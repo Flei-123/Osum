@@ -1,0 +1,1167 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/vorlage.fi -- ROUND THEMESTORE: THE PRESET STORE.
+//
+// Justin asked for two things: templates for the appearance, the way
+// JARVIS and FleiLauncher have templates, and -- if there is an
+// account -- a way to tie your own ones to it.
+//
+// A PRESET IS NOT A FIFTH LAYER OF THE TOKEN SYSTEM. Rounds THEME and
+// LOOK built four: raw ramps, semantic roles, components, and form.
+// Nothing here resolves a colour. A preset is SEVEN NAMES -- which
+// scheme, which mode, which shape, which accent, which taskbar edge,
+// which alignment, and what to call it -- and applying one writes the
+// two files the system already reads (/etc/theme.conf and
+// /etc/taskbar.conf) and then gets out of the way.
+//
+// THE SEVEN KEYS ARE THE WHOLE VOCABULARY, and that is a security
+// property and not tidiness. `parse_key` accepts exactly those seven
+// and COUNTS everything else as bad. A preset file that arrives from
+// another machine, out of an account, off a USB stick, cannot carry a
+// path, a command, a password or a URL, because there is no key that
+// would hold one and no code here that would look at it. What a preset
+// can do to your machine is change what it looks like.
+//
+// THREE PLACES, AND THE ORDER MATTERS:
+//
+//   /etc/themes/            what the system ships. Read-only in
+//                           practice: nothing here ever writes there.
+//   /etc/themes.local/      what YOU saved, on THIS machine. This is
+//                           the one that always works. No account, no
+//                           login, no network.
+//   /users/<name>/config/themes/
+//                           the account store. Only exists if there IS
+//                           an account -- and if there is not, every
+//                           single thing above still works, including
+//                           export to a file and import from one.
+//
+// THAT ORDER IS THE RULE OF THE PROJECT WRITTEN OUT: AN ACCOUNT IS A
+// CONVENIENCE, NEVER A CONDITION. `account_have()` is allowed to be
+// false forever. Nothing in this file returns an error because of it.
+//
+// WHAT AN ACCOUNT IS HERE, honestly: the Unix account of round K13 --
+// /etc/passwd, a uid, a home under /users. `link_all` copies your
+// presets into it and `restore_all` copies them back out, so a second
+// machine that mounts the same home, or restores the same backup, has
+// your appearances. WHAT IT IS NOT: a server. There is no protocol, no
+// transport, no authentication and no conflict resolution in this
+// file, and docs/ROUNDTHEMESTORE.md lists exactly what a real sync
+// would need. Inventing an account system to have something to write
+// about would have been worse than saying this.
+
+profile kernel
+
+import ulib
+import libc.io
+import wlibc
+import msg
+
+export {
+    MAXV, PBUF,
+    scan, count, name_at, id_at, origin_at, scheme_at, shape_at,
+    mode_at, accent_at, edge_at, align_at, bad_at, keys_at, low_at,
+    find, apply_at, save_as, export_at, import_from, remove_at,
+    account_have, account_dir, link_all, restore_all,
+    measure, m_txt, m_min, m_worst, m_ok, m_moved, m_high, m_bar,
+    O_SYSTEM, O_LOCAL, O_ACCOUNT, ACC_NONE,
+    dir_sys, dir_local, wrote
+}
+
+const MAXV: u64 = 24 // presets held at once
+const PBUF: u64 = 4096 // one preset file, read whole
+
+const O_SYSTEM: u64 = 0
+const O_LOCAL: u64 = 1
+const O_ACCOUNT: u64 = 2
+
+// "no accent of its own -- use the scheme's". Not 0: 0 is black, and
+// black is a colour somebody may want.
+const ACC_NONE: u64 = 0xFFFFFFFF
+
+// ------------------------------------------------------------ the table
+static mut v_name: [u8; 768] = [0 as u8; 768] // 24 x 32
+static mut v_id: [u8; 576] = [0 as u8; 576] // 24 x 24
+static mut v_scheme: [u8; 576] = [0 as u8; 576]
+static mut v_shape: [u8; 576] = [0 as u8; 576]
+static mut v_mode: [u64; 24] = [0 as u64; 24]
+static mut v_accent: [u64; 24] = [0 as u64; 24]
+static mut v_edge: [u64; 24] = [0 as u64; 24]
+static mut v_align: [u64; 24] = [0 as u64; 24]
+static mut v_origin: [u64; 24] = [0 as u64; 24]
+static mut v_bad: [u64; 24] = [0 as u64; 24]
+static mut v_keys: [u64; 24] = [0 as u64; 24]
+static mut v_low: [u64; 24] = [0 as u64; 24]
+static mut nv: u64 = 0
+static mut wrote_n: u64 = 0
+
+// the last measurement (`measure`)
+static mut mm_txt: u64 = 0
+static mut mm_min: u64 = 0
+static mut mm_worst: u64 = 0
+static mut mm_ok: u64 = 1
+static mut mm_moved: u64 = 0
+static mut mm_high: u64 = 0
+
+static mut buf: [u8; 4096] = [0 as u8; 4096]
+static mut path: [u8; 128] = [0 as u8; 128]
+static mut path2: [u8; 128] = [0 as u8; 128]
+static mut acdir: [u8; 128] = [0 as u8; 128]
+static mut acok: u64 = 0
+static mut acdone: u64 = 0
+
+// the preset currently being parsed
+static mut c_name: [u8; 32] = [0 as u8; 32]
+static mut c_scheme: [u8; 24] = [0 as u8; 24]
+static mut c_shape: [u8; 24] = [0 as u8; 24]
+static mut c_mode: u64 = 2
+static mut c_accent: u64 = 0xFFFFFFFF
+static mut c_edge: u64 = 0
+static mut c_align: u64 = 0
+static mut c_bad: u64 = 0
+static mut c_keys: u64 = 0
+
+// ------------------------------------------------------------ small tools
+fn rd(p: u64, i: u64) -> u64 {
+    return __mmio_read8((p + i) as *mut u8) as u64
+}
+
+fn wr(p: u64, i: u64, v: u64) {
+    __mmio_write8((p + i) as *mut u8, v as u8)
+}
+
+fn slen(p: u64) -> u64 {
+    var n: u64 = 0
+    while rd(p, n) != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+fn scopy(dst: u64, src: u64, max: u64) {
+    var k: u64 = 0
+    while rd(src, k) != 0 && k + 1 < max {
+        wr(dst, k, rd(src, k))
+        k = k + 1
+    }
+    wr(dst, k, 0)
+}
+
+fn seq(a: u64, b: u64) -> bool {
+    var k: u64 = 0
+    while rd(a, k) != 0 && rd(b, k) != 0 {
+        if rd(a, k) != rd(b, k) {
+            return false
+        }
+        k = k + 1
+    }
+    return rd(a, k) == rd(b, k)
+}
+
+// `n` octets at `p` against a NUL-terminated literal, and the literal
+// has to END there -- otherwise `mode` would match `modeX`.
+fn neq(p: u64, n: u64, lit: u64) -> bool {
+    var k: u64 = 0
+    while k < n {
+        if rd(lit, k) == 0 || rd(p, k) != rd(lit, k) {
+            return false
+        }
+        k = k + 1
+    }
+    return rd(lit, k) == 0
+}
+
+fn app(dst: u64, at: u64, src: u64) -> u64 {
+    var k: u64 = 0
+    while rd(src, k) != 0 {
+        wr(dst, at + k, rd(src, k))
+        k = k + 1
+    }
+    wr(dst, at + k, 0)
+    return at + k
+}
+
+fn app_num(dst: u64, at: u64, v: u64) -> u64 {
+    if v == 0 {
+        wr(dst, at, 48)
+        wr(dst, at + 1, 0)
+        return at + 1
+    }
+    var d: [u8; 24] = [0 as u8; 24]
+    var n: u64 = 0
+    var x: u64 = v
+    while x > 0 {
+        d[(n) as usize] = (48 + (x % 10)) as u8
+        x = x / 10
+        n = n + 1
+    }
+    var k: u64 = 0
+    while k < n {
+        wr(dst, at + k, d[((n - 1 - k)) as usize] as u64)
+        k = k + 1
+    }
+    wr(dst, at + n, 0)
+    return at + n
+}
+
+// six hex digits, lower case -- the same spelling the scheme files use
+fn app_hex6(dst: u64, at: u64, v: u64) -> u64 {
+    var k: u64 = 0
+    while k < 6 {
+        let nib: u64 = (v >> ((5 - k) * 4)) & 15
+        var c: u64 = 48 + nib
+        if nib > 9 {
+            c = 87 + nib
+        }
+        wr(dst, at + k, c)
+        k = k + 1
+    }
+    wr(dst, at + 6, 0)
+    return at + 6
+}
+
+fn hex_of(p: u64, n: u64) -> u64 {
+    if n == 0 || n > 8 {
+        return ACC_NONE
+    }
+    var v: u64 = 0
+    var k: u64 = 0
+    while k < n {
+        let c: u64 = rd(p, k)
+        var d: u64 = 16
+        if c >= 48 && c <= 57 {
+            d = c - 48
+        } else if c >= 97 && c <= 102 {
+            d = c - 87
+        } else if c >= 65 && c <= 70 {
+            d = c - 55
+        }
+        if d > 15 {
+            return ACC_NONE
+        }
+        v = v * 16 + d
+        k = k + 1
+    }
+    return v
+}
+
+// ------------------------------------------------------------ one file
+//
+// The parser. Seven keys, and every other key is COUNTED. A key that
+// is silently dropped is how a person edits a file, sees nothing
+// change and blames the program.
+fn parse_key(kp: u64, kn: u64, vp: u64, vn: u64) -> bool {
+    var k_name: [u8; 5] = "name\0"
+    var k_scheme: [u8; 7] = "scheme\0"
+    var k_mode: [u8; 5] = "mode\0"
+    var k_shape: [u8; 6] = "shape\0"
+    var k_accent: [u8; 7] = "accent\0"
+    var k_edge: [u8; 5] = "edge\0"
+    var k_align: [u8; 6] = "align\0"
+    var v_light: [u8; 6] = "light\0"
+    var v_dark: [u8; 5] = "dark\0"
+    var v_center: [u8; 7] = "center\0"
+    var tmp: [u8; 40] = [0 as u8; 40]
+
+    if neq(kp, kn, (&k_name[0 as usize]) as u64) {
+        var k: u64 = 0
+        while k < vn && k < 31 {
+            c_name[(k) as usize] = rd(vp, k) as u8
+            k = k + 1
+        }
+        c_name[(k) as usize] = 0 as u8
+        return true
+    }
+    if neq(kp, kn, (&k_scheme[0 as usize]) as u64) {
+        var k2: u64 = 0
+        while k2 < vn && k2 < 23 {
+            c_scheme[(k2) as usize] = rd(vp, k2) as u8
+            k2 = k2 + 1
+        }
+        c_scheme[(k2) as usize] = 0 as u8
+        return true
+    }
+    if neq(kp, kn, (&k_shape[0 as usize]) as u64) {
+        var k3: u64 = 0
+        while k3 < vn && k3 < 23 {
+            c_shape[(k3) as usize] = rd(vp, k3) as u8
+            k3 = k3 + 1
+        }
+        c_shape[(k3) as usize] = 0 as u8
+        return true
+    }
+    if neq(kp, kn, (&k_mode[0 as usize]) as u64) {
+        c_mode = wlibc.MODE_AUTO
+        if neq(vp, vn, (&v_light[0 as usize]) as u64) {
+            c_mode = wlibc.MODE_LIGHT
+        }
+        if neq(vp, vn, (&v_dark[0 as usize]) as u64) {
+            c_mode = wlibc.MODE_DARK
+        }
+        return true
+    }
+    if neq(kp, kn, (&k_accent[0 as usize]) as u64) {
+        if vn == 0 {
+            c_accent = ACC_NONE
+            return true
+        }
+        let v: u64 = hex_of(vp, vn)
+        if v == ACC_NONE {
+            return false
+        }
+        c_accent = v
+        return true
+    }
+    if neq(kp, kn, (&k_edge[0 as usize]) as u64) {
+        var k4: u64 = 0
+        while k4 < vn && k4 < 39 {
+            tmp[(k4) as usize] = rd(vp, k4) as u8
+            k4 = k4 + 1
+        }
+        tmp[(k4) as usize] = 0 as u8
+        let e: u64 = wlibc.edge_by_name((&tmp[0 as usize]) as u64)
+        if e >= 4 {
+            return false
+        }
+        c_edge = e
+        return true
+    }
+    if neq(kp, kn, (&k_align[0 as usize]) as u64) {
+        c_align = 0
+        if neq(vp, vn, (&v_center[0 as usize]) as u64) {
+            c_align = 1
+        }
+        return true
+    }
+    return false
+}
+
+// key=value, one per line, '#' starts a comment. The same shape as a
+// scheme file and a shape file, on purpose: a person who has seen one
+// of these files has seen all three.
+fn parse(b: u64, n: u64) {
+    c_bad = 0
+    c_keys = 0
+    var i: u64 = 0
+    while i < n {
+        while i < n && (rd(b, i) == 32 || rd(b, i) == 9) {
+            i = i + 1
+        }
+        let ks: u64 = i
+        while i < n && rd(b, i) != 10 && rd(b, i) != 13 && rd(b, i) != 61 {
+            i = i + 1
+        }
+        if i < n && rd(b, i) == 61 {
+            var ke: u64 = i
+            while ke > ks && (rd(b, ke - 1) == 32 || rd(b, ke - 1) == 9) {
+                ke = ke - 1
+            }
+            i = i + 1
+            while i < n && (rd(b, i) == 32 || rd(b, i) == 9) {
+                i = i + 1
+            }
+            let vs: u64 = i
+            while i < n && rd(b, i) != 10 && rd(b, i) != 13 {
+                i = i + 1
+            }
+            var ve: u64 = i
+            while ve > vs && (rd(b, ve - 1) == 32 || rd(b, ve - 1) == 9) {
+                ve = ve - 1
+            }
+            if rd(b, ks) != 35 && ke > ks {
+                if parse_key(b + ks, ke - ks, b + vs, ve - vs) {
+                    c_keys = c_keys + 1
+                } else {
+                    c_bad = c_bad + 1
+                }
+            }
+        }
+        while i < n && rd(b, i) != 10 {
+            i = i + 1
+        }
+        i = i + 1
+    }
+}
+
+fn read_file(p: u64) -> u64 {
+    let fd: u64 = io.open(p, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    let n: u64 = io.read(fd, (&buf[0 as usize]) as u64, PBUF - 1)
+    io.close(fd)
+    if ulib.bad(n) {
+        return 0
+    }
+    wr((&buf[0 as usize]) as u64, n, 0)
+    return n
+}
+
+fn join(dir: u64, name: u64, out: u64) {
+    let a: u64 = app(out, 0, dir)
+    let _b: u64 = app(out, a, name)
+}
+
+// MKDIR AND OPENDIR WANT THE NAME WITHOUT THE TRAILING SLASH.
+//
+// The directory constants carry one because `join` needs it, and the
+// first run of this round found out what that costs: `theme where`
+// said `have=0` on a disk that had /users/root/config, and
+// `theme save` said `save failed` on a machine with a perfectly good
+// /etc -- both because "/etc/themes.local/" is not a name this file
+// system will create or open. It creates "/etc/themes.local".
+// One helper, and the slash stays where `join` needs it.
+static mut nos: [u8; 128] = [0 as u8; 128]
+
+fn no_slash(dir: u64) -> u64 {
+    let o: u64 = (&nos[0 as usize]) as u64
+    scopy(o, dir, 128)
+    var n: u64 = slen(o)
+    while n > 0 && rd(o, n - 1) == 47 {
+        n = n - 1
+        wr(o, n, 0)
+    }
+    return o
+}
+
+fn ensure_dir(dir: u64) -> bool {
+    let d: u64 = no_slash(dir)
+    let fd: u64 = io.dir_open(d)
+    if !ulib.bad(fd) {
+        io.close(fd)
+        return true
+    }
+    let _m: u64 = io.make_dir(d)
+    let fd2: u64 = io.dir_open(no_slash(dir))
+    if !ulib.bad(fd2) {
+        io.close(fd2)
+        return true
+    }
+    return false
+}
+
+// ------------------------------------------------------------ the slots
+fn name_at(i: u64) -> u64 {
+    if i >= nv {
+        return 0
+    }
+    return ((&v_name[0 as usize]) as u64) + i * 32
+}
+
+fn id_at(i: u64) -> u64 {
+    if i >= nv {
+        return 0
+    }
+    return ((&v_id[0 as usize]) as u64) + i * 24
+}
+
+fn scheme_at(i: u64) -> u64 {
+    if i >= nv {
+        return 0
+    }
+    return ((&v_scheme[0 as usize]) as u64) + i * 24
+}
+
+fn shape_at(i: u64) -> u64 {
+    if i >= nv {
+        return 0
+    }
+    return ((&v_shape[0 as usize]) as u64) + i * 24
+}
+
+fn mode_at(i: u64) -> u64 {
+    if i >= nv {
+        return wlibc.MODE_AUTO
+    }
+    return v_mode[(i) as usize]
+}
+
+fn accent_at(i: u64) -> u64 {
+    if i >= nv {
+        return ACC_NONE
+    }
+    return v_accent[(i) as usize]
+}
+
+fn edge_at(i: u64) -> u64 {
+    if i >= nv {
+        return 0
+    }
+    return v_edge[(i) as usize]
+}
+
+fn align_at(i: u64) -> u64 {
+    if i >= nv {
+        return 0
+    }
+    return v_align[(i) as usize]
+}
+
+fn origin_at(i: u64) -> u64 {
+    if i >= nv {
+        return O_SYSTEM
+    }
+    return v_origin[(i) as usize]
+}
+
+fn bad_at(i: u64) -> u64 {
+    if i >= nv {
+        return 0
+    }
+    return v_bad[(i) as usize]
+}
+
+fn keys_at(i: u64) -> u64 {
+    if i >= nv {
+        return 0
+    }
+    return v_keys[(i) as usize]
+}
+
+// 1 once `measure` has run on this preset and found it below its bar.
+fn low_at(i: u64) -> u64 {
+    if i >= nv {
+        return 0
+    }
+    return v_low[(i) as usize]
+}
+
+fn count() -> u64 {
+    return nv
+}
+
+fn wrote() -> u64 {
+    return wrote_n
+}
+
+fn find(name: u64) -> u64 {
+    var i: u64 = 0
+    while i < nv {
+        if seq(id_at(i), name) || seq(name_at(i), name) {
+            return i
+        }
+        i = i + 1
+    }
+    return MAXV
+}
+
+// ------------------------------------------------------------ reading in
+fn take(dir: u64, nm: u64, origin: u64) {
+    if nv >= MAXV {
+        return
+    }
+    // A preset that came in earlier WINS, and that is the order the
+    // three directories are scanned in: your own beats the account's,
+    // and the account's beats the shipped one. Otherwise a system
+    // update would silently take back an appearance you changed.
+    var i: u64 = 0
+    while i < nv {
+        if seq(id_at(i), nm) {
+            return
+        }
+        i = i + 1
+    }
+    join(dir, nm, (&path[0 as usize]) as u64)
+    let n: u64 = read_file((&path[0 as usize]) as u64)
+    if n == 0 {
+        return
+    }
+    // defaults, so that a short preset is still a whole one
+    c_name[(0) as usize] = 0 as u8
+    c_scheme[(0) as usize] = 0 as u8
+    c_shape[(0) as usize] = 0 as u8
+    c_mode = wlibc.MODE_AUTO
+    c_accent = ACC_NONE
+    c_edge = 0
+    c_align = 0
+    parse((&buf[0 as usize]) as u64, n)
+    if c_keys == 0 {
+        return
+    }
+    let s: u64 = nv
+    if c_name[(0) as usize] == 0 as u8 {
+        scopy(((&v_name[0 as usize]) as u64) + s * 32, nm, 32)
+    } else {
+        scopy(((&v_name[0 as usize]) as u64) + s * 32,
+            (&c_name[0 as usize]) as u64, 32)
+    }
+    scopy(((&v_id[0 as usize]) as u64) + s * 24, nm, 24)
+    scopy(((&v_scheme[0 as usize]) as u64) + s * 24,
+        (&c_scheme[0 as usize]) as u64, 24)
+    scopy(((&v_shape[0 as usize]) as u64) + s * 24,
+        (&c_shape[0 as usize]) as u64, 24)
+    v_mode[(s) as usize] = c_mode
+    v_accent[(s) as usize] = c_accent
+    v_edge[(s) as usize] = c_edge
+    v_align[(s) as usize] = c_align
+    v_origin[(s) as usize] = origin
+    v_bad[(s) as usize] = c_bad
+    v_keys[(s) as usize] = c_keys
+    v_low[(s) as usize] = 0
+    nv = nv + 1
+}
+
+fn scan_dir(dir: u64, origin: u64) -> u64 {
+    var recs: [u8; 1024] = [0 as u8; 1024]
+    let fd: u64 = io.dir_open(no_slash(dir))
+    if ulib.bad(fd) {
+        return 0
+    }
+    var found: u64 = 0
+    var weiter: bool = true
+    while weiter {
+        let got: u64 = io.dir_read(fd, (&recs[0 as usize]) as u64, 1024)
+        if ulib.bad(got) || got == 0 {
+            weiter = false
+        } else {
+            var at: u64 = 0
+            while at < got {
+                let rec: u64 = ((&recs[0 as usize]) as u64) + at
+                let nm: u64 = io.dir_name(rec)
+                if rd(nm, 0) != 46 {
+                    take(dir, nm, origin)
+                    found = found + 1
+                }
+                let rl: u64 = io.dir_reclen(rec)
+                if rl == 0 {
+                    at = got
+                } else {
+                    at = at + rl
+                }
+            }
+        }
+    }
+    io.close(fd)
+    return found
+}
+
+// THE TWO DIRECTORY NAMES LIVE IN STATIC STORAGE and not in a local
+// array, and the compiler is the reason: a pointer into a function's
+// own frame does not outlive the return. Firn says so rather than
+// handing out a dangling pointer, which is the whole point of it.
+static mut d_sys: [u8; 13] = "/etc/themes/\0"
+static mut d_local: [u8; 19] = "/etc/themes.local/\0"
+
+fn dir_sys() -> u64 {
+    return (&d_sys[0 as usize]) as u64
+}
+
+fn dir_local() -> u64 {
+    return (&d_local[0 as usize]) as u64
+}
+
+// YOUR OWN FIRST, THEN THE ACCOUNT'S, THEN THE SYSTEM'S.
+fn scan() -> u64 {
+    nv = 0
+    let _a: u64 = scan_dir(dir_local(), O_LOCAL)
+    if account_have() {
+        let _b: u64 = scan_dir(account_dir(), O_ACCOUNT)
+    }
+    let _c: u64 = scan_dir(dir_sys(), O_SYSTEM)
+    return nv
+}
+
+// ------------------------------------------------------------ the account
+//
+// /users/<name>/config/themes/, derived from the one place that
+// already knows how to get from a uid to a name: `msg.user_path`,
+// which reads /etc/passwd for the language file. One passwd reader in
+// the tree, not two.
+fn account_dir() -> u64 {
+    if acdone != 0 {
+        return (&acdir[0 as usize]) as u64
+    }
+    var suffix: [u8; 8] = "themes/\0"
+    acdone = 1
+    acok = 0
+    let a: u64 = (&acdir[0 as usize]) as u64
+    if !msg.user_path(a) {
+        wr(a, 0, 0)
+        return a
+    }
+    // ".../config/locale" -> ".../config/themes/"
+    var n: u64 = slen(a)
+    while n > 0 && rd(a, n - 1) != 47 {
+        n = n - 1
+    }
+    let _e: u64 = app(a, n, (&suffix[0 as usize]) as u64)
+    acok = 1
+    return a
+}
+
+// TRUE only if the directory is really there or could be made. An
+// account that exists in /etc/passwd but has no home on this disk is
+// not a place to put anything, and pretending otherwise would make
+// `link_all` report a success it did not have.
+fn account_have() -> bool {
+    let d: u64 = account_dir()
+    if acok == 0 {
+        return false
+    }
+    return ensure_dir(d)
+}
+
+// ------------------------------------------------------------ writing out
+fn build(nm: u64, name: u64, scheme: u64, mode: u64, shape: u64,
+    accent: u64, edge: u64, align: u64) -> u64 {
+    var h1: [u8; 42] = "# an Osum appearance preset -- 7 keys.\n#\n\0"
+    var h2: [u8; 62] = "# Nothing here but how the screen looks. See docs/THEMES.md.\n\0"
+    var k1: [u8; 6] = "name=\0"
+    var k2: [u8; 8] = "scheme=\0"
+    var k3: [u8; 6] = "mode=\0"
+    var k4: [u8; 7] = "shape=\0"
+    var k5: [u8; 8] = "accent=\0"
+    var k6: [u8; 6] = "edge=\0"
+    var k7: [u8; 7] = "align=\0"
+    var v_l: [u8; 6] = "light\0"
+    var v_d: [u8; 5] = "dark\0"
+    var v_a: [u8; 5] = "auto\0"
+    var v_le: [u8; 5] = "left\0"
+    var v_ce: [u8; 7] = "center\0"
+    let b: u64 = (&buf[0 as usize]) as u64
+    var at: u64 = app(b, 0, (&h1[0 as usize]) as u64)
+    at = app(b, at, (&h2[0 as usize]) as u64)
+    at = app(b, at, (&k1[0 as usize]) as u64)
+    at = app(b, at, name)
+    wr(b, at, 10)
+    at = app(b, at + 1, (&k2[0 as usize]) as u64)
+    at = app(b, at, scheme)
+    wr(b, at, 10)
+    at = app(b, at + 1, (&k3[0 as usize]) as u64)
+    if mode == wlibc.MODE_LIGHT {
+        at = app(b, at, (&v_l[0 as usize]) as u64)
+    } else if mode == wlibc.MODE_DARK {
+        at = app(b, at, (&v_d[0 as usize]) as u64)
+    } else {
+        at = app(b, at, (&v_a[0 as usize]) as u64)
+    }
+    wr(b, at, 10)
+    at = app(b, at + 1, (&k4[0 as usize]) as u64)
+    at = app(b, at, shape)
+    wr(b, at, 10)
+    at = app(b, at + 1, (&k5[0 as usize]) as u64)
+    if accent != ACC_NONE {
+        at = app_hex6(b, at, accent & 0xFFFFFF)
+    }
+    wr(b, at, 10)
+    at = app(b, at + 1, (&k6[0 as usize]) as u64)
+    at = app(b, at, wlibc.edge_name(edge))
+    wr(b, at, 10)
+    at = app(b, at + 1, (&k7[0 as usize]) as u64)
+    if align == 1 {
+        at = app(b, at, (&v_ce[0 as usize]) as u64)
+    } else {
+        at = app(b, at, (&v_le[0 as usize]) as u64)
+    }
+    wr(b, at, 10)
+    let _u: u64 = nm
+    return at + 1
+}
+
+fn write_file(p: u64, n: u64) -> bool {
+    let fd: u64 = io.create(p)
+    if ulib.bad(fd) {
+        return false
+    }
+    let g: u64 = io.write_all(fd, (&buf[0 as usize]) as u64, n)
+    io.close(fd)
+    if ulib.bad(g) || g < n {
+        return false
+    }
+    wrote_n = wrote_n + 1
+    return true
+}
+
+// Copy octet for octet -- an export must not be a re-rendering, or two
+// machines disagree about the file they are supposed to share.
+fn copy_file(from: u64, to: u64) -> bool {
+    let n: u64 = read_file(from)
+    if n == 0 {
+        return false
+    }
+    return write_file(to, n)
+}
+
+// ------------------------------------------------------------ applying
+//
+// TWO FILES, AND NOT ONE OF THEIR OTHER KEYS IS TOUCHED. The taskbar's
+// height, width, autohide and ontop are the person's settings and not
+// the preset's, so they are read out of the existing file and written
+// back. A preset that reset the bar height every time it was applied
+// would be a preset nobody applies twice.
+fn tb_num(b: u64, n: u64, key: u64, dflt: u64) -> u64 {
+    var i: u64 = 0
+    while i < n {
+        let ks: u64 = i
+        while i < n && rd(b, i) != 61 && rd(b, i) != 10 {
+            i = i + 1
+        }
+        if i < n && rd(b, i) == 61 {
+            let ke: u64 = i
+            i = i + 1
+            var v: u64 = 0
+            var digits: u64 = 0
+            while i < n && rd(b, i) != 10 && rd(b, i) != 13 {
+                let c: u64 = rd(b, i)
+                if c >= 48 && c <= 57 {
+                    v = v * 10 + (c - 48)
+                    digits = digits + 1
+                }
+                i = i + 1
+            }
+            if neq(b + ks, ke - ks, key) && digits > 0 {
+                return v
+            }
+        }
+        while i < n && rd(b, i) != 10 {
+            i = i + 1
+        }
+        i = i + 1
+    }
+    return dflt
+}
+
+fn apply_at(i: u64) -> bool {
+    var p_theme: [u8; 16] = "/etc/theme.conf\0"
+    var p_tb: [u8; 19] = "/etc/taskbar.conf\0\0"
+    var k_h: [u8; 7] = "height\0"
+    var k_w: [u8; 6] = "width\0"
+    var k_ah: [u8; 9] = "autohide\0"
+    var k_ot: [u8; 6] = "ontop\0"
+    var t1: [u8; 8] = "scheme=\0"
+    var t2: [u8; 7] = "\nmode=\0"
+    var t3: [u8; 8] = "\nshape=\0"
+    var t4: [u8; 9] = "\naccent=\0"
+    var t5: [u8; 37] = "\nlight_start=07:00\ndark_start=19:00\n\0"
+    var v_l: [u8; 6] = "light\0"
+    var v_d: [u8; 5] = "dark\0"
+    var v_a: [u8; 5] = "auto\0"
+    var b1: [u8; 41] = "# written by the preset store (vorlage)\n\0"
+    var tb1: [u8; 6] = "edge=\0"
+    var tb2: [u8; 9] = "\nheight=\0"
+    var tb3: [u8; 8] = "\nwidth=\0"
+    var tb4: [u8; 11] = "\nautohide=\0"
+    var tb5: [u8; 8] = "\nontop=\0"
+    var tb6: [u8; 8] = "\nalign=\0"
+    var v_le: [u8; 5] = "left\0"
+    var v_ce: [u8; 7] = "center\0"
+    if i >= nv {
+        return false
+    }
+    // 1. read what the taskbar file says NOW, before it is replaced
+    let old: u64 = read_file((&p_tb[0 as usize]) as u64)
+    let b: u64 = (&buf[0 as usize]) as u64
+    var hh: u64 = 28
+    var ww: u64 = 104
+    var ah: u64 = 0
+    var ot: u64 = 1
+    if old > 0 {
+        hh = tb_num(b, old, (&k_h[0 as usize]) as u64, 28)
+        ww = tb_num(b, old, (&k_w[0 as usize]) as u64, 104)
+        ah = tb_num(b, old, (&k_ah[0 as usize]) as u64, 0)
+        ot = tb_num(b, old, (&k_ot[0 as usize]) as u64, 1)
+    }
+    // 2. /etc/theme.conf
+    var at: u64 = app(b, 0, (&b1[0 as usize]) as u64)
+    at = app(b, at, (&t1[0 as usize]) as u64)
+    at = app(b, at, scheme_at(i))
+    at = app(b, at, (&t2[0 as usize]) as u64)
+    let md: u64 = v_mode[(i) as usize]
+    if md == wlibc.MODE_LIGHT {
+        at = app(b, at, (&v_l[0 as usize]) as u64)
+    } else if md == wlibc.MODE_DARK {
+        at = app(b, at, (&v_d[0 as usize]) as u64)
+    } else {
+        at = app(b, at, (&v_a[0 as usize]) as u64)
+    }
+    at = app(b, at, (&t3[0 as usize]) as u64)
+    at = app(b, at, shape_at(i))
+    at = app(b, at, (&t4[0 as usize]) as u64)
+    if v_accent[(i) as usize] != ACC_NONE {
+        at = app_hex6(b, at, v_accent[(i) as usize] & 0xFFFFFF)
+    }
+    at = app(b, at, (&t5[0 as usize]) as u64)
+    if !write_file((&p_theme[0 as usize]) as u64, at) {
+        return false
+    }
+    // 3. /etc/taskbar.conf
+    at = app(b, 0, (&b1[0 as usize]) as u64)
+    at = app(b, at, (&tb1[0 as usize]) as u64)
+    at = app(b, at, wlibc.edge_name(v_edge[(i) as usize]))
+    at = app(b, at, (&tb2[0 as usize]) as u64)
+    at = app_num(b, at, hh)
+    at = app(b, at, (&tb3[0 as usize]) as u64)
+    at = app_num(b, at, ww)
+    at = app(b, at, (&tb4[0 as usize]) as u64)
+    at = app_num(b, at, ah)
+    at = app(b, at, (&tb5[0 as usize]) as u64)
+    at = app_num(b, at, ot)
+    at = app(b, at, (&tb6[0 as usize]) as u64)
+    if v_align[(i) as usize] == 1 {
+        at = app(b, at, (&v_ce[0 as usize]) as u64)
+    } else {
+        at = app(b, at, (&v_le[0 as usize]) as u64)
+    }
+    wr(b, at, 10)
+    return write_file((&p_tb[0 as usize]) as u64, at + 1)
+}
+
+// ------------------------------------------------------------ saving
+//
+// THE APPEARANCE THAT IS RUNNING, under a name. Everything comes out
+// of `wlibc` and out of /etc/taskbar.conf -- this does not remember
+// what was clicked, it reads what IS.
+fn save_as(nm: u64, label: u64) -> bool {
+    var p_tb: [u8; 19] = "/etc/taskbar.conf\0\0"
+    var k_e: [u8; 5] = "edge\0"
+    var k_al: [u8; 6] = "align\0"
+    var v_ce: [u8; 7] = "center\0"
+    var word: [u8; 32] = [0 as u8; 32]
+    let _m: bool = ensure_dir(dir_local())
+    // the taskbar half
+    var edge: u64 = 0
+    var align: u64 = 0
+    let old: u64 = read_file((&p_tb[0 as usize]) as u64)
+    if old > 0 {
+        let b0: u64 = (&buf[0 as usize]) as u64
+        var i: u64 = 0
+        while i < old {
+            let ks: u64 = i
+            while i < old && rd(b0, i) != 61 && rd(b0, i) != 10 {
+                i = i + 1
+            }
+            if i < old && rd(b0, i) == 61 {
+                let ke: u64 = i
+                i = i + 1
+                var k: u64 = 0
+                while i < old && rd(b0, i) != 10 && rd(b0, i) != 13 {
+                    if k < 31 {
+                        word[(k) as usize] = rd(b0, i) as u8
+                        k = k + 1
+                    }
+                    i = i + 1
+                }
+                word[(k) as usize] = 0 as u8
+                if neq(b0 + ks, ke - ks, (&k_e[0 as usize]) as u64) {
+                    let e: u64 = wlibc.edge_by_name((&word[0 as usize]) as u64)
+                    if e < 4 {
+                        edge = e
+                    }
+                } else if neq(b0 + ks, ke - ks, (&k_al[0 as usize]) as u64) {
+                    if seq((&word[0 as usize]) as u64,
+                        (&v_ce[0 as usize]) as u64) {
+                        align = 1
+                    }
+                }
+            }
+            while i < old && rd(b0, i) != 10 {
+                i = i + 1
+            }
+            i = i + 1
+        }
+    }
+    var acc: u64 = ACC_NONE
+    let own: u64 = wlibc.theme_accent_own()
+    if own != 0 {
+        acc = own & 0xFFFFFF
+    }
+    let n: u64 = build(nm, label, wlibc.theme_scheme_file(),
+        wlibc.theme_mode(), wlibc.shape_file(), acc, edge, align)
+    join(dir_local(), nm, (&path[0 as usize]) as u64)
+    return write_file((&path[0 as usize]) as u64, n)
+}
+
+fn remove_at(i: u64) -> bool {
+    if i >= nv {
+        return false
+    }
+    if v_origin[(i) as usize] != O_LOCAL {
+        return false
+    }
+    join(dir_local(), id_at(i), (&path[0 as usize]) as u64)
+    return !ulib.bad(io.unlink((&path[0 as usize]) as u64))
+}
+
+// ------------------------------------------------------------ file in/out
+//
+// A TEXT FILE AND NOTHING ELSE. That is what makes a preset something
+// Justin can send to somebody: it opens in the editor on this system,
+// it survives being pasted into a message, and there is nothing in it
+// that needs this machine to be understood.
+fn export_at(i: u64, to: u64) -> bool {
+    if i >= nv {
+        return false
+    }
+    var dir: u64 = dir_sys()
+    if v_origin[(i) as usize] == O_LOCAL {
+        dir = dir_local()
+    } else if v_origin[(i) as usize] == O_ACCOUNT {
+        dir = account_dir()
+    }
+    join(dir, id_at(i), (&path[0 as usize]) as u64)
+    return copy_file((&path[0 as usize]) as u64, to)
+}
+
+// Import puts the file in the LOCAL store under `nm` -- not in the
+// account's. Somebody else's appearance becomes yours by being saved
+// where yours live, and it becomes the account's only if you link.
+fn import_from(from: u64, nm: u64) -> bool {
+    let _m: bool = ensure_dir(dir_local())
+    let n: u64 = read_file(from)
+    if n == 0 {
+        return false
+    }
+    // Parse it BEFORE storing it: a file that yields no key at all is
+    // not a preset, and copying it in would give the list an entry
+    // that vanishes on the next scan.
+    c_name[(0) as usize] = 0 as u8
+    c_scheme[(0) as usize] = 0 as u8
+    c_shape[(0) as usize] = 0 as u8
+    c_mode = wlibc.MODE_AUTO
+    c_accent = ACC_NONE
+    c_edge = 0
+    c_align = 0
+    parse((&buf[0 as usize]) as u64, n)
+    if c_keys == 0 {
+        return false
+    }
+    join(dir_local(), nm, (&path[0 as usize]) as u64)
+    return copy_file(from, (&path[0 as usize]) as u64)
+}
+
+// ------------------------------------------------------------ the account
+fn link_all() -> u64 {
+    if !account_have() {
+        return 0
+    }
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < nv {
+        if v_origin[(i) as usize] == O_LOCAL {
+            join(dir_local(), id_at(i), (&path[0 as usize]) as u64)
+            join(account_dir(), id_at(i), (&path2[0 as usize]) as u64)
+            if copy_file((&path[0 as usize]) as u64,
+                (&path2[0 as usize]) as u64) {
+                n = n + 1
+            }
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// THE OTHER MACHINE. Everything in the account store lands in the
+// local one, so that after this the appearances work whether or not
+// the account is reachable again.
+fn restore_all() -> u64 {
+    if !account_have() {
+        return 0
+    }
+    let _m: bool = ensure_dir(dir_local())
+    var recs: [u8; 1024] = [0 as u8; 1024]
+    let fd: u64 = io.dir_open(no_slash(account_dir()))
+    if ulib.bad(fd) {
+        return 0
+    }
+    var n: u64 = 0
+    var weiter: bool = true
+    while weiter {
+        let got: u64 = io.dir_read(fd, (&recs[0 as usize]) as u64, 1024)
+        if ulib.bad(got) || got == 0 {
+            weiter = false
+        } else {
+            var at: u64 = 0
+            while at < got {
+                let rec: u64 = ((&recs[0 as usize]) as u64) + at
+                let nm: u64 = io.dir_name(rec)
+                if rd(nm, 0) != 46 {
+                    join(account_dir(), nm, (&path[0 as usize]) as u64)
+                    join(dir_local(), nm, (&path2[0 as usize]) as u64)
+                    if copy_file((&path[0 as usize]) as u64,
+                        (&path2[0 as usize]) as u64) {
+                        n = n + 1
+                    }
+                }
+                let rl: u64 = io.dir_reclen(rec)
+                if rl == 0 {
+                    at = got
+                } else {
+                    at = at + rl
+                }
+            }
+        }
+    }
+    io.close(fd)
+    return n
+}
+
+// ------------------------------------------------------------ measuring
+//
+// THE CONTRAST OF A PRESET IS PART OF THE PRESET. Not a footnote: a
+// list of appearances that does not say which of them can be read is a
+// list of traps. `wlibc.theme_probe` resolves the preset with the same
+// resolver the screen is painted from and hands back the seventeen
+// text pairings; the smallest of them is the number that decides.
+fn measure(i: u64) -> u64 {
+    if i >= nv {
+        return 0
+    }
+    var acc: u64 = 0
+    if v_accent[(i) as usize] != ACC_NONE {
+        acc = v_accent[(i) as usize]
+        if acc == 0 {
+            acc = wlibc.ACCENT_BLACK
+        }
+    }
+    let keys: u64 = wlibc.theme_probe(scheme_at(i), v_mode[(i) as usize],
+        shape_at(i), acc)
+    mm_txt = wlibc.theme_probe_txt()
+    mm_min = wlibc.theme_probe_min()
+    mm_worst = wlibc.theme_probe_worst()
+    mm_moved = wlibc.theme_probe_moved()
+    mm_high = 0
+    if wlibc.theme_probe_high() {
+        mm_high = 1
+    }
+    mm_ok = 0
+    if wlibc.theme_probe_ok() {
+        mm_ok = 1
+    }
+    v_low[(i) as usize] = 0
+    if mm_min < m_bar() {
+        v_low[(i) as usize] = 1
+    }
+    return keys
+}
+
+// 4.5:1 normally, 7:1 for a scheme that says `contrast=high` -- that is
+// what a high-contrast scheme is FOR, and judging it by the ordinary
+// bar would be the flattering number again.
+fn m_bar() -> u64 {
+    if mm_high != 0 {
+        return 700
+    }
+    return 450
+}
+
+fn m_txt() -> u64 {
+    return mm_txt
+}
+
+fn m_min() -> u64 {
+    return mm_min
+}
+
+fn m_worst() -> u64 {
+    return mm_worst
+}
+
+fn m_ok() -> bool {
+    return mm_ok != 0
+}
+
+fn m_moved() -> u64 {
+    return mm_moved
+}
+
+fn m_high() -> bool {
+    return mm_high != 0
+}

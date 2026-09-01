@@ -35,6 +35,45 @@ UMZUEGE = [
     ("kernel/sys.fi", "kernel/sysgui.fi", ["sys"], []),
 ]
 
+# ===================================================== RUNDE MERGE-2
+#
+# WAS DIESER PRUEFER MISST, UND WAS ER NICHT MESSEN SOLL.
+#
+# Er soll messen: WAR DER UMZUG EIN UMZUG. Er misst dafuer, ob die
+# Rumpfe in kgui.fi/sysgui.fi zeichengleich mit denen sind, die vor
+# SERVERBUILD in kmain.fi/sys.fi standen.
+#
+# Er soll NICHT messen: ob seither jemand an einer dieser Funktionen
+# GEARBEITET hat. Genau das tat er aber, und deshalb war er seit
+# MERGE-2 13 rot, ohne dass es jemandem auffiel -- der Abschnitt
+# `server` lief in keiner Abnahme, weil `serverbuild` seinen Testlaeufer
+# hinter `abschnitte_abarbeiten` angemeldet hatte (siehe MERGE-2 11).
+# Ein Pruefer, der bei JEDER spaeteren Zeile rot wird, sagt nach der
+# zweiten Runde nichts mehr aus.
+#
+# Deshalb steht hier eine LISTE MIT NAMEN UND GRUENDEN. Sie wird NICHT
+# gewachsen, wenn etwas rot ist -- sie wird gewachsen, wenn ein MERGE
+# eine der umgezogenen Funktionen bewusst weiterentwickelt hat, und
+# dann mit der Nummer dieses Merges. Jede Funktion, die NICHT hier
+# steht, macht den Pruefer weiter rot. Das ist der Unterschied
+# zwischen einer Ausnahme und einem abgeschalteten Test.
+SEITHER_WEITERENTWICKELT = {
+    # kgui.fi
+    "surface": "MERGE-2 13 (usbimg): die Aenderung an `surface` geportet",
+    "desk_start": "MERGE-2 15/16 (themestore, softui): der Schreibtisch"
+                  " startet die Vorlagen mit",
+    "wm_bench2": "MERGE-2 16 (softui): neue Messung, im Original nicht da",
+    "vmode_stage": "MERGE-2 18 (customres): Kachelbelegung und der eigene"
+                   " Selbsttest der Runde",
+    "display_hold": "MERGE-2 18 (customres): M_EIGEN/M_EIGENBAD/M_EIGENFRIST",
+    "disp_eigen": "MERGE-2 18 (customres): neu, im Original nicht da",
+    # sysgui.fi
+    "wm_call": "MERGE-2 16 (softui): die neuen WM-Felder",
+    "do_dispget": "MERGE-2 18 (customres): die vierzehn neuen DG_-Felder",
+    "do_dispset": "MERGE-2 18 (customres): DS_CUSTOM, DS_CHECK, DS_SAVE",
+    "disp_rc": "MERGE-2 18 (customres): neu, im Original nicht da",
+}
+
 
 def funktionen(text):
     lines = text.split("\n")
@@ -99,6 +138,10 @@ def main():
         print("  %-22s %d von %d Funktionen zeichengleich mit %s"
               % (neu.split("/")[-1], gleich, ganz, alt.split("/")[-1]))
         for name, warum in abweichend:
+            grund = SEITHER_WEITERENTWICKELT.get(name)
+            if grund:
+                print("      %s: %s -- ERLAUBT: %s" % (name, warum, grund))
+                continue
             print("      %s: %s" % (name, warum))
             schlecht += 1
     return 1 if schlecht else 0

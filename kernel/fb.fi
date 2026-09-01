@@ -71,7 +71,7 @@ export {
     rgb, pixel, get_pixel, fill, line, blit, clear, flush, dirty_all, dirty,
     scroll, write_bytes, read_bytes,
     putc, puts, text, nl, set_color, set_cursor, cursor_on, home, goto,
-    set_echo, echo_on, double_buffered, uncached, set_back,
+    set_echo, echo_on, double_buffered, uncached, set_back, hline_mask,
     parse, mode, want, selftest, selftest_max,
     SRC_NONE, SRC_MB, SRC_VBE, FB_OFF, FB_MAX, FONT_OFF, USER_BASE,
     M_GFX, M_NODBL, M_UC, M_BIG, M_NOCUR, M_HOLD, M_PATTERN, M_USER,
@@ -989,6 +989,80 @@ fn pixel_a(state: u64, x: u64, y: u64, color: u64, a: u64) {
         kstate.get(state, FB_OFF + S_BLENDR) +% 1)
     __mmio_write32(p as *mut u32, blend(state, alt, color, a) as u32)
     dirty(state, y, y + 1)
+}
+
+// =====================================================================
+// RUNDE SOFTUI: EINE BILDZEILE MIT EINER DECKUNG JE BILDPUNKT
+// =====================================================================
+//
+// `hline_a` mischt einen Lauf mit EINER Deckung; das ist die gerade
+// Kante eines Schattens. Seine ECKE braucht eine andere je Bildpunkt,
+// und die lag bisher in einer Tafel, die der Fensterserver Punkt fuer
+// Punkt ueber `pixel_a` abgearbeitet hat.
+//
+// GEMESSEN, WARUM DAS TEUER IST -- UND ES IST NICHT DAS MISCHEN.
+// `pixel_a` holt je Bildpunkt Breite, Hoehe und Zeichenziel aus dem
+// Zustandsblock, zaehlt zwei Zaehler hoch und meldet die Zeile
+// schmutzig: sechs Zugriffe Buchhaltung auf drei Rechenschritte. Genau
+// diesen Unterschied hat Runde PAINT schon fuer `hline_a` aufgeschrieben
+// ("die Grenzen werden EINMAL geprueft statt je Punkt"), nur gab es
+// damals keinen Fall mit veraenderlicher Deckung.
+//
+// `schritt` ist +1 oder -1 auf der DECKUNGSTAFEL, waehrend x immer
+// waechst. Damit bedient EINE Ecktafel alle vier Ecken: die beiden
+// rechten lesen dieselbe Zeile rueckwaerts. Ohne das braeuchte der
+// Server vier Tafeln oder eine Spiegelung je Bild.
+fn hline_mask(state: u64, x: u64, y: u64, n: u64, color: u64, maske: u64,
+    schritt: i64) {
+    if n == 0 {
+        return
+    }
+    let w: u64 = kstate.get(state, FB_OFF + S_WIDTH)
+    if y >= kstate.get(state, FB_OFF + S_HEIGHT) || x >= w {
+        return
+    }
+    var len: u64 = n
+    if x + len > w {
+        len = w - x
+    }
+    let sr: u64 = (color >> 16) & 0xFF
+    let sg: u64 = (color >> 8) & 0xFF
+    let sb: u64 = color & 0xFF
+    var p: u64 = kstate.get(state, FB_OFF + S_DRAW) +% spot(state, x, y)
+    var m: u64 = maske
+    var k: u64 = 0
+    var gemischt: u64 = 0
+    while k < len {
+        let a: u64 = __mmio_read8(m as *mut u8) as u64
+        if a != 0 {
+            if a >= 255 {
+                __mmio_write32(p as *mut u32, color as u32)
+            } else {
+                let ia: u64 = 255 - a
+                let alt: u64 = __mmio_read32(p as *mut u32) as u64
+                let r: u64 = mix8((alt >> 16) & 0xFF, sr, a, ia)
+                let g: u64 = mix8((alt >> 8) & 0xFF, sg, a, ia)
+                let b: u64 = mix8(alt & 0xFF, sb, a, ia)
+                __mmio_write32(p as *mut u32,
+                    ((r << 16) | (g << 8) | b) as u32)
+            }
+            gemischt = gemischt + 1
+        }
+        p = p +% 4
+        if schritt < 0 {
+            m = m -% 1
+        } else {
+            m = m +% 1
+        }
+        k = k + 1
+    }
+    kstate.set(state, FB_OFF + S_BLENDS,
+        kstate.get(state, FB_OFF + S_BLENDS) +% gemischt)
+    kstate.set(state, FB_OFF + S_BLENDR,
+        kstate.get(state, FB_OFF + S_BLENDR) +% gemischt)
+    if gemischt != 0 {
+        dirty(state, y, y + 1)
+    }
 }
 
 // EINE GEMISCHTE BILDZEILE. Kein `rep stosq`: jeder Bildpunkt haengt von
