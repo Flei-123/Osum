@@ -163,6 +163,27 @@ SPEC+=(/quelle1/ /quelle2/)
 # installiert `/bin/opk` nichts mehr.
 SPEC+=("/system/schluessel.pub=$OUT/schluessel.pub")
 
+# ---------------------------------------------------- RUNDE BETRIEB
+#
+# DER ERSATZSCHLUESSEL UND DIE SCHLUESSELGENERATION.
+#
+# `/system/ersatz.pub` ist der zweite vertraute Schluessel. Er ist NICHT
+# derselbe wie der Hauptschluessel und seine geheime Haelfte liegt
+# ausdruecklich NICHT dort, wo gebaut wird -- sie steckt im
+# Schluesselbund (`tools/ota/schluesselbund.py`), verschluesselt und mit
+# einer eigenen Passphrase. Wer ihn hier hineinlegt, tut das mit
+# $OTA_ERSATZ; ohne die Variable liegt keiner im Abbild, und dann
+# verhaelt sich das Geraet genau wie vor dieser Runde.
+#
+# `/system/SCHLUESSELGEN` ist die Generation, bei der dieses Geraet
+# ausgeliefert wurde -- neun Oktett fester Breite, wie `/system/FASSUNG`.
+if [ -n "${OTA_ERSATZ:-}" ] && [ -s "${OTA_ERSATZ}" ]; then
+    SPEC+=("/system/ersatz.pub=$OTA_ERSATZ")
+    echo "   ersatz    $(stat -c%s "$OTA_ERSATZ") Oktette"
+fi
+printf '%08d\n' "${OTA_KGEN:-0}" > "$OUT/SCHLUESSELGEN"
+SPEC+=("/system/SCHLUESSELGEN=$OUT/SCHLUESSELGEN")
+
 # ---------------------------------------------------------- RUNDE OTA
 #
 # DER WURZELSPEICHER. `/bin/fetch` prueft die Kette gegen

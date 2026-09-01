@@ -144,7 +144,15 @@ def main():
     if not dateien:
         raise SystemExit("verzeichnis: %s hat keine .opk-Datei" % quelle)
 
-    zeilen = ["OTA1", "fassung\t%d" % fassung]
+    # RUNDE BETRIEB: OTA2. Dieses Werkzeug bleibt der einfache
+    # Pruefstand-Erzeuger (eine Fassung, ein Schluessel, keine Kette,
+    # keine Sperrliste); die Betriebsfassung mit Register, Vorrat,
+    # Sperrliste und Schluesselwechsel ist
+    # `tools/ota/veroeffentlichen.py`. Die Kennung muss trotzdem
+    # mitziehen, weil ein Geraet dieser Runde ein OTA1-Verzeichnis
+    # ABLEHNT -- sonst waere die Sperrliste durch ein altes, richtig
+    # signiertes Verzeichnis abzuschalten.
+    zeilen = ["OTA2", "fassung\t%d" % fassung, "schluesselgen\t0"]
     for d in dateien:
         p = os.path.join(quelle, d)
         roh = open(p, "rb").read()

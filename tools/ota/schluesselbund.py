@@ -135,13 +135,22 @@ def sichern(bund, d):
     os.replace(tmp, bund)
 
 
-def anlegen(bund):
+def anlegen(bund, aus=None):
+    """`aus` uebernimmt einen VORHANDENEN geheimen Schluessel als Haupt-
+    schluessel. Das ist kein Bequemlichkeitsschalter: die Pruefstaende
+    dieses Repos (tools/install/pakete.sh) erzeugen ihren Schluessel
+    selbst und signieren damit die Pakete, die schon im Abbild liegen.
+    Ohne diesen Weg muesste eine Messung entweder das Abbild neu bauen
+    oder mit zwei verschiedenen Vertrauensankern arbeiten -- beides
+    waere eine Aenderung an dem, was gemessen wird."""
     if os.path.exists(bund):
         raise SystemExit("schluesselbund: %s gibt es schon" % bund)
     m = opkmod()
     hp = pass_holen("OSUM_SIGN_PASS", "Passphrase Hauptschluessel: ")
     ep = pass_holen("OSUM_ERSATZ_PASS", "Passphrase Ersatzschluessel: ")
-    haupt = os.urandom(32)
+    haupt = open(aus, "rb").read() if aus else os.urandom(32)
+    if len(haupt) != 32:
+        raise SystemExit("schluesselbund: %s ist nicht 32 Oktett" % aus)
     ersatz = os.urandom(32)
     d = {"fassung": 1,
          "haupt": {"gen": 0,
@@ -254,7 +263,10 @@ def main():
     was = sys.argv[2]
     rest = sys.argv[3:]
     if was == "anlegen":
-        return anlegen(bund)
+        aus = None
+        if "--aus" in rest:
+            aus = rest[rest.index("--aus") + 1]
+        return anlegen(bund, aus)
     if was == "zeigen":
         return zeigen(bund)
     if was == "kette":
