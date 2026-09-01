@@ -142,6 +142,8 @@ static mut P_FASST: [u8; 20] = "/system/FASSUNG.neu\0"
 static mut P_ERP: [u8; 18] = "/system/ERPROBUNG\0"
 static mut P_AKT: [u8; 16] = "/system/AKTUELL\0"
 static mut P_KEY: [u8; 23] = "/system/schluessel.pub\0"
+static mut P_ERS: [u8; 19] = "/system/ersatz.pub\0"
+static mut P_KGEN: [u8; 22] = "/system/SCHLUESSELGEN\0"
 static mut P_STAND: [u8; 18] = "/system/ota.stand\0"
 static mut P_TMP: [u8; 9] = "/tmp/ota\0"
 static mut P_FETCH: [u8; 11] = "/bin/fetch\0"
@@ -152,7 +154,20 @@ static mut N_INDEX: [u8; 6] = "INDEX\0"
 static mut N_ISIG: [u8; 10] = "INDEX.sig\0"
 static mut N_SIG: [u8; 5] = ".sig\0"
 static mut N_PAKET: [u8; 7] = "paket\t\0"
-static mut N_KENN: [u8; 5] = "OTA1\0"
+// RUNDE BETRIEB: OTA2 STATT OTA1, und der Grund ist eine
+// Sicherheitsaussage und keine Formsache. Das Verzeichnis traegt seit
+// dieser Runde eine SPERRLISTE (`gesperrt`) und die SCHLUESSELKETTE
+// (`kette`). Ein Geraet, das diese Zeilen nicht versteht, wuerde sie
+// ueberspringen und eine zurueckgezogene Fassung einspielen -- also darf
+// es das Verzeichnis gar nicht erst annehmen. Umgekehrt lehnt ein Geraet
+// DIESER Runde ein OTA1-Verzeichnis ab: sonst genuegte es, ihm ein
+// altes, richtig signiertes OTA1-Verzeichnis vorzulegen, um die
+// Sperrliste loszuwerden. Eine Kennung ist genau dafuer da.
+static mut N_KENN: [u8; 5] = "OTA2\0"
+static mut N_KETTE: [u8; 7] = "kette\t\0"
+static mut N_SPERR: [u8; 10] = "gesperrt\t\0"
+static mut N_KGEN: [u8; 15] = "schluesselgen\t\0"
+static mut M_KETTE: [u8; 17] = "osum-schluessel\t\0"
 static mut N_FASS: [u8; 9] = "fassung\t\0"
 static mut K_QUELLE: [u8; 8] = "quelle=\0"
 static mut K_NAME: [u8; 6] = "name=\0"
@@ -184,6 +199,14 @@ static mut E_PLATZ2: [u8; 34] = "     wurde nichts geschrieben. \0\0\0"
 static mut E_OPK: [u8; 41] = "ota: opk hat nicht installiert, Code \0\0\0\0"
 static mut E_FASS: [u8; 45] = "ota: /system/FASSUNG liess sich nicht setzen\0"
 static mut E_KEINS: [u8; 39] = "ota: das VERZEICHNIS nennt kein Paket\0\0"
+static mut E_KETTE: [u8; 64] = "ota: SCHLUESSELWECHSEL: die Kette ist UNTERBROCHEN -- ABGELEHNT\0"
+static mut E_SPERR: [u8; 47] = "ota: FASSUNG GESPERRT -- ABGELEHNT, angeboten \0"
+static mut S_KGEN: [u8; 22] = "ota: schluesselgen \0\0\0"
+static mut S_KNEU: [u8; 46] = "ota: SCHLUESSELWECHSEL angenommen, neue gen \0\0"
+static mut S_KERS: [u8; 46] = "ota: mit dem ERSATZSCHLUESSEL geprueft\0\0\0\0\0\0\0\0"
+static mut S_ERSJA: [u8; 31] = "ota: ersatzschluessel liegt da\0"
+static mut S_ERSNE: [u8; 31] = "ota: KEIN ersatzschluessel\0\0\0\0\0"
+static mut S_SPERRT: [u8; 30] = "ota: gesperrte fassungen: \0\0\0\0"
 static mut S_QUELLE: [u8; 14] = "ota: quelle \0\0"
 static mut S_HIER: [u8; 22] = "ota: fassung hier \0\0\0\0"
 static mut S_DORT: [u8; 22] = "ota: fassung dort \0\0\0\0"
@@ -249,6 +272,19 @@ static mut HEX: [u8; 72] = [0 as u8; 72]
 // dem gemessenen zu ueberschreiben und danach zu vergleichen, ob er sich
 // selbst gleicht -- eine Pruefung, die immer ja sagt.
 static mut SOLLHEX: [u8; 72] = [0 as u8; 72]
+// RUNDE BETRIEB: die Schluesselverwaltung.
+static mut ERS: [u8; 32] = [0 as u8; 32]
+static mut KPUB: [u8; 32] = [0 as u8; 32]
+static mut KSIG: [u8; 64] = [0 as u8; 64]
+static mut KHEX: [u8; 80] = [0 as u8; 80]
+static mut SHEX: [u8; 140] = [0 as u8; 140]
+static mut KMSG: [u8; 160] = [0 as u8; 160]
+static mut KFELD: [u8; 24] = [0 as u8; 24]
+static mut ers_da: bool = false
+static mut kgen: u64 = 0
+static mut kgen_neu: u64 = 0
+static mut kette_riss: bool = false
+static mut mit_ersatz: bool = false
 static mut URL: [u8; 320] = [0 as u8; 320]
 static mut ZIEL: [u8; 256] = [0 as u8; 256]
 static mut ZIEL2: [u8; 256] = [0 as u8; 256]
@@ -510,16 +546,287 @@ fn schluessel_holen() -> bool {
     if n != 32 {
         return false
     }
+    kgen = kgen_lesen()
+    kgen_neu = kgen
+    // DER ERSATZSCHLUESSEL. Es ist KEIN Fehler, wenn er fehlt -- dann
+    // verhaelt sich dieses Geraet wie vor dieser Runde. Es ist ein
+    // Fehler, wenn er ALS EINZIGER da ist, und das faengt die Zeile
+    // darueber: ohne Hauptschluessel wird nichts geholt.
+    ers_da = datei_lesen((&P_ERS[0 as usize]) as u64,
+        (&ERS[0 as usize]) as u64, 32) == 32
     return true
 }
 
-fn signatur_gilt(msg: u64, len: u64) -> bool {
+// ------------------------------------ RUNDE BETRIEB: die Generation
+//
+// `/system/SCHLUESSELGEN`, neun Oktett fester Breite -- dieselbe Bauart
+// wie `/system/FASSUNG` und aus demselben Grund: eine Datei, deren
+// Laenge sich nie aendert, geht in genau EINEN Datenblock, und ein
+// Sektor erreicht die Platte ganz oder gar nicht. Fehlt die Datei, ist
+// die Generation 0; das ist der Zustand eines Geraets, das nie einen
+// Wechsel gesehen hat.
+fn kgen_lesen() -> u64 {
+    var b: [u8; 16] = [0 as u8; 16]
+    let n: u64 = datei_lesen((&P_KGEN[0 as usize]) as u64,
+        (&b[0 as usize]) as u64, 15)
+    if n == 0xFFFFFFFFFFFFFFFF || n < 8 {
+        return 0
+    }
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < 8 {
+        let ch: u64 = b[i as usize] as u64
+        if ch < 48 || ch > 57 {
+            return 0
+        }
+        v = v * 10 + (ch - 48)
+        i = i + 1
+    }
+    return v
+}
+
+fn kgen_schreiben(v: u64) -> bool {
+    var b: [u8; 12] = [0 as u8; 12]
+    var rest: u64 = v
+    var i: u64 = 8
+    while i > 0 {
+        i = i - 1
+        b[i as usize] = (48 + (rest % 10)) as u8
+        rest = rest / 10
+    }
+    b[8 as usize] = 10 as u8
+    return fest_schreiben((&P_KGEN[0 as usize]) as u64,
+        (&b[0 as usize]) as u64, FASS_LEN)
+}
+
+fn sig_mit(schl: u64, msg: u64, len: u64, sig: u64) -> bool {
     var c: ed25519.Ctx = ed25519.ctx_new()
     if !ed25519.ctx_init(&c) {
         return false
     }
-    return ed25519.ed25519_verify(&c, (&KEY[0 as usize]) as u64, msg,
-        len as usize, (&SIG[0 as usize]) as u64)
+    return ed25519.ed25519_verify(&c, schl, msg, len as usize, sig)
+}
+
+// DIE SIGNATUR UEBER DAS VERZEICHNIS. Erst der Hauptschluessel (nach
+// einem etwaigen Wechsel), dann -- und nur dann -- der Ersatz.
+fn signatur_gilt(msg: u64, len: u64) -> bool {
+    mit_ersatz = false
+    if sig_mit((&KEY[0 as usize]) as u64, msg, len,
+        (&SIG[0 as usize]) as u64) {
+        return true
+    }
+    if !ers_da {
+        return false
+    }
+    if sig_mit((&ERS[0 as usize]) as u64, msg, len,
+        (&SIG[0 as usize]) as u64) {
+        mit_ersatz = true
+        return true
+    }
+    return false
+}
+
+// -------------------------------------------- Hexadezimal einlesen
+
+fn hexwert(c: u64) -> u64 {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    return 16
+}
+
+// `n` Oktette aus 2n Hexziffern. `false`, sobald ein Zeichen keine ist
+// -- ein halb gelesener Schluessel waere schlimmer als keiner.
+fn hex_lesen(text: u64, out: u64, n: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        let h: u64 = hexwert(g8(text + i * 2))
+        let l: u64 = hexwert(g8(text + i * 2 + 1))
+        if h > 15 || l > 15 {
+            return false
+        }
+        p8(out + i, (h << 4) | l)
+        i = i + 1
+    }
+    if g8(text + n * 2) != 0 {
+        return false
+    }
+    return true
+}
+
+// Die `k`-te Zeile, die mit `pre` (Laenge `prelen`) anfaengt; gibt die
+// Stelle DAHINTER zurueck, oder 0. Dasselbe Muster wie `paket_zeile`,
+// nur mit einem Praefix, das der Aufrufer nennt.
+fn zeile_ab(pre: u64, prelen: u64, k: u64) -> u64 {
+    let v: u64 = (&VZ[0 as usize]) as u64
+    let e: u64 = v + vz_len
+    var i: u64 = v
+    var n: u64 = 0
+    while i < e {
+        if i == v || g8(i - 1) == 10 {
+            if ulib.strneq(i, pre, prelen) {
+                if n == k {
+                    return i + prelen
+                }
+                n = n + 1
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// --------------------------------------- RUNDE BETRIEB: der Wechsel
+//
+// EIN SCHLUESSELWECHSEL IST EIN VORGANG UND KEIN AUSTAUSCH. Im
+// VERZEICHNIS steht die ganze Kette:
+//
+//     kette <gen> <64hex neuer oeffentlicher Schluessel> <128hex sig>
+//
+// Signiert wird die ASCII-Nachricht
+//
+//     osum-schluessel<TAB><gen><TAB><64hex>
+//
+// mit dem geheimen Schluessel der Generation <gen>-1 ODER mit dem
+// ERSATZSCHLUESSEL. Das erste ist der geordnete Wechsel, das zweite der
+// Weg zurueck, wenn die Kette gerissen ist.
+//
+// DIE NACHRICHT FAENGT MIT EINEM EIGENEN WORT AN, und das ist kein
+// Schmuck: ohne diese Trennung koennte eine Wechselsignatur als
+// Signatur ueber ein VERZEICHNIS durchgehen oder umgekehrt -- derselbe
+// Schluessel, dieselbe Rechnung, und nur der Inhalt haette
+// unterschieden.
+//
+// WAS PASSIERT, WENN EIN GERAET ZWEI WECHSEL VERPASST HAT: es steht bei
+// gen 0, das Verzeichnis traegt die Saetze fuer 1 UND 2, und diese
+// Schleife geht sie der Reihe nach durch -- jeden mit dem Schluessel,
+// den der vorige gerade beglaubigt hat. Danach steht es bei gen 2. Die
+// Kette liegt deshalb VOLLSTAENDIG in jedem Verzeichnis und nicht nur
+// der letzte Satz.
+//
+// DIESE SAETZE WERDEN GELESEN, BEVOR DIE SIGNATUR UEBER DAS VERZEICHNIS
+// GEPRUEFT IST -- und das ist erlaubt, weil jeder Satz seine eigene
+// Signatur mitbringt. Geglaubt wird nichts, was nicht selbst gerechnet
+// wurde. Alles andere im Verzeichnis bleibt bis nach der Pruefung
+// ungelesen.
+fn kette_gehen() {
+    kette_riss = false
+    var weiter: bool = true
+    while weiter {
+        weiter = false
+        var k: u64 = 0
+        var suchen: bool = true
+        while suchen {
+            let z: u64 = zeile_ab((&N_KETTE[0 as usize]) as u64, 6, k)
+            if z == 0 {
+                suchen = false
+            } else {
+                let e: u64 = (&VZ[0 as usize]) as u64 + vz_len
+                if feld(z, e, 0, (&KFELD[0 as usize]) as u64, 24)
+                    && ulib.to_num((&KFELD[0 as usize]) as u64)
+                        == kgen_neu + 1 {
+                    if feld(z, e, 1, (&KHEX[0 as usize]) as u64, 80)
+                        && feld(z, e, 2, (&SHEX[0 as usize]) as u64, 140)
+                        && hex_lesen((&KHEX[0 as usize]) as u64,
+                            (&KPUB[0 as usize]) as u64, 32)
+                        && hex_lesen((&SHEX[0 as usize]) as u64,
+                            (&KSIG[0 as usize]) as u64, 64) {
+                        // die Nachricht bauen
+                        let m: u64 = (&KMSG[0 as usize]) as u64
+                        ulib.strcpy(m, (&M_KETTE[0 as usize]) as u64)
+                        zahl_an(m, kgen_neu + 1)
+                        var tb: [u8; 2] = "\t\0"
+                        ulib.strcat(m, (&tb[0 as usize]) as u64)
+                        ulib.strcat(m, (&KHEX[0 as usize]) as u64)
+                        let ml: u64 = laenge(m)
+                        var gut: bool = sig_mit((&KEY[0 as usize]) as u64,
+                            m, ml, (&KSIG[0 as usize]) as u64)
+                        if !gut && ers_da {
+                            gut = sig_mit((&ERS[0 as usize]) as u64, m, ml,
+                                (&KSIG[0 as usize]) as u64)
+                        }
+                        if gut {
+                            ulib.copy((&KEY[0 as usize]) as u64,
+                                (&KPUB[0 as usize]) as u64, 32)
+                            kgen_neu = kgen_neu + 1
+                            weiter = true
+                            suchen = false
+                        } else {
+                            // ES GIBT EINEN SATZ FUER DIE NAECHSTE
+                            // GENERATION UND ER STIMMT NICHT. Das ist
+                            // nicht "kein Wechsel", das ist ein
+                            // GEBROCHENER Wechsel, und er bekommt eine
+                            // eigene Meldung.
+                            kette_riss = true
+                            suchen = false
+                        }
+                    } else {
+                        kette_riss = true
+                        suchen = false
+                    }
+                }
+                k = k + 1
+            }
+        }
+    }
+}
+
+// Steht `f` in der Sperrliste des (signierten!) Verzeichnisses?
+fn ist_gesperrt(f: u64) -> bool {
+    var k: u64 = 0
+    var weiter: bool = true
+    while weiter {
+        let z: u64 = zeile_ab((&N_SPERR[0 as usize]) as u64, 9, k)
+        if z == 0 {
+            weiter = false
+        } else {
+            if feld(z, (&VZ[0 as usize]) as u64 + vz_len, 0,
+                (&KFELD[0 as usize]) as u64, 24) {
+                if ulib.to_num((&KFELD[0 as usize]) as u64) == f {
+                    return true
+                }
+            }
+            k = k + 1
+        }
+    }
+    return false
+}
+
+// Die Sperrliste zeigen -- und dabei sagen, ob DIESES Geraet auf einer
+// gesperrten Fassung sitzt. Das ist die einzige Stelle, an der ein
+// Nutzer davon erfaehrt.
+fn sperren_zeigen() {
+    var k: u64 = 0
+    var erste: bool = true
+    var weiter: bool = true
+    while weiter {
+        let z: u64 = zeile_ab((&N_SPERR[0 as usize]) as u64, 9, k)
+        if z == 0 {
+            weiter = false
+        } else {
+            if feld(z, (&VZ[0 as usize]) as u64 + vz_len, 0,
+                (&KFELD[0 as usize]) as u64, 24) {
+                if erste {
+                    ulib.say((&S_SPERRT[0 as usize]) as u64)
+                    erste = false
+                } else {
+                    var sp: [u8; 2] = " \0"
+                    ulib.say((&sp[0 as usize]) as u64)
+                }
+                ulib.say((&KFELD[0 as usize]) as u64)
+            }
+            k = k + 1
+        }
+    }
+    if !erste {
+        ulib.nl()
+    }
 }
 
 // -------------------------------------------------------- der Streuwert
@@ -770,16 +1077,54 @@ fn verzeichnis_holen(laut: bool) -> u64 {
         vz_len = 0
         return fehler((&E_NOSIG[0 as usize]) as u64, 0)
     }
+    // ---- DIE SCHLUESSELKETTE, VOR DER SIGNATUR. Jeder Satz bringt
+    //      seine eigene Signatur mit und wird einzeln gerechnet; was
+    //      dabei herauskommt, ist der Schluessel, gegen den das
+    //      VERZEICHNIS geprueft wird.
+    kette_gehen()
+
     // ---- DIE SIGNATUR. Ab hier und keinen Schritt frueher darf eine
     //      Zeile des Verzeichnisses geglaubt werden.
     if !signatur_gilt((&VZ[0 as usize]) as u64, vz_len) {
         vz_len = 0
+        if kette_riss {
+            return fehler((&E_KETTE[0 as usize]) as u64, 0)
+        }
         return fehler((&E_VZSIG[0 as usize]) as u64, 0)
     }
     if !ulib.strneq((&VZ[0 as usize]) as u64, (&N_KENN[0 as usize]) as u64,
         4) {
         vz_len = 0
         return fehler((&E_KENN[0 as usize]) as u64, 0)
+    }
+    if mit_ersatz && laut {
+        ulib.say((&S_KERS[0 as usize]) as u64)
+        ulib.nl()
+    }
+    // ---- DER WECHSEL WIRD ERST JETZT AUF DIE PLATTE GESCHRIEBEN.
+    //
+    // Nicht, weil die Kette allein zu wenig waere -- sie ist gerechnet.
+    // Sondern weil ein Wechsel, dessen Verzeichnis danach durchfaellt,
+    // ein Geraet auf einen Schluessel setzte, von dem es nie eine
+    // gueltige Auslieferung gesehen hat. Zuerst muss die neue
+    // Generation EINMAL etwas Ganzes unterschrieben haben.
+    //
+    // Und er wird geschrieben, AUCH WENN das Update danach abgelehnt
+    // wird (gesperrte Fassung, Rueckschritt, kein Platz): ein
+    // Schluesselwechsel ist ein eigener Vorgang und haengt nicht daran,
+    // ob gerade ein Paket eingespielt wird.
+    if kgen_neu > kgen {
+        if !datei_schreiben((&P_KEY[0 as usize]) as u64,
+            (&KEY[0 as usize]) as u64, 32) {
+            vz_len = 0
+            return fehler((&E_KETTE[0 as usize]) as u64, 0)
+        }
+        if !kgen_schreiben(kgen_neu) {
+            vz_len = 0
+            return fehler((&E_KETTE[0 as usize]) as u64, 0)
+        }
+        sagn((&S_KNEU[0 as usize]) as u64, kgen_neu)
+        kgen = kgen_neu
     }
     return 0
 }
@@ -891,6 +1236,15 @@ fn cmd_zeigen() -> u64 {
         sagt((&S_QUELLE[0 as usize]) as u64, (&QUELLE[0 as usize]) as u64)
     }
     sagn((&S_HIER[0 as usize]) as u64, fassung_lesen())
+    sagn((&S_KGEN[0 as usize]) as u64, kgen_lesen())
+    var epr: [u8; 40] = [0 as u8; 40]
+    if datei_lesen((&P_ERS[0 as usize]) as u64,
+        (&epr[0 as usize]) as u64, 32) == 32 {
+        ulib.say((&S_ERSJA[0 as usize]) as u64)
+    } else {
+        ulib.say((&S_ERSNE[0 as usize]) as u64)
+    }
+    ulib.nl()
     var b: [u8; 16] = [0 as u8; 16]
     let n: u64 = datei_lesen((&P_AKT[0 as usize]) as u64,
         (&b[0 as usize]) as u64, 15)
@@ -929,6 +1283,14 @@ fn cmd_suchen() -> u64 {
     ulib.strcat((&st[0 as usize]) as u64, (&nl[0 as usize]) as u64)
     datei_schreiben((&P_STAND[0 as usize]) as u64,
         (&st[0 as usize]) as u64, laenge((&st[0 as usize]) as u64))
+    sperren_zeigen()
+    // DIE SPERRLISTE STEHT VOR DEM RUECKSCHRITTSSCHUTZ. Eine gesperrte
+    // Fassung ist auch dann gesperrt, wenn sie neuer ist -- das ist der
+    // ganze Zweck.
+    if ist_gesperrt(dort) {
+        sagn((&E_SPERR[0 as usize]) as u64, dort)
+        return 1
+    }
     if rueckschritt(dort, hier, true) != 0 {
         return 1
     }
@@ -963,6 +1325,17 @@ fn cmd_einspielen() -> u64 {
     }
     let dort: u64 = vz_fassung()
     let hier: u64 = fassung_lesen()
+    // DIE SPERRLISTE ZUERST, und zwar VOR dem Rueckschrittsschutz und
+    // lange vor dem ersten Oktett Nutzlast: eine zurueckgezogene
+    // Fassung wird nicht eingespielt, auch wenn sie neuer ist und auch
+    // wenn dieses Geraet ein halbes Jahr aus war. Die Liste steht im
+    // signierten VERZEICHNIS, also kommt sie mit derselben Antwort an,
+    // die das Update anbietet -- ein Geraet muss dafuer nirgends
+    // nachfragen.
+    if ist_gesperrt(dort) {
+        sagn((&E_SPERR[0 as usize]) as u64, dort)
+        return 1
+    }
     if rueckschritt(dort, hier, true) != 0 {
         return 1
     }

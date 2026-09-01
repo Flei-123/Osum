@@ -119,6 +119,21 @@ class Hand(http.server.BaseHTTPRequestHandler):
         pfad = self.path.split("?")[0]
         name = os.path.basename(pfad)
         datei = os.path.join(WURZEL, name)
+        # RUNDE BETRIEB: EIN PFAD DARF AUCH EIN PFAD SEIN.
+        #
+        # Bis hierher liess dieser Dienst NUR den letzten Namensteil
+        # gelten -- das reichte fuer eine Auslieferung, die aus einem
+        # flachen Verzeichnis besteht. Eine Betriebsauslieferung haelt
+        # ALTE FASSUNGEN vor (`v/2/VERZEICHNIS`, `pakete/<sha>.opk`),
+        # und ein Geraet, das drei Fassungen hinterherhinkt, greift
+        # genau dorthin. Der flache Weg bleibt als Rueckfall, damit
+        # `tools/ota/run.sh` sich nicht um ein Oktett aendert.
+        rel = pfad.lstrip("/")
+        if rel and ".." not in rel.split("/"):
+            tief = os.path.join(WURZEL, rel)
+            if os.path.isfile(tief):
+                datei = tief
+                name = rel
         if not name or not os.path.isfile(datei):
             protokoll("404", pfad)
             self.send_response(404)
@@ -144,7 +159,7 @@ class Hand(http.server.BaseHTTPRequestHandler):
                     return
 
         laenge = gesamt - von
-        grenze = ABBRUCH.get(name)
+        grenze = ABBRUCH.get(name, ABBRUCH.get(os.path.basename(name)))
         self.send_response(206 if teil else 200)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(laenge))
@@ -157,7 +172,7 @@ class Hand(http.server.BaseHTTPRequestHandler):
             return
 
         geschrieben = 0
-        kgrenze = KURZ.get(name)
+        kgrenze = KURZ.get(name, KURZ.get(os.path.basename(name)))
         # DIE STELLE, AN DER DIE LEITUNG REISST, IST EINE STELLE IN DER
         # DATEI -- nicht eine Anzahl Oktette dieser einen Antwort. Sonst
         # kaeme ein Geraet, das ab 20000 wieder ansetzt, beim zweiten
