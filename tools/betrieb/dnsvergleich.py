@@ -55,8 +55,16 @@ LISTE = [
     ("de.wikipedia.org", "AAAA", "AAAA hinter einer CNAME-Kette"),
     # ein sehr langer Name: 4 Marken, zusammen 71 Oktett, existiert
     ("assets.tumblr.com", "A", "Name mit vielen Marken"),
-    ("s3.dualstack.eu-central-1.amazonaws.com", "A",
-     "langer Name, fuenf Marken, 39 Oktett"),
+    ("b.root-servers.net", "A", "feste Adresse, gut zum Nachrechnen"),
+    # KEIN NAME HINTER EINEM GROSSEN LASTVERTEILER MEHR. Der erste
+    # Entwurf dieser Liste hatte `s3.dualstack.eu-central-1.amazonaws.com`
+    # als "langer Name" darin, und der Fall war ROT, ohne dass etwas
+    # falsch war: die Zone gibt aus einem Vorrat von ueber zwanzig
+    # Adressen bei jeder Frage acht andere heraus, und `host` und `dig`
+    # bekamen zwei disjunkte Mengen. Ein Pruefstand, der bei richtigem
+    # Verhalten wuerfelt, misst nichts. Der lange Name steht jetzt in
+    # `a.gtld-servers.net` (18 Oktett, drei Marken, EINE feste Adresse).
+    ("a.gtld-servers.net", "A", "langer Name, feste Adresse"),
     ("gibt-es-ganz-sicher-nicht-9q7x.example", "A", "NXDOMAIN"),
     ("nx-zzz-4711.invalid", "A", "NXDOMAIN in einer reservierten Endung"),
 ]

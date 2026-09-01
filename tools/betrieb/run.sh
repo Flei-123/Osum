@@ -141,7 +141,7 @@ sed -n 's/^  /        /p' "$W/dig.txt"
 VG=$(python3 -c "import json;d=json.load(open('/tmp/dnsvergleich.json'));print(d['gut'])" 2>/dev/null)
 VR=$(python3 -c "import json;d=json.load(open('/tmp/dnsvergleich.json'));print(d['rot'])" 2>/dev/null)
 gleich "gegen dig verschieden" "${VR:-1}" "0"
-gleich "gegen dig gleich" "${VG:-0}" "20"
+gleich "gegen dig gleich" "${VG:-0}" "21"
 
 # =====================================================================
 echo
@@ -270,30 +270,6 @@ EP=$(python3 -c "import json;print(json.load(open('$OUT/bund.json'))['ersatz']['
 gleich "der Ersatzschluessel liegt im Abbild" \
     "$(python3 -c "print(open('$OUT/ersatz.pub','rb').read().hex())")" "$EP"
 
-# =====================================================================
-echo
-echo "== 9. weitere Auslieferungen fuer die Gegenproben =="
-# =====================================================================
-mach() { # <ziel-notiz> <schalter...>
-    rm -f "$OUT/stand"/*.opk
-    cp "$OUT/quelle2/hallo-2.opk" "$OUT/stand/"
-    python3 tools/ota/veroeffentlichen.py "$OUT/aus" --stand "$OUT/stand" \
-        --bund "$OUT/bund.json" "$@" 2>&1 | grep -v signiert
-}
-mach --signierer ersatz --notiz "mit dem Ersatzschluessel"          # 5
-mach --sperren 5 --notiz "sperrt 5"                                 # 6
-python3 tools/ota/schluesselbund.py "$OUT/bund.json" wechseln | sed 's/^/        /'
-mach --notiz "nach dem Wechsel auf gen 1"                           # 7
-mach --kette-kaputt --notiz "Kette gebrochen"                       # 8
-python3 tools/ota/schluesselbund.py "$OUT/bund.json" wechseln | sed 's/^/        /'
-mach --notiz "nach dem zweiten Wechsel, gen 2"                      # 9
-rm -rf "$OUT/fremdaus"
-rm -f "$OUT/stand"/*.opk; cp "$OUT/quelle2/hallo-2.opk" "$OUT/stand/"
-OSUM_SIGN_PASS=fremd1 OSUM_ERSATZ_PASS=fremd2 \
-    python3 tools/ota/veroeffentlichen.py "$OUT/fremdaus" --stand "$OUT/stand" \
-    --bund "$OUT/fremd.json" --fassung 9 --notiz fremd 2>&1 | grep -v signiert
-ok "Auslieferungen 5..9 und eine mit einem FREMDEN Schluessel stehen"
-
 if [ "$OHNEQEMU" = 1 ]; then
     echo; echo "== BETRIEB (ohne QEMU): $pass gruen, $fail rot"; exit $((fail>0))
 fi
@@ -367,6 +343,34 @@ for v in 1 2 3; do
     gleich "Fassung $v ist weiter abrufbar (Code, fassung)" "$C $F" "200 $v"
 done
 cp -f "$OUT/ziel.img" "$OUT/f4.img"
+
+# =====================================================================
+echo
+# ERST JETZT, UND DAS IST KEIN SCHOENHEITSFEHLER: bis hierher steht
+# `aktuell` auf Fassung 4, und genau das misst Abschnitt 12 ("drei
+# Fassungen zurueck"). Waeren die Fassungen 5..9 vorher entstanden,
+# spraenge das Geraet von 1 auf 9 und der Nachweis waere ein anderer.
+echo "== 12b. weitere Auslieferungen fuer die Gegenproben =="
+# =====================================================================
+mach() { # <ziel-notiz> <schalter...>
+    rm -f "$OUT/stand"/*.opk
+    cp "$OUT/quelle2/hallo-2.opk" "$OUT/stand/"
+    python3 tools/ota/veroeffentlichen.py "$OUT/aus" --stand "$OUT/stand" \
+        --bund "$OUT/bund.json" "$@" 2>&1 | grep -v signiert
+}
+mach --signierer ersatz --notiz "mit dem Ersatzschluessel"          # 5
+mach --sperren 5 --notiz "sperrt 5"                                 # 6
+python3 tools/ota/schluesselbund.py "$OUT/bund.json" wechseln | sed 's/^/        /'
+mach --notiz "nach dem Wechsel auf gen 1"                           # 7
+mach --kette-kaputt --notiz "Kette gebrochen"                       # 8
+python3 tools/ota/schluesselbund.py "$OUT/bund.json" wechseln | sed 's/^/        /'
+mach --notiz "nach dem zweiten Wechsel, gen 2"                      # 9
+rm -rf "$OUT/fremdaus"
+rm -f "$OUT/stand"/*.opk; cp "$OUT/quelle2/hallo-2.opk" "$OUT/stand/"
+OSUM_SIGN_PASS=fremd1 OSUM_ERSATZ_PASS=fremd2 \
+    python3 tools/ota/veroeffentlichen.py "$OUT/fremdaus" --stand "$OUT/stand" \
+    --bund "$OUT/fremd.json" --fassung 9 --notiz fremd 2>&1 | grep -v signiert
+ok "Auslieferungen 5..9 und eine mit einem FREMDEN Schluessel stehen"
 
 # =====================================================================
 echo
