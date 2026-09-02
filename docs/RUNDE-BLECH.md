@@ -532,6 +532,25 @@ gehalten.
 Deshalb dasselbe Verfahren wie in MERGE-3 und MERGE-FINAL: **jeder rote
 Abschnitt wird einzeln nachgemessen**, und erst diese Zahl zählt.
 
+### Der volle Lauf, roh
+
+`OSUM_JOBS=4`, `accel=auto`, 02.09.2026 10:30–12:59 (**2 h 29 min**),
+Protokoll `/root/blechlogs/ABNAHME-voll.log`:
+
+```
+50 Abschnitte bestanden, 6 FEHLGESCHLAGEN (4124 Zusagen)
+```
+
+| | Abschnitte | grün | rot |
+|---|---:|---:|---:|
+| `main` **vorher** (`163984d`, Zahlen aus `docs/RUNDE-MERGE3.md`) | 54 | 53 | 1 (`netview`) |
+| `blech`, **roh unter Fremdlast** | **56** | **50** | **6** |
+| `blech`, **nach der Einzelnachmessung** | **56** | **54** | **2** |
+
+Die zwei, die bleiben, sind `arm` und `netview` — und beide sind auf
+`main` genauso rot (siehe die Tabelle darunter). **Diese Runde hat
+keinen Abschnitt rot gemacht, der vorher grün war.**
+
 ### Die roten aus dem vollen Lauf, einzeln nachgemessen
 
 | Abschnitt | voller Lauf (Last 8–19) | einzeln | Urteil |
