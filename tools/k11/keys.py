@@ -6,7 +6,7 @@ Ein Editor, der nur "startet ohne Absturz" beweist, beweist nichts. Diese
 Datei ist der Mensch vor der Tastatur: sie uebersetzt einen Text in die
 `sendkey`-Befehle des QEMU-Monitors und schickt sie an den laufenden
 Rechner. Was ankommt, sind echte Abtastcodes am Tor 0x60, echte
-IRQ1-Unterbrechungen und der Weg durch `kernel/kbd.fi` und die
+IRQ1-Unterbrechungen und der Weg durch `kernel/drivers/input/kbd.fi` und die
 Zeilendisziplin -- kein eingeschleustes Oktett irgendwo weiter oben.
 
     keys.py <monitor-socket> <warte-auf-datei> <muster> <taste> ...

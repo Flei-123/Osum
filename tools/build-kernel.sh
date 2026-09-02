@@ -13,11 +13,11 @@
 #                                  [--ohne-tunnel]
 #
 # RUNDE SERVERBUILD: --gui off BAUT OSUM ALS SERVERBETRIEBSSYSTEM.
-# `kernel/fb.fi`, `wm.fi`, `wig.fi`, `font.fi`, `ttf.fi`, `tile.fi`,
+# `kernel/drivers/gfx/fb.fi`, `wm.fi`, `wig.fi`, `font.fi`, `ttf.fi`, `tile.fi`,
 # `vmode.fi`, `ansi.fi`, `ps2m.fi`, `kgui.fi` und `sysgui.fi` werden
 # dabei NICHT UEBERSETZT -- sie liegen nicht im Baum, aus dem der
-# Uebersetzer liest. An der Stelle von `kernel/gfx.fi` (der Naht, ueber
-# die der uebrige Kernel die Grafik erreicht) steht `kernel/gfx-aus.fi`
+# Uebersetzer liest. An der Stelle von `kernel/drivers/gfx/gfx.fi` (der Naht, ueber
+# die der uebrige Kernel die Grafik erreicht) steht `kernel/drivers/gfx/gfx-aus.fi`
 # mit denselben 37 Symbolen und leeren Rumpfen. Kein `#ifdef`, kein
 # Schalter zur Laufzeit, keine tote Verzweigung im Abbild.
 #
@@ -137,14 +137,29 @@ rm -f "$TMP/kernel/wg-aus.fi"
 # gemeldet: 37 Stellen ausserhalb der Naht. Der Weg dorthin fuer den
 # uebrigen Kern sind die zwei Tueren `gfx.disp_poll` und
 # `gfx.disp_restore`.
-GFX_DATEIEN="fb wm wig font ttf tile vmode ansi ps2m kgui sysgui dispsave"
+# RUNDE STRUKTUR: die Liste traegt jetzt PFADE statt nackter Namen.
+# Vier der zwoelf Dateien sind Treiber und liegen seit dieser Runde
+# unter kernel/drivers/ (fb, font, vmode = die Grafikkarte; ps2m =
+# das Zeigegeraet). Die anderen acht sind kein Treiber -- ein
+# Fensterserver, ein Fensterbaum, ein Schriftrasterer, eine
+# Terminalemulation -- und bleiben, wo sie waren.
+#
+# `rm -f` schweigt ueber eine Datei, die es nicht gibt. Ein Pfad,
+# der hier ins Leere zeigt, wuerde also NICHT auffallen: der Bau
+# liefe durch und das Abbild traegt die Grafik, die es nicht tragen
+# soll. Darum wird jeder Pfad geprueft, bevor er geloescht wird.
+GFX_DATEIEN="wm.fi wig.fi ttf.fi tile.fi ansi.fi kgui.fi sysgui.fi dispsave.fi
+             drivers/gfx/fb.fi drivers/gfx/font.fi drivers/gfx/vmode.fi
+             drivers/input/ps2m.fi"
 if [[ $GUI == off ]]; then
     for f in $GFX_DATEIEN; do
-        rm -f "$TMP/kernel/$f.fi" || exit 1
+        [[ -f "$TMP/kernel/$f" ]] || {
+            echo "--gui off: kernel/$f gibt es nicht (verschoben?)" >&2; exit 1; }
+        rm -f "$TMP/kernel/$f" || exit 1
     done
-    cp -f kernel/gfx-aus.fi "$TMP/kernel/gfx.fi" || exit 1
+    cp -f kernel/drivers/gfx/gfx-aus.fi "$TMP/kernel/drivers/gfx/gfx.fi" || exit 1
 fi
-rm -f "$TMP/kernel/gfx-aus.fi"
+rm -f "$TMP/kernel/drivers/gfx/gfx-aus.fi"
 KDIR="$TMP/kernel"
 
 "$FIRNC" -o "$TMP/k.o" "$KDIR/kmain.fi" || exit 1

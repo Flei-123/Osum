@@ -473,7 +473,7 @@ is one too many, because the class is invisible without this test.
 
 `in`/`out` address a separate sixteen-bit space with their own instructions
 that the processor does not reorder against memory. AArch64 has neither.
-`kernel/fb.fi` drives the graphics through the ports 0x1CE/0x1CF, `blk.fi`
+`kernel/drivers/gfx/fb.fi` drives the graphics through the ports 0x1CE/0x1CF, `blk.fi`
 drives ATA through 34 port lines, `pci.fi` reaches configuration space
 through 0xCF8/0xCFC. None of that is a rewrite of syntax; each one needs a
 different way of finding the device in the first place. This is why

@@ -119,14 +119,14 @@ ACCEL="${QEMU_X86#qemu-system-x86_64 }"
 
 echo "== 1. die Quellen: zwei Dateien, eine Legende =="
 
-# DIE GRUENDE STEHEN ZWEIMAL, und das ist Absicht: `kernel/vmode.fi`
+# DIE GRUENDE STEHEN ZWEIMAL, und das ist Absicht: `kernel/drivers/gfx/vmode.fi`
 # vergibt sie, `kernel/user/dispctl.fi` macht Saetze daraus und laeuft in
 # Ring 3, wo es den Kern nicht einbinden kann. Laufen die beiden Listen
 # auseinander, schreibt das Programm einen anderen Satz, als der Kern
 # gemeint hat -- und das faellt niemandem auf, weil beide Seiten fuer
 # sich stimmig bleiben.
 for r in CW_OK CW_REGS CW_VRAM CW_LIMIT CW_DEPTH CW_UNSINN CW_NOCARD; do
-    a=$(grep -aE "^const $r: u64 = " kernel/vmode.fi | sed 's/.*= //; s/ *\/\/.*//')
+    a=$(grep -aE "^const $r: u64 = " kernel/drivers/gfx/vmode.fi | sed 's/.*= //; s/ *\/\/.*//')
     b=$(grep -aE "^const $r: u64 = " kernel/user/dispctl.fi | sed 's/.*= //; s/ *\/\/.*//')
     if [ -n "$a" ] && [ "$a" = "$b" ]; then ok "$r steht im Kern und in Ring 3 gleich ($a)"
     else bad "$r: vmode.fi='$a', dispctl.fi='$b'"; fi
@@ -134,11 +134,11 @@ done
 # Und die Legende von `cand_why` (Runde DISPLAY) benutzt DIESELBEN
 # Nummern -- eine Legende fuer beide, sonst waere die Doku eine Falle.
 gleich "Grund 1 heisst hier wie dort 'die Register haben abgelehnt'" "1" \
-    "$(grep -aE '^const CW_REGS' kernel/vmode.fi | sed 's/.*= //')"
+    "$(grep -aE '^const CW_REGS' kernel/drivers/gfx/vmode.fi | sed 's/.*= //')"
 gleich "Grund 2 heisst hier wie dort 'zu gross fuer den Bildspeicher'" "2" \
-    "$(grep -aE '^const CW_VRAM' kernel/vmode.fi | sed 's/.*= //')"
+    "$(grep -aE '^const CW_VRAM' kernel/drivers/gfx/vmode.fi | sed 's/.*= //')"
 gleich "Grund 3 heisst hier wie dort 'dieser Kernel kann es nicht abbilden'" "3" \
-    "$(grep -aE '^const CW_LIMIT' kernel/vmode.fi | sed 's/.*= //')"
+    "$(grep -aE '^const CW_LIMIT' kernel/drivers/gfx/vmode.fi | sed 's/.*= //')"
 
 # Die neuen Aufrufnummern bleiben im Zehner der Runde DISPLAY
 # (1810..1819) -- es sind KEINE neuen Nummern dazugekommen, nur neue
@@ -270,7 +270,7 @@ echo "== 3. eine eigene Aufloesung -- und zwar im Bild =="
 
 # ZUERST DER NACHWEIS, DASS 1400x1050 WIRKLICH NEU IST. Ohne ihn misst
 # dieser Abschnitt nur, dass `set_mode` weiterhin funktioniert.
-if grep -aq '(1400 << 16)' kernel/vmode.fi; then
+if grep -aq '(1400 << 16)' kernel/drivers/gfx/vmode.fi; then
     bad "1400x1050 steht in der Kandidatenliste -- dann ist es keine EIGENE Aufloesung"
 else
     ok "1400x1050 steht in KEINER Kandidatenliste von vmode.fi (vorher unerreichbar)"
@@ -291,7 +291,7 @@ schau "das Foto ist 1400x1050 -- der Modus steht WIRKLICH" \
 schau "das Pruefbild ist neu gezeichnet, Feld 1 ist rot" \
     flaeche "$TMPD/eigen.ppm" 0 0 100 100 255 0 0
 schau "die Textzeile steht bildpunktgenau im eigenen Modus" \
-    text "$TMPD/eigen.ppm" kernel/font.fi 14 0 "OSUM K7 FRAMEBUFFER 01234"
+    text "$TMPD/eigen.ppm" kernel/drivers/gfx/font.fi 14 0 "OSUM K7 FRAMEBUFFER 01234"
 schau "die Ecke bei (1399,1049) gibt es und sie ist schwarz" \
     punkt "$TMPD/eigen.ppm" 1399 1049 0 0 0
 gleich "die Zusagen der Runde DISPLAY stehen unveraendert" "15" \
@@ -346,7 +346,7 @@ schau "das Foto ist 800x600 -- der Bildmodus steht noch" \
 schau "Feld 1 ist rot -- der Bildschirm ist NICHT schwarz" \
     flaeche "$TMPD/schranken.ppm" 0 0 100 100 255 0 0
 schau "und die Textzeile steht bildpunktgenau da, als waere nichts gewesen" \
-    text "$TMPD/schranken.ppm" kernel/font.fi 14 0 "OSUM K7 FRAMEBUFFER 01234"
+    text "$TMPD/schranken.ppm" kernel/drivers/gfx/font.fi 14 0 "OSUM K7 FRAMEBUFFER 01234"
 schau_nicht "ein schwarzer Schirm haette hier kein Rot" \
     flaeche "$TMPD/schranken.ppm" 0 0 100 100 0 0 0
 behalte "$TMPD/schranken.ppm" abgelehnt-800x600
@@ -405,7 +405,7 @@ gleich "und der Kernel hat zurueckgeschaltet" "1" \
     "$(echo "$cf2" | grep -ao 'after=[0-9]*' | sed 's/after=//')"
 schau "das Foto zeigt wieder 800x600" groesse "$TMPD/zurueck.ppm" 800 600
 schau "und das Pruefbild steht darin" \
-    text "$TMPD/zurueck.ppm" kernel/font.fi 14 0 "OSUM K7 FRAMEBUFFER 01234"
+    text "$TMPD/zurueck.ppm" kernel/drivers/gfx/font.fi 14 0 "OSUM K7 FRAMEBUFFER 01234"
 behalte "$TMPD/zurueck.ppm" nach-der-frist-800x600
 
 # ============================================== 6. der Neustart

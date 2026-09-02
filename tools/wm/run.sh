@@ -4,12 +4,12 @@
 #
 # Runde K7 gab Osum einen Bildschirm: 800x600, eine Textkonsole darauf,
 # /dev/fb fuer Ring 3.  Sie endete mit einem zugegebenen Mangel, und der
-# steht woertlich in `kernel/fb.fi`: "Zwei Zeichner auf einer Flaeche
+# steht woertlich in `kernel/drivers/gfx/fb.fi`: "Zwei Zeichner auf einer Flaeche
 # vertragen sich, solange sie verschiedene Zeilen nehmen.  Ein
 # Fenstersystem waere die Antwort darauf und ist nicht diese Runde."
 #
 # Diese Runde ist es, und sie hat drei Teile: ein ZEIGEGERAET
-# (`kernel/ps2m.fi`), einen FENSTERSERVER (`kernel/wm.fi`) und einen
+# (`kernel/drivers/input/ps2m.fi`), einen FENSTERSERVER (`kernel/wm.fi`) und einen
 # TRUETYPE-RASTERER (`kernel/ttf.fi`).
 #
 # WAS HIER GEMESSEN WIRD, UND WARUM ES SO GEMESSEN WERDEN MUSS.

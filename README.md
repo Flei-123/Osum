@@ -107,7 +107,7 @@ to prove it. `kernel/tile.fi`, `kernel/user/tiling.fi`, `tools/tiling/`.
 
 Most recently added: round K10 has TWO parts that ran in parallel.
 The user interface -- `kernel/wm.fi` (the window server), `kernel/ttf.fi`
-(TrueType reader and rasteriser) and `kernel/ps2m.fi` (the pointing
+(TrueType reader and rasteriser) and `kernel/drivers/input/ps2m.fi` (the pointing
 device), plus on the host `tools/ttf/subset.py`, `tools/ttf/raster.py`
 (the SECOND version of the rasteriser, the one the first is measured
 against) and `tools/wm/` (`docs/ROUNDK10W.md`). And the protection bits
@@ -119,7 +119,7 @@ Round K11 added the editor and the twenty tools (`docs/ROUNDK11.md`).
 
 On top of that, from the capability round: `kernel/cap.fi` (the handle
 table) and the test runners `tools/caps/` and `tools/boot/`. From the
-network round K8: `kernel/virtio.fi`, `kernel/inet.fi`,
+network round K8: `kernel/drivers/net/virtio.fi`, `kernel/inet.fi`,
 `kernel/netsvc.fi`, `lib/libc/net.fi` and `tools/net/`.
 
 The **TCP/IP stack** (2,646 lines) is not part of this count — it is not
@@ -211,7 +211,7 @@ about the kernel changes. Measured against screenshots
 (`docs/ROUNDK7.md`).
 
 **User interface (round K10).** A **pointing device** on the second port
-of the keyboard controller (IRQ 12, `kernel/ps2m.fi`): three- and
+of the keyboard controller (IRQ 12, `kernel/drivers/input/ps2m.fi`): three- and
 four-byte packets, wheel, clamping at the screen edges, a drawn pointer.
 A **window server** (`kernel/wm.fi`): create, move, resize and close
 windows; stacking order; input focus; events to the right window; and
@@ -285,7 +285,7 @@ exist yet (channels, ports, namespaces, spawn with a handle list, memory
 objects) answers `NotSupported` and is an open item in OrientOS'
 `KERNELWECHSEL.md`.
 
-**Network.** A **virtio-net driver** in Firn (`kernel/virtio.fi`), modern
+**Network.** A **virtio-net driver** in Firn (`kernel/drivers/net/virtio.fi`), modern
 by virtio 1.0: the four regions from the device's capability list,
 feature negotiation with `FEATURES_OK`, two virtqueues of 64 descriptors,
 MSI-X or the interrupt pin. On top of it the **TCP/IP stack from round
@@ -553,7 +553,7 @@ bash tools/k16/run.sh         # the compiler on Osum itself (K16)
 ```
 
 Start the kernel with a screen and look for yourself — `-vga std` is the
-card that `kernel/fb.fi` drives:
+card that `kernel/drivers/gfx/fb.fi` drives:
 
 ```sh
 qemu-system-x86_64 -kernel /tmp/k.mb -m 256 -append "osum gfx" \

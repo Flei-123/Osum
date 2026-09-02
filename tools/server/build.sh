@@ -8,7 +8,7 @@
 # Was entsteht:
 #
 #   k.mb       der Kern, gebaut mit `tools/build-kernel.sh --gui off`.
-#              `kernel/fb.fi`, `wm.fi`, `wig.fi`, `font.fi`, `ttf.fi`,
+#              `kernel/drivers/gfx/fb.fi`, `wm.fi`, `wig.fi`, `font.fi`, `ttf.fi`,
 #              `tile.fi`, `vmode.fi`, `ansi.fi`, `ps2m.fi`, `kgui.fi`
 #              und `sysgui.fi` sind dabei NICHT im Uebersetzungsbaum.
 #   bin/*      das Userland eines Servers -- Shell, Dateiwerkzeuge,

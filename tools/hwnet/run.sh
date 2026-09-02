@@ -6,8 +6,8 @@
 # virtio-net card. Everything it proved is still true and none of it says
 # anything about a machine you can touch: virtio-net exists only under a
 # hypervisor. This round put a second driver under the same stack
-# (`kernel/e1000.fi`) and a layer between them that decides WHICH driver
-# a card gets (`kernel/netdev.fi`).
+# (`kernel/drivers/net/e1000.fi`) and a layer between them that decides WHICH driver
+# a card gets (`kernel/drivers/net/netdev.fi`).
 #
 # So the measurement is: RUN THE SAME THING TWICE, once with
 # `-device virtio-net-pci` and once with `-device e1000`, and hold the

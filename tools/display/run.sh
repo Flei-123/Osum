@@ -5,7 +5,7 @@
 # WAS DIESE RUNDE BEHAUPTET, UND WAS HIER DAVON GEMESSEN WIRD.
 #
 # Vor dieser Runde kannte Osum ZWEI Aufloesungen. Sie standen als vier
-# Konstanten in `kernel/fb.fi`, umschaltbar nur ueber ein Wort auf der
+# Konstanten in `kernel/drivers/gfx/fb.fi`, umschaltbar nur ueber ein Wort auf der
 # Befehlszeile beim Start, und das Einstellungen-Programm schrieb dazu
 # den ehrlichen Satz "im Betrieb kann dieser Kernel ihn nicht wechseln".
 #
@@ -108,13 +108,13 @@ echo "== 1. die Quellen: zwei Dateien, eine Wahrheit =="
 for r in VBE_INDEX VBE_DATA VBE_ID VBE_XRES VBE_YRES VBE_BPP VBE_ENABLE \
          VBE_BANK VBE_VWIDTH VBE_VHEIGHT VBE_XOFF VBE_YOFF \
          VBE_DISABLED VBE_ENABLED VBE_LFB VBE_ID_LO VBE_ID_HI; do
-    a=$(grep -aE "^const $r: (u16|u64) = " kernel/fb.fi | sed 's/.*= //; s/ *\/\/.*//')
-    b=$(grep -aE "^const $r: (u16|u64) = " kernel/vmode.fi | sed 's/.*= //; s/ *\/\/.*//')
+    a=$(grep -aE "^const $r: (u16|u64) = " kernel/drivers/gfx/fb.fi | sed 's/.*= //; s/ *\/\/.*//')
+    b=$(grep -aE "^const $r: (u16|u64) = " kernel/drivers/gfx/vmode.fi | sed 's/.*= //; s/ *\/\/.*//')
     if [ -n "$a" ] && [ "$a" = "$b" ]; then ok "$r steht in fb.fi und vmode.fi gleich ($a)"
     else bad "$r: fb.fi='$a', vmode.fi='$b'"; fi
 done
 # Und der Index, den Runde K7 nicht kannte.
-v64=$(grep -aE '^const VBE_VRAM64K' kernel/vmode.fi | sed 's/.*= //; s/ *\/\/.*//')
+v64=$(grep -aE '^const VBE_VRAM64K' kernel/drivers/gfx/vmode.fi | sed 's/.*= //; s/ *\/\/.*//')
 gleich "VBE_VIDEO_MEMORY_64K ist Index 10 (0x0A)" "10" "$v64"
 
 # Die Seiten dieser Runde und die Karte.
@@ -344,7 +344,7 @@ num "der Lauf endet sauber" "$RC" eq 21
 schau "VORHER: das Foto ist 800x600" groesse "$TMPD/vorher.ppm" 800 600
 schau "VORHER: Feld 1 ist reines Rot" flaeche "$TMPD/vorher.ppm" 0 0 100 100 255 0 0
 schau "VORHER: die Textzeile steht bildpunktgenau" \
-    text "$TMPD/vorher.ppm" kernel/font.fi 14 0 "OSUM K7 FRAMEBUFFER 01234"
+    text "$TMPD/vorher.ppm" kernel/drivers/gfx/font.fi 14 0 "OSUM K7 FRAMEBUFFER 01234"
 
 # NACHHER: DERSELBE Kernel, DIESELBE Zeile, ein Wort mehr -- `dispbig`.
 foto nachher "gfx disp dispbig nocursor fbtest fbhold $GRUND"
@@ -366,7 +366,7 @@ schau "NACHHER: das Pruefbild ist neu gezeichnet, Feld 1 ist wieder rot" \
     flaeche "$TMPD/nachher.ppm" 0 0 100 100 255 0 0
 schau "NACHHER: Feld 4 ist weiss" flaeche "$TMPD/nachher.ppm" 300 0 100 100 255 255 255
 schau "NACHHER: die Textzeile steht bildpunktgenau im NEUEN Modus" \
-    text "$TMPD/nachher.ppm" kernel/font.fi 14 0 "OSUM K7 FRAMEBUFFER 01234"
+    text "$TMPD/nachher.ppm" kernel/drivers/gfx/font.fi 14 0 "OSUM K7 FRAMEBUFFER 01234"
 schau "NACHHER: die Ecke bei (1023,767) gibt es jetzt und sie ist schwarz" \
     punkt "$TMPD/nachher.ppm" 1023 767 0 0 0
 schau_nicht "VORHER gab es diese Ecke NICHT" punkt "$TMPD/vorher.ppm" 1023 767 0 0 0
@@ -381,7 +381,7 @@ swz=$(grep -a -m1 '^disp: sw=' "$Z" | grep -ao 'sw=[0-9]*' | sed 's/sw=//')
 gleich "zwei Wechsel in einem Lauf" "2" "$swz"
 schau "ZURUECK: das Foto ist wieder 800x600" groesse "$TMPD/zurueck.ppm" 800 600
 schau "ZURUECK: und das Pruefbild steht wieder da" \
-    text "$TMPD/zurueck.ppm" kernel/font.fi 14 0 "OSUM K7 FRAMEBUFFER 01234"
+    text "$TMPD/zurueck.ppm" kernel/drivers/gfx/font.fi 14 0 "OSUM K7 FRAMEBUFFER 01234"
 
 # ============================================== 6. der Fehlerfall
 
@@ -403,7 +403,7 @@ schau "das Foto ist 800x600 -- der Bildmodus steht noch" groesse "$TMPD/schlecht
 schau "Feld 1 ist rot -- der Bildschirm ist NICHT schwarz" \
     flaeche "$TMPD/schlecht.ppm" 0 0 100 100 255 0 0
 schau "und die Textzeile steht bildpunktgenau da, als waere nichts gewesen" \
-    text "$TMPD/schlecht.ppm" kernel/font.fi 14 0 "OSUM K7 FRAMEBUFFER 01234"
+    text "$TMPD/schlecht.ppm" kernel/drivers/gfx/font.fi 14 0 "OSUM K7 FRAMEBUFFER 01234"
 # Und die Gegenprobe zum Foto selbst: ein SCHWARZES Bild haette diese
 # Stellen nicht.
 schau_nicht "ein schwarzer Schirm haette hier kein Rot" \
