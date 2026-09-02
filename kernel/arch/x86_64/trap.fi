@@ -41,6 +41,7 @@ import time
 import signal
 import proc
 import msr
+import fpu
 
 export { entry }
 
@@ -105,6 +106,9 @@ const VEC_SPURIOUS: u64 = 47
 // Der Name faengt nicht mit VEC_ an: VEC_* sind in diesem Kernel die
 // Nummern der GERAETE, und `tools/kernel/memmap.py` zaehlt sie.
 const GP_VECTOR: u64 = 13
+// RUNDE AVX: #NM, "device not available". Der Prozessor meldet damit
+// den ersten x87/SSE-Zugriff, nachdem CR0.TS gesetzt wurde.
+const NM_VECTOR: u64 = 7
 
 fn word(frame: u64, off: u64) -> u64 {
     return __mmio_read64((frame + off) as *mut u64)
@@ -136,6 +140,22 @@ fn entry(frame: u64, state: u64) {
             let fix: u64 = msr.catch_rip(state, word(frame, F_RIP))
             if fix != 0 {
                 __mmio_write64((frame + F_RIP) as *mut u64, fix)
+                return
+            }
+        }
+        // RUNDE AVX: #NM (Vektor 7), UND ZWAR VOR ALLEM ANDEREN.
+        //
+        // Auf dem traegen Weg (`fpulazy`) setzt jeder Kontextwechsel
+        // CR0.TS, und der erste Vektorzugriff der neu eingeplanten
+        // Aufgabe landet hier. Das ist KEIN Fehler, sondern eine
+        // Anforderung: die Register dieser Aufgabe werden jetzt geladen
+        // und der Befehl noch einmal ausgefuehrt.
+        //
+        // `on_nm` antwortet false, wenn nicht traege gefahren wird --
+        // dann ist ein #NM wirklich ein Fehler und faellt weiter durch
+        // bis `report`, so wie seit Runde 59.
+        if vector == NM_VECTOR {
+            if fpu.on_nm(state, sched.fpu_area(state, sched.current(state))) {
                 return
             }
         }
