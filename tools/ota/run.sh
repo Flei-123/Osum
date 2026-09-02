@@ -155,7 +155,24 @@ vendor/firn/bin/firnc kernel/user/ota.fi -o "$OUT/ota-probe.o" \
     && ok "kernel/user/ota.fi baut ($(grep -c . kernel/user/ota.fi) Zeilen, profile kernel, keine Halde)" \
     || { bad "ota.fi baut nicht"; head -20 "$OUT/ota-cc.log"; }
 
-FIRNLIB="$ROOT/vendor/firn/lib" vendor/firn/bin/firnc -c --profile=app \
+# RUNDE MERGE-5: $FIRNLIB IST HIER DIE BIBLIOTHEK DES REPOS UND NICHT
+# DIE VON FIRN. Hier stand `FIRNLIB="$ROOT/vendor/firn/lib"`, und mit dem
+# Stand der Runde BETRIEB baut diese Zeile nicht mehr:
+#
+#   error: cannot read 'kernel/app/libc/dns.fi': No such file or directory
+#      --> kernel/app/fetch.fi:88:1  |  import libc.dns
+#
+# BETRIEB hat `fetch.fi` den Aufloeser aus `lib/libc/dns.fi` importieren
+# lassen und `tools/install/build.sh` dafuer auf `FIRNLIB="$ROOT/lib"`
+# umgestellt (dort Zeile 101) -- diese PROBE hier wurde dabei vergessen.
+# Sie ist niemandem aufgefallen, weil `tools/ota/run.sh` in `test.sh`
+# nicht angemeldet war und deshalb in keiner Abnahme lief. Genau das ist
+# der Grund, aus dem MERGE-5 die Laeufer anmeldet.
+#
+# Die Bibliothek von Firn geht dabei nicht verloren: der Uebersetzer
+# sucht ausser in $FIRNLIB immer auch in <Verzeichnis des Uebersetzers>
+# /../lib, und das IST `vendor/firn/lib`.
+FIRNLIB="$ROOT/lib" vendor/firn/bin/firnc -c --profile=app \
     -o "$OUT/fetch-probe.o" kernel/app/fetch.fi 2> "$OUT/fetch-cc.log" \
     && ok "kernel/app/fetch.fi baut mit Range/Wiederaufnahme ($(grep -c . kernel/app/fetch.fi) Zeilen)" \
     || { bad "fetch.fi baut nicht"; head -20 "$OUT/fetch-cc.log"; }
@@ -269,7 +286,27 @@ hat "$OUT/inst.txt" "install: fertig" "der Installer meldet sich fertig"
 # jedes weiteren Falls.
 rc=$(lauf basis0 "opk installieren /quelle1/hallo-1.opk;sh /start.sh;df;exit")
 hat "$OUT/basis0.txt" "paket-hallo fassung 1" "Ausgangslage: Fassung 1 laeuft"
-hat "$OUT/basis0.txt" "opk: erprobung bestaetigt" "und ist bestaetigt"
+# RUNDE MERGE-5: DIE DREI ERWARTUNGEN UNTEN TRAGEN JETZT ECHTE UMLAUTE.
+#
+# `kernel/user/opk.fi` druckt seit Runde UMLAUT2
+#
+#     opk: Signatur geprüft <pfad>
+#     opk: erprobung bestätigt für <n>
+#
+# -- mit ü und ä, nachgesehen in den Zeilen 157 und 164 der Datei. Der
+# Laeufer suchte weiter nach der ASCII-Umschrift ("geprueft",
+# "bestaetigt") und war deshalb an drei Stellen rot, OBWOHL das Geraet
+# genau das tat, was die Zusage verlangt. Das ist keine entschaerfte
+# Zusage: gesucht wird dieselbe Meldung, nur so geschrieben, wie sie
+# wirklich auf der Leitung steht. Nachgemessen an einem echten Lauf
+# gegen store.fleitec.com (docs/RUNDE-MERGE5.md, Abschnitt 4):
+#
+#     opk: Signatur geprüft /tmp/ota/INDEX.sig
+#     opk: Signatur geprüft /tmp/ota/hallo-2.opk
+#
+# Aufgefallen ist es erst, als MERGE-5 diesen Laeufer in `test.sh`
+# angemeldet hat -- vorher fuhr ihn nichts.
+hat "$OUT/basis0.txt" "opk: erprobung bestätigt" "und ist bestaetigt"
 cp -f "$OUT/ziel.img" "$OUT/basis.img"
 fi
 BASISBL=$(sed -n 's/.*blocks total=\([0-9]*\) free=\([0-9]*\).*/\1 \2/p' \
@@ -303,7 +340,7 @@ EINMS=$(( (T1 - T0) / 1000000 ))
 cp -f "$OUT/srv.log" "$OUT/srv-gut.log" 2>/dev/null || true
 gleich "einspielen: die Maschine kommt hoch" "$rc" "21"
 hat "$OUT/gut2.txt" "ota: streuwert stimmt hallo-2.opk" "der Streuwert des GELADENEN Pakets stimmt"
-hat "$OUT/gut2.txt" "opk: Signatur geprueft" "opk prueft die Signatur ein ZWEITES Mal, mit eigenem Code"
+hat "$OUT/gut2.txt" "opk: Signatur geprüft" "opk prueft die Signatur ein ZWEITES Mal, mit eigenem Code"
 hat "$OUT/gut2.txt" "opk: installiert hallo" "und installiert"
 hat "$OUT/gut2.txt" "opk: in erprobung: 1 vor 0" "die neue Generation steht in ERPROBUNG, Rueckfall waere 0"
 hat "$OUT/gut2.txt" "ota: BEREIT ZUM NEUSTART" "und der Neustart wird ANGEBOTEN"
@@ -314,7 +351,7 @@ rc=$(lauf gut3 "sh /start.sh;ota zeigen;df;exit")
 gleich "der Neustart" "$rc" "21"
 hat "$OUT/gut3.txt" "ab: gen=1 versuch=1 von 3" "der Kern zaehlt den Erprobungsversuch"
 hat "$OUT/gut3.txt" "paket-hallo fassung 2" "DIE NEUE FASSUNG LAEUFT"
-hat "$OUT/gut3.txt" "opk: erprobung bestaetigt" "und wird bestaetigt"
+hat "$OUT/gut3.txt" "opk: erprobung bestätigt" "und wird bestaetigt"
 hat "$OUT/gut3.txt" "ota: fassung hier 2" "der Fassungszaehler steht jetzt auf 2"
 GENBL=$(sed -n 's/.*blocks total=\([0-9]*\) free=\([0-9]*\).*/\2/p' "$OUT/gut3.txt" | tail -1)
 

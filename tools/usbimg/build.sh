@@ -212,7 +212,7 @@ sagen "umlaute     $UML UTF-8-Umlautfolgen im fertigen Wurzelabbild"
 
 # ================================================== 6. limine.conf
 #
-# DREI EINTRAEGE, UND DER ERSTE IST DER, DEN JUSTIN BRAUCHT.
+# VIER EINTRAEGE, UND DER ERSTE IST DER, DEN JUSTIN BRAUCHT.
 #
 #   1. DIAGNOSE, ANGEHALTEN. Kein Fensterserver, keine Shell, kein
 #      Netz -- nur der Bericht, und danach bleibt der Bildschirm stehen
@@ -222,6 +222,20 @@ sagen "umlaute     $UML UTF-8-Umlautfolgen im fertigen Wurzelabbild"
 #      Oberflaeche hoch. Der Bericht steht dann auf der seriellen
 #      Leitung; auf dem Schirm ueberzeichnet ihn der Fensterserver.
 #   3. NUR SCHREIBTISCH.
+#   4. VEKTOREINHEIT PRUEFEN (RUNDE MERGE-5, BLEIBT STEHEN). Derselbe
+#      Bericht wie 1, aber mit dem Kernwort `vecproc`: vier Prozesse
+#      schreiben ein nur zu ihnen passendes Muster in ALLE
+#      Vektorregister, geben den Prozessor ab und sehen nach, ob sie
+#      ihre eigenen Werte wiederfinden. Danach bleibt der Bildschirm
+#      stehen. Das ist der EINE Punkt aus `docs/RUNDE-AVX.md`,
+#      Abschnitt 8, der auf diesem Wirt nicht zu messen war -- Zen 1 hat
+#      kein AVX-512 und QEMUs TCG kennt es nicht --, und er ist auf
+#      echtem Blech in zwei Zeilen ablesbar:
+#
+#          fpu: mode=3  cr4=0x340620  xcr0=0xe7  size=2696  lazy=0
+#          vec: width=3   ...   vec: bad=0   vec: clean=1
+#
+#      Die Anleitung dazu steht in `docs/AUFSETZEN.md`, Abschnitt 5.
 #
 # IN DEN BEIDEN SCHREIBTISCH-EINTRAEGEN STEHT KEIN `nokbd`: die Runden
 # messen ohne Tastatur, weil ein Testlauf keine hat -- ein Mensch vor
@@ -252,6 +266,12 @@ verbose: yes
     path: boot():/osum.mb
     module_path: boot():/root.img
     cmdline: modfs osum gfx wm wig desk wmshell nosched noproc nofs
+
+/Osum -- Vektoreinheit pruefen (bleibt stehen)
+    protocol: multiboot1
+    path: boot():/osum.mb
+    module_path: boot():/root.img
+    cmdline: hwdiag hwdiagstop vecproc gfx nokbd nosched noproc nofs noring3
 EOF
 
 # ================================================== 7. das Abbild

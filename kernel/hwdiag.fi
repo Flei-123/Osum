@@ -66,7 +66,7 @@ import netdev
 import gfx
 
 export {
-    stage, report, wanted, park,
+    stage, park_if_asked, report, wanted, park,
     firmware_bios, vga_rom_at, smbios_at, rsdp_at,
     cpu_vendor_ebx, cpu_is_amd, cpu_is_intel,
     cpu_family, cpu_model, cpu_stepping,
@@ -651,11 +651,43 @@ fn park() {
 // Vergleich und sonst nichts -- jede Messung der Runden 59 bis HWNET
 // sieht denselben Kern wie vorher.
 fn stage(state: u64, cmd: u64) {
-    var w_stop: [u8; 11] = "hwdiagstop\0"
     if !wanted(cmd) {
         return
     }
     report(state)
+}
+
+// RUNDE MERGE-5: DAS ANHALTEN IST VOM BERICHT GETRENNT, UND ZWAR AUS
+// EINEM GEMESSENEN GRUND.
+//
+// Bis hierher stand `park()` am Ende von `stage`, und `stage` steht in
+// `kernel_main` VOR `fpu.apply` und `fpu.report` -- also hielt der
+// Eintrag "Hardware-Diagnose (bleibt stehen)" auf dem Stick an, BEVOR
+// die einzigen zwei Zeilen gedruckt waren, an denen sich die
+// Vektoreinheit auf echtem Blech ablesen laesst:
+//
+//     fpu: mode=3  cr4=0x...  xcr0=0xe7  size=2696  lazy=0
+//     fpu: f1c=...  f1d=...  f7b=...  sup=0xe7  need=2696
+//
+// Genau die verlangt `docs/AUFSETZEN.md`, Abschnitt 5, vom Eigner --
+// und auf einem Rechner OHNE serielles Kabel waren sie nicht zu
+// bekommen. Deshalb druckt `stage` jetzt nur noch, und angehalten wird
+// mit `park_if_asked`, das `kernel_main` HINTER `fpu.report` und hinter
+// der Vektorprobe aufruft.
+//
+// WAS DAZWISCHEN LIEGT UND WAS NICHT: zwischen den beiden Stellen
+// stehen `fpu.apply`, `sched.init`, `user.setup`, `guard.apply` und die
+// zwei Berichte -- alles Arbeit im Prozessor selbst. KEIN Treiber,
+// KEINE Geraetesuche: `netsvc.stage` und `hw.disk` kommen erst weit
+// danach. Der Grund, aus dem der Bericht frueh gedruckt wird (er soll
+// auch dann dastehen, wenn die Maschine an einer fremden Karte haengt),
+// bleibt damit unangetastet -- gedruckt wird weiterhin an derselben
+// Stelle.
+fn park_if_asked(state: u64, cmd: u64) {
+    var w_stop: [u8; 11] = "hwdiagstop\0"
+    if !wanted(cmd) {
+        return
+    }
     if find(cmd, (&w_stop[0]) as u64, 10) != 0 {
         park()
     }
