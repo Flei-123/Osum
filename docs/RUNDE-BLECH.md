@@ -250,6 +250,44 @@ echter Regler nicht.
    sie. „ehci: init failed" ohne Grund ist genau die Meldung, über die
    diese Runde sich beim Plattentreiber beschwert hat.
 
+### Zwei weitere Fehler, beim Nachlesen gefunden — und beide erst mit ZWEI Geräten sichtbar
+
+Keiner von beiden hat einen roten Haken erzeugt. Beide wären auf einem
+echten Brett aufgetreten und in der Nachbildung nie, weil bis dahin in
+jeder Messung genau **ein** Gerät am Regler hing.
+
+3. **Der Gerätesatz war zu klein.** `DEV_BYTES` stand auf 64, und vier
+   Felder lagen dahinter: `D_VEN` (0x40), `D_PROD` (0x48), `D_TOGOUT`
+   (0x50), `D_MPSIN` (0x58). Gerät 0 hat damit in den Platz von Gerät 1
+   geschrieben — mit einer Tastatur **und** einem Stick an derselben
+   Buchsenleiste hätte die Tastatur die Herstellernummer des Sticks
+   getragen. Die Karte in `tools/kernel/memmap.py` hätte es **nicht**
+   gefunden: sie prüft Bereiche gegeneinander, nicht Felder *innerhalb*
+   eines Bereichs.
+4. **Das Umschaltbit hing an der Zahl der Übertragungen statt an der
+   Zahl der Pakete.** `tin = 1 - tin` nach jedem Bulk-Zugriff — richtig
+   für 512 Oktett bei 512 Oktett je Paket, also für genau die eine
+   Größe, die in der Messung vorkommt. Bei einem Gerät mit 64 Oktett je
+   Paket wären es acht Pakete, und der zweite Block wäre Müll. Jetzt
+   `toggle_after(len, mps, t)`, und die Paketgröße des
+   Ausgangs-Endpunkts kommt aus dem Deskriptor statt aus einer Annahme.
+
+**Die Messung dazu** (Abschnitt 6b des Läufers) — Tastatur *und* Stick
+an derselben Buchsenleiste:
+
+```
+ehci: port 0  portsc=0x1005  speed=2
+ehci: port 1  portsc=0x1005  speed=2
+ehci: dev 0  addr=1  klasse=1  0627:0001     <- die Tastatur
+ehci: dev 1  addr=2  klasse=3  46f4:0001     <- der Stick
+ehci: enum=2  ctrl=14  fehler=0  tasten=6
+ehci: codes 23 1e 26 26 18 1c
+ehci: selftest lba=0  ok=1  sum=16054338  first=100
+```
+
+Jedes Gerät trägt **seine** Nummern, die Tastatur liefert weiterhin die
+richtigen Abtastcodes, und die Blocksummen sind dieselben.
+
 ### Die Gegenproben
 
 | Gegenprobe | Ergebnis |
@@ -414,10 +452,79 @@ Kollisionen.**
 
 ---
 
+## VIER BAUARTEN, ZWEI DAVON GEFAHREN
+
+Der Kern lässt sich in vier Zuschnitten bauen, und diese Runde hat alle
+vier gebaut — zwei davon auch gestartet, weil ein Bau, der nur übersetzt,
+nichts über das Laufen sagt:
+
+| Bauart | Abbild | gefahren |
+|---|---:|---|
+| `gui=on tunnel=on`, Stufe 0 | 3 406 500 | ja (alle Messungen oben) |
+| `gui=off tunnel=on`, Stufe 0 (**Server**) | 2 535 964 | **ja** — EHCI mit Stick, dieselben drei Blocksummen |
+| `gui=on tunnel=off`, Stufe 0 | 3 202 960 | nur gebaut |
+| `gui=off tunnel=off`, Stufe 0 | 2 332 524 | nur gebaut |
+| `gui=on tunnel=on`, **Stufe 1** (`firnc1`) | 8 168 008 | **ja** — NVMe-Wurzel über `rootsel` |
+
+Stufe 1 heißt: der Kern ist vom **selbstgehosteten** Firn-Übersetzer
+gebaut, nicht vom Rust-Übersetzer. Auch dort findet `rootsel` die
+NVMe-Wurzel. Protokoll: `/root/blechlogs/BAUARTEN.log`.
+
+---
+
+## DAS USB-ABBILD, UNTER BIOS UND UNTER UEFI
+
+`bash tools/usbimg/build.sh` aus dem Stand dieser Runde:
+
+| | |
+|---|---|
+| Abbild | **123 731 968 Oktette** (118 MiB), GPT, EFI 96 MiB + Wurzel 20 MiB |
+| SHA-256 | `b8b1fd3abb5e260dc8b865480c53603f88a11b7af1372db8c30408cc87c44b10` |
+| Wurzeldateisystem | 20 971 520 Oktette, OFS v3, 24 Pflichtpfade, 125 Umlautfolgen |
+
+Beide Startwege, jeweils mit `hwdiag` (Protokoll
+`/root/blechlogs/USBIMG-bios-uefi.log`):
+
+```
+--- BIOS ---
+hwdiag: firmware=BIOS  vgarom=0xc0000  smbios=0xf59f0  rsdp=0xf59d0
+hwdiag: fb 1280x800  bpp=32  pitch=5120  src=multiboot  phys=0xfd000000  cols/rows=160/50
+hwdiag: disk IDE    bdf=0x9 8086:7010
+rootsel: reihenfolge: ide
+netdev: c0=e1000 bdf=0x18
+hwdiag: ANGEHALTEN. Der Bildschirm bleibt so stehen.
+
+--- UEFI (OVMF) ---
+hwdiag: firmware=UEFI  vgarom=nein  smbios=nein  rsdp=nein
+hwdiag: fb 1280x800  bpp=32  pitch=5120  src=multiboot  phys=0x80000000  cols/rows=160/50
+hwdiag: disk IDE    bdf=0x9 8086:7010
+rootsel: reihenfolge: ide
+netdev: c0=e1000 bdf=0x18
+hwdiag: ANGEHALTEN. Der Bildschirm bleibt so stehen.
+```
+
+Drei Dinge stehen darin, die zusammengehören:
+
+* **`src=multiboot`** in beiden Fällen — Limine gibt den GOP-Puffer
+  weiter, und der Kern nimmt ihn. `pitch=5120` = 1280 · 4, `cols/rows`
+  = 1280/8 und 800/16: die Rechnung aus Teil 5, hier auf dem echten
+  Startweg statt mit `-kernel`.
+* **`firmware=BIOS` / `firmware=UEFI`** — dieselben drei Spuren
+  (VGA-ROM, SMBIOS, RSDP), zwei verschiedene Antworten. Der Befund ist
+  ein Befund und keine Vermutung.
+* **`rootsel: reihenfolge: ide`** — die neue Zeile ist auf dem echten
+  Startweg da, unter beiden Firmwares. Auf dieser Maschine ist der
+  IDE-Controller der einzige Bewerber, und der Kern sagt es, statt ihn
+  stillschweigend zu nehmen.
+
+---
+
 ## DIE ABNAHME
 
 *(Die Zahlen dieses Abschnitts werden beim Abschluss der Runde
-eingetragen — der volle Lauf läuft zum Zeitpunkt dieses Absatzes noch.)*
+eingetragen — der volle Lauf läuft zum Zeitpunkt dieses Absatzes noch,
+und zwar auf einem Wirt, auf dem die Runde MERGE-5 gleichzeitig ihre
+eigene volle Abnahme fährt.)*
 
 ---
 
