@@ -518,3 +518,128 @@ folgenden Punkte hat kein Lauf dieser Runde beruehren koennen.
   also auf der echten CPU, aber mit nachgebauten Geraeten. Der
   30.08.2026 ist die erste Gelegenheit, die Punkte aus Abschnitt 5 zu
   pruefen.
+
+---
+---
+
+# TEIL C — DER STAND NACH RUNDE BLECH (02.09.2026)
+
+*Zweig `blech`, abgezweigt von `main` (`163984d`). Diese Tabelle ersetzt
+für die genannten Zeilen die Tabelle in Teil A: die dort steht, ist die
+vom 28.08.2026.*
+
+**Die ehrlichste Seite des Projekts, und deshalb die wichtigste Regel
+für sie: „geht" heißt hier IN `main` UND GEMESSEN.** Es gibt in diesem
+Repository Treiber, die gebaut und grün sind und trotzdem auf keinem
+Rechner laufen, weil ihr Zweig nicht gemerged ist. Die bekommen eine
+eigene Spalte und nicht ein Häkchen.
+
+## DIE TABELLE
+
+| Klasse | Geht (in `main`, gemessen) | Gebaut & grün, aber NICHT in `main` | Geht nicht |
+|---|---|---|---|
+| **Netz, kabelgebunden** | virtio-net (`1AF4:1000/1041`, nur virtuell); Intel 8254x/82574 — **genau** `8086:100E, 100F, 1015, 1026, 1028, 10D3` (`e1000.fi::supports`) | **Realtek RTL8169/8168/8111/8101 + RTL8139C+** (`kernel/r8169.fi`, Zweig `rtl`, 1239 Z., *tools/rtl/run.sh: 67/0*); **Intel I217/I218/I219** (PCH-Zweig in `e1000.fi`, derselbe Zweig) | Intel I210/I211/**I225/I226** (igb/igc); Broadcom; Aquantia; Marvell |
+| **WLAN** | nichts | nichts | **alles** — 802.11-MAC, Firmwareladen, WPA2/3, Regulatorik |
+| **Platte, NVMe** | `nvme.fi`, DMA, Warteschlangen, MSI-X; **seit BLECH: mehrere Namensräume** — Liste über CNS 0x02, Größe und Blockformat je Namensraum, Lesen je Namensraum (*gemessen: 3 Namensräume, NSID 1/2/7, Block 0 je Oktett für Oktett gegen das Wirtsabbild*) | — | Einen anderen Namensraum als 1 als **Wurzel** einhängen; Fehlerbehandlung bei fehlerhaftem Medium; Namensraumverwaltung (anlegen/löschen) |
+| **Platte, SATA/AHCI** | `ahci.fi` (`01:06:01`), Port-Register, Kommandolisten, FIS | — | **RAID-Modus** (`01:04`) — wird seit BLECH **benannt** (s. u.), aber nicht gelesen |
+| **Platte, IDE/ATA** | ATA-PIO auf 0x1F0, Meister und Sklave | — | LBA48 (Grenze bleibt **128 GiB**) |
+| **Platte, USB** | Stick über **xHCI**, BOT + SCSI, als `blk.DEV_USB` | Stick über **EHCI** — gelesen und Oktett für Oktett geprüft, aber **noch kein `blk`-Gerät** (`DEV_EHCI` fehlt) | eMMC/SD (`08:05`) — seit BLECH benannt; SCSI/SAS — benannt |
+| **Wurzelwahl beim Start** | **seit BLECH gebaut**: `rootsel.fi` sucht NVMe → AHCI → USB → IDE und nimmt den ersten, dessen Wurzel sich wirklich einhängen lässt; die Entscheidung steht im Startbericht | — | Wurzel auf einer FAT- oder ext4-Partition; Wurzel über Netz |
+| **USB-Hostcontroller** | **xHCI** (`0C:03:30`); **seit BLECH: EHCI** (`0C:03:20`) — Firmwareübergabe, periodische *und* asynchrone Liste, Aufzählung, HID-Boot-Tastatur, Massenspeicher | — | **UHCI/OHCI** (`0C:03:00/10`) — seit BLECH wenigstens **benannt**; **Split-Übertragungen** (USB-1.1-Gerät am EHCI ohne Begleitregler); Hubs in der Tiefe; isochron |
+| **Eingabe, PS/2** | `kbd.fi` (0x60, IRQ 1), `ps2m.fi` | — | — |
+| **Eingabe, USB-HID** | Tastatur und Maus über **xHCI** im Boot-Protokoll; **seit BLECH: Tastatur über EHCI** (*gemessen: 6 Tasten, Abtastcodes `23 1e 26 26 18 1c` gegen den AT-Satz 1*) | **HID-Berichtsbeschreibungen** (`hidrep.fi`, 1032 Z.), **I²C-HID + Präzisions-Touchpad** (`i2chid.fi`, 795 Z.), Zweig `hid`, *tools/hid/run.sh: 57/0* | Maus über EHCI (Klasse erkannt, kein Endpunkt bedient) |
+| **Grafik** | **ein** Weg: der lineare Rahmenpuffer der Firmware — UEFI-GOP über Limine / Multiboot-Bit 12, ersatzweise Bochs `0x1CE/0x1CF`. **Seit BLECH nachgerechnet** über 7 Karten und 2 Auflösungen (s. u.) | — | **kein GPU-Treiber** (bleibt so); kein KMS; kein zweiter Bildschirm; **umschaltbare Grafik: keine Meldung**; Cirrus und VMware-SVGA liefern in QEMU **gar keinen** Rahmenpuffer |
+| **ACPI/Strom** | RSDP/RSDT/XSDT, MADT, FADT; C-/P-Zustände; Akku | — | **kein AML-Interpreter** → kein `_PRT`, kein `_CRS`, keine Thermalzonen, kein Deckelschalter, kein S3 |
+| **Ton** | AC'97 (Zweig `media1`) | — | Intel HDA |
+| **TPM** | nichts | nichts | TPM 2.0 (TIS/CRB) |
+
+---
+
+## WAS BLECH AN DIESER TABELLE GEÄNDERT HAT — mit den Messungen
+
+### 1. Die Wurzel wird gesucht statt geraten
+
+Vorher entschied die Kommandozeile. `kmain.fi::osum_stage` rief
+`blk.use_ata`, und `root_from_part` rief `part.scan(state, blk.DEV_ATA)`
+— beide nannten dasselbe Gerät beim Namen.
+
+Dieselbe Maschine, ein NVMe-Riegel mit einem OFS darauf und nichts an
+0x1F0, zwei Kerne:
+
+```
+main   (163984d):  osum: no drive          <- und dann nichts mehr
+blech            :  rootsel: versuch nvme
+                    rootsel: nvme -- WURZEL, Bloecke=8192  first=0
+                    osum: mount=1   /bin: sh ls cat echo   sh exit=0
+```
+
+Ein Bewerber, der nur DA ist, gewinnt nicht: leere NVMe-Platte neben
+einer AHCI-Platte mit System →
+`rootsel: nvme -- keine Wurzel darauf` / `rootsel: ahci -- WURZEL`.
+
+Und der alte Weg bleibt der erste: mit einer IDE-Wurzel läuft die neue
+Suche **null Mal** (gezählt).
+
+### 2. Der RAID-Modus wird beim Namen genannt
+
+Das ist der häufigste Grund, aus dem ein Notebook mit Osum nicht
+startet — und es ist **kein fehlender Treiber**. Gemessen mit
+`-device megasas` (Klasse 01:04, genau was Intel RST hinstellt):
+
+```
+rootsel: 1000:0060 steht im RAID-Modus (01:04)
+rootsel: im BIOS "SATA Mode" von RAID/RST auf AHCI stellen, dann neu
+rootsel: 1b36:0007 ist ein SD/eMMC-Regler -- kein Treiber
+rootsel: reihenfolge: nvme > ahci > ide
+```
+
+Ein RST-Treiber müsste undokumentierte Metadaten lesen. Der Umschalter
+im BIOS sind zwei Klicks.
+
+### 3. EHCI
+
+```
+ehci: bdf=0x20  caplen=32  hcc=0x6880  ports=6  legacy=0x68  handoff=1
+ehci: msc blocks=2048  bsize=512
+ehci: selftest lba=0  ok=1  sum=16054338  first=100    <- Wirt: 16054338 / 100
+ehci: codes 23 1e 26 26 18 1c                          <- h a l l o Eingabe
+```
+
+`handoff=1` heißt: das BIOS-Besitzbit ist gefallen (EHCI-Spezifikation
+5.1). Auf echtem Blech ist das die häufigste Ursache dafür, dass USB
+„manchmal" geht.
+
+### 4. Der Rahmenpuffer, nachgerechnet
+
+Geprüft wird `pitch >= width*bpp/8`, `cols == width/8`,
+`rows == height/16`, `phys != 0`. **9 bestanden, 0 gefallen.**
+`std`, `qxl`, `bochs-display`, `VGA`, `virtio-vga` liefern
+800x600/32/3200; `fbbig` liefert 1024x768/32/4096. **Cirrus und
+VMware-SVGA liefern gar keinen Rahmenpuffer** (sie haben die
+Bochs-Erweiterung nicht; ihr VBE läuft über INT 10h im realen Modus).
+`-vga none`: der Kern sagt `fb=KEINER` und läuft weiter.
+
+---
+
+## WAS AUF EINEM ECHTEN BRETT ALS NÄCHSTES SCHIEFGEHT
+
+Fortgeschrieben aus Teil A, in der Reihenfolge der Wahrscheinlichkeit:
+
+1. **Die Netzkarte ist ein Realtek 8168 oder ein I219.** Der Treiber
+   dafür ist gebaut und grün — **aber er ist nicht in `main`.** Bis der
+   Zweig `rtl` gemerged ist, sagt die serielle Ausgabe weiterhin
+   `netdev: no driver for 0x10ec:0x8168`.
+2. **Die eingebaute Tastatur hängt an I²C-HID.** Dasselbe: gebaut und
+   grün auf Zweig `hid`, nicht in `main`.
+3. **Der SATA-Controller steht im RAID-Modus.** Seit BLECH sagt der Kern
+   es und sagt auch, was zu tun ist. Zwei Klicks im BIOS.
+4. **Die Netzkarte ist ein I225/I226.** Kein Treiber, und diese Runde hat
+   ihn bewusst nicht blind gebaut (siehe `docs/RUNDE-BLECH.md`, „was noch
+   fehlt"): QEMU 7.2 kennt weder `igb` noch `igc`, er wäre auf diesem
+   Rechner zu keinem Zeitpunkt messbar gewesen.
+5. **Das Interrupt-Routing.** Unverändert: ohne AML-Interpreter wird das
+   Interrupt-Line-Register geglaubt.
+6. **Secure Boot.** Limine ohne Signatur startet nicht. Im UEFI
+   abschalten.
+7. **Umschaltbare Grafik.** Auf die integrierte stellen — der Kern sagt
+   dazu (noch) nichts Verständliches.
