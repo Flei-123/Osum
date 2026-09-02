@@ -342,8 +342,10 @@ was zwischen ihnen passiert ist, steht im nächsten Abschnitt.
 
 **Sie ist in ZWEI Durchgängen gefahren worden, und der Grund ist ein
 Unfall, der hier benannt gehört:** der erste Lauf (`OSUM_JOBS=4 bash
-test.sh`, 09:56–12:51) ist nach 39 von 53 Abschnitten **abgebrochen** —
-der Prozess war weg, ohne Schlussbilanz im Protokoll. Was ihn getötet
+test.sh`, 09:56–12:51) ist nach 39 von 54 angemeldeten Abschnitten
+**abgebrochen** — der Prozess war weg, ohne Schlussbilanz im Protokoll
+(gedruckt waren zu dem Zeitpunkt 35; die Ausgabe geht der Reihe nach und
+hinkt den fertigen Abschnitten hinterher). Was ihn getötet
 hat, ist nicht geklärt; kein OOM in `dmesg`, keine volle Platte zu
 diesem Zeitpunkt. Er ist nicht neu gestartet worden, weil die 39
 gemessenen Abschnitte gültige Messungen sind und ein zweiter voller Lauf
@@ -353,7 +355,13 @@ auf diesem Wirt drei Stunden kostet.
 |---|---|---:|---|
 | 1 (09:56–12:51, abgebrochen) | `MODUL-ABNAHME.log` | 39 | 36 grün, **3 rot**: `net`, `netview`, `netmon` |
 | 2 (`OSUM_NUR` auf die fehlenden 14) | `MODUL-ABNAHME-2.log` | 14 | 13 grün, **1 rot**: `multiuser` |
-| 3 (die vier roten einzeln, `OSUM_JOBS=1`) | `MODUL-ABNAHME-3-einzeln.log` | 4 | siehe unten |
+| 3 (die vier roten einzeln, `OSUM_JOBS=1`) | `MODUL-ABNAHME-3-einzeln.log` | 4 | **noch nicht fertig**, siehe unten |
+
+Danach liegen **54 Protokolle** in `.test-work/`; eines davon
+(`vendor.log`) gehört zur Übersetzerprüfung, die außerhalb der
+Abschnittsliste läuft. Gemessen sind damit **53 Abschnitte**. Eine
+Schlussbilanz über alles gibt es nicht — sie hätte der abgebrochene Lauf
+gedruckt.
 
 **Der Wirt war die ganze Zeit dreifach belegt.** Neben dieser Runde liefen
 die vollen Abnahmen von BLECH (`/root/osum-blech`) und MERGE-5
