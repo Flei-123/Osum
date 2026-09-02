@@ -49,7 +49,8 @@ export {
     rx_take_on, rx_recycle_on, tx_frame_on, tx_room_on, poll_on, irq_on,
     rx_frames_on, tx_frames_on, rx_octets_on, tx_octets_on,
     tx_drops_on, link_up_on, shut_down_on, irqs_on, queue_size_on,
-    msix_on, notified_on, features_on, VEC_NET, print_cards
+    msix_on, notified_on, features_on, VEC_NET, print_cards,
+    vec_of, card_of_vec
 }
 
 // ------------------------------------------------------ the data area
@@ -61,7 +62,23 @@ export {
 //
 // 0x000 upwards: this file, 0x40 per card.
 // 0x400 upwards: `e1000.fi`, 0x200 per unit.
-const MAX_CARDS: u64 = 2
+//
+// RUNDE STRUKTUR: MAX_CARDS war 2, und zwei ist fuer ein Brett mit
+// zwei Anschluessen plus WLAN zu wenig. Die neue Zahl ist 7, und sie
+// ist NICHT frei gewaehlt -- sie ist die kleinste der drei Schranken:
+//
+//   Speicher hier   0x300 / 0x40 = 12 Karten (dann faengt die Liste
+//                   der Karten OHNE Treiber an, S_UNSUP_N).
+//   Speicher e1000  (0x1000 - 0x400) / 0x200 = 6 Einheiten.
+//   UNTERBRECHUNGEN 7. Das ist die bindende, siehe `vec_of` unten.
+//
+// `virtio.MAX_CARDS` bleibt bei 2 und ist damit die vierte Schranke,
+// aber nur fuer virtio-Karten: der Zustand einer virtio-Karte liegt in
+// `pci.K2_SCALARS`, Karte 1 auf +0x1600, und die Seite endet auf
+// 0x2000 -- fuer eine dritte ist dort kein Platz. `probe` prueft jede
+// Treibergrenze einzeln, ein Rechner mit sechs Intel-Karten und einer
+// virtio-Karte ist also moeglich.
+const MAX_CARDS: u64 = 7
 const CARD_SPAN: u64 = 0x40
 
 const S_KIND: u64 = 0x00 // which driver, or KIND_NONE
@@ -79,9 +96,64 @@ const KIND_NONE: u64 = 0
 const KIND_VIRTIO: u64 = 1
 const KIND_E1000: u64 = 2
 
-// Card 0 keeps vector 45 and card 1 takes 46 -- unchanged from round
-// NETMON, because `isr.s` has those two stubs and no others.
+// ------------------------------------------------- DIE UNTERBRECHUNGEN
+//
+// Bis Runde STRUKTUR stand hier: "Karte 0 nimmt Vektor 45, Karte 1
+// nimmt 46 -- unveraendert seit Runde NETMON, weil `isr.s` diese zwei
+// Stummel hat und keine anderen." Der erste Halbsatz war richtig, der
+// zweite ist es nicht, und dazwischen lagen ZWEI Fehler:
+//
+//   1. VEKTOR 46 GEHOERT DER PS/2-MAUS. `hw.fi` traegt GSI 12 auf 46
+//      ein (VEC_MOUSE), und in `trap.fi` steht der Mauszweig VOR dem
+//      Netzzweig. Eine zweite Netzkarte haette ihre Unterbrechung an
+//      `gfx.mouse_irq` verloren und nie eine bekommen.
+//   2. DER VEKTOR KAM AUS DER FALSCHEN NUMMER. `virtio.init_on` rechnete
+//      `VEC_NET + c` und `e1000.intx_arm` rechnete `45 + u` -- beides
+//      die Kartennummer INNERHALB des Treibers. Bei einer virtio- UND
+//      einer e1000-Karte ist das fuer beide 0, also beide auf 45.
+//
+// Beides ist behoben, indem der Vektor dort vergeben wird, wo die
+// globale Kartennummer bekannt ist: HIER. Die Treiber bekommen ihn als
+// Argument und rechnen ihn nicht mehr selbst aus.
+//
+// `isr.s` hat Stummel fuer isr0..isr47; ab 48 stehen in der Tabelle
+// `vectors` andere Eintraege (syscall_entry, user_entry, ...), 48
+// aufwaerts ist also KEIN freier IRQ-Vektor. In 32..47 sind belegt:
+// 32 Zeitgeber, 33 Tastatur, 36 seriell, 43 xHCI, 44 NVMe, 45 Netz,
+// 46 Maus, 47 spurious. Frei bleiben 34, 35, 37..42 -- acht Stueck.
+//
+// Karte 0 behaelt 45, damit jede Messung der Runden K8 und NETMON
+// dieselbe Zahl liest. Die Karten 1..6 bekommen 37..42. 34 und 35
+// bleiben absichtlich frei: der naechste Treiber, der einen Vektor
+// braucht, soll einen finden, ohne diese Tabelle anfassen zu muessen.
 const VEC_NET: u64 = 45
+const VEC_NET_MORE: u64 = 37 // Karten 1..6 -> 37..42
+
+// Der Vektor der Karte `c`, oder 0, wenn sie keinen hat.
+fn vec_of(c: u64) -> u64 {
+    if c == 0 {
+        return VEC_NET
+    }
+    if c < MAX_CARDS {
+        return VEC_NET_MORE + c - 1
+    }
+    return 0
+}
+
+// Die Umkehrung, fuer `trap.fi`: welche Karte meldet sich auf diesem
+// Vektor? MAX_CARDS, wenn es keine ist. Eine Schleife und keine
+// Rechnung, weil die Tabelle oben zwei Bereiche hat und eine Rechnung
+// beim naechsten Bereich still falsch waere.
+fn card_of_vec(vector: u64) -> u64 {
+    var c: u64 = 0
+    while c < MAX_CARDS {
+        if vec_of(c) == vector {
+            return c
+        }
+        c = c + 1
+    }
+    return MAX_CARDS
+}
 
 const VENDOR_VIRTIO: u64 = 0x1AF4
 const CLASS_NET: u64 = 0x02
@@ -279,11 +351,13 @@ fn print_cards(state: u64) {
 
 fn init_on(state: u64, c: u64, use_msix: bool, armed: bool) -> bool {
     let k: u64 = kind_on(state, c)
+    // Der Vektor kommt VON HIER, nicht aus dem Treiber -- siehe `vec_of`.
+    let v: u64 = vec_of(c)
     if k == KIND_VIRTIO {
-        return virtio.init_on(state, unit_of(state, c), use_msix, armed)
+        return virtio.init_on(state, unit_of(state, c), v, use_msix, armed)
     }
     if k == KIND_E1000 {
-        return e1000.init_on(state, unit_of(state, c), use_msix, armed)
+        return e1000.init_on(state, unit_of(state, c), v, use_msix, armed)
     }
     return false
 }
