@@ -31,8 +31,11 @@ import pwr
 import sys
 import gfx
 import arch.arch
+import mem
+import arch.x86_64.fpu
 
-export { main, WORK_UNITS, SPIN, GRIND_UNITS, GRIND_STEP }
+export { main, WORK_UNITS, SPIN, GRIND_UNITS, GRIND_STEP, VEC_ROUNDS,
+    YIELD_ROUNDS }
 
 // 40 turns of 20000 spins. In QEMU that is a few hundred milliseconds --
 // long enough for the timer at 100 Hz to take the processor away many
@@ -56,6 +59,12 @@ fn main(state: u64, index: u64, kind: u64) {
     }
     if kind == sched.K_GRIND {
         grinder(state, index)
+    }
+    if kind == sched.K_VEC {
+        vector_task(state, index)
+    }
+    if kind == sched.K_YIELD {
+        yield_task(state, index)
     }
     // RUNDE ASYNC: der Arbeitsfaden der Auftragsschicht. Sein Rumpf
     // steht in `sys.fi`, weil er `read_of` und `write_of` braucht --
@@ -168,4 +177,73 @@ fn worker(state: u64, index: u64) {
     // The exit code says how much work was done. A worker that was cut
     // short would be visible here.
     sched.exit_task(state, unit)
+}
+
+
+// ==================================================== RUNDE AVX
+//
+// DIE VEKTORPROBE ALS KERNAUFGABE -- der Nachweis auf MEHREREN
+// Prozessoren.
+//
+// Sie schreibt ein Muster, das nur zu ihr passt, in alle 16 xmm, rechnet
+// damit, gibt den Prozessor ab und sieht danach nach, ob sie ihre
+// eigenen Werte wiederfindet. Der Beendigungscode ist die Zahl der
+// Abweichungen. Mehrere davon laufen gleichzeitig; die Laufliste verteilt
+// sie ueber alle Kerne (`sched.cpu_mask` sagt hinterher, ueber welche).
+//
+// Warum das nicht der Test aus Ring 3 tut: `syscall_entry` in `isr.s`
+// hat EIN globales Wort fuer den Nutzerstapel und EINES fuer den
+// Kernstapel. Zwei Kerne, die gleichzeitig einen Systemaufruf machen,
+// stehen danach auf demselben Kernstapel. Das ist eine Grenze aus Runde
+// K5 (siehe den Kommentar bei `sched.set_kernel_stack`), sie ist in
+// dieser Runde GEMESSEN worden, und sie zu heben ist eine eigene Runde.
+const VEC_ROUNDS: u64 = 200
+
+fn vector_task(state: u64, index: u64) {
+    // Ohne Freischaltung waere schon das erste `movdqu` ein #UD -- und
+    // zwar in Ring 0, wo es die Maschine anhaelt. Diese Aufgabe wird
+    // dann gar nicht erst angelegt (`kmain.vectors_smp`); die Abfrage
+    // hier ist der zweite Riegel.
+    if !fpu.enabled(state) {
+        sched.exit_task(state, 0)
+    }
+    let buf: u64 = mem.frame_alloc(state)
+    if buf == 0 {
+        sched.exit_task(state, 250)
+    }
+    let seed: u64 = sched.tget(state, index, sched.T_PID) & 0xFF
+    fpu.vec_seed(buf, seed)
+    fpu.vec_put(buf)
+    var bad: u64 = 0
+    var r: u64 = 0
+    while r < VEC_ROUNDS {
+        sched.yield_now(state)
+        fpu.vec_calc()
+        fpu.vec_ref(buf)
+        sched.yield_now(state)
+        fpu.vec_take(buf + fpu.PROBE_BYTES)
+        bad = bad + fpu.vec_diff(buf, buf + fpu.PROBE_BYTES)
+        sched.tset(state, index, sched.T_WORK, r + 1)
+        r = r + 1
+    }
+    mem.frame_free(state, buf)
+    if bad > 250 {
+        bad = 250
+    }
+    sched.exit_task(state, bad)
+}
+
+
+// RUNDE AVX: das Messgeraet. Zwei davon geben sich den Prozessor
+// gegenseitig, sonst passiert nichts -- was dabei an Zyklen vergeht,
+// geteilt durch die Zahl der Wechsel, IST der Preis eines Wechsels.
+const YIELD_ROUNDS: u64 = 20000
+
+fn yield_task(state: u64, index: u64) {
+    var r: u64 = 0
+    while r < YIELD_ROUNDS {
+        sched.yield_now(state)
+        r = r + 1
+    }
+    sched.exit_task(state, 0)
 }
