@@ -783,7 +783,19 @@ mouse_button 1
 mouse_button 0
 mouse_button 1
 mouse_button 0
-warte 1.0
+# RUNDE MERGE-3: 4.0 STATT 1.0 SEKUNDEN, UND DIE ZAHL IST GEMESSEN.
+# Nach dem Doppelklick steht "explorer: cd /data/bilder" mit n=2 in der
+# seriellen Ausgabe -- der Dateimanager IST also hineingegangen --, aber
+# das Bild zeigte nach einer Sekunde noch die alte Tabelle: "blau.ppm"
+# fehlte (283 von 372 Tintenpunkten falsch) und "bilder" stand noch da.
+# Mit der Zusammenfuehrung von mergeline2 ist ein Neuzeichnen teurer
+# geworden (SOFTUI zeichnet weiche Kanten, PAINT legt einen
+# Fenster-Zwischenpuffer davor), und eine Sekunde reicht dafuer auf
+# diesem Wirt nicht mehr. GEMESSEN mit einer Kopie dieses Laeufers, die
+# nur bis hierher lief: mit 1.0 zwei rote Haken, mit 4.0 "121 passed,
+# 0 failed". Es ist KEINE Zusage entschaerft -- dieselben Bildpunkte
+# werden verglichen, nur nachdem das Neuzeichnen sicher durch ist.
+warte 4.0
 mouse_move 120 120
 EOF
 foto fdbl "gfx wm wigfiles wmhold wiglong $GRUND" "$M"
