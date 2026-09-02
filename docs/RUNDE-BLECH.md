@@ -932,3 +932,292 @@ und was ihn vom gemessenen `e1000.fi` trennt:
 
 Ohne eine Karte oder ein QEMU mit `igc`-Modell bleibt das ungeprueft --
 und ungeprueft gehoert es nicht in diesen Kern.
+
+---
+
+# NACHTRAG 2: DIE NAMENSTABELLE IST NACHGERECHNET — UND HAT EINEN TREIBERFEHLER MITGEBRACHT
+
+Der Eigner hat auf meinen Widerspruch hin **Option 4 plus Option 2**
+entschieden: vollständige PCI-Nummern mit Klarnamen, kein igc/igb-Treiber,
+und die Ablehnung so nützlich wie möglich machen. Der Abschnitt „4.
+igc/igb — ABBESTELLT" weiter oben beschreibt die Entscheidung. Dieser
+Nachtrag beschreibt, was beim **Nachrechnen** herauskam — und das ist der
+eigentliche Ertrag.
+
+## Die Regel dieser Runde, in einem Satz
+
+> Eine Tabelle, die niemand nachgerechnet hat, ist schlimmer als keine.
+> Sie schickt den Menschen vor dem Brett in die falsche Richtung, und er
+> glaubt ihr, weil sie so bestimmt klingt.
+
+Deshalb hat jede Behauptung dieser Runde jetzt ein Werkzeug, das sie
+widerlegen kann. Zwei sind neu.
+
+## 1. `tools/blech/chipnames.py` — 14 falsche Namen gefunden
+
+Das Werkzeug liest **jede** Namensbehauptung aus `kernel/chipname.fi`
+und hält sie gegen `pci.ids` (Fassung 2026-09-02) und gegen die
+Nummernlisten aus dem Linux-Quelltext.
+
+**Erster Lauf: 40 richtig, 14 FALSCH, 6 ohne Beleg.** Die vier
+schlimmsten:
+
+| Nummer | stand da | ist wirklich | Quelle |
+|---|---|---|---|
+| `8086:02F0` u. 6 weitere | „Wi-Fi 6 AX201" | **CNVi-Anschluss**, nicht das Funkmodul | pci.ids |
+| `1D6A:80B1` | „AQC107" | **AQC100S** | pci.ids + `aq_common.h` |
+| `1969:E0B1` | „Killer E2600" | **Killer E2500** | pci.ids |
+| `8086:125E` | „I225/I226" | **I221-V** | `igc_hw.h` |
+
+Der CNVi-Fehler ist der gefährlichste. `8086:02F0` ist der
+**Anschluss in der Brücke**, nicht die Karte: daran kann ein AX201, ein
+AX203 oder ein Wireless-AC 9560 hängen, und *welches*, steht erst in der
+Subsystemnummer — die dieser Kern nicht liest. Wer nach „AX201" sucht,
+lädt die falsche Firmware. Jetzt sagt die Zeile, was wirklich bekannt
+ist: `CNVi-WLAN (Modul erst am Subsystem lesbar)`.
+
+**Der Prüfer prüft in beide Richtungen.** Mit den vier alten Namen wieder
+eingesetzt fällt er mit Rückgabe 1 und nennt genau diese Zeilen; mit der
+heilen Datei gibt er 0. Eine Lücke hat die Negativkontrolle dabei selbst
+gezeigt: Nummern, die `pci.ids` nicht kennt, konnten beliebig heißen —
+`8086:125E` ließ sich ungestraft „I226-V" nennen. Sie werden jetzt gegen
+den **Linux**-Namen gehalten. Nach der Reparatur:
+
+    Behauptungen im Quelltext : 181
+    von pci.ids BESTAETIGT    : 173
+    nur aus Linux belegt [L]  :   8
+    igc-Nummern fehlend       :   0 von 16
+    igb-Nummern fehlend       :   0 von 32
+    I219-Nummern fehlend      :   0 von 53
+
+Ein echter **Quellenkonflikt** bleibt und steht namentlich im Quelltext:
+`8086:550B`. `pci.ids` trägt dort wortwörtlich denselben Text wie für
+`550A` ein („Ethernet Connection (18) I219-LM") — für ein LM/V-Paar kann
+das nicht stimmen. Linux sagt `I219_V18`. **Hier gilt Linux**, weil an
+der LM/V-Unterscheidung im Treiber echtes Verhalten hängt (Management-
+Engine) und diese Zeilen von Intel selbst kommen.
+
+Nebenbei fand die Umstellung einen Fehler in `chipname.has_name`: sie
+**druckte**, statt nur zu antworten. Die Namensfunktionen tragen jetzt
+einen Schalter `say` — eine Nummernliste, zwei Verwendungen.
+
+## 2. `tools/blech/r8125regs.py` — ein echter Treiberfehler
+
+Für `VAR_8125` gibt es **keinen** Testlauf, der etwas widerlegen könnte:
+QEMU 7.2 hat kein Modell des Chips. Es gibt nur eine Prüfmöglichkeit —
+den Quelltext Zeile für Zeile gegen den Treiber halten, der auf echter
+Hardware läuft. Das hat sich sofort gelohnt:
+
+    r8169.fi, tx_kick:            w8(state, u, R_TPPOLL25, 64)
+    Linux, rtl8169_doorbell:      RTL_W16(tp, TxPoll_8125, BIT(0))
+
+Die **Adresse** war richtig aus Linux übernommen (0x90), **Breite und
+Wert** aber vom alten Chip stehen geblieben (8 Bit, NPQ = Bit 6 = 0x40).
+
+**Was das auf echtem Blech geheißen hätte:** Der Chip läuft an, die
+Verbindung steht, der Empfang funktioniert — und es verlässt **kein
+einziges Paket** die Karte, weil der Sendeanstoß nie ankommt. Kein
+Absturz, keine Meldung, nur ein halb totes Gerät. Die unangenehmste
+Sorte Fehler.
+
+Und er ist ein Musterbeispiel für die Entscheidung des Eigners: Er
+konnte hier **nicht** auffallen, weil dieser Zweig in QEMU nicht laufen
+kann. Gefunden hat ihn erst der zeilenweise Abgleich — also genau das
+Verfahren, das ungemessener Code *immer* braucht und **das bei 800 Zeilen
+igc niemand durchhält.**
+
+Der Prüfer vergleicht jetzt dauerhaft Adresse **und** Zugriffsbreite
+**und** Wert:
+
+    R_INTCFG0_25   0x34    INT_CFG0_8125     0x34    ok
+    R_IMR25        0x38    IntrMask_8125     0x38    ok
+    R_ISR25        0x3c    IntrStatus_8125   0x3c    ok
+    R_TPPOLL25     0x90    TxPoll_8125       0x90    ok
+    R_RSSCTRL25    0x4500  RSS_CTRL_8125     0x4500  ok
+    R_QNUMCTRL25   0x4800  Q_NUM_CTRL_8125   0x4800  ok
+    tx_kick  R_TPPOLL25  16 Bit  Wert 1   ok
+
+**Eine Stelle bleibt ausdrücklich offen** und steht so im Werkzeug:
+Wir schreiben `INT_CFG0` (0x34) Bit 0 = 1. Linux *upstream* definiert
+`INT_CFG0_ENABLE_8125` als `BIT(0)`, **benutzt es aber nirgends** und
+schreibt dort sogar `0x00`. Unser Wert stammt aus Realteks eigenem
+r8125-Treiber. Ohne echte Karte ist nicht zu entscheiden, wer recht hat.
+**Wenn eine RTL8125 später keine Unterbrechungen liefert, ist das die
+erste Stelle zum Nachsehen.**
+
+## 3. Wieviel vom Realtek-Treiber ist gemessen — die ehrliche Zahl
+
+`kernel/r8169.fi`: **1413 Zeilen, davon 851 Code** (ohne Kommentar und
+Leerzeile). Aufgeteilt nach Spielart:
+
+| Spielart | eigene Blöcke | eigene Zeilen | Stand |
+|---|---|---|---|
+| `VAR_CP` (RTL8139C+) | 5 | 43 | **in QEMU gemessen**, Oktett für Oktett |
+| `VAR_8169` (8168/8169/8111/8101) | 2 | 6 | aus dem Datenblatt |
+| `VAR_8125` (8125/8126) | 7 | 42 | aus Linux, **nicht messbar** |
+| gemeinsam | — | **≈ 760** | über `VAR_CP` gemessen |
+
+**Was das heißt, ohne Beschönigung:**
+
+* **RTL8168/8169:** Nur **6 Zeilen** in 2 Blöcken sind spielartspezifisch
+  (MDIO-Zugriff über PHYAR statt über den 8139-internen PHY). Alles
+  andere — Ringe, Deskriptorfelder, Rücksetzen, Empfangsfilter,
+  Adressweg über IDR0/IDR4, C+-Betriebsart, Sende- und Empfangsweg — ist
+  über `VAR_CP` **wirklich gemessen**. Das ist der Grund, warum ich diesen
+  Zweig für belastbar halte. Er ist trotzdem **nie an einem echten 8168
+  gelaufen**; was fehlt, ist die PHY-Initialisierung, die echte
+  8168-Revisionen erwarten.
+* **RTL8125:** **42 Zeilen in 7 Blöcken sind zu 100 % ungemessen.**
+  Konkret sind es **sieben Registerzugriffe und ein MAC-OCP-Wort**:
+  Deskriptorformat-Umschaltung (OCP 0xEB58 Bit 0), `RSS_CTRL`,
+  `Q_NUM_CTRL`, `INT_CFG0`, `IMR` (32 Bit), `ISR` (32 Bit, zweimal),
+  Sendeanstoß. Sechs Adressen sind gegen Linux geprüft, eine Breite und
+  ein Wert waren **falsch** (siehe oben), eine Stelle bleibt offen. Die
+  übrigen ~760 Zeilen, die der 8125 mitbenutzt, sind gemessen.
+
+Also: **beim 8125 ist der Rahmen gemessen und der chipspezifische Kern
+nicht.** Das ist besser als „alles ungemessen", und es ist deutlich
+schlechter als „gemessen". Genau so steht es auch auf der seriellen
+Leitung — `(8125/8126, Quelle, NICHT gemessen)`.
+
+## 4. Ein Fund beim Bauen: `probe` war blind für WLAN
+
+Beim Schreiben der Bestandsliste ist aufgefallen, dass `netdev.probe`
+nur über **Klasse 02 Unterklasse 00** (Ethernet) läuft. Eine WLAN-Karte
+ist **Klasse 02 Unterklasse 80** — sie kam in *keiner* Liste vor, weder
+bei den Treibern noch bei den Abgelehnten. Sie wurde schlicht
+**verschwiegen**. In einem Notebook ist sie oft das einzige Netzgerät.
+
+`netdev.print_inventory` läuft deshalb über die **ganze** Klasse 02 und
+fasst nichts an — `probe` bleibt, wie es ist, denn eine Suche, die
+plötzlich WLAN-Karten beansprucht, wäre eine Regression in 54 grünen
+Abschnitten. Gemessen mit `-device rocker`, dem einzigen
+Klasse-02:80-Gerät in QEMU 7.2:
+
+    netdev: bestand 00:03.0 8086:10d3 82574L (1G) -> e1000
+    netdev: bestand 00:04.0 1b36:0006 QEMU -> kein Treiber (kein Ethernet-Port)
+    netdev: bestand 2 geraete, 1 mit treiber, 1 ohne
+
+Und mit gemischten Karten:
+
+    netdev: bestand 00:03.0 10ec:8139 RTL8139 (100 MBit) -> r8169
+    netdev: bestand 00:04.0 1022:2000 PCnet32 -> kein Treiber: other vendor, ...
+    netdev: bestand 00:05.0 15ad:07b0 vmxnet3 -> kein Treiber: other vendor, ...
+    netdev: bestand 3 geraete, 1 mit treiber, 2 ohne
+
+## 5. Was mich zweimal erwischt hat — und die Regel daraus
+
+Ich hatte in dieser Runde **zwei Zeilenanfänge eingedeutscht**:
+`netdev: no driver for` → `netdev: kein Treiber fuer`, und die Gründe
+von `igc silicon, ...` → `igc-Silizium: ...`. Hübscher — und **neun
+grüne Zusagen in drei fremden Testdateien rot**
+(`tools/rtl/run.sh`, `tools/hwnet/run.sh`, `tools/usbimg/run.sh`), ohne
+dass sich am Verhalten das Geringste geändert hätte.
+
+**Die Regel steht jetzt als Kommentar an beiden Zeichenketten:**
+
+> Der Anfang der Zeile bleibt Wort für Wort der von Runde HWNET.
+> Alles Neue hängt **hinten** dran. Wer die Liste für Menschen will,
+> liest `print_inventory`.
+
+Ergebnis — der Name ist da, und die Zusage auch:
+
+    netdev: no driver for 0x10ec:0x8029  other vendor, no driver -- kein
+    Treiber in diesem Kern  [RTL8029 (ne2000)]
+
+Eine dritte Zusage kam dazu: für eine **erfundene** Nummer darf weder ein
+Grund **noch ein Name** behauptet werden. `[unbekannter Hersteller]` ist
+zwar wahr, aber es ist Text hinter `-> none`, und die RTL-Runde verbietet
+das ausdrücklich. Wo nichts bekannt ist, gehört nichts hin.
+
+## 6. BAUPLAN igc — was ein Treiber braucht
+
+**Alle 16 Nummern** stehen bereits in `chipname.intel_igc` (Quelle:
+`drivers/net/ethernet/intel/igc/igc_hw.h`). Ein Treiber müsste in
+`netdev.driver_for` eine Zeile bekommen und `kernel/igc.fi` anlegen.
+Verifiziert gegen `igc_regs.h`:
+
+| Sache | e1000 (gemessen) | igc | Folge |
+|---|---|---|---|
+| Empfangsring | `RDBAL 0x02800` | **`0x0C000 + n*0x40`** | anderer Ort |
+| Sendering | `TDBAL 0x03800` | **`0x0E000 + n*0x40`** | anderer Ort |
+| `RXDCTL`/`TXDCTL` | — | `0x0C028` / `0x0E028` | ENABLE setzen **und zurücklesen** |
+| `SRRCTL` | — | `0x0C00C + n*0x40` | DESCTYPE auf „advanced one buffer" |
+| Unterbrechungen | `ICR 0x00C0`, `IMS 0x00D0` | **`EICR 0x01580`, `EIMS 0x01524`, `EIMC 0x01528`, `GPIE 0x01514`, `IVAR0 0x01700`** | anderer Block |
+| MAC-Adresse | `RAL/RAH 0x05400/0x05404` | **gleich** | übernehmbar |
+| PHY | `MDIC 0x00020` | **gleich** | übernehmbar |
+| Deskriptoren | Legacy, 16 Oktett | **Advanced**: RX lesen `{pkt_addr:u64, hdr_addr:u64}`, zurückschreiben `{info:u32, len_status:u32,…}`; TX `{addr:u64, cmd_type_len:u32, olinfo_status:u32}` mit DTYP=3, DEXT=1 | **komplett neu** |
+
+## 7. BAUPLAN igb — und der Befund, der ihn deutlich billiger macht
+
+**Alle 32 Nummern** stehen in `chipname.intel_igb` (Quelle:
+`drivers/net/ethernet/intel/igb/e1000_hw.h`).
+
+**Wichtige Korrektur an meiner eigenen früheren Aussage:** Ich hatte
+geschrieben, die Warteschlangenregister lägen bei igb wie bei igc auf
+`0x0C000`/`0x0E000`. **Das stimmt nur für igc.** `igb/e1000_regs.h` sagt:
+
+    #define E1000_RDBAL(_n)  ((_n) < 4 ? (0x02800 + ((_n) * 0x100)) : ...)
+    #define E1000_TDBAL(_n)  ((_n) < 4 ? (0x03800 + ((_n) * 0x100)) : ...)
+    #define E1000_SRRCTL(_n) ((_n) < 4 ? (0x0280C + ((_n) * 0x100)) : ...)
+    #define E1000_RXDCTL(_n) ((_n) < 4 ? (0x02828 + ((_n) * 0x100)) : ...)
+
+Für **Warteschlange 0** — und dieser Kern hat nur eine — liegen
+Empfangs- und Senderingregister bei igb **an genau denselben Adressen
+wie beim gemessenen e1000**. Dazu kommen `MDIC` und `RAL/RAH`
+unverändert.
+
+**Daraus folgt die Reihenfolge für später:** igb ist der deutlich
+nähere Verwandte von `e1000.fi`. Es bleiben im Wesentlichen zwei
+Unterschiede statt fünf:
+
+1. **Der Unterbrechungsblock** — wie bei igc `EICR/EIMS/EIMC/GPIE/IVAR0`
+   statt `ICR/IMS`.
+2. **Die Deskriptoren** — Linux' igb setzt
+   `E1000_SRRCTL_DESCTYPE_ADV_ONEBUF`, fährt also advanced. Ob die
+   82576/I210-Reihe daneben noch einen Legacy-Modus beherrscht, habe ich
+   **nicht** belegen können und behaupte es deshalb nicht.
+
+Dazu eine Eigenheit, die einen Menschen sonst Stunden kostet: **I211 hat
+keinen Flash** (iNVM), und **I210 gibt es flashlos** (`157B`/`157C`).
+Wo die MAC-Adresse herkommt, ist dort nicht dasselbe wie beim e1000.
+
+## 8. WAS AN MESSMÖGLICHKEIT FEHLT — der wichtigste Punkt
+
+Für **beide** Familien gilt: In diesem Verzeichnis ist **kein Bit davon
+prüfbar.**
+
+* **QEMU 7.2.22** (die hier installierte Fassung, `qemu-system-x86_64
+  --version`) hat **weder ein `igb`- noch ein `igc`-Modell**.
+  `-device help` listet unter „Network devices" keines von beiden.
+* **`igb` kam mit QEMU 8.0** als Gerät hinzu. Damit wäre der igb-Zweig
+  messbar — Ringe, Deskriptoren, Unterbrechungen, gegen ein Wirtsabbild
+  nachgerechnet, so wie es diese Runde mit EHCI und NVMe gemacht hat.
+* **`igc` hat QEMU bis heute nicht.** Für I225/I226 bleibt nur **echte
+  Hardware**.
+
+**Daraus die zwei Aufträge, die jetzt fertig zugeschnitten sind:**
+
+1. **Eigene Runde „QEMU 8.x bauen".** Voraussetzung für alles Weitere bei
+   igb. In dieser Runde **nicht** gemacht, und das war richtig: die
+   Platte stand auf 97 %, es liefen elf Runden parallel, ein QEMU-Bau
+   hätte sie umgeworfen.
+2. **Danach Runde „igb"** — mit QEMU 8.x als Messgerät, nach dem Bauplan
+   in Abschnitt 7. **igc erst, wenn eine echte I225/I226 auf dem Tisch
+   liegt.** Vorher wäre es genau der Blindflug, den der Eigner zu Recht
+   abbestellt hat.
+
+## 9. Zur Arbeitsweise: diese Aufgabe lief doppelt
+
+Ehrlichkeitshalber und weil es Geld gekostet hat: **Derselbe Auftrag
+wurde in zwei Chats parallel im selben Arbeitsbaum `/root/osum-blech`
+bearbeitet.** Der andere Chat hat um 14:05 den Commit `19d31c8`
+abgesetzt, der meine damals offenen Änderungen mitgenommen hat; beide
+Commits tragen die Nummer „BLECH 20/n".
+
+Inhaltlich ist nichts verloren gegangen — die Bäume waren
+widerspruchsfrei zu vereinigen, und beide Fassungen kamen zur selben
+Entscheidung. Aber: die falschen Chipnamen (`Killer E2600`,
+`AQC107` für `80B1`) stehen noch in der **Commit-Nachricht** von
+`19d31c8`; im Quelltext sind sie korrigiert. Für die Zukunft: **ein
+Arbeitsbaum, ein Chat.**
