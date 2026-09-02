@@ -1,0 +1,187 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// module/ps2maus-fremd.fi -- GEGENPROBE: EIN MODUL, DAS ETWAS VERLANGT,
+// WAS DER KERN NICHT ANBIETET.
+//
+// Wortgleich mit `module/ps2maus.fi`, mit EINEM Unterschied: es
+// deklariert `k_gibtsnicht` und ruft es. `kernel/ksym.fi` kennt den
+// Namen nicht, also gibt `ksym.such` eine Null zurueck, und
+// `kernel/modul.fi` weist die Datei mit dem Grund `symbol` ab -- BEVOR
+// eine einzige Anweisung daraus gelaufen ist.
+//
+// Das ist der Fall, den ein Lader ohne Namenspruefung still falsch
+// machen wuerde: er schriebe eine Null in die Aufrufstelle, das Modul
+// liefe an, und der Absturz kaeme irgendwann spaeter an einer Stelle,
+// die mit der Ursache nichts zu tun hat.
+
+profile kernel
+
+import ps2m
+import modidx
+
+// ------------------------------------------------- was der Kern anbietet
+//
+// `extern fn` (Firn, Runde 75): eine Deklaration ohne Rumpf. Der Aufruf
+// geht unter dem BLANKEN Namen hinaus und bleibt in der Objektdatei ein
+// undefiniertes Symbol -- genau das, was `kernel/modul.fi` beim Laden
+// gegen `kernel/ksym.fi` bindet.
+extern fn k_abi() -> u64;
+extern fn k_gibtsnicht(x: u64) -> u64;
+extern fn k_bind(state: u64, slot: u64, i: u64, adr: u64) -> u64;
+extern fn k_puts(p: u64);
+extern fn k_dec(v: u64);
+
+// Die Fassung, gegen die dieses Modul gebaut ist. Sie steht AUCH im Kopf
+// der `.omod`-Datei (dort prueft sie der Lader) und AUCH hier (hier
+// prueft sie das Modul selbst).
+const GEBAUT_GEGEN: u64 = 1
+
+// ---------------------------------------------- die Form der Zeiger
+//
+// Je Signatur eine Struktur. Der Uebersetzer nimmt den Funktionswert nur
+// an, wenn der Feldtyp passt -- eine falsche Signatur hier waere ein
+// Sprung mit falschen Registern und faellt damit schon beim Uebersetzen
+// auf, nicht erst in QEMU.
+struct A_3b { f: fn(u64, u64, u64) -> bool }
+struct A_1b { f: fn(u64) -> bool }
+struct A_1v { f: fn(u64) }
+struct A_1u { f: fn(u64) -> u64 }
+struct A_0u { f: fn() -> u64 }
+struct A_2vb { f: fn(u64, bool) }
+struct A_3v { f: fn(u64, u64, u64) }
+struct A_6v { f: fn(u64, u64, u64, u64, u64, bool) }
+
+fn zelle(p: u64) -> u64 {
+    let d: u64 = __mmio_read64(p as *mut u64)
+    if d == 0 {
+        return 0
+    }
+    return __mmio_read64(d as *mut u64)
+}
+
+fn a_3b(g: fn(u64, u64, u64) -> bool) -> u64 {
+    var t: A_3b = A_3b { f: g }
+    return zelle((&t) as u64)
+}
+
+fn a_1b(g: fn(u64) -> bool) -> u64 {
+    var t: A_1b = A_1b { f: g }
+    return zelle((&t) as u64)
+}
+
+fn a_1v(g: fn(u64)) -> u64 {
+    var t: A_1v = A_1v { f: g }
+    return zelle((&t) as u64)
+}
+
+fn a_1u(g: fn(u64) -> u64) -> u64 {
+    var t: A_1u = A_1u { f: g }
+    return zelle((&t) as u64)
+}
+
+fn a_0u(g: fn() -> u64) -> u64 {
+    var t: A_0u = A_0u { f: g }
+    return zelle((&t) as u64)
+}
+
+fn a_2vb(g: fn(u64, bool)) -> u64 {
+    var t: A_2vb = A_2vb { f: g }
+    return zelle((&t) as u64)
+}
+
+fn a_3v(g: fn(u64, u64, u64)) -> u64 {
+    var t: A_3v = A_3v { f: g }
+    return zelle((&t) as u64)
+}
+
+fn a_6v(g: fn(u64, u64, u64, u64, u64, bool)) -> u64 {
+    var t: A_6v = A_6v { f: g }
+    return zelle((&t) as u64)
+}
+
+// ------------------------------------------------------- der Einsprung
+
+#[export_c]
+fn modul_init(state: u64) -> u64 {
+    // Riegel eins: laeuft hier der Kern, gegen den ich gebaut bin?
+    if k_abi() != GEBAUT_GEGEN {
+        var w: [u8; 30] = "ps2maus: falsche Kernfassung \0"
+        k_puts((&w[0]) as u64)
+        k_dec(k_abi())
+        return 1
+    }
+
+    // DIE EINE ZEILE, DIE DEN UNTERSCHIED MACHT.
+    var n: u64 = k_gibtsnicht(0)
+    n = n + eintrag(state, modidx.P_INIT, a_3b(ps2m.init))
+    n = n + eintrag(state, modidx.P_PRESENT, a_1b(ps2m.present))
+    n = n + eintrag(state, modidx.P_IRQ, a_1v(ps2m.irq))
+    n = n + eintrag(state, modidx.P_ID, a_1u(ps2m.id))
+    n = n + eintrag(state, modidx.P_X, a_1u(ps2m.x))
+    n = n + eintrag(state, modidx.P_Y, a_1u(ps2m.y))
+    n = n + eintrag(state, modidx.P_BUTTONS, a_1u(ps2m.buttons))
+    n = n + eintrag(state, modidx.P_WHEEL, a_1u(ps2m.wheel))
+    n = n + eintrag(state, modidx.P_PACKETS, a_1u(ps2m.packets))
+    n = n + eintrag(state, modidx.P_DROPS, a_1u(ps2m.drops))
+    n = n + eintrag(state, modidx.P_MOVES, a_1u(ps2m.moves))
+    n = n + eintrag(state, modidx.P_IRQS, a_1u(ps2m.irqs))
+    n = n + eintrag(state, modidx.P_POLLS, a_1u(ps2m.polls))
+    n = n + eintrag(state, modidx.P_SPURIOUS, a_1u(ps2m.spurious))
+    n = n + eintrag(state, modidx.P_CLICKS, a_1u(ps2m.clicks))
+    n = n + eintrag(state, modidx.P_STATUS, a_0u(ps2m.status))
+    n = n + eintrag(state, modidx.P_RESET, a_1v(ps2m.reset_counters))
+    n = n + eintrag(state, modidx.P_POLL_ONE, a_1b(ps2m.poll_one))
+    n = n + eintrag(state, modidx.P_SET_POLL, a_2vb(ps2m.set_poll))
+    n = n + eintrag(state, modidx.P_POLLING, a_1b(ps2m.polling))
+    n = n + eintrag(state, modidx.P_SET_BOUNDS, a_3v(ps2m.set_bounds))
+    n = n + eintrag(state, modidx.P_SET_POS, a_3v(ps2m.set_pos))
+    n = n + eintrag(state, modidx.P_CHANGED, a_1b(ps2m.changed))
+    n = n + eintrag(state, modidx.P_TAKE_CHANGE, a_1b(ps2m.take_change))
+    n = n + eintrag(state, modidx.P_USB_PACKET, a_6v(ps2m.usb_packet))
+    n = n + eintrag(state, modidx.P_ADOPT, a_3v(ps2m.adopt))
+    n = n + eintrag(state, modidx.P_SELFTEST, a_1u(ps2m.selftest))
+    n = n + eintrag(state, modidx.P_SELFTEST_MAX, a_0u(ps2m.selftest_max))
+
+    var s: [u8; 22] = "ps2maus: eingetragen \0"
+    k_puts((&s[0]) as u64)
+    k_dec(n)
+    var e: [u8; 2] = "\n\0"
+    k_puts((&e[0]) as u64)
+
+    // Ein Modul, das nicht ALLE seine Plaetze eintragen konnte, ist
+    // halb da -- und ein halber Treiber ist schlimmer als keiner. Der
+    // Lader raeumt es dann wieder ab.
+    if n != modidx.P_COUNT {
+        return 2
+    }
+    return 0
+}
+
+fn eintrag(state: u64, i: u64, adr: u64) -> u64 {
+    if adr == 0 {
+        return 0
+    }
+    if k_bind(state, modidx.SLOT_MAUS, i, adr) != 0 {
+        return 0
+    }
+    return 1
+}
+
+// ------------------------------------------------------- der Aussprung
+//
+// Das Zeigegeraet WIRD HIER NICHT ABGESCHALTET. Das ist Absicht und
+// steht so in `docs/RUNDE-MODUL.md`: der 8042 meldet nach `0xF4` weiter,
+// und ihn stillzulegen hiesse, ein Kommando ueber denselben Anschluss zu
+// schicken, an dem die TASTATUR haengt. Was das Entladen leistet, ist,
+// dass der Kern die Adressen dieses Moduls nicht mehr kennt -- der
+// Stummel antwortet danach wieder "kein Zeigegeraet", und die Rahmen
+// sind zurueck. Eine Unterbrechung, die danach noch kommt, laeuft in
+// `ps2m-aus.irq` und findet dort eine Null.
+//
+// Dass das reicht, ist gemessen: `tools/modul/run.sh` Abschnitt 6 bewegt
+// die Maus NACH dem Entladen weiter und prueft, dass der Kern lebt.
+#[export_c]
+fn modul_exit(state: u64) -> u64 {
+    var s: [u8; 19] = "ps2maus: entladen\n\0"
+    k_puts((&s[0]) as u64)
+    return 0
+}
