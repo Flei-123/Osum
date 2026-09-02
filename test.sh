@@ -1216,6 +1216,9 @@ lauf "32. der Vorlagenladen: zehn Erscheinungen, gemessen statt angeschaut (tool
 lauf "33. die weiche Oberflaeche: Schatten, Knoepfe, Fokus, Kontrast (tools/softui/run.sh, Runde SOFTUI)" \
      tools/softui/run.sh softui '^SOFTUI: |^   (OK|--) +(classic|Marken|ctrl_h|Formwoerter|und die Datei|der Schatten|Maske|Ringe|ohne Schatten|die drei|der rote|hover|Fokus|Kontrast|kein Bild|Abschnitt A|[0-9]+ Beanstandungen)'
 
+lauf "34. die Ordnung des Kernbaums: liegt jeder Treiber noch, wo er hingehoert? (tools/struktur/run.sh, Runde STRUKTUR)" \
+     tools/struktur/run.sh struktur '^STRUKTUR: |^  (OK|FAIL) +(kein Treiber|alle [0-9]+ Modulnamen|virtio|e1000|nvme|ahci|xhci|netdev|gfx-aus|GFX_DATEIEN|memmap.py|pfade.sh|GEGENPROBE)'
+
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
 abschnitte_abarbeiten
