@@ -71,6 +71,7 @@ import bootmod
 import ab
 import hwdiag
 import rootsel
+import ehci
 import perm
 
 // RUNDE K14: die VFS-Schicht und die fremden Dateisysteme. `vfs` zieht
@@ -451,6 +452,33 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     Blockgeraet sein. Ohne das Wort `usb` ist das hier EINE
     //     gedruckte Zeile und sonst nichts.
     usb_stage(state)
+
+    // 7e-quater. RUNDE BLECH: DER USB-2.0-REGLER. Hinter `usb_stage`
+    //     und nicht davor: auf einem Chipsatz mit beiden Reglern soll
+    //     der xHCI zuerst greifen, weil er der bessere Weg ist -- der
+    //     EHCI ist der Rueckfall fuer Bretter, die keinen haben. Ohne
+    //     das Wort `ehci` ist das hier eine gedruckte Zeile.
+    ehci.stage(state)
+    if kstate.mode_on(state, kstate.M_EHCITEST) {
+        // Der Stick: drei Bloecke, und ihre Oktettsummen haelt der WIRT
+        // gegen dasselbe Abbild, aus dem QEMU liest. "Der Treiber
+        // meldet Erfolg" ist keine Messung.
+        ehci.selftest(state, 0)
+        ehci.selftest(state, 1)
+        ehci.selftest(state, 64)
+        // Die Tastatur: ein Fenster, in dem der Wirt ueber den Monitor
+        // Tasten schickt. Der Unterbrechungsendpunkt hat keinen eigenen
+        // Vektor (siehe ehci.fi), also wird abgefragt -- und die
+        // Schleife steht HIER und nicht in `ehci.fi`, damit dieser
+        // Treiber den Ablaufplaner nicht einbinden muss.
+        var eh_i: u64 = 0
+        while eh_i < 900 {
+            ehci.poll(state)
+            sched.sleep_ticks(state, 1)
+            eh_i = eh_i + 1
+        }
+        ehci.report(state)
+    }
 
     // 7e-ter. RUNDE TRESOR: DIE GERAETEIDENTITAET (`kernel/hwid.fi`).
     //     Hier und nicht frueher, weil die MAC-Adresse erst existiert,
@@ -3570,6 +3598,19 @@ fn mode_of(state: u64, cmd: u64) {
     var w_noirq2: [u8; 9] = "usbnoirq\0"
     var w_stick: [u8; 9] = "usbstick\0"
     var w_hold: [u8; 8] = "usbhold\0"
+    // RUNDE BLECH: der USB-2.0-Regler. Ein EIGENES Wort und nicht `usb`
+    // -- der EHCI ist ein zweiter Treiber neben xHCI und kein Teil des
+    // Baums von Runde K17; wer beide Regler in einer Maschine hat, soll
+    // sie einzeln einschalten koennen, sonst ist nicht zu sagen, welcher
+    // die Tastatur geliefert hat.
+    var w_ehci: [u8; 5] = "ehci\0"
+    var w_ehcit: [u8; 9] = "ehcitest\0"
+    if find(cmd, (&w_ehci[0]) as u64, 4) != 0 {
+        kstate.mode_add(state, kstate.M_EHCI)
+    }
+    if find(cmd, (&w_ehcit[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_EHCITEST)
+    }
     if find(cmd, (&w_usb[0]) as u64, 3) != 0 {
         kstate.mode_add(state, kstate.M_USB)
     }
@@ -3700,6 +3741,10 @@ fn usb_hold(state: u64) {
         if pollen {
             usb.poll(state)
         }
+        // RUNDE BLECH: derselbe Griff fuer den EHCI. Er hat keinen
+        // eigenen Meldevektor (siehe der Kopf von `ehci.fi`), also ist
+        // Abfragen fuer ihn nicht die Gegenprobe, sondern der Weg.
+        ehci.poll(state)
         sched.sleep_ticks(state, 1)
         i = i + 1
     }

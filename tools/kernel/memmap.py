@@ -184,6 +184,13 @@ BEREICHE = [
     # haelt drei Listen zu acht Eintraegen: Bewerber, Befunde,
     # USB-Regler.
     ("ROOTSEL",    "rootsel.fi", "ROOT_OFF",      "ROOT_MAX"),
+    # RUNDE BLECH: der USB-2.0-Regler (kernel/ehci.fi).  Drei Seiten,
+    # 0x4D000..0x50000 -- genau das Stueck, das diese Karte bis zu
+    # dieser Runde als "frei 0x4D000..0x50000 (12 KiB)" ausgewiesen hat.
+    # Die periodische Rahmenliste MUSS auf 4096 ausgerichtet liegen
+    # (PERIODICLISTBASE hat unten zwoelf Bits, die es nicht gibt); jeder
+    # QH und jeder qTD auf 32.  Beides faellt von der Seitengrenze ab.
+    ("EHCI",       "ehci.fi",   "EHCI_OFF",       "EHCI_MAX"),
 
     # RUNDE FSROBUST: der Zustand des OFS-Journals (kernel/ofsj.fi).
     # Drei Seiten aus dem letzten freien Stueck, 0x7A000..0x80000.
@@ -282,6 +289,20 @@ K17_STUECKE = [
     ("usb.fi",  "BLK_OFF",    0x200),
 ]
 
+# RUNDE BLECH: dieselbe Buchfuehrung fuer den EHCI-Bereich.  Jedes
+# Stueck liegt INNERHALB von ehci.EHCI_OFF; Punkt 5b unten rechnet nach,
+# dass keines herauslaeuft und keines ein anderes ueberschneidet.  Die
+# periodische Rahmenliste ist 1024 * 4 Oktett und MUSS auf 4096
+# ausgerichtet liegen -- das prueft Punkt 5b ausdruecklich.
+EHCI_STUECKE = [
+    ("ehci.fi", "PF_OFF",   0x1000),
+    ("ehci.fi", "SCAL_OFF", 0x200),
+    ("ehci.fi", "QH_OFF",   0x180),
+    ("ehci.fi", "QTD_OFF",  0x400),
+    ("ehci.fi", "DEV_OFF",  0x100),
+    ("ehci.fi", "BUF_OFF",  0xC00),
+]
+
 KEINE_KDATA = {
     ("fb.fi", "FB_OFF"),        # Spiegel von kstate.FB_OFF, s. u.
     ("fb.fi", "FONT_OFF"),      # liegt IN FB_OFF
@@ -347,6 +368,8 @@ KEINE_KDATA = {
 # nicht auseinanderlaufen koennen.
 for _d, _k, _n in K17_STUECKE:
     KEINE_KDATA.add((_d, _k))
+for _d, _k, _n in EHCI_STUECKE:
+    KEINE_KDATA.add((_d, _k))
 
 
 def konstanten(pfad):
@@ -396,8 +419,9 @@ def main():
               "part.fi", "ofs.fi",
               # RUNDE OFS3 -- die Geometriewoerter stehen hier.
               "fs.fi",
-              # RUNDE BLECH -- die Wurzelgeraetewahl nimmt eine Seite.
-              "rootsel.fi"):
+              # RUNDE BLECH -- die Wurzelgeraetewahl nimmt eine Seite,
+              # der EHCI-Treiber drei.
+              "rootsel.fi", "ehci.fi"):
         # RUNDE ARM: die Maschine hat seit dem Trennschnitt ein eigenes
         # Verzeichnis (`kernel/arch/x86_64/`).  `hv.fi` liegt dort, und
         # diese Schleife hat es vorher schlicht nicht mehr gefunden --
@@ -470,6 +494,42 @@ def main():
         if not (b < f < b + n):
             fehler.append("FONT_OFF 0x%X liegt nicht in FB_OFF 0x%X + 0x%X"
                           % (f, b, n))
+
+    # 5b. RUNDE BLECH: dieselbe Nachrechnung fuer den EHCI-Bereich, und
+    #     zusaetzlich die eine Ausrichtung, an der ein EHCI-Treiber
+    #     stillschweigend falsch laeuft: PERIODICLISTBASE hat unten
+    #     zwoelf Bits, die es nicht gibt.  Eine Rahmenliste, die nicht
+    #     auf 4096 liegt, wird vom Controller an der falschen Stelle
+    #     gelesen -- und das sieht man erst daran, dass die Tastatur
+    #     nichts liefert.
+    if "ehci.fi" in dateien:
+        a0 = wert(dateien["ehci.fi"], "EHCI_OFF")
+        e0 = a0 + wert(dateien["ehci.fi"], "EHCI_MAX")
+        pf = wert(dateien["ehci.fi"], "PF_OFF")
+        if pf % 0x1000 != 0:
+            fehler.append("ehci.PF_OFF 0x%X liegt nicht auf 4096" % pf)
+        eh = []
+        for datei, k, n in EHCI_STUECKE:
+            if datei not in dateien or k not in dateien[datei]:
+                fehler.append("%s:%s fehlt -- die EHCI-Karte ist veraltet"
+                              % (datei, k))
+                continue
+            a = wert(dateien[datei], k)
+            if a < a0 or a + n > e0:
+                fehler.append(
+                    "%s:%s 0x%X..0x%X liegt AUSSERHALB von EHCI 0x%X..0x%X"
+                    % (datei, k, a, a + n, a0, e0))
+            eh.append((a, a + n, datei, k))
+        eh.sort()
+        for i in range(len(eh)):
+            a1, e1, d1, k1 = eh[i]
+            for j in range(i + 1, len(eh)):
+                a2, e2, d2, k2 = eh[j]
+                if a2 >= e1:
+                    break
+                fehler.append(
+                    "KOLLISION IN EHCI: %s:%s 0x%X..0x%X ueberschneidet "
+                    "%s:%s 0x%X..0x%X" % (d1, k1, a1, e1, d2, k2, a2, e2))
 
     # 5. RUNDE K17: die Untergliederung des USB-Bereichs.  Sie ist kein
     #    eigener kdata-Bereich, aber sie kann sich SELBST ueberschneiden
