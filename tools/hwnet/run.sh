@@ -185,13 +185,33 @@ for pair in "virtio-net-pci:virtio-net:1af4:1000" "e1000:e1000:8086:100e"; do
 done
 
 echo "   counter-check: a chip this kernel has NO driver for"
+# ROUND RTL CHANGED THE CHIP IN THIS COUNTER-CHECK, and the reason is that
+# the premise stopped being true, not that the check was inconvenient:
+# HWNET used `rtl8139` here because this kernel had no Realtek driver.
+# It has one now (`kernel/r8169.fi`), so an rtl8139 is answered by name
+# and the check would have proved the opposite of what it says.
+# `ne2k_pci` is 10EC:8029 -- the SAME VENDOR, a device number the table
+# does not carry. That is a strictly stronger counter-check than the old
+# one: it shows the choice is made on the device number and not on the
+# vendor. The measurement, the run and the assertions are unchanged.
 wire_up; bridge_up
-qemu_bg "rtl8139" "osum $BASE $NETARGS nsvc=0 nwait=60" "$TMPD/bus-rtl.txt"
+qemu_bg "ne2k_pci" "osum $BASE $NETARGS nsvc=0 nwait=60" "$TMPD/bus-ne2k.txt"
 qemu_wait
 bridge_down; wire_down
-R="$TMPD/bus-rtl.txt"
-has "$R" "netdev: no driver for 0x10ec:0x8139" \
+R="$TMPD/bus-ne2k.txt"
+# ROUND BLECH: the line now carries the CHIP NAME as well -- but at its
+# END, not at its start.  The opening words stay exactly what round
+# HWNET wrote, because three test files grep for them (this one,
+# tools/rtl/run.sh:268 and tools/usbimg/run.sh:277).  Renaming a line
+# that three green sections depend on, for nothing but nicer wording,
+# is the wrong trade.  Whoever wants the human-readable list reads
+# `netdev.print_inventory`, which round BLECH added for exactly that.
+has "$R" "netdev: no driver for 0x10ec:0x8029" \
     "the unknown card is NAMED WITH ITS NUMBERS -- the sentence a real board needs"
+has "$R" "10ec:8029" \
+    "and its NUMBERS are still there as the proof"
+has "$R" "[RTL8029 (ne2000)]" \
+    "and round BLECH puts the CHIP NAME at the end of the same line"
 has "$R" "nic: no device" "and the kernel says the stack has nothing under it"
 hasnot "$R" "netdev: c0=" "no driver claimed a card it cannot drive"
 
