@@ -521,10 +521,55 @@ Drei Dinge stehen darin, die zusammengehören:
 
 ## DIE ABNAHME
 
-*(Die Zahlen dieses Abschnitts werden beim Abschluss der Runde
-eingetragen — der volle Lauf läuft zum Zeitpunkt dieses Absatzes noch,
-und zwar auf einem Wirt, auf dem die Runde MERGE-5 gleichzeitig ihre
-eigene volle Abnahme fährt.)*
+**Der Wirt war während des ganzen Laufs nicht allein**, und das gehört
+in den Bericht, bevor eine Zahl kommt: die Runde MERGE-5 fuhr auf
+demselben Rechner ihre eigene volle Abnahme, und ab 10:11 kam eine
+dritte dazu (`/root/osum-modul`). Lastmittel zwischen 8 und **19**, bis
+zu drei Läufe gleichzeitig, und die wirtweite Netzsperre
+`/tmp/osum-netz.lock` war über weite Strecken von jemand anderem
+gehalten.
+
+Deshalb dasselbe Verfahren wie in MERGE-3 und MERGE-FINAL: **jeder rote
+Abschnitt wird einzeln nachgemessen**, und erst diese Zahl zählt.
+
+### Die drei roten aus dem vollen Lauf, einzeln nachgemessen
+
+| Abschnitt | voller Lauf (Last 8–19) | einzeln | Urteil |
+|---|---|---|---|
+| `pci` | 97 / 1 — `DMA against PIO … 995, expected ge 1200` | **98 / 0**, `bench: faster=1415 permil` | **Lastphantom.** Die Zusage ist ein Durchsatz*verhältnis* (NVMe-DMA gegen ATA-PIO); unter drei gleichzeitigen Abnahmen bricht es ein. |
+| `async` | 106 / 1 — `Speicher je Auftrag in Oktett: 0, erwartet eq 112` | **108 / 0** | **Lastphantom.** Die 0 heißt „die Zeile kam nicht", nicht „der Wert ist falsch" — der Lauf, der sie druckt, lief in sein Zeitlimit. Zur Sicherheit auch auf `main` gefahren: dort ebenfalls 108 / 0. |
+| `arm` | 47 / 1 — `_F0.amain__kexception is missing` | 47 / 1 | **Gehört nicht dieser Runde.** Derselbe Abschnitt auf `main` (`163984d`), gefahren in `/root/osum-basecheck`: **dieselbe Zahl, derselbe einzelne Fehler.** Diese Runde hat `kernel/arch/aarch64/` nicht angefasst (`git diff main...HEAD` darauf ist leer). |
+
+Der `arm`-Punkt hätte auch anders ausgehen können, und deshalb ist er
+zusätzlich geprüft worden: diese Runde fügt der **Leerlaufaufgabe** eine
+Zeile hinzu (`ehci.poll`), und `tools/arch/order.sh` prüft unter anderem
+`x86-64: idle -> hlt`. Das ist eine andere Sache — geprüft wird dort die
+Maschinenanweisung hinter `machine__idle`, nicht die Aufgabe. Auf
+`blech` einzeln gefahren: **`ORDER: 15 passed, 0 failed`.**
+
+### Die grünen Abschnitte, aus dem laufenden Vergleich
+
+Aus den Abschnittsprotokollen unter `.test-work/` desselben Laufs, alle
+mit 0 gefallenen Zusagen:
+
+```
+boot 20    caps 67    customres 135   display 145   freestanding 41
+gfx 76     guard 55   handle 80       hv 114        k11 85
+k13 99     k14 152    k16 64          k17 158       k18 170
+kernel 176 osum 130   posix 134       smp 59        tiling 68
+unix 107   userland 91                wm 103
+```
+
+Und der neue Abschnitt der Runde: **`BLECH: 52 bestanden, 0 gefallen`**
+(einzeln gefahren, `accel=kvm`, Protokoll
+`/root/blechlogs/BLECH-runner.log`), dazu **`FB: 9 bestanden, 0
+gefallen`** (`/root/blechlogs/FB-sweep.log`).
+
+Alle Protokolle dieser Runde liegen unter `/root/blechlogs/`:
+`ABNAHME-voll.log`, `BLECH-runner.log`, `FB-sweep.log`,
+`PCI-blech-einzeln.log`, `ASYNC-blech-einzeln.log`, `ASYNC-main.log`,
+`ARM-main-vergleich.txt`, `RTL-nachmessung.log`, `HID-nachmessung.log`,
+`USBIMG-bios-uefi.log`, `BAUARTEN.log`, `BUILD-usbimg.log`.
 
 ---
 
