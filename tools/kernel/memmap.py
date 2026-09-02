@@ -74,8 +74,11 @@ BEREICHE = [
     # Befehlsliste, 256 fuer den FIS-Empfang, 128 fuer die Befehlstafel),
     # fallen dabei von der Seitengrenze ab.
     # RUNDE HID: der Zerleger fuer Berichtsbeschreibungen, der
-    # Eingabeweg und HID ueber I2C.  Neun Seiten aus dem Rest, den
-    # `kstate.fi` nach Merge 2 als frei ausweist (0x92000..0xA0000).
+    # Eingabeweg und HID ueber I2C.  Neun Seiten.  RUNDE BLECH-ECHT:
+    # sie lagen auf 0x92000..0x9B000 -- das war frei, als der Zweig
+    # `hid` abzweigte, und gehoert seit Merge 2 der Runde ASYNC
+    # (AIO/ACQ/ASC).  Sie liegen jetzt auf 0xA0000..0xA9000, hinter
+    # der alten Grenze; dafuer ist KDATA_SIZE auf 0xB0000 gewachsen.
     ("HIDREP_FLD", "hidrep.fi", "FLD_OFF",       "MAX_DEV * 0x1000"),
     ("HIDREP_SUM", "hidrep.fi", "SUM_OFF",       "MAX_DEV * SUM_BYTES"),
     ("HIDREP_RAW", "hidrep.fi", "RAW_OFF",       "MAX_DEV * RAW_MAX"),
