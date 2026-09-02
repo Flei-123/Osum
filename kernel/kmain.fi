@@ -70,6 +70,7 @@ import arch.x86_64.guard
 import bootmod
 import ab
 import hwdiag
+import rootsel
 import perm
 
 // RUNDE K14: die VFS-Schicht und die fremden Dateisysteme. `vfs` zieht
@@ -2354,6 +2355,7 @@ fn osum(state: u64) {
         serial.dec(sekt)
         serial.nl()
     }
+    var kein_ata: bool = false
     if bootmod.ready(state) {
         blk.ram_init(state, bootmod.base(state), bootmod.blocks(state))
         serial.puts((&s_mod[0]) as u64)
@@ -2365,13 +2367,39 @@ fn osum(state: u64) {
         if !blk.present(state) {
             serial.puts((&s_no[0]) as u64)
             serial.nl()
-            return
+            kein_ata = true
+        } else {
+            blk.use_ata(state, kutil.root_blocks(state))
         }
-        blk.use_ata(state, kutil.root_blocks(state))
     }
-    var mounted: bool = fs.mount(state)
+    var mounted: bool = false
+    if !kein_ata {
+        mounted = fs.mount(state)
+        if !mounted && !bootmod.ready(state) {
+            mounted = root_from_part(state)
+        }
+    }
+    // RUNDE BLECH: DIE AUTOMATISCHE WURZELWAHL, und sie steht HIER --
+    // hinter dem alten Weg und nicht davor.
+    //
+    // Der Grund ist eine Zahl: alle 54 Abschnitte der Abnahme haengen
+    // ihre Wurzel heute ueber die zwei Zeilen darueber ein (ATA an
+    // 0x1F0, roh oder ueber die Partitionstafel), und jede einzelne
+    // davon ist gruen. Eine Reihenfolge, die NVMe zuerst probiert,
+    // waere in genau den Laeufen eine Aenderung, in denen daneben eine
+    // leere NVMe-Platte steht -- also eine Aenderung an bestehenden
+    // Messungen statt an einem Startproblem.
+    //
+    // Was diese Zeile loest, ist der Fall, in dem der alte Weg NICHTS
+    // findet: ein PC mit NVMe-Riegel oder mit einer SATA-Platte am
+    // AHCI-Controller und ohne irgendetwas an 0x1F0. Bis heute endete
+    // der Start dort mit `osum: no disk`, obwohl der passende Treiber
+    // im selben Abbild liegt. `rootsel.mount_root` geht die Bewerber in
+    // der Reihenfolge NVMe, AHCI, USB, IDE durch, zieht jeden hoch und
+    // NIMMT DEN ERSTEN, DESSEN WURZEL SICH WIRKLICH EINHAENGEN LAESST.
     if !mounted && !bootmod.ready(state) {
-        mounted = root_from_part(state)
+        mounted = rootsel.mount_root(state, hw.on(state, hw.M_NVME),
+            hw.on(state, hw.M_AHCI))
     }
     serial.puts((&s_mount[0]) as u64)
     serial.dec(kutil.yes(mounted))
