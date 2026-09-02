@@ -540,6 +540,7 @@ Abschnitt wird einzeln nachgemessen**, und erst diese Zahl zählt.
 | `async` | 106 / 1 — `Speicher je Auftrag in Oktett: 0, erwartet eq 112` | **108 / 0** | **Lastphantom.** Die 0 heißt „die Zeile kam nicht", nicht „der Wert ist falsch" — der Lauf, der sie druckt, lief in sein Zeitlimit. Zur Sicherheit auch auf `main` gefahren: dort ebenfalls 108 / 0. |
 | `theme` | 1 / 2 — `themetest hat keine brauchbare Zeile fuer gpx geliefert` | **91 / 0** | **Lastphantom**, und wieder derselbe Bauart: „keine brauchbare Zeile" heißt „der Lauf kam nicht so weit", nicht „der Wert ist falsch". |
 | `arm` | 47 / 1 — `_F0.amain__kexception is missing` | 47 / 1 | **Gehört nicht dieser Runde.** Derselbe Abschnitt auf `main` (`163984d`), gefahren in `/root/osum-basecheck`: **dieselbe Zahl, derselbe einzelne Fehler.** Diese Runde hat `kernel/arch/aarch64/` nicht angefasst (`git diff main...HEAD` darauf ist leer). |
+| `umlaut` | 47 / 1 — `ZU ENG kernel/ehci.fi:1319 t: das Literal ist 78 Oktette, der Puffer 26` | **48 / 0** | **ECHT, und der Fehler gehörte dem Prüfer.** Siehe unten. |
 | `netview` | 3 rote Zusagen | — | **Gehört nicht dieser Runde**, und das ist nachlesbar: `docs/RUNDE-MERGE3.md` führt genau diese Zusagen als die EINE offene Regression von `main` auf, wörtlich — `faking: the state icon went missing: falsch 40 von 82` und `9a: both Super+A presses became hotkeys: 1, expected eq 2`. Diese Runde hat `netview.fi` nicht angefasst. |
 
 Der `arm`-Punkt hätte auch anders ausgehen können, und deshalb ist er
@@ -548,6 +549,49 @@ Zeile hinzu (`ehci.poll`), und `tools/arch/order.sh` prüft unter anderem
 `x86-64: idle -> hlt`. Das ist eine andere Sache — geprüft wird dort die
 Maschinenanweisung hinter `machine__idle`, nicht die Aufgabe. Auf
 `blech` einzeln gefahren: **`ORDER: 15 passed, 0 failed`.**
+
+### Der eine echte rote Haken — und er gehörte dem Prüfer
+
+Das ist die einzige rote Zusage dieser Runde, die keine Last und kein
+Erbe war. Sie ist es wert, ausgeschrieben zu werden:
+
+```
+puffer:  5836 Zeichenketten, 1 passen nicht
+    ZU ENG  kernel/ehci.fi:1319  t: das Literal ist 78 Oktette, der Puffer 26
+  FAIL  spalten rc: '2', erwartet '0'
+```
+
+Zeile 1319 ist die Tabelle, die einen HID-Gebrauchscode in einen
+PS/2-Abtastcode übersetzt: **sechsundzwanzig Oktette, keines davon ein
+druckbares Zeichen**, also `"\x1e\x30\x2e…"`. Sie ist 26 Oktette breit,
+und der Kern beweist es selbst — die Messung aus Teil 3 liest daraus
+`23 1e 26 26 18 1c`, also genau die richtigen Codes.
+
+`tools/i18n/spalten.py::oktette` sprang über **jeden** Escape mit
+`i += 2`. Richtig für `\0`, `\n`, `\t` und `\\`; falsch für die
+hexadezimale Form: von `\x1e` wurde `\x` als ein Oktett gezählt und `1`
+und `e` danach als zwei weitere. Sechsundzwanzig davon ergeben 78.
+
+**`kernel/ehci.fi` ist das erste Literal dieses Baums in dieser Form** —
+deshalb ist der Fehler bis heute niemandem aufgefallen.
+
+Behoben: `\x` gefolgt von zwei Hexziffern überspringt vier Zeichen.
+Nachgerechnet an vier Fällen (26 × `\xNN` → 26 statt 78; `"abc\0"` → 4;
+`"Größe\0"` → 8, das UTF-8 zählt weiter mit; `"a\\b\0"` → 4, der
+doppelte Rückstrich bleibt ein Oktett). Der ganze Baum: **5836
+Zeichenketten, 0 passen nicht, rc=0.**
+
+**Und die Gegenprobe ist nicht entschärft.** Dasselbe Feld ein Oktett zu
+klein deklariert (`[u8; 25]`), und der Prüfer wird sofort wieder rot:
+
+```
+ZU ENG  kernel/ehci.fi:1319  t: das Literal ist 26 Oktette, der Puffer 25
+rc = 2
+```
+
+Er zählt jetzt richtig, und er zählt immer noch. Am Kern ändert sich
+dabei nichts: das Abbild ist vor und nach der Reparatur 3 406 500
+Oktett.
 
 ### Die grünen Abschnitte, aus dem laufenden Vergleich
 
@@ -562,10 +606,16 @@ kernel 176 osum 130   posix 134       smp 59        tiling 68
 unix 107   userland 91                wm 103
 ```
 
-Und der neue Abschnitt der Runde: **`BLECH: 52 bestanden, 0 gefallen`**
-(einzeln gefahren, `accel=kvm`, Protokoll
-`/root/blechlogs/BLECH-runner.log`), dazu **`FB: 9 bestanden, 0
-gefallen`** (`/root/blechlogs/FB-sweep.log`).
+Und der neue Abschnitt der Runde, **im vollen Lauf**:
+**`BLECH: 59 bestanden, 0 gefallen`** — dazu **`FB: 9 bestanden, 0
+gefallen`** (`/root/blechlogs/FB-sweep.log`), **`SOFTUI: 25 / 0`**,
+**`AHCI: 62 / 0`**, **`UPDATE: 49 / 0`**, **`PAINT: 36 / 0`**,
+**`icons: 25 / 0`**, **`CORE: 46 / 0`**.
+
+**Wie lange die Netzsperre gekostet hat**, weil es die Zahl erklärt, die
+sonst niemand glaubt: der Abschnitt `tunnel` brauchte **3675 s, davon
+3404 s Warten auf `/tmp/osum-netz.lock`** — 93 % der Zeit hat er auf
+eine andere Runde gewartet.
 
 Alle Protokolle dieser Runde liegen unter `/root/blechlogs/`:
 `ABNAHME-voll.log`, `BLECH-runner.log`, `FB-sweep.log`,
