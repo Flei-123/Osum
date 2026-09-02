@@ -142,7 +142,7 @@ oder `Esc`.
 
 ## 5. Der erste Start
 
-Nach dem Start kommt das Limine-Menü mit **drei Einträgen** und **10
+Nach dem Start kommt das Limine-Menü mit **vier Einträgen** und **10
 Sekunden** Bedenkzeit:
 
 | Eintrag | Was er tut |
@@ -150,6 +150,7 @@ Sekunden** Bedenkzeit:
 | **1 — Hardware-Diagnose (bleibt stehen)** | *Der Eintrag, mit dem man anfängt.* Druckt den Bericht und hält an. Nichts läuft weiter, nichts wird geschrieben, keine Platte wird angefasst. Ablesen oder fotografieren, dann ausschalten |
 | **2 — Diagnose und danach der Schreibtisch** | Derselbe Bericht, danach fährt die Oberfläche hoch. Der Bericht steht dann nur noch auf der seriellen Leitung |
 | **3 — Nur der Schreibtisch (deutsch)** | Ohne Diagnose. Das ist der Vorgabe-Eintrag |
+| **4 — Vektoreinheit prüfen (bleibt stehen)** | Derselbe Bericht wie 1, danach die **Vektorprobe**: vier Prozesse schreiben ein nur zu ihnen passendes Muster in *alle* Vektorregister, geben den Prozessor ab und sehen nach, ob sie ihre eigenen Werte wiederfinden. Dann bleibt der Bildschirm stehen. **Das ist der Eintrag für Abschnitt 5.1** |
 
 **Es wird nichts geschrieben und nichts installiert**, solange man nicht
 selbst `install --ja` eintippt. Der Stick verändert die Festplatte des
@@ -187,6 +188,72 @@ ausführlich in `docs/USBSTICK.md`, Abschnitt 6. Kurz:
   Sie nennt Hersteller und Gerät der Karte, für die ein Treiber fehlt.
 * **Der Kern hängt in keinem dieser Fälle.** Findet er keine Platte und
   keine Karte, sagt er das und läuft weiter.
+
+### 5.1 Die Vektoreinheit prüfen — zum Ausdrucken
+
+**Warum das hier steht und nicht in einem Testprotokoll:** Osum schaltet
+seit Runde AVX die Vektoreinheit für Ring 3 frei (`CR4.OSFXSR`,
+`OSXMMEXCPT`, `OSXSAVE`, `XCR0`) und sichert sie bei jedem
+Aufgabenwechsel mit `XSAVE`. **Der Weg für AVX-512 ist gebaut, aber auf
+keiner Maschine dieses Projekts auslösbar** — der Prüfrechner ist ein
+AMD Zen 1 und hat es nicht, und QEMUs Emulation kennt es nicht. Es gibt
+also genau einen Ort, an dem sich das nachmessen lässt: **ein echter
+Rechner mit AVX-512.** Das sind Intel ab Skylake-SP/Xeon, Ice Lake,
+Tiger Lake, Rocket Lake (Desktop, oft im BIOS abschaltbar) und AMD ab
+Zen 4 (Ryzen 7000 / EPYC 9004).
+
+Ohne diese Freischaltung stirbt `/bin/fetch` auf so einem Rechner mit
+`user fault: … vector=6` — und damit der ganze Update-Weg. Genau das ist
+zweimal gemessen worden, einmal mit und einmal ohne (Runde MERGE-5,
+`docs/RUNDE-MERGE5.md`, Abschnitt 4).
+
+**So wird geprüft:** im Startmenü **Eintrag 4 — „Vektoreinheit prüfen"**
+wählen (mit den Pfeiltasten, dann Enter). Der Rechner druckt die
+Diagnose, dann die Vektorprobe, und bleibt stehen. **Vier Zeilen zählen:**
+
+```
+guard: cr4=0x340620  smep=1  smap=1  cpu=1/1
+fpu: mode=3  cr4=0x340620  xcr0=0xe7  size=2696  lazy=0
+vec: width=3
+vec: bad=0      (viermal, einmal je Prozess)
+vec: clean=1
+```
+
+#### Was gut ist
+
+| Zeile | gut | was sie bedeutet |
+|---|---|---|
+| `fpu: mode=` | **2 oder 3** | 2 = `XSAVE`, 3 = `XSAVEOPT`. Der Zustand wird gesichert |
+| `cr4=` | Bit 9, 10 und 18 gesetzt (in `0x340620` sind sie es) | `OSFXSR`, `OSXMMEXCPT`, `OSXSAVE` — die Freischaltung steht wirklich im Register, zurückgelesen |
+| `xcr0=` | **`0xe7`** | x87+SSE+AVX **und** die drei AVX-512-Anteile (Bits 5, 6, 7). **Das ist die Zahl, auf die es ankommt** |
+| `size=` | **um 2700** (z. B. 2696) | so groß ist der Sicherungsbereich je Aufgabe, wenn AVX-512 dabei ist |
+| `vec: width=` | **3** | die Probe hat wirklich mit `zmm`-Registern gerechnet |
+| `vec: bad=` | **0**, viermal | kein Prozess hat je die Register eines anderen gesehen |
+| `vec: clean=` | **1** | dasselbe noch einmal als eine Zahl |
+
+#### Was es heißt, wenn dort etwas anderes steht
+
+| Befund | Bedeutung | zu tun |
+|---|---|---|
+| `xcr0=0x7`, `size=832`, `vec: width=2` | **Kein Fehler.** Die Maschine hat kein AVX-512 (jeder AMD vor Zen 4, jeder Intel-Desktop nach Rocket Lake, jede VM ohne durchgereichte Merkmale). Osum nimmt AVX, und das ist richtig | nichts. Für die Messung wird eine andere Maschine gebraucht |
+| `xcr0=0x3`, `vec: width=1` | Nur x87 und SSE. Entweder eine sehr alte CPU oder `noavx` steht auf der Kommandozeile | nichts, wenn die CPU alt ist |
+| `fpu: mode=0`, `xcr0=0x0` | **Es ist gar nichts freigeschaltet.** Entweder hat die CPU kein `FXSAVE`/SSE (vor Pentium III), oder auf der Kommandozeile steht `nofpu` | in diesem Zustand kann `/bin/fetch` kein HTTPS. Kommandozeile prüfen |
+| `sup=0xe7`, aber `xcr0=0x7` | Die Maschine **bietet** AVX-512 an, Osum nimmt es **nicht**. Das wäre ein Fehler in `fpu.probe` | **melden**, mit der ganzen `fpu: f1c=…`-Zeile |
+| `vec: bad=` ist **nicht 0**, oder `vec: clean=0` | **Ein echter Fehler**, und der schwerste, den dieser Bericht finden kann: Prozesse sehen die Vektorregister anderer Prozesse. Auf so einer Maschine ist jede Rechnung unzuverlässig | **melden**, mit allen `vec:`-Zeilen. Den Rechner nicht produktiv benutzen |
+| `user fault: … vector=6` | `#UD` — eine Vektoranweisung ohne Freischaltung. Das ist der Zustand **vor** Runde AVX | **melden**. Es bedeutet, dass `fpu.apply` auf dieser Maschine nicht gegriffen hat |
+| Es kommt **gar keine** `fpu:`-Zeile | Der Kern ist vorher stehengeblieben | die letzte Zeile abschreiben, die noch kam |
+
+#### Und die Gegenprobe, damit die Zeilen etwas wert sind
+
+Die vier `vec: bad=0` sind nur dann eine Aussage, wenn sie auch anders
+ausfallen **können**. Auf dem Prüfstand fällt genau das täglich an:
+derselbe Kern mit dem Wort `nofpuswitch` (freigeschaltet, aber nicht
+gesichert) meldet `vec: sum=1000` und `vec: clean=0`
+(`tools/avx/run.sh`, Abschnitt 4). Wer es auf seiner eigenen Maschine
+sehen will, hängt im Menü mit `e` das Wort `nofpuswitch` an die
+Kommandozeile von Eintrag 4 an.
+
+---
 
 ### Wo die serielle Ausgabe herauskommt
 

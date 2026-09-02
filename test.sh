@@ -942,6 +942,25 @@ lauf "14. das Netz: virtio-net, der Stack aus K3, Steckdosen -- gegen den Linux-
 lauf "15. die Schutzbits und das Boot-Modul: SMEP, SMAP, CRC32 (tools/guard/run.sh, Runde K10)" \
      tools/guard/run.sh guard '^GUARD: |^  OK    (das SMAP-Fenster|und alle drei weiteren|nach einem Lauf)'
 
+# ABSCHNITT 15b -- RUNDE AVX, ANGEMELDET VON RUNDE MERGE-5.
+#
+# DIESER ABSCHNITT WAR NIE ANGEMELDET, UND ES GAB AUCH KEINEN LAEUFER.
+# Die Runde AVX hat zehn Commits und einen Bericht von 492 Zeilen, aber
+# `grep -rn vecproc tools/` gab auf ihrem Zweig NULL Treffer -- ihre
+# eigentliche Zusage ("kein Prozess sieht je die Vektorregister eines
+# anderen") stand in keiner Abnahme. Es ist derselbe Merge-Schaden wie
+# bei usbimg, themestore und softui in MERGE-2. MERGE-5 hat den Laeufer
+# geschrieben (tools/avx/run.sh) und meldet ihn hier an.
+#
+# Was er misst: CR0/CR4/XCR0 aus zurueckgelesenen Registern, vier
+# Prozesse mit ihren Mustern in ALLEN Vektorregistern ueber 64 Runden
+# mit zwei sched_yield je Runde, `fork` erbt den lebenden Zustand, CR4
+# auf allen vier Kernen unter -smp 4 -- und drei Gegenproben, die rot
+# werden MUESSEN: `nofpuswitch` (freigeschaltet, nicht gesichert),
+# `nofpu` (der Stand vor der Runde, #UD) und `noavx` (XCR0 auf 0x3).
+lauf "15b. die Vektoreinheit fuer Ring 3: XSAVE im Kontextwechsel (tools/avx/run.sh, Runde AVX)" \
+     tools/avx/run.sh avx '^AVX: |^  OK    (Vektoranweisungen|CR4 traegt|der Kern nimmt|XCR0|der Sicherungsbereich|mit nofpu|Abweichungen|kein Prozess|gemessene Breite|Prozesse mit|fork erbt|der Wechsel|GEGENPROBE|Kerne, die|sechs Kernaufgaben|und die gemessene|diese Maschine|die Maschine bietet)'
+
 lauf "16. man kann darauf arbeiten: ein Editor, zwanzig Werkzeuge, eine Shell mit Sprache (tools/k11/run.sh, Runde K11)" \
      tools/k11/run.sh k11 '^K11: |^  OK    (DIE GESICHERTE|EINE DATEI|AUF DEM BILDSCHIRM|GNU )'
 
@@ -1215,6 +1234,24 @@ lauf "32. der Vorlagenladen: zehn Erscheinungen, gemessen statt angeschaut (tool
 # angemeldet -- der dritte nach usbimg und themestore.
 lauf "33. die weiche Oberflaeche: Schatten, Knoepfe, Fokus, Kontrast (tools/softui/run.sh, Runde SOFTUI)" \
      tools/softui/run.sh softui '^SOFTUI: |^   (OK|--) +(classic|Marken|ctrl_h|Formwoerter|und die Datei|der Schatten|Maske|Ringe|ohne Schatten|die drei|der rote|hover|Fokus|Kontrast|kein Bild|Abschnitt A|[0-9]+ Beanstandungen)'
+
+# ABSCHNITT 34 -- RUNDE OTA, ANGEMELDET VON RUNDE MERGE-5.
+#
+# Auch dieser Laeufer war nie angemeldet, und er war beim Anmelden ROT:
+# `tools/ota/run.sh` baut `kernel/app/fetch.fi` als Probe mit
+# `FIRNLIB=vendor/firn/lib`, und seit die Runde BETRIEB dort
+# `import libc.dns` hineingeschrieben hat, findet der Uebersetzer die
+# Datei auf diesem Weg nicht mehr. Der Fehler lag da, ohne dass etwas
+# rot geworden waere -- weil ihn nichts fuhr. Die eine Zeile ist
+# berichtigt (der Grund steht dort), und ab jetzt faehrt ihn die
+# Abnahme.
+#
+# Was er misst: das Update ueber HTTPS von einer echten Gegenstelle
+# (Pythons ssl, echtes Zertifikat, echte Kette), das signierte
+# VERZEICHNIS, den Rueckschrittsschutz, dreissig Stromausfaelle mitten
+# im Einspielen und die Wiederaufnahme ueber `Range`.
+lauf "34. das Update ueber das Netz: signiertes VERZEICHNIS, Rueckschritt, Wiederaufnahme (tools/ota/run.sh, Runde OTA)" \
+     tools/ota/run.sh ota '^OTA: |^  OK    (der festgenagelte|kernel/(user|app)/|zwei signierte|Fassung 3|die Zertifikate|jede Signatur|ein VERZEICHNIS|die Gegenstelle|/bin/fetch|das Geraet|die Fassung|Wiederaufnahme|abgelehnt|[0-9]+ von 30|[0-9]+ von 7)'
 
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
