@@ -87,7 +87,15 @@ static mut o_maske: u64 = 0
 static mut o_gw: u64 = 0
 static mut o_server: u64 = 0
 static mut o_lease: u64 = 0
-static mut conf: [u8; 128] = [0 as u8; 128]
+// RUNDE BETRIEB: der Nameserver. DHCP-Option 6 traegt eine LISTE von
+// Adressen zu je vier Oktetten; drei sind mehr als genug, und mehr als
+// vier nimmt der Aufloeser ohnehin nicht (`lib/libc/dns.fi`, MAX_SRV).
+static mut o_dns1: u64 = 0
+static mut o_dns2: u64 = 0
+static mut o_dns3: u64 = 0
+static mut conf: [u8; 320] = [0 as u8; 320]
+static mut rconf: [u8; 640] = [0 as u8; 640]
+static mut alt: [u8; 1024] = [0 as u8; 1024]
 
 fn say(p: u64) {
     ulib.say(p)
@@ -222,6 +230,19 @@ fn lesen(p: u64, n: u64) -> u64 {
                         o_server = g32(p, at + 2)
                     } else if t == 51 && l == 4 {
                         o_lease = g32(p, at + 2)
+                    } else if t == 6 && l >= 4 {
+                        // RUNDE BETRIEB: die Nameserver. `dhcp.fi kennt
+                        // den Nameserver schon` sagte docs/OTA.md -- das
+                        // stimmte fuer das Paket und nicht fuer diesen
+                        // Zerteiler: Option 6 wurde bis hierher
+                        // UEBERSPRUNGEN. Jetzt wird sie gelesen.
+                        o_dns1 = g32(p, at + 2)
+                        if l >= 8 {
+                            o_dns2 = g32(p, at + 6)
+                        }
+                        if l >= 12 {
+                            o_dns3 = g32(p, at + 10)
+                        }
                     }
                     at = at + 2 + l
                 }
@@ -286,6 +307,101 @@ fn sag_ip(marke: u64, v: u64) {
     say((&b[0 as usize]) as u64)
 }
 
+
+// RUNDE BETRIEB: /etc/resolv.conf SCHREIBEN.
+//
+// Bis zu dieser Runde schrieb diese Datei NIEMAND -- das war Punkt 2 der
+// Fehlliste in docs/OTA.md, und es war der billigste. Der Vertrag nennt
+// den Nameserver seit RFC 2132 in Option 6; hier wird er auf die Platte
+// gelegt, wo `lib/libc/dns.fi` ihn findet.
+//
+// WAS ERHALTEN BLEIBT: jede Zeile, die mit `fallback` anfaengt. Das ist
+// der sichtbare, abschaltbare Rueckfall aus dem Auftrag -- ein
+// Nameserver, den ein Mensch von Hand eingetragen hat, weil der aus dem
+// Netz nicht taugt. Er darf nicht bei jedem Vertrag verlorengehen, und
+// er steht ABSICHTLICH nicht als `nameserver` da: sonst wuerde er MIT
+// gefragt, statt NUR DANN, wenn niemand sonst antwortet.
+fn resolv_schreiben(p_res: u64, k_ns: u64, k_fb: u64, k_nl: u64) -> u64 {
+    let r: u64 = (&rconf[0 as usize]) as u64
+    let a: u64 = (&alt[0 as usize]) as u64
+    // das Alte lesen, BEVOR es ueberschrieben wird
+    var an: u64 = 0
+    let fo: u64 = ulib.sys(ulib.SYS_OPEN, p_res, 0, 0)
+    if !ulib.bad(fo) {
+        while an < 1023 {
+            let g: u64 = ulib.sys(ulib.SYS_READ, fo, a + an, 1023 - an)
+            if ulib.bad(g) || g == 0 {
+                break
+            }
+            an = an + g
+        }
+        let _c: u64 = ulib.sys(ulib.SYS_CLOSE, fo, 0, 0)
+    }
+    var at: u64 = 0
+    var d: u64 = 0
+    while d < 3 {
+        var v: u64 = o_dns1
+        if d == 1 {
+            v = o_dns2
+        }
+        if d == 2 {
+            v = o_dns3
+        }
+        if v != 0 {
+            at = text_an(r, at, k_ns)
+            at = ip_an(r, at, v)
+            at = text_an(r, at, k_nl)
+        }
+        d = d + 1
+    }
+    // die aufgehobenen `fallback`-Zeilen
+    var i: u64 = 0
+    while i < an {
+        var e: u64 = i
+        while e < an && __mmio_read8((a + e) as *mut u8) != 10 as u8 {
+            e = e + 1
+        }
+        var gleich: bool = true
+        var k: u64 = 0
+        while k < 8 {
+            if i + k >= e {
+                gleich = false
+                break
+            }
+            if __mmio_read8((a + i + k) as *mut u8)
+                != __mmio_read8((k_fb + k) as *mut u8) {
+                gleich = false
+                break
+            }
+            k = k + 1
+        }
+        if gleich && at + (e - i) + 2 < 640 {
+            var m: u64 = i
+            while m < e {
+                __mmio_write8((r + at) as *mut u8,
+                    __mmio_read8((a + m) as *mut u8))
+                at = at + 1
+                m = m + 1
+            }
+            at = text_an(r, at, k_nl)
+        }
+        i = e + 1
+    }
+    if at == 0 {
+        return 0
+    }
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, p_res, 577, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    let w: u64 = ulib.sys(ulib.SYS_WRITE, fd, r, at)
+    let _c2: u64 = ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(w) {
+        return 0
+    }
+    return w
+}
+
 fn u_start(args: u64) -> u64 {
     var s_no: [u8; 26] = "dhcp: kein Netz im Kernel\0"
     var s_ns: [u8; 26] = "dhcp: kein Socket, errno \0"
@@ -312,6 +428,14 @@ fn u_start(args: u64) -> u64 {
     var k_gw: [u8; 9] = "gateway=\0"
     var k_sv: [u8; 8] = "server=\0"
     var k_ls: [u8; 7] = "lease=\0"
+    var k_d1: [u8; 6] = "dns1=\0"
+    var k_d2: [u8; 6] = "dns2=\0"
+    var k_d3: [u8; 6] = "dns3=\0"
+    var k_ns: [u8; 12] = "nameserver \0"
+    var k_fb: [u8; 9] = "fallback\0"
+    var p_res: [u8; 17] = "/etc/resolv.conf\0"
+    var s_rs: [u8; 43] = "dhcp: /etc/resolv.conf geschrieben, dns \0\0\0"
+    var s_rn: [u8; 50] = "dhcp: kein Nameserver im Vertrag (Option 6 fehlt)\0"
     var k_nl: [u8; 2] = "\n\0"
     var p_conf: [u8; 18] = "/etc/network.conf\0"
     var s_ei: [u8; 7] = "einmal\0"
@@ -503,6 +627,21 @@ fn u_start(args: u64) -> u64 {
     at = text_an(c, at, (&k_ls[0 as usize]) as u64)
     at = zahl_an(c, at, o_lease)
     at = text_an(c, at, (&k_nl[0 as usize]) as u64)
+    if o_dns1 != 0 {
+        at = text_an(c, at, (&k_d1[0 as usize]) as u64)
+        at = ip_an(c, at, o_dns1)
+        at = text_an(c, at, (&k_nl[0 as usize]) as u64)
+    }
+    if o_dns2 != 0 {
+        at = text_an(c, at, (&k_d2[0 as usize]) as u64)
+        at = ip_an(c, at, o_dns2)
+        at = text_an(c, at, (&k_nl[0 as usize]) as u64)
+    }
+    if o_dns3 != 0 {
+        at = text_an(c, at, (&k_d3[0 as usize]) as u64)
+        at = ip_an(c, at, o_dns3)
+        at = text_an(c, at, (&k_nl[0 as usize]) as u64)
+    }
     let fdc: u64 = ulib.sys(ulib.SYS_OPEN, (&p_conf[0 as usize]) as u64,
         577, 0)
     if ulib.bad(fdc) {
@@ -514,6 +653,29 @@ fn u_start(args: u64) -> u64 {
     let _cl: u64 = ulib.sys(ulib.SYS_CLOSE, fdc, 0, 0)
     say((&s_cf[0 as usize]) as u64)
     ulib.sayn(gw2)
+    ulib.nl()
+
+    // 4. RUNDE BETRIEB: der Nameserver nach /etc/resolv.conf.
+    if o_dns1 == 0 {
+        say((&s_rn[0 as usize]) as u64)
+        ulib.nl()
+        return 0
+    }
+    let rw: u64 = resolv_schreiben((&p_res[0 as usize]) as u64,
+        (&k_ns[0 as usize]) as u64, (&k_fb[0 as usize]) as u64,
+        (&k_nl[0 as usize]) as u64)
+    if rw == 0 {
+        return 1
+    }
+    say((&s_rs[0 as usize]) as u64)
+    var dz: u64 = 1
+    if o_dns2 != 0 {
+        dz = 2
+    }
+    if o_dns3 != 0 {
+        dz = 3
+    }
+    ulib.sayn(dz)
     ulib.nl()
     return 0
 }
