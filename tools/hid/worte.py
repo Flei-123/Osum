@@ -41,6 +41,23 @@ import sys
 # einfuehrt, das hier auftaucht, muss sich das ueberlegen und es
 # eintragen -- oder das Wort umbenennen, so wie diese Runde es getan hat.
 BEKANNT = {
+    # RUNDE BLECH-ECHT.  Acht Einschluesse, die erst durch das
+    # Zusammenfuehren entstanden sind -- alle acht vom erlaubten
+    # Bauplan "breiter Schalter + Verfeinerung", keiner davon ein
+    # ABSCHALTER in einem fremden Wort:
+    #   disp*   `vmode.fi` sucht diese vier mit `find_word`, also MIT
+    #           Wortgrenze -- der Einschluss kann dort gar nicht
+    #           zuschlagen.  Sie stehen hier trotzdem, weil worte.py
+    #           den ganzen Baum prueft und nicht den Finder kennt.
+    #   ehcitest / nicself / nictab  brauchen den breiten Schalter
+    #           wirklich: wer die Selbstpruefung des Netztreibers
+    #           fahren will, will den Treiber.  Dieselbe Lage wie bei
+    #           `nic`/`nicintx`, das seit Runde K17 hier steht.
+    ("disp", "dispeigen"), ("disp", "dispeigenbad"),
+    ("disp", "dispeigenfrist"),
+    ("dispeigen", "dispeigenbad"), ("dispeigen", "dispeigenfrist"),
+    ("ehci", "ehcitest"),
+    ("nic", "nicself"), ("nic", "nictab"),
     ("bench", "dispbench"), ("bench", "netmonbench"),
     ("disp", "dispback"), ("disp", "dispbad"), ("disp", "dispbench"),
     ("disp", "dispbig"), ("disp", "dispconfirm"), ("disp", "dispedid"),
