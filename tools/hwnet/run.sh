@@ -199,15 +199,19 @@ qemu_bg "ne2k_pci" "osum $BASE $NETARGS nsvc=0 nwait=60" "$TMPD/bus-ne2k.txt"
 qemu_wait
 bridge_down; wire_down
 R="$TMPD/bus-ne2k.txt"
-# ROUND BLECH: the line now carries the CHIP NAME in front of the
-# numbers -- "Realtek (10ec:8029)" instead of "0x10ec:0x8029".  Whoever
-# stands in front of a strange board gets an answer instead of a lookup
-# task.  The NUMBERS stay, and this check still demands them: the name
-# is the extra, the number is the proof.
+# ROUND BLECH: the line now carries the CHIP NAME as well -- but at its
+# END, not at its start.  The opening words stay exactly what round
+# HWNET wrote, because three test files grep for them (this one,
+# tools/rtl/run.sh:268 and tools/usbimg/run.sh:277).  Renaming a line
+# that three green sections depend on, for nothing but nicer wording,
+# is the wrong trade.  Whoever wants the human-readable list reads
+# `netdev.print_inventory`, which round BLECH added for exactly that.
 has "$R" "netdev: kein Treiber fuer" \
-    "the unknown card is NAMED -- the sentence a real board needs"
+    "the unknown card is NAMED WITH ITS NUMBERS -- the sentence a real board needs"
 has "$R" "10ec:8029" \
     "and its NUMBERS are still there as the proof"
+has "$R" "[RTL8029 (ne2000)]" \
+    "and round BLECH puts the CHIP NAME at the end of the same line"
 has "$R" "nic: no device" "and the kernel says the stack has nothing under it"
 hasnot "$R" "netdev: c0=" "no driver claimed a card it cannot drive"
 
