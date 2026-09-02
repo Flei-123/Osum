@@ -669,7 +669,18 @@ NUR=${OSUM_NUR:-}
 
 # Diese Abschnitte teilen sich Namen im Netz des Wirts und bleiben
 # untereinander seriell. Siehe Punkt 2 oben.
-SERIELL_RE='^tools/(net|netmon|netview|tunnel)/'
+# RUNDE RTL hat zwei Laeufer nachgetragen, und beide fehlten aus
+# demselben Grund: der Ausdruck ist auf `tools/net…` verankert, und
+# `tools/hwnet/` faengt mit `tools/hw` an, passt also nie. Gemessen wurde
+# das an einem Abend, an dem `tools/pci/run.sh` (98 Zusagen, sonst gruen)
+# zweimal durchfiel und `tools/net/run.sh` einmal -- beide NUR im
+# parallelen Lauf, beide allein sofort wieder gruen. Ursache: hwnet und
+# rtl legen `ip netns` und `ip link` an, die dem WIRT gehoeren und nicht
+# dem Arbeitsbaum, und liefen dabei ohne die Sperre neben
+# net/netmon/netview. Das ist keine Testabschaltung, sondern das
+# Gegenteil: zwei Abschnitte, die bisher unbemerkt aneinander
+# vorbeigelaufen sind, halten jetzt dieselbe Reihe ein wie die anderen.
+SERIELL_RE='^tools/(net|netmon|netview|tunnel|hwnet|rtl)/'
 # Die Sperre liegt ABSICHTLICH ausserhalb des Arbeitsbaums (/tmp und nicht
 # .test-work): auf diesem Wirt stehen mehrere Arbeitsbaeume desselben
 # Repos nebeneinander, und `ip netns` und `ip link` gehoeren dem WIRT,
@@ -1173,6 +1184,18 @@ lauf "30. Auto-Update: Ed25519, Signaturpflicht, A/B-Boot (tools/update/run.sh, 
 # der Beendigungscode, eine Datei mit SHA-256 auf beiden Seiten, eine
 # Shell an einem Pseudoterminal, zwei Verbindungen gleichzeitig -- und
 # zu jedem davon die Gegenprobe, die es erst zu einer Aussage macht.
+# RUNDE RTL. Der Realtek RTL8168/8169 -- der haeufigste Netzchip auf
+# Consumer-Brettern -- und der PCH-Zweig fuer den Intel I219. Runde HWNET
+# hatte den Realtek geprueft und NICHT gebaut, weil QEMU nur `-device
+# rtl8139` kennt und der 8139 als "nicht derselbe Chip" galt. Der 8139 ab
+# Revision 0x20 hat aber den C+-Modus, und in dem hat er die
+# Deskriptorringe des 8169 -- QEMU emuliert ihn. Damit ist die Ringmechanik
+# messbar, und dieser Abschnitt misst sie: Ping, 256 KiB TCP, DHCP,
+# Ringueberlauf, Rahmen groesser als der Puffer, Verbindung weg und wieder
+# da, und die Treibertabelle gegen neunzehn PCI-Nummern.
+lauf "31. der Chip, den ein echtes Brett hat: Realtek 8168/8169 und der PCH-Zweig fuer I219 (tools/rtl/run.sh, Runde RTL)" \
+     tools/rtl/run.sh rtl '^RTL: |^   [a-z0-9-]+ +[0-9]+|^  OK    (firnc[01]|k.o:|r8169.fi|tools/net/bridge.c|10EC|8086|1AF4|14E4|GEGENPROBE|eine Nummer|und fuer die|die PCI-Durchmusterung|netdev waehlt|die Ethernet-Adresse|die unbekannte Karte|und der Kern sagt|kein Treiber hat|rtl8139:|RINGUEBERLAUF|GROESSER ALS MTU|der C\+-Modus|der Empfangsfilter|der Chip wurde|der Empfangs- und|die Selbstpruefung|und danach redet|vorher:|Kabel|und der Treiber meldet|virtio-net-pci:|e1000:)'
+
 lauf "30. der Fernzugang: SSH-2 gegen den echten OpenSSH-Klienten (tools/sshd/run.sh, Runde SSHD)" \
      tools/sshd/run.sh sshd '^SSHD: |^  OK    (tools/sshd/oracle|[0-9]+ Vergleiche|der Dienst lauscht|es gab noch keinen|sshd nennt|ssh-keyscan|ssh-keygen|und der Schluesseltyp|ssh mit (Schluessel|Passwort)|die Ausgabe|\.\.\.Zeile|und der Server hat es|der Klient sagt|strict kex|auch root|ssh gibt den|der SHA-256|die Shell|es war wirklich|die Sitzung am|die Zeilenenden|und die Rohr-Sitzung|die (erste|zweite) Sitzung|und beide haben|ein (FREMDER|falsches|unbekannter|Klient)|und der Befehl ist nicht|ein Name, den|.svc shutdown.|kein einziger|derselbe (Fingerabdruck|Schluessel)|und hat KEINEN|das Passwort geht|die Uebertragung|Zahl der Starts|angenommene Verbindungen|die groesste Zahl)|^        (SHA-256:|HMAC|mpint|Base64|Ableitung|chacha20|Gegenprobe|Auffuellung|Klartext|name-list|eine LEERE|[0-9]+ Oktette in|[0-9]+ ms fuer|langsamster|sshd running|/sbin/sshd:)'
 
@@ -1252,6 +1275,24 @@ lauf "33. die weiche Oberflaeche: Schatten, Knoepfe, Fokus, Kontrast (tools/soft
 # im Einspielen und die Wiederaufnahme ueber `Range`.
 lauf "34. das Update ueber das Netz: signiertes VERZEICHNIS, Rueckschritt, Wiederaufnahme (tools/ota/run.sh, Runde OTA)" \
      tools/ota/run.sh ota '^OTA: |^  OK    (der festgenagelte|kernel/(user|app)/|zwei signierte|Fassung 3|die Zertifikate|jede Signatur|ein VERZEICHNIS|die Gegenstelle|/bin/fetch|das Geraet|die Fassung|Wiederaufnahme|abgelehnt|[0-9]+ von 30|[0-9]+ von 7)'
+
+# RUNDE BLECH-ECHT: dieser Abschnitt hiess auf dem Zweig `blech` ebenfalls
+# 34 -- dieselbe Nummer, die Runde MERGE-5 gleichzeitig an `ota` vergeben
+# hat. Beide bleiben, der von BLECH wird 35. Die Nummer ist nur eine
+# Ueberschrift; die Reihenfolge macht die Stelle im Skript.
+# ABSCHNITT 35 -- RUNDE BLECH. Osum auf FREMDEM Blech: die Wurzel wird
+# gesucht statt geraten (NVMe, AHCI, USB, IDE -- und der erste, der
+# wirklich traegt, gewinnt), der RAID-Modus eines SATA-Controllers wird
+# beim Namen genannt statt eine leere Plattenliste zu zeigen, EHCI als
+# zweiter USB-Regler neben xHCI (ein Stick, dessen Bloecke der WIRT
+# nachrechnet, und eine Tastatur, deren Abtastcodes gegen den AT-Satz 1
+# gehalten werden), und NVMe mit mehr als einem Namensraum.
+#
+# Die tragende Gegenprobe steht in Abschnitt 3: mit einer IDE-Wurzel
+# darf die neue Suche NULL Mal laufen. Daran haengt die Zusage, dass
+# diese Runde an den 53 Abschnitten darueber nichts aendert.
+lauf "35. Osum auf fremdem Blech: Wurzelsuche, RAID-Meldung, EHCI, NVMe-Namensraeume (tools/blech/run.sh, Runde BLECH)" \
+     tools/blech/run.sh blech '^BLECH: |^  --    (QEMU|Beschleuniger)|^  OK    (der Kern|die Speicherkarte|ein OFS|DER ALTE|DER NEUE|und haengt|und /bin|und die Shell|die LEERE|und die AHCI|eingehaengt|kein einziger|und die Wurzel|ein Controller|und mit SEINEN|und es steht|der SD|und die Reihenfolge|die Firmware|an Anschluss|READ CAPACITY|keine Uebertragung|Block |die Tastatur|sechs Tasten|und es sind|der Endpunkt|Geraet 0|Geraet 1|beide sind|und Block |alle drei|auch der mit|Namensraum |GEGENPROBE|und kein Geraet|derselbe Treiber|q35|die nackte|ein EHCI|ein OHCI|ein UHCI|und bei OHCI)'
 
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.

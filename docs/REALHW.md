@@ -10,6 +10,10 @@ unveraendert; keiner von beiden ist ein Auszug des anderen.
   HTTPS aus Ring 3, der Wurzelzertifikatsspeicher.
 * **Teil B -- Platte.** Welche Platte Osum findet, was die
   Firmware-Einstellung "SATA MODE" aendert, der IDE/PIO-Rueckfallweg.
+* **Teil C -- Netz, zweiter Anlauf (Runde RTL, 30.08.2026).** Der
+  Realtek RTL8168/8169, der Intel I219, und warum Teil A den Realtek zu
+  Unrecht fuer unpruefbar gehalten hat. Teil A bleibt unveraendert
+  stehen; Teil C sagt, welcher seiner Saetze nicht mehr gilt.
 
 ---
 
@@ -518,3 +522,427 @@ folgenden Punkte hat kein Lauf dieser Runde beruehren koennen.
   also auf der echten CPU, aber mit nachgebauten Geraeten. Der
   30.08.2026 ist die erste Gelegenheit, die Punkte aus Abschnitt 5 zu
   pruefen.
+
+---
+
+## TEIL C -- NETZ, ZWEITER ANLAUF
+
+Runde RTL, 30.08.2026. Zweig `rtl`, abgezweigt von `mergeline2`
+(a919787). Der ausfuehrliche Bericht steht in `docs/ROUNDRTL.md`; hier
+steht nur, was sich fuer *"Osum auf einem gewoehnlichen PC"* geaendert
+hat.
+
+### C.0 WELCHER SATZ AUS TEIL A NICHT MEHR GILT
+
+Teil A schreibt unter der Ueberschrift *"RTL8168/8169 -- geprueft und
+NICHT gebaut, mit Begruendung"*:
+
+> QEMU hat `-device rtl8139`, und das ist NICHT derselbe Chip. […] Ein
+> Treiber fuer den 8139 wuerde ueber den 8168 **nichts** beweisen.
+
+Der Schluss war falsch, und zwar aus einem Grund, den Teil A nicht
+gesehen hat: der RTL8139 hat **ab PCI-Revision 0x20** einen zweiten
+Betriebszustand, den **C+-Modus**, und in dem hat er Deskriptorringe --
+dieselben, die der 8169 hat, mit demselben 16-Oktett-Deskriptor,
+demselben OWN-Bit, demselben EOR-Bit. Der RTL8169 *ist* der
+herausgeloeste C+-Teil des 8139C+; Linux' Treiber dafuer hiess
+`8139cp.c`, bevor `r8169.c` daraus wurde.
+
+QEMU emuliert diesen Zustand (`currCPlusTxDesc`, `currCPlusRxDesc`,
+`cplus_enabled` im Binaerprogramm von qemu-system-x86_64 7.2). Damit ist
+die Ringmechanik hier messbar, ohne ein Brett.
+
+**Der Rest von Teil A gilt weiter, insbesondere sein Massstab:** ein
+Treiber ohne eine einzige Messung ist eine Behauptung. Deshalb steht
+unten Zeile fuer Zeile, was gemessen ist und was aus dem Datenblatt
+kommt.
+
+### C.1 DIE TABELLE, fortgeschrieben
+
+| Klasse | Vor Runde RTL | Nach Runde RTL | Fehlt weiter |
+|---|---|---|---|
+| **Netz, Realtek** | nichts. `netdev: no driver for 0x10ec:0x8168` | `kernel/r8169.fi`: RTL8169/8168/8111/8101 **und** RTL8139C+. In QEMU gemessen: 20/20 Pings, 262144 Oktett TCP mit **6224 KiB/s**, 0 Pruefsummenfehler, 0 Wiederholungen, 0 Rahmen ausser der Reihe | die PHY-Firmwaretabellen der ueber vierzig 8168-Ausfuehrungen; MDIO auf 8168DP/EP; MSI |
+| **Netz, Intel PCH** | nichts. I219 stand in `e1000.fi` als *"bewusst nicht in der Liste"* | der PCH-Zweig in `kernel/e1000.fi`: I217/I218/I219 (dreizehn Geraetenummern). **Datenweg geteilt mit dem gemessenen e1000**, Aufsetzweg aus dem Datenblatt | `e1000_flush_desc_rings` (der Haenger auf Skylake+), PHY-Firmware, K1/LTR |
+| **Netz, Intel 2,5G** | nichts | **erkannt, kein Treiber**: `-> none  igc silicon, advanced descriptors`, mit PCI-Nummer | der ganze igc-Treiber (~700 Zeilen, eigenes Deskriptorformat) |
+| **Netz, unbekannt** | Nummer genannt | Nummer genannt **und Grund**, wenn der Kern den Chip kennt (igc, igb, WLAN, RTL8139 ohne C+, anderer Hersteller) | -- |
+| Netz, virtio / Intel 8254x | siehe Teil A | unveraendert | -- |
+| **WLAN** | nichts | nichts. Aber AX200/AX201/AX210 werden in der Tabelle **beim Namen genannt** (`wifi, needs 802.11 + fw`) statt stillschweigend uebergangen | ALLES |
+
+### C.2 WAS AUF DEM DRAHT GEMESSEN WURDE
+
+`bash tools/rtl/run.sh`, QEMU 7.2.22 unter TCG (ohne KVM), derselbe
+Draht und dieselbe Methodik wie Teil A: `tools/net/bridge.c`, veth-Paar,
+Netzraum mit dem Linux-Kern darin. **67 Zusagen, 0 gefallen.**
+
+| | rtl8139 (C+) | virtio-net-pci | e1000 |
+|---|---|---|---|
+| Ping, 20 Anfragen | **20 beantwortet** | (Teil A: 20) | (Teil A: 20) |
+| Umlaufzeit, Mittel | 5,181 ms | (Teil A: 5,75 ms) | (Teil A: 5,15 ms) |
+| TCP hinein | 262144 Oktett | 262144 Oktett | 262144 Oktett |
+| **Durchsatz** | **6224 KiB/s** | 6242 KiB/s | 3278 KiB/s |
+| Rahmen empfangen | 185 | 188 | 186 |
+| Unterbrechungen | 23 | 33 | 19 |
+| Pruefsummenfehler | 0 | 0 | 0 |
+| Wiederholungen | 0 | 0 | 0 |
+| Ausser der Reihe | 0 | -- | -- |
+| Verworfen (Ring voll) | 0 | 0 | 0 |
+| DHCP von busybox udhcpd | Adresse bezogen | (Teil A) | (Teil A) |
+
+Die Zahlen fuer virtio und e1000 stammen aus DEMSELBEN Lauf und liegen
+etwas anders als in Teil A, weil dieser Server mehrere Runden
+gleichzeitig faehrt. Die Spalten sind untereinander vergleichbar, weil
+sie nacheinander im selben Lauf entstanden sind.
+
+Zusaetzlich gemessen, weil ein Ping es nie ausloest:
+
+| Fall | Ergebnis |
+|---|---|
+| Sendering absichtlich ueberfuellt | 127 von 128 Plaetzen belegt, die 9 weiteren Versuche **alle** abgewiesen und gezaehlt |
+| Rahmen von 2049 Oktett (> Puffer) | abgewiesen, fasst den Ring nicht an |
+| Kabel gezogen (`set_link off`) | 100 % Verlust |
+| Kabel wieder dran | 0 % Verlust, **ohne Neustart**, `link=1` |
+| Rahmen, die der Chip als fehlerhaft meldete | 0 |
+
+### C.3 DER FEHLER, DEN DIE MESSUNG GEFUNDEN HAT
+
+Mit **32** Ringplaetzen -- der Zahl, die `e1000.fi` benutzt -- lieferte
+der Treiber 64 KiB TCP mit 6589 KiB/s, aber 256 KiB nur mit
+**286 KiB/s** und 41 Abschnitten ausser der Reihe. Kein Zaehler des
+Treibers und keiner des Stapels zeigte einen Fehler; nur der Durchsatz.
+
+Die Ursache ist ein Unterschied zwischen den **emulierten Chips**:
+findet QEMUs e1000 keinen freien Deskriptor, *legt er den Rahmen
+beiseite* (`flush_queue_timer`, in Teil A als Aergernis beschrieben);
+QEMUs rtl8139 im C+-Modus **wirft ihn weg**. **Ein echter RTL8168
+verhaelt sich wie der rtl8139**, nicht wie QEMUs e1000. Also wurde der
+Ring auf **128** Plaetze vergroessert (Linux' r8169 nimmt 256), was
+520 KiB kostet: **286 -> 6224 KiB/s**, 0 ausser der Reihe.
+
+Fuer echtes Blech heisst das: **ein Netztreiber fuer diesen Kern braucht
+mehr als 32 Empfangsdeskriptoren**, sobald die Gegenstelle ein
+64-KiB-Fenster benutzt. `e1000.fi` hat weiterhin 32 und kommt in QEMU
+damit durch, weil QEMU nachsichtig ist. Auf einem echten 8254x waere das
+derselbe Verlust. Das ist ein offener Punkt fuer `e1000.fi`.
+
+### C.4 WAS AUF ECHTER HARDWARE TROTZDEM SCHIEFGEHEN KANN
+
+Ehrlich aufgezaehlt; kein Lauf dieser Runde hat einen dieser Punkte
+beruehren koennen. Ausfuehrlich in `docs/ROUNDRTL.md` Abschnitt 7.
+
+**Realtek 8168/8169**
+
+1. **Die PHY-Firmware.** Es gibt ueber vierzig Ausfuehrungen des 8168,
+   und Linux bringt fuer die meisten eine eigene Tabelle von
+   PHY-Registerschreibvorgaengen mit. Dieser Treiber laedt **keine** und
+   verlaesst sich darauf, dass die Karte selbst aushandelt -- was die
+   meisten tun und manche nicht. **Der wahrscheinlichste Ausfallgrund.**
+2. **MDIO auf 8168DP/EP** braucht einen anderen Weg als PHYAR 0x60.
+   Dort bliebe die Verbindungsanzeige leer; der Datenweg liefe trotzdem.
+3. **Der Sendeanstoss auf 0x38** (beim 8139C+ ist es 0xD9) ist nie
+   ausgefuehrt worden. Steht er falsch, sendet die Karte nichts, und man
+   sieht es an `tx_f` > 0 bei `rx_f` = 0.
+4. **Kein MSI/MSI-X**, der Pin durch den I/O-APIC. Ohne AML-Interpreter
+   kommt die Leitungsnummer aus dem Konfigurationsraum; auf manchen
+   Brettern ist sie falsch. Der Stapel dreht dann Leerlaufrunden statt
+   zu stehen -- aber er wird langsam.
+
+**Intel I219 -- hier liegt die Grenze, und sie ist scharf**
+
+Der **Datenweg** ist derselbe Quelltext, den der 82540EM in QEMU
+zwanzigtausend Rahmen lang ausfuehrt. **Nicht gemessen ist der ganze
+Aufsetzweg**, und der ist beim I219 gerade der schwierige Teil, weil sein
+PHY nicht am MAC haengt, sondern an einem Bus, den sich der MAC mit der
+Verwaltungsfirmware (Intel ME/CSME) teilt:
+
+5. Die Semaphore (`EXTCNF_CTRL` Bit 5), `MDIC`, das Abschalten von ULP
+   (`FEXTNVM7` Bit 5) -- alles gebaut, **nie ausgefuehrt**.
+6. Die Adresse: auf der PCH-Linie gibt es **kein EEPROM an EERD**. Der
+   Treiber liest RAL/RAH **vor** dem Ruecksetzen und schreibt sie danach
+   zurueck. Aus dem Datenblatt.
+7. **BEWUSST NICHT GEBAUT: `e1000_flush_desc_rings`.** Auf Skylake und
+   spaeter kann ein Ruecksetzen den Chip *haengen lassen*, wenn die
+   Verwaltungsfirmware gerade Verkehr hat. Der Kunstgriff dagegen
+   schickt einen Blindrahmen los; das ohne echtes Brett zu schreiben
+   waere nicht verantwortbar. **Das ist der wahrscheinlichste Weg, auf
+   dem ein I219-Laptop mit Osum haengenbleibt.**
+8. Haelt die Firmware den PHY (SMBus-Zustand), antwortet MDIC gar nicht.
+   Der Treiber merkt das (`phy=0xFFFFFFFF`) und kommt dann nicht hoch,
+   statt sich aufzuhaengen. Das ist gebaut.
+
+**Beide**
+
+9. Die Schranken sind Zaehlschleifen und keine Uhren (`SPIN_LIMIT` =
+   2 Millionen, wie in `nvme.fi`, `e1000.fi`, `ahci.fi`). Auf blankem
+   Blech laufen sie um Groessenordnungen schneller.
+10. Hoechstens zwei Karten, kein Hotplug, keine geteilten Vektoren.
+
+### C.5 WAS DIE SERIELLE LEITUNG AUF EINEM BRETT SAGEN WIRD
+
+Das ist der praktische Ertrag der Runde. Ein Brett, das nicht ins Netz
+kommt, sagt jetzt eines von diesen drei Dingen:
+
+    netdev: c0=r8169 bdf=0x18          <- es gibt einen Treiber
+    netdev: c0=i219 bdf=0xfa
+    netdev: no driver for 0x8086:0x125b  igc silicon, advanced descriptors
+    netdev: no driver for 0x14e4:0x1686  other vendor, no driver
+    netdev: no driver for 0x1234:0x5678  <- unbekannt, ohne erfundenen Grund
+
+Und mit dem Wort `nictab` auf der Kommandozeile laesst sich die
+Treibertabelle **ohne die Karte** gegen eine eingebaute Nummernliste
+fahren -- das ist der einzige Weg, die Wahl fuer einen I219 oder einen
+RTL8168 zu pruefen, ohne einen zu besitzen.
+
+---
+
+# TEIL D — DER STAND NACH RUNDE BLECH (02.09.2026)
+
+*Zweig `blech`, abgezweigt von `main` (`163984d`). Diese Tabelle ersetzt
+für die genannten Zeilen die Tabelle in Teil A: die dort steht, ist die
+vom 28.08.2026.*
+
+**Die ehrlichste Seite des Projekts, und deshalb die wichtigste Regel
+für sie: „geht" heißt hier IN `main` UND GEMESSEN.** Es gibt in diesem
+Repository Treiber, die gebaut und grün sind und trotzdem auf keinem
+Rechner laufen, weil ihr Zweig nicht gemerged ist. Die bekommen eine
+eigene Spalte und nicht ein Häkchen.
+
+## DIE TABELLE
+
+| Klasse | Geht (in `main`, gemessen) | Gebaut & grün, aber NICHT in `main` | Geht nicht |
+|---|---|---|---|
+| **Netz, kabelgebunden** | virtio-net (`1AF4:1000/1041`, nur virtuell); Intel 8254x/82574 — **genau** `8086:100E, 100F, 1015, 1026, 1028, 10D3` (`e1000.fi::supports`) | **Realtek RTL8169/8168/8111/8101 + RTL8139C+** (`kernel/r8169.fi`, Zweig `rtl`, 1239 Z., *tools/rtl/run.sh: 67/0*); **Intel I217/I218/I219** (PCH-Zweig in `e1000.fi`, derselbe Zweig) | Intel I210/I211/**I225/I226** (igb/igc); Broadcom; Aquantia; Marvell |
+| **WLAN** | nichts | nichts | **alles** — 802.11-MAC, Firmwareladen, WPA2/3, Regulatorik |
+| **Platte, NVMe** | `nvme.fi`, DMA, Warteschlangen, MSI-X; **seit BLECH: mehrere Namensräume** — Liste über CNS 0x02, Größe und Blockformat je Namensraum, Lesen je Namensraum (*gemessen: 3 Namensräume, NSID 1/2/7, Block 0 je Oktett für Oktett gegen das Wirtsabbild*) | — | Einen anderen Namensraum als 1 als **Wurzel** einhängen; Fehlerbehandlung bei fehlerhaftem Medium; Namensraumverwaltung (anlegen/löschen) |
+| **Platte, SATA/AHCI** | `ahci.fi` (`01:06:01`), Port-Register, Kommandolisten, FIS | — | **RAID-Modus** (`01:04`) — wird seit BLECH **benannt** (s. u.), aber nicht gelesen |
+| **Platte, IDE/ATA** | ATA-PIO auf 0x1F0, Meister und Sklave | — | LBA48 (Grenze bleibt **128 GiB**) |
+| **Platte, USB** | Stick über **xHCI**, BOT + SCSI, als `blk.DEV_USB` | Stick über **EHCI** — gelesen und Oktett für Oktett geprüft, aber **noch kein `blk`-Gerät** (`DEV_EHCI` fehlt) | eMMC/SD (`08:05`) — seit BLECH benannt; SCSI/SAS — benannt |
+| **Wurzelwahl beim Start** | **seit BLECH gebaut**: `rootsel.fi` sucht NVMe → AHCI → USB → IDE und nimmt den ersten, dessen Wurzel sich wirklich einhängen lässt; die Entscheidung steht im Startbericht | — | Wurzel auf einer FAT- oder ext4-Partition; Wurzel über Netz |
+| **USB-Hostcontroller** | **xHCI** (`0C:03:30`); **seit BLECH: EHCI** (`0C:03:20`) — Firmwareübergabe, periodische *und* asynchrone Liste, Aufzählung, HID-Boot-Tastatur, Massenspeicher | — | **UHCI/OHCI** (`0C:03:00/10`) — seit BLECH wenigstens **benannt**; **Split-Übertragungen** (USB-1.1-Gerät am EHCI ohne Begleitregler); Hubs in der Tiefe; isochron |
+| **Eingabe, PS/2** | `kbd.fi` (0x60, IRQ 1), `ps2m.fi` | — | — |
+| **Eingabe, USB-HID** | Tastatur und Maus über **xHCI** im Boot-Protokoll; **seit BLECH: Tastatur über EHCI** (*gemessen: 6 Tasten, Abtastcodes `23 1e 26 26 18 1c` gegen den AT-Satz 1*) | **HID-Berichtsbeschreibungen** (`hidrep.fi`, 1032 Z.), **I²C-HID + Präzisions-Touchpad** (`i2chid.fi`, 795 Z.), Zweig `hid`, *tools/hid/run.sh: 57/0* | Maus über EHCI (Klasse erkannt, kein Endpunkt bedient) |
+| **Grafik** | **ein** Weg: der lineare Rahmenpuffer der Firmware — UEFI-GOP über Limine / Multiboot-Bit 12, ersatzweise Bochs `0x1CE/0x1CF`. **Seit BLECH nachgerechnet** über 7 Karten und 2 Auflösungen (s. u.) | — | **kein GPU-Treiber** (bleibt so); kein KMS; kein zweiter Bildschirm; **umschaltbare Grafik: keine Meldung**; Cirrus und VMware-SVGA liefern in QEMU **gar keinen** Rahmenpuffer |
+| **ACPI/Strom** | RSDP/RSDT/XSDT, MADT, FADT; C-/P-Zustände; Akku | — | **kein AML-Interpreter** → kein `_PRT`, kein `_CRS`, keine Thermalzonen, kein Deckelschalter, kein S3 |
+| **Ton** | AC'97 (Zweig `media1`) | — | Intel HDA |
+| **TPM** | nichts | nichts | TPM 2.0 (TIS/CRB) |
+
+---
+
+## WAS BLECH AN DIESER TABELLE GEÄNDERT HAT — mit den Messungen
+
+### 1. Die Wurzel wird gesucht statt geraten
+
+Vorher entschied die Kommandozeile. `kmain.fi::osum_stage` rief
+`blk.use_ata`, und `root_from_part` rief `part.scan(state, blk.DEV_ATA)`
+— beide nannten dasselbe Gerät beim Namen.
+
+Dieselbe Maschine, ein NVMe-Riegel mit einem OFS darauf und nichts an
+0x1F0, zwei Kerne:
+
+```
+main   (163984d):  osum: no drive          <- und dann nichts mehr
+blech            :  rootsel: versuch nvme
+                    rootsel: nvme -- WURZEL, Bloecke=8192  first=0
+                    osum: mount=1   /bin: sh ls cat echo   sh exit=0
+```
+
+Ein Bewerber, der nur DA ist, gewinnt nicht: leere NVMe-Platte neben
+einer AHCI-Platte mit System →
+`rootsel: nvme -- keine Wurzel darauf` / `rootsel: ahci -- WURZEL`.
+
+Und der alte Weg bleibt der erste: mit einer IDE-Wurzel läuft die neue
+Suche **null Mal** (gezählt).
+
+### 2. Der RAID-Modus wird beim Namen genannt
+
+Das ist der häufigste Grund, aus dem ein Notebook mit Osum nicht
+startet — und es ist **kein fehlender Treiber**. Gemessen mit
+`-device megasas` (Klasse 01:04, genau was Intel RST hinstellt):
+
+```
+rootsel: 1000:0060 steht im RAID-Modus (01:04)
+rootsel: im BIOS "SATA Mode" von RAID/RST auf AHCI stellen, dann neu
+rootsel: 1b36:0007 ist ein SD/eMMC-Regler -- kein Treiber
+rootsel: reihenfolge: nvme > ahci > ide
+```
+
+Ein RST-Treiber müsste undokumentierte Metadaten lesen. Der Umschalter
+im BIOS sind zwei Klicks.
+
+### 3. EHCI
+
+```
+ehci: bdf=0x20  caplen=32  hcc=0x6880  ports=6  legacy=0x68  handoff=1
+ehci: msc blocks=2048  bsize=512
+ehci: selftest lba=0  ok=1  sum=16054338  first=100    <- Wirt: 16054338 / 100
+ehci: codes 23 1e 26 26 18 1c                          <- h a l l o Eingabe
+```
+
+`handoff=1` heißt: das BIOS-Besitzbit ist gefallen (EHCI-Spezifikation
+5.1). Auf echtem Blech ist das die häufigste Ursache dafür, dass USB
+„manchmal" geht.
+
+### 4. Der Rahmenpuffer, nachgerechnet
+
+Geprüft wird `pitch >= width*bpp/8`, `cols == width/8`,
+`rows == height/16`, `phys != 0`. **9 bestanden, 0 gefallen.**
+`std`, `qxl`, `bochs-display`, `VGA`, `virtio-vga` liefern
+800x600/32/3200; `fbbig` liefert 1024x768/32/4096. **Cirrus und
+VMware-SVGA liefern gar keinen Rahmenpuffer** (sie haben die
+Bochs-Erweiterung nicht; ihr VBE läuft über INT 10h im realen Modus).
+`-vga none`: der Kern sagt `fb=KEINER` und läuft weiter.
+
+---
+
+## WAS AUF EINEM ECHTEN BRETT ALS NÄCHSTES SCHIEFGEHT
+
+Fortgeschrieben aus Teil A, in der Reihenfolge der Wahrscheinlichkeit:
+
+1. **Die Netzkarte ist ein Realtek 8168 oder ein I219.** Der Treiber
+   dafür ist gebaut und grün — **aber er ist nicht in `main`.** Bis der
+   Zweig `rtl` gemerged ist, sagt die serielle Ausgabe weiterhin
+   `netdev: no driver for 0x10ec:0x8168`.
+2. **Die eingebaute Tastatur hängt an I²C-HID.** Dasselbe: gebaut und
+   grün auf Zweig `hid`, nicht in `main`.
+3. **Der SATA-Controller steht im RAID-Modus.** Seit BLECH sagt der Kern
+   es und sagt auch, was zu tun ist. Zwei Klicks im BIOS.
+4. **Die Netzkarte ist ein I225/I226.** Kein Treiber, und diese Runde hat
+   ihn bewusst nicht blind gebaut (siehe `docs/RUNDE-BLECH.md`, „was noch
+   fehlt"): QEMU 7.2 kennt weder `igb` noch `igc`, er wäre auf diesem
+   Rechner zu keinem Zeitpunkt messbar gewesen.
+5. **Das Interrupt-Routing.** Unverändert: ohne AML-Interpreter wird das
+   Interrupt-Line-Register geglaubt.
+6. **Secure Boot.** Limine ohne Signatur startet nicht. Im UEFI
+   abschalten.
+7. **Umschaltbare Grafik.** Auf die integrierte stellen — der Kern sagt
+   dazu (noch) nichts Verständliches.
+
+---
+
+# TEIL E — WAS DER NACHTRAG ZU BLECH GEÄNDERT HAT (02.09.2026)
+
+Der Eigner hat den igb/igc-Treiber abbestellt und stattdessen bestellt:
+**Nummern ja, Treiber nein — und die Ablehnung so nützlich wie möglich.**
+Für dieses Dokument heißt das: Die Spalte „Geht nicht" sagt jetzt bei
+jeder Zeile **welcher Chip** und **warum**, statt zu schweigen.
+
+## E.1 Was auf der seriellen Leitung steht, wenn nichts geht
+
+Vorher war die einzige Auskunft eine Nummer. Jetzt gibt es **drei
+Zeilenarten**, und sie haben verschiedene Aufgaben:
+
+```
+netdev: no driver for 0x10ec:0x8029  other vendor, no driver -- kein
+  Treiber in diesem Kern  [RTL8029 (ne2000)]
+```
+> Der **Vertrag**. Der Anfang ist seit Runde HWNET unverändert, weil
+> drei Testdateien darauf prüfen. Grund und Klarname hängen hinten dran.
+
+```
+netdev: bestand 00:03.0 8086:10d3 82574L (1G) -> e1000
+netdev: bestand 00:04.0 1b36:0006 QEMU -> kein Treiber (kein Ethernet-Port)
+netdev: bestand 2 geraete, 1 mit treiber, 1 ohne
+```
+> **Die Liste für Menschen** (`netdev.print_inventory`, neu). Sie läuft
+> über die **ganze** PCI-Klasse 02 — also auch über die WLAN-Karte.
+
+```
+netdev: tab 0x8086:0x125c rev=0x0 -> none  igc silicon, advanced
+  descriptors -- eigener Treiber noetig, e1000 passt NICHT  [I226-V (2,5G)]
+```
+> **Die Tabelle ohne Chip** (`nictab`). Für I225/I226/I210/I211 ist das
+> der **einzig mögliche** Beweis, weil QEMU 7.2 keinen davon hat.
+
+## E.2 Ein Loch, das bis hierher niemand gesehen hat: WLAN war unsichtbar
+
+`netdev.probe` läuft nur über **Klasse 02 Unterklasse 00** (Ethernet).
+Eine WLAN-Karte ist **02:80**. Sie tauchte deshalb in *keiner* Liste auf
+— weder bei den Treibern noch bei den Abgelehnten. **In einem Notebook
+ist sie oft das einzige Netzgerät.** Wer dort ein leeres `netdev:` sah,
+musste glauben, der Rechner habe gar keine Netzkarte.
+
+`print_inventory` schließt das. Gemessen mit `-device rocker` (dem
+einzigen Klasse-02:80-Gerät in QEMU 7.2) — der Zweig ist also **wirklich
+gefahren**, nicht nur gelesen.
+
+**Nicht behoben und ausdrücklich so gewollt:** `probe` selbst bleibt auf
+Ethernet beschränkt. Eine Suche, die plötzlich WLAN-Karten beansprucht,
+wäre eine Regression in 54 grünen Abschnitten — und einen
+802.11-Treiber gibt es hier nicht und wird es so bald nicht geben.
+
+## E.3 Die Tabelle „Netz", fortgeschrieben
+
+| Chip | Stand | Was der Kern sagt |
+|---|---|---|
+| Intel 8254x / 82574 (`100E, 100F, 1015, 1026, 1028, 10D3`) | **gefahren, gemessen** | `-> e1000`, mit Modellnamen (`82540EM (1G)`, `82574L (1G)`) |
+| Intel I217/I218/I219 — **20 von 53** Nummern | **gefahren** (PCH-Zweig in `e1000.fi`) | `-> i219`, mit `I219-LM (1G)` / `I219-V (1G)` |
+| Intel I219 — die **übrigen 33** (Tiger Lake … Arrow Lake) | **erkannt, nicht gefahren** | `I219, but this PCH step is not released` |
+| Realtek RTL8169/8168/8111/8101 | **gefahren**, Rahmen gemessen | `-> r8169 [RTL8111/8168/8411] (8169/8168, Datenblatt)` |
+| Realtek RTL8139C+ (Rev ≥ 0x20) | **gefahren, in QEMU gemessen** | `(8139C+, gemessen)` |
+| Realtek RTL8125/8126, Killer E3000 | **gefahren, chipspezifischer Teil ungemessen** | `(8125/8126, Quelle, NICHT gemessen)` |
+| Intel I225/I226 — **alle 16** Nummern | erkannt, **kein Treiber** | `igc silicon, advanced descriptors …` + Klarname |
+| Intel I210/I211/I350/82575/82576/82580 — **alle 32** | erkannt, **kein Treiber** | `igb silicon, other queue set …` + Klarname |
+| Broadcom, Aquantia, Qualcomm/Killer, Marvell, MediaTek, DEC, AMD, VMware | erkannt, **kein Treiber** | `other vendor, no driver …` + Klarname |
+| WLAN (Intel, Realtek, Broadcom, Atheros, MediaTek) | erkannt, **kein Treiber, wird es nicht geben** | `wifi, needs 802.11 + fw …` + Klarname |
+
+**181 PCI-Nummern** stehen in `kernel/chipname.fi`, **173 davon von
+`pci.ids` bestätigt**, 8 nur aus dem Linux-Quelltext belegt, **0 fehlend**
+in den drei Intel-Familien.
+
+## E.4 Zwei Werkzeuge, die diese Tabelle widerlegen können
+
+Ohne sie wäre die Tabelle oben eine Behauptung.
+
+* **`tools/blech/chipnames.py`** — hält jeden Namen gegen `pci.ids` und
+  den Linux-Quelltext. **Erster Lauf: 14 Namen falsch**, darunter sieben
+  CNVi-Anschlüsse, die als „AX201" ausgegeben wurden (an `8086:02F0`
+  kann ein AX201, ein AX203 **oder** ein Wireless-AC 9560 hängen — welches,
+  steht erst in der Subsystemnummer).
+* **`tools/blech/r8125regs.py`** — hält den RTL8125-Zweig gegen Linux'
+  `r8169_main.c`. **Erster Lauf: der Sendeanstoß falsch** (siehe E.5).
+
+Beide sind seit diesem Nachtrag in `tools/blech/run.sh` **angemeldet**
+(Abschnitt 10) und laufen bei jeder Abnahme mit.
+
+## E.5 Der Fehler, den nur der Abgleich finden konnte
+
+    r8169.fi, tx_kick:        w8 (state, u, R_TPPOLL25, 64)
+    Linux, rtl8169_doorbell:  RTL_W16(tp, TxPoll_8125, BIT(0))
+
+Adresse richtig (0x90), **Breite und Wert vom alten Chip** stehen
+geblieben. **Auf einer echten RTL8125:** Chip läuft an, Verbindung steht,
+Empfang geht — **und kein einziges Paket verlässt die Karte.** Kein
+Absturz, keine Meldung.
+
+Das ist der Grund, warum an dieser Stelle jetzt ein Werkzeug steht: In
+QEMU 7.2 **kann** dieser Zweig nicht laufen, also kann kein Test ihn
+widerlegen. Der einzige Ersatz ist der zeilenweise Abgleich gegen den
+Treiber, der auf echter Hardware läuft.
+
+**Eine Stelle bleibt offen:** Wir schreiben `INT_CFG0` (0x34) Bit 0 = 1.
+Linux *upstream* definiert das Bit, benutzt es nie und schreibt dort
+`0x00`; unser Wert stammt aus Realteks eigenem Treiber. **Wenn eine
+RTL8125 auf echtem Blech keine Unterbrechungen liefert, ist das die erste
+Stelle zum Nachsehen.**
+
+## E.6 Was auf einem echten Brett als Nächstes schiefgeht — ergänzt
+
+Die Liste aus Teil D gilt weiter. Neu bzw. präzisiert:
+
+8. **Die Netzkarte ist ein I225/I226 (sehr häufig auf Boards ab 2021).**
+   Kein Treiber, und das bleibt vorerst so. Der Kern sagt jetzt aber
+   Modell, Nummer und Grund — und `docs/RUNDE-BLECH.md` enthält den
+   fertigen Bauplan. **Voraussetzung für einen Treiber: eine echte Karte.**
+   QEMU hat bis heute kein `igc`-Modell.
+9. **Die Netzkarte ist ein I210/I211 (häufig auf Server- und
+   NAS-Boards).** Ebenfalls kein Treiber — aber **billiger nachzurüsten
+   als igc**: Für Warteschlange 0 liegen Empfangs- und Senderingregister
+   bei igb an **denselben Adressen wie beim gemessenen e1000**
+   (`RDBAL 0x02800`, `TDBAL 0x03800`), ebenso `MDIC` und `RAL/RAH`. Es
+   bleiben zwei Unterschiede: der Unterbrechungsblock
+   (`EICR/EIMS/EIMC/GPIE/IVAR0`) und die Advanced-Deskriptoren.
+   **Voraussetzung: QEMU 8.x** — dort gibt es ein `igb`-Gerät, und damit
+   wäre der Zweig messbar statt geraten.
+10. **Der Laptop hat nur WLAN.** Der Kern nennt jetzt die Karte
+    (`print_inventory`), sagt aber ehrlich, dass es dafür keinen Treiber
+    gibt und keinen geben wird. Für Netz braucht es einen
+    USB-Ethernet-Adapter — und auch der ist **noch nicht** gebaut.
