@@ -229,7 +229,22 @@ const S_RINGN: u64 = 0xF0
 // viele Anschluesse bedient, wie er Anschluesse hat, und QEMU sechs
 // hinstellt -- vier ist die Zahl, die `usb.fi` seit K17 fuehrt, und
 // zwei Tabellen mit verschiedenen Grenzen waeren eine Fehlerquelle.
-const DEV_BYTES: u64 = 64
+// 128 UND NICHT 64, und das ist eine Reparatur und keine Reserve.
+//
+// Die erste Fassung dieser Datei hatte 64 -- und schrieb dabei D_VEN
+// (0x40), D_PROD (0x48), D_TOGOUT (0x50) und D_MPSIN (0x58) HINTER das
+// Ende des eigenen Platzes, also in den des naechsten Geraets. Es ist
+// nie aufgefallen, weil in jeder Messung dieser Runde genau EIN Geraet
+// am Regler hing: Platz 1 gab es, aber niemand las ihn. Mit einer
+// Tastatur UND einem Stick an derselben Buchsenleiste haette die
+// Tastatur die Herstellernummer des Sticks getragen und der Stick das
+// Umschaltbit der Tastatur.
+//
+// Gefunden beim Nachlesen, nicht durch einen roten Haken. Die Karte in
+// `tools/kernel/memmap.py` haette es auch nicht gefunden: sie prueft
+// die Bereiche gegeneinander, nicht die Felder INNERHALB eines
+// Bereichs.
+const DEV_BYTES: u64 = 128
 const MAX_DEV: u64 = 4
 
 const D_PORT: u64 = 0x00
@@ -249,6 +264,7 @@ const D_VEN: u64 = 0x40
 const D_PROD: u64 = 0x48
 const D_TOGOUT: u64 = 0x50
 const D_MPSIN: u64 = 0x58
+const D_MPSOUT: u64 = 0x60
 
 const C_NONE: u64 = 0
 const C_KBD: u64 = 1
@@ -862,6 +878,28 @@ fn control(state: u64, addr: u64, mps: u64, rtype: u64, req: u64,
     return await_qtd(state, last)
 }
 
+// DAS UMSCHALTBIT HAENGT AN DER ZAHL DER PAKETE UND NICHT AN DER ZAHL
+// DER UEBERTRAGUNGEN. Das ist die Zeile, die in diesem Treiber
+// versehentlich richtig war und es nicht geblieben waere: 512 Oktett
+// bei 512 Oktett je Paket sind EIN Paket, also einmal umschalten -- und
+// genau diese eine Groesse kommt in der Messung vor. Bei einem Geraet
+// mit 64 Oktett je Paket waeren es ACHT, also achtmal umschalten, und
+// das Bit stuende danach falsch. Der Fehler haette sich in der
+// Nachbildung nie gezeigt und auf einem Brett beim zweiten Block.
+//
+// Eine Uebertragung von null Oktett ist trotzdem EIN Paket (das
+// Null-Paket), deshalb die Eins unten.
+fn toggle_after(len: u64, mps: u64, t: u64) -> u64 {
+    if mps == 0 {
+        return t
+    }
+    var pakete: u64 = (len + mps - 1) / mps
+    if pakete == 0 {
+        pakete = 1
+    }
+    return (t + pakete) % 2
+}
+
 // ------------------------------------------------------- Bulk
 //
 // Ein einzelner qTD auf einem eigenen Kopf. Das Umschaltbit gehoert dem
@@ -1058,6 +1096,7 @@ fn enumerate(state: u64, n: u64) -> bool {
     var epout: u64 = 0
     var epint: u64 = 0
     var mpsin: u64 = 64
+    var mpsout: u64 = 64
     while i + 2 <= total {
         let blen: u64 = d8(dp, i)
         if blen < 2 {
@@ -1082,6 +1121,7 @@ fn enumerate(state: u64, n: u64) -> bool {
                         mpsin = d16(dp, i + 4)
                     } else {
                         epout = ea & 0x0F
+                        mpsout = d16(dp, i + 4)
                     }
                 }
             }
@@ -1096,6 +1136,7 @@ fn enumerate(state: u64, n: u64) -> bool {
     dvs(state, slot, D_EPOUT, epout)
     dvs(state, slot, D_EPINT, epint)
     dvs(state, slot, D_MPSIN, mpsin)
+    dvs(state, slot, D_MPSOUT, mpsout)
     s(state, S_NDEV, slot + 1)
     s(state, S_ENUMS, g(state, S_ENUMS) + 1)
 
@@ -1170,20 +1211,18 @@ fn scsi(state: u64, slot: u64, len: u64, dir_in: bool, cblen: u64,
     s(state, S_IOS, g(state, S_IOS) + 1)
     var tout: u64 = dv(state, slot, D_TOGOUT)
     var tin: u64 = dv(state, slot, D_TOGIN)
-    if bulk(state, addr, epout, 512, 31, state + B_CBW, false, tout)
+    let mpso: u64 = dv(state, slot, D_MPSOUT)
+    if bulk(state, addr, epout, mpso, 31, state + B_CBW, false, tout)
         != 31 {
         s(state, S_MSCERR, g(state, S_MSCERR) + 1)
         return 0xFFFFFFFF
     }
-    tout = 1 - tout
+    tout = toggle_after(31, mpso, tout)
     var got: u64 = 0
     if len > 0 {
         if dir_in {
             got = bulk(state, addr, epin, mpsi, len, buf, true, tin)
-            // Das Umschaltbit haengt an der Zahl der PAKETE, nicht an
-            // der Zahl der Uebertragungen. 512 Oktett bei 512 Oktett
-            // je Paket ist EIN Paket -- also einmal umschalten.
-            tin = 1 - tin
+            tin = toggle_after(len, mpsi, tin)
             if got == 0xFFFFFFFF {
                 s(state, S_MSCERR, g(state, S_MSCERR) + 1)
                 dvs(state, slot, D_TOGOUT, tout)
@@ -1191,13 +1230,13 @@ fn scsi(state: u64, slot: u64, len: u64, dir_in: bool, cblen: u64,
                 return 0xFFFFFFFF
             }
         } else {
-            got = bulk(state, addr, epout, 512, len, buf, false, tout)
-            tout = 1 - tout
+            got = bulk(state, addr, epout, mpso, len, buf, false, tout)
+            tout = toggle_after(len, mpso, tout)
         }
     }
     let csw: u64 = bulk(state, addr, epin, mpsi, 13, state + B_CSW,
         true, tin)
-    tin = 1 - tin
+    tin = toggle_after(13, mpsi, tin)
     dvs(state, slot, D_TOGOUT, tout)
     dvs(state, slot, D_TOGIN, tin)
     if csw != 13 {

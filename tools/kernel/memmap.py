@@ -299,7 +299,7 @@ EHCI_STUECKE = [
     ("ehci.fi", "SCAL_OFF", 0x200),
     ("ehci.fi", "QH_OFF",   0x180),
     ("ehci.fi", "QTD_OFF",  0x400),
-    ("ehci.fi", "DEV_OFF",  0x100),
+    ("ehci.fi", "DEV_OFF",  0x200),
     ("ehci.fi", "BUF_OFF",  0xC00),
 ]
 
