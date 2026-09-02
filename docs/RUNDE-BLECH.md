@@ -1221,3 +1221,53 @@ Entscheidung. Aber: die falschen Chipnamen (`Killer E2600`,
 `AQC107` für `80B1`) stehen noch in der **Commit-Nachricht** von
 `19d31c8`; im Quelltext sind sie korrigiert. Für die Zukunft: **ein
 Arbeitsbaum, ein Chat.**
+
+## 10. DIE ABNAHME DES NACHTRAGS
+
+Vier Abschnitte, alle einzeln gefahren, **keiner rot**:
+
+| Abschnitt | vor dem Nachtrag | nach dem Nachtrag | Δ |
+|---|---|---|---|
+| `tools/blech/run.sh` | 60 / 0 | **72 / 0** | +12 Zusagen (Abschnitte 10 und 11) |
+| `tools/rtl/run.sh` | 67 / 0 → zwischenzeitlich 66 / 1 | **67 / 0** | wiederhergestellt |
+| `tools/hwnet/run.sh` | 54 / 1 | **56 / 0** | +2 Zusagen, rote weg |
+| `tools/usbimg/run.sh` | 46 / 0 → seit dem `rtl`-Merge 45 / 1 | **48 / 0** | +3 Zusagen, Altlast repariert |
+
+Belege: `blechlogs/NACHTRAG-ABNAHME-{blech,rtl,hwnet,usbimg}.log`
+
+### Die zwei roten Haken, die der Nachtrag gefunden hat
+
+**1. `usbimg` war seit dem `rtl`-Merge kaputt, und niemand hatte es
+gesehen.** Die Zusage „eine fremde Karte wird als `no driver for`
+gemeldet" benutzte `-device rtl8139`. QEMUs rtl8139 meldet
+PCI-Revision 0x20, also den C+-Modus — **und genau den fährt
+`r8169.fi` seit Runde RTL**, er ist dort sogar der einzige in QEMU
+gemessene Zweig. Die Zusage verlangte seitdem „kein Treiber" von einer
+Karte, für die es einen gibt.
+
+Die volle Abnahme um 12:59 lief noch **vor** dem Merge und war deshalb
+grün; danach ist `usbimg` bis jetzt nicht mehr einzeln gelaufen. Ein
+Merge kann eine Zusage in einer *anderen* Runde entwerten, ohne dass
+irgendetwas rot wird — das ist die eigentliche Lehre.
+
+Repariert mit `ne2k_pci` (10EC:8029): derselbe Hersteller, aber ein Chip
+ohne Ringe, den dieser Kern nie fahren wird. Dazu **eine Gegenprobe**,
+die denselben rtl8139 als *gefahren* nachweist — ohne sie stünde dort
+wieder eine Zusage, die nur zufällig grün ist.
+
+**2. Die Zeilenanfänge sind dreimal gesprungen.** Siehe Abschnitt 5 und 9.
+
+### Was jetzt bei jeder Abnahme mitläuft
+
+`tools/blech/run.sh` Abschnitt 10 ruft die beiden Nachrechner auf. Ohne
+sie wären beide Werkzeuge nach dieser Runde tote Dateien im Verzeichnis
+— derselbe Fehler, den sich der Bericht bei `fb.sh` schon einmal
+vorgeworfen hat. Ohne Netz **und** ohne zwischengespeicherte Vorlage
+werden sie übersprungen und sagen das; ein Abnahmelauf darf nicht an
+einer fehlenden Internetverbindung scheitern, aber er darf sie auch
+nicht verschweigen.
+
+Abschnitt 11 fährt den Bestand über `-device rocker` (Klasse 02:80) und
+prüft die beiden Vertragszeilen **im eigenen Lauf** — ab jetzt fällt ein
+versehentliches Übersetzen sofort hier auf und nicht erst in drei
+fremden Testdateien.
