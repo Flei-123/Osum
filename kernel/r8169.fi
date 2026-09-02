@@ -30,6 +30,46 @@
 //   VAR_CP    RTL8139C+ (10EC:8139, Revision >= 0x20). Gemessen in QEMU.
 //   VAR_8169  RTL8169/8168/8111/8101 (10EC:8169, 8168, 8161, 8167, 8136).
 //             Aus dem Datenblatt. KEIN Brett hat je geantwortet.
+//   VAR_8125  RTL8125/8125B/8126 (10EC:8125, 8126, 3000) -- 2,5 bzw. 5
+//             Gbit, RUNDE BLECH. Aus Linux' `r8169.c` und dem, was
+//             Realtek oeffentlich beschreibt. WEDER GEMESSEN NOCH
+//             MESSBAR: QEMU 7.2 hat kein Modell dieses Chips, und in
+//             diesem Verzeichnis liegt keine solche Karte. Was daran
+//             steht, steht mit seiner Quelle daneben.
+//
+// WARUM DER 8125 TROTZDEM HIER STEHT UND NICHT IN EINER EIGENEN DATEI:
+// er teilt mit dem 8169 den DESKRIPTOR (16 Oktett, OWN, EOR, FS, LS,
+// 64-Bit-Pufferadresse), die zwei Ringe, das Ruecksetzen, den
+// Empfangsfilter, den Adressweg ueber IDR0/IDR4 und die
+// C+-Betriebsart. Das sind die achtzig Prozent, in denen die Fehler
+// sitzen -- und die sind ueber VAR_CP in QEMU GEMESSEN. Was der 8125
+// anders macht, sind SECHS Stellen, und die stehen unten einzeln.
+//
+// DIE SECHS UNTERSCHIEDE, jeder mit seiner Quelle:
+//
+//   1. IMR und ISR sind 32 Bit breit und liegen auf 0x38 und 0x3C
+//      statt 16 Bit auf 0x3C und 0x3E.
+//      (Linux r8169.c: `IntrMask_8125 = 0x38, IntrStatus_8125 = 0x3c`)
+//   2. Der Sendeanstoss liegt auf 0x90 statt auf 0x38.
+//      (Linux r8169.c: `TxPoll_8125 = 0x90`)
+//   3. Der Unterbrechungsblock muss ueber INT_CFG0 (0x34) Bit 0 erst
+//      eingeschaltet werden.
+//      (Linux r8169.c: `INT_CFG0_8125 = 0x34`, `INT_CFG0_ENABLE_8125`)
+//   4. Der Chip startet im NEUEN Deskriptorformat (32 Oktett). Es wird
+//      ueber das MAC-OCP-Wort 0xEB58, Bit 0, auf das ALTE (16 Oktett)
+//      zurueckgestellt -- ohne das liest er die Ringe falsch.
+//      (Linux r8169.c, `rtl_hw_start_8125_common`:
+//       `r8168_mac_ocp_modify(tp, 0xeb58, 0x0001, 0x0000)`)
+//   5. RSS und die Mehrfach-Warteschlangen muessen aus: RSS_CTRL
+//      (0x4500) und Q_NUM_CTRL (0x4800) auf null.
+//      (Linux r8169.c: `RSS_CTRL_8125 0x4500`, `Q_NUM_CTRL_8125 0x4800`)
+//   6. Der PHY haengt hinter OCP, nicht hinter dem einfachen MDIO auf
+//      0x60. Dieser Treiber geht den OCP-Weg NICHT -- er liest die
+//      Verbindung nur aus PHYstatus (0x6C) und laesst den Chip selbst
+//      aushandeln. Das ist eine BEWUSSTE Luecke und keine Vergessenheit:
+//      ein PHY-Weg, den niemand ausprobieren kann, ist schlimmer als
+//      keiner, weil er beim ersten Fehler die Suche in die falsche
+//      Richtung schickt.
 //
 // WAS SICH DIE BEIDEN TEILEN, Register fuer Register -- und das ist der
 // Grund, warum die Messung etwas ueber den 8168 aussagt:
@@ -86,8 +126,9 @@ import arch.arch
 
 export {
     MAX_UNITS, VENDOR_REALTEK, supports, variant_of, needs_cplus_rev,
+    is_8125,
     RING_SLOTS, BUFSZ,
-    VAR_NONE, VAR_CP, VAR_8169,
+    VAR_NONE, VAR_CP, VAR_8169, VAR_8125,
     init_on, present_on, ready_on, up_on, mac_at_on, bdf_on, idx_on,
     rx_take_on, rx_recycle_on, tx_frame_on, tx_room_on, poll_on, irq_on,
     rx_frames_on, tx_frames_on, rx_octets_on, tx_octets_on,
@@ -150,6 +191,7 @@ const SUB_ETHERNET: u64 = 0x00
 const VAR_NONE: u64 = 0
 const VAR_CP: u64 = 1 // RTL8139C+, der in QEMU gemessene
 const VAR_8169: u64 = 2 // RTL8169/8168/8111/8101, aus dem Datenblatt
+const VAR_8125: u64 = 3 // RTL8125/8126, Runde BLECH -- NICHT gemessen
 
 // Ab dieser PCI-Revision hat ein 8139 den C+-Modus. Ein RTL8139A oder
 // 8139B (Revision 0x00 bzw. 0x10) hat ihn NICHT -- er hat vier feste
@@ -182,6 +224,18 @@ const R_TPPOLL39: u64 = 0xD9 // nur 8139C+
 const R_CPCMD: u64 = 0xE0
 const R_RDSAR: u64 = 0xE4
 const R_MTPS: u64 = 0xEC // nur 8169
+
+// ---- nur 8125, alle sechs Stellen aus dem Kopf dieser Datei
+const R_INTCFG0_25: u64 = 0x34 // Unterbrechungsblock einschalten
+const R_IMR25: u64 = 0x38 // 32 Bit
+const R_ISR25: u64 = 0x3C // 32 Bit, wird durch Zurueckschreiben geloescht
+const R_TPPOLL25: u64 = 0x90
+const R_OCPDR: u64 = 0xB0 // MAC-OCP, ein 32-Bit-Fenster
+const R_RSSCTRL25: u64 = 0x4500
+const R_QNUMCTRL25: u64 = 0x4800
+const INTCFG0_EN: u64 = 1
+const OCP_FLAG: u64 = 2147483648 // 0x80000000, "schreiben"
+const OCP_DESCOLD: u64 = 60248 // 0xEB58: Bit 0 aus = altes Deskriptorformat
 
 // CR (0x37), acht Bit.
 const CR_RST: u64 = 16 // 1 << 4
@@ -300,6 +354,9 @@ const SPIN_LIMIT: u64 = 2000000
 //   0x8161  RTL8168 in einer neueren Ausfuehrung
 //   0x8167  RTL8110SC
 //   0x8136  RTL8101E/8102E -- Fast Ethernet, dieselbe C+-Maschinerie
+//   0x8125  RTL8125/8125B -- 2,5 Gbit, Runde BLECH, NICHT gemessen
+//   0x8126  RTL8126       -- 5 Gbit, dieselbe Maschinerie
+//   0x3000  Killer E3100  -- ein 8125 unter anderem Namen
 fn supports(devid: u64) -> bool {
     if devid == 0x8139 { return true }
     if devid == 0x8169 { return true }
@@ -307,11 +364,22 @@ fn supports(devid: u64) -> bool {
     if devid == 0x8161 { return true }
     if devid == 0x8167 { return true }
     if devid == 0x8136 { return true }
+    if devid == 0x8125 { return true }
+    if devid == 0x8126 { return true }
+    if devid == 0x3000 { return true }
+    return false
+}
+
+fn is_8125(devid: u64) -> bool {
+    if devid == 0x8125 { return true }
+    if devid == 0x8126 { return true }
+    if devid == 0x3000 { return true }
     return false
 }
 
 fn variant_of(devid: u64) -> u64 {
     if devid == 0x8139 { return VAR_CP }
+    if is_8125(devid) { return VAR_8125 }
     if supports(devid) { return VAR_8169 }
     return VAR_NONE
 }
@@ -759,6 +827,32 @@ fn init_on(state: u64, u: u64, use_msix: bool, armed: bool,
     }
     w16(state, u, R_CPCMD, cp & 0xFFFF)
 
+    // ============================================ NUR 8125, RUNDE BLECH
+    //
+    // Drei Schreibvorgaenge, ohne die dieser Chip die Ringe entweder gar
+    // nicht liest oder falsch liest. Alle drei stehen mit ihrer Quelle
+    // im Kopf dieser Datei; KEINER von ihnen ist gemessen, weil QEMU 7.2
+    // kein Modell dieses Chips hat.
+    if var_of(state, u) == VAR_8125 {
+        // (a) DAS DESKRIPTORFORMAT. Der 8125 startet im NEUEN Format mit
+        //     32 Oktett je Deskriptor. Bit 0 im MAC-OCP-Wort 0xEB58
+        //     schaltet auf das ALTE mit 16 Oktett zurueck -- also auf
+        //     genau das, das dieser Treiber baut und das ueber VAR_CP in
+        //     QEMU gemessen ist. Ohne diese Zeile liest der Chip jeden
+        //     zweiten Deskriptor als Puffer.
+        let eb58: u64 = ocp_read(state, u, OCP_DESCOLD)
+        ocp_write(state, u, OCP_DESCOLD, eb58 & 0xFFFE)
+        // (b) EINE WARTESCHLANGE, KEIN RSS. Der Chip kann den Empfang auf
+        //     mehrere Ringe streuen; dieser Treiber hat einen. Beide
+        //     Register auf null heisst "Ring 0 bekommt alles".
+        w32(state, u, R_RSSCTRL25, 0)
+        w32(state, u, R_QNUMCTRL25, 0)
+        // (c) DER UNTERBRECHUNGSBLOCK. Beim 8125 liegt vor IMR/ISR noch
+        //     ein Schalter; ohne ihn bleibt das Maskenregister ohne
+        //     Wirkung und keine Meldung kommt an.
+        w8(state, u, R_INTCFG0_25, INTCFG0_EN)
+    }
+
     // Der Speicher fuer beide Ringe und alle Puffer, in EINEM Lauf
     // Rahmen: ein Deskriptor traegt eine PHYSISCHE Adresse, und die Halde
     // verspricht nichts ueber Zusammenhang.
@@ -779,8 +873,9 @@ fn init_on(state: u64, u: u64, use_msix: bool, armed: bool,
     // das ist die Zusage, auf der der Fall "Rahmen groesser als MTU"
     // beruht.
     w16(state, u, R_RMS, BUFSZ)
-    if var_of(state, u) == VAR_8169 {
-        // Groesster Senderahmen, in Schritten von 128 Oktett.
+    if var_of(state, u) != VAR_CP {
+        // Groesster Senderahmen, in Schritten von 128 Oktett. Den 8139C+
+        // gibt es ohne dieses Register; 8169 und 8125 haben es beide.
         w8(state, u, R_MTPS, 0x3B)
     }
 
@@ -808,12 +903,12 @@ fn init_on(state: u64, u: u64, use_msix: bool, armed: bool,
     w8(state, u, R_CR9346, CR9346_LOCK)
 
     // Das ISR wird geloescht, indem man zurueckschreibt, was darin steht.
-    w16(state, u, R_ISR, 0xFFFF)
+    ack_all(state, u)
     if armed {
-        w16(state, u, R_IMR, I_ROK | I_RER | I_TOK | I_TER | I_RXOVW
+        set_imr(state, u, I_ROK | I_RER | I_TOK | I_TER | I_RXOVW
             | I_LINKCHG | I_FOVW | I_SERR)
     } else {
-        w16(state, u, R_IMR, 0)
+        set_imr(state, u, 0)
     }
 
     kstate.set(state, sc(u, S_READY), 1)
@@ -981,14 +1076,74 @@ fn tx_room_on(state: u64, u: u64) -> u64 {
     return RING_SLOTS - 1 - inflight
 }
 
-// Der Anstoss. Die beiden Spielarten haben ihn an verschiedenen Stellen,
+// ---------------------------------------- das Unterbrechungsregister
+//
+// Beim 8139C+ und beim 8169 sind IMR und ISR SECHZEHN Bit breit und
+// liegen auf 0x3C und 0x3E. Beim 8125 sind sie ZWEIUNDDREISSIG Bit
+// breit und liegen auf 0x38 und 0x3C -- also ueberlappt das ISR des
+// einen genau mit dem IMR des anderen. Wer das verwechselt, schaltet
+// beim Quittieren die Maske ab.
+//
+// Drei Funktionen statt drei `if` an neun Stellen: der Unterschied
+// steht damit AN EINER Stelle, so wie `tx_kick` es fuer den Anstoss tut.
+fn set_imr(state: u64, u: u64, mask: u64) {
+    if var_of(state, u) == VAR_8125 {
+        w32(state, u, R_IMR25, mask)
+        return
+    }
+    w16(state, u, R_IMR, mask)
+}
+
+fn get_isr(state: u64, u: u64) -> u64 {
+    if var_of(state, u) == VAR_8125 {
+        return r32(state, u, R_ISR25)
+    }
+    return r16(state, u, R_ISR)
+}
+
+fn ack_isr(state: u64, u: u64, cause: u64) {
+    if var_of(state, u) == VAR_8125 {
+        w32(state, u, R_ISR25, cause)
+        return
+    }
+    w16(state, u, R_ISR, cause)
+}
+
+fn ack_all(state: u64, u: u64) {
+    if var_of(state, u) == VAR_8125 {
+        w32(state, u, R_ISR25, 4294967295)
+        return
+    }
+    w16(state, u, R_ISR, 0xFFFF)
+}
+
+// MAC-OCP: ein Fenster von 32 Bit auf 0xB0. Lesen heisst, die Adresse
+// hineinzuschreiben und dasselbe Register zurueckzulesen; Schreiben
+// heisst, Adresse und Wert mit gesetztem Bit 31 hineinzuschreiben.
+// (Linux r8169.c, `r8168_mac_ocp_read`/`_write`.) NUR 8125.
+fn ocp_read(state: u64, u: u64, reg: u64) -> u64 {
+    w32(state, u, R_OCPDR, (reg << 15) & 0xFFFFFFFF)
+    return r32(state, u, R_OCPDR) & 0xFFFF
+}
+
+fn ocp_write(state: u64, u: u64, reg: u64, val: u64) {
+    w32(state, u, R_OCPDR,
+        (OCP_FLAG | ((reg << 15) & 0x7FFF0000) | (val & 0xFFFF)) & 0xFFFFFFFF)
+}
+
+// Der Anstoss. Die drei Spielarten haben ihn an verschiedenen Stellen,
 // und das ist der einzige Unterschied im gesamten Sendeweg.
 fn tx_kick(state: u64, u: u64) {
-    if var_of(state, u) == VAR_CP {
+    let v: u64 = var_of(state, u)
+    if v == VAR_CP {
         w8(state, u, R_TPPOLL39, 64) // NPQ, Bit 6
-    } else {
-        w8(state, u, R_TPPOLL69, 64)
+        return
     }
+    if v == VAR_8125 {
+        w8(state, u, R_TPPOLL25, 64)
+        return
+    }
+    w8(state, u, R_TPPOLL69, 64)
 }
 
 // Ein Rahmen hinaus. `false` heisst: der Ring war voll oder der Rahmen war
@@ -1060,10 +1215,10 @@ fn irq_on(state: u64, u: u64) {
         return
     }
     kstate.add(state, sc(u, S_IRQS), 1)
-    let cause: u64 = r16(state, u, R_ISR)
+    let cause: u64 = get_isr(state, u)
     kstate.set(state, sc(u, S_LASTISR), cause)
     if cause != 0 {
-        w16(state, u, R_ISR, cause)
+        ack_isr(state, u, cause)
     }
     if (cause & I_LINKCHG) != 0 {
         read_link(state, u)
@@ -1118,8 +1273,8 @@ fn shut_down_on(state: u64, u: u64) {
     if !present_on(state, u) {
         return
     }
-    w16(state, u, R_IMR, 0)
-    w16(state, u, R_ISR, 0xFFFF)
+    set_imr(state, u, 0)
+    ack_all(state, u)
     w8(state, u, R_CR, 0)
     kstate.set(state, sc(u, S_READY), 0)
     pci.disable_master(bdf_on(state, u))
@@ -1239,13 +1394,19 @@ fn print_regs_on(state: u64, u: u64) {
     serial.puts((&s_rcr[0]) as u64)
     serial.hex(r32(state, u, R_RCR))
     serial.puts((&s_isr[0]) as u64)
-    serial.hex(r16(state, u, R_ISR))
+    serial.hex(get_isr(state, u))
     if var_of(state, u) == VAR_CP {
         serial.puts((&s_msr[0]) as u64)
         serial.hex(r8(state, u, R_MSR))
     } else {
         serial.puts((&s_phy[0]) as u64)
         serial.hex(r8(state, u, R_PHYSTAT))
+    }
+    // RUNDE BLECH: die Spielart, die NICHT gemessen ist, sagt es selbst
+    // -- auf einem fremden Brett ist das die erste Zeile, die zaehlt.
+    if var_of(state, u) == VAR_8125 {
+        var s_ung: [u8; 39] = "  8125: aus der Quelle, NICHT gemessen\0"
+        serial.puts((&s_ung[0]) as u64)
     }
     serial.nl()
 }
