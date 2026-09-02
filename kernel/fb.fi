@@ -72,7 +72,7 @@ export {
     scroll, write_bytes, read_bytes,
     putc, puts, text, nl, set_color, set_cursor, cursor_on, home, goto,
     set_echo, echo_on, double_buffered, uncached, set_back, hline_mask,
-    parse, mode, want, selftest, selftest_max,
+    parse, mode, want, selftest, selftest_max, failbits,
     SRC_NONE, SRC_MB, SRC_VBE, FB_OFF, FB_MAX, FONT_OFF, USER_BASE,
     M_GFX, M_NODBL, M_UC, M_BIG, M_NOCUR, M_HOLD, M_PATTERN, M_USER,
     WIDTH_STD, HEIGHT_STD,
@@ -88,7 +88,12 @@ export {
     selftest2, selftest2_max,
     // RUNDE PAINT -- die Mischung.
     blend, pixel_a, hline_a, fill_a, blends, blend_reads, blend_skips,
-    blend_reset, selftest3, selftest3_max
+    blend_reset, selftest3, selftest3_max,
+    // RUNDE SCHIRM -- die Aufloesung, der Zweitpuffer und die Groesse
+    // der Schrift.
+    need_bytes, fscale, uiscale, stripe, res_w, res_h, scale_for,
+    set_uiscale,
+    selftest4, selftest4_max, M_RES
 }
 
 // ------------------------------------------------- der Datenbereich
@@ -188,6 +193,17 @@ const S_LOGH: u64 = 0x758
 const S_BLENDS: u64 = 0x760
 const S_BLENDR: u64 = 0x768
 const S_BLENDS0: u64 = 0x770
+// RUNDE SCHIRM. Fuenf Woerter hinter der Mischung; die Seite reicht bis
+// FB_MAX (4096), und tools/kernel/memmap.py rechnet den ganzen Bereich
+// als EINEN Block gegen die anderen.
+const S_FSCALE: u64 = 0x778 // Vervielfachung der Konsolenschrift, >= 1
+const S_UISCALE: u64 = 0x780 // derselbe Faktor fuer die Oberflaeche
+const S_STRIPE: u64 = 0x788 // 1 = der Puffer passt nicht ins Fenster
+const S_SLOTV: u64 = 0x790 // die virtuelle Adresse des einen Platzes
+const S_RESW: u64 = 0x798 // Wunsch von der Befehlszeile, 0 = keiner
+const S_RESH: u64 = 0x7A0
+const S_FAIL: u64 = 0x7B0 // Bitmaske der NICHT bestandenen Zusagen
+const S_UIWANT: u64 = 0x7A8 // "uiscale=" von der Befehlszeile, 0 = keiner
 
 // Die drei Arten, ein Bild auf eine Tafel anderer Groesse zu bringen.
 // Dieselben drei, die ein Monitor in seiner eigenen Elektronik hat und
@@ -215,6 +231,10 @@ const M_NOCUR: u64 = 16 // "nocursor" -- ohne Textmarke
 const M_HOLD: u64 = 32 // "fbhold"   -- am Ende stillhalten (fuer das Foto)
 const M_PATTERN: u64 = 64 // "fbtest"   -- das Pruefbild zeichnen
 const M_USER: u64 = 128 // "fbuser"   -- das Programm in Ring 3 laufen lassen
+// RUNDE SCHIRM: "fbres=1920x1080" -- eine Aufloesung mit Zahlen statt
+// eines Wortes, das fuer zwei Zahlen steht. Das Bit sagt nur, DASS eine
+// dastand; die Zahlen stehen in S_RESW/S_RESH.
+const M_RES: u64 = 256
 
 // 800 x 600 x 4 sind 1 920 000 Oktette und passen in EINE 2-MiB-Kachel;
 // 1024 x 768 x 4 sind 3 145 728 und brauchen zwei. Beides steht in der
@@ -500,6 +520,65 @@ fn kernel_pd(state: u64) -> u64 {
 
 // ------------------------------------------------------------ Start
 
+// RUNDE SCHIRM -- WIE GROSS DER ZWEITPUFFER SEIN MUSS, BEVOR ES IHN GIBT.
+//
+// DER FEHLER, DEN DIESE FUNKTION BESEITIGT. `kgui.fi` hat den
+// Zweitpuffer nach WIDTH_STD x HEIGHT_STD bemessen -- 800x600 -- und
+// ihn DANACH an `init` uebergeben. Unter einem Lader bestimmt aber der
+// LADER die Aufloesung, und `init` hat den zu kleinen Puffer dann
+// wortlos liegen lassen (`back_bytes >= n` ist falsch). GEMESSEN, in
+// jedem Start ueber Limine:
+//
+//     fb: 1920x1080x32  pitch=7680  src=mb  ...  back=none
+//
+// "back=none" heisst: JEDER Bildpunkt der Oberflaeche geht einzeln ueber
+// den Bus in den Bildspeicher, und zwar auf ECHTEM Blech, waehrend
+// dieselbe Zeile unter `qemu -kernel` einen Zweitpuffer hatte. Die
+// Messung, die die Runde davon hatte, war die vom falschen Rechner.
+//
+// Also fragt `kgui` jetzt ZUERST, wie viele Oktette der Rahmenpuffer
+// wirklich hat, und legt danach den Puffer an. Diese Funktion liest
+// dieselben Felder wie `init` und veraendert nichts.
+fn need_bytes(mbi: u64, want_w: u64, want_h: u64) -> u64 {
+    if mbi != 0 {
+        if (kstate.get32(mbi + MB_FLAGS) & MB_FB_FLAG) != 0 {
+            if kstate.get8(mbi + MB_FB_TYPE) == MB_FB_RGB {
+                let p: u64 = __mmio_read64((mbi + MB_FB_ADDR) as *mut u64)
+                let pt: u64 = kstate.get32(mbi + MB_FB_PITCH)
+                let w: u64 = kstate.get32(mbi + MB_FB_WIDTH)
+                let h: u64 = kstate.get32(mbi + MB_FB_HEIGHT)
+                let bp: u64 = kstate.get8(mbi + MB_FB_BPP)
+                if p != 0 && w != 0 && h != 0 && bp == 32 && pt >= w * 4 {
+                    return pt * h
+                }
+            }
+        }
+    }
+    if want_w == 0 || want_h == 0 {
+        return 0
+    }
+    return want_w * 4 * want_h
+}
+
+// RUNDE SCHIRM -- DIE VERVIELFACHUNG.
+//
+// Ein Zeichen von 8 x 16 Bildpunkten ist auf 1024x768 gut zu lesen, auf
+// 3840x2160 ist es ein Fleck: dieselbe Zahl Bildpunkte auf einer Tafel
+// mit VIERMAL so vielen. Es gibt in diesem Kernel keine Zahl fuer die
+// PHYSISCHE Groesse der Tafel, ausser der, die im EDID-Block steht --
+// `kgui.fi` nimmt sie, wenn sie da und glaubhaft ist, und faellt sonst
+// auf diese Regel zurueck. Die Schwellen sind die ueblichen: 1440p
+// bleibt bei eins, 4K geht auf zwei, 8K auf drei.
+fn scale_for(w: u64, h: u64) -> u64 {
+    if h >= 2600 || w >= 4600 {
+        return 3
+    }
+    if h >= 1600 || w >= 2800 {
+        return 2
+    }
+    return 1
+}
+
 // Nimmt den Rahmenpuffer entgegen und macht eine Textkonsole daraus.
 //
 //   mbi        die Multiboot-Struktur (Weg 1)
@@ -579,10 +658,41 @@ fn init(state: u64, mbi: u64, want_w: u64, want_h: u64,
     let inner: u64 = p - blk
     // Wie viele 2-MiB-Seiten der Puffer beruehrt, den Versatz im ersten
     // Block eingerechnet.
-    let kacheln: u64 = (inner + n + HUGE_SIZE - 1) / HUGE_SIZE
-    let fenster: u64 = map_run(state, blk, kacheln, uncached)
+    var kacheln: u64 = (inner + n + HUGE_SIZE - 1) / HUGE_SIZE
+    var fenster: u64 = map_run(state, blk, kacheln, uncached)
+    var streifen: u64 = 0
     if fenster == 0 {
-        return false
+        // RUNDE SCHIRM -- DER STREIFENBETRIEB.
+        //
+        // Acht Plaetze zu 2 MiB, davon drei von Geraeten belegt: der
+        // laengste freie Lauf ist SECHS, also 12 MiB. GEMESSEN, mit dem
+        // USB-Abbild unter OVMF und einer Tafel, die sich als 2560x1440
+        // ausgibt:
+        //
+        //     fb: kein Rahmenpuffer
+        //     hwdiag: fb=KEINER -- diese Maschine hat keinen Rahmenpuffer
+        //
+        // Das Bildschirmfoto ist 2560x1440 und SCHWARZ. 2560x1440x4 sind
+        // 14 745 600 Oktette und brauchen acht Kacheln; 3840x2160x4 sind
+        // 33 177 600 und brauchen siebzehn. Ein WQHD-Bildschirm ist nichts
+        // Ausgefallenes, und "gar kein Bild" ist die schlechteste aller
+        // Antworten.
+        //
+        // Jetzt wird der Puffer, wenn er nicht am Stueck hineinpasst,
+        // NICHT am Stueck abgebildet: gezeichnet wird in den Zweitpuffer
+        // im Arbeitsspeicher, und `flush` schiebt die geaenderten Zeilen
+        // in 2-MiB-Scheiben durch EINEN Platz. Ohne Zweitpuffer geht das
+        // nicht -- dann gaebe es nichts, woraus man schoebe --, und dann
+        // bleibt es bei der alten, ehrlichen Antwort.
+        if back == 0 || back_bytes < n {
+            return false
+        }
+        fenster = map_run(state, blk, 1, uncached)
+        if fenster == 0 {
+            return false
+        }
+        kacheln = 1
+        streifen = 1
     }
 
     kstate.set(state, FB_OFF + S_PHYS, p)
@@ -599,6 +709,8 @@ fn init(state: u64, mbi: u64, want_w: u64, want_h: u64,
     kstate.set(state, FB_OFF + S_PHEIGHT, h)
     kstate.set(state, FB_OFF + S_PPITCH, pt)
     kstate.set(state, FB_OFF + S_SLOT0, (fenster - WIN_VIRT) / HUGE_SIZE + 1)
+    kstate.set(state, FB_OFF + S_STRIPE, streifen)
+    kstate.set(state, FB_OFF + S_SLOTV, fenster)
     kstate.set(state, FB_OFF + S_LUT, 0)
     kstate.set(state, FB_OFF + S_ROT, 0)
     kstate.set(state, FB_OFF + S_SCALE, SCALE_FULL)
@@ -610,8 +722,16 @@ fn init(state: u64, mbi: u64, want_w: u64, want_h: u64,
     kstate.set(state, FB_OFF + S_RSHIFT, rs)
     kstate.set(state, FB_OFF + S_GSHIFT, gs)
     kstate.set(state, FB_OFF + S_BSHIFT, bs)
-    kstate.set(state, FB_OFF + S_COLS, w / font.GLYPH_W)
-    kstate.set(state, FB_OFF + S_ROWS, h / font.GLYPH_H)
+    // RUNDE SCHIRM: die Vervielfachung steht VOR cols/rows, weil beide
+    // aus ihr fallen.
+    var us: u64 = kstate.get(state, FB_OFF + S_UIWANT)
+    if us == 0 || us > 4 {
+        us = scale_for(w, h)
+    }
+    kstate.set(state, FB_OFF + S_UISCALE, us)
+    kstate.set(state, FB_OFF + S_FSCALE, us)
+    kstate.set(state, FB_OFF + S_COLS, w / (font.GLYPH_W * us))
+    kstate.set(state, FB_OFF + S_ROWS, h / (font.GLYPH_H * us))
     kstate.set(state, FB_OFF + S_UNCACHED, bool_num(uncached))
 
     // Der Zweitpuffer. Er liegt im Arbeitsspeicher, also im ersten
@@ -748,6 +868,49 @@ fn echo_on(state: u64) -> bool {
 }
 
 // Ist die Geometrie in sich stimmig? Wird als Zusage geprueft.
+// RUNDE SCHIRM: die drei Zahlen, die diese Runde hinzugefuegt hat.
+fn fscale(state: u64) -> u64 {
+    let v: u64 = kstate.get(state, FB_OFF + S_FSCALE)
+    if v == 0 {
+        return 1
+    }
+    return v
+}
+
+fn uiscale(state: u64) -> u64 {
+    let v: u64 = kstate.get(state, FB_OFF + S_UISCALE)
+    if v == 0 {
+        return 1
+    }
+    return v
+}
+
+// RUNDE SCHIRM: die Vervielfachung nachtraeglich setzen. `kgui.fi` tut
+// das, wenn die Tafel im EDID-Block ihre PHYSISCHE Groesse nennt -- dann
+// ist die Zahl gemessen und nicht aus der Bildpunktzahl geraten.
+fn set_uiscale(state: u64, v: u64) -> bool {
+    if v < 1 || v > 4 {
+        return false
+    }
+    kstate.set(state, FB_OFF + S_UISCALE, v)
+    kstate.set(state, FB_OFF + S_FSCALE, v)
+    relayout(state)
+    home(state)
+    return true
+}
+
+fn stripe(state: u64) -> bool {
+    return kstate.get(state, FB_OFF + S_STRIPE) != 0
+}
+
+fn res_w(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_RESW)
+}
+
+fn res_h(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_RESH)
+}
+
 fn geometry_ok(state: u64) -> bool {
     if !ready(state) {
         return false
@@ -1310,6 +1473,45 @@ fn dirty(state: u64, y0: u64, y1: u64) {
 
 // Zweitpuffer auf die Karte. Ohne Zweitpuffer ist das ein Nichts: dann
 // wird ohnehin direkt auf die Karte gezeichnet.
+// RUNDE SCHIRM: die geaenderten Zeilen in 2-MiB-Scheiben durch den EINEN
+// Platz schieben. Die Schleife rechnet in Oktetten und nicht in Zeilen,
+// weil eine Scheibengrenze mitten in einer Bildzeile liegen darf.
+fn flush_stripe(state: u64, lo: u64, hi: u64) {
+    let b: u64 = kstate.get(state, FB_OFF + S_BACK)
+    let basis: u64 = kstate.get(state, FB_OFF + S_SLOTV)
+    if b == 0 || basis == 0 {
+        return
+    }
+    let pt: u64 = kstate.get(state, FB_OFF + S_PITCH)
+    let uc: bool = kstate.get(state, FB_OFF + S_UNCACHED) != 0
+    let phys0: u64 = kstate.get(state, FB_OFF + S_PHYS)
+    var off: u64 = lo *% pt
+    let ende: u64 = hi *% pt
+    while off < ende {
+        let p: u64 = phys0 +% off
+        let blk: u64 = p & (~(HUGE_SIZE - 1))
+        let inner: u64 = p - blk
+        var n: u64 = HUGE_SIZE - inner
+        if n > ende - off {
+            n = ende - off
+        }
+        if !slot_remap(state, basis, blk, uc) {
+            return
+        }
+        let dst: u64 = basis +% inner
+        let src: u64 = b +% off
+        let worte: u64 = n / 8
+        copy_words(dst, src, worte)
+        var i: u64 = worte * 8
+        while i + 4 <= n {
+            __mmio_write32((dst +% i) as *mut u32,
+                __mmio_read32((src +% i) as *mut u32))
+            i = i + 4
+        }
+        off = off +% n
+    }
+}
+
 fn flush(state: u64) {
     let b: u64 = kstate.get(state, FB_OFF + S_BACK)
     if b == 0 {
@@ -1333,6 +1535,13 @@ fn flush(state: u64) {
     let h: u64 = kstate.get(state, FB_OFF + S_HEIGHT)
     if hi > h {
         hi = h
+    }
+    if kstate.get(state, FB_OFF + S_STRIPE) != 0 {
+        flush_stripe(state, lo, hi)
+        kstate.set(state, FB_OFF + S_DIRTY_LO, 0)
+        kstate.set(state, FB_OFF + S_DIRTY_HI, 0)
+        kstate.add(state, FB_OFF + S_FLUSHES, 1)
+        return
     }
     let pt: u64 = kstate.get(state, FB_OFF + S_PITCH)
     let von: u64 = lo *% pt
@@ -1388,7 +1597,14 @@ fn write_bytes(state: u64, off: u64, src: u64, n: u64) -> u64 {
     if off + len > ganz {
         len = ganz - off
     }
-    let dst: u64 = kstate.get(state, FB_OFF + S_ADDR) +% off
+    // RUNDE SCHIRM: im Streifenbetrieb ist S_ADDR nur die eine Scheibe,
+    // die gerade im Platz haengt -- geschrieben wird dann dorthin, wo
+    // auch der Fensterserver zeichnet.
+    var basis: u64 = kstate.get(state, FB_OFF + S_ADDR)
+    if kstate.get(state, FB_OFF + S_STRIPE) != 0 {
+        basis = kstate.get(state, FB_OFF + S_DRAW)
+    }
+    let dst: u64 = basis +% off
     let worte: u64 = len / 8
     copy_words(dst, src, worte)
     var i: u64 = worte * 8
@@ -1411,7 +1627,11 @@ fn read_bytes(state: u64, off: u64, dst: u64, n: u64) -> u64 {
     if off + len > ganz {
         len = ganz - off
     }
-    let src: u64 = kstate.get(state, FB_OFF + S_ADDR) +% off
+    var basis2: u64 = kstate.get(state, FB_OFF + S_ADDR)
+    if kstate.get(state, FB_OFF + S_STRIPE) != 0 {
+        basis2 = kstate.get(state, FB_OFF + S_DRAW)
+    }
+    let src: u64 = basis2 +% off
     var i: u64 = 0
     while i < len {
         kstate.set8(dst + i, kstate.get8(src +% i) as u8)
@@ -1423,11 +1643,11 @@ fn read_bytes(state: u64, off: u64, dst: u64, n: u64) -> u64 {
 // -------------------------------------------------------- die Konsole
 
 fn cell_x(state: u64) -> u64 {
-    return kstate.get(state, FB_OFF + S_CX) *% font.GLYPH_W
+    return kstate.get(state, FB_OFF + S_CX) *% (font.GLYPH_W * fscale(state))
 }
 
 fn cell_y(state: u64) -> u64 {
-    return kstate.get(state, FB_OFF + S_CY) *% font.GLYPH_H
+    return kstate.get(state, FB_OFF + S_CY) *% (font.GLYPH_H * fscale(state))
 }
 
 // Die Textmarke: zwei Bildpunktzeilen am unteren Rand der Zelle.
@@ -1439,9 +1659,10 @@ fn mark(state: u64, on: bool) {
     if on {
         c = kstate.get(state, FB_OFF + S_FG)
     }
-    let y: u64 = cell_y(state) + font.GLYPH_H - 2
-    fill(state, cell_x(state), y, font.GLYPH_W, 2, c)
-    dirty(state, y, y + 2)
+    let fs: u64 = fscale(state)
+    let y: u64 = cell_y(state) + font.GLYPH_H * fs - 2 * fs
+    fill(state, cell_x(state), y, font.GLYPH_W * fs, 2 * fs, c)
+    dirty(state, y, y + 2 * fs)
 }
 
 // EINE GLYPHE. Zweiundvierzig Zeilen weiter unten steht, warum diese
@@ -1471,22 +1692,36 @@ fn glyph(state: u64, ch: u64) {
     let base: u64 = state + FONT_OFF
     let w: u64 = kstate.get(state, FB_OFF + S_WIDTH)
     let h: u64 = kstate.get(state, FB_OFF + S_HEIGHT)
-    if px + font.GLYPH_W > w || py + font.GLYPH_H > h {
+    // RUNDE SCHIRM: `fs` mal so gross. Ein Quellbildpunkt wird zu einem
+    // Quadrat von fs x fs -- ganzzahlig, also ohne Unschaerfe und ohne
+    // eine einzige Division je Bildpunkt.
+    let fs: u64 = fscale(state)
+    let gw: u64 = font.GLYPH_W * fs
+    let gh: u64 = font.GLYPH_H * fs
+    if px + gw > w || py + gh > h {
         var r2: u64 = 0
         while r2 < font.GLYPH_H {
             let b2: u64 = font.row(base, ch, r2)
             var c2: u64 = 0
             while c2 < font.GLYPH_W {
+                var f2: u64 = bg
                 if ((b2 >> (7 - c2)) & 1) != 0 {
-                    pixel(state, px + c2, py + r2, fg)
-                } else {
-                    pixel(state, px + c2, py + r2, bg)
+                    f2 = fg
+                }
+                var sy: u64 = 0
+                while sy < fs {
+                    var sx: u64 = 0
+                    while sx < fs {
+                        pixel(state, px + c2 * fs + sx, py + r2 * fs + sy, f2)
+                        sx = sx + 1
+                    }
+                    sy = sy + 1
                 }
                 c2 = c2 + 1
             }
             r2 = r2 + 1
         }
-        dirty(state, py, py + font.GLYPH_H)
+        dirty(state, py, py + gh)
         return
     }
     let pt: u64 = kstate.get(state, FB_OFF + S_PITCH)
@@ -1494,21 +1729,29 @@ fn glyph(state: u64, ch: u64) {
     var r: u64 = 0
     while r < font.GLYPH_H {
         let bits: u64 = font.row(base, ch, r)
-        var q: u64 = zeile
-        var c: u64 = 0
-        while c < font.GLYPH_W {
-            var farbe: u64 = bg
-            if ((bits >> (7 - c)) & 1) != 0 {
-                farbe = fg
+        var wdh: u64 = 0
+        while wdh < fs {
+            var q: u64 = zeile
+            var c: u64 = 0
+            while c < font.GLYPH_W {
+                var farbe: u64 = bg
+                if ((bits >> (7 - c)) & 1) != 0 {
+                    farbe = fg
+                }
+                var k: u64 = 0
+                while k < fs {
+                    __mmio_write32(q as *mut u32, farbe as u32)
+                    q = q +% 4
+                    k = k + 1
+                }
+                c = c + 1
             }
-            __mmio_write32(q as *mut u32, farbe as u32)
-            q = q +% 4
-            c = c + 1
+            zeile = zeile +% pt
+            wdh = wdh + 1
         }
-        zeile = zeile +% pt
         r = r + 1
     }
-    dirty(state, py, py + font.GLYPH_H)
+    dirty(state, py, py + gh)
 }
 
 // Eine Textzeile nach oben. Der obere Teil wird kopiert, die letzte
@@ -1518,7 +1761,7 @@ fn glyph(state: u64, ch: u64) {
 fn scroll(state: u64) {
     let h: u64 = kstate.get(state, FB_OFF + S_HEIGHT)
     let w: u64 = kstate.get(state, FB_OFF + S_WIDTH)
-    let zh: u64 = font.GLYPH_H
+    let zh: u64 = font.GLYPH_H * fscale(state)
     if h <= zh {
         clear(state, kstate.get(state, FB_OFF + S_BG))
         return
@@ -1713,6 +1956,7 @@ fn parse(state: u64, cmd: u64) {
     var w_hold: [u8; 7] = "fbhold\0"
     var w_pat: [u8; 7] = "fbtest\0"
     var w_usr: [u8; 7] = "fbuser\0"
+    var w_res: [u8; 7] = "fbres=\0"
     var m: u64 = 0
     if cmd != 0 {
         if find(cmd, (&w_gfx[0]) as u64, 3) != 0 {
@@ -1740,7 +1984,91 @@ fn parse(state: u64, cmd: u64) {
             m = m | M_USER
         }
     }
+    if find(cmd, (&w_res[0]) as u64, 6) != 0 {
+        if parse_zahlenpaar(state, cmd, (&w_res[0]) as u64, 6) {
+            m = m | M_RES
+        }
+    }
+    if cmd != 0 {
+        var w_ui: [u8; 9] = "uiscale=\0"
+        let a: u64 = find(cmd, (&w_ui[0]) as u64, 8)
+        if a != 0 {
+            let v: u64 = zahl_bei(a + 8)
+            if v >= 1 && v <= 4 {
+                kstate.set(state, FB_OFF + S_UIWANT, v)
+            }
+        }
+    }
     kstate.set(state, FB_OFF + S_MODE, m)
+}
+
+// RUNDE SCHIRM: eine Zahl ab `p`, dezimal, bis zum ersten Zeichen, das
+// keine Ziffer ist. Kein `break` in Stufe 0 -- also eine Fahne.
+fn zahl_bei(p: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    var lauf: bool = true
+    while lauf {
+        let c: u64 = kstate.get8(p + i)
+        if c >= 0x30 && c <= 0x39 && i < 6 {
+            v = v * 10 + (c - 0x30)
+            i = i + 1
+        } else {
+            lauf = false
+        }
+    }
+    if i == 0 {
+        return 0
+    }
+    return v
+}
+
+fn ziffern_ab(p: u64) -> u64 {
+    var i: u64 = 0
+    var lauf: bool = true
+    while lauf {
+        let c: u64 = kstate.get8(p + i)
+        if c >= 0x30 && c <= 0x39 && i < 6 {
+            i = i + 1
+        } else {
+            lauf = false
+        }
+    }
+    return i
+}
+
+// "fbres=1920x1080" -- zwei Zahlen mit einem kleinen x dazwischen.
+fn parse_zahlenpaar(state: u64, cmd: u64, wort: u64, wlen: u64) -> bool {
+    kstate.set(state, FB_OFF + S_RESW, 0)
+    kstate.set(state, FB_OFF + S_RESH, 0)
+    let a: u64 = find(cmd, wort, wlen)
+    if a == 0 {
+        return false
+    }
+    let p1: u64 = a + wlen
+    let n1: u64 = ziffern_ab(p1)
+    if n1 == 0 {
+        return false
+    }
+    if kstate.get8(p1 + n1) != 0x78 {
+        return false
+    }
+    let p2: u64 = p1 + n1 + 1
+    let n2: u64 = ziffern_ab(p2)
+    if n2 == 0 {
+        return false
+    }
+    let w: u64 = zahl_bei(p1)
+    let h: u64 = zahl_bei(p2)
+    // Die Schranken sind die des Rahmenpuffers und nicht die einer
+    // Vorliebe: darunter passt keine Konsole, darueber rechnet die
+    // Kachelzahl in Bereiche, die dieser Kernel nicht mehr abbildet.
+    if w < 320 || h < 200 || w > 8192 || h > 4608 {
+        return false
+    }
+    kstate.set(state, FB_OFF + S_RESW, w)
+    kstate.set(state, FB_OFF + S_RESH, h)
+    return true
 }
 
 fn mode(state: u64) -> u64 {
@@ -1772,6 +2100,14 @@ fn back_bytes(state: u64) -> u64 {
 }
 
 fn set_back(state: u64, b: u64) {
+    // RUNDE SCHIRM: im Streifenbetrieb gibt es kein "ohne Zweitpuffer".
+    // Der Rahmenpuffer haengt dann nur SCHEIBENWEISE im Fenster, und
+    // wer direkt in S_ADDR malt, schreibt nach 2 MiB in fremden
+    // Speicher -- gemessen als #PF bei cr2=0x40000000, dem Ende des
+    // Fensters, beim ersten `fbbench: direct`.
+    if b == 0 && kstate.get(state, FB_OFF + S_STRIPE) != 0 {
+        return
+    }
     kstate.set(state, FB_OFF + S_BACK, b)
     if b != 0 {
         kstate.set(state, FB_OFF + S_DRAW, b)
@@ -1792,11 +2128,19 @@ fn set_back(state: u64, b: u64) {
 // eigenen Zweitpuffer schreibt und daraus liest, hat noch nichts ueber
 // den Bildschirm bewiesen. Es faengt die Fehlerklasse ab, die ein Foto
 // nur als schwarzes Bild zeigt, ohne zu sagen warum.
+fn failbits(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_FAIL)
+}
+fn pass_ok(state: u64, nr: u64) {
+    kstate.set(state, FB_OFF + S_FAIL,
+        kstate.get(state, FB_OFF + S_FAIL) & ~(1 << nr))
+}
 fn selftest(state: u64) -> u64 {
     if !ready(state) {
         return 0
     }
     var n: u64 = 0
+    kstate.set(state, FB_OFF + S_FAIL, 0x3ffe)
     let rot: u64 = rgb(state, 0xFF, 0, 0)
     let gruen: u64 = rgb(state, 0, 0xFF, 0)
     let blau: u64 = rgb(state, 0, 0, 0xFF)
@@ -1805,6 +2149,7 @@ fn selftest(state: u64) -> u64 {
     //    die Verschiebungen liegen so, wie die Karte es gesagt hat.
     if rot != gruen && gruen != blau && rot != blau {
         n = n + 1
+        pass_ok(state, 1)
     }
     // 2. Geschriebener Bildpunkt = gelesener Bildpunkt.
     pixel(state, 0, 0, rot)
@@ -1813,6 +2158,7 @@ fn selftest(state: u64) -> u64 {
     if get_pixel(state, 0, 0) == rot && get_pixel(state, 1, 0) == gruen {
         if get_pixel(state, 0, 1) == blau {
             n = n + 1
+            pass_ok(state, 2)
         }
     }
     // 3. Der letzte Bildpunkt liegt noch im Puffer -- und der EINE
@@ -1822,11 +2168,13 @@ fn selftest(state: u64) -> u64 {
     pixel(state, w - 1, h - 1, gruen)
     if get_pixel(state, w - 1, h - 1) == gruen {
         n = n + 1
+        pass_ok(state, 3)
     }
     // 4. Ausserhalb wird nichts geschrieben und nichts gelesen.
     pixel(state, w, h, rot)
     if get_pixel(state, w, h) == 0 && get_pixel(state, w, 0) == 0 {
         n = n + 1
+        pass_ok(state, 4)
     }
     // 5. Ein Rechteck ist an seinen Ecken gefuellt und einen Bildpunkt
     //    daneben nicht.
@@ -1835,23 +2183,27 @@ fn selftest(state: u64) -> u64 {
     if get_pixel(state, 10, 10) == blau && get_pixel(state, 29, 29) == blau {
         if get_pixel(state, 9, 10) == 0 && get_pixel(state, 30, 29) == 0 {
             n = n + 1
+            pass_ok(state, 5)
         }
     }
     // 6. Eine Linie trifft ihre beiden Enden.
     line(state, 40, 40, 140, 90, rot)
     if get_pixel(state, 40, 40) == rot && get_pixel(state, 140, 90) == rot {
         n = n + 1
+        pass_ok(state, 6)
     }
     // 7. Ein Bildbereich, an eine andere Stelle kopiert, steht dort.
     blit(state, 10, 10, 200, 100, 20, 20)
     if get_pixel(state, 200, 100) == blau && get_pixel(state, 219, 119) == blau {
         n = n + 1
+        pass_ok(state, 7)
     }
     // 8. Der Zeichensatz zeichnet: das Grossbuchstaben-A hat in seiner
     //    vierten Zeile (Index 3) genau die Bitmaske 0x18 -- zwei gesetzte
     //    Bildpunkte in der Mitte, sechs leere daneben.
     if font.row(state + FONT_OFF, 0x41, 3) == 0x18 {
         n = n + 1
+        pass_ok(state, 8)
     }
     // 9. Ein gezeichnetes Zeichen hinterlaesst Vordergrundfarbe DA, wo
     //    der Zeichensatz ein Bit gesetzt hat, und Hintergrund daneben.
@@ -1861,31 +2213,46 @@ fn selftest(state: u64) -> u64 {
     set_cursor(state, false)
     putc(state, 0x41) // 'A'
     // Zeile 3 der Glyphe, Maske 0x18: Spalten 3 und 4 gesetzt.
-    if get_pixel(state, 3, 3) == rot && get_pixel(state, 4, 3) == rot {
-        if get_pixel(state, 0, 3) == 0 && get_pixel(state, 7, 3) == 0 {
+    //
+    // RUNDE SCHIRM: MAL DEM VERGROESSERUNGSFAKTOR. Auf einem 4K-Schirm
+    // ist die Konsolenschrift verdoppelt, ein Bildpunkt der Glyphe wird
+    // zu einem Quadrat von `fscale` Bildpunkten -- und der Test las an
+    // (3,3) den Hintergrund und meldete `fb: selftest 12 / 13`, obwohl
+    // das Zeichen richtig stand.
+    let fs: u64 = fscale(state)
+    if get_pixel(state, 3 * fs, 3 * fs) == rot
+        && get_pixel(state, 4 * fs, 3 * fs) == rot {
+        if get_pixel(state, 0, 3 * fs) == 0
+            && get_pixel(state, 7 * fs + fs - 1, 3 * fs) == 0 {
             n = n + 1
+            pass_ok(state, 9)
         }
     }
     // 10. Die Schreibmarke ist nach EINEM Zeichen eine Spalte weiter.
     if cx(state) == 1 && cy(state) == 0 {
         n = n + 1
+        pass_ok(state, 10)
     }
     // 11. Ein Zeilenumbruch setzt sie zurueck und eine Zeile tiefer.
     putc(state, 10)
     if cx(state) == 0 && cy(state) == 1 {
         n = n + 1
+        pass_ok(state, 11)
     }
     // 12. Rollen: was in Zeile 1 stand, steht danach in Zeile 0.
     clear(state, 0)
     home(state)
-    fill(state, 0, font.GLYPH_H, 8, 8, gruen)
+    fill(state, 0, font.GLYPH_H * fscale(state), 8, 8, gruen)
     scroll(state)
     if get_pixel(state, 0, 0) == gruen && get_pixel(state, 7, 7) == gruen {
         n = n + 1
+        pass_ok(state, 12)
     }
     // 13. ... und die letzte Zeile ist danach leer.
-    if get_pixel(state, 0, rows(state) * font.GLYPH_H - 1) == 0 {
+    if get_pixel(state, 0,
+        rows(state) * font.GLYPH_H * fscale(state) - 1) == 0 {
         n = n + 1
+        pass_ok(state, 13)
     }
     clear(state, 0)
     home(state)
@@ -2036,6 +2403,34 @@ fn remap(state: u64, p: u64, w: u64, h: u64, pt: u64, uncached: bool) -> bool {
 // zerschnitten. Das ist derselbe Zugriff auf dieselbe Liste, den `unmap`
 // oben macht; der Absatz ganz oben ueber die geteilte Belegungsliste
 // gilt hier genauso.
+// RUNDE SCHIRM: EINEN Platz auf einen ANDEREN Block umhaengen, ohne die
+// Belegungsliste zu verlieren. Das ist der ganze Streifenbetrieb: ein
+// Rahmenpuffer, der nicht am Stueck ins Fenster passt, wird in 2-MiB-
+// Scheiben hindurchgeschoben. Der Preis ist EIN Neuladen von cr3 je
+// Scheibe -- gemessen in docs/RUNDE-SCHIRM.md.
+fn slot_remap(state: u64, virt: u64, block: u64, uncached: bool) -> bool {
+    if virt < WIN_VIRT {
+        return false
+    }
+    let i: u64 = (virt - WIN_VIRT) / HUGE_SIZE
+    if i >= WIN_SLOTS {
+        return false
+    }
+    let pd: u64 = kernel_pd(state)
+    if pd == 0 {
+        return false
+    }
+    var bits: u64 = PAGE_PRESENT | PAGE_WRITE | PAGE_HUGE
+    if uncached {
+        bits = bits | PAGE_PCD | PAGE_PWT
+    }
+    __mmio_write64((pd + (WIN_FIRST + i) * 8) as *mut u64, block | bits)
+    kstate.set(state, WIN_LIST + i * 8, block + 1)
+    let c: u64 = asm("mov rax, cr3", out("rax"))
+    asm("mov cr3, rax", in("rax") c)
+    return true
+}
+
 fn unmap_slot(state: u64, virt: u64) {
     if virt < WIN_VIRT {
         return
@@ -2179,12 +2574,13 @@ fn relayout(state: u64) {
                 kstate.get(state, FB_OFF + S_ADDR))
         }
     }
-    kstate.set(state, FB_OFF + S_COLS, lw / font.GLYPH_W)
-    kstate.set(state, FB_OFF + S_ROWS, lh / font.GLYPH_H)
-    if kstate.get(state, FB_OFF + S_CX) >= lw / font.GLYPH_W {
+    let fs: u64 = fscale(state)
+    kstate.set(state, FB_OFF + S_COLS, lw / (font.GLYPH_W * fs))
+    kstate.set(state, FB_OFF + S_ROWS, lh / (font.GLYPH_H * fs))
+    if kstate.get(state, FB_OFF + S_CX) >= lw / (font.GLYPH_W * fs) {
         kstate.set(state, FB_OFF + S_CX, 0)
     }
-    if kstate.get(state, FB_OFF + S_CY) >= lh / font.GLYPH_H {
+    if kstate.get(state, FB_OFF + S_CY) >= lh / (font.GLYPH_H * fs) {
         kstate.set(state, FB_OFF + S_CY, 0)
     }
     dirty_all(state)
@@ -2907,4 +3303,78 @@ fn get_panel(state: u64, x: u64, y: u64) -> u64 {
     let addr: u64 = kstate.get(state, FB_OFF + S_ADDR)
     return __mmio_read32((addr +% y *% kstate.get(state, FB_OFF + S_PPITCH)
         +% x *% 4) as *mut u32) as u64
+}
+
+
+// ------------------------------------------------- RUNDE SCHIRM: Proben
+//
+// Zwoelf Zusagen ueber genau das, was diese Runde hinzugefuegt hat. Sie
+// laufen im Kern und brauchen weder Bild noch Lader.
+fn selftest4(state: u64) -> u64 {
+    var n: u64 = 0
+    // 1..4 die Schwellen der Vervielfachung, an ihren Kanten.
+    if scale_for(1024, 768) == 1 {
+        n = n + 1
+    }
+    if scale_for(1920, 1080) == 1 {
+        n = n + 1
+    }
+    if scale_for(3840, 2160) == 2 {
+        n = n + 1
+    }
+    if scale_for(7680, 4320) == 3 {
+        n = n + 1
+    }
+    // 5 ohne Lader ist der Bedarf Breite mal vier mal Hoehe.
+    if need_bytes(0, 1920, 1080) == 1920 * 4 * 1080 {
+        n = n + 1
+    }
+    // 6 und ohne Wunsch ist er null -- eine Null, die der Aufrufer sieht,
+    //   ist besser als ein Puffer der Groesse null, den er nicht sieht.
+    if need_bytes(0, 0, 0) == 0 {
+        n = n + 1
+    }
+    // 7 der Faktor ist mindestens eins, auch wenn nie einer gesetzt wurde.
+    if fscale(state) >= 1 && uiscale(state) >= 1 {
+        n = n + 1
+    }
+    // 8..9 cols und rows passen zur Vervielfachung UND zur Breite.
+    if ready(state) {
+        let fs: u64 = fscale(state)
+        if cols(state) == width(state) / (font.GLYPH_W * fs) {
+            n = n + 1
+        }
+        if rows(state) == height(state) / (font.GLYPH_H * fs) {
+            n = n + 1
+        }
+    }
+    // 10 eine Zahl, die dasteht, wird gelesen.
+    var probe: [u8; 24] = "gfx fbres=1280x1024 wm\0\0"
+    var merk_w: u64 = kstate.get(state, FB_OFF + S_RESW)
+    var merk_h: u64 = kstate.get(state, FB_OFF + S_RESH)
+    var wort: [u8; 7] = "fbres=\0"
+    if parse_zahlenpaar(state, (&probe[0]) as u64, (&wort[0]) as u64, 6) {
+        if kstate.get(state, FB_OFF + S_RESW) == 1280
+            && kstate.get(state, FB_OFF + S_RESH) == 1024 {
+            n = n + 1
+        }
+    }
+    // 11 eine unsinnige wird NICHT gelesen -- das ist die Gegenprobe, und
+    //    ohne sie hiesse "es wurde etwas gelesen" gar nichts.
+    var probe2: [u8; 20] = "gfx fbres=9999x1 wm\0"
+    if !parse_zahlenpaar(state, (&probe2[0]) as u64, (&wort[0]) as u64, 6) {
+        n = n + 1
+    }
+    // 12 und eine ohne das kleine x auch nicht.
+    var probe3: [u8; 18] = "gfx fbres=1280 wm\0"
+    if !parse_zahlenpaar(state, (&probe3[0]) as u64, (&wort[0]) as u64, 6) {
+        n = n + 1
+    }
+    kstate.set(state, FB_OFF + S_RESW, merk_w)
+    kstate.set(state, FB_OFF + S_RESH, merk_h)
+    return n
+}
+
+fn selftest4_max() -> u64 {
+    return 12
 }
