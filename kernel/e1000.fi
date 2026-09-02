@@ -836,7 +836,13 @@ fn read_link(state: u64, u: u64) {
 
 // ------------------------------------------------------------- the init
 
-fn init_on(state: u64, u: u64, use_msix: bool, armed: bool) -> bool {
+// RUNDE BLECH: `vec` ist der Meldevektor, den `netdev.fi` fuer DIESE
+// KARTE vergeben hat -- nicht `45 + u` aus der eigenen Einheitennummer.
+// Zwei Treiber mit je einer Karte haetten sonst beide Vektor 45, und
+// `trap.fi` gibt 45 an Karte 0. `vec == 0` heisst: keine Unterbrechung,
+// diese Karte wird abgefragt.
+fn init_on(state: u64, u: u64, use_msix: bool, armed: bool,
+    vec: u64) -> bool {
     if u >= MAX_UNITS {
         return false
     }
@@ -945,7 +951,7 @@ fn init_on(state: u64, u: u64, use_msix: bool, armed: bool) -> bool {
     // order virtio uses. `use_msix` is accepted and ignored: this family
     // has no MSI-X, and saying so through `msix_on` is better than
     // failing to come up at all.
-    intx_arm(state, u, i, armed)
+    intx_arm(state, u, i, armed, vec)
     if armed {
         // EVERY delay register to zero, and the send side in the mask
         // too. Both because of a MEASUREMENT: with only the receive
@@ -1165,14 +1171,20 @@ fn poll_on(state: u64, u: u64) -> bool {
 // The interrupt PIN through the I/O APIC. PCI lines are level triggered
 // and active low -- the same six lines `virtio.intx_arm` has, and for
 // the same reason they cannot simply be shared: the vector is per card.
-fn intx_arm(state: u64, u: u64, i: u64, armed: bool) {
+fn intx_arm(state: u64, u: u64, i: u64, armed: bool, vec: u64) {
     let d: u64 = pci.get(state, i, pci.E_BDF)
     pci.cfg_write16(d, 0x04, pci.cfg_read16(d, 0x04) & 0xFBFF)
+    if vec == 0 {
+        // Diese Karte hat keinen Vektor bekommen. Die Leitung wird gar
+        // nicht erst geroutet -- eine Umleitung auf einen Vektor, den
+        // niemand behandelt, waere schlimmer als keine.
+        return
+    }
     let gsi: u64 = pci.get(state, i, pci.E_IRQLINE)
     if gsi == 0 || gsi > 23 {
         return
     }
-    apic.route(state, gsi, 45 + u, apic.id(state), true, true)
+    apic.route(state, gsi, vec, apic.id(state), true, true)
     if !armed {
         apic.mask_gsi(state, gsi)
     }

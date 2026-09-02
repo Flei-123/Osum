@@ -58,6 +58,7 @@ import r8169
 export {
     probe, kind_on, print_kind, MAX_CARDS,
     KIND_NONE, KIND_VIRTIO, KIND_E1000, KIND_R8169, KIND_I219,
+    MAX_CARDS, IRQ_CARDS, polled_on,
     driver_for, reason_for, print_table, selftest,
     rx_errors, oversize, rx_overflow,
     unsupported_count, unsupported_vendor, unsupported_device,
@@ -80,21 +81,64 @@ export {
 // rounds and round NETVIEW spent a day on two of them landing on the
 // same eight octets. Entered in `tools/kernel/memmap.py`.
 //
-// 0x000 upwards: this file, 0x40 per card.
-// 0x400 upwards: `e1000.fi`, 0x200 per unit.
-const MAX_CARDS: u64 = 2
+// DIE AUFTEILUNG, nachgerechnet und nicht geschaetzt. Eine Seite,
+// 0x1000 Oktette, und sie ist jetzt bis auf 120 Oktette voll:
+//
+//   0x000..0x200   diese Datei, 0x40 je Karte -- MAX_CARDS 8
+//   0x200..0x388   die abgelehnten Karten, 24 Oktett je Eintrag -- 16
+//   0x388..0x400   frei
+//   0x400..0x800   `e1000.fi`, 0x200 je Einheit -- 2
+//   0x800..0xC00   `r8169.fi`, 0x200 je Einheit -- 2
+//   0xC00..0x1000  `igc.fi`,   0x200 je Einheit -- 2
+//
+// ================================================== RUNDE BLECH: ACHT
+//
+// MAX_CARDS stand auf ZWEI, und das war fuer den Zweck dieses Projekts
+// zu wenig: ein gewoehnliches Brett hat einen Chipsatz-Anschluss und
+// eine Steckkarte, ein Server hat zwei Ports auf einem Chip, und wer
+// einen USB-Netzadapter einsteckt, hat drei. Eine dritte Karte fiel
+// bisher stillschweigend heraus -- `probe` hoerte nach der zweiten auf
+// zu zaehlen.
+//
+// ACHT UND NICHT VIERZEHN, obwohl die Treiber zusammen so viele
+// Einheiten haetten (virtio 2 + e1000 2 + r8169 2 + igc 2 = 8, und
+// virtio wohnt ausserhalb dieser Seite): acht Karten sind 0x200
+// Oktette, und der naechste Bereich faengt bei 0x200 an. Mehr ginge
+// nur, wenn die abgelehnten Karten umziehen -- und die stehen
+// absichtlich VOR den Treibern, weil ein Rechner ohne Treiber genau
+// diese Liste braucht.
+//
+// WAS NICHT MITWAECHST, und das ist die ehrliche Halbe an dieser
+// Aenderung: DIE MELDEVEKTOREN. `isr.s` hat zwei Stuempfe, 45 und 46,
+// und diese Runde faesst `isr.s` nicht an. Karte 0 und 1 bekommen
+// deshalb eine Unterbrechung, Karte 2 bis 7 NICHT -- sie werden
+// abgefragt (`netd` fragt den Ring ohnehin ab, nur langsamer). Der
+// Kern sagt das in `print_cards`, statt es zu verschweigen.
+const MAX_CARDS: u64 = 8
 const CARD_SPAN: u64 = 0x40
+
+// Wieviele Karten eine eigene Unterbrechung bekommen koennen. Das ist
+// eine Eigenschaft von `kernel/arch/x86_64/isr.s` und keine von diesem
+// Modul -- deshalb steht die Zahl hier mit ihrer Begruendung und nicht
+// als eine 2 mitten im Quelltext.
+const IRQ_CARDS: u64 = 2
 
 const S_KIND: u64 = 0x00 // which driver, or KIND_NONE
 const S_UNIT: u64 = 0x08 // the card number INSIDE that driver
 const S_PCI: u64 = 0x10 // its place in the device table of pci.fi
 const S_PROBED: u64 = 0x18
+const S_POLLED: u64 = 0x20 // 1 = diese Karte hat keinen Meldevektor
 
-// The refused cards, so that the machine can say what it has. One
-// vendor/device pair, 0x300 upwards.
-const S_UNSUP_N: u64 = 0x300
-const S_UNSUP: u64 = 0x308 // n * 24: Hersteller, Geraet, Grund
-const MAX_UNSUP: u64 = 8
+// Die abgelehnten Karten, damit die Maschine sagen kann, was sie hat.
+// Hersteller, Geraet, Grund -- 24 Oktette je Eintrag.
+//
+// SECHZEHN UND NICHT ACHT: ein Laptop mit Chipsatz-Ethernet, WLAN,
+// Bluetooth-ueber-PCIe und einem Dock kommt auf mehr als acht Geraete,
+// fuer die dieser Kern keinen Treiber hat -- und eine Liste, die
+// ueberlaeuft, verschweigt genau die Karte, wegen der jemand nachsieht.
+const S_UNSUP_N: u64 = 0x200
+const S_UNSUP: u64 = 0x208 // n * 24: Hersteller, Geraet, Grund
+const MAX_UNSUP: u64 = 16
 
 const KIND_NONE: u64 = 0
 const KIND_VIRTIO: u64 = 1
@@ -495,6 +539,8 @@ fn print_cards(state: u64) {
     if kstate.get(state, kstate.NETDEV_OFF + S_PROBED) == 0 {
         probe(state)
     }
+    var s_vec: [u8; 7] = "  vec=\0"
+    var s_poll: [u8; 31] = "  abgefragt (kein Vektor frei)\0"
     var c: u64 = 0
     while c < MAX_CARDS {
         let k: u64 = kstate.get(state, sc(c, S_KIND))
@@ -509,6 +555,19 @@ fn print_cards(state: u64) {
             // has no address of its own yet.
             serial.hex(pci.get(state, kstate.get(state, sc(c, S_PCI)),
                 pci.E_BDF))
+            // RUNDE BLECH: UND WIE SIE SICH MELDET. Eine Karte ohne
+            // Vektor laeuft -- nur langsamer, weil `netd` ihren Ring
+            // abfragen muss. Das ist eine Auskunft, die auf einem
+            // fremden Brett zaehlt: "die dritte Karte ist langsam" ist
+            // ein Befund, "die dritte Karte ist kaputt" waere ein
+            // Irrtum.
+            let v: u64 = vector_for(c)
+            if v == 0 {
+                serial.puts((&s_poll[0]) as u64)
+            } else {
+                serial.puts((&s_vec[0]) as u64)
+                serial.dec(v)
+            }
             serial.nl()
         }
         c = c + 1
@@ -540,16 +599,52 @@ fn print_cards(state: u64) {
 // live here -- a dispatch layer that starts having opinions is a third
 // driver.
 
+// DER MELDEVEKTOR EINER KARTE, und diese Funktion ist der ganze Grund,
+// warum `init_on` unten eine Zahl mehr weitergibt.
+//
+// `trap.fi` hat zwei Einsprungpunkte: Vektor 45 ruft `netdev.irq`
+// (Karte 0) und Vektor 46 ruft `netdev.irq_on(state, 1)` (Karte 1).
+// Mehr Stuempfe hat `isr.s` nicht, und diese Runde faesst `isr.s` nicht
+// an. Also: Karte 0 und 1 bekommen einen Vektor, Karte 2 bis 7 die
+// Null -- und die Null heisst in jedem Treiber "keine Unterbrechung
+// scharfmachen".
+//
+// WARUM DAS UEBERHAUPT EINE FUNKTION IST. Vorher rechnete jeder Treiber
+// `45 + u` aus SEINER Einheitennummer. Bei einem Brett mit einem
+// Intel-Anschluss UND einer Realtek-Karte -- dem haeufigsten Fall
+// ueberhaupt -- ist e1000-Einheit 0 die Karte 0 und r8169-Einheit 0 die
+// Karte 1: beide haetten 45 gerechnet, und Karte 1 haette ihre
+// Meldungen an Karte 0 geschickt.
+fn vector_for(c: u64) -> u64 {
+    if c < IRQ_CARDS {
+        return VEC_NET + c
+    }
+    return 0
+}
+
+fn polled_on(state: u64, c: u64) -> bool {
+    if c >= MAX_CARDS {
+        return false
+    }
+    return kind_on(state, c) != KIND_NONE && c >= IRQ_CARDS
+}
+
 fn init_on(state: u64, c: u64, use_msix: bool, armed: bool) -> bool {
     let k: u64 = kind_on(state, c)
+    let vec: u64 = vector_for(c)
+    if vec == 0 {
+        kstate.set(state, sc(c, S_POLLED), 1)
+    } else {
+        kstate.set(state, sc(c, S_POLLED), 0)
+    }
     if k == KIND_VIRTIO {
-        return virtio.init_on(state, unit_of(state, c), use_msix, armed)
+        return virtio.init_on(state, unit_of(state, c), use_msix, armed, vec)
     }
     if k == KIND_E1000 || k == KIND_I219 {
-        return e1000.init_on(state, unit_of(state, c), use_msix, armed)
+        return e1000.init_on(state, unit_of(state, c), use_msix, armed, vec)
     }
     if k == KIND_R8169 {
-        return r8169.init_on(state, unit_of(state, c), use_msix, armed)
+        return r8169.init_on(state, unit_of(state, c), use_msix, armed, vec)
     }
     return false
 }
