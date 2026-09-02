@@ -52,6 +52,7 @@ fi
 shift
 
 STUFE=0
+OHNE_PS2M=0
 
 # --------------------------------------------------- die Baukonfiguration
 #
@@ -76,6 +77,7 @@ fi
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --ohne-tunnel) TUNNEL=off; shift ;;
+        --ohne-ps2m) OHNE_PS2M=1; shift ;;
         --gui) GUI=$2; shift 2 ;;
         --stufe) STUFE=$2; shift 2 ;;
         *) echo "unbekannte Option: $1" >&2; exit 1 ;;
@@ -145,6 +147,31 @@ if [[ $GUI == off ]]; then
     cp -f kernel/gfx-aus.fi "$TMP/kernel/gfx.fi" || exit 1
 fi
 rm -f "$TMP/kernel/gfx-aus.fi"
+
+# RUNDE MODUL: DERSELBE GRIFF, EINE ETAGE KLEINER.
+#
+# `--ohne-ps2m` ersetzt `kernel/ps2m.fi` (den Treiber des Zeigegeraets,
+# 650 Zeilen) durch `kernel/ps2m-aus.fi` -- dieselben einunddreissig
+# Ausfuhren, kein Treiber darin, und statt dessen ein Blick in die
+# Treibertafel von `kernel/modtab.fi`. Der so gebaute Kern HAT KEINE
+# MAUS, bis eine `.omod`-Datei geladen wird.
+#
+# Das ist nicht dasselbe wie `nomouse` auf der Kommandozeile: dort ist
+# der Treiber im Abbild und wird nur nicht benutzt. Hier ist er NICHT IM
+# ABBILD -- der Groessenunterschied zwischen beiden Abbildern ist der
+# Preis des Treibers und steht in docs/RUNDE-MODUL.md.
+#
+# Kein Aufrufer aendert sich: `wm.fi` ruft `ps2m.x(state)` weiter an
+# fuenfzehn Stellen. Genau das ist der Beweis, dass der Schnitt an der
+# richtigen Stelle liegt.
+if [[ $OHNE_PS2M == 1 ]]; then
+    if [[ $GUI == off ]]; then
+        echo "--ohne-ps2m und --gui off zusammen ergeben nichts: ohne GUI ist ps2m.fi ohnehin nicht im Baum" >&2
+        exit 1
+    fi
+    cp -f kernel/ps2m-aus.fi "$TMP/kernel/ps2m.fi" || exit 1
+fi
+rm -f "$TMP/kernel/ps2m-aus.fi"
 KDIR="$TMP/kernel"
 
 "$FIRNC" -o "$TMP/k.o" "$KDIR/kmain.fi" || exit 1
@@ -168,4 +195,4 @@ ld -n -T kernel/kernel.ld \
 mkdir -p "$(dirname "$AUS")"
 cp -f "$TMP/osum.elf" "$AUS.elf"
 objcopy -O elf32-i386 "$TMP/osum.elf" "$AUS" || exit 1
-echo "$AUS ($(stat -c%s "$AUS") Oktette, Stufe $STUFE, gui=$GUI, tunnel=$TUNNEL)"
+echo "$AUS ($(stat -c%s "$AUS") Oktette, Stufe $STUFE, gui=$GUI, tunnel=$TUNNEL, ps2m=$([[ $OHNE_PS2M == 1 ]] && echo modul || echo fest))"
