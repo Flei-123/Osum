@@ -419,6 +419,82 @@ hat "$TMPD/9b.txt" "usb UHCI" "ein UHCI wird als UHCI benannt"
 hat "$TMPD/9b.txt" "(kein Treiber)" \
     "und bei OHCI/UHCI steht dabei, dass es dafuer keinen Treiber gibt"
 
+# =====================================================================
+echo "== 10. die zwei Nachrechner: Namen und 8125-Register =="
+# =====================================================================
+#
+# WARUM SIE HIER STEHEN UND NICHT NUR IM VERZEICHNIS LIEGEN. Der Bericht
+# der Runde hat sich selbst vorgeworfen, dass `fb.sh` gebaut, aber nie
+# angemeldet wurde -- ein Pruefwerkzeug, das niemand aufruft, ist kein
+# Pruefwerkzeug. Diese beiden pruefen genau das, was in dieser Runde
+# NICHT ueber QEMU pruefbar ist:
+#
+#   chipnames.py  181 Namensbehauptungen gegen pci.ids und den
+#                 Linux-Quelltext. Erster Lauf: 14 davon falsch.
+#   r8125regs.py  den 8125-Zweig gegen r8169_main.c -- Adresse UND
+#                 Zugriffsbreite UND Wert. Erster Lauf: der Sendeanstoss
+#                 falsch, und auf echter Hardware waere kein Paket
+#                 hinausgegangen.
+#
+# Beide laufen OHNE Netz, wenn ihre Vorlagen unter /tmp liegen; fehlen
+# sie, holen sie sie einmal. Ohne Netz und ohne Vorlage werden sie
+# UEBERSPRUNGEN und sagen das -- ein Abnahmelauf darf nicht an einer
+# fehlenden Internetverbindung scheitern, aber er darf sie auch nicht
+# verschweigen.
+
+if python3 tools/blech/chipnames.py >"$TMPD/chipnames.txt" 2>&1; then
+    n=$(grep -oaE 'BESTAETIGT[^0-9]*([0-9]+)' "$TMPD/chipnames.txt" | grep -oaE '[0-9]+$')
+    ok "chipname.fi gegen pci.ids: nichts widerlegt ($n Namen bestaetigt)"
+    for fam in igc igb I219; do
+        grep -qaE "^$fam-Nummern fehlend +: +0 von" "$TMPD/chipnames.txt" \
+            && ok "$fam: alle Nummern aus dem Linux-Quelltext sind benannt" \
+            || bad "$fam: es fehlen Nummern in chipname.fi"
+    done
+elif grep -qa 'hole https' "$TMPD/chipnames.txt"; then
+    echo "  ----  chipnames.py uebersprungen (pci.ids nicht da, kein Netz)"
+else
+    bad "chipname.fi wurde widerlegt -- siehe $TMPD/chipnames.txt"
+    sed -n '/WIDERSPRUCH/,/^$/p' "$TMPD/chipnames.txt" | head -12
+fi
+
+if python3 tools/blech/r8125regs.py >"$TMPD/r8125.txt" 2>&1; then
+    ok "der 8125-Zweig stimmt mit Linux' r8169_main.c ueberein"
+    hat "$TMPD/r8125.txt" "tx_kick" "und der Sendeanstoss wird eigens geprueft"
+elif grep -qa 'hole https' "$TMPD/r8125.txt"; then
+    echo "  ----  r8125regs.py uebersprungen (r8169_main.c nicht da, kein Netz)"
+else
+    bad "der 8125-Zweig weicht von Linux ab -- siehe $TMPD/r8125.txt"
+    sed -n '/WIDERLEGT/,$p' "$TMPD/r8125.txt" | head -8
+fi
+
+# =====================================================================
+echo "== 11. der ehrliche Bestand, auch ueber Nicht-Ethernet =="
+# =====================================================================
+#
+# `probe` sieht nur Klasse 02 UNTERKLASSE 00. Eine WLAN-Karte ist 02:80
+# und kam bis zu dieser Runde in KEINER Liste vor. `-device rocker` ist
+# das einzige Geraet der Klasse 02:80, das QEMU 7.2 anbietet -- damit
+# ist der Zweig wirklich gefahren und nicht nur gelesen.
+lauf "$TMPD/neu.mb" "hwdiag nokbd nosched noproc nofs noring3" "$TMPD/10.txt" \
+    -device e1000e,netdev=nx -netdev user,id=nx -device rocker,name=sw1
+hat "$TMPD/10.txt" "netdev: bestand" "die Bestandsliste wird gedruckt"
+hat "$TMPD/10.txt" "82574L (1G) -> e1000" \
+    "die Karte MIT Treiber steht mit ihrem Modellnamen da, nicht nur als 'Intel'"
+hat "$TMPD/10.txt" "kein Treiber (kein Ethernet-Port)" \
+    "und das Klasse-02:80-Geraet wird GENANNT statt verschwiegen"
+hat "$TMPD/10.txt" "netdev: bestand 2 geraete, 1 mit treiber, 1 ohne" \
+    "und die Zaehlung darunter stimmt"
+
+# Die Zeilenanfaenge, die Vertraege sind. Sie sind in dieser Runde
+# zweimal versehentlich uebersetzt worden; ab jetzt faellt das SOFORT
+# hier auf und nicht erst in drei fremden Testdateien.
+lauf "$TMPD/neu.mb" "hwdiag nokbd nosched noproc nofs noring3" "$TMPD/11.txt" \
+    -device ne2k_pci,netdev=ny -netdev user,id=ny
+hat "$TMPD/11.txt" "netdev: no driver for 0x10ec:0x8029" \
+    "VERTRAG: der Zeilenanfang ist der von Runde HWNET geblieben"
+hat "$TMPD/11.txt" "[RTL8029 (ne2000)]" \
+    "und der Klarname haengt HINTEN dran, wo er keine Zusage bricht"
+
 echo
 echo "BLECH: $pass bestanden, $fail gefallen"
 [ "$fail" -eq 0 ] || exit 1
