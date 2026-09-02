@@ -136,13 +136,32 @@ else
     ok "GEGENPROBE: HWID auf 0x59000 kollidiert mit BATT und faellt auf"
 fi
 
+# RUNDE MERGE-3: 480 SEKUNDEN STATT 240, UND DIE ZAHL IST GEMESSEN.
+# Nach der Zusammenfuehrung von mergeline2 endete der Abschnitt mit
+# "der Geheimnislauf endet ordentlich: '124', erwartet '21'" -- 124 ist
+# der Rueckgabewert von `timeout`, also NICHT ein Fehler des Kerns,
+# sondern die Frist. Danach fielen sechs weitere Zusagen, weil ihre
+# Zahlen aus der Ausgabe dieses einen Laufs kommen: 212/7.
+# GEMESSEN mit einer Kopie dieses Laeufers, die jede Startdauer
+# mitschreibt (Wirt ruhig, Lastmittel unter 4):
+#     sec2   254 s   <- der Geheimnislauf, mit 240 s abgeschnitten
+#     mess   124 s
+#     orph   118 s
+#     backup  84 s
+# Der laengste Lauf liegt also 14 Sekunden ueber der alten Frist. Mit
+# 900 s lief derselbe Abschnitt vollstaendig durch: 220 bestanden, 0
+# gescheitert. 480 s sind knapp das Doppelte des gemessenen Wertes --
+# genug Luft fuer einen belasteten Wirt und immer noch eine Frist, die
+# einen echten Haenger abfaengt. ES IST KEINE ZUSAGE ENTSCHAERFT:
+# derselbe Lauf, dieselben Vergleiche, nur nicht mehr mittendrin
+# abgeschnitten.
 # ------------------------------------------------------------- ein Lauf
 # lauf <name> <abbild> <kommandozeile> [weitere qemu-argumente...]
 lauf() {
     local name=$1 img=$2 app=$3
     shift 3
     cp "$img" "$TMPD/live-$name.img"
-    timeout 240 $QEMU_X86 -kernel "$TMPD/k0.img" -m 256 \
+    timeout 480 $QEMU_X86 -kernel "$TMPD/k0.img" -m 256 \
         -append "$app" -serial "file:$TMPD/$name.txt" -display none \
         -no-reboot -drive "file=$TMPD/live-$name.img,format=raw,if=ide,index=0" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
@@ -153,7 +172,7 @@ lauf() {
 kernlauf() {
     local name=$1 app=$2
     shift 2
-    timeout 240 $QEMU_X86 -kernel "$TMPD/k0.img" -m 256 \
+    timeout 480 $QEMU_X86 -kernel "$TMPD/k0.img" -m 256 \
         -append "$app" -serial "file:$TMPD/$name.txt" -display none -no-reboot \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 "$@" > /dev/null 2>&1
     echo $?
