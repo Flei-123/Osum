@@ -82,6 +82,7 @@ import part
 import nvme
 import ahci
 import usb
+import blkdev
 
 export {
     scan, report, mount_root, order_line,
@@ -519,12 +520,30 @@ fn hc_lines(state: u64) {
     }
 }
 
+// RUNDE BLECH, NACHTRAG: DIE MECHANIK LIEGT JETZT IN `blkdev.fi`.
+//
+// Diese Datei hatte beides -- den Lauf ueber den Bus UND die
+// Entscheidung, welches Geraet die Wurzel traegt. Der Eigner hat
+// zurecht verlangt, dass Speicher dieselbe Form bekommt wie Netz: die
+// TABELLE und der VERTEILER gehoeren in eine Schicht wie `netdev.fi`,
+// und was hier bleibt, ist die POLITIK: welcher der gefundenen
+// Bewerber traegt wirklich eine Wurzel.
+//
+// `report` ruft deshalb `blkdev.print_disks` -- die Liste und die
+// abgelehnten Controller kommen von dort, mit ihren Nummern und ihrem
+// Grund. Die USB-Reglerzeilen bleiben hier, weil sie eine Auskunft
+// ueber den EINGABEWEG sind und nicht ueber die Platte.
 fn report(state: u64) {
     var s_over: [u8; 39] = "mehr Geraete als Plaetze in der Liste\0\0"
     scan(state)
-    order_line(state)
+    // DIE PLATTEN UND DIE ABGELEHNTEN CONTROLLER: aus `blkdev.fi`, der
+    // Schicht, die dieselbe Form hat wie `netdev.fi`. Was frueher hier
+    // stand, stand an der falschen Stelle.
+    blkdev.print_disks(state)
+    // DIE USB-REGLER bleiben hier: sie sind eine Auskunft ueber den
+    // EINGABEWEG (xHCI, EHCI, und was ohne Treiber bleibt) und nicht
+    // ueber die Platte.
     hc_lines(state)
-    warn_lines(state)
     if kstate.get(state, sc(S_NCAND)) > MAX_CAND
         || kstate.get(state, sc(S_NWARN)) > MAX_WARN
         || kstate.get(state, sc(S_NHC)) > MAX_HC {
@@ -544,6 +563,26 @@ fn report(state: u64) {
 // Aenderung an 54 Messungen statt an einem Startproblem.
 
 const TRY_BLOCKS: u64 = 4096
+
+// Die Arten von `blkdev.fi` in die dieser Datei. Beide Listen tragen
+// dieselben Zahlen -- diese Funktion sagt das AUS, statt es
+// vorauszusetzen. Wer eine der beiden umsortiert, bekommt hier ein
+// KIND_NONE und nicht eine Platte, die falsch behandelt wird.
+fn blkdev_kind(k: u64) -> u64 {
+    if k == blkdev.KIND_NVME {
+        return K_NVME
+    }
+    if k == blkdev.KIND_AHCI {
+        return K_AHCI
+    }
+    if k == blkdev.KIND_USB {
+        return K_USB
+    }
+    if k == blkdev.KIND_ATA {
+        return K_IDE
+    }
+    return K_NONE
+}
 
 fn try_mount_on(state: u64, dev: u64, blocks_n: u64) -> bool {
     // Erst roh: eine Platte, die mit `mkfs` unserer Bauart beschrieben
@@ -659,6 +698,14 @@ fn blocks_of(state: u64, kind: u64, dev: u64) -> u64 {
 // darauf eingehaengt haette, waere zehn Zeilen spaeter ueberschrieben.
 // Deshalb wird der Bewerber dann uebersprungen -- und die Zeile sagt
 // es, statt ihn stillschweigend auszulassen.
+// NACHTRAG: DIE BEWERBER KOMMEN JETZT AUS `blkdev.fi`.
+//
+// Vorher hat diese Datei den Bus selbst abgelaufen und ihre eigene
+// Liste gefuehrt. Danach gab es ZWEI Listen derselben Platten -- eine
+// hier und eine in `blkdev.fi` -, und zwei Listen laufen frueher oder
+// spaeter auseinander. Jetzt gibt es eine: `blkdev` findet und ordnet,
+// diese Funktion entscheidet, WELCHE davon wirklich eine Wurzel traegt.
+// Das ist dieselbe Trennung, die `netdev.fi` und `netsvc.fi` haben.
 fn mount_root(state: u64, skip_nvme: bool, skip_ahci: bool) -> bool {
     var s_try: [u8; 9] = "versuch \0"
     var s_up: [u8; 16] = " -- kommt nicht\0"
@@ -668,14 +715,16 @@ fn mount_root(state: u64, skip_nvme: bool, skip_ahci: bool) -> bool {
     var s_none: [u8; 45] = "kein Geraet traegt eine Wurzel -- Ende hier\0\0"
     var s_skip: [u8; 35] = " -- uebersprungen, gehoert hw.disk\0"
     scan(state)
-    let n: u64 = kstate.get(state, sc(S_NCAND))
-    var lim: u64 = n
-    if lim > MAX_CAND {
-        lim = MAX_CAND
-    }
+    let lim: u64 = blkdev.disks(state)
     var i: u64 = 0
     while i < lim {
-        let kind: u64 = kstate.get(state, ent(L_CAND, i, E_KIND))
+        // Die Arten von `blkdev.fi` und die von hier tragen dieselben
+        // Zahlen in derselben Reihenfolge (NVMe 1, AHCI 2, USB 3, IDE
+        // 4). Das ist kein Zufall, sondern der Grund, warum diese
+        // Schleife ohne Umrechnung auskommt -- und `blkdev_kind` unten
+        // rechnet es trotzdem nach, damit es auffaellt, wenn jemand
+        // eine der beiden Listen umsortiert.
+        let kind: u64 = blkdev_kind(blkdev.kind_at(state, i))
         kstate.set(state, sc(S_TRIED), kstate.get(state, sc(S_TRIED)) + 1)
         // Die Zeile wird HIER geschlossen und nicht erst nach dem
         // Ergebnis: `part.scan` und `nvme.init` drucken selbst, und
