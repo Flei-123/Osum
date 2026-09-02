@@ -258,9 +258,15 @@ grep -q 'K16_OFF' tools/kernel/memmap.py \
 # RUNDE ARM: die Kopie braucht `kernel/arch/x86_64/` mit -- `hv.fi` liegt
 # seit dem Trennschnitt dort, und ohne sie stirbt der Kartenpruefer an
 # einem KeyError statt die Kollision zu melden, die hier gemessen wird.
-mkdir -p "$TMPD/kern/arch/x86_64"
-cp kernel/*.fi "$TMPD/kern/"
-cp kernel/arch/x86_64/*.fi "$TMPD/kern/arch/x86_64/"
+mkdir -p "$TMPD/kern"
+# RUNDE STRUKTUR: EINE Kopie des GANZEN Kernbaums statt einer Liste
+# von Verzeichnissen. Bis hierher stand da `cp kernel/*.fi` plus eine
+# zweite Zeile fuer `arch/x86_64/` -- nachgetragen von Runde ARM,
+# nachdem genau diese Stelle an einem KeyError gestorben war. Mit den
+# Treibern unter kernel/drivers/ waere derselbe Nachtrag ein drittes
+# Mal faellig geworden. `cp -a kernel/.` nimmt, was da ist, und bleibt
+# beim naechsten Umzug richtig.
+cp -a kernel/. "$TMPD/kern/"
 # Die Gegenprobe legt K16 auf die Seite des Schriftlesers aus Runde K10
 # (TTF_OFF = 0x3F000). Sie ist BELEGT, also MUSS der Pruefer anschlagen
 # -- ein Pruefer, der nie anschlaegt, rechnet nichts nach. (Nicht auf

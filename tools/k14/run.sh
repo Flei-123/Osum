@@ -175,9 +175,15 @@ done
 # RUNDE ARM: die Kopie braucht `kernel/arch/x86_64/` mit -- `hv.fi` liegt
 # seit dem Trennschnitt dort, und ohne sie stirbt der Kartenpruefer an
 # einem KeyError statt die Kollision zu melden, die hier gemessen wird.
-mkdir -p "$TMPD/kollision/arch/x86_64"
-cp kernel/*.fi "$TMPD/kollision/"
-cp kernel/arch/x86_64/*.fi "$TMPD/kollision/arch/x86_64/"
+mkdir -p "$TMPD/kollision"
+# RUNDE STRUKTUR: EINE Kopie des GANZEN Kernbaums statt einer Liste
+# von Verzeichnissen. Bis hierher stand da `cp kernel/*.fi` plus eine
+# zweite Zeile fuer `arch/x86_64/` -- nachgetragen von Runde ARM,
+# nachdem genau diese Stelle an einem KeyError gestorben war. Mit den
+# Treibern unter kernel/drivers/ waere derselbe Nachtrag ein drittes
+# Mal faellig geworden. `cp -a kernel/.` nimmt, was da ist, und bleibt
+# beim naechsten Umzug richtig.
+cp -a kernel/. "$TMPD/kollision/"
 sed -i 's/^const PROCFS_OFF: u64 = 0x45000$/const PROCFS_OFF: u64 = 0x3C000/' "$TMPD/kollision/kstate.fi"
 if python3 tools/kernel/memmap.py "$TMPD/kollision" > "$TMPD/karte2.txt" 2>&1; then
     bad "GEGENPROBE: PROCFS_OFF auf 0x3C000 (= FB_OFF) und der Pruefer schweigt"

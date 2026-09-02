@@ -234,9 +234,15 @@ else bad "die Speicherkarte von kdata kollidiert"; echo "$kart" | sed 's/^/     
 # RUNDE ARM: siehe tools/wm/run.sh -- die Kopie braucht arch/x86_64/ mit,
 # sonst findet der Pruefer `hv.fi` nicht und stirbt an einem KeyError.
 GG="$TMPD/kernel-gg"
-mkdir -p "$GG/arch/x86_64"
-cp kernel/*.fi "$GG/"
-cp kernel/arch/x86_64/*.fi "$GG/arch/x86_64/"
+mkdir -p "$GG"
+# RUNDE STRUKTUR: EINE Kopie des GANZEN Kernbaums statt einer Liste
+# von Verzeichnissen. Bis hierher stand da `cp kernel/*.fi` plus eine
+# zweite Zeile fuer `arch/x86_64/` -- nachgetragen von Runde ARM,
+# nachdem genau diese Stelle an einem KeyError gestorben war. Mit den
+# Treibern unter kernel/drivers/ waere derselbe Nachtrag ein drittes
+# Mal faellig geworden. `cp -a kernel/.` nimmt, was da ist, und bleibt
+# beim naechsten Umzug richtig.
+cp -a kernel/. "$GG/"
 sed -i 's/^const FB_OFF: u64 = 0x3C000/const FB_OFF: u64 = 0x2F000/; s/^const FONT_OFF: u64 = 0x3C100/const FONT_OFF: u64 = 0x2F100/' "$GG/fb.fi" "$GG/kstate.fi"
 gg=$(python3 tools/kernel/memmap.py "$GG" 2>&1)
 if [ $? -ne 0 ] && printf '%s' "$gg" | grep -q 'KOLLISION: FB'; then

@@ -128,7 +128,7 @@ grep -q '"HWID_OFF"' tools/kernel/memmap.py \
     || bad "HWID_OFF fehlt in tools/kernel/memmap.py"
 
 # GEGENPROBE: der Bereich auf die Seite von K18 gelegt MUSS auffallen.
-mkdir -p "$TMPD/kbad" && cp kernel/*.fi "$TMPD/kbad/"
+mkdir -p "$TMPD/kbad" && cp -a kernel/. "$TMPD/kbad/"
 sed -i 's/^const HWID_OFF: u64 = 0x5A000/const HWID_OFF: u64 = 0x59000/' "$TMPD/kbad/kstate.fi"
 if python3 tools/kernel/memmap.py "$TMPD/kbad" > "$TMPD/karte-bad.txt" 2>&1; then
     bad "GEGENPROBE: HWID auf 0x59000 (dem Akku) faellt NICHT auf"

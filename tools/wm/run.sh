@@ -209,9 +209,15 @@ done
 # RUNDE ARM: die Kopie braucht `kernel/arch/x86_64/` mit -- `hv.fi` liegt
 # seit dem Trennschnitt dort, und ohne sie stirbt der Kartenpruefer an
 # einem KeyError statt die Kollision zu melden, die hier gemessen wird.
-GG="$TMPD/kernel-gg"; mkdir -p "$GG/arch/x86_64"
-cp kernel/*.fi "$GG/"
-cp kernel/arch/x86_64/*.fi "$GG/arch/x86_64/"
+GG="$TMPD/kernel-gg"; mkdir -p "$GG"
+# RUNDE STRUKTUR: EINE Kopie des GANZEN Kernbaums statt einer Liste
+# von Verzeichnissen. Bis hierher stand da `cp kernel/*.fi` plus eine
+# zweite Zeile fuer `arch/x86_64/` -- nachgetragen von Runde ARM,
+# nachdem genau diese Stelle an einem KeyError gestorben war. Mit den
+# Treibern unter kernel/drivers/ waere derselbe Nachtrag ein drittes
+# Mal faellig geworden. `cp -a kernel/.` nimmt, was da ist, und bleibt
+# beim naechsten Umzug richtig.
+cp -a kernel/. "$GG/"
 sed -i 's/^const WM_OFF: u64 = 0x1E000/const WM_OFF: u64 = 0x3C000/' "$GG/kstate.fi"
 gg=$(python3 tools/kernel/memmap.py "$GG" 2>&1)
 if [ $? -ne 0 ] && printf '%s' "$gg" | grep -q 'KOLLISION'; then
@@ -234,9 +240,15 @@ else
 fi
 # RUNDE ARM: die Kopie muss auch das Maschinenverzeichnis mitnehmen --
 # `trap.fi` liegt seit dem Trennschnitt unter arch/x86_64/.
-GV="$TMPD/kernel-gv"; mkdir -p "$GV/arch/x86_64"
-cp kernel/*.fi "$GV/"
-cp kernel/arch/x86_64/*.fi "$GV/arch/x86_64/"
+GV="$TMPD/kernel-gv"; mkdir -p "$GV"
+# RUNDE STRUKTUR: EINE Kopie des GANZEN Kernbaums statt einer Liste
+# von Verzeichnissen. Bis hierher stand da `cp kernel/*.fi` plus eine
+# zweite Zeile fuer `arch/x86_64/` -- nachgetragen von Runde ARM,
+# nachdem genau diese Stelle an einem KeyError gestorben war. Mit den
+# Treibern unter kernel/drivers/ waere derselbe Nachtrag ein drittes
+# Mal faellig geworden. `cp -a kernel/.` nimmt, was da ist, und bleibt
+# beim naechsten Umzug richtig.
+cp -a kernel/. "$GV/"
 sed -i 's/^const VEC_MOUSE: u64 = 46/const VEC_MOUSE: u64 = 44/' "$GV/arch/x86_64/trap.fi"
 gv=$(python3 tools/kernel/memmap.py "$GV" 2>&1)
 if [ $? -ne 0 ] && printf '%s' "$gv" | grep -q 'Vektor 44 haben zwei Namen'; then
