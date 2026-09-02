@@ -1228,7 +1228,7 @@ lauf "33. die weiche Oberflaeche: Schatten, Knoepfe, Fokus, Kontrast (tools/soft
 # darf die neue Suche NULL Mal laufen. Daran haengt die Zusage, dass
 # diese Runde an den 53 Abschnitten darueber nichts aendert.
 lauf "34. Osum auf fremdem Blech: Wurzelsuche, RAID-Meldung, EHCI, NVMe-Namensraeume (tools/blech/run.sh, Runde BLECH)" \
-     tools/blech/run.sh blech '^BLECH: |^  --    (QEMU|Beschleuniger)|^  OK    (der Kern|die Speicherkarte|ein OFS|DER ALTE|DER NEUE|und haengt|und /bin|und die Shell|die LEERE|und die AHCI|eingehaengt|kein einziger|und die Wurzel|ein Controller|und mit SEINEN|und es steht|der SD|und die Reihenfolge|die Firmware|an Anschluss|READ CAPACITY|keine Uebertragung|Block |die Tastatur|sechs Tasten|und es sind|der Endpunkt|alle drei|auch der mit|Namensraum |GEGENPROBE|und kein Geraet|derselbe Treiber|q35|die nackte|ein EHCI|ein OHCI|ein UHCI|und bei OHCI)'
+     tools/blech/run.sh blech '^BLECH: |^  --    (QEMU|Beschleuniger)|^  OK    (der Kern|die Speicherkarte|ein OFS|DER ALTE|DER NEUE|und haengt|und /bin|und die Shell|die LEERE|und die AHCI|eingehaengt|kein einziger|und die Wurzel|ein Controller|und mit SEINEN|und es steht|der SD|und die Reihenfolge|die Firmware|an Anschluss|READ CAPACITY|keine Uebertragung|Block |die Tastatur|sechs Tasten|und es sind|der Endpunkt|Geraet 0|Geraet 1|beide sind|und Block |alle drei|auch der mit|Namensraum |GEGENPROBE|und kein Geraet|derselbe Treiber|q35|die nackte|ein EHCI|ein OHCI|ein UHCI|und bei OHCI)'
 
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
