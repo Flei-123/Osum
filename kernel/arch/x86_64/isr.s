@@ -529,6 +529,16 @@ vectors:
     .quad msr_read_safe             /* 71 */
     .quad msr_write_safe            /* 72 */
 
+    /* RUNDE MODUL: `osum_panic` als ADRESSE.
+     *
+     * `kernel/ksym.fi` reicht die Kerndienste an ein nachgeladenes Modul
+     * durch, und JEDES Modul braucht `osum_panic` -- der Uebersetzer legt
+     * den Aufruf unter `profile kernel` bei jeder geprueften Rechnung
+     * selbst dazu (SPEC Abschnitt 2). Ein Funktionswert hilft dort nicht:
+     * `osum_panic` steht in dieser Datei und ist keine Firn-Funktion.
+     * Also derselbe Weg wie fuer die Faengerroutinen 70..72. */
+    .quad osum_panic                /* 73: kernel/ksym.fi */
+
     .section .bss, "aw", @nobits
     .align 8
 saved_rsp:
