@@ -532,13 +532,15 @@ gehalten.
 Deshalb dasselbe Verfahren wie in MERGE-3 und MERGE-FINAL: **jeder rote
 Abschnitt wird einzeln nachgemessen**, und erst diese Zahl zählt.
 
-### Die drei roten aus dem vollen Lauf, einzeln nachgemessen
+### Die roten aus dem vollen Lauf, einzeln nachgemessen
 
 | Abschnitt | voller Lauf (Last 8–19) | einzeln | Urteil |
 |---|---|---|---|
 | `pci` | 97 / 1 — `DMA against PIO … 995, expected ge 1200` | **98 / 0**, `bench: faster=1415 permil` | **Lastphantom.** Die Zusage ist ein Durchsatz*verhältnis* (NVMe-DMA gegen ATA-PIO); unter drei gleichzeitigen Abnahmen bricht es ein. |
 | `async` | 106 / 1 — `Speicher je Auftrag in Oktett: 0, erwartet eq 112` | **108 / 0** | **Lastphantom.** Die 0 heißt „die Zeile kam nicht", nicht „der Wert ist falsch" — der Lauf, der sie druckt, lief in sein Zeitlimit. Zur Sicherheit auch auf `main` gefahren: dort ebenfalls 108 / 0. |
+| `theme` | 1 / 2 — `themetest hat keine brauchbare Zeile fuer gpx geliefert` | **91 / 0** | **Lastphantom**, und wieder derselbe Bauart: „keine brauchbare Zeile" heißt „der Lauf kam nicht so weit", nicht „der Wert ist falsch". |
 | `arm` | 47 / 1 — `_F0.amain__kexception is missing` | 47 / 1 | **Gehört nicht dieser Runde.** Derselbe Abschnitt auf `main` (`163984d`), gefahren in `/root/osum-basecheck`: **dieselbe Zahl, derselbe einzelne Fehler.** Diese Runde hat `kernel/arch/aarch64/` nicht angefasst (`git diff main...HEAD` darauf ist leer). |
+| `netview` | 3 rote Zusagen | — | **Gehört nicht dieser Runde**, und das ist nachlesbar: `docs/RUNDE-MERGE3.md` führt genau diese Zusagen als die EINE offene Regression von `main` auf, wörtlich — `faking: the state icon went missing: falsch 40 von 82` und `9a: both Super+A presses became hotkeys: 1, expected eq 2`. Diese Runde hat `netview.fi` nicht angefasst. |
 
 Der `arm`-Punkt hätte auch anders ausgehen können, und deshalb ist er
 zusätzlich geprüft worden: diese Runde fügt der **Leerlaufaufgabe** eine
