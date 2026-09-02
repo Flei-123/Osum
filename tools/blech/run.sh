@@ -220,13 +220,19 @@ lauf "$TMPD/neu.mb" "hwdiag nokbd nosched noproc nofs noring3" "$TMPD/4.txt" \
     -device megasas -device sdhci-pci \
     -drive "file=$TMPD/leer.img,format=raw,if=none,id=n0" \
     -device "nvme,drive=n0,serial=x" -device "ahci,id=a0"
-hat "$TMPD/4.txt" "steht im RAID-Modus (01:04)" \
+# NACHTRAG RUNDE BLECH: diese vier Zeilen kommen jetzt aus
+# `kernel/blkdev.fi` statt aus `rootsel.fi` -- der Schicht, die fuer
+# Speicher dasselbe ist wie `netdev.fi` fuer Netz.  Die AUSSAGE ist
+# dieselbe geblieben und um den Chipnamen reicher; nur die Vorsilbe
+# heisst jetzt `blkdev:` und nicht mehr `rootsel:`.
+hat "$TMPD/4.txt" "RAID-Modus" \
     "ein Controller der Klasse 01:04 wird als RAID-Modus erkannt"
 hat "$TMPD/4.txt" "1000:0060" "und mit SEINEN NUMMERN genannt"
-hat "$TMPD/4.txt" 'im BIOS "SATA Mode" von RAID/RST auf AHCI stellen' \
+hat "$TMPD/4.txt" "MegaRAID" "und mit seinem NAMEN"
+hat "$TMPD/4.txt" 'im BIOS "SATA Mode" auf AHCI stellen' \
     "und es steht daneben, was zu tun ist"
-hat "$TMPD/4.txt" "ist ein SD/eMMC-Regler" "der SD-Regler ebenfalls"
-hat "$TMPD/4.txt" "rootsel: reihenfolge: nvme > ahci > ide" \
+hat "$TMPD/4.txt" "SD/eMMC-Regler" "der SD-Regler ebenfalls"
+hat "$TMPD/4.txt" "blkdev: reihenfolge: nvme > ahci > ide" \
     "und die Reihenfolge, in der gesucht wird, steht in EINER Zeile"
 
 # =====================================================================
@@ -403,7 +409,7 @@ done < "$TMPD/summen.txt"
 echo "== 9. was der Rechner ueber sich selbst sagt =="
 # =====================================================================
 lauf "$TMPD/neu.mb" "hwdiag nokbd nosched noproc nofs noring3" "$TMPD/9.txt"
-hat "$TMPD/9.txt" "rootsel: reihenfolge: ide" \
+hat "$TMPD/9.txt" "blkdev: reihenfolge: ide" \
     "die nackte Maschine: nur der IDE-Controller des PIIX3 bleibt uebrig"
 lauf "$TMPD/neu.mb" "hwdiag nokbd nosched noproc nofs noring3" "$TMPD/9b.txt" \
     -device usb-ehci -device pci-ohci -device piix4-usb-uhci

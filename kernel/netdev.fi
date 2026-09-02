@@ -28,7 +28,8 @@
 // that a machine which does not work says which chip it has instead of
 // saying nothing. That sentence is the whole point of the round: Justin
 // puts OrientOS on a real board, and the serial line has to say either
-// "e1000 at 00:03.0" or "no driver for 10EC:8168" -- never just silence.
+// "e1000 at 00:03.0" oder "kein Treiber fuer Intel I226-V (8086:125c)"
+// -- niemals blosses Schweigen.
 //
 // ROUND RTL made that table a DATA TABLE. Until this round the choice was
 // an `if` cascade inside `probe`, and adding a chip meant editing the
@@ -51,6 +52,7 @@
 import kstate
 import serial
 import pci
+import chipname
 import virtio
 import e1000
 import r8169
@@ -59,7 +61,7 @@ export {
     probe, kind_on, print_kind, MAX_CARDS,
     KIND_NONE, KIND_VIRTIO, KIND_E1000, KIND_R8169, KIND_I219,
     MAX_CARDS, IRQ_CARDS, polled_on,
-    driver_for, reason_for, print_table, selftest,
+    driver_for, reason_for, print_table, selftest, print_inventory,
     rx_errors, oversize, rx_overflow,
     unsupported_count, unsupported_vendor, unsupported_device,
     unsupported_reason,
@@ -156,6 +158,13 @@ const WHY_IGB: u64 = 2 // I210/I211: igb-Silizium, andere Warteschlangen
 const WHY_WIFI: u64 = 3 // WLAN: 802.11-MAC und Firmware, kein Ethernet
 const WHY_OLD8139: u64 = 4 // RTL8139 vor Revision 0x20: kein C+-Modus
 const WHY_OTHERVENDOR: u64 = 5 // Broadcom, Atheros, Aquantia, Marvell
+// RUNDE BLECH: der I219, den dieser Kern NICHT faehrt. `e1000.supports_ich`
+// nennt 20 der 53 I219-Nummern aus Linux' e1000e; die uebrigen 33 sitzen in
+// neueren Bruecken (Tiger Lake bis Arrow Lake) und brauchen dort eigene
+// Handgriffe, die hier weder gebaut noch gemessen sind. Das ist ein ANDERES
+// "nein" als bei einem igc -- der Treiber ist da, nur diese Stufe nicht
+// freigegeben -- und wer davorsteht, soll den Unterschied lesen koennen.
+const WHY_I219GEN: u64 = 6
 
 // Card 0 keeps vector 45 and card 1 takes 46 -- unchanged from round
 // NETMON, because `isr.s` has those two stubs and no others.
@@ -347,53 +356,89 @@ fn driver_for(ven: u64, dev: u64, rev: u64) -> u64 {
 // waehrend "unbekannt" ihn zuerst zweifeln laesst, ob die Karte ueberhaupt
 // steckt.
 fn reason_for(ven: u64, dev: u64, rev: u64) -> u64 {
+    // RUNDE BLECH: DIE LISTEN STEHEN NICHT MEHR HIER.
+    //
+    // Vorher standen in dieser Funktion vier Intel-Nummern als
+    // Stichprobe -- 15F2, 15F3, 125B, 125C -- und ein I226-IT (125D)
+    // fiel durch als "unbekannt". Das ist genau der Fall, den der
+    // Eigner abgestellt haben wollte: ein Rechner, der schweigt, obwohl
+    // der Chip bekannt ist.
+    //
+    // Jetzt fragt diese Funktion `chipname.fi`, und zwar mit `say =
+    // false` -- dieselbe Nummernliste, die auch den Klarnamen druckt,
+    // nur ohne zu drucken. Damit gibt es die Liste EINMAL. Eine zweite
+    // Liste hier waere binnen einer Runde veraltet, und niemand haette
+    // es gemerkt, weil beide fuer sich plausibel ausgesehen haetten.
     if ven == r8169.VENDOR_REALTEK {
         if dev == 0x8139 {
             return WHY_OLD8139
         }
-        return WHY_UNKNOWN
+        // Realtek baut auch WLAN. Wer im Laptop nur einen 8852BE hat,
+        // soll nicht "unbekannt" lesen -- Ethernet fehlt dort schlicht.
+        if dev == 0xC821 || dev == 0xC822 || dev == 0xB822 {
+            return WHY_WIFI
+        }
+        if dev == 0xC852 || dev == 0xB852 {
+            return WHY_WIFI
+        }
+        return WHY_OTHERVENDOR
     }
     if ven == e1000.VENDOR_INTEL {
-        // I225/I226 -- neuere Bretter, 2,5 Gbit
-        if dev == 0x15F2 || dev == 0x15F3 || dev == 0x125B || dev == 0x125C {
+        // Alle 16 igc-Nummern aus Linux' igc_hw.h.
+        if chipname.intel_igc(dev, false) {
             return WHY_IGC
         }
-        if dev == 0x0D9F || dev == 0x3100 || dev == 0x3101 {
-            return WHY_IGC
-        }
-        // I210/I211
-        if dev == 0x1533 || dev == 0x1536 || dev == 0x1537 || dev == 0x1539 {
+        // Alle 32 igb-Nummern aus Linux' igb/e1000_hw.h.
+        if chipname.intel_igb(dev, false) {
             return WHY_IGB
         }
-        // Die WLAN-Bausteine, die in denselben Laptops stecken. Sie sind
-        // NICHT Klasse 02:00, tauchen hier also normalerweise nicht auf --
-        // die Zeile steht fuer print_table, damit die Auskunft stimmt,
-        // wenn jemand die Nummer nachschlaegt.
-        if dev == 0x2723 || dev == 0x2725 || dev == 0xA0F0 || dev == 0x0082 {
+        // Ein I219 kommt hier nur an, wenn `driver_for` ihn NICHT
+        // genommen hat -- also genau die 33 Nummern, deren Bruecke
+        // nicht freigegeben ist.
+        if chipname.intel_i219(dev, false) {
+            return WHY_I219GEN
+        }
+        if chipname.intel_wifi(dev, false) {
             return WHY_WIFI
         }
         return WHY_UNKNOWN
     }
-    // Broadcom (14E4), Atheros/Qualcomm (168C, 1969), Aquantia (1D6A),
-    // Marvell (11AB), Nvidia (10DE), AMD/pcnet (1022), DEC/tulip (1011)
-    if ven == 0x14E4 || ven == 0x168C || ven == 0x1969 {
+    // Reine WLAN-Hersteller: Atheros/Qualcomm-Funk (168C) und MediaTek
+    // (14C3). Dort ist "kein Ethernet" die richtige Auskunft.
+    if ven == chipname.VEN_ATHEROS || ven == chipname.VEN_MEDIATEK {
+        return WHY_WIFI
+    }
+    // Broadcom (14E4), Qualcomm-Ethernet/Killer (1969), Aquantia (1D6A),
+    // Marvell (11AB), Nvidia (10DE), AMD/pcnet (1022), DEC/tulip (1011),
+    // VMware (15AD).
+    if ven == chipname.VEN_BROADCOM || ven == chipname.VEN_QUALCOMM {
         return WHY_OTHERVENDOR
     }
-    if ven == 0x1D6A || ven == 0x11AB || ven == 0x1022 {
+    if ven == chipname.VEN_AQUANTIA || ven == chipname.VEN_MARVELL {
         return WHY_OTHERVENDOR
     }
-    if ven == 0x1011 || ven == 0x15AD {
+    if ven == chipname.VEN_AMD || ven == chipname.VEN_NVIDIA {
+        return WHY_OTHERVENDOR
+    }
+    if ven == chipname.VEN_DEC || ven == chipname.VEN_VMWARE {
         return WHY_OTHERVENDOR
     }
     return WHY_UNKNOWN
 }
 
 fn print_reason(why: u64) {
-    var s_igc: [u8; 34] = "igc silicon, advanced descriptors\0"
-    var s_igb: [u8; 30] = "igb silicon, other queue set\0\0"
-    var s_wifi: [u8; 26] = "wifi, needs 802.11 + fw\0\0\0"
-    var s_old: [u8; 31] = "rtl8139 rev < 0x20, no C+ mode\0"
-    var s_oth: [u8; 25] = "other vendor, no driver\0\0"
+    // DER ANFANG DIESER FUENF ZEICHENKETTEN IST FESTGENAGELT.
+    // `tools/rtl/run.sh` prueft sechs von ihnen als Teilzeichenkette
+    // direkt hinter "-> none  " ("igc silicon", "igb silicon", "wifi",
+    // "other vendor", "rtl8139 rev < 0x20, no C+ mode"). Der Zusatz
+    // dahinter darf wachsen; der Anfang nicht. Wer hier das erste Wort
+    // aendert, macht sechs gruene Zusagen rot, ohne dass sich am
+    // Verhalten irgendetwas geaendert haette.
+    var s_igc: [u8; 79] = "igc silicon, advanced descriptors -- eigener Treiber noetig, e1000 passt NICHT\0"
+    var s_igb: [u8; 74] = "igb silicon, other queue set -- eigener Treiber noetig, e1000 passt NICHT\0"
+    var s_wifi: [u8; 58] = "wifi, needs 802.11 + fw -- 802.11-MAC und Firmware fehlen\0"
+    var s_old: [u8; 52] = "rtl8139 rev < 0x20, no C+ mode -- nur der alte Ring\0"
+    var s_oth: [u8; 55] = "other vendor, no driver -- kein Treiber in diesem Kern\0"
     if why == WHY_IGC {
         serial.puts((&s_igc[0]) as u64)
         return
@@ -472,6 +517,23 @@ fn tab_line(ven: u64, dev: u64, rev: u64) {
             print_reason(why)
         }
     }
+    // RUNDE BLECH, NACHTRAG: DER KLARNAME, UND ZWAR GANZ HINTEN.
+    //
+    // Er steht am ZEILENENDE und nicht in der Mitte, und das ist kein
+    // Geschmack: `tools/rtl/run.sh` prueft dreizehn dieser Zeilen auf
+    // ihren Anfang ("-> none  igc silicon"). Ein Name zwischen "none"
+    // und dem Grund haette alle dreizehn rot gemacht -- fuer nichts.
+    // Anhaengen kostet keine einzige bestehende Zusage.
+    var s_kl: [u8; 3] = "  \0"
+    var s_z1: [u8; 2] = "[\0"
+    var s_z2: [u8; 2] = "]\0"
+    var s_unk: [u8; 23] = "unbekannter Hersteller\0"
+    serial.puts((&s_kl[0]) as u64)
+    serial.puts((&s_z1[0]) as u64)
+    if !chipname.net(ven, dev) {
+        serial.puts((&s_unk[0]) as u64)
+    }
+    serial.puts((&s_z2[0]) as u64)
     serial.nl()
 }
 
@@ -493,11 +555,24 @@ fn print_table(state: u64) {
     tab_line(0x10EC, 0x8125, 0x00) // RTL8125  -- 2,5 Gbit, Runde BLECH
     tab_line(0x10EC, 0x8126, 0x00) // RTL8126  -- 5 Gbit
     tab_line(0x10EC, 0x3000, 0x00) // Killer E3100 -- ein 8125
-    tab_line(0x10EC, 0x8029, 0x00) // ne2000 -- gleicher Hersteller, kein Treiber
+    // --- RUNDE BLECH: die Familien, die der Eigner benannt hat. Kein
+    //     Treiber (das war seine Entscheidung, und sie war richtig),
+    //     aber ein Name und ein Grund.
     tab_line(0x8086, 0x15F3, 0x00) // I225-V
+    tab_line(0x8086, 0x15F2, 0x00) // I225-LM
+    tab_line(0x8086, 0x125C, 0x00) // I226-V
     tab_line(0x8086, 0x125B, 0x00) // I226-LM
     tab_line(0x8086, 0x1533, 0x00) // I210
+    tab_line(0x8086, 0x1539, 0x00) // I211
+    tab_line(0x8086, 0x1521, 0x00) // I350
     tab_line(0x8086, 0x2723, 0x00) // Wi-Fi 6 AX200
+    tab_line(0x8086, 0x2725, 0x00) // Wi-Fi 6E AX210
+    tab_line(0x8086, 0xA0F0, 0x00) // Wi-Fi 6 AX201
+    tab_line(0x14E4, 0x165F, 0x00) // Broadcom BCM5720
+    tab_line(0x1D6A, 0x07B1, 0x00) // Aquantia AQC107 10G
+    tab_line(0x1D6A, 0x14C0, 0x00) // Aquantia AQC113 10G
+    tab_line(0x1969, 0xE0B1, 0x00) // Killer E2600
+    tab_line(0x10EC, 0x8029, 0x00) // ne2000 -- gleicher Hersteller, kein Treiber
     tab_line(0x14E4, 0x1686, 0x00) // Broadcom NetXtreme
     tab_line(0x1234, 0x5678, 0x00) // es gibt sie nicht: der unbekannte Fall
 }
@@ -554,6 +629,15 @@ fn print_cards(state: u64) {
     var s_have: [u8; 12] = "netdev: c\0\0\0"
     var s_eq: [u8; 2] = "=\0"
     var s_at: [u8; 6] = " bdf=\0"
+    // DIESE ZEICHENKETTE IST FESTGENAGELT. Drei Testdateien pruefen
+    // sie woertlich: tools/rtl/run.sh (Zeile 268), tools/hwnet/run.sh
+    // (202) und tools/usbimg/run.sh (277) suchen
+    // "netdev: no driver for 0x10ec:0x8029" bzw. "netdev: no driver
+    // for". Ich hatte sie in dieser Runde nach "netdev: kein Treiber
+    // fuer" eingedeutscht -- huebscher, und drei gruene Abschnitte rot,
+    // ohne dass sich am Verhalten das Geringste geaendert haette. Der
+    // Klarname gehoert ans ENDE der Zeile, nicht an ihren Anfang; wer
+    // die Liste fuer Menschen will, liest `print_inventory`.
     var s_no: [u8; 22] = "netdev: no driver for\0"
     var s_col: [u8; 2] = ":\0"
     var s_sp: [u8; 2] = " \0"
@@ -562,6 +646,9 @@ fn print_cards(state: u64) {
     }
     var s_vec: [u8; 7] = "  vec=\0"
     var s_poll: [u8; 31] = "  abgefragt (kein Vektor frei)\0"
+    var s_ob: [u8; 2] = "[\0"
+    var s_cb: [u8; 2] = "]\0"
+    var s_unk2: [u8; 23] = "unbekannter Hersteller\0"
     var c: u64 = 0
     while c < MAX_CARDS {
         let k: u64 = kstate.get(state, sc(c, S_KIND))
@@ -596,11 +683,17 @@ fn print_cards(state: u64) {
     let m: u64 = kstate.get(state, kstate.NETDEV_OFF + S_UNSUP_N)
     var j: u64 = 0
     while j < m {
+        let uven: u64 = unsupported_vendor(state, j)
+        let udev: u64 = unsupported_device(state, j)
         serial.puts((&s_no[0]) as u64)
         serial.puts((&s_sp[0]) as u64)
-        serial.hex(unsupported_vendor(state, j))
+        // Die Nummern in der Schreibweise, die seit Runde HWNET auf der
+        // Leitung steht: `serial.hex` mit fuehrendem 0x und ohne
+        // Auffuellen. NICHT `pci.hexn` -- das druckt "10ec" statt
+        // "0x10ec", und genau darauf pruefen die drei Testdateien.
+        serial.hex(uven)
         serial.puts((&s_col[0]) as u64)
-        serial.hex(unsupported_device(state, j))
+        serial.hex(udev)
         // ROUND RTL: und WARUM nicht, wenn dieser Kern den Chip kennt.
         let why: u64 = unsupported_reason(state, j)
         if why != WHY_UNKNOWN {
@@ -608,9 +701,132 @@ fn print_cards(state: u64) {
             serial.puts((&s_sp[0]) as u64)
             print_reason(why)
         }
+        // Und der Klarname, hinten. Der Anfang der Zeile bleibt damit
+        // Wort fuer Wort der von Runde HWNET; alles Neue haengt hinten
+        // dran. Das ist die ganze Regel, nach der diese Runde Zeilen
+        // erweitert.
+        serial.puts((&s_sp[0]) as u64)
+        serial.puts((&s_sp[0]) as u64)
+        serial.puts((&s_ob[0]) as u64)
+        if !chipname.net(uven, udev) {
+            serial.puts((&s_unk2[0]) as u64)
+        }
+        serial.puts((&s_cb[0]) as u64)
         serial.nl()
         j = j + 1
     }
+}
+
+// ================================================ DER EHRLICHE BESTAND
+//
+// Der Eigner hat es so formuliert: "Ein Rechner, auf dem Osum startet,
+// soll dem Nutzer eine ehrliche Liste zeigen koennen: was ist verbaut,
+// was davon laeuft, was nicht."
+//
+// `print_cards` kann das NICHT, und der Grund ist eine Luecke, die
+// diese Runde erst beim Schreiben dieser Funktion gefunden hat:
+// `probe` laeuft nur ueber Klasse 02 UNTERKLASSE 00 (Ethernet). Eine
+// WLAN-Karte ist Klasse 02 Unterklasse 80 -- sie kommt in `probe` gar
+// nicht vor, landet also auch nicht in der Liste der nicht
+// unterstuetzten Geraete und wird schlicht VERSCHWIEGEN. In einem
+// Notebook ist sie haeufig das einzige Netzgeraet. Der Rechner haette
+// also gesagt: gar nichts.
+//
+// Diese Funktion laeuft deshalb ueber die GANZE Klasse 02 und fasst
+// nichts an: sie liest die PCI-Liste und druckt. `probe` bleibt, wie
+// es ist -- eine Suche, die ploetzlich WLAN-Karten beansprucht, waere
+// eine Regression in 54 gruenen Abschnitten, und ein 802.11-Treiber
+// steht hier nicht zur Debatte.
+//
+//   netdev: bestand 00:03.0 8086:100e Intel 82540EM -> e1000
+//   netdev: bestand 00:04.0 8086:125c Intel I226-V (2,5G) -> kein Treiber
+//   netdev: bestand 00:05.0 8086:2725 Intel Wi-Fi 6E AX210 (WLAN) -> kein Treiber
+//   netdev: bestand 3 geraete, 1 mit treiber, 2 ohne
+//
+// Das Wort "bestand" statt "c0=" ist Absicht: `tools/rtl/run.sh` prueft
+// mit `hasnot "$R" "netdev: c0="`, dass kein Treiber eine Karte
+// beansprucht, die er nicht fahren kann. Eine neue Zeile mit "c0="
+// darin haette diese Zusage falsch rot gemacht.
+fn print_inventory(state: u64) {
+    var s_b: [u8; 17] = "netdev: bestand \0"
+    var s_c: [u8; 2] = ":\0"
+    var s_sp: [u8; 2] = " \0"
+    var s_ar: [u8; 5] = " -> \0"
+    var s_dot: [u8; 2] = ".\0"
+    var s_kt: [u8; 13] = "kein Treiber\0"
+    var s_ko: [u8; 3] = ": \0"
+    var s_wl: [u8; 22] = " (kein Ethernet-Port)\0"
+    var s_ge: [u8; 11] = " geraete, \0"
+    var s_mt: [u8; 15] = " mit treiber, \0"
+    var s_oh: [u8; 6] = " ohne\0"
+    if kstate.get(state, kstate.NETDEV_OFF + S_PROBED) == 0 {
+        probe(state)
+    }
+    let n: u64 = pci.count(state)
+    var i: u64 = 0
+    var total: u64 = 0
+    var driven: u64 = 0
+    while i < n {
+        if pci.get(state, i, pci.E_CLASS) == CLASS_NET {
+            let ven: u64 = pci.get(state, i, pci.E_VENDOR)
+            let dev: u64 = pci.get(state, i, pci.E_DEVICE)
+            let sub: u64 = pci.get(state, i, pci.E_SUBCLASS)
+            let bdf: u64 = pci.get(state, i, pci.E_BDF)
+            total = total + 1
+            serial.puts((&s_b[0]) as u64)
+            // DIESELBE SCHREIBWEISE WIE `pci:` WEITER OBEN -- 00:03.0
+            // und nicht 0x18. Wer die Bestandsliste neben die
+            // PCI-Liste haelt, soll dieselbe Adresse zweimal lesen und
+            // nicht zwei Zahlen vergleichen muessen, die dasselbe
+            // meinen. `print_cards` behaelt sein `bdf=0x18`: darauf
+            // pruefen bestehende Zusagen.
+            pci.hexn(pci.bdf_bus(bdf), 2)
+            serial.puts((&s_c[0]) as u64)
+            pci.hexn(pci.bdf_dev(bdf), 2)
+            serial.puts((&s_dot[0]) as u64)
+            pci.hexn(pci.bdf_fn(bdf), 1)
+            serial.puts((&s_sp[0]) as u64)
+            pci.hexn(ven, 4)
+            serial.puts((&s_c[0]) as u64)
+            pci.hexn(dev, 4)
+            serial.puts((&s_sp[0]) as u64)
+            chipname.net(ven, dev)
+            serial.puts((&s_ar[0]) as u64)
+            // NUR Ethernet wird ueberhaupt einem Treiber angeboten.
+            // Eine WLAN-Karte durch `driver_for` zu schicken waere
+            // sinnlos und im schlimmsten Fall gefaehrlich: die
+            // Nummernraeume sind je Hersteller getrennt, aber darauf
+            // will sich hier niemand verlassen.
+            if sub == SUB_ETHERNET {
+                let rev: u64 = pci.cfg_read8(bdf, 0x08)
+                let k: u64 = driver_for(ven, dev, rev)
+                if k == KIND_NONE {
+                    serial.puts((&s_kt[0]) as u64)
+                    let why: u64 = reason_for(ven, dev, rev)
+                    if why != WHY_UNKNOWN {
+                        serial.puts((&s_ko[0]) as u64)
+                        print_reason(why)
+                    }
+                } else {
+                    driven = driven + 1
+                    print_kind(k)
+                }
+            } else {
+                serial.puts((&s_kt[0]) as u64)
+                serial.puts((&s_wl[0]) as u64)
+            }
+            serial.nl()
+        }
+        i = i + 1
+    }
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(total)
+    serial.puts((&s_ge[0]) as u64)
+    serial.dec(driven)
+    serial.puts((&s_mt[0]) as u64)
+    serial.dec(total - driven)
+    serial.puts((&s_oh[0]) as u64)
+    serial.nl()
 }
 
 // ==================================================== THE DISPATCH
