@@ -10,6 +10,10 @@ unveraendert; keiner von beiden ist ein Auszug des anderen.
   HTTPS aus Ring 3, der Wurzelzertifikatsspeicher.
 * **Teil B -- Platte.** Welche Platte Osum findet, was die
   Firmware-Einstellung "SATA MODE" aendert, der IDE/PIO-Rueckfallweg.
+* **Teil C -- Netz, zweiter Anlauf (Runde RTL, 30.08.2026).** Der
+  Realtek RTL8168/8169, der Intel I219, und warum Teil A den Realtek zu
+  Unrecht fuer unpruefbar gehalten hat. Teil A bleibt unveraendert
+  stehen; Teil C sagt, welcher seiner Saetze nicht mehr gilt.
 
 ---
 
@@ -520,9 +524,177 @@ folgenden Punkte hat kein Lauf dieser Runde beruehren koennen.
   pruefen.
 
 ---
+
+## TEIL C -- NETZ, ZWEITER ANLAUF
+
+Runde RTL, 30.08.2026. Zweig `rtl`, abgezweigt von `mergeline2`
+(a919787). Der ausfuehrliche Bericht steht in `docs/ROUNDRTL.md`; hier
+steht nur, was sich fuer *"Osum auf einem gewoehnlichen PC"* geaendert
+hat.
+
+### C.0 WELCHER SATZ AUS TEIL A NICHT MEHR GILT
+
+Teil A schreibt unter der Ueberschrift *"RTL8168/8169 -- geprueft und
+NICHT gebaut, mit Begruendung"*:
+
+> QEMU hat `-device rtl8139`, und das ist NICHT derselbe Chip. […] Ein
+> Treiber fuer den 8139 wuerde ueber den 8168 **nichts** beweisen.
+
+Der Schluss war falsch, und zwar aus einem Grund, den Teil A nicht
+gesehen hat: der RTL8139 hat **ab PCI-Revision 0x20** einen zweiten
+Betriebszustand, den **C+-Modus**, und in dem hat er Deskriptorringe --
+dieselben, die der 8169 hat, mit demselben 16-Oktett-Deskriptor,
+demselben OWN-Bit, demselben EOR-Bit. Der RTL8169 *ist* der
+herausgeloeste C+-Teil des 8139C+; Linux' Treiber dafuer hiess
+`8139cp.c`, bevor `r8169.c` daraus wurde.
+
+QEMU emuliert diesen Zustand (`currCPlusTxDesc`, `currCPlusRxDesc`,
+`cplus_enabled` im Binaerprogramm von qemu-system-x86_64 7.2). Damit ist
+die Ringmechanik hier messbar, ohne ein Brett.
+
+**Der Rest von Teil A gilt weiter, insbesondere sein Massstab:** ein
+Treiber ohne eine einzige Messung ist eine Behauptung. Deshalb steht
+unten Zeile fuer Zeile, was gemessen ist und was aus dem Datenblatt
+kommt.
+
+### C.1 DIE TABELLE, fortgeschrieben
+
+| Klasse | Vor Runde RTL | Nach Runde RTL | Fehlt weiter |
+|---|---|---|---|
+| **Netz, Realtek** | nichts. `netdev: no driver for 0x10ec:0x8168` | `kernel/r8169.fi`: RTL8169/8168/8111/8101 **und** RTL8139C+. In QEMU gemessen: 20/20 Pings, 262144 Oktett TCP mit **6224 KiB/s**, 0 Pruefsummenfehler, 0 Wiederholungen, 0 Rahmen ausser der Reihe | die PHY-Firmwaretabellen der ueber vierzig 8168-Ausfuehrungen; MDIO auf 8168DP/EP; MSI |
+| **Netz, Intel PCH** | nichts. I219 stand in `e1000.fi` als *"bewusst nicht in der Liste"* | der PCH-Zweig in `kernel/e1000.fi`: I217/I218/I219 (dreizehn Geraetenummern). **Datenweg geteilt mit dem gemessenen e1000**, Aufsetzweg aus dem Datenblatt | `e1000_flush_desc_rings` (der Haenger auf Skylake+), PHY-Firmware, K1/LTR |
+| **Netz, Intel 2,5G** | nichts | **erkannt, kein Treiber**: `-> none  igc silicon, advanced descriptors`, mit PCI-Nummer | der ganze igc-Treiber (~700 Zeilen, eigenes Deskriptorformat) |
+| **Netz, unbekannt** | Nummer genannt | Nummer genannt **und Grund**, wenn der Kern den Chip kennt (igc, igb, WLAN, RTL8139 ohne C+, anderer Hersteller) | -- |
+| Netz, virtio / Intel 8254x | siehe Teil A | unveraendert | -- |
+| **WLAN** | nichts | nichts. Aber AX200/AX201/AX210 werden in der Tabelle **beim Namen genannt** (`wifi, needs 802.11 + fw`) statt stillschweigend uebergangen | ALLES |
+
+### C.2 WAS AUF DEM DRAHT GEMESSEN WURDE
+
+`bash tools/rtl/run.sh`, QEMU 7.2.22 unter TCG (ohne KVM), derselbe
+Draht und dieselbe Methodik wie Teil A: `tools/net/bridge.c`, veth-Paar,
+Netzraum mit dem Linux-Kern darin. **67 Zusagen, 0 gefallen.**
+
+| | rtl8139 (C+) | virtio-net-pci | e1000 |
+|---|---|---|---|
+| Ping, 20 Anfragen | **20 beantwortet** | (Teil A: 20) | (Teil A: 20) |
+| Umlaufzeit, Mittel | 5,181 ms | (Teil A: 5,75 ms) | (Teil A: 5,15 ms) |
+| TCP hinein | 262144 Oktett | 262144 Oktett | 262144 Oktett |
+| **Durchsatz** | **6224 KiB/s** | 6242 KiB/s | 3278 KiB/s |
+| Rahmen empfangen | 185 | 188 | 186 |
+| Unterbrechungen | 23 | 33 | 19 |
+| Pruefsummenfehler | 0 | 0 | 0 |
+| Wiederholungen | 0 | 0 | 0 |
+| Ausser der Reihe | 0 | -- | -- |
+| Verworfen (Ring voll) | 0 | 0 | 0 |
+| DHCP von busybox udhcpd | Adresse bezogen | (Teil A) | (Teil A) |
+
+Die Zahlen fuer virtio und e1000 stammen aus DEMSELBEN Lauf und liegen
+etwas anders als in Teil A, weil dieser Server mehrere Runden
+gleichzeitig faehrt. Die Spalten sind untereinander vergleichbar, weil
+sie nacheinander im selben Lauf entstanden sind.
+
+Zusaetzlich gemessen, weil ein Ping es nie ausloest:
+
+| Fall | Ergebnis |
+|---|---|
+| Sendering absichtlich ueberfuellt | 127 von 128 Plaetzen belegt, die 9 weiteren Versuche **alle** abgewiesen und gezaehlt |
+| Rahmen von 2049 Oktett (> Puffer) | abgewiesen, fasst den Ring nicht an |
+| Kabel gezogen (`set_link off`) | 100 % Verlust |
+| Kabel wieder dran | 0 % Verlust, **ohne Neustart**, `link=1` |
+| Rahmen, die der Chip als fehlerhaft meldete | 0 |
+
+### C.3 DER FEHLER, DEN DIE MESSUNG GEFUNDEN HAT
+
+Mit **32** Ringplaetzen -- der Zahl, die `e1000.fi` benutzt -- lieferte
+der Treiber 64 KiB TCP mit 6589 KiB/s, aber 256 KiB nur mit
+**286 KiB/s** und 41 Abschnitten ausser der Reihe. Kein Zaehler des
+Treibers und keiner des Stapels zeigte einen Fehler; nur der Durchsatz.
+
+Die Ursache ist ein Unterschied zwischen den **emulierten Chips**:
+findet QEMUs e1000 keinen freien Deskriptor, *legt er den Rahmen
+beiseite* (`flush_queue_timer`, in Teil A als Aergernis beschrieben);
+QEMUs rtl8139 im C+-Modus **wirft ihn weg**. **Ein echter RTL8168
+verhaelt sich wie der rtl8139**, nicht wie QEMUs e1000. Also wurde der
+Ring auf **128** Plaetze vergroessert (Linux' r8169 nimmt 256), was
+520 KiB kostet: **286 -> 6224 KiB/s**, 0 ausser der Reihe.
+
+Fuer echtes Blech heisst das: **ein Netztreiber fuer diesen Kern braucht
+mehr als 32 Empfangsdeskriptoren**, sobald die Gegenstelle ein
+64-KiB-Fenster benutzt. `e1000.fi` hat weiterhin 32 und kommt in QEMU
+damit durch, weil QEMU nachsichtig ist. Auf einem echten 8254x waere das
+derselbe Verlust. Das ist ein offener Punkt fuer `e1000.fi`.
+
+### C.4 WAS AUF ECHTER HARDWARE TROTZDEM SCHIEFGEHEN KANN
+
+Ehrlich aufgezaehlt; kein Lauf dieser Runde hat einen dieser Punkte
+beruehren koennen. Ausfuehrlich in `docs/ROUNDRTL.md` Abschnitt 7.
+
+**Realtek 8168/8169**
+
+1. **Die PHY-Firmware.** Es gibt ueber vierzig Ausfuehrungen des 8168,
+   und Linux bringt fuer die meisten eine eigene Tabelle von
+   PHY-Registerschreibvorgaengen mit. Dieser Treiber laedt **keine** und
+   verlaesst sich darauf, dass die Karte selbst aushandelt -- was die
+   meisten tun und manche nicht. **Der wahrscheinlichste Ausfallgrund.**
+2. **MDIO auf 8168DP/EP** braucht einen anderen Weg als PHYAR 0x60.
+   Dort bliebe die Verbindungsanzeige leer; der Datenweg liefe trotzdem.
+3. **Der Sendeanstoss auf 0x38** (beim 8139C+ ist es 0xD9) ist nie
+   ausgefuehrt worden. Steht er falsch, sendet die Karte nichts, und man
+   sieht es an `tx_f` > 0 bei `rx_f` = 0.
+4. **Kein MSI/MSI-X**, der Pin durch den I/O-APIC. Ohne AML-Interpreter
+   kommt die Leitungsnummer aus dem Konfigurationsraum; auf manchen
+   Brettern ist sie falsch. Der Stapel dreht dann Leerlaufrunden statt
+   zu stehen -- aber er wird langsam.
+
+**Intel I219 -- hier liegt die Grenze, und sie ist scharf**
+
+Der **Datenweg** ist derselbe Quelltext, den der 82540EM in QEMU
+zwanzigtausend Rahmen lang ausfuehrt. **Nicht gemessen ist der ganze
+Aufsetzweg**, und der ist beim I219 gerade der schwierige Teil, weil sein
+PHY nicht am MAC haengt, sondern an einem Bus, den sich der MAC mit der
+Verwaltungsfirmware (Intel ME/CSME) teilt:
+
+5. Die Semaphore (`EXTCNF_CTRL` Bit 5), `MDIC`, das Abschalten von ULP
+   (`FEXTNVM7` Bit 5) -- alles gebaut, **nie ausgefuehrt**.
+6. Die Adresse: auf der PCH-Linie gibt es **kein EEPROM an EERD**. Der
+   Treiber liest RAL/RAH **vor** dem Ruecksetzen und schreibt sie danach
+   zurueck. Aus dem Datenblatt.
+7. **BEWUSST NICHT GEBAUT: `e1000_flush_desc_rings`.** Auf Skylake und
+   spaeter kann ein Ruecksetzen den Chip *haengen lassen*, wenn die
+   Verwaltungsfirmware gerade Verkehr hat. Der Kunstgriff dagegen
+   schickt einen Blindrahmen los; das ohne echtes Brett zu schreiben
+   waere nicht verantwortbar. **Das ist der wahrscheinlichste Weg, auf
+   dem ein I219-Laptop mit Osum haengenbleibt.**
+8. Haelt die Firmware den PHY (SMBus-Zustand), antwortet MDIC gar nicht.
+   Der Treiber merkt das (`phy=0xFFFFFFFF`) und kommt dann nicht hoch,
+   statt sich aufzuhaengen. Das ist gebaut.
+
+**Beide**
+
+9. Die Schranken sind Zaehlschleifen und keine Uhren (`SPIN_LIMIT` =
+   2 Millionen, wie in `nvme.fi`, `e1000.fi`, `ahci.fi`). Auf blankem
+   Blech laufen sie um Groessenordnungen schneller.
+10. Hoechstens zwei Karten, kein Hotplug, keine geteilten Vektoren.
+
+### C.5 WAS DIE SERIELLE LEITUNG AUF EINEM BRETT SAGEN WIRD
+
+Das ist der praktische Ertrag der Runde. Ein Brett, das nicht ins Netz
+kommt, sagt jetzt eines von diesen drei Dingen:
+
+    netdev: c0=r8169 bdf=0x18          <- es gibt einen Treiber
+    netdev: c0=i219 bdf=0xfa
+    netdev: no driver for 0x8086:0x125b  igc silicon, advanced descriptors
+    netdev: no driver for 0x14e4:0x1686  other vendor, no driver
+    netdev: no driver for 0x1234:0x5678  <- unbekannt, ohne erfundenen Grund
+
+Und mit dem Wort `nictab` auf der Kommandozeile laesst sich die
+Treibertabelle **ohne die Karte** gegen eine eingebaute Nummernliste
+fahren -- das ist der einzige Weg, die Wahl fuer einen I219 oder einen
+RTL8168 zu pruefen, ohne einen zu besitzen.
+
 ---
 
-# TEIL C — DER STAND NACH RUNDE BLECH (02.09.2026)
+# TEIL D — DER STAND NACH RUNDE BLECH (02.09.2026)
 
 *Zweig `blech`, abgezweigt von `main` (`163984d`). Diese Tabelle ersetzt
 für die genannten Zeilen die Tabelle in Teil A: die dort steht, ist die
