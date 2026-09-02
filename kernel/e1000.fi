@@ -71,7 +71,9 @@ export {
     rx_take_on, rx_recycle_on, tx_frame_on, tx_room_on, poll_on, irq_on,
     rx_frames_on, tx_frames_on, rx_octets_on, tx_octets_on,
     tx_drops_on, link_up_on, shut_down_on, irqs_on, queue_size_on,
-    msix_on, notified_on, features_on, supports, RING_SLOTS, BUFSZ
+    msix_on, notified_on, features_on, supports, RING_SLOTS, BUFSZ,
+    supports_8254x, supports_ich, family_of, FAM_8254X, FAM_ICH,
+    phy_id_on, swflag_on
 }
 
 // ------------------------------------------------------ the data area
@@ -108,6 +110,11 @@ const S_DEVID: u64 = 0x78
 const S_MACOK: u64 = 0x80
 const S_LASTICR: u64 = 0x88
 const S_CAUSES: u64 = 0x90
+// RUNDE RTL: der PCH-Zweig.
+const S_FAM: u64 = 0x98 // FAM_8254X oder FAM_ICH
+const S_PHYID: u64 = 0xA0 // was der PHY ueber sich sagt (MII 2/3)
+const S_SWFLAG: u64 = 0xA8 // 1 = die Semaphore gegen die ME gehoert uns
+const S_PREMAC: u64 = 0xB0 // RAL/RAH, gelesen VOR dem Ruecksetzen
 
 fn sc(u: u64, off: u64) -> u64 {
     return kstate.NETDEV_OFF + UNIT_BASE + u * UNIT_SPAN + off
@@ -171,6 +178,48 @@ const TCTL_PSP: u64 = 8 // 1 << 3, pad short packets
 const TIPG_DEFAULT: u64 = 6299658
 
 const RAH_AV: u64 = 2147483648 // 1 << 31, this address is valid
+
+// ------------------------------------------- RUNDE RTL: der PCH-Zweig
+//
+// Die Register, die es NUR auf der ICH8/PCH-Linie gibt (I217/I218/I219).
+// Der Registerblock daneben -- CTRL, STATUS, RCTL, TCTL, RDBAL, TDBAL,
+// RAL/RAH -- ist derselbe wie oben, und genau das ist der Grund, warum
+// der I219 in DIESER Datei steht und nicht in einer eigenen.
+const R_CTRL_EXT: u64 = 0x0018
+const R_MDIC: u64 = 0x0020 // der Draht zum PHY (MDIO)
+const R_FEXTNVM: u64 = 0x0028
+const R_FEXTNVM7: u64 = 0x00E4
+const R_EXTCNF_CTRL: u64 = 0x0F00 // hier sitzt die Semaphore
+
+// EXTCNF_CTRL Bit 5: das Software-Flag. Der PHY eines I219 haengt NICHT
+// am MAC, sondern an einem Bus, den sich der MAC mit der
+// Verwaltungsfirmware (Intel ME/CSME) TEILT. Wer ohne dieses Flag ein
+// MDIC-Kommando absetzt, redet dem anderen dazwischen -- und der andere
+// ist eine Firmware, die man nicht anhalten kann.
+const EXTCNF_SWFLAG: u64 = 32 // 1 << 5
+
+// MDIC (0x20): Daten 0..15, Registernummer 16..20, PHY-Adresse 21..25,
+// Kommando 26..27, FERTIG 28, FEHLER 30.
+const MDIC_OP_WRITE: u64 = 67108864 // 1 << 26
+const MDIC_OP_READ: u64 = 134217728 // 2 << 26
+const MDIC_READY: u64 = 268435456 // 1 << 28
+const MDIC_ERROR: u64 = 1073741824 // 1 << 30
+
+// FEXTNVM7 Bit 5: solange das Bit steht, bleibt der Chip im
+// Ultra-Low-Power-Zustand und sein PHY antwortet nicht.
+const FEXTNVM7_ULP: u64 = 32 // 1 << 5
+
+// Auf der ICH-Linie sitzt der PHY auf Adresse 1. Das ist eine Konstante
+// aus dem Datenblatt und kein Fund: dieser Baum hat nie einen befragt.
+const ICH_PHY_ADDR: u64 = 1
+
+// MII-Register 1 (BMSR), Bit 2: die Verbindung steht. Das Bit RASTET --
+// ein weggewesener Link bleibt bis zum naechsten Lesen als weg gemeldet,
+// deshalb wird zweimal gelesen und die zweite Antwort gilt.
+const BMSR_LINK: u64 = 4
+
+const FAM_8254X: u64 = 0
+const FAM_ICH: u64 = 1
 
 const EERD_START: u64 = 1
 const EERD_DONE: u64 = 16 // 1 << 4 on the 82540 and later
@@ -249,14 +298,106 @@ const SPIN_LIMIT: u64 = 2000000
 //   I210/I211/I225/I226 (0x1533, 0x1539, 0x15F2, 0x125B ...)
 //     igb/igc silicon: a different descriptor format (advanced only) and
 //     a different queue setup. A different driver, not a table entry.
-fn supports(devid: u64) -> bool {
-    if devid == 0x100E { return true }
-    if devid == 0x100F { return true }
-    if devid == 0x1015 { return true }
-    if devid == 0x1026 { return true }
-    if devid == 0x1028 { return true }
-    if devid == 0x10D3 { return true }
+fn supports_8254x(devid: u64) -> bool {
+    if devid == 0x100E {
+        return true
+    }
+    if devid == 0x100F {
+        return true
+    }
+    if devid == 0x1015 {
+        return true
+    }
+    if devid == 0x1026 {
+        return true
+    }
+    if devid == 0x1028 {
+        return true
+    }
+    if devid == 0x10D3 {
+        return true
+    }
     return false
+}
+
+// RUNDE RTL: DIE PCH-LINIE. Was Runde HWNET oben als "bewusst NICHT in
+// der Liste" aufgeschrieben hat, steht jetzt darin -- aber in einer
+// ZWEITEN Liste und mit einem eigenen Aufsetzweg, weil der Unterschied
+// echt ist: derselbe Registerblock, derselbe Deskriptor, ein voellig
+// anderer Weg zum PHY.
+//
+//   0x153A/0x153B  I217-LM / I217-V   (Lynx Point)
+//   0x155A/0x1559  I218-LM / I218-V   (Wildcat Point)
+//   0x15A0..0x15A3 I218 in weiteren Ausfuehrungen
+//   0x156F/0x1570  I219-LM / I219-V   (Skylake)
+//   0x15B7/0x15B8  I219-LM / I219-V   (Kaby Lake) -- der haeufigste
+//   0x15BB/0x15BC/0x15BD/0x15BE  I219 (Cannon/Comet Lake)
+//   0x15D7/0x15D8/0x15E3          I219 (Coffee Lake)
+//   0x0D4E/0x0D4F/0x0D53/0x0D55   I219 (Tiger Lake und spaeter)
+//   0x1A1C..0x1A1F                I219 (Alder Lake)
+fn supports_ich(devid: u64) -> bool {
+    if devid == 0x153A || devid == 0x153B {
+        return true
+    }
+    if devid == 0x155A || devid == 0x1559 {
+        return true
+    }
+    if devid == 0x15A0 || devid == 0x15A1 {
+        return true
+    }
+    if devid == 0x15A2 || devid == 0x15A3 {
+        return true
+    }
+    if devid == 0x156F || devid == 0x1570 {
+        return true
+    }
+    if devid == 0x15B7 || devid == 0x15B8 || devid == 0x15B9 {
+        return true
+    }
+    if devid == 0x15BB || devid == 0x15BC {
+        return true
+    }
+    if devid == 0x15BD || devid == 0x15BE {
+        return true
+    }
+    if devid == 0x15D7 || devid == 0x15D8 || devid == 0x15E3 {
+        return true
+    }
+    if devid == 0x0D4E || devid == 0x0D4F {
+        return true
+    }
+    if devid == 0x0D53 || devid == 0x0D55 {
+        return true
+    }
+    if devid == 0x1A1C || devid == 0x1A1D {
+        return true
+    }
+    if devid == 0x1A1E || devid == 0x1A1F {
+        return true
+    }
+    return false
+}
+
+fn supports(devid: u64) -> bool {
+    if supports_8254x(devid) { return true }
+    return supports_ich(devid)
+}
+
+fn family_of(devid: u64) -> u64 {
+    if supports_ich(devid) { return FAM_ICH }
+    return FAM_8254X
+}
+
+fn fam(state: u64, u: u64) -> u64 {
+    return kstate.get(state, sc(u, S_FAM))
+}
+
+fn phy_id_on(state: u64, u: u64) -> u64 {
+    return kstate.get(state, sc(u, S_PHYID))
+}
+
+fn swflag_on(state: u64, u: u64) -> u64 {
+    return kstate.get(state, sc(u, S_SWFLAG))
 }
 
 // -------------------------------------------------------- small helpers
@@ -475,6 +616,24 @@ fn read_mac(state: u64, u: u64) -> bool {
             return true
         }
     }
+    // RUNDE RTL, PCH-LINIE: hier gibt es KEIN EEPROM an EERD. Die
+    // nichtfluechtige Kopie liegt im SPI-Flash des Chipsatzes, hinter
+    // einem ganz anderen Registerfenster, und EERD liefert dort Muell.
+    // Der zweite Weg ist stattdessen der Wert, den die Firmware VOR dem
+    // Ruecksetzen in RAL/RAH stehen hatte -- den hat `init_on`
+    // aufgehoben, weil ein Ruecksetzen ihn auf manchen Ausfuehrungen
+    // wegwirft.
+    if fam(state, u) == FAM_ICH {
+        let pre: u64 = kstate.get(state, sc(u, S_PREMAC))
+        if pre != 0 && pre != 0xFFFFFFFFFFFF {
+            kstate.set(state, sc(u, S_MAC), pre)
+            kstate.set(state, sc(u, S_MACOK), 3)
+            setreg(state, u, R_RAL, pre & 0xFFFFFFFF)
+            setreg(state, u, R_RAH, ((pre >> 32) & 0xFFFF) | RAH_AV)
+            return true
+        }
+        return false
+    }
     let w0: u64 = eeprom(state, u, 0)
     let w1: u64 = eeprom(state, u, 1)
     let w2: u64 = eeprom(state, u, 2)
@@ -496,17 +655,194 @@ fn read_mac(state: u64, u: u64) -> bool {
     return true
 }
 
+// ================================================ RUNDE RTL: DER PCH-ZWEIG
+//
+// WIEVIEL VON DIESER DATEI DER I219 WIEDERVERWENDET, nachgezaehlt und
+// nicht geschaetzt. Alles unter dieser Ueberschrift ist NEU; alles
+// darueber und darunter benutzt er unveraendert mit:
+//
+//   WIEDERVERWENDET (unveraendert):
+//     rx_setup, rx_take_on, rx_recycle_on          der Empfangsring
+//     tx_setup, tx_room_on, tx_frame_on            der Sendering
+//     irq_on, poll_on, intx_arm, shut_down_on      Unterbrechung und Ende
+//     die Deskriptorhelfer, die Registerhelfer, die Zaehler
+//     RCTL/TCTL/TIPG/RDBAL/TDBAL/MTA/RAL/RAH       der ganze Datenweg
+//   NEU (nur hier):
+//     swflag_take/swflag_give   die Semaphore gegen die Verwaltungsfirmware
+//     mdic_read/mdic_write      der Weg zum PHY
+//     ulp_off                   den Ultra-Low-Power-Zustand verlassen
+//     phy_probe                 fragt den PHY, wer er ist
+//     read_mac / read_link      bekommen je einen zweiten Zweig
+//
+// DIE GRENZE, und sie steht auch in docs/REALHW.md: HIER IST NICHTS
+// GEMESSEN. QEMU hat kein Modell eines I219, und dieser Rechner hat kein
+// Brett. Was gemessen ist, ist der Datenweg -- weil es DERSELBE Quelltext
+// ist, den der 82540EM in QEMU zwanzigtausend Rahmen lang benutzt.
+// Was NICHT gemessen ist, ist alles unter dieser Ueberschrift.
+//
+// WAS HIER BEWUSST FEHLT, damit niemand es fuer erledigt haelt:
+//   * Das Leeren der Deskriptorringe vor dem Ruecksetzen
+//     (`e1000_flush_desc_rings` bei Linux). Auf Skylake und spaeter kann
+//     ein Ruecksetzen den Chip haengen lassen, wenn die
+//     Verwaltungsfirmware gerade Verkehr hat. Der Kunstgriff dagegen
+//     schickt einen Blindrahmen los und ist ohne echtes Brett nicht
+//     verantwortbar zu schreiben.
+//   * Der SMBus-Zustand. Haelt die Firmware den PHY, antwortet MDIC gar
+//     nicht -- dieser Treiber merkt das (er meldet phy=0xFFFF) und kommt
+//     dann eben nicht hoch, statt sich aufzuhaengen.
+//   * Das Laden der PHY-Firmware (`sw_flag` + NVM-Bloecke).
+//   * K1/LTR/PCIm, die Energiekunstgriffe.
+
+// DIE SEMAPHORE. Setzen, zuruecklesen, pruefen -- und wenn das Flag nicht
+// stehenbleibt, gehoert der Bus gerade der Firmware und dieser Treiber
+// laesst die Finger davon. Ein Kern, der hier stur weitermacht, bekommt
+// keine Fehlermeldung, sondern eine Maschine, die steht.
+fn swflag_take(state: u64, u: u64) -> bool {
+    var spin: u64 = 0
+    while spin < 200 {
+        let v: u64 = reg(state, u, R_EXTCNF_CTRL)
+        if (v & EXTCNF_SWFLAG) == 0 {
+            setreg(state, u, R_EXTCNF_CTRL, v | EXTCNF_SWFLAG)
+            if (reg(state, u, R_EXTCNF_CTRL) & EXTCNF_SWFLAG) != 0 {
+                kstate.set(state, sc(u, S_SWFLAG), 1)
+                return true
+            }
+        }
+        var d: u64 = 0
+        while d < 2000 {
+            arch.pause()
+            d = d + 1
+        }
+        spin = spin + 1
+    }
+    kstate.set(state, sc(u, S_SWFLAG), 0)
+    return false
+}
+
+fn swflag_give(state: u64, u: u64) {
+    if kstate.get(state, sc(u, S_SWFLAG)) == 0 {
+        return
+    }
+    let v: u64 = reg(state, u, R_EXTCNF_CTRL)
+    setreg(state, u, R_EXTCNF_CTRL, v & (~EXTCNF_SWFLAG))
+    kstate.set(state, sc(u, S_SWFLAG), 0)
+}
+
+// EIN MII-REGISTER, ueber MDIC. Der Aufrufer muss die Semaphore halten.
+// 0xFFFFFFFF heisst "keine Antwort" und ist absichtlich KEIN gueltiger
+// Registerwert -- ein PHY antwortet mit sechzehn Bit.
+fn mdic_read(state: u64, u: u64, r: u64) -> u64 {
+    setreg(state, u, R_MDIC, MDIC_OP_READ | (ICH_PHY_ADDR << 21)
+        | ((r & 0x1F) << 16))
+    var spin: u64 = 0
+    while spin < SPIN_LIMIT {
+        let v: u64 = reg(state, u, R_MDIC)
+        if (v & MDIC_READY) != 0 {
+            if (v & MDIC_ERROR) != 0 {
+                return 0xFFFFFFFF
+            }
+            return v & 0xFFFF
+        }
+        arch.pause()
+        spin = spin + 1
+    }
+    return 0xFFFFFFFF
+}
+
+fn mdic_write(state: u64, u: u64, r: u64, val: u64) -> bool {
+    setreg(state, u, R_MDIC, MDIC_OP_WRITE | (ICH_PHY_ADDR << 21)
+        | ((r & 0x1F) << 16) | (val & 0xFFFF))
+    var spin: u64 = 0
+    while spin < SPIN_LIMIT {
+        let v: u64 = reg(state, u, R_MDIC)
+        if (v & MDIC_READY) != 0 {
+            return (v & MDIC_ERROR) == 0
+        }
+        arch.pause()
+        spin = spin + 1
+    }
+    return false
+}
+
+// DEN ULTRA-LOW-POWER-ZUSTAND VERLASSEN. Ein I219, den die Firmware
+// schlafen gelegt hat, antwortet auf MDIC nicht. Das Bit steht in
+// FEXTNVM7; es zu loeschen ist die eine Haelfte, die Wartezeit danach die
+// andere. AUS DEM DATENBLATT -- nie ausgefuehrt.
+fn ulp_off(state: u64, u: u64) {
+    let v: u64 = reg(state, u, R_FEXTNVM7)
+    if (v & FEXTNVM7_ULP) != 0 {
+        setreg(state, u, R_FEXTNVM7, v & (~FEXTNVM7_ULP))
+        var d: u64 = 0
+        while d < 200000 {
+            arch.pause()
+            d = d + 1
+        }
+    }
+}
+
+// WER DER PHY IST, aus MII-Register 2 und 3. Das ist die eine Zeile, an
+// der man auf einem echten Brett sieht, ob ueberhaupt jemand am anderen
+// Ende haengt: 0xFFFFFFFF heisst, der Bus gehoert der Firmware oder der
+// PHY schlaeft noch.
+fn phy_probe(state: u64, u: u64) {
+    let a: u64 = mdic_read(state, u, 2)
+    let b: u64 = mdic_read(state, u, 3)
+    if a == 0xFFFFFFFF || b == 0xFFFFFFFF {
+        kstate.set(state, sc(u, S_PHYID), 0xFFFFFFFF)
+        return
+    }
+    kstate.set(state, sc(u, S_PHYID), (a << 16) | b)
+}
+
+// DER AUFSETZWEG DES PCH-ZWEIGS, zwischen Ruecksetzen und Ringen.
+fn ich_bringup(state: u64, u: u64) {
+    if !swflag_take(state, u) {
+        // Die Firmware haelt den Bus. Der Datenweg kann trotzdem laufen,
+        // wenn die Firmware die Verbindung schon ausgehandelt hat --
+        // deshalb kein Abbruch, sondern eine Zahl, die das sagt.
+        kstate.set(state, sc(u, S_PHYID), 0)
+        return
+    }
+    ulp_off(state, u)
+    phy_probe(state, u)
+    swflag_give(state, u)
+}
+
 fn read_link(state: u64, u: u64) {
     var v: u64 = 0
     if (reg(state, u, R_STATUS) & STATUS_LU) != 0 {
         v = 1
+    }
+    // RUNDE RTL: auf der PCH-Linie kann der MAC die Verbindung noch nicht
+    // sehen, waehrend der PHY sie laengst hat -- die beiden haengen an
+    // verschiedenen Takten. Also wird der PHY gefragt, wenn der MAC
+    // schweigt. Zweimal, weil BMSR.LINK ein rastendes Bit ist: die erste
+    // Antwort meldet, ob die Verbindung SEIT DEM LETZTEN LESEN weg war,
+    // die zweite, ob sie JETZT steht.
+    if v == 0 && fam(state, u) == FAM_ICH {
+        if swflag_take(state, u) {
+            let first: u64 = mdic_read(state, u, 1)
+            let second: u64 = mdic_read(state, u, 1)
+            swflag_give(state, u)
+            if second != 0xFFFFFFFF {
+                if (second & BMSR_LINK) != 0 {
+                    v = 1
+                }
+            }
+        }
     }
     kstate.set(state, sc(u, S_LINK), v)
 }
 
 // ------------------------------------------------------------- the init
 
-fn init_on(state: u64, u: u64, use_msix: bool, armed: bool) -> bool {
+// RUNDE BLECH: `vec` ist der Meldevektor, den `netdev.fi` fuer DIESE
+// KARTE vergeben hat -- nicht `45 + u` aus der eigenen Einheitennummer.
+// Zwei Treiber mit je einer Karte haetten sonst beide Vektor 45, und
+// `trap.fi` gibt 45 an Karte 0. `vec == 0` heisst: keine Unterbrechung,
+// diese Karte wird abgefragt.
+fn init_on(state: u64, u: u64, use_msix: bool, armed: bool,
+    vec: u64) -> bool {
     if u >= MAX_UNITS {
         return false
     }
@@ -519,6 +855,12 @@ fn init_on(state: u64, u: u64, use_msix: bool, armed: bool) -> bool {
     kstate.set(state, sc(u, S_IDX), i)
     kstate.set(state, sc(u, S_BDF), d)
     kstate.set(state, sc(u, S_DEVID), pci.get(state, i, pci.E_DEVICE))
+    // RUNDE RTL: welche der beiden Familien. Alles, was danach anders
+    // laeuft, haengt an dieser einen Zahl.
+    kstate.set(state, sc(u, S_FAM), family_of(pci.get(state, i, pci.E_DEVICE)))
+    kstate.set(state, sc(u, S_PREMAC), 0)
+    kstate.set(state, sc(u, S_PHYID), 0)
+    kstate.set(state, sc(u, S_SWFLAG), 0)
 
     // BAR0, and it has to be MEMORY. An 8254x also offers an I/O BAR;
     // this driver does not use it, and a card whose BAR0 is I/O is not
@@ -537,9 +879,29 @@ fn init_on(state: u64, u: u64, use_msix: bool, armed: bool) -> bool {
     // descriptor -- the same counter-check `nicnobm` makes for virtio.
     pci.enable_master(d)
 
+    // RUNDE RTL, PCH-LINIE: die Adresse VOR dem Ruecksetzen aufheben.
+    // Auf der 8254x-Familie laedt der Chip RAL/RAH nach jedem Ruecksetzen
+    // selbst neu; auf der PCH-Linie hat die FIRMWARE sie hineingeschrieben,
+    // und ein Ruecksetzen kann sie mitnehmen. Wer erst danach liest, hat
+    // eine Karte ohne Adresse und weiss nicht, warum.
+    if fam(state, u) == FAM_ICH {
+        let prah: u64 = reg(state, u, R_RAH)
+        if (prah & RAH_AV) != 0 {
+            kstate.set(state, sc(u, S_PREMAC),
+                (reg(state, u, R_RAL) & 0xFFFFFFFF) | ((prah & 0xFFFF) << 32))
+        }
+    }
+
     if !chip_reset(state, u) {
         kstate.set(state, sc(u, S_MMIO), 0)
         return false
+    }
+
+    // RUNDE RTL: der PHY der PCH-Linie haengt hinter einer Semaphore, die
+    // sich der MAC mit der Verwaltungsfirmware teilt. Vor den Ringen, weil
+    // ein PHY, der noch schlaeft, keine Verbindung meldet.
+    if fam(state, u) == FAM_ICH {
+        ich_bringup(state, u)
     }
 
     // The link: let the chip negotiate it. LRST and ILOS have to be off,
@@ -589,7 +951,7 @@ fn init_on(state: u64, u: u64, use_msix: bool, armed: bool) -> bool {
     // order virtio uses. `use_msix` is accepted and ignored: this family
     // has no MSI-X, and saying so through `msix_on` is better than
     // failing to come up at all.
-    intx_arm(state, u, i, armed)
+    intx_arm(state, u, i, armed, vec)
     if armed {
         // EVERY delay register to zero, and the send side in the mask
         // too. Both because of a MEASUREMENT: with only the receive
@@ -809,14 +1171,20 @@ fn poll_on(state: u64, u: u64) -> bool {
 // The interrupt PIN through the I/O APIC. PCI lines are level triggered
 // and active low -- the same six lines `virtio.intx_arm` has, and for
 // the same reason they cannot simply be shared: the vector is per card.
-fn intx_arm(state: u64, u: u64, i: u64, armed: bool) {
+fn intx_arm(state: u64, u: u64, i: u64, armed: bool, vec: u64) {
     let d: u64 = pci.get(state, i, pci.E_BDF)
     pci.cfg_write16(d, 0x04, pci.cfg_read16(d, 0x04) & 0xFBFF)
+    if vec == 0 {
+        // Diese Karte hat keinen Vektor bekommen. Die Leitung wird gar
+        // nicht erst geroutet -- eine Umleitung auf einen Vektor, den
+        // niemand behandelt, waere schlimmer als keine.
+        return
+    }
     let gsi: u64 = pci.get(state, i, pci.E_IRQLINE)
     if gsi == 0 || gsi > 23 {
         return
     }
-    apic.route(state, gsi, 45 + u, apic.id(state), true, true)
+    apic.route(state, gsi, vec, apic.id(state), true, true)
     if !armed {
         apic.mask_gsi(state, gsi)
     }

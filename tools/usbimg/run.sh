@@ -272,12 +272,47 @@ fi
 # UND EINE KARTE, DIE DIESER KERN NICHT KANN. Ohne diesen Lauf waere die
 # Zeile "no driver for" nie gemessen worden -- und genau sie ist die
 # Zeile, an der Justin ablesen soll, welchen Treiber er braucht.
+#
+# RUNDE BLECH, NACHTRAG: HIER STAND `-device rtl8139`, UND DAS IST SEIT
+# DEM MERGE DES ZWEIGS `rtl` KEINE FREMDE KARTE MEHR. QEMUs rtl8139
+# meldet PCI-Revision 0x20, also den C+-Modus -- und genau den faehrt
+# `kernel/r8169.fi` seit Runde RTL, er ist dort sogar der EINZIGE in QEMU
+# gemessene Zweig. Die Zusage hat danach nicht mehr geprueft, was sie
+# pruefen wollte: sie verlangte "kein Treiber" von einer Karte, fuer die
+# es inzwischen einen gibt.
+#
+# Das ist kein Fehler dieser Runde, sondern eine Altlast des Merges
+# (Commit "BLECH 16/n"): die volle Abnahme um 12:59 lief noch VOR ihm und
+# war deshalb gruen. Sie faellt seitdem -- gesehen hat es niemand, weil
+# usbimg zwischen dem Merge und jetzt nicht mehr einzeln lief.
+#
+# Genommen wird jetzt `ne2k_pci` (10EC:8029): derselbe Hersteller wie der
+# gefahrene Realtek, aber ein Chip ohne Ringe, den dieser Kern nicht
+# faehrt und nie fahren wird. Damit prueft die Zusage wieder ihre Absicht
+# -- und sie prueft zusaetzlich, dass die Zeile den KLARNAMEN traegt.
 lauf fremd -device ide-hd,drive=stick \
-     -device rtl8139,netdev=n0 -netdev user,id=n0
+     -device ne2k_pci,netdev=n0 -netdev user,id=n0
 if grep -qa 'netdev: no driver for' "$TMPD/fremd.txt"; then
-    ok "eine fremde Karte (rtl8139) wird als 'no driver for' gemeldet: $(grep -ao 'no driver for.*' "$TMPD/fremd.txt" | head -1)"
+    ok "eine fremde Karte (ne2k_pci) wird als 'no driver for' gemeldet: $(grep -ao 'no driver for.*' "$TMPD/fremd.txt" | head -1)"
 else
     bad "eine fremde Karte wird nicht als 'no driver for' gemeldet"
+    grep -a 'netdev:' "$TMPD/fremd.txt" | sed 's/^/       /'
+fi
+if grep -qa 'RTL8029 (ne2000)' "$TMPD/fremd.txt"; then
+    ok "und sie wird beim NAMEN genannt, nicht nur bei der Nummer"
+else
+    bad "die fremde Karte wird nicht beim Namen genannt"
+fi
+# GEGENPROBE ZUR ZUSAGE SELBST: derselbe Lauf mit rtl8139 muss das
+# GEGENTEIL zeigen -- eine Karte, die dieser Kern SEHR WOHL faehrt. Ohne
+# sie stuende hier wieder eine Zusage, die nur zufaellig gruen ist.
+lauf gefahren -device ide-hd,drive=stick \
+     -device rtl8139,netdev=n0 -netdev user,id=n0
+if grep -qa 'netdev: c0=r8169' "$TMPD/gefahren.txt"; then
+    ok "GEGENPROBE: derselbe rtl8139 wird als r8169 GEFAHREN, ist also keine fremde Karte mehr"
+else
+    bad "GEGENPROBE: der rtl8139 wird nicht als r8169 gefahren"
+    grep -a 'netdev:' "$TMPD/gefahren.txt" | sed 's/^/       /'
 fi
 # UND DER KERN LAEUFT TROTZDEM WEITER. Punkt 5 der Runde.
 if grep -qa 'ANGEHALTEN' "$TMPD/fremd.txt"; then

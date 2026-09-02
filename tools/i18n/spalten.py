@@ -96,17 +96,42 @@ def inhalt(roh):
 
 
 def oktette(roh):
-    """Wieviele Oktette dieses Literal belegt -- Escape zaehlt eins."""
+    """Wieviele Oktette dieses Literal belegt -- Escape zaehlt eins.
+
+    RUNDE BLECH: `\\xNN` IST VIER ZEICHEN LANG UND EIN OKTETT BREIT.
+    Bis hierher hat diese Funktion jeden Escape mit `i += 2`
+    uebersprungen -- richtig fuer `\\0`, `\\n`, `\\t` und `\\\\`, und falsch
+    fuer die hexadezimale Form: von `\\x1e` wurden `\\x` als ein Oktett
+    gezaehlt und `1` und `e` danach als zwei weitere. Ein Literal aus
+    sechsundzwanzig `\\xNN` kam so auf 78 statt auf 26.
+
+    Gefunden hat es `kernel/ehci.fi`: die Tabelle, die einen
+    HID-Gebrauchscode in einen PS/2-Abtastcode uebersetzt, ist ein Feld
+    aus sechsundzwanzig Oktetten, und keines davon ist ein druckbares
+    Zeichen. Sie ist das erste Literal dieses Baums in dieser Form --
+    deshalb ist der Fehler bis zum 02.09.2026 niemandem aufgefallen.
+
+    Die Gegenprobe steht in `tools/i18n/run.sh` und wurde NICHT
+    entschaerft: eine Spalte um ein Zeichen zu kuerzen macht den Pruefer
+    weiterhin rot.
+    """
     n = 0
     i = 0
     while i < len(roh):
         if roh[i] == '\\':
             n += 1
-            i += 2
+            if (i + 3 < len(roh) and roh[i + 1] == 'x'
+                    and roh[i + 2] in HEX and roh[i + 3] in HEX):
+                i += 4
+            else:
+                i += 2
         else:
             n += len(roh[i].encode('utf-8'))
             i += 1
     return n
+
+
+HEX = '0123456789abcdefABCDEF' 
 
 
 def ketten(pfad):
