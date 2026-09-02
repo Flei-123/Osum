@@ -408,6 +408,21 @@ neue Bereich `MODUL` (0x4D000..0x50000) steht in der Karte; die drei
 Seiten kommen aus dem Loch, das `kstate.fi` seit Runde K17 zwischen
 `MODE_OFF` und `K17_OFF` als frei ausweist.
 
+### Ein Unfall, der benannt gehört
+
+Die Abnahme läuft **in demselben Arbeitsbaum**, in dem committet wird,
+und drei ihrer Läufer (`netview`, `themestore`, `umlaut`) **schreiben
+ihre Bildschirmfotos in den Baum** (`docs/shots/…`). Ein `git add -A`
+hat sie mitgenommen: 25 PNG, deren einziger Unterschied zur Fassung auf
+`main` die Kompression eines neuen Laufs ist. Sie stehen in Commit
+`e4c228f` und sind mit `1266659` wieder zurückgenommen; die Historie ist
+NICHT umgeschrieben.
+
+Dieselbe Sorte Unfall steht in der Commit-Botschaft von `12d292f`
+(CERTUS 9/n). Die Lehre ist beide Male dieselbe: wer in einem Baum
+arbeitet, in dem gleichzeitig die Abnahme läuft, prüft `git status` VOR
+dem `add`.
+
 ### `tools/modul/run.sh` steht NICHT in `test.sh`
 
 Eine bewusste Entscheidung: die Abnahme dieser Runde soll dieselben
