@@ -206,7 +206,7 @@ R="$TMPD/bus-ne2k.txt"
 # that three green sections depend on, for nothing but nicer wording,
 # is the wrong trade.  Whoever wants the human-readable list reads
 # `netdev.print_inventory`, which round BLECH added for exactly that.
-has "$R" "netdev: kein Treiber fuer" \
+has "$R" "netdev: no driver for 0x10ec:0x8029" \
     "the unknown card is NAMED WITH ITS NUMBERS -- the sentence a real board needs"
 has "$R" "10ec:8029" \
     "and its NUMBERS are still there as the proof"
