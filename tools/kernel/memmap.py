@@ -184,6 +184,10 @@ BEREICHE = [
     # haelt drei Listen zu acht Eintraegen: Bewerber, Befunde,
     # USB-Regler.
     ("ROOTSEL",    "rootsel.fi", "ROOT_OFF",      "ROOT_MAX"),
+    # RUNDE BLECH, NACHTRAG: die Treiberschicht fuer Massenspeicher
+    # (kernel/blkdev.fi) -- dasselbe, was netdev.fi fuer Netz ist.  EINE
+    # Seite direkt hinter der Wurzelwahl.
+    ("BLKDEV",     "blkdev.fi", "BLKDEV_OFF",     "BLKDEV_MAX"),
     # RUNDE BLECH: der USB-2.0-Regler (kernel/ehci.fi).  Drei Seiten,
     # 0x4D000..0x50000 -- genau das Stueck, das diese Karte bis zu
     # dieser Runde als "frei 0x4D000..0x50000 (12 KiB)" ausgewiesen hat.
@@ -421,7 +425,7 @@ def main():
               "fs.fi",
               # RUNDE BLECH -- die Wurzelgeraetewahl nimmt eine Seite,
               # der EHCI-Treiber drei.
-              "rootsel.fi", "ehci.fi"):
+              "rootsel.fi", "ehci.fi", "blkdev.fi"):
         # RUNDE ARM: die Maschine hat seit dem Trennschnitt ein eigenes
         # Verzeichnis (`kernel/arch/x86_64/`).  `hv.fi` liegt dort, und
         # diese Schleife hat es vorher schlicht nicht mehr gefunden --
