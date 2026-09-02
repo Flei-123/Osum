@@ -291,6 +291,44 @@ p=$(wert "$TMPD/6.txt" 'abfragen=[0-9]+')
                       || bad "zu wenige Abfragen: ${p:-0}"
 
 # =====================================================================
+echo "== 6b. ZWEI Geraete am selben Regler -- Tastatur UND Stick =="
+# =====================================================================
+# Das ist die Messung, die den zweiten eigenen Fehler dieser Runde
+# festhaelt: der Geraetesatz war 64 Oktett gross, und vier seiner
+# Felder (Hersteller, Erzeugnis, Umschaltbit hinaus, Paketgroesse
+# hinein) lagen bei 0x40..0x58 -- also im Platz des NAECHSTEN Geraets.
+# Mit EINEM Geraet am Regler faellt das nie auf. Mit zweien traegt die
+# Tastatur die Herstellernummer des Sticks.
+( sleep 8
+  for k in h a l l o ret; do echo "sendkey $k"; sleep 0.3; done
+  sleep 22; echo quit ) | \
+timeout 180 $QEMU_X86 -kernel "$TMPD/neu.mb" -m 256 \
+    -append "ehci ehcitest nokbd nosched noproc nofs noring3" \
+    -serial "file:$TMPD/6b.txt" -display none -no-reboot -monitor stdio \
+    -device "usb-ehci,id=eh" -device "usb-kbd,bus=eh.0" \
+    -drive "file=$TMPD/stick.img,format=raw,if=none,id=st2" \
+    -device "usb-storage,bus=eh.0,drive=st2" \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
+hat "$TMPD/6b.txt" "dev 0  addr=1  klasse=1  0627:0001" \
+    "Geraet 0 ist die Tastatur, mit IHRER Herstellernummer"
+hat "$TMPD/6b.txt" "dev 1  addr=2  klasse=3  46f4:0001" \
+    "Geraet 1 ist der Stick, mit SEINER -- die Saetze ueberschreiben sich nicht"
+n=$(wert "$TMPD/6b.txt" 'enum=[0-9]+')
+[ "${n:-0}" -eq 2 ] && ok "beide sind aufgezaehlt (enum=2)" \
+                    || bad "aufgezaehlt: ${n:-0}, erwartet 2"
+if grep -qa "ehci: codes $ERWARTET" "$TMPD/6b.txt"; then
+    ok "die Tastatur liefert weiterhin die richtigen Codes, mit dem Stick daneben"
+else
+    bad "mit zwei Geraeten stimmen die Abtastcodes nicht mehr"
+    grep -a 'ehci: codes' "$TMPD/6b.txt" | sed 's/^/        /'
+fi
+while read -r lba summe erstes; do
+    grep -qa "selftest lba=$lba  ok=1  sum=$summe" "$TMPD/6b.txt" \
+        && ok "und Block $lba kommt weiterhin Oktett fuer Oktett richtig an" \
+        || bad "mit zwei Geraeten weicht Block $lba ab"
+done < "$TMPD/summen.txt"
+
+# =====================================================================
 echo "== 7. NVMe mit drei Namensraeumen, der dritte mit der Nummer 7 =="
 # =====================================================================
 python3 - "$TMPD" > "$TMPD/nssummen.txt" <<'PY'
