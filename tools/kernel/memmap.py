@@ -178,6 +178,12 @@ BEREICHE = [
     ("PMON",       "kstate.fi", "PMON_OFF",       "PMON_MAX"),
     ("NETVIEW",    "kstate.fi", "NETVIEW_OFF",    "NETVIEW_MAX"),
     ("NETDEV",     "kstate.fi", "NETDEV_OFF",     "NETDEV_MAX"),
+    # RUNDE BLECH: die Wurzelgeraetewahl (kernel/rootsel.fi).  EINE Seite
+    # aus dem Stueck, das diese Karte selbst als frei ausweist
+    # (0x84380..0x88000, hinter den Zaehlern der Handle-Schicht).  Sie
+    # haelt drei Listen zu acht Eintraegen: Bewerber, Befunde,
+    # USB-Regler.
+    ("ROOTSEL",    "rootsel.fi", "ROOT_OFF",      "ROOT_MAX"),
 
     # RUNDE FSROBUST: der Zustand des OFS-Journals (kernel/ofsj.fi).
     # Drei Seiten aus dem letzten freien Stueck, 0x7A000..0x80000.
@@ -389,7 +395,9 @@ def main():
               "vfs.fi", "mnt.fi", "fat.fi", "procfs.fi", "devfs.fi",
               "part.fi", "ofs.fi",
               # RUNDE OFS3 -- die Geometriewoerter stehen hier.
-              "fs.fi"):
+              "fs.fi",
+              # RUNDE BLECH -- die Wurzelgeraetewahl nimmt eine Seite.
+              "rootsel.fi"):
         # RUNDE ARM: die Maschine hat seit dem Trennschnitt ein eigenes
         # Verzeichnis (`kernel/arch/x86_64/`).  `hv.fi` liegt dort, und
         # diese Schleife hat es vorher schlicht nicht mehr gefunden --
