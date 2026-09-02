@@ -67,6 +67,7 @@ import rand
 import tty
 import signal
 import arch.x86_64.guard
+import arch.x86_64.fpu
 import bootmod
 import ab
 import hwdiag
@@ -119,6 +120,7 @@ const P_HANDLE: u64 = 48
 const P_ASYNC: u64 = 50
 const P_ABENCH: u64 = 51
 const P_ASYNCFS: u64 = 52
+const P_VEC: u64 = 53 // RUNDE AVX
 // RUNDE K13: die beiden Programmnummern dieser Runde (kernel/uprog.fi).
 const P_PWR: u64 = 45
 const P_PWRIDLE: u64 = 46
@@ -201,6 +203,9 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // `kernel_main` sie nur als Argument hat.
     kstate.set(state, kstate.MBI, mbi)
     guard.parse(state, cmd)
+    // RUNDE AVX: die Vektorregister lesen ihr eigenes Wort, so wie
+    // `guard` seit K10. nofpu / nofpuswitch / fpulazy / noxsave / noavx.
+    fpu.parse(state, cmd)
     bootmod.parse(state, cmd)
     hv.parse(state, cmd)
     // ROUND NETMON: the accounting is on from the first instruction, so
@@ -332,6 +337,18 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     the timer already counts its ticks against it.
     kstate.set(state, kstate.KPML4,
         asm("mov rax, cr3", out("rax")) & ADDR_MASK)
+    // RUNDE AVX: CR0/CR4/XCR0, UND ZWAR VOR `sched.init`.
+    //
+    // Bis zu dieser Runde stand in CR4 nur PAE (0x20) plus SMEP/SMAP --
+    // kein OSFXSR, kein OSXSAVE. Damit war JEDE SSE-Anweisung auf dieser
+    // Maschine ein #UD, und `/bin/fetch` starb unter `-cpu max` an der
+    // SHA-NI-Fassung von SHA-256, die Firns Bibliothek dort waehlt.
+    //
+    // Die Zeile steht HIER und nicht neben `guard.apply`, weil
+    // `sched.init` und das erste `sched.create` schon Vektorbereiche
+    // anfordern -- `fpu.area_new` antwortet 0, solange nicht
+    // freigeschaltet ist, und Aufgabe 0 haette dann keinen.
+    fpu.apply(state)
     sched.init(state)
     let idle: u64 = sched.create(state, sched.K_IDLE, 1, 0, 0)
     sched.start(state, idle)
@@ -346,6 +363,10 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // Programm gesetzt wird, hat genau dieses eine nicht geschuetzt.
     guard.apply(state)
     guard.report(state)
+    // RUNDE AVX: der Bericht steht HIER und die Freischaltung weiter
+    // oben -- so steht in der Zeile das VOLLSTAENDIGE CR4, mit SMEP
+    // und SMAP darin.
+    fpu.report(state)
     proc.map_programs(state)
     // Die beiden Gegenproben. Sie tun nichts, solange die
     // Kommandozeile sie nicht ausdruecklich verlangt -- und wenn sie
@@ -393,6 +414,10 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     Aufgabe derselbe wie vorher.
     asyncs(state)
     async_bench(state)
+    // 7b-sexies. RUNDE AVX: die Gegenprobe zum Kontextwechsel. Hier und
+    //     nicht spaeter, weil sie kein Dateisystem braucht -- vier
+    //     Prozesse, ihre Vektorregister und sonst nichts.
+    vectors(state)
     // 7b-bis. RUNDE K13: Kennungen aus Ring 3, ohne Platte. Hier und
     //     nicht spaeter, weil es KEIN Dateisystem braucht -- die Zusagen
     //     ueber uid/gid gelten auch in einem Lauf `nofs`, und ein Test,
@@ -480,6 +505,17 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     kernel behaves as it did; under `-smp 4` it starts the other
     //     three and hands them work.
     smp.stage(state)
+    // RUNDE AVX, ZWEITER DURCHGANG: dieselben vier Prozesse NOCH EINMAL,
+    // jetzt aber mit allen Kernen oben. Der erste Durchgang oben lief
+    // auf einem Prozessor -- er misst, dass der Wechsel sichert; dieser
+    // hier misst zusaetzlich, dass eine Aufgabe, die von einem Kern auf
+    // einen anderen wandert, ihre Register mitnimmt. Ohne
+    // `fpu.apply_here` in `smp.ap_main` waere das nicht einmal
+    // fehlerhaft, sondern toedlich: der erste `movdqu` auf einem Kern
+    // ohne CR4.OSFXSR ist ein #UD.
+    vectors_smp(state)
+    ring3_smp(state)
+    fpu_bench(state)
 
 
     // 7i. RUNDE K12: ein Wirt fuer fremde Betriebssysteme. Hier und
@@ -513,6 +549,7 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // ohne eine einzige Fensteroeffnung waere ein Kernel, der
     // Ring-3-Speicher nie anfasst.
     guard.report_aps(state)
+    fpu.report_aps(state)
     // ...und ob das Boot-Modul den ganzen Lauf unversehrt ueberstanden
     // hat. Haette `mem.scan` seinen Bereich nicht reserviert, stuende
     // hier jetzt eine andere Summe.
@@ -3702,4 +3739,491 @@ fn usb_unplug(state: u64) {
     serial.puts((&s_p[0]) as u64)
     serial.dec(usb.unplugs(state))
     serial.nl()
+}
+
+
+// ==================================================== RUNDE AVX
+//
+// DER NACHWEIS, DASS DER KONTEXTWECHSEL DIE VEKTORREGISTER SICHERT.
+//
+// Vier Prozesse laufen GLEICHZEITIG, jeder mit einem Muster, das nur zu
+// ihm passt. Jeder gibt den Prozessor 128-mal ab und sieht danach nach,
+// ob er seine eigenen Werte wiederfindet. Der Beendigungscode ist die
+// Zahl der Abweichungen; 0 in allen vier heisst, dass kein Prozess je
+// die Register eines anderen gesehen hat.
+//
+// DIE GEGENPROBE IST DIE HAELFTE DES NACHWEISES. Mit `nofpuswitch`
+// schaltet `fpu.apply` frei, aber `fpu.switch` tut nichts -- genau der
+// Fehler, vor dem `docs/OTA.md` warnt ("Das Freischalten allein waere
+// FALSCH: dann benutzt Ring 3 Vektorregister, die kein Kontextwechsel
+// sichert"). Dann MUSS diese Zahl gross werden. Ein Test, der nicht rot
+// werden kann, misst nichts.
+fn vectors(state: u64) {
+    var s_skip: [u8; 13] = "vec: skipped\0"
+    var s_beg: [u8; 11] = "vec: begin\0"
+    var s_ex: [u8; 11] = "vec: exit=\0"
+    var s_sp: [u8; 2] = " \0"
+    var s_sum: [u8; 10] = "vec: sum=\0"
+    var s_res: [u8; 12] = "vec: clean=\0"
+    if !fpu.want(state, fpu.M_VEC) {
+        serial.puts((&s_skip[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_beg[0]) as u64)
+    serial.nl()
+    // Bit 9: der letzte der vier macht zusaetzlich die `fork`-Probe.
+    let a: u64 = proc.create(state, P_VEC, 1, 2)
+    let b: u64 = proc.create(state, P_VEC, 2, 2)
+    let c: u64 = proc.create(state, P_VEC, 3, 2)
+    let d: u64 = proc.create(state, P_VEC, 0x200 | 4, 2)
+    let ea: u64 = kutil.wait_for(state, a)
+    let eb: u64 = kutil.wait_for(state, b)
+    let ec: u64 = kutil.wait_for(state, c)
+    let ed: u64 = kutil.wait_for(state, d)
+    serial.puts((&s_ex[0]) as u64)
+    serial.dec(ea)
+    serial.puts((&s_sp[0]) as u64)
+    serial.dec(eb)
+    serial.puts((&s_sp[0]) as u64)
+    serial.dec(ec)
+    serial.puts((&s_sp[0]) as u64)
+    serial.dec(ed)
+    serial.nl()
+    serial.puts((&s_sum[0]) as u64)
+    serial.dec(ea + eb + ec + ed)
+    serial.nl()
+    serial.puts((&s_res[0]) as u64)
+    if ea == 0 && eb == 0 && ec == 0 && ed == 0 {
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
+    serial.nl()
+}
+
+
+// RUNDE AVX: DIE PROBE AUF MEHREREN PROZESSOREN.
+//
+// KERNaufgaben und keine Prozesse, und dafuer gibt es einen gemessenen
+// Grund. Ein Versuch mit vier Prozessen aus Ring 3 hinter `smp.stage`
+// endete unter `-smp 4` in einem #DF mit `rsp` in einer NUTZERseite:
+// `syscall_entry` in `isr.s` legt den Nutzerstapel in EIN globales Wort
+// (`sys_rsp`) und holt den Kernstapel aus EINEM (`kdata + KSTACK_CUR`).
+// Zwei Kerne, die gleichzeitig einen Systemaufruf machen, stehen danach
+// auf demselben Kernstapel. Das ist eine Grenze aus Runde K5 -- sie
+// steht im Kommentar von `sched.set_kernel_stack` woertlich da ("a
+// started core ... never leaves ring 0 in this round") -- und sie hat
+// mit den Vektorregistern nichts zu tun. Nachgeprueft: dieselben vier
+// Aufgaben mit `nofpu` (also ohne eine Zeile dieser Runde) enden genauso.
+//
+// KERNAUFGABEN wandern sehr wohl ueber alle Kerne (`may_run` mit
+// ANY_CPU) und gehen durch DENSELBEN `switch_to`. Also wird auf ihnen
+// gemessen, was zu messen ist: dass eine Aufgabe ihre Vektorregister
+// mitnimmt, wenn der Scheduler sie auf einen anderen Kern legt.
+fn vectors_smp(state: u64) {
+    var s_beg: [u8; 15] = "vecsmp: begin\0\0"
+    var s_ex: [u8; 14] = "vecsmp: exit=\0"
+    var s_sp: [u8; 2] = " \0"
+    var s_c: [u8; 15] = "vecsmp: clean=\0"
+    var s_n: [u8; 15] = "vecsmp: cores=\0"
+    var s_m: [u8; 16] = "vecsmp: onmask=\0"
+    var s_sk: [u8; 16] = "vecsmp: skipped\0"
+    if !fpu.want(state, fpu.M_VEC) {
+        return
+    }
+    if !fpu.enabled(state) {
+        serial.puts((&s_sk[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_beg[0]) as u64)
+    serial.nl()
+    // Die Zahl der Kerne, die die Freischaltung WIRKLICH tragen: die
+    // weiteren Prozessoren, die sich in `fpu.apply_here` selbst gezaehlt
+    // haben, plus den Startprozessor. Zurueckgelesen aus CR4 und nicht
+    // angenommen -- siehe `guard.report_aps`.
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(kstate.get(state, kstate.FPU_APS) + 1)
+    serial.nl()
+    var t: [u64; 6] = [0 as u64; 6]
+    var i: u64 = 0
+    while i < 6 {
+        t[i as usize] = sched.create(state, sched.K_VEC, 1, 0, 0)
+        i = i + 1
+    }
+    i = 0
+    while i < 6 {
+        if t[i as usize] != 0 {
+            sched.start(state, t[i as usize])
+        }
+        i = i + 1
+    }
+    while vec_tasks_alive(state) > 0 {
+        sched.sleep_ticks(state, 1)
+    }
+    var bad: u64 = 0
+    var mask: u64 = 0
+    serial.puts((&s_ex[0]) as u64)
+    i = 0
+    while i < 6 {
+        if t[i as usize] != 0 {
+            let e: u64 = sched.tget(state, t[i as usize], sched.T_EXIT)
+            bad = bad + e
+            mask = mask | sched.cpu_mask(state, t[i as usize])
+            serial.dec(e)
+            serial.puts((&s_sp[0]) as u64)
+        }
+        i = i + 1
+    }
+    serial.nl()
+    // Welche Kerne diese sechs Aufgaben zusammen wirklich getragen
+    // haben. Ein Bit je Kern; steht hier 0x1, lief alles auf dem
+    // Startprozessor und der Abschnitt hat nichts ueber mehrere
+    // Prozessoren gesagt.
+    serial.puts((&s_m[0]) as u64)
+    serial.hex(mask)
+    serial.nl()
+    serial.puts((&s_c[0]) as u64)
+    if bad == 0 {
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
+    serial.nl()
+}
+
+fn vec_tasks_alive(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < kstate.get(state, kstate.TASKS) {
+        if sched.tget(state, i, sched.T_KIND) == sched.K_VEC {
+            let st: u64 = sched.tget(state, i, sched.T_STATE)
+            if st != sched.S_FREE && st != sched.S_ZOMBIE {
+                n = n + 1
+            }
+        }
+        i = i + 1
+    }
+    return n
+}
+
+
+// RUNDE AVX, DIAGNOSE UND KEINE ABNAHME: dieselben vier PROZESSE hinter
+// `smp.stage`. Ohne das Wort `r3smp` passiert hier nichts. Was dabei
+// herauskommt, steht in `docs/RUNDE-AVX.md`: unter `-smp 1` laeuft es
+// durch, unter `-smp 4` endet es in einem #DF -- auch mit `nofpu`, also
+// ohne eine Zeile dieser Runde. Der Grund liegt in `isr.s` und ist
+// Runde K5 alt.
+fn ring3_smp(state: u64) {
+    var s_beg: [u8; 14] = "r3smp: begin\0\0"
+    var s_ex: [u8; 13] = "r3smp: exit=\0"
+    var s_sp: [u8; 2] = " \0"
+    if !fpu.want(state, fpu.M_R3SMP) {
+        return
+    }
+    serial.puts((&s_beg[0]) as u64)
+    serial.nl()
+    // Bit 8: ohne Freischaltung darf das Programm kein Vektorregister
+    // anfassen -- sonst misst der Lauf ein #UD statt des Wettlaufs.
+    var flag: u64 = 0
+    if !fpu.enabled(state) {
+        flag = 0x100
+    }
+    let a: u64 = proc.create(state, P_VEC, flag | 5, 2)
+    let b: u64 = proc.create(state, P_VEC, flag | 6, 2)
+    let c: u64 = proc.create(state, P_VEC, flag | 7, 2)
+    let d: u64 = proc.create(state, P_VEC, flag | 8, 2)
+    let ea: u64 = kutil.wait_for(state, a)
+    let eb: u64 = kutil.wait_for(state, b)
+    let ec: u64 = kutil.wait_for(state, c)
+    let ed: u64 = kutil.wait_for(state, d)
+    serial.puts((&s_ex[0]) as u64)
+    serial.dec(ea)
+    serial.puts((&s_sp[0]) as u64)
+    serial.dec(eb)
+    serial.puts((&s_sp[0]) as u64)
+    serial.dec(ec)
+    serial.puts((&s_sp[0]) as u64)
+    serial.dec(ed)
+    serial.nl()
+}
+
+
+// RUNDE AVX: WAS DER KONTEXTWECHSEL JETZT MEHR KOSTET.
+//
+// Zwei Arme, und der Unterschied zwischen ihnen ist die ganze Frage
+// "lazy oder nicht":
+//
+//   A  zwei Aufgaben, die NUR den Prozessor abgeben und kein einziges
+//      Vektorregister anfassen. Das ist der Fall, fuer den der traege
+//      Weg gebaut ist.
+//   B  zwei Aufgaben, die in jeder Runde alle 16 xmm beschreiben und
+//      auslesen. Das ist der Fall, den es in Wirklichkeit gibt --
+//      praktisch jede libc benutzt SSE.
+//
+// Gemessen wird mit `rdtsc` um den ganzen Lauf und dem globalen
+// Wechselzaehler. Was herauskommt, ist der Preis EINES Wechsels, alles
+// eingerechnet: Laufliste, Sperre, Adressraum, Stapel -- und seit dieser
+// Runde XSAVE/XRSTOR. Der Vergleichswert kommt aus demselben Abbild mit
+// dem Wort `nofpu`, also aus dem Stand vor dieser Runde.
+fn fpu_bench(state: u64) {
+    var s_a: [u8; 17] = "fpubench: armA c\0"
+    var s_b: [u8; 17] = "fpubench: armB c\0"
+    var s_sw: [u8; 12] = "  switches=\0"
+    var s_cy: [u8; 10] = "  cycles=\0"
+    var s_per: [u8; 9] = "  each=\0\0"
+    var s_mem: [u8; 17] = "fpubench: bytes=\0"
+    var s_ar: [u8; 10] = "  areas=\0\0"
+    var s_fr: [u8; 11] = "  frames=\0\0"
+    if !fpu.want(state, fpu.M_BENCH) {
+        return
+    }
+    // ZUERST die Anweisungen selbst, und das ist die Zahl, auf die es
+    // ankommt. Der Wechsel als Ganzes ist auf diesem Wirt (zwoelf Kerne,
+    // auf denen gleichzeitig mehrere andere Runden QEMU laufen lassen)
+    // um mehr verrauscht, als der Unterschied gross ist -- eine Messung,
+    // deren Rauschen groesser ist als ihr Gegenstand, misst nichts.
+    bench_ops(state)
+    bench_ops(state)
+    bench_ops(state)
+    bench_parts(state)
+    bench_parts(state)
+    bench_arm(state, sched.K_YIELD, (&s_a[0]) as u64, (&s_sw[0]) as u64,
+        (&s_cy[0]) as u64, (&s_per[0]) as u64)
+    if fpu.enabled(state) {
+        bench_arm(state, sched.K_VEC, (&s_b[0]) as u64, (&s_sw[0]) as u64,
+            (&s_cy[0]) as u64, (&s_per[0]) as u64)
+    }
+    // Der Speicher: die GEMESSENE Groesse aus cpuid Blatt 0x0D und der
+    // Rahmen, der dafuer je Aufgabe belegt wird. Beides gehoert genannt
+    // -- das eine ist der Bedarf, das andere der Preis.
+    serial.puts((&s_mem[0]) as u64)
+    serial.dec(kstate.get(state, kstate.FPU_SIZE))
+    serial.puts((&s_ar[0]) as u64)
+    serial.dec(kstate.get(state, kstate.FPU_AREAS))
+    serial.puts((&s_fr[0]) as u64)
+    serial.dec(4096)
+    serial.nl()
+}
+
+fn bench_arm(state: u64, kind: u64, label: u64, s_sw: u64, s_cy: u64,
+    s_per: u64) {
+    let a: u64 = sched.create(state, kind, 1, 0, 0)
+    let b: u64 = sched.create(state, kind, 1, 0, 0)
+    if a == 0 || b == 0 {
+        return
+    }
+    let sw0: u64 = kstate.get(state, kstate.SWITCHES)
+    let t0: u64 = time.tsc()
+    sched.start(state, a)
+    sched.start(state, b)
+    while bench_alive(state, kind) > 0 {
+        sched.sleep_ticks(state, 1)
+    }
+    let t1: u64 = time.tsc()
+    let sw1: u64 = kstate.get(state, kstate.SWITCHES)
+    let sw: u64 = sw1 - sw0
+    let cy: u64 = t1 - t0
+    serial.puts(label)
+    serial.puts(s_sw)
+    serial.dec(sw)
+    serial.puts(s_cy)
+    serial.dec(cy)
+    serial.puts(s_per)
+    if sw > 0 {
+        serial.dec(cy / sw)
+    } else {
+        serial.dec(0)
+    }
+    serial.nl()
+}
+
+fn bench_alive(state: u64, kind: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < kstate.get(state, kstate.TASKS) {
+        if sched.tget(state, i, sched.T_KIND) == kind {
+            let st: u64 = sched.tget(state, i, sched.T_STATE)
+            if st != sched.S_FREE && st != sched.S_ZOMBIE {
+                n = n + 1
+            }
+        }
+        i = i + 1
+    }
+    return n
+}
+
+
+// DER PREIS DER BEIDEN ANWEISUNGEN, OHNE ALLES ANDERE.
+//
+// `fpu.save` + `fpu.restore` in einer Schleife, gegen dieselbe Schleife
+// ohne die beiden gehalten. Was uebrig bleibt, ist genau das, was jeder
+// Kontextwechsel seit dieser Runde mehr kostet -- unabhaengig davon, wie
+// teuer der Wechsel drumherum ist und wie stark der Wirt gerade belastet
+// wird.
+//
+// Die Leerschleife rechnet etwas, das gedruckt wird. Ein Rumpf, dessen
+// Ergebnis niemand liest, waere in `dce.rs` weg, und dann waere die
+// Referenz null.
+// MINIMUM STATT MITTELWERT, und das ist hier kein Schoenheitsfehler,
+// sondern die einzige Art, auf diesem Wirt etwas zu messen. Zwoelf
+// Kerne, auf denen gleichzeitig mehrere andere Runden QEMU laufen
+// lassen: ein Mittelwert misst dann die Nachbarn mit. Ein
+// weggenommener Zeitabschnitt kann eine Messung nur VERLAENGERN, nie
+// verkuerzen -- also ist das Minimum ueber viele kurze Buendel der
+// saubere Wert, und der Mittelwert daneben sagt, wie unruhig es war.
+const BENCH_BURSTS: u64 = 400
+const BENCH_IN: u64 = 250
+
+fn bench_ops(state: u64) {
+    var s_a: [u8; 18] = "fpubench: ops n=\0\0"
+    var s_b: [u8; 8] = "  min=\0\0"
+    var s_c: [u8; 9] = "  mitt=\0\0"
+    var s_d: [u8; 12] = "  leermin=\0\0"
+    var s_e: [u8; 8] = "  je=\0\0\0"
+    var s_f: [u8; 8] = "  acc=\0\0"
+    var s_no: [u8; 18] = "fpubench: ops aus\0"
+    if !fpu.enabled(state) {
+        serial.puts((&s_no[0]) as u64)
+        serial.nl()
+        return
+    }
+    let area: u64 = mem.frame_alloc(state)
+    if area == 0 {
+        return
+    }
+    fpu.area_init(state, area)
+    // Erst laden, damit die Register in einem definierten Zustand sind
+    // und XSAVEOPT seine Bezugsadresse kennt.
+    fpu.restore(state, area)
+    var best: u64 = 0xFFFFFFFFFFFFFFFF
+    var total: u64 = 0
+    var b: u64 = 0
+    while b < BENCH_BURSTS {
+        let t0: u64 = time.tsc()
+        var i: u64 = 0
+        while i < BENCH_IN {
+            fpu.save(state, area)
+            fpu.restore(state, area)
+            i = i + 1
+        }
+        let d: u64 = time.tsc() - t0
+        if d < best {
+            best = d
+        }
+        total = total +% d
+        b = b + 1
+    }
+    // Dieselbe Schleife OHNE die beiden Aufrufe. Ihr Ergebnis wird
+    // gedruckt -- ein Rumpf, den niemand liest, waere in `dce.rs` weg
+    // und die Referenz waere null.
+    var lbest: u64 = 0xFFFFFFFFFFFFFFFF
+    var acc: u64 = 0
+    var c: u64 = 0
+    while c < BENCH_BURSTS {
+        let t0: u64 = time.tsc()
+        var i: u64 = 0
+        while i < BENCH_IN {
+            acc = acc +% kstate.get(state, kstate.FPU_SIZE)
+            i = i + 1
+        }
+        let d: u64 = time.tsc() - t0
+        if d < lbest {
+            lbest = d
+        }
+        c = c + 1
+    }
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(BENCH_BURSTS * BENCH_IN)
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(best / BENCH_IN)
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(total / (BENCH_BURSTS * BENCH_IN))
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(lbest / BENCH_IN)
+    serial.puts((&s_e[0]) as u64)
+    if best > lbest {
+        serial.dec((best - lbest) / BENCH_IN)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_f[0]) as u64)
+    serial.hex(acc)
+    serial.nl()
+    mem.frame_free(state, area)
+}
+
+
+// DIE EINZELTEILE, aus denen die Entscheidung "traege oder nicht"
+// besteht. Dasselbe Verfahren wie `bench_ops`: Minimum ueber viele
+// kurze Buendel.
+//
+//   sichern    was jeder Wechsel in BEIDEN Faellen kostet
+//   laden      was der traege Weg einspart -- aber nur bei Aufgaben, die
+//              kein einziges Vektorregister anfassen
+//   ts         `mov cr0` mit gesetztem TS und `clts` zurueck; das ist,
+//              was der traege Weg dafuer ZUSAETZLICH bezahlt.
+//              ACHTUNG: unter KVM ist `mov cr0` ein Ausstieg aus der
+//              Gastmaschine und deshalb teurer als auf Blech. Die Zahl
+//              ist eine OBERE Schranke, kein Hardwarewert.
+fn bench_parts(state: u64) {
+    var s_a: [u8; 20] = "fpubench: teile sav\0"
+    var s_b: [u8; 8] = "  lad=\0\0"
+    var s_c: [u8; 8] = "  ts=\0\0\0"
+    if !fpu.enabled(state) {
+        return
+    }
+    let area: u64 = mem.frame_alloc(state)
+    if area == 0 {
+        return
+    }
+    fpu.area_init(state, area)
+    fpu.restore(state, area)
+    var bs: u64 = 0xFFFFFFFFFFFFFFFF
+    var bl: u64 = 0xFFFFFFFFFFFFFFFF
+    var bt: u64 = 0xFFFFFFFFFFFFFFFF
+    var b: u64 = 0
+    while b < BENCH_BURSTS {
+        var t0: u64 = time.tsc()
+        var i: u64 = 0
+        while i < BENCH_IN {
+            fpu.save(state, area)
+            i = i + 1
+        }
+        var d: u64 = time.tsc() - t0
+        if d < bs {
+            bs = d
+        }
+        t0 = time.tsc()
+        i = 0
+        while i < BENCH_IN {
+            fpu.restore(state, area)
+            i = i + 1
+        }
+        d = time.tsc() - t0
+        if d < bl {
+            bl = d
+        }
+        t0 = time.tsc()
+        i = 0
+        while i < BENCH_IN {
+            fpu.ts_set()
+            fpu.ts_clear()
+            i = i + 1
+        }
+        d = time.tsc() - t0
+        if d < bt {
+            bt = d
+        }
+        b = b + 1
+    }
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(bs / BENCH_IN)
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(bl / BENCH_IN)
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(bt / BENCH_IN)
+    serial.nl()
+    mem.frame_free(state, area)
 }
