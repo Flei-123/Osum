@@ -48,8 +48,10 @@ macht, steht es in der Zeile.
 | **Platte, NVMe** | `kernel/nvme.fi` + `kernel/blk.fi` (DEV_NVME), DMA, Warteschlangen, IRQ | unverändert | Namespaces > 1, Fehlerbehandlung bei fehlerhaftem Medium | Samsung/WD/SK-Hynix M.2 -- Klasse 01:08:02, herstellerunabhängig durch die Spezifikation |
 | **Platte, SATA/AHCI** | **NICHTS.** `pci.fi` kennt die Konstanten `SUB_SATA` (0x06) und `PROGIF_AHCI` (0x01) und benutzt sie nirgends. Es gibt KEINE Datei `ahci.fi`. Was es gibt, ist ATA-PIO auf 0x1F0 (`blk.fi`, DEV_ATA) -- das ist der Legacy-IDE-Weg | unverändert (diese Runde hat den Netzweg gebaut, nicht den Plattenweg) | AHCI-Treiber: Port-Register, Kommandolisten, FIS, NCQ-frei reicht | Jeder Rechner ohne NVMe: Intel PCH SATA (8086:xxxx, Klasse 01:06:01), AMD FCH. Ein SATA-Controller im AHCI-Modus antwortet NICHT auf 0x1F0 -- ohne AHCI-Treiber sieht Osum die Platte nicht |
 | **Grafik** | `kernel/fb.fi`: linearer Rahmenpuffer über Multiboot-Flag-Bit 12 (vom Lader), ODER die Bochs-/QEMU-Register 0x1CE/0x1CF, ODER die PCI-BAR der Karte. `kernel/vmode.fi` schaltet Modi über VBE | unverändert | Kein echter GPU-Treiber, kein KMS, keine Beschleunigung -- und das ist die richtige Entscheidung | Auf echter Hardware liefert der UEFI-GOP-Rahmenpuffer über Limine genau das, was Bit 12 verspricht. Der Weg trägt auf Intel-, AMD- und Nvidia-Systemen gleichermaßen, weil er von der Firmware kommt und nicht vom Chip |
-| **Eingabe, PS/2** | `kernel/kbd.fi` (Port 0x60, IRQ 1), `kernel/ps2m.fi` (Maus) | unverändert | -- | Auf Desktops fast immer noch da (der 8042 lebt im Chipsatz weiter). **Auf vielen modernen Laptops NICHT**: dort hängt die Tastatur an einem internen USB- oder I²C-HID-Gerät |
-| **Eingabe, USB-HID** | `kernel/xhci.fi` + `kernel/usb.fi`: xHCI, Geräteaufzählung, HID-Boot-Protokoll für Tastatur UND Maus, umgesetzt in PS/2-Abtastcodes (`usb.fi` Zeile 37 ff.) | unverändert | Keine HID-Report-Deskriptoren (nur das Boot-Protokoll), kein I²C-HID, kein Touchpad-Protokoll (Präzisions-Touchpads melden über Report-Deskriptoren) | USB-Tastatur/Maus: geht über das Boot-Protokoll. Laptop-Touchpad über I²C-HID: geht NICHT |
+| **Eingabe, PS/2** | `kernel/kbd.fi` (Port 0x60, IRQ 1), `kernel/ps2m.fi` (Maus) | unverändert im Verhalten, aber nicht mehr allein: `kbd.on_code` ist jetzt der gemeinsame Trichter, in den PS/2, USB-HID und I²C-HID münden. Der Super-Latch (Runde NETVIEW) gilt für alle drei -- gemessen als Regression | -- | Auf Desktops fast immer noch da (der 8042 lebt im Chipsatz weiter). **Auf vielen modernen Laptops NICHT**: dort hängt die Tastatur an einem internen USB- oder I²C-HID-Gerät |
+| **Eingabe, USB-HID** | `kernel/xhci.fi` + `kernel/usb.fi`: xHCI, Geräteaufzählung, HID-Boot-Protokoll für Tastatur UND Maus | **RUNDE HID:** `kernel/hidrep.fi` zerlegt Berichtsbeschreibungen (Usage Pages, Usages, Report IDs, Input/Output/Feature, Logical Min/Max, Report Size/Count, Collections, Push/Pop). `usb.fi` holt sie mit `GET_DESCRIPTOR(0x22)` an der **Schnittstelle** und schaltet auf `SET_PROTOCOL 1`. Damit: mehr als sechs Tasten gleichzeitig (NKRO), alle acht Zusatztasten (Alt und Super kamen über USB vorher NIE an), mehr Knöpfe, Rad an beliebiger Bitlage, Geräte mit Report IDs, Geräte **ohne** Boot-Protokoll. Das Boot-Protokoll bleibt als Rückfallweg | Keine Output-Reports (Tastatur-LEDs), keine Feature-Reports zur Laufzeit, kein Hotplug-Neuzerlegen bei mehreren HID-Schnittstellen an einem Gerät | USB-Tastatur/Maus/Tablet: geht. `-device usb-tablet` (Klasse 03:00:00, kein Boot-Protokoll) wurde vorher **abgelehnt** und läuft jetzt |
+| **Eingabe, I²C-HID** | **NICHTS.** Auf vielen Laptops damit GAR KEINE Eingabe | **RUNDE HID:** `kernel/i2chid.fi`. Designware/LPSS-I²C über PCI gesucht und an `IC_COMP_TYPE == 0x44570140` nachgeprüft; HID-over-I²C (HID-Descriptor-Register, Report-Descriptor-Register, Eingaberegister); Gerätesuche über einen **Ersatzweg** (siehe unten) | **Kein AML-Interpreter**, also kein `_CRS`-Auswerten, kein `_DSM`, kein `GpioInt`. Und: der ganze Registerteil ist **nur aus der Spezifikation** -- QEMU hat keinen Designware-I²C | Ultrabooks mit ELAN/Synaptics-Touchpad an I²C. Ob es dort wirklich läuft, ist **nicht gemessen** |
+| **Eingabe, Touchpad** | **NICHTS** | **RUNDE HID:** Multitouch-Berichte aus der Berichtsbeschreibung: Tip Switch, Contact Identifier, Contact Count, X/Y je Finger. Daraus Zeiger (relativ aus zwei Lagen, mit Kontaktnummer, damit der Zeiger beim Fingerwechsel nicht springt), Klick und Zwei-Finger-Rollen. Mündet über `gfx.mouse_packet` in denselben Zeiger wie die PS/2-Maus | Alle weiteren Gesten (drei Finger, Kneifen, Randstreifen, Tippen statt Klicken) -- das ist eine eigene Runde. Palm Rejection | Präzisions-Touchpads melden ausschließlich über Report-Deskriptoren; genau das geht jetzt |
 | **USB-Hostcontroller** | `kernel/xhci.fi` (xHCI 1.0, Klasse 0C:03:30) | unverändert | EHCI/UHCI/OHCI (alte Ports), USB-3-Hubs in der Tiefe, Isochronübertragungen | Jeder Rechner seit ~2012 hat xHCI, meist Intel/AMD im Chipsatz. Das ist der richtige und einzige nötige Controller |
 | **ACPI/Strom** | `kernel/acpi.fi`: RSDP-Suche, RSDT/XSDT, MADT (Prozessoren, I/O-APIC), FADT für das Abschalten. `kernel/pwr.fi`: C-Zustände, P-Zustände über MSR, `kernel/batt.fi`: Akku über die ACPI-Tabellen | unverändert | KEIN AML-Interpreter. Ohne den gibt es kein `_PRT` (Interrupt-Routing der PCI-Steckplätze), kein `_CRS`, keine Thermalzonen-Ereignisse, kein Deckelschalter, kein sauberes S3 | Genau hier wird es auf echter Hardware ernst: die Zuordnung PCI-Steckplatz → GSI kommt auf einem echten Brett aus dem AML-Objekt `_PRT`. Diese Runde liest stattdessen das Interrupt-Line-Register aus der Konfiguration (was die Firmware ausgefüllt hat). Das ist auf den meisten Brettern richtig und auf manchen nicht |
 | **TPM** | nichts im Kernel. `kernel/user/key.fi` und `bsec.fi` nennen TPM nur in Kommentaren als das, was es NICHT benutzt | unverändert | TPM-2.0-Treiber (TIS/CRB auf 0xFED40000), PCR-Erweiterung, Versiegeln | Auf jedem Rechner seit 2016 vorhanden (fTPM in der CPU oder dTPM). Für Justins Zweck (Helfer, Update) NICHT nötig; für „Schlüssel, den man nicht wegtragen kann" schon |
@@ -299,9 +301,13 @@ Justin weiß, wonach er beim ersten Versuch schaut:
    Firmware es richtig ausgefüllt; wo nicht, kommt kein
    Netzunterbrechungssignal an -- die Karte funktioniert dann trotzdem,
    weil `netd` den Ring auch abfragt, nur langsamer.
-4. **Die Tastatur hängt an I²C-HID** (viele Ultrabooks). Dann bleibt die
-   Eingabe tot; USB-Tastatur einstecken hilft, weil das
-   HID-Boot-Protokoll da ist.
+4. **Die Tastatur hängt an I²C-HID** (viele Ultrabooks). Nach Runde HID
+   gibt es dafür einen Weg (`kernel/i2chid.fi`), aber er ist **nicht auf
+   echtem Blech gemessen** -- QEMU hat keinen Designware-I²C. Es kann
+   sein, dass er auf Anhieb geht; es kann auch sein, dass er am ersten
+   Register stehenbleibt. USB-Tastatur einstecken hilft weiterhin
+   zuverlässig, und mit dem generischen Weg jetzt auch für Geräte ohne
+   Boot-Protokoll.
 5. **Secure Boot.** Limine ohne Signatur startet nicht. Im UEFI
    abschalten.
 
@@ -946,3 +952,102 @@ Die Liste aus Teil D gilt weiter. Neu bzw. präzisiert:
     (`print_inventory`), sagt aber ehrlich, dass es dafür keinen Treiber
     gibt und keinen geben wird. Für Netz braucht es einen
     USB-Ethernet-Adapter — und auch der ist **noch nicht** gebaut.
+
+## TEIL H -- EINGABE NACH RUNDE HID (30.08.2026)
+
+### Was jetzt wirklich geht, und woher man das weiß
+
+| Geräteklasse | Läuft | Womit gemessen |
+|---|---|---|
+| PS/2-Tastatur, PS/2-Maus | ja, unverändert | `tools/kernel/run.sh`, `tools/k17/run.sh` |
+| USB-Tastatur, Boot-Protokoll | ja | `-device usb-kbd`, Oktett-für-Oktett gegen den PS/2-Lauf (`tools/k17/run.sh`) |
+| USB-Tastatur, Berichtsprotokoll | ja | `-device usb-kbd`, Beschreibung geholt (63 Oktett = HID 1.11 Anhang B.1), zerlegt, `gen=1` |
+| USB-Maus | ja | `-device usb-mouse` |
+| USB-Zeiger **ohne** Boot-Protokoll | ja -- **vorher abgelehnt** | `-device usb-tablet`, Klasse 03:00:00 |
+| Tastatur mit > 6 Tasten gleichzeitig (NKRO) | ja | echte Berichte durch `hidin.report`: 8 aus EINEM Bericht, dann 11 gleichzeitig. **Kein QEMU-Gerät kann das** -- gemessen ist der Weg, nicht ein Gerät |
+| Präzisions-Touchpad | Weg gebaut, mit echten Berichten gemessen | 34 Felder aus der von Microsoft vorgeschriebenen Beschreibung; +300 Geräteeinheiten → 100 Bildpunkte, Zwei-Finger → eine Radrastung. **Kein QEMU-Gerät** |
+| I²C-HID | Weg gebaut, **Transport nicht gemessen** | siehe unten |
+
+### Was NUR aus der Spezifikation stammt
+
+Ehrlich getrennt, weil es der Unterschied zwischen „läuft" und „müsste
+laufen" ist:
+
+* **Jeder Designware-Registerzugriff** (`i2chid.fi`, alles mit
+  `dw_`-Präfix, dazu `reg_read`, `versuche`, `poll`). QEMU kennt keinen
+  LPSS-I²C (`-device help` listet nur `i2c-ddc` und `smbus-ipmi`).
+  Taktzahlen, Warteschlangen-Schwellen und die Abbruchbehandlung stehen
+  so da, wie die Unterlagen zum DW\_apb\_i2c es vorschreiben.
+* **Ob ein echtes Gerät auf Register 0x0001 antwortet.** Ohne `_DSM`
+  wird 0x0001 und danach 0x0020 probiert -- die beiden Werte, die in der
+  Praxis vorkommen.
+* **Die Berichte des Touchpads und der NKRO-Tastatur.** Ihre
+  *Beschreibungen* sind echt und der Zerleger ist gegen einen zweiten
+  Zerleger gemessen; dass ein bestimmtes Gerät auch wirklich so meldet,
+  ist Spezifikation.
+
+### Der ACPI-Ersatzweg -- und was später auf AML umzustellen ist
+
+Die Runde AML baut einen AML-Interpreter auf dem Zweig `aml`.
+**Nachgesehen am 30.08.2026: dieser Zweig zeigt auf denselben Commit wie
+`mergeline2` -- er enthält noch keine Zeile.** Gegen eine gedachte
+Schnittstelle zu bauen wäre das Schlechteste von beidem, also steht dort
+ein Ersatzweg.
+
+Er nutzt aus, dass `_CRS` eine **Ressourcenvorlage** zurückgibt, und die
+ist im AML-Oktettstrom eine feste Binärstruktur -- kein Programm. Der
+große Ressourcentyp `0x8E` mit Bustyp `0x01` ist eine I²C-Verbindung,
+und die Sklavenadresse steht darin an Oktett +16. Diese Struktur lässt
+sich in DSDT und SSDT **suchen**, ohne eine einzige AML-Anweisung
+auszuführen.
+
+**Gemessen:** in einer gebauten Tabelle mit zwei I²C-Verbindungen und
+drei Ködern, die wie eine aussehen, findet er genau die zwei -- und die
+Wiederholung derselben Vorlage nicht doppelt. In den **echten** ACPI-
+Tabellen, die QEMU stellt (5 Stück), findet er null, was richtig ist.
+
+**Die drei Stellen, die auf AML umzustellen sind** (stehen so auch im
+Kopf von `kernel/i2chid.fi`):
+
+| Stelle | Ersatzweg heute | Mit AML |
+|---|---|---|
+| `i2chid.acpi_scan` | Oktettmuster `0x8E`/Bustyp 1 in DSDT+SSDT suchen | `_CRS` des Geräts auswerten |
+| `HDESC_DEFAULT` / `HDESC_ALT` | 0x0001 probieren, dann 0x0020 | `_DSM` Funktion 1 auswerten |
+| `i2chid.poll` | abfragen | `GpioInt` aus `_CRS`, echte Meldung |
+
+Grenzen des Ersatzwegs, damit sie niemand suchen muss: wird die
+Ressourcenvorlage zur Laufzeit zusammengebaut statt wörtlich in der
+Tabelle zu stehen, findet er sie nicht; und er kann eine gefundene
+Adresse keinem *Namen* zuordnen, probiert also alle durch.
+
+### Gemessene Latenz
+
+Vom fertigen Bericht bis zum Oktett in der Zeilendisziplin. Median aus
+fünf Läufen, QEMU/KVM auf AMD EPYC 7571, 2000 Durchläufe je Messung,
+Zeitstempelzähler des Prozessors, umgerechnet mit der von `time.fi`
+kalibrierten Taktzahl (~2,2 GHz).
+
+| Weg | Zyklen | ns |
+|---|---:|---:|
+| PS/2 (fertiger Abtastcode in `kbd.on_code`) | 36 | 16 |
+| USB-HID, Boot-Protokoll (8 Oktett) | 814 | 369 |
+| USB-HID, generisch (Boot-Tastatur-Beschreibung) | 1885 | 855 |
+| I²C-HID, **Softwareanteil** (NKRO, 128 Bit) | 6297 | 2857 |
+| Präzisions-Touchpad (34 Felder, 5 Finger) | 9310 | 4226 |
+
+Zwei Dinge dazu, sonst ist die Tabelle irreführend:
+
+1. **PS/2 vergleicht sich nicht fair.** Dort liefert die Hardware EINEN
+   fertigen Abtastcode; bei HID kommt ein ganzer Bericht, der erst nach
+   seiner Beschreibung zerlegt werden muss. Die 36 Zyklen sind die
+   Auswertung eines Codes, die 1885 die eines Berichts.
+2. **Die Zeit auf dem Draht fehlt in allen Zeilen** und ist um
+   Größenordnungen größer: PS/2 rund 1 ms für elf Bit bei 12,5 kHz, USB
+   ein Meldeintervall (1--8 ms), I²C-HID die Übertragung bei 400 kHz.
+   QEMU stellt das nicht nach, also steht es hier nicht als Zahl.
+
+Die I²C-Zeile heißt „Softwareanteil", weil der Weg ab dem fertigen
+Bericht **buchstäblich derselbe** ist wie bei USB -- dieselbe Funktion.
+Sie ist höher als „USB generisch", weil dort eine Tastatur ohne
+Anschlagsgrenze mit 128 Bit gemessen wird und nicht eine mit 64.
+
