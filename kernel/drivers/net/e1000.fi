@@ -87,7 +87,12 @@ export {
 // `kstate.NETDEV_OFF + 0x600`  unit 1
 const UNIT_BASE: u64 = 0x400
 const UNIT_SPAN: u64 = 0x200
-const MAX_UNITS: u64 = 2
+// RUNDE STRUKTUR: 2 -> 6. Das ist genau, was der Platz hergibt und
+// keine Karte mehr: der Netzbereich ist EINE Seite (kstate.NETDEV_MAX =
+// 0x1000), dieser Treiber faengt bei 0x400 an, und (0x1000 - 0x400) /
+// 0x200 = 6. Eine siebte Einheit wuerde hinter das Seitenende schreiben
+// -- `tools/kernel/memmap.py` rechnet das nach.
+const MAX_UNITS: u64 = 6
 
 const S_MMIO: u64 = 0x00 // where BAR0 is reachable in the first GiB
 const S_BDF: u64 = 0x08
@@ -506,7 +511,7 @@ fn read_link(state: u64, u: u64) {
 
 // ------------------------------------------------------------- the init
 
-fn init_on(state: u64, u: u64, use_msix: bool, armed: bool) -> bool {
+fn init_on(state: u64, u: u64, vector: u64, use_msix: bool, armed: bool) -> bool {
     if u >= MAX_UNITS {
         return false
     }
@@ -589,7 +594,7 @@ fn init_on(state: u64, u: u64, use_msix: bool, armed: bool) -> bool {
     // order virtio uses. `use_msix` is accepted and ignored: this family
     // has no MSI-X, and saying so through `msix_on` is better than
     // failing to come up at all.
-    intx_arm(state, u, i, armed)
+    intx_arm(state, u, i, vector, armed)
     if armed {
         // EVERY delay register to zero, and the send side in the mask
         // too. Both because of a MEASUREMENT: with only the receive
@@ -809,14 +814,16 @@ fn poll_on(state: u64, u: u64) -> bool {
 // The interrupt PIN through the I/O APIC. PCI lines are level triggered
 // and active low -- the same six lines `virtio.intx_arm` has, and for
 // the same reason they cannot simply be shared: the vector is per card.
-fn intx_arm(state: u64, u: u64, i: u64, armed: bool) {
+// RUNDE STRUKTUR: `vector` statt der Rechnung `45 + u`. Siehe den
+// Absatz ueber die Unterbrechungen in `netdev.fi`.
+fn intx_arm(state: u64, u: u64, i: u64, vector: u64, armed: bool) {
     let d: u64 = pci.get(state, i, pci.E_BDF)
     pci.cfg_write16(d, 0x04, pci.cfg_read16(d, 0x04) & 0xFBFF)
     let gsi: u64 = pci.get(state, i, pci.E_IRQLINE)
     if gsi == 0 || gsi > 23 {
         return
     }
-    apic.route(state, gsi, 45 + u, apic.id(state), true, true)
+    apic.route(state, gsi, vector, apic.id(state), true, true)
     if !armed {
         apic.mask_gsi(state, gsi)
     }
