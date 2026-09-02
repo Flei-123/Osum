@@ -77,7 +77,7 @@ echo
 
 FILES=()
 while IFS= read -r f; do FILES+=("$f"); done < <(
-    ls kernel/*.fi kernel/arch/*.fi 2>/dev/null | sort)
+    find kernel -name '*.fi' 2>/dev/null | sort)
 
 clean=0
 dirty=0

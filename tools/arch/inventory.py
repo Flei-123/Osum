@@ -185,7 +185,14 @@ def rows_of(kdir, prefix=""):
     rows = []
     if not os.path.isdir(kdir):
         return rows
-    for f in sorted(os.listdir(kdir)):
+    # RUNDE STRUKTUR: os.walk statt os.listdir -- die Treiber liegen
+    # seit dieser Runde unter kernel/drivers/<klasse>/ und waeren aus
+    # der Zaehlung still verschwunden.
+    alle = []
+    for _w, _d, _n in sorted(os.walk(kdir)):
+        for _f in sorted(_n):
+            alle.append(os.path.relpath(os.path.join(_w, _f), kdir))
+    for f in alle:
         if not (f.endswith(".fi") or f.endswith(".s") or f.endswith(".S")):
             continue
         total, codelines, marked, per = scan(os.path.join(kdir, f))

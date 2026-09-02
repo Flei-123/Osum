@@ -138,9 +138,15 @@ grep -q '"K13_OFF"' tools/kernel/memmap.py \
 # RUNDE ARM: die Kopie braucht `kernel/arch/x86_64/` mit -- `hv.fi` liegt
 # seit dem Trennschnitt dort, und ohne sie stirbt der Kartenpruefer an
 # einem KeyError statt die Kollision zu melden, die hier gemessen wird.
-mkdir -p "$TMPD/kbad/arch/x86_64"
-cp kernel/*.fi "$TMPD/kbad/"
-cp kernel/arch/x86_64/*.fi "$TMPD/kbad/arch/x86_64/"
+mkdir -p "$TMPD/kbad"
+# RUNDE STRUKTUR: EINE Kopie des GANZEN Kernbaums statt einer Liste
+# von Verzeichnissen. Bis hierher stand da `cp kernel/*.fi` plus eine
+# zweite Zeile fuer `arch/x86_64/` -- nachgetragen von Runde ARM,
+# nachdem genau diese Stelle an einem KeyError gestorben war. Mit den
+# Treibern unter kernel/drivers/ waere derselbe Nachtrag ein drittes
+# Mal faellig geworden. `cp -a kernel/.` nimmt, was da ist, und bleibt
+# beim naechsten Umzug richtig.
+cp -a kernel/. "$TMPD/kbad/"
 sed -i 's/^const K13_OFF: u64 = 0x41000/const K13_OFF: u64 = 0x40000/' "$TMPD/kbad/kstate.fi"
 if python3 tools/kernel/memmap.py "$TMPD/kbad" > "$TMPD/karte-bad.txt" 2>&1; then
     bad "GEGENPROBE: K13 auf 0x40000 (dem Hypervisor) faellt NICHT auf"

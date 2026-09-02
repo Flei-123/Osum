@@ -64,6 +64,22 @@ LAENGE_AUS = {
 }
 
 
+def _alle_fi(kdir):
+    """Alle .fi des Kernbaums, relativ zu `kdir`.
+
+    RUNDE STRUKTUR: hier stand `os.listdir(kdir)`. Seit die Treiber unter
+    `kernel/drivers/<klasse>/` liegen, haette das elf Dateien still
+    uebersprungen -- und ein Pruefer, der weniger prueft als gestern,
+    faellt nicht auf, er wird nur gruener.
+    """
+    aus = []
+    for wurzel, _, namen in os.walk(kdir):
+        for f in namen:
+            if f.endswith(".fi"):
+                aus.append(os.path.relpath(os.path.join(wurzel, f), kdir))
+    return sorted(aus)
+
+
 def laengen(pfad):
     """[(name, anfang, oktette, zeile)] fuer eine Datei."""
     with open(pfad, "rb") as fh:
@@ -115,7 +131,7 @@ def main():
     if not dateien:
         kdir = os.path.join(WURZEL, "kernel")
         dateien = sorted(os.path.join(kdir, f)
-                         for f in os.listdir(kdir) if f.endswith(".fi"))
+                         for f in _alle_fi(kdir))
     gesamt = 0
     schlecht = 0
     for p in dateien:

@@ -235,20 +235,20 @@ for n in M_USB M_NOUSB M_USBPOLL M_NOHID M_NOMSC M_UNPLUG M_NOUSBIRQ \
 done
 # UND KEINE EINZIGE MASKE MEHR IM KERNEL. Solange irgendwo `mode & M_X`
 # steht, kann eine Runde wieder eine Maske erfinden.
-masken=$(grep -rac 'kstate\.MODE) &\|& kstate\.M_' kernel/*.fi 2>/dev/null \
+masken=$(grep -rac 'kstate\.MODE) &\|& kstate\.M_' $(find kernel -name '*.fi') 2>/dev/null \
         | awk -F: '{s+=$2} END {print s+0}')
 num "Stellen im Kernel, die den Modus noch als MASKE lesen" "${masken:-1}" eq 0
 
 # GEGENPROBE ZUM MODUSPRUEFER, zweimal -- ohne sie prueft er nur das,
 # woran jemand gedacht hat.
-cp kernel/*.fi "$GG/"
+cp -a kernel/. "$GG/"
 sed -i 's/^const M_USB: u64 = 384/const M_USB: u64 = 321/' "$GG/kstate.fi"
 if python3 tools/kernel/memmap.py "$GG" > "$TMPD/karte-gg3.txt" 2>&1; then
     bad "GEGENPROBE: M_USB auf den Index von M_PWR gelegt und der Pruefer schweigt"
 else
     ok "GEGENPROBE: zwei Modusnamen auf einem Index -- der Pruefer schlaegt an"
 fi
-cp kernel/*.fi "$GG/"
+cp -a kernel/. "$GG/"
 sed -i 's/^const M_USB: u64 = 384/const M_USB: u64 = 140737488355328/' "$GG/kstate.fi"
 if python3 tools/kernel/memmap.py "$GG" > "$TMPD/karte-gg4.txt" 2>&1; then
     bad "GEGENPROBE: eine alte Maske als Modusindex und der Pruefer schweigt"
@@ -259,7 +259,7 @@ fi
 # GEGENPROBE ZUM KARTENPRUEFER: ein Stueck des USB-Bereichs aus seinem
 # Bereich herausgelegt MUSS auffallen. Ohne diese Zeile prueft die neue
 # Karte nur das, woran jemand gedacht hat.
-cp kernel/*.fi "$GG/"
+cp -a kernel/. "$GG/"
 sed -i 's/^const EVT_OFF: u64 = 0x52000/const EVT_OFF: u64 = 0x4C000/' "$GG/xhci.fi"
 if python3 tools/kernel/memmap.py "$GG" > "$TMPD/karte-gg.txt" 2>&1; then
     bad "GEGENPROBE: EVT_OFF auf 0x4C000 gelegt und der Pruefer schweigt"
@@ -267,7 +267,7 @@ else
     ok "GEGENPROBE: ein Ring ausserhalb des Vorrats -- der Kartenpruefer schlaegt an"
 fi
 # Und eine zweite: zwei Stuecke INNERHALB des Bereichs uebereinander.
-cp kernel/*.fi "$GG/"
+cp -a kernel/. "$GG/"
 sed -i 's/^const DESC_OFF: u64 = 0x56000/const DESC_OFF: u64 = 0x55000/' "$GG/usb.fi"
 if python3 tools/kernel/memmap.py "$GG" > "$TMPD/karte-gg2.txt" 2>&1; then
     bad "GEGENPROBE: DESC_OFF auf die Uebertragungsringe gelegt, Pruefer schweigt"

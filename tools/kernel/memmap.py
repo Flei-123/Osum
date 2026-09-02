@@ -395,11 +395,23 @@ def main():
         # diese Schleife hat es vorher schlicht nicht mehr gefunden --
         # KeyError 'hv.fi', mitten in der Abnahme.  Gesucht wird jetzt an
         # beiden Stellen, in dieser Reihenfolge.
+        #
+        # RUNDE STRUKTUR: derselbe Unfall ein zweites Mal, und diesmal
+        # mit elf Dateien auf einen Schlag -- die Treiber liegen jetzt
+        # unter `kernel/drivers/<klasse>/`, und `pci.fi` war als erste
+        # nicht mehr da (KeyError 'pci.fi', mitten in der Abnahme, genau
+        # wie oben beschrieben).  Eine Liste fester Verzeichnisse ist
+        # offensichtlich die falsche Bauart fuer diese Suche: sie muss
+        # bei JEDEM kuenftigen Umzug nachgezogen werden, und wenn das
+        # jemand vergisst, faellt es erst im Lauf auf.  Darum wird jetzt
+        # der ganze Kernbaum durchsucht.  Die Dateinamen sind darin
+        # eindeutig -- sie MUESSEN es sein, weil der Uebersetzer den
+        # Modulnamen aus dem Dateinamen bildet und zwei gleichnamige
+        # Dateien doppelte Symbole ergaeben.
         p = None
-        for kand in (os.path.join(kdir, d),
-                     os.path.join(kdir, "arch", "x86_64", d)):
-            if os.path.exists(kand):
-                p = kand
+        for wurzel, _, namen in sorted(os.walk(kdir)):
+            if d in namen:
+                p = os.path.join(wurzel, d)
                 break
         if p is not None:
             dateien[d] = konstanten(p)
@@ -621,8 +633,11 @@ def main():
     vektoren = {}
     # RUNDE ARM: auch hier beide Verzeichnisse -- `trap.fi` fuehrt die
     # Vektornummern und liegt seit dem Trennschnitt unter arch/x86_64/.
-    for pfad in sorted(glob.glob(os.path.join(kdir, "*.fi"))
-                       + glob.glob(os.path.join(kdir, "arch", "x86_64", "*.fi"))):
+    # RUNDE STRUKTUR: der ganze Baum, aus demselben Grund wie oben.
+    _alle = []
+    for _w, _d, _n in os.walk(kdir):
+        _alle += [os.path.join(_w, _f) for _f in _n if _f.endswith(".fi")]
+    for pfad in sorted(_alle):
         datei = os.path.basename(pfad)
         for k, roh in konstanten(pfad).items():
             if not k.startswith("VEC_"):
@@ -632,6 +647,42 @@ def main():
             except ValueError:
                 continue
             vektoren.setdefault(v, {}).setdefault(k, []).append(datei)
+    # ------------------------------------------------------------------
+    # RUNDE STRUKTUR: DIE LUECKE IN GENAU DIESEM PRUEFER.
+    #
+    # Der Absatz oben erzaehlt, wie Runde K10 den Maustreiber auf den
+    # Vektor des NVMe-Reglers gelegt hat und dass diese Tafel es seitdem
+    # findet. Sie hat es trotzdem ein zweites Mal NICHT gefunden:
+    # `netdev.fi` gab der zweiten Netzkarte `VEC_NET + 1`, und das ist
+    # 46 -- VEC_MOUSE. Die Weiche in `trap.fi` fragte die Maus zuerst,
+    # also hat die zweite Karte nie eine Unterbrechung gesehen.
+    #
+    # Warum der Pruefer schwieg: er liest `const VEC_*`. `VEC_NET + 1`
+    # ist keine Konstante, sondern eine RECHNUNG, und eine Rechnung
+    # steht in keiner Tafel. Ein Pruefer, der nur die Namen kennt und
+    # nicht die belegten ZAHLEN, prueft die Haelfte.
+    #
+    # Darum melden Bereiche sich hier jetzt selbst an: ein Name aus
+    # BEREICHS_VEKTOREN belegt nicht eine Zahl, sondern `n` Zahlen ab
+    # seinem Wert. Wer einen Vektorblock vergibt, traegt ihn hier ein --
+    # sonst faellt die naechste Kollision wieder erst im Betrieb auf,
+    # und zwar als "die Karte bekommt keine Unterbrechungen".
+    BEREICHS_VEKTOREN = {
+        # Name             Anzahl  wofuer
+        "VEC_NET_MORE": (6, "netdev: Karten 1..6 (MAX_CARDS-1)"),
+    }
+    for name, (anzahl, wofuer) in BEREICHS_VEKTOREN.items():
+        basis = None
+        for v, namen in vektoren.items():
+            if name in namen:
+                basis = v
+                break
+        if basis is None:
+            continue
+        for k in range(1, anzahl):
+            vektoren.setdefault(basis + k, {}).setdefault(
+                "%s+%d" % (name, k), []).append(wofuer)
+
     vfehler = []
     for v in sorted(vektoren):
         if len(vektoren[v]) > 1:
