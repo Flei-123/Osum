@@ -74,7 +74,10 @@ import arch.arch
 export {
     init, present, read_block, write_block, read_many,
     irq, drain, blocks, block_shift, bdf, irqs, waits,
-    arm_polling, buffer, identify_ctrl
+    arm_polling, buffer, identify_ctrl,
+    ns_count, ns_id, ns_blocks, ns_shift, ns_report, read_block_ns,
+    ns_verify,
+    MAX_NS
 }
 
 // -------------------------------------------- the K2 data area, part 3
@@ -101,6 +104,25 @@ const S_POLL: u64 = 0x180
 const S_WAITS: u64 = 0x188
 const S_MSIX: u64 = 0x190
 const S_IDX: u64 = 0x198
+// ===================================================== RUNDE BLECH
+//
+// MEHR ALS EIN NAMENSRAUM. Bis zu dieser Runde stand in `identify` der
+// Satz "Namespace 1 is the one every NVMe device that has any namespace
+// at all has" -- richtig, und trotzdem zu wenig: ein Laufwerk darf
+// mehrere haben, und dann sieht dieser Kern alles ausser dem ersten
+// nicht. Auf einem Riegel mit getrennten Namensraeumen fuer System und
+// Daten faende Osum die Haelfte der Platte nicht.
+//
+// Die Tafel liegt in DERSELBEN Skalarseite (K2_SCALARS, 0x12000) --
+// keine neue Seite, kein Eintrag in der Speicherkarte, keine
+// Beruehrung mit einer anderen Runde.
+const S_NSN: u64 = 0x1A0 // wieviele aktive Namensraeume gefunden wurden
+const S_NSLIST: u64 = 0x1A8 // wieviele in der Liste des Controllers standen
+const NS_TAB: u64 = 0x200 // MAX_NS * 32 Oktett
+const MAX_NS: u64 = 8
+const N_ID: u64 = 0
+const N_BLOCKS: u64 = 8
+const N_LBADS: u64 = 16
 
 // The four queues and the buffers. Page aligned because `boot.s` aligns
 // the whole region and every offset here is a multiple of 4096.
@@ -437,6 +459,12 @@ fn init(state: u64, use_msix: bool, armed: bool) -> bool {
     if !identify(state) {
         return false
     }
+    // RUNDE BLECH: die uebrigen Namensraeume. NACH `identify` und nicht
+    // statt dessen -- `identify` beschreibt Namensraum 1, und an ihm
+    // haengt alles, was dieser Kern seit Runde K2 misst. Schlaegt der
+    // Durchgang fehl (ein Controller, der CNS 0x02 nicht kennt), bleibt
+    // die Tafel leer und sonst aendert sich nichts.
+    ns_scan(state)
     if admin(state, A_SET_FEATURES, 0, 0, 0x07, 0) > 1 {
         // Feature 7 is "number of queues". A controller may answer with
         // fewer than asked; one pair is the minimum every one of them
@@ -501,6 +529,183 @@ fn identify(state: u64) -> bool {
     kstate.set(state, sc(S_NSZE), nsze)
     kstate.set(state, sc(S_LBADS), lbads)
     return true
+}
+
+// ===================================================== RUNDE BLECH
+//
+// DIE LISTE DER AKTIVEN NAMENSRAEUME (CNS 0x02) und dann jeder einzeln.
+//
+// CNS 0x02 mit nsid 0 liefert bis zu 1024 Nummern zu je vier Oktett,
+// AUFSTEIGEND, und die erste Null beendet die Liste -- das steht so in
+// NVMe 1.4 Figur 245 und ist die einzige Abbruchbedingung, die es
+// gibt. Wer stattdessen bis 1024 laeuft, liest hinter dem Ende weiter.
+//
+// Warum die Nummern ZUERST in eine eigene Tafel kopiert werden: der
+// Zielpuffer ist `ID_OFF`, und den braucht der naechste Befehl
+// (IDENTIFY NAMESPACE) wieder. Wer die Liste dort stehen laesst und
+// waehrend des Durchgangs daraus liest, liest ab dem zweiten
+// Namensraum die Antwort des ersten.
+fn ns_scan(state: u64) -> u64 {
+    kstate.set(state, sc(S_NSN), 0)
+    kstate.set(state, sc(S_NSLIST), 0)
+    zero(state + ID_OFF, PAGE)
+    if admin(state, A_IDENTIFY, 0, state + ID_OFF, 2, 0) != 0 {
+        return 0
+    }
+    // Erst die Nummern retten.
+    var found: u64 = 0
+    var i: u64 = 0
+    while i < 1024 {
+        let id: u64 = __mmio_read32((state + ID_OFF + i * 4) as *mut u32) as u64
+        if id == 0 {
+            i = 1024
+        } else {
+            if found < MAX_NS {
+                kstate.set(state, sc(NS_TAB + found * 32 + N_ID), id)
+                kstate.set(state, sc(NS_TAB + found * 32 + N_BLOCKS), 0)
+                kstate.set(state, sc(NS_TAB + found * 32 + N_LBADS), 0)
+            }
+            found = found + 1
+            i = i + 1
+        }
+    }
+    kstate.set(state, sc(S_NSLIST), found)
+    var n: u64 = found
+    if n > MAX_NS {
+        n = MAX_NS
+    }
+    // Und jetzt jeden einzeln befragen.
+    var k: u64 = 0
+    var ok: u64 = 0
+    while k < n {
+        let id: u64 = kstate.get(state, sc(NS_TAB + k * 32 + N_ID))
+        zero(state + ID_OFF, PAGE)
+        if admin(state, A_IDENTIFY, id, state + ID_OFF, 0, 0) == 0 {
+            let nsze: u64 = __mmio_read64((state + ID_OFF) as *mut u64)
+            let flbas: u64 = __mmio_read8((state + ID_OFF + 26) as *mut u8) as u64
+            let fmt: u64 = flbas & 0xF
+            let lbads: u64 = __mmio_read8(
+                (state + ID_OFF + 128 + fmt * 4 + 2) as *mut u8) as u64
+            if nsze != 0 && lbads >= 9 && lbads <= 16 {
+                kstate.set(state, sc(NS_TAB + k * 32 + N_BLOCKS), nsze)
+                kstate.set(state, sc(NS_TAB + k * 32 + N_LBADS), lbads)
+                ok = ok + 1
+            }
+        }
+        k = k + 1
+    }
+    kstate.set(state, sc(S_NSN), ok)
+    return ok
+}
+
+fn ns_count(state: u64) -> u64 {
+    return kstate.get(state, sc(S_NSN))
+}
+
+fn ns_id(state: u64, i: u64) -> u64 {
+    if i >= MAX_NS {
+        return 0
+    }
+    return kstate.get(state, sc(NS_TAB + i * 32 + N_ID))
+}
+
+fn ns_blocks(state: u64, i: u64) -> u64 {
+    if i >= MAX_NS {
+        return 0
+    }
+    return kstate.get(state, sc(NS_TAB + i * 32 + N_BLOCKS))
+}
+
+fn ns_shift(state: u64, i: u64) -> u64 {
+    if i >= MAX_NS {
+        return 0
+    }
+    return kstate.get(state, sc(NS_TAB + i * 32 + N_LBADS))
+}
+
+// Ein Block aus dem i-ten Namensraum. Derselbe Weg wie `read_block`,
+// nur mit einer anderen Nummer im zweiten Wort des Befehls -- und genau
+// das IST der ganze Unterschied zwischen einem Namensraum und dem
+// naechsten.
+fn read_block_ns(state: u64, i: u64, lba: u64, dst: u64) -> bool {
+    let id: u64 = ns_id(state, i)
+    if id == 0 {
+        return false
+    }
+    return run_io_ns(state, IO_READ, id, lba, 1, dst, SECTOR)
+}
+
+fn ns_report(state: u64) {
+    var s_h: [u8; 16] = "nvme: ns count=\0"
+    var s_l: [u8; 11] = "  in list=\0"
+    var s_n: [u8; 9] = "nvme: ns\0"
+    var s_i: [u8; 7] = " nsid=\0"
+    var s_b: [u8; 10] = "  blocks=\0"
+    var s_z: [u8; 9] = "  lbasz=\0"
+    serial.puts((&s_h[0]) as u64)
+    serial.dec(kstate.get(state, sc(S_NSN)))
+    serial.puts((&s_l[0]) as u64)
+    serial.dec(kstate.get(state, sc(S_NSLIST)))
+    serial.nl()
+    var i: u64 = 0
+    while i < kstate.get(state, sc(S_NSN)) {
+        serial.puts((&s_n[0]) as u64)
+        serial.dec(i)
+        serial.puts((&s_i[0]) as u64)
+        serial.dec(ns_id(state, i))
+        serial.puts((&s_b[0]) as u64)
+        serial.dec(ns_blocks(state, i))
+        serial.puts((&s_z[0]) as u64)
+        serial.dec(1 << ns_shift(state, i))
+        serial.nl()
+        i = i + 1
+    }
+}
+
+// DER DATENWEG, je Namensraum. Nicht "die Tafel sagt drei", sondern
+// "aus jedem der drei kommen die Oktette, die der Wirt hineingelegt
+// hat". Gedruckt wird eine gewichtete Summe ueber die ersten 512
+// Oktett, damit der Wirt sie nachrechnen kann.
+//
+// Sie laeuft nur, wenn es mehr als EINEN Namensraum gibt. Damit ist
+// jeder bestehende Lauf -- und alle haben genau einen -- Zeile fuer
+// Zeile derselbe wie vorher.
+fn ns_verify(state: u64) {
+    var s_v: [u8; 9] = "nvme: ns\0"
+    var s_i: [u8; 7] = " nsid=\0"
+    var s_o: [u8; 8] = "  lba0=\0"
+    var s_s: [u8; 7] = "  sum=\0"
+    if kstate.get(state, sc(S_NSN)) < 2 {
+        return
+    }
+    let buf: u64 = state + BUF_A
+    var i: u64 = 0
+    while i < kstate.get(state, sc(S_NSN)) {
+        zero(buf, SECTOR)
+        let ok: bool = read_block_ns(state, i, 0, buf)
+        var sum: u64 = 0
+        var k: u64 = 0
+        if ok {
+            while k < SECTOR {
+                sum = sum + (__mmio_read8((buf + k) as *mut u8) as u64) * (k + 1)
+                k = k + 1
+            }
+        }
+        serial.puts((&s_v[0]) as u64)
+        serial.dec(i)
+        serial.puts((&s_i[0]) as u64)
+        serial.dec(ns_id(state, i))
+        serial.puts((&s_o[0]) as u64)
+        var y: u64 = 0
+        if ok {
+            y = 1
+        }
+        serial.dec(y)
+        serial.puts((&s_s[0]) as u64)
+        serial.dec(sum)
+        serial.nl()
+        i = i + 1
+    }
 }
 
 // RUNDE TRESOR: IDENTIFY CONTROLLER (CNS 1), und das ist eine ANDERE
@@ -644,6 +849,16 @@ fn arm_polling(state: u64) {
 // so this loop cannot deadlock even if the completion never comes -- it
 // gives up after three seconds and says so.
 fn run_io(state: u64, opcode: u64, lba: u64, count: u64, addr: u64, len: u64) -> bool {
+    // RUNDE BLECH: dieselbe Funktion, die Nummer des Namensraums als
+    // Argument. Der alte Aufruf steht hier mit einer festen 1 -- also
+    // ist jeder bestehende Weg Wort fuer Wort derselbe Befehl wie
+    // vorher, und die Runde aendert an den 54 Abschnitten der Abnahme
+    // nichts.
+    return run_io_ns(state, opcode, 1, lba, count, addr, len)
+}
+
+fn run_io_ns(state: u64, opcode: u64, nsid: u64, lba: u64, count: u64,
+    addr: u64, len: u64) -> bool {
     if !ready(state) {
         return false
     }
@@ -651,7 +866,7 @@ fn run_io(state: u64, opcode: u64, lba: u64, count: u64, addr: u64, len: u64) ->
     var tail: u64 = kstate.get(state, sc(S_SQ_TAIL))
     let want: u64 = kstate.get(state, sc(S_DONE)) + 1
     let cid: u64 = next_cid(state)
-    command(sq, tail, opcode, cid, 1, addr, prp2_of(addr, len),
+    command(sq, tail, opcode, cid, nsid, addr, prp2_of(addr, len),
         lba & 0xFFFFFFFF, lba >> 32, (count - 1) & 0xFFFF)
     tail = tail + 1
     if tail >= QDEPTH {
