@@ -83,7 +83,23 @@ ip netns del "$NS" 2>/dev/null
 echo "== 1. the program: the full Firn library in ring 3 =="
 # =====================================================================
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
-if FIRNLIB="$ROOT/vendor/firn/lib" vendor/firn/bin/firnc -c --profile=app \
+# RUNDE MERGE-5: $FIRNLIB IS THE REPOSITORY'S OWN LIBRARY, NOT FIRN'S.
+#
+# This line used to read FIRNLIB="$ROOT/vendor/firn/lib", and the
+# acceptance run right after merging branch `betrieb` turned this whole
+# section from 24/0 into 0/1:
+#
+#   FAIL  fetch.fi does not compile
+#   error: cannot read 'kernel/app/libc/dns.fi': No such file or directory
+#      --> kernel/app/fetch.fi:88:1   |   import libc.dns
+#
+# Round BETRIEB gave fetch.fi the resolver from `lib/libc/dns.fi` and
+# switched `tools/install/build.sh` to FIRNLIB="$ROOT/lib" for it
+# (line 101 there) -- this probe and the one in `tools/ota/run.sh` were
+# both missed. Firn's own library is not lost by this: besides $FIRNLIB
+# the compiler always searches <compiler>/../lib, which IS
+# `vendor/firn/lib`.
+if FIRNLIB="$ROOT/lib" vendor/firn/bin/firnc -c --profile=app \
         -o "$TMPD/fetch.o" kernel/app/fetch.fi > "$TMPD/cc.log" 2>&1; then
     ok "firnc --profile=app: fetch.fi with std.rt, std.net, tls.tls and tls.x509"
 else
