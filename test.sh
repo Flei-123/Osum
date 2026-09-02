@@ -1294,6 +1294,17 @@ lauf "34. das Update ueber das Netz: signiertes VERZEICHNIS, Rueckschritt, Wiede
 lauf "35. Osum auf fremdem Blech: Wurzelsuche, RAID-Meldung, EHCI, NVMe-Namensraeume (tools/blech/run.sh, Runde BLECH)" \
      tools/blech/run.sh blech '^BLECH: |^  --    (QEMU|Beschleuniger)|^  OK    (der Kern|die Speicherkarte|ein OFS|DER ALTE|DER NEUE|und haengt|und /bin|und die Shell|die LEERE|und die AHCI|eingehaengt|kein einziger|und die Wurzel|ein Controller|und mit SEINEN|und es steht|der SD|und die Reihenfolge|die Firmware|an Anschluss|READ CAPACITY|keine Uebertragung|Block |die Tastatur|sechs Tasten|und es sind|der Endpunkt|Geraet 0|Geraet 1|beide sind|und Block |alle drei|auch der mit|Namensraum |GEGENPROBE|und kein Geraet|derselbe Treiber|q35|die nackte|ein EHCI|ein OHCI|ein UHCI|und bei OHCI)'
 
+# RUNDE BLECH-ECHT: auf dem Zweig `hid` hiess dieser Abschnitt 32 -- die
+# Nummer gehoert in `main` seit Runde MERGE-2 dem Vorlagenladen
+# (themestore). HID wird deshalb 36.
+# ABSCHNITT 36 -- RUNDE HID. Berichtsbeschreibungen zerlegen, EIN
+# Eingabeweg fuer PS/2, USB-HID und I2C-HID, mehr als sechs Tasten
+# gleichzeitig, das Praezisions-Touchpad und der ACPI-Ersatzweg fuer
+# I2C-HID. Der Zerleger wird gegen einen ZWEITEN Zerleger gehalten
+# (tools/hid/descs.py), Zeile fuer Zeile.
+lauf "36. HID: Berichtsbeschreibungen, ein Eingabeweg, Touchpad, I2C-HID (tools/hid/run.sh, Runde HID)" \
+     tools/hid/run.sh hid '^  ok    |^ +(ps2|usb-boot|usb-gen|i2c-soft|touchpad|n=) '
+
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
 abschnitte_abarbeiten
