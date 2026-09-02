@@ -436,9 +436,10 @@ eigenen Gegenstand ändert. Steht unter „was noch fehlt".
 | `kernel/kstate.fi` | +11 | zwei Modusworte in Wort 12 |
 | `kernel/hwdiag.fi` | +9 | `rootsel.report` im Bericht |
 | `kernel/hw.fi` | +5 | die Namensräume im NVMe-Bericht |
+| `tools/i18n/spalten.py` | +19/−4 | der Pufferprüfer zählt `\xNN` jetzt als **ein** Oktett |
 
-**3291 Zeilen eingefügt, 7 gelöscht, 12 Dateien.** Abbild:
-3 313 608 → 3 402 300 Oktett (**+88 692, +2,7 %**).
+**3454 Zeilen eingefügt, 12 gelöscht, 13 Dateien.** Abbild:
+3 313 608 → **3 406 500 Oktett** (+92 892, **+2,8 %**).
 
 Speicher: **vier Seiten** in `kdata` — drei für den EHCI
 (0x4D000..0x50000, genau das Stück, das die Karte bis heute als „frei
@@ -712,6 +713,20 @@ Alle Protokolle dieser Runde liegen unter `/root/blechlogs/`:
   Thermalzonen, kein Deckelschalter, kein sauberes S3. Der Zweig `aml`
   existiert; diese Runde hat ihn nicht angefasst.
 
+### Am Prüfwerk
+
+* `tools/blech/fb.sh` ist **nicht** in `test.sh` angemeldet. Der Läufer
+  ist gebaut, gemessen und protokolliert, aber er fährt neun QEMU-Starts
+  für eine Frage, die sich in der Abnahme nur selten ändert. Ob er dort
+  hingehört, gehört in die Runde, die ihn zum ersten Mal braucht.
+* Der EHCI-Tastaturteil des Läufers braucht **30 Sekunden Wartezeit**
+  (acht Sekunden bis zum Fenster, sechs Tasten, zweiundzwanzig Sekunden
+  Auslauf). Das ist mit dem QEMU-Monitor über `stdio` gemacht; die
+  Runden K17 und WM benutzen dafür einen Monitor-**Socket** und ein
+  Python-Skript (`tools/wm/monitor.py`), das auf eine gedruckte Marke
+  wartet statt auf die Uhr. Der bessere Weg, und diese Runde ist ihn
+  nicht gegangen.
+
 ### Und das Wichtigste
 
 * **`rtl` und `hid` sind nicht in `main`.** Solange das so ist, hat ein
@@ -719,3 +734,23 @@ Alle Protokolle dieser Runde liegen unter `/root/blechlogs/`:
   eingebaute Tastatur — obwohl beide Treiber im Repository liegen und
   beide grün gemessen sind (67/0 und 57/0, siehe Teil 0). Das ist die
   billigste Verbesserung, die dieses Projekt gerade zu vergeben hat.
+
+---
+
+## DIE COMMITS DIESER RUNDE
+
+| Commit | Was |
+|---|---|
+| `22d5756` | 1/n — `rootsel.fi`: die Wurzel wird gesucht statt geraten, und der RAID-Modus wird beim Namen genannt |
+| `0fbe671` | 2/n — `ehci.fi`: der USB-2.0-Anschluss, mit einem Stick und einer Tastatur daran |
+| `69851d8` | 3/n — NVMe mit mehr als einem Namensraum |
+| `2d371e2` | 4/n — der Läufer der Runde, mit dem alten Kern als Vergleichsmaß |
+| `3050776` | 5/n — der Rahmenpuffer über sieben Grafikkarten |
+| `d521a26` | 6/n — `docs/RUNDE-BLECH.md` und `docs/REALHW.md` Teil C |
+| `8851a72` | 7/n — zwei eigene Fehler im EHCI, beide erst mit ZWEI Geräten sichtbar |
+| `0669796` | 11/n — der Pufferprüfer zählte `\xNN` als drei Oktette |
+| *(übrige)* | 8–13/n — Messungen und Bericht, siehe `git log` |
+
+**Kein Merge nach `main`.** Der Zweig `blech` bleibt stehen; das
+Zusammenführen macht eine spätere Runde — zusammen mit `rtl` und `hid`,
+die dringender sind als alles in dieser Runde.
