@@ -5,7 +5,7 @@
 # Runde PAINT hat in diesem Baum VIER Fassungen derselben Zeile
 # gefunden -- src-over, ganzzahlig, acht Bit je Kanal:
 #
-#     kernel/fb.fi           (neu in dieser Runde)
+#     kernel/drivers/gfx/fb.fi           (neu in dieser Runde)
 #     kernel/wm.fi           `blend`
 #     kernel/user/wlibc.fi   `blend`
 #     tools/gfx/checkshot.py `mische`   -- der Pruefer auf dem Wirt
@@ -116,7 +116,7 @@ def randbedingungen():
 
 
 QUELLEN = [
-    ("kernel/fb.fi", "return (src *% a +% dst *% ia +% 127) / 255"),
+    ("kernel/drivers/gfx/fb.fi", "return (src *% a +% dst *% ia +% 127) / 255"),
     ("kernel/wm.fi", "return (src *% a +% dst *% ia +% 127) / 255"),
     ("kernel/user/wlibc.fi",
      "return (src *% a +% dst *% ia +% 127) / 255"),

@@ -9,7 +9,7 @@
 #
 #   1. DER EDITOR WIRD WIRKLICH BEDIENT. Die Tasten kommen ueber den
 #      QEMU-Monitor (`sendkey`) am Tor 0x60 an, laufen durch IRQ1,
-#      `kernel/kbd.fi` und die Zeilendisziplin. Danach liest der WIRT die
+#      `kernel/drivers/input/kbd.fi` und die Zeilendisziplin. Danach liest der WIRT die
 #      gesicherte Datei AUS DEM PLATTENABBILD (`mkfs.py cat`) und haelt
 #      sie Oktett fuer Oktett gegen die Erwartung. Kein Mitschnitt, keine
 #      Behauptung -- die Oktette auf der Platte.
@@ -762,7 +762,7 @@ grep -qa '\^O Write' "$TMPD/edA.vt" \
 # gegen den Zeichensatz gerechnet (`tools/gfx/checkshot.py lesen`, Runde K7B).
 if [ -s "$TMPD/edA.ppm" ]; then
     ok "das Bildschirmfoto steht ($(stat -c%s "$TMPD/edA.ppm") Oktette)"
-    python3 tools/gfx/checkshot.py lesen "$TMPD/edA.ppm" kernel/font.fi \
+    python3 tools/gfx/checkshot.py lesen "$TMPD/edA.ppm" kernel/drivers/gfx/font.fi \
         > "$TMPD/edA.schirm" 2>&1
     sed -n 's/^ *[0-9]\+ |\(.*\)|$/\1/p' "$TMPD/edA.schirm" | sed 's/ *$//' \
         > "$TMPD/edA.schirm.txt"

@@ -5,7 +5,7 @@
 # Bis zu dieser Runde hatte Osum zwei Eingabegeraete, und beide haengen am
 # 8042: die Tastatur an IRQ 1 (Runde 59) und die Maus an IRQ 12 (Runde
 # K10). Auf einem Laptop von 2026 gibt es diesen Baustein nicht mehr. Im
-# Kopf von `kernel/ps2m.fi` steht seit K10 der Satz, der diese Runde
+# Kopf von `kernel/drivers/input/ps2m.fi` steht seit K10 der Satz, der diese Runde
 # ausgeloest hat: "Ein USB-HID-Weg braucht davor einen xHCI-Treiber,
 # Endpunkte, Deskriptoren und eine Warteschlange; das ist eine Runde fuer
 # sich."
@@ -182,9 +182,9 @@ num "andere Verwendungen der Nummern 1701/1702 im Baum" "${doppelt:-0}" eq 0
 grep -q 'const VEC_XHCI: u64 = 43' kernel/arch/x86_64/trap.fi \
     && ok "der Meldevektor des Reglers ist 43 (kernel/arch/x86_64/trap.fi)" \
     || bad "VEC_XHCI ist nicht 43 in kernel/arch/x86_64/trap.fi"
-grep -q 'const VEC_XHCI: u64 = 43' kernel/xhci.fi \
+grep -q 'const VEC_XHCI: u64 = 43' kernel/drivers/usb/xhci.fi \
     && ok "und dieselbe Zahl steht im Treiber" \
-    || bad "VEC_XHCI in kernel/xhci.fi passt nicht"
+    || bad "VEC_XHCI in kernel/drivers/usb/xhci.fi passt nicht"
 
 # Die Speicherkarte. `karte.py` rechnet seit dieser Runde AUCH die
 # Untergliederung des USB-Bereichs nach -- sie ist kein eigener
@@ -318,7 +318,7 @@ if baue 1; then
 else
     bad "firnc1 baut diese Runde nicht"
 fi
-zeilen=$(cat kernel/xhci.fi kernel/usb.fi | wc -l)
+zeilen=$(cat kernel/drivers/usb/xhci.fi kernel/drivers/usb/usb.fi | wc -l)
 num "Zeilen Treiber, die diese Runde geschrieben hat" "$zeilen" gt 1200
 
 # Die Wurzelplatte.

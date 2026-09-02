@@ -32,7 +32,7 @@ Verwendung:
 RUNDE I18N HAT DIE VORGABE GEAENDERT, und das ist die Voraussetzung fuer
 alles andere in dieser Runde.  Bis hierher war der Ausschnitt 0x20..0x7E
 -- derselbe wie beim 8x16-Zeichensatz aus Runde K7
-(`kernel/font.fi`) -- also reines ASCII.  Genau deshalb stand im ganzen
+(`kernel/drivers/gfx/font.fi`) -- also reines ASCII.  Genau deshalb stand im ganzen
 Projekt "ue" statt "u" mit zwei Punkten: die Schrift KONNTE das Zeichen
 nicht, und niemand hatte es nachgemessen.
 

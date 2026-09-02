@@ -9,7 +9,7 @@ Grund fuer eine zweite Fassung, und der ist die MESSUNG:
 
     Ein Bildschirmfoto sagt ueber gerasterten Text nur dann etwas, wenn
     es etwas gibt, WOGEGEN man es haelt.  Runde K7 hielt die Textkonsole
-    gegen die Bitmaske aus `kernel/font.fi` -- Bit fuer Bit.  Bei einer
+    gegen die Bitmaske aus `kernel/drivers/gfx/font.fi` -- Bit fuer Bit.  Bei einer
     Kantenglaettung gibt es keine Bitmaske; es gibt einen Algorithmus.
     Also steht der Algorithmus zweimal da, und das Foto wird gegen die
     zweite Fassung gerechnet.

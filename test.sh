@@ -117,7 +117,7 @@
 #       gegen den synchronen Weg.
 #
 #  14. Das Netz (tools/net/run.sh, Runde K8): ein virtio-net-Treiber in
-#      Firn (`kernel/virtio.fi`), der TCP/IP-Stack aus Runde K3 als
+#      Firn (`kernel/drivers/net/virtio.fi`), der TCP/IP-Stack aus Runde K3 als
 #      ABHAENGIGKEIT ueber vendor/firn/COMMIT (`vendor/net/PROVENANCE.md`),
 #      die Naht dazwischen (`kernel/inet.fi`) und Steckdosen-Aufrufe fuer
 #      Ring 3 mit den Nummern von Linux. Gemessen gegen den ECHTEN
@@ -188,11 +188,11 @@
 #      und der Lauf ganz ohne `wig`.
 #
 #  23. USB (tools/k17/run.sh, Runde K17): ein xHCI-Regler
-#      (`kernel/xhci.fi`) -- ueber PCI an seiner Klasse 0c:03:30
+#      (`kernel/drivers/usb/xhci.fi`) -- ueber PCI an seiner Klasse 0c:03:30
 #      gefunden, Register aus dem Geraet gelesen, Kommandoring,
 #      Ereignisring und je Endpunkt ein Uebertragungsring, Steckplaetze,
 #      Adressvergabe, MSI-X auf Vektor 43. Darauf ein USB-Kern
-#      (`kernel/usb.fi`): Aufzaehlung beim Anstecken, Deskriptoren,
+#      (`kernel/drivers/usb/usb.fi`): Aufzaehlung beim Anstecken, Deskriptoren,
 #      Konfiguration, Treiberzuordnung an der KLASSE, Anstecken und
 #      Abziehen im Betrieb. Und drei Klassen: Tastatur und Maus im
 #      Boot-Protokoll, die BEIDE in den Eingabeweg von Runde 59 und K10
@@ -415,7 +415,7 @@
 #      Oktett fuer Oktett verglichen.
 #
 #  17. Die Oberflaeche (tools/wm/run.sh, Runde K10): ein Zeigegeraet am
-#      zweiten Anschluss des Tastaturbausteins (`kernel/ps2m.fi`), ein
+#      zweiten Anschluss des Tastaturbausteins (`kernel/drivers/input/ps2m.fi`), ein
 #      Fensterserver mit Stapelreihenfolge, Eingabefokus und
 #      Bereichsverfolgung (`kernel/wm.fi`) und ein TrueType-Leser samt
 #      Rasterer mit Kantenglaettung, ganz in Firn (`kernel/ttf.fi`).
@@ -557,7 +557,7 @@
 #      DER SERVER LAEUFT. Im Kernel. Das ist eine Entscheidung" -- und
 #      einen Bauschalter gab es nicht: `grep -riE
 #      'nogui|headless|console_only'` fand null Treffer.
-#      Diese Runde zieht EINE Naht ein (`kernel/gfx.fi`, 37 Symbole)
+#      Diese Runde zieht EINE Naht ein (`kernel/drivers/gfx/gfx.fi`, 37 Symbole)
 #      und holt die Oberflaeche aus den beiden Dateien heraus, denen
 #      sie gehoerte (`kernel/kgui.fi` aus `kmain.fi`, `kernel/sysgui.fi`
 #      aus `sys.fi`). Danach schreibt kein Modul dieses Kernels mehr

@@ -139,7 +139,7 @@ for s in 0 1; do
     # symbol `kernel/arch/x86_64/boot.s` exports, because `serial.put` has no argument
     # for it and must not grow one. Resolved out of boot.o at link time,
     # exactly like `osum_panic` out of isr.o. The reason is written out in
-    # tools/kernel/run.sh and in kernel/fb.fi.
+    # tools/kernel/run.sh and in kernel/drivers/gfx/fb.fi.
     undef=$(nm -u "$TMPD/k$s.o" 2>/dev/null | awk '{print $NF}' | sed '/^$/d' | grep -vE '^(osum_panic|kdata)$')
     [ -z "$undef" ] && ok "k$s.o: no undefined name other than osum_panic and kdata" \
                     || { bad "k$s.o: undefined symbols"; echo "$undef" | sed 's/^/        /'; }

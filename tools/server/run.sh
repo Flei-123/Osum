@@ -6,14 +6,14 @@
 # Abschnitt macht aus jeder eine Messung:
 #
 #   1. OSUM LAESST SICH OHNE GRAFIK BAUEN. `--gui off` uebersetzt
-#      `kernel/fb.fi`, `wm.fi`, `wig.fi`, `font.fi`, `ttf.fi`,
+#      `kernel/drivers/gfx/fb.fi`, `wm.fi`, `wig.fi`, `font.fi`, `ttf.fi`,
 #      `tile.fi`, `vmode.fi`, `ansi.fi`, `ps2m.fi`, `kgui.fi` und
 #      `sysgui.fi` GAR NICHT ERST. Gemessen wird nicht, dass es
 #      "funktioniert", sondern der OKTETTUNTERSCHIED der beiden
 #      Abbilder -- und dass im Serverabbild keine Zeichenkette der
 #      Oberflaeche mehr steht.
 #
-#   2. DER SCHNITT IST SAUBER. Ausserhalb von `kernel/gfx.fi` schreibt
+#   2. DER SCHNITT IST SAUBER. Ausserhalb von `kernel/drivers/gfx/gfx.fi` schreibt
 #      kein Modul dieses Kernels noch `fb.` oder `wm.`. Das zaehlt ein
 #      Pruefer nach; vor dieser Runde waren es 745 Stellen in acht
 #      Dateien.
@@ -132,7 +132,7 @@ fi
 echo "== 2. der Schnitt: wer im Kernel noch auf Grafik zugreift =="
 
 N=$(python3 tools/server/count.py kernel)
-echo "        Stellen ausserhalb von kernel/gfx.fi: $N"
+echo "        Stellen ausserhalb von kernel/drivers/gfx/gfx.fi: $N"
 num "kein Modul ausser der Naht greift noch auf die Grafik zu" "$N" eq 0
 python3 tools/server/count.py kernel --je-datei | sed 's/^/        /'
 

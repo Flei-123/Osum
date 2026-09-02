@@ -690,7 +690,7 @@ echo "== 11. the line editor on a REAL keyboard =="
 # The other half of case 5. There the two octets came out of a file; here
 # they come out of the PS/2 controller: `l`, `s`, return -- and then the UP
 # ARROW, which arrives as `E0 48`, is translated to 14 in
-# `kernel/kbd.fi` and reaches the shell as "the line before this
+# `kernel/drivers/input/kbd.fi` and reaches the shell as "the line before this
 # one". Two listings out of five keys is the whole measurement.
 rm -f "$TMPD/mon.sock" "$TMPD/kbd.txt" "$TMPD/kbd.rc"
 cp "$TMPD/disk0.img" "$TMPD/kbd.img"

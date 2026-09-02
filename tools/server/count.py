@@ -5,7 +5,7 @@ GREIFEN.
 
 Die Aufgabe der Runde SERVERBUILD verlangt diese Zahl ausdruecklich:
 sie sagt, wie sauber der Schnitt ist. Vor der Runde waren es 745
-Stellen in acht Dateien, danach null -- ausser in `kernel/gfx.fi`, und
+Stellen in acht Dateien, danach null -- ausser in `kernel/drivers/gfx/gfx.fi`, und
 das ist die Naht selbst.
 
 GEZAEHLT WIRD NUR CODE. Kommentare fliegen raus, bevor gesucht wird;
