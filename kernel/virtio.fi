@@ -533,7 +533,22 @@ fn find(state: u64, c: u64) -> u64 {
 // `armed` decides whether the interrupt is unmasked; `use_msix` which of
 // the two paths it takes. Both are switches of `tools/net/run.sh`, and
 // both have a run in which the measurement has to collapse.
-fn init_on(state: u64, c: u64, use_msix: bool, armed: bool) -> bool {
+// RUNDE BLECH: DER MELDEVEKTOR KOMMT VON OBEN.
+//
+// Bis hierher rechnete jeder Treiber `VEC_NET + c` mit seiner EIGENEN
+// Einheitennummer aus. Solange es nur virtio gab, war das dasselbe wie
+// die Kartennummer. Sobald zwei VERSCHIEDENE Treiber je eine Karte
+// haben -- ein Intel-Anschluss auf dem Brett und eine Realtek-Karte im
+// Steckplatz, der haeufigste Fall ueberhaupt -- ist es das nicht mehr:
+// beide waeren Einheit 0 und beide haetten Vektor 45. `trap.fi` gibt
+// 45 aber an KARTE 0 und 46 an KARTE 1; die zweite Karte haette ihre
+// Meldungen an die erste geschickt.
+//
+// `vec` ist deshalb der Vektor, den `netdev.fi` fuer DIESE KARTE
+// vergeben hat. `vec == 0` heisst: fuer diese Karte gibt es keinen --
+// sie wird abgefragt.
+fn init_on(state: u64, c: u64, use_msix: bool, armed: bool,
+    vec: u64) -> bool {
     kstate.set(state, sc(c, S_READY), 0)
     let i: u64 = find(state, c)
     if i >= pci.MAX_DEV {
@@ -598,14 +613,18 @@ fn init_on(state: u64, c: u64, use_msix: bool, armed: bool) -> bool {
     // reports on at the moment it is enabled. Armed afterwards, the
     // vector is one no queue knows about, and every completion lands in
     // memory in silence.
-    if use_msix {
-        if !msix_arm(state, c, i, VEC_NET + c, armed) {
+    if vec == 0 {
+        // Keine Unterbrechung fuer diese Karte. Der Ring laeuft
+        // trotzdem; `netd` fragt ihn ab.
+        kstate.set(state, sc(c, S_MSIX), 0)
+    } else if use_msix {
+        if !msix_arm(state, c, i, vec, armed) {
             wr8(cbase, C_STATUS, ST_FAILED)
             return false
         }
         kstate.set(state, sc(c, S_MSIX), 1)
     } else {
-        intx_arm(state, c, i, VEC_NET + c, armed)
+        intx_arm(state, c, i, vec, armed)
         kstate.set(state, sc(c, S_MSIX), 0)
     }
 
@@ -985,7 +1004,10 @@ fn shut_down_on(state: u64, c: u64) {
 // The `_on` names are what `kernel/share.fi` uses, and nothing else.
 
 fn init(state: u64, use_msix: bool, armed: bool) -> bool {
-    return init_on(state, 0, use_msix, armed)
+    // Karte 0 bekommt Vektor 45 -- dieselbe Zahl, die `trap.fi` an
+    // `netdev.irq` gibt. Diese Kurzform gibt es nur fuer den Fall
+    // "eine Karte, und es ist die erste".
+    return init_on(state, 0, use_msix, armed, VEC_NET)
 }
 
 fn present(state: u64) -> bool { return present_on(state, 0) }
