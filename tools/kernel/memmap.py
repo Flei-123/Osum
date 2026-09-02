@@ -73,6 +73,15 @@ BEREICHE = [
     # Ausrichtungen, die ein AHCI-Controller verlangt (1024 fuer die
     # Befehlsliste, 256 fuer den FIS-Empfang, 128 fuer die Befehlstafel),
     # fallen dabei von der Seitengrenze ab.
+    # RUNDE HID: der Zerleger fuer Berichtsbeschreibungen, der
+    # Eingabeweg und HID ueber I2C.  Neun Seiten aus dem Rest, den
+    # `kstate.fi` nach Merge 2 als frei ausweist (0x92000..0xA0000).
+    ("HIDREP_FLD", "hidrep.fi", "FLD_OFF",       "MAX_DEV * 0x1000"),
+    ("HIDREP_SUM", "hidrep.fi", "SUM_OFF",       "MAX_DEV * SUM_BYTES"),
+    ("HIDREP_RAW", "hidrep.fi", "RAW_OFF",       "MAX_DEV * RAW_MAX"),
+    ("HIDIN",      "hidin.fi",  "IN_OFF",        "0x1000"),
+    ("I2CHID",     "i2chid.fi", "I2C_OFF",       "0x1000"),
+    ("I2CBUF",     "i2chid.fi", "BUF_OFF",       "0x1000"),
     ("AHCI",       "ahci.fi",   "AHCI_OFF",       "0x1000"),
     ("AHCI_ID",    "ahci.fi",   "AHCI_ID_OFF",    "0x1000"),
     ("AHCI_BUF_A", "ahci.fi",   "AHCI_BUFA_OFF",  "0x1000"),
@@ -400,8 +409,18 @@ def wert(werte, ausdruck, tiefe=0):
         return wert(werte, werte[t], tiefe + 1)
     if not re.fullmatch(r"[A-Za-z_0-9 +\-*()x]+", t):
         raise ValueError("kein rechenbarer Ausdruck: %s" % ausdruck)
+    # RUNDE HID: DIE HEXZAHLEN ZUERST.  Bis hierher lief die
+    # Namensersetzung direkt ueber den Ausdruck -- und `0x1000` faengt
+    # nach der Ziffer 0 mit dem Buchstaben `x` an, also hat der
+    # Namensausdruck daraus die "Konstante" `x1000` gemacht und der
+    # Pruefer ist mit `unbekannte Konstante x1000` stehengeblieben.
+    # Eine einzelne Hexzahl (`"0x2000"`) ging weiter oben durch, ein
+    # Produkt wie `MAX_DEV * 0x1000` nicht.  Also werden Hexzahlen
+    # ersetzt, BEVOR nach Namen gesucht wird.
+    ersetzt = re.sub(r"0[xX][0-9A-Fa-f]+",
+                     lambda m: str(int(m.group(0), 16)), t)
     ersetzt = re.sub(r"[A-Za-z_][A-Za-z_0-9]*",
-                     lambda m: str(wert(werte, m.group(0), tiefe + 1)), t)
+                     lambda m: str(wert(werte, m.group(0), tiefe + 1)), ersetzt)
     return int(eval(ersetzt, {"__builtins__": {}}, {}))  # noqa: S307
 
 
@@ -425,7 +444,9 @@ def main():
               "fs.fi",
               # RUNDE BLECH -- die Wurzelgeraetewahl nimmt eine Seite,
               # der EHCI-Treiber drei.
-              "rootsel.fi", "ehci.fi", "blkdev.fi"):
+              "rootsel.fi", "ehci.fi", "blkdev.fi",
+              # RUNDE HID -- der Zerleger, der Eingabeweg und I2C-HID.
+              "hidrep.fi", "hidin.fi", "i2chid.fi"):
         # RUNDE ARM: die Maschine hat seit dem Trennschnitt ein eigenes
         # Verzeichnis (`kernel/arch/x86_64/`).  `hv.fi` liegt dort, und
         # diese Schleife hat es vorher schlicht nicht mehr gefunden --
