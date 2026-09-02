@@ -815,3 +815,134 @@ Fortgeschrieben aus Teil A, in der Reihenfolge der Wahrscheinlichkeit:
    abschalten.
 7. **Umschaltbare Grafik.** Auf die integrierte stellen — der Kern sagt
    dazu (noch) nichts Verständliches.
+
+---
+
+# TEIL E — WAS DER NACHTRAG ZU BLECH GEÄNDERT HAT (02.09.2026)
+
+Der Eigner hat den igb/igc-Treiber abbestellt und stattdessen bestellt:
+**Nummern ja, Treiber nein — und die Ablehnung so nützlich wie möglich.**
+Für dieses Dokument heißt das: Die Spalte „Geht nicht" sagt jetzt bei
+jeder Zeile **welcher Chip** und **warum**, statt zu schweigen.
+
+## E.1 Was auf der seriellen Leitung steht, wenn nichts geht
+
+Vorher war die einzige Auskunft eine Nummer. Jetzt gibt es **drei
+Zeilenarten**, und sie haben verschiedene Aufgaben:
+
+```
+netdev: no driver for 0x10ec:0x8029  other vendor, no driver -- kein
+  Treiber in diesem Kern  [RTL8029 (ne2000)]
+```
+> Der **Vertrag**. Der Anfang ist seit Runde HWNET unverändert, weil
+> drei Testdateien darauf prüfen. Grund und Klarname hängen hinten dran.
+
+```
+netdev: bestand 00:03.0 8086:10d3 82574L (1G) -> e1000
+netdev: bestand 00:04.0 1b36:0006 QEMU -> kein Treiber (kein Ethernet-Port)
+netdev: bestand 2 geraete, 1 mit treiber, 1 ohne
+```
+> **Die Liste für Menschen** (`netdev.print_inventory`, neu). Sie läuft
+> über die **ganze** PCI-Klasse 02 — also auch über die WLAN-Karte.
+
+```
+netdev: tab 0x8086:0x125c rev=0x0 -> none  igc silicon, advanced
+  descriptors -- eigener Treiber noetig, e1000 passt NICHT  [I226-V (2,5G)]
+```
+> **Die Tabelle ohne Chip** (`nictab`). Für I225/I226/I210/I211 ist das
+> der **einzig mögliche** Beweis, weil QEMU 7.2 keinen davon hat.
+
+## E.2 Ein Loch, das bis hierher niemand gesehen hat: WLAN war unsichtbar
+
+`netdev.probe` läuft nur über **Klasse 02 Unterklasse 00** (Ethernet).
+Eine WLAN-Karte ist **02:80**. Sie tauchte deshalb in *keiner* Liste auf
+— weder bei den Treibern noch bei den Abgelehnten. **In einem Notebook
+ist sie oft das einzige Netzgerät.** Wer dort ein leeres `netdev:` sah,
+musste glauben, der Rechner habe gar keine Netzkarte.
+
+`print_inventory` schließt das. Gemessen mit `-device rocker` (dem
+einzigen Klasse-02:80-Gerät in QEMU 7.2) — der Zweig ist also **wirklich
+gefahren**, nicht nur gelesen.
+
+**Nicht behoben und ausdrücklich so gewollt:** `probe` selbst bleibt auf
+Ethernet beschränkt. Eine Suche, die plötzlich WLAN-Karten beansprucht,
+wäre eine Regression in 54 grünen Abschnitten — und einen
+802.11-Treiber gibt es hier nicht und wird es so bald nicht geben.
+
+## E.3 Die Tabelle „Netz", fortgeschrieben
+
+| Chip | Stand | Was der Kern sagt |
+|---|---|---|
+| Intel 8254x / 82574 (`100E, 100F, 1015, 1026, 1028, 10D3`) | **gefahren, gemessen** | `-> e1000`, mit Modellnamen (`82540EM (1G)`, `82574L (1G)`) |
+| Intel I217/I218/I219 — **20 von 53** Nummern | **gefahren** (PCH-Zweig in `e1000.fi`) | `-> i219`, mit `I219-LM (1G)` / `I219-V (1G)` |
+| Intel I219 — die **übrigen 33** (Tiger Lake … Arrow Lake) | **erkannt, nicht gefahren** | `I219, but this PCH step is not released` |
+| Realtek RTL8169/8168/8111/8101 | **gefahren**, Rahmen gemessen | `-> r8169 [RTL8111/8168/8411] (8169/8168, Datenblatt)` |
+| Realtek RTL8139C+ (Rev ≥ 0x20) | **gefahren, in QEMU gemessen** | `(8139C+, gemessen)` |
+| Realtek RTL8125/8126, Killer E3000 | **gefahren, chipspezifischer Teil ungemessen** | `(8125/8126, Quelle, NICHT gemessen)` |
+| Intel I225/I226 — **alle 16** Nummern | erkannt, **kein Treiber** | `igc silicon, advanced descriptors …` + Klarname |
+| Intel I210/I211/I350/82575/82576/82580 — **alle 32** | erkannt, **kein Treiber** | `igb silicon, other queue set …` + Klarname |
+| Broadcom, Aquantia, Qualcomm/Killer, Marvell, MediaTek, DEC, AMD, VMware | erkannt, **kein Treiber** | `other vendor, no driver …` + Klarname |
+| WLAN (Intel, Realtek, Broadcom, Atheros, MediaTek) | erkannt, **kein Treiber, wird es nicht geben** | `wifi, needs 802.11 + fw …` + Klarname |
+
+**181 PCI-Nummern** stehen in `kernel/chipname.fi`, **173 davon von
+`pci.ids` bestätigt**, 8 nur aus dem Linux-Quelltext belegt, **0 fehlend**
+in den drei Intel-Familien.
+
+## E.4 Zwei Werkzeuge, die diese Tabelle widerlegen können
+
+Ohne sie wäre die Tabelle oben eine Behauptung.
+
+* **`tools/blech/chipnames.py`** — hält jeden Namen gegen `pci.ids` und
+  den Linux-Quelltext. **Erster Lauf: 14 Namen falsch**, darunter sieben
+  CNVi-Anschlüsse, die als „AX201" ausgegeben wurden (an `8086:02F0`
+  kann ein AX201, ein AX203 **oder** ein Wireless-AC 9560 hängen — welches,
+  steht erst in der Subsystemnummer).
+* **`tools/blech/r8125regs.py`** — hält den RTL8125-Zweig gegen Linux'
+  `r8169_main.c`. **Erster Lauf: der Sendeanstoß falsch** (siehe E.5).
+
+Beide sind seit diesem Nachtrag in `tools/blech/run.sh` **angemeldet**
+(Abschnitt 10) und laufen bei jeder Abnahme mit.
+
+## E.5 Der Fehler, den nur der Abgleich finden konnte
+
+    r8169.fi, tx_kick:        w8 (state, u, R_TPPOLL25, 64)
+    Linux, rtl8169_doorbell:  RTL_W16(tp, TxPoll_8125, BIT(0))
+
+Adresse richtig (0x90), **Breite und Wert vom alten Chip** stehen
+geblieben. **Auf einer echten RTL8125:** Chip läuft an, Verbindung steht,
+Empfang geht — **und kein einziges Paket verlässt die Karte.** Kein
+Absturz, keine Meldung.
+
+Das ist der Grund, warum an dieser Stelle jetzt ein Werkzeug steht: In
+QEMU 7.2 **kann** dieser Zweig nicht laufen, also kann kein Test ihn
+widerlegen. Der einzige Ersatz ist der zeilenweise Abgleich gegen den
+Treiber, der auf echter Hardware läuft.
+
+**Eine Stelle bleibt offen:** Wir schreiben `INT_CFG0` (0x34) Bit 0 = 1.
+Linux *upstream* definiert das Bit, benutzt es nie und schreibt dort
+`0x00`; unser Wert stammt aus Realteks eigenem Treiber. **Wenn eine
+RTL8125 auf echtem Blech keine Unterbrechungen liefert, ist das die erste
+Stelle zum Nachsehen.**
+
+## E.6 Was auf einem echten Brett als Nächstes schiefgeht — ergänzt
+
+Die Liste aus Teil D gilt weiter. Neu bzw. präzisiert:
+
+8. **Die Netzkarte ist ein I225/I226 (sehr häufig auf Boards ab 2021).**
+   Kein Treiber, und das bleibt vorerst so. Der Kern sagt jetzt aber
+   Modell, Nummer und Grund — und `docs/RUNDE-BLECH.md` enthält den
+   fertigen Bauplan. **Voraussetzung für einen Treiber: eine echte Karte.**
+   QEMU hat bis heute kein `igc`-Modell.
+9. **Die Netzkarte ist ein I210/I211 (häufig auf Server- und
+   NAS-Boards).** Ebenfalls kein Treiber — aber **billiger nachzurüsten
+   als igc**: Für Warteschlange 0 liegen Empfangs- und Senderingregister
+   bei igb an **denselben Adressen wie beim gemessenen e1000**
+   (`RDBAL 0x02800`, `TDBAL 0x03800`), ebenso `MDIC` und `RAL/RAH`. Es
+   bleiben zwei Unterschiede: der Unterbrechungsblock
+   (`EICR/EIMS/EIMC/GPIE/IVAR0`) und die Advanced-Deskriptoren.
+   **Voraussetzung: QEMU 8.x** — dort gibt es ein `igb`-Gerät, und damit
+   wäre der Zweig messbar statt geraten.
+10. **Der Laptop hat nur WLAN.** Der Kern nennt jetzt die Karte
+    (`print_inventory`), sagt aber ehrlich, dass es dafür keinen Treiber
+    gibt und keinen geben wird. Für Netz braucht es einen
+    USB-Ethernet-Adapter — und auch der ist **noch nicht** gebaut.
