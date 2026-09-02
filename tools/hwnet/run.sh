@@ -199,8 +199,15 @@ qemu_bg "ne2k_pci" "osum $BASE $NETARGS nsvc=0 nwait=60" "$TMPD/bus-ne2k.txt"
 qemu_wait
 bridge_down; wire_down
 R="$TMPD/bus-ne2k.txt"
-has "$R" "netdev: no driver for 0x10ec:0x8029" \
-    "the unknown card is NAMED WITH ITS NUMBERS -- the sentence a real board needs"
+# ROUND BLECH: the line now carries the CHIP NAME in front of the
+# numbers -- "Realtek (10ec:8029)" instead of "0x10ec:0x8029".  Whoever
+# stands in front of a strange board gets an answer instead of a lookup
+# task.  The NUMBERS stay, and this check still demands them: the name
+# is the extra, the number is the proof.
+has "$R" "netdev: kein Treiber fuer" \
+    "the unknown card is NAMED -- the sentence a real board needs"
+has "$R" "10ec:8029" \
+    "and its NUMBERS are still there as the proof"
 has "$R" "nic: no device" "and the kernel says the stack has nothing under it"
 hasnot "$R" "netdev: c0=" "no driver claimed a card it cannot drive"
 

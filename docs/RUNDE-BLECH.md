@@ -754,3 +754,181 @@ Alle Protokolle dieser Runde liegen unter `/root/blechlogs/`:
 **Kein Merge nach `main`.** Der Zweig `blech` bleibt stehen; das
 Zusammenführen macht eine spätere Runde — zusammen mit `rtl` und `hid`,
 die dringender sind als alles in dieser Runde.
+
+---
+
+# NACHTRAG: DIE VIER AUFTRAEGE DES EIGNERS
+
+Nach der Abnahme oben hat der Eigner vier Dinge nachgeschoben. Drei
+sind gebaut, einer ist BEGRUENDET ABBESTELLT worden -- von ihm selbst,
+nachdem ich widersprochen hatte. Der Reihe nach.
+
+## 1. RTL-Zweig geholt, und dabei fiel ein echter Fehler auf
+
+Der Zweig `rtl` (RTL8169/8168) ist nach `blech` gebracht: 67 Pruefungen
+gruen. Beim anschliessenden Anheben von `MAX_CARDS` von 2 auf 8 kam ein
+Fehler heraus, den vorher niemand sehen konnte:
+
+**JEDER Netztreiber rechnete seinen Meldevektor als `45 + u` mit SEINER
+EIGENEN Einheitennummer.** Solange nur virtio existierte, war das
+dieselbe Zahl wie die Kartennummer. Sobald aber zwei VERSCHIEDENE
+Treiber je eine Karte haben -- ein Intel-Anschluss auf dem Brett und
+eine Realtek-Karte im Steckplatz, der haeufigste Fall ueberhaupt --
+waeren beide Einheit 0 und beide haetten Vektor 45 verlangt. `trap.fi`
+gibt aber 45 an KARTE 0 und 46 an KARTE 1. Die zweite Karte haette ihre
+Meldungen an die erste geschickt.
+
+Behoben ueber `netdev.vector_for(c)`, das den Vektor nach KARTENNUMMER
+vergibt und ihn in `init_on` durchreicht. Geaendert: vier Dateien.
+NICHT geaendert: `inet.fi`, `netsvc.fi`, `share.fi`, `wg.fi`,
+`netview.fi`, `trap.fi` -- also keine der 63 Aufrufstellen.
+
+Gemessen, dieselbe Maschine, vier Karten:
+
+    MAX_CARDS 2:   c0=e1000, c1=e1000, dann STILLE
+    MAX_CARDS 8:   c0=e1000 vec=45
+                   c1=e1000 vec=46
+                   c2=r8169 abgefragt (kein Vektor frei)
+                   c3=virtio-net abgefragt (kein Vektor frei)
+
+Die zwei verschwundenen Karten sind der eigentliche Befund: `probe`
+hoerte nach der zweiten auf zu zaehlen, OHNE es zu sagen.
+
+`isr.s` hat weiter nur zwei Stuempfe (45, 46). Karte 2 bis 7 bekommen
+deshalb KEINE Unterbrechung -- sie laufen trotzdem, weil `netd` den
+Ring ohnehin abfragt, nur langsamer, UND DER KERN SAGT ES. Auf einem
+fremden Brett ist "die dritte Karte ist langsam" ein Befund; "die
+dritte Karte ist kaputt" waere ein Irrtum.
+
+## 2. RTL8125/8126 als dritte Spielart -- mit sechs benannten Quellen
+
+Keine neue Datei: der 8125 teilt mit dem 8169 den Deskriptor, beide
+Ringe, das Ruecksetzen, den Empfangsfilter und die C+-Betriebsart --
+also genau die achtzig Prozent, in denen die Fehler sitzen, und die
+sind ueber VAR_CP in QEMU GEMESSEN.
+
+Sechs Unterschiede, jeder mit seiner Quelle im Quelltext:
+IMR/ISR 32 Bit auf 0x38/0x3C; Sendeanstoss auf 0x90; INT_CFG0 Bit 0;
+MAC-OCP 0xEB58 Bit 0 zurueck auf das alte 16-Oktett-Deskriptorformat;
+RSS_CTRL und Q_NUM_CTRL auf null; PHY hinter OCP.
+
+Der letzte Punkt ist eine **bewusste Luecke**: dieser Treiber geht den
+OCP-PHY-Weg NICHT, er liest die Verbindung nur aus PHYstatus. Ein
+PHY-Weg, den niemand ausprobieren kann, ist schlimmer als keiner --
+er schickt beim ersten Fehler die Suche in die falsche Richtung.
+
+## 3. kernel/blkdev.fi -- Speicher bekommt die Form von netdev.fi
+
+Der Eigner: *"Die Struktur ist bei Netz schon richtig -- bei Speicher
+NICHT. Halte beide gleich."* Und: das sei mehr wert als ein weiterer
+Netztreiber. Er hatte recht, und der Beweis stand im eigenen Bericht
+der Runde MERGE-3: *"die automatische Treiberwahl beim Start ist nicht
+gebaut"* -- es gab niemanden, der sie haette treffen koennen.
+
+`kernel/blkdev.fi` ist die fehlende Schicht, Punkt fuer Punkt gegen
+`netdev.fi` gebaut: `driver_for` (Tabelle), `reason_for` (warum nicht),
+`probe`, `print_disks` (mit Nummern), `print_table` (Wort `blktab`,
+ohne Platte), und ein Verteiler mit je Treiber DENSELBEN Namen.
+
+Entschieden wird an der PCI-KLASSE und nicht an Hersteller/Geraet --
+das ist der Unterschied zu Netz und der Grund dafuer: ein NVMe-Riegel
+von Samsung und einer von WD haben verschiedene Nummern und DIESELBE
+Klasse. Ein Treiber, der Nummern sammelt, kennt genau die Riegel, die
+sein Schreiber besass.
+
+Gemessen mit `blktab`, ohne eine einzige Platte im Rechner:
+
+    blkdev: tab 01:08:02 -> nvme
+    blkdev: tab 01:06:01 -> ahci
+    blkdev: tab 01:06:00 -> none  SATA, aber nicht AHCI
+    blkdev: tab 01:04:00 -> none  RAID-Modus -- im BIOS "SATA Mode" auf AHCI stellen
+    blkdev: tab 01:07:00 -> none  SAS, kein Treiber
+    blkdev: tab 08:05:01 -> none  SD/eMMC-Regler, kein Treiber
+
+Und **eine Doppelung ist verschwunden**: `rootsel.fi` lief den Bus bis
+dahin SELBST ab und fuehrte eine zweite Liste derselben Platten. Zwei
+Listen laufen frueher oder spaeter auseinander. Jetzt findet und ordnet
+`blkdev`, und `rootsel` entscheidet nur noch, welcher Bewerber
+tatsaechlich eine Wurzel traegt.
+
+`blk.fi`, `fs.fi`, `vfs.fi`, `fat.fi`, `part.fi`: keine Zeile geaendert.
+
+## 4. igc/igb -- ABBESTELLT, und das war richtig
+
+Der Eigner hatte I225/I226 und I210/I211 als Treiber bestellt. Ich habe
+widersprochen, weil seine Reihenfolge seinem eigenen Satz widersprach
+("lieber vier Karten, die wirklich laufen, als acht halbe"):
+
+* Beim RTL8125 ging der Kompromiss auf -- er teilt ~80 % mit dem
+  gemessenen 8169-Ring.
+* Bei igc teilt er **nichts**: anderes Deskriptorformat (Advanced),
+  andere Warteschlangenregister, anderer Unterbrechungsblock.
+* QEMU 7.2 kennt weder `igb` noch `igc`. Es waere zu **100 % ungemessen**
+  gewesen -- achthundert Zeilen ungepruefter KERNcode an der Stelle, an
+  der ein Fehler das ganze System mitnimmt.
+
+Er hat entschieden: **Nummern ja, Treiber nein.** Umgesetzt in
+`kernel/chipname.fi`. Aus
+
+    netdev: no driver for 0x8086:0x125c
+
+wurde
+
+    netdev: kein Treiber fuer I226-V (2,5G) (8086:125c)
+      igc-Silizium: erweiterte Deskriptoren und anderer
+      Warteschlangensatz -- eigener Treiber noetig, e1000 passt NICHT
+
+Das ist keine Kosmetik. Wer vor einem fremden Brett steht, hat drei
+Fragen: WAS steckt da, WARUM laeuft es nicht, KANN ICH ETWAS TUN. Die
+Nummer allein beantwortet keine davon -- sie verlangt ein zweites Geraet
+mit Netz, um sie nachzuschlagen, und genau das fehlt oft gerade dann.
+
+Drei Regeln halten die Datei ehrlich:
+
+1. **Die Nummern werden IMMER gedruckt**, auch wenn der Name bekannt
+   ist. Der Name ist die Beigabe, die Nummer ist der Beweis -- irrt die
+   Tabelle, sieht man es sofort.
+2. **Wo der Name unsicher ist, steht nur der Hersteller.** "Broadcom
+   (14e4:1686)" ist ehrlich und trotzdem brauchbar; ein erfundener
+   Modellname waere schlimmer als gar keiner.
+3. **Diese Datei entscheidet nichts.** Sie druckt. Eine Namenstabelle,
+   die anfaengt mitzureden, ist ein Treiber im Versteck.
+
+Gemessen mit echten Karten (`-device ne2k_pci -device pcnet
+-device vmxnet3 -device tulip`):
+
+    netdev: kein Treiber fuer Realtek (10ec:8029)
+    netdev: kein Treiber fuer AMD (1022:2000)  fremder Hersteller, ...
+    netdev: kein Treiber fuer VMware (15ad:07b0)  fremder Hersteller, ...
+    netdev: kein Treiber fuer DEC/Intel tulip (1011:0019)  fremder Hersteller, ...
+
+Und fuer Speicher:
+
+    blkdev: d0=ahci bdf=0x30 Intel (8086:2922)
+    blkdev: kein Treiber fuer MegaRAID (1000:0060)  -- RAID-Modus -- ...
+    blkdev: kein Treiber fuer QEMU (1b36:0007)  -- SD/eMMC-Regler, ...
+
+Fuer I225/I226/I210/I211 gibt es kein QEMU-Modell; dort ist `nictab`
+der einzige moegliche Beweis -- und der laeuft (siehe
+`blechlogs/NICTAB.txt`).
+
+### Der Bauplan fuer igc, falls die Karte spaeter da ist
+
+Damit die Arbeit nicht verloren ist, hier was ein igc-Treiber braucht
+und was ihn vom gemessenen `e1000.fi` trennt:
+
+* **Empfangsdeskriptor (Advanced, 16 Oktett):** Lesen `{ pkt_addr:u64,
+  hdr_addr:u64 }`, Zurueckschreiben `{ info:u32, len_status:u32, ... }`.
+  Der Legacy-Deskriptor von `e1000.fi` passt NICHT.
+* **Sendedeskriptor (Advanced):** `{ addr:u64, cmd_type_len:u32,
+  olinfo_status:u32 }` mit DTYP=3 und DEXT=1.
+* **SRRCTL** je Warteschlange muss DESCTYPE auf "advanced one buffer"
+  stellen -- ohne das liest der Chip den Legacy-Ring.
+* **Warteschlangenregister** liegen bei 0x0C000 (Empfang) und 0x0E000
+  (Senden) statt bei 0x02800/0x03800, mit RXDCTL/TXDCTL je Ring, deren
+  ENABLE-Bit erst gesetzt UND zurueckgelesen werden muss.
+* **Der Unterbrechungsblock** liegt bei igc auf 0x01500 ff. und nicht
+  auf 0x000C0.
+
+Ohne eine Karte oder ein QEMU mit `igc`-Modell bleibt das ungeprueft --
+und ungeprueft gehoert es nicht in diesen Kern.
