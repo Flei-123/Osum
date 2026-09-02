@@ -265,7 +265,7 @@ qemu_bg "ne2k_pci" "osum $BASE $NETARGS nsvc=0 nwait=60" "$TMPD/bus-ne2k.txt"
 qemu_wait
 bridge_down; wire_down
 R="$TMPD/bus-ne2k.txt"
-has "$R" "netdev: no driver for 0x10ec:0x8029" \
+has "$R" "netdev: kein Treiber fuer" \
     "die unbekannte Karte wird MIT IHREN NUMMERN genannt -- der Satz, den ein Brett braucht"
 has "$R" "nic: no device" "und der Kern sagt, dass unter dem Stapel nichts liegt"
 hasnot "$R" "netdev: c0=" "kein Treiber hat eine Karte beansprucht, die er nicht fahren kann"
