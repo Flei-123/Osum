@@ -178,6 +178,14 @@ BEREICHE = [
     ("PMON",       "kstate.fi", "PMON_OFF",       "PMON_MAX"),
     ("NETVIEW",    "kstate.fi", "NETVIEW_OFF",    "NETVIEW_MAX"),
     ("NETDEV",     "kstate.fi", "NETDEV_OFF",     "NETDEV_MAX"),
+    # RUNDE MODUL: der Modullader (0x4D000..0x50000).  Drei Seiten aus
+    # dem Loch zwischen dem Modusvektor (MODE_OFF, endet 0x4D000) und
+    # dem USB-Vorrat (K17_OFF, faengt 0x50000 an).  Die Karte in
+    # `kstate.fi` weist es seit Runde K17 als frei aus; genommen wird es
+    # hier zum ersten Mal.  Darin liegen die Skalare des Laders, die
+    # vier Modulsaetze, die Abschnittstafel des laufenden Ladevorgangs
+    # und die TREIBERTAFEL, die ein geladenes Modul fuellt.
+    ("MODUL",      "kstate.fi", "MODUL_OFF",      "MODUL_MAX"),
 
     # RUNDE FSROBUST: der Zustand des OFS-Journals (kernel/ofsj.fi).
     # Drei Seiten aus dem letzten freien Stueck, 0x7A000..0x80000.
