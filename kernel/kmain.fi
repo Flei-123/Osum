@@ -69,6 +69,10 @@ import signal
 import arch.x86_64.guard
 import arch.x86_64.fpu
 import bootmod
+import modul
+import ksym
+import modtab
+import modidx
 import ab
 import hwdiag
 import rootsel
@@ -548,6 +552,16 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     NVMe-Laufwerks: die kommt aus `hw.disk`, und das laeuft eine
     //     Stufe TIEFER. Dafuer holt `hwid.refresh` beim Lesen nach.
     hwid.stage(state)
+
+    // 7e-quater. RUNDE MODUL: EIN TREIBER, DER NICHT IM KERN STEHT.
+    //     HIER und nicht spaeter, und der Grund ist der Zeitpunkt: der
+    //     Bus ist gelesen, der Zeitgeber schlaegt, der APIC steht, und
+    //     `osum` eine Zeile weiter unten startet die Shell und kehrt
+    //     erst zurueck, wenn sie fertig ist. Ein Treiber, den ein
+    //     Programm in Ring 3 benutzen soll, muss VOR diesem Programm da
+    //     sein. Ohne das Wort `modul` ist das hier EINE gedruckte Zeile
+    //     und sonst nichts.
+    moduls(state)
 
     // 7f. round K1: a system on that disk. Mount what the host built,
     //     load /bin/sh out of it, and let it run until it is done.
@@ -2094,6 +2108,245 @@ fn wm_owns_shell(state: u64) -> bool {
     return kstate.mode_on(state, kstate.M_WMSHELL)
 }
 
+// ============================================================ RUNDE MODUL
+//
+// DER ABSCHNITT, DER MISST, was `kernel/modul.fi` kann. Er ist der
+// einzige Aufrufer des Laders in diesem Kern, und er tut in genau dieser
+// Reihenfolge:
+//
+//   1. Die Ausfuhrtafel des Kerns drucken (`kernel/ksym.fi`) -- mit
+//      Namen UND Adressen. `tools/modul/run.sh` haelt jede dieser
+//      Zahlen gegen das, was `nm` im gebundenen Abbild sagt. Waeren sie
+//      verschieden, waere der Kniff mit dem Funktionswert falsch, und
+//      alles darunter waere Zufall.
+//   2. DEN ZUSTAND OHNE MODUL: gibt es ein Zeigegeraet? Im gewoehnlichen
+//      Bau: ja, es steht im Abbild. Mit `--ohne-ps2m`: nein, und das ist
+//      der Ausgangspunkt der Messung.
+//   3. Die Wurzelplatte einhaengen -- die Moduldatei liegt darauf, so
+//      wie ein Treiber unter Windows in `C:\Windows\System32\drivers`
+//      liegt und nicht im Kern.
+//   4. Laden. Danach noch einmal Punkt 2: dasselbe `gfx.mouse_present`,
+//      dieselbe Zeile Quelltext, andere Antwort.
+//   5. Das Geraet aufsetzen und die Zahlen drucken, die der
+//      QEMU-Monitor von aussen bewegen kann.
+//   6. Auf Wunsch (`modulaus`) entladen und noch einmal messen.
+//
+// Die GEGENPROBEN stehen nicht hier, sondern in den Dateien: der Laeufer
+// baut vier absichtlich kaputte Module und laesst denselben Abschnitt
+// laufen. Was sich aendert, ist der Grund, den Punkt 4 druckt.
+fn moduls(state: u64) {
+    var s_off: [u8; 11] = "modul: off\0"
+    var s_abi: [u8; 12] = "modul: abi=\0"
+    var s_syms: [u8; 13] = "modul: syms=\0"
+    var s_sym: [u8; 10] = "modul:   \0"
+    var s_gl: [u8; 2] = "=\0"
+    var s_vor: [u8; 17] = "modul: vor init=\0"
+    var s_nach: [u8; 18] = "modul: nach init=\0"
+    var s_pres: [u8; 10] = " present=\0"
+    var s_id: [u8; 5] = " id=\0"
+    var s_pkt: [u8; 6] = " pkt=\0"
+    var s_mount: [u8; 14] = "modul: mount=\0"
+    var s_lade: [u8; 14] = "modul: laden=\0"
+    var s_warte: [u8; 13] = "modul: warte\0"
+    var s_frei: [u8; 13] = "modul: frei=\0"
+    var s_ent: [u8; 17] = "modul: entladen=\0"
+    var s_ende: [u8; 12] = "modul: ende\0"
+    var pfad: [u8; 18] = "/lib/ps2maus.omod\0"
+    // DER ZWEITE PFAD IST DER, AN DEN `opk` INSTALLIERT. Runde INSTALL
+    // legt ein Paket unter /store/<hash>/ ab und baut daraus /apps neu;
+    // eine Datei `lib/x` aus einem Paket `ps2maus` liegt danach unter
+    // /apps/ps2maus.prog/lib/x. Der Kern sucht deshalb an beiden
+    // Stellen -- erst dort, wo ein Mensch sie hinlegt, dann dort, wo die
+    // Paketverwaltung sie hinlegt. Genau so hat Windows einen
+    // DriverStore neben System32\drivers.
+    var pfad2: [u8; 36] = "/apps/ps2maus.prog/lib/ps2maus.omod\0"
+
+    if !kstate.mode_on(state, kstate.M_MODUL) {
+        serial.puts((&s_off[0]) as u64)
+        serial.nl()
+        return
+    }
+
+    modul.init(state)
+
+    // 1. DIE AUSFUHRTAFEL DES KERNS, mit Namen UND Adressen.
+    //    `tools/modul/run.sh` haelt jede dieser Zahlen gegen das, was
+    //    `nm` im gebundenen Abbild sagt. Waeren sie verschieden, waere
+    //    der Kniff mit dem Funktionswert (`kernel/ksym.fi`) falsch, und
+    //    alles darunter waere Zufall statt Messung.
+    serial.puts((&s_abi[0]) as u64)
+    serial.dec(ksym.ABI)
+    serial.nl()
+    serial.puts((&s_syms[0]) as u64)
+    serial.dec(ksym.anzahl())
+    serial.nl()
+    var i: u64 = 0
+    while i < ksym.anzahl() {
+        serial.puts((&s_sym[0]) as u64)
+        ksym.name_at(i)
+        serial.puts((&s_gl[0]) as u64)
+        serial.hex(ksym.adresse_at(i))
+        serial.nl()
+        i = i + 1
+    }
+
+    // 2. DER ZUSTAND OHNE MODUL. Nicht "es ist keins geladen", sondern
+    //    die Frage, um die es geht: LAESST SICH DAS GERAET AUFSETZEN?
+    //    Im gewoehnlichen Bau ja -- der Treiber steht im Abbild. Mit
+    //    `--ohne-ps2m` nein, und das ist der Ausgangspunkt.
+    serial.puts((&s_vor[0]) as u64)
+    serial.dec(kutil.yes(gfx.mouse_init(state, 800, 600)))
+    serial.puts((&s_pres[0]) as u64)
+    serial.dec(kutil.yes(gfx.mouse_present(state)))
+    serial.puts((&s_pkt[0]) as u64)
+    serial.dec(gfx.mouse_packets(state))
+    serial.nl()
+
+    // 3. Die Wurzelplatte -- die Moduldatei liegt darauf, so wie ein
+    //    Treiber unter Windows in `\Windows\System32\drivers` liegt und
+    //    nicht im Kern.
+    if blk.present(state) {
+        blk.use_ata(state, kutil.root_blocks(state))
+    }
+    let eingehaengt: bool = fs.mount(state)
+    serial.puts((&s_mount[0]) as u64)
+    serial.dec(kutil.yes(eingehaengt))
+    serial.nl()
+
+    // Die freien Rahmen VOR dem Laden. Ein Lader, der Rahmen verliert,
+    // faellt an dieser Zahl auf und an keiner anderen.
+    let frei_vor: u64 = mem.frames_free(state)
+
+    // 4. LADEN.
+    var grund: u64 = modul.laden(state, (&pfad[0]) as u64,
+        modidx.SLOT_MAUS)
+    if grund == modul.R_NOFILE {
+        grund = modul.laden(state, (&pfad2[0]) as u64, modidx.SLOT_MAUS)
+    }
+    serial.puts((&s_lade[0]) as u64)
+    modul.say_reason(grund)
+    serial.nl()
+    zahlen(state)
+
+    // 5. DERSELBE AUFRUF WIE IN PUNKT 2, dieselbe Zeile Quelltext.
+    serial.puts((&s_nach[0]) as u64)
+    serial.dec(kutil.yes(gfx.mouse_init(state, 800, 600)))
+    serial.puts((&s_pres[0]) as u64)
+    serial.dec(kutil.yes(gfx.mouse_present(state)))
+    serial.puts((&s_id[0]) as u64)
+    serial.dec(gfx.mouse_id(state))
+    serial.puts((&s_pkt[0]) as u64)
+    serial.dec(gfx.mouse_packets(state))
+    serial.nl()
+
+    if grund == modul.R_OK {
+        bewegen(state, (&s_warte[0]) as u64)
+    }
+
+    // 6. ENTLADEN, wenn verlangt.
+    if kstate.mode_on(state, kstate.M_MODULAUS) {
+        let ok: bool = modul.entladen(state, 0)
+        serial.puts((&s_ent[0]) as u64)
+        serial.dec(kutil.yes(ok))
+        serial.puts((&s_pres[0]) as u64)
+        serial.dec(kutil.yes(gfx.mouse_present(state)))
+        serial.puts((&s_pkt[0]) as u64)
+        serial.dec(gfx.mouse_packets(state))
+        serial.nl()
+        // Und die Rahmen: nach dem Entladen muessen es wieder so viele
+        // sein wie vorher.
+        serial.puts((&s_frei[0]) as u64)
+        serial.dec(mem.frames_free(state))
+        serial.puts((&s_gl[0]) as u64)
+        serial.dec(frei_vor)
+        serial.nl()
+        // UND DANACH WIRD DIE MAUS NOCH EINMAL BEWEGT. Eine
+        // Unterbrechung, die nach dem Entladen kommt, laeuft in
+        // `ps2m-aus.irq` und findet dort eine Null. Dass der Kern das
+        // ueberlebt, ist die Zusage; dass er es TUT, misst diese Zeile.
+        bewegen(state, (&s_warte[0]) as u64)
+    }
+
+    serial.puts((&s_ende[0]) as u64)
+    serial.nl()
+}
+
+fn zahlen(state: u64) {
+    var a: [u8; 14] = "modul: sigok=\0"
+    var b: [u8; 7] = " secs=\0"
+    var c: [u8; 7] = " syms=\0"
+    var e: [u8; 6] = " rel=\0"
+    var f: [u8; 6] = " ext=\0"
+    var g2: [u8; 8] = " bytes=\0"
+    var h: [u8; 8] = " datei=\0"
+    var i2: [u8; 8] = " basis=\0"
+    var j: [u8; 9] = " rahmen=\0"
+    var k2: [u8; 6] = " abi=\0"
+    var l: [u8; 9] = " initrc=\0"
+    var m2: [u8; 10] = " plaetze=\0"
+    var n2: [u8; 12] = " abgelehnt=\0"
+    serial.puts((&a[0]) as u64)
+    serial.dec(modul.sig_ok(state))
+    serial.puts((&b[0]) as u64)
+    serial.dec(modul.secs(state))
+    serial.puts((&c[0]) as u64)
+    serial.dec(modul.syms(state))
+    serial.puts((&e[0]) as u64)
+    serial.dec(modul.relocs(state))
+    serial.puts((&f[0]) as u64)
+    serial.dec(modul.ext_syms(state))
+    serial.puts((&g2[0]) as u64)
+    serial.dec(modul.image_bytes(state))
+    serial.puts((&h[0]) as u64)
+    serial.dec(modul.file_bytes(state))
+    serial.puts((&i2[0]) as u64)
+    serial.hex(modul.base_of(state, 0))
+    serial.puts((&j[0]) as u64)
+    serial.dec(modul.frames_of(state, 0))
+    serial.puts((&k2[0]) as u64)
+    serial.dec(modul.abi_of_file(state))
+    serial.puts((&l[0]) as u64)
+    serial.dec(modul.init_rc(state))
+    serial.puts((&m2[0]) as u64)
+    serial.dec(modtab.count(state, modidx.SLOT_MAUS))
+    serial.puts((&n2[0]) as u64)
+    serial.dec(modul.rejects(state))
+    serial.nl()
+}
+
+// Warten, waehrend der Laeufer von aussen `mouse_move` schickt, und
+// danach die Zahlen drucken. Die Marke `modul: warte` ist das Zeichen
+// fuer den Laeufer -- er wartet darauf und nicht auf die Uhr des Wirts,
+// aus demselben Grund, aus dem Runde OTA ihre Schusszeitpunkte an
+// Marken ausgerichtet hat (docs/RUNDE-MERGE3.md, Teil 1b).
+fn bewegen(state: u64, marke: u64) {
+    var c: [u8; 12] = "modul: pkt=\0"
+    var d2: [u8; 6] = " mov=\0"
+    var e: [u8; 4] = " x=\0"
+    var f: [u8; 4] = " y=\0"
+    var g2: [u8; 6] = " btn=\0"
+    var h2: [u8; 7] = " irqs=\0"
+    serial.puts(marke)
+    serial.nl()
+    let bis: u64 = kstate.get(state, kstate.TICKS) + 500
+    while kstate.get(state, kstate.TICKS) < bis {
+        asm("hlt")
+    }
+    serial.puts((&c[0]) as u64)
+    serial.dec(gfx.mouse_packets(state))
+    serial.puts((&d2[0]) as u64)
+    serial.dec(gfx.mouse_moves(state))
+    serial.puts((&e[0]) as u64)
+    serial.dec(gfx.mouse_x(state))
+    serial.puts((&f[0]) as u64)
+    serial.dec(gfx.mouse_y(state))
+    serial.puts((&g2[0]) as u64)
+    serial.dec(gfx.mouse_buttons(state))
+    serial.puts((&h2[0]) as u64)
+    serial.dec(gfx.mouse_clicks(state))
+    serial.nl()
+}
+
 fn shell(state: u64) {
     if wm_owns_shell(state) {
         return
@@ -3272,6 +3525,9 @@ fn mode_of(state: u64, cmd: u64) {
     var narw: [u8; 8] = "noareap\0"
     var nawv: [u8; 8] = "noawork\0"
     var astw: [u8; 8] = "astress\0"
+    // RUNDE MODUL: `modul` schaltet den Modullader-Abschnitt ein.
+    var mdlw: [u8; 6] = "modul\0"
+    var mdaw: [u8; 9] = "modulaus\0"
     if find(cmd, (&asyw[0]) as u64, 5) != 0 {
         kstate.mode_add(state, kstate.M_ASYNC)
     }
@@ -3289,6 +3545,12 @@ fn mode_of(state: u64, cmd: u64) {
     }
     if find(cmd, (&astw[0]) as u64, 7) != 0 {
         kstate.mode_add(state, kstate.M_ASTRESS)
+    }
+    if find(cmd, (&mdlw[0]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_MODUL)
+    }
+    if find(cmd, (&mdaw[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_MODULAUS)
     }
     if find(cmd, (&k13w[0]) as u64, 6) != 0 {
         kstate.mode_add(state, kstate.M_K13)

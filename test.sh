@@ -1305,6 +1305,18 @@ lauf "35. Osum auf fremdem Blech: Wurzelsuche, RAID-Meldung, EHCI, NVMe-Namensra
 lauf "36. HID: Berichtsbeschreibungen, ein Eingabeweg, Touchpad, I2C-HID (tools/hid/run.sh, Runde HID)" \
      tools/hid/run.sh hid '^  ok    |^ +(ps2|usb-boot|usb-gen|i2c-soft|touchpad|n=) '
 
+# ABSCHNITT 37 -- RUNDE MODUL, ANGEMELDET VON RUNDE BLECH-ECHT.
+#
+# Auch dieser Laeufer war nie in test.sh -- der vierte nach avx, ota und
+# betrieb. Er misst, dass ein Treiber NACHGELADEN werden kann: zwei
+# Kernabbilder aus demselben Quelltext (eines mit `ps2m.fi`, eines mit dem
+# Stummel `ps2m-aus.fi`), die Ausfuhrtafel des Kerns gegen `nm` gehalten,
+# das Modul als signierte Datei auf der Platte, laden, die Maus wirklich
+# bewegen, entladen -- und die Gegenprobe mit einem Symbol, das der Kern
+# nicht anbietet.
+lauf "37. ein Treiber, der nicht im Kern steht: laden, benutzen, entladen (tools/modul/run.sh, Runde MODUL)" \
+     tools/modul/run.sh modul '^MODUL: |^  OK    (zwei Kernabbilder|die Ausfuhrtafel|dasselbe wie nm|ohne Modul|mit Modul|und es bewegt|und es laesst|die Signatur|ein fremdes|der Kern laedt|danach|vorher|eine Platte|der Lauf endet)'
+
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
 abschnitte_abarbeiten
