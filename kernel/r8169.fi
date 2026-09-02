@@ -50,8 +50,13 @@
 //   1. IMR und ISR sind 32 Bit breit und liegen auf 0x38 und 0x3C
 //      statt 16 Bit auf 0x3C und 0x3E.
 //      (Linux r8169.c: `IntrMask_8125 = 0x38, IntrStatus_8125 = 0x3c`)
-//   2. Der Sendeanstoss liegt auf 0x90 statt auf 0x38.
-//      (Linux r8169.c: `TxPoll_8125 = 0x90`)
+//   2. Der Sendeanstoss liegt auf 0x90 statt auf 0x38 -- UND er wird
+//      anders geschrieben: 16 Bit mit Bit 0, nicht 8 Bit mit Bit 6.
+//      (Linux r8169_main.c, `rtl8169_doorbell`:
+//       `RTL_W16(tp, TxPoll_8125, BIT(0))` gegen `RTL_W8(tp, TxPoll,
+//       NPQ)`.) Der zweite Halbsatz hat in der ersten Fassung dieser
+//      Datei GEFEHLT, und darum stand im Code die richtige Adresse mit
+//      dem falschen Wert. Siehe `tx_kick`.
 //   3. Der Unterbrechungsblock muss ueber INT_CFG0 (0x34) Bit 0 erst
 //      eingeschaltet werden.
 //      (Linux r8169.c: `INT_CFG0_8125 = 0x34`, `INT_CFG0_ENABLE_8125`)
@@ -230,6 +235,12 @@ const R_INTCFG0_25: u64 = 0x34 // Unterbrechungsblock einschalten
 const R_IMR25: u64 = 0x38 // 32 Bit
 const R_ISR25: u64 = 0x3C // 32 Bit, wird durch Zurueckschreiben geloescht
 const R_TPPOLL25: u64 = 0x90
+// UND SEIN WERT, und der ist NICHT derselbe wie beim alten Chip.
+// Linux r8169_main.c, `rtl8169_doorbell`:
+//     if (rtl_is_8125(tp))  RTL_W16(tp, TxPoll_8125, BIT(0));
+//     else                  RTL_W8 (tp, TxPoll,      NPQ);
+// Also: SECHZEHN Bit und Bit 0 -- nicht acht Bit und Bit 6.
+const TPPOLL25_GO: u64 = 1
 const R_OCPDR: u64 = 0xB0 // MAC-OCP, ein 32-Bit-Fenster
 const R_RSSCTRL25: u64 = 0x4500
 const R_QNUMCTRL25: u64 = 0x4800
@@ -1140,7 +1151,30 @@ fn tx_kick(state: u64, u: u64) {
         return
     }
     if v == VAR_8125 {
-        w8(state, u, R_TPPOLL25, 64)
+        // HIER STAND EIN FEHLER, und er ist ein Musterbeispiel dafuer,
+        // warum der Eigner den igc-Treiber abbestellt hat.
+        //
+        // Es stand `w8(..., R_TPPOLL25, 64)` da: die ADRESSE vom 8125
+        // (0x90, richtig aus Linux uebernommen), aber Breite und Bit
+        // vom ALTEN Chip (8 Bit, NPQ = Bit 6). Linux macht an dieser
+        // Stelle ausdruecklich zweierlei: `RTL_W16(TxPoll_8125,
+        // BIT(0))` fuer den 8125 und `RTL_W8(TxPoll, NPQ)` fuer alles
+        // aeltere. Mein Kopf hat die Adresse ersetzt und den Wert
+        // stehen lassen.
+        //
+        // WAS DAS AUF ECHTEM BLECH GEHEISSEN HAETTE: Der Chip laeuft
+        // an, der Verbindungsstatus stimmt, Empfang funktioniert -- und
+        // es geht kein einziges Paket hinaus, weil der Sendeanstoss nie
+        // ankommt. Das ist die unangenehmste Sorte Fehler: kein
+        // Absturz, keine Meldung, nur ein halb totes Geraet.
+        //
+        // UND ES IST HIER NICHT AUFGEFALLEN, weil dieser Zweig in QEMU
+        // 7.2 nicht laufen KANN. Kein Modell des Chips, keine Karte im
+        // Haus. Gefunden hat ihn erst der Abgleich Zeile fuer Zeile
+        // gegen Linux -- also genau das Verfahren, das ein ungemessener
+        // Treiber IMMER braucht und das bei 800 Zeilen igc niemand
+        // durchhaelt.
+        w16(state, u, R_TPPOLL25, TPPOLL25_GO)
         return
     }
     w8(state, u, R_TPPOLL69, 64)
