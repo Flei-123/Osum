@@ -679,7 +679,13 @@ fn read_link(state: u64, u: u64) {
 
 // ------------------------------------------------------------- das Aufsetzen
 
-fn init_on(state: u64, u: u64, use_msix: bool, armed: bool) -> bool {
+// RUNDE BLECH: `vec` ist der Meldevektor, den `netdev.fi` fuer DIESE
+// KARTE vergeben hat -- nicht `45 + u` aus der eigenen Einheitennummer.
+// Zwei Treiber mit je einer Karte haetten sonst beide Vektor 45, und
+// `trap.fi` gibt 45 an Karte 0. `vec == 0` heisst: keine Unterbrechung,
+// diese Karte wird abgefragt.
+fn init_on(state: u64, u: u64, use_msix: bool, armed: bool,
+    vec: u64) -> bool {
     if u >= MAX_UNITS {
         return false
     }
@@ -789,7 +795,7 @@ fn init_on(state: u64, u: u64, use_msix: bool, armed: bool) -> bool {
 
     // DIE UNTERBRECHUNG WIRD SCHARFGEMACHT, BEVOR DIE RINGE LAUFEN --
     // dieselbe Reihenfolge, die virtio und e1000 benutzen.
-    intx_arm(state, u, i, armed)
+    intx_arm(state, u, i, armed, vec)
 
     // Erst jetzt Senden und Empfangen einschalten. Das Datenblatt
     // verlangt, dass RCR NACH dem Setzen von RE geschrieben wird; Linux
@@ -1087,14 +1093,20 @@ fn poll_on(state: u64, u: u64) -> bool {
 // pegelgesteuert und aktiv niedrig -- dieselben sechs Zeilen, die
 // `virtio.intx_arm` und `e1000.intx_arm` haben, und aus demselben Grund
 // nicht teilbar: der Vektor gehoert zur Karte.
-fn intx_arm(state: u64, u: u64, i: u64, armed: bool) {
+fn intx_arm(state: u64, u: u64, i: u64, armed: bool, vec: u64) {
     let d: u64 = pci.get(state, i, pci.E_BDF)
     pci.cfg_write16(d, 0x04, pci.cfg_read16(d, 0x04) & 0xFBFF)
+    if vec == 0 {
+        // Diese Karte hat keinen Vektor bekommen. Die Leitung wird gar
+        // nicht erst geroutet -- eine Umleitung auf einen Vektor, den
+        // niemand behandelt, waere schlimmer als keine.
+        return
+    }
     let gsi: u64 = pci.get(state, i, pci.E_IRQLINE)
     if gsi == 0 || gsi > 23 {
         return
     }
-    apic.route(state, gsi, 45 + u, apic.id(state), true, true)
+    apic.route(state, gsi, vec, apic.id(state), true, true)
     if !armed {
         apic.mask_gsi(state, gsi)
     }
