@@ -1,8 +1,8 @@
 <!-- SPDX-License-Identifier: GPL-2.0-only -->
 # BLECH-BEREIT — was Osum auf einem echten Laptop kann, Geräteklasse für Geräteklasse
 
-Stand **03.09.2026**, Zweig `main` nach Runde **BLECH-HID** (davor:
-STICK, BLECH-ECHT). Gemessen auf dem üblichen Wirt (AMD EPYC 7571,
+Stand **03.09.2026**, Zweig `main` nach Runde **HIDWEG** (davor:
+BLECH-HID, STICK, BLECH-ECHT). Gemessen auf dem üblichen Wirt (AMD EPYC 7571,
 12 Kerne, 19 GiB, `/dev/kvm`, QEMU 7.2.22) — **und, zum ersten Mal in
 diesem Projekt, auf einem echten Rechner.**
 
@@ -46,9 +46,50 @@ unsichtbar, und der Mauszeiger war kein Pfeil. Alle drei sind in Runde
 BLECH-HID bearbeitet; was daran gemessen ist und was nicht, steht in
 `docs/RUNDE-BLECH-HID.md`.
 
+### 0.1 DIE ZWEITE MESSUNG AUF BLECH — der USB-Baum ist grün
+
+Mit dem Abbild aus BLECH-HID hat Justin am selben Tag die **USB-Diagnose
+(Menü 2)** fotografiert. Damit ist der ganze untere Eingabeweg auf
+echtem Silizium belegt:
+
+| Befund | Zeile vom Blech |
+|---|---|
+| **Übernahme vom BIOS geprüft** | `usbleg: gut=2 schlecht=0` |
+| **Anschlussstrom steht** | `usb: hc1 … strom=8/8 verbunden=2 frei=2`, `hc0 strom=14/22 verbunden=3` |
+| **Maus aufgezählt und gebunden** | `usb: port=3 speed=1 slot=1 id=046d:c08b class=03:01:02 driver=mouse` |
+| **Tastatur aufgezählt und gebunden** | `usb: port=4 speed=1 slot=2 id=046d:c336 class=03:01:01 driver=kbd` |
+| **beide am zweiten Regler** | `usb: devices=2 kbd=1 mouse=1 msc=0 enums=4 fails=0` |
+| **die Meldung kommt an (hc1)** | `events=36 irqs=23` |
+| **die Meldung kommt NICHT an (hc0)** | `events=50 irqs=0` — fünfzig fertige Übertragungen, keine Meldung |
+| Stick am ersten Regler | `usb: port=8 … class=08:06:50 driver=msc` |
+| zweite Tastatur, Beschreibung zerlegt | `usb: port=10 … id=0951:16df class=03:00:00`, `hidrep: dev=1 ok=1 felder=15 rids=2 top=0xc0001` |
+
+**Und die Eingabe kam trotzdem nicht an.** Die LEDs von Tastatur und
+Maus leuchteten jetzt, der Zeiger stand in der Bildmitte und rührte sich
+nicht. Damit war bewiesen, dass der Fehler **nicht** im USB-Baum liegt.
+Runde HIDWEG hat den Weg von dort nach oben verfolgt und drei Fehler
+gefunden, von denen jeder für sich „keine Eingabe" bedeutet:
+
+1. **Der Schreibtisch hörte nach 9,4 Sekunden auf.** `kgui.wait_wm`
+   hatte eine harte Rundengrenze (20000); unter `nosched` — und das
+   steht auf jedem Schreibtisch-Eintrag — ist die in Sekunden erreicht.
+   Danach lief der Kern durch bis `kernel: done` und das Bild war ein
+   **Standbild**. Behoben mit dem Kernwort `wmdauer`.
+2. **Die Unterbrechungen waren aus**, seit `ring3` — der Ausflug nach
+   Ring 3 kommt über `leave_user` aus einem `syscall` zurück, und
+   `syscall` löscht IF über `IA32_FMASK`. Gemessen: `nach hv.stage
+   if=1`, `nach ring3 if=0`. Kein Zeitgeber, keine Taste, keine Maus.
+3. **Niemand fragte nach.** Im Schreibtisch rief nichts `usb.poll`; der
+   ganze Weg hing an der Meldung. Ein Regler wie `hc0` mit `irqs=0` ist
+   damit stumm.
+
+Alles davon steht mit Zahlen in `docs/RUNDE-HIDWEG.md`;
+`tools/hidweg/run.sh` misst es (**31 gehalten, 0 gefallen**), mit
+Gegenproben in beide Richtungen.
+
 **Das Abbild, auf das sich diese Tafel bezieht:** gebaut aus dem Zweig
-`blechhid` (Runde BLECH-HID), 123 731 968 Oktette,
-SHA-256 `a37098b983784875e7e484a329d496ba63d7654c700d98800c2e6082c37e34c0`,
+`hidweg` (Runde HIDWEG), 123 731 968 Oktette,
+SHA-256 `46df9d4cdc8ac17291e068c22abca77bb803592c74e5424c3def1285c781c972`,
 ausgeliefert als `/srv/store/abbilder/osum-usb.img` (daneben
 `osum-usb.img.sha256`).
 Ein zweiter Baulauf aus demselben Baum gibt eine andere Prüfsumme —
@@ -122,7 +163,11 @@ Datei meint, meint ihren SHA.
 | Klasse | Urteil | Beleg / was fehlt |
 |---|---|---|
 | **PS/2-Tastatur und -Maus** | **GEHT** (QEMU) | `kernel/kbd.fi`, `kernel/ps2m.fi`; auf Desktops meist noch vorhanden, **auf modernen AMD-Brettern und Laptops nicht** — Justins Rechner hat keinen |
-| **USB-Tastatur/Maus, Boot-Protokoll** | **GEHT** (QEMU), auf Blech **NOCH UNGEMESSEN — aber drei echte Fehler behoben** | `-device usb-kbd`, Oktett für Oktett gegen den PS/2-Lauf. **Auf Justins Blech kam am 03.09.2026 nichts an, und die Ursachen sind gefunden:** (1) die Schreibtisch-Einträge des Sticks hatten **kein `usb`** auf der Kommandozeile — `usb.stage` druckte `usb: skipped` und der ganze Baum lief nie; (2) `xhci.fi` hatte **keine Zeile zum USB Legacy Support** (xECP-Kennung 1) und schrieb in einen Regler, den die Firmware noch besaß — genau das Bild „im Startmenü geht die Tastatur, danach nicht mehr"; (3) es wurde nur der **erste** von zwei xHCI-Reglern aufgesetzt. Dazu echte Wartezeiten statt Zählschleifen (200 ms Anschlussstrom, 100 ms Prellzeit, 20 ms Erholung). Die Übernahme ist an einer **gebauten** Fähigkeitsliste geprüft (`usbleg`, 2 Fälle, 0 Fehler), weil QEMU keinen Legacy-Abschnitt hat |
+| **USB-Tastatur/Maus, Boot-Protokoll** | **AUFGEZÄHLT UND GEBUNDEN (BLECH)**, Weg bis zum Fenster **GEHT** (QEMU, Ende zu Ende vom Stick) | `-device usb-kbd`, Oktett für Oktett gegen den PS/2-Lauf. **Auf Justins Blech kam am 03.09.2026 nichts an, und die Ursachen sind gefunden:** (1) die Schreibtisch-Einträge des Sticks hatten **kein `usb`** auf der Kommandozeile — `usb.stage` druckte `usb: skipped` und der ganze Baum lief nie; (2) `xhci.fi` hatte **keine Zeile zum USB Legacy Support** (xECP-Kennung 1) und schrieb in einen Regler, den die Firmware noch besaß — genau das Bild „im Startmenü geht die Tastatur, danach nicht mehr"; (3) es wurde nur der **erste** von zwei xHCI-Reglern aufgesetzt. Dazu echte Wartezeiten statt Zählschleifen (200 ms Anschlussstrom, 100 ms Prellzeit, 20 ms Erholung). Die Übernahme ist an einer **gebauten** Fähigkeitsliste geprüft (`usbleg`, 2 Fälle, 0 Fehler), weil QEMU keinen Legacy-Abschnitt hat. **Am 03.09.2026 auf Blech nachgemessen:** `usbleg: gut=2 schlecht=0`, `driver=kbd` und `driver=mouse` an `1022:149c`, `devices=2 kbd=1 mouse=1`, `irqs=23` — der ganze untere Weg ist grün. Was danach noch fehlte, lag **oberhalb** des Treibers und steht in der nächsten Zeile |
+| **Ein Tastendruck kommt im Fenster an** | **GEHT** (seit HIDWEG), auf Blech **NOCH UNGEMESSEN** | Drei Fehler über dem Treiber, jeder für sich tödlich: (1) der Schreibtisch hatte eine **Rundengrenze** und hörte nach **9,4 s** auf — danach ein Standbild; (2) `ring3` kam mit **abgeschalteten Unterbrechungen** zurück (`if=1` vor, `if=0` nach), also kein Zeitgeber und keine Meldung mehr; (3) im Schreibtisch fragte **niemand** den Ereignisring ab. `tools/hidweg/run.sh`: **31 gehalten, 0 gefallen** — Zeiger wandert (`639,399 → 799,539`), Klick kommt an (`kl=1`), Marken laufen (`mk 434 → 4406`), Meldungen kommen an (`irq 40 → 47`). Ende zu Ende **vom fertigen Abbild über UEFI** nachgefahren, mit zwei Reglern und HID am zweiten |
+| **Sehen, ob Eingabe ankommt — ohne serielles Kabel** | **GEHT** (seit HIDWEG) | Der Kern schreibt alle fünf Sekunden eine Zeile **ins Terminalfenster**: `eingabe: ber= irq= ev= sts= iman= mk= if= ta= lo= bew= pk= xy= wm= kl= sh=`. Von unten nach oben lesbar: `ber=0` heißt „gar nichts kommt an", `ber` hoch und `pk=0` heißt „hängt zwischen Bericht und Zeiger", `pk` hoch und `wm=0` heißt „hängt im Fensterserver". `mk` still heißt: die Unterbrechungen sind aus |
+| **Die Meldeart des Reglers** | **GEHT** (seit HIDWEG) | `usb: hcN melde=msi-x\|msi\|intx`. MSI fehlte bis dahin **ganz** — nur MSI-X und der Stift durch den I/O-APIC waren da, und der Stift gibt auf, wenn die Anschlussleitung im PCI-Kopf 0 oder über 23 ist. Genau das erklärt `hc0: events=50 irqs=0` auf Justins Brett. Der MSI-Weg ist geschrieben, aber **auf Blech ungemessen** — QEMUs beide xHCI haben MSI-X |
+| **Die richtige Schnittstelle eines Geräts nehmen** | **GEHT** (seit HIDWEG) | Eine Spieletastatur hat drei: NKRO, Boot-Tastatur, Verbrauchersteuerung. `parse` nahm die **erste**; bei `0951:16df` war das die Verbrauchersteuerung (`top=0xc0001`) — Lautstärketasten statt Buchstaben. Jetzt zwei Durchgänge mit Rangfolge. QEMU hat kein zusammengesetztes HID-Gerät, also wird der Konfigurationsdeskriptor im Kern **gebaut**: `usb: rang ok=6 / 6` |
 | **Sehen, WARUM keine Eingabe ankommt** | **GEHT** (seit BLECH-HID) | `xhci.uebersicht` (lesend, in Menü 1): `usb: regler=N`, je Regler `besitz=BIOS|OS|frei`, `strom=`, `verbunden=`. `xhci.bericht` (Menüeintrag *„USB-Diagnose"*): Semaphore vor/nach der Übernahme, HCRST, und jeder Anschluss mit `pp/ccs/ped/pr/spd`, vier je Zeile — ein Foto reicht |
 | **USB-Nabenchip (Hub)** | **GEHT NICHT** | es gibt keinen Hub-Treiber. Ein Hub wird aufgezählt und mit `class=09:…  driver=none` benannt; was DAHINTER steckt, sieht dieses System nicht. Tastatur und Maus gehören direkt in eine Buchse am Gehäuse |
 | **USB-HID mit Berichtsbeschreibung** (NKRO, Zusatztasten, Geräte ohne Boot-Protokoll) | **GEHT** (QEMU) | `tools/hid/run.sh`: **57 bestanden, 0 gefallen**; der Zerleger wird gegen einen **zweiten** Zerleger gehalten |
@@ -194,13 +239,18 @@ NVMe und SATA erkannt, die Netzkarte erkannt UND vom Treiber genommen,
 Schutzbits und Vektoreinheit in Ordnung, Bild über den ganzen
 Ultrawide-Schirm, Fenster korrekt gezeichnet, kein Absturz.
 
-**Womit man noch nicht arbeiten kann, ist die EINGABE.** Sie kam auf
-diesem Rechner nicht an; drei Ursachen sind gefunden und behoben
-(kein `usb` auf der Kommandozeile, keine Übernahme vom BIOS, nur ein
-Regler von zweien), aber ob es damit geht, entscheidet der nächste Lauf
-auf demselben Brett. Bis dahin gibt es den Menüeintrag *„Netz-Selbstlauf
-ohne Tastatur"*, der ohne eine einzige Taste `dhcp`, `host`, `fetch` und
-`ota suchen` fährt und das Ergebnis stehen lässt.
+**Die EINGABE ist der Punkt, an dem sich alles entscheidet.** Ihr
+unterer Teil ist auf Blech gemessen und grün: Übernahme, Anschlussstrom,
+Aufzählung, Bindung, Meldung (`usb: devices=2 kbd=1 mouse=1`, `irqs=23`
+auf `1022:149c`). Was danach fehlte, lag **oberhalb** des Treibers und
+ist in Runde HIDWEG behoben — der Schreibtisch hörte nach 9,4 Sekunden
+auf, die Unterbrechungen waren seit dem Ring-3-Ausflug abgeschaltet, und
+niemand fragte den Ereignisring ab. In QEMU geht der Weg jetzt **Ende zu
+Ende vom fertigen Abbild über UEFI**, mit zwei Reglern und HID am
+zweiten; auf Justins Brett ist er **noch ungemessen**. Wenn es hakt,
+sagt die Zeile `eingabe:` im Terminalfenster, an welcher Stelle. Und es
+bleibt der Menüeintrag *„Netz-Selbstlauf ohne Tastatur"*, der ohne eine
+einzige Taste `dhcp`, `host`, `fetch` und `ota suchen` fährt.
 
 Was du erwarten darfst, wenn du es probierst:
 
@@ -228,11 +278,14 @@ Was du erwarten darfst, wenn du es probierst:
   **RAID** statt AHCI, siehst du keine Platte — dann im BIOS umstellen.
   Eine **FAT32**-Platte oder ein zweiter Stick hängt beim Start unter
   `/mnt`.
-* **Tastatur/Touchpad:** Am Desktop mit PS/2 oder USB: geht. **Auf einem
-  Ultrabook, dessen Touchpad an I²C hängt, ist es Glückssache** — der
-  Weg ist gebaut, aber nie an echter Hardware gelaufen. Für den Fall,
-  dass gar keine Tastatur ankommt: die Kommandozeile geht auch über ein
-  serielles Terminal.
+* **Tastatur/Touchpad:** Am Desktop mit PS/2 oder USB: geht. **Steck
+  beide direkt ans Gehäuse** — hinter einem USB-Hub (auch im Monitor
+  oder in der Tastatur) sieht Osum sie nicht, es gibt keinen
+  Hub-Treiber. **Auf einem Ultrabook, dessen Touchpad an I²C hängt, ist
+  es Glückssache** — der Weg ist gebaut, aber nie an echter Hardware
+  gelaufen. Für den Fall, dass gar keine Tastatur ankommt: die
+  Kommandozeile geht auch über ein serielles Terminal, und der
+  Menüeintrag *„Netz-Selbstlauf ohne Tastatur"* braucht keine.
 * **Ton, TPM, Beschleunigung, S3:** nein.
 
 **Kurz:** zum Anschauen, Ausprobieren und für einen ersten echten

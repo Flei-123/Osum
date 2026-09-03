@@ -184,12 +184,16 @@ else bad "the memory map collides"; echo "$kart" | sed 's/^/        /'; fi
 # is brought up to date instead of removed: every number is named, and
 # the highest is named separately, so the next round that adds one has
 # to touch this line.
-for n in 2112 2113 2114 2115; do
+# ROUND HIDWEG: 2116 (WM_APP) came with round PAINT and this list had
+# not been brought along -- the assertion had been red ever since, and a
+# red assertion everybody steps over is what this very comment warns
+# about three lines up.
+for n in 2112 2113 2114 2115 2116; do
     grep -qE "= $n( |$)" kernel/sys.fi && ok "call number $n is in kernel/sys.fi" \
         || bad "call number $n is missing"
 done
-grep -q 'const WM_MAXNR: u64 = 2115' kernel/sys.fi \
-    && ok "and 2115 is the highest of the window server" \
+grep -q 'const WM_MAXNR: u64 = 2116' kernel/sys.fi \
+    && ok "and 2116 is the highest of the window server" \
     || bad "WM_MAXNR does not match the calls"
 # THE FOUR EDGES ARE THE SAME FOUR NUMBERS IN FOUR PLACES. Not a
 # translation table -- one set of numbers, written down four times, and
