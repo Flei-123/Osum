@@ -1,0 +1,354 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/jarvisctl.fi -- RUNDE BRIDGE: DER MENSCH SIEHT ZU.
+//
+//     jarvisctl zustand              was der Helfer darf und ob er kann
+//     jarvisctl rechte               die Rechteliste, wie sie dasteht
+//     jarvisctl protokoll [zeilen]   was der Helfer getan hat
+//     jarvisctl koppeln <code>       die Erstanmeldung bestaetigen
+//     jarvisctl fotoschein [sek]     EIN Bildschirmfoto erlauben
+//     jarvisctl fotoschein weg       den Schein zuruecknehmen
+//
+// ====================================================================
+// WOFUER
+// ====================================================================
+//
+// Ein Fernhelfer, den man nicht sehen kann, ist von einer Hintertuer
+// nicht zu unterscheiden. Dieses Programm ist die Stelle, an der ein
+// Mensch OHNE Netz und OHNE den Server nachsehen kann, was auf seinem
+// Rechner los ist: welche Rechte gelten, ob es einen Geraeteschluessel
+// gibt und wie er geschuetzt ist, und was der Helfer zuletzt getan hat.
+//
+// Es ist eine KOMMANDOZEILE und kein Fenster. Der Auftrag dieser Runde
+// nennt eine Oberflaeche ausdruecklich als Zugabe; sie faellt hier weg,
+// weil der Helfer auch auf einem Bau OHNE Bildschirm laufen muss und
+// das Werkzeug, das ihn sichtbar macht, dann mitkommen soll.
+//
+// ====================================================================
+// DIE ZWEI STELLEN, AN DENEN HIER WIRKLICH ETWAS ENTSCHIEDEN WIRD
+// ====================================================================
+//
+// 1. `koppeln`. Der Helfer legt den Code, den der Server geschickt hat,
+//    nach /var/jarvis/kopplung und wartet. Dieses Programm schreibt
+//    /var/jarvis/kopplung-ja -- ABER NUR, wenn der eingetippte Code mit
+//    dem uebereinstimmt, den der Helfer hingelegt hat. Wer einen Code
+//    bestaetigt, den niemand angefragt hat, bekommt eine Weigerung.
+//    Damit muss ein Mensch beides gesehen haben: den Code im Cockpit
+//    (er kam ueber den Server) und den auf diesem Bildschirm.
+//
+// 2. `fotoschein`. Ein EINMALIGER, BEFRISTETER Schein fuer genau ein
+//    Bildschirmfoto. Er steht in /var/jarvis/fotoschein, traegt eine
+//    Frist als Sekunden seit 1970, und der Helfer LOESCHT ihn, wenn er
+//    ihn benutzt. Ohne Schein gibt es kein Bild.
+//
+// EHRLICH DAZU, und derselbe Satz steht in kernel/app/jarvisd.fi: das
+// ist eine Sperre in Ring 3. Der richtige Ort ist der Kern, und Runde
+// FEEDBACK hat ihn dort schon gebaut (SYS_OSUM_SHOT mit Schein). In
+// diesem Zweig ist FEEDBACK nicht enthalten; sobald er hereinkommt,
+// faellt diese Datei weg und der Kern entscheidet.
+
+profile kernel
+
+import ulib
+import libc.kcall
+import libc.errno
+import libc.io
+import libc.stdio
+import libc.text
+
+export { u_start }
+
+static mut PFAD_RECHTE: [u8; 24] = "/etc/jarvis/rechte.conf\0"
+static mut PFAD_KEY: [u8; 23] = "/etc/jarvis/geraet.key\0"
+static mut PFAD_LOG: [u8; 21] = "/var/log/jarvisd.log\0"
+static mut PFAD_KOPPLUNG: [u8; 21] = "/var/jarvis/kopplung\0"
+static mut PFAD_KOPPJA: [u8; 24] = "/var/jarvis/kopplung-ja\0"
+static mut PFAD_SCHEIN: [u8; 23] = "/var/jarvis/fotoschein\0"
+static mut PFAD_VARJ: [u8; 12] = "/var/jarvis\0"
+
+static mut puffer: [u8; 8192] = [0 as u8; 8192]
+
+fn zeig(t: u64) {
+    ulib.say(t)
+}
+
+fn zeig_zeile(t: u64) {
+    ulib.say(t)
+    ulib.nl()
+}
+
+// Eine ganze Datei auf die Ausgabe. Rueckgabe: gelesene Oktette, oder
+// eine Fehlerzahl.
+fn datei_zeigen(pfad: u64) -> u64 {
+    let fd: u64 = io.open(pfad, 0)
+    if errno.failed(fd) {
+        return fd
+    }
+    var summe: u64 = 0
+    while true {
+        let n: u64 = io.read(fd, (&puffer[0 as usize]) as u64, 8192)
+        if errno.failed(n) || n == 0 {
+            break
+        }
+        ulib.put((&puffer[0 as usize]) as u64, n)
+        summe = summe + n
+    }
+    io.close(fd)
+    return summe
+}
+
+// Die letzten `wieviel` Zeilen. Das Protokoll wird nur angehaengt, also
+// reicht es, den Schwanz zu lesen: die Datei kann lang werden, und ein
+// Werkzeug, das sie ganz in den Speicher zieht, ist bei genau der
+// Datei falsch, die durch langen Betrieb gross wird.
+fn schwanz_zeigen(pfad: u64, wieviel: u64) -> u64 {
+    let gross: u64 = io.size_of(pfad)
+    if errno.failed(gross) {
+        return gross
+    }
+    var von: u64 = 0
+    if gross > 8192 {
+        von = gross - 8192
+    }
+    let fd: u64 = io.open(pfad, 0)
+    if errno.failed(fd) {
+        return fd
+    }
+    io.seek(fd, von, kcall.SEEK_SET)
+    let n: u64 = io.read(fd, (&puffer[0 as usize]) as u64, 8192)
+    io.close(fd)
+    if errno.failed(n) || n == 0 {
+        return 0
+    }
+    // Von hinten so viele Zeilenumbrueche zaehlen, wie verlangt sind.
+    var i: u64 = n
+    var zeilen: u64 = 0
+    var anfang: u64 = 0
+    while i > 0 {
+        i = i - 1
+        if *((((&puffer[0 as usize]) as u64) + i) as *mut u8) == 10 as u8 {
+            zeilen = zeilen + 1
+            if zeilen > wieviel {
+                anfang = i + 1
+                break
+            }
+        }
+    }
+    // Ein angeschnittener erster Satz waere eine halbe Zeile.
+    if anfang == 0 && von > 0 {
+        var k: u64 = 0
+        while k < n {
+            if *((((&puffer[0 as usize]) as u64) + k) as *mut u8) == 10 as u8 {
+                anfang = k + 1
+                break
+            }
+            k = k + 1
+        }
+    }
+    ulib.put(((&puffer[0 as usize]) as u64) + anfang, n - anfang)
+    return n - anfang
+}
+
+fn tue_zustand() -> u64 {
+    var t1: [u8; 39] = "Rechteliste  /etc/jarvis/rechte.conf: \0"
+    var t_da: [u8; 3] = "da\0"
+    var t_weg: [u8; 6] = "FEHLT\0"
+    zeig((&t1[0 as usize]) as u64)
+    let g: u64 = io.size_of((&PFAD_RECHTE[0 as usize]) as u64)
+    if errno.failed(g) {
+        zeig_zeile((&t_weg[0 as usize]) as u64)
+    } else {
+        zeig((&t_da[0 as usize]) as u64)
+        var kl: [u8; 3] = " (\0"
+        zeig((&kl[0 as usize]) as u64)
+        ulib.sayu(g)
+        var kr: [u8; 12] = " Oktette)\0\0\0"
+        zeig_zeile((&kr[0 as usize]) as u64)
+    }
+
+    var t2: [u8; 38] = "Schluessel   /etc/jarvis/geraet.key: \0"
+    zeig((&t2[0 as usize]) as u64)
+    let m: u64 = io.stat_mode((&PFAD_KEY[0 as usize]) as u64)
+    if errno.failed(m) {
+        var t: [u8; 37] = "noch keiner (`jsig aus` legt ihn an)\0"
+        zeig_zeile((&t[0 as usize]) as u64)
+    } else {
+        var t: [u8; 12] = "da, Rechte \0"
+        zeig((&t[0 as usize]) as u64)
+        // Nur die neun Rechtebits, in Oktalziffern.
+        let r: u64 = m & 511
+        ulib.sayu((r >> 6) & 7)
+        ulib.sayu((r >> 3) & 7)
+        ulib.sayu(r & 7)
+        if (r & 63) != 0 {
+            var w: [u8; 39] = "  -- ZU WEIT, andere duerfen ihn lesen\0"
+            zeig((&w[0 as usize]) as u64)
+        }
+        ulib.nl()
+    }
+
+    var t3: [u8; 36] = "Protokoll    /var/log/jarvisd.log: \0"
+    zeig((&t3[0 as usize]) as u64)
+    let lg: u64 = io.size_of((&PFAD_LOG[0 as usize]) as u64)
+    if errno.failed(lg) {
+        var t: [u8; 18] = "noch nichts darin\0"
+        zeig_zeile((&t[0 as usize]) as u64)
+    } else {
+        ulib.sayu(lg)
+        var t: [u8; 9] = " Oktette\0"
+        zeig_zeile((&t[0 as usize]) as u64)
+    }
+
+    var t4: [u8; 38] = "Fotoschein   /var/jarvis/fotoschein: \0"
+    zeig((&t4[0 as usize]) as u64)
+    let sg: u64 = io.size_of((&PFAD_SCHEIN[0 as usize]) as u64)
+    if errno.failed(sg) {
+        var t: [u8; 13] = "keiner offen\0"
+        zeig_zeile((&t[0 as usize]) as u64)
+    } else {
+        var t: [u8; 16] = "EINER IST OFFEN\0"
+        zeig_zeile((&t[0 as usize]) as u64)
+    }
+
+    var t5: [u8; 36] = "Kopplung     /var/jarvis/kopplung: \0"
+    zeig((&t5[0 as usize]) as u64)
+    let kg: u64 = io.size_of((&PFAD_KOPPLUNG[0 as usize]) as u64)
+    if errno.failed(kg) {
+        var t: [u8; 12] = "keine offen\0"
+        zeig_zeile((&t[0 as usize]) as u64)
+    } else {
+        var t: [u8; 42] = "der Helfer wartet auf `jarvisctl koppeln`\0"
+        zeig_zeile((&t[0 as usize]) as u64)
+    }
+    return 0
+}
+
+fn tue_koppeln(code: u64) -> u64 {
+    let fd: u64 = io.open((&PFAD_KOPPLUNG[0 as usize]) as u64, 0)
+    if errno.failed(fd) {
+        var t: [u8; 67] = "Es liegt keine Kopplungsanfrage vor -- niemand hat danach gefragt.\0"
+        ulib.esay_line((&t[0 as usize]) as u64, 0)
+        return 1
+    }
+    let n: u64 = io.read(fd, (&puffer[0 as usize]) as u64, 256)
+    io.close(fd)
+    if errno.failed(n) || n == 0 {
+        return 1
+    }
+    // Was hinten an Leerraum haengt, gehoert nicht zum Code.
+    var len: u64 = n
+    while len > 0 && *((((&puffer[0 as usize]) as u64) + len - 1) as *mut u8)
+            <= 32 as u8 {
+        len = len - 1
+    }
+    __mmio_write8((((&puffer[0 as usize]) as u64) + len) as *mut u8, 0 as u8)
+    if !ulib.streq((&puffer[0 as usize]) as u64, code) {
+        var t: [u8; 69] = "Der Code stimmt nicht mit dem ueberein, den der Helfer bekommen hat.\0"
+        ulib.esay_line((&t[0 as usize]) as u64, 0)
+        var t2: [u8; 16] = "Er wartet auf: \0"
+        ulib.eput((&t2[0 as usize]) as u64)
+        ulib.esay_line((&puffer[0 as usize]) as u64, 0)
+        return 1
+    }
+    io.make_dir((&PFAD_VARJ[0 as usize]) as u64)
+    let out: u64 = io.create((&PFAD_KOPPJA[0 as usize]) as u64)
+    if errno.failed(out) {
+        return 1
+    }
+    io.write_all(out, code, ulib.length(code))
+    io.close(out)
+    kcall.sys2(kcall.SYS_CHMOD, (&PFAD_KOPPJA[0 as usize]) as u64, 384)
+    var t: [u8; 29] = "Die Kopplung ist bestaetigt.\0"
+    zeig_zeile((&t[0 as usize]) as u64)
+    return 0
+}
+
+fn tue_schein(sek: u64) -> u64 {
+    io.make_dir((&PFAD_VARJ[0 as usize]) as u64)
+    let jetzt: u64 = io.now_sec()
+    let frist: u64 = jetzt + sek
+    var zahl: [u8; 32] = [0 as u8; 32]
+    let n: u64 = text.digits(frist, (&zahl[0 as usize]) as u64, false)
+    __mmio_write8((((&zahl[0 as usize]) as u64) + n) as *mut u8, 10 as u8)
+    let out: u64 = io.create((&PFAD_SCHEIN[0 as usize]) as u64)
+    if errno.failed(out) {
+        var t: [u8; 38] = "Der Schein laesst sich nicht anlegen.\0"
+        ulib.esay_line((&t[0 as usize]) as u64, 0)
+        return 1
+    }
+    io.write_all(out, (&zahl[0 as usize]) as u64, n + 1)
+    io.close(out)
+    kcall.sys2(kcall.SYS_CHMOD, (&PFAD_SCHEIN[0 as usize]) as u64, 384)
+    var t: [u8; 44] = "Ein einziges Bildschirmfoto ist frei, fuer \0"
+    zeig((&t[0 as usize]) as u64)
+    ulib.sayu(sek)
+    var t2: [u8; 11] = " Sekunden.\0"
+    zeig_zeile((&t2[0 as usize]) as u64)
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    let argc: u64 = ulib.arg_count(args)
+    var w_zust: [u8; 8] = "zustand\0"
+    var w_recht: [u8; 7] = "rechte\0"
+    var w_prot: [u8; 10] = "protokoll\0"
+    var w_kop: [u8; 8] = "koppeln\0"
+    var w_sch: [u8; 11] = "fotoschein\0"
+    var w_weg: [u8; 4] = "weg\0"
+    if argc < 2 {
+        return tue_zustand()
+    }
+    let was: u64 = ulib.arg_at(args, 1)
+    if ulib.streq(was, (&w_zust[0 as usize]) as u64) {
+        return tue_zustand()
+    }
+    if ulib.streq(was, (&w_recht[0 as usize]) as u64) {
+        let r: u64 = datei_zeigen((&PFAD_RECHTE[0 as usize]) as u64)
+        if errno.failed(r) {
+            var t: [u8; 39] = "/etc/jarvis/rechte.conf gibt es nicht.\0"
+            ulib.esay_line((&t[0 as usize]) as u64, 0)
+            return 1
+        }
+        return 0
+    }
+    if ulib.streq(was, (&w_prot[0 as usize]) as u64) {
+        var wieviel: u64 = 20
+        if argc > 2 {
+            wieviel = ulib.to_num(ulib.arg_at(args, 2))
+        }
+        let r: u64 = schwanz_zeigen((&PFAD_LOG[0 as usize]) as u64, wieviel)
+        if errno.failed(r) {
+            var t: [u8; 52] = "Es gibt noch kein Protokoll -- der Helfer lief nie.\0"
+            ulib.esay_line((&t[0 as usize]) as u64, 0)
+            return 1
+        }
+        return 0
+    }
+    if ulib.streq(was, (&w_kop[0 as usize]) as u64) {
+        if argc < 3 {
+            var t: [u8; 33] = "Aufruf: jarvisctl koppeln <code>\0"
+            ulib.esay_line((&t[0 as usize]) as u64, 0)
+            return 2
+        }
+        return tue_koppeln(ulib.arg_at(args, 2))
+    }
+    if ulib.streq(was, (&w_sch[0 as usize]) as u64) {
+        if argc > 2 && ulib.streq(ulib.arg_at(args, 2),
+                (&w_weg[0 as usize]) as u64) {
+            kcall.sys1(kcall.SYS_UNLINK, (&PFAD_SCHEIN[0 as usize]) as u64)
+            var t: [u8; 24] = "Der Fotoschein ist weg.\0"
+            zeig_zeile((&t[0 as usize]) as u64)
+            return 0
+        }
+        var sek: u64 = 60
+        if argc > 2 {
+            sek = ulib.to_num(ulib.arg_at(args, 2))
+        }
+        if sek == 0 || sek > 3600 {
+            sek = 60
+        }
+        return tue_schein(sek)
+    }
+    var t: [u8; 87] = "Aufruf: jarvisctl zustand | rechte | protokoll [n] | koppeln <code> | fotoschein [sek]\0"
+    ulib.esay_line((&t[0 as usize]) as u64, 0)
+    return 2
+}
