@@ -125,11 +125,45 @@ das einzige Stück Oberfläche, das nicht mit `uiscale` wächst — 8x15
 Bildpunkte auf einem 34-Zoll-Schirm. Zahlen in `docs/RUNDE-HIDPUNKTE.md`,
 gemessen von `tools/hidpunkte/run.sh` (**19 gehalten, 0 gefallen**).
 
+### DIE FASSUNGSNUMMER — PFLICHT IN JEDER ABNAHME
+
+Am 03.09.2026 hat Justin ein Abbild gebrannt und „kein Unterschied"
+gemeldet. Ob die Runde darin war, liess sich **nur** mit Zeitstempeln,
+Prüfsummen und einem QEMU-Lauf klären — der Kern selbst sagte es nicht.
+(Er enthielt sie; die Zeichenketten der neuen Ausgaben stehen nur nicht
+am Stück im Abbild, weil `firnc` Stapel-Arrays aus Immediates baut. Eine
+`grep`-Gegenprobe auf solche Texte beweist deshalb **nichts**.)
+
+Seither steht der kurze Commit-Hash an zwei Stellen, an denen ein Mensch
+ihn **ohne serielle Leitung** sieht:
+
+1. als **erste Zeile** des Startprotokolls: `osum 575545a2`
+2. **vorn in der grünen Kopfzeile** auf dem Schreibtisch:
+   `osum 575545a2 wahl=1 eingabe: ber=… ta=… bew=…`
+
+Ein ungesicherter Arbeitsbaum bekommt ein Pluszeichen (`osum 7e425a7+`).
+`tools/build-kernel.sh` bricht ab, wenn das Einsetzen nicht greift.
+
+**Wie ein Abbild ab jetzt vor der Auslieferung geprüft wird** — und
+zwar am fertigen Abbild, nicht am Arbeitsbaum:
+
+```
+HASH=$(git rev-parse --short=8 HEAD)
+grep -ac "osum $HASH" osum-usb.img        # muss > 0 sein
+mcopy -i osum-usb.img@@1048576 ::osum.mb k.mb
+qemu-system-x86_64 -kernel k.mb …         # erste Zeile muss "osum $HASH" sein
+```
+
+---
+
 **Das Abbild, auf das sich diese Tafel bezieht:** gebaut aus dem Zweig
-`hidpunkte` (Runde HIDPUNKTE), 123 731 968 Oktette,
-SHA-256 `0339dac53cbf5b088a414c996ecbcfd972bb93b739d8a91eb4ac912b5cad2cb5`,
+`hidpunkte` (Runden HIDPUNKTE + FASSUNG), 123 731 968 Oktette,
+SHA-256 `fffb6bd7a6b93c683fb7addd0c54c098f606484ba4448b7e0b85eb9f282a2e6b`,
+Fassung `575545a2`, gebaut 2026-09-03 18:32 UTC,
 ausgeliefert als `/srv/store/abbilder/osum-usb.img` (daneben
-`osum-usb.img.sha256`).
+`osum-usb.img.sha256`). Belegt am fertigen Abbild: `osum 575545a2` steht
+dreimal darin, und der daraus geholte Kern meldet beim Booten als erste
+Zeile `osum 575545a2` und danach `usb: wahl hc0=3 hc1=16 -> hc1`.
 Ein zweiter Baulauf aus demselben Baum gibt eine andere Prüfsumme —
 `mkfs.vfat` schreibt eine Datenträgernummer aus der Uhr in die
 EFI-Partition (gemessen: sechs abweichende Oktette). Wer eine bestimmte
