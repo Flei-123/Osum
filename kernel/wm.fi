@@ -103,11 +103,13 @@ export {
     shape, set_shape,
     downs, moves_seen, hits_seen, win_keys,
     set_fonts, font_ui, font_mono, px_ui, px_mono,
-    selftest, selftest_max,
+    selftest, selftest_max, failbits, diag1, diag2,
     tile_on, set_tile_on, tile_take, tile_release, tile_apply,
     tile_node, tile_float, tile_snap, tile_action, hotkeys, hotkeys_seen,
     on_screen_resize, win_tabbed, tiled,
-    MAX_WIN, K_RAW, K_TERM, TITLE_H, BORDER, GRIP, MAX_W, MAX_H,
+    MAX_WIN, K_RAW, K_TERM, title_h, border, grip, max_w, max_h,
+    set_uiscale, uisc,
+    MAX_W_HARD, MAX_H_HARD,
     E_KEY, E_DOWN, E_UP, E_MOVE, E_CLOSE, E_FOCUS, E_RESIZE,
     L_DESK, L_NORMAL, L_TOP, F_HIDDEN, F_NODECO, F_TABBED,
     EDGE_BOTTOM, EDGE_TOP, EDGE_LEFT, EDGE_RIGHT, F_MAXIMIZED
@@ -131,10 +133,17 @@ const EV_SLOTS: u64 = 32
 const EV_BYTES: u64 = 16
 const EV_RING: u64 = 512 // EV_SLOTS * EV_BYTES
 
-const TITLE_H: u64 = 22 // die Titelleiste
-const BORDER: u64 = 2 // der Rand links, rechts und unten
-const GRIP: u64 = 12 // das Feld unten rechts zum Groessenaendern
-const CLOSE_W: u64 = 14
+// RUNDE SCHIRM -- DIESE VIER ZAHLEN WAREN BILDPUNKTE UND SIND JETZT
+// GRUNDMASSE. Eine Titelleiste von 22 Bildpunkten ist auf 1024x768 eine
+// Titelleiste und auf 3840x2160 ein Strich: auf einer Tafel mit viermal
+// so vielen Bildpunkten je Zoll ist sie physisch ein Viertel so hoch.
+// Multipliziert wird mit `uisc(state)`, und der Faktor kommt aus
+// `fb.uiscale` -- entweder aus der PHYSISCHEN Groesse der Tafel (EDID,
+// Oktett 21) oder, wenn die Tafel dazu schweigt, aus ihrer Bildpunktzahl.
+const TITLE_H0: u64 = 22 // die Titelleiste
+const BORDER0: u64 = 2 // der Rand links, rechts und unten
+const GRIP0: u64 = 12 // das Feld unten rechts zum Groessenaendern
+const CLOSE_W0: u64 = 14
 
 const K_RAW: u64 = 0 // die Anwendung malt selbst
 const K_TERM: u64 = 1 // ein Zeichenraster, der Server malt
@@ -143,8 +152,22 @@ const K_TERM: u64 = 1 // ein Zeichenraster, der Server malt
 // the screen, and it is exported because whoever wants a window that
 // can be maximized to ANY work area has to ask for this size when the
 // window is created -- the buffer is never reallocated.
-const MAX_W: u64 = 800
-const MAX_H: u64 = 600
+//
+// RUNDE SCHIRM: DAS WAREN ZWEI ZAHLEN IM QUELLTEXT, UND SIE HABEN
+// GELOGEN, SOBALD DER SCHIRM GROESSER WAR. Auf 1024x768 fielen genau
+// deshalb vier Zusagen des Selbsttests (26/30 statt 30/30): ein Fenster,
+// das mit 800x600 entsteht, kann eine Arbeitsflaeche von 1024x740 nicht
+// fuellen, `resize_win` waechst nicht ueber seinen Puffer hinaus, und
+// `maximize` gibt darum ehrlich `false` zurueck. Auf Justins Blech
+// (1280x800 unter UEFI, 1920x1080 unter BIOS) heisst dasselbe:
+// "maximieren" macht ein Fenster von 800x600 in der Ecke.
+//
+// Jetzt sind es die Masse des Schirms, die `init` einmal hinlegt.
+// MAX_W_HARD ist nur noch die Obergrenze, an der ein Puffer je Fenster
+// unvernuenftig wuerde -- 3840x2160x4 sind 33 MiB, und sechzehn davon
+// waeren mehr, als der Rahmenverwalter ueberhaupt verwaltet.
+const MAX_W_HARD: u64 = 4096
+const MAX_H_HARD: u64 = 2304
 
 // ------------------------------------------- RUNDE DESKTOP: die Ebenen
 //
@@ -403,12 +426,18 @@ const S_SHKEY: u64 = 0x2C0 // fuer welche Werte sie gebaut wurde
 const S_SHS: u64 = 0x2C8 // die Kantenlaenge des Eckquadrats
 const S_SHOLD: u64 = 0x2D0 // GEGENPROBE: wieder mit Ringen malen
 const S_CAPHOV: u64 = 0x2D8 // ueberfahrene Schaltflaeche, (Fenster*4+n)+1
-const S_CAPHITS: u64 = 0x2E0 // wie oft eine davon geklickt wurde
+const S_CAPHITS: u64 = 0x2E0
+// RUNDE SCHIRM: die Vervielfachung des Fensterschmucks. 0 heisst "noch
+// nicht gesetzt" und wird als 1 gelesen.
+const S_UISC: u64 = 0x2E8 // wie oft eine davon geklickt wurde
 // DIE MASKE SELBST. Zwei Baenke -- aktiv und unscharf -- mal
 // SHMASK_SIDE^2 Oktette. 40 ist RADIUS_MAX + SHADOW_MAX, also die
 // groesste Ecke, die dieser Server ueberhaupt malen darf.
 const S_SHMASK: u64 = 0x400 // 3200 Oktette
 const S_SHEDGE: u64 = 0x1080 // 32 Oktette
+const S_FAIL: u64 = 0x10A8 // Bitmaske
+const S_DIAG1: u64 = 0x10B0 // Diagnose des Selbsttests
+const S_DIAG2: u64 = 0x10B8 // Bitmaske der NICHT bestandenen Zusagen
 const SHMASK_SIDE: u64 = 40
 const FORM_SLOTS: u64 = 8
 const FM_RADIUS: u64 = 0 // Eckenradius des Fensterrahmens, 0 = eckig
@@ -447,7 +476,7 @@ const CAP_N: u64 = 3
 // sind es 800 Bildpunkte Schirmbreite und Fenster ab 300, also ist die
 // Flaeche auf 30 x (TITLE_H - 2*BORDER) heruntergerechnet -- immer noch
 // ein groesseres Ziel als das 14 x 14 grosse Schliessfeld davor.
-const CAP_W: u64 = 30
+const CAP_W0: u64 = 30
 const DK_FRAME: u64 = 0
 const DK_TITLE: u64 = 1
 const DK_TEXT: u64 = 2
@@ -1517,14 +1546,14 @@ fn deko(state: u64, i: u64) -> bool {
 // Fassung dieser Runde an zweien davon stand und an der dritten nicht.
 fn inx(state: u64, i: u64) -> u64 {
     if deko(state, i) {
-        return BORDER
+        return border(state)
     }
     return 0
 }
 
 fn iny(state: u64, i: u64) -> u64 {
     if deko(state, i) {
-        return TITLE_H
+        return title_h(state)
     }
     return 0
 }
@@ -1533,14 +1562,14 @@ fn outer_w(state: u64, i: u64) -> u64 {
     if !deko(state, i) {
         return wg(state, i, W_W)
     }
-    return wg(state, i, W_W) + BORDER * 2
+    return wg(state, i, W_W) + border(state) * 2
 }
 
 fn outer_h(state: u64, i: u64) -> u64 {
     if !deko(state, i) {
         return wg(state, i, W_H)
     }
-    return wg(state, i, W_H) + TITLE_H + BORDER
+    return wg(state, i, W_H) + title_h(state) + border(state)
 }
 
 fn win_layer(state: u64, i: u64) -> u64 {
@@ -1831,7 +1860,8 @@ fn dirty_y1(state: u64) -> u64 {
 
 fn create(state: u64, owner: u64, x: i64, y: i64, w: u64, h: u64,
     kind: u64, title: u64) -> u64 {
-    if !ready(state) || w < 32 || h < 16 || w > 2048 || h > 2048 {
+    if !ready(state) || w < 32 || h < 16 || w > MAX_W_HARD
+        || h > MAX_H_HARD {
         return MAX_WIN
     }
     var i: u64 = 0
@@ -2251,6 +2281,59 @@ fn set_deco(state: u64, i: u64, on: bool) {
 // and the taskbar is gone from the picture. That is the state this
 // addendum removes, and it has to be reachable to be measurable.
 
+fn uisc(state: u64) -> u64 {
+    let v: u64 = gs(state, S_UISC)
+    if v == 0 || v > 4 {
+        return 1
+    }
+    return v
+}
+
+fn set_uiscale(state: u64, v: u64) {
+    if v >= 1 && v <= 4 {
+        ss(state, S_UISC, v)
+    }
+}
+
+fn title_h(state: u64) -> u64 {
+    return TITLE_H0 * uisc(state)
+}
+
+fn border(state: u64) -> u64 {
+    return BORDER0 * uisc(state)
+}
+
+fn grip(state: u64) -> u64 {
+    return GRIP0 * uisc(state)
+}
+
+fn close_w(state: u64) -> u64 {
+    return CLOSE_W0 * uisc(state)
+}
+
+fn cap_w(state: u64) -> u64 {
+    return CAP_W0 * uisc(state)
+}
+
+// RUNDE SCHIRM: das groesste Fenster, das dieser Server macht -- die
+// Masse des Schirms, gedeckelt auf das, was ein Puffer je Fenster noch
+// vertraegt.
+fn max_w(state: u64) -> u64 {
+    var v: u64 = gs(state, S_SW)
+    if v == 0 || v > MAX_W_HARD {
+        v = MAX_W_HARD
+    }
+    return v
+}
+
+fn max_h(state: u64) -> u64 {
+    var v: u64 = gs(state, S_SH)
+    if v == 0 || v > MAX_H_HARD {
+        v = MAX_H_HARD
+    }
+    return v
+}
+
 fn work_x(state: u64) -> u64 {
     return gs(state, S_WORK_X)
 }
@@ -2401,11 +2484,11 @@ fn fit_work(state: u64, i: u64) -> bool {
     var iw: u64 = gs(state, S_WORK_W)
     var ih: u64 = gs(state, S_WORK_H)
     if deko(state, i) {
-        if iw <= BORDER * 2 || ih <= TITLE_H + BORDER {
+        if iw <= border(state) * 2 || ih <= title_h(state) + border(state) {
             return false
         }
-        iw = iw - BORDER * 2
-        ih = ih - TITLE_H - BORDER
+        iw = iw - border(state) * 2
+        ih = ih - title_h(state) - border(state)
     }
     if !resize_win(state, i, iw, ih) {
         return false
@@ -2515,7 +2598,16 @@ fn resize_win(state: u64, i: u64, w: u64, h: u64) -> bool {
     if !valid(state, i) {
         return false
     }
-    if w < 32 || h < 16 || w > 2048 || h > 2048 {
+    // RUNDE SCHIRM: DIE ZWEI 2048 WAREN DER GRUND, WARUM AUF EINEM
+    // 2560x1440-SCHIRM NICHTS MEHR MAXIMIERTE.
+    //
+    // Gemessen: `wm: selftest 26 / 30  failed=0x58c04200  mw=2  max=0`
+    // -- das Fenster entstand (mw=2), aber `maximize` gab false. Der
+    // Weg dahin ist fit_work -> resize_win, und dort stand ein fester
+    // Deckel von 2048, den jeder Schirm ueber 2048 Bildpunkten Breite
+    // reisst. Die Grenze, die es wirklich gibt, ist der PUFFER des
+    // Fensters, und die steht zwei Zeilen tiefer.
+    if w < 32 || h < 16 || w > MAX_W_HARD || h > MAX_H_HARD {
         return false
     }
     if w * h * 4 > wg(state, i, W_BUFBYTES) {
@@ -3011,24 +3103,24 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     // Kreuz, das dieser Server seit Runde K10 malt -- dieselben
     // Koordinaten, dieselbe Schleife. `modern` schickt 1 und bekommt
     // die drei Windows-Schaltflaechen: Strich, Quadrat, Kreuz.
-    var bx: i64 = wx + ow - BORDER as i64 - CLOSE_W as i64 - 3
+    var bx: i64 = wx + ow - border(state) as i64 - close_w(state) as i64 - 3
     if form(state, FM_CAPTION) != 0 {
-        bx = wx + ow - BORDER as i64 - (CAP_N * CAP_W) as i64
+        bx = wx + ow - border(state) as i64 - (CAP_N * cap_w(state)) as i64
         paint_caption(state, i, wx, wy, ow, titel, schrift,
             ax0, ay0, ax1, ay1)
     } else {
         let by: i64 = wy + 4
-        if bx + CLOSE_W as i64 > ax0 && bx < ax1
-            && by + CLOSE_W as i64 > ay0 {
+        if bx + close_w(state) as i64 > ax0 && bx < ax1
+            && by + close_w(state) as i64 > ay0 {
             let rot: u64 = deco(state, DK_CLOSE)
-            fb.fill(state, bx as u64, by as u64, CLOSE_W, CLOSE_W, rot)
+            fb.fill(state, bx as u64, by as u64, close_w(state), close_w(state), rot)
             let weiss: u64 = deco(state, DK_CLOSE_MARK)
             var k: u64 = 3
-            while k < CLOSE_W - 3 {
+            while k < close_w(state) - 3 {
                 fb.pixel(state, (bx + k as i64) as u64,
                     (by + k as i64) as u64, weiss)
                 fb.pixel(state, (bx + k as i64) as u64,
-                    (by + (CLOSE_W - 1 - k) as i64) as u64, weiss)
+                    (by + (close_w(state) - 1 - k) as i64) as u64, weiss)
                 k = k + 1
             }
         }
@@ -3046,22 +3138,22 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     var vor: i64 = 0
     let sicht: u64 = netview.view_of(state, win_owner(state, i))
     if sicht != netview.V_REAL && sicht <= 3 {
-        title_mark(state, sicht - 1, wx + BORDER as i64 + 4,
-            wy + BORDER as i64
-                + ((TITLE_H - BORDER - netmark.H) / 2) as i64,
+        title_mark(state, sicht - 1, wx + border(state) as i64 + 4,
+            wy + border(state) as i64
+                + ((title_h(state) - border(state) - netmark.H) / 2) as i64,
             schrift, ax0, ay0, ax1, ay1)
         vor = netmark.W as i64 + 4
     }
     // der Titel
     let f: u64 = gs(state, S_FONT_UI)
     if f < ttf.MAX_FONTS {
-        title_text(state, i, f, wx + BORDER as i64 + 5 + vor,
-            wy + BORDER as i64 + ttf.ascent(state, f, gs(state, S_PX_UI)),
+        title_text(state, i, f, wx + border(state) as i64 + 5 + vor,
+            wy + border(state) as i64 + ttf.ascent(state, f, gs(state, S_PX_UI)),
             schrift, ax0, ay0, ax1, ay1, bx)
     }
     // die Flaeche der Anwendung
-    let px0: i64 = wx + BORDER as i64
-    let py0: i64 = wy + TITLE_H as i64
+    let px0: i64 = wx + border(state) as i64
+    let py0: i64 = wy + title_h(state) as i64
     let sx0: i64 = imax(px0, ax0)
     let sy0: i64 = imax(py0, ay0)
     let sx1: i64 = imin(px0 + wg(state, i, W_W) as i64, ax1)
@@ -3166,10 +3258,10 @@ fn mix24(a: u64, b: u64, per: u64) -> u64 {
 
 fn paint_title(state: u64, i: u64, wx: i64, wy: i64, ow: i64, titel: u64,
     schrift: u64, ax0: i64, ay0: i64, ax1: i64, ay1: i64) {
-    let x0: i64 = wx + BORDER as i64
-    let y0: i64 = wy + BORDER as i64
-    let tw: i64 = ow - 2 * BORDER as i64
-    let th: i64 = TITLE_H as i64 - 1 - BORDER as i64
+    let x0: i64 = wx + border(state) as i64
+    let y0: i64 = wy + border(state) as i64
+    let tw: i64 = ow - 2 * border(state) as i64
+    let th: i64 = title_h(state) as i64 - 1 - border(state) as i64
     if tw <= 0 || th <= 0 {
         return
     }
@@ -3178,8 +3270,8 @@ fn paint_title(state: u64, i: u64, wx: i64, wy: i64, ow: i64, titel: u64,
     // Rahmens gleichmittig statt sie zu schneiden.
     var tr: u64 = 0
     let rw: u64 = form(state, FM_RADIUS)
-    if rw > BORDER {
-        tr = rw - BORDER
+    if rw > border(state) {
+        tr = rw - border(state)
     }
     if tr as i64 > th {
         tr = th as u64
@@ -3267,8 +3359,8 @@ fn deco_titel(state: u64, i: u64) -> u64 {
 // Schaltflaechen -- deshalb fuehrt der Server jetzt mit, welche gerade
 // unter dem Zeiger liegt (S_CAPHOV), und faerbt genau diese eine.
 fn cap_x0(state: u64, i: u64) -> i64 {
-    return win_x(state, i) + outer_w(state, i) as i64 - BORDER as i64
-        - (CAP_N * CAP_W) as i64
+    return win_x(state, i) + outer_w(state, i) as i64 - border(state) as i64
+        - (CAP_N * cap_w(state)) as i64
 }
 
 // Welche Schaltflaeche liegt unter (x, y)? CAP_N = keine.
@@ -3280,31 +3372,31 @@ fn cap_at(state: u64, i: u64, x: i64, y: i64) -> u64 {
         return CAP_N
     }
     let bx: i64 = cap_x0(state, i)
-    let by: i64 = win_y(state, i) + BORDER as i64
-    let h: i64 = TITLE_H as i64 - 1 - BORDER as i64
-    if y < by || y >= by + h || x < bx || x >= bx + (CAP_N * CAP_W) as i64 {
+    let by: i64 = win_y(state, i) + border(state) as i64
+    let h: i64 = title_h(state) as i64 - 1 - border(state) as i64
+    if y < by || y >= by + h || x < bx || x >= bx + (CAP_N * cap_w(state)) as i64 {
         return CAP_N
     }
-    return ((x - bx) / CAP_W as i64) as u64
+    return ((x - bx) / cap_w(state) as i64) as u64
 }
 
 fn paint_caption(state: u64, i: u64, wx: i64, wy: i64, ow: i64,
     titel: u64, schrift: u64, ax0: i64, ay0: i64, ax1: i64, ay1: i64) {
-    let bx: i64 = wx + ow - BORDER as i64 - (CAP_N * CAP_W) as i64
-    let by: i64 = wy + BORDER as i64
-    let h: i64 = TITLE_H as i64 - 1 - BORDER as i64
+    let bx: i64 = wx + ow - border(state) as i64 - (CAP_N * cap_w(state)) as i64
+    let by: i64 = wy + border(state) as i64
+    let h: i64 = title_h(state) as i64 - 1 - border(state) as i64
     if h <= 0 {
         return
     }
     var tr: u64 = 0
     let rw: u64 = form(state, FM_RADIUS)
-    if rw > BORDER {
-        tr = rw - BORDER
+    if rw > border(state) {
+        tr = rw - border(state)
     }
     let hov: u64 = gs(state, S_CAPHOV)
     var n: u64 = 0
     while n < CAP_N {
-        let x: i64 = bx + (n * CAP_W) as i64
+        let x: i64 = bx + (n * cap_w(state)) as i64
         var mark: u64 = schrift
         if hov != 0 && hov - 1 == i * 4 + n {
             if n == CAP_CLOSE {
@@ -3326,7 +3418,7 @@ fn paint_caption(state: u64, i: u64, wx: i64, wy: i64, ow: i64,
                     ax0, ay0, ax1, ay1)
             }
         }
-        cap_glyph(state, n, x + (CAP_W as i64 - 10) / 2,
+        cap_glyph(state, n, x + (cap_w(state) as i64 - 10) / 2,
             by + (h - 10) / 2, mark, i, ax0, ay0, ax1, ay1)
         n = n + 1
     }
@@ -3344,7 +3436,7 @@ fn deco_schrift(state: u64, i: u64) -> u64 {
 // Rechtecke, weil sie mitten in der Leiste stehen.
 fn cap_face(state: u64, x: i64, y: i64, h: i64, tr: u64, farbe: u64,
     rechts: bool, ax0: i64, ay0: i64, ax1: i64, ay1: i64) {
-    let w: i64 = CAP_W as i64
+    let w: i64 = cap_w(state) as i64
     if !rechts || tr == 0 {
         fill_clip(state, x, y, w, h, farbe, ax0, ay0, ax1, ay1)
         return
@@ -3444,9 +3536,9 @@ fn damage_caption(state: u64, i: u64) {
         return
     }
     let bx: i64 = cap_x0(state, i)
-    let by: i64 = win_y(state, i) + BORDER as i64
-    damage(state, bx, by, bx + (CAP_N * CAP_W) as i64,
-        by + TITLE_H as i64 - 1 - BORDER as i64)
+    let by: i64 = win_y(state, i) + border(state) as i64
+    damage(state, bx, by, bx + (CAP_N * cap_w(state)) as i64,
+        by + title_h(state) as i64 - 1 - border(state) as i64)
 }
 
 // Eine Bildzeile aus einem Fensterpuffer in den Zweitpuffer des
@@ -3792,11 +3884,11 @@ fn on_mouse(state: u64) {
                 }
                 // Schliessfeld?
                 let bx: i64 = win_x(state, i) + outer_w(state, i) as i64
-                    - BORDER as i64 - CLOSE_W as i64 - 3
+                    - border(state) as i64 - close_w(state) as i64 - 3
                 let by: i64 = win_y(state, i) + 4
                 let im_feld: bool = form(state, FM_CAPTION) == 0
-                    && x >= bx && x < bx + CLOSE_W as i64
-                let im_feld2: bool = y >= by && y < by + CLOSE_W as i64
+                    && x >= bx && x < bx + close_w(state) as i64
+                let im_feld2: bool = y >= by && y < by + close_w(state) as i64
                 if im_feld && im_feld2 {
                     ev_push(state, i, E_CLOSE, 0, 0, 0)
                     destroy(state, i)
@@ -3814,9 +3906,9 @@ fn on_mouse(state: u64) {
                 }
                 // der Griff unten rechts
                 let gx: bool = lokal_x
-                    >= wg(state, i, W_W) as i64 - GRIP as i64
+                    >= wg(state, i, W_W) as i64 - grip(state) as i64
                 let gy: bool = lokal_y
-                    >= wg(state, i, W_H) as i64 - GRIP as i64
+                    >= wg(state, i, W_H) as i64 - grip(state) as i64
                 if gx && gy {
                     ss(state, S_SIZING, i + 1)
                     return
@@ -4164,46 +4256,66 @@ fn term_out(state: u64, i: u64, c: u64) {
     damage_win(state, i)
 }
 
+fn diag1(state: u64) -> u64 {
+    return gs(state, S_DIAG1)
+}
+fn diag2(state: u64) -> u64 {
+    return gs(state, S_DIAG2)
+}
+fn failbits(state: u64) -> u64 {
+    return gs(state, S_FAIL)
+}
+fn pass_ok(state: u64, nr: u64) {
+    ss(state, S_FAIL, gs(state, S_FAIL) & ~(1 << nr))
+}
 fn selftest(state: u64) -> u64 {
     if !ready(state) {
         return 0
     }
     var n: u64 = 0
+    ss(state, S_FAIL, 0x7FFFFFFE)
     var t1: [u8; 5] = "eins\0"
     var t2: [u8; 5] = "zwei\0"
     // 1. Ein Fenster entsteht und hat eine Flaeche.
     let a: u64 = create(state, 0, 40, 40, 200, 100, K_RAW, (&t1[0]) as u64)
     if a < MAX_WIN && win_buf(state, a) != 0 {
         n = n + 1
+        pass_ok(state, 1)
     }
     // 2. Ein zweites liegt DARUEBER -- die Stapelreihenfolge waechst.
     let b: u64 = create(state, 0, 100, 70, 200, 100, K_RAW, (&t2[0]) as u64)
     if b < MAX_WIN && win_z(state, b) > win_z(state, a) {
         n = n + 1
+        pass_ok(state, 2)
     }
     // 3. Der Treffer an einer Stelle, an der sich beide ueberschneiden,
     //    ist das OBERE. Das ist die ganze Stapelreihenfolge in einer
     //    Zeile.
     if hit(state, 150, 100) == b {
         n = n + 1
+        pass_ok(state, 3)
     }
     // 4. ... und daneben das untere.
     if hit(state, 50, 60) == a {
         n = n + 1
+        pass_ok(state, 4)
     }
     // 5. Der Hintergrund ist kein Fenster.
     if hit(state, 700, 500) == MAX_WIN {
         n = n + 1
+        pass_ok(state, 5)
     }
     // 6. Heben aendert die Reihenfolge wirklich.
     raise_win(state, a)
     if hit(state, 150, 100) == a && win_z(state, a) > win_z(state, b) {
         n = n + 1
+        pass_ok(state, 6)
     }
     // 7. Der Fokus liegt bei genau EINEM Fenster.
     set_focus(state, b)
     if focus(state) == b {
         n = n + 1
+        pass_ok(state, 7)
     }
     // 8. Eine Taste kommt beim Fenster mit dem Fokus an -- und NUR
     //    dort. Das ist die Zusage, die `nofocus` zum Einsturz bringt.
@@ -4213,10 +4325,12 @@ fn selftest(state: u64) -> u64 {
     if gs(state, S_NOFOCUS) == 0 {
         if ev_waiting(state, b) == vb + 1 && ev_waiting(state, a) == va {
             n = n + 1
+            pass_ok(state, 8)
         }
     } else {
         if ev_waiting(state, b) == vb + 1 && ev_waiting(state, a) == va + 1 {
             n = n + 1
+            pass_ok(state, 9)
         }
     }
     // 9. Und das Ereignis traegt das Zeichen, das gedrueckt wurde.
@@ -4231,6 +4345,7 @@ fn selftest(state: u64) -> u64 {
     }
     if gefunden {
         n = n + 1
+        pass_ok(state, 10)
     }
     // 10. Das Malen bleibt IM Fenster: ein Bildpunkt jenseits der Kante
     //     wird nicht geschrieben, und der letzte darin schon.
@@ -4239,30 +4354,40 @@ fn selftest(state: u64) -> u64 {
     wpixel(state, a, 200, 99, PROBE_OUT)
     if wget(state, a, 199, 99) == PROBE_IN && wget(state, a, 0, 0) == 0 {
         n = n + 1
+        pass_ok(state, 11)
     }
     // 11. Verschieben aendert die Stelle, nicht den Inhalt.
     move_win(state, a, 300, 200)
     if win_x(state, a) == 300 && wget(state, a, 199, 99) == PROBE_IN {
         n = n + 1
+        pass_ok(state, 12)
     }
     // 12. Der schmutzige Bereich deckt beide Stellen -- die alte und
     //     die neue. Ohne das bliebe ein Fenstergespenst stehen.
     if gs(state, S_NODIRTY) == 0 {
         if dirty_x0(state) <= 40 && dirty_x1(state) >= 300 {
             n = n + 1
+            pass_ok(state, 13)
         }
     } else {
         if dirty_x0(state) == 0 && dirty_x1(state) == gs(state, S_SW) {
             n = n + 1
+            pass_ok(state, 14)
         }
     }
     // 13. Ein Terminalfenster hat ein Raster, und ein Zeichen landet in
     //     der Zelle, in der es landen soll.
     var t3: [u8; 5] = "term\0"
-    let t: u64 = create(state, 0, 10, 300, 200, 100, K_TERM,
+    // RUNDE SCHIRM: die Groesse in ZELLEN, nicht in Bildpunkten. Bei
+    // doppelter Oberflaechenschrift ist eine Zelle 20x38 statt 10x19,
+    // und ein starres 200x100-Fenster hatte nur noch zwei Zeilen --
+    // der Test schlug fehl, obwohl das Raster stimmte.
+    let t: u64 = create(state, 0, 10, 300, 200 * uisc(state),
+        100 * uisc(state), K_TERM,
         (&t3[0]) as u64)
     if t < MAX_WIN && term_cols(state, t) > 4 && term_rows(state, t) > 2 {
         n = n + 1
+        pass_ok(state, 15)
     }
     // 14. Zeilenvorschub und Umbruch bewegen die Schreibmarke.
     if t < MAX_WIN {
@@ -4270,6 +4395,7 @@ fn selftest(state: u64) -> u64 {
         term_write(state, t, (&txt[0]) as u64, 4)
         if term_cx(state, t) == 1 && term_cy(state, t) == 1 {
             n = n + 1
+            pass_ok(state, 16)
         }
     }
     // 15. Schliessen gibt den Platz frei und schliesst die Luecke in der
@@ -4287,6 +4413,7 @@ fn selftest(state: u64) -> u64 {
         }
         if !luecke {
             n = n + 1
+            pass_ok(state, 17)
         }
     }
     // 16. GROESSE AENDERN. Der Puffer wurde beim Anlegen fuer die
@@ -4297,6 +4424,7 @@ fn selftest(state: u64) -> u64 {
     if resize_win(state, a, 120, 60) && win_w(state, a) == 120 {
         if !resize_win(state, a, 4096, 4096) && win_w(state, a) == 120 {
             n = n + 1
+            pass_ok(state, 18)
         }
     }
     // 17. Und ein Terminalfenster rechnet sein Raster dabei NEU.
@@ -4305,6 +4433,7 @@ fn selftest(state: u64) -> u64 {
         if resize_win(state, t, 100, 60) {
             if term_cols(state, t) < vorher_cols && term_cols(state, t) > 0 {
                 n = n + 1
+                pass_ok(state, 19)
             }
         }
     }
@@ -4321,11 +4450,13 @@ fn selftest(state: u64) -> u64 {
         set_layer(state, d, L_DESK)
         if win_z(state, d) < win_z(state, a) {
             n = n + 1
+            pass_ok(state, 20)
         }
         // 19. Und ein Klick darauf hebt ihn NICHT ueber das andere.
         raise_win(state, d)
         if win_z(state, d) < win_z(state, a) || gs(state, S_NOLAYER) != 0 {
             n = n + 1
+            pass_ok(state, 21)
         }
         // 20. Verbergen nimmt ein Fenster aus der Trefferpruefung --
         //     und Wiederherstellen bringt es zurueck. Der Puffer bleibt
@@ -4338,10 +4469,12 @@ fn selftest(state: u64) -> u64 {
         if gs(state, S_NOMIN) == 0 {
             if vorher == a && nachher != a && win_buf(state, a) == puf {
                 n = n + 1
+                pass_ok(state, 22)
             }
         } else {
             if vorher == a && nachher == a {
                 n = n + 1
+                pass_ok(state, 23)
             }
         }
         // 21. Ohne Schmuck ist das aeussere Rechteck die Malflaeche --
@@ -4350,6 +4483,7 @@ fn selftest(state: u64) -> u64 {
         if outer_w(state, d) == win_w(state, d)
             && outer_h(state, d) == win_h(state, d) && iny(state, d) == 0 {
             n = n + 1
+            pass_ok(state, 24)
         }
         destroy(state, d)
     }
@@ -4377,6 +4511,7 @@ fn selftest(state: u64) -> u64 {
     if work_x(state) == 0 && work_y(state) == 0
         && work_w(state) == sw2 && work_h(state) == sh2 {
         n = n + 1
+        pass_ok(state, 25)
     }
     let bar: u64 = create(state, 0, 0, (sh2 - 28) as i64, sw2, 28, K_RAW,
         (&tb[0]) as u64)
@@ -4388,12 +4523,21 @@ fn selftest(state: u64) -> u64 {
         if s23 && work_x(state) == 0 && work_y(state) == 0
             && work_w(state) == sw2 && work_h(state) == sh2 - 28 {
             n = n + 1
+            pass_ok(state, 26)
         }
         // 24. MAXIMIZE FILLS THE WORK AREA, NOT THE SCREEN. Compared on
         //     the OUTER rectangle, because that is what covers pixels.
-        let mw: u64 = create(state, 0, 40, 40, MAX_W, MAX_H, K_RAW,
+        let mw: u64 = create(state, 0, 40, 40, max_w(state), max_h(state),
+            K_RAW,
             (&tm[0]) as u64)
-        if mw < MAX_WIN && maximize(state, mw, true) {
+        ss(state, S_DIAG1, mw)
+        ss(state, S_DIAG2, 0)
+        if mw < MAX_WIN {
+            if maximize(state, mw, true) {
+                ss(state, S_DIAG2, 1)
+            }
+        }
+        if mw < MAX_WIN && gs(state, S_DIAG2) == 1 {
             let ox: i64 = win_x(state, mw)
             let oy: i64 = win_y(state, mw)
             let ow: u64 = outer_w(state, mw)
@@ -4401,6 +4545,7 @@ fn selftest(state: u64) -> u64 {
             if ox == work_x(state) as i64 && oy == work_y(state) as i64
                 && ow == work_w(state) && oh == work_h(state) {
                 n = n + 1
+                pass_ok(state, 27)
             }
             // 25. AND IT DOES NOT TOUCH THE BAR. The two rectangles are
             //     disjoint: the bottom of the window is at or above the
@@ -4408,6 +4553,7 @@ fn selftest(state: u64) -> u64 {
             //     addendum, and it is one comparison.
             if oy + oh as i64 <= win_y(state, bar) {
                 n = n + 1
+                pass_ok(state, 28)
             }
         }
         // 26. THE BAR MOVES TO THE LEFT EDGE AND THE WINDOW FOLLOWS.
@@ -4419,10 +4565,12 @@ fn selftest(state: u64) -> u64 {
             if work_x(state) == 44 && work_y(state) == 0
                 && work_w(state) == sw2 - 44 && work_h(state) == sh2 {
                 n = n + 1
+                pass_ok(state, 29)
             }
             if win_x(state, mw) == 44 && outer_w(state, mw) == sw2 - 44
                 && outer_h(state, mw) == sh2 {
                 n = n + 1
+                pass_ok(state, 30)
             }
         }
         // 27. THE COUNTER-TEST: with `nostrut` the work area is the
@@ -4434,11 +4582,13 @@ fn selftest(state: u64) -> u64 {
         set_nostrut(state, false)
         if deckt && win_x(state, mw) == 44 {
             n = n + 1
+            pass_ok(state, 31)
         }
         // 28. CLEARING THE STRUT GIVES THE EDGE BACK.
         let _s28: bool = set_strut(state, bar, EDGE_LEFT, 0)
         if work_x(state) == 0 && work_w(state) == sw2 {
             n = n + 1
+            pass_ok(state, 32)
         }
         // 29. AND SO DOES DYING. Set it once more, then destroy.
         let _s29: bool = set_strut(state, bar, EDGE_TOP, 30)
@@ -4446,15 +4596,18 @@ fn selftest(state: u64) -> u64 {
         destroy(state, bar)
         if vorher == 30 && work_y(state) == 0 && work_h(state) == sh2 {
             n = n + 1
+            pass_ok(state, 33)
         }
         // 30. RESTORING PUTS THE WINDOW BACK WHERE IT WAS: it was
         //     created at (40, 40) with the full screen and has been
         //     maximized to two different work areas since.
         let _m30: bool = maximize(state, mw, false)
         if win_x(state, mw) == 40 && win_y(state, mw) == 40
-            && win_w(state, mw) == MAX_W && win_h(state, mw) == MAX_H
+            && win_w(state, mw) == max_w(state)
+            && win_h(state, mw) == max_h(state)
             && !is_max(state, mw) {
             n = n + 1
+            pass_ok(state, 34)
         }
         if mw < MAX_WIN {
             destroy(state, mw)
@@ -4630,18 +4783,25 @@ fn place_win(state: u64, i: u64, n: u64) {
     let ow: u64 = tile.n_w(state, n)
     let oh: u64 = tile.n_h(state, n)
     var w: u64 = 32
-    if ow > BORDER * 2 + 32 {
-        w = ow - BORDER * 2
+    if ow > border(state) * 2 + 32 {
+        w = ow - border(state) * 2
     }
     var h: u64 = 16
-    if oh > TITLE_H + BORDER + 16 {
-        h = oh - TITLE_H - BORDER
+    if oh > title_h(state) + border(state) + 16 {
+        h = oh - title_h(state) - border(state)
     }
-    if w > 2048 {
-        w = 2048
+    // RUNDE SCHIRM-ECHT: DIE DRITTE 2048 -- dieselbe vergessene Zahl,
+    // die `resize_win` schon losgeworden ist. Beim Kacheln bekommt ein
+    // Blatt die Flaeche des Baumes, und die ist auf einem 2560er Schirm
+    // breiter als 2048; das Fenster blieb dann kleiner als sein Platz
+    // und liess einen Streifen Schreibtisch stehen. Die echte Grenze
+    // ist der Puffer, und um den kuemmert sich `reframe` zwei Zeilen
+    // tiefer.
+    if w > MAX_W_HARD {
+        w = MAX_W_HARD
     }
-    if h > 2048 {
-        h = 2048
+    if h > MAX_H_HARD {
+        h = MAX_H_HARD
     }
     wsv(state, i, W_X, tile.n_x(state, n))
     wsv(state, i, W_Y, tile.n_y(state, n))

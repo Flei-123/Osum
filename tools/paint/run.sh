@@ -72,9 +72,19 @@ if ! bash tools/build-kernel.sh "$TMPD/k0.mb" > "$TMPD/k.log" 2>&1; then
 fi
 ok "der Kernel baut ($(stat -c%s "$TMPD/k0.mb") Oktette)"
 
+# RUNDE SCHIRM-ECHT: DIESE MASCHINE HAT KEINE TAFEL.
+#
+# Seit Runde SCHIRM liest der Kern den EDID-Block und nimmt die
+# Aufloesung, die der Bildschirm nennt. QEMUs `-vga std` nennt ab Werk
+# 1280x800. Dieser Laeufer misst aber die EINGEBAUTE VORGABE und die
+# Modussetzung (800x600, pitch=3200, cols=100 rows=37) -- also wird die
+# Tafel hier abgeschaltet. Wer den EDID-Weg messen will, findet ihn in
+# tools/display/run.sh Abschnitt 4 und in tools/customres/run.sh.
+VGA_STD=${VGA_STD:-"-vga std -global VGA.edid=off"}
+
 lauf() { # zeile ausgabe
     timeout 300 qemu-system-x86_64 -kernel "$TMPD/k0.mb" -m 256 \
-        -append "$1" -serial "file:$2" -display none -no-reboot -vga std \
+        -append "$1" -serial "file:$2" -display none -no-reboot $VGA_STD \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
 }
 GRUND="nokbd nosched noproc nofs noring3"

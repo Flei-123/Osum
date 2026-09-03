@@ -272,6 +272,31 @@ verbose: yes
     path: boot():/osum.mb
     module_path: boot():/root.img
     cmdline: hwdiag hwdiagstop vecproc gfx nokbd nosched noproc nofs noring3
+
+# RUNDE SCHIRM: ZWEI EINTRAEGE FUER GROSSE SCHIRME.
+#
+# GEMESSEN: auf einem 3840x2160-Schirm gibt der Lader dem Kern von sich
+# aus 1280x800 (docs/SCHIRM.md, Abschnitt "Unter dem Lader"). Der Kern
+# kann das NICHT nachbessern -- nach ExitBootServices gibt es kein GOP
+# mehr, und der Bochs-Weg, ueber den er ohne Lader den Modus setzt, ist
+# auf echter Hardware nicht da. Wer den Modus will, muss ihn den LADER
+# waehlen lassen, und genau das tun diese zwei Eintraege.
+#
+# Passt die Aufloesung dem Bildschirm nicht, faellt Limine auf seine
+# Vorgabe zurueck; es bleibt also immer ein Bild.
+/Osum -- Schreibtisch auf einem WQHD-Schirm (2560x1440)
+    protocol: multiboot1
+    path: boot():/osum.mb
+    module_path: boot():/root.img
+    resolution: 2560x1440
+    cmdline: modfs osum gfx wm wig desk wmshell nosched noproc nofs
+
+/Osum -- Schreibtisch auf einem 4K-Schirm (3840x2160)
+    protocol: multiboot1
+    path: boot():/osum.mb
+    module_path: boot():/root.img
+    resolution: 3840x2160
+    cmdline: modfs osum gfx wm wig desk wmshell nosched noproc nofs
 EOF
 
 # ================================================== 7. das Abbild

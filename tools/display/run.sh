@@ -220,11 +220,21 @@ python3 tools/osum/mkfs.py build "$TMPD/root.img" "$BLOCKS" /bin/ $MKARGS \
 
 GRUND="nokbd nosched noproc nofs noring3"
 
+# RUNDE SCHIRM-ECHT: DIESE MASCHINE HAT KEINE TAFEL.
+#
+# Seit Runde SCHIRM liest der Kern den EDID-Block und nimmt die
+# Aufloesung, die der Bildschirm nennt. QEMUs `-vga std` nennt ab Werk
+# 1280x800. Dieser Laeufer misst aber die EINGEBAUTE VORGABE und die
+# Modussetzung (800x600, pitch=3200, cols=100 rows=37) -- also wird die
+# Tafel hier abgeschaltet. Wer den EDID-Weg messen will, findet ihn in
+# tools/display/run.sh Abschnitt 4 und in tools/customres/run.sh.
+VGA_STD=${VGA_STD:-"-vga std -global VGA.edid=off"}
+
 lauf() { # name kommandozeile [zeitlimit]
     local name=$1 zeile=$2 t=${3:-180}
     rm -f "$TMPD/$name.txt"
     timeout "$t" $QEMU_X86 -kernel "$TMPD/k0.mb" -m 256 -append "$zeile" \
-        -serial "file:$TMPD/$name.txt" -display none -no-reboot -vga std \
+        -serial "file:$TMPD/$name.txt" -display none -no-reboot $VGA_STD \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1
     echo $?
 }
@@ -236,7 +246,7 @@ foto() { # name kommandozeile
     local sock="$TMPD/mon-$name.sock" aus="$TMPD/$name.txt" ppm="$TMPD/$name.ppm"
     rm -f "$aus" "$ppm" "$sock"
     timeout 200 $QEMU_X86 -kernel "$TMPD/k0.mb" -m 256 -append "$zeile" \
-        -serial "file:$aus" -display none -no-reboot -vga std \
+        -serial "file:$aus" -display none -no-reboot $VGA_STD \
         -monitor "unix:$sock,server,nowait" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1 &
     local pid=$! i=0
@@ -256,7 +266,7 @@ lauf_platte() { # name kommandozeile
     rm -f "$TMPD/$name.txt"
     cp -f "$TMPD/root.img" "$TMPD/live-$name.img"
     timeout 200 $QEMU_X86 -kernel "$TMPD/k0.mb" -m 256 -append "$zeile" \
-        -serial "file:$TMPD/$name.txt" -display none -no-reboot -vga std \
+        -serial "file:$TMPD/$name.txt" -display none -no-reboot $VGA_STD \
         -drive "file=$TMPD/live-$name.img,format=raw,if=ide,index=0" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1
     echo $?
@@ -299,7 +309,8 @@ gleich "und die dreizehn aus Runde K7 stehen unveraendert" "13" "$st1"
 # ============================================== 4. EDID
 
 echo "== 4. EDID: was der Bildschirm ueber sich sagt =="
-rc=$(lauf edid "gfx disp dispedid $GRUND")
+# ... ausser diesem einen: er MISST die Tafel und braucht sie deshalb.
+rc=$(VGA_STD="-vga std" lauf edid "gfx disp dispedid $GRUND")
 num "der Lauf endet sauber" "$rc" eq 21
 E="$TMPD/edid.txt"
 if grep -qa '^disp: edid ok' "$E"; then

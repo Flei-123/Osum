@@ -703,6 +703,16 @@ echo "== 8. der Editor, wirklich bedient: Tasten ueber den QEMU-Monitor =="
 # Ein Lauf, in dem ein MENSCH tippt. Die Tasten gehen ueber den Monitor an
 # den PS/2-Regler, also durch IRQ1, `kbd.fi` und die Zeilendisziplin --
 # denselben Weg, den eine echte Tastatur nimmt.
+# RUNDE SCHIRM-ECHT: DIESE MASCHINE HAT KEINE TAFEL.
+#
+# Seit Runde SCHIRM liest der Kern den EDID-Block und nimmt die
+# Aufloesung, die der Bildschirm nennt. QEMUs `-vga std` nennt ab Werk
+# 1280x800. Dieser Laeufer misst aber die EINGEBAUTE VORGABE und die
+# Modussetzung (800x600, pitch=3200, cols=100 rows=37) -- also wird die
+# Tafel hier abgeschaltet. Wer den EDID-Weg messen will, findet ihn in
+# tools/display/run.sh Abschnitt 4 und in tools/customres/run.sh.
+VGA_STD=${VGA_STD:-"-vga std -global VGA.edid=off"}
+
 tipp_lauf() { # name abbild kommandozeile muster tasten...
     local name=$1 abbild=$2 zeile=$3 muster=$4
     shift 4
@@ -711,7 +721,7 @@ tipp_lauf() { # name abbild kommandozeile muster tasten...
     cp "$abbild" "$TMPD/live-$name.img"
     ( timeout 180 $QEMU_X86 -kernel "$TMPD/k0.mb" -m 256 \
         -append "$zeile" -serial "file:$TMPD/$name.txt" -display none \
-        -no-reboot -vga std \
+        -no-reboot $VGA_STD \
         -drive "file=$TMPD/live-$name.img,format=raw,if=ide,index=0" \
         -monitor "unix:$sock,server,nowait" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1

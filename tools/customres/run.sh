@@ -221,8 +221,18 @@ python3 tools/osum/mkfs.py build "$TMPD/root.img" "$BLOCKS" /bin/ $MKARGS \
 
 GRUND="nokbd nosched noproc nofs noring3"
 
+# RUNDE SCHIRM-ECHT: DIESE MASCHINE HAT KEINE TAFEL.
+#
+# Seit Runde SCHIRM liest der Kern den EDID-Block und nimmt die
+# Aufloesung, die der Bildschirm nennt. QEMUs `-vga std` nennt ab Werk
+# 1280x800. Dieser Laeufer misst aber die EINGEBAUTE VORGABE und die
+# Modussetzung (800x600, pitch=3200, cols=100 rows=37) -- also wird die
+# Tafel hier abgeschaltet. Wer den EDID-Weg messen will, findet ihn in
+# tools/display/run.sh Abschnitt 4 und in tools/customres/run.sh.
+VGA_STD=${VGA_STD:-"-vga std -global VGA.edid=off"}
+
 lauf() { # name kommandozeile [zeitlimit] [vga-argumente]
-    local name=$1 zeile=$2 t=${3:-180} vga=${4:--vga std}
+    local name=$1 zeile=$2 t=${3:-180} vga=${4:-$VGA_STD}
     rm -f "$TMPD/$name.txt"
     timeout "$t" qemu-system-x86_64 $ACCEL -kernel "$TMPD/k0.mb" -m 256 \
         -append "$zeile" -serial "file:$TMPD/$name.txt" -display none \
@@ -237,7 +247,7 @@ foto() { # name kommandozeile
     local sock="$TMPD/mon-$name.sock" aus="$TMPD/$name.txt" ppm="$TMPD/$name.ppm"
     rm -f "$aus" "$ppm" "$sock"
     timeout 240 qemu-system-x86_64 $ACCEL -kernel "$TMPD/k0.mb" -m 256 \
-        -append "$zeile" -serial "file:$aus" -display none -no-reboot -vga std \
+        -append "$zeile" -serial "file:$aus" -display none -no-reboot $VGA_STD \
         -monitor "unix:$sock,server,nowait" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1 &
     local pid=$! i=0
@@ -259,7 +269,7 @@ lauf_platte() { # name kommandozeile abbild
     rm -f "$TMPD/$name.txt"
     timeout 240 qemu-system-x86_64 $ACCEL -kernel "$TMPD/k0.mb" -m 256 \
         -append "$zeile" -serial "file:$TMPD/$name.txt" -display none \
-        -no-reboot -vga std -drive "file=$img,format=raw,if=ide,index=0" \
+        -no-reboot $VGA_STD -drive "file=$img,format=raw,if=ide,index=0" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1
     echo $?
 }
@@ -357,7 +367,7 @@ echo "== 4b. dieselbe Zahl an eine KLEINERE Karte =="
 # Der Grund MUSS sich von 3 (Kachelgrenze) auf 2 (Bildspeicher) aendern,
 # denn jetzt ist wirklich die Karte zu klein -- und die genannte Zahl
 # bleibt dieselbe, weil das Bild dieselbe Groesse hat.
-rc=$(lauf klein "gfx disp dispeigenbad $GRUND" 180 "-device VGA,vgamem_mb=8")
+rc=$(lauf klein "gfx disp dispeigenbad $GRUND" 180 "-device VGA,edid=off,vgamem_mb=8")
 num "der Lauf endet sauber" "$rc" eq 21
 K="$TMPD/klein.txt"
 gleich "die kleinere Karte meldet 8 MiB" "8388608" "$(ew "$K" 1 vram)"
@@ -523,7 +533,7 @@ gleich "auch der gespeicherte Modus" "-" "$(uw "$O3" saveok)"
 # ============================================== 9. die Grenze, ehrlich
 
 echo "== 9. wo die Grenze wirklich liegt =="
-rc=$(lauf gross "gfx disp $GRUND" 180 "-device VGA,vgamem_mb=64")
+rc=$(lauf gross "gfx disp $GRUND" 180 "-device VGA,edid=off,vgamem_mb=64")
 num "der Lauf endet sauber" "$rc" eq 21
 G="$TMPD/gross.txt"
 gleich "mit 64 MiB Bildspeicher meldet die Karte mehr" "65536" "$(kw "$G" vram)"
@@ -533,7 +543,7 @@ gleich "mit 64 MiB Bildspeicher meldet die Karte mehr" "65536" "$(kw "$G" vram)"
 # an, und uebrig bleibt genau eine Schranke: diese hier.
 gleich "3840x2160 scheitert jetzt NUR noch an den Fensterplaetzen dieses Kernels" "3" \
     "$(grep -a '^disp: out   3840x2160' "$G" | grep -ao 'reason=[0-9]*' | sed 's/reason=//')"
-rc=$(lauf klein16 "gfx disp $GRUND" 180 "-vga std")
+rc=$(lauf klein16 "gfx disp $GRUND" 180 "$VGA_STD")
 num "der Lauf endet sauber" "$rc" eq 21
 K16="$TMPD/klein16.txt"
 gleich "mit 16 MiB war es noch die Karte, die ablehnte" "1" \
