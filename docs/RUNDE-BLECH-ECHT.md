@@ -213,6 +213,7 @@ nächsten Runde und steht auch in `docs/BLECH-BEREIT.md`, Abschnitt 4.
 | | MERGE-5 | **BLECH-ECHT** | Unterschied |
 |---|---:|---:|---|
 | Abbild | 123 731 968 Oktette | **123 731 968 Oktette (118 MiB)** | 0 |
+| SHA-256 | `16a188f1266f937ecdbb9073e4cc3e0a4e518ba251ae0cbe5f5eab775b542719` | **`39a2952caeb53abefa27b7e8ea4e6adf5776f883c513766a8865acd5b715340e`** | anders |
 | Kern | 3 363 920 Oktette | **3 789 672 Oktette** | **+425 752 (+12,7 %)** |
 | Ring-3-Programme | 43 | **43** | 0 |
 | Wurzel | 20 971 520, OFS v3 | **dieselbe** | 0 |
