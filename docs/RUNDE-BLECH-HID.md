@@ -372,6 +372,61 @@ Beanstandungen durch dieselbe Prüfung — die Gegenprobe ist gefahren.
 
 ---
 
+## 6a. DIE ABNAHME
+
+| Läufer | diese Runde | Referenzbaum `main` 4609ec9 |
+|---|---|---|
+| `tools/k17/run.sh` (USB) | **158 bestanden, 0 gefallen** | 157 + 1 Zusage dieser Runde |
+| `tools/hid/run.sh` | **57 bestanden, 0 gefallen** | 57/0 |
+| `tools/wm/run.sh` | **104 bestanden, 0 gefallen** | **103/0** — der Unterschied ist genau die neue Zeigerprüfung |
+| `tools/usbimg/run.sh` | **48 bestanden, 0 gescheitert** | 48/0 |
+| `tools/desktop/run.sh` | 20 rot | **20 rot, Zeile für Zeile dieselben** |
+| `tools/netview/run.sh` | 1 rot (siehe unten) | — |
+
+**Zwei Zusagen sind unterwegs gefallen, und beide hatten recht.** Das
+gehört in diesen Bericht, weil beide Fehler von dieser Runde waren:
+
+1. `tools/hid/run.sh`: *„GEGENPROBE nurboot: usb-tablet wird wieder
+   abgelehnt: erwartet 0, bekommen 0\n0"* — auf einer Maschine mit
+   **einem** Regler wurde derselbe zweimal aufgesetzt und die Zeile
+   `usb: devices=` zweimal gedruckt. Behoben (`anzahl > 1`).
+2. `tools/k17/run.sh`: *„Anstecken im Betrieb im Regellauf (darf nicht
+   anschlagen): 3"* — die neuen **echten** Wartezeiten geben dem
+   Zeitgeber Gelegenheit, `unplug_check` zu rufen, während der Baum
+   selbst aufzählt; der zählte Tastatur, Maus und Stick als „im Betrieb
+   angesteckt". Behoben mit einem Schloss (`S_BUSY`) über der
+   Aufzählung.
+
+**Die 20 roten Zusagen von `tools/desktop/run.sh` gehören dieser Runde
+NICHT.** Sie sind auf `main` 4609ec9 in einem eigenen Arbeitsbaum
+nachgefahren worden und dort **dieselben, in derselben Reihenfolge, mit
+denselben Zahlen** — der Läufer rechnet ab Abschnitt 2 mit einem
+800x600-Schirm und bekommt 1280x800 (`the bar is at (0, 772, 1280, 28),
+expected (0, 572, 800, 28)`). Deshalb fällt in Abschnitt 5 auch das
+Ziehen: der Mausklick auf y=586 landet auf dem Schreibtisch statt auf
+der Leiste.
+
+**Der eine rote Punkt in `tools/netview/run.sh`** heißt *„faking: the
+state icon went missing: falsch 40 von 82"*. Er ist **nachgeprüft und
+kein Zeichenfehler**: dasselbe Bildschirmfoto, an derselben Stelle,
+gegen alle vier Zustandsbilder gehalten —
+
+```
+state-online       falsch 40 von 82
+state-noroute      ok 68 von 68 gleich      <-- das steht im Bild
+state-noip         falsch 10 von 52
+state-nocarrier    falsch 31 von 62
+```
+
+Die Leiste hat ein **vollständiges, richtiges** Symbol gemalt, nämlich
+`noroute` — den Zustand, den sie in dem Augenblick kannte. Das
+Protokoll sagt in seiner **letzten** Zeile `s=3` (online), weil das
+Netz nach dem Foto hochkam. Das ist ein Wettlauf zwischen dem
+Aufnehmen des Bildes und dem letzten Neuzeichnen, und er steckt im
+Läufer, nicht im Programm.
+
+---
+
 ## 6b. DAS AUSGELIEFERTE ABBILD
 
 ```
