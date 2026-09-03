@@ -69,7 +69,7 @@ import mem
 
 export {
     present, init, ready, base_of, bdf, ctx_size, slots, ports,
-    irq, drain, irqs, events, cmds, port_events, errors,
+    irq, drain, irqs, events, cmds, port_events, errors, usbsts, iman,
     portsc, port_connected, port_enabled, port_power, port_speed,
     port_reset, port_clear_changes, port_has_change,
     slot_enable, slot_disable, address_device, configure_endpoint,
@@ -81,7 +81,7 @@ export {
     CC_SUCCESS, CC_SHORT, VEC_XHCI, teardown, forget_slot,
     // RUNDE BLECH-HID: was ein zweiter Regler und eine fremde Firmware
     // von diesem Treiber verlangen.
-    count_hc, nth_hc, init_at, unit, udelay, power_all,
+    count_hc, nth_hc, init_at, unit, udelay, power_all, melde_art,
     uebersicht, bericht, owned_by_bios, hcs_seen, legtest
 }
 
@@ -142,6 +142,11 @@ const S_PORTEV: u64 = 0x098
 const S_ERRORS: u64 = 0x0A0
 const S_NEP: u64 = 0x0A8 // belegte Plaetze der Endpunkttafel
 const S_MSIX: u64 = 0x0B0
+// RUNDE HIDWEG: WIE gemeldet wird. 0 = Stift durch den I/O-APIC,
+// 1 = MSI-X, 2 = MSI. Ohne diese Zahl ist `irqs=0` nicht zu deuten.
+const MELDE_INTX: u64 = 0
+const MELDE_MSIX: u64 = 1
+const MELDE_MSI: u64 = 2
 const S_SCRATCH: u64 = 0x0B8 // Feld der Kratzbloecke, 0 = keine
 const S_NSCRATCH: u64 = 0x0C0
 const S_XFERS: u64 = 0x0C8
@@ -377,6 +382,31 @@ fn events(state: u64) -> u64 {
 
 fn cmds(state: u64) -> u64 {
     return g(state, S_CMDS)
+}
+
+// ==================================================== RUNDE HIDWEG
+//
+// DREI REGISTER, DIE LIVE GELESEN WERDEN. Ein Zaehler sagt, wie oft
+// eine Meldung ANKAM; diese drei sagen, ob der Regler ueberhaupt eine
+// SCHICKT. Bleibt `irqs` stehen und `sts` hat EINT gesetzt, dann hat
+// der Regler gemeldet und niemand hat es abgeholt -- ein Fehler im
+// Meldeweg. Bleiben beide stehen, liegt es weiter unten.
+fn melde_art(state: u64) -> u64 {
+    return g(state, S_MSIX)
+}
+
+fn usbsts(state: u64) -> u64 {
+    if g(state, S_READY) == 0 {
+        return 0
+    }
+    return rd32(op(state), O_USBSTS)
+}
+
+fn iman(state: u64) -> u64 {
+    if g(state, S_READY) == 0 {
+        return 0
+    }
+    return rd32(rt(state), R_IMAN)
 }
 
 fn port_events(state: u64) -> u64 {
@@ -1317,15 +1347,37 @@ fn init_at(state: u64, einheit: u64, armed: bool) -> bool {
     // DIE MELDUNG WIRD SCHARFGEMACHT, BEVOR DER REGLER LAEUFT. Dieselbe
     // Regel wie bei NVMe in Runde K2, und aus demselben Grund: was
     // hinterher eingerichtet wird, kennt keine Warteschlange.
+    // ================================================== RUNDE HIDWEG
+    //
+    // DREI WEGE, UND ZWEI DAVON GAB ES NICHT.
+    //
+    // Bis hierher kannte dieser Treiber MSI-X und den Stift durch den
+    // I/O-APIC. Dazwischen fehlte MSI -- die aeltere Nachrichtenform,
+    // die viele Chipsatz-xHCI koennen und MSI-X nicht.
+    //
+    // GEMESSEN auf Justins Brett (03.09.2026): `hc0` (1022:43d5, der
+    // Chipsatzregler mit 22 Anschluessen und dem Stick daran) meldete
+    // `events=50 irqs=0` -- fuenfzig fertige Uebertragungen, und KEINE
+    // EINZIGE Meldung. Der Stift half nicht: `intx_arm` liest die
+    // Anschlussleitung aus dem PCI-Kopf und gibt auf, wenn dort 0 oder
+    // etwas ueber 23 steht -- und genau das steht auf einem Brett, das
+    // ueber MSI meldet, im Kopf. Ein Regler ohne Meldung bewegt Daten,
+    // sagt es aber niemandem.
+    //
+    // Reihenfolge: MSI-X (eine Tabelle je Vektor), dann MSI, dann der
+    // Stift. Was genommen wurde, steht seit dieser Runde IM BERICHT.
     if pci.get(state, idx, pci.E_MSIX) != 0 {
         if msix_arm(state, idx, VEC_XHCI, armed) {
-            s(state, S_MSIX, 1)
+            s(state, S_MSIX, MELDE_MSIX)
         } else {
             return false
         }
+    } else if pci.get(state, idx, pci.E_MSI) != 0
+        && msi_arm(state, idx, VEC_XHCI, armed) {
+        s(state, S_MSIX, MELDE_MSI)
     } else {
         intx_arm(state, idx, VEC_XHCI, armed)
-        s(state, S_MSIX, 0)
+        s(state, S_MSIX, MELDE_INTX)
     }
     var iman: u64 = 0
     if armed {
@@ -1435,6 +1487,44 @@ fn msix_arm(state: u64, idx: u64, vector: u64, armed: bool) -> bool {
     wr32(tbase, 12, ctrl)
     let msg: u64 = pci.cfg_read16(d, cap + 2)
     pci.cfg_write16(d, cap + 2, (msg | 0x8000) & 0xBFFF)
+    pci.cfg_write16(d, 0x04, pci.cfg_read16(d, 0x04) | 0x400)
+    return true
+}
+
+// MSI -- die Nachricht OHNE Tabelle. Adresse und Datum stehen im
+// PCI-Kopf selbst; wie viele Nachrichten das Geraet anbieten darf, steht
+// in den Bits 3..1 des Steuerworts, und wie viele es benutzen SOLL, in
+// den Bits 6..4. Hier wird genau EINE bestellt -- dieser Treiber hat
+// einen Ereignisring und einen Vektor.
+//
+// Bit 7 des Steuerworts sagt, ob die Adresse 64 Bit breit ist; danach
+// richtet sich, wo das Datum steht (Versatz 8 oder 12). Wer das
+// verwechselt, schreibt den Vektor in die obere Adresshaelfte -- und
+// dann meldet der Regler an eine Stelle, an der niemand zuhoert.
+fn msi_arm(state: u64, idx: u64, vector: u64, armed: bool) -> bool {
+    let d: u64 = pci.get(state, idx, pci.E_BDF)
+    let cap: u64 = pci.get(state, idx, pci.E_MSI)
+    if cap == 0 {
+        return false
+    }
+    let ctrl: u64 = pci.cfg_read16(d, cap + 2)
+    pci.cfg_write32(d, cap + 4,
+        apic.lapic_phys(state) | ((apic.id(state) & 0xFF) << 12))
+    var datoff: u64 = cap + 8
+    if (ctrl & 0x80) != 0 {
+        pci.cfg_write32(d, cap + 8, 0)
+        datoff = cap + 12
+    }
+    // Flanke, festgelegt, Vektor. Die oberen Bits bleiben null: keine
+    // Umleitung, kein Niedrigstpriorisieren.
+    pci.cfg_write16(d, datoff, vector & 0xFF)
+    // Bits 6..4 auf null (genau eine Nachricht), Bit 0 = einschalten.
+    var neu: u64 = ctrl & 0xFF8E
+    if armed {
+        neu = neu | 1
+    }
+    pci.cfg_write16(d, cap + 2, neu)
+    // Und der Stift wird abgeschaltet, sonst meldet der Regler zweimal.
     pci.cfg_write16(d, 0x04, pci.cfg_read16(d, 0x04) | 0x400)
     return true
 }
@@ -1665,6 +1755,14 @@ fn port_lines(state: u64, einheit: u64) {
     var s_von: [u8; 2] = "/\0"
     var s_ver: [u8; 12] = " verbunden=\0"
     var s_fr: [u8; 8] = " frei=\0\0"
+    // RUNDE HIDWEG: WIE dieser Regler meldet. `irqs=0` ist ohne diese
+    // Angabe nicht zu deuten -- an einem Stift, den die Firmware nicht
+    // eingetragen hat, sieht ein Treiber genauso aus wie an einer
+    // Nachricht, die nie eingerichtet wurde.
+    var s_me: [u8; 9] = " melde=\0\0"
+    var s_mx: [u8; 6] = "msi-x\0"
+    var s_ms: [u8; 4] = "msi\0"
+    var s_ix: [u8; 5] = "intx\0"
     let n: u64 = ports(state)
     var mit: u64 = 0
     var ver: u64 = 0
@@ -1685,6 +1783,14 @@ fn port_lines(state: u64, einheit: u64) {
     }
     serial.puts((&s_x[0]) as u64)
     serial.dec(einheit)
+    serial.puts((&s_me[0]) as u64)
+    if g(state, S_MSIX) == MELDE_MSIX {
+        serial.puts((&s_mx[0]) as u64)
+    } else if g(state, S_MSIX) == MELDE_MSI {
+        serial.puts((&s_ms[0]) as u64)
+    } else {
+        serial.puts((&s_ix[0]) as u64)
+    }
     serial.puts((&s_sum[0]) as u64)
     serial.dec(mit)
     serial.puts((&s_von[0]) as u64)

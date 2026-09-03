@@ -75,8 +75,13 @@ export {
     stage, irq, service, poll, say, report, ready, count,
     msc_ready, msc_blocks, msc_bsize, msc_read, msc_write,
     unplug_check, unplug_now, keys, reports, enums, hotplugs, unplugs,
+    // RUNDE HIDWEG: die Zahlen von `hidin`, durch diese Tuer. `kgui`
+    // darf `hidin` NICHT einbinden -- hidin -> gfx -> kgui waere ein
+    // Kreis im Modulgraphen, und der bleibt ein Baum.
+    hid_keys, hid_los, hid_bew,
     stat,
     have_kbd, have_mouse, msc_errors, msc_ios, selftest,
+    rangtest, rangtest_max,
     DRV_NONE, DRV_KBD, DRV_MOUSE, DRV_MSC
 }
 
@@ -300,6 +305,17 @@ fn stage(state: u64) {
         s(state, S_GEN, 1)
     }
     hidin.stage(state)
+    // RUNDE HIDWEG: die Rangfolge der Schnittstellen, gemessen an einem
+    // gebauten Deskriptor. Steht hier und nicht in einem eigenen
+    // Menueeintrag, weil sie keinen Regler braucht und weil die Zahl
+    // damit auf JEDEM Foto steht, auf dem `usb:` steht.
+    var s_rang: [u8; 15] = "usb: rang ok=\0\0"
+    var s_von2: [u8; 4] = " / \0"
+    serial.puts((&s_rang[0]) as u64)
+    serial.dec(rangtest(state))
+    serial.puts((&s_von2[0]) as u64)
+    serial.dec(rangtest_max())
+    serial.nl()
     if kstate.mode_on(state, kstate.M_NOMSC) {
         s(state, S_NOMSC, 1)
     }
@@ -562,6 +578,24 @@ fn attach(state: u64, port: u64) -> bool {
     s(state, S_ENUMS, g(state, S_ENUMS) + 1)
     s(state, S_NDEV, g(state, S_NDEV) + 1)
 
+    // ==================================================== RUNDE HIDWEG
+    //
+    // ERST BINDEN, DANN BERICHTEN -- UND DIE ZEILE AM STUECK.
+    //
+    // Bis hierher stand die Zeile VOR `bind`, und damit stand darin,
+    // was `driver_for` aus der Klasse GERATEN hatte, nicht, was der
+    // Baum daraus gemacht hat. Auf Justins Brett las sich das als
+    //   `usb: port=10 ... id=0951:16df class=03:00:00 driver=none`,
+    // und "none" war schlicht falsch: das Geraet war ueber seine
+    // BERICHTSBESCHREIBUNG angenommen worden (`hidrep: dev=1 ok=1
+    // felder=15`) und lief ueber den generischen Weg. `drv_name`
+    // kannte DRV_HIDGEN nur nicht.
+    //
+    // `bind` druckt SELBST (die Zerlegerzeile, die Blockzahl des
+    // Sticks). Deshalb steht der ganze Bericht dahinter und nicht
+    // halb davor -- sonst schiebt sich eine fremde Zeile mitten in
+    // diese hinein, und auf einem Foto ist das nicht zu entwirren.
+    bind(state, d)
     serial.puts((&s_dev[0]) as u64)
     serial.dec(port)
     serial.puts((&s_sp[0]) as u64)
@@ -581,7 +615,6 @@ fn attach(state: u64, port: u64) -> bool {
     serial.puts((&s_drv[0]) as u64)
     drv_name(dg(state, d, D_DRIVER))
     serial.nl()
-    bind(state, d)
     return true
 }
 
@@ -608,12 +641,15 @@ fn drv_name(k: u64) {
     var s_m: [u8; 6] = "mouse\0"
     var s_s: [u8; 4] = "msc\0"
     var s_n: [u8; 5] = "none\0"
+    var s_g: [u8; 7] = "hidgen\0"
     if k == DRV_KBD {
         serial.puts((&s_k[0]) as u64)
     } else if k == DRV_MOUSE {
         serial.puts((&s_m[0]) as u64)
     } else if k == DRV_MSC {
         serial.puts((&s_s[0]) as u64)
+    } else if k == DRV_HIDGEN {
+        serial.puts((&s_g[0]) as u64)
     } else {
         serial.puts((&s_n[0]) as u64)
     }
@@ -734,10 +770,145 @@ fn configure(state: u64, d: u64) -> bool {
     return true
 }
 
+// ======================================================= RUNDE HIDWEG
+//
+// WELCHE SCHNITTSTELLE EINES GERAETS GENOMMEN WIRD.
+//
+// Ein Geraet hat oft mehrere. Eine Spieletastatur bringt regelmaessig
+// drei mit: eine ohne Boot-Protokoll mit allen Tasten gleichzeitig
+// (03:00:00), eine Boot-Tastatur (03:01:01) und eine
+// Verbrauchersteuerung fuer die Medientasten (auch 03:00:00). Welche
+// davon zuerst im Konfigurationsdeskriptor steht, entscheidet der
+// Hersteller und niemand sonst.
+//
+// Bis zu dieser Runde nahm `parse` die ERSTE, die durch `wanted` kam --
+// also die erste in der Reihenfolge des Herstellers. Auf Justins Brett
+// war das bei 0951:16df eine mit `top=0xc0001`, einer
+// VERBRAUCHERSTEUERUNG: die Beschreibung wurde sauber zerlegt
+// (`felder=15`), das Geraet lief -- und meldete Lautstaerketasten statt
+// Buchstaben.
+//
+// Jetzt wird ZWEIMAL gelesen. Der erste Durchgang sucht den besten
+// Rang, der zweite nimmt die erste Schnittstelle mit genau diesem Rang.
+// Damit gewinnt eine Boot-Tastatur gegen eine Verbrauchersteuerung
+// DESSELBEN Geraets, egal in welcher Reihenfolge sie dastehen.
+//
+// Der Rang ist ausdruecklich eine Rangfolge und keine Wertung: eine
+// Schnittstelle ohne Boot-Protokoll bleibt annehmbar (Rang 1) -- das
+// Praezisions-Touchpad eines Laptops hat gar nichts anderes.
+fn iface_rang(state: u64, cls: u64, sub: u64, pro: u64) -> u64 {
+    if !wanted(state, cls, sub, pro) {
+        return 0
+    }
+    if cls == CLS_HID && sub == 1 && pro == 1 {
+        return 4
+    }
+    if cls == CLS_HID && sub == 1 && pro == 2 {
+        return 3
+    }
+    if cls == CLS_MSC {
+        return 2
+    }
+    return 1
+}
+
+fn best_rang(state: u64, buf: u64, total: u64) -> u64 {
+    var at: u64 = 0
+    var best: u64 = 0
+    while at + 2 <= total {
+        let len: u64 = b8(buf, at)
+        if len < 2 {
+            at = total
+        } else {
+            if b8(buf, at + 1) == 4 && len >= 9 && b8(buf, at + 3) == 0 {
+                let r: u64 = iface_rang(state, b8(buf, at + 5),
+                    b8(buf, at + 6), b8(buf, at + 7))
+                if r > best {
+                    best = r
+                }
+            }
+            at = at + len
+        }
+    }
+    return best
+}
+
+// ================================ DER SELBSTTEST ZUR RANGFOLGE
+//
+// Ein zusammengesetztes Geraet gibt es in QEMU nicht: `-device usb-kbd`
+// hat GENAU EINE Schnittstelle. Die Rangfolge liesse sich damit
+// ueberhaupt nicht messen -- und eine Aenderung an der Auswahl, die
+// niemand misst, ist eine Behauptung.
+//
+// Also wird der Konfigurationsdeskriptor HIER GEBAUT, Oktett fuer
+// Oktett, genau so, wie eine Spieletastatur ihn liefert: zuerst eine
+// Schnittstelle OHNE Boot-Protokoll (03:00:00), danach die
+// Boot-Tastatur (03:01:01). Der alte Weg nahm die erste. Der neue muss
+// die zweite nehmen -- mit ihrer Schnittstellennummer, ihrer
+// Beschreibungslaenge (63 statt 52) und ihrem Endpunkt (0x82 -> DCI 5).
+//
+// Gibt zurueck, wie viele der sechs Zusagen halten.
+fn rangtest(state: u64) -> u64 {
+    let buf: u64 = state + DESC_OFF
+    zero(buf, 64)
+    var i: u64 = 0
+    var q: [u8; 59] = [
+        9 as u8, 2 as u8, 59 as u8, 0 as u8, 2 as u8, 1 as u8, 0 as u8,
+        0x80 as u8, 50 as u8,
+        // Schnittstelle 0: HID, kein Boot-Protokoll
+        9 as u8, 4 as u8, 0 as u8, 0 as u8, 1 as u8, 3 as u8, 0 as u8,
+        0 as u8, 0 as u8,
+        9 as u8, 0x21 as u8, 0x11 as u8, 1 as u8, 0 as u8, 1 as u8,
+        0x22 as u8, 52 as u8, 0 as u8,
+        7 as u8, 5 as u8, 0x81 as u8, 3 as u8, 8 as u8, 0 as u8, 10 as u8,
+        // Schnittstelle 1: die Boot-Tastatur
+        9 as u8, 4 as u8, 1 as u8, 0 as u8, 1 as u8, 3 as u8, 1 as u8,
+        1 as u8, 0 as u8,
+        9 as u8, 0x21 as u8, 0x11 as u8, 1 as u8, 0 as u8, 1 as u8,
+        0x22 as u8, 63 as u8, 0 as u8,
+        7 as u8, 5 as u8, 0x82 as u8, 3 as u8, 8 as u8, 0 as u8, 10 as u8
+    ]
+    while i < 59 {
+        __mmio_write8((buf + i) as *mut u8, q[i as usize])
+        i = i + 1
+    }
+    var n: u64 = 0
+    if best_rang(state, buf, 59) == 4 {
+        n = n + 1
+    }
+    if iface_rang(state, CLS_HID, 1, 2) == 3 {
+        n = n + 1
+    }
+    if iface_rang(state, CLS_MSC, 6, 0x50) == 2 {
+        n = n + 1
+    }
+    zero(state + UDEV_OFF, DEV_BYTES)
+    parse(state, 0, buf, 59)
+    if dg(state, 0, D_IFACE) == 1 {
+        n = n + 1
+    }
+    if dg(state, 0, D_RDLEN) == 63 && dg(state, 0, D_PROTO) == 1 {
+        n = n + 1
+    }
+    if dg(state, 0, D_INTDCI) == 5 {
+        n = n + 1
+    }
+    zero(state + UDEV_OFF, DEV_BYTES)
+    return n
+}
+
+fn rangtest_max() -> u64 {
+    return 6
+}
+
 fn parse(state: u64, d: u64, buf: u64, total: u64) {
     var at: u64 = 0
     var mine: bool = false
     var picked: bool = false
+    let ziel: u64 = best_rang(state, buf, total)
+    if ziel == 0 {
+        return
+    }
     while at + 2 <= total {
         let len: u64 = b8(buf, at)
         let kind: u64 = b8(buf, at + 1)
@@ -753,7 +924,7 @@ fn parse(state: u64, d: u64, buf: u64, total: u64) {
                     let cls: u64 = b8(buf, at + 5)
                     let sub: u64 = b8(buf, at + 6)
                     let pro: u64 = b8(buf, at + 7)
-                    if wanted(state, cls, sub, pro) {
+                    if iface_rang(state, cls, sub, pro) == ziel {
                         ds(state, d, D_CLASS, cls)
                         ds(state, d, D_SUB, sub)
                         ds(state, d, D_PROTO, pro)
@@ -1234,6 +1405,21 @@ fn kbd_report(state: u64, d: u64) {
     // daran. Die Zahl bleibt, auch wenn die Auswertung eine Etage
     // tiefer gewandert ist.
     s(state, S_KEYS, g(state, S_KEYS) + (hidin.keys(state) - vor))
+}
+
+// RUNDE HIDWEG: was `hidin` gezaehlt hat, fuer den Eingabepuls des
+// Schreibtischs. Drei Weiterreichungen und keine eigene Buchfuehrung --
+// zwei Zaehler ueber dieselbe Sache waeren zwei Wahrheiten.
+fn hid_keys(state: u64) -> u64 {
+    return hidin.keys(state)
+}
+
+fn hid_los(state: u64) -> u64 {
+    return hidin.releases(state)
+}
+
+fn hid_bew(state: u64) -> u64 {
+    return hidin.moves(state)
 }
 
 fn press(state: u64, u: u64) {

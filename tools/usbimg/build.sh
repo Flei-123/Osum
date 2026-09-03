@@ -518,7 +518,7 @@ verbose: yes
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: hwdiag modfs osum gfx wm wig desk wmshell usb hidgen nosched noproc nofs
+    cmdline: hwdiag modfs osum gfx wm wig desk wmshell wmdauer usb hidgen nosched noproc nofs
 
 # RUNDE STICK: DIESER EINTRAG HAT JETZT AUCH EINE NETZKARTE. Ohne
 # `nic` blieb der Schreibtisch fuer immer bei "kein Netz", und das
@@ -529,7 +529,7 @@ verbose: yes
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx wm wig desk wmshell usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+    cmdline: modfs osum gfx wm wig desk wmshell wmdauer usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
 
 /Osum -- Vektoreinheit pruefen (bleibt stehen)
     protocol: multiboot1
@@ -606,14 +606,14 @@ verbose: yes
     path: boot():/osum.mb
     module_path: boot():/root.img
     resolution: 2560x1440
-    cmdline: modfs osum gfx wm wig desk wmshell usb hidgen nosched noproc nofs
+    cmdline: modfs osum gfx wm wig desk wmshell wmdauer usb hidgen nosched noproc nofs
 
 /Osum -- Schreibtisch auf einem 4K-Schirm (3840x2160)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
     resolution: 3840x2160
-    cmdline: modfs osum gfx wm wig desk wmshell usb hidgen nosched noproc nofs
+    cmdline: modfs osum gfx wm wig desk wmshell wmdauer usb hidgen nosched noproc nofs
 EOF
 
 # ================================================== 7. das Abbild
