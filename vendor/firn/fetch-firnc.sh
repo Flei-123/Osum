@@ -82,6 +82,27 @@ rm -rf "$HIER/lib"
 # waere er hier tot; aufgeloest ist die Bibliothek in sich geschlossen.
 cp -rL "$BAU/lib" "$HIER/lib"
 
+# --- DIE FLICKEN DIESES REPOS AUF DIE FIRN-BIBLIOTHEK.
+#
+# vendor/firn/lib/ ist NICHT eingecheckt und wird oben mit `rm -rf`
+# weggeraeumt. Was Osum an der Bibliothek geaendert hat, liegt deshalb
+# als Flicken unter vendor/firn/patches/ -- eingecheckt, mit Begruendung
+# im Kopf jeder Datei -- und wird HIER aufgelegt. Ohne diesen Block waere
+# jede solche Aenderung beim naechsten `--force` still verschwunden.
+#
+# Sie werden in Namensreihenfolge aufgelegt, und ein Flicken, der nicht
+# passt, bricht den Bau ab: eine halb geflickte Bibliothek ist schlimmer
+# als eine ungeflickte, weil der Fehler dann anderswo auftaucht.
+if [[ -d $HIER/patches ]]; then
+    for f in "$HIER"/patches/*.patch; do
+        [[ -e $f ]] || continue
+        echo ">> Flicken: $(basename "$f")"
+        patch -p1 -d "$HIER/lib" -i "$f" --silent \
+            || { echo "Flicken $(basename "$f") passt nicht auf Firn $KURZ" >&2
+                 exit 1; }
+    done
+fi
+
 echo ">> firnc1 bauen (der Uebersetzer in Firn, von firnc0 uebersetzt)"
 FIRNLIB="$HIER/lib" "$HIER/bin/firnc" "$BAU/bin/firnc1.fi" -o "$HIER/bin/firnc1"
 

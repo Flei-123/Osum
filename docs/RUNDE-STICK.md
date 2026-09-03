@@ -351,6 +351,19 @@ Der Zweig greift **nur** für Ziel 255.255.255.255 — Pakete, die bis
 hierher stillschweigend liegengeblieben sind. Alles andere geht
 unverändert über `next_hop`.
 
+**Und er überlebt den nächsten Bau.** `vendor/firn/lib/` ist nicht
+eingecheckt (`.gitignore`), und `fetch-firnc.sh` räumt es mit `rm -rf`
+weg und legt es aus dem festgenagelten Firn-Commit neu an. Eine Änderung,
+die nur dort liegt, wäre beim nächsten `--force` still verschwunden — und
+der DHCP-Klient hätte wieder geschwiegen, ohne dass jemand etwas geändert
+hat. Deshalb liegt sie als **eingecheckter Flicken** unter
+`vendor/firn/patches/0001-rundruf-ohne-arp.patch`, mit der Begründung im
+Kopf, und `fetch-firnc.sh` legt sie nach dem Auspacken auf. Ein Flicken,
+der nicht passt, bricht den Bau ab — eine halb geflickte Bibliothek wäre
+schlimmer als eine ungeflickte, weil der Fehler dann anderswo auftaucht.
+Wohin die drei Zeilen wirklich gehören, steht in `REMOVE-FROM-FIRN.md`:
+nach Firn.
+
 ---
 
 ## TEIL 5 — DIE ABNAHME: `tools/stick/run.sh`

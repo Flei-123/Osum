@@ -1,0 +1,61 @@
+# vendor/firn/patches/0001-rundruf-ohne-arp.patch
+#
+# RUNDE STICK (Osum, 03.09.2026) -- DER RUNDRUF BRAUCHT KEIN ARP.
+#
+# WARUM DIESE DATEI UEBERHAUPT EXISTIERT. vendor/firn/lib/ ist NICHT
+# eingecheckt (.gitignore); fetch-firnc.sh loescht das Verzeichnis und
+# legt es aus dem festgenagelten Firn-Commit neu an. Eine Aenderung, die
+# nur dort liegt, ist beim naechsten `--force` weg -- und genau das waere
+# hier passiert: der DHCP-Klient haette wieder geschwiegen, ohne dass
+# jemand etwas geaendert haette. Also liegt die Aenderung HIER, wird
+# eingecheckt, und fetch-firnc.sh legt sie nach dem Auspacken auf.
+#
+# WAS SIE TUT. `net_output` schickte JEDES Datagramm ueber `next_hop`
+# und ARP -- auch eines an 255.255.255.255. Nach dessen Hardwareadresse
+# fragt man aber nicht: sie ist ff:ff:ff:ff:ff:ff, und zwar immer. Ohne
+# diesen Zweig kam ein DHCP-DISCOVER nur dann hinaus, wenn schon ein
+# Gateway eingetragen war UND dieses auf ARP antwortete -- also genau
+# dann nicht, wenn man DHCP braucht: beim ersten Start in einem fremden
+# Netz. kernel/user/dhcp.fi hat die Luecke selbst benannt ("dafuer
+# braeuchte der Stapel drei Zeilen mehr").
+#
+# GEMESSEN, vom USB-Abbild, ohne Gateway auf der Kommandozeile:
+#   vorher   dhcp: discover xid=...    (und dann nichts, 90 Sekunden)
+#   nachher  dhcp: offer ip=10.0.2.15 ... dhcp: gesetzt ip=10.0.2.15
+#
+# GEHOERT DAS NACH FIRN? Ja -- siehe REMOVE-FROM-FIRN.md. Solange es
+# dort nicht ist, steht es hier.
+--- a/net/stack.fi	2026-09-03 08:24:33.295042571 +0000
++++ b/net/stack.fi	2026-09-03 08:24:33.295123742 +0000
+@@ -540,6 +540,31 @@
+             bump(s, NS_TX)
+             return len
+         }
++        // RUNDE STICK (Osum, 03.09.2026): DER RUNDRUF BRAUCHT KEIN ARP.
++        //
++        // Bis hierher ging JEDES Datagramm ueber `next_hop` und ARP --
++        // auch eines an 255.255.255.255. Nach dessen Hardwareadresse
++        // fragt man aber nicht: sie ist ff:ff:ff:ff:ff:ff, und zwar
++        // immer. Ohne diesen Zweig kam ein DHCP-DISCOVER nur dann
++        // hinaus, wenn ein Gateway eingetragen war UND dieses auf ARP
++        // antwortete -- also genau dann nicht, wenn man DHCP braucht:
++        // beim ersten Start in einem fremden Netz.
++        //
++        // `kernel/user/dhcp.fi` hat diese Luecke selbst benannt ("dafuer
++        // braeuchte der Stapel drei Zeilen mehr") und sich mit einem
++        // Einzelruf an das Gateway beholfen. Hier sind die drei Zeilen.
++        // GEMESSEN: vom USB-Abbild mit `nip=169.254.10.1/16` und ohne
++        // Gateway blieb `dhcp: discover` vorher ohne Antwort; danach
++        // kommt `dhcp: offer` und `dhcp: gesetzt ip=10.0.2.15`.
++        if (*s).out_dst[e] == 0xFFFFFFFF {
++            var bc: [u8; 6] = [0 as u8; 6]
++            wire.mac_broadcast(&bc[0])
++            wire.eth_build(slot, &bc[0], &(*s).mac[0], wire.ETYPE_IP4)
++            wire.copy(buf, slot, len)
++            (*s).out_head = out_next(e)
++            bump(s, NS_TX)
++            return len
++        }
+         let nh: u32 = next_hop(s, (*s).out_dst[e])
+         let a: i32 = net_arp_find(s, nh, now)
+         if a >= 0 {
