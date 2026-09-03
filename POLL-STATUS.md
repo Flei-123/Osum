@@ -1,5 +1,13 @@
 # RUNDE POLL — Stand, mit gemessenen Zahlen
 
+> **RUNDE BLECH-ECHT (03.09.2026):** das Programm, das in diesem
+> Bericht `/bin/jarvisd` heisst, heisst seit dem Zusammenfuehren des
+> Zweiges `bridge` **`/bin/pollbr`** (`kernel/user/pollbr.fi`). Der
+> Name `/bin/jarvisd` gehoert jetzt der richtigen Bruecke aus Runde
+> BRIDGE (`kernel/app/jarvisd.fi`, 2274 Zeilen, TLS + Ed25519 +
+> Rechteliste). Der Text unten ist unveraendert; wo `jarvisd` steht,
+> ist `pollbr` gemeint.
+
 Zweig `poll`, abgezweigt von `mergeline` (4f844b5). **Nicht nach `main`
 gemerged.** Gearbeitet wurde in einem eigenen Arbeitsbaum
 (`git worktree`, `/root/mg-osum-poll`), damit der Hauptbaum, in dem
