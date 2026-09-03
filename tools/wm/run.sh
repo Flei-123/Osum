@@ -112,11 +112,21 @@ fi
 DISK="$TMPD/disk.img"
 GRUND="nokbd nosched noproc nofs"
 
+# RUNDE SCHIRM-ECHT: DIESE MASCHINE HAT KEINE TAFEL.
+#
+# Seit Runde SCHIRM liest der Kern den EDID-Block und nimmt die
+# Aufloesung, die der Bildschirm nennt. QEMUs `-vga std` nennt ab Werk
+# 1280x800. Dieser Laeufer misst aber die EINGEBAUTE VORGABE und die
+# Modussetzung (800x600, pitch=3200, cols=100 rows=37) -- also wird die
+# Tafel hier abgeschaltet. Wer den EDID-Weg messen will, findet ihn in
+# tools/display/run.sh Abschnitt 4 und in tools/customres/run.sh.
+VGA_STD=${VGA_STD:-"-vga std -global VGA.edid=off"}
+
 lauf() { # abbild kommandozeile ausgabe
     local abbild=$1 zeile=$2 aus=$3
     cp -f "$DISK" "$TMPD/live.img"
     timeout 180 $QEMU_X86 -kernel "$abbild" -m 256 -append "$zeile" \
-        -serial "file:$aus" -display none -no-reboot -vga std \
+        -serial "file:$aus" -display none -no-reboot $VGA_STD \
         -drive "file=$TMPD/live.img,format=raw,if=ide,index=0" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
     return $?
@@ -130,7 +140,7 @@ foto() { # abbild kommandozeile ausgabe ppm [monitorbefehle]
     rm -f "$aus" "$ppm" "$sock"
     cp -f "$DISK" "$live"
     timeout 180 $QEMU_X86 -kernel "$abbild" -m 256 -append "$zeile" \
-        -serial "file:$aus" -display none -no-reboot -vga std \
+        -serial "file:$aus" -display none -no-reboot $VGA_STD \
         -monitor "unix:$sock,server,nowait" \
         -drive "file=$live,format=raw,if=ide,index=0" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 &

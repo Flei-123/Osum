@@ -248,15 +248,63 @@ fn graphics(state: u64, mbi: u64) {
         w = fb.WIDTH_BIG
         h = fb.HEIGHT_BIG
     }
+    // RUNDE SCHIRM -- DIE TAFEL FRAGEN, STATT ZWEI ZAHLEN ZU RATEN.
+    //
+    // Ohne Lader (qemu -kernel) stellt der Kern den Modus selbst ein, und
+    // bis zu dieser Runde nahm er dafuer 800x600 oder, auf ein Wort hin,
+    // 1024x768. Auf jeder Tafel, die etwas anderes kann, war das die
+    // falsche Zahl -- und zwei Zeilen weiter unten meldete DERSELBE
+    // Kern, was die Tafel wirklich ist:
+    //
+    //     disp: edid ok  nat=1920x1080
+    //     fb:   800x600x32
+    //
+    // Die Reihenfolge ist: die Befehlszeile schlaegt alles, dann der
+    // EDID-Block der Tafel, dann die eingebaute Vorgabe.
+    var quelle_w: u64 = 0 // 0 = eingebaut, 1 = Befehlszeile, 2 = EDID
+    if fb.want(state, fb.M_RES) && fb.res_w(state) != 0 {
+        w = fb.res_w(state)
+        h = fb.res_h(state)
+        quelle_w = 1
+    } else {
+        let nat: u64 = vmode.native(state)
+        if nat != 0 {
+            w = nat >> 16
+            h = nat & 0xFFFF
+            quelle_w = 2
+        }
+    }
+    // RUNDE SCHIRM: die Tafelmeldung SELBST in den Mitschnitt, sonst ist
+    // ein Rueckfall auf die Vorgabe nicht von einer fehlenden Tafel zu
+    // unterscheiden.
+    var s_nat: [u8; 10] = "fb: nat=\0\0"
+    var s_natx: [u8; 2] = "x\0"
+    var s_why: [u8; 8] = "  why=\0\0"
+    serial.puts((&s_nat[0]) as u64)
+    serial.dec(vmode.edid_native_w(state))
+    serial.puts((&s_natx[0]) as u64)
+    serial.dec(vmode.edid_native_h(state))
+    serial.puts((&s_why[0]) as u64)
+    serial.dec(vmode.edid_why(state))
+    serial.nl()
     // Der Zweitpuffer, aus zusammenhaengenden Rahmen. Acht Rahmen mehr
     // als gerechnet: eine Karte darf eine laengere Zeile liefern als
     // Breite mal vier, und ein zu kleiner Zweitpuffer waere ein
     // Schreibzugriff daneben. `fb.init` prueft die Groesse noch einmal
     // und laesst ihn im Zweifel liegen.
+    //
+    // RUNDE SCHIRM: `fb.need_bytes` statt `w * h * 4`. Unter einem Lader
+    // bestimmt der LADER die Aufloesung, und ein Puffer, der fuer 800x600
+    // gerechnet wurde, wird bei 1920x1080 stillschweigend verworfen --
+    // gemessen als "back=none" in JEDEM Start ueber Limine.
     var back: u64 = 0
     var back_bytes: u64 = 0
     if !fb.want(state, fb.M_NODBL) {
-        let rahmen: u64 = (w * h * 4 + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE + 8
+        var noetig: u64 = fb.need_bytes(mbi, w, h)
+        if noetig == 0 {
+            noetig = w * h * 4
+        }
+        let rahmen: u64 = (noetig + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE + 8
         back = mem.frame_run(state, rahmen)
         if back != 0 {
             back_bytes = rahmen * mem.FRAME_SIZE
@@ -269,6 +317,16 @@ fn graphics(state: u64, mbi: u64) {
     }
     if fb.want(state, fb.M_NOCUR) {
         fb.set_cursor(state, false)
+    }
+    // RUNDE SCHIRM: sagt die Tafel, wie GROSS sie ist, schlaegt das die
+    // Regel nach der reinen Bildpunktzahl. Ein 27-Zoll-4K und ein
+    // 15-Zoll-4K haben dieselben Bildpunkte und einen Faktor
+    // Unterschied in der Groesse eines Buchstabens.
+    if fb.res_w(state) == 0 {
+        let ds: u64 = vmode.dpi_scale(state, fb.width(state))
+        if ds != 0 {
+            let _sc: bool = fb.set_uiscale(state, ds)
+        }
     }
 
     serial.puts((&s_geo[0]) as u64)
@@ -303,12 +361,32 @@ fn graphics(state: u64, mbi: u64) {
     serial.puts((&s_uc[0]) as u64)
     serial.dec(bnum(fb.uncached(state)))
     serial.nl()
+    // RUNDE SCHIRM: woher die Aufloesung kam, wie gross die Schrift ist
+    // und ob der Puffer in Streifen geschoben wird. Drei Zahlen, die
+    // vorher nirgends standen und ohne die man den Unterschied zwischen
+    // "es geht" und "es geht zufaellig" nicht sieht.
+    var s_sc: [u8; 13] = "fb: skala x\0\0"
+    var s_src2: [u8; 10] = "  quelle=\0"
+    var s_str: [u8; 12] = "  streifen=\0"
+    var s_mm: [u8; 7] = "  mm=\0\0"
+    serial.puts((&s_sc[0]) as u64)
+    serial.dec(fb.uiscale(state))
+    serial.puts((&s_src2[0]) as u64)
+    serial.dec(quelle_w)
+    serial.puts((&s_str[0]) as u64)
+    serial.dec(bnum(fb.stripe(state)))
+    serial.puts((&s_mm[0]) as u64)
+    serial.dec(vmode.edid_mm_w(state))
+    serial.nl()
 
     let n: u64 = fb.selftest(state)
     serial.puts((&s_st[0]) as u64)
     serial.dec(n)
     serial.puts((&s_of[0]) as u64)
     serial.dec(fb.selftest_max())
+    var s_fbf: [u8; 11] = "  failed=\0\0"
+    serial.puts((&s_fbf[0]) as u64)
+    serial.hex(fb.failbits(state))
     serial.nl()
 
     gfx_bench(state, back)
@@ -1372,8 +1450,13 @@ fn surface(state: u64) {
     if f_tx >= ttf.MAX_FONTS {
         f_tx = f_sans
     }
-    let PX_UI: u64 = 15
-    let PX_MONO: u64 = 16
+    // RUNDE SCHIRM: die Schriftgroesse der Oberflaeche haengt an der
+    // Vervielfachung. 15 und 16 waren die Zahlen fuer 800x600; auf
+    // 3840x2160 sind sie ein Viertel der physischen Groesse, die sie
+    // dort hatten -- derselbe Fehler, den wir bei Certus gefunden haben.
+    let UISC: u64 = fb.uiscale(state)
+    let PX_UI: u64 = 15 * UISC
+    let PX_MONO: u64 = 16 * UISC
     say_font(state, f_tx, PX_MONO, (&s_mono[0]) as u64, (&s_font[0]) as u64,
         (&s_g[0]) as u64, (&s_upm[0]) as u64, (&s_asc[0]) as u64,
         (&s_desc[0]) as u64, (&s_lh[0]) as u64, (&s_kp[0]) as u64,
@@ -1419,6 +1502,7 @@ fn surface(state: u64) {
     wm.set_nolayer(state, kstate.mode_on(state, kstate.M_NOLAYER))
     wm.set_nomin(state, kstate.mode_on(state, kstate.M_NOMIN))
     wm.set_nostrut(state, kstate.mode_on(state, kstate.M_NOSTRUT))
+    wm.set_uiscale(state, UISC)
     wm.set_fonts(state, f_ui, PX_UI, f_tx, PX_MONO)
     // ROUND ICONS: the icon font is reported LATER, after `wig.init`.
     // It has to be: `wig.init` clears the first 0x80 octets of its page
@@ -1457,6 +1541,15 @@ fn surface(state: u64) {
     serial.dec(wm.selftest(state))
     serial.puts((&s_of[0]) as u64)
     serial.dec(wm.selftest_max())
+    var s_wmf: [u8; 11] = "  failed=\0\0"
+    serial.puts((&s_wmf[0]) as u64)
+    serial.hex(wm.failbits(state))
+    var s_d1: [u8; 8] = "  mw=\0\0\0"
+    var s_d2: [u8; 8] = "  max=\0\0"
+    serial.puts((&s_d1[0]) as u64)
+    serial.dec(wm.diag1(state))
+    serial.puts((&s_d2[0]) as u64)
+    serial.dec(wm.diag2(state))
     serial.nl()
     // RUNDE K15: die Naht zur Widget-Bibliothek. Sie kommt NACH dem
     // Fensterserver, weil sie in seine Fenster schreibt, und sie kommt
@@ -1711,12 +1804,13 @@ fn say_max(state: u64) {
     // and 796 x 568 does not fit into it. That is the server refusing
     // to lie, not a defect -- so the measurement gets a window that was
     // created large enough, and the refusal keeps its meaning.
-    let i: u64 = wm.create(state, 0, 0, 0, wm.MAX_W, wm.MAX_H, wm.K_RAW,
+    let i: u64 = wm.create(state, 0, 0, 0, wm.max_w(state),
+        wm.max_h(state), wm.K_RAW,
         (&s_t[0]) as u64)
     if i >= wm.MAX_WIN {
         return
     }
-    wm.fill(state, i, 0, 0, wm.MAX_W, wm.MAX_H,
+    wm.fill(state, i, 0, 0, wm.max_w(state), wm.max_h(state),
         fb.rgb(state, 0x24, 0x50, 0x30))
     let ok: bool = wm.maximize(state, i, true)
     wm.damage_all(state)

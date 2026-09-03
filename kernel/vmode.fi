@@ -60,6 +60,8 @@ export {
     cand_count, cand_w, cand_h, cand_why,
     vram, depths, refused, toobig, probed, map_limit,
     edid_ok, edid_why, edid_native_w, edid_native_h, edid_at, edid_bytes,
+    // RUNDE SCHIRM: die Tafel fragen, BEVOR es einen Rahmenpuffer gibt.
+    native, edid_mm_w, edid_mm_h, dpi_scale,
     vendor_at, model_at,
     set_mode, set_custom, check_custom, switch_to, current, revert,
     confirm, pending, deadline, remaining,
@@ -93,7 +95,11 @@ const LIST_OFF: u64 = 0x200 // im DISP-Bereich, je Modus acht Oktette
 //   Bildspeicher · 3 dieser Kernel kann es nicht abbilden
 const WHY_OFF: u64 = 0x400
 const LUT_OFF: u64 = 0x000 // im DLUT-Bereich, 3 x 256 Oktette
-const EDID_OFF: u64 = 0x400 // im DLUT-Bereich, 128 Oktette
+const EDID_OFF: u64 = 0x400 // im DLUT-Bereich, EDID_BYTES Oktette
+// RUNDE SCHIRM: der Basisblock UND bis zu zwei Erweiterungsbloecke.
+// Auf einem 3840x2160-Schirm steht im Basisblock ueberhaupt keine
+// Zeitlage mehr -- die native steht im CTA-861-Block dahinter.
+const EDID_BYTES: u64 = 384
 
 // Fuenfzehn Sekunden, so wie Windows es macht, und aus demselben Grund:
 // ein Modus, den der Monitor nicht darstellen kann, ist ohne diese
@@ -1081,6 +1087,68 @@ fn list_insert(state: u64, w: u64, h: u64) -> bool {
 //
 // edid_why: 0 gelesen · 1 kein Speicherbereich · 2 nicht abbildbar
 //           3 falsche Kennung · 4 Pruefsumme falsch
+// RUNDE SCHIRM: EINE STELLE, DIE ZEITLAGENSAETZE LIEST.
+//
+// `basis + start` ist der erste Satz, `anzahl` sind es hoechstens, und
+// `bisher` ist die groesste bisher gefundene Flaeche als
+// (Breite << 16) | Hoehe. Zurueck kommt dieselbe Form. Ein Satz mit
+// Pixeltakt null ist KEINE Zeitlage (im Basisblock sind das Text- und
+// Grenzwertsaetze, im CTA-Block das Ende der Liste).
+fn dtd_scan(basis: u64, start: u64, anzahl: u64, bisher: u64) -> u64 {
+    var best: u64 = bisher
+    var d: u64 = 0
+    while d < anzahl {
+        let p: u64 = basis + start + d * 18
+        if (kstate.get8(p) | kstate.get8(p + 1)) != 0 {
+            let hw: u64 = kstate.get8(p + 2) | ((kstate.get8(p + 4) >> 4) << 8)
+            let vh: u64 = kstate.get8(p + 5) | ((kstate.get8(p + 7) >> 4) << 8)
+            if hw >= 640 && vh >= 400 && hw <= 8192 && vh <= 4608 {
+                if hw * vh > (best >> 16) * (best & 0xFFFF) {
+                    best = (hw << 16) | vh
+                }
+            }
+        }
+        d = d + 1
+    }
+    return best
+}
+
+// Die acht Kurzsaetze ("standard timings") ab Oktett 38. Je zwei
+// Oktette: (Breite / 8) - 31 und darin die zwei oberen Bit als
+// Seitenverhaeltnis. 0x0101 heisst "nicht belegt".
+fn std_scan(dst: u64) -> u64 {
+    var best: u64 = 0
+    var i: u64 = 0
+    while i < 8 {
+        let b0: u64 = kstate.get8(dst + 38 + i * 2)
+        let b1: u64 = kstate.get8(dst + 39 + i * 2)
+        if b0 != 0x01 || b1 != 0x01 {
+            let w: u64 = (b0 + 31) * 8
+            let a: u64 = b1 >> 6
+            var h: u64 = 0
+            if a == 0 {
+                h = w * 10 / 16
+            }
+            if a == 1 {
+                h = w * 3 / 4
+            }
+            if a == 2 {
+                h = w * 4 / 5
+            }
+            if a == 3 {
+                h = w * 9 / 16
+            }
+            if w >= 640 && h >= 400 && w <= 8192 && h <= 4608 {
+                if w * h > (best >> 16) * (best & 0xFFFF) {
+                    best = (w << 16) | h
+                }
+            }
+        }
+        i = i + 1
+    }
+    return best
+}
+
 fn edid_probe(state: u64) {
     s(state, S_EDID, 0)
     s(state, S_NATW, 0)
@@ -1101,7 +1169,7 @@ fn edid_probe(state: u64) {
     // Der EDID-Bereich ist Geraetespeicher, kein Arbeitsspeicher: er
     // wird in Vierfachoktetten gelesen und danach in Oktette zerlegt.
     var i: u64 = 0
-    while i < 128 {
+    while i < EDID_BYTES {
         let w32: u64 = __mmio_read32((v +% i) as *mut u32) as u64
         kstate.set8(dst + i, (w32 & 0xFF) as u8)
         kstate.set8(dst + i + 1, ((w32 >> 8) & 0xFF) as u8)
@@ -1138,13 +1206,139 @@ fn edid_probe(state: u64) {
     fb.unmap_slot(state, v)
     s(state, S_EDIDWHY, 0)
     s(state, S_EDID, 1)
-    // Der erste ausfuehrliche Zeitlagensatz ab Oktett 54 traegt die
-    // native Aufloesung: acht Bit in einem Oktett, die oberen vier in
-    // einem geteilten.
-    let hw: u64 = kstate.get8(dst + 56) | ((kstate.get8(dst + 58) >> 4) << 8)
-    let vh: u64 = kstate.get8(dst + 59) | ((kstate.get8(dst + 61) >> 4) << 8)
-    s(state, S_NATW, hw)
-    s(state, S_NATH, vh)
+    // RUNDE SCHIRM -- NICHT NUR DER ERSTE SATZ.
+    //
+    // Bis zu dieser Runde las der Kern die native Aufloesung STARR aus
+    // dem Satz ab Oktett 54. Das ist nur dann der Zeitlagensatz, wenn
+    // die Tafel ihn dorthin legt. Auf einem 3840x2160-Schirm legt QEMU
+    // dorthin einen TEXTSATZ, und der Kern las aus Buchstaben Zahlen:
+    //
+    //     fb: nat=0x1034  (statt 3840x2160)
+    //     fb: 800x600x32  quelle=0
+    //
+    // -- der Rueckfall auf die eingebaute Vorgabe, auf einem 4K-Schirm.
+    // Also: alle VIER Saetze ansehen, die mit einer Pixeltaktzahl von
+    // null ueberspringen (das sind die Textsaetze), und von den echten
+    // Zeitlagen die GROESSTE nehmen. Die Reihenfolge im Block ist die
+    // Vorliebe der Tafel, die Flaeche ist das, was der Benutzer sieht.
+    var best: u64 = 0
+    best = dtd_scan(dst, 54, 4, best)
+    // UND DIE ERWEITERUNGSBLOECKE. Oktett 126 sagt, wie viele folgen.
+    // Ein CTA-861-Block (Kennung 0x02) traegt an der Stelle, die sein
+    // Oktett 2 nennt, weitere Zeitlagensaetze -- auf einer 4K-Tafel
+    // steht die native Aufloesung genau dort und NIRGENDWO sonst.
+    var ext: u64 = kstate.get8(dst + 126)
+    if ext > 2 {
+        ext = 2
+    }
+    var e: u64 = 0
+    while e < ext {
+        let base: u64 = dst + 128 + e * 128
+        var sum2: u64 = 0
+        var k: u64 = 0
+        while k < 128 {
+            sum2 = (sum2 + kstate.get8(base + k)) & 0xFF
+            k = k + 1
+        }
+        if sum2 == 0 && kstate.get8(base) == 0x02 {
+            let doff: u64 = kstate.get8(base + 2)
+            if doff >= 4 && doff < 127 {
+                // (127 - doff) / 18 Saetze passen noch in den Block.
+                best = dtd_scan(base, doff, (127 - doff) / 18, best)
+            }
+        }
+        e = e + 1
+    }
+    // UND WENN GAR KEINE ZEITLAGE DASTEHT: die acht Kurzsaetze ab
+    // Oktett 38. Sie sind keine Zeitlagen, sondern Wuensche -- aber sie
+    // sind das EINZIGE, was manche Tafel ueber ihre Groesse sagt.
+    //
+    // GEMESSEN: QEMU meldet fuer einen 3840x2160-Schirm ueberhaupt keine
+    // Zeitlage. Der Pixeltakt einer 4K-Zeitlage passt nicht in die
+    // sechzehn Bit des EDID-Feldes, also laesst der Erzeuger den Satz
+    // weg. Ohne diesen Rueckfall landete der Kern dort auf 800x600 --
+    // auf einem 4K-Schirm. Mit ihm auf dem groessten Kurzsatz.
+    if best == 0 {
+        best = std_scan(dst)
+    }
+    s(state, S_NATW, best >> 16)
+    s(state, S_NATH, best & 0xFFFF)
+}
+
+// ------------------------------------------- RUNDE SCHIRM: die Tafel
+//
+// WAS VORHER FEHLTE, UND ES FEHLTE NICHT AN DER MESSUNG, SONDERN AN DER
+// VERWENDUNG. Dieses Modul liest den EDID-Block seit Runde DISPLAY und
+// meldet ihn auf der seriellen Leitung:
+//
+//     disp: edid ok  nat=1920x1080  ven=RHT  mod=QEMU Monitor
+//     fb: 800x600x32 ...
+//
+// Zwei Zeilen untereinander: der Kernel WEISS, dass die Tafel 1920x1080
+// kann, und stellt 800x600 ein. Der Grund ist die Reihenfolge -- `probe`
+// laeuft NACH `fb.init`, weil es die Fensterplaetze zaehlt, die `init`
+// gerade genommen hat. Diese Funktion ist der Teil, der VORHER laufen
+// kann: sie sucht die Karte, liest den Block und ruehrt keinen Modus an.
+//
+// Rueckgabe (w << 16) | h, 0 = keine brauchbare Auskunft.
+fn native(state: u64) -> u64 {
+    if !find_card(state) {
+        return 0
+    }
+    edid_probe(state)
+    if !edid_ok(state) {
+        return 0
+    }
+    let w: u64 = g(state, S_NATW)
+    let h: u64 = g(state, S_NATH)
+    if w < 640 || h < 400 || w > 8192 || h > 4608 {
+        return 0
+    }
+    return (w << 16) | h
+}
+
+// Oktett 21 und 22 des Blocks: Breite und Hoehe des BILDES in
+// Zentimetern. Das ist die einzige Zahl im ganzen Rechner, die etwas
+// ueber die PHYSISCHE Groesse der Tafel sagt -- ohne sie ist jede
+// Aussage ueber Punkte je Zoll geraten.
+fn edid_mm_w(state: u64) -> u64 {
+    if !edid_ok(state) {
+        return 0
+    }
+    return kstate.get8(state + kstate.DLUT_OFF + EDID_OFF + 21) * 10
+}
+
+fn edid_mm_h(state: u64) -> u64 {
+    if !edid_ok(state) {
+        return 0
+    }
+    return kstate.get8(state + kstate.DLUT_OFF + EDID_OFF + 22) * 10
+}
+
+// Die Vervielfachung aus Punkten je Zoll, wenn die Tafel ihre Groesse
+// nennt. 0 heisst "keine Aussage" -- dann entscheidet die Regel in
+// `fb.scale_for` nach der reinen Bildpunktzahl.
+//
+// Die Schwellen, an einem Zollstock nachgerechnet:
+//   24" 1920x1080  ->  92 dpi -> 1
+//   27" 2560x1440  -> 109 dpi -> 1
+//   15,6" 1920x1080 -> 141 dpi -> 1
+//   27" 3840x2160  -> 163 dpi -> 2
+//   13,3" 2560x1600 -> 227 dpi -> 2
+//   15,6" 3840x2160 -> 282 dpi -> 3
+fn dpi_scale(state: u64, w: u64) -> u64 {
+    let mm: u64 = edid_mm_w(state)
+    if mm < 100 || mm > 2000 || w == 0 {
+        return 0
+    }
+    let dpi: u64 = w * 254 / (mm * 10)
+    if dpi >= 280 {
+        return 3
+    }
+    if dpi >= 150 {
+        return 2
+    }
+    return 1
 }
 
 fn edid_ok(state: u64) -> bool {

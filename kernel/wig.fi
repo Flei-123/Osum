@@ -78,7 +78,7 @@ export {
     blits, rows_copied, pixels, glyph_calls, clip_writes, clip_reads,
     fetch,
     selftest, selftest_max,
-    CLIP_MAX, G_HDR, MAX_ROW
+    CLIP_MAX, G_HDR, MAX_ROW, stuecke
 }
 
 // ------------------------------------------------------- die Zahlen
@@ -88,11 +88,37 @@ const CLIP_MAX: u64 = 4096
 const STAGE_OFF: u64 = 0x2000
 const STAGE_MAX: u64 = 4096
 
-// Die breiteste Bildpunktzeile, die durch den Umschlagpuffer passt.
-// 4096 / 4 = 1024, und der Bildschirm dieser Runde ist 800 breit. Steht
-// hier als Rechnung und nicht als Zahl, damit ein groesserer Puffer
-// nicht vergessen wird.
+// Wie viele Bildpunkte AUF EINMAL durch den Umschlagpuffer passen.
+// 4096 / 4 = 1024. Steht hier als Rechnung und nicht als Zahl, damit
+// ein groesserer Puffer nicht vergessen wird.
+//
+// RUNDE SCHIRM-ECHT: DAS WAR EINMAL DIE BREITESTE ZEILE UEBERHAUPT --
+// UND DAMIT DIE HALBE OBERFLAECHE AUF JEDEM SCHIRM UEBER 1024.
+//
+// `blit` hat bis hierher jede Zeile ABGELEHNT, die breiter war
+// (`w > MAX_ROW -> return 0`). Der Kommentar sagte den Grund selbst:
+// "und der Bildschirm dieser Runde ist 800 breit". Auf 1280x800 sind
+// Schreibtisch und Taskleiste aber 1280 breit; ihr `push` kam nie an,
+// ihr Fensterpuffer behielt die Farbe aus `wm.create`, und weil ohne
+// Blit auch kein `wm.damage` laeuft, war die Leiste im Bild nicht
+// vorhanden. GEMESSEN 03.09.2026: gezeichneter Inhalt 24..650 x 40..443
+// von 1280x800 -- genau die beiden Fenster, die SCHMALER als 1024 sind
+// (Terminal 564, Starter 444). Mit `fbres=800x600` war alles heil.
+//
+// Jetzt ist MAX_ROW die Groesse EINES UMSCHLAGS und keine Schranke:
+// eine breitere Zeile wird in `stuecke(w)` Umschlaege zerlegt. Der
+// Puffer bleibt eine Seite, die Speicherkarte bleibt unberuehrt.
 const MAX_ROW: u64 = 1024 // STAGE_MAX / 4
+
+// Wie viele Umschlaege eine Zeile von `w` Bildpunkten braucht. Steht
+// als eigene Funktion da, weil der Selbsttest sie nachrechnet -- eine
+// Zerlegung, die niemand nachprueft, ist eine Behauptung.
+fn stuecke(w: u64) -> u64 {
+    if w == 0 {
+        return 0
+    }
+    return (w + MAX_ROW - 1) / MAX_ROW
+}
 
 // Der Kopf eines Deckungsfeldes, sechs Woerter, danach w*h Oktette:
 //   +0 Breite  +8 Hoehe  +16 links  +24 oben  +32 Laufweite in 26.6
@@ -293,7 +319,7 @@ fn blit(state: u64, me: u64, i: u64, x: u64, y: u64, w: u64, h: u64,
     if !wm.valid(state, i) {
         return 0
     }
-    if w == 0 || h == 0 || w > MAX_ROW {
+    if w == 0 || h == 0 {
         return 0
     }
     let ww: u64 = wm.win_w(state, i)
@@ -312,13 +338,26 @@ fn blit(state: u64, me: u64, i: u64, x: u64, y: u64, w: u64, h: u64,
     let stage: u64 = base(state) + STAGE_OFF
     var r: u64 = 0
     while r < bh {
-        if !fetch(state, me, stage, src +% r *% stride *% 4, bw *% 4) {
-            // Was schon drin steht, bleibt drin -- aber die Zusage
-            // "so viele Bildpunkte" wird nicht gegeben.
-            ss(state, S_ROWS, gs(state, S_ROWS) + r)
-            return 0
+        // RUNDE SCHIRM-ECHT: eine Zeile geht in so vielen Umschlaegen
+        // hinueber, wie sie braucht. Bis 1024 Bildpunkte ist das genau
+        // einer und damit derselbe Weg wie vorher; darueber sind es
+        // `stuecke(bw)` -- und nicht mehr eine Absage.
+        var c: u64 = 0
+        while c < bw {
+            var n: u64 = bw - c
+            if n > MAX_ROW {
+                n = MAX_ROW
+            }
+            if !fetch(state, me, stage,
+                src +% r *% stride *% 4 +% c *% 4, n *% 4) {
+                // Was schon drin steht, bleibt drin -- aber die Zusage
+                // "so viele Bildpunkte" wird nicht gegeben.
+                ss(state, S_ROWS, gs(state, S_ROWS) + r)
+                return 0
+            }
+            wm.blit_in(state, i, stage, x + c, y + r, n, 1)
+            c = c + n
         }
-        wm.blit_in(state, i, stage, x, y + r, bw, 1)
         r = r + 1
     }
     ss(state, S_BLITS, gs(state, S_BLITS) + 1)
@@ -504,9 +543,14 @@ fn selftest(state: u64) -> u64 {
     if MAX_ROW * 4 == STAGE_MAX {
         gut = gut + 1
     }
-    // 2. Ein Blit, das breiter ist als der Umschlagpuffer, wird
-    //    abgelehnt -- und nicht halb ausgefuehrt.
-    if blit(state, 0, 0, 0, 0, MAX_ROW + 1, 1, 0, MAX_ROW + 1) == 0 {
+    // 2. RUNDE SCHIRM-ECHT: eine Zeile, die breiter ist als der
+    //    Umschlagpuffer, wird ZERLEGT und nicht abgelehnt -- und die
+    //    Rechnung dahinter stimmt an beiden Kanten. Vorher stand hier
+    //    das Gegenteil ("wird abgelehnt"), und genau diese Zusage hat
+    //    den halben Schreibtisch auf 1280x800 gruen abgesegnet.
+    if stuecke(0) == 0 && stuecke(1) == 1 && stuecke(MAX_ROW) == 1
+        && stuecke(MAX_ROW + 1) == 2 && stuecke(2 * MAX_ROW) == 2
+        && stuecke(3840) == 4 {
         gut = gut + 1
     }
     // 3. Ein Fenster, das es nicht gibt.

@@ -54,7 +54,7 @@ export {
     px, get, hline, vline, rect, frame, frame3, blend,
     text_at, text_w, text_h, glyph_w, ascent_of, mono_cell,
     icon_at, icon_box, icon_have, icon_ink_w, icon_ink_h,
-    ICON_SMALL, ICON_MENU, ICON_TASKBAR, ICON_LARGE,
+    icon_small, icon_menu, icon_taskbar, icon_large,
     fit, back, chars,
     push, push_rect, cursor_shape,
     clip_put, clip_take, clip_len,
@@ -93,7 +93,7 @@ export {
     // ---- ROUND NETVIEW, addendum: icons whose colours come from
     // the scheme (OSYM coverage 1..5 = a role, not an alpha).
     icon_ok, icon_w, icon_h, icon_role, icon_draw, ICON_ROLES,
-    F_UI, F_MONO, F_ICON, PX_UI, PX_MONO,
+    F_UI, F_MONO, F_ICON, px_ui, px_mono, ui_scale,
     RGB24, MODE_LIGHT, MODE_DARK, MODE_AUTO,
     NEUTRAL_STEPS, RAMP_STEPS, R_ACCENT, R_DANGER, R_WARNING, R_SUCCESS,
     R_COUNT,
@@ -268,8 +268,13 @@ const MAP_ANON_PRIV: u64 = 34
 // eigenen Text in 14 setzt, zwei Schriftbilder hat.
 const F_UI: u64 = 0
 const F_MONO: u64 = 1
-const PX_UI: u64 = 15
-const PX_MONO: u64 = 16
+// RUNDE SCHIRM: aus zwei Zahlen wurden zwei Grundmasse. Multipliziert
+// wird mit dem, was der Server sagt (WIG_SCREEN, WS_SCALE) -- derselbe
+// Faktor, mit dem er seine Titelleisten und seine eigene Schrift setzt.
+// Stuende hier weiter 15, setzte auf einer 4K-Tafel der Server den Titel
+// in 30 und das Programm darunter seinen Text in 15.
+const PX_UI0: u64 = 15
+const PX_MONO0: u64 = 16
 
 // ROUND ICONS: the third role.  Same number as `wig.F_ICON`, and it has
 // to be -- the value travels through WIG_GLYPH unchanged.
@@ -290,19 +295,57 @@ const F_ICON: u64 = 2
 // they answer to different things: SMALL follows the row height of a
 // list, MENU follows PX_UI.  When one of the two moves, the other must
 // not move with it by accident.
-const ICON_SMALL: u64 = 16
-const ICON_MENU: u64 = 16
-const ICON_TASKBAR: u64 = 20
-const ICON_LARGE: u64 = 24
+const ICON_SMALL0: u64 = 16
+const ICON_MENU0: u64 = 16
+const ICON_TASKBAR0: u64 = 20
+const ICON_LARGE0: u64 = 24
 
 // ------------------------------------------------------- die Flaeche
 
-// 800 x 81 Bildpunkte = 259 200 Oktette, aufgerundet 64 Seiten.
-const SURF_W: u64 = 800
-const SURF_ROWS: u64 = 81
-const SURF_BYTES: u64 = 259200
+// RUNDE SCHIRM -- WARUM HIER EINE KONSTANTE STAND UND JETZT KEINE MEHR.
+//
+// Bis zu dieser Runde war die Malflaeche 800 x 81 Bildpunkte GROSS UND
+// FEST, und `start` gab `false` zurueck, sobald der Bildschirm breiter
+// war als 800:
+//
+//     if ulib.bad(s_scr_w) || s_scr_w == 0 || s_scr_w > SURF_W {
+//         return false
+//     }
+//
+// Das war keine Schranke, das war ein Ausschalter. GEMESSEN, mit
+// demselben Kern und derselben Platte, nur mit `fbbig` dazu:
+//
+//     800x600    wm: windows=5   Schreibtisch, Leiste, Starter, Terminal
+//     1024x768   wm: windows=1   "desktop: keine Flaeche",
+//                                "taskbar: no surface",
+//                                "launcher: keine Flaeche"
+//
+// Und auf ECHTEM Blech faengt es erst ueber 800 an: Limine liefert dem
+// Kern unter UEFI/OVMF 1280x800, unter BIOS mit EDID 1920x1080. Osum
+// startete dort also und zeigte einen leeren Schirm mit einem einzigen
+// Terminalfenster -- genau der Zustand "bootet, ist aber nicht
+// benutzbar".
+//
+// JETZT IST DIE FLAECHE SO BREIT WIE DER SCHIRM. Ihre HOEHE faellt aus
+// einem festen Vorrat: SURF_BUDGET Oktette, geteilt durch eine
+// Bildzeile. Damit kostet ein Prozess unabhaengig von der Aufloesung
+// dasselbe, und die Zahl der Streifen waechst statt der Speicherbedarf:
+//
+//     800 breit   -> 327 Zeilen (vorher 81)
+//    1920 breit   -> 136 Zeilen
+//    3840 breit   ->  68 Zeilen
+//
+// Der 800er Fall wird dabei nebenbei schneller, weil ein voller
+// Schreibtisch statt in acht Streifen in zwei geht.
+const SURF_BUDGET: u64 = 1048576
+// Weiter als das ist kein Bildschirm, den dieser Kernel abbilden kann;
+// die Schranke steht hier gegen eine unsinnige Antwort des Servers und
+// nicht gegen eine Aufloesung.
+const SURF_W_MAX: u64 = 8192
 
 static mut s_surf: u64 = 0
+static mut s_sw: u64 = 0 // Breite der Flaeche = Breite des Schirms
+static mut s_srows: u64 = 0 // wie viele Bildzeilen ein Streifen traegt
 static mut s_band: u64 = 0
 static mut s_scr_w: u64 = 0
 static mut s_scr_h: u64 = 0
@@ -313,6 +356,7 @@ static mut s_cy1: u64 = 0
 static mut s_ready: u64 = 0
 static mut s_noclip: u64 = 0
 static mut s_shape: u64 = 0
+static mut s_scale: u64 = 0 // 0 = noch nicht gefragt
 
 fn sys5(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
     return asm("syscall", out("rax"), in("rax") number, in("rdi") a0,
@@ -326,10 +370,10 @@ fn sys3w(number: u64, a0: u64, a1: u64, a2: u64) -> u64 {
         clobber("memory"))
 }
 
-fn map_surface() -> u64 {
+fn map_surface(bytes: u64) -> u64 {
     let no: u64 = 0 -% 1
     return asm("syscall", out("rax"), in("rax") SYS_MMAP, in("rdi") 0,
-        in("rsi") SURF_BYTES, in("rdx") PROT_RW, in("r10") MAP_ANON_PRIV,
+        in("rsi") bytes, in("rdx") PROT_RW, in("r10") MAP_ANON_PRIV,
         in("r8") no, in("r9") 0, clobber("rcx"), clobber("r11"),
         clobber("memory"))
 }
@@ -338,16 +382,31 @@ fn start(noclip: bool) -> bool {
     if s_ready != 0 {
         return true
     }
-    let p: u64 = map_surface()
+    // ERST FRAGEN, DANN ABBILDEN. Die Reihenfolge war umgekehrt, solange
+    // die Groesse der Flaeche im Quelltext stand; jetzt haengt sie von
+    // der Antwort des Servers ab und muss danach kommen.
+    s_scr_w = sys3w(WIG_SCREEN, 0, 0, 0)
+    s_scr_h = sys3w(WIG_SCREEN, 1, 0, 0)
+    if ulib.bad(s_scr_w) || s_scr_w == 0 || s_scr_w > SURF_W_MAX {
+        return false
+    }
+    if ulib.bad(s_scr_h) || s_scr_h == 0 {
+        return false
+    }
+    var rows: u64 = SURF_BUDGET / (s_scr_w *% 4)
+    if rows == 0 {
+        return false
+    }
+    if rows > s_scr_h {
+        rows = s_scr_h
+    }
+    let p: u64 = map_surface(s_scr_w *% rows *% 4)
     if ulib.bad(p) || p == 0 {
         return false
     }
     s_surf = p
-    s_scr_w = sys3w(WIG_SCREEN, 0, 0, 0)
-    s_scr_h = sys3w(WIG_SCREEN, 1, 0, 0)
-    if ulib.bad(s_scr_w) || s_scr_w == 0 || s_scr_w > SURF_W {
-        return false
-    }
+    s_sw = s_scr_w
+    s_srows = rows
     if noclip {
         s_noclip = 1
     }
@@ -360,16 +419,55 @@ fn ready() -> bool {
     return s_ready != 0
 }
 
+// RUNDE SCHIRM: die Vervielfachung. Einmal gefragt, dann gemerkt -- sie
+// aendert sich nicht, solange das Programm laeuft, und ein Systemaufruf
+// je gezeichnetem Buchstaben waere teurer als der Buchstabe.
+fn ui_scale() -> u64 {
+    if s_scale == 0 {
+        let v: u64 = sys3w(WIG_SCREEN, 6, 0, 0)
+        if ulib.bad(v) || v == 0 || v > 4 {
+            s_scale = 1
+        } else {
+            s_scale = v
+        }
+    }
+    return s_scale
+}
+
+fn px_ui() -> u64 {
+    return PX_UI0 * ui_scale()
+}
+
+fn px_mono() -> u64 {
+    return PX_MONO0 * ui_scale()
+}
+
+fn icon_small() -> u64 {
+    return ICON_SMALL0 * ui_scale()
+}
+
+fn icon_menu() -> u64 {
+    return ICON_MENU0 * ui_scale()
+}
+
+fn icon_taskbar() -> u64 {
+    return ICON_TASKBAR0 * ui_scale()
+}
+
+fn icon_large() -> u64 {
+    return ICON_LARGE0 * ui_scale()
+}
+
 fn surface() -> u64 {
     return s_surf
 }
 
 fn surf_w() -> u64 {
-    return SURF_W
+    return s_sw
 }
 
 fn surf_rows() -> u64 {
-    return SURF_ROWS
+    return s_srows
 }
 
 fn band_y() -> u64 {
@@ -437,26 +535,26 @@ fn px(x: u64, y: u64, color: u64) {
     if x < s_cx0 || x >= s_cx1 || y < s_cy0 || y >= s_cy1 {
         return
     }
-    if x >= SURF_W || y < s_band {
+    if x >= s_sw || y < s_band {
         return
     }
     let r: u64 = y - s_band
-    if r >= SURF_ROWS {
+    if r >= s_srows {
         return
     }
-    __mmio_write32((s_surf +% (r *% SURF_W +% x) *% 4) as *mut u32,
+    __mmio_write32((s_surf +% (r *% s_sw +% x) *% 4) as *mut u32,
         color as u32)
 }
 
 fn get(x: u64, y: u64) -> u64 {
-    if x >= SURF_W || y < s_band {
+    if x >= s_sw || y < s_band {
         return 0
     }
     let r: u64 = y - s_band
-    if r >= SURF_ROWS {
+    if r >= s_srows {
         return 0
     }
-    return __mmio_read32((s_surf +% (r *% SURF_W +% x) *% 4)
+    return __mmio_read32((s_surf +% (r *% s_sw +% x) *% 4)
         as *mut u32) as u64
 }
 
@@ -1255,8 +1353,8 @@ fn push(h: u64, x: u64, y: u64, w: u64, hh: u64) -> u64 {
     if w == 0 || hh == 0 {
         return 0
     }
-    let src: u64 = s_surf +% (y -% s_band) *% SURF_W *% 4 +% x *% 4
-    return sys5(WIG_BLIT, h, (x << 16) | y, (w << 16) | hh, src, SURF_W)
+    let src: u64 = s_surf +% (y -% s_band) *% s_sw *% 4 +% x *% 4
+    return sys5(WIG_BLIT, h, (x << 16) | y, (w << 16) | hh, src, s_sw)
 }
 
 fn push_rect(h: u64, x: u64, y: u64, w: u64, hh: u64) -> u64 {
@@ -3124,11 +3222,35 @@ fn metrics_classic() {
     shp_id = SHAPE_CLASSIC
 }
 
+// RUNDE SCHIRM: LAENGEN WACHSEN MIT DER OBERFLAECHENSCHRIFT.
+//
+// Die Zahlen der Formentabelle sind Bildpunkte fuer eine Zelle von
+// 10x19 -- eine Listenzeile von 20, ein Knopf von 26. Bei doppelter
+// Schrift ist eine Textzeile 38 Bildpunkte hoch, und sie wurde in eine
+// Zeile von 20 gemalt: im Bild von 3840x2160 lagen die Eintraege des
+// Starters UEBEREINANDER ("Suchen -- Programm..." im "Terminal --").
+// Also mal dem Faktor -- aber NUR die Laengen. `M_SHADOW`, `M_TONE`,
+// `M_DIVIDER` und `M_GRAD` sind Hundertstel und bleiben, wie sie sind;
+// ein verdoppelter Prozentwert waere ein anderer Farbton.
+fn metric_ist_laenge(i: u64) -> bool {
+    if i == M_SHADOW || i == M_SHADOW2 || i == M_DIVIDER {
+        return false
+    }
+    if i == M_TONE || i == M_GRAD {
+        return false
+    }
+    return true
+}
+
 fn metric(i: u64) -> u64 {
     if i >= M_COUNT {
         return 0
     }
-    return met[(i) as usize]
+    let v: u64 = met[(i) as usize]
+    if v != 0 && metric_ist_laenge(i) {
+        return v * ui_scale()
+    }
+    return v
 }
 
 fn shape_name() -> u64 {
@@ -4096,7 +4218,7 @@ fn edge_by_name(p: u64) -> u64 {
 // /lib/icons.ttf is a system without icons, not a broken one -- the
 // caller draws its text and leaves the box empty.
 fn icon_have() -> bool {
-    return gfind(F_ICON, ICON_SMALL, icons.NETWORK_WIRED)
+    return gfind(F_ICON, icon_small(), icons.NETWORK_WIRED)
         != 0xFFFFFFFFFFFFFFFF
 }
 
