@@ -82,6 +82,8 @@ export {
     stat,
     have_kbd, have_mouse, msc_errors, msc_ios, selftest,
     rangtest, rangtest_max,
+    // RUNDE HIDPUNKTE: die Punktzahl je Regler und die getroffene Wahl.
+    punkte, pkt_get, wahl,
     DRV_NONE, DRV_KBD, DRV_MOUSE, DRV_MSC
 }
 
@@ -133,6 +135,18 @@ const S_RDLEN: u64 = 0xC0 // Oktette der zuletzt geholten Beschreibung
 // `unplug_check` -- der Zeitgeber darf dem Aufzaehlen nicht ins Wort
 // fallen.
 const S_BUSY: u64 = 0xC8
+
+// RUNDE HIDPUNKTE: DIE PUNKTZAHL JE REGLER, und sie ist der ganze
+// Unterschied zwischen "Justin kann tippen" und "Justin kann nicht
+// tippen". Bis zu dieser Runde gewann der ERSTE Regler, an dem
+// IRGENDEIN Eingabegeraet hing. Auf Justins Brett haengt an hc0 ein
+// Stick und ein HID OHNE Boot-Protokoll (Kingston 0951:16df), an hc1
+// seine Tastatur und seine Maus -- und damit gewann hc0 mit einem
+// Geraet, das keine Taste liefert, waehrend hc1 nie aufgesetzt wurde.
+// Gemessen und nachgestellt in `tools/hidpunkte/run.sh`.
+const S_PKT: u64 = 0xD0 // vier Regler zu 8 Oktett: 0xD0..0xF0
+const S_WAHL: u64 = 0xF0 // welcher Regler behalten wurde
+const MAX_HC_PKT: u64 = 4
 
 const D_USED: u64 = 0
 const D_SLOT: u64 = 8
@@ -349,36 +363,66 @@ fn stage(state: u64) {
     // Anschluessen steht, damit ein Mensch Tastatur und Maus notfalls
     // an denselben stecken kann.
     let anzahl: u64 = xhci.count_hc(state)
-    var u: u64 = 0
-    var behalten: u64 = anzahl
-    while u < anzahl {
-        if versuch(state, u, armed) {
-            behalten = u
-            u = anzahl
-        } else {
-            u = u + 1
-        }
-    }
-    // Keiner hatte ein Eingabegeraet. Dann bleibt der ERSTE stehen: er
-    // kann immer noch einen Stick tragen, und ein Regler, der laeuft,
-    // meldet ein spaeter angestecktes Geraet.
+    // ================================= RUNDE HIDPUNKTE: DER BESTE, NICHT DER ERSTE
     //
-    // `anzahl > 1` IST KEINE FEINHEIT, SONDERN EINE GEMESSENE ZUSAGE.
-    // Ohne diese Bedingung wird auf einer Maschine mit GENAU EINEM
-    // Regler derselbe Regler zweimal aufgesetzt und die Zeile
-    // `usb: devices=` zweimal gedruckt -- und `tools/hid/run.sh` liest
-    // sie ohne `tail`, bekommt "0\n0" statt "0" und faellt. Gefunden
-    // von genau dieser Zusage ("GEGENPROBE nurboot: usb-tablet wird
-    // wieder abgelehnt"), und sie hat recht gehabt: ein Lauf, der
-    // zweimal dasselbe meldet, hat zweimal dasselbe getan.
-    if behalten >= anzahl && anzahl > 1 {
-        let _wieder: bool = versuch(state, 0, armed)
+    // JEDER Regler wird aufgesetzt und aufgezaehlt, und JEDER bekommt
+    // eine Punktzahl (`punkte`). Danach wird der BESTE noch einmal
+    // aufgesetzt und bleibt stehen. Das kostet auf einer Maschine mit
+    // zwei Reglern ein zusaetzliches Aufsetzen (etwa 300 ms) und ist
+    // der Unterschied zwischen einer toten und einer lebenden Tastatur.
+    //
+    // WARUM NICHT BEIDE GLEICHZEITIG: der Vorrat dieses Treibers
+    // (0x50000..0x58000, Ringe, Zusammenhaenge, Endpunkttafel) ist
+    // EINMAL da; zwei Regler gleichzeitig zu fahren hiesse, ihn zu
+    // verdoppeln und jeden Zugriff reglerrelativ zu machen -- eine
+    // eigene Runde. Was DIESE Runde leistet, ist, dass der Regler mit
+    // der Tastatur gewinnt und nicht der mit dem Stick.
+    var u: u64 = 0
+    var bester: u64 = 0
+    var bestp: u64 = 0
+    while u < anzahl && u < MAX_HC_PKT {
+        let p: u64 = versuch(state, u, armed)
+        pkt_set(state, u, p)
+        if p > bestp {
+            bestp = p
+            bester = u
+        }
+        u = u + 1
     }
+    // Der beste wird noch einmal aufgesetzt -- ausser er war ohnehin
+    // der letzte, dann steht er schon.
+    let letzter: u64 = anzahl - 1
+    if anzahl > 0 && bester != letzter {
+        let _wieder: u64 = versuch(state, bester, armed)
+    }
+    s(state, S_WAHL, bester)
+    // EINE ZEILE FUER EIN FOTO: welcher Regler wie viele Punkte hatte
+    // und welcher gewonnen hat. Ohne sie ist "die Tastatur geht nicht"
+    // nicht von "die Tastatur haengt am anderen Regler" zu trennen.
+    var s_w1: [u8; 11] = "usb: wahl \0"
+    var s_w2: [u8; 3] = "hc\0"
+    var s_w3: [u8; 2] = "=\0"
+    var s_w4: [u8; 6] = " -> h\0"
+    var s_w5: [u8; 2] = "c\0"
+    serial.puts((&s_w1[0]) as u64)
+    var v: u64 = 0
+    while v < anzahl && v < MAX_HC_PKT {
+        serial.puts((&s_w2[0]) as u64)
+        serial.dec(v)
+        serial.puts((&s_w3[0]) as u64)
+        serial.dec(pkt_get(state, v))
+        serial.put(32 as u8)
+        v = v + 1
+    }
+    serial.puts((&s_w4[0]) as u64)
+    serial.puts((&s_w5[0]) as u64)
+    serial.dec(bester)
+    serial.nl()
 }
 
 // EIN REGLER: aufsetzen, Anschluesse einschalten, aufzaehlen, berichten.
 // Gibt zurueck, ob an ihm eine Tastatur oder eine Maus haengt.
-fn versuch(state: u64, einheit: u64, armed: bool) -> bool {
+fn versuch(state: u64, einheit: u64, armed: bool) -> u64 {
     var s_fail: [u8; 22] = "usb: init fehlt hc\0\0\0\0"
     var s_hc: [u8; 12] = "usb: xhci \0\0"
     var s_slots: [u8; 7] = "slots=\0"
@@ -404,7 +448,7 @@ fn versuch(state: u64, einheit: u64, armed: bool) -> bool {
         // Auch ein Regler, der sich nicht aufsetzen laesst, bekommt
         // seine Zeile im Bericht -- sonst ist "nichts passiert" von
         // "es gibt ihn nicht" nicht zu unterscheiden.
-        return false
+        return 0
     }
     serial.puts((&s_hc[0]) as u64)
     serial.puts((&s_slots[0]) as u64)
@@ -422,7 +466,7 @@ fn versuch(state: u64, einheit: u64, armed: bool) -> bool {
     scan(state)
     xhci.bericht(state)
     say(state)
-    return have_kbd(state) || have_mouse(state)
+    return punkte(state)
 }
 
 // Alle Anschluesse einschalten und dann durchsehen. In zwei Durchgaengen,
@@ -616,6 +660,66 @@ fn attach(state: u64, port: u64) -> bool {
     drv_name(dg(state, d, D_DRIVER))
     serial.nl()
     return true
+}
+
+// RUNDE HIDPUNKTE: WAS EIN REGLER WERT IST.
+//
+// Nicht "hat er irgendein HID", sondern WIE GUT. Eine Tastatur mit
+// Boot-Protokoll ist das, woran ein Mensch tippt; ein Geraet, das nur
+// ueber seine Berichtsbeschreibung als Zeigegeraet durchgeht (ein
+// Touchpad, QEMUs `usb-tablet`, Justins Kingston), ist ein schwacher
+// Hinweis. Wer beide gleich zaehlt, waehlt den falschen Regler --
+// genau das ist auf Justins Brett passiert.
+//
+// Der Massenspeicher zaehlt ABSICHTLICH null: Kern und Wurzelabbild
+// sind zu diesem Zeitpunkt laengst geladen (Multiboot-Module), der
+// Stick wird nicht mehr gebraucht, und ein Regler ohne Eingabe ist ein
+// Regler ohne Nutzen fuer einen Menschen vor dem Schirm.
+fn punkte(state: u64) -> u64 {
+    var p: u64 = 0
+    var d: u64 = 0
+    while d < MAX_DEV {
+        if dg(state, d, D_USED) != 0 {
+            let k: u64 = dg(state, d, D_DRIVER)
+            // Was ein Geraet IST, steht in seiner Schnittstelle, nicht
+            // darin, auf welchem Weg der Kern es gerade liest. Mit
+            // `hidgen` laeuft AUCH eine Boot-Tastatur ueber den
+            // generischen Zerleger; wer nach `D_GENERIC` unterscheidet,
+            // zaehlt sie dann wie ein Touchpad. Also nach Unterklasse 1
+            // und Protokoll 1/2 -- das ist die Boot-Schnittstelle, und
+            // die hat kein Lautstaerkeregler und kein Kartenleser.
+            let boot: bool = dg(state, d, D_SUB) == 1
+                && (dg(state, d, D_PROTO) == 1 || dg(state, d, D_PROTO) == 2)
+            if k == DRV_KBD || k == DRV_MOUSE {
+                if boot {
+                    p = p + 8
+                } else {
+                    p = p + 3
+                }
+            } else if k == DRV_HIDGEN {
+                p = p + 1
+            }
+        }
+        d = d + 1
+    }
+    return p
+}
+
+fn pkt_get(state: u64, u: u64) -> u64 {
+    if u >= MAX_HC_PKT {
+        return 0
+    }
+    return g(state, S_PKT + u * 8)
+}
+
+fn pkt_set(state: u64, u: u64, v: u64) {
+    if u < MAX_HC_PKT {
+        s(state, S_PKT + u * 8, v)
+    }
+}
+
+fn wahl(state: u64) -> u64 {
+    return g(state, S_WAHL)
 }
 
 fn hex2(v: u64) {

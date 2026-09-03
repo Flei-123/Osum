@@ -183,8 +183,17 @@ lauf() { # name kommandozeile marke sek [mit-eingabe]
 feld() { # datei name
     grep -a '^eingabe:' "$1" | tail -1 | sed -n "s/.*[ :]$2=\([0-9]*\).*/\1/p"
 }
-feld1() { # datei name -- aus der ERSTEN Pulszeile
-    grep -a '^eingabe:' "$1" | head -1 | sed -n "s/.*[ :]$2=\([0-9]*\).*/\1/p"
+feld1() { # datei name -- aus der ersten VOLLSTAENDIGEN Pulszeile
+    # RUNDE HIDPUNKTE: `sh=` IST DAS LETZTE FELD DER ZEILE, und dass hier
+    # danach gefiltert wird, ist keine Vorsicht auf Vorrat. Der Laeufer
+    # wartet jetzt auf die erste Pulszeile und liest die Datei in dem
+    # Augenblick, in dem sie geschrieben wird -- die erste Zeile ist
+    # dann oft halb da. `irq=` steht vorne und war zu lesen, `mk=` und
+    # `xy=` stehen hinten und waren leer, und ein leerer Vergleichswert
+    # laesst jede Zusage darauf fallen. Gemessen: "der Zeitgeber
+    # schlaegt (mk): 4217, sollte groesser als  sein".
+    grep -a '^eingabe:' "$1" | grep -a 'sh=' | head -1 \
+        | sed -n "s/.*[ :]$2=\([0-9]*\).*/\1/p"
 }
 
 BASE="modfs osum gfx wm wig desk wmshell usb hidgen nosched noproc nofs"
@@ -202,7 +211,23 @@ echo "       (Lebensdauer bis zum Aufgeben: $(( (t1-t0)/1000000000 )) s)"
 
 echo
 echo "== 3. MIT wmdauer laeuft er weiter, und die Meldungen kommen an =="
-lauf neu "$BASE wmdauer" '^wm: term win=' 45
+# RUNDE HIDPUNKTE: DIE MARKE IST JETZT DIE ERSTE PULSZEILE UND NICHT
+# MEHR DAS TERMINALFENSTER, und das ist die Reparatur eines Wettlaufs im
+# LAEUFER, nicht im Kern.
+#
+# Die drei Zusagen weiter unten vergleichen die LETZTE Pulszeile mit der
+# ERSTEN ("irq steigt", "ber steigt", "der Zeiger bewegt sich"). Das
+# Terminalfenster steht aber lange VOR dem ersten Puls (der haengt an
+# den Marken, alle fuenf Sekunden). Wurde die elf Sekunden lange
+# Befehlsfolge in dieser Luecke abgearbeitet, stand in der ERSTEN
+# Pulszeile bereits `ber=13 irq=47 xy=799,539` -- und dieselbe Zahl kann
+# nicht groesser als sie selbst sein.
+#
+# Gemessen an BEIDEN Kernen, dem dieser Runde und dem davor (HEAD ohne
+# die Aenderungen): erste und letzte Zeile identisch. Es ist also die
+# Zeitlage der Maschine und keine Regression -- deshalb wird hier die
+# Marke verschoben und nicht die Zusage aufgeweicht.
+lauf neu "$BASE wmdauer" '^eingabe:' 45
 hatnicht "$TMPD/neu.txt" 'wm: sh exit' "mit wmdauer gibt der Schreibtisch NICHT auf"
 is "die Maschine lief noch, als der Laeufer sie abraeumte" "$RC" 124
 hat "$TMPD/neu.txt" 'wm: dauer' "der Dauerbetrieb steht im Mitschnitt"

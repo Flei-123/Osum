@@ -87,9 +87,47 @@ Alles davon steht mit Zahlen in `docs/RUNDE-HIDWEG.md`;
 `tools/hidweg/run.sh` misst es (**31 gehalten, 0 gefallen**), mit
 Gegenproben in beide Richtungen.
 
+### ZWEITER BLECH-LAUF, 03.09.2026 18:53 — Abbild `46df9d4c`
+
+Justin hat das Abbild der Runde HIDWEG gestartet. **Zwei Zusagen haben
+gehalten, vier Fehler standen weiter da:**
+
+| | Beleg vom Bildschirm |
+|---|---|
+| **die Meldung läuft jetzt auch auf hc0** | `usb: hc0 … events=50 IRQS=20 cmds=10` (vorher `irqs=0`) |
+| **MSI-X greift auf echtem Silizium** | `usb: hc1 melde=MSI-X strom=8/8 verbunden=2 frei=2` |
+| Eingabe im Schreibtisch | **weiter tot** — Zeiger unbewegt, keine Taste |
+| Taskleiste | **unten nichts, reines Blau** |
+| Terminalfenster | links abgeschnitten: „al -- sh" statt „Terminal -- sh" |
+| Mauszeiger | ein weißer Fleck, kein Pfeil |
+
+Runde HIDPUNKTE hat die vier nachgestellt und behoben. Der Eingabefehler
+war **eine Nebenwirkung der Runde davor**: seit HIDWEG bindet der Kern
+HID auch ohne Boot-Protokoll, und damit zählte Justins Kingston
+(`0951:16df`, `class=03:00:00`) an hc0 als Zeigegerät. `usb.stage`
+behielt den **ersten** Regler mit irgendeinem Eingabegerät — also hc0,
+mit einem Gerät, das keine Taste liefert. hc1 mit Tastatur und Maus
+wurde nie aufgesetzt.
+
+Nachgestellt in QEMU mit `usb-tablet` als Stellvertreter für die
+Kingston, gemessen vorher/nachher:
+
+| | `ta` | `lo` | `bew` | `pk` | `wm` |
+|---|---|---|---|---|---|
+| vorher | **0** | **0** | **0** | 2 | 3 |
+| nachher | **3** | **3** | **5** | **5** | **6** |
+
+Die drei Bildfehler sind alle **der Schirm**: auf 3440x1440 scheitert
+der Puffer der Taskleiste (`rc=-4`, Leiste 128 statt 3440 Bildpunkte
+breit, im Bildschirmfoto nachgemessen), das Terminalfenster hat feste
+560x380 und ist zu schmal für seinen eigenen Titel, und der Zeiger war
+das einzige Stück Oberfläche, das nicht mit `uiscale` wächst — 8x15
+Bildpunkte auf einem 34-Zoll-Schirm. Zahlen in `docs/RUNDE-HIDPUNKTE.md`,
+gemessen von `tools/hidpunkte/run.sh` (**19 gehalten, 0 gefallen**).
+
 **Das Abbild, auf das sich diese Tafel bezieht:** gebaut aus dem Zweig
-`hidweg` (Runde HIDWEG), 123 731 968 Oktette,
-SHA-256 `46df9d4cdc8ac17291e068c22abca77bb803592c74e5424c3def1285c781c972`,
+`hidpunkte` (Runde HIDPUNKTE), 123 731 968 Oktette,
+SHA-256 `0339dac53cbf5b088a414c996ecbcfd972bb93b739d8a91eb4ac912b5cad2cb5`,
 ausgeliefert als `/srv/store/abbilder/osum-usb.img` (daneben
 `osum-usb.img.sha256`).
 Ein zweiter Baulauf aus demselben Baum gibt eine andere Prüfsumme —
