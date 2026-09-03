@@ -1,8 +1,9 @@
 <!-- SPDX-License-Identifier: GPL-2.0-only -->
 # BLECH-BEREIT — was Osum auf einem echten Laptop kann, Geräteklasse für Geräteklasse
 
-Stand **03.09.2026**, Zweig `main` nach Runde BLECH-ECHT. Gemessen auf dem
-üblichen Wirt (AMD EPYC 7571, 12 Kerne, 19 GiB, `/dev/kvm`, QEMU 7.2.22).
+Stand **03.09.2026**, Zweig `main` nach Runde **STICK** (davor:
+BLECH-ECHT). Gemessen auf dem üblichen Wirt (AMD EPYC 7571, 12 Kerne,
+19 GiB, `/dev/kvm`, QEMU 7.2.22).
 
 **Die Regel dieser Datei, und sie gilt ohne Ausnahme:** jede Zeile sagt
 **GEHT**, **GEHT NICHT** oder **UNGEMESSEN**, und daneben steht, woher
@@ -26,6 +27,8 @@ nie auf echtem Blech gelaufen** — dieses Projekt hat kein Testbrett.
 | **Vom Stick starten, wenn der Stick an NVMe hängt** | **GEHT** | UEFI + `-device nvme,drive=stick`: gestartet, und der Kern meldet danach `hwdiag: disk NVMe bdf=0x20 1b36:0010` |
 | **Vom Stick starten, wenn er an einem AHCI-Anschluss hängt** | **GEHT** | UEFI + `-device ahci` + `ide-hd,bus=ahci0.0`: gestartet, `hwdiag: disk AHCI bdf=0x20 8086:2922` |
 | Partitionierung, die eine fremde Firmware akzeptiert | **GEHT** | GPT, EFI-Partition (EF00) mit `EFI/BOOT/BOOTX64.EFI`, `limine.conf`, `osum.mb`, `root.img`, `limine-bios.sys`; BIOS-Startteil im MBR-Bereich |
+| **Eine Kommandozeile auf dem Stick** | **GEHT** | Runde STICK: Menüeintrag 5 *„Kommandozeile mit Netz“*. `console=ttyS0` macht COM1 zu einem Terminal, `vfs` gibt die Einhängetafel, `nic` die Karte. Gemessen unter BIOS **und** UEFI, vom Abbild über Limine: `tools/stick/run.sh`, **42 bestanden, 0 gescheitert** |
+| Ein zweiter Datenträger (FAT32) | **GEHT** | mit `vfs` hängt der Kern die FAT-Partition der zweiten Platte beim Start selbst unter `/mnt` ein — gemessen im Lauf `sbr` der Runde STICK. **OFS lässt sich nicht zweimal einhängen** (`tools/e2e/run.sh`), für einen zweiten Datenträger also FAT |
 | **Auf einem echten Laptop starten** | **UNGEMESSEN** | **nur QEMU, nie auf echtem Blech gelaufen.** Es gibt keinen Rechner in diesem Projekt, auf dem der Stick je gesteckt hat |
 
 ---
@@ -39,6 +42,7 @@ nie auf echtem Blech gelaufen** — dieses Projekt hat kein Testbrett.
 | **Intel I217/I218/I219 (PCH, Business-Laptops)** | **UNGEMESSEN** | Der PCH-Zweig steht in `kernel/e1000.fi` (13 Gerätenummern), der Datenweg ist mit dem gemessenen e1000 geteilt, der Aufsetzweg kommt aus dem Datenblatt. **QEMU hat keinen I219** — nie gelaufen. Es fehlt `e1000_flush_desc_rings` (der bekannte Hänger auf Skylake+) |
 | **Intel I225/I226 (2,5 G)** | **GEHT NICHT** | wird erkannt und **beim Namen genannt** (`-> none igc silicon, advanced descriptors`), aber es gibt keinen Treiber |
 | **WLAN (alle)** | **GEHT NICHT** | Es gibt keine Zeile 802.11 in diesem Repository. AX200/AX201/AX210, MT7921, QCA6390 werden in der Tabelle als `wifi, needs 802.11 + fw` benannt und sonst nichts. **Du brauchst Kabel.** |
+| **Adresse und Nameserver per DHCP** | **GEHT** (QEMU) | Runde STICK, und vorher ging es **nicht**: ein DISCOVER an 255.255.255.255 lief durch `next_hop` und ARP und blieb ohne eingetragenes Gateway liegen. `net_output` nimmt dafür jetzt ff:ff:ff:ff:ff:ff. Vom Abbild gemessen: `dhcp: ack ip=10.0.2.15 lease=86400`, `/etc/resolv.conf geschrieben, dns 1` |
 | Netzkarte, die keiner kennt | **GEHT** | wird als `no driver for 0x…` gemeldet, mit Namen wenn bekannt, und **der Kern läuft danach weiter** (gemessen mit `ne2k_pci`) |
 
 ---
@@ -62,7 +66,8 @@ nie auf echtem Blech gelaufen** — dieses Projekt hat kein Testbrett.
 |---|---|---|
 | Rahmenpuffer von der Firmware (UEFI-GOP über Limine) | **GEHT** | `hwdiag: fb 1280x800 bpp=32 pitch=5120 src=multiboot` — die Auflösung kommt vom Lader, nicht geraten |
 | Rahmenpuffer ohne Lader (Bochs/VBE-Register) | **GEHT** | `src=vbe`, `fb: selftest 13 / 13` |
-| **Die Oberfläche füllt einen großen Schirm** | **GEHT NICHT** | **gemessen, 03.09.2026:** bei 1280x800 liegt der gezeichnete Inhalt nur in `24..650 × 40..443` — **49 % der Breite, 50 % der Höhe** —, und die Taskleiste ist unsichtbar, obwohl sie sich selbst richtig ausrechnet (`taskbar: geom edge=0 x=0 y=772 w=1280 h=28 shown=1`). Mit `fbres=800x600` füllt dieselbe Oberfläche den Schirm zu 100 %. Deshalb ist der Zweig `schirm` in dieser Runde **nicht** nach `main` gekommen — siehe `docs/RUNDE-BLECH-ECHT.md` |
+| **Die Oberfläche füllt einen großen Schirm** | **GEHT** (QEMU) | **Behoben in Runde STICK, gemessen 03.09.2026.** Der gezeichnete Inhalt füllt **100 % × 100 %** bei 800x600, 1280x800, 1920x1080 und 2048x1152, die Taskleiste ist sichtbar (Bilder: `docs/shots/schirm-nach-*.png`, vorher `schirm-vor-1280x800.png` mit 49 % × 50 %). Ursache war **nicht** die Auflösung: `wig.blit` hat jede Bildpunktzeile breiter als 1024 (`MAX_ROW`) stillschweigend abgelehnt, und Schreibtisch und Taskleiste sind so breit wie der Schirm. Jetzt wird sie zerlegt statt abgelehnt — `docs/RUNDE-STICK.md`, Teil 1 |
+| Auflösung des Bildschirms erkennen (EDID) | **GEHT** (QEMU) | Zweig `schirm`, jetzt in `main`: alle vier Zeitlagensätze, CTA-Erweiterungen, Kurzsatz-Rückfall. 1024x768, 1920x1080, 2560x1440 übernommen; auf einem 4K-Schirm meldet QEMU keine Zeitlage, dann 2048x1152. **Unter einem Lader bestimmt der Lader** — dafür hat `limine.conf` Einträge für WQHD und 4K |
 | Echter GPU-Treiber, Beschleunigung | **GEHT NICHT** | und ist auch nicht geplant: der Weg über den Firmware-Rahmenpuffer trägt auf Intel, AMD und Nvidia gleichermaßen |
 
 ---
@@ -90,56 +95,91 @@ nie auf echtem Blech gelaufen** — dieses Projekt hat kein Testbrett.
 | **Ton** | **GEHT NICHT** | kein HDA, kein AC97, keine Zeile |
 | **TPM** | **GEHT NICHT** | für den Zweck nicht nötig |
 | **Treiber nachladen (`.omod`, signiert)** | **GEHT** (QEMU) | `tools/modul/run.sh`: **74 bestanden, 0 gefallen** — Kern ohne PS/2-Maustreiber, Modul von der Platte geladen, Maus bewegt sich, Modul wieder entladen |
-| **Update über das Netz (OTA)** | **GEHT** (QEMU) | Runde BETRIEB/MERGE-5: über den **Namen** `store.fleitec.com`, eigener DNS-Auflöser, echte Let's-Encrypt-Kette, signiertes Verzeichnis. **Aber nicht vom Stick** — siehe unten |
-| **JARVIS-Brücke (`/bin/jarvisd`)** | **GEHT** (QEMU) | `tools/bridge/run.sh`: **113 bestanden, 0 durchgefallen**, gegen einen TLS-Server in Python, nicht gegen den echten Server. **Aber nicht vom Stick** |
+| **Update über das Netz (OTA), VOM STICK** | **GEHT** (QEMU) | Runde STICK, im laufenden System vom Abbild getippt, unter BIOS und UEFI: `dhcp` → `host store.fleitec.com` (dieselbe Adresse, die `dig` auf dem Wirt nennt) → `fetch https://store.fleitec.com/index.json`: **`fetch: roots 11`, `fetch: verify OK`, `fetch: certs 4`** — echte Let's-Encrypt-Kette gegen die Mozilla-Wurzeln **im Abbild** → `ota suchen`: `ota: fassung dort 2`, `ota: NEUE FASSUNG verfuegbar` |
+| **`ota einspielen` vom Stick** | **UNGEMESSEN** | und zwar mit Ansage: die Wurzel des Sticks ist ein Boot-Modul im Arbeitsspeicher, ein eingespieltes Update überlebt den Neustart nicht. Für ein Update, das bleibt, muss Osum erst installiert sein (`/bin/install`). Gemessen ist `ota einspielen` auf einer PLATTE (Runde OTA/MERGE-5) |
+| **JARVIS-Brücke (`/bin/jarvisd`), VOM STICK** | **GEHT** (QEMU) | Runde STICK: `jarvisd: verbunden` / `angemeldet`, und auf der Gegenseite (Python, nicht Osum) `TLSv1.3`, `BEWEIS gut` (Ed25519, von python-cryptography nachgerechnet), `ANGEMELDET`, **zwei Aufträge beantwortet** — `system` und `/bin/echo`, dessen Ausgabe auf dem Stick entstanden ist. Gegen `tools/bridge/gegenstelle.py`, **nicht** gegen den echten JARVIS-Server. Die Rechteliste des Prüfstands kam auf einer zweiten Platte herein; **das Abbild wurde dafür nicht angefasst** |
 
 ---
 
-## 7. WAS AUF DEM STICK FEHLT — und das ist eine kurze, konkrete Liste
+## 7. WAS AUF DEM STICK IST — die Liste aus Abschnitt 7 ist abgearbeitet
 
-Der Stick trägt **43 Ring-3-Programme**. Nicht darunter:
-`ota`, `fetch`, `host`, `jarvisd`, `jsig`, `jarvisctl`, `pollbr`.
+Der Stick trug **43** Ring-3-Programme. Er trägt jetzt **52**. Dazu
+gekommen sind genau die sieben, die hier bis zum 03.09.2026 als fehlend
+standen — `ota`, `fetch`, `host`, `jarvisd`, `jsig`, `jarvisctl`,
+`pollbr` —, und dazu `dhcp` und `reboot`, ohne die die anderen nichts
+können.
 
-Das heißt in Klartext: **vom Stick aus kann Osum sich nicht selbst
-aktualisieren, keine HTTPS-Seite holen und die JARVIS-Brücke nicht
-starten** — obwohl der Kern das Netz kann und alle drei Programme im
-Repository stehen und gemessen sind. Es fehlt eine Zeile Bauliste
-(`PROGS` in `tools/usbimg/build.sh`) und der App-Bauweg, den
-`tools/install/build.sh` schon hat. Das ist die kleinste und lohnendste
-nächste Runde.
+`fetch` und `jarvisd` sind `--profile=app` und bringen TLS 1.3 mit
+(1 532 800 Oktette); die übrigen sind `profile kernel`. Der Bauweg dafür
+steht seit dieser Runde in `tools/usbimg/build.sh` und ist wörtlich der
+aus `tools/install/build.sh`.
+
+**Und was sie brauchen, um etwas zu können, liegt auch drauf:**
+
+| Pfad | was |
+|---|---|
+| `/etc/ssl/roots.pem` | 15 261 Oktette, **11 Mozilla-Wurzeln** — ohne sie vertraut `fetch` nichts |
+| `/etc/ota.conf` | `quelle=https://store.fleitec.com/osum/aktuell`, **`auto=nein`** |
+| `/system/schluessel.pub` | der Schlüssel der Auslieferung, 32 Oktette |
+| `/system/FASSUNG`, `/system/SCHLUESSELGEN` | je neun Oktette fester Breite |
+| `/etc/jarvis/rechte.conf` | die Rechteliste — **ab Werk ist alles aus** |
+
+Zwei Vorgaben sind ausdrücklich so gewählt und stehen so im Bauskript:
+**`auto=nein`** (ein Stick, der ab Werk von selbst irgendwo nachfragt,
+wäre eine Entscheidung, die niemand getroffen hat) und eine **leere
+Rechteliste** (kein Server, keine Befehle, kein Bildschirmfoto, keine
+Pfade — so gestartet meldet sich `jarvisd` nirgends an).
+
+**Was jetzt noch fehlt, ist kurz und steht in `docs/RUNDE-STICK.md`:**
+ein Rechner aus Blech, ein Lauf gegen den echten JARVIS-Server statt
+gegen den Prüfstand, und `ota einspielen` von einem Stick — was, siehe
+oben, ohne Installation ohnehin nicht bleiben würde.
 
 ---
 
 ## 8. DIE ANTWORT AUF DIE FRAGE
 
-**„Kann ich den Stick jetzt in einen Laptop stecken und es läuft?"**
+**„Kann ich den Stick jetzt in einen Laptop stecken und es läuft?“**
 
-**Nein — nicht verlässlich, und niemand kann heute sagen, ob es auf
-deinem Laptop läuft, weil Osum noch auf keinem einzigen echten Rechner
-gestartet ist.** Was gemessen ist, ist QEMU.
+**Stecken ja, ausprobieren ja — verlassen kann man sich nicht darauf,
+und der Grund ist derselbe wie gestern: Osum ist noch auf keinem
+einzigen echten Rechner gestartet.** Was gemessen ist, ist QEMU. Was
+sich gegenüber gestern geändert hat, ist, dass der Stick jetzt etwas
+KANN, wenn er startet.
 
 Was du erwarten darfst, wenn du es probierst:
 
 * **Starten** wird er wahrscheinlich: BIOS und UEFI, von einem
   USB-Stick, von SATA und von NVMe — alle vier Wege sind mit demselben
   Abbild gefahren worden.
+* **Bild:** Du bekommst ein Bild in der Auflösung, die die Firmware
+  setzt, **und die Oberfläche füllt es jetzt auch** — samt Taskleiste
+  unten. Das war gestern der hässlichste Satz dieser Datei und ist
+  erledigt. Auf einem WQHD- oder 4K-Bildschirm nimm die beiden
+  Menüeinträge, die die Auflösung dem Lader vorgeben.
+* **Etwas tun:** Menüeintrag 5, *„Kommandozeile mit Netz“*. Dort gibt es
+  eine Shell — auf dem Bildschirm und auf der seriellen Leitung — und
+  darin `dhcp`, `host`, `fetch`, `ota`, `jarvisd`, `mount` und die
+  übrigen 45 Programme.
 * **Netz:** nur mit **Kabel**. WLAN geht nicht, gar nicht. Hat der
   Laptop einen Realtek- oder Intel-e1000-Anschluss, stehen die Chancen
   gut; ein I225/I226 (2,5 Gbit) wird erkannt, aber **nicht gefahren**.
+  Mit Kabel: `dhcp` holt Adresse und Nameserver selbst.
+* **Sich aktualisieren:** `ota suchen` findet den Update-Server über
+  seinen **Namen** und liest das signierte Verzeichnis. **Einspielen
+  bringt vom Stick nichts** — die Wurzel liegt im Arbeitsspeicher und ist
+  nach dem Neustart wieder die alte.
 * **Platte:** NVMe und SATA/AHCI werden gefunden. Steht das BIOS auf
   **RAID** statt AHCI, siehst du keine Platte — dann im BIOS umstellen.
+  Eine **FAT32**-Platte oder ein zweiter Stick hängt beim Start unter
+  `/mnt`.
 * **Tastatur/Touchpad:** Am Desktop mit PS/2 oder USB: geht. **Auf einem
   Ultrabook, dessen Touchpad an I²C hängt, ist es Glückssache** — der
-  Weg ist gebaut, aber nie an echter Hardware gelaufen, und ohne
-  AML-Interpreter wird das Gerät geraten statt gefragt.
-* **Bild:** Du bekommst ein Bild in der Auflösung, die die Firmware
-  setzt. **Die Oberfläche füllt es aber nicht** — sie sitzt in der
-  oberen linken Ecke, und die Taskleiste ist nicht zu sehen (gemessen:
-  49 % × 50 % bei 1280x800). Das ist der ehrlichste Satz dieser Datei:
-  **so wie es heute ist, sieht der Schreibtisch auf einem großen Schirm
-  kaputt aus.**
-* **Selbst aktualisieren oder die JARVIS-Brücke starten:** vom Stick
-  aus **nicht** — die Programme sind nicht drauf.
+  Weg ist gebaut, aber nie an echter Hardware gelaufen. Für den Fall,
+  dass gar keine Tastatur ankommt: die Kommandozeile geht auch über ein
+  serielles Terminal.
+* **Ton, TPM, Beschleunigung, S3:** nein.
 
-**Kurz:** zum Anschauen und Ausprobieren mit Kabelnetz ja; als System,
-auf dem man arbeitet, nein.
+**Kurz:** zum Anschauen, Ausprobieren und für einen ersten echten
+Bericht von Blech — ja, und dafür ist er jetzt gemacht. Als System, auf
+dem man arbeitet — nein.
