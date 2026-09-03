@@ -62,6 +62,8 @@ import kstate
 import mem
 import font
 import fb
+// RUNDE MESSTAFEL: die Fensterliste geht auf die serielle Leitung.
+import serial
 // RUNDE NETVIEW, NACHTRAG: die einzigen zwei Zeilen, die diese Runde
 // in den Fensterserver legt. `netview` sagt, welche Netzsicht der
 // Besitzer eines Fensters hat, `netmark` traegt das Zeichen dafuer.
@@ -110,6 +112,11 @@ export {
     on_screen_resize, win_tabbed, tiled,
     MAX_WIN, K_RAW, K_TERM, title_h, border, grip, max_w, max_h,
     set_uiscale, uisc, messleiste,
+    // RUNDE MESSTAFEL
+    mess_grund, messzeile, messhoehe, messk,
+    mess_gruen, mess_rot, mess_weiss, mess_gelb, mess_ampel,
+    evpush, evpop, keyin, curx, cury, evdrops,
+    win_paints, win_px, win_flags, top_layer_win, wins_say,
     MAX_W_HARD, MAX_H_HARD,
     E_KEY, E_DOWN, E_UP, E_MOVE, E_CLOSE, E_FOCUS, E_RESIZE,
     L_DESK, L_NORMAL, L_TOP, F_HIDDEN, F_NODECO, F_TABBED,
@@ -356,6 +363,30 @@ const S_DROPE: u64 = 0x240 // Bildschirmrand + 1 statt eines Zielfensters
 const S_DRAGT: u64 = 0x248 // das gezogene Fenster kam AUS dem Baum
 const S_HOTS: u64 = 0x250 // wie viele Tastenkuerzel ausgefuehrt wurden
 const S_ACTS: u64 = 0x258 // wie viele davon wirklich etwas getan haben
+
+// ===================================== RUNDE MESSTAFEL: DER EINGABEWEG
+//
+// Drei Zaehler, die es vorher nicht gab, und jeder beantwortet GENAU
+// eine Frage aus Justins Kette "wo bleibt mein Tastendruck":
+//
+//   S_KEYIN   wie oft `on_key` gerufen wurde -- also wie viele Tasten
+//             der FENSTERSERVER entgegengenommen hat. Vorher war das
+//             nicht zu sehen: `usb.hid_keys` zaehlt, was `hidin` an
+//             `kbd` gab, und danach klaffte eine Luecke bis zum Fenster.
+//   S_EVPUSH  wie viele Ereignisse in einen Fensterring GELEGT wurden.
+//   S_EVPOP   wie viele ein RING-3-PROGRAMM daraus ABGEHOLT hat.
+//
+// Das letzte Paar ist der Kern der Sache. Stehen beide hoch, arbeitet
+// der Schreibtisch. Laeuft `S_EVPUSH` hoch und `S_EVPOP` bleibt null,
+// dann liefert der Kern und NIEMAND holt ab -- dann laeuft kein
+// Ring-3-Prozess mehr, und das erklaert die tote Eingabe UND die
+// unsichtbare Taskleiste mit EINER Ursache statt mit zweien.
+//
+// Die Luecke 0x260..0x278 war frei; `tools/paint/scalars.py` prueft das
+// mechanisch nach und ist nach dieser Aenderung gelaufen.
+const S_EVPUSH: u64 = 0x260 // Ereignisse in einen Fensterring gelegt
+const S_EVPOP: u64 = 0x268 // Ereignisse von einem Programm abgeholt
+const S_KEYIN: u64 = 0x270 // Tasten, die der Fensterserver annahm
 
 // ---------------------------------------------------- RUNDE THEME
 //
@@ -610,6 +641,28 @@ const W_SAVWH: u64 = 0x110
 // leeren Namen und die Taskleiste faellt auf reinen Text zurueck --
 // dieselbe Regel wie bei Netz und Akku.
 const W_APP: u64 = 0x118 // APP_LEN Oktette
+
+// ================= RUNDE MESSTAFEL: WURDE DIESES FENSTER GEMALT ODER NICHT
+//
+// Justins Taskleiste meldet Erfolg (`rc=0`, richtige Groesse, richtige
+// Kante) und ist trotzdem nicht zu sehen. Zwischen "das Fenster gibt es"
+// und "die Bildpunkte stehen auf dem Schirm" lagen bisher vier Stufen
+// ohne eine einzige Zahl. Diese beiden Zaehler schliessen die groesste
+// Luecke davon:
+//
+//   W_PAINTS  wie oft `paint_win` dieses Fenster wirklich gemalt hat
+//   W_PX      wie viele Bildpunkte dabei zusammenkamen
+//
+// Steht bei der Leiste PAINTS=0, hat `compose` sie UEBERGANGEN -- dann
+// ist sie verborgen, nicht in der Stapelfolge, oder ihr Rechteck liegt
+// ausserhalb des schmutzigen Bereichs. Steht PAINTS hoch und man sieht
+// sie trotzdem nicht, sind die Bildpunkte gemalt und der Fehler liegt
+// DAHINTER (Zweitpuffer, Flush, Zeilenabstand). Das ist der Unterschied,
+// den kein Foto bisher machen konnte.
+//
+// 0x118 + APP_LEN endet bei 0x130, WIN_BYTES ist 512 -- der Platz ist da.
+const W_PAINTS: u64 = 0x130 // wie oft compose dieses Fenster malte
+const W_PX: u64 = 0x138 // und wie viele Bildpunkte dabei herauskamen
 const APP_LEN: u64 = 24
 
 // "kein Terminal". Absichtlich eine Zahl und kein Ruf nach `tty.fi`:
@@ -1448,6 +1501,125 @@ fn focus(state: u64) -> u64 {
 
 fn composites(state: u64) -> u64 {
     return gs(state, S_COMPOSITES)
+}
+
+// RUNDE MESSTAFEL -- die fuenf Stufen, von aussen lesbar.
+fn evpush(state: u64) -> u64 {
+    return gs(state, S_EVPUSH)
+}
+
+fn evpop(state: u64) -> u64 {
+    return gs(state, S_EVPOP)
+}
+
+fn keyin(state: u64) -> u64 {
+    return gs(state, S_KEYIN)
+}
+
+// WO DER ZEIGER LAUT FENSTERSERVER STEHT. Nicht `ps2m.x` -- das ist
+// die Stelle, die der Treiber fuehrt. Wenn die beiden auseinander
+// laufen, holt der Server nicht ab, und genau das soll man sehen.
+fn curx(state: u64) -> u64 {
+    return gs(state, S_CURX)
+}
+
+fn cury(state: u64) -> u64 {
+    return gs(state, S_CURY)
+}
+
+fn evdrops(state: u64) -> u64 {
+    return gs(state, S_EVDROP)
+}
+
+fn win_paints(state: u64, i: u64) -> u64 {
+    if !valid(state, i) {
+        return 0
+    }
+    return wg(state, i, W_PAINTS)
+}
+
+fn win_px(state: u64, i: u64) -> u64 {
+    if !valid(state, i) {
+        return 0
+    }
+    return wg(state, i, W_PX)
+}
+
+fn win_flags(state: u64, i: u64) -> u64 {
+    if !valid(state, i) {
+        return 0
+    }
+    return wg(state, i, W_FLAGS)
+}
+
+// DAS FENSTER DER TASKLEISTE, ohne dass der Kern die Leiste kennen muss:
+// das oberste benutzte Fenster auf der Ebene L_TOP. Genau dorthin legt
+// `taskbar.fi` sich (`WS_LAYER = L_TOP`), und sonst nichts.
+fn top_layer_win(state: u64) -> u64 {
+    var z: u64 = gs(state, S_COUNT)
+    while z > 0 {
+        z = z - 1
+        let i: u64 = at_z(state, z)
+        if i < MAX_WIN && wg(state, i, W_USED) != 0 {
+            if wg(state, i, W_LAYER) == L_TOP {
+                return i
+            }
+        }
+    }
+    return MAX_WIN
+}
+
+// ================== RUNDE MESSTAFEL: DIE FENSTERLISTE AUF DIE LEITUNG
+//
+// Eine Zeile je Fenster, mit ALLEM, was zwischen "angelegt" und
+// "sichtbar" schiefgehen kann: Kennung, Lage, Groesse, Ebene, die
+// Merkerbits, der Platz in der Stapelfolge -- und die beiden neuen
+// Zaehler. Wer diese Liste hat, muss ueber die Taskleiste nicht mehr
+// raten.
+fn wins_say(state: u64) {
+    if !ready(state) {
+        return
+    }
+    var s_h: [u8; 11] = "wm: fen i=\0"
+    var s_id: [u8; 5] = " id=\0"
+    var s_x: [u8; 4] = " x=\0"
+    var s_y: [u8; 4] = " y=\0"
+    var s_w: [u8; 4] = " w=\0"
+    var s_hh: [u8; 4] = " h=\0"
+    var s_l: [u8; 6] = " lay=\0"
+    var s_f: [u8; 5] = " fl=\0"
+    var s_z: [u8; 4] = " z=\0"
+    var s_p: [u8; 8] = " malen=\0"
+    var s_px: [u8; 5] = " px=\0"
+    var i: u64 = 0
+    while i < MAX_WIN {
+        if wg(state, i, W_USED) != 0 {
+            serial.puts((&s_h[0]) as u64)
+            serial.dec(i)
+            serial.puts((&s_id[0]) as u64)
+            serial.dec(wg(state, i, W_ID))
+            serial.puts((&s_x[0]) as u64)
+            serial.dec(win_x(state, i) as u64)
+            serial.puts((&s_y[0]) as u64)
+            serial.dec(win_y(state, i) as u64)
+            serial.puts((&s_w[0]) as u64)
+            serial.dec(wg(state, i, W_W))
+            serial.puts((&s_hh[0]) as u64)
+            serial.dec(wg(state, i, W_H))
+            serial.puts((&s_l[0]) as u64)
+            serial.dec(wg(state, i, W_LAYER))
+            serial.puts((&s_f[0]) as u64)
+            serial.dec(wg(state, i, W_FLAGS))
+            serial.puts((&s_z[0]) as u64)
+            serial.dec(wg(state, i, W_Z))
+            serial.puts((&s_p[0]) as u64)
+            serial.dec(wg(state, i, W_PAINTS))
+            serial.puts((&s_px[0]) as u64)
+            serial.dec(wg(state, i, W_PX))
+            serial.nl()
+        }
+        i = i + 1
+    }
 }
 
 fn blits(state: u64) -> u64 {
@@ -3127,6 +3299,12 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     if ax1 <= ax0 || ay1 <= ay0 {
         return
     }
+    // RUNDE MESSTAFEL: AB HIER WIRD GEMALT. Der Zaehler steht vor der
+    // Verzweigung nach `deko`, weil beide Zweige malen -- ein Zaehler je
+    // Zweig waere zweimal dieselbe Aussage mit doppelter Fehlerquelle.
+    wsv(state, i, W_PAINTS, wg(state, i, W_PAINTS) + 1)
+    wsv(state, i, W_PX,
+        wg(state, i, W_PX) + ((ax1 - ax0) * (ay1 - ay0)) as u64)
     // OHNE SCHMUCK: kein Rahmen, keine Titelleiste, kein Schliessfeld.
     // Die Flaeche der Anwendung faengt am aeusseren Rechteck an, und der
     // ganze Rest dieser Funktion entfaellt. Ein Schreibtisch mit
@@ -3754,33 +3932,81 @@ fn fb_glyph(state: u64, slot: u64, x: i64, y: i64, color: u64,
 }
 
 // ==================================== RUNDE HIDPUNKTE: DIE MESSLEISTE
+// ======================================= RUNDE MESSTAFEL: SIEBEN ZEILEN
 //
-// EINE ZEILE, DIE NICHT VOM FENSTERSYSTEM ABHAENGT.
+// EINE ANZEIGE, DIE NICHT VOM FENSTERSYSTEM ABHAENGT.
 //
 // Der Eingabepuls stand bisher IM Terminalfenster. Auf Justins Brett
 // war genau dieses Fenster zu schmal und links abgeschnitten -- die
 // Diagnose war also da, wo man sie am wenigsten lesen konnte. Diese
-// Zeile wird NACH `compose` unmittelbar in den Rahmenpuffer gemalt,
+// Zeilen werden NACH `compose` unmittelbar in den Rahmenpuffer gemalt,
 // mit dem eingebauten Bitmapzeichensatz (kein TTF, kein Fenster, kein
-// Puffer, keine Arena). Sie steht deshalb auch dann da, wenn der
+// Puffer, keine Arena). Sie stehen deshalb auch dann da, wenn der
 // Fensterserver, die Taskleiste und die Schrift allesamt versagen.
 //
-// Oben links, schwarz hinterlegt, mit `uisc` vergroessert.
-fn messleiste(state: u64, p: u64, n: u64) {
+// RUNDE MESSTAFEL, UND DAS IST DER GRUND FUER DEN UMBAU: Justin
+// fotografiert den Bildschirm mit dem Mobiltelefon AUS ZWEI METERN.
+// Eine Zeile mit zwanzig Zahlen in `uisc`-Groesse ist auf so einem
+// Foto nicht zu lesen. Also: sieben kurze Zeilen, ein Maszstab GROESSER
+// als der der Oberflaeche, und -- das ist das eigentliche Werkzeug --
+// JEDE STUFE BEKOMMT EINE FARBE. Gruen heiszt "hier kam etwas an", rot
+// heiszt "hier kam nichts an". Die ERSTE ROTE ZEILE ist die Stelle, an
+// der der Eingabeweg abreiszt. Das kann man aus zwei Metern erkennen,
+// ohne eine einzige Ziffer zu entziffern.
+fn messk(state: u64) -> u64 {
+    // Eine Stufe groesser als die Oberflaeche, hoechstens 4. Auf
+    // 3440x1440 ist `uisc` 2, die Tafel also 3: 24 x 48 Bildpunkte je
+    // Zeichen, rund elf Millimeter hoch. Das ist aus zwei Metern
+    // dieselbe Winkelgroesse wie 6-mm-Text aus einem Meter.
+    var k: u64 = uisc(state) + 1
+    if k > 4 {
+        k = 4
+    }
+    return k
+}
+
+fn messhoehe(state: u64, zeilen: u64) -> u64 {
+    return font.GLYPH_H * messk(state) * zeilen + 2 * messk(state)
+}
+
+// DER GRUND WIRD EINMAL GEFUELLT, nicht je Zeile. Sieben schwarze
+// Balken ueber die volle Schirmbreite waeren auf 3440 Punkten 1,15
+// Millionen Bildpunkte JE RUNDE -- der Grund hoert deshalb dort auf,
+// wo die laengste Zeile aufhoert (`spalten` Zeichen).
+fn mess_grund(state: u64, zeilen: u64, spalten: u64) {
     if !fb.ready(state) {
         return
     }
-    let k: u64 = uisc(state)
-    let gw: u64 = font.GLYPH_W * k
-    let gh: u64 = font.GLYPH_H * k
-    let breite: u64 = fb.width(state)
-    let hoehe: u64 = gh + 2 * k
+    let k: u64 = messk(state)
+    let hoehe: u64 = messhoehe(state, zeilen)
     if hoehe >= fb.height(state) {
         return
     }
-    let bg: u64 = fb.rgb(state, 0x00, 0x00, 0x00)
-    let fg: u64 = fb.rgb(state, 0x00, 0xFF, 0x66)
-    fb.fill(state, 0, 0, breite, hoehe, bg)
+    var breite: u64 = font.GLYPH_W * k * spalten + 2 * k
+    if breite > fb.width(state) {
+        breite = fb.width(state)
+    }
+    fb.fill(state, 0, 0, breite, hoehe, fb.rgb(state, 0x00, 0x00, 0x00))
+    // EIN RAHMEN, damit die Tafel auf einem Foto nicht mit einem
+    // dunklen Fenster verwechselt wird.
+    let rand: u64 = fb.rgb(state, 0x40, 0x40, 0x40)
+    fb.fill(state, 0, hoehe - k, breite, k, rand)
+    fb.dirty(state, 0, hoehe)
+}
+
+// EINE ZEILE. `zeile` zaehlt ab null, `fg` ist die Farbe.
+fn messzeile(state: u64, zeile: u64, p: u64, n: u64, fg: u64) {
+    if !fb.ready(state) {
+        return
+    }
+    let k: u64 = messk(state)
+    let gw: u64 = font.GLYPH_W * k
+    let gh: u64 = font.GLYPH_H * k
+    let y0: u64 = k + zeile * gh
+    if y0 + gh >= fb.height(state) {
+        return
+    }
+    let breite: u64 = fb.width(state)
     var i: u64 = 0
     var x: u64 = k
     while i < n && x + gw <= breite {
@@ -3796,7 +4022,7 @@ fn messleiste(state: u64, p: u64, n: u64) {
                         var dx: u64 = 0
                         while dx < k {
                             fb.pixel(state, x + c * k + dx,
-                                k + r * k + dy, fg)
+                                y0 + r * k + dy, fg)
                             dx = dx + 1
                         }
                         dy = dy + 1
@@ -3809,7 +4035,42 @@ fn messleiste(state: u64, p: u64, n: u64) {
         x = x + gw
         i = i + 1
     }
-    fb.dirty(state, 0, hoehe)
+    fb.dirty(state, y0, y0 + gh)
+}
+
+// DIE FARBEN DER TAFEL. Gruen: hier kam etwas an. Rot: hier nicht.
+fn mess_gruen(state: u64) -> u64 {
+    return fb.rgb(state, 0x00, 0xFF, 0x66)
+}
+
+fn mess_rot(state: u64) -> u64 {
+    return fb.rgb(state, 0xFF, 0x40, 0x40)
+}
+
+fn mess_weiss(state: u64) -> u64 {
+    return fb.rgb(state, 0xFF, 0xFF, 0xFF)
+}
+
+fn mess_gelb(state: u64) -> u64 {
+    return fb.rgb(state, 0xFF, 0xE0, 0x00)
+}
+
+// Gruen, wenn der Zaehler laeuft -- sonst rot.
+fn mess_ampel(state: u64, v: u64) -> u64 {
+    if v == 0 {
+        return mess_rot(state)
+    }
+    return mess_gruen(state)
+}
+
+// DIE ALTE EINZEILIGE FASSUNG, unveraendert im Verhalten: sie malt
+// ihren eigenen Grund und steht in Zeile null. Sie bleibt, weil die
+// Runde FASSUNG mit ihr belegt hat, dass eine Zeile ueber `compose`
+// hinweg stehenbleibt, und weil ein Kern ohne Tafel (Selbsttest) sie
+// weiter braucht.
+fn messleiste(state: u64, p: u64, n: u64) {
+    mess_grund(state, 1, n + 1)
+    messzeile(state, 0, p, n, mess_gruen(state))
 }
 
 fn paint_cursor(state: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
@@ -3869,6 +4130,8 @@ fn ev_push(state: u64, i: u64, typ: u64, a: u64, b: u64, c: u64) {
     kstate.set(p, 0, typ)
     kstate.set(p, 8, ((a & 0xFFFF) << 32) | ((b & 0xFFFF) << 16) | (c & 0xFFFF))
     wsv(state, i, W_EHEAD, kopf + 1)
+    // RUNDE MESSTAFEL, Stufe 4a: hier verlaesst das Ereignis den Kern.
+    ss(state, S_EVPUSH, gs(state, S_EVPUSH) + 1)
 }
 
 fn ev_waiting(state: u64, i: u64) -> u64 {
@@ -3888,6 +4151,10 @@ fn ev_pop(state: u64, i: u64, out: u64) -> bool {
     kstate.set(out, 0, kstate.get(p, 0))
     kstate.set(out, 8, kstate.get(p, 8))
     wsv(state, i, W_ETAIL, schwanz + 1)
+    // RUNDE MESSTAFEL, Stufe 4b: und hier holt es ein Programm ab.
+    // Diese Zeile ist der einzige Beleg dafuer, dass ueberhaupt noch
+    // ein Ring-3-Prozess laeuft.
+    ss(state, S_EVPOP, gs(state, S_EVPOP) + 1)
     return true
 }
 
@@ -4105,6 +4372,8 @@ fn on_key(state: u64, c: u64) {
     if !ready(state) || c == 0 {
         return
     }
+    // RUNDE MESSTAFEL, Stufe 3 fuer die Tastatur.
+    ss(state, S_KEYIN, gs(state, S_KEYIN) + 1)
     if gs(state, S_NOFOCUS) != 0 {
         var i: u64 = 0
         while i < MAX_WIN {
