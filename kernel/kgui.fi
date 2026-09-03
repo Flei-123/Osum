@@ -47,6 +47,7 @@ import usb
 import vmode
 import wig
 import wm
+import fassung
 import xhci
 import kutil
 
@@ -2499,6 +2500,10 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         usb.poll(state)
         wm.poll(state)
         wm.compose(state)
+        // RUNDE FASSUNG: UNMITTELBAR NACH DEM ZUSAMMENSETZEN, JEDE
+        // RUNDE. Vorher stand die Zeile nur im Puls und war beim
+        // naechsten `compose` weg (siehe `kopf_malen`).
+        kopf_malen(state)
         if dauer {
             let jetzt: u64 = kstate.get(state, kstate.TICKS)
             // DIE MARKEN SIND DIE UHR. Die Rundenzahl ist NUR der
@@ -2558,8 +2563,48 @@ const PULS_RUNDEN: u64 = 4000
 // Steht `ber=0`, kommt gar nichts an. Steht `ber` hoch und `pk=0`,
 // haengt es zwischen Bericht und Zeiger. Steht `pk` hoch und `wm=0`,
 // haengt es im Fensterserver.
+// ================================== RUNDE FASSUNG: DIE KOPFZEILE BLEIBT
+//
+// HIER WAR EIN ECHTER FEHLER, UND ER HAT JUSTIN EINEN TESTLAUF
+// GEKOSTET. Die Messleiste wurde bisher NUR im Puls gemalt, also alle
+// fuenf Sekunden -- und sie markiert ihren Streifen dabei als
+// schmutzig. Das naechste `wm.compose` malt einen schmutzigen Streifen
+// mit dem Schreibtisch zu. Sichtbar war die Zeile damit fuer den
+// Bruchteil einer Runde; auf einem Foto ist sie praktisch nie drauf.
+// Justin hat sie deshalb gemeldet als "keine gruene Zeile" -- und er
+// hatte recht.
+//
+// Jetzt steht der Text in einem bleibenden Puffer, und gemalt wird er
+// nach JEDEM `compose`. Der Puls fuellt nur noch den Puffer.
+static mut kopf: [u8; 176] = [0 as u8; 176]
+static mut kopf_n: u64 = 0
+
+fn kopf_setzen(state: u64, p: u64, n: u64) {
+    var i: u64 = 0
+    var m: u64 = n
+    if m > 175 {
+        m = 175
+    }
+    while i < m {
+        kstate.set8((&kopf[0]) as u64 + i, kstate.get8(p + i) as u8)
+        i = i + 1
+    }
+    kopf_n = m
+}
+
+// Jede Runde nach dem Zusammensetzen. Steht nichts im Puffer, steht
+// wenigstens die Fassung da -- damit ein Foto des Schreibtischs IMMER
+// sagt, welche Fassung laeuft.
+fn kopf_malen(state: u64) {
+    if kopf_n == 0 {
+        wm.messleiste(state, fassung.text(), fassung.laenge())
+        return
+    }
+    wm.messleiste(state, (&kopf[0]) as u64, kopf_n)
+}
+
 fn eingabe_puls(state: u64, tw: u64, neustarts: u64) {
-    var buf: [u8; 160] = [0 as u8; 160]
+    var buf: [u8; 200] = [0 as u8; 200]
     var n: u64 = 0
     var m_ber: [u8; 10] = "eingabe: \0"
     var m_b: [u8; 5] = "ber=\0"
@@ -2578,6 +2623,15 @@ fn eingabe_puls(state: u64, tw: u64, neustarts: u64) {
     var m_m: [u8; 5] = " wm=\0"
     var m_c: [u8; 5] = " kl=\0"
     var m_sh: [u8; 5] = " sh=\0"
+    // RUNDE FASSUNG: DIE ZEILE FAENGT MIT DER FASSUNG AN. Justin
+    // fotografiert den Bildschirm; wenn die Fassung nicht IN der Zeile
+    // steht, die er fotografiert, steht sie fuer ihn nirgends.
+    var m_wahl: [u8; 7] = " wahl=\0"
+    n = puls_text(state, (&buf[0]) as u64, n, fassung.text())
+    n = puls_text(state, (&buf[0]) as u64, n, (&m_wahl[0]) as u64)
+    n = puls_zahl(state, (&buf[0]) as u64, n, usb.wahl(state))
+    kstate.set8((&buf[0]) as u64 + n, 32)
+    n = n + 1
     n = puls_text(state, (&buf[0]) as u64, n, (&m_ber[0]) as u64)
     n = puls_text(state, (&buf[0]) as u64, n, (&m_b[0]) as u64)
     n = puls_zahl(state, (&buf[0]) as u64, n, usb.reports(state))
@@ -2622,8 +2676,12 @@ fn eingabe_puls(state: u64, tw: u64, neustarts: u64) {
     // schmal und links abgeschnitten -- die Diagnose stand also da, wo
     // sie am schlechtesten zu lesen war. Diese Zeile haengt an nichts:
     // kein Fenster, kein Puffer, keine TTF-Schrift.
+    //
+    // RUNDE FASSUNG: sie wird hier nur noch HINTERLEGT und in der
+    // Hauptschleife nach jedem `compose` gemalt -- sonst ueberschreibt
+    // das naechste Zusammensetzen sie sofort wieder.
     if n > 0 {
-        wm.messleiste(state, (&buf[0]) as u64, n - 1)
+        kopf_setzen(state, (&buf[0]) as u64, n - 1)
     }
     kstate.set8((&buf[0]) as u64 + n - 1, 0)
     serial.puts((&buf[0]) as u64)
@@ -2634,7 +2692,7 @@ fn eingabe_puls(state: u64, tw: u64, neustarts: u64) {
 fn puls_text(state: u64, buf: u64, at: u64, t: u64) -> u64 {
     var n: u64 = at
     var i: u64 = 0
-    while kstate.get8(t + i) != 0 && n < 150 {
+    while kstate.get8(t + i) != 0 && n < 190 {
         kstate.set8(buf + n, kstate.get8(t + i) as u8)
         n = n + 1
         i = i + 1
@@ -2656,7 +2714,7 @@ fn puls_zahl(state: u64, buf: u64, at: u64, v: u64) -> u64 {
         k = k + 1
     }
     var n: u64 = at
-    while k > 0 && n < 150 {
+    while k > 0 && n < 190 {
         k = k - 1
         kstate.set8(buf + n, ziffern[k as usize])
         n = n + 1
