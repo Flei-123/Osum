@@ -1657,17 +1657,9 @@ fn surface(state: u64) {
     // Die Shell im Terminalfenster -- auf ausdrueckliches Wort, weil sie
     // eine Platte braucht.
     if kstate.mode_on(state, kstate.M_WMSHELL) {
-        var p_sh: [u8; 8] = "/bin/sh\0"
-        var a_sh: [u8; 3] = "sh\0"
-        let abuf: u64 = state + kstate.EARG_OFF
-        var k: u64 = 0
-        while k < 3 {
-            kstate.set8(abuf + k, a_sh[k as usize])
-            k = k + 1
-        }
-        let sh: u64 = elf.spawn(state, (&p_sh[0]) as u64, abuf, 1, 2)
+        let sh: u64 = shell_start(state)
         if sh != 0 {
-            let code: u64 = wait_wm(state, sh)
+            let code: u64 = wait_wm(state, sh, tw)
             serial.puts((&s_exit[0]) as u64)
             serial.dec(code)
             serial.nl()
@@ -2384,23 +2376,252 @@ fn say_wig(state: u64) {
 // Warten auf die Shell im Fenster -- wie `wait_long`, aber es setzt
 // zwischendurch zusammen, damit man beim Zusehen etwas sieht und damit
 // der Zeiger sich bewegen laesst, waehrend sie laeuft.
-fn wait_wm(state: u64, i: u64) -> u64 {
+// Die Shell im Terminalfenster starten. Steht hier und nicht mehr
+// mitten in `surface`, weil sie seit RUNDE HIDWEG zweimal gebraucht
+// wird: einmal am Anfang und wieder, wenn sie im Dauerbetrieb endet.
+fn shell_start(state: u64) -> u64 {
+    var p_sh: [u8; 8] = "/bin/sh\0"
+    var a_sh: [u8; 3] = "sh\0"
+    let abuf: u64 = state + kstate.EARG_OFF
+    var k: u64 = 0
+    while k < 3 {
+        kstate.set8(abuf + k, a_sh[k as usize])
+        k = k + 1
+    }
+    return elf.spawn(state, (&p_sh[0]) as u64, abuf, 1, 2)
+}
+
+// ===================================================== RUNDE HIDWEG
+//
+// DIESE SCHLEIFE IST DER SCHREIBTISCH. Sie holt den Zeiger ab
+// (`wm.poll`) und setzt das Bild zusammen (`wm.compose`) -- laeuft sie
+// nicht, bewegt sich nichts, egal wie fehlerfrei der USB-Baum darunter
+// ist.
+//
+// WAS HIER FALSCH WAR, und es ist der Sperrpunkt der Runde: die
+// Schleife hatte eine HARTE RUNDENGRENZE von 20000. Sie war als
+// Notausgang fuer die TESTLAEUFE gedacht -- ein Laeufer, der ewig auf
+// eine Shell wartet, ist kein Laeufer. Auf dem Stick aber steht auf
+// jedem Schreibtisch-Eintrag `nosched`, und dann kostet eine Runde
+// keine Zeitmarke, sondern nur einen Durchgang. GEMESSEN in QEMU mit
+// genau der Kommandozeile von Menue 4: der Schreibtisch lebte
+// **9,4 Sekunden**, danach kehrte `surface` zurueck, der Kern lief
+// durch bis `kernel: done` und das Bild stand still.
+//
+// Von aussen sieht das aus wie ein kaputter Eingabetreiber: das Bild
+// ist da, der Zeiger ist da, Tastatur und Maus haben Strom -- und
+// nichts reagiert. Der Treiber war in Ordnung; es rief ihn nur
+// niemand mehr.
+//
+// Mit `wmdauer` gibt es keine Grenze. Endet die Shell im Fenster
+// (STRG-D), wird sie NEU GESTARTET statt den Schreibtisch mitzunehmen.
+fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
     if i == 0 {
         return 0xFFFFFFFFFFFFFFFF
     }
+    let dauer: bool = kstate.mode_on(state, kstate.M_WMDAUER)
+    var s_d: [u8; 12] = "wm: dauer\0\0\0"
+    if dauer {
+        serial.puts((&s_d[0]) as u64)
+        serial.nl()
+    }
+    var cur: u64 = i
     var rounds: u64 = 0
-    while rounds < 20000 {
-        if sched.tget(state, i, sched.T_STATE) == sched.S_ZOMBIE {
-            let code: u64 = sched.tget(state, i, sched.T_EXIT)
-            proc.reap(state, i)
-            return code
+    var neustarts: u64 = 0
+    // ZWEI UHREN, UND DIE SCHNELLERE GEWINNT. Der Zeitgeber ist die
+    // richtige (fuenf Sekunden bleiben fuenf Sekunden, egal wie schnell
+    // die Maschine zusammensetzt) -- aber unter `nosched` ist nicht
+    // ausgemacht, dass die Marken ueberhaupt weiterzaehlen, und ein
+    // Puls, der nie kommt, ist schlimmer als einer, der ungenau ist.
+    // Also ausserdem eine Rundenzahl als Rueckfall.
+    var naechster: u64 = kstate.get(state, kstate.TICKS) + PULS_MARKEN
+    var naechste_runde: u64 = PULS_RUNDEN
+    var letzte_marke: u64 = kstate.get(state, kstate.TICKS)
+    while dauer || rounds < 20000 {
+        if sched.tget(state, cur, sched.T_STATE) == sched.S_ZOMBIE {
+            let code: u64 = sched.tget(state, cur, sched.T_EXIT)
+            proc.reap(state, cur)
+            if !dauer {
+                return code
+            }
+            // Im Dauerbetrieb ist eine beendete Shell kein Grund, den
+            // Schreibtisch zu schliessen -- sie kommt wieder.
+            //
+            // ABER NICHT SOFORT. Gemessen: auf einer Maschine, deren
+            // Konsole nichts liefert, kehrt `read` mit null zurueck und
+            // die Shell endet in dem Augenblick, in dem sie anfaengt.
+            // Wer sie dann ungebremst neu startet, baut einen
+            // Prozessgenerator statt eines Terminals. Eine Sekunde
+            // Abstand -- ein Mensch merkt sie nicht, ein Sturm schon.
+            sched.sleep_ticks(state, 100)
+            neustarts = neustarts + 1
+            cur = shell_start(state)
+            if cur == 0 {
+                cur = i
+            }
         }
+        // RUNDE HIDWEG, MESSPUNKT: der zweite Weg zu denselben
+        // Berichten. Steht die Meldung, findet er nichts mehr vor --
+        // steht sie nicht, ist er der Weg. Der Unterschied ist an
+        // `irq=` und `ber=` im Puls abzulesen.
+        usb.poll(state)
         wm.poll(state)
         wm.compose(state)
+        if dauer {
+            let jetzt: u64 = kstate.get(state, kstate.TICKS)
+            // DIE MARKEN SIND DIE UHR. Die Rundenzahl ist NUR der
+            // Rueckfall fuer den Fall, dass die Marken STEHEN -- und
+            // genau dann ist der Puls das Wichtigste auf dem Schirm,
+            // weil ein stehender Zeitgeber heisst, dass die
+            // Unterbrechungen aus sind. Steht die Uhr nicht, schweigt
+            // der Rueckfall: sonst schreibt der Kern dem Menschen sein
+            // Terminalfenster in vierzig Sekunden 238-mal voll
+            // (gemessen), und das ist keine Diagnose, das ist Rauschen.
+            if jetzt >= naechster {
+                naechster = jetzt + PULS_MARKEN
+                naechste_runde = rounds + PULS_RUNDEN
+                letzte_marke = jetzt
+                eingabe_puls(state, tw, neustarts)
+            } else if rounds >= naechste_runde {
+                naechste_runde = rounds + PULS_RUNDEN
+                if jetzt == letzte_marke {
+                    eingabe_puls(state, tw, neustarts)
+                }
+                letzte_marke = jetzt
+            }
+        }
         sched.sleep_ticks(state, 1)
         rounds = rounds + 1
     }
     return 0xFFFFFFFFFFFFFFFE
+}
+
+// Wie oft der Eingabepuls erscheint: alle 500 Marken, also alle fuenf
+// Sekunden, WENN der Zeitgeber laeuft. Unter `nosched` zaehlt er
+// trotzdem (der Zeitgeberbehandler haengt nicht am Ablaufplaner), also
+// ist der Abstand auch dort eine echte Zeit und keine Rundenzahl.
+const PULS_MARKEN: u64 = 500
+// Der Rueckfall, wenn die Marken nicht laufen.
+const PULS_RUNDEN: u64 = 4000
+
+// =============================== DER EINGABEPULS, GEBAUT FUER EIN FOTO
+//
+// Justin steht vor dem Rechner mit einem Mobiltelefon. Er kann NICHT
+// die serielle Leitung mitlesen -- was er sehen kann, ist der
+// Bildschirm, und darauf das Terminalfenster. Also wird diese eine
+// Zeile DORT hineingeschrieben (`wm.term_write`) und zusaetzlich auf
+// die serielle Leitung.
+//
+// Sie beantwortet die Frage "wo bleibt mein Tastendruck" der Reihe
+// nach, von unten nach oben:
+//
+//   ber=   HID-Berichte, die der USB-Baum entgegengenommen hat
+//   irq=   Meldungen des xHCI (0 hiesse: alles nur ueber Abfrage)
+//   ta=    Tasten, die `hidin` daraus gelesen hat, lo= Loslassen
+//   bew=   Mausbewegungen aus HID-Berichten
+//   pk=    Pakete, die beim Zeiger ankamen (mx/my = seine Stelle)
+//   wm=    wie oft der Fensterserver eine Zeigeraenderung abgeholt hat
+//   kl=    Klicks, die im Fensterserver ankamen
+//
+// Steht `ber=0`, kommt gar nichts an. Steht `ber` hoch und `pk=0`,
+// haengt es zwischen Bericht und Zeiger. Steht `pk` hoch und `wm=0`,
+// haengt es im Fensterserver.
+fn eingabe_puls(state: u64, tw: u64, neustarts: u64) {
+    var buf: [u8; 160] = [0 as u8; 160]
+    var n: u64 = 0
+    var m_ber: [u8; 10] = "eingabe: \0"
+    var m_b: [u8; 5] = "ber=\0"
+    var m_i: [u8; 6] = " irq=\0"
+    var m_e: [u8; 5] = " ev=\0"
+    var m_s: [u8; 6] = " sts=\0"
+    var m_n: [u8; 7] = " iman=\0"
+    var m_mk: [u8; 5] = " mk=\0"
+    var m_if: [u8; 5] = " if=\0"
+    var m_t: [u8; 5] = " ta=\0"
+    var m_l: [u8; 5] = " lo=\0"
+    var m_w: [u8; 6] = " bew=\0"
+    var m_p: [u8; 5] = " pk=\0"
+    var m_x: [u8; 5] = " xy=\0"
+    var m_k: [u8; 2] = ",\0"
+    var m_m: [u8; 5] = " wm=\0"
+    var m_c: [u8; 5] = " kl=\0"
+    var m_sh: [u8; 5] = " sh=\0"
+    n = puls_text(state, (&buf[0]) as u64, n, (&m_ber[0]) as u64)
+    n = puls_text(state, (&buf[0]) as u64, n, (&m_b[0]) as u64)
+    n = puls_zahl(state, (&buf[0]) as u64, n, usb.reports(state))
+    n = puls_text(state, (&buf[0]) as u64, n, (&m_i[0]) as u64)
+    n = puls_zahl(state, (&buf[0]) as u64, n, xhci.irqs(state))
+    n = puls_text(state, (&buf[0]) as u64, n, (&m_e[0]) as u64)
+    n = puls_zahl(state, (&buf[0]) as u64, n, xhci.events(state))
+    n = puls_text(state, (&buf[0]) as u64, n, (&m_s[0]) as u64)
+    n = puls_zahl(state, (&buf[0]) as u64, n, xhci.usbsts(state))
+    n = puls_text(state, (&buf[0]) as u64, n, (&m_n[0]) as u64)
+    n = puls_zahl(state, (&buf[0]) as u64, n, xhci.iman(state))
+    n = puls_text(state, (&buf[0]) as u64, n, (&m_mk[0]) as u64)
+    n = puls_zahl(state, (&buf[0]) as u64, n, kstate.get(state, kstate.TICKS))
+    n = puls_text(state, (&buf[0]) as u64, n, (&m_if[0]) as u64)
+    let fl: u64 = asm("pushfq\npop rax", out("rax"))
+    n = puls_zahl(state, (&buf[0]) as u64, n, (fl >> 9) & 1)
+    n = puls_text(state, (&buf[0]) as u64, n, (&m_t[0]) as u64)
+    n = puls_zahl(state, (&buf[0]) as u64, n, usb.hid_keys(state))
+    n = puls_text(state, (&buf[0]) as u64, n, (&m_l[0]) as u64)
+    n = puls_zahl(state, (&buf[0]) as u64, n, usb.hid_los(state))
+    n = puls_text(state, (&buf[0]) as u64, n, (&m_w[0]) as u64)
+    n = puls_zahl(state, (&buf[0]) as u64, n, usb.hid_bew(state))
+    n = puls_text(state, (&buf[0]) as u64, n, (&m_p[0]) as u64)
+    n = puls_zahl(state, (&buf[0]) as u64, n, ps2m.packets(state))
+    n = puls_text(state, (&buf[0]) as u64, n, (&m_x[0]) as u64)
+    n = puls_zahl(state, (&buf[0]) as u64, n, ps2m.x(state))
+    n = puls_text(state, (&buf[0]) as u64, n, (&m_k[0]) as u64)
+    n = puls_zahl(state, (&buf[0]) as u64, n, ps2m.y(state))
+    n = puls_text(state, (&buf[0]) as u64, n, (&m_m[0]) as u64)
+    n = puls_zahl(state, (&buf[0]) as u64, n, wm.moves_seen(state))
+    n = puls_text(state, (&buf[0]) as u64, n, (&m_c[0]) as u64)
+    n = puls_zahl(state, (&buf[0]) as u64, n, wm.downs(state))
+    n = puls_text(state, (&buf[0]) as u64, n, (&m_sh[0]) as u64)
+    n = puls_zahl(state, (&buf[0]) as u64, n, neustarts)
+    kstate.set8((&buf[0]) as u64 + n, 10)
+    n = n + 1
+    if tw < wm.MAX_WIN {
+        let _w: u64 = wm.term_write(state, tw, (&buf[0]) as u64, n)
+    }
+    kstate.set8((&buf[0]) as u64 + n - 1, 0)
+    serial.puts((&buf[0]) as u64)
+    serial.nl()
+    kstate.set8((&buf[0]) as u64 + n - 1, 10)
+}
+
+fn puls_text(state: u64, buf: u64, at: u64, t: u64) -> u64 {
+    var n: u64 = at
+    var i: u64 = 0
+    while kstate.get8(t + i) != 0 && n < 150 {
+        kstate.set8(buf + n, kstate.get8(t + i) as u8)
+        n = n + 1
+        i = i + 1
+    }
+    return n
+}
+
+fn puls_zahl(state: u64, buf: u64, at: u64, v: u64) -> u64 {
+    var ziffern: [u8; 24] = [0 as u8; 24]
+    var k: u64 = 0
+    var w: u64 = v
+    if w == 0 {
+        ziffern[0] = 0x30
+        k = 1
+    }
+    while w != 0 && k < 20 {
+        ziffern[k as usize] = (0x30 + (w % 10)) as u8
+        w = w / 10
+        k = k + 1
+    }
+    var n: u64 = at
+    while k > 0 && n < 150 {
+        k = k - 1
+        kstate.set8(buf + n, ziffern[k as usize])
+        n = n + 1
+    }
+    return n
 }
 
 // Was das Zeigegeraet in diesem Lauf WIRKLICH gemeldet hat. Die Zahlen
