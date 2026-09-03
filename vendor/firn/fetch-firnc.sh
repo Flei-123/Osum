@@ -30,12 +30,24 @@ HIER=$(pwd)
 COMMIT=$(cat COMMIT)
 KURZ=${COMMIT:0:8}
 
+# DIE MARKE IST COMMIT **UND** FLICKENSTAND, und das ist kein Luxus.
+#
+# vendor/firn/lib/ ist nicht eingecheckt und liegt in JEDEM Arbeitsbaum
+# einzeln. Stuende in `.gebaut` nur der Commit, waere ein Baum, dessen
+# lib/ noch ungeflickt ist, "aktuell" -- und man bekaeme aus demselben
+# Quelltext zwei verschiedene Kerne. GEMESSEN, 03.09.2026: 3 844 792
+# gegen 3 844 744 Oktette, und im kleineren fehlte der Rundruf-Zweig,
+# also DHCP. Deshalb geht der Flickenstand in die Marke: aendert sich
+# einer, wird neu gebaut.
+PSUM=$( { cat "$HIER"/patches/*.patch 2>/dev/null || true; } | sha256sum | cut -c1-16)
+MARKE="$COMMIT $PSUM"
+
 FORCE=0
 [[ ${1:-} == --force ]] && FORCE=1
 
 if [[ $FORCE -eq 0 && -x $HIER/bin/firnc && -x $HIER/bin/firnc1 \
-      && -f $HIER/.gebaut && $(cat "$HIER/.gebaut") == "$COMMIT" ]]; then
-    echo "firnc ist aktuell ($KURZ)"
+      && -f $HIER/.gebaut && $(cat "$HIER/.gebaut") == "$MARKE" ]]; then
+    echo "firnc ist aktuell ($KURZ, Flicken $PSUM)"
     exit 0
 fi
 
@@ -106,6 +118,6 @@ fi
 echo ">> firnc1 bauen (der Uebersetzer in Firn, von firnc0 uebersetzt)"
 FIRNLIB="$HIER/lib" "$HIER/bin/firnc" "$BAU/bin/firnc1.fi" -o "$HIER/bin/firnc1"
 
-echo "$COMMIT" > "$HIER/.gebaut"
+echo "$MARKE" > "$HIER/.gebaut"
 rm -rf "$BAU"
-echo ">> fertig: vendor/firn/bin/firnc + bin/firnc1 + lib ($KURZ)"
+echo ">> fertig: vendor/firn/bin/firnc + bin/firnc1 + lib ($KURZ, Flicken $PSUM)"
