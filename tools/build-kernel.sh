@@ -121,6 +121,29 @@ done
 # einmal direkt und einmal aus /tmp uebersetzt, ergibt ein anderes
 # Abbild. Gleicher Weg fuer beide, dann ist die Differenz der Inhalt.
 cp -a kernel "$TMP/kernel" || exit 1
+
+# ================================ RUNDE FASSUNG: WELCHE FASSUNG IST DAS
+#
+# Der kurze Commit-Hash wird HIER in die Kopie eingesetzt, nicht in den
+# Arbeitsbaum -- sonst haette jeder Bau eine Aenderung im Baum zur
+# Folge, und `git status` waere nie wieder sauber.
+#
+# WARUM ES DAS GIBT: am 03.09.2026 hat Justin ein Abbild getestet und
+# "kein Unterschied" gemeldet. Ob die Runde darin war, liess sich
+# hinterher nur mit Zeitstempeln, Pruefsummen und einem QEMU-Lauf
+# klaeren -- der Kern selbst sagte es nicht. Jetzt sagt er es, in der
+# ersten Zeile des Startprotokolls und in der Messleiste auf dem
+# Schreibtisch.
+FASSUNG_HASH=$(git rev-parse --short=8 HEAD 2>/dev/null || echo "unbekant")
+if git status --porcelain 2>/dev/null | grep -q .; then
+    # Ein Baum mit ungesicherten Aenderungen ist NICHT der Commit, auf
+    # den der Hash zeigt. Das Pluszeichen sagt das.
+    FASSUNG_HASH="${FASSUNG_HASH:0:7}+"
+fi
+sed -i "s/osum ????????/osum $FASSUNG_HASH/" "$TMP/kernel/fassung.fi" || exit 1
+grep -q "osum $FASSUNG_HASH" "$TMP/kernel/fassung.fi" || {
+    echo "die Fassungsnummer wurde NICHT eingesetzt -- Bau abgebrochen" >&2
+    exit 1; }
 if [[ $OHNE_TUNNEL == 1 ]]; then
     cp -f kernel/wg-aus.fi "$TMP/kernel/wg.fi" || exit 1
 fi
