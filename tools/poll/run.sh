@@ -9,7 +9,8 @@
 # ohne die ein Prozess nur auf GENAU EINE Quelle warten kann.
 #
 # WARUM DAS DER HARTE BLOCKER WAR. Die geplante Bruecke nach JARVIS
-# (`jarvisd`) ist ein Helfer, der gleichzeitig auf einen NETZANSCHLUSS
+# (`pollbr`, bis Runde BLECH-ECHT `jarvisd`) ist ein Helfer, der
+# gleichzeitig auf einen NETZANSCHLUSS
 # und auf das ROHR ZU EINEM KINDPROZESS warten muss. Ohne `poll` bleibt
 # nur der Wechsel zwischen beiden in einer Warteschleife -- Rechenzeit,
 # wenn nichts los ist, und Verzoegerung, wenn etwas los ist. Jede Shell
@@ -45,7 +46,7 @@
 #   6. DIE FEHLER: zu viele Deskriptoren (-EINVAL), ein Nullzeiger und
 #      ein Zeiger in den Kern (-EFAULT), ein Deskriptor, der nicht offen
 #      ist (POLLNVAL statt eines Fehlers des ganzen Aufrufs).
-#   7. DIE BRUECKE SELBST, MIT DRAHT. `/bin/jarvisd` lauscht auf 9100,
+#   7. DIE BRUECKE SELBST, MIT DRAHT. `/bin/pollbr` lauscht auf 9100,
 #      haelt daneben das Rohr eines Kindes und steht in EINEM `poll`
 #      ueber beide. Der Wirt verbindet sich durch QEMUs Weiterleitung und
 #      schickt eine Zeile; das Kind redet unabhaengig davon. BEIDES muss
@@ -67,7 +68,7 @@ FIRNC=${FIRNC:-vendor/firn/bin/firnc}
 FC1=${FIRNC1:-vendor/firn/bin/firnc1}
 LDSCRIPT=kernel/kernel.ld
 ULD=kernel/user/user.ld
-PROGS="sh ls cat echo hello pollt jarvisd"
+PROGS="sh ls cat echo hello pollt pollbr"
 BLOCKS=2048
 OSUM_IP=10.0.2.15
 OSUM_GW=10.0.2.2
@@ -102,7 +103,7 @@ between() { # name wert unten oben
 }
 
 value_of()  { grep -a -m1 "^pollt: $2 = " "$1" 2>/dev/null | sed 's/.* = //'; }
-jvalue_of() { grep -a -m1 "^jarvisd: $2 = " "$1" 2>/dev/null | sed 's/.* = //'; }
+jvalue_of() { grep -a -m1 "^pollbr: $2 = " "$1" 2>/dev/null | sed 's/.* = //'; }
 
 say() { # datei name erwartet beschreibung
     local got
@@ -189,7 +190,7 @@ else
 fi
 
 # =====================================================================
-echo "== 2. bauen: Kernel, libc, /bin/pollt und /bin/jarvisd =="
+echo "== 2. bauen: Kernel, libc, /bin/pollt und /bin/pollbr =="
 # =====================================================================
 for f in boot isr switch smp hv; do
     as --64 -o "$TMPD/$f.o" "kernel/arch/x86_64/$f.s" 2>"$TMPD/as.err" \
@@ -238,8 +239,8 @@ fi
 undef=$(nm -u "$TMPD/pollt0.elf" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
 [ -z "$undef" ] && ok "/bin/pollt hat keinen undefinierten Namen -- die libc ist vollstaendig" \
                 || bad "undefinierte Namen in pollt: $undef"
-undef=$(nm -u "$TMPD/jarvisd0.elf" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
-[ -z "$undef" ] && ok "/bin/jarvisd ebenso" || bad "undefinierte Namen in jarvisd: $undef"
+undef=$(nm -u "$TMPD/pollbr0.elf" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
+[ -z "$undef" ] && ok "/bin/pollbr ebenso" || bad "undefinierte Namen in pollbr: $undef"
 
 SPEC="/bin/"
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$TMPD/${p}0.elf"; done
@@ -353,7 +354,7 @@ grep -aq "kernel: done" "$F" && ok "der Kernel ist nach allen Faellen noch am Le
                              || bad "'kernel: done' fehlt -- der Kernel hat den Lauf nicht ueberstanden"
 
 # =====================================================================
-echo "== 4. die Bruecke selbst: /bin/jarvisd am Draht =="
+echo "== 4. die Bruecke selbst: /bin/pollbr am Draht =="
 # =====================================================================
 # Der Draht ist QEMUs Benutzernetz mit einer Weiterleitung. Das braucht
 # keine Netzwerknamensraeume und keine Rechte -- anders als
@@ -364,10 +365,10 @@ if ! command -v nc >/dev/null 2>&1; then
     note 'Abschnitt 4: uebersprungen, nc fehlt'
 else
     cp "$TMPD/disk.img" "$TMPD/live2.img"
-    JF="$TMPD/jarvisd.txt"
+    JF="$TMPD/pollbr.txt"
     rm -f "$JF" "$JF.rc"
     ( timeout 300 qemu-system-x86_64 $ACCEL -kernel "$TMPD/k0.mb" -m 256 \
-        -append "osum $QUIET nic nip=$OSUM_IP/24 ngw=$OSUM_GW script=jarvisd;exit" \
+        -append "osum $QUIET nic nip=$OSUM_IP/24 ngw=$OSUM_GW script=pollbr;exit" \
         -serial "file:$JF" -display none -no-reboot \
         -drive "file=$TMPD/live2.img,format=raw,if=ide,index=0" \
         -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$FWPORT-$OSUM_IP:9100" \
@@ -381,12 +382,12 @@ else
     # das Zeitverhalten von QEMU und nicht das von `poll`.
     listening=0
     for i in $(seq 1 600); do
-        [ -f "$JF" ] && grep -qa 'jarvisd: listening' "$JF" && { listening=1; break; }
+        [ -f "$JF" ] && grep -qa 'pollbr: listening' "$JF" && { listening=1; break; }
         kill -0 "$QPID" 2>/dev/null || break
         sleep 0.2
     done
     if [ "$listening" = 1 ]; then
-        ok "jarvisd lauscht auf $OSUM_IP:9100 (nach rund $(( i * 200 )) ms)"
+        ok "pollbr lauscht auf $OSUM_IP:9100 (nach rund $(( i * 200 )) ms)"
         sleep 0.5
         printf 'hallo welt\n' | timeout 30 nc -q 3 -w 10 127.0.0.1 $FWPORT > "$TMPD/nc.out" 2>&1
         ncrc=$?
@@ -418,7 +419,7 @@ else
         fi
     else
         kill "$QPID" 2>/dev/null; QPID=""
-        bad "jarvisd hat nicht angefangen zu lauschen"
+        bad "pollbr hat nicht angefangen zu lauschen"
         tail -6 "$JF" 2>/dev/null | tr -d '\000' | sed 's/^/        /'
     fi
 fi
