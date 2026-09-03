@@ -4,7 +4,11 @@
 # STARTET.
 #
 #   bash tools/usbimg/build.sh [ausgabeverzeichnis]
-#   -> <ausgabeverzeichnis>/osum-usb.img, mit dd auf einen Stick zu schreiben
+#   -> <ausgabeverzeichnis>/orientos-usb.img, mit dd auf einen Stick zu
+#      schreiben. Der alte Name osum-usb.img liegt als VERWEIS daneben,
+#      damit Lesezeichen und Skripte nicht brechen (Runde MESSTAFEL:
+#      das Abbild ist das SYSTEM, also OrientOS -- der Kern darin
+#      heisst weiter osum.mb).
 #
 # ==================================================================
 # WARUM ES SO UND NICHT ANDERS GEBAUT IST
@@ -75,7 +79,8 @@ FS_INODES=${FS_INODES:-1024}
 FS_KARTEN=${FS_KARTEN:-128}
 
 mkdir -p "$OUT"
-IMG="$OUT/osum-usb.img"
+IMG="$OUT/orientos-usb.img"
+IMG_ALT="$OUT/osum-usb.img"
 
 sagen() { printf '   %s\n' "$*"; }
 fehler() { printf '== %s\n' "$*" >&2; exit 1; }
@@ -479,12 +484,25 @@ sagen "umlaute     $UML UTF-8-Umlautfolgen im fertigen Wurzelabbild"
 # sie laeuft, laeuft der Schreibtisch. Ohne sie kaeme der Kern nach dem
 # Zeichnen zurueck und schaltete ab.
 cat > "$OUT/limine.conf" <<'EOF'
-# limine.conf -- Osum auf dem Stick (Runde USBIMG)
+# limine.conf -- OrientOS auf dem Stick (Runde USBIMG)
+#
+# DIE NAMEN, UND WARUM SIE HIER AUSEINANDERGEHEN (Runde MESSTAFEL).
+# docs/ROADMAP-UPDATE.md:28 sagt es seit langem: OSUM IST DER KERN,
+# ORIENTOS IST DAS SYSTEM DARUM. Auf dem Schirm stand trotzdem ueberall
+# Osum. Justins Vergleich trifft: der Kern heisst Linux, der Startschirm
+# sagt Ubuntu -- niemand nennt seine Verteilung "Linux 6.8".
+#
+# Ab hier: was der BENUTZER liest, traegt OrientOS. Was den KERN meint,
+# heiszt weiter Osum -- die Datei /osum.mb, das Startprotokoll, die
+# Fassungszeile, die Panikmeldungen. Genau wie `Linux` im dmesg steht
+# und nicht im Startbildschirm. `docs/NAMING.md` steht dem nicht
+# entgegen: jenes Dokument regelt DEUTSCH GEGEN ENGLISCH in Pfaden und
+# Anzeigetexten, nicht den Produktnamen.
 timeout: 10
 default_entry: 1
 verbose: yes
 
-/Osum -- Hardware-Diagnose (bleibt stehen)
+/OrientOS -- Hardware-Diagnose (bleibt stehen)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
@@ -508,13 +526,13 @@ verbose: yes
 # WARUM ZWEI EINTRAEGE UND NICHT EINER: der erste fasst nichts an und
 # kann deshalb nicht haengen. Wenn dieser hier auf einem fremden Brett
 # stehenbleibt, ist der andere immer noch da.
-/Osum -- USB-Diagnose: Regler uebernehmen und jeden Anschluss zeigen
+/OrientOS -- USB-Diagnose: Regler uebernehmen und jeden Anschluss zeigen
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
     cmdline: hwdiag usb hidgen usbleg usbstop gfx nokbd nosched noproc nofs noring3
 
-/Osum -- Diagnose und danach der Schreibtisch
+/OrientOS -- Diagnose und danach der Schreibtisch
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
@@ -525,13 +543,28 @@ verbose: yes
 # Terminal darin konnte `dhcp` nicht fahren -- der Stapel stand gar
 # nicht. Die Adresse ist dieselbe verbindungslokale Platzhalteradresse
 # wie im Kommandozeilen-Eintrag; `dhcp` ersetzt sie.
-/Osum -- nur der Schreibtisch (deutsch)
+/OrientOS -- nur der Schreibtisch (deutsch)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
     cmdline: modfs osum gfx wm wig desk wmshell wmdauer usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
 
-/Osum -- Vektoreinheit pruefen (bleibt stehen)
+# ================== RUNDE MESSTAFEL: DERSELBE EINTRAG AUF ENGLISCH
+#
+# Beide Textkataloge liegen im Abbild (`/usr/share/locale/de/messages`
+# und `.../en/messages`, beide in der PFLICHT-Liste weiter oben). Was
+# fehlte, war der Schalter: die Sprache stand fest in
+# /users/root/config/locale, und das Einstellungsprogramm, das sie
+# umstellen kann, braucht Maus oder Tastatur -- also genau das, was bei
+# Justin klemmt. `lang=en` setzt die Datei VOR dem ersten
+# Ring-3-Programm; sonst aendert sich an diesem Eintrag nichts.
+/OrientOS -- desktop only (English)
+    protocol: multiboot1
+    path: boot():/osum.mb
+    module_path: boot():/root.img
+    cmdline: modfs osum gfx wm wig desk wmshell wmdauer usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs lang=en
+
+/OrientOS -- Vektoreinheit pruefen (bleibt stehen)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
@@ -562,7 +595,7 @@ verbose: yes
 #     osum$ fetch https://store.fleitec.com/index.json
 #     osum$ ota suchen
 #     osum$ jarvisd -n
-/Osum -- Kommandozeile mit Netz (dhcp, host, fetch, ota, jarvisd)
+/OrientOS -- Kommandozeile mit Netz (dhcp, host, fetch, ota, jarvisd)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
@@ -584,7 +617,7 @@ verbose: yes
 # `usb hidgen` steht mit drin, obwohl niemand tippen muss: findet der
 # Baum Tastatur und Maus, sagt der Bericht das mit -- und dann weiss
 # Justin im selben Foto, ob die Uebernahme dieser Runde greift.
-/Osum -- Netz-Selbstlauf ohne Tastatur (dhcp, host, fetch, ota)
+/OrientOS -- Netz-Selbstlauf ohne Tastatur (dhcp, host, fetch, ota)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
@@ -601,14 +634,14 @@ verbose: yes
 #
 # Passt die Aufloesung dem Bildschirm nicht, faellt Limine auf seine
 # Vorgabe zurueck; es bleibt also immer ein Bild.
-/Osum -- Schreibtisch auf einem WQHD-Schirm (2560x1440)
+/OrientOS -- Schreibtisch auf einem WQHD-Schirm (2560x1440)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
     resolution: 2560x1440
     cmdline: modfs osum gfx wm wig desk wmshell wmdauer usb hidgen nosched noproc nofs
 
-/Osum -- Schreibtisch auf einem 4K-Schirm (3840x2160)
+/OrientOS -- Schreibtisch auf einem 4K-Schirm (3840x2160)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
@@ -656,7 +689,14 @@ dd if="$OUT/root.img" of="$IMG" bs=512 seek="$P2_ANF" conv=notrunc status=none
 "$LIMINE/limine" bios-install "$IMG" > "$OUT/limine.log" 2>&1 \
     || { cat "$OUT/limine.log" >&2; fehler "limine bios-install fehlgeschlagen"; }
 
+# RUNDE MESSTAFEL: DER ALTE NAME BLEIBT ERREICHBAR. Ein Verweis und
+# keine Kopie -- zwei Dateien mit demselben Inhalt sind zwei Dinge, die
+# auseinanderlaufen koennen, und genau daran ist diese Runde schon
+# einmal fast gescheitert.
+ln -sf "$(basename "$IMG")" "$IMG_ALT"
+
 sagen "abbild      $IMG"
+sagen "            (alter Name als Verweis: $IMG_ALT)"
 sagen "            $(stat -c%s "$IMG") Oktette (${GES_MIB} MiB), GPT, EFI ${ESP_MIB} MiB + Wurzel ${FS_MIB} MiB"
 sagen "            auf den Stick:  sudo dd if=$IMG of=/dev/sdX bs=4M conv=fsync status=progress"
 exit 0

@@ -1652,9 +1652,15 @@ fn surface(state: u64) {
         // ausrechnen laesst -- Zeile 0 und 1, Spalte 0. Genau das
         // rechnet `tools/wm/run.sh` bildpunktgenau gegen den
         // Referenzrasterer nach.
-        var b1: [u8; 32] = "OSUM K10 WINDOW SERVER 0123\n\0\0\0\0"
+        // RUNDE MESSTAFEL: DIESE ZEILE LIEST DER BENUTZER, ALSO
+        // TRAEGT SIE DEN SYSTEMNAMEN. Sie ist zugleich das Ziel von
+        // vier bildpunktgenauen Zusagen in `tools/wm/run.sh`; die
+        // Zeichenkette steht dort ebenfalls und ist mitgewandert. Eine
+        // Zusage, die auf einen Text zeigt, den es nicht mehr gibt,
+        // geht immer auf und misst nichts.
+        var b1: [u8; 32] = "ORIENTOS K10 WM 0123\n\0\0\0\0\0\0\0\0\0\0\0"
         var b2: [u8; 32] = "abcdefghijklm ABCDEFGHIJK +-*/\n\0"
-        wm.term_write(state, tw, (&b1[0]) as u64, 28)
+        wm.term_write(state, tw, (&b1[0]) as u64, 21)
         wm.term_write(state, tw, (&b2[0]) as u64, 31)
     }
 
@@ -2072,7 +2078,56 @@ fn i18n_bench(state: u64, f: u64, px: u64) {
 //   4. /bin/einstellungen nur auf Wort (`einst`), und /bin/dhcp nur
 //      auf Wort (`dhcp`) -- der DHCP-Lauf braucht eine Karte, und
 //      nicht jeder Messlauf hat eine.
+// ================= RUNDE MESSTAFEL: DIE SPRACHE, BEVOR JEMAND FRAGT
+//
+// `msg.fi` liest die Sprache in dieser Reihenfolge:
+//   1. /users/<name>/config/locale   die Wahl des Benutzers
+//   2. /etc/locale.conf              die Vorgabe des Systems
+//   3. `en`                          die Quellsprache
+//
+// Der Bau schreibt `de` in (1). Diese Funktion ueberschreibt (1) --
+// und zwar VOR dem ersten Ring-3-Programm, damit Schreibtisch,
+// Taskleiste, Starter und Einstellungen alle dieselbe Sprache lesen.
+// Es wird KEIN zweiter Weg zur Sprache gebaut: die Datei bleibt die
+// einzige Wahrheit, sie wird nur vorher richtig gestellt.
+//
+// Ohne `lang=` passiert hier nichts -- ein Stick ohne den Schalter
+// verhaelt sich Oktett fuer Oktett wie vorher.
+fn locale_setzen(state: u64) {
+    let en: bool = kstate.mode_on(state, kstate.M_LANGEN)
+    let de: bool = kstate.mode_on(state, kstate.M_LANGDE)
+    if !en && !de {
+        return
+    }
+    var pfad: [u8; 26] = "/users/root/config/locale\0"
+    var t_en: [u8; 4] = "en\n\0"
+    var t_de: [u8; 4] = "de\n\0"
+    var s_ok: [u8; 16] = "locale: gesetzt\0"
+    var s_sp: [u8; 2] = " \0"
+    var s_rc: [u8; 5] = " rc=\0"
+    let ino: u64 = fs.path(state, (&pfad[0]) as u64)
+    if ino == 0 {
+        var s_no: [u8; 27] = "locale: keine Datei dafuer\0"
+        serial.puts((&s_no[0]) as u64)
+        serial.nl()
+        return
+    }
+    fs.file_truncate(state, ino)
+    var q: u64 = (&t_de[0]) as u64
+    if en {
+        q = (&t_en[0]) as u64
+    }
+    let n: u64 = fs.write_at(state, ino, 0, q, 3)
+    serial.puts((&s_ok[0]) as u64)
+    serial.puts((&s_sp[0]) as u64)
+    serial.text(q, 2)
+    serial.puts((&s_rc[0]) as u64)
+    serial.dec(n)
+    serial.nl()
+}
+
 fn desk_start(state: u64) -> u64 {
+    locale_setzen(state)
     var p_desk: [u8; 13] = "/bin/desktop\0"
     var p_task: [u8; 13] = "/bin/taskbar\0"
     var p_star: [u8; 14] = "/bin/launcher\0"
@@ -2592,15 +2647,196 @@ fn kopf_setzen(state: u64, p: u64, n: u64) {
     kopf_n = m
 }
 
-// Jede Runde nach dem Zusammensetzen. Steht nichts im Puffer, steht
-// wenigstens die Fassung da -- damit ein Foto des Schreibtischs IMMER
-// sagt, welche Fassung laeuft.
+// ====================================== RUNDE MESSTAFEL: SIEBEN ZEILEN
+//
+// WARUM ES DIESE TAFEL GIBT. Nach der Runde FASSUNG stand EINE Zeile
+// oben am Schirm, mit zwanzig Zahlen darin. Justin hat sie
+// fotografiert und konnte sie nicht lesen -- aus zwei Metern, mit dem
+// Mobiltelefon, in `uisc`-Groesse. Eine Diagnose, die man nicht lesen
+// kann, ist keine.
+//
+// Also: SIEBEN kurze Zeilen, jede eine STUFE des Eingabewegs, jede in
+// EINER Farbe. Gruen heiszt "hier kam etwas an", rot heiszt "hier kam
+// nichts an". Justin muss keine Ziffer entziffern -- er sucht die
+// ERSTE ROTE ZEILE, und das ist die Stelle, an der es abreiszt.
+//
+// DIE STUFEN, von unten nach oben durch die Kette:
+//
+//   1 USB     HID-Berichte, die der USB-Baum entgegengenommen hat.
+//             Rot heiszt: der Regler liefert gar nichts.
+//   2 REIHE   was `hidin` daraus gemacht und EINGEREIHT hat -- Tasten
+//             in den Ring von `kbd`, Mausbewegungen als Pakete in
+//             `ps2m`. Rot bei gruenem 1: die Berichte werden nicht
+//             verstanden (falsche Beschreibung, falsches Protokoll).
+//   3 SERVER  was der FENSTERSERVER davon abgeholt hat (`on_key`,
+//             `on_mouse`). Rot bei gruenem 2: die Hauptschleife ruft
+//             `wm.poll` nicht mehr, oder der Ring wird nicht geleert.
+//   4 RING    Ereignisse, die in einen Fensterring GELEGT wurden.
+//             Rot bei gruenem 3: es gibt kein Fenster mit Fokus.
+//   5 APP     Ereignisse, die ein RING-3-PROGRAMM ABGEHOLT hat.
+//             Rot bei gruenem 4 ist der wichtigste Befund von allen:
+//             der Kern liefert, und niemand holt ab -- dann laeuft
+//             kein Anwendungsprozess mehr. Das erklaert die tote
+//             Eingabe UND die unsichtbare Taskleiste mit EINER Ursache.
+//   6 ZEIGER  wo der Server den Zeiger fuehrt.
+//
+// ZEILE 0 IST DER HERZSCHLAG und sie beantwortet die Frage davor:
+// LAEUFT DAS SYSTEM UEBERHAUPT NOCH? `B` sind die zusammengesetzten
+// Bilder (die Hauptschleife), `T` die Zeitgebermarken (die
+// Unterbrechung). Stehen beide still, ist der Rechner haengengeblieben
+// und keine der sechs Stufen darunter bedeutet etwas. Genau diese
+// Unterscheidung -- "eingefroren" gegen "laeuft, bekommt aber nichts"
+// -- war bisher auf keinem Foto zu treffen.
+const TAFEL_ZEILEN: u64 = 8
+const TAFEL_SPALTEN: u64 = 30
+
+fn tz_text(state: u64, buf: u64, at: u64, t: u64) -> u64 {
+    return puls_text(state, buf, at, t)
+}
+
+// Jede Runde nach dem Zusammensetzen -- damit die Tafel auch dann
+// steht, wenn Fenster, Taskleiste und Schrift versagen.
 fn kopf_malen(state: u64) {
-    if kopf_n == 0 {
-        wm.messleiste(state, fassung.text(), fassung.laenge())
+    if !fb.ready(state) {
         return
     }
-    wm.messleiste(state, (&kopf[0]) as u64, kopf_n)
+    wm.mess_grund(state, TAFEL_ZEILEN, TAFEL_SPALTEN)
+    var buf: [u8; 64] = [0 as u8; 64]
+    let b: u64 = (&buf[0]) as u64
+    var n: u64 = 0
+
+    // ---- Zeile 0: welche Fassung, und schlaegt das Herz noch ----
+    var t_b: [u8; 4] = " B\0\0"
+    var t_t: [u8; 4] = " T\0\0"
+    n = tz_text(state, b, 0, fassung.text())
+    n = tz_text(state, b, n, (&t_b[0]) as u64)
+    n = puls_zahl(state, b, n, wm.composites(state))
+    n = tz_text(state, b, n, (&t_t[0]) as u64)
+    n = puls_zahl(state, b, n, kstate.get(state, kstate.TICKS))
+    wm.messzeile(state, 0, b, n, wm.mess_weiss(state))
+
+    // ---- Zeile 1: Stufe 1, die HID-Berichte ----
+    var t1: [u8; 12] = "1 USB  BER \0"
+    var t_w: [u8; 7] = " WAHL \0"
+    let ber: u64 = usb.reports(state)
+    n = tz_text(state, b, 0, (&t1[0]) as u64)
+    n = puls_zahl(state, b, n, ber)
+    n = tz_text(state, b, n, (&t_w[0]) as u64)
+    n = puls_zahl(state, b, n, usb.wahl(state))
+    wm.messzeile(state, 1, b, n, wm.mess_ampel(state, ber))
+
+    // ---- Zeile 2: Stufe 2, eingereiht ----
+    var t2: [u8; 9] = "2 REIHE \0"
+    var t_ta: [u8; 3] = "T\0\0"
+    var t_ma: [u8; 4] = " M\0\0"
+    let e_ta: u64 = usb.hid_keys(state)
+    let e_ma: u64 = ps2m.packets(state)
+    n = tz_text(state, b, 0, (&t2[0]) as u64)
+    n = tz_text(state, b, n, (&t_ta[0]) as u64)
+    n = puls_zahl(state, b, n, e_ta)
+    n = tz_text(state, b, n, (&t_ma[0]) as u64)
+    n = puls_zahl(state, b, n, e_ma)
+    wm.messzeile(state, 2, b, n, wm.mess_ampel(state, e_ta + e_ma))
+
+    // ---- Zeile 3: Stufe 3, der Fensterserver hat abgeholt ----
+    var t3: [u8; 9] = "3 SERV  \0"
+    let s_ta: u64 = wm.keyin(state)
+    let s_ma: u64 = wm.moves_seen(state)
+    n = tz_text(state, b, 0, (&t3[0]) as u64)
+    n = tz_text(state, b, n, (&t_ta[0]) as u64)
+    n = puls_zahl(state, b, n, s_ta)
+    n = tz_text(state, b, n, (&t_ma[0]) as u64)
+    n = puls_zahl(state, b, n, s_ma)
+    wm.messzeile(state, 3, b, n, wm.mess_ampel(state, s_ta + s_ma))
+
+    // ---- Zeile 4: Stufe 4, in den Fensterring gelegt ----
+    var t4: [u8; 10] = "4 RING   \0"
+    var t_v: [u8; 8] = "  VERL \0"
+    let rein: u64 = wm.evpush(state)
+    n = tz_text(state, b, 0, (&t4[0]) as u64)
+    n = puls_zahl(state, b, n, rein)
+    n = tz_text(state, b, n, (&t_v[0]) as u64)
+    n = puls_zahl(state, b, n, wm.evdrops(state))
+    wm.messzeile(state, 4, b, n, wm.mess_ampel(state, rein))
+
+    // ---- Zeile 5: Stufe 5, ein Programm hat abgeholt ----
+    var t5: [u8; 10] = "5 APP    \0"
+    let raus: u64 = wm.evpop(state)
+    n = tz_text(state, b, 0, (&t5[0]) as u64)
+    n = puls_zahl(state, b, n, raus)
+    wm.messzeile(state, 5, b, n, wm.mess_ampel(state, raus))
+
+    // ---- Zeile 6: der Zeiger ----
+    var t6: [u8; 10] = "6 ZEIGER \0"
+    var t_x: [u8; 3] = "X\0\0"
+    var t_y: [u8; 4] = " Y\0\0"
+    n = tz_text(state, b, 0, (&t6[0]) as u64)
+    n = tz_text(state, b, n, (&t_x[0]) as u64)
+    n = puls_zahl(state, b, n, wm.curx(state))
+    n = tz_text(state, b, n, (&t_y[0]) as u64)
+    n = puls_zahl(state, b, n, wm.cury(state))
+    wm.messzeile(state, 6, b, n, wm.mess_ampel(state, s_ma))
+
+    // ---- Zeile 7: die TASKLEISTE -- wird sie ueberhaupt gemalt? ----
+    //
+    // Justins zweiter Befund: die Leiste meldet Erfolg und ist nicht zu
+    // sehen. `MAL` ist die Zahl der Male, die `wm.compose` sie WIRKLICH
+    // gemalt hat. Ist sie 0 (rot), hat das Zusammensetzen sie
+    // uebergangen -- dann liegt es an `fl` (verborgen/Reiter) oder an
+    // der Stapelfolge. Laeuft sie hoch und der untere Bildrand bleibt
+    // leer, sind die Bildpunkte gemalt und der Fehler liegt DAHINTER.
+    var t7: [u8; 10] = "7 LEISTE \0"
+    var t_id: [u8; 4] = "id\0\0"
+    var t_yy: [u8; 4] = " y\0\0"
+    var t_ml: [u8; 6] = " MAL \0"
+    var t_fl: [u8; 4] = " fl\0"
+    let tb: u64 = wm.top_layer_win(state)
+    n = tz_text(state, b, 0, (&t7[0]) as u64)
+    if tb >= wm.MAX_WIN {
+        // Kein Fenster auf der obersten Ebene: die Leiste hat sich nie
+        // angemeldet. Das ist ein anderer Fehler als "gemalt, unsichtbar".
+        var t_kein: [u8; 5] = "KEIN\0"
+        n = tz_text(state, b, n, (&t_kein[0]) as u64)
+        wm.messzeile(state, 7, b, n, wm.mess_rot(state))
+    } else {
+        let mal: u64 = wm.win_paints(state, tb)
+        n = tz_text(state, b, n, (&t_id[0]) as u64)
+        n = puls_zahl(state, b, n, wm.win_id(state, tb))
+        n = tz_text(state, b, n, (&t_yy[0]) as u64)
+        n = puls_zahl(state, b, n, wm.win_y(state, tb) as u64)
+        n = tz_text(state, b, n, (&t_ml[0]) as u64)
+        n = puls_zahl(state, b, n, mal)
+        n = tz_text(state, b, n, (&t_fl[0]) as u64)
+        n = puls_zahl(state, b, n, wm.win_flags(state, tb))
+        wm.messzeile(state, 7, b, n, wm.mess_ampel(state, mal))
+    }
+    // ================================ UND JETZT AUF DEN SCHIRM DAMIT
+    //
+    // HIER WAR DER FEHLER, DER JUSTIN DIE GANZE RUNDE FASSUNG GEKOSTET
+    // HAT, und er ist gemessen, nicht vermutet.
+    //
+    // `wm.compose` steigt in seiner ZWEITEN Zeile aus, wenn nichts
+    // schmutzig ist (`S_DON == 0`) -- und der Ausstieg liegt VOR
+    // `fb.flush`. Auf einem Schreibtisch, auf dem sich nichts bewegt,
+    // wird also NIE geflusht. Alles, was danach in den Rahmenpuffer
+    // gemalt wird, landet im ZWEITPUFFER und kommt dort nicht mehr weg.
+    //
+    // Genau das ist mit der gruenen Zeile passiert. In QEMU fiel es
+    // nicht auf, weil dort die Shell im Terminalfenster staendig neu
+    // startet und mit jeder Zeile Schmutz erzeugt -- also floss der
+    // Puffer. Auf Justins Brett steht der Schreibtisch still, es wird
+    // nichts schmutzig, es wird nie geflusht, und die Zeile ist
+    // unsichtbar. Er hat gemeldet "kein sichtbarer Unterschied", und er
+    // hatte zum zweiten Mal recht.
+    //
+    // Gemessen am Bildschirmfoto vor dieser Zeile: die obersten 84
+    // Bildzeilen der Tafel standen auf dem Schirm, die restlichen 258
+    // nicht -- der Rest des Zweitpuffers war nie hinuebergekommen.
+    //
+    // Diese eine Zeile ist der Unterschied zwischen "in den Puffer
+    // gemalt" und "auf dem Bildschirm". Sie flusht NUR die Zeilen der
+    // Tafel (`fb.dirty` hat sie eben markiert), nicht das ganze Bild.
+    fb.flush(state)
 }
 
 fn eingabe_puls(state: u64, tw: u64, neustarts: u64) {
@@ -2671,6 +2907,11 @@ fn eingabe_puls(state: u64, tw: u64, neustarts: u64) {
     if tw < wm.MAX_WIN {
         let _w: u64 = wm.term_write(state, tw, (&buf[0]) as u64, n)
     }
+    // RUNDE MESSTAFEL: und die ganze Fensterliste auf die Leitung --
+    // Kennung, Lage, Groesse, Ebene, Merker, Stapelplatz, Malzaehler.
+    // Damit ist der Weg der Taskleiste vom Anlegen bis zum
+    // Zusammensetzen lueckenlos in Zahlen nachlesbar.
+    wm.wins_say(state)
     // RUNDE HIDPUNKTE: UND DIESELBE ZEILE OBEN AUF DEN SCHIRM, an
     // `compose` vorbei. Auf Justins Brett war das Terminalfenster zu
     // schmal und links abgeschnitten -- die Diagnose stand also da, wo
