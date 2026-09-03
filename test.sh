@@ -1339,6 +1339,20 @@ lauf "37. ein Treiber, der nicht im Kern steht: laden, benutzen, entladen (tools
 lauf "38. der JARVIS-Helfer und seine Rechteliste (tools/bridge/run.sh, Runde BRIDGE)" \
      tools/bridge/run.sh bridge '^BRIDGE: |^  OK    (firnc|kein undefinierter|die Namenskollision|bridge/build|jarvisd auf der Platte|jsig auf der Platte|der GUI-lose|die Testzertifikate|die Rechteliste wird|GEGENPROBE|die Verbindung steht|die Ed25519|der Server hat|und Osum hat|der Helfer meldet|die Laenge|system|schreib|lies|liste|befehl|foto|genau eine|sieben|der Start steht|die Anmeldung steht|ein (erledigter|abgelehnter)|acht Ablehnungen|und NICHTS ist passiert|(expired|wrong|rogue):|leerer Speicher|ohne Bestaetigung|der Code wird|und die Ablehnung|sie steht auch|jarvisctl|beim zweiten Anlauf|und sie steht|die Gegenstelle hat|der Helfer stirbt|er zaehlt|und er versucht|er endet|ohne Netz|er sagt|und er wartet|keine einzige|Systemaufrufe je|pub |die Schluesseldatei|und sie laesst|nach chmod|python-cryptography|der beschnittene|und der KERN|lesen geht weiter|die Rechte des|ohne Schein|mit Schein|DER SCHEIN GILT|und das zweite|das Foto steht|drei Auftraege|Antworten, die|Quelltext)|^        (Quelltext:|/bin/jarvisd:|/bin/jsig:|Wartelast:|gewartet:|QEMU auf dem Wirt|Rechtebitfeld|Groesse des Bildschirmfotos|KEIN BILD GEMESSEN|vom QEMU-Start)|^BRIDGE: uebersprungen'
 
+# ABSCHNITT 39 -- RUNDE STICK.
+#
+# Der Unterschied zu Abschnitt 31 (usbimg) in einem Satz: DORT wird
+# gemessen, dass das Abbild STARTET, HIER, dass man damit etwas TUN
+# kann. Der Kern kommt vom Abbild ueber Limine (BIOS und UEFI), der
+# Menueeintrag wird ueber den QEMU-Monitor gewaehlt, und danach wird auf
+# der seriellen Leitung getippt: dhcp, host, fetch, ota, jarvisd.
+#
+# ER BRAUCHT DAS OFFENE INTERNET (store.fleitec.com) und einen Wirt mit
+# python3-cryptography. Fehlt eines von beidem, sagt er das und endet
+# mit 0 -- wie tools/bridge/run.sh es auch tut.
+lauf "39. was man mit dem Stick TUN kann: dhcp, host, fetch, ota und die Bruecke, vom Abbild (tools/stick/run.sh, Runde STICK)" \
+     tools/stick/run.sh stick '^STICK: |^  ok   |^       (SHA-256|/bin traegt|kern|programme|apps|wurzeln|ota.conf|schluessel)'
+
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
 abschnitte_abarbeiten
