@@ -472,7 +472,7 @@ Befehls ist auf dem Stick entstanden.**
 | | BLECH-ECHT | **STICK** | Unterschied |
 |---|---:|---:|---|
 | Abbild | 123 731 968 | **123 731 968 Oktette (118 MiB)** | 0 |
-| SHA-256 | `39a2952c…` | **`bceacfe940772b25fff90582bc5a6a3de0c4e7aed8d8d4d9a841d61a4b4e39ad`** | anders |
+| SHA-256 | `39a2952c…` | **`5a520aaf7835d643030d2e7e0583a2fe1f000709141b70e1649aa456a6746b57`** | anders |
 | Kern | 3 789 672 | **3 844 792 Oktette** | +55 120 |
 | Ring-3-Programme | 43 | **52** | **+9** |
 | davon Apps mit TLS 1.3 | 0 | **2** (1 532 800 Oktette) | +2 |
@@ -482,7 +482,17 @@ Befehls ist auf dem Stick entstanden.**
 | Menüeinträge | 4 | **7** | +3 |
 
 Der SHA-256 ist mit `sha256sum` auf dem fertigen Abbild gemessen und
-nicht abgeschrieben.
+nicht abgeschrieben. Er gehört zu **dieser Datei** (gebaut aus `main`
+`102873b`), und ein zweiter Baulauf aus demselben Baum gibt eine andere
+Prüfsumme — auch das ist gemessen und nicht vermutet: zwei `mkfs.vfat`
+auf identische Eingaben unterscheiden sich in **sechs** Oktetten, bei
+0x44..0x46 und 0xC44..0xC46. Das ist die Datenträgernummer der
+EFI-Partition, die `mkfs.vfat` aus der Uhr nimmt, im Startsatz und in
+seiner Sicherung. Das Abbild ist also **nicht** oktettgleich
+reproduzierbar; wer eine bestimmte Datei meint, meint ihren SHA.
+
+Gemessen mit genau diesem Abbild: **`STICK: 42 bestanden, 0 gescheitert`**
+und **`USBIMG: 48 bestanden, 0 gescheitert`**.
 
 ---
 
