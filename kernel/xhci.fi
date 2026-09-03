@@ -77,7 +77,7 @@ export {
     devctx, inctx, in_control, in_slot, in_ep, dev_slot_ctx, dev_ep_ctx,
     ep_open, ep_find, ep_ring, ep_seq, ep_code, ep_resid, ep_reset_ring,
     control, bulk, int_queue, doorbell, dcbaa_set,
-    MAX_SLOT, MAX_EP,
+    MAX_SLOT, max_slot, MAX_EP,
     CC_SUCCESS, CC_SHORT, VEC_XHCI, teardown, forget_slot,
     // RUNDE BLECH-HID: was ein zweiter Regler und eine fremde Firmware
     // von diesem Treiber verlangen.
@@ -699,7 +699,7 @@ fn slot_enable(state: u64) -> u64 {
         return 0
     }
     let slot: u64 = g(state, S_CC_SLOT)
-    if slot == 0 || slot > MAX_SLOT {
+    if slot == 0 || slot > max_slot(state) {
         return 0
     }
     return slot
@@ -758,8 +758,40 @@ fn dcbaa_set(state: u64, slot: u64, addr: u64) {
     __mmio_write64((state + DCBAA_OFF + slot * 8) as *mut u64, addr)
 }
 
+// RUNDE HIDPUNKTE: DIE 1024 WAREN EINE ANNAHME UEBER FREMDE HARDWARE.
+//
+// Ein Geraetezusammenhang hat 32 Eintraege (Steckplatz + 31 Endpunkte),
+// und wie gross EIN Eintrag ist, sagt der REGLER in HCCPARAMS1: 32 oder
+// 64 Oktett. QEMU sagt ueberall 32, und mit 32 * 32 = 1024 ging die
+// feste Zahl auf. Justins zweiter Regler (1022:149c) sagt **64** --
+// gemessen auf seinem Brett, `usb: xhci slots=64 ports=8 ctx=64`. Dann
+// braucht EIN Zusammenhang 2048 Oktett, und der zweite Steckplatz lag
+// mitten im ersten.
+//
+// Der Abstand ist jetzt gerechnet und nicht geraten, und wie viele
+// Steckplaetze in den Bereich passen, sagt `max_slot`.
+fn dctx_bytes(state: u64) -> u64 {
+    return 32 * ctx_size(state)
+}
+
+// So viele Geraetezusammenhaenge passen zwischen DEVCTX_OFF und
+// RING_OFF: vier bei 32 Oktett je Eintrag, zwei bei 64. Wer darueber
+// hinaus einen Steckplatz vergaebe, wuerde die Uebertragungsringe
+// ueberschreiben -- und ein Fehler, der Speicher zerstoert, ist
+// schlimmer als ein Geraet, das abgelehnt wird und das sagt.
+fn max_slot(state: u64) -> u64 {
+    let n: u64 = 4096 / dctx_bytes(state)
+    if n > MAX_SLOT {
+        return MAX_SLOT
+    }
+    if n < 1 {
+        return 1
+    }
+    return n
+}
+
 fn devctx(state: u64, slot: u64) -> u64 {
-    return state + DEVCTX_OFF + (slot - 1) * 1024
+    return state + DEVCTX_OFF + (slot - 1) * dctx_bytes(state)
 }
 
 fn inctx(state: u64) -> u64 {
@@ -1300,7 +1332,7 @@ fn init_at(state: u64, einheit: u64, armed: bool) -> bool {
     // Geraetezusammenhaenge hat: die Steckplatznummern, die der Regler
     // dann vergibt, liegen zwischen 1 und MAX_SLOT und sind damit
     // unmittelbar der Platz in DEVCTX_OFF.
-    var want: u64 = MAX_SLOT
+    var want: u64 = max_slot(state)
     if want > slots(state) {
         want = slots(state)
     }

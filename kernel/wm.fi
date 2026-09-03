@@ -60,6 +60,7 @@ profile kernel
 
 import kstate
 import mem
+import font
 import fb
 // RUNDE NETVIEW, NACHTRAG: die einzigen zwei Zeilen, die diese Runde
 // in den Fensterserver legt. `netview` sagt, welche Netzsicht der
@@ -108,7 +109,7 @@ export {
     tile_node, tile_float, tile_snap, tile_action, hotkeys, hotkeys_seen,
     on_screen_resize, win_tabbed, tiled,
     MAX_WIN, K_RAW, K_TERM, title_h, border, grip, max_w, max_h,
-    set_uiscale, uisc,
+    set_uiscale, uisc, messleiste,
     MAX_W_HARD, MAX_H_HARD,
     E_KEY, E_DOWN, E_UP, E_MOVE, E_CLOSE, E_FOCUS, E_RESIZE,
     L_DESK, L_NORMAL, L_TOP, F_HIDDEN, F_NODECO, F_TABBED,
@@ -2610,8 +2611,32 @@ fn resize_win(state: u64, i: u64, w: u64, h: u64) -> bool {
     if w < 32 || h < 16 || w > MAX_W_HARD || h > MAX_H_HARD {
         return false
     }
+    // RUNDE HIDPUNKTE: HIER STAND "OHNE NEUEN PUFFER NICHT GROESSER ALS
+    // ANGELEGT", UND DAS WAR DER GRUND, WARUM AUF EINEM ULTRAWIDE-SCHIRM
+    // KEINE TASKLEISTE ZU SEHEN IST.
+    //
+    // Gemessen auf 3440x1440: die Leiste entsteht klein, will auf
+    // `w=3440 h=56` wachsen (770 560 Oktett) und bekommt `rc=-4`. Sie
+    // behaelt ihren alten Puffer von 128 Bildpunkten Breite -- und
+    // genau 128 Bildpunkte breit ist sie danach auf dem Schirm
+    // (nachgemessen im Bildschirmfoto, `docs/shots/hidpunkte/`). Auf
+    // 1280x800 passte der Wunsch zufaellig in den vorhandenen Puffer,
+    // deshalb ist das nie aufgefallen.
+    //
+    // Ein Fenster, das waechst, bekommt jetzt einen groesseren Puffer.
+    // Der alte wird NICHT freigegeben -- `mem.frame_run` hat kein
+    // Gegenstueck in diesem Kern, und ein Rahmen, der zurueckgegeben
+    // wird, ohne dass es einen Weg dafuer gibt, ist schlimmer als einer,
+    // der liegen bleibt. Bei sechzehn Fenstern ist das begrenzt.
     if w * h * 4 > wg(state, i, W_BUFBYTES) {
-        return false // ohne neuen Puffer nicht groesser als angelegt
+        let bytes: u64 = w * h * 4
+        let rahmen: u64 = (bytes + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE
+        let neu: u64 = mem.frame_run(state, rahmen)
+        if neu == 0 {
+            return false // wirklich kein Speicher -- dann ehrlich nein
+        }
+        wsv(state, i, W_BUF, neu)
+        wsv(state, i, W_BUFBYTES, rahmen * mem.FRAME_SIZE)
     }
     damage_win(state, i)
     wsv(state, i, W_W, w)
@@ -2874,6 +2899,28 @@ fn flush_win(state: u64, i: u64) {
 const CUR_W: u64 = 12
 const CUR_H: u64 = 18
 
+// RUNDE HIDPUNKTE: DER ZEIGER IST EIN PFEIL -- ER WAR NUR ZU KLEIN,
+// UM EINER ZU SEIN.
+//
+// Die Bitmaske stimmt; aus einem echten Bildschirmfoto (3440x1440)
+// herausgeschnitten ist ein sauberer Pfeil mit durchgehendem Schwanz
+// und umlaufendem Rand zu sehen -- er ist dort acht mal fuenfzehn
+// Bildpunkte gross. Auf einem 34-Zoll-Ultrawide ist das ein Fleck, und
+// genau als "einzelner weisser Fleck" hat Justin ihn beschrieben.
+//
+// Titelleiste, Rand und Schriftgroesse wachsen seit Runde SCHIRM mit
+// `uisc(state)`; der Zeiger war das einzige Stueck Oberflaeche, das es
+// nicht tat. Jetzt wird jeder Bildpunkt der Maske zu einem Block von
+// `uisc` mal `uisc` -- auf 1280x800 (uisc=1) aendert sich damit KEIN
+// einziges Bildpunkt, und das ist die Gegenprobe.
+fn cur_w(state: u64) -> u64 {
+    return CUR_W * uisc(state)
+}
+
+fn cur_h(state: u64) -> u64 {
+    return CUR_H * uisc(state)
+}
+
 fn cursor_row(r: u64, fuell: bool) -> u64 {
     return cursor_row_of(0, r, fuell)
 }
@@ -2967,7 +3014,7 @@ fn set_shape(state: u64, s: u64) {
     ss(state, S_SHAPE, s)
     let mx: i64 = gs(state, S_CURX) as i64
     let my: i64 = gs(state, S_CURY) as i64
-    damage(state, mx, my, mx + CUR_W as i64, my + CUR_H as i64)
+    damage(state, mx, my, mx + cur_w(state) as i64, my + cur_h(state) as i64)
 }
 
 // Eine Bildzeile des zusammengesetzten Bildes. Der Hintergrund, dann
@@ -3706,22 +3753,82 @@ fn fb_glyph(state: u64, slot: u64, x: i64, y: i64, color: u64,
     }
 }
 
+// ==================================== RUNDE HIDPUNKTE: DIE MESSLEISTE
+//
+// EINE ZEILE, DIE NICHT VOM FENSTERSYSTEM ABHAENGT.
+//
+// Der Eingabepuls stand bisher IM Terminalfenster. Auf Justins Brett
+// war genau dieses Fenster zu schmal und links abgeschnitten -- die
+// Diagnose war also da, wo man sie am wenigsten lesen konnte. Diese
+// Zeile wird NACH `compose` unmittelbar in den Rahmenpuffer gemalt,
+// mit dem eingebauten Bitmapzeichensatz (kein TTF, kein Fenster, kein
+// Puffer, keine Arena). Sie steht deshalb auch dann da, wenn der
+// Fensterserver, die Taskleiste und die Schrift allesamt versagen.
+//
+// Oben links, schwarz hinterlegt, mit `uisc` vergroessert.
+fn messleiste(state: u64, p: u64, n: u64) {
+    if !fb.ready(state) {
+        return
+    }
+    let k: u64 = uisc(state)
+    let gw: u64 = font.GLYPH_W * k
+    let gh: u64 = font.GLYPH_H * k
+    let breite: u64 = fb.width(state)
+    let hoehe: u64 = gh + 2 * k
+    if hoehe >= fb.height(state) {
+        return
+    }
+    let bg: u64 = fb.rgb(state, 0x00, 0x00, 0x00)
+    let fg: u64 = fb.rgb(state, 0x00, 0xFF, 0x66)
+    fb.fill(state, 0, 0, breite, hoehe, bg)
+    var i: u64 = 0
+    var x: u64 = k
+    while i < n && x + gw <= breite {
+        let ch: u64 = kstate.get8(p + i)
+        var r: u64 = 0
+        while r < font.GLYPH_H {
+            let bits: u64 = font.row(state + fb.FONT_OFF, ch, r)
+            var c: u64 = 0
+            while c < font.GLYPH_W {
+                if (bits & (1 << (7 - c))) != 0 {
+                    var dy: u64 = 0
+                    while dy < k {
+                        var dx: u64 = 0
+                        while dx < k {
+                            fb.pixel(state, x + c * k + dx,
+                                k + r * k + dy, fg)
+                            dx = dx + 1
+                        }
+                        dy = dy + 1
+                    }
+                }
+                c = c + 1
+            }
+            r = r + 1
+        }
+        x = x + gw
+        i = i + 1
+    }
+    fb.dirty(state, 0, hoehe)
+}
+
 fn paint_cursor(state: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     let mx: i64 = gs(state, S_CURX) as i64
     let my: i64 = gs(state, S_CURY) as i64
     let schwarz: u64 = rgb24(state, CURSOR_EDGE)
     let weiss: u64 = rgb24(state, CURSOR_BODY)
+    let k: u64 = uisc(state)
     var r: u64 = 0
-    while r < CUR_H {
+    while r < CUR_H * k {
         let py: i64 = my + r as i64
         if py >= cy0 as i64 && py < cy1 as i64 {
-            let u: u64 = cursor_row_of(gs(state, S_SHAPE), r, false)
-            let f: u64 = cursor_row_of(gs(state, S_SHAPE), r, true)
+            let u: u64 = cursor_row_of(gs(state, S_SHAPE), r / k, false)
+            let f: u64 = cursor_row_of(gs(state, S_SHAPE), r / k, true)
             var c: u64 = 0
-            while c < CUR_W {
+            while c < CUR_W * k {
                 let pxx: i64 = mx + c as i64
                 if pxx >= cx0 as i64 && pxx < cx1 as i64 {
-                    let bit: u64 = 1 << (11 - c)
+                    let bit: u64 = 1 << (11 - c / k)
                     if (f & bit) != 0 {
                         fb.pixel(state, pxx as u64, py as u64, weiss)
                     } else {
@@ -3824,12 +3931,12 @@ fn on_mouse(state: u64) {
         // dort den Hintergrund und die Fenster neu und danach den
         // Zeiger. Ein gerettetes Rechteck waere der zweite Weg dahin
         // und muesste bei jedem Fensterwechsel nachgezogen werden.
-        damage(state, ox as i64, oy as i64, (ox + CUR_W) as i64,
-            (oy + CUR_H) as i64)
+        damage(state, ox as i64, oy as i64, (ox + cur_w(state)) as i64,
+            (oy + cur_h(state)) as i64)
         ss(state, S_CURX, nx)
         ss(state, S_CURY, ny)
-        damage(state, nx as i64, ny as i64, (nx + CUR_W) as i64,
-            (ny + CUR_H) as i64)
+        damage(state, nx as i64, ny as i64, (nx + cur_w(state)) as i64,
+            (ny + cur_h(state)) as i64)
     }
     let x: i64 = nx as i64
     let y: i64 = ny as i64
