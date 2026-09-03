@@ -300,19 +300,24 @@ Vorgabe zurueck; es bleibt also immer ein Bild.
 
 ## 7. Offen, gemessen, nicht behoben
 
-1. **Die Taskleiste erscheint ab 1920x1080 nicht auf dem Schirm.**
-   Auf 1024x768 ist sie vollstaendig da (`nach-1024x768.png`: Start,
-   zwei Fensterknoepfe, Netz, Akku, Uhr). Auf 1920x1080 und 2560x1440
-   ist die Flaeche, auf der sie liegen muesste, im Bild unveraendert
-   Hintergrund (Pixelprobe der untersten 40 Zeilen: EINE Farbe,
-   16,20,26), obwohl der Mitschnitt sagt, dass alles stimmt:
-   `taskbar: size w=1920 h=32 rc=0`,
-   `taskbar: geom edge=0 x=0 y=1048 w=1920 h=32`, `paints=2`, und alle
-   Felder werden mit sinnvollen Koordinaten gemalt
-   (`text clock x=1868`). Der Fehler liegt also NICHT in der
-   Aufloesungserkennung und nicht in der Leiste selbst, sondern
-   zwischen Fensterpuffer und Zusammensetzen. Das ist der erste
-   Auftrag der naechsten Runde.
+1. ~~**Die Taskleiste erscheint ab 1920x1080 nicht auf dem Schirm.**~~
+   **GEFUNDEN UND BEHOBEN, Runde SCHIRM-ECHT (03.09.2026)** -- siehe
+   `docs/RUNDE-SCHIRM-ECHT.md`. Der Befund dieser Runde war richtig
+   ("nicht die Aufloesung, nicht die Leiste, sondern zwischen
+   Fensterpuffer und Zusammensetzen"), und die Ursache lag eine Schicht
+   tiefer als vermutet: `wig.blit` -- der einzige Weg, auf dem ein
+   Programm aus Ring 3 Bildpunkte in sein Fenster bekommt -- hat jede
+   Zeile ABGELEHNT, die breiter war als der Umschlagpuffer
+   (`w > MAX_ROW`, MAX_ROW = STAGE_MAX/4 = **1024**). Schreibtisch und
+   Taskleiste sind so breit wie der Schirm. Auf 800x600 und 1024x768
+   passte das, ab 1280 nicht mehr: ihr `push` gab 0 zurueck, ihr
+   Fensterpuffer behielt die Farbe aus `wm.create` (16,20,26 -- genau
+   die "eine Farbe" der Pixelprobe oben), und weil ohne Blit auch kein
+   `wm.damage` laeuft, wurde die Leiste nie zusammengesetzt.
+   Behoben, ohne die Speicherkarte anzufassen: eine zu breite Zeile
+   wird in `stuecke(w)` Umschlaege zerlegt statt abgelehnt.
+   Gemessen nachher: **100 % x 100 % auf 800x600, 1280x800, 1920x1080
+   und 2048x1152**, Leiste sichtbar (`docs/shots/schirm-nach-*.png`).
 2. **Rohe Sprachschluessel im Starter.** Im Bild stehen
    `launcher.prompt` und `launcher.run` statt uebersetzter Texte --
    auf jeder Aufloesung, also kein Schirm-Problem, aber sichtbar.

@@ -98,6 +98,16 @@ schau() { # name unterbefehl args...
 }
 
 # Dasselbe, aber es MUSS fehlschlagen (die Gegenprobe).
+# RUNDE SCHIRM-ECHT: DIESE MASCHINE HAT KEINE TAFEL.
+#
+# Seit Runde SCHIRM liest der Kern den EDID-Block und nimmt die
+# Aufloesung, die der Bildschirm nennt. QEMUs `-vga std` nennt ab Werk
+# 1280x800. Dieser Laeufer misst aber die EINGEBAUTE VORGABE und die
+# Modussetzung (800x600, pitch=3200, cols=100 rows=37) -- also wird die
+# Tafel hier abgeschaltet. Wer den EDID-Weg messen will, findet ihn in
+# tools/display/run.sh Abschnitt 4 und in tools/customres/run.sh.
+VGA_STD=${VGA_STD:-"-vga std -global VGA.edid=off"}
+
 schau_nicht() { # name unterbefehl args...
     local name=$1; shift
     local aus rc
@@ -113,7 +123,7 @@ fi
 
 # ---------------------------------------------------------- ein Lauf
 #
-# `-vga std` ist der Bochs-VBE-Aufsatz von QEMU (PCI 1234:1111): die
+# `$VGA_STD` ist der Bochs-VBE-Aufsatz von QEMU (PCI 1234:1111): die
 # Karte, deren Register `fb.fi` bedient.  Er ist bei x86 ohnehin die
 # Vorgabe; er steht hier ausdruecklich, weil der ganze Abschnitt davon
 # abhaengt.
@@ -125,7 +135,7 @@ lauf() { # abbild kommandozeile ausgabe [weitere qemu-argumente]
     local abbild=$1 zeile=$2 aus=$3
     shift 3
     timeout 120 $QEMU_X86 -kernel "$abbild" -m 256 -append "$zeile" \
-        -serial "file:$aus" -display none -no-reboot -vga std \
+        -serial "file:$aus" -display none -no-reboot $VGA_STD \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 "$@" >/dev/null 2>&1
     return $?
 }
@@ -140,7 +150,7 @@ foto() { # abbild kommandozeile ausgabe ppm [weitere qemu-argumente]
     local sock="$TMPD/mon-$$.sock"
     rm -f "$aus" "$ppm" "$sock"
     timeout 120 $QEMU_X86 -kernel "$abbild" -m 256 -append "$zeile" \
-        -serial "file:$aus" -display none -no-reboot -vga std \
+        -serial "file:$aus" -display none -no-reboot $VGA_STD \
         -monitor "unix:$sock,server,nowait" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 "$@" >/dev/null 2>&1 &
     local pid=$!
