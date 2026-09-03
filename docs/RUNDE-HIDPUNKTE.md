@@ -305,6 +305,25 @@ auf die erste Pulszeile, bevor er einspeist, und `feld1` nimmt die erste
 Zeile ist beim Lesen sonst oft halb geschrieben, und ein leerer
 Vergleichswert lässt jede Zusage darauf fallen.
 
+### `tools/desktop/run.sh`: 19 rote Zusagen, und keine davon ist neu
+
+Der Läufer rechnet durchgehend mit `SCREEN_W=800 SCREEN_H=600`, gibt QEMU
+aber keine Auflösung mit und bekommt 1280x800 — er sagt das in jeder
+seiner Meldungen selbst („work area (0, 0, 1280, 800), expected
+(0, 0, 800, 600)"). Runde BLECH-HID und Runde HIDWEG haben dasselbe
+vermerkt.
+
+Die roten Zeilen sind Zeile für Zeile gegen den Lauf der Runde davor
+gehalten (Zahlen normalisiert, sortiert, `comm`):
+
+```
+nur VORHER (also jetzt behoben):  FAIL  tools/kN/run.sh: KN: N passed, N failed
+nur JETZT (also neu):             — keine —
+```
+
+**20 vorher, 19 jetzt, kein einziger neuer.** Nichts in dieser Runde
+fasst die Bildschirmgröße an; der Läufer gehört einer eigenen.
+
 ---
 
 ## 7. WAS DIESE RUNDE NICHT ERREICHT HAT
