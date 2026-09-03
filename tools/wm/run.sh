@@ -673,6 +673,23 @@ echo "        im Regellauf: irqs=$npi  davon leer=$nps  abgefragt=$npp"
 num "im Regellauf kommen Oktette auf BEIDEN Wegen an (Unterbrechungen)" \
     "$npi" gt 0
 
+# ================= RUNDE BLECH-HID: DER ZEIGER, ALS BILD UND NICHT ALS ZAHL
+#
+# Justin hat den Zeiger auf echtem Blech fotografiert: ein Dreieck, eine
+# Luecke, zwei Stummel. Der Fehler stand in achtzehn von Hand
+# geschriebenen Bitmasken, und KEINE Zusage dieses Laeufers hat ihn
+# gesehen -- weil keine ihn ansehen konnte. Jetzt malt
+# `tools/wm/zeiger.py` die Masken als ASCII-Bild und rechnet sechs
+# Zusagen nach.
+echo
+echo "== 18. der Mauszeiger (Runde BLECH-HID) =="
+if python3 tools/wm/zeiger.py kernel/wm.fi > "$TMPD/zeiger.txt" 2>&1; then
+    ok "der Zeiger ist ein Pfeil: $(tail -1 "$TMPD/zeiger.txt" | sed 's/^ *//')"
+else
+    bad "der Zeiger ist kein Pfeil"
+fi
+sed 's/^/       /' "$TMPD/zeiger.txt"
+
 echo
 if [ "$fail" -eq 0 ]; then
     echo "WM: $pass passed, 0 failed"
