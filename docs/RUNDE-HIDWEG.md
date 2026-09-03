@@ -343,7 +343,16 @@ Startmodul (`modfs`), dieselbe Kommandozeile wie Menü 4.
 |---|---|---|
 | `tools/hid/run.sh` | 57 / 0 | **57 / 0** |
 | `tools/k17/run.sh` | 158 / 0 | **158 / 0** |
-| `tools/desktop/run.sh` | 1 rote Zusage (`WM_MAXNR`) | **grün** — die Liste stand seit Runde PAINT auf 2115, `WM_APP` ist 2116. Eine rote Zusage, über die alle hinwegsteigen, ist schlimmer als keine; das steht drei Zeilen darüber im selben Läufer |
+| `tools/desktop/run.sh` | 5 rote Zusagen | **4** — `WM_MAXNR` ist repariert (die Liste stand seit Runde PAINT auf 2115, `WM_APP` ist 2116; eine rote Zusage, über die alle hinwegsteigen, ist schlimmer als keine — das steht drei Zeilen darüber im selben Läufer) |
+
+Die **vier** übrigen roten Zusagen dieses Läufers (`[bottom|top|left|right]
+the rectangles do not add up`) gehören dieser Runde **nicht** und sind
+auch keine Regression: der Läufer rechnet mit `SCREEN_W=800
+SCREEN_H=600`, gibt QEMU aber keine Auflösung mit, und `-vga std` liefert
+1280×800. Die Meldung sagt das selbst — *„the bar is at (0, 772, 1280,
+28), expected (0, 572, 800, 28)"*. Sie stehen vor und nach dieser Runde
+gleich da; Runde BLECH-HID hat dasselbe schon vermerkt. Nichts in dieser
+Runde fasst die Bildschirmgröße an.
 
 ---
 
