@@ -64,6 +64,7 @@ import serial
 import kstate
 import pci
 import arch.x86_64.apic
+import atomic
 import mem
 
 export {
@@ -77,7 +78,11 @@ export {
     ep_open, ep_find, ep_ring, ep_seq, ep_code, ep_resid, ep_reset_ring,
     control, bulk, int_queue, doorbell, dcbaa_set,
     MAX_SLOT, MAX_EP,
-    CC_SUCCESS, CC_SHORT, VEC_XHCI, teardown, forget_slot
+    CC_SUCCESS, CC_SHORT, VEC_XHCI, teardown, forget_slot,
+    // RUNDE BLECH-HID: was ein zweiter Regler und eine fremde Firmware
+    // von diesem Treiber verlangen.
+    count_hc, nth_hc, init_at, unit, udelay, power_all,
+    uebersicht, bericht, owned_by_bios, hcs_seen, legtest
 }
 
 // ------------------------------------------------- der Vorrat dieser Runde
@@ -141,6 +146,34 @@ const S_SCRATCH: u64 = 0x0B8 // Feld der Kratzbloecke, 0 = keine
 const S_NSCRATCH: u64 = 0x0C0
 const S_XFERS: u64 = 0x0C8
 const S_STALLS: u64 = 0x0D0
+
+// ================================================ RUNDE BLECH-HID
+//
+// WAS AUF ECHTEM BLECH ZU MESSEN IST UND IN QEMU NIE AUFFIEL. Justin
+// hat am 03.09.2026 den Stick zum ersten Mal in einen echten Rechner
+// gesteckt: die Tastatur ging IM STARTMENUE DES LADERS einwandfrei und
+// war tot, sobald Osum uebernahm -- die Maus leuchtete nicht einmal.
+// Genau das ist das Bild, das entsteht, wenn die Firmware den Regler
+// noch besitzt: sie bedient ihn weiter, das Betriebssystem sieht keine
+// Ereignisse, und ein HCRST auf einem fremden Regler wird von der
+// Firmware ueber einen SMI abgefangen.
+//
+// Diese acht Zellen halten fest, was dabei gemessen wurde -- vorher,
+// nachher und wie lange es gedauert hat. Sie stehen im Bericht, damit
+// ein FOTO des Bildschirms die Frage beantwortet und nicht eine
+// Vermutung.
+const S_UNIT: u64 = 0x0D8 // der wievielte xHCI dieses Bretts
+const S_HCS: u64 = 0x0E0 // wie viele es ueberhaupt gibt
+const S_XECP: u64 = 0x0E8 // Versatz der ersten erweiterten Faehigkeit
+const S_LEGCAP: u64 = 0x0F0 // Versatz von USBLEGSUP, 0 = es gibt keine
+const S_LEGPRE: u64 = 0x0F8 // USBLEGSUP, wie die Firmware es hinterliess
+const S_LEGPOST: u64 = 0x100 // ... und nach der Uebernahme
+const S_LEGMS: u64 = 0x108 // Millisekunden, die das BIOS gebraucht hat
+const S_LEGFORCE: u64 = 0x110 // 1 = das BIOS-Bit musste geloescht werden
+const S_HALTOK: u64 = 0x118
+const S_RSTOK: u64 = 0x120
+const S_HCIVER: u64 = 0x128
+const S_BAR: u64 = 0x130
 
 // -------------------------------------- die Felder eines Endpunktplatzes
 
@@ -237,6 +270,40 @@ const VEC_XHCI: u64 = 43
 
 const SPIN_LIMIT: u64 = 2000000
 const RESET_SPIN: u64 = 400000
+
+// ======================================= RUNDE BLECH-HID: DIE UEBERGABE
+//
+// Ein xHCI traegt hinter den Faehigkeitsregistern eine VERKETTETE LISTE
+// erweiterter Faehigkeiten (xHCI 1.2, Abschnitt 7). Wo sie anfaengt,
+// steht in HCCPARAMS1 Bit 31..16, und zwar in DOPPELWORTEN. Jeder
+// Eintrag hat im ersten Oktett seine Kennung und im zweiten den Abstand
+// zum naechsten, ebenfalls in Doppelworten; ein Abstand von null ist das
+// Ende.
+//
+// KENNUNG 1 IST DIE, AN DER ALLES HAENGT: "USB Legacy Support". Das
+// erste Doppelwort ist USBLEGSUP mit zwei Fahnen -- Bit 16 "HC BIOS
+// Owned" und Bit 24 "HC OS Owned". Solange Bit 16 steht, gehoert der
+// Regler der FIRMWARE. Das Betriebssystem setzt Bit 24 und WARTET,
+// bis die Firmware Bit 16 fallen laesst; erst danach darf es den Regler
+// anfassen. Wer das ueberspringt, bekommt genau das Bild von oben.
+//
+// Das zweite Doppelwort (USBLEGCTLSTS) sagt, welche Ereignisse die
+// Firmware als SMI zugestellt bekommt. Nach der Uebernahme werden alle
+// Freigaben geloescht und die stehenden Meldungen quittiert -- sonst
+// laeuft die Maschine bei jedem Tastendruck in den Systemverwaltungsmodus
+// und der Regler wird zweimal bedient. Die beiden Masken sind
+// zeichengleich die aus Linux (drivers/usb/host/pci-quirks.c).
+const XECP_LEGSUP: u64 = 1
+const XECP_PROTO: u64 = 2
+const LEG_BIOS: u64 = 0x00010000
+const LEG_OS: u64 = 0x01000000
+const O_LEGCTL: u64 = 4
+const LEG_SMI_BEHALTEN: u64 = 0x000E1FEE
+const LEG_SMI_QUITTIEREN: u64 = 0xE0000000
+// So lange wird der Firmware Zeit gelassen. Linux wartet 5 Sekunden;
+// eine Sekunde reicht fuer jedes Brett, das ueberhaupt loslaesst, und
+// laenger will niemand vor einem schwarzen Schirm sitzen.
+const LEG_MS: u64 = 1000
 
 // ---------------------------------------------------------- Kleinkram
 
@@ -726,6 +793,44 @@ fn port_power(state: u64, p: u64) {
     portsc_write(state, p, (cur & PSC_KEEP) | PSC_PP)
 }
 
+// RUNDE BLECH-HID: ALLE ANSCHLUESSE EINSCHALTEN UND DANN WIRKLICH WARTEN.
+//
+// Justins Maus LEUCHTETE NICHT EINMAL. Das ist keine Aussage ueber HID
+// und keine ueber die Aufzaehlung -- das ist eine Aussage ueber die
+// Versorgungsspannung an einem Anschluss. Ein HCRST setzt PP auf null
+// (xHCI 1.2, 5.4.8: "PP ... is reset to 0 by HCRST when PPC = 1"), und
+// danach dauert es, bis Spannung anliegt: die USB-2.0-Spezifikation gibt
+// einem Anschluss dafuer bis zu 100 ms (bPwrOn2PwrGood, in
+// 2-ms-Schritten), und das Geraet dahinter braucht danach noch einmal
+// Zeit, bis es sich meldet.
+//
+// Bis zu dieser Runde stand an dieser Stelle eine ZAEHLSCHLEIFE mit
+// 200000 leeren Durchlaeufen. Sie misst keine Zeit -- sie misst den
+// Uebersetzer und den Prozessortakt, und auf einer schnellen Maschine
+// ist sie in weniger als einer Millisekunde durch. In QEMU faellt das
+// nicht auf, weil ein nachgebildetes Geraet sofort "verbunden" meldet.
+// Hier stehen jetzt 200 echte Millisekunden, und die Zahl der
+// Anschluesse, an denen danach WIRKLICH Strom steht, wird
+// zurueckgegeben statt gehofft.
+fn power_all(state: u64) -> u64 {
+    let n: u64 = ports(state)
+    var p: u64 = 1
+    while p <= n {
+        port_power(state, p)
+        p = p + 1
+    }
+    udelay(state, 200000)
+    var mit: u64 = 0
+    p = 1
+    while p <= n {
+        if (portsc(state, p) & PSC_PP) != 0 {
+            mit = mit + 1
+        }
+        p = p + 1
+    }
+    return mit
+}
+
 fn port_clear_changes(state: u64, p: u64) {
     let cur: u64 = portsc(state, p)
     portsc_write(state, p, (cur & PSC_KEEP) | (cur & PSC_CHANGES))
@@ -741,18 +846,170 @@ fn port_reset(state: u64, p: u64) -> bool {
         port_clear_changes(state, p)
         return true
     }
+    // RUNDE BLECH-HID: DIE PRELLZEIT. Ein Anschluss, der gerade
+    // "verbunden" gemeldet hat, ist noch nicht ruhig -- USB 2.0,
+    // 7.1.7.3 verlangt 100 ms (TATTDB), bevor zurueckgesetzt wird. Ein
+    // nachgebildetes Geraet braucht das nicht, ein Stecker in einer
+    // Buchse schon.
+    udelay(state, 100000)
     let cur: u64 = portsc(state, p)
     portsc_write(state, p, (cur & PSC_KEEP) | PSC_PR)
-    var spin: u64 = 0
-    while spin < RESET_SPIN {
-        let v: u64 = portsc(state, p)
-        if (v & PSC_PRC) != 0 {
-            port_clear_changes(state, p)
-            return (portsc(state, p) & PSC_PED) != 0
+    var ms: u64 = 0
+    var fertig: bool = false
+    while ms < 500 {
+        if (portsc(state, p) & PSC_PRC) != 0 {
+            fertig = true
+            ms = 500
+        } else {
+            udelay(state, 1000)
+            ms = ms + 1
         }
-        spin = spin + 1
     }
-    return false
+    if !fertig {
+        return false
+    }
+    port_clear_changes(state, p)
+    // Und die Erholungszeit danach (USB 2.0, 7.1.7.5, TRSTRCY = 10 ms).
+    // Wer sofort auf Adresse 0 fragt, fragt ein Geraet, das noch nicht
+    // zuhoert.
+    udelay(state, 20000)
+    return (portsc(state, p) & PSC_PED) != 0
+}
+
+// ================================ RUNDE BLECH-HID: EINE ECHTE PAUSE
+//
+// Gemessen am Zyklenzaehler, den `apic.calibrate` gegen den PIT gehalten
+// hat -- dieselbe Rechnung wie `smp.udelay`, hier noch einmal, weil
+// dieser Treiber `smp` nicht einbinden darf (smp bindet `sched` ein, und
+// `sched` laeuft ueber Geraete). Ohne geeichten Zaehler bleibt die
+// Zaehlschleife als Rueckfall -- sie ist dann ungenau, aber sie ist
+// nicht null.
+fn udelay(state: u64, us: u64) {
+    let hz: u64 = apic.tsc_hz(state)
+    if hz == 0 {
+        var i: u64 = 0
+        while i < us * 200 {
+            atomic.pause()
+            i = i + 1
+        }
+        return
+    }
+    let want: u64 = hz / 1000000 * us
+    let t0: u64 = apic.tsc()
+    var laeuft: bool = true
+    while laeuft {
+        if apic.tsc() - t0 >= want {
+            laeuft = false
+        } else {
+            atomic.pause()
+        }
+    }
+}
+
+// ------------------------------------------ die erweiterten Faehigkeiten
+
+// Der Versatz der ersten erweiterten Faehigkeit, in OKTETTEN ab BAR 0.
+// 0 heisst: dieser Regler hat keine.
+fn xecp_first(b: u64) -> u64 {
+    let hcc1: u64 = rd32(b, C_HCCPARAMS1)
+    return ((hcc1 >> 16) & 0xFFFF) * 4
+}
+
+// Der Versatz der Faehigkeit mit der Kennung `id`, oder 0. Die Liste
+// wird BEGRENZT durchlaufen: ein Brett mit einem verbogenen Zeiger darf
+// den Start nicht anhalten.
+fn xecp_find(b: u64, id: u64) -> u64 {
+    var at: u64 = xecp_first(b)
+    var n: u64 = 0
+    while at != 0 && n < 64 {
+        let w: u64 = rd32(b, at)
+        if (w & 0xFF) == id {
+            return at
+        }
+        let next: u64 = (w >> 8) & 0xFF
+        if next == 0 {
+            at = 0
+        } else {
+            at = at + next * 4
+        }
+        n = n + 1
+    }
+    return 0
+}
+
+// Gehoert der Regler in diesem Augenblick der Firmware?
+fn owned_by_bios(state: u64) -> bool {
+    let b: u64 = base_of(state)
+    let cap: u64 = xecp_find(b, XECP_LEGSUP)
+    if cap == 0 {
+        return false
+    }
+    return (rd32(b, cap) & LEG_BIOS) != 0
+}
+
+// ================== RUNDE BLECH-HID: DEN REGLER DER FIRMWARE ABNEHMEN
+//
+// Der Ablauf steht in xHCI 1.2, Abschnitt 4.22.1, und er ist kurz:
+// OS-Bit setzen, warten, bis das BIOS-Bit faellt, danach die SMIs
+// abschalten. Was hier dazukommt, ist die Ehrlichkeit darueber, was
+// gemessen wurde -- vorher, nachher, wie lange -- und der Fall, in dem
+// die Firmware NICHT loslaesst.
+//
+// DASS WIR DANN TROTZDEM UEBERNEHMEN, ist eine Entscheidung und keine
+// Nachlaessigkeit: Linux tut dasselbe (`pci-quirks.c` loescht das
+// BIOS-Bit nach dem Zeitablauf von Hand), und ein Regler, den niemand
+// bedient, ist schlimmer als einer, den man einer Firmware wegnimmt, die
+// auf ein Bit nicht antwortet. Der Bericht sagt, welcher der beiden
+// Faelle eingetreten ist.
+fn handover(state: u64) -> bool {
+    let b: u64 = base_of(state)
+    s(state, S_XECP, xecp_first(b))
+    let cap: u64 = xecp_find(b, XECP_LEGSUP)
+    s(state, S_LEGCAP, cap)
+    s(state, S_LEGMS, 0)
+    s(state, S_LEGFORCE, 0)
+    if cap == 0 {
+        // Kein Legacy-Abschnitt: der Regler hat nie jemandem gehoert.
+        // QEMU ist dieser Fall, und genau deshalb ist der Fehler
+        // fuenfundzwanzig Runden lang nicht aufgefallen.
+        s(state, S_LEGPRE, 0)
+        s(state, S_LEGPOST, 0)
+        return true
+    }
+    let vor: u64 = rd32(b, cap)
+    s(state, S_LEGPRE, vor)
+    wr32(b, cap, vor | LEG_OS)
+    // ZWEI ZAEHLER UND NICHT EINER. Der erste Entwurf hat die Schleife
+    // mit `ms = LEG_MS` verlassen und damit die gemessene Zeit
+    // ueberschrieben -- eine Uebernahme, die nach drei Millisekunden
+    // durch war, meldete tausend. Gefunden hat es `legtest`, Fall 1,
+    // und genau dafuer gibt es ihn: die Zahl im Bericht ist die
+    // Begruendung fuer alles, was danach entschieden wird.
+    var ms: u64 = 0
+    var lauf: u64 = 0
+    var frei: bool = false
+    while lauf < LEG_MS {
+        if (rd32(b, cap) & LEG_BIOS) == 0 {
+            frei = true
+            lauf = LEG_MS
+        } else {
+            udelay(state, 1000)
+            ms = ms + 1
+            lauf = lauf + 1
+        }
+    }
+    s(state, S_LEGMS, ms)
+    if !frei {
+        let hart: u64 = rd32(b, cap)
+        wr32(b, cap, (hart & (~LEG_BIOS) & 0xFFFFFFFF) | LEG_OS)
+        s(state, S_LEGFORCE, 1)
+    }
+    s(state, S_LEGPOST, rd32(b, cap))
+    // Und die Systemverwaltungsmeldungen abschalten, bevor der erste
+    // Tastendruck ankommt.
+    let ctl: u64 = rd32(b, cap + O_LEGCTL)
+    wr32(b, cap + O_LEGCTL, (ctl & LEG_SMI_BEHALTEN) | LEG_SMI_QUITTIEREN)
+    return (rd32(b, cap) & LEG_BIOS) == 0
 }
 
 // ------------------------------------------------------ die Uebertragungen
@@ -885,12 +1142,74 @@ fn int_queue(state: u64, slot: u64, dci: u64, dst: u64, len: u64) -> bool {
 // ------------------------------------------------------------ das Aufsetzen
 
 fn present(state: u64) -> bool {
-    return pci.find_class(state, 0x0C, 0x03, 0x30) < pci.MAX_DEV
+    return count_hc(state) > 0
+}
+
+// ============ RUNDE BLECH-HID: ES GIBT MEHR ALS EINEN xHCI IN EINEM PC
+//
+// `rootsel` auf Justins Brett meldet ZWEI:
+//
+//     rootsel: usb xHCI bdf=0x200 1022:43d5
+//     rootsel: usb xHCI bdf=0xc03 1022:149c
+//
+// Bis zu dieser Runde nahm `init` immer `pci.find_class(...)`, also den
+// ERSTEN, und hat den zweiten nie angesehen. Steckt die Tastatur an
+// einer Buchse des anderen Reglers, gibt es keine Eingabe -- und, was
+// schlimmer ist, keine Zeile darueber. Jetzt werden sie GEZAEHLT, jeder
+// einzeln aufgesetzt und einzeln berichtet.
+fn is_hc(state: u64, i: u64) -> bool {
+    return pci.get(state, i, pci.E_CLASS) == 0x0C
+        && pci.get(state, i, pci.E_SUBCLASS) == 0x03
+        && pci.get(state, i, pci.E_PROGIF) == 0x30
+}
+
+fn count_hc(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < pci.count(state) && i < pci.MAX_DEV {
+        if is_hc(state, i) {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// Der PCI-Platz des `n`-ten Reglers, oder `pci.MAX_DEV`.
+fn nth_hc(state: u64, n: u64) -> u64 {
+    var seen: u64 = 0
+    var i: u64 = 0
+    while i < pci.count(state) && i < pci.MAX_DEV {
+        if is_hc(state, i) {
+            if seen == n {
+                return i
+            }
+            seen = seen + 1
+        }
+        i = i + 1
+    }
+    return pci.MAX_DEV
+}
+
+fn unit(state: u64) -> u64 {
+    return g(state, S_UNIT)
+}
+
+fn hcs_seen(state: u64) -> u64 {
+    return g(state, S_HCS)
 }
 
 fn init(state: u64, armed: bool) -> bool {
+    return init_at(state, 0, armed)
+}
+
+fn init_at(state: u64, einheit: u64, armed: bool) -> bool {
     s(state, S_READY, 0)
-    let idx: u64 = pci.find_class(state, 0x0C, 0x03, 0x30)
+    s(state, S_UNIT, einheit)
+    s(state, S_HCS, count_hc(state))
+    s(state, S_HALTOK, 0)
+    s(state, S_RSTOK, 0)
+    let idx: u64 = nth_hc(state, einheit)
     if idx >= pci.MAX_DEV {
         return false
     }
@@ -903,9 +1222,11 @@ fn init(state: u64, armed: bool) -> bool {
         return false
     }
     s(state, S_BASE, b)
+    s(state, S_BAR, phys)
     s(state, S_BDF, pci.get(state, idx, pci.E_BDF))
 
     let caplen: u64 = rd32(b, C_CAPLENGTH) & 0xFF
+    s(state, S_HCIVER, (rd32(b, C_CAPLENGTH) >> 16) & 0xFFFF)
     if caplen == 0 || caplen == 0xFF {
         return false
     }
@@ -929,12 +1250,21 @@ fn init(state: u64, armed: bool) -> bool {
     // Speicher greifen -- und ein xHCI tut nichts anderes als das.
     pci.enable_master(bdf(state))
 
+    // RUNDE BLECH-HID: ZUERST DER FIRMWARE ABNEHMEN, DANN ANFASSEN.
+    // Diese eine Zeile ist der Unterschied zwischen "die Tastatur geht
+    // im Startmenue und danach nicht mehr" und "sie geht". Vor ihr stand
+    // hier unmittelbar `halt` -- ein Schreibzugriff auf USBCMD eines
+    // Reglers, der noch dem BIOS gehoert.
+    handover(state)
+
     if !halt(state) {
         return false
     }
+    s(state, S_HALTOK, 1)
     if !reset(state) {
         return false
     }
+    s(state, S_RSTOK, 1)
 
     // Steckplaetze anmelden. Genau so viele, wie diese Runde
     // Geraetezusammenhaenge hat: die Steckplatznummern, die der Regler
@@ -1119,6 +1449,511 @@ fn intx_arm(state: u64, idx: u64, vector: u64, armed: bool) {
     apic.route(state, gsi, vector, apic.id(state), true, true)
     if !armed {
         apic.mask_gsi(state, gsi)
+    }
+}
+
+// =================================================== RUNDE BLECH-HID
+//
+// DER USB-BERICHT, DER AUF EIN FOTO PASSEN MUSS.
+//
+// Justin steht vor einem Rechner ohne serielles Kabel und hat ein
+// Mobiltelefon in der Hand. Was hier gedruckt wird, muss deshalb drei
+// Bedingungen erfuellen: es muss die Frage "warum kommt keine Eingabe
+// an" WIRKLICH beantworten, es muss KURZ sein, und die wichtigste
+// Aussage muss in EINER Zeile stehen -- fuer den Fall, dass der Rest
+// unscharf ist.
+//
+// Deshalb gibt es zwei Ausgaben:
+//
+//   `uebersicht` LIEST NUR. Sie steht in der Diagnose (Menue 1) und
+//   sagt, was die FIRMWARE hinterlassen hat: wie viele Regler es gibt,
+//   wem sie gehoeren, und wie viele Anschluesse Strom und ein Geraet
+//   haben. Kein Register wird beschrieben -- das ist die Regel dieses
+//   Berichts seit Runde USBIMG, und sie gilt weiter.
+//
+//   `bericht` steht NACH der Uebernahme und sagt, was sich geaendert
+//   hat: die Halbleiter-Semaphore vorher und nachher, ob HCRST
+//   geantwortet hat, und dann jeden Anschluss einzeln mit seinen vier
+//   Bits.
+//
+// PP=0 heisst "an dieser Buchse liegt keine Spannung" und erklaert eine
+// Maus, die nicht leuchtet. CCS=0 heisst "hier steckt nichts". PED=1
+// heisst "der Anschluss ist freigeschaltet, das Geraet antwortet".
+
+fn h(v: u64, n: u64) {
+    pci.hexn(v, n)
+}
+
+fn ja(b: bool) -> u64 {
+    if b {
+        return 1
+    }
+    return 0
+}
+
+// Die eine Zeile je Anschluss.
+fn port_line(state: u64, p: u64) {
+    var s_p: [u8; 3] = " p\0"
+    var s_e: [u8; 7] = " psc=0\0"
+    var s_pp: [u8; 5] = " pp=\0"
+    var s_cc: [u8; 6] = " ccs=\0"
+    var s_pe: [u8; 6] = " ped=\0"
+    var s_pr: [u8; 5] = " pr=\0"
+    var s_sp: [u8; 6] = " spd=\0"
+    let v: u64 = portsc(state, p)
+    serial.puts((&s_p[0]) as u64)
+    if p < 10 {
+        serial.put(48 as u8)
+    }
+    serial.dec(p)
+    serial.puts((&s_e[0]) as u64)
+    serial.put(120 as u8)
+    h(v, 8)
+    serial.puts((&s_pp[0]) as u64)
+    serial.dec(ja((v & PSC_PP) != 0))
+    serial.puts((&s_cc[0]) as u64)
+    serial.dec(ja((v & PSC_CCS) != 0))
+    serial.puts((&s_pe[0]) as u64)
+    serial.dec(ja((v & PSC_PED) != 0))
+    serial.puts((&s_pr[0]) as u64)
+    serial.dec(ja((v & PSC_PR) != 0))
+    serial.puts((&s_sp[0]) as u64)
+    serial.dec((v >> 10) & 0xF)
+}
+
+// Die Kopfzeile eines Reglers: wer er ist, wie gross er ist.
+fn kopf_line(state: u64, einheit: u64) {
+    var s_hc: [u8; 9] = "usb: hc\0\0"
+    var s_bdf: [u8; 8] = " bdf=0\0\0"
+    var s_id: [u8; 5] = " id=\0"
+    var s_bar: [u8; 8] = " bar=0\0\0"
+    var s_v: [u8; 8] = " hciv=\0\0"
+    var s_s: [u8; 8] = " slots=\0"
+    var s_pt: [u8; 8] = " ports=\0"
+    var s_c: [u8; 6] = " ctx=\0"
+    serial.puts((&s_hc[0]) as u64)
+    serial.dec(einheit)
+    serial.puts((&s_bdf[0]) as u64)
+    serial.put(120 as u8)
+    h(bdf(state), 4)
+    serial.puts((&s_id[0]) as u64)
+    h(pci.cfg_read16(bdf(state), 0x00), 4)
+    serial.put(58 as u8)
+    h(pci.cfg_read16(bdf(state), 0x02), 4)
+    serial.puts((&s_bar[0]) as u64)
+    serial.put(120 as u8)
+    h(g(state, S_BAR), 8)
+    serial.puts((&s_v[0]) as u64)
+    h(g(state, S_HCIVER), 4)
+    serial.puts((&s_s[0]) as u64)
+    serial.dec(slots(state))
+    serial.puts((&s_pt[0]) as u64)
+    serial.dec(ports(state))
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(ctx_size(state))
+    serial.nl()
+}
+
+// Die erweiterten Faehigkeiten als Liste, und die
+// Anschlussgruppen (USB2 gegen USB3) aus Kennung 2 -- das ist die
+// Zeile, die sagt, WELCHE Buchse an welchem Draht haengt.
+fn xecp_line(state: u64, einheit: u64) {
+    var s_x: [u8; 9] = "usb: hc\0\0"
+    var s_c: [u8; 8] = " xecp=0\0"
+    var s_id: [u8; 5] = " id=\0"
+    var s_u2: [u8; 8] = " usb\0\0\0\0"
+    var s_pt: [u8; 3] = " p\0"
+    var s_bis: [u8; 3] = "..\0"
+    var s_kein: [u8; 7] = " keine\0"
+    let b: u64 = base_of(state)
+    serial.puts((&s_x[0]) as u64)
+    serial.dec(einheit)
+    serial.puts((&s_c[0]) as u64)
+    serial.put(120 as u8)
+    h(xecp_first(b), 4)
+    var at: u64 = xecp_first(b)
+    var n: u64 = 0
+    if at == 0 {
+        serial.puts((&s_kein[0]) as u64)
+    }
+    while at != 0 && n < 16 {
+        let w: u64 = rd32(b, at)
+        let id: u64 = w & 0xFF
+        serial.puts((&s_id[0]) as u64)
+        serial.dec(id)
+        if id == XECP_PROTO {
+            // Name (Oktette 4..7, "USB "), Hauptfassung im dritten
+            // Oktett des ersten Doppelworts, dann Anschluss und Anzahl.
+            let rev: u64 = (w >> 24) & 0xFF
+            let pp: u64 = rd32(b, at + 8)
+            let erst: u64 = pp & 0xFF
+            let anz: u64 = (pp >> 8) & 0xFF
+            serial.puts((&s_u2[0]) as u64)
+            serial.dec(rev)
+            serial.puts((&s_pt[0]) as u64)
+            serial.dec(erst)
+            serial.puts((&s_bis[0]) as u64)
+            serial.dec(erst + anz - 1)
+        }
+        let next: u64 = (w >> 8) & 0xFF
+        if next == 0 {
+            at = 0
+        } else {
+            at = at + next * 4
+        }
+        n = n + 1
+    }
+    serial.nl()
+}
+
+// Die Zeile ueber die Uebernahme. SIE IST DIE WICHTIGSTE DES BERICHTS.
+fn leg_line(state: u64, einheit: u64) {
+    var s_x: [u8; 9] = "usb: hc\0\0"
+    var s_k: [u8; 12] = " legsup=0\0\0\0"
+    var s_kein: [u8; 34] = " legsup=KEINE (nie fremd besetzt)\0"
+    var s_vor: [u8; 7] = " vor=0\0"
+    var s_nach: [u8; 9] = " nach=0\0\0"
+    var s_bios: [u8; 7] = " bios=\0"
+    var s_os: [u8; 5] = " os=\0"
+    var s_ms: [u8; 8] = " nach\0\0\0"
+    var s_ms2: [u8; 4] = "ms\0\0"
+    var s_hart: [u8; 34] = " BIOS-Bit von Hand geloescht\0\0\0\0\0\0"
+    var s_halt: [u8; 7] = " halt=\0"
+    var s_rst: [u8; 8] = " hcrst=\0"
+    let cap: u64 = g(state, S_LEGCAP)
+    serial.puts((&s_x[0]) as u64)
+    serial.dec(einheit)
+    if cap == 0 {
+        serial.puts((&s_kein[0]) as u64)
+    } else {
+        serial.puts((&s_k[0]) as u64)
+        serial.put(120 as u8)
+        h(cap, 4)
+        serial.puts((&s_vor[0]) as u64)
+        serial.put(120 as u8)
+        h(g(state, S_LEGPRE), 8)
+        serial.puts((&s_bios[0]) as u64)
+        serial.dec(ja((g(state, S_LEGPRE) & LEG_BIOS) != 0))
+        serial.puts((&s_os[0]) as u64)
+        serial.dec(ja((g(state, S_LEGPRE) & LEG_OS) != 0))
+        serial.puts((&s_nach[0]) as u64)
+        serial.put(120 as u8)
+        h(g(state, S_LEGPOST), 8)
+        serial.puts((&s_bios[0]) as u64)
+        serial.dec(ja((g(state, S_LEGPOST) & LEG_BIOS) != 0))
+        serial.puts((&s_os[0]) as u64)
+        serial.dec(ja((g(state, S_LEGPOST) & LEG_OS) != 0))
+        serial.puts((&s_ms[0]) as u64)
+        serial.dec(g(state, S_LEGMS))
+        serial.puts((&s_ms2[0]) as u64)
+        if g(state, S_LEGFORCE) != 0 {
+            serial.puts((&s_hart[0]) as u64)
+        }
+    }
+    serial.puts((&s_halt[0]) as u64)
+    serial.dec(g(state, S_HALTOK))
+    serial.puts((&s_rst[0]) as u64)
+    serial.dec(g(state, S_RSTOK))
+    serial.nl()
+}
+
+// Die Anschluesse, vier je Zeile -- damit zwanzig Anschluesse fuenf
+// Zeilen brauchen und nicht zwanzig.
+fn port_lines(state: u64, einheit: u64) {
+    var s_x: [u8; 9] = "usb: hc\0\0"
+    var s_sum: [u8; 8] = " strom=\0"
+    var s_von: [u8; 2] = "/\0"
+    var s_ver: [u8; 12] = " verbunden=\0"
+    var s_fr: [u8; 8] = " frei=\0\0"
+    let n: u64 = ports(state)
+    var mit: u64 = 0
+    var ver: u64 = 0
+    var frei: u64 = 0
+    var p: u64 = 1
+    while p <= n {
+        let v: u64 = portsc(state, p)
+        if (v & PSC_PP) != 0 {
+            mit = mit + 1
+        }
+        if (v & PSC_CCS) != 0 {
+            ver = ver + 1
+        }
+        if (v & PSC_PED) != 0 {
+            frei = frei + 1
+        }
+        p = p + 1
+    }
+    serial.puts((&s_x[0]) as u64)
+    serial.dec(einheit)
+    serial.puts((&s_sum[0]) as u64)
+    serial.dec(mit)
+    serial.puts((&s_von[0]) as u64)
+    serial.dec(n)
+    serial.puts((&s_ver[0]) as u64)
+    serial.dec(ver)
+    serial.puts((&s_fr[0]) as u64)
+    serial.dec(frei)
+    serial.nl()
+    p = 1
+    while p <= n {
+        if (p % 4) == 1 {
+            serial.puts((&s_x[0]) as u64)
+            serial.dec(einheit)
+        }
+        port_line(state, p)
+        if (p % 4) == 0 || p == n {
+            serial.nl()
+        }
+        p = p + 1
+    }
+}
+
+// Der volle Bericht ueber den Regler, der GERADE aufgesetzt ist.
+fn bericht(state: u64) {
+    let einheit: u64 = g(state, S_UNIT)
+    kopf_line(state, einheit)
+    xecp_line(state, einheit)
+    leg_line(state, einheit)
+    port_lines(state, einheit)
+}
+
+// ============ RUNDE BLECH-HID: DIE GEGENPROBE ZUR UEBERNAHME
+//
+// DAS PROBLEM MIT DIESER RUNDE IST, DASS IHR WICHTIGSTER TEIL IN QEMU
+// NICHT VORKOMMT. Weder `qemu-xhci` noch `nec-usb-xhci` traegt einen
+// Legacy-Abschnitt -- beide melden "legsup=KEINE", und die zwanzig
+// Zeilen, an denen auf Justins Brett alles haengt, laufen dort NIE.
+// Eine Runde, die ihren eigenen Kern nicht messen kann, hat nichts
+// vorzuweisen; also wird die Faehigkeitsliste GEBAUT und derselbe
+// Quelltext dagegen gefahren.
+//
+// Was damit wirklich gemessen wird -- und das ist genau der Teil, an
+// dem ein Treiber sich vertut:
+//
+//   * die ZEIGERRECHNUNG. Der Zeiger in HCCPARAMS1 zaehlt DOPPELWORTE
+//     und nicht Oktette, und der Abstand zum naechsten Eintrag ebenso.
+//     Wer einmal mal 4 vergisst, landet im Nichts und findet nie eine
+//     Faehigkeit -- und das sieht auf dem Schirm genauso aus wie ein
+//     Brett ohne Legacy-Abschnitt.
+//   * die BEIDEN FAHNEN. Bit 16 gehoert dem BIOS, Bit 24 dem
+//     Betriebssystem. Wer sie vertauscht, wartet auf sich selbst.
+//   * DER FALL, IN DEM DIE FIRMWARE NICHT LOSLAESST. Ein Speicherwort
+//     antwortet nie -- also ist der Ablauf im Prueffall immer der
+//     harte, und dass er greift, ist die Zusage.
+//   * DER FALL, IN DEM SIE SCHON LOSGELASSEN HAT. Steht Bit 16 nicht,
+//     muss die Uebernahme SOFORT zurueckkommen (0 ms, nicht erzwungen).
+//
+// Der Prueffall wohnt in `SPARE_OFF` -- dem Feld, das der Regler nur
+// braucht, wenn er Kratzbloecke verlangt, und das zu diesem Zeitpunkt
+// noch niemandem gehoert.
+fn legtest(state: u64) {
+    var s_a: [u8; 14] = "usbleg: fall \0"
+    var s_cap: [u8; 6] = " cap=\0"
+    var s_soll: [u8; 7] = " soll=\0"
+    var s_pre: [u8; 6] = " vor=\0"
+    var s_post: [u8; 7] = " nach=\0"
+    var s_bios: [u8; 7] = " bios=\0"
+    var s_os: [u8; 5] = " os=\0"
+    var s_ms: [u8; 5] = " ms=\0"
+    var s_f: [u8; 8] = " hart=\0\0"
+    var s_ctl: [u8; 6] = " ctl=\0"
+    var s_ok: [u8; 5] = " OK\0\0"
+    var s_bad: [u8; 10] = " GEFALLEN\0"
+    var s_sum: [u8; 15] = "usbleg: gut=\0\0\0"
+    var s_sch: [u8; 11] = " schlecht=\0"
+    let buf: u64 = state + SPARE_OFF
+    var gut: u64 = 0
+    var schlecht: u64 = 0
+    // Der gemerkte Zustand des echten Reglers, damit die Probe ihn nicht
+    // verliert -- sie schreibt in dieselben Zellen.
+    let alt_base: u64 = g(state, S_BASE)
+    let alt_cap: u64 = g(state, S_LEGCAP)
+    let alt_pre: u64 = g(state, S_LEGPRE)
+    let alt_post: u64 = g(state, S_LEGPOST)
+    let alt_ms: u64 = g(state, S_LEGMS)
+    let alt_force: u64 = g(state, S_LEGFORCE)
+    let alt_xecp: u64 = g(state, S_XECP)
+    var fall: u64 = 0
+    while fall < 2 {
+        zero(buf, 0x200)
+        // Die Faehigkeitsregister: der Zeiger steht in Doppelworten.
+        // 0x100 Oktette = 0x40 Doppelworte.
+        wr32(buf, C_HCCPARAMS1, (0x40 << 16) | 4)
+        // Erster Eintrag bei 0x100: Kennung 2 (Anschlussarten), vier
+        // Doppelworte weiter geht es.
+        wr32(buf, 0x100, 2 | (4 << 8))
+        // Zweiter Eintrag bei 0x110: Kennung 1, Ende der Kette.
+        var leg: u64 = 1
+        if fall == 0 {
+            leg = leg | LEG_BIOS
+        } else {
+            leg = leg | LEG_OS
+        }
+        wr32(buf, 0x110, leg)
+        wr32(buf, 0x114, 0x0000E00F)
+        s(state, S_BASE, buf)
+        let genommen: bool = handover(state)
+        let cap: u64 = g(state, S_LEGCAP)
+        let post: u64 = g(state, S_LEGPOST)
+        let ctl: u64 = rd32(buf, 0x114)
+        var heil: bool = true
+        if cap != 0x110 {
+            heil = false
+        }
+        if (post & LEG_OS) == 0 {
+            heil = false
+        }
+        if (post & LEG_BIOS) != 0 {
+            heil = false
+        }
+        if !genommen {
+            heil = false
+        }
+        // Die SMI-Freigaben muessen weg und die drei Meldebits
+        // quittiert sein.
+        if (ctl & 0x0000E000) != 0 {
+            heil = false
+        }
+        if fall == 0 {
+            // Ein Speicherwort laesst nie los: es MUSS erzwungen worden
+            // sein, und es muss die volle Frist gedauert haben.
+            if g(state, S_LEGFORCE) != 1 || g(state, S_LEGMS) != LEG_MS {
+                heil = false
+            }
+        } else {
+            // Schon frei: sofort zurueck, nichts erzwungen.
+            if g(state, S_LEGFORCE) != 0 || g(state, S_LEGMS) != 0 {
+                heil = false
+            }
+        }
+        serial.puts((&s_a[0]) as u64)
+        serial.dec(fall)
+        serial.puts((&s_cap[0]) as u64)
+        serial.put(120 as u8)
+        h(cap, 4)
+        serial.puts((&s_soll[0]) as u64)
+        serial.put(120 as u8)
+        h(0x110, 4)
+        serial.puts((&s_pre[0]) as u64)
+        serial.put(120 as u8)
+        h(g(state, S_LEGPRE), 8)
+        serial.puts((&s_post[0]) as u64)
+        serial.put(120 as u8)
+        h(post, 8)
+        serial.puts((&s_bios[0]) as u64)
+        serial.dec(ja((post & LEG_BIOS) != 0))
+        serial.puts((&s_os[0]) as u64)
+        serial.dec(ja((post & LEG_OS) != 0))
+        serial.puts((&s_ms[0]) as u64)
+        serial.dec(g(state, S_LEGMS))
+        serial.puts((&s_f[0]) as u64)
+        serial.dec(g(state, S_LEGFORCE))
+        serial.puts((&s_ctl[0]) as u64)
+        serial.put(120 as u8)
+        h(ctl, 8)
+        if heil {
+            serial.puts((&s_ok[0]) as u64)
+            gut = gut + 1
+        } else {
+            serial.puts((&s_bad[0]) as u64)
+            schlecht = schlecht + 1
+        }
+        serial.nl()
+        fall = fall + 1
+    }
+    serial.puts((&s_sum[0]) as u64)
+    serial.dec(gut)
+    serial.puts((&s_sch[0]) as u64)
+    serial.dec(schlecht)
+    serial.nl()
+    zero(buf, 0x200)
+    s(state, S_BASE, alt_base)
+    s(state, S_LEGCAP, alt_cap)
+    s(state, S_LEGPRE, alt_pre)
+    s(state, S_LEGPOST, alt_post)
+    s(state, S_LEGMS, alt_ms)
+    s(state, S_LEGFORCE, alt_force)
+    s(state, S_XECP, alt_xecp)
+}
+
+// ============================================================ die Uebersicht
+//
+// NUR LESEN. Jeder Regler auf dem Bus, seine Kennung, wem er gehoert und
+// wie seine Anschluesse dastehen -- so, wie die Firmware sie
+// hinterlassen hat. Diese Fassung fasst NICHTS an: sie bildet den
+// Registerbereich ab und liest.
+fn uebersicht(state: u64) {
+    var s_n: [u8; 14] = "usb: regler=\0\0"
+    var s_hc: [u8; 9] = "usb: hc\0\0"
+    var s_bdf: [u8; 8] = " bdf=0\0\0"
+    var s_id: [u8; 5] = " id=\0"
+    var s_pt: [u8; 8] = " ports=\0"
+    var s_ow: [u8; 9] = " besitz=\0"
+    var s_bios: [u8; 5] = "BIOS\0"
+    var s_frei: [u8; 5] = "frei\0"
+    var s_os: [u8; 3] = "OS\0"
+    var s_strom: [u8; 8] = " strom=\0"
+    var s_ver: [u8; 12] = " verbunden=\0"
+    var s_bad: [u8; 24] = " NICHT ZU ERREICHEN\0\0\0\0\0"
+    let n: u64 = count_hc(state)
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(n)
+    serial.nl()
+    var u: u64 = 0
+    while u < n {
+        let idx: u64 = nth_hc(state, u)
+        serial.puts((&s_hc[0]) as u64)
+        serial.dec(u)
+        serial.puts((&s_bdf[0]) as u64)
+        serial.put(120 as u8)
+        h(pci.get(state, idx, pci.E_BDF), 4)
+        serial.puts((&s_id[0]) as u64)
+        h(pci.get(state, idx, pci.E_VENDOR), 4)
+        serial.put(58 as u8)
+        h(pci.get(state, idx, pci.E_DEVICE), 4)
+        let phys: u64 = pci.bar(state, idx, 0)
+        var b: u64 = 0
+        if phys != 0 && !pci.bar_is_io(state, idx, 0) {
+            b = apic.map_device(state, phys)
+        }
+        if b == 0 {
+            serial.puts((&s_bad[0]) as u64)
+            serial.nl()
+        } else {
+            let caplen: u64 = rd32(b, C_CAPLENGTH) & 0xFF
+            let hcs1: u64 = rd32(b, C_HCSPARAMS1)
+            let np: u64 = (hcs1 >> 24) & 0xFF
+            serial.puts((&s_pt[0]) as u64)
+            serial.dec(np)
+            serial.puts((&s_ow[0]) as u64)
+            let cap: u64 = xecp_find(b, XECP_LEGSUP)
+            if cap == 0 {
+                serial.puts((&s_frei[0]) as u64)
+            } else if (rd32(b, cap) & LEG_BIOS) != 0 {
+                serial.puts((&s_bios[0]) as u64)
+            } else {
+                serial.puts((&s_os[0]) as u64)
+            }
+            var mit: u64 = 0
+            var ver: u64 = 0
+            var p: u64 = 1
+            while p <= np && caplen != 0 {
+                let v: u64 = rd32(b + caplen, O_PORTSC + (p - 1) * 0x10)
+                if (v & PSC_PP) != 0 {
+                    mit = mit + 1
+                }
+                if (v & PSC_CCS) != 0 {
+                    ver = ver + 1
+                }
+                p = p + 1
+            }
+            serial.puts((&s_strom[0]) as u64)
+            serial.dec(mit)
+            serial.puts((&s_ver[0]) as u64)
+            serial.dec(ver)
+            serial.nl()
+        }
+        u = u + 1
     }
 }
 

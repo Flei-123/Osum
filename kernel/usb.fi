@@ -124,6 +124,10 @@ const S_GEN: u64 = 0xA8 // 1 = der generische Weg ist erlaubt (Modus `hid`)
 const S_GENDEV: u64 = 0xB0 // wie viele Geraete wirklich darueber laufen
 const S_RDFAIL: u64 = 0xB8 // Beschreibung nicht zu holen/zu zerlegen
 const S_RDLEN: u64 = 0xC0 // Oktette der zuletzt geholten Beschreibung
+// RUNDE BLECH-HID: 1, solange DIESER Baum selbst aufzaehlt. Siehe
+// `unplug_check` -- der Zeitgeber darf dem Aufzaehlen nicht ins Wort
+// fallen.
+const S_BUSY: u64 = 0xC8
 
 const D_USED: u64 = 0
 const D_SLOT: u64 = 8
@@ -312,10 +316,79 @@ fn stage(state: u64) {
         return
     }
     let armed: bool = !kstate.mode_on(state, kstate.M_NOUSBIRQ)
-    if !xhci.init(state, armed) {
+    // ================================= RUNDE BLECH-HID: JEDER REGLER
+    //
+    // Bis hierher wurde GENAU EINER aufgesetzt, und zwar der erste, den
+    // `pci.find_class` fand. Auf Justins Brett sind es zwei
+    // (1022:43d5 und 1022:149c), und niemand kann wissen, an welchem
+    // seine Tastatur steckt. Also werden sie der Reihe nach probiert,
+    // und der ERSTE, an dem ein Eingabegeraet haengt, bleibt stehen.
+    //
+    // WARUM NICHT BEIDE GLEICHZEITIG: der Vorrat dieses Treibers
+    // (0x50000..0x58000, Ringe, Zusammenhaenge, Endpunkttafel) ist
+    // EINMAL da. Zwei Regler gleichzeitig zu fahren hiesse, ihn zu
+    // verdoppeln -- eine eigene Runde. Was diese Runde tut, ist das,
+    // was den Unterschied zwischen "gar keine Eingabe" und "Eingabe"
+    // ausmacht; und der Bericht sagt fuer JEDEN Regler, was an seinen
+    // Anschluessen steht, damit ein Mensch Tastatur und Maus notfalls
+    // an denselben stecken kann.
+    let anzahl: u64 = xhci.count_hc(state)
+    var u: u64 = 0
+    var behalten: u64 = anzahl
+    while u < anzahl {
+        if versuch(state, u, armed) {
+            behalten = u
+            u = anzahl
+        } else {
+            u = u + 1
+        }
+    }
+    // Keiner hatte ein Eingabegeraet. Dann bleibt der ERSTE stehen: er
+    // kann immer noch einen Stick tragen, und ein Regler, der laeuft,
+    // meldet ein spaeter angestecktes Geraet.
+    //
+    // `anzahl > 1` IST KEINE FEINHEIT, SONDERN EINE GEMESSENE ZUSAGE.
+    // Ohne diese Bedingung wird auf einer Maschine mit GENAU EINEM
+    // Regler derselbe Regler zweimal aufgesetzt und die Zeile
+    // `usb: devices=` zweimal gedruckt -- und `tools/hid/run.sh` liest
+    // sie ohne `tail`, bekommt "0\n0" statt "0" und faellt. Gefunden
+    // von genau dieser Zusage ("GEGENPROBE nurboot: usb-tablet wird
+    // wieder abgelehnt"), und sie hat recht gehabt: ein Lauf, der
+    // zweimal dasselbe meldet, hat zweimal dasselbe getan.
+    if behalten >= anzahl && anzahl > 1 {
+        let _wieder: bool = versuch(state, 0, armed)
+    }
+}
+
+// EIN REGLER: aufsetzen, Anschluesse einschalten, aufzaehlen, berichten.
+// Gibt zurueck, ob an ihm eine Tastatur oder eine Maus haengt.
+fn versuch(state: u64, einheit: u64, armed: bool) -> bool {
+    var s_fail: [u8; 22] = "usb: init fehlt hc\0\0\0\0"
+    var s_hc: [u8; 12] = "usb: xhci \0\0"
+    var s_slots: [u8; 7] = "slots=\0"
+    var s_ports: [u8; 9] = "  ports=\0"
+    var s_ctx: [u8; 7] = "  ctx=\0"
+    var s_msix: [u8; 7] = "  irq=\0"
+    var s_hcn: [u8; 6] = "  hc=\0"
+    // Der Regler, der vorher lief, wird ANGEHALTEN, bevor der naechste
+    // aufgesetzt wird -- sonst liest ein laufender Regler weiter aus
+    // Ringen, die gleich neu beschrieben werden.
+    xhci.teardown(state)
+    s(state, S_READY, 0)
+    zero(state + UDEV_OFF, MAX_DEV * DEV_BYTES)
+    s(state, S_NDEV, 0)
+    s(state, S_KBD, 0)
+    s(state, S_MOUSE, 0)
+    s(state, S_MSC, 0)
+    s(state, S_ATTACHED, 0)
+    if !xhci.init_at(state, einheit, armed) {
         serial.puts((&s_fail[0]) as u64)
+        serial.dec(einheit)
         serial.nl()
-        return
+        // Auch ein Regler, der sich nicht aufsetzen laesst, bekommt
+        // seine Zeile im Bericht -- sonst ist "nichts passiert" von
+        // "es gibt ihn nicht" nicht zu unterscheiden.
+        return false
     }
     serial.puts((&s_hc[0]) as u64)
     serial.puts((&s_slots[0]) as u64)
@@ -326,10 +399,14 @@ fn stage(state: u64) {
     serial.dec(xhci.ctx_size(state))
     serial.puts((&s_msix[0]) as u64)
     serial.dec(yes(armed))
+    serial.puts((&s_hcn[0]) as u64)
+    serial.dec(einheit)
     serial.nl()
     s(state, S_READY, 1)
     scan(state)
+    xhci.bericht(state)
     say(state)
+    return have_kbd(state) || have_mouse(state)
 }
 
 // Alle Anschluesse einschalten und dann durchsehen. In zwei Durchgaengen,
@@ -338,14 +415,30 @@ fn stage(state: u64) {
 // Treiber, der beides in einer Schleife tut, findet das erste Geraet
 // und das zweite nicht.
 fn scan(state: u64) {
+    // ============================================= RUNDE BLECH-HID
+    //
+    // WARUM HIER EIN SCHLOSS STEHT. Seit dieser Runde WARTET das
+    // Aufzaehlen wirklich -- zweihundert Millisekunden, bis an den
+    // Anschluessen Spannung steht. In dieser Zeit laeuft der Zeitgeber,
+    // und der ruft viermal je Sekunde `unplug_check`. Der sieht
+    // Anschluesse mit gesetztem Aenderungsbit, findet sie nicht in der
+    // Bitkarte -- und zaehlt drei ANSTECKUNGEN IM BETRIEB fuer
+    // Tastatur, Maus und Stick, die von Anfang an steckten.
+    //
+    // `tools/k17/run.sh` hat genau das gemeldet ("Anstecken im Betrieb
+    // im Regellauf (darf nicht anschlagen): 3"), und die Zusage hat
+    // recht: ein Zaehler, der ohne Stecker hochlaeuft, ist Rauschen.
+    // Waehrend der Baum SELBST aufzaehlt, faehrt ihm der Zeitgeber
+    // nicht dazwischen.
+    s(state, S_BUSY, 1)
     let n: u64 = xhci.ports(state)
+    // RUNDE BLECH-HID: einschalten UND warten, bis wirklich Spannung
+    // ansteht. `power_all` gibt zurueck, an wie vielen Anschluessen PP
+    // danach steht -- das ist die Zahl, an der eine Maus, die nicht
+    // leuchtet, abzulesen ist.
+    let _mit: u64 = xhci.power_all(state)
+    xhci.drain(state)
     var p: u64 = 1
-    while p <= n {
-        xhci.port_power(state, p)
-        p = p + 1
-    }
-    settle(state)
-    p = 1
     while p <= n {
         if xhci.port_connected(state, p) {
             mark(state, p)
@@ -353,14 +446,40 @@ fn scan(state: u64) {
         }
         p = p + 1
     }
-}
-
-fn settle(state: u64) {
-    var i: u64 = 0
-    while i < 200000 {
-        i = i + 1
+    // ZWEITER DURCHGANG -- UND NUR, WENN DER ERSTE NICHTS FAND.
+    //
+    // Ein Geraet mit langsamem Netzteil meldet sich spaeter, als der
+    // Regler antwortet, und beim Start sammelt niemand nach. Also wird
+    // noch einmal nachgesehen.
+    //
+    // ABER NUR ALS RUECKFALL, und das ist gemessen: der zweite Durchgang
+    // wartet dreihundert Millisekunden, und in dieser Zeit laeuft der
+    // Zeitgeber, der `unplug_check` ruft. Der sieht einen Anschluss mit
+    // gesetztem Aenderungsbit, findet ihn nicht in der Bitkarte und
+    // zaehlt ein ANSTECKEN IM BETRIEB. `tools/k17/run.sh` hat genau das
+    // gemeldet ("Anstecken im Betrieb im Regellauf (darf nicht
+    // anschlagen): 1") -- und die Zusage hat recht: in einem Lauf, in
+    // dem niemand etwas ansteckt, darf der Zaehler nicht anschlagen.
+    // Wurde beim ersten Mal etwas gefunden, ist die Wartezeit ohnehin
+    // ueberfluessig; auf Justins Brett, wo nichts gefunden wurde, ist
+    // sie der ganze Zweck.
+    if g(state, S_NDEV) == 0 {
+        xhci.udelay(state, 300000)
+        xhci.drain(state)
+        p = 1
+        while p <= n {
+            if xhci.port_connected(state, p) && !was_there(state, p) {
+                mark(state, p)
+                attach(state, p)
+            }
+            p = p + 1
+        }
     }
-    xhci.drain(state)
+    // Und jetzt darf der Zeitgeber wieder. Die Aenderungsbits der
+    // eigenen Aufzaehlung sind quittiert (`port_reset` ->
+    // `port_clear_changes`); was von hier an anschlaegt, hat wirklich
+    // jemand gesteckt.
+    s(state, S_BUSY, 0)
 }
 
 fn mark(state: u64, p: u64) {
@@ -1408,7 +1527,7 @@ fn copy(from: u64, to: u64, n: u64) {
 // gerufen und aus der Gegenprobe -- und der Unterschied zwischen
 // "abgezogen" und "war nie da" steht in der Bitkarte S_ATTACHED.
 fn unplug_check(state: u64) {
-    if g(state, S_READY) == 0 {
+    if g(state, S_READY) == 0 || g(state, S_BUSY) != 0 {
         return
     }
     let n: u64 = xhci.ports(state)
