@@ -16,6 +16,14 @@ nie auf echtem Blech gelaufen** — dieses Projekt hat kein Testbrett.
 > Zeile „GEHT" sagt, heißt das „geht in QEMU, gemessen"; ob derselbe Chip
 > in einem echten Laptop antwortet, steht in der Spalte daneben.
 
+**Das Abbild, auf das sich diese Tafel bezieht:** gebaut aus `main`
+`102873b`, 123 731 968 Oktette,
+SHA-256 `5a520aaf7835d643030d2e7e0583a2fe1f000709141b70e1649aa456a6746b57`.
+Ein zweiter Baulauf aus demselben Baum gibt eine andere Prüfsumme —
+`mkfs.vfat` schreibt eine Datenträgernummer aus der Uhr in die
+EFI-Partition (gemessen: sechs abweichende Oktette). Wer eine bestimmte
+Datei meint, meint ihren SHA.
+
 ---
 
 ## 1. STARTEN — der Stick in einem fremden Rechner
