@@ -522,6 +522,11 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     EHCI ist der Rueckfall fuer Bretter, die keinen haben. Ohne
     //     das Wort `ehci` ist das hier eine gedruckte Zeile.
     ehci.stage(state)
+    // RUNDE BLECH-HID: HIER haelt der Diagnose-Eintrag an, wenn
+    // `usbstop` auf der Kommandozeile steht. Der USB-Bericht ist damit
+    // das LETZTE auf dem Schirm -- ein Foto davon beantwortet die
+    // Frage, warum keine Eingabe ankommt.
+    hwdiag.park_after_usb(state)
     if kstate.mode_on(state, kstate.M_EHCITEST) {
         // Der Stick: drei Bloecke, und ihre Oktettsummen haelt der WIRT
         // gegen dasselbe Abbild, aus dem QEMU liest. "Der Treiber
@@ -2679,6 +2684,9 @@ fn osum(state: u64) {
     var a_init: [u8; 5] = "init\0"
     var p_bin: [u8; 5] = "/bin\0"
     var a_sh: [u8; 3] = "sh\0"
+    // RUNDE BLECH-HID: das Argument des Notausgangs, 17 Oktette mit
+    // der Null.
+    var a_nlauf: [u8; 17] = "/etc/netlauf.sh\0\0"
     var s_mod: [u8; 20] = "osum: from module \0\0"
     var s_blk: [u8; 10] = "  blocks=\0"
     var s_sect: [u8; 20] = "osum: ata0 sectors=\0"
@@ -2826,6 +2834,7 @@ fn osum(state: u64) {
     }
     var first: u64 = (&p_sh[0]) as u64
     var k: u64 = 0
+    var argn: u64 = 1
     if use_init {
         first = initpath
         while k < 5 {
@@ -2837,6 +2846,30 @@ fn osum(state: u64) {
         while k < 3 {
             kstate.set8(abuf + k, a_sh[k as usize])
             k = k + 1
+        }
+        // ============== RUNDE BLECH-HID: DER NOTAUSGANG OHNE TASTATUR
+        //
+        // Justins Rechner hat den Stick gestartet, ein Bild gezeigt --
+        // und keine Eingabe angenommen. Damit war JEDER Befehl
+        // unerreichbar: `dhcp`, `host`, `fetch`, `ota`. Ein System, das
+        // sich nur mit einer Tastatur befragen laesst, ist auf einem
+        // Rechner ohne Tastatur nicht messbar.
+        //
+        // `netlauf` gibt der Shell ein ARGUMENT mit, und `/bin/sh`
+        // kann seit Runde K11 ein Skript als Ganzes lesen (`u_start`,
+        // `run_script`). Der Arg-Puffer ist eine Folge
+        // nullterminierter Zeichenketten; "sh\0" steht schon darin,
+        // dahinter kommt der Pfad, und `argc` wird zwei.
+        //
+        // Danach haelt `hwdiag.park_after_shell` den Schirm an -- ohne
+        // das waere das Ergebnis eine Zehntelsekunde zu sehen.
+        if kstate.mode_on(state, kstate.M_NETLAUF) {
+            var j: u64 = 0
+            while j < 17 {
+                kstate.set8(abuf + 3 + j, a_nlauf[j as usize])
+                j = j + 1
+            }
+            argn = 2
         }
     }
     // EINE ZEILE NUR DANN, WENN SICH ETWAS AENDERT -- und sie enthaelt
@@ -2878,7 +2911,7 @@ fn osum(state: u64) {
         kstate.set(state, kstate.NEXT_PID, 1)
     }
     let before: u64 = mem.frames_free(state)
-    let t: u64 = elf.spawn(state, first, abuf, 1, 2)
+    let t: u64 = elf.spawn(state, first, abuf, argn, 2)
     if use_init {
         kstate.set(state, kstate.NEXT_PID, keep + 1)
     }
@@ -2922,6 +2955,8 @@ fn osum(state: u64) {
     // ROUND POWERMON: the same numbers ring 3 reads, on the serial line,
     // so the acceptance run can hold the two sides against each other.
     pmon.report(state)
+    // RUNDE BLECH-HID: der Selbstlauf soll LESBAR stehen bleiben.
+    hwdiag.park_after_shell(state)
 }
 
 // ROUND K4: what the system call layer did in this run. Six counters, one
@@ -3939,6 +3974,13 @@ fn mode_of(state: u64, cmd: u64) {
     var w_noirq2: [u8; 9] = "usbnoirq\0"
     var w_stick: [u8; 9] = "usbstick\0"
     var w_hold: [u8; 8] = "usbhold\0"
+    // RUNDE BLECH-HID: nach dem USB-Baum anhalten. Enthaelt `usb` und
+    // ist damit derselbe Bauplan wie `usbhold`/`usbpoll`: wer den
+    // USB-Bericht sehen will, will USB. Eingetragen in
+    // tools/hid/worte.py.
+    var w_ustop: [u8; 8] = "usbstop\0"
+    var w_uleg: [u8; 7] = "usbleg\0"
+    var w_nlauf: [u8; 8] = "netlauf\0"
     // RUNDE BLECH: der USB-2.0-Regler. Ein EIGENES Wort und nicht `usb`
     // -- der EHCI ist ein zweiter Treiber neben xHCI und kein Teil des
     // Baums von Runde K17; wer beide Regler in einer Maschine hat, soll
@@ -3990,6 +4032,15 @@ fn mode_of(state: u64, cmd: u64) {
     }
     if find(cmd, (&w_hold[0]) as u64, 7) != 0 {
         kstate.mode_add(state, kstate.M_USBHOLD)
+    }
+    if find(cmd, (&w_ustop[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_USBSTOP)
+    }
+    if find(cmd, (&w_uleg[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_USBLEG)
+    }
+    if find(cmd, (&w_nlauf[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_NETLAUF)
     }
     // RUNDE HID. `hidgen` schaltet den generischen Weg an, `nurboot` ist
     // die GEGENPROBE dazu (nur Boot-Protokoll, wie vor dieser Runde),
@@ -4122,6 +4173,12 @@ fn hid_stage(state: u64) {
 }
 
 fn usb_stage(state: u64) {
+    // RUNDE BLECH-HID: die Gegenprobe zur Uebernahme, an einer gebauten
+    // Faehigkeitsliste. Sie braucht keinen Regler und laeuft deshalb
+    // auch auf einer Maschine ohne USB -- genau das ist ihr Zweck.
+    if kstate.mode_on(state, kstate.M_USBLEG) {
+        xhci.legtest(state)
+    }
     usb.stage(state)
     if !usb.ready(state) {
         return

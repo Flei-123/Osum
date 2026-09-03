@@ -219,6 +219,37 @@ justin:x:1000:1000:Justin:/users/justin:/bin/sh
 EOF
 printf '# taskbar.conf\nedge=bottom\nheight=28\nwidth=104\nautohide=0\nontop=1\n' \
     > "$OUT/taskbar.conf"
+
+# ==================== RUNDE BLECH-HID: DER NOTAUSGANG OHNE TASTATUR
+#
+# Justins erster Blech-Lauf hat den Stick gestartet und ein Bild
+# gezeigt -- und keine Taste und keine Maus angenommen. Damit war jeder
+# Befehl unerreichbar; `dhcp`, `host`, `fetch` und `ota` liegen auf dem
+# Abbild und waren nicht zu tippen.
+#
+# Dieses Skript ist die Antwort darauf: der Menueeintrag "Netz-Selbstlauf"
+# gibt es der Shell als Argument mit (Kernwort `netlauf`), sie faehrt es
+# von oben nach unten, und danach bleibt der Bildschirm stehen. Ein Foto
+# davon ist die erste Messung des Netzwegs auf echter Hardware -- ohne
+# eine einzige Taste.
+cat > "$OUT/netlauf.sh" <<'EOFNL'
+echo "=================================================="
+echo "  OSUM NETZ-SELBSTLAUF -- ohne Tastatur, ohne Maus"
+echo "=================================================="
+echo "-- 1. Adresse holen (dhcp)"
+dhcp
+echo "-- 2. was dabei herausgekommen ist"
+cat /etc/resolv.conf
+echo "-- 3. Namen aufloesen: store.fleitec.com"
+host store.fleitec.com
+echo "-- 4. holen: https://store.fleitec.com/index.json"
+fetch https://store.fleitec.com/index.json
+echo "-- 5. nach einer neuen Fassung sehen"
+ota suchen
+echo "=================================================="
+echo "  ENDE DES NETZ-SELBSTLAUFS"
+echo "=================================================="
+EOFNL
 # DIE SPRACHE DES STICKS IST DEUTSCH. Das ist die Wahl des Benutzers und
 # steht deshalb unter /users/root/config/ und NICHT unter /etc/ -- die
 # Regel aus docs/I18N.md, die tools/i18n/run.sh nachprueft.
@@ -342,7 +373,8 @@ ARGS+=(/bin/)
 for p in $gebaut; do ARGS+=("/bin/$p=$OUT/$p.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
 ARGS+=(/etc/ "/etc/theme=$OUT/baum/theme" "/etc/passwd=$OUT/passwd"
-       "/etc/taskbar.conf=$OUT/taskbar.conf")
+       "/etc/taskbar.conf=$OUT/taskbar.conf"
+       "/etc/netlauf.sh=$OUT/netlauf.sh")
 ARGS+=(/etc/netview/)
 for q in $SYMBOLE; do ARGS+=("/etc/netview/$q=$OUT/icons/$q"); done
 ARGS+=(/usr/ /usr/share/ /usr/share/locale/
@@ -384,7 +416,7 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /etc/netview/state-noip /etc/netview/state-noroute \
 /etc/netview/mark-filtered /etc/netview/mark-faked /etc/netview/mark-none \
 /etc/netview/sys-faking /etc/netview/tile-fake /etc/netview/tile-net \
-/etc/netview/tile-hide /etc/theme /etc/taskbar.conf \
+/etc/netview/tile-hide /etc/theme /etc/taskbar.conf /etc/netlauf.sh \
 /bin/desktop /bin/taskbar /bin/netview /bin/explorer /boot/osum.mb \
 /bin/ota /bin/fetch /bin/host /bin/dhcp /bin/jarvisd /bin/jsig \
 /bin/jarvisctl /bin/pollbr /etc/ota.conf /etc/jarvis/rechte.conf \
@@ -458,11 +490,35 @@ verbose: yes
     module_path: boot():/root.img
     cmdline: hwdiag hwdiagstop gfx nokbd nosched noproc nofs noring3
 
+# ================== RUNDE BLECH-HID: DIE USB-DIAGNOSE, DIE ANFASST
+#
+# Eintrag 1 darueber bleibt Oktett fuer Oktett, wie er war -- er haelt
+# VOR jedem Treiber an und ist damit der Eintrag, der auf JEDER Maschine
+# bis zum Bericht kommt. Er hat seit dieser Runde eine LESENDE
+# USB-Uebersicht am Ende (`usb: regler=`, je Regler eine Zeile mit
+# `besitz=BIOS|OS|frei`, `strom=`, `verbunden=`).
+#
+# DIESER Eintrag hier geht weiter: er nimmt der Firmware die Regler ab
+# (`usb`), zaehlt auf, prueft die Uebernahme an einer gebauten
+# Faehigkeitsliste (`usbleg`) und haelt danach an (`usbstop`). Was dabei
+# gedruckt wird, ist der volle Bericht -- je Regler die
+# Halbleiter-Semaphore vor und nach der Uebernahme, HCRST, und dann
+# jeder Anschluss einzeln mit PP, CCS, PED, PR und Tempo.
+#
+# WARUM ZWEI EINTRAEGE UND NICHT EINER: der erste fasst nichts an und
+# kann deshalb nicht haengen. Wenn dieser hier auf einem fremden Brett
+# stehenbleibt, ist der andere immer noch da.
+/Osum -- USB-Diagnose: Regler uebernehmen und jeden Anschluss zeigen
+    protocol: multiboot1
+    path: boot():/osum.mb
+    module_path: boot():/root.img
+    cmdline: hwdiag usb hidgen usbleg usbstop gfx nokbd nosched noproc nofs noring3
+
 /Osum -- Diagnose und danach der Schreibtisch
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: hwdiag modfs osum gfx wm wig desk wmshell nosched noproc nofs
+    cmdline: hwdiag modfs osum gfx wm wig desk wmshell usb hidgen nosched noproc nofs
 
 # RUNDE STICK: DIESER EINTRAG HAT JETZT AUCH EINE NETZKARTE. Ohne
 # `nic` blieb der Schreibtisch fuer immer bei "kein Netz", und das
@@ -473,7 +529,7 @@ verbose: yes
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx wm wig desk wmshell nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+    cmdline: modfs osum gfx wm wig desk wmshell usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
 
 /Osum -- Vektoreinheit pruefen (bleibt stehen)
     protocol: multiboot1
@@ -510,7 +566,29 @@ verbose: yes
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum vfs nic nip=169.254.10.1/16 nsvc=0 nwait=0 console=ttyS0 nosched noproc nofs
+    cmdline: modfs osum vfs usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 console=ttyS0 nosched noproc nofs
+
+# ============ RUNDE BLECH-HID: DER NETZ-SELBSTLAUF, OHNE EINE TASTE
+#
+# Der Eintrag, den Justin am 03.09.2026 gebraucht haette und nicht
+# hatte. Der Stick startete, zeigte ein Bild -- und nahm keine Eingabe
+# an; damit war jeder der 52 Befehle auf dem Abbild unerreichbar.
+#
+# `netlauf` gibt der Shell `/etc/netlauf.sh` als Argument mit
+# (`kernel/kmain.fi`, Abschnitt `osum`), sie faehrt es von oben nach
+# unten -- `dhcp`, `resolv.conf`, `host store.fleitec.com`,
+# `fetch https://store.fleitec.com/index.json`, `ota suchen` -- und
+# danach BLEIBT DER BILDSCHIRM STEHEN (`hwdiag.park_after_shell`). Ein
+# Foto davon ist die erste Messung des Netzwegs auf echtem Blech.
+#
+# `usb hidgen` steht mit drin, obwohl niemand tippen muss: findet der
+# Baum Tastatur und Maus, sagt der Bericht das mit -- und dann weiss
+# Justin im selben Foto, ob die Uebernahme dieser Runde greift.
+/Osum -- Netz-Selbstlauf ohne Tastatur (dhcp, host, fetch, ota)
+    protocol: multiboot1
+    path: boot():/osum.mb
+    module_path: boot():/root.img
+    cmdline: modfs osum vfs netlauf usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 console=ttyS0 nosched noproc nofs
 
 # RUNDE SCHIRM: ZWEI EINTRAEGE FUER GROSSE SCHIRME.
 #
@@ -528,14 +606,14 @@ verbose: yes
     path: boot():/osum.mb
     module_path: boot():/root.img
     resolution: 2560x1440
-    cmdline: modfs osum gfx wm wig desk wmshell nosched noproc nofs
+    cmdline: modfs osum gfx wm wig desk wmshell usb hidgen nosched noproc nofs
 
 /Osum -- Schreibtisch auf einem 4K-Schirm (3840x2160)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
     resolution: 3840x2160
-    cmdline: modfs osum gfx wm wig desk wmshell nosched noproc nofs
+    cmdline: modfs osum gfx wm wig desk wmshell usb hidgen nosched noproc nofs
 EOF
 
 # ================================================== 7. das Abbild

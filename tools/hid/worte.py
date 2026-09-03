@@ -68,6 +68,11 @@ BEKANNT = {
     ("share", "noshare"),
     ("usb", "nousb"), ("usb", "usbhold"), ("usb", "usbnoirq"),
     ("usb", "usbpoll"), ("usb", "usbstick"),
+    # RUNDE BLECH-HID.  Zwei weitere Verfeinerungen von `usb`, und
+    # beide vom erlaubten Bauplan -- wer den USB-Bericht stehen lassen
+    # (`usbstop`) oder die Uebernahme pruefen (`usbleg`) will, will
+    # USB.  Kein Abschalter, keiner von beiden hebt etwas Fremdes auf.
+    ("usb", "usbstop"), ("usb", "usbleg"),
 }
 
 
