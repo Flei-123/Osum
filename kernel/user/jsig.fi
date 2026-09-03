@@ -1,0 +1,380 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/jsig.fi -- RUNDE BRIDGE: DER SCHLUESSELHALTER DES HELFERS.
+//
+//     jsig aus                              legt den Geraeteschluessel an,
+//                                           wenn es ihn noch nicht gibt,
+//                                           und nennt den OEFFENTLICHEN
+//     jsig unterschreibe <hex>              unterschreibt diese Oktette
+//     jsig pruefe <pub> <nachricht> <sig>   die Gegenprobe, fuer den Pruefstand
+//     jsig wo                               sagt, wo der Schluessel liegt
+//
+// ====================================================================
+// WARUM DAS EIN EIGENES PROGRAMM IST UND NICHT EINE FUNKTION IN jarvisd
+// ====================================================================
+//
+// `kernel/app/jarvisd.fi` ist das Programm, das am Netz haengt. Es
+// spricht TLS mit einem Rechner, den es nicht kontrolliert, es nimmt
+// Auftraege von aussen entgegen, und es ist mit Abstand die groesste
+// Angriffsflaeche, die dieses System nach aussen hat. DER PRIVATE
+// SCHLUESSEL DES GERAETS HAT IN DIESEM ADRESSRAUM NICHTS ZU SUCHEN.
+//
+// Also liegt er hier. `jarvisd` kennt den Schluessel nicht; es startet
+// dieses Programm, gibt ihm die Zufallsforderung des Servers mit und
+// bekommt eine Unterschrift zurueck. Ein Fehler im Datensatzleser von
+// TLS, im Auftragsleser oder im Rechtepruefer gibt dem Angreifer damit
+// den Schluessel NICHT -- er muesste zusaetzlich einen Weg finden, ein
+// beliebiges Programm auszufuehren, und genau das ist die Sache, die
+// die Rechteliste verbietet.
+//
+// Der Preis ist ein `fork` + `execve` je Anmeldung. Das ist einmal je
+// VERBINDUNG, nicht je Auftrag, und `tools/bridge/run.sh` misst, was es
+// kostet.
+//
+// ES GIBT NOCH EINEN GRUND, und er ist der praktischere: Ed25519 liegt
+// in diesem Baum unter `lib/crypto/ed25519.fi` und haengt an
+// `lib/crypto/big.fi` und `lib/crypto/sha512.fi`. Der Uebersetzer fuehrt
+// Module unter ihrem LETZTEN Namen; `crypto.sha512` dieses Repos und
+// `std.crypto.sha512` der Firn-Bibliothek heissen beide `sha512` und
+// haben verschiedene Schnittstellen. Ein Programm mit `--profile=app`,
+// das TLS UND dieses Ed25519 einbindet, uebersetzt deshalb nicht --
+// gemessen, nicht vermutet:
+//
+//     error: module 'sha512' has no element 'sha384'
+//        --> vendor/firn/lib/std/crypto/rsa.fi:94:9
+//
+// Die Trennung loest das nebenbei: `jsig` ist `profile kernel` und baut
+// gegen `lib/`, `jarvisd` ist `--profile=app` und baut gegen
+// `vendor/firn/lib/`. Keines von beiden muss den Uebersetzer ueberreden.
+//
+// ====================================================================
+// DIE DATEI
+// ====================================================================
+//
+// /etc/jarvis/geraet.key traegt 64 Hexziffern und einen Zeilenumbruch:
+// den SAMEN (RFC 8032 nennt ihn so), 32 Oktette. Der private Skalar wird
+// daraus jedes Mal neu abgeleitet und steht nirgends auf der Platte.
+//
+// TEXT UND NICHT ROH, damit ein Mensch mit `cat` sehen kann, dass dort
+// ein Schluessel liegt, und damit ein halb geschriebener Schluessel
+// auffaellt statt still 32 falsche Oktette zu sein.
+//
+// DIE RECHTE SIND 0600 UND WERDEN GEPRUEFT, nicht nur gesetzt. Wer die
+// Datei nach dem Anlegen aufmacht, bekommt hier eine Weigerung und
+// keinen Dienst. Das ist die Zusage (g) dieser Runde.
+
+profile kernel
+
+import ulib
+import libc.kcall
+import libc.errno
+import libc.io
+import libc.stdio
+import libc.text
+import crypto.ed25519
+
+export { u_start }
+
+const SEEDLEN: u64 = 32
+const PUBLEN: u64 = 32
+const SIGLEN: u64 = 64
+const MAXMSG: u64 = 512 // Oktette, die unterschrieben werden koennen
+
+// Ein Schluessel, den auch die Gruppe oder die Welt lesen darf, ist
+// keiner. 0o077 sind genau diese sechs Bits.
+const FREMDBITS: u64 = 63
+
+static mut seed: [u8; 32] = [0 as u8; 32]
+static mut pubk: [u8; 32] = [0 as u8; 32]
+static mut sig: [u8; 64] = [0 as u8; 64]
+static mut msg: [u8; 512] = [0 as u8; 512]
+static mut hexbuf: [u8; 1200] = [0 as u8; 1200]
+
+// Die beiden Pfade als Statik: eine Zeichenkette auf dem Rahmen einer
+// Funktion darf ihn nicht ueberleben, und firnc prueft das.
+static mut KEYP: [u8; 23] = "/etc/jarvis/geraet.key\0"
+static mut KEYDIR: [u8; 12] = "/etc/jarvis\0"
+
+// ------------------------------------------------------------ Hexzeug
+
+fn hex_digit(v: u64) -> u8 {
+    if v < 10 {
+        return (48 + v) as u8
+    }
+    return (87 + v) as u8 // 'a' .. 'f'
+}
+
+fn hex_val(c: u8) -> u64 {
+    let v: u64 = c as u64
+    if v >= 48 && v <= 57 {
+        return v - 48
+    }
+    if v >= 97 && v <= 102 {
+        return v - 87
+    }
+    if v >= 65 && v <= 70 {
+        return v - 55
+    }
+    return 256 // keine Hexziffer
+}
+
+// Oktette -> Hexziffern. `out` braucht 2*n Platz.
+fn to_hex(src: u64, n: u64, out: u64) {
+    var i: u64 = 0
+    while i < n {
+        let b: u64 = __mmio_read8((src + i) as *mut u8) as u64
+        __mmio_write8((out + i * 2) as *mut u8, hex_digit((b >> 4) & 15))
+        __mmio_write8((out + i * 2 + 1) as *mut u8, hex_digit(b & 15))
+        i = i + 1
+    }
+}
+
+// Hexziffern -> Oktette. Rueckgabe: Zahl der Oktette, oder MAXMSG+1 bei
+// einer Ziffer, die keine ist, oder bei ungerader Laenge.
+fn from_hex(src: u64, out: u64, max: u64) -> u64 {
+    let n: u64 = ulib.length(src)
+    if (n & 1) != 0 {
+        return max + 1
+    }
+    if n / 2 > max {
+        return max + 1
+    }
+    var i: u64 = 0
+    while i < n / 2 {
+        let hi: u64 = hex_val(__mmio_read8((src + i * 2) as *mut u8))
+        let lo: u64 = hex_val(__mmio_read8((src + i * 2 + 1) as *mut u8))
+        if hi > 15 || lo > 15 {
+            return max + 1
+        }
+        __mmio_write8((out + i) as *mut u8, ((hi << 4) | lo) as u8)
+        i = i + 1
+    }
+    return n / 2
+}
+
+// ------------------------------------------------------- Der Schluessel
+
+fn keypath() -> u64 {
+    return (&KEYP[0 as usize]) as u64
+}
+
+fn dirpath() -> u64 {
+    return (&KEYDIR[0 as usize]) as u64
+}
+
+fn moan(t: u64) {
+    var pre: [u8; 7] = "jsig: \0"
+    ulib.esay_line((&pre[0 as usize]) as u64, t)
+}
+
+// Legt den Schluessel an, wenn es ihn nicht gibt. 0 = da (neu oder alt),
+// 1 = ging nicht.
+fn key_ensure() -> u64 {
+    let m: u64 = io.stat_mode(keypath())
+    if !errno.failed(m) {
+        return 0
+    }
+    // Es gibt ihn nicht. /etc/jarvis muss es geben; ein `mkdir` auf ein
+    // vorhandenes Verzeichnis ist EEXIST und kein Grund aufzuhoeren.
+    io.make_dir(dirpath())
+    let r: u64 = kcall.sys3(kcall.SYS_GETRANDOM, (&seed[0 as usize]) as u64,
+        SEEDLEN, 0)
+    if errno.failed(r) || r != SEEDLEN {
+        var t1: [u8; 40] = "der Zufallsgeber hat nichts hergegeben\0\0"
+        moan((&t1[0 as usize]) as u64)
+        return 1
+    }
+    to_hex((&seed[0 as usize]) as u64, SEEDLEN, (&hexbuf[0 as usize]) as u64)
+    __mmio_write8(((&hexbuf[0 as usize]) as u64 + 64) as *mut u8, 10 as u8)
+    let fd: u64 = io.create(keypath())
+    if errno.failed(fd) {
+        var t2: [u8; 49] = "/etc/jarvis/geraet.key laesst sich nicht anlegen\0"
+        moan((&t2[0 as usize]) as u64)
+        return 1
+    }
+    io.write_all(fd, (&hexbuf[0 as usize]) as u64, 65)
+    io.close(fd)
+    // 0o600 = 384. ZUERST schreiben, dann die Rechte -- umgekehrt haette
+    // die Datei einen Augenblick lang mit der Voreinstellung dagestanden.
+    kcall.sys2(kcall.SYS_CHMOD, keypath(), 384)
+    return 0
+}
+
+// Liest den Samen ein. 0 = gut, 1 = fehlt, 2 = die Rechte sind zu weit,
+// 3 = der Inhalt ist keiner.
+fn key_load() -> u64 {
+    let m: u64 = io.stat_mode(keypath())
+    if errno.failed(m) {
+        return 1
+    }
+    if (m & FREMDBITS) != 0 {
+        return 2
+    }
+    let fd: u64 = io.open(keypath(), 0)
+    if errno.failed(fd) {
+        return 1
+    }
+    var raw: [u8; 80] = [0 as u8; 80]
+    let n: u64 = io.read(fd, (&raw[0 as usize]) as u64, 79)
+    io.close(fd)
+    if errno.failed(n) || n < 64 {
+        return 3
+    }
+    __mmio_write8(((&raw[0 as usize]) as u64 + 64) as *mut u8, 0 as u8)
+    if from_hex((&raw[0 as usize]) as u64, (&seed[0 as usize]) as u64,
+            SEEDLEN) != SEEDLEN {
+        return 3
+    }
+    return 0
+}
+
+fn key_complain(st: u64) {
+    if st == 1 {
+        var t: [u8; 53] = "es gibt keinen Geraeteschluessel (erst `jsig aus`)\0\0\0"
+        moan((&t[0 as usize]) as u64)
+    } else if st == 2 {
+        var t: [u8; 76] = "/etc/jarvis/geraet.key darf von anderen gelesen werden -- das ist keiner\0\0\0\0"
+        moan((&t[0 as usize]) as u64)
+    } else {
+        var t: [u8; 47] = "/etc/jarvis/geraet.key traegt keinen Samen\0\0\0\0\0"
+        moan((&t[0 as usize]) as u64)
+    }
+}
+
+// ------------------------------------------------------------- Die Arbeit
+
+fn tue_aus() -> u64 {
+    if key_ensure() != 0 {
+        return 1
+    }
+    let st: u64 = key_load()
+    if st != 0 {
+        key_complain(st)
+        return 1
+    }
+    var c: ed25519.Ctx = ed25519.ctx_new()
+    if !ed25519.ctx_init(&c) {
+        var t: [u8; 37] = "die Kurve laesst sich nicht aufbauen\0"
+        moan((&t[0 as usize]) as u64)
+        return 1
+    }
+    if !ed25519.ed25519_public(&c, (&seed[0 as usize]) as u64,
+            (&pubk[0 as usize]) as u64) {
+        var t: [u8; 32] = "der oeffentliche Teil fehlt\0\0\0\0\0"
+        moan((&t[0 as usize]) as u64)
+        return 1
+    }
+    var kopf: [u8; 6] = "pub \0\0"
+    ulib.say((&kopf[0 as usize]) as u64)
+    to_hex((&pubk[0 as usize]) as u64, PUBLEN, (&hexbuf[0 as usize]) as u64)
+    ulib.put((&hexbuf[0 as usize]) as u64, PUBLEN * 2)
+    ulib.nl()
+    return 0
+}
+
+fn tue_sign(hexarg: u64) -> u64 {
+    let st: u64 = key_load()
+    if st != 0 {
+        key_complain(st)
+        return 1
+    }
+    let mlen: u64 = from_hex(hexarg, (&msg[0 as usize]) as u64, MAXMSG)
+    if mlen > MAXMSG {
+        var t: [u8; 49] = "die Nachricht ist keine Hexfolge oder zu lang\0\0\0\0"
+        moan((&t[0 as usize]) as u64)
+        return 2
+    }
+    var c: ed25519.Ctx = ed25519.ctx_new()
+    if !ed25519.ctx_init(&c) {
+        var t: [u8; 37] = "die Kurve laesst sich nicht aufbauen\0"
+        moan((&t[0 as usize]) as u64)
+        return 1
+    }
+    if !ed25519.ed25519_sign(&c, (&seed[0 as usize]) as u64,
+            (&msg[0 as usize]) as u64, mlen as usize,
+            (&sig[0 as usize]) as u64) {
+        var t: [u8; 30] = "das Unterschreiben ging nicht\0"
+        moan((&t[0 as usize]) as u64)
+        return 1
+    }
+    var kopf: [u8; 6] = "sig \0\0"
+    ulib.say((&kopf[0 as usize]) as u64)
+    to_hex((&sig[0 as usize]) as u64, SIGLEN, (&hexbuf[0 as usize]) as u64)
+    ulib.put((&hexbuf[0 as usize]) as u64, SIGLEN * 2)
+    ulib.nl()
+    return 0
+}
+
+fn tue_pruefe(phex: u64, mhex: u64, shex: u64) -> u64 {
+    if from_hex(phex, (&pubk[0 as usize]) as u64, PUBLEN) != PUBLEN {
+        var t: [u8; 34] = "der oeffentliche Teil ist keiner\0\0"
+        moan((&t[0 as usize]) as u64)
+        return 2
+    }
+    if from_hex(shex, (&sig[0 as usize]) as u64, SIGLEN) != SIGLEN {
+        var t: [u8; 30] = "die Unterschrift ist keine\0\0\0\0"
+        moan((&t[0 as usize]) as u64)
+        return 2
+    }
+    let mlen: u64 = from_hex(mhex, (&msg[0 as usize]) as u64, MAXMSG)
+    if mlen > MAXMSG {
+        var t: [u8; 34] = "die Nachricht ist keine Hexfolge\0\0"
+        moan((&t[0 as usize]) as u64)
+        return 2
+    }
+    var c: ed25519.Ctx = ed25519.ctx_new()
+    if !ed25519.ctx_init(&c) {
+        return 1
+    }
+    let gut: bool = ed25519.ed25519_verify(&c, (&pubk[0 as usize]) as u64,
+        (&msg[0 as usize]) as u64, mlen as usize, (&sig[0 as usize]) as u64)
+    if gut {
+        var j: [u8; 4] = "ja\n\0"
+        ulib.say((&j[0 as usize]) as u64)
+        return 0
+    }
+    var n: [u8; 6] = "nein\n\0"
+    ulib.say((&n[0 as usize]) as u64)
+    return 1
+}
+
+fn u_start(args: u64) -> u64 {
+    let argc: u64 = ulib.arg_count(args)
+    var w_aus: [u8; 4] = "aus\0"
+    var w_sig: [u8; 16] = "unterschreibe\0\0\0"
+    var w_prf: [u8; 8] = "pruefe\0\0"
+    var w_wo: [u8; 4] = "wo\0\0"
+    if argc < 2 {
+        var u: [u8; 96] = "Aufruf: jsig aus | jsig unterschreibe <hex> | jsig pruefe <pub> <nachricht> <sig> | jsig wo\0\0\0\0\0"
+        moan((&u[0 as usize]) as u64)
+        return 2
+    }
+    let was: u64 = ulib.arg_at(args, 1)
+    if ulib.streq(was, (&w_aus[0 as usize]) as u64) {
+        return tue_aus()
+    }
+    if ulib.streq(was, (&w_wo[0 as usize]) as u64) {
+        ulib.say(keypath())
+        ulib.nl()
+        return 0
+    }
+    if ulib.streq(was, (&w_sig[0 as usize]) as u64) {
+        if argc < 3 {
+            var t: [u8; 32] = "unterschreibe braucht Oktette\0\0\0"
+            moan((&t[0 as usize]) as u64)
+            return 2
+        }
+        return tue_sign(ulib.arg_at(args, 2))
+    }
+    if ulib.streq(was, (&w_prf[0 as usize]) as u64) {
+        if argc < 5 {
+            var t: [u8; 44] = "pruefe braucht pub, Nachricht und Signatur\0\0"
+            moan((&t[0 as usize]) as u64)
+            return 2
+        }
+        return tue_pruefe(ulib.arg_at(args, 2), ulib.arg_at(args, 3),
+            ulib.arg_at(args, 4))
+    }
+    var t: [u8; 24] = "unbekannter Befehl\0\0\0\0\0\0"
+    moan((&t[0 as usize]) as u64)
+    return 2
+}

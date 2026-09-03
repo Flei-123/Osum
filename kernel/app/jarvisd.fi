@@ -1,0 +1,2274 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/app/jarvisd.fi -- RUNDE BRIDGE: DER JARVIS-HELFER FUER OSUM.
+//
+//     jarvisd [-c datei] [-1] [-t ms] [-v] [-n]
+//
+//     -c   die Rechteliste, voreingestellt /etc/jarvis/rechte.conf
+//     -1   nach EINER Verbindung aufhoeren (fuer den Pruefstand)
+//     -t   Gesamtlaufzeit in Millisekunden, dann Schluss (Pruefstand)
+//     -v   jeden Schritt auf die Konsole
+//     -n   nichts tun ausser die Rechteliste lesen und melden
+//
+// ====================================================================
+// WAS DAS IST
+// ====================================================================
+//
+// Auf Justins Windows-Rechnern laeuft ein "Helfer": ein Programm, das
+// sich beim JARVIS-Server meldet und dessen Auftraege ausfuehrt --
+// Befehle, Dateien, Bildschirmfotos. Dies ist das Gegenstueck fuer
+// Osum, damit `docs/REALHW.md` zu Ende gelesen werden kann: OrientOS
+// auf einem gewoehnlichen PC, und darauf der Helfer.
+//
+// DER HELFER VERBINDET SICH HERAUS. Es gibt KEINEN offenen Anschluss in
+// diesem Betriebssystem. Ein lauschender Dienst waere eine Tuer, die
+// jeder im selben Netz anfassen kann; eine ausgehende Verbindung ist
+// eine, die nur dieses Geraet oeffnet. Reisst sie ab, wird mit
+// WACHSENDER Wartezeit neu verbunden (250 ms, dann doppelt, bis 30 s),
+// und ohne Netz wird GEWARTET und nicht gedreht -- `tools/bridge/run.sh`
+// misst die Last dabei.
+//
+// ====================================================================
+// DER WICHTIGSTE TEIL: DIE RECHTE
+// ====================================================================
+//
+// Ein Fernhelfer, der als Wurzel alles darf, ist eine Hintertuer mit
+// Anleitung. Dieses Programm darf GENAU DAS, was in einer LESBAREN
+// Datei unter /etc steht (`/etc/jarvis/rechte.conf`), die der Mensch
+// aendern kann, und
+//
+//   * die Datei wird VOR JEDEM AUFTRAG neu gelesen. Nicht beim
+//     Verbinden. Wer sie aendert, waehrend der Helfer laeuft, hat sie
+//     mit dem naechsten Auftrag geaendert -- und ein Helfer, der seine
+//     Rechte nur einmal liest, ist ein Helfer, dem man beim Entziehen
+//     eines Rechts erst den Strom abdrehen muss.
+//   * ein Auftrag ausserhalb der Liste wird ABGELEHNT, mit einem Satz,
+//     der sagt warum, und er wird PROTOKOLLIERT (/var/log/jarvisd.log).
+//     Beides, denn eine stille Ablehnung ist von einem Fehler nicht zu
+//     unterscheiden.
+//
+// UND DANN NOCH EIN SCHLOSS, das nicht dieses Programm haelt. Runde
+// HANDLE hat jedem Deskriptor ein Rechtebitfeld gegeben und mit
+// `HND_DUP` (2208) einen Weg, einen Deskriptor mit WENIGER Rechten
+// herzustellen -- die Maske kann nur wegnehmen. Also:
+//
+//     Auftrag "lies"     -> open, dann HND_DUP auf R_READ|R_INSPECT|R_SEEK
+//     Auftrag "schreib"  -> open, dann HND_DUP auf R_WRITE|R_INSPECT|R_SEEK
+//
+// und ab da arbeitet dieses Programm NUR noch auf dem beschnittenen
+// Deskriptor; der urspruengliche wird geschlossen. Ein Fehler im
+// Pfadpruefer hier oben gibt damit trotzdem kein Schreibrecht: `write`
+// prueft in `kernel/sys.fi` (`file.fd_check(..., handle.R_WRITE)`) das
+// Bit, das dieser Deskriptor nicht mehr hat, und der Kern sagt nein.
+// Das ist der Unterschied zwischen "das Programm prueft" und "das
+// System prueft".
+//
+// ====================================================================
+// DIE ANMELDUNG
+// ====================================================================
+//
+// Das Geraet weist sich mit einem Ed25519-Schluesselpaar aus. Der
+// PRIVATE Teil liegt in /etc/jarvis/geraet.key mit 0600 und wird von
+// DIESEM Programm nie gelesen: es startet `/bin/jsig`, gibt ihm die
+// Zufallsforderung des Servers und bekommt die Unterschrift zurueck
+// (siehe kernel/user/jsig.fi, oben, fuer den Grund). Kein Passwort im
+// Klartext, kein geteiltes Geheimnis in einer Datei mit Weltleserecht.
+//
+// ERSTANMELDUNG NUR MIT BESTAETIGUNG DES MENSCHEN. Der Server schickt
+// `kopplung-noetig <code>`; der Helfer schreibt den Code sichtbar hin
+// (/var/jarvis/kopplung und auf die Konsole) und wartet. Erst wenn
+// jemand AN DIESEM GERAET `jarvisctl koppeln <code>` mit DEMSELBEN Code
+// eingegeben hat, geht die Kopplung weiter. Der Code steht im Cockpit
+// und auf dem Bildschirm; wer beide sieht, ist der Mensch. Ohne die
+// Bestaetigung wird abgelehnt und protokolliert.
+//
+// ====================================================================
+// DAS BILDSCHIRMFOTO -- UND WAS IN DIESEM ZWEIG DAFUER FEHLT
+// ====================================================================
+//
+// Runde FEEDBACK hat den richtigen Weg schon gebaut: `kernel/shot.fi`,
+// SYS_OSUM_SHOT (1840), mit Schein, Taskleisten-Recht und Super+P.
+// DIESER ZWEIG HAT IHN NICHT -- `feedback` ist in `mergeline2` noch
+// nicht gemergt (gemessen: `grep SYS_OSUM_SHOT kernel/sys.fi` findet
+// nichts). Also:
+//
+//   1. Dieses Programm RUFT 1840 ZUERST. Sobald FEEDBACK hereinkommt,
+//      laeuft das Bildschirmfoto ueber den Kern-Schein und ueber
+//      nichts sonst. Es wird hier KEIN zweiter Kernweg gebaut.
+//   2. Solange 1840 fehlt, geht es ueber /dev/fb (Runde K7) -- und NUR
+//      mit zwei Schloessern in Ring 3: `bildschirmfoto = ja` in der
+//      Rechteliste UND ein EINMALIGER Schein, den nur ein Mensch an
+//      diesem Geraet ausstellen kann (`jarvisctl fotoschein`), der
+//      befristet ist und beim Gebrauch verbraucht wird.
+//   3. Fehlt eines von beiden, kommt kein Bild heraus, und die
+//      Ablehnung steht im Protokoll.
+//
+// EHRLICH DAZU: Schloss 2 ist Ring 3. Ein Programm, das als Wurzel
+// laeuft, kann /dev/fb selbst aufmachen -- das ist die Luecke, die
+// FEEDBACK im KERN schliesst und die dieses Programm nicht schliessen
+// kann. Sie steht in docs/BRIDGE.md unter "was fehlt".
+//
+// ====================================================================
+// DAS PROTOKOLL AUF DEM DRAHT
+// ====================================================================
+//
+// Zeilenweise Text ueber TLS 1.3. Jede Nachricht ist EINE Zeile, deren
+// LETZTES Feld die Laenge der Nutzlast in Oktetten ist; danach kommen
+// genau so viele Oktette. Felder sind durch EIN Leerzeichen getrennt;
+// alles, was Leerzeichen oder Zeilenumbrueche enthalten kann (Pfade,
+// Befehle, Gruende), steht als Hexfolge. Damit gibt es keine Zeile, die
+// sich durch ihren Inhalt zerlegen laesst.
+//
+//   Helfer -> Server        Server -> Helfer
+//   -----------------       ----------------------------
+//   osum-bruecke 1 0        frage <noncehex> 0
+//   ich <pubhex> 0          kopplung-noetig <codehex> 0
+//   beweis <sighex> 0       willkommen 0
+//   kopplung <codehex> 0    weg <grundhex> 0
+//   kopplung-abgelehnt 0    auftrag <id> <art> <a1hex> <a2hex> <laenge>
+//   fertig <id> <ok|nein> <laenge>
+//   puls 0                  tschuess 0
+//
+// Jeder Auftrag traegt eine KENNUNG, jede Antwort traegt dieselbe. Ohne
+// sie kann ein Server, der zwei Auftraege gleichzeitig schickt, die
+// Antworten nicht zuordnen.
+//
+// AUFTRAGSARTEN: befehl, lies, schreib, liste, foto, system.
+//
+// ====================================================================
+// WAS HIER NICHT GEBAUT WIRD, mit Absicht
+// ====================================================================
+//
+// KEINE SHELL. `befehl` startet ein PROGRAMM mit Argumenten und keine
+// Kommandozeile: Osums `/bin/sh` kennt kein `-c`, und selbst wenn es
+// das kaennte, waere eine Zeichenkette, die durch eine Shell laeuft,
+// die klassische Stelle, an der aus einem erlaubten Befehl ein
+// beliebiger wird. Die Rechteliste nennt die erlaubten Programme mit
+// vollem Pfad, und verglichen wird der Pfad, nicht ein Muster.
+//
+// DIESE KRYPTOGRAFIE IST NICHT GEPRUEFT WORDEN. Siehe docs/REALHW.md;
+// derselbe Satz gilt hier.
+
+import std.io
+import std.rt
+import std.net
+import std.deflate
+import tls.tls
+import tls.x509
+
+// ====================================================================
+// ZAHLEN
+// ====================================================================
+
+const MAXPFAD: usize = 128 // Oktette je Eintrag der Rechteliste
+const MAXLISTE: usize = 6 // Eintraege je Liste
+const MAXBEFEHLE: usize = 8
+const MAXZEILE: usize = 4096
+const MAXFELD: usize = 10
+// DIE HARTE OBERGRENZE einer Nutzlast, unabhaengig von der Rechteliste.
+// `max_datei` darf darunter liegen und tut es normalerweise; DIESE Zahl
+// ist die, ab der gar nicht erst Speicher besorgt wird. Ein Server, der
+// mehr ankuendigt, redet nicht mehr mit diesem Geraet.
+const MAXNUTZ: usize = 1048576
+
+// Die Rechtebits von Runde HANDLE (kernel/handle.fi). Absichtlich
+// dieselben Zahlen; eine zweite Liste waere eine, die auseinanderlaeuft.
+const R_READ: i64 = 1
+const R_WRITE: i64 = 2
+const R_INSPECT: i64 = 32
+const R_SEEK: i64 = 2048
+
+// Die Systemaufrufe, die dieses Programm braucht. Osum traegt Linux'
+// Nummern (Runde K4), also stehen hier Linux' Nummern.
+const S_READ: i64 = 0
+const S_WRITE: i64 = 1
+const S_OPEN: i64 = 2
+const S_CLOSE: i64 = 3
+const S_LSEEK: i64 = 8
+const S_NANOSLEEP: i64 = 35
+const S_FORK: i64 = 57
+const S_EXECVE: i64 = 59
+const S_WAIT4: i64 = 61
+const S_DUP2: i64 = 33
+const S_MKDIR: i64 = 83
+const S_UNLINK: i64 = 87
+const S_GETDENTS64: i64 = 217
+const S_CLOCK: i64 = 228
+const S_CHMOD: i64 = 90
+
+// Osums eigene Nummern.
+const S_SYSINFO: i64 = 1002
+const S_WIGSCREEN: i64 = 1805
+const S_DISPGET: i64 = 1810
+const S_SHOT: i64 = 1840 // Runde FEEDBACK -- in diesem Zweig nicht da
+const S_HNDRIGHTS: i64 = 2202
+const S_HNDDUP: i64 = 2208
+
+const O_WRONLY: i64 = 1
+const O_CREAT: i64 = 64
+const O_TRUNC: i64 = 512
+const O_APPEND: i64 = 1024
+const O_DIRECTORY: i64 = 65536
+
+// Felder von SYS_OSUM_SYSINFO (kernel/uio.fi).
+const I_UPTIME: i64 = 1
+const I_FRAMES_FREE: i64 = 2
+const I_FRAMES_ALL: i64 = 3
+const I_BLOCKS: i64 = 4
+const I_BFREE: i64 = 5
+const I_TASKS: i64 = 9
+const I_SYSCALLS: i64 = 10
+const I_VERSION: i64 = 11
+const I_YEAR: i64 = 12
+
+// Bildschirm.
+const WS_W: i64 = 0
+const WS_H: i64 = 1
+const DG_PITCH: i64 = 30
+const DG_BPP: i64 = 31
+
+// ====================================================================
+// DER ZUSTAND
+// ====================================================================
+
+static mut k_ip: u32 = 0 as u32
+static mut k_port: u32 = 0 as u32
+static mut k_name: [u8; 96] = [0; 96]
+static mut k_namelen: usize = 0
+static mut k_wurzeln: [u8; 128] = [0; 128]
+static mut k_protokoll: [u8; 128] = [0; 128]
+static mut k_arbeit: [u8; 128] = [0; 128]
+static mut k_schein: [u8; 128] = [0; 128]
+
+static mut k_befehle: bool = false
+static mut k_foto: bool = false
+static mut k_system: bool = false
+static mut k_max_ausgabe: usize = 65536
+static mut k_max_datei: usize = 262144
+
+// Drei Praefixlisten und eine Programmliste. Eintrag i beginnt bei
+// i * MAXPFAD; die Laenge steht daneben.
+static mut l_lesen: [u8; 768] = [0; 768]
+static mut n_lesen: usize = 0
+static mut l_schreiben: [u8; 768] = [0; 768]
+static mut n_schreiben: usize = 0
+static mut l_auflisten: [u8; 768] = [0; 768]
+static mut n_auflisten: usize = 0
+static mut l_befehl: [u8; 1024] = [0; 1024]
+static mut n_befehl: usize = 0
+
+static mut laut: bool = false
+static mut konfpfad: [u8; 128] = [0; 128]
+
+// Zaehler, die der Bericht nennt.
+static mut z_auftraege: u64 = 0
+static mut z_abgelehnt: u64 = 0
+static mut z_verbindungen: u64 = 0
+// Fuer die Zusage (f): wie viele Systemaufrufe waehrend des WARTENS
+// ueberhaupt stattgefunden haben. Eine Warteschleife macht Millionen,
+// ein `nanosleep` macht eine Handvoll -- die Zahl ist der Unterschied.
+static mut z_wartems: u64 = 0
+static mut z_warteaufrufe: u64 = 0
+
+// ====================================================================
+// SYSTEMAUFRUFE, DUENN UMWICKELT
+// ====================================================================
+
+fn sys_open(pfad: u64, flags: i64, mode: i64) -> i64 {
+    return syscall(S_OPEN, pfad as i64, flags, mode, 0, 0, 0)
+}
+
+fn sys_close(fd: i64) -> i64 {
+    return syscall(S_CLOSE, fd, 0, 0, 0, 0, 0)
+}
+
+fn sys_read(fd: i64, p: u64, n: usize) -> i64 {
+    return syscall(S_READ, fd, p as i64, n as i64, 0, 0, 0)
+}
+
+fn sys_write(fd: i64, p: u64, n: usize) -> i64 {
+    return syscall(S_WRITE, fd, p as i64, n as i64, 0, 0, 0)
+}
+
+fn sys_mkdir(pfad: u64) -> i64 {
+    return syscall(S_MKDIR, pfad as i64, 493, 0, 0, 0, 0)
+}
+
+fn sys_unlink(pfad: u64) -> i64 {
+    return syscall(S_UNLINK, pfad as i64, 0, 0, 0, 0, 0)
+}
+
+fn sys_getdents(fd: i64, p: u64, n: usize) -> i64 {
+    return syscall(S_GETDENTS64, fd, p as i64, n as i64, 0, 0, 0)
+}
+
+fn sysinfo(was: i64) -> i64 {
+    return syscall(S_SYSINFO, was, 0, 0, 0, 0, 0)
+}
+
+fn hnd_dup(fd: i64, maske: i64) -> i64 {
+    return syscall(S_HNDDUP, fd, maske, 0, 0, 0, 0)
+}
+
+fn hnd_rechte(fd: i64) -> i64 {
+    return syscall(S_HNDRIGHTS, fd, 0, 0, 0, 0, 0)
+}
+
+// Warten, ohne zu drehen. Osum weist mehr als sechzig Sekunden ab, also
+// wird zerlegt. DAS ist die Zeile, hinter der die Leerlauflast steht:
+// ein Prozess in `nanosleep` steht in der Warteliste des Kerns und
+// bekommt keinen Zeitschnitz.
+fn schlafe_ms(ms: u64) {
+    var rest: u64 = ms
+    while rest > 0 {
+        var teil: u64 = rest
+        if teil > 30000 {
+            teil = 30000
+        }
+        var ts: [i64; 2] = [0; 2]
+        ts[0] = (teil / 1000) as i64
+        ts[1] = ((teil % 1000) * 1000000) as i64
+        syscall(S_NANOSLEEP, (&ts[0]) as i64, 0, 0, 0, 0, 0)
+        rest = rest - teil
+    }
+}
+
+fn jetzt_ms() -> u64 {
+    let v: i64 = sysinfo(I_UPTIME)
+    if v < 0 {
+        return 0
+    }
+    return v as u64
+}
+
+fn jetzt_s() -> u64 {
+    var ts: [i64; 2] = [0; 2]
+    syscall(S_CLOCK, 0, (&ts[0]) as i64, 0, 0, 0, 0)
+    return ts[0] as u64
+}
+
+// ====================================================================
+// HEX UND TEXT
+// ====================================================================
+
+fn hexz(v: u64) -> u8 {
+    if v < 10 {
+        return (48 + v) as u8
+    }
+    return (87 + v) as u8
+}
+
+fn hexwert(c: u8) -> u64 {
+    let v: u64 = c as u64
+    if v >= 48 && v <= 57 {
+        return v - 48
+    }
+    if v >= 97 && v <= 102 {
+        return v - 87
+    }
+    if v >= 65 && v <= 70 {
+        return v - 55
+    }
+    return 256
+}
+
+fn hex_an(b: *mut rt.Buf, p: u64, n: usize) {
+    var i: usize = 0
+    while i < n {
+        let v: u64 = rt.ld8(p, i) as u64
+        rt.buf_push(b, hexz((v >> 4) & 15))
+        rt.buf_push(b, hexz(v & 15))
+        i = i + 1
+    }
+}
+
+// Hexfolge -> Oktette in einen Puffer. false = keine Hexfolge.
+fn hex_aus(p: u64, n: usize, out: *mut rt.Buf) -> bool {
+    if (n & 1) != 0 {
+        return false
+    }
+    var i: usize = 0
+    while i < n / 2 {
+        let hi: u64 = hexwert(rt.ld8(p, i * 2))
+        let lo: u64 = hexwert(rt.ld8(p, i * 2 + 1))
+        if hi > 15 || lo > 15 {
+            return false
+        }
+        rt.buf_push(out, ((hi << 4) | lo) as u8)
+        i = i + 1
+    }
+    return true
+}
+
+fn gleich(a: u64, an: usize, b: u64, bn: usize) -> bool {
+    if an != bn {
+        return false
+    }
+    var i: usize = 0
+    while i < an {
+        if rt.ld8(a, i) != rt.ld8(b, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// Ein Wort gegen eine Zeichenkette mit Null am Ende.
+fn ist(p: u64, n: usize, s: u64) -> bool {
+    return gleich(p, n, s, rt.c_length(s))
+}
+
+fn zahl_von(p: u64, n: usize) -> u64 {
+    var v: u64 = 0
+    var i: usize = 0
+    while i < n {
+        let c: u64 = rt.ld8(p, i) as u64
+        if c < 48 || c > 57 {
+            return v
+        }
+        v = v * 10 + (c - 48)
+        i = i + 1
+    }
+    return v
+}
+
+// Text mit Null am Ende in einen festen Platz. Gibt die Laenge zurueck.
+fn hinein(ziel: u64, max: usize, p: u64, n: usize) -> usize {
+    var k: usize = n
+    if k > max - 1 {
+        k = max - 1
+    }
+    rt.mem_copy(ziel, p, k)
+    rt.st8(ziel, k, 0 as u8)
+    return k
+}
+
+fn sag(s: str) {
+    io.print(s)
+}
+
+fn sag_wenn_laut(s: str) {
+    if laut {
+        io.print(s)
+    }
+}
+
+fn sag_zahl(v: u64) {
+    var b: rt.Buf = rt.buf_new()
+    rt.buf_push_dec_u64(&b, v)
+    rt.write_everything(1, b.ptr, b.len)
+    rt.buf_free(&b)
+}
+
+fn sag_oktette(p: u64, n: usize) {
+    rt.write_everything(1, p, n)
+}
+
+// ====================================================================
+// DIE RECHTELISTE
+// ====================================================================
+//
+// Eine Zeile ist entweder leer, ein Kommentar ab '#', oder
+// `schluessel = wert`. Leerzeichen um beides herum sind egal. Ein
+// Schluessel darf mehrfach vorkommen -- die Listen sammeln dann.
+//
+// DIE VOREINSTELLUNG IST NEIN. Fehlt die Datei, ist sie leer oder steht
+// eine Zeile falsch da, dann ist die entsprechende Liste LEER und damit
+// ist nichts erlaubt. Ein Rechtepruefer, dessen Voreinstellung "ja"
+// ist, prueft nichts -- er wartet nur darauf, dass jemand die Datei
+// loescht.
+
+fn liste_dazu(feld: u64, n: *mut usize, p: u64, len: usize) {
+    if *n >= MAXLISTE {
+        return
+    }
+    hinein(feld + (*n * MAXPFAD) as u64, MAXPFAD, p, len)
+    *n = *n + 1
+}
+
+fn liste_pfad(feld: u64, i: usize) -> u64 {
+    return feld + (i * MAXPFAD) as u64
+}
+
+fn ja_ist(p: u64, n: usize) -> bool {
+    var w: [u8; 3] = "ja\0"
+    return ist(p, n, (&w[0]) as u64)
+}
+
+// Eine IPv4-Adresse mit Anschluss: a.b.c.d:p
+fn adresse_lesen(p: u64, n: usize) -> bool {
+    var teil: u64 = 0
+    var wert: u64 = 0
+    var adr: u32 = 0 as u32
+    var i: usize = 0
+    var hatte: bool = false
+    while i < n {
+        let c: u64 = rt.ld8(p, i) as u64
+        if c >= 48 && c <= 57 {
+            wert = wert * 10 + (c - 48)
+            hatte = true
+        } else if c == 46 { // '.'
+            if !hatte || wert > 255 || teil >= 3 {
+                return false
+            }
+            adr = (adr << 8) | (wert as u32)
+            teil = teil + 1
+            wert = 0
+            hatte = false
+        } else if c == 58 { // ':'
+            if !hatte || wert > 255 || teil != 3 {
+                return false
+            }
+            adr = (adr << 8) | (wert as u32)
+            teil = 4
+            wert = 0
+            hatte = false
+        } else {
+            return false
+        }
+        i = i + 1
+    }
+    if teil != 4 || !hatte || wert == 0 || wert > 65535 {
+        return false
+    }
+    k_ip = adr
+    k_port = wert as u32
+    return true
+}
+
+// Setzt alles auf "nichts erlaubt" zurueck. Wird vor JEDEM Lesen
+// gerufen, damit ein entfernter Eintrag wirklich weg ist.
+fn konf_leeren() {
+    k_befehle = false
+    k_foto = false
+    k_system = false
+    n_lesen = 0
+    n_schreiben = 0
+    n_auflisten = 0
+    n_befehl = 0
+    k_max_ausgabe = 65536
+    k_max_datei = 262144
+    var p1: [u8; 22] = "/var/log/jarvisd.log\0\0"
+    hinein((&k_protokoll[0]) as u64, MAXPFAD, (&p1[0]) as u64, 20)
+    var p2: [u8; 24] = "/var/jarvis/ausgabe.txt\0"
+    hinein((&k_arbeit[0]) as u64, MAXPFAD, (&p2[0]) as u64, 23)
+    var p3: [u8; 24] = "/var/jarvis/fotoschein\0\0"
+    hinein((&k_schein[0]) as u64, MAXPFAD, (&p3[0]) as u64, 22)
+    var p4: [u8; 20] = "/etc/ssl/roots.pem\0\0"
+    hinein((&k_wurzeln[0]) as u64, MAXPFAD, (&p4[0]) as u64, 18)
+}
+
+fn konf_lesen() -> bool {
+    konf_leeren()
+    var b: rt.Buf = rt.buf_new()
+    if !rt.read_file((&konfpfad[0]) as u64, &b) {
+        rt.buf_free(&b)
+        return false
+    }
+    var s_server: [u8; 7] = "server\0"
+    var s_name: [u8; 11] = "servername\0"
+    var s_wurzeln: [u8; 8] = "wurzeln\0"
+    var s_befehle: [u8; 8] = "befehle\0"
+    var s_berl: [u8; 15] = "befehl_erlaubt\0"
+    var s_lesen: [u8; 6] = "lesen\0"
+    var s_schr: [u8; 10] = "schreiben\0"
+    var s_aufl: [u8; 11] = "auflisten\0\0"
+    var s_foto: [u8; 15] = "bildschirmfoto\0"
+    var s_sys: [u8; 11] = "systeminfo\0"
+    var s_maxa: [u8; 12] = "max_ausgabe\0"
+    var s_maxd: [u8; 10] = "max_datei\0"
+    var s_prot: [u8; 10] = "protokoll\0"
+    var s_arb: [u8; 13] = "arbeitsdatei\0"
+    var s_sch: [u8; 16] = "fotoscheindatei\0"
+
+    var at: usize = 0
+    while at < b.len {
+        // Die Zeile abstecken.
+        var ende: usize = at
+        while ende < b.len && rt.ld8(b.ptr, ende) != 10 as u8 {
+            ende = ende + 1
+        }
+        var von: usize = at
+        var bis: usize = ende
+        // Kommentar ab '#'.
+        var k: usize = von
+        while k < bis {
+            if rt.ld8(b.ptr, k) == 35 as u8 {
+                bis = k
+                break
+            }
+            k = k + 1
+        }
+        // Am Gleichheitszeichen trennen.
+        var eq: usize = von
+        var hat_eq: bool = false
+        while eq < bis {
+            if rt.ld8(b.ptr, eq) == 61 as u8 {
+                hat_eq = true
+                break
+            }
+            eq = eq + 1
+        }
+        if hat_eq {
+            var sv: usize = von
+            var sb: usize = eq
+            while sv < sb && rt.ld8(b.ptr, sv) <= 32 as u8 {
+                sv = sv + 1
+            }
+            while sb > sv && rt.ld8(b.ptr, sb - 1) <= 32 as u8 {
+                sb = sb - 1
+            }
+            var wv: usize = eq + 1
+            var wb: usize = bis
+            while wv < wb && rt.ld8(b.ptr, wv) <= 32 as u8 {
+                wv = wv + 1
+            }
+            while wb > wv && rt.ld8(b.ptr, wb - 1) <= 32 as u8 {
+                wb = wb - 1
+            }
+            let sp: u64 = b.ptr + sv as u64
+            let sl: usize = sb - sv
+            let wp: u64 = b.ptr + wv as u64
+            let wl: usize = wb - wv
+            if sl > 0 {
+                if ist(sp, sl, (&s_server[0]) as u64) {
+                    adresse_lesen(wp, wl)
+                } else if ist(sp, sl, (&s_name[0]) as u64) {
+                    k_namelen = hinein((&k_name[0]) as u64, 96, wp, wl)
+                } else if ist(sp, sl, (&s_wurzeln[0]) as u64) {
+                    hinein((&k_wurzeln[0]) as u64, MAXPFAD, wp, wl)
+                } else if ist(sp, sl, (&s_prot[0]) as u64) {
+                    hinein((&k_protokoll[0]) as u64, MAXPFAD, wp, wl)
+                } else if ist(sp, sl, (&s_arb[0]) as u64) {
+                    hinein((&k_arbeit[0]) as u64, MAXPFAD, wp, wl)
+                } else if ist(sp, sl, (&s_sch[0]) as u64) {
+                    hinein((&k_schein[0]) as u64, MAXPFAD, wp, wl)
+                } else if ist(sp, sl, (&s_befehle[0]) as u64) {
+                    k_befehle = ja_ist(wp, wl)
+                } else if ist(sp, sl, (&s_foto[0]) as u64) {
+                    k_foto = ja_ist(wp, wl)
+                } else if ist(sp, sl, (&s_sys[0]) as u64) {
+                    k_system = ja_ist(wp, wl)
+                } else if ist(sp, sl, (&s_maxa[0]) as u64) {
+                    k_max_ausgabe = zahl_von(wp, wl) as usize
+                } else if ist(sp, sl, (&s_maxd[0]) as u64) {
+                    k_max_datei = zahl_von(wp, wl) as usize
+                } else if ist(sp, sl, (&s_lesen[0]) as u64) {
+                    liste_dazu((&l_lesen[0]) as u64, &n_lesen, wp, wl)
+                } else if ist(sp, sl, (&s_schr[0]) as u64) {
+                    liste_dazu((&l_schreiben[0]) as u64, &n_schreiben, wp, wl)
+                } else if ist(sp, sl, (&s_aufl[0]) as u64) {
+                    liste_dazu((&l_auflisten[0]) as u64, &n_auflisten, wp, wl)
+                } else if ist(sp, sl, (&s_berl[0]) as u64) {
+                    liste_dazu((&l_befehl[0]) as u64, &n_befehl, wp, wl)
+                }
+            }
+        }
+        at = ende + 1
+    }
+    rt.buf_free(&b)
+    return true
+}
+
+// ====================================================================
+// PFADE
+// ====================================================================
+//
+// EIN PFAD MUSS ABSOLUT SEIN und darf `..` nicht enthalten. Das ist
+// keine Bequemlichkeit, sondern der Grund, aus dem eine Praefixpruefung
+// ueberhaupt etwas bedeutet: `/var/jarvis/../etc/schatten` faengt mit
+// `/var/jarvis/` an und liegt trotzdem woanders. Es wird hier NICHT
+// aufgeloest, sondern ABGELEHNT -- eine Aufloesung waere eine zweite
+// Fassung dessen, was der Kern tut, und die beiden liefen auseinander.
+
+fn pfad_sauber(p: u64, n: usize) -> bool {
+    if n == 0 || n >= MAXPFAD {
+        return false
+    }
+    if rt.ld8(p, 0) != 47 as u8 { // '/'
+        return false
+    }
+    var i: usize = 0
+    while i < n {
+        let c: u8 = rt.ld8(p, i)
+        if c == 0 as u8 || c == 10 as u8 || c == 13 as u8 {
+            return false
+        }
+        if c < 32 as u8 {
+            return false
+        }
+        // "//" ist unnoetig und macht die Praefixpruefung mehrdeutig.
+        if i + 1 < n && c == 47 as u8 && rt.ld8(p, i + 1) == 47 as u8 {
+            return false
+        }
+        i = i + 1
+    }
+    // Ein Abschnitt, der genau ".." ist.
+    var von: usize = 0
+    while von < n {
+        var bis: usize = von
+        while bis < n && rt.ld8(p, bis) != 47 as u8 {
+            bis = bis + 1
+        }
+        if bis - von == 2 && rt.ld8(p, von) == 46 as u8
+            && rt.ld8(p, von + 1) == 46 as u8 {
+            return false
+        }
+        von = bis + 1
+    }
+    return true
+}
+
+// Ein Eintrag, der auf '/' endet, ist ein Verzeichnisvorspann; alles
+// andere ist ein einzelner Name und muss GENAU stimmen.
+fn passt_eintrag(e: u64, p: u64, n: usize) -> bool {
+    let el: usize = rt.c_length(e)
+    if el == 0 {
+        return false
+    }
+    if rt.ld8(e, el - 1) == 47 as u8 {
+        if n < el {
+            return false
+        }
+        return gleich(e, el, p, el)
+    }
+    return gleich(e, el, p, n)
+}
+
+fn in_liste(feld: u64, anzahl: usize, p: u64, n: usize) -> bool {
+    var i: usize = 0
+    while i < anzahl {
+        if passt_eintrag(liste_pfad(feld, i), p, n) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// ====================================================================
+// DAS PROTOKOLL UNTER /var/log
+// ====================================================================
+//
+// Eine Zeile je Auftrag, angehaengt, mit Zeitstempel aus der Uhr des
+// Kerns. Sichtbarkeit ist eine Zusage dieser Runde und keine Zugabe:
+// wer nicht sehen kann, was der Helfer tut, hat keinen Helfer, sondern
+// einen Fremden auf seinem Rechner.
+
+fn zwei(b: *mut rt.Buf, v: u64) {
+    if v < 10 {
+        rt.buf_push(b, 48 as u8)
+    }
+    rt.buf_push_dec_u64(b, v)
+}
+
+fn zeitstempel(b: *mut rt.Buf) {
+    let j: i64 = sysinfo(I_YEAR)
+    if j < 0 {
+        rt.buf_push_dec_u64(b, jetzt_ms())
+        return
+    }
+    rt.buf_push_dec_u64(b, j as u64)
+    rt.buf_push(b, 45 as u8)
+    zwei(b, sysinfo(I_YEAR + 1) as u64)
+    rt.buf_push(b, 45 as u8)
+    zwei(b, sysinfo(I_YEAR + 2) as u64)
+    rt.buf_push(b, 32 as u8)
+    zwei(b, sysinfo(I_YEAR + 3) as u64)
+    rt.buf_push(b, 58 as u8)
+    zwei(b, sysinfo(I_YEAR + 4) as u64)
+    rt.buf_push(b, 58 as u8)
+    zwei(b, sysinfo(I_YEAR + 5) as u64)
+}
+
+fn notiere(art: u64, artn: usize, erg: str, det: u64, detn: usize) {
+    var b: rt.Buf = rt.buf_new()
+    zeitstempel(&b)
+    rt.buf_push(&b, 32 as u8)
+    rt.buf_push_bytes(&b, art, artn)
+    rt.buf_push(&b, 32 as u8)
+    rt.buf_push_bytes(&b, erg.p as u64, erg.n)
+    if detn > 0 {
+        rt.buf_push(&b, 32 as u8)
+        rt.buf_push_bytes(&b, det, detn)
+    }
+    rt.buf_push(&b, 10 as u8)
+    let fd: i64 = sys_open((&k_protokoll[0]) as u64,
+        O_WRONLY | O_CREAT | O_APPEND, 384)
+    if fd >= 0 {
+        sys_write(fd, b.ptr, b.len)
+        sys_close(fd)
+    }
+    if laut {
+        rt.write_everything(1, b.ptr, b.len)
+    }
+    rt.buf_free(&b)
+}
+
+// ====================================================================
+// DER DRAHT: ZEILEN UEBER TLS
+// ====================================================================
+//
+// `tls_read` liefert, was gerade da ist, und nicht, was gebraucht wird.
+// Also liegt ein Puffer davor, aus dem Zeilen und Nutzlasten
+// herausgeschnitten werden. `tot` bedeutet: die Gegenseite ist weg --
+// und dann wird JEDER laufende Auftrag abgebrochen, statt auf Oktette
+// zu warten, die nicht mehr kommen.
+
+struct Draht {
+    t: u64, // *mut tls.Tls, als Zahl gehalten
+    puf: rt.Buf,
+    at: usize,
+    tot: bool,
+}
+
+fn draht_neu(t: *mut tls.Tls) -> Draht {
+    return Draht { t: t as u64, puf: rt.buf_new(), at: 0, tot: false }
+}
+
+fn draht_weg(d: *mut Draht) {
+    rt.buf_free(&(*d).puf)
+}
+
+// Aufraeumen: was schon gelesen wurde, faellt vorne weg. Ohne das
+// waechst der Puffer eine lange Sitzung lang und wird nie kleiner.
+fn draht_kuerzen(d: *mut Draht) {
+    if (*d).at == 0 {
+        return
+    }
+    let rest: usize = (*d).puf.len - (*d).at
+    if rest > 0 {
+        rt.mem_copy((*d).puf.ptr, (*d).puf.ptr + (*d).at as u64, rest)
+    }
+    rt.buf_set_len(&(*d).puf, rest)
+    (*d).at = 0
+}
+
+fn draht_fuellen(d: *mut Draht) -> bool {
+    if (*d).tot {
+        return false
+    }
+    var chunk: [u8; 4096] = [0; 4096]
+    var schief: bool = false
+    let n: usize = tls.tls_read((*d).t as *mut tls.Tls,
+        (&chunk[0]) as u64, 4096 as usize)
+    catch | e | fehl_len(&schief)
+    if schief || n == 0 {
+        (*d).tot = true
+        return false
+    }
+    rt.buf_push_bytes(&(*d).puf, (&chunk[0]) as u64, n)
+    return true
+}
+
+fn fehl_len(schief: *mut bool) -> usize {
+    *schief = true
+    return 0 as usize
+}
+
+fn fehl_bool(schief: *mut bool) -> bool {
+    *schief = true
+    return false
+}
+
+// Eine Zeile OHNE den Umbruch. false = die Verbindung ist weg.
+fn draht_zeile(d: *mut Draht, aus: *mut rt.Buf) -> bool {
+    rt.buf_clear(aus)
+    while true {
+        var i: usize = (*d).at
+        while i < (*d).puf.len {
+            if rt.ld8((*d).puf.ptr, i) == 10 as u8 {
+                let n: usize = i - (*d).at
+                if n > MAXZEILE {
+                    (*d).tot = true
+                    return false
+                }
+                rt.buf_push_bytes(aus, (*d).puf.ptr + (*d).at as u64, n)
+                (*d).at = i + 1
+                draht_kuerzen(d)
+                return true
+            }
+            i = i + 1
+        }
+        if (*d).puf.len - (*d).at > MAXZEILE {
+            // Eine Zeile ohne Umbruch, laenger als erlaubt: das ist
+            // kein Gespraech mehr, das ist ein Speicherfresser.
+            (*d).tot = true
+            return false
+        }
+        if !draht_fuellen(d) {
+            return false
+        }
+    }
+    return false
+}
+
+fn draht_oktette(d: *mut Draht, n: usize, aus: *mut rt.Buf) -> bool {
+    rt.buf_clear(aus)
+    var fehlt: usize = n
+    while fehlt > 0 {
+        let da: usize = (*d).puf.len - (*d).at
+        if da == 0 {
+            if !draht_fuellen(d) {
+                return false
+            }
+            continue
+        }
+        var k: usize = da
+        if k > fehlt {
+            k = fehlt
+        }
+        rt.buf_push_bytes(aus, (*d).puf.ptr + (*d).at as u64, k)
+        (*d).at = (*d).at + k
+        fehlt = fehlt - k
+        draht_kuerzen(d)
+    }
+    return true
+}
+
+fn draht_senden(d: *mut Draht, p: u64, n: usize) -> bool {
+    if (*d).tot {
+        return false
+    }
+    var schief: bool = false
+    let ok: bool = tls.tls_write((*d).t as *mut tls.Tls, p, n)
+    catch | e | fehl_bool(&schief)
+    if schief {
+        (*d).tot = true
+        return false
+    }
+    return true
+}
+
+// Eine Nachricht: Zeile, dann Nutzlast. Die Laenge steht immer als
+// letztes Feld der Zeile -- hier wird sie angehaengt, damit kein
+// Aufrufer sie vergessen kann.
+fn sende(d: *mut Draht, kopf: *mut rt.Buf, nutz: u64, nutzn: usize) -> bool {
+    var b: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&b, (*kopf).ptr, (*kopf).len)
+    rt.buf_push(&b, 32 as u8)
+    rt.buf_push_dec_u64(&b, nutzn as u64)
+    rt.buf_push(&b, 10 as u8)
+    if nutzn > 0 {
+        rt.buf_push_bytes(&b, nutz, nutzn)
+    }
+    let ok: bool = draht_senden(d, b.ptr, b.len)
+    rt.buf_free(&b)
+    return ok
+}
+
+// ------------------------------------------------------ Zeilen zerlegen
+
+struct Felder {
+    off: [usize; 10],
+    len: [usize; 10],
+    n: usize,
+}
+
+fn zerlege(p: u64, n: usize, f: *mut Felder) {
+    (*f).n = 0
+    var i: usize = 0
+    while i < n && (*f).n < MAXFELD {
+        while i < n && rt.ld8(p, i) == 32 as u8 {
+            i = i + 1
+        }
+        if i >= n {
+            break
+        }
+        let von: usize = i
+        while i < n && rt.ld8(p, i) != 32 as u8 {
+            i = i + 1
+        }
+        (*f).off[(*f).n] = von
+        (*f).len[(*f).n] = i - von
+        (*f).n = (*f).n + 1
+    }
+}
+
+// ====================================================================
+// DIE AUFTRAEGE
+// ====================================================================
+//
+// Jede Auftragsart hat GENAU EINEN Eingang, und der erste Satz jedes
+// Eingangs ist die Rechtefrage. Es gibt keinen Weg an ihr vorbei, weil
+// es keinen zweiten Eingang gibt.
+
+fn ablehnen(aus: *mut rt.Buf, grund: str) -> bool {
+    rt.buf_clear(aus)
+    rt.buf_push_bytes(aus, grund.p as u64, grund.n)
+    z_abgelehnt = z_abgelehnt + 1
+    return false
+}
+
+// ------------------------------------------------------------ system
+
+fn zeile_zahl(aus: *mut rt.Buf, name: u64, v: u64) {
+    rt.buf_push_bytes(aus, name, rt.c_length(name))
+    rt.buf_push(aus, 32 as u8)
+    rt.buf_push_dec_u64(aus, v)
+    rt.buf_push(aus, 10 as u8)
+}
+
+fn tue_system(aus: *mut rt.Buf) -> bool {
+    if !k_system {
+        return ablehnen(aus, "systeminfo steht nicht in der Rechteliste")
+    }
+    rt.buf_clear(aus)
+    var n1: [u8; 8] = "fassung\0"
+    var n2: [u8; 12] = "laufzeit_ms\0"
+    var n3: [u8; 14] = "speicher_alle\0"
+    var n4: [u8; 14] = "speicher_frei\0"
+    var n5: [u8; 15] = "platte_bloecke\0"
+    var n6: [u8; 12] = "platte_frei\0"
+    var n7: [u8; 9] = "aufgaben\0"
+    var n8: [u8; 15] = "systemaufrufe\0\0"
+    var n9: [u8; 6] = "kerne\0"
+    zeile_zahl(aus, (&n1[0]) as u64, sysinfo(I_VERSION) as u64)
+    zeile_zahl(aus, (&n2[0]) as u64, sysinfo(I_UPTIME) as u64)
+    // Ein Rahmen ist 4096 Oktette; die Zahl in Oktetten ist die, die
+    // ein Mensch erwartet.
+    zeile_zahl(aus, (&n3[0]) as u64, (sysinfo(I_FRAMES_ALL) as u64) * 4096)
+    zeile_zahl(aus, (&n4[0]) as u64, (sysinfo(I_FRAMES_FREE) as u64) * 4096)
+    zeile_zahl(aus, (&n5[0]) as u64, sysinfo(I_BLOCKS) as u64)
+    zeile_zahl(aus, (&n6[0]) as u64, sysinfo(I_BFREE) as u64)
+    zeile_zahl(aus, (&n7[0]) as u64, sysinfo(I_TASKS) as u64)
+    zeile_zahl(aus, (&n8[0]) as u64, sysinfo(I_SYSCALLS) as u64)
+    zeile_zahl(aus, (&n9[0]) as u64, 1)
+    var nz: [u8; 5] = "zeit\0"
+    rt.buf_push_bytes(aus, (&nz[0]) as u64, 4)
+    rt.buf_push(aus, 32 as u8)
+    zeitstempel(aus)
+    rt.buf_push(aus, 10 as u8)
+    return true
+}
+
+// -------------------------------------------------------------- lies
+//
+// DER SCHNITT MIT HND_DUP. Nach dem `open` wird ein Deskriptor mit
+// ausschliesslich Leserechten hergestellt und der urspruengliche
+// geschlossen. Ab hier kann dieses Programm auf diese Datei NICHT MEHR
+// schreiben, auch wenn es wollte -- das entscheidet der Kern.
+
+fn eng_machen(fd: i64, maske: i64, aus: *mut rt.Buf) -> i64 {
+    let enger: i64 = hnd_dup(fd, maske)
+    if enger < 0 {
+        sys_close(fd)
+        ablehnen(aus, "der Deskriptor liess sich nicht beschneiden (HND_DUP)")
+        return -1
+    }
+    sys_close(fd)
+    return enger
+}
+
+fn tue_lies(pfad: u64, pn: usize, aus: *mut rt.Buf) -> bool {
+    if !pfad_sauber(pfad, pn) {
+        return ablehnen(aus, "kein sauberer absoluter Pfad")
+    }
+    if !in_liste((&l_lesen[0]) as u64, n_lesen, pfad, pn) {
+        return ablehnen(aus, "dieser Pfad steht nicht unter `lesen` in /etc/jarvis/rechte.conf")
+    }
+    var name: [u8; 128] = [0; 128]
+    hinein((&name[0]) as u64, MAXPFAD, pfad, pn)
+    let roh: i64 = sys_open((&name[0]) as u64, 0, 0)
+    if roh < 0 {
+        return ablehnen(aus, "die Datei laesst sich nicht oeffnen")
+    }
+    let fd: i64 = eng_machen(roh, R_READ | R_INSPECT | R_SEEK, aus)
+    if fd < 0 {
+        return false
+    }
+    rt.buf_clear(aus)
+    var chunk: [u8; 4096] = [0; 4096]
+    var zuviel: bool = false
+    while true {
+        let n: i64 = sys_read(fd, (&chunk[0]) as u64, 4096 as usize)
+        if n <= 0 {
+            break
+        }
+        if (*aus).len + (n as usize) > k_max_datei {
+            zuviel = true
+            break
+        }
+        rt.buf_push_bytes(aus, (&chunk[0]) as u64, n as usize)
+    }
+    sys_close(fd)
+    if zuviel {
+        return ablehnen(aus, "die Datei ist groesser als max_datei")
+    }
+    return true
+}
+
+// ----------------------------------------------------------- schreib
+
+fn tue_schreib(pfad: u64, pn: usize, nutz: *mut rt.Buf,
+    aus: *mut rt.Buf) -> bool {
+    if !pfad_sauber(pfad, pn) {
+        return ablehnen(aus, "kein sauberer absoluter Pfad")
+    }
+    if !in_liste((&l_schreiben[0]) as u64, n_schreiben, pfad, pn) {
+        return ablehnen(aus, "dieser Pfad steht nicht unter `schreiben` in /etc/jarvis/rechte.conf")
+    }
+    if (*nutz).len > k_max_datei {
+        return ablehnen(aus, "der Inhalt ist groesser als max_datei")
+    }
+    var name: [u8; 128] = [0; 128]
+    hinein((&name[0]) as u64, MAXPFAD, pfad, pn)
+    let roh: i64 = sys_open((&name[0]) as u64,
+        O_WRONLY | O_CREAT | O_TRUNC, 420)
+    if roh < 0 {
+        return ablehnen(aus, "die Datei laesst sich nicht anlegen")
+    }
+    let fd: i64 = eng_machen(roh, R_WRITE | R_INSPECT | R_SEEK, aus)
+    if fd < 0 {
+        return false
+    }
+    var getan: usize = 0
+    var schief: bool = false
+    while getan < (*nutz).len {
+        let n: i64 = sys_write(fd, (*nutz).ptr + getan as u64,
+            (*nutz).len - getan)
+        if n <= 0 {
+            schief = true
+            break
+        }
+        getan = getan + (n as usize)
+    }
+    sys_close(fd)
+    if schief {
+        return ablehnen(aus, "das Schreiben ist mittendrin gescheitert")
+    }
+    rt.buf_clear(aus)
+    var t: [u8; 10] = "oktette \0\0"
+    rt.buf_push_bytes(aus, (&t[0]) as u64, 8)
+    rt.buf_push_dec_u64(aus, getan as u64)
+    rt.buf_push(aus, 10 as u8)
+    return true
+}
+
+// ------------------------------------------------------------- liste
+
+fn tue_liste(pfad: u64, pn: usize, aus: *mut rt.Buf) -> bool {
+    if !pfad_sauber(pfad, pn) {
+        return ablehnen(aus, "kein sauberer absoluter Pfad")
+    }
+    if !in_liste((&l_auflisten[0]) as u64, n_auflisten, pfad, pn) {
+        return ablehnen(aus, "dieses Verzeichnis steht nicht unter `auflisten` in /etc/jarvis/rechte.conf")
+    }
+    var name: [u8; 128] = [0; 128]
+    hinein((&name[0]) as u64, MAXPFAD, pfad, pn)
+    let fd: i64 = sys_open((&name[0]) as u64, O_DIRECTORY, 0)
+    if fd < 0 {
+        return ablehnen(aus, "das Verzeichnis laesst sich nicht oeffnen")
+    }
+    rt.buf_clear(aus)
+    var satz: [u8; 4096] = [0; 4096]
+    while true {
+        let n: i64 = sys_getdents(fd, (&satz[0]) as u64, 4096 as usize)
+        if n <= 0 {
+            break
+        }
+        var at: usize = 0
+        while at < (n as usize) {
+            let basis: u64 = (&satz[0]) as u64 + at as u64
+            let reclen: usize = rt.ld16(basis, 8) as usize
+            if reclen == 0 {
+                break
+            }
+            let art: u8 = rt.ld8(basis, 18)
+            // 4 = Verzeichnis, 8 = gewoehnliche Datei (Linux' DT_*).
+            if art == 4 as u8 {
+                rt.buf_push(aus, 100 as u8) // 'd'
+            } else {
+                rt.buf_push(aus, 45 as u8) // '-'
+            }
+            rt.buf_push(aus, 32 as u8)
+            var k: usize = 19
+            while k < reclen && rt.ld8(basis, k) != 0 as u8 {
+                rt.buf_push(aus, rt.ld8(basis, k))
+                k = k + 1
+            }
+            rt.buf_push(aus, 10 as u8)
+            if (*aus).len > k_max_ausgabe {
+                sys_close(fd)
+                return ablehnen(aus, "die Liste ist laenger als max_ausgabe")
+            }
+            at = at + reclen
+        }
+    }
+    sys_close(fd)
+    return true
+}
+
+// ------------------------------------------------------------ befehl
+//
+// KEINE SHELL, KEINE ZEICHENKETTE. Das erste Wort ist der PFAD des
+// Programms und muss WOERTLICH in der Liste `befehl_erlaubt` stehen;
+// die uebrigen Worte sind Argumente. Ein Muster statt eines Pfades
+// waere eine Erlaubnis, die niemand mehr ueberblickt.
+//
+// DIE AUSGABE laeuft ueber eine Datei und nicht ueber ein Rohr: das
+// Kind schreibt, der Vater liest danach. Ein Rohr waere schoener und
+// haette einen zweiten Wartepunkt gebraucht (`poll`), und der gehoert
+// in die Runde, die den Helfer nebenlaeufig macht -- nicht in diese.
+// Die Grenze `max_ausgabe` greift beim Lesen: was darueber liegt, wird
+// abgeschnitten und die Kuerzung steht in der Antwort.
+
+fn arg_zaehlen(p: u64, n: usize) -> usize {
+    var z: usize = 0
+    var i: usize = 0
+    while i < n {
+        while i < n && rt.ld8(p, i) == 32 as u8 {
+            i = i + 1
+        }
+        if i >= n {
+            break
+        }
+        z = z + 1
+        while i < n && rt.ld8(p, i) != 32 as u8 {
+            i = i + 1
+        }
+    }
+    return z
+}
+
+fn tue_befehl(zeile: u64, zn: usize, aus: *mut rt.Buf) -> bool {
+    if !k_befehle {
+        return ablehnen(aus, "`befehle = nein` in /etc/jarvis/rechte.conf")
+    }
+    // Das erste Wort abstecken.
+    var i: usize = 0
+    while i < zn && rt.ld8(zeile, i) == 32 as u8 {
+        i = i + 1
+    }
+    let pvon: usize = i
+    while i < zn && rt.ld8(zeile, i) != 32 as u8 {
+        i = i + 1
+    }
+    let pn: usize = i - pvon
+    if pn == 0 {
+        return ablehnen(aus, "leerer Befehl")
+    }
+    let prog: u64 = zeile + pvon as u64
+    if !pfad_sauber(prog, pn) {
+        return ablehnen(aus, "das Programm muss mit vollem Pfad genannt werden")
+    }
+    if !in_liste((&l_befehl[0]) as u64, n_befehl, prog, pn) {
+        return ablehnen(aus, "dieses Programm steht nicht unter `befehl_erlaubt` in /etc/jarvis/rechte.conf")
+    }
+    let anz: usize = arg_zaehlen(zeile, zn)
+    if anz > 6 {
+        return ablehnen(aus, "hoechstens sechs Worte je Befehl")
+    }
+    // Die Worte als Zeichenketten mit Null, dazu die Zeigerliste.
+    var worte: rt.Buf = rt.buf_new()
+    var zeiger: [u64; 8] = [0; 8]
+    var wz: usize = 0
+    var starts: [usize; 8] = [0; 8]
+    i = 0
+    while i < zn && wz < 7 {
+        while i < zn && rt.ld8(zeile, i) == 32 as u8 {
+            i = i + 1
+        }
+        if i >= zn {
+            break
+        }
+        starts[wz] = worte.len
+        while i < zn && rt.ld8(zeile, i) != 32 as u8 {
+            rt.buf_push(&worte, rt.ld8(zeile, i))
+            i = i + 1
+        }
+        rt.buf_push(&worte, 0 as u8)
+        wz = wz + 1
+    }
+    var q: usize = 0
+    while q < wz {
+        zeiger[q] = worte.ptr + starts[q] as u64
+        q = q + 1
+    }
+    zeiger[wz] = 0
+
+    // Die Ausgabedatei anlegen und dem Kind auf 1 und 2 legen.
+    let ziel: i64 = sys_open((&k_arbeit[0]) as u64,
+        O_WRONLY | O_CREAT | O_TRUNC, 384)
+    if ziel < 0 {
+        rt.buf_free(&worte)
+        return ablehnen(aus, "die Arbeitsdatei laesst sich nicht anlegen")
+    }
+    let kind: i64 = syscall(S_FORK, 0, 0, 0, 0, 0, 0)
+    if kind < 0 {
+        sys_close(ziel)
+        rt.buf_free(&worte)
+        return ablehnen(aus, "es liess sich kein Prozess abspalten")
+    }
+    if kind == 0 {
+        syscall(S_DUP2, ziel, 1, 0, 0, 0, 0)
+        syscall(S_DUP2, ziel, 2, 0, 0, 0, 0)
+        sys_close(ziel)
+        syscall(S_EXECVE, zeiger[0] as i64, (&zeiger[0]) as i64, 0, 0, 0, 0)
+        rt.finish(127)
+    }
+    sys_close(ziel)
+    var status: i32 = 0
+    syscall(S_WAIT4, kind, (&status) as i64, 0, 0, 0, 0)
+    rt.buf_free(&worte)
+    var code: u64 = 255
+    if (status & 127) == 0 {
+        code = ((status >> 8) & 255) as u64
+    }
+
+    // Die Ausgabe zurueckholen, bis zur Grenze.
+    rt.buf_clear(aus)
+    var kopf: [u8; 7] = "ende \0\0"
+    rt.buf_push_bytes(aus, (&kopf[0]) as u64, 5)
+    rt.buf_push_dec_u64(aus, code)
+    rt.buf_push(aus, 10 as u8)
+    let fd: i64 = sys_open((&k_arbeit[0]) as u64, 0, 0)
+    if fd >= 0 {
+        var chunk: [u8; 4096] = [0; 4096]
+        var gekuerzt: bool = false
+        while true {
+            let n: i64 = sys_read(fd, (&chunk[0]) as u64, 4096 as usize)
+            if n <= 0 {
+                break
+            }
+            var k: usize = n as usize
+            if (*aus).len + k > k_max_ausgabe {
+                k = k_max_ausgabe - (*aus).len
+                gekuerzt = true
+            }
+            if k > 0 {
+                rt.buf_push_bytes(aus, (&chunk[0]) as u64, k)
+            }
+            if gekuerzt {
+                break
+            }
+        }
+        sys_close(fd)
+        if gekuerzt {
+            var g: [u8; 42] = "\n-- gekuerzt, max_ausgabe erreicht --\n\0\0\0\0"
+            rt.buf_push_bytes(aus, (&g[0]) as u64, 38)
+        }
+    }
+    return true
+}
+
+// -------------------------------------------------------------- foto
+//
+// Die Reihenfolge ist Absicht: erst die Rechteliste, dann der Schein,
+// dann erst wird irgendetwas vom Bildschirm gelesen.
+
+fn schein_pruefen(aus: *mut rt.Buf) -> bool {
+    var b: rt.Buf = rt.buf_new()
+    if !rt.read_file((&k_schein[0]) as u64, &b) {
+        rt.buf_free(&b)
+        return ablehnen(aus, "es liegt kein Fotoschein vor -- `jarvisctl fotoschein` an diesem Geraet")
+    }
+    // Der Schein traegt eine Frist in Sekunden seit 1970 in der ersten
+    // Zeile. Abgelaufen ist so gut wie nicht da.
+    var ende: usize = 0
+    while ende < b.len && rt.ld8(b.ptr, ende) != 10 as u8 {
+        ende = ende + 1
+    }
+    let frist: u64 = zahl_von(b.ptr, ende)
+    rt.buf_free(&b)
+    let nun: u64 = jetzt_s()
+    if frist == 0 || nun > frist {
+        sys_unlink((&k_schein[0]) as u64)
+        return ablehnen(aus, "der Fotoschein ist abgelaufen")
+    }
+    // EINMALIG: der Schein wird beim Gebrauch verbraucht.
+    sys_unlink((&k_schein[0]) as u64)
+    return true
+}
+
+// PNG, Farbart 2 (RGB, 8 Bit). Der Datenstrom ist zlib, und den kann
+// `std.deflate` wirklich packen -- die Zahl in `docs/BRIDGE.md` ist
+// gemessen und nicht geschaetzt.
+fn png_stueck(aus: *mut rt.Buf, art: u64, inhalt: u64, n: usize) {
+    var laenge: [u8; 4] = [0; 4]
+    rt.st8((&laenge[0]) as u64, 0, ((n >> 24) & 255) as u8)
+    rt.st8((&laenge[0]) as u64, 1, ((n >> 16) & 255) as u8)
+    rt.st8((&laenge[0]) as u64, 2, ((n >> 8) & 255) as u8)
+    rt.st8((&laenge[0]) as u64, 3, (n & 255) as u8)
+    rt.buf_push_bytes(aus, (&laenge[0]) as u64, 4)
+    var mit: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&mit, art, 4)
+    if n > 0 {
+        rt.buf_push_bytes(&mit, inhalt, n)
+    }
+    rt.buf_push_bytes(aus, mit.ptr, mit.len)
+    let c: u32 = deflate.crc32(mit.ptr, mit.len)
+    var cb: [u8; 4] = [0; 4]
+    rt.st8((&cb[0]) as u64, 0, ((c >> 24) & 255 as u32) as u8)
+    rt.st8((&cb[0]) as u64, 1, ((c >> 16) & 255 as u32) as u8)
+    rt.st8((&cb[0]) as u64, 2, ((c >> 8) & 255 as u32) as u8)
+    rt.st8((&cb[0]) as u64, 3, (c & 255 as u32) as u8)
+    rt.buf_push_bytes(aus, (&cb[0]) as u64, 4)
+    rt.buf_free(&mit)
+}
+
+fn tue_foto(aus: *mut rt.Buf) -> bool {
+    if !k_foto {
+        return ablehnen(aus, "`bildschirmfoto = nein` in /etc/jarvis/rechte.conf")
+    }
+    if !schein_pruefen(aus) {
+        return false
+    }
+    // ZUERST der Weg von Runde FEEDBACK. Gibt es ihn, ist er der
+    // richtige, und dieses Programm baut keinen zweiten.
+    let hat: i64 = syscall(S_SHOT, 0, 0, 0, 0, 0, 0)
+    if hat >= 0 {
+        return ablehnen(aus, "dieser Kern hat SYS_OSUM_SHOT -- der Weg ueber den Kern-Schein gehoert hierher und ist noch nicht angeschlossen")
+    }
+    let w: i64 = syscall(S_WIGSCREEN, WS_W, 0, 0, 0, 0, 0)
+    let h: i64 = syscall(S_WIGSCREEN, WS_H, 0, 0, 0, 0, 0)
+    if w <= 0 || h <= 0 {
+        return ablehnen(aus, "keine Bildschirmmasse in Ring 3: SYS_OSUM_SHOT fehlt (Runde FEEDBACK) und der Fensterserver laeuft nicht")
+    }
+    var pitch: i64 = syscall(S_DISPGET, DG_PITCH, 0, 0, 0, 0, 0)
+    var bpp: i64 = syscall(S_DISPGET, DG_BPP, 0, 0, 0, 0, 0)
+    if bpp <= 0 {
+        bpp = 32
+    }
+    if pitch <= 0 {
+        pitch = w * (bpp / 8)
+    }
+    var fbname: [u8; 8] = "/dev/fb\0"
+    let fd: i64 = sys_open((&fbname[0]) as u64, 0, 0)
+    if fd < 0 {
+        return ablehnen(aus, "/dev/fb laesst sich nicht oeffnen")
+    }
+    let breite: usize = w as usize
+    let hoehe: usize = h as usize
+    let zeile: usize = pitch as usize
+    var roh: rt.Buf = rt.buf_new()
+    var zpuf: rt.Buf = rt.buf_new()
+    rt.buf_reserve(&zpuf, zeile)
+    rt.buf_set_len(&zpuf, zeile)
+    var y: usize = 0
+    var schief: bool = false
+    while y < hoehe {
+        var da: usize = 0
+        while da < zeile {
+            let n: i64 = sys_read(fd, zpuf.ptr + da as u64, zeile - da)
+            if n <= 0 {
+                schief = true
+                break
+            }
+            da = da + (n as usize)
+        }
+        if schief {
+            break
+        }
+        // Filter 0 (None) je Zeile, dann R, G, B. Die Karte liegt als
+        // BGRX vor (Runde K7); die Reihenfolge wird hier gedreht.
+        rt.buf_push(&roh, 0 as u8)
+        var x: usize = 0
+        while x < breite {
+            let off: usize = x * ((bpp / 8) as usize)
+            rt.buf_push(&roh, rt.ld8(zpuf.ptr, off + 2))
+            rt.buf_push(&roh, rt.ld8(zpuf.ptr, off + 1))
+            rt.buf_push(&roh, rt.ld8(zpuf.ptr, off))
+            x = x + 1
+        }
+        y = y + 1
+    }
+    sys_close(fd)
+    rt.buf_free(&zpuf)
+    if schief {
+        rt.buf_free(&roh)
+        return ablehnen(aus, "der Rahmenpuffer liess sich nicht ganz lesen")
+    }
+    let gut: bool = png_bauen(aus, breite, hoehe, &roh)
+    rt.buf_free(&roh)
+    if !gut {
+        return ablehnen(aus, "das Bild liess sich nicht in ein PNG bringen")
+    }
+    return true
+}
+
+// Aus zeilenweise gefilterten RGB-Oktetten ein PNG. `roh` traegt je
+// Zeile ein Filteroktett (0) und danach 3*breite Oktette R,G,B -- genau
+// das, was RFC 2083 fuer Farbart 2 verlangt.
+fn png_bauen(aus: *mut rt.Buf, breite: usize, hoehe: usize,
+    roh: *mut rt.Buf) -> bool {
+    var idat: rt.Buf = rt.buf_new()
+    var pfehl: bool = false
+    let gepackt: usize = deflate.zlib_compress((*roh).ptr, (*roh).len,
+        6 as usize, &idat) catch | e | fehl_len(&pfehl)
+    if pfehl {
+        rt.buf_free(&idat)
+        return false
+    }
+    rt.buf_clear(aus)
+    var sig: [u8; 8] = [0; 8]
+    rt.st8((&sig[0]) as u64, 0, 137 as u8)
+    rt.st8((&sig[0]) as u64, 1, 80 as u8)
+    rt.st8((&sig[0]) as u64, 2, 78 as u8)
+    rt.st8((&sig[0]) as u64, 3, 71 as u8)
+    rt.st8((&sig[0]) as u64, 4, 13 as u8)
+    rt.st8((&sig[0]) as u64, 5, 10 as u8)
+    rt.st8((&sig[0]) as u64, 6, 26 as u8)
+    rt.st8((&sig[0]) as u64, 7, 10 as u8)
+    rt.buf_push_bytes(aus, (&sig[0]) as u64, 8)
+    var ihdr: [u8; 13] = [0; 13]
+    rt.st8((&ihdr[0]) as u64, 0, ((breite >> 24) & 255) as u8)
+    rt.st8((&ihdr[0]) as u64, 1, ((breite >> 16) & 255) as u8)
+    rt.st8((&ihdr[0]) as u64, 2, ((breite >> 8) & 255) as u8)
+    rt.st8((&ihdr[0]) as u64, 3, (breite & 255) as u8)
+    rt.st8((&ihdr[0]) as u64, 4, ((hoehe >> 24) & 255) as u8)
+    rt.st8((&ihdr[0]) as u64, 5, ((hoehe >> 16) & 255) as u8)
+    rt.st8((&ihdr[0]) as u64, 6, ((hoehe >> 8) & 255) as u8)
+    rt.st8((&ihdr[0]) as u64, 7, (hoehe & 255) as u8)
+    rt.st8((&ihdr[0]) as u64, 8, 8 as u8) // Bit je Anteil
+    rt.st8((&ihdr[0]) as u64, 9, 2 as u8) // Farbart 2 = RGB
+    var n_ihdr: [u8; 5] = "IHDR\0"
+    var n_idat: [u8; 5] = "IDAT\0"
+    var n_iend: [u8; 5] = "IEND\0"
+    png_stueck(aus, (&n_ihdr[0]) as u64, (&ihdr[0]) as u64, 13 as usize)
+    png_stueck(aus, (&n_idat[0]) as u64, idat.ptr, idat.len)
+    png_stueck(aus, (&n_iend[0]) as u64, 0, 0 as usize)
+    rt.buf_free(&idat)
+    return true
+}
+
+// -b: DERSELBE PNG-Weg mit einem gerechneten Bild statt mit dem
+// Bildschirm. Damit ist der Kodierer gemessen, auch auf einem Kern, der
+// Ring 3 keine Bildschirmmasse gibt. Das Muster ist absichtlich
+// berechenbar: der Pruefstand rechnet jeden Bildpunkt nach.
+fn bildprobe() -> i32 {
+    let breite: usize = 64
+    let hoehe: usize = 48
+    var roh: rt.Buf = rt.buf_new()
+    var y: usize = 0
+    while y < hoehe {
+        rt.buf_push(&roh, 0 as u8)
+        var x: usize = 0
+        while x < breite {
+            rt.buf_push(&roh, (x * 4) as u8)
+            rt.buf_push(&roh, (y * 5) as u8)
+            rt.buf_push(&roh, ((x + y) * 2) as u8)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    var aus: rt.Buf = rt.buf_new()
+    let gut: bool = png_bauen(&aus, breite, hoehe, &roh)
+    rt.buf_free(&roh)
+    if !gut {
+        sag("bild: gescheitert\n")
+        return 1
+    }
+    sag("bild ")
+    var hx: rt.Buf = rt.buf_new()
+    hex_an(&hx, aus.ptr, aus.len)
+    sag_oktette(hx.ptr, hx.len)
+    sag("\n")
+    sag("bildlaenge ")
+    sag_zahl(aus.len as u64)
+    sag("\n")
+    rt.buf_free(&hx)
+    rt.buf_free(&aus)
+    return 0
+}
+
+// ====================================================================
+// DER SCHLUESSELHALTER
+// ====================================================================
+//
+// `/bin/jsig` wird gestartet, seine Ausgabe geht in die Arbeitsdatei
+// und wird von dort gelesen. Der private Schluessel taucht in DIESEM
+// Adressraum nie auf.
+
+fn jsig_rufen(a1: u64, a2: u64, aus: *mut rt.Buf) -> bool {
+    var prog: [u8; 10] = "/bin/jsig\0"
+    var zeiger: [u64; 4] = [0; 4]
+    zeiger[0] = (&prog[0]) as u64
+    zeiger[1] = a1
+    zeiger[2] = a2
+    zeiger[3] = 0
+    let ziel: i64 = sys_open((&k_arbeit[0]) as u64,
+        O_WRONLY | O_CREAT | O_TRUNC, 384)
+    if ziel < 0 {
+        return false
+    }
+    let kind: i64 = syscall(S_FORK, 0, 0, 0, 0, 0, 0)
+    if kind < 0 {
+        sys_close(ziel)
+        return false
+    }
+    if kind == 0 {
+        syscall(S_DUP2, ziel, 1, 0, 0, 0, 0)
+        sys_close(ziel)
+        syscall(S_EXECVE, zeiger[0] as i64, (&zeiger[0]) as i64, 0, 0, 0, 0)
+        rt.finish(127)
+    }
+    sys_close(ziel)
+    var status: i32 = 0
+    syscall(S_WAIT4, kind, (&status) as i64, 0, 0, 0, 0)
+    if (status & 127) != 0 || ((status >> 8) & 255) != 0 {
+        return false
+    }
+    rt.buf_clear(aus)
+    if !rt.read_file((&k_arbeit[0]) as u64, aus) {
+        return false
+    }
+    return true
+}
+
+// Aus "pub <hex>\n" oder "sig <hex>\n" die Hexfolge herausschneiden.
+fn nach_leerzeichen(b: *mut rt.Buf, von: *mut usize, bis: *mut usize) -> bool {
+    var i: usize = 0
+    while i < (*b).len && rt.ld8((*b).ptr, i) != 32 as u8 {
+        i = i + 1
+    }
+    if i >= (*b).len {
+        return false
+    }
+    i = i + 1
+    let a: usize = i
+    while i < (*b).len && rt.ld8((*b).ptr, i) > 32 as u8 {
+        i = i + 1
+    }
+    if i == a {
+        return false
+    }
+    *von = a
+    *bis = i
+    return true
+}
+
+// ====================================================================
+// DIE KOPPLUNG
+// ====================================================================
+//
+// Der Code kommt vom Server. Er wird sichtbar hingelegt und auf die
+// Konsole geschrieben; dann muss GENAU DIESER Code in der
+// Bestaetigungsdatei stehen, die nur `jarvisctl koppeln` schreibt.
+// Steht dort nichts oder etwas anderes, wird abgelehnt.
+
+fn kopplung_dateien(codep: u64, coden: usize, jap: u64) -> bool {
+    var pfad_code: [u8; 21] = "/var/jarvis/kopplung\0"
+    var pfad_ja: [u8; 24] = "/var/jarvis/kopplung-ja\0"
+    hinein(jap, MAXPFAD, (&pfad_ja[0]) as u64, 23)
+    rt.write_file((&pfad_code[0]) as u64, codep, coden)
+    return true
+}
+
+fn kopplung_bestaetigt(codep: u64, coden: usize) -> bool {
+    var jap: [u8; 128] = [0; 128]
+    kopplung_dateien(codep, coden, (&jap[0]) as u64)
+    var b: rt.Buf = rt.buf_new()
+    if !rt.read_file((&jap[0]) as u64, &b) {
+        rt.buf_free(&b)
+        return false
+    }
+    // Zeilenumbrueche und Leerzeichen am Ende weg.
+    var n: usize = b.len
+    while n > 0 && rt.ld8(b.ptr, n - 1) <= 32 as u8 {
+        n = n - 1
+    }
+    let gut: bool = gleich(b.ptr, n, codep, coden)
+    rt.buf_free(&b)
+    return gut
+}
+
+// ====================================================================
+// DIE ANMELDUNG
+// ====================================================================
+
+fn wort_senden(d: *mut Draht, w: str, arg: u64, argn: usize) -> bool {
+    var kopf: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&kopf, w.p as u64, w.n)
+    if argn > 0 {
+        rt.buf_push(&kopf, 32 as u8)
+        rt.buf_push_bytes(&kopf, arg, argn)
+    }
+    let ok: bool = sende(d, &kopf, 0, 0 as usize)
+    rt.buf_free(&kopf)
+    return ok
+}
+
+// 0 = angemeldet, 1 = abgelehnt, 2 = Verbindung weg.
+fn anmelden(d: *mut Draht) -> u64 {
+    var hallo: rt.Buf = rt.buf_new()
+    var h: [u8; 16] = "osum-bruecke 1\0\0"
+    rt.buf_push_bytes(&hallo, (&h[0]) as u64, 14)
+    let okh: bool = sende(d, &hallo, 0, 0 as usize)
+    rt.buf_free(&hallo)
+    if !okh {
+        return 2
+    }
+    // Wer ich bin.
+    var id: rt.Buf = rt.buf_new()
+    var w_aus: [u8; 4] = "aus\0"
+    if !jsig_rufen((&w_aus[0]) as u64, 0, &id) {
+        rt.buf_free(&id)
+        sag("jarvisd: /bin/jsig gibt keinen Schluessel her\n")
+        return 1
+    }
+    var pv: usize = 0
+    var pb: usize = 0
+    if !nach_leerzeichen(&id, &pv, &pb) {
+        rt.buf_free(&id)
+        return 1
+    }
+    var pubhex: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&pubhex, id.ptr + pv as u64, pb - pv)
+    rt.buf_free(&id)
+    if !wort_senden(d, "ich", pubhex.ptr, pubhex.len) {
+        rt.buf_free(&pubhex)
+        return 2
+    }
+    rt.buf_free(&pubhex)
+
+    var zeile: rt.Buf = rt.buf_new()
+    var f: Felder = Felder { off: [0; 10], len: [0; 10], n: 0 }
+    var ergebnis: u64 = 2
+    while true {
+        if !draht_zeile(d, &zeile) {
+            ergebnis = 2
+            break
+        }
+        zerlege(zeile.ptr, zeile.len, &f)
+        if f.n == 0 {
+            continue
+        }
+        let wp: u64 = zeile.ptr + f.off[0] as u64
+        let wn: usize = f.len[0]
+        var w_frage: [u8; 6] = "frage\0"
+        var w_will: [u8; 11] = "willkommen\0"
+        var w_weg: [u8; 4] = "weg\0"
+        var w_kop: [u8; 16] = "kopplung-noetig\0"
+        if ist(wp, wn, (&w_frage[0]) as u64) && f.n >= 2 {
+            // Unterschreiben lassen. Das Argument ist schon Hex, genau
+            // die Form, die `jsig unterschreibe` erwartet.
+            var nonce: [u8; 260] = [0; 260]
+            let nn: usize = hinein((&nonce[0]) as u64, 260 as usize,
+                zeile.ptr + f.off[1] as u64, f.len[1])
+            var w_sig: [u8; 14] = "unterschreibe\0"
+            var sigb: rt.Buf = rt.buf_new()
+            if !jsig_rufen((&w_sig[0]) as u64, (&nonce[0]) as u64, &sigb) {
+                rt.buf_free(&sigb)
+                sag("jarvisd: /bin/jsig hat nicht unterschrieben\n")
+                ergebnis = 1
+                break
+            }
+            var sv: usize = 0
+            var sb: usize = 0
+            if !nach_leerzeichen(&sigb, &sv, &sb) {
+                rt.buf_free(&sigb)
+                ergebnis = 1
+                break
+            }
+            let ok: bool = wort_senden(d, "beweis",
+                sigb.ptr + sv as u64, sb - sv)
+            rt.buf_free(&sigb)
+            if !ok {
+                ergebnis = 2
+                break
+            }
+        } else if ist(wp, wn, (&w_kop[0]) as u64) && f.n >= 2 {
+            let cp: u64 = zeile.ptr + f.off[1] as u64
+            let cn: usize = f.len[1]
+            sag("jarvisd: KOPPLUNGSCODE ")
+            sag_oktette(cp, cn)
+            sag("\n         Bestaetige an DIESEM Geraet mit: jarvisctl koppeln ")
+            sag_oktette(cp, cn)
+            sag("\n")
+            if kopplung_bestaetigt(cp, cn) {
+                if !wort_senden(d, "kopplung", cp, cn) {
+                    ergebnis = 2
+                    break
+                }
+                var a1: [u8; 9] = "kopplung\0"
+                notiere((&a1[0]) as u64, 8, "bestaetigt", cp, cn)
+            } else {
+                wort_senden(d, "kopplung-abgelehnt", 0, 0 as usize)
+                var a2: [u8; 9] = "kopplung\0"
+                var g: [u8; 40] = "ohne Bestaetigung am Geraet\0\0\0\0\0\0\0\0\0\0\0\0\0"
+                notiere((&a2[0]) as u64, 8, "abgelehnt", (&g[0]) as u64, 26)
+                z_abgelehnt = z_abgelehnt + 1
+                sag("jarvisd: die Kopplung wurde ABGELEHNT -- niemand hat sie an diesem Geraet bestaetigt\n")
+                ergebnis = 1
+                break
+            }
+        } else if ist(wp, wn, (&w_will[0]) as u64) {
+            ergebnis = 0
+            break
+        } else if ist(wp, wn, (&w_weg[0]) as u64) {
+            sag("jarvisd: der Server hat die Anmeldung abgewiesen\n")
+            ergebnis = 1
+            break
+        }
+    }
+    rt.buf_free(&zeile)
+    return ergebnis
+}
+
+// ====================================================================
+// DIE AUFTRAGSSCHLEIFE
+// ====================================================================
+
+fn bediene(d: *mut Draht) -> bool {
+    var zeile: rt.Buf = rt.buf_new()
+    var nutz: rt.Buf = rt.buf_new()
+    var aus: rt.Buf = rt.buf_new()
+    var arg1: rt.Buf = rt.buf_new()
+    var f: Felder = Felder { off: [0; 10], len: [0; 10], n: 0 }
+    var sauber: bool = true
+    while true {
+        if !draht_zeile(d, &zeile) {
+            sauber = false
+            break
+        }
+        zerlege(zeile.ptr, zeile.len, &f)
+        if f.n == 0 {
+            continue
+        }
+        let wp: u64 = zeile.ptr + f.off[0] as u64
+        let wn: usize = f.len[0]
+        var w_ende: [u8; 9] = "tschuess\0"
+        var w_auf: [u8; 8] = "auftrag\0"
+        if ist(wp, wn, (&w_ende[0]) as u64) {
+            break
+        }
+        if !ist(wp, wn, (&w_auf[0]) as u64) {
+            continue
+        }
+        // auftrag <id> <art> <a1hex> <a2hex> <laenge>
+        if f.n < 4 {
+            continue
+        }
+        let laenge: usize = zahl_von(zeile.ptr + f.off[f.n - 1] as u64,
+            f.len[f.n - 1]) as usize
+        if laenge > MAXNUTZ {
+            // UEBER DER HARTEN GRENZE wird gar nicht erst Speicher
+            // besorgt und auch nicht mehr geantwortet: wer eine
+            // Nutzlast dieser Groesse ankuendigt, haelt sich nicht an
+            // das Protokoll, und der Strom laesst sich danach nicht
+            // mehr sauber lesen. Was die RECHTELISTE erlaubt
+            // (`max_datei`), liegt darunter und wird in den
+            // Auftragsarten selbst geprueft -- dort kann noch
+            // geantwortet werden.
+            sag("jarvisd: eine Nutzlast ueber der harten Grenze -- Schluss\n")
+            var a: [u8; 8] = "auftrag\0"
+            var g: [u8; 33] = "Nutzlast ueber der harten Grenze\0"
+            notiere((&a[0]) as u64, 7, "ABGELEHNT", (&g[0]) as u64, 32)
+            z_abgelehnt = z_abgelehnt + 1
+            sauber = false
+            break
+        }
+        if !draht_oktette(d, laenge, &nutz) {
+            sauber = false
+            break
+        }
+        // Die Rechteliste FRISCH lesen -- vor jedem einzelnen Auftrag.
+        konf_lesen()
+        z_auftraege = z_auftraege + 1
+
+        let idp: u64 = zeile.ptr + f.off[1] as u64
+        let idn: usize = f.len[1]
+        let artp: u64 = zeile.ptr + f.off[2] as u64
+        let artn: usize = f.len[2]
+        rt.buf_clear(&arg1)
+        if f.n >= 5 {
+            hex_aus(zeile.ptr + f.off[3] as u64, f.len[3], &arg1)
+        }
+        var w_sys: [u8; 7] = "system\0"
+        var w_lies: [u8; 5] = "lies\0"
+        var w_schr: [u8; 8] = "schreib\0"
+        var w_list: [u8; 6] = "liste\0"
+        var w_bef: [u8; 7] = "befehl\0"
+        var w_foto: [u8; 5] = "foto\0"
+        var gut: bool = false
+        if ist(artp, artn, (&w_sys[0]) as u64) {
+            gut = tue_system(&aus)
+        } else if ist(artp, artn, (&w_lies[0]) as u64) {
+            gut = tue_lies(arg1.ptr, arg1.len, &aus)
+        } else if ist(artp, artn, (&w_schr[0]) as u64) {
+            gut = tue_schreib(arg1.ptr, arg1.len, &nutz, &aus)
+        } else if ist(artp, artn, (&w_list[0]) as u64) {
+            gut = tue_liste(arg1.ptr, arg1.len, &aus)
+        } else if ist(artp, artn, (&w_bef[0]) as u64) {
+            gut = tue_befehl(arg1.ptr, arg1.len, &aus)
+        } else if ist(artp, artn, (&w_foto[0]) as u64) {
+            gut = tue_foto(&aus)
+        } else {
+            gut = ablehnen(&aus, "unbekannte Auftragsart")
+        }
+        if gut {
+            notiere(artp, artn, "ok", arg1.ptr, arg1.len)
+        } else {
+            notiere(artp, artn, "ABGELEHNT", aus.ptr, aus.len)
+        }
+        var kopf: rt.Buf = rt.buf_new()
+        var w_fertig: [u8; 7] = "fertig\0"
+        rt.buf_push_bytes(&kopf, (&w_fertig[0]) as u64, 6)
+        rt.buf_push(&kopf, 32 as u8)
+        rt.buf_push_bytes(&kopf, idp, idn)
+        rt.buf_push(&kopf, 32 as u8)
+        if gut {
+            var s_ok: [u8; 3] = "ok\0"
+            rt.buf_push_bytes(&kopf, (&s_ok[0]) as u64, 2)
+        } else {
+            var s_nein: [u8; 5] = "nein\0"
+            rt.buf_push_bytes(&kopf, (&s_nein[0]) as u64, 4)
+        }
+        let okk: bool = sende(d, &kopf, aus.ptr, aus.len)
+        rt.buf_free(&kopf)
+        if !okk {
+            sauber = false
+            break
+        }
+    }
+    // ABRAEUMEN, IMMER. Ein Abriss mitten im Auftrag darf nichts
+    // liegenlassen: die vier Puffer gehoeren diesem Aufruf.
+    rt.buf_free(&zeile)
+    rt.buf_free(&nutz)
+    rt.buf_free(&aus)
+    rt.buf_free(&arg1)
+    return sauber
+}
+
+// ====================================================================
+// EINE VERBINDUNG
+// ====================================================================
+
+fn fehl_conn(schief: *mut bool) -> net.Conn {
+    *schief = true
+    return net.Conn { fd: -1, err: 0, peer: 0 as u32, peer_port: 0 as u16 }
+}
+
+// 0 = alles gut, 1 = abgewiesen (nicht sofort neu versuchen),
+// 2 = Netz/Handschlag ging nicht.
+fn eine_runde() -> u64 {
+    var schief: bool = false
+    var c: net.Conn = net.connect_tcp(k_ip, k_port as u16)
+    catch | e | fehl_conn(&schief)
+    if schief {
+        sag_wenn_laut("jarvisd: keine Verbindung\n")
+        return 2
+    }
+    let okt: bool = net.set_timeout(&c, 30000 as u64) catch false
+
+    var storebuf: rt.Buf = rt.buf_new()
+    var store: x509.Store = x509.store_new()
+    var wurzeln: usize = 0
+    if rt.read_file((&k_wurzeln[0]) as u64, &storebuf) {
+        wurzeln = x509.store_load_pem(&store, storebuf.ptr, storebuf.len)
+    }
+    if wurzeln == 0 {
+        // KEIN STILLES WEITER. Ohne Wurzeln ist jede Gegenstelle
+        // gleich glaubwuerdig, und das ist schlimmer als kein TLS.
+        sag("jarvisd: kein Wurzelspeicher -- es wird nichts vertraut\n")
+    }
+    var t: tls.Tls = tls.tls_new()
+    let oki: bool = tls.tls_init(&t, &c, &store, (&k_name[0]) as u64,
+        k_namelen, jetzt_s())
+    var hschief: bool = false
+    let okh: bool = tls.tls_handshake(&t) catch | e | fehl_bool(&hschief)
+    if hschief || !tls.tls_established(&t) {
+        sag("jarvisd: der Handschlag ist gescheitert, Grund ")
+        sag_zahl(tls.tls_verify_reason(&t) as u64)
+        sag("\n")
+        var a: [u8; 4] = "tls\0"
+        var g: [u8; 30] = "Zertifikat nicht angenommen\0\0\0"
+        notiere((&a[0]) as u64, 3, "ABGELEHNT", (&g[0]) as u64, 27)
+        tls.tls_free(&t)
+        net.close(&c)
+        rt.buf_free(&storebuf)
+        return 2
+    }
+    z_verbindungen = z_verbindungen + 1
+    sag("jarvisd: verbunden, Verfahren ")
+    sag_zahl(tls.tls_suite(&t) as u64)
+    sag(", Zertifikate ")
+    sag_zahl(tls.tls_peer_cert_count(&t) as u64)
+    sag("\n")
+
+    var d: Draht = draht_neu(&t)
+    var erg: u64 = 2
+    let an: u64 = anmelden(&d)
+    if an == 0 {
+        sag("jarvisd: angemeldet\n")
+        var a: [u8; 8] = "sitzung\0"
+        notiere((&a[0]) as u64, 7, "angemeldet", 0, 0 as usize)
+        if bediene(&d) {
+            erg = 0
+        } else {
+            erg = 2
+        }
+    } else {
+        erg = an
+    }
+    draht_weg(&d)
+    tls.tls_close(&t)
+    tls.tls_free(&t)
+    net.close(&c)
+    rt.buf_free(&storebuf)
+    return erg
+}
+
+// ====================================================================
+// DAS PROGRAMM
+// ====================================================================
+
+fn mach_verzeichnisse() {
+    var v1: [u8; 5] = "/var\0"
+    var v2: [u8; 12] = "/var/jarvis\0"
+    var v3: [u8; 9] = "/var/log\0"
+    var v4: [u8; 5] = "/etc\0"
+    var v5: [u8; 12] = "/etc/jarvis\0"
+    sys_mkdir((&v1[0]) as u64)
+    sys_mkdir((&v2[0]) as u64)
+    sys_mkdir((&v3[0]) as u64)
+    sys_mkdir((&v4[0]) as u64)
+    sys_mkdir((&v5[0]) as u64)
+}
+
+// ====================================================================
+// DIE PROBE (-p): DASS DER KERN UND NICHT DIESES PROGRAMM NEIN SAGT
+// ====================================================================
+//
+// Eine Datei wird zum LESEN UND SCHREIBEN geoeffnet, dann mit HND_DUP
+// auf Leserechte beschnitten, dann wird geschrieben. Geht das Schreiben
+// durch, ist die ganze Begruendung dieser Runde falsch -- also steht
+// hier eine Zahl und keine Behauptung.
+fn probe() -> i32 {
+    var name: [u8; 32] = "/var/jarvis/probe.txt\0\0\0\0\0\0\0\0\0\0\0"
+    let a: i64 = sys_open((&name[0]) as u64, O_WRONLY | O_CREAT | O_TRUNC, 420)
+    if a < 0 {
+        sag("probe: die Datei laesst sich nicht anlegen\n")
+        return 1
+    }
+    var text: [u8; 6] = "hallo\0"
+    sys_write(a, (&text[0]) as u64, 5 as usize)
+    sys_close(a)
+    // 2 = O_RDWR: beide Rechte im Handle.
+    let fd: i64 = sys_open((&name[0]) as u64, 2, 0)
+    if fd < 0 {
+        sag("probe: die Datei laesst sich nicht oeffnen\n")
+        return 1
+    }
+    sag("probe: rechte_offen ")
+    sag_zahl(hnd_rechte(fd) as u64)
+    sag("\n")
+    let eng: i64 = hnd_dup(fd, R_READ | R_INSPECT | R_SEEK)
+    if eng < 0 {
+        sag("probe: HND_DUP ging nicht\n")
+        sys_close(fd)
+        return 1
+    }
+    sys_close(fd)
+    let rr: i64 = hnd_rechte(eng)
+    sag("probe: rechte_eng ")
+    sag_zahl(rr as u64)
+    sag("\n")
+    sag("probe: hat_schreibrecht ")
+    if (rr & R_WRITE) != 0 {
+        sag("ja")
+    } else {
+        sag("nein")
+    }
+    sag("\n")
+    var neu: [u8; 6] = "boese\0"
+    let w: i64 = sys_write(eng, (&neu[0]) as u64, 5 as usize)
+    sag("probe: schreibversuch ")
+    if w < 0 {
+        sag("abgewiesen ")
+        sag_zahl((0 - w) as u64)
+    } else {
+        sag("DURCHGELASSEN ")
+        sag_zahl(w as u64)
+    }
+    sag("\n")
+    var chunk: [u8; 16] = [0; 16]
+    let r: i64 = sys_read(eng, (&chunk[0]) as u64, 16 as usize)
+    sag("probe: gelesen ")
+    if r > 0 {
+        sag_zahl(r as u64)
+        sag(" ")
+        sag_oktette((&chunk[0]) as u64, r as usize)
+    } else {
+        sag_zahl(0)
+    }
+    sag("\n")
+    sys_close(eng)
+    return 0
+}
+
+// -s: was dieses Programm vom Bildschirm sieht. Eine Zeile Zahlen,
+// damit "kein Rahmenpuffer" nicht geraten werden muss.
+fn schirm() -> i32 {
+    sag("schirm: shot ")
+    sag_zahl(syscall(S_SHOT, 0, 0, 0, 0, 0, 0) as u64)
+    sag(" w ")
+    sag_zahl(syscall(S_WIGSCREEN, WS_W, 0, 0, 0, 0, 0) as u64)
+    sag(" h ")
+    sag_zahl(syscall(S_WIGSCREEN, WS_H, 0, 0, 0, 0, 0) as u64)
+    sag(" pitch ")
+    sag_zahl(syscall(S_DISPGET, DG_PITCH, 0, 0, 0, 0, 0) as u64)
+    sag(" bpp ")
+    sag_zahl(syscall(S_DISPGET, DG_BPP, 0, 0, 0, 0, 0) as u64)
+    var fbname: [u8; 8] = "/dev/fb\0"
+    let fd: i64 = sys_open((&fbname[0]) as u64, 0, 0)
+    sag(" devfb ")
+    sag_zahl(fd as u64)
+    if fd >= 0 {
+        sys_close(fd)
+    }
+    sag("\n")
+    return 0
+}
+
+fn bericht() {
+    sag("jarvisd: verbindungen ")
+    sag_zahl(z_verbindungen)
+    sag("\njarvisd: auftraege ")
+    sag_zahl(z_auftraege)
+    sag("\njarvisd: abgelehnt ")
+    sag_zahl(z_abgelehnt)
+    sag("\njarvisd: wartezeit_ms ")
+    sag_zahl(z_wartems)
+    sag("\njarvisd: aufrufe_beim_warten ")
+    sag_zahl(z_warteaufrufe)
+    sag("\n")
+}
+
+fn main(start: u64) -> i32 {
+    var p_konf: [u8; 26] = "/etc/jarvis/rechte.conf\0\0\0"
+    hinein((&konfpfad[0]) as u64, MAXPFAD, (&p_konf[0]) as u64, 23)
+    var einmal: bool = false
+    var nurlesen: bool = false
+    var frist: u64 = 0
+
+    let argc: usize = rt.arg_count(start)
+    var i: usize = 1
+    while i < argc {
+        let a: u64 = rt.arg_ptr(start, i)
+        let n: usize = rt.c_length(a)
+        if n == 2 && rt.ld8(a, 0) == 45 as u8 {
+            let c: u8 = rt.ld8(a, 1)
+            if c == 99 as u8 { // -c
+                i = i + 1
+                if i < argc {
+                    let q: u64 = rt.arg_ptr(start, i)
+                    hinein((&konfpfad[0]) as u64, MAXPFAD, q, rt.c_length(q))
+                }
+            } else if c == 116 as u8 { // -t
+                i = i + 1
+                if i < argc {
+                    let q: u64 = rt.arg_ptr(start, i)
+                    frist = zahl_von(q, rt.c_length(q))
+                }
+            } else if c == 49 as u8 { // -1
+                einmal = true
+            } else if c == 118 as u8 { // -v
+                laut = true
+            } else if c == 110 as u8 { // -n
+                nurlesen = true
+            } else if c == 112 as u8 { // -p
+                mach_verzeichnisse()
+                return probe()
+            } else if c == 115 as u8 { // -s
+                return schirm()
+            } else if c == 98 as u8 { // -b
+                return bildprobe()
+            }
+        }
+        i = i + 1
+    }
+
+    mach_verzeichnisse()
+    if !konf_lesen() {
+        sag("jarvisd: /etc/jarvis/rechte.conf fehlt -- ohne Rechteliste ist nichts erlaubt\n")
+        return 2
+    }
+    sag("jarvisd: rechte lesen ")
+    sag_zahl(n_lesen as u64)
+    sag(" schreiben ")
+    sag_zahl(n_schreiben as u64)
+    sag(" auflisten ")
+    sag_zahl(n_auflisten as u64)
+    sag(" befehle ")
+    if k_befehle {
+        sag_zahl(n_befehl as u64)
+    } else {
+        sag("nein")
+    }
+    sag(" foto ")
+    if k_foto {
+        sag("ja")
+    } else {
+        sag("nein")
+    }
+    sag(" system ")
+    if k_system {
+        sag("ja")
+    } else {
+        sag("nein")
+    }
+    sag("\n")
+    if nurlesen {
+        return 0
+    }
+    if k_ip == 0 as u32 {
+        sag("jarvisd: in der Rechteliste steht kein `server = a.b.c.d:anschluss`\n")
+        return 2
+    }
+
+    var a_start: [u8; 7] = "dienst\0"
+    notiere((&a_start[0]) as u64, 6, "gestartet", 0, 0 as usize)
+    sag("jarvisd: bereit\n")
+
+    let t0: u64 = jetzt_ms()
+    var warte: u64 = 250
+    while true {
+        if frist > 0 && jetzt_ms() - t0 > frist {
+            break
+        }
+        let erg: u64 = eine_runde()
+        if erg == 0 {
+            sag("jarvisd: die Gegenstelle hat sich verabschiedet\n")
+            if einmal {
+                break
+            }
+            warte = 250
+        } else if erg == 1 {
+            // Abgewiesen. Nicht schneller wiederkommen, sondern lange
+            // warten -- eine abgelehnte Anmeldung im Sekundentakt ist
+            // aus Sicht des Servers ein Angriff.
+            if einmal {
+                break
+            }
+            warte = 30000
+        } else {
+            if einmal && z_verbindungen > 0 {
+                break
+            }
+        }
+        if frist > 0 && jetzt_ms() - t0 > frist {
+            break
+        }
+        sag_wenn_laut("jarvisd: warten\n")
+        let a0: i64 = sysinfo(I_SYSCALLS)
+        schlafe_ms(warte)
+        let a1: i64 = sysinfo(I_SYSCALLS)
+        if a1 > a0 {
+            z_warteaufrufe = z_warteaufrufe + ((a1 - a0) as u64)
+        }
+        z_wartems = z_wartems + warte
+        // WACHSENDE WARTEZEIT, gedeckelt. Ohne Deckel waere das Geraet
+        // nach einem langen Ausfall stundenlang weg; ohne Wachstum
+        // haemmert es dem Server die Tuer ein.
+        warte = warte * 2
+        if warte > 30000 {
+            warte = 30000
+        }
+    }
+    bericht()
+    var a_ende: [u8; 7] = "dienst\0"
+    notiere((&a_ende[0]) as u64, 6, "beendet", 0, 0 as usize)
+    return 0
+}
