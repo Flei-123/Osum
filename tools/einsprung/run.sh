@@ -103,7 +103,7 @@ else
     bad "kein sysretq in enter_user_task gefunden"
 fi
 
-PROGS="desktop taskbar settings launcher explorer sh echo ls cat"
+PROGS="desktop taskbar settings launcher dhcp explorer widgetdemo locate sh echo ls cat edit"
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || bad "crt.s uebersetzt nicht"
 rc=0
 for p in $PROGS; do
@@ -127,8 +127,19 @@ ARGS+=("/bin/files@/bin/explorer")
 ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme" "/etc/taskbar.conf=$TMPD/tb.conf")
 while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel")
 while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
-python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
-    && ok "Abbild gebaut" || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs.txt" | head -5; }
+if python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1; then
+    ok "Abbild gebaut"
+else
+    bad "mkfs.py fehlgeschlagen"
+    sed 's/^/        /' "$TMPD/mkfs.txt" | head -5
+    # OHNE ABBILD IST JEDE WEITERE ZUSAGE EINE LUEGE: `hasnot` findet in
+    # einer Datei, die es nicht gibt, natuerlich nichts und meldet
+    # Erfolg. Genau so ist dieser Laeufer beim ersten Versuch mit
+    # "8 bestanden" durchgelaufen, obwohl gar nichts gemessen wurde.
+    echo
+    echo "EINSPRUNG: $pass bestanden, $fail gescheitert (ohne Abbild abgebrochen)"
+    exit 1
+fi
 
 lauf() { # name extra
     local name=$1 extra=$2
