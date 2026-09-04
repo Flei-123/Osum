@@ -74,6 +74,7 @@ export {
     port_reset, port_clear_changes, port_has_change,
     slot_enable, slot_disable, address_device, configure_endpoint,
     evaluate_context, reset_endpoint, stop_endpoint, set_dequeue,
+    ep_state, ep_halted,
     devctx, inctx, in_control, in_slot, in_ep, dev_slot_ctx, dev_ep_ctx,
     ep_open, ep_find, ep_ring, ep_seq, ep_code, ep_resid, ep_reset_ring,
     control, bulk, int_queue, doorbell, dcbaa_set,
@@ -755,6 +756,47 @@ fn set_dequeue(state: u64, slot: u64, dci: u64, i: u64) -> u64 {
     ep_reset_ring(state, i)
     return command(state, eg(state, i, E_RING) | 1, 0,
         (T_SET_DEQ << 10) | ((slot & 0xFF) << 24) | ((dci & 0x1F) << 16))
+}
+
+// ============================================== RUNDE STARTKNOPF
+// WAS DER REGLER SELBST UEBER DEN ENDPUNKT SAGT.
+//
+// Bis zu dieser Runde war der einzige Blick auf einen Endpunkt der
+// Fertigmeldungscode des letzten Transfers -- also unsere eigene
+// Buchfuehrung. Die sagt NICHT, ob der Regler den Endpunkt noch
+// bedient. Genau das ist die offene Frage auf Justins Brett: "KBD 2
+// TAS 0" heisst, das Geraet ist da und liefert nichts, und ein
+// ANGEHALTENER Endpunkt sieht von aussen genauso aus wie ein Geraet,
+// das nicht tippt.
+//
+// Der GERAETEZUSAMMENHANG steht im Speicher des Reglers und wird von
+// IHM geschrieben (xHCI 1.2, 6.2.3): Endpunktzusammenhang `dci`,
+// Doppelwort 0, Bits 0..2 -- der ENDPUNKTZUSTAND:
+//   0 disabled  1 running  2 halted  3 stopped  4 error
+// Steht dort 2 oder 4, nimmt der Endpunkt keinen Block mehr an, egal
+// wie oft `arm` klingelt. Diese Zahl beantwortet die Frage mit EINEM
+// Foto -- und sie ist der Grund, warum die Wiederbelebung unten
+// ueberhaupt gebaut werden konnte.
+fn dev_ctx(state: u64, slot: u64) -> u64 {
+    if slot == 0 || slot > 127 {
+        return 0
+    }
+    return __mmio_read64((state + DCBAA_OFF + slot * 8) as *mut u64)
+}
+
+fn ep_state(state: u64, slot: u64, dci: u64) -> u64 {
+    let c: u64 = dev_ctx(state, slot)
+    if c == 0 || dci == 0 || dci > 31 {
+        return 0
+    }
+    return rd32(c + dci * ctx_size(state), 0) & 7
+}
+
+// Ein Endpunkt, der nichts mehr annimmt. `halted` und `error` sind die
+// beiden Zustaende, aus denen er von selbst nicht zurueckkommt.
+fn ep_halted(state: u64, slot: u64, dci: u64) -> bool {
+    let st: u64 = ep_state(state, slot, dci)
+    return st == 2 || st == 4
 }
 
 // ---------------------------------------------------- die Zusammenhaenge
