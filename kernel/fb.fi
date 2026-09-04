@@ -98,7 +98,10 @@ export {
     set_uiscale,
     selftest4, selftest4_max, M_RES,
     // RUNDE BLECHEINGABE: der Herzschlag und der grobe Hammer.
-    herz, herz_x, herz_y, HERZ_W, HERZ_H, flush_rows
+    herz, herz_x, herz_y, HERZ_W, HERZ_H, flush_rows,
+    // RUNDE BLECHZWEI: nur ein Rechteck uebertragen, und die
+    // Abbildungsart aus der Seitentafel selbst ablesen.
+    flush_rect, pat_roh, pde_roh, stripe_slots
 }
 
 // ------------------------------------------------- der Datenbereich
@@ -1595,7 +1598,27 @@ fn flush_stripe(state: u64, lo: u64, hi: u64) {
         if n > ende - off {
             n = ende - off
         }
+        // ============ RUNDE BLECHZWEI: EIN FENSTER, ZWEI SCHREIBER.
+        //
+        // DAS IST DER GRUND FUER JUSTINS DOPPELBILD ("alte und neue
+        // Zeichen an derselben Stelle uebereinander").
+        //
+        // Es gibt GENAU EIN Fenster von 2 MiB, durch das der ganze
+        // Rahmenpuffer gestreift wird, und `slot_remap` biegt es auf
+        // den naechsten Block um. Die Messtafel laeuft seit der Runde
+        // HAENGER AUS DEM ZEITGEBERBEHANDLER und ruft denselben Weg.
+        // Trifft die Unterbrechung eine Aufgabe ZWISCHEN `slot_remap`
+        // und `copy_words`, biegt sie das Fenster auf einen anderen
+        // Block -- und die Aufgabe schreibt ihren Streifen danach an
+        // die FALSCHE Stelle im Bildspeicher. Genau so sieht das aus:
+        // Bruchstuecke einer alten Zeile mitten in einer neuen.
+        //
+        // Umbiegen und Kopieren gehoeren deshalb zusammen. Es sind ein
+        // paar Mikrosekunden mit abgeschalteten Unterbrechungen je
+        // Block, und der Zeitgeber holt sie danach nach.
+        let fl: u64 = arch.irq_save()
         if !slot_remap(state, basis, blk, uc) {
+            arch.irq_restore(fl)
             return
         }
         let dst: u64 = basis +% inner
@@ -1608,6 +1631,8 @@ fn flush_stripe(state: u64, lo: u64, hi: u64) {
                 __mmio_read32((src +% i) as *mut u32))
             i = i + 4
         }
+        arch.barrier_write()
+        arch.irq_restore(fl)
         off = off +% n
     }
     // RUNDE ZWISCHENSPEICHER: WC-Schreibzugriffe sind schwach geordnet
@@ -1678,6 +1703,22 @@ fn flush(state: u64) {
             __mmio_read32((src +% i) as *mut u32))
         i = i + 4
     }
+    // ============ RUNDE BLECHZWEI: HIER FEHLTE DAS `sfence`.
+    //
+    // Die Vorrunde hat es an `flush_stripe` gehaengt und diesen Pfad
+    // uebersehen. WC-Schreibzugriffe sind schwach geordnet und sammeln
+    // sich in den Schreibpuffern; ohne Zaun steht ein Streifen erst
+    // dann auf dem Schirm, wenn zufaellig genug nachkommt. Bei einer
+    // grossen Uebertragung faellt das nicht auf (die Puffer laufen
+    // ohnehin ueber), bei einer kleinen -- Taskleiste, Messtafel, eine
+    // Zeile Text -- ist es der ganze Unterschied.
+    //
+    // Justins Brett faehrt im Streifenbetrieb (19,8 MB Puffer gegen ein
+    // Fenster von 8 x 2 MiB), also lief bei IHM der andere Pfad. Ein
+    // Fehler bleibt es trotzdem, und auf 1920x1080 ist es GENAU dieser
+    // Pfad.
+    arch.barrier_write()
+    nachspuelen(state)
     kstate.set(state, FB_OFF + S_DIRTY_LO, 0)
     kstate.set(state, FB_OFF + S_DIRTY_HI, 0)
     kstate.add(state, FB_OFF + S_FLUSHES, 1)
@@ -3621,8 +3662,12 @@ fn herz(state: u64, feld: u64, an: u64) {
     }
     if feld == 0 {
         // DER NORMALE WEG. Genau der, den die Taskleiste nimmt.
+        // RUNDE BLECHZWEI: `flush_rect` statt `flush_rows`. Volle
+        // Bildzeilen waren 56 * 3440 * 4 = 770 KiB je Umlegen -- in UC
+        // sind das rund acht Millisekunden IM ZEITGEBERBEHANDLER,
+        // viermal je Sekunde. Das Rechteck ist 56 * 56 * 4 = 12 KiB.
         fill(state, x0, y0, HERZ_W, HERZ_H, farbe)
-        flush_rows(state, y0, y0 + HERZ_H)
+        flush_rect(state, x0, y0, HERZ_W, HERZ_H)
         return
     }
     // DER DIREKTE WEG. In das Fenster der Karte, am Zweitpuffer vorbei.
@@ -3632,7 +3677,7 @@ fn herz(state: u64, feld: u64, an: u64) {
     // zwei gleich blinkende Felder, was ebenfalls eine Aussage ist).
     if kstate.get(state, FB_OFF + S_STRIPE) != 0 {
         fill(state, x0, y0, HERZ_W, HERZ_H, farbe)
-        flush_rows(state, y0, y0 + HERZ_H)
+        flush_rect(state, x0, y0, HERZ_W, HERZ_H)
         return
     }
     // ============ GEMESSEN, UND DESHALB STEHT DIESE ZEILE HIER.
@@ -3669,4 +3714,139 @@ fn herz(state: u64, feld: u64, an: u64) {
     }
     arch.barrier_write()
     nachspuelen(state)
+}
+
+
+// ================================================== RUNDE BLECHZWEI
+// ============ NUR EIN RECHTECK UEBERTRAGEN, NICHT GANZE BILDZEILEN
+//
+// GEMESSEN AUF JUSTINS BRETT (Menueeintrag `fbuc`, drei Fotos im
+// Minutenabstand): "8 TAKT IRQ 130 MAL 13 ... IRQ 610 MAL 61" -- die
+// Messtafel malt zehnmal je Sekunde, und sie malte bis zu dieser Runde
+// 582 VOLLE BILDZEILEN: 582 * 3440 * 4 = 8,0 MB. Bei der in der
+// Vorrunde gemessenen UC-Rate (19,8 MB in 200 ms) sind das rund
+// 80 ms JE ANSTRICH -- 80 % der Rechenzeit im Zeitgeberbehandler, mit
+// abgeschalteten Unterbrechungen. Dass in derselben Messung `LOOP 0`
+// steht (die Schreibtischschleife kam nie durch), ist damit kein
+// Zufall mehr, sondern ein Verdacht mit einer Zahl dahinter.
+//
+// Der Text der Tafel ist 30 Zeichen breit. Das Rechteck ist damit rund
+// ein Fuenftel der Bildbreite, und der Anstrich kostet ein Fuenftel.
+fn flush_rect(state: u64, x: u64, y: u64, w: u64, h: u64) {
+    let b: u64 = kstate.get(state, FB_OFF + S_BACK)
+    if b == 0 {
+        return
+    }
+    if transformed(state) {
+        present(state)
+        return
+    }
+    let bw: u64 = kstate.get(state, FB_OFF + S_WIDTH)
+    let bh: u64 = kstate.get(state, FB_OFF + S_HEIGHT)
+    if x >= bw || y >= bh {
+        return
+    }
+    var ww: u64 = w
+    if x + ww > bw {
+        ww = bw - x
+    }
+    var hh: u64 = h
+    if y + hh > bh {
+        hh = bh - y
+    }
+    if ww == 0 || hh == 0 {
+        return
+    }
+    let pt: u64 = kstate.get(state, FB_OFF + S_PITCH)
+    let n: u64 = ww *% 4
+    if kstate.get(state, FB_OFF + S_STRIPE) != 0 {
+        let basis: u64 = kstate.get(state, FB_OFF + S_SLOTV)
+        let uc: bool = kstate.get(state, FB_OFF + S_UNCACHED) != 0
+        let phys0: u64 = kstate.get(state, FB_OFF + S_PHYS)
+        var r: u64 = 0
+        while r < hh {
+            let off: u64 = (y + r) *% pt +% x *% 4
+            let p: u64 = phys0 +% off
+            let blk: u64 = p & (~(HUGE_SIZE - 1))
+            let inner: u64 = p - blk
+            // Eine Zeile passt immer in einen Block, solange sie
+            // schmaler als 2 MiB ist -- sonst wird sie hier ausgelassen
+            // und der volle Weg macht sie beim naechsten Bild mit.
+            if inner + n <= HUGE_SIZE {
+                let fl: u64 = arch.irq_save()
+                if slot_remap(state, basis, blk, uc) {
+                    copy_words(basis +% inner, b +% off, n / 8)
+                    var k: u64 = (n / 8) * 8
+                    while k + 4 <= n {
+                        __mmio_write32((basis +% inner +% k) as *mut u32,
+                            __mmio_read32((b +% off +% k) as *mut u32))
+                        k = k + 4
+                    }
+                    arch.barrier_write()
+                }
+                arch.irq_restore(fl)
+            }
+            r = r + 1
+        }
+        nachspuelen(state)
+        return
+    }
+    let basis: u64 = kstate.get(state, FB_OFF + S_ADDR)
+    var r2: u64 = 0
+    while r2 < hh {
+        let off: u64 = (y + r2) *% pt +% x *% 4
+        copy_words(basis +% off, b +% off, n / 8)
+        var k: u64 = (n / 8) * 8
+        while k + 4 <= n {
+            __mmio_write32((basis +% off +% k) as *mut u32,
+                __mmio_read32((b +% off +% k) as *mut u32))
+            k = k + 4
+        }
+        r2 = r2 + 1
+    }
+    arch.barrier_write()
+    nachspuelen(state)
+}
+
+// ============ DIE ABBILDUNGSART, AUS DER SEITENTAFEL SELBST GELESEN
+//
+// Bis zu dieser Runde stand auf der Messtafel `FB WC` -- und das war
+// eine ABSICHT (`S_WC`), keine Messung: der Wert sagt nur, dass
+// `pat_setup` zurueckgelesen hat, nicht, welche Bits wirklich in der
+// Seitentafel stehen. Genau diese Luecke ist der Grund, warum drei
+// Runden lang niemand sagen konnte, ob Write-Combining bei Justin
+// ueberhaupt greift.
+//
+// `pde_roh` liest den ECHTEN Eintrag des Fensterplatzes zurueck. Die
+// unteren Bits sind die Antwort, und sie sind aus zwei Metern lesbar:
+//
+// GEMESSEN in QEMU, alle drei Betriebsarten nacheinander (das A- und
+// das D-Bit setzt die Maschine selbst dazu, deshalb E3 und nicht 83):
+//   00E3 -> WRITE-BACK       (der stille Fall: bleibt im Speicher liegen)
+//   10E3 -> WRITE-COMBINING  (Bit 12, die PAT-Stelle, ist gesetzt)
+//   00FB -> UNCACHED         (Bit 3 PWT und Bit 4 PCD sind gesetzt)
+//
+// `pat_roh` gibt das MSR dazu: Stelle 4 (Oktett 4, also Bits 32..39)
+// muss 01 sein, sonst ist das PAT-Bit oben wirkungslos.
+fn pde_roh(state: u64) -> u64 {
+    let pd: u64 = kernel_pd(state)
+    if pd == 0 {
+        return 0
+    }
+    let s0: u64 = kstate.get(state, FB_OFF + S_SLOT0)
+    if s0 == 0 {
+        return 0
+    }
+    return __mmio_read64((pd + (WIN_FIRST + s0 - 1) * 8) as *mut u64)
+}
+
+fn pat_roh(state: u64) -> u64 {
+    return msr.rd0(state, IA32_PAT)
+}
+
+// Wie viele 2-MiB-Kacheln der Puffer braucht -- und damit, warum er im
+// Streifenbetrieb laeuft: WIN_SLOTS sind acht, Justins 3440x1440x4 sind
+// 19,8 MB, also zehn Kacheln. Zehn passen nicht in acht.
+fn stripe_slots(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_HUGES)
 }

@@ -625,6 +625,25 @@ verbose: yes
     module_path: boot():/root.img
     cmdline: modfs osum gfx fbflush wm wig desk wmshell wmdauer tafel herz usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
 
+# ============ RUNDE BLECHZWEI: DER DRITTE VERGLEICHSFALL
+#
+# GEMESSEN, Vollbild-Blit in QEMU, alle drei Betriebsarten mit
+# demselben Kern und derselben Aufloesung:
+#
+#   write-combining (Vorgabe)   1 751 us   PDE 10E3
+#   write-back      (`fbwb`)    3 402 us   PDE 00E3
+#   uncached        (`fbuc`)  396 531 us   PDE 00FB
+#
+# UC ist 226-mal langsamer als WC. Der Eintrag ist deshalb AUSDRUECKLICH
+# ein Messeintrag und kein Betriebsmodus -- er macht das Bild sichtbar,
+# aber der Rechner verbringt seine Zeit im Bildspeicher. `fbwb` ist die
+# dritte Ecke des Dreiecks: schnell, aber es kann liegenbleiben.
+/@MARKE_PRODUKT@ -- Schreibtisch (Rahmenpuffer write-back, Test)
+    protocol: multiboot1
+    path: boot():/osum.mb
+    module_path: boot():/root.img
+    cmdline: modfs osum gfx fbwb wm wig desk wmshell wmdauer tafel herz usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+
 /@MARKE_PRODUKT@ -- Desktop (English)
     protocol: multiboot1
     path: boot():/osum.mb
