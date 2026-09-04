@@ -956,9 +956,31 @@ fn ticks(state: u64) {
     idt.enable()
     serial.puts((&s_wait[0]) as u64)
     serial.nl()
+    // ================================ RUNDE BLECHEINGABE: MIT GRENZE.
+    //
+    // HIER STAND EINE SCHLEIFE OHNE AUSWEG. Kommt keine Marke, dreht sie
+    // fuer immer -- und der Rechner steht mit schwarzem Schirm, ohne
+    // dass irgendjemand sagen koennte, warum. Dass Justins Brett hier
+    // DURCHKOMMT (es erreicht den Schreibtisch), ist damit ein
+    // MESSWERT und keine Vermutung: der oertliche Zeitgeber schlaegt
+    // beim Start, mit bereits abgeschaltetem alten Regler. Trotzdem
+    // gehoert eine Grenze hierher -- ein Kern, der an einer Zeile
+    // haengt, kann nicht einmal sagen, an welcher.
+    var s_keine: [u8; 30] = "ticks: KEINE MARKE, weiter!!!\0"
     let start: u64 = kstate.get(state, kstate.TICKS)
-    while kstate.get(state, kstate.TICKS) - start < TICKS_WANTED {
-        idt.halt()
+    let thz: u64 = apic.tsc_hz(state)
+    let t0: u64 = apic.tsc()
+    var warte: bool = true
+    while warte {
+        if kstate.get(state, kstate.TICKS) - start >= TICKS_WANTED {
+            warte = false
+        } else if thz != 0 && apic.tsc() - t0 > thz * 3 {
+            warte = false
+            serial.puts((&s_keine[0]) as u64)
+            serial.nl()
+        } else {
+            idt.halt()
+        }
     }
     serial.puts((&s_got[0]) as u64)
     serial.dec(kstate.get(state, kstate.TICKS))
@@ -3428,6 +3450,10 @@ fn mode_of(state: u64, cmd: u64) {
     var notimer: [u8; 8] = "notimer\0"
     var dtaf: [u8; 6] = "tafel\0"
     var dnos: [u8; 9] = "noserial\0"
+    var dfbf: [u8; 8] = "fbflush\0"
+    var dherz: [u8; 5] = "herz\0"
+    var dnhub: [u8; 6] = "nohub\0"
+    var dusaf: [u8; 8] = "usbsafe\0"
     var r3fault: [u8; 11] = "ring3fault\0"
     var nosched: [u8; 8] = "nosched\0"
     var nopre: [u8; 10] = "nopreempt\0"
@@ -3473,6 +3499,24 @@ fn mode_of(state: u64, cmd: u64) {
     // RUNDE STANDBILD: die Messtafel wird ausdruecklich eingeschaltet.
     if find(cmd, (&dtaf[0]) as u64, 5) != 0 {
         kstate.mode_add(state, kstate.M_TAFEL)
+    }
+    // ================================ RUNDE BLECHEINGABE: VIER WOERTER.
+    // `fbflush` -- nach jedem Blit `wbinvd` (Justins zweiter, von `fbuc`
+    //              unabhaengiger Beweis derselben Ursache).
+    // `herz`    -- die zwei Blinkfelder und die Lampe der Tastatur.
+    // `nohub`   -- den Hub-Treiber stilllegen (Gegenprobe).
+    // `usbsafe` -- der Zeitgeber sieht gar nicht mehr nach Anschluessen.
+    if find(cmd, (&dfbf[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_FBFLUSH)
+    }
+    if find(cmd, (&dherz[0]) as u64, 4) != 0 {
+        kstate.mode_add(state, kstate.M_HERZ)
+    }
+    if find(cmd, (&dnhub[0]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_NOHUB)
+    }
+    if find(cmd, (&dusaf[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_USBSAFE)
     }
     // RUNDE KABEL: die Leitung von Hand stilllegen.
     if find(cmd, (&dnos[0]) as u64, 8) != 0 {

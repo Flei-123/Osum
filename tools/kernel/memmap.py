@@ -308,13 +308,15 @@ K17_STUECKE = [
     ("xhci.fi", "DEVCTX_OFF", 0x1000),
     ("xhci.fi", "RING_OFF",   0x1000),
     ("xhci.fi", "SPARE_OFF",  0x1000),
-    ("usb.fi",  "USCAL_OFF",  0x100),
-    ("usb.fi",  "UDEV_OFF",   0x300),
+    ("usb.fi",  "USCAL_OFF",  0x180),
+    ("usb.fi",  "UDEV_OFF",   0x400),
+    ("usb.fi",  "FUND_OFF",   0x280),
     ("usb.fi",  "DESC_OFF",   0x200),
     ("usb.fi",  "REPORT_OFF", 0x100),
     ("usb.fi",  "CBW_OFF",    0x40),
     ("usb.fi",  "CSW_OFF",    0x40),
     ("usb.fi",  "BLK_OFF",    0x200),
+    ("usb.fi",  "HUB_OFF",    0x100),
 ]
 
 # RUNDE BLECH: dieselbe Buchfuehrung fuer den EHCI-Bereich.  Jedes
