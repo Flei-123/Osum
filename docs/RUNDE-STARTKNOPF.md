@@ -360,6 +360,64 @@ Punkt (a), dem Netz.
 
 ---
 
+---
+
+## 10. WAS NICHT FUNKTIONIERT — und deshalb nichts ausgeliefert wird
+
+**Aus diesem Stand gebaute USB-Abbilder starten den Schreibtisch
+nicht.** Das Startprotokoll endet mit
+
+    wm: skipped  modus w0..3 0x0 0x0 0x0 0x0
+
+Der **ganze Modusvektor** steht auf null, obwohl die Befehlszeile
+`wm` enthält und obwohl derselbe Vektor eine Etage vorher noch
+gestimmt hat (`fb: band=486` wird nur gedruckt, wenn `M_TAFEL`
+gesetzt ist). Zwischen diesen beiden Punkten verliert kdata seine
+Modusseite.
+
+Was ich dazu **gemessen** habe:
+
+* **Nur der Lader-Pfad ist betroffen.** Derselbe Kern über `-kernel`
+  bei 3440x1440, mit xHCI, USB-Tastatur, USB-Maus, USB-Massenspeicher
+  und e1000 — in jeder Kombination einzeln geprüft — kommt
+  einwandfrei bis `wm: mount=1` und malt Schreibtisch, Leiste und
+  Uhr. Nur das über Limine/UEFI und `modfs` gestartete Abbild bricht.
+* **Das alte Abbild (`6589cac`) bricht nicht.** Gleicher Läufer,
+  gleiche QEMU-Befehlszeile, gleiche Kernel-Befehlszeile,
+  `guard: smep=1 smap=1` und `fpu: mode=3` in beiden. Der Unterschied
+  liegt also im Baum dieser Runde.
+* **Es ist nicht die Größe der Messtafel.** Mit 24 Zeilen (Band 582)
+  bricht es, mit 20 Zeilen (Band 486 — genau der Wert des
+  funktionierenden Abbilds) bricht es genauso.
+* **Es ist nicht die Befehlszeilen-Auswertung.** Ein Abbild ohne die
+  `kmain.fi`-Änderung dieser Runde bricht ebenso.
+* **Der Kern ist nur 608 Oktett gewachsen** (`kernel end` 0x5d7c58 ->
+  0x5d7eb8) und bleibt damit in derselben Seite; `heap` und die
+  Modul-Adresse stehen in beiden Läufen an derselben Stelle. Eine
+  verschobene Speicheraufteilung ist damit **nicht** die Erklärung.
+
+**Der nächste Verdacht, ungeprüft:** `kgui.fi` hat in dieser Runde
+`import cpu` bekommen. Ein neuer Import ändert die Binde- und damit
+die BSS-Reihenfolge. Schreibt irgendwo im Baum etwas über das Ende
+eines BSS-Feldes hinaus, trifft es nach einer solchen Umordnung eine
+andere Variable — und ein Fehler, der vorher folgenlos war, wird
+sichtbar. Das erklärt „lief vorher, bricht jetzt, und nur in einem
+von zwei Startwegen" besser als alles andere, was ich geprüft habe.
+Der Weg dorthin ist ein Vergleich der Symboltafeln beider Kerne
+(`nm -n`) und ein Wächterwert vor und hinter der Modusseite.
+
+**Folge:** `/srv/store/abbilder/orientos-usb.img` bleibt auf dem
+Stand `6589cac`
+(`75f39a858e3ac3944e53af13983bb0a2e0b0b6652718b7209e8fe741bca47315`).
+Justins Stick funktioniert damit weiter. Ein Abbild auszuliefern, das
+nur die Messtafel und sonst nichts zeigt, wäre ein Rückschritt.
+
+*(Nebenbei gefunden: die Datei `orientos-usb.img.sha256` im Speicher
+war seit 14:07 alt und nannte eine Prüfsumme, die zu dem dort
+liegenden Abbild seit 17:34 nicht mehr passte. Korrigiert.)*
+
+---
+
 ## Neue Kommandozeilenwörter
 
 | Wort | Wirkung |
