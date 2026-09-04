@@ -43,6 +43,12 @@
 # Verwendung:  bash tools/display/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+# RUNDE MARKE: der Produktname kommt aus `marke.conf` (geschlagen von
+# OSUM_MARKE_*), nicht aus dieser Datei. Eine Zusage auf einen fest
+# getippten Namen waere nach der ersten Umbenennung eine Zusage auf
+# etwas, das es nicht mehr gibt -- sie ginge auf und pruefte nichts.
+. tools/lib/marke.sh
+marke_laden . || exit 1
 . tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
@@ -355,7 +361,7 @@ num "der Lauf endet sauber" "$RC" eq 21
 schau "VORHER: das Foto ist 800x600" groesse "$TMPD/vorher.ppm" 800 600
 schau "VORHER: Feld 1 ist reines Rot" flaeche "$TMPD/vorher.ppm" 0 0 100 100 255 0 0
 schau "VORHER: die Textzeile steht bildpunktgenau" \
-    text "$TMPD/vorher.ppm" kernel/font.fi 14 0 "OSUM K7 FRAMEBUFFER 01234"
+    text "$TMPD/vorher.ppm" kernel/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
 
 # NACHHER: DERSELBE Kernel, DIESELBE Zeile, ein Wort mehr -- `dispbig`.
 foto nachher "gfx disp dispbig nocursor fbtest fbhold $GRUND"
@@ -377,7 +383,7 @@ schau "NACHHER: das Pruefbild ist neu gezeichnet, Feld 1 ist wieder rot" \
     flaeche "$TMPD/nachher.ppm" 0 0 100 100 255 0 0
 schau "NACHHER: Feld 4 ist weiss" flaeche "$TMPD/nachher.ppm" 300 0 100 100 255 255 255
 schau "NACHHER: die Textzeile steht bildpunktgenau im NEUEN Modus" \
-    text "$TMPD/nachher.ppm" kernel/font.fi 14 0 "OSUM K7 FRAMEBUFFER 01234"
+    text "$TMPD/nachher.ppm" kernel/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
 schau "NACHHER: die Ecke bei (1023,767) gibt es jetzt und sie ist schwarz" \
     punkt "$TMPD/nachher.ppm" 1023 767 0 0 0
 schau_nicht "VORHER gab es diese Ecke NICHT" punkt "$TMPD/vorher.ppm" 1023 767 0 0 0
@@ -392,7 +398,7 @@ swz=$(grep -a -m1 '^disp: sw=' "$Z" | grep -ao 'sw=[0-9]*' | sed 's/sw=//')
 gleich "zwei Wechsel in einem Lauf" "2" "$swz"
 schau "ZURUECK: das Foto ist wieder 800x600" groesse "$TMPD/zurueck.ppm" 800 600
 schau "ZURUECK: und das Pruefbild steht wieder da" \
-    text "$TMPD/zurueck.ppm" kernel/font.fi 14 0 "OSUM K7 FRAMEBUFFER 01234"
+    text "$TMPD/zurueck.ppm" kernel/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
 
 # ============================================== 6. der Fehlerfall
 
@@ -414,7 +420,7 @@ schau "das Foto ist 800x600 -- der Bildmodus steht noch" groesse "$TMPD/schlecht
 schau "Feld 1 ist rot -- der Bildschirm ist NICHT schwarz" \
     flaeche "$TMPD/schlecht.ppm" 0 0 100 100 255 0 0
 schau "und die Textzeile steht bildpunktgenau da, als waere nichts gewesen" \
-    text "$TMPD/schlecht.ppm" kernel/font.fi 14 0 "OSUM K7 FRAMEBUFFER 01234"
+    text "$TMPD/schlecht.ppm" kernel/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
 # Und die Gegenprobe zum Foto selbst: ein SCHWARZES Bild haette diese
 # Stellen nicht.
 schau_nicht "ein schwarzer Schirm haette hier kein Rot" \

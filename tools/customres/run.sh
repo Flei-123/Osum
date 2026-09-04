@@ -47,6 +47,12 @@
 # Verwendung:  bash tools/customres/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+# RUNDE MARKE: der Produktname kommt aus `marke.conf` (geschlagen von
+# OSUM_MARKE_*), nicht aus dieser Datei. Eine Zusage auf einen fest
+# getippten Namen waere nach der ersten Umbenennung eine Zusage auf
+# etwas, das es nicht mehr gibt -- sie ginge auf und pruefte nichts.
+. tools/lib/marke.sh
+marke_laden . || exit 1
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
@@ -301,7 +307,7 @@ schau "das Foto ist 1400x1050 -- der Modus steht WIRKLICH" \
 schau "das Pruefbild ist neu gezeichnet, Feld 1 ist rot" \
     flaeche "$TMPD/eigen.ppm" 0 0 100 100 255 0 0
 schau "die Textzeile steht bildpunktgenau im eigenen Modus" \
-    text "$TMPD/eigen.ppm" kernel/font.fi 14 0 "OSUM K7 FRAMEBUFFER 01234"
+    text "$TMPD/eigen.ppm" kernel/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
 schau "die Ecke bei (1399,1049) gibt es und sie ist schwarz" \
     punkt "$TMPD/eigen.ppm" 1399 1049 0 0 0
 gleich "die Zusagen der Runde DISPLAY stehen unveraendert" "15" \
@@ -356,7 +362,7 @@ schau "das Foto ist 800x600 -- der Bildmodus steht noch" \
 schau "Feld 1 ist rot -- der Bildschirm ist NICHT schwarz" \
     flaeche "$TMPD/schranken.ppm" 0 0 100 100 255 0 0
 schau "und die Textzeile steht bildpunktgenau da, als waere nichts gewesen" \
-    text "$TMPD/schranken.ppm" kernel/font.fi 14 0 "OSUM K7 FRAMEBUFFER 01234"
+    text "$TMPD/schranken.ppm" kernel/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
 schau_nicht "ein schwarzer Schirm haette hier kein Rot" \
     flaeche "$TMPD/schranken.ppm" 0 0 100 100 0 0 0
 behalte "$TMPD/schranken.ppm" abgelehnt-800x600
@@ -415,7 +421,7 @@ gleich "und der Kernel hat zurueckgeschaltet" "1" \
     "$(echo "$cf2" | grep -ao 'after=[0-9]*' | sed 's/after=//')"
 schau "das Foto zeigt wieder 800x600" groesse "$TMPD/zurueck.ppm" 800 600
 schau "und das Pruefbild steht darin" \
-    text "$TMPD/zurueck.ppm" kernel/font.fi 14 0 "OSUM K7 FRAMEBUFFER 01234"
+    text "$TMPD/zurueck.ppm" kernel/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
 behalte "$TMPD/zurueck.ppm" nach-der-frist-800x600
 
 # ============================================== 6. der Neustart
