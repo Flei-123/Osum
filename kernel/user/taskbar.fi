@@ -73,6 +73,7 @@ profile kernel
 import ulib
 import libc.io
 import wlibc
+import marke_start
 import icons
 import msg
 import qs
@@ -332,6 +333,19 @@ static mut cf_height: u64 = 28
 static mut cf_width: u64 = 104
 static mut cf_autohide: u64 = 0
 static mut cf_ontop: u64 = 1
+// RUNDE STARTKNOPF: die Uhr.
+static mut cf_sec: u64 = 0 // Sekunden mitzeigen
+static mut cf_date: u64 = 0 // Datum mitzeigen
+static mut cf_wday: u64 = 0 // Wochentag mitzeigen
+static mut cf_clines: u64 = 1 // 1 = einzeilig, 2 = Uhrzeit ueber Datum
+// Die Beschriftung der Programmknoepfe:
+//   0 nie (nur Symbol, wie Windows 11)  1 immer  2 solange Platz ist
+const LB_NEVER: u64 = 0
+const LB_ALWAYS: u64 = 1
+const LB_ROOM: u64 = 2
+static mut cf_labels: u64 = LB_NEVER
+// Ein Feld ohne passende Hardware wird GAR NICHT gezeichnet.
+static mut cf_hidemissing: u64 = 1
 static mut cf_from_file: u64 = 0
 
 // the geometry derived from it
@@ -516,6 +530,29 @@ static mut k_width: [u8; 6] = "width\0"
 static mut k_autohide: [u8; 9] = "autohide\0"
 static mut k_ontop: [u8; 6] = "ontop\0"
 static mut k_align: [u8; 6] = "align\0"
+// ============================================== RUNDE STARTKNOPF
+// DIE UHR WIRD EINSTELLBAR, UND DER INFOBEREICH HOERT AUF ZU LUEGEN.
+//
+// Justin: "in der Taskleiste ist alles falsch". Drei Dinge stecken
+// darin, und sie sind unabhaengig voneinander:
+//
+//   1. Die Uhr zeigt NUR Stunde und Minute. Sie wird deshalb hoechstens
+//      einmal je Minute neu gemalt -- und eine Leiste, die 59 Sekunden
+//      lang dasselbe Bild zeigt, ist von einer eingefrorenen nicht zu
+//      unterscheiden. Mit `clock_seconds=1` tickt sie sichtbar, und
+//      damit beantwortet ein Blick die Frage, ob sie lebt.
+//   2. "kein Akku" steht als TEXT in der Leiste. Ein Symbol fuer etwas,
+//      das die Maschine nicht hat, gehoert gar nicht gemalt -- weder
+//      als Bild noch als Satz. Das Feld faellt jetzt ganz weg.
+//   3. Die Knopfbeschriftungen werden abgeschnitten ("St", "Termina").
+//      Windows 11 loest das nicht mit mehr Platz, sondern mit einem
+//      SYMBOL statt eines Textes; `labels=` waehlt zwischen beidem.
+static mut k_seconds: [u8; 15] = "clock_seconds\0\0"
+static mut k_cdate: [u8; 12] = "clock_date\0\0"
+static mut k_cwday: [u8; 15] = "clock_weekday\0\0"
+static mut k_clines: [u8; 13] = "clock_lines\0\0"
+static mut k_labels: [u8; 8] = "labels\0\0"
+static mut k_nohw: [u8; 15] = "hide_missing\0\0\0"
 static mut v_left: [u8; 5] = "left\0"
 static mut v_center: [u8; 7] = "center\0"
 
@@ -536,6 +573,29 @@ fn key_is(p: u64, n: u64, k: u64) -> bool {
 
 // `left` or `center`, by name. Anything else is `left`, because a
 // misspelt value must not move the start button.
+// never = nur Symbol (Windows 11 im Auslieferungszustand)
+// always = Symbol und Text
+// room   = Text, solange er ohne Abschneiden hineinpasst
+fn labels_by_name(p: u64) -> u64 {
+    var w_nev: [u8; 6] = "never\0"
+    var w_alw: [u8; 7] = "always\0"
+    var w_room: [u8; 5] = "room\0"
+    var w_full: [u8; 10] = "when_full\0"
+    if ulib.streq(p, (&w_nev[0 as usize]) as u64) {
+        return LB_NEVER
+    }
+    if ulib.streq(p, (&w_alw[0 as usize]) as u64) {
+        return LB_ALWAYS
+    }
+    if ulib.streq(p, (&w_room[0 as usize]) as u64) {
+        return LB_ROOM
+    }
+    if ulib.streq(p, (&w_full[0 as usize]) as u64) {
+        return LB_ROOM
+    }
+    return cf_labels
+}
+
 fn align_by_name(p: u64) -> u64 {
     if __mmio_read8((p) as *mut u8) == 99 as u8 {
         return AL_CENTER
@@ -634,6 +694,33 @@ fn conf_read() -> bool {
                 if digits > 0 {
                     cf_ontop = v & 1
                 }
+            } else if key_is(b + ks, kl, (&k_seconds[0 as usize]) as u64) {
+                if digits > 0 {
+                    cf_sec = v & 1
+                }
+            } else if key_is(b + ks, kl, (&k_cdate[0 as usize]) as u64) {
+                if digits > 0 {
+                    cf_date = v & 1
+                }
+            } else if key_is(b + ks, kl, (&k_cwday[0 as usize]) as u64) {
+                if digits > 0 {
+                    cf_wday = v & 1
+                }
+            } else if key_is(b + ks, kl, (&k_clines[0 as usize]) as u64) {
+                if v == 2 {
+                    cf_clines = 2
+                } else if digits > 0 {
+                    cf_clines = 1
+                }
+            } else if key_is(b + ks, kl, (&k_nohw[0 as usize]) as u64) {
+                if digits > 0 {
+                    cf_hidemissing = v & 1
+                }
+            } else if key_is(b + ks, kl, (&k_labels[0 as usize]) as u64) {
+                // EIN WORT UND KEINE ZAHL, aus demselben Grund wie bei
+                // `edge=` und `align=`: `labels=never` sagt, was es
+                // tut, `labels=0` nicht.
+                cf_labels = labels_by_name(wp)
             } else if key_is(b + ks, kl, (&k_align[0 as usize]) as u64) {
                 // ROUND LOOK. A WORD AND NOT A NUMBER, like `edge=`
                 // above and unlike `ontop=`: `align=center` says what
@@ -1327,6 +1414,152 @@ fn txt(key: u64, fallback: u64) -> u64 {
     return t
 }
 
+// ============================================== RUNDE STARTKNOPF
+// DIE UHR, IN VIER SCHALTERN.
+//
+// `clock_seconds` Sekunden, `clock_date` Datum, `clock_weekday` der
+// Wochentag, `clock_lines=2` Uhrzeit ueber Datum. Die BREITE des
+// Feldes rechnet `layout` aus dem Text (`width_of(line_of(...))`) --
+// sie waechst und schrumpft also von selbst mit dem Format, und keine
+// feste Zahl muss mitgepflegt werden.
+//
+// UND DER TAG DER WOCHE WIRD GERECHNET, nicht erfragt: `SYS_SYSINFO`
+// kennt Jahr, Monat, Tag, Stunde, Minute und Sekunde und keinen
+// Wochentag. Die Formel ist Sakamotos -- vier Zeilen, gueltig ab 1752,
+// und sie kostet keine Systemschnittstelle, die es nicht gibt.
+static mut wd_namen: [u8; 24] = "SoMoDiMiDoFrSa\0\0\0\0\0\0\0\0\0\0"
+static mut c_sp: [u8; 2] = " \0"
+static mut c_ko: [u8; 3] = ", \0"
+static mut c_pt: [u8; 2] = ".\0"
+
+fn weekday(y: u64, m: u64, d: u64) -> u64 {
+    var t: [u64; 12] = [0 as u64, 3 as u64, 2 as u64, 5 as u64, 0 as u64,
+        3 as u64, 5 as u64, 1 as u64, 4 as u64, 6 as u64, 2 as u64,
+        4 as u64]
+    if y < 1 || m < 1 || m > 12 || d < 1 {
+        return 0
+    }
+    var yy: u64 = y
+    if m < 3 {
+        yy = yy - 1
+    }
+    return (yy + yy / 4 - yy / 100 + yy / 400 + t[(m - 1) as usize] + d) % 7
+}
+
+fn clock_build() {
+    let hr: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_HOUR, 0, 0)
+    let mi: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_MIN, 0, 0)
+    let se: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_SEC, 0, 0)
+    var yr: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_YEAR, 0, 0)
+    var mo: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_MONTH, 0, 0)
+    var dy: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_DAY, 0, 0)
+    // DER VERSATZ DARF UEBER MITTERNACHT GEHEN. `offset` ist der
+    // Ortszeitversatz in Minuten; wer ihn nur auf die Minuten im Tag
+    // rechnet, zeigt am 4. um 23:30 UTC in Wien "01:30" und dazu den
+    // 4. statt den 5.
+    let roh: u64 = hr * 60 + mi
+    let ganz: u64 = (roh + offset) % 1440
+    if roh + offset >= 1440 {
+        dy = dy + 1
+        if dy > tage_im_monat(yr, mo) {
+            dy = 1
+            mo = mo + 1
+            if mo > 12 {
+                mo = 1
+                yr = yr + 1
+            }
+        }
+    }
+    let c: u64 = full_of(F_CLK)
+    var at: u64 = 0
+    if cf_wday != 0 && cf_clines == 1 {
+        let w: u64 = weekday(yr, mo, dy)
+        __mmio_write8((c) as *mut u8,
+            __mmio_read8(((&wd_namen[0 as usize]) as u64 + w * 2) as *mut u8))
+        __mmio_write8((c + 1) as *mut u8,
+            __mmio_read8(((&wd_namen[0 as usize]) as u64 + w * 2 + 1) as *mut u8))
+        __mmio_write8((c + 2) as *mut u8, 0 as u8)
+        at = text_at_p(c, 2, (&c_sp[0 as usize]) as u64)
+    }
+    two(c, at, ganz / 60)
+    at = at + 2
+    __mmio_write8((c + at) as *mut u8, 58 as u8)
+    at = at + 1
+    two(c, at, ganz % 60)
+    at = at + 2
+    if cf_sec != 0 {
+        __mmio_write8((c + at) as *mut u8, 58 as u8)
+        at = at + 1
+        two(c, at, se % 60)
+        at = at + 2
+    }
+    __mmio_write8((c + at) as *mut u8, 0 as u8)
+    // ZWEIZEILIG heisst: die zweite Zeile ist das Datum, und
+    // `fit_field` faellt fuer dieses Feld aus -- die Trennung steht
+    // hier und nicht bei der Textbreite.
+    clk_zwei = 0
+    if cf_date != 0 || cf_clines == 2 {
+        if cf_clines == 2 {
+            clk_zwei = 1
+            let z: u64 = (&clk_z2[0 as usize]) as u64
+            var b: u64 = 0
+            if cf_wday != 0 {
+                let w2: u64 = weekday(yr, mo, dy)
+                __mmio_write8((z) as *mut u8,
+                    __mmio_read8(((&wd_namen[0 as usize]) as u64 + w2 * 2) as *mut u8))
+                __mmio_write8((z + 1) as *mut u8,
+                    __mmio_read8(((&wd_namen[0 as usize]) as u64 + w2 * 2 + 1) as *mut u8))
+                __mmio_write8((z + 2) as *mut u8, 0 as u8)
+                b = text_at_p(z, 2, (&c_ko[0 as usize]) as u64)
+            }
+            two(z, b, dy)
+            b = b + 2
+            __mmio_write8((z + b) as *mut u8, 46 as u8)
+            b = b + 1
+            two(z, b, mo)
+            b = b + 2
+            __mmio_write8((z + b) as *mut u8, 46 as u8)
+            b = b + 1
+            two(z, b, yr % 100)
+            b = b + 2
+            __mmio_write8((z + b) as *mut u8, 0 as u8)
+        } else {
+            at = text_at_p(c, at, (&c_sp[0 as usize]) as u64)
+            two(c, at, dy)
+            at = at + 2
+            __mmio_write8((c + at) as *mut u8, 46 as u8)
+            at = at + 1
+            two(c, at, mo)
+            at = at + 2
+            __mmio_write8((c + at) as *mut u8, 46 as u8)
+            at = at + 1
+            two(c, at, yr % 100)
+            at = at + 2
+            __mmio_write8((c + at) as *mut u8, 0 as u8)
+        }
+    }
+}
+
+fn tage_im_monat(y: u64, m: u64) -> u64 {
+    var t: [u64; 12] = [31 as u64, 28 as u64, 31 as u64, 30 as u64,
+        31 as u64, 30 as u64, 31 as u64, 31 as u64, 30 as u64, 31 as u64,
+        30 as u64, 31 as u64]
+    if m < 1 || m > 12 {
+        return 31
+    }
+    if m == 2 {
+        if (y % 4) == 0 && ((y % 100) != 0 || (y % 400) == 0) {
+            return 29
+        }
+        return 28
+    }
+    return t[(m - 1) as usize]
+}
+
+static mut clk_z2: [u8; 32] = [0 as u8; 32]
+static mut clk_zwei: u64 = 0
+static mut net_da: u64 = 1
+
 fn status_build() -> bool {
     let s_kA: u64 = txt((&k_nobatt[0 as usize]) as u64,
         (&s_nobat[0 as usize]) as u64)
@@ -1335,14 +1568,7 @@ fn status_build() -> bool {
     let s_ak: u64 = txt((&k_batt[0 as usize]) as u64,
         (&s_bat[0 as usize]) as u64)
     offset_read()
-    let hr: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_HOUR, 0, 0)
-    let mi: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_MIN, 0, 0)
-    let whole: u64 = ((hr * 60 + mi) + offset) % 1440
-    let c: u64 = full_of(F_CLK)
-    two(c, 0, whole / 60)
-    __mmio_write8((c + 2) as *mut u8, 58 as u8)
-    two(c, 3, whole % 60)
-    __mmio_write8((c + 5) as *mut u8, 0 as u8)
+    clock_build()
     let a: u64 = full_of(F_BAT)
     let have: u64 = ulib.sys(SYS_PWRGET, PG_BATPRESENT, 0, 0)
     bat_have = 0
@@ -1353,7 +1579,22 @@ fn status_build() -> bool {
         bat_chg = 1
     }
     if ulib.bad(have) || have == 0 {
-        let _q: u64 = text_at_p(a, 0, s_kA)
+        // ============================== RUNDE STARTKNOPF
+        // KEIN AKKU HEISST KEIN FELD -- und nicht der Satz "kein
+        // Akku". Justins Rechner ist ein Tischrechner; die Leiste hat
+        // ihm bei jedem Blick mitgeteilt, dass er keinen Akku hat.
+        // Das ist keine Auskunft, das ist Laerm. Windows zeigt dort
+        // nichts, und das ist richtig: ein Symbol steht fuer etwas,
+        // das die Maschine HAT.
+        //
+        // Mit `hide_missing=0` kommt der alte Text zurueck -- er ist
+        // die Gegenprobe und die Auskunft fuer den Fall, dass jemand
+        // einen Akku ERWARTET und keiner gefunden wird.
+        if cf_hidemissing != 0 {
+            __mmio_write8((a) as *mut u8, 0 as u8)
+        } else {
+            let _q: u64 = text_at_p(a, 0, s_kA)
+        }
     } else {
         bat_have = 1
         let pc: u64 = ulib.sys(SYS_PWRGET, PG_BATPERCENT, 0, 0)
@@ -1372,6 +1613,15 @@ fn status_build() -> bool {
     // ask three questions and draw its own conclusion -- the next
     // reader of those three would conclude something else.
     let st: u64 = ulib.sys(SYS_NETGET, NG_STATE, 0, 0)
+    // ============================== RUNDE STARTKNOPF
+    // GIBT ES UEBERHAUPT EINE NETZKARTE? Der Kern beantwortet die
+    // Frage selbst (`NG_STATE` schlaegt fehl, wenn kein Geraet da
+    // ist). Ohne Karte kein Symbol und kein "kein Netz" -- dieselbe
+    // Regel wie beim Akku, und aus demselben Grund.
+    net_da = 1
+    if ulib.bad(st) {
+        net_da = 0
+    }
     if ulib.bad(st) {
         net_state = 0
     } else {
@@ -1401,7 +1651,9 @@ fn status_build() -> bool {
             ip = 0
         }
     }
-    if ip == 0 {
+    if net_da == 0 && cf_hidemissing != 0 {
+        __mmio_write8((ne) as *mut u8, 0 as u8)
+    } else if ip == 0 {
         let _q: u64 = text_at_p(ne, 0, s_kN)
     } else {
         var at: u64 = num_at(ne, 0, (ip >> 24) & 255)
@@ -1485,6 +1737,17 @@ fn fit_field(f: u64, avail: u64) {
     let l0: u64 = line_of(f, 0)
     let l1: u64 = line_of(f, 1)
     __mmio_write8((l1) as *mut u8, 0 as u8)
+    // RUNDE STARTKNOPF: die ZWEIZEILIGE UHR wird nicht umgebrochen,
+    // sie IST zwei Zeilen -- Uhrzeit oben, Datum darunter, wie in
+    // Windows. Der Umbruch nach Textbreite darunter wuerde "19:09"
+    // und "04.09.2026" an irgendeiner Stelle trennen.
+    if f == F_CLK && clk_zwei != 0 {
+        copy_n(l0, src, tlen(src))
+        let z: u64 = (&clk_z2[0 as usize]) as u64
+        copy_n(l1, z, tlen(z))
+        f_lines[(f) as usize] = 2
+        return
+    }
     if width_of(src) <= avail {
         copy_n(l0, src, tlen(src))
         f_lines[(f) as usize] = 1
@@ -1556,6 +1819,13 @@ fn layout() {
             if f == F_NET && sys_icon() != 0 {
                 vroom = vroom + MK_W + 2
             }
+            if tlen(full_of(f)) == 0 {
+                f_x[(f) as usize] = pad()
+                f_y[(f) as usize] = y
+                f_w[(f) as usize] = 0
+                f_h[(f) as usize] = 0
+                f_lines[(f) as usize] = 0
+            } else {
             fit_field(f, inner - 8 - vroom)
             let hh: u64 = f_lines[(f) as usize] * LINE_H + 4
             y = y - hh
@@ -1564,6 +1834,7 @@ fn layout() {
             f_w[(f) as usize] = inner
             f_h[(f) as usize] = hh
             y = y - gap()
+            }
             if f == F_CLK {
                 f = F_BAT
             } else if f == F_BAT {
@@ -1612,7 +1883,11 @@ fn layout() {
     }
     st_x = pad() + 1
     st_y = (bar_h - btn_h()) / 2
+    // RUNDE STARTKNOPF: ohne Wort ist der Knopf quadratisch.
     st_w = START_W
+    if cf_labels == LB_NEVER {
+        st_w = btn_h() + 8
+    }
     st_h = btn_h()
     var x: u64 = bar_w - pad()
     var f: u64 = F_CLK
@@ -1644,6 +1919,19 @@ fn layout() {
         if f == F_NET && sys_icon() != 0 {
             room = room + MK_W + 2
         }
+        // ============================== RUNDE STARTKNOPF
+        // EIN LEERES FELD BEKOMMT KEINEN PLATZ. `status_build` laesst
+        // den Text weg, wenn es die Hardware nicht gibt; ohne diese
+        // vier Zeilen bliebe an der Stelle ein leeres Rechteck von
+        // zehn Bildpunkten plus Symbolplatz stehen -- ein Loch, das
+        // aussieht wie ein Fehler.
+        if tlen(full_of(f)) == 0 {
+            f_x[(f) as usize] = x
+            f_y[(f) as usize] = st_y
+            f_w[(f) as usize] = 0
+            f_h[(f) as usize] = 0
+            f_lines[(f) as usize] = 0
+        } else {
         fit_field(f, bar_w / 4 - room)
         var ww: u64 = width_of(line_of(f, 0)) + 10 + room
         if f_lines[(f) as usize] > 1 {
@@ -1658,6 +1946,7 @@ fn layout() {
         f_w[(f) as usize] = ww
         f_h[(f) as usize] = btn_h()
         x = x - gap()
+        }
         if f == F_CLK {
             f = F_BAT
         } else if f == F_BAT {
@@ -1671,11 +1960,46 @@ fn layout() {
     if x > left {
         space = x - left
     }
+    // ============================================== RUNDE STARTKNOPF
+    // NUR SYMBOL -- DIE WINDOWS-11-LEISTE.
+    //
+    // Justins Foto: "St" statt "Start", "Termina" statt "Terminal".
+    // Das ist kein Platzmangel bei 3440 Bildpunkten Breite, sondern
+    // eine feste Hoechstbreite (TASK_MAX = 132) und ein Titel, der
+    // nicht hineinpasst. Windows 11 loest es NICHT mit mehr Platz: es
+    // zeigt gar keinen Text, nur das Symbol, quadratisch. Ein Symbol
+    // wird nie abgeschnitten.
+    //
+    // `labels=always` bringt die Beschriftung zurueck, `labels=room`
+    // zeigt sie, solange sie ohne Abschneiden passt, und `never` ist
+    // die Vorgabe. Die Zahlen (40 logische Bildpunkte je Knopf, das
+    // Quadrat aus der Leistenhoehe) stehen so in
+    // docs/RECHERCHE-TASKLEISTE-2026.md.
     var width: u64 = TASK_MAX
-    if nk > 0 {
+    if cf_labels == LB_NEVER {
+        // Quadratisch: so hoch wie der Knopf, plus etwas Luft.
+        width = btn_h() + 8
+        if width < 28 {
+            width = 28
+        }
+    } else if nk > 0 {
         width = (space - (nk - 1) * gap()) / nk
         if width > TASK_MAX {
             width = TASK_MAX
+        }
+    }
+    if nk > 0 && cf_labels != LB_NEVER {
+        // Passt der Text nicht ohne Abschneiden, faellt `room` auf das
+        // Symbol zurueck statt zu verstuemmeln.
+        if cf_labels == LB_ROOM && width < TASK_MIN {
+            width = btn_h() + 8
+        }
+    }
+    // Und die Knoepfe duerfen nie mehr Platz brauchen, als da ist.
+    if nk > 0 {
+        let hoechst: u64 = (space - (nk - 1) * gap()) / nk
+        if width > hoechst {
+            width = hoechst
         }
     }
     // ROUND LOOK: THE GROUP, AND WHERE IT STARTS.
@@ -1715,11 +2039,20 @@ fn layout() {
         kx[(i) as usize] = left2 + i * (width + gap())
         ky[(i) as usize] = st_y
         kh[(i) as usize] = btn_h()
-        if width >= TASK_MIN {
+        if cf_labels == LB_NEVER || width < TASK_MIN {
+            // NUR DAS SYMBOL. Die Beschriftung wird auf leer gesetzt
+            // und nicht abgeschnitten -- `paint` malt sie dann gar
+            // nicht, und `say_text` meldet einen leeren Text statt
+            // "Termina".
+            kw[(i) as usize] = width
+            __mmio_write8(((&klab[0 as usize]) as u64 + i * 40) as *mut u8,
+                0 as u8)
+            if width < 12 {
+                kw[(i) as usize] = 0
+            }
+        } else {
             kw[(i) as usize] = width
             shorten_title(i, width)
-        } else {
-            kw[(i) as usize] = 0
         }
         i = i + 1
     }
@@ -2068,6 +2401,62 @@ fn button_mark(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
 // der Kasten und nicht die Schrift: diese Leiste hat keine Symbole fuer
 // jedes Programm, und eine Kachel ohne Schrift und ohne Symbol waere
 // ein leeres Feld. Der Kasten ist weg, die Schrift steht.
+// DAS MARKENZEICHEN, MITTIG IN DEN KNOPF, MIT DECKUNG.
+//
+// Gemischt wird gegen die KNOPFFARBE und nicht gegen den Rahmenpuffer:
+// `wlibc` hat kein Zuruecklesen, und der Knopf ist einen Augenblick
+// vorher genau mit dieser Farbe gefuellt worden. Das ist exakt und
+// spart das Lesen.
+static mut mk_ink: u64 = 0
+
+fn marke_malen(x: u64, y: u64, w: u64, h: u64, report: bool) {
+    var s_mk: [u8; 18] = "taskbar: marke n=\0"
+    var s_mx: [u8; 4] = " x=\0"
+    var s_my: [u8; 4] = " y=\0"
+    var s_mi: [u8; 6] = " ink=\0"
+    if w < 8 || h < 8 {
+        return
+    }
+    var kante: u64 = h - 4
+    if kante > w - 4 {
+        kante = w - 4
+    }
+    let n: u64 = marke_start.breit(kante)
+    if n == 0 {
+        return
+    }
+    let x0: u64 = x + (w - n) / 2
+    let y0: u64 = y + (h - n) / 2
+    let grund: u64 = wlibc.theme(wlibc.C_BUTTON_FACE)
+    mk_ink = 0
+    var yy: u64 = 0
+    while yy < n {
+        var xx: u64 = 0
+        while xx < n {
+            let v: u64 = marke_start.punkt(n, xx, yy)
+            let a: u64 = (v >> 24) & 0xFF
+            if a != 0 {
+                wlibc.px(x0 + xx, y0 + yy,
+                    wlibc.blend(grund, v & 0xFFFFFF, a))
+                mk_ink = mk_ink + 1
+            }
+            xx = xx + 1
+        }
+        yy = yy + 1
+    }
+    if report {
+        say((&s_mk[0 as usize]) as u64)
+        ulib.sayn(n)
+        say((&s_mx[0 as usize]) as u64)
+        ulib.sayn(x0)
+        say((&s_my[0 as usize]) as u64)
+        ulib.sayn(y0)
+        say((&s_mi[0 as usize]) as u64)
+        ulib.sayn(mk_ink)
+        ulib.nl()
+    }
+}
+
 fn button_sym(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
     dim: bool, mark: u64, sym: u64) -> u64 {
     let weich: bool = wlibc.metric(wlibc.M_RADIUS_BUTTON) != 0
@@ -2262,10 +2651,33 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
     // kein neu erfundenes. Gibt es das Buendel nicht, bleibt der Knopf
     // reiner Text.
     var st_app: [u8; 9] = "launcher\0"
-    let ssym: u64 = sym_of((&st_app[0 as usize]) as u64)
+    var ssym: u64 = sym_of((&st_app[0 as usize]) as u64)
+    // ============================================== RUNDE STARTKNOPF
+    // DAS MARKENZEICHEN STATT DES WORTES "Start".
+    //
+    // Justins Foto zeigte "St" -- der Text passte nicht in den Knopf.
+    // Windows 11 hat dort seit Jahren kein Wort mehr, sondern ein
+    // Zeichen, und OrientOS hat jetzt eines (assets/marke/start-*.png,
+    // als Bildpunkte in `marke_start.fi`, siehe den Kopf von
+    // tools/marke/startbild.py).
+    //
+    // Der weisse Kreis IN dem Zeichen gehoert dazu und bleibt; nur der
+    // Grund AUSSERHALB des Rings ist durchsichtig und wird gegen die
+    // Knopffarbe gemischt. Auf einer dunklen Leiste bleibt der
+    // schwarze Ring damit sichtbar, weil der weisse Kreis direkt
+    // dahinter steht -- gemessen und nicht gehofft.
+    var st_leer: [u8; 2] = "\0\0"
+    var st_txt: u64 = txt((&k_start[0 as usize]) as u64,
+        (&s_st[0 as usize]) as u64)
+    if cf_labels == LB_NEVER {
+        st_txt = (&st_leer[0 as usize]) as u64
+        ssym = 0
+    }
     let rs: u64 = button_sym(st_x, st_y, st_w, st_h,
-        txt((&k_start[0 as usize]) as u64,
-            (&s_st[0 as usize]) as u64), false, false, 0, ssym)
+        st_txt, false, false, 0, ssym)
+    if cf_labels == LB_NEVER {
+        marke_malen(st_x, st_y, st_w, st_h, report)
+    }
     var i: u64 = 0
     while i < nk {
         if kw[(i) as usize] != 0 {
@@ -2354,6 +2766,13 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
     }
     var f: u64 = 0
     while f < F_N {
+        // RUNDE STARTKNOPF: ein Feld ohne Breite wird nicht gemalt --
+        // kein Rechteck, kein Symbol, keine Zeile im Bericht. Das ist
+        // die andere Haelfte von "kein Symbol ohne Hardware": ohne
+        // diese Zeile bliebe ein Farbfleck ohne Inhalt stehen.
+        if f_w[(f) as usize] == 0 {
+            f = f + 1
+        } else {
         wlibc.rect(f_x[(f) as usize], f_y[(f) as usize], f_w[(f) as usize],
             f_h[(f) as usize], wlibc.theme(wlibc.T_PANEL))
         // ROUND NETVIEW, addendum: the state of the MACHINE, in the
@@ -2523,6 +2942,7 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
             ulib.nl()
         }
         f = f + 1
+        }
     }
     // ROUND NETVIEW, addendum: WHAT THE POINTER IS RESTING ON, as a
     // sentence, in the empty space between the last window button and
