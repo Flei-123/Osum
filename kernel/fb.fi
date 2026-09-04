@@ -101,7 +101,9 @@ export {
     herz, herz_x, herz_y, HERZ_W, HERZ_H, flush_rows,
     // RUNDE BLECHZWEI: nur ein Rechteck uebertragen, und die
     // Abbildungsart aus der Seitentafel selbst ablesen.
-    flush_rect, pat_roh, pde_roh, stripe_slots
+    flush_rect, pat_roh, pde_roh, stripe_slots,
+    // RUNDE BLECHDREI: das reservierte Band am oberen Rand.
+    set_band, band, band_lo, band_open
 }
 
 // ------------------------------------------------- der Datenbereich
@@ -213,6 +215,35 @@ const S_RESW: u64 = 0x798 // Wunsch von der Befehlszeile, 0 = keiner
 const S_RESH: u64 = 0x7A0
 const S_FAIL: u64 = 0x7B0 // Bitmaske der NICHT bestandenen Zusagen
 const S_UIWANT: u64 = 0x7A8 // "uiscale=" von der Befehlszeile, 0 = keiner
+
+// ================================================== RUNDE BLECHDREI
+// ============ DAS RESERVIERTE BAND, UND WARUM ES IN `fb` STEHT
+//
+// Justin steht vor dem Blech und kann nur fotografieren. Bis zu dieser
+// Runde war die Messtafel fuer knapp eine Sekunde zu sehen: sie wird
+// aus dem Zeitgeber gemalt, und der Schreibtisch malt danach seinen
+// Grund darueber. Wer die Zahlen wollte, brauchte Glueck und schnelle
+// Finger. Ein Messgeraet, das man nur mit Reflexen ablesen kann, ist
+// keines.
+//
+// Die Tafel selbst zu schuetzen ("male haeufiger als der andere") hat
+// drei Runden lang nicht gereicht, und das kann es auch nicht: der
+// Fensterserver, die Konsole des Boot-Protokolls, die Taskleiste und
+// Ring 3 malen alle auf DIESELBE Flaeche, und jeder von ihnen hat
+// gute Gruende, ein Vollbild zu schreiben.
+//
+// Also wird der Bereich HIER gesperrt, an der einzigen Stelle, durch
+// die sie alle muessen: in den Zeichengrundlagen. `S_BAND` sind die
+// obersten Bildzeilen, in die NIEMAND schreiben darf. `S_BANDOPEN` ist
+// der Schluessel, und den hat nur der Tafelmaler -- er dreht ihn fuer
+// die Dauer seines Anstrichs um und danach wieder zurueck.
+//
+// Das kostet einen Vergleich je `pixel`, `hline`, `blit` und Glyphe.
+// Gemessen in `fbbench` (Vollbild-Blit 3440x1440): unveraendert, weil
+// der heisse Weg `copy_words`/`rep stosq` ist und die Pruefung EINMAL
+// je Zeile steht, nicht je Bildpunkt.
+const S_BAND: u64 = 0x7B8 // reservierte Bildzeilen ganz oben, 0 = keine
+const S_BANDOPEN: u64 = 0x7C0 // 1 = der Tafelmaler darf hinein
 
 // Die drei Arten, ein Bild auf eine Tafel anderer Groesse zu bringen.
 // Dieselben drei, die ein Monitor in seiner eigenen Elektronik hat und
@@ -870,6 +901,59 @@ fn bool_num(b: bool) -> u64 {
 
 // -------------------------------------------------------- die Zahlen
 
+// Wie viele Bildzeilen oben reserviert sind. Das ist die ROHE Zahl --
+// sie gilt auch fuer den, der den Schluessel gerade hat, denn die
+// Konsole und der Fensterserver rechnen mit ihr ihre Flaeche aus.
+fn band(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_BAND)
+}
+
+// Die Grenze, an der geklemmt wird. Null, solange der Tafelmaler den
+// Schluessel umgedreht hat -- sonst koennte die Tafel ihr eigenes Band
+// nicht bemalen.
+fn band_lo(state: u64) -> u64 {
+    if kstate.get(state, FB_OFF + S_BANDOPEN) != 0 {
+        return 0
+    }
+    return kstate.get(state, FB_OFF + S_BAND)
+}
+
+fn band_open(state: u64, on: bool) {
+    var v: u64 = 0
+    if on {
+        v = 1
+    }
+    kstate.set(state, FB_OFF + S_BANDOPEN, v)
+}
+
+// DAS BAND EINRICHTEN. `px` sind Bildzeilen. Die Textkonsole faengt
+// danach UNTER dem Band an -- sonst schriebe das Boot-Protokoll in
+// einen Bereich, den es nie zu sehen bekaeme, und die ersten Zeilen
+// waeren spurlos weg.
+//
+// EIN BAND, DAS DEN SCHIRM FRISST, IST KEINES: mehr als ein Drittel
+// der Hoehe wird abgelehnt. Auf 1280x800 (den Regressionslaeufen) faellt
+// die Tafel damit von selbst auf ihr altes Verhalten zurueck, und kein
+// Selbsttest sieht eine kleinere Flaeche als vorher.
+fn set_band(state: u64, px: u64) -> bool {
+    let h: u64 = kstate.get(state, FB_OFF + S_HEIGHT)
+    if h == 0 {
+        return false
+    }
+    var n: u64 = px
+    if n * 3 >= h {
+        n = 0
+    }
+    kstate.set(state, FB_OFF + S_BAND, n)
+    let zh: u64 = font.GLYPH_H * fscale(state)
+    if zh != 0 && h > n {
+        kstate.set(state, FB_OFF + S_ROWS, (h - n) / zh)
+    }
+    kstate.set(state, FB_OFF + S_CX, 0)
+    kstate.set(state, FB_OFF + S_CY, 0)
+    return n != 0
+}
+
 fn ready(state: u64) -> bool {
     return kstate.get(state, FB_OFF + S_READY) != 0
 }
@@ -1121,6 +1205,10 @@ fn pixel(state: u64, x: u64, y: u64, color: u64) {
     if y >= kstate.get(state, FB_OFF + S_HEIGHT) {
         return
     }
+    // RUNDE BLECHDREI: das reservierte Band gehoert der Messtafel.
+    if y < band_lo(state) {
+        return
+    }
     __mmio_write32((kstate.get(state, FB_OFF + S_DRAW) +% spot(state, x, y))
         as *mut u32, color as u32)
 }
@@ -1241,6 +1329,9 @@ fn pixel_a(state: u64, x: u64, y: u64, color: u64, a: u64) {
     if y >= kstate.get(state, FB_OFF + S_HEIGHT) {
         return
     }
+    if y < band_lo(state) {
+        return
+    }
     if a >= 255 {
         kstate.set(state, FB_OFF + S_BLENDS0,
             kstate.get(state, FB_OFF + S_BLENDS0) +% 1)
@@ -1285,6 +1376,9 @@ fn hline_mask(state: u64, x: u64, y: u64, n: u64, color: u64, maske: u64,
     }
     let w: u64 = kstate.get(state, FB_OFF + S_WIDTH)
     if y >= kstate.get(state, FB_OFF + S_HEIGHT) || x >= w {
+        return
+    }
+    if y < band_lo(state) {
         return
     }
     var len: u64 = n
@@ -1343,6 +1437,9 @@ fn hline_a(state: u64, x: u64, y: u64, n: u64, color: u64, a: u64) {
     }
     let w: u64 = kstate.get(state, FB_OFF + S_WIDTH)
     if y >= kstate.get(state, FB_OFF + S_HEIGHT) || x >= w {
+        return
+    }
+    if y < band_lo(state) {
         return
     }
     var len: u64 = n
@@ -1406,6 +1503,12 @@ fn blend_reset(state: u64) {
 fn hline(state: u64, x: u64, y: u64, n: u64, color: u64) {
     let w: u64 = kstate.get(state, FB_OFF + S_WIDTH)
     if y >= kstate.get(state, FB_OFF + S_HEIGHT) || x >= w {
+        return
+    }
+    // RUNDE BLECHDREI: EINE Pruefung je BILDZEILE, nicht je Bildpunkt.
+    // `fill` und `clear` gehen beide hier durch, also auch der Grund des
+    // Fensterservers und das Loeschen der Konsole.
+    if y < band_lo(state) {
         return
     }
     var len: u64 = n
@@ -1528,14 +1631,20 @@ fn blit(state: u64, sx: u64, sy: u64, dx: u64, dy: u64, w: u64, h: u64) {
     let n: u64 = w *% 4
     let worte: u64 = n / 8
     let rest: u64 = n - worte * 8
+    // RUNDE BLECHDREI: das reservierte Band bleibt stehen. Das Rollen
+    // der Textkonsole geht hier durch, und ohne diese Grenze zoege es
+    // die Tafel Zeile fuer Zeile aus dem Bild.
+    let bl: u64 = band_lo(state)
     var r: u64 = 0
     while r < h {
-        let s: u64 = base +% spot(state, sx, sy + r)
-        let d: u64 = base +% spot(state, dx, dy + r)
-        copy_words(d, s, worte)
-        if rest != 0 {
-            __mmio_write32((d +% worte *% 8) as *mut u32,
-                __mmio_read32((s +% worte *% 8) as *mut u32))
+        if dy + r >= bl {
+            let s: u64 = base +% spot(state, sx, sy + r)
+            let d: u64 = base +% spot(state, dx, dy + r)
+            copy_words(d, s, worte)
+            if rest != 0 {
+                __mmio_write32((d +% worte *% 8) as *mut u32,
+                    __mmio_read32((s +% worte *% 8) as *mut u32))
+            }
         }
         r = r + 1
     }
@@ -1810,7 +1919,9 @@ fn cell_x(state: u64) -> u64 {
 }
 
 fn cell_y(state: u64) -> u64 {
-    return kstate.get(state, FB_OFF + S_CY) *% (font.GLYPH_H * fscale(state))
+    let bd: u64 = kstate.get(state, FB_OFF + S_BAND)
+    let zh: u64 = font.GLYPH_H * fscale(state)
+    return bd +% kstate.get(state, FB_OFF + S_CY) *% zh
 }
 
 // Die Textmarke: zwei Bildpunktzeilen am unteren Rand der Zelle.
@@ -1850,6 +1961,13 @@ fn mark(state: u64, on: bool) {
 fn glyph(state: u64, ch: u64) {
     let px: u64 = cell_x(state)
     let py: u64 = cell_y(state)
+    // RUNDE BLECHDREI: der schnelle Weg schreibt an `pixel` vorbei --
+    // also steht die Grenze des Bandes hier noch einmal. `cell_y`
+    // rechnet das Band bereits ein; das hier faengt den ab, der die
+    // Schreibmarke von aussen verstellt hat.
+    if py < band_lo(state) {
+        return
+    }
     let fg: u64 = kstate.get(state, FB_OFF + S_FG)
     let bg: u64 = kstate.get(state, FB_OFF + S_BG)
     let base: u64 = state + FONT_OFF
@@ -1929,9 +2047,16 @@ fn scroll(state: u64) {
         clear(state, kstate.get(state, FB_OFF + S_BG))
         return
     }
+    // RUNDE BLECHDREI: die Konsole rollt UNTERHALB des Bandes.
+    let bd: u64 = kstate.get(state, FB_OFF + S_BAND)
     let rest: u64 = kstate.get(state, FB_OFF + S_ROWS) *% zh - zh
-    blit(state, 0, zh, 0, 0, w, rest)
-    fill(state, 0, rest, w, h - rest, kstate.get(state, FB_OFF + S_BG))
+    if bd + rest + zh > h {
+        clear(state, kstate.get(state, FB_OFF + S_BG))
+        return
+    }
+    blit(state, 0, bd + zh, 0, bd, w, rest)
+    fill(state, 0, bd + rest, w, h - bd - rest,
+        kstate.get(state, FB_OFF + S_BG))
     dirty_all(state)
     kstate.add(state, FB_OFF + S_SCROLLS, 1)
 }
