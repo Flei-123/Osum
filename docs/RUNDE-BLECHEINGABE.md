@@ -208,3 +208,42 @@ nicht, war es der Zwischenspeicher.
 * `fbflush` — `wbinvd` nach jedem Blit.
 * `nohub` — den Hub-Treiber stilllegen (Gegenprobe).
 * `usbsafe` — der Zeitgeber sieht gar nicht mehr nach Anschluessen.
+
+## Die A/B-Gegenprobe zum Hub-Treiber
+
+Derselbe QEMU-Aufbau (Tastatur und Maus hinter einem `usb-hub`), einmal
+mit und einmal ohne `nohub` — also der Zustand des Baums **vor** dieser
+Runde:
+
+| | Bericht |
+|---|---|
+| **mit** Hub-Treiber | `USB hc=1 ports=8 dev=3 fund=3 hubs=1 hbprt=8 fails=0` |
+| **ohne** (`nohub`) | `USB hc=1 ports=8 dev=0 fund=1 hubs=0 hbprt=0 fails=0` |
+
+Ohne Hub-Treiber: **`dev=0`**. Der Hub steht als einziger Eintrag da
+(`D0 @5.0 id=0409.55AA dev=09:00:00 if=09:00:00 n=1 f=3 drv=0` — Adresse
+und Deskriptor geglueckt, kein `SET_CONFIGURATION`, kein Treiber), und
+Tastatur und Maus dahinter sind **vollstaendig unsichtbar**.
+
+Das ist Justins Symptom, Wort fuer Wort: „Maus und Tastatur gehen nicht,
+es leuchtet auch nicht mehr."
+
+## Am fertigen Abbild belegt
+
+`/srv/store/abbilder/orientos-usb.img`, ueber den Lader (OVMF), zwei
+xHCI-Regler, 3440x1440:
+
+```
+USB  hc=2 ports=8 dev=2 fund=3 hubs=0 hbprt=0 fails=0
+ P5 ccs=1 en=1 sp=3 psc=00000E03
+ D0 @1.0 sp=4 id=46F4.0001 dev=00:00:00 if=08:06:50 n=1 f=15 drv=3
+ D1 @5.0 sp=3 id=0627.0001 dev=00:00:00 if=03:01:01 n=1 f=15 drv=1
+ D2 @6.0 sp=3 id=0627.0001 dev=00:00:00 if=03:01:02 n=1 f=15 drv=2
+tafel: 9 KABEL  LSR 60 SCR A5 VERW 0 AUS 0 FB WC
+tafel: 10 HERZ  HZ 5789 TOT 0 LED 114 HELL 116
+tafel: 11 USB   DEV 2 FUND 3 HUB 0 KBD 0 FAIL 0
+```
+
+SHA-256 `7fdb350f43f004a3afba59954c6fb804992e3a74e8328553b2e497f4f4cada49`,
+Commit `6fa8996`. Regression `tools/wm/run.sh`: **104 passed, 0 failed**.
+`tools/kernel/memmap.py`: 91 Bereiche, **0 Kollisionen**.
