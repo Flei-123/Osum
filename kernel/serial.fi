@@ -24,7 +24,9 @@ export {
     out8, in8, io_wait,
     init, put, puts, text, nl, hex, hex_digits, hex_width, dec, pad_dec,
     COM1, COM2, port, set_port, rx_ready, rx_take, rx_on, rx_off,
-    overrun, drain_fifo
+    overrun, drain_fifo,
+    // RUNDE KABEL: der Baustein wird geprueft, nicht geglaubt.
+    probe, aus, set_aus, verworfen, lsr_roh, scr_roh
 }
 
 // 0x3F8 = COM1 on every PC that has ever existed
@@ -45,6 +47,45 @@ const LSR_RX: u8 = 0x01 // ein Oktett liegt bereit
 const LSR_OVERRUN: u8 = 0x02 // eines ist verlorengegangen
 const LSR_TX: u8 = 0x20 // der Sender ist leer
 const IER_RX: u8 = 0x01 // "sag Bescheid, wenn etwas ankommt"
+const R_SCR: u16 = 7 // das Notizregister -- der Praesenztest
+
+// ====================================================================
+// RUNDE KABEL: DER BILDSCHIRM DARF NICHT AN EINEM KABEL HAENGEN, DAS
+// NIEMAND ANGESCHLOSSEN HAT.
+//
+// Hier stand:
+//
+//     fn put(c: u8) {
+//         while !ready() {
+//         }
+//         out8(port(), c)
+//         gfx.echo(c)          <- DER BILDSCHIRM KOMMT ERST DANACH
+//     }
+//
+// `ready()` liest LSR und prueft Bit 5 (Sender leer). Das war eine
+// UNBEGRENZTE Warteschleife auf einen Baustein, von dem niemand
+// geprueft hatte, ob es ihn gibt. Sitzt an 0x3F8 nichts und liefert der
+// Chipsatz fuer nicht dekodierte Tore 0x00 (viele tun das), dann ist
+// `0x00 & 0x20` null, `ready()` ist FUER IMMER falsch, und der Kern
+// kehrt aus `put` nie zurueck -- mit Unterbrechungen an, aber tot.
+//
+// Und weil `gfx.echo` DAHINTER stand, nimmt es den Bildschirm mit:
+// jedes Oktett erscheint erst, wenn der UART es genommen hat. Das
+// erklaert einen Abbruch MITTEN IN EINER ZEILE, so wie "qs: win id="
+// ohne die Zahl dahinter.
+//
+// In QEMU faellt es nie auf: dort ist ein echter, sofort leerer UART
+// emuliert. Genau der Unterschied Blech/QEMU.
+//
+// Drei Dinge dagegen: eine ZEITGRENZE, ein PRAESENZTEST, und
+// `gfx.echo` VOR der Leitung.
+const PUT_GRENZE: u64 = 100000 // Durchlaeufe, dann ist Schluss
+const VERW_GRENZE: u64 = 16 // so oft, dann bleibt die Leitung zu
+
+static mut ser_aus: u64 = 0 // 1 = stillgelegt, es kommt nichts mehr
+static mut ser_verw: u64 = 0 // verworfene Oktette
+static mut ser_lsr: u64 = 256 // roher LSR beim Test (256 = ungeprueft)
+static mut ser_scr: u64 = 256 // was das Notizregister zurueckgab
 
 // ------------------------------------------------------- der Torwert
 //
@@ -117,6 +158,44 @@ fn init() {
     out8(b + R_MCR, 0x0B as u8) // DTR, RTS, OUT2
 }
 
+// DER PRAESENZTEST, der Standardweg: einen Wert ins Notizregister
+// schreiben und zurueckholen. Kommt er nicht wieder, sitzt dort kein
+// UART -- dann bleibt die Leitung still, und der Kern verliert keine
+// Zeit mehr an sie. Der rohe LSR wird mitgenommen: 0x00 heisst "kein
+// Baustein" (nicht dekodiertes Tor), 0xFF heisst "offener Bus".
+fn probe() -> bool {
+    let b: u16 = port()
+    out8(b + R_SCR, 0xA5 as u8)
+    let zurueck: u8 = in8(b + R_SCR)
+    ser_scr = zurueck as u64
+    ser_lsr = in8(b + R_LSR) as u64
+    if zurueck != 0xA5 as u8 {
+        ser_aus = 1
+        return false
+    }
+    return true
+}
+
+fn aus() -> u64 {
+    return ser_aus
+}
+
+fn set_aus(v: u64) {
+    ser_aus = v
+}
+
+fn verworfen() -> u64 {
+    return ser_verw
+}
+
+fn lsr_roh() -> u64 {
+    return ser_lsr
+}
+
+fn scr_roh() -> u64 {
+    return ser_scr
+}
+
 fn ready() -> bool {
     return (in8(port() + R_LSR) & LSR_TX) != 0 as u8
 }
@@ -168,8 +247,25 @@ fn rx_off() {
     out8(port() + R_IER, 0x00 as u8)
 }
 
+// DER BILDSCHIRM ZUERST. Er haengt ab hier an nichts mehr.
 fn put(c: u8) {
-    while !ready() {
+    gfx.echo(c)
+    if ser_aus != 0 {
+        return
+    }
+    var n: u64 = 0
+    while !ready() && n < PUT_GRENZE {
+        n = n + 1
+    }
+    if n >= PUT_GRENZE {
+        // Die Leitung nimmt nichts. Einmal ist ein Zufall; sechzehnmal
+        // heisst, dass dort niemand zuhoert -- dann wird nicht bei
+        // JEDEM weiteren Oktett hunderttausendmal gewartet.
+        ser_verw = ser_verw + 1
+        if ser_verw >= VERW_GRENZE {
+            ser_aus = 1
+        }
+        return
     }
     out8(port(), c)
     // Der Bildschirm. RUNDE K11 HAT HIER EIN MODUL DAZWISCHENGESETZT:
@@ -180,7 +276,7 @@ fn put(c: u8) {
     // solange niemand `gfx` auf die Kommandozeile geschrieben hat -- ein
     // `lea` und ein Speicherzugriff je Oktett, auf einem Weg, der ohnehin
     // auf ein 38400-Baud-Tor wartet.
-    gfx.echo(c)
+    // RUNDE KABEL: der Aufruf steht jetzt GANZ OBEN in dieser Funktion.
 }
 
 fn nl() {
