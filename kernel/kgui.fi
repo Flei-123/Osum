@@ -41,6 +41,7 @@ import pwr
 import sched
 import serial
 import tile
+import time
 import ttf
 import tty
 import usb
@@ -408,6 +409,34 @@ fn graphics(state: u64, mbi: u64) {
     // also einen Bildschirm braucht, den es hinterher wieder so
     // hinstellen kann, wie es ihn vorgefunden hat.
     vmode_stage(state)
+
+    // ============================================ RUNDE BLECHDREI
+    // DAS BAND WIRD HIER RESERVIERT, VOR DEM ERSTEN ZEICHEN.
+    //
+    // Justin: "ich muss ganz schnell sein mit dem Foto machen, weil
+    // kurz darauf der Schreibtisch startet und alles ueberschreibt."
+    // Ab hier gehoeren die obersten Bildzeilen der Messtafel, und
+    // NIEMAND kommt mehr hinein -- weder das Boot-Protokoll (es faengt
+    // gleich darunter an, `fb.set_band` setzt die Schreibmarke), noch
+    // der Fensterserver, noch die Taskleiste, noch Ring 3. Gesperrt
+    // wird in `fb.pixel`/`hline`/`blit`/`glyph` und in `wm.fb_row`.
+    //
+    // `notafel` laesst es wie vorher. Ohne `tafel` gibt es auch nichts
+    // zu schuetzen.
+    if kstate.mode_on(state, kstate.M_TAFEL)
+        && !kstate.mode_on(state, kstate.M_NOTAFEL) {
+        let hoehe: u64 = wm.messhoehe(state, TAFEL_ZEILEN)
+        let gesetzt: bool = fb.set_band(state, hoehe)
+        var s_bd: [u8; 12] = "fb: band=\0\0\0"
+        var s_bk: [u8; 7] = "  kol=\0"
+        serial.puts((&s_bd[0]) as u64)
+        serial.dec(fb.band(state))
+        serial.puts((&s_bk[0]) as u64)
+        serial.dec(wm.mess_kol(state))
+        serial.put(32 as u8)
+        serial.dec(bnum(gesetzt))
+        serial.nl()
+    }
 
     // Und JETZT der Spiegel: ab hier geht jedes Oktett, das ueber
     // `serial.put` laeuft, auch auf den Bildschirm.
@@ -2829,8 +2858,13 @@ fn kopf_setzen(state: u64, p: u64, n: u64) {
 // und keine der sechs Stufen darunter bedeutet etwas. Genau diese
 // Unterscheidung -- "eingefroren" gegen "laeuft, bekommt aber nichts"
 // -- war bisher auf keinem Foto zu treffen.
-const TAFEL_ZEILEN: u64 = 14
-const TAFEL_SPALTEN: u64 = 30
+// RUNDE BLECHDREI: SECHZEHN ZEILEN, ACHT JE SPALTE.
+// Zwei kommen dazu, und beide gehoeren in den ZEITGEBER-Pfad -- den
+// einzigen, der auf Justins Brett nachweislich laeuft:
+//   14 WAHL -- welcher USB-Regler gewonnen hat und mit welcher Punktzahl
+//   15 BAND -- ob das reservierte Band wirklich steht
+const TAFEL_ZEILEN: u64 = 16
+const TAFEL_SPALTEN: u64 = 48
 
 fn tz_text(state: u64, buf: u64, at: u64, t: u64) -> u64 {
     return puls_text(state, buf, at, t)
@@ -2910,10 +2944,13 @@ fn tafel_zeile_sagen(b: u64, n: u64) {
 // haengt (Systemaufruf/Ring 3). Steht IRQ auch: die Unterbrechungen
 // sind aus. Steht beides und der Zeiger ist da: der Rechner ist tot.
 // Diese Unterscheidung war auf keinem Foto zu treffen.
-const TAFEL_SP: u64 = 40 // Zeichen je gemerkter Zeile
-static mut tafel_txt: [u8; 560] = [0 as u8; 560] // TAFEL_ZEILEN * TAFEL_SP
-static mut tafel_len: [u64; 14] = [0 as u64; 14]
-static mut tafel_fg: [u64; 14] = [0 as u64; 14]
+// RUNDE BLECHDREI: 40 GEMERKT, 30 GEMALT -- und die kleinere Zahl
+// gewann still. Justins Foto zeigte "... HUB 0 KBD" und dort hoerte
+// die Zeile auf. Jetzt ist es EINE Zahl, und sie steht in `wm` genauso.
+const TAFEL_SP: u64 = 48 // Zeichen je gemerkter Zeile
+static mut tafel_txt: [u8; 768] = [0 as u8; 768] // TAFEL_ZEILEN * TAFEL_SP
+static mut tafel_len: [u64; 16] = [0 as u64; 16]
+static mut tafel_fg: [u64; 16] = [0 as u64; 16]
 static mut tafel_hat: u64 = 0 // steht schon Inhalt bereit?
 static mut tafel_drin: u64 = 0 // Wiedereintrittssperre
 static mut tafel_irq: u64 = 0 // Rufe aus dem Zeitgeber
@@ -2921,6 +2958,47 @@ static mut tafel_mal: u64 = 0 // Anstriche
 static mut tafel_loop: u64 = 0 // Rufe aus der Schreibtischschleife
 static mut tafel_irqm: u64 = 0 // letzte Marke, an der aus dem IRQ gemalt wurde
 static mut tafel_serm: u64 = 0 // letzte Marke der seriellen Ausgabe
+// ================================================== RUNDE BLECHDREI
+// ============ DIE ECHTE FREQUENZ, AUS EINER ZWEITEN UHR
+//
+// Justin konnte aus einem EINZELNEN Foto nicht ablesen, wie schnell der
+// Zeitgeber wirklich schlaegt -- "IRQ 260 MAL 26" ist ohne ein zweites
+// Foto und eine Armbanduhr keine Rate. Zwei Fotos im Minutenabstand
+// ergaben zuletzt drei Marken je Sekunde statt hundert; das war die
+// wichtigste Zahl der ganzen Runde, und sie kostete ihn zwei Bilder und
+// eine Rechnung.
+//
+// Der Zyklenzaehler (`rdtsc`) ist eine von der Unterbrechung voellig
+// unabhaengige Uhr, und `time.khz` sagt, wie viele Zyklen eine
+// Millisekunde sind (in `time.fi` gegen den PIT geeicht). Damit steht
+// die Rate als ZAHL auf der Tafel: soll 100, gemessen was auch immer.
+static mut hz_tsc: u64 = 0
+static mut hz_irq: u64 = 0
+static mut hz_wert: u64 = 0
+
+fn hz_takt(state: u64) -> u64 {
+    let k: u64 = time.khz(state)
+    if k == 0 {
+        return 0
+    }
+    let t: u64 = time.tsc()
+    if hz_tsc == 0 || t <= hz_tsc || tafel_irq < hz_irq {
+        hz_tsc = t
+        hz_irq = tafel_irq
+        return hz_wert
+    }
+    let dt: u64 = t - hz_tsc
+    // Erst nach einer vollen Sekunde -- kuerzer waere die Koernung
+    // groesser als die Aussage.
+    if dt < k * 1000 {
+        return hz_wert
+    }
+    let di: u64 = tafel_irq - hz_irq
+    hz_wert = di * k * 1000 / dt
+    hz_tsc = t
+    hz_irq = tafel_irq
+    return hz_wert
+}
 
 // EINE ZEILE ABLEGEN. Gemalt wird sie erst in `tafel_streichen` -- und
 // zwar von wem auch immer als naechstes drankommt, Schleife oder
@@ -2982,6 +3060,11 @@ fn tafel_streichen(state: u64) {
     var t_p: [u8; 6] = " PRE \0"
     tn = puls_text(state, tp, tn, (&t_p[0]) as u64)
     tn = puls_zahl(state, tp, tn, kstate.get(state, kstate.PREEMPT))
+    // RUNDE BLECHDREI: DIE RATE, AUS DEM ZYKLENZAEHLER. Soll 100.
+    var t_hz: [u8; 5] = " HZ \0"
+    let hz: u64 = hz_takt(state)
+    tn = puls_text(state, tp, tn, (&t_hz[0]) as u64)
+    tn = puls_zahl(state, tp, tn, hz)
     tafel_merken(8, tp, tn, wm.mess_ampel(state, tafel_loop))
     tafel_zeile_sagen(tp, tn)
 
@@ -3150,6 +3233,68 @@ fn tafel_streichen(state: u64) {
     tafel_merken(13, tp, tn, afarbe)
     tafel_zeile_sagen(tp, tn)
 
+    // ---- Zeile 14: WELCHER USB-REGLER GEWONNEN HAT ----
+    //
+    // Justins Brett hat ZWEI xHCI-Regler, und dieser Kern faehrt genau
+    // EINEN (sein Vorrat -- Ringe, Zusammenhaenge, Endpunkttafel --
+    // liegt einmal da). Welcher es wird, entscheidet eine Punktzahl:
+    // acht je Boot-Tastatur oder Boot-Maus, drei je andere HID-Klasse,
+    // eins fuer den generischen Weg. Der Stick zaehlt NICHT.
+    //
+    // Zwischen zwei Laeufen desselben Sticks kippte diese Wahl bei
+    // Justin von "Tastatur und Maus" auf "nur der Stick" -- die Zahlen
+    // standen aber nur auf der SERIELLEN Leitung, und die hat er nicht.
+    // Jetzt stehen sie auf dem Schirm: `HC` ist die Wahl von wie vielen,
+    // `P` sind die Punkte je Regler in ihrer Reihenfolge.
+    var t14: [u8; 10] = "14 WAHL  \0"
+    var w_hc: [u8; 4] = "HC \0"
+    var w_vo: [u8; 2] = "/\0"
+    var w_pk: [u8; 4] = " P \0"
+    var w_ko: [u8; 2] = ",\0"
+    let nhc: u64 = xhci.count_hc(state)
+    tn = puls_text(state, tp, 0, (&t14[0]) as u64)
+    tn = puls_text(state, tp, tn, (&w_hc[0]) as u64)
+    tn = puls_zahl(state, tp, tn, usb.wahl(state))
+    tn = puls_text(state, tp, tn, (&w_vo[0]) as u64)
+    tn = puls_zahl(state, tp, tn, nhc)
+    tn = puls_text(state, tp, tn, (&w_pk[0]) as u64)
+    var hi: u64 = 0
+    while hi < nhc && hi < 4 {
+        if hi != 0 {
+            tn = puls_text(state, tp, tn, (&w_ko[0]) as u64)
+        }
+        tn = puls_zahl(state, tp, tn, usb.pkt_get(state, hi))
+        hi = hi + 1
+    }
+    tafel_merken(14, tp, tn, wm.mess_ampel(state, usb.kbd_dev(state)))
+    tafel_zeile_sagen(tp, tn)
+
+    // ---- Zeile 15: STEHT DAS RESERVIERTE BAND WIRKLICH? ----
+    //
+    // Die Tafel selbst kann nicht beweisen, dass sie geschuetzt ist --
+    // sie ist ja da. Diese Zeile sagt, WARUM: `H` ist die Hoehe des
+    // gesperrten Bandes in Bildpunkten (0 = kein Schutz, dann kann der
+    // Schreibtisch wieder darueber malen), `KOL` die Zahl der Spalten,
+    // `SP` die Zeichen je Zeile -- die Zahl, die in der Vorrunde
+    // stillschweigend auf dreissig beschnitten wurde.
+    var t15: [u8; 10] = "15 BAND  \0"
+    var b_h: [u8; 3] = "H \0"
+    var b_k: [u8; 6] = " KOL \0"
+    var b_s: [u8; 5] = " SP \0"
+    var b_w: [u8; 5] = " BR \0"
+    let bh: u64 = fb.band(state)
+    tn = puls_text(state, tp, 0, (&t15[0]) as u64)
+    tn = puls_text(state, tp, tn, (&b_h[0]) as u64)
+    tn = puls_zahl(state, tp, tn, bh)
+    tn = puls_text(state, tp, tn, (&b_k[0]) as u64)
+    tn = puls_zahl(state, tp, tn, wm.mess_kol(state))
+    tn = puls_text(state, tp, tn, (&b_s[0]) as u64)
+    tn = puls_zahl(state, tp, tn, TAFEL_SPALTEN)
+    tn = puls_text(state, tp, tn, (&b_w[0]) as u64)
+    tn = puls_zahl(state, tp, tn, wm.mess_vollbreite(state))
+    tafel_merken(15, tp, tn, wm.mess_ampel(state, bh))
+    tafel_zeile_sagen(tp, tn)
+
     // ================================================ RUNDE BLECHZWEI
     // ============ NUR DIE ZEILEN, DIE SICH WIRKLICH GEAENDERT HABEN.
     //
@@ -3190,17 +3335,21 @@ fn tafel_streichen(state: u64) {
     // das ist Justins Fall, `LOOP 0` --, bleibt es beim billigen Weg
     // mit einer Zeile. Der teure Fall ist damit an den gebunden, der
     // ihn verursacht.
-    let comp: u64 = wm.composites(state)
-    var voll: bool = false
-    if comp != tafel_comp {
-        tafel_comp = comp
-        tafel_grund = 0
-        voll = true
-    }
+    // ============================================ RUNDE BLECHDREI
+    // DER SCHLUESSEL ZUM BAND. Ab hier -- und NUR hier -- darf in die
+    // obersten Bildzeilen geschrieben werden; `fb.band_lo` weist jeden
+    // anderen ab. Er wird am Ende dieser Funktion wieder umgedreht,
+    // auch auf jedem Rueckweg.
+    fb.band_open(state, true)
+    // Die Gegenprobe zu `wm.composites` faellt damit weg: der
+    // Fensterserver KANN die Tafel nicht mehr uebermalen, also muss
+    // auch nichts mehr nachgezogen werden. Was bleibt, ist der billige
+    // Weg -- nur Zeilen, die sich wirklich geaendert haben.
+    tafel_comp = wm.composites(state)
     if tafel_grund == 0 {
         tafel_grund = 1
         wm.mess_grund(state, TAFEL_ZEILEN, TAFEL_SPALTEN)
-        fb.flush_rect(state, 0, 0, wm.mess_breite(state, TAFEL_SPALTEN),
+        fb.flush_rect(state, 0, 0, wm.mess_vollbreite(state),
             wm.messhoehe(state, TAFEL_ZEILEN))
     }
     let breite: u64 = wm.mess_breite(state, TAFEL_SPALTEN)
@@ -3208,14 +3357,16 @@ fn tafel_streichen(state: u64) {
     var z: u64 = 0
     while z < TAFEL_ZEILEN {
         let n: u64 = tafel_len[z as usize]
-        if n != 0 && (voll || tafel_anders(z, n)) {
+        if n != 0 && tafel_anders(z, n) {
             wm.messzeile(state, z, (&tafel_txt[0]) as u64 + z * TAFEL_SP,
                 n, tafel_fg[z as usize])
-            fb.flush_rect(state, 0, wm.messzeile_y(state, z), breite, zh)
+            fb.flush_rect(state, wm.messzeile_x(state, z),
+                wm.messzeile_y(state, z), breite, zh)
             tafel_merken_alt(z, n)
         }
         z = z + 1
     }
+    fb.band_open(state, false)
     // ============ RUNDE BLECHZWEI: NUR DAS RECHTECK, NICHT DAS BILD.
     //
     // Hier stand `fb.flush(state)`. Das uebertraegt den ganzen
@@ -3236,9 +3387,9 @@ fn tafel_streichen(state: u64) {
 // Was zuletzt WIRKLICH auf dem Schirm stand -- Text, Laenge und Farbe.
 // Ohne die Farbe waere eine Zeile, die nur von rot auf gruen wechselt,
 // unsichtbar geblieben, und die Ampel ist die halbe Aussage der Tafel.
-static mut tafel_alt: [u8; 560] = [0 as u8; 560]
-static mut tafel_altlen: [u64; 14] = [0 as u64; 14]
-static mut tafel_altfg: [u64; 14] = [0 as u64; 14]
+static mut tafel_alt: [u8; 768] = [0 as u8; 768]
+static mut tafel_altlen: [u64; 16] = [0 as u64; 16]
+static mut tafel_altfg: [u64; 16] = [0 as u64; 16]
 static mut tafel_grund: u64 = 0
 // Der Stand des Zusammensetzers beim letzten Anstrich.
 static mut tafel_comp: u64 = 0
@@ -3417,6 +3568,12 @@ fn tafel_tick(state: u64) {
         return
     }
     tafel_irq = tafel_irq + 1
+    // RUNDE BLECHDREI: NICHT WAEHREND DES AUFZAEHLENS. Siehe
+    // `usb.busy` -- die Begruendung steht dort, mit Justins beiden
+    // Messwerten.
+    if usb.busy(state) != 0 {
+        return
+    }
     let jetzt: u64 = kstate.get(state, kstate.TICKS)
     // ZWEI UHREN, WIE IN DER SCHLEIFE. Steht der Zeitgeber, zaehlt die
     // Zahl der Rufe -- kommt gar kein Ruf mehr, ist das die Aussage.

@@ -123,7 +123,8 @@ export {
     EDGE_BOTTOM, EDGE_TOP, EDGE_LEFT, EDGE_RIGHT, F_MAXIMIZED,
     // RUNDE BLECHZWEI: wie breit die Tafel wirklich ist, und wo eine
     // einzelne Zeile steht -- damit nur SIE uebertragen werden muss.
-    mess_breite, messzeile_y, messzeile_h
+    mess_breite, messzeile_y, messzeile_x, messzeile_h,
+    mess_vollbreite, mess_kol
 }
 
 // ------------------------------------------------------- die Zahlen
@@ -2053,8 +2054,28 @@ fn create(state: u64, owner: u64, x: i64, y: i64, w: u64, h: u64,
             wsv(state, i, W_ID, gs(state, S_NEXTID))
             ss(state, S_NEXTID, gs(state, S_NEXTID) + 1)
             wsv(state, i, W_OWNER, owner)
+            // ==================================== RUNDE BLECHDREI
+            // EIN FENSTER FAENGT UNTER DER ARBEITSFLAECHE AN.
+            //
+            // Der Schreibtisch legt sein Terminalfenster auf feste
+            // Koordinaten (x=24, y=40). Mit dem reservierten Band der
+            // Messtafel lag es damit VOLLSTAENDIG darunter und wurde von
+            // `fb` weggeschnitten -- ein Fenster, das es gibt, das man
+            // aber nicht sieht. Ein Strut, den nur die Maximierung
+            // beachtet, ist keiner.
+            //
+            // Nur nach UNTEN geschoben, nie verkleinert, und nur wenn es
+            // ein Band gibt: bei `nostrut` und auf schmalen Schirmen ist
+            // `work_y` null und diese Zeilen tun nichts. Deshalb sehen
+            // die Laeufe in tools/wm/run.sh dieselben Koordinaten wie
+            // vorher.
+            var wy: i64 = y
+            let oben: i64 = gs(state, S_WORK_Y) as i64
+            if wy < oben {
+                wy = oben
+            }
             wsv(state, i, W_X, x as u64)
-            wsv(state, i, W_Y, y as u64)
+            wsv(state, i, W_Y, wy as u64)
             wsv(state, i, W_W, w)
             wsv(state, i, W_H, h)
             wsv(state, i, W_BUF, buf)
@@ -2568,6 +2589,11 @@ fn recalc_work(state: u64) {
     var x1: u64 = sw
     var y1: u64 = sh
     if gs(state, S_NOSTRUT) == 0 {
+        // RUNDE BLECHDREI: das reservierte Band der Messtafel ist ein
+        // Strut wie jeder andere -- nur einer, den kein Fenster haelt.
+        // Ohne diese Zeile legte der Schreibtisch seine Fenster unter
+        // die Tafel, und `fb` schnitte sie dort ab.
+        y0 = fb.band(state)
         var i: u64 = 0
         while i < MAX_WIN {
             if wg(state, i, W_USED) != 0 && wg(state, i, W_STRUT) != 0 {
@@ -3814,6 +3840,14 @@ fn damage_caption(state: u64, i: u64) {
 // Bildschirms. Ueber `rep movsq`, wie alles andere in `fb.fi` -- eine
 // Schleife aus Einzelzugriffen kostete dort gemessen den Faktor acht.
 fn fb_row(state: u64, x: u64, y: u64, src: u64, n: u64) {
+    // RUNDE BLECHDREI: DIESER WEG GEHT AN `fb.hline` VORBEI -- er
+    // kopiert die Fensterflaeche wortweise direkt in den Zweitpuffer.
+    // Ohne die Grenze hier waere das reservierte Band der Messtafel
+    // genau von dem ueberschrieben worden, der es am haeufigsten
+    // ueberschrieben hat: dem Fensterserver.
+    if y < fb.band_lo(state) {
+        return
+    }
     let ziel: u64 = fb.draw_at(state) +% y *% fb.pitch(state) +% x *% 4
     copy_words(ziel, src, n *% 4 / 8)
     if (n & 1) != 0 {
@@ -3959,14 +3993,38 @@ fn fb_glyph(state: u64, slot: u64, x: i64, y: i64, color: u64,
 // So breit ist die laengste Tafelzeile (kgui.TAFEL_SPALTEN). Hier
 // noch einmal, weil `wm` `kgui` nicht einbinden darf -- der
 // Modulgraph ist ein Baum und kgui haengt ueber wm.
-const MESS_SPALTEN: u64 = 30
+// ================================================== RUNDE BLECHDREI
+// Justins Foto zeigte "11 USB DEV 0 FUND 3 HUB 0 KBD" -- mitten im
+// Wort abgeschnitten. Der Grund war eine ZWEITE Zahl: `kgui` merkt
+// sich 40 Zeichen je Zeile, gemalt und uebertragen wurden aber nur
+// `MESS_SPALTEN` = 30. Alles ab Zeichen 31 stand im Zweitpuffer und
+// kam nie ueber den Bus. Zwei Zahlen fuer eine Sache, und die
+// kleinere gewinnt still.
+const MESS_SPALTEN: u64 = 48
+// Wie viele Zeilen die Tafel hat. Spiegel von `kgui.TAFEL_ZEILEN` --
+// `wm` darf `kgui` nicht einbinden (der Modulgraph ist ein Baum).
+const MESS_ZEILEN: u64 = 16
 
 fn messk(state: u64) -> u64 {
     // Eine Stufe groesser als die Oberflaeche, hoechstens 4. Auf
     // 3440x1440 ist `uisc` 2, die Tafel also 3: 24 x 48 Bildpunkte je
     // Zeichen, rund elf Millimeter hoch. Das ist aus zwei Metern
     // dieselbe Winkelgroesse wie 6-mm-Text aus einem Meter.
-    var k: u64 = uisc(state) + 1
+    // ============================================ RUNDE BLECHDREI
+    // AUS DER BILDBREITE, NICHT AUS `uisc`.
+    //
+    // Zwei Gruende. Erstens steht `uisc` erst nach `surface` fest, die
+    // Tafel malt aber schon aus dem Boot-Protokoll heraus -- auf
+    // Justins 3440x1440 kam damit k=2 heraus, obwohl dort k=3 gemeint
+    // war. Zweitens ist die Frage hier eine andere als bei der
+    // Oberflaeche: nicht "wie gross ist ein Knopf", sondern "was kann
+    // ein Mensch aus einem Meter mit dem Handy noch fotografieren".
+    // 3440 / 900 = 3 -> Zeichen von 24 x 48 Bildpunkten, auf einem
+    // 34-Zoll-Schirm rund elf Millimeter hoch.
+    var k: u64 = fb.width(state) / 900
+    if k < 2 {
+        k = 2
+    }
     if k > 4 {
         k = 4
     }
@@ -3974,7 +4032,13 @@ fn messk(state: u64) -> u64 {
 }
 
 fn messhoehe(state: u64, zeilen: u64) -> u64 {
-    return font.GLYPH_H * messk(state) * zeilen + 2 * messk(state)
+    var z: u64 = zeilen
+    // RUNDE BLECHDREI: bei mehreren Spalten ist die Tafel nur so hoch
+    // wie EINE Spalte. `messleiste` ruft weiter mit einer Zeile.
+    if z > 1 {
+        z = (z + mess_kol(state) - 1) / mess_kol(state)
+    }
+    return font.GLYPH_H * messk(state) * z + 2 * messk(state)
 }
 
 // DER GRUND WIRD EINMAL GEFUELLT, nicht je Zeile. Sieben schwarze
@@ -4011,9 +4075,58 @@ fn mess_breite(state: u64, spalten: u64) -> u64 {
 
 // Wo eine einzelne Tafelzeile anfaengt und wie hoch sie ist. Damit
 // uebertraegt `kgui` nur die Zeilen, die sich WIRKLICH geaendert haben.
+// ================================================== RUNDE BLECHDREI
+// ZWEI SPALTEN NEBENEINANDER, UND WARUM.
+//
+// Die Tafel bekommt in dieser Runde ein FEST RESERVIERTES Band am
+// oberen Rand, das niemand ueberschreibt (`fb.set_band`). Vierzehn
+// Zeilen uebereinander waeren auf Justins 3440x1440 aber 14 * 48 =
+// 678 Bildpunkte, also fast die halbe Bildhoehe -- ein Messgeraet,
+// das den Messgegenstand verdeckt.
+//
+// Also sieben Zeilen in zwei Spalten: 342 Bildpunkte hoch, 2 * 1182
+// breit. Passen zwei Spalten nicht nebeneinander (schmale Schirme der
+// Regressionslaeufe), faellt es von selbst auf eine zurueck.
+fn mess_kol(state: u64) -> u64 {
+    if 2 * mess_breite(state, MESS_SPALTEN) <= fb.width(state) {
+        return 2
+    }
+    return 1
+}
+
+// Zeilen JE SPALTE -- aufgerundet, damit keine Zeile herausfaellt.
+fn mess_projespalte(state: u64) -> u64 {
+    let k: u64 = mess_kol(state)
+    return (MESS_ZEILEN + k - 1) / k
+}
+
+// Die volle Breite der Tafel: alle Spalten nebeneinander.
+fn mess_vollbreite(state: u64) -> u64 {
+    var b: u64 = mess_kol(state) * mess_breite(state, MESS_SPALTEN)
+    if b > fb.width(state) {
+        b = fb.width(state)
+    }
+    return b
+}
+
+fn messzeile_x(state: u64, zeile: u64) -> u64 {
+    // GEMESSEN UND KORRIGIERT: im ersten Lauf stand `MESS_ZEILEN` auf
+    // 14, waehrend `kgui` schon sechzehn Zeilen schickte. Die beiden
+    // letzten landeten damit in einer DRITTEN Spalte bei x=2364 --
+    // ausserhalb des schwarzen Grundes, mitten auf dem Schreibtisch,
+    // gruen auf blau. Zwei Zahlen fuer eine Sache, schon wieder. Die
+    // Klemme hier sorgt dafuer, dass eine solche Zeile schlimmstenfalls
+    // eine andere ueberschreibt, statt aus der Tafel zu fallen.
+    var kol: u64 = zeile / mess_projespalte(state)
+    if kol >= mess_kol(state) {
+        kol = mess_kol(state) - 1
+    }
+    return kol * mess_breite(state, MESS_SPALTEN)
+}
+
 fn messzeile_y(state: u64, zeile: u64) -> u64 {
     let k: u64 = messk(state)
-    return k + zeile * font.GLYPH_H * k
+    return k + (zeile % mess_projespalte(state)) * font.GLYPH_H * k
 }
 
 fn messzeile_h(state: u64) -> u64 {
@@ -4029,7 +4142,7 @@ fn mess_grund(state: u64, zeilen: u64, spalten: u64) {
     if hoehe >= fb.height(state) {
         return
     }
-    let breite: u64 = mess_breite(state, spalten)
+    let breite: u64 = mess_vollbreite(state)
     fb.fill(state, 0, 0, breite, hoehe, fb.rgb(state, 0x00, 0x00, 0x00))
     // Die Trennlinie unten -- damit die Tafel auf einem Foto eine
     // KANTE hat und nicht in den Schreibtisch ausfranst.
@@ -4046,8 +4159,9 @@ fn messzeile(state: u64, zeile: u64, p: u64, n: u64, fg: u64) {
     let k: u64 = messk(state)
     let gw: u64 = font.GLYPH_W * k
     let gh: u64 = font.GLYPH_H * k
-    let y0: u64 = k + zeile * gh
-    if y0 + gh >= fb.height(state) {
+    let y0: u64 = messzeile_y(state, zeile)
+    let x0: u64 = messzeile_x(state, zeile)
+    if y0 + gh >= fb.height(state) || x0 >= fb.width(state) {
         return
     }
     // ============ RUNDE BLECHZWEI: DIE ZEILE ZUERST LOESCHEN.
@@ -4063,11 +4177,14 @@ fn messzeile(state: u64, zeile: u64, p: u64, n: u64, fg: u64) {
     // Jetzt loescht JEDE Zeile ihr eigenes Feld, unmittelbar bevor sie
     // gemalt wird. Es kostet einen Balken je Zeile statt einen fuer
     // alle -- dieselbe Flaeche, aber lueckenlos.
-    let breite: u64 = mess_breite(state, MESS_SPALTEN)
-    fb.fill(state, 0, y0, breite, gh, fb.rgb(state, 0x00, 0x00, 0x00))
+    var breite: u64 = mess_breite(state, MESS_SPALTEN)
+    if x0 + breite > fb.width(state) {
+        breite = fb.width(state) - x0
+    }
+    fb.fill(state, x0, y0, breite, gh, fb.rgb(state, 0x00, 0x00, 0x00))
     var i: u64 = 0
-    var x: u64 = k
-    while i < n && x + gw <= breite {
+    var x: u64 = x0 + k
+    while i < n && x + gw <= x0 + breite {
         let ch: u64 = kstate.get8(p + i)
         var r: u64 = 0
         while r < font.GLYPH_H {
