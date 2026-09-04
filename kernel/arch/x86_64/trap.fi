@@ -47,7 +47,9 @@ import fpu
 export {
     entry,
     // RUNDE BLECHVIER: was der Zeitgeberbehandler ueber sich selbst weiss.
-    isr_us_last, isr_us_max, ticks_lost, ticks_late, bh_tief
+    isr_us_last, isr_us_max, ticks_lost, ticks_late, bh_tief,
+    // RUNDE LEISTE: der letzte gestorbene Prozess, fuer die Tafel.
+    tote_pid, tote_zahl
 }
 
 // Offsets in the trap frame (see isr.s).
@@ -480,6 +482,102 @@ fn report_user(frame: u64, state: u64, vector: u64, cur: u64, dies: bool) {
         signal.say_name(signal.signal_of(vector))
     }
     serial.nl()
+    // ================================================== RUNDE LEISTE
+    // UND JETZT DIE SPUR, DIE DIE ZEILE DARUEBER SCHULDIG BLEIBT.
+    //
+    // "rip=0xd70" sagt, WOHIN gesprungen wurde, und nichts darueber,
+    // WOHER. Genau daran hat diese Runde zwei Stunden verloren: 0xd70
+    // ist 3440, die Bildschirmbreite, also stand in einer
+    // Ruecksprungadresse eine Zahl, die dort nichts zu suchen hat --
+    // und welche Adresse das war, stand nirgends.
+    //
+    // Gedruckt werden deshalb der Stapelzeiger und die ersten Woerter
+    // des BENUTZERSTAPELS, die wie Programmcode aussehen. Das ist
+    // keine echte Rueckverfolgung (dafuer braeuchte es die
+    // Rahmenzeiger), aber es ist die Kette der Ruecksprungadressen,
+    // und `addr2line` macht daraus Quellzeilen.
+    //
+    // Gelesen wird ueber `proc.translate`, also ueber die
+    // Seitentafel DIESES Prozesses -- der Kern steht hier auf seinem
+    // eigenen Stapel, und der Benutzerstapel ist nur ueber die
+    // Uebersetzung erreichbar.
+    spur_sagen(state, cur, word(frame, F_RSP))
+}
+
+// Die Grenzen, zwischen denen eine Zahl auf dem Benutzerstapel wie
+// eine Ruecksprungadresse aussieht: der Stummel in `.utext` (0x400000)
+// und alles, was der Lader nach 0x40100000 legt. Alles darunter oder
+// darueber ist Datum, nicht Code.
+const U_TEXT_LO: u64 = 0x400000
+const U_TEXT_HI: u64 = 0x40400000
+
+fn spur_sagen(state: u64, cur: u64, rsp: u64) {
+    var s_sp: [u8; 14] = "  spur rsp=\0\0\0"
+    var s_at: [u8; 3] = " \0\0"
+    var s_no: [u8; 12] = "  (keine)\0\0\0"
+    serial.puts((&s_sp[0]) as u64)
+    serial.hex(rsp)
+    if rsp == 0 {
+        serial.nl()
+        return
+    }
+    // ================================================== RUNDE LEISTE
+    // DIE FRAGE, DIE DIESE RUNDE ENTSCHEIDET: LIEGT DER BENUTZERSTAPEL
+    // AUF EINEM RAHMEN, DER SCHON JEMAND ANDEREM GEHOERT?
+    //
+    // Auf dem Benutzerstapel des Starters standen Zahlen, die dort
+    // nicht hingehoeren -- KERNADRESSEN (`wm.mess_kol+0x79`) und ein
+    // Zeiger in den Kernstapel-Bereich. Beides ist unmoeglich, solange
+    // der Rahmen hinter dem Stapel NUR diesem Prozess gehoert.
+    //
+    // Also wird er gedruckt: die physische Adresse hinter `rsp`, der
+    // Kernstapel dieses Prozesses und der Abstand. Sind sie gleich
+    // oder liegen sie in derselben Kachel, ist der Fall geklaert und
+    // die Ursache liegt im Rahmenverwalter, nicht im Programm.
+    var s_ph: [u8; 8] = "  phys=\0"
+    var s_ks: [u8; 10] = "  kstack=\0"
+    serial.puts((&s_ph[0]) as u64)
+    serial.hex(proc.translate(state, cur, rsp))
+    serial.puts((&s_ks[0]) as u64)
+    serial.hex(sched.tget(state, cur, sched.T_KSTACK))
+    var i: u64 = 0
+    var n: u64 = 0
+    // 256 Woerter, also 2 KiB Stapel -- weit genug fuer die Kette und
+    // nah genug, um in einer Zeile zu bleiben.
+    while i < 256 && n < 8 {
+        let a: u64 = rsp + i * 8
+        let phys: u64 = proc.translate(state, cur, a)
+        if phys != 0 {
+            let v: u64 = __mmio_read64(phys as *mut u64)
+            if v >= U_TEXT_LO && v < U_TEXT_HI {
+                serial.puts((&s_at[0]) as u64)
+                serial.hex(v)
+                n = n + 1
+            }
+        }
+        i = i + 1
+    }
+    if n == 0 {
+        serial.puts((&s_no[0]) as u64)
+    }
+    serial.nl()
+    // UND FUER JUSTINS FOTO: der letzte Prozesstod bleibt stehen.
+    tot_pid = sched.tget(state, cur, sched.T_PID)
+    tot_zahl = tot_zahl + 1
+}
+
+// Der letzte gestorbene Prozess -- fuer die Messtafel, damit ein Foto
+// die Frage "ist mir da etwas weggestorben?" beantwortet, ohne dass
+// eine serielle Leitung noetig waere (Justins Brett hat keine).
+static mut tot_pid: u64 = 0
+static mut tot_zahl: u64 = 0
+
+fn tote_pid() -> u64 {
+    return tot_pid
+}
+
+fn tote_zahl() -> u64 {
+    return tot_zahl
 }
 
 // =====================================================================
