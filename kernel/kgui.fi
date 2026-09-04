@@ -34,6 +34,8 @@ import fs
 import hw
 import kstate
 import mem
+import netdev
+import inet
 import pmon
 import proc
 import ps2m
@@ -2971,7 +2973,30 @@ fn kopf_setzen(state: u64, p: u64, n: u64) {
 //    9 EICH  -> KNALL  (LSR FF, PIT und ACPI-Uhr stimmen ueberein)
 //   13 ABBILD-> KRIP   (PDE 10E3, PAT 01 -- write-combining steht)
 // Ein Absturz ist wichtiger als eine beantwortete Frage.
-const TAFEL_ZEILEN: u64 = 20
+//
+// ================================================== RUNDE LEISTE
+// UND JETZT DOCH VIERUNDZWANZIG -- WEIL DIE URSACHE GEFUNDEN IST.
+//
+// Der Absatz darueber sagt: "Die Ursache steckt im Lader-/modfs-Pfad
+// und ist NICHT gefunden -- also wird das Band nicht groesser gemacht,
+// bis sie es ist." Sie ist gefunden, und sie steckte nicht im Lader:
+// ein KERNSTAPEL lief unten heraus und schrieb in den Rahmen darunter
+// (siehe `kernel/sched.fi`, KSTACK_FRAMES). Ein groesseres Band
+// verschiebt Code und Rahmen und damit das OPFER -- beim einen Stand
+// war es etwas Folgenloses, beim anderen die Modusseite. Das Band war
+// nie die Ursache, es war der Wuerfel.
+//
+// Mit der Waechterseite unter jedem Kernstapel ist ein solcher
+// Ueberlauf keine stille Zerstoerung mehr, sondern eine Meldung mit
+// Aufgabennummer -- und die Zeilen 20 bis 22 bekommen ihre eigenen
+// Plaetze zurueck:
+//   20 ENDP   der Endpunktzustand aus Sicht des Reglers
+//   21 FUND   die Fundliste des USB-Baums, Stufe fuer Stufe
+//   22 NETZ   die Netzkarte: Hersteller, Geraet, Verbindung, Adresse
+// 24 Zeilen sind auf 1440 Bildpunkten ein Band von 582, und 582 * 2
+// ist kleiner als 1440 -- `fb.set_band` nimmt es seit der Runde
+// STARTKNOPF an.
+const TAFEL_ZEILEN: u64 = 24
 const TAFEL_SPALTEN: u64 = 48
 
 fn tz_text(state: u64, buf: u64, at: u64, t: u64) -> u64 {
@@ -3417,8 +3442,35 @@ fn absturz(state: u64, vec: u64, err: u64, rip: u64, cr2: u64, rsp: u64,
 
 // Der Zustand der Aufgabe hinter dem obersten Ebenenfenster -- das ist
 // die Taskleiste. 0, wenn es keins gibt.
+// ==================================================== RUNDE LEISTE
+// DER HOECHSTE KERNSTAPELSTAND ALLER AUFGABEN, in Oktetten.
+//
+// `sched.stack_high` liest die Hochwassermarke aus der Faerbung
+// zurueck. Was hier steht, ist das Maximum ueber alle lebenden
+// Aufgaben -- die eine Zahl, an der man sieht, ob 64 KiB reichen. Sie
+// gehoert neben den Waechterzaehler: der sagt, DASS es passiert ist,
+// diese sagt, WIE NAH man dran ist.
+fn kstapel_hoch(state: u64) -> u64 {
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var i: u64 = 0
+    var m: u64 = 0
+    while i < n {
+        if sched.tget(state, i, sched.T_STATE) != sched.S_FREE {
+            let h: u64 = sched.stack_high(state, i)
+            if h > m {
+                m = h
+            }
+        }
+        i = i + 1
+    }
+    return m
+}
+
 fn leiste_zustand(state: u64) -> u64 {
-    let tb: u64 = wm.top_layer_win(state)
+    // RUNDE LEISTE: `panel_win` und nicht `top_layer_win` -- seit dem
+    // Startmenue liegt auf L_TOP mehr als die Leiste, und `TB` hat
+    // eine Runde lang den Starter gemessen.
+    let tb: u64 = wm.panel_win(state)
     if tb >= wm.MAX_WIN {
         return 0
     }
@@ -3653,7 +3705,30 @@ fn tafel_streichen(state: u64) {
     var s_tb: [u8; 5] = " TB \0"
     tn = puls_text(state, tp, tn, (&s_tb[0]) as u64)
     tn = puls_zahl(state, tp, tn, leiste_zustand(state))
-    tafel_merken(12, tp, tn, wm.mess_ampel(state, wm_runden()))
+    // ======================================== RUNDE LEISTE
+    // DIE WAECHTERSEITE UNTER DEN KERNSTAPELN.
+    //
+    // `WA` ist die Zahl der Ueberlaeufe, `T` wie tief der letzte ging
+    // (in Oktetten unter den Stapelboden) und `KS` der hoechste je
+    // gemessene Stapelstand aller Aufgaben, in Oktetten von 65536.
+    //
+    // WA MUSS NULL BLEIBEN. Steht dort etwas anderes, hat ein
+    // Kernstapel in fremden Speicher geschrieben, und jeder andere
+    // Messwert auf dieser Tafel ist ab da eine Vermutung.
+    var s_wa: [u8; 5] = " WA \0"
+    var s_wt: [u8; 4] = " T \0"
+    var s_ks: [u8; 5] = " KS \0"
+    tn = puls_text(state, tp, tn, (&s_wa[0]) as u64)
+    tn = puls_zahl(state, tp, tn, sched.guard_faults())
+    tn = puls_text(state, tp, tn, (&s_wt[0]) as u64)
+    tn = puls_zahl(state, tp, tn, sched.guard_last_depth())
+    tn = puls_text(state, tp, tn, (&s_ks[0]) as u64)
+    tn = puls_zahl(state, tp, tn, kstapel_hoch(state))
+    var ampel12: u64 = wm.mess_ampel(state, wm_runden())
+    if sched.guard_faults() != 0 {
+        ampel12 = wm.mess_rot(state)
+    }
+    tafel_merken(12, tp, tn, ampel12)
     tafel_zeile_sagen(tp, tn)
 
     // ---- Zeile 13: DIE ABBILDUNG, AUS DER SEITENTAFEL GELESEN ----
@@ -3971,7 +4046,7 @@ fn tafel_streichen(state: u64) {
     // Wiederbelebungen. Vor dieser Runde gab es die Wiederbelebung
     // ueberhaupt nicht -- ein einziger Uebertragungsfehler hat die
     // Tastatur fuer immer stillgelegt, waehrend die Maus weiterlief.
-    var t20: [u8; 10] = "14 ENDP  \0"
+    var t20: [u8; 10] = "20 ENDP  \0"
     var e_k: [u8; 5] = "KBD \0"
     var e_m: [u8; 6] = " MAU \0"
     var e_e: [u8; 4] = "EP\0\0"
@@ -4023,7 +4098,7 @@ fn tafel_streichen(state: u64) {
     if ekst == 1 {
         efarb = wm.mess_gruen(state)
     }
-    tafel_merken(14, tp, tn, efarb)
+    tafel_merken(20, tp, tn, efarb)
     tafel_zeile_sagen(tp, tn)
 
     // ---- Zeile 21: DIE FUNDLISTE, STUFE FUER STUFE ----
@@ -4041,7 +4116,7 @@ fn tafel_streichen(state: u64) {
     // "3:AD--" heisst: Geraet an Anschluss 3, Adresse und Deskriptor
     // gingen, die Konfiguration nicht. Das ist die Auskunft, die drei
     // Runden lang gefehlt hat.
-    var t21: [u8; 10] = "17 FUND  \0"
+    var t21: [u8; 10] = "21 FUND  \0"
     var f_dp: [u8; 2] = ":\0"
     var f_sp: [u8; 2] = " \0"
     var f_a: [u8; 2] = "A\0"
@@ -4080,7 +4155,80 @@ fn tafel_streichen(state: u64) {
         tn = puls_text(state, tp, tn, (&f_sp[0]) as u64)
         fi = fi + 1
     }
-    tafel_merken(17, tp, tn, wm.mess_ampel(state, fvoll))
+    tafel_merken(21, tp, tn, wm.mess_ampel(state, fvoll))
+    tafel_zeile_sagen(tp, tn)
+
+    // ---- Zeile 22: DIE NETZKARTE ----
+    //
+    // ================================================== RUNDE LEISTE
+    // DIE ZEILE, DIE JUSTIN FOTOGRAFIEREN SOLL, DAMIT `jarvisd` LAEUFT.
+    //
+    // Sein Brett hat keine serielle Leitung (LSR FF, seit Runde KABEL
+    // gemessen). Alles, was `netdev.fi` beim Erkunden auf die Leitung
+    // schreibt -- also auch die eine Zahl, die entscheidet, ob dieser
+    // Kern seinen Netzchip fahren kann -- ist auf seinem Rechner
+    // unsichtbar. Deshalb steht sie ab hier auf der Tafel:
+    //
+    //   K    welcher Treiber gewaehlt wurde
+    //        0 keiner  1 virtio  2 e1000  3 r8169  4 i219
+    //   BDF  wo die Karte auf dem Bus sitzt (Bus/Geraet/Funktion)
+    //   L    Verbindung: 1 = Kabel steckt und der Partner antwortet
+    //   ABL  wie viele Karten der Klasse 02:00 ABGELEHNT wurden, und
+    //        dahinter Hersteller und Geraet der ERSTEN davon. GENAU
+    //        DIESE VIER HEXZIFFERNPAARE brauche ich von ihm, wenn K 0
+    //        ist -- damit steht fest, ob sein Chip in der Tabelle
+    //        fehlt oder ob der Treiber ihn nicht hochbekommt.
+    //   IP   die Adresse, die der Stapel gerade fuehrt. Steht dort
+    //        169.254.x.x, ist es die feste aus der Befehlszeile und
+    //        DHCP hat nichts gebracht; steht dort etwas aus seinem
+    //        Heimnetz, ist die Leitung fertig und `jarvisd` kann
+    //        hinaus.
+    var t22: [u8; 10] = "22 NETZ  \0"
+    var n_k: [u8; 3] = "K\0\0"
+    var n_b: [u8; 6] = " BDF \0"
+    var n_l: [u8; 4] = " L \0"
+    var n_a: [u8; 6] = " ABL \0"
+    var n_d: [u8; 2] = ":\0"
+    var n_i: [u8; 5] = " IP \0"
+    var n_p: [u8; 2] = ".\0"
+    let nk0: u64 = netdev.kind_on(state, 0)
+    tn = puls_text(state, tp, 0, (&t22[0]) as u64)
+    tn = puls_text(state, tp, tn, (&n_k[0]) as u64)
+    tn = puls_zahl(state, tp, tn, nk0)
+    tn = puls_text(state, tp, tn, (&n_b[0]) as u64)
+    tn = puls_hexn(state, tp, tn, netdev.bdf_on(state, 0), 4)
+    tn = puls_text(state, tp, tn, (&n_l[0]) as u64)
+    var lnk: u64 = 0
+    if netdev.link_up_on(state, 0) {
+        lnk = 1
+    }
+    tn = puls_zahl(state, tp, tn, lnk)
+    let abl: u64 = netdev.unsupported_count(state)
+    tn = puls_text(state, tp, tn, (&n_a[0]) as u64)
+    tn = puls_zahl(state, tp, tn, abl)
+    if abl != 0 {
+        tn = puls_text(state, tp, tn, (&n_d[0]) as u64)
+        tn = puls_hexn(state, tp, tn, netdev.unsupported_vendor(state, 0), 4)
+        tn = puls_text(state, tp, tn, (&n_d[0]) as u64)
+        tn = puls_hexn(state, tp, tn, netdev.unsupported_device(state, 0), 4)
+    }
+    let adr: u64 = inet.ip(state)
+    tn = puls_text(state, tp, tn, (&n_i[0]) as u64)
+    tn = puls_zahl(state, tp, tn, (adr >> 24) & 255)
+    tn = puls_text(state, tp, tn, (&n_p[0]) as u64)
+    tn = puls_zahl(state, tp, tn, (adr >> 16) & 255)
+    tn = puls_text(state, tp, tn, (&n_p[0]) as u64)
+    tn = puls_zahl(state, tp, tn, (adr >> 8) & 255)
+    tn = puls_text(state, tp, tn, (&n_p[0]) as u64)
+    tn = puls_zahl(state, tp, tn, adr & 255)
+    // GRUEN erst, wenn wirklich eine Adresse steht UND ein Treiber da
+    // ist. Eine gelbe Zeile heisst "Karte erkannt, aber keine
+    // Verbindung", eine rote "kein Treiber".
+    var nfarb: u64 = wm.mess_rot(state)
+    if nk0 != 0 {
+        nfarb = wm.mess_ampel(state, lnk)
+    }
+    tafel_merken(22, tp, tn, nfarb)
     tafel_zeile_sagen(tp, tn)
 
     // ================================================ RUNDE BLECHZWEI
@@ -4599,7 +4747,7 @@ fn kopf_malen(state: u64) {
     var t_yy: [u8; 4] = " y\0\0"
     var t_ml: [u8; 6] = " MAL \0"
     var t_fl: [u8; 4] = " fl\0"
-    let tb: u64 = wm.top_layer_win(state)
+    let tb: u64 = wm.panel_win(state)
     n = tz_text(state, b, 0, (&t7[0]) as u64)
     if tb >= wm.MAX_WIN {
         // Kein Fenster auf der obersten Ebene: die Leiste hat sich nie
