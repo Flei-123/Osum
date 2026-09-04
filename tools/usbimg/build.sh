@@ -583,6 +583,33 @@ verbose: yes
 # Justin klemmt. `lang=en` setzt die Datei VOR dem ersten
 # Ring-3-Programm; sonst aendert sich an diesem Eintrag nichts.
 
+# ================== RUNDE ZWISCHENSPEICHER: DER EINE EINTRAG, DER DIE
+# FRAGE MIT EINEM FOTO ENTSCHEIDET
+#
+# Justins Rechner hat KEINE eingebaute Grafik: der Rahmenpuffer ist ein
+# PCIe-Fenster der RTX 3060. Er war bis zu dieser Runde WRITE-BACK
+# abgebildet -- kleine Aenderungen (Taskleiste, Messtafel, ein Fenster)
+# bleiben dann in der Zwischenspeicherhierarchie der CPU liegen und
+# gehen nie ueber PCIe zur Karte. Nur das erste Vollbild (19,8 MB, mehr
+# als jeder L3) verdraengt sich selbst und wird sichtbar. Genau das
+# zeigt sein Foto: blauer Grund und Zeiger, sonst nichts.
+#
+# Der Kern bildet den Puffer seit dieser Runde write-combining ab. DIESER
+# Eintrag ist die GEGENPROBE mit dem groebsten Mittel: `fbuc` schaltet
+# den Zwischenspeicher fuer das Fenster ganz ab (PCD|PWT). Das ist
+# langsam -- jeder Bildpunkt geht einzeln auf den Bus --, aber es kann
+# per Bauart nichts liegenbleiben.
+#
+# ERSCHEINEN HIER TASKLEISTE, TERMINALFENSTER UND MESSTAFEL, waehrend
+# sie im ersten Eintrag fehlen, dann ist die Ursache bewiesen und es
+# war die Abbildungsart. Erscheinen sie auch hier nicht, ist sie
+# widerlegt und der Fehler liegt woanders.
+/@MARKE_PRODUKT@ -- Schreibtisch (Rahmenpuffer ohne Zwischenspeicher)
+    protocol: multiboot1
+    path: boot():/osum.mb
+    module_path: boot():/root.img
+    cmdline: modfs osum gfx fbuc wm wig desk wmshell wmdauer tafel usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+
 /@MARKE_PRODUKT@ -- Desktop (English)
     protocol: multiboot1
     path: boot():/osum.mb

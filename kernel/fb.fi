@@ -63,8 +63,11 @@ profile kernel
 
 import kstate
 import font
+import msr
+import arch.arch
 
 export {
+    wc,
     init, ready, echo, geometry_ok,
     width, height, pitch, bpp, bytes, addr, phys, source, back, draw_at,
     cols, rows, cx, cy, chars, flushes, scrolls, huges, block, offset,
@@ -74,7 +77,7 @@ export {
     set_echo, echo_on, double_buffered, uncached, set_back, hline_mask,
     parse, mode, want, selftest, selftest_max, failbits,
     SRC_NONE, SRC_MB, SRC_VBE, FB_OFF, FB_MAX, FONT_OFF, USER_BASE,
-    M_GFX, M_NODBL, M_UC, M_BIG, M_NOCUR, M_HOLD, M_PATTERN, M_USER,
+    M_GFX, M_NODBL, M_UC, M_BIG, M_NOCUR, M_HOLD, M_PATTERN, M_USER, M_WB,
     WIDTH_STD, HEIGHT_STD,
     WIDTH_BIG, HEIGHT_BIG,
     // RUNDE DISPLAY -- der Moduswechsel und das Umrechnen beim Uebertragen.
@@ -144,6 +147,7 @@ const S_HUGES: u64 = 0x0D8 // wie viele 2-MiB-Seiten der Puffer braucht
 const S_DIRTY_LO: u64 = 0x0E0 // erste geaenderte Bildzeile
 const S_DIRTY_HI: u64 = 0x0E8 // letzte + 1
 const S_UNCACHED: u64 = 0x0F0 // 1 = Fenster ohne Zwischenspeicher
+const S_WC: u64 = 0x0F8 // 1 = Write-Combining (PAT-Stelle 4) steht
 const S_MODE: u64 = 0x0F8 // die Worte der Kommandozeile, die hierher gehoeren
 
 // RUNDE DISPLAY. Die Skalare dieser Runde liegen NICHT bei 0x100 --
@@ -235,6 +239,10 @@ const M_USER: u64 = 128 // "fbuser"   -- das Programm in Ring 3 laufen lassen
 // eines Wortes, das fuer zwei Zahlen steht. Das Bit sagt nur, DASS eine
 // dastand; die Zahlen stehen in S_RESW/S_RESH.
 const M_RES: u64 = 256
+// RUNDE ZWISCHENSPEICHER: die Gegenprobe zu WC. `fbwb` laesst den
+// Rahmenpuffer write-back abgebildet, so wie bis zu dieser Runde --
+// damit laesst sich der Unterschied MESSEN statt behaupten.
+const M_WB: u64 = 512 // "fbwb" -- WC ausdruecklich NICHT einschalten
 
 // 800 x 600 x 4 sind 1 920 000 Oktette und passen in EINE 2-MiB-Kachel;
 // 1024 x 768 x 4 sind 3 145 728 und brauchen zwei. Beides steht in der
@@ -305,6 +313,42 @@ const PAGE_WRITE: u64 = 2
 const PAGE_PWT: u64 = 8
 const PAGE_PCD: u64 = 16
 const PAGE_HUGE: u64 = 0x80
+// ====================================================================
+// RUNDE ZWISCHENSPEICHER: WRITE-COMBINING FUER DEN RAHMENPUFFER.
+//
+// Justins Rechner hat KEINE eingebaute Grafik. Der Rahmenpuffer ist ein
+// PCIe-Fenster der RTX 3060, kein Systemspeicher -- und er war bis zu
+// dieser Runde WRITE-BACK abgebildet (`PAGE_PCD|PAGE_PWT` kamen nur mit
+// `fbuc` dazu, und `fbuc` stand auf keinem Menueeintrag).
+//
+// Ein Schreibzugriff in einen WB-abgebildeten MMIO-Bereich landet in
+// der Zwischenspeicherhierarchie der CPU und geht erst dann ueber PCIe
+// zur Karte, wenn die Zeile VERDRAENGT wird. Niemand erzwingt das: es
+// gibt in diesem Kern kein `wbinvd`, kein `clflush` und bis zu dieser
+// Runde auch kein `sfence` nach dem Blit.
+//
+// DAS ERKLAERT JUSTINS FOTO GENAU: das erste Vollbild ist
+// 3440*1440*4 = 19,8 MB und damit groesser als jeder L3 -- es
+// verdraengt sich selbst und wird sichtbar (blauer Grund, Zeiger).
+// Jede spaetere Aenderung ist klein (Taskleiste, Messtafel, ein
+// Fenster), passt bequem in den Zwischenspeicher, wird nie verdraengt
+// und erscheint NIE. Der Kern laeuft dabei voellig gesund weiter --
+// deshalb meldet die Taskleiste `rc=0` und deshalb waren die 453
+// Anstriche der Vorrunde echt gezaehlt und trotzdem unsichtbar.
+//
+// In QEMU faellt es nie auf, weil der Rahmenpuffer dort gewoehnlicher
+// Systemspeicher ist.
+//
+// WC ist die Betriebsart, in der jeder echte Grafiktreiber einen
+// Rahmenpuffer abbildet: nahezu WB-Tempo beim Schreiben, aber nichts
+// bleibt im Zwischenspeicher liegen. Bei 2-MiB-Seiten ist das
+// PAT-Bit Bit 12 (bei 4-KiB-Seiten waere es Bit 7).
+const PAGE_PAT_HUGE: u64 = 0x1000 // Bit 12 -- die PAT-Stelle bei 2 MiB
+const IA32_PAT: u64 = 0x277
+// Die Stelle, die wir umprogrammieren: PA4. Index = PAT<<2|PCD<<1|PWT,
+// also PAT=1, PCD=0, PWT=0. Die Stellen 0 bis 3 bleiben UNVERAENDERT --
+// jede bestehende Abbildung behaelt damit ihre Bedeutung.
+const PAT_WC: u64 = 0x01 // Write-Combining
 const ADDR_MASK: u64 = 0x000FFFFFFFFFF000
 
 // MUSS mit `apic.fi` uebereinstimmen. Acht Plaetze zu 2 MiB, aliasiert
@@ -459,6 +503,53 @@ fn slot_used(state: u64, i: u64) -> u64 {
 // `n` aufeinanderfolgende freie Plaetze, damit ein Puffer, der groesser
 // als 2 MiB ist, im Kernel an EINEM Stueck liegt. Gibt die virtuelle
 // Adresse des ersten zurueck, 0 = kein Platz.
+// IA32_PAT so stellen, dass Stelle 4 Write-Combining ist. Gibt zurueck,
+// ob es geklappt hat -- zurueckgelesen, nicht geglaubt.
+//
+// EHRLICH GESAGT: das Handbuch verlangt fuer eine PAT-Aenderung im
+// Betrieb eine laengere Folge (Zwischenspeicher aus, spuelen, TLB
+// leeren). Hier steht sie VOR der ersten Abbildung des Rahmenpuffers
+// und vor jedem Bild, und danach wird CR3 ohnehin neu geladen. Auf
+// mehreren Kernen muesste jeder Kern sie ausfuehren; dieser Kern malt
+// nur auf dem Startprozessor.
+// Ob der Rahmenpuffer wirklich write-combining abgebildet ist. Das ist
+// eine MESSUNG (PAT zurueckgelesen), keine Absicht.
+fn wc(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_WC)
+}
+
+fn pat_setup(state: u64) -> bool {
+    let alt: u64 = msr.rd0(state, IA32_PAT)
+    if alt == 0 {
+        return false
+    }
+    let maske: u64 = 255 << 32
+    let neu: u64 = (alt & (~maske)) | (PAT_WC << 32)
+    if !msr.wr(state, IA32_PAT, neu) {
+        return false
+    }
+    let c: u64 = asm("mov rax, cr3", out("rax"))
+    asm("mov cr3, rax", in("rax") c)
+    return msr.rd0(state, IA32_PAT) == neu
+}
+
+// Die Seitenbits fuer den Rahmenpuffer, an EINER Stelle. `map_run` und
+// `slot_remap` hatten sie doppelt -- und genau so eine Verdopplung ist
+// der Grund, warum eine Betriebsart an einer Stelle greift und an der
+// anderen nicht.
+fn fb_bits(state: u64, uncached: bool) -> u64 {
+    var bits: u64 = PAGE_PRESENT | PAGE_WRITE | PAGE_HUGE
+    if uncached {
+        // Fuer Geraeteregister richtig, fuer einen Rahmenpuffer teuer:
+        // jeder Bildpunkt geht einzeln auf den Bus.
+        return bits | PAGE_PCD | PAGE_PWT
+    }
+    if kstate.get(state, FB_OFF + S_WC) != 0 {
+        return bits | PAGE_PAT_HUGE
+    }
+    return bits
+}
+
 fn map_run(state: u64, block: u64, n: u64, uncached: bool) -> u64 {
     if n == 0 || n > WIN_SLOTS {
         return 0
@@ -480,13 +571,7 @@ fn map_run(state: u64, block: u64, n: u64, uncached: bool) -> u64 {
             }
         }
         if frei {
-            var bits: u64 = PAGE_PRESENT | PAGE_WRITE | PAGE_HUGE
-            if uncached {
-                // Fuer Geraeteregister richtig, fuer einen Rahmenpuffer
-                // teuer: jeder Bildpunkt geht einzeln auf den Bus.
-                // `tools/gfx/run.sh` misst genau diesen Unterschied.
-                bits = bits | PAGE_PCD | PAGE_PWT
-            }
+            let bits: u64 = fb_bits(state, uncached)
             var j: u64 = 0
             while j < n {
                 __mmio_write64((pd + (WIN_FIRST + start + j) * 8) as *mut u64,
@@ -659,6 +744,19 @@ fn init(state: u64, mbi: u64, want_w: u64, want_h: u64,
     // Wie viele 2-MiB-Seiten der Puffer beruehrt, den Versatz im ersten
     // Block eingerechnet.
     var kacheln: u64 = (inner + n + HUGE_SIZE - 1) / HUGE_SIZE
+    // RUNDE ZWISCHENSPEICHER: PAT ZUERST, DANN ABBILDEN.
+    //
+    // Ohne `fbuc` und ohne `fbwb` bekommt der Rahmenpuffer
+    // Write-Combining. Klappt das Umprogrammieren nicht (zurueckgelesen,
+    // nicht geglaubt), bleibt es beim alten Verhalten -- dann steht
+    // `wc=0` in der Zeile unten und auf der Messtafel.
+    var wc: u64 = 0
+    if !uncached && !want(state, M_WB) {
+        if pat_setup(state) {
+            wc = 1
+        }
+    }
+    kstate.set(state, FB_OFF + S_WC, wc)
     var fenster: u64 = map_run(state, blk, kacheln, uncached)
     var streifen: u64 = 0
     if fenster == 0 {
@@ -1510,6 +1608,13 @@ fn flush_stripe(state: u64, lo: u64, hi: u64) {
         }
         off = off +% n
     }
+    // RUNDE ZWISCHENSPEICHER: WC-Schreibzugriffe sind schwach geordnet
+    // und sammeln sich in den Schreibpuffern. Ohne dieses `sfence` steht
+    // ein Streifen erst dann auf dem Schirm, wenn zufaellig genug
+    // nachkommt, um die Puffer zu leeren -- bei einer kleinen Aenderung
+    // also nie. Es kostet nichts Messbares und steht deshalb
+    // bedingungslos hier, auch fuer WB und UC.
+    arch.barrier_write()
 }
 
 fn flush(state: u64) {
@@ -1957,6 +2062,7 @@ fn parse(state: u64, cmd: u64) {
     var w_pat: [u8; 7] = "fbtest\0"
     var w_usr: [u8; 7] = "fbuser\0"
     var w_res: [u8; 7] = "fbres=\0"
+    var w_wb: [u8; 5] = "fbwb\0"
     var m: u64 = 0
     if cmd != 0 {
         if find(cmd, (&w_gfx[0]) as u64, 3) != 0 {
@@ -1967,6 +2073,9 @@ fn parse(state: u64, cmd: u64) {
         }
         if find(cmd, (&w_uc[0]) as u64, 4) != 0 {
             m = m | M_UC
+        }
+        if find(cmd, (&w_wb[0]) as u64, 4) != 0 {
+            m = m | M_WB
         }
         if find(cmd, (&w_big[0]) as u64, 5) != 0 {
             m = m | M_BIG
@@ -2420,10 +2529,7 @@ fn slot_remap(state: u64, virt: u64, block: u64, uncached: bool) -> bool {
     if pd == 0 {
         return false
     }
-    var bits: u64 = PAGE_PRESENT | PAGE_WRITE | PAGE_HUGE
-    if uncached {
-        bits = bits | PAGE_PCD | PAGE_PWT
-    }
+    let bits: u64 = fb_bits(state, uncached)
     __mmio_write64((pd + (WIN_FIRST + i) * 8) as *mut u64, block | bits)
     kstate.set(state, WIN_LIST + i * 8, block + 1)
     let c: u64 = asm("mov rax, cr3", out("rax"))
