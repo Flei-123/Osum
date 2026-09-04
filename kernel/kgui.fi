@@ -56,7 +56,9 @@ import xhci
 import kutil
 
 export {
-    stage_graphics, stage_surface, stage_hold, tafel_tick, herz_tick
+    stage_graphics, stage_surface, stage_hold, tafel_tick, herz_tick,
+    // RUNDE BLECHFUENF: die Absturzanzeige. `trap.report` ruft sie.
+    absturz
 }
 
 const P_FB: u64 = 13
@@ -2725,6 +2727,24 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
             // der Rueckfall: sonst schreibt der Kern dem Menschen sein
             // Terminalfenster in vierzig Sekunden 238-mal voll
             // (gemessen), und das ist keine Diagnose, das ist Rauschen.
+            // ==================================== RUNDE BLECHFUENF
+            // DER RUECKFALL HAT DAS TERMINAL GEFLUTET.
+            //
+            // Justin fotografiert dieselbe Zeilengruppe, die endlos
+            // durchlaeuft, und die Marke darin steigt um zwei bis vier
+            // je Zeile (mk=1799, 1803, 1805, 1809). Die Rechnung dazu:
+            // `letzte_marke` wurde am Ende JEDER Rueckfallpruefung neu
+            // gesetzt, also verglich der Rueckfall die Marke von jetzt
+            // mit der von vor PULS_RUNDEN Runden. Seit die
+            // Schreibtischschleife wirklich laeuft (LOOP 810, RND in
+            // Millionen), passen viertausend Runden in eine einzige
+            // Marke -- und dann sind die beiden Marken IMMER gleich und
+            // der Rueckfall feuert IMMER.
+            //
+            // Der Rueckfall ist fuer einen STEHENDEN Zeitgeber gedacht.
+            // Also wird jetzt gegen die Marke des LETZTEN ANSTRICHS
+            // verglichen: hat sich seither keine einzige Marke bewegt,
+            // steht die Uhr wirklich, und nur dann redet er.
             var feuern: bool = false
             if jetzt >= naechster {
                 naechster = jetzt + PULS_MARKEN
@@ -2736,7 +2756,6 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
                 if jetzt == letzte_marke {
                     feuern = true
                 }
-                letzte_marke = jetzt
             }
             if feuern {
                 eingabe_puls(state, tw, neustarts)
@@ -2751,6 +2770,57 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
                         neustarts = neustarts + 1
                     }
                 }
+            }
+        }
+        // ==================================== RUNDE BLECHFUENF
+        // DIE GEGENPROBE ZU JUSTINS ABSTURZ. Nach zehn Sekunden geht
+        // das oberste Fenster zu -- ueber denselben Weg wie das Kreuz.
+        // Danach laeuft die Schleife weiter; wer hier stirbt, stirbt an
+        // dem, woran Justin gestorben ist.
+        // Alle fuenf Sekunden EINES: zuerst das Terminalfenster (das
+        // mit dem Kreuz auf Justins Foto), danach der Reihe nach die
+        // uebrigen. Jedes einzelne ist ein eigener Verdaechtiger, und
+        // dazwischen laeuft der Schreibtisch weiter -- ein Absturz, der
+        // erst beim naechsten Anstrich kommt, faellt sonst durch.
+        // RUNDE BLECHFUENF: die Gegenprobe zur Absturzanzeige.
+        if kstate.mode_on(state, kstate.M_KNALL) {
+            if kstate.get(state, kstate.TICKS) > 1000 {
+                __mmio_write64(0x00007FFFFFFF0000 as *mut u64, 1)
+            }
+        }
+        if kstate.mode_on(state, kstate.M_ZUMACHEN) {
+            let jj: u64 = kstate.get(state, kstate.TICKS)
+            if jj > 1000 && jj >= zumach_marke {
+                zumach_marke = jj + 500
+                if zumach_getan == 0 {
+                    // ERSTER DURCHGANG: EIN ECHTER KLICK AUF DAS KREUZ.
+                    // Nicht `destroy` von der Seite, sondern der Weg,
+                    // den Justins Maus genommen hat -- mit `cap_track`,
+                    // `raise_win`, `set_focus` und allem, was `on_mouse`
+                    // vor dem Schliessen noch tut.
+                    let ti: u64 = wm.term_win(state)
+                    if ti < wm.MAX_WIN {
+                        let pkt: u64 = wm.kreuz_punkt(state, ti)
+                        ps2m.set_pos(state, pkt >> 32, pkt & 0xFFFFFFFF)
+                        wm.poll(state)
+                        ps2m.usb_packet(state, 8 | ps2m.B_LEFT, 0, 0, 0,
+                            false)
+                        let _p1: bool = wm.poll(state)
+                        ps2m.usb_packet(state, 8, 0, 0, 0, false)
+                        let _p2: bool = wm.poll(state)
+                        zumach_fenster = ti + 1
+                    }
+                } else {
+                    // Und danach: den Zeiger BEWEGEN. Justin hat nach
+                    // dem Klick weitergearbeitet, und `cap_track` fasst
+                    // dabei den ueberfahrenen Knopf des Fensters an,
+                    // das es nicht mehr gibt.
+                    ps2m.set_pos(state, 400 + zumach_getan * 40, 500)
+                    let _p3: bool = wm.poll(state)
+                    zumach_fenster = wm.close_top(state) + 1
+                }
+                zumach_getan = zumach_getan + 1
+                zumach_sagen(state)
             }
         }
         st(38)
@@ -2864,7 +2934,7 @@ fn kopf_setzen(state: u64, p: u64, n: u64) {
 // einzigen, der auf Justins Brett nachweislich laeuft:
 //   14 WAHL -- welcher USB-Regler gewonnen hat und mit welcher Punktzahl
 //   15 BAND -- ob das reservierte Band wirklich steht
-const TAFEL_ZEILEN: u64 = 18
+const TAFEL_ZEILEN: u64 = 20 // RUNDE BLECHFUENF: dazu TAST und UHR
 const TAFEL_SPALTEN: u64 = 48
 
 fn tz_text(state: u64, buf: u64, at: u64, t: u64) -> u64 {
@@ -2888,6 +2958,23 @@ fn tz_text(state: u64, buf: u64, at: u64, t: u64) -> u64 {
 const TAFEL_MARKEN: u64 = 10 // Zeitmarken zwischen zwei Anstrichen
 const TAFEL_RUNDEN: u64 = 200 // Rueckfall, wenn die Marken stehen
 const TAFEL_SERMARKEN: u64 = 500 // fuenf Sekunden zwischen zwei Berichten
+// RUNDE BLECHFUENF: die Gegenprobe `zumachen`.
+static mut zumach_getan: u64 = 0
+static mut zumach_fenster: u64 = 0
+static mut zumach_marke: u64 = 0
+
+fn zumach_sagen(state: u64) {
+    var s_z: [u8; 12] = "zumachen n=\0"
+    var s_w: [u8; 4] = " w=\0"
+    var s_c: [u8; 4] = " c=\0"
+    serial.puts((&s_z[0]) as u64)
+    serial.dec(zumach_getan)
+    serial.puts((&s_w[0]) as u64)
+    serial.dec(zumach_fenster)
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(wm.count(state))
+    serial.nl()
+}
 static mut tafel_marke: u64 = 0
 static mut tafel_runde: u64 = 0
 static mut tafel_sh: u64 = 0
@@ -2949,9 +3036,9 @@ fn tafel_zeile_sagen(b: u64, n: u64) {
 // gewann still. Justins Foto zeigte "... HUB 0 KBD" und dort hoerte
 // die Zeile auf. Jetzt ist es EINE Zahl, und sie steht in `wm` genauso.
 const TAFEL_SP: u64 = 48 // Zeichen je gemerkter Zeile
-static mut tafel_txt: [u8; 864] = [0 as u8; 864] // TAFEL_ZEILEN * TAFEL_SP
-static mut tafel_len: [u64; 18] = [0 as u64; 18]
-static mut tafel_fg: [u64; 18] = [0 as u64; 18]
+static mut tafel_txt: [u8; 960] = [0 as u8; 960] // TAFEL_ZEILEN * TAFEL_SP
+static mut tafel_len: [u64; 20] = [0 as u64; 20]
+static mut tafel_fg: [u64; 20] = [0 as u64; 20]
 static mut tafel_hat: u64 = 0 // steht schon Inhalt bereit?
 static mut tafel_drin: u64 = 0 // Wiedereintrittssperre
 static mut tafel_irq: u64 = 0 // Rufe aus dem Zeitgeber
@@ -3024,6 +3111,100 @@ fn tafel_merken(zeile: u64, p: u64, n: u64, fg: u64) {
 }
 
 // DER EINZIGE ANSTREICHER. Grund, Zeilen, Takt-Zeile, Flush.
+// ============================================ RUNDE BLECHFUENF
+// DIE ABSTURZANZEIGE, UND WARUM SIE IN DAS BAND GEHOERT.
+//
+// Justin hat auf das rote Kreuz eines Fensters geklickt; das Fenster
+// ging zu, und danach war die Maschine weg. Was dabei WIRKLICH passiert
+// ist, stand bis zu dieser Runde ausschliesslich auf der seriellen
+// Leitung -- und sein Brett hat keine (LSR FF, seit der Runde KABEL
+// gemessen). Danach schaltete `report` den Rechner ab. Fuer ihn war ein
+// Kernabsturz damit ununterscheidbar von einem Ausfall der Stromzufuhr.
+//
+// Ab hier stehen Vektor, Fehlercode, RIP und CR2 in dem einen Bereich,
+// den NIEMAND ueberschreiben kann, in grosser roter Schrift -- und der
+// Rechner HAELT AN statt sich abzuschalten. Ein Foto der Adresse sagt
+// uns, wo es geknallt ist; raten muessen wir nicht mehr.
+//
+// Der Anstrich geht bewusst NICHT ueber den Schmutzbereich: an dieser
+// Stelle ist der Kern schon halb tot, und die Buchfuehrung des
+// Fensterservers ist womoeglich genau das, was ihn umgebracht hat.
+// `fb.flush_rect` mit festen Koordinaten haengt an nichts.
+fn absturz(state: u64, vec: u64, err: u64, rip: u64, cr2: u64, rsp: u64,
+    cs: u64) {
+    if !fb.ready(state) {
+        return
+    }
+    // Vier Oktett je Name, damit der Index eine Multiplikation ist --
+    // dieselbe Tabelle wie in `trap.report`, damit auf dem Schirm
+    // dasselbe Wort steht wie auf der Leitung.
+    var namen: [u8; 128] = "#DE\0#DB\0NMI\0#BP\0#OF\0#BR\0#UD\0#NM\0#DF\0#CO\0#TS\0#NP\0#SS\0#GP\0#PF\0r15\0#MF\0#AC\0#MC\0#XM\0#VE\0#CP\0r22\0r23\0r24\0r25\0r26\0#HV\0#VC\0#SX\0r30\0r31\0"
+    fb.band_open(state, true)
+    wm.mess_grund(state, TAFEL_ZEILEN, TAFEL_SPALTEN)
+    var b: [u8; 64] = [0 as u8; 64]
+    let p: u64 = (&b[0]) as u64
+    let rot: u64 = wm.mess_rot(state)
+    let gelb: u64 = wm.mess_gelb(state)
+    var n: u64 = 0
+
+    var z0: [u8; 21] = "*** ABSTURZ *** VEK \0"
+    var lz: [u8; 2] = " \0"
+    n = puls_text(state, p, 0, (&z0[0]) as u64)
+    n = puls_zahl(state, p, n, vec)
+    n = puls_text(state, p, n, (&lz[0]) as u64)
+    if vec < 32 {
+        n = puls_text(state, p, n, (&namen[0]) as u64 + vec * 4)
+    }
+    wm.messzeile(state, 0, p, n, rot)
+
+    var z1: [u8; 5] = "RIP \0"
+    n = puls_text(state, p, 0, (&z1[0]) as u64)
+    n = puls_hexn(state, p, n, rip, 16)
+    wm.messzeile(state, 1, p, n, rot)
+
+    var z2: [u8; 5] = "CR2 \0"
+    n = puls_text(state, p, 0, (&z2[0]) as u64)
+    n = puls_hexn(state, p, n, cr2, 16)
+    wm.messzeile(state, 2, p, n, rot)
+
+    var z3: [u8; 5] = "ERR \0"
+    var z3b: [u8; 6] = "  CS \0"
+    n = puls_text(state, p, 0, (&z3[0]) as u64)
+    n = puls_hexn(state, p, n, err & 0xFFFFFFFF, 8)
+    n = puls_text(state, p, n, (&z3b[0]) as u64)
+    n = puls_hexn(state, p, n, cs & 0xFFFF, 4)
+    wm.messzeile(state, 3, p, n, rot)
+
+    var z4: [u8; 5] = "RSP \0"
+    n = puls_text(state, p, 0, (&z4[0]) as u64)
+    n = puls_hexn(state, p, n, rsp, 16)
+    wm.messzeile(state, 4, p, n, rot)
+
+    // Wo der Kern zuletzt WAR. `st()` setzt die Stufe in jeder Runde
+    // des Schreibtischs; zusammen mit dem RIP sagt sie, in welchem
+    // Abschnitt es geknallt ist, auch ohne Symboltafel.
+    var z5: [u8; 10] = "STUFE ST \0"
+    var z5b: [u8; 6] = " MAX \0"
+    var z5c: [u8; 6] = " RND \0"
+    n = puls_text(state, p, 0, (&z5[0]) as u64)
+    n = puls_zahl(state, p, n, stufe_zahl())
+    n = puls_text(state, p, n, (&z5b[0]) as u64)
+    n = puls_zahl(state, p, n, stufe_max())
+    n = puls_text(state, p, n, (&z5c[0]) as u64)
+    n = puls_zahl(state, p, n, wm_runden())
+    wm.messzeile(state, 5, p, n, gelb)
+
+    var z6: [u8; 25] = "ANGEHALTEN -- BITTE FOTO\0"
+    n = puls_text(state, p, 0, (&z6[0]) as u64)
+    wm.messzeile(state, 6, p, n, gelb)
+
+    // UNBEDINGT UEBERTRAGEN. Kein `dirty`, kein `compose`, keine
+    // Bedingung -- das ganze Band in einem Zug auf die Karte.
+    fb.flush_rect(state, 0, 0, wm.mess_vollbreite(state),
+        wm.messhoehe(state, TAFEL_ZEILEN))
+    fb.band_open(state, false)
+}
+
 fn tafel_streichen(state: u64) {
     if !fb.ready(state) {
         return
@@ -3137,7 +3318,12 @@ fn tafel_streichen(state: u64) {
     // (am Zyklenzaehler gemessen) keine Marke mehr kam -- eine Zahl
     // groesser null ist der Beweis, dass der Zeitgeber wirklich stand.
     var t10: [u8; 10] = "10 HERZ  \0"
-    var h_h: [u8; 4] = "HZ \0"
+    // RUNDE BLECHFUENF: DIESE ZAHL IST KEINE FREQUENZ. Zeile 8 hat ein
+    // `HZ`, und das IST eine (Marken je Sekunde, aus dem
+    // Zyklenzaehler). Hier stand dasselbe Wort vor einer SCHLAGZAHL --
+    // "HERZ HZ 2178" neben "TAKT HZ 99" laesst jeden die Tafel falsch
+    // lesen. Zwei Groessen, zwei Namen.
+    var h_h: [u8; 6] = "SCHL \0"
     var h_t: [u8; 6] = " TOT \0"
     var h_l: [u8; 6] = " LED \0"
     var h_b: [u8; 7] = " HELL \0"
@@ -3204,6 +3390,15 @@ fn tafel_streichen(state: u64) {
     var t12: [u8; 10] = "12 STUFE \0"
     var s_st: [u8; 4] = "ST \0"
     var s_mx: [u8; 6] = " MAX \0"
+    // RUNDE BLECHFUENF: WAS `RND` IST. Justin sah "RND 2200221" neben
+    // "LOOP 810" und hielt die Zahl fuer Unsinn. Sie ist es nicht:
+    // `RND` sind die RUNDEN DER SCHREIBTISCHSCHLEIFE (`wm_runden`,
+    // gesetzt in `wait_wm`), `LOOP` sind die Anstriche der Tafel aus
+    // ebendieser Schleife. Die Schleife dreht viel oefter, als die
+    // Tafel gemalt wird -- das Verhaeltnis ist der Anstrichtakt und
+    // kein Fehler. In QEMU steht es bei rund zehn zu eins, auf Justins
+    // Brett bei rund zweitausendsiebenhundert zu eins; woran das liegt,
+    // ist UNGEMESSEN und gehoert in eine eigene Runde.
     var s_rd: [u8; 6] = " RND \0"
     var s_lp: [u8; 7] = " LOOP \0"
     tn = puls_text(state, tp, 0, (&t12[0]) as u64)
@@ -3416,6 +3611,111 @@ fn tafel_streichen(state: u64) {
     tafel_merken(17, tp, tn, bfarbe)
     tafel_zeile_sagen(tp, tn)
 
+    // ---- Zeile 18: DIE TASTATUR, OKTETT FUER OKTETT ----
+    //
+    // DIE ZEILE, DIE DIESE RUNDE BEANTWORTET. "KBD 2 TAS 0" ist
+    // zweideutig -- eine Tastatur ist da, keine Taste kommt an, und
+    // warum, steht nirgends. `ber=6188` half nicht: die Maus hatte
+    // davon 6186, also ist die Summe ueber alle Geraete eine Zahl ohne
+    // Aussage ueber die Tastatur.
+    //
+    // Hier zaehlt nur DIE TASTATUR:
+    //   BER  -- fertige Unterbrechungstransfers DIESES Geraets
+    //   ARM  -- wie oft ein Block auf ihren Ring gelegt wurde. Ist ARM
+    //           gross und BER null, wird nachgefragt und nie
+    //           geantwortet; sind beide null, laeuft der Transfer gar
+    //           nicht.
+    //   CC   -- der letzte Fertigmeldungscode (1 = gut, 13 = kurz,
+    //           4 = Uebertragungsfehler, 6 = Stall)
+    //   ROH  -- die ersten acht Oktett des zuletzt empfangenen Berichts
+    //
+    // UND SO LIEST JUSTIN SIE: eine Taste druecken und HALTEN, dann
+    // fotografieren. Aendert sich ROH, kommt der Bericht an und der
+    // Zerleger ist schuld. Bleibt ROH auf Nullen und BER steht, kommt
+    // nichts an, und dann ist es der Endpunkt.
+    var t18: [u8; 10] = "18 TAST  \0"
+    var k_d: [u8; 3] = "D \0"
+    var k_b: [u8; 6] = " BER \0"
+    var k_a: [u8; 6] = " ARM \0"
+    var k_c: [u8; 5] = " CC \0"
+    var k_r: [u8; 6] = " ROH \0"
+    let kd: u64 = usb.kbd_dev(state)
+    tn = puls_text(state, tp, 0, (&t18[0]) as u64)
+    tn = puls_text(state, tp, tn, (&k_d[0]) as u64)
+    tn = puls_zahl(state, tp, tn, kd)
+    var kfarb: u64 = wm.mess_rot(state)
+    if kd != 0 {
+        let kdev: u64 = kd - 1
+        tn = puls_text(state, tp, tn, (&k_b[0]) as u64)
+        tn = puls_zahl(state, tp, tn, usb.dev_reps(state, kdev))
+        tn = puls_text(state, tp, tn, (&k_a[0]) as u64)
+        tn = puls_zahl(state, tp, tn, usb.dev_arms(state, kdev))
+        tn = puls_text(state, tp, tn, (&k_c[0]) as u64)
+        tn = puls_zahl(state, tp, tn, usb.dev_cc(state, kdev))
+        tn = puls_text(state, tp, tn, (&k_r[0]) as u64)
+        var kk: u64 = 0
+        while kk < 8 {
+            tn = puls_hexn(state, tp, tn, usb.dev_roh(state, kdev, kk), 2)
+            kk = kk + 1
+        }
+        if usb.dev_reps(state, kdev) != 0 {
+            kfarb = wm.mess_gruen(state)
+        }
+    }
+    tafel_merken(18, tp, tn, kfarb)
+    tafel_zeile_sagen(tp, tn)
+
+    // ---- Zeile 19: DIE UHR ----
+    //
+    // Justin sagt, die Uhrzeit stimmt nicht, und auf dem Foto stand
+    // 18:47, als es wirklich 18:47 war. Aus einem Foto laesst sich
+    // beides nicht unterscheiden -- also stehen hier DREI Zeiten
+    // nebeneinander:
+    //   RTC  -- was der CMOS-Baustein GERADE sagt (hh:mm:ss). Das ist
+    //           die Quelle, aus der die Taskleiste ihre Uhr nimmt
+    //           (`uio.sysinfo` liest 0x70/0x71 bei jedem Aufruf neu).
+    //   KRN  -- die Zeit des KERNS, TIME_BOOT plus Zyklenzaehler. Sie
+    //           laeuft unabhaengig von der RTC weiter; laufen die
+    //           beiden auseinander, steht eine von beiden.
+    //   TZ   -- der Versatz auf Ortszeit in Minuten (`tz=` auf der
+    //           Kommandozeile, Vorgabe 0). Steht die RTC auf UTC und
+    //           TZ auf 0, geht die Anzeige im Sommer zwei Stunden nach.
+    //   D    -- der Tag aus der RTC, damit auch das Datum belegt ist.
+    var t19: [u8; 10] = "19 UHR   \0"
+    var u_r: [u8; 5] = "RTC \0"
+    var u_dp: [u8; 2] = ":\0"
+    var u_kr: [u8; 6] = " KRN \0"
+    var u_tz: [u8; 5] = " TZ \0"
+    var u_dd: [u8; 4] = " D \0"
+    var u_pt: [u8; 2] = ".\0"
+    tn = puls_text(state, tp, 0, (&t19[0]) as u64)
+    tn = puls_text(state, tp, tn, (&u_r[0]) as u64)
+    tn = puls_zwei(state, tp, tn, time.rtc_field(time.R_HOUR))
+    tn = puls_text(state, tp, tn, (&u_dp[0]) as u64)
+    tn = puls_zwei(state, tp, tn, time.rtc_field(time.R_MIN))
+    tn = puls_text(state, tp, tn, (&u_dp[0]) as u64)
+    tn = puls_zwei(state, tp, tn, time.rtc_field(time.R_SEC))
+    let ks: u64 = time.now_local(state) % 86400
+    tn = puls_text(state, tp, tn, (&u_kr[0]) as u64)
+    tn = puls_zwei(state, tp, tn, ks / 3600)
+    tn = puls_text(state, tp, tn, (&u_dp[0]) as u64)
+    tn = puls_zwei(state, tp, tn, (ks % 3600) / 60)
+    tn = puls_text(state, tp, tn, (&u_dp[0]) as u64)
+    tn = puls_zwei(state, tp, tn, ks % 60)
+    tn = puls_text(state, tp, tn, (&u_tz[0]) as u64)
+    tn = puls_zahl(state, tp, tn, time.tz_min(state))
+    tn = puls_text(state, tp, tn, (&u_dd[0]) as u64)
+    tn = puls_zwei(state, tp, tn, time.rtc_field(time.R_DAY))
+    tn = puls_text(state, tp, tn, (&u_pt[0]) as u64)
+    tn = puls_zwei(state, tp, tn, time.rtc_field(time.R_MONTH))
+    // Gruen, solange Kernuhr und RTC in derselben Minute stehen.
+    var ufarb: u64 = wm.mess_rot(state)
+    if (ks / 60) % 60 == time.rtc_field(time.R_MIN) {
+        ufarb = wm.mess_gruen(state)
+    }
+    tafel_merken(19, tp, tn, ufarb)
+    tafel_zeile_sagen(tp, tn)
+
     // ================================================ RUNDE BLECHZWEI
     // ============ NUR DIE ZEILEN, DIE SICH WIRKLICH GEAENDERT HABEN.
     //
@@ -3508,9 +3808,9 @@ fn tafel_streichen(state: u64) {
 // Was zuletzt WIRKLICH auf dem Schirm stand -- Text, Laenge und Farbe.
 // Ohne die Farbe waere eine Zeile, die nur von rot auf gruen wechselt,
 // unsichtbar geblieben, und die Ampel ist die halbe Aussage der Tafel.
-static mut tafel_alt: [u8; 864] = [0 as u8; 864]
-static mut tafel_altlen: [u64; 18] = [0 as u64; 18]
-static mut tafel_altfg: [u64; 18] = [0 as u64; 18]
+static mut tafel_alt: [u8; 960] = [0 as u8; 960]
+static mut tafel_altlen: [u64; 20] = [0 as u64; 20]
+static mut tafel_altfg: [u64; 20] = [0 as u64; 20]
 static mut tafel_grund: u64 = 0
 // Der Stand des Zusammensetzers beim letzten Anstrich.
 static mut tafel_comp: u64 = 0
@@ -3673,8 +3973,41 @@ fn herz_tick(state: u64) {
     herz_marke = jetzt
     herz_an = 1 - herz_an
     herz_hell = herz_hell + herz_an
-    fb.herz(state, 0, herz_an)
-    fb.herz(state, 1, herz_an)
+    // ==================================== RUNDE BLECHFUENF
+    // DIE ZWEI BLINKFELDER GEHOEREN ZUM DIAGNOSESCHALTER.
+    //
+    // Justin hat sie als "zwei farbige Quadrate am rechten Rand"
+    // gemeldet und fuer einen Zeichenfehler gehalten. Sie sind keiner:
+    // links gruen ist der normale Weg (Zweitpuffer und `flush`),
+    // rechts gelb geht unmittelbar in das Fenster der Karte -- der
+    // Unterschied der beiden war der Beweis, dass der Rahmenpuffer
+    // ueberhaupt erreichbar ist. Diese Frage ist beantwortet (die Tafel
+    // steht, und sie steht ueber den normalen Weg). Auf einem
+    // Schreibtisch, den ein Mensch benutzt, haben zwei blinkende
+    // Kaestchen nichts verloren -- sie kommen mit demselben Schalter
+    // zurueck wie die Lampe.
+    if kstate.mode_on(state, kstate.M_PULSLED) {
+        fb.herz(state, 0, herz_an)
+        fb.herz(state, 1, herz_an)
+    }
+    // ==================================== RUNDE BLECHFUENF
+    // DIE LAMPEN GEHOEREN AB HIER DEM MENSCHEN.
+    //
+    // Der LED-Herzschlag war ein Messgeraet fuer eine Frage, die
+    // beantwortet ist: laeuft der Zeitgeber? Justins Tafel sagt HZ 99,
+    // also ja. Was blieb, war Schaden -- an seiner Tastatur blinkten
+    // Nummernfeststell und Rollen dauernd, und Nummernfeststell liess
+    // sich NICHT mehr umschalten, weil der Kern die Maske zweimal je
+    // Sekunde selbst ueberschrieb. Ein Diagnosewerkzeug, das die
+    // Bedienung kaputtmacht, gehoert auf einen Schalter.
+    //
+    // Und das ist zugleich die Richtigstellung einer falschen Deutung:
+    // "LED 30/30/0" war NICHT gelungenes Nummernfeststell-Schalten,
+    // das waren die Herzschlaege beim Zaehlen. Ohne diesen Schalter
+    // sagt dieselbe Zahl jetzt das, was sie zu sagen vorgibt.
+    if !kstate.mode_on(state, kstate.M_PULSLED) {
+        return
+    }
     // Die Lampe halb so schnell -- eine Tastatur mag keinen
     // Steuertransfer viermal je Sekunde, und zweimal reicht dem Auge.
     herz_sek = herz_sek + 1
@@ -4016,7 +4349,10 @@ fn eingabe_puls(state: u64, tw: u64, neustarts: u64) {
     n = puls_zahl(state, (&buf[0]) as u64, n, neustarts)
     kstate.set8((&buf[0]) as u64 + n, 10)
     n = n + 1
-    if tw < wm.MAX_WIN {
+    // RUNDE BLECHFUENF: `nopuls` haelt die Zeile aus dem Terminal. Die
+    // Kopfzeile oben und die serielle Ausgabe bleiben -- was Justin
+    // stoerte, war das Fenster, in dem er arbeiten will.
+    if tw < wm.MAX_WIN && !kstate.mode_on(state, kstate.M_NOPULS) {
         let _w: u64 = wm.term_write(state, tw, (&buf[0]) as u64, n)
     }
     // RUNDE MESSTAFEL: und die ganze Fensterliste auf die Leitung --
@@ -4065,6 +4401,16 @@ fn puls_text(state: u64, buf: u64, at: u64, t: u64) -> u64 {
 // 0x000D (Erzeugnis) und ein PORTSC-Register (32 Bit) nicht -- und
 // genau die drei sind die Zahlen, an denen sich auf Justins Brett
 // entscheidet, WAS dort haengt.
+// RUNDE BLECHFUENF: ZWEI DEZIMALSTELLEN MIT FUEHRENDER NULL. Eine Uhr
+// als "18:7:5" liest niemand als 18:07:05.
+fn puls_zwei(state: u64, buf: u64, at: u64, v: u64) -> u64 {
+    var n: u64 = at
+    let w: u64 = v % 100
+    kstate.set8(buf + n, (48 + w / 10) as u8)
+    kstate.set8(buf + n + 1, (48 + w % 10) as u8)
+    return n + 2
+}
+
 fn puls_hexn(state: u64, buf: u64, at: u64, v: u64, stellen: u64) -> u64 {
     var ziffern: [u8; 17] = "0123456789ABCDEF\0"
     var i: u64 = stellen

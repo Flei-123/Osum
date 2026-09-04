@@ -79,6 +79,8 @@ export {
     init, ready, compose, damage, damage_all, dirty_x0, dirty_y0,
     dirty_x1, dirty_y1,
     create, destroy, valid, count, focus, set_focus, raise_win,
+    // RUNDE BLECHFUENF: der Schliessweg des Kreuzes, von aussen rufbar.
+    close_top, close_term, top_visible, kreuz_punkt, term_win,
     move_win, resize_win, win_x, win_y, win_w, win_h, win_z, win_buf,
     win_owner, win_kind, win_id, outer_w, outer_h,
     win_layer, set_layer, win_hidden, set_hidden, win_deco, set_deco,
@@ -2219,10 +2221,99 @@ fn destroy(state: u64, i: u64) -> bool {
     if gs(state, S_SIZING) == i + 1 {
         ss(state, S_SIZING, 0)
     }
+    // ==================================== RUNDE BLECHFUENF
+    // WAS SONST NOCH AUF DIESES FENSTER ZEIGT.
+    //
+    // Justin klickt auf das Kreuz, und danach ist die Maschine weg.
+    // `S_DRAG` und `S_SIZING` waren gedacht, `S_CAPHOV` nicht -- und
+    // GENAU DAS ist der Zustand nach einem Klick auf das Kreuz: der
+    // Zeiger stand ueber dem Knopf, also stand dort die Nummer dieses
+    // Fensters, und der naechste `cap_track` faerbt eine Schaltflaeche
+    // an einem Fenster, das es nicht mehr gibt. Wird der Platz danach
+    // neu vergeben, faerbt er die des NEUEN.
+    if gs(state, S_CAPHOV) != 0 && (gs(state, S_CAPHOV) - 1) / 4 == i {
+        ss(state, S_CAPHOV, 0)
+    }
+    // UND DIE MASSE AUF NULL. `destroy` hat den Puffer freigegeben und
+    // W_BUF genullt, die BREITE und HOEHE aber stehen gelassen. Ein
+    // Weg, der die Gueltigkeit nicht prueft, rechnet damit ein
+    // plausibles Rechteck aus und schreibt es an die Anschrift null --
+    // also mitten in die Seitentafeln des Kerns. Mit Nullen kommt er
+    // ueber die erste Schleifenbedingung nicht hinaus.
+    wsv(state, i, W_W, 0)
+    wsv(state, i, W_H, 0)
+    wsv(state, i, W_COLS, 0)
+    wsv(state, i, W_ROWS, 0)
+    wsv(state, i, W_CX, 0)
+    wsv(state, i, W_CY, 0)
+    wsv(state, i, W_KIND, 0)
+    wsv(state, i, W_EHEAD, 0)
+    wsv(state, i, W_ETAIL, 0)
     if hatte_strut {
         recalc_work(state)
     }
     return true
+}
+
+// ============================================ RUNDE BLECHFUENF
+// DAS OBERSTE FENSTER ZUMACHEN -- GENAU SO WIE DAS KREUZ.
+//
+// Kein zweiter Weg neben `on_mouse`, sondern DIESELBEN ZWEI ZEILEN:
+// erst das Ereignis in den Ring des Fensters, dann `destroy`. Waere es
+// ein anderer Weg, waere die Gegenprobe wertlos.
+// DIE MITTE DES SCHLIESSKREUZES eines Fensters, gepackt (x << 32) | y.
+// Damit kann die Gegenprobe wirklich DORTHIN klicken, wo Justin
+// geklickt hat -- und nicht einen zweiten Schliessweg neben dem Kreuz
+// benutzen, der die Haelfte der Arbeit auslaesst.
+fn kreuz_punkt(state: u64, i: u64) -> u64 {
+    if !valid(state, i) {
+        return 0
+    }
+    let bx: i64 = cap_x0(state, i) + (CAP_CLOSE * cap_w(state)) as i64
+        + (cap_w(state) / 2) as i64
+    let by: i64 = win_y(state, i) + border(state) as i64
+        + ((title_h(state) - 1 - border(state)) / 2) as i64
+    if bx < 0 || by < 0 {
+        return 0
+    }
+    return ((bx as u64) << 32) | (by as u64)
+}
+
+fn term_win(state: u64) -> u64 {
+    var i: u64 = 0
+    while i < MAX_WIN {
+        if wg(state, i, W_USED) != 0 && wg(state, i, W_KIND) == K_TERM {
+            return i
+        }
+        i = i + 1
+    }
+    return MAX_WIN
+}
+
+fn close_top(state: u64) -> u64 {
+    let i: u64 = top_visible(state)
+    if i >= MAX_WIN {
+        return MAX_WIN
+    }
+    ev_push(state, i, E_CLOSE, 0, 0, 0)
+    destroy(state, i)
+    return i
+}
+
+// DAS TERMINALFENSTER. Justins Foto zeigt "Terminal -- sh" mit dem
+// Kreuz, auf das er geklickt hat -- also ist DAS das Fenster, das die
+// Gegenprobe zuerst zumachen muss und nicht irgendeines.
+fn close_term(state: u64) -> u64 {
+    var i: u64 = 0
+    while i < MAX_WIN {
+        if wg(state, i, W_USED) != 0 && wg(state, i, W_KIND) == K_TERM {
+            ev_push(state, i, E_CLOSE, 0, 0, 0)
+            destroy(state, i)
+            return i
+        }
+        i = i + 1
+    }
+    return MAX_WIN
 }
 
 fn topmost(state: u64) -> u64 {
@@ -2873,7 +2964,11 @@ fn wget(state: u64, i: u64, x: u64, y: u64) -> u64 {
 }
 
 fn fill(state: u64, i: u64, x: u64, y: u64, w: u64, h: u64, color: u64) {
-    if !valid(state, i) {
+    // RUNDE BLECHFUENF: KEIN PUFFER, KEIN SCHREIBEN. `valid` prueft den
+    // Belegungsmerker; der Puffer ist eine zweite Zusage, und nach
+    // `destroy` ist sie null. Eine Fuellung ohne diese Zeile schriebe
+    // ab Anschrift null.
+    if !valid(state, i) || wg(state, i, W_BUF) == 0 {
         return
     }
     let ww: u64 = wg(state, i, W_W)
@@ -4003,7 +4098,7 @@ fn fb_glyph(state: u64, slot: u64, x: i64, y: i64, color: u64,
 const MESS_SPALTEN: u64 = 48
 // Wie viele Zeilen die Tafel hat. Spiegel von `kgui.TAFEL_ZEILEN` --
 // `wm` darf `kgui` nicht einbinden (der Modulgraph ist ein Baum).
-const MESS_ZEILEN: u64 = 18
+const MESS_ZEILEN: u64 = 20
 
 fn messk(state: u64) -> u64 {
     // Eine Stufe groesser als die Oberflaeche, hoechstens 4. Auf
@@ -4087,8 +4182,25 @@ fn mess_breite(state: u64, spalten: u64) -> u64 {
 // Also sieben Zeilen in zwei Spalten: 342 Bildpunkte hoch, 2 * 1182
 // breit. Passen zwei Spalten nicht nebeneinander (schmale Schirme der
 // Regressionslaeufe), faellt es von selbst auf eine zurueck.
+// ============================================ RUNDE BLECHFUENF
+// DIE DRITTE SPALTE, UND WARUM SIE SEIN MUSS.
+//
+// Die Tafel hat zwei Zeilen mehr bekommen (die Tastatur und die Uhr),
+// und mit zwanzig Zeilen in ZWEI Spalten wurde das Band 487 Bildpunkte
+// hoch. `fb.set_band` lehnt alles ueber einem Drittel des Schirms ab --
+// bei 1440 sind das 480 -- und lehnte es AB: `BAND H 0`, gemessen.
+// Damit war der Schutz weg, den die Vorrunde eingezogen hat, und die
+// Tafel haette wieder uebermalt werden koennen.
+//
+// Justins Schirm ist 3440 breit; drei Spalten zu 1178 Bildpunkten
+// passen zweimal hinein. Sieben Zeilen statt zehn, Band 170 statt 487.
+// Die Breite war nie das Problem, die Hoehe ist es.
 fn mess_kol(state: u64) -> u64 {
-    if 2 * mess_breite(state, MESS_SPALTEN) <= fb.width(state) {
+    let b: u64 = mess_breite(state, MESS_SPALTEN)
+    if 3 * b <= fb.width(state) {
+        return 3
+    }
+    if 2 * b <= fb.width(state) {
         return 2
     }
     return 1
@@ -4722,6 +4834,11 @@ fn term_scroll(state: u64, i: u64) {
     let ch: u64 = wg(state, i, W_CELLH)
     let ww: u64 = wg(state, i, W_W)
     let buf: u64 = wg(state, i, W_BUF)
+    // RUNDE BLECHFUENF: dieselbe Zusage wie in `fill`. Hier waere sie
+    // die teuerste -- `copy_words` schreibt ZEILENWEISE ab null.
+    if buf == 0 || ww == 0 || ch == 0 {
+        return
+    }
     var y: u64 = 0
     while y + ch < rows * ch {
         copy_words(buf +% y *% ww *% 4, buf +% (y + ch) *% ww *% 4,

@@ -79,6 +79,7 @@ export {
     // darf `hidin` NICHT einbinden -- hidin -> gfx -> kgui waere ein
     // Kreis im Modulgraphen, und der bleibt ein Baum.
     hid_keys, hid_los, hid_bew,
+    dev_reps, dev_arms, dev_cc, dev_dci, dev_iface, dev_generic, dev_roh,
     stat,
     have_kbd, have_mouse, msc_errors, msc_ios, selftest,
     rangtest, rangtest_max,
@@ -120,7 +121,7 @@ const USCAL_OFF: u64 = 0x51800
 // Zahl der Schnittstellen und ob `SET_CONFIGURATION` quittiert wurde.
 // 256 * 4 = 1 KiB, und der Platz dahinter (0x51D00) war frei.
 const UDEV_OFF: u64 = 0x51980
-const DEV_BYTES: u64 = 256
+const DEV_BYTES: u64 = 384 // RUNDE BLECHFUENF: Platz fuer D_REPS/D_LASTCC/D_ARMS
 const MAX_DEV: u64 = 4
 
 // ================================================ RUNDE BLECHEINGABE
@@ -266,6 +267,24 @@ const D_IFACES: u64 = 224 // Schnittstellen der Konfiguration
 const D_FUND: u64 = 232 // Platz in der Fundliste + 1
 const D_TTSLOT: u64 = 240 // Steckplatz des Uebersetzers (TT), 0 = keiner
 const D_TTPORT: u64 = 248
+// ============================================ RUNDE BLECHFUENF
+// WAS JEDES GERAET FUER SICH GEMELDET HAT.
+//
+// Justins Tafel sagt "KBD 2 TAS 0": eine Tastatur ist da, und keine
+// Taste kommt an. Damit ist NICHT entschieden, ob der
+// Unterbrechungstransfer der Tastatur ueberhaupt fertig wird -- die
+// Zahl `ber=` ist die SUMME ueber alle Geraete, und die Maus allein
+// hat davon 6186 von 6188. Zwei Geraete in einem Zaehler sind eine
+// Zahl ohne Aussage.
+//
+// Ab hier zaehlt JEDES Geraet fuer sich, und der zuletzt empfangene
+// Bericht steht in den ersten acht Oktett auf der Tafel. Damit
+// entscheidet EIN Foto die Frage: aendern sich die Oktett, wenn Justin
+// eine Taste drueckt, kommt der Bericht an und der Zerleger ist
+// schuld. Bleiben sie stehen, kommt gar nichts an.
+const D_REPS: u64 = 256 // fertige Unterbrechungstransfers dieses Geraets
+const D_LASTCC: u64 = 264 // der letzte Fertigmeldungscode
+const D_ARMS: u64 = 272 // wie oft ein Block auf den Ring gelegt wurde
 
 const DRV_NONE: u64 = 0
 const DRV_KBD: u64 = 1
@@ -1665,6 +1684,7 @@ fn hid_claim(state: u64, d: u64) {
 }
 
 fn arm(state: u64, d: u64) {
+    ds(state, d, D_ARMS, dg(state, d, D_ARMS) + 1)
     xhci.int_queue(state, dg(state, d, D_SLOT), dg(state, d, D_INTDCI),
         report_buf(state, d), dg(state, d, D_INTLEN))
 }
@@ -1696,9 +1716,11 @@ fn service(state: u64) {
                 let seq: u64 = xhci.ep_seq(state, i)
                 if seq != dg(state, d, D_SEQ) {
                     ds(state, d, D_SEQ, seq)
+                    ds(state, d, D_LASTCC, xhci.ep_code(state, i))
                     if xhci.ep_code(state, i) == xhci.CC_SUCCESS
                         || xhci.ep_code(state, i) == xhci.CC_SHORT {
                         s(state, S_REPORTS, g(state, S_REPORTS) + 1)
+                        ds(state, d, D_REPS, dg(state, d, D_REPS) + 1)
                         deliver(state, d)
                     }
                     arm(state, d)
@@ -2608,6 +2630,58 @@ fn leds_try(state: u64) -> u64 {
 
 fn kbd_dev(state: u64) -> u64 {
     return g(state, S_KBD)
+}
+
+// RUNDE BLECHFUENF: was EIN Geraet fuer sich gemeldet hat.
+fn dev_reps(state: u64, d: u64) -> u64 {
+    if d >= MAX_DEV {
+        return 0
+    }
+    return dg(state, d, D_REPS)
+}
+
+fn dev_arms(state: u64, d: u64) -> u64 {
+    if d >= MAX_DEV {
+        return 0
+    }
+    return dg(state, d, D_ARMS)
+}
+
+fn dev_cc(state: u64, d: u64) -> u64 {
+    if d >= MAX_DEV {
+        return 0
+    }
+    return dg(state, d, D_LASTCC)
+}
+
+fn dev_dci(state: u64, d: u64) -> u64 {
+    if d >= MAX_DEV {
+        return 0
+    }
+    return dg(state, d, D_INTDCI)
+}
+
+fn dev_iface(state: u64, d: u64) -> u64 {
+    if d >= MAX_DEV {
+        return 0
+    }
+    return dg(state, d, D_IFACE)
+}
+
+fn dev_generic(state: u64, d: u64) -> u64 {
+    if d >= MAX_DEV {
+        return 0
+    }
+    return dg(state, d, D_GENERIC)
+}
+
+// EIN OKTETT DES ZULETZT EMPFANGENEN BERICHTS. Das ist die Zahl, die
+// Justins Tastendruck sichtbar macht -- oder eben nicht.
+fn dev_roh(state: u64, d: u64, k: u64) -> u64 {
+    if d >= MAX_DEV || k >= 64 {
+        return 0
+    }
+    return kstate.get8(report_buf(state, d) + k)
 }
 
 // ================================================== RUNDE BLECHDREI

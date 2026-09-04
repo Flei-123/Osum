@@ -571,7 +571,7 @@ verbose: yes
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx wm wig desk wmshell wmdauer tafel herz usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+    cmdline: modfs osum gfx wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
 
 # ================== RUNDE MESSTAFEL: DERSELBE EINTRAG AUF ENGLISCH
 #
@@ -608,7 +608,7 @@ verbose: yes
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx fbuc wm wig desk wmshell wmdauer tafel herz usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+    cmdline: modfs osum gfx fbuc wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
 
 # ============ RUNDE BLECHEINGABE: DER ZWEITE, UNABHAENGIGE BEWEIS
 #
@@ -623,7 +623,7 @@ verbose: yes
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx fbflush wm wig desk wmshell wmdauer tafel herz usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+    cmdline: modfs osum gfx fbflush wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
 
 # ============ RUNDE BLECHZWEI: DER DRITTE VERGLEICHSFALL
 #
@@ -642,13 +642,35 @@ verbose: yes
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx fbwb wm wig desk wmshell wmdauer tafel herz usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+    cmdline: modfs osum gfx fbwb wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+
+# ============================================ RUNDE BLECHFUENF
+# DER DIAGNOSE-EINTRAG, UND WARUM ER EIN EIGENER IST.
+#
+# Justin hat gemeldet, dass an seiner Tastatur die Lampen DAUERND
+# blinken und Nummernfeststell sich nicht mehr schalten laesst. Das war
+# der LED-Herzschlag aus der Runde BLECHVIER: er legt zweimal je Sekunde
+# die Rollen-Lampe ueber den Tastenzustand. Als Messgeraet hat er seine
+# Frage beantwortet (der Zeitgeber laeuft, HZ 99); als Dauerzustand
+# macht er die Feststelltasten unbrauchbar. Dasselbe gilt fuer die zwei
+# blinkenden Kaestchen am rechten Bildrand, die er fuer einen
+# Zeichenfehler gehalten hat.
+#
+# Beides haengt jetzt an `pulsled` und ist in den Schreibtisch-
+# Eintraegen AUS. Hier ist es an -- fuer den Fall, dass wieder einmal
+# ohne Bild und ohne serielle Leitung entschieden werden muss, ob
+# ueberhaupt noch etwas laeuft.
+/@MARKE_PRODUKT@ -- Schreibtisch (Diagnose: Lampe und Blinkfelder)
+    protocol: multiboot1
+    path: boot():/osum.mb
+    module_path: boot():/root.img
+    cmdline: modfs osum gfx wm wig desk wmshell wmdauer tafel herz pulsled absturzhalt tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
 
 /@MARKE_PRODUKT@ -- Desktop (English)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx wm wig desk wmshell wmdauer tafel herz usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs lang=en
+    cmdline: modfs osum gfx wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs lang=en
 
 /@MARKE_PRODUKT@ -- Kommandozeile mit Netz
     protocol: multiboot1
