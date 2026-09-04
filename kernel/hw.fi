@@ -40,6 +40,7 @@ import ahci
 import blk
 import fs
 import arch.x86_64.idt
+import acpi
 
 export {
     parse, stage, disk, timer_off, mode_of,
@@ -47,7 +48,11 @@ export {
     M_NIC, M_NICINTX, M_NICNOIRQ, M_NICNOBM, M_NICTAB, M_NICSELF,
     net_ip, net_prefix, net_gw, net_svc, net_port, net_bytes, net_wait,
     net_fallback,
-    on, yes, cmd_copy
+    on, yes, cmd_copy,
+    // RUNDE BLECHVIER: die Blech-Diagnose.
+    blech_stage, gpe_abgeschaltet, gpe_status, ivrs_info, iommu_base,
+    iommu_ctrl, iommu_stat, pmtmr_port, pmtmr_bits, smi_cmd,
+    pm_tschz, pm_abweichung
 }
 
 // The words of the command line this round understands. They are read
@@ -1064,4 +1069,284 @@ fn find(hay: u64, needle: u64, n: u64) -> u64 {
         i = i + 1
     }
     return 0
+}
+
+// =====================================================================
+// RUNDE BLECHVIER: DIE BLECH-DIAGNOSE
+// =====================================================================
+//
+// Drei Dinge, die auf echtem Blech einen Kern stillstehen lassen und in
+// QEMU NIE auffallen. Alle drei waren in diesem Baum bisher nicht
+// einmal nachgesehen -- `grep` nach GPE, SCI, SMI_CMD, DMAR, IVRS und
+// iommu ueber `kernel/` gab NULL Treffer.
+//
+// 1. DER GPE-STURM. Ein reales Brett hat viele verdrahtete General
+//    Purpose Events (Netzschalter, Temperatur, PCIe-Hotplug,
+//    USB-Aufwecken, GPIO). Feuert eines, wird der SCI gezogen -- meist
+//    IRQ 9, PEGELGESTEUERT. Der zugehoerige `_Lxx`/`_Exx`-Behandler ist
+//    AML, und AML fuehrt dieser Kern nicht aus. Das Statusbit wird also
+//    NIE geloescht, die Leitung bleibt gezogen, und der Rechner steht
+//    in einem Unterbrechungssturm. QEMU hat praktisch keine aktiven
+//    GPEs, deshalb faellt es dort nie auf.
+//
+//    Die Gegenmassnahme braucht KEIN AML: alle Bits in GPE0_EN und
+//    GPE1_EN auf null, Statusregister einmal leeren. Die Adressen
+//    stehen in der FADT, und die kann dieser Baum lesen.
+//
+// 2. DIE IOMMU. "Das BIOS hat IOMMU an" heisst NICHT, dass DMA
+//    blockiert wird -- es gibt zwei Zustaende. Uebersetzung aus oder
+//    Durchreichen: DMA laeuft. Uebersetzung AN mit Pre-Boot-DMA-Schutz:
+//    jeder Zugriff ausserhalb der Unity-Bereiche wird STILL abgebrochen.
+//    Symptombild: xHCI-Ereignisring bleibt leer, NVMe-Completion bleibt
+//    leer, prozessorseitig sieht alles richtig aus.
+//
+//    Hier wird ZUERST GEMESSEN und nichts repariert: IVRS suchen, das
+//    IVinfo-Feld und die IOMMU-Basisadresse aus dem ersten IVHD holen,
+//    das Steuerregister und das Fehlerregister lesen. Aus einem stillen
+//    Haenger wird damit eine Zahl auf der Tafel.
+//
+// 3. DER ACPI-ZEITGEBER. Feste 3,579545 MHz, per Spezifikation, nicht
+//    eichbeduerftig und von SMIs nicht zu verfaelschen -- der richtige
+//    Ersatz fuer den PIT auf Ryzen, wo der 8254 ueber LPC/eSPI emuliert
+//    wird und ein einzelner Lesezugriff laenger als 12 us dauern kann.
+//    Hier wird nur seine Anschrift geholt; geeicht wird in `time.fi`.
+
+// Die Felder der FADT, die diese Runde braucht. Alle aus ACPI 6.x,
+// Tabelle "Fixed ACPI Description Table (FADT) Format".
+const F_SMI_CMD: u64 = 48
+const F_ACPI_EN: u64 = 52
+const F_PM_TMR: u64 = 76
+const F_GPE0: u64 = 80
+const F_GPE1: u64 = 84
+const F_PM_TMR_LEN: u64 = 91
+const F_GPE0_LEN: u64 = 92
+const F_GPE1_LEN: u64 = 93
+const F_FLAGS: u64 = 112
+
+// Was gemessen wurde. Gelesen wird es von der Messtafel.
+// GEMESSEN UND KORRIGIERT: die erste Fassung legte diese Zaehler auf
+// 0x300 -- und dort liegt seit Runde K8 der IP-Stapel (`inet.fi`,
+// 0x300..0x3A0). Am fertigen Abbild fiel es sofort auf: die serielle
+// Leitung meldete "gpe=0", die Tafel zeigte "GPE 6631424". Zwei Zahlen
+// fuer denselben Zaehler, und eine davon war eine IP-Adresse.
+//
+// Belegt in dieser Seite: 0x000..0x1A8 (apic, nvme), 0x200..0x2D8
+// (virtio, netdev), 0x300..0x3F0 (inet, das Netz von `hw`, netsvc),
+// 0xC00..0xC58 (wg), 0xE00 (die Befehlszeile). Frei und hier genommen:
+// 0x400..0x458.
+const S_GPE_N: u64 = 0x400 // wie viele GPE-Bits abgeschaltet wurden
+const S_GPE_ST: u64 = 0x408 // was in den Statusregistern stand
+const S_IVRS: u64 = 0x410 // IVinfo, 0 = keine IVRS
+const S_IOMMU: u64 = 0x418 // Basisadresse des ersten IOMMU
+const S_IOMMU_C: u64 = 0x420 // sein Steuerregister
+const S_IOMMU_S: u64 = 0x428 // sein Fehlerregister
+const S_PMTMR: u64 = 0x430 // Anschrift des ACPI-Zeitgebers
+const S_PMBITS: u64 = 0x438 // 24 oder 32
+const S_SMI: u64 = 0x440 // SMI_CMD, 0 = keiner
+const S_PMHZ: u64 = 0x448 // Zyklen je Sekunde, gegen den ACPI-Zeitgeber
+const S_ABW: u64 = 0x450 // Abweichung zur PIT-Eichung, in Promille
+
+fn dg(state: u64, off: u64) -> u64 {
+    return kstate.get(state, pci.K2_SCALARS + off)
+}
+
+fn ds(state: u64, off: u64, v: u64) {
+    kstate.set(state, pci.K2_SCALARS + off, v)
+}
+
+fn gpe_abgeschaltet(state: u64) -> u64 {
+    return dg(state, S_GPE_N)
+}
+
+fn gpe_status(state: u64) -> u64 {
+    return dg(state, S_GPE_ST)
+}
+
+fn ivrs_info(state: u64) -> u64 {
+    return dg(state, S_IVRS)
+}
+
+fn iommu_base(state: u64) -> u64 {
+    return dg(state, S_IOMMU)
+}
+
+fn iommu_ctrl(state: u64) -> u64 {
+    return dg(state, S_IOMMU_C)
+}
+
+fn iommu_stat(state: u64) -> u64 {
+    return dg(state, S_IOMMU_S)
+}
+
+fn pmtmr_port(state: u64) -> u64 {
+    return dg(state, S_PMTMR)
+}
+
+fn pmtmr_bits(state: u64) -> u64 {
+    return dg(state, S_PMBITS)
+}
+
+fn smi_cmd(state: u64) -> u64 {
+    return dg(state, S_SMI)
+}
+
+// Zyklen je Sekunde, gegen den ACPI-Zeitgeber gemessen. 0 = nicht
+// gemessen.
+fn pm_tschz(state: u64) -> u64 {
+    return dg(state, S_PMHZ)
+}
+
+// Um wie viele Promille die PIT-Eichung von der ACPI-Messung abweicht.
+// Ueber hundert (also ueber zehn Prozent) heisst nach Linux-Massstab:
+// die Eichung ist unbrauchbar. 9999 = nicht vergleichbar.
+fn pm_abweichung(state: u64) -> u64 {
+    return dg(state, S_ABW)
+}
+
+// EIN GPE-BLOCK: die zweite Haelfte ist das Freigaberegister, die erste
+// die Statusanzeige. Reihenfolge mit Bedacht: ERST freigeben abschalten
+// (sonst kommt zwischen Loeschen und Abschalten ein neues Ereignis),
+// DANN den Status leeren. Statusbits sind RW1C -- eine Eins loescht.
+fn gpe_block_aus(state: u64, blk: u64, len: u64) -> u64 {
+    if blk == 0 || len < 2 {
+        return 0
+    }
+    let halb: u64 = len / 2
+    var gesehen: u64 = 0
+    var i: u64 = 0
+    while i < halb {
+        let sts: u64 = (blk + i) & 0xFFFF
+        let en: u64 = (blk + halb + i) & 0xFFFF
+        gesehen = gesehen | (serial.in8(sts as u16) as u64)
+        serial.out8(en as u16, 0 as u8)
+        serial.out8(sts as u16, 0xFF as u8)
+        i = i + 1
+    }
+    ds(state, S_GPE_ST, dg(state, S_GPE_ST) | gesehen)
+    return halb * 8
+}
+
+// DIE GANZE DIAGNOSE. Laeuft einmal beim Start, kostet ein paar
+// Tabellenzugriffe und ein paar Anschlusszugriffe.
+fn blech_stage(state: u64) {
+    var s_g: [u8; 12] = "acpi: gpe=\0\0"
+    var s_gs: [u8; 7] = " sts=\0\0"
+    var s_t: [u8; 9] = " pmtmr=\0\0"
+    var s_tb: [u8; 7] = " bits=\0"
+    var s_s: [u8; 7] = " smi=\0\0"
+    var s_i: [u8; 13] = "acpi: ivrs=\0\0"
+    var s_ib: [u8; 8] = " base=\0\0"
+    var s_ic: [u8; 8] = " ctrl=\0\0"
+    var s_is: [u8; 8] = " stat=\0\0"
+    var s_keine: [u8; 6] = "keine\0"
+    // `acpi.table` vergleicht VIER OKTETTE ab einem Zeiger, keine Zahl.
+    // Eine Kennung als u32 uebergeben zu wollen war der Fehler des
+    // ersten Laufs: "acpi: gpe=0 ... smi=0" auf einer Maschine, die
+    // sehr wohl eine FADT hat.
+    var w_facp: [u8; 5] = "FACP\0"
+    var w_ivrs: [u8; 5] = "IVRS\0"
+
+    let facp: u64 = acpi.table(state, (&w_facp[0]) as u64)
+    if facp != 0 {
+        ds(state, S_SMI, kstate.get32(facp + F_SMI_CMD))
+        ds(state, S_PMTMR, kstate.get32(facp + F_PM_TMR))
+        var bits: u64 = 24
+        if (kstate.get32(facp + F_FLAGS) & 0x100) != 0 {
+            bits = 32
+        }
+        ds(state, S_PMBITS, bits)
+        var n: u64 = gpe_block_aus(state, kstate.get32(facp + F_GPE0),
+            kstate.get8(facp + F_GPE0_LEN))
+        n = n + gpe_block_aus(state, kstate.get32(facp + F_GPE1),
+            kstate.get8(facp + F_GPE1_LEN))
+        ds(state, S_GPE_N, n)
+    }
+    serial.puts((&s_g[0]) as u64)
+    serial.dec(dg(state, S_GPE_N))
+    serial.puts((&s_gs[0]) as u64)
+    serial.dec(dg(state, S_GPE_ST))
+    serial.puts((&s_t[0]) as u64)
+    serial.dec(dg(state, S_PMTMR))
+    serial.puts((&s_tb[0]) as u64)
+    serial.dec(dg(state, S_PMBITS))
+    serial.puts((&s_s[0]) as u64)
+    serial.dec(dg(state, S_SMI))
+    serial.nl()
+
+    // ---- DIE GEGENPROBE ZUR EICHUNG.
+    //
+    // Der PIT hat geeicht (`apic.calibrate`), der ACPI-Zeitgeber misst
+    // dasselbe noch einmal. Stimmen beide ueberein, ist die Eichung
+    // dieses Bretts in Ordnung -- und dann bleibt sie, wie sie ist.
+    // Weichen sie ab, steht die Zahl auf der Tafel, und der Umbau auf
+    // den ACPI-Zeitgeber ist keine Vermutung mehr, sondern faellig.
+    var s_pm: [u8; 13] = "acpi: pmhz=\0\0"
+    var s_pit: [u8; 8] = " pit=\0\0\0"
+    var s_ab: [u8; 9] = " abw=\0\0\0\0"
+    let pmhz: u64 = apic.tsc_gegen_pm(dg(state, S_PMTMR), dg(state, S_PMBITS))
+    ds(state, S_PMHZ, pmhz)
+    let pithz: u64 = apic.tsc_hz(state)
+    ds(state, S_ABW, 9999)
+    if pmhz != 0 && pithz != 0 {
+        var d: u64 = 0
+        if pithz > pmhz {
+            d = pithz - pmhz
+        } else {
+            d = pmhz - pithz
+        }
+        ds(state, S_ABW, (d *% 1000) / pmhz)
+    }
+    serial.puts((&s_pm[0]) as u64)
+    serial.dec(pmhz)
+    serial.puts((&s_pit[0]) as u64)
+    serial.dec(pithz)
+    serial.puts((&s_ab[0]) as u64)
+    serial.dec(dg(state, S_ABW))
+    serial.nl()
+
+    // ---- die IOMMU. NUR LESEN.
+    let ivrs: u64 = acpi.table(state, (&w_ivrs[0]) as u64)
+    serial.puts((&s_i[0]) as u64)
+    if ivrs == 0 {
+        serial.puts((&s_keine[0]) as u64)
+        serial.nl()
+        return
+    }
+    ds(state, S_IVRS, kstate.get32(ivrs + 36))
+    // Der erste IVHD-Eintrag steht bei 48; Typ 0x10, 0x11 oder 0x40
+    // tragen die Basisadresse bei Versatz 8.
+    let laenge: u64 = kstate.get32(ivrs + 4)
+    var p: u64 = ivrs + 48
+    var basis: u64 = 0
+    while p + 4 <= ivrs + laenge && basis == 0 {
+        let typ: u64 = kstate.get8(p)
+        let l: u64 = kstate.get8(p + 2) | (kstate.get8(p + 3) << 8)
+        if l < 4 {
+            p = ivrs + laenge
+        } else {
+            if typ == 0x10 || typ == 0x11 || typ == 0x40 {
+                basis = __mmio_read64((p + 8) as *mut u64)
+            }
+            p = p + l
+        }
+    }
+    ds(state, S_IOMMU, basis)
+    if basis != 0 {
+        // Unbeschreibbar abgebildet -- ein Registersatz ist MMIO und
+        // gehoert nie in den Zwischenspeicher (`apic.map_device` setzt
+        // PCD und PWT).
+        let v: u64 = apic.map_device(state, basis & 0xFFFFFFFFFFFFC000)
+        if v != 0 {
+            ds(state, S_IOMMU_C, __mmio_read64((v + 0x18) as *mut u64))
+            ds(state, S_IOMMU_S, __mmio_read64((v + 0x2020) as *mut u64))
+        }
+    }
+    serial.dec(dg(state, S_IVRS))
+    serial.puts((&s_ib[0]) as u64)
+    serial.dec(dg(state, S_IOMMU))
+    serial.puts((&s_ic[0]) as u64)
+    serial.dec(dg(state, S_IOMMU_C))
+    serial.puts((&s_is[0]) as u64)
+    serial.dec(dg(state, S_IOMMU_S))
+    serial.nl()
 }

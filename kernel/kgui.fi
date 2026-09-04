@@ -42,6 +42,7 @@ import sched
 import serial
 import tile
 import time
+import arch.x86_64.trap
 import ttf
 import tty
 import usb
@@ -2863,7 +2864,7 @@ fn kopf_setzen(state: u64, p: u64, n: u64) {
 // einzigen, der auf Justins Brett nachweislich laeuft:
 //   14 WAHL -- welcher USB-Regler gewonnen hat und mit welcher Punktzahl
 //   15 BAND -- ob das reservierte Band wirklich steht
-const TAFEL_ZEILEN: u64 = 16
+const TAFEL_ZEILEN: u64 = 18
 const TAFEL_SPALTEN: u64 = 48
 
 fn tz_text(state: u64, buf: u64, at: u64, t: u64) -> u64 {
@@ -2948,9 +2949,9 @@ fn tafel_zeile_sagen(b: u64, n: u64) {
 // gewann still. Justins Foto zeigte "... HUB 0 KBD" und dort hoerte
 // die Zeile auf. Jetzt ist es EINE Zahl, und sie steht in `wm` genauso.
 const TAFEL_SP: u64 = 48 // Zeichen je gemerkter Zeile
-static mut tafel_txt: [u8; 768] = [0 as u8; 768] // TAFEL_ZEILEN * TAFEL_SP
-static mut tafel_len: [u64; 16] = [0 as u64; 16]
-static mut tafel_fg: [u64; 16] = [0 as u64; 16]
+static mut tafel_txt: [u8; 864] = [0 as u8; 864] // TAFEL_ZEILEN * TAFEL_SP
+static mut tafel_len: [u64; 18] = [0 as u64; 18]
+static mut tafel_fg: [u64; 18] = [0 as u64; 18]
 static mut tafel_hat: u64 = 0 // steht schon Inhalt bereit?
 static mut tafel_drin: u64 = 0 // Wiedereintrittssperre
 static mut tafel_irq: u64 = 0 // Rufe aus dem Zeitgeber
@@ -3074,11 +3075,26 @@ fn tafel_streichen(state: u64) {
     // GENAU DANN drehte `serial.put` bis zu dieser Runde fuer immer.
     // LSR FF heisst offener Bus. SCR ist das Notizregister: kommt A5
     // zurueck, sitzt dort einer.
-    var t9: [u8; 10] = "9 KABEL  \0"
+    // ============================================ RUNDE BLECHVIER
+    // AUS DER KABEL-ZEILE WIRD DIE EICH-ZEILE.
+    //
+    // `VERW` und `AUS` haben ihre Frage beantwortet (Justins Brett hat
+    // keinen UART, LSR FF, und `serial.put` dreht seit der Runde KABEL
+    // nicht mehr fuer immer). An ihre Stelle tritt die Frage dieser
+    // Runde: STIMMT DIE EICHUNG UEBERHAUPT?
+    //   PIT -- Zyklen je Mikrosekunde, gegen den 8254 gemessen
+    //   PM  -- dasselbe, gegen den ACPI-Zeitgeber (3,579545 MHz, per
+    //          Spezifikation, von SMIs nicht zu verfaelschen)
+    //   ABW -- Abweichung der beiden in PROMILLE. Ueber hundert (zehn
+    //          Prozent) verwirft Linux eine Eichung; 9999 heisst, dass
+    //          gar nicht verglichen werden konnte.
+    // Auf Ryzen wird der 8254 ueber LPC emuliert -- dort ist genau das
+    // die Zahl, die entscheidet, ob die Uhr dieses Kerns etwas taugt.
+    var t9: [u8; 10] = "9 EICH   \0"
     var k_l: [u8; 5] = "LSR \0"
-    var t_s: [u8; 6] = " SCR \0"
-    var k_v: [u8; 7] = " VERW \0"
-    var t_a: [u8; 6] = " AUS \0"
+    var t_s: [u8; 6] = " PIT \0"
+    var k_v: [u8; 5] = " PM \0"
+    var t_a: [u8; 6] = " ABW \0"
     var k_m: [u8; 5] = " FB \0"
     var k_wb: [u8; 3] = "WB\0"
     var k_wc: [u8; 3] = "WC\0"
@@ -3087,11 +3103,11 @@ fn tafel_streichen(state: u64) {
     tn = puls_text(state, tp, tn, (&k_l[0]) as u64)
     tn = puls_hex(state, tp, tn, serial.lsr_roh())
     tn = puls_text(state, tp, tn, (&t_s[0]) as u64)
-    tn = puls_hex(state, tp, tn, serial.scr_roh())
+    tn = puls_zahl(state, tp, tn, time.khz(state) / 1000)
     tn = puls_text(state, tp, tn, (&k_v[0]) as u64)
-    tn = puls_zahl(state, tp, tn, serial.verworfen())
+    tn = puls_zahl(state, tp, tn, hw.pm_tschz(state) / 1000000)
     tn = puls_text(state, tp, tn, (&t_a[0]) as u64)
-    tn = puls_zahl(state, tp, tn, serial.aus())
+    tn = puls_zahl(state, tp, tn, hw.pm_abweichung(state))
     // UND DIE ABBILDUNGSART DES RAHMENPUFFERS. WB heisst: kleine
     // Aenderungen bleiben im Zwischenspeicher und kommen nie an.
     tn = puls_text(state, tp, tn, (&k_m[0]) as u64)
@@ -3103,8 +3119,11 @@ fn tafel_streichen(state: u64) {
         tn = puls_text(state, tp, tn, (&k_wb[0]) as u64)
     }
     // Gruen, wenn das Notizregister A5 zurueckgab -- sonst rot.
+    // Gruen, solange die zwei Uhren um weniger als ein Prozent
+    // auseinanderliegen. Rot heisst: eine der beiden luegt, und dann
+    // ist jede Zeitangabe dieses Kerns eine Schaetzung.
     var kfarbe: u64 = wm.mess_rot(state)
-    if serial.scr_roh() == 165 {
+    if hw.pm_abweichung(state) < 10 {
         kfarbe = wm.mess_gruen(state)
     }
     tafel_merken(9, tp, tn, kfarbe)
@@ -3251,6 +3270,9 @@ fn tafel_streichen(state: u64) {
     var w_vo: [u8; 2] = "/\0"
     var w_pk: [u8; 4] = " P \0"
     var w_ko: [u8; 2] = ",\0"
+    var w_rv: [u8; 6] = " RVR \0"
+    var w_rf: [u8; 6] = " RFL \0"
+    var w_mm: [u8; 6] = " MMU \0"
     let nhc: u64 = xhci.count_hc(state)
     tn = puls_text(state, tp, 0, (&t14[0]) as u64)
     tn = puls_text(state, tp, tn, (&w_hc[0]) as u64)
@@ -3266,6 +3288,24 @@ fn tafel_streichen(state: u64) {
         tn = puls_zahl(state, tp, tn, usb.pkt_get(state, hi))
         hi = hi + 1
     }
+    // RUNDE BLECHVIER, DREI ZAHLEN DAZU:
+    //   RVR -- wie viele Anschluesse zurueckgesetzt werden MUSSTEN,
+    //          obwohl sie schon freigeschaltet waren. Das ist die Zahl
+    //          der Geraete, die die FIRMWARE vor uns angefasst hatte --
+    //          genau die, bei denen das Ueberspringen der Ruecksetzung
+    //          eine tote Tastatur ergab.
+    //   RFL -- Ruecksetzungen, die nicht quittiert wurden.
+    //   MMU -- die Seitentafelbits des xHCI-REGISTERSATZES, aus der
+    //          Seitentafel ZURUECKGELESEN. 01B = PRESENT|WRITE|PWT|PCD
+    //          |HUGE, also unbeschreibbar -- richtig. Fehlten PWT/PCD
+    //          (083), laege eine Tuerklingel im L1 und klingelte nie:
+    //          derselbe Fehler wie beim Rahmenpuffer, nur schlimmer.
+    tn = puls_text(state, tp, tn, (&w_rv[0]) as u64)
+    tn = puls_zahl(state, tp, tn, xhci.reset_vorbelegt(state))
+    tn = puls_text(state, tp, tn, (&w_rf[0]) as u64)
+    tn = puls_zahl(state, tp, tn, xhci.reset_fails(state))
+    tn = puls_text(state, tp, tn, (&w_mm[0]) as u64)
+    tn = puls_hexn(state, tp, tn, xhci.bar_pde(state) & 0xFFF, 3)
     tafel_merken(14, tp, tn, wm.mess_ampel(state, usb.kbd_dev(state)))
     tafel_zeile_sagen(tp, tn)
 
@@ -3293,6 +3333,87 @@ fn tafel_streichen(state: u64) {
     tn = puls_text(state, tp, tn, (&b_w[0]) as u64)
     tn = puls_zahl(state, tp, tn, wm.mess_vollbreite(state))
     tafel_merken(15, tp, tn, wm.mess_ampel(state, bh))
+    tafel_zeile_sagen(tp, tn)
+
+    // ---- Zeile 16: DER ZEITGEBERBEHANDLER MISST SICH SELBST ----
+    //
+    // DIE ZEILE, DIE DIESE RUNDE BEANTWORTET. Justins Recherche hat
+    // ausgerechnet, dass ein Anstrich von 396 ms bei 10-ms-Takt
+    // neununddreissig von vierzig Schlaegen verschluckt -- IRR und ISR
+    // haben ein Bit je Vektor, alles darueber faellt still weg (Intel
+    // SDM Band 3, 10.8.4). Statt das zu glauben, steht es hier:
+    //   US    -- wie lange der Behandler zuletzt gebraucht hat
+    //   MAX   -- wie lange am laengsten
+    //   VERL  -- Marken, die der Zyklenzaehler NACHTRAGEN musste
+    //   SPAET -- Schlaege, die in einen laufenden Anstrich fielen und
+    //            umgekehrt sind. Ohne die Sperre waeren genau das die
+    //            verlorenen -- diese Zahl ist der Beweis, dass der
+    //            Umbau wirkt.
+    // Rot, sobald der Behandler laenger als eine halbe Marke braucht.
+    var t16: [u8; 10] = "16 ISR   \0"
+    var i_u: [u8; 4] = "US \0"
+    var i_m: [u8; 6] = " MAX \0"
+    var i_v: [u8; 7] = " VERL \0"
+    var i_s: [u8; 8] = " SPAET \0"
+    let us: u64 = trap.isr_us_max()
+    tn = puls_text(state, tp, 0, (&t16[0]) as u64)
+    tn = puls_text(state, tp, tn, (&i_u[0]) as u64)
+    tn = puls_zahl(state, tp, tn, trap.isr_us_last())
+    tn = puls_text(state, tp, tn, (&i_m[0]) as u64)
+    tn = puls_zahl(state, tp, tn, us)
+    tn = puls_text(state, tp, tn, (&i_v[0]) as u64)
+    tn = puls_zahl(state, tp, tn, trap.ticks_lost())
+    tn = puls_text(state, tp, tn, (&i_s[0]) as u64)
+    tn = puls_zahl(state, tp, tn, trap.ticks_late())
+    var ifarbe: u64 = wm.mess_gruen(state)
+    if us > 5000 {
+        ifarbe = wm.mess_rot(state)
+    }
+    tafel_merken(16, tp, tn, ifarbe)
+    tafel_zeile_sagen(tp, tn)
+
+    // ---- Zeile 17: WAS DAS BLECH UNTER UNS TUT ----
+    //
+    // Drei Dinge, die in QEMU NIE auffallen und auf echtem Blech einen
+    // Kern stillstehen lassen (siehe `hw.blech_stage`):
+    //   GPE  -- wie viele General-Purpose-Event-Bits abgeschaltet
+    //           wurden. Null heisst: keine FADT gefunden, und dann kann
+    //           ein Ereignis den SCI dauerhaft ziehen.
+    //   ST   -- was in den GPE-Statusregistern STAND. Groesser null
+    //           heisst: es haette wirklich einen Sturm gegeben.
+    //   IVR  -- das IVinfo-Feld der IVRS. 0 = keine IOMMU-Tabelle.
+    //   CTL  -- Bit 0 des IOMMU-Steuerregisters: 1 = die Uebersetzung
+    //           ist AN, und dann wird jeder DMA ausserhalb der
+    //           Unity-Bereiche STILL abgebrochen.
+    //   PMT  -- die Anschrift des ACPI-Zeitgebers (3,579545 MHz, per
+    //           Spezifikation). Der richtige Eichmassstab auf Ryzen,
+    //           wo der 8254 ueber LPC emuliert wird.
+    var t17: [u8; 10] = "17 BLECH \0"
+    var q_g: [u8; 5] = "GPE \0"
+    var q_s: [u8; 5] = " ST \0"
+    var q_i: [u8; 6] = " IVR \0"
+    var q_c: [u8; 6] = " CTL \0"
+    var q_p: [u8; 6] = " PMT \0"
+    let ivr: u64 = hw.ivrs_info(state)
+    let ctl: u64 = hw.iommu_ctrl(state)
+    tn = puls_text(state, tp, 0, (&t17[0]) as u64)
+    tn = puls_text(state, tp, tn, (&q_g[0]) as u64)
+    tn = puls_zahl(state, tp, tn, hw.gpe_abgeschaltet(state))
+    tn = puls_text(state, tp, tn, (&q_s[0]) as u64)
+    tn = puls_hex(state, tp, tn, hw.gpe_status(state))
+    tn = puls_text(state, tp, tn, (&q_i[0]) as u64)
+    tn = puls_hexn(state, tp, tn, ivr & 0xFFFF, 4)
+    tn = puls_text(state, tp, tn, (&q_c[0]) as u64)
+    tn = puls_zahl(state, tp, tn, ctl & 1)
+    tn = puls_text(state, tp, tn, (&q_p[0]) as u64)
+    tn = puls_hexn(state, tp, tn, hw.pmtmr_port(state) & 0xFFFF, 4)
+    // Rot, sobald die IOMMU wirklich uebersetzt -- das ist der Zustand,
+    // in dem xHCI-Ereignisringe still leer bleiben.
+    var bfarbe: u64 = wm.mess_gruen(state)
+    if (ctl & 1) != 0 {
+        bfarbe = wm.mess_rot(state)
+    }
+    tafel_merken(17, tp, tn, bfarbe)
     tafel_zeile_sagen(tp, tn)
 
     // ================================================ RUNDE BLECHZWEI
@@ -3387,9 +3508,9 @@ fn tafel_streichen(state: u64) {
 // Was zuletzt WIRKLICH auf dem Schirm stand -- Text, Laenge und Farbe.
 // Ohne die Farbe waere eine Zeile, die nur von rot auf gruen wechselt,
 // unsichtbar geblieben, und die Ampel ist die halbe Aussage der Tafel.
-static mut tafel_alt: [u8; 768] = [0 as u8; 768]
-static mut tafel_altlen: [u64; 16] = [0 as u64; 16]
-static mut tafel_altfg: [u64; 16] = [0 as u64; 16]
+static mut tafel_alt: [u8; 864] = [0 as u8; 864]
+static mut tafel_altlen: [u64; 18] = [0 as u64; 18]
+static mut tafel_altfg: [u64; 18] = [0 as u64; 18]
 static mut tafel_grund: u64 = 0
 // Der Stand des Zusammensetzers beim letzten Anstrich.
 static mut tafel_comp: u64 = 0
