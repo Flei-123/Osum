@@ -60,6 +60,8 @@ import pci
 export {
     present, init, active, hz, id,
     eoi, timer_start, timer_stop, map_device, window_slots, lapic_phys,
+    // RUNDE BLECHVIER: die Gegenprobe mit dem ACPI-Zeitgeber.
+    tsc_gegen_pm, win_pde, pde_bei,
     route, mask_gsi, ioapic_entries, gsi_entry, pic_off,
     timer_running,
     spurious, spurious_hit, tsc, tsc_hz, VEC_SPURIOUS,
@@ -201,6 +203,49 @@ fn map_device(state: u64, phys: u64) -> u64 {
     return 0
 }
 
+// ================================================== RUNDE BLECHVIER
+// DAS CACHE-ATTRIBUT EINES GERAETEFENSTERS, ZURUECKGELESEN.
+//
+// Justins Recherche nennt als Verdacht Nummer eins, dass MMIO-Bereiche
+// write-back abgebildet sein koennten -- dann landet ein Schreibzugriff
+// auf eine xHCI-Tuerklingel im L1 und erreicht das Geraet nie, und in
+// QEMU faellt es nicht auf, weil dort gar keine Caches nachgebildet
+// werden.
+//
+// DER VERDACHT IST HIER WIDERLEGT: `map_device` setzt seit jeher
+// `PAGE_PCD | PAGE_PWT`. Aber "steht im Quelltext" ist nicht "steht in
+// der Seitentafel" -- das war schon beim Rahmenpuffer der Unterschied
+// zwischen drei verlorenen Runden und der Loesung. Also wird der
+// Eintrag ZURUECKGELESEN, genau wie `fb.pde_roh` es tut:
+//   0x1B = PRESENT|WRITE|PWT|PCD|HUGE  -> uncached, richtig
+//   0x83 = ohne PWT/PCD                -> write-back, FALSCH
+fn win_pde(state: u64, i: u64) -> u64 {
+    if i >= WIN_SLOTS {
+        return 0
+    }
+    if kstate.get(state, pci.K2_SCALARS + S_WIN + i * 8) == 0 {
+        return 0
+    }
+    let pd: u64 = kernel_pd(state)
+    if pd == 0 {
+        return 0
+    }
+    return __mmio_read64((pd + (WIN_FIRST + i) * 8) as *mut u64) & 0xFFF
+}
+
+// GEMESSEN UND KORRIGIERT: "sind ALLE Fenster unbeschreibbar" war die
+// falsche Frage und meldete am fertigen Abbild `MMU 0`. Der
+// RAHMENPUFFER teilt sich diese Fensterplaetze und ist mit gutem Grund
+// write-combining -- die Antwort war also richtig und trotzdem
+// nutzlos. Gefragt ist das Attribut EINES BESTIMMTEN Registersatzes.
+fn pde_bei(state: u64, virt: u64) -> u64 {
+    if virt < WIN_VIRT {
+        return 0
+    }
+    let i: u64 = (virt - WIN_VIRT) / HUGE_SIZE
+    return win_pde(state, i)
+}
+
 fn window_slots(state: u64) -> u64 {
     var n: u64 = 0
     var i: u64 = 0
@@ -340,6 +385,81 @@ fn calibrate(state: u64) -> u64 {
     kstate.set(state, pci.K2_SCALARS + S_HZ, per_sec)
     kstate.set(state, pci.K2_SCALARS + S_TSCHZ, (t1 - t0) * 100)
     return per_sec
+}
+
+// =====================================================================
+// RUNDE BLECHVIER: DIE GEGENPROBE MIT DEM ACPI-ZEITGEBER
+// =====================================================================
+//
+// WARUM DER PIT AUF RYZEN NICHT REICHT. Auf modernen AMD-FCH gibt es
+// keinen echten 8254 mehr -- er wird ueber LPC/eSPI emuliert, und ein
+// einzelner Lesezugriff kann laenger dauern als das gesamte Messfenster
+// gross sein duerfte. Dazu kommen SMIs (Luefterregelung, ErP,
+// USB-Altlasten) im Bereich von zehn bis hundert Millisekunden, die
+// mitten in das Fenster fallen. Linux verwirft eine Eichung, wenn das
+// Groesste zehnmal groesser ist als das Kleinste, und es gibt einen
+// Commit, der die PIT-Aufsetzung auf modernen Chipsaetzen ganz
+// ueberspringt.
+//
+// DER ACPI-ZEITGEBER hat eine FESTGESCHRIEBENE Frequenz von 3,579545
+// MHz. Er muss nicht geeicht werden, er ist per Spezifikation richtig,
+// und ein SMI verfaelscht ihn nicht -- er laeuft weiter, waehrend der
+// Prozessor im Systemverwaltungsmodus steht.
+//
+// Hier wird NICHTS umgestellt. Hier wird GEGENGEPRUEFT: dieselbe
+// Zyklenzahl noch einmal, diesmal gegen den ACPI-Zeitgeber, und die
+// Abweichung in Promille auf die Tafel. Weicht sie stark ab, ist die
+// PIT-Eichung dieses Bretts unbrauchbar -- und DANN lohnt der Umbau.
+// Vorher waere er eine Behauptung.
+const PM_HZ: u64 = 3579545
+
+// GEMESSEN UND KORRIGIERT: die erste Fassung las den Zaehler in VIER
+// EINZELNEN OKTETTZUGRIFFEN zusammen. Das ergab in QEMU 33 489 Zyklen
+// je Sekunde statt 2,2 Milliarden -- der Zaehler laeuft WAEHREND der
+// vier Zugriffe weiter, und die zusammengesetzte Zahl springt. Der
+// ACPI-Zeitgeber ist ein 32-Bit-Anschlussregister und will in EINEM
+// Zugriff gelesen werden.
+fn in32(port: u16) -> u64 {
+    return asm("in eax, dx", out("rax"), in("dx") port)
+}
+
+fn pm_lesen(port: u64, bits: u64) -> u64 {
+    let v: u64 = in32(port as u16)
+    if bits >= 32 {
+        return v & 0xFFFFFFFF
+    }
+    return v & 0xFFFFFF
+}
+
+// Zyklen je Sekunde, gegen den ACPI-Zeitgeber gemessen. 0 = kein
+// Zeitgeber da oder er zaehlt nicht (dann steht der Wert still, und
+// eine Schleife ohne Ende waere die schlechteste aller Antworten --
+// deshalb der Zaehler `wache`).
+fn tsc_gegen_pm(port: u64, bits: u64) -> u64 {
+    if port == 0 {
+        return 0
+    }
+    let maske: u64 = (1 << bits) - 1
+    // Ein Zehntel der Zeitgeberfrequenz sind 100 ms. Lang genug, dass
+    // ein einzelner SMI nicht durchschlaegt, kurz genug fuer den Start.
+    let spanne: u64 = PM_HZ / 10
+    let a0: u64 = pm_lesen(port, bits)
+    let t0: u64 = tsc()
+    var wache: u64 = 0
+    var vergangen: u64 = 0
+    while vergangen < spanne && wache < 200000000 {
+        let a: u64 = pm_lesen(port, bits)
+        vergangen = (a - a0) & maske
+        wache = wache + 1
+    }
+    let t1: u64 = tsc()
+    if vergangen < spanne || t1 <= t0 {
+        return 0
+    }
+    // Zyklen je Sekunde = Zyklen / vergangene Zeitgebertakte * PM_HZ.
+    // Erst teilen, dann malnehmen -- sonst laeuft das Produkt ueber.
+    return ((t1 - t0) / vergangen) * PM_HZ
+        + (((t1 - t0) % vergangen) * PM_HZ) / vergangen
 }
 
 // The cycle counter of the processor. Not a clock -- it says nothing

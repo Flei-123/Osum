@@ -82,7 +82,9 @@ export {
     // RUNDE BLECH-HID: was ein zweiter Regler und eine fremde Firmware
     // von diesem Treiber verlangen.
     count_hc, nth_hc, init_at, unit, udelay, power_all, melde_art,
-    uebersicht, bericht, owned_by_bios, hcs_seen, legtest
+    uebersicht, bericht, owned_by_bios, hcs_seen, legtest,
+    // RUNDE BLECHVIER: was die Ruecksetzung der Anschluesse gekostet hat.
+    reset_fails, reset_vorbelegt, bar_pde
 }
 
 // ------------------------------------------------- der Vorrat dieser Runde
@@ -179,6 +181,15 @@ const S_HALTOK: u64 = 0x118
 const S_RSTOK: u64 = 0x120
 const S_HCIVER: u64 = 0x128
 const S_BAR: u64 = 0x130
+// RUNDE BLECHVIER: Ruecksetzungen, die nicht durchkamen. Eine Zahl
+// groesser null heisst: an diesem Anschluss ist ein Geraet, das die
+// Ruecksetzung nicht quittiert -- und dann ist jede folgende Aussage
+// ueber dieses Geraet mit Vorsicht zu lesen.
+const S_RESETFAIL: u64 = 0x138
+// Wie oft ein Anschluss zurueckgesetzt wurde, OBWOHL er schon
+// freigeschaltet war. Das ist die Zahl der Geraete, die die Firmware
+// vor uns angefasst hatte.
+const S_RESETVOR: u64 = 0x140
 
 // -------------------------------------- die Felder eines Endpunktplatzes
 
@@ -835,6 +846,21 @@ fn port_connected(state: u64, p: u64) -> bool {
     return (portsc(state, p) & PSC_CCS) != 0
 }
 
+// DAS CACHE-ATTRIBUT DES EIGENEN REGISTERSATZES, aus der Seitentafel
+// zurueckgelesen. MMIO MUSS unbeschreibbar sein: eine Tuerklingel, die
+// im L1 liegenbleibt, klingelt nie. 0x1B = PRESENT|WRITE|PWT|PCD|HUGE.
+fn bar_pde(state: u64) -> u64 {
+    return apic.pde_bei(state, g(state, S_BASE))
+}
+
+fn reset_fails(state: u64) -> u64 {
+    return g(state, S_RESETFAIL)
+}
+
+fn reset_vorbelegt(state: u64) -> u64 {
+    return g(state, S_RESETVOR)
+}
+
 fn port_enabled(state: u64, p: u64) -> bool {
     return (portsc(state, p) & PSC_PED) != 0
 }
@@ -904,10 +930,52 @@ fn port_clear_changes(state: u64, p: u64) {
 // QEMU beide anbietet: die ersten Anschluesse von `qemu-xhci` sind
 // USB 2, die hinteren USB 3.
 fn port_reset(state: u64, p: u64) -> bool {
-    if port_enabled(state, p) {
+    // ================================================ RUNDE BLECHVIER
+    // ============ DIE RUECKSETZUNG WIRD ERZWUNGEN, NICHT ERSPART.
+    //
+    // HIER STAND: `if port_enabled(state, p) { return true }` -- ein
+    // freigeschalteter Anschluss galt als fertig. Auf einem Brett mit
+    // UEFI ist das falsch, und es ist die beste Erklaerung, die es fuer
+    // Justins flatternde Aufzaehlung gibt.
+    //
+    // Die Firmware zaehlt Tastatur und Maus SELBST auf, bevor der Lader
+    // laeuft: sie adressiert die Geraete und schaltet die Anschluesse
+    // frei. Nach unserem `HCRST` sind UNSERE Steckplaetze weg -- das
+    // GERAET aber behaelt seine von der Firmware vergebene Adresse, bis
+    // es einen echten Anschluss-Reset sieht. Wer den Reset ueberspringt,
+    // weil PED schon steht, vergibt Adresse 1 an ein Geraet, das noch
+    // auf die alte Adresse hoert: `Address Device` wird quittiert, die
+    // Aufzaehlung gilt formal als geglueckt, und JEDER folgende
+    // Steuertransfer laeuft ins Leere.
+    //
+    // UND ES FLATTERT GENAU RICHTIG: ob die Firmware ein Geraet
+    // angefasst hat, haengt davon ab, ob im Bootmenue eine Taste
+    // gedrueckt wurde. Zwei Startvorgaenge desselben Sticks, zwei
+    // verschiedene Ergebnisse, bei UNVERAENDERTER Zahl von
+    // Unterbrechungen und Ereignissen -- und genau das hat Justin
+    // gemeldet.
+    //
+    // In QEMU faellt es nicht auf, weil dort niemand vor uns
+    // aufgezaehlt hat.
+    //
+    // `usbnoreset` ist die Gegenprobe und stellt das alte Verhalten her.
+    let war_an: bool = port_enabled(state, p)
+    if war_an && kstate.mode_on(state, kstate.M_USBNORESET) {
         port_clear_changes(state, p)
         return true
     }
+    // ============ UND DAS ALTE AENDERUNGSBIT ZUERST WEG.
+    //
+    // `PSC_PRC` ist RW1C. Steht es noch von einer frueheren
+    // Ruecksetzung, kehrt die Warteschleife unten SOFORT zurueck und
+    // meldet einen Reset, den es nie gab. Es wird deshalb hier
+    // ausdruecklich geloescht -- vor `PR`, nicht danach, denn danach
+    // wuerde es die gerade erst gemeldete Ruecksetzung wegwerfen.
+    if war_an {
+        s(state, S_RESETVOR, g(state, S_RESETVOR) + 1)
+    }
+    let vor: u64 = portsc(state, p)
+    portsc_write(state, p, (vor & PSC_KEEP) | PSC_PRC)
     // RUNDE BLECH-HID: DIE PRELLZEIT. Ein Anschluss, der gerade
     // "verbunden" gemeldet hat, ist noch nicht ruhig -- USB 2.0,
     // 7.1.7.3 verlangt 100 ms (TATTDB), bevor zurueckgesetzt wird. Ein
@@ -928,6 +996,15 @@ fn port_reset(state: u64, p: u64) -> bool {
         }
     }
     if !fertig {
+        // Die Ruecksetzung kam nicht durch. War der Anschluss vorher
+        // freigeschaltet, ist das immer noch besser als gar nichts --
+        // aber es wird GEMELDET und nicht stillschweigend als Erfolg
+        // verbucht.
+        s(state, S_RESETFAIL, g(state, S_RESETFAIL) + 1)
+        if war_an {
+            port_clear_changes(state, p)
+            return port_enabled(state, p)
+        }
         return false
     }
     port_clear_changes(state, p)
