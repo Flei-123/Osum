@@ -241,7 +241,21 @@ cat > "$OUT/passwd" <<'EOF'
 root:x:0:0:root:/:/bin/sh
 justin:x:1000:1000:Justin:/users/justin:/bin/sh
 EOF
-printf '# taskbar.conf\nedge=bottom\nheight=28\nwidth=104\nautohide=0\nontop=1\n' \
+# ============================================== RUNDE STARTKNOPF
+# Die Vorgaben der Leiste, nach Justins Vorlage (Windows 11):
+#   labels=never    Programmknoepfe nur als Symbol -- ein Symbol wird
+#                   nie abgeschnitten ("St", "Termina" waren die Folge
+#                   einer festen Hoechstbreite, nicht von Platzmangel).
+#   clock_seconds=1 Die Uhr tickt SICHTBAR. Ohne Sekunden wird die
+#                   Leiste hoechstens einmal je Minute neu gemalt, und
+#                   das ist von "eingefroren" nicht zu unterscheiden --
+#                   genau der Befund, den Justin gemeldet hat.
+#   clock_date=1    Datum daneben; die Feldbreite waechst mit.
+#   hide_missing=1  Kein Symbol und kein Text fuer Hardware, die es
+#                   nicht gibt. Das "kein Akku" auf einem Tischrechner
+#                   war keine Auskunft.
+#   height=40       28 war auf 3440x1440 ein Strich.
+printf '# taskbar.conf\nedge=bottom\nheight=40\nwidth=104\nautohide=0\nontop=1\nalign=left\nlabels=never\nclock_seconds=1\nclock_date=1\nclock_weekday=0\nclock_lines=1\nhide_missing=1\n' \
     > "$OUT/taskbar.conf"
 
 # ==================== RUNDE BLECH-HID: DER NOTAUSGANG OHNE TASTATUR

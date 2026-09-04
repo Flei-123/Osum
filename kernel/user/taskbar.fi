@@ -74,6 +74,7 @@ import ulib
 import libc.io
 import wlibc
 import marke_start
+import nv
 import icons
 import msg
 import qs
@@ -3239,6 +3240,84 @@ static mut z_none: [u8; 5] = "none\0"
 static mut z_qs: [u8; 6] = "quick\0"
 static mut s_noqs: [u8; 28] = "taskbar: no quick settings\0\0"
 
+// ============================================== RUNDE STARTKNOPF
+// DAS STARTMENUE AUF UND ZU -- UEBER DIE SUPER-TASTE ODER DEN KNOPF.
+//
+// Der Startknopf hat bis hierher IMMER `SYS_SPAWN` gerufen. Zweimal
+// druecken hiess also: zwei Starter. Ein Startmenue schaltet um, und
+// das gilt fuer die Taste genauso wie fuer den Knopf.
+//
+// ZUGEMACHT WIRD UEBER DEN FENSTERSERVER und nicht ueber ein Signal an
+// den Prozess: `WA_TOGGLE` ist genau der Weg, den der Klick auf den
+// Fensterknopf in der Leiste schon nimmt (verkleinern/hervorholen).
+// Damit ist der zweite Druck auf Super derselbe Vorgang wie ein Klick
+// auf den Knopf, und es gibt nicht zwei Wege, dasselbe zu tun. Der
+// Starter bleibt dabei am Leben -- das zweite Oeffnen ist deshalb
+// sofort da und kostet keinen Programmstart.
+static mut menue_pid: u64 = 0
+
+fn launcher_fenster() -> u64 {
+    var i: u64 = 0
+    while i < nk {
+        if ulib.streq((&kapp[0 as usize]) as u64 + i * 24,
+            (&a_launcher[0 as usize]) as u64) {
+            return kid[(i) as usize]
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+static mut a_launcher: [u8; 9] = "launcher\0"
+static mut s_tog: [u8; 24] = "taskbar: startmenue zu\0\0"
+
+// ============================================== RUNDE STARTKNOPF
+// DIE SUPER-TASTE, GELESEN NACH DEM ZAEHLERPROTOKOLL AUS kbd.fi.
+//
+// Der Kern schreibt Taste, Zeitstempel und einen ZAEHLER; wer eine
+// Zahl sieht, die er noch nicht hatte, handelt genau einmal. Zwei
+// Leser (dieser hier und `qs.step` fuer Super+A) nehmen sich den
+// Druck damit nicht gegenseitig weg -- das ist der ganze Grund fuer
+// den Zaehler statt einer Fahne.
+//
+// Taste 0 heisst SUPER ALLEIN (kein Zeichen hat den Wert null).
+static mut hk_gesehen: u64 = 0
+static mut hk_erst: u64 = 1
+
+fn hotkey_step() {
+    let seq: u64 = nv.hotkey_seq()
+    if seq == hk_gesehen {
+        return
+    }
+    // Beim ersten Blick wird nur der Stand uebernommen: was vor dem
+    // Start der Leiste gedrueckt wurde, ist nicht an sie gerichtet.
+    if hk_erst != 0 {
+        hk_erst = 0
+        hk_gesehen = seq
+        return
+    }
+    hk_gesehen = seq
+    if nv.hotkey_key() == 0 {
+        startmenue_um()
+    }
+}
+
+fn startmenue_um() {
+    let w: u64 = launcher_fenster()
+    if w != 0 {
+        say((&s_tog[0 as usize]) as u64)
+        ulib.nl()
+        let _rc: u64 = wlibc.win_act(w, wlibc.WA_TOGGLE)
+        return
+    }
+    let pid: u64 = ulib.sys(ulib.SYS_SPAWN,
+        (&p_start[0 as usize]) as u64, 0, 0)
+    menue_pid = pid
+    say((&s_sp[0 as usize]) as u64)
+    ulib.sayn(pid)
+    ulib.nl()
+}
+
 fn click(x: u64, y: u64) {
     clicks = clicks + 1
     say((&s_cl[0 as usize]) as u64)
@@ -3263,11 +3342,7 @@ fn click(x: u64, y: u64) {
         say((&s_ct[0 as usize]) as u64)
         say((&z_start[0 as usize]) as u64)
         ulib.nl()
-        let pid: u64 = ulib.sys(ulib.SYS_SPAWN,
-            (&p_start[0 as usize]) as u64, 0, 0)
-        say((&s_sp[0 as usize]) as u64)
-        ulib.sayn(pid)
-        ulib.nl()
+        startmenue_um()
         return
     }
     var i: u64 = 0
@@ -3524,6 +3599,7 @@ fn u_start(args: u64) -> u64 {
         // of `/etc/taskbar.conf` inside one process would be two
         // answers to one question.
         let _qsc: bool = qs.step()
+        hotkey_step()
         let hw: u64 = qs.want_hide()
         if hw != 0 {
             if hw == 1 {

@@ -297,6 +297,123 @@ fn starten(zeile: u64) {
     ulib.nl()
 }
 
+// ============================================== RUNDE STARTKNOPF
+// WO DAS MENUE AUFGEHT.
+//
+// Gelesen wird dieselbe Datei, die die Leiste liest. Ohne sie (oder
+// ohne den Schluessel) bleibt es bei `left` -- das ist die Vorgabe der
+// Leiste, also ist es hier dieselbe.
+static mut lp_conf: [u8; 20] = "/etc/taskbar.conf\0\0\0"
+static mut lk_align: [u8; 6] = "align\0"
+static mut lw_center: [u8; 7] = "center\0"
+static mut lk_height: [u8; 7] = "height\0"
+static mut l_align: u64 = 0 // 0 = links, 1 = mittig
+static mut l_bar: u64 = 40 // Hoehe der Leiste
+
+fn conf_lesen() {
+    var buf: [u8; 256] = [0 as u8; 256]
+    var wort: [u8; 24] = [0 as u8; 24]
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&lp_conf[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    let b: u64 = (&buf[0 as usize]) as u64
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, b, 255)
+    let _c: u64 = ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) || n == 0 {
+        return
+    }
+    var i: u64 = 0
+    while i < n {
+        let ks: u64 = i
+        var ke: u64 = i
+        while ke < n && __mmio_read8((b + ke) as *mut u8) != 61 as u8
+            && __mmio_read8((b + ke) as *mut u8) != 10 as u8 {
+            ke = ke + 1
+        }
+        if ke < n && __mmio_read8((b + ke) as *mut u8) == 61 as u8 {
+            let vs: u64 = ke + 1
+            var ve: u64 = vs
+            while ve < n && __mmio_read8((b + ve) as *mut u8) != 10 as u8
+                && __mmio_read8((b + ve) as *mut u8) != 13 as u8 {
+                ve = ve + 1
+            }
+            let wp: u64 = (&wort[0 as usize]) as u64
+            var k: u64 = 0
+            var v: u64 = 0
+            var ziffern: u64 = 0
+            while vs + k < ve && k < 23 {
+                let c: u64 = __mmio_read8((b + vs + k) as *mut u8) as u64
+                __mmio_write8((wp + k) as *mut u8, c as u8)
+                if c >= 48 && c <= 57 {
+                    v = v * 10 + (c - 48)
+                    ziffern = ziffern + 1
+                }
+                k = k + 1
+            }
+            __mmio_write8((wp + k) as *mut u8, 0 as u8)
+            if schluessel_ist(b + ks, ke - ks, (&lk_align[0 as usize]) as u64) {
+                if ulib.streq(wp, (&lw_center[0 as usize]) as u64) {
+                    l_align = 1
+                }
+            } else if schluessel_ist(b + ks, ke - ks,
+                (&lk_height[0 as usize]) as u64) {
+                if ziffern > 0 && v > 0 && v < 400 {
+                    l_bar = v
+                }
+            }
+            i = ve + 1
+        } else {
+            i = ke + 1
+        }
+    }
+}
+
+fn schluessel_ist(p: u64, n: u64, name: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = __mmio_read8((p + i) as *mut u8) as u64
+        let d: u64 = __mmio_read8((name + i) as *mut u8) as u64
+        if d == 0 || c != d {
+            return false
+        }
+        i = i + 1
+    }
+    return __mmio_read8((name + n) as *mut u8) == 0 as u8
+}
+
+// Waagerecht: an der Kante des Startknopfes (links) oder mittig ueber
+// ihm. Der Startknopf steht bei `pad()+1` bzw. mittig im freien Lauf --
+// die Leiste rechnet dasselbe, und wenn beide dieselbe Datei lesen,
+// stehen sie an derselben Stelle.
+fn anker_x(bw: u64) -> u64 {
+    let sw: u64 = wlibc.screen_w()
+    if l_align == 1 {
+        if sw > bw {
+            return (sw - bw) / 2
+        }
+        return 0
+    }
+    return 8
+}
+
+// Senkrecht: unmittelbar ueber der Leiste, und nie ueber den oberen
+// Rand der Arbeitsflaeche hinaus (dort liegt das reservierte Band).
+fn anker_y(bh: u64) -> u64 {
+    // Die Arbeitsflaeche (`work_*`) braucht ein FENSTER, und das gibt
+    // es hier noch nicht. Gerechnet wird deshalb aus Schirmhoehe und
+    // Leistenhoehe -- und das ist dieselbe Zahl: die Leiste ist der
+    // einzige Streifen unter dem Menue. Das reservierte Band der
+    // Messtafel liegt OBEN und kann von einem Feld, das unten
+    // verankert ist, nicht getroffen werden.
+    let sh2: u64 = wlibc.screen_h()
+    let unten: u64 = sh2 - l_bar
+    if unten > bh + 8 {
+        return unten - bh - 8
+    }
+    return 0
+}
+
 fn u_start(args: u64) -> u64 {
     var s_no: [u8; 8] = "nohit\0\0\0"
     var s_nc: [u8; 8] = "noclip\0\0"
@@ -400,7 +517,32 @@ fn u_start(args: u64) -> u64 {
     let by: u64 = 110
     let bw: u64 = 440
     let bh: u64 = 300
-    let w: u64 = wlib.window(bx, by, bw, bh, (&t_titel[0 as usize]) as u64)
+    // ============================================== RUNDE STARTKNOPF
+    // KEIN FENSTER MIT TITELLEISTE, SONDERN EIN FELD AN DER LEISTE.
+    //
+    // Justins Hauptkritik am Starter: er ist ein Fenster mit Rahmen und
+    // rotem Kreuz, taucht in der Fensterliste auf und steht irgendwo im
+    // Bild. Ein Startmenue ist nichts davon -- es geht ueber dem
+    // Schreibtisch auf, unten an der Leiste verankert, und ist wieder
+    // weg, wenn man daneben klickt.
+    //
+    // STUFE 1 dieser Runde: kein Schmuck, oberste Ebene, VERANKERT AN
+    // DER ECHTEN LAGE DES STARTKNOPFES -- und die kommt nicht aus einer
+    // festen Zahl, sondern aus der Ausrichtung der Leiste
+    // (`/etc/taskbar.conf`, `align=`). Steht die Leiste links, geht das
+    // Menue unten links bündig auf; steht sie mittig, waagerecht
+    // mittig ueber dem Startknopf. Dieselbe Datei, dieselbe Regel --
+    // eine zweite Stelle, die entscheidet, wo der Startknopf ist, waere
+    // die zweite Wahrheit darueber.
+    //
+    // Die Arbeitsflaeche (`work_*`) und nicht der Schirm ist der
+    // Rahmen: unter der Leiste (und unter dem reservierten Band der
+    // Messtafel) hat das Menue nichts verloren.
+    conf_lesen()
+    let anker: u64 = anker_x(bw)
+    let ay: u64 = anker_y(bh)
+    let w: u64 = wlib.window_plain(anker, ay, bw, bh,
+        (&t_titel[0 as usize]) as u64, wlibc.L_TOP)
     // RUNDE PAINT: welchem Buendel dieses Fenster gehoert --
     // damit die Taskleiste sein Symbol findet.
     var a_app: [u8; 9] = "launcher\0"
@@ -470,6 +612,16 @@ fn u_start(args: u64) -> u64 {
             } else if kind == wlib.K_BUTTON && id == bt {
                 starten(wlib.value(ls))
             }
+        }
+        // ============================================ RUNDE STARTKNOPF
+        // ESCAPE SCHLIESST DAS MENUE.
+        //
+        // Ein Feld ohne Titelleiste hat kein Kreuz -- also braucht es
+        // einen anderen Weg hinaus, und der ist auf jedem System
+        // derselbe. (Der zweite Druck auf Super geht ueber die
+        // Taskleiste; die kennt das Fenster und schaltet es um.)
+        if wlib.key_last() == wlib.KEY_ESC {
+            return 0
         }
         // WAEHREND MAN TIPPT wird die Liste kuerzer. Das Textfeld meldet
         // keinen Tastendruck (es meldet die Eingabetaste), also wird
