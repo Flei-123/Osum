@@ -33,6 +33,7 @@ import fb
 import fs
 import hw
 import kstate
+import cpu
 import mem
 import pmon
 import proc
@@ -2934,7 +2935,7 @@ fn kopf_setzen(state: u64, p: u64, n: u64) {
 // einzigen, der auf Justins Brett nachweislich laeuft:
 //   14 WAHL -- welcher USB-Regler gewonnen hat und mit welcher Punktzahl
 //   15 BAND -- ob das reservierte Band wirklich steht
-const TAFEL_ZEILEN: u64 = 22 // RUNDE STARTKNOPF: dazu ENDP und FUND
+const TAFEL_ZEILEN: u64 = 24 // RUNDE STARTKNOPF: dazu ENDP, FUND und die Absturzklinke
 const TAFEL_SPALTEN: u64 = 48
 
 fn tz_text(state: u64, buf: u64, at: u64, t: u64) -> u64 {
@@ -3036,9 +3037,9 @@ fn tafel_zeile_sagen(b: u64, n: u64) {
 // gewann still. Justins Foto zeigte "... HUB 0 KBD" und dort hoerte
 // die Zeile auf. Jetzt ist es EINE Zahl, und sie steht in `wm` genauso.
 const TAFEL_SP: u64 = 48 // Zeichen je gemerkter Zeile
-static mut tafel_txt: [u8; 1056] = [0 as u8; 1056] // TAFEL_ZEILEN * TAFEL_SP
-static mut tafel_len: [u64; 22] = [0 as u64; 22]
-static mut tafel_fg: [u64; 22] = [0 as u64; 22]
+static mut tafel_txt: [u8; 1152] = [0 as u8; 1152] // TAFEL_ZEILEN * TAFEL_SP
+static mut tafel_len: [u64; 24] = [0 as u64; 24]
+static mut tafel_fg: [u64; 24] = [0 as u64; 24]
 static mut tafel_hat: u64 = 0 // steht schon Inhalt bereit?
 static mut tafel_drin: u64 = 0 // Wiedereintrittssperre
 static mut tafel_irq: u64 = 0 // Rufe aus dem Zeitgeber
@@ -3130,8 +3131,118 @@ fn tafel_merken(zeile: u64, p: u64, n: u64, fg: u64) {
 // Stelle ist der Kern schon halb tot, und die Buchfuehrung des
 // Fensterservers ist womoeglich genau das, was ihn umgebracht hat.
 // `fb.flush_rect` mit festen Koordinaten haengt an nichts.
+// ============================================== RUNDE STARTKNOPF
+// DIE ABSTURZKLINKE -- WEIL EINE ANZEIGE, DIE VERSCHWINDET, LUEGT.
+//
+// Justin hat den ersten Absturz fotografiert und danach die Maus
+// bewegt: die rote Anzeige war WEG, alles wieder gruen, die Zaehler
+// liefen weiter (B31 -> B2626 -> B7085). Auf dem Schirm stand
+// "ANGEHALTEN", und angehalten war nichts.
+//
+// Das ist kein Widerspruch, sondern eine Auskunft: `power.halt_forever`
+// macht `cli; hlt` -- das haelt DEN KERN AN, AUF DEM ES LAEUFT, und
+// sonst keinen. Lief der Fehler auf einem der anderen Kerne, steht der
+// bis zum Ausschalten still, und der Rest der Maschine merkt nichts.
+// Der naechste Anstrich der Tafel (aus dem Zeitgeber des LEBENDEN
+// Kerns) hat die rote Anzeige dann einfach ueberschrieben.
+//
+// AB HIER GEHT DAS NICHT MEHR. Der Absturz wird GEMERKT: Nummer,
+// Vektor, RIP, und WELCHER KERN. Solange die Klinke steht, malt die
+// Tafel diese Zeilen in jedem Anstrich mit -- egal, welcher Kern noch
+// laeuft. Und sie sagt dazu, ob dieser Kern anhaelt oder weiterlaeuft,
+// statt "ANGEHALTEN" zu behaupten und dann weiterzumalen.
+static mut ab_klinke: u64 = 0 // steht ein Absturz an?
+static mut ab_zahl: u64 = 0 // wie viele es waren
+static mut ab_vec: u64 = 0
+static mut ab_rip: u64 = 0
+static mut ab_cr2: u64 = 0
+static mut ab_rsp: u64 = 0
+static mut ab_err: u64 = 0
+static mut ab_cs: u64 = 0
+static mut ab_kern: u64 = 0 // der Kern, auf dem es geknallt hat
+static mut ab_haelt: u64 = 0 // haelt dieser Kern danach an?
+
+// Die Aufzeichnung, in ZWEI Zeilen der laufenden Tafel. Sie stehen
+// UNTER den Messzeilen und ueberschreiben nichts von ihnen: Justin
+// braucht beides -- die Zahlen, die weiterlaufen, UND den Beleg, dass
+// es geknallt hat.
+fn absturz_zeilen(state: u64) {
+    var b: [u8; 64] = [0 as u8; 64]
+    let p: u64 = (&b[0]) as u64
+    let rot: u64 = wm.mess_rot(state)
+    var namen: [u8; 128] = "#DE\0#DB\0NMI\0#BP\0#OF\0#BR\0#UD\0#NM\0#DF\0#CO\0#TS\0#NP\0#SS\0#GP\0#PF\0r15\0#MF\0#AC\0#MC\0#XM\0#VE\0#CP\0r22\0r23\0r24\0r25\0r26\0#HV\0#VC\0#SX\0r30\0r31\0"
+    var t0: [u8; 10] = "22 KNALL \0"
+    var s_n: [u8; 4] = "N \0\0"
+    var s_v: [u8; 5] = " VEK\0"
+    var s_k: [u8; 4] = " K\0\0"
+    var s_h: [u8; 8] = " HAELT\0\0"
+    var s_w: [u8; 8] = " WEITER\0"
+    var n: u64 = 0
+    n = puls_text(state, p, 0, (&t0[0]) as u64)
+    n = puls_text(state, p, n, (&s_n[0]) as u64)
+    n = puls_zahl(state, p, n, ab_zahl)
+    n = puls_text(state, p, n, (&s_v[0]) as u64)
+    n = puls_zahl(state, p, n, ab_vec)
+    if ab_vec < 32 {
+        n = puls_text(state, p, n, (&namen[0]) as u64 + ab_vec * 4)
+    }
+    n = puls_text(state, p, n, (&s_k[0]) as u64)
+    n = puls_zahl(state, p, n, ab_kern)
+    if ab_haelt != 0 {
+        n = puls_text(state, p, n, (&s_h[0]) as u64)
+    } else {
+        n = puls_text(state, p, n, (&s_w[0]) as u64)
+    }
+    tafel_merken(22, p, n, rot)
+    tafel_zeile_sagen(p, n)
+
+    var t1: [u8; 10] = "23 KRIP  \0"
+    var s_c: [u8; 7] = "  CS \0\0"
+    var s_e: [u8; 7] = " ERR \0\0"
+    n = puls_text(state, p, 0, (&t1[0]) as u64)
+    n = puls_hexn(state, p, n, ab_rip, 8)
+    n = puls_text(state, p, n, (&s_c[0]) as u64)
+    n = puls_hexn(state, p, n, ab_cs & 0xFFFF, 4)
+    n = puls_text(state, p, n, (&s_e[0]) as u64)
+    n = puls_hexn(state, p, n, ab_err & 0xFFFF, 4)
+    // cr2 nur bei #PF -- sonst ist es eine alte Zahl, siehe oben.
+    if ab_vec == 14 {
+        var s_r: [u8; 7] = " CR2 \0\0"
+        n = puls_text(state, p, n, (&s_r[0]) as u64)
+        n = puls_hexn(state, p, n, ab_cr2, 8)
+    } else {
+        var s_s: [u8; 7] = " RSP \0\0"
+        n = puls_text(state, p, n, (&s_s[0]) as u64)
+        n = puls_hexn(state, p, n, ab_rsp, 8)
+    }
+    tafel_merken(23, p, n, rot)
+    tafel_zeile_sagen(p, n)
+}
+
+fn absturz_klinke() -> u64 {
+    return ab_klinke
+}
+
 fn absturz(state: u64, vec: u64, err: u64, rip: u64, cr2: u64, rsp: u64,
     cs: u64) {
+    // ZUERST MERKEN, DANN MALEN. Kommt der Kern beim Malen selbst um,
+    // steht die Aufzeichnung trotzdem und die Tafel des naechsten
+    // Anstrichs bringt sie auf den Schirm.
+    ab_zahl = ab_zahl + 1
+    if ab_klinke == 0 {
+        ab_vec = vec
+        ab_rip = rip
+        ab_cr2 = cr2
+        ab_rsp = rsp
+        ab_err = err
+        ab_cs = cs
+        ab_kern = cpu.here(state)
+        ab_haelt = 0
+        if kstate.mode_on(state, kstate.M_ABSTURZ) {
+            ab_haelt = 1
+        }
+        ab_klinke = 1
+    }
     if !fb.ready(state) {
         return
     }
@@ -3162,9 +3273,25 @@ fn absturz(state: u64, vec: u64, err: u64, rip: u64, cr2: u64, rsp: u64,
     n = puls_hexn(state, p, n, rip, 16)
     wm.messzeile(state, 1, p, n, rot)
 
+    // ============================================ RUNDE STARTKNOPF
+    // CR2 GILT NUR BEI #PF -- SONST IST DIE ZAHL ALT.
+    //
+    // Das Register wird von einem Seitenfehler gesetzt und von NICHTS
+    // wieder geloescht. Justins Foto zeigte neben einem #GP ein cr2
+    // von 0x4007EFF8, und diese Zahl hat eine ganze Stunde Analyse in
+    // die falsche Richtung gefuehrt: sie stammte vom Wachsen des
+    // Prozessstapels und hatte mit dem Absturz nichts zu tun. Ein
+    // Messgeraet, das eine alte Zahl neben eine neue stellt, ohne es
+    // zu sagen, ist schlimmer als eins, das schweigt.
     var z2: [u8; 5] = "CR2 \0"
+    var z2a: [u8; 12] = "  (ALT, \0\0\0\0"
+    var z2b: [u8; 17] = "gilt nur bei PF)\0"
     n = puls_text(state, p, 0, (&z2[0]) as u64)
     n = puls_hexn(state, p, n, cr2, 16)
+    if vec != 14 {
+        n = puls_text(state, p, n, (&z2a[0]) as u64)
+        n = puls_text(state, p, n, (&z2b[0]) as u64)
+    }
     wm.messzeile(state, 2, p, n, rot)
 
     var z3: [u8; 5] = "ERR \0"
@@ -3194,9 +3321,56 @@ fn absturz(state: u64, vec: u64, err: u64, rip: u64, cr2: u64, rsp: u64,
     n = puls_zahl(state, p, n, wm_runden())
     wm.messzeile(state, 5, p, n, gelb)
 
-    var z6: [u8; 25] = "ANGEHALTEN -- BITTE FOTO\0"
-    n = puls_text(state, p, 0, (&z6[0]) as u64)
+    // ============================================ RUNDE STARTKNOPF
+    // WER. Ein Ring-0-Absturz ohne den Prozess dahinter laesst offen,
+    // welches Programm ihn ausgeloest hat -- und genau das war Justins
+    // Frage ("ich habe ein Fenster zugemacht, und dann war er weg").
+    // AUF ist der Platz der laufenden Aufgabe, PID ihre Kennung, ART
+    // ihre Gattung (2 = Nutzerprozess), SYS die Nummer des zuletzt
+    // begonnenen Systemaufrufs.
+    var z7: [u8; 5] = "AUF \0"
+    var z7b: [u8; 7] = " PID \0\0"
+    var z7c: [u8; 7] = " ART \0\0"
+    var z7d: [u8; 7] = " PRG \0\0"
+    var z7e: [u8; 7] = " BAD \0\0"
+    let cur: u64 = sched.current(state)
+    n = puls_text(state, p, 0, (&z7[0]) as u64)
+    n = puls_zahl(state, p, n, cur)
+    n = puls_text(state, p, n, (&z7b[0]) as u64)
+    n = puls_zahl(state, p, n, sched.tget(state, cur, sched.T_PID))
+    n = puls_text(state, p, n, (&z7c[0]) as u64)
+    n = puls_zahl(state, p, n, sched.tget(state, cur, sched.T_KIND))
+    n = puls_text(state, p, n, (&z7d[0]) as u64)
+    var pn: u64 = 0
+    while pn < 16 && pmon.name_at(state, cur, pn) != 0 {
+        if n < TAFEL_SPALTEN - 1 {
+            kstate.set8(p + n, pmon.name_at(state, cur, pn) as u8)
+            n = n + 1
+        }
+        pn = pn + 1
+    }
+    n = puls_text(state, p, n, (&z7e[0]) as u64)
+    n = puls_zahl(state, p, n, proc.badentry_zahl())
     wm.messzeile(state, 6, p, n, gelb)
+
+    // UND JETZT DIE WAHRHEIT UEBER DAS ANHALTEN. `halt_forever` haelt
+    // DIESEN Kern an, nicht die Maschine. Steht daneben eine
+    // Kernnummer ungleich 0, laeuft der Rest weiter -- und genau das
+    // hat Justin gesehen.
+    var z8: [u8; 6] = "KERN \0"
+    var z8a: [u8; 26] = " HAELT AN -- BITTE FOTO\0\0\0"
+    var z8b: [u8; 29] = " LAEUFT WEITER -- BITTE FOTO\0"
+    var z8c: [u8; 9] = "  NR \0\0\0\0"
+    n = puls_text(state, p, 0, (&z8[0]) as u64)
+    n = puls_zahl(state, p, n, ab_kern)
+    if ab_haelt != 0 {
+        n = puls_text(state, p, n, (&z8a[0]) as u64)
+    } else {
+        n = puls_text(state, p, n, (&z8b[0]) as u64)
+    }
+    n = puls_text(state, p, n, (&z8c[0]) as u64)
+    n = puls_zahl(state, p, n, ab_zahl)
+    wm.messzeile(state, 7, p, n, gelb)
 
     // UNBEDINGT UEBERTRAGEN. Kein `dirty`, kein `compose`, keine
     // Bedingung -- das ganze Band in einem Zug auf die Karte.
@@ -3214,6 +3388,14 @@ fn tafel_streichen(state: u64) {
     }
     tafel_drin = 1
     tafel_mal = tafel_mal + 1
+    // ============================================ RUNDE STARTKNOPF
+    // WAR SCHON EINMAL ETWAS? Dann steht es in JEDEM Anstrich wieder
+    // da. Justins erster Absturz war nach einer Mausbewegung spurlos
+    // weg -- der naechste Anstrich hatte ihn ueberschrieben, und
+    // damit war das wichtigste Beweisstueck des Abends fort.
+    if ab_klinke != 0 {
+        absturz_zeilen(state)
+    }
     // Die Takt-Zeile wird JEDES MAL frisch gebaut -- sie ist der Puls,
     // und ein Puls aus dem Zwischenspeicher waere keiner.
     var tb: [u8; 64] = [0 as u8; 64]

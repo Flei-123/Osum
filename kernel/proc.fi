@@ -51,6 +51,7 @@ import cap
 
 export {
     create, user_start, free_space, reap, translate, user_ok, map_programs,
+    badentry_zahl,
     inherit, create_bare, discard, page_free, page_exec, map_page, map_huge, nx,
     create_cap,
     copy_space, swap_space, use_space, page_drop, ARG_RESUME,
@@ -1072,11 +1073,73 @@ fn user_start(state: u64, i: u64, kind: u64) {
     }
     let arg: u64 = sched.tget(state, i, sched.T_WORK)
     sched.tset(state, i, sched.T_WORK, 0)
+    // ============================================ RUNDE STARTKNOPF
+    // ============ DER LETZTE BLICK VOR DEM `sysretq`.
+    //
+    // JUSTINS ABSTURZ, aufgeloest: die Absturzanzeige meldete
+    //     rip = 0x0010049C   cs = 0x0008   rsp = 0x4007F000
+    // und `objdump` sagt, was an dieser Adresse steht: das `sysretq`
+    // am Ende von `enter_user_task` (switch.s). Der Ring-0-Fehlercode
+    // 0 und ein `sysretq`, das keinen Speicher anfasst, lassen genau
+    // EINE Deutung zu -- #GP(0), und den wirft dieser Befehl aus genau
+    // EINEM Grund: DER RUECKSPRUNGZEIGER IN rcx IST NICHT KANONISCH
+    // (AMD APM Bd. 3, SYSRET: "#GP(0) if the target RIP is
+    // non-canonical"). rcx ist hier `T_ENTRY`.
+    //
+    // (Das `cr2` auf dem Foto, 0x4007EFF8, ist NICHT die Ursache: cr2
+    // wird von einem #GP nicht angefasst und stand noch von dem
+    // Seitenfehler, mit dem der Stapel dieses Prozesses gewachsen ist.
+    // Genau deshalb steht die Zahl ab dieser Runde nur noch bei #PF
+    // auf dem Schirm.)
+    //
+    // WARUM ES DIE MASCHINE UMBRINGT: das `sysretq` steht in RING 0.
+    // `trap.user_fault` verlangt `(cs & 3) == 3`, also faellt der
+    // Fehler durch bis `report` -- und `report` haelt an. Ein einziges
+    // Programm mit kaputtem Einsprung nimmt den ganzen Rechner mit.
+    //
+    // DER GRIFF: es wird VORHER nachgesehen. Ein Einsprung, der nicht
+    // in der unteren Haelfte des Adressraums liegt (also alles
+    // Nichtkanonische UND jede Kernadresse), und ein Stapelzeiger
+    // derselben Art kommen gar nicht erst bis zum `sysretq`. Der
+    // PROZESS stirbt, der Rechner laeuft. Das kostet zwei Vergleiche
+    // ein einziges Mal je Programmstart.
+    let e: u64 = sched.tget(state, i, sched.T_ENTRY)
+    let sp: u64 = sched.tget(state, i, sched.T_USTACK)
+    if e == 0 || (e >> 47) != 0 || sp == 0 || (sp >> 47) != 0 {
+        say_badentry(state, i, e, sp)
+        sched.exit_task(state, 127)
+        return
+    }
     asm("call rax", in("rax") vector(state, V_ENTER_TASK),
-        in("rdi") sched.tget(state, i, sched.T_ENTRY),
-        in("rsi") sched.tget(state, i, sched.T_USTACK),
+        in("rdi") e,
+        in("rsi") sp,
         in("rdx")(sched.tget(state, i, sched.T_ARG) << 32) | arg,
         clobber("memory"))
     // Unreachable: `enter_user_task` ends in `sysretq`.
     sched.exit_task(state, 0)
+}
+
+// Und es wird GESAGT, nicht verschwiegen. Ein Programm, das nicht
+// startet, ohne dass irgendwo eine Zeile steht, ist genauso schwer zu
+// finden wie ein Rechner, der stehenbleibt.
+static mut bad_entries: u64 = 0
+
+fn badentry_zahl() -> u64 {
+    return bad_entries
+}
+
+fn say_badentry(state: u64, i: u64, e: u64, sp: u64) {
+    var s_a: [u8; 27] = "proc: bad entry -- pid=\0\0\0\0"
+    var s_e: [u8; 9] = "  entry=\0"
+    var s_u: [u8; 10] = "  ustack=\0"
+    var s_t: [u8; 34] = "  (kein sysret, Prozess beendet)\0\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(sched.tget(state, i, sched.T_PID))
+    serial.puts((&s_e[0]) as u64)
+    serial.hex(e)
+    serial.puts((&s_u[0]) as u64)
+    serial.hex(sp)
+    serial.puts((&s_t[0]) as u64)
+    serial.nl()
+    bad_entries = bad_entries + 1
 }
