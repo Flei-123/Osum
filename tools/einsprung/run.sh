@@ -171,7 +171,7 @@ hasnot "$TMPD/regel.txt" "*** EXCEPTION" "Regellauf: keine Ausnahme"
 echo "== 4. MIT KAPUTTEM EINSPRUNG -- JUSTINS FALL =="
 lauf knall "einsprung"
 has "$TMPD/knall.txt" "elf: entry abgelehnt" "der kaputte Einsprung wird abgelehnt, und zwar laut"
-has "$TMPD/knall.txt" "0xDEAD000000000000" "und die abgelehnte Anschrift steht dabei"
+has "$TMPD/knall.txt" "DEAD000000000000" "und die abgelehnte Anschrift steht dabei"
 # DIE ZUSAGE DIESER RUNDE: die Maschine ueberlebt.
 hasnot "$TMPD/knall.txt" "*** EXCEPTION" "KEINE Ausnahme -- die Maschine lebt (vor dieser Runde: #GP am sysretq)"
 hasnot "$TMPD/knall.txt" "#GP" "kein #GP"

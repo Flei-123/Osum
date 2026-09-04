@@ -362,59 +362,83 @@ Punkt (a), dem Netz.
 
 ---
 
-## 10. WAS NICHT FUNKTIONIERT — und deshalb nichts ausgeliefert wird
+## 10. Die Regression im Abbild — gefunden
 
-**Aus diesem Stand gebaute USB-Abbilder starten den Schreibtisch
-nicht.** Das Startprotokoll endet mit
+Zwischendurch startete kein aus diesem Stand gebautes USB-Abbild mehr
+den Schreibtisch:
 
     wm: skipped  modus w0..3 0x0 0x0 0x0 0x0
 
-Der **ganze Modusvektor** steht auf null, obwohl die Befehlszeile
-`wm` enthält und obwohl derselbe Vektor eine Etage vorher noch
-gestimmt hat (`fb: band=486` wird nur gedruckt, wenn `M_TAFEL`
-gesetzt ist). Zwischen diesen beiden Punkten verliert kdata seine
-Modusseite.
+Der **ganze Modusvektor** stand auf null, obwohl die Befehlszeile `wm`
+enthielt und eine Etage vorher noch alles stimmte (`fb: band=486`
+druckt nur, wenn `M_TAFEL` gesetzt ist). Bisektion, jeder Schritt ein
+eigenes Abbild:
 
-Was ich dazu **gemessen** habe:
+| geprüft | Ergebnis |
+|---|---|
+| derselbe Kern über `-kernel`, 3440x1440, xHCI + Tastatur + Maus + Massenspeicher + e1000 | **läuft** |
+| altes Abbild (`6589cac`), gleicher Läufer | **läuft** |
+| Messtafel 24 Zeilen (Band 582) → 20 Zeilen (Band 486) | bricht weiter |
+| ohne die `kmain.fi`/Befehlszeilen-Änderung | bricht weiter |
+| **ohne `import cpu` in `kgui.fi`** | **läuft** |
 
-* **Nur der Lader-Pfad ist betroffen.** Derselbe Kern über `-kernel`
-  bei 3440x1440, mit xHCI, USB-Tastatur, USB-Maus, USB-Massenspeicher
-  und e1000 — in jeder Kombination einzeln geprüft — kommt
-  einwandfrei bis `wm: mount=1` und malt Schreibtisch, Leiste und
-  Uhr. Nur das über Limine/UEFI und `modfs` gestartete Abbild bricht.
-* **Das alte Abbild (`6589cac`) bricht nicht.** Gleicher Läufer,
-  gleiche QEMU-Befehlszeile, gleiche Kernel-Befehlszeile,
-  `guard: smep=1 smap=1` und `fpu: mode=3` in beiden. Der Unterschied
-  liegt also im Baum dieser Runde.
-* **Es ist nicht die Größe der Messtafel.** Mit 24 Zeilen (Band 582)
-  bricht es, mit 20 Zeilen (Band 486 — genau der Wert des
-  funktionierenden Abbilds) bricht es genauso.
-* **Es ist nicht die Befehlszeilen-Auswertung.** Ein Abbild ohne die
-  `kmain.fi`-Änderung dieser Runde bricht ebenso.
-* **Der Kern ist nur 608 Oktett gewachsen** (`kernel end` 0x5d7c58 ->
-  0x5d7eb8) und bleibt damit in derselben Seite; `heap` und die
-  Modul-Adresse stehen in beiden Läufen an derselben Stelle. Eine
-  verschobene Speicheraufteilung ist damit **nicht** die Erklärung.
+**Es war der neue Import.** `kgui.fi` hatte ihn bekommen, um für die
+Absturzklinke `cpu.here` zu rufen. Ein neuer Import ändert die
+Bindereihenfolge und damit die Lage jedes BSS-Feldes — und irgendwo im
+Baum schreibt etwas über das Ende eines Feldes hinaus. Vorher traf das
+etwas Folgenloses, nach der Umordnung die Modusseite in kdata
+(`MODE_OFF = 0x4C000`).
 
-**Der nächste Verdacht, ungeprüft:** `kgui.fi` hat in dieser Runde
-`import cpu` bekommen. Ein neuer Import ändert die Binde- und damit
-die BSS-Reihenfolge. Schreibt irgendwo im Baum etwas über das Ende
-eines BSS-Feldes hinaus, trifft es nach einer solchen Umordnung eine
-andere Variable — und ein Fehler, der vorher folgenlos war, wird
-sichtbar. Das erklärt „lief vorher, bricht jetzt, und nur in einem
-von zwei Startwegen" besser als alles andere, was ich geprüft habe.
-Der Weg dorthin ist ein Vergleich der Symboltafeln beider Kerne
-(`nm -n`) und ein Wächterwert vor und hinter der Modusseite.
+Behoben ist der **Auslöser**: die Kernnummer kommt jetzt aus `trap.fi`
+(das `cpu` ohnehin einbindet) und wird an `gfx.absturz` übergeben;
+`kgui` bindet `cpu` nicht ein. Der **Fehler selbst ist noch da** — er
+ist nur wieder unsichtbar. Das ist ausdrücklich kein Abschluss: ein
+Überlauf, der sich beim nächsten Import wieder zeigt, ist eine
+Zeitbombe. Der Weg dorthin: Wächterwerte vor und hinter der Modusseite,
+und `nm -n` beider Kerne vergleichen.
 
-**Folge:** `/srv/store/abbilder/orientos-usb.img` bleibt auf dem
-Stand `6589cac`
-(`75f39a858e3ac3944e53af13983bb0a2e0b0b6652718b7209e8fe741bca47315`).
-Justins Stick funktioniert damit weiter. Ein Abbild auszuliefern, das
-nur die Messtafel und sonst nichts zeigt, wäre ein Rückschritt.
+*(Nebenbei: `orientos-usb.img.sha256` im Speicher war seit 14:07 alt
+und nannte eine Prüfsumme, die zum dortigen Abbild nicht mehr passte.
+Korrigiert.)*
 
-*(Nebenbei gefunden: die Datei `orientos-usb.img.sha256` im Speicher
-war seit 14:07 alt und nannte eine Prüfsumme, die zu dem dort
-liegenden Abbild seit 17:34 nicht mehr passte. Korrigiert.)*
+---
+
+## 11. Was am Ende gemessen wurde
+
+Am **fertigen Abbild**, über den Lader, UEFI, 3440x1440, zwei xHCI,
+Tastatur und Maus am zweiten:
+
+    fb: band=486  kol=2 1
+    wm: mount=1        wm: 3440x1440  cursor=1 dirty=1 focus=1
+    tafel: 8 TAKT  IRQ 2331 MAL 353 LOOP 126 PRE 1 HZ 99
+    tafel: 12 STUFE ST 38 MAX 38 RND 962 LOOP 100 TB 2
+    tafel: 14 ENDP  KBD EP1 F0 H0 MAU EP1 F0 HEI 0 OP 0
+    taskbar: marke n=16 x=11 y=12 ink=236
+    taskbar: btn i=0 id=7 x=38 y=9 w=30 h=22 t=
+    taskbar: field net   x=3157 w=128
+    taskbar: field clock x=3289 w=148  t=19:03:28 04.09.26
+    taskbar: state n=1 paints=23
+
+* `HZ 99`, `LOOP 126` — Zeitgeber und Schreibtischschleife laufen.
+* `TB 2` — die Aufgabe hinter dem obersten Ebenenfenster **läuft**.
+* `ENDP … EP1 F0 H0` für Tastatur **und** Maus — beide Endpunkte
+  laufen, null Fehler, null Wiederbelebungen.
+* `marke … ink=236` — das Startzeichen ist wirklich gemalt.
+* `btn … w=30 … t=` — Programmknopf quadratisch, ohne Text.
+* Feldliste: **net und clock, kein battery** — und die Uhr ist von 53
+  auf 148 Bildpunkte gewachsen.
+* 23 Anstriche mit fortlaufender Uhr von 19:03:28 bis 19:03:49 — die
+  Leiste tickt **jede Sekunde**.
+
+**Und ein offener Punkt, ehrlich:** danach hörte sie auf. Über die
+restlichen siebzig Sekunden des Laufs kam kein Anstrich mehr, und die
+beiden Bildschirmfotos vier Sekunden auseinander sind auf den
+Bildpunkt gleich. Das ist Justins Befund, zum ersten Mal im Prüfstand
+reproduziert. `TB 2` sagt dabei „läuft" — aber Zeile 7 zeigt
+`id11 y1092`, also den **Starter** und nicht die Leiste: seit der
+Starter auf der obersten Ebene liegt, misst `top_layer_win` das
+falsche Fenster. Die nächste Runde braucht die Zahl je Fenster statt
+je Ebene.
 
 ---
 
