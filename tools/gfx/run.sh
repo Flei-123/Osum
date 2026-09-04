@@ -62,6 +62,12 @@
 # Verwendung:  bash tools/gfx/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+# RUNDE MARKE: der Produktname kommt aus `marke.conf` (geschlagen von
+# OSUM_MARKE_*), nicht aus dieser Datei. Eine Zusage auf einen fest
+# getippten Namen waere nach der ersten Umbenennung eine Zusage auf
+# etwas, das es nicht mehr gibt -- sie ginge auf und pruefte nichts.
+. tools/lib/marke.sh
+marke_laden . || exit 1
 . tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 
@@ -299,13 +305,13 @@ schau "die Linie trifft ihr Ende" punkt "$TMPD/pat.ppm" 399 210 255 255 0
 # DIE eigentliche Zusage dieses Abschnitts: der Text, den `serial.puts`
 # geschrieben hat, steht als BILDPUNKTE da -- 3200 Stellen je Zeile,
 # jede einzelne gegen die Bitmaske des Zeichensatzes gerechnet.
-schau "Zeile 14 bildpunktgenau: 'OSUM K7 FRAMEBUFFER 01234'" \
-    text "$TMPD/pat.ppm" kernel/font.fi 14 0 "OSUM K7 FRAMEBUFFER 01234"
+schau "Zeile 14 bildpunktgenau: '$MARKE_PRODUKT K7 FRAMEBUFFER 01234'" \
+    text "$TMPD/pat.ppm" kernel/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
 schau "Zeile 15 bildpunktgenau: 'abcdefghijklm ABCDEFGHIJK'" \
     text "$TMPD/pat.ppm" kernel/font.fi 15 0 "abcdefghijklm ABCDEFGHIJK"
 # Dieselben zwei Zeilen stehen im seriellen Mitschnitt -- eine Ausgabe,
 # zwei Wege.
-has "$TMPD/pat.txt" "OSUM K7 FRAMEBUFFER 01234" "dieselbe Zeile steht seriell"
+has "$TMPD/pat.txt" "$MARKE_PRODUKT K7 FRAMEBUFFER 01234" "dieselbe Zeile steht seriell"
 
 echo "== 6. DIE GEGENPROBE: derselbe Kernel ohne das Wort 'gfx' =="
 # Alles bleibt gleich -- dasselbe Abbild, dieselbe Maschine, dasselbe
@@ -322,7 +328,7 @@ schau_nicht "Feld 1 ist NICHT rot" \
 schau_nicht "Feld 2 ist NICHT gruen" \
     flaeche "$TMPD/keine.ppm" 100 0 100 100 0 255 0
 schau_nicht "die Textzeile steht NICHT da" \
-    text "$TMPD/keine.ppm" kernel/font.fi 14 0 "OSUM K7 FRAMEBUFFER 01234"
+    text "$TMPD/keine.ppm" kernel/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
 # Was auf dem Textmodusbild zu sehen ist, ist die Meldung des BIOS -- also
 # durchaus Bildpunkte, nur eben keine, die dieser Kernel gemalt hat.  Die
 # Zusage ist deshalb nicht "alles schwarz", sondern: die Stellen, die
@@ -410,7 +416,7 @@ schau "das Foto ist 1024x768" groesse "$TMPD/big.ppm" 1024 768
 schau "die vier Farbfelder stehen auch hier" \
     flaeche "$TMPD/big.ppm" 200 0 100 100 0 0 255
 schau "und der Text ebenso, bildpunktgenau" \
-    text "$TMPD/big.ppm" kernel/font.fi 14 0 "OSUM K7 FRAMEBUFFER 01234"
+    text "$TMPD/big.ppm" kernel/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
 
 echo "== 11. die Shell auf dem Bildschirm =="
 # /bin/sh von der Platte, wie in Runde K1 und K6 -- nur dass die Ausgabe

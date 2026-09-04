@@ -62,6 +62,12 @@
 # Verwendung:  bash tools/wm/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+# RUNDE MARKE: der Produktname kommt aus `marke.conf` (geschlagen von
+# OSUM_MARKE_*), nicht aus dieser Datei. Eine Zusage auf einen fest
+# getippten Namen waere nach der ersten Umbenennung eine Zusage auf
+# etwas, das es nicht mehr gibt -- sie ginge auf und pruefte nichts.
+. tools/lib/marke.sh
+marke_laden . || exit 1
 . tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 
@@ -381,7 +387,7 @@ echo "== 7. der Text im Fenster, bildpunktgenau gegen den zweiten Rasterer =="
 # ein Zeichen ohne Tinte laesst die Zusage fallen -- die Lehre aus K7B.
 schau "Zeile 0 des Terminalfensters" \
     tgrid "$TMPD/w.ppm" assets/osum-mono.ttf 16 26 62 10 19 0 0 \
-    224 230 236 16 20 26 "ORIENTOS K10 WM 0123"
+    224 230 236 16 20 26 "$MARKE_PRODUKT K10 WM 0123"
 schau "Zeile 1 des Terminalfensters" \
     tgrid "$TMPD/w.ppm" assets/osum-mono.ttf 16 26 62 10 19 1 0 \
     224 230 236 16 20 26 "abcdefghijklm ABCDEFGHIJK +-*/"
@@ -401,7 +407,7 @@ schau "der Text ist wirklich kantengeglaettet" \
 # steht, findet er keinen.
 schau_nicht "wo kein Text steht, geht dieselbe Rechnung NICHT auf" \
     tgrid "$TMPD/w.ppm" assets/osum-mono.ttf 16 26 62 10 19 8 0 \
-    224 230 236 16 20 26 "ORIENTOS K10 WM 0123"
+    224 230 236 16 20 26 "$MARKE_PRODUKT K10 WM 0123"
 
 echo "== 8. die Maus: Bewegung und Klick von aussen in die Maschine =="
 # Erst in die linke obere Ecke (der Anschlag loescht die Vorgeschichte),
@@ -611,7 +617,7 @@ num "und sich sauber beendet" "$she" eq 0
 # gehoeren dem Kernbanner; ab Zeile 2 schreibt die Shell.
 schau "die Kopfzeile des Terminalfensters steht im Bild" \
     tgrid "$TMPD/sh.ppm" assets/osum-mono.ttf 16 26 62 10 19 0 0 \
-    224 230 236 16 20 26 "ORIENTOS K10 WM 0123"
+    224 230 236 16 20 26 "$MARKE_PRODUKT K10 WM 0123"
 if grep -qa 'hallo-fenster' "$TMPD/sh.txt"; then
     # WELCHE Rasterzeile die Ausgabe traegt, haengt daran, wie viele
     # Zeilen die Shell vorher geschrieben hat.  Also wird sie GESUCHT:
@@ -651,7 +657,7 @@ schau_nicht "im Bild steht an der Zeigerstelle KEIN Zeiger" \
     punkt "$TMPD/nm.ppm" 400 301 255 255 255
 schau "das Terminalfenster steht trotzdem da" \
     tgrid "$TMPD/nm.ppm" assets/osum-mono.ttf 16 26 62 10 19 0 0 \
-    224 230 236 16 20 26 "ORIENTOS K10 WM 0123"
+    224 230 236 16 20 26 "$MARKE_PRODUKT K10 WM 0123"
 # `nompoll`: NUR die Unterbrechung.  Die Zahl dahinter ist der ehrliche
 # Befund dieser Runde ueber QEMUs 8042 -- siehe docs/ROUNDK10.md.
 foto "$K0" "gfx wm wmhold nompoll $GRUND" "$TMPD/np.txt" "$TMPD/np.ppm" \

@@ -48,6 +48,8 @@ import vmode
 import wig
 import wm
 import fassung
+// RUNDE MARKE: der Produktname kommt aus EINER Quelle.
+import marke
 import xhci
 import kutil
 
@@ -1155,8 +1157,24 @@ fn gfx_user(state: u64) {
 // Das Pruefbild und das Stillhalten. Beides nur auf ausdrueckliches Wort:
 // `fbtest` malt, `fbhold` wartet, damit der Testlaeufer draussen
 // `screendump` rufen kann, waehrend das Bild noch steht.
+// RUNDE MARKE: DIE KOPFZEILE DES PRUEFBILDS TRAEGT DEN PRODUKTNAMEN.
+// Sie stand hier als Literal und ist ANZEIGETEXT -- ein Mensch liest
+// sie vom Bildschirm ab. Also wird sie zusammengesetzt statt getippt.
+// Die vier Laeufer, die sie bildpunktgenau nachmessen (gfx, customres,
+// display, und zwar zehnmal), lesen denselben Namen aus `marke.conf`;
+// eine Zusage, die auf einen fest getippten Text zeigt, waere nach der
+// ersten Umbenennung eine Zusage auf etwas, das es nicht mehr gibt.
+fn pruefbild_kopf(dst: u64) -> u64 {
+    var rest: [u8; 22] = " K7 FRAMEBUFFER 01234\0"
+    var n: u64 = marke.anhaengen(dst, 0, marke.produkt(), 63)
+    n = marke.anhaengen(dst, n, (&rest[0]) as u64, 63)
+    kstate.set8(dst + n, 0)
+    return n
+}
+
 fn gfx_hold(state: u64) {
-    var s_pat: [u8; 26] = "OSUM K7 FRAMEBUFFER 01234\0"
+    var s_pat: [u8; 64] = [0 as u8; 64]
+    let _pk: u64 = pruefbild_kopf((&s_pat[0]) as u64)
     var s_pat2: [u8; 26] = "abcdefghijklm ABCDEFGHIJK\0"
     var s_hold: [u8; 10] = "fb: hold\0\0"
     var s_go: [u8; 10] = "fb: go\0\0\0\0"
@@ -1653,14 +1671,20 @@ fn surface(state: u64) {
         // rechnet `tools/wm/run.sh` bildpunktgenau gegen den
         // Referenzrasterer nach.
         // RUNDE MESSTAFEL: DIESE ZEILE LIEST DER BENUTZER, ALSO
-        // TRAEGT SIE DEN SYSTEMNAMEN. Sie ist zugleich das Ziel von
-        // vier bildpunktgenauen Zusagen in `tools/wm/run.sh`; die
-        // Zeichenkette steht dort ebenfalls und ist mitgewandert. Eine
-        // Zusage, die auf einen Text zeigt, den es nicht mehr gibt,
-        // geht immer auf und misst nichts.
-        var b1: [u8; 32] = "ORIENTOS K10 WM 0123\n\0\0\0\0\0\0\0\0\0\0\0"
+        // TRAEGT SIE DEN SYSTEMNAMEN.
+        //
+        // RUNDE MARKE: und deshalb steht der Name jetzt nicht mehr
+        // hier, sondern kommt aus `marke.conf`. Die vier
+        // bildpunktgenauen Zusagen in `tools/wm/run.sh` lesen dieselbe
+        // Datei -- eine Zusage auf einen fest getippten Namen waere
+        // nach der ersten Umbenennung eine Zusage auf etwas, das es
+        // nicht mehr gibt.
+        var b1: [u8; 64] = [0 as u8; 64]
+        var b1r: [u8; 14] = " K10 WM 0123\n\0"
+        var n1: u64 = marke.anhaengen((&b1[0]) as u64, 0, marke.produkt(), 63)
+        n1 = marke.anhaengen((&b1[0]) as u64, n1, (&b1r[0]) as u64, 63)
         var b2: [u8; 32] = "abcdefghijklm ABCDEFGHIJK +-*/\n\0"
-        wm.term_write(state, tw, (&b1[0]) as u64, 21)
+        wm.term_write(state, tw, (&b1[0]) as u64, n1)
         wm.term_write(state, tw, (&b2[0]) as u64, 31)
     }
 
@@ -1697,8 +1721,19 @@ fn surface(state: u64) {
     // eine Platte braucht.
     if kstate.mode_on(state, kstate.M_WMSHELL) {
         let sh: u64 = shell_start(state)
+        // RUNDE TAFEL: DIE SCHLEIFE WIRD IMMER BETRETEN, auch wenn die
+        // Shell nicht kam. Vorher stand hier `if sh != 0` um den
+        // ganzen Aufruf -- und damit hing der Schreibtisch am Gelingen
+        // eines Prozessstarts. `wait_wm` entscheidet jetzt selbst: mit
+        // `wmdauer` laeuft es weiter, ohne kehrt es sofort zurueck wie
+        // bisher.
+        var s_nosh: [u8; 24] = "wm: KEINE SHELL, weiter\0"
+        if sh == 0 {
+            serial.puts((&s_nosh[0]) as u64)
+            serial.nl()
+        }
+        let code: u64 = wait_wm(state, sh, tw)
         if sh != 0 {
-            let code: u64 = wait_wm(state, sh, tw)
             serial.puts((&s_exit[0]) as u64)
             serial.dec(code)
             serial.nl()
@@ -2504,10 +2539,33 @@ fn shell_start(state: u64) -> u64 {
 // Mit `wmdauer` gibt es keine Grenze. Endet die Shell im Fenster
 // (STRG-D), wird sie NEU GESTARTET statt den Schreibtisch mitzunehmen.
 fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
-    if i == 0 {
+    let dauer: bool = kstate.mode_on(state, kstate.M_WMDAUER)
+    // ============ RUNDE TAFEL: DIESE SCHLEIFE IST DER SCHREIBTISCH,
+    // UND SIE DARF NICHT AN DER SHELL HAENGEN.
+    //
+    // HIER STAND `if i == 0 { return }`, ganz oben, vor allem anderen.
+    // Damit galt: startet `/bin/sh` nicht, laeuft der Schreibtisch
+    // KEINE EINZIGE RUNDE. Kein `wm.poll` (also keine Eingabe), kein
+    // `wm.compose` (also kein Bild nach dem ersten), kein
+    // `kopf_malen` (also keine Messtafel). Der Bildschirm zeigt das
+    // Startbild -- Hintergrund, Fenster, Zeiger --, und danach steht
+    // alles still.
+    //
+    // Das ist Oktett fuer Oktett das Bild, das Justin am 04.09. um
+    // 10:03 fotografiert hat, und es ist derselbe Fehler, den die
+    // Runde HIDWEG im Kommentar darueber schon einmal beschrieben hat:
+    // "Der Treiber war in Ordnung; es rief ihn nur niemand mehr."
+    //
+    // Im Dauerbetrieb wird deshalb GELAUFEN, mit oder ohne Shell. Ein
+    // Schreibtisch ohne Terminal ist ein Schreibtisch; ein
+    // Schreibtisch, der nicht laeuft, ist ein Standbild.
+    //
+    // Ohne `wmdauer` bleibt es beim alten Verhalten -- ein Testlaeufer,
+    // der auf eine Shell wartet, die es nicht gibt, soll weiterhin
+    // sofort zurueckkehren und nicht ewig drehen.
+    if i == 0 && !dauer {
         return 0xFFFFFFFFFFFFFFFF
     }
-    let dauer: bool = kstate.mode_on(state, kstate.M_WMDAUER)
     var s_d: [u8; 12] = "wm: dauer\0\0\0"
     if dauer {
         serial.puts((&s_d[0]) as u64)
@@ -2526,7 +2584,10 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
     var naechste_runde: u64 = PULS_RUNDEN
     var letzte_marke: u64 = kstate.get(state, kstate.TICKS)
     while dauer || rounds < 20000 {
-        if sched.tget(state, cur, sched.T_STATE) == sched.S_ZOMBIE {
+        // `cur == 0` heisst: es laeuft gerade keine Shell. Dann gibt es
+        // auch keinen Zustand abzufragen -- gefragt wird erst wieder,
+        // wenn der Puls unten eine neue gestartet hat.
+        if cur != 0 && sched.tget(state, cur, sched.T_STATE) == sched.S_ZOMBIE {
             let code: u64 = sched.tget(state, cur, sched.T_EXIT)
             proc.reap(state, cur)
             if !dauer {
@@ -2558,6 +2619,8 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         // RUNDE FASSUNG: UNMITTELBAR NACH DEM ZUSAMMENSETZEN, JEDE
         // RUNDE. Vorher stand die Zeile nur im Puls und war beim
         // naechsten `compose` weg (siehe `kopf_malen`).
+        // RUNDE TAFEL: und die Tafel erfaehrt, ob eine Shell laeuft.
+        tafel_shell(cur)
         kopf_malen(state)
         if dauer {
             let jetzt: u64 = kstate.get(state, kstate.TICKS)
@@ -2569,17 +2632,32 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
             // der Rueckfall: sonst schreibt der Kern dem Menschen sein
             // Terminalfenster in vierzig Sekunden 238-mal voll
             // (gemessen), und das ist keine Diagnose, das ist Rauschen.
+            var feuern: bool = false
             if jetzt >= naechster {
                 naechster = jetzt + PULS_MARKEN
                 naechste_runde = rounds + PULS_RUNDEN
                 letzte_marke = jetzt
-                eingabe_puls(state, tw, neustarts)
+                feuern = true
             } else if rounds >= naechste_runde {
                 naechste_runde = rounds + PULS_RUNDEN
                 if jetzt == letzte_marke {
-                    eingabe_puls(state, tw, neustarts)
+                    feuern = true
                 }
                 letzte_marke = jetzt
+            }
+            if feuern {
+                eingabe_puls(state, tw, neustarts)
+                tafel_seriell_an()
+                // RUNDE TAFEL: KAM DIE SHELL NICHT, WIRD ES HIER NOCH
+                // EINMAL VERSUCHT -- im Pulstakt und nicht in jeder
+                // Runde. Der Schreibtisch laeuft inzwischen ohnehin;
+                // das hier ist der Nachschlag, kein Startzwang.
+                if cur == 0 {
+                    cur = shell_start(state)
+                    if cur != 0 {
+                        neustarts = neustarts + 1
+                    }
+                }
             }
         }
         sched.sleep_ticks(state, 1)
@@ -2696,9 +2774,72 @@ fn tz_text(state: u64, buf: u64, at: u64, t: u64) -> u64 {
 
 // Jede Runde nach dem Zusammensetzen -- damit die Tafel auch dann
 // steht, wenn Fenster, Taskleiste und Schrift versagen.
+// RUNDE TAFEL: EIN EIGENER TAKT, UNABHAENGIG VON ALLEM.
+//
+// Der Balken geht jetzt ueber die volle Breite: auf 3440x1440 sind das
+// 3440 x 390 = 1,34 Millionen Bildpunkte je Anstrich. In jeder Runde
+// waeren das auf einem UNGEPUFFERTEN Firmware-Rahmenpuffer -- und
+// genau so einen richtet Limine auf Justins Brett ein -- mehrere
+// hundert Megabyte je Sekunde ueber den Bus. Die Maschine wuerde
+// dabei nichts anderes mehr tun.
+//
+// Also zehnmal je Sekunde. Fuer ein Foto ist das reichlich, und es
+// haengt an KEINER anderen Bedingung: nicht an `compose`, nicht an
+// Schmutz, nicht an einem Fenster, nicht an der Taskleiste.
+const TAFEL_MARKEN: u64 = 10 // Zeitmarken zwischen zwei Anstrichen
+const TAFEL_RUNDEN: u64 = 200 // Rueckfall, wenn die Marken stehen
+static mut tafel_marke: u64 = 0
+static mut tafel_runde: u64 = 0
+static mut tafel_sh: u64 = 0
+// RUNDE TAFEL, RUECKFALLEBENE: dieselben acht Zeilen auf die serielle
+// Leitung. Wenn der Rahmenpuffer selbst das Problem ist, ist das der
+// einzige Weg nach draussen -- und er kostet nichts, solange niemand
+// mitliest. Gesetzt wird die Marke im Puls (alle fuenf Sekunden),
+// geloescht am Ende des Anstrichs.
+static mut tafel_seriell: u64 = 0
+
+fn tafel_seriell_an() {
+    tafel_seriell = 1
+}
+
+// Der Schreibtisch sagt der Tafel, ob eine Shell laeuft. Das ist die
+// Zahl, die Justins Foto vom 04.09. gekostet hat: ohne Shell lief die
+// Schleife gar nicht, und niemand konnte es sehen.
+fn tafel_shell(v: u64) {
+    tafel_sh = v
+}
+
+// Eine Tafelzeile auf die serielle Leitung -- nur wenn die Marke steht.
+fn tafel_zeile_sagen(b: u64, n: u64) {
+    if tafel_seriell == 0 {
+        return
+    }
+    var v: [u8; 8] = "tafel: \0"
+    serial.puts((&v[0]) as u64)
+    serial.text(b, n)
+    serial.nl()
+}
+
 fn kopf_malen(state: u64) {
     if !fb.ready(state) {
         return
+    }
+    let jetzt: u64 = kstate.get(state, kstate.TICKS)
+    tafel_runde = tafel_runde + 1
+    if jetzt != tafel_marke {
+        if jetzt < tafel_marke + TAFEL_MARKEN {
+            return
+        }
+        tafel_marke = jetzt
+        tafel_runde = 0
+    } else {
+        // Die Uhr steht (`nosched`, keine Unterbrechungen). Dann zaehlt
+        // die Rundenzahl -- ein Messgeraet, das an einer stehenden Uhr
+        // haengt, misst genau dann nichts, wenn es gebraucht wird.
+        if tafel_runde < TAFEL_RUNDEN {
+            return
+        }
+        tafel_runde = 0
     }
     wm.mess_grund(state, TAFEL_ZEILEN, TAFEL_SPALTEN)
     var buf: [u8; 64] = [0 as u8; 64]
@@ -2713,7 +2854,14 @@ fn kopf_malen(state: u64) {
     n = puls_zahl(state, b, n, wm.composites(state))
     n = tz_text(state, b, n, (&t_t[0]) as u64)
     n = puls_zahl(state, b, n, kstate.get(state, kstate.TICKS))
+    // RUNDE TAFEL: UND OB EINE SHELL LAEUFT. `sh0` heisst: keine --
+    // und bis zu dieser Runde hiess das ausserdem, dass diese ganze
+    // Schleife nicht lief und die Tafel deshalb nicht zu sehen war.
+    var t_sh: [u8; 5] = " sh\0\0"
+    n = tz_text(state, b, n, (&t_sh[0]) as u64)
+    n = puls_zahl(state, b, n, tafel_sh)
     wm.messzeile(state, 0, b, n, wm.mess_weiss(state))
+    tafel_zeile_sagen(b, n)
 
     // ---- Zeile 1: Stufe 1, die HID-Berichte ----
     var t1: [u8; 12] = "1 USB  BER \0"
@@ -2724,6 +2872,7 @@ fn kopf_malen(state: u64) {
     n = tz_text(state, b, n, (&t_w[0]) as u64)
     n = puls_zahl(state, b, n, usb.wahl(state))
     wm.messzeile(state, 1, b, n, wm.mess_ampel(state, ber))
+    tafel_zeile_sagen(b, n)
 
     // ---- Zeile 2: Stufe 2, eingereiht ----
     var t2: [u8; 9] = "2 REIHE \0"
@@ -2737,6 +2886,7 @@ fn kopf_malen(state: u64) {
     n = tz_text(state, b, n, (&t_ma[0]) as u64)
     n = puls_zahl(state, b, n, e_ma)
     wm.messzeile(state, 2, b, n, wm.mess_ampel(state, e_ta + e_ma))
+    tafel_zeile_sagen(b, n)
 
     // ---- Zeile 3: Stufe 3, der Fensterserver hat abgeholt ----
     var t3: [u8; 9] = "3 SERV  \0"
@@ -2748,6 +2898,7 @@ fn kopf_malen(state: u64) {
     n = tz_text(state, b, n, (&t_ma[0]) as u64)
     n = puls_zahl(state, b, n, s_ma)
     wm.messzeile(state, 3, b, n, wm.mess_ampel(state, s_ta + s_ma))
+    tafel_zeile_sagen(b, n)
 
     // ---- Zeile 4: Stufe 4, in den Fensterring gelegt ----
     var t4: [u8; 10] = "4 RING   \0"
@@ -2758,6 +2909,7 @@ fn kopf_malen(state: u64) {
     n = tz_text(state, b, n, (&t_v[0]) as u64)
     n = puls_zahl(state, b, n, wm.evdrops(state))
     wm.messzeile(state, 4, b, n, wm.mess_ampel(state, rein))
+    tafel_zeile_sagen(b, n)
 
     // ---- Zeile 5: Stufe 5, ein Programm hat abgeholt ----
     var t5: [u8; 10] = "5 APP    \0"
@@ -2765,6 +2917,7 @@ fn kopf_malen(state: u64) {
     n = tz_text(state, b, 0, (&t5[0]) as u64)
     n = puls_zahl(state, b, n, raus)
     wm.messzeile(state, 5, b, n, wm.mess_ampel(state, raus))
+    tafel_zeile_sagen(b, n)
 
     // ---- Zeile 6: der Zeiger ----
     var t6: [u8; 10] = "6 ZEIGER \0"
@@ -2776,6 +2929,7 @@ fn kopf_malen(state: u64) {
     n = tz_text(state, b, n, (&t_y[0]) as u64)
     n = puls_zahl(state, b, n, wm.cury(state))
     wm.messzeile(state, 6, b, n, wm.mess_ampel(state, s_ma))
+    tafel_zeile_sagen(b, n)
 
     // ---- Zeile 7: die TASKLEISTE -- wird sie ueberhaupt gemalt? ----
     //
@@ -2798,6 +2952,7 @@ fn kopf_malen(state: u64) {
         var t_kein: [u8; 5] = "KEIN\0"
         n = tz_text(state, b, n, (&t_kein[0]) as u64)
         wm.messzeile(state, 7, b, n, wm.mess_rot(state))
+    tafel_zeile_sagen(b, n)
     } else {
         let mal: u64 = wm.win_paints(state, tb)
         n = tz_text(state, b, n, (&t_id[0]) as u64)
@@ -2809,6 +2964,7 @@ fn kopf_malen(state: u64) {
         n = tz_text(state, b, n, (&t_fl[0]) as u64)
         n = puls_zahl(state, b, n, wm.win_flags(state, tb))
         wm.messzeile(state, 7, b, n, wm.mess_ampel(state, mal))
+        tafel_zeile_sagen(b, n)
     }
     // ================================ UND JETZT AUF DEN SCHIRM DAMIT
     //
@@ -2837,6 +2993,7 @@ fn kopf_malen(state: u64) {
     // gemalt" und "auf dem Bildschirm". Sie flusht NUR die Zeilen der
     // Tafel (`fb.dirty` hat sie eben markiert), nicht das ganze Bild.
     fb.flush(state)
+    tafel_seriell = 0
 }
 
 fn eingabe_puls(state: u64, tw: u64, neustarts: u64) {
