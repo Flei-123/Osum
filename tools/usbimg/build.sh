@@ -581,11 +581,28 @@ verbose: yes
 # BLEIBT ABSICHTLICH STEHEN. Der Stick lief also nach zehn Sekunden von
 # selbst in einen Bericht, der nie weitergeht.
 
+# ==================================================== RUNDE LEISTE
+# `dhcp` STEHT JETZT IM HAUPTEINTRAG.
+#
+# Justin will den JARVIS-Helfer auf dem Blech. Der braucht eine Route
+# ins Internet, und `nip=169.254.10.1/16` ist eine
+# VERBINDUNGSLOS-Adresse: kein Tor, kein Nameserver, kein Weg hinaus.
+# `dhcp` startet /bin/dhcp in Ring 3, sobald der Schreibtisch steht.
+#
+# DIE FESTE ADRESSE BLEIBT TROTZDEM STEHEN, und das ist Absicht: sie
+# gilt, bis der Klient etwas Besseres bekommt. Kommt kein Angebot
+# (kein Kabel, kein Server, kein Treiber fuer den Chip), bleibt der
+# Rechner genau so bedienbar wie vorher -- nur eben ohne Netz. Ein
+# Schreibtisch, der auf ein DHCP-Angebot WARTET, waere ein Rueckschritt.
+#
+# Was danach auf der Tafel steht, beantwortet die Frage ohne serielle
+# Leitung: Zeile 22 (NETZ) zeigt Treiber, Bus, Verbindung und die
+# Adresse, die der Stapel wirklich fuehrt.
 /@MARKE_PRODUKT@ -- Schreibtisch
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+    cmdline: modfs osum gfx wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp nosched noproc nofs
 
 # ================== RUNDE MESSTAFEL: DERSELBE EINTRAG AUF ENGLISCH
 #
