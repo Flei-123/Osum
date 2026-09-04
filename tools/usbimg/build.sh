@@ -571,7 +571,7 @@ verbose: yes
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx wm wig desk wmshell wmdauer tafel usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+    cmdline: modfs osum gfx wm wig desk wmshell wmdauer tafel herz usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
 
 # ================== RUNDE MESSTAFEL: DERSELBE EINTRAG AUF ENGLISCH
 #
@@ -604,17 +604,32 @@ verbose: yes
 # sie im ersten Eintrag fehlen, dann ist die Ursache bewiesen und es
 # war die Abbildungsart. Erscheinen sie auch hier nicht, ist sie
 # widerlegt und der Fehler liegt woanders.
-/@MARKE_PRODUKT@ -- Schreibtisch (Rahmenpuffer ohne Zwischenspeicher)
+/@MARKE_PRODUKT@ -- Schreibtisch (Rahmenpuffer uncached, Test)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx fbuc wm wig desk wmshell wmdauer tafel usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+    cmdline: modfs osum gfx fbuc wm wig desk wmshell wmdauer tafel herz usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+
+# ============ RUNDE BLECHEINGABE: DER ZWEITE, UNABHAENGIGE BEWEIS
+#
+# `fbuc` bildet den Rahmenpuffer ohne Zwischenspeicher ab -- eine andere
+# ABBILDUNG. `fbflush` laesst die Abbildung, wie sie ist (write-combining
+# seit der Vorrunde), und raeumt nach jedem Blit den ganzen
+# Zwischenspeicher mit `wbinvd` hinaus. Zwei verschiedene Mittel gegen
+# DIESELBE Ursache: hilft eines von beiden und das erste nicht, lag es am
+# Zwischenspeicher. Hilft keines, lag es woanders -- und dann sagen die
+# zwei Herzschlagfelder am rechten Bildrand, wo.
+/@MARKE_PRODUKT@ -- Schreibtisch (Zwischenspeicher nach jedem Bild leeren, Test)
+    protocol: multiboot1
+    path: boot():/osum.mb
+    module_path: boot():/root.img
+    cmdline: modfs osum gfx fbflush wm wig desk wmshell wmdauer tafel herz usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
 
 /@MARKE_PRODUKT@ -- Desktop (English)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx wm wig desk wmshell wmdauer tafel usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs lang=en
+    cmdline: modfs osum gfx wm wig desk wmshell wmdauer tafel herz usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs lang=en
 
 /@MARKE_PRODUKT@ -- Kommandozeile mit Netz
     protocol: multiboot1
@@ -685,7 +700,7 @@ verbose: yes
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: hwdiag modfs osum gfx wm wig desk wmshell wmdauer tafel usb hidgen nosched noproc nofs
+    cmdline: hwdiag modfs osum gfx wm wig desk wmshell wmdauer tafel herz usb hidgen nosched noproc nofs
 
 # RUNDE STICK: DIESER EINTRAG HAT JETZT AUCH EINE NETZKARTE. Ohne
 # `nic` blieb der Schreibtisch fuer immer bei "kein Netz", und das
@@ -754,14 +769,14 @@ verbose: yes
     path: boot():/osum.mb
     module_path: boot():/root.img
     resolution: 2560x1440
-    cmdline: modfs osum gfx wm wig desk wmshell wmdauer tafel usb hidgen nosched noproc nofs
+    cmdline: modfs osum gfx wm wig desk wmshell wmdauer tafel herz usb hidgen nosched noproc nofs
 
 //@MARKE_PRODUKT@ -- Schreibtisch auf einem 4K-Schirm (3840x2160)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
     resolution: 3840x2160
-    cmdline: modfs osum gfx wm wig desk wmshell wmdauer tafel usb hidgen nosched noproc nofs
+    cmdline: modfs osum gfx wm wig desk wmshell wmdauer tafel herz usb hidgen nosched noproc nofs
 
 EOF
 

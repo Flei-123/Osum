@@ -61,6 +61,7 @@ export {
     present, init, active, hz, id,
     eoi, timer_start, timer_stop, map_device, window_slots, lapic_phys,
     route, mask_gsi, ioapic_entries, gsi_entry, pic_off,
+    timer_running,
     spurious, spurious_hit, tsc, tsc_hz, VEC_SPURIOUS,
     window, core_init, ipi
 }
@@ -409,7 +410,62 @@ fn init(state: u64, want_hz: u64) -> bool {
     }
     kstate.set(state, pci.K2_SCALARS + S_ACTIVE, 1)
     timer_start(state, want_hz)
+    // ================================ RUNDE BLECHEINGABE: NACHMESSEN.
+    //
+    // Justin hat den Verdacht sauber formuliert: `hw.stage` schaltet
+    // gleich hinter dieser Zeile den alten Regler ab (`apic.pic_off`).
+    // Feuert der oertliche Zeitgeber danach NICHT wirklich periodisch,
+    // gibt es KEINEN Zeitgeber mehr -- und keinen Weg zurueck. In QEMU
+    // faellt das nie auf; auf einem Brett mit fremder Firmware ist es
+    // ein anderer Pfad.
+    //
+    // Also wird gemessen statt vertraut, und zwar OHNE Unterbrechungen
+    // (die sind hier noch aus): der laufende Zaehler des oertlichen
+    // Zeitgebers muss in einem am Zyklenzaehler abgelesenen Fenster
+    // KLEINER werden. Wird er das nicht, gibt `init` false zurueck --
+    // und `hw.stage` laesst den alten Regler an, genau so, wie es der
+    // Kommentar ueber `init` seit Runde 59 verspricht ("everything that
+    // can go wrong is answered with false and the PIC keeps running").
+    if !timer_running(state) {
+        lwrite(base, R_LVT_TIMER, LVT_MASKED)
+        lwrite(base, R_TIMER_INIT, 0)
+        kstate.set(state, pci.K2_SCALARS + S_ACTIVE, 0)
+        return false
+    }
     return true
+}
+
+// Laeuft der Zaehler des oertlichen Zeitgebers wirklich? Zwei Blicke,
+// dazwischen ein am Zyklenzaehler gemessenes Fenster. Ohne
+// Unterbrechungen und ohne den PIT -- der ist an dieser Stelle schon
+// fuer die Eichung benutzt worden und soll nicht noch einmal
+// umprogrammiert werden.
+fn timer_running(state: u64) -> bool {
+    let base: u64 = lapic(state)
+    let hz: u64 = kstate.get(state, pci.K2_SCALARS + S_TSCHZ)
+    let a: u64 = lread(base, R_TIMER_CUR)
+    if hz == 0 {
+        // Ohne geeichten Zyklenzaehler bleibt die Zaehlschleife. Sie ist
+        // ungenau, aber sie ist nicht null.
+        var i: u64 = 0
+        while i < 2000000 {
+            asm("pause")
+            i = i + 1
+        }
+    } else {
+        let t0: u64 = tsc()
+        var laeuft: bool = true
+        while laeuft {
+            if tsc() - t0 >= hz / 1000 {
+                laeuft = false
+            }
+        }
+    }
+    let b: u64 = lread(base, R_TIMER_CUR)
+    // Periodisch laeuft der Zaehler auf null und wird neu geladen; er
+    // ist also entweder kleiner geworden oder er ist umgelaufen. Genau
+    // EIN Fall ist verdaechtig: er steht still.
+    return a != b
 }
 
 // The local timer, periodic, on the vector round 59 already gave the
