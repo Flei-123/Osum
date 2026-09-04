@@ -120,7 +120,10 @@ export {
     MAX_W_HARD, MAX_H_HARD,
     E_KEY, E_DOWN, E_UP, E_MOVE, E_CLOSE, E_FOCUS, E_RESIZE,
     L_DESK, L_NORMAL, L_TOP, F_HIDDEN, F_NODECO, F_TABBED,
-    EDGE_BOTTOM, EDGE_TOP, EDGE_LEFT, EDGE_RIGHT, F_MAXIMIZED
+    EDGE_BOTTOM, EDGE_TOP, EDGE_LEFT, EDGE_RIGHT, F_MAXIMIZED,
+    // RUNDE BLECHZWEI: wie breit die Tafel wirklich ist, und wo eine
+    // einzelne Zeile steht -- damit nur SIE uebertragen werden muss.
+    mess_breite, messzeile_y, messzeile_h
 }
 
 // ------------------------------------------------------- die Zahlen
@@ -3953,6 +3956,11 @@ fn fb_glyph(state: u64, slot: u64, x: i64, y: i64, color: u64,
 // heiszt "hier kam nichts an". Die ERSTE ROTE ZEILE ist die Stelle, an
 // der der Eingabeweg abreiszt. Das kann man aus zwei Metern erkennen,
 // ohne eine einzige Ziffer zu entziffern.
+// So breit ist die laengste Tafelzeile (kgui.TAFEL_SPALTEN). Hier
+// noch einmal, weil `wm` `kgui` nicht einbinden darf -- der
+// Modulgraph ist ein Baum und kgui haengt ueber wm.
+const MESS_SPALTEN: u64 = 30
+
 fn messk(state: u64) -> u64 {
     // Eine Stufe groesser als die Oberflaeche, hoechstens 4. Auf
     // 3440x1440 ist `uisc` 2, die Tafel also 3: 24 x 48 Bildpunkte je
@@ -3985,6 +3993,33 @@ fn messhoehe(state: u64, zeilen: u64) -> u64 {
 // darunter eine helle Trennlinie. Aus zwei Metern ist das ein Balken
 // und kein Fensterrand. `spalten` bleibt in der Aufrufliste, weil die
 // einzeilige `messleiste` sie noch benutzt.
+// ================================================== RUNDE BLECHZWEI
+// Wie breit die Tafel wirklich ist. Bis zu dieser Runde ging der
+// schwarze Balken ueber die GANZE Bildbreite -- gut auf einem Foto,
+// aber 3440 Bildpunkte je Zeile, und die muessen alle ueber PCIe. Der
+// Text ist `spalten` Zeichen breit; der Balken bekommt einen halben
+// Zeichenrand dazu und hoert dann auf. Auf 3440 sind das rund 780 statt
+// 3440 Bildpunkte, also ein Fuenftel der Uebertragung.
+fn mess_breite(state: u64, spalten: u64) -> u64 {
+    let k: u64 = messk(state)
+    var b: u64 = font.GLYPH_W * k * (spalten + 1) + 2 * k
+    if b > fb.width(state) {
+        b = fb.width(state)
+    }
+    return b
+}
+
+// Wo eine einzelne Tafelzeile anfaengt und wie hoch sie ist. Damit
+// uebertraegt `kgui` nur die Zeilen, die sich WIRKLICH geaendert haben.
+fn messzeile_y(state: u64, zeile: u64) -> u64 {
+    let k: u64 = messk(state)
+    return k + zeile * font.GLYPH_H * k
+}
+
+fn messzeile_h(state: u64) -> u64 {
+    return font.GLYPH_H * messk(state)
+}
+
 fn mess_grund(state: u64, zeilen: u64, spalten: u64) {
     if !fb.ready(state) {
         return
@@ -3994,7 +4029,7 @@ fn mess_grund(state: u64, zeilen: u64, spalten: u64) {
     if hoehe >= fb.height(state) {
         return
     }
-    let breite: u64 = fb.width(state)
+    let breite: u64 = mess_breite(state, spalten)
     fb.fill(state, 0, 0, breite, hoehe, fb.rgb(state, 0x00, 0x00, 0x00))
     // Die Trennlinie unten -- damit die Tafel auf einem Foto eine
     // KANTE hat und nicht in den Schreibtisch ausfranst.
@@ -4015,7 +4050,21 @@ fn messzeile(state: u64, zeile: u64, p: u64, n: u64, fg: u64) {
     if y0 + gh >= fb.height(state) {
         return
     }
-    let breite: u64 = fb.width(state)
+    // ============ RUNDE BLECHZWEI: DIE ZEILE ZUERST LOESCHEN.
+    //
+    // Justin fotografiert ein DOPPELBILD: alte und neue Zeichen an
+    // derselben Stelle uebereinander. Bis zu dieser Runde loeschte nur
+    // `mess_grund` den Grund, und `mess_grund` malt einen Balken ueber
+    // ALLE Zeilen -- das ist teuer, und im Streifenbetrieb hat es die
+    // Unterbrechung mitten hineingeschlagen (siehe `fb.flush_stripe`).
+    // Wird eine Zahl kuerzer ("MAL 130" -> "MAL 61"), stehen die alten
+    // Ziffern rechts daneben weiter da.
+    //
+    // Jetzt loescht JEDE Zeile ihr eigenes Feld, unmittelbar bevor sie
+    // gemalt wird. Es kostet einen Balken je Zeile statt einen fuer
+    // alle -- dieselbe Flaeche, aber lueckenlos.
+    let breite: u64 = mess_breite(state, MESS_SPALTEN)
+    fb.fill(state, 0, y0, breite, gh, fb.rgb(state, 0x00, 0x00, 0x00))
     var i: u64 = 0
     var x: u64 = k
     while i < n && x + gw <= breite {

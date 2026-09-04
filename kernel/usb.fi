@@ -96,6 +96,7 @@ export {
     hubs, hubports, fails, attached_map,
     // Die Lampen der Tastatur und der Herzschlag darueber.
     set_leds, led_service, herz_leds, leds_sent, leds_fail, leds_last,
+    leds_try, kbd_dev,
     // Aufzaehlen NICHT mehr aus dem Zeitgeber.
     port_watch, hotplug_work, pending
 }
@@ -207,6 +208,14 @@ const S_LEDBAD: u64 = 0x120 // fehlgeschlagene
 const S_PEND: u64 = 0x128 // Bitkarte der Anschluesse mit offenem Wechsel
 const S_PENDN: u64 = 0x130 // wie oft der Zeitgeber einen Wechsel sah
 const S_LEDHERZ: u64 = 0x138 // die Lampe, die der Herzschlag gerade legt
+// RUNDE BLECHZWEI: wie oft es VERSUCHT wurde. `LED 0` allein sagt
+// nicht, ob es keine Tastatur gab oder ob der Steuertransfer
+// scheiterte -- das sind zwei verschiedene Fehler.
+const S_LEDTRY: u64 = 0x140
+// 1, solange ein SET_REPORT laeuft. Der Zeitgeber und die
+// Schreibtischschleife greifen sonst gleichzeitig auf den
+// Steuerungsring desselben Steckplatzes zu.
+const S_LEDBUSY: u64 = 0x148
 
 // RUNDE HIDPUNKTE: DIE PUNKTZAHL JE REGLER, und sie ist der ganze
 // Unterschied zwischen "Justin kann tippen" und "Justin kann nicht
@@ -2560,17 +2569,43 @@ fn set_leds(state: u64, mask: u64) -> bool {
     if dg(state, d, D_USED) == 0 {
         return false
     }
+    // RUNDE BLECHZWEI: NICHT ZWEIMAL GLEICHZEITIG AUF DENSELBEN RING.
+    //
+    // `herz_leds` kommt aus dem Zeitgeberbehandler, `led_service` aus
+    // der Meldung des Geraets und aus `usb.poll` in der
+    // Schreibtischschleife. Beide legen Bloecke auf den
+    // Steuerungsendpunkt DESSELBEN Steckplatzes. Faellt die
+    // Unterbrechung einer laufenden Uebertragung ins Wort, warten
+    // danach beide auf eine Meldung, die nur einmal kommt -- und beide
+    // zaehlen einen Fehlschlag.
+    if g(state, S_LEDBUSY) != 0 {
+        return false
+    }
+    s(state, S_LEDBUSY, 1)
+    s(state, S_LEDTRY, g(state, S_LEDTRY) + 1)
     let p: u64 = state + HUB_OFF
     kstate.set8(p, (mask & 7) as u8)
     let r: i64 = xhci.control(state, dg(state, d, D_SLOT), 0x21,
         REQ_SET_REPORT, (2 << 8), dg(state, d, D_IFACE), 1, p, false)
     s(state, S_LEDS, mask & 7)
+    s(state, S_LEDBUSY, 0)
     if r < 0 {
         s(state, S_LEDBAD, g(state, S_LEDBAD) + 1)
         return false
     }
     s(state, S_LEDOK, g(state, S_LEDOK) + 1)
     return true
+}
+
+// Wie oft es VERSUCHT wurde, und ob es ueberhaupt eine Tastatur gibt.
+// `LED 0` allein ist zweideutig: keine Tastatur, oder Tastatur da und
+// der Transfer scheitert. Zwei Zahlen, zwei Antworten.
+fn leds_try(state: u64) -> u64 {
+    return g(state, S_LEDTRY)
+}
+
+fn kbd_dev(state: u64) -> u64 {
+    return g(state, S_KBD)
 }
 
 // Hat eine Feststelltaste den Zustand umgelegt, geht er hinaus. Der
