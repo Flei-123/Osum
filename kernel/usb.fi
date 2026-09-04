@@ -97,7 +97,9 @@ export {
     hubs, hubports, fails, attached_map,
     // Die Lampen der Tastatur und der Herzschlag darueber.
     set_leds, led_service, herz_leds, leds_sent, leds_fail, leds_last,
-    leds_try, kbd_dev,
+    leds_try, kbd_dev, mouse_dev,
+    dev_errs, dev_heal, dev_epstate, dev_slot, dev_intdci, heilungen,
+    ohne_platz,
     // Aufzaehlen NICHT mehr aus dem Zeitgeber.
     port_watch, hotplug_work, pending,
     // RUNDE BLECHDREI: laeuft gerade eine Aufzaehlung?
@@ -219,6 +221,17 @@ const S_LEDTRY: u64 = 0x140
 // Schreibtischschleife greifen sonst gleichzeitig auf den
 // Steuerungsring desselben Steckplatzes zu.
 const S_LEDBUSY: u64 = 0x148
+// ============================================== RUNDE STARTKNOPF
+// Wie oft ein Unterbrechungsendpunkt wiederbelebt werden musste.
+const S_HEAL: u64 = 0x150
+// 1, solange `service` laeuft. Die Wiederbelebung eines Endpunkts
+// wartet auf Antworten des Reglers; faellt in diese Wartezeit eine
+// zweite Meldung, stuenden zwei Durchlaeufe auf demselben Ring.
+const S_SVCBUSY: u64 = 0x158
+// Wie oft `alloc_dev` leer war -- ein Geraet, fuer das kein Platz mehr
+// da ist, verschwindet sonst spurlos. Justins Brett meldet FUND 5 bei
+// MAX_DEV 4; ob das je angeschlagen hat, stand nirgends.
+const S_NOPLATZ: u64 = 0x160
 
 // RUNDE HIDPUNKTE: DIE PUNKTZAHL JE REGLER, und sie ist der ganze
 // Unterschied zwischen "Justin kann tippen" und "Justin kann nicht
@@ -285,6 +298,10 @@ const D_TTPORT: u64 = 248
 const D_REPS: u64 = 256 // fertige Unterbrechungstransfers dieses Geraets
 const D_LASTCC: u64 = 264 // der letzte Fertigmeldungscode
 const D_ARMS: u64 = 272 // wie oft ein Block auf den Ring gelegt wurde
+// ============================================== RUNDE STARTKNOPF
+// FEHLER UND WIEDERBELEBUNGEN, JE GERAET.
+const D_ERRS: u64 = 280 // Transfers mit schlechtem Fertigmeldungscode
+const D_HEAL: u64 = 288 // wie oft der Endpunkt wiederbelebt wurde
 
 const DRV_NONE: u64 = 0
 const DRV_KBD: u64 = 1
@@ -701,6 +718,7 @@ fn alloc_dev(state: u64) -> u64 {
         }
         i = i + 1
     }
+    s(state, S_NOPLATZ, g(state, S_NOPLATZ) + 1)
     return MAX_DEV
 }
 
@@ -1707,6 +1725,15 @@ fn service(state: u64) {
     if g(state, S_READY) == 0 {
         return
     }
+    // RUNDE STARTKNOPF: die Wiederbelebung eines Endpunkts wartet auf
+    // den Regler. `service` kommt aus der Unterbrechung UND aus
+    // `poll` -- ohne diese Sperre liefen zwei Durchlaeufe auf
+    // demselben Ring, und beide warteten auf eine Antwort, die nur
+    // einmal kommt.
+    if g(state, S_SVCBUSY) != 0 {
+        return
+    }
+    s(state, S_SVCBUSY, 1)
     var d: u64 = 0
     while d < MAX_DEV {
         if dg(state, d, D_USED) != 0 && dg(state, d, D_INTDCI) != 0 {
@@ -1716,12 +1743,48 @@ fn service(state: u64) {
                 let seq: u64 = xhci.ep_seq(state, i)
                 if seq != dg(state, d, D_SEQ) {
                     ds(state, d, D_SEQ, seq)
-                    ds(state, d, D_LASTCC, xhci.ep_code(state, i))
-                    if xhci.ep_code(state, i) == xhci.CC_SUCCESS
-                        || xhci.ep_code(state, i) == xhci.CC_SHORT {
+                    let cc: u64 = xhci.ep_code(state, i)
+                    ds(state, d, D_LASTCC, cc)
+                    if cc == xhci.CC_SUCCESS || cc == xhci.CC_SHORT {
                         s(state, S_REPORTS, g(state, S_REPORTS) + 1)
                         ds(state, d, D_REPS, dg(state, d, D_REPS) + 1)
                         deliver(state, d)
+                    } else {
+                        // ==================== RUNDE STARTKNOPF
+                        // EIN ANGEHALTENER ENDPUNKT KOMMT VON SELBST
+                        // NICHT ZURUECK.
+                        //
+                        // HIER STAND NUR `arm`. Das ist der Fehler, und
+                        // er erklaert die Beobachtung genau: die MAUS
+                        // laeuft (sie hat nie einen Fehler), die
+                        // TASTATUR liefert nichts (ein einziger
+                        // Uebertragungsfehler genuegt). Nach einem
+                        // Stall (6) oder einem Uebertragungsfehler (4)
+                        // steht der Endpunkt im Zustand `halted`, und
+                        // xHCI 1.2, 4.6.8 ist dabei eindeutig: der
+                        // Regler nimmt DANN KEINEN BLOCK MEHR AN. Man
+                        // darf klingeln, so oft man will -- `ARM` laeuft
+                        // hoch, `BER` steht. Genau dieses Zahlenbild
+                        // meldet Justins Tafel.
+                        //
+                        // In QEMU kommt es nie vor: ein nachgebildetes
+                        // Geraet erzeugt keine Uebertragungsfehler. Auf
+                        // Blech, an einem echten Kabel, mit einer echten
+                        // Spieletastatur, kommen sie.
+                        //
+                        // Die Wiederbelebung ist die vorgeschriebene:
+                        // `Reset Endpoint` an den Regler,
+                        // CLEAR_FEATURE(ENDPOINT_HALT) an das Geraet,
+                        // `Set TR Dequeue Pointer` auf den frischen
+                        // Ring. `unstall` tut genau das und wurde
+                        // bisher nur vom Massenspeicher gerufen.
+                        ds(state, d, D_ERRS, dg(state, d, D_ERRS) + 1)
+                        if xhci.ep_halted(state, dg(state, d, D_SLOT),
+                            dg(state, d, D_INTDCI)) {
+                            unstall(state, d, dg(state, d, D_INTDCI))
+                            ds(state, d, D_HEAL, dg(state, d, D_HEAL) + 1)
+                            s(state, S_HEAL, g(state, S_HEAL) + 1)
+                        }
                     }
                     arm(state, d)
                 }
@@ -1734,6 +1797,7 @@ fn service(state: u64) {
     // hier ist gerade ohnehin ein Bericht durchgelaufen, das Geraet
     // antwortet also.
     led_service(state)
+    s(state, S_SVCBUSY, 0)
 }
 
 // DER ZWEITE WEG ZU DENSELBEN BERICHTEN, und er ist eine GEGENPROBE und
@@ -2632,6 +2696,13 @@ fn kbd_dev(state: u64) -> u64 {
     return g(state, S_KBD)
 }
 
+// Dasselbe fuer die Maus. Sie ist der FUNKTIONIERENDE Zweig auf
+// Justins Brett und damit die Vergleichszahl: was bei ihr steht und
+// bei der Tastatur nicht, ist der Unterschied.
+fn mouse_dev(state: u64) -> u64 {
+    return g(state, S_MOUSE)
+}
+
 // RUNDE BLECHFUENF: was EIN Geraet fuer sich gemeldet hat.
 fn dev_reps(state: u64, d: u64) -> u64 {
     if d >= MAX_DEV {
@@ -2682,6 +2753,51 @@ fn dev_roh(state: u64, d: u64, k: u64) -> u64 {
         return 0
     }
     return kstate.get8(report_buf(state, d) + k)
+}
+
+fn dev_errs(state: u64, d: u64) -> u64 {
+    if d >= MAX_DEV {
+        return 0
+    }
+    return dg(state, d, D_ERRS)
+}
+
+fn dev_heal(state: u64, d: u64) -> u64 {
+    if d >= MAX_DEV {
+        return 0
+    }
+    return dg(state, d, D_HEAL)
+}
+
+fn dev_slot(state: u64, d: u64) -> u64 {
+    if d >= MAX_DEV {
+        return 0
+    }
+    return dg(state, d, D_SLOT)
+}
+
+fn dev_intdci(state: u64, d: u64) -> u64 {
+    if d >= MAX_DEV {
+        return 0
+    }
+    return dg(state, d, D_INTDCI)
+}
+
+// Der Endpunktzustand, wie der REGLER ihn in den Geraetezusammenhang
+// schreibt. 1 = laeuft, 2 = angehalten, 4 = Fehler, 0 = gar nicht da.
+fn dev_epstate(state: u64, d: u64) -> u64 {
+    if d >= MAX_DEV {
+        return 0
+    }
+    return xhci.ep_state(state, dg(state, d, D_SLOT), dg(state, d, D_INTDCI))
+}
+
+fn heilungen(state: u64) -> u64 {
+    return g(state, S_HEAL)
+}
+
+fn ohne_platz(state: u64) -> u64 {
+    return g(state, S_NOPLATZ)
 }
 
 // ================================================== RUNDE BLECHDREI
