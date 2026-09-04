@@ -908,7 +908,32 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
         return 0
     }
     let h: u64 = head(state)
-    sched.tset(state, t, sched.T_ENTRY, get64(h + E_ENTRY))
+    // ============================================ RUNDE STARTKNOPF
+    // DER EINSPRUNG WIRD GEPRUEFT, BEVOR EIN PROZESS DARAUS ENTSTEHT.
+    //
+    // `h` ist EIN gemeinsamer Kopfpuffer (`kstate.ELF_OFF`). Was hier
+    // gelesen wird, ist der Kopf der ZULETZT geladenen Datei -- und
+    // zwischen `load` und dieser Zeile liegen `perm.apply_exec` und
+    // `write_args`. Steht dort etwas Nichtkanonisches, endet es am
+    // `sysretq` in `enter_user_task` als #GP(0) IN RING 0, und das
+    // haelt die ganze Maschine an (genau Justins Absturz, rip
+    // 0x0010049C). Ein Programm, dessen Einsprung nicht in die untere
+    // Haelfte des Adressraums zeigt, wird ab hier gar nicht erst
+    // gestartet.
+    var eentry: u64 = get64(h + E_ENTRY)
+    if kstate.mode_on(state, kstate.M_EINSPRUNG) {
+        // Die Gegenprobe: ein Einsprung, wie ihn kein Uebersetzer je
+        // erzeugt. Muss abgelehnt werden, ohne den Rechner mitzunehmen.
+        eentry = 0xDEAD000000000000
+    }
+    if eentry == 0 || (eentry >> 47) != 0 {
+        say_badentry(state, eentry)
+        proc.discard(state, t)
+        sched.irq_restore(flags)
+        fail(state, R_ENTRY)
+        return 0
+    }
+    sched.tset(state, t, sched.T_ENTRY, eentry)
     // RUNDE K16: DER STAPELZEIGER ZEIGT AUF DEN ARGUMENTBLOCK.
     //
     // Bis zu dieser Runde stand er 16 Oktette darunter, und der Block war
@@ -948,6 +973,15 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
     pmon.name_set(state, t, path)
     sched.irq_restore(flags)
     return t
+}
+
+// Ein abgelehnter Einsprung wird GESAGT. Ein Programm, das schweigend
+// nicht startet, ist so schwer zu finden wie ein Rechner, der steht.
+fn say_badentry(state: u64, e: u64) {
+    var s_a: [u8; 27] = "elf: entry abgelehnt e=\0\0\0\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.hex(e)
+    serial.nl()
 }
 
 fn say_start(state: u64, t: u64) {
