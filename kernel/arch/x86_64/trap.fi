@@ -41,9 +41,14 @@ import time
 import signal
 import proc
 import msr
+import arch.arch
 import fpu
 
-export { entry }
+export {
+    entry,
+    // RUNDE BLECHVIER: was der Zeitgeberbehandler ueber sich selbst weiss.
+    isr_us_last, isr_us_max, ticks_lost, ticks_late, bh_tief
+}
 
 // Offsets in the trap frame (see isr.s).
 const F_VECTOR: u64 = 120
@@ -215,8 +220,9 @@ fn entry(frame: u64, state: u64) {
         // a second" -- not "one hundredth divided by the number of cores".
         // So the BOOT processor counts it and the others count their own
         // (`cpu.C_TICKS`, in `sched.on_tick`).
+        let isr_t0: u64 = time.tsc()
         if cpu.here(state) == 0 {
-            kstate.add(state, kstate.TICKS, 1)
+            marken_nachfuehren(state)
         }
         // ROUND K9: DER SAMMLER DES ZUFALLSGENERATORS. Der genaue
         // Zyklenzaehler zum Zeitpunkt eines Zeitgeberschlags haengt an
@@ -228,7 +234,33 @@ fn entry(frame: u64, state: u64) {
         // The end-of-interrupt has to go out BEFORE the switch: the
         // controller lets nothing through until it has seen it, and the
         // task that is switched to would run without a timer.
+        //
+        // RUNDE BLECHVIER, ZUR RICHTIGSTELLUNG: der Bericht sagte, das
+        // EOI stehe erst am Ende des Behandlers (Zeile 391). Das gilt
+        // fuer den DURCHFALL am Ende, nicht fuer den Zeitgeber -- hier
+        // steht es seit jeher weit vorne. Die Koaleszenz kommt nicht
+        // vom EOI, sondern von IF=0 waehrend des Anstrichs; das ISR-Bit
+        // ist da laengst geloescht.
         eoi(state, vector)
+        // ================================================ RUNDE BLECHVIER
+        // EIN GENESTETER SCHLAG MACHT NUR DIE BUCHFUEHRUNG.
+        //
+        // `unteres_stueck` schaltet die Unterbrechungen fuer die Dauer
+        // des Anstrichs EIN. Damit kann ein Zeitgeberschlag mitten
+        // hinein fallen -- und das ist genau der Sinn der Sache: die
+        // Marke geht dann NICHT mehr verloren. Was ein solcher Schlag
+        // aber auf KEINEN FALL tun darf, ist `sched.on_tick` zu rufen:
+        // das endet in `schedule_locked` und WECHSELT DEN STAPEL, aus
+        // einer geschachtelten Unterbrechung heraus. Also kehrt er hier
+        // um, sobald er sieht, dass unten schon einer arbeitet.
+        //
+        // Die Sperre gilt NUR fuer den Startprozessor -- nur dort wird
+        // gemalt, und nur dort werden die Unterbrechungen zwischendurch
+        // eingeschaltet. Ein zweiter Kern soll seinen `on_tick` behalten.
+        if cpu.here(state) == 0 && bh_drin != 0 {
+            ticks_spaet = ticks_spaet + 1
+            return
+        }
         // ============================== RUNDE BLECHEINGABE: DER HERZSCHLAG
         //
         // GANZ VORNE, vor allem anderen in diesem Behandler. Justins
@@ -244,9 +276,14 @@ fn entry(frame: u64, state: u64) {
         // schlaegt, wenn alles DAHINTER haengt -- und genau das
         // unterscheidet "der Zeitgeber ist tot" von "der Behandler
         // kommt nicht zurueck".
-        if cpu.here(state) == 0 {
-            gfx.herz_tick(state)
-        }
+        // ============================== RUNDE BLECHVIER
+        // WAS HIER STAND UND WARUM ES WEG IST, siehe `unteres_stueck`
+        // weiter unten: Herzschlag und Messtafel malen jetzt MIT
+        // EINGESCHALTETEN UNTERBRECHUNGEN, hinter einer
+        // Wiedereintrittssperre. Vorher liefen beide hier, mit
+        // IF=0 -- und ein Anstrich von 396 ms bei UC-Abbildung hat
+        // damit neununddreissig von vierzig Zeitgeberschlaegen
+        // verschluckt.
         // ROUND POWERMON: the power accounting takes its sample here,
         // and it stands BEFORE `sched.on_tick` for a reason that cost a
         // measurement to find. `on_tick` ends in `schedule_locked`, and
@@ -315,9 +352,7 @@ fn entry(frame: u64, state: u64) {
         //
         // Nur der Startprozessor malt: zwei Kerne, die gleichzeitig
         // denselben Balken schreiben, ergaeben ein zerrissenes Bild.
-        if cpu.here(state) == 0 {
-            gfx.tafel_tick(state)
-        }
+        unteres_stueck(state, isr_t0)
         sched.on_tick(state)
         // ROUND K9. ZWEI DINGE, DIE NUR HIER GEHEN. Die Frist von
         // `alarm` laeuft in Marken, also wird sie hier faellig. Und ein
@@ -445,6 +480,160 @@ fn report_user(frame: u64, state: u64, vector: u64, cur: u64, dies: bool) {
         signal.say_name(signal.signal_of(vector))
     }
     serial.nl()
+}
+
+// =====================================================================
+// RUNDE BLECHVIER: DER ZEITGEBERBEHANDLER, DER SICH SELBST MISST
+// =====================================================================
+//
+// DIE RECHNUNG, DIE DIESEN UMBAU ERZWUNGEN HAT -- und sie stammt nicht
+// von hier, sondern aus Justins Recherche, nachgerechnet an unseren
+// eigenen Messwerten:
+//
+//   Vollbild-Blit auf 3440x1440 bei UNCACHED-Abbildung: 396 531 us.
+//   1 / 0,3965 s = 2,52 Marken je Sekunde. Justin hat rund 3 gemessen.
+//
+// Das ist keine schlechte Eichung, das ist INTERRUPT-KOALESZENZ. Intel
+// SDM Band 3, Abschnitt 10.8.4: IRR und ISR haben GENAU EIN BIT JE
+// VEKTOR. Hoechstens zwei Schlaege desselben Vektors sind unterwegs
+// (einer im IRR, einer im ISR); jeder weitere faellt in dasselbe Bit
+// und ist weg. Es gibt keinen Zaehler, keine Warteschlange und beim
+// LAPIC-Zeitgeber auch kein Ueberlaufbit -- der Verlust ist STILL.
+//
+// Bei 10 ms Periode und 396 ms Behandlerlaufzeit laufen 39,6 Marken
+// auf, GENAU EINE wird gerettet. Der Faktor 39,6 passt zu keiner
+// LAPIC-Teilerstufe (die kann nur 2, 4, 8, ... 128), aber punktgenau
+// zur Laufzeit des Behandlers. Damit ist die Ursache benannt.
+//
+// Drei Dinge folgen daraus, und alle drei stehen hier:
+//
+//   1. GEMALT WIRD MIT EINGESCHALTETEN UNTERBRECHUNGEN. Dann geht
+//      waehrend eines langen Anstrichs keine Marke mehr verloren.
+//   2. DIE ZEIT KOMMT AUS DEM ZYKLENZAEHLER, nicht aus der Zahl der
+//      Schlaege. Selbst wenn doch einmal welche verlorengehen, geht
+//      nicht auch noch die UHR falsch -- und genau das war Justins
+//      stehende Taskleistenuhr.
+//   3. DER BEHANDLER MISST SICH SELBST und schreibt die Zahl auf die
+//      Tafel. Eine Laufzeit, ueber die man streiten muss, ist keine.
+
+// Wie lange der Behandler zuletzt und wie lange er am laengsten
+// gebraucht hat, in Mikrosekunden. Und wie viele Marken nachgefuehrt
+// werden mussten, weil kein Schlag fuer sie kam.
+static mut isr_us_l: u64 = 0
+static mut isr_us_m: u64 = 0
+static mut tick_tsc: u64 = 0
+static mut ticks_verloren: u64 = 0
+static mut ticks_spaet: u64 = 0
+static mut bh_drin: u64 = 0
+static mut bh_max: u64 = 0
+
+fn isr_us_last() -> u64 {
+    return isr_us_l
+}
+
+fn isr_us_max() -> u64 {
+    return isr_us_m
+}
+
+// Marken, die der Zyklenzaehler nachtragen musste, weil kein eigener
+// Schlag fuer sie kam. Groesser null heisst: es sind welche
+// verlorengegangen -- und die Uhr stimmt trotzdem.
+fn ticks_lost() -> u64 {
+    return ticks_verloren
+}
+
+// Schlaege, die in einen laufenden Anstrich gefallen sind. Sie haben
+// ihre Marke gezaehlt und sind dann umgekehrt. Groesser null heisst:
+// die Sperre arbeitet, und ohne sie waeren genau das die verlorenen.
+fn ticks_late() -> u64 {
+    return ticks_spaet
+}
+
+fn bh_tief() -> u64 {
+    return bh_max
+}
+
+// DIE MARKEN AUS DEM ZYKLENZAEHLER NACHFUEHREN.
+//
+// Bis hierher stand hier `TICKS + 1` -- ein Zaehler von Schlaegen, die
+// angekommen sind. Wo Schlaege verlorengehen, ist das keine Uhr.
+// Jetzt: wie viele Marken seit dem letzten Mal WIRKLICH vergangen
+// sind, gerechnet aus `rdtsc` und der geeichten Zyklenfrequenz.
+//
+// Der Rest bleibt stehen (`tick_tsc + n * je`), damit sich kein Bruch
+// aufsummiert. Ohne Eichung (`khz` = 0) bleibt es beim alten Verhalten
+// -- eine Uhr, die auf einer geratenen Frequenz steht, waere schlimmer
+// als eine, die langsam geht.
+fn marken_nachfuehren(state: u64) {
+    let jetzt: u64 = time.tsc()
+    let khz: u64 = time.khz(state)
+    let je: u64 = khz *% (time.TICK_NS / 1000000)
+    if khz == 0 || je == 0 || tick_tsc == 0 || jetzt <= tick_tsc {
+        tick_tsc = jetzt
+        kstate.add(state, kstate.TICKS, 1)
+        return
+    }
+    var n: u64 = (jetzt - tick_tsc) / je
+    if n == 0 {
+        // Der Schlag kam frueher als eine volle Marke -- das ist kein
+        // Fehler, sondern Koernung. Die Marke wird gezaehlt, die
+        // Grundlinie NICHT verschoben, sonst laeuft die Uhr vor.
+        kstate.add(state, kstate.TICKS, 1)
+        return
+    }
+    // EINE OBERGRENZE, UND WARUM. Steht der Rechner im Fehlersuchlauf
+    // eine Minute im Einzelschritt, waeren das sechstausend Marken auf
+    // einmal -- jeder Schlaefer wuerde gleichzeitig geweckt und jede
+    // Frist auf einmal faellig. Mehr als eine Sekunde wird deshalb
+    // nicht nachgetragen.
+    if n > time.TICK_HZ {
+        n = time.TICK_HZ
+        tick_tsc = jetzt
+    } else {
+        tick_tsc = tick_tsc +% n *% je
+    }
+    if n > 1 {
+        ticks_verloren = ticks_verloren + (n - 1)
+    }
+    kstate.add(state, kstate.TICKS, n)
+}
+
+// DAS UNTERE STUECK: gemalt wird MIT eingeschalteten Unterbrechungen.
+//
+// Die Sperre `bh_drin` verhindert nicht das Schachteln -- sie
+// verhindert, dass ein geschachtelter Schlag den Ablaufplaner ruft
+// (siehe die Umkehr oben). Ein zweiter Anstrich kann hier nie
+// hineinlaufen, weil dieser Zweig nur erreicht wird, wenn die Sperre
+// offen war.
+fn unteres_stueck(state: u64, t0: u64) {
+    if cpu.here(state) != 0 {
+        return
+    }
+    bh_drin = 1
+    if bh_drin > bh_max {
+        bh_max = bh_drin
+    }
+    arch.irq_on()
+    gfx.herz_tick(state)
+    gfx.tafel_tick(state)
+    arch.irq_off()
+    bh_drin = 0
+    // Die eigene Laufzeit, in Mikrosekunden. `khz` sind Zyklen je
+    // Millisekunde, also ist khz/1000 die Zahl der Zyklen je
+    // Mikrosekunde.
+    let khz: u64 = time.khz(state)
+    let je: u64 = khz / 1000
+    if je == 0 {
+        return
+    }
+    let t1: u64 = time.tsc()
+    if t1 <= t0 {
+        return
+    }
+    isr_us_l = (t1 - t0) / je
+    if isr_us_l > isr_us_m {
+        isr_us_m = isr_us_l
+    }
 }
 
 fn eoi(state: u64, vector: u64) {
