@@ -538,9 +538,79 @@ cat > "$OUT/limine.conf" <<'EOF'
 # `docs/NAMING.md` steht dem nicht
 # entgegen: jenes Dokument regelt DEUTSCH GEGEN ENGLISCH in Pfaden und
 # Anzeigetexten, nicht den Produktnamen.
-timeout: 10
+timeout: 20
 default_entry: 1
 verbose: yes
+
+# ================== RUNDE MENUE: VIER EINTRAEGE FUER MENSCHEN, DER REST
+# EINE ETAGE TIEFER.
+#
+# Hier standen zehn gleichwertige Eintraege untereinander. Das war eine
+# gewachsene TESTLISTE, keine Auswahl: wer den Stick in einen fremden
+# Rechner steckt, will den Schreibtisch, und musste ihn zwischen
+# Vektoreinheit, USB-Diagnose und zwei Aufloesungsvarianten suchen.
+#
+# Oben stehen jetzt die vier, die ein Mensch wirklich waehlt. Alles
+# uebrige liegt unter "Werkzeuge und Diagnose" -- ein Baumeintrag, den
+# Limine seit Fassung 8 kann (ein Eintrag OHNE `protocol`, dessen Kinder
+# einen Schraegstrich mehr haben). Nichts ist weg, nichts hat eine
+# andere `cmdline`; es ist reine Ordnung.
+#
+# WARTEZEIT 20 SEKUNDEN, und danach startet der Standardeintrag von
+# selbst -- ein echter Countdown, kein Warten auf eine Taste. Das ist
+# genau der Fall, um den es die ganze Runde geht: auf einem Brett, auf
+# dem die Tastatur nicht antwortet, MUSS das Menue von allein
+# weiterlaufen, sonst kommt man nie bis zum Schreibtisch.
+#
+# `default_entry: 1` zeigt jetzt auf den Schreibtisch. Vorher war es
+# ebenfalls die 1 -- nur stand dort die Hardware-Diagnose, und die
+# BLEIBT ABSICHTLICH STEHEN. Der Stick lief also nach zehn Sekunden von
+# selbst in einen Bericht, der nie weitergeht.
+
+/@MARKE_PRODUKT@ -- Schreibtisch
+    protocol: multiboot1
+    path: boot():/osum.mb
+    module_path: boot():/root.img
+    cmdline: modfs osum gfx wm wig desk wmshell wmdauer usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+
+# ================== RUNDE MESSTAFEL: DERSELBE EINTRAG AUF ENGLISCH
+#
+# Beide Textkataloge liegen im Abbild (`/usr/share/locale/de/messages`
+# und `.../en/messages`, beide in der PFLICHT-Liste weiter oben). Was
+# fehlte, war der Schalter: die Sprache stand fest in
+# /users/root/config/locale, und das Einstellungsprogramm, das sie
+# umstellen kann, braucht Maus oder Tastatur -- also genau das, was bei
+# Justin klemmt. `lang=en` setzt die Datei VOR dem ersten
+# Ring-3-Programm; sonst aendert sich an diesem Eintrag nichts.
+
+/@MARKE_PRODUKT@ -- Desktop (English)
+    protocol: multiboot1
+    path: boot():/osum.mb
+    module_path: boot():/root.img
+    cmdline: modfs osum gfx wm wig desk wmshell wmdauer usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs lang=en
+
+/@MARKE_PRODUKT@ -- Kommandozeile mit Netz
+    protocol: multiboot1
+    path: boot():/osum.mb
+    module_path: boot():/root.img
+    cmdline: modfs osum vfs usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 console=ttyS0 nosched noproc nofs
+
+# ============ RUNDE BLECH-HID: DER NETZ-SELBSTLAUF, OHNE EINE TASTE
+#
+# Der Eintrag, den Justin am 03.09.2026 gebraucht haette und nicht
+# hatte. Der Stick startete, zeigte ein Bild -- und nahm keine Eingabe
+# an; damit war jeder der 52 Befehle auf dem Abbild unerreichbar.
+#
+# `netlauf` gibt der Shell `/etc/netlauf.sh` als Argument mit
+# (`kernel/kmain.fi`, Abschnitt `osum`), sie faehrt es von oben nach
+# unten -- `dhcp`, `resolv.conf`, `host store.fleitec.com`,
+# `fetch https://store.fleitec.com/index.json`, `ota suchen` -- und
+# danach BLEIBT DER BILDSCHIRM STEHEN (`hwdiag.park_after_shell`). Ein
+# Foto davon ist die erste Messung des Netzwegs auf echtem Blech.
+#
+# `usb hidgen` steht mit drin, obwohl niemand tippen muss: findet der
+# Baum Tastatur und Maus, sagt der Bericht das mit -- und dann weiss
+# Justin im selben Foto, ob die Uebernahme dieser Runde greift.
 
 /@MARKE_PRODUKT@ -- Hardware-Diagnose (bleibt stehen)
     protocol: multiboot1
@@ -566,13 +636,25 @@ verbose: yes
 # WARUM ZWEI EINTRAEGE UND NICHT EINER: der erste fasst nichts an und
 # kann deshalb nicht haengen. Wenn dieser hier auf einem fremden Brett
 # stehenbleibt, ist der andere immer noch da.
-/@MARKE_PRODUKT@ -- USB-Diagnose: Regler uebernehmen und jeden Anschluss zeigen
-    protocol: multiboot1
-    path: boot():/osum.mb
-    module_path: boot():/root.img
-    cmdline: hwdiag usb hidgen usbleg usbstop gfx nokbd nosched noproc nofs noring3
 
-/@MARKE_PRODUKT@ -- Diagnose und danach der Schreibtisch
+# ------------------------------------------------------------------
+# DER BAUMEINTRAG. Er hat selbst KEIN `protocol` -- genau daran
+# erkennt Limine ein Untermenue statt eines Starteintrags.
+#
+# ZU DEN ZWEI AUFLOESUNGSEINTRAEGEN, und warum sie NICHT verschwinden:
+# Justins Vorschlag war, die Aufloesung einfach von der Firmware
+# uebernehmen zu lassen. Das tut der Lader bereits -- alle Eintraege
+# ohne `resolution:` bekommen, was die Firmware anbietet, und auf
+# Justins 3440x1440 ist das richtig. Es ist nur NICHT verlaesslich:
+# gemessen (docs/SCHIRM.md, "Unter dem Lader") gibt derselbe Lader auf
+# einem 3840x2160-Schirm von sich aus 1280x800. Nach
+# ExitBootServices gibt es kein GOP mehr, der Kern kann das also nicht
+# nachbessern. Wer auf so einem Schirm ein scharfes Bild will, muss den
+# LADER waehlen lassen -- deshalb bleiben die zwei Eintraege. Sie
+# gehoeren nur nicht ins Hauptmenue.
+/Werkzeuge und Diagnose
+
+//@MARKE_PRODUKT@ -- Diagnose und danach der Schreibtisch
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
@@ -583,28 +665,32 @@ verbose: yes
 # Terminal darin konnte `dhcp` nicht fahren -- der Stapel stand gar
 # nicht. Die Adresse ist dieselbe verbindungslokale Platzhalteradresse
 # wie im Kommandozeilen-Eintrag; `dhcp` ersetzt sie.
-/@MARKE_PRODUKT@ -- nur der Schreibtisch (deutsch)
+
+//@MARKE_PRODUKT@ -- USB-Diagnose: Regler uebernehmen und jeden Anschluss zeigen
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx wm wig desk wmshell wmdauer usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+    cmdline: hwdiag usb hidgen usbleg usbstop gfx nokbd nosched noproc nofs noring3
 
-# ================== RUNDE MESSTAFEL: DERSELBE EINTRAG AUF ENGLISCH
+//@MARKE_PRODUKT@ -- Netz-Selbstlauf ohne Tastatur (dhcp, host, fetch, ota)
+    protocol: multiboot1
+    path: boot():/osum.mb
+    module_path: boot():/root.img
+    cmdline: modfs osum vfs netlauf usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 console=ttyS0 nosched noproc nofs
+
+# RUNDE SCHIRM: ZWEI EINTRAEGE FUER GROSSE SCHIRME.
 #
-# Beide Textkataloge liegen im Abbild (`/usr/share/locale/de/messages`
-# und `.../en/messages`, beide in der PFLICHT-Liste weiter oben). Was
-# fehlte, war der Schalter: die Sprache stand fest in
-# /users/root/config/locale, und das Einstellungsprogramm, das sie
-# umstellen kann, braucht Maus oder Tastatur -- also genau das, was bei
-# Justin klemmt. `lang=en` setzt die Datei VOR dem ersten
-# Ring-3-Programm; sonst aendert sich an diesem Eintrag nichts.
-/@MARKE_PRODUKT@ -- desktop only (English)
-    protocol: multiboot1
-    path: boot():/osum.mb
-    module_path: boot():/root.img
-    cmdline: modfs osum gfx wm wig desk wmshell wmdauer usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs lang=en
+# GEMESSEN: auf einem 3840x2160-Schirm gibt der Lader dem Kern von sich
+# aus 1280x800 (docs/SCHIRM.md, Abschnitt "Unter dem Lader"). Der Kern
+# kann das NICHT nachbessern -- nach ExitBootServices gibt es kein GOP
+# mehr, und der Bochs-Weg, ueber den er ohne Lader den Modus setzt, ist
+# auf echter Hardware nicht da. Wer den Modus will, muss ihn den LADER
+# waehlen lassen, und genau das tun diese zwei Eintraege.
+#
+# Passt die Aufloesung dem Bildschirm nicht, faellt Limine auf seine
+# Vorgabe zurueck; es bleibt also immer ein Bild.
 
-/@MARKE_PRODUKT@ -- Vektoreinheit pruefen (bleibt stehen)
+//@MARKE_PRODUKT@ -- Vektoreinheit pruefen (bleibt stehen)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
@@ -635,58 +721,21 @@ verbose: yes
 #     osum$ fetch https://store.fleitec.com/index.json
 #     osum$ ota suchen
 #     osum$ jarvisd -n
-/@MARKE_PRODUKT@ -- Kommandozeile mit Netz (dhcp, host, fetch, ota, jarvisd)
-    protocol: multiboot1
-    path: boot():/osum.mb
-    module_path: boot():/root.img
-    cmdline: modfs osum vfs usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 console=ttyS0 nosched noproc nofs
 
-# ============ RUNDE BLECH-HID: DER NETZ-SELBSTLAUF, OHNE EINE TASTE
-#
-# Der Eintrag, den Justin am 03.09.2026 gebraucht haette und nicht
-# hatte. Der Stick startete, zeigte ein Bild -- und nahm keine Eingabe
-# an; damit war jeder der 52 Befehle auf dem Abbild unerreichbar.
-#
-# `netlauf` gibt der Shell `/etc/netlauf.sh` als Argument mit
-# (`kernel/kmain.fi`, Abschnitt `osum`), sie faehrt es von oben nach
-# unten -- `dhcp`, `resolv.conf`, `host store.fleitec.com`,
-# `fetch https://store.fleitec.com/index.json`, `ota suchen` -- und
-# danach BLEIBT DER BILDSCHIRM STEHEN (`hwdiag.park_after_shell`). Ein
-# Foto davon ist die erste Messung des Netzwegs auf echtem Blech.
-#
-# `usb hidgen` steht mit drin, obwohl niemand tippen muss: findet der
-# Baum Tastatur und Maus, sagt der Bericht das mit -- und dann weiss
-# Justin im selben Foto, ob die Uebernahme dieser Runde greift.
-/@MARKE_PRODUKT@ -- Netz-Selbstlauf ohne Tastatur (dhcp, host, fetch, ota)
-    protocol: multiboot1
-    path: boot():/osum.mb
-    module_path: boot():/root.img
-    cmdline: modfs osum vfs netlauf usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 console=ttyS0 nosched noproc nofs
-
-# RUNDE SCHIRM: ZWEI EINTRAEGE FUER GROSSE SCHIRME.
-#
-# GEMESSEN: auf einem 3840x2160-Schirm gibt der Lader dem Kern von sich
-# aus 1280x800 (docs/SCHIRM.md, Abschnitt "Unter dem Lader"). Der Kern
-# kann das NICHT nachbessern -- nach ExitBootServices gibt es kein GOP
-# mehr, und der Bochs-Weg, ueber den er ohne Lader den Modus setzt, ist
-# auf echter Hardware nicht da. Wer den Modus will, muss ihn den LADER
-# waehlen lassen, und genau das tun diese zwei Eintraege.
-#
-# Passt die Aufloesung dem Bildschirm nicht, faellt Limine auf seine
-# Vorgabe zurueck; es bleibt also immer ein Bild.
-/@MARKE_PRODUKT@ -- Schreibtisch auf einem WQHD-Schirm (2560x1440)
+//@MARKE_PRODUKT@ -- Schreibtisch auf einem WQHD-Schirm (2560x1440)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
     resolution: 2560x1440
     cmdline: modfs osum gfx wm wig desk wmshell wmdauer usb hidgen nosched noproc nofs
 
-/@MARKE_PRODUKT@ -- Schreibtisch auf einem 4K-Schirm (3840x2160)
+//@MARKE_PRODUKT@ -- Schreibtisch auf einem 4K-Schirm (3840x2160)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
     resolution: 3840x2160
     cmdline: modfs osum gfx wm wig desk wmshell wmdauer usb hidgen nosched noproc nofs
+
 EOF
 
 # Und JETZT der Name hinein. `@MARKE_PRODUKT@` ist der einzige

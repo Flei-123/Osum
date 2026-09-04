@@ -54,7 +54,7 @@ import xhci
 import kutil
 
 export {
-    stage_graphics, stage_surface, stage_hold
+    stage_graphics, stage_surface, stage_hold, tafel_tick
 }
 
 const P_FB: u64 = 13
@@ -2765,7 +2765,7 @@ fn kopf_setzen(state: u64, p: u64, n: u64) {
 // und keine der sechs Stufen darunter bedeutet etwas. Genau diese
 // Unterscheidung -- "eingefroren" gegen "laeuft, bekommt aber nichts"
 // -- war bisher auf keinem Foto zu treffen.
-const TAFEL_ZEILEN: u64 = 8
+const TAFEL_ZEILEN: u64 = 9
 const TAFEL_SPALTEN: u64 = 30
 
 fn tz_text(state: u64, buf: u64, at: u64, t: u64) -> u64 {
@@ -2820,6 +2820,140 @@ fn tafel_zeile_sagen(b: u64, n: u64) {
     serial.nl()
 }
 
+// ====================================================================
+// RUNDE HAENGER: DIE TAFEL HAENGT JETZT AM ZEITGEBER, AN SONST NICHTS.
+//
+// Vorige Runde hat sie von der Shell geloest -- sie stand trotzdem
+// nicht auf Justins Schirm. Der Grund kann nur noch einer sein: die
+// SCHLEIFE, die sie malt, laeuft nicht. `wait_wm` ist Kernkode, aber
+// unter `nosched` (so bootet jeder Schreibtisch-Eintrag) gibt es KEINE
+// Verdraengung: bleibt irgendein Systemaufruf im Kern stehen, bekommt
+// diese Schleife nie wieder den Prozessor, und mit ihr steht alles --
+// Bild, Eingabe, Taskleiste, Tafel. Vier Meldungen, eine Ursache.
+//
+// Ein Messgeraet, das genau dann ausfaellt, wenn es gebraucht wird, ist
+// keins. Also wird die Tafel ab hier aus dem ZEITGEBERBEHANDLER
+// gemalt: `trap.fi` -> `gfx.tafel_tick` -> hierher. Das laeuft, solange
+// die Unterbrechungen an sind, voellig gleich, was Ring 3 oder die
+// Hauptschleife gerade tun.
+//
+// ZEILE 8 IST DIE ANTWORT AUF JUSTINS FRAGE. Sie zeigt drei Zaehler:
+//   IRQ   -- wie oft der Zeitgeber diese Funktion gerufen hat
+//   MAL   -- wie oft die Tafel gemalt wurde
+//   LOOP  -- wie oft die Schreibtischschleife `kopf_malen` gerufen hat
+// Bewegt sich IRQ und LOOP steht: die Maschine lebt, die Hauptschleife
+// haengt (Systemaufruf/Ring 3). Steht IRQ auch: die Unterbrechungen
+// sind aus. Steht beides und der Zeiger ist da: der Rechner ist tot.
+// Diese Unterscheidung war auf keinem Foto zu treffen.
+const TAFEL_SP: u64 = 40 // Zeichen je gemerkter Zeile
+static mut tafel_txt: [u8; 360] = [0 as u8; 360] // TAFEL_ZEILEN * TAFEL_SP
+static mut tafel_len: [u64; 9] = [0 as u64; 9]
+static mut tafel_fg: [u64; 9] = [0 as u64; 9]
+static mut tafel_hat: u64 = 0 // steht schon Inhalt bereit?
+static mut tafel_drin: u64 = 0 // Wiedereintrittssperre
+static mut tafel_irq: u64 = 0 // Rufe aus dem Zeitgeber
+static mut tafel_mal: u64 = 0 // Anstriche
+static mut tafel_loop: u64 = 0 // Rufe aus der Schreibtischschleife
+static mut tafel_irqm: u64 = 0 // letzte Marke, an der aus dem IRQ gemalt wurde
+
+// EINE ZEILE ABLEGEN. Gemalt wird sie erst in `tafel_streichen` -- und
+// zwar von wem auch immer als naechstes drankommt, Schleife oder
+// Zeitgeber.
+fn tafel_merken(zeile: u64, p: u64, n: u64, fg: u64) {
+    if zeile >= TAFEL_ZEILEN {
+        return
+    }
+    var m: u64 = n
+    if m > TAFEL_SP {
+        m = TAFEL_SP
+    }
+    let ziel: u64 = (&tafel_txt[0]) as u64 + zeile * TAFEL_SP
+    var i: u64 = 0
+    while i < m {
+        kstate.set8(ziel + i, kstate.get8(p + i) as u8)
+        i = i + 1
+    }
+    tafel_len[zeile as usize] = m
+    tafel_fg[zeile as usize] = fg
+    tafel_hat = 1
+}
+
+// DER EINZIGE ANSTREICHER. Grund, Zeilen, Takt-Zeile, Flush.
+fn tafel_streichen(state: u64) {
+    if !fb.ready(state) {
+        return
+    }
+    if tafel_drin != 0 {
+        return
+    }
+    tafel_drin = 1
+    tafel_mal = tafel_mal + 1
+    // Die Takt-Zeile wird JEDES MAL frisch gebaut -- sie ist der Puls,
+    // und ein Puls aus dem Zwischenspeicher waere keiner.
+    var tb: [u8; 64] = [0 as u8; 64]
+    let tp: u64 = (&tb[0]) as u64
+    var t8: [u8; 10] = "8 TAKT   \0"
+    var t_i: [u8; 5] = "IRQ \0"
+    var t_m: [u8; 6] = " MAL \0"
+    var t_l: [u8; 7] = " LOOP \0"
+    var tn: u64 = 0
+    tn = puls_text(state, tp, 0, (&t8[0]) as u64)
+    tn = puls_text(state, tp, tn, (&t_i[0]) as u64)
+    tn = puls_zahl(state, tp, tn, tafel_irq)
+    tn = puls_text(state, tp, tn, (&t_m[0]) as u64)
+    tn = puls_zahl(state, tp, tn, tafel_mal)
+    tn = puls_text(state, tp, tn, (&t_l[0]) as u64)
+    tn = puls_zahl(state, tp, tn, tafel_loop)
+    tafel_merken(8, tp, tn, wm.mess_ampel(state, tafel_loop))
+    tafel_zeile_sagen(tp, tn)
+
+    wm.mess_grund(state, TAFEL_ZEILEN, TAFEL_SPALTEN)
+    var z: u64 = 0
+    while z < TAFEL_ZEILEN {
+        let n: u64 = tafel_len[z as usize]
+        if n != 0 {
+            wm.messzeile(state, z, (&tafel_txt[0]) as u64 + z * TAFEL_SP,
+                n, tafel_fg[z as usize])
+        }
+        z = z + 1
+    }
+    // DER EIGENE FLUSH. Er haengt an keinem `compose`, an keinem
+    // Schmutz und an keinem Fenster -- das ist der ganze Sinn.
+    fb.flush(state)
+    tafel_drin = 0
+}
+
+// AUS DEM ZEITGEBERBEHANDLER. Laeuft mit abgeschalteten
+// Unterbrechungen, nimmt kein Schloss und ruft nichts, was schlafen
+// koennte. Zehnmal je Sekunde -- oefter waere auf einem ungepufferten
+// Firmware-Rahmenpuffer bei 3440x1440 sinnlos teuer.
+fn tafel_tick(state: u64) {
+    // NUR IM DAUERBETRIEB. Gemessen: ohne diese Bedingung malt der
+    // Zeitgeber die Tafel auch in den Laeufen von `tools/wm/run.sh`,
+    // und weil er das ZEHNMAL JE SEKUNDE und immer NACH `compose` tut,
+    // liegt sie dort auf dem Terminalfenster -- zwei Pruefungen fielen
+    // sofort ("die Kopfzeile des Terminalfensters steht im Bild": 950
+    // von 950 Tintenpunkten falsch).
+    //
+    // `wmdauer` steht auf JEDEM Schreibtisch-Eintrag des Sticks und auf
+    // keinem Laeufer. Das ist genau die Trennlinie: ein Messgeraet
+    // gehoert an das Brett, das gemessen wird, und nicht in eine
+    // Abnahme, die Bildpunkte vergleicht.
+    if !kstate.mode_on(state, kstate.M_WMDAUER) {
+        return
+    }
+    tafel_irq = tafel_irq + 1
+    if tafel_hat == 0 {
+        return
+    }
+    let jetzt: u64 = kstate.get(state, kstate.TICKS)
+    if jetzt < tafel_irqm + TAFEL_MARKEN {
+        return
+    }
+    tafel_irqm = jetzt
+    tafel_streichen(state)
+}
+
 fn kopf_malen(state: u64) {
     if !fb.ready(state) {
         return
@@ -2841,7 +2975,7 @@ fn kopf_malen(state: u64) {
         }
         tafel_runde = 0
     }
-    wm.mess_grund(state, TAFEL_ZEILEN, TAFEL_SPALTEN)
+    tafel_loop = tafel_loop + 1
     var buf: [u8; 64] = [0 as u8; 64]
     let b: u64 = (&buf[0]) as u64
     var n: u64 = 0
@@ -2860,7 +2994,7 @@ fn kopf_malen(state: u64) {
     var t_sh: [u8; 5] = " sh\0\0"
     n = tz_text(state, b, n, (&t_sh[0]) as u64)
     n = puls_zahl(state, b, n, tafel_sh)
-    wm.messzeile(state, 0, b, n, wm.mess_weiss(state))
+    tafel_merken(0, b, n, wm.mess_weiss(state))
     tafel_zeile_sagen(b, n)
 
     // ---- Zeile 1: Stufe 1, die HID-Berichte ----
@@ -2871,7 +3005,7 @@ fn kopf_malen(state: u64) {
     n = puls_zahl(state, b, n, ber)
     n = tz_text(state, b, n, (&t_w[0]) as u64)
     n = puls_zahl(state, b, n, usb.wahl(state))
-    wm.messzeile(state, 1, b, n, wm.mess_ampel(state, ber))
+    tafel_merken(1, b, n, wm.mess_ampel(state, ber))
     tafel_zeile_sagen(b, n)
 
     // ---- Zeile 2: Stufe 2, eingereiht ----
@@ -2885,7 +3019,7 @@ fn kopf_malen(state: u64) {
     n = puls_zahl(state, b, n, e_ta)
     n = tz_text(state, b, n, (&t_ma[0]) as u64)
     n = puls_zahl(state, b, n, e_ma)
-    wm.messzeile(state, 2, b, n, wm.mess_ampel(state, e_ta + e_ma))
+    tafel_merken(2, b, n, wm.mess_ampel(state, e_ta + e_ma))
     tafel_zeile_sagen(b, n)
 
     // ---- Zeile 3: Stufe 3, der Fensterserver hat abgeholt ----
@@ -2897,7 +3031,7 @@ fn kopf_malen(state: u64) {
     n = puls_zahl(state, b, n, s_ta)
     n = tz_text(state, b, n, (&t_ma[0]) as u64)
     n = puls_zahl(state, b, n, s_ma)
-    wm.messzeile(state, 3, b, n, wm.mess_ampel(state, s_ta + s_ma))
+    tafel_merken(3, b, n, wm.mess_ampel(state, s_ta + s_ma))
     tafel_zeile_sagen(b, n)
 
     // ---- Zeile 4: Stufe 4, in den Fensterring gelegt ----
@@ -2908,7 +3042,7 @@ fn kopf_malen(state: u64) {
     n = puls_zahl(state, b, n, rein)
     n = tz_text(state, b, n, (&t_v[0]) as u64)
     n = puls_zahl(state, b, n, wm.evdrops(state))
-    wm.messzeile(state, 4, b, n, wm.mess_ampel(state, rein))
+    tafel_merken(4, b, n, wm.mess_ampel(state, rein))
     tafel_zeile_sagen(b, n)
 
     // ---- Zeile 5: Stufe 5, ein Programm hat abgeholt ----
@@ -2916,7 +3050,7 @@ fn kopf_malen(state: u64) {
     let raus: u64 = wm.evpop(state)
     n = tz_text(state, b, 0, (&t5[0]) as u64)
     n = puls_zahl(state, b, n, raus)
-    wm.messzeile(state, 5, b, n, wm.mess_ampel(state, raus))
+    tafel_merken(5, b, n, wm.mess_ampel(state, raus))
     tafel_zeile_sagen(b, n)
 
     // ---- Zeile 6: der Zeiger ----
@@ -2928,7 +3062,7 @@ fn kopf_malen(state: u64) {
     n = puls_zahl(state, b, n, wm.curx(state))
     n = tz_text(state, b, n, (&t_y[0]) as u64)
     n = puls_zahl(state, b, n, wm.cury(state))
-    wm.messzeile(state, 6, b, n, wm.mess_ampel(state, s_ma))
+    tafel_merken(6, b, n, wm.mess_ampel(state, s_ma))
     tafel_zeile_sagen(b, n)
 
     // ---- Zeile 7: die TASKLEISTE -- wird sie ueberhaupt gemalt? ----
@@ -2951,7 +3085,7 @@ fn kopf_malen(state: u64) {
         // angemeldet. Das ist ein anderer Fehler als "gemalt, unsichtbar".
         var t_kein: [u8; 5] = "KEIN\0"
         n = tz_text(state, b, n, (&t_kein[0]) as u64)
-        wm.messzeile(state, 7, b, n, wm.mess_rot(state))
+        tafel_merken(7, b, n, wm.mess_rot(state))
     tafel_zeile_sagen(b, n)
     } else {
         let mal: u64 = wm.win_paints(state, tb)
@@ -2963,7 +3097,7 @@ fn kopf_malen(state: u64) {
         n = puls_zahl(state, b, n, mal)
         n = tz_text(state, b, n, (&t_fl[0]) as u64)
         n = puls_zahl(state, b, n, wm.win_flags(state, tb))
-        wm.messzeile(state, 7, b, n, wm.mess_ampel(state, mal))
+        tafel_merken(7, b, n, wm.mess_ampel(state, mal))
         tafel_zeile_sagen(b, n)
     }
     // ================================ UND JETZT AUF DEN SCHIRM DAMIT
@@ -2992,7 +3126,7 @@ fn kopf_malen(state: u64) {
     // Diese eine Zeile ist der Unterschied zwischen "in den Puffer
     // gemalt" und "auf dem Bildschirm". Sie flusht NUR die Zeilen der
     // Tafel (`fb.dirty` hat sie eben markiert), nicht das ganze Bild.
-    fb.flush(state)
+    tafel_streichen(state)
     tafel_seriell = 0
 }
 
