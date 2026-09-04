@@ -65,7 +65,10 @@ export {
     irq, on_code, translate, shifted, take, waiting,
     hot_take, hot_waiting, MAX_KEYS, HOT_SLOTS,
     code_of, layout, set_layout, switches, LAYOUTS, L_US, L_DE,
-    super_down, hotkey_seq, hotkey_key, hotkey_ns
+    super_down, hotkey_seq, hotkey_key, hotkey_ns,
+    // RUNDE BLECHEINGABE: die drei Feststelltasten und ihre Lampen.
+    locks, locks_dirty, locks_clean, locks_set,
+    LK_NUM, LK_CAPS, LK_SCROLL
 }
 
 // How many octets fit into the buffer in the data area.
@@ -120,7 +123,82 @@ fn irq(state: u64) {
 // `-device usb-kbd` und einmal mit PS/2, und die Ausgaben werden
 // Oktett fuer Oktett verglichen. Waeren es zwei Wege, gingen sie
 // irgendwann auseinander -- und der Vergleich saehe es.
+// ================================================ RUNDE BLECHEINGABE
+// ============ DIE DREI FESTSTELLTASTEN UND IHRE LAMPEN, AN EINER STELLE
+//
+// Justin: "die Num-Lock-Taste leuchtet -- und ich kann sie auch nicht
+// togglen." Das ist zwei Aussagen: die Lampe steht so, wie die FIRMWARE
+// sie gelassen hat, und niemand aendert sie. Der Grund stand im
+// Quelltext: `SET_REPORT` gab es in diesem Baum nicht (`grep SET_REPORT
+// kernel/` -- kein Treffer), es gab nur SET_PROTOCOL und SET_IDLE. Eine
+// Tastatur schaltet ihre Lampen NICHT selbst; sie wartet auf einen
+// Ausgabebericht des Wirts.
+//
+// DER ZUSTAND STEHT HIER UND NICHT IM USB-TREIBER, und das ist der
+// Punkt: `kbd.on_code` ist die EINE Stelle, durch die beide
+// Tastaturwege gehen -- PS/2 aus IRQ 1 und USB ueber `usb.press` (siehe
+// den Kommentar zu `on_code` weiter unten). Ein Zustand je Weg waeren
+// zwei Wahrheiten. `usb.fi` liest ihn hier ab und schickt ihn mit
+// `SET_REPORT` an das Geraet; einen Kreis im Modulgraphen gibt es
+// dabei nicht, denn `usb` bindet `kbd` ein und nicht umgekehrt.
+const LK_NUM: u64 = 1
+const LK_CAPS: u64 = 2
+const LK_SCROLL: u64 = 4
+
+static mut lock_bits: u64 = 0
+// 1 = seit der letzten Uebertragung hat sich etwas geaendert. Beim Start
+// eine 1, damit die Lampen EINMAL auf einen bekannten Stand gebracht
+// werden -- was die Firmware hinterlassen hat, weiss niemand.
+static mut lock_neu: u64 = 1
+
+fn locks(state: u64) -> u64 {
+    return lock_bits
+}
+
+fn locks_dirty() -> u64 {
+    return lock_neu
+}
+
+fn locks_clean() {
+    lock_neu = 0
+}
+
+// Von aussen setzen -- der Herzschlag dieser Runde legt darueber die
+// Rollen-Lampe im Sekundentakt um, ohne den Tastenzustand zu verlieren.
+fn locks_set(v: u64) {
+    lock_bits = v & 7
+    lock_neu = 1
+}
+
+fn lock_toggle(bit: u64) {
+    lock_bits = lock_bits ^ bit
+    lock_neu = 1
+}
+
 fn on_code(state: u64, code: u64) {
+    // DIE DREI FESTSTELLTASTEN, VOR ALLEM ANDEREN. Sie erzeugen kein
+    // Zeichen; sie legen einen Zustand um und lassen eine Lampe
+    // nachziehen. Nur das DRUECKEN zaehlt (Loslassen ist Code + 0x80),
+    // sonst schaltete jede Taste zweimal und die Lampe stuende still.
+    if code == 0x45 {
+        lock_toggle(LK_NUM)
+        kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
+        return
+    }
+    if code == 0x3A {
+        lock_toggle(LK_CAPS)
+        kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
+        return
+    }
+    if code == 0x46 {
+        lock_toggle(LK_SCROLL)
+        kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
+        return
+    }
+    if code == 0xC5 || code == 0xBA || code == 0xC6 {
+        kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
+        return
+    }
     if code == 0xE0 {
         kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 1)
         return

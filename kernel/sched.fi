@@ -32,9 +32,13 @@ import mem
 import atomic
 import cpu
 import arch.x86_64.fpu
+// RUNDE BLECHEINGABE: der Zyklenzaehler, um einen STEHENDEN Zeitgeber
+// zu erkennen. `apic.fi` bindet nur serial/kstate/pci ein -- kein Kreis.
+import arch.x86_64.apic
 
 export {
     init, create, start, schedule, on_tick, yield_now, sleep_ticks,
+    tote_schlaefe,
     exit_task, reap,
     kill_current, wake_pid, find_pid, current, tget, tset, task_at,
     stack_high, STACK_PAINT,
@@ -1290,9 +1294,67 @@ fn on_tick(state: u64) {
 
 // ---------------------------------------------------------- blocking
 
+// ================================================ RUNDE BLECHEINGABE
+// ============ EIN SCHLAEFER AN EINEM TOTEN ZEITGEBER IST EINE LEICHE.
+//
+// Geweckt wird ausschliesslich in `on_tick`, und `on_tick` kommt
+// ausschliesslich aus dem Zeitgeberbehandler. Schlaegt der nicht mehr,
+// dann schlafen `wait_wm` (die Schreibtischschleife) und die
+// Taskleiste (`ulib.sleep_ms(25)`) FUER IMMER: kein Bild, keine
+// Eingabe, keine Messtafel -- und die Uhr steht auf der Minute, in der
+// es passiert ist.
+//
+// Deshalb wird hier gemessen statt vertraut. Bewegt sich die
+// Markenzahl in einem am Zyklenzaehler abgelesenen Fenster nicht, wird
+// NICHT geschlafen: die Aufgabe gibt den Prozessor einmal ab und
+// kehrt zurueck. Das ist langsamer und dreht leer -- aber ein
+// Schreibtisch, der leer dreht, ist ein Schreibtisch, und ein
+// Schreibtisch, der schlaeft, ist ein Standbild.
+//
+// Die Zahl unten ist grosszuegig: bei 100 Hz kommt alle 10 ms eine
+// Marke; 300 ms ohne eine einzige heisst, dass etwas kaputt ist und
+// nicht, dass die Maschine beschaeftigt war.
+static mut tote_marke: u64 = 0
+static mut tote_zeit: u64 = 0
+static mut tote_zahl: u64 = 0
+
+fn timer_tot(state: u64) -> bool {
+    let hz: u64 = apic.tsc_hz(state)
+    if hz == 0 {
+        return false
+    }
+    let jetzt: u64 = kstate.get(state, kstate.TICKS)
+    let t: u64 = apic.tsc()
+    if jetzt != tote_marke {
+        tote_marke = jetzt
+        tote_zeit = t
+        return false
+    }
+    if tote_zeit == 0 {
+        tote_zeit = t
+        return false
+    }
+    if t - tote_zeit > hz / 3 {
+        tote_zahl = tote_zahl + 1
+        return true
+    }
+    return false
+}
+
+// Wie oft ein Schlaf abgelehnt wurde, weil keine Marke mehr kam. Steht
+// auf der Messtafel: ist die Zahl groesser als null, war der Zeitgeber
+// wirklich stehen -- gemessen, nicht vermutet.
+fn tote_schlaefe() -> u64 {
+    return tote_zahl
+}
+
 // `ticks` timer ticks, 10 ms each at 100 Hz. Zero is a yield.
 fn sleep_ticks(state: u64, ticks: u64) {
     if ticks == 0 {
+        yield_now(state)
+        return
+    }
+    if timer_tot(state) {
         yield_now(state)
         return
     }

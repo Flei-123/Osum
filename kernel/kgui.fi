@@ -54,7 +54,7 @@ import xhci
 import kutil
 
 export {
-    stage_graphics, stage_surface, stage_hold, tafel_tick
+    stage_graphics, stage_surface, stage_hold, tafel_tick, herz_tick
 }
 
 const P_FB: u64 = 13
@@ -1708,6 +1708,21 @@ fn surface(state: u64) {
     // Schoenheit: `u_wclick` wartet in einer Schleife auf Ereignisse und
     // teilt sich einen Prozessor mit der Anwendung dieser Runde, und ihr
     // Fenster liegt genau dort, wo der Dateimanager steht.
+    // ============ RUNDE BLECHEINGABE: WAS DER KERN AN USB SIEHT,
+    // ============ IN DAS TERMINALFENSTER.
+    //
+    // Justins erste Forderung, woertlich: "Sag zuerst, WAS DER KERN
+    // UEBERHAUPT SIEHT. Auf den SCHIRM (Terminalfenster oder Tafel,
+    // nicht seriell)."
+    //
+    // Das Terminalfenster ist dafuer die RICHTIGE Flaeche, und das ist
+    // nicht geraten: auf seinem Foto vom 04.09., 14:51 steht es oben
+    // links mit dem vollen Protokoll -- es ist die einzige Flaeche
+    // dieses Systems, von der BEWIESEN ist, dass sie bei ihm ankommt.
+    // Die Messtafel kam auf demselben Foto nicht, die serielle Leitung
+    // hat er gar nicht (Zeile 9 der Tafel misst das).
+    usb_bericht(state, tw)
+
     // ============ RUNDE STANDBILD: DIE TAFEL, EINMAL, HIER.
     //
     // Das ist die letzte Zeile vor dem ersten Ring-3-Programm. Was
@@ -2633,6 +2648,12 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         // steht sie nicht, ist er der Weg. Der Unterschied ist an
         // `irq=` und `ber=` im Puls abzulesen.
         usb.poll(state)
+        // RUNDE BLECHEINGABE: HIER wird aufgezaehlt und nicht im
+        // Zeitgeberbehandler. `attach` wartet in `port_reset` bis zu
+        // einer halben Sekunde -- das gehoert in Aufgabenkontext, wo es
+        // dauern darf, und nicht in eine Unterbrechung mit
+        // abgeschalteten Unterbrechungen.
+        usb.hotplug_work(state)
         wm.poll(state)
         wm.compose(state)
         // RUNDE FASSUNG: UNMITTELBAR NACH DEM ZUSAMMENSETZEN, JEDE
@@ -2784,7 +2805,7 @@ fn kopf_setzen(state: u64, p: u64, n: u64) {
 // und keine der sechs Stufen darunter bedeutet etwas. Genau diese
 // Unterscheidung -- "eingefroren" gegen "laeuft, bekommt aber nichts"
 // -- war bisher auf keinem Foto zu treffen.
-const TAFEL_ZEILEN: u64 = 10
+const TAFEL_ZEILEN: u64 = 12
 const TAFEL_SPALTEN: u64 = 30
 
 fn tz_text(state: u64, buf: u64, at: u64, t: u64) -> u64 {
@@ -2866,9 +2887,9 @@ fn tafel_zeile_sagen(b: u64, n: u64) {
 // sind aus. Steht beides und der Zeiger ist da: der Rechner ist tot.
 // Diese Unterscheidung war auf keinem Foto zu treffen.
 const TAFEL_SP: u64 = 40 // Zeichen je gemerkter Zeile
-static mut tafel_txt: [u8; 400] = [0 as u8; 400] // TAFEL_ZEILEN * TAFEL_SP
-static mut tafel_len: [u64; 10] = [0 as u64; 10]
-static mut tafel_fg: [u64; 10] = [0 as u64; 10]
+static mut tafel_txt: [u8; 480] = [0 as u8; 480] // TAFEL_ZEILEN * TAFEL_SP
+static mut tafel_len: [u64; 12] = [0 as u64; 12]
+static mut tafel_fg: [u64; 12] = [0 as u64; 12]
 static mut tafel_hat: u64 = 0 // steht schon Inhalt bereit?
 static mut tafel_drin: u64 = 0 // Wiedereintrittssperre
 static mut tafel_irq: u64 = 0 // Rufe aus dem Zeitgeber
@@ -2982,6 +3003,51 @@ fn tafel_streichen(state: u64) {
     tafel_merken(9, tp, tn, kfarbe)
     tafel_zeile_sagen(tp, tn)
 
+    // ---- Zeile 10: DER HERZSCHLAG UND DER ZEITGEBER ----
+    //
+    // `HZ` ist die Zahl der Rufe aus dem Zeitgeberbehandler, seit der
+    // Kern laeuft. Steht sie, steht der Zeitgeber. `TOT` zaehlt, wie oft
+    // eine Aufgabe NICHT schlafen gelegt wurde, weil seit 300 ms
+    // (am Zyklenzaehler gemessen) keine Marke mehr kam -- eine Zahl
+    // groesser null ist der Beweis, dass der Zeitgeber wirklich stand.
+    var t10: [u8; 10] = "10 HERZ  \0"
+    var h_h: [u8; 4] = "HZ \0"
+    var h_t: [u8; 6] = " TOT \0"
+    var h_l: [u8; 6] = " LED \0"
+    var h_b: [u8; 7] = " HELL \0"
+    tn = puls_text(state, tp, 0, (&t10[0]) as u64)
+    tn = puls_text(state, tp, tn, (&h_h[0]) as u64)
+    tn = puls_zahl(state, tp, tn, herz_zahl())
+    tn = puls_text(state, tp, tn, (&h_t[0]) as u64)
+    tn = puls_zahl(state, tp, tn, sched.tote_schlaefe())
+    tn = puls_text(state, tp, tn, (&h_l[0]) as u64)
+    tn = puls_zahl(state, tp, tn, usb.leds_sent(state))
+    tn = puls_text(state, tp, tn, (&h_b[0]) as u64)
+    tn = puls_zahl(state, tp, tn, herz_hellzahl())
+    tafel_merken(10, tp, tn, wm.mess_ampel(state, herz_zahl()))
+    tafel_zeile_sagen(tp, tn)
+
+    // ---- Zeile 11: WAS AN USB HAENGT ----
+    var t11: [u8; 10] = "11 USB   \0"
+    var u_d: [u8; 5] = "DEV \0"
+    var u_f: [u8; 7] = " FUND \0"
+    var u_h: [u8; 6] = " HUB \0"
+    var u_k: [u8; 6] = " KBD \0"
+    var u_x: [u8; 7] = " FAIL \0"
+    tn = puls_text(state, tp, 0, (&t11[0]) as u64)
+    tn = puls_text(state, tp, tn, (&u_d[0]) as u64)
+    tn = puls_zahl(state, tp, tn, usb.count(state))
+    tn = puls_text(state, tp, tn, (&u_f[0]) as u64)
+    tn = puls_zahl(state, tp, tn, usb.fund_count(state))
+    tn = puls_text(state, tp, tn, (&u_h[0]) as u64)
+    tn = puls_zahl(state, tp, tn, usb.hubs(state))
+    tn = puls_text(state, tp, tn, (&u_k[0]) as u64)
+    tn = puls_zahl(state, tp, tn, usb.hid_keys(state))
+    tn = puls_text(state, tp, tn, (&u_x[0]) as u64)
+    tn = puls_zahl(state, tp, tn, usb.fails(state))
+    tafel_merken(11, tp, tn, wm.mess_ampel(state, usb.fund_count(state)))
+    tafel_zeile_sagen(tp, tn)
+
     wm.mess_grund(state, TAFEL_ZEILEN, TAFEL_SPALTEN)
     var z: u64 = 0
     while z < TAFEL_ZEILEN {
@@ -3029,6 +3095,63 @@ fn tafel_streichen(state: u64) {
 // Die erste Sperre ist ebenfalls weg: `wmdauer` war eine Annahme ueber
 // Umgebungen (`tools/hidpunkte/run.sh` setzt es auch). Jetzt entscheidet
 // ein eigenes Wort auf der Kommandozeile, `tafel`.
+// ================================================ RUNDE BLECHEINGABE
+// ============ DER HERZSCHLAG, AUS DEM ZEITGEBER, VOR ALLEM ANDEREN
+//
+// Justins Bild steht seit dem ersten Vollbild still: die Uhr der
+// Taskleiste zeigte um 14:51 und um 14:54 dieselbe Minute. Zwei
+// Erklaerungen bleiben, und sie sind nur mit etwas zu trennen, das sich
+// SICHTBAR bewegt, ohne Fensterserver, ohne Schreibtischschleife, ohne
+// serielle Leitung (er hat keinen UART).
+//
+// Alle 25 Marken -- viermal je Sekunde -- werden zwei Felder am rechten
+// Bildrand umgelegt: links ueber den NORMALEN Weg (Zweitpuffer,
+// Schmutz, flush), rechts DIREKT in das Fenster der Karte. Und einmal
+// je Sekunde die Rollen-Lampe der Tastatur.
+//
+// Die Tafel steht danach: sie ist teuer (ein schwarzer Balken ueber
+// 3440 Bildpunkte), der Herzschlag ist billig und muss auch dann noch
+// schlagen, wenn die Tafel es nicht schafft.
+static mut herz_n: u64 = 0
+static mut herz_marke: u64 = 0
+static mut herz_an: u64 = 0
+static mut herz_sek: u64 = 0
+static mut herz_led: u64 = 0
+// Wie oft HELL gemalt wurde -- damit sich das Blinken MESSEN laesst und
+// nicht nur fotografieren.
+static mut herz_hell: u64 = 0
+
+fn herz_zahl() -> u64 {
+    return herz_n
+}
+
+fn herz_hellzahl() -> u64 {
+    return herz_hell
+}
+
+fn herz_tick(state: u64) {
+    if !kstate.mode_on(state, kstate.M_HERZ) {
+        return
+    }
+    herz_n = herz_n + 1
+    let jetzt: u64 = kstate.get(state, kstate.TICKS)
+    if jetzt < herz_marke + 25 {
+        return
+    }
+    herz_marke = jetzt
+    herz_an = 1 - herz_an
+    herz_hell = herz_hell + herz_an
+    fb.herz(state, 0, herz_an)
+    fb.herz(state, 1, herz_an)
+    // Die Lampe halb so schnell -- eine Tastatur mag keinen
+    // Steuertransfer viermal je Sekunde, und zweimal reicht dem Auge.
+    herz_sek = herz_sek + 1
+    if (herz_sek & 1) == 0 {
+        herz_led = 1 - herz_led
+        usb.herz_leds(state, herz_led)
+    }
+}
+
 fn tafel_tick(state: u64) {
     if !kstate.mode_on(state, kstate.M_TAFEL) {
         return
@@ -3397,6 +3520,25 @@ fn puls_text(state: u64, buf: u64, at: u64, t: u64) -> u64 {
 // verschiedene Aussagen, und "0", "32", "255" liest niemand als
 // Registerzustand. 256 heisst "nicht geprueft" und wird als "--"
 // geschrieben.
+// RUNDE BLECHEINGABE: HEXADEZIMAL MIT ANGEGEBENER BREITE.
+//
+// `puls_hex` kann genau zwei Ziffern und schreibt fuer alles darueber
+// "--". Fuer ein Klassentripel reicht das; fuer 0x1B36 (Hersteller),
+// 0x000D (Erzeugnis) und ein PORTSC-Register (32 Bit) nicht -- und
+// genau die drei sind die Zahlen, an denen sich auf Justins Brett
+// entscheidet, WAS dort haengt.
+fn puls_hexn(state: u64, buf: u64, at: u64, v: u64, stellen: u64) -> u64 {
+    var ziffern: [u8; 17] = "0123456789ABCDEF\0"
+    var i: u64 = stellen
+    var n: u64 = at
+    while i > 0 {
+        i = i - 1
+        kstate.set8(buf + n, ziffern[((v >> (i * 4)) & 15) as usize])
+        n = n + 1
+    }
+    return n
+}
+
 fn puls_hex(state: u64, buf: u64, at: u64, v: u64) -> u64 {
     var ziffern: [u8; 17] = "0123456789ABCDEF\0"
     var n: u64 = at
@@ -4242,3 +4384,170 @@ fn tile_dirty(state: u64) -> u64 {
     return (zu << 32) | (auf & 0xFFFFFFFF)
 }
 
+
+// ####################################################################
+// ============ RUNDE BLECHEINGABE: DER USB-BERICHT AUF DEM SCHIRM
+// ####################################################################
+//
+// Vier Blöcke, und jeder beantwortet eine von Justins Fragen:
+//
+//   USB   -- wie viele Regler, Anschluesse, Geraete, wie viele Hubs,
+//            wie viele Fehlschlaege. Steht hier ueberall null, war es
+//            die Aufzaehlung und nicht die Tastenverarbeitung.
+//   P<n>  -- JE WURZELANSCHLUSS: steckt etwas (ccs), ist er
+//            freigeschaltet (en), welche Geschwindigkeit, und das rohe
+//            PORTSC-Register. Ein Anschluss mit ccs=1 en=0 ist ein
+//            Geraet, das der Regler sieht und nicht hochbekommt.
+//   D<n>  -- JE GEFUNDENEM GERAET: Anschluss (und Hubanschluss
+//            dahinter), Geschwindigkeit, Hersteller:Erzeugnis,
+//            Geraeteklasse, Klasse der GEWAEHLTEN Schnittstelle, wie
+//            viele Schnittstellen es hat, welche Stufen geglueckt sind
+//            und welcher Treiber es genommen hat.
+//   f=     -- die Stufen: 1 Adresse, 2 Deskriptor, 4 SET_CONFIGURATION
+//            quittiert, 8 ein Treiber hat es genommen. f=7 ohne 8
+//            heisst: der Kern hat mit dem Geraet geredet und konnte
+//            nichts damit anfangen. STEHT DORT KLASSE 09, IST ES EIN
+//            HUB.
+//
+// Jede Zeile geht in das Fenster UND auf die Leitung -- dieselben
+// Oktette, damit ein Foto und ein Protokoll dasselbe sagen.
+fn ub_zeile(state: u64, tw: u64, p: u64, n: u64) {
+    kstate.set8(p + n, 10 as u8)
+    wm.term_write(state, tw, p, n + 1)
+    var i: u64 = 0
+    while i < n {
+        serial.put(kstate.get8(p + i) as u8)
+        i = i + 1
+    }
+    serial.nl()
+}
+
+fn ub_sp(state: u64, b: u64, n: u64) -> u64 {
+    var l: [u8; 2] = " \0"
+    return puls_text(state, b, n, (&l[0]) as u64)
+}
+
+// Klasse:Unterklasse:Protokoll, immer sechs Zeichen -- so stehen die
+// Zeilen auf einem Foto untereinander und lassen sich vergleichen.
+fn ub_cls(state: u64, b: u64, n: u64, c: u64, u: u64, pr: u64) -> u64 {
+    var d: [u8; 2] = ":\0"
+    var m: u64 = puls_hexn(state, b, n, c, 2)
+    m = puls_text(state, b, m, (&d[0]) as u64)
+    m = puls_hexn(state, b, m, u, 2)
+    m = puls_text(state, b, m, (&d[0]) as u64)
+    return puls_hexn(state, b, m, pr, 2)
+}
+
+fn usb_bericht(state: u64, tw: u64) {
+    // NULL IST EIN GUELTIGES FENSTER. `wm: term win=0` steht in jedem
+    // Protokoll dieses Baums -- das Terminal ist das erste Fenster, das
+    // der Kern anlegt. Eine Pruefung auf `== 0` haette den ganzen
+    // Bericht verschluckt, und genau das tat sie im ersten Lauf.
+    if tw >= wm.MAX_WIN {
+        return
+    }
+    var b: [u8; 128] = [0 as u8; 128]
+    let p: u64 = (&b[0]) as u64
+
+    var t_h: [u8; 6] = "USB  \0"
+    var t_hc: [u8; 5] = "hc=\0\0"
+    var t_po: [u8; 8] = " ports=\0"
+    var t_de: [u8; 6] = " dev=\0"
+    var t_fu: [u8; 7] = " fund=\0"
+    var t_hb: [u8; 7] = " hubs=\0"
+    var t_hp: [u8; 8] = " hbprt=\0"
+    var t_fa: [u8; 8] = " fails=\0"
+    var n: u64 = 0
+    n = puls_text(state, p, 0, (&t_h[0]) as u64)
+    n = puls_text(state, p, n, (&t_hc[0]) as u64)
+    n = puls_zahl(state, p, n, xhci.count_hc(state))
+    n = puls_text(state, p, n, (&t_po[0]) as u64)
+    n = puls_zahl(state, p, n, xhci.ports(state))
+    n = puls_text(state, p, n, (&t_de[0]) as u64)
+    n = puls_zahl(state, p, n, usb.count(state))
+    n = puls_text(state, p, n, (&t_fu[0]) as u64)
+    n = puls_zahl(state, p, n, usb.fund_count(state))
+    n = puls_text(state, p, n, (&t_hb[0]) as u64)
+    n = puls_zahl(state, p, n, usb.hubs(state))
+    n = puls_text(state, p, n, (&t_hp[0]) as u64)
+    n = puls_zahl(state, p, n, usb.hubports(state))
+    n = puls_text(state, p, n, (&t_fa[0]) as u64)
+    n = puls_zahl(state, p, n, usb.fails(state))
+    ub_zeile(state, tw, p, n)
+
+    // ---- je Wurzelanschluss ----
+    var t_p: [u8; 4] = " P\0\0"
+    var t_c: [u8; 6] = " ccs=\0"
+    var t_e: [u8; 5] = " en=\0"
+    var t_s: [u8; 5] = " sp=\0"
+    var t_r: [u8; 7] = " psc=\0\0"
+    let np: u64 = xhci.ports(state)
+    var i: u64 = 1
+    while i <= np && i < 32 {
+        n = puls_text(state, p, 0, (&t_p[0]) as u64)
+        n = puls_zahl(state, p, n, i)
+        n = puls_text(state, p, n, (&t_c[0]) as u64)
+        n = puls_zahl(state, p, n, ja1(xhci.port_connected(state, i)))
+        n = puls_text(state, p, n, (&t_e[0]) as u64)
+        n = puls_zahl(state, p, n, ja1(xhci.port_enabled(state, i)))
+        n = puls_text(state, p, n, (&t_s[0]) as u64)
+        n = puls_zahl(state, p, n, xhci.port_speed(state, i))
+        n = puls_text(state, p, n, (&t_r[0]) as u64)
+        n = puls_hexn(state, p, n, xhci.portsc(state, i), 8)
+        ub_zeile(state, tw, p, n)
+        i = i + 1
+    }
+
+    // ---- je gefundenem Geraet ----
+    var t_d: [u8; 4] = " D\0\0"
+    var t_at: [u8; 3] = " @\0"
+    var t_dot: [u8; 2] = ".\0"
+    var t_id: [u8; 5] = " id=\0"
+    var t_dc: [u8; 6] = " dev=\0"
+    var t_if: [u8; 5] = " if=\0"
+    var t_nn: [u8; 4] = " n=\0"
+    var t_ff: [u8; 4] = " f=\0"
+    var t_dr: [u8; 6] = " drv=\0"
+    var t_leer: [u8; 24] = " KEIN EINZIGES GERAET!\0\0"
+    let nf: u64 = usb.fund_count(state)
+    if nf == 0 {
+        n = puls_text(state, p, 0, (&t_leer[0]) as u64)
+        ub_zeile(state, tw, p, n)
+    }
+    i = 0
+    while i < nf {
+        n = puls_text(state, p, 0, (&t_d[0]) as u64)
+        n = puls_zahl(state, p, n, i)
+        n = puls_text(state, p, n, (&t_at[0]) as u64)
+        n = puls_zahl(state, p, n, usb.fund_port(state, i))
+        n = puls_text(state, p, n, (&t_dot[0]) as u64)
+        n = puls_zahl(state, p, n, usb.fund_hub(state, i))
+        n = puls_text(state, p, n, (&t_s[0]) as u64)
+        n = puls_zahl(state, p, n, usb.fund_speed(state, i))
+        n = puls_text(state, p, n, (&t_id[0]) as u64)
+        n = puls_hexn(state, p, n, usb.fund_vid(state, i), 4)
+        n = puls_text(state, p, n, (&t_dot[0]) as u64)
+        n = puls_hexn(state, p, n, usb.fund_pid(state, i), 4)
+        n = puls_text(state, p, n, (&t_dc[0]) as u64)
+        n = ub_cls(state, p, n, usb.fund_dcls(state, i),
+            usb.fund_dsub(state, i), usb.fund_dpro(state, i))
+        n = puls_text(state, p, n, (&t_if[0]) as u64)
+        n = ub_cls(state, p, n, usb.fund_icls(state, i),
+            usb.fund_isub(state, i), usb.fund_ipro(state, i))
+        n = puls_text(state, p, n, (&t_nn[0]) as u64)
+        n = puls_zahl(state, p, n, usb.fund_ifaces(state, i))
+        n = puls_text(state, p, n, (&t_ff[0]) as u64)
+        n = puls_zahl(state, p, n, usb.fund_flags(state, i))
+        n = puls_text(state, p, n, (&t_dr[0]) as u64)
+        n = puls_zahl(state, p, n, usb.fund_driver(state, i))
+        ub_zeile(state, tw, p, n)
+        i = i + 1
+    }
+}
+
+fn ja1(b: bool) -> u64 {
+    if b {
+        return 1
+    }
+    return 0
+}

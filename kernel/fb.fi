@@ -96,7 +96,9 @@ export {
     // der Schrift.
     need_bytes, fscale, uiscale, stripe, res_w, res_h, scale_for,
     set_uiscale,
-    selftest4, selftest4_max, M_RES
+    selftest4, selftest4_max, M_RES,
+    // RUNDE BLECHEINGABE: der Herzschlag und der grobe Hammer.
+    herz, herz_x, herz_y, HERZ_W, HERZ_H, flush_rows
 }
 
 // ------------------------------------------------- der Datenbereich
@@ -1615,6 +1617,21 @@ fn flush_stripe(state: u64, lo: u64, hi: u64) {
     // also nie. Es kostet nichts Messbares und steht deshalb
     // bedingungslos hier, auch fuer WB und UC.
     arch.barrier_write()
+    nachspuelen(state)
+}
+
+// ================= RUNDE BLECHEINGABE: DER SCHALTER `fbflush`.
+//
+// Justins zweiter, von `fbuc` UNABHAENGIGER Beweis derselben Ursache.
+// `sfence` ordnet nur -- es raeumt keine Zeile aus dem Zwischenspeicher.
+// Steht der Rahmenpuffer WRITE-BACK, liegt eine kleine Aenderung danach
+// weiter im L3 und geht erst bei einer Verdraengung ueber PCIe.
+// `wbinvd` erzwingt genau das. Es kostet Millisekunden und ist deshalb
+// AUS, solange niemand `fbflush` sagt.
+fn nachspuelen(state: u64) {
+    if kstate.mode_on(state, kstate.M_FBFLUSH) {
+        arch.cache_writeback()
+    }
 }
 
 fn flush(state: u64) {
@@ -3483,4 +3500,173 @@ fn selftest4(state: u64) -> u64 {
 
 fn selftest4_max() -> u64 {
     return 12
+}
+
+
+// ================================================ RUNDE BLECHEINGABE
+// ============ DER HERZSCHLAG: ZWEI FELDER, ZWEI VOELLIG GETRENNTE WEGE
+//
+// Justin steht vor einem Rechner, dessen Bild seit dem ersten Vollbild
+// steht: die Uhr der Taskleiste zeigte um 14:51 und um 14:54 dieselbe
+// Minute. Damit sind genau zwei Erklaerungen uebrig, und sie sind mit
+// blossem Auge zu trennen -- wenn es etwas gibt, das sich bewegt:
+//
+//   (A) DER ZEITGEBER STEHT (oder der Kern haengt im Behandler). Dann
+//       weckt niemand die Schlaefer, die Taskleiste und `wait_wm`
+//       schlafen fuer immer, und nichts wird mehr gemalt.
+//   (B) DER ZEITGEBER LAEUFT, es wird gemalt -- aber die Schreibzugriffe
+//       erreichen den Rahmenpuffer der Karte nicht (Zwischenspeicher).
+//
+// DIE ZWEI FELDER STEHEN AM RECHTEN RAND, SENKRECHT MITTIG, und beide
+// werden AUS DEM ZEITGEBERBEHANDLER gemalt -- an Fensterserver,
+// Schreibtischschleife und Ring 3 vorbei:
+//
+//   FELD LINKS  (A): ueber den NORMALEN Weg -- Zweitpuffer, Schmutz,
+//                    `flush`. Genau der Weg, den Taskleiste und
+//                    Messtafel nehmen.
+//   FELD RECHTS (B): DIREKT in das Fenster der Karte (`S_ADDR`), am
+//                    Zweitpuffer und am `flush` vorbei, mit `sfence`
+//                    und -- mit `fbflush` -- `wbinvd` dahinter.
+//
+// WIE JUSTIN DAS LIEST:
+//   beide blinken      -> Zeitgeber laeuft, Bildweg in Ordnung. Dann
+//                         liegt der Fehler ueber uns (Schleife, Ring 3).
+//   nur rechts blinkt  -> Zeitgeber laeuft, aber der NORMALE Bildweg
+//                         kommt nicht an: (B), Zwischenspeicher.
+//   keines blinkt      -> (A): der Zeitgeber schlaegt nicht mehr, oder
+//                         der Kern haengt in seinem Behandler.
+//   nur links blinkt   -> die direkte Abbildung stimmt nicht (Streifen).
+//
+// Das ist der einzige Bildkanal, der weder Fensterserver noch
+// Schreibtischschleife noch serielle Leitung braucht.
+
+const HERZ_W: u64 = 56
+const HERZ_H: u64 = 56
+
+fn herz_x(state: u64, feld: u64) -> u64 {
+    let w: u64 = kstate.get(state, FB_OFF + S_WIDTH)
+    if w < 320 {
+        return 0
+    }
+    if feld == 0 {
+        return w - 136
+    }
+    return w - 68
+}
+
+fn herz_y(state: u64) -> u64 {
+    let h: u64 = kstate.get(state, FB_OFF + S_HEIGHT)
+    if h < 2 * HERZ_H {
+        return 0
+    }
+    return h / 2 - HERZ_H / 2
+}
+
+// EIN FLUSH FUER GENAU DIESE ZEILEN, ohne den Schmutzbereich des
+// Fensterservers anzufassen. `flush` setzt DIRTY_LO/HI auf null; aus dem
+// Zeitgeber gerufen wuerde es dem gerade zusammensetzenden Fensterserver
+// seinen Schmutz unter den Fuessen wegziehen und ein halb gemaltes Bild
+// stehen lassen. Deshalb ein eigener Weg mit ausdruecklichen Grenzen.
+fn flush_rows(state: u64, lo: u64, hi: u64) {
+    let b: u64 = kstate.get(state, FB_OFF + S_BACK)
+    if b == 0 {
+        return
+    }
+    if transformed(state) {
+        present(state)
+        return
+    }
+    var o: u64 = lo
+    var u: u64 = hi
+    let h: u64 = kstate.get(state, FB_OFF + S_HEIGHT)
+    if u > h {
+        u = h
+    }
+    if u <= o {
+        return
+    }
+    if kstate.get(state, FB_OFF + S_STRIPE) != 0 {
+        flush_stripe(state, o, u)
+        return
+    }
+    let pt: u64 = kstate.get(state, FB_OFF + S_PITCH)
+    let von: u64 = o *% pt
+    let n: u64 = (u - o) *% pt
+    let dst: u64 = kstate.get(state, FB_OFF + S_ADDR) +% von
+    let src: u64 = b +% von
+    copy_words(dst, src, n / 8)
+    arch.barrier_write()
+    nachspuelen(state)
+}
+
+// `feld` 0 = der normale Weg, 1 = der direkte. `an` 1 = hell, 0 = dunkel.
+fn herz(state: u64, feld: u64, an: u64) {
+    if kstate.get(state, FB_OFF + S_READY) == 0 {
+        return
+    }
+    let x0: u64 = herz_x(state, feld)
+    let y0: u64 = herz_y(state)
+    if x0 == 0 || y0 == 0 {
+        return
+    }
+    // Zwei verschiedene Farben, damit auf einem Foto ohne Zweifel
+    // feststeht, welches Feld gerade leuchtet.
+    var hell: u64 = rgb(state, 0x00, 0xFF, 0x66) // links: gruen
+    if feld == 1 {
+        hell = rgb(state, 0xFF, 0xE0, 0x00) // rechts: gelb
+    }
+    var farbe: u64 = rgb(state, 0x10, 0x10, 0x10)
+    if an != 0 {
+        farbe = hell
+    }
+    if feld == 0 {
+        // DER NORMALE WEG. Genau der, den die Taskleiste nimmt.
+        fill(state, x0, y0, HERZ_W, HERZ_H, farbe)
+        flush_rows(state, y0, y0 + HERZ_H)
+        return
+    }
+    // DER DIREKTE WEG. In das Fenster der Karte, am Zweitpuffer vorbei.
+    // Im Streifenbetrieb ist `S_ADDR` nur EINE Scheibe des Puffers --
+    // dort waere eine feste Adresse schlicht die falsche Stelle, also
+    // bleibt es in diesem Fall beim normalen Weg (und Justin sieht
+    // zwei gleich blinkende Felder, was ebenfalls eine Aussage ist).
+    if kstate.get(state, FB_OFF + S_STRIPE) != 0 {
+        fill(state, x0, y0, HERZ_W, HERZ_H, farbe)
+        flush_rows(state, y0, y0 + HERZ_H)
+        return
+    }
+    // ============ GEMESSEN, UND DESHALB STEHT DIESE ZEILE HIER.
+    //
+    // Im ersten Lauf blinkte das linke Feld sauber und das rechte zeigte
+    // fast immer den SCHREIBTISCHGRUND (8,14,32 statt 255,224,0) --
+    // sechzehn Bildschirmfotos im Abstand von 0,4 s haben das gezeigt.
+    // Der Grund: das rechte Feld schreibt NUR auf die Karte, im
+    // Zweitpuffer steht an seiner Stelle weiter der Grund. Das naechste
+    // `flush` -- egal von wem -- kopiert genau diesen Grund darueber.
+    //
+    // Also steht der Block JETZT AUCH IM ZWEITPUFFER. Kein `flush`
+    // dazu: das waere der normale Weg, und den misst das linke Feld.
+    // Damit gilt:
+    //   normaler Weg heil  -> beide Felder blinken
+    //   normaler Weg tot   -> nur das rechte blinkt (der direkte Weg)
+    //   Zeitgeber tot      -> keines blinkt
+    // ...und der Grund kann das rechte Feld nicht mehr zudecken.
+    fill(state, x0, y0, HERZ_W, HERZ_H, farbe)
+    let basis: u64 = kstate.get(state, FB_OFF + S_ADDR)
+    if basis == 0 {
+        return
+    }
+    let pt: u64 = kstate.get(state, FB_OFF + S_PITCH)
+    var r: u64 = 0
+    while r < HERZ_H {
+        let zeile: u64 = basis +% (y0 + r) *% pt +% x0 *% 4
+        var c: u64 = 0
+        while c < HERZ_W {
+            __mmio_write32((zeile +% c * 4) as *mut u32, farbe as u32)
+            c = c + 1
+        }
+        r = r + 1
+    }
+    arch.barrier_write()
+    nachspuelen(state)
 }
