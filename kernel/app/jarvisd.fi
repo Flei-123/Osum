@@ -220,6 +220,14 @@ const I_SYSCALLS: i64 = 10
 const I_VERSION: i64 = 11
 const I_YEAR: i64 = 12
 
+// ==================================================== RUNDE LEISTE
+// DER NETZZUSTAND, DEN DIE STARTDIAGNOSE BRAUCHT.
+const S_NETGET: i64 = 1300
+const NG_READY: i64 = 0
+const NG_IP: i64 = 1
+const NG_MASK: i64 = 2
+const NG_GW: i64 = 3
+
 // Bildschirm.
 const WS_W: i64 = 0
 const WS_H: i64 = 1
@@ -2122,6 +2130,236 @@ fn schirm() -> i32 {
     return 0
 }
 
+// ====================================================================
+// RUNDE LEISTE: DAS BILDSCHIRMFOTO, DAS OHNE NETZ AUSKOMMT
+// ====================================================================
+//
+//     jarvisd -f /var/jarvis/schirm.ppm
+//
+// WARUM PPM UND NICHT PNG. Der Auftragsweg (`tue_foto`) liefert PNG
+// ueber die Leitung, weil dort jedes Oktett zaehlt. Diese Fassung hier
+// schreibt in eine DATEI auf DIESEM Geraet, und dafuer ist PPM die
+// richtige Wahl: kein zlib, kein CRC, kein Zwischenpuffer ueber dem
+// ganzen Bild -- eine Kopfzeile und dann Zeile fuer Zeile durch. Auf
+// 3440x1440 sind das 14,9 MiB, und sie gehen SOFORT auf die Platte
+// statt vorher in den Speicher. Ein Helfer, der zum Fotografieren 15
+// MiB Halde braucht, macht auf einem Geraet mit knappem Speicher kein
+// Foto.
+//
+// Vorlage ist `r_ppm` aus `lib/fenster/win32.fi` des Certus-Zweigs:
+// "P6\n<breite> <hoehe>\n255\n", dann drei Oktette je Bildpunkt, und
+// die Reihenfolge wird gedreht -- die Karte liegt als BGRX vor.
+//
+// UND WOZU DAS GUT IST, wenn niemand die Datei abholt: Justin kann sie
+// auf einen USB-Stick kopieren. Der Weg ueber den Server (`foto`)
+// benutzt denselben Leser; wenn dieser hier ein Bild liefert, liegt
+// ein Fehler dort NICHT mehr am Rahmenpuffer.
+fn foto_datei(pfad: u64) -> i32 {
+    let w: i64 = syscall(S_WIGSCREEN, WS_W, 0, 0, 0, 0, 0)
+    let h: i64 = syscall(S_WIGSCREEN, WS_H, 0, 0, 0, 0, 0)
+    if w <= 0 || h <= 0 {
+        sag("jarvisd: keine Bildschirmmasse -- laeuft der Fensterserver?\n")
+        return 2
+    }
+    var pitch: i64 = syscall(S_DISPGET, DG_PITCH, 0, 0, 0, 0, 0)
+    var bpp: i64 = syscall(S_DISPGET, DG_BPP, 0, 0, 0, 0, 0)
+    if bpp <= 0 {
+        bpp = 32
+    }
+    if pitch <= 0 {
+        pitch = w * (bpp / 8)
+    }
+    var fbname: [u8; 8] = "/dev/fb\0"
+    let fd: i64 = sys_open((&fbname[0]) as u64, 0, 0)
+    if fd < 0 {
+        sag("jarvisd: /dev/fb laesst sich nicht oeffnen\n")
+        return 2
+    }
+    let out: i64 = sys_open(pfad, O_WRONLY | O_CREAT | O_TRUNC, 420)
+    if out < 0 {
+        sys_close(fd)
+        sag("jarvisd: die Zieldatei laesst sich nicht anlegen\n")
+        return 2
+    }
+    // Der Kopf.
+    var kopf: rt.Buf = rt.buf_new()
+    var p6: [u8; 4] = "P6\n\0"
+    rt.buf_push_bytes(&kopf, (&p6[0]) as u64, 3)
+    rt.buf_push_dec_u64(&kopf, w as u64)
+    rt.buf_push(&kopf, 32 as u8)
+    rt.buf_push_dec_u64(&kopf, h as u64)
+    rt.buf_push(&kopf, 10 as u8)
+    var m255: [u8; 5] = "255\n\0"
+    rt.buf_push_bytes(&kopf, (&m255[0]) as u64, 4)
+    let _hk: i64 = sys_write(out, kopf.ptr, kopf.len)
+    rt.buf_free(&kopf)
+    // Und Zeile fuer Zeile. Ein Zeilenpuffer herein, ein Zeilenpuffer
+    // hinaus -- mehr Speicher braucht es nicht.
+    let breite: usize = w as usize
+    let zeile: usize = pitch as usize
+    var zpuf: rt.Buf = rt.buf_new()
+    rt.buf_reserve(&zpuf, zeile)
+    rt.buf_set_len(&zpuf, zeile)
+    var apuf: rt.Buf = rt.buf_new()
+    rt.buf_reserve(&apuf, breite * 3)
+    rt.buf_set_len(&apuf, breite * 3)
+    var y: usize = 0
+    var schief: bool = false
+    while y < (h as usize) {
+        var da: usize = 0
+        while da < zeile {
+            let n: i64 = sys_read(fd, zpuf.ptr + da as u64, zeile - da)
+            if n <= 0 {
+                schief = true
+                break
+            }
+            da = da + (n as usize)
+        }
+        if schief {
+            break
+        }
+        var x: usize = 0
+        while x < breite {
+            let off: usize = x * ((bpp / 8) as usize)
+            rt.st8(apuf.ptr, x * 3, rt.ld8(zpuf.ptr, off + 2))
+            rt.st8(apuf.ptr, x * 3 + 1, rt.ld8(zpuf.ptr, off + 1))
+            rt.st8(apuf.ptr, x * 3 + 2, rt.ld8(zpuf.ptr, off))
+            x = x + 1
+        }
+        let _wz: i64 = sys_write(out, apuf.ptr, breite * 3)
+        y = y + 1
+    }
+    rt.buf_free(&zpuf)
+    rt.buf_free(&apuf)
+    sys_close(fd)
+    sys_close(out)
+    if schief {
+        sag("jarvisd: /dev/fb bricht mitten im Bild ab\n")
+        return 2
+    }
+    sag("jarvisd: foto ")
+    sag_zahl(w as u64)
+    sag("x")
+    sag_zahl(h as u64)
+    sag(" ppm ")
+    sag_zahl((15 + breite * 3 * (h as usize)) as u64)
+    sag(" oktette\n")
+    return 0
+}
+
+// ====================================================================
+// RUNDE LEISTE: DIE STARTDIAGNOSE
+// ====================================================================
+//
+//     jarvisd -d
+//
+// Justins Satz war: "jarvisd soll beim Start ehrlich sagen, woran es
+// hakt". Bis hierher sagte es zwei Dinge -- die Rechteliste und
+// "bereit" -- und wenn danach nichts geschah, war nicht zu
+// unterscheiden, ob das Kabel nicht steckt, die Adresse fehlt, der
+// Server nicht antwortet oder das Recht nicht da ist.
+//
+// Diese Liste geht die Kette der Reihe nach durch und schreibt je
+// Glied EIN Wort: JA, NEIN oder die Zahl. Sie ist so gebaut, dass ein
+// FOTO davon reicht -- Justins Brett hat keine serielle Leitung, also
+// muss die Antwort auf den Bildschirm passen.
+fn zeig_ip(name: str, v: u64) {
+    sag(name)
+    sag_zahl((v >> 24) & 255)
+    sag(".")
+    sag_zahl((v >> 16) & 255)
+    sag(".")
+    sag_zahl((v >> 8) & 255)
+    sag(".")
+    sag_zahl(v & 255)
+    sag("\n")
+}
+
+fn diagnose() -> i32 {
+    sag("jarvisd: --- Startdiagnose ---\n")
+    // 1. Der Stapel.
+    let bereit: i64 = syscall(S_NETGET, NG_READY, 0, 0, 0, 0, 0)
+    sag("1 netzstapel      ")
+    if bereit == 1 {
+        sag("JA\n")
+    } else {
+        sag("NEIN -- der Kern faehrt ohne `nic`, oder es gibt keinen Treiber fuer den Chip\n")
+    }
+    // 2. Adresse, Maske, Tor.
+    let ip: u64 = syscall(S_NETGET, NG_IP, 0, 0, 0, 0, 0) as u64
+    let mask: u64 = syscall(S_NETGET, NG_MASK, 0, 0, 0, 0, 0) as u64
+    let gw: u64 = syscall(S_NETGET, NG_GW, 0, 0, 0, 0, 0) as u64
+    zeig_ip("2 adresse        ", ip)
+    zeig_ip("  maske          ", mask)
+    zeig_ip("3 tor            ", gw)
+    if ip == 0 {
+        sag("  -> keine Adresse. `dhcp` fahren oder nip= auf der Kernzeile setzen.\n")
+    } else if ((ip >> 24) & 255) == 169 && ((ip >> 16) & 255) == 254 {
+        sag("  -> das ist die feste Verbindungslos-Adresse aus der Kernzeile.\n")
+        sag("     DHCP hat nichts gebracht. Ohne Tor gibt es keinen Weg hinaus.\n")
+    }
+    if gw == 0 {
+        sag("  -> KEIN TOR. Alles ausserhalb des eigenen Netzes ist unerreichbar.\n")
+    }
+    // 4. Die Rechteliste.
+    sag("4 rechteliste     ")
+    if konf_lesen() {
+        sag("gelesen: ")
+        sag_oktette((&konfpfad[0]) as u64, rt.c_length((&konfpfad[0]) as u64))
+        sag("\n")
+        sag("  server         ")
+        if k_ip == 0 as u32 {
+            sag("FEHLT -- ohne `server = a.b.c.d:anschluss` startet der Dienst nicht\n")
+        } else {
+            zeig_ip("", k_ip as u64)
+        }
+        sag("  befehle        ")
+        if k_befehle {
+            sag("ja\n")
+        } else {
+            sag("nein\n")
+        }
+        sag("  bildschirmfoto ")
+        if k_foto {
+            sag("ja\n")
+        } else {
+            sag("nein\n")
+        }
+        sag("  systeminfo     ")
+        if k_system {
+            sag("ja\n")
+        } else {
+            sag("nein\n")
+        }
+    } else {
+        sag("FEHLT\n")
+    }
+    // 5. Der Ausweis.
+    var kp: [u8; 24] = "/etc/jarvis/geraet.key\0\0"
+    let kfd: i64 = sys_open((&kp[0]) as u64, 0, 0)
+    sag("5 geraeteschluessel ")
+    if kfd >= 0 {
+        sag("da\n")
+        sys_close(kfd)
+    } else {
+        sag("FEHLT -- `jarvisctl koppeln` erzeugt ihn\n")
+    }
+    // 6. Die Wurzelzertifikate.
+    var wp: [u8; 20] = "/etc/ssl/roots.pem\0\0"
+    let wfd: i64 = sys_open((&wp[0]) as u64, 0, 0)
+    sag("6 wurzeln         ")
+    if wfd >= 0 {
+        sag("da\n")
+        sys_close(wfd)
+    } else {
+        sag("FEHLEN -- ohne sie wird jede TLS-Verbindung abgelehnt\n")
+    }
+    // 7. Der Bildschirm.
+    let _s: i32 = schirm()
+    sag("jarvisd: --- Ende ---\n")
+    return 0
+}
+
 fn bericht() {
     sag("jarvisd: verbindungen ")
     sag_zahl(z_verbindungen)
@@ -2173,6 +2411,15 @@ fn main(start: u64) -> i32 {
                 return probe()
             } else if c == 115 as u8 { // -s
                 return schirm()
+            } else if c == 100 as u8 { // -d
+                return diagnose()
+            } else if c == 102 as u8 { // -f
+                i = i + 1
+                if i < argc {
+                    return foto_datei(rt.arg_ptr(start, i))
+                }
+                sag("jarvisd -f braucht einen Dateinamen\n")
+                return 2
             } else if c == 98 as u8 { // -b
                 return bildprobe()
             }

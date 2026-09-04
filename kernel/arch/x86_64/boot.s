@@ -197,20 +197,59 @@ gdt64_pointer:
 
     /* --------------------------- page tables, stacks, data area --- */
     .section .bss, "aw", @nobits
-    .align 4096
-pml4:
-    .skip 4096
-pdpt:
-    .skip 4096
-pd:
-    .skip 4096
 
-    /* The task state segment. 104 bytes; RSP0 (+4) and IST1 (+36) are
-     * written by the kernel in Firn, the I/O map base (+100) as well. */
-    .align 16
-    .globl tss
-tss:
-    .skip 104
+    /* ============================================== RUNDE LEISTE ===
+     *
+     * DIE SEITENTAFELN LAGEN UNTER DEN STAPELN. GEMESSEN:
+     *
+     *   *** EXCEPTION 14 #PF  err=0xb  cr2=0xb2c140
+     *     rip=0x26d0b7 (fb.fill_words)  rsp=0x5096c0
+     *   *** EXCEPTION 14 #PF  err=0x2  cr2=0xa00000
+     *     rsp=0x503ea0
+     *
+     * `err=0xb` hat das RESERVED-Bit gesetzt: der Prozessor hat in
+     * einem Seitentafeleintrag Bits gefunden, die dort nicht stehen
+     * duerfen. Und der zweite `rsp` ist 0x503ea0 -- das lag GENAU IN
+     * `pml4` (0x503000). Die alte Reihenfolge war
+     *
+     *   pml4, pdpt, pd, tss, boot_stack(16K), kernel_stack(64K), ...
+     *
+     * und ein Stapel waechst nach unten. `kernel_stack` ist unten
+     * herausgelaufen, durch `boot_stack` und `tss` hindurch, und hat
+     * die Seitentafeln aufgefressen. Danach ist jede Adresse des
+     * Rechners eine Zufallszahl -- und weil die Seitentafeln stumm
+     * sind, sieht man davon nichts, bis irgendwo etwas Unmoegliches
+     * passiert.
+     *
+     * DAS IST DIESELBE KRANKHEIT WIE BEI DEN AUFGABEN-KERNSTAPELN
+     * (kernel/sched.fi, KSTACK_FRAMES), nur eine Etage tiefer -- und
+     * es ist der beste Kandidat fuer den "unsichtbaren
+     * Ueberschreiber", den die Runde STARTKNOPF gesucht hat: WELCHES
+     * Byte ein ueberlaufender Stapel trifft, entscheidet die
+     * Bindereihenfolge, und die aendert sich mit jedem neuen `import`.
+     *
+     * DREI AENDERUNGEN:
+     *
+     *   1. DIE SEITENTAFELN UND DAS TSS STEHEN JETZT OBEN, hinter
+     *      allen Stapeln. Kein Stapel dieses Kerns kann sie noch
+     *      erreichen, egal wie tief er faellt.
+     *   2. EIN WACHFELD VON 128 KiB unter dem untersten Stapel. Wer
+     *      ueberlaeuft, faellt zuerst dort hinein -- und dort steht
+     *      nichts, was jemand braucht.
+     *   3. `kernel_stack` IST 256 KiB STATT 64. Das ist der Stapel,
+     *      auf dem `kmain` die ganze Kette der Startstufen faehrt
+     *      (Grafik, Fensterserver, Messtafel, USB); 64 KiB haben
+     *      nachweislich nicht gereicht. `.bss` kostet nichts im
+     *      Abbild -- die Seiten entstehen beim ersten Zugriff.
+     */
+
+    /* 1. DAS WACHFELD. Ganz unten, damit ein Ueberlauf hier landet. */
+    .align 4096
+    .globl stack_guard_lo
+stack_guard_lo:
+    .skip 131072
+    .globl stack_guard_hi
+stack_guard_hi:
 
     .align 16
 boot_stack_bottom:
@@ -219,7 +258,7 @@ boot_stack_top:
 
     .align 16
 kernel_stack_bottom:
-    .skip 65536
+    .skip 262144
     .globl kernel_stack_top
 kernel_stack_top:
 
@@ -246,6 +285,23 @@ irq_stack_bottom:
     .skip 16384
     .globl irq_stack_top
 irq_stack_top:
+
+    /* RUNDE LEISTE: DIE SEITENTAFELN UND DAS TSS, JETZT OBERHALB
+     * ALLER STAPEL. Der Grund steht oben bei `stack_guard_lo`. */
+    .align 4096
+pml4:
+    .skip 4096
+pdpt:
+    .skip 4096
+pd:
+    .skip 4096
+
+    /* The task state segment. 104 bytes; RSP0 (+4) and IST1 (+36) are
+     * written by the kernel in Firn, the I/O map base (+100) as well. */
+    .align 16
+    .globl tss
+tss:
+    .skip 104
 
     /* The kernel data area: state block, IDT, frame bitmap, heap
      * metadata. The division is in `kernel/kstate.fi`. */
