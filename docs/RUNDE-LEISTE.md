@@ -292,7 +292,75 @@ bleibt es bei `bereit` und wachsender Wartezeit (250 ms, verdoppelnd bis
 
 ---
 
-## 6. Was NICHT erledigt ist
+## 6. Die Abnahme
+
+Am **fertigen Abbild**, über Limine, unter **UEFI**, 3440×1440,
+xHCI-Tastatur + Tablett + Massenspeicher, e1000 mit DHCP —
+Justins Aufbau, nicht der Prüfstands-Abkürzung.
+
+| gemessen | Zahl |
+|---|---|
+| Anstriche der Leiste in 160 s | **164** |
+| Uhr-Anstriche / davon **verschiedene** Zeiten | 164 / **163** |
+| erste → letzte Uhr | `20:18:44 04.09.26` → `20:21:24` |
+| Wächterbrüche (`WA`) | **0** |
+| `user fault` | **0** |
+| Kernausnahmen | **0** |
+| höchster Kernstapelstand (`KS`) | 44 168 von 65 536 |
+| Netz | `22 NETZ K2 BDF 0020 L 1 ABL 0 IP 10.0.2.15` |
+
+**164 Anstriche in 160 Sekunden und 163 verschiedene Uhrzeiten** heißt:
+die Leiste malt genau einmal je Sekunde, über die ganze Zeit, ohne eine
+einzige Wiederholung. Genau das war der Punkt, an dem Justin bisher
+umsonst gebrannt hat.
+
+### Klicks
+
+`taskbar: state … clicks=10` und `taskbar: click x=… y=… hits=…` — die
+Kette Kern → Fensterserver → Leiste → Trefferprüfung läuft. Ein Klick
+wurde auch **wirksam**: `taskbar: drag start` → `drag done edge=3`, die
+Leiste ist an den rechten Rand gewandert und hat sich neu vermessen
+(`size w=104 h=1440`, `strut edge=3`).
+
+**Was ich NICHT belegen konnte:** ein Klick, der den 30 Bildpunkte
+breiten Startknopf trifft. QEMUs `mouse_move` ist im Monitor **relativ**
+und in Tablett-Einheiten (gemessen: elf Bewegungen um 40…400 ergaben
+x=1759…3439, also die Summe); ich habe den Knopf nicht getroffen. Das
+ist eine Eigenschaft meines Prüfaufbaus, nicht des Systems.
+
+### Die Eingabe, ohne Maus
+
+    tafel: 11 USB   DEV 3 FUND 3 HUB 0 KBD 2 TAS 0 -> TAS 7 FAIL 0
+    tafel: 18 TAST  D 2 BER 4 ARM 5 CC 1  ->  BER 18 ARM 19 CC 1
+
+Sieben Tastendrücke, achtzehn fertige Interrupt-IN-Transfers,
+Fertigmeldungscode 1, null Fehler — am fertigen Abbild.
+
+**Super+A geht:** `taskbar: klinke seq=1 war=0 taste=97`, und das
+Kontrollzentrum geht auf (`qs: text … [Netz vortäuschen]`).
+
+**Super ALLEIN geht nicht.** Der Kern erkennt es (`hk: super allein`,
+zweimal), der Leser der Leiste sieht den Zähler aber nicht steigen —
+`taskbar: klinke` bleibt aus, während dieselbe Zeile bei Super+A kommt.
+Der Systemaufruf und der Leser sind also in Ordnung; nur dieser eine
+Puls kommt nicht an. Eingekreist, nicht behoben.
+
+### Regression
+
+`tools/einsprung/run.sh`: **12 von 14**.
+
+* `FAIL 'DEAD000000000000' fehlt` — der erwartete Text im Prüfskript,
+  seit der Vorrunde. Kosmetik.
+* `FAIL Regellauf: 'wm: hold' fehlt` — **neu**. In demselben Lauf startet
+  der Schreibtisch nachweislich (`taskbar: state n=1 paints=13`, Uhr
+  läuft), nur die Marke am Ende des Haltens kommt nicht mehr in 240 s.
+  Die Messtafel malt seit dieser Runde 24 statt 20 Zeilen, also rund ein
+  Fünftel mehr Band je Zeitgeberrunde. Das ist eine **Laufzeit**- und
+  keine Funktionsregression — aber sie ist da, und sie steht hier.
+
+---
+
+## 7. Was NICHT erledigt ist
 
 * **`ROH` bleibt auf Nullen trotz `TAS 7`** — nicht angefasst.
 * **Blit-Versatz bei 3440** — nicht nachgestellt, nicht behoben.
@@ -305,3 +373,5 @@ bleibt es bei `bereit` und wachsender Wartezeit (250 ms, verdoppelnd bis
   fehlt dasselbe wie bei `jarvisd`: **DNS**.
 * **Die statischen Stapel haben kein Prüfwerk**, nur Abstand. Die
   Aufgaben-Kernstapel haben eines (`WA` auf der Tafel).
+* **Super allein** öffnet das Startmenü nicht (siehe Abschnitt 6).
+* **`wm: hold` in `tools/einsprung/run.sh`** braucht länger als 240 s.
