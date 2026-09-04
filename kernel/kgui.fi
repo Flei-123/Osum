@@ -1605,6 +1605,12 @@ fn surface(state: u64) {
     fb.clear(state, 0)
     wm.damage_all(state)
 
+    // RUNDE STANDBILD, STUFE 1: der frueheste Punkt, an dem es einen
+    // Rahmenpuffer und einen Zeichensatz gibt. Steht die Tafel HIER
+    // schon nicht, trifft die Malroutine den Schirm nicht -- und dann
+    // ist es kein Zeitgeber- und kein Schleifenproblem.
+    tafel_boot(state, 1)
+
     // Das Terminalfenster. Es bekommt das Terminal der Konsole -- von
     // hier an geht jedes Oktett, das ein Prozess auf fd 1 schreibt,
     // durch `tty.emit` mit SINK_WINDOW in dieses Fenster UND weiter auf
@@ -1695,6 +1701,12 @@ fn surface(state: u64) {
     // Schoenheit: `u_wclick` wartet in einer Schleife auf Ereignisse und
     // teilt sich einen Prozessor mit der Anwendung dieser Runde, und ihr
     // Fenster liegt genau dort, wo der Dateimanager steht.
+    // ============ RUNDE STANDBILD: DIE TAFEL, EINMAL, HIER.
+    //
+    // Das ist die letzte Zeile vor dem ersten Ring-3-Programm. Was
+    // danach kommt, kann haengen; was hier steht, steht auf dem Schirm.
+    tafel_boot(state, 2)
+
     var t: u64 = 0
     if !kstate.mode_on(state, kstate.M_WIG)
        && !kstate.mode_on(state, kstate.M_WIGFILES)
@@ -2788,6 +2800,7 @@ fn tz_text(state: u64, buf: u64, at: u64, t: u64) -> u64 {
 // Schmutz, nicht an einem Fenster, nicht an der Taskleiste.
 const TAFEL_MARKEN: u64 = 10 // Zeitmarken zwischen zwei Anstrichen
 const TAFEL_RUNDEN: u64 = 200 // Rueckfall, wenn die Marken stehen
+const TAFEL_SERMARKEN: u64 = 500 // fuenf Sekunden zwischen zwei Berichten
 static mut tafel_marke: u64 = 0
 static mut tafel_runde: u64 = 0
 static mut tafel_sh: u64 = 0
@@ -2855,6 +2868,7 @@ static mut tafel_irq: u64 = 0 // Rufe aus dem Zeitgeber
 static mut tafel_mal: u64 = 0 // Anstriche
 static mut tafel_loop: u64 = 0 // Rufe aus der Schreibtischschleife
 static mut tafel_irqm: u64 = 0 // letzte Marke, an der aus dem IRQ gemalt wurde
+static mut tafel_serm: u64 = 0 // letzte Marke der seriellen Ausgabe
 
 // EINE ZEILE ABLEGEN. Gemalt wird sie erst in `tafel_streichen` -- und
 // zwar von wem auch immer als naechstes drankommt, Schleife oder
@@ -2927,31 +2941,116 @@ fn tafel_streichen(state: u64) {
 // Unterbrechungen, nimmt kein Schloss und ruft nichts, was schlafen
 // koennte. Zehnmal je Sekunde -- oefter waere auf einem ungepufferten
 // Firmware-Rahmenpuffer bei 3440x1440 sinnlos teuer.
+// AUS DEM ZEITGEBERBEHANDLER.
+//
+// ============ HIER STAND DER FEHLER DIESER RUNDE, UND ER WAR MEINER.
+//
+// Vorher standen hier ZWEI Sperren:
+//
+//     if !kstate.mode_on(state, kstate.M_WMDAUER) { return }
+//     if tafel_hat == 0 { return }
+//
+// Die zweite hat die ganze Runde gekostet. `tafel_hat` wird NUR in
+// `tafel_merken` gesetzt, und `tafel_merken` ruft NUR `kopf_malen`, und
+// `kopf_malen` ruft NUR `wait_wm` -- die Schreibtischschleife. Damit
+// hing der angeblich unabhaengige Zeitgeberweg WEITERHIN daran, dass
+// die Schleife mindestens eine Runde gelaufen war.
+//
+// In QEMU lief sie, also wurde `tafel_hat` 1, also malte der Zeitgeber
+// (453 Anstriche gemessen) -- und die Messung sah richtig aus. Auf
+// Justins Brett laeuft die Schleife nie eine volle Runde, `tafel_hat`
+// bleibt 0, und die Tafel kommt nie. Genau das zeigt sein Foto.
+//
+// Ein Messgeraet darf keinen Messwert brauchen, um anzugehen. Ohne
+// Inhalt zeigt es eben Nullen -- und DAS ist die Aussage, auf die es
+// ankommt.
+//
+// Die erste Sperre ist ebenfalls weg: `wmdauer` war eine Annahme ueber
+// Umgebungen (`tools/hidpunkte/run.sh` setzt es auch). Jetzt entscheidet
+// ein eigenes Wort auf der Kommandozeile, `tafel`.
 fn tafel_tick(state: u64) {
-    // NUR IM DAUERBETRIEB. Gemessen: ohne diese Bedingung malt der
-    // Zeitgeber die Tafel auch in den Laeufen von `tools/wm/run.sh`,
-    // und weil er das ZEHNMAL JE SEKUNDE und immer NACH `compose` tut,
-    // liegt sie dort auf dem Terminalfenster -- zwei Pruefungen fielen
-    // sofort ("die Kopfzeile des Terminalfensters steht im Bild": 950
-    // von 950 Tintenpunkten falsch).
-    //
-    // `wmdauer` steht auf JEDEM Schreibtisch-Eintrag des Sticks und auf
-    // keinem Laeufer. Das ist genau die Trennlinie: ein Messgeraet
-    // gehoert an das Brett, das gemessen wird, und nicht in eine
-    // Abnahme, die Bildpunkte vergleicht.
-    if !kstate.mode_on(state, kstate.M_WMDAUER) {
+    if !kstate.mode_on(state, kstate.M_TAFEL) {
         return
     }
     tafel_irq = tafel_irq + 1
-    if tafel_hat == 0 {
-        return
-    }
     let jetzt: u64 = kstate.get(state, kstate.TICKS)
-    if jetzt < tafel_irqm + TAFEL_MARKEN {
+    // ZWEI UHREN, WIE IN DER SCHLEIFE. Steht der Zeitgeber, zaehlt die
+    // Zahl der Rufe -- kommt gar kein Ruf mehr, ist das die Aussage.
+    var faellig: bool = false
+    if jetzt >= tafel_irqm + TAFEL_MARKEN {
+        tafel_irqm = jetzt
+        faellig = true
+    }
+    if !faellig {
         return
     }
-    tafel_irqm = jetzt
+    // DIE LEITUNG, UNABHAENGIG VON DER SCHLEIFE. Bisher setzte nur der
+    // Puls in `wait_wm` die Marke -- laeuft die Schleife nicht, kam auch
+    // seriell nichts. Alle fuenf Sekunden, damit es kein Rauschen wird.
+    if jetzt >= tafel_serm + TAFEL_SERMARKEN {
+        tafel_serm = jetzt
+        tafel_seriell = 1
+    }
     tafel_streichen(state)
+    tafel_seriell = 0
+}
+
+// ============ DAS STANDBILD, EINMAL, UNBEDINGT.
+//
+// Gemalt am Ende der Boot-Folge, BEVOR das erste Ring-3-Programm
+// startet. Es beantwortet die Frage, die drei Runden lang offen war und
+// die kein Foto bisher trennen konnte:
+//
+//   Tafel steht (auch nur mit Nullen)  -> der Kern lebt und die
+//                                         Malroutine TRIFFT den Schirm.
+//                                         Bleiben die Zahlen danach
+//                                         stehen, ist der Zeitgeber tot
+//                                         oder die Schleife haengt.
+//   Tafel steht GAR NICHT              -> die Malroutine trifft den
+//                                         Schirm nicht (Rahmenpuffer,
+//                                         Zeilenlaenge, Farbformat).
+//
+// Es haengt an KEINEM Zeitgeber, an KEINER Schleife und an KEINEM
+// Ring-3-Programm -- nur am Schalter und daran, dass es einen
+// Rahmenpuffer gibt.
+fn tafel_boot(state: u64, stufe: u64) {
+    if !kstate.mode_on(state, kstate.M_TAFEL) {
+        return
+    }
+    if !fb.ready(state) {
+        return
+    }
+    var s_b: [u8; 24] = "tafel: STANDBILD gemalt\0"
+    // Die Zeilen, die es noch nicht gibt, mit einem Strich fuellen --
+    // eine leere Tafel waere nicht von einer fehlenden zu unterscheiden.
+    var lz: [u8; 25] = "-- noch keine Messung --\0"
+    var z: u64 = 0
+    while z < TAFEL_ZEILEN {
+        if tafel_len[z as usize] == 0 {
+            tafel_merken(z, (&lz[0]) as u64, 24, wm.mess_gelb(state))
+        }
+        z = z + 1
+    }
+    // ZEILE 0 SAGT, WIE WEIT DER KERN GEKOMMEN IST. Stufe 1 steht
+    // direkt nach `fb.clear`, VOR dem Terminalfenster; Stufe 2 steht
+    // hinter allen Fenstern und VOR dem ersten Ring-3-Programm. Sieht
+    // Justin nur STUFE1, ist der Kern zwischen Fensterbau und Ring 3
+    // stehengeblieben -- und genau diese Strecke erklaert ein fehlendes
+    // Terminalfenster.
+    var sb: [u8; 64] = [0 as u8; 64]
+    let sp: u64 = (&sb[0]) as u64
+    var t_st: [u8; 10] = "STANDBILD\0"
+    var t_su: [u8; 8] = " STUFE \0"
+    var sn: u64 = 0
+    sn = puls_text(state, sp, 0, (&t_st[0]) as u64)
+    sn = puls_text(state, sp, sn, (&t_su[0]) as u64)
+    sn = puls_zahl(state, sp, sn, stufe)
+    tafel_merken(0, sp, sn, wm.mess_gelb(state))
+    tafel_seriell = 1
+    tafel_streichen(state)
+    tafel_seriell = 0
+    serial.puts((&s_b[0]) as u64)
+    serial.nl()
 }
 
 fn kopf_malen(state: u64) {
