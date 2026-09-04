@@ -238,6 +238,7 @@ fn graphics(state: u64, mbi: u64) {
     var s_back: [u8; 8] = "  back=\0"
     var s_none2: [u8; 5] = "none\0"
     var s_uc: [u8; 6] = "  uc=\0"
+    var s_wc: [u8; 6] = "  wc=\0"
     var s_st: [u8; 14] = "fb: selftest \0"
     var s_of: [u8; 4] = " / \0"
     var s_on: [u8; 31] = "fb: console mirrored to screen\0"
@@ -363,6 +364,12 @@ fn graphics(state: u64, mbi: u64) {
     }
     serial.puts((&s_uc[0]) as u64)
     serial.dec(bnum(fb.uncached(state)))
+    // RUNDE ZWISCHENSPEICHER: die eine Zahl, die sagt, ob der
+    // Rahmenpuffer write-combining abgebildet ist. wc=0 bei uc=0 heisst
+    // WRITE-BACK -- und damit landet jede kleine Aenderung im
+    // Zwischenspeicher statt auf der Karte.
+    serial.puts((&s_wc[0]) as u64)
+    serial.dec(fb.wc(state))
     serial.nl()
     // RUNDE SCHIRM: woher die Aufloesung kam, wie gross die Schrift ist
     // und ob der Puffer in Streifen geschoben wird. Drei Zahlen, die
@@ -2777,7 +2784,7 @@ fn kopf_setzen(state: u64, p: u64, n: u64) {
 // und keine der sechs Stufen darunter bedeutet etwas. Genau diese
 // Unterscheidung -- "eingefroren" gegen "laeuft, bekommt aber nichts"
 // -- war bisher auf keinem Foto zu treffen.
-const TAFEL_ZEILEN: u64 = 9
+const TAFEL_ZEILEN: u64 = 10
 const TAFEL_SPALTEN: u64 = 30
 
 fn tz_text(state: u64, buf: u64, at: u64, t: u64) -> u64 {
@@ -2859,9 +2866,9 @@ fn tafel_zeile_sagen(b: u64, n: u64) {
 // sind aus. Steht beides und der Zeiger ist da: der Rechner ist tot.
 // Diese Unterscheidung war auf keinem Foto zu treffen.
 const TAFEL_SP: u64 = 40 // Zeichen je gemerkter Zeile
-static mut tafel_txt: [u8; 360] = [0 as u8; 360] // TAFEL_ZEILEN * TAFEL_SP
-static mut tafel_len: [u64; 9] = [0 as u64; 9]
-static mut tafel_fg: [u64; 9] = [0 as u64; 9]
+static mut tafel_txt: [u8; 400] = [0 as u8; 400] // TAFEL_ZEILEN * TAFEL_SP
+static mut tafel_len: [u64; 10] = [0 as u64; 10]
+static mut tafel_fg: [u64; 10] = [0 as u64; 10]
 static mut tafel_hat: u64 = 0 // steht schon Inhalt bereit?
 static mut tafel_drin: u64 = 0 // Wiedereintrittssperre
 static mut tafel_irq: u64 = 0 // Rufe aus dem Zeitgeber
@@ -2918,7 +2925,61 @@ fn tafel_streichen(state: u64) {
     tn = puls_zahl(state, tp, tn, tafel_mal)
     tn = puls_text(state, tp, tn, (&t_l[0]) as u64)
     tn = puls_zahl(state, tp, tn, tafel_loop)
+    // RUNDE KABEL: UND DER GEMESSENE PREEMPT-WERT.
+    //
+    // Justin hat meine Erklaerung der Vorrunde im Quelltext widerlegt:
+    // `nosched` setzt NUR M_NOSCHED, und ausgewertet wird das in
+    // `kmain.scheduler()` -- dem Selbsttest mit den drei K_WORKERn.
+    // `sched.init` steht in `kmain.fi:387`, im Hauptpfad, und setzt
+    // PREEMPT auf 1. `M_NOPREEMPT` steht HINTER dem nosched-Return und
+    // wird bei `nosched` nie erreicht. Die Verdraengung ist also AN.
+    // Damit das nicht wieder eine Lesung bleibt, steht die Zahl hier.
+    var t_p: [u8; 6] = " PRE \0"
+    tn = puls_text(state, tp, tn, (&t_p[0]) as u64)
+    tn = puls_zahl(state, tp, tn, kstate.get(state, kstate.PREEMPT))
     tafel_merken(8, tp, tn, wm.mess_ampel(state, tafel_loop))
+    tafel_zeile_sagen(tp, tn)
+
+    // ---- Zeile 9: DAS KABEL. Sitzt an 0x3F8 ueberhaupt ein Baustein?
+    //
+    // LSR 00 heisst: nicht dekodiertes Tor, es gibt keinen UART -- und
+    // GENAU DANN drehte `serial.put` bis zu dieser Runde fuer immer.
+    // LSR FF heisst offener Bus. SCR ist das Notizregister: kommt A5
+    // zurueck, sitzt dort einer.
+    var t9: [u8; 10] = "9 KABEL  \0"
+    var k_l: [u8; 5] = "LSR \0"
+    var t_s: [u8; 6] = " SCR \0"
+    var k_v: [u8; 7] = " VERW \0"
+    var t_a: [u8; 6] = " AUS \0"
+    var k_m: [u8; 5] = " FB \0"
+    var k_wb: [u8; 3] = "WB\0"
+    var k_wc: [u8; 3] = "WC\0"
+    var k_uc: [u8; 3] = "UC\0"
+    tn = puls_text(state, tp, 0, (&t9[0]) as u64)
+    tn = puls_text(state, tp, tn, (&k_l[0]) as u64)
+    tn = puls_hex(state, tp, tn, serial.lsr_roh())
+    tn = puls_text(state, tp, tn, (&t_s[0]) as u64)
+    tn = puls_hex(state, tp, tn, serial.scr_roh())
+    tn = puls_text(state, tp, tn, (&k_v[0]) as u64)
+    tn = puls_zahl(state, tp, tn, serial.verworfen())
+    tn = puls_text(state, tp, tn, (&t_a[0]) as u64)
+    tn = puls_zahl(state, tp, tn, serial.aus())
+    // UND DIE ABBILDUNGSART DES RAHMENPUFFERS. WB heisst: kleine
+    // Aenderungen bleiben im Zwischenspeicher und kommen nie an.
+    tn = puls_text(state, tp, tn, (&k_m[0]) as u64)
+    if fb.uncached(state) {
+        tn = puls_text(state, tp, tn, (&k_uc[0]) as u64)
+    } else if fb.wc(state) != 0 {
+        tn = puls_text(state, tp, tn, (&k_wc[0]) as u64)
+    } else {
+        tn = puls_text(state, tp, tn, (&k_wb[0]) as u64)
+    }
+    // Gruen, wenn das Notizregister A5 zurueckgab -- sonst rot.
+    var kfarbe: u64 = wm.mess_rot(state)
+    if serial.scr_roh() == 165 {
+        kfarbe = wm.mess_gruen(state)
+    }
+    tafel_merken(9, tp, tn, kfarbe)
     tafel_zeile_sagen(tp, tn)
 
     wm.mess_grund(state, TAFEL_ZEILEN, TAFEL_SPALTEN)
@@ -3329,6 +3390,24 @@ fn puls_text(state: u64, buf: u64, at: u64, t: u64) -> u64 {
         i = i + 1
     }
     return n
+}
+
+// RUNDE KABEL: ZWEI HEXZIFFERN. Ein LSR-Wert gehoert in Hex auf die
+// Tafel und nicht in Dezimal -- 0x00, 0x20 und 0xFF sind drei
+// verschiedene Aussagen, und "0", "32", "255" liest niemand als
+// Registerzustand. 256 heisst "nicht geprueft" und wird als "--"
+// geschrieben.
+fn puls_hex(state: u64, buf: u64, at: u64, v: u64) -> u64 {
+    var ziffern: [u8; 17] = "0123456789ABCDEF\0"
+    var n: u64 = at
+    if v > 255 {
+        kstate.set8(buf + n, 45 as u8)
+        kstate.set8(buf + n + 1, 45 as u8)
+        return n + 2
+    }
+    kstate.set8(buf + n, ziffern[((v >> 4) & 15) as usize])
+    kstate.set8(buf + n + 1, ziffern[(v & 15) as usize])
+    return n + 2
 }
 
 fn puls_zahl(state: u64, buf: u64, at: u64, v: u64) -> u64 {
