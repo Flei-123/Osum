@@ -140,10 +140,40 @@ if git status --porcelain 2>/dev/null | grep -q .; then
     # den der Hash zeigt. Das Pluszeichen sagt das.
     FASSUNG_HASH="${FASSUNG_HASH:0:7}+"
 fi
-sed -i "s/osum ????????/osum $FASSUNG_HASH/" "$TMP/kernel/fassung.fi" || exit 1
-grep -q "osum $FASSUNG_HASH" "$TMP/kernel/fassung.fi" || {
+# ================================ RUNDE MARKE: DER NAME UND DIE FASSUNG
+#
+# Bis hierher stand `osum` in diesem sed fest verdrahtet -- der
+# Kurzname des Produkts, in einer Zeile eines Bauskripts. Genau das
+# war Justins Beanstandung.
+#
+# Jetzt macht es `tools/marke-einsetzen.py`: es liest `marke.conf`,
+# laesst `OSUM_MARKE_*` aus der Umgebung darueberschlagen (Firns Ersatz
+# fuer `option_env!` aus /root/projects/freeviewer/src/brand.rs) und
+# setzt beides in die /tmp-Kopie ein -- die sechs Markenfelder in
+# `kernel/marke.fi` und die Fassungszeile `<KURZ> <hash>` in
+# `kernel/fassung.fi`. Es BRICHT AB, wenn ein Feld fehlt, leer ist,
+# nicht passt oder ein Platzhalter stehenbleibt.
+#
+# Der Arbeitsbaum wird dabei nicht angefasst; `git status` meldet nach
+# einem Bau weiterhin nichts.
+python3 "$(dirname "$0")/marke-einsetzen.py" "$TMP" \
+    "$(dirname "$0")/../marke.conf" "$FASSUNG_HASH" || {
+    echo "die Marke wurde NICHT eingesetzt -- Bau abgebrochen" >&2
+    exit 1; }
+# GEGENPROBE AM ERGEBNIS, nicht am Werkzeug: steht die Fassungszeile
+# wirklich in der Datei, aus der uebersetzt wird?
+grep -q " $FASSUNG_HASH" "$TMP/kernel/fassung.fi" || {
     echo "die Fassungsnummer wurde NICHT eingesetzt -- Bau abgebrochen" >&2
     exit 1; }
+# Und dieselbe Gegenprobe fuer die Marke: kein Feld darf noch ein
+# Fragezeichen tragen. (Das Werkzeug prueft es auch; hier steht es
+# NOCH EINMAL am Ergebnis, weil eine Pruefung im Werkzeug nur das
+# Werkzeug prueft.)
+if grep -qE 'static mut s_[a-z]+: \[u8; [0-9]+\] = "[^"]*\?' \
+        "$TMP/kernel/marke.fi"; then
+    echo "in kernel/marke.fi steht noch ein Platzhalter -- abgebrochen" >&2
+    exit 1
+fi
 if [[ $OHNE_TUNNEL == 1 ]]; then
     cp -f kernel/wg-aus.fi "$TMP/kernel/wg.fi" || exit 1
 fi

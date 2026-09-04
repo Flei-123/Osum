@@ -79,8 +79,27 @@ FS_INODES=${FS_INODES:-1024}
 FS_KARTEN=${FS_KARTEN:-128}
 
 mkdir -p "$OUT"
-IMG="$OUT/orientos-usb.img"
-IMG_ALT="$OUT/osum-usb.img"
+# ============================== RUNDE MARKE: DER NAME AUS EINER QUELLE
+#
+# Bis hierher stand "orientos" in dieser Zeile. Jetzt kommt er aus
+# `marke.conf`, geschlagen von `OSUM_MARKE_*` aus der Umgebung -- genau
+# wie im Kern und wie in der Vorlage
+# /root/projects/freeviewer/src/brand.rs. Eine Umbenennung ist damit
+# ein Bauaufruf:
+#
+#   OSUM_MARKE_PRODUKT="Xoffi OS" bash tools/usbimg/build.sh /tmp/bau
+#
+# `MARKE_DATEI` ist der abgeleitete Dateiname (PRODUKT kleingeschrieben,
+# ohne Leerzeichen) -- die Entsprechung zu `reg_key()` in der Vorlage:
+# abgeleitet, nicht gespeichert.
+. tools/lib/marke.sh
+marke_laden . || fehler "marke.conf laesst sich nicht lesen"
+
+IMG="$OUT/${MARKE_DATEI}-usb.img"
+# DER ALTE NAME BLEIBT ERREICHBAR. Er haengt am KURZnamen und nicht am
+# Produktnamen -- Justins Lesezeichen zeigt auf osum-usb.img, und ein
+# Verweis, der bei jeder Umbenennung mitwandert, waere kein Verweis.
+IMG_ALT="$OUT/${MARKE_KURZ}-usb.img"
 
 sagen() { printf '   %s\n' "$*"; }
 fehler() { printf '== %s\n' "$*" >&2; exit 1; }
@@ -293,7 +312,12 @@ else
     sagen "wurzeln     KEINE -- /bin/fetch wird nichts vertrauen"
 fi
 
-STORE=${STORE_URL:-https://store.fleitec.com/osum}
+# RUNDE MARKE, zweite Entwurfsentscheidung der Vorlage: "Ein
+# Xoffi-Build darf sich nie zum FreeViewer aktualisieren." Der Feed
+# gehoert zur MARKE. Ein umbenannter Bau holt damit nie die Pakete der
+# anderen Marke. STORE_URL schlaegt beides -- das ist der Weg fuer
+# einen Testspeicher und aendert an der Regel nichts.
+STORE=${STORE_URL:-$MARKE_FEED}
 if [ -n "${OTA_CONF:-}" ] && [ -s "${OTA_CONF}" ]; then
     [ "$OTA_CONF" -ef "$OUT/ota.conf" ] || cp -f "$OTA_CONF" "$OUT/ota.conf"
 else
@@ -483,26 +507,42 @@ sagen "umlaute     $UML UTF-8-Umlautfolgen im fertigen Wurzelabbild"
 # Terminalfenster, und `kmain.surface` wartet auf diese Shell; solange
 # sie laeuft, laeuft der Schreibtisch. Ohne sie kaeme der Kern nach dem
 # Zeichnen zurueck und schaltete ab.
+# DAS HEREDOC BLEIBT ZITIERT ('EOF'), und der Name kommt ueber einen
+# PLATZHALTER hinein, der danach ersetzt wird.
+#
+# Der erste Versuch war ein unzitiertes Heredoc mit ${MARKE_PRODUKT}
+# darin -- und das waere ein echter Fehler gewesen: in einem
+# unzitierten Heredoc fuehrt die Schale auch das aus, was in
+# KOMMENTARZEILEN steht. In diesem Text stehen siebzehn Rueckwaerts-
+# Anfuehrungszeichen (`Linux`, `dhcp`, `usbstop` ...), und jedes davon
+# waere ein Befehlsaufruf beim Bauen geworden. Ein Platzhalter mit
+# einem sed danach kann das nicht.
 cat > "$OUT/limine.conf" <<'EOF'
-# limine.conf -- OrientOS auf dem Stick (Runde USBIMG)
+# limine.conf -- @MARKE_PRODUKT@ auf dem Stick (Runde USBIMG)
 #
 # DIE NAMEN, UND WARUM SIE HIER AUSEINANDERGEHEN (Runde MESSTAFEL).
-# docs/ROADMAP-UPDATE.md:28 sagt es seit langem: OSUM IST DER KERN,
-# ORIENTOS IST DAS SYSTEM DARUM. Auf dem Schirm stand trotzdem ueberall
-# Osum. Justins Vergleich trifft: der Kern heisst Linux, der Startschirm
-# sagt Ubuntu -- niemand nennt seine Verteilung "Linux 6.8".
+# docs/ROADMAP-UPDATE.md:28 sagt es seit langem: der KERN und das
+# SYSTEM darum sind zwei Namen. Auf dem Schirm stand trotzdem ueberall
+# der des Kerns. Justins Vergleich trifft: der Kern heisst Linux, der
+# Startschirm sagt Ubuntu -- niemand nennt seine Verteilung "Linux 6.8".
 #
-# Ab hier: was der BENUTZER liest, traegt OrientOS. Was den KERN meint,
-# heiszt weiter Osum -- die Datei /osum.mb, das Startprotokoll, die
-# Fassungszeile, die Panikmeldungen. Genau wie `Linux` im dmesg steht
-# und nicht im Startbildschirm. `docs/NAMING.md` steht dem nicht
+# Ab hier: was der BENUTZER liest, traegt den PRODUKTnamen aus
+# marke.conf. Was den KERN meint, traegt den KERNnamen -- die Datei
+# /osum.mb, das Startprotokoll, die Fassungszeile, die Panikmeldungen.
+# Genau wie `Linux` im dmesg steht und nicht im Startbildschirm.
+#
+# RUNDE MARKE: in dieser Datei steht deshalb KEIN Produktname mehr,
+# auch nicht im Kommentar. Ein Kommentar, der den alten Namen nennt,
+# ist nach der ersten Umbenennung schlicht falsch -- und er stuende
+# ausgerechnet in der Datei, die der Bau fuer jede Marke neu schreibt.
+# `docs/NAMING.md` steht dem nicht
 # entgegen: jenes Dokument regelt DEUTSCH GEGEN ENGLISCH in Pfaden und
 # Anzeigetexten, nicht den Produktnamen.
 timeout: 10
 default_entry: 1
 verbose: yes
 
-/OrientOS -- Hardware-Diagnose (bleibt stehen)
+/@MARKE_PRODUKT@ -- Hardware-Diagnose (bleibt stehen)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
@@ -526,13 +566,13 @@ verbose: yes
 # WARUM ZWEI EINTRAEGE UND NICHT EINER: der erste fasst nichts an und
 # kann deshalb nicht haengen. Wenn dieser hier auf einem fremden Brett
 # stehenbleibt, ist der andere immer noch da.
-/OrientOS -- USB-Diagnose: Regler uebernehmen und jeden Anschluss zeigen
+/@MARKE_PRODUKT@ -- USB-Diagnose: Regler uebernehmen und jeden Anschluss zeigen
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
     cmdline: hwdiag usb hidgen usbleg usbstop gfx nokbd nosched noproc nofs noring3
 
-/OrientOS -- Diagnose und danach der Schreibtisch
+/@MARKE_PRODUKT@ -- Diagnose und danach der Schreibtisch
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
@@ -543,7 +583,7 @@ verbose: yes
 # Terminal darin konnte `dhcp` nicht fahren -- der Stapel stand gar
 # nicht. Die Adresse ist dieselbe verbindungslokale Platzhalteradresse
 # wie im Kommandozeilen-Eintrag; `dhcp` ersetzt sie.
-/OrientOS -- nur der Schreibtisch (deutsch)
+/@MARKE_PRODUKT@ -- nur der Schreibtisch (deutsch)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
@@ -558,13 +598,13 @@ verbose: yes
 # umstellen kann, braucht Maus oder Tastatur -- also genau das, was bei
 # Justin klemmt. `lang=en` setzt die Datei VOR dem ersten
 # Ring-3-Programm; sonst aendert sich an diesem Eintrag nichts.
-/OrientOS -- desktop only (English)
+/@MARKE_PRODUKT@ -- desktop only (English)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
     cmdline: modfs osum gfx wm wig desk wmshell wmdauer usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs lang=en
 
-/OrientOS -- Vektoreinheit pruefen (bleibt stehen)
+/@MARKE_PRODUKT@ -- Vektoreinheit pruefen (bleibt stehen)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
@@ -595,7 +635,7 @@ verbose: yes
 #     osum$ fetch https://store.fleitec.com/index.json
 #     osum$ ota suchen
 #     osum$ jarvisd -n
-/OrientOS -- Kommandozeile mit Netz (dhcp, host, fetch, ota, jarvisd)
+/@MARKE_PRODUKT@ -- Kommandozeile mit Netz (dhcp, host, fetch, ota, jarvisd)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
@@ -617,7 +657,7 @@ verbose: yes
 # `usb hidgen` steht mit drin, obwohl niemand tippen muss: findet der
 # Baum Tastatur und Maus, sagt der Bericht das mit -- und dann weiss
 # Justin im selben Foto, ob die Uebernahme dieser Runde greift.
-/OrientOS -- Netz-Selbstlauf ohne Tastatur (dhcp, host, fetch, ota)
+/@MARKE_PRODUKT@ -- Netz-Selbstlauf ohne Tastatur (dhcp, host, fetch, ota)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
@@ -634,20 +674,30 @@ verbose: yes
 #
 # Passt die Aufloesung dem Bildschirm nicht, faellt Limine auf seine
 # Vorgabe zurueck; es bleibt also immer ein Bild.
-/OrientOS -- Schreibtisch auf einem WQHD-Schirm (2560x1440)
+/@MARKE_PRODUKT@ -- Schreibtisch auf einem WQHD-Schirm (2560x1440)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
     resolution: 2560x1440
     cmdline: modfs osum gfx wm wig desk wmshell wmdauer usb hidgen nosched noproc nofs
 
-/OrientOS -- Schreibtisch auf einem 4K-Schirm (3840x2160)
+/@MARKE_PRODUKT@ -- Schreibtisch auf einem 4K-Schirm (3840x2160)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
     resolution: 3840x2160
     cmdline: modfs osum gfx wm wig desk wmshell wmdauer usb hidgen nosched noproc nofs
 EOF
+
+# Und JETZT der Name hinein. `@MARKE_PRODUKT@` ist der einzige
+# Platzhalter in dieser Datei; bleibt einer stehen, bricht der Bau ab --
+# ein Bootmenue, in dem "@MARKE_PRODUKT@" steht, waere schlimmer als
+# eines mit dem alten Namen.
+sed -i "s|@MARKE_PRODUKT@|$MARKE_PRODUKT|g" "$OUT/limine.conf" \
+    || fehler "der Produktname liess sich nicht in limine.conf einsetzen"
+if grep -q '@MARKE_PRODUKT@' "$OUT/limine.conf"; then
+    fehler "in limine.conf steht noch ein Platzhalter"
+fi
 
 # ================================================== 7. das Abbild
 FS_MIB=$(( ( $(stat -c%s "$OUT/root.img") + 1048575 ) / 1048576 ))
