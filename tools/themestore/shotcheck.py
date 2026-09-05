@@ -200,7 +200,7 @@ def main(argv):
         print(__doc__)
         return 2
     pic = Pic(argv[1])
-marke = "settings: rect name=waa "
+    marke = "settings: rect name=waa "
     for a in argv[3:]:
         if a.startswith("--cut="):
             marke = a[6:]

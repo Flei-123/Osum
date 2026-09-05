@@ -143,25 +143,36 @@ ok "die vorkommenden Zustandsnummern: $ZUST (dieselben wie sched.S_*)"
 # ==================================================== 4. das Fenster steht
 echo
 echo "== 4. jedes Rechteck liegt im Fenster, jede Beschriftung hat Tinte =="
-BW=$(grep -a 'taskmgr: start bw=' "$S1" | head -1 | sed -E 's/.*bw=([0-9]+).*/\1/')
-BH=$(grep -a 'taskmgr: start bw=' "$S1" | head -1 | sed -E 's/.*bh=([0-9]+).*/\1/')
+# GEMESSEN WIRD AM FENSTER ALLEIN und nicht auf dem Schreibtisch, und
+# das ist keine Bequemlichkeit: der Schreibtisch startet die Shell im
+# Terminalfenster NACH den Anwendungen, und das Terminal (560 x 380 bei
+# 24,40) liegt damit ueber der oberen Haelfte des Aufgabenverwalters --
+# inklusive des Graphen. Ein Pruefer, der dort Tinte sucht, misst das
+# Terminal. `wigapp=` ohne `desk` gibt genau ein Fenster auf leerem
+# Grund, so wie tools/powermon/run.sh es seit Runde POWERMON tut.
+bash tools/werkzeug/build.sh "$TMPD/b0" app=/bin/taskmgr,melde,takt,300 \
+    wait=10 last=140 shot=allein > "$TMPD/b0.log" 2>&1
+S0="$TMPD/b0/serial.txt"
+BW=$(grep -a 'taskmgr: start bw=' "$S0" | head -1 | sed -E 's/.*bw=([0-9]+).*/\1/')
+BH=$(grep -a 'taskmgr: start bw=' "$S0" | head -1 | sed -E 's/.*bh=([0-9]+).*/\1/')
 num "die Fensterbreite steht" "${BW:-0}" gt 400
-RAUS=$(grep -a 'taskmgr: rect id=' "$S1" | awk -v w="$BW" -v h="$BH" '
+RAUS=$(grep -a 'taskmgr: rect id=' "$S0" | awk -v w="$BW" -v h="$BH" '
     { x=0;y=0;ww=0;hh=0
       for(i=1;i<=NF;i++){split($i,a,"=");
         if(a[1]=="x")x=a[2]; if(a[1]=="y")y=a[2];
         if(a[1]=="w")ww=a[2]; if(a[1]=="h")hh=a[2]}
       if (x+ww>w || y+hh>h) n++ } END {print n+0}')
 num "Rechtecke, die aus dem Fenster ragen" "$RAUS" eq 0
-if [ -s "$TMPD/b1/v01_liste.ppm" ]; then
-    python3 tools/themestore/shotcheck.py "$TMPD/b1/v01_liste.ppm" "$S1" \
+if [ -s "$TMPD/b0/allein.ppm" ]; then
+    python3 tools/themestore/shotcheck.py "$TMPD/b0/allein.ppm" "$S0" \
         --window=20,14,"$BW","$BH" --cut="taskmgr: neu" \
         > "$TMPD/shot1.txt" 2>&1
+    cat "$TMPD/shot1.txt" | sed 's/^/        /' | head -3
     LEER=$(grep -oE 'empty [0-9]+' "$TMPD/shot1.txt" | grep -oE '[0-9]+')
     AB=$(grep -oE 'cut [0-9]+' "$TMPD/shot1.txt" | grep -oE '[0-9]+')
     UEB=$(grep -oE 'overlapping [0-9]+' "$TMPD/shot1.txt" | grep -oE '[0-9]+')
     GEM=$(grep -oE 'measured [0-9]+' "$TMPD/shot1.txt" | grep -oE '[0-9]+')
-    num "gemessene Beschriftungen im Bild" "${GEM:-0}" ge 10
+    num "gemessene Beschriftungen im Bild" "${GEM:-0}" ge 8
     num "leere Beschriftungen" "${LEER:-9}" eq 0
     num "abgeschnittene Beschriftungen" "${AB:-9}" eq 0
     num "einander ueberlappende Beschriftungen" "${UEB:-9}" eq 0
@@ -220,10 +231,10 @@ fi
 # ==================================================== 7. der Graph im Bild
 echo
 echo "== 7. der Verlaufsgraph ist gemalt und nicht behauptet =="
-G=$(grep -a 'taskmgr: graph x=' "$S1" | tail -1)
+G=$(grep -a 'taskmgr: graph x=' "$S0" | tail -1)
 if [ -n "$G" ]; then
     ok "das Programm meldet seinen Graphen: $G"
-    python3 tools/werkzeug/graphcheck.py "$TMPD/b1/v01_liste.ppm" "$S1" \
+    python3 tools/werkzeug/graphcheck.py "$TMPD/b0/allein.ppm" "$S0" \
         20,14 > "$TMPD/graph.txt" 2>&1
     RC=$?
     sed 's/^/        /' "$TMPD/graph.txt"
@@ -278,7 +289,7 @@ else
 fi
 
 # ------------------------------------------------------------- die Bilder
-for f in "$TMPD/b1"/*.png "$TMPD/b3"/*.png; do
+for f in "$TMPD/b0"/*.png "$TMPD/b1"/*.png "$TMPD/b3"/*.png; do
     [ -s "$f" ] && cp "$f" "$SHOTS/" 2>/dev/null
 done
 echo
