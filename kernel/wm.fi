@@ -72,10 +72,12 @@ import netmark
 import ttf
 import utf8
 import ps2m
+import time // RUNDE ALLTAG: der Leerlaufzaehler der Sperre
 import arch.arch
 import tile
 
 export {
+    sperre_an, sperrer, sperr_platz, darf, eingabe_gesehen,
     init, ready, compose, damage, damage_all, dirty_x0, dirty_y0,
     dirty_x1, dirty_y1,
     create, destroy, valid, count, focus, set_focus, raise_win,
@@ -3390,7 +3392,14 @@ fn compose(state: u64) -> u64 {
         // Runde TILING hatte dafuer ein eigenes Wort, aber "minimiert"
         // und "hinter einem Reiter" muessen sich getrennt aufheben
         // lassen.
-        if i < MAX_WIN && (wg(state, i, W_FLAGS) & (F_HIDDEN | F_TABBED)) == 0 {
+        // RUNDE ALLTAG: WAEHREND DER SPERRE WIRD NUR DER SPERRER
+        // GEMALT. Eine Ebene ueber allem waere zu wenig: der Starter
+        // liegt auch oben, und im ersten Anlauf stand er im Bild des
+        // Sperrbildschirms. Was nicht dem Sperrer gehoert, ist waehrend
+        // der Sperre nicht auf dem Schirm -- und der Inhalt eines
+        // fremden Fensters ist damit auch nicht ablesbar.
+        if i < MAX_WIN && (wg(state, i, W_FLAGS) & (F_HIDDEN | F_TABBED)) == 0
+            && darf(state, i) {
             paint_win(state, i, x0, y0, x1, y1)
         }
         z = z + 1
@@ -4664,6 +4673,13 @@ fn on_mouse(state: u64) {
     if i >= MAX_WIN {
         return
     }
+    // RUNDE ALLTAG: waehrend die Sperre steht, bekommt nur der Sperrer
+    // etwas. Die Bewegung des Zeigers selbst laeuft weiter (sonst
+    // klebte er fest), die EREIGNISSE gehen nicht hinaus.
+    eingabe_gesehen(state)
+    if !darf(state, i) {
+        return
+    }
     ss(state, S_HITS, gs(state, S_HITS) + 1)
     let lokal_x: i64 = x - win_x(state, i) - inx(state, i) as i64
     let lokal_y: i64 = y - win_y(state, i) - iny(state, i) as i64
@@ -4775,24 +4791,86 @@ fn on_mouse(state: u64) {
 
 // Eine Taste. Sie geht an das Fenster mit dem EINGABEFOKUS -- und mit
 // `nofocus` an alle, damit die Zusage darueber etwas wert ist.
+// ============================================ RUNDE ALLTAG: DIE SPERRE
+//
+// Sie steht hier, wo die Eingabe ihren Weg zu einem Fenster nimmt --
+// das ist die einzige Stelle, an der sie WIRKT. Ein Sperrbildschirm,
+// der nur ein Fenster ganz vorne ist, ist ein Vorhang: das Fenster
+// darunter bekommt jede Taste weiter, und wer den Vorhang abschiesst,
+// steht in der Sitzung. Hier bekommt es sie nicht.
+fn sperre_an(state: u64) -> bool {
+    return kstate.get(state, kstate.K11_OFF + kstate.SP_ON) != 0
+}
+
+fn sperrer(state: u64) -> u64 {
+    return kstate.get(state, kstate.K11_OFF + kstate.SP_PID)
+}
+
+// Der PLATZ des Sperrers in der Aufgabentafel -- das ist die Zahl, die
+// in `W_OWNER` steht. Die Prozessnummer daneben ist die, die Ring 3
+// sieht; sie sind NICHT dasselbe, und der erste Anlauf hat sie
+// verwechselt: der Sperrbildschirm war danach unsichtbar, weil sein
+// eigenes Fenster ihm nicht zu gehoeren schien.
+fn sperr_platz(state: u64) -> u64 {
+    return kstate.get(state, kstate.K11_OFF + kstate.SP_SLOT)
+}
+
+// Darf dieses Fenster jetzt etwas bekommen? Ohne Sperre: jedes. Mit
+// Sperre: nur, was dem Sperrer gehoert.
+fn darf(state: u64, i: u64) -> bool {
+    if !sperre_an(state) {
+        return true
+    }
+    let p: u64 = sperr_platz(state)
+    if sperrer(state) == 0 {
+        return false
+    }
+    return wg(state, i, W_OWNER) == p
+}
+
+fn eingabe_gesehen(state: u64) {
+    kstate.set(state, kstate.K11_OFF + kstate.SP_LAST, time.mono_ns(state))
+}
+
 fn on_key(state: u64, c: u64) {
     if !ready(state) || c == 0 {
         return
     }
+    eingabe_gesehen(state)
     // RUNDE MESSTAFEL, Stufe 3 fuer die Tastatur.
     ss(state, S_KEYIN, gs(state, S_KEYIN) + 1)
     if gs(state, S_NOFOCUS) != 0 {
         var i: u64 = 0
         while i < MAX_WIN {
-            if wg(state, i, W_USED) != 0 {
+            if wg(state, i, W_USED) != 0 && darf(state, i) {
                 ev_push(state, i, E_KEY, c, 0, 0)
             }
             i = i + 1
         }
         return
     }
+    // RUNDE ALLTAG: WAEHREND DER SPERRE GEHT DIE TASTE AN DEN SPERRER,
+    // ohne nach dem Fokus zu fragen.
+    //
+    // Sein Fenster liegt auf der obersten Ebene, und Fenster dieser
+    // Ebene bekommen den Fokus mit Absicht NICHT (das ist die Regel,
+    // die die Taskleiste braucht). Der erste Anlauf hat deshalb jede
+    // Taste weggeworfen: der Sperrbildschirm stand da und nahm kein
+    // Kennwort an. Gemessen mit `sendkey`.
+    if sperre_an(state) {
+        var k: u64 = 0
+        while k < MAX_WIN {
+            if wg(state, k, W_USED) != 0 && darf(state, k) {
+                ev_push(state, k, E_KEY, c, 0, 0)
+                k = MAX_WIN
+            } else {
+                k = k + 1
+            }
+        }
+        return
+    }
     let f: u64 = focus(state)
-    if f < MAX_WIN {
+    if f < MAX_WIN && darf(state, f) {
         ev_push(state, f, E_KEY, c, 0, 0)
     }
 }

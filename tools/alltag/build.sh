@@ -67,6 +67,7 @@ xdirs=""
 desk_on=yes
 moncmds=""
 kbd_on=no
+warten=0
 keep=no
 progs="desktop taskbar settings launcher theme explorer rechner zip sh echo ls cat mkdir rm cp diff"
 for a in "$@"; do
@@ -92,6 +93,7 @@ for a in "$@"; do
         mon=*) moncmds="$moncmds
 ${a#*=}" ;;
         kbd=*) kbd_on=${a#*=} ;;
+        warten=*) warten=${a#*=} ;;
         uitrace=*) uitrace=${a#*=} ;;
         xscheme=*) xscheme=${a#*=} ;;
         xfile=*) xfiles="$xfiles ${a#*=}" ;;
@@ -312,6 +314,10 @@ fi
 # `sendkey shift-delete` ist der einzige Weg, Umschalt+Entf zu
 # schicken, und ohne ihn waere die Zusage "Umschalt+Entf loescht
 # endgueltig" eine Behauptung.
+# RUNDE ALLTAG: dem Gast Zeit lassen. Ein Programm, das eine Aufnahme
+# macht und eine Datei schreibt, ist nicht fertig, wenn der
+# Fensterserver "hold" sagt.
+[ "$warten" != 0 ] && sleep "$warten"
 if [ -n "$moncmds" ]; then
     printf '%s\n' "$moncmds" | grep -v '^$' > "$OUT/mon2.txt"
     python3 tools/wm/monitor.py "$SOCK" "$OUT/mon2.txt" > "$OUT/mon2.log" 2>&1

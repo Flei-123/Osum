@@ -1933,6 +1933,10 @@ fn surface(state: u64) {
                 }
             }
             wm.poll(state)
+            // RUNDE ALLTAG: auch die Halteschleife ist eine Schleife,
+            // in der der Sperrer sterben kann -- und die Abnahme
+            // dieser Runde laeuft genau in ihr.
+            sperre_wache(state)
             wm.compose(state)
             sched.sleep_ticks(state, 1)
         }
@@ -2727,6 +2731,55 @@ fn k15_start(state: u64) -> u64 {
 // wie oft Ring 3 ein Rechteck herueber geschoben hat, `pixels` wie viele
 // Bildpunkte das waren -- und das ist NICHT dasselbe wie die Bildpunkte,
 // die der Server danach zusammengesetzt hat.
+// RUNDE ALLTAG: nachsehen, ob der Sperrer noch da ist.
+//
+// Nicht in jeder Runde: `find_pid` laeuft ueber die Aufgabentafel, und
+// die Schleife hier dreht sich hundertmal in der Sekunde. Alle 32
+// Runden reicht -- laenger als ein Wimpernschlag ist die Luecke nie,
+// und in dieser Luecke ist die Sperre trotzdem dicht (der
+// Fensterserver laesst nichts durch, wm.darf).
+static mut sp_takt: u64 = 0
+
+fn sperre_wache(state: u64) {
+    if !wm.sperre_an(state) {
+        return
+    }
+    sp_takt = sp_takt + 1
+    if (sp_takt & 31) != 0 {
+        return
+    }
+    // "LEBT NOCH" HEISST NICHT "STEHT NOCH IN DER TAFEL".
+    //
+    // Eine gestorbene Aufgabe bleibt als LEICHE (S_ZOMBIE) darin
+    // stehen, bis jemand ihren Ausgang abholt -- `find_pid` findet sie
+    // also weiter. Der erste Anlauf hat den Sperrer deshalb nie neu
+    // gestartet: er war tot und trotzdem "da". Gemessen an
+    // `lock -absturz`: user fault, und danach ein Bildschirm, auf dem
+    // nichts mehr steht.
+    let pid: u64 = wm.sperrer(state)
+    if pid != 0 {
+        let t: u64 = sched.find_pid(state, pid)
+        if t < kstate.MAX_TASKS {
+            let z: u64 = sched.tget(state, t, sched.T_STATE)
+            if z != sched.S_ZOMBIE && z != sched.S_FREE {
+                return
+            }
+        }
+    }
+    var p_lock: [u8; 10] = "/bin/lock\0"
+    var a_lock: [u8; 5] = "lock\0"
+    let neu: u64 = desk_spawn(state, (&p_lock[0]) as u64,
+        (&a_lock[0]) as u64, 5)
+    kstate.set(state, kstate.K11_OFF + kstate.SP_PID, neu)
+    kstate.set(state, kstate.K11_OFF + kstate.SP_SLOT,
+        sched.find_pid(state, neu))
+    kstate.add(state, kstate.K11_OFF + kstate.SP_SPAWNS, 1)
+    var s_w: [u8; 26] = "sperre: Sperrer neu, pid=\0"
+    serial.puts((&s_w[0]) as u64)
+    serial.dec(neu)
+    serial.nl()
+}
+
 fn say_wig(state: u64) {
     var s_a: [u8; 12] = "wig: blits=\0"
     var s_b: [u8; 10] = "  rows=\0\0\0"
@@ -2886,6 +2939,15 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         usb.hotplug_work(state)
         st(34)
         wm.poll(state)
+        // ==================================== RUNDE ALLTAG: DIE SPERRE
+        //
+        // DER AUSFALLZUSTAND, und er ist der ganze Grund, warum diese
+        // fuenf Zeilen im KERN stehen und nicht im Sperrprogramm:
+        // stirbt der Sperrer, waehrend die Sperre steht -- abgeschossen,
+        // abgestuerzt, egal --, bleibt die Sperre STEHEN und der Kern
+        // startet ihn neu. Ein Sperrbildschirm, den man durch einen
+        // Absturz loswird, ist ein Bildschirmschoner.
+        sperre_wache(state)
         st(35)
         wm.compose(state)
         st(36)
