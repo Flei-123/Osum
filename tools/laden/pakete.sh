@@ -42,6 +42,14 @@ n=0
 while IFS='|' read -r paket programm fassung titel info keys art; do
     case "${paket:-}" in ""|\#*) continue ;; esac
     prog="$OUT/bin/$programm"
+    # RUNDE CERTUS-AUF-OSUM: der Browser ist das einzige Paket, dessen
+    # Quelltext ausserhalb dieses Baumes liegt (siehe build.sh). Ohne
+    # ihn wird das Paket ausgelassen und gesagt, dass es fehlt -- jedes
+    # andere fehlende Programm bleibt ein Abbruch.
+    if [ ! -x "$prog" ] && [ "$paket" = certus ]; then
+        echo "   certus    uebersprungen (kein /bin/certus gebaut)"
+        continue
+    fi
     [ -x "$prog" ] || { echo "== $prog fehlt -- tools/laden/build.sh baut es"; exit 1; }
     zeich="tools/laden/symbole/$paket.txt"
     [ -f "$zeich" ] || { echo "== $zeich fehlt"; exit 1; }
