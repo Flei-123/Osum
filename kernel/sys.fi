@@ -10171,20 +10171,53 @@ fn do_scan(state: u64, me: u64, curp: u64, dst: u64, max: u64) -> u64 {
     if !proc.user_ok(state, me, dst, n * nidx.REC) {
         return neg(errno.E_FAULT)
     }
+    // ================================================== RUNDE GLYPHE
+    // DER UMSCHLAGPUFFER GEHOERT DER GANZEN MASCHINE, UND ER HAT HIER
+    // EIN PROGRAMM UMGEBRACHT.
+    //
+    // `kstate.BLOCK_OFF` sind 4096 Oktett fuer den ganzen Rechner.
+    // Dieser Weg legt die Saetze des Namensindex hinein und gibt sie
+    // von dort an Ring 3. Mit `r3alle` laufen mehrere Ring-3-Programme
+    // auf mehreren Kernen; zwei davon in `scan` oder `jrnl`
+    // ueberschreiben einander die Saetze. GEMESSEN, voller
+    // Schreibtisch, `-smp 4 r3alle`, 20 Laeufe:
+    //
+    //   panic: integer overflow casting 'u64 as u32'
+    //   at kernel/user/nidx.fi:408
+    //
+    // Das ist `pino[] = read64(rec + R_PARENT) as u32` -- eine
+    // Inodenummer, die keine mehr war.
+    //
+    // Es ist dieselbe Fehlerform wie die Buehne dieser Runde und wie
+    // `fs.inode_get` aus VIELKERN 3, und es ist EINER der 43 Wege, die
+    // MERGE-6 in dieser Datei GEZAEHLT und nicht gesperrt hat. Die
+    // uebrigen 42 stehen weiter offen und werden in
+    // `tools/vielkern/einkern.py` gezaehlt; dieser hier ist der, der
+    // nachweislich zuschlaegt.
+    //
+    // `fs.enter` ist die richtige Sperre und nicht irgendeine: der
+    // Puffer gehoert dem Dateisystem, `fs.scan` nimmt sie ohnehin, und
+    // sie ist je Kern wiedereintrittsfaehig -- die innere `enter`
+    // sieht sich selbst und verklemmt sich nicht.
+    let fl: u64 = fs.enter(state)
     let cur: u64 = state + kstate.BLOCK_OFF
     let buf: u64 = cur + 64
     if !copy_in(state, me, cur, curp, 8) {
+        fs.leave(state, fl)
         return neg(errno.E_FAULT)
     }
     let got: u64 = fs.scan(state, cur, buf, n)
     if !copy_out(state, me, curp, cur, 8) {
+        fs.leave(state, fl)
         return neg(errno.E_FAULT)
     }
     if got != 0 {
         if !copy_out(state, me, dst, buf, got * nidx.REC) {
+            fs.leave(state, fl)
             return neg(errno.E_FAULT)
         }
     }
+    fs.leave(state, fl)
     return got
 }
 
@@ -10199,13 +10232,17 @@ fn do_jrnl(state: u64, me: u64, from: u64, dst: u64, max: u64) -> u64 {
     if !proc.user_ok(state, me, dst, n * nidx.REC) {
         return neg(errno.E_FAULT)
     }
+    // RUNDE GLYPHE: dieselbe Sperre wie in `do_scan`, derselbe Grund.
+    let fl: u64 = fs.enter(state)
     let buf: u64 = state + kstate.BLOCK_OFF
     let got: u64 = nidx.take(state, from, buf, n)
     if got != 0 {
         if !copy_out(state, me, dst, buf, got * nidx.REC) {
+            fs.leave(state, fl)
             return neg(errno.E_FAULT)
         }
     }
+    fs.leave(state, fl)
     return got
 }
 
