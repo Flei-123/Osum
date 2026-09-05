@@ -58,6 +58,13 @@ const A_MIXED: u64 = 31
 const A_CLIPS: u64 = 32
 const A_LOST: u64 = 42
 const A_ZEROED: u64 = 43
+// ---- RUNDE TON: die Messstrecke (siehe kernel/audio.fi)
+const A_GAPMAX: u64 = 50
+const A_SYSUS: u64 = 51
+const A_WALLUS: u64 = 52
+const A_CALLS: u64 = 53
+const A_MINFILL: u64 = 48
+const A_LOCKSPIN: u64 = 47
 
 const AS_OPEN: u64 = 1
 const AS_DRAIN: u64 = 3
@@ -93,6 +100,23 @@ static mut buf: [u8; 4608] = [0 as u8; 4608]
 // dieselbe Zahl, die der MP3-Weg schon immer hatte, weil sein
 // Dekodierer aus einem 64-KiB-Fenster liest.
 const RAWSZ: u64 = 65536
+
+// ---- RUNDE TON: die Stoppuhr von Ring 3 ---------------------------
+// Der Kern misst, wie lange ER braucht (kern_us). Diese Uhr misst, wo
+// die uebrige Zeit BLEIBT: im Lesen von der Platte, im Umrechnen oder
+// im Abschicken. Ohne diese Dreiteilung ist "Ring 3 ist zu langsam"
+// eine Vermutung und keine Messung.
+const SYS_CLOCK_GETTIME: u64 = 228
+const CLOCK_MONOTONIC: u64 = 1
+
+fn jetzt_us() -> u64 {
+    var ts: [u64; 2] = [0 as u64; 2]
+    if ulib.bad(ulib.sys(SYS_CLOCK_GETTIME, CLOCK_MONOTONIC,
+        (&ts[0]) as u64, 0)) {
+        return 0
+    }
+    return ts[0 as usize] *% 1000000 +% (ts[1 as usize] / 1000)
+}
 static mut raw: [u8; 65536] = [0 as u8; 65536]
 static mut rawlen: u64 = 0
 static mut rawpos: u64 = 0
@@ -320,6 +344,10 @@ fn u_start(args: u64) -> u64 {
     var lauf: bool = true
     var quelle: u64 = w_off
     var rest: u64 = w_len
+    var us_lesen: u64 = 0
+    var us_rechnen: u64 = 0
+    var us_senden: u64 = 0
+    var us_start: u64 = jetzt_us()
     var wart: u64 = 0
     while lauf {
         // 1. einen Schub bereitstellen
@@ -340,8 +368,10 @@ fn u_start(args: u64) -> u64 {
                     if uebrig > 0 {
                         ulib.copy(roh0, roh0 + rawpos, uebrig)
                     }
+                    let t_r: u64 = jetzt_us()
                     let neu: u64 = ulib.sys(ulib.SYS_READ, wfd,
                         roh0 + uebrig, RAWSZ - uebrig)
+                    us_lesen = us_lesen +% (jetzt_us() -% t_r)
                     if ulib.bad(neu) {
                         rawlen = uebrig
                     } else {
@@ -413,6 +443,7 @@ fn u_start(args: u64) -> u64 {
         //    beim naechsten Mal. NICHT warten: der Aufruf blockiert
         //    nicht, und ein Abspieler, der blockiert, kann kein Bild
         //    dekodieren.
+        let t_s: u64 = jetzt_us()
         var ab: u64 = 0
         while ab < n {
             var got: u64 = 0
@@ -458,6 +489,7 @@ fn u_start(args: u64) -> u64 {
         // selbst bremst): zwei Aussetzer. Mit WAV ohne diese Zeile:
         // 175.
         ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
+        us_senden = us_senden +% (jetzt_us() -% t_s)
         if ist_wav && rest == 0 {
             lauf = false
         }
@@ -551,11 +583,59 @@ fn u_start(args: u64) -> u64 {
     ulib.nl()
     var s_lo: [u8; 14] = "  verloren: \0\0"
     var s_zo: [u8; 13] = "  genullt: \0\0"
+    var s_gp: [u8; 14] = "  luecke_us: \0"
+    var s_sy: [u8; 13] = "  kern_us: \0\0"
+    var s_wl: [u8; 13] = "  wand_us: \0\0"
+    var s_ca: [u8; 12] = "  schuebe: \0"
+    var s_mf: [u8; 14] = "  minvorrat: \0"
+    var s_ls: [u8; 14] = "  drehungen: \0"
+    var s_r1: [u8; 14] = "  lesen_us: \0\0"
+    var s_r2: [u8; 15] = "  rechnen_us: \0"
+    var s_r3: [u8; 14] = "  senden_us: \0"
+    var s_r4: [u8; 14] = "  ring3_us: \0\0"
     ulib.say((&s_lo[0 as usize]) as u64)
     ulib.sayu(ulib.sys(SYS_AUDGET, A_LOST, 0, 0))
     ulib.nl()
     ulib.say((&s_zo[0 as usize]) as u64)
     ulib.sayu(ulib.sys(SYS_AUDGET, A_ZEROED, 0, 0))
+    ulib.nl()
+    // DIE VIER ZAHLEN, DIE EINEN AUSSETZER ERKLAEREN. luecke_us ist
+    // die groesste Pause zwischen zwei Schueben; ist sie groesser als
+    // die Ringlatenz, kam Ring 3 zu spaet. kern_us gegen wand_us sagt,
+    // wie viel davon der Kern selbst verbraucht hat.
+    ulib.say((&s_gp[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(SYS_AUDGET, A_GAPMAX, 0, 0))
+    ulib.nl()
+    ulib.say((&s_sy[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(SYS_AUDGET, A_SYSUS, 0, 0))
+    ulib.nl()
+    ulib.say((&s_wl[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(SYS_AUDGET, A_WALLUS, 0, 0))
+    ulib.nl()
+    ulib.say((&s_ca[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(SYS_AUDGET, A_CALLS, 0, 0))
+    ulib.nl()
+    ulib.say((&s_mf[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(SYS_AUDGET, A_MINFILL, 0, 0))
+    ulib.nl()
+    ulib.say((&s_ls[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(SYS_AUDGET, A_LOCKSPIN, 0, 0))
+    ulib.nl()
+    // WO DIE ZEIT BLEIBT. ring3_us ist die ganze Schleife; lesen,
+    // rechnen und senden teilen sie auf. Was uebrig bleibt, ist die
+    // Schleife selbst.
+    us_rechnen = (jetzt_us() -% us_start) -% us_lesen -% us_senden
+    ulib.say((&s_r1[0 as usize]) as u64)
+    ulib.sayu(us_lesen)
+    ulib.nl()
+    ulib.say((&s_r2[0 as usize]) as u64)
+    ulib.sayu(us_rechnen)
+    ulib.nl()
+    ulib.say((&s_r3[0 as usize]) as u64)
+    ulib.sayu(us_senden)
+    ulib.nl()
+    ulib.say((&s_r4[0 as usize]) as u64)
+    ulib.sayu(jetzt_us() -% us_start)
     ulib.nl()
     let gp: u64 = gespielt
     if gp == 0 {

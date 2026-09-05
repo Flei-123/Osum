@@ -104,6 +104,8 @@ import mix
 import mem
 import time
 import arch.arch
+import atomic
+import cpu
 
 export {
     init, ready, why, backend,
@@ -130,7 +132,14 @@ export {
     A_WRITES, A_MASTERREG, A_PCMREG, A_BACKSTEPS,
     A_STREAMS, A_MIXED, A_CLIPS, A_MIXUNDER, A_DISAGREE, A_IRQARMED,
     A_CMDPATH, A_DAC, A_PIN, A_PATHLEN, A_WIDGETS, A_CODECADDR, A_LOST, A_ZEROED,
-    A_COUNT
+    A_VOLGEN, A_CLICKS, A_TICKSKIP, A_LOCKSPIN, A_MINFILL, A_SYSSOUNDS,
+    A_GAPMAX, A_SYSUS, A_WALLUS, A_CALLS,
+    mark_write, mark_done, gap_max, sys_us, wall_us, calls, mess_reset,
+    A_COUNT,
+    // ---- RUNDE TON ----
+    hold, drop, try_hold, release, lock_spins, tick_skips, min_fill,
+    sys_sound, click, sys_sounds, set_clicks, clicks_on, volgen, close_pid,
+    SND_CLICK, SND_NOTE, SND_ERROR
 }
 
 // Welcher Treiber unter der Grenze steht. Die Zahl geht bis Ring 3
@@ -188,7 +197,19 @@ const A_WIDGETS: u64 = 40
 const A_CODECADDR: u64 = 41
 const A_LOST: u64 = 42 // Rahmen, die nach einem Aussetzer aufgegeben wurden
 const A_ZEROED: u64 = 43 // vorausgenullte Rahmen
-const A_COUNT: u64 = 44
+// ---- RUNDE TON ----
+const A_VOLGEN: u64 = 44 // Aenderungszaehler von Master/Stumm (Ring 3 fragt ab)
+const A_CLICKS: u64 = 45 // Klickton an/aus
+const A_TICKSKIP: u64 = 46 // Zeitgeberschlaege, die die Sperre besetzt fanden
+const A_LOCKSPIN: u64 = 47 // Wartedrehungen an der Tonsperre, gesamt
+const A_MINFILL: u64 = 48 // kleinster Vorrat im Ring seit dem Start (Rahmen)
+const A_SYSSOUNDS: u64 = 49 // Systemklaenge, die durch den Mischer gingen
+// ---- RUNDE TON, die Messstrecke ----
+const A_GAPMAX: u64 = 50 // groesste Pause zwischen zwei Schueben (us)
+const A_SYSUS: u64 = 51 // Zeit IN den Ton-Systemaufrufen (us)
+const A_WALLUS: u64 = 52 // erster bis letzter Schub (us)
+const A_CALLS: u64 = 53 // Zahl der Schuebe
+const A_COUNT: u64 = 54
 
 // Die Skalare der Schicht. Sie liegen in derselben kdata-Seite wie die
 // des Treibers, aber in einem eigenen Block ab 0x400 -- der Treiber
@@ -209,6 +230,29 @@ const L_ZEROED: u64 = 0x60 // vorausgenullte Rahmen, gesamt
 const L_IDLE: u64 = 0x68 // Zeitgeberschlaege ohne Nachschub
 const L_PHASE: u64 = 0x40 // Phase des laufenden Tons, damit zwei
                           // Aufrufe hintereinander keinen Sprung haben
+// ---- RUNDE TON: die Sperre, der Master, die Zaehler ----
+const L_LOCK: u64 = 0x70 // die Tonsperre (0 = frei, sonst Kern + 1)
+const L_MASTER: u64 = 0x78 // der Master in Prozent, 0..100, LINEAR
+const L_MMUTE: u64 = 0x80 // Master stumm
+const L_CLICKS: u64 = 0x88 // Klickton an (1) oder aus (0)
+const L_VOLGEN: u64 = 0x90 // zaehlt jede Aenderung an Master/Stumm
+const L_SYSSND: u64 = 0x98 // Systemklaenge durch den Mischer
+// ---- RUNDE TON, die Messstrecke ----
+// GEMESSEN UND KORRIGIERT: erst lagen diese fuenf auf 0xA0..0xC0 --
+// GENAU dort, wo L_TICKSKIP, L_LOCKSPIN, L_MINFILL und L_SNDPH schon
+// standen. Die Folge war kein Absturz, sondern etwas Schlimmeres: der
+// Pruefer las fuer "Wartedrehungen" und "groesste Luecke" DIESELBE Zahl
+// (130560) und haette sie fast geglaubt. Zwei Namen auf einem Versatz
+// sind eine Messluege. Jetzt ab 0xC8, hinter allem Bestehenden.
+const L_LASTNS: u64 = 0xC8 // Uhr beim letzten Schub
+const L_GAPMAX: u64 = 0xD0 // groesste Pause dazwischen, in us
+const L_SYSUS: u64 = 0xD8 // Zeit in den Aufrufen, us
+const L_FIRSTNS: u64 = 0xE0 // Uhr beim ersten Schub
+const L_CALLS: u64 = 0xE8 // Zahl der Schuebe
+const L_TICKSKIP: u64 = 0xA0 // Schlaege, die die Sperre besetzt fanden
+const L_LOCKSPIN: u64 = 0xA8 // Wartedrehungen an der Sperre
+const L_MINFILL: u64 = 0xB0 // kleinster Vorrat im Ring seit dem Start
+const L_SNDPH: u64 = 0xB8 // Phase des Systemklangs
 
 // Wie voll der Ring hoechstens werden darf. Ein Eintrag bleibt frei:
 // der Regler holt sich seine Oktette in Schueben, und in genau den
@@ -404,6 +448,12 @@ fn hw_set_rate(state: u64, hz: u64) -> bool {
 fn init(state: u64) -> bool {
     s(state, L_BACKEND, B_NONE)
     s(state, L_SOUNDS, 1) // Systemklaenge sind an, bis jemand sie abstellt
+    s(state, L_MASTER, 100)
+    s(state, L_MMUTE, 0)
+    s(state, L_CLICKS, 1)
+    s(state, L_LOCK, 0)
+    s(state, L_VOLGEN, 0)
+    s(state, L_MINFILL, 0xFFFFFFFFFFFFFFFF)
     s(state, L_RATE, ac97.RATE)
     mix.init(state)
     if !kstate.mode_on(state, kstate.M_NOHDA) {
@@ -433,6 +483,22 @@ fn tick(state: u64) {
     if g(state, L_BACKEND) == B_NONE {
         return
     }
+    // RUNDE TON: DIE SPERRE, UND SIE WIRD HIER NUR VERSUCHT. Der
+    // Schlag laeuft mit IF=0 im Unterbrechungsbehandler; auf sie zu
+    // WARTEN hiesse, den Zeitgeber dieses Kerns anzuhalten, solange
+    // ein anderer Kern einen Systemaufruf des Tons abarbeitet. Ein
+    // ausgelassener Schlag kostet nichts: der naechste kommt in 10 ms,
+    // der Ring traegt 85, und wer die Sperre hatte, hat die Uhr
+    // selbst abgelesen. Gezaehlt wird es trotzdem (A_TICKSKIP).
+    if !try_hold(state) {
+        s(state, L_TICKSKIP, g(state, L_TICKSKIP) + 1)
+        return
+    }
+    tick_locked(state)
+    release(state)
+}
+
+fn tick_locked(state: u64) {
     // AUFRAEUMEN AUCH DANN, WENN NICHTS LAEUFT. Ein Strom, dessen
     // Programm sich verabschiedet hat, muss auch dann geschlossen
     // werden, wenn der Regler gerade steht -- sonst haelt ein
@@ -442,6 +508,14 @@ fn tick(state: u64) {
         return
     }
     samples_played(state)
+    // Der kleinste Vorrat, den der Zeitgeber je gesehen hat -- die
+    // Zahl, an der man einen Aussetzer KOMMEN sieht, bevor er da ist.
+    if g(state, L_STARTED) != 0 {
+        let vorrat: u64 = remaining(state)
+        if vorrat < g(state, L_MINFILL) {
+            s(state, L_MINFILL, vorrat)
+        }
+    }
     zero_ahead(state)
     if mix.streams(state) != 0 {
         mix_pump(state)
@@ -774,33 +848,112 @@ fn beeps(state: u64) -> u64 {
     return g(state, L_BEEPS)
 }
 
+// ================================= RUNDE TON: DER MASTER IN SOFTWARE
+//
+// Runde HDA drehte am Verstaerker des Codecs (`hw_volume`). Das ist auf
+// jedem Codec eine ANDERE Kurve: QEMUs hda-duplex rechnet die Schritte
+// linear in eine Amplitude um, ein Realtek hat 1,5-dB-Stufen, AC97 hat
+// 63 Stufen zu 1,5 dB -- und 50 Prozent hiessen auf jedem etwas
+// anderes. Ein Regler, dessen Wirkung vom Chip abhaengt, ist nicht
+// messbar; dieser hier ist es: der Master ist ein linearer Faktor auf
+// die Abtastwerte, EINMAL angewandt beim Kopieren in den Geraetering
+// (`write_kernel`), also fuer den Einstromweg und den Mischerweg
+// gleich. 50 Prozent sind die halbe Amplitude, also -6,02 dB, auf
+// jedem Codec der Welt; `tools/ton/run.sh` misst genau das.
+//
+// 100 Prozent kosten NICHTS: dann kopiert `write_kernel` wie bisher
+// wortweise, und die Bitgleichheit der Zusage (a) bleibt eine
+// Bitgleichheit. Der Verstaerker des Codecs bleibt auf dem Nullpunkt
+// (0 dB), wie `hda.init`/`ac97.init` ihn setzen; das Stummschalten
+// geht ZUSAETZLICH an den Codec, weil ein stummes Register ein
+// besserer Schalter ist als lauter Nullen.
 fn set_volume(state: u64, pct: u64) {
-    hw_volume(state, pct)
+    var v: u64 = pct
+    if v > 100 {
+        v = 100
+    }
+    s(state, L_MASTER, v)
+    s(state, L_VOLGEN, g(state, L_VOLGEN) + 1)
 }
 
 fn volume(state: u64) -> u64 {
-    let b: u64 = g(state, L_BACKEND)
-    if b == B_HDA {
-        return hda.volume(state)
-    }
-    return ac97.volume(state)
+    return g(state, L_MASTER)
 }
 
 fn set_muted(state: u64, on: bool) {
+    if on {
+        s(state, L_MMUTE, 1)
+    } else {
+        s(state, L_MMUTE, 0)
+    }
+    s(state, L_VOLGEN, g(state, L_VOLGEN) + 1)
     let b: u64 = g(state, L_BACKEND)
     if b == B_HDA {
         hda.set_muted(state, on)
         return
     }
-    ac97.set_muted(state, on)
+    if b == B_AC97 {
+        ac97.set_muted(state, on)
+    }
 }
 
 fn muted(state: u64) -> bool {
-    let b: u64 = g(state, L_BACKEND)
-    if b == B_HDA {
-        return hda.muted(state)
+    return g(state, L_MMUTE) != 0
+}
+
+fn volgen(state: u64) -> u64 {
+    return g(state, L_VOLGEN)
+}
+
+fn set_clicks(state: u64, on: bool) {
+    if on {
+        s(state, L_CLICKS, 1)
+    } else {
+        s(state, L_CLICKS, 0)
     }
-    return ac97.muted(state)
+}
+
+fn clicks_on(state: u64) -> bool {
+    return g(state, L_CLICKS) != 0
+}
+
+// Der Faktor in Q8: 256 heisst unveraendert. Stumm ist null.
+fn master_q8(state: u64) -> u64 {
+    if g(state, L_MMUTE) != 0 {
+        return 0
+    }
+    return (g(state, L_MASTER) * 256) / 100
+}
+
+// Einen 16-Bit-Abtastwert (als 0..65535) mit dem Faktor Q8 skalieren.
+// Ueber den BETRAG, damit das Zweierkomplement nicht als grosse
+// positive Zahl geteilt wird -- dieselbe Regel wie `mix.scale`.
+fn scale16(v: u64, f: u64) -> u64 {
+    if f >= 256 {
+        return v & 0xFFFF
+    }
+    if f == 0 {
+        return 0
+    }
+    if (v & 0x8000) != 0 {
+        let m: u64 = (65536 -% (v & 0xFFFF)) & 0xFFFF
+        let r: u64 = (m * f) >> 8
+        return (65536 -% r) & 0xFFFF
+    }
+    return ((v & 0xFFFF) * f) >> 8
+}
+
+// Rahmen kopieren UND skalieren -- der Weg, den `write_kernel` nimmt,
+// sobald der Master unter 100 steht oder stumm ist.
+fn copy_scaled(src: u64, dst: u64, frames: u64, f: u64) {
+    var i: u64 = 0
+    while i < frames {
+        let w: u64 = kstate.get32(src + i * 4)
+        let l: u64 = scale16(w & 0xFFFF, f)
+        let r: u64 = scale16((w >> 16) & 0xFFFF, f)
+        __mmio_write32((dst + i * 4) as *mut u32, (l | (r << 16)) as u32)
+        i = i + 1
+    }
 }
 
 fn sounds_on(state: u64) -> bool {
@@ -865,7 +1018,14 @@ fn write_kernel(state: u64, src: u64, frames: u64) -> u64 {
         if chunk > n -% done {
             chunk = n -% done
         }
-        copy_octets(src + done * fo, ring + slot * fo, chunk * fo)
+        // RUNDE TON: der Master. 100 Prozent und nicht stumm ist der
+        // alte Weg, Wort fuer Wort und bitgleich.
+        let mq: u64 = master_q8(state)
+        if mq >= 256 {
+            copy_octets(src + done * fo, ring + slot * fo, chunk * fo)
+        } else {
+            copy_scaled(src + done * fo, ring + slot * fo, chunk, mq)
+        }
         done = done + chunk
     }
     s(state, L_WPOS, g(state, L_WPOS) + n)
@@ -1471,6 +1631,238 @@ fn error_beep(state: u64) -> bool {
     return beep(state, BEEP_HZ, BEEP_MS)
 }
 
+// ============================================ RUNDE TON: DIE SPERRE
+//
+// DER EIN-KERN-REST DER RUNDE HDA, beim Namen genannt: `audio.fi`,
+// `hda.fi` und `mix.fi` fuehren ihre Buchfuehrung in kdata -- den
+// Schreibzeiger, die Umlaufzaehlung der Position, die Lese- und
+// Schreibzeiger der vier Stroeme -- und Runde HDA hat sie von EINEM
+// Kern aus gemessen. `S_GUARD` in den Treibern war eine Antwort auf
+// den Zeitgeber, der auf demselben Kern in `position_frames`
+// hineinplatzt; gegen einen ZWEITEN Kern, der gleichzeitig `audsend`
+// ruft, ist ein Pruefen-dann-Setzen keine Sperre, sondern ein
+// Wettlauf. Seit VIELKERN laeuft Ring 3 auf allen Kernen.
+//
+// ALSO EINE SPERRE, dieselbe Bauart wie `inet.hold`: Unterbrechungen
+// aus, `cas` auf ein Wort in der Tonseite, Kern + 1 als Eigner. Sie
+// liegt NICHT in `atomic.LOCK_OFF`: dort sind acht Plaetze, alle
+// vergeben, und dahinter faengt TCPU_OFF an. Ein Wort in der eigenen
+// Seite tut dasselbe.
+//
+// WER SIE NIMMT: jeder Ton-Systemaufruf (`sys.do_aud*`), der
+// Klickton aus dem Fensterserver, und der Zeitgeberschlag -- der aber
+// nur mit `try_hold`, siehe `tick`. Die Messschleifen des Kerns in
+// `kmain.fi` (audsine, audmix ...) nehmen sie NICHT: sie laufen auf
+// dem Startprozessor vor der Shell, und ihr einziger Nebenlaeufer ist
+// derselbe Zeitgeber wie in Runde HDA, gegen den `S_GUARD` weiter
+// steht. Ihre Bitgleichheit ist die Gegenprobe dafuer, dass die
+// Sperre den Ton NICHT veraendert.
+const LOCK_STUCK: u64 = 60000000
+
+fn lock_addr(state: u64) -> u64 {
+    return state + kstate.AUD_OFF + L_OFF + L_LOCK
+}
+
+fn hold(state: u64) -> u64 {
+    let flags: u64 = asm("pushfq\npop rax\ncli", out("rax"))
+    let a: u64 = lock_addr(state)
+    let me: u64 = cpu.here(state) + 1
+    var spins: u64 = 0
+    while atomic.cas(a, 0, me) != 0 {
+        atomic.pause()
+        spins = spins + 1
+        if spins > LOCK_STUCK {
+            var s_st: [u8; 23] = "aud: lock stuck owner=\0"
+            serial.puts((&s_st[0]) as u64)
+            serial.dec(atomic.load(a))
+            serial.nl()
+            spins = 0
+        }
+    }
+    if spins > 0 {
+        s(state, L_LOCKSPIN, g(state, L_LOCKSPIN) + spins)
+    }
+    return flags
+}
+
+fn drop(state: u64, flags: u64) {
+    atomic.store(lock_addr(state), 0)
+    if (flags & 0x200) != 0 {
+        asm("sti")
+    }
+}
+
+// Ein Versuch ohne Warten und ohne die Flags anzufassen -- fuer den
+// Unterbrechungsbehandler, der mit IF=0 laeuft und es bleibt.
+fn try_hold(state: u64) -> bool {
+    return atomic.cas(lock_addr(state), 0, cpu.here(state) + 1) == 0
+}
+
+fn release(state: u64) {
+    atomic.store(lock_addr(state), 0)
+}
+
+fn lock_spins(state: u64) -> u64 {
+    return g(state, L_LOCKSPIN)
+}
+
+fn tick_skips(state: u64) -> u64 {
+    return g(state, L_TICKSKIP)
+}
+
+fn min_fill(state: u64) -> u64 {
+    return g(state, L_MINFILL)
+}
+
+// ============================= RUNDE TON: SYSTEMKLAENGE DURCH DEN MISCHER
+//
+// `beep` (oben) ist der Weg aus MEDIA1: Einstromweg, und still, sobald
+// jemand spielt. Fuer einen Klick- oder Hinweiston ist das die falsche
+// Regel -- er soll NEBEN der Musik zu hoeren sein, und genau dafuer
+// gibt es seit Runde HDA einen Mischer. Ein Systemklang ist hier ein
+// Strom mit der Prozessnummer 0, der in einem Zug geschrieben und
+// sofort als beendet markiert wird; `mix.reap` raeumt ihn weg, sobald
+// er leer gelesen ist. Er WARTET NIE: was nicht in den Strompuffer
+// passt (341 ms), passt in keinen Klick.
+//
+// DIE HUELLKURVE. Ein Sinus, der bei voller Amplitude anfaengt oder
+// aufhoert, ist ein Knack -- und ein Klickton, der knackt, ist ein
+// Fehler, den man fuer Absicht haelt. Also 2 ms Anstieg und ein
+// Abfall ueber das letzte Viertel, beides linear, je Abtastwert.
+const SND_CLICK: u64 = 0
+const SND_NOTE: u64 = 1
+const SND_ERROR: u64 = 2
+
+fn tone_env_into(state: u64, buf: u64, frames: u64, freq: u64, amp: u64,
+    phase0: u64, at: u64, total: u64) -> u64 {
+    let r: u64 = rate(state)
+    if r == 0 {
+        return phase0
+    }
+    let step: u64 = (freq * 4294967296 + r / 2) / r
+    let anstieg: u64 = r * 2 / 1000
+    let abfall: u64 = total / 4
+    var ph: u64 = phase0
+    var i: u64 = 0
+    while i < frames {
+        let k: u64 = at + i
+        var a: u64 = amp
+        if k < anstieg && anstieg > 0 {
+            a = (amp * (k + 1)) / anstieg
+        }
+        if k + abfall >= total && abfall > 0 {
+            let rest: u64 = total -% k
+            let b: u64 = (amp * rest) / abfall
+            if b < a {
+                a = b
+            }
+        }
+        let m: u64 = (sine_q28(ph) * a) >> 28
+        var v: u64 = m
+        if sine_neg(ph) {
+            v = 65536 -% m
+        }
+        if v > 65535 {
+            v = 65535
+        }
+        __mmio_write32((buf + i * 4) as *mut u32,
+            ((v & 0xFFFF) | ((v & 0xFFFF) << 16)) as u32)
+        ph = (ph +% step) & 0xFFFFFFFF
+        i = i + 1
+    }
+    return ph
+}
+
+// Einen Ton von `ms` Millisekunden in den Strom `id` legen -- in
+// Stuecken von SCRATCH_FRAMES, ohne zu warten. Gibt die geschriebenen
+// Rahmen zurueck.
+fn sound_tone(state: u64, id: u64, freq: u64, ms: u64, amp: u64) -> u64 {
+    let total: u64 = rate(state) * ms / 1000
+    let buf: u64 = scratch(state)
+    var done: u64 = 0
+    var ph: u64 = g(state, L_SNDPH)
+    var weiter: bool = true
+    while done < total && weiter {
+        var n: u64 = total -% done
+        if n > SCRATCH_FRAMES {
+            n = SCRATCH_FRAMES
+        }
+        ph = tone_env_into(state, buf, n, freq, amp, ph, done, total)
+        let got: u64 = mix.write(state, id, buf, n)
+        done = done + got
+        if got < n {
+            weiter = false
+        }
+    }
+    s(state, L_SNDPH, 0)
+    return done
+}
+
+fn sys_sound(state: u64, kind: u64) -> bool {
+    if !hw_ready(state) {
+        return false
+    }
+    if !sounds_on(state) {
+        return false
+    }
+    if kind == SND_CLICK && g(state, L_CLICKS) == 0 {
+        return false
+    }
+    s(state, L_BEEPS, g(state, L_BEEPS) + 1)
+    if g(state, L_OPEN) != 0 {
+        return false // der Einstromweg hat das Geraet allein
+    }
+    let id: u64 = open_stream(state, 0, rate(state))
+    if id >= mix.MAX_STREAMS {
+        return false
+    }
+    // Ein Systemklang ist leiser als Musik -- er meldet sich, er
+    // uebertoent nicht. -15 dB fuer den Hinweis, -20 dB fuer den Klick.
+    var n: u64 = 0
+    if kind == SND_CLICK {
+        n = sound_tone(state, id, 1200, 14, 3300)
+    } else if kind == SND_NOTE {
+        n = sound_tone(state, id, 660, 70, 6000)
+        n = n + sound_tone(state, id, 880, 110, 6000)
+    } else {
+        n = sound_tone(state, id, BEEP_HZ, BEEP_MS, BEEP_AMP)
+    }
+    end_stream(state, id)
+    s(state, L_SYSSND, g(state, L_SYSSND) + 1)
+    return n > 0
+}
+
+// Der Klick, wie der Fensterserver ihn ruft: nimmt die Sperre selbst.
+fn click(state: u64) -> bool {
+    if g(state, L_BACKEND) == B_NONE || g(state, L_CLICKS) == 0 {
+        return false
+    }
+    let f: u64 = hold(state)
+    let ok: bool = sys_sound(state, SND_CLICK)
+    drop(state, f)
+    return ok
+}
+
+fn sys_sounds(state: u64) -> u64 {
+    return g(state, L_SYSSND)
+}
+
+// Die Stroeme eines Prozesses schliessen -- gerufen, wenn er stirbt.
+// Ohne das haelt ein abgeschossener Abspieler einen der vier Plaetze
+// fuer immer; Runde HDA hatte dafuer keinen Weg.
+fn close_pid(state: u64, pid: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < mix.MAX_STREAMS {
+        if mix.is_open(state, i) && mix.pid_of(state, i) == pid && pid != 0 {
+            close_stream(state, i)
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
 // ==================================================== DER MISCHERWEG
 //
 // ZWEI WEGE IN DENSELBEN RING, und sie schliessen einander aus:
@@ -1617,4 +2009,67 @@ fn mix_pump(state: u64) -> u64 {
         }
     }
     return gesamt
+}
+
+// ================================ RUNDE TON: DIE MESSSTRECKE
+//
+// EINE PAUSE ZWISCHEN ZWEI SCHUEBEN ist die Zahl, die einen Aussetzer
+// erklaert -- und sie laesst sich NUR hier messen, weil nur der Kern
+// eine Uhr hat, die Ring 3 nicht verstellen kann. Der Ring traegt
+// 85333 us; ist die groesste Pause groesser, hat der Abspieler den
+// Aussetzer verursacht und nicht die Groesse des Puffers.
+//
+// `mark_write` steht am ANFANG jedes Schreibvorgangs (vor der Arbeit),
+// `mark_done` am Ende. Die Differenz ist die Zeit IM Kern; der Abstand
+// zweier `mark_write` ist die Zeit, die Ring 3 gebraucht hat.
+fn mark_write(state: u64) -> u64 {
+    let jetzt: u64 = time.mono_ns(state)
+    let vor: u64 = g(state, L_LASTNS)
+    if vor != 0 {
+        let d: u64 = (jetzt -% vor) / 1000
+        if d > g(state, L_GAPMAX) {
+            s(state, L_GAPMAX, d)
+        }
+    } else {
+        s(state, L_FIRSTNS, jetzt)
+    }
+    s(state, L_LASTNS, jetzt)
+    s(state, L_CALLS, g(state, L_CALLS) + 1)
+    return jetzt
+}
+
+fn mark_done(state: u64, seit: u64) {
+    let jetzt: u64 = time.mono_ns(state)
+    s(state, L_SYSUS, g(state, L_SYSUS) +% ((jetzt -% seit) / 1000))
+    // Die Uhr des letzten Schubes ist die BEIM VERLASSEN -- sonst
+    // zaehlt die Zeit im Kern als Pause von Ring 3 mit.
+    s(state, L_LASTNS, jetzt)
+}
+
+fn gap_max(state: u64) -> u64 {
+    return g(state, L_GAPMAX)
+}
+
+fn sys_us(state: u64) -> u64 {
+    return g(state, L_SYSUS)
+}
+
+fn wall_us(state: u64) -> u64 {
+    let f: u64 = g(state, L_FIRSTNS)
+    if f == 0 {
+        return 0
+    }
+    return (g(state, L_LASTNS) -% f) / 1000
+}
+
+fn calls(state: u64) -> u64 {
+    return g(state, L_CALLS)
+}
+
+fn mess_reset(state: u64) {
+    s(state, L_LASTNS, 0)
+    s(state, L_GAPMAX, 0)
+    s(state, L_SYSUS, 0)
+    s(state, L_FIRSTNS, 0)
+    s(state, L_CALLS, 0)
 }

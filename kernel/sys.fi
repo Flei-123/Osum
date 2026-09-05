@@ -1092,6 +1092,10 @@ const AS_CLOSE: u64 = 8 // Wert = Strom-Kennung: Mischerstrom schliessen
 const AS_END: u64 = 9 // Wert = Strom-Kennung: "ich schreibe nichts mehr"
 const AS_SVOL: u64 = 10 // (Kennung << 8) | Prozent -- Lautstaerke JE STROM
 const AS_PUMP: u64 = 11 // den Mischer einmal drehen
+// ---- RUNDE TON ----
+const AS_SOUND: u64 = 12 // Wert = Art des Systemklangs (0 Klick, 1 Hinweis, 2 Fehler), durch den Mischer
+const AS_CLICKS: u64 = 13 // Klickton an/aus
+const AS_SMUTE: u64 = 14 // (Kennung << 8) | 1/0 -- stumm JE STROM
 
 const SYS_OSUM_PMON: u64 = 1830
 
@@ -10308,7 +10312,52 @@ fn do_jrnl(state: u64, me: u64, from: u64, dst: u64, max: u64) -> u64 {
 // gegeben -- der Regler wuerde eine Adresse lesen, die dem Prozess
 // gehoert und die er waehrend des Spielens freigeben kann.
 
+// ============================== RUNDE TON: DIE SPERRE UM JEDEN TONAUFRUF
+//
+// Fuenf Huellen, eine Regel: die Tonschicht wird NUR unter
+// `audio.hold` betreten. Was die Sperre kostet, steht in A_LOCKSPIN
+// (Wartedrehungen) und A_TICKSKIP (ausgelassene Zeitgeberschlaege);
+// `tools/ton/run.sh` druckt beide.
 fn do_audget(state: u64, field: u64) -> u64 {
+    let f: u64 = audio.hold(state)
+    let r: u64 = audget_locked(state, field)
+    audio.drop(state, f)
+    return r
+}
+
+fn do_audset(state: u64, field: u64, value: u64) -> u64 {
+    let f: u64 = audio.hold(state)
+    let r: u64 = audset_locked(state, field, value)
+    audio.drop(state, f)
+    return r
+}
+
+fn do_audwrite(state: u64, me: u64, src: u64, frames: u64) -> u64 {
+    let f: u64 = audio.hold(state)
+    let t: u64 = audio.mark_write(state)
+    let r: u64 = audwrite_locked(state, me, src, frames)
+    audio.mark_done(state, t)
+    audio.drop(state, f)
+    return r
+}
+
+fn do_audopen(state: u64, me: u64, hz: u64) -> u64 {
+    let f: u64 = audio.hold(state)
+    let r: u64 = audopen_locked(state, me, hz)
+    audio.drop(state, f)
+    return r
+}
+
+fn do_audsend(state: u64, me: u64, id: u64, src: u64, frames: u64) -> u64 {
+    let f: u64 = audio.hold(state)
+    let t: u64 = audio.mark_write(state)
+    let r: u64 = audsend_locked(state, me, id, src, frames)
+    audio.mark_done(state, t)
+    audio.drop(state, f)
+    return r
+}
+
+fn audget_locked(state: u64, field: u64) -> u64 {
     if field == audio.A_READY {
         if audio.ready(state) {
             return 1
@@ -10405,6 +10454,40 @@ fn do_audget(state: u64, field: u64) -> u64 {
     if field == audio.A_ZEROED {
         return audio.zeroed(state)
     }
+    // ---- RUNDE TON ----
+    if field == audio.A_VOLGEN {
+        return audio.volgen(state)
+    }
+    if field == audio.A_CLICKS {
+        if audio.clicks_on(state) {
+            return 1
+        }
+        return 0
+    }
+    if field == audio.A_TICKSKIP {
+        return audio.tick_skips(state)
+    }
+    if field == audio.A_LOCKSPIN {
+        return audio.lock_spins(state)
+    }
+    if field == audio.A_MINFILL {
+        return audio.min_fill(state)
+    }
+    if field == audio.A_SYSSOUNDS {
+        return audio.sys_sounds(state)
+    }
+    if field == audio.A_GAPMAX {
+        return audio.gap_max(state)
+    }
+    if field == audio.A_SYSUS {
+        return audio.sys_us(state)
+    }
+    if field == audio.A_WALLUS {
+        return audio.wall_us(state)
+    }
+    if field == audio.A_CALLS {
+        return audio.calls(state)
+    }
     if field == audio.A_STREAMS {
         return mix.streams(state)
     }
@@ -10462,7 +10545,7 @@ fn do_audget(state: u64, field: u64) -> u64 {
     return neg(errno.E_INVAL)
 }
 
-fn do_audset(state: u64, field: u64, value: u64) -> u64 {
+fn audset_locked(state: u64, field: u64, value: u64) -> u64 {
     if field == AS_VOLUME {
         if value > 100 {
             return neg(errno.E_INVAL)
@@ -10527,6 +10610,23 @@ fn do_audset(state: u64, field: u64, value: u64) -> u64 {
         audio.zero_rest(state)
         return 0
     }
+    if field == AS_SOUND {
+        if value > audio.SND_ERROR {
+            return neg(errno.E_INVAL)
+        }
+        if audio.sys_sound(state, value) {
+            return 1
+        }
+        return 0
+    }
+    if field == AS_CLICKS {
+        audio.set_clicks(state, value != 0)
+        return 0
+    }
+    if field == AS_SMUTE {
+        mix.set_muted_pub(state, value >> 8, (value & 0xFF) != 0)
+        return 0
+    }
     if field == AS_BEEP {
         var hz: u64 = value
         if hz == 0 {
@@ -10542,7 +10642,7 @@ fn do_audset(state: u64, field: u64, value: u64) -> u64 {
     return neg(errno.E_INVAL)
 }
 
-fn do_audwrite(state: u64, me: u64, src: u64, frames: u64) -> u64 {
+fn audwrite_locked(state: u64, me: u64, src: u64, frames: u64) -> u64 {
     if !audio.ready(state) {
         return neg(errno.E_NODEV)
     }
@@ -10553,7 +10653,7 @@ fn do_audwrite(state: u64, me: u64, src: u64, frames: u64) -> u64 {
         return 0
     }
     let fo: u64 = audio.frame_octets(state)
-    let cap: u64 = kstate.BLOCK_MAX / fo
+    let cap: u64 = kstate.AUDB_MAX / fo
     var n: u64 = frames
     if n > cap {
         n = cap
@@ -10565,7 +10665,7 @@ fn do_audwrite(state: u64, me: u64, src: u64, frames: u64) -> u64 {
     if n > room {
         n = room
     }
-    let bounce: u64 = state + kstate.BLOCK_OFF
+    let bounce: u64 = state + kstate.AUDB_OFF
     if !copy_in(state, me, bounce, src, n * fo) {
         return neg(errno.E_FAULT)
     }
@@ -10576,7 +10676,7 @@ fn do_audwrite(state: u64, me: u64, src: u64, frames: u64) -> u64 {
 // Stromes (0..3) -- eine Zahl und kein Handle, weil die Handle-Schicht
 // (Runde HANDLE) fuer einen Tonstrom kein einziges ihrer Merkmale
 // braucht: er wird nicht weitergegeben, nicht geerbt, nicht abgebrochen.
-fn do_audopen(state: u64, me: u64, hz: u64) -> u64 {
+fn audopen_locked(state: u64, me: u64, hz: u64) -> u64 {
     if !audio.ready(state) {
         return neg(errno.E_NODEV)
     }
@@ -10587,7 +10687,7 @@ fn do_audopen(state: u64, me: u64, hz: u64) -> u64 {
     return id
 }
 
-fn do_audsend(state: u64, me: u64, id: u64, src: u64, frames: u64) -> u64 {
+fn audsend_locked(state: u64, me: u64, id: u64, src: u64, frames: u64) -> u64 {
     if !audio.ready(state) {
         return neg(errno.E_NODEV)
     }
@@ -10601,7 +10701,7 @@ fn do_audsend(state: u64, me: u64, id: u64, src: u64, frames: u64) -> u64 {
         return 0
     }
     let fo: u64 = audio.frame_octets(state)
-    let cap: u64 = kstate.BLOCK_MAX / fo
+    let cap: u64 = kstate.AUDB_MAX / fo
     var n: u64 = frames
     if n > cap {
         n = cap
@@ -10617,7 +10717,7 @@ fn do_audsend(state: u64, me: u64, id: u64, src: u64, frames: u64) -> u64 {
     if n > room {
         n = room
     }
-    let bounce: u64 = state + kstate.BLOCK_OFF
+    let bounce: u64 = state + kstate.AUDB_OFF
     if !copy_in(state, me, bounce, src, n * fo) {
         return neg(errno.E_FAULT)
     }
