@@ -362,7 +362,16 @@ if [ -z "$script" ] && [ "$shot" = yes ]; then
     python3 tools/gfx/screenshot.py "$SOCK" "$OUT/desktop.ppm" 25 \
         > "$OUT/shot.log" 2>&1
 fi
-[ -n "$script" ] || kill "$PID" 2>/dev/null
+# RUNDE ALLTAG: AUCH DAS KIND ERSCHLAGEN.
+#
+# `$PID` ist das `timeout`, nicht QEMU -- `kill` darauf liess die
+# Maschine weiterlaufen. Nach einem Dutzend Laeufen standen ein Dutzend
+# QEMUs auf dem Wirt und jeder weitere Lauf wurde langsamer (gemessen:
+# aus 40 Sekunden wurden Minuten).
+if [ -z "$script" ]; then
+    for kind in $(pgrep -P "$PID" 2>/dev/null); do kill "$kind" 2>/dev/null; done
+    kill "$PID" 2>/dev/null
+fi
 wait "$PID"; RC=$?
 T1=$(date +%s%N)
 rm -f "$SOCK"
