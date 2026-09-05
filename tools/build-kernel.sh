@@ -53,6 +53,9 @@ shift
 
 STUFE=0
 OHNE_PS2M=0
+# RUNDE PROTOKOLL: die Symbol- und Zeilentabelle im Abbild.  Vorgabe an;
+# `--ohne-symbole` laesst sie weg (siehe tools/kernel/symtab.py).
+SYMBOLE=on
 
 # --------------------------------------------------- die Baukonfiguration
 #
@@ -78,6 +81,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --ohne-tunnel) TUNNEL=off; shift ;;
         --ohne-ps2m) OHNE_PS2M=1; shift ;;
+        --ohne-symbole) SYMBOLE=off; shift ;;
         --gui) GUI=$2; shift 2 ;;
         --stufe) STUFE=$2; shift 2 ;;
         *) echo "unbekannte Option: $1" >&2; exit 1 ;;
@@ -233,19 +237,59 @@ KDIR="$TMP/kernel"
 # firnc0 stellt jedem Symbol `_F0.` voran, firnc1 `_F1.`
 # (docs/SELF_HOSTING.md im Firn-Repo).
 P="_F${STUFE}."
-ld -n -T kernel/kernel.ld \
-    --defsym=KERNEL_MAIN="${P}kernel_main" \
-    --defsym=KERNEL_TRAP="${P}trap__entry" \
-    --defsym=KERNEL_SYSCALL="${P}sys__entry" \
-    --defsym=KERNEL_TASK_MAIN="${P}tasks__main" \
-    --defsym=KERNEL_USER_START="${P}proc__user_start" \
-    --defsym=KERNEL_AP_MAIN="${P}smp__ap_main" \
-    --defsym=USER_MAIN="${P}u_enter" \
-    -o "$TMP/osum.elf" "$TMP/boot.o" "$TMP/isr.o" "$TMP/switch.o" \
-    "$TMP/smp.o" "$TMP/hv.o" "$TMP/k.o" "$TMP/uprog.o" 2> >(grep -vE \
-        'GNU-stack|deprecated|LOAD segment with RWX' >&2) || exit 1
+
+# ==================================================== RUNDE PROTOKOLL
+# ZWEIMAL BINDEN, UND DANACH NACHRECHNEN.
+#
+# Die Symbol- und Zeilentabelle (`tools/kernel/symtab.py`) entsteht aus
+# einem FERTIG GEBUNDENEN Abbild -- vorher gibt es keine Adressen.  Also:
+# einmal binden mit dem Stummel aus `kernel/arch/x86_64/osym.s`, die
+# Tabelle daraus erzeugen, noch einmal binden.
+#
+# Das geht nur auf, wenn der zweite Durchgang keine einzige
+# Funktionsadresse verschiebt.  Er tut es nicht, weil die Tabelle in
+# `.rodata` liegt und `.rodata` im Bindeskript hinter `.text` und
+# `.utext` steht -- aber das wird hier NICHT GEGLAUBT, sondern gemessen:
+# `nm` auf beide Abbilder, und wenn eine Adresse gewandert ist, bricht
+# der Bau ab.  Waere das je der Fall, zeigte der Panik-Bildschirm falsche
+# Namen, und ein falscher Name ist schlimmer als gar keiner.
+binde() { # $1 = osym-Objekt, $2 = Ausgabe
+    ld -n -T kernel/kernel.ld \
+        --defsym=KERNEL_MAIN="${P}kernel_main" \
+        --defsym=KERNEL_TRAP="${P}trap__entry" \
+        --defsym=KERNEL_SYSCALL="${P}sys__entry" \
+        --defsym=KERNEL_TASK_MAIN="${P}tasks__main" \
+        --defsym=KERNEL_USER_START="${P}proc__user_start" \
+        --defsym=KERNEL_AP_MAIN="${P}smp__ap_main" \
+        --defsym=USER_MAIN="${P}u_enter" \
+        -o "$2" "$TMP/boot.o" "$TMP/isr.o" "$TMP/switch.o" \
+        "$TMP/smp.o" "$TMP/hv.o" "$TMP/k.o" "$TMP/uprog.o" $1 \
+        2> >(grep -vE 'GNU-stack|deprecated|LOAD segment with RWX' >&2)
+}
+
+# Durchgang 1: OHNE Tabelle. `osym_tab` ist trotzdem aufgeloest -- es
+# steht als SCHWACHES Symbol in `boot.s`, und das ist der Grund, aus dem
+# jeder andere Laeufer dieses Repos den Kernel weiterhin mit seiner
+# eigenen ld-Zeile binden kann.
+binde "" "$TMP/osum.elf" || exit 1
+
+if [[ $SYMBOLE == on ]]; then
+    nm -n "$TMP/osum.elf" | awk '$2=="T"||$2=="t"' > "$TMP/sym1.txt"
+    python3 "$(dirname "$0")/kernel/symtab.py" "$TMP/osum.elf" \
+        "$TMP/osym2.s" || { echo "symtab.py fehlgeschlagen" >&2; exit 1; }
+    as --64 -o "$TMP/osym2.o" "$TMP/osym2.s" || exit 1
+    binde "$TMP/osym2.o" "$TMP/osum2.elf" || exit 1
+    nm -n "$TMP/osum2.elf" | awk '$2=="T"||$2=="t"' > "$TMP/sym2.txt"
+    if ! cmp -s "$TMP/sym1.txt" "$TMP/sym2.txt"; then
+        echo "PROTOKOLL: der zweite Bindedurchgang hat Funktionsadressen" \
+             "verschoben -- die Symboltabelle waere falsch. Bau abgebrochen." >&2
+        diff "$TMP/sym1.txt" "$TMP/sym2.txt" | head -5 >&2
+        exit 1
+    fi
+    mv -f "$TMP/osum2.elf" "$TMP/osum.elf"
+fi
 
 mkdir -p "$(dirname "$AUS")"
 cp -f "$TMP/osum.elf" "$AUS.elf"
 objcopy -O elf32-i386 "$TMP/osum.elf" "$AUS" || exit 1
-echo "$AUS ($(stat -c%s "$AUS") Oktette, Stufe $STUFE, gui=$GUI, tunnel=$TUNNEL, ps2m=$([[ $OHNE_PS2M == 1 ]] && echo modul || echo fest))"
+echo "$AUS ($(stat -c%s "$AUS") Oktette, Stufe $STUFE, gui=$GUI, tunnel=$TUNNEL, ps2m=$([[ $OHNE_PS2M == 1 ]] && echo modul || echo fest), symbole=$SYMBOLE)"

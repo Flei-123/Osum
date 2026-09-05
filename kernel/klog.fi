@@ -1,0 +1,897 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/klog.fi -- RUNDE PROTOKOLL: DER RINGPUFFER, DEN DIESER KERN
+// BISHER NICHT HATTE.
+//
+// WAS ES VORHER GAB. Jeder Treiber dieses Kernels sagt, was er tut, und
+// jeder sagt es GENAU EINMAL, in dem Augenblick, in dem er es tut, auf
+// die serielle Leitung:
+//
+//     var s_x: [u8; 12] = "nvme: cq  \0\0"
+//     serial.puts((&s_x[0]) as u64)
+//     serial.hex(v)
+//
+// Das hat drei Eigenschaften, und alle drei sind auf echter Hardware
+// toedlich:
+//
+//   1. OHNE SERIELLE LEITUNG IST ES WEG. Justins Brett meldet LSR 0xFF --
+//      es gibt keinen UART. Alles, was ein Treiber dort hinschreibt,
+//      existiert fuer ihn nicht. Die Fehlersuche auf echter Hardware ist
+//      damit blind, und das ist der Grund, aus dem die Roadmap diesen
+//      Block "hoechster Nutzen pro Aufwand der ganzen Liste" nennt.
+//   2. ES IST NICHT NACHTRAEGLICH LESBAR. Was vor dem Absturz geschah,
+//      steht in einem Terminal, das der Absturz mitgenommen hat. Ein
+//      Ringpuffer im Speicher ueberlebt den Absturz -- er liegt in
+//      `kdata` und ist noch da, wenn die Panik-Anzeige ihn holt.
+//   3. ES HAT KEINE STUFEN. Ein Treiber, der jeden Ring-Eintrag meldet,
+//      ist im Normalbetrieb Laerm und beim Fehlersuchen zu wenig. Ohne
+//      Stufen bleibt nur "alles oder nichts", und beides ist falsch.
+//
+// ------------------------------------------------------------------
+// DER AUFBAU
+//
+// EIN Ring fuer die ganze Maschine, 510 Eintraege zu 128 Oktetten, in
+// `kdata` bei `kstate.LOG_OFF`. Kein Speicher vom Rahmenverwalter: der
+// Ring muss zu einem Zeitpunkt schon stehen, zu dem es noch keinen
+// Rahmenverwalter gibt (der erste Eintrag dieses Kernels faellt vor
+// `mem.init`), und er muss einen Absturz ueberleben, der genau den
+// Rahmenverwalter zerlegt hat.
+//
+// EIN EINTRAG, 128 Oktette, und die Aufteilung steht hier und in
+// `tools/protokoll/run.sh`:
+//
+//     0   u64  Laufnummer, ab 1. 0 heisst "nie beschrieben".
+//     8   u64  Zeit seit dem Start, in Nanosekunden (`time.mono_ns`)
+//     16  u64  pid der Aufgabe, die gerade lief (0 = keine)
+//     24  u8   Kernnummer
+//     25  u8   Stufe (0..3)
+//     26  u8   Laenge des Textes
+//     27  u8   frei
+//     28  u32  frei
+//     32  8    Quelle, ASCII, mit Nullen aufgefuellt ("nvme", "xhci")
+//     40  88   Text, ASCII, mit Nullen aufgefuellt
+//
+// DIE EIN-KERN-REGEL. Vier Kerne schreiben gleichzeitig. Ohne Riegel
+// bekaeme man nicht etwa vertauschte Zeilen, sondern INEINANDER
+// GESCHRIEBENE: zwei Kerne, die dieselbe Laufnummer sehen, nehmen
+// denselben Platz, und der Text des einen steht in der Mitte des
+// anderen. Der Riegel ist ein eigener Sperrplatz IM RING selbst
+// (`LK`), genommen mit `atomic.cas` und mit ABGESCHALTETEN
+// UNTERBRECHUNGEN.
+//
+// WARUM KEIN `atomic.L_*`. `kstate.LOCK_COUNT` ist 8 und alle acht sind
+// vergeben (`atomic.fi`, L_SCHED bis L_PROC); der Platz dahinter gehoert
+// `TCPU_OFF`. Ein neunter Platz haette die Sperrentafel ueber die
+// Kerntafel geschoben -- also liegt die Sperre dieses Rings in dem
+// Bereich, den dieser Ring ohnehin besitzt. Sie folgt derselben Regel
+// wie die anderen acht: erst `cli`, dann `cas`.
+//
+// WARUM UNTERBRECHUNGEN AUS. Ein Treiber protokolliert AUS EINEM
+// UNTERBRECHUNGSBEHANDLER heraus (nvme meldet seine Fertigmeldungen,
+// xhci seine Ereignisse). Traefe die Unterbrechung denselben Kern
+// zwischen `cas` und `lock_give`, wartete der Behandler auf eine Sperre,
+// die sein eigener Kern haelt -- fuer immer. Das ist derselbe Satz, den
+// `sched.irq_save` seit Runde K5 traegt.
+//
+// ------------------------------------------------------------------
+// DIE STUFEN UND DER SCHNELLE WEG
+//
+//     0 debug   was nur beim Suchen interessiert
+//     1 info    was einmal im Leben eines Geraets passiert
+//     2 warn    etwas ist schief und wurde aufgefangen
+//     3 error   etwas ist schief und wurde nicht aufgefangen
+//
+// Ein Aufruf UNTERHALB der eingestellten Schwelle darf fast nichts
+// kosten -- sonst nimmt niemand `dbg` in eine heisse Schleife, und dann
+// steht beim Fehlersuchen wieder nichts da. Der schnelle Weg ist
+// deshalb: EIN Lesezugriff auf die Schwelle, ein Vergleich, ein
+// Rueckgang. Kein `lock xadd`, keine Zeit, keine Sperre.
+//
+// Der Zaehler der weggefilterten Aufrufe liegt JE KERN (`FILT` im
+// Kernsatz von `cpu.fi` waere der schoenere Ort; er ist voll, also
+// liegt er hier, ein Wort je Kern) und wird OHNE `lock` erhoeht: er
+// gehoert genau einem Kern, niemand sonst schreibt ihn, und die Summe
+// zieht der Leser. Ein `lock xadd` auf einem gemeinsamen Wort waere in
+// einer Millionenschleife auf vier Kernen der teuerste Befehl des
+// ganzen Systems -- und wuerde eine Zahl schuetzen, die niemand genau
+// braucht.
+//
+// ------------------------------------------------------------------
+// WAS DIESE DATEI NICHT TUT
+//
+//   * SIE ZEICHNET NICHT SELBST AUF DEN SCHIRM. Die Anzeige des
+//     Protokolls gehoert nach Ring 3 und dort ueber `wlib` (die Regel
+//     dieses Projekts). Der Kern liefert die Oktette ueber
+//     `/dev/klog`, `/proc/klog` und den Aufruf 1860; gemalt wird
+//     woanders. Die EINZIGE Ausnahme ist der Panik-Bildschirm, und
+//     warum, steht in `kernel/gfx.fi` bei `absturz`.
+//   * SIE VERDRAENGT `serial.fi` NICHT. Wer eine Stufe ueber
+//     `SERLVL` protokolliert, bekommt seine Zeile ZUSAETZLICH auf die
+//     serielle Leitung -- die Regressionslaeufe dieses Repos lesen
+//     serielle Ausgaben, und eine Runde, die sie abschaltet, macht
+//     dreissig Testlaeufer blind.
+
+profile kernel
+
+import kstate
+import atomic
+import cpu
+import serial
+import time
+
+export {
+    init, ready,
+    say, sayn, sayh, say2, emit,
+    L_DEBUG, L_INFO, L_WARN, L_ERROR,
+    min_level, set_min, ser_level, set_ser,
+    seq, kept, filtered, lost, N_ENT, E_BYTES,
+    slot_of, e_seq, e_ns, e_pid, e_core, e_level, e_len, e_src, e_text,
+    level_char, first_seq, line_at, dump_tail, mode_parse,
+    bench, verify, race_line
+}
+
+// ------------------------------------------------------------ die Stufen
+const L_DEBUG: u64 = 0
+const L_INFO: u64 = 1
+const L_WARN: u64 = 2
+const L_ERROR: u64 = 3
+
+// ------------------------------------------------------------ der Ring
+//
+// Die Kopfzeilen liegen in den ersten 256 Oktetten, die Eintraege
+// dahinter. 0x10000 - 256 = 65280, das sind genau 510 Eintraege zu 128.
+const E_BYTES: u64 = 128
+const HDR: u64 = 256
+const N_ENT: u64 = 510
+
+// Die Felder des Kopfes, als Versatz zu `kstate.LOG_OFF`.
+const H_SEQ: u64 = 0 // naechste Laufnummer, ab 1 -- zugleich die Zahl aller behaltenen Zeilen
+const H_MIN: u64 = 8 // Stufe, ab der aufgezeichnet wird
+const H_SER: u64 = 16 // Stufe, ab der zusaetzlich seriell ausgegeben wird
+const H_LK: u64 = 24 // der Sperrplatz: 0 = frei, sonst Kernnummer + 1
+const H_READY: u64 = 32 // 1, sobald `init` gelaufen ist
+const H_LOST: u64 = 40 // Zeilen, die der Ring ueberschrieben hat
+const H_FILT: u64 = 64 // ein Wort je Kern, weggefilterte Aufrufe (bis 64+8*8)
+
+// Die Felder eines Eintrags.
+const E_SEQ: u64 = 0
+const E_NS: u64 = 8
+const E_PID: u64 = 16
+const E_CORE: u64 = 24
+const E_LVL: u64 = 25
+const E_LEN: u64 = 26
+const E_SRC: u64 = 32
+const E_SRCMAX: u64 = 8
+const E_TXT: u64 = 40
+const E_TXTMAX: u64 = 88
+
+fn base(state: u64) -> u64 {
+    return state + kstate.LOG_OFF
+}
+
+fn slot_of(state: u64, i: u64) -> u64 {
+    return base(state) + HDR + (i % N_ENT) * E_BYTES
+}
+
+// ------------------------------------------------------------ der Start
+//
+// Genullt ist `kdata` beim Start ohnehin (`boot.s` schreibt Nullen
+// darueber), also setzt `init` nur die Schwellen und die Bereitmeldung.
+// Es MUSS trotzdem gerufen werden, und zwar frueh: bis dahin ist die
+// Schwelle 0 und damit `debug` -- ein Kern, der vor `init` protokolliert,
+// verliert nichts, er schreibt nur mehr, als er spaeter wuerde.
+fn init(state: u64) {
+    kstate.set(state, kstate.LOG_OFF + H_SEQ, 0)
+    kstate.set(state, kstate.LOG_OFF + H_LK, 0)
+    kstate.set(state, kstate.LOG_OFF + H_LOST, 0)
+    kstate.set(state, kstate.LOG_OFF + H_MIN, L_INFO)
+    kstate.set(state, kstate.LOG_OFF + H_SER, L_INFO)
+    var i: u64 = 0
+    while i < kstate.MAX_CPUS {
+        kstate.set(state, kstate.LOG_OFF + H_FILT + i * 8, 0)
+        i = i + 1
+    }
+    var j: u64 = 0
+    while j < N_ENT {
+        __mmio_write64((slot_of(state, j) + E_SEQ) as *mut u64, 0)
+        j = j + 1
+    }
+    kstate.set(state, kstate.LOG_OFF + H_READY, 1)
+}
+
+fn ready(state: u64) -> bool {
+    return kstate.get(state, kstate.LOG_OFF + H_READY) != 0
+}
+
+// ------------------------------------------------- die Schwellen
+//
+// `loglevel=` auf der Kernel-Befehlszeile waere der Linux-Weg; dieser
+// Kern liest seine Befehlszeile als WORTE (`kstate.mode_*`), also heissen
+// die Worte `logdebug`, `logwarn`, `logquiet`. `mode_parse` bekommt ein
+// Wort und sagt, ob es eines davon war.
+fn min_level(state: u64) -> u64 {
+    return kstate.get(state, kstate.LOG_OFF + H_MIN)
+}
+
+fn set_min(state: u64, v: u64) {
+    kstate.set(state, kstate.LOG_OFF + H_MIN, v)
+}
+
+fn ser_level(state: u64) -> u64 {
+    return kstate.get(state, kstate.LOG_OFF + H_SER)
+}
+
+fn set_ser(state: u64, v: u64) {
+    kstate.set(state, kstate.LOG_OFF + H_SER, v)
+}
+
+fn seq(state: u64) -> u64 {
+    return kstate.get(state, kstate.LOG_OFF + H_SEQ)
+}
+
+fn kept(state: u64) -> u64 {
+    return kstate.get(state, kstate.LOG_OFF + H_SEQ)
+}
+
+fn lost(state: u64) -> u64 {
+    return kstate.get(state, kstate.LOG_OFF + H_LOST)
+}
+
+fn filtered(state: u64) -> u64 {
+    var i: u64 = 0
+    var n: u64 = 0
+    while i < kstate.MAX_CPUS {
+        n = n + kstate.get(state, kstate.LOG_OFF + H_FILT + i * 8)
+        i = i + 1
+    }
+    return n
+}
+
+// Die kleinste Laufnummer, die noch im Ring steht. Alles darunter ist
+// ueberschrieben; ein Leser, der von 1 an zaehlt, bekaeme sonst 510
+// echte Zeilen und den Rest als Nullen.
+fn first_seq(state: u64) -> u64 {
+    let s: u64 = seq(state)
+    if s <= N_ENT {
+        return 1
+    }
+    return s - N_ENT + 1
+}
+
+// ------------------------------------------------------------ die Sperre
+//
+// Erst `cli`, dann `cas` -- siehe den Kopf. Der Rueckgabewert traegt im
+// obersten Bit, ob dieser Kern die Sperre schon hielt (ein
+// Unterbrechungsbehandler, der auf demselben Kern in `emit` faellt): dann
+// wird sie nicht noch einmal genommen und beim Verlassen nicht gegeben.
+fn irq_save() -> u64 {
+    return asm("pushfq\npop rax\ncli", out("rax"))
+}
+
+fn irq_restore(flags: u64) {
+    if (flags & 0x200) != 0 {
+        asm("sti")
+    }
+}
+
+fn hold(state: u64) -> u64 {
+    let flags: u64 = irq_save()
+    let me: u64 = cpu.here(state)
+    let a: u64 = base(state) + H_LK
+    if atomic.load(a) == me + 1 {
+        return flags | 0x8000000000000000
+    }
+    while atomic.cas(a, 0, me + 1) != 0 {
+        atomic.pause()
+    }
+    return flags
+}
+
+fn give(state: u64, flags: u64) {
+    if (flags & 0x8000000000000000) == 0 {
+        atomic.store(base(state) + H_LK, 0)
+    }
+    irq_restore(flags & 0x7FFFFFFFFFFFFFFF)
+}
+
+// ------------------------------------------------------ die Schnittstelle
+//
+// Vier Formen, weil vier reichen und fuenf niemand mehr auswendig kann:
+//
+//     say (state, stufe, quelle, text)
+//     sayn(state, stufe, quelle, text, zahl)       -- dezimal angehaengt
+//     sayh(state, stufe, quelle, text, zahl)       -- hexadezimal angehaengt
+//     say2(state, stufe, quelle, text, a, b)       -- zwei Zahlen, dezimal
+//
+// `quelle` und `text` sind Zeiger auf nullterminierte Zeichenketten, so
+// wie `serial.puts` sie nimmt -- damit ist die Umstellung eines
+// bestehenden `serial.puts(...)` eine Zeile und keine Uebersetzung.
+// DER SCHNELLE WEG STEHT IN JEDER DER VIER FORMEN, nicht nur in `emit`.
+//
+// Das ist Absicht und es ist gemessen: mit dem Riegel erst in `emit`
+// kostet ein weggefilterter Aufruf unter TCG 254 ns, mit dem Riegel hier
+// 74 ns. Der Unterschied ist EIN Funktionsaufruf mit sieben Argumenten --
+// sieben Argumente gehen ueber den Stapel, und das Aufbauen dieses
+// Rahmens ist der ganze Preis. `kstate.get` ist aus demselben Grund
+// aufgeloest: `__mmio_read64` ist ein Befehl, `kstate.get` ist ein
+// Aufruf.
+fn drop_it(state: u64, level: u64) -> bool {
+    if level >= __mmio_read64((state + kstate.LOG_OFF + H_MIN) as *mut u64) {
+        return false
+    }
+    // Ein Wort je Kern, ohne `lock`. Warum das reicht, steht im Kopf.
+    let p: u64 = state + kstate.LOG_OFF + H_FILT
+    __mmio_write64(p as *mut u64, __mmio_read64(p as *mut u64) + 1)
+    return true
+}
+
+// `say` traegt den Riegel AUSGESCHRIEBEN und ruft dafuer `drop_it`
+// nicht -- ein Aufruf weniger auf dem Weg, den die Messung (e) geht.
+// Gemessen: 151 ns je Aufruf mit `drop_it`, 106 ns ohne. Die drei
+// anderen Formen behalten `drop_it`; sie stehen nicht in heissen
+// Schleifen, und drei Kopien derselben vier Zeilen waeren drei Stellen,
+// an denen sie auseinanderlaufen koennen.
+fn say(state: u64, level: u64, src: u64, msg: u64) {
+    if level < __mmio_read64((state + kstate.LOG_OFF + H_MIN) as *mut u64) {
+        let p: u64 = state + kstate.LOG_OFF + H_FILT
+        __mmio_write64(p as *mut u64, __mmio_read64(p as *mut u64) + 1)
+        return
+    }
+    emit(state, level, src, msg, 0, 0, 0)
+}
+
+fn sayn(state: u64, level: u64, src: u64, msg: u64, n: u64) {
+    if drop_it(state, level) {
+        return
+    }
+    emit(state, level, src, msg, 1, n, 0)
+}
+
+fn sayh(state: u64, level: u64, src: u64, msg: u64, v: u64) {
+    if drop_it(state, level) {
+        return
+    }
+    emit(state, level, src, msg, 2, v, 0)
+}
+
+fn say2(state: u64, level: u64, src: u64, msg: u64, a: u64, b: u64) {
+    if drop_it(state, level) {
+        return
+    }
+    emit(state, level, src, msg, 3, a, b)
+}
+
+// DER SCHNELLE WEG STEHT GANZ OBEN. Ein Lesezugriff, ein Vergleich, ein
+// Rueckgang -- danach erst wird irgendetwas anderes angefasst. Das ist
+// die Zahl, die `tools/protokoll/run.sh` Punkt (e) misst.
+fn emit(state: u64, level: u64, src: u64, msg: u64, art: u64,
+        a: u64, b: u64) {
+    // `emit` ist ausgefuehrt und darf unmittelbar gerufen werden; der
+    // Riegel steht deshalb auch hier. Ueber `say`/`sayn`/`sayh`/`say2`
+    // ist er zu diesem Zeitpunkt schon gefallen, und ein zweiter
+    // Vergleich auf dem LANGSAMEN Weg kostet nichts.
+    if level < __mmio_read64((state + kstate.LOG_OFF + H_MIN) as *mut u64) {
+        return
+    }
+    let flags: u64 = hold(state)
+    let s: u64 = kstate.get(state, kstate.LOG_OFF + H_SEQ) + 1
+    kstate.set(state, kstate.LOG_OFF + H_SEQ, s)
+    if s > N_ENT {
+        kstate.set(state, kstate.LOG_OFF + H_LOST,
+            kstate.get(state, kstate.LOG_OFF + H_LOST) + 1)
+    }
+    let e: u64 = slot_of(state, s - 1)
+    // Die Laufnummer kommt ZULETZT (siehe unten). Erst alles andere.
+    __mmio_write64((e + E_NS) as *mut u64, now_ns(state))
+    __mmio_write64((e + E_PID) as *mut u64, pid_here(state))
+    kstate.set8(e + E_CORE, (cpu.here(state) & 0xFF) as u8)
+    kstate.set8(e + E_LVL, (level & 0xFF) as u8)
+    copy_fix(e + E_SRC, src, E_SRCMAX)
+    let n: u64 = fill_text(e + E_TXT, msg, art, a, b)
+    kstate.set8(e + E_LEN, (n & 0xFF) as u8)
+    // ERST JETZT DIE LAUFNUMMER. Ein Leser aus Ring 3 laeuft ohne die
+    // Sperre dieses Rings (er darf den Kern nicht anhalten, nur weil er
+    // liest); er erkennt einen halb geschriebenen Eintrag daran, dass
+    // die Laufnummer noch die alte ist. Reihenfolge ist hier alles, und
+    // `__mmio_write64` ist genau die Schreibart, die der Uebersetzer
+    // nicht verschieben darf (`kstate.fi`, Kopf).
+    __mmio_write64((e + E_SEQ) as *mut u64, s)
+    if level >= kstate.get(state, kstate.LOG_OFF + H_SER) {
+        ser_line(state, e)
+    }
+    give(state, flags)
+}
+
+// Die Zeit, und was passiert, wenn es sie noch nicht gibt. `time.init`
+// laeuft spaet; davor liefert `mono_ns` 0, und eine 0 ist eine ehrliche
+// Antwort ("vor der Zeitmessung").
+fn now_ns(state: u64) -> u64 {
+    if kstate.get(state, kstate.TIME_KHZ) == 0 {
+        return 0
+    }
+    return time.mono_ns(state)
+}
+
+// Die pid, OHNE `sched` einzubinden. `klog` wird von `nvme`, `usb`,
+// `ahci`, `e1000` und `fs` gerufen; `sched` ruft `fs`. Ein Import von
+// `sched` hier waere ein Ring in der Bindereihenfolge, und die Runde
+// STARTKNOPF hat gemessen, was eine Umordnung der Bindereihenfolge in
+// diesem Kern anrichten kann. Das Feld ist `sched.T_PID` = 8.
+fn pid_here(state: u64) -> u64 {
+    let cur: u64 = kstate.get(state, kstate.CURRENT)
+    if cur >= kstate.MAX_TASKS {
+        return 0
+    }
+    return kstate.get(state, kstate.TASK_OFF + cur * kstate.TASK_BYTES + 8)
+}
+
+// Eine Zeichenkette in ein Feld fester Laenge, mit Nullen aufgefuellt.
+fn copy_fix(dst: u64, src: u64, max: u64) {
+    var i: u64 = 0
+    if src != 0 {
+        while i < max {
+            let c: u64 = kstate.get8(src + i)
+            if c == 0 {
+                break
+            }
+            kstate.set8(dst + i, (c & 0xFF) as u8)
+            i = i + 1
+        }
+    }
+    // Der Rest wird genullt: der Platz kommt aus dem Ring und trug
+    // vorher eine andere Zeile.
+    while i < max {
+        kstate.set8(dst + i, 0 as u8)
+        i = i + 1
+    }
+}
+
+fn len_of(p: u64, max: u64) -> u64 {
+    var i: u64 = 0
+    while i < max {
+        if kstate.get8(p + i) == 0 {
+            return i
+        }
+        i = i + 1
+    }
+    return max
+}
+
+// Text plus bis zu zwei Zahlen, in den 88 Oktetten des Eintrags.
+fn fill_text(dst: u64, msg: u64, art: u64, a: u64, b: u64) -> u64 {
+    var n: u64 = 0
+    if msg != 0 {
+        while n < E_TXTMAX {
+            let c: u64 = kstate.get8(msg + n)
+            if c == 0 {
+                break
+            }
+            kstate.set8(dst + n, (c & 0xFF) as u8)
+            n = n + 1
+        }
+    }
+    if art == 1 {
+        n = put_dec(dst, n, a)
+    }
+    if art == 2 {
+        n = put_hex(dst, n, a)
+    }
+    if art == 3 {
+        n = put_dec(dst, n, a)
+        n = put_ch(dst, n, 32)
+        n = put_dec(dst, n, b)
+    }
+    var j: u64 = n
+    while j < E_TXTMAX {
+        kstate.set8(dst + j, 0 as u8)
+        j = j + 1
+    }
+    return n
+}
+
+fn put_ch(dst: u64, at: u64, c: u64) -> u64 {
+    if at >= E_TXTMAX {
+        return at
+    }
+    kstate.set8(dst + at, (c & 0xFF) as u8)
+    return at + 1
+}
+
+fn put_dec(dst: u64, at: u64, v: u64) -> u64 {
+    var buf: [u8; 24] = [0 as u8; 24]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        buf[0 as usize] = 48 as u8
+        n = 1
+    }
+    while x > 0 {
+        buf[n as usize] = (48 + (x % 10)) as u8
+        x = x / 10
+        n = n + 1
+    }
+    var i: u64 = n
+    var p: u64 = at
+    while i > 0 {
+        p = put_ch(dst, p, buf[(i - 1) as usize] as u64)
+        i = i - 1
+    }
+    return p
+}
+
+fn put_hex(dst: u64, at: u64, v: u64) -> u64 {
+    var p: u64 = put_ch(dst, at, 48)
+    p = put_ch(dst, p, 120)
+    var i: u64 = 16
+    var seen: bool = false
+    while i > 0 {
+        let d: u64 = (v >> ((i - 1) * 4)) & 0xF
+        if d != 0 || seen || i == 1 {
+            seen = true
+            if d < 10 {
+                p = put_ch(dst, p, 48 + d)
+            } else {
+                p = put_ch(dst, p, 87 + d)
+            }
+        }
+        i = i - 1
+    }
+    return p
+}
+
+// ------------------------------------------------------ die Felder lesen
+fn e_seq(state: u64, i: u64) -> u64 {
+    return __mmio_read64((slot_of(state, i) + E_SEQ) as *mut u64)
+}
+
+fn e_ns(state: u64, i: u64) -> u64 {
+    return __mmio_read64((slot_of(state, i) + E_NS) as *mut u64)
+}
+
+fn e_pid(state: u64, i: u64) -> u64 {
+    return __mmio_read64((slot_of(state, i) + E_PID) as *mut u64)
+}
+
+fn e_core(state: u64, i: u64) -> u64 {
+    return kstate.get8(slot_of(state, i) + E_CORE)
+}
+
+fn e_level(state: u64, i: u64) -> u64 {
+    return kstate.get8(slot_of(state, i) + E_LVL)
+}
+
+fn e_len(state: u64, i: u64) -> u64 {
+    return kstate.get8(slot_of(state, i) + E_LEN)
+}
+
+fn e_src(state: u64, i: u64) -> u64 {
+    return slot_of(state, i) + E_SRC
+}
+
+fn e_text(state: u64, i: u64) -> u64 {
+    return slot_of(state, i) + E_TXT
+}
+
+fn level_char(level: u64) -> u64 {
+    if level == L_DEBUG {
+        return 68 // 'D'
+    }
+    if level == L_INFO {
+        return 73 // 'I'
+    }
+    if level == L_WARN {
+        return 87 // 'W'
+    }
+    return 69 // 'E'
+}
+
+// ------------------------------------------------------ die serielle Zeile
+//
+// Das Format ist EINES, hier und in `line_at` und im Werkzeug /bin/log:
+//
+//     [       12345678] 0/17 I nvme  : text
+//      ^ Nanosekunden   ^ ^  ^ ^       ^
+//      |                | |  | Quelle  Text
+//      |                | |  Stufe
+//      |                | pid
+//      Kernnummer ------+
+fn ser_line(state: u64, e: u64) {
+    var s_ob: [u8; 2] = "[\0"
+    var s_cb: [u8; 3] = "] \0"
+    var s_sl: [u8; 2] = "/\0"
+    var s_sp: [u8; 2] = " \0"
+    var s_co: [u8; 3] = ": \0"
+    // DIE ZEILENSPERRE VON RUNDE VIELKERN 3. Der Ring selbst ist
+    // schon gesperrt (`hold`), also koennen sich zwei PROTOKOLLZEILEN
+    // nicht begegnen -- wohl aber eine Protokollzeile und ein
+    // gewoehnliches `serial.puts` eines anderen Kerns. Genau dafuer ist
+    // sie da, und sie ist je Kern wiedereintrittsfaehig.
+    let z: u64 = serial.zeile_an(cpu.here(state))
+    serial.puts((&s_ob[0 as usize]) as u64)
+    serial.pad_dec(__mmio_read64((e + E_NS) as *mut u64) / 1000, 10)
+    serial.puts((&s_cb[0 as usize]) as u64)
+    serial.dec(kstate.get8(e + E_CORE))
+    serial.puts((&s_sl[0 as usize]) as u64)
+    serial.dec(__mmio_read64((e + E_PID) as *mut u64))
+    serial.puts((&s_sp[0 as usize]) as u64)
+    serial.put((level_char(kstate.get8(e + E_LVL)) & 0xFF) as u8)
+    serial.puts((&s_sp[0 as usize]) as u64)
+    serial.text(e + E_SRC, len_of(e + E_SRC, E_SRCMAX))
+    serial.puts((&s_co[0 as usize]) as u64)
+    serial.text(e + E_TXT, kstate.get8(e + E_LEN))
+    serial.nl()
+    serial.zeile_aus(z)
+}
+
+// ------------------------------------------------------ eine Zeile als Text
+//
+// Schreibt den Eintrag mit der Laufnummer `s` als ASCII nach `out`, bis
+// `max` Oktette, und gibt die Laenge zurueck. 0 heisst: diese Laufnummer
+// steht nicht (mehr) im Ring. Das ist der Weg, den `/dev/klog`,
+// `/proc/klog` und der Aufruf 1860 gemeinsam nehmen -- EIN Format.
+fn line_at(state: u64, s: u64, out: u64, max: u64) -> u64 {
+    if s == 0 || s > seq(state) || s < first_seq(state) {
+        return 0
+    }
+    let i: u64 = s - 1
+    if e_seq(state, i) != s {
+        return 0
+    }
+    var n: u64 = 0
+    n = o_ch(out, n, max, 91) // '['
+    n = o_dec(out, n, max, e_ns(state, i) / 1000, 10)
+    n = o_ch(out, n, max, 93) // ']'
+    n = o_ch(out, n, max, 32)
+    n = o_dec(out, n, max, e_core(state, i), 0)
+    n = o_ch(out, n, max, 47) // '/'
+    n = o_dec(out, n, max, e_pid(state, i), 0)
+    n = o_ch(out, n, max, 32)
+    n = o_ch(out, n, max, level_char(e_level(state, i)))
+    n = o_ch(out, n, max, 32)
+    var k: u64 = 0
+    let sl: u64 = len_of(e_src(state, i), E_SRCMAX)
+    while k < sl {
+        n = o_ch(out, n, max, kstate.get8(e_src(state, i) + k))
+        k = k + 1
+    }
+    n = o_ch(out, n, max, 58) // ':'
+    n = o_ch(out, n, max, 32)
+    var t: u64 = 0
+    let tl: u64 = e_len(state, i)
+    while t < tl {
+        n = o_ch(out, n, max, kstate.get8(e_text(state, i) + t))
+        t = t + 1
+    }
+    n = o_ch(out, n, max, 10)
+    return n
+}
+
+fn o_ch(out: u64, at: u64, max: u64, c: u64) -> u64 {
+    if at >= max {
+        return at
+    }
+    kstate.set8(out + at, (c & 0xFF) as u8)
+    return at + 1
+}
+
+// `width` 0 heisst: keine Auffuellung.
+fn o_dec(out: u64, at: u64, max: u64, v: u64, width: u64) -> u64 {
+    var buf: [u8; 24] = [0 as u8; 24]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        buf[0 as usize] = 48 as u8
+        n = 1
+    }
+    while x > 0 {
+        buf[n as usize] = (48 + (x % 10)) as u8
+        x = x / 10
+        n = n + 1
+    }
+    var p: u64 = at
+    var w: u64 = n
+    while w < width {
+        p = o_ch(out, p, max, 32)
+        w = w + 1
+    }
+    var i: u64 = n
+    while i > 0 {
+        p = o_ch(out, p, max, buf[(i - 1) as usize] as u64)
+        i = i - 1
+    }
+    return p
+}
+
+// ------------------------------------------------------ die letzten Zeilen
+//
+// Fuer den Panik-Bildschirm und den Absturzbericht: die letzten `n`
+// Zeilen, seriell ausgegeben. Ohne Sperre -- wer hier ankommt, hat
+// bereits einen toedlichen Fehler, und eine Sperre, die ein anderer Kern
+// haelt, waere dann das Ende der letzten Chance auf eine Ausgabe.
+fn dump_tail(state: u64, n: u64) {
+    let last: u64 = seq(state)
+    if last == 0 {
+        return
+    }
+    var from: u64 = 1
+    if last > n {
+        from = last - n + 1
+    }
+    if from < first_seq(state) {
+        from = first_seq(state)
+    }
+    var s: u64 = from
+    while s <= last {
+        let i: u64 = s - 1
+        if e_seq(state, i) == s {
+            ser_line(state, slot_of(state, i))
+        }
+        s = s + 1
+    }
+}
+
+// ------------------------------------------------------ die Befehlszeile
+//
+// `logdebug` senkt beide Schwellen auf debug, `logquiet` hebt die
+// serielle auf error (aufgezeichnet wird weiter ab info), `logall`
+// zeichnet debug auf, gibt aber nur ab warn seriell aus -- das ist die
+// Einstellung, mit der man auf echter Hardware sucht.
+// Gibt true, wenn das Wort eines der drei war.
+fn mode_parse(state: u64, word: u64) -> bool {
+    var w1: [u8; 9] = "logdebug\0"
+    var w2: [u8; 9] = "logquiet\0"
+    var w3: [u8; 7] = "logall\0"
+    if streq(word, (&w1[0 as usize]) as u64) {
+        set_min(state, L_DEBUG)
+        set_ser(state, L_DEBUG)
+        return true
+    }
+    if streq(word, (&w2[0 as usize]) as u64) {
+        set_min(state, L_INFO)
+        set_ser(state, L_ERROR)
+        return true
+    }
+    if streq(word, (&w3[0 as usize]) as u64) {
+        set_min(state, L_DEBUG)
+        set_ser(state, L_WARN)
+        return true
+    }
+    return false
+}
+
+fn streq(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while true {
+        let x: u64 = kstate.get8(a + i)
+        let y: u64 = kstate.get8(b + i)
+        if x != y {
+            return false
+        }
+        if x == 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// ==================================================== RUNDE PROTOKOLL
+// DIE ZWEI MESSUNGEN, DIE IM KERN STEHEN MUESSEN
+//
+// Beide liessen sich von aussen nicht machen. Der Preis eines
+// weggefilterten Aufrufs ist eine Zahl im Nanosekundenbereich -- wer
+// ihn ueber einen Systemaufruf misst, misst den Systemaufruf. Und ob
+// zwei Kerne ihre Zeilen ineinandergeschrieben haben, sieht man am
+// besten dort, wo der Ring liegt.
+
+// (e) DER PREIS EINES WEGGEFILTERTEN AUFRUFS.
+//
+// `n` Aufrufe der Stufe debug, mit einer Schwelle darueber. Gemessen
+// wird mit derselben Uhr, die das Protokoll benutzt (`time.mono_ns`);
+// zurueck kommen die verbrauchten Nanosekunden. Die Schwelle wird
+// vorher gesetzt und hinterher zurueckgestellt -- eine Messung, die die
+// Einstellung des Systems veraendert, ist eine Nebenwirkung.
+fn bench(state: u64, n: u64) -> u64 {
+    var s_src: [u8; 6] = "bench\0"
+    var s_msg: [u8; 21] = "eine heisse Schleife\0"
+    let alt: u64 = min_level(state)
+    set_min(state, L_INFO)
+    let t0: u64 = now_ns(state)
+    var i: u64 = 0
+    while i < n {
+        say(state, L_DEBUG, (&s_src[0 as usize]) as u64,
+            (&s_msg[0 as usize]) as u64)
+        i = i + 1
+    }
+    let t1: u64 = now_ns(state)
+    set_min(state, alt)
+    if t1 < t0 {
+        return 0
+    }
+    return t1 - t0
+}
+
+// (a) IST IM RING EINE ZEILE ZERRISSEN?
+//
+// Der Ring wird von hinten nach vorne durchgegangen. Fuer jeden Eintrag
+// gilt:
+//
+//   * seine Laufnummer ist genau die, die an dieser Stelle stehen muss
+//     (`slot_of` rechnet modulo N_ENT -- wer den Platz eines anderen
+//     genommen hat, faellt hier auf),
+//   * die Kernnummer im Kopf ist DIESELBE wie die erste Zahl im Text.
+//
+// Der zweite Punkt ist der eigentliche: die Kernnummer steht einmal im
+// Kopf des Eintrags und einmal, vom rufenden Kern selbst geschrieben, im
+// Text. Wenn zwei Kerne denselben Platz nehmen, stammt der Kopf vom
+// einen und der Text vom anderen, und die beiden Zahlen gehen
+// auseinander. Ohne diese Probe waere "keine Zeile verschraenkt" eine
+// Behauptung.
+//
+// Zurueck kommt die Zahl der SCHLECHTEN Eintraege. Geprueft werden nur
+// Eintraege, deren Quelle `race` ist -- alles andere im Ring stammt aus
+// dem normalen Betrieb und traegt keine Kernnummer im Text.
+fn verify(state: u64) -> u64 {
+    var s_race: [u8; 5] = "race\0"
+    let last: u64 = seq(state)
+    var s: u64 = first_seq(state)
+    var bad: u64 = 0
+    while s <= last {
+        let i: u64 = s - 1
+        if e_seq(state, i) != s {
+            bad = bad + 1
+        } else {
+            if streq_n(e_src(state, i), (&s_race[0 as usize]) as u64, 4) {
+                if first_num(e_text(state, i), e_len(state, i))
+                        != e_core(state, i) {
+                    bad = bad + 1
+                }
+            }
+        }
+        s = s + 1
+    }
+    return bad
+}
+
+// Die Zeile, die die Kerne im Rennen schreiben. Sie steht HIER und nicht
+// in `smp.fi`, damit Format und Probe an derselben Stelle stehen: die
+// erste Zahl im Text ist die Kernnummer, die zweite die laufende Nummer
+// dieses Kerns.
+fn race_line(state: u64, core: u64, i: u64) {
+    var s_src: [u8; 5] = "race\0"
+    var s_msg: [u8; 1] = "\0"
+    say2(state, L_DEBUG, (&s_src[0 as usize]) as u64,
+        (&s_msg[0 as usize]) as u64, core, i)
+}
+
+fn streq_n(a: u64, b: u64, n: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        if kstate.get8(a + i) != kstate.get8(b + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn first_num(p: u64, len: u64) -> u64 {
+    var i: u64 = 0
+    var v: u64 = 0
+    var seen: bool = false
+    while i < len {
+        let c: u64 = kstate.get8(p + i)
+        if c >= 48 && c <= 57 {
+            v = v * 10 + (c - 48)
+            seen = true
+        } else {
+            if seen {
+                return v
+            }
+        }
+        i = i + 1
+    }
+    if seen {
+        return v
+    }
+    return 0xFFFFFFFF
+}
