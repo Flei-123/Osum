@@ -72,6 +72,8 @@ profile kernel
 import ulib
 import wlibc
 import nv
+import msg
+import vorlage
 import libc.io
 import libc.kcall
 
@@ -107,14 +109,85 @@ const PAD: u64 = 10
 const TW: u64 = 180 // one tile
 const TH: u64 = 74
 const GAP: u64 = 8
-const FH: u64 = 22 // the "all settings" row
+const FH: u64 = 22 // eine Zeile am Fuss
 const W: u64 = PAD + TW + GAP + TW + PAD // 388
-const H: u64 = PAD + TH + GAP + TH + PAD + FH + PAD // 208
+// ============================================== RUNDE WERKZEUGE
+// DAS PANEL IST GEWACHSEN, UND JEDE NEUE ZEILE HAT EINE QUELLE.
+//
+// Drei Kacheln waren es, weil im August drei Dinge WIRKLICH da waren.
+// Seither sind vier davon dazugekommen, und die Begruendung fuer jede
+// steht neben ihr:
+//
+//   DUNKELMODUS   Runde THEME/THEMESTORE hat die Schnittstelle gebaut,
+//                 die es im August nicht gab: `wlibc.theme_set_mode`
+//                 gilt sofort in JEDEM Fenster (gemeinsame Bank,
+//                 `theme_gen` zieht die anderen Programme nach), und
+//                 `vorlage.mode_write` schreibt eine Zeile in
+//                 /etc/theme.conf, damit es den Neustart ueberlebt.
+//   ENERGIEPROFIL Runde K18 hat `osum_pwrget/pwrset`. Der Kern sagt
+//                 selbst, ob er die MSR wirklich lesen konnte
+//                 (`PG_READY`) -- steht dort eine Null, zeigt die
+//                 Kachel einen Strich und tut nichts. Eine Kachel, die
+//                 auf einer Maschine ohne diese Register etwas
+//                 verspraeche, waere genau die Luege mit runden Ecken,
+//                 vor der der Kopf dieser Datei warnt.
+//   KACHELN       Runde TILING, `osum_tileget/tiledo`. Ein Schalter,
+//                 den man wirklich oft umlegt.
+//   HELLIGKEIT    Die Begruendung von damals ist NACHGEPRUEFT und
+//                 hinfaellig: `pwr.rescale` skalierte den Rahmenpuffer
+//                 an Ort und Stelle und verlor bei jedem Schritt Bits.
+//                 Runde DISPLAY hat das ersetzt -- `vmode.set_picture`
+//                 baut eine NACHSCHLAGETABELLE, die beim Ausgeben
+//                 angewandt wird; der Rahmenpuffer bleibt unberuehrt,
+//                 und fuenfzig Schritte hintereinander kosten nichts.
+//                 Deshalb steht hier jetzt ein Schieberegler.
+//
+// UND LAUTSTAERKE STEHT WEITER NICHT DA. Nachgemessen in diesem Baum,
+// nicht angenommen: `grep -ril audio kernel/` findet zwei Treffer, und
+// beide sind Kommentare (kernel/usb.fi ueber Audioklassen, und der
+// Kopf dieser Datei). Es gibt keinen Tontreiber, keinen Mischer und
+// keine Lautstaerke, die man setzen koennte. Ein Regler dafuer bewegte
+// eine Zahl, die keinen Lautsprecher erreicht.
+const TOP2: u64 = PAD + 3 * TH + 2 * GAP // unter den sechs Kacheln
+const SLY: u64 = TOP2 + GAP // der Helligkeitsregler
+const SLH: u64 = 34
+const BAY: u64 = SLY + SLH + GAP // der Akkustand
+const L1Y: u64 = BAY + FH + GAP // Verknuepfung: Aufgabenverwaltung
+const L2Y: u64 = L1Y + FH + GAP // Verknuepfung: Alle Einstellungen
+const H: u64 = L2Y + FH + PAD
+const SL_X: u64 = PAD + 104 // wo die Rinne des Reglers anfaengt
+const SL_KN: u64 = 12 // die Breite des Griffs
+// 20 UND NICHT 0. Der Kern nimmt 0..200; eine Null macht den Schirm
+// schwarz, und einen Regler, mit dem man sich aussperren kann, gibt
+// dieses Panel nicht her -- man saehe ihn danach nicht mehr, um ihn
+// zurueckzuschieben.
+const BR_MIN: u64 = 20
+const BR_MAX: u64 = 200
 const MARGIN: u64 = 4 // between the panel and the bar it sits beside
 const BAND: u64 = 64 // rows of the drawing surface used at a time
 const IC: u64 = 16 // the tile symbol, at its target size
 
-const N_TILE: u64 = 3
+const N_TILE: u64 = 6
+
+// Die Aufrufe, die die neuen Kacheln bedienen. Dieselben Nummern wie in
+// /bin/dispctl, /bin/power und /bin/tiling -- kein zweiter Weg zu
+// derselben Sache.
+const SYS_DISPGET: u64 = 1810
+const SYS_DISPSET: u64 = 1811
+const DG_BRIGHT: u64 = 16
+const DS_BRIGHT: u64 = 3
+const SYS_PWRGET: u64 = 1750
+const SYS_PWRSET: u64 = 1751
+const PG_READY: u64 = 0
+const PG_PROFILE: u64 = 1
+const PG_BATPRESENT: u64 = 24
+const PG_BATPERCENT: u64 = 25
+const PG_BATSTATE: u64 = 27
+const PS_PROFILE: u64 = 0
+const SYS_TILEGET: u64 = 1820
+const SYS_TILEDO: u64 = 1821
+const TL_ON: u64 = 0
+const A_TILE_TOGGLE: u64 = 29
 
 // ---------------------------------------------------------- the state
 
@@ -141,23 +214,48 @@ static mut ev: [u8; 16] = [0 as u8; 16]
 // in this round -- OSYM with colour ROLES, so one file is right in a
 // light scheme and in a dark one.
 const ICON_MAX: u64 = 1100
-static mut ic_buf: [u8; 3300] = [0 as u8; 3300] // 3 pictures
+static mut ic_buf: [u8; 6600] = [0 as u8; 6600] // 6 Bilder
 static mut ic_ok: u64 = 0
 
 static mut p_icons: [u8; 14] = "/etc/netview/\0"
-static mut n_ic: [u8; 33] = "tile-fake\0tile-net\0tile-hide\0\0\0\0\0"
+static mut n_ic: [u8; 76] = "tile-fake tile-net tile-hide tile-dark tile-power tile-tile                 "
 static mut p_settings: [u8; 14] = "/bin/settings\0"
 
 // The words. German, like every other string the taskbar and the
 // settings put on the screen in this tree; round I18N is the one that
 // changes that, everywhere at once.
-static mut l_fake: [u8; 18] = "Netz vortäuschen\0"
-static mut l_net: [u8; 5] = "Netz\0"
-static mut l_hide: [u8; 17] = "Leiste verbergen\0"
-static mut w_on: [u8; 4] = "an\0\0"
-static mut w_off: [u8; 4] = "aus\0"
-static mut l_all: [u8; 19] = "Alle Einstellungen\0"
+// RUNDE WERKZEUGE: DIE WOERTER STEHEN IM KATALOG, NICHT HIER.
+//
+// Bis zu dieser Runde standen "Netz vortäuschen", "Leiste verbergen"
+// und "Alle Einstellungen" als deutsche Zeichenketten im Quelltext --
+// zwei davon hat `tools/i18n/scan.py` seit Runde I18N angeschlagen, und
+// zu Recht: das Panel ist Oberflaeche, und Oberflaeche gehoert
+// uebersetzt. Was hier steht, sind SCHLUESSEL.
+static mut k_fake: [u8; 8] = "qs.fake\0"
+static mut k_net: [u8; 7] = "qs.net\0"
+static mut k_hide: [u8; 8] = "qs.hide\0"
+static mut k_dark: [u8; 8] = "qs.dark\0"
+static mut k_power: [u8; 9] = "qs.power\0"
+static mut k_tile: [u8; 8] = "qs.tile\0"
+static mut k_on: [u8; 6] = "qs.on\0"
+static mut k_off: [u8; 7] = "qs.off\0"
+static mut k_na: [u8; 6] = "qs.na\0"
+static mut k_bright: [u8; 10] = "qs.bright\0"
+static mut k_bat: [u8; 11] = "qs.battery\0"
+static mut k_nobat: [u8; 13] = "qs.nobattery\0"
+static mut k_chg: [u8; 12] = "qs.charging\0"
+static mut k_all: [u8; 12] = "qs.settings\0"
+static mut k_tm: [u8; 11] = "qs.taskmgr\0"
+static mut k_p0: [u8; 13] = "qs.prof.save\0"
+static mut k_p1: [u8; 12] = "qs.prof.mid\0"
+static mut k_p2: [u8; 12] = "qs.prof.max\0"
+static mut k_title: [u8; 9] = "qs.title\0"
 static mut t_title: [u8; 16] = "Schnelleinst.\0\0\0"
+static mut p_taskmgr: [u8; 13] = "/bin/taskmgr\0"
+static mut u_pct: [u8; 3] = " %\0"
+static mut u_sp: [u8; 2] = " \0"
+static mut u_op: [u8; 3] = " (\0"
+static mut u_cl: [u8; 2] = ")\0"
 
 static mut s_open: [u8; 12] = "qs: open x=\0"
 static mut s_y: [u8; 4] = " y=\0"
@@ -202,6 +300,8 @@ static mut s_tt: [u8; 3] = " [\0"
 static mut s_te: [u8; 3] = "]\0\0"
 static mut s_sym: [u8; 12] = "qs: sym n=\0\0"
 static mut s_sx: [u8; 4] = " x=\0"
+static mut s_hell: [u8; 15] = "qs: hell auf =\0"
+static mut s_hellist: [u8; 14] = "qs: hell ist=\0"
 
 fn say(p: u64) {
     ulib.say(p)
@@ -292,6 +392,38 @@ fn tile_icon(t: u64) -> u64 {
 // first, `dhcp` can change the second, `/bin/settings` the third.
 // A panel with its own copy would show the copy.
 
+fn pget(f: u64) -> u64 {
+    let v: u64 = ulib.sys(SYS_PWRGET, f, 0, 0)
+    if ulib.bad(v) {
+        return 0
+    }
+    return v
+}
+
+fn dget(f: u64) -> u64 {
+    let v: u64 = ulib.sys(SYS_DISPGET, f, 0, 0)
+    if ulib.bad(v) {
+        return 0
+    }
+    return v
+}
+
+fn tget(f: u64) -> u64 {
+    let v: u64 = ulib.sys(SYS_TILEGET, f, 0, 0)
+    if ulib.bad(v) {
+        return 0
+    }
+    return v
+}
+
+// KANN DIE MASCHINE DAS UEBERHAUPT? Der Kern sagt es selbst: `PG_READY`
+// ist 1, wenn die Energieverwaltung ihre Register wirklich gelesen hat.
+// Steht dort eine Null, zeigt die Kachel einen Strich -- und nicht
+// "sparen", was wie eine Einstellung aussaehe.
+fn power_da() -> bool {
+    return pget(PG_READY) != 0
+}
+
 fn tile_on(t: u64) -> bool {
     if t == 0 {
         return nv.fallback_on()
@@ -299,17 +431,61 @@ fn tile_on(t: u64) -> bool {
     if t == 1 {
         return nv.net_ip() != 0 && !ulib.bad(nv.net_ip())
     }
-    return ah_on != 0
+    if t == 2 {
+        return ah_on != 0
+    }
+    if t == 3 {
+        return wlibc.theme_dark()
+    }
+    if t == 4 {
+        // "an" heisst hier: nicht auf Sparen. Das Wort darunter sagt
+        // ohnehin, welches der drei Profile laeuft.
+        return power_da() && pget(PG_PROFILE) != 0
+    }
+    return tget(TL_ON) != 0
 }
 
 fn tile_label(t: u64) -> u64 {
     if t == 0 {
-        return (&l_fake[0 as usize]) as u64
+        return msg.get((&k_fake[0 as usize]) as u64)
     }
     if t == 1 {
-        return (&l_net[0 as usize]) as u64
+        return msg.get((&k_net[0 as usize]) as u64)
     }
-    return (&l_hide[0 as usize]) as u64
+    if t == 2 {
+        return msg.get((&k_hide[0 as usize]) as u64)
+    }
+    if t == 3 {
+        return msg.get((&k_dark[0 as usize]) as u64)
+    }
+    if t == 4 {
+        return msg.get((&k_power[0 as usize]) as u64)
+    }
+    return msg.get((&k_tile[0 as usize]) as u64)
+}
+
+// DAS WORT UNTER DER KACHEL. Bei fuenf Kacheln ist es "an" oder "aus";
+// beim Energieprofil ist es der NAME des Profils, denn drei Zustaende
+// lassen sich nicht mit zwei Woertern sagen -- und ein Schalter, der
+// "an" zeigt, wenn drei Dinge moeglich sind, sagt nichts.
+fn tile_word(t: u64) -> u64 {
+    if t == 4 {
+        if !power_da() {
+            return msg.get((&k_na[0 as usize]) as u64)
+        }
+        let p: u64 = pget(PG_PROFILE)
+        if p == 0 {
+            return msg.get((&k_p0[0 as usize]) as u64)
+        }
+        if p == 1 {
+            return msg.get((&k_p1[0 as usize]) as u64)
+        }
+        return msg.get((&k_p2[0 as usize]) as u64)
+    }
+    if tile_on(t) {
+        return msg.get((&k_on[0 as usize]) as u64)
+    }
+    return msg.get((&k_off[0 as usize]) as u64)
 }
 
 // The address the machine had before "network off" took it away, so
@@ -322,6 +498,37 @@ static mut old_mask: u64 = 0
 static mut old_gw: u64 = 0
 
 fn tile_click(t: u64) -> u64 {
+    if t == 3 {
+        // SOFORT UND DAUERHAFT. `theme_set_mode` schreibt in die
+        // gemeinsame Bank, aus der JEDES Fenster liest -- die anderen
+        // Programme ziehen beim naechsten `theme_poll` nach, ohne dass
+        // hier jemand benachrichtigt werden muesste. `mode_write` legt
+        // eine Zeile in /etc/theme.conf, damit es den Neustart
+        // ueberlebt; geschrieben wird sie von dem Modul, das die Datei
+        // ohnehin schreibt, und nicht von hier.
+        var neu: u64 = wlibc.MODE_DARK
+        if wlibc.theme_dark() {
+            neu = wlibc.MODE_LIGHT
+        }
+        wlibc.theme_set_mode(neu)
+        if !vorlage.mode_write(neu) {
+            return 0 - 1
+        }
+        return 0
+    }
+    if t == 4 {
+        if !power_da() {
+            return 0 - 1
+        }
+        var p: u64 = pget(PG_PROFILE) + 1
+        if p > 2 {
+            p = 0
+        }
+        return ulib.sys(SYS_PWRSET, PS_PROFILE, p, 0)
+    }
+    if t == 5 {
+        return ulib.sys(SYS_TILEDO, A_TILE_TOGGLE, 0, 0)
+    }
     if t == 0 {
         return nv.fallback_switch(!nv.fallback_on())
     }
@@ -682,8 +889,37 @@ fn click(x: u64, y: u64) {
         }
         t = t + 1
     }
-    let fy: u64 = PAD + 2 * (TH + GAP) + PAD - GAP
-    if y >= fy && y < fy + FH {
+    // DER HELLIGKEITSREGLER. Die Stelle des Klicks IST der Wert -- kein
+    // Ziehen, kein Griff, den man treffen muss: das Panel schliesst
+    // sich bei einem Druck ausserhalb, und ein Ziehen ueber den Rand
+    // hinaus waere genau so ein Druck.
+    if y >= SLY && y < SLY + SLH && x >= SL_X {
+        let spur: u64 = W - PAD - SL_X
+        var rel: u64 = x - SL_X
+        if rel > spur {
+            rel = spur
+        }
+        let v: u64 = BR_MIN + rel * (BR_MAX - BR_MIN) / spur
+        let rc: u64 = ulib.sys(SYS_DISPSET, DS_BRIGHT, v, 0)
+        say((&s_hell[0 as usize]) as u64)
+        ulib.sayn(v)
+        say((&s_rc[0 as usize]) as u64)
+        ulib.sayn(rc)
+        ulib.nl()
+        paint(true)
+        return
+    }
+    if y >= L1Y && y < L1Y + FH {
+        let pid: u64 = ulib.sys(ulib.SYS_SPAWN,
+            (&p_taskmgr[0 as usize]) as u64, 0, 0)
+        say((&s_spawn[0 as usize]) as u64)
+        say((&s_eq[0 as usize]) as u64)
+        ulib.sayn(pid)
+        ulib.nl()
+        shut((&s_out[0 as usize]) as u64)
+        return
+    }
+    if y >= L2Y && y < L2Y + FH {
         let pid: u64 = ulib.sys(ulib.SYS_SPAWN,
             (&p_settings[0 as usize]) as u64, 0, 0)
         say((&s_spawn[0 as usize]) as u64)
@@ -804,10 +1040,7 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
             let lb: u64 = ty + 8 + IC + 4 + asc
             let _e: u64 = wlibc.text_at(wlibc.F_UI, wlibc.px_ui(), tx + 10,
                 lb, lab, tlen(lab), fg)
-            var st: u64 = (&w_off[0 as usize]) as u64
-            if on {
-                st = (&w_on[0 as usize]) as u64
-            }
+            let st: u64 = tile_word(t)
             let sb: u64 = ty + TH - 10
             let _f: u64 = wlibc.text_at(wlibc.F_UI, wlibc.px_ui(), tx + 10,
                 sb, st, tlen(st), dim)
@@ -818,14 +1051,86 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
         }
         t = t + 1
     }
-    let fy: u64 = PAD + 2 * (TH + GAP) + PAD - GAP
-    if fy + FH > y0 && fy < y0 + hh {
-        wlibc.hline(PAD, fy - 4, W - 2 * PAD, wlibc.theme(wlibc.T_LINE))
-        let p: u64 = (&l_all[0 as usize]) as u64
-        let base: u64 = fy + (FH + asc) / 2 - 1
+    // ------------------------------------------------ der Helligkeitsregler
+    if SLY + SLH > y0 && SLY < y0 + hh {
+        let lb: u64 = msg.get((&k_bright[0 as usize]) as u64)
+        let base: u64 = SLY + (SLH + asc) / 2 - 1
+        let _h1: u64 = wlibc.text_at(wlibc.F_UI, wlibc.px_ui(), PAD, base,
+            lb, tlen(lb), wlibc.theme(wlibc.T_FG))
+        let spur: u64 = W - PAD - SL_X
+        let mitte: u64 = SLY + SLH / 2
+        wlibc.rect(SL_X, mitte - 2, spur, 4, wlibc.theme(wlibc.T_SCROLL))
+        var v: u64 = dget(DG_BRIGHT)
+        if v < BR_MIN {
+            v = BR_MIN
+        }
+        if v > BR_MAX {
+            v = BR_MAX
+        }
+        let kx: u64 = SL_X + (v - BR_MIN) * (spur - SL_KN)
+            / (BR_MAX - BR_MIN)
+        // DER TEIL LINKS VOM GRIFF IN DER AKZENTFARBE: so sieht man, wo
+        // der Regler steht, auch wenn man den Griff nicht erkennt.
+        wlibc.rect(SL_X, mitte - 2, kx - SL_X, 4, wlibc.theme(wlibc.T_ACCENT))
+        wlibc.rect(kx, mitte - 8, SL_KN, 16, wlibc.theme(wlibc.T_BTN))
+        wlibc.frame(kx, mitte - 8, SL_KN, 16, wlibc.theme(wlibc.T_LINE))
+        if report && SLY >= y0 && SLY < y0 + hh {
+            say_text(PAD, base, wlibc.theme(wlibc.T_FG),
+                wlibc.theme(wlibc.T_PANEL), lb)
+            say((&s_hellist[0 as usize]) as u64)
+            ulib.sayn(v)
+            say((&s_sx[0 as usize]) as u64)
+            ulib.sayn(kx)
+            ulib.nl()
+        }
+    }
+    // ------------------------------------------------------ der Akkustand
+    if BAY + FH > y0 && BAY < y0 + hh {
+        let base: u64 = BAY + (FH + asc) / 2 - 1
+        var zeile: [u8; 64] = [0 as u8; 64]
+        let z: u64 = (&zeile[0 as usize]) as u64
+        var at: u64 = ulib.strcpy(z, msg.get((&k_bat[0 as usize]) as u64))
+        at = at + ulib.strcpy(z + at, (&u_sp[0 as usize]) as u64)
+        // KEIN AKKU IST KEINE NULL PROZENT. Der Kern sagt, ob einer da
+        // ist; steht dort eine Null, steht hier ein Wort und keine Zahl.
+        if pget(PG_BATPRESENT) == 0 {
+            at = at + ulib.strcpy(z + at,
+                msg.get((&k_nobat[0 as usize]) as u64))
+        } else {
+            at = at + ulib.digits(pget(PG_BATPERCENT), z + at)
+            at = at + ulib.strcpy(z + at, (&u_pct[0 as usize]) as u64)
+            if (pget(PG_BATSTATE) & 2) != 0 {
+                at = at + ulib.strcpy(z + at, (&u_op[0 as usize]) as u64)
+                at = at + ulib.strcpy(z + at,
+                    msg.get((&k_chg[0 as usize]) as u64))
+                at = at + ulib.strcpy(z + at, (&u_cl[0 as usize]) as u64)
+            }
+        }
+        let _b: u64 = wlibc.text_at(wlibc.F_UI, wlibc.px_ui(), PAD, base,
+            z, at, wlibc.theme(wlibc.T_DIM))
+        if report && BAY >= y0 && BAY < y0 + hh {
+            say_text(PAD, base, wlibc.theme(wlibc.T_DIM),
+                wlibc.theme(wlibc.T_PANEL), z)
+        }
+    }
+    // -------------------------------------------------- die Verknuepfungen
+    if L1Y + FH > y0 && L1Y < y0 + hh {
+        wlibc.hline(PAD, L1Y - 4, W - 2 * PAD, wlibc.theme(wlibc.T_LINE))
+        let p: u64 = msg.get((&k_tm[0 as usize]) as u64)
+        let base: u64 = L1Y + (FH + asc) / 2 - 1
         let _g: u64 = wlibc.text_at(wlibc.F_UI, wlibc.px_ui(), PAD + 10,
             base, p, tlen(p), wlibc.theme(wlibc.T_FG))
-        if report && fy >= y0 && fy < y0 + hh {
+        if report && L1Y >= y0 && L1Y < y0 + hh {
+            say_text(PAD + 10, base, wlibc.theme(wlibc.T_FG),
+                wlibc.theme(wlibc.T_PANEL), p)
+        }
+    }
+    if L2Y + FH > y0 && L2Y < y0 + hh {
+        let p: u64 = msg.get((&k_all[0 as usize]) as u64)
+        let base: u64 = L2Y + (FH + asc) / 2 - 1
+        let _g: u64 = wlibc.text_at(wlibc.F_UI, wlibc.px_ui(), PAD + 10,
+            base, p, tlen(p), wlibc.theme(wlibc.T_FG))
+        if report && L2Y >= y0 && L2Y < y0 + hh {
             say_text(PAD + 10, base, wlibc.theme(wlibc.T_FG),
                 wlibc.theme(wlibc.T_PANEL), p)
         }
