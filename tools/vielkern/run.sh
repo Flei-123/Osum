@@ -392,7 +392,7 @@ echo "== 12. RUNDE MERGE-6: die uebrigen Ein-Kern-Reste, an der Quelle gezaehlt 
 # KEINE FEHLERLISTE, SONDERN EIN VERTRAG. Die Zahl darf nicht wachsen,
 # ohne dass jemand sie hier hochsetzt und in docs/RUNDE-MERGE6.md
 # aufschreibt, warum.
-EK_SOLL=${EK_SOLL:-61}
+EK_SOLL=${EK_SOLL:-60}
 ek=$(python3 tools/vielkern/einkern.py | sed -n 's/.*offen=\([0-9]*\).*/\1/p')
 if [ -n "$ek" ] && [ "$ek" -le "$EK_SOLL" ] 2>/dev/null; then
     ok "Funktionen mit einem Puffer der Datenseite ohne Sperrwort: $ek (Vertrag: hoechstens $EK_SOLL)"
