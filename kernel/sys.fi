@@ -10154,6 +10154,15 @@ fn do_userinfo(state: u64, me: u64, out: u64) -> u64 {
 // warum die Grenze hier steht und nicht bei einem Satz je Aufruf.
 const SCAN_MAX: u64 = 63 // (BLOCK_MAX - 64) / nidx.REC
 
+// RUNDE GLYPHE: die Satzseite DIESES Kerns. Siehe kstate.SCANB_OFF.
+fn satzpuffer(state: u64) -> u64 {
+    var k: u64 = cpu.here(state)
+    if k >= kstate.MAX_CPUS {
+        k = 0
+    }
+    return state + kstate.SCANB_OFF + k * kstate.BLOCK_MAX
+}
+
 fn do_scan(state: u64, me: u64, curp: u64, dst: u64, max: u64) -> u64 {
     if kstate.get(state, kstate.FS_READY) == 0 {
         return neg(errno.E_NODEV)
@@ -10200,7 +10209,7 @@ fn do_scan(state: u64, me: u64, curp: u64, dst: u64, max: u64) -> u64 {
     // sie ist je Kern wiedereintrittsfaehig -- die innere `enter`
     // sieht sich selbst und verklemmt sich nicht.
     let fl: u64 = fs.enter(state)
-    let cur: u64 = state + kstate.BLOCK_OFF
+    let cur: u64 = satzpuffer(state)
     let buf: u64 = cur + 64
     if !copy_in(state, me, cur, curp, 8) {
         fs.leave(state, fl)
@@ -10232,9 +10241,16 @@ fn do_jrnl(state: u64, me: u64, from: u64, dst: u64, max: u64) -> u64 {
     if !proc.user_ok(state, me, dst, n * nidx.REC) {
         return neg(errno.E_FAULT)
     }
-    // RUNDE GLYPHE: dieselbe Sperre wie in `do_scan`, derselbe Grund.
+    // RUNDE GLYPHE: dieselbe Sperre und derselbe Puffer wie in
+    // `do_scan`. UND EINE SCHRANKE, die gefehlt hat: `nidx.MAXJ` ist
+    // 127, ein Satz ist 64 Oktett -- das sind 8128 Oktette in einen
+    // Puffer von 4096. Bis zu dieser Runde lief der Rest davon in die
+    // NAECHSTE Seite (`kstate.NAME_OFF`), und zwar still.
+    if n * nidx.REC > kstate.BLOCK_MAX {
+        n = kstate.BLOCK_MAX / nidx.REC
+    }
     let fl: u64 = fs.enter(state)
-    let buf: u64 = state + kstate.BLOCK_OFF
+    let buf: u64 = satzpuffer(state)
     let got: u64 = nidx.take(state, from, buf, n)
     if got != 0 {
         if !copy_out(state, me, dst, buf, got * nidx.REC) {
