@@ -1,0 +1,652 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/bild.fi -- Runde ALLTAG: PNG UND BMP, LESEN UND SCHREIBEN.
+//
+// Zwei Programme dieser Runde brauchen dasselbe: der Bildbetrachter
+// macht Bilder auf, das Ausschnittwerkzeug legt eines an. Also steht es
+// hier und nicht zweimal.
+//
+// WAS ES KANN:
+//
+//   png_lesen    PNG, Farbtiefe 8, alle fuenf Farbarten (Grau, RGB,
+//                Palette, Grau+Deckung, RGBA), Deckungskapitel tRNS,
+//                nicht verschachtelt (kein Adam7).
+//   png_schreiben  PNG, Farbart 6 (RGBA), Filter 0, ein IDAT.
+//   bmp_lesen    BMP mit 24 und 32 Bit, von unten nach oben und von
+//                oben nach unten, unkomprimiert.
+//
+// WAS ES NICHT KANN, und es steht hier: Farbtiefe 16 (wird abgelehnt,
+// nicht halbiert), Adam7, RLE-BMP, Farbtafeln unter 8 Bit. Jedes davon
+// sagt `fehler()`, statt etwas Falsches zu zeigen.
+//
+// DAS FORMAT IM SPEICHER ist ein Feld aus u32, eine Zahl je Bildpunkt,
+// 0xAARRGGBB -- dieselbe Anordnung, die `wlibc.px` erwartet, und
+// dieselbe, in der die Symbole dieses Systems liegen (`wlib.bild_malen`).
+//
+// EIN EINZIGER GROSSER PUFFER, und das ist kein Geiz: ein Prozess in
+// diesem System hat 6 MiB grosse Arena (kernel/sys.fi, `big_map`) und
+// die Zeichenflaeche von wlib will davon schon eines. Also wird der
+// entpackte Bilddatenstrom IN DEN AUSGABEPUFFER inflatiert, dort
+// entfiltert und dort -- VON HINTEN NACH VORN -- zu 0xAARRGGBB
+// auseinandergezogen. Ein zweiter Puffer waere bequemer und wuerde das
+// groesste Bild halbieren, das dieses System aufmachen kann.
+
+profile kernel
+
+import ulib
+import flate
+
+export {
+    png_lesen, png_schreiben, bmp_lesen, ist_png, ist_bmp, ist_jpeg,
+    breite, hoehe, fehler, fehlertext, bedarf,
+    E_OK, E_FORM, E_TIEFE, E_GROSS, E_PACK, E_PLATZ
+}
+
+const E_OK: u64 = 0
+const E_FORM: u64 = 1 // das ist kein PNG/BMP, oder es ist beschaedigt
+const E_TIEFE: u64 = 2 // Farbtiefe 16 oder Adam7 -- wird nicht gemacht
+const E_GROSS: u64 = 3 // passt nicht in den Puffer
+const E_PACK: u64 = 4 // der Datenstrom laesst sich nicht auspacken
+const E_PLATZ: u64 = 5 // der Ausgabepuffer ist zu klein
+
+static mut b_w: u64 = 0
+static mut b_h: u64 = 0
+static mut b_err: u64 = 0
+static mut plte: [u8; 1024] = [0 as u8; 1024]
+static mut trns: [u8; 256] = [0 as u8; 256]
+static mut ntrns: u64 = 0
+
+fn breite() -> u64 {
+    return b_w
+}
+
+fn hoehe() -> u64 {
+    return b_h
+}
+
+fn fehler() -> u64 {
+    return b_err
+}
+
+static mut t_ok: [u8; 11] = "in Ordnung\0"
+static mut t_form: [u8; 20] = "kein gültiges Bild\0"
+static mut t_tiefe: [u8; 54] = "Farbtiefe 16 oder verschachtelt -- nicht unterstützt\0"
+static mut t_gross: [u8; 40] = "das Bild ist zu groß für den Speicher\0"
+static mut t_pack: [u8; 31] = "der Datenstrom ist beschädigt\0"
+static mut t_platz: [u8; 11] = "kein Platz\0"
+
+fn fehlertext() -> u64 {
+    if b_err == E_FORM {
+        return (&t_form[(0) as usize]) as u64
+    }
+    if b_err == E_TIEFE {
+        return (&t_tiefe[(0) as usize]) as u64
+    }
+    if b_err == E_GROSS {
+        return (&t_gross[(0) as usize]) as u64
+    }
+    if b_err == E_PACK {
+        return (&t_pack[(0) as usize]) as u64
+    }
+    if b_err == E_PLATZ {
+        return (&t_platz[(0) as usize]) as u64
+    }
+    return (&t_ok[(0) as usize]) as u64
+}
+
+// Wieviel Platz ein Bild dieser Groesse braucht: das Feld selbst, oder
+// der entpackte Datenstrom davor -- was groesser ist.
+fn bedarf(w: u64, h: u64, kanaele: u64) -> u64 {
+    let a: u64 = w * h * 4
+    let b: u64 = (w * kanaele + 1) * h
+    if b > a {
+        return b
+    }
+    return a
+}
+
+fn ld8(p: u64, at: u64) -> u64 {
+    return (*((p + at) as *mut u8)) as u64
+}
+
+fn st8(p: u64, at: u64, v: u64) {
+    __mmio_write8((p + at) as *mut u8, (v & 255) as u8)
+}
+
+fn be32(p: u64, at: u64) -> u64 {
+    return (ld8(p, at) << 24) | (ld8(p, at + 1) << 16)
+        | (ld8(p, at + 2) << 8) | ld8(p, at + 3)
+}
+
+fn le16(p: u64, at: u64) -> u64 {
+    return ld8(p, at) | (ld8(p, at + 1) << 8)
+}
+
+fn le32(p: u64, at: u64) -> u64 {
+    return le16(p, at) | (le16(p, at + 2) << 16)
+}
+
+fn st32(p: u64, at: u64, v: u64) {
+    __mmio_write32((p + at) as *mut u32, (v & 0xFFFFFFFF) as u32)
+}
+
+fn ld32(p: u64, at: u64) -> u64 {
+    return (__mmio_read32((p + at) as *mut u32)) as u64
+}
+
+fn ist_png(p: u64, n: u64) -> bool {
+    if n < 8 {
+        return false
+    }
+    return ld8(p, 0) == 137 && ld8(p, 1) == 80 && ld8(p, 2) == 78
+        && ld8(p, 3) == 71
+}
+
+fn ist_bmp(p: u64, n: u64) -> bool {
+    if n < 54 {
+        return false
+    }
+    return ld8(p, 0) == 66 && ld8(p, 1) == 77
+}
+
+fn ist_jpeg(p: u64, n: u64) -> bool {
+    if n < 4 {
+        return false
+    }
+    return ld8(p, 0) == 255 && ld8(p, 1) == 216
+}
+
+// ============================================================== PNG
+
+fn paeth(a: u64, b: u64, c: u64) -> u64 {
+    let p: i64 = (a as i64) + (b as i64) - (c as i64)
+    var pa: i64 = p - (a as i64)
+    var pb: i64 = p - (b as i64)
+    var pc: i64 = p - (c as i64)
+    if pa < 0 {
+        pa = 0 - pa
+    }
+    if pb < 0 {
+        pb = 0 - pb
+    }
+    if pc < 0 {
+        pc = 0 - pc
+    }
+    if pa <= pb && pa <= pc {
+        return a
+    }
+    if pb <= pc {
+        return b
+    }
+    return c
+}
+
+// Die Filter zuruecknehmen, Zeile fuer Zeile, IM Puffer. Danach steht
+// dort derselbe Strom ohne die fuehrenden Filteroktette -- die Zeilen
+// ruecken zusammen.
+fn entfiltern(buf: u64, zeile: u64, h: u64, kan: u64) {
+    var y: u64 = 0
+    while y < h {
+        let ein: u64 = buf + y * (zeile + 1)
+        let f: u64 = ld8(ein, 0)
+        let hier: u64 = ein + 1
+        // Die vorige Zeile steht schon ENTFILTERT an ihrem alten Platz.
+        // NUR AUSRECHNEN, WENN ES SIE GIBT: `(y - 1)` bei y = 0 ist in
+        // Firn kein grosses Ergebnis, sondern ein Abbruch ("integer
+        // overflow in 'u64 - u64'"), und genau daran ist der erste
+        // Anlauf gestorben.
+        var oben: u64 = hier
+        if y > 0 {
+            oben = buf + (y - 1) * (zeile + 1) + 1
+        }
+        var i: u64 = 0
+        while i < zeile {
+            var a: u64 = 0
+            var b: u64 = 0
+            var c: u64 = 0
+            if i >= kan {
+                a = ld8(hier, i - kan)
+            }
+            if y > 0 {
+                b = ld8(oben, i)
+                if i >= kan {
+                    c = ld8(oben, i - kan)
+                }
+            }
+            let x: u64 = ld8(hier, i)
+            var v: u64 = x
+            if f == 1 {
+                v = x + a
+            } else if f == 2 {
+                v = x + b
+            } else if f == 3 {
+                v = x + (a + b) / 2
+            } else if f == 4 {
+                v = x + paeth(a, b, c)
+            }
+            st8(hier, i, v)
+            i = i + 1
+        }
+        y = y + 1
+    }
+    // Jetzt die Filteroktette herausnehmen: Zeile y liegt bei
+    // y*(zeile+1)+1 und soll bei y*zeile liegen. Von VORN nach hinten,
+    // denn das Ziel liegt immer links von der Quelle.
+    y = 0
+    while y < h {
+        let von: u64 = buf + y * (zeile + 1) + 1
+        let nach: u64 = buf + y * zeile
+        var i2: u64 = 0
+        while i2 < zeile {
+            st8(nach, i2, ld8(von, i2))
+            i2 = i2 + 1
+        }
+        y = y + 1
+    }
+}
+
+// FARBTIEFE 1, 2 UND 4 AUSPACKEN -- ein Oktett je Abtastwert daraus
+// machen. Von hinten, denn das Ergebnis ist groesser als die Vorlage
+// und liegt im selben Puffer.
+//
+// Warum ueberhaupt: Pillow schreibt eine Farbtafel mit sechzehn
+// Eintraegen als PNG mit VIER Bit je Bildpunkt, und das ist kein
+// Sonderfall, sondern der Normalfall bei Symbolen und Bildschirmfotos
+// mit wenigen Farben. Ein Betrachter, der daran scheitert, scheitert an
+// der Haelfte dessen, was auf einer Platte liegt.
+fn auspacken(buf: u64, w: u64, h: u64, tiefe: u64, grau: bool) {
+    let proz: u64 = 8 / tiefe
+    let zb: u64 = (w * tiefe + 7) / 8
+    let maske: u64 = (1 << tiefe) - 1
+    var skala: u64 = 1
+    if grau {
+        skala = 255 / maske
+    }
+    var y: u64 = h
+    while y > 0 {
+        y = y - 1
+        var x: u64 = w
+        while x > 0 {
+            x = x - 1
+            let oktett: u64 = ld8(buf, y * zb + x / proz)
+            let schritt: u64 = (proz - 1 - (x % proz)) * tiefe
+            st8(buf, y * w + x, ((oktett >> schritt) & maske) * skala)
+        }
+    }
+}
+
+// Aus `kan` Oktetten je Bildpunkt eine Zahl 0xAARRGGBB machen -- VON
+// HINTEN, damit Quelle und Ziel derselbe Puffer sein duerfen.
+fn ausziehen(buf: u64, w: u64, h: u64, kan: u64, art: u64) {
+    var i: u64 = w * h
+    while i > 0 {
+        i = i - 1
+        let s: u64 = buf + i * kan
+        var r: u64 = 0
+        var g: u64 = 0
+        var b: u64 = 0
+        var a: u64 = 255
+        if art == 0 {
+            r = ld8(s, 0)
+            g = r
+            b = r
+            if ntrns > 0 && r == ld8((&trns[(0) as usize]) as u64, 0) {
+                a = 0
+            }
+        } else if art == 4 {
+            r = ld8(s, 0)
+            g = r
+            b = r
+            a = ld8(s, 1)
+        } else if art == 2 {
+            r = ld8(s, 0)
+            g = ld8(s, 1)
+            b = ld8(s, 2)
+        } else if art == 6 {
+            r = ld8(s, 0)
+            g = ld8(s, 1)
+            b = ld8(s, 2)
+            a = ld8(s, 3)
+        } else {
+            let idx: u64 = ld8(s, 0)
+            r = ld8((&plte[(0) as usize]) as u64, idx * 3)
+            g = ld8((&plte[(0) as usize]) as u64, idx * 3 + 1)
+            b = ld8((&plte[(0) as usize]) as u64, idx * 3 + 2)
+            if idx < ntrns {
+                a = ld8((&trns[(0) as usize]) as u64, idx)
+            }
+        }
+        st32(buf, i * 4, (a << 24) | (r << 16) | (g << 8) | b)
+    }
+}
+
+// `src` DARF veraendert werden -- die IDAT-Stuecke werden darin
+// zusammengeschoben. `out` nimmt erst den entpackten Strom und danach
+// die Bildpunkte auf; `outcap` muss `bedarf(w, h, kanaele)` sein.
+fn png_lesen(src: u64, srcn: u64, out: u64, outcap: u64) -> bool {
+    b_err = E_OK
+    b_w = 0
+    b_h = 0
+    ntrns = 0
+    if !ist_png(src, srcn) {
+        b_err = E_FORM
+        return false
+    }
+    var at: u64 = 8
+    var tiefe: u64 = 0
+    var art: u64 = 0
+    var kan: u64 = 0
+    var dat: u64 = 0 // wohin die IDAT-Oktette geschoben werden
+    var datn: u64 = 0
+    var kopf: bool = false
+    var fertig: bool = false
+    while !fertig && at + 8 <= srcn {
+        let len: u64 = be32(src, at)
+        let typ: u64 = be32(src, at + 4)
+        let inhalt: u64 = src + at + 8
+        if at + 12 + len > srcn {
+            fertig = true
+        } else if typ == 0x49484452 {
+            // IHDR
+            b_w = be32(inhalt, 0)
+            b_h = be32(inhalt, 4)
+            tiefe = ld8(inhalt, 8)
+            art = ld8(inhalt, 9)
+            if ld8(inhalt, 12) != 0 {
+                b_err = E_TIEFE
+                return false
+            }
+            // Tiefe 1, 2 und 4 gibt es nur bei Grau und Farbtafel; 16
+            // wird nicht halbiert, sondern abgelehnt.
+            if tiefe != 8 {
+                if tiefe != 1 && tiefe != 2 && tiefe != 4 {
+                    b_err = E_TIEFE
+                    return false
+                }
+                if art != 0 && art != 3 {
+                    b_err = E_TIEFE
+                    return false
+                }
+            }
+            if art == 0 {
+                kan = 1
+            } else if art == 2 {
+                kan = 3
+            } else if art == 3 {
+                kan = 1
+            } else if art == 4 {
+                kan = 2
+            } else if art == 6 {
+                kan = 4
+            } else {
+                b_err = E_FORM
+                return false
+            }
+            if b_w == 0 || b_h == 0 || b_w > 8192 || b_h > 8192 {
+                b_err = E_GROSS
+                return false
+            }
+            if bedarf(b_w, b_h, kan) > outcap {
+                b_err = E_GROSS
+                return false
+            }
+            kopf = true
+        } else if typ == 0x504C5445 {
+            var i: u64 = 0
+            while i < len && i < 768 {
+                st8((&plte[(0) as usize]) as u64, i, ld8(inhalt, i))
+                i = i + 1
+            }
+        } else if typ == 0x74524E53 {
+            var k: u64 = 0
+            while k < len && k < 256 {
+                st8((&trns[(0) as usize]) as u64, k, ld8(inhalt, k))
+                k = k + 1
+            }
+            ntrns = len
+            if art == 0 && len >= 2 {
+                // Grau: zwei Oktette, das zweite ist der Wert bei
+                // Tiefe 8.
+                st8((&trns[(0) as usize]) as u64, 0, ld8(inhalt, 1))
+                ntrns = 1
+            }
+        } else if typ == 0x49444154 {
+            if !kopf {
+                b_err = E_FORM
+                return false
+            }
+            if dat == 0 {
+                dat = src + at + 8
+                datn = len
+            } else {
+                // Zusammenschieben: das Stueck wandert direkt hinter
+                // das vorige. Das ist in der Quelle immer nach links.
+                var j: u64 = 0
+                while j < len {
+                    st8(dat, datn + j, ld8(inhalt, j))
+                    j = j + 1
+                }
+                datn = datn + len
+            }
+        } else if typ == 0x49454E44 {
+            fertig = true
+        }
+        at = at + 12 + len
+    }
+    if !kopf || dat == 0 || datn < 3 {
+        b_err = E_FORM
+        return false
+    }
+    // zlib: zwei Oktette Kopf, danach deflate. Ein Woerterbuch (Bit 5
+    // des zweiten Oktetts) gibt es in PNG nicht.
+    if (ld8(dat, 1) & 32) != 0 {
+        b_err = E_FORM
+        return false
+    }
+    var roh: u64 = 0
+    let rc: u64 = flate.inflate(dat + 2, datn - 2, out, outcap,
+        (&roh) as u64)
+    if rc != flate.E_OK {
+        b_err = E_PACK
+        return false
+    }
+    let zb: u64 = (b_w * kan * tiefe + 7) / 8
+    if roh < (zb + 1) * b_h {
+        b_err = E_PACK
+        return false
+    }
+    entfiltern(out, zb, b_h, kan)
+    if tiefe < 8 {
+        auspacken(out, b_w, b_h, tiefe, art == 0)
+    }
+    ausziehen(out, b_w, b_h, kan, art)
+    return true
+}
+
+// ============================================================== BMP
+
+fn bmp_lesen(src: u64, srcn: u64, out: u64, outcap: u64) -> bool {
+    b_err = E_OK
+    if !ist_bmp(src, srcn) {
+        b_err = E_FORM
+        return false
+    }
+    let off: u64 = le32(src, 10)
+    let kopf: u64 = le32(src, 14)
+    if kopf < 40 {
+        b_err = E_FORM
+        return false
+    }
+    b_w = le32(src, 18)
+    var hroh: u64 = le32(src, 22)
+    var von_unten: bool = true
+    if hroh > 0x7FFFFFFF {
+        hroh = 4294967296 - hroh
+        von_unten = false
+    }
+    b_h = hroh
+    let bits: u64 = le16(src, 28)
+    let komp: u64 = le32(src, 30)
+    if (bits != 24 && bits != 32) || komp != 0 {
+        b_err = E_TIEFE
+        return false
+    }
+    if b_w == 0 || b_h == 0 || b_w > 8192 || b_h > 8192 {
+        b_err = E_GROSS
+        return false
+    }
+    if b_w * b_h * 4 > outcap {
+        b_err = E_GROSS
+        return false
+    }
+    let bpp: u64 = bits / 8
+    let stride: u64 = (b_w * bpp + 3) & 0xFFFFFFFFFFFFFFFC
+    if off + stride * b_h > srcn {
+        b_err = E_FORM
+        return false
+    }
+    var y: u64 = 0
+    while y < b_h {
+        var quelle_y: u64 = y
+        if von_unten {
+            quelle_y = b_h - 1 - y
+        }
+        let zeile: u64 = src + off + quelle_y * stride
+        var x: u64 = 0
+        while x < b_w {
+            let s: u64 = zeile + x * bpp
+            let b: u64 = ld8(s, 0)
+            let g: u64 = ld8(s, 1)
+            let r: u64 = ld8(s, 2)
+            var a: u64 = 255
+            if bpp == 4 {
+                a = ld8(s, 3)
+                // Ein BMP mit lauter Nullen in der Deckung ist ein BMP
+                // ohne Deckung, kein unsichtbares Bild.
+                if a == 0 {
+                    a = 255
+                }
+            }
+            st32(out, (y * b_w + x) * 4, (a << 24) | (r << 16) | (g << 8)
+                | b)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    return true
+}
+
+// ============================================================ SCHREIBEN
+
+static mut adler_a: u64 = 1
+static mut adler_b: u64 = 0
+
+fn adler_dazu(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        adler_a = (adler_a + ld8(p, i)) % 65521
+        adler_b = (adler_b + adler_a) % 65521
+        i = i + 1
+    }
+}
+
+fn bst32(p: u64, at: u64, v: u64) {
+    st8(p, at, v >> 24)
+    st8(p, at + 1, v >> 16)
+    st8(p, at + 2, v >> 8)
+    st8(p, at + 3, v)
+}
+
+// Ein Kapitel: Laenge, Name, Inhalt, CRC ueber Name und Inhalt.
+fn kapitel(out: u64, at: u64, typ: u64, inhalt: u64, n: u64) -> u64 {
+    bst32(out, at, n)
+    bst32(out, at + 4, typ)
+    var i: u64 = 0
+    while i < n {
+        st8(out, at + 8 + i, ld8(inhalt, i))
+        i = i + 1
+    }
+    let crc: u64 = flate.crc32(out + at + 4, n + 4)
+    bst32(out, at + 8 + n, crc)
+    return at + 12 + n
+}
+
+// Ein PNG aus einem Feld 0xAARRGGBB. `roh` ist ein Arbeitspuffer fuer
+// den ungepackten Strom: (w*4+1)*h Oktette.
+//
+// FARBART 6 UND FILTER 0. Filter kosten Rechenzeit und bringen bei
+// einem Bildschirmfoto (grosse gleichfarbige Flaechen) fast nichts,
+// weil deflate die Wiederholungen ohnehin findet -- gemessen an einem
+// Fenster: 2 Prozent.
+fn png_schreiben(pix: u64, w: u64, h: u64, roh: u64, rohcap: u64,
+    out: u64, outcap: u64, out_len: u64) -> bool {
+    b_err = E_OK
+    let zeile: u64 = w * 4
+    if (zeile + 1) * h > rohcap {
+        b_err = E_PLATZ
+        return false
+    }
+    var y: u64 = 0
+    while y < h {
+        let ziel: u64 = roh + y * (zeile + 1)
+        st8(ziel, 0, 0)
+        var x: u64 = 0
+        while x < w {
+            let f: u64 = ld32(pix, (y * w + x) * 4)
+            st8(ziel, 1 + x * 4, f >> 16)
+            st8(ziel, 2 + x * 4, f >> 8)
+            st8(ziel, 3 + x * 4, f)
+            st8(ziel, 4 + x * 4, f >> 24)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    let rohn: u64 = (zeile + 1) * h
+    // 8 Signatur + 25 IHDR + 12 + Daten + 12 IEND
+    if outcap < 8 + 25 + 12 + 6 + rohn + 12 {
+        b_err = E_PLATZ
+        return false
+    }
+    st8(out, 0, 137)
+    st8(out, 1, 80)
+    st8(out, 2, 78)
+    st8(out, 3, 71)
+    st8(out, 4, 13)
+    st8(out, 5, 10)
+    st8(out, 6, 26)
+    st8(out, 7, 10)
+    var ihdr: [u8; 13] = [0 as u8; 13]
+    let ih: u64 = (&ihdr[(0) as usize]) as u64
+    bst32(ih, 0, w)
+    bst32(ih, 4, h)
+    st8(ih, 8, 8)
+    st8(ih, 9, 6)
+    st8(ih, 10, 0)
+    st8(ih, 11, 0)
+    st8(ih, 12, 0)
+    var at: u64 = kapitel(out, 8, 0x49484452, ih, 13)
+    // Der Platz des IDAT-Inhalts: hinter Laenge und Name.
+    let dstart: u64 = at + 8
+    st8(out, dstart, 0x78)
+    st8(out, dstart + 1, 0x01)
+    var gepackt: u64 = 0
+    let rc: u64 = flate.deflate(roh, rohn, out + dstart + 2,
+        outcap - dstart - 10, (&gepackt) as u64)
+    if rc != flate.E_OK {
+        b_err = E_PLATZ
+        return false
+    }
+    adler_a = 1
+    adler_b = 0
+    adler_dazu(roh, rohn)
+    let adler: u64 = (adler_b << 16) | adler_a
+    bst32(out, dstart + 2 + gepackt, adler)
+    let dlen: u64 = gepackt + 6
+    bst32(out, at, dlen)
+    bst32(out, at + 4, 0x49444154)
+    bst32(out, dstart + dlen, flate.crc32(out + at + 4, dlen + 4))
+    at = dstart + dlen + 4
+    var leer: [u8; 4] = [0 as u8; 4]
+    at = kapitel(out, at, 0x49454E44, (&leer[(0) as usize]) as u64, 0)
+    __mmio_write64((out_len) as *mut u64, at)
+    return true
+}
