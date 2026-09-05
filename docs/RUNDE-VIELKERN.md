@@ -225,7 +225,69 @@ Prüfskripts; ein Erwartungstext aus einer Vorrunde). Keine Regression.
 
 ---
 
-## 6. Ehrlich offen
+## 6. Und der zweite Fehler, den die Abnahme gefangen hat
+
+Mit Ring 3 auf allen Kernen startet der **volle Schreibtisch** nicht
+mehr vollständig:
+
+    desk: start /bin/desktop  pid=6
+    desk: start /bin/taskbar  pid=0      <- kein Prozess
+    desk: start /bin/launcher pid=7
+
+`pid=0` heißt: `elf.spawn` hat gar nicht erst angelegt — es gibt keine
+`elf: start`-Zeile davor, keinen `user fault`, keine Ausnahme. Zweimal
+von zwei Läufen, also kein Zufall. Danach ist die Leiste weg
+(`7 LEISTE KEIN`), und damit ist genau das kaputt, worum es Justin
+geht.
+
+Der Kern-Unterbau ist davon **nicht** betroffen: dieselben Kerne, die
+hier den Schreibtisch nicht hochbringen, fahren den kleineren Aufbau
+(`kurz.sh`, Leiste + Uhr + Eingabe) mit `R3K 4` und **null** Ausnahmen
+durch. Der Fehler sitzt oberhalb — im Anlegen eines Prozesses aus einem
+Prozess heraus, auf einem anderen Kern als dem, der `desk` gerade
+ausführt. Gefunden ist er nicht.
+
+**Also fährt das ausgelieferte Abbild wie das der Runde BLECHKERN:
+Ring 3 auf Kern 0.** Das neue Wort **`r3alle`** auf der
+Kernel-Befehlszeile gibt alle Kerne frei — für den nächsten, der die
+Ursache sucht, und ohne dass dafür ein zweiter Kernel gebaut werden
+muss. `R3K` auf Tafelzeile 23 sagt jederzeit, was gerade gilt: `1` ohne
+das Wort, `4` bzw. `7` mit ihm.
+
+Das ist kein schöner Abschluss, aber es ist der ehrliche: der Unterbau
+ist gebaut und belegt, und er wird erst scharf geschaltet, wenn der
+Schreibtisch darauf steht.
+
+---
+
+## 7. Die Abnahme
+
+Am **fertigen Abbild**, Limine, UEFI, `-accel kvm -cpu host`,
+**`-smp 4`**, 3440×1440, xHCI-Tastatur + USB-Maus, e1000 mit DHCP.
+
+| gemessen | Zahl |
+|---|---|
+| Anstriche der Leiste | **180** |
+| Uhr-Anstriche / davon **verschiedene** | 179 / **177** |
+| erste → letzte Uhr | `13:34:45` → `13:37:41` = **176 s durchgehend** |
+| `EXCEPTION` · `user fault` · `UEBERGELAUFEN` · `lock: stuck` | **0 · 0 · 0 · 0** |
+| Tafelzeile 23 | `WA 0  KS 50896  R3W 0  R3K 1  LG 0` |
+| Tafelzeile 18 | `TAST D 1 BER 16 ARM 17 CC 1 RK 08000000 N 10` |
+| Tafelzeile 7 | `LEISTE id9 y1400 MAL 145 fl2 ZU 1 **TK 0**` |
+| Netz | `22 NETZ K2 BDF 0020 L 1 ABL 0 IP 10.0.2.15` |
+| Klicks / davon auf den Startknopf | 7 / **4** |
+| Startmenü | `launcher pid=25` |
+| `tools/einsprung/run.sh` | **12 von 14** — dieselben zwei wie in den beiden Runden davor |
+
+`LG 0` ist neu und wichtig: **keine** Tafelzeile wird mehr
+abgeschnitten. Was auf dem Schirm steht, ist vollständig.
+
+`KS 50896` von 65536 — 78 %. Der höchste bisher gemessene Wert; die
+Wächterseite steht, aber die Zahl ist im Auge zu behalten.
+
+---
+
+## 8. Ehrlich offen
 
 **Nicht gebaut in dieser Runde:** Startmenü Stufe 2, Ausbau des
 Kontrollzentrums, App-Store mit echtem Inhalt, jarvisd-Ausbau. Für den
