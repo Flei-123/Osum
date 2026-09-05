@@ -1395,6 +1395,24 @@ lauf "40. Ring 3 auf ALLEN Kernen, und der Riegel davor -- der Fehler der Runde 
 lauf "41. der Aufgabenverwalter und das Kontrollzentrum (tools/werkzeug/run.sh, Runde WERKZEUGE)" \
      tools/werkzeug/run.sh werkzeug '^WERKZEUGE: |^  OK    |^        '
 
+#  42. DER ZEICHENWEG AUF MEHREREN KERNEN (tools/glyphe/run.sh, Runde
+#      GLYPHE). Der Rest, an dem MERGE-6 gescheitert ist: `wig.blit` und
+#      `wig.glyph_into` bauten in EINEM Puffer der Datenseite, und nur
+#      einer der beiden Wege hatte eine Sperre. Ein Ring-3-Programm
+#      starb dadurch in einem von fuenf Laeufen mit vier Kernen
+#      (`panic: integer overflow in 'u64 * u64'`). Seit dieser Runde
+#      gehoert die Buehne dem Kern, der auf ihr zeichnet
+#      (`kstate.WIGST_OFF`, angesprochen ueber `cpu.here`), der
+#      Glyphenspeicher liegt unter einer eigenen Sperre und die
+#      Zwischenablage auch. Nachgewiesen wie `fsrace`: `glyphrace`
+#      startet alle Kerne im selben Augenblick, dazu DREI Gegenproben
+#      (`glyphblind` = der Stand von MERGE-6, `glyphsperre` = die
+#      Bauform mit einer gemeinsamen Sperre, `glyphtafelfrei` = der
+#      Glyphenspeicher ohne die seine) und zwanzig Schreibtischlaeufe
+#      je mit vier und acht Kernen.
+lauf "42. der Zeichenweg auf mehreren Kernen: eine Buehne je Kern (tools/glyphe/run.sh, Runde GLYPHE)" \
+     tools/glyphe/run.sh glyphe '^GLYPHE: |^  OK    |^  FAIL |^  ZAHL  |^        '
+
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
 abschnitte_abarbeiten
