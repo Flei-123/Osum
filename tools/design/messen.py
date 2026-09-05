@@ -177,6 +177,28 @@ def klickflaechen(rechtecke, mindest=32):
     return zu_klein
 
 
+def eckfarben(b, x, y, n=16):
+    """WIE VIELE VERSCHIEDENE FARBEN STEHEN IM ECKQUADRAT.
+
+    Das ist die ehrlichste Zahl, die man ueber eine Ecke aus EINEM Bild
+    lesen kann.  Eine harte, eckige Ecke kennt genau zwei Farben --
+    Schreibtisch und Rahmen --, eine geglaettete Rundung kennt die
+    Zwischenwerte der Deckung dazu.  Ein Radius in Bildpunkten laesst
+    sich dagegen nicht zuverlaessig ablesen, solange der Schreibtisch
+    ein VERLAUF ist: der Nachbarpunkt ist dort nie derselbe, und jede
+    Schwelle findet entweder alles oder nichts.  (Der erste Versuch
+    dieser Runde hat auf diese Weise dem eckigen Fenster einen Radius
+    von 11 zugeschrieben.)
+    """
+    z = {}
+    for dy in range(n):
+        for dx in range(n):
+            p = b.px(x + dx, y + dy)
+            if p:
+                z[p] = 1
+    return len(z)
+
+
 def eck_radius(b, x, y, hg, tol=24):
     """Der Radius der oberen linken Ecke bei (x, y), an der Diagonale
     abgelesen: wie viele Bildpunkte der Diagonale sind noch Hintergrund?
@@ -229,6 +251,24 @@ def schatten(b, x, y, w, h, tiefe=8):
         return None
     r = sum(ref) // len(ref)
     return [r - v for v in unten]
+
+
+def entdoppeln(texte):
+    """DIESELBE BESCHRIFTUNG ZAEHLT EINMAL.
+
+    Die Programme melden ihre Texte bei JEDEM Neuzeichnen, und ein
+    Schreibtisch zeichnet in dreissig Sekunden zwanzigmal neu.  Wer die
+    Liste nimmt, wie sie ist, findet die Beschriftung `Suchen` zwanzigmal
+    an derselben Stelle und meldet neunzehn Ueberlappungen, die es nicht
+    gibt -- der erste Lauf dieser Runde hat auf diese Weise 12 273
+    Ueberlappungen in einem Bild gefunden, auf dem gar kein Text
+    ueberlappt.  Geschluesselt wird auf Fenster, Ort und Inhalt; der
+    LETZTE Stand gewinnt, weil er der ist, der auf dem Bild steht.
+    """
+    d = {}
+    for t in texte:
+        d[(t["win"], t["ax"] + t["x"], t["ay"] + t["base"], t["t"])] = t
+    return list(d.values())
 
 
 def text_pruefung(b, texte, fenster=None):
@@ -312,11 +352,11 @@ def main():
 
     if zh and font:
         v = zh[-1] * 100 // font[0]
-        print("3. zeilenhoehe:   %d px bei %d px Schrift = %.2f"
+        print("3. listenzeile:   %d px bei %d px Schrift = %.2f"
               % (zh[-1], font[0], v / 100.0))
         erg["zeilenhoehe"], erg["zh_faktor"] = zh[-1], v / 100.0
     else:
-        print("3. zeilenhoehe:   -")
+        print("3. listenzeile:   -")
 
     bilder = sorted(glob.glob(os.path.join(d, "*.ppm")))
     erg["bilder"] = {}
@@ -327,26 +367,56 @@ def main():
         n, stark = hauptfarben(b)
         e["farben"], e["farben_stark"] = n, stark
         # Die Ecke und der Schatten des Fensters, das dieses Bild zeigt.
+        eig = pfad[:-4] + ".serial"
+        g2 = geom
+        if os.path.exists(eig):
+            g2 = sammle(eig)[4]
+        if "settings" not in g2:
+            m = None
+            for m in re.finditer(
+                    r"settings: rect name=win x=(\d+) y=(\d+) w=(\d+) h=(\d+)",
+                    lies(eig) if os.path.exists(eig) else ""):
+                pass
+            if m:
+                g2 = dict(g2)
+                g2["settings"] = tuple(int(m.group(i)) for i in (1, 2, 3, 4))
         prog = None
         for k in ("explorer", "settings", "launcher"):
-            if k in geom and k in name or (k in geom and prog is None):
+            if k in g2:
                 prog = k
-        if prog and prog in geom:
-            gx, gy, gw, gh = geom[prog]
-            hg = b.px(max(gx - 6, 0), max(gy - 6, 0))
+                break
+        if prog and prog in g2:
+            # DIE ECKE UND DER SCHATTEN GEHOEREN DEM FENSTER UND NICHT
+            # SEINER MALFLAECHE.  Ein Programm meldet mit `geom` das
+            # Rechteck, in das es MALT; der Rahmen (2) und die
+            # Titelleiste (22) liegen darum herum, und die runde Ecke
+            # und der Schatten sind Sache des Zusammensetzers.  Der
+            # erste Lauf dieser Runde hat den Schatten INNERHALB des
+            # Fensters gesucht und ueberall 0 gefunden.
+            gx, gy, gw, gh = g2[prog]
+            gx = gx - 2 if gx >= 2 else 0
+            gy = gy - 22 if gy >= 22 else 0
+            gw, gh = gw + 4, gh + 24
+            hg = b.px(max(gx - 8, 0), max(gy - 8, 0))
+            e["eckfarben"] = eckfarben(b, gx, gy)
             if hg:
                 r, zwi = eck_radius(b, gx, gy, hg)
                 e["radius"], e["aa_punkte"] = r, zwi
             s = schatten(b, gx, gy, gw, gh)
             if s:
                 e["schatten"] = s
-        leer, ab, ueber = text_pruefung(b, texte)
+        # Die Beschriftungen dieses Bildes und nicht die aller Bilder.
+        if os.path.exists(eig):
+            _r2, t2, _f2, _z2, _g2, _s2 = sammle(eig)
+        else:
+            t2 = texte
+        leer, ab, ueber = text_pruefung(b, entdoppeln(t2))
         e["text_leer"], e["text_ab"], e["text_ueber"] = leer, ab, ueber
         erg["bilder"][name] = e
-        print("   %-20s farben=%-5d tragend=%-3d radius=%-3s aa=%-4s "
-              "schatten=%-18s leer=%d ab=%d ueber=%d"
-              % (name, n, stark, e.get("radius", "-"), e.get("aa_punkte", "-"),
-                 str(e.get("schatten", "-"))[:18], leer, ab, ueber))
+        print("   %-20s farben=%-5d tragend=%-3d eckfarben=%-4s "
+              "schatten=%-16s leer=%d ab=%d ueber=%d"
+              % (name, n, stark, e.get("eckfarben", "-"),
+                 str(e.get("schatten", "-"))[:16], leer, ab, ueber))
 
     if "--json" in sys.argv:
         j = sys.argv[sys.argv.index("--json") + 1]
