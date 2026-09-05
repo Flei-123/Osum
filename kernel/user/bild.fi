@@ -33,10 +33,11 @@
 profile kernel
 
 import ulib
+import libc.io
 import flate
 
 export {
-    png_lesen, png_schreiben, bmp_lesen, ist_png, ist_bmp, ist_jpeg,
+    png_lesen, png_schreiben, png_datei, bmp_lesen, ist_png, ist_bmp, ist_jpeg,
     breite, hoehe, fehler, fehlertext, bedarf,
     E_OK, E_FORM, E_TIEFE, E_GROSS, E_PACK, E_PLATZ
 }
@@ -648,5 +649,150 @@ fn png_schreiben(pix: u64, w: u64, h: u64, roh: u64, rohcap: u64,
     var leer: [u8; 4] = [0 as u8; 4]
     at = kapitel(out, at, 0x49454E44, (&leer[(0) as usize]) as u64, 0)
     __mmio_write64((out_len) as *mut u64, at)
+    return true
+}
+
+// ================================== RUNDE ALLTAG: PNG DIREKT IN EINE DATEI
+//
+// `png_schreiben` braucht drei Puffer in voller Bildgroesse (die
+// Bildpunkte, den gefilterten Strom, das Ergebnis). Fuer ein
+// Bildschirmfoto von 1280 mal 800 sind das zwoelf Megabyte, und ein
+// Prozess dieses Systems hat sechs.
+//
+// Also derselbe Aufbau, aber STREIFENWEISE in die Datei: ein Streifen
+// wird gefiltert, gepackt (flate.strom_block), weggeschrieben, der
+// Puffer wieder von vorn. Was dabei nicht in einen Puffer passen muss,
+// ist das Bild -- nur ein Streifen.
+//
+// DIE LAENGE DES IDAT-KAPITELS steht VOR seinen Daten und ist erst
+// hinterher bekannt. Also wird sie als Null geschrieben und am Ende
+// nachgetragen (`io.seek`); die Pruefsumme laeuft nebenher mit
+// (`flate.crc32_fort`). Das ist der uebliche Weg, und er ist der
+// Grund, warum diese Funktion einen Dateizeiger nimmt und keinen
+// Puffer.
+fn png_datei(fd: u64, pix: u64, w: u64, h: u64, roh: u64, rohcap: u64,
+    komp: u64, kompcap: u64) -> bool {
+    b_err = E_OK
+    let zeile: u64 = w * 4 + 1
+    if zeile > rohcap || kompcap < 4096 || w == 0 || h == 0 {
+        b_err = E_PLATZ
+        return false
+    }
+    var kopf: [u8; 64] = [0 as u8; 64]
+    let k: u64 = (&kopf[(0) as usize]) as u64
+    st8(k, 0, 137)
+    st8(k, 1, 80)
+    st8(k, 2, 78)
+    st8(k, 3, 71)
+    st8(k, 4, 13)
+    st8(k, 5, 10)
+    st8(k, 6, 26)
+    st8(k, 7, 10)
+    var ihdr: [u8; 13] = [0 as u8; 13]
+    let ih: u64 = (&ihdr[(0) as usize]) as u64
+    bst32(ih, 0, w)
+    bst32(ih, 4, h)
+    st8(ih, 8, 8)
+    st8(ih, 9, 6)
+    st8(ih, 10, 0)
+    st8(ih, 11, 0)
+    st8(ih, 12, 0)
+    let ende: u64 = kapitel(k, 8, 0x49484452, ih, 13)
+    if ulib.bad(io.write_all(fd, k, ende)) {
+        b_err = E_PLATZ
+        return false
+    }
+    // Der Kopf des IDAT: Laenge noch unbekannt.
+    let laenge_bei: u64 = ende
+    bst32(k, 0, 0)
+    bst32(k, 4, 0x49444154)
+    st8(k, 8, 0x78)
+    st8(k, 9, 0x01)
+    if ulib.bad(io.write_all(fd, k, 10)) {
+        b_err = E_PLATZ
+        return false
+    }
+    var crc: u64 = flate.crc32_fort(0, k + 4, 6)
+    var datenlen: u64 = 2
+    adler_a = 1
+    adler_b = 0
+    flate.strom_start(komp, kompcap)
+    let pro: u64 = rohcap / zeile
+    var y: u64 = 0
+    while y < h {
+        var n: u64 = pro
+        if y + n > h {
+            n = h - y
+        }
+        var r: u64 = 0
+        while r < n {
+            let ziel: u64 = roh + r * zeile
+            st8(ziel, 0, 0)
+            var x: u64 = 0
+            while x < w {
+                let f: u64 = ld32(pix, ((y + r) * w + x) * 4)
+                st8(ziel, 1 + x * 4, f >> 16)
+                st8(ziel, 2 + x * 4, f >> 8)
+                st8(ziel, 3 + x * 4, f)
+                st8(ziel, 4 + x * 4, f >> 24)
+                x = x + 1
+            }
+            r = r + 1
+        }
+        let roh_n: u64 = n * zeile
+        adler_dazu(roh, roh_n)
+        let letzt: bool = y + n >= h
+        if flate.strom_block(roh, roh_n, letzt) != flate.E_OK {
+            b_err = E_PLATZ
+            return false
+        }
+        if letzt {
+            var wieviel: u64 = 0
+            if flate.strom_ende((&wieviel) as u64) != flate.E_OK {
+                b_err = E_PLATZ
+                return false
+            }
+        }
+        let fertig: u64 = flate.strom_pos()
+        if fertig > 0 {
+            if ulib.bad(io.write_all(fd, komp, fertig)) {
+                b_err = E_PLATZ
+                return false
+            }
+            crc = flate.crc32_fort(crc, komp, fertig)
+            datenlen = datenlen + fertig
+            flate.strom_leeren()
+        }
+        y = y + n
+    }
+    bst32(k, 0, (adler_b << 16) | adler_a)
+    if ulib.bad(io.write_all(fd, k, 4)) {
+        b_err = E_PLATZ
+        return false
+    }
+    crc = flate.crc32_fort(crc, k, 4)
+    datenlen = datenlen + 4
+    bst32(k, 0, crc)
+    if ulib.bad(io.write_all(fd, k, 4)) {
+        b_err = E_PLATZ
+        return false
+    }
+    var nix: [u8; 4] = [0 as u8; 4]
+    let e2: u64 = kapitel(k, 0, 0x49454E44, (&nix[(0) as usize]) as u64, 0)
+    if ulib.bad(io.write_all(fd, k, e2)) {
+        b_err = E_PLATZ
+        return false
+    }
+    // Die Laenge nachtragen.
+    if ulib.bad(io.seek(fd, laenge_bei, 0)) {
+        b_err = E_PLATZ
+        return false
+    }
+    bst32(k, 0, datenlen)
+    if ulib.bad(io.write_all(fd, k, 4)) {
+        b_err = E_PLATZ
+        return false
+    }
+    let _z: u64 = io.seek(fd, 0, 2)
     return true
 }

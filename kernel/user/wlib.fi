@@ -97,6 +97,8 @@ export {
     K_CARD, card,
     K_BILD, K_SLIDER, bild, bild_setzen, bild_zoom, bild_set_zoom,
     bild_schieben, bild_drehen, bild_dreh_von, bild_anpassen,
+    bild_werkzeug, bild_aus_da, bild_aus_x0, bild_aus_y0, bild_aus_x1,
+    bild_aus_y1, bild_aus_weg, bild_px, bild_py,
     bild_bw, bild_bh, slider,
     K_MENUBAR, K_CHOICE, K_SEP, K_SCROLL,
     NK_MAIN, NK_MENU, NK_DLG,
@@ -238,7 +240,8 @@ const D_ZOOM: u64 = 20 // Vergroesserung in Hundertsteln
 const D_PX: u64 = 21 // Verschiebung waagerecht
 const D_PY: u64 = 22 // Verschiebung senkrecht
 const D_DREH: u64 = 23 // 0, 1, 2, 3 -- Vielfache von 90 Grad
-const D_FIELDS: u64 = 24
+const D_WZ: u64 = 24 // 0 = schieben, 1 = Ausschnitt ziehen
+const D_FIELDS: u64 = 25
 
 const F_FOCUSABLE: u64 = 1
 const F_PRESSED: u64 = 2
@@ -310,7 +313,7 @@ const KEY_SDEL: u64 = 0x10A
 
 // ------------------------------------------------------- der Zustand
 
-static mut wd: [u64; 3840] = [0 as u64; 3840] // MAXWD * D_FIELDS
+static mut wd: [u64; 4000] = [0 as u64; 4000] // MAXWD * D_FIELDS
 static mut wn: [u64; 56] = [0 as u64; 56] // MAXWN * N_FIELDS
 static mut ct: [u64; 312] = [0 as u64; 312] // MAXCT * C_FIELDS
 static mut nwd: u64 = 0
@@ -341,6 +344,14 @@ static mut s_down: u64 = 0 // gedruecktes Widget + 1
 // RUNDE ALLTAG: wo das Ziehen anfing (Bildflaeche und Schieberegler).
 static mut s_dragx: u64 = 0
 static mut s_dragy: u64 = 0
+// Der gezogene Ausschnitt, in BILDPUNKTEN des Bildes und nicht des
+// Schirms -- ein Programm, das darin etwas veraendert, rechnet sonst
+// jede Vergroesserung selbst zurueck.
+static mut s_aus_x0: u64 = 0
+static mut s_aus_y0: u64 = 0
+static mut s_aus_x1: u64 = 0
+static mut s_aus_y1: u64 = 0
+static mut s_aus_da: u64 = 0
 static mut s_esc: u64 = 0 // Zustand der Fluchtfolge
 static mut s_lastclick: u64 = 0
 static mut s_lastwd: u64 = 0
@@ -1514,6 +1525,100 @@ fn bild_bh(i: u64) -> u64 {
     // "Anpassen" rechnete mit der falschen Zahl. Im Bild zu sehen: das
     // Foto klebte oben am Rand.
     return g(i, D_G)
+}
+
+// Welches Werkzeug die Maus auf der Bildflaeche ist: 0 schiebt das
+// Bild, 1 zieht einen Ausschnitt auf. Das Ausschnittwerkzeug braucht
+// das zweite, der Betrachter das erste.
+fn bild_werkzeug(i: u64, m: u64) {
+    if i >= nwd || g(i, D_KIND) != K_BILD {
+        return
+    }
+    s(i, D_WZ, m)
+    s_aus_da = 0
+    dirty_wd(i)
+}
+
+// Die Ecke des Bildes auf dem Schirm -- dieselbe Rechnung wie in
+// `paint_bild`, und deshalb steht sie einmal hier und nicht zweimal.
+fn bild_ox(i: u64) -> u64 {
+    let zw: u64 = bild_bw(i) * g(i, D_ZOOM) / 100
+    var ox: u64 = g(i, D_X)
+    if zw < g(i, D_W) {
+        ox = g(i, D_X) + (g(i, D_W) - zw) / 2
+    }
+    return ox +% g(i, D_PX)
+}
+
+fn bild_oy(i: u64) -> u64 {
+    let zh: u64 = bild_bh(i) * g(i, D_ZOOM) / 100
+    var oy: u64 = g(i, D_Y)
+    if zh < g(i, D_H) {
+        oy = g(i, D_Y) + (g(i, D_H) - zh) / 2
+    }
+    return oy +% g(i, D_PY)
+}
+
+// Ein Punkt auf dem Schirm als Punkt IM BILD. Ausserhalb wird auf den
+// Rand geklemmt -- wer ueber den Rand hinauszieht, meint den Rand.
+fn bild_px(i: u64, x: u64) -> u64 {
+    let ox: u64 = bild_ox(i)
+    if x <= ox {
+        return 0
+    }
+    let v: u64 = (x - ox) * 100 / g(i, D_ZOOM)
+    if v >= g(i, D_F) {
+        return g(i, D_F) - 1
+    }
+    return v
+}
+
+fn bild_py(i: u64, y: u64) -> u64 {
+    let oy: u64 = bild_oy(i)
+    if y <= oy {
+        return 0
+    }
+    let v: u64 = (y - oy) * 100 / g(i, D_ZOOM)
+    if v >= g(i, D_G) {
+        return g(i, D_G) - 1
+    }
+    return v
+}
+
+fn bild_aus_da() -> bool {
+    return s_aus_da != 0
+}
+
+fn bild_aus_x0() -> u64 {
+    if s_aus_x1 < s_aus_x0 {
+        return s_aus_x1
+    }
+    return s_aus_x0
+}
+
+fn bild_aus_y0() -> u64 {
+    if s_aus_y1 < s_aus_y0 {
+        return s_aus_y1
+    }
+    return s_aus_y0
+}
+
+fn bild_aus_x1() -> u64 {
+    if s_aus_x1 < s_aus_x0 {
+        return s_aus_x0
+    }
+    return s_aus_x1
+}
+
+fn bild_aus_y1() -> u64 {
+    if s_aus_y1 < s_aus_y0 {
+        return s_aus_y0
+    }
+    return s_aus_y1
+}
+
+fn bild_aus_weg() {
+    s_aus_da = 0
 }
 
 fn bild_zoom(i: u64) -> u64 {
@@ -3338,6 +3443,21 @@ fn paint_bild(i: u64) {
         }
         sy = sy + 1
     }
+    // Der gezogene Ausschnitt: ein Rahmen in der Akzentfarbe, INNEN
+    // beschnitten wie das Bild selbst.
+    if g(i, D_WZ) == 1 && s_aus_da != 0 {
+        let ox2: u64 = bild_ox(i)
+        let oy2: u64 = bild_oy(i)
+        let ax: u64 = ox2 + bild_aus_x0() * z / 100
+        let ay: u64 = oy2 + bild_aus_y0() * z / 100
+        let aw: u64 = (bild_aus_x1() - bild_aus_x0() + 1) * z / 100
+        let ah: u64 = (bild_aus_y1() - bild_aus_y0() + 1) * z / 100
+        wlibc.frame(ax, ay, aw, ah, wlibc.theme(wlibc.T_ACCENT))
+        if aw > 2 && ah > 2 {
+            wlibc.frame(ax + 1, ay + 1, aw - 2, ah - 2,
+                wlibc.theme(wlibc.T_ACCENT))
+        }
+    }
     wlibc.clip_set(a_x0, a_y0, a_x1, a_y1)
     wlibc.frame(x, y, w, h, wlibc.theme(wlibc.T_LINE))
     focus_ring(i)
@@ -3633,6 +3753,14 @@ fn on_down(w: u64, x: u64, y: u64, btn: u64) {
         s_down = i + 1
         s_dragx = x
         s_dragy = y
+        if g(i, D_WZ) == 1 {
+            s_aus_x0 = bild_px(i, x)
+            s_aus_y0 = bild_py(i, y)
+            s_aus_x1 = s_aus_x0
+            s_aus_y1 = s_aus_y0
+            s_aus_da = 1
+            dirty_wd(i)
+        }
         return
     }
     // ROUND THEMESTORE: A TILE IS A BIG BUTTON. It reports the click
@@ -3846,6 +3974,12 @@ fn on_move(w: u64, x: u64, y: u64, btn: u64) {
             return
         }
         if g(dd, D_KIND) == K_BILD {
+            if g(dd, D_WZ) == 1 {
+                s_aus_x1 = bild_px(dd, x)
+                s_aus_y1 = bild_py(dd, y)
+                dirty_wd(dd)
+                return
+            }
             bild_schieben(dd, x -% s_dragx, y -% s_dragy)
             s_dragx = x
             s_dragy = y

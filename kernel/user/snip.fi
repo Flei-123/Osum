@@ -1,0 +1,718 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/snip.fi -- Runde ALLTAG: DAS AUSSCHNITTWERKZEUG.
+//
+//   snip                        das Fenster: aufnehmen, malen, sichern
+//   snip -o /pfad.png           Vollbild aufnehmen, sichern, fertig
+//   snip -v 3 -o /pfad.png      dasselbe, drei Sekunden spaeter
+//   snip -a fenster -o ...      nur das oberste fremde Fenster
+//
+// WOHER DIE BILDPUNKTE KOMMEN: aus /dev/fb, gelesen, nicht abgebildet.
+// Der Rahmenpuffer laesst sich in einen Prozess einblenden (fb.USER_BASE),
+// aber dann kann derselbe Prozess kein grosses Abbild mehr haben
+// (kernel/proc.fi sagt das ausdruecklich) -- und dieses Programm ist
+// gross, weil ein PNG-Schreiber darin steckt. Also `read`, Zeile fuer
+// Zeile; die Zeilenlaenge und die Farbtiefe sagt SYS_DISPGET.
+//
+// WAS DABEI AUF DEM BILD IST: alles, was der Fensterserver
+// zusammengesetzt hat -- also auch dieses Fenster. Deshalb VERSTECKT es
+// sich vor der Aufnahme (`wlib.win_hide`) und kommt danach zurueck. Das
+// ist keine Kosmetik: ein Ausschnittwerkzeug, das sich selbst
+// fotografiert, ist unbrauchbar.
+//
+// DIE ZWISCHENABLAGE ist in diesem System TEXT (`wlibc.clip_put`). Ein
+// Bild passt da nicht hinein, und diese Runde erfindet dafuer kein
+// zweites Protokoll -- das gehoert der Runde SYSTEMBUS. Was hier
+// passiert, ist der gekapselte Uebergang: die Datei wird geschrieben
+// und ihr PFAD kommt in die Zwischenablage, mit dem Vorsatz `bild:`.
+// EINE Funktion (`ablage_bild`) tut das; wenn es einen Bilddienst gibt,
+// aendert sich diese eine Funktion und sonst nichts.
+//
+// MALEN AUF DEM AUSSCHNITT: Rechteck, Pfeil, Verpixeln. Das ist KEIN
+// Zeichnen an der Bibliothek vorbei -- es aendert die BILDPUNKTE des
+// Bildes, so wie ein Malprogramm es tut, und wlib malt danach dieses
+// Bild. Der Ausschnitt selbst wird mit dem Werkzeug der Bildflaeche
+// gezogen (`wlib.bild_werkzeug`), das in dieser Runde ins Framework
+// gekommen ist.
+
+profile kernel
+
+import ulib
+import libc.io
+import tools
+import wlibc
+import wlib
+import bild
+
+export { u_start }
+
+const SYS_DISPGET: u64 = 1810
+const DG_PITCH: u64 = 30
+const DG_BPP: u64 = 31
+
+const PIXCAP: u64 = 4587520 // 1280 * 896 Bildpunkte
+const ROHCAP: u64 = 65536
+const KOMPCAP: u64 = 98304
+
+static mut pix: u64 = 0
+static mut roh: u64 = 0
+static mut komp: u64 = 0
+static mut bw: u64 = 0
+static mut bh: u64 = 0
+static mut scr_w: u64 = 0
+static mut scr_h: u64 = 0
+static mut pitch: u64 = 0
+static mut bpp: u64 = 4
+
+static mut ziel: [u8; 256] = [0 as u8; 256]
+static mut kopf: [u8; 192] = [0 as u8; 192]
+static mut ablage: [u8; 288] = [0 as u8; 288]
+
+static mut w_bild: u64 = 0
+static mut w_kopf: u64 = 0
+static mut w_neu: u64 = 0
+static mut w_fenster: u64 = 0
+static mut w_aus: u64 = 0
+static mut w_rechteck: u64 = 0
+static mut w_pfeil: u64 = 0
+static mut w_pixel: u64 = 0
+static mut w_sichern: u64 = 0
+static mut w_verz: u64 = 0
+static mut werkzeug: u64 = 0 // 0 keins, 1 Rechteck, 2 Pfeil, 3 Verpixeln
+
+static mut T_TITEL: [u8; 11] = "Ausschnitt\0"
+static mut T_APP: [u8; 5] = "snip\0"
+static mut T_NEU: [u8; 9] = "Vollbild\0"
+static mut T_FENSTER: [u8; 8] = "Fenster\0"
+static mut T_AUS: [u8; 11] = "Ausschnitt\0"
+static mut T_RECHTECK: [u8; 9] = "Rechteck\0"
+static mut T_PFEIL: [u8; 6] = "Pfeil\0"
+static mut T_PIXEL: [u8; 10] = "Verpixeln\0"
+static mut T_SICHERN: [u8; 8] = "Sichern\0"
+static mut T_VERZ: [u8; 16] = "0 s\n1 s\n3 s\n5 s\0"
+static mut T_BEREIT: [u8; 34] = "Aufnehmen, dann malen und sichern\0"
+static mut T_GESICHERT: [u8; 12] = "gesichert: \0"
+static mut T_FEHL: [u8; 17] = "das ging nicht: \0"
+static mut T_DEV: [u8; 8] = "/dev/fb\0"
+static mut T_VOR: [u8; 6] = "bild:\0"
+static mut T_ORDNER: [u8; 8] = "/bilder\0"
+static mut T_MUSTER: [u8; 19] = "/bilder/schnipsel-\0"
+static mut T_ENDE: [u8; 5] = ".png\0"
+static mut S_X: [u8; 5] = " × \0"
+
+fn say(p: u64) {
+    ulib.say(p)
+}
+
+fn karte(n: u64) -> u64 {
+    let p: u64 = wlibc.map_surface(n)
+    if ulib.bad(p) {
+        return 0
+    }
+    return p
+}
+
+fn schirm_masse() {
+    scr_w = wlibc.screen_w()
+    scr_h = wlibc.screen_h()
+    pitch = ulib.sys(SYS_DISPGET, DG_PITCH, 0, 0)
+    bpp = ulib.sys(SYS_DISPGET, DG_BPP, 0, 0) / 8
+    if ulib.bad(pitch) || pitch == 0 {
+        pitch = scr_w * 4
+    }
+    if ulib.bad(bpp) || bpp == 0 || bpp > 4 {
+        bpp = 4
+    }
+}
+
+// Ein Rechteck des Schirms holen. Zeile fuer Zeile, mit `seek`; der
+// Rahmenpuffer ist ein Geraet, das `read` kann.
+fn aufnehmen(x: u64, y: u64, w: u64, h: u64) -> bool {
+    if w == 0 || h == 0 || w * h > PIXCAP / 4 {
+        return false
+    }
+    let fd: u64 = io.open((&T_DEV[(0) as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    var zeile: [u8; 8192] = [0 as u8; 8192]
+    let zp: u64 = (&zeile[(0) as usize]) as u64
+    var r: u64 = 0
+    var gut: bool = true
+    while r < h && gut {
+        let off: u64 = (y + r) * pitch + x * bpp
+        if ulib.bad(io.seek(fd, off, 0)) {
+            gut = false
+        } else {
+            var n: u64 = w * bpp
+            if n > 8192 {
+                n = 8192
+            }
+            let g: u64 = io.read_full(fd, zp, n)
+            if ulib.bad(g) {
+                gut = false
+            } else {
+                var c: u64 = 0
+                while c < w && c * bpp + bpp <= n {
+                    let s: u64 = zp + c * bpp
+                    let b: u64 = (*((s) as *mut u8)) as u64
+                    let gr: u64 = (*((s + 1) as *mut u8)) as u64
+                    let rt: u64 = (*((s + 2) as *mut u8)) as u64
+                    __mmio_write32((pix + (r * w + c) * 4) as *mut u32,
+                        ((255 << 24) | (rt << 16) | (gr << 8) | b) as u32)
+                    c = c + 1
+                }
+            }
+        }
+        r = r + 1
+    }
+    io.close(fd)
+    if gut {
+        bw = w
+        bh = h
+    }
+    return gut
+}
+
+// Das oberste Fenster, das NICHT uns gehoert. `WM_LIST` gibt die Liste
+// des Servers; die Reihenfolge darin ist die Stapelfolge.
+fn fremdes_fenster(eigen: u64, rx: u64, ry: u64, rw: u64, rh: u64) -> bool {
+    var liste: [u8; 2048] = [0 as u8; 2048]
+    let lp: u64 = (&liste[(0) as usize]) as u64
+    let n: u64 = wlibc.sys3w(wlibc.WM_LIST, lp, 16, 0)
+    if ulib.bad(n) || n == 0 {
+        return false
+    }
+    var i: u64 = 0
+    var gefunden: bool = false
+    while i < n && i < 16 {
+        let e: u64 = lp + i * wlibc.WL_BYTES
+        let id: u64 = __mmio_read64((e + wlibc.WL_ID) as *mut u64)
+        let flags: u64 = __mmio_read64((e + wlibc.WL_FLAGS) as *mut u64)
+        if id != eigen && (flags & wlibc.F_HIDDEN) == 0 {
+            __mmio_write64((rx) as *mut u64,
+                __mmio_read64((e + wlibc.WL_X) as *mut u64))
+            __mmio_write64((ry) as *mut u64,
+                __mmio_read64((e + wlibc.WL_Y) as *mut u64))
+            __mmio_write64((rw) as *mut u64,
+                __mmio_read64((e + wlibc.WL_W) as *mut u64))
+            __mmio_write64((rh) as *mut u64,
+                __mmio_read64((e + wlibc.WL_H) as *mut u64))
+            gefunden = true
+        }
+        i = i + 1
+    }
+    return gefunden
+}
+
+// -------------------------------------------------------- das Malen
+
+fn setz(x: u64, y: u64, f: u64) {
+    if x < bw && y < bh {
+        __mmio_write32((pix + (y * bw + x) * 4) as *mut u32, f as u32)
+    }
+}
+
+fn hol(x: u64, y: u64) -> u64 {
+    if x < bw && y < bh {
+        return (__mmio_read32((pix + (y * bw + x) * 4) as *mut u32)) as u64
+    }
+    return 0
+}
+
+const ROT: u64 = 0xFFE02020
+
+fn rechteck(x0: u64, y0: u64, x1: u64, y1: u64) {
+    var d: u64 = 0
+    while d < 3 {
+        var x: u64 = x0
+        while x <= x1 {
+            setz(x, y0 + d, ROT)
+            setz(x, y1 - d, ROT)
+            x = x + 1
+        }
+        var y: u64 = y0
+        while y <= y1 {
+            setz(x0 + d, y, ROT)
+            setz(x1 - d, y, ROT)
+            y = y + 1
+        }
+        d = d + 1
+    }
+}
+
+// Ein Pfeil von der einen Ecke des Ausschnitts zur anderen: eine dicke
+// Linie und zwei kurze Striche an der Spitze.
+fn pfeil(x0: u64, y0: u64, x1: u64, y1: u64) {
+    var dx: u64 = x1 -% x0
+    var dy: u64 = y1 -% y0
+    var n: u64 = 0
+    if x1 > x0 {
+        n = x1 - x0
+    } else {
+        n = x0 - x1
+    }
+    var m: u64 = 0
+    if y1 > y0 {
+        m = y1 - y0
+    } else {
+        m = y0 - y1
+    }
+    if m > n {
+        n = m
+    }
+    if n == 0 {
+        return
+    }
+    var i: u64 = 0
+    while i <= n {
+        let x: u64 = x0 +% (dx * i / n)
+        let y: u64 = y0 +% (dy * i / n)
+        var a: u64 = 0
+        while a < 3 {
+            var b: u64 = 0
+            while b < 3 {
+                setz(x + a, y + b, ROT)
+                b = b + 1
+            }
+            a = a + 1
+        }
+        i = i + 1
+    }
+    // Die Spitze: die letzten zwanzig Schritte, jeweils zur Seite.
+    var k: u64 = 0
+    while k < 14 {
+        let x: u64 = x1 -% (dx * k / n)
+        let y: u64 = y1 -% (dy * k / n)
+        var a2: u64 = 0
+        while a2 < 3 {
+            setz(x +% (dy * k / n) / 2 + a2, y -% (dx * k / n) / 2, ROT)
+            setz(x -% (dy * k / n) / 2 + a2, y +% (dx * k / n) / 2, ROT)
+            a2 = a2 + 1
+        }
+        k = k + 1
+    }
+}
+
+// Verpixeln: Bloecke von acht mal acht auf ihren Mittelwert. Nicht
+// weichzeichnen -- ein Weichzeichner laesst sich zurueckrechnen, ein
+// Mittelwert ueber vierundsechzig Punkte nicht.
+fn verpixeln(x0: u64, y0: u64, x1: u64, y1: u64) {
+    var y: u64 = y0
+    while y <= y1 {
+        var x: u64 = x0
+        while x <= x1 {
+            var sr: u64 = 0
+            var sg: u64 = 0
+            var sb: u64 = 0
+            var n: u64 = 0
+            var by: u64 = 0
+            while by < 8 && y + by <= y1 {
+                var bx: u64 = 0
+                while bx < 8 && x + bx <= x1 {
+                    let c: u64 = hol(x + bx, y + by)
+                    sr = sr + ((c >> 16) & 255)
+                    sg = sg + ((c >> 8) & 255)
+                    sb = sb + (c & 255)
+                    n = n + 1
+                    bx = bx + 1
+                }
+                by = by + 1
+            }
+            if n > 0 {
+                let f: u64 = (255 << 24) | ((sr / n) << 16)
+                    | ((sg / n) << 8) | (sb / n)
+                var cy: u64 = 0
+                while cy < 8 && y + cy <= y1 {
+                    var cx: u64 = 0
+                    while cx < 8 && x + cx <= x1 {
+                        setz(x + cx, y + cy, f)
+                        cx = cx + 1
+                    }
+                    cy = cy + 1
+                }
+            }
+            x = x + 8
+        }
+        y = y + 8
+    }
+}
+
+// -------------------------------------------------------- das Sichern
+
+fn zahl_an(p: u64, v: u64) {
+    var z: [u8; 24] = [0 as u8; 24]
+    let n: u64 = ulib.digits(v, (&z[(0) as usize]) as u64)
+    z[(n) as usize] = 0 as u8
+    ulib.strcat(p, (&z[(0) as usize]) as u64)
+}
+
+// Der naechste freie Name. Kein Zeitstempel im Namen: die Uhr dieses
+// Systems steht beim ersten Start auf einem Wert aus dem CMOS, und ein
+// falsches Datum im Dateinamen bleibt fuer immer darin.
+fn naechster_name() -> u64 {
+    let z: u64 = (&ziel[(0) as usize]) as u64
+    let _m: u64 = io.make_dir((&T_ORDNER[(0) as usize]) as u64)
+    var i: u64 = 1
+    while i < 10000 {
+        ulib.strcpy(z, (&T_MUSTER[(0) as usize]) as u64)
+        zahl_an(z, i)
+        ulib.strcat(z, (&T_ENDE[(0) as usize]) as u64)
+        let fd: u64 = io.open(z, 0)
+        if ulib.bad(fd) {
+            return z
+        }
+        io.close(fd)
+        i = i + 1
+    }
+    return z
+}
+
+// DER GEKAPSELTE UEBERGANG. Solange die Zwischenablage dieses Systems
+// Text ist, steht dort der Pfad mit dem Vorsatz `bild:`. Kommt ein
+// Bilddienst (Runde SYSTEMBUS), aendert sich genau diese Funktion.
+fn ablage_bild(pfadp: u64) {
+    let a: u64 = (&ablage[(0) as usize]) as u64
+    ulib.strcpy(a, (&T_VOR[(0) as usize]) as u64)
+    ulib.strcat(a, pfadp)
+    wlibc.clip_put(a, ulib.length(a))
+}
+
+fn sichern(pfadp: u64) -> bool {
+    if bw == 0 || bh == 0 {
+        return false
+    }
+    let fd: u64 = tools.openw(pfadp)
+    if ulib.bad(fd) {
+        return false
+    }
+    let ok: bool = bild.png_datei(fd, pix, bw, bh, roh, ROHCAP, komp,
+        KOMPCAP)
+    io.close(fd)
+    if !ok {
+        return false
+    }
+    ablage_bild(pfadp)
+    return true
+}
+
+// ------------------------------------------------------- das Fenster
+
+fn kopf_bauen(p: u64) {
+    let k: u64 = (&kopf[(0) as usize]) as u64
+    ulib.strncpy(k, p, 100)
+    if bw > 0 {
+        var sp: [u8; 3] = "  \0"
+        ulib.strcat(k, (&sp[(0) as usize]) as u64)
+        zahl_an(k, bw)
+        ulib.strcat(k, (&S_X[(0) as usize]) as u64)
+        zahl_an(k, bh)
+    }
+    wlib.set_text(w_kopf, k)
+}
+
+fn verzoegern(w: u64) {
+    let stufe: u64 = wlib.value(w_verz)
+    var sek: u64 = 0
+    if stufe == 1 {
+        sek = 1
+    } else if stufe == 2 {
+        sek = 3
+    } else if stufe == 3 {
+        sek = 5
+    }
+    // WEG MIT UNS SELBST, und zwar VOR der Wartezeit -- der Server
+    // braucht einen Augenblick, bis das Fenster wirklich fort ist.
+    let _h: u64 = wlib.win_hide(w, true)
+    let _p: u64 = wlib.paint_all()
+    let _s: u64 = ulib.sleep_ms(400 + sek * 1000)
+}
+
+fn wieder_da(w: u64) {
+    let _h: u64 = wlib.win_hide(w, false)
+    wlib.dirty_all(w)
+}
+
+fn zeigen() {
+    wlib.bild_setzen(w_bild, pix, bw, bh)
+    wlib.bild_anpassen(w_bild)
+    wlib.bild_werkzeug(w_bild, 1)
+}
+
+fn u_gui() -> u64 {
+    var s_bad: [u8; 20] = "snip: keine Flaeche\0"
+    var s_mem: [u8; 20] = "snip: kein Speicher\0"
+    var s_go: [u8; 12] = "snip: ready\0"
+    var s_geom: [u8; 14] = "snip: geom w=\0"
+    var s_h: [u8; 4] = " h=\0"
+    var s_shot: [u8; 18] = "snip: aufnahme w=\0"
+    var s_save: [u8; 17] = "snip: gesichert \0"
+    if !wlib.begin(false, false) {
+        say((&s_bad[(0) as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    pix = karte(PIXCAP)
+    roh = karte(ROHCAP)
+    komp = karte(KOMPCAP)
+    if pix == 0 || roh == 0 || komp == 0 {
+        say((&s_mem[(0) as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    schirm_masse()
+    let bwin: u64 = 760
+    let bhin: u64 = 560
+    let w: u64 = wlib.window(50, 40, bwin, bhin,
+        (&T_TITEL[(0) as usize]) as u64)
+    if w >= wlib.MAXWN {
+        say((&s_bad[(0) as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    let _a: u64 = wlib.window_app(w, (&T_APP[(0) as usize]) as u64)
+    let rand: u64 = wlib.inset()
+    let luft: u64 = wlib.inset() / 2
+    let innen: u64 = bwin - rand * 2
+
+    wlib.box_v(w, 0, 0, bwin, bhin, rand, luft)
+    ulib.strcpy((&kopf[(0) as usize]) as u64,
+        (&T_BEREIT[(0) as usize]) as u64)
+    w_kopf = wlib.label((&kopf[(0) as usize]) as u64)
+    wlib.box_end()
+
+    let y0: u64 = wlib.rect_y(w_kopf) + wlib.rect_h(w_kopf) + luft
+    let leiste: u64 = wlib.ctrl_small() + luft
+    let flaeche: u64 = bhin - y0 - leiste * 2 - rand
+
+    let c_b: u64 = wlib.box_v(w, rand, y0, innen, flaeche, 0, 0)
+    wlib.size(innen, flaeche)
+    w_bild = wlib.bild(0, 0, 0)
+    wlib.box_end()
+
+    let c_1: u64 = wlib.box_h(w, rand, y0 + flaeche + luft, innen,
+        wlib.ctrl_small(), 0, luft)
+    wlib.size(110, wlib.ctrl_small())
+    w_neu = wlib.button((&T_NEU[(0) as usize]) as u64)
+    wlib.size(100, wlib.ctrl_small())
+    w_fenster = wlib.button((&T_FENSTER[(0) as usize]) as u64)
+    wlib.size(120, wlib.ctrl_small())
+    w_aus = wlib.button((&T_AUS[(0) as usize]) as u64)
+    wlib.size(90, wlib.ctrl_thin())
+    w_verz = wlib.choice((&T_VERZ[(0) as usize]) as u64, 0)
+    wlib.box_end()
+
+    let c_2: u64 = wlib.box_h(w, rand, y0 + flaeche + luft + leiste, innen,
+        wlib.ctrl_small(), 0, luft)
+    wlib.size(110, wlib.ctrl_small())
+    w_rechteck = wlib.button((&T_RECHTECK[(0) as usize]) as u64)
+    wlib.size(90, wlib.ctrl_small())
+    w_pfeil = wlib.button((&T_PFEIL[(0) as usize]) as u64)
+    wlib.size(120, wlib.ctrl_small())
+    w_pixel = wlib.button((&T_PIXEL[(0) as usize]) as u64)
+    wlib.size(110, wlib.ctrl_small())
+    w_sichern = wlib.button((&T_SICHERN[(0) as usize]) as u64)
+    wlib.box_end()
+    let _u: u64 = c_b + c_1 + c_2
+
+    wlib.bild_werkzeug(w_bild, 1)
+    say((&s_geom[(0) as usize]) as u64)
+    ulib.sayn(bwin)
+    say((&s_h[(0) as usize]) as u64)
+    ulib.sayn(bhin)
+    ulib.nl()
+    wlib.draw_all()
+    say((&s_go[(0) as usize]) as u64)
+    ulib.nl()
+
+    var runden: u64 = 0
+    while wlib.alive() && runden < 40000000 {
+        runden = runden + 1
+        let id: u64 = wlib.step()
+        if id < wlib.MAXWD {
+            let kind: u64 = wlib.fired_kind()
+            if kind == wlib.K_BUTTON {
+                if id == w_neu {
+                    verzoegern(w)
+                    let ok: bool = aufnehmen(0, 0, scr_w, scr_h)
+                    wieder_da(w)
+                    if ok {
+                        zeigen()
+                        say((&s_shot[(0) as usize]) as u64)
+                        ulib.sayn(bw)
+                        say((&s_h[(0) as usize]) as u64)
+                        ulib.sayn(bh)
+                        ulib.nl()
+                    }
+                    kopf_bauen((&T_BEREIT[(0) as usize]) as u64)
+                } else if id == w_fenster {
+                    var fx: u64 = 0
+                    var fy: u64 = 0
+                    var fw: u64 = 0
+                    var fh: u64 = 0
+                    let da: bool = fremdes_fenster(wlib.handle(w),
+                        (&fx) as u64, (&fy) as u64, (&fw) as u64,
+                        (&fh) as u64)
+                    if da {
+                        verzoegern(w)
+                        let ok2: bool = aufnehmen(fx, fy, fw, fh)
+                        wieder_da(w)
+                        if ok2 {
+                            zeigen()
+                        }
+                    }
+                    kopf_bauen((&T_BEREIT[(0) as usize]) as u64)
+                } else if id == w_aus {
+                    // Der Ausschnitt aus dem, was schon aufgenommen
+                    // ist: der Rahmen, den die Maus gezogen hat.
+                    if wlib.bild_aus_da() && bw > 0 {
+                        let ax: u64 = wlib.bild_aus_x0()
+                        let ay: u64 = wlib.bild_aus_y0()
+                        let aw: u64 = wlib.bild_aus_x1() - ax + 1
+                        let ah: u64 = wlib.bild_aus_y1() - ay + 1
+                        var r: u64 = 0
+                        while r < ah {
+                            var c: u64 = 0
+                            while c < aw {
+                                __mmio_write32((pix + (r * aw + c) * 4)
+                                    as *mut u32,
+                                    (hol(ax + c, ay + r)) as u32)
+                                c = c + 1
+                            }
+                            r = r + 1
+                        }
+                        bw = aw
+                        bh = ah
+                        wlib.bild_aus_weg()
+                        zeigen()
+                        kopf_bauen((&T_BEREIT[(0) as usize]) as u64)
+                    }
+                } else if id == w_rechteck || id == w_pfeil
+                    || id == w_pixel {
+                    if wlib.bild_aus_da() && bw > 0 {
+                        let bx0: u64 = wlib.bild_aus_x0()
+                        let by0: u64 = wlib.bild_aus_y0()
+                        let bx1: u64 = wlib.bild_aus_x1()
+                        let by1: u64 = wlib.bild_aus_y1()
+                        if id == w_rechteck {
+                            rechteck(bx0, by0, bx1, by1)
+                        } else if id == w_pfeil {
+                            pfeil(bx0, by0, bx1, by1)
+                        } else {
+                            verpixeln(bx0, by0, bx1, by1)
+                        }
+                        wlib.bild_aus_weg()
+                        wlib.dirty_all(w)
+                    }
+                } else if id == w_sichern {
+                    let p: u64 = naechster_name()
+                    if sichern(p) {
+                        var t: [u8; 256] = [0 as u8; 256]
+                        ulib.strcpy((&t[(0) as usize]) as u64,
+                            (&T_GESICHERT[(0) as usize]) as u64)
+                        ulib.strcat((&t[(0) as usize]) as u64, p)
+                        kopf_bauen((&t[(0) as usize]) as u64)
+                        say((&s_save[(0) as usize]) as u64)
+                        say(p)
+                        ulib.nl()
+                    } else {
+                        kopf_bauen((&T_FEHL[(0) as usize]) as u64)
+                    }
+                }
+            }
+        }
+    }
+    return 0
+}
+
+// -------------------------------------------------------- die Konsole
+
+fn u_start(args: u64) -> u64 {
+    var s_o: [u8; 3] = "-o\0"
+    var s_v: [u8; 3] = "-v\0"
+    var s_a: [u8; 3] = "-a\0"
+    var a_fenster: [u8; 8] = "fenster\0"
+    var s_use: [u8; 57] = "snip: snip [-v <sek>] [-a voll|fenster] [-o <datei.png>]\0"
+    var s_mem: [u8; 20] = "snip: kein Speicher\0"
+    var s_kein: [u8; 30] = "snip: die Aufnahme ging nicht\0"
+    var s_schr: [u8; 29] = "snip: schreiben ging nicht: \0"
+    var s_ok: [u8; 17] = "snip: gesichert \0"
+    var s_wh: [u8; 4] = " w=\0"
+    var s_h: [u8; 4] = " h=\0"
+    let argc: u64 = ulib.arg_count(args)
+    var out: u64 = 0
+    var sek: u64 = 0
+    var nur_fenster: bool = false
+    var a: u64 = 1
+    while a < argc {
+        let p: u64 = ulib.arg_at(args, a)
+        if ulib.streq(p, (&s_o[(0) as usize]) as u64) && a + 1 < argc {
+            out = ulib.arg_at(args, a + 1)
+            a = a + 1
+        } else if ulib.streq(p, (&s_v[(0) as usize]) as u64)
+            && a + 1 < argc {
+            sek = ulib.to_num(ulib.arg_at(args, a + 1))
+            a = a + 1
+        } else if ulib.streq(p, (&s_a[(0) as usize]) as u64)
+            && a + 1 < argc {
+            nur_fenster = ulib.streq(ulib.arg_at(args, a + 1),
+                (&a_fenster[(0) as usize]) as u64)
+            a = a + 1
+        }
+        a = a + 1
+    }
+    if out == 0 {
+        if argc > 1 {
+            ulib.esay_line((&s_use[(0) as usize]) as u64, 0)
+            return 2
+        }
+        return u_gui()
+    }
+    // Ohne Fenster: die Flaeche wird trotzdem gebraucht, denn nur ueber
+    // sie kommt dieses Programm an die Masse des Schirms.
+    if !wlib.begin(false, true) {
+        say((&s_kein[(0) as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    pix = karte(PIXCAP)
+    roh = karte(ROHCAP)
+    komp = karte(KOMPCAP)
+    if pix == 0 || roh == 0 || komp == 0 {
+        say((&s_mem[(0) as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    schirm_masse()
+    if sek > 0 {
+        let _s: u64 = ulib.sleep_ms(sek * 1000)
+    }
+    var x: u64 = 0
+    var y: u64 = 0
+    var w: u64 = scr_w
+    var h: u64 = scr_h
+    if nur_fenster {
+        if !fremdes_fenster(0, (&x) as u64, (&y) as u64, (&w) as u64,
+            (&h) as u64) {
+            say((&s_kein[(0) as usize]) as u64)
+            ulib.nl()
+            return 1
+        }
+    }
+    if !aufnehmen(x, y, w, h) {
+        say((&s_kein[(0) as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    if !sichern(out) {
+        ulib.esay_line((&s_schr[(0) as usize]) as u64, out)
+        return 1
+    }
+    say((&s_ok[(0) as usize]) as u64)
+    say(out)
+    say((&s_wh[(0) as usize]) as u64)
+    ulib.sayn(bw)
+    say((&s_h[(0) as usize]) as u64)
+    ulib.sayn(bh)
+    ulib.nl()
+    return 0
+}
