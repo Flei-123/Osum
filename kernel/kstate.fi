@@ -195,12 +195,13 @@ export {
     BITMAP_OCTETS, MAPPED_GIB, FRAME_HINT, M_MEMSTRESS,
     STRESS_GOT, STRESS_HIGH, STRESS_BEFORE, STRESS_LOW,
     STRESS_BAD, STRESS_SEEN, STRESS_AFTER, PROBE_ADDR,
-    WIG_OFF, WIG_MAX, FSG_OFF, JRNL_OFF, JRNL_MAX,
+    WIG_OFF, WIG_MAX, WIGST_OFF, WIGST_MAX, FSG_OFF, JRNL_OFF, JRNL_MAX,
     K17_OFF, K17_MAX, M_USB, M_NOUSB, M_USBPOLL, M_NOHID,
     M_HIDREP, M_HID, M_NURBOOT, M_I2CHID, M_NOI2C, M_HIDLAT,
     M_HIDPAD, M_HIDDUMP, M_TAFEL, M_NOSERIAL,
     M_FBFLUSH, M_HERZ, M_NOHUB, M_USBSAFE, M_NOTAFEL, M_USBNORESET,
     M_ABSTURZ, M_PULSLED, M_NOPULS, M_ZUMACHEN, M_KNALL, M_EINSPRUNG,
+    M_GRACE, M_GBLIND, M_GLOCK, M_GTFREI,
     M_NOMSC, M_UNPLUG, M_NOUSBIRQ, M_USBSTICK, M_USBHOLD, M_USBSTOP, M_USBLEG, M_NETLAUF,
     M_EHCI, M_EHCITEST, M_BLKTAB, M_BLKSELF,
     M_WIG, M_WIGFILES, M_WIGNOHIT, M_WIGNOCLIP, M_WIGLONG,
@@ -1124,6 +1125,40 @@ const SER_OVERRUNS: u64 = 1160 // der Baustein meldet Ueberlauf (LSR Bit 1)
 const WIG_OFF: u64 = 0x46000
 const WIG_MAX: u64 = 0x3000
 
+// ======================================================= RUNDE GLYPHE
+// DIE BUEHNE JE KERN -- MAX_CPUS SEITEN, EINE FUER JEDEN.
+//
+// Die drei Seiten oben sind ZUSAMMEN so gross wie das, was EIN Kern
+// braucht; der Umschlagpuffer auf +0x2000 gehoerte bis hierher der
+// ganzen Maschine. Zwei Kerne, die gleichzeitig zeichnen, schreiben
+// darin uebereinander -- `wig.blit` legt eine Bildpunktzeile hinein,
+// `wig.glyph_into` einen Glyphenkopf, und wer zuletzt schreibt,
+// gewinnt. GEMESSEN in Runde MERGE-6: ein Ring-3-Programm starb in
+// einem von fuenf Laeufen mit vier Kernen an
+// `panic: integer overflow in 'u64 * u64'` (wlibc.fi), weil im Kopf
+// die Breite des einen und dahinter die Bildpunkte des anderen
+// standen.
+//
+// WARUM JE KERN UND NICHT EINE SPERRE: `wig.blit` ist der heisseste
+// Weg der Oberflaeche -- jede Fensterzeile geht durch ihn. Eine
+// gemeinsame Sperre darum macht aus dem Zeichnen aller Kerne wieder
+// eine Reihe. Die Zahlen dazu stehen in docs/RUNDE-GLYPHE.md; die
+// Wahl ist gemessen und nicht geraten.
+//
+// WARUM DAS SICHER IST: der Umschlagpuffer wird AUSSCHLIESSLICH im
+// Systemaufruf angefasst, und `MSR_SFMASK` (kernel/arch/x86_64/user.fi)
+// haelt IF fuer den GANZEN Systemaufruf unten. Eine Aufgabe kann
+// darin also nicht verdraengt und auf einem anderen Kern fortgesetzt
+// werden -- dieselbe Zusicherung, auf der `C_KSTACK` ueber die
+// GS-Basis schon steht.
+//
+// MAX_CPUS * 0x1000 = 0x8000. Sie liegen hinter der bisherigen Grenze,
+// weil davor kein Stueck von acht Seiten am Stueck mehr frei war
+// (0xAC000..0xB0000 sind vier); KDATA_SIZE waechst dafuer um 32 KiB.
+// Das ist `.bss` und kostet im Abbild kein Oktett.
+const WIGST_OFF: u64 = 0xB0000
+const WIGST_MAX: u64 = 0x8000 // MAX_CPUS * 0x1000
+
 // RUNDE K15, ZWEITER NACHTRAG: DIE SEITE DER SKALARE WIRD GETEILT.
 //
 // `wig.fi` braucht von der ersten Seite dieses Vorrats 0x40 Oktette.
@@ -1808,7 +1843,14 @@ const H_ESCALATE: u64 = 1472 // versuchte Rechteerweiterung beim Weitergeben
 // waechst kdata um 64 KiB -- genau das, was Merge 2 schon einmal
 // getan hat (512 -> 640). kdata steht in .bss (boot.s), das Abbild
 // wird davon NICHT groesser; es wird beim Start genullt.
-const KDATA_SIZE: u64 = 0xB0000
+// RUNDE GLYPHE: 704 -> 736 KiB. Die Buehne des Zeichenwegs liegt seit
+// dieser Runde JE KERN vor (WIGST_OFF, acht Seiten am Stueck); frei
+// waren nur noch vier (0xAC000..0xB0000). Derselbe Schritt wie in
+// Runde MERGE-2 (512 -> 640) und BLECH-ECHT (640 -> 704), aus
+// demselben Grund und mit demselben Preis: `.bss`, kein Oktett im
+// Abbild. DIE ZAHL STEHT ZWEIMAL, hier und in
+// `kernel/arch/x86_64/boot.s`; `tools/hv/run.sh` vergleicht beide.
+const KDATA_SIZE: u64 = 0xB8000
 // =============================================== RUNDE MULTIUSER
 //
 // EINE SEITE ZAEHLER UND EINE SEITE GRUPPEN, bei 0x7A000. Das ist der
@@ -2435,6 +2477,30 @@ const M_KNALL: u64 = 852 // Wort 13, Bit 20
 // weiter und der Schreibtisch malt weiter. Vor dieser Runde haette
 // derselbe Lauf die Maschine angehalten.
 const M_EINSPRUNG: u64 = 853 // Wort 13, Bit 21
+
+// ================================================== RUNDE GLYPHE
+// Wort 14, bis hierher ganz frei. Drei Namen, und zwei davon sind
+// GEGENPROBEN -- ohne sie misst der Nachweis nichts.
+//
+// `glyphrace`   der Nachweis: alle Kerne zeichnen im selben
+//               Augenblick durch `wig.glyph_build`, jeder sein
+//               eigenes Zeichen, und jeder rechnet seine Antwort
+//               gegen den in Ruhe genommenen Sollwert.
+// `glyphblind`  die Gegenprobe: EINE Buehne fuer die ganze Maschine,
+//               genau wie vor dieser Runde. Sie schaltet `glyphrace`
+//               mit ein -- eine Gegenprobe, die man versehentlich
+//               ohne die Probe starten kann, misst nichts.
+// `glyphsperre` die zweite Bauform, gegen die gemessen wurde: EINE
+//               Buehne, aber `blit` UND `glyph_into` unter derselben
+//               Sperre. Richtig, aber sie stellt das Zeichnen aller
+//               Kerne wieder in eine Reihe.
+const M_GRACE: u64 = 896 // Wort 14, Bit 0
+const M_GBLIND: u64 = 897 // Wort 14, Bit 1
+const M_GLOCK: u64 = 898 // Wort 14, Bit 2
+// `glyphtafelfrei` -- die dritte Gegenprobe: der Glyphenspeicher
+//   OHNE seine Sperre. Ohne sie liesse sich nur behaupten, dass
+//   `ttf.tafel_an` etwas tut. Mit ihr steht die Zahl daneben.
+const M_GTFREI: u64 = 899 // Wort 14, Bit 3
 
 // --------------------------------------------------------- der Modusvektor
 //
