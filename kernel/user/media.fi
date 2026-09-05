@@ -1,0 +1,621 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/media.fi -- Runde DEMUX: was jeder Behaelter braucht.
+//
+// Drei Dinge liegen hier, weil MP4 und MKV sie BEIDE brauchen und zwei
+// Abschriften zwei Gelegenheiten waeren, eine falsch zu machen:
+//
+//   1. EINE QUELLE. Ein Fenster von 64 KiB ueber der Datei, mit
+//      `lseek` nachgezogen. Jeder Zugriff geht ueber eine ABSOLUTE
+//      Position, und jeder Zugriff hinter das Dateiende liefert 0 und
+//      setzt `src_eof`. Das ist der Grund, warum eine abgeschnittene
+//      Datei hier nicht abstuerzt: es gibt keinen Weg, an einem Ende
+//      vorbeizulesen, ohne dass es gemerkt wird.
+//   2. DIE ZAHLEN. Gross- und kleinendige Ganzzahlen aus dem Fenster.
+//      MP4 ist grossendig, Matroska ist es auch, WAV und die
+//      Codec-Kopfdaten darin sind kleinendig.
+//   3. DIE SPURENTAFEL. Was eine Spur ist, weiss weder MP4 noch MKV
+//      allein: es ist das, was die Anwendung darueber wissen muss --
+//      Art, Codec, Aufloesung, Abtastrate, Kanaele, Dauer, Datenmenge.
+//      Und dazu die EHRLICHE ANTWORT auf die Frage, ob dieses System
+//      den Codec dekodieren kann. Diese Antwort steht an EINER Stelle;
+//      wer sie aendert, aendert sie ueberall.
+//
+// WAS DIESES SYSTEM NICHT KANN, UND WARUM ES DAS SAGT: H.264, HEVC, AV1
+// und VP9 sind zwischen 15.000 und 150.000 Zeilen Dekodierer, und bei
+// AV1 kaeme handgeschriebener Assembler dazu, ohne den es nicht in
+// Echtzeit laeuft. Das ist recherchiert und steht mit Zahlen in
+// /root/osum-roadmap/ROADMAP.md, Block F. Ein Abspieler, der so eine
+// Datei oeffnet und ein schwarzes Fenster zeigt, luegt. Dieser hier
+// nennt den Codec, die Aufloesung, die Dauer und die Datenrate und
+// bietet an, den Ton allein abzuspielen.
+
+profile kernel
+
+import ulib
+
+export {
+    src_open, src_close, src_size, src_byte, src_bytes, src_eof, src_bad,
+    be16, be24, be32, be64, le16, le32, le64,
+    C_NONE, C_H264, C_HEVC, C_AV1, C_VP9, C_VP8, C_MPEG4V, C_MJPEG,
+    C_THEORA, C_VIDEO_OTHER,
+    C_AAC, C_MP3, C_MP2, C_MP1, C_AC3, C_EAC3, C_PCM, C_FLAC, C_OPUS,
+    C_VORBIS, C_ALAC, C_AUDIO_OTHER,
+    C_SRT, C_ASS, C_VOBSUB, C_SUB_OTHER,
+    K_NONE, K_VIDEO, K_AUDIO, K_SUB,
+    codec_name, codec_kind, can_decode,
+    trk_reset, trk_add, trk_count, trk_get, trk_set,
+    T_KIND, T_CODEC, T_ID, T_W, T_H, T_RATE, T_CH, T_BITS,
+    T_DUR_MS, T_BYTES, T_NSAMP, T_SCALE, T_LANG, T_PROFILE, T_FIELDS,
+    trk_first, trk_bitrate,
+    say_codec_line, say_ms,
+    idx_reset, idx_add, idx_count, idx_off, idx_size, idx_time, idx_dur,
+    idx_setdur, idx_full, IDX_MAX
+}
+
+// ---------------------------------------------------------- die Quelle
+//
+// Ein Fenster, kein Abbild der ganzen Datei: ein Musikstueck von acht
+// Minuten sind 8 MiB, und ein Prozess hat 3 MiB Abbild. Das Fenster ist
+// 64 KiB gross, weil ein MP4-Kopf (`moov`) selten groesser ist und ein
+// MP3-Rahmen nie -- damit kostet ein Durchlauf durch eine Datei genau
+// einen Systemaufruf je 64 KiB.
+
+const WIN: u64 = 65536
+
+static mut f_fd: u64 = 0
+static mut f_open: u64 = 0
+static mut f_size: u64 = 0
+static mut f_win: [u8; 65536] = [0 as u8; 65536]
+static mut f_woff: u64 = 0 // Dateiposition von f_win[0]
+static mut f_wlen: u64 = 0
+static mut f_eof: u64 = 0 // wurde hinter das Ende gegriffen?
+static mut f_err: u64 = 0 // ging ein Lesen schief?
+
+// Oeffnen. Rueckgabe: true, wenn die Datei da ist. Die GROESSE kommt aus
+// `lseek(END)` und nicht aus `stat`, weil dieselbe Zahl dann aus
+// derselben Quelle kommt wie jedes spaetere Lesen.
+fn src_open(path: u64) -> bool {
+    src_close()
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    let n: u64 = ulib.sys(ulib.SYS_SEEK, fd, 0, ulib.SEEK_END)
+    if ulib.bad(n) {
+        ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+        return false
+    }
+    f_fd = fd
+    f_open = 1
+    f_size = n
+    f_woff = 0
+    f_wlen = 0
+    f_eof = 0
+    f_err = 0
+    return true
+}
+
+fn src_close() {
+    if f_open == 1 {
+        ulib.sys(ulib.SYS_CLOSE, f_fd, 0, 0)
+    }
+    f_open = 0
+    f_fd = 0
+    f_size = 0
+    f_wlen = 0
+    f_woff = 0
+}
+
+fn src_size() -> u64 {
+    return f_size
+}
+
+// Wurde je hinter das Dateiende gegriffen? Das ist die eine Frage, die
+// ein Leser stellen muss, bevor er dem Gelesenen glaubt.
+fn src_eof() -> bool {
+    return f_eof == 1
+}
+
+fn src_bad() -> bool {
+    return f_err == 1
+}
+
+// Das Fenster so schieben, dass `off` darin liegt. Fehlschlag ist kein
+// Absturz: das Fenster bleibt leer, und jeder Zugriff liefert 0.
+// DAS FENSTER FAENGT ETWAS VOR DER ANGEFRAGTEN STELLE AN, und das ist
+// keine Geschmacksfrage, sondern gemessen. Der MP3-Sucher prueft einen
+// Kandidaten bei p und den Kopf, den dieser verspricht, bei p+len (bis
+// zu 2048 weiter). Faellt p+len knapp hinter das Fenster, wird
+// nachgeladen -- und der naechste Schritt fragt wieder p+1, also wieder
+// davor. Das ist ein Pendel: zwei Nachladungen von je 64 KiB je
+// Kandidat, und eine WAV-Datei voller 0xFF-Oktette hat Tausende davon.
+// Mit acht Kibioktett Vorlauf kostet derselbe Lauf eine Nachladung
+// statt zweitausend.
+const BACK: u64 = 8192
+
+fn win_fill(want: u64) {
+    if f_open == 0 {
+        f_wlen = 0
+        return
+    }
+    var off: u64 = 0
+    if want > BACK {
+        off = want - BACK
+    }
+    let p: u64 = ulib.sys(ulib.SYS_SEEK, f_fd, off, 0)
+    if ulib.bad(p) || p != off {
+        f_wlen = 0
+        f_err = 1
+        return
+    }
+    f_woff = off
+    f_wlen = 0
+    var got: u64 = 0
+    var going: bool = true
+    while going {
+        let n: u64 = ulib.sys(ulib.SYS_READ, f_fd,
+                              (&f_win[(got) as usize]) as u64, WIN - got)
+        if ulib.bad(n) {
+            f_err = 1
+            going = false
+        } else if n == 0 {
+            going = false
+        } else {
+            got = got + n
+            if got >= WIN {
+                going = false
+            }
+        }
+    }
+    f_wlen = got
+}
+
+// EIN Oktett an einer absoluten Position. Hinter dem Ende: 0, und
+// `src_eof` steht danach. Das ist die einzige Stelle im ganzen Modul,
+// die aus einer Datei liest -- alles andere geht hier durch.
+fn src_byte(off: u64) -> u64 {
+    if off >= f_size {
+        f_eof = 1
+        return 0
+    }
+    if f_wlen == 0 || off < f_woff || off >= f_woff + f_wlen {
+        win_fill(off)
+        if f_wlen == 0 {
+            f_eof = 1
+            return 0
+        }
+        if off < f_woff || off >= f_woff + f_wlen {
+            f_eof = 1
+            return 0
+        }
+    }
+    return (f_win[(off - f_woff) as usize]) as u64
+}
+
+// Ein Stueck am Stueck. Rueckgabe: wie viele Oktette wirklich kamen.
+// Weniger als verlangt heisst: die Datei ist dort zu Ende.
+fn src_bytes(off: u64, dst: u64, n: u64) -> u64 {
+    var i: u64 = 0
+    while i < n {
+        if off + i >= f_size {
+            return i
+        }
+        __mmio_write8((dst + i) as *mut u8, src_byte(off + i) as u8)
+        i = i + 1
+    }
+    return n
+}
+
+// ------------------------------------------------------------ die Zahlen
+
+fn be16(off: u64) -> u64 {
+    return (src_byte(off) << 8) | src_byte(off + 1)
+}
+
+fn be24(off: u64) -> u64 {
+    return (src_byte(off) << 16) | (src_byte(off + 1) << 8) | src_byte(off + 2)
+}
+
+fn be32(off: u64) -> u64 {
+    return (src_byte(off) << 24) | (src_byte(off + 1) << 16)
+        | (src_byte(off + 2) << 8) | src_byte(off + 3)
+}
+
+fn be64(off: u64) -> u64 {
+    return (be32(off) << 32) | be32(off + 4)
+}
+
+fn le16(off: u64) -> u64 {
+    return src_byte(off) | (src_byte(off + 1) << 8)
+}
+
+fn le32(off: u64) -> u64 {
+    return src_byte(off) | (src_byte(off + 1) << 8)
+        | (src_byte(off + 2) << 16) | (src_byte(off + 3) << 24)
+}
+
+fn le64(off: u64) -> u64 {
+    return le32(off) | (le32(off + 4) << 32)
+}
+
+// ------------------------------------------------------------ die Codecs
+//
+// Eine Nummer je Codec, und zwar EINE Nummerierung fuer beide Behaelter.
+// MP4 nennt AAC `mp4a`, Matroska nennt es `A_AAC`; ab hier heisst es
+// C_AAC, und die Anwendung muss keinen der beiden Namen kennen.
+
+const C_NONE: u64 = 0
+const C_H264: u64 = 1
+const C_HEVC: u64 = 2
+const C_AV1: u64 = 3
+const C_VP9: u64 = 4
+const C_VP8: u64 = 5
+const C_MPEG4V: u64 = 6
+const C_MJPEG: u64 = 7
+const C_THEORA: u64 = 8
+const C_VIDEO_OTHER: u64 = 9
+
+const C_AAC: u64 = 20
+const C_MP3: u64 = 21
+const C_MP2: u64 = 22
+const C_MP1: u64 = 23
+const C_AC3: u64 = 24
+const C_EAC3: u64 = 25
+const C_PCM: u64 = 26
+const C_FLAC: u64 = 27
+const C_OPUS: u64 = 28
+const C_VORBIS: u64 = 29
+const C_ALAC: u64 = 30
+const C_AUDIO_OTHER: u64 = 31
+
+const C_SRT: u64 = 40
+const C_ASS: u64 = 41
+const C_VOBSUB: u64 = 42
+const C_SUB_OTHER: u64 = 43
+
+const K_NONE: u64 = 0
+const K_VIDEO: u64 = 1
+const K_AUDIO: u64 = 2
+const K_SUB: u64 = 3
+
+fn codec_kind(c: u64) -> u64 {
+    if c == C_NONE {
+        return K_NONE
+    }
+    if c < 20 {
+        return K_VIDEO
+    }
+    if c < 40 {
+        return K_AUDIO
+    }
+    return K_SUB
+}
+
+// Der Name, den ein Mensch lesen soll. Keine Vierbuchstabenkennung, kein
+// `A_MPEG/L3` -- das steht in der Datei, nicht auf dem Bildschirm.
+static mut n_h264: [u8; 15] = "H.264 / AVC\0\0\0\0"
+static mut n_hevc: [u8; 15] = "H.265 / HEVC\0\0\0"
+static mut n_av1: [u8; 15] = "AV1\0\0\0\0\0\0\0\0\0\0\0\0"
+static mut n_vp9: [u8; 15] = "VP9\0\0\0\0\0\0\0\0\0\0\0\0"
+static mut n_vp8: [u8; 15] = "VP8\0\0\0\0\0\0\0\0\0\0\0\0"
+static mut n_mp4v: [u8; 15] = "MPEG-4 Teil 2\0\0"
+static mut n_mjpg: [u8; 15] = "MJPEG\0\0\0\0\0\0\0\0\0\0"
+static mut n_theo: [u8; 15] = "Theora\0\0\0\0\0\0\0\0\0"
+static mut n_voth: [u8; 15] = "Video, fremd\0\0\0"
+static mut n_aac: [u8; 15] = "AAC-LC\0\0\0\0\0\0\0\0\0"
+static mut n_mp3: [u8; 15] = "MP3\0\0\0\0\0\0\0\0\0\0\0\0"
+static mut n_mp2: [u8; 15] = "MP2\0\0\0\0\0\0\0\0\0\0\0\0"
+static mut n_mp1: [u8; 15] = "MP1\0\0\0\0\0\0\0\0\0\0\0\0"
+static mut n_ac3: [u8; 15] = "AC-3\0\0\0\0\0\0\0\0\0\0\0"
+static mut n_eac3: [u8; 15] = "E-AC-3\0\0\0\0\0\0\0\0\0"
+static mut n_pcm: [u8; 15] = "PCM\0\0\0\0\0\0\0\0\0\0\0\0"
+static mut n_flac: [u8; 15] = "FLAC\0\0\0\0\0\0\0\0\0\0\0"
+static mut n_opus: [u8; 15] = "Opus\0\0\0\0\0\0\0\0\0\0\0"
+static mut n_vorb: [u8; 15] = "Vorbis\0\0\0\0\0\0\0\0\0"
+static mut n_alac: [u8; 15] = "ALAC\0\0\0\0\0\0\0\0\0\0\0"
+static mut n_aoth: [u8; 15] = "Ton, fremd\0\0\0\0\0"
+static mut n_srt: [u8; 15] = "SRT\0\0\0\0\0\0\0\0\0\0\0\0"
+static mut n_ass: [u8; 15] = "ASS / SSA\0\0\0\0\0\0"
+static mut n_vsub: [u8; 15] = "VobSub\0\0\0\0\0\0\0\0\0"
+static mut n_soth: [u8; 15] = "Untertitel\0\0\0\0\0"
+static mut n_unk: [u8; 15] = "unbekannt\0\0\0\0\0\0"
+
+fn codec_name(c: u64) -> u64 {
+    if c == C_H264 { return (&n_h264[0 as usize]) as u64 }
+    if c == C_HEVC { return (&n_hevc[0 as usize]) as u64 }
+    if c == C_AV1 { return (&n_av1[0 as usize]) as u64 }
+    if c == C_VP9 { return (&n_vp9[0 as usize]) as u64 }
+    if c == C_VP8 { return (&n_vp8[0 as usize]) as u64 }
+    if c == C_MPEG4V { return (&n_mp4v[0 as usize]) as u64 }
+    if c == C_MJPEG { return (&n_mjpg[0 as usize]) as u64 }
+    if c == C_THEORA { return (&n_theo[0 as usize]) as u64 }
+    if c == C_VIDEO_OTHER { return (&n_voth[0 as usize]) as u64 }
+    if c == C_AAC { return (&n_aac[0 as usize]) as u64 }
+    if c == C_MP3 { return (&n_mp3[0 as usize]) as u64 }
+    if c == C_MP2 { return (&n_mp2[0 as usize]) as u64 }
+    if c == C_MP1 { return (&n_mp1[0 as usize]) as u64 }
+    if c == C_AC3 { return (&n_ac3[0 as usize]) as u64 }
+    if c == C_EAC3 { return (&n_eac3[0 as usize]) as u64 }
+    if c == C_PCM { return (&n_pcm[0 as usize]) as u64 }
+    if c == C_FLAC { return (&n_flac[0 as usize]) as u64 }
+    if c == C_OPUS { return (&n_opus[0 as usize]) as u64 }
+    if c == C_VORBIS { return (&n_vorb[0 as usize]) as u64 }
+    if c == C_ALAC { return (&n_alac[0 as usize]) as u64 }
+    if c == C_AUDIO_OTHER { return (&n_aoth[0 as usize]) as u64 }
+    if c == C_SRT { return (&n_srt[0 as usize]) as u64 }
+    if c == C_ASS { return (&n_ass[0 as usize]) as u64 }
+    if c == C_VOBSUB { return (&n_vsub[0 as usize]) as u64 }
+    if c == C_SUB_OTHER { return (&n_soth[0 as usize]) as u64 }
+    return (&n_unk[0 as usize]) as u64
+}
+
+// DIE EINE STELLE, DIE JA ODER NEIN SAGT.
+//
+// Sie steht hier und nicht in der Anwendung, damit es keine zweite gibt,
+// die etwas anderes sagt. Was fehlt, fehlt mit Grund und nicht aus
+// Versehen: der Aufwand steht in ROADMAP.md, Block F.
+fn can_decode(c: u64) -> bool {
+    if c == C_MP3 {
+        return true
+    }
+    if c == C_PCM {
+        return true
+    }
+    if c == C_SRT {
+        return true
+    }
+    return false
+}
+
+// ------------------------------------------------------- die Spurentafel
+
+const MAXTRK: u64 = 16
+const T_FIELDS: u64 = 16
+
+const T_KIND: u64 = 0
+const T_CODEC: u64 = 1
+const T_ID: u64 = 2 // die Nummer, unter der der Behaelter sie fuehrt
+const T_W: u64 = 3
+const T_H: u64 = 4
+const T_RATE: u64 = 5 // Abtastrate in Hz
+const T_CH: u64 = 6
+const T_BITS: u64 = 7
+const T_DUR_MS: u64 = 8
+const T_BYTES: u64 = 9 // Nutzdaten dieser Spur in Oktetten
+const T_NSAMP: u64 = 10 // Zahl der Beispiele (Rahmen)
+const T_SCALE: u64 = 11 // Zeiteinheiten je Sekunde
+const T_LANG: u64 = 12 // drei Buchstaben, gepackt
+const T_PROFILE: u64 = 13 // Codec-Unterart, wo sie zaehlt
+
+static mut trk: [u64; 256] = [0 as u64; 256] // MAXTRK * T_FIELDS
+static mut ntrk: u64 = 0
+
+fn trk_reset() {
+    var i: u64 = 0
+    while i < MAXTRK * T_FIELDS {
+        trk[(i) as usize] = 0
+        i = i + 1
+    }
+    ntrk = 0
+}
+
+fn trk_add(kind: u64, codec: u64, id: u64) -> u64 {
+    if ntrk >= MAXTRK {
+        return MAXTRK // kein Platz mehr; der Aufrufer prueft das
+    }
+    let i: u64 = ntrk
+    ntrk = ntrk + 1
+    trk[(i * T_FIELDS + T_KIND) as usize] = kind
+    trk[(i * T_FIELDS + T_CODEC) as usize] = codec
+    trk[(i * T_FIELDS + T_ID) as usize] = id
+    return i
+}
+
+fn trk_count() -> u64 {
+    return ntrk
+}
+
+fn trk_get(i: u64, field: u64) -> u64 {
+    if i >= MAXTRK || field >= T_FIELDS {
+        return 0
+    }
+    return trk[(i * T_FIELDS + field) as usize]
+}
+
+fn trk_set(i: u64, field: u64, v: u64) {
+    if i >= MAXTRK || field >= T_FIELDS {
+        return
+    }
+    trk[(i * T_FIELDS + field) as usize] = v
+}
+
+// Die erste Spur einer Art, oder MAXTRK, wenn es keine gibt.
+fn trk_first(kind: u64) -> u64 {
+    var i: u64 = 0
+    while i < ntrk {
+        if trk[(i * T_FIELDS + T_KIND) as usize] == kind {
+            return i
+        }
+        i = i + 1
+    }
+    return MAXTRK
+}
+
+// Datenrate in kbit/s, aus Nutzdaten und Dauer. Ohne Dauer: 0. Das ist
+// ABSICHTLICH gerechnet und nicht aus einem Kopffeld gelesen -- ein
+// Kopffeld kann luegen, die Summe der Beispiele nicht.
+fn trk_bitrate(i: u64) -> u64 {
+    let ms: u64 = trk_get(i, T_DUR_MS)
+    let by: u64 = trk_get(i, T_BYTES)
+    if ms == 0 {
+        return 0
+    }
+    return (by * 8) / ms
+}
+
+// -------------------------------------------------------- die Ausgabe
+
+// "  1  Video   H.264 / AVC   320x240  3000 ms  1234 kbit/s  KANN NICHT"
+static mut s_vid: [u8; 8] = "Video  \0"
+static mut s_aud: [u8; 8] = "Ton    \0"
+static mut s_sub: [u8; 8] = "Text   \0"
+static mut s_non: [u8; 8] = "-      \0"
+static mut s_sp: [u8; 3] = "  \0"
+static mut s_x: [u8; 2] = "x\0"
+static mut s_hz: [u8; 5] = " Hz\0\0"
+static mut s_ch: [u8; 4] = " Ka\0"
+static mut s_kb: [u8; 9] = " kbit/s\0\0"
+static mut s_ja: [u8; 15] = "  spielbar\0\0\0\0\0"
+static mut s_nein: [u8; 20] = "  NICHT dekodierbar\0"
+
+fn kind_name(k: u64) -> u64 {
+    if k == K_VIDEO { return (&s_vid[0 as usize]) as u64 }
+    if k == K_AUDIO { return (&s_aud[0 as usize]) as u64 }
+    if k == K_SUB { return (&s_sub[0 as usize]) as u64 }
+    return (&s_non[0 as usize]) as u64
+}
+
+// Dauer als Sekunden mit einer Nachkommastelle -- ohne Fliesskomma,
+// denn in Ring 3 gibt es keins (`kernel/user/netstat.fi` rechnet die
+// Prozent aus demselben Grund in Oktetten).
+fn say_ms(ms: u64) {
+    var s_pt: [u8; 2] = ".\0"
+    var s_s: [u8; 3] = " s\0"
+    ulib.sayn(ms / 1000)
+    ulib.say((&s_pt[0 as usize]) as u64)
+    ulib.sayn((ms % 1000) / 100)
+    ulib.say((&s_s[0 as usize]) as u64)
+}
+
+fn say_codec_line(i: u64) {
+    let k: u64 = trk_get(i, T_KIND)
+    let c: u64 = trk_get(i, T_CODEC)
+    ulib.say((&s_sp[0 as usize]) as u64)
+    ulib.sayn(i)
+    ulib.say((&s_sp[0 as usize]) as u64)
+    ulib.say(kind_name(k))
+    ulib.say(codec_name(c))
+    if k == K_VIDEO {
+        ulib.say((&s_sp[0 as usize]) as u64)
+        ulib.sayn(trk_get(i, T_W))
+        ulib.say((&s_x[0 as usize]) as u64)
+        ulib.sayn(trk_get(i, T_H))
+    }
+    if k == K_AUDIO {
+        ulib.say((&s_sp[0 as usize]) as u64)
+        ulib.sayn(trk_get(i, T_RATE))
+        ulib.say((&s_hz[0 as usize]) as u64)
+        ulib.say((&s_sp[0 as usize]) as u64)
+        ulib.sayn(trk_get(i, T_CH))
+        ulib.say((&s_ch[0 as usize]) as u64)
+    }
+    ulib.say((&s_sp[0 as usize]) as u64)
+    say_ms(trk_get(i, T_DUR_MS))
+    let br: u64 = trk_bitrate(i)
+    if br > 0 {
+        ulib.say((&s_sp[0 as usize]) as u64)
+        ulib.sayn(br)
+        ulib.say((&s_kb[0 as usize]) as u64)
+    }
+    if can_decode(c) {
+        ulib.say((&s_ja[0 as usize]) as u64)
+    } else {
+        ulib.say((&s_nein[0 as usize]) as u64)
+    }
+    ulib.nl()
+}
+
+// ------------------------------------------------------- die Beispielliste
+//
+// EINE Liste fuer beide Behaelter. MP4 rechnet sie aus fuenf Tabellen
+// aus, MKV liest sie aus den Klumpen -- danach sieht sie gleich aus, und
+// die Anwendung muss nicht wissen, woher sie kam.
+//
+// Warum 32768 und nicht "so viele wie noetig": ein Prozess hat drei
+// Mebioktett Abbild (`proc.IMAGE_BASE`..`IMAGE_END`), und diese Liste
+// kostet davon 512 KiB. 32768 Beispiele sind bei AAC (1024 je Rahmen,
+// 44,1 kHz) 12,7 Minuten und bei MP3 (1152) 14,3. Laenger geht auch --
+// dann steht `idx_full` und die Anwendung SAGT, dass sie abschneidet.
+// Eine MP3-Datei braucht diese Liste gar nicht: sie wird gestroemt.
+
+const IDX_MAX: u64 = 32768
+
+static mut i_off: [u64; 32768] = [0 as u64; 32768]
+static mut i_len: [u32; 32768] = [0 as u32; 32768]
+static mut i_tim: [u32; 32768] = [0 as u32; 32768] // Millisekunden
+static mut i_dur: [u32; 32768] = [0 as u32; 32768] // Millisekunden, 0 = unbekannt
+static mut i_n: u64 = 0
+static mut i_over: u64 = 0
+
+fn idx_reset() {
+    i_n = 0
+    i_over = 0
+}
+
+fn idx_add(off: u64, len: u64, ms: u64) -> bool {
+    if i_n >= IDX_MAX {
+        i_over = 1
+        return false
+    }
+    i_off[(i_n) as usize] = off
+    if len > 0xFFFFFFFF {
+        i_len[(i_n) as usize] = 0xFFFFFFFF as u32
+    } else {
+        i_len[(i_n) as usize] = len as u32
+    }
+    if ms > 0xFFFFFFFF {
+        i_tim[(i_n) as usize] = 0xFFFFFFFF as u32
+    } else {
+        i_tim[(i_n) as usize] = ms as u32
+    }
+    i_dur[(i_n) as usize] = 0
+    i_n = i_n + 1
+    return true
+}
+
+fn idx_setdur(i: u64, ms: u64) {
+    if i >= i_n {
+        return
+    }
+    if ms > 0xFFFFFFFF {
+        i_dur[(i) as usize] = 0xFFFFFFFF as u32
+    } else {
+        i_dur[(i) as usize] = ms as u32
+    }
+}
+
+fn idx_count() -> u64 {
+    return i_n
+}
+
+fn idx_full() -> bool {
+    return i_over == 1
+}
+
+fn idx_off(i: u64) -> u64 {
+    if i >= i_n {
+        return 0
+    }
+    return i_off[(i) as usize]
+}
+
+fn idx_size(i: u64) -> u64 {
+    if i >= i_n {
+        return 0
+    }
+    return (i_len[(i) as usize]) as u64
+}
+
+fn idx_time(i: u64) -> u64 {
+    if i >= i_n {
+        return 0
+    }
+    return (i_tim[(i) as usize]) as u64
+}
+
+fn idx_dur(i: u64) -> u64 {
+    if i >= i_n {
+        return 0
+    }
+    return (i_dur[(i) as usize]) as u64
+}

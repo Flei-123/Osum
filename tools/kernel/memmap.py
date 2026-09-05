@@ -288,6 +288,26 @@ BEREICHE = [
     # Damit ist es ein Bereich in `kdata` wie jeder andere und steht
     # NICHT mehr unten in KEINE_KDATA.
     ("JRNL",       "kstate.fi", "JRNL_OFF",       "JRNL_MAX"),
+    # RUNDE HDA: der Ton, sechs Seiten -- RUNDE TON: sieben, und auf
+    # 0xB0000..0xB7000 statt 0x92000..0x98000, wo seit Merge 2 die Runde
+    # ASYNC liegt (fuenf Kollisionen, VOR dem Bauen gefunden).  Der
+    # zweite Anlauf, 0x9F000..0xA6000, traf die Runde HID (sechs
+    # Kollisionen, ebenfalls hier gefunden).  Deshalb KDATA_SIZE
+    # 0xB0000 -> 0xC0000 und der Ton HINTER der alten Grenze.  Eine Seite Tonschicht und AC97, drei Seiten
+    # Intel HD-Audio (Skalare samt Positionspuffer, CORB/RIRB,
+    # Deskriptorliste samt Widget-Tafel), zwei Seiten Mischer.  Die
+    # DMA-Ringpuffer selbst stehen NICHT hier -- sie kommen aus dem
+    # Rahmenverwalter, weil 16 KiB je Strom in dieser Karte
+    # Verschwendung waeren und der Rahmenverwalter ohnehin
+    # seitenausgerichtet liefert.
+    ("AUD",        "kstate.fi", "AUD_OFF",        "AUD_MAX"),
+    ("HDA",        "kstate.fi", "HDA_OFF",        "HDA_MAX"),
+    ("HDARING",    "kstate.fi", "HDAR_OFF",       "HDAR_MAX"),
+    ("HDABDL",     "kstate.fi", "HDAB_OFF",       "HDAB_MAX"),
+    ("MIX",        "kstate.fi", "MIX_OFF",        "MIX_MAX"),
+    # RUNDE TON: der Umsteigepuffer der Ton-Systemaufrufe, eine Seite
+    # hinter dem Mischer -- statt des maschinenweiten BLOCK_OFF.
+    ("AUDB",       "kstate.fi", "AUDB_OFF",       "AUDB_MAX"),
 ]
 
 # `_OFF`-Konstanten, die KEINE Bereiche in `kdata` sind -- Offsets
