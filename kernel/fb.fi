@@ -81,7 +81,7 @@ export {
     WIDTH_STD, HEIGHT_STD,
     WIDTH_BIG, HEIGHT_BIG,
     // RUNDE DISPLAY -- der Moduswechsel und das Umrechnen beim Uebertragen.
-    panel_w, panel_h, panel_pitch, slot0,
+    panel_w, panel_h, panel_pitch, slot0, pad_wert,
     remap, unmap, unmap_slot, longest_run, map_span, free_slots,
     win_slots, huge_size,
     set_backbuf, back_bytes,
@@ -709,6 +709,16 @@ fn scale_for(w: u64, h: u64) -> u64 {
 //   uncached   das Fenster ohne Zwischenspeicher abbilden
 //
 // Gibt wahr zurueck, wenn danach ein Bildschirm da ist.
+static mut pad_wunsch: u64 = 0
+
+fn pad_setzen(n: u64) {
+    pad_wunsch = n
+}
+
+fn pad_wert() -> u64 {
+    return pad_wunsch
+}
+
 fn init(state: u64, mbi: u64, want_w: u64, want_h: u64,
     back: u64, back_bytes: u64, uncached: bool) -> bool {
     font.load(state + FONT_OFF)
@@ -829,6 +839,11 @@ fn init(state: u64, mbi: u64, want_w: u64, want_h: u64,
         streifen = 1
     }
 
+    // RUNDE VIELKERN: `fbpad=<n>` -- siehe `zahl_hinter` weiter unten.
+    // Steht das Wort nicht auf der Befehlszeile, aendert sich nichts.
+    if pad_wunsch != 0 && w > pad_wunsch + 320 {
+        w = w - pad_wunsch
+    }
     kstate.set(state, FB_OFF + S_PHYS, p)
     kstate.set(state, FB_OFF + S_ADDR, fenster + inner)
     kstate.set(state, FB_OFF + S_BLOCK, blk)
@@ -2271,9 +2286,11 @@ fn parse(state: u64, cmd: u64) {
     var w_pat: [u8; 7] = "fbtest\0"
     var w_usr: [u8; 7] = "fbuser\0"
     var w_res: [u8; 7] = "fbres=\0"
+    var w_pad: [u8; 7] = "fbpad= "
     var w_wb: [u8; 5] = "fbwb\0"
     var m: u64 = 0
     if cmd != 0 {
+        pad_setzen(zahl_hinter(state, cmd, (&w_pad[0]) as u64, 6))
         if find(cmd, (&w_gfx[0]) as u64, 3) != 0 {
             m = m | M_GFX
         }
@@ -2387,6 +2404,42 @@ fn parse_zahlenpaar(state: u64, cmd: u64, wort: u64, wlen: u64) -> bool {
     kstate.set(state, FB_OFF + S_RESW, w)
     kstate.set(state, FB_OFF + S_RESH, h)
     return true
+}
+
+// ====================================================== RUNDE VIELKERN
+// "fbpad=<n>" -- EINE ZEILENBREITE, DIE GROESSER IST ALS DAS BILD.
+//
+// WOZU. Justin berichtet seit mehreren Runden, dass im FENSTERINHALT
+// bei 3440x1440 die ersten Zeichen jeder Zeile fehlen, waehrend der
+// Rahmen richtig sitzt. Im Pruefstand ist das nie aufgetreten -- und
+// der Grund dafuer steht in der eigenen Startzeile des Kerns:
+//
+//     fb: 3440x1440x32  pitch=13760      (13760 = 3440 * 4)
+//
+// Unter QEMU ist die Zeilenbreite GENAU die Bildbreite mal vier. Auf
+// echter Firmware ist sie das oft NICHT: eine GOP meldet fuer 3440
+// Bildpunkte gern 3456 je Zeile, weil die Karte ausrichtet. Jede
+// Rechnung, die `breite * 4` schreibt, wo `zeilenbreite` stehen
+// muesste, ist damit im Pruefstand richtig und auf Justins Brett
+// falsch -- Zeile fuer Zeile um genau den Unterschied.
+//
+// `fbpad=<n>` stellt diesen Fall her, ohne echte Hardware: die
+// gemeldete BREITE wird um n Bildpunkte verkleinert, die Zeilenbreite
+// bleibt. Damit gilt pitch > breite * 4, und es wird kein Oktett
+// ausserhalb des echten Rahmenpuffers beschrieben.
+fn zahl_hinter(state: u64, cmd: u64, wort: u64, wlen: u64) -> u64 {
+    if cmd == 0 {
+        return 0
+    }
+    let a: u64 = find(cmd, wort, wlen)
+    if a == 0 {
+        return 0
+    }
+    let p1: u64 = a + wlen
+    if ziffern_ab(p1) == 0 {
+        return 0
+    }
+    return zahl_bei(p1)
 }
 
 fn mode(state: u64) -> u64 {

@@ -36,7 +36,12 @@ export {
     set_online, online_count, get, set, add, record,
     C_APICID, C_ONLINE, C_CUR, C_IDLE, C_TICKS, C_SWITCHES, C_STACK,
     C_GDT, C_TSS, C_WORK, C_GO, C_SUM, C_CYCLES, C_PICKS, C_STARTED,
-    C_IDLERUNS, C_LAPIC, C_FPUOWNER
+    C_IDLERUNS, C_LAPIC, C_FPUOWNER,
+    // RUNDE VIELKERN: die drei Felder, die Ring 3 auf jedem Kern
+    // moeglich machen. Der Satz DIESES Kerns ist zugleich der Block,
+    // auf den seine GS-Basis zeigt -- `%gs:C_SYSRSP` und
+    // `%gs:C_KSTACK` in isr.s sind genau diese beiden Zahlen.
+    C_SYSRSP, C_KSTACK, C_TSSADDR
 }
 
 // ---------------------------------------------------- the record fields
@@ -63,6 +68,32 @@ const C_IDLERUNS: u64 = 120 // turns of its idle loop
 // Wechsel zwischen beiden Wegen keinen halben Zustand hinterlaesst.
 // Es ist PRO KERN, weil die Register es sind.
 const C_FPUOWNER: u64 = 128
+// ====================================================== RUNDE VIELKERN
+// WO EIN SYSTEMAUFRUF AUF DIESEM KERN LANDET.
+//
+// Bis hierher stand beides EINMAL fuer die ganze Maschine: der Ablageort
+// des Benutzerstapels (`sys_rsp` in isr.s, ein .bss-Wort) und der
+// Kernstapel (`kdata + KSTACK_CUR`, ein Wort in der Datenseite). Zwei
+// Kerne, die gleichzeitig `syscall` ausfuehren, ueberschrieben sich
+// darin gegenseitig -- das war Justins #UD vom 05.09. Deshalb durfte
+// Ring 3 seit Runde BLECHKERN nur auf Kern 0 laufen.
+//
+// Jetzt liegen beide IM SATZ DES KERNS, und `syscall_entry` erreicht sie
+// ueber die GS-Basis, die auf genau diesen Satz zeigt. Kein `swapgs`:
+// Ring 3 benutzt in diesem System GS nicht (nachgezaehlt: `objdump -d`
+// findet im ganzen Abbild keinen GS-Praefix ausserhalb dieser drei
+// Stellen), also darf die Basis STEHEN bleiben und muss nicht getauscht
+// werden. Das spart die Paarung von `swapgs` in 48 Unterbrechungs-
+// stuempfen und den ganzen Zoo an Fehlern, den eine verlorene Haelfte
+// dieser Paarung macht. Wenn dieses System einmal TLS in Ring 3 bekommt,
+// ist DAS der Tag fuer `swapgs` -- und nicht frueher.
+//
+// DIE ZAHLEN STEHEN AUCH IN isr.s (`.set CPU_SYSRSP` / `.set CPU_KSTACK`)
+// und muessen mit diesen hier uebereinstimmen. `kmain` vergleicht sie
+// beim Start und sagt es, wenn sie auseinanderlaufen.
+const C_SYSRSP: u64 = 136 // Ablage des Benutzerstapels im Einsprung
+const C_KSTACK: u64 = 144 // Kernstapel der Aufgabe, die hier laeuft
+const C_TSSADDR: u64 = 152 // Aufgabenzustandssegment DIESES Kerns
 
 // Where the address of the local APIC window is kept. It is written once,
 // by `smp.probe`, out of what `apic.fi` measured -- this file does not
@@ -113,11 +144,31 @@ fn register(state: u64, apid: u64) -> u64 {
     if n >= kstate.MAX_CPUS {
         return kstate.MAX_CPUS
     }
+    // ================================================== RUNDE VIELKERN
+    // DER SATZ WIRD GENULLT -- ABER NICHT DIE DREI FELDER, AUS DENEN DER
+    // SYSTEMAUFRUF SEINEN STAPEL HOLT.
+    //
+    // `register` laeuft in `smp.probe`, also NACH `sched.init` und NACH
+    // `user.setup`. Fuer den Satz 0 ist das kein Anlegen, sondern ein
+    // Ueberschreiben von etwas, das schon benutzt wird: `C_KSTACK` stand
+    // auf `syscall_stack_top` und war danach 0. Der naechste `syscall`
+    // holte sich `rsp = 0` und starb im ersten `push` -- gemessen als
+    //
+    //     *** EXCEPTION 8 #DF  rip=0x1002c3  rsp=0x0
+    //
+    // und `rip` war genau das `push %gs:0x88` des Einsprungs.
+    // `tools/einsprung/run.sh` hat es gefangen (7 von 14 statt 12).
+    let k_sysrsp: u64 = get(state, n, C_SYSRSP)
+    let k_kstack: u64 = get(state, n, C_KSTACK)
+    let k_tss: u64 = get(state, n, C_TSSADDR)
     var i: u64 = 0
     while i < kstate.CPU_BYTES / 8 {
         __mmio_write64((record(state, n) + i * 8) as *mut u64, 0)
         i = i + 1
     }
+    set(state, n, C_SYSRSP, k_sysrsp)
+    set(state, n, C_KSTACK, k_kstack)
+    set(state, n, C_TSSADDR, k_tss)
     set(state, n, C_APICID, apid)
     kstate.set(state, kstate.SMP_OFF + kstate.SMP_COUNT, n + 1)
     return n

@@ -49,6 +49,8 @@ export {
     adopt, enter_task, set_idle, zombies, reap_all, cpu_of, cpu_mask,
     clear_signals,
     set_affinity, affinity, ANY_CPU, ring3_fremd,
+    gs_melden, gs_bereit, gs_fehler, ring3_kerne, gs_soll, gs_pruefen,
+    kstack_hier, kstack_wieder,
     T_STATE, T_PID, T_RSP, T_KSTACK, T_KTOP, T_PRIO, T_BUDGET, T_WORK,
     T_WAKE, T_CR3, T_PARENT, T_EXIT, T_RUNS, T_ENTRY, T_USTACK, T_KIND,
     T_WAITPID, T_TICKS, T_PDPT, T_PD, T_PT, T_DATA, T_CWD, T_ARG,
@@ -671,8 +673,112 @@ fn may_run(state: u64, i: u64, me: u64) -> bool {
 // genau davon handelt diese Runde. Deshalb steht dieselbe Bedingung hier
 // noch einmal, aus der GATTUNG der Aufgabe hergeleitet: ein Kern ungleich
 // null nimmt keinen Ring-3-Prozess, was auch immer in der Tabelle steht.
+// RUNDE VIELKERN: DER RIEGEL BLEIBT -- ER FRAGT NUR ETWAS ANDERES.
+//
+// Bis hierher hiess er "nur Kern 0 darf Ring 3". Jetzt heisst er: ein
+// Kern darf Ring 3 nur nehmen, wenn seine GS-Basis wirklich auf SEINEN
+// `cpu`-Satz zeigt. Ist sie das nicht, faende der naechste `syscall`
+// seinen Kernstapel nicht -- und das ist genau der Fehler, den diese
+// beiden Runden ausgeraeumt haben. Lieber laeuft der Prozess dann auf
+// Kern 0 weiter, als dass er die Maschine mitnimmt.
+//
+// Die Pruefung ist ein Vergleich zweier Zahlen im Speicher; das MSR
+// wird NICHT bei jeder Auswahl gelesen (das waere ein `rdmsr` je
+// Zeitgeberschlag je Kern). Gesetzt wird `C_GSOK` einmal, von dem Kern
+// selbst, in `smp.ap_main` bzw. `kmain`.
 fn darf_ring3(state: u64, i: u64, me: u64) -> bool {
-    return me == 0 || tget(state, i, T_KIND) != K_USER
+    if tget(state, i, T_KIND) != K_USER {
+        return true
+    }
+    return me == 0 || gs_bereit(state, me)
+}
+
+// Hat dieser Kern eine GS-Basis, die auf seinen eigenen Satz zeigt?
+// EINMAL gemessen und hingeschrieben, von dem Kern, um den es geht.
+static mut gs_gut: [u64; 8] = [0 as u64; 8]
+
+fn gs_melden(state: u64, me: u64, gut: bool) {
+    if me >= 8 {
+        return
+    }
+    if gut {
+        gs_gut[me as usize] = 1
+    } else {
+        gs_gut[me as usize] = 2
+    }
+}
+
+// Die Adresse, auf die die GS-Basis DIESES Kerns zeigen muss.
+// Der Kernstapel, den DIESER Kern beim naechsten Systemaufruf nimmt --
+// dieselbe Zahl, die `%gs:CPU_KSTACK` in isr.s liest.
+// Den Kernstapel dieses Kerns NEU eintragen -- aus der Aufgabe, die
+// gerade laeuft. Gebraucht nach `smp.stage`: dort bekommt der Startkern
+// unter Umstaenden eine andere Satznummer als 0, und dann steht sein
+// Stapel im falschen Satz.
+fn kstack_wieder(state: u64) {
+    set_kernel_stack(state, tget(state, current(state), T_KTOP))
+}
+
+fn kstack_hier(state: u64) -> u64 {
+    return cpu.get(state, cpu.here(state), cpu.C_KSTACK)
+}
+
+fn gs_soll(state: u64) -> u64 {
+    return cpu.record(state, cpu.here(state))
+}
+
+// Gegenprobe fuer den Startkern: er kennt seine eigene Nummer erst,
+// wenn der APIC oben ist, und die MADT muss ihn nicht als ersten
+// auffuehren. Also wird nach dem Hochlauf noch einmal nachgesehen.
+fn gs_pruefen(state: u64, basis: u64) -> bool {
+    let me: u64 = cpu.here(state)
+    let gut: bool = basis == cpu.record(state, me)
+    gs_melden(state, me, gut)
+    return gut
+}
+
+fn gs_bereit(state: u64, me: u64) -> bool {
+    if me >= 8 {
+        return false
+    }
+    return gs_gut[me as usize] == 1
+}
+
+// Wie viele Kerne eine FALSCHE oder gar keine GS-Basis gemeldet haben.
+// Muss null bleiben; die Tafel zeigt es als `R3W`.
+fn gs_fehler(state: u64) -> u64 {
+    var i: u64 = 0
+    var c: u64 = 0
+    while i < 8 {
+        if gs_gut[i as usize] == 2 {
+            c = c + 1
+        }
+        i = i + 1
+    }
+    return c
+}
+
+// Auf wie vielen Kernen Ring 3 wirklich gelaufen ist -- die Zahl, die
+// diese Runde beweist. `TC_MASK` traegt je Aufgabe ein Bit je Kern.
+fn ring3_kerne(state: u64) -> u64 {
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var i: u64 = 1
+    var maske: u64 = 0
+    while i < n {
+        if tget(state, i, T_KIND) == K_USER {
+            maske = maske | tc_get(state, i, TC_MASK)
+        }
+        i = i + 1
+    }
+    var c: u64 = 0
+    var b: u64 = 0
+    while b < 8 {
+        if ((maske >> b) & 1) != 0 {
+            c = c + 1
+        }
+        b = b + 1
+    }
+    return c
 }
 
 // Wie viele Ring-3-Prozesse zuletzt auf einem Kern ungleich null gelaufen
@@ -1037,11 +1143,21 @@ fn create(state: u64, kind: u64, prio: u64, arg: u64, entry: u64) -> u64 {
     // Aufgehoben wird das erst von der Runde, die KSTACK_CUR je Kern
     // fuehrt (GS-Basis oder zweiter Tabellenzugriff im Einsprung, in
     // Assembler, vor dem ersten Stapel) -- genau wie es smp.fi sagt.
-    if kind == K_USER {
-        tc_set(state, slot, TC_AFF, 0)
-    } else {
-        tc_set(state, slot, TC_AFF, ANY_CPU)
-    }
+    // RUNDE VIELKERN: UND JETZT DARF RING 3 WIEDER AUF JEDEN KERN.
+    //
+    // Runde BLECHKERN hat hier `TC_AFF = 0` fuer K_USER eingetragen,
+    // weil `syscall_entry` den Kernstapel aus EINEM Wort fuer die ganze
+    // Maschine holte. Dieses Wort liegt jetzt im `cpu`-Satz je Kern
+    // (`set_kernel_stack` weiter oben, `%gs:CPU_KSTACK` in isr.s), und
+    // ebenso die RSP0 im Aufgabenzustandssegment jedes Kerns. Die
+    // Bedingung, die die Bindung noetig machte, gibt es nicht mehr.
+    //
+    // `sched.ring3_fremd` (Tafelzeile 12, `R3F`) misst weiter, auf wie
+    // vielen Kernen Ring 3 wirklich gelaufen ist -- die Zahl ist ab
+    // dieser Runde ein ERWARTETER Wert groesser null und keine Alarm-
+    // zahl mehr. Was NICHT null sein darf, misst `R3W`: Kerne, die
+    // Ring 3 genommen haben, OHNE eine eigene GS-Basis zu haben.
+    tc_set(state, slot, TC_AFF, ANY_CPU)
     clear_signals(state, slot)
     atomic.lock_give(state, atomic.L_SCHED)
     irq_restore(flags)
@@ -1243,14 +1359,36 @@ fn start(state: u64, i: u64) -> bool {
 // that wrote its kernel task's stack into that word would send the next
 // system call of a ring 3 process onto a stack somebody else is standing
 // on.
+// RUNDE VIELKERN: BEIDES JE KERN, UND DAMIT FAELLT DIE BINDUNG AN KERN 0.
+//
+// Der obige Absatz beschreibt den Zustand VOR dieser Runde und bleibt
+// stehen, weil er die Begruendung enthaelt. Was sich geaendert hat:
+//
+//   * Der Kernstapel steht nicht mehr in EINEM Wort der Datenseite,
+//     sondern im `cpu`-Satz DIESES Kerns (`C_KSTACK`). `syscall_entry`
+//     erreicht ihn ueber die GS-Basis, die auf denselben Satz zeigt.
+//   * Die RSP0 wird in das Aufgabenzustandssegment DIESES Kerns
+//     geschrieben (`C_TSSADDR`, von `smp.tables` gesetzt). Bisher
+//     bekam nur das des Startkerns eine -- eine Unterbrechung aus
+//     Ring 3 auf einem Anwendungskern waere sonst auf dessen
+//     Startstapel gelandet, also mitten in seine Leerlaufaufgabe.
+//   * `kstate.KSTACK_CUR` wird noch mitgeschrieben, aber von niemandem
+//     mehr gelesen. Es bleibt als Anzeige stehen, bis eine Runde die
+//     Datenseite aufraeumt.
 fn set_kernel_stack(state: u64, ktop: u64) {
-    if cpu.here(state) != 0 {
-        return
+    let me: u64 = cpu.here(state)
+    cpu.set(state, me, cpu.C_KSTACK, ktop)
+    // Ein gestarteter Kern traegt seins seit `smp.tables` ein; eine 0
+    // heisst also "das ist der Startkern", und der hat das aus `idt`.
+    var tss: u64 = cpu.get(state, me, cpu.C_TSSADDR)
+    if tss == 0 {
+        tss = kstate.get(state, kstate.TSS)
     }
-    kstate.set(state, kstate.KSTACK_CUR, ktop)
-    let tss: u64 = kstate.get(state, kstate.TSS)
     if tss != 0 {
         __mmio_write64((tss + 4) as *mut u64, ktop)
+    }
+    if me == 0 {
+        kstate.set(state, kstate.KSTACK_CUR, ktop)
     }
 }
 
