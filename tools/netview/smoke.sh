@@ -63,7 +63,7 @@ for q in state-nocarrier state-noip state-noroute state-online \
          tile-fake tile-net tile-hide; do
     ARGS+=("/etc/netview/$q=$TMPD/icons/$q")
 done
-while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel")
+while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel" nur="$GPROGS")
 while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 || { tail -5 "$TMPD/mkfs.txt"; exit 1; }
 cp -f "$TMPD/d.img" "$TMPD/l.img"
