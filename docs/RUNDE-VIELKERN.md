@@ -515,3 +515,62 @@ Maschine mit Absicht umbringt, und der gehört in den Prüfstand.
 * **`kstate.KSTACK_CUR` wird weiter mitgeschrieben und von niemandem
   gelesen.** Das ist Absicht und steht so in `sched.set_kernel_stack`:
   es bleibt als Anzeige stehen, bis eine Runde die Datenseite aufräumt.
+
+## 8. Vorgefunden, **nicht** von dieser Runde
+
+Die Abnahme dieses Zweigs hat rote Abschnitte, die schon auf `hidweg`
+rot waren. Sie stehen hier, weil ein roter Abschnitt, über den alle
+hinwegsehen, genau das ist, wovor `tools/gfx/run.sh` in seinem eigenen
+Kommentar warnt — und weil der nächste, der sie sieht, wissen soll, daß
+sie nachgemessen sind.
+
+| Abschnitt | dieser Zweig | Grundlinie | Befund |
+|---|---|---|---|
+| 1 — festgenagelter Übersetzer | rot | **rot** | `vendor/firn/.gebaut` hat zwei Felder (`<commit> <flicken>`), `test.sh` vergleicht gegen ein Feld; und `vendor/net/BLOBS` nennt für `net/stack.fi` `136851a0…`, im Baum liegt `723eaa12…`. **Beides Oktett für Oktett identisch im unberührten Basisbaum `/root/osum-blechhid`.** |
+| gfx | 46 / 30 | **rot** | zwei Ursachen, beide alt |
+| display | 126 / 19 | 145 / 0 (03.09.) | dieselbe zweite Ursache wie gfx |
+| customres | 126 / 9 | — | dieselbe |
+| k16 | 60 / 4 | 58 / 6 (03.09.) | **weniger** Fehler als vorher |
+| k17 | 157 / 1 | 154 / 4 (03.09.) | **weniger** |
+| k18 | 169 / 1 | 167 / 3 (03.09.) | **weniger** |
+| arm | 47 / 1 | 47 / 1 (03.09.) | unverändert |
+
+**Die zwei Ursachen in gfx**, beide nachgemessen:
+
+1. **`kernel/fb.fi` enthält NUL-Oktette**, `grep` hält die Datei damit
+   für binär. `tools/gfx/run.sh` liest `WIN_LIST` mit `grep -E` **ohne
+   `-a`** und bekommt eine leere Zeichenkette. Zwei statische Zusagen
+   fallen daran.
+2. **`fb: hold` wird nicht mehr ausgegeben**, obwohl `fbhold` auf der
+   Befehlszeile steht. `kgui.gfx_hold` kommt bis
+   `if !fb.want(state, fb.M_HOLD) { return }` und kehrt dort um —
+   `FB_OFF + S_MODE` trägt das Bit 32 nicht, während `M_GFX` aus
+   derselben Zeile gesetzt ist. Damit wartet jeder Läufer, der ein
+   Bildschirmfoto machen will, ins Leere, und alle folgenden Zusagen
+   fallen mit `No such file or directory: …ppm`.
+
+   **Nachgemessen mit zwei Kernen aus zwei Commits**, gleiche
+   Befehlszeile, gleiche Maschine:
+
+   | Kern | `fb: hold` |
+   |---|---|
+   | `vielkern3` (dieser Zweig) | **0** |
+   | `1493451` (VIELKERN 2, die Grundlinie) | **0** |
+
+   Es ist also **vor** dieser Runde entstanden — irgendwo zwischen dem
+   grünen Lauf vom 03.09. und `1493451`, also in BLECHKERN oder
+   VIELKERN 1/2. Behoben wird es hier nicht: das ist eine eigene Runde,
+   und sie bekommt drei Abschnitte auf einmal zurück (gfx, display,
+   customres).
+
+**Grün geblieben sind die vier Läufer, die überhaupt mit mehr als einem
+Kern starten** — und nur die konnte das Umschalten der Vorgabe treffen:
+
+    tools/guard/run.sh   58 / 0
+    tools/avx/run.sh     32 / 0
+    tools/smp/run.sh     59 / 0
+    tools/kvm/run.sh     31 / 0
+
+und der neue Läufer selbst:
+
+    tools/vielkern/run.sh   36 / 0
