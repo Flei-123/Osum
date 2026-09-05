@@ -18,15 +18,20 @@ der seriellen Leitung melden, die Farben aus den Bildpunkten.
 
 | Messgröße | vorher | nachher |
 |---|---|---|
-| Gemeldete Längen auf dem Viererraster | **166 von 824 = 20 %** | **654 von 664 = 98 %** |
-| Klickflächen unter 32 px | **97 von 100** | **0 von 93** |
-| Vorkommende Höhen von Bedienelementen | 22, 26, 28 | **32** |
+| Gemeldete Längen auf dem Viererraster | **166 von 824 = 20 %** | **671 von 724 = 92 %** |
+| davon in der Taskleiste daneben | **559** | **0** |
+| Klickflächen unter 32 px | **97 von 100** | **2 von 86** |
+| Vorkommende Höhen von Bedienelementen | 22, 26, 28 | **32** (Rest: 26, 28 im Starter) |
 | Listenzeile | 20 px (Faktor 1,33 zur Schrift) | **28 px (1,86)** |
-| Farben im Bild (Dateimanager) | 230 | **822** |
+| Farben im Bild (Dateimanager) | 230 | **833** |
 | Farben im Eckquadrat 16×16 des Fensters | 16 | **129** |
 | Schatten unter dem Fenster | keiner | **8 px, monoton 67 → 8 Helligkeitsstufen** |
 | Leere Beschriftungen | 2 | 2 |
-| Beschriftungen, deren Tinte die eigene Breite berührt | 30 | 18 |
+| Beschriftungen, deren Tinte die eigene Breite berührt | 30 | 24 |
+
+Zwischenstand nach der Umstellung der Taskleiste **allein**, ohne die
+Anwendungen: 62 % auf dem Raster, 7 von 98 Klickflächen unter 32. Die
+Leiste war also, wie vermutet, der größte einzelne Posten.
 
 20 Prozent ist der Wert des **Zufalls** — bei vier möglichen Resten ist
 jede vierte Zahl durch vier teilbar. Eine Oberfläche, deren Abstände man
@@ -285,7 +290,42 @@ Programm: `icont.fi`, dem Messprogramm für die Symbolschrift (weißer
 Grund, damit Tinte zählbar ist — dort ist es Absicht und kein Thema).
 Der Dunkelmodus ist an dieser Stelle also nicht kaputt.
 
-### 5.2 Der Zweig `hidweg` startet unter KVM nicht bis `wm: hold`
+### 5.2 Der Starter löscht eine Beschriftung in einem anderen Fenster
+
+`tools/themestore/run.sh`, Abschnitt 10, nach der Umstellung von
+`launcher.fi` auf Marken:
+
+```
+FAIL  Seite Darstellung: leere Beschriftungen: 1, erwartet eq 0
+      EMPTY 'Akzent unveraendert uebernommen' at 68,479 w=254: no pixel differs
+```
+
+Die Beschriftung wird laut Mitschnitt **gemalt** (`wlib: text … base=454`),
+und an der gemeldeten Stelle steht kein einziger Bildpunkt. Der Knopf
+darunter trägt dafür 866 statt 520 Tintenpunkte — der Text landet also
+rund eine Zeile tiefer, als das Programm meldet.
+
+Eingekreist durch Einzeltausch in einer Kopie des unveränderten Baums,
+je eine Datei dieser Runde hineingelegt:
+
+| Stand | Tinte an der Stelle |
+|---|---|
+| unverändert | 280 |
+| + `wlibc.fi` | 280 |
+| + `wlib.fi` | 280 |
+| + `taskbar.fi` | 280 |
+| + `osum.shape` und die Vorlagen | 280 |
+| + `launcher.fi` | **0** |
+| `launcher.fi` wieder zurück | 280 |
+
+Der Starter ist ein **anderer Prozess** als das Einstellungsfenster; sie
+teilen nur den Fensterserver. Es ist also kein Fehler der Umstellung
+selbst, sondern eine Stelle, an der die Malfläche eines Fensters davon
+abhängt, was ein anderes Fenster vorher angelegt hat. Das gehört
+gefunden — aber nicht nebenbei in einer Runde, die das Aussehen ändert.
+Die Umstellung des Starters ist deshalb zurückgenommen.
+
+### 5.3 Der Zweig `hidweg` startet unter KVM nicht bis `wm: hold`
 
 Beim Aufsetzen der Aufnahme gemessen, mit demselben Plattenabbild und
 demselben Kern, nur der Beschleuniger getauscht:
@@ -306,12 +346,16 @@ gehört in eine eigene Runde. Alle Aufnahmen hier laufen deshalb auf TCG.
 
 ## 6. Was offen bleibt
 
-* **Zehn Längen liegen noch neben dem Raster** (8 im Dateimanager, 2 im
-  Startmenü). Es sind Textbreiten in einer waagerechten Anordnung — die
-  Pfadleiste, die den Rest der Zeile bekommt, und die Spaltenbreiten der
-  Dateitabelle. Sauber wird das erst, wenn `wlib.place` selbst auf das
-  Raster rundet; das ändert die Bildpunktprüfungen von `tools/k15/run.sh`
-  und gehört deshalb in eine Runde, die die mit abnimmt.
+* **53 Längen liegen noch neben dem Raster** — 35 im Einstellungsfenster
+  (die Spaltenteilung 300/400 und Textbreiten), 8 im Dateimanager
+  (Pfadleiste und Spaltenbreiten der Tabelle), 7 im Startmenü. Sauber
+  wird das erst, wenn `wlib.place` selbst auf das Raster rundet; das
+  ändert die Bildpunktprüfungen von `tools/k15/run.sh` und gehört deshalb
+  in eine Runde, die die mit abnimmt.
+* **Der Starter (`launcher.fi`) steht noch auf seinen dreizehn getippten
+  Zahlen** — die Umstellung ist gebaut, gemessen und **zurückgenommen**
+  worden, weil sie eine Beschriftung in einem *anderen* Fenster
+  verschwinden lässt. Der Befund steht in Abschnitt 5.2.
 * **`desktop.fi` malt weiter direkt auf `wlibc`.** Es hat genau einen
   Malaufruf (`wlibc.px` für den Verlauf) und keine Bedienelemente; ein
   Symbolraster auf dem Schreibtisch gibt es noch nicht. Sobald es eines
@@ -330,3 +374,43 @@ gehört in eine eigene Runde. Alle Aufnahmen hier laufen deshalb auf TCG.
   `TY_CAPTION` trägt die Statuszeilen von Taskleiste und Dateimanager;
   `TY_TITLE` und `TY_DISPLAY` hat noch kein Programm abgerufen. Das ist
   Arbeit in `settings.fi` und `explorer.fi` und ändert dort Bildpunkte.
+
+---
+
+## 7. Die Leitplanken
+
+| Läufer | unverändert (`/root/osum-blechhid`) | diese Runde |
+|---|---|---|
+| `tools/themestore/run.sh` | 81 grün, 0 rot | **81 grün, 0 rot** |
+| `tools/k15/run.sh` | 1 rot (Zwischenablage, unter Last) | siehe unten |
+| `tests/theme/run.sh` | 1 rot (`rohe Farbwerte im Zeichencode: 8`) | 1 rot, **dieselbe Zeile** |
+
+`tests/theme/run.sh` ist auf beiden Seiten **identisch** rot:
+`tests/theme/rawcolour.py` findet in beiden Bäumen dieselben 8 Stellen
+(sieben in `kernel/wm.fi`, eine Bitmaske in `taskbar.fi`). Das ist ein
+Befund des Zweiges und keiner dieser Runde.
+
+`tools/k15/run.sh` ist unter paralleler Last flatterig: es speist Klicks
+und Tastendrücke über den QEMU-Monitor ein und misst, ob sie **einmal**
+ankommen. Im unveränderten Baum fiel dabei die Zwischenablage durch
+(`'' statt 'Kopiermich-ab'`), in diesem Baum der Klickzähler
+(`genau EINMAL: 0`) — zwei **verschiedene** Zusagen in zwei
+verschiedenen Abschnitten, beide zeitabhängig. Der Lauf ohne Nebenlast
+steht unter `/tmp/design/t-k15b.log`.
+
+## 8. Der Skalierungsfaktor
+
+Aufgenommen bei 3440×1440 (`tools/design/aufnahme.sh … res=3440x1440`),
+also dem Schirm, an dem Justin wirklich sitzt. Der Server meldet den
+Faktor 2, und **die Längen wachsen mit, nicht nur die Schrift**:
+
+```
+taskbar: shape file=osum name=OrientOS id=1 keys=25 ctrl_h=64
+taskbar: geom edge=0 x=0 y=1368 w=3440 h=72 vertical=0 thick=72
+taskbar: start x=4 y=4 w=72 h=64
+taskbar: field net x=3164 y=4 w=168 h=64
+```
+
+64, 72, 168, 4 — alles Vielfache von vier, weil `metric()` die Marke mit
+dem Faktor multipliziert und `snap`/`grid` das Raster mitskalieren
+(`grid() = 4 · ui_scale()`).
