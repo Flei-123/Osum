@@ -1,0 +1,705 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/viewer.fi -- Runde ALLTAG: DER BILDBETRACHTER.
+//
+//   viewer <datei>            das Fenster
+//   viewer -i <datei>         Art, Groesse, Pruefsumme und fuenf
+//                             Bildpunkte auf die Konsole -- DAS ist die
+//                             Messung, gegen Pythons Pillow
+//
+// Er kann PNG, BMP und JPEG (Grundform); die Arbeit steht in `bild.fi`
+// und `jpeg.fi`, hier ist die Bedienung. Vergroessern, Drehen, im
+// Ordner Blaettern, Miniaturen.
+//
+// DIE OBERFLAECHE IST wlib UND NUR wlib. Die Bildflaeche mit
+// Vergroesserung und der Schieberegler daneben sind KEINE Malerei in
+// diesem Programm -- sie sind in dieser Runde ins Widget-Framework
+// eingebaut worden (`wlib.bild`, `wlib.slider`), damit das
+// Ausschnittwerkzeug und jedes spaetere Programm dieselbe Flaeche
+// benutzen.
+//
+// DER SPEICHER, und das ist die harte Grenze dieses Programms: ein
+// Prozess dieses Systems hat 6 MiB grosse Arena (kernel/sys.fi,
+// `big_map`). Davon nimmt die Zeichenflaeche von wlib eines. Also:
+// 3 MiB fuer die Bildpunkte (das sind 786.432 Stueck, zum Beispiel
+// 1024 mal 768), 768 KiB fuer die Datei und 300 KiB fuer die
+// Miniaturen. Ein groesseres Bild wird ABGELEHNT mit einem Satz, der
+// sagt, warum -- nicht halb geladen.
+
+profile kernel
+
+import ulib
+import libc.io
+import tools
+import wlibc
+import wlib
+import bild
+import jpeg
+
+export { u_start }
+
+const PIXCAP: u64 = 3145728
+const DATCAP: u64 = 786432
+const MINIW: u64 = 80
+const MININ: u64 = 12
+const MAXD: u64 = 64 // Dateien im Ordner
+
+static mut pix: u64 = 0
+static mut dat: u64 = 0
+static mut mini: u64 = 0
+static mut datn: u64 = 0
+static mut bw: u64 = 0
+static mut bh: u64 = 0
+static mut art: u64 = 0 // 1 png, 2 bmp, 3 jpeg
+
+static mut ordner: [u8; 256] = [0 as u8; 256]
+static mut namen: [u8; 4096] = [0 as u8; 4096]
+static mut nd: u64 = 0
+static mut akt: u64 = 0
+static mut vollp: [u8; 512] = [0 as u8; 512]
+static mut kopf: [u8; 256] = [0 as u8; 256]
+static mut mini_da: [u64; 12] = [0; 12]
+
+static mut w_bild: u64 = 0
+static mut w_kopf: u64 = 0
+static mut w_zoom: u64 = 0
+static mut w_vor: u64 = 0
+static mut w_zur: u64 = 0
+static mut w_fit: u64 = 0
+static mut w_eins: u64 = 0
+static mut w_dreh: u64 = 0
+static mut w_mini: u64 = 0
+static mut w_mid: [u64; 12] = [0; 12]
+static mut modus: u64 = 0
+static mut c_mini: u64 = 0
+static mut c_bild: u64 = 0
+static mut c_leiste: u64 = 0
+
+static mut T_TITEL: [u8; 15] = "Bildbetrachter\0"
+static mut T_APP: [u8; 7] = "viewer\0"
+static mut T_VOR: [u8; 2] = ">\0"
+static mut T_ZUR: [u8; 2] = "<\0"
+static mut T_FIT: [u8; 9] = "Anpassen\0"
+static mut T_EINS: [u8; 4] = "1:1\0"
+static mut T_DREH: [u8; 7] = "Drehen\0"
+static mut T_MINI: [u8; 11] = "Miniaturen\0"
+static mut T_EINZ: [u8; 11] = "Einzelbild\0"
+static mut T_KEIN: [u8; 10] = "kein Bild\0"
+static mut S_X: [u8; 5] = " × \0"
+static mut S_SP: [u8; 3] = "  \0"
+static mut S_PROZ: [u8; 2] = "%\0"
+static mut A_PNG: [u8; 4] = "png\0"
+static mut A_BMP: [u8; 4] = "bmp\0"
+static mut A_JPG: [u8; 5] = "jpeg\0"
+
+fn say(p: u64) {
+    ulib.say(p)
+}
+
+fn nptr(i: u64) -> u64 {
+    return (&namen[(0) as usize]) as u64 + i * 64
+}
+
+fn karte(n: u64) -> u64 {
+    let p: u64 = wlibc.map_surface(n)
+    if ulib.bad(p) {
+        return 0
+    }
+    return p
+}
+
+fn kleiner(a: u64, b: u64) -> bool {
+    return ulib.cmp(a, b) == 1
+}
+
+// Endet der Name auf eine Bildendung? Gross und klein gilt gleich.
+fn ist_bildname(n: u64) -> bool {
+    var e_png: [u8; 4] = "png\0"
+    var e_bmp: [u8; 4] = "bmp\0"
+    var e_jpg: [u8; 4] = "jpg\0"
+    var e_jpeg: [u8; 5] = "jpeg\0"
+    let len: u64 = ulib.length(n)
+    var punkt: u64 = 0
+    var i: u64 = 0
+    while i < len {
+        if *((n + i) as *mut u8) == 46 as u8 {
+            punkt = i + 1
+        }
+        i = i + 1
+    }
+    if punkt == 0 {
+        return false
+    }
+    var kl: [u8; 16] = [0 as u8; 16]
+    var k: u64 = 0
+    while punkt + k < len && k < 15 {
+        var c: u64 = (*((n + punkt + k) as *mut u8)) as u64
+        if c >= 65 && c <= 90 {
+            c = c + 32
+        }
+        __mmio_write8(((&kl[(0) as usize]) as u64 + k) as *mut u8, c as u8)
+        k = k + 1
+    }
+    __mmio_write8(((&kl[(0) as usize]) as u64 + k) as *mut u8, 0 as u8)
+    let p: u64 = (&kl[(0) as usize]) as u64
+    return ulib.streq(p, (&e_png[(0) as usize]) as u64)
+        || ulib.streq(p, (&e_bmp[(0) as usize]) as u64)
+        || ulib.streq(p, (&e_jpg[(0) as usize]) as u64)
+        || ulib.streq(p, (&e_jpeg[(0) as usize]) as u64)
+}
+
+// Den Ordner einlesen und die Bilder darin sortieren -- damit "das
+// naechste Bild" eine feste Bedeutung hat und nicht die Reihenfolge
+// des Dateisystems.
+fn ordner_lesen(pfadp: u64) {
+    var punkt: [u8; 2] = ".\0"
+    nd = 0
+    let base: u64 = ulib.base_name(pfadp)
+    var n: u64 = base - pfadp
+    if n > 1 {
+        n = n - 1
+    }
+    if n == 0 {
+        ulib.strcpy((&ordner[(0) as usize]) as u64,
+            (&punkt[(0) as usize]) as u64)
+    } else {
+        ulib.copy((&ordner[(0) as usize]) as u64, pfadp, n)
+        __mmio_write8(((&ordner[(0) as usize]) as u64 + n) as *mut u8,
+            0 as u8)
+    }
+    let fd: u64 = io.dir_open((&ordner[(0) as usize]) as u64)
+    if ulib.bad(fd) {
+        return
+    }
+    var buf: [u8; 1024] = [0 as u8; 1024]
+    var weiter: bool = true
+    while weiter {
+        let g: u64 = io.dir_read(fd, (&buf[(0) as usize]) as u64, 1024)
+        if ulib.bad(g) || g == 0 {
+            weiter = false
+        } else {
+            var at: u64 = 0
+            while at < g {
+                let rec: u64 = (&buf[(0) as usize]) as u64 + at
+                let nm: u64 = io.dir_name(rec)
+                if ist_bildname(nm) && nd < MAXD {
+                    ulib.strncpy(nptr(nd), nm, 60)
+                    nd = nd + 1
+                }
+                at = at + io.dir_reclen(rec)
+            }
+        }
+    }
+    io.close(fd)
+    // Einfaches Sortieren -- vierundsechzig Namen, das reicht.
+    var i: u64 = 1
+    while i < nd {
+        var j: u64 = i
+        while j > 0 && kleiner(nptr(j), nptr(j - 1)) {
+            var t: [u8; 64] = [0 as u8; 64]
+            ulib.strncpy((&t[(0) as usize]) as u64, nptr(j), 62)
+            ulib.strncpy(nptr(j), nptr(j - 1), 62)
+            ulib.strncpy(nptr(j - 1), (&t[(0) as usize]) as u64, 62)
+            j = j - 1
+        }
+        i = i + 1
+    }
+    akt = 0
+    var k: u64 = 0
+    while k < nd {
+        if ulib.streq(nptr(k), base) {
+            akt = k
+        }
+        k = k + 1
+    }
+}
+
+fn voll(i: u64) -> u64 {
+    let v: u64 = (&vollp[(0) as usize]) as u64
+    tools.join(v, (&ordner[(0) as usize]) as u64, nptr(i))
+    return v
+}
+
+fn datei_lesen(pfadp: u64) -> u64 {
+    let fd: u64 = tools.openr(pfadp)
+    if ulib.bad(fd) {
+        return 0
+    }
+    var n: u64 = 0
+    var weiter: bool = true
+    while weiter {
+        let g: u64 = io.read(fd, dat + n, DATCAP - n)
+        if ulib.bad(g) || g == 0 {
+            weiter = false
+        } else {
+            n = n + g
+            if n >= DATCAP {
+                weiter = false
+            }
+        }
+    }
+    io.close(fd)
+    return n
+}
+
+// Ein Bild laden. Gibt false und setzt `art` auf 0, wenn es nicht geht;
+// der Grund steht in `bild.fehlertext` oder `jpeg.fehlertext`.
+fn laden(pfadp: u64) -> bool {
+    art = 0
+    bw = 0
+    bh = 0
+    let n: u64 = datei_lesen(pfadp)
+    if n == 0 {
+        return false
+    }
+    datn = n
+    if bild.ist_png(dat, n) {
+        art = 1
+        if !bild.png_lesen(dat, n, pix, PIXCAP) {
+            art = 0
+            return false
+        }
+        bw = bild.breite()
+        bh = bild.hoehe()
+        return true
+    }
+    if bild.ist_bmp(dat, n) {
+        art = 2
+        if !bild.bmp_lesen(dat, n, pix, PIXCAP) {
+            art = 0
+            return false
+        }
+        bw = bild.breite()
+        bh = bild.hoehe()
+        return true
+    }
+    if jpeg.ist_jpeg(dat, n) {
+        art = 3
+        if !jpeg.jpeg_lesen(dat, n, pix, PIXCAP) {
+            art = 0
+            return false
+        }
+        bw = jpeg.breite()
+        bh = jpeg.hoehe()
+        return true
+    }
+    return false
+}
+
+fn artname() -> u64 {
+    if art == 1 {
+        return (&A_PNG[(0) as usize]) as u64
+    }
+    if art == 2 {
+        return (&A_BMP[(0) as usize]) as u64
+    }
+    if art == 3 {
+        return (&A_JPG[(0) as usize]) as u64
+    }
+    return (&T_KEIN[(0) as usize]) as u64
+}
+
+fn grund() -> u64 {
+    if art == 0 {
+        if jpeg.fehler() != 0 {
+            return jpeg.fehlertext()
+        }
+        return bild.fehlertext()
+    }
+    return artname()
+}
+
+fn zahl_an(p: u64, v: u64) {
+    var z: [u8; 24] = [0 as u8; 24]
+    let n: u64 = ulib.digits(v, (&z[(0) as usize]) as u64)
+    z[(n) as usize] = 0 as u8
+    ulib.strcat(p, (&z[(0) as usize]) as u64)
+}
+
+fn kopf_bauen() {
+    let k: u64 = (&kopf[(0) as usize]) as u64
+    if nd == 0 {
+        ulib.strcpy(k, (&T_KEIN[(0) as usize]) as u64)
+        return
+    }
+    ulib.strncpy(k, nptr(akt), 60)
+    ulib.strcat(k, (&S_SP[(0) as usize]) as u64)
+    ulib.strcat(k, grund())
+    if art != 0 {
+        ulib.strcat(k, (&S_SP[(0) as usize]) as u64)
+        zahl_an(k, bw)
+        ulib.strcat(k, (&S_X[(0) as usize]) as u64)
+        zahl_an(k, bh)
+        ulib.strcat(k, (&S_SP[(0) as usize]) as u64)
+        zahl_an(k, wlib.bild_zoom(w_bild))
+        ulib.strcat(k, (&S_PROZ[(0) as usize]) as u64)
+    }
+    ulib.strcat(k, (&S_SP[(0) as usize]) as u64)
+    zahl_an(k, akt + 1)
+    ulib.strcat(k, (&S_X[(0) as usize]) as u64)
+    zahl_an(k, nd)
+}
+
+// Ein Bild in eine Miniatur ziehen: der naechste Nachbar, in ein
+// Quadrat von MINIW, mit Rand.
+fn mini_machen(slot: u64) {
+    let ziel: u64 = mini + slot * MINIW * MINIW * 4
+    var i: u64 = 0
+    while i < MINIW * MINIW {
+        __mmio_write32((ziel + i * 4) as *mut u32, 0 as u32)
+        i = i + 1
+    }
+    if bw == 0 || bh == 0 {
+        return
+    }
+    var f: u64 = bw
+    if bh > f {
+        f = bh
+    }
+    var y: u64 = 0
+    while y < MINIW {
+        var x: u64 = 0
+        while x < MINIW {
+            let sx: u64 = x * f / MINIW
+            let sy: u64 = y * f / MINIW
+            if sx < bw && sy < bh {
+                let c: u64 = (__mmio_read32((pix + (sy * bw + sx) * 4)
+                    as *mut u32)) as u64
+                __mmio_write32((ziel + (y * MINIW + x) * 4) as *mut u32,
+                    c as u32)
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+fn zeigen() {
+    wlib.bild_setzen(w_bild, pix, bw, bh)
+    if art == 0 {
+        wlib.bild_setzen(w_bild, 0, 0, 0)
+    }
+    wlib.bild_anpassen(w_bild)
+    wlib.set_value(w_zoom, wlib.bild_zoom(w_bild))
+    kopf_bauen()
+    wlib.set_text(w_kopf, (&kopf[(0) as usize]) as u64)
+}
+
+fn oeffnen(i: u64) {
+    if nd == 0 {
+        return
+    }
+    akt = i % nd
+    let _r: bool = laden(voll(akt))
+    zeigen()
+}
+
+// Die Miniaturen bauen: jedes Bild einmal laden, verkleinern, wegheben.
+// Danach steht im grossen Puffer das zuletzt geladene -- also wird das
+// aktuelle zum Schluss noch einmal geholt.
+fn mini_bauen() {
+    var i: u64 = 0
+    while i < MININ {
+        mini_da[(i) as usize] = 0
+        if i < nd {
+            if laden(voll(i)) {
+                mini_machen(i)
+                mini_da[(i) as usize] = 1
+            }
+        }
+        wlib.bild_setzen(w_mid[(i) as usize],
+            mini + i * MINIW * MINIW * 4, MINIW, MINIW)
+        if mini_da[(i) as usize] == 0 {
+            wlib.bild_setzen(w_mid[(i) as usize], 0, 0, 0)
+        }
+        wlib.bild_set_zoom(w_mid[(i) as usize], 100)
+        i = i + 1
+    }
+    let _r: bool = laden(voll(akt))
+    zeigen()
+}
+
+fn anordnen(bwin: u64, bhin: u64) {
+    let rand: u64 = wlib.inset()
+    let luft: u64 = wlib.inset() / 2
+    let innen: u64 = bwin - rand * 2
+    let y: u64 = wlib.rect_y(w_kopf) + wlib.rect_h(w_kopf) + luft
+    let leiste_h: u64 = wlib.ctrl_small() + luft
+    let flaeche: u64 = bhin - y - leiste_h - rand
+    wlib.setz_groesse(w_bild, innen, flaeche)
+    if modus == 0 {
+        wlib.box_at(c_bild, rand, y, innen, flaeche)
+        wlib.box_at(c_mini, rand, y, 0, 0)
+    } else {
+        wlib.box_at(c_mini, rand, y, innen, flaeche)
+        wlib.box_at(c_bild, rand, y, 0, 0)
+    }
+    wlib.box_at(c_leiste, rand, y + flaeche + luft, innen,
+        wlib.ctrl_small())
+    wlib.show(w_bild, modus == 0)
+    var i: u64 = 0
+    while i < MININ {
+        wlib.show(w_mid[(i) as usize], modus == 1)
+        i = i + 1
+    }
+    wlib.neu_setzen()
+}
+
+fn u_gui(pfadp: u64) -> u64 {
+    var s_bad: [u8; 22] = "viewer: keine Flaeche\0"
+    var s_mem: [u8; 22] = "viewer: kein Speicher\0"
+    var s_go: [u8; 14] = "viewer: ready\0"
+    var s_geom: [u8; 16] = "viewer: geom w=\0"
+    var s_h: [u8; 4] = " h=\0"
+    var s_bild: [u8; 14] = "viewer: bild \0"
+    if !wlib.begin(false, false) {
+        say((&s_bad[(0) as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    pix = karte(PIXCAP)
+    dat = karte(DATCAP)
+    mini = karte(MININ * MINIW * MINIW * 4)
+    if pix == 0 || dat == 0 || mini == 0 {
+        say((&s_mem[(0) as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    ordner_lesen(pfadp)
+    let bwin: u64 = 720
+    let bhin: u64 = 560
+    let w: u64 = wlib.window(60, 50, bwin, bhin,
+        (&T_TITEL[(0) as usize]) as u64)
+    if w >= wlib.MAXWN {
+        say((&s_bad[(0) as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    let _a: u64 = wlib.window_app(w, (&T_APP[(0) as usize]) as u64)
+    let rand: u64 = wlib.inset()
+    let luft: u64 = wlib.inset() / 2
+    let innen: u64 = bwin - rand * 2
+
+    wlib.box_v(w, 0, 0, bwin, bhin, rand, luft)
+    ulib.strcpy((&kopf[(0) as usize]) as u64, (&T_KEIN[(0) as usize]) as u64)
+    w_kopf = wlib.label((&kopf[(0) as usize]) as u64)
+    wlib.box_end()
+
+    c_bild = wlib.box_v(w, rand, 0, innen, 0, 0, 0)
+    wlib.size(innen, 380)
+    w_bild = wlib.bild(0, 0, 0)
+    wlib.box_end()
+
+    c_mini = wlib.box_grid(w, rand, 0, innen, 0, 0, luft, 6)
+    var i: u64 = 0
+    while i < MININ {
+        wlib.size(MINIW + 4, MINIW + 4)
+        w_mid[(i) as usize] = wlib.bild(0, 0, 0)
+        i = i + 1
+    }
+    wlib.box_end()
+
+    c_leiste = wlib.box_h(w, rand, 0, innen, wlib.ctrl_small(), 0, luft)
+    wlib.size(40, wlib.ctrl_small())
+    w_zur = wlib.button((&T_ZUR[(0) as usize]) as u64)
+    wlib.size(40, wlib.ctrl_small())
+    w_vor = wlib.button((&T_VOR[(0) as usize]) as u64)
+    wlib.size(100, wlib.ctrl_small())
+    w_fit = wlib.button((&T_FIT[(0) as usize]) as u64)
+    wlib.size(60, wlib.ctrl_small())
+    w_eins = wlib.button((&T_EINS[(0) as usize]) as u64)
+    wlib.size(90, wlib.ctrl_small())
+    w_dreh = wlib.button((&T_DREH[(0) as usize]) as u64)
+    wlib.size(120, wlib.ctrl_small())
+    w_mini = wlib.button((&T_MINI[(0) as usize]) as u64)
+    wlib.size(160, wlib.ctrl_small())
+    w_zoom = wlib.slider(10, 800, 100)
+    wlib.box_end()
+
+    oeffnen(akt)
+    anordnen(bwin, bhin)
+    say((&s_geom[(0) as usize]) as u64)
+    ulib.sayn(bwin)
+    say((&s_h[(0) as usize]) as u64)
+    ulib.sayn(bhin)
+    ulib.nl()
+    say((&s_bild[(0) as usize]) as u64)
+    say((&kopf[(0) as usize]) as u64)
+    ulib.nl()
+    wlib.draw_all()
+    say((&s_go[(0) as usize]) as u64)
+    ulib.nl()
+
+    var runden: u64 = 0
+    while wlib.alive() && runden < 40000000 {
+        runden = runden + 1
+        let id: u64 = wlib.step()
+        if id < wlib.MAXWD {
+            let kind: u64 = wlib.fired_kind()
+            if kind == wlib.K_SLIDER {
+                if id == w_zoom {
+                    wlib.bild_set_zoom(w_bild, wlib.value(w_zoom))
+                    kopf_bauen()
+                    wlib.set_text(w_kopf, (&kopf[(0) as usize]) as u64)
+                }
+            } else if kind == wlib.K_BILD {
+                var k: u64 = 0
+                while k < MININ {
+                    if id == w_mid[(k) as usize] && k < nd {
+                        modus = 0
+                        oeffnen(k)
+                        anordnen(bwin, bhin)
+                    }
+                    k = k + 1
+                }
+            } else if kind == wlib.K_BUTTON {
+                if id == w_vor {
+                    oeffnen(akt + 1)
+                } else if id == w_zur {
+                    if akt == 0 {
+                        oeffnen(nd - 1)
+                    } else {
+                        oeffnen(akt - 1)
+                    }
+                } else if id == w_fit {
+                    wlib.bild_anpassen(w_bild)
+                    wlib.set_value(w_zoom, wlib.bild_zoom(w_bild))
+                    kopf_bauen()
+                    wlib.set_text(w_kopf, (&kopf[(0) as usize]) as u64)
+                } else if id == w_eins {
+                    wlib.bild_set_zoom(w_bild, 100)
+                    wlib.set_value(w_zoom, 100)
+                    kopf_bauen()
+                    wlib.set_text(w_kopf, (&kopf[(0) as usize]) as u64)
+                } else if id == w_dreh {
+                    wlib.bild_drehen(w_bild, 1)
+                    wlib.bild_anpassen(w_bild)
+                    wlib.set_value(w_zoom, wlib.bild_zoom(w_bild))
+                } else if id == w_mini {
+                    if modus == 0 {
+                        modus = 1
+                        wlib.set_text(w_mini, (&T_EINZ[(0) as usize]) as u64)
+                        mini_bauen()
+                    } else {
+                        modus = 0
+                        wlib.set_text(w_mini, (&T_MINI[(0) as usize]) as u64)
+                    }
+                    anordnen(bwin, bhin)
+                }
+            }
+        }
+    }
+    return 0
+}
+
+// -------------------------------------------------------- die Konsole
+
+static mut hexz: [u8; 17] = "0123456789abcdef\0"
+
+fn hex6(v: u64) {
+    var t: [u8; 8] = [0 as u8; 8]
+    var k: u64 = 6
+    var x: u64 = v
+    while k > 0 {
+        k = k - 1
+        __mmio_write8(((&t[(0) as usize]) as u64 + k) as *mut u8,
+            *(((&hexz[(0) as usize]) as u64 + (x & 15)) as *mut u8))
+        x = x >> 4
+    }
+    __mmio_write8(((&t[(0) as usize]) as u64 + 6) as *mut u8, 0 as u8)
+    say((&t[(0) as usize]) as u64)
+}
+
+fn punkt_sagen(x: u64, y: u64) {
+    var s_p: [u8; 2] = " \0"
+    say((&s_p[(0) as usize]) as u64)
+    ulib.sayn(x)
+    var s_k: [u8; 2] = ",\0"
+    say((&s_k[(0) as usize]) as u64)
+    ulib.sayn(y)
+    var s_g: [u8; 2] = "=\0"
+    say((&s_g[(0) as usize]) as u64)
+    let c: u64 = (__mmio_read32((pix + (y * bw + x) * 4) as *mut u32))
+        as u64
+    hex6(c & 0xFFFFFF)
+}
+
+fn u_info(pfadp: u64) -> u64 {
+    var s_art: [u8; 13] = "viewer: art=\0"
+    var s_w: [u8; 4] = " w=\0"
+    var s_h: [u8; 4] = " h=\0"
+    var s_sum: [u8; 15] = "viewer: summe \0"
+    var s_px: [u8; 11] = "viewer: px\0"
+    var s_no: [u8; 21] = "viewer: geht nicht: \0"
+    var s_mem: [u8; 22] = "viewer: kein Speicher\0"
+    pix = karte(PIXCAP)
+    dat = karte(DATCAP)
+    if pix == 0 || dat == 0 {
+        say((&s_mem[(0) as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    var s_datei: [u8; 15] = "viewer: datei \0"
+    say((&s_datei[(0) as usize]) as u64)
+    say(ulib.base_name(pfadp))
+    ulib.nl()
+    if !laden(pfadp) {
+        say((&s_no[(0) as usize]) as u64)
+        say(grund())
+        ulib.nl()
+        return 1
+    }
+    say((&s_art[(0) as usize]) as u64)
+    say(artname())
+    say((&s_w[(0) as usize]) as u64)
+    ulib.sayn(bw)
+    say((&s_h[(0) as usize]) as u64)
+    ulib.sayn(bh)
+    ulib.nl()
+    // Die Pruefsumme: die Summe aller drei Farbkanaele, jeder fuer
+    // sich. Sie faellt bei EINEM falschen Bildpunkt auf und laesst sich
+    // auf dem Wirt in drei Zeilen Python nachrechnen.
+    var sr: u64 = 0
+    var sg: u64 = 0
+    var sb: u64 = 0
+    var i: u64 = 0
+    while i < bw * bh {
+        let c: u64 = (__mmio_read32((pix + i * 4) as *mut u32)) as u64
+        sr = sr + ((c >> 16) & 255)
+        sg = sg + ((c >> 8) & 255)
+        sb = sb + (c & 255)
+        i = i + 1
+    }
+    say((&s_sum[(0) as usize]) as u64)
+    ulib.sayn(sr)
+    say((&s_w[(0) as usize]) as u64)
+    ulib.sayn(sg)
+    say((&s_h[(0) as usize]) as u64)
+    ulib.sayn(sb)
+    ulib.nl()
+    say((&s_px[(0) as usize]) as u64)
+    punkt_sagen(0, 0)
+    punkt_sagen(bw - 1, 0)
+    punkt_sagen(0, bh - 1)
+    punkt_sagen(bw - 1, bh - 1)
+    punkt_sagen(bw / 2, bh / 2)
+    ulib.nl()
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_use: [u8; 28] = "viewer: viewer [-i] <datei>\0"
+    var s_i: [u8; 3] = "-i\0"
+    let argc: u64 = ulib.arg_count(args)
+    if argc < 2 {
+        ulib.esay_line((&s_use[(0) as usize]) as u64, 0)
+        return 2
+    }
+    if ulib.streq(ulib.arg_at(args, 1), (&s_i[(0) as usize]) as u64) {
+        if argc < 3 {
+            ulib.esay_line((&s_use[(0) as usize]) as u64, 0)
+            return 2
+        }
+        return u_info(ulib.arg_at(args, 2))
+    }
+    return u_gui(ulib.arg_at(args, 1))
+}

@@ -1,0 +1,640 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/jpeg.fi -- Runde ALLTAG: JPEG, DIE GRUNDFORM.
+//
+// Ein Bildbetrachter, der kein JPEG aufmachen kann, ist kein
+// Bildbetrachter -- jedes Foto auf der Welt ist eines. Es gab keinen in
+// diesem Baum (gesucht nach `jpeg`, `jfif`, `SOF0`: nichts), also steht
+// er hier.
+//
+// GRUNDFORM (baseline, SOF0/SOF1), und das ist eine Entscheidung und
+// kein Versehen: die fortschreitende Form (SOF2, "progressive") ist ein
+// zweiter, groesserer Decoder mit mehreren Durchgaengen ueber
+// Teilkoeffizienten. Er wird ERKANNT und ABGELEHNT, mit einem Satz, der
+// sagt, was los ist -- nicht halb dekodiert.
+//
+// WAS ES KANN: SOF0/SOF1, Huffman, ein bis drei Farbauszuege (Grau und
+// YCbCr), Unterabtastung 1x1, 2x1, 1x2 und 2x2 (also 4:4:4, 4:2:2,
+// 4:2:0), Neustartabstaende (DRI/RSTn), mehrere DQT/DHT in einem Bild.
+// WAS ES NICHT KANN: SOF2 (fortschreitend), arithmetische Kodierung,
+// vier Auszuege (CMYK), Abtastfaktoren ueber 2.
+//
+// DIE UMKEHRTRANSFORMATION rechnet in f64 und nicht in Ganzzahlen. Der
+// Grund ist Ehrlichkeit: eine Ganzzahl-IDCT ist schneller und WEICHT AB
+// -- dann muesste jeder Vergleich mit einem fremden Decoder eine
+// Toleranz mitbringen, und eine Toleranz verdeckt Fehler. So ist der
+// Vergleich mit Pythons Pillow eine Sache von einem Bildpunkt Abstand
+// und nicht von "sieht aehnlich aus".
+//
+// DER SPEICHER: keine Ebenen. Es wird MCU fuer MCU dekodiert und jede
+// MCU sofort in den Ausgabepuffer umgerechnet -- ein Prozess in diesem
+// System hat 6 MiB, und drei Ebenen eines grossen Bildes waeren mehr.
+
+profile kernel
+
+import ulib
+import std.math
+
+export { jpeg_lesen, breite, hoehe, fehler, fehlertext, ist_jpeg }
+
+const E_OK: u64 = 0
+const E_FORM: u64 = 1
+const E_PROG: u64 = 2
+const E_ART: u64 = 3
+const E_GROSS: u64 = 4
+const E_DATEN: u64 = 5
+
+static mut j_w: u64 = 0
+static mut j_h: u64 = 0
+static mut j_err: u64 = 0
+
+static mut t_form: [u8; 20] = "kein gültiges JPEG\0"
+static mut t_prog: [u8; 50] = "fortschreitendes JPEG (SOF2) -- nur die Grundform\0"
+static mut t_art: [u8; 35] = "diese JPEG-Spielart kann ich nicht\0"
+static mut t_gross: [u8; 40] = "das Bild ist zu groß für den Speicher\0"
+static mut t_daten: [u8; 25] = "der Datenstrom bricht ab\0"
+static mut t_ok: [u8; 11] = "in Ordnung\0"
+
+fn breite() -> u64 {
+    return j_w
+}
+
+fn hoehe() -> u64 {
+    return j_h
+}
+
+fn fehler() -> u64 {
+    return j_err
+}
+
+fn fehlertext() -> u64 {
+    if j_err == E_FORM {
+        return (&t_form[(0) as usize]) as u64
+    }
+    if j_err == E_PROG {
+        return (&t_prog[(0) as usize]) as u64
+    }
+    if j_err == E_ART {
+        return (&t_art[(0) as usize]) as u64
+    }
+    if j_err == E_GROSS {
+        return (&t_gross[(0) as usize]) as u64
+    }
+    if j_err == E_DATEN {
+        return (&t_daten[(0) as usize]) as u64
+    }
+    return (&t_ok[(0) as usize]) as u64
+}
+
+fn ist_jpeg(p: u64, n: u64) -> bool {
+    if n < 4 {
+        return false
+    }
+    return (*((p) as *mut u8)) as u64 == 255
+        && (*((p + 1) as *mut u8)) as u64 == 216
+}
+
+// ------------------------------------------------------------ Tabellen
+
+static mut ZIG: [u64; 64] = [
+    0, 1, 8, 16, 9, 2, 3, 10,
+    17, 24, 32, 25, 18, 11, 4, 5,
+    12, 19, 26, 33, 40, 48, 41, 34,
+    27, 20, 13, 6, 7, 14, 21, 28,
+    35, 42, 49, 56, 57, 50, 43, 36,
+    29, 22, 15, 23, 30, 37, 44, 51,
+    58, 59, 52, 45, 38, 31, 39, 46,
+    53, 60, 61, 54, 47, 55, 62, 63]
+
+static mut qt: [u64; 256] = [0; 256]
+static mut hcnt: [u64; 128] = [0; 128] // (klasse*4+id)*16 + laenge-1
+static mut hsym: [u64; 2048] = [0; 2048]
+static mut hmin: [i64; 128] = [0; 128]
+static mut hmax: [i64; 128] = [0; 128]
+static mut hval: [u64; 128] = [0; 128]
+
+static mut c_id: [u64; 4] = [0; 4]
+static mut c_h: [u64; 4] = [0; 4]
+static mut c_v: [u64; 4] = [0; 4]
+static mut c_q: [u64; 4] = [0; 4]
+static mut c_dc: [u64; 4] = [0; 4]
+static mut c_ac: [u64; 4] = [0; 4]
+static mut c_pred: [i64; 4] = [0; 4]
+static mut nc: u64 = 0
+static mut hmaxf: u64 = 1
+static mut vmaxf: u64 = 1
+static mut dri: u64 = 0
+
+static mut koef: [i64; 64] = [0; 64]
+static mut blk: [f64; 64] = [0.0; 64]
+static mut tmp8: [f64; 64] = [0.0; 64]
+static mut cost: [f64; 64] = [0.0; 64]
+static mut cos_da: bool = false
+static mut probe: [u8; 1024] = [0 as u8; 1024] // 3 Auszuege je 16x16
+
+// Bitleser
+static mut src: u64 = 0
+static mut srcn: u64 = 0
+static mut pos: u64 = 0
+static mut bbuf: u64 = 0
+static mut bcnt: u64 = 0
+static mut leer: bool = false
+
+fn ld8(p: u64, at: u64) -> u64 {
+    return (*((p + at) as *mut u8)) as u64
+}
+
+fn st8(p: u64, at: u64, v: u64) {
+    __mmio_write8((p + at) as *mut u8, (v & 255) as u8)
+}
+
+fn be16(at: u64) -> u64 {
+    return (ld8(src, at) << 8) | ld8(src, at + 1)
+}
+
+// Ein Bit aus dem Strom. 0xFF 0x00 ist ein eingeschobenes Oktett und
+// gibt 0xFF; jedes andere 0xFF ist eine Marke und beendet den Strom --
+// ab da kommen Nullen, damit ein abgeschnittenes Bild grau endet und
+// nicht in einer Endlosschleife.
+fn bit() -> u64 {
+    if bcnt == 0 {
+        if pos >= srcn {
+            leer = true
+            return 0
+        }
+        var c: u64 = ld8(src, pos)
+        pos = pos + 1
+        if c == 255 {
+            let n: u64 = ld8(src, pos)
+            if n == 0 {
+                pos = pos + 1
+            } else {
+                leer = true
+                pos = pos - 1
+                return 0
+            }
+        }
+        bbuf = c
+        bcnt = 8
+    }
+    bcnt = bcnt - 1
+    return (bbuf >> bcnt) & 1
+}
+
+fn bits(n: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        v = (v << 1) | bit()
+        i = i + 1
+    }
+    return v
+}
+
+// Der Zahlenwert einer Huffman-Groesse: die obere Haelfte ist positiv,
+// die untere negativ. Steht so in T.81, Tabelle F.1.
+fn erweitern(v: u64, n: u64) -> i64 {
+    if n == 0 {
+        return 0
+    }
+    let grenze: u64 = 1 << (n - 1)
+    if v < grenze {
+        return (v as i64) - ((1 << n) as i64) + 1
+    }
+    return v as i64
+}
+
+fn h_dekod(tab: u64) -> u64 {
+    var code: i64 = 0
+    var l: u64 = 0
+    while l < 16 {
+        code = (code << 1) | (bit() as i64)
+        let idx: u64 = tab * 16 + l
+        if hcnt[(idx) as usize] > 0 && code <= hmax[(idx) as usize] {
+            let k: u64 = hval[(idx) as usize]
+                + ((code - hmin[(idx) as usize]) as u64)
+            if k < 256 {
+                return hsym[((tab * 256 + k)) as usize]
+            }
+            return 0
+        }
+        l = l + 1
+    }
+    return 0
+}
+
+fn baum_bauen(tab: u64) {
+    var code: i64 = 0
+    var k: u64 = 0
+    var l: u64 = 0
+    while l < 16 {
+        let idx: u64 = tab * 16 + l
+        hval[(idx) as usize] = k
+        hmin[(idx) as usize] = code
+        code = code + (hcnt[(idx) as usize] as i64)
+        k = k + hcnt[(idx) as usize]
+        hmax[(idx) as usize] = code - 1
+        code = code << 1
+        l = l + 1
+    }
+}
+
+// ------------------------------------------------------- die Umkehr-DCT
+
+#[allow_fp]
+fn cos_setup() {
+    if cos_da {
+        return
+    }
+    var u: u64 = 0
+    while u < 8 {
+        var x: u64 = 0
+        while x < 8 {
+            let w: f64 = ((2 * x + 1) as f64) * (u as f64) * math.PI()
+                / 16.0
+            var c: f64 = math.cos(w)
+            if u == 0 {
+                c = c * math.sqrt(0.5)
+            }
+            cost[((u * 8 + x)) as usize] = c * 0.5
+            x = x + 1
+        }
+        u = u + 1
+    }
+    cos_da = true
+}
+
+// Getrennt in Zeilen und Spalten: 8 mal 8 mal 8 statt 8 mal 8 mal 64.
+#[allow_fp]
+fn idct(ziel: u64, zstride: u64) {
+    cos_setup()
+    var y: u64 = 0
+    while y < 8 {
+        var x: u64 = 0
+        while x < 8 {
+            var s: f64 = 0.0
+            var u: u64 = 0
+            while u < 8 {
+                let k: i64 = koef[((y * 8 + u)) as usize]
+                if k != 0 {
+                    s = s + (k as f64) * cost[((u * 8 + x)) as usize]
+                }
+                u = u + 1
+            }
+            tmp8[((y * 8 + x)) as usize] = s
+            x = x + 1
+        }
+        y = y + 1
+    }
+    var x2: u64 = 0
+    while x2 < 8 {
+        var y2: u64 = 0
+        while y2 < 8 {
+            var s2: f64 = 0.0
+            var v: u64 = 0
+            while v < 8 {
+                s2 = s2 + tmp8[((v * 8 + x2)) as usize] * cost[
+                    ((v * 8 + y2)) as usize]
+                v = v + 1
+            }
+            var p: f64 = s2 + 128.5
+            if p < 0.0 {
+                p = 0.0
+            }
+            if p > 255.0 {
+                p = 255.0
+            }
+            st8(ziel, y2 * zstride + x2, p as u64)
+            y2 = y2 + 1
+        }
+        x2 = x2 + 1
+    }
+}
+
+// Einen Block holen: DC als Unterschied zum vorigen, dann Laufweiten
+// und Werte, alles im Zickzack, dazu entquantisiert.
+fn block(c: u64, ziel: u64, zstride: u64) {
+    var i: u64 = 0
+    while i < 64 {
+        koef[(i) as usize] = 0
+        i = i + 1
+    }
+    let q: u64 = c_q[(c) as usize] * 64
+    let t: u64 = h_dekod(c_dc[(c) as usize])
+    let d: i64 = erweitern(bits(t), t)
+    c_pred[(c) as usize] = c_pred[(c) as usize] + d
+    koef[(0) as usize] = c_pred[(c) as usize] * (qt[
+        (q) as usize] as i64)
+    var k: u64 = 1
+    while k < 64 {
+        let rs: u64 = h_dekod(4 + c_ac[(c) as usize])
+        let r: u64 = rs >> 4
+        let s: u64 = rs & 15
+        if s == 0 {
+            if r == 15 {
+                k = k + 16
+            } else {
+                k = 64
+            }
+        } else {
+            k = k + r
+            if k < 64 {
+                let z: u64 = ZIG[(k) as usize]
+                koef[(z) as usize] = erweitern(bits(s), s) * (qt[
+                    ((q + k)) as usize] as i64)
+            }
+            k = k + 1
+        }
+    }
+    idct(ziel, zstride)
+}
+
+fn neustart() -> bool {
+    bcnt = 0
+    // Auf die naechste RSTn-Marke laufen.
+    var i: u64 = pos
+    while i + 1 < srcn {
+        if ld8(src, i) == 255 {
+            let m: u64 = ld8(src, i + 1)
+            if m >= 0xD0 && m <= 0xD7 {
+                pos = i + 2
+                var c: u64 = 0
+                while c < nc {
+                    c_pred[(c) as usize] = 0
+                    c = c + 1
+                }
+                leer = false
+                return true
+            }
+            if m != 0 {
+                return false
+            }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn klemm(v: i64) -> u64 {
+    if v < 0 {
+        return 0
+    }
+    if v > 255 {
+        return 255
+    }
+    return v as u64
+}
+
+// `src` ist der Dateiinhalt, `out` nimmt w*h Zahlen 0xAARRGGBB auf.
+fn jpeg_lesen(p: u64, n: u64, out: u64, outcap: u64) -> bool {
+    j_err = E_OK
+    j_w = 0
+    j_h = 0
+    nc = 0
+    dri = 0
+    src = p
+    srcn = n
+    if !ist_jpeg(p, n) {
+        j_err = E_FORM
+        return false
+    }
+    var at: u64 = 2
+    var sos: u64 = 0
+    var weiter: bool = true
+    while weiter && at + 4 <= n {
+        if ld8(src, at) != 255 {
+            at = at + 1
+        } else {
+            let m: u64 = ld8(src, at + 1)
+            if m == 0xD8 || m == 0x01 || (m >= 0xD0 && m <= 0xD7) {
+                at = at + 2
+            } else if m == 0xD9 {
+                weiter = false
+            } else {
+                let len: u64 = be16(at + 2)
+                let inh: u64 = at + 4
+                if at + 2 + len > n {
+                    j_err = E_FORM
+                    return false
+                }
+                if m == 0xC0 || m == 0xC1 {
+                    if ld8(src, inh) != 8 {
+                        j_err = E_ART
+                        return false
+                    }
+                    j_h = (ld8(src, inh + 1) << 8) | ld8(src, inh + 2)
+                    j_w = (ld8(src, inh + 3) << 8) | ld8(src, inh + 4)
+                    nc = ld8(src, inh + 5)
+                    if nc == 0 || nc > 3 {
+                        j_err = E_ART
+                        return false
+                    }
+                    if j_w == 0 || j_h == 0 || j_w > 8192 || j_h > 8192 {
+                        j_err = E_GROSS
+                        return false
+                    }
+                    if j_w * j_h * 4 > outcap {
+                        j_err = E_GROSS
+                        return false
+                    }
+                    hmaxf = 1
+                    vmaxf = 1
+                    var c: u64 = 0
+                    while c < nc {
+                        let b: u64 = inh + 6 + c * 3
+                        c_id[(c) as usize] = ld8(src, b)
+                        c_h[(c) as usize] = ld8(src, b + 1) >> 4
+                        c_v[(c) as usize] = ld8(src, b + 1) & 15
+                        c_q[(c) as usize] = ld8(src, b + 2)
+                        if c_h[(c) as usize] > 2 || c_v[(c) as usize] > 2
+                            || c_h[(c) as usize] == 0
+                            || c_v[(c) as usize] == 0 {
+                            j_err = E_ART
+                            return false
+                        }
+                        if c_h[(c) as usize] > hmaxf {
+                            hmaxf = c_h[(c) as usize]
+                        }
+                        if c_v[(c) as usize] > vmaxf {
+                            vmaxf = c_v[(c) as usize]
+                        }
+                        c = c + 1
+                    }
+                } else if m == 0xC2 {
+                    j_err = E_PROG
+                    return false
+                } else if m >= 0xC3 && m <= 0xCF && m != 0xC4 && m != 0xC8
+                    && m != 0xCC {
+                    j_err = E_ART
+                    return false
+                } else if m == 0xDB {
+                    var q: u64 = inh
+                    while q < at + 2 + len {
+                        let pq: u64 = ld8(src, q) >> 4
+                        let tq: u64 = ld8(src, q) & 15
+                        if pq != 0 || tq > 3 {
+                            j_err = E_ART
+                            return false
+                        }
+                        var i: u64 = 0
+                        while i < 64 {
+                            qt[((tq * 64 + i)) as usize] =
+                                ld8(src, q + 1 + i)
+                            i = i + 1
+                        }
+                        q = q + 65
+                    }
+                } else if m == 0xC4 {
+                    var d: u64 = inh
+                    while d + 17 <= at + 2 + len {
+                        let tc: u64 = ld8(src, d) >> 4
+                        let th: u64 = ld8(src, d) & 15
+                        if tc > 1 || th > 3 {
+                            j_err = E_ART
+                            return false
+                        }
+                        let tab: u64 = tc * 4 + th
+                        var summe: u64 = 0
+                        var l: u64 = 0
+                        while l < 16 {
+                            let cn: u64 = ld8(src, d + 1 + l)
+                            hcnt[((tab * 16 + l)) as usize] = cn
+                            summe = summe + cn
+                            l = l + 1
+                        }
+                        if summe > 256 {
+                            j_err = E_FORM
+                            return false
+                        }
+                        var s: u64 = 0
+                        while s < summe {
+                            hsym[((tab * 256 + s)) as usize] =
+                                ld8(src, d + 17 + s)
+                            s = s + 1
+                        }
+                        baum_bauen(tab)
+                        d = d + 17 + summe
+                    }
+                } else if m == 0xDD {
+                    dri = (ld8(src, inh) << 8) | ld8(src, inh + 1)
+                } else if m == 0xDA {
+                    let ns: u64 = ld8(src, inh)
+                    var k: u64 = 0
+                    while k < ns {
+                        let cs: u64 = ld8(src, inh + 1 + k * 2)
+                        let tt: u64 = ld8(src, inh + 2 + k * 2)
+                        var c2: u64 = 0
+                        while c2 < nc {
+                            if c_id[(c2) as usize] == cs {
+                                c_dc[(c2) as usize] = tt >> 4
+                                c_ac[(c2) as usize] = tt & 15
+                            }
+                            c2 = c2 + 1
+                        }
+                        k = k + 1
+                    }
+                    sos = at + 2 + len
+                    weiter = false
+                }
+                at = at + 2 + len
+            }
+        }
+    }
+    if sos == 0 || j_w == 0 {
+        if j_err == E_OK {
+            j_err = E_FORM
+        }
+        return false
+    }
+
+    // ------------------------------------------------------ der Scan
+    pos = sos
+    bbuf = 0
+    bcnt = 0
+    leer = false
+    var c3: u64 = 0
+    while c3 < nc {
+        c_pred[(c3) as usize] = 0
+        c3 = c3 + 1
+    }
+    let mcu_w: u64 = 8 * hmaxf
+    let mcu_h: u64 = 8 * vmaxf
+    let mcus_x: u64 = (j_w + mcu_w - 1) / mcu_w
+    let mcus_y: u64 = (j_h + mcu_h - 1) / mcu_h
+    var seit_rst: u64 = 0
+    var my: u64 = 0
+    while my < mcus_y {
+        var mx: u64 = 0
+        while mx < mcus_x {
+            if dri > 0 && seit_rst == dri {
+                if !neustart() {
+                    j_err = E_DATEN
+                    return false
+                }
+                seit_rst = 0
+            }
+            var c: u64 = 0
+            while c < nc {
+                let bw: u64 = 8 * c_h[(c) as usize]
+                let basis: u64 = (&probe[(0) as usize]) as u64 + c * 256
+                var by: u64 = 0
+                while by < c_v[(c) as usize] {
+                    var bx: u64 = 0
+                    while bx < c_h[(c) as usize] {
+                        block(c, basis + by * 8 * bw + bx * 8, bw)
+                        bx = bx + 1
+                    }
+                    by = by + 1
+                }
+                c = c + 1
+            }
+            // Die MCU in den Ausgabepuffer, Bildpunkt fuer Bildpunkt.
+            var py: u64 = 0
+            while py < mcu_h {
+                let zy: u64 = my * mcu_h + py
+                if zy < j_h {
+                    var px: u64 = 0
+                    while px < mcu_w {
+                        let zx: u64 = mx * mcu_w + px
+                        if zx < j_w {
+                            let yb: u64 = (&probe[(0) as usize]) as u64
+                            let ys: u64 = ld8(yb
+                                + (py * c_v[(0) as usize] / vmaxf)
+                                    * (8 * c_h[(0) as usize])
+                                + (px * c_h[(0) as usize] / hmaxf), 0)
+                            var r: u64 = ys
+                            var g: u64 = ys
+                            var b: u64 = ys
+                            if nc == 3 {
+                                let cb: i64 = (ld8(yb + 256
+                                    + (py * c_v[(1) as usize] / vmaxf)
+                                        * (8 * c_h[(1) as usize])
+                                    + (px * c_h[(1) as usize] / hmaxf), 0)
+                                    as i64) - 128
+                                let cr: i64 = (ld8(yb + 512
+                                    + (py * c_v[(2) as usize] / vmaxf)
+                                        * (8 * c_h[(2) as usize])
+                                    + (px * c_h[(2) as usize] / hmaxf), 0)
+                                    as i64) - 128
+                                let yy: i64 = ys as i64
+                                r = klemm(yy + (91881 * cr) / 65536)
+                                g = klemm(yy - (22554 * cb
+                                    + 46802 * cr) / 65536)
+                                b = klemm(yy + (116130 * cb) / 65536)
+                            }
+                            __mmio_write32((out + (zy * j_w + zx) * 4)
+                                as *mut u32,
+                                ((255 << 24) | (r << 16) | (g << 8) | b)
+                                as u32)
+                        }
+                        px = px + 1
+                    }
+                }
+                py = py + 1
+            }
+            seit_rst = seit_rst + 1
+            mx = mx + 1
+        }
+        my = my + 1
+    }
+    return true
+}
