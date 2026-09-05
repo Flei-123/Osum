@@ -36,6 +36,7 @@ SMP=${2:-4}
 QUELLE=${3:-ide}
 TMPD=${TON_TMPD:-$(mktemp -d)}
 KEEP=${TON_KEEP:-0}
+mkdir -p "$TMPD"
 [ "$KEEP" = 1 ] || trap 'rm -rf "$TMPD"' EXIT
 
 echo "== bauen =="
