@@ -310,6 +310,69 @@ Naht), `fs.fi` (`frei`, `ready`, klog), `nvme/ahci/e1000/xhci/usb.fi`
 
 ---
 
+## Was `./test.sh` gesagt hat
+
+`tools/protokoll/run.sh` selbst: **55 Zusagen, 0 Fehler**, als Abschnitt
+42 angemeldet.
+
+Der Gesamtlauf hat vier Regressionen in FREMDEN Läufern aufgedeckt, und
+alle vier waren echte Folgen dieser Runde. Sie sind behoben und einzeln
+nachgemessen:
+
+| Läufer | was war | jetzt |
+|---|---|---|
+| `tools/kernel` | `k0.o: undefined symbols` (osym_tab) und `'fs: mount unformatted=0' fehlt` | **176 / 0** |
+| `tools/pci` | dasselbe undefinierte Symbol | **98 / 0** |
+| `tools/posix` | `SYS_OSUM_KLOG: kernel 1860, libc missing` | **134 / 0** |
+| `tools/net`, `tools/hwnet`, `tools/rtl` | dasselbe undefinierte Symbol | nachgezogen |
+
+Die zwei Ursachen dahinter sind der Preis dieser Runde und stehen im
+zweiten Commit ausgeschrieben:
+
+* **Ein Dutzend Läufer bindet den Kernel mit einer eigenen `ld`-Zeile.**
+  Eine neue Objektdatei einzuführen heißt, diese Liste zu pflegen — und
+  sie ist beim nächsten Läufer wieder unvollständig. Deshalb steht der
+  Stummel `osym_tab` als **schwaches Symbol in `boot.s`**: `boot.s` ist
+  in jeder dieser Zeilen dabei, und die erzeugte Tabelle des zweiten
+  Durchgangs überschreibt es, ohne dass `ld` mit „multiple definition"
+  antwortet.
+* **Rund dreißig Läufer lesen die serielle Ausgabe Zeile für Zeile.**
+  Der Rufer schreibt `fs: mount unformatted=`, ruft `fs.mount` und
+  schreibt danach die Ziffer — eine Protokollzeile *aus* `mount` heraus
+  fällt mitten hinein. Deshalb steht die serielle Schwelle auf `warn`
+  und nicht auf `info`: aufgezeichnet wird alles ab `info`, auf die
+  Leitung geht ab `warn`, und wer beim Suchen alles sehen will, schreibt
+  `logdebug`.
+
+Ausserdem fällt seit dieser Runde die Zeile `  spur rsp=…` aus dem
+Vergleich firnc0/firnc1 heraus — und zwar **weil die Runde sie repariert
+hat**: solange `spur_sagen` den Benutzerstapel für Code hielt, fand sie
+auf beiden Stufen immer acht Zahlen und war deshalb „gleich". Mit den
+richtigen Grenzen findet Stufe 0 eine echte Rücksprungadresse und Stufe
+1 keine, weil der Code verschieden lang ist. Das ist der Inhalt eines
+fremden Stapels, kein Verhalten der Sprache; die Zeile daneben
+(`user fault: … -- process killed`) wird weiter Wort für Wort verglichen.
+
+**Nicht von dieser Runde**, auf `merge6` gegengeprüft und dort genauso:
+
+* Abschnitt 1: `vendor/firn/lib/net/stack.fi: 723eaa12… statt
+  136851a0…` — der festgenagelte Übersetzer im Arbeitsbaum weicht ab.
+* `tools/gfx`: `fb.WIN_LIST ist ''` (grep hält `kernel/fb.fi` für eine
+  Binärdatei; die Datei ist Oktett für Oktett dieselbe wie auf `merge6`)
+  und `'fb: hold' fehlt` — derselbe Kernel-Aufruf liefert auf `merge6`
+  ebenfalls kein `fb: hold`.
+* `tools/handle`: zwei ZYKLENSCHRANKEN (`lseek < 700`, `getpid < 450`)
+  wurden mit 912 und 663 gerissen. Auf diesem Wirt liefen zur selben
+  Zeit die Abnahmen zweier anderer Arbeitsbäume; die Last lag bei 13.
+  Das ist eine Messung der Maschine, nicht des Kernels.
+
+Ein vollständiger, ungestörter `./test.sh`-Lauf steht damit noch aus —
+die Platte dieses Wirts war während der Messung zu 99 % voll und drei
+Abnahmen liefen gleichzeitig. Das ist hier vermerkt und nicht
+weggelassen.
+
+---
+
 ## Offene Kanten
 
 * **`/proc/klog` passt nicht.** Eine procfs-Datei entsteht in *einer*
