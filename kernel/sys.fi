@@ -100,7 +100,8 @@ export {
     SYS_LSEEK, SYS_MMAP, SYS_MUNMAP, SYS_BRK, SYS_PIPE, SYS_YIELD,
     SYS_POLL, POLLIN, POLLPRI, POLLOUT, POLLERR, POLLHUP, POLLNVAL,
     SYS_DUP, SYS_DUP2, SYS_NANOSLEEP, SYS_GETPID, SYS_FORK, SYS_EXECVE,
-    SYS_EXIT, SYS_WAIT4, SYS_GETCWD, SYS_MKDIR, SYS_UNLINK, SYS_GETPPID,
+    SYS_EXIT, SYS_WAIT4, SYS_GETCWD, SYS_MKDIR, SYS_RMDIR, SYS_UNLINK,
+    SYS_GETPPID,
     SYS_GETDENTS64, SYS_EXIT_GROUP, SYS_OSUM_SPAWN, SYS_OSUM_EXEC,
     SYS_CHDIR, SYS_OSUM_SYSINFO, SYS_OSUM_PSTAT, SYS_OSUM_KILL,
     SYS_RT_SIGACTION, SYS_RT_SIGPROCMASK, SYS_RT_SIGRETURN, SYS_IOCTL,
@@ -274,6 +275,7 @@ const SYS_GETCWD: u64 = 79
 // answering "/".
 const SYS_CHDIR: u64 = 80
 const SYS_MKDIR: u64 = 83
+const SYS_RMDIR: u64 = 84 // RUNDE ALLTAG
 const SYS_UNLINK: u64 = 87
 const SYS_GETPPID: u64 = 110
 const SYS_GETDENTS64: u64 = 217
@@ -1659,6 +1661,9 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     }
     if number == SYS_UNLINK {
         return do_unlink(state, me, a0)
+    }
+    if number == SYS_RMDIR {
+        return do_rmdir(state, me, a0)
     }
     if number == SYS_GETCWD {
         return do_getcwd(state, me, a0, a1)
@@ -4261,6 +4266,73 @@ fn do_unlink(state: u64, me: u64, name: u64) -> u64 {
     }
     if !fs.unlink_path(state, buf) {
         return neg(errno.E_NOENT)
+    }
+    return 0
+}
+
+// ================================================== RUNDE ALLTAG: rmdir
+//
+// EIN LEERES VERZEICHNIS ENTFERNEN -- und bis zu dieser Runde konnte
+// dieses System das nicht. `/bin/rmdir` rief `unlink` auf, `do_unlink`
+// antwortet jedem Verzeichnis mit EISDIR (zu Recht, so steht es in
+// POSIX), und also blieb jeder je angelegte Ordner fuer immer stehen.
+// GEMESSEN: `mkdir /x; rmdir /x; ls /` -- und /x ist noch da.
+//
+// Aufgefallen ist es dem Papierkorb: er leert einen Ordner, den jemand
+// weggeworfen hat, und wird ihn danach nicht los.
+//
+// Also der richtige Weg statt eines aufgeweichten `unlink`: Linux'
+// Nummer 84, eine eigene Funktion, und die Unterscheidung, die POSIX
+// verlangt -- was KEIN Verzeichnis ist, bekommt ENOTDIR, was noch
+// Eintraege hat, ENOTEMPTY. `fs.unlink_path` prueft die Leere selbst
+// (mehr als `.` und `..`); es kam nur nie dorthin.
+fn do_rmdir(state: u64, me: u64, name: u64) -> u64 {
+    let buf: u64 = state + kstate.NAME_OFF
+    let len: u64 = fetch_path(state, me, name, buf, MAX_NAME)
+    if errno.is_error(len) {
+        return len
+    }
+    if !perm.walk(state, me, buf) {
+        return neg(errno.E_ACCES)
+    }
+    if vfs.ready(state) {
+        let m: u64 = vfs.mount_for(state, buf)
+        if m < vfs.MAX_MNT {
+            if m != 0 || vfs.all_mode(state) {
+                let node: u64 = vfs.node_for(state, m, buf)
+                if node == 0 {
+                    return neg(errno.E_NOENT)
+                }
+                if vfs.v_attr(state, m, node, vfsops.A_TYPE)
+                    != vfsops.N_DIR {
+                    return neg(errno.E_NOTDIR)
+                }
+                let r: u64 = vfs.v_unlink(state, m, buf)
+                if r != 0 {
+                    return neg(r)
+                }
+                return 0
+            }
+        }
+    }
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return neg(errno.E_NOSYS)
+    }
+    let ino: u64 = fs.path(state, buf)
+    if ino == 0 {
+        return neg(errno.E_NOENT)
+    }
+    if fs.inode_type(state, ino) != fs.T_DIR {
+        return neg(errno.E_NOTDIR)
+    }
+    let dir: u64 = fs.parent_ino(state, buf)
+    if dir != 0 {
+        if !perm.may(state, me, dir, perm.R_WRITE | perm.R_EXEC) {
+            return neg(errno.E_ACCES)
+        }
+    }
+    if !fs.unlink_path(state, buf) {
+        return neg(errno.E_NOTEMPTY)
     }
     return 0
 }

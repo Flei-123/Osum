@@ -63,7 +63,10 @@ uitrace=no
 clicks=""
 xscheme=""
 xfiles=""
+xdirs=""
 desk_on=yes
+moncmds=""
+kbd_on=no
 keep=no
 progs="desktop taskbar settings launcher theme explorer rechner zip sh echo ls cat mkdir rm cp diff"
 for a in "$@"; do
@@ -86,9 +89,13 @@ for a in "$@"; do
         accel=*) accel=${a#*=} ;;
         keep=*) keep=${a#*=} ;;
         desk=*) desk_on=${a#*=} ;;
+        mon=*) moncmds="$moncmds
+${a#*=}" ;;
+        kbd=*) kbd_on=${a#*=} ;;
         uitrace=*) uitrace=${a#*=} ;;
         xscheme=*) xscheme=${a#*=} ;;
         xfile=*) xfiles="$xfiles ${a#*=}" ;;
+        xdir=*) xdirs="$xdirs ${a#*=}" ;;
         click=*) clicks="$clicks ${a#*=}" ;;
         *) echo "unknown option: $a" >&2; exit 2 ;;
     esac
@@ -191,6 +198,10 @@ done
 if [ -n "$xscheme" ] && [ -f "$xscheme" ]; then
     ARGS+=("/etc/schemas/$(basename "$xscheme" .scheme)=$xscheme@0644")
 fi
+# Ordner, die es geben muss, BEVOR eine Datei hineingelegt wird.
+for d in $xdirs; do
+    ARGS+=("$d/")
+done
 # Loose files into the root, for the import test: `xfile=/name=hostpath`
 for f in $xfiles; do
     ARGS+=("${f%%=*}=${f#*=}@0644")
@@ -257,6 +268,10 @@ echo "disk $(stat -c%s "$OUT/disk.img") octets"
 ACC=()
 [ "$accel" = kvm ] && ACC=(-accel kvm)
 SOCK="$OUT/mon.sock"; rm -f "$SOCK" "$OUT/serial.txt"
+# OHNE `nokbd` nimmt der Kern die echte Tastatur -- das braucht jeder
+# Test, der eine TASTE schickt (Entf, Umschalt+Entf, Win+L).
+KBW=nokbd
+[ "$kbd_on" = yes ] && KBW=""
 if [ -n "$script" ]; then
     APPEND="osum nokbd nosched noproc nofs script=$script"
     WAITFOR='^kernel: done'
@@ -265,9 +280,9 @@ else
     # eines einzelnen Fensters ist das der Unterschied zwischen einer
     # Aufnahme und einer Aufnahme mit dem Startmenue davor.
     if [ "$desk_on" = yes ]; then
-        APPEND="gfx wm wig wigicons desk wmhold wiglong nokbd nosched noproc nofs $extra"
+        APPEND="gfx wm wig wigicons desk wmhold wiglong $KBW nosched noproc nofs $extra"
     else
-        APPEND="gfx wm wig wigicons wmhold wiglong nokbd nosched noproc nofs $extra"
+        APPEND="gfx wm wig wigicons wmhold wiglong $KBW nosched noproc nofs $extra"
     fi
     WAITFOR='^wm: hold'
 fi
@@ -291,6 +306,15 @@ if [ -n "$clicks" ]; then
     # what it costs to get it wrong.
     python3 tools/themestore/click.py $clicks > "$OUT/mon.txt" 2>"$OUT/click.err"
     python3 tools/wm/monitor.py "$SOCK" "$OUT/mon.txt" > "$OUT/click.log" 2>&1
+    sleep 2
+fi
+# RUNDE ALLTAG: BELIEBIGE MONITORBEFEHLE (`mon=...`), nach den Klicks.
+# `sendkey shift-delete` ist der einzige Weg, Umschalt+Entf zu
+# schicken, und ohne ihn waere die Zusage "Umschalt+Entf loescht
+# endgueltig" eine Behauptung.
+if [ -n "$moncmds" ]; then
+    printf '%s\n' "$moncmds" | grep -v '^$' > "$OUT/mon2.txt"
+    python3 tools/wm/monitor.py "$SOCK" "$OUT/mon2.txt" > "$OUT/mon2.log" 2>&1
     sleep 2
 fi
 if [ -z "$script" ] && [ "$shot" = yes ]; then
