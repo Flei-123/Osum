@@ -810,6 +810,70 @@ verbose: yes
     module_path: boot():/root.img
     cmdline: hwdiag hwdiagstop vecproc gfx nokbd nosched noproc nofs noring3
 
+# ================= RUNDE VIELKERN 3: DER EINTRAG FUER DAS BLECH
+#
+# Bis zur Runde BLECHKERN lief die ganze Oberflaeche auf EINEM Kern --
+# nicht aus Bequemlichkeit, sondern weil `syscall_entry` den Kernstapel
+# aus einem Wort fuer die ganze Maschine holte. Justins Foto vom 05.09.
+# (`VEK 6 #UD RIP 0x80`, Kern 2) ist genau das gewesen.
+#
+# Der Unterbau dafuer steht seit VIELKERN 1 (Kernstapel je Kern ueber
+# die GS-Basis), und seit VIELKERN 3 kommt auch der volle Schreibtisch
+# damit hoch -- die zweite Ursache war ein Inodepuffer fuer die ganze
+# Maschine (`fs.inode_get`), der nur solange hielt, wie nie zwei Kerne
+# gleichzeitig hinsahen.
+#
+# GEMESSEN IST DAS BISHER NUR IN QEMU (-smp 1, 4 und 8). DIESER EINTRAG
+# IST DIE MESSUNG AUF BLECH, und er ist deshalb ein EIGENER Eintrag und
+# keine Aenderung am Schreibtisch darueber: geht etwas schief, nimmt
+# man den anderen.
+#
+# WAS AUF DEM SCHREIBTISCH-EINTRAG ZU FOTOGRAFIEREN IST -- Tafelzeile 23,
+# unten rechts:
+#
+#     23 SICHER WA 0 KS <n> R3W 0 R3K <n> LG 0
+#
+#   R3K   auf WIE VIELEN Kernen Ring 3 wirklich gelaufen ist. Auf
+#         Justins Brett muss dort etwas GROESSER ALS 1 stehen; steht
+#         dort 1, hat kein Anwendungskern einen Prozess bekommen.
+#   R3W   Kerne, deren GS-Basis NICHT auf ihren eigenen Satz zeigt.
+#         MUSS 0 sein. Steht dort etwas anderes, hat der Riegel in
+#         `sched.darf_ring3` gegriffen und Ring 3 auf Kern 0 gehalten
+#         -- die Maschine lebt dann, aber die Runde ist nicht erfuellt.
+#   WA    Ueberlauf einer Kernstapel-Waechterseite. MUSS 0 sein.
+#
+# Und Zeile 7 (LEISTE) sagt, ob der Schreibtisch dabei wirklich malt.
+# DER SCHREIBTISCH-EINTRAG GANZ OBEN BRAUCHT DAFUER KEIN WORT MEHR:
+# seit VIELKERN 3 ist Ring 3 auf allen Kernen die VORGABE. Was hier
+# steht, sind die beiden Eintraege, mit denen sich das ueberpruefen und
+# zurueckdrehen laesst.
+#
+# DIE RUECKFALLEBENE. `r3eins` haelt Ring 3 auf Kern 0 -- Oktett fuer
+# Oktett das Verhalten der Runde BLECHKERN. Wenn der Schreibtisch mit
+# allen Kernen auf diesem Brett nicht so laeuft wie mit einem, ist das
+# der Eintrag, der es beweist: derselbe Kern, dieselbe Wurzel, ein Wort
+# Unterschied.
+/@MARKE_PRODUKT@ -- Schreibtisch, Ring 3 nur auf Kern 0 (Rueckfallebene)
+    protocol: multiboot1
+    path: boot():/osum.mb
+    module_path: boot():/root.img
+    cmdline: modfs osum r3eins gfx wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp nosched noproc nofs
+
+# Und die GEGENPROBE dazu, auf demselben Stick: `gsluege` gibt jedem
+# Anwendungskern eine FALSCHE GS-Basis. Der Riegel MUSS das sehen und
+# Ring 3 auf Kern 0 halten -- auf der Tafel steht dann `R3W` groesser
+# null und `R3K 1`, UND DIE MASCHINE LAEUFT WEITER. Das ist derselbe
+# Nachweis, den tools/vielkern/run.sh in QEMU fuehrt, nur auf Blech.
+# (`r3blind` gibt es auf dem Stick absichtlich NICHT: das ist der
+# Eintrag, der die Maschine mit Absicht umbringt, und der gehoert in
+# den Pruefstand und nicht in die Hand eines Menschen vor einem
+# echten Rechner.)
+/@MARKE_PRODUKT@ -- Gegenprobe: falsche GS-Basis, der Riegel muss halten
+    protocol: multiboot1
+    path: boot():/osum.mb
+    module_path: boot():/root.img
+    cmdline: modfs osum r3alle gsluege gfx wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+
 # RUNDE STICK: DIE KOMMANDOZEILE MIT NETZ.
 #
 # Bis hierher konnte man auf dem Stick nur ZUSEHEN: Diagnose oder

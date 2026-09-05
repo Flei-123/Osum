@@ -267,8 +267,8 @@ zahl "Ausnahmen" "$(w_exc $L)" eq 0
 grep -a '^r3: syscalls' $L | tail -1 | sed 's/^/        /'
 
 echo
-echo "== 7. GEGENPROBE zur Messung: dieselbe Platte OHNE r3alle =="
-lauf n4 4 ""
+echo "== 7. GEGENPROBE zur Messung: dieselbe Platte mit r3eins (Ring 3 nur auf Kern 0) =="
+lauf n4 4 "r3eins"
 L=$TMPD/n4.txt
 zahl "R3K muss 1 sein" "$(w_r3k $L)" eq 1
 zahl "nur EIN Kern bekommt Systemaufrufe" "$(w_scpu $L)" eq 1
