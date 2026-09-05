@@ -305,3 +305,272 @@ Unterbrechungspfad und kann sich mit sich selbst verklemmen — das ist
 eine eigene Runde. Für Justin ändert sich nichts: sein Brett hat keine
 serielle Leitung (`LSR FF`). Für den Prüfstand heißt es, dass einzelne
 Protokollzeilen ineinanderlaufen können.
+
+---
+---
+
+# Runde VIELKERN 3 — scharf geschaltet, und der Riegel wird gebrochen
+
+*05.09.2026 · Arbeitsbaum `/root/osum-vielkern`, Zweig `vielkern3`,
+abgezweigt von `hidweg` @ 1493451*
+
+Die Vorrunde endete mit einem ehrlichen Satz und einem offenen Fehler:
+
+> **Also fährt das ausgelieferte Abbild wie das der Runde BLECHKERN:
+> Ring 3 auf Kern 0.** […] `/bin/taskbar` bekommt beim Start `pid=0`,
+> zweimal von zwei Läufen — der Prozess wird gar nicht erst angelegt,
+> und die Leiste fehlt. Warum, ist nicht gefunden.
+
+Diese Runde findet es, behebt es, misst es und schaltet scharf.
+
+---
+
+## 1. Ein Fehlschlag, der nichts sagt, ist keine Messung
+
+Vor `pid=0` stand nichts: keine `elf: start`-Zeile, keine Ausnahme,
+kein Grund. Dabei legt `elf.build` seinen Grund seit jeher in
+`kstate.ELF_ERR` ab, und `sys.do_exec` liest ihn auch aus — nur der Weg
+**aus dem Kern heraus** (`kgui.desk_spawn_n`) tat es nicht.
+
+Drei Zeilen dazu, und der erste Lauf sagte, wo es sitzt:
+
+    desk: start /bin/taskbar   pid=0  kern=0
+    elf: refused, reason 1  no such file
+    desk: start /bin/launcher  pid=0  kern=0
+    elf: refused, reason 2  not a plain file
+
+`/bin/launcher` **ist** eine gewöhnliche Datei. Und weil ein Treiber,
+der stumm scheitert, aus einem Plattenfehler einen Dateisystemfehler
+macht, zählt `blk.fi` seither jeden ATA-Fehlschlag und nennt die ersten
+acht mit Block und Statusregister. **Es kam keine einzige solche
+Zeile.** Die Platte war es nicht.
+
+## 2. Die Ursache: das zweite `KSTACK_CUR`
+
+```
+fn inode_get(state, ino, field) -> u64 {
+    ofsj.read(state, inode_block_of(state, ino), buf_in(state))   // EIN Puffer
+    return get64(buf_in(state) + inode_off(state, ino) + field)   // fuer die
+}                                                                 // ganze Maschine
+```
+
+`buf_in` ist **ein** Block von 512 Oktetten in der Datenseite. Zwischen
+dem Lesen und dem Herausholen liegt nichts — solange nur **ein** Kern im
+Dateisystem ist. Genau das war bis zur Vorrunde der Fall: Ring 3 lief auf
+Kern 0, und die Arbeit des Kerns auch. Mit `r3alle` liest Kern 0 den
+Inode von A hinein, Kern 2 überschreibt ihn mit dem von B, und Kern 0
+liest die **Art** von B aus dem Feld von A. Daher `not a plain file` für
+eine gewöhnliche Datei.
+
+**Dieselbe Fehlerform wie `KSTACK_CUR`, ein Stockwerk tiefer**: ein Wort
+für die ganze Maschine, das nur hielt, weil nie zwei Kerne gleichzeitig
+hinsahen. Der Riegel dafür war die ganze Zeit da (`atomic.L_FS` über
+`fs.enter`/`leave`, **je Kern wiedereintrittsfähig**) — er lag nur nicht
+um diese Zugriffe.
+
+Unter die Sperre kommen jetzt alle Wege, die einen Block in einen
+geteilten Puffer holen: `inode_get`, `inode_set`, `inode_init`,
+`used_inodes`, `free_blocks`, `file_truncate` (`buf_ib`/`buf_i2`/
+`buf_dt`), `entry_at` (die **ganze** Aufzählung, nicht je Eintrag) und
+`symlink_path` (`OP_TMP`).
+
+**Nachgezählt statt behauptet**, und zwar an der Quelle: von den 112
+Funktionen in `fs.fi` fassen 10 Blöcke direkt an, und **jeder** ihrer
+Wege nach draußen geht durch `enter`. Das ist Abschnitt 3 von
+`tools/vielkern/run.sh` und läuft bei jeder Abnahme mit.
+
+| voller Schreibtisch, `-smp 8 r3alle einst` | vorher | nachher |
+|---|---|---|
+| `/bin/desktop` | pid≠0 | pid≠0 |
+| `/bin/taskbar` | **pid=0**, `reason 1` | pid≠0 |
+| `/bin/launcher` | **pid=0**, `reason 2` | pid≠0 |
+| `/bin/settings` | **pid=0**, `reason 2` | pid≠0 |
+| Tafelzeile 23 | — | `WA 0 R3W 0 R3K 7 LG 0` |
+
+## 3. Die Messung: welcher Prozess auf welchem Kern
+
+`R3K` allein ist eine Zahl ohne Auflösung dahinter. Jetzt steht da, wer
+wo war — alle fünf Sekunden, mit der Tafel:
+
+    r3: pid=18  kern=6  maske=0xdb  n=6  runs=67
+    r3: pid=19  kern=0  maske=0xcf  n=6  runs=48
+    r3: prozesse=4  kerne=0xdb  n=6  fremd=4  alle=1
+    r3: syscalls  c0=52 c1=26 c2=0 c3=261 c4=50 c5=0 c6=11 c7=0  summe=400  abw=0
+
+`maske` ist `TC_MASK`, ein Bit je Kern, auf dem die Aufgabe **je** lief;
+`kern` ist `TC_CPU`, der letzte.
+
+**Die letzte Zeile ist der eigentliche Beweis.** Gezählt wird in
+`syscall_entry` mit **einem** Befehl:
+
+    incq %gs:CPU_SYSCALLS
+
+— im selben `cpu`-Satz und über **dieselbe GS-Basis**, aus der eine
+Zeile darüber der Kernstapel kommt. Zählt ein Kern hier hoch, dann hat
+sein `%gs:CPU_KSTACK` funktioniert: er steht ja schon darauf. Hätte ein
+Kern eine falsche Basis, zählte er in einen fremden Satz — und `abw`
+(Summe der Zähler gegen `kstate.SYSCALLS`) wäre nicht null. Das kostet
+einen Befehl und **kein** `cpu.here` je Systemaufruf.
+
+`abw` war in **jedem** gemessenen Lauf 0.
+
+| voller Schreibtisch, vier Ring-3-Programme | Kerne mit Ring 3 | Systemaufrufe je Kern |
+|---|---|---|
+| `-smp 4 r3eins` | **1** | `c0=590 c1=0 c2=0 c3=0` |
+| `-smp 4` (Vorgabe) | **4** | `c0=328 c1=107878 c2=2594 c3=558` |
+| `-smp 8` (Vorgabe) | **5…8** | über fünf bis acht Kerne verteilt |
+
+## 4. Eine Zeile bleibt eine Zeile
+
+Der erste Lauf der neuen Messung sah so aus:
+
+    r3: pid=16  kern=2  maske=0x4  n=1  rulnsau=n1c
+
+Das ist `runs=1` und `launc…` ineinander — mehrere Kerne auf einer
+seriellen Leitung, `serial.puts` schreibt Zeichen für Zeichen. Für einen
+Menschen häßlich, für einen Prüfstand das Ende der Messung.
+
+Der Einwand aus Abschnitt 8 der Vorrunde („eine Sperre dort liegt im
+Unterbrechungspfad und kann sich mit sich selbst verklemmen") ist
+richtig — und lösbar. `serial.zeile_an`/`zeile_aus` ist **je Kern
+wiedereintrittsfähig** wie `fs.enter`: gehört die Sperre diesem Kern
+schon, wird nicht gewartet, sondern geschrieben. Ein Behandler, der
+einen schreibenden Kern unterbricht, wartet damit nie auf sich selbst.
+Und sie ist **begrenzt**: wer 20 Mio. Runden wartet, schreibt trotzdem
+(`zeile_verloren()` zählt es) — gerade die Ausgabe muß überleben, wenn
+sonst nichts mehr geht. Sie liegt **nicht** in `put`/`puts`, sondern um
+die Zeilen herum, deren Text gemessen wird.
+
+## 5. Der Riegel wird gebrochen — `tools/vielkern/run.sh`
+
+Runde BLECHKERN hat ihren Fehler nicht deshalb übersehen, weil er
+schwer zu sehen war, sondern weil **niemand ihn herbeiführen konnte**.
+Die Bedingung stand im Kommentar, die Abnahme war grün, und aufgefallen
+ist es auf Justins Brett.
+
+Zwei neue Wörter auf der Kernel-Befehlszeile machen ihn bestellbar:
+
+| Wort | was es tut |
+|---|---|
+| `gsluege` | jeder Anwendungskern bekommt die GS-Basis von **Kern 0** (`smp.ap_main`, vor `gs_melden`) — der Zustand vom 05.09. |
+| `r3blind` | `sched.darf_ring3` fragt nicht mehr nach der GS-Basis |
+
+**Mit `gsluege` allein muß der Riegel halten** — gemessen:
+
+    tafel: 23 SICHER WA 0 KS 42488 R3W 3 R3K 1 LG 0
+    keine Ausnahme, nur Kern 0 bekommt Systemaufrufe
+
+**Mit `gsluege r3blind` muß er brechen** — und er bricht mit genau der
+Signatur von Justins Foto:
+
+    absturz:  0 *** ABSTURZ *** VEK 6 #UD
+    absturz:  1 RIP 0000000000000007
+    absturz:  6 AUF 6 PID 15 ART 3 PRG taskbar BAD 0
+
+Ohne die zweite Hälfte mißt die erste nichts: daß die Maschine dort
+lebt, könnte auch Zufall sein.
+
+Dazu drei **statische** Zusagen gegen die Klasse Fehler, die still
+bleibt: die Feldabstände in `isr.s` gegen `cpu.fi`, `kstate.MAX_CPUS`
+gegen die Größe von `sched.gs_gut`, und der Nachweis an der Quelle über
+`fs.fi` aus Abschnitt 2.
+
+Der Läufer ist als **Abschnitt 40** in `test.sh` angemeldet.
+
+## 6. Scharf geschaltet
+
+`sched.ring3_alle` steht ab dieser Runde auf **1**. Die Bedingung, die
+sich die Vorrunde selbst gestellt hat („er wird erst scharf geschaltet,
+wenn der Schreibtisch darauf steht"), ist erfüllt und gemessen.
+
+**`r3eins`** holt den alten Zustand zurück — Ring 3 nur auf Kern 0,
+Oktett für Oktett das Verhalten der Runde BLECHKERN. Es wird **nach**
+`r3alle` gefragt und gewinnt, wenn jemand beides schreibt: die
+vorsichtigere Angabe schlägt die kühnere. Auf dem Stick liegt es als
+eigener Menüeintrag, dazu einer mit `gsluege` als Gegenprobe auf Blech.
+`r3blind` gibt es auf dem Stick **nicht** — das ist der Eintrag, der die
+Maschine mit Absicht umbringt, und der gehört in den Prüfstand.
+
+## 7. Ehrlich offen
+
+* **Auf echtem Blech ist das noch nicht gelaufen.** Alle Zahlen dieser
+  Runde kommen aus QEMU/KVM. Der Stick trägt die zwei Einträge dafür
+  (Schreibtisch mit der neuen Vorgabe, plus `r3eins` als
+  Rückfallebene); was zu fotografieren ist, steht in
+  `tools/usbimg/build.sh` beim Eintrag.
+* **Fairness zwischen den Kernen ist nicht gemessen.** In mehreren
+  Läufen bekamen zwei der vier Prozesse auffällig wenige Züge
+  (`runs=67 / 48 / 1 / 1`), während ohne `r3alle` alle vier auf
+  ähnliche Zahlen kommen (`136 / 116 / 92 / 89`). Ob das an der Weckung
+  über Kerngrenzen liegt oder daran, daß die betroffenen Prozesse
+  einfach auf Ereignisse warten, ist **offen**. Es ist keine
+  Korrektheitsfrage — `abw` bleibt 0, es gibt keine Ausnahme —, aber es
+  ist die nächste Runde: *die Weckung über Kerngrenzen, mit Zahlen.*
+* **Die Zahl der Systemaufrufe je Lauf schwankt um Größenordnungen**
+  (590 bis 111 358 in gleich langen Läufen), je nachdem, ob
+  `/bin/launcher` gerade seinen Namensindex durchsucht. Sie taugt als
+  Verteilungsmaß (auf wie vielen Kernen kommt etwas an) und **nicht**
+  als Durchsatzmaß. Ein Durchsatzmaß für den Schreibtisch gibt es in
+  diesem Repo noch nicht.
+* **`kstate.KSTACK_CUR` wird weiter mitgeschrieben und von niemandem
+  gelesen.** Das ist Absicht und steht so in `sched.set_kernel_stack`:
+  es bleibt als Anzeige stehen, bis eine Runde die Datenseite aufräumt.
+
+## 8. Vorgefunden, **nicht** von dieser Runde
+
+Die Abnahme dieses Zweigs hat rote Abschnitte, die schon auf `hidweg`
+rot waren. Sie stehen hier, weil ein roter Abschnitt, über den alle
+hinwegsehen, genau das ist, wovor `tools/gfx/run.sh` in seinem eigenen
+Kommentar warnt — und weil der nächste, der sie sieht, wissen soll, daß
+sie nachgemessen sind.
+
+| Abschnitt | dieser Zweig | Grundlinie | Befund |
+|---|---|---|---|
+| 1 — festgenagelter Übersetzer | rot | **rot** | `vendor/firn/.gebaut` hat zwei Felder (`<commit> <flicken>`), `test.sh` vergleicht gegen ein Feld; und `vendor/net/BLOBS` nennt für `net/stack.fi` `136851a0…`, im Baum liegt `723eaa12…`. **Beides Oktett für Oktett identisch im unberührten Basisbaum `/root/osum-blechhid`.** |
+| gfx | 46 / 30 | **rot** | zwei Ursachen, beide alt |
+| display | 126 / 19 | 145 / 0 (03.09.) | dieselbe zweite Ursache wie gfx |
+| customres | 126 / 9 | — | dieselbe |
+| k16 | 60 / 4 | 58 / 6 (03.09.) | **weniger** Fehler als vorher |
+| k17 | 157 / 1 | 154 / 4 (03.09.) | **weniger** |
+| k18 | 169 / 1 | 167 / 3 (03.09.) | **weniger** |
+| arm | 47 / 1 | 47 / 1 (03.09.) | unverändert |
+
+**Die zwei Ursachen in gfx**, beide nachgemessen:
+
+1. **`kernel/fb.fi` enthält NUL-Oktette**, `grep` hält die Datei damit
+   für binär. `tools/gfx/run.sh` liest `WIN_LIST` mit `grep -E` **ohne
+   `-a`** und bekommt eine leere Zeichenkette. Zwei statische Zusagen
+   fallen daran.
+2. **`fb: hold` wird nicht mehr ausgegeben**, obwohl `fbhold` auf der
+   Befehlszeile steht. `kgui.gfx_hold` kommt bis
+   `if !fb.want(state, fb.M_HOLD) { return }` und kehrt dort um —
+   `FB_OFF + S_MODE` trägt das Bit 32 nicht, während `M_GFX` aus
+   derselben Zeile gesetzt ist. Damit wartet jeder Läufer, der ein
+   Bildschirmfoto machen will, ins Leere, und alle folgenden Zusagen
+   fallen mit `No such file or directory: …ppm`.
+
+   **Nachgemessen mit zwei Kernen aus zwei Commits**, gleiche
+   Befehlszeile, gleiche Maschine:
+
+   | Kern | `fb: hold` |
+   |---|---|
+   | `vielkern3` (dieser Zweig) | **0** |
+   | `1493451` (VIELKERN 2, die Grundlinie) | **0** |
+
+   Es ist also **vor** dieser Runde entstanden — irgendwo zwischen dem
+   grünen Lauf vom 03.09. und `1493451`, also in BLECHKERN oder
+   VIELKERN 1/2. Behoben wird es hier nicht: das ist eine eigene Runde,
+   und sie bekommt drei Abschnitte auf einmal zurück (gfx, display,
+   customres).
+
+**Grün geblieben sind die vier Läufer, die überhaupt mit mehr als einem
+Kern starten** — und nur die konnte das Umschalten der Vorgabe treffen:
+
+    tools/guard/run.sh   58 / 0
+    tools/avx/run.sh     32 / 0
+    tools/smp/run.sh     59 / 0
+    tools/kvm/run.sh     31 / 0
+
+und der neue Läufer selbst:
+
+    tools/vielkern/run.sh   36 / 0

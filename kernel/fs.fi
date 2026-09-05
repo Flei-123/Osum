@@ -865,25 +865,60 @@ fn inode_off(state: u64, ino: u64) -> u64 {
     return ((ino - 1) % inodes_per_block(state)) * inode_bytes(state)
 }
 
+// ==================================================== RUNDE VIELKERN 3
+// DAS ZWEITE `KSTACK_CUR`: EIN PUFFER FUER DIE GANZE MASCHINE.
+//
+// `buf_in` ist EIN Block von 512 Oktetten in der Datenseite, und diese
+// beiden Funktionen lesen einen Inodeblock hinein und holen sich das
+// Feld gleich danach wieder heraus. Zwischen dem Lesen und dem Holen
+// liegt nichts -- solange nur EIN Kern im Dateisystem ist. Ab dieser
+// Runde sind es alle: `inode_get` von Kern 0 liest den Block der Datei
+// A hinein, Kern 2 ueberschreibt ihn mit dem Block der Datei B, und
+// Kern 0 liest dann die ART von B aus dem Feld von A.
+//
+// GEMESSEN, `-smp 8 r3alle einst`, voller Schreibtisch:
+//
+//     desk: start /bin/taskbar  pid=0
+//     elf: refused, reason 1  no such file
+//     desk: start /bin/launcher pid=0
+//     elf: refused, reason 2  not a plain file
+//
+// `/bin/launcher` IST eine gewoehnliche Datei; was `elf.aufloesen` dort
+// gesehen hat, war der Inode eines Verzeichnisses aus dem Lauf eines
+// anderen Kerns. Der Lader war nie schuld -- er hat getreulich gemeldet,
+// was in dem Puffer stand.
+//
+// DER RIEGEL IST DERSELBE WIE UEBERALL SONST IM DATEISYSTEM: `enter` /
+// `leave`, also `atomic.L_FS`. Er ist JE KERN WIEDEREINTRITTSFAEHIG
+// (siehe `enter`), diese Funktionen werden also aus den schon
+// gesperrten Wegen heraus weiter kostenlos gerufen -- was sie kosten,
+// ist eine Sperrnahme gegen einen Blockzugriff, und der ist um
+// Groessenordnungen teurer.
 fn inode_get(state: u64, ino: u64, field: u64) -> u64 {
     if ino == 0 || ino > inode_count(state) {
         return 0
     }
-    if !ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
-        return 0
+    let flags: u64 = enter(state)
+    var v: u64 = 0
+    if ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
+        v = get64(buf_in(state) + inode_off(state, ino) + field)
     }
-    return get64(buf_in(state) + inode_off(state, ino) + field)
+    leave(state, flags)
+    return v
 }
 
 fn inode_set(state: u64, ino: u64, field: u64, v: u64) -> bool {
     if ino == 0 || ino > inode_count(state) {
         return false
     }
-    if !ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
-        return false
+    let flags: u64 = enter(state)
+    var ok: bool = false
+    if ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
+        put64(buf_in(state) + inode_off(state, ino) + field, v)
+        ok = ofsj.write(state, inode_block_of(state, ino), buf_in(state))
     }
-    put64(buf_in(state) + inode_off(state, ino) + field, v)
-    return ofsj.write(state, inode_block_of(state, ino), buf_in(state))
+    leave(state, flags)
+    return ok
 }
 
 fn inode_type(state: u64, ino: u64) -> u64 {
@@ -897,7 +932,9 @@ fn inode_size(state: u64, ino: u64) -> u64 {
 // A whole inode at once: cheaper than eighteen single writes, and it is
 // the only way a new inode gets a clean state.
 fn inode_init(state: u64, ino: u64, kind: u64) -> bool {
+    let flags: u64 = enter(state)
     if !ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
+        leave(state, flags)
         return false
     }
     let at: u64 = buf_in(state) + inode_off(state, ino)
@@ -915,7 +952,10 @@ fn inode_init(state: u64, ino: u64, kind: u64) -> bool {
         put64(at + I_MTIME, nun)
         put64(at + I_ATIME, nun)
     }
-    return ofsj.write(state, inode_block_of(state, ino), buf_in(state))
+    let ok: bool = ofsj.write(state, inode_block_of(state, ino),
+        buf_in(state))
+    leave(state, flags)
+    return ok
 }
 
 fn inode_alloc(state: u64, kind: u64) -> u64 {
@@ -937,6 +977,7 @@ fn inode_alloc(state: u64, kind: u64) -> u64 {
 // war der Unterschied nicht zu merken; mit 4096 sind es 4096 Leseaufrufe
 // gegen 1024 fuer dieselbe Antwort, und `df` ruft das.
 fn used_inodes(state: u64) -> u64 {
+    let flags: u64 = enter(state)
     let letzte: u64 = inode_count(state)
     var n: u64 = 0
     var b: u64 = 0
@@ -954,6 +995,7 @@ fn used_inodes(state: u64) -> u64 {
         }
         b = b + 1
     }
+    leave(state, flags)
     return n
 }
 
@@ -1072,6 +1114,7 @@ fn block_free(state: u64, b: u64) {
 // die beiden Faelle, die auf einer echten Platte fast alles ausmachen,
 // und beide kosten hier eine Abfrage statt acht.
 fn free_blocks(state: u64) -> u64 {
+    let flags: u64 = enter(state)
     let last: u64 = total_blocks(state)
     var lim: u64 = max_blocks(state)
     if last < lim {
@@ -1082,6 +1125,7 @@ fn free_blocks(state: u64) -> u64 {
     while b < lim {
         let kb: u64 = bm_block_of(state, b)
         if !ofsj.read(state, kb, buf_bm(state)) {
+            leave(state, flags)
             return n
         }
         var ende: u64 = (b / BITS_PER_BLOCK + 1) * BITS_PER_BLOCK
@@ -1113,6 +1157,7 @@ fn free_blocks(state: u64) -> u64 {
             }
         }
     }
+    leave(state, flags)
     return n
 }
 
@@ -1316,6 +1361,11 @@ fn stufe(state: u64, block: u64, k: u64, grow: bool) -> u64 {
 
 // Every block of a file back to the bitmap.
 fn file_truncate(state: u64, ino: u64) {
+    // RUNDE VIELKERN 3: `buf_ib`, `buf_i2` und `buf_dt` sind Puffer der
+    // ganzen Maschine, und diese Funktion laeuft ueber alle drei. Sie
+    // gehoert damit unter dieselbe Sperre wie alles andere, was Bloecke
+    // in diese Puffer holt.
+    let vk_flags: u64 = enter(state)
     var i: u64 = 0
     let dn: u64 = directs(state)
     while i < dn {
@@ -1396,6 +1446,7 @@ fn file_truncate(state: u64, ino: u64) {
     // Datei, die abgeschnitten wird, ohne dass der Index es erfaehrt,
     // waere in `du` fuer immer so gross wie vorher.
     size_write(state, ino, 0, false)
+    leave(state, vk_flags)
 }
 
 // Wie `free_pointers`, nur durch `buf_dt` statt durch `buf_i2` -- damit
@@ -1675,20 +1726,30 @@ fn slot_count(state: u64, dir: u64) -> u64 {
 }
 
 fn entry_at(state: u64, dir: u64, index: u64, out: u64) -> u64 {
+    // RUNDE VIELKERN 3: unter der Sperre, und zwar der GANZE Durchlauf.
+    // Ohne sie zaehlt dieser Kern die Eintraege eines Verzeichnisses
+    // durch, waehrend ein anderer eines anlegt oder loescht -- und der
+    // Aufrufer bekommt einen Eintrag, den es zweimal oder gar nicht
+    // gibt. `readdir` ueber ein lebendes Verzeichnis ist genau der Weg,
+    // auf dem der Dateimanager laeuft.
+    let flags: u64 = enter(state)
     let n: u64 = dir_entries(state, dir)
     var i: u64 = 0
     var seen: u64 = 0
+    var got: u64 = 0
     while i < n {
         let ino: u64 = entry_read(state, dir, i, out)
         if ino != 0 {
             if seen == index {
-                return ino
+                got = ino
+                i = n
             }
             seen = seen + 1
         }
         i = i + 1
     }
-    return 0
+    leave(state, flags)
+    return got
 }
 
 fn dir_add(state: u64, dir: u64, name: u64, ino: u64) -> bool {
@@ -2119,16 +2180,20 @@ fn symlink_path(state: u64, ziel: u64, wo: u64) -> u64 {
     // Das Ziel ZUERST in einen eigenen Puffer -- `create_path` benutzt
     // OP_PATH, OP_WORK, OP_BUILD und OP_NAME, und der Aufrufer kann
     // sein Ziel in einem davon liegen haben.
+    // RUNDE VIELKERN 3: OP_TMP gehoert der ganzen Maschine, also unter
+    // die Sperre -- sonst legt ein zweiter Kern sein Ziel dort ab,
+    // waehrend dieser seines noch schreibt.
+    let flags: u64 = enter(state)
     let t: u64 = state + kstate.OFS3_OFF + kstate.OP_TMP
     strcopy(ziel, t, PATHBUF)
-    let ino: u64 = create_path(state, wo, T_LINK)
-    if ino == 0 {
-        return 0
+    var ino: u64 = create_path(state, wo, T_LINK)
+    if ino != 0 {
+        if write_at(state, ino, 0, t, n) != n {
+            unlink_path(state, wo)
+            ino = 0
+        }
     }
-    if write_at(state, ino, 0, t, n) != n {
-        unlink_path(state, wo)
-        return 0
-    }
+    leave(state, flags)
     return ino
 }
 
