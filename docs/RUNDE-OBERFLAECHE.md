@@ -382,21 +382,36 @@ gehört in eine eigene Runde. Alle Aufnahmen hier laufen deshalb auf TCG.
 | Läufer | unverändert (`/root/osum-blechhid`) | diese Runde |
 |---|---|---|
 | `tools/themestore/run.sh` | 81 grün, 0 rot | **81 grün, 0 rot** |
-| `tools/k15/run.sh` | 1 rot (Zwischenablage, unter Last) | siehe unten |
-| `tests/theme/run.sh` | 1 rot (`rohe Farbwerte im Zeichencode: 8`) | 1 rot, **dieselbe Zeile** |
+| `tests/theme/run.sh` | 1 rot (`rohe Farbwerte im Zeichencode: 8`) | 1 rot, **dieselbe Zeile, dieselben 8 Stellen** |
+| `tools/k15/run.sh` | 1 rot, zeitabhängig | 1 rot, zeitabhängig (andere Zusage) |
 
 `tests/theme/run.sh` ist auf beiden Seiten **identisch** rot:
 `tests/theme/rawcolour.py` findet in beiden Bäumen dieselben 8 Stellen
 (sieben in `kernel/wm.fi`, eine Bitmaske in `taskbar.fi`). Das ist ein
 Befund des Zweiges und keiner dieser Runde.
 
-`tools/k15/run.sh` ist unter paralleler Last flatterig: es speist Klicks
-und Tastendrücke über den QEMU-Monitor ein und misst, ob sie **einmal**
-ankommen. Im unveränderten Baum fiel dabei die Zwischenablage durch
-(`'' statt 'Kopiermich-ab'`), in diesem Baum der Klickzähler
-(`genau EINMAL: 0`) — zwei **verschiedene** Zusagen in zwei
-verschiedenen Abschnitten, beide zeitabhängig. Der Lauf ohne Nebenlast
-steht unter `/tmp/design/t-k15b.log`.
+`tools/k15/run.sh` speist Klicks und Tastendrücke über den QEMU-Monitor
+ein und misst, ob sie **einmal** ankommen — das ist der zeitabhängigste
+Läufer des Baums. Er hat in dieser Runde einen **echten** Fehler
+gefunden und einen, der von der Last des Wirts kommt:
+
+* **Echt, und behoben.** `FAIL und genau EINMAL: 0` bei grünem
+  `der Knopf meldet sich`. Der Klick kam an (`widgetdemo: fired id=5
+  kind=2` steht in derselben Datei), aber der Zustandsbericht mit
+  `klicks=0` stand schon davor auf der Leitung. Ursache: `pmon.init`
+  nullt die *Skalare* (0x0000..0x01FF), und das neue Wort für
+  `wighalt=` liegt bei 0x0F80 — es wurde von niemandem zurückgesetzt.
+  Ein Lauf **ohne** `wighalt=` bekam damit als Haltezeit, was zufällig
+  in `kdata` stand. Eine Zeile Behebung (erst auf null, dann lesen),
+  und die Zusage ist grün: `OK und genau EINMAL: 1`. Der Kern sagt die
+  Zahl jetzt selbst: `wm: halt sek=20`.
+* **Last.** Im unveränderten Baum fiel unter paralleler Last die
+  Zwischenablage durch (`'' statt 'Kopiermich-ab'`), in diesem Baum ein
+  Reiterwechsel (`der zweite Reiter ist aktiv: 0`) — zwei verschiedene
+  Zusagen in zwei verschiedenen Abschnitten, beide messen einen Klick
+  gegen eine Uhr. Auf einem Wirt, auf dem gleichzeitig fünf bis
+  dreißig andere QEMU-Instanzen liefen, ist das kein Urteil über den
+  Quelltext.
 
 ## 8. Der Skalierungsfaktor
 
