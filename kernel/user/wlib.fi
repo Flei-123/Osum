@@ -77,7 +77,7 @@ export {
     step, draw_all, dirty, dirty_all, alive, quit,
     menu_open, menu_at, menu_win, dlg_text, dlg_open, dlg_ask, dlg_state,
     dlg_close, dlg_button, dlg_win, dlg_label,
-    counts, blits_done, key_last,
+    counts, blits_done, key_last, key_seq,
     theme_watch, theme_now, theme_switches, theme_polls, theme_pixels,
     theme_stales, paint_all, THEME_POLL_TICKS,
     rect_x, rect_y, rect_w, rect_h, kind_of, tab_x, tab_w,
@@ -98,6 +98,7 @@ export {
     NK_MAIN, NK_MENU, NK_DLG,
     KEY_TAB, KEY_ENTER, KEY_BS, KEY_ESC, KEY_UP, KEY_DOWN, KEY_LEFT,
     KEY_RIGHT, KEY_HOME, KEY_END, KEY_PGUP, KEY_PGDN, KEY_DEL,
+    KEY_SDEL,
     MAXWD, MAXWN
 }
 
@@ -277,6 +278,11 @@ const KEY_END: u64 = 0x106
 const KEY_PGUP: u64 = 0x107
 const KEY_PGDN: u64 = 0x108
 const KEY_DEL: u64 = 0x109
+// RUNDE ALLTAG: UMSCHALT+ENTF IST EINE ANDERE TASTE. Der Dateimanager
+// legt bei Entf in den Papierkorb und loescht bei Umschalt+Entf
+// endgueltig; ohne eine eigene Nummer waere das nicht zu unterscheiden.
+// Der Kern schickt dafuer `ESC [ 3 ; 2 ~` (kernel/kbd.fi, `arrow`).
+const KEY_SDEL: u64 = 0x10A
 
 // ------------------------------------------------------- der Zustand
 
@@ -301,6 +307,12 @@ static mut s_findex: u64 = 0
 static mut s_fwin: u64 = 0
 static mut s_blits: u64 = 0
 static mut s_keylast: u64 = 0
+static mut s_keyseq: u64 = 0
+// RUNDE ALLTAG: die Zahl und der Modifikator einer Fluchtfolge
+// `ESC [ n ; m ~`. Vorher stand die Zahl im Zustand selbst
+// (`s_esc = 3 + Ziffer`) und mehr als eine Ziffer gab es nicht.
+static mut s_num: u64 = 0
+static mut s_mod: u64 = 0
 static mut s_down: u64 = 0 // gedruecktes Widget + 1
 static mut s_esc: u64 = 0 // Zustand der Fluchtfolge
 static mut s_lastclick: u64 = 0
@@ -500,6 +512,13 @@ fn blits_done() -> u64 {
 
 fn key_last() -> u64 {
     return s_keylast
+}
+
+// WIE OFT SCHON EINE TASTE KAM. Ein Programm, das auf Entf reagieren
+// will, kann `key_last` nicht vergleichen -- zweimal Entf ist zweimal
+// dieselbe Zahl. Es vergleicht diesen Zaehler.
+fn key_seq() -> u64 {
+    return s_keyseq
 }
 
 fn alive() -> bool {
@@ -3524,6 +3543,18 @@ fn decode(c: u64) -> u64 {
         if c == 14 {
             return KEY_UP
         }
+        // RUNDE ALLTAG: DIE EINGABETASTE KOMMT ALS ZEILENVORSCHUB.
+        //
+        // `KEY_ENTER` ist 13, die Tastatur dieses Systems liefert 10
+        // (kernel/kbd.fi, us-Tabelle). Damit hat in JEDEM Fenster die
+        // Eingabetaste nichts getan -- kein Knopf, kein Dialog, kein
+        // Textfeld. Gemessen an einem Dialog, der sich mit
+        // `sendkey ret` nicht schliessen liess. Hier wird aus dem
+        // einen das andere, an der einen Stelle, an der alle Tasten
+        // vorbeikommen.
+        if c == 10 {
+            return KEY_ENTER
+        }
         return c
     }
     if s_esc == 1 {
@@ -3536,7 +3567,9 @@ fn decode(c: u64) -> u64 {
     }
     if s_esc == 2 {
         if c >= 48 && c <= 57 {
-            s_esc = 3 + (c - 48)
+            s_num = c - 48
+            s_mod = 0
+            s_esc = 3
             return 0
         }
         s_esc = 0
@@ -3560,12 +3593,35 @@ fn decode(c: u64) -> u64 {
         }
         return 0
     }
-    // `ESC [ n ~`
-    let n: u64 = s_esc - 3
+    // `ESC [ n ~` und `ESC [ n ; m ~`. Der Modifikator m ist der von
+    // xterm: 2 = Umschalt, 3 = Alt, 5 = Steuerung, jeweils plus eins.
+    if s_esc == 3 {
+        if c >= 48 && c <= 57 {
+            s_num = s_num * 10 + (c - 48)
+            return 0
+        }
+        if c == 59 {
+            s_esc = 4
+            return 0
+        }
+        s_esc = 0
+        if c != 126 {
+            return 0
+        }
+        return tilde(s_num, 0)
+    }
+    if c >= 48 && c <= 57 {
+        s_mod = s_mod * 10 + (c - 48)
+        return 0
+    }
     s_esc = 0
     if c != 126 {
         return 0
     }
+    return tilde(s_num, s_mod)
+}
+
+fn tilde(n: u64, m: u64) -> u64 {
     if n == 5 {
         return KEY_PGUP
     }
@@ -3573,6 +3629,9 @@ fn decode(c: u64) -> u64 {
         return KEY_PGDN
     }
     if n == 3 {
+        if m == 2 {
+            return KEY_SDEL
+        }
         return KEY_DEL
     }
     if n == 1 {
@@ -3780,12 +3839,28 @@ fn entry_key(i: u64, k: u64) {
     dirty_wd(i)
 }
 
-fn on_key(w: u64, c: u64) {
+fn on_key(wein: u64, c: u64) {
     let k: u64 = decode(c)
     if k == 0 {
         return
     }
     s_keylast = k
+    s_keyseq = s_keyseq + 1
+    // RUNDE ALLTAG: EIN DIALOG IST MODAL, AUCH FUER DIE TASTATUR.
+    //
+    // Der Fensterserver schickt die Taste an das Fenster mit dem
+    // Fokus, und das ist nach `dlg_ask` weiterhin das Hauptfenster --
+    // der Dialog ist gerade erst entstanden und noch nicht angeklickt
+    // worden. Also landete jede Taste bei der Tabelle darunter, und
+    // ein Dialog liess sich mit der Eingabetaste nicht schliessen
+    // (gemessen mit `sendkey ret`). Solange einer offen ist, gehoert
+    // die Tastatur ihm.
+    var w: u64 = wein
+    if dl_win != 0xFFFFFFFFFFFFFFFF && ng(dl_win, N_H) != 0 {
+        w = dl_win
+    } else if mn_win != 0xFFFFFFFFFFFFFFFF && ng(mn_win, N_H) != 0 {
+        w = mn_win
+    }
     if ng(w, N_KIND) == NK_MENU {
         let zh: u64 = ng(w, N_CNT)
         if k == KEY_DOWN && ng(w, N_VAL) < zh {
@@ -3799,6 +3874,24 @@ fn on_key(w: u64, c: u64) {
         } else if k == KEY_ESC {
             ns(w, N_VAL, 0)
             fire(ng(w, N_OWNER), K_MENUBAR, 0xFFFF, w)
+        }
+        return
+    }
+    // EIN DIALOG HAT ZWEI TASTEN, und beide muessen ohne Maus gehen:
+    // Eingabe ist "ja", Flucht ist "nein". Sein Textfeld bekommt alles
+    // andere -- der Fokus liegt nach `dlg_open` darauf, nach `dlg_ask`
+    // gibt es keines.
+    if ng(w, N_KIND) == NK_DLG {
+        if k == KEY_ENTER {
+            fire(dl_ok, K_BUTTON, 0, w)
+            return
+        }
+        if k == KEY_ESC {
+            fire(dl_no, K_BUTTON, 0, w)
+            return
+        }
+        if dl_ent < MAXWD {
+            entry_key(dl_ent, k)
         }
         return
     }
