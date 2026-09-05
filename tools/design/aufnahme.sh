@@ -36,7 +36,7 @@ export FIRN_REPO=${FIRN_REPO:-/root/jarvis/projects/u_DiS4in7esMF1/firn}
 OUT=${1:?usage: aufnahme.sh <outdir> [key=value ...]}
 shift || true
 
-shape=classic
+shape=osum
 scheme=day
 mode=light
 res=1280x800
@@ -60,6 +60,8 @@ res=1280x800
 # steht in docs/RUNDE-OBERFLAECHE.md, damit sie nicht verlorengeht.
 accel=tcg
 halt=300
+extra=""
+nurbau=nein
 drehbuch=""
 progs="desktop taskbar settings launcher explorer edit sh echo ls cat theme"
 for a in "$@"; do
@@ -72,6 +74,8 @@ for a in "$@"; do
         progs=*) progs=${a#*=} ;;
         drehbuch=*) drehbuch=${a#*=} ;;
         halt=*) halt=${a#*=} ;;
+        extra=*) extra=${a#*=} ;;
+        nurbau=*) nurbau=${a#*=} ;;
         *) echo "unbekannt: $a" >&2; exit 2 ;;
     esac
 done
@@ -118,7 +122,12 @@ echo "programme $(echo $progs | wc -w)"
 
 # ------------------------------------------------------------ 2. Platte
 python3 tools/k15/tree.py "$OUT/baum" > "$OUT/baum.log" 2>&1 || exit 1
-printf '# taskbar.conf\nedge=bottom\nheight=28\nwidth=104\nautohide=0\nontop=1\nalign=left\n' \
+# KEIN `height=`.  Die Dicke der Leiste ist seit dieser Runde eine
+# MARKE (`ctrl_h` + zweimal `spacing_xs`, kernel/user/taskbar.fi
+# `def_h`); wer sie hier hineinschreibt, misst seine eigene Zahl und
+# nicht die des Formsatzes.  `width=` bleibt: das ist die Dicke einer
+# SENKRECHTEN Leiste und die haengt an der Breite der Beschriftungen.
+printf '# taskbar.conf\nedge=bottom\nwidth=104\nautohide=0\nontop=1\nalign=left\n' \
     > "$OUT/taskbar.conf"
 printf '# /etc/theme.conf\nscheme=%s\nmode=%s\naccent=\nshape=%s\nlight_start=07:00\ndark_start=19:00\n' \
     "$scheme" "$mode" "$shape" > "$OUT/theme.conf"
@@ -185,6 +194,7 @@ while read -r z; do ARGS+=("$z"); done < "$OUT/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 \
     || { echo "FEHLGESCHLAGEN: mkfs"; tail -25 "$OUT/mkfs.log"; exit 1; }
 echo "platte $(stat -c%s "$OUT/disk.img") Oktette"
+[ "$nurbau" = ja ] && exit 0
 
 # ------------------------------------------------------------ 3. starten
 if [ -z "$drehbuch" ]; then
@@ -233,7 +243,7 @@ if [ "$accel" = kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
     ACC=(-accel kvm -cpu host)
 fi
 timeout 600 qemu-system-x86_64 "${ACC[@]}" -kernel "$BUILDD/k0.mb" -m 512 \
-    -append "gfx fbres=${XRES}x${YRES} wm wig wigstart desk wmhold wighalt=$halt nokbd nosched noproc nofs" \
+    -append "gfx fbres=${XRES}x${YRES} wm desk wmhold wighalt=$halt nokbd nosched noproc nofs $extra" \
     -serial "file:$OUT/serial.txt" -display none -no-reboot \
     -device "VGA,edid=on,xres=$XRES,yres=$YRES,vgamem_mb=32" \
     -monitor "unix:$SOCK,server,nowait" \
