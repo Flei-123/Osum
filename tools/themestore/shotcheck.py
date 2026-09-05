@@ -118,11 +118,21 @@ WINRE = re.compile(
 FONTRE = re.compile(r"wlib: font ui px=(\d+) asc=(\d+) h=(\d+)")
 
 
-def parse(path):
+def parse(path, marke="settings: rect name=waa "):
     body = open(path, "rb").read().decode("latin1")
     # everything after the LAST full rectangle report is the page that
     # is on the screen now
-    cut = body.rfind("settings: rect name=waa ")
+    #
+    # RUNDE WERKZEUGE: DIE MARKE IST EIN ARGUMENT GEWORDEN.
+    # Sie stand hier als eine Zeichenkette aus /bin/settings, und damit
+    # konnte dieser Pruefer genau EIN Programm messen. Jedes andere
+    # bekam ALLE je gemalten Texte auf einmal vorgelegt -- und ein
+    # Programm mit einer Beschriftung, die sich jede Sekunde aendert
+    # (der Aufgabenverwalter zeigt die Auslastung), meldete damit
+    # dreiundzwanzig Ueberlappungen einer Zeile mit sich selbst zu
+    # frueheren Zeitpunkten. Der Standard bleibt der von Runde
+    # THEMESTORE, damit die Aufrufe dort unveraendert weiterlaufen.
+    cut = body.rfind(marke)
     tail = body[cut:] if cut >= 0 else body
     out = []
     for raw in tail.splitlines():
@@ -190,7 +200,11 @@ def main(argv):
         print(__doc__)
         return 2
     pic = Pic(argv[1])
-    texts, wins, font = parse(argv[2])
+    marke = "settings: rect name=waa "
+    for a in argv[3:]:
+        if a.startswith("--cut="):
+            marke = a[6:]
+    texts, wins, font = parse(argv[2], marke)
     ox = oy = 0
     forced = False
     ww, wh = pic.w, pic.h

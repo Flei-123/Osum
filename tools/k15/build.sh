@@ -57,7 +57,7 @@ ARGS+=(/usr/ /usr/share/ /usr/share/locale/ /usr/share/locale/en/
        /usr/share/locale/de/
        "/usr/share/locale/de/messages=locale/de/messages")
 # DIE BUENDEL: /apps/<name>.osp/{INFO,start,symbol,daten/}
-while read -r zeile; do ARGS+=("$zeile"); done < <(python3 tools/k15/bundle.py assets/apps "$OUT/buendel")
+while read -r zeile; do ARGS+=("$zeile"); done < <(python3 tools/k15/bundle.py assets/apps "$OUT/buendel" nur="$PROGS")
 while read -r pfad; do ARGS+=("$pfad"); done < "$OUT/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 || {
     echo "== mkfs.py fehlgeschlagen"; tail -20 "$OUT/mkfs.log"; exit 1; }

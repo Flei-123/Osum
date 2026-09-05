@@ -2113,6 +2113,100 @@ fn say_wins(state: u64) {
 // EIN PROGRAMM VON DER PLATTE STARTEN, mit genau einem Argument. Die
 // drei Zeilen standen in `k15_start` viermal untereinander; hier
 // stehen sie einmal.
+// ================================================== RUNDE WERKZEUGE
+// `wigapp=` UND SEINE ARGUMENTE, EINMAL ZERLEGT.
+//
+//     wigapp=/bin/taskmgr,melde,takt,300
+//
+// Warum ein Komma und kein Leerzeichen: die Kernkommandozeile IST durch
+// Leerzeichen getrennt -- `pmon.take_wigapp` holt genau EIN Wort. Ein
+// zweites Trennzeichen innerhalb dieses Wortes kostet die Schleife hier
+// unten und keine neue Regel.
+//
+// WARUM ES DAS BRAUCHT: ohne Argumente laesst sich ein Programm mit
+// Fenster nur in seiner Grundeinstellung messen. Der Aufgabenverwalter
+// soll fuer den Testlauf jeden Durchgang MELDEN und oefter messen als
+// einmal je Sekunde -- beides sind Argumente, und beides waere sonst je
+// ein neuer Schalter im Kern gewesen, den die naechste Runde wieder
+// verdoppelt. Genau diese Ueberlegung hat `wigapp=` selbst
+// hervorgebracht (Runde POWERMON, drei fest verdrahtete Namen).
+//
+// ZERLEGT WIRD AN EINER STELLE, weil es zwei Leser gibt: `k15_start`
+// (ein einzelnes Fenster im Fensterserver) und `desk_start` (dasselbe
+// Programm zusaetzlich zum Schreibtisch, damit ein Bild von der
+// Taskleiste UND der Anwendung entstehen kann).
+static mut wg_path: [u8; 64] = [0 as u8; 64]
+static mut wg_args: [u8; 128] = [0 as u8; 128]
+static mut wg_len: u64 = 0 // belegte Oktette in wg_args
+static mut wg_argc: u64 = 0
+static mut wg_da: u64 = 0 // 1 = auf der Kommandozeile stand ein wigapp=
+
+fn wigapp_zerlegen(state: u64) {
+    wg_da = 0
+    wg_len = 0
+    wg_argc = 0
+    let wa: u64 = pmon.wigapp(state)
+    if wa == 0 {
+        return
+    }
+    var slash: u64 = 0
+    var kommas: u64 = 0
+    var wargs: u64 = 0 // Stelle hinter dem ersten Komma, 0 = keines
+    var wi: u64 = 0
+    while wi < 63 && kstate.get8(wa + wi) != 0 {
+        var c: u64 = kstate.get8(wa + wi)
+        if c == 44 {
+            // Jedes Komma wird zur Null: damit steht in `wg_path` schon
+            // die Form, die `abuf` verlangt -- Zeichenkette, Null,
+            // Zeichenkette, Null.
+            c = 0
+            kommas = kommas + 1
+            if wargs == 0 {
+                wargs = wi + 1
+            }
+        }
+        wg_path[wi as usize] = c as u8
+        if c == 47 && wargs == 0 {
+            slash = wi + 1
+        }
+        wi = wi + 1
+    }
+    var wj: u64 = 0
+    while wj < 31 && wg_path[(slash + wj) as usize] != 0 as u8 {
+        wg_args[wj as usize] = wg_path[(slash + wj) as usize]
+        wj = wj + 1
+    }
+    if wj == 0 {
+        return
+    }
+    // DIE NULL GEHOERT DAZU. Jede andere Stelle, die hier ein Argument
+    // hinlegt, zaehlt sie mit (`a_nohit` ist 6 Oktette fuer fuenf
+    // Buchstaben). Ohne sie klebte das zweite Argument am ersten; es
+    // fiel bis zu dieser Runde nicht auf, weil `wigapp=` nie ein
+    // zweites hatte und `abuf` mit Nullen anfaengt.
+    wg_args[wj as usize] = 0 as u8
+    wg_len = wj + 1
+    wg_argc = 1
+    wg_da = 1
+    if wargs == 0 {
+        return
+    }
+    var wp: u64 = wargs
+    while wp < 63 && wg_path[wp as usize] != 0 as u8 && wg_len < 120 {
+        var wl: u64 = 0
+        while wp + wl < 63 && wg_path[(wp + wl) as usize] != 0 as u8
+              && wg_len < 120 {
+            wg_args[wg_len as usize] = wg_path[(wp + wl) as usize]
+            wg_len = wg_len + 1
+            wl = wl + 1
+        }
+        wg_args[wg_len as usize] = 0 as u8
+        wg_len = wg_len + 1
+        wg_argc = wg_argc + 1
+        wp = wp + wl + 1
+    }
+}
+
 fn desk_spawn(state: u64, pfad: u64, arg: u64, n: u64) -> u64 {
     return desk_spawn_n(state, pfad, arg, n, 1)
 }
@@ -2142,6 +2236,14 @@ fn desk_spawn_n(state: u64, pfad: u64, arg: u64, n: u64,
     serial.dec(pid)
     serial.puts((&s_cpu[0]) as u64)
     serial.dec(sched.hier(state))
+    // RUNDE MERGE-6: DER BLOCK DER RUNDE WERKZEUGE STEHT HIER NICHT
+    // ZWEIMAL. Sie hat denselben Fehler gefunden wie VIELKERN 3 --
+    // `pid=0` ohne Grund -- und dieselbe Abhilfe gebaut
+    // (`elf.say_reason` aus `kstate.ELF_ERR`). Genommen ist die von
+    // VIELKERN 3, elf Zeilen weiter unten: sie steht NACH `serial.nl`
+    // und `zeile_aus`, und `say_reason` schreibt eine eigene Zeile.
+    // Zweimal gerufen stuende der Grund zweimal auf der Leitung, und
+    // jeder Laeufer, der Zeilen zaehlt, zaehlte falsch.
     serial.nl()
     serial.zeile_aus(z)
     // =================================================== RUNDE VIELKERN 3
@@ -2325,6 +2427,23 @@ fn desk_start(state: u64) -> u64 {
     }
     if !kstate.mode_on(state, kstate.M_NOSTART) {
         pid = desk_spawn(state, (&p_star[0]) as u64, (&a_star[0]) as u64, 8)
+    }
+    // RUNDE WERKZEUGE: `wigapp=` GILT AUCH AUF DEM SCHREIBTISCH.
+    //
+    // Ohne den Schreibtisch startet `wigapp=` EIN Fenster ANSTELLE von
+    // allem anderen (Runde POWERMON) -- gut fuer eine Messung, aber es
+    // gibt dann keine Taskleiste, kein Startmenue und keinen zweiten
+    // Prozess, den man beenden koennte. Genau das braucht die Abnahme
+    // dieser Runde aber: der Beweis, dass der Knopf "Prozess beenden"
+    // wirklich einen Prozess beendet, ist ein Bild VORHER und eines
+    // NACHHER, und dafuer muss es ein Opfer geben.
+    //
+    // Also: hier startet dasselbe Programm ZUSAETZLICH, nach der Leiste
+    // und dem Starter. Ohne `wigapp=` aendert sich keine Zeile.
+    wigapp_zerlegen(state)
+    if wg_da != 0 {
+        pid = desk_spawn_n(state, (&wg_path[0]) as u64,
+            (&wg_args[0]) as u64, wg_len, wg_argc)
     }
     if kstate.mode_on(state, kstate.M_EINST) {
         pid = desk_spawn(state, (&p_set[0]) as u64,
@@ -2550,30 +2669,11 @@ fn k15_start(state: u64) -> u64 {
     // would need a fifth, and the one after that a sixth. The path is
     // read out of the command line, the name after the last slash
     // becomes argv[0], and nothing here has to change again.
-    var wpath: [u8; 64] = [0 as u8; 64]
-    var wname: [u8; 32] = [0 as u8; 32]
-    let wa: u64 = pmon.wigapp(state)
-    if wa != 0 {
-        var wi: u64 = 0
-        var slash: u64 = 0
-        while wi < 63 && kstate.get8(wa + wi) != 0 {
-            let c: u64 = kstate.get8(wa + wi)
-            wpath[wi as usize] = c as u8
-            if c == 47 {
-                slash = wi + 1
-            }
-            wi = wi + 1
-        }
-        var wj: u64 = 0
-        while wj < 31 && wpath[(slash + wj) as usize] != 0 as u8 {
-            wname[wj as usize] = wpath[(slash + wj) as usize]
-            wj = wj + 1
-        }
-        if wj != 0 {
-            pfad = (&wpath[0]) as u64
-            arg0 = (&wname[0]) as u64
-            n0 = wj
-        }
+    wigapp_zerlegen(state)
+    if wg_da != 0 {
+        pfad = (&wg_path[0]) as u64
+        arg0 = (&wg_args[0]) as u64
+        n0 = wg_len
     }
     var at: u64 = 0
     var k: u64 = 0
@@ -2583,6 +2683,9 @@ fn k15_start(state: u64) -> u64 {
         k = k + 1
     }
     var argc: u64 = 1
+    if wg_da != 0 {
+        argc = wg_argc
+    }
     if kstate.mode_on(state, kstate.M_WIGNOHIT) {
         k = 0
         while k < 6 {

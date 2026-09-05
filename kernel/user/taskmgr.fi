@@ -1,0 +1,1526 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/taskmgr.fi -- RUNDE WERKZEUGE: DER AUFGABENVERWALTER.
+//
+// Osum hatte `ps`, `top`, `kill`, `speicher`, `df`, `netmon` und
+// `powermon` -- sieben Programme, die alle etwas ueber die laufende
+// Maschine wissen, und alle sieben schreiben Zeilen in ein Terminal.
+// Was fehlte, ist das Fenster, das ein Mensch aufmacht, wenn etwas
+// haengt: eine Liste, in der man eine Zeile ANKLICKT, und ein Knopf,
+// der sie beendet.
+//
+// ------------------------------------------------------------------
+// DIE REGEL DIESER DATEI: KEINE ZAHL IST VON DIESEM PROGRAMM
+//
+// Dieselbe Regel wie in /bin/power und /bin/dispctl, und hier ist sie
+// wichtiger als dort, weil ein Aufgabenverwalter die Zahlen ZEIGT und
+// nicht nur meldet. Jede Zahl kommt aus demselben Systemaufruf, den
+// auch das Kommandozeilenwerkzeug daneben benutzt:
+//
+//   Prozessliste     SYS_PSTAT, ein Feld je Aufruf -- wie `/bin/ps`
+//                    und `/bin/top` seit Runde K6.
+//   Name             SYS_PMON, Art 2 -- dieselbe Quelle, aus der
+//                    `/bin/powermon` die Programmnamen nimmt. Der
+//                    Kernel setzt ihn an EINER Stelle (`elf.fi`, beim
+//                    Einsprung), also gibt es keinen zweiten Namen.
+//   Speicher         SYS_PSTAT, P_PAGES -- neu in dieser Runde, gezaehlt
+//                    aus DENSELBEN Seitentabellen, die `proc.free_space`
+//                    beim Beenden zurueckgibt.
+//   Kern             SYS_PSTAT, P_CPU -- neu, aus dem Feld, das der
+//                    Aufgabenwechsel schreibt.
+//   je Kern          SYS_CPUSTAT -- neu; `C_TICKS` gab es seit Runde K5,
+//                    `C_IDLETICKS` kam in dieser Runde dazu, weil eine
+//                    Auslastung ohne Leerlaufzaehler nicht ausrechenbar
+//                    ist.
+//   Speicher gesamt  SYS_SYSINFO, I_FRAMES_* -- wie `/bin/top`.
+//   Platte           SYS_SYSINFO, I_BLOCKS/I_BFREE/I_BSIZE -- wie
+//                    `/bin/df`.
+//   Netz             SYS_NETMON, NM_SYSTX/NM_SYSRX -- wie `/bin/netmon`.
+//   Betriebszeit     SYS_SYSINFO, I_UPTIME -- wie `/bin/top`.
+//   Beenden          SYS_KILL, genau der Aufruf aus `/bin/kill`, mit
+//                    demselben Code 137.
+//
+// WAS DIESES PROGRAMM SELBST RECHNET, sind Differenzen und Prozente:
+// die Auslastung ist (Schlaege - Leerlauf) / Schlaege zwischen ZWEI
+// Messungen, und das gehoert nach Ring 3, weil hier der Zeitpunkt
+// beider Messungen bekannt ist.
+//
+// ------------------------------------------------------------------
+// WARUM DER ANTEIL EINES PROZESSES SICH AUF DIE GANZE MASCHINE BEZIEHT
+//
+// Vier Kerne schlagen viermal in der Sekunde hundertmal; ein Prozess,
+// der einen Kern voll belegt, bekommt hundert Schlaege von vierhundert.
+// Dieses Programm zeigt 25 % und nicht 100 %, und der Grund ist die
+// Spalte darueber: die Summe der Zeilen soll die Auslastung des Kopfes
+// ergeben. `top` unter Linux zeigt die andere Zahl und muss dafuer
+// erklaeren, warum acht Prozesse zusammen 800 % haben.
+//
+// ------------------------------------------------------------------
+// DIE LEERLAUFAUFGABEN STEHEN MIT IN DER LISTE
+//
+// Genau wie in `ps`. Sie mit ihrer typischen Auslastung von 90 % zu
+// verstecken, waere die bequeme Anzeige -- und die Summe der uebrigen
+// Zeilen ergaebe dann nicht mehr die Zahl im Kopf. Wer sie sieht, sieht
+// die Maschine.
+//
+// ------------------------------------------------------------------
+// DER VERLAUFSGRAPH IST SELBST GEMALT
+//
+// Sechzig Messpunkte, zwei Kurven, gezeichnet mit `wlibc.rrect`,
+// `wlibc.px` und `wlibc.hline` in genau demselben Streifenverfahren,
+// das `wlib.flush_rect` benutzt: Streifen setzen, beschneiden, malen,
+// hinueberschieben. Es gibt keine Bibliothek dafuer und diese Runde
+// baut auch keine -- ein Graph ist eine Schleife ueber sechzig Zahlen.
+//
+// ZWEI KURVEN, DREI UNTERSCHIEDE. Farbe allein taugt nicht (dieselbe
+// Feststellung wie bei den Kacheln der Schnelleinstellungen): die
+// Prozessorkurve ist ZWEI Bildpunkte dick und durchgezogen, die
+// Speicherkurve ist einen dick und GESTRICHELT, und daneben steht in
+// Worten, welche welche ist.
+//
+// ------------------------------------------------------------------
+// DIE FARBEN KOMMEN AUS DEN ROLLEN, NIE AUS ZAHLEN
+//
+// `wlibc.theme_semantic(S_*)` und `wlibc.theme(T_*)`, kein einziger
+// Farbwert im Quelltext. Sonst waere der Dunkelmodus kaputt und die
+// Kontrastpruefung (tools/themestore/run.sh) haette recht damit.
+//
+// ------------------------------------------------------------------
+// AUFRUF
+//
+//     taskmgr                       das Fenster
+//     taskmgr takt N                Millisekunden zwischen zwei Messungen
+//     taskmgr runden N              nach N Durchlaeufen von selbst enden
+//     taskmgr melde                 jeden Durchlauf auf die serielle
+//                                   Leitung -- Kopf, Kerne, jede Zeile,
+//                                   jeder Messpunkt des Graphen
+//     taskmgr nohit                 die Gegenprobe von `wlib`: keine
+//                                   Trefferpruefung, also kein Klick
+
+profile kernel
+
+import ulib
+import wlibc
+import wlib
+import msg
+
+export { u_start }
+
+// ------------------------------------------------------------- Zahlen
+
+const SLOTS: u64 = 32 // kstate.MAX_TASKS
+const MAXCPU: u64 = 8 // kstate.MAX_CPUS
+const NCOL: u64 = 6
+const HIST: u64 = 60 // Messpunkte des Graphen
+const NAMEW: u64 = 24 // pmon.NAME_MAX
+
+const BW: u64 = 752
+const BH: u64 = 524
+const GH: u64 = 116 // Hoehe des Graphen
+
+// Die Spalten, die keinen Text tragen, der wachsen kann. Der Name
+// bekommt, was uebrig bleibt -- so passt die Tabelle auch, wenn die
+// Design-Runde die Abstaende aendert.
+const CW_PID: u64 = 62
+const CW_STATE: u64 = 104
+const CW_CPU: u64 = 82
+const CW_MEM: u64 = 112
+const CW_CORE: u64 = 62
+
+// ------------------------------------------------------------ Zustand
+
+static mut p_pid: [u64; 32] = [0 as u64; 32]
+static mut p_ppid: [u64; 32] = [0 as u64; 32]
+static mut p_state: [u64; 32] = [0 as u64; 32]
+static mut p_kind: [u64; 32] = [0 as u64; 32]
+static mut p_pages: [u64; 32] = [0 as u64; 32]
+static mut p_core: [u64; 32] = [0 as u64; 32]
+static mut p_pm: [u64; 32] = [0 as u64; 32] // Anteil in Promille
+static mut p_ticks: [u64; 32] = [0 as u64; 32]
+// Der Stand der letzten Messung -- UND die Prozessnummer dazu. Ein Platz
+// der Aufgabentafel wird wiederverwendet; ohne die zweite Zahl bekaeme
+// der Nachfolger die Schlaege seines Vorgaengers als Differenz
+// gutgeschrieben und stuende eine Sekunde lang mit 90 % da.
+static mut p_last: [u64; 32] = [0 as u64; 32]
+static mut p_lastpid: [u64; 32] = [0 as u64; 32]
+static mut p_name: [u8; 768] = [0 as u8; 768] // SLOTS * NAMEW
+static mut ord: [u64; 32] = [0 as u64; 32]
+static mut nlive: u64 = 0
+
+static mut c_ticks: [u64; 8] = [0 as u64; 8]
+static mut c_idle: [u64; 8] = [0 as u64; 8]
+static mut c_pm: [u64; 8] = [0 as u64; 8]
+static mut ncpu: u64 = 1
+
+static mut h_cpu: [u64; 60] = [0 as u64; 60]
+static mut h_mem: [u64; 60] = [0 as u64; 60]
+static mut h_n: u64 = 0
+// DIE ANGABE FUER DAS GRAPH-WIDGET. Fuenf Woerter, die die Bibliothek
+// bei jedem Anstrich frisch liest -- die Messreihe bleibt hier, wo sie
+// entsteht.
+static mut g_spec: [u64; 5] = [0 as u64; 5]
+
+static mut cpu_pm: u64 = 0
+static mut mem_pm: u64 = 0
+static mut mem_used: u64 = 0
+static mut mem_all: u64 = 0
+static mut disk_pm: u64 = 0
+static mut disk_used: u64 = 0
+static mut disk_all: u64 = 0
+static mut up_ms: u64 = 0
+static mut net_tx: u64 = 0
+static mut net_rx: u64 = 0
+static mut net_ltx: u64 = 0
+static mut net_lrx: u64 = 0
+static mut net_ok: u64 = 0
+
+static mut sort_col: u64 = 3 // die Auslastung, absteigend
+static mut sort_ab: u64 = 1
+static mut sel_pid: u64 = 0
+static mut ask_pid: u64 = 0
+static mut melde: u64 = 0
+static mut blocknr: u64 = 0
+
+static mut blob: [u8; 4096] = [0 as u8; 4096]
+static mut cols: [u64; 6] = [0 as u64; 6]
+static mut l_sys: [u8; 160] = [0 as u8; 160]
+static mut l_cores: [u8; 200] = [0 as u8; 200]
+static mut l_disk: [u8; 200] = [0 as u8; 200]
+static mut l_sel: [u8; 160] = [0 as u8; 160]
+static mut frage: [u8; 128] = [0 as u8; 128]
+
+// -------------------------------------------------- Schluessel und Worte
+//
+// KEIN DEUTSCHER TEXT IM QUELLTEXT -- Runde I18N, und
+// `tools/i18n/scan.py` rechnet es nach. Was hier steht, sind
+// SCHLUESSEL; die Woerter stehen in locale/en/messages und
+// locale/de/messages.
+
+static mut k_title: [u8; 14] = "taskmgr.title\0"
+static mut k_cols: [u8; 13] = "taskmgr.cols\0"
+static mut k_end: [u8; 12] = "taskmgr.end\0"
+static mut k_asktitle: [u8; 18] = "taskmgr.ask.title\0"
+static mut k_asktext: [u8; 17] = "taskmgr.ask.text\0"
+static mut k_cpu: [u8; 12] = "taskmgr.cpu\0"
+static mut k_mem: [u8; 12] = "taskmgr.mem\0"
+static mut k_disk: [u8; 13] = "taskmgr.disk\0"
+static mut k_net: [u8; 12] = "taskmgr.net\0"
+static mut k_up: [u8; 11] = "taskmgr.up\0"
+static mut k_cores: [u8; 14] = "taskmgr.cores\0"
+static mut k_tasks: [u8; 14] = "taskmgr.tasks\0"
+static mut k_nosel: [u8; 14] = "taskmgr.nosel\0"
+static mut k_sel: [u8; 12] = "taskmgr.sel\0"
+static mut k_s_new: [u8; 18] = "taskmgr.state.new\0"
+static mut k_s_ready: [u8; 20] = "taskmgr.state.ready\0"
+static mut k_s_run: [u8; 18] = "taskmgr.state.run\0"
+static mut k_s_sleep: [u8; 20] = "taskmgr.state.sleep\0"
+static mut k_s_wait: [u8; 19] = "taskmgr.state.wait\0"
+static mut k_s_zombie: [u8; 21] = "taskmgr.state.zombie\0"
+static mut k_s_stop: [u8; 19] = "taskmgr.state.stop\0"
+static mut k_s_poll: [u8; 19] = "taskmgr.state.poll\0"
+static mut k_k_boot: [u8; 18] = "taskmgr.kind.boot\0"
+static mut k_k_idle: [u8; 18] = "taskmgr.kind.idle\0"
+static mut k_k_worker: [u8; 20] = "taskmgr.kind.worker\0"
+static mut k_k_user: [u8; 18] = "taskmgr.kind.user\0"
+
+// WELCHEM BUENDEL DIESES FENSTER GEHOERT -- der BUENDELNAME und nicht
+// sein Pfad. Die Taskleiste haengt "/apps/" davor und ".osp/symbol"
+// dahinter (`taskbar.sym_of`); ein Pfad an dieser Stelle ergaebe
+// "/apps//apps/taskmgr.osp/start.osp/symbol", und der Knopf bliebe
+// stumm -- gemessen, der erste Lauf hatte genau das.
+static mut t_self: [u8; 8] = "taskmgr\0"
+
+// Einheiten und Trennzeichen. Keine Woerter, also kein Katalog: ein
+// Prozentzeichen ist in jeder Sprache eines, und "KiB" ist eine
+// Einheit nach IEC 80000-13 und wird nicht uebersetzt.
+static mut u_pct: [u8; 3] = " %\0"
+static mut u_kib: [u8; 5] = " KiB\0"
+static mut u_mib: [u8; 5] = " MiB\0"
+static mut u_sp: [u8; 2] = " \0"
+static mut u_sep: [u8; 4] = "   \0"
+static mut u_tab: [u8; 2] = "\t\0"
+static mut u_nl: [u8; 2] = "\n\0"
+static mut u_colon: [u8; 3] = ": \0"
+static mut u_slash: [u8; 4] = " / \0"
+static mut u_comma: [u8; 2] = ",\0"
+static mut u_dash: [u8; 3] = "--\0"
+static mut u_h: [u8; 4] = " h \0"
+static mut u_m: [u8; 4] = " m \0"
+static mut u_s: [u8; 3] = " s\0"
+static mut u_op: [u8; 3] = " (\0"
+static mut u_cl: [u8; 2] = ")\0"
+static mut u_q: [u8; 2] = "?\0"
+static mut u_ps: [u8; 3] = "/s\0"
+static mut u_arrow_up: [u8; 3] = " ^\0"
+static mut u_arrow_dn: [u8; 3] = " v\0"
+
+// Mitschnitt. Faengt mit "taskmgr: " an und geht nur auf die serielle
+// Leitung -- `tools/i18n/scan.py` laesst genau diese Form durch, und
+// ein uebersetzter Mitschnitt machte jeden Testlaeufer sprachabhaengig.
+static mut m_start: [u8; 19] = "taskmgr: start bw=\0"
+static mut m_bh: [u8; 5] = " bh=\0"
+static mut m_rect: [u8; 18] = "taskmgr: rect id=\0"
+static mut m_kind: [u8; 7] = " kind=\0"
+static mut m_x: [u8; 4] = " x=\0"
+static mut m_y: [u8; 4] = " y=\0"
+static mut m_w: [u8; 4] = " w=\0"
+static mut m_h: [u8; 4] = " h=\0"
+static mut m_block: [u8; 16] = "taskmgr: block \0"
+static mut m_blockend: [u8; 20] = "taskmgr: blockende \0"
+static mut m_head: [u8; 19] = "taskmgr: kopf cpu=\0"
+static mut m_memu: [u8; 9] = " memkib=\0"
+static mut m_mema: [u8; 12] = " memallkib=\0"
+static mut m_mem: [u8; 6] = " mem=\0"
+static mut m_disk: [u8; 7] = " disk=\0"
+static mut m_up: [u8; 5] = " up=\0"
+static mut m_tasks: [u8; 8] = " tasks=\0"
+static mut m_core: [u8; 17] = "taskmgr: kern n=\0"
+static mut m_ct: [u8; 8] = " ticks=\0"
+static mut m_ci: [u8; 7] = " idle=\0"
+static mut m_cp: [u8; 5] = " pm=\0"
+static mut m_row: [u8; 18] = "taskmgr: zeile r=\0"
+static mut m_pid: [u8; 6] = " pid=\0"
+static mut m_ppid: [u8; 7] = " ppid=\0"
+static mut m_st: [u8; 5] = " st=\0"
+static mut m_pm: [u8; 5] = " pm=\0"
+static mut m_kib: [u8; 6] = " kib=\0"
+static mut m_kern: [u8; 7] = " kern=\0"
+static mut m_name: [u8; 7] = " name=\0"
+static mut m_sort: [u8; 26] = "taskmgr: sortiert spalte=\0"
+static mut m_ab: [u8; 5] = " ab=\0"
+static mut m_wahl: [u8; 19] = "taskmgr: wahl pid=\0"
+static mut m_ask: [u8; 20] = "taskmgr: frage pid=\0"
+static mut m_kill: [u8; 21] = "taskmgr: beende pid=\0"
+static mut m_rc: [u8; 5] = " rc=\0"
+static mut m_graph: [u8; 18] = "taskmgr: graph x=\0"
+static mut m_gn: [u8; 4] = " n=\0"
+static mut m_ghist: [u8; 7] = " hist=\0"
+static mut m_p0x: [u8; 6] = " p0x=\0"
+static mut m_p0y: [u8; 6] = " p0y=\0"
+static mut m_pnx: [u8; 6] = " pnx=\0"
+static mut m_pny: [u8; 6] = " pny=\0"
+static mut m_gcpu: [u8; 14] = "taskmgr: gcpu\0"
+static mut m_gmem: [u8; 14] = "taskmgr: gmem\0"
+static mut m_neu: [u8; 13] = "taskmgr: neu\0"
+static mut m_feuer: [u8; 19] = "taskmgr: feuer id=\0"
+static mut m_art: [u8; 6] = " art=\0"
+static mut m_idx: [u8; 6] = " idx=\0"
+static mut m_tab: [u8; 20] = "taskmgr: tabelle x=\0"
+static mut m_kopfh: [u8; 7] = " kopf=\0"
+static mut m_zh: [u8; 5] = " zh=\0"
+static mut m_spalte: [u8; 19] = "taskmgr: spalte c=\0"
+static mut m_text: [u8; 17] = "taskmgr: text x=\0"
+static mut m_base: [u8; 7] = " base=\0"
+static mut m_fg: [u8; 5] = " fg=\0"
+static mut m_bg: [u8; 5] = " bg=\0"
+static mut m_ot: [u8; 3] = " [\0"
+static mut m_ct2: [u8; 2] = "]\0"
+static mut m_nowm: [u8; 28] = "taskmgr: kein Fensterserver\0"
+static mut m_net: [u8; 18] = "taskmgr: netz tx=\0"
+static mut m_nrx: [u8; 5] = " rx=\0"
+static mut m_non: [u8; 5] = " on=\0"
+
+static mut a_takt: [u8; 5] = "takt\0"
+static mut a_runden: [u8; 7] = "runden\0"
+static mut a_melde: [u8; 6] = "melde\0"
+static mut a_nohit: [u8; 6] = "nohit\0"
+
+// ------------------------------------------------------------ Werkzeug
+
+fn say(p: u64) {
+    ulib.say(p)
+}
+
+fn sub(a: u64, b: u64) -> u64 {
+    if b >= a {
+        return 0
+    }
+    return a - b
+}
+
+fn ptr(p: u64) -> u64 {
+    return p
+}
+
+fn put_str(d: u64, at: u64, s: u64) -> u64 {
+    let n: u64 = ulib.length(s)
+    var i: u64 = 0
+    while i < n {
+        __mmio_write8((d + at + i) as *mut u8, __mmio_read8((s + i) as *mut u8))
+        i = i + 1
+    }
+    __mmio_write8((d + at + n) as *mut u8, 0 as u8)
+    return at + n
+}
+
+fn put_num(d: u64, at: u64, v: u64) -> u64 {
+    let n: u64 = ulib.digits(v, d + at)
+    __mmio_write8((d + at + n) as *mut u8, 0 as u8)
+    return at + n
+}
+
+// Promille als Prozent mit einer Nachkommastelle: 375 -> "37,5".
+fn put_pm(d: u64, at: u64, v: u64) -> u64 {
+    var a: u64 = at
+    a = put_num(d, a, v / 10)
+    a = put_str(d, a, ptr((&u_comma[0]) as u64))
+    a = put_num(d, a, v % 10)
+    return a
+}
+
+// Kibioktette, und ab tausend Kibioktetten in Mebioktetten mit einer
+// Nachkommastelle. Ohne Bruch waere jede Zahl unter einem MiB eine 0.
+fn put_size(d: u64, at: u64, kib: u64) -> u64 {
+    var a: u64 = at
+    if kib < 1024 {
+        a = put_num(d, a, kib)
+        return put_str(d, a, ptr((&u_kib[0]) as u64))
+    }
+    let mib: u64 = kib / 1024
+    let zehntel: u64 = (kib % 1024) * 10 / 1024
+    a = put_num(d, a, mib)
+    a = put_str(d, a, ptr((&u_comma[0]) as u64))
+    a = put_num(d, a, zehntel)
+    return put_str(d, a, ptr((&u_mib[0]) as u64))
+}
+
+fn put_time(d: u64, at: u64, ms: u64) -> u64 {
+    let sek: u64 = ms / 1000
+    var a: u64 = at
+    a = put_num(d, a, sek / 3600)
+    a = put_str(d, a, ptr((&u_h[0]) as u64))
+    a = put_num(d, a, (sek / 60) % 60)
+    a = put_str(d, a, ptr((&u_m[0]) as u64))
+    a = put_num(d, a, sek % 60)
+    return put_str(d, a, ptr((&u_s[0]) as u64))
+}
+
+// ================= EINE ZEILE, EIN SCHREIBVORGANG ==================
+//
+// Auf dieser seriellen Leitung schreiben mehrere Prozesse gleichzeitig:
+// der Schreibtisch, die Taskleiste, der Starter und dieses Programm.
+// Wer eine Zeile aus einem Dutzend `say`-Aufrufen zusammensetzt, bekommt
+// vom Nachbarn mitten hinein geschrieben -- GEMESSEN in dieser Runde:
+//
+//     taskmgr: spalte c=launcher: geom 1 x=80 w=276
+//
+// Das ist keine Schoenheitsfrage: ein Testlaeufer, der diese Zeile
+// liest, findet die Spalte nicht und meldet einen Fehler, den es nicht
+// gibt. `kernel/user/qs.fi` hat dieselbe Lehre in Runde HAENGER
+// gezogen. Also: die ganze Zeile in einen Puffer, EIN `put`, und das
+// Zeilenende gehoert dazu.
+static mut zl: [u8; 512] = [0 as u8; 512]
+static mut zn: u64 = 0
+
+fn z_str(t: u64) {
+    if zn + ulib.length(t) < 508 {
+        zn = put_str((&zl[0]) as u64, zn, t)
+    }
+}
+
+fn z_num(v: u64) {
+    if zn + 24 < 508 {
+        zn = put_num((&zl[0]) as u64, zn, v)
+    }
+}
+
+fn z_kv(t: u64, v: u64) {
+    z_str(t)
+    z_num(v)
+}
+
+fn z_neu(t: u64) {
+    zn = 0
+    z_str(t)
+}
+
+fn z_ende() {
+    __mmio_write8(((&zl[0]) as u64 + zn) as *mut u8, 10 as u8)
+    zn = zn + 1
+    let _w: u64 = ulib.put((&zl[0]) as u64, zn)
+    zn = 0
+}
+
+fn kv(name: u64, v: u64) {
+    z_kv(name, v)
+}
+
+// ------------------------------------------------------- die Messung
+
+fn pstat(i: u64, f: u64) -> u64 {
+    let v: u64 = ulib.sys(ulib.SYS_PSTAT, i, f, 0)
+    if ulib.bad(v) {
+        return 0
+    }
+    return v
+}
+
+fn cpustat(i: u64, f: u64) -> u64 {
+    let v: u64 = ulib.sys(ulib.SYS_CPUSTAT, i, f, 0)
+    if ulib.bad(v) {
+        return 0
+    }
+    return v
+}
+
+fn info(f: u64) -> u64 {
+    let v: u64 = ulib.sys(ulib.SYS_SYSINFO, f, 0, 0)
+    if ulib.bad(v) {
+        return 0
+    }
+    return v
+}
+
+fn netmon(f: u64) -> u64 {
+    let v: u64 = ulib.sys(ulib.SYS_NETMON, 0, 0, f)
+    if ulib.bad(v) {
+        return 0
+    }
+    return v
+}
+
+// Der Name eines Prozesses, Oktett fuer Oktett aus SYS_PMON, Art 2 --
+// dieselbe Quelle wie in /bin/powermon. Er steht im Kernel an genau
+// einer Stelle (`elf.fi` beim Einsprung), also kann er hier nicht von
+// dem abweichen, was wirklich laeuft.
+const SYS_PMON: u64 = 1830
+
+fn read_name(slot: u64) {
+    let d: u64 = (&p_name[0]) as u64 + slot * NAMEW
+    var i: u64 = 0
+    while i < NAMEW {
+        var c: u64 = ulib.sys(SYS_PMON, 2, slot, i)
+        if ulib.bad(c) {
+            c = 0
+        }
+        __mmio_write8((d + i) as *mut u8, c as u8)
+        i = i + 1
+    }
+    __mmio_write8((d + NAMEW - 1) as *mut u8, 0 as u8)
+}
+
+fn name_of(slot: u64) -> u64 {
+    let d: u64 = (&p_name[0]) as u64 + slot * NAMEW
+    if __mmio_read8((d) as *mut u8) != 0 as u8 {
+        return d
+    }
+    let k: u64 = p_kind[(slot) as usize]
+    if k == 0 {
+        return msg.get(ptr((&k_k_boot[0]) as u64))
+    }
+    if k == 1 {
+        return msg.get(ptr((&k_k_idle[0]) as u64))
+    }
+    if k == 2 {
+        return msg.get(ptr((&k_k_worker[0]) as u64))
+    }
+    return msg.get(ptr((&k_k_user[0]) as u64))
+}
+
+fn state_word(st: u64) -> u64 {
+    if st == 1 {
+        return msg.get(ptr((&k_s_ready[0]) as u64))
+    }
+    if st == 2 {
+        return msg.get(ptr((&k_s_run[0]) as u64))
+    }
+    if st == 3 {
+        return msg.get(ptr((&k_s_sleep[0]) as u64))
+    }
+    if st == 4 {
+        return msg.get(ptr((&k_s_wait[0]) as u64))
+    }
+    if st == 5 {
+        return msg.get(ptr((&k_s_zombie[0]) as u64))
+    }
+    if st == 7 {
+        return msg.get(ptr((&k_s_stop[0]) as u64))
+    }
+    if st == 8 {
+        return msg.get(ptr((&k_s_poll[0]) as u64))
+    }
+    return msg.get(ptr((&k_s_new[0]) as u64))
+}
+
+// EINE MESSUNG. `erste` heisst: nur den Stand holen, keine Differenz
+// bilden -- ohne einen Vorher-Wert ist jeder Prozentsatz erfunden.
+fn sample(erste: bool) {
+    var n: u64 = cpustat(0, ulib.CS_COUNT)
+    if n == 0 || n > MAXCPU {
+        n = 1
+    }
+    ncpu = n
+    var d_all: u64 = 0
+    var d_busy: u64 = 0
+    var i: u64 = 0
+    while i < ncpu {
+        let t: u64 = cpustat(i, ulib.CS_TICKS)
+        let idl: u64 = cpustat(i, ulib.CS_IDLE)
+        let dt: u64 = sub(t, c_ticks[(i) as usize])
+        var di: u64 = sub(idl, c_idle[(i) as usize])
+        if di > dt {
+            di = dt
+        }
+        c_ticks[(i) as usize] = t
+        c_idle[(i) as usize] = idl
+        if !erste && dt > 0 {
+            c_pm[(i) as usize] = (dt - di) * 1000 / dt
+        }
+        d_all = d_all + dt
+        d_busy = d_busy + (dt - di)
+        i = i + 1
+    }
+    if !erste && d_all > 0 {
+        cpu_pm = d_busy * 1000 / d_all
+    }
+
+    // Der Speicher: Rahmen, wie `top` sie zaehlt. Ein Rahmen ist 4 KiB.
+    mem_all = info(ulib.I_FRAMES_ALL)
+    let frei: u64 = info(ulib.I_FRAMES_FREE)
+    mem_used = sub(mem_all, frei)
+    if mem_all > 0 {
+        mem_pm = mem_used * 1000 / mem_all
+    }
+    disk_all = info(ulib.I_BLOCKS)
+    disk_used = sub(disk_all, info(ulib.I_BFREE))
+    if disk_all > 0 {
+        disk_pm = disk_used * 1000 / disk_all
+    }
+    up_ms = info(ulib.I_UPTIME)
+
+    // Das Netz: dieselben zwei Zaehler, die `/bin/netmon` liest.
+    net_ok = netmon(ulib.NM_ON)
+    let tx: u64 = netmon(ulib.NM_SYSTX)
+    let rx: u64 = netmon(ulib.NM_SYSRX)
+    if !erste {
+        net_tx = sub(tx, net_ltx)
+        net_rx = sub(rx, net_lrx)
+    }
+    net_ltx = tx
+    net_lrx = rx
+
+    // Die Prozesse.
+    nlive = 0
+    var s: u64 = 0
+    while s < SLOTS {
+        let st: u64 = ulib.sys(ulib.SYS_PSTAT, s, ulib.P_STATE, 0)
+        if ulib.bad(st) || st == 0 {
+            p_last[(s) as usize] = 0
+            p_lastpid[(s) as usize] = 0
+        } else {
+            let pid: u64 = pstat(s, ulib.P_PID)
+            let tk: u64 = pstat(s, ulib.P_TICKS)
+            var d: u64 = 0
+            if p_lastpid[(s) as usize] == pid && tk > p_last[(s) as usize] {
+                d = tk - p_last[(s) as usize]
+            }
+            p_last[(s) as usize] = tk
+            p_lastpid[(s) as usize] = pid
+            p_pid[(s) as usize] = pid
+            p_ppid[(s) as usize] = pstat(s, ulib.P_PPID)
+            p_state[(s) as usize] = st
+            p_kind[(s) as usize] = pstat(s, ulib.P_KIND)
+            p_pages[(s) as usize] = pstat(s, ulib.P_PAGES)
+            p_core[(s) as usize] = pstat(s, ulib.P_CPU)
+            p_ticks[(s) as usize] = tk
+            if erste || d_all == 0 {
+                p_pm[(s) as usize] = 0
+            } else {
+                p_pm[(s) as usize] = d * 1000 / d_all
+            }
+            read_name(s)
+            ord[(nlive) as usize] = s
+            nlive = nlive + 1
+        }
+        s = s + 1
+    }
+    sortiere()
+}
+
+// -------------------------------------------------------- das Sortieren
+//
+// Einfuegesortieren ueber die Platznummern. Zweiunddreissig Zeilen
+// einmal je Sekunde -- ein schnelleres Verfahren waere hier mehr Code
+// als Nutzen.
+
+fn schluessel(s: u64) -> u64 {
+    if sort_col == 0 {
+        return p_pid[(s) as usize]
+    }
+    if sort_col == 2 {
+        return p_state[(s) as usize]
+    }
+    if sort_col == 3 {
+        return p_pm[(s) as usize]
+    }
+    if sort_col == 4 {
+        return p_pages[(s) as usize]
+    }
+    if sort_col == 5 {
+        return p_core[(s) as usize]
+    }
+    return 0
+}
+
+// Spalte 1 ist der Name, und ein Name ist keine Zahl. Der Vergleich
+// laeuft Oktett fuer Oktett; gleiche Namen entscheidet die
+// Prozessnummer, damit die Reihenfolge zwischen zwei Messungen nicht
+// springt.
+fn vor(a: u64, b: u64) -> bool {
+    if sort_col == 1 {
+        let pa: u64 = name_of(a)
+        let pb: u64 = name_of(b)
+        var i: u64 = 0
+        while i < NAMEW {
+            let ca: u64 = __mmio_read8((pa + i) as *mut u8) as u64
+            let cb: u64 = __mmio_read8((pb + i) as *mut u8) as u64
+            if ca != cb {
+                if sort_ab != 0 {
+                    return ca > cb
+                }
+                return ca < cb
+            }
+            if ca == 0 {
+                i = NAMEW
+            }
+            i = i + 1
+        }
+        return p_pid[(a) as usize] < p_pid[(b) as usize]
+    }
+    let ka: u64 = schluessel(a)
+    let kb: u64 = schluessel(b)
+    if ka == kb {
+        return p_pid[(a) as usize] < p_pid[(b) as usize]
+    }
+    if sort_ab != 0 {
+        return ka > kb
+    }
+    return ka < kb
+}
+
+fn sortiere() {
+    var i: u64 = 1
+    while i < nlive {
+        let v: u64 = ord[(i) as usize]
+        var j: u64 = i
+        while j > 0 && vor(v, ord[(j - 1) as usize]) {
+            ord[(j) as usize] = ord[(j - 1) as usize]
+            j = j - 1
+        }
+        ord[(j) as usize] = v
+        i = i + 1
+    }
+}
+
+// ------------------------------------------------------- die Textblocks
+
+fn build_head() {
+    let d: u64 = (&l_sys[0]) as u64
+    var a: u64 = 0
+    a = put_str(d, a, msg.get(ptr((&k_cpu[0]) as u64)))
+    a = put_str(d, a, ptr((&u_colon[0]) as u64))
+    a = put_pm(d, a, cpu_pm)
+    a = put_str(d, a, ptr((&u_pct[0]) as u64))
+    a = put_str(d, a, ptr((&u_sep[0]) as u64))
+    a = put_str(d, a, msg.get(ptr((&k_mem[0]) as u64)))
+    a = put_str(d, a, ptr((&u_colon[0]) as u64))
+    a = put_size(d, a, mem_used * 4)
+    a = put_str(d, a, ptr((&u_slash[0]) as u64))
+    a = put_size(d, a, mem_all * 4)
+    a = put_str(d, a, ptr((&u_op[0]) as u64))
+    a = put_pm(d, a, mem_pm)
+    a = put_str(d, a, ptr((&u_pct[0]) as u64))
+    a = put_str(d, a, ptr((&u_cl[0]) as u64))
+    a = put_str(d, a, ptr((&u_sep[0]) as u64))
+    a = put_str(d, a, msg.get(ptr((&k_up[0]) as u64)))
+    a = put_str(d, a, ptr((&u_colon[0]) as u64))
+    a = put_time(d, a, up_ms)
+
+    let e: u64 = (&l_cores[0]) as u64
+    var b: u64 = 0
+    b = put_str(e, b, msg.get(ptr((&k_cores[0]) as u64)))
+    b = put_str(e, b, ptr((&u_colon[0]) as u64))
+    var i: u64 = 0
+    while i < ncpu {
+        if i > 0 {
+            b = put_str(e, b, ptr((&u_sep[0]) as u64))
+        }
+        b = put_num(e, b, i)
+        b = put_str(e, b, ptr((&u_colon[0]) as u64))
+        b = put_pm(e, b, c_pm[(i) as usize])
+        b = put_str(e, b, ptr((&u_pct[0]) as u64))
+        i = i + 1
+    }
+
+    let f: u64 = (&l_disk[0]) as u64
+    var c: u64 = 0
+    c = put_str(f, c, msg.get(ptr((&k_disk[0]) as u64)))
+    c = put_str(f, c, ptr((&u_colon[0]) as u64))
+    c = put_size(f, c, disk_used * 512 / 1024)
+    c = put_str(f, c, ptr((&u_slash[0]) as u64))
+    c = put_size(f, c, disk_all * 512 / 1024)
+    c = put_str(f, c, ptr((&u_op[0]) as u64))
+    c = put_pm(f, c, disk_pm)
+    c = put_str(f, c, ptr((&u_pct[0]) as u64))
+    c = put_str(f, c, ptr((&u_cl[0]) as u64))
+    c = put_str(f, c, ptr((&u_sep[0]) as u64))
+    c = put_str(f, c, msg.get(ptr((&k_net[0]) as u64)))
+    c = put_str(f, c, ptr((&u_colon[0]) as u64))
+    // OHNE ZAEHLUNG KEINE ZAHL. `netmon` zaehlt nur, wenn es
+    // eingeschaltet ist -- dann steht hier ein Strich und keine Null,
+    // die wie "nichts uebertragen" aussaehe.
+    if net_ok == 0 {
+        c = put_str(f, c, ptr((&u_dash[0]) as u64))
+    } else {
+        c = put_size(f, c, net_tx / 1024)
+        c = put_str(f, c, ptr((&u_ps[0]) as u64))
+        c = put_str(f, c, ptr((&u_slash[0]) as u64))
+        c = put_size(f, c, net_rx / 1024)
+        c = put_str(f, c, ptr((&u_ps[0]) as u64))
+    }
+    c = put_str(f, c, ptr((&u_sep[0]) as u64))
+    c = put_str(f, c, msg.get(ptr((&k_tasks[0]) as u64)))
+    c = put_str(f, c, ptr((&u_colon[0]) as u64))
+    c = put_num(f, c, nlive)
+}
+
+// Die Kopfzeile der Tabelle ist Zeile 0 des Blocks -- so steht die
+// Beschriftung in derselben Quelle wie die Daten. Die Pfeilspitze sagt,
+// nach welcher Spalte sortiert ist und in welche Richtung; ohne sie
+// waere die Sortierung nur an der Reihenfolge zu erraten.
+fn build_rows() {
+    let d: u64 = (&blob[0]) as u64
+    var a: u64 = 0
+    let kopf: u64 = msg.get(ptr((&k_cols[0]) as u64))
+    let kn: u64 = ulib.length(kopf)
+    var i: u64 = 0
+    var spalte: u64 = 0
+    while i < kn {
+        let ch: u64 = __mmio_read8((kopf + i) as *mut u8) as u64
+        if ch == 9 {
+            if spalte == sort_col {
+                a = put_str(d, a, pfeil())
+            }
+            spalte = spalte + 1
+        }
+        __mmio_write8((d + a) as *mut u8, ch as u8)
+        a = a + 1
+        i = i + 1
+    }
+    if spalte == sort_col {
+        a = put_str(d, a, pfeil())
+    }
+    a = put_str(d, a, ptr((&u_nl[0]) as u64))
+
+    var r: u64 = 0
+    while r < nlive {
+        let s: u64 = ord[(r) as usize]
+        a = put_num(d, a, p_pid[(s) as usize])
+        a = put_str(d, a, ptr((&u_tab[0]) as u64))
+        a = put_str(d, a, name_of(s))
+        a = put_str(d, a, ptr((&u_tab[0]) as u64))
+        a = put_str(d, a, state_word(p_state[(s) as usize]))
+        a = put_str(d, a, ptr((&u_tab[0]) as u64))
+        a = put_pm(d, a, p_pm[(s) as usize])
+        a = put_str(d, a, ptr((&u_pct[0]) as u64))
+        a = put_str(d, a, ptr((&u_tab[0]) as u64))
+        // KEIN EIGENER ADRESSRAUM, KEINE ZAHL. Die Bootaufgabe und die
+        // Leerlaufaufgaben laufen im Adressraum des Kernels; eine 0 KiB
+        // waere eine Messung, ein Strich ist die Wahrheit.
+        if p_pages[(s) as usize] == 0 {
+            a = put_str(d, a, ptr((&u_dash[0]) as u64))
+        } else {
+            a = put_size(d, a, p_pages[(s) as usize] * 4)
+        }
+        a = put_str(d, a, ptr((&u_tab[0]) as u64))
+        if p_core[(s) as usize] >= MAXCPU {
+            a = put_str(d, a, ptr((&u_dash[0]) as u64))
+        } else {
+            a = put_num(d, a, p_core[(s) as usize])
+        }
+        a = put_str(d, a, ptr((&u_nl[0]) as u64))
+        r = r + 1
+    }
+    __mmio_write8((d + a) as *mut u8, 0 as u8)
+}
+
+fn pfeil() -> u64 {
+    if sort_ab != 0 {
+        return ptr((&u_arrow_dn[0]) as u64)
+    }
+    return ptr((&u_arrow_up[0]) as u64)
+}
+
+fn row_of_pid(pid: u64) -> u64 {
+    var r: u64 = 0
+    while r < nlive {
+        if p_pid[(ord[(r) as usize]) as usize] == pid {
+            return r
+        }
+        r = r + 1
+    }
+    return SLOTS
+}
+
+fn build_sel() {
+    let d: u64 = (&l_sel[0]) as u64
+    var a: u64 = 0
+    if sel_pid == 0 {
+        let _x: u64 = put_str(d, a, msg.get(ptr((&k_nosel[0]) as u64)))
+        return
+    }
+    a = put_str(d, a, msg.get(ptr((&k_sel[0]) as u64)))
+    a = put_str(d, a, ptr((&u_colon[0]) as u64))
+    let r: u64 = row_of_pid(sel_pid)
+    if r < SLOTS {
+        a = put_str(d, a, name_of(ord[(r) as usize]))
+        a = put_str(d, a, ptr((&u_sp[0]) as u64))
+    }
+    a = put_str(d, a, ptr((&u_op[0]) as u64))
+    a = put_num(d, a, sel_pid)
+    a = put_str(d, a, ptr((&u_cl[0]) as u64))
+}
+
+// --------------------------------------------------------- der Graph
+
+fn hist_push() {
+    hist_schieben()
+    g_spec[(wlib.GR_N) as usize] = h_n
+}
+
+fn hist_schieben() {
+    if h_n < HIST {
+        h_cpu[(h_n) as usize] = cpu_pm
+        h_mem[(h_n) as usize] = mem_pm
+        h_n = h_n + 1
+        return
+    }
+    var i: u64 = 0
+    while i + 1 < HIST {
+        h_cpu[(i) as usize] = h_cpu[(i + 1) as usize]
+        h_mem[(i) as usize] = h_mem[(i + 1) as usize]
+        i = i + 1
+    }
+    h_cpu[(HIST - 1) as usize] = cpu_pm
+    h_mem[(HIST - 1) as usize] = mem_pm
+}
+
+// Die Stelle eines Messpunktes. EINE Funktion, und der Mitschnitt
+// meldet ihr Ergebnis fuer den ersten und den letzten Punkt -- ein
+// Pruefer, der die Formel nachbaut, kann seinen Nachbau an beiden Enden
+// gegen das Original halten.
+fn gx_of(gx: u64, gw: u64, i: u64) -> u64 {
+    return gx + 1 + i * sub(gw, 2) / HIST
+}
+
+fn gy_of(gy: u64, gh: u64, v: u64) -> u64 {
+    var w: u64 = v
+    if w > 1000 {
+        w = 1000
+    }
+    let innen: u64 = sub(gh, 3)
+    return gy + 1 + innen - w * innen / 1000
+}
+
+fn kurve(gx: u64, gy: u64, gw: u64, gh: u64, ist_cpu: bool, farbe: u64) {
+    if h_n == 0 {
+        return
+    }
+    var i: u64 = 0
+    while i < h_n {
+        var v: u64 = h_mem[(i) as usize]
+        if ist_cpu {
+            v = h_cpu[(i) as usize]
+        }
+        let x: u64 = gx_of(gx, gw, i)
+        let y: u64 = gy_of(gy, gh, v)
+        var y0: u64 = y
+        if i > 0 {
+            var vp: u64 = h_mem[(i - 1) as usize]
+            if ist_cpu {
+                vp = h_cpu[(i - 1) as usize]
+            }
+            y0 = gy_of(gy, gh, vp)
+        }
+        var oben: u64 = y
+        var unten: u64 = y0
+        if y0 < y {
+            oben = y0
+            unten = y
+        }
+        if ist_cpu {
+            // Durchgezogen und zwei Bildpunkte dick.
+            wlibc.rect(x, oben, 2, unten - oben + 2, farbe)
+        } else if (i % 2) == 0 {
+            // Gestrichelt und einen dick: der zweite Unterschied neben
+            // der Farbe, damit die zwei Kurven auch dann zu trennen
+            // sind, wenn jemand die Farben nicht unterscheiden kann.
+            wlibc.rect(x, oben, 1, unten - oben + 1, farbe)
+        }
+        i = i + 1
+    }
+}
+
+fn graph_body(gx: u64, gy: u64, gw: u64, gh: u64) {
+    let r: u64 = wlibc.metric(wlibc.M_RADIUS_PANEL)
+    let grund: u64 = wlibc.theme_semantic(wlibc.S_SURFACE_SUNKEN)
+    wlibc.rrect(gx, gy, gw, gh, r, grund)
+    wlibc.rring(gx, gy, gw, gh, r, 1,
+        wlibc.theme_semantic(wlibc.S_BORDER))
+    // Das Gitter bei 25, 50 und 75 Prozent. Ohne es ist eine Kurve eine
+    // Linie ohne Massstab.
+    var k: u64 = 1
+    while k < 4 {
+        wlibc.hline(gx + 1, gy + gh * k / 4, sub(gw, 2),
+            wlibc.theme_semantic(wlibc.S_BORDER))
+        k = k + 1
+    }
+    let f_cpu: u64 = wlibc.theme_semantic(wlibc.S_ACCENT)
+    let f_mem: u64 = wlibc.theme_semantic(wlibc.S_SUCCESS)
+    kurve(gx, gy, gw, gh, false, f_mem)
+    kurve(gx, gy, gw, gh, true, f_cpu)
+    // Die Legende: zwei Farbflecken und zwei Woerter. Das Wort ist der
+    // dritte Traeger neben Farbe und Strichart.
+    let asc: u64 = wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())
+    let sp: u64 = wlibc.space(0)
+    var lx: u64 = gx + 6
+    let ly: u64 = gy + 4
+    let bh2: u64 = wlibc.text_h(wlibc.px_ui())
+    lx = legende(lx, ly, bh2, asc, sp, f_cpu, grund,
+        msg.get(ptr((&k_cpu[0]) as u64)))
+    let _l2: u64 = legende(lx + 3 * sp, ly, bh2, asc, sp, f_mem, grund,
+        msg.get(ptr((&k_mem[0]) as u64)))
+}
+
+fn legende(x: u64, y: u64, hh: u64, asc: u64, sp: u64, farbe: u64,
+    grund: u64, txt: u64) -> u64 {
+    wlibc.rect(x, y + hh / 3, 12, 3, farbe)
+    let tx: u64 = x + 12 + sp
+    let n: u64 = ulib.length(txt)
+    let fg: u64 = wlibc.theme_semantic(wlibc.S_TEXT_SECONDARY)
+    let _b: u64 = wlibc.text_at(wlibc.F_UI, wlibc.px_ui(), tx, y + asc,
+        txt, n, fg)
+    z_neu(ptr((&m_text[0]) as u64))
+    z_num(tx)
+    z_kv(ptr((&m_base[0]) as u64), y + asc)
+    z_kv(ptr((&m_fg[0]) as u64), fg)
+    z_kv(ptr((&m_bg[0]) as u64), grund)
+    z_str(ptr((&m_ot[0]) as u64))
+    z_str(txt)
+    z_str(ptr((&m_ct2[0]) as u64))
+    z_ende()
+    return tx + wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), txt, n)
+}
+
+// GEMALT WIRD DER GRAPH VON DER BIBLIOTHEK (`wlib.K_GRAPH`); hier wird
+// nur noch GEMELDET, wo er steht und welche Zahlen darin stehen. Warum
+// er ein Widget ist und nicht mehr selbst gemalt wird, steht ueber
+// `wlib.K_GRAPH`: was nicht aus einem Widget kommt, streicht der
+// naechste Anstrich weg, und ein Bildschirmfoto trifft dann die Haelfte
+// der Zeit die leere Flaeche.
+//
+// DIE STELLEN KOMMEN AUS DER BIBLIOTHEK (`wlib.graph_x/graph_y`) und
+// werden hier NICHT nachgerechnet: ein Programm, das seine eigene
+// Formel meldet, meldet seinen eigenen Nachbau.
+// GEMALT WIRD ER NACH JEDEM DURCHLAUF, und das ist keine
+// Bequemlichkeit, sondern die Folge davon, dass er kein Widget ist:
+// `wlib.paint_all` malt den HINTERGRUND jedes schmutzigen Rechtecks neu
+// und danach die Widgets darin -- der Graph gehoert zu keinem und wird
+// dabei jedesmal ueberstrichen. Die erste Fassung hat ihn nur
+// nachgezogen, wenn `blits_done` sich geaendert hatte; im Bild war die
+// Flaeche trotzdem leer, weil zwischen dem Nachziehen und dem Foto ein
+// weiterer Anstrich lag. GEMESSEN: von 83.520 Bildpunkten der Flaeche
+// waren 83.368 die reine Fensterfarbe.
+//
+// Also: nach JEDEM Durchlauf, und der Preis ist gemessen -- 720 x 116
+// Bildpunkte sind ein Fuenftel dessen, was ein voller Anstrich des
+// Fensters kostet, und das Programm schlaeft ohnehin zwischen zwei
+// Durchlaeufen.
+//
+// `melden` trennt das Malen vom Mitschnitt: die Zeile mit der Geometrie
+// und die sechzig Messwerte gehen auf die serielle Leitung, wenn eine
+// neue Messung da ist -- nicht fuenfundzwanzigmal je Sekunde.
+fn draw_graph(w: u64, gx: u64, gy: u64, gw: u64, gh: u64, melden: bool) {
+    if !melden {
+        return
+    }
+    let _w2: u64 = w
+    var letzte: u64 = 0
+    if h_n > 0 {
+        letzte = h_n - 1
+    }
+    z_neu(ptr((&m_graph[0]) as u64))
+    z_num(gx)
+    z_kv(ptr((&m_y[0]) as u64), gy)
+    z_kv(ptr((&m_w[0]) as u64), gw)
+    z_kv(ptr((&m_h[0]) as u64), gh)
+    z_kv(ptr((&m_gn[0]) as u64), h_n)
+    z_kv(ptr((&m_ghist[0]) as u64), HIST)
+    z_kv(ptr((&m_p0x[0]) as u64), wlib.graph_x(i_graph, 0))
+    z_kv(ptr((&m_p0y[0]) as u64),
+        wlib.graph_y(i_graph, h_cpu[(0) as usize]))
+    z_kv(ptr((&m_pnx[0]) as u64), wlib.graph_x(i_graph, letzte))
+    z_kv(ptr((&m_pny[0]) as u64),
+        wlib.graph_y(i_graph, h_cpu[(letzte) as usize]))
+    z_ende()
+    if melde == 0 {
+        return
+    }
+    z_neu(ptr((&m_gcpu[0]) as u64))
+    var i: u64 = 0
+    while i < h_n {
+        z_str(ptr((&u_sp[0]) as u64))
+        z_num(h_cpu[(i) as usize])
+        i = i + 1
+    }
+    z_ende()
+    z_neu(ptr((&m_gmem[0]) as u64))
+    i = 0
+    while i < h_n {
+        z_str(ptr((&u_sp[0]) as u64))
+        z_num(h_mem[(i) as usize])
+        i = i + 1
+    }
+    z_ende()
+}
+
+// ------------------------------------------------------- der Mitschnitt
+
+fn say_rect(id: u64, art: u64) {
+    z_neu(ptr((&m_rect[0]) as u64))
+    z_num(id)
+    z_kv(ptr((&m_kind[0]) as u64), art)
+    z_kv(ptr((&m_x[0]) as u64), wlib.rect_x(id))
+    z_kv(ptr((&m_y[0]) as u64), wlib.rect_y(id))
+    z_kv(ptr((&m_w[0]) as u64), wlib.rect_w(id))
+    z_kv(ptr((&m_h[0]) as u64), wlib.rect_h(id))
+    z_ende()
+}
+
+// EIN VOLLER BLOCK. Er geht ueber die serielle Leitung, und die ist
+// 115 200 Baud: vierzig Zeilen je Sekunde sind ein Fuenftel der
+// Leitung und bremsen genau das Programm, das die Auslastung messen
+// soll. Also nur, wenn `melde` es verlangt -- und einmal am Anfang und
+// einmal am Ende, damit auch ein stiller Lauf nachzurechnen ist.
+static mut i_tabelle: u64 = 0
+static mut i_graph: u64 = 0
+
+// Die Oberkante der Zeile r der Tabelle, in Fensterkoordinaten --
+// dieselbe Rechnung wie in `wlib.paint_table` und `wlib.row_under`.
+fn tab_y(r: u64) -> u64 {
+    return wlib.rect_y(i_tabelle) + wlib.head_h(i_tabelle) + 1
+        + r * wlib.row_h()
+}
+
+fn bericht() {
+    blocknr = blocknr + 1
+    z_neu(ptr((&m_block[0]) as u64))
+    z_num(blocknr)
+    z_ende()
+    z_neu(ptr((&m_head[0]) as u64))
+    z_num(cpu_pm)
+    z_kv(ptr((&m_mem[0]) as u64), mem_pm)
+    z_kv(ptr((&m_memu[0]) as u64), mem_used * 4)
+    z_kv(ptr((&m_mema[0]) as u64), mem_all * 4)
+    z_kv(ptr((&m_disk[0]) as u64), disk_pm)
+    z_kv(ptr((&m_up[0]) as u64), up_ms)
+    z_kv(ptr((&m_tasks[0]) as u64), nlive)
+    z_ende()
+    z_neu(ptr((&m_net[0]) as u64))
+    z_num(net_tx)
+    z_kv(ptr((&m_nrx[0]) as u64), net_rx)
+    z_kv(ptr((&m_non[0]) as u64), net_ok)
+    z_ende()
+    var i: u64 = 0
+    while i < ncpu {
+        z_neu(ptr((&m_core[0]) as u64))
+        z_num(i)
+        z_kv(ptr((&m_ct[0]) as u64), c_ticks[(i) as usize])
+        z_kv(ptr((&m_ci[0]) as u64), c_idle[(i) as usize])
+        z_kv(ptr((&m_cp[0]) as u64), c_pm[(i) as usize])
+        z_ende()
+        i = i + 1
+    }
+    var r: u64 = 0
+    while r < nlive {
+        let s: u64 = ord[(r) as usize]
+        z_neu(ptr((&m_row[0]) as u64))
+        z_num(r)
+        z_kv(ptr((&m_pid[0]) as u64), p_pid[(s) as usize])
+        z_kv(ptr((&m_ppid[0]) as u64), p_ppid[(s) as usize])
+        z_kv(ptr((&m_st[0]) as u64), p_state[(s) as usize])
+        z_kv(ptr((&m_pm[0]) as u64), p_pm[(s) as usize])
+        z_kv(ptr((&m_kib[0]) as u64), p_pages[(s) as usize] * 4)
+        z_kv(ptr((&m_kern[0]) as u64), p_core[(s) as usize])
+        z_kv(ptr((&m_ct[0]) as u64), p_ticks[(s) as usize])
+        // WO DIE ZEILE STEHT, in Fensterkoordinaten. Ein Testlaeufer,
+        // der das ausrechnen muesste, rechnete die Anordnung nach --
+        // und pruefte damit seinen eigenen Nachbau. `tab_y` ist
+        // dieselbe Formel, mit der `paint_table` die Zeile hinmalt.
+        z_kv(ptr((&m_y[0]) as u64), tab_y(r))
+        z_str(ptr((&m_name[0]) as u64))
+        z_str(name_of(s))
+        z_ende()
+        r = r + 1
+    }
+    z_neu(ptr((&m_blockend[0]) as u64))
+    z_num(blocknr)
+    z_ende()
+}
+
+// ------------------------------------------------------------ die Argumente
+
+fn arg_num(args: u64, wort: u64, standard: u64) -> u64 {
+    let n: u64 = ulib.arg_count(args)
+    var i: u64 = 1
+    while i + 1 < n {
+        if ulib.streq(ulib.arg_at(args, i), wort) {
+            return ulib.to_num(ulib.arg_at(args, i + 1))
+        }
+        i = i + 1
+    }
+    return standard
+}
+
+fn arg_hat(args: u64, wort: u64) -> bool {
+    let n: u64 = ulib.arg_count(args)
+    var i: u64 = 1
+    while i < n {
+        if ulib.streq(ulib.arg_at(args, i), wort) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// ---------------------------------------------------------------- Start
+
+fn u_start(args: u64) -> u64 {
+    let takt: u64 = arg_num(args, ptr((&a_takt[0]) as u64), 1000)
+    let grenze: u64 = arg_num(args, ptr((&a_runden[0]) as u64), 0)
+    if arg_hat(args, ptr((&a_melde[0]) as u64)) {
+        melde = 1
+    }
+    let nohit: bool = arg_hat(args, ptr((&a_nohit[0]) as u64))
+
+    if !wlib.begin(nohit, false) {
+        say(ptr((&m_nowm[0]) as u64))
+        ulib.nl()
+        return 1
+    }
+    // DER KATALOG ZUERST, vor jedem Bedienelement: `wlib` behaelt den
+    // Zeiger auf den Text eines Knopfes, und ein Knopf, der vor dem
+    // Katalog entsteht, traegt den Schluessel statt des Wortes.
+    let _mk: u64 = msg.init()
+    // Jede Textstelle, die die Bibliothek malt, geht auf die serielle
+    // Leitung -- daran misst `tools/werkzeug/run.sh` das Bild.
+    wlib.set_trace(true)
+
+    sample(true)
+    hist_push()
+    build_head()
+    build_rows()
+    build_sel()
+
+    let w: u64 = wlib.window(20, 14, BW, BH, msg.get(ptr((&k_title[0]) as u64)))
+    if w >= wlib.MAXWN {
+        say(ptr((&m_nowm[0]) as u64))
+        ulib.nl()
+        return 1
+    }
+    let _wa: u64 = wlib.window_app(w, ptr((&t_self[0]) as u64))
+    // NACH VORN, EINMAL, BEIM OEFFNEN.
+    //
+    // Der Fensterserver hebt ein Fenster NICHT, wenn man es anklickt --
+    // `wm.set_focus` gibt ihm die Tastatur und sonst nichts, und das ist
+    // eine bewusste Regel dieses Systems (Runde DESKTOP). Ein Programm,
+    // das gerade gestartet wurde, gehoert aber nach vorn: sonst
+    // erscheint es unter einem Fenster, das schon dastand, und der
+    // Mensch sieht nichts.
+    //
+    // GEMESSEN, warum es diese drei Zeilen gibt: der Starter wird vor
+    // dem Aufgabenverwalter gestartet und lag mit seiner Liste ueber
+    // dessen unterem Drittel. Der Klick auf "Prozess beenden" landete
+    // dort, im Mitschnitt stand nichts, und es sah aus wie ein Fehler
+    // in der Trefferpruefung.
+    let _rz: u64 = wlibc.win_act(
+        wlibc.sys3w(wlibc.WM_INFO, wlib.handle(w), wlibc.WI_ID, 0),
+        wlibc.WA_RAISE)
+    let bw: u64 = wlib.win_w(w)
+    let bh: u64 = wlib.win_h(w)
+    z_neu(ptr((&m_start[0]) as u64))
+    z_num(bw)
+    z_kv(ptr((&m_bh[0]) as u64), bh)
+    z_ende()
+
+    let pad: u64 = wlibc.space(2)
+    let gap: u64 = wlibc.space(1)
+    let th: u64 = wlibc.text_h(wlibc.px_ui())
+    let ch: u64 = wlibc.metric(wlibc.M_CTRL_H)
+    let unten: u64 = ch + 2 + pad
+    // Was der Tabelle bleibt: alles ausser Kopfzeilen, Graph,
+    // Auswahlzeile und Knopfreihe. Gerechnet und nicht hingeschrieben,
+    // damit ein groesserer Zeilenabstand die Tabelle verkleinert statt
+    // sie aus dem Fenster zu schieben.
+    let fest: u64 = 3 * (th + gap) + GH + gap + th + gap
+    var tbh: u64 = 0
+    if bh > fest + unten + 2 * pad + 40 {
+        tbh = bh - fest - unten - 2 * pad
+    } else {
+        tbh = 40
+    }
+
+    // Die Spaltenbreiten: die festen aus den Zahlen oben, der Name
+    // bekommt den Rest. 6 Bildpunkte Einzug links, 16 fuer die
+    // Bildlaufleiste rechts -- beides `paint_table`, nicht geraten.
+    let innen: u64 = sub(bw, 2 * pad)
+    let fix: u64 = CW_PID + CW_STATE + CW_CPU + CW_MEM + CW_CORE
+    var namew: u64 = 160
+    if innen > fix + 22 + 160 {
+        namew = innen - fix - 22
+    }
+    cols[(0) as usize] = CW_PID
+    cols[(1) as usize] = namew
+    cols[(2) as usize] = CW_STATE
+    cols[(3) as usize] = CW_CPU
+    cols[(4) as usize] = CW_MEM
+    cols[(5) as usize] = CW_CORE
+
+    wlib.box_v(w, 0, 0, bw, bh, pad, gap)
+    let i_sys: u64 = wlib.label(ptr((&l_sys[0]) as u64))
+    let i_core: u64 = wlib.label(ptr((&l_cores[0]) as u64))
+    let i_disk: u64 = wlib.label(ptr((&l_disk[0]) as u64))
+    g_spec[(wlib.GR_HIST) as usize] = HIST
+    g_spec[(wlib.GR_A) as usize] = (&h_cpu[0]) as u64
+    g_spec[(wlib.GR_B) as usize] = (&h_mem[0]) as u64
+    g_spec[(wlib.GR_MAX) as usize] = 1000
+    g_spec[(wlib.GR_N) as usize] = h_n
+    wlib.size(0, GH)
+    let i_card: u64 = wlib.graph(ptr((&g_spec[0]) as u64))
+    wlib.size(0, tbh)
+    let i_tab: u64 = wlib.table(ptr((&blob[0]) as u64), 8, NCOL,
+        ptr((&cols[0]) as u64))
+    let i_sel: u64 = wlib.label(ptr((&l_sel[0]) as u64))
+    wlib.box_end()
+    // EIN KLICK GENUEGT. Ohne das loest eine Tabelle erst beim
+    // Doppelklick aus (die Regel eines Dateimanagers: oft waehlen,
+    // selten oeffnen), und die Auswahl liesse sich nur daran erkennen,
+    // dass sich `wlib.value` AENDERT. Das ist genau die Stelle, an der
+    // die erste Fassung dieses Programms den Prozess in Zeile 0 als
+    // "gewaehlt" meldete, ohne dass jemand geklickt hatte -- eine
+    // Auswahl, die von selbst entsteht, ist bei einem Knopf namens
+    // "Prozess beenden" die falsche Voreinstellung.
+    wlib.list_einklick(i_tab, true)
+
+    // DER KNOPF STEHT RECHTS UNTEN, und das ist nicht Geschmack:
+    // dieselbe Stelle, an der `wlib.dlg_new` seit Runde K15 die
+    // Antwortknoepfe hinsetzt, und die Stelle, an der jedes System der
+    // Welt die Handlung eines Fensters hat.
+    //
+    // Es hat auch einen gemessenen Grund: der Starter des Schreibtischs
+    // liegt mit seinem Fenster ueber der LINKEN unteren Ecke, und ein
+    // Knopf dort ist nur erreichbar, wenn man vorher das Fenster hebt.
+    // Rechts liegt nichts.
+    let ktxt: u64 = msg.get(ptr((&k_end[0]) as u64))
+    let ktw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), ktxt,
+        ulib.length(ktxt)) + 2 * wlibc.metric(wlibc.M_PAD_X)
+    wlib.box_h(w, sub(bw, pad + ktw), sub(bh, unten), ktw, ch + 2, 0, gap)
+    wlib.size(ktw, ch + 2)
+    let i_kill: u64 = wlib.button(ktxt)
+    wlib.box_end()
+
+    say_rect(i_sys, wlib.K_LABEL)
+    say_rect(i_core, wlib.K_LABEL)
+    say_rect(i_disk, wlib.K_LABEL)
+    say_rect(i_card, wlib.K_GRAPH)
+    say_rect(i_tab, wlib.K_TABLE)
+    say_rect(i_sel, wlib.K_LABEL)
+    say_rect(i_kill, wlib.K_BUTTON)
+
+    i_tabelle = i_tab
+    i_graph = i_card
+    z_neu(ptr((&m_tab[0]) as u64))
+    z_num(wlib.rect_x(i_tab))
+    z_kv(ptr((&m_y[0]) as u64), wlib.rect_y(i_tab))
+    z_kv(ptr((&m_kopfh[0]) as u64), wlib.head_h(i_tab))
+    z_kv(ptr((&m_zh[0]) as u64), wlib.row_h())
+    z_ende()
+    // Wo die Kopffelder liegen, an denen sortiert wird -- dieselbe
+    // Rechnung wie in `wlib.on_down`: zwei Bildpunkte Einzug, dann die
+    // Spaltenbreiten der Reihe nach.
+    var sx: u64 = wlib.rect_x(i_tab) + 2
+    var sc: u64 = 0
+    while sc < NCOL {
+        z_neu(ptr((&m_spalte[0]) as u64))
+        z_num(sc)
+        z_kv(ptr((&m_x[0]) as u64), sx)
+        z_kv(ptr((&m_w[0]) as u64), cols[(sc) as usize])
+        z_ende()
+        sx = sx + cols[(sc) as usize]
+        sc = sc + 1
+    }
+    let gx: u64 = wlib.rect_x(i_card)
+    let gy: u64 = wlib.rect_y(i_card)
+    let gw: u64 = wlib.rect_w(i_card)
+    let gh: u64 = wlib.rect_h(i_card)
+
+    wlib.set_rows(i_tab, nlive + 1)
+    z_neu(ptr((&m_neu[0]) as u64))
+    z_ende()
+    wlib.draw_all()
+    draw_graph(w, gx, gy, gw, gh, true)
+    bericht()
+
+    var blits: u64 = wlib.blits_done()
+    var runden: u64 = 0
+    var last: u64 = info(ulib.I_TICKS)
+    while wlib.alive() && (grenze == 0 || runden < grenze) {
+        runden = runden + 1
+        let id: u64 = wlib.step()
+        if id < wlib.MAXWD {
+            let art: u64 = wlib.fired_kind()
+            // JEDES AUSLOESEN WIRD GEMELDET. Ohne diese Zeile ist ein
+            // Klick, der nicht ankommt, nicht von einem Klick zu
+            // unterscheiden, der ankommt und nichts bewirkt -- und
+            // genau diese zwei Faelle hat die Abnahme dieser Runde
+            // eine halbe Stunde lang verwechselt.
+            z_neu(ptr((&m_feuer[0]) as u64))
+            z_num(id)
+            z_kv(ptr((&m_art[0]) as u64), art)
+            z_kv(ptr((&m_idx[0]) as u64), wlib.fired_index())
+            z_ende()
+            if art == wlib.K_TABLE {
+                // Ein Klick in die Kopfzeile: nach dieser Spalte
+                // sortieren. Dieselbe Spalte noch einmal dreht die
+                // Richtung um.
+                let sp: u64 = wlib.fired_index()
+                if sp == sort_col {
+                    if sort_ab != 0 {
+                        sort_ab = 0
+                    } else {
+                        sort_ab = 1
+                    }
+                } else {
+                    sort_col = sp
+                    sort_ab = 1
+                }
+                sortiere()
+                build_rows()
+                wlib.set_rows(i_tab, nlive + 1)
+                z_neu(ptr((&m_sort[0]) as u64))
+                z_num(sort_col)
+                z_kv(ptr((&m_ab[0]) as u64), sort_ab)
+                z_ende()
+                wlib.dirty_all(w)
+            } else if art == wlib.K_LIST && id == i_tab {
+                // EINE ZEILE WURDE ANGEKLICKT. Gemerkt wird die
+                // PROZESSNUMMER und nicht die Zeilennummer -- eine
+                // Zeilennummer zeigt nach dem naechsten Sortieren auf
+                // einen anderen Prozess, und der Knopf daneben beendet
+                // ihn.
+                let z: u64 = wlib.fired_index()
+                if z < nlive {
+                    sel_pid = p_pid[(ord[(z) as usize]) as usize]
+                    build_sel()
+                    z_neu(ptr((&m_wahl[0]) as u64))
+                    z_num(sel_pid)
+                    z_ende()
+                    wlib.dirty_all(w)
+                }
+            } else if art == wlib.K_BUTTON && id == i_kill {
+                frage_stellen()
+            }
+        }
+        if ask_pid != 0 {
+            let st: u64 = wlib.dlg_state()
+            if st == 2 {
+                toeten()
+                wlib.dlg_close()
+                ask_pid = 0
+            } else if st == 3 || st == 0 {
+                ask_pid = 0
+                wlib.dlg_close()
+            }
+        }
+        let jetzt: u64 = info(ulib.I_TICKS)
+        if jetzt >= last + takt / 10 {
+            last = jetzt
+            sample(false)
+            hist_push()
+            build_head()
+            build_rows()
+            if sel_pid != 0 && row_of_pid(sel_pid) >= SLOTS {
+                sel_pid = 0
+            }
+            build_sel()
+            wlib.set_rows(i_tab, nlive + 1)
+            let r: u64 = row_of_pid(sel_pid)
+            if r < SLOTS {
+                wlib.set_value(i_tab, r)
+            }
+            // DIE MARKE VOR DEM NEUMALEN. `tools/themestore/shotcheck.py`
+            // nimmt alles NACH der letzten Marke als das Bild, das
+            // gerade steht -- ohne sie haelt es die Beschriftung von
+            // vor zehn Sekunden fuer eine zweite Beschriftung an
+            // derselben Stelle und meldet eine Ueberlappung, die es
+            // nicht gibt. /bin/settings hat dafuer seit Runde LOOK
+            // seinen Rechteckblock; hier ist es diese eine Zeile.
+            z_neu(ptr((&m_neu[0]) as u64))
+            z_ende()
+            wlib.dirty_all(w)
+            let _g: u64 = wlib.paint_all()
+            draw_graph(w, gx, gy, gw, gh, true)
+            blits = wlib.blits_done()
+            if melde != 0 {
+                bericht()
+            }
+        } else {
+            // Die Bibliothek hat vielleicht gemalt -- und wenn, dann
+            // auch ueber den Graphen. Nachgezogen wird er in JEDEM
+            // Durchlauf; die Begruendung steht ueber `draw_graph`.
+            blits = wlib.blits_done()
+            draw_graph(w, gx, gy, gw, gh, false)
+        }
+    }
+    bericht()
+    return 0
+}
+
+fn frage_stellen() {
+    if sel_pid == 0 || ask_pid != 0 {
+        return
+    }
+    let d: u64 = (&frage[0]) as u64
+    var a: u64 = 0
+    a = put_str(d, a, msg.get(ptr((&k_asktext[0]) as u64)))
+    a = put_str(d, a, ptr((&u_sp[0]) as u64))
+    let r: u64 = row_of_pid(sel_pid)
+    if r < SLOTS {
+        a = put_str(d, a, name_of(ord[(r) as usize]))
+        a = put_str(d, a, ptr((&u_sp[0]) as u64))
+    }
+    a = put_str(d, a, ptr((&u_op[0]) as u64))
+    a = put_num(d, a, sel_pid)
+    a = put_str(d, a, ptr((&u_cl[0]) as u64))
+    a = put_str(d, a, ptr((&u_q[0]) as u64))
+    let _dw: u64 = wlib.dlg_ask(msg.get(ptr((&k_asktitle[0]) as u64)), d)
+    ask_pid = sel_pid
+    z_neu(ptr((&m_ask[0]) as u64))
+    z_num(ask_pid)
+    z_ende()
+}
+
+// GENAU DER AUFRUF AUS /bin/kill, mit demselben Code. 137 ist 128 + 9,
+// die Zahl, die ein System mit einem SIGKILL hinterliesse. Der Kernel
+// entscheidet, ob es erlaubt ist (`sys.kill_allowed`, Runde K13: nur
+// eigene Prozesse), und ein Fehler wird GEMELDET und nicht verschluckt.
+fn toeten() {
+    let rc: u64 = ulib.sys(ulib.SYS_KILL, ask_pid, 137, 0)
+    z_neu(ptr((&m_kill[0]) as u64))
+    z_num(ask_pid)
+    z_kv(ptr((&m_rc[0]) as u64), rc)
+    z_ende()
+    if sel_pid == ask_pid {
+        sel_pid = 0
+    }
+}

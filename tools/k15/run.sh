@@ -227,7 +227,7 @@ ARGS+=(/usr/ /usr/share/ /usr/share/locale/ /usr/share/locale/en/
        "/usr/share/locale/de/messages=locale/de/messages")
 
 # DIE BUENDEL: /apps/<name>.osp/{INFO,start,symbol,daten/}
-while read -r zeile; do ARGS+=("$zeile"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel")
+while read -r zeile; do ARGS+=("$zeile"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel" nur="$PROGS")
 while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
     && ok "mkfs.py baut ein Abbild mit den Schriften, den Programmen und /etc/theme" \
@@ -963,7 +963,7 @@ ARGS2+=(/usr/ /usr/share/ /usr/share/locale/ /usr/share/locale/en/
        /usr/share/locale/de/
        "/usr/share/locale/de/messages=locale/de/messages")
 
-while read -r zeile; do ARGS2+=("$zeile"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel")
+while read -r zeile; do ARGS2+=("$zeile"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel" nur="$PROGS")
 while read -r z; do ARGS2+=("$z"); done < "$TMPD/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS2[@]}" > "$TMPD/mkfs2.txt" 2>&1
 cp -f "$TMPD/disk.img" "$TMPD/disk1.img"
