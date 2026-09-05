@@ -188,8 +188,25 @@ ARGS+=("/users/justin/notizen.txt=$OUT/heim/notizen.txt@0644"
        "/users/justin/tabelle.csv=$OUT/heim/tabelle.csv@0644"
        "/users/justin/brief.txt=$OUT/heim/brief.txt@0644")
 rm -rf "$OUT/apps"; cp -a assets/apps "$OUT/apps"
-rm -rf "$OUT/apps/widgets.osp"
-while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py "$OUT/apps" "$OUT/buendel" 2>/dev/null || true)
+# RUNDE MERGE-6: HIER STAND EIN NAME, JETZT STEHT DIE REGEL.
+#
+# `rm -rf "$OUT/apps/widgets.osp"` war noetig, weil /bin/widgetdemo
+# nicht in der Programmliste dieses Laeufers steht und `mkfs.py`
+# dann mit "gibt es nicht" abbricht. Die Runde WERKZEUGE hat ein
+# zweites solches Buendel dazugelegt (taskmgr.osp) -- und dieser
+# Laeufer ist beim ZUSAMMENFUEHREN daran gestorben:
+#
+#     FEHLGESCHLAGEN: mkfs
+#     mkfs: '/bin/taskmgr' gibt es nicht
+#
+# Genommen wird derselbe Riegel, den WERKZEUGE fuer
+# tools/themestore/build.sh gebaut hat: `bundle.py nur=`
+# ueberspringt jedes Buendel, dessen Programm nicht auf DIESER
+# Platte liegt. Damit ist die Aufnahme wieder genau die der Runde
+# OBERFLAECHE -- dieselben Buendel, dasselbe Startmenue, dieselbe
+# Messgrundlage -- und der naechste neue Buendelname bricht sie
+# nicht mehr.
+while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py "$OUT/apps" "$OUT/buendel" "nur=$progs" 2>/dev/null || true)
 while read -r z; do ARGS+=("$z"); done < "$OUT/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 \
     || { echo "FEHLGESCHLAGEN: mkfs"; tail -25 "$OUT/mkfs.log"; exit 1; }
