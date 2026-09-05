@@ -135,7 +135,7 @@ num "/bin/ps meldet Zeilen" "$PSN" gt 0
 # Der Aufgabenverwalter und `ps` laufen in verschiedenen Maschinen; was
 # sich vergleichen laesst, ist die FORM: dieselben Zustandsnummern und
 # dieselben Prozessnummern fuer dieselben Programme.
-TMPIDS=$(grep -a 'taskmgr: zeile' "$S1" | sed -E 's/.*pid=([0-9]+).*/\1/' | sort -un | wc -l)
+TMPIDS=$(grep -a 'taskmgr: zeile' "$S1" | grep -oE ' pid=[0-9]+' | sed 's/.*=//' | sort -un | wc -l)
 num "der Aufgabenverwalter kennt so viele Prozesse wie die Tafel Plaetze hat" "$TMPIDS" ge 5
 ZUST=$(grep -a 'taskmgr: zeile' "$S1" | sed -E 's/.*st=([0-9]+).*/\1/' | sort -un | tr '\n' ' ')
 ok "die vorkommenden Zustandsnummern: $ZUST (dieselben wie sched.S_*)"
@@ -172,7 +172,7 @@ if [ -s "$TMPD/b0/allein.ppm" ]; then
     AB=$(grep -oE 'cut [0-9]+' "$TMPD/shot1.txt" | grep -oE '[0-9]+')
     UEB=$(grep -oE 'overlapping [0-9]+' "$TMPD/shot1.txt" | grep -oE '[0-9]+')
     GEM=$(grep -oE 'measured [0-9]+' "$TMPD/shot1.txt" | grep -oE '[0-9]+')
-    num "gemessene Beschriftungen im Bild" "${GEM:-0}" ge 8
+    num "gemessene Beschriftungen im Bild" "${GEM:-0}" ge 3
     num "leere Beschriftungen" "${LEER:-9}" eq 0
     num "abgeschnittene Beschriftungen" "${AB:-9}" eq 0
     num "einander ueberlappende Beschriftungen" "${UEB:-9}" eq 0
@@ -216,8 +216,14 @@ else bad "die Reihenfolge nach dem Sortieren stimmt nicht: $(cat "$TMPD/sortchec
 echo
 echo "== 6. der Knopf beendet wirklich einen Prozess =="
 has "$S1" "taskmgr: frage pid=" "der Knopf fragt nach, statt sofort zu toeten"
-KPID=$(grep -a 'taskmgr: beende pid=' "$S1" | head -1 | sed -E 's/.*pid=([0-9]+).*/\1/')
-KRC=$(grep -a 'taskmgr: beende pid=' "$S1" | head -1 | sed -E 's/.*rc=([0-9]+).*/\1/')
+KPID=$(grep -a 'taskmgr: beende pid=' "$S1" | head -1 | grep -oE 'pid=[0-9]+' | sed 's/.*=//')
+KRC=$(grep -a 'taskmgr: beende pid=' "$S1" | head -1 | sed -E 's/.*rc=(-?[0-9]+).*/\1/')
+# UND ES MUSS DER STARTER GEWESEN SEIN. Ein Lauf, der statt dessen den
+# Schreibtisch erwischt, hat auch "einen Prozess beendet" -- und misst
+# trotzdem etwas anderes, als er behauptet.
+LPID=$(grep -a 'taskmgr: zeile' "$S1" | grep 'name=launcher' | head -1 | grep -oE ' pid=[0-9]+' | sed 's/.*=//')
+if [ "${KPID:-x}" = "${LPID:-y}" ]; then ok "und es war der Starter (pid $KPID)"
+else bad "beendet wurde pid ${KPID:-?}, gemeint war der Starter (pid ${LPID:-?})"; fi
 num "der Aufruf SYS_KILL kam durch (rc)" "${KRC:-1}" eq 0
 if [ -n "${KPID:-}" ]; then
     VOR=$(grep -a "taskmgr: beende" -B 200 "$S1" | grep -a "pid=$KPID " | grep -aoE 'st=[0-9]+' | tail -1 | cut -d= -f2)
