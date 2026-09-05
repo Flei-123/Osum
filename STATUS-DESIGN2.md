@@ -265,7 +265,28 @@ davon ist. Die 6,3 ms sind also die obere Schranke, nicht der Alltag.
 | d) 4er-Raster | >= 95 % | **93 %** (827/880) |
 | e) themestore-Kontrastpruefung | 81/0 | **81 passed, 0 failed** |
 | f) Bildzeit bei 1920x1080 | < 16 ms | **~6,3 ms** |
-| g) 20 Laeufe -smp 4 ohne Panik | 20/20 | **laeuft** (siehe unten) |
+| g) 20 Laeufe -smp 4 ohne Panik | 20/20 | **20 / 20, 0 Panik** |
+
+### Zwanzig Laeufe mit vier Kernen
+
+`bash tools/design/dauerlauf.sh 20 4`, jeder Lauf eine eigene Maschine
+mit `-smp 4`, Bewegungen an (`shape=osum`, `motion=160`):
+
+```
+== 20 Laeufe, -smp 4, mit Bewegungen ==
+....................
+== 20 von 20 ohne Panik, 0 Fehlschlaege ==
+```
+
+Gezaehlt wird dreifach und nicht einfach: QEMU-Code 21, die Zeile
+`kernel: done` auf der seriellen Leitung, und **keine** Zeile mit
+PANIC/EXCEPTION/#PF/#GP/#DF. Ein Lauf, der nur den richtigen Code
+liefert, aber unterwegs eine Ausnahme gemeldet hat, zaehlt als
+Fehlschlag.
+
+Das ist die Zusage, die eine Animation am ehesten bricht: sie fasst
+staendig dieselben Felder an, waehrend der Zeitgeber auf vier Kernen
+weiterlaeuft.
 
 ### Regressionspruefung gegen den Ausgangszweig
 
