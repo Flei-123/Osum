@@ -60,6 +60,7 @@ import sched
 
 export {
     stage, ap_main, parse, mode_of, present,
+    wache_brueche,
     M_NOSMP, M_NOLOCK, M_SMPLONG, M_NOLOCKALL
 }
 
@@ -121,7 +122,22 @@ const STRESS_GAP: u64 = 6 // how wide the window inside the lock is
 // The frame test.
 const FR_PER: u64 = 16
 
-const AP_STACK_FRAMES: u64 = 4 // 16 KiB, as a task gets
+// RUNDE BLECHKERN: 64 KiB, WIE EINE AUFGABE SIE HEUTE BEKOMMT.
+//
+// Der alte Wert war 4 Rahmen mit dem Kommentar "16 KiB, as a task gets".
+// Das stimmte, als eine Aufgabe 4 Rahmen bekam. Runde LEISTE hat die
+// Kernstapel der Aufgaben auf 16 Rahmen gesetzt, weil der gemessene
+// Hoechststand `KS 46688` war -- 45,6 KiB. Der Kommentar blieb stehen
+// und war ab da falsch, der Wert auch: der Anwendungskern faehrt seither
+// mit einem Drittel des Stapels, den derselbe Ablaufplaner auf Kern 0
+// braucht.
+//
+// Und dieser Stapel hat KEINE Wache: er gehoert einer Aufgabe, die
+// `sched.adopt` uebernimmt, und die traegt `T_KSTACK = 0` -- `guard_check`
+// sieht sie also nicht an. Deshalb bekommt er hier einen Rahmen mehr,
+// der nur bemalt wird, damit ein Ueberlauf auffaellt statt zu wirken.
+const AP_STACK_FRAMES: u64 = 16 // 64 KiB, wie eine Aufgabe sie bekommt
+const AP_STACK_GUARD: u64 = 1 // ein Rahmen darunter, nur Muster
 const GDT_IN_PAGE: u64 = 0x000
 const GDTR_IN_PAGE: u64 = 0x040
 const TSS_IN_PAGE: u64 = 0x080
@@ -269,14 +285,62 @@ fn start(state: u64) {
     }
 }
 
+// ====================================================== RUNDE BLECHKERN
+// DIE WACHE UNTER DEM STAPEL EINES ANWENDUNGSKERNS.
+//
+// Dasselbe Muster wie `sched.guard_paint`, aber je Kern statt je
+// Aufgabe -- der Stapel eines gestarteten Kerns gehoert keiner Aufgabe
+// mit `T_KSTACK`, also sieht ihn `sched.guard_check` nicht.
+const WACHE_MUSTER: u64 = 0xC0DEFACEC0DEFACE
+static mut wache_von: [u64; 8] = [0 as u64; 8]
+
+fn wache_malen(roh: u64, stack: u64) {
+    var w: u64 = roh
+    while w < stack {
+        __mmio_write64(w as *mut u64, WACHE_MUSTER)
+        w = w + 8
+    }
+}
+
+// Wie viele Anwendungskerne ihre Wache angefasst haben. 0 = keiner.
+fn wache_brueche(state: u64) -> u64 {
+    var k: u64 = 1
+    var c: u64 = 0
+    while k < 8 {
+        let roh: u64 = wache_von[k as usize]
+        if roh != 0 {
+            let oben: u64 = roh + mem.FRAME_SIZE
+            var p: u64 = roh
+            var kaputt: u64 = 0
+            while p < oben {
+                if __mmio_read64(p as *mut u64) != WACHE_MUSTER {
+                    kaputt = 1
+                    p = oben
+                } else {
+                    p = p + 8
+                }
+            }
+            c = c + kaputt
+        }
+        k = k + 1
+    }
+    return c
+}
+
 fn one(state: u64, k: u64, param: u64, base: u64) {
-    let stack: u64 = mem.frame_run(state, AP_STACK_FRAMES)
+    // RUNDE BLECHKERN: der unterste Rahmen ist die Wache und gehoert
+    // nicht zum Stapel. `guard_wache` bemalt ihn; `guard_hin` zaehlt
+    // nach, ob das Muster noch steht.
+    let roh: u64 = mem.frame_run(state, AP_STACK_FRAMES + AP_STACK_GUARD)
     let page: u64 = mem.frame_alloc(state)
     let dfst: u64 = mem.frame_alloc(state)
-    if stack == 0 || page == 0 || dfst == 0 {
+    if roh == 0 || page == 0 || dfst == 0 {
         kstate.add(state, kstate.SMP_OFF + S_FAILED, 1)
         return
     }
+    let stack: u64 = roh + AP_STACK_GUARD * mem.FRAME_SIZE
+    wache_malen(roh, stack)
+    wache_von[k as usize] = roh
     let top: u64 = stack + AP_STACK_FRAMES * mem.FRAME_SIZE
     cpu.set(state, k, cpu.C_STACK, top)
     cpu.set(state, k, cpu.C_GDT, page)

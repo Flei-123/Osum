@@ -48,7 +48,7 @@ export {
     irq_save, irq_restore, set_kernel_stack,
     adopt, enter_task, set_idle, zombies, reap_all, cpu_of, cpu_mask,
     clear_signals,
-    set_affinity, affinity, ANY_CPU,
+    set_affinity, affinity, ANY_CPU, ring3_fremd,
     T_STATE, T_PID, T_RSP, T_KSTACK, T_KTOP, T_PRIO, T_BUDGET, T_WORK,
     T_WAKE, T_CR3, T_PARENT, T_EXIT, T_RUNS, T_ENTRY, T_USTACK, T_KIND,
     T_WAITPID, T_TICKS, T_PDPT, T_PD, T_PT, T_DATA, T_CWD, T_ARG,
@@ -663,6 +663,36 @@ fn may_run(state: u64, i: u64, me: u64) -> bool {
     return a == ANY_CPU || a == me
 }
 
+// ====================================================== RUNDE BLECHKERN
+// DER RIEGEL, DER NICHT VON EINER ZAHL IM SPEICHER ABHAENGT.
+//
+// Die Bindung eines Prozesses an Kern 0 steht in der Nebentabelle
+// (`TC_AFF`), also in Speicher, den ein Ueberlauf umschreiben kann -- und
+// genau davon handelt diese Runde. Deshalb steht dieselbe Bedingung hier
+// noch einmal, aus der GATTUNG der Aufgabe hergeleitet: ein Kern ungleich
+// null nimmt keinen Ring-3-Prozess, was auch immer in der Tabelle steht.
+fn darf_ring3(state: u64, i: u64, me: u64) -> bool {
+    return me == 0 || tget(state, i, T_KIND) != K_USER
+}
+
+// Wie viele Ring-3-Prozesse zuletzt auf einem Kern ungleich null gelaufen
+// sind. Muss immer 0 sein; die Tafel zeigt die Zahl, damit "es ist
+// behoben" nicht geglaubt, sondern gelesen wird.
+fn ring3_fremd(state: u64) -> u64 {
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var i: u64 = 1
+    var c: u64 = 0
+    while i < n {
+        let wo: u64 = tc_get(state, i, TC_CPU)
+        if tget(state, i, T_KIND) == K_USER && wo != 0
+        && wo < kstate.MAX_CPUS {
+            c = c + 1
+        }
+        i = i + 1
+    }
+    return c
+}
+
 // ------------------------------------------------- the interrupt flag
 
 // A critical section in a kernel is not a lock -- on one processor it is
@@ -968,7 +998,50 @@ fn create(state: u64, kind: u64, prio: u64, arg: u64, entry: u64) -> u64 {
     }
     tc_set(state, slot, TC_CPU, kstate.MAX_CPUS)
     tc_set(state, slot, TC_MASK, 0)
-    tc_set(state, slot, TC_AFF, ANY_CPU)
+    // ================================================== RUNDE BLECHKERN
+    // RING 3 BLEIBT AUF DEM STARTKERN -- UND JETZT STEHT ES AUCH IM CODE.
+    //
+    // `kernel/arch/x86_64/smp.fi` schreibt seit Runde K5 als ausdrueck-
+    // liche Bedingung dieses Kerns hin: "Ring 3 stays on the boot
+    // processor ... the application processors run kernel tasks". Der
+    // Grund steht daneben: `syscall_entry` in isr.s holt den Kernstapel
+    // aus EINEM festen Wort der Datenseite (`kdata + KSTACK_CUR`), und
+    // `set_kernel_stack` schreibt dieses Wort nur, wenn Kern 0 es
+    // schreibt.
+    //
+    // DIE BEDINGUNG WURDE NIE DURCHGESETZT. Diese Zeile stand auf
+    // ANY_CPU -- fuer JEDE Gattung, also auch fuer K_USER. Ein
+    // Anwendungskern durfte damit einen Ring-3-Prozess nehmen; dessen
+    // naechster `syscall` landete auf dem Kernstapel der Aufgabe, die
+    // gerade auf Kern 0 lief. Zwei Kerne auf einem Stapel, und der
+    // naechste Ruecksprung geht irgendwohin.
+    //
+    // GEMESSEN, am ausgelieferten Abbild b2addaf7, Limine/UEFI, KVM,
+    // `-cpu host`, sonst identisch, nur die Kernzahl verschieden:
+    //
+    //     -smp 1   791 Zeilen Protokoll, NULL Ausnahmen, Leiste laeuft
+    //     -smp 4   Absturz: #DB rip=0x100453, danach #GP und #UD
+    //     -smp 8   Absturz: user fault err=0xf, #DB, #DF, lock stuck
+    //
+    // Justins Foto vom 05.09. zeigt denselben Abbruch an derselben
+    // Stelle: die letzte Zeile ist `taskbar: shape file= ...`, dann
+    // `VEK 6 #UD RIP 0x80` auf KERN 2 in einer Aufgabe der Gattung 1.
+    // 0x80 ist keine Adresse, sondern der Rest einer ueberschriebenen
+    // Ruecksprungkette.
+    //
+    // Die Kernaufgaben (K_WORKER, K_GRIND, K_NETD, K_AIO, ...) bleiben
+    // auf ALLEN Kernen -- sie verlassen Ring 0 nie und haben mit
+    // KSTACK_CUR nichts zu tun. Verloren geht also nichts ausser der
+    // Wanderung von Benutzerprozessen, und die war nie zugesagt.
+    //
+    // Aufgehoben wird das erst von der Runde, die KSTACK_CUR je Kern
+    // fuehrt (GS-Basis oder zweiter Tabellenzugriff im Einsprung, in
+    // Assembler, vor dem ersten Stapel) -- genau wie es smp.fi sagt.
+    if kind == K_USER {
+        tc_set(state, slot, TC_AFF, 0)
+    } else {
+        tc_set(state, slot, TC_AFF, ANY_CPU)
+    }
     clear_signals(state, slot)
     atomic.lock_give(state, atomic.L_SCHED)
     irq_restore(flags)
@@ -1267,7 +1340,7 @@ fn pick(state: u64) -> u64 {
     while k <= n {
         let i: u64 = (cur + k) % n
         if tget(state, i, T_KIND) != K_IDLE && tget(state, i, T_STATE) == S_READY
-        && may_run(state, i, me) {
+        && may_run(state, i, me) && darf_ring3(state, i, me) {
             return i
         }
         k = k + 1
