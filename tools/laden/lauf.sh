@@ -72,8 +72,20 @@ fi
 # fotografiert, bekommt ein leeres Bild; gemessen: 1280x1024 mit ZWEI
 # Farben.
 [ "${LADEN_WARTE:-0}" != 0 ] && sleep "${LADEN_WARTE}"
+# EIN BILD VOR DEM EINGRIFF. Der Nachweis "das Programm kam aus dem
+# Laden" braucht ZWEI Aufnahmen derselben Maschine: den Starter mit der
+# Liste, und danach dasselbe Bild mit dem gestarteten Fenster darin.
+# Zwei Laeufe waeren zwei Maschinen.
+if [ "${LADEN_VORSHOT:-nein}" = ja ]; then
+    python3 tools/gfx/screenshot.py "$sock" "$OUT/$NAME-vor.ppm" 25 \
+        > "$OUT/$NAME-vor.shot" 2>&1
+    if [ -s "$OUT/$NAME-vor.ppm" ]; then
+        python3 -c "import sys;from PIL import Image;Image.open(sys.argv[1]+'.ppm').convert('RGB').save(sys.argv[1]+'.png')" \
+            "$OUT/$NAME-vor" 2>/dev/null
+    fi
+fi
 if [ -n "$MON" ] && [ -s "$MON" ]; then
-    python3 tools/wm/monitor.py "$sock" "$MON" > "$OUT/$NAME.monlog" 2>&1
+    python3 tools/wm/monitor.py "$sock" "$MON" "${LADEN_TIPPAUSE:-0.10}" > "$OUT/$NAME.monlog" 2>&1
 fi
 # DIE ZWEITE MARKE, und sie ist der Grund, warum die Bilder dieser
 # Runde ueberhaupt etwas zeigen: das Terminalfenster haengt an der
