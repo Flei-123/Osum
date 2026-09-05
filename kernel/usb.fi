@@ -79,7 +79,7 @@ export {
     // darf `hidin` NICHT einbinden -- hidin -> gfx -> kgui waere ein
     // Kreis im Modulgraphen, und der bleibt ein Baum.
     hid_keys, hid_los, hid_bew,
-    dev_reps, dev_arms, dev_cc, dev_dci, dev_iface, dev_generic, dev_roh,
+    dev_reps, dev_arms, dev_cc, dev_dci, dev_iface, dev_generic, dev_roh, dev_rohw, dev_rohn,
     stat,
     have_kbd, have_mouse, msc_errors, msc_ios, selftest,
     rangtest, rangtest_max,
@@ -302,6 +302,23 @@ const D_ARMS: u64 = 272 // wie oft ein Block auf den Ring gelegt wurde
 // FEHLER UND WIEDERBELEBUNGEN, JE GERAET.
 const D_ERRS: u64 = 280 // Transfers mit schlechtem Fertigmeldungscode
 const D_HEAL: u64 = 288 // wie oft der Endpunkt wiederbelebt wurde
+// ====================================================== RUNDE VIELKERN
+// DER LETZTE BERICHT, DER NICHT LEER WAR -- UND WARUM DAS DER
+// UNTERSCHIED ZWISCHEN EINEM MESSGERAET UND EINER NULL IST.
+//
+// `dev_roh` las bisher den DMA-Puffer, also das, was die Karte ZULETZT
+// hineingeschrieben hat. Eine USB-Tastatur im Boot-Protokoll schickt
+// beim LOSLASSEN einen Bericht aus acht Nullen. Nach jedem normalen
+// Tastendruck steht dort also 0000000000000000 -- die Tafel zeigte
+// getreulich den Zustand "gerade wird keine Taste gehalten".
+//
+// Damit war die Zeile genau dann leer, wenn man sie liest, und Justins
+// Anleitung dazu lautete folgerichtig "eine Taste druecken und HALTEN,
+// dann fotografieren". Ein Messgeraet, das eine dritte Hand braucht,
+// ist keins. Gemerkt wird deshalb der letzte Bericht, der NICHT nur
+// Nullen war, und wie viele davon es gab.
+const D_ROHW: u64 = 296 // die ersten acht Oktett, als ein Wort
+const D_ROHN: u64 = 304 // wie viele nicht-leere Berichte es gab
 
 const DRV_NONE: u64 = 0
 const DRV_KBD: u64 = 1
@@ -1707,6 +1724,34 @@ fn arm(state: u64, d: u64) {
         report_buf(state, d), dg(state, d, D_INTLEN))
 }
 
+fn roh_merken(state: u64, d: u64) {
+    let b: u64 = report_buf(state, d)
+    var w: u64 = 0
+    var k: u64 = 0
+    while k < 8 {
+        w = w | ((kstate.get8(b + k) as u64) << (k * 8))
+        k = k + 1
+    }
+    if w != 0 {
+        ds(state, d, D_ROHW, w)
+        ds(state, d, D_ROHN, dg(state, d, D_ROHN) + 1)
+    }
+}
+
+fn dev_rohw(state: u64, d: u64) -> u64 {
+    if d >= MAX_DEV {
+        return 0
+    }
+    return dg(state, d, D_ROHW)
+}
+
+fn dev_rohn(state: u64, d: u64) -> u64 {
+    if d >= MAX_DEV {
+        return 0
+    }
+    return dg(state, d, D_ROHN)
+}
+
 fn report_buf(state: u64, d: u64) -> u64 {
     return state + REPORT_OFF + d * 64
 }
@@ -1748,6 +1793,10 @@ fn service(state: u64) {
                     if cc == xhci.CC_SUCCESS || cc == xhci.CC_SHORT {
                         s(state, S_REPORTS, g(state, S_REPORTS) + 1)
                         ds(state, d, D_REPS, dg(state, d, D_REPS) + 1)
+                        // RUNDE VIELKERN: den Bericht MERKEN, bevor
+                        // der naechste ihn ueberschreibt -- und nur,
+                        // wenn er etwas sagt. Siehe D_ROHW.
+                        roh_merken(state, d)
                         deliver(state, d)
                     } else {
                         // ==================== RUNDE STARTKNOPF
