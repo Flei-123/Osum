@@ -2364,6 +2364,62 @@ fn do_write(state: u64, me: u64, fd: u64, buf: u64, want: u64) -> u64 {
     return write_of(state, me, of, buf, len)
 }
 
+// ==================================================== RUNDE MERGE-6
+// EIN `write` AUS RING 3 BLEIBT EIN `write` -- AUCH MIT ACHT KERNEN.
+//
+// HIER STANDEN ZWEIMAL DIESELBEN VIER ZEILEN: Text aus Ring 3 nach
+// `kstate.BLOCK_OFF` kopieren und von dort an das Terminal geben.
+// `BLOCK_OFF` ist EIN Puffer von 4096 Oktetten in der Datenseite und
+// gehoert der ganzen Maschine -- dieselbe Fehlerform wie `KSTACK_CUR`
+// (VIELKERN 1) und `fs.buf_in` (VIELKERN 3), nur an der Stelle, an der
+// dieses System seine Messwerte HERAUSGIBT.
+//
+// Solange Ring 3 auf Kern 0 blieb, war das richtig. Seit VIELKERN 3
+// (5fe74f6, "scharf geschaltet -- die Vorgabe ist Ring 3 auf allen
+// Kernen") ist es falsch, und es ist beim Zusammenfuehren mit der Runde
+// WERKZEUGE aufgefallen. GEMESSEN, aus dem Mitschnitt eines Laufs mit
+// vier Kernen und vier Ring-3-Programmen:
+//
+//     er: treffetaskmgr: start bww=7=i5=3 n2ame= [bTerhmin=al5] ...
+//
+// Das sind DREI Zeilen ineinander. Fuer einen Menschen ist es
+// haesslich; fuer einen Pruefstand ist es das Ende der Messung. Die
+// Zeile `wlib: win id=..`, aus der tools/werkzeug/klickplan.py JEDE
+// Klickkoordinate holt, war in diesem Lauf ueberhaupt nicht mehr zu
+// finden -- acht rote Zusagen der Runde WERKZEUGE, und keine davon
+// hatte mit dem Aufgabenverwalter zu tun.
+//
+// DIE SPERRE IST DIE, DIE VIELKERN 3 SCHON GEBAUT HAT
+// (`serial.zeile_an`/`zeile_aus`): je Kern wiedereintrittsfaehig, also
+// verklemmt sie sich nicht gegen sich selbst, und BEGRENZT, also
+// verschluckt ein Kern, der mit der Sperre in der Hand gestorben ist,
+// die Ausgabe der anderen nicht. Sie lag bis hierher NUR um die Zeilen,
+// die der KERN schreibt -- Ring 3 ging daran vorbei. Diese Funktion
+// zieht sie ueber beides.
+//
+// SIE DECKT ZWEIERLEI AB, und beides ist noetig:
+//   * den PUFFER: solange dieser Kern drin ist, kopiert kein anderer in
+//     `BLOCK_OFF`, also gibt kein Kern den Text eines anderen aus;
+//   * die REIHENFOLGE: ein `write` geht am Stueck auf die Leitung, statt
+//     Zeichen fuer Zeichen mit einem fremden verzahnt zu werden.
+//
+// WAS SIE NICHT ABDECKT: die uebrigen dreiundvierzig Wege in dieser
+// Datei, die `BLOCK_OFF` oder `NAME_OFF` anfassen. Sie stehen mit Zahl
+// in docs/RUNDE-MERGE6.md und in tools/vielkern/einkern.py; die
+// Ausgabe ist der erste, weil sie die einzige ist, deren Bruch eine
+// ABNAHME zum Luegen bringt.
+fn conout(state: u64, me: u64, t: u64, buf: u64, len: u64) -> u64 {
+    let z: u64 = serial.zeile_an(cpu.here(state))
+    let bounce: u64 = state + kstate.BLOCK_OFF
+    if !copy_in(state, me, bounce, buf, len) {
+        serial.zeile_aus(z)
+        return neg(errno.E_FAULT)
+    }
+    let r: u64 = tty.write_out(state, t, bounce, len)
+    serial.zeile_aus(z)
+    return r
+}
+
 // Der Rumpf von `do_write`, aber auf einem EINTRAG DER OFFENEN DATEIEN
 // statt auf einer Deskriptornummer. Aufgespalten fuer die native ABI: ein
 // Handle zeigt auf genau diesen Eintrag, und es waere falsch, es vorher
@@ -2380,19 +2436,10 @@ fn write_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
         // aendert, ist die eine Weiche in `tty.emit`: sagt Runde K7
         // dort SINK_SCREEN, geht dieselbe Ausgabe auf den Bildschirm,
         // ohne dass hier eine Zeile anders wird.
-        let bounce: u64 = state + kstate.BLOCK_OFF
-        if !copy_in(state, me, bounce, buf, len) {
-            return neg(errno.E_FAULT)
-        }
-        return tty.write_out(state, tty_of(state, me), bounce, len)
+        return conout(state, me, tty_of(state, me), buf, len)
     }
     if kind == file.K_TTY {
-        let t: u64 = file.open_ino(state, of)
-        let bounce: u64 = state + kstate.BLOCK_OFF
-        if !copy_in(state, me, bounce, buf, len) {
-            return neg(errno.E_FAULT)
-        }
-        return tty.write_out(state, t, bounce, len)
+        return conout(state, me, file.open_ino(state, of), buf, len)
     }
     if kind == file.K_PIPEW {
         return pipe_write(state, me, of, buf, len)

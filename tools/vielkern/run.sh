@@ -155,13 +155,23 @@ def roh(f):
                           "\n".join(funcs.get(f,[]))))
 def callers(f):
     return [n for n,b in funcs.items() if n!=f and re.search(r"(?<![\w.])"+f+r"\(", "\n".join(b))]
-offen=[f for f in funcs if roh(f) and not enter(f)]
+# RUNDE MERGE-6: DIE GEGENPROBE IST KEIN FEHLER.
+# `inode_get_blind` ist WOERTLICH der Rumpf, den `inode_get` vor
+# VIELKERN 3 hatte, und `race_core` ruft ihn -- absichtlich und nur,
+# wenn `fsblind` auf der Befehlszeile steht. Ein Pruefer, der seine
+# eigene Gegenprobe anzeigt, zwingt den naechsten dazu, die Gegenprobe
+# zu loeschen statt sie zu behalten. Beide stehen deshalb HIER mit
+# Namen, und wer einen dritten Namen dazutut, muss ihn hier eintragen
+# und begruenden.
+mitwissen={"inode_get_blind","race_core"}
+offen=[f for f in funcs if roh(f) and not enter(f) and f not in mitwissen]
 leck=[]; gesehen=set(); todo=list(offen)
 while todo:
     f=todo.pop()
     if f in gesehen: continue
     gesehen.add(f)
     if enter(f): continue
+    if f in mitwissen: continue
     if f in exp: leck.append(f); continue
     cs=callers(f)
     if not cs: leck.append(f+"(ohne-Aufrufer)")
@@ -208,7 +218,14 @@ ARGS=(build "$TMPD/disk.img" 16384 /lib/
 for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/$p.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
 ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme" "/etc/taskbar.conf=$TMPD/tb.conf")
-while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel")
+# RUNDE MERGE-6: `nur=` -- SONST IST DIESER LAEUFER TOT.
+# Die Runde WERKZEUGE hat assets/apps/taskmgr.osp dazugelegt. Ein
+# Buendel ist ein VERWEIS auf eine Datei unter /bin; steht sie nicht in
+# $PROGS, bricht mkfs.py mit "gibt es nicht" ab -- und dann faellt
+# ALLES ab Abschnitt 5, weil es keine Platte gibt. Gemessen am
+# zusammengefuehrten Stand VOR dieser Zeile: 22 rote Zusagen, davon 21
+# allein an der fehlenden Platte.
+while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel" "nur=$PROGS")
 while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
     && ok "die Platte steht ($(stat -c%s "$TMPD/disk.img") Oktette)" \
