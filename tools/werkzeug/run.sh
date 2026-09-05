@@ -155,6 +155,20 @@ bash tools/werkzeug/build.sh "$TMPD/b0" app=/bin/taskmgr,melde,takt,300 \
 S0="$TMPD/b0/serial.txt"
 BW=$(grep -a 'taskmgr: start bw=' "$S0" | head -1 | sed -E 's/.*bw=([0-9]+).*/\1/')
 BH=$(grep -a 'taskmgr: start bw=' "$S0" | head -1 | sed -E 's/.*bh=([0-9]+).*/\1/')
+# RUNDE MERGE-6: DIE LAGE WIRD GELESEN, NICHT GETIPPT.
+#
+# Hier stand `--window=20,14` fest in der Zeile darunter -- dieselben
+# zwei Zahlen wie in kernel/user/taskmgr.fi, also an zwei Stellen. Beim
+# Zusammenfuehren mit der Runde OBERFLAECHE ist die 14 auf 16 gewandert
+# (14/4 = 3,5 liegt neben dem Viererraster), und dieser Pruefer haette
+# ohne ein Wort daneben gemessen: jede Beschriftung im Fenster waere um
+# zwei Bildpunkte verschoben gesucht worden. Das Programm meldet seine
+# Lage jetzt selbst (`wx=`/`wy=`); die 20/14 bleiben nur als Rueckfall
+# fuer einen Mitschnitt aus der Zeit davor.
+WX=$(grep -a 'taskmgr: start bw=' "$S0" | head -1 | sed -nE 's/.* wx=([0-9]+).*/\1/p')
+WY=$(grep -a 'taskmgr: start bw=' "$S0" | head -1 | sed -nE 's/.* wy=([0-9]+).*/\1/p')
+WX=${WX:-20}
+WY=${WY:-14}
 num "die Fensterbreite steht" "${BW:-0}" gt 400
 RAUS=$(grep -a 'taskmgr: rect id=' "$S0" | awk -v w="$BW" -v h="$BH" '
     { x=0;y=0;ww=0;hh=0
@@ -165,7 +179,7 @@ RAUS=$(grep -a 'taskmgr: rect id=' "$S0" | awk -v w="$BW" -v h="$BH" '
 num "Rechtecke, die aus dem Fenster ragen" "$RAUS" eq 0
 if [ -s "$TMPD/b0/allein.ppm" ]; then
     python3 tools/themestore/shotcheck.py "$TMPD/b0/allein.ppm" "$S0" \
-        --window=20,14,"$BW","$BH" --cut="taskmgr: neu" \
+        --window="$WX","$WY","$BW","$BH" --cut="taskmgr: neu" \
         > "$TMPD/shot1.txt" 2>&1
     cat "$TMPD/shot1.txt" | sed 's/^/        /' | head -3
     LEER=$(grep -oE 'empty [0-9]+' "$TMPD/shot1.txt" | grep -oE '[0-9]+')
