@@ -117,7 +117,7 @@ export {
     SYS_OSUM_FTYPE, SYS_OSUM_FOPEN, SYS_OSUM_FLIST, SYS_OSUM_FREG,
     SYS_OSUM_TILEGET, SYS_OSUM_TILEDO, SYS_OSUM_TILECONF,
     SYS_OSUM_TILEBIND,
-    SYS_OSUM_PMON, SYS_OSUM_CPUSTAT,
+    SYS_OSUM_PMON, SYS_OSUM_CPUSTAT, SYS_OSUM_SPERRE,
     CAP_BASE, CAP_VERSION, CAP_READ, CAP_WRITE, CAP_CLOSE, CAP_DUP,
     CAP_INSPECT, CAP_TRANSFER, CAP_COUNT, CAP_MAXNR,
     SYS_SOCKET, SYS_CONNECT, SYS_ACCEPT, SYS_SENDTO, SYS_RECVFROM,
@@ -1068,6 +1068,31 @@ const SYS_OSUM_PMON: u64 = 1830
 // verschweigt, schuetzt niemanden. GESCHRIEBEN WIRD HIER GAR NICHTS.
 const SYS_OSUM_CPUSTAT: u64 = 1840
 
+// ============================================ RUNDE ALLTAG: DIE SPERRE
+//
+//   1850  osum_sperre(op, arg)
+//
+//     op 0  steht sie?           -> 0 oder 1
+//     op 1  sperren              -> 0   (darf jeder: sich selbst
+//                                        aussperren ist erlaubt)
+//     op 2  aufsperren           -> 0 oder -EPERM
+//     op 3  Leerlauf in ms       -> wie lange nichts eingegeben wurde
+//     op 4  ich bin der Sperrer  -> 0 oder -EPERM
+//     op 5  falscher Versuch     -> die neue Zahl
+//     op 6  Zaehler lesen (arg: 0 Sperrungen, 1 Aufsperrungen,
+//           2 Fehlversuche, 3 Neustarts des Sperrers, 4 Sperrer-PID)
+//
+// AUFSPERREN DARF NUR DER SPERRER, und das ist die ganze Sicherheit
+// dieser Sache: das Kennwort prueft ein Programm in Ring 3
+// (kernel/user/lock.fi, gegen /etc/shadow mit PBKDF2), aber WER das
+// darf, entscheidet der Kern. Ein anderes Programm, das `op 2` ruft,
+// bekommt -EPERM -- auch dann, wenn es das Kennwort kennt.
+//
+// SICH ZUM SPERRER MACHEN (op 4) geht nur, wenn es keinen gibt oder der
+// eingetragene tot ist. Sonst koennte ein Programm sich waehrend der
+// Sperre dazwischenschieben und danach aufsperren.
+const SYS_OSUM_SPERRE: u64 = 1850
+
 const CS_COUNT: u64 = 0 // wie viele Kerne die Firmware gemeldet hat
 const CS_ONLINE: u64 = 1 // wie viele davon Firn-Code erreicht haben
 const CS_UP: u64 = 2 // laeuft DIESER Kern
@@ -2001,6 +2026,9 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // RUNDE WERKZEUGE: die Kerne, einzeln.
     if number == SYS_OSUM_CPUSTAT {
         return do_cpustat(state, a0, a1)
+    }
+    if number == SYS_OSUM_SPERRE {
+        return do_sperre(state, me, a0, a1)
     }
     // ------------------------------------------------------ RUNDE K13
     //
@@ -6431,6 +6459,71 @@ fn do_pstat(state: u64, index: u64, field: u64) -> u64 {
 
 // Ein Feld eines Kerns. Alles daraus steht im Satz des Kerns
 // (`kernel/cpu.fi`) oder in der Aufgabe, die gerade auf ihm laeuft.
+// RUNDE ALLTAG: die Sperre. Siehe die Nummer 1850 weiter oben.
+fn do_sperre(state: u64, me: u64, op: u64, arg: u64) -> u64 {
+    let ich: u64 = sched.tget(state, me, sched.T_PID)
+    let sp: u64 = kstate.K11_OFF
+    if op == 0 {
+        return kstate.get(state, sp + kstate.SP_ON)
+    }
+    if op == 1 {
+        if kstate.get(state, sp + kstate.SP_ON) == 0 {
+            kstate.set(state, sp + kstate.SP_ON, 1)
+            kstate.add(state, sp + kstate.SP_LOCKS, 1)
+        }
+        return 0
+    }
+    if op == 2 {
+        if kstate.get(state, sp + kstate.SP_PID) != ich {
+            return neg(errno.E_PERM)
+        }
+        kstate.set(state, sp + kstate.SP_ON, 0)
+        kstate.set(state, sp + kstate.SP_PID, 0)
+        kstate.set(state, sp + kstate.SP_SLOT, 0)
+        kstate.add(state, sp + kstate.SP_UNLOCKS, 1)
+        kstate.set(state, sp + kstate.SP_LAST, time.mono_ns(state))
+        return 0
+    }
+    if op == 3 {
+        let l: u64 = kstate.get(state, sp + kstate.SP_LAST)
+        let jetzt: u64 = time.mono_ns(state)
+        if l == 0 || jetzt < l {
+            return 0
+        }
+        return (jetzt - l) / 1000000
+    }
+    if op == 4 {
+        let alt: u64 = kstate.get(state, sp + kstate.SP_PID)
+        if alt != 0 && alt != ich {
+            if sched.find_pid(state, alt) < kstate.MAX_TASKS {
+                return neg(errno.E_PERM)
+            }
+        }
+        kstate.set(state, sp + kstate.SP_PID, ich)
+        kstate.set(state, sp + kstate.SP_SLOT, me)
+        return 0
+    }
+    if op == 5 {
+        return kstate.add(state, sp + kstate.SP_TRIES, 1)
+    }
+    if op == 6 {
+        if arg == 0 {
+            return kstate.get(state, sp + kstate.SP_LOCKS)
+        }
+        if arg == 1 {
+            return kstate.get(state, sp + kstate.SP_UNLOCKS)
+        }
+        if arg == 2 {
+            return kstate.get(state, sp + kstate.SP_TRIES)
+        }
+        if arg == 3 {
+            return kstate.get(state, sp + kstate.SP_SPAWNS)
+        }
+        return kstate.get(state, sp + kstate.SP_PID)
+    }
+    return neg(errno.E_INVAL)
+}
+
 fn do_cpustat(state: u64, index: u64, field: u64) -> u64 {
     if field == CS_COUNT {
         return cpu.count(state)
