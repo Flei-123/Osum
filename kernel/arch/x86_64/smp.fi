@@ -57,6 +57,11 @@ import acpi
 import guard
 import fpu
 import sched
+// RUNDE VIELKERN: ein gestarteter Kern braucht dieselben vier
+// Systemaufruf-Register wie der Startkern (EFER.SCE, LSTAR, STAR,
+// SFMASK) und seine eigene GS-Basis. `user.fi` bindet nur serial,
+// kstate und mem ein -- der Import macht also keinen Ring.
+import user
 
 export {
     stage, ap_main, parse, mode_of, present,
@@ -404,6 +409,19 @@ fn ap_main(state: u64, index: u64) {
     // teuer macht. Er fragt `cpuid` nicht neu; was der
     // Startprozessor entschieden hat, gilt fuer die Maschine.
     fpu.apply_here(state)
+    // ============================================== RUNDE VIELKERN
+    // DIE VIER SYSTEMAUFRUF-REGISTER UND DIE GS-BASIS, HIER UND JETZT.
+    //
+    // Ohne diese Zeile ist `syscall` auf diesem Kern ein #UD (EFER.SCE
+    // fehlt), und selbst mit ihm faende der Einsprung ohne GS-Basis
+    // seinen Kernstapel nicht. Sie steht VOR `C_ONLINE = 1`, denn ab
+    // diesem Merkzeichen darf der Ablaufplaner dem Kern Arbeit geben.
+    user.setup_here(state, cpu.record(state, index))
+    // Und danach die Gegenprobe, von dem Kern, um den es geht: zeigt
+    // die Basis wirklich auf SEINEN Satz? Erst wenn das hier steht,
+    // laesst `sched.darf_ring3` einen Benutzerprozess auf ihn.
+    sched.gs_melden(state, index,
+        user.gs_base() == cpu.record(state, index))
     apic.core_init(state, index)
     cpu.set(state, index, cpu.C_ONLINE, 1)
     atomic.barrier()
@@ -442,6 +460,10 @@ fn tables(state: u64, index: u64) {
     // same on every core.
     idt.tss_install(page + GDT_IN_PAGE, page + TSS_IN_PAGE,
         cpu.get(state, index, cpu.C_STACK), cpu.get(state, index, cpu.C_TSS))
+    // RUNDE VIELKERN: und WO dieses Segment liegt, damit
+    // `sched.set_kernel_stack` bei jedem Wechsel die RSP0 DIESES Kerns
+    // nachfuehren kann. Bisher wusste das niemand ausser dieser Zeile.
+    cpu.set(state, index, cpu.C_TSSADDR, page + TSS_IN_PAGE)
     asm("lidt [rax]", in("rax") state + kstate.IDTR, clobber("memory"))
 }
 

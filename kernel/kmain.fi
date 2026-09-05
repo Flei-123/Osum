@@ -408,6 +408,16 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // not only before the excursion of round 59. Without EFER.SCE the
     // `sysretq` of `enter_user_task` is an invalid opcode.
     user.setup(state)
+    // RUNDE VIELKERN: die GS-Basis und der Kernstapel, sofort nach dem
+    // Setzen. Ohne diese Zeile war eine 0 in einem der beiden nur als
+    // Dreifachfehler im Einsprung sichtbar (rsp=0 beim ersten push).
+    var s_g0: [u8; 16] = "user: gs-basis  "
+    var s_g1: [u8; 10] = "  kstack  "
+    serial.puts((&s_g0[0]) as u64)
+    serial.hex(user.gs_base())
+    serial.puts((&s_g1[0]) as u64)
+    serial.hex(sched.kstack_hier(state))
+    serial.nl()
     // ROUNDE K10: SMEP und SMAP, und zwar hier -- direkt hinter den
     // vier Modellregistern und VOR der ersten Seite mit Benutzerbit.
     // Ein Schutzbit, das erst nach dem ersten unprivilegierten
@@ -609,6 +619,31 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     kernel behaves as it did; under `-smp 4` it starts the other
     //     three and hands them work.
     smp.stage(state)
+    // ================================================== RUNDE VIELKERN
+    // DIE GS-BASIS DES STARTKERNS, JETZT MIT SEINER ECHTEN NUMMER.
+    //
+    // `user.setup` weiter oben hat sie auf den Satz 0 gesetzt -- zu dem
+    // Zeitpunkt gibt es den APIC noch nicht, also auch keine Kernnummer.
+    // Hier ist beides da. Stimmt es schon, kostet die Zeile ein `wrmsr`
+    // und einen Vergleich; stimmt es nicht (eine MADT, die den
+    // Startprozessor nicht als ersten auffuehrt), ist es der
+    // Unterschied zwischen einem laufenden System und einem, dessen
+    // erster Systemaufruf in den Speicher unterhalb des Kerns springt.
+    user.gs_set(sched.gs_soll(state))
+    // Und der Kernstapel dazu: bekommt der Startkern hier eine andere
+    // Satznummer als 0, stuende sein Stapel sonst im falschen Satz.
+    sched.kstack_wieder(state)
+    let gs_ok: bool = sched.gs_pruefen(state, user.gs_base())
+    var s_gs: [u8; 22] = "smp: gs-basis kern 0  "
+    var s_gsj: [u8; 4] = "ok  "
+    var s_gsn: [u8; 7] = "FALSCH "
+    serial.puts((&s_gs[0]) as u64)
+    if gs_ok {
+        serial.puts((&s_gsj[0]) as u64)
+    } else {
+        serial.puts((&s_gsn[0]) as u64)
+    }
+    serial.nl()
     // RUNDE AVX, ZWEITER DURCHGANG: dieselben vier Prozesse NOCH EINMAL,
     // jetzt aber mit allen Kernen oben. Der erste Durchgang oben lief
     // auf einem Prozessor -- er misst, dass der Wechsel sichert; dieser
