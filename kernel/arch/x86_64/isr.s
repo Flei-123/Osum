@@ -184,6 +184,7 @@ isr_common:
      * Mit `swapgs` waere genau das ein Fehler gewesen. */
     .set CPU_SYSRSP, 136            /* cpu.C_SYSRSP -- kernel/cpu.fi */
     .set CPU_KSTACK, 144            /* cpu.C_KSTACK -- kernel/cpu.fi */
+    .set CPU_SYSCALLS, 160          /* cpu.C_SYSCALLS -- kernel/cpu.fi */
 
     .globl syscall_entry
 syscall_entry:
@@ -227,6 +228,14 @@ syscall_entry:
      */
     movq %rsp, %gs:CPU_SYSRSP       /* the user stack -- no register is free */
     movq %gs:CPU_KSTACK, %rsp
+    /* RUNDE VIELKERN 3: EIN BEFEHL, DER DEN BEWEIS FUEHRT.
+     *
+     * Er zaehlt in DENSELBEN Satz, aus dem eine Zeile darueber der
+     * Kernstapel kam. Zaehlt ein Kern hier hoch, dann hat sein
+     * `%gs:CPU_KSTACK` funktioniert -- er steht ja schon darauf.
+     * Kein Register wird angefasst; die Flaggen sind hier frei, die
+     * des Benutzers liegen in r11 und werden gleich gerettet. */
+    incq %gs:CPU_SYSCALLS
     pushq %gs:CPU_SYSRSP            /* user rsp */
     pushq %r11                      /* user rflags */
     pushq %rcx                      /* user rip */
