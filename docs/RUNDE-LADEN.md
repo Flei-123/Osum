@@ -230,6 +230,78 @@ Vier Zertifikate, Kettentiefe 3 — das ist Let's Encrypt und nicht eine
 Wurzel, die derselbe Lauf zwei Minuten vorher selbst gebaut hat.
 `ota suchen` **installiert nichts**; das steht so im Protokoll.
 
+### Die Installation — gemessen, mit Uhrzeit
+
+Ein Osum ohne ein einziges Paket, `ota einspielen` gegen den echten
+Server. Anfang und Ende sagt `/bin/date` im Gast:
+
+    2026-09-05 15:37:16   ota einspielen
+    2026-09-05 16:13:03   fertig               -> 35 min 47 s
+
+    ota: platz 126317568          ota: noetig 7402026
+    ota: streuwert stimmt edit-1.opk … widgetdemo-1.opk      (8 von 8)
+    opk: Signatur geprüft /tmp/ota/INDEX.sig
+    opk: Signatur geprüft /tmp/ota/<paket>.opk               (8 von 8)
+    opk: installiert edit -> 0 … widgetdemo -> 7             (8 von 8)
+    ota: BEREIT ZUM NEUSTART -- es wird NICHT
+    ota: fassung hier 3           ota: generation 7
+
+Danach:
+
+    osum$ opk liste
+    generation 7
+      widgetdemo -> 1aeea9192a1f      settings  -> 4949ca447fa0
+      top        -> cb7c7badab50      netview   -> 515978a5dc65
+      themetest  -> e68ff554b54d      netmon    -> 03cfdf6397a3
+      explorer   -> 959bb0557376      edit      -> 646df8d7cca0
+
+Die Zahl neben jedem Namen ist der Streuwert über **Metadaten und
+Nutzlast** — dieselbe, die `opk.py bauen` auf dem Wirt ausgegeben hat.
+Zwei Programme, zwei Rechnungen, ein Ergebnis.
+
+**Und die Fassungsnummer geht zuletzt hoch**: `ota: fassung hier 3`
+steht *nach* `opk: installiert widgetdemo`. Fällt zwischen beidem der
+Strom aus, steht die neue Generation und die Fassung ist noch alt — der
+nächste Lauf spielt dasselbe noch einmal ein. Andersherum wäre es ein
+Gerät, das eine Fassung führt, die es nicht hat.
+
+### Der Starter — und das ist das eigentliche Bild dieser Runde
+
+Derselbe Rechner, neu gestartet, mit Oberfläche. `/bin/launcher` liest
+`/apps` und meldet, was er gefunden hat:
+
+    launcher: apps=8
+    launcher: treffer i=0 name=[Datei-Explorer] exec=[/apps/explorer.osp/start]
+    launcher: treffer i=1 name=[Editor]         exec=[/apps/edit.osp/start]
+    launcher: treffer i=2 name=[Einstellungen]  exec=[/apps/settings.osp/start]
+    launcher: treffer i=3 name=[Netzmonitor]    exec=[/apps/netmon.osp/start]
+    launcher: treffer i=4 name=[Netzsicht]      exec=[/apps/netview.osp/start]
+    launcher: treffer i=5 name=[Prozesse]       exec=[/apps/top.osp/start]
+    launcher: treffer i=6 name=[Vorlagen]       exec=[/apps/themetest.osp/start]
+    launcher: treffer i=7 name=[Widgets]        exec=[/apps/widgetdemo.osp/start]
+
+**Acht Namen, und keiner davon steht im Quelltext dieses Systems.** Sie
+kommen aus den INFO-Dateien in den Paketen, die über das Netz kamen. Vor
+dieser Runde standen dort fünf Namen, und alle fünf waren beim Bau des
+Abbilds eingebacken.
+
+### Und sie laufen
+
+    osum$ /apps/widgetdemo.osp/start
+    elf: start 6 … bytes=505036
+    wm: fen i=5 id=12 x=60 y=60 w=480 h=400
+
+    osum$ /apps/explorer.osp/start
+    elf: start … bytes=563573
+    wm: fen i=5 id=12 x=70 y=70 w=660 h=430
+
+Aus den Bildern zurückgelesen (`tesseract`, `docs/shots/laden/`):
+
+* **Widgets**: „K15 Widgets" · „Datei Bearbeiten Hilfe" · „Kopier mich" ·
+  „Knopf · Kopieren · Haken" · Liste „alpha beta gamma delta".
+* **Datei-Explorer**: „Datei Ansicht" · „Start /data" · Spalten „Name ·
+  Größe · Zeit · Rechte" · „8 Stück, 2 Ordner, 354 Oktette".
+
 ### Die Gegenprobe: was beschädigt ist, kommt nicht durch
 
     osum$ opk installieren /boese/verdreht.opk
@@ -249,6 +321,31 @@ installiert**: kein halbes Paket, kein Store-Eintrag, keine Generation. Das
 ist die Zeile, die den Abschnitt erst zu einer Messung macht.
 
 ---
+
+## 4b. Die Bilder
+
+Alle in `docs/shots/laden/`, 1280x1024, aus QEMU über den Monitor
+(`screendump`), auf derselben Maschine, in dieser Reihenfolge:
+
+| Bild | Was darauf steht |
+|---|---|
+| `1-liste-im-terminal.png` | `ota suchen` im Terminalfenster: `fassung hier 0` · `fassung dort 3` · `NEUE FASSUNG verfuegbar` · die Paketzeilen |
+| `2-starter-acht-programme.png` | der Starter mit den acht Programmen aus dem Laden, mit Symbol und Beschreibung |
+| `3-installation-im-terminal.png` | `opk installieren /tmp/ota/top-1.opk` im Terminalfenster |
+| `4-widgets-laeuft.png` | `/apps/widgetdemo.osp/start` — das Fenster steht, mit Menü, Knöpfen und Liste |
+| `5-explorer-laeuft.png` | `/apps/explorer.osp/start` — der Dateimanager zeigt `/data` |
+
+Getippt wird über die **PS/2-Tastatur** (`tools/laden/tippen.py` →
+`tools/wm/monitor.py` → QEMU `sendkey`), nicht über `script=` auf der
+seriellen Leitung: was durch die serielle Tür geht, steht nie auf dem
+Bildschirm, und ein Bild davon gäbe es nicht.
+
+**Bild 3 ist das schwächste, und das steht hier, weil es stimmt.** Das
+Terminalfenster hängt an der Konsole; der Schreibtisch schreibt im
+Fünf-Sekunden-Takt zwei Dutzend Zeilen Messwerte dorthin. Zwischen
+`opk: installiert top -> 8` und der Aufnahme lag ein solcher Takt, und
+die Antwort war hinausgerollt. Was die Installation belegt, ist der
+Mitschnitt — Bild 3 zeigt den Befehl und das Fenster, in dem er lief.
 
 ## 5. Was diese Runde NICHT eingelöst hat
 
