@@ -60,6 +60,27 @@
 #       nicht der Riegel die Maschine, sondern der Zufall, und Zusage 7
 #       ist wertlos.
 #
+#    9. RUNDE MERGE-6, DER INODEPUFFER AUF BESTELLUNG. Bis hierher war
+#       der Fund von VIELKERN 3 (`fs.inode_get` liest in EINEN Puffer
+#       der ganzen Maschine) nur STATISCH gesichert -- Abschnitt 3
+#       zaehlt an der Quelle nach, dass kein Weg ohne `enter`
+#       auskommt. Eine Zusage ueber Text faellt, wenn jemand die
+#       Sperre entfernt, und sie faellt NICHT, wenn die Sperre dasteht
+#       und nicht wirkt.
+#       `fsrace` erzwingt den Fall: die Sperre `smp.run_phase` startet
+#       ALLE Kerne im selben Augenblick, jeder liest zwanzigtausend Mal
+#       die Art SEINES Inodes -- aus einem EIGENEN Inodeblock, denn der
+#       geteilte Puffer fasst einen BLOCK und nicht einen Inode.
+#       GEGENPROBE `fsblind`: dieselbe Schleife durch den Rumpf, den
+#       `inode_get` VOR VIELKERN 3 hatte. Sie MUSS fallen.
+#
+#   10. RUNDE MERGE-6, DIE UEBRIGEN EIN-KERN-RESTE. Ein Puffer in der
+#       Datenseite gehoert der ganzen Maschine. `tools/vielkern/einkern.py`
+#       zaehlt an der Quelle, wie viele Funktionen einen benutzen, ohne
+#       dass ein Sperrwort in ihrem Rumpf steht. Die Zahl ist KEINE
+#       Fehlerliste -- sie ist ein Vertrag: sie darf nicht wachsen,
+#       ohne dass jemand es aufschreibt.
+#
 # Zusage 8 ist der eigentliche Punkt: sie ist die einzige, die BEWEIST,
 # dass Zusage 7 etwas misst.
 set -uo pipefail
@@ -304,6 +325,64 @@ else
 fi
 grep -qa 'ART 3' $L && ok "und zwar in einer Aufgabe der Gattung 3 (K_USER, also Ring 3)" \
     || bad "der Bruch trifft keine Ring-3-Aufgabe -- dann ist es ein anderer Fehler"
+
+echo
+echo "== 10. RUNDE MERGE-6: der Inodepuffer, auf mehreren Kernen ERZWUNGEN =="
+# Der Lauf braucht kein Ring 3 und keinen Schreibtisch: er laeuft in
+# `smp.stage`, also im Hochlauf, und ist nach einer Sekunde fertig.
+# `nosched noproc` haelt alles andere still -- was hier misst, ist der
+# Puffer und nichts sonst.
+fsrace() { # name  smp  extra
+    local name=$1 smp=$2 extra=$3
+    cp -f "$TMPD/disk.img" "$TMPD/fsr-$name.img"
+    timeout 240 $QEMU_X86 -kernel "$TMPD/k.mb" -m 512 -smp "$smp" \
+        -append "nokbd nosched noproc $extra" \
+        -serial "file:$TMPD/fsr-$name.txt" -display none -no-reboot \
+        -drive "file=$TMPD/fsr-$name.img,format=raw,if=ide,index=0" \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1
+    return 0
+}
+w_fehl() { grep -a '^smp: fsrace kerne=' "$1" | tail -1 \
+    | sed -n 's/.*fehler=\([0-9]*\).*/\1/p'; }
+w_inos() { grep -a '^smp: fsrace   c0' "$1" | tail -1 \
+    | grep -oE 'inode=[0-9]+' | sed 's/.*=//' | sort -un | wc -l; }
+
+fsrace mit 4 "fsrace"
+L=$TMPD/fsr-mit.txt
+if [ -s "$L" ]; then
+    grep -a '^smp: fsrace' $L | sed 's/^/        /'
+    zahl "Kerne mit je EIGENEM Inodeblock" "$(w_inos $L)" ge 2
+    zahl "Abweichungen MIT der Sperre" "$(w_fehl $L)" eq 0
+else
+    bad "kein Mitschnitt des fsrace-Laufs"
+fi
+
+echo
+echo "== 11. GEGENPROBE dazu: fsblind -- ohne die Sperre MUSS es brechen =="
+# Ohne diesen Abschnitt misst Abschnitt 10 nichts: null Abweichungen
+# koennten auch heissen, dass die Schleife gar nicht gelaufen ist.
+fsrace ohne 4 "fsblind"
+L=$TMPD/fsr-ohne.txt
+if [ -s "$L" ]; then
+    grep -a '^smp: fsrace' $L | sed 's/^/        /'
+    zahl "Abweichungen OHNE die Sperre" "$(w_fehl $L)" ge 1
+else
+    bad "kein Mitschnitt des fsblind-Laufs"
+fi
+
+echo
+echo "== 12. RUNDE MERGE-6: die uebrigen Ein-Kern-Reste, an der Quelle gezaehlt =="
+# KEINE FEHLERLISTE, SONDERN EIN VERTRAG. Die Zahl darf nicht wachsen,
+# ohne dass jemand sie hier hochsetzt und in docs/RUNDE-MERGE6.md
+# aufschreibt, warum.
+EK_SOLL=${EK_SOLL:-61}
+ek=$(python3 tools/vielkern/einkern.py | sed -n 's/.*offen=\([0-9]*\).*/\1/p')
+if [ -n "$ek" ] && [ "$ek" -le "$EK_SOLL" ] 2>/dev/null; then
+    ok "Funktionen mit einem Puffer der Datenseite ohne Sperrwort: $ek (Vertrag: hoechstens $EK_SOLL)"
+else
+    bad "Ein-Kern-Reste: $ek, Vertrag ist hoechstens $EK_SOLL -- neue Stelle? Dann in docs/RUNDE-MERGE6.md eintragen"
+fi
+python3 tools/vielkern/einkern.py | sed 's/^/        /'
 
 echo
 echo "VIELKERN: $pass bestanden, $fail gescheitert"

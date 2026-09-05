@@ -131,7 +131,10 @@ export {
     SB_BLOCKS, SB_MAGIC, SB_DATA, SB_ITABLE, SB_INODES, SB_VERSION,
     link_path,
     // ---------------------------------------------------- RUNDE FSROBUST
-    SB_JSTART, SB_JBLOCKS, journal_start, journal_blocks, journal_on
+    SB_JSTART, SB_JBLOCKS, journal_start, journal_blocks, journal_on,
+    // ---------------------------------------------------- RUNDE MERGE-6
+    // Die Probe, die den Ein-Kern-Rest ERZWINGT statt ihn zu behaupten.
+    race_ino, race_soll, race_core
 }
 
 const BS: u64 = 512 // one block
@@ -927,6 +930,89 @@ fn inode_type(state: u64, ino: u64) -> u64 {
 
 fn inode_size(state: u64, ino: u64) -> u64 {
     return inode_get(state, ino, I_SIZE)
+}
+
+// ==================================================== RUNDE MERGE-6
+// DER FALL WIRD ERZWUNGEN, NICHT BEHAUPTET.
+//
+// Die Vorrunde (VIELKERN 3) hat `inode_get` unter `atomic.L_FS`
+// gestellt und den Nachweis dafuer AN DER QUELLE gefuehrt: kein Weg in
+// dieser Datei erreicht einen geteilten Blockpuffer ohne `enter`. Das
+// ist eine gute Zusage, aber es ist eine Zusage ueber TEXT. Sie faellt,
+// wenn jemand die Sperre entfernt, und sie faellt nicht, wenn die
+// Sperre da ist und nicht wirkt.
+//
+// Diese drei Funktionen sind der Gegenbeweis in Zahlen. Jeder Kern
+// bekommt einen EIGENEN Inode -- und zwar einen in einem EIGENEN
+// Inodeblock, denn der geteilte Puffer `buf_in` fasst einen BLOCK und
+// nicht einen Inode: zwei Kerne, die Inodes aus demselben Block lesen,
+// wuerden sich gegenseitig dasselbe hineinlegen und nichts beweisen.
+// Dann liest jeder Kern in einer Schleife die ART seines Inodes und
+// vergleicht sie mit dem Wert, den EIN Kern in Ruhe gelesen hat.
+//
+// MIT der Sperre muss die Zahl der Abweichungen 0 sein.
+// OHNE sie (`race_core(..., blind = true)`, das ist woertlich der
+// Rumpf von `inode_get` VOR VIELKERN 3) muss sie groesser als 0 sein.
+// Eine Zusage, deren Gegenprobe nicht faellt, ist eine Behauptung --
+// dieselbe Regel wie beim Riegel der Vorrunde.
+
+// WOERTLICH DER RUMPF VON `inode_get` VOR VIELKERN 3. Er steht hier,
+// damit die Gegenprobe den ECHTEN alten Weg nimmt und nicht eine
+// Nachbildung davon. Er wird von nichts anderem gerufen als von
+// `race_core`, und `race_core` nimmt ihn nur, wenn der Laeufer
+// `fsblind` gesagt hat.
+fn inode_get_blind(state: u64, ino: u64, field: u64) -> u64 {
+    if ino == 0 || ino > inode_count(state) {
+        return 0
+    }
+    if !ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
+        return 0
+    }
+    return get64(buf_in(state) + inode_off(state, ino) + field)
+}
+
+// WELCHEN INODE KERN `index` NIMMT. Ein Schritt von einem ganzen
+// Inodeblock je Kern, damit die Bloecke verschieden sind; laeuft die
+// Tafel aus, faellt der Kern auf den ersten Inode zurueck (dann misst
+// dieser Kern nichts, und `race_soll` sagt das ueber die Zahl).
+fn race_ino(state: u64, index: u64) -> u64 {
+    let ipb: u64 = inodes_per_block(state)
+    if ipb == 0 {
+        return 1
+    }
+    let ino: u64 = 1 + index * ipb
+    if ino == 0 || ino > inode_count(state) {
+        return 1
+    }
+    return ino
+}
+
+// DER SOLLWERT, IN RUHE GELESEN. Ein Kern, kein Nebenlaeufer, die
+// gewoehnliche gesperrte Fassung.
+fn race_soll(state: u64, index: u64) -> u64 {
+    return inode_get(state, race_ino(state, index), I_TYPE)
+}
+
+// DIE SCHLEIFE, DIE JEDER KERN FAEHRT. Rueckgabe: wie oft der Puffer
+// etwas anderes hergab als das, was drinstehen musste.
+fn race_core(state: u64, index: u64, soll: u64, runden: u64,
+    blind: bool) -> u64 {
+    let ino: u64 = race_ino(state, index)
+    var fehler: u64 = 0
+    var i: u64 = 0
+    while i < runden {
+        var v: u64 = 0
+        if blind {
+            v = inode_get_blind(state, ino, I_TYPE)
+        } else {
+            v = inode_get(state, ino, I_TYPE)
+        }
+        if v != soll {
+            fehler = fehler + 1
+        }
+        i = i + 1
+    }
+    return fehler
 }
 
 // A whole inode at once: cheaper than eighteen single writes, and it is
