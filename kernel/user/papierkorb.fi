@@ -1,0 +1,359 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/papierkorb.fi -- Runde ALLTAG: DAS FENSTER ZUM KORB.
+//
+//   papierkorb                      das Fenster
+//   papierkorb liste                aufzaehlen, was drin liegt
+//   papierkorb weg <datei>          hineinlegen (das tut sonst der Explorer)
+//   papierkorb zurueck <nummer>     wieder herausholen
+//   papierkorb entfernen <nummer>   endgueltig, nur dieses eine
+//   papierkorb leeren               endgueltig, alles
+//
+// Die Arbeit steht in `korb.fi` -- hier ist nur die Bedienung. Das ist
+// kein Aufteilen um des Aufteilens willen: der Dateimanager legt ueber
+// dieselbe Bibliothek hinein, und zwei Vorstellungen davon, wo der Korb
+// liegt, waeren zwei Papierkoerbe.
+//
+// Die Oberflaeche ist eine Tabelle, drei Knoepfe und eine Zeile, die
+// sagt, wie voll er ist. Alles davon kommt aus wlib.
+
+profile kernel
+
+import ulib
+import libc.io
+import wlibc
+import wlib
+import korb
+
+export { u_start }
+
+static mut blob: [u8; 20480] = [0 as u8; 20480]
+static mut bp: u64 = 0
+static mut kopf: [u8; 160] = [0 as u8; 160]
+static mut spalten: [u64; 4] = [0; 4]
+static mut wurzel: [u8; 2] = "/\0"
+
+static mut w_tab: u64 = 0
+static mut w_kopf: u64 = 0
+static mut w_zur: u64 = 0
+static mut w_ent: u64 = 0
+static mut w_leer: u64 = 0
+static mut w_neu: u64 = 0
+
+static mut T_TITEL: [u8; 11] = "Papierkorb\0"
+static mut T_APP: [u8; 11] = "papierkorb\0"
+static mut T_COLS: [u8; 32] = "Name\tKam aus\tGelöscht\tGröße\n\0"
+static mut T_ZUR: [u8; 17] = "Wiederherstellen\0"
+static mut T_ENT: [u8; 20] = "Endgültig löschen\0"
+static mut T_LEER: [u8; 7] = "Leeren\0"
+static mut T_NEU: [u8; 10] = "Neu lesen\0"
+static mut T_VON: [u8; 13] = " Einträge, \0"
+static mut T_VON2: [u8; 6] = " von \0"
+static mut T_MIB: [u8; 5] = " MiB\0"
+static mut T_LEERTXT: [u8; 24] = "Der Papierkorb ist leer\0"
+
+fn say(p: u64) {
+    ulib.say(p)
+}
+
+fn put(c: u64) {
+    if bp + 2 < 20480 {
+        __mmio_write8(((&blob[(0) as usize]) as u64 + bp) as *mut u8,
+            c as u8)
+        bp = bp + 1
+    }
+}
+
+fn puts(p: u64) {
+    var i: u64 = 0
+    while *((p + i) as *mut u8) != 0 as u8 {
+        put((*((p + i) as *mut u8)) as u64)
+        i = i + 1
+    }
+}
+
+fn putn(v: u64) {
+    var z: [u8; 24] = [0 as u8; 24]
+    let n: u64 = ulib.digits(v, (&z[(0) as usize]) as u64)
+    var i: u64 = 0
+    while i < n {
+        put(z[(i) as usize] as u64)
+        i = i + 1
+    }
+}
+
+fn ende() {
+    __mmio_write8(((&blob[(0) as usize]) as u64 + bp) as *mut u8, 0 as u8)
+}
+
+// Der Ort, aus dem die Datei kam -- ohne ihren Namen, denn der steht
+// schon in der ersten Spalte.
+fn ort(pfad: u64, out: u64, max: u64) {
+    let base: u64 = ulib.base_name(pfad)
+    var n: u64 = base - pfad
+    if n > 1 {
+        n = n - 1
+    }
+    if n + 1 > max {
+        n = max - 1
+    }
+    ulib.copy(out, pfad, n)
+    __mmio_write8((out + n) as *mut u8, 0 as u8)
+}
+
+fn tabelle_bauen() {
+    var ovar: [u8; 128] = [0 as u8; 128]
+    bp = 0
+    puts((&T_COLS[(0) as usize]) as u64)
+    var i: u64 = 0
+    while i < korb.anzahl() {
+        puts(korb.name_von(i))
+        put(9)
+        ort(korb.pfad_von(i), (&ovar[(0) as usize]) as u64, 120)
+        puts((&ovar[(0) as usize]) as u64)
+        put(9)
+        puts(korb.zeit_text(korb.zeit_von(i)))
+        put(9)
+        putn(korb.groesse_von(i))
+        put(10)
+        i = i + 1
+    }
+    ende()
+}
+
+fn kopf_bauen() {
+    let k: u64 = (&kopf[(0) as usize]) as u64
+    var z: [u8; 24] = [0 as u8; 24]
+    if korb.anzahl() == 0 {
+        ulib.strcpy(k, (&T_LEERTXT[(0) as usize]) as u64)
+        return
+    }
+    var n: u64 = ulib.digits(korb.anzahl(), (&z[(0) as usize]) as u64)
+    z[(n) as usize] = 0 as u8
+    ulib.strcpy(k, (&z[(0) as usize]) as u64)
+    ulib.strcat(k, (&T_VON[(0) as usize]) as u64)
+    n = ulib.digits((korb.summe() + 1048575) / 1048576,
+        (&z[(0) as usize]) as u64)
+    z[(n) as usize] = 0 as u8
+    ulib.strcat(k, (&z[(0) as usize]) as u64)
+    ulib.strcat(k, (&T_VON2[(0) as usize]) as u64)
+    n = ulib.digits(korb.grenze() / 1048576, (&z[(0) as usize]) as u64)
+    z[(n) as usize] = 0 as u8
+    ulib.strcat(k, (&z[(0) as usize]) as u64)
+    ulib.strcat(k, (&T_MIB[(0) as usize]) as u64)
+}
+
+fn neu_lesen() {
+    let _n: u64 = korb.laden((&wurzel[(0) as usize]) as u64)
+    tabelle_bauen()
+    kopf_bauen()
+    wlib.set_text(w_tab, (&blob[(0) as usize]) as u64)
+    wlib.set_text(w_kopf, (&kopf[(0) as usize]) as u64)
+    wlib.set_value(w_tab, 0)
+}
+
+fn gewaehlt() -> u64 {
+    let z: u64 = wlib.value(w_tab)
+    if z >= korb.anzahl() {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    return z
+}
+
+fn u_gui() -> u64 {
+    var s_bad: [u8; 26] = "papierkorb: keine Flaeche\0"
+    var s_go: [u8; 18] = "papierkorb: ready\0"
+    var s_geom: [u8; 20] = "papierkorb: geom w=\0"
+    var s_h: [u8; 4] = " h=\0"
+    var s_n: [u8; 23] = "papierkorb: eintraege \0"
+    if !wlib.begin(false, false) {
+        say((&s_bad[(0) as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    let bw: u64 = 620
+    let bh: u64 = 360
+    let w: u64 = wlib.window(70, 70, bw, bh, (&T_TITEL[(0) as usize]) as u64)
+    if w >= wlib.MAXWN {
+        say((&s_bad[(0) as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    let _a: u64 = wlib.window_app(w, (&T_APP[(0) as usize]) as u64)
+    let rand: u64 = wlib.inset()
+    let luft: u64 = wlib.inset() / 2
+    let innen: u64 = bw - rand * 2
+    spalten[(0) as usize] = 160
+    spalten[(1) as usize] = 200
+    spalten[(2) as usize] = 140
+    spalten[(3) as usize] = 84
+
+    let _n0: u64 = korb.laden((&wurzel[(0) as usize]) as u64)
+    tabelle_bauen()
+    kopf_bauen()
+
+    wlib.box_v(w, 0, 0, bw, bh, rand, luft)
+    w_kopf = wlib.label((&kopf[(0) as usize]) as u64)
+    wlib.size(innen, 0)
+    w_tab = wlib.table((&blob[(0) as usize]) as u64, 8, 4,
+        (&spalten[(0) as usize]) as u64)
+    wlib.box_end()
+
+    let y: u64 = wlib.rect_y(w_tab) + wlib.rect_h(w_tab) + luft * 2
+    wlib.box_h(w, rand, y, innen, wlib.ctrl_small(), 0, luft)
+    wlib.size(150, wlib.ctrl_small())
+    w_zur = wlib.button((&T_ZUR[(0) as usize]) as u64)
+    wlib.size(160, wlib.ctrl_small())
+    w_ent = wlib.button((&T_ENT[(0) as usize]) as u64)
+    wlib.size(90, wlib.ctrl_small())
+    w_leer = wlib.button((&T_LEER[(0) as usize]) as u64)
+    wlib.size(110, wlib.ctrl_small())
+    w_neu = wlib.button((&T_NEU[(0) as usize]) as u64)
+    wlib.box_end()
+
+    say((&s_geom[(0) as usize]) as u64)
+    ulib.sayn(bw)
+    say((&s_h[(0) as usize]) as u64)
+    ulib.sayn(bh)
+    ulib.nl()
+    say((&s_n[(0) as usize]) as u64)
+    ulib.sayn(korb.anzahl())
+    ulib.nl()
+    wlib.draw_all()
+    say((&s_go[(0) as usize]) as u64)
+    ulib.nl()
+
+    var runden: u64 = 0
+    while wlib.alive() && runden < 40000000 {
+        runden = runden + 1
+        let id: u64 = wlib.step()
+        if id < wlib.MAXWD {
+            let kind: u64 = wlib.fired_kind()
+            if kind == wlib.K_BUTTON {
+                if id == w_neu {
+                    neu_lesen()
+                } else if id == w_leer {
+                    let _g: u64 = korb.leeren((&wurzel[(0) as usize]) as u64)
+                    neu_lesen()
+                } else if id == w_zur {
+                    let z: u64 = gewaehlt()
+                    if z != 0xFFFFFFFFFFFFFFFF {
+                        let _r: u64 = korb.zurueck(
+                            (&wurzel[(0) as usize]) as u64, korb.id_von(z))
+                    }
+                    neu_lesen()
+                } else if id == w_ent {
+                    let z2: u64 = gewaehlt()
+                    if z2 != 0xFFFFFFFFFFFFFFFF {
+                        let _e: bool = korb.entfernen(
+                            (&wurzel[(0) as usize]) as u64, korb.id_von(z2))
+                    }
+                    neu_lesen()
+                }
+            }
+        }
+    }
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var c_liste: [u8; 6] = "liste\0"
+    var c_weg: [u8; 4] = "weg\0"
+    var c_zur: [u8; 8] = "zurueck\0"
+    var c_ent: [u8; 10] = "entfernen\0"
+    var c_leer: [u8; 7] = "leeren\0"
+    var c_aus: [u8; 12] = "ausloeschen\0"
+    var s_use: [u8; 71] = "papierkorb: liste | weg <datei> | zurueck <n> | entfernen <n> | leeren\0"
+    var s_nr: [u8; 20] = "papierkorb: nummer \0"
+    var s_leer: [u8; 17] = "papierkorb: leer\0"
+    var s_weg: [u8; 22] = "papierkorb: entfernt \0"
+    var s_sp: [u8; 3] = "  \0"
+    var s_kein: [u8; 25] = "papierkorb: geht nicht: \0"
+    var s_zurok: [u8; 24] = "papierkorb: wieder da: \0"
+    let argc: u64 = ulib.arg_count(args)
+    if argc < 2 {
+        return u_gui()
+    }
+    let cmd: u64 = ulib.arg_at(args, 1)
+    let wz: u64 = (&wurzel[(0) as usize]) as u64
+    if ulib.streq(cmd, (&c_liste[(0) as usize]) as u64) {
+        let n: u64 = korb.laden(wz)
+        if n == 0 {
+            say((&s_leer[(0) as usize]) as u64)
+            ulib.nl()
+            return 0
+        }
+        var i: u64 = 0
+        while i < n {
+            say((&s_nr[(0) as usize]) as u64)
+            ulib.sayn(korb.id_von(i))
+            say((&s_sp[(0) as usize]) as u64)
+            say(korb.pfad_von(i))
+            say((&s_sp[(0) as usize]) as u64)
+            ulib.sayn(korb.groesse_von(i))
+            say((&s_sp[(0) as usize]) as u64)
+            say(korb.zeit_text(korb.zeit_von(i)))
+            ulib.nl()
+            i = i + 1
+        }
+        return 0
+    }
+    if ulib.streq(cmd, (&c_weg[(0) as usize]) as u64) && argc >= 3 {
+        let p: u64 = ulib.arg_at(args, 2)
+        let id: u64 = korb.hinein(p)
+        if id == 0 {
+            ulib.esay_line((&s_kein[(0) as usize]) as u64, p)
+            return 1
+        }
+        say((&s_nr[(0) as usize]) as u64)
+        ulib.sayn(id)
+        ulib.nl()
+        return 0
+    }
+    if ulib.streq(cmd, (&c_zur[(0) as usize]) as u64) && argc >= 3 {
+        let id2: u64 = ulib.to_num(ulib.arg_at(args, 2))
+        let r: u64 = korb.zurueck(wz, id2)
+        if r != 0 {
+            ulib.esay_line((&s_kein[(0) as usize]) as u64,
+                ulib.arg_at(args, 2))
+            return 1
+        }
+        say((&s_zurok[(0) as usize]) as u64)
+        ulib.sayn(id2)
+        ulib.nl()
+        return 0
+    }
+    if ulib.streq(cmd, (&c_ent[(0) as usize]) as u64) && argc >= 3 {
+        let id3: u64 = ulib.to_num(ulib.arg_at(args, 2))
+        if !korb.entfernen(wz, id3) {
+            ulib.esay_line((&s_kein[(0) as usize]) as u64,
+                ulib.arg_at(args, 2))
+            return 1
+        }
+        say((&s_weg[(0) as usize]) as u64)
+        ulib.sayn(id3)
+        ulib.nl()
+        return 0
+    }
+    // ENDGUELTIG UND OHNE KORB -- das, was der Dateimanager bei
+    // Umschalt+Entf tut, auf der Konsole nachzumessen.
+    if ulib.streq(cmd, (&c_aus[(0) as usize]) as u64) && argc >= 3 {
+        if !korb.loesche_rekursiv(ulib.arg_at(args, 2), 0) {
+            ulib.esay_line((&s_kein[(0) as usize]) as u64,
+                ulib.arg_at(args, 2))
+            return 1
+        }
+        say((&s_weg[(0) as usize]) as u64)
+        say(ulib.arg_at(args, 2))
+        ulib.nl()
+        return 0
+    }
+    if ulib.streq(cmd, (&c_leer[(0) as usize]) as u64) {
+        let g: u64 = korb.leeren(wz)
+        say((&s_weg[(0) as usize]) as u64)
+        ulib.sayn(g)
+        ulib.nl()
+        return 0
+    }
+    ulib.esay_line((&s_use[(0) as usize]) as u64, 0)
+    return 2
+}
