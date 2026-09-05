@@ -70,6 +70,16 @@ def letzter_block(zeilen):
     """Der letzte VOLLSTAENDIGE Block. Ein halb geschriebener Block am
     Ende des Mitschnitts (die Maschine wurde mittendrin abgeraeumt)
     haette Zeilen ohne Kopf."""
+    # UND NUR BLOECKE NACH DER LETZTEN SORTIERUNG. Ein Klick in die
+    # Kopfzeile stellt die Liste um; ein Block von davor beschreibt eine
+    # Reihenfolge, die es nicht mehr gibt, und die Zeile darunter gehoert
+    # dann einem anderen Prozess. GEMESSEN: der Laeufer waehlte den
+    # Schreibtisch statt des Starters, weil er eine Zeile zu tief traf.
+    ab = 0
+    for i, z in enumerate(zeilen):
+        if "taskmgr: sortiert " in z:
+            ab = i
+    zeilen = zeilen[ab:]
     anf = None
     ende = None
     for i, z in enumerate(zeilen):
