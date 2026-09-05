@@ -72,6 +72,9 @@ import arch.x86_64.fpu
 import bootmod
 import modul
 import ksym
+import ksymtab
+import absturz
+import klog
 import modtab
 import modidx
 import ab
@@ -200,6 +203,11 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     kstate.set(state, kstate.TSS, tss)
     kstate.set(state, kstate.KERNEL_END, kernel_end)
 
+    // ==================================================== RUNDE PROTOKOLL
+    // DAS PROTOKOLL WIRD VOR DER BEFEHLSZEILE EINGERICHTET, weil
+    // `mode_of` die Schwellen setzt und dafuer den Ring braucht -- und
+    // weil ab hier jede Zeile dieses Kernels protokolliert werden kann.
+    klog.init(state)
     let cmd: u64 = mem.cmdline(mbi)
     mode_of(state, cmd)
     // ROUND K2: read here and not down in `hw.stage`, and the reason is
@@ -512,6 +520,17 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
 
     // 7c. the file system.
     filesystem(state)
+    // ==================================================== RUNDE PROTOKOLL
+    // LIEGT EIN ABSTURZBERICHT VOM LETZTEN START?
+    //
+    // Erst hier -- vorher gibt es kein Dateisystem, in dem man
+    // nachsehen koennte. Die Antwort wird gemerkt; der Systemaufruf
+    // 1860/KL_CRASH gibt sie an die Oberflaeche weiter, und die
+    // Benachrichtigung selbst entsteht in Ring 3 (`/bin/absturz`,
+    // ueber wlib). Der Kern MALT hier nichts -- die einzige Ausnahme
+    // von dieser Regel ist der Panik-Bildschirm, und der Grund dafuer
+    // steht in `kernel/kgui.fi` bei `panikbild`.
+    absturz.init(state)
     // 7c-bis. RUNDE ASYNC, zweiter Teil: die Arten, die ein
     //     DATEISYSTEM brauchen -- asynchron oeffnen, lesen, auf den
     //     Traeger druecken, schliessen. Sie stehen hier und nicht oben
@@ -704,9 +723,37 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     }
 
     sercon.report(state)
+    // ==================================================== RUNDE PROTOKOLL
+    // `krachjetzt` -- DER KNALL OHNE RING 3.
+    //
+    // Der gewoehnliche Weg zu einer erzwungenen Panik ist der Aufruf
+    // 1861 aus einem Programm heraus. Der hier ist der zweite, und er
+    // wird gebraucht: er funktioniert AUCH DANN, wenn es gar kein
+    // Userland gibt (`noring3`), und er ist damit der Weg, mit dem
+    // `tools/protokoll/run.sh` den Panik-Bildschirm misst, ohne vorher
+    // eine Platte mit einer Shell bauen zu muessen. Er hat denselben
+    // Riegel: ohne `krach` auf der Befehlszeile passiert nichts.
+    if kstate.mode_on(state, kstate.M_KRACH)
+            && kstate.mode_on(state, kstate.M_KRACHJETZT) {
+        absturz.knall(state, 0)
+    }
     serial.puts((&s_done[0]) as u64)
     serial.nl()
     power.shutdown(power.EXIT_OK)
+}
+
+// RUNDE PROTOKOLL: eine Zeile beim Start, wenn ein Bericht offen ist.
+// Sie geht auf die serielle Leitung -- das ist keine Oberflaeche,
+// sondern das Startprotokoll, und ein Testlaeufer liest sie.
+fn absturz_melden(state: u64) {
+    var s_j: [u8; 52] = "absturz: ein Bericht vom letzten Start liegt vor\0\0\0\0"
+    var s_n: [u8; 32] = "absturz: kein offener Bericht\0\0\0"
+    if absturz.offen(state) != 0 {
+        serial.puts((&s_j[0]) as u64)
+    } else {
+        serial.puts((&s_n[0]) as u64)
+    }
+    serial.nl()
 }
 
 // ------------------------------------- RUNDE K12: eine Gastmaschine aus Ring 3
@@ -2858,6 +2905,16 @@ fn osum(state: u64) {
     // Shell, die /proc erst nach ihrem Start bekaeme, haette es zum
     // Zeitpunkt ihres eigenen `open` noch nicht.
     k14_setup(state)
+    // ==================================================== RUNDE PROTOKOLL
+    // JETZT ERST NACH DEM ABSTURZBERICHT SEHEN, UND WARUM ERST JETZT:
+    // `absturz.init` weiter oben lief unmittelbar hinter
+    // `filesystem(state)` -- und das ist die RAM-Platte des
+    // Selbsttests, nicht die Wurzel, auf der /var/crash liegt. Der
+    // erste Anlauf meldete deshalb bei jedem Start "kein offener
+    // Bericht", obwohl einer dalag. Hier ist die richtige Wurzel
+    // eingehaengt und der erste Prozess laeuft noch nicht.
+    absturz.init(state)
+    absturz_melden(state)
     // RUNDE UPDATE: DER ERPROBUNGSZAEHLER. Hier und nicht spaeter -- die
     // Wurzel ist eingehaengt, der erste Prozess laeuft noch nicht, und
     // genau dazwischen liegt die einzige Stelle, an der ein Kern ueber
@@ -3511,6 +3568,12 @@ fn mode_of(state: u64, cmd: u64) {
     var dtz: [u8; 4] = "tz=\0"
     var dknall: [u8; 6] = "knall\0"
     var deins: [u8; 11] = "einsprung\0\0"
+    // RUNDE PROTOKOLL: die drei Worte des Kernprotokolls.
+    var dlogd: [u8; 9] = "logdebug\0"
+    var dlogq: [u8; 9] = "logquiet\0"
+    var dkrach: [u8; 6] = "krach\0"
+    var dkrachj: [u8; 11] = "krachjetzt\0"
+    var dloga: [u8; 7] = "logall\0"
     var r3fault: [u8; 11] = "ring3fault\0"
     var nosched: [u8; 8] = "nosched\0"
     var nopre: [u8; 10] = "nopreempt\0"
@@ -3635,6 +3698,37 @@ fn mode_of(state: u64, cmd: u64) {
     }
     if find(cmd, (&deins[0]) as u64, 9) != 0 {
         kstate.mode_add(state, kstate.M_EINSPRUNG)
+    }
+    // ==================================================== RUNDE PROTOKOLL
+    // `logdebug` senkt beide Schwellen des Protokolls auf debug,
+    // `logquiet` laesst nur noch Fehler auf die serielle Leitung, und
+    // `krach` macht den Testausloeser scharf. Die Schwellen selbst
+    // stehen in `klog.fi`; hier steht nur, welches Wort welche setzt.
+    if find(cmd, (&dlogd[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_LOGDEBUG)
+        klog.set_min(state, klog.L_DEBUG)
+        klog.set_ser(state, klog.L_DEBUG)
+    }
+    if find(cmd, (&dlogq[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_LOGQUIET)
+        klog.set_min(state, klog.L_INFO)
+        klog.set_ser(state, klog.L_ERROR)
+    }
+    if find(cmd, (&dloga[0]) as u64, 6) != 0 {
+        // `logall` -- ALLES aufzeichnen, aber nur ab `warn` seriell
+        // ausgeben. Das ist die Einstellung fuer die Fehlersuche auf
+        // echter Hardware und fuer die Abnahme: vierzigtausend Zeilen
+        // ueber eine 115200-Leitung waeren vier Minuten Leitung und
+        // keine Messung.
+        kstate.mode_add(state, kstate.M_LOGDEBUG)
+        klog.set_min(state, klog.L_DEBUG)
+        klog.set_ser(state, klog.L_WARN)
+    }
+    if find(cmd, (&dkrach[0]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_KRACH)
+    }
+    if find(cmd, (&dkrachj[0]) as u64, 10) != 0 {
+        kstate.mode_add(state, kstate.M_KRACHJETZT)
     }
     // RUNDE BLECHFUENF: `tz=<minuten>` -- der Versatz auf Ortszeit.
     let tzp: u64 = find(cmd, (&dtz[0]) as u64, 3)

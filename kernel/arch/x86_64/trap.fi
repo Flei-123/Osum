@@ -43,6 +43,9 @@ import proc
 import msr
 import arch.arch
 import fpu
+import klog
+import ksymtab
+import absturz
 
 export {
     entry,
@@ -519,14 +522,72 @@ fn report_user(frame: u64, state: u64, vector: u64, cur: u64, dies: bool) {
     // eigenen Stapel, und der Benutzerstapel ist nur ueber die
     // Uebersetzung erreichbar.
     spur_sagen(state, cur, word(frame, F_RSP))
+    // ==================================================== RUNDE PROTOKOLL
+    // UND DARAUS EIN BERICHT AUF DER PLATTE -- aber nur, wenn der
+    // Prozess wirklich stirbt. Ein Programm, das SIGSEGV abfaengt und
+    // weiterlaeuft, hat keinen Absturz gehabt; einen Bericht darueber
+    // zu schreiben hiesse, /var/crash mit Nichtigkeiten zu fuellen.
+    //
+    // Der Kern ist hier GESUND: es ist ein Fehler in Ring 3, kein
+    // Fehler im Kern. Es wird also ganz gewoehnlich geschrieben, ohne
+    // Sonderweg und ohne Riegel.
+    if dies {
+        var nm: [u8; 24] = [0 as u8; 24]
+        var k: u64 = 0
+        while k < 23 && pmon.name_at(state, cur, k) != 0 {
+            nm[k as usize] = (pmon.name_at(state, cur, k) & 0xFF) as u8
+            k = k + 1
+        }
+        nm[k as usize] = 0 as u8
+        let _ok: bool = absturz.prog_bericht(state,
+            regblock_fuellen(frame), word(frame, F_RIP),
+            word(frame, F_CS), word(frame, F_RFLAGS),
+            word(frame, F_RSP), word(frame, F_SS),
+            word(frame, F_ERROR), cr2(), vector,
+            sched.tget(state, cur, sched.T_PID),
+            (&nm[0 as usize]) as u64,
+            (&uspur[0 as usize]) as u64, uspur_n)
+    }
 }
 
 // Die Grenzen, zwischen denen eine Zahl auf dem Benutzerstapel wie
 // eine Ruecksprungadresse aussieht: der Stummel in `.utext` (0x400000)
-// und alles, was der Lader nach 0x40100000 legt. Alles darunter oder
-// darueber ist Datum, nicht Code.
+// und alles, was der Lader nach 0x40100000 legt.
+//
+// ==================================================== RUNDE PROTOKOLL
+// ES WAREN ZWEI BEREICHE UND NICHT EINER, und der Unterschied ist der
+// ganze Wert dieser Spur.
+//
+// Bis zu dieser Runde galt EIN Bereich, 0x400000 bis 0x40400000. Darin
+// liegt aber auch der BENUTZERSTAPEL: `proc.ARGS_BASE` ist 0x4007F000.
+// Jede Zahl auf dem Stapel, die auf den Stapel zeigt -- also jeder
+// gerettete Rahmenzeiger und jeder Zeiger auf eine lokale Variable --
+// sah damit aus wie Code. Gemessen an einem Bericht dieser Runde:
+//
+//     #0 0x4007f056  #1 0x4007e202  #2 0x4007e201  #3 0x4007e200 ...
+//
+// Acht Eintraege, davon acht Stapelzeiger und keine einzige
+// Ruecksprungadresse. Die Spur war voll und leer zugleich.
+//
+// Jetzt sind es die zwei Bereiche, in denen wirklich Code steht:
+// der handgeschriebene Stummel aus `isr.s` und `uprog.fi` unten, und
+// das geladene Programm ab 0x40100000. Dazwischen (0x40000000 bis
+// 0x40100000) liegen Argumente und Stapel -- und nichts davon ist Code.
 const U_TEXT_LO: u64 = 0x400000
-const U_TEXT_HI: u64 = 0x40400000
+const U_TEXT_HI: u64 = 0x500000
+const U_PROG_LO: u64 = 0x40100000
+const U_PROG_HI: u64 = 0x40400000
+
+fn wie_code(v: u64) -> bool {
+    if v >= U_TEXT_LO && v < U_TEXT_HI {
+        return true
+    }
+    return v >= U_PROG_LO && v < U_PROG_HI
+}
+
+// RUNDE PROTOKOLL: die Kette des BENUTZERSTAPELS, mitgeschrieben.
+static mut uspur: [u64; 8] = [0 as u64; 8]
+static mut uspur_n: u64 = 0
 
 fn spur_sagen(state: u64, cur: u64, rsp: u64) {
     var s_sp: [u8; 14] = "  spur rsp=\0\0\0"
@@ -566,13 +627,22 @@ fn spur_sagen(state: u64, cur: u64, rsp: u64) {
         let phys: u64 = proc.translate(state, cur, a)
         if phys != 0 {
             let v: u64 = __mmio_read64(phys as *mut u64)
-            if v >= U_TEXT_LO && v < U_TEXT_HI {
+            if wie_code(v) {
                 serial.puts((&s_at[0]) as u64)
                 serial.hex(v)
+                // RUNDE PROTOKOLL: mitschreiben, nicht nur drucken --
+                // der Bericht braucht dieselbe Kette.
+                if n < 8 {
+                    uspur[n as usize] = v
+                }
                 n = n + 1
             }
         }
         i = i + 1
+    }
+    uspur_n = n
+    if uspur_n > 8 {
+        uspur_n = 8
     }
     if n == 0 {
         serial.puts((&s_no[0]) as u64)
@@ -786,9 +856,17 @@ fn cr2() -> u64 {
 //      nicht. Die Spur geht deshalb MIT auf die Tafel.
 //   3. DIE ANDEREN KERNE ANHALTEN, siehe den Riegel in `entry`.
 const KERN_LO: u64 = 0x100000
-const SPUR_MAX: u64 = 5
+// RUNDE PROTOKOLL: FUENF WAREN ZU WENIG.
+//
+// Fuenf Adressen reichten, solange sie roh gedruckt wurden und ein
+// Mensch sie ohnehin einzeln nachschlug. Aufgeloest passen mehr auf den
+// Schirm als in den Kopf, und die Abnahme dieser Runde verlangt
+// mindestens fuenf AUFGELOESTE -- also muessen mehr als fuenf ROHE
+// gesammelt werden: nicht jede Zahl auf dem Stapel, die im Textbereich
+// liegt, ist wirklich eine Ruecksprungadresse.
+const SPUR_MAX: u64 = 16
 
-static mut kspur: [u64; 5] = [0 as u64; 5]
+static mut kspur: [u64; 16] = [0 as u64; 16]
 static mut kspur_n: u64 = 0
 static mut halt_alle: u64 = 0
 
@@ -823,22 +901,35 @@ fn kspur_bauen(state: u64, rsp: u64) {
 }
 
 fn kspur_sagen() {
-    var s_a: [u8; 12] = "  kspur:    "
-    var s_b: [u8; 3] = "   "
-    var s_k: [u8; 12] = "  (keine)   "
+    var s_a: [u8; 10] = "  kspur:\0\0"
+    var s_k: [u8; 12] = "  (keine)   "
+    var s_e: [u8; 7] = "      \0"
     serial.puts((&s_a[0]) as u64)
     if kspur_n == 0 {
         serial.puts((&s_k[0]) as u64)
         serial.nl()
         return
     }
+    // ==================================================== RUNDE PROTOKOLL
+    // EINE ZEILE JE ADRESSE, MIT NAMEN UND QUELLZEILE.
+    //
+    // Bis hierher standen die fuenf Zahlen nebeneinander in einer Zeile,
+    // und wer sie lesen wollte, brauchte `objdump` und das passende
+    // Abbild. `ksymtab.say_addr` macht daraus
+    //
+    //     sched.irq_restore+0x11 (sched.fi:1046)
+    //
+    // und braucht dafuer nichts als das Abbild, das gerade laeuft.
+    // Gibt es keine Symboltabelle (`--ohne-symbole`), druckt dieselbe
+    // Funktion die rohe Adresse -- die Zeile wird aermer, nicht falsch.
+    serial.nl()
     var i: u64 = 0
     while i < kspur_n {
-        serial.puts((&s_b[0]) as u64)
-        serial.hex(kspur[i as usize])
+        serial.puts((&s_e[0]) as u64)
+        ksymtab.say_addr(kspur[i as usize])
+        serial.nl()
         i = i + 1
     }
-    serial.nl()
 }
 
 // Ein NMI an ALLE ausser sich selbst. Die Kurzform 11 im Zielfeld
@@ -911,6 +1002,32 @@ fn report(frame: u64, state: u64, vector: u64) {
     // die Absturzstelle zurueckrechnen laesst, wenn `rip` Muell ist.
     kspur_bauen(state, word(frame, F_RSP))
     kspur_sagen()
+    // ==================================================== RUNDE PROTOKOLL
+    // DIE LETZTEN FUENFZIG ZEILEN DES KERNPROTOKOLLS.
+    //
+    // Was ein Kern UNMITTELBAR VOR dem Absturz getan hat, ist die
+    // Haelfte der Antwort, und bis zu dieser Runde war sie weg: die
+    // Ausgaben der Treiber gingen auf die serielle Leitung, und auf
+    // Justins Brett gibt es keine. Jetzt stehen sie im Ring in `kdata`,
+    // und der Ring hat den Absturz ueberlebt.
+    //
+    // OHNE SPERRE (`klog.dump_tail` nimmt keine). Wer hier ankommt, ist
+    // tot; auf eine Sperre zu warten, die ein anderer Kern haelt, waere
+    // das Ende der letzten Ausgabe.
+    var s_lg: [u8; 32] = "*** die letzten Protokollzeilen\0"
+    serial.puts((&s_lg[0]) as u64)
+    serial.nl()
+    klog.dump_tail(state, 50)
+    // ==================================================== RUNDE PROTOKOLL
+    // DER BERICHT AUF DIE PLATTE, mit dem Riegel aus `absturz.fi`:
+    // steckt dieser Kern schon im Dateisystem, wird nichts geschrieben.
+    // Er steht VOR dem Panik-Bildschirm, weil das Malen ueber den
+    // Rahmenpuffer laeuft und ein Kern, der dabei ein zweites Mal
+    // faellt, den Bericht sonst nicht mehr abgelegt haette.
+    let _bok: bool = absturz.kern_bericht(state, regblock_fuellen(frame),
+        word(frame, F_RIP), word(frame, F_CS), word(frame, F_RFLAGS),
+        word(frame, F_RSP), word(frame, F_SS), word(frame, F_ERROR),
+        cr2(), vector, (&kspur[0 as usize]) as u64, kspur_n)
     serial.puts((&s_tail[0]) as u64)
     serial.nl()
     // ======================================== RUNDE BLECHFUENF
@@ -936,12 +1053,54 @@ fn report(frame: u64, state: u64, vector: u64) {
     gfx.absturz(state, vector, word(frame, F_ERROR), word(frame, F_RIP),
         cr2(), word(frame, F_RSP), word(frame, F_CS), cpu.here(state),
         (&kspur[0]) as u64, kspur_n, stoppzahl(state))
+    // ==================================================== RUNDE PROTOKOLL
+    // UND DANN DER GANZE SCHIRM.
+    //
+    // Die Messtafel darueber hat acht Zeilen zu achtundvierzig Spalten
+    // -- das reicht fuer Vektor, RIP und vier rohe Adressen und fuer
+    // nichts sonst. Register, aufgeloeste Rueckverfolgung und die
+    // letzten Protokollzeilen brauchen den ganzen Bildschirm, und in
+    // diesem Augenblick braucht ihn sonst niemand mehr.
+    //
+    // ER KOMMT ZULETZT, aus zwei Gruenden: der Bericht auf der Platte
+    // steht dann schon (sein Pfad ist die letzte Zeile des Bildes), und
+    // wenn das Malen selbst noch einmal faellt, ist alles andere bereits
+    // gesagt und geschrieben.
+    gfx.panikbild(state, vector, word(frame, F_ERROR), word(frame, F_RIP),
+        cr2(), word(frame, F_RSP), word(frame, F_CS),
+        word(frame, F_RFLAGS), word(frame, F_SS), cpu.here(state),
+        (&regblock[0 as usize]) as u64,
+        (&kspur[0 as usize]) as u64, kspur_n, absturz.letzte_datei())
     if kstate.mode_on(state, kstate.M_ABSTURZ) {
         // ERST DAS BILD, DANN DIE MASCHINE. Siehe `alle_stoppen`.
         alle_stoppen(state)
         power.halt_forever()
     }
     power.shutdown(power.EXIT_TRAP)
+}
+
+// ==================================================== RUNDE PROTOKOLL
+// DIE SECHZEHN REGISTER ALS ZUSAMMENHAENGENDER BLOCK.
+//
+// `absturz.fi` schreibt sie in den Bericht und kennt die Versaetze im
+// Rahmen nicht -- die kennt nur diese Datei und `isr.s`. Also werden
+// sie hier einmal in der Reihenfolge rax..r15 abgelegt und als EIN
+// Zeiger weitergereicht. Das ist dieselbe Tabelle wie in `registers`,
+// und sie steht absichtlich nur hier: zwei Kopien einer Versatztabelle
+// sind zwei Gelegenheiten, sie auseinanderlaufen zu lassen.
+static mut regblock: [u64; 16] = [0 as u64; 16]
+
+fn regblock_fuellen(frame: u64) -> u64 {
+    var offs: [u8; 16] = [14 as u8, 11 as u8, 13 as u8, 12 as u8,
+        9 as u8, 8 as u8, 10 as u8, 20 as u8,
+        7 as u8, 6 as u8, 5 as u8, 4 as u8,
+        3 as u8, 2 as u8, 1 as u8, 0 as u8]
+    var i: u64 = 0
+    while i < 16 {
+        regblock[i as usize] = word(frame, offs[i as usize] as u64 * 8)
+        i = i + 1
+    }
+    return (&regblock[0 as usize]) as u64
 }
 
 // All sixteen, four per line. `rsp` comes out of the processor's frame,

@@ -1,0 +1,175 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/absturz.fi -- RUNDE PROTOKOLL: DIE ABSTURZBERICHTE ANSEHEN.
+//
+//     absturz            liegt ein neuer Bericht vor? Wenn ja: anzeigen.
+//     absturz -l         alle Berichte in /var/crash auflisten
+//     absturz -c         die Marke loeschen ("gesehen")
+//
+// WARUM DAS EIN PROGRAMM IN RING 3 IST UND KEIN BILD AUS DEM KERN:
+// weil es das sein kann. Der Panik-Bildschirm muss aus dem Kern kommen,
+// weil in dem Augenblick nichts anderes mehr laeuft (`kgui.panikbild`
+// sagt, warum). Ein Bericht, den man BEIM NAECHSTEN START ansieht, wird
+// von einem laufenden System angezeigt -- und dann gilt wieder die
+// Regel dieses Projekts: alles Sichtbare entsteht in Ring 3.
+//
+// DIE BENACHRICHTIGUNG. Ein Bericht meldet sich beim Start von selbst;
+// den Weg dorthin liefert der Kern als ZAHL (Aufruf 1860, `KL_CRASH`)
+// und nicht als Bild. Wer eine Benachrichtigung in der Oberflaeche
+// will, fragt diese Zahl und baut daraus ein `wlib`-Fenster. Solange
+// es in diesem Baum keinen Benachrichtigungsdienst gibt (die Runde
+// SYSTEMBUS baut einen), ist dieses Programm der gekapselte Uebergang:
+// EINE Stelle, an der aus der Zahl ein Text wird. Wer den Dienst
+// spaeter hat, ersetzt genau diese Datei und nichts sonst.
+
+profile kernel
+
+import ulib
+import libc.io
+import libc.errno
+
+export { u_start }
+
+const DIR_LEN: u64 = 11 // "/var/crash/"
+
+fn u_start(args: u64) -> u64 {
+    var o_l: [u8; 3] = "-l\0"
+    var o_c: [u8; 3] = "-c\0"
+    var s_kein: [u8; 38] = "absturz: kein neuer Bericht vorhanden\0"
+    var s_neu: [u8; 49] = "absturz: EIN BERICHT VOM LETZTEN START LIEGT VOR\0"
+    let argc: u64 = ulib.arg_count(args)
+    if argc > 1 {
+        let a: u64 = ulib.arg_at(args, 1)
+        if ulib.streq(a, (&o_l[0 as usize]) as u64) {
+            return listen()
+        }
+        if ulib.streq(a, (&o_c[0 as usize]) as u64) {
+            return marke_weg()
+        }
+    }
+    if ulib.sys4(ulib.SYS_KLOG, ulib.KL_CRASH, 0, 0, 0) == 0 {
+        zeile_aus((&s_kein[0 as usize]) as u64)
+        return 0
+    }
+    zeile_aus((&s_neu[0 as usize]) as u64)
+    return listen()
+}
+
+// Alles auflisten UND den juengsten Bericht ausgeben. Ein Werkzeug,
+// das nur Dateinamen zeigt, zwingt zu einem zweiten Befehl.
+fn listen() -> u64 {
+    var dir: [u8; 11] = "/var/crash\0"
+    var neu: [u8; 4] = "NEU\0"
+    var s_kein: [u8; 29] = "absturz: /var/crash ist leer\0"
+    var s_head: [u8; 24] = "-- der juengste Bericht\0"
+    var eintrag: [u8; 512] = [0 as u8; 512]
+    var jung: [u8; 96] = [0 as u8; 96]
+    // `getdents64` und nicht `read` -- ein Verzeichnis liefert
+    // Datensaetze mit Laengenfeld, keine Zeilen. Der erste Anlauf las
+    // mit `read` und bekam nichts; `libc.io` hat den richtigen Weg,
+    // und /bin/ls geht ihn seit Runde K4.
+    let fd: u64 = io.dir_open((&dir[0 as usize]) as u64)
+    if errno.failed(fd) {
+        zeile_aus((&s_kein[0 as usize]) as u64)
+        return 0
+    }
+    var n: u64 = 0
+    var beste: u64 = 0
+    var weiter: bool = true
+    while weiter {
+        let m: u64 = io.dir_read(fd, (&eintrag[0 as usize]) as u64, 512)
+        if m == 0 || ulib.bad(m) {
+            weiter = false
+        } else {
+            var at: u64 = 0
+            while at < m {
+                let rec: u64 = (&eintrag[0 as usize]) as u64 + at
+                let name: u64 = io.dir_name(rec)
+                if !punkt(name) && !ulib.streq(name,
+                        (&neu[0 as usize]) as u64) {
+                    n = n + 1
+                    zeile_aus(name)
+                    // JUENGSTER heisst hier: groesste Zahl. Die Namen
+                    // sind Sekunden seit 1970.
+                    let v: u64 = ulib.to_num(name)
+                    if v >= beste {
+                        beste = v
+                        let _c: u64 = ulib.strcpy(
+                            (&jung[0 as usize]) as u64, name)
+                    }
+                }
+                at = at + io.dir_reclen(rec)
+            }
+        }
+    }
+    let _x: u64 = ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if n == 0 {
+        zeile_aus((&s_kein[0 as usize]) as u64)
+        return 0
+    }
+    ulib.nl()
+    zeile_aus((&s_head[0 as usize]) as u64)
+    return zeigen((&dir[0 as usize]) as u64, (&jung[0 as usize]) as u64)
+}
+
+fn zeigen(dir: u64, name: u64) -> u64 {
+    var pfad: [u8; 160] = [0 as u8; 160]
+    var slash: [u8; 2] = "/\0"
+    var b: [u8; 512] = [0 as u8; 512]
+    var s_bad: [u8; 34] = "absturz: Bericht nicht lesbar\0\0\0\0\0"
+    ulib.strcpy((&pfad[0 as usize]) as u64, dir)
+    ulib.strcat((&pfad[0 as usize]) as u64, (&slash[0 as usize]) as u64)
+    ulib.strcat((&pfad[0 as usize]) as u64, name)
+    let f: u64 = ulib.sys(ulib.SYS_OPEN, (&pfad[0 as usize]) as u64, 0, 0)
+    if ulib.failed(f) {
+        ulib.esay_line((&s_bad[0 as usize]) as u64, 0)
+        return 1
+    }
+    while true {
+        let r: u64 = ulib.sys(ulib.SYS_READ, f, (&b[0 as usize]) as u64, 512)
+        if ulib.failed(r) || r == 0 {
+            break
+        }
+        let _w: u64 = ulib.sys(ulib.SYS_WRITE, ulib.OUT,
+            (&b[0 as usize]) as u64, r)
+    }
+    let _c: u64 = ulib.sys(ulib.SYS_CLOSE, f, 0, 0)
+    return 0
+}
+
+fn marke_weg() -> u64 {
+    var m: [u8; 16] = "/var/crash/NEU\0\0"
+    var s_ok: [u8; 26] = "absturz: Marke geloescht\0\0"
+    var s_no: [u8; 30] = "absturz: es gab keine Marke\0\0\0"
+    let r: u64 = ulib.sys(ulib.SYS_UNLINK, (&m[0 as usize]) as u64, 0, 0)
+    if ulib.failed(r) {
+        zeile_aus((&s_no[0 as usize]) as u64)
+        return 0
+    }
+    zeile_aus((&s_ok[0 as usize]) as u64)
+    return 0
+}
+
+fn ch(p: u64, i: u64) -> u64 {
+    let c: u8 = *((p + i) as *mut u8)
+    return c as u64
+}
+
+fn punkt(p: u64) -> bool {
+    if ch(p, 0) != 46 {
+        return false
+    }
+    if ch(p, 1) == 0 {
+        return true
+    }
+    if ch(p, 1) != 46 {
+        return false
+    }
+    return ch(p, 2) == 0
+}
+
+// `ulib.say_line` haengt eine ZAHL an; hier soll nur eine Zeile
+// heraus. Zwei Aufrufe, ein Name.
+fn zeile_aus(p: u64) {
+    ulib.say(p)
+    ulib.nl()
+}

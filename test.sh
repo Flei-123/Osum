@@ -1395,6 +1395,15 @@ lauf "40. Ring 3 auf ALLEN Kernen, und der Riegel davor -- der Fehler der Runde 
 lauf "41. der Aufgabenverwalter und das Kontrollzentrum (tools/werkzeug/run.sh, Runde WERKZEUGE)" \
      tools/werkzeug/run.sh werkzeug '^WERKZEUGE: |^  OK    |^        '
 
+# RUNDE PROTOKOLL: der Ringpuffer, die Absturzberichte und der
+# Panik-Bildschirm. Fuenf Messungen, und die zwei, um die es geht:
+# vierzigtausend Zeilen aus vier Kernen ohne eine einzige verschraenkte,
+# und ein Panik-Bildschirm, dessen Text WIRKLICH GELESEN wird
+# (tools/protokoll/schirmtext.py rechnet die Glyphen aus dem
+# Bildschirmfoto zurueck).
+lauf "42. das Kernprotokoll, die Absturzberichte und der Panik-Bildschirm (tools/protokoll/run.sh, Runde PROTOKOLL)" \
+     tools/protokoll/run.sh protokoll '^PROTOKOLL: |^  OK    |^        '
+
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
 abschnitte_abarbeiten

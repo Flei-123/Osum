@@ -58,6 +58,7 @@ import blk
 import sched
 import atomic
 import cpu
+import klog
 
 export { ops, node_root, D_TTY, D_FB, D_CONSOLE, is_tty, is_fb, rdev_of }
 
@@ -80,7 +81,31 @@ const D_NVME0: u64 = 11
 // Abziehen verschwindet er wieder. Deshalb aendert sich an /dev in jedem
 // Lauf ohne USB kein einziges Oktett.
 const D_USB0: u64 = 12
-const D_LAST: u64 = 12
+// ==================================================== RUNDE PROTOKOLL
+//
+// /dev/klog -- DAS KERNPROTOKOLL ALS DATEI.
+//
+// Es ist der erste Knoten dieses Verzeichnisses, hinter dem WEDER ein
+// Geraet noch eine Platte steckt, sondern ein Ringpuffer in `kdata`.
+// Genau dafuer ist ein Geraeteverzeichnis da: `cat /dev/klog` liest,
+// `echo hallo > /dev/klog` schreibt eine Zeile hinein, und kein
+// Programm muss dafuer den Aufruf 1860 kennen.
+//
+// WIE DER VERSATZ AUF EINE ZEILE ABGEBILDET WIRD. Der Ring hat keine
+// Oktettadressen, er hat Eintraege. `d_read` geht deshalb von der
+// aeltesten noch vorhandenen Zeile an vorwaerts und zaehlt Laengen,
+// bis es `off` erreicht hat. Das ist O(Zeilen) je Lesevorgang und
+// waere fuer eine Platte unbrauchbar; fuer 510 Zeilen, die ein Mensch
+// oder ein `cat` einmal liest, ist es die einfachste richtige Loesung.
+//
+// WAS DAS BEDEUTET, UND ES STEHT HIER STATT IN EINER FUSSNOTE: DER
+// RING DREHT SICH WEITER, WAEHREND GELESEN WIRD. Wer /dev/klog mit
+// vielen kleinen `read` liest, waehrend der Kern schreibt, bekommt
+// keinen zusammenhaengenden Schnappschuss. Wer das braucht, nimmt
+// `/bin/log`: es liest ueber den Aufruf 1860 NACH LAUFNUMMERN und
+// merkt daran, dass ihm etwas entgangen ist.
+const D_KLOG: u64 = 13
+const D_LAST: u64 = 13
 const D_ROOT: u64 = 100
 
 const BS: u64 = 512
@@ -135,6 +160,7 @@ fn name_at(node: u64, out: u64) -> bool {
     var n_ram: [u8; 5] = "ram0\0"
     var n_nvme: [u8; 6] = "nvme0\0"
     var n_usb: [u8; 4] = "usb\0"
+    var n_klog: [u8; 5] = "klog\0"
     var src: u64 = 0
     if node == D_NULL {
         src = (&n_null[0]) as u64
@@ -160,6 +186,8 @@ fn name_at(node: u64, out: u64) -> bool {
         src = (&n_nvme[0]) as u64
     } else if node == D_USB0 {
         src = (&n_usb[0]) as u64
+    } else if node == D_KLOG {
+        src = (&n_klog[0]) as u64
     } else {
         return false
     }
@@ -342,15 +370,78 @@ fn d_read(state: u64, m: u64, node: u64, off: u64, dst: u64,
     if node == D_RANDOM || node == D_URANDOM {
         return rand.bytes(state, dst, len)
     }
+    if node == D_KLOG {
+        return klog_read(state, off, dst, len)
+    }
     if is_block(node) {
         return block_read(state, block_of(node), off, dst, len)
     }
     return 0
 }
 
+// RUNDE PROTOKOLL: den Ring als Oktettstrom.
+//
+// Zeile fuer Zeile bauen, Laengen zaehlen, ab `off` kopieren. Der
+// Zwischenpuffer ist EINER fuer alle Kerne -- deshalb unter derselben
+// Sperre wie der Rest dieses Dateisystems (`enter`/`leave`).
+fn klog_read(state: u64, off: u64, dst: u64, len: u64) -> u64 {
+    let flags: u64 = enter(state)
+    var b: [u8; 256] = [0 as u8; 256]
+    let p: u64 = (&b[0 as usize]) as u64
+    var pos: u64 = 0
+    var n: u64 = 0
+    var s: u64 = klog.first_seq(state)
+    let last: u64 = klog.seq(state)
+    while s <= last && n < len {
+        let m2: u64 = klog.line_at(state, s, p, 255)
+        if m2 != 0 {
+            if pos + m2 > off {
+                var i: u64 = 0
+                if off > pos {
+                    i = off - pos
+                }
+                while i < m2 && n < len {
+                    kstate.set8(dst + n, kstate.get8(p + i) as u8)
+                    n = n + 1
+                    i = i + 1
+                }
+            }
+            pos = pos + m2
+        }
+        s = s + 1
+    }
+    leave(state, flags)
+    return n
+}
+
+// Und die Gegenrichtung: was hineingeschrieben wird, wird EINE Zeile im
+// Protokoll, Stufe info, Quelle `prog`. Ein Zeilenende beendet die
+// Zeile; laengere Texte werden auf die 88 Oktette eines Eintrags
+// gekuerzt (`klog.fi`).
+fn klog_write(state: u64, src: u64, len: u64) -> u64 {
+    var t: [u8; 96] = [0 as u8; 96]
+    var q: [u8; 5] = "prog\0"
+    var i: u64 = 0
+    while i < len && i < 95 {
+        let c: u64 = kstate.get8(src + i)
+        if c == 10 {
+            break
+        }
+        t[i as usize] = (c & 0xFF) as u8
+        i = i + 1
+    }
+    t[i as usize] = 0 as u8
+    klog.say(state, klog.L_INFO, (&q[0 as usize]) as u64,
+        (&t[0 as usize]) as u64)
+    return len
+}
+
 fn d_write(state: u64, m: u64, node: u64, off: u64, src: u64,
     len: u64) -> u64 {
     tick(state)
+    if node == D_KLOG {
+        return klog_write(state, src, len)
+    }
     if node == D_NULL || node == D_ZERO {
         return len // geschluckt, und das ist die Zusage
     }
