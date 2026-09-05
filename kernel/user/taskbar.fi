@@ -451,6 +451,39 @@ static mut acts: u64 = 0
 static mut paints: u64 = 0
 static mut writes: u64 = 0
 
+// ================================================== RUNDE UHRWERK
+// DIE ZAEHLER, MIT DENEN JUSTINS BEFUND ZU EINER ZAHL WIRD.
+//
+// Der Befund lautet: die Uhr steht, bis die Maus ueber die Ziffern
+// faehrt. Dafuer gibt es genau drei Verdaechtige, und jeder von ihnen
+// hat hier seinen Zaehler:
+//
+//   ub_round -- laeuft diese Schleife ueberhaupt weiter? Sie schlaeft
+//               mit `ulib.sleep_ms(25)`, und geweckt wird sie NUR aus
+//               dem Zeitgeber (kernel/sched.fi, `on_tick`). Schlaegt
+//               der nicht, steht die Zahl -- und dann ist es ein
+//               Fehler im Ablaufplaner und keiner im Zeichenweg.
+//   ub_sb    -- wie oft `status_build` gelaufen ist (alle 10 Runden).
+//   ub_sbt   -- wie oft es TRUE geliefert hat, also wie oft sich die
+//               Felder wirklich geaendert haben. Bei `clock_seconds=1`
+//               muss das ungefaehr einmal je Sekunde sein.
+//   ub_px    -- wie viele Bildpunkte diese Leiste ueber WIG_BLIT
+//               hinuebergeschoben hat. Das ist die Gegenprobe gegen
+//               "zu viel gemalt": eine Sekundenuhr darf den Schirm
+//               nicht neu setzen.
+//
+// Gemeldet wird im PULSTAKT und NICHT in jeder Runde. Der Grund steht
+// in kernel/kgui.fi bei `eingabe_puls`: eine Zeile je Runde schreibt
+// dem Menschen in vierzig Sekunden 238 Zeilen ins Terminal, und das
+// ist keine Diagnose, sondern Rauschen.
+static mut ub_round: u64 = 0
+static mut ub_sb: u64 = 0
+static mut ub_sbt: u64 = 0
+static mut ub_px: u64 = 0
+static mut ub_naechster: u64 = 0
+static mut ub_soll: u64 = 0   // Bildpunkte, die hinueber SOLLTEN
+static mut ub_null: u64 = 0   // Pushs, die NICHTS hinuebergebracht haben
+
 // the drag
 static mut dragging: u64 = 0
 static mut drag_edge: u64 = 9
@@ -2645,6 +2678,11 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
     }
     if shown == 0 {
         let _p0: u64 = wlibc.push(w_h, 0, y0, win_w, hh)
+        ub_px = ub_px + _p0
+        ub_soll = ub_soll + win_w * hh
+        if _p0 == 0 {
+            ub_null = ub_null + 1
+        }
         return
     }
     // RUNDE PAINT: DER STARTKNOPF BEKOMMT AUCH EINES, und zwar das des
@@ -2980,6 +3018,16 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
         }
     }
     let _p: u64 = wlibc.push(w_h, 0, y0, win_w, hh)
+    // RUNDE UHRWERK: WAS HAT `push` WIRKLICH HINUEBERGEBRACHT?
+    // `wig.blit` gibt die Zahl der Bildpunkte zurueck -- und NULL,
+    // wenn `fetch` die Quelle nicht lesen durfte. Bis zu dieser Runde
+    // hat das niemand angesehen (`let _p`), und genau darin lag der
+    // Fehler: die Leiste meldete "gemalt", waehrend nichts ankam.
+    ub_px = ub_px + _p
+    ub_soll = ub_soll + win_w * hh
+    if _p == 0 {
+        ub_null = ub_null + 1
+    }
     if report {
         // ROUND LOOK: the RECTANGLE, not only the word inside it.
         say((&lk_sx[0 as usize]) as u64)
@@ -3009,8 +3057,34 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
 fn paint(report: bool) {
     var y: u64 = 0
     var first: bool = true
+    // ================================================ RUNDE UHRWERK
+    // DIE BANDHOEHE IST NICHT MEHR EINE ZAHL IM QUELLTEXT, SONDERN
+    // DIE, DIE DIE FLAECHE WIRKLICH TRAEGT.
+    //
+    // `BAND` = 80 war richtig, solange die Flaeche 800 Bildpunkte breit
+    // war. Sie ist aber so breit wie der SCHIRM, und ihr Platz ist
+    // fest (1 MiB) -- also traegt sie auf einem breiten Schirm WENIGER
+    // Zeilen:
+    //
+    //     1920 -> 136      2560 -> 102      3440 -> 76      3840 -> 68
+    //
+    // Auf Justins 3440x1440 wollte diese Schleife 80 Zeilen schieben,
+    // wo 76 abgebildet waren. Der Kern darf die vier Zeilen dahinter
+    // nicht lesen (`proc.user_ok`), also brach `wig.blit` ab, gab null
+    // zurueck und kam nie bis `wm.damage` -- die ganze Leiste blieb auf
+    // dem Schirm stehen, wie sie beim ersten Mal gemalt war. Das ist
+    // die stehende Uhr.
+    //
+    // Mit dem Minimum aus beiden passt jedes Band immer in die Flaeche,
+    // und auf schmalen Schirmen aendert sich NICHTS: dort ist
+    // `surf_rows` groesser als 80, und es bleibt bei 80.
+    var band: u64 = BAND
+    let tragf: u64 = wlibc.surf_rows()
+    if tragf != 0 && tragf < band {
+        band = tragf
+    }
     while y < win_h {
-        var hh: u64 = BAND
+        var hh: u64 = band
         if y + hh > win_h {
             hh = win_h - y
         }
@@ -3458,6 +3532,14 @@ static mut s_pm: [u8; 9] = " paints=\0"
 static mut s_ck: [u8; 9] = " clicks=\0"
 static mut s_ac: [u8; 7] = " acts=\0"
 static mut s_wt: [u8; 9] = " writes=\0"
+// RUNDE UHRWERK: die Pulszeile der Leiste.
+static mut s_ur: [u8; 16] = "taskbar: round=\0"
+static mut s_usb: [u8; 5] = " sb=\0"
+static mut s_usbt: [u8; 6] = " sbt=\0"
+static mut s_upx: [u8; 5] = " px=\0"
+static mut s_usoll: [u8; 7] = " soll=\0"
+static mut s_unull: [u8; 7] = " null=\0"
+static mut s_upm: [u8; 5] = " pm=\0"
 static mut s_title: [u8; 8] = "Taskbar\0"
 static mut s_theme: [u8; 11] = "/etc/theme\0"
 static mut a_once: [u8; 5] = "once\0"
@@ -3692,7 +3774,13 @@ fn u_start(args: u64) -> u64 {
             }
         }
         if (round % 10) == 0 {
+            // RUNDE UHRWERK: gezaehlt, nicht vermutet. `ub_sb` steigt
+            // bei jedem Ruf, `ub_sbt` nur, wenn sich wirklich etwas
+            // geaendert hat -- bei einer Sekundenuhr also einmal je
+            // Sekunde. Stehen beide, laeuft diese Schleife nicht.
+            ub_sb = ub_sb + 1
             if status_build() {
+                ub_sbt = ub_sbt + 1
                 fresh = true
             }
             // RUNDE THEME: `theme_poll` liest nach und sagt, ob sich
@@ -3776,6 +3864,35 @@ fn u_start(args: u64) -> u64 {
         // before anything looks at the latch. A second look here costs
         // one system call and takes the repaint out of the wait.
         let _qs2: bool = qs.step()
+        // ============================================ RUNDE UHRWERK
+        // DER PULS DIESER LEISTE, und er steht bewusst NACH allem
+        // anderen: was hier gemeldet wird, ist der Zustand am Ende
+        // einer vollstaendigen Runde und nicht der in ihrer Mitte.
+        //
+        // Alle 200 Runden, also ungefaehr alle fuenf Sekunden --
+        // dieselbe Frequenz wie der Puls des Kerns und aus demselben
+        // Grund: eine Zeile je Runde waere eine Zeile alle 25 ms, und
+        // ein Terminal, das vierzigmal je Sekunde zurollt, ist kein
+        // Messgeraet.
+        ub_round = ub_round + 1
+        if ub_round >= ub_naechster {
+            ub_naechster = ub_round + 200
+            say((&s_ur[0 as usize]) as u64)
+            ulib.sayn(ub_round)
+            say((&s_usb[0 as usize]) as u64)
+            ulib.sayn(ub_sb)
+            say((&s_usbt[0 as usize]) as u64)
+            ulib.sayn(ub_sbt)
+            say((&s_upx[0 as usize]) as u64)
+            ulib.sayn(ub_px)
+            say((&s_usoll[0 as usize]) as u64)
+            ulib.sayn(ub_soll)
+            say((&s_unull[0 as usize]) as u64)
+            ulib.sayn(ub_null)
+            say((&s_upm[0 as usize]) as u64)
+            ulib.sayn(paints)
+            ulib.nl()
+        }
         ulib.sleep_ms(25)
     }
     return 0
