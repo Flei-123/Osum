@@ -241,7 +241,12 @@ python3 tools/osum/mkfs.py cat "$TMPD/ap/disk.img" /etc/taskbar.conf \
 same "und /etc/theme.conf traegt das Schema der Vorlage" "midnight" \
     "$(grep -a '^scheme=' "$TMPD/theme.conf" | cut -d= -f2)"
 same "den Modus" "dark" "$(grep -a '^mode=' "$TMPD/theme.conf" | cut -d= -f2)"
-same "den Formsatz" "modern" "$(grep -a '^shape=' "$TMPD/theme.conf" | cut -d= -f2)"
+# RUNDE OBERFLAECHE: die Vorlage `studio` nennt jetzt die HAUSFORM
+# (assets/shapes/osum.shape) und nicht mehr `modern`.  Die Zeile hier
+# wird mitgezogen und nicht weggelassen: sie prueft, dass `theme apply`
+# den Formsatz der Vorlage in die Datei schreibt, und das ist unabhaengig
+# davon, wie er heisst.
+same "den Formsatz" "osum" "$(grep -a '^shape=' "$TMPD/theme.conf" | cut -d= -f2)"
 same "die Akzentfarbe" "0891b2" "$(grep -a '^accent=' "$TMPD/theme.conf" | cut -d= -f2)"
 same "und /etc/taskbar.conf die Kante" "left" \
     "$(grep -a '^edge=' "$TMPD/taskbar.conf" | cut -d= -f2)"
