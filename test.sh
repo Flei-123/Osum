@@ -1353,6 +1353,23 @@ lauf "38. der JARVIS-Helfer und seine Rechteliste (tools/bridge/run.sh, Runde BR
 lauf "39. was man mit dem Stick TUN kann: dhcp, host, fetch, ota und die Bruecke, vom Abbild (tools/stick/run.sh, Runde STICK)" \
      tools/stick/run.sh stick '^STICK: |^  ok   |^       (SHA-256|/bin traegt|kern|programme|apps|wurzeln|ota.conf|schluessel)'
 
+# ABSCHNITT 40 -- RUNDE WERKZEUGE. Der grafische Aufgabenverwalter
+# (/bin/taskmgr) und das ausgebaute Kontrollzentrum der Taskleiste.
+#
+# Gemessen wird vor allem, dass die ZAHLEN ECHT sind: die drei
+# Kennzahlen, die es vor dieser Runde nicht gab (Leerlauf je Kern,
+# Rahmen je Prozess, Kern je Prozess), mit ihren Gegenproben -- kein
+# Kern meldet mehr Leerlauf als Zeit, ein Prozess ohne eigenen
+# Adressraum hat keine Seiten, und es kommen wirklich mehrere Kerne vor.
+# Dazu: das Fenster steht (jedes Rechteck im Fenster, keine leere und
+# keine ueberlappende Beschriftung), Sortieren und Waehlen mit der MAUS,
+# der Knopf "Prozess beenden" macht aus einem laufenden Prozess wirklich
+# eine Leiche, der Verlaufsgraph steht im BILD an den Stellen, die das
+# Programm gemeldet hat, und der Dunkelmodus-Schalter des
+# Kontrollzentrums macht das Bild messbar dunkler.
+lauf "40. der Aufgabenverwalter und das Kontrollzentrum (tools/werkzeug/run.sh, Runde WERKZEUGE)" \
+     tools/werkzeug/run.sh werkzeug '^WERKZEUGE: |^  OK    |^        '
+
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
 abschnitte_abarbeiten
