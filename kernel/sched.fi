@@ -51,6 +51,7 @@ export {
     set_affinity, affinity, ANY_CPU, ring3_fremd,
     gs_melden, gs_bereit, gs_fehler, ring3_kerne, gs_soll, gs_pruefen,
     kstack_hier, kstack_wieder, ring3_alle_setzen, ring3_alle_an, hier,
+    ring3_bericht, syscalls_of, syscalls_summe, kerne, ring3_prozesse,
     T_STATE, T_PID, T_RSP, T_KSTACK, T_KTOP, T_PRIO, T_BUDGET, T_WORK,
     T_WAKE, T_CR3, T_PARENT, T_EXIT, T_RUNS, T_ENTRY, T_USTACK, T_KIND,
     T_WAITPID, T_TICKS, T_PDPT, T_PD, T_PT, T_DATA, T_CWD, T_ARG,
@@ -800,6 +801,156 @@ fn ring3_kerne(state: u64) -> u64 {
         b = b + 1
     }
     return c
+}
+
+// Wie viele Kerne die Maschine wirklich hat.
+fn kerne(state: u64) -> u64 {
+    return cpu.count(state)
+}
+
+// Systemaufrufe, die auf DIESEM Kern hereingekommen sind. Gezaehlt wird
+// in `syscall_entry` mit einem einzigen `incq %gs:CPU_SYSCALLS` -- siehe
+// den Kopf von `kernel/cpu.fi`.
+fn syscalls_of(state: u64, k: u64) -> u64 {
+    if k >= kstate.MAX_CPUS {
+        return 0
+    }
+    return cpu.get(state, k, cpu.C_SYSCALLS)
+}
+
+fn syscalls_summe(state: u64) -> u64 {
+    var k: u64 = 0
+    var n: u64 = 0
+    while k < cpu.count(state) {
+        n = n + cpu.get(state, k, cpu.C_SYSCALLS)
+        k = k + 1
+    }
+    return n
+}
+
+fn ring3_prozesse(state: u64) -> u64 {
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var i: u64 = 1
+    var c: u64 = 0
+    while i < n {
+        if tget(state, i, T_KIND) == K_USER
+        && tget(state, i, T_STATE) != S_FREE {
+            c = c + 1
+        }
+        i = i + 1
+    }
+    return c
+}
+
+// ==================================================== RUNDE VIELKERN 3
+// DIE MESSUNG, UM DIE ES IN DIESER RUNDE GEHT.
+//
+// "Ring 3 laeuft auf allen Kernen" ist eine Behauptung, solange nicht
+// dasteht, WELCHER Prozess auf WELCHEM Kern war. Drei Zahlen je Prozess
+// und zwei Summen, und alle fuenf kommen aus Stellen, die der
+// Ablaufplaner ohnehin fuehrt:
+//
+//   kern    `TC_CPU`  -- der Kern, auf dem er ZULETZT lief
+//   maske   `TC_MASK` -- ein Bit je Kern, auf dem er JE lief
+//   n       wie viele Bits das sind
+//   runs    wie oft er ueberhaupt an die Reihe kam
+//
+// und darunter die Systemaufrufe JE KERN. Die letzte Zahl ist die
+// eigentliche: sie wird in `syscall_entry` ueber DIESELBE GS-Basis
+// hochgezaehlt, aus der der Kernstapel kommt. Ein Kern mit falscher
+// Basis zaehlt in einen fremden Satz -- die Summe der Zaehler weicht
+// dann von `kstate.SYSCALLS` ab, und genau das misst `abw`.
+fn bits_in(v: u64) -> u64 {
+    var b: u64 = 0
+    var c: u64 = 0
+    while b < 64 {
+        if ((v >> b) & 1) != 0 {
+            c = c + 1
+        }
+        b = b + 1
+    }
+    return c
+}
+
+fn ring3_bericht(state: u64) {
+    var s_p: [u8; 9] = "r3: pid=\0"
+    var s_k: [u8; 8] = "  kern=\0"
+    var s_m: [u8; 9] = "  maske=\0"
+    var s_n: [u8; 5] = "  n=\0"
+    var s_r: [u8; 9] = "  runs=\0\0"
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var i: u64 = 1
+    var alle: u64 = 0
+    var proz: u64 = 0
+    while i < n {
+        if tget(state, i, T_KIND) == K_USER
+        && tget(state, i, T_STATE) != S_FREE {
+            let m: u64 = tc_get(state, i, TC_MASK)
+            alle = alle | m
+            proz = proz + 1
+            let z: u64 = serial.zeile_an(cpu.here(state))
+            serial.puts((&s_p[0]) as u64)
+            serial.dec(tget(state, i, T_PID))
+            serial.puts((&s_k[0]) as u64)
+            serial.dec(tc_get(state, i, TC_CPU))
+            serial.puts((&s_m[0]) as u64)
+            serial.hex(m)
+            serial.puts((&s_n[0]) as u64)
+            serial.dec(bits_in(m))
+            serial.puts((&s_r[0]) as u64)
+            serial.dec(tget(state, i, T_RUNS))
+            serial.nl()
+            serial.zeile_aus(z)
+        }
+        i = i + 1
+    }
+    let z2: u64 = serial.zeile_an(cpu.here(state))
+    var s_g: [u8; 15] = "r3: prozesse=\0\0"
+    var s_gk: [u8; 9] = "  kerne=\0"
+    var s_gn: [u8; 5] = "  n=\0"
+    var s_gf: [u8; 10] = "  fremd=\0\0"
+    var s_ga: [u8; 8] = "  alle=\0"
+    serial.puts((&s_g[0]) as u64)
+    serial.dec(proz)
+    serial.puts((&s_gk[0]) as u64)
+    serial.hex(alle)
+    serial.puts((&s_gn[0]) as u64)
+    serial.dec(bits_in(alle))
+    serial.puts((&s_gf[0]) as u64)
+    serial.dec(ring3_fremd(state))
+    serial.puts((&s_ga[0]) as u64)
+    serial.dec(ring3_alle)
+    serial.nl()
+    serial.zeile_aus(z2)
+    let z3: u64 = serial.zeile_an(cpu.here(state))
+    var s_s: [u8; 14] = "r3: syscalls \0"
+    var s_c: [u8; 3] = " c\0"
+    var s_e: [u8; 2] = "=\0"
+    var s_su: [u8; 10] = "  summe=\0\0"
+    var s_ab: [u8; 8] = "  abw=\0\0"
+    serial.puts((&s_s[0]) as u64)
+    var k: u64 = 0
+    var sum: u64 = 0
+    while k < cpu.count(state) {
+        let v: u64 = cpu.get(state, k, cpu.C_SYSCALLS)
+        sum = sum + v
+        serial.puts((&s_c[0]) as u64)
+        serial.dec(k)
+        serial.puts((&s_e[0]) as u64)
+        serial.dec(v)
+        k = k + 1
+    }
+    serial.puts((&s_su[0]) as u64)
+    serial.dec(sum)
+    serial.puts((&s_ab[0]) as u64)
+    let ks: u64 = kstate.get(state, kstate.SYSCALLS)
+    if ks > sum {
+        serial.dec(ks - sum)
+    } else {
+        serial.dec(sum - ks)
+    }
+    serial.nl()
+    serial.zeile_aus(z3)
 }
 
 // Wie viele Ring-3-Prozesse zuletzt auf einem Kern ungleich null gelaufen
