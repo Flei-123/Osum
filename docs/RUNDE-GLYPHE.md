@@ -309,7 +309,48 @@ Start nimmt.
 
 ## 8. Der Fall, der die Runde ausgelöst hat
 
-*(wird nach den Serien eingetragen)*
+Voller Schreibtisch, `wigapp=/bin/taskmgr,melde,takt,500`,
+`wighalt=60`, `r3alle`, je **zwanzig** Läufe. Eine grüne Runde reicht
+nicht — der Fehler kam in einem von fünf.
+
+| Serie | Läufe | mit Panic/Ausnahme | Meldezeilen |
+|---|---|---|---|
+| **je Kern, `-smp 4`** | **20** | **0** | 5 038 |
+| **je Kern, `-smp 8`** | **20** | **0** | 6 256 |
+
+Der Aufgabenverwalter startete in 18 von 20 Läufen und meldete in jedem
+davon (die zwei Ausreißer sind Läufe, in denen die Maschine vor seinem
+Start am Zeitlimit endete — 0 Meldezeilen, kein Panic).
+
+### 8.1 Und die unbequeme Wahrheit über diesen Prüfstand
+
+Dieselben zwanzig Läufe mit `glyphblind` — also mit der **geteilten**
+Bühne:
+
+| Serie | Läufe | mit Panic | Meldezeilen |
+|---|---|---|---|
+| `glyphblind`, `-smp 4` | 20 | **0** | 5 011 |
+| `glyphblind`, `-smp 8` | 20 | **0** | 5 746 |
+| `glyphblind`, hart (`takt=60`), `-smp 4` | 12 | **0** | 2 212 |
+| `glyphblind` **und ohne den Riegel in `wlibc`**, hart | 12 | **0** | — |
+
+**Der Schreibtischlauf ist kein Sucher.** Er hat den Fehler nicht
+gefunden, auch nicht mit achtfacher Zeichenfrequenz und auch nicht mit
+ausgebautem zweiten Riegel. MERGE-6 hat ihn dort gesehen, weil dort
+zusätzlich der Glyphenspeicher ungesperrt war und ein Klickdrehbuch
+über 260 Sekunden gelaufen ist.
+
+Das steht hier, weil es der Punkt ist: **null Panics in vierzig Läufen
+sind ein „nichts kaputtgegangen", keine Zusage.** Die Zusage kommt aus
+Abschnitt 5 — `glyphrace` findet in jeder einzelnen Runde Hunderte von
+zerschossenen Antworten, wenn die Bühne geteilt ist, und **null**, wenn
+sie es nicht ist. Genau deshalb wurde er gebaut.
+
+Was die vierzig Läufe **wirklich** beweisen: der Umbau (kdata um 64 KiB
+größer, jede Fensterzeile über einen anderen Puffer, eine neue Sperre
+im Rasterer, zwei Systemaufrufe unter `fs.enter`) hat den Schreibtisch
+**nicht** beschädigt — bei vier und bei acht Kernen, in vierzig
+Starts.
 
 ---
 
@@ -319,9 +360,42 @@ Start nimmt.
 
 ---
 
-## 10. `tools/laden/run.sh`
+## 10. `tools/laden/run.sh` — die zweite offene Auflage
 
-*(wird nach dem Lauf eingetragen)*
+```
+LADEN: 31 passed, 0 failed
+```
+
+Und der Grund, warum sie offen blieb, war **nicht** „nicht dran
+gewesen": der Läufer war **kaputt**. Die erste QEMU-Zeile kam nie:
+
+```
+FEHLGESCHLAGEN: mkfs
+mkfs: '/bin/taskmgr' gibt es nicht
+```
+
+Wörtlich der Bruch aus MERGE-6 4.1, an einer dritten Stelle:
+`assets/apps/taskmgr.osp` ist ein Bündel, ein Bündel ist ein Verweis auf
+eine Datei unter `/bin`, und `/bin` dieses Läufers hat kein `taskmgr`.
+MERGE-6 hat den Riegel (`bundle.py nur=…`) in `tools/design/aufnahme.sh`
+und `tools/vielkern/run.sh` eingebaut — hier nicht, weil dieser Läufer
+in jener Runde nie lief. Dazu fehlte `$OUT/schluessel.pub`; er liegt in
+`/srv/store/osum/aktuell/` und wird jetzt von dort geholt.
+
+Was der Lauf zeigt, Zusage für Zusage:
+
+| Abschnitt | Ergebnis |
+|---|---|
+| 1 acht `.opk` gebaut, jedes mit `start`, `INFO`, `symbol` | grün |
+| 2 `VERZEICHNIS`, `.sig`, `INDEX`, `.sig` mit **curl** geholt (200) | grün |
+| 3 ein Osum ohne Paket fragt den Laden, zählt **acht** auf, Kette geprüft | grün |
+| 4 `ota einspielen`: acht Streuwerte, acht Signaturen **ein zweites Mal** durch `opk`, acht installiert | grün |
+| 5 der Schreibtisch startet, ein Programm **aus dem Laden** malt sein Fenster | grün, `docs/shots/glyphe/laden-schreibtisch.png` |
+| 6 Gegenprobe: gekipptes Oktett, ohne Signatur, fremder Schlüssel — **alle drei abgelehnt**, danach nichts halb installiert | grün |
+| 7 die Bilder werden **gelesen**: `tesseract` holt 181 Wörter aus dem Fenster zurück | grün |
+
+Das Bild ist keine Behauptung: Abschnitt 7 liest es mit einem fremden
+Werkzeug wieder ein.
 
 ---
 
