@@ -1,0 +1,324 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
+"""tools/design/fahren.py -- EIN START, VIELE BILDER.
+
+    fahren.py <monitor-socket> <serial.txt> <ausgabeverzeichnis> <drehbuch>
+
+Die Runden davor haben je Bild eine eigene Maschine gestartet: bauen,
+booten, EIN Foto, beenden.  Fuer eine Bestandsaufnahme von sieben
+Ansichten sind das sieben Starts a rund vierzig Sekunden, und sieben
+Maschinen sind sieben verschiedene Uhrzeiten in der Leiste -- ein
+Vorher/Nachher-Vergleich, bei dem sich nebenbei die Uhr bewegt, ist ein
+Vergleich mit Rauschen darin.
+
+Also: EIN Start, EINE Verbindung zum QEMU-Monitor, und ein Drehbuch,
+das dazwischen klickt, tippt und fotografiert.
+
+Befehle im Drehbuch (eine Zeile je Befehl, `#` ist eine Anmerkung):
+
+    warte <sekunden>            anhalten
+    warteauf <regex> [|| frist] warten, bis der regex in serial.txt steht
+    fahre <x>,<y>               den Zeiger dorthin, ohne zu klicken
+    klick <x>,<y>               dorthin fahren und einmal klicken
+    doppel <x>,<y>              dorthin fahren und zweimal klicken
+    klickauf <name>             das zuletzt gemeldete Rechteck <name>
+                                anklicken (siehe unten)
+    doppelauf <name>            dasselbe, zweimal
+    taste <name>                sendkey
+    foto <name>                 screendump nach <ausgabe>/<name>.ppm
+
+DIE RECHTECKE.  Die Programme dieses Systems melden ihre Widgets auf
+der seriellen Leitung -- `launcher: rect id=2 kind=5 x=12 y=82 w=416
+h=166`, `settings: rect name=wtb x=.. y=.. w=.. h=..`, `taskbar: start
+x=4 y=3 w=30 h=22`.  Ein Klick, der aus einer solchen Zeile gerechnet
+ist, trifft das, was das PROGRAMM gemeldet hat, und nicht das, was
+jemand aus einem alten Bild abgelesen hat.  Genau daran ist die Runde
+THEMESTORE mit `click=680,51` haengengeblieben: die Zahl stimmt genau
+so lange, bis sich das Fenster verschiebt.
+
+Umgerechnet wird mit dem Ursprung des Fensters: `<programm>: geom x= y=`
+plus Rahmen (2) und Titelleiste (22) -- dieselben zwei Zahlen, die
+`wlib.say_painted` benutzt.  Wer ein Rechteck ohne Fensterbezug meldet
+(die Taskleiste), gibt schon Bildschirmkoordinaten an.
+
+Namen fuer `klickauf`:
+
+    start           der Startknopf         (taskbar: start x= y= w= h=)
+    netz            die Symbolgruppe       (taskbar: field net ...)
+    uhr             die Uhr                (taskbar: field clock ...)
+    lrect<N>        Widget N des Starters  (launcher: rect id=N ...)
+    lzeile<N>       Zeile N der Trefferliste des Starters
+    srect<NAME>     Widget NAME der Einstellungen (settings: rect name=)
+    frect<N>        Widget N des Dateimanagers (explorer: rect id=N)
+"""
+import os
+import re
+import socket
+import sys
+import time
+
+BORDER = 2
+TITLE_H = 22
+
+
+def lies(pfad):
+    try:
+        with open(pfad, "rb") as f:
+            return f.read().decode("latin1")
+    except OSError:
+        return ""
+
+
+class Fahrer:
+    def __init__(self, sock, serial, out):
+        self.serial = serial
+        self.out = out
+        self.s = None
+        bis = time.time() + 20.0
+        while time.time() < bis:
+            try:
+                s = socket.socket(socket.AF_UNIX)
+                s.settimeout(5.0)
+                s.connect(sock)
+                self.s = s
+                break
+            except OSError:
+                time.sleep(0.1)
+        if self.s is None:
+            raise SystemExit("kein Monitor an %s" % sock)
+        time.sleep(0.3)
+        self.leeren()
+        self.x, self.y = 0, 0
+        self.ecke()
+
+    def leeren(self):
+        try:
+            self.s.settimeout(0.4)
+            while True:
+                if not self.s.recv(65536):
+                    break
+        except OSError:
+            pass
+        finally:
+            self.s.settimeout(5.0)
+
+    def cmd(self, zeile):
+        self.s.sendall((zeile + "\n").encode())
+        time.sleep(0.06)
+        self.leeren()
+
+    # --- der Zeiger.  `mouse_move` ist RELATIV (PS/2 kennt nichts
+    # anderes), und ein Paket traegt neun Bit je Achse.  Also: erst in
+    # die linke obere Ecke, wo der Anschlag die Vorgeschichte loescht,
+    # dann in Schritten unter 128 heraus.  Dieselbe Route wie
+    # tools/themestore/click.py, nur dass die Verbindung stehen bleibt.
+    def ecke(self):
+        for _ in range(8):
+            self.cmd("mouse_move -120 -120")
+        self.x, self.y = 0, 0
+
+    def fahre(self, x, y):
+        self.ecke()
+        dx, dy = x, y
+        while dx > 0 or dy > 0:
+            sx, sy = min(dx, 120), min(dy, 120)
+            self.cmd("mouse_move %d %d" % (sx, sy))
+            dx -= sx
+            dy -= sy
+        self.x, self.y = x, y
+
+    def klick(self, x, y, mal=1):
+        self.fahre(x, y)
+        time.sleep(0.35)
+        for i in range(mal):
+            self.cmd("mouse_button 1")
+            time.sleep(0.05)
+            self.cmd("mouse_button 0")
+            if i + 1 < mal:
+                time.sleep(0.12)
+        time.sleep(1.2)
+
+    def taste(self, name):
+        self.cmd("sendkey %s" % name)
+        time.sleep(0.4)
+
+    def warteauf(self, muster, frist=25.0):
+        r = re.compile(muster)
+        bis = time.time() + frist
+        while time.time() < bis:
+            if r.search(lies(self.serial)):
+                return True
+            time.sleep(0.2)
+        return False
+
+    # --- das Foto.  `screendump` kehrt zurueck, BEVOR die Datei fertig
+    # ist; gewartet wird, bis die Groesse steht.  (tools/gfx/screenshot.py
+    # hat das herausgefunden, hier steht es noch einmal, weil diese
+    # Verbindung nicht neu aufgebaut wird.)
+    def foto(self, name, frist=30.0):
+        ziel = os.path.join(self.out, name + ".ppm")
+        if os.path.exists(ziel):
+            os.unlink(ziel)
+        self.cmd("screendump %s" % ziel)
+        letzte, ruhig = -1, 0
+        bis = time.time() + frist
+        while time.time() < bis:
+            time.sleep(0.15)
+            try:
+                jetzt = os.path.getsize(ziel)
+            except OSError:
+                continue
+            if jetzt == letzte and jetzt > 0:
+                ruhig += 1
+                if ruhig >= 3:
+                    print("foto %s %d Oktette" % (name, jetzt))
+                    return True
+            else:
+                ruhig, letzte = 0, jetzt
+        print("foto %s FEHLGESCHLAGEN" % name)
+        return False
+
+    # ------------------------------------------------ die Rechtecke
+    def fenster(self, prog):
+        """Der Ursprung der Malflaeche eines Programmfensters."""
+        t = lies(self.serial)
+        m = None
+        for m in re.finditer(
+                r"%s: geom x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % prog, t):
+            pass
+        if m is None:
+            return None
+        return (int(m.group(1)) + BORDER, int(m.group(2)) + TITLE_H)
+
+    def rechteck(self, name):
+        t = lies(self.serial)
+
+        def letzte(muster):
+            m = None
+            for m in re.finditer(muster, t):
+                pass
+            return m
+
+        # DIE LEISTE MELDET IN IHREN EIGENEN KOORDINATEN.  `taskbar:
+        # start x=4 y=3` ist die Ecke IM Fenster der Leiste, und das
+        # Fenster steht bei `taskbar: geom x=0 y=772`.  Der erste
+        # Versuch dieser Runde hat die beiden verwechselt und auf
+        # (19,14) geklickt -- oben links auf den Schreibtisch.  Genau
+        # deshalb steht hier eine Umrechnung und keine Zahl.
+        gm = letzte(r"taskbar: geom edge=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+        tb = (int(gm.group(1)), int(gm.group(2))) if gm else (0, 0)
+        if name == "start":
+            m = letzte(r"taskbar: start x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            if m is None:
+                return None
+            return (tb[0] + int(m.group(1)), tb[1] + int(m.group(2)),
+                    int(m.group(3)), int(m.group(4)))
+        if name in ("netz", "uhr"):
+            f = "net" if name == "netz" else "clock"
+            m = letzte(r"taskbar: field %s x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % f)
+            if m is None:
+                return None
+            return (tb[0] + int(m.group(1)), tb[1] + int(m.group(2)),
+                    int(m.group(3)), int(m.group(4)))
+        if name == "qsalle":
+            # Die unterste Zeile des Kontrollzentrums ("Alle
+            # Einstellungen").  Das Feld meldet nur seine eigene Ecke
+            # (`qs: open x= y= w= h=`); die Zeile darin steht als
+            # Konstante in kernel/user/qs.fi -- PAD=10, FH=22, und sie
+            # sitzt unten, also H - PAD - FH.
+            m = letzte(r"qs: open x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            if m is None:
+                return None
+            x, y = int(m.group(1)), int(m.group(2))
+            w, h = int(m.group(3)), int(m.group(4))
+            return (x + 10, y + h - 10 - 22, w - 20, 22)
+        if name.startswith("lrect"):
+            n = int(name[5:])
+            m = letzte(r"launcher: rect id=%d kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % n)
+            o = self.fenster("launcher")
+            if m is None or o is None:
+                return None
+            return (o[0] + int(m.group(1)), o[1] + int(m.group(2)),
+                    int(m.group(3)), int(m.group(4)))
+        if name.startswith("lzeile"):
+            n = int(name[6:])
+            m = letzte(r"launcher: rect id=2 kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            z = letzte(r"launcher: rows x=\d+ base=\d+ zh=(\d+)")
+            o = self.fenster("launcher")
+            if m is None or z is None or o is None:
+                return None
+            zh = int(z.group(1))
+            return (o[0] + int(m.group(1)), o[1] + int(m.group(2)) + n * zh,
+                    int(m.group(3)), zh)
+        if name.startswith("srect"):
+            k = name[5:]
+            m = letzte(r"settings: rect name=%s x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % k)
+            o = self.fenster("settings")
+            if m is None or o is None:
+                return None
+            return (o[0] + int(m.group(1)), o[1] + int(m.group(2)),
+                    int(m.group(3)), int(m.group(4)))
+        if name.startswith("frect"):
+            n = int(name[5:])
+            m = letzte(r"explorer: rect id=%d kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % n)
+            o = self.fenster("explorer")
+            if m is None or o is None:
+                return None
+            return (o[0] + int(m.group(1)), o[1] + int(m.group(2)),
+                    int(m.group(3)), int(m.group(4)))
+        return None
+
+
+def main():
+    if len(sys.argv) < 5:
+        print(__doc__)
+        return 2
+    sock, serial, out, buch = sys.argv[1:5]
+    os.makedirs(out, exist_ok=True)
+    f = Fahrer(sock, serial, out)
+    fehler = 0
+    for roh in open(buch, encoding="utf-8"):
+        z = roh.strip()
+        if not z or z.startswith("#"):
+            continue
+        teile = z.split(None, 1)
+        b = teile[0]
+        arg = teile[1].strip() if len(teile) > 1 else ""
+        if b == "warte":
+            time.sleep(float(arg))
+        elif b == "warteauf":
+            st = arg.split("||")
+            ok = f.warteauf(st[0].strip(), float(st[1]) if len(st) > 1 else 25.0)
+            print("warteauf %s -> %s" % (st[0].strip(), "da" if ok else "NICHT DA"))
+            if not ok:
+                fehler += 1
+        elif b in ("klick", "doppel", "fahre"):
+            x, y = (int(v) for v in arg.split(","))
+            if b == "fahre":
+                f.fahre(x, y)
+            else:
+                f.klick(x, y, 2 if b == "doppel" else 1)
+        elif b in ("klickauf", "doppelauf"):
+            r = f.rechteck(arg)
+            if r is None:
+                print("klickauf %s -> KEIN RECHTECK GEMELDET" % arg)
+                fehler += 1
+                continue
+            x, y = r[0] + r[2] // 2, r[1] + r[3] // 2
+            print("klickauf %s -> %d,%d  (rect %d,%d %dx%d)"
+                  % (arg, x, y, r[0], r[1], r[2], r[3]))
+            f.klick(x, y, 2 if b == "doppelauf" else 1)
+        elif b == "taste":
+            f.taste(arg)
+        elif b == "foto":
+            if not f.foto(arg):
+                fehler += 1
+        else:
+            print("unbekannter Befehl: %s" % z)
+            fehler += 1
+    print("drehbuch fertig, fehler=%d" % fehler)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
