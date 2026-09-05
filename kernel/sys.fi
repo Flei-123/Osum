@@ -71,6 +71,7 @@ import netview
 import netmon
 import share
 import wg
+import bus
 import perm
 import power
 import pwr
@@ -117,6 +118,14 @@ export {
     SYS_OSUM_TILEGET, SYS_OSUM_TILEDO, SYS_OSUM_TILECONF,
     SYS_OSUM_TILEBIND,
     SYS_OSUM_PMON, SYS_OSUM_CPUSTAT,
+    // ---- RUNDE SYSTEMBUS ----
+    SYS_OSUM_BUS,
+    BUS_REG, BUS_FIND, BUS_SEND, BUS_RECV, BUS_SUB, BUS_PUB,
+    BUS_SEGNEW, BUS_SEGMAP, BUS_SEGDROP,
+    BUS_CLIPSET, BUS_CLIPGET, BUS_CLIPINFO,
+    BUS_OFFER, BUS_FILL,
+    BUS_DRAGSET, BUS_DRAGGET, BUS_DRAGCLEAR, BUS_DRAGINFO,
+    BUS_NOTIPOST, BUS_NOTIGET, BUS_NOTIINFO, BUS_STAT,
     CAP_BASE, CAP_VERSION, CAP_READ, CAP_WRITE, CAP_CLOSE, CAP_DUP,
     CAP_INSPECT, CAP_TRANSFER, CAP_COUNT, CAP_MAXNR,
     SYS_SOCKET, SYS_CONNECT, SYS_ACCEPT, SYS_SENDTO, SYS_RECVFROM,
@@ -1383,6 +1392,40 @@ const SYS_OSUM_FREG: u64 = 1903 // (satz, len) -> Platz in der Tabelle
 // heraus. Es gibt deshalb keinen Getter fuer ihn -- `WG_PUBLIC` gibt
 // den OEFFENTLICHEN Schluessel, und der ist zum Weitergeben da.
 const SYS_OSUM_WGGET: u64 = 1950 // (feld, zeiger, len) -> Zahl oder -E
+// ===================================================== RUNDE SYSTEMBUS
+//
+// EINE Nummer und ein OP-Wort, und nicht zweiundzwanzig Nummern. Der
+// Grund steht bei Runde K13 im Verteiler: `dispatch` ist eine Funktion
+// mit ueber hundert Zweigen, und jeder weitere Zweig kostet Stapel, von
+// dem 112 Oktette uebrig waren. Zweiundzwanzig Zweige haetten den
+// Kernstapel gesprengt -- einer tut es nicht.
+//
+// 1960, zwischen SYS_OSUM_WGSET (1951) und CAP_BASE (2000).
+const SYS_OSUM_BUS: u64 = 1960
+
+const BUS_REG: u64 = 1 // (name, n, zugriff) -> dienst
+const BUS_FIND: u64 = 2 // (name, n) -> dienst
+const BUS_SEND: u64 = 3 // (dienst, puffer, n, segment) -> 0
+const BUS_RECV: u64 = 4 // (puffer, max, kopf) -> n
+const BUS_SUB: u64 = 5 // (dienst) -> 0
+const BUS_PUB: u64 = 6 // (dienst, puffer, n) -> Zahl der Empfaenger
+const BUS_SEGNEW: u64 = 7 // (seiten) -> segment
+const BUS_SEGMAP: u64 = 8 // (segment) -> Adresse
+const BUS_SEGDROP: u64 = 9 // (segment) -> 0
+const BUS_CLIPSET: u64 = 10 // (typen, puffer, n, segment) -> 0
+const BUS_CLIPGET: u64 = 11 // (zurueck, puffer, max, kopf) -> n
+const BUS_CLIPINFO: u64 = 12 // (zurueck, was) -> Zahl
+const BUS_OFFER: u64 = 13 // (typen) -> 0
+const BUS_FILL: u64 = 14 // (puffer, n, segment) -> 0
+const BUS_DRAGSET: u64 = 15 // (typen, puffer, n, segment) -> 0
+const BUS_DRAGGET: u64 = 16 // (puffer, max, kopf) -> n
+const BUS_DRAGCLEAR: u64 = 17 // () -> 0
+const BUS_DRAGINFO: u64 = 18 // (was) -> Zahl
+const BUS_NOTIPOST: u64 = 19 // (dringlichkeit, puffer, n) -> 0
+const BUS_NOTIGET: u64 = 20 // (zurueck, puffer, max) -> n
+const BUS_NOTIINFO: u64 = 21 // (was, zurueck) -> Zahl
+const BUS_STAT: u64 = 22 // (welcher) -> Zaehler
+
 const SYS_OSUM_WGSET: u64 = 1951 // (feld, zeiger, anzahl) -> 0 oder -E
 
 // wgget
@@ -1996,6 +2039,10 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // RUNDE WERKZEUGE: die Kerne, einzeln.
     if number == SYS_OSUM_CPUSTAT {
         return do_cpustat(state, a0, a1)
+    }
+    // RUNDE SYSTEMBUS: EIN Zweig fuer zweiundzwanzig Handgriffe.
+    if number == SYS_OSUM_BUS {
+        return do_bus(state, me, a0, a1, a2, a3, a4)
     }
     // ------------------------------------------------------ RUNDE K13
     //
@@ -5859,8 +5906,18 @@ fn find_child(state: u64, me: u64, pid: u64) -> u64 {
 
 // ------------------------------------------------- the two Osum calls
 
+// RUNDE SYSTEMBUS: 61 ist `uprog.P_BUSB`, der Leser der Abnahme, und er
+// steht hier EINZELN und nicht als angehobene Obergrenze. Die Grenze 16
+// ist kein Zufall: alles darueber sind Programme, die der KERN startet
+// (Messungen, Selbsttests), und ein Ring-3-Prozess, der sie sich selbst
+// starten koennte, koennte sich damit auch die Messungen verstellen.
+// Der Leser ist die eine Ausnahme, weil die Zusage a) der Runde ZWEI
+// Prozesse braucht und der Schreiber der einzige ist, der weiss, wann
+// der zweite da sein muss.
+const P_BUSB_SPAWN: u64 = 61
+
 fn do_spawn(state: u64, me: u64, prog: u64, arg: u64) -> u64 {
-    if prog == 0 || prog > 16 {
+    if prog == 0 || (prog > 16 && prog != P_BUSB_SPAWN) {
         return neg(errno.E_INVAL)
     }
     let i: u64 = proc.create(state, prog, arg, 2)
@@ -10214,3 +10271,267 @@ fn do_jrnl(state: u64, me: u64, from: u64, dst: u64, max: u64) -> u64 {
 
 
 
+
+
+// ==================================================== RUNDE SYSTEMBUS
+//
+// DER EINE SYSTEMRUF DES BUSSES. Er holt aus dem Nutzerraum in einen
+// Puffer AUF DEM STAPEL DIESES AUFRUFS -- nicht in einen globalen. Das
+// ist die Ein-Kern-Regel dieser Runde und der Grund, warum vier Kerne
+// gleichzeitig kopieren duerfen, ohne sich zu ueberschreiben
+// (`STATUS-MERGE6.md`, die Befunde zu `fs.inode_get` und
+// `wig.glyph_into`).
+//
+// DIE REIHENFOLGE, und sie ist wichtig: erst aus dem Nutzerraum holen
+// (das kann einen Seitenfehler ausloesen), dann in den Bus (der nimmt
+// die Sperre). Umgekehrt haette ein Seitenfehler die Bussperre in der
+// Hand gehalten, und der naechste Kern haette darauf gewartet, bis die
+// Zeit abgelaufen waere.
+//
+// pid und uid der Nachricht setzt der BUS aus der Aufgabentafel. Diese
+// Funktion reicht sie nicht durch -- es gibt keinen Parameter dafuer,
+// und das ist Absicht.
+fn do_bus(state: u64, me: u64, op: u64, a1: u64, a2: u64, a3: u64,
+    a4: u64) -> u64 {
+    if kstate.mode_on(state, kstate.M_NOBUS) {
+        return neg(errno.E_NODEV)
+    }
+    // ---- Namen: hoechstens sechzehn Oktette, zwei Woerter.
+    if op == BUS_REG || op == BUS_FIND {
+        var nm: [u8; 16] = [0 as u8; 16]
+        var n: u64 = a2
+        if n > 16 {
+            n = 16
+        }
+        if n > 0 {
+            if !copy_in(state, me, (&nm[0]) as u64, a1, n) {
+                return neg(errno.E_FAULT)
+            }
+        }
+        let w0: u64 = bus_word((&nm[0]) as u64, 0)
+        let w1: u64 = bus_word((&nm[0]) as u64, 8)
+        if op == BUS_REG {
+            return bus.reg(state, me, w0, w1, a3)
+        }
+        return bus.find(state, w0, w1)
+    }
+    // ---- alles, was Oktette traegt: EIN Puffer, 192 Oktette.
+    if op == BUS_SEND || op == BUS_PUB || op == BUS_CLIPSET
+        || op == BUS_FILL || op == BUS_DRAGSET || op == BUS_NOTIPOST {
+        var buf: [u8; 192] = [0 as u8; 192]
+        var n: u64 = 0
+        var src: u64 = 0
+        if op == BUS_SEND || op == BUS_PUB {
+            src = a2
+            n = a3
+        }
+        if op == BUS_CLIPSET || op == BUS_DRAGSET {
+            src = a2
+            n = a3
+        }
+        if op == BUS_FILL {
+            src = a1
+            n = a2
+        }
+        if op == BUS_NOTIPOST {
+            src = a2
+            n = a3
+        }
+        if n > 192 {
+            n = 192
+        }
+        if n > 0 {
+            if !copy_in(state, me, (&buf[0]) as u64, src, n) {
+                return neg(errno.E_FAULT)
+            }
+        }
+        let p: u64 = (&buf[0]) as u64
+        if op == BUS_SEND {
+            return bus.send(state, me, a1, a4, n, p)
+        }
+        if op == BUS_PUB {
+            return bus.pub(state, me, a1, n, p)
+        }
+        if op == BUS_CLIPSET {
+            return bus.clip_set(state, me, a1, n, a4, p)
+        }
+        if op == BUS_FILL {
+            return bus.fill(state, me, n, a3, p)
+        }
+        if op == BUS_DRAGSET {
+            return bus.drag_set(state, me, a1, n, a4, p)
+        }
+        return bus.noti_post(state, me, a1, n, p)
+    }
+    // ---- alles, was Oktette HOLT: Puffer und ein Kopf von sechs Woertern.
+    if op == BUS_RECV || op == BUS_CLIPGET || op == BUS_DRAGGET
+        || op == BUS_NOTIGET {
+        var buf: [u8; 192] = [0 as u8; 192]
+        var meta: [u8; 48] = [0 as u8; 48]
+        var max: u64 = 0
+        var uout: u64 = 0
+        var umeta: u64 = 0
+        var got: u64 = 0
+        if op == BUS_RECV {
+            uout = a1
+            max = a2
+            umeta = a3
+        }
+        if op == BUS_CLIPGET {
+            uout = a2
+            max = a3
+            umeta = a4
+        }
+        if op == BUS_DRAGGET {
+            uout = a1
+            max = a2
+            umeta = a3
+        }
+        if op == BUS_NOTIGET {
+            uout = a2
+            max = a3
+        }
+        if max > 192 {
+            max = 192
+        }
+        let bp: u64 = (&buf[0]) as u64
+        let mp: u64 = (&meta[0]) as u64
+        if op == BUS_RECV {
+            got = bus.recv(state, me, bp, max, mp)
+        }
+        if op == BUS_CLIPGET {
+            got = bus.clip_get(state, me, a1, bp, max, mp)
+        }
+        if op == BUS_DRAGGET {
+            got = bus.drag_get(state, bp, max, mp)
+        }
+        if op == BUS_NOTIGET {
+            got = bus.noti_get(state, a1, bp, max)
+        }
+        if got > 0x8000000000000000 {
+            return got as i64 as u64 // ein Fehler des Busses, unveraendert
+        }
+        if got > 0 {
+            if !copy_out(state, me, uout, bp, got) {
+                return neg(errno.E_FAULT)
+            }
+        }
+        if umeta != 0 {
+            if !copy_out(state, me, umeta, mp, 48) {
+                return neg(errno.E_FAULT)
+            }
+        }
+        return got
+    }
+    // ---- die Segmente.
+    if op == BUS_SEGNEW {
+        return bus.seg_new(state, me, a1)
+    }
+    if op == BUS_SEGMAP {
+        return bus_segmap(state, me, a1)
+    }
+    if op == BUS_SEGDROP {
+        return bus.seg_drop(state, me, a1)
+    }
+    // ---- die Fragen ohne Oktette.
+    if op == BUS_SUB {
+        return bus.sub(state, me, a1)
+    }
+    if op == BUS_OFFER {
+        return bus.offer(state, me, a1)
+    }
+    if op == BUS_DRAGCLEAR {
+        return bus.drag_clear(state)
+    }
+    if op == BUS_CLIPINFO {
+        if a2 == 0 {
+            return bus.clip_types(state, a1)
+        }
+        if a2 == 1 {
+            return bus.clip_len(state, a1)
+        }
+        if a2 == 2 {
+            return bus.clip_owner(state, a1)
+        }
+        if a2 == 3 {
+            return bus.clip_count(state)
+        }
+        return bus.offer_state(state)
+    }
+    if op == BUS_DRAGINFO {
+        if a1 == 0 {
+            return bus.drag_active(state)
+        }
+        return bus.drag_types(state)
+    }
+    if op == BUS_NOTIINFO {
+        if a1 == 0 {
+            return bus.noti_count(state)
+        }
+        if a1 == 1 {
+            return bus.noti_seen(state)
+        }
+        if a1 == 2 {
+            return bus.noti_len(state, a2)
+        }
+        return bus.noti_prio(state, a2)
+    }
+    if op == BUS_STAT {
+        return bus.stat(state, a1)
+    }
+    return neg(errno.E_INVAL)
+}
+
+fn bus_word(p: u64, off: u64) -> u64 {
+    var w: u64 = 0
+    var k: u64 = 0
+    while k < 8 {
+        w = w | (kstate.get8(p + off + k) << (k * 8))
+        k = k + 1
+    }
+    return w
+}
+
+// EIN MEGABYTE OHNE EIN EINZIGES KOPIERTES OKTETT.
+//
+// Die Seiten des Segments werden in den Adressraum des Aufrufers
+// GEHAENGT, nicht hineingeschrieben. Die Adressen kommen aus demselben
+// Vorrat wie `big_map` (`proc.BIG_FLOOR`..`T_BIG`), damit es genau EINEN
+// Zaehler fuer den grossen Bereich gibt und nicht zwei, die sich
+// ueberholen koennen.
+//
+// Und die Rahmen tragen `PAGE_SHARED`: `proc.free_pt` laesst sie beim
+// Abraeumen des Adressraums liegen, denn sie gehoeren dem Bus. Ohne das
+// Bit haette der zweite Prozess nach dem Ende des ersten in fremden,
+// laengst neu vergebenen Speicher geschrieben -- still.
+fn bus_segmap(state: u64, me: u64, id: u64) -> u64 {
+    if bus.seg_map(state, me, id) != bus.E_OK {
+        return neg(errno.E_INVAL)
+    }
+    let pages: u64 = bus.seg_pages(state, id)
+    if pages == 0 {
+        return neg(errno.E_INVAL)
+    }
+    let top: u64 = big_bottom(state, me)
+    if pages * PAGE > top - proc.BIG_FLOOR {
+        return neg(errno.E_NOMEM)
+    }
+    let base: u64 = top - pages * PAGE
+    if base < proc.BIG_FLOOR {
+        return neg(errno.E_NOMEM)
+    }
+    var k: u64 = 0
+    while k < pages {
+        let f: u64 = bus.seg_frame(state, id, k)
+        if f == 0 {
+            return neg(errno.E_INVAL)
+        }
+        if !proc.map_frame(state, me, base + k * PAGE, f, true) {
+            return neg(errno.E_NOMEM)
+        }
+        kstate.add(state, kstate.MAPS, 1)
+        k = k + 1
+    }
+    sched.tset(state, me, sched.T_BIG, base)
+    return base
+}

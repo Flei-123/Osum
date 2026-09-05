@@ -138,7 +138,13 @@ const DEF_V: u64 = 104
 const F_NET: u64 = 0
 const F_BAT: u64 = 1
 const F_CLK: u64 = 2
-const F_N: u64 = 3
+// RUNDE SYSTEMBUS: das vierte Statusfeld -- die Glocke. Es ist ein FELD
+// wie die anderen drei und keine Sonderbehandlung: dadurch bekommt es
+// Anordnung, Ausrichtung, Bericht und Neuzeichnen umsonst und richtig,
+// und die Leiste hat weiterhin genau EINE Stelle, an der Statusfelder
+// gebaut werden.
+const F_NOTI: u64 = 3
+const F_N: u64 = 4
 
 // The calls this bar needs besides the window server.
 const SYS_PWRGET: u64 = 1750
@@ -435,13 +441,13 @@ static mut st_x: u64 = 0
 static mut st_y: u64 = 0
 static mut st_w: u64 = 0
 static mut st_h: u64 = 0
-static mut f_x: [u64; 3] = [0 as u64; 3]
-static mut f_y: [u64; 3] = [0 as u64; 3]
-static mut f_w: [u64; 3] = [0 as u64; 3]
-static mut f_h: [u64; 3] = [0 as u64; 3]
-static mut f_lines: [u64; 3] = [0 as u64; 3]
-static mut f_txt: [u8; 192] = [0 as u8; 192] // 3 fields x 2 lines x 32
-static mut f_full: [u8; 96] = [0 as u8; 96] // 3 fields x 32, unshortened
+static mut f_x: [u64; 4] = [0 as u64; 4]
+static mut f_y: [u64; 4] = [0 as u64; 4]
+static mut f_w: [u64; 4] = [0 as u64; 4]
+static mut f_h: [u64; 4] = [0 as u64; 4]
+static mut f_lines: [u64; 4] = [0 as u64; 4]
+static mut f_txt: [u8; 256] = [0 as u8; 256] // 4 fields x 2 lines x 32
+static mut f_full: [u8; 128] = [0 as u8; 128] // 4 fields x 32, unshortened
 static mut kx: [u64; 10] = [0 as u64; 10]
 // RUNDE PAINT: der Buendelname je Knopf, 24 Oktette, aus WL_APP.
 static mut kapp: [u8; 240] = [0 as u8; 240]
@@ -1628,6 +1634,10 @@ fn tage_im_monat(y: u64, m: u64) -> u64 {
 static mut clk_z2: [u8; 32] = [0 as u8; 32]
 static mut clk_zwei: u64 = 0
 static mut net_da: u64 = 1
+// RUNDE SYSTEMBUS: die Zahl auf der Glocke, gemerkt fuer den Bericht.
+static mut noti_neu: u64 = 0
+static mut s_glocke: [u8; 7] = "Meldg \0"
+
 
 fn status_build() -> bool {
     let s_kA: u64 = txt((&k_nobatt[0 as usize]) as u64,
@@ -1732,6 +1742,21 @@ fn status_build() -> bool {
         at = num_at(ne, at, (ip >> 8) & 255)
         at = text_at_p(ne, at, (&s_dot[0 as usize]) as u64)
         at = num_at(ne, at, ip & 255)
+    }
+    // ================================================ RUNDE SYSTEMBUS
+    //
+    // DIE GLOCKE. Was hier steht, ist die Zahl der Meldungen, die noch
+    // NIEMAND gelesen hat -- `bus.noti_seen` im Kern. Null Meldungen
+    // heisst KEIN Feld und nicht die Ziffer 0: dieselbe Regel, nach der
+    // die Runde STARTKNOPF das Akkufeld eines Tischrechners entfernt
+    // hat. Ein Symbol steht fuer etwas, das da IST.
+    let nb: u64 = full_of(F_NOTI)
+    noti_neu = wlibc.noti_neu()
+    if noti_neu == 0 {
+        __mmio_write8((nb) as *mut u8, 0 as u8)
+    } else {
+        var nat: u64 = text_at_p(nb, 0, (&s_glocke[0 as usize]) as u64)
+        nat = num_at(nb, nat, noti_neu)
     }
     var sum: u64 = 1469598103934665603 ^ (net_state *% 2654435761)
     // The sign is not part of any of the three texts, so without this
@@ -1908,6 +1933,13 @@ fn layout() {
                 f = F_BAT
             } else if f == F_BAT {
                 f = F_NET
+            } else if f == F_NET {
+                // RUNDE SYSTEMBUS: die Glocke steht am Ende der Kette,
+                // also am weitesten vom Rand weg. Sie ist das Feld,
+                // das am seltensten etwas zeigt -- und ein Feld, das
+                // meistens leer ist, darf nicht die Stelle bestimmen,
+                // an der Uhr und Akku stehen.
+                f = F_NOTI
             } else {
                 f = F_N
             }
@@ -2037,6 +2069,8 @@ fn layout() {
             f = F_BAT
         } else if f == F_BAT {
             f = F_NET
+        } else if f == F_NET {
+            f = F_NOTI
         } else {
             f = F_N
         }
@@ -2225,6 +2259,11 @@ static mut m_start: [u8; 6] = "start\0"
 static mut m_clk: [u8; 6] = "clock\0"
 static mut m_bat: [u8; 8] = "battery\0"
 static mut m_net: [u8; 4] = "net\0"
+// RUNDE SYSTEMBUS: die Glocke hat einen eigenen Namen im Bericht.
+// Ohne ihn haette sie den des Netzes getragen, und ein Laeufer, der
+// `taskbar: field net` zweimal findet, sucht den Fehler an der
+// falschen Stelle.
+static mut m_noti: [u8; 5] = "noti\0"
 static mut m_btn: [u8; 7] = "button\0"
 static mut s_tx: [u8; 15] = "taskbar: text \0"
 static mut s_tX: [u8; 4] = " x=\0"
@@ -3000,6 +3039,8 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
                     mark = (&m_bat[0 as usize]) as u64
                 } else if f == F_CLK {
                     mark = (&m_clk[0 as usize]) as u64
+                } else if f == F_NOTI {
+                    mark = (&m_noti[0 as usize]) as u64
                 }
                 say_text(mark, tx, base, wlibc.theme(wlibc.T_FG),
                     wlibc.theme(wlibc.T_PANEL), p)
@@ -3012,6 +3053,8 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
                 mark = (&m_bat[0 as usize]) as u64
             } else if f == F_CLK {
                 mark = (&m_clk[0 as usize]) as u64
+            } else if f == F_NOTI {
+                mark = (&m_noti[0 as usize]) as u64
             }
             say((&s_fl[0 as usize]) as u64)
             say(mark)
