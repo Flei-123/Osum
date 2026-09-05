@@ -48,7 +48,9 @@ export {
     // ---- RUNDE INSTALL ----
     use_at, first, identify, probe_ata0, flush,
     // ---- RUNDE AHCI ----
-    use_ahci, DEV_AHCI
+    use_ahci, DEV_AHCI,
+    // ---- RUNDE VIELKERN 3 ----
+    ata_fehler, ata_letzte_lba, ata_letzter_st
 }
 
 const BLOCK_SIZE: u64 = 512
@@ -292,10 +294,69 @@ fn ata_recover(slave: bool) {
     serial.io_wait()
 }
 
+// ===================================================== RUNDE VIELKERN 3
+// EIN LESEFEHLER DER PLATTE WIRD GEZAEHLT UND GESAGT.
+//
+// Runde VIELKERN 2 stand vor `desk: start /bin/taskbar pid=0` und hatte
+// nichts weiter in der Hand. Der Grund war `elf: refused, reason 1 --
+// no such file` bzw. `reason 20 -- short disk read`, und BEIDE kommen
+// aus derselben Zeile: `ata_read_on` hat aufgegeben und `false`
+// zurueckgegeben, still. Ein Treiber, der stumm scheitert, macht aus
+// einem Plattenfehler einen Dateisystemfehler und aus dem einen
+// Ladefehler -- drei Stockwerke weiter oben sucht man dann den Fehler.
+//
+// `ata_recover` bleibt, wo es war; dazu kommt nur, dass jeder Fehlschlag
+// gezaehlt wird und die ersten acht ihre Zahlen sagen: welcher Block,
+// welches Statusregister. Das ist die Zeile, an der diese Runde gemerkt
+// hat, dass der Fehler UNTEN sitzt und nicht im Lader.
+static mut ata_fehl: u64 = 0
+static mut ata_gesagt: u64 = 0
+static mut ata_lba: u64 = 0
+static mut ata_st: u64 = 0
+
+fn ata_fehler() -> u64 {
+    return ata_fehl
+}
+
+fn ata_letzte_lba() -> u64 {
+    return ata_lba
+}
+
+fn ata_letzter_st() -> u64 {
+    return ata_st
+}
+
+fn ata_melden(lba: u64, schreiben: bool) {
+    let st: u64 = serial.in8(ATA_CMD) as u64
+    ata_fehl = ata_fehl + 1
+    ata_lba = lba
+    ata_st = st
+    if ata_gesagt >= 8 {
+        return
+    }
+    ata_gesagt = ata_gesagt + 1
+    var s_r: [u8; 18] = "ata: read fehl b=\0"
+    var s_w: [u8; 19] = "ata: write fehl b=\0"
+    var s_s: [u8; 7] = "  st=\0\0"
+    var s_n: [u8; 5] = "  n=\0"
+    if schreiben {
+        serial.puts((&s_w[0]) as u64)
+    } else {
+        serial.puts((&s_r[0]) as u64)
+    }
+    serial.dec(lba)
+    serial.puts((&s_s[0]) as u64)
+    serial.hex(st)
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(ata_fehl)
+    serial.nl()
+}
+
 fn ata_read_on(lba: u64, dst: u64, slave: bool) -> bool {
     ata_select_on(lba, slave)
     serial.out8(ATA_CMD, ATA_READ)
     if !ata_wait(true) {
+        ata_melden(lba, false)
         ata_recover(slave)
         return false
     }
@@ -311,6 +372,7 @@ fn ata_write_on(lba: u64, src: u64, slave: bool) -> bool {
     ata_select_on(lba, slave)
     serial.out8(ATA_CMD, ATA_WRITE)
     if !ata_wait(true) {
+        ata_melden(lba, true)
         ata_recover(slave)
         return false
     }
