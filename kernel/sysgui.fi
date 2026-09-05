@@ -46,14 +46,16 @@ import perm
 import proc
 import ps2m
 import sched
+import shot
 import tile
+import time
 import vmode
 import wig
 import wm
 
 import sys
 
-export { wm_call, wig_call, tile_call, disp_call }
+export { wm_call, wig_call, tile_call, disp_call, shot_call }
 
 
 fn disp_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
@@ -1241,4 +1243,268 @@ fn do_tilebind(state: u64, nr: u64, field: u64) -> u64 {
         return tile.bind_mods(state, nr)
     }
     return tile.bind_action(state, nr)
+}
+
+
+// =====================================================================
+// RUNDE FEEDBACK, IN DIESEN ZWEIG GEHOLT VON RUNDE BRIDGE-2:
+// DAS BILDSCHIRMFOTO.
+// =====================================================================
+//
+// WARUM DIESE DATEI UND NICHT `sys.fi`. Runde FEEDBACK hatte `do_shot`
+// in `sys.fi` stehen, und dort steht es hier NICHT -- aus zwei
+// gemessenen Gruenden:
+//
+//   1. `sys.fi` importiert in diesem Zweig weder `wm` noch `fb`. Der
+//      Fensterserver haengt an `gfx`, und genau dafuer gibt es diese
+//      Datei: sie faellt bei `gui=off` aus dem Uebersetzungsbaum
+//      (tools/server/build.sh nennt sie beim Namen). Ein
+//      Bildschirmfoto-Aufruf in `sys.fi` haette den GUI-losen Kern
+//      entweder mitgeschleppt oder gebrochen.
+//   2. `ist_leiste` -- die Rechtepruefung, auf der das Ganze steht --
+//      steht schon HIER, ein paar Zeilen weiter oben. FEEDBACK hatte
+//      sie in `sys.fi`. Sie zweimal zu haben waere genau die Art
+//      Doppelung, an der zwei Fassungen auseinanderlaufen.
+//
+// AN DER SACHE SELBST IST NICHTS GEAENDERT: dieselben fuenf Handlungen,
+// dieselben drei Schloesser, dieselben Zaehler. Nur die Nummer ist eine
+// andere (siehe `sys.SYS_OSUM_SHOT`).
+
+// DER WEG UEBER DIE TASTE. Vier Bedingungen, und der Kern prueft alle
+// vier -- ein Programm, das sich selbst freigeben koennte, waere kein
+// Schloss.
+//
+//   1. der letzte Tastendruck war Super+P (gross oder klein),
+//   2. er ist weniger als GRACE_NS her,
+//   3. diese Zaehlernummer hat noch keinen Schein bekommen,
+//   4. der Rufende besitzt das Fenster MIT DEM EINGABEFOKUS.
+//
+// Punkt 4 ist der wichtigste: ohne ihn koennte ein Programm im
+// Hintergrund die Bildschirmfoto-Taste eines anderen abfangen.
+fn shot_key_ok(state: u64, me: u64) -> bool {
+    let k: u64 = kstate.get(state, kstate.K11_OFF + kstate.HK_KEY)
+    if k != shot.KEY && k != shot.KEY_UPPER {
+        return false
+    }
+    let seq: u64 = kstate.get(state, kstate.K11_OFF + kstate.HK_SEQ)
+    if seq == 0 {
+        return false // es wurde ueberhaupt noch keine Taste gelatcht
+    }
+    if shot.keyseq(state) == seq {
+        return false // dieser Druck hat seinen Schein schon gehabt
+    }
+    let ns: u64 = kstate.get(state, kstate.K11_OFF + kstate.HK_NS)
+    let now: u64 = time.mono_ns(state)
+    if now < ns {
+        return false
+    }
+    if now - ns > shot.GRACE_NS {
+        return false
+    }
+    let w: u64 = wm.focus(state)
+    if w >= wm.MAX_WIN {
+        return false
+    }
+    if !wm.valid(state, w) {
+        return false
+    }
+    return wm.win_owner(state, w) == me
+}
+
+// WER DARF EINEN SCHEIN AUSSTELLEN: die Taskleiste oder die Wurzel.
+fn shot_may_arm(state: u64, me: u64) -> bool {
+    if sched.tget(state, me, sched.T_EUID) == 0 {
+        return true
+    }
+    return ist_leiste(state, me)
+}
+
+// EIN BAND BILDPUNKTE NACH RING 3.
+//
+// Die Uebersetzung Seite fuer Seite und nicht Oktett fuer Oktett: ein
+// Bild sind ueber eine Million Oktette, und `proc.translate` ist ein
+// vierstufiger Gang durch die Seitentafeln. Einmal je 4096 Oktette
+// statt einmal je Oktett ist der Unterschied zwischen Millisekunden und
+// Sekunden.
+//
+// GEPRUEFT WIRD TROTZDEM VORHER UND GANZ: `proc.user_ok` ueber den
+// vollen Bereich, und danach muss JEDE Seite wirklich uebersetzbar sein,
+// sonst bricht die Schleife mit -EFAULT ab.
+fn shot_copy(state: u64, me: u64, dst: u64, rows: u64, from: u64) -> u64 {
+    let w: u64 = shot.width(state)
+    var y: u64 = 0
+    var at: u64 = dst
+    var page: u64 = 1 // eine Adresse, die keine Seitenanfangsadresse ist
+    var phys: u64 = 0
+    while y < rows {
+        var x: u64 = 0
+        while x < w {
+            let c: u64 = shot.rgb_at(state, x, from + y)
+            var k: u64 = 0
+            while k < 3 {
+                let a: u64 = at +% k
+                let pg: u64 = a & 0xFFFFFFFFFFFFF000
+                if pg != page {
+                    phys = proc.translate(state, me, pg)
+                    if phys == 0 {
+                        return sys.neg(errno.E_FAULT)
+                    }
+                    page = pg
+                }
+                var v: u64 = c >> 16
+                if k == 1 {
+                    v = c >> 8
+                }
+                if k == 2 {
+                    v = c
+                }
+                kstate.set8(phys +% (a & 0xFFF), (v & 0xFF) as u8)
+                k = k + 1
+            }
+            at = at +% 3
+            x = x + 1
+        }
+        y = y + 1
+    }
+    return rows *% shot.row_bytes(state)
+}
+
+fn shot_call(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
+    // ---- AUSKUNFT. Ohne jedes Recht, mit Absicht: was gezaehlt wird,
+    //      kann nicht heimlich sein.
+    if what == sys.SH_INFO {
+        if a1 == sys.SI_READY {
+            if shot.ready(state) {
+                return 1
+            }
+            return 0
+        }
+        if a1 == sys.SI_WIDTH {
+            return shot.width(state)
+        }
+        if a1 == sys.SI_HEIGHT {
+            return shot.height(state)
+        }
+        if a1 == sys.SI_ROWBYTES {
+            return shot.row_bytes(state)
+        }
+        if a1 == sys.SI_BYTES {
+            return shot.image_bytes(state)
+        }
+        if a1 == sys.SI_CHUNKROWS {
+            return shot.rows_per_chunk(state)
+        }
+        if a1 == sys.SI_SHOTS {
+            return shot.shots(state)
+        }
+        if a1 == sys.SI_LASTPID {
+            return shot.last_pid(state)
+        }
+        if a1 == sys.SI_ARMED {
+            if shot.armed(state) {
+                return 1
+            }
+            return 0
+        }
+        if a1 == sys.SI_ARMPID {
+            if shot.armed(state) {
+                return shot.arm_pid(state)
+            }
+            return 0
+        }
+        if a1 == sys.SI_DENIED {
+            return shot.denied(state)
+        }
+        if a1 == sys.SI_ARMS {
+            return shot.arms(state)
+        }
+        if a1 == sys.SI_NEXT {
+            return shot.next_row(state)
+        }
+        if a1 == sys.SI_KEY {
+            return shot.KEY
+        }
+        return sys.neg(errno.E_INVAL)
+    }
+    if !shot.ready(state) {
+        return sys.neg(errno.E_NODEV)
+    }
+    // ---- DEN SCHEIN AUSSTELLEN. Nur die Taskleiste oder die Wurzel.
+    if what == sys.SH_ARM {
+        if !shot_may_arm(state, me) {
+            shot.deny(state)
+            return sys.neg(errno.E_PERM)
+        }
+        // Auf WEN. 0 heisst "auf mich" -- der uebliche Fall, wenn die
+        // Wurzel selbst fotografiert.
+        var pid: u64 = a1
+        if pid == 0 {
+            pid = sched.tget(state, me, sched.T_PID)
+        }
+        shot.arm(state, pid)
+        return 0
+    }
+    // ---- DER WEG UEBER DIE TASTE.
+    if what == sys.SH_KEY {
+        if !shot_key_ok(state, me) {
+            shot.deny(state)
+            return sys.neg(errno.E_PERM)
+        }
+        // Die Zaehlernummer wird VERBRAUCHT, bevor der Schein da ist:
+        // ein zweiter Aufruf zu demselben Druck bekommt nichts mehr.
+        shot.set_keyseq(state, kstate.get(state, kstate.K11_OFF + kstate.HK_SEQ))
+        shot.arm(state, sched.tget(state, me, sched.T_PID))
+        return 0
+    }
+    // ---- DEN SCHEIN ZURUECKGEBEN. Nur der eigene.
+    if what == sys.SH_DROP {
+        if shot.armed(state)
+            && shot.arm_pid(state) == sched.tget(state, me, sched.T_PID) {
+            shot.drop(state)
+            return 0
+        }
+        // GEZAEHLT WIE DIE ANDEREN BEIDEN: ein Schutz, dessen
+        // Umgehungsversuche nur zum Teil auffallen, ist ein Protokoll,
+        // dem man nicht glauben kann.
+        shot.deny(state)
+        return sys.neg(errno.E_PERM)
+    }
+    // ---- EIN BAND HOLEN.
+    if what == sys.SH_GRAB {
+        let mine: u64 = sched.tget(state, me, sched.T_PID)
+        let from: u64 = shot.next_row(state)
+        if !shot.may_grab(state, mine, from) {
+            shot.deny(state)
+            return sys.neg(errno.E_PERM)
+        }
+        let rb: u64 = shot.row_bytes(state)
+        if rb == 0 || a2 < rb {
+            return sys.neg(errno.E_INVAL)
+        }
+        var len: u64 = a2
+        if len > shot.MAX_CHUNK {
+            len = shot.MAX_CHUNK
+        }
+        var rows: u64 = len / rb
+        let left: u64 = shot.height(state) - from
+        if rows > left {
+            rows = left
+        }
+        if rows == 0 {
+            return 0
+        }
+        if !proc.user_ok(state, me, a1, rows *% rb) {
+            return sys.neg(errno.E_FAULT)
+        }
+        let n: u64 = shot_copy(state, me, a1, rows, from)
+        if errno.is_error(n) {
+            return n
+        }
+        // ERST KOPIEREN, DANN WEITERRUECKEN. Bricht das Kopieren mit
+        // -EFAULT ab, bleibt die Zeilenmarke stehen und der Rufende darf
+        // dasselbe Band mit einem richtigen Puffer noch einmal holen.
+        shot.advance(state, rows)
+        return n
+    }
+    return sys.neg(errno.E_INVAL)
 }
