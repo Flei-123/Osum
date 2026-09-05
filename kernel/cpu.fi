@@ -41,7 +41,9 @@ export {
     // moeglich machen. Der Satz DIESES Kerns ist zugleich der Block,
     // auf den seine GS-Basis zeigt -- `%gs:C_SYSRSP` und
     // `%gs:C_KSTACK` in isr.s sind genau diese beiden Zahlen.
-    C_SYSRSP, C_KSTACK, C_TSSADDR
+    C_SYSRSP, C_KSTACK, C_TSSADDR,
+    // RUNDE VIELKERN 3: der Zaehler, der den Beweis fuehrt.
+    C_SYSCALLS
 }
 
 // ---------------------------------------------------- the record fields
@@ -94,6 +96,24 @@ const C_FPUOWNER: u64 = 128
 const C_SYSRSP: u64 = 136 // Ablage des Benutzerstapels im Einsprung
 const C_KSTACK: u64 = 144 // Kernstapel der Aufgabe, die hier laeuft
 const C_TSSADDR: u64 = 152 // Aufgabenzustandssegment DIESES Kerns
+// ==================================================== RUNDE VIELKERN 3
+// WIE VIELE SYSTEMAUFRUFE AUF DIESEM KERN AUS RING 3 HEREINKAMEN.
+//
+// Gezaehlt wird in `syscall_entry` selbst, mit EINEM `incq %gs:...` --
+// nicht aus Firn heraus. Das hat zwei Gruende, und beide sind der Punkt
+// dieser Runde:
+//
+//   * ES KOSTET NICHTS. Ein `cpu.here` je Systemaufruf waere ein Lesen
+//     im APIC-Fenster, also ein Speicherzugriff auf eine nicht
+//     zwischengespeicherte Seite -- fuer einen Zaehler.
+//   * ES MISST GENAU DAS RICHTIGE. Der Zaehler liegt in demselben Satz
+//     und wird ueber DIESELBE GS-Basis erreicht wie der Kernstapel eine
+//     Zeile darueber. Steht auf einem Kern eine falsche Basis, zaehlt
+//     dieser Kern in einen fremden Satz -- und die Summe der Zaehler
+//     passt nicht mehr zu `kstate.SYSCALLS`. Der Beweis "Ring 3 lief
+//     wirklich auf diesem Kern" ist damit nicht die Abwesenheit eines
+//     Absturzes, sondern eine Zahl.
+const C_SYSCALLS: u64 = 160 // Systemaufrufe, die HIER hereinkamen
 
 // Where the address of the local APIC window is kept. It is written once,
 // by `smp.probe`, out of what `apic.fi` measured -- this file does not
@@ -158,9 +178,15 @@ fn register(state: u64, apid: u64) -> u64 {
     //
     // und `rip` war genau das `push %gs:0x88` des Einsprungs.
     // `tools/einsprung/run.sh` hat es gefangen (7 von 14 statt 12).
+    // RUNDE VIELKERN 3: und C_SYSCALLS dazu. Derselbe Grund, eine
+    // Runde spaeter: der Zaehler steht schon auf dem, was der
+    // Startkern bis hierher an Systemaufrufen gesehen hat (der
+    // Ring-3-Ausflug aus Runde 59 liegt davor), und ein Zaehler, den
+    // der Hochlauf zurueckdreht, macht aus `abw` eine Zufallszahl.
     let k_sysrsp: u64 = get(state, n, C_SYSRSP)
     let k_kstack: u64 = get(state, n, C_KSTACK)
     let k_tss: u64 = get(state, n, C_TSSADDR)
+    let k_sysc: u64 = get(state, n, C_SYSCALLS)
     var i: u64 = 0
     while i < kstate.CPU_BYTES / 8 {
         __mmio_write64((record(state, n) + i * 8) as *mut u64, 0)
@@ -169,6 +195,7 @@ fn register(state: u64, apid: u64) -> u64 {
     set(state, n, C_SYSRSP, k_sysrsp)
     set(state, n, C_KSTACK, k_kstack)
     set(state, n, C_TSSADDR, k_tss)
+    set(state, n, C_SYSCALLS, k_sysc)
     set(state, n, C_APICID, apid)
     kstate.set(state, kstate.SMP_OFF + kstate.SMP_COUNT, n + 1)
     return n

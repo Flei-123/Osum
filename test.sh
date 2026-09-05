@@ -1353,6 +1353,25 @@ lauf "38. der JARVIS-Helfer und seine Rechteliste (tools/bridge/run.sh, Runde BR
 lauf "39. was man mit dem Stick TUN kann: dhcp, host, fetch, ota und die Bruecke, vom Abbild (tools/stick/run.sh, Runde STICK)" \
      tools/stick/run.sh stick '^STICK: |^  ok   |^       (SHA-256|/bin traegt|kern|programme|apps|wurzeln|ota.conf|schluessel)'
 
+#  40. RING 3 AUF ALLEN KERNEN, UND DER RIEGEL DAVOR (tools/vielkern/run.sh,
+#      Runde VIELKERN 3). Der Abschnitt, den es in der Runde BLECHKERN
+#      nicht gab -- und deshalb ist deren Fehler damals bis auf Justins
+#      Brett durchgerutscht: ein Anwendungskern durfte Ring 3 nehmen,
+#      ohne dass sein `syscall` den eigenen Kernstapel finden konnte.
+#      Kein Laeufer hat je gefragt, auf welchem Kern ein Ring-3-Prozess
+#      wirklich lief.
+#
+#      Gemessen wird jetzt beides: dass er es tut (R3K, die Maske je
+#      Prozess, die Systemaufrufe JE KERN ueber die GS-Basis gezaehlt)
+#      und dass der Riegel davor haelt -- letzteres, indem der Laeufer
+#      ihn BRICHT. `gsluege` gibt den Anwendungskernen eine falsche
+#      GS-Basis (der Riegel muss greifen, die Maschine muss leben),
+#      `gsluege r3blind` schaltet ihn dazu ab (die Maschine MUSS
+#      brechen, mit VEK 6 #UD in einer Ring-3-Aufgabe). Eine Zusage,
+#      deren Gegenprobe nicht faellt, ist eine Behauptung.
+lauf "40. Ring 3 auf ALLEN Kernen, und der Riegel davor -- der Fehler der Runde BLECHKERN, auf Bestellung (tools/vielkern/run.sh, Runde VIELKERN)" \
+     tools/vielkern/run.sh vielkern '^VIELKERN: |^  OK   |^  FAIL |^        (r3:|tafel:|absturz:)'
+
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
 abschnitte_abarbeiten
