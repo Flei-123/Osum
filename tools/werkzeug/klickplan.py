@@ -35,8 +35,12 @@ SPALTE = re.compile(r"taskmgr: spalte c=(\d+) x=(\d+) w=(\d+)")
 ZEILE = re.compile(r"taskmgr: zeile r=(\d+) pid=(\d+) ppid=(\d+) st=(\d+) "
                    r"pm=(\d+) kib=(\d+) kern=(\d+) ticks=(\d+) y=(\d+) "
                    r"name=(.*)$")
+# Die Spur der Bibliothek traegt seit Runde SOFTUI zwei Felder mehr
+# (`ax=`, `ay=`, der Ursprung der Arbeitsflaeche). Wer sie nicht
+# zulaesst, findet den Ja-Knopf nicht -- und es sieht aus, als haette
+# die Nachfrage keinen.
 DLG = re.compile(r"wlib: text win=(\d+) kind=2 x=(\d+) base=(\d+) fg=(\d+) "
-                 r"bg=(\d+) tw=(\d+) t=(.*)$")
+                 r"bg=(\d+) tw=(\d+)(?: ax=\d+ ay=\d+)? t=(.*)$")
 
 
 def lies(pfad):
