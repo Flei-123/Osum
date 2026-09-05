@@ -78,7 +78,8 @@ export {
     set_icon_font, icon_font, F_UI, F_MONO, F_ICON, FONT_ROLES,
     shape, set_shape,
     blits, rows_copied, pixels, glyph_calls, clip_writes, clip_reads,
-    buehne_verloren,
+    buehne_verloren, stage_of, glyph_build,
+    race_bereit, race_soll, race_core, race_zeichen, RACE_PX,
     fetch,
     selftest, selftest_max,
     CLIP_MAX, G_HDR, MAX_ROW, stuecke
@@ -142,6 +143,10 @@ const S_SHAPE: u64 = 0x040
 // so that 0 can mean "none loaded".  `kmain` sets it after it has read
 // /lib/icons.ttf.
 const S_ICONFONT: u64 = 0x048
+// RUNDE GLYPHE: die Schrift, mit der der Nachweis zeichnet. Sie
+// steht hier und nicht in `wm`, weil der Nachweis VOR dem
+// Fensterserver laeuft -- im Hochlauf, aus `smp.stage`.
+const S_RACEFONT: u64 = 0x050
 
 // THE THREE FONT ROLES Ring 3 is allowed to name.  They are ROLES and
 // not slot numbers: which slot the font reader gave a file depends on
@@ -338,7 +343,13 @@ fn blit(state: u64, me: u64, i: u64, x: u64, y: u64, w: u64, h: u64,
     if y + bh > wh {
         bh = wh - y
     }
-    let stage: u64 = base(state) + STAGE_OFF
+    // RUNDE GLYPHE: die Buehne DIESES Kerns. Bis hierher stand hier
+    // `base(state) + STAGE_OFF` -- EIN Puffer fuer die ganze Maschine,
+    // und das war die Haelfte des Fehlers, an dem MERGE-6 gescheitert
+    // ist: `glyph_into` hatte eine Sperre, `blit` nicht, und beide
+    // schrieben in denselben Puffer.
+    let bz: u64 = buehne_wenn_sperre(state)
+    let stage: u64 = stage_of(state)
     var r: u64 = 0
     while r < bh {
         // RUNDE SCHIRM-ECHT: eine Zeile geht in so vielen Umschlaegen
@@ -356,6 +367,7 @@ fn blit(state: u64, me: u64, i: u64, x: u64, y: u64, w: u64, h: u64,
                 // Was schon drin steht, bleibt drin -- aber die Zusage
                 // "so viele Bildpunkte" wird nicht gegeben.
                 ss(state, S_ROWS, gs(state, S_ROWS) + r)
+                buehne_aus(bz)
                 return 0
             }
             wm.blit_in(state, i, stage, x + c, y + r, n, 1)
@@ -363,6 +375,7 @@ fn blit(state: u64, me: u64, i: u64, x: u64, y: u64, w: u64, h: u64,
         }
         r = r + 1
     }
+    buehne_aus(bz)
     ss(state, S_BLITS, gs(state, S_BLITS) + 1)
     ss(state, S_ROWS, gs(state, S_ROWS) + bh)
     ss(state, S_PIXELS, gs(state, S_PIXELS) + bw * bh)
@@ -491,17 +504,82 @@ fn buehne_verloren() -> u64 {
     return buehne_daneben[0]
 }
 
-fn glyph_into(state: u64, me: u64, f: u64, px: u64, c: u64, out: u64,
-    max: u64) -> u64 {
-    if f >= FONT_ROLES || px == 0 || px > 128 {
+// ======================================================= RUNDE GLYPHE
+// DIE BUEHNE GEHOERT JETZT DEM KERN, DER AUF IHR ZEICHNET.
+//
+// Die Sperre oben senkte die Rate und schloss die Luecke nicht -- und
+// der Grund steht drei Bildschirme weiter oben in DIESER Datei:
+// `wig.blit` benutzt DENSELBEN Puffer (`base(state) + STAGE_OFF`) und
+// hat die Sperre NIE genommen. Jede Fensterzeile geht durch `blit`;
+// waehrend ein Kern zwischen "Kopf schreiben" und "an Ring 3 geben"
+// steht, legt der andere seine Bildpunktzeile darueber. Das ist die
+// eine von fuenf Laeufen, an der MERGE-6 gescheitert ist.
+//
+// Zwei Bauformen sind moeglich, und die Messung hat entschieden
+// (docs/RUNDE-GLYPHE.md):
+//
+//   A `glyphsperre` -- eine Buehne, aber `blit` UND `glyph_into` unter
+//     derselben Sperre. Richtig, aber jede Fensterzeile jedes Kerns
+//     wartet dann auf jede andere.
+//   B die Vorgabe -- JE KERN EINE BUEHNE ueber `kstate.WIGST_OFF`,
+//     angesprochen ueber `cpu.here`, so wie `C_KSTACK` ueber die
+//     GS-Basis. Keine Sperre, kein Warten.
+//
+// Sicher ist B, weil der Umschlagpuffer AUSSCHLIESSLICH im
+// Systemaufruf angefasst wird und `MSR_SFMASK` IF fuer den ganzen
+// Systemaufruf unten haelt: eine Aufgabe kann darin nicht verdraengt
+// und auf einem anderen Kern fortgesetzt werden.
+fn geteilte_buehne(state: u64) -> bool {
+    return kstate.mode_on(state, kstate.M_GBLIND)
+        || kstate.mode_on(state, kstate.M_GLOCK)
+}
+
+fn stage_of(state: u64) -> u64 {
+    if geteilte_buehne(state) {
+        // `glyphblind` = der Stand VOR dieser Runde, `glyphsperre` =
+        // Bauform A. Beide brauchen die EINE Buehne.
+        return base(state) + STAGE_OFF
+    }
+    var k: u64 = cpu.here(state)
+    if k >= kstate.MAX_CPUS {
+        k = 0
+    }
+    return state + kstate.WIGST_OFF + k * STAGE_MAX
+}
+
+// DIE SPERRE WIRD NUR NOCH GENOMMEN, WENN ES ETWAS ZU SPERREN GIBT --
+// und die zwei Wege nehmen sie NICHT GLEICH, weil sie es vor dieser
+// Runde auch nicht taten:
+//
+//   `glyph_into` nahm sie in MERGE-6 (die Buehnensperre dieser Runde),
+//   `blit` nahm sie NIE -- das war die Luecke.
+//
+// `glyphblind` bildet genau diesen Stand nach: Glyphe gesperrt, Zeile
+// frei, eine Buehne. `glyphsperre` ist Bauform A: BEIDE gesperrt.
+fn buehne_wenn_geteilt(state: u64) -> u64 {
+    if !geteilte_buehne(state) {
         return 0
     }
-    let font: u64 = font_of(state, f)
+    return buehne_an(cpu.here(state))
+}
+
+fn buehne_wenn_sperre(state: u64) -> u64 {
+    if !kstate.mode_on(state, kstate.M_GLOCK) {
+        return 0
+    }
+    return buehne_an(cpu.here(state))
+}
+
+// DER RUMPF, DEN AUCH DER NACHWEIS RUFT. Er baut die Antwort auf der
+// uebergebenen Buehne zusammen und gibt ihre Laenge zurueck; wer sie
+// nach Ring 3 traegt, entscheidet der Aufrufer. `font` ist der Platz
+// des Schriftlesers, nicht die Rolle -- der Nachweis laeuft vor dem
+// Fensterserver und hat keine Rollen.
+fn glyph_build(state: u64, stage: u64, font: u64, px: u64, c: u64,
+    max: u64) -> u64 {
     if font >= ttf.MAX_FONTS {
         return 0
     }
-    let bz: u64 = buehne_an(cpu.here(state))
-    let stage: u64 = base(state) + STAGE_OFF
     let slot: u64 = ttf.glyph(state, font, c, px)
     var gw: u64 = 0
     var gh: u64 = 0
@@ -522,11 +600,9 @@ fn glyph_into(state: u64, me: u64, f: u64, px: u64, c: u64, out: u64,
         ga = ttf.advance26(state, font, gid, px)
     }
     if gw * gh + G_HDR > STAGE_MAX {
-        buehne_aus(bz)
         return 0
     }
     if gw * gh + G_HDR > max {
-        buehne_aus(bz)
         return 0
     }
     __mmio_write64((stage + 0) as *mut u64, gw)
@@ -545,13 +621,123 @@ fn glyph_into(state: u64, me: u64, f: u64, px: u64, c: u64, out: u64,
         }
         r = r + 1
     }
-    if !store(state, me, out, stage, G_HDR + gw * gh) {
+    return G_HDR + gw * gh
+}
+
+// Der Systemaufruf: Buehne holen, bauen, hinuebertragen.
+fn glyph_into(state: u64, me: u64, f: u64, px: u64, c: u64, out: u64,
+    max: u64) -> u64 {
+    if f >= FONT_ROLES || px == 0 || px > 128 {
+        return 0
+    }
+    let font: u64 = font_of(state, f)
+    if font >= ttf.MAX_FONTS {
+        return 0
+    }
+    let bz: u64 = buehne_wenn_geteilt(state)
+    let stage: u64 = stage_of(state)
+    let n: u64 = glyph_build(state, stage, font, px, c, max)
+    if n == 0 {
+        buehne_aus(bz)
+        return 0
+    }
+    if !store(state, me, out, stage, n) {
         buehne_aus(bz)
         return 0
     }
     ss(state, S_GLYPHS, gs(state, S_GLYPHS) + 1)
     buehne_aus(bz)
-    return G_HDR + gw * gh
+    return n
+}
+
+// ================================ RUNDE GLYPHE: DER NACHWEIS, ERZWUNGEN
+//
+// Dieselbe Bauart wie `fs.race_core` aus MERGE-6: `smp.run_phase`
+// startet ALLE Kerne im selben Augenblick, jeder zeichnet SEIN eigenes
+// Zeichen und rechnet die Antwort gegen den in Ruhe genommenen
+// Sollwert. Gehoert die Buehne allen, muss der eine lesen, was der
+// andere hineingelegt hat.
+//
+// Und weil der wirkliche Zusammenstoss `blit` GEGEN `glyph_into` war,
+// legt jeder Kern in derselben Runde AUCH eine Bildpunktzeile auf die
+// Buehne und liest sie zurueck -- genau die Reihenfolge, die `blit`
+// hat (`fetch` hinein, `wm.blit_in` heraus).
+const RACE_PX: u64 = 16
+
+fn race_zeichen(index: u64) -> u64 {
+    return 0x41 + index % 26
+}
+
+fn race_bereit(state: u64, font: u64) {
+    ss(state, S_RACEFONT, font)
+}
+
+fn race_probe(state: u64, index: u64) -> u64 {
+    // GENAU DIE SPERRE, DIE `glyph_into` NIMMT -- sonst misst der
+    // Nachweis eine Bauform, die es nicht gibt.
+    let bz: u64 = buehne_wenn_geteilt(state)
+    let stage: u64 = stage_of(state)
+    let n: u64 = glyph_build(state, stage, gs(state, S_RACEFONT), RACE_PX,
+        race_zeichen(index), STAGE_MAX)
+    if n == 0 {
+        buehne_aus(bz)
+        return 0
+    }
+    var h: u64 = 1
+    var i: u64 = 0
+    while i < n {
+        h = h *% 31 +% kstate.get8(stage + i) as u64
+        i = i + 1
+    }
+    buehne_aus(bz)
+    return h
+}
+
+// In Ruhe, auf EINEM Kern, vor dem Rennen. Ein Sollwert, der waehrend
+// des Rennens genommen wird, ist selbst schon falsch.
+fn race_soll(state: u64, index: u64) -> u64 {
+    return race_probe(state, index)
+}
+
+fn race_zeile(state: u64, muster: u64) -> u64 {
+    // GENAU DIE SPERRE, DIE `blit` NIMMT -- also keine, ausser in
+    // Bauform A.
+    let bz: u64 = buehne_wenn_sperre(state)
+    let stage: u64 = stage_of(state)
+    var i: u64 = 0
+    while i < STAGE_MAX / 8 {
+        kstate.set(stage, i * 8, muster +% i)
+        i = i + 1
+    }
+    i = 0
+    var fehler: u64 = 0
+    while i < STAGE_MAX / 8 {
+        if kstate.get(stage, i * 8) != muster +% i {
+            fehler = 1
+            i = STAGE_MAX / 8
+        } else {
+            i = i + 1
+        }
+    }
+    buehne_aus(bz)
+    return fehler
+}
+
+fn race_core(state: u64, index: u64, runden: u64, soll: u64) -> u64 {
+    if soll == 0 {
+        return 0
+    }
+    let muster: u64 = (index + 1) *% 0x0101010101010101
+    var fehler: u64 = 0
+    var i: u64 = 0
+    while i < runden {
+        if race_probe(state, index) != soll {
+            fehler = fehler + 1
+        }
+        fehler = fehler + race_zeile(state, muster +% i)
+        i = i + 1
+    }
+    return fehler
 }
 
 // --------------------------------------------- 3. die Unterschneidung
@@ -571,36 +757,61 @@ fn kern_of(state: u64, f: u64, px: u64, c1: u64, c2: u64) -> i64 {
 
 // ------------------------------------------- 4. die Zwischenablage
 
+// ======================================================= RUNDE GLYPHE
+// DIE ZWISCHENABLAGE IST DER ZWEITE GETEILTE PUFFER DIESER DATEI --
+// UND DER ERWEITERTE `einkern.py` HAT SIE GEFUNDEN.
+//
+// Sie GEHOERT der ganzen Maschine, und das ist richtig so: was das eine
+// Programm kopiert, muss das andere einfuegen koennen. Je Kern waere
+// hier also FALSCH. Was fehlte, ist die Sperre: `clip_set` kopiert
+// `len` Oktette aus Ring 3 hinein und setzt DANACH die Laenge; ein
+// `clip_get` auf einem anderen Kern liest in derselben Zeit die ALTE
+// Laenge ueber dem NEUEN Inhalt -- oder umgekehrt.
+//
+// Es ist dieselbe Sperre wie die der Buehne (je Kern
+// wiedereintrittsfaehig, begrenzt); sie wird hier IMMER genommen, weil
+// es hier keine zweite Bauform gibt. Die Zwischenablage wird selten
+// benutzt -- der Preis ist nicht messbar.
 fn clip_set(state: u64, me: u64, src: u64, n: u64) -> u64 {
     var len: u64 = n
     if len > CLIP_MAX {
         len = CLIP_MAX
     }
+    let bz: u64 = buehne_an(cpu.here(state))
     if len == 0 {
         ss(state, S_CLIPLEN, 0)
         ss(state, S_CLIPW, gs(state, S_CLIPW) + 1)
+        buehne_aus(bz)
         return 0
     }
     if !fetch(state, me, base(state) + CLIP_OFF, src, len) {
+        buehne_aus(bz)
         return 0
     }
     ss(state, S_CLIPLEN, len)
     ss(state, S_CLIPW, gs(state, S_CLIPW) + 1)
+    buehne_aus(bz)
     return len
 }
 
 fn clip_get(state: u64, me: u64, dst: u64, max: u64) -> u64 {
+    // RUNDE GLYPHE: dieselbe Sperre wie in `clip_set` -- Laenge und
+    // Inhalt muessen aus DEMSELBEN Kopiervorgang stammen.
+    let bz: u64 = buehne_an(cpu.here(state))
     var len: u64 = gs(state, S_CLIPLEN)
     if len > max {
         len = max
     }
     if len == 0 {
+        buehne_aus(bz)
         return 0
     }
     if !store(state, me, dst, base(state) + CLIP_OFF, len) {
+        buehne_aus(bz)
         return 0
     }
     ss(state, S_CLIPR, gs(state, S_CLIPR) + 1)
+    buehne_aus(bz)
     return len
 }
 
