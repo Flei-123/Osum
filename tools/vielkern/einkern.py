@@ -25,6 +25,11 @@ dem Betreten der Funktion und dem Gebrauch des Puffers eine Sperre?
 Bekannte Sperren:
   * `fs.enter(state)` / `enter(state)`  -> atomic.L_FS
   * `atomic.lock_take(state, ...)`      -> die genannte Sperre
+  * `serial.zeile_an(...)`              -> die Zeilensperre aus
+    VIELKERN 3, je Kern wiedereintrittsfaehig und begrenzt. Sie ist
+    seit Runde MERGE-6 auch der Riegel um den Ausgabeweg aus Ring 3
+    (`sys.conout`), und sie deckt dort BEIDES ab: den geteilten Puffer
+    und die Reihenfolge der Zeichen.
   * `sched.irq_save()` allein zaehlt NICHT. Sie haelt die
     Unterbrechungen DIESES Kerns an und sagt ueber den Nachbarkern
     nichts aus. Genau dieser Irrtum steht in mehreren Kommentaren des
@@ -52,7 +57,8 @@ PUFFER = re.compile(
     r"NAME_OFF|BLOCK_OFF|EARG_OFF|FS_OFF|OFS3_OFF|LOAD_OFF|CONSOLE_OFF"
     r")")
 
-SPERRE = re.compile(r"\benter\(state\)|\bfs\.enter\(|atomic\.lock_take\(")
+SPERRE = re.compile(r"\benter\(state\)|\bfs\.enter\(|atomic\.lock_take\("
+                    r"|serial\.zeile_an\(")
 
 # Diese Dateien laufen nachweislich nur auf einem Kern oder nur vor dem
 # Start der Anwendungskerne. Sie stehen mit BEGRUENDUNG hier und nicht
