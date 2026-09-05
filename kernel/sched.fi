@@ -50,7 +50,7 @@ export {
     clear_signals,
     set_affinity, affinity, ANY_CPU, ring3_fremd,
     gs_melden, gs_bereit, gs_fehler, ring3_kerne, gs_soll, gs_pruefen,
-    kstack_hier, kstack_wieder,
+    kstack_hier, kstack_wieder, ring3_alle_setzen, ring3_alle_an,
     T_STATE, T_PID, T_RSP, T_KSTACK, T_KTOP, T_PRIO, T_BUDGET, T_WORK,
     T_WAKE, T_CR3, T_PARENT, T_EXIT, T_RUNS, T_ENTRY, T_USTACK, T_KIND,
     T_WAITPID, T_TICKS, T_PDPT, T_PD, T_PT, T_DATA, T_CWD, T_ARG,
@@ -690,7 +690,20 @@ fn darf_ring3(state: u64, i: u64, me: u64) -> bool {
     if tget(state, i, T_KIND) != K_USER {
         return true
     }
+    if ring3_alle == 0 {
+        return me == 0
+    }
     return me == 0 || gs_bereit(state, me)
+}
+
+static mut ring3_alle: u64 = 0
+
+fn ring3_alle_setzen(v: u64) {
+    ring3_alle = v
+}
+
+fn ring3_alle_an() -> u64 {
+    return ring3_alle
 }
 
 // Hat dieser Kern eine GS-Basis, die auf seinen eigenen Satz zeigt?
@@ -1157,7 +1170,24 @@ fn create(state: u64, kind: u64, prio: u64, arg: u64, entry: u64) -> u64 {
     // dieser Runde ein ERWARTETER Wert groesser null und keine Alarm-
     // zahl mehr. Was NICHT null sein darf, misst `R3W`: Kerne, die
     // Ring 3 genommen haben, OHNE eine eigene GS-Basis zu haben.
-    tc_set(state, slot, TC_AFF, ANY_CPU)
+    // DEFAULT: RING 3 BLEIBT AUF KERN 0. `r3alle` schaltet es frei.
+    //
+    // Der Unterbau steht und ist belegt (Kernstapel je Kern ueber die
+    // GS-Basis, RSP0 je Kern, `R3K 4` und `R3K 7` mit null Ausnahmen).
+    // Mit dem VOLLEN Schreibtisch ist er es NICHT: `/bin/taskbar`
+    // bekommt beim Start `pid=0`, zweimal von zwei Laeufen -- der
+    // Prozess wird gar nicht erst angelegt, und die Leiste fehlt.
+    // Warum, ist nicht gefunden.
+    //
+    // Also faehrt das Abbild, das Justin brennt, wie das der Runde
+    // BLECHKERN: Ring 3 auf Kern 0. `r3alle` auf der Kernel-Befehlszeile
+    // gibt alle Kerne frei -- fuer den naechsten, der die Ursache
+    // sucht, und ohne einen zweiten Kernel bauen zu muessen.
+    if kind == K_USER && ring3_alle == 0 {
+        tc_set(state, slot, TC_AFF, 0)
+    } else {
+        tc_set(state, slot, TC_AFF, ANY_CPU)
+    }
     clear_signals(state, slot)
     atomic.lock_give(state, atomic.L_SCHED)
     irq_restore(flags)
