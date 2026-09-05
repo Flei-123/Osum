@@ -68,6 +68,10 @@ desk_on=yes
 moncmds=""
 kbd_on=no
 warten=0
+platte=""
+bloecke=16384
+mager=no
+inodes=""
 keep=no
 progs="desktop taskbar settings launcher theme explorer rechner zip sh echo ls cat mkdir rm cp diff"
 for a in "$@"; do
@@ -94,6 +98,10 @@ for a in "$@"; do
 ${a#*=}" ;;
         kbd=*) kbd_on=${a#*=} ;;
         warten=*) warten=${a#*=} ;;
+        platte=*) platte=${a#*=} ;;
+        bloecke=*) bloecke=${a#*=} ;;
+        mager=*) mager=${a#*=} ;;
+        inodes=*) inodes=${a#*=} ;;
         uitrace=*) uitrace=${a#*=} ;;
         xscheme=*) xscheme=${a#*=} ;;
         xfile=*) xfiles="$xfiles ${a#*=}" ;;
@@ -174,7 +182,12 @@ else
 fi
 printf '%s\n' de > "$OUT/userlocale"
 
-ARGS=(build "$OUT/disk.img" 16384 /lib/
+ARGS=(build "$OUT/disk.img" "$bloecke")
+# RUNDE ALLTAG: die INODE-TAFEL ist einstellbar (mkfs.py --inodes) und
+# die Vorgabe 128 ist fuer sechs Pakete zu klein -- gemessen: inodes
+# 128/128 und das sechste Buendel entstand nicht mehr.
+[ -n "$inodes" ] && ARGS+=("--inodes=$inodes")
+ARGS+=(/lib/
       "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
       "/lib/icons.ttf=assets/osum-icons.ttf")
 ARGS+=(/bin/)
@@ -190,6 +203,7 @@ if [ "$uitrace" = yes ]; then
     printf 'on\n' > "$OUT/uitrace"
     ARGS+=("/etc/uitrace=$OUT/uitrace@0644")
 fi
+if [ "$mager" = no ]; then
 ARGS+=(/etc/schemas/)
 for s in assets/schemes/*.scheme; do
     ARGS+=("/etc/schemas/$(basename "$s" .scheme)=$s@0644")
@@ -200,6 +214,7 @@ done
 if [ -n "$xscheme" ] && [ -f "$xscheme" ]; then
     ARGS+=("/etc/schemas/$(basename "$xscheme" .scheme)=$xscheme@0644")
 fi
+fi
 # Ordner, die es geben muss, BEVOR eine Datei hineingelegt wird.
 for d in $xdirs; do
     ARGS+=("$d/")
@@ -208,11 +223,13 @@ done
 for f in $xfiles; do
     ARGS+=("${f%%=*}=${f#*=}@0644")
 done
+if [ "$mager" = no ]; then
 ARGS+=(/etc/shapes/)
 for s in assets/shapes/*.shape; do
     ARGS+=("/etc/shapes/$(basename "$s" .shape)=$s@0644")
 done
-if [ "$themes" = yes ]; then
+fi
+if [ "$themes" = yes ] && [ "$mager" = no ]; then
     ARGS+=(/etc/themes/)
     for s in assets/themes/*.preset; do
         ARGS+=("/etc/themes/$(basename "$s" .preset)=$s@0644")
@@ -260,11 +277,29 @@ for b in "$OUT/apps"/*.osp; do
     done
     [ "$keep" = yes ] || rm -rf "$b"
 done
+# RUNDE ALLTAG: `mager=yes` laesst weg, was diese Runde nicht braucht.
+# Der Grund ist eine harte Grenze und keine Sparsamkeit: dieses
+# Dateisystem hat 128 INODES (kernel/fs.fi, INODE_COUNT), und die
+# Grundausstattung verbraucht davon schon ueber hundert. Sechs Pakete
+# zu installieren heisst, zwei Dutzend neue Dateien anzulegen -- das
+# geht nur auf einer Platte, auf der Platz dafuer ist.
+if [ "$mager" = no ]; then
 while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py "$OUT/apps" "$OUT/buendel" 2>/dev/null || true)
 while read -r z; do ARGS+=("$z"); done < "$OUT/baum/liste"
+fi
+# RUNDE ALLTAG: EINE SCHON BESPIELTE PLATTE WEITERBENUTZEN.
+#
+# Zwei Laeufe hintereinander auf DEMSELBEN Dateisystem sind der einzige
+# Weg, "was der eine geschrieben hat, macht der andere auf" wirklich zu
+# zeigen -- ein frisch gebautes Abbild haette die Datei nie gesehen.
+if [ -n "$platte" ]; then
+    cp "$platte" "$OUT/disk.img"
+    echo "disk $(stat -c%s "$OUT/disk.img") octets (uebernommen von $platte)"
+else
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 \
     || { echo "FAILED: mkfs"; tail -20 "$OUT/mkfs.log"; exit 1; }
 echo "disk $(stat -c%s "$OUT/disk.img") octets"
+fi
 
 # ------------------------------------------------------------ 4. boot
 ACC=()
