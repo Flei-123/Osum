@@ -30,7 +30,7 @@ DAS FORMAT, ASCII, mit Tabulatoren getrennt, Zeilenende LF:
 
     OTA1
     fassung\t<dezimal>
-    paket\t<name>\t<fassung>\t<sha256 der Datei, 64 hex>\t<oktette>\t<datei>
+    paket\t<name>\t<fassung>\t<sha256 der Datei, 64 hex>\t<oktette>\t<datei>\t<plattform>
     ...
 
 Die erste Zeile ist die Kennung. Die zweite MUSS die Fassung sein --
@@ -52,6 +52,9 @@ import hashlib
 import importlib.util
 import os
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import plattform as PLT   # noqa: E402
 
 OPK = os.environ.get("OPK", "/root/orientos-install/pkg/opk.py")
 
@@ -163,7 +166,10 @@ def main():
             # die Kette zum Paket ist gebrochen.
             h = ("%x" % (int(h, 16) ^ 1)).rjust(64, "0")
         name, pf = meta_aus_opk(p)
-        zeilen.append("paket\t%s\t%s\t%s\t%d\t%s" % (name, pf, h, len(roh), d))
+        # RUNDE STORE-MOBIL: die sechste Spalte, siehe plattform.py.
+        plattform = PLT.plattform_von_roh(roh, d)
+        zeilen.append("paket\t%s\t%s\t%s\t%d\t%s\t%s"
+                      % (name, pf, h, len(roh), d, plattform))
     text = "\n".join(zeilen) + "\n"
     roh = text.encode("ascii")
 
