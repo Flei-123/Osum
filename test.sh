@@ -876,17 +876,51 @@ bash vendor/firn/fetch-firnc.sh > "$WORK/vendor.log" 2>&1 || \
 [ -x vendor/firn/bin/firnc ]  || S1="$S1 vendor/firn/bin/firnc fehlt;"
 [ -x vendor/firn/bin/firnc1 ] || S1="$S1 vendor/firn/bin/firnc1 fehlt;"
 [ -d vendor/firn/lib/std ]    || S1="$S1 vendor/firn/lib/std fehlt;"
-[ -f vendor/firn/.gebaut ] && [ "$(cat vendor/firn/.gebaut)" = "$COMMIT" ] || \
-    S1="$S1 vendor/firn/.gebaut passt nicht zu COMMIT;"
+# RUNDE GLYPHE: DIE MARKE IST ZWEITEILIG -- COMMIT **UND** FLICKENSTAND.
+#
+# Hier stand `[ "$(cat .gebaut)" = "$COMMIT" ]`, also der Vergleich der
+# GANZEN Zeile gegen den Commit allein. Seit Runde STICK (03.09.2026,
+# 102873b) schreibt vendor/firn/fetch-firnc.sh aber zwei Felder:
+#
+#     a751b3db...  b229d84c0efbe8b6
+#     ^ Commit     ^ sha256 der Flicken in vendor/firn/patches/
+#
+# und zwar mit Grund: vendor/firn/lib/ ist nicht eingecheckt und liegt in
+# jedem Arbeitsbaum einzeln. Stuende dort nur der Commit, waere ein Baum
+# mit ungeflicktem lib/ "aktuell" -- und man bekaeme aus demselben
+# Quelltext zwei verschiedene Kerne (gemessen: 3 844 792 gegen
+# 3 844 744 Oktette, im kleineren fehlte DHCP).
+#
+# Der Pruefer wurde damals nicht nachgezogen und war seither IMMER rot,
+# auf jedem Zweig, mit leerem Grund hinter dem Strichpunkt. Er prueft
+# jetzt beide Felder einzeln: Feld 1 gegen COMMIT, Feld 2 gegen den
+# Flickenstand, den fetch-firnc.sh selbst errechnet.
+GEB_C=$(cut -d' ' -f1 vendor/firn/.gebaut 2>/dev/null)
+GEB_P=$(cut -d' ' -f2 vendor/firn/.gebaut 2>/dev/null)
+PSUM_SOLL=$( { cat vendor/firn/patches/*.patch 2>/dev/null || true; } \
+             | sha256sum | cut -c1-16)
+[ -f vendor/firn/.gebaut ] || S1="$S1 vendor/firn/.gebaut fehlt;"
+[ "$GEB_C" = "$COMMIT" ] || \
+    S1="$S1 vendor/firn/.gebaut: Commit $GEB_C statt $COMMIT;"
+[ "$GEB_P" = "$PSUM_SOLL" ] || \
+    S1="$S1 vendor/firn/.gebaut: Flicken $GEB_P statt $PSUM_SOLL;"
 # RUNDE K8: der TCP/IP-Stack kommt MIT dem festgenagelten Uebersetzer
 # herein und nicht als Kopie. Die drei Blob-Hashes in vendor/net/BLOBS
 # sind die, die Firn im Baum dieses Commits stehen hat -- zieht jemand
 # COMMIT nach und der Stack hat sich dabei geaendert, faellt es hier auf
 # und nicht erst in einer Messung. Siehe vendor/net/PROVENANCE.md.
+# RUNDE GLYPHE, Nachtrag: vendor/net/BLOBS nennt den Stand, wie er im
+# Firn-Commit steht -- also VOR den Flicken aus vendor/firn/patches/.
+# 0001-rundruf-ohne-arp.patch aendert net/stack.fi mit Absicht; dessen
+# Streuwert ist danach ein anderer, und das ist RICHTIG so. Geprueft
+# wird deshalb gegen den ungeflickten Stand aus dem Firn-Repo, den
+# fetch-firnc.sh vor dem Auflegen weglegt.
 while read -r want name; do
     case "$want" in \#*|"") continue;; esac
-    got=$(git hash-object "vendor/firn/lib/$name" 2>/dev/null)
-    [ "$got" = "$want" ] || S1="$S1 vendor/firn/lib/$name: $got statt $want;"
+    roh="vendor/firn/lib/.roh/$name"
+    [ -f "$roh" ] || roh="vendor/firn/lib/$name"
+    got=$(git hash-object "$roh" 2>/dev/null)
+    [ "$got" = "$want" ] || S1="$S1 $roh: $got statt $want;"
 done < vendor/net/BLOBS
 # Gegenprobe zur Gegenprobe: eine Kopie des Stacks im Repo waere genau
 # das Auseinanderdriften, das diese Runde vermeidet.
