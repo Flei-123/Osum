@@ -69,6 +69,8 @@ import arch.x86_64.guard
 import wm
 import ttf
 import arch.arch
+// RUNDE MERGE-6: welcher Kern zeichnet gerade -- fuer die Buehnensperre.
+import cpu
 
 export {
     init, ready,
@@ -76,6 +78,7 @@ export {
     set_icon_font, icon_font, F_UI, F_MONO, F_ICON, FONT_ROLES,
     shape, set_shape,
     blits, rows_copied, pixels, glyph_calls, clip_writes, clip_reads,
+    buehne_verloren,
     fetch,
     selftest, selftest_max,
     CLIP_MAX, G_HDR, MAX_ROW, stuecke
@@ -424,6 +427,70 @@ fn icon_font(state: u64) -> u64 {
     return n - 1
 }
 
+// ==================================================== RUNDE MERGE-6
+// DIE BUEHNE GEHOERT DER GANZEN MASCHINE -- UND SIE HAT EIN PROGRAMM
+// UMGEBRACHT.
+//
+// `glyph_into` baut die Antwort in EINEM Puffer der Datenseite
+// zusammen (`base(state) + STAGE_OFF`): erst sechs Kopfworte (Breite,
+// Hoehe, links, oben, Laufweite, Zahl der Bildpunkte), dann die
+// Bildpunkte. Danach wird alles am Stueck nach Ring 3 kopiert.
+//
+// Solange Ring 3 auf Kern 0 lag, war das richtig. Seit VIELKERN 3
+// laufen mehrere Programme mit eigenem Fenster auf verschiedenen
+// Kernen, und zwei davon zeichnen Text gleichzeitig. Dann steht im
+// Kopf die Breite des einen Zeichens und dahinter die Bildpunkte des
+// anderen -- und der Klient in `wlibc.gload` rechnet `gw * gh` auf
+// Zahlen, die nicht zusammengehoeren:
+//
+//     panic: integer overflow in 'u64 * u64' at kernel/user/wlibc.fi:1128:8
+//
+// GEMESSEN am zusammengefuehrten Stand, vier Kerne, voller
+// Schreibtisch: der Aufgabenverwalter starb genau eine Zeile nach
+// `taskmgr: start`, jedes Mal. Es sah aus wie ein Fehler in ihm.
+//
+// DIESELBE SPERRE WIE IN VIELKERN 3, aus denselben zwei Gruenden:
+// JE KERN WIEDEREINTRITTSFAEHIG (ein Behandler, der einen zeichnenden
+// Kern unterbricht, wartet nie auf sich selbst) und BEGRENZT (ein Kern,
+// der mit ihr in der Hand gestorben ist, darf die Oberflaeche der
+// anderen nicht einfrieren -- wer zu lange wartet, zeichnet trotzdem,
+// und `buehne_verloren` zaehlt es).
+//
+// Sie deckt AUCH den Zwischenspeicher der Umrisse mit ab: `ttf.glyph`
+// legt neue Glyphen in eine gemeinsame Tafel, und `ttf.g_pixel` liest
+// unmittelbar danach aus dem Platz, den es dabei bekommen hat.
+const BUEHNE_GRENZE: u64 = 20000000
+
+static mut buehne_wer: [u64; 1] = [0 as u64; 1]
+static mut buehne_daneben: [u64; 1] = [0 as u64; 1]
+
+fn buehne_an(me: u64) -> u64 {
+    let a: u64 = (&buehne_wer[0]) as u64
+    if __mmio_read64(a as *mut u64) == me + 1 {
+        return 0
+    }
+    var spins: u64 = 0
+    while __atomic_swap(a as *mut u64, 0 as u64, me + 1) != 0 as u64 {
+        arch.pause()
+        spins = spins + 1
+        if spins > BUEHNE_GRENZE {
+            buehne_daneben[0] = buehne_daneben[0] + 1
+            return 0
+        }
+    }
+    return 1
+}
+
+fn buehne_aus(hat: u64) {
+    if hat != 0 {
+        arch.atomic_store((&buehne_wer[0]) as u64, 0)
+    }
+}
+
+fn buehne_verloren() -> u64 {
+    return buehne_daneben[0]
+}
+
 fn glyph_into(state: u64, me: u64, f: u64, px: u64, c: u64, out: u64,
     max: u64) -> u64 {
     if f >= FONT_ROLES || px == 0 || px > 128 {
@@ -433,6 +500,7 @@ fn glyph_into(state: u64, me: u64, f: u64, px: u64, c: u64, out: u64,
     if font >= ttf.MAX_FONTS {
         return 0
     }
+    let bz: u64 = buehne_an(cpu.here(state))
     let stage: u64 = base(state) + STAGE_OFF
     let slot: u64 = ttf.glyph(state, font, c, px)
     var gw: u64 = 0
@@ -454,9 +522,11 @@ fn glyph_into(state: u64, me: u64, f: u64, px: u64, c: u64, out: u64,
         ga = ttf.advance26(state, font, gid, px)
     }
     if gw * gh + G_HDR > STAGE_MAX {
+        buehne_aus(bz)
         return 0
     }
     if gw * gh + G_HDR > max {
+        buehne_aus(bz)
         return 0
     }
     __mmio_write64((stage + 0) as *mut u64, gw)
@@ -476,9 +546,11 @@ fn glyph_into(state: u64, me: u64, f: u64, px: u64, c: u64, out: u64,
         r = r + 1
     }
     if !store(state, me, out, stage, G_HDR + gw * gh) {
+        buehne_aus(bz)
         return 0
     }
     ss(state, S_GLYPHS, gs(state, S_GLYPHS) + 1)
+    buehne_aus(bz)
     return G_HDR + gw * gh
 }
 
