@@ -3244,6 +3244,11 @@ static mut ab_err: u64 = 0
 static mut ab_cs: u64 = 0
 static mut ab_kern: u64 = 0 // der Kern, auf dem es geknallt hat
 static mut ab_haelt: u64 = 0 // haelt dieser Kern danach an?
+// RUNDE BLECHKERN: die Ruecksprungkette des Kernstapels und die Zahl
+// der Kerne, denen der NMI geschickt wurde.
+static mut ab_spur: [u64; 5] = [0 as u64; 5]
+static mut ab_spurn: u64 = 0
+static mut ab_stopp: u64 = 0
 
 // Die Aufzeichnung, in ZWEI Zeilen der laufenden Tafel. Sie stehen
 // UNTER den Messzeilen und ueberschreiben nichts von ihnen: Justin
@@ -3302,12 +3307,31 @@ fn absturz_zeilen(state: u64) {
     tafel_zeile_sagen(p, n)
 }
 
+// ====================================================== RUNDE BLECHKERN
+// DIE ABSTURZANZEIGE SAGT DASSELBE AUCH AUF DIE LEITUNG.
+//
+// Justin hat keine serielle Leitung, also ist der Schirm fuer ihn die
+// Wahrheit -- und genau deshalb muss der PRUEFSTAND nachlesen koennen,
+// was dort steht. Bisher ging die Anzeige nur auf den Rahmenpuffer; ob
+// eine Zeile wirklich gemalt wurde, liess sich nur fotografieren und
+// mit dem Auge vergleichen. Ab hier steht jede Zeile Oktett fuer Oktett
+// auch im Mitschnitt, mit demselben Puffer und derselben Laenge.
+fn ab_zeile(state: u64, z: u64, p: u64, n: u64, farbe: u64) {
+    wm.messzeile(state, z, p, n, farbe)
+    var v: [u8; 11] = "absturz:   "
+    serial.puts((&v[0]) as u64)
+    serial.dec(z)
+    serial.put(32 as u8)
+    serial.text(p, n)
+    serial.nl()
+}
+
 fn absturz_klinke() -> u64 {
     return ab_klinke
 }
 
 fn absturz(state: u64, vec: u64, err: u64, rip: u64, cr2: u64, rsp: u64,
-    cs: u64, kern: u64) {
+    cs: u64, kern: u64, spur: u64, spurn: u64, gestoppt: u64) {
     // ZUERST MERKEN, DANN MALEN. Kommt der Kern beim Malen selbst um,
     // steht die Aufzeichnung trotzdem und die Tafel des naechsten
     // Anstrichs bringt sie auf den Schirm.
@@ -3320,6 +3344,16 @@ fn absturz(state: u64, vec: u64, err: u64, rip: u64, cr2: u64, rsp: u64,
         ab_err = err
         ab_cs = cs
         ab_kern = kern
+        // RUNDE BLECHKERN: die Ruecksprungkette des Kernstapels wird
+        // MITGEMERKT, nicht nur mitgemalt -- die Klinke muss sie bei
+        // jedem spaeteren Anstrich wieder hinschreiben koennen.
+        ab_spurn = 0
+        while ab_spurn < spurn && ab_spurn < 5 {
+            ab_spur[ab_spurn as usize] =
+                __mmio_read64((spur + ab_spurn * 8) as *mut u64)
+            ab_spurn = ab_spurn + 1
+        }
+        ab_stopp = gestoppt
         ab_haelt = 0
         if kstate.mode_on(state, kstate.M_ABSTURZ) {
             ab_haelt = 1
@@ -3366,12 +3400,12 @@ fn absturz(state: u64, vec: u64, err: u64, rip: u64, cr2: u64, rsp: u64,
     if vec < 32 {
         n = puls_text(state, p, n, (&namen[0]) as u64 + vec * 4)
     }
-    wm.messzeile(state, 0, p, n, rot)
+    ab_zeile(state, 0, p, n, rot)
 
     var z1: [u8; 5] = "RIP \0"
     n = puls_text(state, p, 0, (&z1[0]) as u64)
     n = puls_hexn(state, p, n, rip, 16)
-    wm.messzeile(state, 1, p, n, rot)
+    ab_zeile(state, 1, p, n, rot)
 
     // ============================================ RUNDE STARTKNOPF
     // CR2 GILT NUR BEI #PF -- SONST IST DIE ZAHL ALT.
@@ -3392,7 +3426,7 @@ fn absturz(state: u64, vec: u64, err: u64, rip: u64, cr2: u64, rsp: u64,
         n = puls_text(state, p, n, (&z2a[0]) as u64)
         n = puls_text(state, p, n, (&z2b[0]) as u64)
     }
-    wm.messzeile(state, 2, p, n, rot)
+    ab_zeile(state, 2, p, n, rot)
 
     var z3: [u8; 5] = "ERR \0"
     var z3b: [u8; 6] = "  CS \0"
@@ -3400,12 +3434,12 @@ fn absturz(state: u64, vec: u64, err: u64, rip: u64, cr2: u64, rsp: u64,
     n = puls_hexn(state, p, n, err & 0xFFFFFFFF, 8)
     n = puls_text(state, p, n, (&z3b[0]) as u64)
     n = puls_hexn(state, p, n, cs & 0xFFFF, 4)
-    wm.messzeile(state, 3, p, n, rot)
+    ab_zeile(state, 3, p, n, rot)
 
     var z4: [u8; 5] = "RSP \0"
     n = puls_text(state, p, 0, (&z4[0]) as u64)
     n = puls_hexn(state, p, n, rsp, 16)
-    wm.messzeile(state, 4, p, n, rot)
+    ab_zeile(state, 4, p, n, rot)
 
     // Wo der Kern zuletzt WAR. `st()` setzt die Stufe in jeder Runde
     // des Schreibtischs; zusammen mit dem RIP sagt sie, in welchem
@@ -3419,7 +3453,7 @@ fn absturz(state: u64, vec: u64, err: u64, rip: u64, cr2: u64, rsp: u64,
     n = puls_zahl(state, p, n, stufe_max())
     n = puls_text(state, p, n, (&z5c[0]) as u64)
     n = puls_zahl(state, p, n, wm_runden())
-    wm.messzeile(state, 5, p, n, gelb)
+    ab_zeile(state, 5, p, n, gelb)
 
     // ============================================ RUNDE STARTKNOPF
     // WER. Ein Ring-0-Absturz ohne den Prozess dahinter laesst offen,
@@ -3451,7 +3485,7 @@ fn absturz(state: u64, vec: u64, err: u64, rip: u64, cr2: u64, rsp: u64,
     }
     n = puls_text(state, p, n, (&z7e[0]) as u64)
     n = puls_zahl(state, p, n, proc.badentry_zahl())
-    wm.messzeile(state, 6, p, n, gelb)
+    ab_zeile(state, 6, p, n, gelb)
 
     // UND JETZT DIE WAHRHEIT UEBER DAS ANHALTEN. `halt_forever` haelt
     // DIESEN Kern an, nicht die Maschine. Steht daneben eine
@@ -3470,7 +3504,50 @@ fn absturz(state: u64, vec: u64, err: u64, rip: u64, cr2: u64, rsp: u64,
     }
     n = puls_text(state, p, n, (&z8c[0]) as u64)
     n = puls_zahl(state, p, n, ab_zahl)
-    wm.messzeile(state, 7, p, n, gelb)
+    ab_zeile(state, 7, p, n, gelb)
+
+    // ============================================ RUNDE BLECHKERN
+    // WOHER DER SPRUNG KAM -- die Kette der Ruecksprungadressen, die
+    // noch auf dem KERNSTAPEL steht.
+    //
+    // Justins Anzeige sagte `RIP 0000000000000080`, und 0x80 ist keine
+    // Adresse: dorthin springt nur, wessen Ruecksprungkette jemand
+    // ueberschrieben hat. Welche Adresse das war, stand nirgends. Diese
+    // Zeile ist die Antwort: die ersten fuenf Zahlen ab `rsp`, die
+    // zwischen 0x100000 und dem Kernende liegen. `addr2line` auf
+    // `kernel.img.elf` macht daraus Quellzeilen.
+    var z9: [u8; 6] = "SPUR  "
+    var z9k: [u8; 8] = "(keine) "
+    var z9l: [u8; 2] = "  "
+    n = puls_text(state, p, 0, (&z9[0]) as u64)
+    if ab_spurn == 0 {
+        n = puls_text(state, p, n, (&z9k[0]) as u64)
+    } else {
+        var si: u64 = 0
+        while si < ab_spurn && si < 4 {
+            n = puls_hexn(state, p, n, ab_spur[si as usize], 8)
+            n = puls_text(state, p, n, (&z9l[0]) as u64)
+            si = si + 1
+        }
+    }
+    ab_zeile(state, 8, p, n, gelb)
+
+    // UND WAS MIT DEN ANDEREN KERNEN GESCHIEHT. `halt_forever` haelt nur
+    // den eigenen an; seit dieser Runde bekommen die uebrigen einen NMI
+    // und bleiben im Fangnetz stehen. Steht hier eine Zahl, ist die
+    // Maschine wirklich still und die Anzeige wird nicht mehr
+    // ueberschrieben.
+    var za: [u8; 15] = "ANDERE KERNE:  "
+    var zb: [u8; 21] = " NMI, MASCHINE STEHT "
+    var zc: [u8; 17] = "keiner -- allein "
+    n = puls_text(state, p, 0, (&za[0]) as u64)
+    if ab_stopp == 0 {
+        n = puls_text(state, p, n, (&zc[0]) as u64)
+    } else {
+        n = puls_zahl(state, p, n, ab_stopp)
+        n = puls_text(state, p, n, (&zb[0]) as u64)
+    }
+    ab_zeile(state, 9, p, n, gelb)
 
     // UNBEDINGT UEBERTRAGEN. Kein `dirty`, kein `compose`, keine
     // Bedingung -- das ganze Band in einem Zug auf die Karte.
@@ -3763,8 +3840,22 @@ fn tafel_streichen(state: u64) {
     tn = puls_zahl(state, tp, tn, sched.guard_last_depth())
     tn = puls_text(state, tp, tn, (&s_ks[0]) as u64)
     tn = puls_zahl(state, tp, tn, kstapel_hoch(state))
+    // ======================================== RUNDE BLECHKERN
+    // R3F: RING-3-PROZESSE AUF EINEM FREMDEN KERN.
+    //
+    // Bis zu dieser Runde durfte ein Anwendungskern einen Benutzer-
+    // prozess nehmen, obwohl `syscall_entry` den Kernstapel aus EINEM
+    // Wort fuer die ganze Maschine holt. Zwei Kerne standen dann auf
+    // einem Stapel. Das war Justins #UD auf Kern 2, und es war der
+    // ganze Unterschied zwischen `-smp 1` (sauber) und `-smp 4`.
+    //
+    // R3F MUSS NULL BLEIBEN, genau wie WA. Steht dort etwas anderes,
+    // ist die Bindung an Kern 0 durchbrochen.
+    var s_r3: [u8; 6] = " R3F  "
+    tn = puls_text(state, tp, tn, (&s_r3[0]) as u64)
+    tn = puls_zahl(state, tp, tn, sched.ring3_fremd(state))
     var ampel12: u64 = wm.mess_ampel(state, wm_runden())
-    if sched.guard_faults() != 0 {
+    if sched.guard_faults() != 0 || sched.ring3_fremd(state) != 0 {
         ampel12 = wm.mess_rot(state)
     }
     tafel_merken(12, tp, tn, ampel12)

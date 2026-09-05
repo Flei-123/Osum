@@ -35,6 +35,18 @@ SECTIONS
         *(EXCLUDE_FILE(*uprog*.o) .text.*)
     }
 
+    /* RUNDE BLECHKERN: WO DER KERNCODE AUFHOERT.
+     *
+     * Die Ruecksprungspur eines Ring-0-Absturzes (`trap.kspur_bauen`)
+     * sucht auf dem Kernstapel nach Zahlen, die CODE sein koennen. Ohne
+     * diese Marke war die obere Schranke `KERNEL_END`, also das Ende von
+     * Text UND Daten UND bss -- und dann stehen in der Spur `kdata` und
+     * Stapelzeiger neben den echten Adressen. Mit ihr ist die Schranke
+     * genau: hinter dieser Stelle liegt kein ausfuehrbarer Kernbefehl
+     * mehr. Erreichbar wird sie ueber die Tabelle in isr.s (Nummer 74),
+     * weil Firn keine Symbole des Binders benennen kann. */
+    _etext = .;
+
     /* Round 62: everything between `__user_begin` and `__user_end` is
      * what ring 3 may see. That is the hand-written user program of round
      * 59 (`.utext` out of isr.s) AND the whole code of `uprog.fi`, which

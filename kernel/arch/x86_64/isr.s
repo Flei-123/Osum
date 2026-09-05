@@ -539,6 +539,11 @@ vectors:
      * Also derselbe Weg wie fuer die Faengerroutinen 70..72. */
     .quad osum_panic                /* 73: kernel/ksym.fi */
 
+    /* RUNDE BLECHKERN: das Ende des Kerncodes, aus kernel/kernel.ld.
+     * Die einzige obere Schranke, mit der sich eine Zahl auf dem
+     * Kernstapel als Ruecksprungadresse ausweisen laesst. */
+    .quad _etext                    /* 74: kernel/kernel.ld */
+
     .section .bss, "aw", @nobits
     .align 8
 saved_rsp:

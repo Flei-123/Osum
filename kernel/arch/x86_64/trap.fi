@@ -123,6 +123,23 @@ fn word(frame: u64, off: u64) -> u64 {
 
 // `KERNEL_TRAP` out of isr.s. rdi = frame, rsi = kernel data area.
 fn entry(frame: u64, state: u64) {
+    // ================================================== RUNDE BLECHKERN
+    // WENN EIN KERN GESTORBEN IST, HALTEN DIE ANDEREN AUCH AN.
+    //
+    // `power.halt_forever` ist `cli; hlt` und haelt DEN KERN AN, AUF DEM
+    // ES LAEUFT -- nicht die Maschine. Justin hat genau das gesehen: die
+    // rote Anzeige stand da, und der Rechner lief weiter, malte weiter
+    // und ueberschrieb die Anzeige beim naechsten Anstrich. Schlimmer
+    // als die Anzeige ist der Zustand: die uebrigen Kerne arbeiten auf
+    // Speicher weiter, den gerade jemand zerstoert hat.
+    //
+    // Also schickt der sterbende Kern einen NMI an alle anderen (siehe
+    // `alle_stoppen`), und dieser Riegel hier ist die Gegenseite: der
+    // ERSTE Befehl des Fangnetzes, vor jedem Zaehler und jeder Ausgabe.
+    // Wer hier mit gesetzter Marke ankommt, geht nicht mehr weiter.
+    if halt_alle != 0 {
+        power.halt_forever()
+    }
     let vector: u64 = word(frame, F_VECTOR)
     kstate.add(state, kstate.TRAPS, 1)
     kstate.set(state, kstate.LAST_TRAP, vector)
@@ -751,6 +768,102 @@ fn cr2() -> u64 {
     return asm("mov rax, cr2", out("rax"))
 }
 
+// ====================================================== RUNDE BLECHKERN
+//
+// DREI DINGE, DIE EINE TOEDLICHE AUSNAHME BISHER SCHULDIG BLIEB.
+//
+//   1. WOHER der Sprung kam. `rip=0x80` sagt, WOHIN gesprungen wurde,
+//      und 0x80 ist keine Adresse -- es ist der Rest einer Kette, die
+//      jemand ueberschrieben hat. Runde LEISTE hat dafuer `spur_sagen`
+//      gebaut, aber nur fuer RING 3: es liest ueber `proc.translate`
+//      und sucht Zahlen im Bereich der Benutzerprogramme. Ein Absturz
+//      in Ring 0 -- und Justins war einer, CS 0008 -- fiel durch.
+//      `kspur_bauen` macht dasselbe fuer den KERNSTAPEL: gelesen wird
+//      unmittelbar (der Kern steht in seinem eigenen Adressraum),
+//      gesucht wird zwischen 0x100000 und `KERNEL_END`.
+//   2. DIE ZAHLEN AUF DEN SCHIRM. Justins Brett hat keine serielle
+//      Leitung; was nur `serial.puts` erreicht, existiert fuer ihn
+//      nicht. Die Spur geht deshalb MIT auf die Tafel.
+//   3. DIE ANDEREN KERNE ANHALTEN, siehe den Riegel in `entry`.
+const KERN_LO: u64 = 0x100000
+const SPUR_MAX: u64 = 5
+
+static mut kspur: [u64; 5] = [0 as u64; 5]
+static mut kspur_n: u64 = 0
+static mut halt_alle: u64 = 0
+
+fn kspur_bauen(state: u64, rsp: u64) {
+    kspur_n = 0
+    if rsp == 0 || rsp < KERN_LO {
+        return
+    }
+    // Die obere Schranke ist das ENDE DES KERNCODES (`_etext`, Nummer 74
+    // der Tabelle aus isr.s), nicht das Ende des Kernels. Mit
+    // `KERNEL_END` standen in der Spur `kdata` und Stapelzeiger neben
+    // den echten Ruecksprungadressen -- gemessen am Lauf `knall`:
+    // `SPUR 00578000 001430BC 0055FC00 0055FBC0`, davon war genau eine
+    // Zahl Code (`sched.irq_restore`).
+    var hi: u64 = __mmio_read64((kstate.get(state, kstate.VECTORS)
+            + 74 * 8) as *mut u64)
+    if hi <= KERN_LO {
+        hi = kstate.get(state, kstate.KERNEL_END)
+    }
+    if hi <= KERN_LO {
+        return
+    }
+    var i: u64 = 0
+    while i < 512 && kspur_n < SPUR_MAX {
+        let v: u64 = __mmio_read64((rsp + i * 8) as *mut u64)
+        if v >= KERN_LO && v < hi {
+            kspur[kspur_n as usize] = v
+            kspur_n = kspur_n + 1
+        }
+        i = i + 1
+    }
+}
+
+fn kspur_sagen() {
+    var s_a: [u8; 12] = "  kspur:    "
+    var s_b: [u8; 3] = "   "
+    var s_k: [u8; 12] = "  (keine)   "
+    serial.puts((&s_a[0]) as u64)
+    if kspur_n == 0 {
+        serial.puts((&s_k[0]) as u64)
+        serial.nl()
+        return
+    }
+    var i: u64 = 0
+    while i < kspur_n {
+        serial.puts((&s_b[0]) as u64)
+        serial.hex(kspur[i as usize])
+        i = i + 1
+    }
+    serial.nl()
+}
+
+// Ein NMI an ALLE ausser sich selbst. Die Kurzform 11 im Zielfeld
+// (Bits 19:18) braucht keine Kennung, die Zustellart 100 in Bits 10:8
+// ist NMI, Bit 14 ist die Behauptung. Also 0xC4400.
+//
+// GERUFEN WIRD ERST NACH DEM MALEN. Die Anzeige laeuft ueber den
+// Fensterserver, und ein Kern, den ein NMI mitten in einer Sperre
+// trifft, gibt sie nicht mehr her -- die Reihenfolge ist deshalb:
+// erst die Zahlen auf den Schirm, dann die Maschine stilllegen.
+fn stoppzahl(state: u64) -> u64 {
+    if !apic.active(state) || cpu.count(state) < 2 {
+        return 0
+    }
+    return cpu.count(state) - 1
+}
+
+fn alle_stoppen(state: u64) {
+    halt_alle = 1
+    if stoppzahl(state) == 0 {
+        return
+    }
+    apic.ipi(state, 0, 0xC4400)
+}
+
 fn report(frame: u64, state: u64, vector: u64) {
     // Four octets per name, so that the index is a multiplication and not
     // a search: entry n starts at 4 * n.
@@ -793,6 +906,11 @@ fn report(frame: u64, state: u64, vector: u64) {
     serial.nl()
 
     registers(frame)
+    // RUNDE BLECHKERN: die Ruecksprungkette des KERNSTAPELS. Sie steht
+    // vor "kernel halted", weil sie die einzige Zeile ist, aus der sich
+    // die Absturzstelle zurueckrechnen laesst, wenn `rip` Muell ist.
+    kspur_bauen(state, word(frame, F_RSP))
+    kspur_sagen()
     serial.puts((&s_tail[0]) as u64)
     serial.nl()
     // ======================================== RUNDE BLECHFUENF
@@ -816,8 +934,11 @@ fn report(frame: u64, state: u64, vector: u64) {
     // einen Speicherfehler sichtbar gemacht zu haben, wird kein
     // Import hinzugefuegt, der sich vermeiden laesst.
     gfx.absturz(state, vector, word(frame, F_ERROR), word(frame, F_RIP),
-        cr2(), word(frame, F_RSP), word(frame, F_CS), cpu.here(state))
+        cr2(), word(frame, F_RSP), word(frame, F_CS), cpu.here(state),
+        (&kspur[0]) as u64, kspur_n, stoppzahl(state))
     if kstate.mode_on(state, kstate.M_ABSTURZ) {
+        // ERST DAS BILD, DANN DIE MASCHINE. Siehe `alle_stoppen`.
+        alle_stoppen(state)
         power.halt_forever()
     }
     power.shutdown(power.EXIT_TRAP)
