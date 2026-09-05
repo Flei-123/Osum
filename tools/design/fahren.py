@@ -127,11 +127,11 @@ class Fahrer:
             dy -= sy
         self.x, self.y = x, y
 
-    def klick(self, x, y, mal=1):
+    def klick(self, x, y, mal=1, taste=1):
         self.fahre(x, y)
         time.sleep(0.35)
         for i in range(mal):
-            self.cmd("mouse_button 1")
+            self.cmd("mouse_button %d" % taste)
             time.sleep(0.05)
             self.cmd("mouse_button 0")
             if i + 1 < mal:
@@ -220,6 +220,31 @@ class Fahrer:
                 return None
             return (tb[0] + int(m.group(1)), tb[1] + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
+        if name.startswith("fmbar"):
+            # Eintrag <N> der Menueleiste des Dateimanagers.  Die
+            # Leiste meldet ihr Rechteck (`explorer: rect id=0 kind=8`);
+            # die Eintraege darin sind gleich breit gesetzt und der
+            # erste faengt am linken Innenrand an.
+            n = int(name[5:])
+            m = letzte(r"explorer: rect id=0 kind=8 "
+                       r"x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            o = self.fenster("explorer")
+            if m is None or o is None:
+                return None
+            return (o[0] + int(m.group(1)) + 8 + n * 60,
+                    o[1] + int(m.group(2)), 44, int(m.group(4)))
+        if name.startswith("emenue"):
+            # Die Zeile <N> des offenen Kontextmenues des Dateimanagers.
+            # Es meldet Ecke und Hoehe des MENUEFENSTERS
+            # (`explorer: menurect wx= wy= wh=`); die Zeilenhoehe ist
+            # die des Systems (`launcher: rows ... zh=`), sonst 20.
+            n = int(name[6:])
+            m = letzte(r"explorer: menurect wx=(\d+) wy=(\d+) wh=(\d+)")
+            if m is None:
+                return None
+            z = letzte(r"rows x=\d+ base=\d+ zh=(\d+)")
+            zh = int(z.group(1)) if z else 20
+            return (int(m.group(1)) + 8, int(m.group(2)) + 4 + n * zh, 90, zh)
         if name == "qsalle":
             # Die unterste Zeile des Kontrollzentrums ("Alle
             # Einstellungen").  Das Feld meldet nur seine eigene Ecke
@@ -288,17 +313,26 @@ def main():
             time.sleep(float(arg))
         elif b == "warteauf":
             st = arg.split("||")
-            ok = f.warteauf(st[0].strip(), float(st[1]) if len(st) > 1 else 25.0)
-            print("warteauf %s -> %s" % (st[0].strip(), "da" if ok else "NICHT DA"))
+            # Die Anfuehrungszeichen gehoeren der Lesbarkeit des
+            # Drehbuchs und nicht dem regulaeren Ausdruck.  Der erste
+            # Lauf dieser Runde hat nach `'launcher: ready'` MIT
+            # Hochkommas gesucht, nie etwas gefunden und trotzdem
+            # weitergeklickt -- und das Ergebnis war ein zweites
+            # Startmenue statt eines Dateimanagers.
+            muster = st[0].strip().strip("'\"")
+            ok = f.warteauf(muster, float(st[1]) if len(st) > 1 else 25.0)
+            print("warteauf %s -> %s" % (muster, "da" if ok else "NICHT DA"))
             if not ok:
                 fehler += 1
-        elif b in ("klick", "doppel", "fahre"):
+        elif b in ("klick", "doppel", "fahre", "rklick"):
             x, y = (int(v) for v in arg.split(","))
             if b == "fahre":
                 f.fahre(x, y)
+            elif b == "rklick":
+                f.klick(x, y, 1, taste=4)
             else:
                 f.klick(x, y, 2 if b == "doppel" else 1)
-        elif b in ("klickauf", "doppelauf"):
+        elif b in ("klickauf", "doppelauf", "rklickauf"):
             r = f.rechteck(arg)
             if r is None:
                 print("klickauf %s -> KEIN RECHTECK GEMELDET" % arg)
@@ -307,7 +341,10 @@ def main():
             x, y = r[0] + r[2] // 2, r[1] + r[3] // 2
             print("klickauf %s -> %d,%d  (rect %d,%d %dx%d)"
                   % (arg, x, y, r[0], r[1], r[2], r[3]))
-            f.klick(x, y, 2 if b == "doppelauf" else 1)
+            if b == "rklickauf":
+                f.klick(x, y, 1, taste=4)
+            else:
+                f.klick(x, y, 2 if b == "doppelauf" else 1)
         elif b == "taste":
             f.taste(arg)
         elif b == "foto":
