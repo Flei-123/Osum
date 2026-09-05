@@ -65,7 +65,7 @@ xscheme=""
 xfiles=""
 desk_on=yes
 keep=no
-progs="desktop taskbar settings launcher theme explorer rechner sh echo ls cat mkdir rm cp sha"
+progs="desktop taskbar settings launcher theme explorer rechner zip sh echo ls cat mkdir rm cp diff"
 for a in "$@"; do
     case "$a" in
         preset=*) preset=${a#*=} ;;
