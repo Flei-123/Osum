@@ -410,7 +410,12 @@ Vorlage auf einem absichtlich schlechten Schema **wird** als geringer
 Kontrast erkannt); und in keiner der zehn Aufnahmen eine leere,
 abgeschnittene oder überlappende Beschriftung.
 
-`./test.sh` (41 Abschnitte): siehe `STATUS-MERGE6.md`.
+`./test.sh` (64 Abschnitte, 10 gleichzeitig) wurde gestartet und lief
+innerhalb dieser Runde NICHT zu Ende. Die fertigen Abschnitte stehen in
+`STATUS-MERGE6.md`; die eine Zusage, die dabei wirklich rot war
+(`posix` 133/1, `SYS_OSUM_CPUSTAT` fehlte in der libc), ist behoben und
+einzeln auf 134/0 nachgemessen. Eine Zahl, die niemand gesehen hat, ist
+keine Abnahme -- deshalb steht hier kein Gesamtergebnis.
 
 ---
 
