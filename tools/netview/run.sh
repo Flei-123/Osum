@@ -484,7 +484,7 @@ mk_gimage() { # image theme-file
              tile-fake tile-net tile-hide; do
         ARGS+=("/etc/netview/$q=$TMPD/icons/$q")
     done
-    while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel")
+    while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel" nur="$PROGS")
     while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
     python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfsg.txt" 2>&1
 }

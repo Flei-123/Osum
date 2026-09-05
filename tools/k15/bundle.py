@@ -25,7 +25,21 @@ das Programm -- `/bin/explorer` ist 205 KiB, und ein Abbild hat zwei
 Megaoktett.
 
 Verwendung:
-    bundle.py <assets/apps> <arbeitsverzeichnis> [<zusatz.osp>=...]
+    bundle.py <assets/apps> <arbeitsverzeichnis> [nur=<programmliste>]
+
+RUNDE WERKZEUGE: `nur=` -- WELCHE PROGRAMME AUF DIESER PLATTE LIEGEN.
+
+Ein Buendel ist ein VERWEIS auf eine Datei unter /bin. Liegt die dort
+nicht, bricht `mkfs.py` mit "gibt es nicht" ab -- und zwar in JEDEM
+Laeufer, der eine kleine Programmliste hat. Bis zu dieser Runde stand
+deshalb in `tools/themestore/build.sh` eine Zeile mit zwei Namen
+(`editor.osp`, `widgets.osp`), die vorher geloescht wurden. Die naechste
+Runde mit einem neuen Buendel laeuft in dieselbe Wand -- diese hier ist
+es gewesen.
+
+Also sagt der Aufrufer, was er hat, und was er nicht hat, wird
+uebersprungen. Ohne `nur=` bleibt alles wie vorher: jedes Buendel kommt
+mit.
 """
 
 import os
@@ -49,12 +63,18 @@ def main(argv):
         print(__doc__)
         return 2
     quelle, arbeit = argv[1], argv[2]
+    nur = None
+    for a in argv[3:]:
+        if a.startswith("nur="):
+            nur = set("/bin/" + w for w in a[4:].split())
     os.makedirs(arbeit, exist_ok=True)
     zeilen = ["/apps/"]
     for name in sorted(os.listdir(quelle)):
         if not name.endswith(".osp"):
             continue
         pfad = os.path.join(quelle, name)
+        if nur is not None and start_von(pfad) not in nur:
+            continue
         ziel = "/apps/%s" % name
         zeilen.append(ziel + "/")
         zeilen.append("%s/INFO=%s" % (ziel, os.path.join(pfad, "INFO")))

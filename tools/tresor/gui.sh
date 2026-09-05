@@ -96,7 +96,7 @@ python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
 ARGS=(build "$TMPD/disk.img" 4096 /lib/ "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/bin/${p}.elf"); done
 ARGS+=("/bin/files@/bin/explorer" /sicherung/ /etc/ "/etc/theme=$TMPD/baum/theme")
-while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel")
+while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel" nur="$PROGS")
 while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
     && ok "mkfs.py baut das Abbild mit /data (Quelle) und /sicherung (der Stick)" \
