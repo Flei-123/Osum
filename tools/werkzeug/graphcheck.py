@@ -135,6 +135,10 @@ def main(argv):
         px_ = gx + 1 + i * (gw - 2) // hist
         innen = gh - 3
         py_ = gy + 1 + innen - min(v, 1000) * innen // 1000
+        # Dieselbe Rechnung wie `wlib.graph_x/graph_y`. Dass die beiden
+        # nicht auseinanderlaufen, sagt der Vergleich der Enden unten --
+        # das Programm meldet sie so, wie die Bibliothek sie ausgerechnet
+        # hat, und nicht wie es sie selbst gern haette.
         # In einem Fenster von drei Bildpunkten um die gemeldete Stelle
         # muss etwas stehen, das nicht der Grund ist.
         gut = False

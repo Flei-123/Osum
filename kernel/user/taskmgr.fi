@@ -154,6 +154,10 @@ static mut ncpu: u64 = 1
 static mut h_cpu: [u64; 60] = [0 as u64; 60]
 static mut h_mem: [u64; 60] = [0 as u64; 60]
 static mut h_n: u64 = 0
+// DIE ANGABE FUER DAS GRAPH-WIDGET. Fuenf Woerter, die die Bibliothek
+// bei jedem Anstrich frisch liest -- die Messreihe bleibt hier, wo sie
+// entsteht.
+static mut g_spec: [u64; 5] = [0 as u64; 5]
 
 static mut cpu_pm: u64 = 0
 static mut mem_pm: u64 = 0
@@ -879,6 +883,11 @@ fn build_sel() {
 // --------------------------------------------------------- der Graph
 
 fn hist_push() {
+    hist_schieben()
+    g_spec[(wlib.GR_N) as usize] = h_n
+}
+
+fn hist_schieben() {
     if h_n < HIST {
         h_cpu[(h_n) as usize] = cpu_pm
         h_mem[(h_n) as usize] = mem_pm
@@ -1002,9 +1011,16 @@ fn legende(x: u64, y: u64, hh: u64, asc: u64, sp: u64, farbe: u64,
     return tx + wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), txt, n)
 }
 
-// Malen in Streifen -- genau das Verfahren aus `wlib.flush_rect`: die
-// Zeichenflaeche fasst nicht das ganze Fenster, also Streifen setzen,
-// beschneiden, malen, hinueberschieben.
+// GEMALT WIRD DER GRAPH VON DER BIBLIOTHEK (`wlib.K_GRAPH`); hier wird
+// nur noch GEMELDET, wo er steht und welche Zahlen darin stehen. Warum
+// er ein Widget ist und nicht mehr selbst gemalt wird, steht ueber
+// `wlib.K_GRAPH`: was nicht aus einem Widget kommt, streicht der
+// naechste Anstrich weg, und ein Bildschirmfoto trifft dann die Haelfte
+// der Zeit die leere Flaeche.
+//
+// DIE STELLEN KOMMEN AUS DER BIBLIOTHEK (`wlib.graph_x/graph_y`) und
+// werden hier NICHT nachgerechnet: ein Programm, das seine eigene
+// Formel meldet, meldet seinen eigenen Nachbau.
 // GEMALT WIRD ER NACH JEDEM DURCHLAUF, und das ist keine
 // Bequemlichkeit, sondern die Folge davon, dass er kein Widget ist:
 // `wlib.paint_all` malt den HINTERGRUND jedes schmutzigen Rechtecks neu
@@ -1024,25 +1040,10 @@ fn legende(x: u64, y: u64, hh: u64, asc: u64, sp: u64, farbe: u64,
 // und die sechzig Messwerte gehen auf die serielle Leitung, wenn eine
 // neue Messung da ist -- nicht fuenfundzwanzigmal je Sekunde.
 fn draw_graph(w: u64, gx: u64, gy: u64, gw: u64, gh: u64, melden: bool) {
-    if gw < 8 || gh < 8 {
-        return
-    }
-    let h: u64 = wlib.handle(w)
-    var yb: u64 = gy
-    while yb < gy + gh {
-        var ye: u64 = yb + wlibc.surf_rows()
-        if ye > gy + gh {
-            ye = gy + gh
-        }
-        wlibc.set_band(yb)
-        wlibc.clip_set(gx, yb, gx + gw, ye)
-        graph_body(gx, gy, gw, gh)
-        let _p: u64 = wlibc.push(h, gx, yb, gw, ye - yb)
-        yb = ye
-    }
     if !melden {
         return
     }
+    let _w2: u64 = w
     var letzte: u64 = 0
     if h_n > 0 {
         letzte = h_n - 1
@@ -1054,10 +1055,12 @@ fn draw_graph(w: u64, gx: u64, gy: u64, gw: u64, gh: u64, melden: bool) {
     z_kv(ptr((&m_h[0]) as u64), gh)
     z_kv(ptr((&m_gn[0]) as u64), h_n)
     z_kv(ptr((&m_ghist[0]) as u64), HIST)
-    z_kv(ptr((&m_p0x[0]) as u64), gx_of(gx, gw, 0))
-    z_kv(ptr((&m_p0y[0]) as u64), gy_of(gy, gh, h_cpu[(0) as usize]))
-    z_kv(ptr((&m_pnx[0]) as u64), gx_of(gx, gw, letzte))
-    z_kv(ptr((&m_pny[0]) as u64), gy_of(gy, gh, h_cpu[(letzte) as usize]))
+    z_kv(ptr((&m_p0x[0]) as u64), wlib.graph_x(i_graph, 0))
+    z_kv(ptr((&m_p0y[0]) as u64),
+        wlib.graph_y(i_graph, h_cpu[(0) as usize]))
+    z_kv(ptr((&m_pnx[0]) as u64), wlib.graph_x(i_graph, letzte))
+    z_kv(ptr((&m_pny[0]) as u64),
+        wlib.graph_y(i_graph, h_cpu[(letzte) as usize]))
     z_ende()
     if melde == 0 {
         return
@@ -1099,6 +1102,7 @@ fn say_rect(id: u64, art: u64) {
 // soll. Also nur, wenn `melde` es verlangt -- und einmal am Anfang und
 // einmal am Ende, damit auch ein stiller Lauf nachzurechnen ist.
 static mut i_tabelle: u64 = 0
+static mut i_graph: u64 = 0
 
 // Die Oberkante der Zeile r der Tabelle, in Fensterkoordinaten --
 // dieselbe Rechnung wie in `wlib.paint_table` und `wlib.row_under`.
@@ -1286,8 +1290,13 @@ fn u_start(args: u64) -> u64 {
     let i_sys: u64 = wlib.label(ptr((&l_sys[0]) as u64))
     let i_core: u64 = wlib.label(ptr((&l_cores[0]) as u64))
     let i_disk: u64 = wlib.label(ptr((&l_disk[0]) as u64))
+    g_spec[(wlib.GR_HIST) as usize] = HIST
+    g_spec[(wlib.GR_A) as usize] = (&h_cpu[0]) as u64
+    g_spec[(wlib.GR_B) as usize] = (&h_mem[0]) as u64
+    g_spec[(wlib.GR_MAX) as usize] = 1000
+    g_spec[(wlib.GR_N) as usize] = h_n
     wlib.size(0, GH)
-    let i_card: u64 = wlib.card()
+    let i_card: u64 = wlib.graph(ptr((&g_spec[0]) as u64))
     wlib.size(0, tbh)
     let i_tab: u64 = wlib.table(ptr((&blob[0]) as u64), 8, NCOL,
         ptr((&cols[0]) as u64))
@@ -1323,12 +1332,13 @@ fn u_start(args: u64) -> u64 {
     say_rect(i_sys, wlib.K_LABEL)
     say_rect(i_core, wlib.K_LABEL)
     say_rect(i_disk, wlib.K_LABEL)
-    say_rect(i_card, wlib.K_CARD)
+    say_rect(i_card, wlib.K_GRAPH)
     say_rect(i_tab, wlib.K_TABLE)
     say_rect(i_sel, wlib.K_LABEL)
     say_rect(i_kill, wlib.K_BUTTON)
 
     i_tabelle = i_tab
+    i_graph = i_card
     z_neu(ptr((&m_tab[0]) as u64))
     z_num(wlib.rect_x(i_tab))
     z_kv(ptr((&m_y[0]) as u64), wlib.rect_y(i_tab))
