@@ -60,6 +60,9 @@ profile kernel
 
 import kstate
 import utf8
+// RUNDE GLYPHE: welcher Kern haelt die Tafel -- und `pause`.
+import cpu
+import arch.arch
 
 export {
     init, ready, load_font, fonts, glyphs, arena, arena_bytes, used_bytes,
@@ -67,7 +70,8 @@ export {
     has_cmap12,
     glyph, g_w, g_h, g_left, g_top, g_adv, g_pixel, g_data,
     text_width26, text_width26_bytes,
-    hits, misses, rastered, cache_slots, cache_used,
+    hits, misses, rastered, cache_slots, cache_used, tafel_verloren,
+    cache_clear,
     selftest, selftest_max,
     MAX_FONTS, SLOTS, A_HEAP, ARENA_BYTES
 }
@@ -1351,7 +1355,119 @@ fn hash(k: u64) -> u64 {
 
 // Die Glyphe fuer ein Zeichen -- aus dem Speicher oder frisch gerastert.
 // Gibt die Platznummer oder SLOTS.
+// ======================================================= RUNDE GLYPHE
+// DER GLYPHENSPEICHER GEHOERT DER GANZEN MASCHINE -- UND ER WIRD
+// WAEHREND DES LESENS BESCHRIEBEN.
+//
+// Drei Dinge in dieser Datei sind geteilt, und keines war gesperrt:
+//
+//   1. DER SCHLUESSEL WIRD VOR DEN DATEN VEROEFFENTLICHT. `glyph`
+//      schreibt `C_KEY` und rastert DANACH. Ein zweiter Kern, der in
+//      derselben Zeit denselben Platz sondiert, findet den Schluessel,
+//      haelt den Platz fuer fertig und liest Breite, Hoehe und
+//      Datenversatz eines Umrisses, den es noch nicht gibt.
+//   2. DER STOSSALLOKATOR. `alloc` liest `S_HEAD`, rechnet und schreibt
+//      zurueck -- ohne Sperre bekommen zwei Kerne DENSELBEN Versatz und
+//      malen uebereinander.
+//   3. DIE KANTENLISTE UND DIE DECKUNGSZEILE (`A_EDGE`, `A_COV`) sind
+//      EINE Arbeitsflaeche im Zwischenspeicher. Zwei Kerne, die
+//      gleichzeitig rastern, rastern durcheinander.
+//
+// Dieselbe Bauform wie `serial.zeile_an` und `wig.buehne_an`: je Kern
+// wiedereintrittsfaehig (ein Behandler, der einen rasternden Kern
+// unterbricht, wartet nie auf sich selbst) und BEGRENZT (wer zu lange
+// wartet, arbeitet trotzdem weiter und `tafel_verloren` zaehlt es).
+//
+// UND DIE UNTERBRECHUNGEN BLEIBEN AUS, SOLANGE SIE GEHALTEN WIRD. Die
+// Kennung in der Sperre ist eine KERNNUMMER; wuerde eine Aufgabe mit
+// ihr in der Hand verdraengt und auf einem anderen Kern fortgesetzt,
+// waere die Kennung eine Luege und der Wiedereintritt liesse einen
+// fremden Kern herein. Aus dem Systemaufruf heraus ist das ohnehin so
+// (MSR_SFMASK); aus einer Kernaufgabe heraus -- Taskleiste, Terminal --
+// nicht, und genau die zeichnen auch.
+//
+// GELESEN WIRD OHNE SPERRE: ein fertiger Platz wird nie wieder
+// beschrieben und nie geraeumt, also sind `g_w`, `g_h` und `g_pixel`
+// nach `glyph` ohne Sperre richtig.
+const TAFEL_GRENZE: u64 = 20000000
+
+static mut tafel_wer: [u64; 1] = [0 as u64; 1]
+static mut tafel_daneben: [u64; 1] = [0 as u64; 1]
+
+fn tafel_an(me: u64) -> u64 {
+    let a: u64 = (&tafel_wer[0]) as u64
+    if __mmio_read64(a as *mut u64) == me + 1 {
+        return 0
+    }
+    var spins: u64 = 0
+    while __atomic_swap(a as *mut u64, 0 as u64, me + 1) != 0 as u64 {
+        arch.pause()
+        spins = spins + 1
+        if spins > TAFEL_GRENZE {
+            tafel_daneben[0] = tafel_daneben[0] + 1
+            return 0
+        }
+    }
+    return 1
+}
+
+fn tafel_aus(hat: u64) {
+    if hat != 0 {
+        arch.atomic_store((&tafel_wer[0]) as u64, 0)
+    }
+}
+
+fn tafel_verloren() -> u64 {
+    return tafel_daneben[0]
+}
+
+fn irq_aus() -> u64 {
+    return asm("pushfq\npop rax\ncli", out("rax"))
+}
+
+fn irq_an(flags: u64) {
+    if (flags & 0x200) != 0 {
+        asm("sti")
+    }
+}
+
+// DEN ZWISCHENSPEICHER LEEREN -- ohne die Schriften zu verlieren.
+// Nur der Nachweis ruft das: ohne einen KALTEN Speicher rastert im
+// Rennen niemand, und dann misst es die Kantenliste und den
+// Stossallokator gar nicht.
+fn cache_clear(state: u64) {
+    let ar: u64 = arena(state)
+    if ar == 0 {
+        return
+    }
+    let fl: u64 = irq_aus()
+    let hat: u64 = tafel_an(cpu.here(state))
+    var i: u64 = 0
+    while i < SLOTS {
+        kstate.set(ar, A_IDX + i * SLOT_BYTES + C_KEY, 0)
+        i = i + 1
+    }
+    ss(state, S_HEAD, A_HEAP)
+    ss(state, S_USED, 0)
+    tafel_aus(hat)
+    irq_an(fl)
+}
+
 fn glyph(state: u64, f: u64, c: u64, px: u64) -> u64 {
+    // GEGENPROBE `glyphtafelfrei`: ohne die Sperre. Ein Vergleich, der
+    // dieselbe Zahl liefert wie mit ihr, misst nichts.
+    if kstate.mode_on(state, kstate.M_GTFREI) {
+        return glyph_gesperrt(state, f, c, px)
+    }
+    let fl: u64 = irq_aus()
+    let hat: u64 = tafel_an(cpu.here(state))
+    let r: u64 = glyph_gesperrt(state, f, c, px)
+    tafel_aus(hat)
+    irq_an(fl)
+    return r
+}
+
+fn glyph_gesperrt(state: u64, f: u64, c: u64, px: u64) -> u64 {
     if !ready(state) || f >= gs(state, S_FONTS) || px == 0 || px > 200 {
         return SLOTS
     }
