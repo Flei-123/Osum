@@ -188,7 +188,7 @@ if [ -n "$script" ]; then
     WAITFOR='^kernel: done'
 elif [ "$desk" = yes ]; then
     WA=""; [ -n "$app" ] && WA="wigapp=$app"
-    APPEND="gfx wm wig desk wmhold wiglong $WA nokbd nosched noproc nofs $extra"
+    APPEND="gfx wm wig desk wmhold wiglong wmdauer $WA nokbd nosched noproc nofs $extra"
     # WORAUF GEWARTET WIRD. `wm: hold` heisst "der Schreibtisch steht",
     # und das ist das richtige Zeichen ohne eigene Anwendung. MIT einer
     # ist es das falsche: sie wird NACH der Leiste gestartet, und unter
@@ -200,7 +200,7 @@ elif [ "$desk" = yes ]; then
         WAITFOR='^wm: hold'
     fi
 else
-    APPEND="gfx wm wig wmhold wiglong wigapp=$app nokbd nosched noproc nofs $extra"
+    APPEND="gfx wm wig wmhold wiglong wmdauer wigapp=$app nokbd nosched noproc nofs $extra"
     WAITFOR='^wm: hold|^k15: start'
 fi
 T0=$(date +%s%N)
@@ -225,51 +225,14 @@ if [ -n "$clicks" ]; then
 fi
 # ------------------------------------------------------------ 4b. der Plan
 #
-# EINE LAUFENDE MASCHINE, MEHRERE SCHRITTE. Der Beweis, dass "Prozess
-# beenden" wirklich einen Prozess beendet, ist kein einzelner Klick: er
-# ist Zeile anklicken, Bild, Knopf, Nachfrage, Bild, Ja, Bild -- und die
-# Stelle des Ja-Knopfes steht erst im Mitschnitt, NACHDEM die Nachfrage
-# offen ist. Ein Werkzeug, das alle Klicks vorher ausrechnet, kann das
-# nicht.
-#
-#   warte N          N Sekunden
-#   klick x,y        an diese Stelle
-#   ziel <worte>     Stelle aus dem Mitschnitt holen (klickplan.py) und
-#                    dorthin klicken
-#   foto NAME        Bildschirmfoto nach <outdir>/NAME.ppm
-#   marke TEXT       eine Zeile in den Ablauf schreiben
+# EINE VERBINDUNG FUER DEN GANZEN ABLAUF. Warum das eine eigene Datei
+# geworden ist und nicht eine Schleife hier, steht im Kopf von
+# tools/werkzeug/fahren.py: der QEMU-Monitor nahm die ZWEITE Verbindung
+# nicht mehr an, und ein verlorener Klick sieht im Gast genauso aus wie
+# eine Trefferpruefung, die nicht greift.
 if [ -n "$plan" ] && [ -f "$plan" ]; then
-    while IFS= read -r schritt; do
-        case "$schritt" in
-            ""|\#*) continue ;;
-        esac
-        set -- $schritt
-        was=$1; shift
-        case "$was" in
-            warte) sleep "$1" ;;
-            marke) echo "plan: $*" ;;
-            klick)
-                python3 tools/themestore/click.py "$1" > "$OUT/mon.txt" 2>>"$OUT/click.err"
-                python3 tools/wm/monitor.py "$SOCK" "$OUT/mon.txt" >> "$OUT/click.log" 2>&1
-                echo "plan: klick $1"
-                sleep 1 ;;
-            ziel)
-                Z=$(python3 tools/werkzeug/klickplan.py "$OUT/serial.txt" "$@" 2>>"$OUT/plan.err")
-                if [ -z "$Z" ]; then
-                    echo "plan: ZIEL NICHT GEFUNDEN: $*"
-                else
-                    python3 tools/themestore/click.py "$Z" > "$OUT/mon.txt" 2>>"$OUT/click.err"
-                    python3 tools/wm/monitor.py "$SOCK" "$OUT/mon.txt" >> "$OUT/click.log" 2>&1
-                    echo "plan: ziel $* -> $Z"
-                fi
-                sleep 1 ;;
-            foto)
-                python3 tools/gfx/screenshot.py "$SOCK" "$OUT/$1.ppm" 25 \
-                    >> "$OUT/shot.log" 2>&1
-                echo "plan: foto $1" ;;
-            *) echo "plan: unbekannter Schritt '$was'" ;;
-        esac
-    done < "$plan"
+    python3 tools/werkzeug/fahren.py "$SOCK" "$plan" "$OUT/serial.txt" "$OUT" \
+        2>&1 | tee "$OUT/plan.log"
 fi
 if [ -n "$shot" ]; then
     python3 tools/gfx/screenshot.py "$SOCK" "$OUT/$shot.ppm" 25 > "$OUT/shot.log" 2>&1

@@ -39,6 +39,10 @@ ZEILE = re.compile(r"taskmgr: zeile r=(\d+) pid=(\d+) ppid=(\d+) st=(\d+) "
 # (`ax=`, `ay=`, der Ursprung der Arbeitsflaeche). Wer sie nicht
 # zulaesst, findet den Ja-Knopf nicht -- und es sieht aus, als haette
 # die Nachfrage keinen.
+TBGEOM = re.compile(r"taskbar: geom edge=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+TBFELD = re.compile(r"taskbar: field net x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+QSOPEN = re.compile(r"qs: open x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+QSSYM = re.compile(r"qs: sym n=(\d+) x=(\d+) y=(\d+)")
 DLG = re.compile(r"wlib: text win=(\d+) kind=2 x=(\d+) base=(\d+) fg=(\d+) "
                  r"bg=(\d+) tw=(\d+)(?: ax=\d+ ay=\d+)? t=(.*)$")
 
@@ -86,7 +90,71 @@ def main(argv):
         return 2
     zeilen = lies(argv[1])
     was = argv[2]
-    x, y, w, h, cx, cy = fenster(zeilen)
+    # DAS FENSTER WIRD ERST GEHOLT, WENN ES GEBRAUCHT WIRD. Die Ziele des
+    # Kontrollzentrums liegen in der Taskleiste und im Panel -- beides
+    # sind Fenster, die keine Widget-Spur schreiben, und ein Laeufer, der
+    # hier abbricht, weil ein UNBETEILIGTES Fenster fehlt, misst nichts.
+    if was in ("qsfeld", "kachel", "qszeile1", "qszeile2"):
+        cx = 0
+        cy = 0
+    else:
+        x, y, w, h, cx, cy = fenster(zeilen)
+
+    if was == "qsfeld":
+        # Die Ecke der Taskleiste, in der die Symbole stehen -- ein Klick
+        # dorthin oeffnet die Schnelleinstellungen (Runde NETVIEW,
+        # dritter Nachtrag). Die Leiste meldet beides: wo SIE steht und
+        # wo das Feld IN ihr liegt.
+        g = None
+        f = None
+        for z in zeilen:
+            m = TBGEOM.search(z)
+            if m:
+                g = m
+            m = TBFELD.search(z)
+            if m:
+                f = m
+        if g is None or f is None:
+            raise SystemExit("klickplan: die Leiste hat ihr Netzfeld nicht gemeldet")
+        fx = int(g.group(2)) + int(f.group(1)) + int(f.group(3)) // 2
+        fy = int(g.group(3)) + int(f.group(2)) + int(f.group(4)) // 2
+        print("%d,%d" % (fx, fy))
+        return 0
+
+    if was == "kachel":
+        # Eine Kachel des Kontrollzentrums. Das Panel meldet die Stelle
+        # JEDES Symbols in SCHIRMKOORDINATEN; die Kachel ist 180 x 74
+        # gross und ihr Symbol sitzt 10 Bildpunkte vom Rand.
+        t = argv[3]
+        s_ = None
+        for z in zeilen:
+            m = QSSYM.search(z)
+            if m and m.group(1) == t:
+                s_ = m
+        if s_ is None:
+            raise SystemExit("klickplan: Kachel %s nicht gemeldet" % t)
+        print("%d,%d" % (int(s_.group(2)) - 10 + 90, int(s_.group(3)) - 10 + 37))
+        return 0
+
+    if was in ("qszeile1", "qszeile2"):
+        # Die zwei Verknuepfungszeilen am Fuss des Panels. Ihre Lage
+        # steht im Quelltext von qs.fi als L1Y/L2Y; hier wird sie aus dem
+        # gemeldeten Panelrechteck und der Hoehe zurueckgerechnet -- die
+        # Zeilen sind die letzten beiden, je 22 hoch, mit 8 Abstand und
+        # 10 Rand darunter.
+        o = None
+        for z in zeilen:
+            m = QSOPEN.search(z)
+            if m:
+                o = m
+        if o is None:
+            raise SystemExit("klickplan: das Panel hat sich nicht gemeldet")
+        px_, py_, pw, ph = (int(v) for v in o.groups())
+        l2 = py_ + ph - 10 - 22
+        l1 = l2 - 8 - 22
+        y = l1 if was == "qszeile1" else l2
+        print("%d,%d" % (px_ + 60, y + 11))
+        return 0
 
     if was == "ja":
         # Der Dialog ist ein eigenes Fenster; sein Ja-Knopf ist der
