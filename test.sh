@@ -1372,6 +1372,29 @@ lauf "39. was man mit dem Stick TUN kann: dhcp, host, fetch, ota und die Bruecke
 lauf "40. Ring 3 auf ALLEN Kernen, und der Riegel davor -- der Fehler der Runde BLECHKERN, auf Bestellung (tools/vielkern/run.sh, Runde VIELKERN)" \
      tools/vielkern/run.sh vielkern '^VIELKERN: |^  OK   |^  FAIL |^        (r3:|tafel:|absturz:)'
 
+# RUNDE MERGE-6: VIELKERN UND WERKZEUGE HABEN BEIDE DIE 40 VERGEBEN --
+# sie sind am selben Tag aus demselben Commit (1493451) entstanden und
+# haben unabhaengig voneinander die naechste freie Nummer genommen.
+# Verfahren wie bei BLECH/OTA weiter oben: beide bleiben, der zweite
+# wird 41. Die Nummer ist nur eine Ueberschrift; die Reihenfolge macht
+# die Stelle im Skript.
+# ABSCHNITT 41 -- RUNDE WERKZEUGE. Der grafische Aufgabenverwalter
+# (/bin/taskmgr) und das ausgebaute Kontrollzentrum der Taskleiste.
+#
+# Gemessen wird vor allem, dass die ZAHLEN ECHT sind: die drei
+# Kennzahlen, die es vor dieser Runde nicht gab (Leerlauf je Kern,
+# Rahmen je Prozess, Kern je Prozess), mit ihren Gegenproben -- kein
+# Kern meldet mehr Leerlauf als Zeit, ein Prozess ohne eigenen
+# Adressraum hat keine Seiten, und es kommen wirklich mehrere Kerne vor.
+# Dazu: das Fenster steht (jedes Rechteck im Fenster, keine leere und
+# keine ueberlappende Beschriftung), Sortieren und Waehlen mit der MAUS,
+# der Knopf "Prozess beenden" macht aus einem laufenden Prozess wirklich
+# eine Leiche, der Verlaufsgraph steht im BILD an den Stellen, die das
+# Programm gemeldet hat, und der Dunkelmodus-Schalter des
+# Kontrollzentrums macht das Bild messbar dunkler.
+lauf "41. der Aufgabenverwalter und das Kontrollzentrum (tools/werkzeug/run.sh, Runde WERKZEUGE)" \
+     tools/werkzeug/run.sh werkzeug '^WERKZEUGE: |^  OK    |^        '
+
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
 abschnitte_abarbeiten

@@ -44,6 +44,7 @@ import kstate
 import mem
 import sched
 import proc
+import cpu
 import arch.x86_64.user
 import fs
 import kbd
@@ -115,7 +116,7 @@ export {
     SYS_OSUM_FTYPE, SYS_OSUM_FOPEN, SYS_OSUM_FLIST, SYS_OSUM_FREG,
     SYS_OSUM_TILEGET, SYS_OSUM_TILEDO, SYS_OSUM_TILECONF,
     SYS_OSUM_TILEBIND,
-    SYS_OSUM_PMON,
+    SYS_OSUM_PMON, SYS_OSUM_CPUSTAT,
     CAP_BASE, CAP_VERSION, CAP_READ, CAP_WRITE, CAP_CLOSE, CAP_DUP,
     CAP_INSPECT, CAP_TRANSFER, CAP_COUNT, CAP_MAXNR,
     SYS_SOCKET, SYS_CONNECT, SYS_ACCEPT, SYS_SENDTO, SYS_RECVFROM,
@@ -1039,6 +1040,42 @@ const KB_SWITCH: u64 = 3
 // the display worth less than nothing.
 const SYS_OSUM_PMON: u64 = 1830
 
+// ============================================= RUNDE WERKZEUGE: 1840
+//
+// DIE KERNE, EINZELN. Bauart wie PSTAT, NETMON und PMON: EINE ZAHL JE
+// AUFRUF, kein Zeiger in den Kernel, kein Aufbau, ueber den sich Ring 0
+// und Ring 3 einigen muessten.
+//
+//     osum_cpustat(index, feld) -> Wert
+//
+// WARUM NICHT `sysinfo`. Der nimmt EIN Argument, und ein Wert je Kern
+// braucht zwei -- Kern und Feld. Eine zweite Bedeutung in dasselbe
+// Argument zu falten (etwa `kern * 100 + feld`) ist die Art Kodierung,
+// die beim ersten Rechner mit hundert Kernen bricht.
+//
+// WARUM ES SIE GIBT: `/bin/taskmgr` zeigt die Auslastung GESAMT UND JE
+// KERN, und je Kern gab es sie in diesem Kernel nicht. `C_TICKS` stand
+// seit Runde K5 im Satz jedes Kerns, `C_IDLETICKS` ist seit dieser Runde
+// daneben -- die Auslastung ist die Differenz zweier Differenzen, und
+// das Rechnen davon gehoert nach Ring 3, wo der Zeitpunkt der beiden
+// Messungen bekannt ist.
+//
+// LESEN DARF JEDER, genau wie bei PSTAT, NETMON und PMON. Wie viele
+// Kerne eine Maschine hat und wie beschaeftigt sie sind, ist kein
+// Geheimnis, und ein Rechner, der seinem Besitzer die eigene Auslastung
+// verschweigt, schuetzt niemanden. GESCHRIEBEN WIRD HIER GAR NICHTS.
+const SYS_OSUM_CPUSTAT: u64 = 1840
+
+const CS_COUNT: u64 = 0 // wie viele Kerne die Firmware gemeldet hat
+const CS_ONLINE: u64 = 1 // wie viele davon Firn-Code erreicht haben
+const CS_UP: u64 = 2 // laeuft DIESER Kern
+const CS_APICID: u64 = 3 // wie sein lokaler APIC sich nennt
+const CS_TICKS: u64 = 4 // Zeitgeberschlaege, die er genommen hat
+const CS_IDLE: u64 = 5 // davon im Leerlauf
+const CS_SWITCHES: u64 = 6 // Aufgabenwechsel, die er gemacht hat
+const CS_PICKS: u64 = 7 // Aufgaben, die er aus der Laufliste nahm
+const CS_CURPID: u64 = 8 // Prozessnummer der Aufgabe, die auf ihm laeuft
+
 // kind 1, above the six counters of `pmon.PT_*`.
 const PT_PID: u64 = 6
 const PT_ALIVE: u64 = 7 // 1 = the slot still holds a live task
@@ -1804,7 +1841,7 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
         return uio.sysinfo(state, a0)
     }
     if number == SYS_OSUM_PSTAT {
-        return uio.pstat(state, a0, a1)
+        return do_pstat(state, a0, a1)
     }
     if number == SYS_OSUM_KILL {
         if !kill_allowed(state, me, a0) {
@@ -1955,6 +1992,10 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // ROUND POWERMON: the power accounting.
     if number == SYS_OSUM_PMON {
         return do_pmon(state, me, a0, a1, a2)
+    }
+    // RUNDE WERKZEUGE: die Kerne, einzeln.
+    if number == SYS_OSUM_CPUSTAT {
+        return do_cpustat(state, a0, a1)
     }
     // ------------------------------------------------------ RUNDE K13
     //
@@ -6224,6 +6265,94 @@ fn do_rename(state: u64, me: u64, from: u64, to: u64) -> u64 {
 // `k13_call`: every branch of `dispatch` costs stack whether it is taken
 // or not, and this kernel has already overflowed its kernel stack once
 // for exactly that reason.
+// ================================================== RUNDE WERKZEUGE
+//
+// ZWEI FELDER VON `SYS_PSTAT`, DIE NICHT IN `uio.fi` STEHEN KOENNEN --
+// und der Grund ist keine Vorliebe, sondern der Abhaengigkeitsgraph:
+// `proc.fi` importiert `uio.fi` (Zeile 46 dort), also darf `uio.fi`
+// nicht `proc.fi` importieren, und der Speicher eines Prozesses steht in
+// seinen Seitentabellen, die `proc.fi` fuehrt. Dasselbe gilt fuer den
+// Kern: den weiss der Planer.
+//
+// Also liegt hier die WEICHE und in `uio.pstat` alles Uebrige. Die
+// Alternative waere gewesen, den Seitentabellenlauf ein zweites Mal in
+// `uio.fi` zu schreiben -- zwei Stellen, die dieselbe Speicherkarte
+// kennen muessen, und die eine davon merkt es nicht, wenn die andere
+// sich aendert.
+//
+// Neue Felder werden ANGEHAENGT (8 und 9), nie eingeschoben: die alten
+// Nummern stehen in `/bin/ps`, in `/bin/top` und in jedem Programm, das
+// seit Runde K6 gegen diese Tafel gebaut wurde.
+fn do_pstat(state: u64, index: u64, field: u64) -> u64 {
+    if index >= kstate.MAX_TASKS {
+        return neg(errno.E_INVAL)
+    }
+    if index >= kstate.get(state, kstate.TASKS) {
+        return 0
+    }
+    if field == uio.P_CPU || field == uio.P_PAGES {
+        if sched.tget(state, index, sched.T_STATE) == sched.S_FREE {
+            return 0
+        }
+        if field == uio.P_CPU {
+            // WELCHER KERN, und das ist der, auf dem die Aufgabe ZULETZT
+            // lief -- `sched.cpu_of` liest genau das Feld, das der
+            // Aufgabenwechsel schreibt. Fuer eine laufende Aufgabe ist
+            // das der Kern, auf dem sie jetzt ist; fuer eine schlafende
+            // der, auf dem sie zuletzt war. Etwas anderes gibt es nicht
+            // zu wissen, und eine Aufgabe, die noch nie lief, bekommt
+            // `MAX_CPUS` -- kein Kern, und nicht die Null, die wie Kern 0
+            // aussaehe.
+            return sched.cpu_of(state, index)
+        }
+        return proc.space_pages(state, index)
+    }
+    return uio.pstat(state, index, field)
+}
+
+// Ein Feld eines Kerns. Alles daraus steht im Satz des Kerns
+// (`kernel/cpu.fi`) oder in der Aufgabe, die gerade auf ihm laeuft.
+fn do_cpustat(state: u64, index: u64, field: u64) -> u64 {
+    if field == CS_COUNT {
+        return cpu.count(state)
+    }
+    if field == CS_ONLINE {
+        return cpu.online_count(state)
+    }
+    if index >= kstate.MAX_CPUS || index >= cpu.count(state) {
+        return neg(errno.E_INVAL)
+    }
+    if field == CS_UP {
+        if cpu.online(state, index) {
+            return 1
+        }
+        return 0
+    }
+    if field == CS_APICID {
+        return cpu.apic_id(state, index)
+    }
+    if field == CS_TICKS {
+        return cpu.get(state, index, cpu.C_TICKS)
+    }
+    if field == CS_IDLE {
+        return cpu.get(state, index, cpu.C_IDLETICKS)
+    }
+    if field == CS_SWITCHES {
+        return cpu.get(state, index, cpu.C_SWITCHES)
+    }
+    if field == CS_PICKS {
+        return cpu.get(state, index, cpu.C_PICKS)
+    }
+    if field == CS_CURPID {
+        let t: u64 = cpu.get(state, index, cpu.C_CUR)
+        if t >= kstate.MAX_TASKS {
+            return 0
+        }
+        return sched.tget(state, t, sched.T_PID)
+    }
+    return neg(errno.E_INVAL)
+}
+
 fn do_pmon(state: u64, me: u64, kind: u64, index: u64, field: u64) -> u64 {
     if kind == 0 {
         if field >= pmon.PM_SCALARS {

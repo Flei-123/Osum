@@ -21,7 +21,20 @@ import sys
 
 
 def go(x, y):
-    out = ["mouse_move -120 -120"] * 6
+    # ZWOELF SCHRITTE UND NICHT SECHS -- RUNDE WERKZEUGE.
+    #
+    # Sechs mal 120 sind 720 Bildpunkte. Das reicht, um von der Mitte
+    # eines 800x600-Schirms in die Ecke zu kommen, und es reichte fuer
+    # jeden Lauf, den es bis hierher gab. Auf 1280x800 reicht es NICHT:
+    # wer eben bei x = 1171 geklickt hat (die Ecke der Taskleiste, in der
+    # das Kontrollzentrum aufgeht), landet nach dem Zuruecksetzen bei
+    # x = 451 statt bei 0 -- und der naechste Klick geht um genau diese
+    # 451 daneben, ohne dass irgendwo ein Fehler steht. GEMESSEN: der
+    # zweite Klick einer Folge traf den rechten Bildrand.
+    #
+    # Zwoelf mal 120 sind 1440 und decken damit jede Breite bis 1440;
+    # ein Schritt in den Anschlag kostet nichts, weil der Anschlag haelt.
+    out = ["mouse_move -120 -120"] * 12
     dx, dy = x, y
     while dx > 0 or dy > 0:
         sx, sy = min(dx, 120), min(dy, 120)
