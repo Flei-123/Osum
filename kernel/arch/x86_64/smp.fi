@@ -62,11 +62,16 @@ import sched
 // SFMASK) und seine eigene GS-Basis. `user.fi` bindet nur serial,
 // kstate und mem ein -- der Import macht also keinen Ring.
 import user
+// RUNDE MERGE-6: die Probe des Dateisystems auf mehreren Kernen.
+// `fs` bindet serial, kstate, sched, blk, atomic, cpu, nidx, ofsj und
+// time ein und NICHT diese Datei -- der Import macht also keinen Ring.
+import fs
 
 export {
     stage, ap_main, parse, mode_of, present,
     wache_brueche,
-    M_NOSMP, M_NOLOCK, M_SMPLONG, M_NOLOCKALL
+    M_NOSMP, M_NOLOCK, M_SMPLONG, M_NOLOCKALL,
+    M_FSRACE, M_FSBLIND
 }
 
 // ------------------------------------------------------- the parameters
@@ -97,6 +102,10 @@ const S_TRAMP: u64 = 320
 const S_DUPS: u64 = 328
 const S_MODE: u64 = 336
 const S_CLAIM: u64 = 344 // the next unit of work nobody has taken yet
+const S_FSRACE: u64 = 352 // RUNDE MERGE-6: Runden je Kern
+const S_FSBLIND: u64 = 360 // 1 = ohne die Sperre, die Gegenprobe
+const S_FSSOLL: u64 = 2048 // 8 Kerne * 8 Oktett: der Sollwert je Kern
+const S_FSFEHL: u64 = 2112 // 8 Kerne * 8 Oktett: die Abweichungen
 const S_FRAMES: u64 = 1024 // 8 cores * 16 frames * 8 octets
 
 // The phases. A started core watches S_PHASE and does what it says; the
@@ -106,12 +115,16 @@ const PH_BENCH: u64 = 1
 const PH_STRESS: u64 = 2
 const PH_FRAMES: u64 = 3
 const PH_SCHED: u64 = 4
+const PH_FSRACE: u64 = 5 // RUNDE MERGE-6
 
 // The words of the command line this file reads.
 const M_NOSMP: u64 = 1 // do not start the other cores
 const M_NOLOCK: u64 = 2 // the two data locks off -- the counter-check
 const M_SMPLONG: u64 = 4 // the long version of the benchmark
 const M_NOLOCKALL: u64 = 8 // the run queue lock off as well: this dies
+// RUNDE MERGE-6: die Probe auf den Ein-Kern-Rest im Dateisystem.
+const M_FSRACE: u64 = 16 // alle Kerne gleichzeitig in `fs.inode_get`
+const M_FSBLIND: u64 = 32 // dieselbe Probe OHNE die Sperre -- muss fallen
 
 // How much work the benchmark is. TOTAL is divided by the number of
 // cores, so both runs do the SAME arithmetic -- that is the whole point
@@ -126,6 +139,12 @@ const STRESS_GAP: u64 = 6 // how wide the window inside the lock is
 
 // The frame test.
 const FR_PER: u64 = 16
+
+// RUNDE MERGE-6: wie oft jeder Kern seinen Inode liest. 20000 sind
+// unter TCG rund eine Sekunde je Kern -- lang genug, dass die Kerne
+// sich wirklich begegnen, kurz genug fuer einen Abnahmelauf. GEMESSEN
+// steht in docs/RUNDE-MERGE6.md.
+const FSRACE_ITER: u64 = 20000
 
 // RUNDE BLECHKERN: 64 KiB, WIE EINE AUFGABE SIE HEUTE BEKOMMT.
 //
@@ -500,6 +519,10 @@ fn phases(state: u64, index: u64) {
                 stress_core(state, index)
                 atomic.fetch_add(sp(state, S_DONE), 1)
             }
+            if ph == PH_FSRACE {
+                fsrace_core(state, index)
+                atomic.fetch_add(sp(state, S_DONE), 1)
+            }
             if ph == PH_FRAMES {
                 frames_core(state, index)
                 atomic.fetch_add(sp(state, S_DONE), 1)
@@ -597,6 +620,27 @@ fn stress_core(state: u64, index: u64) {
     }
 }
 
+// ==================================================== RUNDE MERGE-6
+// ALLE KERNE GLEICHZEITIG IN `fs.inode_get`.
+//
+// Der Fall, den VIELKERN 3 gefunden und behoben hat, lief bis hierher
+// nur nebenbei mit: der Schreibtisch startet vier Programme, und WENN
+// zwei Kerne sich dabei im Inodepuffer begegnen, sieht man es an einem
+// `pid=0`. Das ist eine Beobachtung und keine Messung -- sie haengt
+// daran, wie der Ablaufplaner den Lauf gerade legt.
+//
+// Hier ist es keine Frage des Gluecks mehr: die Sperre `run_phase`
+// startet ALLE Kerne im selben Augenblick, und jeder liest zwanzigtausend
+// Mal die Art SEINES Inodes aus einem EIGENEN Inodeblock. Ohne den
+// Riegel muss der eine lesen, was der andere hineingelegt hat.
+fn fsrace_core(state: u64, index: u64) {
+    let soll: u64 = atomic.load(sp(state, S_FSSOLL) + index * 8)
+    let blind: bool = atomic.load(sp(state, S_FSBLIND)) != 0
+    let n: u64 = fs.race_core(state, index, soll,
+        atomic.load(sp(state, S_FSRACE)), blind)
+    atomic.store(sp(state, S_FSFEHL) + index * 8, n)
+}
+
 // Every core takes frames out of the ONE allocator and writes down what
 // it got. Nothing is widened here and nothing is arranged: this is the
 // allocator every other part of the kernel uses, and the race is the one
@@ -626,6 +670,9 @@ fn run_phase(state: u64, index: u64, ph: u64) {
     }
     if ph == PH_FRAMES {
         frames_core(state, index)
+    }
+    if ph == PH_FSRACE {
+        fsrace_core(state, index)
     }
     atomic.fetch_add(sp(state, S_DONE), 1)
     var guard: u64 = 0
@@ -716,6 +763,11 @@ fn stage(state: u64) {
     bench(state)
     stress(state)
     frames(state)
+    // RUNDE MERGE-6: NACH `frames` und VOR `schedule_demo`. Das
+    // Dateisystem steht zu diesem Zeitpunkt (kmain ruft `filesystem`
+    // vor `smp.stage`), und die Rahmen sind schon zurueckgegeben --
+    // ein Lauf, der hier haengt, haengt nicht am Allokator.
+    fsrace(state)
     // With the allocator lock switched off the frames just handed out are
     // not trustworthy, and a scheduler that builds stacks out of them
     // would measure the damage instead of the distribution. The two
@@ -803,6 +855,75 @@ fn bench(state: u64) {
     }
     serial.puts((&s_sum[0]) as u64)
     serial.dec(sum)
+    serial.nl()
+}
+
+// ------------------------------------------- measurement 4 (MERGE-6)
+
+// DER FAHRER. Er laeuft NUR, wenn `fsrace` auf der Befehlszeile steht:
+// zwanzigtausend Runden je Kern kosten unter TCG rund eine Sekunde, und
+// das gehoert nicht in jeden der siebenunddreissig Laeufe dieses Baums.
+fn fsrace(state: u64) {
+    var s_head: [u8; 14] = "smp: fsrace \0\0"
+    var s_cores: [u8; 7] = "kerne=\0"
+    var s_it: [u8; 10] = "  runden=\0"
+    var s_bl: [u8; 9] = "  blind=\0"
+    var s_err: [u8; 10] = "  fehler=\0"
+    var s_ino: [u8; 9] = "  inode=\0"
+    var s_c: [u8; 4] = "  c\0"
+    var s_eq: [u8; 2] = "=\0"
+
+    if !on(state, M_FSRACE) {
+        return
+    }
+    let online: u64 = cpu.online_count(state)
+    var blind: u64 = 0
+    if on(state, M_FSBLIND) {
+        blind = 1
+    }
+    atomic.store(sp(state, S_FSRACE), FSRACE_ITER)
+    atomic.store(sp(state, S_FSBLIND), blind)
+    // DIE SOLLWERTE ZUERST, IN RUHE. Ein Sollwert, der waehrend des
+    // Rennens gelesen wird, ist selbst schon falsch.
+    var i: u64 = 0
+    while i < kstate.MAX_CPUS {
+        atomic.store(sp(state, S_FSSOLL) + i * 8, fs.race_soll(state, i))
+        atomic.store(sp(state, S_FSFEHL) + i * 8, 0)
+        i = i + 1
+    }
+    run_phase(state, 0, PH_FSRACE)
+
+    var fehler: u64 = 0
+    i = 0
+    while i < online {
+        fehler = fehler + atomic.load(sp(state, S_FSFEHL) + i * 8)
+        i = i + 1
+    }
+    serial.puts((&s_head[0]) as u64)
+    serial.puts((&s_cores[0]) as u64)
+    serial.dec(online)
+    serial.puts((&s_it[0]) as u64)
+    serial.dec(FSRACE_ITER)
+    serial.puts((&s_bl[0]) as u64)
+    serial.dec(blind)
+    serial.puts((&s_err[0]) as u64)
+    serial.dec(fehler)
+    serial.nl()
+
+    // JE KERN: welcher Inode, welcher Sollwert, wie viele Abweichungen.
+    // Ohne diese Zeile waere `fehler=0` auch dann gruen, wenn alle Kerne
+    // denselben Inode gelesen haetten -- also gar nichts gemessen haben.
+    serial.puts((&s_head[0]) as u64)
+    i = 0
+    while i < online {
+        serial.puts((&s_c[0]) as u64)
+        serial.dec(i)
+        serial.puts((&s_ino[0]) as u64)
+        serial.dec(fs.race_ino(state, i))
+        serial.puts((&s_eq[0]) as u64)
+        serial.dec(atomic.load(sp(state, S_FSFEHL) + i * 8))
+        i = i + 1
+    }
     serial.nl()
 }
 
@@ -1064,6 +1185,8 @@ fn mode_of(cmd: u64) -> u64 {
     var w_nolock: [u8; 7] = "nolock\0"
     var w_long: [u8; 8] = "smplong\0"
     var w_all: [u8; 10] = "nolockall\0"
+    var w_race: [u8; 8] = "fsrace\0\0"
+    var w_blind: [u8; 9] = "fsblind\0\0"
     if cmd == 0 {
         return 0
     }
@@ -1079,6 +1202,15 @@ fn mode_of(cmd: u64) -> u64 {
     }
     if find(cmd, (&w_all[0]) as u64, 9) != 0 {
         m = m | M_NOLOCKALL
+    }
+    // RUNDE MERGE-6: `fsblind` schaltet `fsrace` mit ein. Eine
+    // Gegenprobe, die man versehentlich ohne die Probe starten kann,
+    // misst nichts und sagt es nicht.
+    if find(cmd, (&w_race[0]) as u64, 6) != 0 {
+        m = m | M_FSRACE
+    }
+    if find(cmd, (&w_blind[0]) as u64, 7) != 0 {
+        m = m | M_FSRACE | M_FSBLIND
     }
     return m
 }
