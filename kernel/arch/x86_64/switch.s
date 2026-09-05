@@ -53,8 +53,41 @@ context_switch:
     pushq %r14
     pushq %r15
     pushfq
+    /* ------------------------------------------- ROUND CERTUS: xmm
+     *
+     * Since round CERTUS ring 3 may use SSE (`boot.s`), and from that
+     * moment the sixteen `xmm` registers and `mxcsr` are part of a
+     * task's state exactly like `rbx` is. A switch that does not save
+     * them hands one process the arithmetic registers of another --
+     * and that is not a crash, it is a WRONG NUMBER in a layout, which
+     * nobody would ever trace back to here.
+     *
+     * WHERE IT IS SAVED: on the kernel stack of the task that is
+     * leaving, right under its register frame. That way there is no
+     * per-task buffer to allocate and no order to get wrong -- the
+     * state travels with the stack it belongs to, and a task that is
+     * never resumed takes it with it when its stack is freed.
+     *
+     * 528 AND NOT 512, and the alignment done by hand: `fxsave` needs a
+     * 16-aligned address and this function is reached from Firn through
+     * an `asm` block, so the alignment of `rsp` on entry is not
+     * something to bet on. 528 = 512 + 16 leaves room to round UP into
+     * the block from any starting point.
+     *
+     * `sched.frame_build` writes the same block for a task that has
+     * never run, with `mxcsr` = 0x1F80 -- all exceptions MASKED. A
+     * zeroed block would mean every exception unmasked, and the first
+     * inexact result of the first task would raise #XM. */
+    subq $528, %rsp
+    leaq 15(%rsp), %rax
+    andq $-16, %rax
+    fxsave (%rax)
     movq %rsp, (%rdi)               /* rdi still holds the slot */
     movq %rsi, %rsp                 /* from here on: the other task */
+    leaq 15(%rsp), %rax
+    andq $-16, %rax
+    fxrstor (%rax)
+    addq $528, %rsp
     popfq
     popq %r15
     popq %r14
