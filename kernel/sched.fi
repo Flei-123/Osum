@@ -1200,12 +1200,38 @@ fn adopt(state: u64, kind: u64, prio: u64, ktop: u64) -> u64 {
 // looks EXACTLY like a task the switch stepped out of a moment ago -- see
 // the layout in switch.s. That way `context_switch` needs no special case
 // for a first start.
+// RUNDE CERTUS: der Platz fuer `fxsave` unter jedem Rahmen.
+// 512 Oktette Zustand, 16 fuer die Ausrichtung von Hand.
+const FX_BYTES: u64 = 528
+
 fn frame_build(state: u64, ktop: u64, entry: u64, a0: u64, a1: u64,
     a2: u64) -> u64 {
-    let base: u64 = ktop - 144
+    // RUNDE CERTUS: DER RAHMEN IST UM 528 OKTETTE GEWACHSEN.
+    //
+    // `context_switch` (kernel/arch/x86_64/switch.s) legt seit dieser
+    // Runde die SSE-Zustaende mit `fxsave` unter den Registerrahmen --
+    // 512 Oktette plus 16 fuer die Ausrichtung von Hand. Ein Aufgabe,
+    // die noch NIE gelaufen ist, wird von der Umschaltung nicht anders
+    // behandelt als eine, die eben weggelegt wurde (das ist der Sinn
+    // dieser Funktion), also muss auch sie diesen Bereich haben.
+    //
+    // UND ER DARF NICHT NULL SEIN. `fxrstor` liest aus ihm `mxcsr`, und
+    // 0 heisst dort: JEDE Ausnahme unmaskiert. Die erste ungenaue
+    // Division der ersten Aufgabe gaebe dann #XM (Vektor 19). Der Wert
+    // nach einem Kaltstart ist 0x1F80 -- alle sechs maskiert --, und
+    // genau der wird hier eingetragen, an Versatz 24 des FXSAVE-Bildes.
+    let base: u64 = ktop - 144 - FX_BYTES
+    var z: u64 = 0
+    while z < FX_BYTES {
+        __mmio_write64((base + z) as *mut u64, 0)
+        z = z + 8
+    }
+    let fx: u64 = (base + 15) & 0xFFFFFFFFFFFFFFF0
+    __mmio_write32((fx + 24) as *mut u32, 0x1F80)
+    let rahmen: u64 = base + FX_BYTES
     var i: u64 = 0
     while i < 18 {
-        __mmio_write64((base + i * 8) as *mut u64, 0)
+        __mmio_write64((rahmen + i * 8) as *mut u64, 0)
         i = i + 1
     }
     // ROUND K5: IF OFF, not on. A task that has never run starts with
@@ -1216,12 +1242,12 @@ fn frame_build(state: u64, ktop: u64, entry: u64, a0: u64, a1: u64,
     // lock back and only THEN switches interrupts on. Starting with them
     // on would let this core's own timer interrupt run into a lock this
     // core holds.
-    __mmio_write64(base as *mut u64, 0x002) // rflags: IF off until enter_task
-    __mmio_write64((base + 72) as *mut u64, a0) // rdi
-    __mmio_write64((base + 80) as *mut u64, a1) // rsi
-    __mmio_write64((base + 104) as *mut u64, a2) // rdx
-    __mmio_write64((base + 128) as *mut u64, entry) // where `ret` goes
-    __mmio_write64((base + 136) as *mut u64, vector(state, V_GUARD))
+    __mmio_write64(rahmen as *mut u64, 0x002) // rflags: IF off until enter_task
+    __mmio_write64((rahmen + 72) as *mut u64, a0) // rdi
+    __mmio_write64((rahmen + 80) as *mut u64, a1) // rsi
+    __mmio_write64((rahmen + 104) as *mut u64, a2) // rdx
+    __mmio_write64((rahmen + 128) as *mut u64, entry) // where `ret` goes
+    __mmio_write64((rahmen + 136) as *mut u64, vector(state, V_GUARD))
     return base
 }
 
