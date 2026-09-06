@@ -105,6 +105,37 @@ USB-Stick und keine PCIe-Karte -- **keinen Umbau erzwungen hat**.
 
 Siehe Abschnitt 3. Das ist die praktisch wichtigste Zeile der Runde.
 
+### 1.6 Es gibt `/bin/wlan`, und es luegt nicht
+
+Ein Programm fuer etwas, das es nicht gibt, koennte man weglassen. Es
+ist der Grund, es **genau so** zu schreiben:
+
+    osum$ wlan status
+    wlan: kein Geraet -- es gibt keinen Treiber
+    wlan: ein USB-Stick wuerde an seiner Nummer ERKANNT werden,
+          gefahren wird keiner. 'wlan chips' zeigt die Liste.
+
+    osum$ wlan chips
+      0bda:8812  Realtek RTL8812AU
+      0e8d:7601  MediaTek MT7601U
+      ...  (40 Nummern)
+
+    osum$ wlan verbinden MeinNetz geheim12345
+    wlan: /etc/wlan.conf geschrieben fuer Netz MeinNetz
+    wlan: verbunden wird damit NICHT -- es gibt keinen Treiber.
+
+**Das ist kein Papier: die Zeilen oben sind aus einem echten Lauf in
+QEMU abgeschrieben** (`tools/wlan/prog.sh`, 14 Zusagen, davon acht aus
+dem Lauf). `wlan chips` ist ausserdem die Liste, gegen die man den
+Aufdruck eines Sticks halten kann, falls die Zeile am Blech nichts
+hergibt.
+
+`/etc/wlan.conf` bekommt die Rechte **0600** -- in der Datei steht ein
+WLAN-Passwort. Laesst sich das nicht setzen, wird die Datei **wieder
+geloescht**, statt sie mit falschen Rechten liegenzulassen: ein
+Geheimnis, das lesbar herumliegt, ist schlimmer als keines, weil
+niemand damit rechnet.
+
 ---
 
 ## 2. WARUM NICHT GEGEN hostapd -- GEMESSEN, NICHT GEMEINT
@@ -196,7 +227,7 @@ ausdruecklich.
 ## 4. WAS GEMESSEN WURDE
 
 `bash tools/wlan/run2.sh`, Abschnitt 43 der Abnahme.
-**29 Zusagen, 0 Fehler.**
+**43 Zusagen, 0 Fehler.**
 
 Dazu laeuft der geerbte Abschnitt 42 (Runde WLAN) auf dieser Grundlage
 unveraendert weiter: **185 Zusagen, 0 Fehler**.
@@ -210,7 +241,8 @@ unveraendert weiter: **185 Zusagen, 0 Fehler**.
 | Boesartige Faelle im Handschlag, die Osum ablehnen muss | 5 |
 | Boesartige Faelle im ganzen Weg (`weg.py`), in denen NULL Schluessel ins Geraet gehen | 6 |
 | USB-Nummern, die Familie **und** Klarnamen richtig ergeben | 15 geprueft von 40 in der Tabelle |
-| Neue Zeilen in `lib/wlan/` | 1.400 |
+| Zusagen aus einem ECHTEN Lauf von `/bin/wlan` in Osum | 8 |
+| Neue Zeilen in `lib/wlan/` und `kernel/user/wlan.fi` | 1.748 |
 
 ### Die vier Fehler, die dieser Lauf gefunden hat
 
@@ -372,7 +404,7 @@ braucht.
 |---:|---|---|---|
 | 1 | Die `wifi-usb:`-Zeile am echten Blech ablesen und die VID/PID festhalten | ein Foto | **JA** |
 | 3 | 802.11w (BIP-CMAC-128, IGTK) erkennen UND umsetzen | ~350 Zeilen | nein |
-| 4 | Ein Ring-3-Programm `wlan` (suchen, verbinden, Zustand) plus Kachel, ueber `wlib` | ~700 Zeilen | nein |
+| 4 | Die **Kachel** im Kontrollzentrum, ueber `wlib` (das Programm `/bin/wlan` steht) | ~300 Zeilen | nein |
 | 5 | SAE (WPA3): P-256 auf `big.fi`, hunting-and-pecking | ~900 Zeilen | nein -- aber ohne Vektoren nicht sinnvoll pruefbar |
 | 6 | **USB-Treiber fuer GENAU DEN Chip aus Punkt 1**: Endpunkte, Firmware ueber Bulk, Register, Kommandos, Ringe | **~3.000-5.000 Zeilen** | **JA** |
 | 7 | Regulatorik gegen das, was die Firmware zulaesst | ~400 Zeilen | **JA** |
@@ -398,6 +430,8 @@ falschen Chip ist nutzlos.
 | `lib/wlan/usbchip.fi` | 368 | 40 USB-Nummern auf Familie und Klarnamen |
 | `tools/wlan/gegenstelle.py` | 655 | ein **unabhaengiger** WPA2-Authenticator, an der echten Aufzeichnung geeicht |
 | `tools/wlan/handschlag.py` | 337 | Osums Supplicant gegen die Gegenstelle, glaeubig und boese |
+| `kernel/user/wlan.fi` | 348 | `/bin/wlan`: status, chips, scan, verbinden, vergessen |
+| `tools/wlan/prog.sh` | 117 | baut ein Abbild mit /bin/wlan und ruft es in Osum auf |
 | `tools/wlan/weg.py` | 223 | der ganze Weg, und was passiert, wenn jemand luegt |
 | `tools/wlan/run2.sh` | 240 | Abschnitt 43 der Abnahme |
 | `kernel/usb.fi` | +43 | die Zeile, die den Stick benennt |
