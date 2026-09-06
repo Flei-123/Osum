@@ -97,10 +97,19 @@ export {
     shadow_builds, set_shadow_old, cap_hover, cap_hits,
     CAP_MIN, CAP_MAX, CAP_CLOSE,
     FORM_SLOTS, FM_RADIUS, FM_SHADOW, FM_SHADOW_R, FM_SHADOW_C,
-    FM_SHADOW2, FM_SHADOW_R2, FM_GRAD, FM_CAPTION,
+    FM_SHADOW2, FM_SHADOW_R2, FM_GRAD, FM_CAPTION, FM_MOTION,
     RADIUS_MAX, SHADOW_MAX,
     DK_FRAME, DK_TITLE, DK_TEXT, DK_FRAME_ON, DK_TITLE_ON, DK_TEXT_ON,
     DK_CLOSE, DK_CLOSE_MARK, DK_DESK, DK_TERM_FG, DK_TERM_BG,
+    // RUNDE VSYNC: die Bildgrenze, die Bewegung und die Zerreissprobe.
+    present, set_vsync, vsync_on, presents, skipped, pending,
+    anim_start, anim_tick, anim_laeuft, anims, anim_frames, anim_ticks,
+    set_noanim, close_anim, minimize_anim, open_anim,
+    set_sig, sig_on, frame_no, sig_colour,
+    set_leser, leser_tick, liest, risse, riss_oben, riss_unten, ohne_sig,
+    riss_y0, riss_y1, riss_frame, verworfen,
+    vor_t0, set_vor_t0, vor_step, set_vor_step, vor_win, set_vor_win,
+    AN_OPEN, AN_CLOSE, AN_MIN, MOTION_DEF, SIG_H,
     fill, text, blit_in, flush_win, hit,
     ev_push, ev_pop, ev_waiting,
     on_mouse, on_key, term_write, term_out, term_cols, term_rows, term_cx, term_cy,
@@ -478,8 +487,101 @@ const S_SHEDGE: u64 = 0x1080 // 32 Oktette
 const S_FAIL: u64 = 0x10A8 // Bitmaske
 const S_DIAG1: u64 = 0x10B0 // Diagnose des Selbsttests
 const S_DIAG2: u64 = 0x10B8 // Bitmaske der NICHT bestandenen Zusagen
+
+// ================== RUNDE VSYNC: DIE BILDGRENZE UND DIE BEWEGUNG
+//
+// Bis hierher rief `compose` am Ende `fb.flush`, und `flush` uebertrug
+// die schmutzigen Zeilen SOFORT. Bei einer Bewegung liegen zwischen zwei
+// Mauspaketen aber mehrere `compose`-Laeufe, und jeder davon schob seinen
+// Streifen einzeln auf die Karte. Wer in diesem Augenblick abliest --
+// der Bildaufbau des Schirms tut es staendig --, sieht die obere Haelfte
+// des Fensters aus dem einen und die untere aus dem naechsten Zustand.
+// Das ist das Reissen, und es entsteht NICHT durch einen fehlenden
+// Rueckpuffer (den gibt es seit Runde SCHIRM), sondern durch die
+// FEHLENDE BILDGRENZE: es war nie gesagt, welche Zeichenschritte
+// zusammen EIN Bild sind.
+//
+// Also wird die Uebertragung von der Zeichnung getrennt:
+//
+//   `compose`  zeichnet in den Rueckpuffer und merkt den Bereich vor.
+//   `present`  uebertraegt EINMAL, im Zeitgebertakt.
+//
+// S_VSYNC schaltet das an, S_PEND sammelt das Rechteck ueber mehrere
+// `compose`-Laeufe hinweg. `nopresent` ist die Gegenprobe: dann geht es
+// wieder den alten Weg, und die Zerreissprobe MUSS fehlschlagen.
+const S_VSYNC: u64 = 0x10C0 // 1 = Uebertragen erst im Tick
+const S_PEND: u64 = 0x10C8 // 1 = es liegt ein ungezeigtes Bild
+const S_PX0: u64 = 0x10D0 // das gesammelte Rechteck
+const S_PY0: u64 = 0x10D8
+const S_PX1: u64 = 0x10E0
+const S_PY1: u64 = 0x10E8
+const S_PRESENTS: u64 = 0x10F0 // wie oft wirklich uebertragen wurde
+const S_SKIPPED: u64 = 0x10F8 // Zeichnungen ohne eigene Uebertragung
+// DIE ZERREISSPROBE. Jedes Bild bekommt eine Nummer; malt der Server im
+// Signaturbetrieb, faerbt er den oberen und den unteren Rand JEDES
+// Fensters mit einer Farbe, die aus dieser Nummer faellt. Ein
+// Bildschirmfoto, das im selben Fenster ZWEI verschiedene Signaturen
+// zeigt, hat ein halb uebertragenes Bild erwischt -- und genau das ist
+// Reissen, sichtbar gemacht.
+const S_SIG: u64 = 0x1100 // 1 = Signaturbetrieb
+const S_FRAME: u64 = 0x1108 // die laufende Bildnummer
+// DIE BEWEGUNG BEIM OEFFNEN UND SCHLIESSEN. Vier Zahlen je Fenster
+// liegen im Fenstersatz (W_AN*), hier stehen nur die Zaehler und der
+// Takt. Die Zeiten kommen aus den Formmarken (FM_MOTION) und nicht aus
+// eigenen Konstanten -- DESIGN-2 hat sie in wlib gesetzt, und zwei
+// Wahrheiten ueber dieselbe Dauer waeren eine zu viel.
+// DER ABLESER DER ZERREISSPROBE. Er tut, was ein Bildschirm tut: er
+// liest den VORDERPUFFER, oben und unten, und vergleicht die beiden
+// Signaturen. Sind sie verschieden, hat er ein halb uebertragenes Bild
+// erwischt -- und genau das ist Reissen.
+const S_LESER: u64 = 0x1130 // 1 = der Ableser laeuft
+const S_LIEST: u64 = 0x1138 // wie oft abgelesen wurde
+const S_RISS: u64 = 0x1140 // wie oft es dabei nicht zusammenpasste
+const S_LX: u64 = 0x1148 // wo abgelesen wird (Fenstermitte)
+const S_LY0: u64 = 0x1150 // die obere Zeile
+const S_LY1: u64 = 0x1158 // und die untere
+const S_R0: u64 = 0x1160 // die erste beobachtete Signatur oben, +1
+const S_R1: u64 = 0x1168 // und die untere, +1
+const S_KEIN: u64 = 0x1170 // Ablesungen ohne Signatur an einer Stelle
+const S_LPAAR: u64 = 0x1178 // zwei Woerter: die beiden abgelesenen Punkte
+const S_LFEST: u64 = 0x1188 // 1 = die Ablesestelle steht fest
+const S_RY0: u64 = 0x11A8 // wo der erste Riss gesehen wurde
+const S_RY1: u64 = 0x11B0
+const S_RFR: u64 = 0x11B8 // und bei welcher Bildnummer
+const S_VERWORF: u64 = 0x11C0 // Ablesungen ueber eine Bildgrenze hinweg
+// Die drei Zahlen der Vorfuehrung (kgui ruft sie). Sie liegen HIER und
+// nicht in `kstate`, weil dort jede Seite gezaehlt ist und diese drei
+// nur die Oberflaeche etwas angehen.
+const S_VT0: u64 = 0x1190 // Tick, an dem das Halten begann
+const S_VSTEP: u64 = 0x1198 // wie weit die Vorfuehrung ist
+const S_VWIN: u64 = 0x11A0 // das vorgefuehrte Fenster + 1
+const S_ANIMS: u64 = 0x1110 // begonnene Bewegungen
+const S_ANFRAMES: u64 = 0x1118 // gezeichnete Zwischenbilder
+const S_NOANIM: u64 = 0x1120 // GEGENPROBE: keine Bewegung
+const S_TICKS: u64 = 0x1128 // wie oft `anim_tick` lief
+
+// Die Arten einer Fensterbewegung. Oeffnen waechst, Schliessen und
+// Minimieren schrumpfen -- der Unterschied zwischen den letzten beiden
+// liegt NICHT im Bild, sondern darin, was danach passiert.
+const AN_OPEN: u64 = 1
+const AN_CLOSE: u64 = 2
+const AN_MIN: u64 = 3
+// Ein Tick sind zehn Millisekunden, weil `time.TICK_HZ` 100 ist. Die
+// Zahl steht hier als Konstante und nicht als Division im Quelltext,
+// damit ein Takt von 250 Hz an EINER Stelle nachgezogen wird.
+const MS_PRO_TICK: u64 = 10
+// Die Vorgabe, wenn keine Formmarke da ist: MO_FAST aus wlibc.
+const MOTION_DEF: u64 = 120
+const MOTION_MAX: u64 = 500
+// Wie hoch der Signaturstreifen ist. Vier Zeilen sind im PPM sicher zu
+// finden und im Bild klein genug, um den Rest nicht zu verdecken.
+const SIG_H: u64 = 4
+// Wie klein ein Fenster am Anfang der Oeffnungsbewegung ist, in
+// Tausendsteln. 850 heisst: es waechst aus 85 Prozent heraus -- der
+// Sprung, den man sieht, ohne dass es zappelt.
+const AN_SCALE0: u64 = 850
 const SHMASK_SIDE: u64 = 40
-const FORM_SLOTS: u64 = 8
+const FORM_SLOTS: u64 = 9
 const FM_RADIUS: u64 = 0 // Eckenradius des Fensterrahmens, 0 = eckig
 const FM_SHADOW: u64 = 1 // Staerke des Schattens, 0..100, 0 = keiner
 const FM_SHADOW_R: u64 = 2 // wie weit er reicht, in Bildpunkten
@@ -498,6 +600,13 @@ const FM_GRAD: u64 = 6
 // 0 = das alte Schliessfeld (ein rotes Quadrat mit Kreuz), 1 = die
 // drei Windows-Schaltflaechen rechts oben.
 const FM_CAPTION: u64 = 7
+// RUNDE VSYNC: DIE DAUER EINER FENSTERBEWEGUNG, in Millisekunden.
+// Sie kommt aus derselben Quelle wie alle anderen Formmarken -- die
+// Taskleiste schickt sie beim Start --, damit "Animationen reduzieren"
+// EINE Stelle hat und nicht zwei. 0 heisst SOFORT FERTIG und nicht
+// uebersprungen: der Endzustand wird in beiden Faellen erreicht.
+// Vorgabe ist MO_FAST aus wlibc (120 ms), siehe DESIGN-2.
+const FM_MOTION: u64 = 8
 // Die Obergrenzen. Sie stehen hier und nicht beim Aufrufer, weil ein
 // Radius von 4000 den Rahmen nicht rund macht, sondern den Server in
 // eine Schleife ueber vier Millionen Eckpunkte schickt.
@@ -671,6 +780,17 @@ const W_APP: u64 = 0x118 // APP_LEN Oktette
 // 0x118 + APP_LEN endet bei 0x130, WIN_BYTES ist 512 -- der Platz ist da.
 const W_PAINTS: u64 = 0x130 // wie oft compose dieses Fenster malte
 const W_PX: u64 = 0x138 // und wie viele Bildpunkte dabei herauskamen
+
+// RUNDE VSYNC: DIE BEWEGUNG EINES FENSTERS. Vier Zahlen, und keine
+// davon ist eine Dauer in Bildern: `W_AN0` ist der Tick, an dem sie
+// begann, `W_ANMS` die zugesagte Dauer in Millisekunden. Erst
+// `anim_p` rechnet daraus den Fortschritt -- dieselbe Trennung wie in
+// wlib (DESIGN-2), damit ein Kernel mit TICK_HZ=100 und eine
+// Bibliothek, die in Millisekunden zusagt, dieselbe Bewegung meinen.
+const W_ANK: u64 = 0x140 // Art: 0 keine, AN_OPEN, AN_CLOSE, AN_MIN
+const W_AN0: u64 = 0x148 // Starttick
+const W_ANMS: u64 = 0x150 // zugesagte Dauer in Millisekunden
+const W_ANP: u64 = 0x158 // zuletzt gezeichneter Fortschritt, 0..1000
 const APP_LEN: u64 = 24
 
 // "kein Terminal". Absichtlich eine Zahl und kein Ruf nach `tty.fi`:
@@ -831,6 +951,11 @@ fn set_form(state: u64, i: u64, v: u64) -> bool {
     }
     if i == FM_CAPTION && w > 1 {
         w = 1
+    }
+    // RUNDE VSYNC: eine halbe Sekunde ist die Obergrenze. Laenger ist
+    // keine Rueckmeldung mehr, sondern Warten.
+    if i == FM_MOTION && w > MOTION_MAX {
+        w = MOTION_MAX
     }
     ss(state, S_FORM + i * 8, w + 1)
     ss(state, S_FORMN, gs(state, S_FORMN) + 1)
@@ -2330,6 +2455,48 @@ fn term_win(state: u64) -> u64 {
     return MAX_WIN
 }
 
+// ---------------------------------------------------- die drei Anlaesse
+//
+// DREI EINSTIEGE UND EIN FALLBACK, und der Fallback ist der Kern der
+// Sache: ist die Bewegung abgeschaltet (Formmarke motion=0 oder die
+// Gegenprobe `noanim`), tut jede dieser Funktionen SOFORT das, was sie
+// zusagt. Der Endzustand haengt nie an der Bewegung -- ein Fenster, das
+// geschlossen werden soll, wird geschlossen, ob es dabei schrumpft oder
+// nicht. Das ist der Unterschied zwischen "reduziert" und "kaputt".
+
+// Ein neues Fenster waechst auf. Der Aufrufer hat es schon angelegt.
+fn open_anim(state: u64, i: u64) -> bool {
+    return anim_start(state, i, AN_OPEN)
+}
+
+// Schliessen ueber die Bewegung. Das Fenster verschwindet erst, wenn
+// sie durch ist -- `anim_tick` ruft dann `destroy`. Ohne Bewegung
+// geschieht genau das sofort.
+fn close_anim(state: u64, i: u64) -> bool {
+    if !valid(state, i) {
+        return false
+    }
+    ev_push(state, i, E_CLOSE, 0, 0, 0)
+    if !anim_start(state, i, AN_CLOSE) {
+        destroy(state, i)
+        return false
+    }
+    return true
+}
+
+// Minimieren ueber die Bewegung. Dasselbe Bild wie beim Schliessen,
+// aber am Ende steht `set_hidden` und nicht `destroy`.
+fn minimize_anim(state: u64, i: u64) -> bool {
+    if !valid(state, i) {
+        return false
+    }
+    if !anim_start(state, i, AN_MIN) {
+        set_hidden(state, i, true)
+        return false
+    }
+    return true
+}
+
 fn close_top(state: u64) -> u64 {
     let i: u64 = top_visible(state)
     if i >= MAX_WIN {
@@ -3353,6 +3520,535 @@ fn set_shape(state: u64, s: u64) {
     damage(state, mx, my, mx + cur_w(state) as i64, my + cur_h(state) as i64)
 }
 
+// ================== RUNDE VSYNC: BEWEGUNG, BILDGRENZE, SIGNATUR
+
+// Die zugesagte Dauer einer Fensterbewegung. Steht keine Formmarke da,
+// gilt MO_FAST -- dieselben 120 ms, die wlib seit DESIGN-2 fuer Hover
+// und Menue nimmt. Die Zahl steht hier EINMAL; wer sie aendern will,
+// aendert die Formmarke und nicht den Quelltext.
+fn motion_ms(state: u64) -> u64 {
+    if gs(state, S_FORM + FM_MOTION * 8) == 0 {
+        return MOTION_DEF
+    }
+    return form(state, FM_MOTION)
+}
+
+// Sind Bewegungen abgeschaltet? Zwei Wege fuehren dahin, und sie
+// bedeuten dasselbe: die Formmarke sagt 0 (das ist "Animationen
+// reduzieren"), oder die Gegenprobe `noanim` steht auf der
+// Befehlszeile. In beiden Faellen ist eine Bewegung SOFORT FERTIG.
+fn anim_aus(state: u64) -> bool {
+    return gs(state, S_NOANIM) != 0 || motion_ms(state) == 0
+}
+
+// ease-out, ganzzahlig: 1-(1-t)^2 in Tausendsteln. Dieselbe Kurve wie
+// `wlib.ease(EASE_OUT)` -- absichtlich, damit ein Fenster, das
+// aufgeht, und ein Knopf, der hell wird, sich gleich anfuehlen.
+// Keine Fliesskommazahl: der Kernel rettet in `syscall` kein SSE.
+fn ease_out(t: u64) -> u64 {
+    var pp: u64 = t
+    if pp > 1000 {
+        pp = 1000
+    }
+    let inv: u64 = 1000 - pp
+    return 1000 - inv * inv / 1000
+}
+
+// Der Fortschritt einer laufenden Bewegung, 0..1000. Er faellt aus der
+// VERGANGENEN ZEIT und nicht aus der Zahl der Bilder: bei TICK_HZ=100
+// ist ein Tick 10 ms, und eine Zusage von 120 ms sind zwoelf Ticks --
+// aber wenn der Server einmal langsamer ist, springt die Bewegung
+// weiter, statt sich zu dehnen.
+fn anim_p(state: u64, i: u64) -> u64 {
+    let ms: u64 = wg(state, i, W_ANMS)
+    if ms == 0 {
+        return 1000
+    }
+    let jetzt: u64 = kstate.get(state, kstate.TICKS)
+    let ab: u64 = wg(state, i, W_AN0)
+    if jetzt <= ab {
+        return 0
+    }
+    let vergangen: u64 = (jetzt - ab) * MS_PRO_TICK
+    if vergangen >= ms {
+        return 1000
+    }
+    return vergangen * 1000 / ms
+}
+
+// Eine Bewegung anmelden. `art` ist AN_OPEN, AN_CLOSE oder AN_MIN.
+// Ist sie abgeschaltet, wird NICHTS angemeldet -- der Aufrufer sieht
+// `false` und macht seinen Endzustand sofort.
+fn anim_start(state: u64, i: u64, art: u64) -> bool {
+    if !valid(state, i) || anim_aus(state) {
+        return false
+    }
+    wsv(state, i, W_ANK, art)
+    wsv(state, i, W_AN0, kstate.get(state, kstate.TICKS))
+    wsv(state, i, W_ANMS, motion_ms(state))
+    wsv(state, i, W_ANP, 0)
+    ss(state, S_ANIMS, gs(state, S_ANIMS) + 1)
+    damage_win(state, i)
+    return true
+}
+
+fn anim_laeuft(state: u64, i: u64) -> bool {
+    return valid(state, i) && wg(state, i, W_ANK) != 0
+}
+
+fn anims(state: u64) -> u64 {
+    return gs(state, S_ANIMS)
+}
+
+fn anim_frames(state: u64) -> u64 {
+    return gs(state, S_ANFRAMES)
+}
+
+fn anim_ticks(state: u64) -> u64 {
+    return gs(state, S_TICKS)
+}
+
+fn set_noanim(state: u64, on: bool) {
+    ss(state, S_NOANIM, 0)
+    if on {
+        ss(state, S_NOANIM, 1)
+    }
+}
+
+// Der Fortschritt, den `paint_win` gerade sehen soll -- schon durch die
+// Kurve gelaufen. Beim Schliessen und Minimieren laeuft er rueckwaerts:
+// dieselbe Kurve, gespiegelt, statt einer zweiten.
+fn anim_mix(state: u64, i: u64) -> u64 {
+    let art: u64 = wg(state, i, W_ANK)
+    if art == 0 {
+        return 1000
+    }
+    let e: u64 = ease_out(anim_p(state, i))
+    if art == AN_OPEN {
+        return e
+    }
+    return 1000 - e
+}
+
+// EIN TICK DER BEWEGUNGEN, und er gehoert in den Zeitgeber und nicht
+// ins Zeichnen. Er macht drei Dinge: abgelaufene Bewegungen beenden,
+// laufende schmutzig machen (sonst zeichnet `compose` sie nicht), und
+// beim Ende einer Schliessbewegung das Fenster WIRKLICH wegnehmen.
+// Gibt zurueck, wie viele Bewegungen noch laufen.
+fn anim_tick(state: u64) -> u64 {
+    if !ready(state) {
+        return 0
+    }
+    ss(state, S_TICKS, gs(state, S_TICKS) + 1)
+    var offen: u64 = 0
+    var i: u64 = 0
+    while i < MAX_WIN {
+        if valid(state, i) && wg(state, i, W_ANK) != 0 {
+            let p: u64 = anim_p(state, i)
+            let art: u64 = wg(state, i, W_ANK)
+            // Der Bereich wird IMMER schmutzig, auch wenn der
+            // Fortschritt gleich blieb -- am Ende der Bewegung steht
+            // sonst das letzte Zwischenbild auf dem Schirm.
+            damage_win(state, i)
+            if p >= 1000 {
+                wsv(state, i, W_ANK, 0)
+                wsv(state, i, W_ANP, 1000)
+                // DAS FENSTER GEHT ERST JETZT. Waere es beim Klick
+                // verschwunden, haette die Bewegung nichts mehr zu
+                // zeigen gehabt -- das ist der ganze Grund, warum
+                // Schliessen ueber diesen Umweg laeuft.
+                if art == AN_CLOSE {
+                    destroy(state, i)
+                } else {
+                    if art == AN_MIN {
+                        set_hidden(state, i, true)
+                    }
+                }
+            } else {
+                wsv(state, i, W_ANP, p)
+                ss(state, S_ANFRAMES, gs(state, S_ANFRAMES) + 1)
+                offen = offen + 1
+            }
+        }
+        i = i + 1
+    }
+    return offen
+}
+
+// ---------------------------------------------------- DIE BILDGRENZE
+
+fn set_vsync(state: u64, on: bool) {
+    ss(state, S_VSYNC, 0)
+    if on {
+        ss(state, S_VSYNC, 1)
+    }
+}
+
+fn vsync_on(state: u64) -> bool {
+    return gs(state, S_VSYNC) != 0
+}
+
+fn presents(state: u64) -> u64 {
+    return gs(state, S_PRESENTS)
+}
+
+fn skipped(state: u64) -> u64 {
+    return gs(state, S_SKIPPED)
+}
+
+fn pending(state: u64) -> bool {
+    return gs(state, S_PEND) != 0
+}
+
+// Das gezeichnete Rechteck vormerken, statt es zu uebertragen. Mehrere
+// `compose`-Laeufe zwischen zwei Ticks wachsen so zu EINEM Rechteck
+// zusammen, und der Schirm sieht sie zusammen oder gar nicht.
+fn pend_add(state: u64, x0: u64, y0: u64, x1: u64, y1: u64) {
+    if gs(state, S_PEND) == 0 {
+        ss(state, S_PX0, x0)
+        ss(state, S_PY0, y0)
+        ss(state, S_PX1, x1)
+        ss(state, S_PY1, y1)
+        ss(state, S_PEND, 1)
+        return
+    }
+    if x0 < gs(state, S_PX0) {
+        ss(state, S_PX0, x0)
+    }
+    if y0 < gs(state, S_PY0) {
+        ss(state, S_PY0, y0)
+    }
+    if x1 > gs(state, S_PX1) {
+        ss(state, S_PX1, x1)
+    }
+    if y1 > gs(state, S_PY1) {
+        ss(state, S_PY1, y1)
+    }
+}
+
+// DAS BILD ZEIGEN. Eine Uebertragung, ein Rechteck -- und der Zaehler
+// steigt nur, wenn wirklich etwas anlag. Wer das im Takt ruft, hat
+// genau die Bildgrenze, die vorher fehlte.
+fn present(state: u64) -> u64 {
+    if !ready(state) || !fb.ready(state) {
+        return 0
+    }
+    if gs(state, S_PEND) == 0 {
+        return 0
+    }
+    let x0: u64 = gs(state, S_PX0)
+    let y0: u64 = gs(state, S_PY0)
+    let x1: u64 = gs(state, S_PX1)
+    let y1: u64 = gs(state, S_PY1)
+    ss(state, S_PEND, 0)
+    if x1 <= x0 || y1 <= y0 {
+        return 0
+    }
+    // `flush_rect` statt `flush`: nur die Spalten, die wirklich
+    // schmutzig waren. `flush` haette die ganze Bildbreite genommen,
+    // weil es nur Zeilen kennt.
+    // MIT SEITENUMSCHALTUNG MUSS DIE GANZE SEITE STIMMEN, nicht nur
+    // das schmutzige Rechteck: gezeigt wird gleich die ANDERE Haelfte,
+    // und in der steht das vorletzte Bild. Was seitdem woanders
+    // gemalt wurde, fehlte dort. Also die volle Flaeche kopieren --
+    // sie ist unsichtbar, solange nicht umgeschaltet ist, und der
+    // Preis dafuer steht in docs/VSYNC.md.
+    if fb.flip_on(state) {
+        fb.flush_rect(state, 0, 0, gs(state, S_SW), gs(state, S_SH))
+        fb.flip(state)
+    } else {
+        fb.flush_rect(state, x0, y0, x1 - x0, y1 - y0)
+    }
+    ss(state, S_PRESENTS, gs(state, S_PRESENTS) + 1)
+    return (x1 - x0) * (y1 - y0)
+}
+
+// ------------------------------------------- DER ABLESER (SCANOUT)
+//
+// WARUM ES DIESEN ABLESER GEBEN MUSS, UND WARUM ER IM KERNEL SITZT.
+//
+// Die erste Fassung der Zerreissprobe hat von aussen fotografiert und
+// die Signaturen im Bild verglichen. Sie fand NIE ein zerrissenes Bild
+// -- auch dann nicht, wenn die Bildgrenze ausdruecklich abgeschaltet
+// war (`nopresent`) und es also reissen MUSSTE. Der Grund liegt in
+// QEMU: `screendump` liest die Bildflaeche in EINEM Zug, waehrend
+// niemand schreibt. Ein halb uebertragenes Bild ist darin nicht zu
+// sehen. Eine Messung, die auch bei abgeschalteter Zusage gruen
+// bleibt, misst nichts -- also war sie zu verwerfen.
+//
+// Der Ableser stellt dieselbe Frage an der Stelle, an der sie
+// beantwortbar ist: er liest den VORDERPUFFER (die Karte), oben und
+// unten, GENAU SO, wie ein Bildschirm ihn ausliest -- und er tut es
+// waehrend der Server malt. Findet er oben und unten verschiedene
+// Signaturen, hat er ein halbes Bild in der Hand.
+//
+// Das ist keine Nachbildung des Reissens, sondern das Reissen selbst:
+// ein Bildschirm, der in diesem Augenblick abgelesen haette, haette
+// dasselbe gesehen.
+fn set_leser(state: u64, on: bool) {
+    ss(state, S_LESER, 0)
+    if on {
+        ss(state, S_LESER, 1)
+    }
+}
+
+fn liest(state: u64) -> u64 {
+    return gs(state, S_LIEST)
+}
+
+fn risse(state: u64) -> u64 {
+    return gs(state, S_RISS)
+}
+
+fn riss_oben(state: u64) -> u64 {
+    return gs(state, S_R0)
+}
+
+fn riss_unten(state: u64) -> u64 {
+    return gs(state, S_R1)
+}
+
+fn ohne_sig(state: u64) -> u64 {
+    return gs(state, S_KEIN)
+}
+
+fn riss_y0(state: u64) -> u64 {
+    return gs(state, S_RY0)
+}
+
+fn riss_y1(state: u64) -> u64 {
+    return gs(state, S_RY1)
+}
+
+fn riss_frame(state: u64) -> u64 {
+    return gs(state, S_RFR)
+}
+
+// Wie viele Ablesungen verworfen wurden, weil zwischen ihren beiden
+// Punkten umgeschaltet wurde. Sie sind KEIN Riss -- die Zahl steht
+// daneben, damit man sieht, wie oft es vorkam.
+fn verworfen(state: u64) -> u64 {
+    return gs(state, S_VERWORF)
+}
+
+// Die drei Zahlen der Vorfuehrung, von `kgui` gelesen und gesetzt.
+fn vor_t0(state: u64) -> u64 {
+    return gs(state, S_VT0)
+}
+
+fn set_vor_t0(state: u64, v: u64) {
+    ss(state, S_VT0, v)
+}
+
+fn vor_step(state: u64) -> u64 {
+    return gs(state, S_VSTEP)
+}
+
+fn set_vor_step(state: u64, v: u64) {
+    ss(state, S_VSTEP, v)
+}
+
+fn vor_win(state: u64) -> u64 {
+    return gs(state, S_VWIN)
+}
+
+fn set_vor_win(state: u64, v: u64) {
+    ss(state, S_VWIN, v)
+}
+
+// Welche Farbnummer steht an dieser Stelle? MAX_SIG heisst "keine der
+// acht" -- dort steht dann Fensterinhalt oder Hintergrund, und das ist
+// kein Widerspruch, sondern nur nichts zu vergleichen.
+fn sig_nr(c: u64) -> u64 {
+    var k: u64 = 0
+    while k < 8 {
+        if sig_colour(k) == (c & RGB24) {
+            return k
+        }
+        k = k + 1
+    }
+    return 8
+}
+
+// EINMAL ABLESEN. Er nimmt das oberste sichtbare Fenster, liest dessen
+// oberen und unteren Signaturstreifen aus dem VORDERPUFFER und
+// vergleicht. Der Aufrufer ruft das dicht -- je dichter, desto eher
+// erwischt er die Uebertragung mitten im Lauf.
+fn leser_tick(state: u64) {
+    if gs(state, S_LESER) == 0 || gs(state, S_SIG) == 0 {
+        return
+    }
+    let i: u64 = top_visible(state)
+    if i >= MAX_WIN {
+        return
+    }
+    // NUR AN EINEM FENSTER, DAS SICH GERADE NICHT BEWEGT UND NICHT
+    // AUFGEHT. Waehrend einer Oeffnungsbewegung wird die Flaeche
+    // skaliert und gemischt gemalt -- die Signaturstreifen liegen dann
+    // nicht dort, wo dieser Ableser sie aus `win_x`/`win_y` errechnet,
+    // und was er findet, ist wieder eine Aussage ueber die Messung.
+    // Dasselbe gilt fuer ein gezogenes Fenster.
+    if wg(state, i, W_ANK) != 0 || gs(state, S_DRAG) != 0 {
+        return
+    }
+    let wx: i64 = win_x(state, i)
+    let wy: i64 = win_y(state, i)
+    let ow: i64 = outer_w(state, i) as i64
+    let oh: i64 = outer_h(state, i) as i64
+    if ow <= 0 || oh < 2 * SIG_H as i64 || wx < 0 || wy < 0 {
+        return
+    }
+    // DIE STELLE WIRD AUS EINER EINZIGEN ABLESUNG DES ORTES GERECHNET.
+    //
+    // Der Ableser rechnete sie zuerst bei jeder Ablesung frisch aus
+    // `win_x`/`win_y` -- und zwar ZWEIMAL, einmal fuer oben und einmal
+    // fuer unten. Waehrend eines Zuges wandert das Fenster dazwischen,
+    // und dann las er oben an der neuen und unten an der alten Stelle:
+    // zwei Signaturen, die nichts miteinander zu tun hatten. GEMESSEN
+    // als 97 Prozent "Risse" bei stehender Bildgrenze, waehrend
+    // derselbe Ableser am STEHENDEN Bild null fand. Der Fehler lag in
+    // der Messung.
+    //
+    // Eine feste Stelle war die naechste Fassung und auch falsch: das
+    // Fenster wandert unter ihr weg, und dann misst sie Hintergrund
+    // (gemessen: 1 165 276 Ablesungen ohne Signatur von 1 210 449).
+    //
+    // Richtig ist: den Ort EINMAL lesen und BEIDE Punkte daraus
+    // rechnen. Bewegt sich das Fenster danach, gehoert die Ablesung
+    // eben zum vorigen Ort -- aber zu EINEM Ort, und genau darauf
+    // kommt es an.
+    let x: u64 = (wx + ow / 2) as u64
+    let y0: u64 = (wy + 1) as u64
+    let y1: u64 = (wy + oh - 2) as u64
+    // BEIDE PUNKTE AUS DERSELBEN BILDSEITE, in einem Zug. Zwei
+    // getrennte Ablesungen haetten den Seitenwechsel dazwischen
+    // erwischt und einen Riss gemeldet, den es nicht gab -- siehe
+    // `fb.front_paar`.
+    let puffer: u64 = state + kstate.WM_OFF + S_LPAAR
+    // BIS ZU DREI VERSUCHE. `front_paar` sagt `false`, wenn zwischen
+    // den beiden Punkten die Bildseite gewechselt wurde -- dann hat die
+    // Ablesung KEINE Aussage (siehe die Begruendung dort). Ein neuer
+    // Versuch trifft die naechste ruhige Spanne; klappt es dreimal
+    // nicht, wird gar nichts gezaehlt. Eine verworfene Ablesung ist
+    // KEIN Riss, und sie als einen zu zaehlen waere die eine Zahl, auf
+    // die sich diese Runde nicht verlassen duerfte.
+    var versuch: u64 = 0
+    var gut: bool = false
+    while versuch < 3 && !gut {
+        gut = fb.front_paar(state, x, y0, y1, puffer)
+        versuch = versuch + 1
+    }
+    if !gut {
+        ss(state, S_VERWORF, gs(state, S_VERWORF) + 1)
+        return
+    }
+    let a: u64 = kstate.get(state, kstate.WM_OFF + S_LPAAR)
+    let b: u64 = kstate.get(state, kstate.WM_OFF + S_LPAAR + 8)
+    let ka: u64 = sig_nr(a)
+    let kb: u64 = sig_nr(b)
+    ss(state, S_LIEST, gs(state, S_LIEST) + 1)
+    // Nur wenn BEIDE eine Signatur tragen, ist die Frage gestellt.
+    // Steht an einer Stelle Fensterinhalt, wurde dort gerade nichts
+    // uebertragen -- das ist kein Riss.
+    if ka < 8 && kb < 8 && ka != kb {
+        ss(state, S_RISS, gs(state, S_RISS) + 1)
+        // Die ERSTE Beobachtung festhalten: welche zwei Signaturen,
+        // an welchen Zeilen. Ohne sie ist "es reisst" eine Zahl ohne
+        // Anhalt, und die Suche nach dem Grund faengt bei null an.
+        if gs(state, S_R0) == 0 {
+            ss(state, S_R0, ka + 1)
+            ss(state, S_R1, kb + 1)
+            // Und WO es passiert ist: die Zeilen und die Bildnummer.
+            // Ohne sie bleibt "es reisst noch ein bisschen" eine Zahl
+            // ohne Anhalt.
+            ss(state, S_RY0, y0)
+            ss(state, S_RY1, y1)
+            ss(state, S_RFR, gs(state, S_FRAME))
+        }
+    }
+    if ka >= 8 || kb >= 8 {
+        ss(state, S_KEIN, gs(state, S_KEIN) + 1)
+    }
+}
+
+// ---------------------------------------------------- DIE SIGNATUR
+
+fn set_sig(state: u64, on: bool) {
+    ss(state, S_SIG, 0)
+    if on {
+        ss(state, S_SIG, 1)
+    }
+}
+
+fn sig_on(state: u64) -> bool {
+    return gs(state, S_SIG) != 0
+}
+
+fn frame_no(state: u64) -> u64 {
+    return gs(state, S_FRAME)
+}
+
+// Die Farbe einer Bildnummer. Acht gut unterscheidbare Volltoene --
+// keine Rechnung mit kleinen Unterschieden, denn ein Foto wird
+// maschinell gelesen und ein Unterschied von eins waere keiner.
+fn sig_colour(n: u64) -> u64 {
+    let k: u64 = n & 7
+    if k == 0 {
+        return 0xFF0000
+    }
+    if k == 1 {
+        return 0x00FF00
+    }
+    if k == 2 {
+        return 0x0000FF
+    }
+    if k == 3 {
+        return 0xFFFF00
+    }
+    if k == 4 {
+        return 0xFF00FF
+    }
+    if k == 5 {
+        return 0x00FFFF
+    }
+    if k == 6 {
+        return 0xFF8000
+    }
+    return 0xFFFFFF
+}
+
+// DIE ZERREISSPROBE, und warum sie so und nicht anders aussieht.
+//
+// Reissen ist unter QEMU nicht zu sehen: `screendump` liest die
+// Bildflaeche, nachdem der Bildaufbau fertig ist, und ein halb
+// uebertragenes Bild sieht dabei aus wie ein ganzes. Also wird die
+// Frage umgestellt. Jedes Bild traegt eine Nummer; im Signaturbetrieb
+// malt der Server einen Streifen dieser Farbe an den OBEREN und einen
+// an den UNTEREN Rand jedes Fensters. Beide Streifen entstehen im
+// SELBEN `compose`-Lauf und tragen deshalb dieselbe Farbe.
+//
+// Wird nun mitten in der Uebertragung abgelesen, steht oben noch das
+// alte und unten schon das neue Bild -- ZWEI Farben in einem Fenster.
+// Das ist Reissen, und ein Programm kann es zaehlen. Steht die
+// Bildgrenze, MUSS jedes Foto in jedem Fenster genau eine Farbe zeigen.
+fn paint_sig(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
+    cy1: i64) {
+    if gs(state, S_SIG) == 0 {
+        return
+    }
+    let farbe: u64 = sig_colour(gs(state, S_FRAME))
+    let wx: i64 = win_x(state, i)
+    let wy: i64 = win_y(state, i)
+    let ow: i64 = outer_w(state, i) as i64
+    let oh: i64 = outer_h(state, i) as i64
+    if oh < 2 * SIG_H as i64 {
+        return
+    }
+    fill_clip(state, wx, wy, ow, SIG_H as i64, farbe, cx0, cy0, cx1, cy1)
+    fill_clip(state, wx, wy + oh - SIG_H as i64, ow, SIG_H as i64, farbe,
+        cx0, cy0, cx1, cy1)
+}
+
 // Eine Bildzeile des zusammengesetzten Bildes. Der Hintergrund, dann
 // von unten nach oben jedes Fenster, das diese Stelle beruehrt.
 fn compose(state: u64) -> u64 {
@@ -3370,6 +4066,10 @@ fn compose(state: u64) -> u64 {
     if x1 <= x0 || y1 <= y0 {
         return 0
     }
+    // RUNDE VSYNC: DIE BILDNUMMER STEIGT HIER und nicht beim
+    // Uebertragen. Alles, was in diesem Lauf gemalt wird, gehoert zu
+    // EINEM Bild und traegt dieselbe Signatur.
+    ss(state, S_FRAME, gs(state, S_FRAME) + 1)
     // 1. der Hintergrund
     fb.fill(state, x0, y0, x1 - x0, y1 - y0, gs(state, S_DESK))
     // 1b. die Reiter- und Stapelzeilen des Baumes. Sie liegen UNTER den
@@ -3395,6 +4095,23 @@ fn compose(state: u64) -> u64 {
         }
         z = z + 1
     }
+    // 2a. RUNDE VSYNC: die Signatur der Zerreissprobe, ueber der
+    //     Fensterflaeche und unter allem, was darueber liegt. Sie wird
+    //     je Fenster gemalt, damit ein Foto sie JE FENSTER vergleichen
+    //     kann -- ein Streifen quer ueber den Schirm haette nicht
+    //     gezeigt, welches Fenster zerrissen ist.
+    if gs(state, S_SIG) != 0 {
+        var zs: u64 = 0
+        while zs < gs(state, S_COUNT) {
+            let si: u64 = at_z(state, zs)
+            if si < MAX_WIN
+                && (wg(state, si, W_FLAGS) & (F_HIDDEN | F_TABBED)) == 0 {
+                paint_sig(state, si, x0 as i64, y0 as i64, x1 as i64,
+                    y1 as i64)
+            }
+            zs = zs + 1
+        }
+    }
     // 2b. das Vorschaurechteck beim Ziehen -- ueber den Fenstern, unter
     //     dem Zeiger.
     if gs(state, S_PVON) != 0 {
@@ -3404,8 +4121,18 @@ fn compose(state: u64) -> u64 {
     if gs(state, S_CURON) != 0 {
         paint_cursor(state, x0, y0, x1, y1)
     }
-    fb.dirty(state, y0, y1)
-    fb.flush(state)
+    // RUNDE VSYNC: DIE WEICHE. Mit Bildgrenze wird das Rechteck nur
+    // VORGEMERKT -- `present` uebertraegt es im Takt, und zwar als
+    // Ganzes. Ohne (die Gegenprobe `nopresent`) geht es den alten Weg
+    // und wird sofort geschoben; dann MUSS die Zerreissprobe wieder
+    // gemischte Signaturen finden.
+    if gs(state, S_VSYNC) != 0 {
+        pend_add(state, x0, y0, x1, y1)
+        ss(state, S_SKIPPED, gs(state, S_SKIPPED) + 1)
+    } else {
+        fb.dirty(state, y0, y1)
+        fb.flush(state)
+    }
     ss(state, S_COMPOSITES, gs(state, S_COMPOSITES) + 1)
     ss(state, S_PIXELS, gs(state, S_PIXELS) + (x1 - x0) * (y1 - y0))
     return (x1 - x0) * (y1 - y0)
@@ -3451,6 +4178,82 @@ fn imin(a: i64, b: i64) -> i64 {
 
 // Ein Fenster in den schmutzigen Bereich. Rahmen, Titelleiste,
 // Schliessfeld, Groessengriff -- und dann die Flaeche der Anwendung.
+// RUNDE VSYNC: EIN FENSTER IN BEWEGUNG, und warum es NICHT der
+// gewoehnliche Weg mit anderen Zahlen ist.
+//
+// Beim Oeffnen und Schliessen soll das Fenster skalieren UND
+// durchscheinen. Skalieren heisst: die Fensterflaeche (`W_BUF`) wird
+// beim Uebertragen abgetastet, nicht Zeile fuer Zeile kopiert.
+// Durchscheinen heisst: jeder Bildpunkt wird mit dem gemischt, was
+// schon dasteht. Beides zusammen geht nur, wenn man an die Flaeche VOR
+// dem Uebertragen herankommt -- genau das, was DESIGN-2 in wlib
+// vermisst hat und was hier, im Server, selbstverstaendlich ist.
+//
+// Der Rahmen wird dabei NICHT mitgemalt: ein Rahmen, der mitskaliert,
+// hat an jeder Kante eine andere Strichstaerke und sieht nach Fehler
+// aus. Gemalt wird die Flaeche, mittig um denselben Punkt, um den auch
+// das fertige Fenster steht.
+fn paint_win_anim(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
+    cy1: i64) {
+    let p: u64 = anim_mix(state, i)
+    // Die Groesse laeuft von AN_SCALE0 nach 1000, die Deckung von 0
+    // nach 255. Beide aus DEMSELBEN p -- zwei Kurven waeren zwei
+    // Bewegungen, die nur zufaellig zusammen enden.
+    let sk: u64 = AN_SCALE0 + (1000 - AN_SCALE0) * p / 1000
+    let a: u64 = 255 * p / 1000
+    if a == 0 {
+        return
+    }
+    let bw: i64 = wg(state, i, W_W) as i64
+    let bh: i64 = wg(state, i, W_H) as i64
+    if bw <= 0 || bh <= 0 {
+        return
+    }
+    // Die verkleinerte Flaeche, mittig zur gewachsenen.
+    let nw: i64 = bw * sk as i64 / 1000
+    let nh: i64 = bh * sk as i64 / 1000
+    if nw <= 0 || nh <= 0 {
+        return
+    }
+    let ix: i64 = win_x(state, i) + border(state) as i64
+    let iy: i64 = win_y(state, i) + title_h(state) as i64
+    let ox: i64 = ix + (bw - nw) / 2
+    let oy: i64 = iy + (bh - nh) / 2
+    let ax0: i64 = imax(ox, cx0)
+    let ay0: i64 = imax(oy, cy0)
+    let ax1: i64 = imin(ox + nw, cx1)
+    let ay1: i64 = imin(oy + nh, cy1)
+    if ax1 <= ax0 || ay1 <= ay0 {
+        return
+    }
+    let buf: u64 = wg(state, i, W_BUF)
+    let stride: u64 = wg(state, i, W_W)
+    var y: i64 = ay0
+    while y < ay1 {
+        // Die Quellzeile: Nachbarabtastung. Ein gewichtetes Mittel
+        // waere schoener und kostet bei zwoelf Zwischenbildern mehr,
+        // als es zeigt -- die Bewegung dauert 120 ms.
+        let sy: i64 = (y - oy) * bh / nh
+        if sy >= 0 && sy < bh {
+            var x: i64 = ax0
+            while x < ax1 {
+                let sx: i64 = (x - ox) * bw / nw
+                if sx >= 0 && sx < bw {
+                    let zeile: u64 = (sy as u64) *% stride *% 4
+                    let q: u64 = buf +% zeile +% (sx as u64) *% 4
+                    let c: u64 = __mmio_read32(q as *mut u32) as u64
+                    fb.pixel_a(state, x as u64, y as u64, c & RGB24, a)
+                }
+                x = x + 1
+            }
+        }
+        y = y + 1
+    }
+    wsv(state, i, W_PAINTS, wg(state, i, W_PAINTS) + 1)
+    wsv(state, i, W_PX,
+        wg(state, i, W_PX) + ((ax1 - ax0) * (ay1 - ay0)) as u64)
+}
+
 fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     let wx: i64 = win_x(state, i)
     let wy: i64 = win_y(state, i)
@@ -3461,6 +4264,14 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     let ax1: i64 = imin(wx + ow, cx1 as i64)
     let ay1: i64 = imin(wy + oh, cy1 as i64)
     if ax1 <= ax0 || ay1 <= ay0 {
+        return
+    }
+    // RUNDE VSYNC: laeuft eine Oeffnungs- oder Schliessbewegung, wird
+    // das Fenster ANDERS gemalt -- skaliert und durchscheinend -- und
+    // der gewoehnliche Weg entfaellt vollstaendig.
+    if wg(state, i, W_ANK) != 0 {
+        paint_win_anim(state, i, cx0 as i64, cy0 as i64, cx1 as i64,
+            cy1 as i64)
         return
     }
     // RUNDE MESSTAFEL: AB HIER WIRD GEMALT. Der Zaehler steht vor der
