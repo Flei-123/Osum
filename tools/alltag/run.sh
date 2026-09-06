@@ -438,6 +438,11 @@ PY
     esac
     python3 tools/design/messen.py "$OUT/s-$name" 2>/dev/null \
         | sed -n '/raster/p;/klickflaechen/p' | sed 's/^/        /'
+    # DAS RASTER WIRD FUER JEDES PROGRAMM GEFORDERT, nicht nur gezeigt.
+    local r
+    r=$(python3 tools/design/messen.py "$OUT/s-$name" 2>/dev/null \
+        | grep -a 'raster/4' | grep -aoE '\([0-9]+%\)' | tr -dc '0-9')
+    num "$name: Vierer-Raster (Prozent)" "$r" ge 92
 }
 PROGS="rechner zip papierkorb viewer snip lock theme sh echo ls cat"
 schuss rechner /bin/rechner 80,60
