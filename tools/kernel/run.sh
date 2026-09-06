@@ -188,8 +188,15 @@ for f in k0 k1 uprog0 uprog1; do
     # own assembly. `uprog.o` is held to the stricter rule on purpose --
     # a program in ring 3 that reached `kdata` would be reaching into the
     # kernel, and it may not even name it.
+    # RUNDE PROTOKOLL: `osym_tab` ist der dritte solche Name. Er steht
+    # als SCHWACHES Symbol in `boot.s` (die wirkliche Symboltabelle
+    # setzt `tools/build-kernel.sh` im zweiten Bindedurchgang darueber),
+    # und `kernel/ksymtab.fi` erreicht ihn mit derselben einen `lea`,
+    # mit der `ksym.fi` an `kdata` kommt. Aufgeloest wird er beim Binden
+    # aus boot.o -- genau wie `osum_panic` aus isr.o. Die Zusage bleibt
+    # dieselbe: keine libc, keine Laufzeit, nichts von aussen.
     erlaubt='^(osum_panic)$'
-    case "$f" in k0|k1) erlaubt='^(osum_panic|kdata)$' ;; esac
+    case "$f" in k0|k1) erlaubt='^(osum_panic|kdata|osym_tab)$' ;; esac
     undef=$(nm -u "$o" 2>/dev/null | awk '{print $NF}' | sed '/^$/d' | grep -vE "$erlaubt")
     [ -z "$undef" ] && ok "$f.o: no undefined symbol other than $(echo "$erlaubt" | tr -d '^$()' | tr '|' '/') (no libc, no runtime)" \
                     || { bad "$f.o: undefined symbols"; echo "$undef" | sed 's/^/        /'; }
@@ -307,8 +314,29 @@ if [ -f "$TMPD/full0.txt" ] && [ -f "$TMPD/full1.txt" ]; then
     # at a different speed, and the workers are done after a different
     # number of ticks. The trace and the counters are therefore compared
     # by their SHAPE, not word by word.
-    normalise "$TMPD/full0.txt" | grep -vE '^(trace|task|sched|proc|fs|sh|ata):' > "$TMPD/n0.txt"
-    normalise "$TMPD/full1.txt" | grep -vE '^(trace|task|sched|proc|fs|sh|ata):' > "$TMPD/n1.txt"
+    # RUNDE PROTOKOLL: die Zeile `  spur rsp=... ` faellt dazu.
+    #
+    # Sie ist die Rueckverfolgung eines Ring-3-Absturzes, und sie
+    # entsteht, indem der Kern den BENUTZERSTAPEL nach Zahlen absucht,
+    # die im Textbereich des Programms liegen (`trap.spur_sagen`). Was
+    # dort steht, haengt daran, wie lang der Code ist und wie tief die
+    # Aufrufe gingen -- also genau an dem, was sich zwischen firnc0 und
+    # firnc1 unterscheidet und was die Zeile darueber schon fuer den
+    # Ablaufplaner einraeumt.
+    #
+    # GEMESSEN, nicht vermutet: bis Runde PROTOKOLL hielt `spur_sagen`
+    # JEDE Zahl zwischen 0x400000 und 0x40400000 fuer Code -- darin
+    # liegt auch der Benutzerstapel (0x4007F000), und deshalb fand sie
+    # immer acht "Adressen", auf beiden Stufen. Seit die Grenzen richtig
+    # sind, findet sie auf Stufe 0 eine echte und auf Stufe 1 keine:
+    #     <   spur rsp=NxX  phys=NxX  kstack=NxX NxX
+    #     >   spur rsp=NxX  phys=NxX  kstack=NxX  (keine)
+    # Das ist kein Verhaltensunterschied der Sprache, sondern der
+    # Inhalt eines fremden Stapels. Die Zeile daneben ("user fault:
+    # pid=... -- process killed") wird weiter Wort fuer Wort verglichen,
+    # und sie ist die, auf die es ankommt.
+    normalise "$TMPD/full0.txt" | grep -vE '^(trace|task|sched|proc|fs|sh|ata):|^  spur ' > "$TMPD/n0.txt"
+    normalise "$TMPD/full1.txt" | grep -vE '^(trace|task|sched|proc|fs|sh|ata):|^  spur ' > "$TMPD/n1.txt"
     if diff -q "$TMPD/n0.txt" "$TMPD/n1.txt" >/dev/null; then
         ok "the serial output of both compilers is equal apart from addresses"
     else

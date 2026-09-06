@@ -89,6 +89,7 @@
 
 import serial
 import kstate
+import klog
 import sched
 import blk
 import atomic
@@ -119,6 +120,8 @@ export {
     // deshalb dieselbe Sperre. Je Kern wiedereintrittsfaehig, also
     // verklemmt sie sich nicht gegen die `enter` weiter innen.
     enter, leave,
+    // ---- RUNDE PROTOKOLL ----
+    frei, ready,
     // RUNDE K15, zweiter Nachtrag: die Geometrie aus dem Superblock und
     // der Weg ueber Plaetze statt ueber "der wievielte".
     inode_count, data_start, scan, geom, entry_slot, slot_count,
@@ -553,6 +556,25 @@ const NESTED: u64 = 0x8000000000000000
 // und beide gehen hier durch; bestaetigt wird erst, wenn der aeusserste
 // wieder herauskommt. Genau dadurch ist "eine Datei anlegen" EINE
 // unteilbare Umschreibung und nicht drei.
+// ==================================================== RUNDE PROTOKOLL
+//
+// DARF ICH JETZT SCHREIBEN? Diese Frage stellt genau ein Rufer:
+// `absturz.kern_bericht`, aus einer Kernel-Panik heraus. Haelt DIESER
+// Kern die Dateisystemsperre schon, ist der Absturz mitten im
+// Dateisystem passiert -- ein `write_at` von hier aus liefe in ein
+// halb umgestelltes Journal und in Datenstrukturen, die gerade
+// auseinandergenommen sind. Dann wird nicht geschrieben.
+//
+// Es ist bewusst KEIN `lock_try`: das nimmt die Sperre und muesste sie
+// wieder hergeben. Hier wird nur GEFRAGT.
+fn frei(state: u64) -> bool {
+    return atomic.lock_owner(state, atomic.L_FS) != cpu.here(state) + 1
+}
+
+fn ready(state: u64) -> bool {
+    return kstate.get(state, kstate.FS_READY) != 0
+}
+
 fn enter(state: u64) -> u64 {
     let flags: u64 = sched.irq_save()
     let me: u64 = cpu.here(state)
@@ -2717,7 +2739,22 @@ fn journal_on(state: u64) -> bool {
 
 // Whatever does not carry the magic number is not a file system of this
 // kind. `mount` says so instead of interpreting foreign octets as inodes.
+// RUNDE PROTOKOLL: die Quelle dieses Treibers im Ring. Siehe `nvme.lq`.
+// Der Name liegt als `static mut` im Modul und nicht als `var` in
+// dieser Funktion: eine lokale Zeichenkette stirbt mit dem Rahmen,
+// und firnc faengt genau das ab ("the address of the local escapes
+// through the return value"). Der Protokollring liest den Namen
+// erst im Aufruf danach.
+static mut q_fs: [u8; 3] = "fs\0"
+
+fn lq() -> u64 {
+    return (&q_fs[0]) as u64
+}
+
 fn mount(state: u64) -> bool {
+    var l_lesen: [u8; 41] = "Superblock nicht lesbar, kein Einhaengen\0"
+    var l_magie: [u8; 33] = "falsche Kennung im Superblock, \0\0"
+    var l_ok: [u8; 30] = "eingehaengt, Fassung/Bloecke \0"
     // RUNDE FSROBUST: SOLANGE NICHT NACHGETRAGEN IST, GIBT ES KEIN
     // JOURNAL. `ofsj.replay` schreibt mit `blk.write` und nicht ueber
     // die Journalschicht -- es gaebe auch nichts zu protokollieren.
@@ -2726,10 +2763,13 @@ fn mount(state: u64) -> bool {
     kstate.set(state, kstate.FS_READY, 0)
     geom_j(state, 0, 0)
     if !blk.read(state, 0, buf_sb(state)) {
+        klog.say(state, klog.L_INFO, lq(), (&l_lesen[0]) as u64)
         leave(state, flags)
         return false
     }
     if get64(buf_sb(state) + SB_MAGIC) != MAGIC {
+        klog.sayh(state, klog.L_INFO, lq(), (&l_magie[0]) as u64,
+            get64(buf_sb(state) + SB_MAGIC))
         leave(state, flags)
         return false
     }
@@ -2890,6 +2930,8 @@ fn mount(state: u64) -> bool {
         return false
     }
     kstate.set(state, kstate.FS_ROOT, r)
+    klog.say2(state, klog.L_INFO, lq(), (&l_ok[0]) as u64,
+        version(state), total_blocks(state))
     kstate.set(state, kstate.FS_READY, 1)
     leave(state, flags)
     // RUNDE FSROBUST: JETZT erst wird das Journal scharf. Vorher waere

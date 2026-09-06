@@ -149,7 +149,7 @@ D="$TMPD/s0/disk.img"
 # Der Treiber ist Teil des freistehenden Kerns: keine libc, keine
 # Laufzeit und kein einziger `syscall` in Ring 0.
 undef=$(nm -u "$TMPD/s0/k.o" 2>/dev/null | awk '{print $NF}' | sed '/^$/d' \
-        | grep -vE '^(osum_panic|kdata)$')
+        | grep -vE '^(osum_panic|kdata|osym_tab)$')
 [ -z "$undef" ] && ok "k.o: kein undefinierter Name ausser osum_panic und kdata" \
                 || bad "k.o: undefinierte Symbole: $undef"
 n=$(nm "$TMPD/s0/k.o" 2>/dev/null | grep -cE 'r8169__init_on|netdev__driver_for')

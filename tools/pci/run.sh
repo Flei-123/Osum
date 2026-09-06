@@ -140,8 +140,8 @@ for s in 0 1; do
     # for it and must not grow one. Resolved out of boot.o at link time,
     # exactly like `osum_panic` out of isr.o. The reason is written out in
     # tools/kernel/run.sh and in kernel/fb.fi.
-    undef=$(nm -u "$TMPD/k$s.o" 2>/dev/null | awk '{print $NF}' | sed '/^$/d' | grep -vE '^(osum_panic|kdata)$')
-    [ -z "$undef" ] && ok "k$s.o: no undefined name other than osum_panic and kdata" \
+    undef=$(nm -u "$TMPD/k$s.o" 2>/dev/null | awk '{print $NF}' | sed '/^$/d' | grep -vE '^(osum_panic|kdata|osym_tab)$')
+    [ -z "$undef" ] && ok "k$s.o: no undefined name other than osum_panic, kdata und osym_tab (RUNDE PROTOKOLL: die Symboltabelle, schwach in boot.s)" \
                     || { bad "k$s.o: undefined symbols"; echo "$undef" | sed 's/^/        /'; }
     n=$(objdump -d "$TMPD/k$s.o" | grep -cE '^\s+[0-9a-f]+:.*\bsyscall\b')
     [ "$n" -eq 0 ] && ok "k$s.o: no syscall in the kernel's own code" \

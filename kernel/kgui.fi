@@ -58,6 +58,8 @@ import fassung
 import marke
 import xhci
 import kutil
+import klog
+import ksymtab
 
 export {
     stage_graphics, stage_surface, stage_hold, tafel_tick, herz_tick,
@@ -66,7 +68,9 @@ export {
     // RUNDE GLYPHE: die drei Tueren des Zeichen-Nachweises.
     grace_bereit, grace_soll, grace_core, grace_kalt,
     // RUNDE BLECH2: `mausflut=<hz>` aus der Kommandozeile (gfx.parse).
-    parse
+    parse,
+    // RUNDE PROTOKOLL: der GANZE Schirm, direkt auf den Rahmenpuffer.
+    panikbild
 }
 
 const P_FB: u64 = 13
@@ -6693,4 +6697,284 @@ fn ja1(b: bool) -> u64 {
         return 1
     }
     return 0
+}
+
+// ==================================================== RUNDE PROTOKOLL
+// DER PANIK-BILDSCHIRM, UND DIE EINZIGE ERLAUBTE AUSNAHME VON DER
+// wlib-REGEL DIESES PROJEKTS.
+//
+// DIE REGEL: alles, was ein Mensch sieht, entsteht in Ring 3 und geht
+// durch `wlib`. Der Kern malt nicht. Das ist keine Stilfrage -- es ist
+// der Grund, aus dem es in diesem System genau EINE Stelle gibt, an der
+// eine Oberflaeche entsteht, und damit genau eine Stelle, an der man sie
+// aendern muss.
+//
+// DIE AUSNAHME, UND WARUM SIE UNVERMEIDLICH IST. Ein Panik-Bildschirm
+// wird gebraucht, WENN DER KERN GESTORBEN IST. In diesem Augenblick:
+//
+//   * laeuft kein Prozess mehr weiter -- der Ablaufplaner wird nie
+//     wieder aufgerufen, also kann kein Programm in Ring 3 etwas malen;
+//   * ist der Fensterserver moeglicherweise genau das, was kaputt ist
+//     (Justins Absturz von Runde STARTKNOPF kam aus `wm.fi`);
+//   * darf keine Sperre mehr genommen werden -- ein anderer Kern kann
+//     sie halten, und er kommt nie mehr dazu, sie herzugeben;
+//   * gibt es keinen Rahmenverwalter mehr, dem man einen Puffer
+//     abfragen koennte.
+//
+// Ein Panik-Bildschirm ueber `wlib` waere also ein Panik-Bildschirm,
+// der genau dann nicht erscheint, wenn er gebraucht wird. Deshalb malt
+// DIESE Funktion unmittelbar in den Rahmenpuffer, mit dem Textmodus,
+// den `fb.fi` seit Runde K7 ohnehin hat: `fb.clear`, `fb.putc`,
+// `fb.flush`. Kein Fenster, kein Server, keine Sperre, keine Zuteilung.
+//
+// UND SIE IST DIE EINZIGE. Es gibt in diesem Kern keine zweite Stelle,
+// die ohne `wlib` etwas Sichtbares erzeugt; die Messtafel am oberen
+// Rand (Runde BLECHDREI) geht ueber `wm.messzeile` und damit ueber den
+// Fensterserver.
+//
+// WAS DRAUFSTEHT, in dieser Reihenfolge und aus diesem Grund:
+//
+//   1. WAS  -- Vektor, Name, Fehlercode, Kernnummer. Die erste Frage.
+//   2. WO   -- rip, aufgeloest zu Name+Versatz (Datei:Zeile). Bis zu
+//              dieser Runde stand hier eine nackte Zahl.
+//   3. WOMIT-- alle sechzehn Register. Sie sind die einzige Chance,
+//              einen Zeigerfehler ohne Nachbau zu erkennen.
+//   4. WOHER-- die Rueckverfolgung, aufgeloest.
+//   5. WAS VORHER WAR -- die letzten Zeilen des Kernprotokolls. Auf
+//              einem Brett ohne serielle Leitung ist das die einzige
+//              Stelle, an der die Treiberausgaben je sichtbar werden.
+//   6. WO ES SPAETER STEHT -- der Pfad des Berichts auf der Platte.
+//
+// Reicht der Schirm nicht fuer alle Protokollzeilen, wird ABGESCHNITTEN
+// UND GESAGT, dass abgeschnitten wurde. Der vollstaendige Text liegt in
+// /var/crash.
+const PB_KOPF: u64 = 3 // Zeilen bis zum ersten Register
+
+fn pb_dec(state: u64, v: u64) {
+    var t: [u8; 24] = [0 as u8; 24]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        t[0 as usize] = 48 as u8
+        n = 1
+    }
+    while x > 0 {
+        t[n as usize] = (48 + (x % 10)) as u8
+        x = x / 10
+        n = n + 1
+    }
+    while n > 0 {
+        fb.putc(state, t[(n - 1) as usize] as u64)
+        n = n - 1
+    }
+}
+
+fn pb_hex(state: u64, v: u64, w: u64) {
+    fb.putc(state, 48)
+    fb.putc(state, 120)
+    var i: u64 = w
+    while i > 0 {
+        i = i - 1
+        let d: u64 = (v >> (i * 4)) & 15
+        if d < 10 {
+            fb.putc(state, 48 + d)
+        } else {
+            fb.putc(state, 87 + d)
+        }
+    }
+}
+
+fn pb_str(state: u64, p: u64) {
+    if p == 0 {
+        return
+    }
+    fb.puts(state, p)
+}
+
+// Eine Adresse als `Name+Versatz (Datei:Zeile)`. Ohne Symboltabelle
+// bleibt die rohe Zahl -- aermer, nicht falsch.
+fn pb_addr(state: u64, a: u64) {
+    var s_plus: [u8; 2] = "+\0"
+    var s_ob: [u8; 3] = " (\0"
+    var s_co: [u8; 2] = ":\0"
+    var s_cb: [u8; 2] = ")\0"
+    let i: u64 = ksymtab.resolve(a)
+    if i >= ksymtab.n_sym() {
+        pb_hex(state, a, 16)
+        return
+    }
+    pb_str(state, ksymtab.sym_name(i))
+    pb_str(state, (&s_plus[0 as usize]) as u64)
+    pb_hex(state, a - ksymtab.sym_addr(i), 4)
+    let pk: u64 = ksymtab.line_of(a)
+    if pk == 0 {
+        return
+    }
+    let f: u64 = ksymtab.file_name(ksymtab.line_file(pk))
+    if f == 0 {
+        return
+    }
+    pb_str(state, (&s_ob[0 as usize]) as u64)
+    pb_str(state, f)
+    pb_str(state, (&s_co[0 as usize]) as u64)
+    pb_dec(state, ksymtab.line_nr(pk))
+    pb_str(state, (&s_cb[0 as usize]) as u64)
+}
+
+fn panikbild(state: u64, vec: u64, err: u64, rip: u64, cr2: u64,
+        rsp: u64, cs: u64, flg: u64, ss: u64, kern: u64, regs: u64,
+        spur: u64, spurn: u64, datei: u64) {
+    var namen: [u8; 128] = "#DE\0#DB\0NMI\0#BP\0#OF\0#BR\0#UD\0#NM\0#DF\0#CO\0#TS\0#NP\0#SS\0#GP\0#PF\0r15\0#MF\0#AC\0#MC\0#XM\0#VE\0#CP\0r22\0r23\0r24\0r25\0r26\0#HV\0#VC\0#SX\0r30\0r31\0"
+    var rnamen: [u8; 64] = "rax\0rbx\0rcx\0rdx\0rsi\0rdi\0rbp\0rsp\0r8 \0r9 \0r10\0r11\0r12\0r13\0r14\0r15\0"
+    var s_kopf: [u8; 27] = "*** OSUM  KERNEL-PANIK ***\0"
+    var s_vek: [u8; 8] = "  VEK \0\0"
+    var s_err: [u8; 8] = "  ERR \0\0"
+    var s_krn: [u8; 9] = "  KERN \0\0"
+    var s_rip: [u8; 6] = "RIP \0\0"
+    var s_cr2: [u8; 8] = "  CR2 \0\0"
+    var s_cs: [u8; 7] = "  CS \0\0"
+    var s_flg: [u8; 8] = "  FLG \0\0"
+    var s_rsp: [u8; 7] = "RSP \0\0\0"
+    var s_ss: [u8; 7] = "  SS \0\0"
+    var s_spur: [u8; 15] = "-- RUECKSPUR\0\0\0"
+    var s_prot: [u8; 15] = "-- PROTOKOLL\0\0\0"
+    var s_ber: [u8; 12] = "-- BERICHT\0\0"
+    var s_kb: [u8; 14] = "-- (keiner)\0\0\0"
+    var s_ab: [u8; 20] = "  ... abgeschnitten\0"
+    var s_foto: [u8; 43] = "*** BITTE FOTOGRAFIEREN -- Maschine steht\0\0"
+    var s_sp: [u8; 3] = "  \0"
+    var s_gl: [u8; 2] = "=\0"
+
+    if !fb.ready(state) {
+        return
+    }
+    // ROT UND WEISS, und der ganze Schirm. Ein Panik-Bildschirm, der
+    // aussieht wie das System, ist ein Panik-Bildschirm, den man
+    // uebersieht.
+    let rot: u64 = fb.rgb(state, 128, 0, 0)
+    let weiss: u64 = fb.rgb(state, 255, 255, 255)
+    let gelb: u64 = fb.rgb(state, 255, 220, 80)
+    fb.clear(state, rot)
+    fb.set_color(state, weiss, rot)
+    fb.home(state)
+
+    pb_str(state, (&s_kopf[0 as usize]) as u64)
+    pb_str(state, (&s_vek[0 as usize]) as u64)
+    pb_dec(state, vec)
+    fb.putc(state, 32)
+    if vec < 32 {
+        pb_str(state, (&namen[0 as usize]) as u64 + vec * 4)
+    }
+    pb_str(state, (&s_err[0 as usize]) as u64)
+    pb_hex(state, err, 8)
+    pb_str(state, (&s_krn[0 as usize]) as u64)
+    pb_dec(state, kern)
+    fb.nl(state)
+    pb_str(state, fassung.text())
+    fb.nl(state)
+
+    // WO. Die Zeile, um die es geht.
+    pb_str(state, (&s_rip[0 as usize]) as u64)
+    pb_addr(state, rip)
+    fb.nl(state)
+    pb_str(state, (&s_rsp[0 as usize]) as u64)
+    pb_hex(state, rsp, 16)
+    pb_str(state, (&s_cs[0 as usize]) as u64)
+    pb_hex(state, cs, 4)
+    pb_str(state, (&s_ss[0 as usize]) as u64)
+    pb_hex(state, ss, 4)
+    pb_str(state, (&s_flg[0 as usize]) as u64)
+    pb_hex(state, flg, 8)
+    // CR2 GILT NUR BEI #PF. Dieselbe Regel wie in der Messtafel, und
+    // aus demselben Grund (Runde STARTKNOPF, eine Stunde Fehlsuche).
+    if vec == 14 {
+        pb_str(state, (&s_cr2[0 as usize]) as u64)
+        pb_hex(state, cr2, 16)
+    }
+    fb.nl(state)
+
+    // WOMIT.
+    var i: u64 = 0
+    while i < 16 {
+        pb_str(state, (&rnamen[0 as usize]) as u64 + i * 4)
+        pb_str(state, (&s_gl[0 as usize]) as u64)
+        pb_hex(state, __mmio_read64((regs + i * 8) as *mut u64), 16)
+        if i % 4 == 3 {
+            fb.nl(state)
+        } else {
+            pb_str(state, (&s_sp[0 as usize]) as u64)
+        }
+        i = i + 1
+    }
+
+    // WOHER.
+    fb.set_color(state, gelb, rot)
+    pb_str(state, (&s_spur[0 as usize]) as u64)
+    fb.nl(state)
+    fb.set_color(state, weiss, rot)
+    if spurn == 0 {
+        pb_str(state, (&s_kb[0 as usize]) as u64)
+        fb.nl(state)
+    }
+    i = 0
+    while i < spurn {
+        pb_str(state, (&s_sp[0 as usize]) as u64)
+        pb_addr(state, __mmio_read64((spur + i * 8) as *mut u64))
+        fb.nl(state)
+        i = i + 1
+    }
+
+    // WAS VORHER WAR. So viele Zeilen, wie noch auf den Schirm gehen --
+    // zwei bleiben fuer den Bericht und die Bitte um das Foto frei.
+    fb.set_color(state, gelb, rot)
+    pb_str(state, (&s_prot[0 as usize]) as u64)
+    fb.nl(state)
+    fb.set_color(state, weiss, rot)
+    let rows: u64 = fb.rows(state)
+    var frei: u64 = 0
+    if rows > fb.cy(state) + 3 {
+        frei = rows - fb.cy(state) - 3
+    }
+    let last: u64 = klog.seq(state)
+    var von: u64 = 1
+    if last > frei {
+        von = last - frei + 1
+    }
+    if von < klog.first_seq(state) {
+        von = klog.first_seq(state)
+    }
+    if last > 0 && last >= von {
+        // Steht mehr im Ring, als auf den Schirm passt, sagt das die
+        // erste Zeile -- der ganze Text liegt in /var/crash.
+        if von > klog.first_seq(state) {
+            pb_str(state, (&s_ab[0 as usize]) as u64)
+            fb.nl(state)
+        }
+        var b: [u8; 200] = [0 as u8; 200]
+        var sq: u64 = von
+        while sq <= last {
+            let n: u64 = klog.line_at(state, sq,
+                (&b[0 as usize]) as u64, 199)
+            if n > 1 {
+                // Ohne das Zeilenende: `fb.nl` macht den Umbruch.
+                fb.text(state, (&b[0 as usize]) as u64, n - 1)
+                fb.nl(state)
+            }
+            sq = sq + 1
+        }
+    }
+
+    // WO ES SPAETER STEHT.
+    fb.set_color(state, gelb, rot)
+    pb_str(state, (&s_ber[0 as usize]) as u64)
+    fb.putc(state, 32)
+    if datei != 0 {
+        pb_str(state, datei)
+    } else {
+        pb_str(state, (&s_kb[0 as usize]) as u64)
+    }
+    fb.nl(state)
+    pb_str(state, (&s_foto[0 as usize]) as u64)
+    fb.nl(state)
+    fb.flush(state)
 }

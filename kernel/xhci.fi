@@ -62,6 +62,7 @@ profile kernel
 
 import serial
 import kstate
+import klog
 import pci
 import arch.x86_64.apic
 import atomic
@@ -1384,7 +1385,22 @@ fn init(state: u64, armed: bool) -> bool {
     return init_at(state, 0, armed)
 }
 
+// RUNDE PROTOKOLL: die Quelle dieses Treibers im Ring. Siehe `nvme.lq`.
+// Der Name liegt als `static mut` im Modul und nicht als `var` in
+// dieser Funktion: eine lokale Zeichenkette stirbt mit dem Rahmen,
+// und firnc faengt genau das ab ("the address of the local escapes
+// through the return value"). Der Protokollring liest den Namen
+// erst im Aufruf danach.
+static mut q_xhci: [u8; 5] = "xhci\0"
+
+fn lq() -> u64 {
+    return (&q_xhci[0]) as u64
+}
+
 fn init_at(state: u64, einheit: u64, armed: bool) -> bool {
+    var l_kein: [u8; 32] = "kein xHCI-Regler an Einheit \0\0\0\0"
+    var l_bar: [u8; 25] = "BAR0 unbrauchbar, phys \0\0"
+    var l_los: [u8; 24] = "Regler gefunden, BAR0 \0\0"
     s(state, S_READY, 0)
     s(state, S_UNIT, einheit)
     s(state, S_HCS, count_hc(state))
@@ -1392,12 +1408,15 @@ fn init_at(state: u64, einheit: u64, armed: bool) -> bool {
     s(state, S_RSTOK, 0)
     let idx: u64 = nth_hc(state, einheit)
     if idx >= pci.MAX_DEV {
+        klog.sayn(state, klog.L_DEBUG, lq(), (&l_kein[0]) as u64, einheit)
         return false
     }
     let phys: u64 = pci.bar(state, idx, 0)
     if phys == 0 || pci.bar_is_io(state, idx, 0) {
+        klog.sayh(state, klog.L_ERROR, lq(), (&l_bar[0]) as u64, phys)
         return false
     }
+    klog.sayh(state, klog.L_INFO, lq(), (&l_los[0]) as u64, phys)
     let b: u64 = apic.map_device(state, phys)
     if b == 0 {
         return false
