@@ -29,6 +29,10 @@ ULD=kernel/user/user.ld
 PROGS="sh echo cat ls play"
 
 MEDIA=${1:-/ton.wav}
+# RUNDE TON-2: zusaetzliche Argumente an /bin/play (z. B. "-w 6" fuer
+# sechs Durchlaeufe). Sie stehen VOR dem Pfad, weil /bin/play seine
+# Optionen vor dem Dateinamen erwartet.
+PLAYOPT=${TON_PLAYOPT:-}
 SMP=${2:-4}
 # QUELLE: ide (Platte an den ATA-Ports) oder ram (dieselbe Abbildung als
 # Multiboot-Modul). Der Unterschied zwischen beiden Laeufen ist der
@@ -55,9 +59,15 @@ bash tools/hda/mkmedia.sh "$TMPD/m" > "$TMPD/media.txt" 2>&1
 SPEC="/bin/"
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$TMPD/$p.elf"; done
 for f in "$TMPD"/m/*; do SPEC="$SPEC /$(basename "$f")=$f"; done
-python3 tools/osum/mkfs.py build "$TMPD/disk.img" 16384 $SPEC > "$TMPD/mkfs.txt" 2>&1 \
+# RUNDE TON-2: die Platte richtet sich nach dem, was drauf soll.
+# 16384 Sektoren (8 MiB) reichten fuer eine Sekunde Ton; die
+# 60-s-Abnahme bringt allein 10,6 MiB mit. Statt einer festen Zahl
+# wird gerechnet: alles, was hineinkommt, plus die Haelfte als Luft.
+SEKT=$(( $(du -cb "$TMPD"/m/* "$TMPD"/*.elf 2>/dev/null | tail -1 | cut -f1) * 3 / 2 / 512 + 4096 ))
+[ "$SEKT" -lt 16384 ] && SEKT=16384
+python3 tools/osum/mkfs.py build "$TMPD/disk.img" "$SEKT" $SPEC > "$TMPD/mkfs.txt" 2>&1 \
     || { echo mkfs; tail -5 "$TMPD/mkfs.txt"; exit 1; }
-echo "  Platte: $(stat -c%s "$TMPD/disk.img") Oktette, Medien: $(ls "$TMPD/m" | tr '\n' ' ')"
+echo "  Platte: $SEKT Sektoren, $(stat -c%s "$TMPD/disk.img") Oktette, Medien: $(ls "$TMPD/m" | tr '\n' ' ')"
 
 HDADEV="-device intel-hda -device hda-duplex,audiodev=snd0"
 aud="-audiodev wav,id=snd0,path=$TMPD/out.wav,out.frequency=48000,out.channels=2,out.format=s16"
@@ -66,9 +76,9 @@ DISKARG="-drive file=$TMPD/disk.img,format=raw,if=ide,index=0"
 [ "$QUELLE" = ram ] && DISKARG="-initrd $TMPD/disk.img"
 EXTRA=""
 [ "$QUELLE" = ram ] && EXTRA="modfs"
-echo "== messen: /bin/play $MEDIA bei -smp $SMP, Quelle $QUELLE =="
+echo "== messen: /bin/play $PLAYOPT $MEDIA bei -smp $SMP, Quelle $QUELLE =="
 timeout 600 $QEMU_X86 -kernel "$TMPD/k.mb" -m 512 -smp "$SMP" \
-    -append "osum nokbd audio nosounds $EXTRA script=/bin/play $MEDIA;exit" \
+    -append "osum nokbd audio nosounds $EXTRA script=/bin/play $PLAYOPT $MEDIA;exit" \
     -serial "file:$TMPD/out.txt" -display none -no-reboot $aud $HDADEV \
     $DISKARG \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1

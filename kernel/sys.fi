@@ -1096,6 +1096,42 @@ const AS_PUMP: u64 = 11 // den Mischer einmal drehen
 const AS_SOUND: u64 = 12 // Wert = Art des Systemklangs (0 Klick, 1 Hinweis, 2 Fehler), durch den Mischer
 const AS_CLICKS: u64 = 13 // Klickton an/aus
 const AS_SMUTE: u64 = 14 // (Kennung << 8) | 1/0 -- stumm JE STROM
+// ---- RUNDE TON-2 ----
+// WARTEN, STATT LEER ZU DREHEN. Wert = ((Kennung + 1) << 8) |
+// gewuenschte Rahmen/16; 0 heisst "der Einstromweg", sonst der Strom
+// (Kennung - 1). Rueckgabe: wie viele Rahmen jetzt Platz haben.
+//
+// WARUM UM EINS VERSCHOBEN: `mix.open` gibt fuer den ERSTEN Strom die
+// Kennung 0 zurueck. Ohne die Verschiebung waere "Strom 0" von "kein
+// Strom, sondern der Einstromweg" nicht zu unterscheiden -- und der
+// erste Strom ist genau der, den ein einzelner Abspieler bekommt,
+// also der Regelfall und nicht der Sonderfall.
+//
+// WARUM ES DIESES FELD GEBEN MUSS, und warum es nicht in Ring 3 geht.
+// Ist der Ring voll, hat der Abspieler nichts zu tun, bis das Geraet
+// gespielt hat. Bis Runde TON drehte er dabei leer (`A_PLAYED` +
+// `SYS_YIELD`), und das war GEMESSEN kein Schoenheitsfehler: 139290
+// Wartedrehungen zu je zwei Systemaufrufen sind 278580 von 418952
+// Aufrufen -- ZWEI DRITTEL aller Systemaufrufe einer Sekunde Ton,
+// fuer nichts.
+//
+// Der naheliegende Ausweg `sleep_ms(1)` ist in diesem Kernel KEINER:
+// `do_nanosleep` rechnet in ganzen Zeitgeberschlaegen und rundet AUF
+// (TICK_HZ = 100), also schlaeft die kuerzeste Bitte volle 10 ms. Bei
+// einem Ring von 85 ms ist das ein Achtel des Vorrats, verschenkt auf
+// Verdacht -- Runde TON hat das gemessen (158 Aussetzer) und deshalb
+// den Spin behalten.
+//
+// HIER WIRD STATTDESSEN GERECHNET. Der Kern kennt den Fuellstand und
+// die Abtastrate, also kennt er die Zeit bis zum naechsten freien
+// Platz. Er schlaeft GENAU so lange -- nicht laenger (das gaebe einen
+// Aussetzer) und nicht kuerzer (das waere wieder der Spin).
+//
+// DIE SPERRE WIRD VORHER ABGEGEBEN. `audio.hold` nimmt eine Drehsperre
+// MIT ABGESCHALTETEN UNTERBRECHUNGEN; wer damit schlafen geht, haelt
+// den ganzen Rechner an. Deshalb rechnet dieser Weg UNTER der Sperre
+// und schlaeft OHNE sie.
+const AS_WAITSPACE: u64 = 15
 
 const SYS_OSUM_PMON: u64 = 1830
 
@@ -10326,10 +10362,97 @@ fn do_audget(state: u64, field: u64) -> u64 {
 }
 
 fn do_audset(state: u64, field: u64, value: u64) -> u64 {
+    // RUNDE TON-2: das eine Feld, das NICHT unter der Sperre laufen
+    // darf, weil es schlaeft. Die Begruendung steht bei AS_WAITSPACE.
+    if field == AS_WAITSPACE {
+        return do_audwait(state, value)
+    }
     let f: u64 = audio.hold(state)
     let r: u64 = audset_locked(state, field, value)
     audio.drop(state, f)
     return r
+}
+
+// RUNDE TON-2: WARTEN, BIS PLATZ IST -- gerechnet, nicht geraten.
+//
+// Der Ablauf ist dreimal dasselbe Muster: Sperre nehmen, RECHNEN,
+// Sperre abgeben, DANN schlafen. Zwischen dem Rechnen und dem
+// Schlafen kann das Geraet weiterlaufen; das macht die Wartezeit
+// hoechstens zu lang, nie zu kurz, und deshalb wird nach dem Schlafen
+// noch einmal nachgesehen, statt dem ersten Ergebnis zu glauben.
+fn do_audwait(state: u64, value: u64) -> u64 {
+    let kenn: u64 = value >> 8
+    let will: u64 = (value & 0xFF) * 16
+    var runden: u64 = 0
+    // HOECHSTENS SO OFT. Eine Warteschleife im Kern braucht eine
+    // Obergrenze, sonst haengt ein Abspieler an einem Geraet, das
+    // stehengeblieben ist, fuer immer. 200 Runden zu hoechstens einem
+    // Schlag sind zwei Sekunden -- weit mehr, als ein Ring je braucht.
+    while runden < 200 {
+        let f: u64 = audio.hold(state)
+        // ERST PUMPEN. Der Platz entsteht dadurch, dass der Mischer
+        // in den Geraetering nachlegt; wer nur nachsieht, ohne zu
+        // pumpen, wartet auf etwas, das er selbst ausloesen muesste.
+        audio.mix_pump(state)
+        var platz: u64 = 0
+        if kenn == 0 {
+            platz = audio.space_frames(state)
+        } else {
+            let id: u64 = kenn -% 1
+            if id >= mix.MAX_STREAMS || !mix.is_open(state, id) {
+                audio.drop(state, f)
+                return neg(errno.E_BADF)
+            }
+            platz = mix.space(state, id)
+        }
+        // Wie lange dauert es, bis genug frei ist? Der Ring gibt
+        // Rahmen in der Geschwindigkeit der Abtastrate frei.
+        let hz: u64 = audio.rate(state)
+        var us: u64 = 0
+        if platz < will && hz > 0 {
+            us = (will -% platz) * 1000000 / hz
+        }
+        audio.drop(state, f)
+        if platz >= will || will == 0 {
+            return platz
+        }
+        // SCHLAFEN OHNE DIE SPERRE, UND NICHT AUF DEN LETZTEN RAHMEN
+        // GENAU.
+        //
+        // GEMESSEN: fragt der Abspieler nur nach dem, was ihm gerade
+        // fehlt (ein Schub, 1024 Rahmen), ist die gerechnete Wartezeit
+        // fast immer kuerzer als ein Zeitgeberschlag. `us / 10000`
+        // wird dann null, es bleibt beim `yield`, und der Aufruf kommt
+        // nach durchschnittlich 724 us zurueck -- 74361 Wartedrehungen
+        // in sechzig Sekunden. Das ist besser als der alte Spin (zwei
+        // Systemaufrufe je Drehung), aber es ist noch kein Warten.
+        //
+        // DESHALB WIRD AUF EINEN GANZEN SCHLAG AUFGERUNDET, sobald
+        // ueberhaupt gewartet werden muss: wer schlafen geht, soll
+        // lange genug schlafen, dass es sich lohnt. Der Ring traegt
+        // 85 ms Vorrat, ein Schlag sind 10 ms -- das ist ein Achtel
+        // und kein Risiko, und der Deckel unten begrenzt es zusaetzlich
+        // auf den halben Ring.
+        var ticks: u64 = us / 10000
+        if ticks == 0 && us > 0 {
+            ticks = 1
+        }
+        if ticks == 0 {
+            sched.yield_now(state)
+        } else {
+            var t: u64 = ticks
+            // NIE LAENGER ALS DER HALBE RING. Verrechnet sich die
+            // Schaetzung nach oben, ist ein zu langer Schlaf ein
+            // Aussetzer -- ein zu kurzer kostet nur eine Runde mehr.
+            let deckel: u64 = audio.latency_us(state) / 20000
+            if deckel > 0 && t > deckel {
+                t = deckel
+            }
+            sched.sleep_ticks(state, t)
+        }
+        runden = runden + 1
+    }
+    return 0
 }
 
 fn do_audwrite(state: u64, me: u64, src: u64, frames: u64) -> u64 {

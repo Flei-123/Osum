@@ -73,6 +73,64 @@ s44 = reihe(440, 44100, 44100, 24000)
 schreib(os.path.join(aus, 'ton44.wav'), 44100, 2, [v for x in s44 for v in (x, x)])
 # ein Kanal
 schreib(os.path.join(aus, 'mono.wav'), 48000, 1, s)
+
+# ================================================== RUNDE TON-2
+# ZWEI DATEIEN MIT VERSCHIEDENEN TONHOEHEN, damit sich ZWEI
+# gleichzeitig laufende PROGRAMME in der Ausgabedatei EINZELN
+# nachweisen lassen (Goertzel auf 440 und auf 660 Hz).
+#
+# DER PEGEL IST ABSICHTLICH 12000 UND NICHT 24000: zwei Stroeme zu je
+# 12000 ergeben 24000 und bleiben damit unter der Vollaussteuerung.
+# Damit ist "keine Uebersteuerung" eine Aussage ueber den MISCHER und
+# nicht ueber die Quellen -- die Gegenprobe mit vollem Pegel steht
+# daneben (a5.wav/b5.wav).
+schreib(os.path.join(aus, 'a4.wav'), 48000, 2,
+        [v for x in reihe(440, 48000, 48000 * 5, 12000) for v in (x, x)])
+schreib(os.path.join(aus, 'b6.wav'), 48000, 2,
+        [v for x in reihe(660, 48000, 48000 * 5, 12000) for v in (x, x)])
+# DIE GEGENPROBE ZUR SAETTIGUNG: zweimal fast Vollaussteuerung. Die
+# Summe MUSS begrenzt werden, der Zaehler MUSS ausschlagen, und in der
+# Datei MUSS ein flacher Scheitel stehen statt eines Sprungs ans
+# andere Ende.
+schreib(os.path.join(aus, 'a5.wav'), 48000, 2,
+        [v for x in reihe(440, 48000, 48000 * 2, 30000) for v in (x, x)])
+schreib(os.path.join(aus, 'b5.wav'), 48000, 2,
+        [v for x in reihe(660, 48000, 48000 * 2, 30000) for v in (x, x)])
+
+# ================================================== RUNDE TON-2
+# LANG44.WAV -- 60 Sekunden, 44100 Hz, stereo.
+#
+# WARUM ES DIESE DATEI BRAUCHT UND DIE EINE SEKUNDE NICHT REICHT: ein
+# Aussetzer ist ein SELTENES Ereignis. Ueber eine Sekunde gemessen
+# schwankte die Zahl in fuenf gleichen Laeufen zwischen eins und fuenf
+# -- das ist Rauschen und keine Messung, und man kann daran keine
+# Verbesserung ablesen. Ueber sechzig Sekunden ist derselbe Fehler
+# sechzigmal so wahrscheinlich und die Zahl entsprechend stabiler.
+#
+# WARUM 44100 UND NICHT 48000: weil dann die Umrechnung der Rate im
+# Mischer WIRKLICH laeuft (das Geraet faehrt 48000). Eine Abnahme, die
+# nur die Rate misst, bei der nichts umgerechnet wird, prueft den
+# leichten Fall.
+#
+# WARUM EIN GLEITENDER TON und nicht derselbe 440-Hz-Sinus: eine
+# Nullstrecke in einem Dauerton faellt auf; in einem Ton, der die
+# Tonhoehe wechselt, faellt zusaetzlich auf, WO sie liegt. Der Ton
+# laeuft in zehn Stufen von 220 auf 880 Hz und wieder zurueck.
+if os.environ.get('TON_LANG', '1') != '0':
+    # ZEHN SEKUNDEN UND NICHT SECHZIG, und das ist eine Grenze des
+    # Dateisystems und keine Bequemlichkeit: ein Inode fasst hier
+    # 2134016 Oktette (kernel/fs.fi), also 12,1 s bei 44100 Hz
+    # stereo. Die 60-s-Abnahme entsteht daraus mit `play -w 6` --
+    # sechs Durchlaeufe an EINEM offenen Strom, und die fuenf Nahte
+    # dazwischen sind zusaetzlich das, was eine einzelne lange Datei
+    # gar nicht pruefen koennte.
+    lang = []
+    stufen = [220, 262, 330, 392, 440, 523, 660, 784, 880, 660]
+    je = 44100 * 10 // len(stufen)
+    for hz in stufen:
+        lang.extend(reihe(hz, 44100, je, 24000))
+    schreib(os.path.join(aus, 'lang44.wav'), 44100, 2,
+            [v for x in lang for v in (x, x)])
 PY
 
 # Das MP3. ffmpeg auf dem WIRT, mit -flags +bitexact, damit zwei Laeufe
