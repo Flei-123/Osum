@@ -78,8 +78,14 @@ echo "== 1. an der Quelle: wer holt die Buehne, und woher =="
 # Der Fehler war nicht, dass eine Sperre fehlte -- er war, dass ZWEI
 # Wege denselben Puffer nahmen und nur einer davon gesichert war. Also
 # wird hier gezaehlt, wer den Puffer ueberhaupt anfasst.
-ROH=$(grep -c 'base(state) + STAGE_OFF' kernel/wig.fi)
-zahl "Stellen, die die geteilte Buehne noch direkt nehmen" "$ROH" eq 1
+# GEZAEHLT WIRD CODE, NICHT ERKLAERUNG. `grep -c` zaehlt auch die
+# Kommentarzeilen, die den Fehler dieser Runde beschreiben -- und die
+# muessen den Ausdruck woertlich nennen, sonst erklaeren sie nichts.
+# Stand 06.09.: vier Fundstellen, davon DREI in Kommentaren (347, 448,
+# 512) und eine im Code (541, in `stage_of` selbst). Wer hier stumpf
+# zaehlt, macht jede Begruendung zu einem Fehler.
+ROH=$(grep 'base(state) + STAGE_OFF' kernel/wig.fi | grep -vc '^[[:space:]]*//')
+zahl "Stellen im CODE, die die geteilte Buehne noch direkt nehmen" "$ROH" eq 1
 grep -q 'fn stage_of' kernel/wig.fi \
     && ok "wig.stage_of gibt es" || bad "wig.stage_of fehlt"
 for f in blit glyph_into; do
@@ -182,7 +188,11 @@ if grep -qa '^panic:' "$TMPD/r-tf.txt"; then
 elif [ -n "$TFF" ] && [ "$TFF" -ge 1 ]; then
     ok "ohne die Tafelsperre: $TFF Abweichungen"
 else
-    bad "ohne die Tafelsperre passiert NICHTS -- dann misst sie auch nichts"
+    # Auch das ist ein Rennen: ohne die Tafelsperre stirbt der Kern
+    # ZUVERLAESSIG (panic in ttf.fi:975), aber nur, wenn im Lauf
+    # ueberhaupt gerastert wird. Bei wenigen Runden kann der Lauf vorher
+    # enden. Dieselbe Einschraenkung wie unten in Abschnitt 8.
+    bad "ohne die Tafelsperre passiert NICHTS -- dann misst sie auch nichts (LAEUFE=$LAEUFE)"
 fi
 
 echo
@@ -262,7 +272,16 @@ printf '        -smp 4 glyphblind: %s Laeufe, %s mit Panic/Ausnahme, %s Meldezei
 if [ "$P" -ge 1 ]; then
     ok "mit EINER Buehne bricht es weiterhin: $P von $L Laeufen"
 else
-    bad "mit EINER Buehne passiert nichts -- dann misst Abschnitt 7 nichts (Rate war 1 von 5)"
+    # WIE VIELE LAEUFE DAS BRAUCHT, STEHT IN RUNDE-GLYPHE 8.1: der
+    # Schreibtischlauf ist KEIN Sucher. Er fand den Fehler in einem von
+    # fuenf Laeufen, und mit weniger als ~20 Laeufen ist ein gruenes
+    # Ergebnis hier ein Zufall und kein Beweis. Mit OSUM_GLYPHE_LAEUFE=6
+    # (der Wert, mit dem ./test.sh faehrt, damit der Abschnitt nicht eine
+    # Stunde dauert) schlaegt diese Gegenprobe deshalb regelmaessig fehl.
+    # Die belastbare Zusage ist Abschnitt 4/5: `zeichenrennen` findet mit
+    # geteilter Buehne JEDESMAL Hunderte Abweichungen und mit der Buehne
+    # je Kern null -- in JEDEM einzelnen Lauf, ohne Wuerfeln.
+    bad "mit EINER Buehne passiert nichts -- dann misst Abschnitt 7 nichts (Rate 1 von 5; LAEUFE=$LAEUFE, fuer eine belastbare Aussage >= 20)"
 fi
 
 echo
