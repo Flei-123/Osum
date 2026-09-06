@@ -1483,6 +1483,37 @@ lauf "42. der Zeichenweg auf mehreren Kernen: eine Buehne je Kern (tools/glyphe/
 # kostet und wie weit der Weg damit ist.
 lauf "42. WLAN ohne eine einzige Karte: 802.11, WPA2/WPA3 und CCMP gegen die Normen und gegen eine echte Aufzeichnung (tools/wlan/run.sh, Runde WLAN)" \
      tools/wlan/run.sh wlan '^WLAN: |^WLAN-FUZZ: |^== |^  OK    (QEMU |tools/wlan/orakel|das Orakel lehnt|die Aufzeichnung liegt|SHA-1 gegen|HMAC-SHA1 gegen|PRF-SHA1, IEEE|PBKDF2-SHA1, RFC|PMK aus|AES gegen OpenSSL|AES-CMAC, RFC|Key Wrap, RFC|AES-CCM|IEEE Std 802\.11|Beacon 1|die Ketten|EAPOL-Rahmen|PTK aus dem echten|Pruefwert von Nachricht|Gruppenschluessel aus|DIE GANZE KETTE|mit einem TK|ueber ALLE|die richtige Folge|und hat den Schluessel|alle [0-9]+ Verstuemmelungen|Nachricht 3 zweimal|ERSCHOEPFEND|der Fehlerzustand|alle [0-9]+ Abschnitte|ein RSN-Element|EAPOL: alle|[0-9]+ verstuemmelte Rahmen|jede der [0-9]+|von den [0-9]+|valgrind ueber|keine WLAN-PCI|SAE ist NICHT|TKIP und WEP|die Runde in Zeilen|PTK mit KDF-SHA256|beide Seiten)'
+# ABSCHNITT 43 -- RUNDE WLAN-2. Der Abschnitt, der die zwei ehrlichsten
+# Saetze aus docs/WLAN-BEFUND.md einloest:
+#
+#     S2 -- Der 4-Wege-Handschlag ist gegen sich selbst und gegen die
+#     Normvektoren der Primitiven gemessen, NICHT gegen einen echten
+#     Zugangspunkt.
+#     S4 -- Nichts davon ist gegen einen boesartigen Zugangspunkt
+#     gemessen.
+#
+# Beides ist jetzt gemessen. Osums Supplicant tritt gegen
+# `tools/wlan/gegenstelle.py` an -- einen vollstaendigen
+# WPA2-Authenticator, der mit Osum keine Zeile teilt, unter sich
+# OpenSSL statt lib/crypto/ benutzt und bei JEDEM Lauf neue
+# Zufallszahlen wuerfelt. Vorher eicht er sich an der echten
+# Aufzeichnung von 2007 (Coherer/Induction), damit der Massstab selbst
+# einen Massstab hat.
+#
+# Warum nicht hostapd: gemessen und im Kopf von gegenstelle.py
+# festgehalten. Debian baut hostapd ohne CONFIG_TESTING_OPTIONS
+# (EAPOL_RX -> 'Unknown command'), driver=wired ist auf 802.1X
+# verdrahtet und ruehrt die WPA-PSK-Maschine nicht an, und
+# mac80211_hwsim gibt es auf diesem Kern nicht.
+#
+# Dazu die Naht zum Blech (lib/wlan/geraet.fi) und -- nach Justins
+# Zwischenruf, dass in seinem Rechner ein USB-STICK und keine
+# PCIe-Karte steckt -- die Tabelle, die einen Stick an seiner
+# USB-Nummer BENENNT, damit die Zeile am echten Blech fotografierbar
+# ist. Sie bindet keinen Treiber; das waere eine Behauptung.
+lauf "43. WLAN gegen ein ZWEITES Programm: 4-Wege-Handschlag gegen einen unabhaengigen Authenticator, die Naht zum Blech, der USB-Stick beim Namen (tools/wlan/run2.sh, Runde WLAN-2)" \
+     tools/wlan/run2.sh wlan2 '^WLAN2: |^== |^  OK    (tools/wlan/orakel|die Gegenstelle|PMK aus|Pruefwert von|Schluesseldaten von|[0-9]+ vollstaendige|in jedem Lauf|Nachricht 3 mit|Schluesseldaten OHNE|Automat: |die Naht|ein Geraet OHNE|alle [0-9]+ USB|kernel/usb\.fi|SAE ist NICHT|kein USB-WLAN|die neuen Dateien)'
+
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
 abschnitte_abarbeiten
