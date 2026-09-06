@@ -456,7 +456,22 @@ if [ "$gebaut" = 1 ]; then
     # genau so sah der Fehlschlag auch aus. Der Satz steht jetzt hinter
     # `ls /bin`. Gemessen wird unveraendert, dass die Zeile durch K9s
     # Zeilendisziplin bis auf den Bildpunkt kommt.
-    foto "$K0" "osum gfx nocursor fbhold nokbd nosched noproc nofs noring3 script=ls /bin;echo OSUM SHELL ON SCREEN;echo DONE" \
+    # RUNDE ALLTAG: DIE BILANZ AM ENDE IST WIEDER LAENGER GEWORDEN.
+    # Der Schirm fasst 37 Zeilen; zwischen dem Satz und "fb: hold"
+    # standen zuletzt 36 Zeilen Bilanz (smp, netmon, share, nv, k13,
+    # mu ...), und damit stand der Satz genau eine Zeile zu hoch. Er
+    # ist jetzt die LETZTE Zeile des Skripts -- das ist die Stelle, die
+    # am weitesten unten steht und deshalb als einzige nicht davon
+    # abhaengt, wieviel eine spaetere Runde noch meldet. `DONE` rueckt
+    # dafuer eine Zeile hoch und wird weiter geprueft.
+    # ... und dieser eine Lauf bekommt den Schirm, den QEMUs EDID nennt
+    # (1280x800, 50 Zeilen) statt der eingebauten Vorgabe mit 37: die
+    # Bilanz am Ende ist ueber die Runden auf 36 Zeilen gewachsen, und
+    # damit passte der Satz der Shell nicht mehr mit ins Bild. Gemessen
+    # wird hier die Zeilendisziplin auf dem Schirm, nicht die Vorgabe --
+    # die steht in Abschnitt 2 und bleibt unangetastet.
+    VGA_STD="-vga std" \
+    foto "$K0" "osum gfx nocursor fbhold nokbd nosched noproc nofs noring3 script=ls /bin;echo DONE;echo OSUM SHELL ON SCREEN" \
         "$TMPD/sh.txt" "$TMPD/sh.ppm" \
         -drive "file=$TMPD/disk.img,format=raw,if=ide,index=0"
     num "der Kern beendet sich sauber" "$RC" eq 21
@@ -476,7 +491,7 @@ if [ "$gebaut" = 1 ]; then
     schau "die Zeile der Shell steht bildpunktgenau auf dem Schirm" \
         finde "$TMPD/sh.ppm" kernel/font.fi "$TMPD/sh.txt" \
         "fb: console mirrored to screen" "fb: hold" "OSUM SHELL ON SCREEN"
-    schau "und die Zeile, mit der das Skript endet, ebenso" \
+    schau "und die Zeile davor (DONE) ebenso" \
         finde "$TMPD/sh.ppm" kernel/font.fi "$TMPD/sh.txt" \
         "fb: console mirrored to screen" "fb: hold" "DONE"
 fi

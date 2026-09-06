@@ -118,3 +118,54 @@ hält die Systemaufrufnummern des Kerns gegen die der libc — `SYS_OSUM_SPERRE`
 stand nur im Kern (1850) und fehlte in `lib/libc/kcall.fi`. Genau derselbe Fehler
 wie bei `SYS_OSUM_CPUSTAT` in MERGE-6, jetzt mit derselben Begründung
 danebengeschrieben.
+
+## Nachtrag: `merge6` nachgezogen (Commit „ALLTAG 10/n")
+
+Während dieser Zweig gebaut wurde, ist Runde **GLYPHE** (22 Commits) in `merge6`
+gelandet. Der Zweig war damit auf einer alten Basis und maß gegen alte Zahlen.
+`git merge merge6` ging **ohne Konflikt** durch; danach:
+
+* `./test.sh` Abschnitt 1 ist **grün** — der oben beschriebene Punkt „bekannt und
+  nicht von dieser Runde" hat sich damit von selbst erledigt. Einmal
+  `vendor/firn/fetch-firnc.sh` laufen lassen genügt nicht, weil das Skript bei
+  aktuellem Übersetzer früh aussteigt und `lib/.roh/` dann fehlt; die Datei kommt
+  aus dem Baum, der sie schon hat, oder aus einem Lauf mit gelöschtem `.gebaut`.
+* `tools/k15/run.sh`: die Zusage „Zeilen der Naht im Kernel" zählt seit GLYPHE
+  Code statt Kommentar und ist wieder grün.
+
+## Drei Fehler, die erst der volle Lauf gezeigt hat
+
+1. **Das Abbild war zu klein — an drei Stellen.** `wlib` ist um Bildfläche,
+   Schieberegler und Vierer-Raster gewachsen, und jedes Programm trägt das mit.
+   `mkfs` sagte „the disk is full": in `tools/k15/run.sh` beim **zweiten** Abbild
+   (Farbschema-Gegenprobe, `disk2.img`) und in `tools/k16/run.sh` bei beiden
+   Abbildern. Sichtbar wurde es als scheinbar ganz anderer Fehler: der Assembler
+   auf Osum kam mit `BIN=6` zurück — das ist `schreib_elf` fehlgeschlagen, also
+   kein Platz. Alle drei stehen jetzt auf 8192 Blöcken (32 MiB, Fassung 2 mit
+   mehrblockiger Blockkarte).
+2. **`tools/gfx/run.sh`, Abschnitt 11.** Der Schirm hat bei 800×600 und 8×16
+   genau 37 Zeilen; die Bilanz am Ende eines Laufs ist über die Runden auf 36
+   Zeilen gewachsen, damit stand der Satz der Shell eine Zeile zu hoch. Dieser
+   eine Lauf bekommt jetzt den Schirm, den QEMUs EDID nennt (1280×800, 50
+   Zeilen); gemessen wird dort die Zeilendisziplin, nicht die eingebaute Vorgabe
+   — die steht in Abschnitt 2 und bleibt unangetastet. **GFX: 76 grün, 0 rot.**
+3. **SSE2 im eigenen Assembler.** `fas` lehnte die Gleitkommabefehle
+   ausdrücklich ab („kein Programm dieses Userlands hat eine f64"). Der
+   Taschenrechner hat eine, und die IDCT des JPEG-Decoders auch. Die dreizehn
+   Befehle, die `firnc1` dafür erzeugt, sind jetzt kodiert und in
+   `tools/k16/run.sh` Oktett für Oktett gegen `as`+`ld` gemessen; dazu die
+   Paritätsbedingung (`setp`/`setnp`/`setpe`/`setpo`), ohne die `comisd` nicht
+   auswertbar ist.
+
+## Zahlen des Nachlaufs
+
+| Lauf | Ergebnis |
+|---|---|
+| `tools/alltag/run.sh` | **45 grün, 0 rot** |
+| `tools/themestore/run.sh` | **81 grün, 0 rot** |
+| `tools/gfx/run.sh` | **76 grün, 0 rot** |
+
+`tools/k15/run.sh` ist auf dieser Basis **nicht** grün — und war es vorher auch
+nicht: `merge6` selbst hat dort 30 rote Zusagen im letzten Lauf, dieser Zweig 23,
+und die verbleibenden sind auf beiden Zweigen dieselben (Dialogfenster von
+`widgetdemo`, Starter/Suche). Diese Runde hat dort nichts hinzugefügt.
