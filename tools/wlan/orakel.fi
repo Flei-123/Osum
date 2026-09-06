@@ -62,6 +62,9 @@ import wlan.kanal
 import wlan.wpa
 import wlan.ccmp
 import wlan.zustand
+import wlan.usbchip
+import wlan.geraet
+import wlan.pruefgeraet
 
 const CAP: usize = 4096
 
@@ -649,6 +652,84 @@ fn run_line(line: u64, len: usize) {
         temit()
         return
     }
+    // ---- RUNDE WLAN-2: der USB-Stick, an seiner Nummer erkannt ----
+    //
+    //   usbchip <vid> <pid>   ->  <familie> <klarname>
+    //
+    // Damit laesst sich die Tabelle aus lib/wlan/usbchip.fi auf dem
+    // WIRT ablaufen, obwohl hier kein Stick steckt. Sie ist der
+    // einzige Weg, auf dem wir erfahren, welcher Chip in Justins
+    // Rechner sitzt -- und ein Tippfehler in einer der vierzig
+    // Nummern faellt sonst erst am echten Blech auf.
+    var wuc: [u8; 8] = "usbchip\0"
+    if word_is(line, len, &at, (&wuc[0]) as u64) {
+        let vid: i64 = field_num(line, len, &at)
+        let pid: i64 = field_num(line, len, &at)
+        if vid < 0 || pid < 0 { fail(); return }
+        var nb: [u8; 40] = [0; 40]
+        let fam: u64 = usbchip.familie(vid as u64, pid as u64)
+        usbchip.familie_name_holen(fam, (&nb[0]) as u64)
+        var i: usize = 0
+        while nb[i] != 0 as u8 { tch(nb[i] as u64); i = i + 1 }
+        tch(32)
+        var nb2: [u8; 40] = [0; 40]
+        usbchip.name_holen(vid as u64, pid as u64, (&nb2[0]) as u64)
+        i = 0
+        while nb2[i] != 0 as u8 { tch(nb2[i] as u64); i = i + 1 }
+        temit()
+        return
+    }
+
+    // ---- RUNDE WLAN-2: die Naht und das Geraet dahinter ----
+    //
+    //   geraet <rahmenhex>  ->  Zeile mit den Zaehlern
+    //
+    // Ein Rahmen geht durch die Tafel hinein und wieder heraus. Das
+    // misst, was `lib/wlan/geraet.fi` zusagt: dass ein Rahmen
+    // unveraendert durchkommt, dass die Zaehler stimmen und dass ein
+    // Geraet OHNE Tafel nicht in einen Nullzeiger springt.
+    var wgr: [u8; 7] = "geraet\0"
+    if word_is(line, len, &at, (&wgr[0]) as u64) {
+        let fl: i64 = field_hex(line, len, &at, p0)
+        if fl < 0 { fail(); return }
+        var pr: pruefgeraet.Pruef = pruefgeraet.pruef_new()
+        var gg: geraet.Geraet = geraet.geraet_new()
+        // Ein frisches Geraet MUSS ablehnen -- vor der Tafel gibt es
+        // kein Senden.
+        let vorher: i64 = geraet.senden(&gg, p0, fl as usize)
+        if !pruefgeraet.anhaengen(&gg, &pr, false) { fail(); return }
+        let gesendet: i64 = geraet.senden(&gg, p0, fl as usize)
+        if !pruefgeraet.einspeisen(&pr, p0, fl as usize) { fail(); return }
+        let empfangen: i64 = geraet.empfangen(&gg, p1, CAP)
+        // Kam derselbe Rahmen zurueck?
+        var gleich: bool = empfangen == (fl as i64)
+        var j: usize = 0
+        while j < (fl as usize) {
+            if rt.ld8(p0, j) != rt.ld8(p1, j) { gleich = false }
+            j = j + 1
+        }
+        var lv: [u8; 8] = "vorher=\0"
+        tlit((&lv[0]) as u64)
+        tnum((0 - vorher) as u64)
+        var lg: [u8; 8] = " gesd=\0\0"
+        tlit((&lg[0]) as u64)
+        tnum(gesendet as u64)
+        var le: [u8; 8] = " empf=\0\0"
+        tlit((&le[0]) as u64)
+        tnum(empfangen as u64)
+        var lgl: [u8; 8] = " same=\0\0"
+        tlit((&lgl[0]) as u64)
+        tbit(gleich)
+        var lz: [u8; 8] = " ztx=\0\0\0"
+        tlit((&lz[0]) as u64)
+        tnum(geraet.zaehler_gesendet(&gg))
+        var lzr: [u8; 8] = " zrx=\0\0\0"
+        tlit((&lzr[0]) as u64)
+        tnum(geraet.zaehler_empfangen(&gg))
+        temit()
+        return
+    }
+
     fail()
 }
 
