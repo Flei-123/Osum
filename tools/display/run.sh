@@ -148,7 +148,14 @@ gleich "und sie folgt unmittelbar auf den Modustreiber" \
 # beansprucht, meldet die Nachbarn als Eindringlinge.
 fremd=$(grep -ran --include='*.fi' -E '^const SYS_[A-Za-z0-9_]+: u64 = 181[0-9]' kernel/ \
     | grep -v -e '^kernel/sys.fi' -e '^kernel/user/dispctl.fi' \
-              -e '^kernel/user/settings.fi' || true)
+              -e '^kernel/user/settings.fi' -e '^kernel/user/qs.fi' \
+              -e '^kernel/user/snip.fi' || true)
+# `kernel/user/qs.fi` (Runde GLYPHE) und `kernel/user/snip.fi` (Runde
+# ALLTAG) stehen aus demselben Grund daneben wie powermon.fi in
+# tools/k18/run.sh: sie LESEN ueber genau diesen Aufruf. Das
+# Ausschnittwerkzeug braucht Zeilenlaenge und Farbtiefe des Schirms,
+# bevor es ein PNG daraus macht. Eine zweite VERGABE derselben Nummer
+# faende diese Suche weiterhin.
 [ -z "$fremd" ] && ok "keine Aufrufnummer aus 1810..1819 steht ausserhalb der Dateien dieser Runde" \
                 || bad "Aufrufnummern aus 1810..1819 stehen auch in: $(echo $fremd | tr '\n' ' ')"
 eigen=$(grep -ahE '^const SYS_[A-Za-z0-9_]+: u64 = 181[0-9]' kernel/sys.fi | wc -l | tr -d ' ')
