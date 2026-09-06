@@ -110,6 +110,23 @@
 //   0x87000  der Schein fuers Bildschirmfoto (Runde FEEDBACK, in
 //            diesem Zweig ueber Runde BRIDGE-2, `shot.fi`), eine Seite
 //            -- die letzte freie Seite vor TASK_OFF (0x88000)
+//   0xC0000  DER SYSTEMBUS (Runde SYSTEMBUS, Lage aus MERGE-7)
+//   0xC8000  DER RINGPUFFER DES KERNPROTOKOLLS (Runde PROTOKOLL,
+//            Lage aus MERGE-7)
+//   0xD8000  DER TON (RUNDE HDA, Lage aus MERGE-7): eine Seite
+//            Tonschicht und AC97 (`audio.fi`, `ac97.fi`), drei
+//            Seiten Intel HD-Audio (`hda.fi`: Skalare und
+//            Positionspuffer, CORB/RIRB, Deskriptorliste und
+//            Widget-Tafel), zwei Seiten Mischer (`mix.fi`), eine
+//            Seite Umsteigepuffer der Ton-Systemaufrufe -- sieben
+//            Seiten bis 0xDF000. Die DMA-Ringpuffer liegen NICHT
+//            hier -- sie kommen aus dem Rahmenverwalter.
+//   0xDF000  DER VORAUSLESEPUFFER DER PLATTE (Runde TON): eine Seite
+//            Buchhaltung, acht Seiten Daten (8 Wege * 8 Sektoren)
+//            bis 0xE8000
+//   frei sind jetzt nur noch die Loecher:
+//            0x9F000 (eine Seite), 0xAC000..0xB0000 (vier Seiten)
+//            und 0xE8000..0x100000 (96 KiB)
 //
 // ================== RUNDE MERGE-2: kdata WAECHST VON 512 AUF 640 KiB.
 //
@@ -247,6 +264,14 @@ export {
     M_HANDLE, M_NOGEN, M_NOFLIGHT, M_NORIGHTS, M_HSTRICT, M_HBENCH,
     H_CHECKS, H_DENIED, H_STALE, H_CANCELS, H_INFLIGHT, H_DEFERRED,
     H_OPENED, H_CLOSED, H_PASSED, H_ESCALATE,
+    // ---- RUNDE HDA: der Ton ----
+    AUD_OFF, AUD_MAX, HDA_OFF, HDA_MAX, HDAR_OFF, HDAR_MAX,
+    HDAB_OFF, HDAB_MAX, MIX_OFF, MIX_MAX, AUDB_OFF, AUDB_MAX,
+    BLKC_OFF, BLKC_MAX, BLKD_OFF, BLKD_MAX, BLKC_SECTORS, BLKC_WAYS,
+    M_AUDIO, M_NOAUDIO, M_AUDSINE, M_AUDSAY, M_AUDNOMIX,
+    M_AUDSTARVE, M_AUDBEEP, M_NOSOUNDS, M_AUDHALF, M_AUDLONG,
+    M_NOHDA, M_NOAC97, M_AUDMIX, M_AUDCLIP, M_AUD441,
+    M_AUDCLOSE, M_AUDPOS, M_AUDLOAD, M_NOAUDIRQ, M_AUDGRAPH,
     // ---- RUNDE MULTIUSER ----
     MU_OFF, MU_MAX, MU_GRP, MU_GRPMAX,
     MU_WALKS, MU_WALKDENY, MU_GRPHITS, MU_SUPPSET, MU_NODECHK,
@@ -2693,3 +2718,164 @@ fn mode_add(state: u64, bit: u64) {
 fn mode_word(state: u64, w: u64) -> u64 {
     return get(state, MODE_OFF + w * 8)
 }
+
+// ==================================================== RUNDE HDA: DER TON
+//
+// SIEBEN SEITEN, 0xB0000..0xB7000 -- und NICHT 0x92000..0x98000, wo
+// Runde HDA sie hingelegt hatte. Der Zweig `hda` zweigte von MERGE-2
+// Schritt 13 ab, und damals wies `kstate.fi` 0x92000 aufwaerts als
+// frei aus. Seit MERGE-2 Schritt 17 (Runde ASYNC) liegen dort AIO,
+// ACQ, ASC und APATH (0x92000..0x9F000), und Runde BLECH-ECHT hat
+// KDATA_SIZE auf 0xB0000 gehoben. `tools/kernel/memmap.py` meldete
+// nach dem Zusammenfuehren FUENF Kollisionen auf diesen Seiten -- die
+// vierte Wiederholung des Fehlers, den der Kopf dieser Datei
+// beschreibt, und diesmal hat ihn der Pruefer VOR dem Bauen gesehen.
+//
+// DER ERSTE ANLAUF DIESER RUNDE nahm 0x9F000..0xA6000 -- das Loch, das
+// `kstate.fi` hinter APATH auswies. Der Pruefer meldete SECHS neue
+// Kollisionen: dort liegt seit BLECH-ECHT die Runde HID (hidrep.fi,
+// hidin.fi, i2chid.fi, 0xA0000..0xA9000), deren Konstanten NICHT in
+// dieser Datei stehen. Wer nur `kstate.fi` liest, sieht die Karte nicht
+// -- nur `python3 tools/kernel/memmap.py kernel -v` sieht sie ganz.
+//
+// ALSO WAECHST kdata EIN WEITERES MAL, 0xB0000 -> 0xC0000 (704 -> 768
+// KiB), und der Ton liegt HINTER der alten Grenze, wo keine parallel
+// laufende Runde ihn erwartet. Die Zahl steht ZWEIMAL, hier und in
+// `kernel/arch/x86_64/boot.s`; `tools/hv/run.sh` haelt beide
+// gegeneinander. Die Tabelle:
+//
+//   Bereich   war (hda)   ist (ton)   Seiten  Inhalt
+//   AUD_OFF   0x92000     0xB0000     1       Tonschicht, AC97, AC97-BDL, Kratzpuffer
+//   HDA_OFF   0x93000     0xB1000     1       HDA-Skalare, Codec-Tafel, DPIB, BDL
+//   HDAR_OFF  0x94000     0xB2000     1       CORB + RIRB
+//   HDAB_OFF  0x95000     0xB3000     1       Widget-Tafel
+//   MIX_OFF   0x96000     0xB4000     2       Stromtafel, Mischpuffer
+//   AUDB_OFF  (BLOCK_OFF) 0xB6000     1       Umsteigepuffer der Systemaufrufe (NEU)
+//
+// Angefasst wurden dafuer GENAU diese Konstanten -- jeder Zugriff der
+// vier Tondateien geht ueber sie, keine Zahl steht doppelt.
+//
+// WARUM SECHS UND NICHT EINE. Runde MEDIA1 kam mit einer Seite aus,
+// weil unter der Grenze nur AC97 stand: ein Portbereich, eine
+// Deskriptorliste zu 256 Oktetten, ein Kratzpuffer. Intel HD-Audio
+// bringt drei Dinge mit, die AC97 nicht hat, und alle drei sind
+// SPEICHER, den der Regler per DMA liest oder schreibt und der deshalb
+// physisch zusammenhaengend und ausgerichtet liegen muss:
+//
+//   der Befehlsring CORB   256 Eintraege zu 4 Oktetten = 1 KiB, 128er
+//   der Antwortring RIRB   256 Eintraege zu 8 Oktetten = 2 KiB, 128er
+//   der Positionspuffer    8 Oktette je Strom, 128er Ausrichtung
+//   die Deskriptorliste    bis 256 Eintraege zu 16 Oktetten = 4 KiB
+//
+// Dazu kommt die Tafel des Widget-Graphen: HD-Audio beschreibt seinen
+// Codec als Graph aus bis zu 128 Knoten, und der Weg vom Wandler zur
+// Buchse wird EINMAL beim Aufsetzen gesucht und danach nur noch
+// nachgeschlagen. Diese Tafel steht neben der Deskriptorliste.
+//
+//   0xB0000  `audio.fi` (Schicht) + `ac97.fi` (Treiber) + AC97-BDL
+//            + Kratzpuffer -- die Aufteilung von Runde MEDIA1,
+//            unveraendert uebernommen
+//   0xB1000  `hda.fi`: Skalare (0x000..0x400), Codec-Tafel
+//            (0x400..0x600), DMA-Positionspuffer (0x700..0x780,
+//            128er ausgerichtet, 8 Oktette je Strom), die
+//            Deskriptorliste des Ausgabestroms (0x800..0xA00,
+//            32 Eintraege zu 16 Oktetten, 128er ausgerichtet)
+//   0xB2000  CORB (0x000..0x400) und RIRB (0x400..0xC00)
+//   0xB3000  die Widget-Tafel: 64 Knoten zu 64 Oktetten. Sie hat eine
+//            GANZE Seite, weil an einem Knoten sechs Dinge haengen
+//            (Faehigkeiten, Buchsenbelegung, Verstaerkerbereich und
+//            bis zu acht Quellen mit ihrem INDEX -- der Index ist es,
+//            der den Eingang eines Mischers benennt)
+//   0xB4000  `mix.fi`: die Stromtafel (0x000..0x400) und der
+//            Mischpuffer (0x400..0x2000, 1792 Rahmen)
+//
+// Alle sieben stehen in `tools/kernel/memmap.py`; wer sie verschiebt,
+// ohne sie dort nachzuziehen, faellt beim naechsten Bau auf.
+const AUD_OFF: u64 = 0xD8000
+const AUD_MAX: u64 = 0x1000
+const HDA_OFF: u64 = 0xD9000
+const HDA_MAX: u64 = 0x1000
+const HDAR_OFF: u64 = 0xDA000
+const HDAR_MAX: u64 = 0x1000
+const HDAB_OFF: u64 = 0xDB000
+const HDAB_MAX: u64 = 0x1000
+const MIX_OFF: u64 = 0xDC000
+const MIX_MAX: u64 = 0x2000
+// RUNDE TON: der Umsteigepuffer der Ton-Systemaufrufe. Runde HDA
+// kopierte Ring-3-Rahmen in den MASCHINENWEITEN `BLOCK_OFF` -- genau
+// den Ein-Kern-Rest, den MERGE-6 bei `write` gefunden hat (zwei
+// Kerne, ein Puffer, zerschossene Daten). Eine eigene Seite, und sie
+// wird NUR unter der Tonsperre (`audio.L_LOCK`) benutzt.
+const AUDB_OFF: u64 = 0xDE000
+const AUDB_MAX: u64 = 0x1000
+
+// RUNDE TON, DER VORAUSLESEPUFFER DER PLATTE (`blk.fi`).
+//
+// Er steht in dieser Runde, weil er hier GEMESSEN wurde: eine Sekunde
+// Ton von der IDE-Platte kostete 4982 Millisekunden LESEN und 8
+// Millisekunden Ton. Ein Sektor je Befehl bei 512 Oktetten sind 375
+// Befehle fuer 192 KiB. Der Puffer holt 32 Sektoren mit EINEM Befehl
+// und beantwortet die naechsten 31 Anfragen aus dem Speicher.
+//
+// Fuenf Seiten: eine fuer die Buchhaltung (welche LBA, wie viele, von
+// welchem Geraet), vier fuer die 32 * 512 Oktette Daten. Er wird nur
+// unter der Dateisystemsperre (`atomic.L_FS`) angefasst -- `fs.fi`
+// haelt sie ueber jedem Aufruf von `blk.read` -- und JEDES Schreiben
+// wirft ihn weg, sonst liest der naechste Lauf, was vorgestern
+// dortstand.
+const BLKC_OFF: u64 = 0xDF000
+const BLKC_MAX: u64 = 0x1000
+const BLKD_OFF: u64 = 0xE0000
+const BLKD_MAX: u64 = 0x8000
+const BLKC_SECTORS: u64 = 8
+// ZWEI WEGE, UND ZWAR AUS EINEM GEMESSENEN GRUND. Mit EINEM Puffer
+// blieb /bin/play (258 KiB) beim Laden stehen, waehrend /bin/ls (38
+// KiB) durchlief: eine Datei ueber der Grenze zu den indirekten
+// Bloecken laesst das Dateisystem zwischen Zeigerblock und Datenblock
+// hin- und herspringen, und ein Puffer mit einem einzigen Platz wirft
+// bei jedem Sprung den anderen weg. Statt 16 Sektoren je Befehl zu
+// sparen, las er 16 Sektoren je EINZELNEM Block -- sechzehnmal mehr
+// als vorher. Zwei Plaetze, reihum vergeben, trennen die Zeiger von
+// den Daten.
+const BLKC_WAYS: u64 = 8
+
+// WORT 14, DER TON -- und nicht Wort 11, das Runde HDA genommen hatte.
+// Wort 11 gehoert auf `merge6` seit MERGE-2 der Runde ASYNC (704..709)
+// und der Runde MODUL (710, 711); `tools/kernel/memmap.py` zaehlte nach
+// dem Zusammenfuehren acht doppelt vergebene Modusindizes. Wort 12
+// hat BLECH (EHCI, 768..771), Wort 13 hat HID/BLECHEINGABE (832..853).
+// Wort 14 (896..959) war frei; Wort 15 bleibt es. Dieselbe Lehre wie
+// bei den Seiten oben: zwei Zweige nehmen unabhaengig "das naechste
+// freie Wort" und nehmen dasselbe -- und nur der Pruefer sieht es.
+//
+// RUNDE MERGE-7: GENAU DAS IST DANN PASSIERT. Der Zweig hat Wort 14
+// ab Bit 0 genommen -- so wie GLYPHE (896..899, schon in merge6),
+// SYSTEMBUS (jetzt 900..904) und PROTOKOLL (jetzt 905..908). Vier
+// Runden, dasselbe Wort, und der Textverschmelzer sieht nichts davon,
+// weil keine zwei davon dieselbe Zeile anfassen. Der Ton hat die
+// meisten Bits (zwanzig) und bekommt deshalb Wort 15 GANZ:
+// 960..979. Wort 14 ist damit bis Bit 12 belegt.
+//
+// `audio` schaltet den Ton an. Alles andere sind GEGENPROBEN und
+// Schalter der Abnahme -- eine Zusage ohne Gegenprobe ist eine
+// Behauptung.
+const M_AUDIO: u64 = 960 // Wort 15, Bit 0 -- den Ton aufsetzen
+const M_NOAUDIO: u64 = 961 // Bit 1 -- GEGENPROBE: gar kein Ton
+const M_AUDSINE: u64 = 962 // Bit 2 -- 440 Hz aus dem Kernel
+const M_AUDSAY: u64 = 963 // Bit 3 -- den Bericht drucken
+const M_AUDNOMIX: u64 = 964 // Bit 4 -- GEGENPROBE: Mischer stumm
+const M_AUDSTARVE: u64 = 965 // Bit 5 -- GEGENPROBE: Ring leerlaufen
+const M_AUDBEEP: u64 = 966 // Bit 6 -- den Systemklang spielen
+const M_NOSOUNDS: u64 = 967 // Bit 7 -- Systemklaenge aus
+const M_AUDHALF: u64 = 968 // Bit 8 -- GEGENPROBE: halbe Lautstaerke
+const M_AUDLONG: u64 = 969 // Bit 9 -- fuenf Sekunden statt einer
+const M_NOHDA: u64 = 970 // Bit 10 -- GEGENPROBE: HDA uebergehen
+const M_NOAC97: u64 = 971 // Bit 11 -- GEGENPROBE: AC97 uebergehen
+const M_AUDMIX: u64 = 972 // Bit 12 -- ZWEI Stroeme gleichzeitig
+const M_AUDCLIP: u64 = 973 // Bit 13 -- GEGENPROBE: Uebersteuerung
+const M_AUD441: u64 = 974 // Bit 14 -- 44100 statt 48000 Hz
+const M_AUDCLOSE: u64 = 975 // Bit 15 -- mitten im Lauf schliessen
+const M_AUDPOS: u64 = 976 // Bit 16 -- der Positionsgang ueber 10 s
+const M_AUDLOAD: u64 = 977 // Bit 17 -- dasselbe unter Rechenlast
+const M_NOAUDIRQ: u64 = 978 // Bit 18 -- GEGENPROBE: Vektor maskiert
+const M_AUDGRAPH: u64 = 979 // Bit 19 -- den Widget-Graphen drucken
