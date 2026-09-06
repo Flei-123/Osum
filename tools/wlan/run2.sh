@@ -124,6 +124,26 @@ case "$R" in
 esac
 
 # =====================================================================
+echo "== 4b. der ganze Weg, und was passiert, wenn jemand luegt (T4) =="
+# =====================================================================
+#
+# `verbinden.fi` ist der Draht zwischen Beacon, Automat, Supplicant und
+# Geraet. Genau dort sitzen die drei Fehler, die die Datei verhindern
+# soll: sich an ein offenes Netz haengen, verbunden sein ohne
+# Schluessel, einen Schluessel haben ohne fertigen Handschlag.
+#
+# Die Zahl, auf die es ankommt, ist `skeys` -- wie viele Schluessel
+# wirklich im GERAET liegen. Nicht was ein Merker sagt, sondern was
+# unten angekommen ist.
+
+ORAKEL=./.probe/worakel python3 tools/wlan/weg.py > "$OUT/weg.txt" 2>&1
+grep -E '^  (OK|FAIL)' "$OUT/weg.txt" || true
+WG=$(grep -c '^  OK' "$OUT/weg.txt" || true)
+WF=$(grep -c '^  FAIL' "$OUT/weg.txt" || true)
+pass=$((pass+WG))
+fail=$((fail+WF))
+
+# =====================================================================
 echo "== 5. welcher USB-Stick steckt da? =="
 # =====================================================================
 #
