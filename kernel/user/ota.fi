@@ -21,6 +21,18 @@
 //                     eingestellt ist
 //   ota einstellen <schluessel> <wert>   und wie man es aendert
 //
+// RUNDE STORE-MOBIL: NUR, WAS AUF DIESE MASCHINE PASST. Jede Paketzeile
+// des VERZEICHNISSES traegt seit dieser Runde als sechstes Feld die
+// PLATTFORM (`osum-x86_64`, `osum-aarch64`, `osum-any`). `suchen` zeigt
+// und `einspielen` holt NUR die Zeilen, deren Plattform die eigene ist
+// (oder `osum-any`); die anderen werden gezaehlt und als "ausgeblendet"
+// genannt, nie still weggelassen. Eine Zeile OHNE das Feld -- ein
+// Verzeichnis von vor dieser Runde -- gilt als "ohne Plattformangabe"
+// und wird ebenfalls ausgeblendet, mit eigener Zaehlung: ein Paket, von
+// dem niemand sagt, wofuer es ist, wird nicht auf gut Glueck
+// installiert. Dieselbe Regel steht in der Speicher-App fuers Telefon
+// (`Katalog.Paket.passt`) und im Werkzeug (`werkzeug/plattform.py`).
+//
 // ES WIRD NIE VON SELBST NEU GESTARTET. `einspielen` endet mit dem Satz
 // "bereit zum Neustart" und tut nichts weiter. Der einzige Ort in dieser
 // Datei, der `reboot` aufruft, ist der WACHHUND -- und der laeuft nur,
@@ -170,6 +182,18 @@ static mut N_SPERR: [u8; 10] = "gesperrt\t\0"
 static mut N_KGEN: [u8; 15] = "schluesselgen\t\0"
 static mut M_KETTE: [u8; 17] = "osum-schluessel\t\0"
 static mut N_FASS: [u8; 9] = "fassung\t\0"
+// RUNDE STORE-MOBIL: DIESE MASCHINE, in einem Wort. Der Userland dieses
+// Baums wird nur fuer x86-64 uebersetzt (tools/arm/build.sh baut allein
+// den Kern, `kernel/kmain_a64.fi`); sobald ein AArch64-Userland
+// existiert, gehoert hier `osum-aarch64` hinein -- und zwar ueber den
+// Bau, nicht von Hand.
+static mut PLATTFORM: [u8; 12] = "osum-x86_64\0"
+static mut P_ANY: [u8; 9] = "osum-any\0"
+static mut S_PLATT: [u8; 16] = "ota: plattform \0"
+static mut S_FREMD: [u8; 44] = "ota: fuer andere Plattformen ausgeblendet: \0"
+static mut S_OHNE: [u8; 41] = "ota: ohne Plattformangabe ausgeblendet: \0"
+static mut S_UEBER: [u8; 48] = "ota: nicht fuer diese Maschine, uebersprungen: \0"
+static mut E_KEINSP: [u8; 54] = "ota: KEIN PAKET fuer diese Plattform -- nichts zu tun\0"
 static mut K_QUELLE: [u8; 8] = "quelle=\0"
 static mut K_NAME: [u8; 6] = "name=\0"
 static mut K_ABST: [u8; 9] = "abstand=\0"
@@ -299,6 +323,7 @@ static mut HNAME: [u8; 128] = [0 as u8; 128]
 static mut FELD: [u8; 128] = [0 as u8; 128]
 static mut FELD2: [u8; 128] = [0 as u8; 128]
 static mut PNAME: [u8; 64] = [0 as u8; 64]
+static mut PLATT: [u8; 32] = [0 as u8; 32]
 static mut ARGV: [u64; 8] = [0 as u64; 8]
 // Diese beiden liegen STATISCH und nicht auf dem Stapel, weil ihre
 // Adresse in ARGV landet und ARGV den Aufruf ueberlebt -- der
@@ -1087,6 +1112,39 @@ fn paket_zahl() -> u64 {
     return n
 }
 
+// RUNDE STORE-MOBIL: passt die Paketzeile `z` auf diese Maschine?
+// Feld 5 ist die Plattform. Rueckgabe: 2 = passt (eigenes Wort oder
+// `osum-any`), 1 = fremde Plattform, 0 = das Feld fehlt (altes
+// Verzeichnis). Das Wort bleibt in PLATT stehen, fuer die Anzeige.
+fn paket_plattform(z: u64) -> u64 {
+    let e: u64 = (&VZ[0 as usize]) as u64 + vz_len
+    if !feld(z, e, 5, (&PLATT[0 as usize]) as u64, 32) {
+        return 0
+    }
+    if ulib.streq((&PLATT[0 as usize]) as u64,
+        (&PLATTFORM[0 as usize]) as u64) {
+        return 2
+    }
+    if ulib.streq((&PLATT[0 as usize]) as u64,
+        (&P_ANY[0 as usize]) as u64) {
+        return 2
+    }
+    return 1
+}
+
+// Wie viele Paketzeilen auf diese Maschine passen.
+fn passende_zahl() -> u64 {
+    var n: u64 = 0
+    var k: u64 = 0
+    while paket_zeile(k) != 0 {
+        if paket_plattform(paket_zeile(k)) == 2 {
+            n = n + 1
+        }
+        k = k + 1
+    }
+    return n
+}
+
 // Die Fassung, die das Verzeichnis nennt. Sie steht in der ZWEITEN
 // Zeile, und sie wird erst gelesen, nachdem die Signatur gestimmt hat.
 fn vz_fassung() -> u64 {
@@ -1344,6 +1402,7 @@ fn cmd_zeigen() -> u64 {
         (&QUELLE[0 as usize]) as u64, 200) {
         sagt((&S_QUELLE[0 as usize]) as u64, (&QUELLE[0 as usize]) as u64)
     }
+    sagt((&S_PLATT[0 as usize]) as u64, (&PLATTFORM[0 as usize]) as u64)
     sagn((&S_HIER[0 as usize]) as u64, fassung_lesen())
     sagn((&S_KGEN[0 as usize]) as u64, kgen_lesen())
     var epr: [u8; 40] = [0 as u8; 40]
@@ -1409,20 +1468,50 @@ fn cmd_suchen() -> u64 {
     }
     ulib.say((&S_NEU[0 as usize]) as u64)
     ulib.nl()
+    sagt((&S_PLATT[0 as usize]) as u64, (&PLATTFORM[0 as usize]) as u64)
+    // RUNDE STORE-MOBIL: gezeigt wird, was auf diese Maschine passt.
+    // Der Rest wird GEZAEHLT und genannt -- ausgeblendet ist nicht
+    // verschwiegen.
+    var fremd: u64 = 0
+    var ohne: u64 = 0
+    var passend: u64 = 0
     var k: u64 = 0
     while k < anz {
         let z: u64 = paket_zeile(k)
-        feld(z, (&VZ[0 as usize]) as u64 + vz_len, 0,
-            (&FELD[0 as usize]) as u64, 128)
-        feld(z, (&VZ[0 as usize]) as u64 + vz_len, 1,
-            (&FELD2[0 as usize]) as u64, 128)
-        ulib.say((&S_PAKET[0 as usize]) as u64)
-        ulib.say((&FELD[0 as usize]) as u64)
-        var sp: [u8; 2] = " \0"
-        ulib.say((&sp[0 as usize]) as u64)
-        ulib.say((&FELD2[0 as usize]) as u64)
-        ulib.nl()
+        let art: u64 = paket_plattform(z)
+        if art == 2 {
+            feld(z, (&VZ[0 as usize]) as u64 + vz_len, 0,
+                (&FELD[0 as usize]) as u64, 128)
+            feld(z, (&VZ[0 as usize]) as u64 + vz_len, 1,
+                (&FELD2[0 as usize]) as u64, 128)
+            ulib.say((&S_PAKET[0 as usize]) as u64)
+            ulib.say((&FELD[0 as usize]) as u64)
+            var sp: [u8; 2] = " \0"
+            ulib.say((&sp[0 as usize]) as u64)
+            ulib.say((&FELD2[0 as usize]) as u64)
+            ulib.say((&sp[0 as usize]) as u64)
+            ulib.say((&PLATT[0 as usize]) as u64)
+            ulib.nl()
+            passend = passend + 1
+        } else {
+            if art == 1 {
+                fremd = fremd + 1
+            } else {
+                ohne = ohne + 1
+            }
+        }
         k = k + 1
+    }
+    if fremd != 0 {
+        sagn((&S_FREMD[0 as usize]) as u64, fremd)
+    }
+    if ohne != 0 {
+        sagn((&S_OHNE[0 as usize]) as u64, ohne)
+    }
+    if passend == 0 {
+        ulib.say((&E_KEINSP[0 as usize]) as u64)
+        ulib.nl()
+        return 1
     }
     return 0
 }
@@ -1464,13 +1553,26 @@ fn cmd_einspielen() -> u64 {
     //
     // Gefragt wird der KERN und nicht gerechnet: `SYS_SYSINFO` mit
     // I_BFREE und I_BSIZE ist dasselbe, was `/bin/df` anzeigt.
+    // RUNDE STORE-MOBIL: NUR DIE PASSENDEN. Ein Paket fuer eine andere
+    // Maschine wird weder geholt noch gezaehlt noch installiert -- es
+    // wird genannt und uebersprungen. Passt keines, ist das ein Fehler
+    // mit Ansage und kein leerer Erfolg.
+    let passend: u64 = passende_zahl()
+    if passend == 0 {
+        return fehler((&E_KEINSP[0 as usize]) as u64, 0)
+    }
+    if passend < anz {
+        sagn((&S_UEBER[0 as usize]) as u64, anz - passend)
+    }
     var gesamt: u64 = 0
     var k: u64 = 0
     while k < anz {
         let z0: u64 = paket_zeile(k)
         let e0: u64 = (&VZ[0 as usize]) as u64 + vz_len
-        feld(z0, e0, 3, (&FELD[0 as usize]) as u64, 128)
-        gesamt = gesamt + ulib.to_num((&FELD[0 as usize]) as u64)
+        if paket_plattform(z0) == 2 {
+            feld(z0, e0, 3, (&FELD[0 as usize]) as u64, 128)
+            gesamt = gesamt + ulib.to_num((&FELD[0 as usize]) as u64)
+        }
         k = k + 1
     }
     let bfree: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_BFREE, 0, 0)
@@ -1497,25 +1599,27 @@ fn cmd_einspielen() -> u64 {
         let e: u64 = (&VZ[0 as usize]) as u64 + vz_len
         // DIE FELDNUMMERN. `paket_zeile` gibt den Zeiger HINTER
         // "paket\t" zurueck, also ist Feld 0 der Name:
-        //   0 name  1 fassung  2 sha256  3 oktette  4 datei
-        feld(z, e, 2, (&SOLLHEX[0 as usize]) as u64, 72)
-        feld(z, e, 3, (&FELD[0 as usize]) as u64, 128)
-        feld(z, e, 4, (&FELD2[0 as usize]) as u64, 128)
-        let soll: u64 = ulib.to_num((&FELD[0 as usize]) as u64)
-        if !paket_holen((&FELD2[0 as usize]) as u64, soll,
-            (&SOLLHEX[0 as usize]) as u64) {
-            return 1
-        }
-        sagt((&S_GEPRUEFT[0 as usize]) as u64, (&FELD2[0 as usize]) as u64)
-        // die Signaturdatei daneben
-        ulib.strcpy((&ZIEL2[0 as usize]) as u64, (&FELD2[0 as usize]) as u64)
-        ulib.strcat((&ZIEL2[0 as usize]) as u64, (&N_SIG[0 as usize]) as u64)
-        tmp_pfad((&ZIEL[0 as usize]) as u64, (&ZIEL2[0 as usize]) as u64)
-        weg((&ZIEL[0 as usize]) as u64)
-        if hole((&ZIEL2[0 as usize]) as u64, (&ZIEL[0 as usize]) as u64, 0)
-            != 0 {
-            return fehler((&E_HOLEN[0 as usize]) as u64,
-                (&ZIEL2[0 as usize]) as u64)
+        //   0 name  1 fassung  2 sha256  3 oktette  4 datei  5 plattform
+        if paket_plattform(z) == 2 {
+            feld(z, e, 2, (&SOLLHEX[0 as usize]) as u64, 72)
+            feld(z, e, 3, (&FELD[0 as usize]) as u64, 128)
+            feld(z, e, 4, (&FELD2[0 as usize]) as u64, 128)
+            let soll: u64 = ulib.to_num((&FELD[0 as usize]) as u64)
+            if !paket_holen((&FELD2[0 as usize]) as u64, soll,
+                (&SOLLHEX[0 as usize]) as u64) {
+                return 1
+            }
+            sagt((&S_GEPRUEFT[0 as usize]) as u64, (&FELD2[0 as usize]) as u64)
+            // die Signaturdatei daneben
+            ulib.strcpy((&ZIEL2[0 as usize]) as u64, (&FELD2[0 as usize]) as u64)
+            ulib.strcat((&ZIEL2[0 as usize]) as u64, (&N_SIG[0 as usize]) as u64)
+            tmp_pfad((&ZIEL[0 as usize]) as u64, (&ZIEL2[0 as usize]) as u64)
+            weg((&ZIEL[0 as usize]) as u64)
+            if hole((&ZIEL2[0 as usize]) as u64, (&ZIEL[0 as usize]) as u64, 0)
+                != 0 {
+                return fehler((&E_HOLEN[0 as usize]) as u64,
+                    (&ZIEL2[0 as usize]) as u64)
+            }
         }
         k = k + 1
     }
@@ -1556,15 +1660,17 @@ fn cmd_einspielen() -> u64 {
     while k < anz {
         let z: u64 = paket_zeile(k)
         let e: u64 = (&VZ[0 as usize]) as u64 + vz_len
-        feld(z, e, 0, (&PNAME[0 as usize]) as u64, 64)
-        sagt((&S_SPIEL[0 as usize]) as u64, (&PNAME[0 as usize]) as u64)
-        let rc: u64 = opk_ruf((&A_AKTU[0 as usize]) as u64,
-            (&PNAME[0 as usize]) as u64,
-            (&A_QUELLE[0 as usize]) as u64,
-            (&P_TMP[0 as usize]) as u64, 5)
-        if rc != 0 {
-            sagn((&E_OPK[0 as usize]) as u64, rc)
-            return 1
+        if paket_plattform(z) == 2 {
+            feld(z, e, 0, (&PNAME[0 as usize]) as u64, 64)
+            sagt((&S_SPIEL[0 as usize]) as u64, (&PNAME[0 as usize]) as u64)
+            let rc: u64 = opk_ruf((&A_AKTU[0 as usize]) as u64,
+                (&PNAME[0 as usize]) as u64,
+                (&A_QUELLE[0 as usize]) as u64,
+                (&P_TMP[0 as usize]) as u64, 5)
+            if rc != 0 {
+                sagn((&E_OPK[0 as usize]) as u64, rc)
+                return 1
+            }
         }
         k = k + 1
     }
