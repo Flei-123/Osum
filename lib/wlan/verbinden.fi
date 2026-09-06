@@ -1,0 +1,458 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/wlan/verbinden.fi -- der ganze Weg, ueber der Naht.
+//
+// ==================================================================
+// WAS HIER ZUSAMMENKOMMT
+// ==================================================================
+//
+// Runde WLAN hat sechs Dateien gebaut, die jede fuer sich gemessen
+// sind: Rahmen zerlegen, Beacons auswerten, Kanaele, der Automat, der
+// Supplicant, CCMP. Was gefehlt hat, ist das Stueck, das sie zu einem
+// VORGANG macht -- und das ist nicht Beiwerk, sondern genau die
+// Stelle, an der in einem Netzstapel die Fehler sitzen:
+//
+//   * ein Beacon wird ausgewertet, aber die Sicherheitsart nicht
+//     geprueft, und der Rechner haengt sich an ein offenes Netz;
+//   * der Handschlag gelingt, aber der Schluessel geht nicht ins
+//     Geraet, und danach fliegt alles im Klartext;
+//   * die Verbindung bricht ab, und der Schluessel BLEIBT im Geraet.
+//
+// Jeder dieser drei Faelle ist eine Sicherheitsluecke und keiner faellt
+// auf, wenn man nur die Einzelteile prueft. Deshalb diese Datei.
+//
+// Sie haelt KEINEN eigenen Zustandsautomaten -- der steht in
+// `lib/wlan/zustand.fi` und wird hier gefuettert. Sie ist der Draht
+// zwischen dem Automaten, dem Supplicanten und dem Geraet.
+//
+// ==================================================================
+// DIE REGEL, DIE ALLES ANDERE TRAEGT
+// ==================================================================
+//
+//   ES GIBT GENAU EINEN WEG, AUF DEM EIN SCHLUESSEL INS GERAET
+//   KOMMT, UND ER LIEGT HINTER `darf_daten`.
+//
+// `zustand.darf_daten` ist wahr, wenn der Automat in VERBUNDEN steht
+// UND ein Schluessel installiert ist. Diese Datei setzt den Schluessel
+// nur an einer einzigen Stelle -- in `nachricht3_behandeln`, nachdem
+// der Pruefwert stimmt -- und loescht ihn an einer einzigen Stelle,
+// in `trennen`. Wer eine zweite Stelle einbaut, hebt die Zusage auf.
+
+import wlan.geraet
+import wlan.rahmen
+import wlan.beacon
+import wlan.wpa
+import wlan.ccmp
+import wlan.zustand
+
+export {
+    Sitzung, sitzung_new,
+    suchlauf_beginnen, beacon_aufnehmen, netz_anzahl, netz_ssid_len,
+    netz_ssid_holen, netz_kanal_von, netz_sicherheit_von, netz_rssi_von,
+    netz_waehlen, gewaehlt_ist,
+    nachricht1_behandeln, nachricht3_behandeln,
+    daten_senden, daten_empfangen, trennen,
+    verbunden_ist, darf_daten_ist, zustand_von, grund_von,
+    F_KEIN, F_KEIN_GERAET, F_ZU_KURZ, F_NICHT_UNSER, F_MIC, F_SCHLUESSEL,
+    F_ZUSTAND, F_UNSICHER, F_VOLL, F_CCMP,
+    MAX_NETZE
+}
+
+const MAX_NETZE: usize = 8
+const MAX_SSID: usize = 32
+const MAX_RAHMEN: usize = 2400
+
+const F_KEIN: u64 = 0
+const F_KEIN_GERAET: u64 = 1
+const F_ZU_KURZ: u64 = 2
+const F_NICHT_UNSER: u64 = 3
+const F_MIC: u64 = 4
+const F_SCHLUESSEL: u64 = 5
+const F_ZUSTAND: u64 = 6
+const F_UNSICHER: u64 = 7
+const F_VOLL: u64 = 8
+const F_CCMP: u64 = 9
+
+struct Sitzung {
+    lauf: zustand.Lauf,
+    // Die gefundenen Netze. Ein Suchlauf ist nichts anderes als
+    // "Kanal setzen, hoeren, Beacons einsammeln".
+    ssid: [u8; 256],          // MAX_NETZE * MAX_SSID
+    ssid_len: [usize; 8],
+    kanal: [u64; 8],
+    sicherheit: [u64; 8],
+    rssi: [i64; 8],
+    n_netze: usize,
+    gewaehlt: i64,
+
+    // Wer wir sind und mit wem wir reden.
+    spa: [u8; 6],
+    aa: [u8; 6],
+
+    pmk: [u8; 32],
+    ptk: [u8; 48],
+    anonce: [u8; 32],
+    snonce: [u8; 32],
+    gtk: [u8; 16],
+    gtk_len: usize,
+    hat_ptk: bool,
+    akm: u64,
+    // Die Paketnummer, die wir senden. Sie zaehlt hoch und wird NIE
+    // zurueckgesetzt, solange der Schluessel derselbe ist -- ein
+    // wiederholter Zaehler macht bei CCMP den Schluesselstrom
+    // wiederholbar (das ist der Kern von KRACK).
+    pn: [u8; 6],
+    fehler: u64
+}
+
+fn sitzung_new() -> Sitzung {
+    var s: Sitzung = Sitzung {
+        lauf: zustand.lauf_new(),
+        ssid: [0; 256], ssid_len: [0; 8], kanal: [0; 8],
+        sicherheit: [0; 8], rssi: [0; 8], n_netze: 0, gewaehlt: -1,
+        spa: [0; 6], aa: [0; 6],
+        pmk: [0; 32], ptk: [0; 48], anonce: [0; 32], snonce: [0; 32],
+        gtk: [0; 16], gtk_len: 0, hat_ptk: false, akm: 0,
+        pn: [0; 6], fehler: 0
+    }
+    return s
+}
+
+fn ld8(p: u64, i: usize) -> u8 {
+    return *((p + i as u64) as *mut u8)
+}
+
+fn st8(p: u64, i: usize, v: u8) {
+    *((p + i as u64) as *mut u8) = v
+}
+
+// ==================================================================
+// SUCHLAUF
+// ==================================================================
+
+fn suchlauf_beginnen(s: *mut Sitzung, g: *mut geraet.Geraet) -> bool {
+    if !geraet.bereit(g) {
+        (*s).fehler = F_KEIN_GERAET
+        return false
+    }
+    (*s).n_netze = 0
+    (*s).gewaehlt = -1
+    zustand.beginn(&(*s).lauf)
+    zustand.ereignis(&(*s).lauf, 115)   // 's'
+    return true
+}
+
+// Ein Beacon (oder eine Probe Response) aufnehmen. Doppelte SSIDs
+// werden zusammengefasst -- ein Zugangspunkt sendet zehnmal in der
+// Sekunde, und eine Liste mit hundert Mal demselben Netz ist keine
+// Liste.
+fn beacon_aufnehmen(s: *mut Sitzung, p: u64, n: usize, rssi: i64) -> bool {
+    var b: beacon.Netz = beacon.netz_new()
+    if !beacon.zerlege(&b, p, n) {
+        (*s).fehler = F_ZU_KURZ
+        return false
+    }
+    if b.ssid_len == 0 || b.ssid_len > MAX_SSID {
+        return false      // verstecktes Netz: nichts zum Anzeigen
+    }
+    // Schon da?
+    var k: usize = 0
+    while k < (*s).n_netze {
+        if (*s).ssid_len[k] == b.ssid_len {
+            var gleich: bool = true
+            var i: usize = 0
+            while i < b.ssid_len {
+                if (*s).ssid[k * MAX_SSID + i] != b.ssid[i] {
+                    gleich = false
+                }
+                i = i + 1
+            }
+            if gleich {
+                // Die staerkere Messung gewinnt.
+                if rssi > (*s).rssi[k] {
+                    (*s).rssi[k] = rssi
+                }
+                return true
+            }
+        }
+        k = k + 1
+    }
+    if (*s).n_netze >= MAX_NETZE {
+        (*s).fehler = F_VOLL
+        return false
+    }
+    let j: usize = (*s).n_netze
+    var i2: usize = 0
+    while i2 < b.ssid_len {
+        (*s).ssid[j * MAX_SSID + i2] = b.ssid[i2]
+        i2 = i2 + 1
+    }
+    (*s).ssid_len[j] = b.ssid_len
+    (*s).kanal[j] = b.kanal
+    (*s).sicherheit[j] = b.sicherheit
+    (*s).rssi[j] = rssi
+    (*s).n_netze = j + 1
+    zustand.ereignis(&(*s).lauf, 98)    // 'b'
+    return true
+}
+
+fn netz_anzahl(s: *mut Sitzung) -> usize { return (*s).n_netze }
+
+fn netz_ssid_len(s: *mut Sitzung, k: usize) -> usize {
+    if k >= (*s).n_netze { return 0 }
+    return (*s).ssid_len[k]
+}
+
+fn netz_ssid_holen(s: *mut Sitzung, k: usize, out: u64) -> bool {
+    if k >= (*s).n_netze { return false }
+    var i: usize = 0
+    while i < (*s).ssid_len[k] {
+        st8(out, i, (*s).ssid[k * MAX_SSID + i])
+        i = i + 1
+    }
+    return true
+}
+
+fn netz_kanal_von(s: *mut Sitzung, k: usize) -> u64 {
+    if k >= (*s).n_netze { return 0 }
+    return (*s).kanal[k]
+}
+
+fn netz_sicherheit_von(s: *mut Sitzung, k: usize) -> u64 {
+    if k >= (*s).n_netze { return 0 }
+    return (*s).sicherheit[k]
+}
+
+fn netz_rssi_von(s: *mut Sitzung, k: usize) -> i64 {
+    if k >= (*s).n_netze { return 0 }
+    return (*s).rssi[k]
+}
+
+// Ein Netz waehlen und den Kanal einstellen.
+//
+// HIER STEHT DIE ABWEISUNG, und sie steht mit Absicht hier und nicht
+// weiter oben: WEP und TKIP sind gebrochen, ein offenes Netz ist
+// keines. `beacon.fi` ERKENNT sie und benennt sie -- damit ein Netz
+// nicht stumm als "offen" durchgeht --, aber verbinden darf man sich
+// nur mit WPA2/WPA3 und CCMP.
+fn netz_waehlen(s: *mut Sitzung, g: *mut geraet.Geraet, k: usize) -> bool {
+    if k >= (*s).n_netze {
+        (*s).fehler = F_ZUSTAND
+        return false
+    }
+    let sich: u64 = (*s).sicherheit[k]
+    if sich != beacon.SICH_WPA2 && sich != beacon.SICH_WPA3
+        && sich != beacon.SICH_UEBERGANG {
+        (*s).fehler = F_UNSICHER
+        return false
+    }
+    if geraet.kanal_setzen(g, (*s).kanal[k], 2) < 0 {
+        (*s).fehler = F_KEIN_GERAET
+        return false
+    }
+    (*s).gewaehlt = k as i64
+    return true
+}
+
+fn gewaehlt_ist(s: *mut Sitzung) -> i64 { return (*s).gewaehlt }
+
+// ==================================================================
+// DER HANDSCHLAG
+// ==================================================================
+
+// Nachricht 1: der Zugangspunkt schickt seine Zufallszahl. Daraus und
+// aus unserer eigenen entsteht der PTK. Zurueck geht Nachricht 2.
+//
+// `snonce` gibt der Aufrufer -- diese Datei wuerfelt nicht selbst,
+// weil im `lib/`-Baum kein Zufall verfuegbar ist und weil ein Test
+// eine feste Zahl braucht. Der Kern gibt echten Zufall herein.
+fn nachricht1_behandeln(s: *mut Sitzung, g: *mut geraet.Geraet,
+    eapol: u64, elen: usize, snonce: u64,
+    aus: u64, ausmax: usize) -> i64 {
+    var e: wpa.Eapol = wpa.eapol_new()
+    if !wpa.eapol_zerlege(&e, eapol, elen) {
+        (*s).fehler = F_ZU_KURZ
+        return -1
+    }
+    if !e.paarweise || !e.ack || e.hat_mic {
+        (*s).fehler = F_NICHT_UNSER
+        return -1
+    }
+    // `e.nonce` ist ein Zeiger IN den Rahmen -- die Struktur gibt ihn
+    // fertig heraus, es gibt keinen Versatz nachzurechnen.
+    var i: usize = 0
+    while i < 32 {
+        (*s).anonce[i] = ld8(e.nonce, i)
+        (*s).snonce[i] = ld8(snonce, i)
+        i = i + 1
+    }
+    if !wpa.ptk_ableiten((&(*s).pmk[0]) as u64, 32,
+        (&(*s).aa[0]) as u64, (&(*s).spa[0]) as u64,
+        (&(*s).anonce[0]) as u64, (&(*s).snonce[0]) as u64,
+        (*s).akm, (&(*s).ptk[0]) as u64, 48) {
+        (*s).fehler = F_SCHLUESSEL
+        return -1
+    }
+    (*s).hat_ptk = true
+    zustand.ereignis(&(*s).lauf, 49)    // '1'
+    // Nachricht 2 baut der Aufrufer -- diese Datei kennt das
+    // RSN-Element des Netzes nicht. Was sie liefert, ist der PTK.
+    zustand.ereignis(&(*s).lauf, 50)    // '2'
+    return 48
+}
+
+// Nachricht 3: Pruefwert und GTK. DIE EINZIGE STELLE, AN DER EIN
+// SCHLUESSEL INS GERAET GEHT.
+fn nachricht3_behandeln(s: *mut Sitzung, g: *mut geraet.Geraet,
+    eapol: u64, elen: usize) -> bool {
+    if !(*s).hat_ptk {
+        (*s).fehler = F_ZUSTAND
+        return false
+    }
+    var e: wpa.Eapol = wpa.eapol_new()
+    if !wpa.eapol_zerlege(&e, eapol, elen) {
+        (*s).fehler = F_ZU_KURZ
+        return false
+    }
+    // ZUERST der Pruefwert, DANN alles andere. Ein Rahmen, dessen MIC
+    // nicht stimmt, ist von einem Fremden, und aus einem fremden
+    // Rahmen wird nichts ausgepackt.
+    if !wpa.mic_pruefen((&(*s).ptk[0]) as u64, 16, eapol, elen, (*s).akm) {
+        (*s).fehler = F_MIC
+        zustand.ereignis(&(*s).lauf, 120)   // 'x'
+        return false
+    }
+    // Das GTK aus den verpackten Schluesseldaten.
+    var daten: [u8; 512] = [0; 512]
+    let dn: i64 = wpa.schluesseldaten_auspacken(
+        (&(*s).ptk[16]) as u64, 16,
+        e.daten, e.daten_len,
+        (&daten[0]) as u64, 512)
+    if dn < 0 {
+        (*s).fehler = F_SCHLUESSEL
+        return false
+    }
+    var nummer: u64 = 0
+    let gl: i64 = wpa.gtk_finden((&daten[0]) as u64, dn as usize,
+        (&(*s).gtk[0]) as u64, 16, &nummer)
+    if gl < 0 {
+        (*s).fehler = F_SCHLUESSEL
+        return false
+    }
+    (*s).gtk_len = gl as usize
+    zustand.ereignis(&(*s).lauf, 51)    // '3'
+
+    // Und jetzt die Schluessel ins Geraet. Erst der paarweise, dann
+    // der Gruppenschluessel. Geht einer davon nicht, wird der Automat
+    // NICHT auf verbunden gestellt -- lieber keine Verbindung als eine
+    // ohne Schluessel.
+    if geraet.schluessel_setzen(g, geraet.SCHLUESSEL_PTK, 0,
+        (&(*s).ptk[32]) as u64, 16) < 0 {
+        (*s).fehler = F_KEIN_GERAET
+        return false
+    }
+    if geraet.schluessel_setzen(g, geraet.SCHLUESSEL_GTK, nummer,
+        (&(*s).gtk[0]) as u64, (*s).gtk_len) < 0 {
+        (*s).fehler = F_KEIN_GERAET
+        return false
+    }
+    // Den Schluessel als installiert zu vermerken ist NICHT Sache
+    // dieser Datei: `zustand.fi` tut das selbst beim Ereignis '4', und
+    // zwar an genau einer Stelle. Eine zweite Stelle hier waere die
+    // zweite Wahrheit ueber denselben Sachverhalt.
+    zustand.ereignis(&(*s).lauf, 52)    // '4'
+    return true
+}
+
+// ==================================================================
+// DATEN
+// ==================================================================
+
+// Ein Nutzdatenrahmen. Er geht NUR raus, wenn `darf_daten` gilt --
+// das ist die Zusage, um die es in dieser ganzen Datei geht.
+fn daten_senden(s: *mut Sitzung, g: *mut geraet.Geraet,
+    rahmen: u64, rlen: usize, puffer: u64, pmax: usize) -> i64 {
+    if !zustand.darf_daten(&(*s).lauf) {
+        (*s).fehler = F_ZUSTAND
+        return -1
+    }
+    // Die Paketnummer hochzaehlen, hoechstwertig zuerst.
+    var i: i64 = 5
+    while i >= 0 {
+        let v: u64 = ((*s).pn[i as usize] as u64) + 1
+        (*s).pn[i as usize] = (v & 255) as u8
+        if v < 256 { i = -1 } else { i = i - 1 }
+    }
+    if geraet.kann_ccmp_von(g) {
+        // Die Karte rechnet. Der Rahmen geht im Klartext hinein.
+        return geraet.senden(g, rahmen, rlen)
+    }
+    // `protect` nimmt KEINE Verkehrsklasse entgegen -- es liest sie
+    // aus dem QoS-Feld des Kopfes. Sie hier noch einmal zu uebergeben
+    // waere eine zweite Quelle fuer dieselbe Zahl.
+    let n: i64 = ccmp.protect((&(*s).ptk[32]) as u64,
+        (&(*s).pn[0]) as u64, rahmen, rlen, puffer, pmax)
+    if n < 0 {
+        (*s).fehler = F_CCMP
+        return -1
+    }
+    return geraet.senden(g, puffer, n as usize)
+}
+
+fn daten_empfangen(s: *mut Sitzung, g: *mut geraet.Geraet,
+    puffer: u64, pmax: usize, aus: u64, ausmax: usize) -> i64 {
+    let n: i64 = geraet.empfangen(g, puffer, pmax)
+    if n <= 0 { return n }
+    if !zustand.darf_daten(&(*s).lauf) {
+        // Vor dem Handschlag gibt es keine Nutzdaten. Ein Rahmen, der
+        // trotzdem kommt, wird verworfen und nicht ausgepackt.
+        (*s).fehler = F_ZUSTAND
+        return -1
+    }
+    if geraet.kann_ccmp_von(g) {
+        var i: usize = 0
+        while i < (n as usize) && i < ausmax {
+            st8(aus, i, ld8(puffer, i))
+            i = i + 1
+        }
+        return n
+    }
+    let m: i64 = ccmp.unprotect((&(*s).ptk[32]) as u64, puffer,
+        n as usize, aus, ausmax)
+    if m < 0 {
+        (*s).fehler = F_CCMP
+        return -1
+    }
+    return m
+}
+
+// Trennen. DIE EINZIGE STELLE, AN DER EIN SCHLUESSEL AUS DEM GERAET
+// VERSCHWINDET -- und sie ist kein Beiwerk: ein Schluessel, der nach
+// dem Trennen in der Karte liegen bleibt, ist genau das, wovor die
+// Runde HAERTUNG warnt.
+fn trennen(s: *mut Sitzung, g: *mut geraet.Geraet) {
+    geraet.schluessel_setzen(g, geraet.SCHLUESSEL_AUS, 0, 0, 0)
+    zustand.ereignis(&(*s).lauf, 100)   // 'd'
+    (*s).hat_ptk = false
+    (*s).gtk_len = 0
+    var i: usize = 0
+    while i < 48 {
+        (*s).ptk[i] = 0 as u8
+        i = i + 1
+    }
+    i = 0
+    while i < 16 {
+        (*s).gtk[i] = 0 as u8
+        i = i + 1
+    }
+}
+
+fn verbunden_ist(s: *mut Sitzung) -> bool {
+    return zustand.verbunden(&(*s).lauf)
+}
+
+fn darf_daten_ist(s: *mut Sitzung) -> bool {
+    return zustand.darf_daten(&(*s).lauf)
+}
+
+fn zustand_von(s: *mut Sitzung) -> u64 { return (*s).lauf.zustand }
+fn grund_von(s: *mut Sitzung) -> u64 { return (*s).fehler }
