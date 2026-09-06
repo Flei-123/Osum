@@ -78,6 +78,19 @@ export {
     menu_open, menu_at, menu_win, dlg_text, dlg_open, dlg_ask, dlg_state,
     dlg_close, dlg_button, dlg_win, dlg_label,
     counts, blits_done, key_last,
+    // RUNDE DESIGN-2: die Bewegung. Ein Programm braucht davon im
+    // Regelfall NICHTS -- die Bibliothek bewegt selbst. Nach aussen
+    // gehen die Zaehler (damit ein Testlaeufer eine Bewegung messen
+    // kann, statt sie zu filmen) und die Kurven (fuer den Pruefstand).
+    anim_starts, anim_frames, anim_at, anim_laeuft, ease, anim_mix,
+    motion_aus, EASE_LINEAR, EASE_OUT, EASE_IN_OUT,
+    // RUNDE DESIGN-2: der Maler -- die Schicht fuer die Programme,
+    // die eine FLAECHE malen und kein Formular.
+    mal_flaeche, mal_tafel, mal_trenner, mal_text, mal_text_w,
+    mal_ascent, mal_balken, mal_punkt, mal_symbol, mal_abstand,
+    mal_radius, mal_rahmen, mal_linie, mal_kante3,
+    MR_FLAECHE, MR_TAFEL, MR_KNOPF, MR_FELD,
+    AN_WIN_OPEN, AN_WIN_CLOSE, AN_MENU, AN_HOVER, AN_PRESS, AN_NOTIFY,
     theme_watch, theme_now, theme_switches, theme_polls, theme_pixels,
     theme_stales, paint_all, THEME_POLL_TICKS,
     rect_x, rect_y, rect_w, rect_h, kind_of, tab_x, tab_w,
@@ -306,6 +319,66 @@ static mut s_esc: u64 = 0 // Zustand der Fluchtfolge
 static mut s_lastclick: u64 = 0
 static mut s_lastwd: u64 = 0
 static mut s_ticks: u64 = 0
+
+// ================================ RUNDE DESIGN-2: DIE BEWEGUNG
+//
+// EIN Tween-Verwalter fuer die ganze Bibliothek, und zwar aus dem
+// Grund, aus dem alles andere hier auch nur einmal existiert: eine
+// Bewegung, die jedes Programm selbst zaehlt, laeuft auf zwei Fenstern
+// verschieden schnell.
+//
+// DIE ZEITQUELLE IST `ticks()`, also `SYS_SYSINFO/I_TICKS`, und der
+// Takt steht in kernel/time.fi: `TICK_HZ = 100`. Ein Tick sind somit
+// GENAU 10 ms. Das ist die einzige Umrechnung in dieser Datei, sie
+// steht hier, und sie heisst `MS_PRO_TICK`.
+//
+// WARUM NICHT 60 Hz. Weil dieser Kernel 100 Hz hat. Eine Bibliothek,
+// die 60 Hz BEHAUPTET, waehrend ihr Zeitgeber mit 100 laeuft, rechnet
+// jede Dauer um 40 Prozent falsch. Die Zusage lautet: die Dauer in
+// Millisekunden stimmt; die Zahl der Zwischenbilder ist, was die
+// Maschine hergibt.
+//
+// WAS EIN TWEEN IST: vier Zahlen (Anfangstick, Dauer in Ticks, Kurve,
+// Ziel) und ein Fortschritt 0..1000. Nicht 0..100 -- bei einem Fenster
+// von 800 Bildpunkten ist ein Prozent acht Bildpunkte, und ein Sprung
+// von acht Bildpunkten ist genau das Ruckeln, das diese Runde
+// abstellen soll.
+const TW_MAX: u64 = 16
+const TW_FREI: u64 = 0
+const TW_LAEUFT: u64 = 1
+const TW_FERTIG: u64 = 2
+
+// Die Felder eines Tweens.
+const TW_STATE: u64 = 0
+const TW_T0: u64 = 1
+const TW_DUR: u64 = 2
+const TW_CURVE: u64 = 3
+const TW_WHAT: u64 = 4
+const TW_WIN: u64 = 5
+const TW_WD: u64 = 6
+const TW_P: u64 = 7
+const TW_FIELDS: u64 = 8
+
+// Die Kurven. Linear ist ausdruecklich dabei, weil eine gemessene
+// Bewegung eine braucht, an der nichts zu deuten ist.
+const EASE_LINEAR: u64 = 0
+const EASE_OUT: u64 = 1
+const EASE_IN_OUT: u64 = 2
+
+// Wofuer eine Bewegung laeuft.
+const AN_WIN_OPEN: u64 = 1
+const AN_WIN_CLOSE: u64 = 2
+const AN_MENU: u64 = 3
+const AN_HOVER: u64 = 4
+const AN_PRESS: u64 = 5
+const AN_NOTIFY: u64 = 6
+
+const MS_PRO_TICK: u64 = 10
+
+static mut tw: [u64; 128] = [0 as u64; 128]
+static mut tw_n: u64 = 0
+static mut tw_starts: u64 = 0
+static mut tw_frames: u64 = 0
 
 // =============================== RUNDE LOOK: DIE OBERFLAECHE MELDET SICH
 //
@@ -667,6 +740,13 @@ static mut tw_w: [u8; 4] = " w=\0"
 static mut tw_h: [u8; 4] = " h=\0"
 static mut tw_cx: [u8; 5] = " cx=\0"
 static mut tw_cy: [u8; 5] = " cy=\0"
+
+// RUNDE DESIGN-2: die Woerter der Bewegungsmeldung.
+static mut an_wort: [u8; 12] = "wlib: anim \0"
+static mut an_was: [u8; 5] = "was=\0"
+static mut an_p: [u8; 4] = " p=\0"
+static mut an_dur: [u8; 6] = " dur=\0"
+static mut an_wd: [u8; 5] = " wd=\0"
 
 fn say_window(i: u64) {
     if s_trace == 0 || i >= MAXWN {
@@ -3193,6 +3273,413 @@ fn ticks() -> u64 {
     return ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
 }
 
+// ------------------------------------------------------ die Bewegung
+//
+// DIE KURVEN, IN GANZZAHLEN. Eingang und Ausgang sind Tausendstel.
+// Es gibt hier keine Fliesskommazahl, und das ist keine Sparsamkeit:
+// dieser Kernel rettet in `syscall` keine SSE-Register, also hat ein
+// Ring-3-Programm, das in einer Ereignisschleife multipliziert, mit
+// `f64` keine Zusage. Ganzzahlen haben eine.
+//
+// ease-out ist 1-(1-t)^2, ease-in-out ist die Zwei-Stueck-Parabel --
+// beides die Formen aus states-and-variants.md, nur als Bruch.
+fn ease(kurve: u64, t: u64) -> u64 {
+    var p: u64 = t
+    if p > 1000 {
+        p = 1000
+    }
+    if kurve == EASE_OUT {
+        let inv: u64 = 1000 - p
+        return 1000 - inv * inv / 1000
+    }
+    if kurve == EASE_IN_OUT {
+        if p < 500 {
+            return 2 * p * p / 1000
+        }
+        let inv2: u64 = 1000 - p
+        return 1000 - 2 * inv2 * inv2 / 1000
+    }
+    return p
+}
+
+fn tg(i: u64, f: u64) -> u64 {
+    return tw[(i * TW_FIELDS + f) as usize]
+}
+
+fn tset(i: u64, f: u64, v: u64) {
+    tw[(i * TW_FIELDS + f) as usize] = v
+}
+
+// "Sind Bewegungen abgeschaltet?" -- EINE Stelle. `motion` gibt 0
+// zurueck, wenn die Formentabelle motion=0 sagt, und das ist genau die
+// Zusage "Animationen reduzieren": jede Bewegung ist dann sofort fertig
+// statt uebersprungen. Der Unterschied ist wichtig -- der Endzustand
+// wird in beiden Faellen erreicht, nur ohne Zwischenbilder.
+fn motion_aus() -> bool {
+    return wlibc.motion(wlibc.MO_NORMAL) == 0
+}
+
+// Eine Bewegung anmelden. Gibt die Nummer zurueck, oder TW_MAX, wenn
+// kein Platz ist -- und das ist kein Fehler: eine Oberflaeche, die
+// mehr als sechzehn Dinge gleichzeitig bewegt, darf die siebzehnte
+// weglassen. Sie ist dann sofort an ihrem Ziel.
+fn anim_start(was: u64, w: u64, wd: u64, stufe: u64, kurve: u64) -> u64 {
+    // Laeuft fuer dasselbe Ding schon eine: sie wird ersetzt, nicht
+    // gestapelt. Ein Knopf, ueber den die Maus dreimal wandert, hatte
+    // sonst drei Bewegungen mit drei Startzeiten.
+    var i: u64 = 0
+    var frei: u64 = TW_MAX
+    while i < tw_n {
+        if tg(i, TW_STATE) != TW_FREI && tg(i, TW_WHAT) == was
+            && tg(i, TW_WIN) == w && tg(i, TW_WD) == wd {
+            frei = i
+            i = tw_n
+        } else {
+            i = i + 1
+        }
+    }
+    if frei == TW_MAX {
+        var k: u64 = 0
+        while k < TW_MAX && tg(k, TW_STATE) != TW_FREI {
+            k = k + 1
+        }
+        if k >= TW_MAX {
+            return TW_MAX
+        }
+        frei = k
+        if frei >= tw_n {
+            tw_n = frei + 1
+        }
+    }
+    let ms: u64 = wlibc.motion(stufe)
+    var d: u64 = ms / MS_PRO_TICK
+    if d == 0 {
+        d = 1
+    }
+    tset(frei, TW_STATE, TW_LAEUFT)
+    tset(frei, TW_T0, ticks())
+    tset(frei, TW_DUR, d)
+    tset(frei, TW_CURVE, kurve)
+    tset(frei, TW_WHAT, was)
+    tset(frei, TW_WIN, w)
+    tset(frei, TW_WD, wd)
+    tset(frei, TW_P, 0)
+    tw_starts = tw_starts + 1
+    // motion=0: sofort am Ziel, aber EINMAL gemalt.
+    if ms == 0 {
+        tset(frei, TW_P, 1000)
+        tset(frei, TW_STATE, TW_FERTIG)
+    }
+    return frei
+}
+
+// Der Fortschritt eines Dings, 0..1000. Laeuft keine Bewegung dafuer,
+// ist die Antwort 1000 -- "steht an seinem Ziel". Das ist die Antwort,
+// die ein Maler will: er fragt nicht, OB etwas animiert wird, er malt
+// den Zustand, den er bekommt.
+fn anim_at(was: u64, w: u64, wd: u64) -> u64 {
+    var i: u64 = 0
+    while i < tw_n {
+        if tg(i, TW_STATE) != TW_FREI && tg(i, TW_WHAT) == was
+            && tg(i, TW_WIN) == w && tg(i, TW_WD) == wd {
+            return ease(tg(i, TW_CURVE), tg(i, TW_P))
+        }
+        i = i + 1
+    }
+    return 1000
+}
+
+fn anim_laeuft(was: u64, w: u64, wd: u64) -> bool {
+    var i: u64 = 0
+    while i < tw_n {
+        if tg(i, TW_STATE) == TW_LAEUFT && tg(i, TW_WHAT) == was
+            && tg(i, TW_WIN) == w && tg(i, TW_WD) == wd {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn anim_stop(was: u64, w: u64, wd: u64) {
+    var i: u64 = 0
+    while i < tw_n {
+        if tg(i, TW_STATE) != TW_FREI && tg(i, TW_WHAT) == was
+            && tg(i, TW_WIN) == w && tg(i, TW_WD) == wd {
+            tset(i, TW_STATE, TW_FREI)
+        }
+        i = i + 1
+    }
+}
+
+// EIN Takt fuer alle Bewegungen, aufgerufen aus `step`. Gibt zurueck,
+// wie viele noch laufen -- danach entscheidet `step`, ob es die CPU
+// abgeben darf oder nicht. Das ist der ganze Unterschied zwischen einer
+// Bewegung und einem Standbild: eine Schleife, die bei "nichts
+// passiert" schlaeft, muss wissen, dass eine laufende Bewegung ETWAS
+// ist.
+// Ein Schritt einer Bewegung auf die serielle Leitung. Nur mit
+// `/etc/uitrace`, wie jede andere Meldung dieser Bibliothek.
+fn say_anim(was: u64, wd: u64, p: u64, dur: u64) {
+    if s_trace == 0 {
+        return
+    }
+    let b: u64 = (&tr_buf[0 as usize]) as u64
+    var at: u64 = tr_put(b, 0, (&an_wort[0 as usize]) as u64)
+    at = tr_put(b, at, (&an_was[0 as usize]) as u64)
+    at = tr_num(b, at, was)
+    at = tr_put(b, at, (&an_wd[0 as usize]) as u64)
+    at = tr_num(b, at, wd)
+    at = tr_put(b, at, (&an_p[0 as usize]) as u64)
+    at = tr_num(b, at, p)
+    at = tr_put(b, at, (&an_dur[0 as usize]) as u64)
+    at = tr_num(b, at, dur)
+    __mmio_write8((b + at) as *mut u8, 10 as u8)
+    at = at + 1
+    let _w: u64 = ulib.put(b, at)
+}
+
+fn anim_tick() -> u64 {
+    if tw_n == 0 {
+        return 0
+    }
+    let jetzt: u64 = ticks()
+    var aktiv: u64 = 0
+    var i: u64 = 0
+    while i < tw_n {
+        let st: u64 = tg(i, TW_STATE)
+        if st == TW_LAEUFT {
+            var p: u64 = 1000
+            let d: u64 = tg(i, TW_DUR)
+            let t0: u64 = tg(i, TW_T0)
+            if jetzt > t0 {
+                let v: u64 = jetzt - t0
+                if v < d {
+                    p = v * 1000 / d
+                }
+            } else {
+                p = 0
+            }
+            if p != tg(i, TW_P) {
+                tset(i, TW_P, p)
+                let w: u64 = tg(i, TW_WIN)
+                let wd: u64 = tg(i, TW_WD)
+                if wd < MAXWD && wd < nwd {
+                    dirty_wd(wd)
+                } else {
+                    dirty_all(w)
+                }
+                tw_frames = tw_frames + 1
+                say_anim(tg(i, TW_WHAT), wd, p, d)
+            }
+            if p >= 1000 {
+                tset(i, TW_STATE, TW_FERTIG)
+            } else {
+                aktiv = aktiv + 1
+            }
+        } else if st == TW_FERTIG {
+            // Ein fertiger Tween bleibt EINEN Durchlauf stehen, damit
+            // `anim_at` den Endzustand noch einmal liefert, und wird
+            // dann frei. Wer ihn sofort loescht, malt das letzte Bild
+            // einer Bewegung nie.
+            tset(i, TW_STATE, TW_FREI)
+        }
+        i = i + 1
+    }
+    // Den Rand zuruecknehmen, damit `tw_n` nicht auf 16 stehenbleibt.
+    while tw_n > 0 && tg(tw_n - 1, TW_STATE) == TW_FREI {
+        tw_n = tw_n - 1
+    }
+    return aktiv
+}
+
+fn anim_starts() -> u64 {
+    return tw_starts
+}
+
+fn anim_frames() -> u64 {
+    return tw_frames
+}
+
+// Ein Wert zwischen zwei Zahlen, nach Fortschritt. Die eine Rechnung,
+// die ein Maler braucht, damit sie nicht in fuenfzehn Fassungen im
+// Baum steht.
+// ==================================================================
+// RUNDE DESIGN-2: DER MALER -- die zweite Schicht neben den Widgets.
+//
+// WOFUER ER DA IST. Fuenf Programme dieses Systems sind keine
+// Widget-Fenster: die Taskleiste, das Schnelleinstellungs-Blatt, das
+// Verlaufsdiagramm des Task-Managers, die Kachelkarte von `speicher`
+// und der Schreibtisch. Sie malen eine FLAECHE, und ein Knopf ist
+// dafuer das falsche Werkzeug.
+//
+// Vor dieser Runde haben sie deshalb `wlibc.rect`, `wlibc.frame` und
+// `wlibc.text_at` selbst gerufen -- also am Rahmenwerk vorbei, mit
+// eigenen Radien (keinen), eigenen Abstaenden (getippt) und eigener
+// Hoehe (keiner). Genau das zaehlt tools/design/zaehlen.py.
+//
+// DIE ANTWORT IST NICHT "macht Knoepfe daraus", sondern die Regel von
+// Justin: was das Rahmenwerk nicht kann, wird INS Rahmenwerk gebaut.
+// Diese Schicht ist der Pinsel, den ein flaechenmalendes Programm
+// braucht -- und sie kennt die Form-Tokens, die ein Programm nicht
+// kennen soll.
+//
+// WAS SIE NICHT IST: ein zweiter Zeichenkern. Jede Routine hier ist
+// eine Handvoll Zeilen ueber wlibc, und die Rechnung (Radius aus der
+// Rolle, Schatten aus der Hoehenstufe, Abstand aus der Skala) steht
+// EINMAL hier statt fuenfmal dort.
+
+// Die Rollen, aus denen ein Radius folgt. Ein Programm sagt WAS es
+// malt, nicht WIE rund es ist.
+const MR_FLAECHE: u64 = 0   // Hintergrund, kein Radius
+const MR_TAFEL: u64 = 1     // eine Tafel/Karte
+const MR_KNOPF: u64 = 2     // etwas Anfassbares
+const MR_FELD: u64 = 3      // ein Eingabefeld/eine Spur
+
+fn mal_radius(rolle: u64) -> u64 {
+    if rolle == MR_TAFEL {
+        return wlibc.metric(wlibc.M_RADIUS_PANEL)
+    }
+    if rolle == MR_KNOPF {
+        return wlibc.metric(wlibc.M_RADIUS_BUTTON)
+    }
+    if rolle == MR_FELD {
+        return wlibc.metric(wlibc.M_RADIUS_INPUT)
+    }
+    return 0
+}
+
+// EINE FLAECHE. Das ist `rect` mit einem Namen -- und der Name ist der
+// Punkt: ein Programm, das seinen Hintergrund fuellt, sagt das jetzt,
+// statt ein Rechteck zu malen.
+fn mal_flaeche(x: u64, y: u64, w: u64, h: u64, farbe: u64) {
+    wlibc.rrect(x, y, w, h, 0, farbe)
+}
+
+// EINE TAFEL: Flaeche mit dem Radius ihrer Rolle, wahlweise mit einer
+// Umrandung und mit einer Hoehenstufe (also einem Schatten).
+//
+// `stufe` ist EL_FLAT..EL_WINDOW aus wlibc. Bei EL_FLAT wird kein
+// Schatten gemalt und die Routine kostet genau so viel wie vorher.
+fn mal_tafel(x: u64, y: u64, w: u64, h: u64, rolle: u64, stufe: u64,
+    fuellung: u64, rand: u64) {
+    let r: u64 = mal_radius(rolle)
+    if stufe != wlibc.EL_FLAT {
+        let s: u64 = wlibc.elev_strength(stufe)
+        let reich: u64 = wlibc.elev_reach(stufe)
+        if s != 0 && reich != 0 {
+            wlibc.drop_shadow(x, y, w, h, r, s, reich,
+                wlibc.theme(wlibc.C_SHADOW))
+        }
+    }
+    if rand == 0 {
+        wlibc.rrect(x, y, w, h, r, fuellung)
+        return
+    }
+    wlibc.rframe(x, y, w, h, r, wlibc.metric(wlibc.M_BORDER), rand,
+        fuellung)
+}
+
+// EINE TRENNLINIE, mit der Deckkraft aus der Formentabelle. `classic`
+// bekommt seine harte Linie, `osum` eine, die nicht schreit.
+fn mal_trenner(x: u64, y: u64, w: u64) {
+    wlibc.divider(x, y, w, wlibc.theme(wlibc.T_LINE))
+}
+
+// TEXT AN EINER GRUNDLINIE, in einer Typo-Stufe. Ein Programm nennt die
+// STUFE (TY_CAPTION..TY_DISPLAY) und keine Punktgroesse.
+fn mal_text(x: u64, grundlinie: u64, p: u64, n: u64, farbe: u64,
+    stufe: u64) -> u64 {
+    return wlibc.text_at(wlibc.F_UI, wlibc.type_px(stufe), x, grundlinie,
+        p, n, farbe)
+}
+
+// Wie breit wird dieser Text in dieser Stufe? Messen ist kein Malen,
+// aber es gehoert an dieselbe Stelle wie das Malen -- sonst misst ein
+// Programm mit einer anderen Groesse, als es malt.
+fn mal_text_w(p: u64, n: u64, stufe: u64) -> u64 {
+    return wlibc.text_w(wlibc.F_UI, wlibc.type_px(stufe), p, n)
+}
+
+fn mal_ascent(stufe: u64) -> u64 {
+    return wlibc.ascent_of(wlibc.F_UI, wlibc.type_px(stufe))
+}
+
+// DIE ALTE KANTE: Flaeche, darauf eine Kante mit Licht und Schatten.
+//
+// Das ist die Form von `classic` und ausdruecklich KEINE Gestaltung
+// dieser Runde -- sie ist die Vergangenheit, und sie muss erhalten
+// bleiben, weil tools/look/run.sh Bildpunkt fuer Bildpunkt gegen sie
+// misst. `eingedrueckt` dreht Licht und Schatten um.
+//
+// Sie steht hier und nicht mehr in der Taskleiste, damit auch der
+// letzte Pinselstrich dieses Systems durch das Rahmenwerk geht.
+fn mal_kante3(x: u64, y: u64, w: u64, h: u64, fuellung: u64, licht: u64,
+    schatten: u64, eingedrueckt: bool) {
+    wlibc.rect(x, y, w, h, fuellung)
+    wlibc.frame3(x, y, w, h, licht, schatten, eingedrueckt)
+}
+
+// EIN RAHMEN OHNE FUELLUNG, mit dem Radius seiner Rolle.
+//
+// Fuer alles, was UEBER bereits Gemaltes gelegt wird: die Umrandung
+// einer Kachelkarte, der Rand eines Diagramms. `mal_tafel` fuellt --
+// wer sie hier nimmt, loescht, was er gerade gemalt hat.
+fn mal_rahmen(x: u64, y: u64, w: u64, h: u64, rolle: u64, farbe: u64) {
+    wlibc.rring(x, y, w, h, mal_radius(rolle),
+        wlibc.metric(wlibc.M_BORDER), farbe)
+}
+
+// EINE WAAGERECHTE HILFSLINIE IN VOLLER DECKKRAFT.
+//
+// Nicht `mal_trenner`: der ist ein TRENNER zwischen zwei Bereichen und
+// laeuft mit der Deckkraft aus der Formentabelle (bei `osum` ein
+// Fuenftel). Ein Gitter in einem Diagramm ist etwas anderes -- es muss
+// ablesbar sein, sonst ist es kein Gitter.
+fn mal_linie(x: u64, y: u64, w: u64, farbe: u64) {
+    wlibc.hline(x, y, w, farbe)
+}
+
+// EIN BALKEN: die Grundform eines Reglers, eines Fortschritts und eines
+// Diagrammbalkens. Radius der Rolle "Feld", damit ein Balken von vier
+// Bildpunkten Hoehe nicht wie ein Draht aussieht.
+fn mal_balken(x: u64, y: u64, w: u64, h: u64, farbe: u64) {
+    var r: u64 = mal_radius(MR_FELD)
+    if r * 2 > h {
+        r = h / 2
+    }
+    wlibc.rrect(x, y, w, h, r, farbe)
+}
+
+// EIN EINZELNER BILDPUNKT -- fuer die einzige Stelle, an der das
+// wirklich noetig ist: ein Hintergrundbild, das Punkt fuer Punkt
+// gerechnet wird (kernel/user/desktop.fi). Er steht hier, damit auch
+// diese Stelle durch das Rahmenwerk geht und nicht daran vorbei.
+fn mal_punkt(x: u64, y: u64, farbe: u64) {
+    wlibc.px(x, y, farbe)
+}
+
+// EIN SYMBOL an einer Stelle, in der Farbe einer Rolle.
+fn mal_symbol(id: u64, x: u64, y: u64) -> bool {
+    return wlibc.icon_draw(id, x, y)
+}
+
+// Ein Abstand aus der Skala. `sp(0..3)` = xs/s/m/l. Damit hoert das
+// Tippen von 8, 10, 12 in den Programmen auf.
+fn mal_abstand(stufe: u64) -> u64 {
+    return wlibc.space(stufe)
+}
+
+fn anim_mix(von: u64, bis: u64, p: u64) -> u64 {
+    if p >= 1000 {
+        return bis
+    }
+    if bis >= von {
+        return von + (bis - von) * p / 1000
+    }
+    return von - (von - bis) * p / 1000
+}
+
 fn fire(i: u64, kind: u64, index: u64, w: u64) {
     s_fired = i + 1
     s_fkind = kind
@@ -3264,6 +3751,10 @@ fn on_down(w: u64, x: u64, y: u64, btn: u64) {
     }
     if k == K_BUTTON {
         s(i, D_FLAGS, g(i, D_FLAGS) | F_PRESSED)
+        // Das Druecken ist die schnellste Bewegung im System: die
+        // Hand ist schon da, das Bild darf nicht hinterherlaufen.
+        let _a3: u64 = anim_start(AN_PRESS, g(i, D_WIN), i,
+            wlibc.MO_FAST, EASE_OUT)
         s_down = i + 1
         dirty_wd(i)
         return
@@ -3494,8 +3985,14 @@ fn on_move(w: u64, x: u64, y: u64, btn: u64) {
             if alt != neu {
                 if neu {
                     s(k2, D_FLAGS, g(k2, D_FLAGS) | F_HOVER)
+                    // RUNDE DESIGN-2: der Knopf faehrt hoch,
+                    // er springt nicht. MO_FAST = 120 ms.
+                    let _a1: u64 = anim_start(AN_HOVER, g(k2, D_WIN),
+                        k2, wlibc.MO_FAST, EASE_OUT)
                 } else {
                     s(k2, D_FLAGS, g(k2, D_FLAGS) & ~F_HOVER)
+                    let _a2: u64 = anim_start(AN_HOVER, g(k2, D_WIN),
+                        k2, wlibc.MO_FAST, EASE_OUT)
                 }
                 if g(k2, D_KIND) == K_BUTTON {
                     dirty_wd(k2)
@@ -3958,6 +4455,10 @@ fn menu_open(owner: u64, sx: u64, sy: u64, items: u64, n: u64) -> u64 {
         x = sub(wlibc.screen_w(), bw + 4)
     }
     let w: u64 = new_win(x, y, bw, bh, tp, NK_MENU)
+    // RUNDE DESIGN-2: das Menue klappt auf. Ganzes Fenster, also
+    // MAXWD als Widget -- `anim_tick` macht daraus `dirty_all`.
+    let _a4: u64 = anim_start(AN_MENU, w, MAXWD, wlibc.MO_FAST,
+        EASE_OUT)
     if w >= MAXWN {
         return MAXWN
     }
@@ -4286,11 +4787,18 @@ fn step() -> u64 {
         }
     }
     let gewechselt: bool = theme_watch()
+    // RUNDE DESIGN-2: die Bewegungen VOR dem Malen weiterdrehen. Wer
+    // sie danach dreht, malt jedes Zwischenbild einen Durchlauf zu
+    // spaet -- bei 150 ms sind das bei zehn Bildern zehn Prozent.
+    let laufend: u64 = anim_tick()
     let gemalt: u64 = paint_all()
     if gewechselt {
         s_thpx = s_thpx + gemalt
     }
-    if !etwas && gemalt == 0 {
+    // Eine laufende Bewegung ist ETWAS. Ohne diese Zeile schlaeft die
+    // Schleife mitten in einer Animation ein und das Fenster bleibt auf
+    // halbem Weg stehen, bis die Maus wackelt.
+    if !etwas && gemalt == 0 && laufend == 0 {
         ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
     }
     if s_fired == 0 {
