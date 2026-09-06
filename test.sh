@@ -1446,6 +1446,21 @@ lauf "41. der Aufgabenverwalter und das Kontrollzentrum (tools/werkzeug/run.sh, 
 #      je mit vier und acht Kernen.
 lauf "42. der Zeichenweg auf mehreren Kernen: eine Buehne je Kern (tools/glyphe/run.sh, Runde GLYPHE)" \
      tools/glyphe/run.sh glyphe '^GLYPHE: |^  OK    |^  FAIL |^  ZAHL  |^        '
+#  43. DER SYSTEMBUS (tools/systembus/run.sh, Runde SYSTEMBUS)
+#
+# Der wichtigste Einzelposten der Wegkarte (A3): benannte Dienste,
+# Nachrichten mit der ECHTEN Absenderkennung aus der Aufgabentafel,
+# Rechtepruefung mit sichtbarem Nein, Abo/Ereignis, geteilte Segmente
+# ohne Kopie -- und darauf EIN Typmodell fuer Zwischenablage,
+# Drag-and-Drop und geteilten Speicher (D1-D3), plus die
+# Benachrichtigungen (A11).
+#
+# Gemessen wird mit VIER Kernen, weil ein Bus mit einem Kern nichts
+# beweist: hundert Durchlaeufe zwischen zwei Prozessen mit Pruefsumme,
+# ein abgelehnter Ruf, ein Megabyte durch ein Segment, und drei
+# Gegenproben (`nobus`, ohne `busbench`, root gegen Nicht-root).
+lauf "43. der Systembus: Dienste, Rechte, Zwischenablage, Segmente (tools/systembus/run.sh, Runde SYSTEMBUS)" \
+     tools/systembus/run.sh systembus '^SYSTEMBUS: |^  OK   |^  FAIL |^        (busa|busb|busd|buss|byt=|vor=|mit nobus|bild)'
 
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
