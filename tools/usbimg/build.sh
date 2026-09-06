@@ -650,7 +650,7 @@ verbose: yes
 # DIESELBE Ursache: hilft eines von beiden und das erste nicht, lag es am
 # Zwischenspeicher. Hilft keines, lag es woanders -- und dann sagen die
 # zwei Herzschlagfelder am rechten Bildrand, wo.
-/@MARKE_PRODUKT@ -- Schreibtisch (Zwischenspeicher nach jedem Bild leeren, Test)
+/@MARKE_PRODUKT@ -- Schreibtisch (Cache leeren je Bild, Test)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
@@ -780,13 +780,13 @@ verbose: yes
 # nicht. Die Adresse ist dieselbe verbindungslokale Platzhalteradresse
 # wie im Kommandozeilen-Eintrag; `dhcp` ersetzt sie.
 
-//@MARKE_PRODUKT@ -- USB-Diagnose: Regler uebernehmen und jeden Anschluss zeigen
+//@MARKE_PRODUKT@ -- USB-Diagnose: Regler und jeder Anschluss
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
     cmdline: hwdiag usb hidgen usbleg usbstop gfx nokbd nosched noproc nofs noring3
 
-//@MARKE_PRODUKT@ -- Netz-Selbstlauf ohne Tastatur (dhcp, host, fetch, ota)
+//@MARKE_PRODUKT@ -- Netz-Selbstlauf ohne Tastatur (dhcp, ota)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
@@ -853,7 +853,7 @@ verbose: yes
 # allen Kernen auf diesem Brett nicht so laeuft wie mit einem, ist das
 # der Eintrag, der es beweist: derselbe Kern, dieselbe Wurzel, ein Wort
 # Unterschied.
-/@MARKE_PRODUKT@ -- Schreibtisch, Ring 3 nur auf Kern 0 (Rueckfallebene)
+/@MARKE_PRODUKT@ -- Schreibtisch, Ring 3 nur Kern 0 (Rueckfall)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
@@ -868,7 +868,7 @@ verbose: yes
 # Eintrag, der die Maschine mit Absicht umbringt, und der gehoert in
 # den Pruefstand und nicht in die Hand eines Menschen vor einem
 # echten Rechner.)
-/@MARKE_PRODUKT@ -- Gegenprobe: falsche GS-Basis, der Riegel muss halten
+/@MARKE_PRODUKT@ -- Gegenprobe: falsche GS-Basis (Riegel haelt?)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
@@ -925,6 +925,17 @@ sed -i "s|@MARKE_PRODUKT@|$MARKE_PRODUKT|g" "$OUT/limine.conf" \
 if grep -q '@MARKE_PRODUKT@' "$OUT/limine.conf"; then
     fehler "in limine.conf steht noch ein Platzhalter"
 fi
+# RUNDE BLECH2: KEIN MENUEEINTRAG LAENGER ALS 60 ZEICHEN. Justins Foto
+# vom 05.09.: "OrientOS -- Schreibtisch (Zwischenspeicher nach jedem Bild
+# lee" -- Limine schneidet den Text an der Spaltenzahl des Menues ab, und
+# der Rest stand nirgends. Gezaehlt wird NACH dem Einsetzen des
+# Produktnamens: ein laengerer Name aus marke.conf nimmt dem Rest den
+# Platz, und dann soll der Bau das sagen und nicht der Bildschirm.
+zu_lang=$(grep -E '^/' "$OUT/limine.conf" | sed 's|^/*||' | awk 'length($0) > 60')
+if [ -n "$zu_lang" ]; then
+    fehler "Menueeintrag laenger als 60 Zeichen: $zu_lang"
+fi
+sagen "menue       $(grep -cE '^/' "$OUT/limine.conf") Eintraege, laengster $(grep -E '^/' "$OUT/limine.conf" | sed 's|^/*||' | awk '{ if (length($0) > m) m = length($0) } END { print m }') Zeichen"
 
 # ================================================== 7. das Abbild
 FS_MIB=$(( ( $(stat -c%s "$OUT/root.img") + 1048575 ) / 1048576 ))
