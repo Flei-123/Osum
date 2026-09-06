@@ -16,7 +16,13 @@ Grundlage: `merge6` = `a92fa00` (Runde GLYPHE, `./test.sh` 65/65 Abschnitte,
 | 7 | `protokoll` | 422650d | 9 Dateien | 55/0 (Zweig) | **55/0** |
 | 8 | `ton` | 6d0b887 | 5 Dateien | — | siehe unten |
 | 9 | `certus2` | 94bd4a1 | 2 (`.gitignore`, `wlibc.fi`) | avx 32/0, certus 47/0 | **avx 32/0** |
-| 10 | `blech2`/Rest | — | — | — | — |
+
+Zusaetzlich hereingeholt: `origin/main` (d7cbdd9) — acht Commits Lizenz- und
+`.gitattributes`-Arbeit vom 27.08., die noch nicht in merge6 steckten. Ein
+Konflikt (`LICENSE`); genommen wurde die Fassung von origin (der reine
+GPL-2.0-Text, damit GitHub das Repo richtig ausweist) — die Uebersicht steht
+weiter in `LICENSE-UEBERSICHT.md` und `LICENSING.md`. Damit ist der Push ein
+VORSPULEN und wirft nichts weg.
 
 `alltag` ist ABSICHTLICH NICHT gemergt — die Runde laeuft noch.
 
@@ -154,3 +160,72 @@ Verzeichnis mitten im Auspacken weg; das sieht dann aus wie
 `tar: ... Cannot open: No such file or directory` und
 `vendor/firn/fetch-firnc.sh fehlgeschlagen`, also wie ein Codefehler.
 **Je Laeufer ein eigenes `FIRN_BAU_DIR` setzen.**
+
+
+## Gemessen (Stand 06.09.2026, 19:05)
+
+Alle Zahlen unter FREMDLAST erhoben — auf der Maschine liefen bis zu 37
+QEMU-Instanzen anderer Runden (Lastmittel bis 29). Wo das zaehlt, steht es
+dabei.
+
+| Laeufer | merge7 | Grundlinie | Bemerkung |
+|---------|--------|------------|-----------|
+| `tools/avx/run.sh` | **32 / 0** | 32 / 0 | der fxsave-Kanarienvogel |
+| `tools/posix/run.sh` | **134 / 0** | 134 / 0 | nach dem SHOT-Fix (vorher 133/1) |
+| `tools/pci/run.sh` | **98 / 0** | 98 / 0 | allein gemessen (unter Last 97/1) |
+| `tools/userland/run.sh` | **91 / 0** | 91 / 0 | |
+| `tools/protokoll/run.sh` | **55 / 0** | 55 / 0 | nach dem kdata-Fix |
+| `tools/bridge/run.sh` | **113 / 0** | 16 / 0 (Zweig) | |
+| `tools/systembus/run.sh` | **34 / 1** | 30 / 5 (Zweig) | besser als der Zweig |
+| `tools/uhrwerk/abnahme.sh` | **8 / 0** | 8 / 0 | 3440x1440, smp1 und smp4 |
+| `tools/hda/run.sh` | 140 / 3 | — | die 3 sind Tempo/Aussetzer, lastabhaengig |
+| `tools/vielkern/run.sh` | 37 / 3 | **26 / 13** | merge6 unter derselben Last SCHLECHTER |
+| `tools/usbimg/run.sh` | 27 / 15 | 37 / 11 (rot) | vorbestehend rot, siehe unten |
+| `tools/certus/run.sh` | uebersprungen | — | `/root/certus-sammeln` gibt es nicht mehr |
+
+### Der eine echte Fehler, den das Zusammenfuehren gefunden hat
+
+`SYS_OSUM_SHOT = 1841` stand NUR in `kernel/sys.fi`, nicht in
+`lib/libc/kcall.fi`. Auf dem Zweig `bridge2` faellt das nie auf —
+`tools/bridge/run.sh` geht ueber den Kern und fragt die libc nie (113/0).
+Erst `tools/posix/run.sh` Abschnitt 1 haelt beide Tafeln nebeneinander:
+
+    SYS_OSUM_SHOT: kernel 1841, libc missing
+
+POSIX 133/1 → nach der Ergaenzung **134/0**. Das ist das DRITTE Mal: die
+Datei beschreibt `SYS_OSUM_CPUSTAT` (1840, Runde WERKZEUGE) und
+`SYS_OSUM_KLOG` (1860, Runde PROTOKOLL) mit demselben Text.
+
+### Zwei falsche Rotmeldungen, beide nachgewiesen
+
+1. **PCI**: unter Last `DMA against PIO, in thousandths: 1009, expected ge
+   1200` → 97/1. ALLEIN nachgemessen: **1360 → 98/0**. Eine reine
+   Durchsatzmessung auf einer Maschine mit 37 fremden QEMU.
+2. **VIELKERN**: 37/3 sah nach Regression aus. Gegenprobe mit merge6 auf
+   DERSELBEN Maschine, DERSELBEN Last: **26/13**, mit demselben
+   `abw: 7, wollte eq 0` und vielen `keine Zahl gefunden` (QEMU-Zeitlimit).
+   merge7 ist also besser als die Grundlinie.
+
+### `usbimg` ist vorbestehend rot, nicht neu
+
+Der GLYPHE-Lauf auf merge6 meldet denselben Abschnitt schon als
+fehlgeschlagen (37/11). Ursache: eine spaetere Runde (LEISTE) hat
+`default_entry` in `limine.conf` bewusst auf den Schreibtisch gestellt,
+`tools/usbimg/run.sh` erwartet aber weiter den Diagnose-Eintrag und sucht
+`hwdiag:`-Zeilen, die dann nicht kommen. Das Abbild selbst ist in Ordnung:
+es startet unter BIOS UND UEFI, GPT/EFI/MBR stimmen, und der serielle
+Mitschnitt zeigt den vollen Schreibtisch samt Uhr (`18:54:20 06.09.26`),
+Netz (`10.0.2.15`) und `sh: ready`.
+
+## Das Abbild
+
+    /root/abbilder/orientos-usb-20260906-db3e942.img   118 MiB
+    sha256 bc9648058e4d5c34fd2811c93d4539253e70ab286b1bcfd50bf990f22e52753b
+
+Gebaut mit `JARVIS_CONF=assets/jarvis/rechte-justin.conf`, also mit Justins
+ECHTEM Server vorbelegt (`server = 192.168.1.54:8443`,
+`servername = jarvis.fleitec.com`) — im rohen `.img` nachgewiesen. Der
+allgemeine Stick bleibt bei "nichts erlaubt".
+
+Liegt unter `https://store.fleitec.com/abbilder/orientos-usb-20260906-db3e942.img`
+(+ `.sha256`) als NEUE Datei; `orientos-usb.img` vom 05.09. ist unberuehrt.
