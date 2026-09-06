@@ -334,6 +334,62 @@ und dazu: `f_x/f_y/f_w/f_h/f_lines` auf `[u64; 5]`, `f_txt` auf 320,
 
 ---
 
+## 6b. Die bestehenden Abnahmen — und ein Fehlalarm, der einzeln verschwand
+
+`tools/hda/run.sh` (Runde HDA) gegen **beide** Zweige gefahren:
+
+| | `ton` (unverändert) | `ton2` |
+|---|---:|---:|
+| bestanden | 138 | 135 |
+| gefallen | **4** | **7** |
+
+Die vier auf beiden Zweigen sind **Bestand** und zeichengleich:
+`Stroeme, die zu spaet kamen: 1`, `Aussetzer aus Ring 3: 4`,
+`Aussetzer: 2`, `die Speicherkarte hat Kollisionen`.
+
+Die drei zusätzlichen sahen nach einer echten Regression aus — die
+gefährlichste Sorte, weil zwei davon genau den Mischer betreffen, den
+diese Runde für korrekt erklärt:
+
+    FAIL  begrenzte Abtastwerte (12000+12000 < 32767): 24, erwartet 0
+    FAIL  die groesste Summe liegt unter der Vollaussteuerung: 35781
+    FAIL  Aussetzer bei MP3 aus Ring 3: 4, erwartet <= 2
+
+**Einzeln nachgestellt, drei Läufe je Zweig** (derselbe `audmix`-Pfad,
+eine QEMU zur Zeit):
+
+| | Lauf 1 | Lauf 2 | Lauf 3 | clips |
+|---|---:|---:|---:|---:|
+| `ton2` | 23 715 | 22 871 | 22 871 | 0, 0, 0 |
+| `ton` | 23 826 | 22 871 | 23 910 | 0, 0, 0 |
+
+**Dieselbe Verteilung, keine Begrenzung.** Der Wert 35 781 entstand
+unter der Last von zehn gleichzeitigen QEMU-Instanzen, die `test.sh` mit
+`OSUM_JOBS=10` startet.
+
+Das ist belegbar und nicht nur plausibel: `kernel/audio.fi`,
+`kernel/mix.fi`, `kernel/hda.fi` und `kernel/kmain.fi` sind zwischen
+`ton` und `ton2` **unverändert** (`git diff ton..HEAD --name-only` nennt
+keine davon), und der `audmix`-Pfad benutzt weder `/bin/play` noch
+`AS_WAITSPACE`.
+
+**Es ist derselbe Fehlalarm, den Runde DESIGN-2 schon einmal hatte** (ein
+SOFTUI-Lauf meldete 4 statt 3 Fehlschläge, weil 5 QEMU gleichzeitig
+liefen). Die Lehre daraus hat sich hier zum zweiten Mal bezahlt gemacht:
+**immer einzeln nachstellen, bevor man einen Fehler glaubt.**
+
+Der andere Fehler, den `test.sh` meldet — *„der festgenagelte
+Uebersetzer: vendor/firn/lib/net/stack.fi …"* — ist ebenfalls Bestand:
+`vendor/` ist von TON-2 nicht angefasst, die Datei ist auf
+`/root/osum-merge6` und `/root/osum-ton2` byte-gleich (sha1
+`742b8e0d…`), und derselbe Abschnitt fällt auf `merge6` mit derselben
+Meldung.
+
+**`test.sh` Abschnitt 42** (`tools/ton/mischer.sh`) läuft auch unter
+`OSUM_JOBS=10` mit **25 gut, 0 beanstandet**.
+
+---
+
 ## 7. Was diese Runde NICHT getan hat
 
 * **Der Aussetzerzähler ist nicht repariert.** `hda.fi` schreibt ihn nur
