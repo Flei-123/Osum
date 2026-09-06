@@ -25,7 +25,13 @@ mkdir -p "$OUT/bin"
 # DIE PROGRAMME. Die erste Gruppe ist die Oberflaeche (alles, was
 # `import wlib` hat), die zweite das Werkzeug darunter -- darunter
 # `opk` und `ota`, ohne die diese Runde nichts zu messen haette.
-GUI=${GUI:-"desktop taskbar launcher settings explorer widgetdemo themetest netmon theme"}
+# RUNDE CERTUS-AUF-OSUM: `taskmgr` gehoert dazu. assets/apps enthaelt
+# taskmgr.osp, und dessen `start` ist ein zweiter Name auf /bin/taskmgr
+# -- fehlt die Datei, lehnt tools/osum/mkfs.py das ganze Abbild ab
+# ("mkfs: '/bin/taskmgr' gibt es nicht"). Gemessen beim ersten Bau
+# dieser Runde; es hat nichts mit dem Browser zu tun und wird hier
+# trotzdem behoben, weil es JEDEN Bau dieses Skripts betrifft.
+GUI=${GUI:-"desktop taskbar launcher settings explorer widgetdemo themetest netmon theme taskmgr"}
 CLI=${CLI:-"sh ls cat echo edit cp mv rm mkdir rmdir touch head tail wc grep sort sleep ps kill uname date df install opk ota dhcp host reboot find du chmod id whoami top netview locate tar mount umount env which"}
 APPS=${APPS:-"fetch"}
 
@@ -78,4 +84,29 @@ for p in $APPS; do
     strip --strip-all "$OUT/bin/$p"
     echo "   app       $p ($(stat -c%s "$OUT/bin/$p") Oktette)"
 done
+
+# ============================================ RUNDE CERTUS-AUF-OSUM
+#
+# Der Browser ist die dritte Bauart in diesem Skript, und er ist die
+# einzige, deren QUELLTEXT NICHT IN DIESEM BAUM LIEGT: Certus gehoert
+# zum Firn-Projekt ($CERTUS_REPO, Zweig `osum`), ist rund 105.000
+# Zeilen gross und wird mit SEINEM eigenen Uebersetzer gebaut -- nicht
+# mit dem festgenagelten aus vendor/firn, dem er voraus ist. Wie das
+# geht und warum, steht in kernel/user/certus/bau.sh.
+#
+# Fehlt der Baum, faellt hier nichts aus: das Abbild hat dann kein
+# /bin/certus, und tools/laden/pakete.sh laesst das Paket weg. Ein
+# Bauskript, das ohne fremdes Repo gar nicht mehr durchlaeuft, waere
+# der schlechtere Tausch.
+if [ -d "${CERTUS_REPO:-/root/certus-sammeln}/lib/browser" ]; then
+    if bash kernel/user/certus/bau.sh "$OUT/bin/certus" \
+            > "$OUT/certus.log" 2>&1; then
+        echo "   browser   certus ($(stat -c%s "$OUT/bin/certus") Oktette)"
+    else
+        echo "== certus laesst sich nicht bauen:"
+        tail -12 "$OUT/certus.log"
+    fi
+else
+    echo "   browser   uebersprungen (kein Certus-Baum in ${CERTUS_REPO:-/root/certus-sammeln})"
+fi
 exit 0

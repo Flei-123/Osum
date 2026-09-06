@@ -43,7 +43,6 @@ profile kernel
 
 import ulib
 import libc.io
-import libc.mem
 import icons
 import utf8
 
@@ -1158,6 +1157,48 @@ fn gfind(f: u64, px_: u64, c: u64) -> u64 {
 // Konstanten des Kerns nicht einbindet; laeuft sie auseinander, faellt
 // das im Prueflauf auf und nicht im Betrieb.
 const GMAX: u64 = 256
+// =========================== RUNDE CERTUS-AUF-OSUM: DER GLYPHENSPEICHER
+//
+// Bis zu dieser Runde kam der Speicher fuer die Glyphenbilder aus
+// `libc.mem` -- dem brk-Allokator der libc. Das war richtig und ist es
+// geblieben; was sich geaendert hat, ist der NAME. Firn fuehrt Module am
+// Kurznamen (`compiler/src/modules.rs`), und der Browser Certus, der
+// diese Bibliothek seit dieser Runde in EINEM Programm mit seinen
+// eigenen Modulen bindet, hat ein Modul `html.mem`. Zwei Module namens
+// `mem` in einem Programm: der erste Treffer gewinnt STILL, und das
+// zweite ruft danach Funktionen, die es nicht gibt (docs/RUNDE-EINKERN.md
+// in Certus hat genau das gemessen).
+//
+// Also holt sich diese Bibliothek den Glyphenspeicher selbst: 64-KiB-
+// Stuecke aus `mmap` -- derselbe Weg, auf dem oben schon die Malflaeche
+// kommt (`map_surface`) -- und ein Zeiger, der darin nach vorn laeuft.
+// Glyphen werden nie freigegeben (das war mit libc.mem nicht anders:
+// es gab kein `release` in dieser Datei), also braucht es keine Liste.
+// Ein Glyph ist hoechstens 2000 Oktette gross (`gbuf`); 64 KiB fassen
+// davon dreissig, und die 512 Plaetze der Tafel oben brauchen im
+// schlimmsten Fall sechzehn Stuecke.
+static mut g_arena: u64 = 0
+static mut g_arena_rest: u64 = 0
+const G_CHUNK: u64 = 65536
+
+fn gmem(n: u64) -> u64 {
+    let m: u64 = (n + 15) & ~15
+    if m > G_CHUNK {
+        return 0
+    }
+    if g_arena == 0 || g_arena_rest < m {
+        let p: u64 = map_surface(G_CHUNK)
+        if ulib.bad(p) || p == 0 {
+            return 0
+        }
+        g_arena = p
+        g_arena_rest = G_CHUNK
+    }
+    let r: u64 = g_arena
+    g_arena = g_arena + m
+    g_arena_rest = g_arena_rest - m
+    return r
+}
 
 fn gload(at: u64, f: u64, px_: u64, c: u64, k: u64) -> u64 {
     let n: u64 = sys5(WIG_GLYPH, f, px_, c, (&gbuf[0 as usize]) as u64,
@@ -1203,9 +1244,9 @@ fn gload(at: u64, f: u64, px_: u64, c: u64, k: u64) -> u64 {
     gc[(at + GC_ADV) as usize] = __mmio_read64((b + 32) as *mut u64)
     gc[(at + GC_DATA) as usize] = 0
     if gw * gh > 0 {
-        let p: u64 = mem.alloc(gw * gh)
+        let p: u64 = gmem(gw * gh)
         if p != 0 {
-            mem.copy(p, b + 48, gw * gh)
+            ulib.copy(p, b + 48, gw * gh)
             gc[(at + GC_DATA) as usize] = p
         } else {
             gc[(at + GC_W) as usize] = 0
