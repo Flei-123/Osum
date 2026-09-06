@@ -1113,6 +1113,12 @@ fn gfind(f: u64, px_: u64, c: u64) -> u64 {
     return 0xFFFFFFFFFFFFFFFF
 }
 
+// Die groesste Glyphe, die der Rasterer im Kern ueberhaupt hergibt --
+// `ttf.MAX_W` und `ttf.MAX_H`. Steht hier als Zahl, weil Ring 3 die
+// Konstanten des Kerns nicht einbindet; laeuft sie auseinander, faellt
+// das im Prueflauf auf und nicht im Betrieb.
+const GMAX: u64 = 256
+
 fn gload(at: u64, f: u64, px_: u64, c: u64, k: u64) -> u64 {
     let n: u64 = sys5(WIG_GLYPH, f, px_, c, (&gbuf[0 as usize]) as u64,
         2048)
@@ -1123,6 +1129,32 @@ fn gload(at: u64, f: u64, px_: u64, c: u64, k: u64) -> u64 {
     let b: u64 = (&gbuf[0 as usize]) as u64
     let gw: u64 = __mmio_read64((b + 0) as *mut u64)
     let gh: u64 = __mmio_read64((b + 8) as *mut u64)
+    // ================================================== RUNDE GLYPHE
+    // DER KOPF WIRD GEPRUEFT, BEVOR MIT IHM GERECHNET WIRD.
+    //
+    // `gw * gh` ist eine u64-Multiplikation, und Firn faengt ihren
+    // Ueberlauf mit einem Panic ab. Das ist die Zeile, an der in Runde
+    // MERGE-6 der Aufgabenverwalter starb -- eine Zeile nach
+    // `taskmgr: start`, in einem von fuenf Laeufen mit vier Kernen:
+    //
+    //   panic: integer overflow in 'u64 * u64' at wlibc.fi:1128:8
+    //
+    // DIE URSACHE LAG IM KERN und ist behoben (`wig.stage_of`, eine
+    // Buehne je Kern): im Kopf stand die Breite des einen Zeichens und
+    // dahinter die Bildpunkte des anderen. NACHGERECHNET: mit sauberen
+    // Werten kann die Rechnung NICHT ueberlaufen -- der Rasterer
+    // liefert hoechstens 256 x 256 (`ttf.MAX_W`/`MAX_H`), und der
+    // Umschlag ist 2048 Oktett gross. Diese drei Vergleiche sind
+    // deshalb kein Ersatz fuer die Reparatur, sondern der zweite
+    // Riegel: ein Kopf, der nicht zu der gemeldeten Laenge passt, wird
+    // VERWORFEN statt multipliziert. Die Laengenprobe kommt ohne
+    // Multiplikation aus (Division statt Produkt).
+    if gw > GMAX || gh > GMAX {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    if gw != 0 && gh > (n - 48) / gw {
+        return 0xFFFFFFFFFFFFFFFF
+    }
     gc[(at + GC_KEY) as usize] = k
     gc[(at + GC_W) as usize] = gw
     gc[(at + GC_H) as usize] = gh

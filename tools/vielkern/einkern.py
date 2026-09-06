@@ -35,6 +35,34 @@ Bekannte Sperren:
     nichts aus. Genau dieser Irrtum steht in mehreren Kommentaren des
     Baums.
 
+RUNDE GLYPHE: DIE ZWEITE BAUFORM DESSELBEN FEHLERS.
+
+Der Zeichenweg hat den Fehler noch einmal gehabt, und dieses Werkzeug
+hat ihn NICHT gesehen -- weil er nicht `state + kstate.X_OFF` heisst.
+`kernel/wig.fi` holt seine Seite ueber einen eigenen Zugriff:
+
+    fn base(state: u64) -> u64 { return state + kstate.WIG_OFF }
+    ...
+    let stage: u64 = base(state) + STAGE_OFF     <-- derselbe Puffer
+
+Textlich steht dort kein `kstate.`, also fiel die Buehne durch das
+Raster -- und mit ihr der Fehler, an dem Runde MERGE-6 gescheitert ist
+(`panic: integer overflow in 'u64 * u64'`, ein Ring-3-Programm tot in
+einem von fuenf Laeufen mit vier Kernen). Seit dieser Runde sucht das
+Werkzeug deshalb ZWEI Formen:
+
+  1. `state + kstate.<X>_OFF`  -- die alte, und
+  2. `<zugriff>(state) + <KONST>` in jeder Datei, die einen solchen
+     Zugriff auf eine kdata-Seite selbst definiert.
+
+Was als Sperre gilt, ist um die drei Namen dieser Runde erweitert:
+`wig.buehne_an` (die Buehnensperre), `ttf.tafel_an` (der
+Glyphenspeicher) und `stage_of(` -- der letzte ist KEINE Sperre,
+sondern die Aufloesung JE KERN: er gibt die Seite DIESES Kerns
+(`kstate.WIGST_OFF + cpu.here(state) * STAGE_MAX`), und damit gibt es
+nichts mehr zu teilen. Er steht mit diesem Satz hier und nicht als
+stille Ausnahme.
+
 WAS ES NICHT KANN. Es liest Text und keine Ablaeufe. Eine Funktion, die
 ihren Puffer nur unter einer Sperre BEKOMMT (weil jeder Aufrufer sie
 haelt), steht hier trotzdem -- und eine, die ihn nur auf einem Kern
@@ -58,13 +86,37 @@ PUFFER = re.compile(
     r")")
 
 SPERRE = re.compile(r"\benter\(state\)|\bfs\.enter\(|atomic\.lock_take\("
-                    r"|serial\.zeile_an\(")
+                    r"|serial\.zeile_an\("
+                    # RUNDE GLYPHE: die drei Namen des Zeichenwegs.
+                    r"|buehne_an\(|buehne_wenn_|tafel_an\(|stage_of\(")
+
+# RUNDE GLYPHE: die zweite Bauform -- eine Seite, die die Datei ueber
+# einen EIGENEN Zugriff holt. Der Zugriff selbst wird hier gesucht ...
+BASISZUGRIFF = re.compile(
+    r"fn (\w+)\(state: u64\) -> u64 \{\s*\n\s*return state \+ kstate\.(\w+_OFF)")
+# ... und das hier ist sein Gebrauch als ARBEITSFLAECHE. `+ 0x` und
+# `+ <kleinbuchstaben>` faengt es nicht: nur benannte Konstanten, also
+# genau das, was eine Runde sich als Puffer hinlegt.
+def puffer2(zugriff):
+    return re.compile(r"\b%s\(state\)\s*\+\s*([A-Z][A-Z0-9_]*)" % zugriff)
 
 # Diese Dateien laufen nachweislich nur auf einem Kern oder nur vor dem
 # Start der Anwendungskerne. Sie stehen mit BEGRUENDUNG hier und nicht
 # als stille Ausnahme.
 RUHIG = {
     "kmain.fi": "laeuft vor smp.probe, also bevor es zweite Kerne gibt",
+}
+
+# RUNDE GLYPHE: EINE Stelle, die den geteilten Puffer mit Absicht
+# anfasst -- und sie steht hier mit Namen, so wie `inode_get_blind` und
+# `race_core` in tools/vielkern/run.sh. Wer eine zweite dazutut, muss
+# sie hier eintragen und begruenden.
+MITWISSEN = {
+    ("kernel/wig.fi", "stage_of"):
+        "gibt die Buehne DIESES Kerns (kstate.WIGST_OFF + cpu.here * "
+        "STAGE_MAX). Die GETEILTE Seite kommt darin nur unter "
+        "`glyphblind`/`glyphsperre` vor -- das sind die zwei "
+        "Gegenproben, und ohne sie misst der Nachweis nichts.",
 }
 
 
@@ -102,6 +154,7 @@ def main(argv):
 
     gesperrt = []
     offen = []
+    mitwissen = []
     for wurzel, _, dateien in os.walk(os.path.join(WURZEL, "kernel")):
         for d in sorted(dateien):
             if not d.endswith(".fi"):
@@ -110,12 +163,26 @@ def main(argv):
                 continue
             pfad = os.path.join(wurzel, d)
             kurz = os.path.relpath(pfad, WURZEL)
+            roh = open(pfad, "rb").read().decode("utf-8", "surrogateescape")
+            # RUNDE GLYPHE: hat die Datei einen eigenen Zugriff auf eine
+            # kdata-Seite? Dann ist `<zugriff>(state) + KONST` derselbe
+            # geteilte Puffer, nur anders geschrieben.
+            zweite = [(z, seite, puffer2(z))
+                      for z, seite in BASISZUGRIFF.findall(roh)]
             for fn, leib in sorted(funktionen(pfad).items()):
                 text = "\n".join(leib)
                 treffer = PUFFER.findall(text)
+                for zugriff, seite, muster in zweite:
+                    if fn == zugriff:
+                        continue
+                    treffer = treffer + ["%s+%s" % (seite, k)
+                                         for k in muster.findall(text)]
                 if not treffer:
                     continue
                 eintrag = (kurz, fn, sorted(set(treffer)))
+                if (kurz, fn) in MITWISSEN:
+                    mitwissen.append(eintrag)
+                    continue
                 if SPERRE.search(text) or d in RUHIG:
                     gesperrt.append(eintrag)
                 else:
@@ -130,9 +197,16 @@ def main(argv):
         for k, f, p in offen:
             print("   %-24s %-22s %s" % (k, f, ",".join(p)))
         print()
+    if liste and mitwissen:
+        print("== MITWISSEN: mit Absicht am geteilten Puffer ==")
+        for k, f, p in mitwissen:
+            print("   %-24s %-22s %s" % (k, f, ",".join(p)))
+            print("      %s" % MITWISSEN[(k, f)])
+        print()
     dat_offen = sorted(set(k for k, _, _ in offen))
-    print("einkern gesperrt=%d offen=%d dateien=%s"
-          % (len(gesperrt), len(offen), ",".join(dat_offen) or "-"))
+    print("einkern gesperrt=%d offen=%d mitwissen=%d dateien=%s"
+          % (len(gesperrt), len(offen), len(mitwissen),
+             ",".join(dat_offen) or "-"))
     return 0
 
 

@@ -392,7 +392,15 @@ echo "== 12. RUNDE MERGE-6: die uebrigen Ein-Kern-Reste, an der Quelle gezaehlt 
 # KEINE FEHLERLISTE, SONDERN EIN VERTRAG. Die Zahl darf nicht wachsen,
 # ohne dass jemand sie hier hochsetzt und in docs/RUNDE-MERGE6.md
 # aufschreibt, warum.
-EK_SOLL=${EK_SOLL:-60}
+# RUNDE GLYPHE: 60 -> 66. Nicht, weil sechs Stellen dazugekommen
+# waeren -- `einkern.py` SIEHT seit dieser Runde eine zweite Bauform
+# desselben Fehlers: eine Seite, die eine Datei ueber einen EIGENEN
+# Zugriff holt (`base(state) + KONST` statt `state + kstate.X_OFF`).
+# Genau in dieser Form stand der Fehler, an dem MERGE-6 gescheitert
+# ist. Die sechs neuen sind hwid.fi (2), ofsj.fi (2) und rand.fi (2);
+# `wig.fi` war die siebte und ist repariert. Begruendung ausfuehrlich
+# in docs/RUNDE-GLYPHE.md.
+EK_SOLL=${EK_SOLL:-66}
 ek=$(python3 tools/vielkern/einkern.py | sed -n 's/.*offen=\([0-9]*\).*/\1/p')
 if [ -n "$ek" ] && [ "$ek" -le "$EK_SOLL" ] 2>/dev/null; then
     ok "Funktionen mit einem Puffer der Datenseite ohne Sperrwort: $ek (Vertrag: hoechstens $EK_SOLL)"

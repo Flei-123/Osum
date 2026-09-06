@@ -105,9 +105,30 @@ cp -rL "$BAU/lib" "$HIER/lib"
 # Sie werden in Namensreihenfolge aufgelegt, und ein Flicken, der nicht
 # passt, bricht den Bau ab: eine halb geflickte Bibliothek ist schlimmer
 # als eine ungeflickte, weil der Fehler dann anderswo auftaucht.
+#
+# RUNDE GLYPHE: DER UNGEFLICKTE STAND WIRD VORHER WEGGELEGT.
+#
+# vendor/net/BLOBS nennt die Streuwerte, die Firn im Baum des
+# festgenagelten Commits stehen hat -- also den Stand VOR den Flicken.
+# Abschnitt 1 von ./test.sh prueft dagegen. Legt man die Flicken auf,
+# ohne das Original zu behalten, misst der Pruefer den geflickten Stand
+# gegen den ungeflickten Sollwert und ist dauerhaft rot -- oder man
+# zieht BLOBS nach und verliert damit genau die Zusage, die er geben
+# soll: dass sich der Stack unter uns nicht geaendert hat.
+#
+# Also: die Dateien, die ein Flicken anfasst, kommen vorher unveraendert
+# nach lib/.roh/. Dort liest der Pruefer sie.
 if [[ -d $HIER/patches ]]; then
+    rm -rf "$HIER/lib/.roh"
     for f in "$HIER"/patches/*.patch; do
         [[ -e $f ]] || continue
+        # Welche Dateien fasst dieser Flicken an? (die +++-Zeilen)
+        while read -r ziel; do
+            [[ -n $ziel ]] || continue
+            [[ -f $HIER/lib/$ziel ]] || continue
+            mkdir -p "$HIER/lib/.roh/$(dirname "$ziel")"
+            [[ -e $HIER/lib/.roh/$ziel ]] || cp -p "$HIER/lib/$ziel" "$HIER/lib/.roh/$ziel"
+        done < <(sed -n 's|^+++ [ab]/||p' "$f" | sed 's/\t.*//')
         echo ">> Flicken: $(basename "$f")"
         patch -p1 -d "$HIER/lib" -i "$f" --silent \
             || { echo "Flicken $(basename "$f") passt nicht auf Firn $KURZ" >&2
