@@ -73,6 +73,8 @@ import share
 import wg
 import bus
 import perm
+import klog
+import absturz
 import power
 import pwr
 import batt
@@ -130,6 +132,10 @@ export {
     BUS_OFFER, BUS_FILL,
     BUS_DRAGSET, BUS_DRAGGET, BUS_DRAGCLEAR, BUS_DRAGINFO,
     BUS_NOTIPOST, BUS_NOTIGET, BUS_NOTIINFO, BUS_STAT,
+    // ---- RUNDE PROTOKOLL ----
+    SYS_OSUM_KLOG, SYS_OSUM_KRACH,
+    KL_SEQ, KL_FIRST, KL_LOST, KL_FILT, KL_MIN, KL_SER, KL_NENT,
+    KL_LINE, KL_SETMIN, KL_SETSER, KL_WRITE, KL_CRASH,
     CAP_BASE, CAP_VERSION, CAP_READ, CAP_WRITE, CAP_CLOSE, CAP_DUP,
     CAP_INSPECT, CAP_TRANSFER, CAP_COUNT, CAP_MAXNR,
     SYS_SOCKET, SYS_CONNECT, SYS_ACCEPT, SYS_SENDTO, SYS_RECVFROM,
@@ -1077,6 +1083,50 @@ const SYS_OSUM_PMON: u64 = 1830
 // Kerne eine Maschine hat und wie beschaeftigt sie sind, ist kein
 // Geheimnis, und ein Rechner, der seinem Besitzer die eigene Auslastung
 // verschweigt, schuetzt niemanden. GESCHRIEBEN WIRD HIER GAR NICHTS.
+// ==================================================== RUNDE PROTOKOLL
+//
+// 1860 -- DAS KERNPROTOKOLL, und 1861 der Testausloeser.
+//
+// `sys4(1860, was, arg, zeiger, laenge)`. Die Abfragen (`KL_*` unter 10)
+// liefern eine Zahl und ruehren nichts an; `KL_LINE` schreibt EINE
+// fertig formatierte Zeile nach `zeiger`. Das Format ist dasselbe, das
+// auf der seriellen Leitung steht -- es steht EINMAL, in
+// `klog.line_at`, und /bin/log, /dev/klog und /proc/klog nehmen alle
+// diesen Weg.
+//
+// WER DARF WAS. Lesen darf jeder, wie bei PSTAT, NETMON, PMON und
+// CPUSTAT: was die Treiber dieser Maschine gemeldet haben, ist kein
+// Geheimnis, und ein Rechner, der seinem Besitzer die eigenen
+// Fehlermeldungen verschweigt, schuetzt niemanden. Die SCHWELLEN
+// aendern (`KL_SETMIN`, `KL_SETSER`) darf nur Wurzel -- eine Schwelle
+// auf `error` von einem beliebigen Programm aus waere die einfachste
+// Art, die Spuren einer Tat verschwinden zu lassen.
+const SYS_OSUM_KLOG: u64 = 1860
+
+const KL_SEQ: u64 = 0 // wie viele Zeilen je geschrieben wurden
+const KL_FIRST: u64 = 1 // kleinste Laufnummer, die noch im Ring steht
+const KL_LOST: u64 = 2 // wie viele der Ring ueberschrieben hat
+const KL_FILT: u64 = 3 // weggefilterte Aufrufe
+const KL_MIN: u64 = 4 // Aufzeichnungsschwelle
+const KL_SER: u64 = 5 // Schwelle der seriellen Ausgabe
+const KL_NENT: u64 = 6 // wie viele Eintraege der Ring fasst
+const KL_LINE: u64 = 10 // arg = Laufnummer -> Zeile nach (zeiger, laenge)
+const KL_SETMIN: u64 = 20 // nur Wurzel
+const KL_SETSER: u64 = 21 // nur Wurzel
+const KL_WRITE: u64 = 22 // arg = Stufe, (zeiger, laenge) = Text
+const KL_CRASH: u64 = 30 // liegt ein Absturzbericht vom letzten Start vor?
+
+// 1861 -- DER TESTAUSLOESER, UND WARUM ER EINEN RIEGEL HAT.
+//
+// Die Abnahme dieser Runde verlangt eine ERZWUNGENE Kernel-Panik: ohne
+// sie liesse sich der Panik-Bildschirm nur messen, indem man auf einen
+// echten Fehler wartet. Ein Systemaufruf, mit dem jedes Programm den
+// Kern anhalten kann, ist aber genau die Art Tuer, die man in einem
+// Betriebssystem nicht offen laesst. Also: er antwortet -EPERM, solange
+// `krach` NICHT auf der Kernel-Befehlszeile steht, und ausserdem nur
+// der Wurzel. Beides zusammen, nicht eines davon.
+const SYS_OSUM_KRACH: u64 = 1861
+
 const SYS_OSUM_CPUSTAT: u64 = 1840
 
 // ===================================================== RUNDE FEEDBACK,
@@ -2112,6 +2162,13 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // RUNDE SYSTEMBUS: EIN Zweig fuer zweiundzwanzig Handgriffe.
     if number == SYS_OSUM_BUS {
         return do_bus(state, me, a0, a1, a2, a3, a4)
+    }
+    // ------------------------------------------------ RUNDE PROTOKOLL
+    if number == SYS_OSUM_KLOG {
+        return do_klog(state, me, a0, a1, a2, a3)
+    }
+    if number == SYS_OSUM_KRACH {
+        return do_krach(state, me, a0)
     }
     // ------------------------------------------------------ RUNDE K13
     //
@@ -6524,6 +6581,102 @@ fn do_cpustat(state: u64, index: u64, field: u64) -> u64 {
         return sched.tget(state, t, sched.T_PID)
     }
     return neg(errno.E_INVAL)
+}
+
+// ==================================================== RUNDE PROTOKOLL
+fn do_klog(state: u64, me: u64, was: u64, arg: u64, ptr: u64,
+        len: u64) -> u64 {
+    if was == KL_SEQ {
+        return klog.seq(state)
+    }
+    if was == KL_FIRST {
+        return klog.first_seq(state)
+    }
+    if was == KL_LOST {
+        return klog.lost(state)
+    }
+    if was == KL_FILT {
+        return klog.filtered(state)
+    }
+    if was == KL_MIN {
+        return klog.min_level(state)
+    }
+    if was == KL_SER {
+        return klog.ser_level(state)
+    }
+    if was == KL_NENT {
+        return klog.N_ENT
+    }
+    if was == KL_CRASH {
+        return absturz.offen(state)
+    }
+    if was == KL_LINE {
+        // DER PUFFER IM KERN UND NICHT IN RING 3. `klog.line_at`
+        // schreibt Oktett fuer Oktett; direkt in den Adressraum des
+        // Prozesses zu schreiben hiesse, das SMAP-Fenster fuer die
+        // Dauer der ganzen Formatierung offen zu lassen. Also erst in
+        // einen Kernpuffer, dann EIN `copy_out`.
+        var b: [u8; 256] = [0 as u8; 256]
+        var max: u64 = len
+        if max > 256 {
+            max = 256
+        }
+        let n: u64 = klog.line_at(state, arg, (&b[0 as usize]) as u64, max)
+        if n == 0 {
+            return 0
+        }
+        if !copy_out(state, me, ptr, (&b[0 as usize]) as u64, n) {
+            return neg(errno.E_FAULT)
+        }
+        return n
+    }
+    if was == KL_SETMIN || was == KL_SETSER {
+        if perm.euid(state, me) != 0 {
+            return neg(errno.E_PERM)
+        }
+        if arg > klog.L_ERROR {
+            return neg(errno.E_INVAL)
+        }
+        if was == KL_SETMIN {
+            klog.set_min(state, arg)
+        } else {
+            klog.set_ser(state, arg)
+        }
+        return 0
+    }
+    if was == KL_WRITE {
+        var t: [u8; 96] = [0 as u8; 96]
+        var max: u64 = len
+        if max > 95 {
+            max = 95
+        }
+        if !copy_in(state, me, (&t[0 as usize]) as u64, ptr, max) {
+            return neg(errno.E_FAULT)
+        }
+        kstate.set8((&t[0 as usize]) as u64 + max, 0 as u8)
+        var q: [u8; 5] = "prog\0"
+        var lv: u64 = arg
+        if lv > klog.L_ERROR {
+            lv = klog.L_INFO
+        }
+        klog.say(state, lv, (&q[0 as usize]) as u64,
+            (&t[0 as usize]) as u64)
+        return max
+    }
+    return neg(errno.E_INVAL)
+}
+
+// DER TESTAUSLOESER. Zwei Riegel (siehe oben bei SYS_OSUM_KRACH), und
+// erst dahinter der Knall.
+fn do_krach(state: u64, me: u64, art: u64) -> u64 {
+    if !kstate.mode_on(state, kstate.M_KRACH) {
+        return neg(errno.E_PERM)
+    }
+    if perm.euid(state, me) != 0 {
+        return neg(errno.E_PERM)
+    }
+    absturz.knall(state, art)
+    return 0
 }
 
 fn do_pmon(state: u64, me: u64, kind: u64, index: u64, field: u64) -> u64 {

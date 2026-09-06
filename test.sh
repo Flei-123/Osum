@@ -1461,6 +1461,14 @@ lauf "42. der Zeichenweg auf mehreren Kernen: eine Buehne je Kern (tools/glyphe/
 # Gegenproben (`nobus`, ohne `busbench`, root gegen Nicht-root).
 lauf "43. der Systembus: Dienste, Rechte, Zwischenablage, Segmente (tools/systembus/run.sh, Runde SYSTEMBUS)" \
      tools/systembus/run.sh systembus '^SYSTEMBUS: |^  OK   |^  FAIL |^        (busa|busb|busd|buss|byt=|vor=|mit nobus|bild)'
+# RUNDE PROTOKOLL: der Ringpuffer, die Absturzberichte und der
+# Panik-Bildschirm. Fuenf Messungen, und die zwei, um die es geht:
+# vierzigtausend Zeilen aus vier Kernen ohne eine einzige verschraenkte,
+# und ein Panik-Bildschirm, dessen Text WIRKLICH GELESEN wird
+# (tools/protokoll/schirmtext.py rechnet die Glyphen aus dem
+# Bildschirmfoto zurueck).
+lauf "44. das Kernprotokoll, die Absturzberichte und der Panik-Bildschirm (tools/protokoll/run.sh, Runde PROTOKOLL)" \
+     tools/protokoll/run.sh protokoll '^PROTOKOLL: |^  OK    |^        '
 
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.

@@ -1,0 +1,362 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/log.fi -- RUNDE PROTOKOLL: /bin/log, DAS WERKZEUG ZUM RING.
+//
+// `dmesg` unter Linux liest einen Puffer und druckt ihn. Das reicht,
+// solange man nur wissen will, was war. Dieses Werkzeug kann drei Dinge
+// mehr, und jedes davon hat einen Grund:
+//
+//     log                 alles, was noch im Ring steht
+//     log -n 20           die letzten zwanzig Zeilen
+//     log -s nvme         nur die Quelle `nvme`
+//     log -l warn         nur ab Stufe warn
+//     log -t 5000         nur, was juenger ist als 5000 ms
+//     log -f              mitlaufen, wie `tail -f`
+//     log -z              nur die Zahlen (Zeilen, verloren, gefiltert)
+//     log -p <text>       eine Zeile SCHREIBEN
+//     log -q <stufe>      die Aufzeichnungsschwelle setzen (nur Wurzel)
+//
+// ------------------------------------------------------------------
+// WARUM ES NACH LAUFNUMMERN LIEST UND NICHT NACH OKTETTEN
+//
+// /dev/klog ist ein Oktettstrom, und der Ring dreht sich waehrend des
+// Lesens weiter. Wer mit vielen kleinen `read` liest, bekommt deshalb
+// kein zusammenhaengendes Bild und MERKT ES NICHT.
+//
+// Dieses Werkzeug fragt den Kern nach ZEILE MIT DER LAUFNUMMER n
+// (Aufruf 1860, `KL_LINE`). Ist die Nummer laengst herausgerotiert,
+// antwortet der Kern mit 0, und das Werkzeug sagt dann ausdruecklich,
+// wie viele Zeilen ihm entgangen sind. Ein Protokollwerkzeug, das
+// stillschweigend Luecken hat, ist schlimmer als keines.
+//
+// ------------------------------------------------------------------
+// KEINE OBERFLAECHE HIER
+//
+// Das ist ein Kommandozeilenwerkzeug. Die ANSICHT des Protokolls im
+// Aufgabenverwalter und in den Einstellungen entsteht in Ring 3 ueber
+// `wlib` und liest denselben Aufruf 1860 -- nicht diese Datei, und
+// nicht den Kern unmittelbar.
+
+profile kernel
+
+import ulib
+
+export { u_start }
+
+// Die Zeile, die der Kern liefert, ist hoechstens 160 Oktette lang
+// (`klog.line_at`); 256 sind reichlich und passen auf jeden Stapel.
+const Z_MAX: u64 = 256
+
+fn u_start(args: u64) -> u64 {
+    var o_n: [u8; 3] = "-n\0"
+    var o_s: [u8; 3] = "-s\0"
+    var o_l: [u8; 3] = "-l\0"
+    var o_t: [u8; 3] = "-t\0"
+    var o_f: [u8; 3] = "-f\0"
+    var o_z: [u8; 3] = "-z\0"
+    var o_p: [u8; 3] = "-p\0"
+    var o_q: [u8; 3] = "-q\0"
+    var o_h: [u8; 3] = "-h\0"
+    let argc: u64 = ulib.arg_count(args)
+
+    var wieviel: u64 = 0 // 0 = alles, was im Ring steht
+    var quelle: u64 = 0 // Zeiger auf den Namen, 0 = jede
+    var stufe: u64 = 0 // Mindeststufe
+    var juenger: u64 = 0 // in Millisekunden, 0 = ohne Grenze
+    var folgen: bool = false
+
+    var i: u64 = 1
+    while i < argc {
+        let a: u64 = ulib.arg_at(args, i)
+        if ulib.streq(a, (&o_h[0 as usize]) as u64) {
+            hilfe()
+            return 0
+        }
+        if ulib.streq(a, (&o_f[0 as usize]) as u64) {
+            folgen = true
+        } else if ulib.streq(a, (&o_z[0 as usize]) as u64) {
+            zahlen()
+            return 0
+        } else if ulib.streq(a, (&o_n[0 as usize]) as u64) && i + 1 < argc {
+            i = i + 1
+            wieviel = ulib.to_num(ulib.arg_at(args, i))
+        } else if ulib.streq(a, (&o_s[0 as usize]) as u64) && i + 1 < argc {
+            i = i + 1
+            quelle = ulib.arg_at(args, i)
+        } else if ulib.streq(a, (&o_t[0 as usize]) as u64) && i + 1 < argc {
+            i = i + 1
+            juenger = ulib.to_num(ulib.arg_at(args, i))
+        } else if ulib.streq(a, (&o_l[0 as usize]) as u64) && i + 1 < argc {
+            i = i + 1
+            stufe = stufe_von(ulib.arg_at(args, i))
+        } else if ulib.streq(a, (&o_p[0 as usize]) as u64) && i + 1 < argc {
+            i = i + 1
+            return schreiben(ulib.arg_at(args, i))
+        } else if ulib.streq(a, (&o_q[0 as usize]) as u64) && i + 1 < argc {
+            i = i + 1
+            return schwelle(stufe_von(ulib.arg_at(args, i)))
+        }
+        i = i + 1
+    }
+
+    let last: u64 = ulib.sys4(ulib.SYS_KLOG, ulib.KL_SEQ, 0, 0, 0)
+    let erste: u64 = ulib.sys4(ulib.SYS_KLOG, ulib.KL_FIRST, 0, 0, 0)
+    var von: u64 = erste
+    if wieviel != 0 && last > wieviel && last - wieviel + 1 > erste {
+        von = last - wieviel + 1
+    }
+    var jetzt: u64 = 0
+    if juenger != 0 {
+        jetzt = ulib.sys(ulib.SYS_SYSINFO, ulib.I_UPTIME, 0, 0)
+    }
+    var naechste: u64 = drucken(von, last, quelle, stufe, juenger, jetzt)
+    if !folgen {
+        return 0
+    }
+    // MITLAUFEN. Zehn Millisekunden schlafen, nachfragen, drucken.
+    // Endlos, wie `tail -f`: beendet wird es mit einem Signal, und ein
+    // Werkzeug, das von selbst aufhoert mitzulaufen, ist keines.
+    while true {
+        ulib.sleep_ms(10)
+        let neu: u64 = ulib.sys4(ulib.SYS_KLOG, ulib.KL_SEQ, 0, 0, 0)
+        if neu >= naechste {
+            if juenger != 0 {
+                jetzt = ulib.sys(ulib.SYS_SYSINFO, ulib.I_UPTIME, 0, 0)
+            }
+            naechste = drucken(naechste, neu, quelle, stufe, juenger, jetzt)
+        }
+    }
+    return 0
+}
+
+// Druckt die Laufnummern `von`..`bis` und gibt die naechste noch nicht
+// gedruckte Nummer zurueck.
+fn drucken(von: u64, bis: u64, quelle: u64, stufe: u64, juenger: u64,
+        jetzt: u64) -> u64 {
+    var b: [u8; 256] = [0 as u8; 256]
+    var s_weg: [u8; 24] = "log: entgangen: Zeilen \0"
+    let p: u64 = (&b[0 as usize]) as u64
+    var s: u64 = von
+    var weg: u64 = 0
+    while s <= bis {
+        let n: u64 = ulib.sys4(ulib.SYS_KLOG, ulib.KL_LINE, s, p, Z_MAX)
+        if n == 0 {
+            // Diese Nummer ist herausrotiert, waehrend wir lasen.
+            weg = weg + 1
+        } else {
+            if passt(p, n, quelle, stufe, juenger, jetzt) {
+                ulib.sys(ulib.SYS_WRITE, ulib.OUT, p, n)
+            }
+        }
+        s = s + 1
+    }
+    if weg != 0 {
+        // AUF DIE FEHLERAUSGABE, damit `log | grep` die Luecke nicht
+        // mitliest, und MIT DER ZAHL: "es hat gefehlt" ohne "wie viel"
+        // ist keine Auskunft.
+        ulib.esay_line((&s_weg[0 as usize]) as u64, 0)
+        ulib.say((&s_weg[0 as usize]) as u64)
+        ulib.sayu(weg)
+        ulib.nl()
+    }
+    return bis + 1
+}
+
+// Die drei Filter arbeiten auf der FERTIGEN ZEILE und nicht auf den
+// Feldern des Eintrags. Das ist Absicht: der Kern liefert genau EIN
+// Format (`klog.line_at`), und ein Werkzeug, das die Felder noch einmal
+// selbst zusammensetzt, waere die zweite Stelle, an der das Format
+// steht.
+//
+// Aufbau der Zeile:  [      1234] 0/17 I nvme  : text
+fn passt(p: u64, n: u64, quelle: u64, stufe: u64, juenger: u64,
+        jetzt: u64) -> bool {
+    if stufe != 0 {
+        if stufe_der_zeile(p, n) < stufe {
+            return false
+        }
+    }
+    if quelle != 0 {
+        if !quelle_ist(p, n, quelle) {
+            return false
+        }
+    }
+    if juenger != 0 {
+        // Die Zeit in der Zeile sind Mikrosekunden seit dem Start,
+        // `I_UPTIME` sind Millisekunden. Also mal tausend.
+        let us: u64 = zeit_der_zeile(p, n)
+        if jetzt * 1000 > us && jetzt * 1000 - us > juenger * 1000 {
+            return false
+        }
+    }
+    return true
+}
+
+// Die Zeit steht zwischen '[' und ']', in Mikrosekunden seit dem Start.
+fn zeit_der_zeile(p: u64, n: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < n && ch(p, i) != 91 {
+        i = i + 1
+    }
+    i = i + 1
+    while i < n && ch(p, i) != 93 {
+        let c: u64 = ch(p, i)
+        if c >= 48 && c <= 57 {
+            v = v * 10 + (c - 48)
+        }
+        i = i + 1
+    }
+    return v
+}
+
+// Die Stufe ist der einzelne Grossbuchstabe hinter der pid.
+fn stufe_der_zeile(p: u64, n: u64) -> u64 {
+    var i: u64 = 0
+    while i < n && ch(p, i) != 93 {
+        i = i + 1
+    }
+    // hinter "] ", dann kern/pid, dann " X "
+    var leer: u64 = 0
+    while i < n {
+        if ch(p, i) == 32 {
+            leer = leer + 1
+            if leer == 2 {
+                let c: u64 = ch(p, i + 1)
+                if c == 68 {
+                    return ulib.LV_DEBUG
+                }
+                if c == 73 {
+                    return ulib.LV_INFO
+                }
+                if c == 87 {
+                    return ulib.LV_WARN
+                }
+                if c == 69 {
+                    return ulib.LV_ERROR
+                }
+                return ulib.LV_INFO
+            }
+        }
+        i = i + 1
+    }
+    return ulib.LV_INFO
+}
+
+// Die Quelle steht zwischen der Stufe und dem Doppelpunkt.
+fn quelle_ist(p: u64, n: u64, name: u64) -> bool {
+    var i: u64 = 0
+    var leer: u64 = 0
+    while i < n && ch(p, i) != 93 {
+        i = i + 1
+    }
+    while i < n {
+        if ch(p, i) == 32 {
+            leer = leer + 1
+            if leer == 3 {
+                i = i + 1
+                var k: u64 = 0
+                while ch(name, k) != 0 {
+                    if i + k >= n || ch(p, i + k) != ch(name, k) {
+                        return false
+                    }
+                    k = k + 1
+                }
+                let nach: u64 = ch(p, i + k)
+                return nach == 58 || nach == 32
+            }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// `*(... as *mut u8) as u64` bindet das `as` an den ZEIGER und nicht an
+// den gelesenen Wert -- der Uebersetzer sagt dann "dereference expects a
+// pointer, found u64". Also erst lesen, dann wandeln.
+fn ch(p: u64, i: u64) -> u64 {
+    let c: u8 = *((p + i) as *mut u8)
+    return c as u64
+}
+
+fn stufe_von(s: u64) -> u64 {
+    var d: [u8; 6] = "debug\0"
+    var i2: [u8; 5] = "info\0"
+    var w: [u8; 5] = "warn\0"
+    var e: [u8; 6] = "error\0"
+    if ulib.streq(s, (&d[0 as usize]) as u64) {
+        return ulib.LV_DEBUG
+    }
+    if ulib.streq(s, (&i2[0 as usize]) as u64) {
+        return ulib.LV_INFO
+    }
+    if ulib.streq(s, (&w[0 as usize]) as u64) {
+        return ulib.LV_WARN
+    }
+    if ulib.streq(s, (&e[0 as usize]) as u64) {
+        return ulib.LV_ERROR
+    }
+    return ulib.LV_INFO
+}
+
+fn zahlen() {
+    var s_a: [u8; 10] = "zeilen:  \0"
+    var s_b: [u8; 10] = "erste:   \0"
+    var s_c: [u8; 10] = "rotiert: \0"
+    var s_d: [u8; 10] = "gefiltert\0"
+    var s_e: [u8; 10] = "ring:    \0"
+    var s_f: [u8; 10] = "schwelle \0"
+    var s_g: [u8; 10] = "seriell: \0"
+    var s_h: [u8; 10] = "absturz: \0"
+    zeile((&s_a[0 as usize]) as u64, ulib.KL_SEQ)
+    zeile((&s_b[0 as usize]) as u64, ulib.KL_FIRST)
+    zeile((&s_c[0 as usize]) as u64, ulib.KL_LOST)
+    zeile((&s_d[0 as usize]) as u64, ulib.KL_FILT)
+    zeile((&s_e[0 as usize]) as u64, ulib.KL_NENT)
+    zeile((&s_f[0 as usize]) as u64, ulib.KL_MIN)
+    zeile((&s_g[0 as usize]) as u64, ulib.KL_SER)
+    zeile((&s_h[0 as usize]) as u64, ulib.KL_CRASH)
+}
+
+fn zeile(text: u64, was: u64) {
+    ulib.say(text)
+    ulib.sayu(ulib.sys4(ulib.SYS_KLOG, was, 0, 0, 0))
+    ulib.nl()
+}
+
+fn schreiben(text: u64) -> u64 {
+    var s_bad: [u8; 26] = "log: schreiben ging nicht\0"
+    let n: u64 = ulib.length(text)
+    let r: u64 = ulib.sys4(ulib.SYS_KLOG, ulib.KL_WRITE, ulib.LV_INFO,
+        text, n)
+    if ulib.failed(r) {
+        ulib.esay_line((&s_bad[0 as usize]) as u64, 0)
+        return 1
+    }
+    return 0
+}
+
+fn schwelle(v: u64) -> u64 {
+    var s_bad: [u8; 41] = "log: die Schwelle darf nur Wurzel setzen\0"
+    let r: u64 = ulib.sys4(ulib.SYS_KLOG, ulib.KL_SETMIN, v, 0, 0)
+    if ulib.failed(r) {
+        ulib.esay_line((&s_bad[0 as usize]) as u64, 0)
+        return 1
+    }
+    return 0
+}
+
+fn hilfe() {
+    var h1: [u8; 42] = "log [-n N] [-s quelle] [-l stufe] [-t ms]\0"
+    var h2: [u8; 41] = "    [-f] [-z] [-p text] [-q stufe] [-h]\0\0"
+    var h3: [u8; 41] = "stufen: debug info warn error\0\0\0\0\0\0\0\0\0\0\0\0"
+    zeile_aus((&h1[0 as usize]) as u64)
+    zeile_aus((&h2[0 as usize]) as u64)
+    zeile_aus((&h3[0 as usize]) as u64)
+}
+
+// `ulib.say_line` haengt eine ZAHL an; hier soll nur eine Zeile
+// heraus. Zwei Aufrufe, ein Name.
+fn zeile_aus(p: u64) {
+    ulib.say(p)
+    ulib.nl()
+}

@@ -280,6 +280,10 @@ BEREICHE = [
     ("ACQ",        "kstate.fi", "ACQ_OFF",        "ACQ_MAX"),
     ("ASC",        "kstate.fi", "ASC_OFF",        "ASC_MAX"),
     ("APATH",      "kstate.fi", "APATH_OFF",      "APATH_MAX"),
+    # RUNDE PROTOKOLL: der Ringpuffer des Kernprotokolls, 64 KiB am
+    # Stueck hinter allem bisherigen.  Er ist der Grund, aus dem
+    # KDATA_SIZE in dieser Runde von 0xB0000 auf 0xC0000 gewachsen ist.
+    ("LOG",        "kstate.fi", "LOG_OFF",        "LOG_MAX"),
     # RUNDE TRESOR: die Geraeteidentitaet, zwei Seiten (0x5A000..0x5C000).
     # Die erste traegt die Merkmale, die zweite ist das DMA-Ziel des
     # `identify controller` von NVMe -- und deshalb MUSS sie eine eigene,

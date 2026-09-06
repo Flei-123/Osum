@@ -69,6 +69,8 @@ import fs
 // RUNDE GLYPHE: der Zeichenweg liegt hinter der Naht -- im
 // Serverbau gibt es `wig.fi` und `ttf.fi` gar nicht.
 import gfx
+import klog
+import time
 
 export {
     stage, ap_main, parse, mode_of, present,
@@ -115,6 +117,10 @@ const S_GFEHL: u64 = 2240 // 8 Kerne * 8 Oktett: die Abweichungen
 const S_GRUNDEN: u64 = 2304 // Runden je Kern
 const S_GSUM: u64 = 2368 // 8 Kerne * 8 Oktett: Abweichungen ueber alle
 const S_FRAMES: u64 = 1024 // 8 cores * 16 frames * 8 octets
+// RUNDE PROTOKOLL: wie viele Zeilen jeder Kern wirklich geschrieben hat.
+// 8 Kerne * 8 Oktett, hinter S_FSFEHL (2112..2176) und weit unter
+// SMP_MAX (4096).
+const S_LOGN: u64 = 2176
 
 // The phases. A started core watches S_PHASE and does what it says; the
 // boot processor waits until S_DONE has reached the number of cores.
@@ -124,11 +130,22 @@ const PH_STRESS: u64 = 2
 const PH_FRAMES: u64 = 3
 const PH_SCHED: u64 = 4
 const PH_FSRACE: u64 = 5 // RUNDE MERGE-6
+// RUNDE PROTOKOLL: alle Kerne schreiben gleichzeitig in den Ringpuffer.
+//
+// RUNDE MERGE-7: PROTOKOLL und GLYPHE hatten BEIDE die 6. Das faellt
+// keinem Textverschmelzer auf -- die Zahl steht in zwei Zweigen in
+// derselben Zeile, aber mit verschiedenen Namen. Zusammengefuehrt
+// haette ein `lograce` die Kerne in `grace_core` geschickt und
+// umgekehrt. PROTOKOLL bleibt auf 6, weil GLYPHE die Nummern nach
+// OBEN OFFEN braucht (siehe PH_GRACE), und ein fester Wert ueber
+// PH_GRACE waere von dessen `>=` verschluckt worden.
+const PH_LOG: u64 = 6
 // RUNDE GLYPHE: die UNTERSTE Nummer des Zeichen-Rennens. Es laeuft
 // GRACE_KALT mal hintereinander, und jeder Durchgang braucht eine
 // EIGENE Nummer -- ein gestarteter Kern vergleicht die Phase mit der
 // zuletzt gesehenen und sieht dieselbe Zahl kein zweites Mal.
-const PH_GRACE: u64 = 6
+// Es belegt damit PH_GRACE .. PH_GRACE+GRACE_KALT-1 (7..31).
+const PH_GRACE: u64 = 7
 
 // The words of the command line this file reads.
 const M_NOSMP: u64 = 1 // do not start the other cores
@@ -138,6 +155,9 @@ const M_NOLOCKALL: u64 = 8 // the run queue lock off as well: this dies
 // RUNDE MERGE-6: die Probe auf den Ein-Kern-Rest im Dateisystem.
 const M_FSRACE: u64 = 16 // alle Kerne gleichzeitig in `fs.inode_get`
 const M_FSBLIND: u64 = 32 // dieselbe Probe OHNE die Sperre -- muss fallen
+// RUNDE PROTOKOLL: `lograce` -- vier Kerne, je zehntausend Zeilen, in
+// EINEN Ringpuffer. Das ist Punkt (a) der Abnahme.
+const M_LOGRACE: u64 = 64
 
 // How much work the benchmark is. TOTAL is divided by the number of
 // cores, so both runs do the SAME arithmetic -- that is the whole point
@@ -157,6 +177,11 @@ const FR_PER: u64 = 16
 // unter TCG rund eine Sekunde je Kern -- lang genug, dass die Kerne
 // sich wirklich begegnen, kurz genug fuer einen Abnahmelauf. GEMESSEN
 // steht in docs/RUNDE-MERGE6.md.
+// RUNDE PROTOKOLL: Zeilen je Kern. Zehntausend mal vier sind
+// vierzigtausend -- das Zwanzigfache dessen, was der Ring fasst, also
+// rotiert er waehrend der Messung achtundsiebzig Mal. Genau das soll er.
+const LOG_ITER: u64 = 10000
+
 const FSRACE_ITER: u64 = 20000
 // RUNDE GLYPHE: eine Runde ist EINE Glyphe (Kopf, Bildpunkte,
 // Pruefsumme) UND eine Bildpunktzeile von 4096 Oktetten hin und
@@ -546,6 +571,10 @@ fn phases(state: u64, index: u64) {
                 fsrace_core(state, index)
                 atomic.fetch_add(sp(state, S_DONE), 1)
             }
+            if ph == PH_LOG {
+                lograce_core(state, index)
+                atomic.fetch_add(sp(state, S_DONE), 1)
+            }
             if ph >= PH_GRACE {
                 grace_core(state, index)
                 atomic.fetch_add(sp(state, S_DONE), 1)
@@ -711,6 +740,9 @@ fn run_phase(state: u64, index: u64, ph: u64) {
     if ph == PH_FSRACE {
         fsrace_core(state, index)
     }
+    if ph == PH_LOG {
+        lograce_core(state, index)
+    }
     if ph >= PH_GRACE {
         grace_core(state, index)
     }
@@ -811,6 +843,7 @@ fn stage(state: u64) {
     // RUNDE GLYPHE: derselbe Platz, derselbe Grund. Er laeuft nur
     // mit `glyphrace` auf der Befehlszeile.
     zeichenrennen(state)
+    lograce(state)
     // With the allocator lock switched off the frames just handed out are
     // not trustworthy, and a scheduler that builds stacks out of them
     // would measure the damage instead of the distribution. The two
@@ -899,6 +932,23 @@ fn bench(state: u64) {
     serial.puts((&s_sum[0]) as u64)
     serial.dec(sum)
     serial.nl()
+}
+
+// ==================================== RUNDE PROTOKOLL: der Arbeiter
+//
+// Zehntausend Zeilen, so schnell dieser Kern kann, in denselben Ring wie
+// die drei anderen. Kein `pause`, keine Luecke: der Sinn der Messung ist,
+// dass die Kerne sich WIRKLICH begegnen. Die Stufe ist `debug` -- mit
+// `logall` wird sie aufgezeichnet und NICHT seriell ausgegeben.
+// Vierzigtausend Zeilen ueber eine 115200-Leitung waeren vier Minuten
+// und wuerden nur die Leitung messen.
+fn lograce_core(state: u64, index: u64) {
+    var i: u64 = 0
+    while i < LOG_ITER {
+        klog.race_line(state, index, i)
+        i = i + 1
+    }
+    atomic.store(sp(state, S_LOGN) + index * 8, LOG_ITER)
 }
 
 // ------------------------------------------- measurement 4 (MERGE-6)
@@ -1137,6 +1187,102 @@ fn stress(state: u64) {
     serial.nl()
 }
 
+// ============================ RUNDE PROTOKOLL: Messung 5, Punkt (a)
+//
+// VIER KERNE, JE ZEHNTAUSEND ZEILEN, EIN RING.
+//
+// Was hier gemessen wird und was nicht:
+//
+//   `zeilen=`   was die Kerne zu schreiben BEHAUPTEN (4 * 10000). Das
+//               ist der Sollwert und kommt aus den Kernen selbst, nicht
+//               aus dieser Funktion -- ein Kern, der frueh aufhoert,
+//               faellt damit auf.
+//   `gesamt=`   was der Ring GEZAEHLT hat (`klog.seq`). Verloren gehen
+//               darf keine einzige: der Zaehler steht unter derselben
+//               Sperre wie das Schreiben. Ist er kleiner, haben zwei
+//               Kerne dieselbe Laufnummer bekommen.
+//   `ring=`     wie viele davon noch im Ring stehen (510).
+//   `rotiert=`  wie viele herausgefallen sind. Das ist kein Verlust,
+//               das ist der Sinn eines Ringpuffers -- aber es muss
+//               genau `gesamt - 510` sein.
+//   `kaputt=`   Eintraege, in denen Kopf und Text von verschiedenen
+//               Kernen stammen (`klog.verify`). Das ist die Zahl, um
+//               die es geht, und sie muss 0 sein.
+fn lograce(state: u64) {
+    var s_head: [u8; 15] = "smp: lograce \0\0"
+    var s_k: [u8; 7] = "kerne=\0"
+    var s_z: [u8; 10] = "  zeilen=\0"
+    var s_g: [u8; 10] = "  gesamt=\0"
+    var s_r: [u8; 8] = "  ring=\0"
+    var s_ro: [u8; 11] = "  rotiert=\0"
+    var s_b: [u8; 10] = "  kaputt=\0"
+    var s_ms: [u8; 7] = "  ms=\0\0"
+    var s_bh: [u8; 14] = "smp: logbank \0"
+    var s_n: [u8; 9] = "aufrufe=\0"
+    var s_ns: [u8; 7] = "  ns=\0\0"
+    var s_je: [u8; 12] = "  ns_je_10=\0"
+
+    if !on(state, M_LOGRACE) {
+        return
+    }
+    let online: u64 = cpu.online_count(state)
+    var i: u64 = 0
+    while i < kstate.MAX_CPUS {
+        atomic.store(sp(state, S_LOGN) + i * 8, 0)
+        i = i + 1
+    }
+    let vor: u64 = klog.seq(state)
+    let t0: u64 = time.mono_ns(state)
+    run_phase(state, 0, PH_LOG)
+    let t1: u64 = time.mono_ns(state)
+
+    var soll: u64 = 0
+    i = 0
+    while i < online {
+        soll = soll + atomic.load(sp(state, S_LOGN) + i * 8)
+        i = i + 1
+    }
+    let gesamt: u64 = klog.seq(state) - vor
+    var ring: u64 = klog.seq(state)
+    if ring > klog.N_ENT {
+        ring = klog.N_ENT
+    }
+    serial.puts((&s_head[0]) as u64)
+    serial.puts((&s_k[0]) as u64)
+    serial.dec(online)
+    serial.puts((&s_z[0]) as u64)
+    serial.dec(soll)
+    serial.puts((&s_g[0]) as u64)
+    serial.dec(gesamt)
+    serial.puts((&s_r[0]) as u64)
+    serial.dec(ring)
+    serial.puts((&s_ro[0]) as u64)
+    serial.dec(klog.lost(state))
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(klog.verify(state))
+    serial.puts((&s_ms[0]) as u64)
+    serial.dec((t1 - t0) / 1000000)
+    serial.nl()
+
+    // ------------------ und gleich daneben Punkt (e): der schnelle Weg.
+    //
+    // Eine Million Aufrufe der Stufe debug bei einer Schwelle darueber.
+    // Die Zahl, auf die es ankommt, steht als `ns` da; `ns_je_10` ist
+    // dieselbe Zahl je zehn Aufrufe, damit man sie ohne Bruchrechnung
+    // lesen kann.
+    let ns: u64 = klog.bench(state, 1000000)
+    serial.puts((&s_bh[0]) as u64)
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(1000000)
+    serial.puts((&s_ns[0]) as u64)
+    serial.dec(ns)
+    serial.puts((&s_ms[0]) as u64)
+    serial.dec(ns / 1000000)
+    serial.puts((&s_je[0]) as u64)
+    serial.dec(ns / 100000)
+    serial.nl()
+}
+
 // --------------------------------------------------------- measurement 3
 
 fn frames(state: u64) {
@@ -1364,6 +1510,7 @@ fn mode_of(cmd: u64) -> u64 {
     var w_all: [u8; 10] = "nolockall\0"
     var w_race: [u8; 8] = "fsrace\0\0"
     var w_blind: [u8; 9] = "fsblind\0\0"
+    var w_lograce: [u8; 8] = "lograce\0"
     if cmd == 0 {
         return 0
     }
@@ -1388,6 +1535,10 @@ fn mode_of(cmd: u64) -> u64 {
     }
     if find(cmd, (&w_blind[0]) as u64, 7) != 0 {
         m = m | M_FSRACE | M_FSBLIND
+    }
+    // RUNDE PROTOKOLL.
+    if find(cmd, (&w_lograce[0]) as u64, 7) != 0 {
+        m = m | M_LOGRACE
     }
     return m
 }
