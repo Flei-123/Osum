@@ -713,7 +713,13 @@ zusagen() {
     # RUNDE MERGE-2: `bestanden` dazu -- der Laeufer der Runde USBIMG
     # meldet auf deutsch ("USBIMG: 46 bestanden, 0 gescheitert"), und mit
     # dem alten Muster waeren seine 46 Zusagen still verschwunden.
-    n=$(grep -aoE '^[A-Z][A-Z0-9]*: [0-9]+ (passed|proofs|bestanden)' "$log" | tail -1 | grep -oE '[0-9]+' | tail -1)
+    # RUNDE WLAN: `Zusagen` dazu. Der Laeufer von tools/wlan/run.sh
+    # meldet "WLAN: 183 Zusagen, 0 Fehler" -- das ist genau das Wort,
+    # das diese Datei selbst fuer eine gepruefte Aussage benutzt, und
+    # ohne diesen Zusatz waeren die Zusagen still verschwunden. Die
+    # Ergaenzung ist rein additiv: kein bisher passendes Muster faellt
+    # dadurch weg.
+    n=$(grep -aoE '^[A-Z][A-Z0-9]*: [0-9]+ (passed|proofs|bestanden|Zusagen)' "$log" | tail -1 | grep -oE '[0-9]+' | tail -1)
     [ -n "${n:-}" ] && ZUSAGEN=$((ZUSAGEN + n))
 }
 
@@ -1446,7 +1452,37 @@ lauf "41. der Aufgabenverwalter und das Kontrollzentrum (tools/werkzeug/run.sh, 
 #      je mit vier und acht Kernen.
 lauf "42. der Zeichenweg auf mehreren Kernen: eine Buehne je Kern (tools/glyphe/run.sh, Runde GLYPHE)" \
      tools/glyphe/run.sh glyphe '^GLYPHE: |^  OK    |^  FAIL |^  ZAHL  |^        '
-
+# ABSCHNITT 42 -- RUNDE WLAN (auf merge6 zu 42 umnummeriert: 32 ist
+# dort schon THEMESTORE). Der einzige Abschnitt dieser Abnahme, der
+# KEIN QEMU startet, und der einzige, der dafuer eine gemessene
+# Begruendung mitbringt: `qemu-system-x86_64 -device help` kennt NULL
+# 802.11-Geraete. Es gibt keinen Weg, eine WLAN-Karte zu emulieren, und
+# damit keinen Weg, in QEMU einen einzigen WLAN-Rahmen zu erzeugen.
+#
+# Gemessen wird deshalb auf dem WIRT, gegen dieselben Firn-Dateien, die
+# der Kern binden wird (`tools/wlan/orakel.fi` bindet `lib/crypto/` und
+# `lib/wlan/`) -- dasselbe Werkzeug, das die Runden TUNNEL und UPDATE
+# fuer Ed25519 gebaut haben.
+#
+# Drei Arten von Vergleich, und die dritte ist die, auf die es ankommt:
+# gegen die Normen (FIPS 197, RFC 3394, RFC 4493, RFC 6070, IEEE 802.11i
+# und 802.11-2012 M.6.4/M.9.2), gegen OpenSSL, und gegen eine ECHTE
+# AUFZEICHNUNG eines echten WPA2-Netzes -- aus dem Passwort `Induction`
+# und dem Namen `Coherer` wird ein PMK, daraus mit den Zufallszahlen des
+# echten Handschlags ein PTK, dessen KCK die Pruefwerte nachrechnet, die
+# damals wirklich auf dem Draht standen, und dessen TK die echten
+# verschluesselten Rahmen aufmacht.
+#
+# Dazu ein Fuzz-Lauf ueber Zehntausende verstuemmelte Rahmen UNTER
+# VALGRIND: ein Beacon kommt von einem Fremden, ist von niemandem
+# beglaubigt und trifft den Kernel, bevor es einen Schluessel gibt.
+#
+# WAS DIESER ABSCHNITT AUSDRUECKLICH NICHT ZEIGT: dass Osum sich mit
+# einem WLAN verbindet. Es gibt keinen Treiber, und es wird auf diesem
+# Rechner auch keinen geben. `docs/WLAN-BEFUND.md` sagt, warum, was das
+# kostet und wie weit der Weg damit ist.
+lauf "42. WLAN ohne eine einzige Karte: 802.11, WPA2/WPA3 und CCMP gegen die Normen und gegen eine echte Aufzeichnung (tools/wlan/run.sh, Runde WLAN)" \
+     tools/wlan/run.sh wlan '^WLAN: |^WLAN-FUZZ: |^== |^  OK    (QEMU |tools/wlan/orakel|das Orakel lehnt|die Aufzeichnung liegt|SHA-1 gegen|HMAC-SHA1 gegen|PRF-SHA1, IEEE|PBKDF2-SHA1, RFC|PMK aus|AES gegen OpenSSL|AES-CMAC, RFC|Key Wrap, RFC|AES-CCM|IEEE Std 802\.11|Beacon 1|die Ketten|EAPOL-Rahmen|PTK aus dem echten|Pruefwert von Nachricht|Gruppenschluessel aus|DIE GANZE KETTE|mit einem TK|ueber ALLE|die richtige Folge|und hat den Schluessel|alle [0-9]+ Verstuemmelungen|Nachricht 3 zweimal|ERSCHOEPFEND|der Fehlerzustand|alle [0-9]+ Abschnitte|ein RSN-Element|EAPOL: alle|[0-9]+ verstuemmelte Rahmen|jede der [0-9]+|von den [0-9]+|valgrind ueber|keine WLAN-PCI|SAE ist NICHT|TKIP und WEP|die Runde in Zeilen|PTK mit KDF-SHA256|beide Seiten)'
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
 abschnitte_abarbeiten
