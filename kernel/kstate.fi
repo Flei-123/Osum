@@ -151,6 +151,7 @@ export {
     KILLED, SYSCALLS, DISK_DEV, IDT_OFF, BITMAP_OFF, BITMAP_BYTES,
     PT_OFF, KDATA_SIZE, TASK_OFF, TASK_BYTES, MAX_TASKS, TRACE_OFF, POLLSEQ,
     TRACE_MAX, CONSOLE_OFF, CONSOLE_MAX, BLOCK_OFF, BLOCK_MAX, NAME_OFF,
+    NAMEK_OFF, NAMEK_MAX,
     NAME_MAX, FS_OFF, FS_MAX, KEYPOS, NX_OK, EXECS,
     ELF_ERR, ELF_BYTES, ELF_PAGES, ELF_LOADS, ELF_OFF, ELF_MAX,
     EARG_OFF, EARG_MAX, LOAD_OFF, LOAD_MAX, EXCURSION, FORKS,
@@ -1187,6 +1188,55 @@ const WIGST_MAX: u64 = 0x8000 // MAX_CPUS * 0x1000
 const SCANB_OFF: u64 = 0xB8000
 const SCANB_MAX: u64 = 0x8000 // MAX_CPUS * 0x1000
 
+// ==================================================== RUNDE HAERTUNG-2
+// DER PFADPUFFER JE KERN -- DER GROESSTE POSTEN AUS MERGE-6 6.2.
+//
+// `kstate.NAME_OFF` ist EINE Seite fuer die GANZE MASCHINE, und fast
+// jeder Systemaufruf mit einem Pfad legt seinen Namen dort ab:
+// `do_open`, `do_stat`, `do_unlink`, `do_mkdir`, `do_rename`,
+// `do_chdir`, `do_exec` und dreizehn weitere. Der Ablauf ist immer
+// derselbe:
+//
+//     let buf: u64 = state + kstate.NAME_OFF
+//     fetch_path(state, me, name, buf, MAX_NAME)   // Ring 3 -> Kern
+//     ... und danach wird AUS buf gearbeitet
+//
+// Zwischen dem Fuellen und dem Gebrauch liegt kein Riegel. Zwei
+// Ring-3-Prozesse auf zwei Kernen in `open` oeffnen damit den Namen des
+// jeweils anderen. MERGE-6 hat das gezaehlt (dreiundvierzig Wege,
+// docs/RUNDE-MERGE6.md 6.2) und als VERTRAG stehen lassen; GLYPHE hat
+// den ersten davon geschlossen, weil er nachweislich zuschlug
+// (`do_scan`/`do_jrnl` -> SCANB_OFF, eine Etage tiefer derselbe Fehler).
+//
+// WARUM JE KERN UND NICHT EINE SPERRE -- und das ist gemessen, nicht
+// geraten: `fs.path` nimmt die Dateisystemsperre ohnehin, und zwar
+// NACHDEM der Name im Puffer steht. Eine zweite Sperre um Fuellen und
+// Gebrauch waere also eine Sperre um eine Sperre, und sie laege auf dem
+// heissesten Weg des Systems (jeder `open`, jeder `stat`). Die Bauform,
+// die Runde GLYPHE gegen die gemeinsame Sperre GEMESSEN hat, war um den
+// Faktor 2,25 (smp4) bis 2,46 (smp8) schneller -- dieselbe Wahl, aus
+// demselben Grund.
+//
+// WARUM DAS SICHER IST: derselbe Satz wie bei WIGST_OFF und SCANB_OFF.
+// Der Puffer wird AUSSCHLIESSLICH innerhalb eines Systemaufrufs
+// angefasst, und `MSR_SFMASK` (kernel/arch/x86_64/user.fi) haelt IF
+// fuer den GANZEN Systemaufruf unten. Eine Aufgabe kann darin nicht
+// verdraengt und auf einem anderen Kern fortgesetzt werden.
+//
+// EINE Seite je Kern reicht: `MAX_NAME` ist 1024, und `uio.resolve`
+// arbeitet in derselben Seite weiter.
+//
+// DER PLATZ: es gibt kein Loch von acht Seiten mehr. Die vollstaendige
+// Karte (tools/kernel/memmap.py, ALLE Dateien -- nicht nur kstate.fi)
+// hat als groesstes freies Stueck 16 KiB bei 0xAC000; die 40 KiB bei
+// 0x9F000, die eine Zaehlung nur ueber kstate.fi zeigt, sind in
+// Wahrheit von hidrep.fi und hidin.fi belegt. Also waechst KDATA_SIZE
+// um 32 KiB auf 0xE0000 -- genau wie in Runde GLYPHE, und aus
+// demselben Grund unbedenklich: das ist `.bss` und kostet im Abbild
+// KEIN Oktett (boot.s legt es mit `.skip` an und nullt es beim Start).
+const NAMEK_OFF: u64 = 0xC0000
+const NAMEK_MAX: u64 = 0x8000 // MAX_CPUS * 0x1000
+
 // RUNDE K15, ZWEITER NACHTRAG: DIE SEITE DER SKALARE WIRD GETEILT.
 //
 // `wig.fi` braucht von der ersten Seite dieses Vorrats 0x40 Oktette.
@@ -1879,7 +1929,13 @@ const H_ESCALATE: u64 = 1472 // versuchte Rechteerweiterung beim Weitergeben
 // demselben Grund und mit demselben Preis: `.bss`, kein Oktett im
 // Abbild. DIE ZAHL STEHT ZWEIMAL, hier und in
 // `kernel/arch/x86_64/boot.s`; `tools/hv/run.sh` vergleicht beide.
-const KDATA_SIZE: u64 = 0xC0000
+// RUNDE HAERTUNG-2: 768 -> 896 KiB. Der Pfadpuffer je Kern (NAMEK_OFF,
+// acht Seiten am Stueck) schliesst den groessten Posten aus MERGE-6 6.2
+// -- die dreiundvierzig Wege in sys.fi um `kstate.NAME_OFF`. Ein Loch
+// von acht Seiten gab es nicht mehr (groesstes freies Stueck 16 KiB bei
+// 0xAC000). Derselbe Schritt, derselbe Preis: `.bss`, kein Oktett im
+// Abbild.
+const KDATA_SIZE: u64 = 0xE0000
 // =============================================== RUNDE MULTIUSER
 //
 // EINE SEITE ZAEHLER UND EINE SEITE GRUPPEN, bei 0x7A000. Das ist der
