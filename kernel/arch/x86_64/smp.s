@@ -106,20 +106,6 @@ ap_prot32:
 
     .code64
 ap_long64:
-    /* ROUND CERTUS: SSE on this core too. The bits are the ones
-     * `boot.s` sets on the boot processor, and the reason is the same
-     * one -- a task that does arithmetic may be scheduled on any core,
-     * and a core that came up with CR0.EM set would answer it with #UD.
-     * Setting it in only one place would be a fault that appears when
-     * the scheduler happens to move a process, which is the worst kind
-     * there is. */
-    movq %cr0, %rax
-    orq  $(1 << 1), %rax                /* MP */
-    andq $~(1 << 2), %rax               /* EM off */
-    movq %rax, %cr0
-    movq %cr4, %rax
-    orq  $((1 << 9) | (1 << 10)), %rax  /* OSFXSR | OSXMMEXCPT */
-    movq %rax, %cr4
     /* Everything out of the parameter block into registers FIRST, and
      * only then the flag: from the moment the flag is set the boot
      * processor may overwrite the block for the next core. */
