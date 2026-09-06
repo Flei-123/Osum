@@ -30,6 +30,7 @@ import blk
 import bootmod
 import elf
 import fb
+import file
 import fs
 import hw
 import kstate
@@ -62,7 +63,9 @@ export {
     // RUNDE BLECHFUENF: die Absturzanzeige. `trap.report` ruft sie.
     absturz,
     // RUNDE GLYPHE: die drei Tueren des Zeichen-Nachweises.
-    grace_bereit, grace_soll, grace_core, grace_kalt
+    grace_bereit, grace_soll, grace_core, grace_kalt,
+    // RUNDE BLECH2: `mausflut=<hz>` aus der Kommandozeile (gfx.parse).
+    parse
 }
 
 const P_FB: u64 = 13
@@ -1752,8 +1755,14 @@ fn surface(state: u64) {
         var n1: u64 = marke.anhaengen((&b1[0]) as u64, 0, marke.produkt(), 63)
         n1 = marke.anhaengen((&b1[0]) as u64, n1, (&b1r[0]) as u64, 63)
         var b2: [u8; 32] = "abcdefghijklm ABCDEFGHIJK +-*/\n\0"
-        wm.term_write(state, tw, (&b1[0]) as u64, n1)
-        wm.term_write(state, tw, (&b2[0]) as u64, 31)
+        // RUNDE BLECH2: NICHT auf dem Schreibtisch. Dort will der
+        // Mensch ein leeres Terminal mit einer Eingabeaufforderung;
+        // die zwei Zeilen sind das Messmuster von tools/wm/run.sh, und
+        // der faehrt `gfx wm` ohne `desk`.
+        if !kstate.mode_on(state, kstate.M_DESK) {
+            wm.term_write(state, tw, (&b1[0]) as u64, n1)
+            wm.term_write(state, tw, (&b2[0]) as u64, 31)
+        }
     }
 
     // Die Anwendung in Ring 3. Sie legt ihr Fenster SELBST an, ueber ein
@@ -2209,6 +2218,181 @@ fn wigapp_zerlegen(state: u64) {
     }
 }
 
+// ====================================================== RUNDE BLECH2
+// DAS PROTOKOLL DER SCHREIBTISCHPROGRAMME GEHT AUF DIE LEITUNG, NICHT
+// IN DAS TERMINAL DES MENSCHEN.
+//
+// Justins Foto vom 05.09. 22:46: das Terminalfenster ist beim Start
+// voll mit `taskbar: text ...`, `taskbar: btn ...`, `taskbar: state ...`
+// -- Messzeilen der Leiste, die ueber fd 1 in die Konsole (SINK_WINDOW)
+// und damit in SEIN Fenster liefen. Die Zeilen sind richtig, und
+// tools/desktop/run.sh liest sie -- von der SERIELLEN LEITUNG, nicht
+// aus dem Fenster. Also bekommen die Programme, die der Schreibtisch
+// selbst startet (desktop, taskbar, launcher, settings, dhcp), fuer
+// fd 1 und fd 2 ein eigenes Terminal, dessen Ausgabe NUR auf die
+// Leitung geht (`tty.alloc_log`, SINK_SERIAL). Auf der Leitung steht
+// Oktett fuer Oktett dasselbe wie vorher.
+//
+// WAS SIE STARTEN, BEKOMMT WIEDER DIE KONSOLE: `file.inherit_std`
+// tauscht das Protokoll-Terminal beim Vererben gegen die
+// Konsoleneintraege (kstate.LOGOPEN). Ein `sh` aus dem Startmenue
+// schreibt damit wie bisher in das Terminalfenster.
+//
+// Die Runde PROTOKOLL baut parallel einen Ringpuffer-Log; sobald der
+// da ist, ist `alloc_log` die eine Stelle, die ihn statt der Leitung
+// nimmt.
+static mut log_open: u64 = 0
+
+fn protokoll_binden(state: u64, task: u64) {
+    if task == 0 {
+        return
+    }
+    if log_open == 0 {
+        let t: u64 = tty.alloc_log(state)
+        if t >= tty.MAX_TTY {
+            return
+        }
+        // 1 = O_WRONLY (sys.fi) -- `kgui` darf `sys` nicht einbinden.
+        let of: u64 = file.open_alloc(state, file.K_TTY, t, 1)
+        if of >= file.MAX_OPEN {
+            return
+        }
+        log_open = of
+        kstate.set(state, kstate.LOGOPEN, of)
+        var s_p: [u8; 21] = "desk: protokoll tty=\0"
+        var s_o: [u8; 5] = " of=\0"
+        serial.puts((&s_p[0]) as u64)
+        serial.dec(t)
+        serial.puts((&s_o[0]) as u64)
+        serial.dec(of)
+        serial.nl()
+    }
+    // Unter gesperrten Unterbrechungen: das Kind darf seine erste Zeile
+    // nicht schreiben, bevor sein fd 1 umgehaengt ist.
+    let fl: u64 = sched.irq_save()
+    var fd: u64 = 1
+    while fd < 3 {
+        file.open_ref(state, log_open)
+        file.fd_free(state, task, fd)
+        if !file.fd_set(state, task, fd, log_open) {
+            file.open_unref(state, log_open)
+        }
+        fd = fd + 1
+    }
+    sched.irq_restore(fl)
+}
+
+// ====================================================== RUNDE BLECH2
+// `mausflut=<hz>` -- EIN ZEIGERSTROM AUS DEM KERN, MIT ECHTER RATE.
+//
+// Die QMP-Maus von QEMU (tools/blech2/maus.py) belastet den Weg
+// xHCI -> Bericht -> ps2m -> wm mit ECHTEN Berichten, aber das
+// Mausgeraet von QEMU fasst Bewegungen zwischen zwei Abfragen zu einem
+// Bericht zusammen: im Gast kommen rund hundert je Sekunde an. Justins
+// Spielmaus meldet bis zu tausend. Dieses Wort erzeugt genau diese Rate
+// im Kern selbst: je Marke (100 Hz) hz/100 Pakete in `ps2m.usb_packet`,
+// jedes sofort durch `wm.on_mouse` -- so wie ein USB-Bericht seit dieser
+// Runde auch (hidin.maus_melden -> gfx.mouse_now). Der Zeiger faehrt
+// waagerecht ueber den Schreibtisch hin und her, auf zwei Dritteln der
+// Hoehe (Terminal und Schreibtisch, nicht die Leiste), und alle 250
+// Pakete faellt ein Linksklick. Die Klicks stehen in `ps2m.clicks` --
+// Tafelzeile 2 `K` -- und muessen als `kl=` (E_DOWN eingereiht) wieder
+// herauskommen: kein Klick verloren, gezaehlt.
+static mut mausflut_hz: u64 = 0
+static mut mausflut_marke: u64 = 0
+static mut mausflut_links: u64 = 0
+static mut mausflut_n: u64 = 0
+static mut mausflut_klicks: u64 = 0
+
+fn parse(state: u64, cmd: u64) {
+    if cmd == 0 {
+        return
+    }
+    var w: [u8; 10] = "mausflut=\0"
+    var i: u64 = 0
+    while i < 4096 && kstate.get8(cmd + i) != 0 {
+        var k: u64 = 0
+        while k < 9 && kstate.get8(cmd + i + k) == (w[k as usize] as u64) {
+            k = k + 1
+        }
+        if k == 9 {
+            var v: u64 = 0
+            var j: u64 = i + 9
+            var n: u64 = 0
+            while n < 6 && kstate.get8(cmd + j) >= 48
+                && kstate.get8(cmd + j) <= 57 {
+                v = v * 10 + (kstate.get8(cmd + j) - 48)
+                j = j + 1
+                n = n + 1
+            }
+            mausflut_hz = v
+            return
+        }
+        i = i + 1
+    }
+}
+
+fn mausflut_klickzahl() -> u64 {
+    return mausflut_klicks
+}
+
+fn mausflut_schritt(state: u64) {
+    if mausflut_hz == 0 || !wm.ready(state) {
+        return
+    }
+    let jetzt: u64 = kstate.get(state, kstate.TICKS)
+    if mausflut_marke == 0 {
+        // Der erste Schritt stellt den Zeiger auf die Schreibtischflaeche.
+        ps2m.adopt(state, fb.width(state), fb.height(state))
+        ps2m.set_pos(state, fb.width(state) / 2, fb.height(state) * 2 / 3)
+        mausflut_marke = jetzt
+        return
+    }
+    if jetzt <= mausflut_marke {
+        return
+    }
+    var marken: u64 = jetzt - mausflut_marke
+    if marken > 10 {
+        marken = 10
+    }
+    mausflut_marke = jetzt
+    var k: u64 = marken * mausflut_hz / 100
+    while k > 0 {
+        var b0: u64 = 8
+        var dx: u64 = 3
+        if mausflut_links != 0 {
+            dx = 253
+            b0 = b0 | 0x10
+        }
+        var dy: u64 = 0
+        if (mausflut_n % 14) == 0 {
+            dy = 1
+        }
+        if (mausflut_n % 14) == 7 {
+            dy = 255
+            b0 = b0 | 0x20
+        }
+        if (mausflut_n % 250) == 0 {
+            b0 = b0 | ps2m.B_LEFT
+            mausflut_klicks = mausflut_klicks + 1
+        }
+        ps2m.usb_packet(state, b0, dx, dy, 0, false)
+        if ps2m.changed(state) {
+            let _c: bool = ps2m.take_change(state)
+            wm.on_mouse(state)
+        }
+        let x: u64 = ps2m.x(state)
+        if x + 16 >= fb.width(state) {
+            mausflut_links = 1
+        }
+        if x <= 16 {
+            mausflut_links = 0
+        }
+        mausflut_n = mausflut_n + 1
+        k = k - 1
+    }
+}
+
 fn desk_spawn(state: u64, pfad: u64, arg: u64, n: u64) -> u64 {
     return desk_spawn_n(state, pfad, arg, n, 1)
 }
@@ -2228,6 +2412,7 @@ fn desk_spawn_n(state: u64, pfad: u64, arg: u64, n: u64,
         k = k + 1
     }
     let pid: u64 = elf.spawn(state, pfad, abuf, argc, 2)
+    protokoll_binden(state, pid)
     let z: u64 = serial.zeile_an(sched.hier(state))
     var s_st: [u8; 13] = "desk: start \0"
     var s_pid: [u8; 7] = "  pid=\0"
@@ -2877,6 +3062,7 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         // Berichten. Steht die Meldung, findet er nichts mehr vor --
         // steht sie nicht, ist er der Weg. Der Unterschied ist an
         // `irq=` und `ber=` im Puls abzulesen.
+        mausflut_schritt(state)
         st(32)
         usb.poll(state)
         // RUNDE BLECHEINGABE: HIER wird aufgezaehlt und nicht im
@@ -3210,6 +3396,33 @@ static mut tafel_seriell: u64 = 0
 
 fn tafel_seriell_an() {
     tafel_seriell = 1
+    kopf_seriell = 1
+}
+
+// ====================================================== RUNDE BLECH2
+// DIE ZEILEN 0 BIS 7 KAMEN NIE AUF DIE LEITUNG.
+//
+// `tafel_seriell` wird vom Puls gesetzt und vom Zeitgeber-Anstrich
+// (`tafel_tick`, zehnmal je Sekunde) nach dessen Zeilen 8..23 wieder
+// geloescht. Die Zeilen 0..7 malt aber die SCHREIBTISCHSCHLEIFE
+// (`kopf_malen`), und die kam fast nie zwischen Setzen und Loeschen --
+// in einem 45-Sekunden-Lauf mit 20 Anstrichen der Zeilen 8..23 stand
+// von den Zeilen 1..7 keine einzige im Mitschnitt. Genau diese Zeilen
+// tragen RING/VERL (4) und TK (7): die Abnahme dieser Runde konnte sie
+// nicht lesen. Also eine eigene Marke fuer den Kopf, die NUR
+// `kopf_malen` loescht, nachdem es seine Zeilen gesagt hat.
+static mut kopf_seriell: u64 = 0
+
+fn kopf_zeile_sagen(state: u64, b: u64, n: u64) {
+    if kopf_seriell == 0 {
+        return
+    }
+    var v: [u8; 8] = "tafel: \0"
+    let z: u64 = serial.zeile_an(sched.hier(state))
+    serial.puts((&v[0]) as u64)
+    serial.text(b, n)
+    serial.nl()
+    serial.zeile_aus(z)
 }
 
 // Der Schreibtisch sagt der Tafel, ob eine Shell laeuft. Das ist die
@@ -4168,21 +4381,31 @@ fn tafel_streichen(state: u64) {
     //            verlorenen -- diese Zahl ist der Beweis, dass der
     //            Umbau wirkt.
     // Rot, sobald der Behandler laenger als eine halbe Marke braucht.
-    var t16: [u8; 10] = "16 ISR   \0"
-    var i_u: [u8; 4] = "US \0"
-    var i_m: [u8; 6] = " MAX \0"
+    // RUNDE BLECH2: OHNE `US` -- mit `LM` dahinter war die Zeile 50
+    // Zeichen (Tafel: `LG 1 Z16 50`, gemessen). MAX ist die Zahl, an
+    // der die Farbe haengt; die letzte Laufzeit steht weiter auf der
+    // Leitung nicht -- wer sie braucht, hat trap.isr_us_last.
+    var t16: [u8; 8] = "16 ISR \0"
+    var i_m: [u8; 5] = "MAX \0"
     var i_v: [u8; 7] = " VERL \0"
     var i_s: [u8; 8] = " SPAET \0"
     let us: u64 = trap.isr_us_max()
     tn = puls_text(state, tp, 0, (&t16[0]) as u64)
-    tn = puls_text(state, tp, tn, (&i_u[0]) as u64)
-    tn = puls_zahl(state, tp, tn, trap.isr_us_last())
     tn = puls_text(state, tp, tn, (&i_m[0]) as u64)
     tn = puls_zahl(state, tp, tn, us)
     tn = puls_text(state, tp, tn, (&i_v[0]) as u64)
     tn = puls_zahl(state, tp, tn, trap.ticks_lost())
     tn = puls_text(state, tp, tn, (&i_s[0]) as u64)
     tn = puls_zahl(state, tp, tn, trap.ticks_late())
+    // RUNDE BLECH2: `LM` -- die Marke, bei der ZULETZT nachgetragen
+    // wurde. Steht sie klein und bleibt stehen, sind die VERL vom
+    // Start (Aufzaehlung, Anschlussruecksetzung mit gesperrten
+    // Unterbrechungen); laeuft sie mit, verliert der laufende Betrieb.
+    // In SEKUNDEN seit dem Start (Marken / 100), damit die Zeile in 48
+    // Zeichen bleibt.
+    var i_lm: [u8; 5] = " LM \0"
+    tn = puls_text(state, tp, tn, (&i_lm[0]) as u64)
+    tn = puls_zahl(state, tp, tn, trap.ticks_lost_at() / 100)
     var ifarbe: u64 = wm.mess_gruen(state)
     if us > 5000 {
         ifarbe = wm.mess_rot(state)
@@ -4945,6 +5168,7 @@ fn tafel_tick(state: u64) {
     if jetzt >= tafel_serm + TAFEL_SERMARKEN {
         tafel_serm = jetzt
         tafel_seriell = 1
+        kopf_seriell = 1
     }
     tafel_streichen(state)
     tafel_seriell = 0
@@ -5049,7 +5273,7 @@ fn kopf_malen(state: u64) {
     n = tz_text(state, b, n, (&t_sh[0]) as u64)
     n = puls_zahl(state, b, n, tafel_sh)
     tafel_merken(0, b, n, wm.mess_weiss(state))
-    tafel_zeile_sagen(state, b, n)
+    kopf_zeile_sagen(state, b, n)
 
     // ---- Zeile 1: Stufe 1, die HID-Berichte ----
     var t1: [u8; 12] = "1 USB  BER \0"
@@ -5060,12 +5284,17 @@ fn kopf_malen(state: u64) {
     n = tz_text(state, b, n, (&t_w[0]) as u64)
     n = puls_zahl(state, b, n, usb.wahl(state))
     tafel_merken(1, b, n, wm.mess_ampel(state, ber))
-    tafel_zeile_sagen(state, b, n)
+    kopf_zeile_sagen(state, b, n)
 
     // ---- Zeile 2: Stufe 2, eingereiht ----
     var t2: [u8; 9] = "2 REIHE \0"
     var t_ta: [u8; 3] = "T\0\0"
     var t_ma: [u8; 4] = " M\0\0"
+    // RUNDE BLECH2: `K` -- Tastenflanken, die beim Zeiger angekommen sind
+    // (ps2m.clicks). Zusammen mit `kl=` im Puls (E_DOWN in einen Ring
+    // gelegt) ist das die Kette, an der ein verlorener Klick haengen
+    // bleibt: QMP-Klicks == K == kl.
+    var t_ka: [u8; 4] = " K\0\0"
     let e_ta: u64 = usb.hid_keys(state)
     let e_ma: u64 = ps2m.packets(state)
     n = tz_text(state, b, 0, (&t2[0]) as u64)
@@ -5073,8 +5302,18 @@ fn kopf_malen(state: u64) {
     n = puls_zahl(state, b, n, e_ta)
     n = tz_text(state, b, n, (&t_ma[0]) as u64)
     n = puls_zahl(state, b, n, e_ma)
+    n = tz_text(state, b, n, (&t_ka[0]) as u64)
+    n = puls_zahl(state, b, n, ps2m.clicks(state))
+    // `D` -- E_DOWN, die in einen Fensterring gelegt wurden (wm.downs),
+    // im SELBEN Anstrich wie K: mit dem Zeiger ueber einem Fenster
+    // muss D gleich K sein, sonst ist zwischen Zeiger und Ring ein
+    // Klick verschwunden. (`kl=` im Puls ist dieselbe Zahl, aber zu
+    // einem anderen Zeitpunkt.)
+    var t_d: [u8; 4] = " D\0\0"
+    n = tz_text(state, b, n, (&t_d[0]) as u64)
+    n = puls_zahl(state, b, n, wm.downs(state))
     tafel_merken(2, b, n, wm.mess_ampel(state, e_ta + e_ma))
-    tafel_zeile_sagen(state, b, n)
+    kopf_zeile_sagen(state, b, n)
 
     // ---- Zeile 3: Stufe 3, der Fensterserver hat abgeholt ----
     var t3: [u8; 9] = "3 SERV  \0"
@@ -5086,18 +5325,30 @@ fn kopf_malen(state: u64) {
     n = tz_text(state, b, n, (&t_ma[0]) as u64)
     n = puls_zahl(state, b, n, s_ma)
     tafel_merken(3, b, n, wm.mess_ampel(state, s_ta + s_ma))
-    tafel_zeile_sagen(state, b, n)
+    kopf_zeile_sagen(state, b, n)
 
     // ---- Zeile 4: Stufe 4, in den Fensterring gelegt ----
     var t4: [u8; 10] = "4 RING   \0"
     var t_v: [u8; 8] = "  VERL \0"
+    // RUNDE BLECH2: `KOAL` -- Bewegungen, die in ein liegendes E_MOVE
+    // zusammengefasst wurden (kein Verlust, siehe wm.ev_push). Und die
+    // Zeile wird ROT, sobald VERL nicht null ist: genau die Zahl, die
+    // Justin fotografieren soll.
+    var t_ko: [u8; 7] = " KOAL \0"
     let rein: u64 = wm.evpush(state)
+    let verl: u64 = wm.evdrops(state)
     n = tz_text(state, b, 0, (&t4[0]) as u64)
     n = puls_zahl(state, b, n, rein)
     n = tz_text(state, b, n, (&t_v[0]) as u64)
-    n = puls_zahl(state, b, n, wm.evdrops(state))
-    tafel_merken(4, b, n, wm.mess_ampel(state, rein))
-    tafel_zeile_sagen(state, b, n)
+    n = puls_zahl(state, b, n, verl)
+    n = tz_text(state, b, n, (&t_ko[0]) as u64)
+    n = puls_zahl(state, b, n, wm.evkoal(state))
+    var f4: u64 = wm.mess_ampel(state, rein)
+    if verl != 0 {
+        f4 = wm.mess_rot(state)
+    }
+    tafel_merken(4, b, n, f4)
+    kopf_zeile_sagen(state, b, n)
 
     // ---- Zeile 5: Stufe 5, ein Programm hat abgeholt ----
     var t5: [u8; 10] = "5 APP    \0"
@@ -5105,7 +5356,7 @@ fn kopf_malen(state: u64) {
     n = tz_text(state, b, 0, (&t5[0]) as u64)
     n = puls_zahl(state, b, n, raus)
     tafel_merken(5, b, n, wm.mess_ampel(state, raus))
-    tafel_zeile_sagen(state, b, n)
+    kopf_zeile_sagen(state, b, n)
 
     // ---- Zeile 6: der Zeiger ----
     var t6: [u8; 10] = "6 ZEIGER \0"
@@ -5117,7 +5368,7 @@ fn kopf_malen(state: u64) {
     n = tz_text(state, b, n, (&t_y[0]) as u64)
     n = puls_zahl(state, b, n, wm.cury(state))
     tafel_merken(6, b, n, wm.mess_ampel(state, s_ma))
-    tafel_zeile_sagen(state, b, n)
+    kopf_zeile_sagen(state, b, n)
 
     // ---- Zeile 7: die TASKLEISTE -- wird sie ueberhaupt gemalt? ----
     //
@@ -5140,7 +5391,7 @@ fn kopf_malen(state: u64) {
         var t_kein: [u8; 5] = "KEIN\0"
         n = tz_text(state, b, n, (&t_kein[0]) as u64)
         tafel_merken(7, b, n, wm.mess_rot(state))
-    tafel_zeile_sagen(state, b, n)
+    kopf_zeile_sagen(state, b, n)
     } else {
         let mal: u64 = wm.win_paints(state, tb)
         n = tz_text(state, b, n, (&t_id[0]) as u64)
@@ -5171,11 +5422,19 @@ fn kopf_malen(state: u64) {
         let bo: u64 = wm.win_owner(state, tb)
         n = tz_text(state, b, n, (&t_zu[0]) as u64)
         n = puls_zahl(state, b, n, sched.tget(state, bo, sched.T_STATE))
-        var l_tk: [u8; 5] = " TK  "
+        // RUNDE BLECH2: TK heisst jetzt "Titelzeilen im Band der Tafel"
+        // (wm.title_text); die alte Zaehlweise steht als `tka=` in
+        // `wm: fen`. Rot, sobald TK nicht null ist.
+        var l_tk: [u8; 5] = " TK \0"
         n = puls_text(state, b, n, (&l_tk[0]) as u64)
-        n = puls_zahl(state, b, n, wm.titel_beschnitten())
-        tafel_merken(7, b, n, wm.mess_ampel(state, mal))
-        tafel_zeile_sagen(state, b, n)
+        let tk: u64 = wm.titel_beschnitten()
+        n = puls_zahl(state, b, n, tk)
+        var f7: u64 = wm.mess_ampel(state, mal)
+        if tk != 0 {
+            f7 = wm.mess_rot(state)
+        }
+        tafel_merken(7, b, n, f7)
+        kopf_zeile_sagen(state, b, n)
     }
     // ================================ UND JETZT AUF DEN SCHIRM DAMIT
     //
@@ -5205,6 +5464,7 @@ fn kopf_malen(state: u64) {
     // Tafel (`fb.dirty` hat sie eben markiert), nicht das ganze Bild.
     tafel_streichen(state)
     tafel_seriell = 0
+    kopf_seriell = 0
 }
 
 fn eingabe_puls(state: u64, tw: u64, neustarts: u64) {
