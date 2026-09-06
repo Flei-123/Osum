@@ -133,14 +133,32 @@ const V_MAX: u64 = 128
 const DEF_H0: u64 = 28
 const DEF_V: u64 = 104
 
-// The three status fields, bottom-up in a vertical bar and right to
-// left in a horizontal one.
+// The status fields, bottom-up in a vertical bar and right to left in
+// a horizontal one.
+//
+// ROUND TON-2 ADDED THE VOLUME, and it sits BEFORE the battery on
+// purpose: the order here is the order on the bar, and every system
+// that has both puts the speaker next to the clock, not out at the
+// edge. It follows the same rule as the two before it -- NO SOUND
+// CARD, NO FIELD (`snd_da`), because a symbol stands for something the
+// machine HAS.
 const F_NET: u64 = 0
-const F_BAT: u64 = 1
-const F_CLK: u64 = 2
-const F_N: u64 = 3
+const F_SND: u64 = 1
+const F_BAT: u64 = 2
+const F_CLK: u64 = 3
+const F_N: u64 = 4
 
 // The calls this bar needs besides the window server.
+// ROUND TON-2: the sound interface. Same numbers as /bin/play,
+// /bin/qs and kernel/sys.fi -- one way to a thing, not two.
+const SYS_AUDGET: u64 = 1850
+const SYS_AUDSET: u64 = 1851
+const AS_MUTE: u64 = 2
+const A_READY: u64 = 0
+const A_VOLUME: u64 = 4
+const A_MUTED: u64 = 21
+const A_VOLGEN: u64 = 44
+
 const SYS_PWRGET: u64 = 1750
 const PG_BATPRESENT: u64 = 24
 const PG_BATPERCENT: u64 = 25
@@ -315,6 +333,25 @@ fn gl_w() -> u64 {
     return GL_W0 * wlibc.ui_scale()
 }
 
+// ROUND TON-2: THE VOLUME, AS A SHAPE.
+//
+// Three steps and a cross, and the thresholds are the same idea as the
+// battery's four: at sixteen pixels a number cannot be read, an
+// outline can. Muted is its OWN shape and not a colour -- "silent" has
+// to be visible to someone who cannot separate grey from red.
+fn snd_icon() -> u64 {
+    if snd_mute != 0 {
+        return icons.VOLUME_MUTED
+    }
+    if snd_vol == 0 {
+        return icons.VOLUME_ZERO
+    }
+    if snd_vol >= 50 {
+        return icons.VOLUME_HIGH
+    }
+    return icons.VOLUME_LOW
+}
+
 fn bat_icon() -> u64 {
     if bat_have == 0 {
         return icons.BATTERY_ABSENT
@@ -337,6 +374,18 @@ fn bat_icon() -> u64 {
 // And its colour -- a ROLE and not a value, so it is right in every
 // scheme. Below ten percent the thing is an alarm and says so; the
 // rest of the time it is text and looks like text.
+// ROUND TON-2: stumm wird GEDAEMPFT gezeichnet, und das ist die
+// zweite Haelfte der Aussage neben der Form. Ein Symbol, das nur
+// blasser ist, sagt zu wenig; eines, das nur eine andere Form hat,
+// faellt in einer vollen Leiste nicht auf. Beides zusammen ist
+// eindeutig.
+fn snd_colour() -> u64 {
+    if snd_mute != 0 {
+        return wlibc.theme(wlibc.T_DIM)
+    }
+    return wlibc.theme(wlibc.T_FG)
+}
+
 fn bat_colour() -> u64 {
     if bat_have == 0 {
         return wlibc.theme(wlibc.T_DIM)
@@ -435,13 +484,13 @@ static mut st_x: u64 = 0
 static mut st_y: u64 = 0
 static mut st_w: u64 = 0
 static mut st_h: u64 = 0
-static mut f_x: [u64; 3] = [0 as u64; 3]
-static mut f_y: [u64; 3] = [0 as u64; 3]
-static mut f_w: [u64; 3] = [0 as u64; 3]
-static mut f_h: [u64; 3] = [0 as u64; 3]
-static mut f_lines: [u64; 3] = [0 as u64; 3]
-static mut f_txt: [u8; 192] = [0 as u8; 192] // 3 fields x 2 lines x 32
-static mut f_full: [u8; 96] = [0 as u8; 96] // 3 fields x 32, unshortened
+static mut f_x: [u64; 4] = [0 as u64; 4]
+static mut f_y: [u64; 4] = [0 as u64; 4]
+static mut f_w: [u64; 4] = [0 as u64; 4]
+static mut f_h: [u64; 4] = [0 as u64; 4]
+static mut f_lines: [u64; 4] = [0 as u64; 4]
+static mut f_txt: [u8; 256] = [0 as u8; 256] // 4 fields x 2 lines x 32
+static mut f_full: [u8; 128] = [0 as u8; 128] // 4 fields x 32, unshortened
 static mut kx: [u64; 10] = [0 as u64; 10]
 // RUNDE PAINT: der Buendelname je Knopf, 24 Oktette, aus WL_APP.
 static mut kapp: [u8; 240] = [0 as u8; 240]
@@ -873,6 +922,7 @@ static mut lk_sg: [u8; 8] = " align=\0"
 static mut lk_ic: [u8; 21] = "taskbar: icon field=\0"
 static mut lk_no: [u8; 24] = "taskbar: noglyph field=\0"
 static mut lk_bat: [u8; 4] = "bat\0"
+static mut lk_snd: [u8; 4] = "snd\0"
 static mut lk_net: [u8; 4] = "net\0"
 static mut lk_id: [u8; 6] = " id=\0\0"
 static mut lk_px: [u8; 6] = " px=\0\0"
@@ -1628,6 +1678,14 @@ fn tage_im_monat(y: u64, m: u64) -> u64 {
 static mut clk_z2: [u8; 32] = [0 as u8; 32]
 static mut clk_zwei: u64 = 0
 static mut net_da: u64 = 1
+// ROUND TON-2. `snd_da` is the same rule as `net_da` and `bat_have`:
+// no sound card, no field. `snd_gen` is the change counter the kernel
+// keeps (`A_VOLGEN`) -- the bar asks for ONE number to find out
+// whether anything moved, instead of repainting on a timer.
+static mut snd_da: u64 = 0
+static mut snd_vol: u64 = 0
+static mut snd_mute: u64 = 0
+static mut snd_gen: u64 = 0
 
 fn status_build() -> bool {
     let s_kA: u64 = txt((&k_nobatt[0 as usize]) as u64,
@@ -1675,6 +1733,31 @@ fn status_build() -> bool {
             at = num_at(a, at, pc)
             let _q: u64 = text_at_p(a, at, (&s_pct[0 as usize]) as u64)
         }
+    }
+    // ============================== ROUND TON-2: the volume field.
+    // Same rule as the battery above -- no card, no field. The text is
+    // the percentage, and it is what a bar without a glyph path falls
+    // back to; with glyphs the symbol replaces it.
+    let sn: u64 = full_of(F_SND)
+    snd_da = 0
+    if ulib.sys(SYS_AUDGET, A_READY, 0, 0) == 1 {
+        snd_da = 1
+        let v: u64 = ulib.sys(SYS_AUDGET, A_VOLUME, 0, 0)
+        if !ulib.bad(v) {
+            snd_vol = v
+        }
+        snd_mute = 0
+        if ulib.sys(SYS_AUDGET, A_MUTED, 0, 0) == 1 {
+            snd_mute = 1
+        }
+        let g2: u64 = ulib.sys(SYS_AUDGET, A_VOLGEN, 0, 0)
+        if !ulib.bad(g2) {
+            snd_gen = g2
+        }
+        var at2: u64 = num_at(sn, 0, snd_vol)
+        let _q2: u64 = text_at_p(sn, at2, (&s_pct[0 as usize]) as u64)
+    } else {
+        __mmio_write8((sn) as *mut u8, 0 as u8)
     }
     let ne: u64 = full_of(F_NET)
     // ROUND NETVIEW, addendum: the four states of the MACHINE. The
@@ -1904,9 +1987,16 @@ fn layout() {
             f_h[(f) as usize] = hh
             y = y - gap()
             }
+            // ROUND TON-2: the volume sits between the battery and
+            // the network. Two chains walk these fields (here and in
+            // the horizontal layout below) and BOTH have to name the
+            // same order -- a field that only one of them knows is a
+            // field that is laid out on one edge and not on the other.
             if f == F_CLK {
                 f = F_BAT
             } else if f == F_BAT {
+                f = F_SND
+            } else if f == F_SND {
                 f = F_NET
             } else {
                 f = F_N
@@ -2036,6 +2126,8 @@ fn layout() {
         if f == F_CLK {
             f = F_BAT
         } else if f == F_BAT {
+            f = F_SND
+        } else if f == F_SND {
             f = F_NET
         } else {
             f = F_N
@@ -2901,6 +2993,38 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
                 ulib.nl()
             }
         }
+        // ROUND TON-2: THE VOLUME GETS THE SAME TREATMENT AS THE
+        // BATTERY -- symbol first, percentage behind it. Built the
+        // same way on purpose: two status fields that report
+        // differently are two fields a test has to know separately.
+        if f == F_SND && glyphs_ok() {
+            let vid: u64 = snd_icon()
+            let vx: u64 = f_x[(f) as usize] + 2
+            let vy: u64 = f_y[(f) as usize] + (f_h[(f) as usize] - gl_w()) / 2
+            if wlibc.icon_at(vid, vx, vy, gl_w(), snd_colour()) {
+                icx = gl_w() + 2
+                if report {
+                    say((&lk_ic[0 as usize]) as u64)
+                    say((&lk_snd[0 as usize]) as u64)
+                    say((&lk_id[0 as usize]) as u64)
+                    ulib.sayn(vid)
+                    say((&s_tX[0 as usize]) as u64)
+                    ulib.sayn(vx)
+                    say((&s_gy[0 as usize]) as u64)
+                    ulib.sayn(vy)
+                    say((&lk_px[0 as usize]) as u64)
+                    ulib.sayn(gl_w())
+                    say((&lk_ink[0 as usize]) as u64)
+                    ulib.sayn(wlibc.icon_ink_w(vid, gl_w())
+                        * wlibc.icon_ink_h(vid, gl_w()))
+                    ulib.nl()
+                }
+            } else if report {
+                say((&lk_no[0 as usize]) as u64)
+                say((&lk_snd[0 as usize]) as u64)
+                ulib.nl()
+            }
+        }
         if f == F_NET {
             // SECOND ADDENDUM, and the ORDER is the argument: the
             // faking sign comes FIRST, before the state of the machine.
@@ -3422,8 +3546,42 @@ fn hotkey_step() {
     hk_erst = 0
     if taste == 0 {
         startmenue_um()
+        return
+    }
+    // ROUND TON-2: SUPER+M SILENCES THE MACHINE.
+    //
+    // `m` and not one of the multimedia keys, because this kernel's
+    // keyboard driver (kernel/kbd.fi) delivers letters and not the
+    // extended scan codes a media key sends -- a shortcut on a key
+    // that never arrives is not a shortcut. `m` for mute is what
+    // Windows, GNOME and KDE all use for the same thing.
+    //
+    // THE HOTKEY IS THE SAME LATCH AS SUPER+A: read the counter, act
+    // once. Nothing is acknowledged, so the panel and the bar can both
+    // watch it without taking the press from each other.
+    if taste == 109 {
+        if snd_da != 0 {
+            let an: u64 = ulib.sys(SYS_AUDGET, A_MUTED, 0, 0)
+            var neu2: u64 = 1
+            if an == 1 {
+                neu2 = 0
+            }
+            let rc: u64 = ulib.sys(SYS_AUDSET, AS_MUTE, neu2, 0)
+            say((&s_hkmute[0 as usize]) as u64)
+            ulib.sayn(neu2)
+            say((&s_hkrc[0 as usize]) as u64)
+            ulib.sayn(rc)
+            ulib.nl()
+            snd_mute = neu2
+            status_build()
+            paint(false)
+        }
+        return
     }
 }
+
+static mut s_hkmute: [u8; 21] = "taskbar: hk mute on=\0"
+static mut s_hkrc: [u8; 5] = " rc=\0"
 
 static mut s_hk: [u8; 21] = "taskbar: klinke seq=\0"
 static mut s_hkw: [u8; 7] = "  war=\0"
@@ -3476,6 +3634,21 @@ fn click(x: u64, y: u64) {
         && x < f_x[(F_NET) as usize] + f_w[(F_NET) as usize]
         && y >= f_y[(F_NET) as usize]
         && y < f_y[(F_NET) as usize] + f_h[(F_NET) as usize] {
+        say((&s_ct[0 as usize]) as u64)
+        say((&z_qs[0 as usize]) as u64)
+        ulib.nl()
+        qs.toggle()
+        return
+    }
+    // ROUND TON-2: THE SPEAKER OPENS THE SAME PANEL. It is the field
+    // next door and it belongs to the same corner -- a symbol that
+    // shows a state and does nothing when it is clicked is a symbol
+    // that teaches people not to click it.
+    if snd_da != 0 && f_w[(F_SND) as usize] != 0
+        && x >= f_x[(F_SND) as usize]
+        && x < f_x[(F_SND) as usize] + f_w[(F_SND) as usize]
+        && y >= f_y[(F_SND) as usize]
+        && y < f_y[(F_SND) as usize] + f_h[(F_SND) as usize] {
         say((&s_ct[0 as usize]) as u64)
         say((&z_qs[0 as usize]) as u64)
         ulib.nl()
