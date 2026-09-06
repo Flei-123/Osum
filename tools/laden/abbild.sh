@@ -130,7 +130,24 @@ ARGS+=(/usr/ /usr/share/ /usr/share/locale/
 ARGS+=(/system/ "/system/schluessel.pub=$PUB")
 ARGS+=(/store/ /users/ /tmp/ /mnt/ /dev/ /proc/)
 # DIE MITGELIEFERTEN BUENDEL -- der Vorher-Zustand.
-while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$P/buendel")
+#
+# RUNDE GLYPHE: `nur=` -- SONST GIBT ES DIESES ABBILD NICHT.
+#
+# Ein Buendel ist ein VERWEIS auf eine Datei unter /bin; liegt sie nicht
+# auf DIESER Platte, bricht mkfs.py mit "gibt es nicht" ab. Die Runde
+# WERKZEUGE hat assets/apps/taskmgr.osp dazugelegt, und /bin dieses
+# Laeufers hat kein taskmgr -- gemessen am zusammengefuehrten Stand:
+#
+#     FEHLGESCHLAGEN: mkfs
+#     mkfs: '/bin/taskmgr' gibt es nicht
+#
+# MERGE-6 hat denselben Bruch in tools/design/aufnahme.sh und
+# tools/vielkern/run.sh gefunden und dort denselben Riegel eingebaut;
+# HIER fiel er nicht auf, weil dieser Laeufer in jener Runde nicht
+# gefahren ist. Er ist der Grund, warum die Auflage offen blieb.
+while read -r z; do ARGS+=("$z"); done \
+    < <(python3 tools/k15/bundle.py assets/apps "$P/buendel" \
+        "nur=$(ls "$OUT/bin" | tr '\n' ' ')")
 # DAS PRUEFMATERIAL FUER DIE GEGENPROBE.
 if [ -d "$BOESE" ]; then
     ARGS+=(/boese/)
