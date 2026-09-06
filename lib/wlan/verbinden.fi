@@ -48,8 +48,9 @@ export {
     Sitzung, sitzung_new,
     suchlauf_beginnen, beacon_aufnehmen, netz_anzahl, netz_ssid_len,
     netz_ssid_holen, netz_kanal_von, netz_sicherheit_von, netz_rssi_von,
-    netz_waehlen, gewaehlt_ist,
+    netz_waehlen, gewaehlt_ist, auth_angenommen, assoz_angenommen,
     nachricht1_behandeln, nachricht3_behandeln,
+    identitaet_setzen, pmk_setzen, akm_setzen,
     daten_senden, daten_empfangen, trennen,
     verbunden_ist, darf_daten_ist, zustand_von, grund_von,
     F_KEIN, F_KEIN_GERAET, F_ZU_KURZ, F_NICHT_UNSER, F_MIC, F_SCHLUESSEL,
@@ -115,6 +116,31 @@ fn sitzung_new() -> Sitzung {
         pn: [0; 6], fehler: 0
     }
     return s
+}
+
+// Wer wir sind, mit wem wir reden, und der Schluessel aus dem
+// Passwort. Das steht NICHT in dieser Datei -- die Adresse kommt aus
+// dem Geraet, der PMK aus dem Passwort und der SSID, und beides weiss
+// nur der Aufrufer.
+fn identitaet_setzen(s: *mut Sitzung, spa: u64, aa: u64) {
+    var i: usize = 0
+    while i < 6 {
+        (*s).spa[i] = *((spa + i as u64) as *mut u8)
+        (*s).aa[i] = *((aa + i as u64) as *mut u8)
+        i = i + 1
+    }
+}
+
+fn pmk_setzen(s: *mut Sitzung, pmk: u64) {
+    var i: usize = 0
+    while i < 32 {
+        (*s).pmk[i] = *((pmk + i as u64) as *mut u8)
+        i = i + 1
+    }
+}
+
+fn akm_setzen(s: *mut Sitzung, akm: u64) {
+    (*s).akm = akm
 }
 
 fn ld8(p: u64, i: usize) -> u8 {
@@ -254,6 +280,39 @@ fn netz_waehlen(s: *mut Sitzung, g: *mut geraet.Geraet, k: usize) -> bool {
 }
 
 fn gewaehlt_ist(s: *mut Sitzung) -> i64 { return (*s).gewaehlt }
+
+// Zwischen der Netzwahl und dem 4-Wege-Handschlag stehen ZWEI
+// Schritte, und sie hier zu vergessen war der einzige echte Fehler,
+// den `tools/wlan/weg.py` an dieser Datei gefunden hat:
+// Authentifizierung und Assoziation. Der Automat in `zustand.fi`
+// kennt sie ('a' und 'c') und laesst ohne sie keine EAPOL-Nachricht
+// durch -- der glaeubige Weg endete deshalb mit zwei Schluesseln im
+// Geraet, aber `darf_daten` blieb falsch.
+//
+// Das ist genau die Art halber Verbindung, gegen die der Automat
+// gebaut wurde, und er hat sie gemeldet. Dass die Schluessel trotzdem
+// schon unten waren, ist der zweite Teil des Befundes: die
+// Reihenfolge in `nachricht3_behandeln` setzt sie, BEVOR das Ereignis
+// '4' den Automaten weiterstellt. Beides steht jetzt richtig
+// hintereinander, und `weg.py` misst es.
+//
+// Wer diese beiden Aufrufe weglaesst, bekommt kein `darf_daten` --
+// und das ist die Zusage, um die es geht.
+fn auth_angenommen(s: *mut Sitzung, angenommen: bool) {
+    if angenommen {
+        zustand.ereignis(&(*s).lauf, 97)    // 'a'
+    } else {
+        zustand.ereignis(&(*s).lauf, 65)    // 'A'
+    }
+}
+
+fn assoz_angenommen(s: *mut Sitzung, angenommen: bool) {
+    if angenommen {
+        zustand.ereignis(&(*s).lauf, 99)    // 'c'
+    } else {
+        zustand.ereignis(&(*s).lauf, 67)    // 'C'
+    }
+}
 
 // ==================================================================
 // DER HANDSCHLAG
