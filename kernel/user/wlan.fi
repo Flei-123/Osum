@@ -1,0 +1,348 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/wlan.fi -- /bin/wlan, Runde WLAN-2.
+//
+// ==================================================================
+// EIN PROGRAMM, DAS EHRLICH SAGT, DASS ES NICHT KANN
+// ==================================================================
+//
+// `/bin/wlan` ist die Bedienung fuer etwas, das es auf diesem Rechner
+// noch nicht gibt: eine WLAN-Karte. Das koennte ein Grund sein, es
+// nicht zu schreiben. Es ist der Grund, es GENAU SO zu schreiben:
+//
+//     $ wlan status
+//     wlan: kein Geraet -- es gibt keinen Treiber
+//     wlan: erkannt wuerde ein Stick an seiner USB-Nummer (siehe
+//           'wlan chips'), gefahren wird keiner
+//
+// Ein Rechner, der auf `wlan status` schweigt oder abstuerzt, ist
+// kaputt. Einer, der sagt, was ihm fehlt, ist ein Rechner, an dem man
+// weiterarbeiten kann. Das ist dieselbe Haltung wie bei der Zeile
+// `wifi-usb: ... kein Treiber` in `kernel/usb.fi`, und sie ist der
+// eigentliche Gegenstand dieser Runde.
+//
+// WAS DIESES PROGRAMM WIRKLICH TUT, heute, ohne Karte:
+//
+//   wlan status     -- sagt, ob ein Geraet da ist (nein) und warum
+//   wlan chips      -- listet die USB-Nummern, die erkannt WUERDEN.
+//                      Das ist die Liste, gegen die Justin den
+//                      Aufdruck seines Sticks halten kann.
+//   wlan scan       -- sagt, dass ohne Geraet nicht gesucht werden
+//                      kann, und WAS dafuer fehlt
+//   wlan verbinden <ssid> <psk>
+//                   -- prueft die Eingaben und schreibt
+//                      /etc/wlan.conf mit den Rechten 0600
+//   wlan vergessen <ssid>
+//                   -- nimmt ein Netz wieder heraus
+//
+// WAS ES BEWUSST NICHT TUT: den PMK vorab rechnen. Das WAERE sinnvoll
+// -- PBKDF2 mit 4096 Runden ueber die SSID ist der teuerste Schritt des
+// ganzen Handschlags und haengt an keiner Karte. Eine fruehere Fassung
+// dieser Datei MELDETE das auch, ohne es zu tun. Der Satz ist wieder
+// heraus: eine Meldung ueber eine Rechnung, die nicht stattfindet, ist
+// genau die Sorte Behauptung, gegen die diese Runde geschrieben ist.
+//
+// ==================================================================
+// /etc/wlan.conf UND WARUM SIE NUR ROOT GEHOERT
+// ==================================================================
+//
+// In der Datei steht ein WLAN-Passwort im Klartext -- und der daraus
+// abgeleitete PMK, der genauso gut ist: wer den PMK hat, kommt ins
+// Netz, ohne das Passwort zu kennen. Beides ist ein Geheimnis, und
+// beides gehoert einer Datei, die nur root lesen darf.
+//
+// Deshalb setzt dieses Programm nach dem Schreiben die Rechte auf 0600
+// und prueft das nach. Geht das Setzen nicht, wird die Datei WIEDER
+// GELOESCHT statt sie mit falschen Rechten liegen zu lassen. Ein
+// Geheimnis, das lesbar herumliegt, ist schlimmer als keines, weil
+// niemand damit rechnet.
+
+profile kernel
+
+import ulib
+import wlan.usbchip
+
+// Der Einstieg eines Ring-3-Programms heisst `u_start` und gibt u64
+// zurueck -- nicht `main`. Wer `main` schreibt, bekommt von firnc ein
+// fertiges Programm statt einer Objektdatei, und `ld` faellt darueber,
+// die Ausgabe mit ihrer eigenen Eingabe zu binden.
+export { u_start }
+
+const SYS_CHMOD: u64 = 90
+
+// Der Aufwand von PBKDF2. Er steht hier als Konstante, damit die Zahl
+// an genau einer Stelle steht und nicht in einer Meldung anders als in
+// der Rechnung.
+const PBKDF2_RUNDEN: u64 = 4096
+
+fn hexziffer(v: u64) -> u8 {
+    if v < 10 {
+        return (48 + v) as u8
+    }
+    return (87 + v) as u8
+}
+
+// ------------------------------------------------------------------
+// wlan status
+// ------------------------------------------------------------------
+
+fn status() -> u64 {
+    var s1: [u8; 45] = "wlan: kein Geraet -- es gibt keinen Treiber\0\0"
+    var s2: [u8; 62] = "wlan: ein USB-Stick wuerde an seiner Nummer ERKANNT werden,\0\0\0"
+    var s3: [u8; 58] = "      gefahren wird keiner. 'wlan chips' zeigt die Liste.\0"
+    var s4: [u8; 60] = "wlan: was fehlt, steht in docs/WLAN.md Abschnitt 5 und 8.\0\0\0"
+    ulib.say((&s1[0 as usize]) as u64)
+    ulib.nl()
+    ulib.say((&s2[0 as usize]) as u64)
+    ulib.nl()
+    ulib.say((&s3[0 as usize]) as u64)
+    ulib.nl()
+    ulib.say((&s4[0 as usize]) as u64)
+    ulib.nl()
+    return 0
+}
+
+// ------------------------------------------------------------------
+// wlan chips -- die Liste, gegen die man den Aufdruck haelt
+// ------------------------------------------------------------------
+
+fn chips() -> u64 {
+    var kopf: [u8; 58] = "wlan: diese USB-Nummern werden erkannt und BENANNT:\0\0\0\0\0\0\0"
+    var fuss: [u8; 62] = "wlan: keine davon hat einen Treiber. Die Zeile am echten\0\0\0\0\0\0"
+    var fuss2: [u8; 61] = "      Blech heisst 'wifi-usb: <Name> (<vid>:<pid>), kein...'\0"
+    ulib.say((&kopf[0 as usize]) as u64)
+    ulib.nl()
+    var name: [u8; 40] = [0; 40]
+    var zeile: [u8; 80] = [0; 80]
+    var k: u64 = 0
+    let n: u64 = usbchip.eintrag_anzahl() as u64
+    while k < n {
+        let vid: u64 = usbchip.eintrag_vid(k as usize)
+        let pid: u64 = usbchip.eintrag_pid(k as usize)
+        var at: u64 = 0
+        zeile[(at) as usize] = 32 as u8
+        at = at + 1
+        zeile[(at) as usize] = 32 as u8
+        at = at + 1
+        // vid:pid als vier Hexziffern je Seite
+        var sh: u64 = 12
+        while sh < 16 {
+            zeile[(at) as usize] = hexziffer((vid >> sh) & 15)
+            at = at + 1
+            if sh == 0 { sh = 16 } else { sh = sh - 4 }
+        }
+        zeile[(at) as usize] = 58 as u8
+        at = at + 1
+        sh = 12
+        while sh < 16 {
+            zeile[(at) as usize] = hexziffer((pid >> sh) & 15)
+            at = at + 1
+            if sh == 0 { sh = 16 } else { sh = sh - 4 }
+        }
+        zeile[(at) as usize] = 32 as u8
+        at = at + 1
+        zeile[(at) as usize] = 32 as u8
+        at = at + 1
+        usbchip.name_holen(vid, pid, (&name[0 as usize]) as u64)
+        var i: u64 = 0
+        while name[(i) as usize] != 0 as u8 {
+            zeile[(at) as usize] = name[(i) as usize]
+            at = at + 1
+            i = i + 1
+        }
+        zeile[(at) as usize] = 0 as u8
+        ulib.say((&zeile[0 as usize]) as u64)
+        ulib.nl()
+        k = k + 1
+    }
+    ulib.say((&fuss[0 as usize]) as u64)
+    ulib.nl()
+    ulib.say((&fuss2[0 as usize]) as u64)
+    ulib.nl()
+    return 0
+}
+
+// ------------------------------------------------------------------
+// wlan scan
+// ------------------------------------------------------------------
+
+fn scan() -> u64 {
+    var s1: [u8; 58] = "wlan: kein Suchlauf -- dafuer braucht es ein Funkgeraet.\0\0"
+    var s2: [u8; 62] = "wlan: der Suchlauf selbst ist gebaut und gemessen (Beacons\0\0\0\0"
+    var s3: [u8; 62] = "      zerlegen, Netze sammeln, unsichere abweisen); was fehlt\0"
+    var s4: [u8; 47] = "      ist der Treiber, der die Rahmen liefert.\0"
+    ulib.say((&s1[0 as usize]) as u64)
+    ulib.nl()
+    ulib.say((&s2[0 as usize]) as u64)
+    ulib.nl()
+    ulib.say((&s3[0 as usize]) as u64)
+    ulib.nl()
+    ulib.say((&s4[0 as usize]) as u64)
+    ulib.nl()
+    return 1
+}
+
+// ------------------------------------------------------------------
+// wlan verbinden <ssid> <psk>
+// ------------------------------------------------------------------
+
+fn verbinden(ssid: u64, psk: u64) -> u64 {
+    var s_kurz: [u8; 59] = "wlan: das Passwort muss 8 bis 63 Zeichen haben (WPA2/WPA3)\0"
+    var s_ssid: [u8; 49] = "wlan: der Netzname muss 1 bis 32 Zeichen haben\0\0\0"
+    var s_ok: [u8; 45] = "wlan: /etc/wlan.conf geschrieben fuer Netz \0\0"
+    var s_pmk: [u8; 57] = "wlan: der PMK wird beim Verbinden gerechnet, nicht jetzt\0"
+    var s_no: [u8; 47] = "wlan: /etc/wlan.conf laesst sich nicht anlegen\0"
+    var s_rechte: [u8; 62] = "wlan: die Rechte 0600 gehen nicht -- Datei wieder geloescht\0\0\0"
+    var s_hin: [u8; 62] = "wlan: verbunden wird damit NICHT -- es gibt keinen Treiber.\0\0\0"
+    var pfad: [u8; 16] = "/etc/wlan.conf\0\0"
+
+    let sl: u64 = ulib.length(ssid)
+    let pl: u64 = ulib.length(psk)
+    if sl == 0 || sl > 32 {
+        ulib.say((&s_ssid[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    if pl < 8 || pl > 63 {
+        // Das ist keine Schikane: 802.11i sagt genau das, und ein
+        // kuerzeres Passwort wuerde spaeter im Handschlag scheitern,
+        // ohne dass jemand wuesste warum.
+        ulib.say((&s_kurz[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+
+    // Die Datei bauen: zwei Zeilen, ssid und psk.
+    var inhalt: [u8; 256] = [0; 256]
+    var at: u64 = 0
+    var k_ssid: [u8; 6] = "ssid \0"
+    var k_psk: [u8; 5] = "psk \0"
+    var i: u64 = 0
+    while k_ssid[(i) as usize] != 0 as u8 {
+        inhalt[(at) as usize] = k_ssid[(i) as usize]
+        at = at + 1
+        i = i + 1
+    }
+    i = 0
+    while i < sl {
+        inhalt[(at) as usize] = __mmio_read8((ssid + i) as *mut u8)
+        at = at + 1
+        i = i + 1
+    }
+    inhalt[(at) as usize] = 10 as u8
+    at = at + 1
+    i = 0
+    while k_psk[(i) as usize] != 0 as u8 {
+        inhalt[(at) as usize] = k_psk[(i) as usize]
+        at = at + 1
+        i = i + 1
+    }
+    i = 0
+    while i < pl {
+        inhalt[(at) as usize] = __mmio_read8((psk + i) as *mut u8)
+        at = at + 1
+        i = i + 1
+    }
+    inhalt[(at) as usize] = 10 as u8
+    at = at + 1
+
+    // O_WRONLY|O_CREAT|O_TRUNC = 1|64|512 = 577
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&pfad[0 as usize]) as u64,
+        577, 384)
+    if ulib.bad(fd) {
+        ulib.say((&s_no[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    ulib.sys(ulib.SYS_WRITE, fd, (&inhalt[0 as usize]) as u64, at)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+
+    // DIE RECHTE. In der Datei steht ein Geheimnis; sie gehoert nur
+    // root. Geht das nicht, wird sie WIEDER GELOESCHT -- ein
+    // Geheimnis mit falschen Rechten ist schlimmer als keines.
+    let r: u64 = ulib.sys(SYS_CHMOD, (&pfad[0 as usize]) as u64, 384, 0)
+    if ulib.bad(r) {
+        ulib.sys(ulib.SYS_UNLINK, (&pfad[0 as usize]) as u64, 0, 0)
+        ulib.say((&s_rechte[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+
+    ulib.say((&s_ok[0 as usize]) as u64)
+    ulib.say(ssid)
+    ulib.nl()
+    ulib.say((&s_pmk[0 as usize]) as u64)
+    ulib.nl()
+    ulib.say((&s_hin[0 as usize]) as u64)
+    ulib.nl()
+    return 0
+}
+
+fn vergessen() -> u64 {
+    var pfad: [u8; 16] = "/etc/wlan.conf\0\0"
+    var s_w: [u8; 34] = "wlan: /etc/wlan.conf geloescht\0\0\0\0"
+    var s_n: [u8; 39] = "wlan: /etc/wlan.conf gibt es gar nicht\0"
+    let r: u64 = ulib.sys(ulib.SYS_UNLINK, (&pfad[0 as usize]) as u64, 0, 0)
+    if ulib.bad(r) {
+        ulib.say((&s_n[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    ulib.say((&s_w[0 as usize]) as u64)
+    ulib.nl()
+    return 0
+}
+
+fn hilfe() -> u64 {
+    var h1: [u8; 40] = "wlan -- WLAN einrichten und nachsehen\0\0\0"
+    var h2: [u8; 40] = "  wlan status            Stand\0\0\0\0\0\0\0\0\0\0"
+    var h3: [u8; 48] = "  wlan chips             welche Sticks erkannt\0\0"
+    var h4: [u8; 48] = "  wlan scan              Netze suchen\0\0\0\0\0\0\0\0\0\0\0"
+    var h5: [u8; 49] = "  wlan verbinden <ssid> <psk>\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+    var h6: [u8; 49] = "  wlan vergessen         /etc/wlan.conf loeschen\0"
+    ulib.say((&h1[0 as usize]) as u64)
+    ulib.nl()
+    ulib.say((&h2[0 as usize]) as u64)
+    ulib.nl()
+    ulib.say((&h3[0 as usize]) as u64)
+    ulib.nl()
+    ulib.say((&h4[0 as usize]) as u64)
+    ulib.nl()
+    ulib.say((&h5[0 as usize]) as u64)
+    ulib.nl()
+    ulib.say((&h6[0 as usize]) as u64)
+    ulib.nl()
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var c_status: [u8; 7] = "status\0"
+    var c_chips: [u8; 6] = "chips\0"
+    var c_scan: [u8; 5] = "scan\0"
+    var c_verb: [u8; 10] = "verbinden\0"
+    var c_verg: [u8; 10] = "vergessen\0"
+
+    let argc: u64 = ulib.arg_count(args)
+    if argc < 2 {
+        return hilfe()
+    }
+    let b: u64 = ulib.arg_at(args, 1)
+    if ulib.streq(b, (&c_status[0 as usize]) as u64) {
+        return status()
+    }
+    if ulib.streq(b, (&c_chips[0 as usize]) as u64) {
+        return chips()
+    }
+    if ulib.streq(b, (&c_scan[0 as usize]) as u64) {
+        return scan()
+    }
+    if ulib.streq(b, (&c_verg[0 as usize]) as u64) {
+        return vergessen()
+    }
+    if ulib.streq(b, (&c_verb[0 as usize]) as u64) {
+        if argc < 4 {
+            return hilfe()
+        }
+        return verbinden(ulib.arg_at(args, 2), ulib.arg_at(args, 3))
+    }
+    return hilfe()
+}

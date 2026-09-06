@@ -398,7 +398,7 @@ falschen Chip ist nutzlos.
 | `lib/wlan/usbchip.fi` | 368 | 40 USB-Nummern auf Familie und Klarnamen |
 | `tools/wlan/gegenstelle.py` | 655 | ein **unabhaengiger** WPA2-Authenticator, an der echten Aufzeichnung geeicht |
 | `tools/wlan/handschlag.py` | 337 | Osums Supplicant gegen die Gegenstelle, glaeubig und boese |
-| `tools/wlan/weg.py` | 250 | der ganze Weg, und was passiert, wenn jemand luegt |
+| `tools/wlan/weg.py` | 223 | der ganze Weg, und was passiert, wenn jemand luegt |
 | `tools/wlan/run2.sh` | 240 | Abschnitt 43 der Abnahme |
 | `kernel/usb.fi` | +43 | die Zeile, die den Stick benennt |
 

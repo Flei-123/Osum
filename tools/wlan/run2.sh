@@ -208,6 +208,20 @@ else
 fi
 
 # =====================================================================
+echo "== 5b. /bin/wlan, wirklich gelaufen =="
+# =====================================================================
+#
+# Ein Programm, das nur uebersetzt, ist nicht gemessen. Dieser Teil
+# baut ein Abbild MIT /bin/wlan darin und ruft es in Osum auf.
+
+bash tools/wlan/prog.sh "$OUT/prog" > "$OUT/prog.txt" 2>&1
+grep -E '^  (OK|FAIL)' "$OUT/prog.txt" || true
+PG=$(grep -c '^  OK' "$OUT/prog.txt" || true)
+PF=$(grep -c '^  FAIL' "$OUT/prog.txt" || true)
+pass=$((pass+PG))
+fail=$((fail+PF))
+
+# =====================================================================
 echo "== 6. was diese Runde NICHT kann, gemessen =="
 # =====================================================================
 
@@ -231,8 +245,8 @@ else
 fi
 
 Z=$(cat lib/wlan/geraet.fi lib/wlan/pruefgeraet.fi lib/wlan/verbinden.fi \
-        lib/wlan/usbchip.fi 2>/dev/null | wc -l)
-ok "die neuen Dateien dieser Runde in Zeilen: $Z in lib/wlan/"
+        lib/wlan/usbchip.fi kernel/user/wlan.fi 2>/dev/null | wc -l)
+ok "die neuen Dateien dieser Runde in Zeilen: $Z in lib/wlan/ und kernel/user/wlan.fi"
 
 echo
 echo "WLAN2: $pass Zusagen, $fail Fehler"
