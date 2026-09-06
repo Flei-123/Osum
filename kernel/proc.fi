@@ -108,16 +108,40 @@ const IMAGE_BASE: u64 = 0x40100000
 // klar (es gibt 0 zurueck, `mmap` daraus -ENOMEM); es verwechselt die
 // beiden nicht stillschweigend. Kein Programm dieses Systems will beides,
 // und der Uebersetzer will den Bildschirm am allerwenigsten.
-const IMAGE_END: u64 = 0x40400000 // RUNDE K16: war 0x40200000
+// ===================== RUNDE CERTUS-AUF-OSUM: DER BROWSER IST 6,5 MiB
+//
+// Das Abbildfenster war drei Kacheln gross (0x40100000..0x40400000),
+// und der Grund dafuer war der Uebersetzer: firnc1 sind 1,6 MiB. Certus
+// mit dem AKTUELLEN Motor -- HTML, CSS, Layout, JavaScript,
+// Schriftrasterer, TLS, Bilder, PDF -- ist GEMESSEN groesser:
+//
+//     .text    5.788.309 Oktette
+//     .rodata    692.652
+//     .data/.bss 107.488
+//     Ende      0x4074a5e0, also 6,5 MiB ueber IMAGE_BASE
+//
+// (`readelf -lW` auf dem gebundenen /bin/certus, 05.09.2026.) Das
+// Fenster waechst deshalb auf sechs Kacheln, 0x40100000..0x40C00000 =
+// 11 MiB, und die grosse Arena beginnt entsprechend hoeher. Was das
+// kostet, ist wieder nichts: eine Kachel entsteht erst, wenn `pt_for`
+// sie anlegt, und ein Programm von 40 KiB beruehrt genau eine.
+//
+// Die Warnung von K16 gilt unveraendert: `fb.USER_BASE` ist 0x40200000.
+// Ein Prozess kann ein Abbild ueber 1 MiB haben ODER den Rahmenpuffer
+// abbilden, nicht beides. Certus will den Rahmenpuffer nicht -- er malt
+// ueber den Fensterserver (WIG_BLIT in kernel/user/wlib.fi).
+const IMAGE_END: u64 = 0x40C00000 // CERTUS: war 0x40400000 (K16)
 
 // Wie viele 2-MiB-Kacheln dem privaten Seitenverzeichnis gehoeren.
 //
 //   0  0x40000000  Datenseite, Stapel, Argumente, `brk`, das alte `mmap`
-//   1  0x40200000  Abbild, zweite Haelfte -- ODER der Rahmenpuffer
-//   2  0x40400000  Abbild, dritte Haelfte
-//   3  0x40600000  \
-//   4  0x40800000   > RUNDE K16: die GROSSE Arena, 6 MiB, waechst von
-//   5  0x40A00000  /  0x40C00000 nach unten
+//   1  0x40200000  Abbild, zweite Kachel -- ODER der Rahmenpuffer
+//   2  0x40400000  Abbild, dritte Kachel
+//   3  0x40600000  Abbild  \
+//   4  0x40800000  Abbild   > RUNDE CERTUS-AUF-OSUM: das Abbildfenster
+//   5  0x40A00000  Abbild  /  reicht bis 0x40C00000 (der Browser)
+//   6  0x40C00000  \  die GROSSE Arena, 186 MiB, waechst von
+//  ..              /  0x4C600000 nach unten
 //
 // Die Kacheln 3 bis 5 sind der Grund, warum ein Uebersetzer hier laufen
 // kann. Gemessen: `firnc1` braucht auf Linux 3 MiB Adressraum insgesamt
@@ -125,9 +149,44 @@ const IMAGE_END: u64 = 0x40400000 // RUNDE K16: war 0x40200000
 // Halde -- und die alte Halde dieses Systems war 851.968 Oktette
 // zwischen `brk` und `MMAP_TOP`. Es fehlte also nicht viel, aber es
 // fehlte.
-const PRIV_SLOTS: u64 = 6
-const BIG_TOP: u64 = 0x40C00000
-const BIG_FLOOR: u64 = 0x40600000
+//
+// ================================== RUNDE CERTUS: 6 MiB SIND EIN BROWSER
+// ZU WENIG, UND DIE ZAHL IST GEMESSEN UND NICHT GESCHAETZT.
+//
+// Certus (der Browser aus dem Firn-Baum, lib/browser) wurde am 28.08.2026
+// auf dem Wirt unter `strace -e trace=mmap,munmap` vermessen, waehrend er
+// zwei ECHTE Seiten aus dem Netz lud und malte (`tools/certus/speicher.py`
+// auf dem Zweig `certus`):
+//
+//                        mmap    munmap   gleichzeitig   INSGESAMT
+//     example.com         226      171      37.920.768   47.550.464
+//     en.wikipedia.org    944      679      88.952.832  114.290.688
+//
+// Die LETZTE Spalte ist die, auf die es hier ankommt, und der Grund steht
+// dreissig Zeilen ueber `do_unmap` in kernel/sys.fi: "The pages go back,
+// the bump pointer does not." Die Rahmen kommen zurueck, der Zeiger nicht
+// -- also verbraucht ein Prozess so viel ADRESSRAUM, wie er insgesamt je
+// abgebildet hat, und nicht so viel, wie gleichzeitig offen war. Sechs
+// MiB reichen fuer example.com um den Faktor 7,6 nicht.
+//
+// Also waechst die grosse Arena von 6 MiB auf 192 MiB: die Kacheln 3 bis
+// 98 statt 3 bis 5. Was das KOSTET, ist nichts, solange niemand sie
+// anfasst -- eine Kachel ist erst da, wenn `pt_for` sie anlegt
+// (ein Rahmen von 4 KiB je 2 MiB), und `free_space` gibt genau die
+// wieder her, die angelegt wurden. Ein Programm, das 1 MiB braucht,
+// merkt von dieser Zeile nichts.
+//
+// RUNDE CERTUS-AUF-OSUM (05.09.2026): dieselbe Zahl noch einmal, diesmal
+// auf `merge6` und mit dem AKTUELLEN Motor (JavaScript, Raster,
+// Sicherheit); tools/certus/run.sh misst, was der Browser davon wirklich
+// anfasst.
+//
+// WARUM NICHT MEHR: `tools/osum/run.sh` bindet ein Programm auf 0x50000000
+// und verlangt, dass der Lader es ABLEHNT. Die private Gegend darf diese
+// Adresse also nicht erreichen; 0x4C600000 laesst 58 MiB Luft.
+const PRIV_SLOTS: u64 = 99
+const BIG_TOP: u64 = 0x4C600000
+const BIG_FLOOR: u64 = 0x40C00000 // CERTUS: war 0x40600000 (K16)
 // RUNDE K16: DER ARGUMENTBLOCK IST HOCHGEZOGEN, DAMIT DER STAPEL WACHSEN
 // KANN.
 //
