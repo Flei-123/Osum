@@ -1395,6 +1395,23 @@ lauf "40. Ring 3 auf ALLEN Kernen, und der Riegel davor -- der Fehler der Runde 
 lauf "41. der Aufgabenverwalter und das Kontrollzentrum (tools/werkzeug/run.sh, Runde WERKZEUGE)" \
      tools/werkzeug/run.sh werkzeug '^WERKZEUGE: |^  OK    |^        '
 
+# ================================================== RUNDE TON-2
+#
+# DER MISCHER VON RING 3 AUS. Abschnitt 5 von tools/hda/run.sh prueft
+# ihn von INNEN -- aus einem Kernel-Pruefpfad mit zwei erfundenen
+# Stroemen -- und das ist eine Aussage ueber die Additionsschleife und
+# keine darueber, ob zwei PROGRAMME nebeneinander spielen koennen.
+# Dieser Abschnitt fragt es von aussen: zweimal /bin/play durch die
+# Shell, jeder Ton per Goertzel einzeln nachgewiesen.
+#
+# DIE 60-SEKUNDEN-ABNAHME (tools/ton/abnahme.sh) STEHT ABSICHTLICH
+# NICHT HIER. Zwoelf Laeufe zu einer Minute sind zwoelf Minuten, und
+# das gehoert nicht in einen Durchlauf, den man vor jedem Commit
+# startet. Sie wird von Hand gefahren, und ihre Zahlen stehen in
+# STATUS-TON2.md.
+lauf "42. der Mischer von Ring 3 aus: zwei Programme, Lautstaerke je Strom, Saettigung, Systemklang (tools/ton/mischer.sh, Runde TON-2)" \
+     tools/ton/mischer.sh ton2 '^== |^  OK   |^  FEHL |^    \(|^ERGEBNIS'
+
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
 abschnitte_abarbeiten

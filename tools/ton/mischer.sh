@@ -101,10 +101,22 @@ num "660 Hz ist AUCH da"       "$(w zwei p2)"      ge 2000
 num "dazwischen (550 Hz) fast nichts" "$(w zwei pmitte)" le 500
 num "keine Luecke"             "$(w zwei gaps)"    eq 0
 num "keine Begrenzung noetig"  "$(w zwei max)"     lt 32767
-s0=$(grep -aoE 'strom: *[0-9]+' "$OUT/zwei.txt" | head -1 | grep -oE '[0-9]+$')
-s1=$(grep -aoE 'strom: *[0-9]+' "$OUT/zwei.txt" | tail -1 | grep -oE '[0-9]+$')
-[ "$s0" != "$s1" ] && gruen "zwei VERSCHIEDENE Stroeme ($s0 und $s1)" \
-    || rot "beide Programme bekamen denselben Strom ($s0)"
+# ZWEI PROGRAMME SCHREIBEN AUF DIESELBE SERIELLE LEITUNG, und sie
+# tun es gleichzeitig. Deshalb steht dort Zeilensalat wie
+# "strom:   art: wav" -- die Zeile des einen ist mitten in der des
+# anderen gelandet. Ein `head -1`/`tail -1` liest dann zweimal
+# dieselbe Zahl und meldet einen Fehler, den es nicht gibt (genau das
+# ist beim ersten Lauf unter test.sh passiert, waehrend derselbe
+# Aufruf einzeln durchlief).
+#
+# ALSO NICHT DIE ZEILEN ZAEHLEN, SONDERN DIE ZAHLEN EINSAMMELN: alle
+# "strom: N" holen, doppelte streichen, und fragen, ob zwei
+# VERSCHIEDENE uebrig bleiben.
+sn=$(grep -aoE 'strom: [0-9]+' "$OUT/zwei.txt" | grep -oE '[0-9]+$' \
+     | sort -u | tr '\n' ' ')
+sc=$(printf '%s' "$sn" | wc -w)
+[ "$sc" -ge 2 ] && gruen "zwei VERSCHIEDENE Stroeme ($sn)" \
+    || rot "es war nur ein Strom offen ($sn)"
 
 echo
 echo "== 2. LAUTSTAERKE JE STROM =="
