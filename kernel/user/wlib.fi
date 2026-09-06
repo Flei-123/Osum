@@ -91,6 +91,7 @@ export {
     head_base, cell_base, cell_x, head_h, icon_x, icon_y,
     icon_letter_x, icon_letter_base,
     K_LABEL, K_BUTTON, K_CHECK, K_ENTRY, K_LIST, K_TABLE, K_TABS, K_TILE,
+    K_SLIDER, slider, slider_step,
     K_GRAPH, graph, graph_x, graph_y, GRAPH_FIELDS, GR_N, GR_HIST, GR_A,
     GR_B, GR_MAX,
     K_CARD, card,
@@ -130,6 +131,20 @@ const K_SCROLL: u64 = 11
 // whose colours do NOT come from the running theme -- it draws a
 // preset, and a preset is by definition not the thing that is running.
 const K_TILE: u64 = 12
+// ==================================================== RUNDE TON-2
+//
+// DER SCHIEBEREGLER. Er kommt in die BIBLIOTHEK und nicht in das
+// Programm, und das ist die Regel dieses Projekts und keine Vorliebe:
+// ein Lautstaerkeregler, den `/bin/qs` selbst malt, ist ein Programm,
+// das an der Bibliothek vorbei zeichnet -- und genau das zaehlt
+// `tools/design/messen.py` als Fehler. Der zweite Regler (Helligkeit,
+// Mausgeschwindigkeit, Fortschritt) haette ihn ohnehin gebraucht.
+//
+// WAS ER IST: ein Wert von 0 bis 100 in `D_VAL`, eine Rinne, ein
+// Griff. Kein Bruchteil, keine eigene Skala -- Prozent ist genau das,
+// was `audset AS_VOLUME` nimmt, und eine zweite Einheit dazwischen
+// waere eine Umrechnung, die irgendwann falsch herum steht.
+const K_SLIDER: u64 = 13
 // ==================================================== ROUND SOFTUI
 //
 // A CARD: A ROUNDED PANEL WITH A SOFT SHADOW AND NO BORDER.
@@ -1157,7 +1172,11 @@ fn reshape() {
             s(i, D_H, wlibc.metric(wlibc.M_CTRL_H))
         } else if k == K_ENTRY || k == K_CHOICE {
             s(i, D_H, ctrl_thin())
-        } else if k == K_CHECK || k == K_MENUBAR {
+        } else if k == K_CHECK || k == K_MENUBAR || k == K_SLIDER {
+            // RUNDE TON-2: der Regler richtet sich wie jedes andere
+            // Bedienelement nach dem Thema. Ohne diese Zeile behielte
+            // er nach einem Themenwechsel seine alte Hoehe, waehrend
+            // alles um ihn herum sich aendert.
             s(i, D_H, ctrl_small())
         } else if k == K_SEP {
             s(i, D_H, sep_h())
@@ -1330,6 +1349,38 @@ fn button(txt: u64) -> u64 {
     let w: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), txt, tlen(txt))
         + pad * 2
     return add(K_BUTTON, txt, w, wlibc.metric(wlibc.M_CTRL_H), true)
+}
+
+// RUNDE TON-2: EIN SCHIEBEREGLER, 0..100.
+//
+// `txt` ist die Beschriftung LINKS davon (0 = keine). Der Wert steht
+// wie bei jedem anderen Widget in `value`/`set_value`.
+//
+// DIE HOEHE IST `ctrl_small()` UND NICHT DIE DER RINNE. Die Rinne ist
+// vier Bildpunkte hoch; ein Widget, das nur vier Bildpunkte hoch ist,
+// laesst sich nicht treffen. Gemessen wird die Klickflaeche
+// (tools/design/messen.py, Frage 2, Grenze 32 Bildpunkte), und die
+// ist hier die ganze Widgethoehe.
+fn slider(txt: u64, wert: u64) -> u64 {
+    let i: u64 = add(K_SLIDER, txt, 0, ctrl_small(), true)
+    var v: u64 = wert
+    if v > 100 {
+        v = 100
+    }
+    s(i, D_VAL, v)
+    // D_A ist die Schrittweite der Tastatur. Fuenf und nicht eins:
+    // eine Lautstaerke in Hundertsteln zu regeln heisst zwanzig
+    // Tastendruecke fuer ein Viertel, und hoerbar ist der Unterschied
+    // ohnehin erst in groesseren Stufen.
+    s(i, D_A, 5)
+    return i
+}
+
+fn slider_step(i: u64, n: u64) {
+    if i >= MAXWD || n == 0 {
+        return
+    }
+    s(i, D_A, n)
 }
 
 fn check(txt: u64, on: bool) -> u64 {
@@ -2198,6 +2249,131 @@ fn bg_of(w: u64) -> u64 {
     return wlibc.theme(wlibc.T_BG)
 }
 
+// RUNDE TON-2: WO DIE RINNE ANFAENGT UND WIE BREIT SIE IST.
+//
+// Zwei Stellen brauchen dieselbe Rechnung -- das Malen und das
+// Treffen. Stuende sie zweimal da, waere der Regler eines Tages an
+// einer anderen Stelle zu fassen, als er gezeichnet ist; das ist der
+// Fehler, den man erst auf einem Bildschirmfoto sieht.
+fn slider_bahn(i: u64) -> u64 {
+    let txt: u64 = g(i, D_TEXT)
+    var lx: u64 = g(i, D_X)
+    if txt != 0 && tlen(txt) > 0 {
+        lx = lx + wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), txt,
+            tlen(txt)) + 8
+    }
+    return lx
+}
+
+fn slider_rw(i: u64) -> u64 {
+    let x: u64 = g(i, D_X)
+    let bw: u64 = g(i, D_W)
+    let lx: u64 = slider_bahn(i)
+    let zw: u64 = 34
+    if bw > (lx -% x) + zw + 8 {
+        return bw -% (lx -% x) -% zw -% 8
+    }
+    return 0
+}
+
+// Aus einer Zeigerstelle einen Wert. Der Griff ist zehn Bildpunkte
+// breit, also ist die BAHN um zehn kuerzer als die Rinne -- gerechnet
+// wird auf die Mitte des Griffs, sonst laesst sich die 100 nicht
+// erreichen.
+fn slider_set_x(i: u64, x: u64) {
+    let lx: u64 = slider_bahn(i)
+    let rw: u64 = slider_rw(i)
+    let gw: u64 = 10
+    if rw <= gw {
+        return
+    }
+    let bahn: u64 = rw -% gw
+    var v: u64 = 0
+    if x > lx + gw / 2 {
+        let ab: u64 = x -% lx -% gw / 2
+        if ab >= bahn {
+            v = 100
+        } else {
+            // AUF DIE NAECHSTE STUFE RUNDEN und nicht abschneiden:
+            // sonst erreicht ein Klick ganz rechts 99 statt 100.
+            v = (ab * 100 + bahn / 2) / bahn
+        }
+    }
+    if v > 100 {
+        v = 100
+    }
+    s(i, D_VAL, v)
+}
+
+// RUNDE TON-2: DER SCHIEBEREGLER.
+//
+// Beschriftung links, dann die Rinne, rechts der Wert in Prozent.
+// JEDE Farbe kommt aus dem Thema: die Rinne aus T_SCROLL (dieselbe,
+// aus der die Rollleiste ihre nimmt -- es ist dieselbe Sache: eine
+// Bahn, in der etwas laeuft), der gefuellte Teil aus T_ACCENT, der
+// Griff aus T_THUMB. Ein fester Farbwert an dieser Stelle wuerde von
+// tools/design/messen.py gezaehlt, und zwar zu Recht: er ueberlebte
+// keinen Themenwechsel.
+fn paint_slider(i: u64) {
+    let x: u64 = g(i, D_X)
+    let y: u64 = g(i, D_Y)
+    let bw: u64 = g(i, D_W)
+    let bh: u64 = g(i, D_H)
+    let txt: u64 = g(i, D_TEXT)
+    if txt != 0 && tlen(txt) > 0 {
+        let grund: u64 = y + (bh
+            + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())) / 2
+        put_text(wlibc.F_UI, wlibc.px_ui(), x, grund, bw, txt,
+            tlen(txt), wlibc.theme(wlibc.T_FG), 0)
+    }
+    // RECHTS BLEIBT PLATZ FUER DIE ZAHL. Ein Regler ohne abgelesenen
+    // Wert ist eine Schaetzung; "wie laut ist es gerade" muss man
+    // ablesen koennen und nicht abmessen.
+    //
+    // DIE BAHN KOMMT AUS DERSELBEN RECHNUNG WIE DAS TREFFEN
+    // (`slider_bahn`/`slider_rw`) -- zwei Rechnungen fuer dieselbe
+    // Rinne gingen irgendwann auseinander.
+    let zw: u64 = 34
+    let lx: u64 = slider_bahn(i)
+    let rw: u64 = slider_rw(i)
+    if rw < 8 {
+        return
+    }
+    let rh: u64 = 4
+    let ry: u64 = y + sub(bh, rh) / 2
+    wlibc.rect(lx, ry, rw, rh, wlibc.theme(wlibc.T_SCROLL))
+    wlibc.frame(lx, ry, rw, rh, wlibc.theme(wlibc.T_LINE))
+    var v: u64 = g(i, D_VAL)
+    if v > 100 {
+        v = 100
+    }
+    // DER GRIFF SITZT AUF DER MITTE DES WERTES, nicht an seinem Anfang:
+    // sonst steht er bei 100 % mit seiner halben Breite ueber dem Ende
+    // der Rinne.
+    let gw: u64 = 10
+    let bahn: u64 = sub(rw, gw)
+    let gx: u64 = lx + bahn * v / 100
+    if v > 0 {
+        wlibc.rect(lx, ry, gx -% lx + gw / 2, rh,
+            wlibc.theme(wlibc.T_ACCENT))
+    }
+    let gh: u64 = 14
+    let gy: u64 = y + sub(bh, gh) / 2
+    wlibc.rect(gx, gy, gw, gh, wlibc.theme(wlibc.T_THUMB))
+    wlibc.frame(gx, gy, gw, gh, wlibc.theme(wlibc.T_LINE))
+    // DER WERT ALS ZAHL, rechtsbuendig an der Widgetkante.
+    var zahl: [u8; 8] = [0 as u8; 8]
+    let n: u64 = ulib.digits(v, (&zahl[0 as usize]) as u64)
+    zahl[n as usize] = 37 as u8
+    zahl[(n + 1) as usize] = 0 as u8
+    let zx: u64 = x + bw -% zw
+    let zgrund: u64 = y + (bh
+        + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())) / 2
+    put_text(wlibc.F_UI, wlibc.px_ui(), zx, zgrund, zw,
+        (&zahl[0 as usize]) as u64, n + 1, wlibc.theme(wlibc.T_DIM), 0)
+    focus_ring(i)
+}
+
 fn paint_check(i: u64) {
     let x: u64 = g(i, D_X)
     let y: u64 = g(i, D_Y)
@@ -3042,6 +3218,8 @@ fn paint_one(i: u64) {
         paint_button(i)
     } else if k == K_CHECK {
         paint_check(i)
+    } else if k == K_SLIDER {
+        paint_slider(i)
     } else if k == K_ENTRY {
         paint_entry(i)
     } else if k == K_LIST {
@@ -3283,6 +3461,17 @@ fn on_down(w: u64, x: u64, y: u64, btn: u64) {
         fire(i, K_CHECK, g(i, D_VAL), w)
         return
     }
+    // RUNDE TON-2: EIN KLICK IN DIE RINNE SETZT DEN WERT DORTHIN,
+    // und das Ziehen mit gedrueckter Taste zieht ihn mit (`s_down`,
+    // derselbe Weg wie beim Textfeld). Ein Regler, den man nur in
+    // Stufen klicken kann, ist ein Knopf mit einer Rinne dahinter.
+    if k == K_SLIDER {
+        s_down = i + 1
+        slider_set_x(i, x)
+        dirty_wd(i)
+        fire(i, K_SLIDER, g(i, D_VAL), w)
+        return
+    }
     if k == K_ENTRY {
         // Die Einfuegemarke dorthin, wo geklickt wurde -- Zeichen fuer
         // Zeichen nachgerechnet und nicht durch die mittlere Breite
@@ -3463,6 +3652,19 @@ fn on_move(w: u64, x: u64, y: u64, btn: u64) {
     // kommt nie als eigenes Ereignis an. Also waehlt die Maus.
     if s_down != 0 && (btn & 1) != 0 {
         let d: u64 = s_down - 1
+        // RUNDE TON-2: den Regler MIT DER MAUS ZIEHEN. Der Wert folgt
+        // dem Zeiger, auch wenn er die Rinne oben oder unten verlaesst
+        // -- wer beim Ziehen abrutscht, will die Lautstaerke
+        // weiterschieben und nicht, dass der Regler stehenbleibt.
+        if g(d, D_KIND) == K_SLIDER {
+            let vor: u64 = g(d, D_VAL)
+            slider_set_x(d, x)
+            if g(d, D_VAL) != vor {
+                dirty_wd(d)
+                fire(d, K_SLIDER, g(d, D_VAL), w)
+            }
+            return
+        }
         if g(d, D_KIND) == K_ENTRY {
             let p: u64 = g(d, D_TEXT)
             let n: u64 = tlen(p)
@@ -3836,6 +4038,35 @@ fn on_key(w: u64, c: u64) {
             s(i, D_VAL, 1 - g(i, D_VAL))
             dirty_wd(i)
             fire(i, K_CHECK, g(i, D_VAL), w)
+        }
+        return
+    }
+    // RUNDE TON-2: der Regler an der Tastatur. Links/rechts eine
+    // Stufe, Pos1/Ende an die Enden -- dieselben Tasten, die jedes
+    // andere System dafuer nimmt, und die einzige Art, ihn ohne Maus
+    // zu bedienen.
+    if kind == K_SLIDER {
+        var v: u64 = g(i, D_VAL)
+        let schritt: u64 = g(i, D_A)
+        var neu: u64 = v
+        if k == KEY_LEFT || k == KEY_DOWN {
+            neu = sub(v, schritt)
+        } else if k == KEY_RIGHT || k == KEY_UP {
+            neu = v + schritt
+            if neu > 100 {
+                neu = 100
+            }
+        } else if k == KEY_HOME {
+            neu = 0
+        } else if k == KEY_END {
+            neu = 100
+        } else {
+            return
+        }
+        if neu != v {
+            s(i, D_VAL, neu)
+            dirty_wd(i)
+            fire(i, K_SLIDER, neu, w)
         }
         return
     }
