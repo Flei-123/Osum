@@ -1,8 +1,74 @@
+> Hinweis: Diese Datei ist die menschenlesbare Uebersicht. Der verbindliche Lizenztext steht in LICENSE (GPL-2.0-only) und LICENSES/MIT.txt.
+
+Osum -- licensing
+=================
+
+SHORT ANSWER: the kernel and everything around it is GPL-2.0-only.
+The full, unmodified licence text is in the file COPYING next to this
+one. Only the Ring 3 user space libraries listed below are MIT; that
+text is in LICENSES/MIT.txt.
+
+  SPDX-License-Identifier: GPL-2.0-only
+
+Until 27 August 2026 this whole repository was published under the MIT
+licence. Anyone who obtained a copy before that date keeps the rights
+MIT gave them for that copy. Everything from that date on is covered by
+the split described here.
+
+-------------------------------------------------------------------
+
+
+THIS REPOSITORY IS UNDER TWO LICENCES. The authoritative, machine readable
+answer is the `SPDX-License-Identifier:` line at the top of every source
+file; this header is the human readable summary, and the notes below explain
+the reasoning.
+
+  MIT  --  THE USER SPACE LIBRARIES. Everything a Ring 3 program links
+           against. Full text: LICENSES/MIT.txt.
+
+               lib/libc/**                 the libc of round K4
+               kernel/user/crt.s           the entry stub, in EVERY binary
+               kernel/user/user.ld         the linker script for programs
+               kernel/user/ulib.fi         the standard library of Ring 3
+               kernel/user/tools.fi        the shared output buffer
+               kernel/user/wlib.fi         the widget library
+               kernel/user/wlibc.fi        the drawing core under it
+               kernel/user/appdir.fi       the application directory
+               kernel/user/nidx.fi         the name index
+               kernel/user/pw.fi           the user database
+               kernel/user/flate.fi        deflate and gzip
+
+           WHAT THAT BUYS YOU: you may write a program for Osum / OrientOS,
+           link it against these libraries, and ship it under ANY licence
+           you like, including a closed one. Nothing in a Ring 3 program is
+           forced under the GPL by linking them.
+
+  GPL-2.0-only  --  THE KERNEL AND EVERYTHING ELSE.
+           kernel/**.fi except the eight Ring 3 libraries above,
+           kernel/*.s, kernel/kernel.ld, kernel/linker.ld, the seventy
+           Ring 3 PROGRAMS under kernel/user/, tools/** and test.sh.
+           Full text below.
+
+           GPL VERSION 2 ONLY. NOT "version 2 or any later version".
+           Deliberate; the reason is in LICENSING.md.
+
+Copyright (c) 2026 Justin (Flei123)
+
+Third-party material is NOT covered by either of the above and keeps its
+own terms -- notably the glyph outlines in assets/*.ttf and the bitmap
+table inside kernel/font.fi, which come from DejaVu. See THIRD_PARTY.md.
+
+Until 27 August 2026 this whole repository was MIT. That file is kept
+verbatim as LICENSES/MIT.old.txt, so the change is visible in the tree and not
+only in the history.
+
+--------------------------------------------------------------------------
+
                     GNU GENERAL PUBLIC LICENSE
                        Version 2, June 1991
 
  Copyright (C) 1989, 1991 Free Software Foundation, Inc.,
- 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ <https://fsf.org/>
  Everyone is permitted to copy and distribute verbatim copies
  of this license document, but changing it is not allowed.
 
@@ -304,8 +370,7 @@ the "copyright" line and a pointer to where the full notice is found.
     GNU General Public License for more details.
 
     You should have received a copy of the GNU General Public License along
-    with this program; if not, write to the Free Software Foundation, Inc.,
-    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+    with this program; if not, see <https://www.gnu.org/licenses/>.
 
 Also add information on how to contact you by electronic and paper mail.
 
@@ -329,8 +394,8 @@ necessary.  Here is a sample; alter the names:
   Yoyodyne, Inc., hereby disclaims all copyright interest in the program
   `Gnomovision' (which makes passes at compilers) written by James Hacker.
 
-  <signature of Ty Coon>, 1 April 1989
-  Ty Coon, President of Vice
+  <signature of Moe Ghoul>, 1 April 1989
+  Moe Ghoul, President of Vice
 
 This General Public License does not permit incorporating your program into
 proprietary programs.  If your program is a subroutine library, you may
