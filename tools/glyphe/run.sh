@@ -145,11 +145,11 @@ rennen() { # name smp extra
     rm -f "$TMPD/r-$name.img"
     return 0
 }
-r_fehl() { grep -a '^smp: glyphrace kerne=' "$1" 2>/dev/null | tail -1 \
+r_fehl() { grep -a '^smp: zeichenrennen kerne=' "$1" 2>/dev/null | tail -1 \
     | sed -n 's/.*fehler=\([0-9]*\).*/\1/p'; }
-r_zyk() { grep -a '^smp: glyphrace kerne=' "$1" 2>/dev/null | tail -1 \
+r_zyk() { grep -a '^smp: zeichenrennen kerne=' "$1" 2>/dev/null | tail -1 \
     | sed -n 's/.*zyklen=\([0-9]*\).*/\1/p'; }
-r_zeichen() { grep -a '^smp: glyphrace   c0' "$1" 2>/dev/null | tail -1 \
+r_zeichen() { grep -a '^smp: zeichenrennen   c0' "$1" 2>/dev/null | tail -1 \
     | grep -oE 'zeichen=[0-9]+' | sed 's/.*=//' | sort -un | wc -l; }
 
 echo
@@ -157,7 +157,7 @@ echo "== 3. der Nachweis: alle Kerne zeichnen im selben Augenblick =="
 for n in 4 8; do
     rennen "n$n" "$n" "glyphrace"
     L="$TMPD/r-n$n.txt"
-    grep -a '^smp: glyphrace' "$L" | sed 's/^/        /'
+    grep -a '^smp: zeichenrennen' "$L" | sed 's/^/        /'
     zahl "Kerne mit je EIGENEM Zeichen (-smp $n)" "$(r_zeichen $L)" ge 2
     zahl "Abweichungen mit der Buehne je Kern (-smp $n)" "$(r_fehl $L)" eq 0
 done
@@ -169,7 +169,7 @@ echo "== 4. GEGENPROBE 1: glyphblind -- EINE Buehne, wie in MERGE-6 =="
 for n in 4 8; do
     rennen "b$n" "$n" "glyphblind"
     L="$TMPD/r-b$n.txt"
-    grep -a '^smp: glyphrace kerne' "$L" | sed 's/^/        /'
+    grep -a '^smp: zeichenrennen kerne' "$L" | sed 's/^/        /'
     zahl "Abweichungen OHNE die Trennung (-smp $n)" "$(r_fehl $L)" ge 1
 done
 
