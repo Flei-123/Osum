@@ -142,10 +142,38 @@ echo "== 10. was diese Runde NICHT kann, gemessen =="
 # Treibers. In Kommentaren darf ueber AX200 geredet werden -- in
 # lib/wlan/kanal.fi steht ein ganzer Absatz darueber, warum die
 # Firmware ihre eigene Regulatorik mitbringt.
-if grep -rqn '0x2723\|0x2725\|0xA0F0\|0xa0f0' --include=*.fi kernel/ lib/ 2>/dev/null; then
-    bad "irgendwo steht eine WLAN-PCI-Nummer -- dann gibt es einen Treiber, den docs/WLAN-BEFUND.md nicht kennt"
+# RUNDE WLAN-2, AUF merge6 BERICHTIGT. Diese Wache war auf mergeline2
+# gruen und wurde auf merge6 beim ersten Lauf ROT -- zu Recht gemeldet,
+# aber aus dem falschen Grund. In `kernel/netdev.fi` stehen seit Runde
+# BLECH drei Zeilen
+#
+#     tab_line(0x8086, 0x2723, 0x00) // Wi-Fi 6 AX200
+#
+# und in `kernel/chipname.fi` die zugehoerigen Namen. Das ist NICHT der
+# Anfang eines Treibers -- es ist genau Punkt 1 der Fortsetzungsliste
+# aus docs/WLAN-BEFUND.md Abschnitt 8: eine Maschine mit einem AX200
+# soll seine Nummer NENNEN statt still zu bleiben. Die dritte Spalte
+# von `tab_line` ist der Treiber, und sie ist 0x00 = keiner.
+#
+# Die Wache prueft deshalb ab jetzt das, worauf es ankommt: dass keine
+# WLAN-Nummer an einen TREIBER gebunden ist. Eine Nummer mit 0x00
+# dahinter ist erwuenscht; eine Nummer mit etwas anderem dahinter waere
+# ein Treiber, von dem der Befund nichts weiss.
+WLTAB=$(grep -rhn 'tab_line(0x8086, *0x\(2723\|2725\|[Aa]0[Ff]0\)' --include=*.fi kernel/ 2>/dev/null || true)
+WLBOUND=$(printf '%s\n' "$WLTAB" | grep -v '0x00)' | grep -c 'tab_line' || true)
+WLNAMED=$(printf '%s\n' "$WLTAB" | grep -c 'tab_line' || true)
+if [ "$WLBOUND" != "0" ]; then
+    bad "eine WLAN-PCI-Nummer haengt an einem Treiber -- dann gibt es einen, den docs/WLAN-BEFUND.md nicht kennt"
 else
-    ok "keine WLAN-PCI-Nummer in kernel/ oder lib/: es gibt KEINEN Treiber, so wie docs/WLAN-BEFUND.md sagt"
+    ok "keine WLAN-PCI-Nummer ist an einen Treiber gebunden ($WLNAMED benannt, alle mit Treiber 0x00): es gibt KEINEN Treiber, so wie docs/WLAN-BEFUND.md sagt"
+fi
+# Und die Gegenprobe dazu, damit diese Wache nicht gruen werden kann,
+# indem die Nummern einfach verschwinden: Punkt 1 der Fortsetzungsliste
+# IST erledigt, und das soll gemessen bleiben.
+if [ "$WLNAMED" -ge 3 ]; then
+    ok "Punkt 1 der Fortsetzungsliste ist auf merge6 erledigt: AX200/AX201/AX210 werden mit Namen gemeldet statt still zu bleiben"
+else
+    bad "die WLAN-Karten werden nicht mehr benannt -- Punkt 1 der Fortsetzungsliste ist verlorengegangen"
 fi
 if grep -rqn 'fn sae_\|dragonfly\|hunting' --include=*.fi lib/wlan/ 2>/dev/null; then
     bad "SAE ist angefangen worden, ohne dass es Testvektoren gibt"
