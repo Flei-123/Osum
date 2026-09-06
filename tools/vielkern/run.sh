@@ -400,7 +400,21 @@ echo "== 12. RUNDE MERGE-6: die uebrigen Ein-Kern-Reste, an der Quelle gezaehlt 
 # ist. Die sechs neuen sind hwid.fi (2), ofsj.fi (2) und rand.fi (2);
 # `wig.fi` war die siebte und ist repariert. Begruendung ausfuehrlich
 # in docs/RUNDE-GLYPHE.md.
-EK_SOLL=${EK_SOLL:-66}
+# RUNDE MERGE-7: 66 -> 67. Die drei neuen Stellen sind ALLE in
+# `kernel/klog.fi` (Runde PROTOKOLL, in merge6 gibt es die Datei nicht):
+# `base()`, `emit()` und `set_filter()` fassen `kstate.LOG_OFF` an, ohne
+# dass `einkern.py` ein Sperrwort SIEHT. Sie sind trotzdem gesperrt --
+# klog nimmt eine EIGENE Sperre mit `atomic.cas` auf `H_LK`
+# (kernel/klog.fi:300..311), weil alle acht Plaetze in `kstate.LOCK_COUNT`
+# vergeben sind und `atomic.lock_take` deshalb ausschied. `einkern.py`
+# kennt nur die Namen aus SPERRE und sieht diese Bauform nicht.
+#
+# BELEGT, nicht behauptet: tools/protokoll/run.sh laesst vier Kerne
+# gleichzeitig in den Ring schreiben (PH_LOG) und misst 40000 Zeilen
+# geschrieben, 40000 gezaehlt, **0 verschraenkte Eintraege**. Eine
+# ungesperrte Datenseite haette dort Kopf und Text verschiedener Kerne
+# gemischt.
+EK_SOLL=${EK_SOLL:-67}
 ek=$(python3 tools/vielkern/einkern.py | sed -n 's/.*offen=\([0-9]*\).*/\1/p')
 if [ -n "$ek" ] && [ "$ek" -le "$EK_SOLL" ] 2>/dev/null; then
     ok "Funktionen mit einem Puffer der Datenseite ohne Sperrwort: $ek (Vertrag: hoechstens $EK_SOLL)"
