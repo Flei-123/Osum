@@ -144,47 +144,6 @@ long_mode:
     movw %ax, %fs
     movw %ax, %gs
 
-    /* ------------------------------------------- ROUND CERTUS: SSE
-     *
-     * WHY THIS WAS MISSING FOR EIGHTEEN ROUNDS AND WHY IT STOPPED A
-     * BROWSER DEAD.
-     *
-     * Every program this kernel had ever run was integer arithmetic: a
-     * shell, twenty-five tools, a window server, a compiler. None of
-     * them ever touched an `xmm` register, so nobody noticed that the
-     * machine came up with SSE TURNED OFF -- CR0.EM set (every SSE
-     * instruction traps as if there were no unit), CR4.OSFXSR clear
-     * (the operating system has not said it can save the state).
-     *
-     * Certus is float arithmetic from end to end: CSS lengths, the box
-     * model, line boxes, the alpha blend. It got as far as
-     *
-     *     40181ebb: f2 48 0f 2a c0    cvtsi2sd %rax,%xmm0
-     *
-     * and the kernel reported `user fault: vector=6` -- #UD, invalid
-     * opcode, on a perfectly valid instruction. Measured on 28.08.2026;
-     * `guard: cr4=0x20` in every boot log before that round is the same
-     * fact seen from the other side.
-     *
-     * The four bits, and what each one is for:
-     *   CR0.MP  (1)   `wait`/`fwait` respects TS -- the pair to EM
-     *   CR0.EM  (2)   CLEARED: there IS a unit, do not emulate
-     *   CR4.OSFXSR    (9)  fxsave/fxrstor exist, and xmm may be used
-     *   CR4.OSXMMEXCPT(10) a SIMD exception is #XM (19) and not #UD
-     *
-     * The state itself is saved in `switch.s` (fxsave/fxrstor into the
-     * kernel stack of the task that is leaving) -- without that, two
-     * processes doing arithmetic would quietly overwrite each other's
-     * registers, which is the kind of fault that shows up as a wrong
-     * number and never as a crash. */
-    movq %cr0, %rax
-    orq  $(1 << 1), %rax                /* MP */
-    andq $~(1 << 2), %rax               /* EM off */
-    movq %rax, %cr0
-    movq %cr4, %rax
-    orq  $((1 << 9) | (1 << 10)), %rax  /* OSFXSR | OSXMMEXCPT */
-    movq %rax, %cr4
-
     movq $kernel_stack_top, %rsp
     xorq %rbp, %rbp
 
