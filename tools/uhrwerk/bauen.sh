@@ -49,7 +49,7 @@ ARGS=(build "$OUT/root.img" 16384 /lib/
 for p in $PROGS; do ARGS+=("/bin/$p=$OUT/$p.elf"); done
 ARGS+=("/bin/files@/bin/explorer" /etc/ "/etc/theme=$OUT/baum/theme"
        "/etc/taskbar.conf=$OUT/tb.conf")
-while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$OUT/buendel")
+while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$OUT/buendel" "nur=$PROGS")
 while read -r z; do ARGS+=("$z"); done < "$OUT/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs.txt" 2>&1 \
     || { echo "NEIN: mkfs.py"; tail -5 "$OUT/mkfs.txt"; exit 1; }
