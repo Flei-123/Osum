@@ -299,7 +299,7 @@ Zahl, die niemand gesehen hat, ist keine Abnahme.
 | `tools/kernel/run.sh` | **176 passed, 0 failed** | 176/0 ✅ |
 | `tools/posix/run.sh` | **134 passed, 0 failed** | 134/0 ✅ |
 | `tools/caps/run.sh` | **67 passed, 0 failed** | 67/0 ✅ |
-| `tools/handle/run.sh` | siehe 4.1 | 80/0 |
+| `tools/handle/run.sh` | **80 bestanden, 0 gefallen** | 80/0 ✅ |
 | `tools/haertung/run.sh` | **19 gehalten, 0 gefallen** | neu |
 | `test.sh` Abschnitt 43 | **bestanden**, 0,14 s | neu |
 | `memmap.py` | 94 Bereiche, **0 Kollisionen** | 0 |
@@ -312,7 +312,10 @@ Der Fehler ließ sich danach **nicht** nachstellen (`firnc1
 kernel/uprog.fi -o …` läuft durch) — er stammt aus einem
 Zwischenstand, in dem der Fuzzer noch nicht übersetzte.
 
-Der zweite Lauf gab **77/3**, und zwei davon sind **keine Regression,
+**Der dritte Lauf, auf ruhigem Wirt, gab 80 bestanden, 0 gefallen** —
+der Sollwert. Der Weg dorthin ist trotzdem lehrreich.
+
+Der zweite Lauf gab **77/3**, und zwei davon waren **keine Regression,
 sondern der Wirt**:
 
 ```
@@ -320,11 +323,13 @@ sondern der Wirt**:
   FAIL  getpid (von dieser Runde unberührt) bleibt unter 450 Zyklen: 798
 ```
 
-Im ersten Lauf standen dort **620** und **422** — grün. Dazwischen lief
-mein eigener Fuzzer-QEMU auf denselben Kernen. `getpid` ist von dieser
-Runde nachweislich unberührt; die Zusage misst also die Last des Wirts,
-nicht den Kernel. **Ein Prüfstand auf einem ausgelasteten Wirt misst den
-Wirt** — dieselbe Lehre wie in Runde GLYPHE (dort volles Dateisystem).
+Im ersten Lauf standen dort **620** und **422**, im dritten **617** und
+**430** — beide Male grün. Dazwischen lief mein eigener Fuzzer-QEMU auf
+denselben Kernen. `getpid` ist von dieser Runde nachweislich unberührt;
+die Zusage misst also die Last des Wirts, nicht den Kernel. **Ein
+Prüfstand auf einem ausgelasteten Wirt misst den Wirt** — dieselbe Lehre
+wie in Runde GLYPHE (dort volles Dateisystem), und der Grund, warum hier
+drei Läufe stehen und nicht einer.
 
 Der dritte FAIL war **echt und ist behoben**: `memmap.py` meldete eine
 Kollision, weil ich `M_FUZZ` auf Modusindex **646** gelegt hatte — den
@@ -335,7 +340,16 @@ gibt es das Werkzeug.
 
 `cargo build --release` — durch. `./test.sh` im Firn-Repo lief bis
 Abschnitt 17 (*the fixpoint: Firn compiles itself*) **ohne eine einzige
-gefallene Zusage**; `FAULTY: 0`, `CODEGEN MISSING: 0`. Dass `firnc1`
+gefallene Zusage**. Abschnitt 16 (`self_compare.sh`) im Klartext:
+
+```
+   SAME BEHAVIOUR:     337
+   DIFFERING:            0
+   FAULTY:               0
+   CODEGEN MISSING:      0
+```
+
+Dass `firnc1`
 — der Übersetzer, der selbst in Firn geschrieben ist und `rt.fi`
 benutzt — sich mit dem geänderten `rt.fi` neu baut, ist der härteste
 verfügbare Test dieser Änderung, und er hält.
