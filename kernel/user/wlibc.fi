@@ -1390,12 +1390,65 @@ fn mono_cell(px_: u64) -> u64 {
 
 // EIN STREIFEN, EIN AUFRUF. `x` und `y` sind Fensterkoordinaten, die
 // Quelle ist die Flaeche mit ihrer eigenen Zeilenlaenge.
+//
+// ==================================================== RUNDE UHRWERK
+// HIER STAND JUSTINS STEHENDE UHR, UND SIE STAND AN EINER
+// RECHNUNG, DIE NUR AUF BREITEN SCHIRMEN SCHIEFGEHT.
+//
+// Die Zeichenflaeche ist ein STREIFEN mit festem Platzbedarf
+// (`SURF_BUDGET` = 1 MiB). Wie viele BILDZEILEN das sind, haengt an der
+// Breite des Schirms:
+//
+//     1920 -> 136 Zeilen      2560 -> 102 Zeilen
+//     3440 ->  76 Zeilen      3840 ->  68 Zeilen
+//
+// Die Taskleiste malt in EINEM Band von `BAND` = 80 Zeilen (bei
+// height=40 und Skala 2). Auf 1920 und 2560 passt das. AUF JUSTINS
+// 3440x1440 PASST ES NICHT: 80 angeforderte Zeilen gegen 76
+// abgebildete.
+//
+// Was dann geschah, war schlimmer als ein abgeschnittener Streifen.
+// `push` reichte dem Kern Quelle UND Hoehe; `wig.blit` las daraus
+// zeilenweise ueber `fetch`, und `fetch` fragt `proc.user_ok` --
+// die vier Zeilen hinter der Abbildung sind fuer den Prozess NICHT
+// lesbar. Also gab `fetch` false, `blit` brach ab und lieferte NULL,
+// und `wm.damage` am Ende von `blit` wurde NIE ERREICHT.
+//
+// Das Ergebnis ist genau das Foto: die Leiste steht auf dem Schirm, wie
+// sie beim allerersten Mal gemalt wurde, und keine spaetere Aenderung
+// kommt je an. Bewegt man die Maus darueber, malt der FENSTERSERVER
+// den Bereich neu (Zeiger, Damage aus dem Eingabepfad) -- und schiebt
+// dabei den Fensterpuffer mit, in dem die neue Uhrzeit laengst steht.
+// Deshalb sprang die Uhr nur unter dem Mauszeiger.
+//
+// GEMESSEN, vorher: `px=0 soll=4403200 null=16` -- jeder einzelne
+// Push brachte null Bildpunkte hinueber.
+//
+// Die Abhilfe steht HIER und nicht bei der Leiste, weil der Fehler
+// hier ist: `push` darf nicht mehr Zeilen versprechen, als die Flaeche
+// traegt. Was nicht in den Streifen passt, wird nicht gelesen -- und
+// der Rest kommt an, statt dass alles verlorengeht.
 fn push(h: u64, x: u64, y: u64, w: u64, hh: u64) -> u64 {
     if w == 0 || hh == 0 {
         return 0
     }
-    let src: u64 = s_surf +% (y -% s_band) *% s_sw *% 4 +% x *% 4
-    return sys5(WIG_BLIT, h, (x << 16) | y, (w << 16) | hh, src, s_sw)
+    if y < s_band {
+        return 0
+    }
+    let r: u64 = y -% s_band
+    if r >= s_srows {
+        return 0
+    }
+    // NUR SO VIELE ZEILEN, WIE WIRKLICH ABGEBILDET SIND.
+    var hn: u64 = hh
+    if r +% hn > s_srows {
+        hn = s_srows -% r
+    }
+    if hn == 0 {
+        return 0
+    }
+    let src: u64 = s_surf +% r *% s_sw *% 4 +% x *% 4
+    return sys5(WIG_BLIT, h, (x << 16) | y, (w << 16) | hn, src, s_sw)
 }
 
 fn push_rect(h: u64, x: u64, y: u64, w: u64, hh: u64) -> u64 {
