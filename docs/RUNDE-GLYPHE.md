@@ -354,9 +354,127 @@ Starts.
 
 ---
 
-## 9. `./test.sh`
+## 9. `./test.sh` — alle 65 Abschnitte, zu Ende gefahren
 
-*(wird nach dem Lauf eingetragen)*
+`OSUM_JOBS=2`, 06.09.2026 22:50–06:43 (7 h 53 min), 1167 grüne Zusagen.
+**Alle 65 Abschnitte gelaufen** — MERGE-6 kam bis 7.
+
+### 9.1 Zuerst: was der erste Anlauf gemessen hat, war der Wirt
+
+Ein Lauf mit `OSUM_JOBS=4` lief um 22:41 in ein **volles Dateisystem**
+(68 KiB frei) und meldete sechs Abschnitte rot, die es nicht sind:
+
+```
+netview.log:  OSError: [Errno 28] No space left on device
+tresor.log:   cat: write error: No space left on device
+```
+
+`k18`, `display`, `customres` und `arm` starben still — QEMU konnte sein
+Abbild nicht mehr schreiben. Beim sauberen Lauf mit `JOBS=2`:
+
+| | mit vollem Dateisystem | mit Platz |
+|---|---|---|
+| `net` | 74/1 | **75/0** |
+| `k13` | 98/1 | **99/0** |
+| `customres` | 133/2 | **135/0** |
+| `arm` | 47/1 | **48/0** |
+| `tresor` | rot | **220/0** |
+| `hwnet` | rot | **56/0** |
+
+**Ein Prüfstand auf einem vollen Wirt misst den Wirt.** Deshalb steht die
+Begründung für `JOBS=2` im Läufer und nicht nur hier.
+
+### 9.2 Die roten Abschnitte, jeder gegen `merge6` nachgemessen
+
+Maßstab ist **derselbe Läufer auf `merge6`**, auf demselben Wirt.
+
+| Abschnitt | GLYPHE | merge6 | Urteil |
+|---|---|---|---|
+| `gfx` | **75/1** ¹ | 46/30 | **besser** (NUL-Oktett behoben) |
+| `k15` | 226/26 | 222/30 | besser |
+| `display` | 141/4 | 125/20 | besser |
+| `netview` | 170/23 | 164/23 | besser |
+| `paint` | 31/1 | 30/2 | besser |
+| `modul` | 72/2 | 67/3 | besser |
+| `usbimg` | 37/11 | 36/12 | besser |
+| `k16` | 60/4 | 60/4 | gleich |
+| `k18` | 168/2 | 168/2 | gleich |
+| `powermon` | 119/2 | 119/2 | gleich |
+| `multiuser` | 90/1 | 90/1 | gleich |
+| `umlaut` | 43/5 | 43/5 | gleich |
+| `softui` | 21/3 | 21/3 | gleich |
+| `blech` | 69/1 | 69/1 | gleich |
+| `bridge` | 111/1 | 111/1 | gleich |
+| `werkzeug` | 21/13 | 21/13 | gleich, Zusage für Zusage |
+| `theme` | 88/8 | — ² | die 8 sind in `wm.fi`/`taskbar.fi` |
+| `stick` | 20/22 | 21/21 | dieselben Zusagen, eine wackelt |
+| `server` | **22/1** ³ | 22/1 | gleich, nach Behebung |
+| `init` | **39/39** ⁴ | **38/40** | merge6 ist SCHLECHTER |
+| `vielkern` | 39/1 ⁵ | 39/1 ⁵ | gleich |
+| `glyphe` | 26/3 ⁶ | — | siehe GLYPHE 20/n |
+
+¹ Der Wert im Lauf (18/56) entstand während des Plattenengpasses.
+Einzeln nachgefahren: **75/1**, und die eine rote Zusage
+(„die Zeile der Shell steht bildpunktgenau") ist auf `merge6`
+wörtlich dieselbe.
+
+² `tests/theme` lief auf `merge6` gar nicht — es starb an `mkfs`
+(GLYPHE 16/n). Die 8 roten Zusagen sind nachgerechnet: `rawcolour.py`
+findet auf **beiden** Ständen `raw 8`, alle acht in `kernel/wm.fi` und
+`kernel/user/taskbar.fi` — zwei Dateien, die diese Runde **nicht
+angefasst** hat (`git show 2aa3f59:… | sha1sum` identisch).
+
+³ War **neu rot** und ist behoben — siehe GLYPHE 19/n.
+
+⁴ Der Verdachtsfall. Nachgemessen auf **demselben Wirt, in derselben
+Stunde**: `merge6` **38/40**, dieser Zweig **39/39**. Beide sterben an
+derselben ersten Zusage (`'124'` = QEMU-Zeitlimit); danach sind alle
+Folgewerte leer, und wie viele davon rot werden, hängt daran, wie weit
+die Maschine kam. `kernel/user/init.fi` und `tools/init/` sind in dieser
+Runde **unberührt**; die einzige Änderung an `sched.fi` ist reiner
+Kommentar (`git show b5d5fee` ohne Kommentarzeilen: leer).
+
+⁵ `/bin/settings kommt nicht hoch` ist ein **Wackler, kein Rückschritt**.
+Fünf Läufe hier, drei auf `merge6`, gleicher Wirt:
+
+```
+glypharbeit:  --  OK  --  --  --
+merge6:       --  --  --
+```
+
+`merge6` bringt es in **0 von 3** Läufen hoch, dieser Zweig in 1 von 5 —
+und `merge6` erreicht dabei dieselbe Endnote 39/1. Der Wert, auf den es
+ankommt, ist in **allen fünf** Läufen grün: `abw=0`.
+
+⁶ Der eigene Prüfstand zählte Kommentare als Fehler und fuhr die zwei
+Würfel-Gegenproben mit sechs statt zwanzig Läufen. Behoben und begründet
+in GLYPHE 20/n; die belastbare Zusage (`zeichenrennen`) war im selben
+Lauf grün.
+
+### 9.3 Zwei rote Zusagen, die diese Runde GEFUNDEN und behoben hat
+
+Beide waren **vor** dieser Runde rot und sind es jetzt nicht mehr:
+
+* **Abschnitt 1** (`der festgenagelte Uebersetzer`) war seit Runde STICK
+  (03.09.) auf **jedem** Zweig rot — mit leerem Grund hinter dem
+  Strichpunkt, weshalb es niemand nachsah. Zwei Fehler, GLYPHE 18/n.
+* **`k15` „Zeilen der Naht"** zählte Kommentar als Kernel. `merge6` war
+  damit schon rot (664 > 600), GLYPHE 17/n.
+
+### 9.4 Was NICHT grün ist, und warum das so bleibt
+
+`k16` (60/4) ist **nicht** Sache dieser Runde, und das ist belegt:
+`kernel/user/fas.fi`, `tools/osum/mkfs.py` und `tools/k16/run.sh` sind
+gegen `merge6` **Oktett für Oktett gleich**. Der Befund ist in sich
+widersprüchlich — `fas` meldet Fehler 6 (`schreib_elf` gab `false`), und
+**dasselbe Programm läuft danach und endet mit 42**, wie es soll. Das
+gehört in eine eigene Runde und nicht in eine Zeile hier.
+
+Dasselbe gilt für `werkzeug` (21/13, Zusage für Zusage identisch mit
+`merge6`) — die Vermutung aus der Aufgabenstellung, das Zusammenführen
+habe dort etwas gebrochen, ist damit **widerlegt**: der Unterschied
+26/34 gegen 37/0 stammt aus einem anderen Läuferstand, nicht aus dem
+Merge.
 
 ---
 
@@ -401,4 +519,71 @@ Werkzeug wieder ein.
 
 ## 11. Ist `merge6` reif, `hidweg` zu ersetzen?
 
-*(wird am Ende beantwortet)*
+**Ja** — mit einer Einschränkung, die benannt gehört.
+
+### 11.1 Wofür der Beweis vollständig ist
+
+Der Auftrag war, den letzten bekannten Ein-Kern-Rest zu schließen. Er ist
+geschlossen, und der Nachweis hängt nicht am Glück:
+
+| Zusage | Beleg |
+|---|---|
+| Der Fehler ist gefunden, nicht umgangen | `wig.blit` nahm dieselbe Bühne wie `glyph_into` und hat die Sperre aus MERGE-6 nie genommen (Abschnitt 1) |
+| Die Bauform ist gemessen, nicht geraten | je Kern gegen eine Sperre: 2,25× / 2,46× (Abschnitt 2) |
+| Der Überlauf ist verstanden | Folgefehler, nachgerechnet; Riegel ohne Multiplikation (1.1) |
+| Das Rennen ist erzwungen | `zeichenrennen`: 0 von 8 000 / 0 von 16 000, blind 1 065 / 1 957 (Abschnitt 5) |
+| Die Gegenprobe fällt hart | `glyphtafelfrei` → Panic in `ttf.fi:975` (3.1) |
+| Nichts kaputtgegangen | 40 Schreibtischläufe, 4 und 8 Kerne, 0 Panics (Abschnitt 8) |
+| Das Werkzeug sieht die Bauform | `einkern.py`: gesperrt 13 → 18, offen 66 → **64** (Abschnitt 6) |
+| Der Laden nimmt ab | `LADEN: 31 passed, 0 failed` (Abschnitt 10) |
+| Der Prüfstand ist zu Ende gefahren | 65 von 65, 1167 grüne Zusagen (Abschnitt 9) |
+
+Dazu drei Zusagen, die **vor** dieser Runde rot waren und es nicht mehr
+sind: `./test.sh` Abschnitt 1, `k15` „Zeilen der Naht", `gfx` (46/30 →
+75/1).
+
+### 11.2 Der ehrliche Vergleich
+
+Kein Abschnitt ist gegen `merge6` schlechter geworden. Sieben sind
+besser, dreizehn gleich, zwei wackeln in beide Richtungen
+(`stick`, `vielkern`/`settings`) — und bei `init` ist `merge6` das
+schlechtere der beiden Ergebnisse.
+
+Die eine Zusage, die diese Runde **selbst gerissen** hat
+(`tools/server`), wurde gefunden, verstanden und behoben, bevor dieser
+Satz geschrieben war: der Nachweis trug seinen Namen in den Serverbau
+(GLYPHE 19/n).
+
+### 11.3 Was NICHT behauptet wird
+
+`merge6` ist **nicht fehlerfrei**. Offen bleiben unter anderem:
+
+* `k16` 60/4 — der Assembler auf Osum meldet Fehler 6, und das Programm,
+  das er dabei schreibt, läuft trotzdem richtig. Widersprüchlich,
+  unberührt von dieser Runde, gehört in eine eigene.
+* `init` — die erste Zusage läuft in ein QEMU-Zeitlimit, auf **beiden**
+  Zweigen; alles danach ist Folge.
+* `werkzeug` 21/13, `stick` 20/22, `netview` 170/23, `k15` 226/26 — alt,
+  gezählt, unverändert.
+* **42 der 43 Wege in `sys.fi`** sind weiter ungesperrt (MERGE-6 6.2).
+  Diese Runde hat den 43. geschlossen, weil er zuschlug — die anderen
+  stehen im Vertrag und warten.
+
+### 11.4 Die Begründung für den Wechsel
+
+`hidweg` ist als Grundlinie **schlechter als der Stand, der ihn ersetzen
+soll**, und zwar nachweisbar:
+
+* `hidweg` hat `fs.inode_get` ungesperrt (MERGE-6: 31 506 von 80 000
+  Abweichungen mit dem alten Rumpf).
+* `hidweg` hat die geteilte Bühne im Zeichenweg (diese Runde: 13 % der
+  Antworten zerschossen).
+* `hidweg` kennt weder `vielkern3` noch `design`, `werkzeug`, `laden`.
+
+Eine Grundlinie soll das Beste sein, was belegt funktioniert. Das ist
+`merge6` — nicht, weil er fehlerfrei wäre, sondern weil jeder bekannte
+Unterschied zu `hidweg` in **eine** Richtung zeigt und jede Behauptung
+darüber eine Messung hinter sich hat.
+
+**Der Wechsel ist vollzogen** (`hidweg` auf diesen Stand gezogen).
+**Nicht gepusht** — das entscheidet Justin.
