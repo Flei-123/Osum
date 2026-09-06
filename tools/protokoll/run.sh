@@ -160,9 +160,19 @@ un=$(grep -aoE 'const SYS_KRACH: u64 = [0-9]+' kernel/user/ulib.fi | grep -oE '[
 # sich mit nichts ueberschneiden.
 python3 tools/kernel/memmap.py kernel > "$TMPD/map.txt" 2>&1
 has "$TMPD/map.txt" "0 Kollisionen" "die Speicherkarte von kdata bleibt kollisionsfrei"
-grep -q '0xC0000' "$TMPD/map.txt" \
-    && ok "kdata ist auf 0xC0000 gewachsen (der Ring braucht 64 KiB am Stueck)" \
-    || bad "kdata hat nicht die erwartete Groesse"
+# RUNDE MERGE-7: hier stand die Zahl 0xC0000. Die Runde PROTOKOLL hat
+# kdata auf genau diesen Wert wachsen lassen, und der Pruefstand hat ihn
+# abgeschrieben. Beim Zusammenfuehren mit SYSTEMBUS und TON -- die
+# dasselbe Loch fuer sich beansprucht hatten -- ist kdata auf 0x100000
+# gewachsen, und diese Zusage wurde rot, OHNE dass am Protokoll etwas
+# faul war. Eine Zusage, die eine Zahl abschreibt statt sie zu lesen,
+# misst den Abschreibfehler mit. Jetzt wird die geltende Groesse aus
+# kstate.fi gelesen, und geprueft wird, was hier wirklich zaehlt: der
+# Ring liegt drin und die Karte bleibt kollisionsfrei.
+KDS=$(sed -n 's/^const KDATA_SIZE: u64 = \(0x[0-9A-Fa-f]*\).*/\1/p' kernel/kstate.fi | head -1)
+grep -q "$KDS" "$TMPD/map.txt" \
+    && ok "kdata ist $KDS gross (der Ring braucht 64 KiB am Stueck)" \
+    || bad "kdata hat nicht die erwartete Groesse ($KDS)"
 a=$(grep -aoE 'KDATA_SIZE, 0x[0-9A-F]+' kernel/arch/x86_64/boot.s | head -1 | grep -oE '0x[0-9A-F]+')
 b=$(grep -aoE 'const KDATA_SIZE: u64 = 0x[0-9A-F]+' kernel/kstate.fi | grep -oE '0x[0-9A-F]+')
 [ "$a" = "$b" ] && ok "KDATA_SIZE steht in boot.s und kstate.fi gleich ($a)" \
