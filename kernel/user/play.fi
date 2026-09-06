@@ -56,6 +56,7 @@ const A_REMAIN: u64 = 25
 const A_STREAMS: u64 = 30
 const A_MIXED: u64 = 31
 const A_CLIPS: u64 = 32
+const A_SYSSOUNDS: u64 = 49
 const A_LOST: u64 = 42
 const A_ZEROED: u64 = 43
 // ---- RUNDE TON: die Messstrecke (siehe kernel/audio.fi)
@@ -74,6 +75,9 @@ const AS_CLOSE: u64 = 8
 const AS_END: u64 = 9
 const AS_PUMP: u64 = 11
 const AS_WAITSPACE: u64 = 15
+const AS_VOLUME: u64 = 0
+const AS_SVOL: u64 = 10
+const AS_SOUND: u64 = 12
 
 // EIN SCHUB. 1024 Rahmen sind genau der Umsteigepuffer des
 // Systemaufrufs (4096 Oktette); mehr nimmt der Kern in einem Zug nicht
@@ -196,10 +200,19 @@ fn u_start(args: u64) -> u64 {
     var s_lat: [u8; 14] = "  latenz_us: \0"
     var s_bk: [u8; 13] = "  treiber: \0\0"
     var s_id: [u8; 10] = "  strom: \0"
+    var s_sv: [u8; 14] = "  stromvol: \0\0"
+    var s_mv: [u8; 14] = "  mastervol: \0"
+    var s_v1: [u8; 46] = "play: -v geht nur ueber den Mischer, nicht -1\0"
     var s_mx: [u8; 13] = "  gemischt: \0"
+    var s_cl: [u8; 13] = "  begrenzt: \0"
+    var s_kl: [u8; 14] = "  klick gab: \0"
+    var s_sk: [u8; 18] = "  systemklaenge: \0"
     var opt_i: [u8; 3] = "-i\0"
     var opt_1: [u8; 3] = "-1\0"
     var opt_w: [u8; 3] = "-w\0"
+    var opt_v: [u8; 3] = "-v\0"
+    var opt_k: [u8; 3] = "-k\0"
+    var opt_m: [u8; 3] = "-m\0"
 
     let argc: u64 = ulib.arg_count(args)
     var nur_info: bool = false
@@ -217,6 +230,9 @@ fn u_start(args: u64) -> u64 {
     // an jeder Naht muss der Abspieler nachliefern, ohne dass eine
     // Luecke entsteht.
     var wdh: u64 = 1
+    var svol: u64 = 101
+    var mvol: u64 = 101
+    var klick_bei: u64 = 0
     var k: u64 = 1
     while k < argc {
         let a: u64 = ulib.arg_at(args, k)
@@ -233,6 +249,28 @@ fn u_start(args: u64) -> u64 {
                 wdh = 1
             }
             k = k + 2
+        } else if ulib.streq(a, (&opt_v[0 as usize]) as u64)
+            && k + 1 < argc {
+            // RUNDE TON-2: die Lautstaerke DIESES Stromes, 0..100.
+            // 101 heisst "nicht gesetzt" -- eine 0 waere sonst nicht
+            // von "keine Angabe" zu unterscheiden, und genau 0 ist
+            // der Wert, mit dem eine Abnahme prueft, dass ein Strom
+            // WIRKLICH still wird.
+            svol = ulib.to_num(ulib.arg_at(args, k + 1))
+            k = k + 2
+        } else if ulib.streq(a, (&opt_m[0 as usize]) as u64)
+            && k + 1 < argc {
+            mvol = ulib.to_num(ulib.arg_at(args, k + 1))
+            k = k + 2
+        } else if ulib.streq(a, (&opt_k[0 as usize]) as u64)
+            && k + 1 < argc {
+            // RUNDE TON-2: nach so vielen Schueben EINEN Systemklang
+            // ausloesen -- MITTEN in der Musik und nicht davor oder
+            // danach. Nur so misst die Abnahme, was sie behauptet zu
+            // messen: dass ein Klick NEBEN der Musik liegt und sie
+            // nicht unterbricht.
+            klick_bei = ulib.to_num(ulib.arg_at(args, k + 1))
+            k = k + 2
         } else {
             k = argc
         }
@@ -241,7 +279,10 @@ fn u_start(args: u64) -> u64 {
     var j: u64 = 1
     while j < argc {
         let a: u64 = ulib.arg_at(args, j)
-        if ulib.streq(a, (&opt_w[0 as usize]) as u64) {
+        if ulib.streq(a, (&opt_w[0 as usize]) as u64)
+            || ulib.streq(a, (&opt_v[0 as usize]) as u64)
+            || ulib.streq(a, (&opt_m[0 as usize]) as u64)
+            || ulib.streq(a, (&opt_k[0 as usize]) as u64) {
             // DIE ZAHL HINTER `-w` IST KEIN PFAD. Ohne diese Zeile
             // wird aus `play -w 5 /ton.wav` der Versuch, die Datei
             // "5" zu oeffnen.
@@ -349,6 +390,28 @@ fn u_start(args: u64) -> u64 {
         ulib.sayu(strom)
         ulib.nl()
     }
+    // RUNDE TON-2: die Lautstaerken setzen, wenn welche verlangt sind.
+    //
+    // JE STROM geht nur ueber den Mischer -- der Einstromweg hat
+    // keinen eigenen Regler, er IST der einzige Strom. Das wird
+    // gesagt und nicht verschwiegen: eine Option, die stillschweigend
+    // nichts tut, ist schlimmer als eine, die es nicht gibt.
+    if svol <= 100 {
+        if einstrom {
+            ulib.esay_line((&s_v1[0 as usize]) as u64, 0)
+        } else {
+            ulib.sys(SYS_AUDSET, AS_SVOL, (strom << 8) | svol, 0)
+            ulib.say((&s_sv[0 as usize]) as u64)
+            ulib.sayu(svol)
+            ulib.nl()
+        }
+    }
+    if mvol <= 100 {
+        ulib.sys(SYS_AUDSET, AS_VOLUME, mvol, 0)
+        ulib.say((&s_mv[0 as usize]) as u64)
+        ulib.sayu(mvol)
+        ulib.nl()
+    }
     let grate: u64 = ulib.sys(SYS_AUDGET, A_RATE, 0, 0)
     ulib.say((&s_dr[0 as usize]) as u64)
     ulib.sayu(grate)
@@ -371,6 +434,7 @@ fn u_start(args: u64) -> u64 {
     var lauf: bool = true
     var quelle: u64 = w_off
     var rest: u64 = w_len
+    var schub: u64 = 0
     var runden_uebrig: u64 = wdh
     var us_lesen: u64 = 0
     var us_rechnen: u64 = 0
@@ -572,6 +636,20 @@ fn u_start(args: u64) -> u64 {
         // Zeitgeberschlag passt. Das Abgeben verteilt die Arbeit.
         ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
         us_senden = us_senden +% (jetzt_us() -% t_s)
+        // RUNDE TON-2: DER SYSTEMKLANG MITTEN IM STUECK.
+        //
+        // `schub` zaehlt die Durchgaenge; beim verlangten wird EIN
+        // Hinweiston ausgeloest. Der geht durch den Mischer (`AS_SOUND`,
+        // audio.sys_sound) und bekommt einen eigenen Strom -- die
+        // Musik laeuft dabei weiter, und genau das weist die Abnahme
+        // nach: die Musik hat hinterher keine Luecke.
+        schub = schub + 1
+        if klick_bei > 0 && schub == klick_bei {
+            let r: u64 = ulib.sys(SYS_AUDSET, AS_SOUND, 1, 0)
+            ulib.say((&s_kl[0 as usize]) as u64)
+            ulib.sayu(r)
+            ulib.nl()
+        }
         if ist_wav && rest == 0 {
             // RUNDE TON-2: AM ENDE DER DATEI NOCH EINMAL VON VORN.
             //
@@ -658,6 +736,16 @@ fn u_start(args: u64) -> u64 {
     ulib.nl()
     ulib.say((&s_bk[0 as usize]) as u64)
     ulib.sayu(bk)
+    ulib.nl()
+    // RUNDE TON-2: WAS DER MISCHER GETAN HAT. `begrenzt` ist die
+    // Zahl, mit der "ohne Uebersteuerung" eine Messung wird und keine
+    // Hoffnung; `systemklaenge` zeigt, dass ein Klick NEBEN der Musik
+    // durchgegangen ist und sie nicht unterbrochen hat.
+    ulib.say((&s_cl[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(SYS_AUDGET, A_CLIPS, 0, 0))
+    ulib.nl()
+    ulib.say((&s_sk[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(SYS_AUDGET, A_SYSSOUNDS, 0, 0))
     ulib.nl()
     ulib.say((&s_mx[0 as usize]) as u64)
     ulib.sayu(gm)
