@@ -1,0 +1,418 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/wlan/ccmp.fi -- CCMP: die Verschluesselung jedes einzelnen Rahmens.
+//
+// ==================================================================
+// WAS CCMP IST
+// ==================================================================
+//
+// AES im CCM-Modus, mit einer 802.11-eigenen Bildung von Nonce und
+// zusaetzlichen Daten. Es ist das, was WPA2 und WPA3 fuer die Nutzdaten
+// benutzen -- TKIP war der Uebergang und ist gebrochen, WEP war der
+// Anfang und ist zweimal gebrochen.
+//
+// Aus einem Rahmen
+//
+//     [ 802.11-Kopf ] [ Klartext ]
+//
+// wird
+//
+//     [ 802.11-Kopf ] [ CCMP-Kopf, 8 ] [ Schluesseltext ] [ MIC, 8 ]
+//
+// Der Rahmen wird also um 16 Oktette laenger, und das
+// Geschuetzt-Bit im Frame Control wird gesetzt.
+//
+// ==================================================================
+// DER CCMP-KOPF, IEEE 802.11-2016 12.5.3.2
+// ==================================================================
+//
+//   0   PN0        die NIEDRIGSTWERTIGEN Oktette der Paketnummer
+//   1   PN1
+//   2   vorbehalten (0)
+//   3   Schluesselnummer: Bit 5 muss 1 sein (ExtIV), Bits 6-7 die
+//       Nummer
+//   4   PN2
+//   5   PN3
+//   6   PN4
+//   7   PN5        das HOECHSTWERTIGE
+//
+// Die Paketnummer ist 48 Bit und liegt IM KOPF VERDREHT: zuerst die
+// beiden niedrigsten, dann ein Loch, dann die oberen vier. In der Nonce
+// und in jeder Schnittstelle dieser Datei steht sie dagegen
+// hoechstwertig zuerst. Das ist die haeufigste Fehlerquelle in einer
+// CCMP-Umsetzung -- diese Runde ist selbst hineingelaufen, siehe die
+// Anmerkung bei `ccmp_kopf_bauen` -- und deshalb passiert die
+// Verdrehung in genau einer Funktion und sonst nirgends.
+//
+// ==================================================================
+// DIE PAKETNUMMER IST DER GANZE WIEDEREINSPIELSCHUTZ
+// ==================================================================
+//
+// CCM ist sicher, solange dieselbe Nonce mit demselben Schluessel nie
+// zweimal benutzt wird. Die Nonce enthaelt die Paketnummer. Also:
+//
+//   * Der Sender ZAEHLT die Paketnummer bei jedem Rahmen hoch, und
+//     wenn sie ueberlaeuft, muss ein neuer Schluessel her. Nicht
+//     "sollte".
+//   * Der Empfaenger merkt sich die groesste bisher gesehene und wirft
+//     alles weg, was nicht groesser ist. Genau das ist die Abwehr gegen
+//     das Wiedereinspielen aufgezeichneter Rahmen.
+//
+// `wiedereinspiel_pruefen` macht das Zweite. Das Erste liegt beim
+// Treiber, den es noch nicht gibt -- und deshalb steht in
+// `docs/WLAN-BEFUND.md`, dass dieser Teil ungemessen ist.
+//
+// ==================================================================
+// WAS HIER GEMESSEN IST UND WAS NICHT
+// ==================================================================
+//
+// Die CCM-Rechnung darunter (`lib/crypto/aes.fi`) ist gegen OpenSSL
+// ueber viele erzeugte Eingaben gemessen. Die 802.11-eigene Bildung von
+// Nonce und zusaetzlichen Daten ist gegen GENAU EINEN
+// veroeffentlichten Vektor gemessen: IEEE Std 802.11-2012, Anhang
+// M.6.4, uebernommen aus `wlantest/test_vectors.c` von `hostap.git`.
+// Dazu kommt der Vektor M.9.2 (ein geschuetzter Deauth-Rahmen), der
+// den Verwaltungsfall abdeckt. Faelle mit vier Adressen sind NICHT
+// gegen einen Fremdvektor gemessen. Das steht so in
+// `docs/WLAN-BEFUND.md` Abschnitt 9 als S1.
+
+import wlan.rahmen
+import crypto.aes
+
+export {
+    protect, unprotect, ccmp_kopf_bauen, pn_aus_kopf,
+    wiedereinspiel_pruefen,
+    CCMP_KOPF, CCMP_MIC, CCMP_MEHR, PN_LEN
+}
+
+const CCMP_KOPF: usize = 8
+const CCMP_MIC: usize = 8
+const CCMP_MEHR: usize = 16 // Kopf + MIC
+const PN_LEN: usize = 6
+const AAD_MAX: usize = 30
+const NONCE_LEN: usize = 13
+
+fn ld8(p: u64, i: usize) -> u8 {
+    return *((p + i as u64) as *mut u8)
+}
+
+fn st8(p: u64, i: usize, v: u8) {
+    *((p + i as u64) as *mut u8) = v
+}
+
+fn le16(p: u64, i: usize) -> u64 {
+    return (ld8(p, i) as u64) | ((ld8(p, i + 1) as u64) << 8)
+}
+
+// ==================================================================
+// NONCE UND ZUSAETZLICHE DATEN
+// ==================================================================
+//
+// Die zusaetzlichen Daten (AAD) sind der Teil des Rahmens, der NICHT
+// verschluesselt, aber MITGESICHERT wird -- der Kopf. Er wird dabei
+// nicht so genommen, wie er dasteht, sondern MASKIERT: alle Bits, die
+// sich auf dem Weg noch aendern duerfen, werden auf null gesetzt.
+// Sonst wuerde ein Vermittler, der das Wiederholungsbit setzt, den
+// Pruefwert zerstoeren.
+//
+// Maskiert werden (IEEE 802.11-2016 12.5.3.3.3):
+//   * bei Datenrahmen die Untertyp-Bits 4, 5 und 6 -- Bit 7 (das
+//     QoS-Bit) bleibt stehen, weil es die Kopflaenge bestimmt
+//   * bei QoS-Datenrahmen zusaetzlich das Ordnungsbit
+//   * immer: Wiederholung, Stromsparen, weitere Daten
+//   * das Geschuetzt-Bit wird auf EINS gesetzt, egal was dastand
+//   * im Sequence-Control-Feld die Folgenummer (die oberen 12 Bit);
+//     die Bruchstuecknummer bleibt
+//   * im QoS-Feld alles ausser den vier Bits der Verkehrsklasse
+//
+// Rueckgabe: die Laenge der AAD, oder -1.
+fn aad_und_nonce(p: u64, n: usize, pn: u64, aad: *mut [u8; 30],
+    nonce: *mut [u8; 13]) -> i64 {
+    let kl: i64 = rahmen.kopf_laenge(p, n)
+    if kl < 0 {
+        return -1
+    }
+    var f: u64 = rahmen.fc(p, n)
+    let a: u64 = rahmen.art(f)
+    let ut: u64 = rahmen.untertyp(f)
+    let adr4: bool = rahmen.hat_adr4(f)
+    var qos: bool = false
+
+    var i: usize = 0
+    while i < NONCE_LEN {
+        (*nonce)[i] = 0 as u8
+        i = i + 1
+    }
+
+    if a == rahmen.ART_DATEN {
+        f = f & 65423 // ~0x0070: die Untertyp-Bits 4, 5, 6
+        if (ut & 8) != 0 {
+            qos = true
+            f = f & 32767 // ~0x8000: das Ordnungsbit
+            var qat: usize = rahmen.MIN_KOPF
+            if adr4 {
+                qat = qat + 6
+            }
+            if n < qat + 2 {
+                return -1
+            }
+            (*nonce)[0] = (ld8(p, qat) as u64 & 15) as u8
+        }
+    } else {
+        if a == rahmen.ART_VERWALTUNG {
+            (*nonce)[0] = ((*nonce)[0] as u64 | 16) as u8
+        } else {
+            return -1 // Steuerrahmen werden nicht geschuetzt
+        }
+    }
+    // ~(0x0800 | 0x1000 | 0x2000) = Wiederholung, Stromsparen, mehr
+    f = f & 51199
+    f = f | 16384 // geschuetzt
+
+    (*aad)[0] = (f & 255) as u8
+    (*aad)[1] = ((f >> 8) & 255) as u8
+    // Die drei Adressen, unveraendert.
+    if n < 22 {
+        return -1
+    }
+    i = 0
+    while i < 18 {
+        (*aad)[2 + i] = ld8(p, 4 + i)
+        i = i + 1
+    }
+    // Sequence Control: nur die Bruchstuecknummer bleibt.
+    if n < 24 {
+        return -1
+    }
+    let sc: u64 = le16(p, 22) & 15
+    (*aad)[20] = (sc & 255) as u8
+    (*aad)[21] = ((sc >> 8) & 255) as u8
+    var at: usize = 22
+    if adr4 {
+        if n < 30 {
+            return -1
+        }
+        i = 0
+        while i < 6 {
+            (*aad)[at + i] = ld8(p, 24 + i)
+            i = i + 1
+        }
+        at = at + 6
+    }
+    if qos {
+        var qat: usize = rahmen.MIN_KOPF
+        if adr4 {
+            qat = qat + 6
+        }
+        // Von den zwei Oktetten des QoS-Feldes bleiben nur die vier
+        // Bits der Verkehrsklasse; das zweite Oktett wird null.
+        var q0: u64 = ld8(p, qat) as u64
+        q0 = q0 & 143 // ~0x70
+        q0 = q0 & 127 // ~0x80 (A-MSDU)
+        (*aad)[at] = q0 as u8
+        (*aad)[at + 1] = 0 as u8
+        at = at + 2
+    }
+
+    // Die Nonce: Kennzeichen, Senderadresse, Paketnummer
+    // HOECHSTWERTIG ZUERST.
+    let a2: u64 = rahmen.adr2(p, n)
+    if a2 == 0 {
+        return -1
+    }
+    i = 0
+    while i < 6 {
+        (*nonce)[1 + i] = ld8(a2, i)
+        i = i + 1
+    }
+    // Die Paketnummer steht in der Nonce hoechstwertig zuerst -- also
+    // genau so, wie der Aufrufer sie uebergibt. Kein Umdrehen.
+    i = 0
+    while i < PN_LEN {
+        (*nonce)[7 + i] = ld8(pn, i)
+        i = i + 1
+    }
+    return at as i64
+}
+
+// DIE REIHENFOLGE DER PAKETNUMMER, an genau einer Stelle festgelegt.
+//
+// Ueberall in dieser Datei -- als Eingabe von `protect`, als Ausgabe
+// von `pn_aus_kopf`, im Vergleich von `wiedereinspiel_pruefen` -- sind
+// die sechs Oktette HOECHSTWERTIG ZUERST: pn[0] ist PN5, pn[5] ist PN0.
+// Das ist dieselbe Reihenfolge, in der sie in der Nonce steht, und
+// dieselbe, in der die Norm sie in ihren Testvektoren druckt
+// ("PN: b5 03 97 76 e7 0c").
+//
+// IM CCMP-KOPF steht sie ANDERS: dort kommen zuerst die beiden
+// NIEDRIGSTWERTIGEN, dann ein Loch und das Kennzeichenoktett, dann die
+// oberen vier. Diese Verdrehung passiert genau hier und sonst nirgends.
+//
+// Das ist keine Kleinigkeit, und die erste Fassung dieser Datei hatte
+// es falsch: sie nahm pn[0] als PN0 an. Alles rechnete, nichts
+// stuerzte ab, und der Kopf kam als `b5 03 00 20 97 76 e7 0c` heraus
+// statt als `0c e7 00 20 76 97 03 b5`. Gefunden hat es der Vektor aus
+// IEEE Std 802.11-2012 M.6.4 -- beim ersten Lauf, in der ersten
+// Sekunde. Genau dafuer gibt es Normvektoren.
+fn ccmp_kopf_bauen(pn: u64, kid: u64, out: u64) {
+    st8(out, 0, ld8(pn, 5)) // PN0
+    st8(out, 1, ld8(pn, 4)) // PN1
+    st8(out, 2, 0 as u8)
+    // Bit 5 ist ExtIV und MUSS bei CCMP gesetzt sein -- ohne es
+    // behauptet der Rahmen, ein WEP-Rahmen zu sein.
+    st8(out, 3, (32 | ((kid & 3) << 6)) as u8)
+    st8(out, 4, ld8(pn, 3)) // PN2
+    st8(out, 5, ld8(pn, 2)) // PN3
+    st8(out, 6, ld8(pn, 1)) // PN4
+    st8(out, 7, ld8(pn, 0)) // PN5
+}
+
+// Holt die sechs Oktette Paketnummer aus einem CCMP-Kopf heraus,
+// HOECHSTWERTIGES ZUERST -- also so, wie `ccmp_kopf_bauen` sie bekommt.
+// Rueckgabe false: das ExtIV-Bit fehlt, das ist kein CCMP-Kopf.
+fn pn_aus_kopf(kopf: u64, out: u64) -> bool {
+    if (ld8(kopf, 3) as u64 & 32) == 0 {
+        return false
+    }
+    st8(out, 0, ld8(kopf, 7)) // PN5
+    st8(out, 1, ld8(kopf, 6)) // PN4
+    st8(out, 2, ld8(kopf, 5)) // PN3
+    st8(out, 3, ld8(kopf, 4)) // PN2
+    st8(out, 4, ld8(kopf, 1)) // PN1
+    st8(out, 5, ld8(kopf, 0)) // PN0
+    return true
+}
+
+// Ist die neue Paketnummer echt groesser als die zuletzt gesehene?
+// Beide sechs Oktette, hoechstwertiges zuerst -- also von vorne
+// vergleichen.
+fn wiedereinspiel_pruefen(neu: u64, zuletzt: u64) -> bool {
+    var i: usize = 0
+    while i < PN_LEN {
+        let a: u8 = ld8(neu, i)
+        let b: u8 = ld8(zuletzt, i)
+        if a > b {
+            return true
+        }
+        if a < b {
+            return false
+        }
+        i = i + 1
+    }
+    return false // gleich ist NICHT groesser
+}
+
+// ==================================================================
+// SCHUETZEN
+// ==================================================================
+//
+// `p` ist der ganze Rahmen: Kopf und Klartext. `pn` sind sechs Oktette
+// Paketnummer. Ausgabe: Kopf, CCMP-Kopf, Schluesseltext, MIC.
+// Rueckgabe: die Laenge, oder -1.
+//
+// Der Rahmen des Aufrufers wird nicht veraendert.
+fn protect(tk: u64, pn: u64, p: u64, n: usize, out: u64,
+    outmax: usize) -> i64 {
+    let kl: i64 = rahmen.kopf_laenge(p, n)
+    if kl < 0 {
+        return -1
+    }
+    let kopf: usize = kl as usize
+    if n < kopf {
+        return -1
+    }
+    let nutz: usize = n - kopf
+    if n + CCMP_MEHR > outmax {
+        return -1
+    }
+    var aad: [u8; 30] = [0 as u8; 30]
+    var nonce: [u8; 13] = [0 as u8; 13]
+    let al: i64 = aad_und_nonce(p, n, pn, &aad, &nonce)
+    if al < 0 {
+        return -1
+    }
+    var k: aes.Key = aes.key_new()
+    if !aes.key_set(&k, tk, 16) {
+        return -1
+    }
+    // Der Kopf wandert unveraendert mit, aber MIT gesetztem
+    // Geschuetzt-Bit -- sonst wuerde die Gegenseite gar nicht erst
+    // entschluesseln.
+    var i: usize = 0
+    while i < kopf {
+        st8(out, i, ld8(p, i))
+        i = i + 1
+    }
+    let f: u64 = rahmen.fc(p, n) | 16384
+    st8(out, 0, (f & 255) as u8)
+    st8(out, 1, ((f >> 8) & 255) as u8)
+    ccmp_kopf_bauen(pn, 0, out + (kopf as u64))
+    if !aes.ccm_encrypt(&k, (&nonce[0]) as u64, NONCE_LEN,
+        (&aad[0]) as u64, al as usize, p + (kopf as u64), nutz,
+        CCMP_MIC, out + ((kopf + CCMP_KOPF) as u64)) {
+        return -1
+    }
+    return (n + CCMP_MEHR) as i64
+}
+
+// ==================================================================
+// ENTSCHUETZEN
+// ==================================================================
+//
+// Rueckgabe -1 heisst: der Pruefwert stimmt nicht, oder der Rahmen ist
+// zu kurz, oder das ExtIV-Bit fehlt. In `out` steht dann NICHTS
+// Brauchbares, und der Aufrufer darf nichts davon weiterreichen -- das
+// ist der Unterschied zwischen einer Verschluesselung und einer
+// Verschluesselung, die auch etwas nuetzt.
+fn unprotect(tk: u64, p: u64, n: usize, out: u64,
+    outmax: usize) -> i64 {
+    let kl: i64 = rahmen.kopf_laenge(p, n)
+    if kl < 0 {
+        return -1
+    }
+    let kopf: usize = kl as usize
+    if n < kopf + CCMP_MEHR {
+        return -1
+    }
+    let f: u64 = rahmen.fc(p, n)
+    if !rahmen.geschuetzt(f) {
+        return -1
+    }
+    var pn: [u8; 6] = [0 as u8; 6]
+    if !pn_aus_kopf(p + (kopf as u64), (&pn[0]) as u64) {
+        return -1
+    }
+    var aad: [u8; 30] = [0 as u8; 30]
+    var nonce: [u8; 13] = [0 as u8; 13]
+    let al: i64 = aad_und_nonce(p, n, (&pn[0]) as u64, &aad, &nonce)
+    if al < 0 {
+        return -1
+    }
+    let clen: usize = n - kopf - CCMP_KOPF
+    if kopf + clen - CCMP_MIC > outmax {
+        return -1
+    }
+    var k: aes.Key = aes.key_new()
+    if !aes.key_set(&k, tk, 16) {
+        return -1
+    }
+    var i: usize = 0
+    while i < kopf {
+        st8(out, i, ld8(p, i))
+        i = i + 1
+    }
+    // DAS SCHUTZKENNZEICHEN WIRD GELOESCHT. Was diese Funktion
+    // zurueckgibt, ist ein Klartextrahmen -- er ist nicht mehr
+    // geschuetzt, und ein Kennzeichen, das etwas anderes behauptet,
+    // waere die Art von Kleinigkeit, an der weiter oben jemand einen
+    // Rahmen zum zweiten Mal durch die Entschluesselung schickt.
+    // (Linux' mac80211 macht an derselben Stelle dasselbe.)
+    let fk: u64 = f & 49151 // ~0x4000
+    st8(out, 0, (fk & 255) as u8)
+    st8(out, 1, ((fk >> 8) & 255) as u8)
+    if !aes.ccm_decrypt(&k, (&nonce[0]) as u64, NONCE_LEN,
+        (&aad[0]) as u64, al as usize, p + ((kopf + CCMP_KOPF) as u64),
+        clen, CCMP_MIC, out + (kopf as u64)) {
+        return -1
+    }
+    return (kopf + clen - CCMP_MIC) as i64
+}
