@@ -119,7 +119,7 @@ export {
     // RUNDE MESSTAFEL
     mess_grund, messzeile, messhoehe, messk,
     mess_gruen, mess_rot, mess_weiss, mess_gelb, mess_ampel,
-    evpush, evpop, keyin, curx, cury, evdrops,
+    evpush, evpop, keyin, curx, cury, evdrops, evkoal, evterm, titel_alt,
     win_paints, win_px, win_flags, top_layer_win, wins_say,
     MAX_W_HARD, MAX_H_HARD,
     E_KEY, E_DOWN, E_UP, E_MOVE, E_CLOSE, E_FOCUS, E_RESIZE,
@@ -470,6 +470,18 @@ const S_CAPHITS: u64 = 0x2E0
 // RUNDE SCHIRM: die Vervielfachung des Fensterschmucks. 0 heisst "noch
 // nicht gesetzt" und wird als 1 gelesen.
 const S_UISC: u64 = 0x2E8 // wie oft eine davon geklickt wurde
+// ====================================================== RUNDE BLECH2
+// ZWEI ZAEHLER FUER DEN EREIGNISRING, siehe `ev_push`:
+//   S_EVKOAL -- Bewegungen, die in ein NOCH NICHT ABGEHOLTES E_MOVE
+//               desselben Fensters zusammengefasst wurden. Das ist
+//               kein Verlust: die Anwendung bekommt die letzte Stelle,
+//               und genau die will sie.
+//   S_EVTERM -- Ereignisse an das Terminalfenster des KERNS, das
+//               keinen Abholer in Ring 3 hat. Sie werden gezaehlt und
+//               nicht eingereiht -- vorher fielen sie nach 32 Stueck
+//               als VERL aus dem Ring (Justins 1283).
+const S_EVKOAL: u64 = 0x2F0
+const S_EVTERM: u64 = 0x2F8
 // DIE MASKE SELBST. Zwei Baenke -- aktiv und unscharf -- mal
 // SHMASK_SIDE^2 Oktette. 40 ist RADIUS_MAX + SHADOW_MAX, also die
 // groesste Ecke, die dieser Server ueberhaupt malen darf.
@@ -1539,6 +1551,17 @@ fn evdrops(state: u64) -> u64 {
     return gs(state, S_EVDROP)
 }
 
+// RUNDE BLECH2: zusammengefasste Bewegungen und Ereignisse an das
+// abholerlose Terminal des Kerns -- beides KEIN Verlust, beides eine
+// Zahl auf Tafelzeile 4 bzw. in `wm: fen`.
+fn evkoal(state: u64) -> u64 {
+    return gs(state, S_EVKOAL)
+}
+
+fn evterm(state: u64) -> u64 {
+    return gs(state, S_EVTERM)
+}
+
 fn win_paints(state: u64, i: u64) -> u64 {
     if !valid(state, i) {
         return 0
@@ -1662,6 +1685,49 @@ fn wins_say(state: u64) {
             serial.dec(wg(state, i, W_PAINTS))
             serial.puts((&s_px[0]) as u64)
             serial.dec(wg(state, i, W_PX))
+            // ============================================== RUNDE BLECH2
+            // WO DER TITEL STEHT, damit ein Laeufer ihn im Bild
+            // bildpunktgenau nachrechnen kann (tools/blech2/run.sh mit
+            // `checkshot.py tkette`): Anfang, Grundlinie, Schriftgroesse,
+            // Schrift- und Leistenfarbe -- und `tka`, die alte
+            // TK-Zaehlweise, zum Vergleich mit dem Bild.
+            if deko(state, i) {
+                var s_tx: [u8; 5] = " tx=\0"
+                var s_tb: [u8; 5] = " tb=\0"
+                var s_tp: [u8; 5] = " tp=\0"
+                var s_tf: [u8; 5] = " tf=\0"
+                var s_tg: [u8; 5] = " tg=\0"
+                var s_tk: [u8; 6] = " tka=\0"
+                let f: u64 = gs(state, S_FONT_UI)
+                let px: u64 = gs(state, S_PX_UI)
+                var vor: i64 = 0
+                let sicht: u64 = netview.view_of(state, win_owner(state, i))
+                if sicht != netview.V_REAL && sicht <= 3 {
+                    vor = netmark.W as i64 + 4
+                }
+                var tf: u64 = deco_rgb(state, DK_TEXT)
+                var tg: u64 = deco_rgb(state, DK_TITLE)
+                if focus(state) == i {
+                    tf = deco_rgb(state, DK_TEXT_ON)
+                    tg = deco_rgb(state, DK_TITLE_ON)
+                }
+                var tb: i64 = win_y(state, i) + border(state) as i64
+                if f < ttf.MAX_FONTS {
+                    tb = tb + ttf.ascent(state, f, px)
+                }
+                serial.puts((&s_tx[0]) as u64)
+                serial.dec((win_x(state, i) + border(state) as i64 + 5 + vor) as u64)
+                serial.puts((&s_tb[0]) as u64)
+                serial.dec(tb as u64)
+                serial.puts((&s_tp[0]) as u64)
+                serial.dec(px)
+                serial.puts((&s_tf[0]) as u64)
+                serial.hex(tf)
+                serial.puts((&s_tg[0]) as u64)
+                serial.hex(tg)
+                serial.puts((&s_tk[0]) as u64)
+                serial.dec(titel_schnitt_alt)
+            }
             serial.nl()
         }
         i = i + 1
@@ -4025,9 +4091,16 @@ fn title_mark(state: u64, m: u64, x: i64, y: i64, color: u64,
 
 static mut titel_schnitt: u64 = 0
 static mut titel_max: u64 = 0
+// RUNDE BLECH2: die ALTE Zaehlweise (Schnittfenster beginnt rechts vom
+// Titelanfang), nur noch fuer `wm: fen` -- siehe `title_text`.
+static mut titel_schnitt_alt: u64 = 0
 
 fn titel_beschnitten() -> u64 {
     return titel_schnitt
+}
+
+fn titel_alt() -> u64 {
+    return titel_schnitt_alt
 }
 
 fn titel_fehlt() -> u64 {
@@ -4071,9 +4144,32 @@ fn title_text(state: u64, i: u64, f: u64, x: i64, y: i64, color: u64,
     // wird in einem anderen Aufruf mit einem anderen Schnitt gemalt
     // und bleibt heil. Das ist keine Behauptung, sondern jetzt eine
     // ZAHL: `TK` auf Tafelzeile 7 sagt, wie oft und wie weit.
+    // ====================================================== RUNDE BLECH2
+    // TK ZAEHLTE DAS FALSCHE. Justins Tafel: `7 LEISTE ... TK 643`, und
+    // auf demselben Foto steht `Terminal -- sh` VOLLSTAENDIG in der
+    // Titelleiste. `x < ax0` heisst nur: das Schnittfenster dieses
+    // Anstrichs faengt rechts vom Titelanfang an -- und das ist bei
+    // JEDEM Teilanstrich so, dessen schmutziges Rechteck nicht am linken
+    // Fensterrand beginnt: der Zeiger, der ueber die Fensterflaeche
+    // laeuft, ein Fenster, das darueber aufgeht. Die Bildpunkte links
+    // vom Schnitt stehen unveraendert im Zweitpuffer und werden mit der
+    // Zeile zusammen uebertragen; es fehlt nichts. GEMESSEN in
+    // tools/blech2/run.sh: alte Zaehlweise in die Hunderte, Titel im
+    // Bild bildpunktgenau vollstaendig (`checkshot.py tkette`).
+    //
+    // Was einen Titel WIRKLICH verschwinden laesst, ist das Band der
+    // Messtafel: `fb.pixel` weist jede Zeile unter `band_lo` ab, still.
+    // Ein Fenster, das nach oben in das Band geschoben wird, verliert
+    // seinen Titel genau dort. DAS zaehlt TK jetzt: Titelzeilen, die im
+    // Band liegen. Die alte Zahl bleibt als `tka=` in `wm: fen`.
     if x < ax0 {
+        titel_schnitt_alt = titel_schnitt_alt + 1
+    }
+    let oben: i64 = y - ttf.ascent(state, f, px)
+    let band: i64 = fb.band_lo(state) as i64
+    if oben < band {
         titel_schnitt = titel_schnitt + 1
-        let fehlt: u64 = (ax0 - x) as u64
+        let fehlt: u64 = (band - oben) as u64
         if fehlt > titel_max {
             titel_max = fehlt
         }
@@ -4523,19 +4619,69 @@ fn ev_push(state: u64, i: u64, typ: u64, a: u64, b: u64, c: u64) {
     if !valid(state, i) {
         return
     }
-    let kopf: u64 = wg(state, i, W_EHEAD)
-    if kopf - wg(state, i, W_ETAIL) >= EV_SLOTS {
-        // Ein Ring, der ueberlaeuft, verliert das AELTESTE. Eine
-        // Anwendung, die nicht abholt, soll nicht den Server anhalten.
-        wsv(state, i, W_ETAIL, wg(state, i, W_ETAIL) + 1)
-        ss(state, S_EVDROP, gs(state, S_EVDROP) + 1)
-    }
     if typ == E_KEY {
         wsv(state, i, W_KEYS, wg(state, i, W_KEYS) + 1)
     }
+    // ====================================================== RUNDE BLECH2
+    // EIN RING OHNE ABHOLER IST KEIN RING.
+    //
+    // Justins Tafel vom 05.09. 22:46: `4 RING 5226 VERL 1283` -- ein
+    // Viertel aller Ereignisse aus dem Fensterring gefallen, in QEMU
+    // stand dort immer 0. Der Grund ist nicht die Ringgroesse und nicht
+    // ein langsamer Abholer, sondern EIN FENSTER OHNE ABHOLER: das
+    // Terminalfenster legt der KERN an (`kgui`), seine Tasten gehen
+    // ueber `key_tty` an die Zeilendisziplin, und aus seinem Ring holt
+    // NIEMAND -- der einzige `ev_pop` sitzt im Systemaufruf WM_EVENT,
+    // und dazu braucht es ein Ring-3-Programm mit einem Handle darauf.
+    // Jede Bewegung ueber dem Terminal ging trotzdem in den Ring; nach
+    // 32 Stueck fiel fuer jede weitere die aelteste heraus, und der
+    // Zaehler VERL zaehlte einen Verlust, der keiner war. In QEMU faehrt
+    // kein Laeufer die Maus ueber das Terminal -- deshalb dort 0.
+    //
+    // Ein Terminalfenster mit gebundenem tty (W_TTY) bekommt deshalb
+    // nichts eingereiht: gezaehlt (S_EVTERM, und W_KEYS wie bisher),
+    // sonst nichts. Das Terminal des Selbsttests hat kein tty und
+    // verhaelt sich wie vorher.
+    if wg(state, i, W_KIND) == K_TERM && wg(state, i, W_TTY) != 0 {
+        ss(state, S_EVTERM, gs(state, S_EVTERM) + 1)
+        return
+    }
+    let kopf: u64 = wg(state, i, W_EHEAD)
+    let schwanz: u64 = wg(state, i, W_ETAIL)
+    let daten: u64 = ((a & 0xFFFF) << 32) | ((b & 0xFFFF) << 16)
+        | (c & 0xFFFF)
+    // KOALESZENZ DER BEWEGUNG. Eine Maus mit 1000 Berichten je Sekunde
+    // legt in die 25 ms, die die Leiste zwischen zwei Abholrunden
+    // schlaeft, 25 Bewegungen -- der Ring hat 32 Plaetze, und ein
+    // Anstrich dazwischen reicht fuer den Ueberlauf. Von einer Bewegung
+    // interessiert eine Anwendung aber nur die LETZTE Stelle: liegt als
+    // juengstes, noch nicht abgeholtes Ereignis schon ein E_MOVE, wird
+    // es ueberschrieben statt eines neuen eingereiht. Tasten, Klicks,
+    // Schliessen, Fokus, Groesse: jedes ein eigener Platz, nie verworfen.
+    //
+    // Der Abholer liest Art und Daten eines Platzes und rueckt danach
+    // den Schwanz vor; wird das Datenwort waehrenddessen ueberschrieben,
+    // liest er die neuere Stelle -- auch das ist die richtige.
+    if typ == E_MOVE && kopf > schwanz {
+        let letzt: u64 = ev_at(state, i, kopf - 1)
+        if kstate.get(letzt, 0) == E_MOVE {
+            kstate.set(letzt, 8, daten)
+            ss(state, S_EVKOAL, gs(state, S_EVKOAL) + 1)
+            return
+        }
+    }
+    if kopf - schwanz >= EV_SLOTS {
+        // Ein Ring, der ueberlaeuft, verliert das AELTESTE. Eine
+        // Anwendung, die nicht abholt, soll nicht den Server anhalten.
+        // Nach dem Umbau oben heisst VERL > 0 nur noch: 32 Tasten oder
+        // Klicks ohne eine einzige Abholrunde -- ein Programm, das
+        // wirklich nicht mehr abholt.
+        wsv(state, i, W_ETAIL, schwanz + 1)
+        ss(state, S_EVDROP, gs(state, S_EVDROP) + 1)
+    }
     let p: u64 = ev_at(state, i, kopf)
     kstate.set(p, 0, typ)
-    kstate.set(p, 8, ((a & 0xFFFF) << 32) | ((b & 0xFFFF) << 16) | (c & 0xFFFF))
+    kstate.set(p, 8, daten)
     wsv(state, i, W_EHEAD, kopf + 1)
     // RUNDE MESSTAFEL, Stufe 4a: hier verlaesst das Ereignis den Kern.
     ss(state, S_EVPUSH, gs(state, S_EVPUSH) + 1)
