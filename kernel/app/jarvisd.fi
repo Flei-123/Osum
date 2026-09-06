@@ -199,7 +199,28 @@ const S_CHMOD: i64 = 90
 const S_SYSINFO: i64 = 1002
 const S_WIGSCREEN: i64 = 1805
 const S_DISPGET: i64 = 1810
-const S_SHOT: i64 = 1840 // Runde FEEDBACK -- in diesem Zweig nicht da
+// RUNDE BRIDGE-2: 1841 UND NICHT 1840.
+//
+// Runde FEEDBACK hatte 1840. In `merge6` ist 1840 seit Runde WERKZEUGE
+// `SYS_OSUM_CPUSTAT`. Der alte Code hier fragte mit `syscall(1840,0,0)`,
+// OB der Kern das Bildschirmfoto kann, und nahm "Antwort >= 0" als ja --
+// `do_cpustat` beantwortet genau diesen Aufruf aber mit der KERNZAHL.
+// Der Helfer hat deshalb in merge6 JEDES Bildschirmfoto abgelehnt.
+// Gemessen, nicht vermutet.
+const S_SHOT: i64 = 1841
+
+// Die fuenf Handlungen (kernel/sys.fi, SH_*).
+const SH_INFO: i64 = 0
+const SH_ARM: i64 = 1
+const SH_GRAB: i64 = 2
+const SH_DROP: i64 = 4
+
+// Die Felder von SH_INFO (kernel/sys.fi, SI_*).
+const SI_READY: i64 = 0
+const SI_WIDTH: i64 = 1
+const SI_HEIGHT: i64 = 2
+const SI_ROWBYTES: i64 = 3
+const SI_CHUNKROWS: i64 = 5
 const S_HNDRIGHTS: i64 = 2202
 const S_HNDDUP: i64 = 2208
 
@@ -1415,6 +1436,90 @@ fn png_stueck(aus: *mut rt.Buf, art: u64, inhalt: u64, n: usize) {
     rt.buf_free(&mit)
 }
 
+// DAS BILDSCHIRMFOTO UEBER DEN KERN (Runde FEEDBACK, Nummer 1841).
+//
+// Der Weg, den docs/BRIDGE.md als den richtigen bezeichnet und den
+// dieser Zweig endlich hat. Der Unterschied zum /dev/fb-Weg darunter
+// ist nicht die Bildqualitaet, sondern WER ENTSCHEIDET: hier sagt der
+// KERN nein, wenn kein Schein offen ist, und ein Fehler in diesem
+// Programm kann daran nichts aendern.
+//
+//   1. SH_ARM stellt den Einmal-Schein aus (nur Wurzel/Taskleiste),
+//   2. SH_GRAB holt das Bild in Baendern von hoechstens MAX_CHUNK,
+//   3. der Schein ist nach der letzten Zeile VERBRAUCHT -- der Kern
+//      zieht ihn selbst ein, dieses Programm muss nichts zurueckgeben.
+//
+// Die Bildpunkte kommen als R,G,B (drei Oktette, `shot.rgb_at` dreht
+// die Reihenfolge der Karte schon zurecht). PNG-Farbart 2 will genau
+// das, mit einem Filteroktett je Zeile -- das setzt diese Schleife
+// davor, ohne die Zeile noch einmal anzufassen.
+fn foto_ueber_kern(aus: *mut rt.Buf) -> bool {
+    let w: i64 = syscall(S_SHOT, SH_INFO, SI_WIDTH, 0, 0, 0, 0)
+    let h: i64 = syscall(S_SHOT, SH_INFO, SI_HEIGHT, 0, 0, 0, 0)
+    let rb: i64 = syscall(S_SHOT, SH_INFO, SI_ROWBYTES, 0, 0, 0, 0)
+    var zpc: i64 = syscall(S_SHOT, SH_INFO, SI_CHUNKROWS, 0, 0, 0, 0)
+    if w <= 0 || h <= 0 || rb <= 0 {
+        return ablehnen(aus, "der Kern nennt keine Bildschirmmasse")
+    }
+    if zpc <= 0 {
+        zpc = 1
+    }
+    // DER SCHEIN. Er wird hier ausgestellt und nicht frueher: zwischen
+    // Schein und erstem Band soll nichts liegen, was scheitern kann.
+    let arm: i64 = syscall(S_SHOT, SH_ARM, 0, 0, 0, 0, 0)
+    if arm < 0 {
+        return ablehnen(aus, "der Kern stellt keinen Schein aus (SH_ARM abgelehnt)")
+    }
+    let breite: usize = w as usize
+    let hoehe: usize = h as usize
+    let zeile: usize = rb as usize
+    var band: rt.Buf = rt.buf_new()
+    let bandzeilen: usize = zpc as usize
+    rt.buf_reserve(&band, bandzeilen * zeile)
+    rt.buf_set_len(&band, bandzeilen * zeile)
+    var roh: rt.Buf = rt.buf_new()
+    var y: usize = 0
+    var schief: bool = false
+    while y < hoehe {
+        var will: usize = bandzeilen
+        if y + will > hoehe {
+            will = hoehe - y
+        }
+        let n: i64 = syscall(S_SHOT, SH_GRAB, band.ptr as i64,
+            (will * zeile) as i64, 0, 0, 0)
+        if n <= 0 {
+            schief = true
+            break
+        }
+        let kam: usize = (n as usize) / zeile
+        if kam == 0 {
+            schief = true
+            break
+        }
+        var i: usize = 0
+        while i < kam {
+            // Filter 0 (None), dann die Zeile, wie der Kern sie gibt.
+            rt.buf_push(&roh, 0 as u8)
+            rt.buf_push_bytes(&roh, band.ptr + (i * zeile) as u64, zeile)
+            i = i + 1
+        }
+        y = y + kam
+    }
+    rt.buf_free(&band)
+    if schief {
+        // Den Schein zurueckgeben, damit kein halber offen bleibt.
+        syscall(S_SHOT, SH_DROP, 0, 0, 0, 0, 0)
+        rt.buf_free(&roh)
+        return ablehnen(aus, "der Kern hat das Bild nicht ganz herausgegeben")
+    }
+    let gut: bool = png_bauen(aus, breite, hoehe, &roh)
+    rt.buf_free(&roh)
+    if !gut {
+        return ablehnen(aus, "das Bild liess sich nicht in ein PNG bringen")
+    }
+    return true
+}
+
 fn tue_foto(aus: *mut rt.Buf) -> bool {
     if !k_foto {
         return ablehnen(aus, "`bildschirmfoto = nein` in /etc/jarvis/rechte.conf")
@@ -1424,9 +1529,18 @@ fn tue_foto(aus: *mut rt.Buf) -> bool {
     }
     // ZUERST der Weg von Runde FEEDBACK. Gibt es ihn, ist er der
     // richtige, und dieses Programm baut keinen zweiten.
-    let hat: i64 = syscall(S_SHOT, 0, 0, 0, 0, 0, 0)
-    if hat >= 0 {
-        return ablehnen(aus, "dieser Kern hat SYS_OSUM_SHOT -- der Weg ueber den Kern-Schein gehoert hierher und ist noch nicht angeschlossen")
+    //
+    // GEFRAGT WIRD MIT SH_INFO/SI_READY -- also mit einer Handlung, die
+    // dieser Aufruf WIRKLICH hat. Ein blankes `syscall(S_SHOT,0,0)` als
+    // Ja/Nein-Frage war der Fehler, der in merge6 jedes Bild verhindert
+    // hat: die Nummer gehoerte dort einem anderen Aufruf, der bereitwillig
+    // eine Zahl >= 0 zurueckgab.
+    let bereit: i64 = syscall(S_SHOT, SH_INFO, SI_READY, 0, 0, 0, 0)
+    if bereit >= 0 {
+        if bereit == 0 {
+            return ablehnen(aus, "der Kern hat den Bildschirmfoto-Aufruf, aber es gibt kein Bild (kein Rahmenpuffer / kein 32-Bit-Modus)")
+        }
+        return foto_ueber_kern(aus)
     }
     let w: i64 = syscall(S_WIGSCREEN, WS_W, 0, 0, 0, 0, 0)
     let h: i64 = syscall(S_WIGSCREEN, WS_H, 0, 0, 0, 0, 0)
@@ -2110,7 +2224,11 @@ fn probe() -> i32 {
 // damit "kein Rahmenpuffer" nicht geraten werden muss.
 fn schirm() -> i32 {
     sag("schirm: shot ")
-    sag_zahl(syscall(S_SHOT, 0, 0, 0, 0, 0, 0) as u64)
+    sag_zahl(syscall(S_SHOT, SH_INFO, SI_READY, 0, 0, 0, 0) as u64)
+    sag(" shotw ")
+    sag_zahl(syscall(S_SHOT, SH_INFO, SI_WIDTH, 0, 0, 0, 0) as u64)
+    sag(" shoth ")
+    sag_zahl(syscall(S_SHOT, SH_INFO, SI_HEIGHT, 0, 0, 0, 0) as u64)
     sag(" w ")
     sag_zahl(syscall(S_WIGSCREEN, WS_W, 0, 0, 0, 0, 0) as u64)
     sag(" h ")
@@ -2154,12 +2272,125 @@ fn schirm() -> i32 {
 // auf einen USB-Stick kopieren. Der Weg ueber den Server (`foto`)
 // benutzt denselben Leser; wenn dieser hier ein Bild liefert, liegt
 // ein Fehler dort NICHT mehr am Rahmenpuffer.
+// DAS PPM UEBER DEN KERN-SCHEIN (Runde FEEDBACK, Nummer 1841).
+//
+// Dasselbe wie `foto_datei` darunter, nur dass die Bildpunkte vom Kern
+// kommen und nicht aus `/dev/fb`: SH_ARM stellt den Einmal-Schein aus,
+// SH_GRAB holt Baender, und der Kern zieht den Schein nach der letzten
+// Zeile selbst ein. Die Oktette kommen schon als R,G,B -- PPM will
+// genau das, also geht jede Zeile ohne Umsortieren hinaus.
+fn ppm_ueber_kern(pfad: u64, w: i64, h: i64) -> i32 {
+    let rb: i64 = syscall(S_SHOT, SH_INFO, SI_ROWBYTES, 0, 0, 0, 0)
+    var zpc: i64 = syscall(S_SHOT, SH_INFO, SI_CHUNKROWS, 0, 0, 0, 0)
+    if rb <= 0 {
+        sag("jarvisd: der Kern nennt keine Zeilenlaenge\n")
+        return 2
+    }
+    if zpc <= 0 {
+        zpc = 1
+    }
+    let out: i64 = sys_open(pfad, O_WRONLY | O_CREAT | O_TRUNC, 420)
+    if out < 0 {
+        sag("jarvisd: die Zieldatei laesst sich nicht anlegen\n")
+        return 2
+    }
+    let arm: i64 = syscall(S_SHOT, SH_ARM, 0, 0, 0, 0, 0)
+    if arm < 0 {
+        sys_close(out)
+        sag("jarvisd: der Kern stellt keinen Schein aus (SH_ARM abgelehnt)\n")
+        return 2
+    }
+    var kopf: rt.Buf = rt.buf_new()
+    var p6: [u8; 4] = "P6\n\0"
+    rt.buf_push_bytes(&kopf, (&p6[0]) as u64, 3)
+    rt.buf_push_dec_u64(&kopf, w as u64)
+    rt.buf_push(&kopf, 32 as u8)
+    rt.buf_push_dec_u64(&kopf, h as u64)
+    rt.buf_push(&kopf, 10 as u8)
+    var m255: [u8; 5] = "255\n\0"
+    rt.buf_push_bytes(&kopf, (&m255[0]) as u64, 4)
+    let _hk: i64 = sys_write(out, kopf.ptr, kopf.len)
+    rt.buf_free(&kopf)
+    let zeile: usize = rb as usize
+    let bandzeilen: usize = zpc as usize
+    var band: rt.Buf = rt.buf_new()
+    rt.buf_reserve(&band, bandzeilen * zeile)
+    rt.buf_set_len(&band, bandzeilen * zeile)
+    var y: usize = 0
+    var schief: bool = false
+    while y < (h as usize) {
+        var will: usize = bandzeilen
+        if y + will > (h as usize) {
+            will = (h as usize) - y
+        }
+        let n: i64 = syscall(S_SHOT, SH_GRAB, band.ptr as i64,
+            (will * zeile) as i64, 0, 0, 0)
+        if n <= 0 {
+            schief = true
+            break
+        }
+        // EIN `write` SCHREIBT NICHT ALLES, und das ist kein Fehler,
+        // sondern die Regel: Osums `write` geht ueber `fs.fi` und legt
+        // hoechstens EINEN Block (4096 Oktette) auf einmal ab.
+        // Gemessen: von 65280 geholten Oktetten kamen 4096 an, und das
+        // Bild brach nach drei Baendern ab. Wer den Rueckgabewert nicht
+        // ansieht, schreibt ein Bild mit Loechern.
+        var ab: usize = 0
+        while ab < (n as usize) {
+            let gw: i64 = sys_write(out, band.ptr + ab as u64, (n as usize) - ab)
+            if gw <= 0 {
+                schief = true
+                break
+            }
+            ab = ab + (gw as usize)
+        }
+        if schief {
+            break
+        }
+        y = y + ((n as usize) / zeile)
+    }
+    rt.buf_free(&band)
+    sys_close(out)
+    if schief {
+        syscall(S_SHOT, SH_DROP, 0, 0, 0, 0, 0)
+        sag("jarvisd: der Kern hat das Bild nicht ganz herausgegeben\n")
+        return 2
+    }
+    sag("jarvisd: Bildschirmfoto geschrieben (ueber den Kern-Schein), ")
+    sag_zahl(w as u64)
+    sag("x")
+    sag_zahl(h as u64)
+    sag("\n")
+    return 0
+}
+
 fn foto_datei(pfad: u64) -> i32 {
-    let w: i64 = syscall(S_WIGSCREEN, WS_W, 0, 0, 0, 0, 0)
-    let h: i64 = syscall(S_WIGSCREEN, WS_H, 0, 0, 0, 0, 0)
+    // RUNDE BRIDGE-2: ZUERST DEN KERN FRAGEN, genau wie `tue_foto` es
+    // tut. Vorher stand hier nur `WIG_SCREEN`, und das liegt hinter dem
+    // Fensterserver -- auf einem Kern mit Rahmenpuffer, aber ohne
+    // laufenden Fensterserver sagte dieses Programm "keine
+    // Bildschirmmasse", obwohl der Kern die Masse laengst kannte.
+    // Gemessen mit tools/bridge/fotoprobe.sh: `schirm: shot 1 shotw 1280
+    // shoth 800`, waehrend WIG_SCREEN mit -19 antwortete.
+    var w: i64 = 0
+    var h: i64 = 0
+    let bereit: i64 = syscall(S_SHOT, SH_INFO, SI_READY, 0, 0, 0, 0)
+    var ueber_kern: bool = false
+    if bereit > 0 {
+        w = syscall(S_SHOT, SH_INFO, SI_WIDTH, 0, 0, 0, 0)
+        h = syscall(S_SHOT, SH_INFO, SI_HEIGHT, 0, 0, 0, 0)
+        ueber_kern = w > 0 && h > 0
+    }
+    if !ueber_kern {
+        w = syscall(S_WIGSCREEN, WS_W, 0, 0, 0, 0, 0)
+        h = syscall(S_WIGSCREEN, WS_H, 0, 0, 0, 0, 0)
+    }
     if w <= 0 || h <= 0 {
         sag("jarvisd: keine Bildschirmmasse -- laeuft der Fensterserver?\n")
         return 2
+    }
+    if ueber_kern {
+        return ppm_ueber_kern(pfad, w, h)
     }
     var pitch: i64 = syscall(S_DISPGET, DG_PITCH, 0, 0, 0, 0, 0)
     var bpp: i64 = syscall(S_DISPGET, DG_BPP, 0, 0, 0, 0, 0)
