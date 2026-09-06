@@ -1051,3 +1051,38 @@ Bericht **buchstäblich derselbe** ist wie bei USB -- dieselbe Funktion.
 Sie ist höher als „USB generisch", weil dort eine Tastatur ohne
 Anschlagsgrenze mit 128 Bit gemessen wird und nicht eine mit 64.
 
+
+## Ton (Runde HDA, 30.08.2026)
+
+**Was gemessen ist:** `kernel/hda.fi` hat mit GENAU EINEM Codec geredet --
+QEMUs `hda-duplex` (0x1af4:0x0022), vier Knoten, ein Wandler, eine
+Buchse, Weglaenge 2. Alles, was unten ueber ein Brett steht, ist eine
+Aussage ueber die Spezifikation (Intel High Definition Audio 1.0a) und
+NICHT ueber gemessene Hardware.
+
+**Was auf echtem Blech trotzdem fehlen kann:**
+
+| Punkt | Was passiert | Woran man es erkennt |
+|---|---|---|
+| Buchsenbelegung leer oder falsch | der Treiber waehlt eine Buchse, aus der nichts kommt | `audgraph` drucken: `cfg=` ist 0x00000000 oder `punkt=1` bei allen |
+| EAPD ueber GPIO statt ueber Verb 0x70C | alles richtig eingestellt, Lautsprecher bleibt still | `audgraph`: die Buchse hat PINCAP Bit 16 nicht |
+| Kopfhoererbuchse | wird beim Aufsetzen einmal gewaehlt; Einstecken im Betrieb schaltet nicht um | fehlende unaufgeforderte Antworten |
+| zwei analoge Codecs | der erste mit einem Weg gewinnt -- das kann der falsche sein | `hda_codecaddr` im Bericht |
+| Regler ohne DMA-Positionspuffer | wird ERKANNT und auf LPIB umgeschaltet | `posfix` = 1 |
+| nur MSI, keine Leitung im I/O-APIC | bleibt abfragend | `irqarmed` = 0 -- der Ton laeuft trotzdem (Gegenprobe `noaudirq`) |
+| `SDnFIFOS`/`SDnFIFOW` | Vorgabewerte, nicht angefasst | Knacken bei knappem FIFO |
+| HDMI/DisplayPort | wird UEBERSPRUNGEN (digitale Knoten) | kein Ton am Bildschirm |
+| Aufnahme | nicht gebaut | -- |
+
+**Die drei Zahlen, die man auf einem fremden Brett zuerst ansieht**
+(`osum audio audgraph audsay`):
+
+```
+hda: statests 0x....     welche Codecs sich melden
+hda: codec 0 p=1 w=1 c=1 p = antwortet, w = Graph gelesen, c = Weg gefunden
+hda: bereit ... dac=N pin=M len=L
+```
+
+Bleibt `c=0`, ist der Graph gelesen und kein Weg zu einer analogen Buchse
+gefunden -- dann sagt `hda-graph:` Knoten fuer Knoten, was der Codec
+anbietet und wie die Buchsen bewertet wurden.
