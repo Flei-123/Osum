@@ -986,7 +986,7 @@ num "Farben, die aus /etc/theme gelesen wurden" "$tn" eq "$soll"
 # ANDEREN Datei hat er eine andere -- das ist die Gegenprobe, ohne die
 # "es gibt ein Farbschema" eine Behauptung ueber eine Zahl waere.
 sed 's/^btn=.*/btn=804020/' "$TMPD/baum/theme" > "$TMPD/theme2"
-ARGS2=(build "$TMPD/disk2.img" 4096 /lib/
+ARGS2=(build "$TMPD/disk2.img" 8192 /lib/
       "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
 for p in $PROGS; do ARGS2+=("/bin/$p=$TMPD/${p}0.elf"); done
 ARGS2+=("/bin/files@/bin/explorer")
