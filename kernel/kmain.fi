@@ -127,6 +127,8 @@ const P_CAPS: u64 = 12
 const P_HBENCH: u64 = 49
 // RUNDE HANDLE: der Selbsttest der Handle-Schicht in Ring 3.
 const P_HANDLE: u64 = 48
+// RUNDE HAERTUNG-2: der Fuzzer in Ring 3 (kernel/uprog.fi).
+const P_FUZZ: u64 = 54
 // RUNDE ASYNC: der Selbsttest der Auftragsschicht und ihre Messung.
 const P_ASYNC: u64 = 50
 const P_ABENCH: u64 = 51
@@ -467,6 +469,12 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // und nicht den Regelbetrieb. `hbench` allein ist die Messung, die
     // gilt.
     handle_bench(state)
+    // 7b-sexies. RUNDE HAERTUNG-2: der Fuzzer. Hier, weil er dieselben
+    //     Voraussetzungen hat wie der Selbsttest der Handle-Schicht --
+    //     Ring 3 und sonst nichts -- und weil er VOR dem Dateisystem
+    //     laufen soll: ein Kern, der an einem Zufallswert stirbt, soll
+    //     das sagen, bevor eine Platte im Spiel ist.
+    fuzzer(state)
     // 7b-quinquies. RUNDE ASYNC: die asynchrone Auftragsschicht. Hier
     //     und direkt hinter HANDLE, weil sie auf ihr steht und aus
     //     demselben Grund kein Dateisystem braucht -- gearbeitet wird
@@ -1417,6 +1425,62 @@ fn capabilities(state: u64) {
 //      Rechtepruefung, die niemand aufruft, ist von einer, die immer ja
 //      sagt, sonst nicht zu unterscheiden -- das ist die Lehre aus
 //      Runde K13, und sie gilt hier genauso.
+// ==================================================== RUNDE HAERTUNG-2
+// DER FUZZER. Der Rumpf liegt in `kernel/uprog.fi` (`u_fuzz`), in Ring
+// 3, und das ist der Punkt: er ruft die Systemaufrufe von DRAUSSEN, mit
+// denselben Rechten wie jedes andere Programm.
+//
+// Was hier gemessen wird, ist nicht der Rueckgabewert eines einzelnen
+// Aufrufs -- das tun tools/kernel/run.sh und tools/posix/run.sh
+// ausfuehrlich -- sondern DASS DER KERN ES UEBERLEBT. Ein Aufruf, der
+// einen Zeiger aus Ring 3 ungeprueft benutzt, faellt nicht beim
+// ordentlichen Gebrauch auf, sondern bei genau den Werten, die dieses
+// Programm schickt.
+//
+// Der Kern meldet den Endestand des Programms; bleibt die Maschine
+// haengen oder faellt sie in eine Ausnahme, sieht das der Laeufer an
+// der fehlenden Schlusszeile und am Rueckgabewert von QEMU.
+fn fuzzer(state: u64) {
+    var s_skip: [u8; 14] = "fuzz: skipped\0"
+    var s_begin: [u8; 13] = "fuzz: begin\0\0"
+    var s_exit: [u8; 19] = "fuzz: ring 3 exit=\0"
+    var s_done: [u8; 12] = "fuzz: done\0\0"
+    if !kstate.mode_on(state, kstate.M_FUZZ) {
+        serial.puts((&s_skip[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_begin[0]) as u64)
+    serial.nl()
+    // Das Argument ist die Rundenzahl in Tausend; 0 heisst hundert
+    // Tausend. Der Laeufer setzt sie ueber `fuzzrunden`.
+    var tausend: u64 = kstate.get(state, kstate.FUZZ_K)
+    let t: u64 = proc.create(state, P_FUZZ, tausend, 2)
+    // EIGENE WARTESCHLEIFE STATT `kutil.wait_for`. Dessen Frist sind
+    // 2000 Runden, und hunderttausend Systemaufrufe unter TCG brauchen
+    // laenger -- GEMESSEN: das Programm lief richtig durch und bekam
+    // trotzdem -2, weil der WARTENDE aufgab und nicht der Laufende.
+    // Eine Frist, die vom Wirt abhaengt, ist keine Zusage; hier wartet
+    // der Kern, bis das Programm fertig ist, und der Laeufer setzt die
+    // Grenze aussen (`timeout` um QEMU).
+    var e: u64 = 0
+    var lauf: bool = true
+    while lauf {
+        if sched.tget(state, t, sched.T_STATE) == sched.S_ZOMBIE {
+            e = sched.tget(state, t, sched.T_EXIT)
+            proc.reap(state, t)
+            lauf = false
+        } else {
+            sched.sleep_ticks(state, 1)
+        }
+    }
+    serial.puts((&s_exit[0]) as u64)
+    serial.dec(e)
+    serial.nl()
+    serial.puts((&s_done[0]) as u64)
+    serial.nl()
+}
+
 fn handles(state: u64) {
     var s_skip: [u8; 16] = "handle: skipped\0"
     var s_begin: [u8; 15] = "handle: begin\0\0"
@@ -3759,6 +3823,34 @@ fn mode_of(state: u64, cmd: u64) {
     var nrgw: [u8; 9] = "norights\0"
     var hstw: [u8; 8] = "hstrict\0"
     var hbw: [u8; 7] = "hbench\0"
+    // RUNDE HAERTUNG-2
+    var fuzzw: [u8; 5] = "fuzz\0"
+    var fuzzrw: [u8; 11] = "fuzzrunden\0"
+    if find(cmd, (&fuzzw[0]) as u64, 4) != 0 {
+        kstate.mode_add(state, kstate.M_FUZZ)
+    }
+    // `fuzzrunden=<n>` -- n in TAUSEND. Der Wert steht hinter dem
+    // Gleichheitszeichen; `find` gibt die Fundstelle, die Ziffern
+    // dahinter liest diese Schleife.
+    let fr: u64 = find(cmd, (&fuzzrw[0]) as u64, 10)
+    if fr != 0 {
+        var at: u64 = fr + 10
+        if kstate.get8(at) == 61 {
+            at = at + 1
+        }
+        var v: u64 = 0
+        var lese: bool = true
+        while lese {
+            let c: u64 = kstate.get8(at) as u64
+            if c >= 48 && c <= 57 {
+                v = v * 10 + (c - 48)
+                at = at + 1
+            } else {
+                lese = false
+            }
+        }
+        kstate.set(state, kstate.FUZZ_K, v)
+    }
     if find(cmd, (&hndw[0]) as u64, 6) != 0 {
         kstate.mode_add(state, kstate.M_HANDLE)
     }

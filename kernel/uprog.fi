@@ -198,6 +198,10 @@ const P_ASYNCFS: u64 = 52
 // GLEICHZEITIG und pruefen, dass jeder seine eigenen Werte behaelt.
 const P_VEC: u64 = 53
 
+// RUNDE HAERTUNG-2: DER FUZZER. Er ruft JEDEN Systemaufruf mit Zufalls-
+// und Grenzwerten und darf den Kern damit nicht umbringen.
+const P_FUZZ: u64 = 54
+
 // Die sechs Aufrufe des Blocks ab 1980 (`kernel/sys.fi`).
 const AIO_VERSION: u64 = 1980
 const AIO_SUBMIT: u64 = 1981
@@ -359,11 +363,169 @@ fn u_say_line(p: u64, v: u64) {
 
 // The one entry point of every user program (`USER_MAIN` in isr.s).
 // rdi = (program << 32) | argument.
+// ==================================================== RUNDE HAERTUNG-2
+// DER FUZZER IN RING 3.
+//
+// Er ruft jeden Systemaufruf mit Werten, die kein ordentliches Programm
+// je schickt: Nullzeiger, Kernadressen, Adressen knapp hinter dem
+// eigenen Ende, Laengen von 0, 1, 0xFFFFFFFFFFFFFFFF, negative
+// Deskriptoren, unbekannte Nummern.
+//
+// WAS ER PRUEFT, ist NICHT "kommt der richtige Fehler zurueck" -- das
+// tun tools/kernel/run.sh und tools/posix/run.sh schon. Er prueft das
+// eine, was sonst niemand prueft: DASS DER KERN WEITERLEBT. Ein
+// Systemaufruf, der einen Zeiger aus Ring 3 ungeprueft benutzt, nimmt
+// den Kern mit -- und zwar nicht beim ordentlichen Aufruf, sondern bei
+// genau diesen Werten.
+//
+// DER ZUFALL IST EIGENER UND WIEDERHOLBAR. Ein xorshift mit fester
+// Saat: derselbe Lauf gibt dieselbe Folge, ein Fehler ist also
+// nachstellbar. `getrandom` waere hier falsch -- es ist selbst einer
+// der Aufrufe, die geprueft werden.
+//
+// DIE ZAHL AM ENDE ist die Zahl der Aufrufe, die zurueckgekommen sind.
+// Kommt sie heraus und lebt der Kern, ist die Zusage gehalten; bleibt
+// die Maschine haengen oder faellt sie in eine Ausnahme, sagt das der
+// Laeufer.
+fn u_fuzz_rand(zst: *mut u64) -> u64 {
+    var x: u64 = *zst
+    x = x ^ (x << 13)
+    x = x ^ (x >> 7)
+    x = x ^ (x << 17)
+    *zst = x
+    return x
+}
+
+// Ein Wert aus der Liste der BOESEN Zahlen -- die Raender, an denen es
+// bricht, sind keine Zufallszahlen, sondern immer dieselben.
+fn u_fuzz_wert(z: u64, k: u64) -> u64 {
+    let w: u64 = k % 12
+    if w == 0 {
+        return 0
+    }
+    if w == 1 {
+        return 1
+    }
+    if w == 2 {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    if w == 3 {
+        return 0x7FFFFFFFFFFFFFFF
+    }
+    if w == 4 {
+        return 0x100000 // mitten im Kern
+    }
+    if w == 5 {
+        return USER_DATA
+    }
+    if w == 6 {
+        return USER_DATA - 1
+    }
+    if w == 7 {
+        return 0x400000
+    }
+    if w == 8 {
+        return 4096
+    }
+    if w == 9 {
+        return 0xFFFFFFFF
+    }
+    if w == 10 {
+        return z
+    }
+    return z >> 32
+}
+
+fn u_fuzz(arg: u64) {
+    var s_kopf: [u8; 20] = "fuzz: runden=\0\0\0\0\0\0\0"
+    var s_ende: [u8; 20] = "fuzz: zurueck=\0\0\0\0\0\0"
+    var s_leb: [u8; 20] = "fuzz: kern lebt\n\0\0\0\0"
+    var s_bei: [u8; 12] = "fuzz: bei=\0\0"
+
+    // Wie viele Runden: `arg` sagt es in Tausend, damit die Zahl in die
+    // Programmnummer passt. 0 heisst 100 Tausend.
+    var tausend: u64 = arg
+    if tausend == 0 {
+        tausend = 100
+    }
+    let runden: u64 = tausend * 1000
+    u_say_line((&s_kopf[0]) as u64, runden)
+
+    // Die Nummern, die es wirklich gibt -- gemischt mit solchen, die es
+    // nicht gibt. Beides muss der Kern aushalten.
+    var nummern: [u64; 24] = [0 as u64; 24]
+    nummern[0] = SYS_GETPID
+    nummern[1] = SYS_WRITE
+    nummern[2] = SYS_OPEN
+    nummern[3] = SYS_CLOSE
+    nummern[4] = SYS_LSEEK
+    nummern[5] = 5    // fstat -- getdents64 arbeitet auf der Platte
+    nummern[6] = SYS_MKDIR
+    nummern[7] = SYS_UNLINK
+    nummern[8] = SYS_GETPID
+    nummern[9] = SYS_GETPPID
+    nummern[10] = SYS_YIELD
+    nummern[11] = SYS_NANOSLEEP
+    nummern[12] = SYS_UMASK
+    nummern[13] = SYS_GETPID
+    nummern[14] = SYS_YIELD
+    nummern[15] = 4    // stat
+    nummern[16] = 5    // fstat
+    nummern[17] = 9    // mmap
+    nummern[18] = 79   // getcwd
+    nummern[19] = 80   // chdir
+    nummern[20] = 39   // getpid, doppelt -- harmlos, fuellt die Tabelle
+    nummern[21] = 24   // yield, dito
+    nummern[22] = 999  // gibt es nicht
+    nummern[23] = 1841 // Bildschirmfoto, gibt es vielleicht
+
+    // WAS NICHT IN DER TABELLE STEHT, UND WARUM. Der Fuzzer soll den
+    // KERN pruefen, nicht sich selbst umbringen:
+    //
+    //   exit/exit_group  kaemen nicht zurueck.
+    //   fork             ein Kind, das hier weiterliefe, verdoppelt die
+    //                    Zahl der Aufrufe und macht den Nachweis unlesbar.
+    //   munmap/brk       GEMESSEN: mit ihnen endete das Programm mit -2.
+    //                    Sie raeumen dem Programm den Boden unter den
+    //                    Fuessen weg -- ein zufaelliges `munmap` auf den
+    //                    eigenen Text ist kein Kernfehler, sondern ein
+    //                    Programmfehler. Der Kern tut dabei genau das
+    //                    Richtige.
+    //   wait4            wartet, und ein Fuzzer, der wartet, misst nichts.
+
+    var zst: u64 = 0x243F6A8885A308D3
+    var i: u64 = 0
+    var zurueck: u64 = 0
+    while i < runden {
+        let r1: u64 = u_fuzz_rand(&zst)
+        let r2: u64 = u_fuzz_rand(&zst)
+        let nr: u64 = nummern[(r1 % 24) as usize]
+        let a0: u64 = u_fuzz_wert(r1, r1 >> 8)
+        let a1: u64 = u_fuzz_wert(r2, r1 >> 16)
+        let a2: u64 = u_fuzz_wert(r1 ^ r2, r1 >> 24)
+        // FORTSCHRITT: alle hundert Runden die Nummer, die JETZT
+        // drankommt. Ohne sie sagt ein Haenger nur "es haengt" und
+        // nicht, WORAN.
+        if i % 100 == 0 {
+            u_say_line((&s_bei[0]) as u64, nr)
+        }
+        u_sys(nr, a0, a1, a2)
+        zurueck = zurueck + 1
+        i = i + 1
+    }
+    u_say_line((&s_ende[0]) as u64, zurueck)
+    u_say((&s_leb[0]) as u64)
+    u_sys(SYS_EXIT, 0, 0, 0)
+}
+
 fn u_enter(packed: u64) {
     let prog: u64 = packed >> 32
     let arg: u64 = packed & 0xFFFFFFFF
     if prog == P_HELLO {
         u_hello(arg)
+    }
+    if prog == P_FUZZ {
+        u_fuzz(arg)
     }
     if prog == P_MEMORY {
         u_memory(arg)
