@@ -58,6 +58,13 @@ export {
     fit, back, chars,
     push, push_rect, cursor_shape,
     clip_put, clip_take, clip_len,
+    // ---- RUNDE SYSTEMBUS ----
+    clip_put_typ, clip_hist_count, clip_hist_take, clip_hist_typ,
+    clip_hist_owner, bus_da,
+    drag_put, drag_take, drag_an, drag_weg,
+    noti_post, noti_count, noti_neu, noti_take,
+    bus_reg, bus_find, bus_send, bus_recv, bus_sub, bus_pub,
+    BT_TEXT, BT_PATH, BT_HTML, BT_IMAGE, BT_FILES,
     theme, theme_live, theme_semantic, theme_neutral, theme_ramp,
     theme_role_of, theme_gen, theme_frame_begin, theme_frame_stale,
     theme_dark, theme_mode, theme_scheme_mode, theme_high,
@@ -156,6 +163,44 @@ export {
 const WIG_BLIT: u64 = 1800
 const WIG_GLYPH: u64 = 1801
 const WIG_KERN: u64 = 1802
+// ===================================================== RUNDE SYSTEMBUS
+//
+// DER BUS, VON RING 3 AUS. Ein Systemruf mit einem Op-Wort, und die
+// Zahlen stehen in `kernel/sys.fi` (SYS_OSUM_BUS). Was frueher
+// `WIG_CLIPSET` war, geht jetzt hier durch -- mit einem TYP, einem
+// BESITZER und einem VERLAUF, und zwischen zwei Prozessen statt in
+// einem Kernpuffer ohne Namen.
+//
+// DER RUECKFALL IST ABSICHT und nicht Vorsicht: `nobus` auf der
+// Kernel-Befehlszeile schaltet den Bus ab, und dann MUSS die alte
+// Zwischenablage weiter tun, was sie seit Runde WIG tut. Das ist die
+// Gegenprobe, mit der `tools/systembus/run.sh` misst, dass die neue
+// wirklich die neue ist.
+const SYS_OSUM_BUS: u64 = 1960
+
+const BUS_REG_OP: u64 = 1
+const BUS_FIND_OP: u64 = 2
+const BUS_SEND_OP: u64 = 3
+const BUS_RECV_OP: u64 = 4
+const BUS_SUB_OP: u64 = 5
+const BUS_PUB_OP: u64 = 6
+const BUS_CLIPSET_OP: u64 = 10
+const BUS_CLIPGET_OP: u64 = 11
+const BUS_CLIPINFO_OP: u64 = 12
+const BUS_DRAGSET_OP: u64 = 15
+const BUS_DRAGGET_OP: u64 = 16
+const BUS_DRAGCLEAR_OP: u64 = 17
+const BUS_DRAGINFO_OP: u64 = 18
+const BUS_NOTIPOST_OP: u64 = 19
+const BUS_NOTIGET_OP: u64 = 20
+const BUS_NOTIINFO_OP: u64 = 21
+
+const BT_TEXT: u64 = 1
+const BT_PATH: u64 = 2
+const BT_HTML: u64 = 4
+const BT_IMAGE: u64 = 8
+const BT_FILES: u64 = 16
+
 const WIG_CLIPSET: u64 = 1803
 const WIG_CLIPGET: u64 = 1804
 const WIG_SCREEN: u64 = 1805
@@ -1471,22 +1516,165 @@ fn cursor_shape(s: u64) {
 // dass ein Text von einem Feld ins andere gewandert ist, MUSS dann
 // einbrechen.
 
+fn bus5(op: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+    return asm("syscall", out("rax"), in("rax") SYS_OSUM_BUS, in("rdi") op,
+        in("rsi") a1, in("rdx") a2, in("r10") a3, in("r8") a4, in("r9") 0,
+        clobber("rcx"), clobber("r11"), clobber("memory"))
+}
+
+// Gibt es den Bus in diesem Kern? Ein Ruf, der nichts tut: die Zahl der
+// Verlaufsplaetze. Kommt ein Fehler, laeuft der Kern mit `nobus`, und
+// jede Anwendung faellt auf die alte Zwischenablage zurueck.
+fn bus_da() -> bool {
+    return !ulib.bad(bus5(BUS_CLIPINFO_OP, 0, 3, 0, 0))
+}
+
 fn clip_put(p: u64, n: u64) -> u64 {
+    return clip_put_typ(BT_TEXT, p, n)
+}
+
+// MIT TYP. Derselbe Text kann Text UND Pfad sein -- der Explorer legt
+// einen Dateinamen ab, der Editor liest ihn als Text, und beide haben
+// recht. Genau dafuer ist der erste Wert eine Maske.
+fn clip_put_typ(typen: u64, p: u64, n: u64) -> u64 {
     if s_noclip != 0 {
         return 0
+    }
+    let r: u64 = bus5(BUS_CLIPSET_OP, typen, p, n, 0)
+    if !ulib.bad(r) {
+        return n
     }
     return sys3w(WIG_CLIPSET, p, n, 0)
 }
 
 fn clip_take(p: u64, max: u64) -> u64 {
+    return clip_hist_take(0, p, max)
+}
+
+// `zurueck` 0 ist das Neueste, 1 das davor -- der Verlauf, und Win+V
+// ist genau diese Zahl und sonst nichts.
+fn clip_hist_take(zurueck: u64, p: u64, max: u64) -> u64 {
     if s_noclip != 0 {
         return 0
     }
-    let n: u64 = sys3w(WIG_CLIPGET, p, max, 0)
+    let n: u64 = bus5(BUS_CLIPGET_OP, zurueck, p, max, 0)
+    if !ulib.bad(n) {
+        return n
+    }
+    if zurueck != 0 {
+        return 0
+    }
+    let m: u64 = sys3w(WIG_CLIPGET, p, max, 0)
+    if ulib.bad(m) {
+        return 0
+    }
+    return m
+}
+
+fn clip_hist_count() -> u64 {
+    let n: u64 = bus5(BUS_CLIPINFO_OP, 0, 3, 0, 0)
     if ulib.bad(n) {
         return 0
     }
     return n
+}
+
+fn clip_hist_typ(zurueck: u64) -> u64 {
+    let n: u64 = bus5(BUS_CLIPINFO_OP, zurueck, 0, 0, 0)
+    if ulib.bad(n) {
+        return 0
+    }
+    return n
+}
+
+fn clip_hist_owner(zurueck: u64) -> u64 {
+    let n: u64 = bus5(BUS_CLIPINFO_OP, zurueck, 2, 0, 0)
+    if ulib.bad(n) {
+        return 0
+    }
+    return n
+}
+
+// ------------------------------------------------------ Drag-and-Drop
+//
+// DASSELBE MODELL, EIN PLATZ. Der Explorer legt beim Ziehen einen Pfad
+// ab, der Editor fragt beim Loslassen danach. Dass das keine zweite
+// Ablage ist, sondern dieselben Felder, ist die Entscheidung 2 der
+// Wegkarte -- und der Grund, warum diese vier Funktionen zusammen
+// kuerzer sind als eine eigene Ablage waere.
+fn drag_put(typen: u64, p: u64, n: u64) -> u64 {
+    return bus5(BUS_DRAGSET_OP, typen, p, n, 0)
+}
+
+fn drag_take(p: u64, max: u64) -> u64 {
+    let n: u64 = bus5(BUS_DRAGGET_OP, p, max, 0, 0)
+    if ulib.bad(n) {
+        return 0
+    }
+    return n
+}
+
+fn drag_an() -> bool {
+    return bus5(BUS_DRAGINFO_OP, 0, 0, 0, 0) == 1
+}
+
+fn drag_weg() -> u64 {
+    return bus5(BUS_DRAGCLEAR_OP, 0, 0, 0, 0)
+}
+
+// --------------------------------------------------- Benachrichtigungen
+fn noti_post(dringlich: u64, p: u64, n: u64) -> u64 {
+    return bus5(BUS_NOTIPOST_OP, dringlich, p, n, 0)
+}
+
+fn noti_count() -> u64 {
+    let n: u64 = bus5(BUS_NOTIINFO_OP, 0, 0, 0, 0)
+    if ulib.bad(n) {
+        return 0
+    }
+    return n
+}
+
+// Wieviele noch NIEMAND gelesen hat -- die Zahl auf der Glocke.
+fn noti_neu() -> u64 {
+    let n: u64 = bus5(BUS_NOTIINFO_OP, 1, 0, 0, 0)
+    if ulib.bad(n) {
+        return 0
+    }
+    return n
+}
+
+fn noti_take(zurueck: u64, p: u64, max: u64) -> u64 {
+    let n: u64 = bus5(BUS_NOTIGET_OP, zurueck, p, max, 0)
+    if ulib.bad(n) {
+        return 0
+    }
+    return n
+}
+
+// ------------------------------------------------- Dienste und Nachrichten
+fn bus_reg(name: u64, n: u64, zugriff: u64) -> u64 {
+    return bus5(BUS_REG_OP, name, n, zugriff, 0)
+}
+
+fn bus_find(name: u64, n: u64) -> u64 {
+    return bus5(BUS_FIND_OP, name, n, 0, 0)
+}
+
+fn bus_send(dienst: u64, p: u64, n: u64) -> u64 {
+    return bus5(BUS_SEND_OP, dienst, p, n, 0)
+}
+
+fn bus_recv(p: u64, max: u64, kopf: u64) -> u64 {
+    return bus5(BUS_RECV_OP, p, max, kopf, 0)
+}
+
+fn bus_sub(dienst: u64) -> u64 {
+    return bus5(BUS_SUB_OP, dienst, 0, 0, 0)
+}
+
+fn bus_pub(dienst: u64, p: u64, n: u64) -> u64 {
+    return bus5(BUS_PUB_OP, dienst, p, n, 0)
 }
 
 fn clip_len() -> u64 {

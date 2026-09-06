@@ -44,6 +44,8 @@ plus Rahmen (2) und Titelleiste (22) -- dieselben zwei Zahlen, die
 Namen fuer `klickauf`:
 
     start           der Startknopf         (taskbar: start x= y= w= h=)
+    glocke          die Meldungen          (taskbar: field noti ...)
+    tbbtn<N>        Fensterknopf N         (taskbar: btn i=N ...)
     netz            die Symbolgruppe       (taskbar: field net ...)
     uhr             die Uhr                (taskbar: field clock ...)
     lrect<N>        Widget N des Starters  (launcher: rect id=N ...)
@@ -209,6 +211,24 @@ class Fahrer:
         tb = (int(gm.group(1)), int(gm.group(2))) if gm else (0, 0)
         if name == "start":
             m = letzte(r"taskbar: start x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            if m is None:
+                return None
+            return (tb[0] + int(m.group(1)), tb[1] + int(m.group(2)),
+                    int(m.group(3)), int(m.group(4)))
+        # RUNDE SYSTEMBUS: die Glocke und die FENSTERKNOEPFE der Leiste.
+        # Ohne den Fensterknopf gibt es keinen Weg, ein Fenster
+        # anzuklicken, das der Schreibtisch selbst gestartet hat -- und
+        # ohne den keinen Weg, im Terminal etwas zu tippen.
+        if name == "glocke":
+            m = letzte(r"taskbar: field noti x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            if m is None:
+                return None
+            return (tb[0] + int(m.group(1)), tb[1] + int(m.group(2)),
+                    int(m.group(3)), int(m.group(4)))
+        if name.startswith("tbbtn"):
+            n = int(name[5:])
+            m = letzte(r"taskbar: btn i=%d id=\d+ x=(\d+) y=(\d+) "
+                       r"w=(\d+) h=(\d+)" % n)
             if m is None:
                 return None
             return (tb[0] + int(m.group(1)), tb[1] + int(m.group(2)),
