@@ -1,0 +1,281 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/wlan/geraet.fi -- die Naht zwischen dem Protokoll und dem Blech.
+//
+// ==================================================================
+// WOZU EINE NAHT, WENN ES KEINE KARTE GIBT
+// ==================================================================
+//
+// Genau DESHALB. `docs/WLAN-BEFUND.md` rechnet vor, dass der Treiber
+// fuer einen AX200 zwei Drittel des Weges ist und dass auf diesem
+// Rechner kein Prozent davon messbar ist -- QEMU hat kein
+// 802.11-Geraet, und dieser Kern hat nicht einmal
+// `drivers/net/wireless/`.
+//
+// Wer unter dieser Bedingung einen Treiber schreibt, schreibt eine
+// Behauptung. Wer aber gar nichts schreibt, laesst die eine Frage
+// offen, die man OHNE Karte beantworten kann und die spaeter am
+// teuersten wird, wenn sie falsch beantwortet ist:
+//
+//   WELCHE VIER DINGE MUSS EIN 802.11-GERAET KOENNEN, damit der
+//   ganze Rest darueber laufen kann?
+//
+// Diese Datei legt das fest und sonst nichts. Sie ist eine Tafel aus
+// Funktionszeigern und ein Zustandsblock -- kein Treiber, kein
+// Register, keine Firmware. Sie hat zwei Umsetzungen:
+//
+//   (a) `lib/wlan/pruefgeraet.fi` -- ein Geraet, das seine Rahmen aus
+//       einem Puffer nimmt und in einen Puffer legt. Damit laesst sich
+//       der GANZE Weg -- Suchlauf, Auswahl, Assoziation, 4-Wege,
+//       Schluessel setzen, Daten -- auf diesem Rechner fahren und
+//       MESSEN, ohne dass eine Antenne im Spiel ist.
+//
+//   (b) ein echter Treiber, spaeter, auf echtem Blech.
+//
+// Wenn (a) und (b) dieselbe Tafel fuellen, dann ist alles, was ueber
+// der Tafel liegt, schon gemessen, wenn die Karte kommt. Das ist der
+// einzige Teil der zwei Drittel, den man vorab holen kann.
+//
+// ==================================================================
+// WARUM GENAU DIESE VIER
+// ==================================================================
+//
+// Die Auswahl ist nicht frei erfunden, sie ist die kleinste Menge, mit
+// der `lib/wlan/zustand.fi` sein Alphabet erzeugen kann:
+//
+//   senden(rahmen)      -- fuer Auth, Assoc, Nachricht 2 und 4, Daten
+//   empfangen(puffer)   -- fuer Beacon, Auth-Antwort, Assoc-Antwort,
+//                          Nachricht 1 und 3, Daten
+//   kanal_setzen(k)     -- der Suchlauf ist "Kanal setzen und hoeren"
+//   schluessel_setzen() -- nach dem Handschlag muessen PTK und GTK
+//                          dorthin, wo entschluesselt wird
+//
+// Alles andere, was ein echter Treiber koennen muss -- Firmware laden,
+// Ringe aufsetzen, Interrupts, Rateneinstellung, Stromsparen --, ist
+// SEINE Sache und steht nicht in dieser Tafel. Das ist Absicht: eine
+// Naht, die die Eigenheiten der Karte durchreicht, ist keine Naht.
+//
+// EINE AUSNAHME, und sie ist begruendet: `schluessel_setzen`. Bei
+// e1000 gibt es nichts Vergleichbares -- Ethernet verschluesselt nicht.
+// Bei WLAN entschluesselt in aller Regel die KARTE, weil CCMP bei
+// 300 MBit/s in Software teuer ist. Der AX200 nimmt den Schluessel
+// ueber ein Firmwarekommando entgegen und rechnet selbst. Ein Geraet,
+// das das nicht kann, sagt das (`kann_ccmp` ist dann falsch), und dann
+// rechnet `lib/wlan/ccmp.fi` in Software. Beide Wege gibt es, und die
+// Naht muss beide tragen -- sonst muss man sie aufmachen, sobald die
+// erste Karte da ist.
+//
+// ==================================================================
+// KEIN ALLOKATOR, KEIN SYSTEMAUFRUF
+// ==================================================================
+//
+// Dieselbe Regel wie im ganzen `lib/`-Baum (siehe den Kopf von
+// `lib/crypto/sha256.fi`): keine `profile`-Zeile, kein `import` ausser
+// auf `lib/`, aller Zustand beim Aufrufer. Nur so laesst sich
+// derselbe Quelltext in den Kern binden, in ein Ring-3-Programm und in
+// einen Testlaeufer auf dem Wirt, ohne dass eine Zeile sich aendert --
+// und nur deshalb kann `tools/wlan/orakel.fi` diese Datei ueberhaupt
+// messen.
+
+export {
+    Geraet, geraet_new, tafel_setzen,
+    senden, empfangen, kanal_setzen, schluessel_setzen,
+    bereit, kanal_von, kann_ccmp_von, adresse_von, adresse_setzen,
+    zaehler_gesendet, zaehler_empfangen, zaehler_verworfen,
+    SCHLUESSEL_PTK, SCHLUESSEL_GTK, SCHLUESSEL_AUS,
+    MAX_RAHMEN
+}
+
+// Der groesste Rahmen, den diese Naht durchlaesst. 2304 ist die
+// Nutzlast nach 802.11-2016 9.2.4.7 ohne Aggregation; dazu der laengste
+// Kopf (30 mit vier Adressen + 2 QoS + 4 HT-Control), der CCMP-Kopf
+// (8) und der Pruefwert (8). Aufgerundet auf 2400. Ein Geraet, das
+// mehr will (A-MSDU), muss die Naht aufmachen -- und soll das dann
+// auch, statt hier heimlich abzuschneiden.
+const MAX_RAHMEN: usize = 2400
+
+const SCHLUESSEL_AUS: u64 = 0
+const SCHLUESSEL_PTK: u64 = 1
+const SCHLUESSEL_GTK: u64 = 2
+
+// ==================================================================
+// DIE TAFEL
+// ==================================================================
+//
+// Vier Zeiger. Jeder bekommt als erstes Argument den `ctx`-Wert aus
+// dem Geraeteblock -- das ist der Platz, an dem ein Treiber seinen
+// eigenen Zustand unterbringt (bei (a) ein Puffer, bei (b) die
+// Registerbasis der Karte). Die Naht selbst weiss davon nichts.
+//
+// Rueckgaben sind absichtlich `i64` und nicht `bool`: ein Geraet soll
+// SAGEN koennen, warum etwas nicht ging, und die einzige Zahl, die
+// jeder Aufrufer versteht, ist eine Laenge bzw. ein negativer Fehler.
+// Die Zeiger stehen MIT IHREM TYP in der Struktur -- dasselbe Muster
+// wie `Ops` in `kernel/vfsops.fi`. Ein `u64`, das erst beim Aufruf zu
+// einer Funktion erklaert wird, laesst Firn zu Recht nicht zu: dann
+// waere die Stelle, an der die Stelligkeit festgelegt wird, eine
+// andere als die, an der sie geprueft wird.
+struct Tafel {
+    // senden(ctx, rahmen, laenge) -> gesendete Oktette oder < 0
+    senden: fn(u64, u64, usize) -> i64,
+    // empfangen(ctx, puffer, platz) -> Laenge, 0 = nichts da, < 0 Fehler
+    empfangen: fn(u64, u64, usize) -> i64,
+    // kanal_setzen(ctx, kanal, band) -> 0 oder < 0
+    kanal_setzen: fn(u64, u64, u64) -> i64,
+    // schluessel_setzen(ctx, art, kennung, schluessel, laenge) -> 0 / < 0
+    schluessel_setzen: fn(u64, u64, u64, u64, usize) -> i64
+}
+
+// Vier Platzhalter. Ein frisches Geraet zeigt auf sie und nicht auf
+// null -- damit ein Aufruf vor `tafel_setzen` einen ordentlichen
+// Fehler gibt statt eines Sprungs nach null.
+fn leer_senden(ctx: u64, rahmen: u64, len: usize) -> i64 { return -1 }
+fn leer_empfangen(ctx: u64, puffer: u64, platz: usize) -> i64 { return -1 }
+fn leer_kanal(ctx: u64, kanal: u64, band: u64) -> i64 { return -1 }
+fn leer_schluessel(ctx: u64, art: u64, kennung: u64, k: u64,
+    len: usize) -> i64 { return -1 }
+
+struct Geraet {
+    tafel: Tafel,
+    ctx: u64,
+    // Die eigene Adresse. Ein Treiber liest sie aus dem Chip (beim
+    // AX200 aus dem OTP), ein Pruefgeraet bekommt sie gesagt.
+    adr: [u8; 6],
+    kanal: u64,
+    band: u64,
+    // Kann das Geraet CCMP selbst? Wenn nicht, rechnet lib/wlan/ccmp.fi.
+    kann_ccmp: bool,
+    bereit: bool,
+    n_gesendet: u64,
+    n_empfangen: u64,
+    n_verworfen: u64
+}
+
+fn geraet_new() -> Geraet {
+    var g: Geraet = Geraet {
+        tafel: Tafel { senden: leer_senden, empfangen: leer_empfangen,
+                       kanal_setzen: leer_kanal,
+                       schluessel_setzen: leer_schluessel },
+        ctx: 0,
+        adr: [0; 6],
+        kanal: 0,
+        band: 0,
+        kann_ccmp: false,
+        bereit: false,
+        n_gesendet: 0,
+        n_empfangen: 0,
+        n_verworfen: 0
+    }
+    return g
+}
+
+// Eine Tafel wird EINMAL gesetzt. Ein Geraet, dem eine der vier
+// Funktionen fehlt, wird NICHT bereit -- lieber gar kein Geraet als
+// eines, das beim ersten Rahmen in einen Nullzeiger springt.
+fn tafel_setzen(g: *mut Geraet, ctx: u64,
+    senden: fn(u64, u64, usize) -> i64,
+    empfangen: fn(u64, u64, usize) -> i64,
+    kanal_setzen: fn(u64, u64, u64) -> i64,
+    schluessel_setzen: fn(u64, u64, u64, u64, usize) -> i64,
+    kann_ccmp: bool) -> bool {
+    (*g).tafel.senden = senden
+    (*g).tafel.empfangen = empfangen
+    (*g).tafel.kanal_setzen = kanal_setzen
+    (*g).tafel.schluessel_setzen = schluessel_setzen
+    (*g).ctx = ctx
+    (*g).kann_ccmp = kann_ccmp
+    (*g).bereit = true
+    return true
+}
+
+fn adresse_setzen(g: *mut Geraet, a: u64) {
+    var i: usize = 0
+    while i < 6 {
+        (*g).adr[i] = *((a + i as u64) as *mut u8)
+        i = i + 1
+    }
+}
+
+fn adresse_von(g: *mut Geraet, out: u64) {
+    var i: usize = 0
+    while i < 6 {
+        *((out + i as u64) as *mut u8) = (*g).adr[i]
+        i = i + 1
+    }
+}
+
+fn bereit(g: *mut Geraet) -> bool { return (*g).bereit }
+fn kanal_von(g: *mut Geraet) -> u64 { return (*g).kanal }
+fn kann_ccmp_von(g: *mut Geraet) -> bool { return (*g).kann_ccmp }
+fn zaehler_gesendet(g: *mut Geraet) -> u64 { return (*g).n_gesendet }
+fn zaehler_empfangen(g: *mut Geraet) -> u64 { return (*g).n_empfangen }
+fn zaehler_verworfen(g: *mut Geraet) -> u64 { return (*g).n_verworfen }
+
+// ------------------------------------------------------------------
+// Die vier Aufrufe. Jeder prueft ZUERST, ob das Geraet bereit ist --
+// ein nicht bereites Geraet gibt -1 und springt nirgendwohin.
+// ------------------------------------------------------------------
+
+fn senden(g: *mut Geraet, rahmen: u64, len: usize) -> i64 {
+    if !(*g).bereit { return -1 }
+    // Ein Rahmen unter der Mindestgroesse eines 802.11-Kopfes ist kein
+    // Rahmen. Das hier abzufangen erspart es jedem Treiber.
+    if len < 10 || len > MAX_RAHMEN {
+        (*g).n_verworfen = (*g).n_verworfen + 1
+        return -1
+    }
+    // Der Umweg ueber eine oertliche Abschrift der Tafel ist derselbe
+    // wie in `kernel/vfs.fi` (`let o: vfsops.Ops = ...; o.lookup(...)`):
+    // Stufe 0 des Uebersetzers ruft nur ueber einen Feldnamen auf, nicht
+    // ueber einen geklammerten Ausdruck.
+    let t: Tafel = (*g).tafel
+    let r: i64 = t.senden((*g).ctx, rahmen, len)
+    if r > 0 { (*g).n_gesendet = (*g).n_gesendet + 1 }
+    return r
+}
+
+fn empfangen(g: *mut Geraet, puffer: u64, platz: usize) -> i64 {
+    if !(*g).bereit { return -1 }
+    if platz == 0 { return -1 }
+    let t: Tafel = (*g).tafel
+    let r: i64 = t.empfangen((*g).ctx, puffer, platz)
+    if r > 0 {
+        // Auch hier: was zu kurz ist, um ein Rahmen zu sein, wird
+        // verworfen, BEVOR es irgendein Zerleger sieht. Ein Beacon
+        // kommt von einem Fremden.
+        if (r as usize) < 10 {
+            (*g).n_verworfen = (*g).n_verworfen + 1
+            return 0
+        }
+        (*g).n_empfangen = (*g).n_empfangen + 1
+    }
+    return r
+}
+
+fn kanal_setzen(g: *mut Geraet, kanal: u64, band: u64) -> i64 {
+    if !(*g).bereit { return -1 }
+    let t: Tafel = (*g).tafel
+    let r: i64 = t.kanal_setzen((*g).ctx, kanal, band)
+    if r >= 0 {
+        (*g).kanal = kanal
+        (*g).band = band
+    }
+    return r
+}
+
+// `art` ist SCHLUESSEL_PTK, SCHLUESSEL_GTK oder SCHLUESSEL_AUS.
+// SCHLUESSEL_AUS loescht -- und das ist kein Beiwerk: beim Trennen
+// muss der Schluessel aus der Karte, sonst liegt er dort weiter.
+fn schluessel_setzen(g: *mut Geraet, art: u64, kennung: u64,
+    schluessel: u64, len: usize) -> i64 {
+    if !(*g).bereit { return -1 }
+    if art != SCHLUESSEL_AUS {
+        // CCMP-128. Andere Laengen gibt es in dieser Umsetzung nicht,
+        // und sie stillschweigend anzunehmen waere der Anfang eines
+        // Schluessels, der halb gesetzt ist.
+        if len != 16 { return -1 }
+        if schluessel == 0 { return -1 }
+    }
+    if kennung > 3 { return -1 }
+    let t: Tafel = (*g).tafel
+    return t.schluessel_setzen((*g).ctx, art, kennung, schluessel, len)
+}
