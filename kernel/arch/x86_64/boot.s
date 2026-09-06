@@ -309,3 +309,38 @@ tss:
     .globl kdata
 kdata:
     .skip KDATA_SIZE
+
+/* ==================================================== RUNDE PROTOKOLL
+ * DER STUMMEL DER SYMBOLTABELLE, ALS SCHWACHES SYMBOL.
+ *
+ * `kernel/ksymtab.fi` holt die Symbol- und Zeilentabelle mit
+ * `lea rax, [rip + osym_tab]` -- Firn kann Bindersymbole nicht anders
+ * benennen. Die WIRKLICHE Tabelle entsteht aber erst aus dem fertig
+ * gebundenen Abbild (`tools/kernel/symtab.py`), also erst NACH dem
+ * ersten Bindedurchgang.
+ *
+ * WARUM SIE HIER STEHT UND NICHT IN EINER EIGENEN DATEI: sie stand
+ * zuerst in `kernel/arch/x86_64/osym.s`, und `tools/build-kernel.sh`
+ * band sie mit. Nur bindet dieses Repo den Kernel an EINEM DUTZEND
+ * STELLEN selbst -- `tools/osum/run.sh`, `tools/smp/run.sh`,
+ * `tools/handle/run.sh`, `tools/async/run.sh`, `tools/userland/run.sh`
+ * und weitere haben ihre eigene `ld`-Zeile mit fünf Objektdateien
+ * darin. Die alle nachzuziehen ist eine Liste, die beim nächsten
+ * Läufer wieder unvollständig ist; gemessen an einem Lauf dieser
+ * Runde: fünf Abschnitte fielen mit "ld failed on the kernel" durch,
+ * weil ihnen `osym.o` fehlte.
+ *
+ * `boot.s` ist in JEDER dieser Zeilen dabei. Also steht der Stummel
+ * hier, und weil er SCHWACH ist, überschreibt ihn die erzeugte Tabelle
+ * des zweiten Durchgangs ohne "multiple definition" -- genau das ist,
+ * wofür `.weak` da ist.
+ *
+ * Kennung 0 heisst "keine Tabelle"; `ksymtab.have()` sagt dann nein und
+ * der Panik-Bildschirm zeigt rohe Adressen. Der Aufbau steht in
+ * `kernel/ksymtab.fi`. */
+    .section .rodata
+    .align 8
+    .weak osym_tab
+osym_tab:
+    .quad 0     /* Kennung: 0 = keine Tabelle */
+    .quad 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0

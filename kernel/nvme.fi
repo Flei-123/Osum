@@ -67,6 +67,7 @@
 
 import serial
 import kstate
+import klog
 import pci
 import arch.x86_64.apic
 import arch.arch
@@ -364,17 +365,40 @@ fn present(state: u64) -> bool {
 // what makes them comparable. `armed` false leaves the message vector
 // MASKED: the transfer then still works and the interrupt does not,
 // which is the counter-check that separates the two.
+// ==================================================== RUNDE PROTOKOLL
+// DIE QUELLE, UNTER DER DIESER TREIBER IM RING STEHT.
+//
+// Sie steht EINMAL je Datei und wird an jeden Aufruf gereicht -- der
+// Name im Protokoll ist damit derselbe wie der Dateiname und laesst
+// sich nicht aus Versehen anders schreiben.
+// Der Name liegt als `static mut` im Modul und nicht als `var` in
+// dieser Funktion: eine lokale Zeichenkette stirbt mit dem Rahmen,
+// und firnc faengt genau das ab ("the address of the local escapes
+// through the return value"). Der Protokollring liest den Namen
+// erst im Aufruf danach.
+static mut q_nvme: [u8; 5] = "nvme\0"
+
+fn lq() -> u64 {
+    return (&q_nvme[0]) as u64
+}
+
 fn init(state: u64, use_msix: bool, armed: bool) -> bool {
+    var l_kein: [u8; 34] = "kein NVMe-Regler auf diesem Bus\0\0\0"
+    var l_bar: [u8; 30] = "BAR0 unbrauchbar, phys \0\0\0\0\0\0\0"
+    var l_los: [u8; 25] = "Regler gefunden, BAR0 \0\0\0"
     kstate.set(state, sc(S_READY), 0)
     let idx: u64 = pci.find_class(state, pci.CLASS_STORAGE, pci.SUB_NVM,
         pci.PROGIF_NVME)
     if idx >= pci.MAX_DEV {
+        klog.say(state, klog.L_INFO, lq(), (&l_kein[0]) as u64)
         return false
     }
     let phys: u64 = pci.bar(state, idx, 0)
     if phys == 0 || pci.bar_is_io(state, idx, 0) {
+        klog.sayh(state, klog.L_ERROR, lq(), (&l_bar[0]) as u64, phys)
         return false
     }
+    klog.sayh(state, klog.L_INFO, lq(), (&l_los[0]) as u64, phys)
     // The BAR says where the controller answers ON THE BUS. What the
     // kernel writes is a virtual address, and until this round there was
     // no page table entry for anything that high (`apic.map_device`).
