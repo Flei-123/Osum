@@ -129,6 +129,20 @@ ARGS+=(/usr/ /usr/share/ /usr/share/locale/
 [ -e locale/de/icons ] && ARGS+=("/usr/share/locale/de/icons=locale/de/icons")
 ARGS+=(/system/ "/system/schluessel.pub=$PUB")
 ARGS+=(/store/ /users/ /tmp/ /mnt/ /dev/ /proc/)
+# RUNDE CERTUS-AUF-OSUM: DIE PAKETE MIT AUF DIE PLATTE.
+#
+# `/store/` war bis hierher ein leeres Verzeichnis -- der Ort, an den
+# `ota` holt, was es aus dem Netz bekommt. Mit $LADEN_STAND legt dieser
+# Bau die fertigen Pakete samt ihren Signaturen GLEICH dort hinein.
+# Damit laesst sich der Weg des Pakets (Signatur pruefen, auspacken,
+# Buendel unter /apps) OHNE einen Server im Netz messen -- der Weg MIT
+# Server bleibt tools/laden/run.sh, und beide messen dasselbe `opk`.
+if [ -n "${LADEN_STAND:-}" ] && [ -d "${LADEN_STAND}" ]; then
+    for f in "$LADEN_STAND"/*.opk "$LADEN_STAND"/*.opk.sig; do
+        [ -e "$f" ] || continue
+        ARGS+=("/store/$(basename "$f")=$f")
+    done
+fi
 # DIE MITGELIEFERTEN BUENDEL -- der Vorher-Zustand.
 #
 # RUNDE GLYPHE: `nur=` -- SONST GIBT ES DIESES ABBILD NICHT.

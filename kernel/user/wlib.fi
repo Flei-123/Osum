@@ -107,6 +107,10 @@ export {
     K_GRAPH, graph, graph_x, graph_y, GRAPH_FIELDS, GR_N, GR_HIST, GR_A,
     GR_B, GR_MAX,
     K_CARD, card,
+    // RUNDE CERTUS-AUF-OSUM: die Leinwand.
+    K_LEINWAND, leinwand, leinwand_setzen, leinwand_neu, leinwand_neu_teil,
+    leinwand_ereignis, leinwand_anstehend,
+    LE_DOWN, LE_UP, LE_MOVE, LE_KEY, LE_FELDER,
     K_MENUBAR, K_CHOICE, K_SEP, K_SCROLL,
     NK_MAIN, NK_MENU, NK_DLG,
     KEY_TAB, KEY_ENTER, KEY_BS, KEY_ESC, KEY_UP, KEY_DOWN, KEY_LEFT,
@@ -207,6 +211,47 @@ const K_CARD: u64 = 13
 // bekommt einen Zeiger auf GRAPH_FIELDS Woerter und liest sie bei
 // jedem Anstrich frisch. Diese Bibliothek fuehrt keine Messreihe.
 const K_GRAPH: u64 = 14
+
+// ========================================== RUNDE CERTUS-AUF-OSUM
+// EINE LEINWAND: DAS WIDGET, DESSEN BILDPUNKTE DEM AUFRUFER GEHOEREN.
+//
+// Der Browser Certus malt seine Seite selbst -- Baumbau, Kaskade,
+// Layout, Schriftrasterer, alles in lib/paint auf eine eigene Leinwand.
+// Was er von dieser Bibliothek braucht, sind die Bedienelemente darum
+// herum (Knoepfe, Adressfeld, Reiter) und EIN Rechteck, in dem seine
+// Bildpunkte stehen und stehen BLEIBEN: `paint_all` malt den Hintergrund
+// jedes schmutzigen Rechtecks neu und streicht dabei weg, was nicht aus
+// einem Widget kommt (dieselbe Beobachtung wie beim Graphen oben). Also
+// ist die Leinwand ein Widget.
+//
+// DIE BILDPUNKTE GEHOEREN DEM AUFRUFER, wie der Puffer hinter einem
+// Textfeld: `leinwand(px, w, h)` bekommt einen Zeiger auf w*h Woerter zu
+// 32 Bit (0x00RRGGBB, im Speicher B, G, R, 0 -- dasselbe Format wie die
+// Malflaeche und wie WIG_BLIT) und liest sie bei jedem Anstrich frisch.
+// Wer die Bildpunkte geaendert hat, sagt es mit `leinwand_neu`; die
+// Bibliothek kopiert dann den Ausschnitt des schmutzigen Streifens
+// Zeile fuer Zeile in die Malflaeche.
+//
+// DIE EINGABE GEHT IN EINEN RING und nicht ueber `fire`: `fire` haelt
+// EIN Ereignis je `step`, und ein `step` holt bis zu 64 Ereignisse ab
+// -- eine Mausbewegung mit einem Klick dahinter verloere den Klick. Der
+// Ring haelt 64 Eintraege zu vier Woertern (Widget, Art, a, b); die
+// Bewegungen werden darin ZUSAMMENGEFASST (eine Bewegung ersetzt die
+// vorige, solange nichts dazwischen liegt), damit ein Zeiger, der
+// ueber die Seite faehrt, den Ring nicht fuellt.
+//
+// Felder im Widget: D_TEXT = die Bildpunkte, D_A = Breite des Puffers,
+// D_B = Hoehe des Puffers, D_C = Zeilenlaenge in Bildpunkten.
+const K_LEINWAND: u64 = 15
+const LE_DOWN: u64 = 1 // a = (x << 16) | y im Widget, b = Tasten
+const LE_UP: u64 = 2 // dito
+const LE_MOVE: u64 = 3 // dito
+const LE_KEY: u64 = 4 // a = die Taste wie aus `decode` (KEY_* oder Oktett)
+const LE_FELDER: u64 = 4
+const LW_RING: u64 = 64
+static mut lw_q: [u64; 256] = [0 as u64; 256] // LW_RING * LE_FELDER
+static mut lw_head: u64 = 0
+static mut lw_tail: u64 = 0
 
 const GRAPH_FIELDS: u64 = 5
 const GR_N: u64 = 0 // wie viele Messwerte belegt sind
@@ -1320,6 +1365,156 @@ fn graph(spec: u64) -> u64 {
     let i: u64 = add(K_GRAPH, 0, 0, 0, false)
     s(i, D_A, spec)
     return i
+}
+
+fn leinwand(px: u64, bw: u64, bh: u64) -> u64 {
+    let i: u64 = add(K_LEINWAND, px, bw, bh, true)
+    s(i, D_A, bw)
+    s(i, D_B, bh)
+    s(i, D_C, bw)
+    return i
+}
+
+// Ein anderer Puffer (nach einer Groessenaenderung): Zeiger, Breite,
+// Hoehe, Zeilenlaenge in Bildpunkten.
+fn leinwand_setzen(i: u64, px: u64, bw: u64, bh: u64, zeile: u64) {
+    if i >= nwd || g(i, D_KIND) != K_LEINWAND {
+        return
+    }
+    s(i, D_TEXT, px)
+    s(i, D_A, bw)
+    s(i, D_B, bh)
+    s(i, D_C, zeile)
+    dirty_wd(i)
+}
+
+// Die Bildpunkte haben sich geaendert -- ganz ...
+fn leinwand_neu(i: u64) {
+    if i >= nwd {
+        return
+    }
+    dirty_wd(i)
+}
+
+// ... oder in einem Ausschnitt (in Leinwandkoordinaten, [x0,x1) x [y0,y1)).
+fn leinwand_neu_teil(i: u64, x0: u64, y0: u64, x1: u64, y1: u64) {
+    if i >= nwd {
+        return
+    }
+    var ax: u64 = g(i, D_X) + x1
+    var ay: u64 = g(i, D_Y) + y1
+    if ax > g(i, D_X) + g(i, D_W) {
+        ax = g(i, D_X) + g(i, D_W)
+    }
+    if ay > g(i, D_Y) + g(i, D_H) {
+        ay = g(i, D_Y) + g(i, D_H)
+    }
+    dirty(g(i, D_WIN), g(i, D_X) + x0, g(i, D_Y) + y0, ax, ay)
+}
+
+fn lw_push(i: u64, art: u64, a: u64, b: u64) {
+    // Eine Bewegung ersetzt die vorige, wenn sie zuoberst liegt.
+    if art == LE_MOVE && lw_head != lw_tail {
+        let letzte: u64 = ((lw_head + LW_RING - 1) % LW_RING) * LE_FELDER
+        if lw_q[(letzte + 1) as usize] == LE_MOVE
+            && lw_q[(letzte) as usize] == i {
+            lw_q[(letzte + 2) as usize] = a
+            lw_q[(letzte + 3) as usize] = b
+            return
+        }
+    }
+    let naechste: u64 = (lw_head + 1) % LW_RING
+    if naechste == lw_tail {
+        // Voll: das aelteste faellt weg. Ein Ring, der den neuesten
+        // Klick verwirft, waere der schlechtere.
+        lw_tail = (lw_tail + 1) % LW_RING
+    }
+    let at: u64 = lw_head * LE_FELDER
+    lw_q[(at) as usize] = i
+    lw_q[(at + 1) as usize] = art
+    lw_q[(at + 2) as usize] = a
+    lw_q[(at + 3) as usize] = b
+    lw_head = naechste
+}
+
+// Das naechste Ereignis der Leinwand in vier Woerter (Widget, Art, a,
+// b) hinter `aus`. false = keines.
+fn leinwand_ereignis(aus: u64) -> bool {
+    if lw_head == lw_tail {
+        return false
+    }
+    let at: u64 = lw_tail * LE_FELDER
+    __mmio_write64((aus) as *mut u64, lw_q[(at) as usize])
+    __mmio_write64((aus + 8) as *mut u64, lw_q[(at + 1) as usize])
+    __mmio_write64((aus + 16) as *mut u64, lw_q[(at + 2) as usize])
+    __mmio_write64((aus + 24) as *mut u64, lw_q[(at + 3) as usize])
+    lw_tail = (lw_tail + 1) % LW_RING
+    return true
+}
+
+fn leinwand_anstehend() -> u64 {
+    return (lw_head + LW_RING - lw_tail) % LW_RING
+}
+
+// Das Malen: der Ausschnitt des Streifens, den die Leinwand bedeckt,
+// Zeile fuer Zeile aus dem Puffer des Aufrufers. Was die Leinwand nicht
+// bedeckt (ein Widget, das groesser ist als sein Puffer), behaelt den
+// Hintergrund, den `paint_bg` schon gemalt hat.
+fn paint_leinwand(i: u64) {
+    let px: u64 = g(i, D_TEXT)
+    if px == 0 {
+        return
+    }
+    let bw: u64 = g(i, D_A)
+    let bh: u64 = g(i, D_B)
+    let zeile: u64 = g(i, D_C)
+    var ww: u64 = g(i, D_W)
+    if ww > bw {
+        ww = bw
+    }
+    var hh: u64 = g(i, D_H)
+    if hh > bh {
+        hh = bh
+    }
+    var x0: u64 = g(i, D_X)
+    var x1: u64 = g(i, D_X) + ww
+    var y0: u64 = g(i, D_Y)
+    var y1: u64 = g(i, D_Y) + hh
+    if x0 < wlibc.clip_x0() {
+        x0 = wlibc.clip_x0()
+    }
+    if x1 > wlibc.clip_x1() {
+        x1 = wlibc.clip_x1()
+    }
+    if y0 < wlibc.clip_y0() {
+        y0 = wlibc.clip_y0()
+    }
+    if y1 > wlibc.clip_y1() {
+        y1 = wlibc.clip_y1()
+    }
+    let band: u64 = wlibc.band_y()
+    let rows: u64 = wlibc.surf_rows()
+    let sw: u64 = wlibc.surf_w()
+    if x1 > sw {
+        x1 = sw
+    }
+    if x1 <= x0 {
+        return
+    }
+    if y0 < band {
+        y0 = band
+    }
+    if y1 > band + rows {
+        y1 = band + rows
+    }
+    let n: u64 = (x1 - x0) * 4
+    var y: u64 = y0
+    while y < y1 {
+        let quelle: u64 = px + ((y - g(i, D_Y)) * zeile + (x0 - g(i, D_X))) * 4
+        let ziel: u64 = wlibc.surface() + ((y - band) * sw + x0) * 4
+        ulib.copy(ziel, quelle, n)
+        y = y + 1
+    }
 }
 
 fn gspec(i: u64, f: u64) -> u64 {
@@ -3163,6 +3358,8 @@ fn paint_one(i: u64) {
         paint_tile(i)
     } else if k == K_GRAPH {
         paint_graph(i)
+    } else if k == K_LEINWAND {
+        paint_leinwand(i)
     }
 }
 
@@ -3777,6 +3974,13 @@ fn on_down(w: u64, x: u64, y: u64, btn: u64) {
         dirty_wd(i)
         return
     }
+    // RUNDE CERTUS-AUF-OSUM: die Leinwand bekommt die Stelle IM WIDGET
+    // und entscheidet selbst, was darunter liegt.
+    if k == K_LEINWAND {
+        lw_push(i, LE_DOWN, ((x - g(i, D_X)) << 16) | (y - g(i, D_Y)), btn)
+        s_down = i + 1
+        return
+    }
     // ROUND THEMESTORE: A TILE IS A BIG BUTTON. It reports the click
     // at once instead of on release -- there is no "pressed" look to
     // show, because the tile already shows a preset and dimming it
@@ -3933,6 +4137,11 @@ fn on_up(w: u64, x: u64, y: u64) {
     if s_down != 0 {
         let i: u64 = s_down - 1
         s_down = 0
+        if g(i, D_KIND) == K_LEINWAND {
+            lw_push(i, LE_UP, (sub(x, g(i, D_X)) << 16) | sub(y, g(i, D_Y)),
+                0)
+            return
+        }
         if g(i, D_KIND) == K_BUTTON {
             s(i, D_FLAGS, g(i, D_FLAGS) & ~F_PRESSED)
             dirty_wd(i)
@@ -3959,6 +4168,12 @@ fn on_move(w: u64, x: u64, y: u64, btn: u64) {
         return
     }
     let i: u64 = hit_at(w, x, y)
+    // RUNDE CERTUS-AUF-OSUM: die Leinwand sieht jede Bewegung ueber ihr
+    // (ein ueberfahrener Verweis will das wissen); zusammengefasst im
+    // Ring, siehe `lw_push`.
+    if i < MAXWD && g(i, D_KIND) == K_LEINWAND {
+        lw_push(i, LE_MOVE, ((x - g(i, D_X)) << 16) | (y - g(i, D_Y)), btn)
+    }
     // Das Zeigerbild: ueber einem Textfeld ein Balken, sonst ein Pfeil.
     // Es ist der einzige Weg, auf dem eine Anwendung dem SERVER etwas
     // ueber den Zeiger sagt, und deshalb steht er im Logbuch.
@@ -4332,6 +4547,10 @@ fn on_key(w: u64, c: u64) {
             return
         }
         entry_key(i, k)
+        return
+    }
+    if kind == K_LEINWAND {
+        lw_push(i, LE_KEY, k, 0)
         return
     }
     if kind == K_BUTTON {
