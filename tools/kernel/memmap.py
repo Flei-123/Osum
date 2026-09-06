@@ -228,6 +228,7 @@ BEREICHE = [
     # vier Modulsaetze, die Abschnittstafel des laufenden Ladevorgangs
     # und die TREIBERTAFEL, die ein geladenes Modul fuellt.
     ("MODUL",      "kstate.fi", "MODUL_OFF",      "MODUL_MAX"),
+    ("BUS",        "kstate.fi", "BUS_OFF",        "BUS_MAX"),
 
     # RUNDE FSROBUST: der Zustand des OFS-Journals (kernel/ofsj.fi).
     # Drei Seiten aus dem letzten freien Stueck, 0x7A000..0x80000.

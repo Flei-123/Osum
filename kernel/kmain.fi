@@ -97,6 +97,7 @@ import usb
 import hidrep
 import hidin
 import i2chid
+import bus
 
 // Indices in the table out of isr.s.
 const V_DF_STACK: u64 = 52
@@ -132,6 +133,11 @@ const P_ASYNC: u64 = 50
 const P_ABENCH: u64 = 51
 const P_ASYNCFS: u64 = 52
 const P_VEC: u64 = 53 // RUNDE AVX
+// RUNDE SYSTEMBUS: die vier Programme der Abnahme (kernel/uprog.fi).
+const P_BUSA: u64 = 60
+const P_BUSB: u64 = 61
+const P_BUSD: u64 = 62
+const P_BUSS: u64 = 63
 // RUNDE K13: die beiden Programmnummern dieser Runde (kernel/uprog.fi).
 const P_PWR: u64 = 45
 const P_PWRIDLE: u64 = 46
@@ -271,6 +277,24 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // Laufes passiert lange vor `wig.init` -- ein Journal, das erst mit
     // der Oberflaeche entsteht, hat die halbe Wurzel schon verpasst.
     nidx.init(state)
+    // RUNDE SYSTEMBUS: der Bus steht VOR dem ersten Nutzerprozess. Ein
+    // Dienst, der sich anmelden will, bevor die Tafel genullt ist,
+    // schreibt in einen Platz, den es noch nicht gibt -- und `init`
+    // (pid 1) ist der erste, der einen anmeldet.
+    if !kstate.mode_on(state, kstate.M_NOBUS) {
+        bus.init(state)
+        // RUNDE SYSTEMBUS, `notidemo`: EINE Meldung, damit die Leiste
+        // etwas zu zeigen hat, das nicht sie selbst erfunden hat. Sie
+        // kommt vom Kern (Aufgabe 0) und geht denselben Weg wie jede
+        // andere -- der Bildbeweis der Zusage e) ist deshalb ein
+        // Bildbeweis fuer den Bus und nicht fuer eine Zeichenroutine.
+        if kstate.mode_on(state, kstate.M_NOTIDEMO) {
+            var s_n1: [u8; 23] = "Datentraeger verbunden\0"
+            var s_n2: [u8; 22] = "Aktualisierung bereit\0"
+            bus.noti_post(state, 0, 1, 22, (&s_n1[0]) as u64)
+            bus.noti_post(state, 0, 2, 21, (&s_n2[0]) as u64)
+        }
+    }
     serial.puts((&s_mb[0]) as u64)
     serial.hex(kstate.get32(mbi))
     serial.puts((&s_cmd[0]) as u64)
@@ -492,6 +516,7 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     der ohne Platte auskommt, kann sich nicht an ihr vertun.
     //     Ohne das Wort `k13` eine Zeile und sonst nichts.
     users(state)
+    busround(state)
 
     // 7b-ter. RUNDE K18: DIE ENERGIESCHICHT UND IHRE MESSUNG.
     //     Hier und nicht weiter unten, und der Grund ist derselbe wie
@@ -1741,6 +1766,92 @@ fn handle_bench(state: u64) {
 // eine Meldung verloren haben und die Objekttafel wieder auf ihren drei
 // Konsoleneintraegen stehen. Eine Refcount-Schicht, die niemand
 // nachzaehlt, ist eine Behauptung.
+// ==================================================== RUNDE SYSTEMBUS
+//
+// DREI LAEUFE UND EIN SATZ ZAHLEN. Sie stehen hier und nicht in einem
+// Userland-Programm, weil sie messen sollen, was der KERN kann -- ein
+// Abbild, das nicht baut, darf die Abnahme des Busses nicht mitnehmen.
+//
+//   1. Schreiber und Leser, hundert Runden, verschiedene Kerne.
+//      `busa: abw=0` ist die Zusage.
+//   2. Der Unberechtigte. `busd: ruf=-3` ist die Zusage, und darueber
+//      MUSS eine Zeile `bus: ABGELEHNT` stehen.
+//   3. Ein Megabyte durch ein Segment. `buss: us=` ist die Zahl.
+//
+// Danach die Zaehler des Busses. Ein Bus, dessen Zaehler niemand
+// nachliest, ist ein Bus, dessen Verluste niemand sieht: `drops` und
+// `denied` stehen deshalb daneben.
+fn busround(state: u64) {
+    var s_skip: [u8; 13] = "bus: skipped\0"
+    var s_begin: [u8; 11] = "bus: begin\0"
+    var s_a: [u8; 14] = "bus: a exit=\0\0"
+    var s_d: [u8; 14] = "bus: d exit=\0\0"
+    var s_s: [u8; 14] = "bus: s exit=\0\0"
+    var s_regs: [u8; 11] = "bus: regs=\0"
+    var s_snd: [u8; 12] = "bus: sends=\0"
+    var s_rcv: [u8; 12] = "bus: recvs=\0"
+    var s_den: [u8; 13] = "bus: denied=\0"
+    var s_dro: [u8; 12] = "bus: drops=\0"
+    var s_cls: [u8; 15] = "bus: clipsets=\0"
+    var s_clg: [u8; 15] = "bus: clipgets=\0"
+    var s_hst: [u8; 14] = "bus: verlauf=\0"
+    var s_seg: [u8; 11] = "bus: segs=\0"
+    var s_sgp: [u8; 16] = "bus: segseiten=\0"
+    var s_lck: [u8; 13] = "bus: sperre=\0"
+    var s_done: [u8; 10] = "bus: done\0"
+    if !kstate.mode_on(state, kstate.M_BUSBENCH) {
+        serial.puts((&s_skip[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_begin[0]) as u64)
+    serial.nl()
+    let a: u64 = proc.create(state, P_BUSA, 0, 2)
+    let ea: u64 = kutil.wait_for(state, a)
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(ea)
+    serial.nl()
+    let d: u64 = proc.create(state, P_BUSD, 0, 2)
+    let ed: u64 = kutil.wait_for(state, d)
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(ed)
+    serial.nl()
+    let g: u64 = proc.create(state, P_BUSS, 0, 2)
+    let eg: u64 = kutil.wait_for(state, g)
+    serial.puts((&s_s[0]) as u64)
+    serial.dec(eg)
+    serial.nl()
+    var s_nti: [u8; 16] = "bus: meldungen=\0"
+    var s_nne: [u8; 10] = "bus: neu=\0"
+    serial.puts((&s_nti[0]) as u64)
+    serial.dec(bus.noti_count(state))
+    serial.nl()
+    serial.puts((&s_nne[0]) as u64)
+    serial.dec(bus.noti_seen(state))
+    serial.nl()
+    buszahl(state, (&s_regs[0]) as u64, bus.S_REGS)
+    buszahl(state, (&s_snd[0]) as u64, bus.S_SENDS)
+    buszahl(state, (&s_rcv[0]) as u64, bus.S_RECVS)
+    buszahl(state, (&s_den[0]) as u64, bus.S_DENIED)
+    buszahl(state, (&s_dro[0]) as u64, bus.S_DROPS)
+    buszahl(state, (&s_cls[0]) as u64, bus.S_CLIPSETS)
+    buszahl(state, (&s_clg[0]) as u64, bus.S_CLIPGETS)
+    buszahl(state, (&s_seg[0]) as u64, bus.S_SEGS)
+    buszahl(state, (&s_sgp[0]) as u64, bus.S_SEGPAGES)
+    buszahl(state, (&s_lck[0]) as u64, bus.S_LOCKED)
+    serial.puts((&s_hst[0]) as u64)
+    serial.dec(bus.clip_count(state))
+    serial.nl()
+    serial.puts((&s_done[0]) as u64)
+    serial.nl()
+}
+
+fn buszahl(state: u64, p: u64, welcher: u64) {
+    serial.puts(p)
+    serial.dec(bus.stat(state, welcher))
+    serial.nl()
+}
+
 fn asyncs(state: u64) {
     var s_skip: [u8; 15] = "async: skipped\0"
     var s_begin: [u8; 14] = "async: begin\0\0"
@@ -3815,6 +3926,32 @@ fn mode_of(state: u64, cmd: u64) {
     }
     if find(cmd, (&mdaw[0]) as u64, 8) != 0 {
         kstate.mode_add(state, kstate.M_MODULAUS)
+    }
+    // RUNDE SYSTEMBUS. `bus` redet auf die Leitung, `nobus` ist die
+    // Gegenprobe (der Bus wird gar nicht erst aufgesetzt, und jeder Ruf
+    // muss dann E_NOENT geben statt still zu tun als ob), `busbench`
+    // sind die Messungen im Kern, `clipdemo` und `notidemo` die beiden
+    // Bilder der Abnahme.
+    var busw: [u8; 4] = "bus\0"
+    var nbuw: [u8; 6] = "nobus\0"
+    var bbew: [u8; 9] = "busbench\0"
+    var cldw: [u8; 9] = "clipdemo\0"
+    var ntdw: [u8; 9] = "notidemo\0"
+    if find(cmd, (&nbuw[0]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_NOBUS)
+    } else {
+        if find(cmd, (&busw[0]) as u64, 3) != 0 {
+            kstate.mode_add(state, kstate.M_BUS)
+        }
+    }
+    if find(cmd, (&bbew[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_BUSBENCH)
+    }
+    if find(cmd, (&cldw[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_CLIPDEMO)
+    }
+    if find(cmd, (&ntdw[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_NOTIDEMO)
     }
     if find(cmd, (&k13w[0]) as u64, 6) != 0 {
         kstate.mode_add(state, kstate.M_K13)

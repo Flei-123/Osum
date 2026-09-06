@@ -48,12 +48,14 @@ import arch.x86_64.user
 import file
 import handle
 import cap
+import bus
 
 export {
     create, user_start, free_space, space_pages, reap, translate, user_ok,
     map_programs,
     badentry_zahl,
     inherit, create_bare, discard, page_free, page_exec, map_page, map_huge, nx,
+    map_frame,
     create_cap,
     copy_space, swap_space, use_space, page_drop, ARG_RESUME,
     USER_DATA, USER_STACK, USER_SPAN, USER_TOP,
@@ -64,6 +66,10 @@ export {
 const PAGE_PRESENT: u64 = 1
 const PAGE_WRITE: u64 = 2
 const PAGE_USER: u64 = 4
+// RUNDE SYSTEMBUS: Bit 9 ist eines der drei, die die Hardware dem
+// Betriebssystem ueberlaesst. Gesetzt heisst: dieser Rahmen gehoert dem
+// Adressraum NICHT, er ist nur eingeblendet.
+const PAGE_SHARED: u64 = 512
 const ADDR_MASK: u64 = 0x000FFFFFFFFFF000
 
 const USER_DATA: u64 = 0x40000000
@@ -317,8 +323,16 @@ fn free_pt(state: u64, pt: u64) -> u64 {
     while k < 512 {
         let e: u64 = read_entry(pt, k)
         if (e & PAGE_PRESENT) != 0 {
-            mem.frame_free(state, e & ADDR_MASK)
-            freed = freed + 1
+            // RUNDE SYSTEMBUS: ein EINGEBLENDETER Rahmen gehoert diesem
+            // Adressraum nicht. Ihn hier freizugeben hiesse, den Rahmen
+            // dem anderen Prozess unter den Fuessen wegzuziehen -- und
+            // zwar still, denn seine Tabelle zeigt weiter hin. Der Bus
+            // gibt ihn zurueck (`bus.seg_drop`, `bus.forget_task`), und
+            // nur er.
+            if (e & PAGE_SHARED) == 0 {
+                mem.frame_free(state, e & ADDR_MASK)
+                freed = freed + 1
+            }
         }
         k = k + 1
     }
@@ -450,8 +464,46 @@ fn count_pt(pt: u64) -> u64 {
 
 // Corpse to memory: first the address space, then the kernel stack.
 fn reap(state: u64, i: u64) -> bool {
+    // RUNDE SYSTEMBUS: was diese Aufgabe am Bus hatte, geht mit ihr --
+    // Dienste, Abos, Nachrichten, Segmente. Die pid muss VOR
+    // `sched.reap` gelesen werden; danach ist der Platz frei und traegt
+    // schon die naechste.
+    bus.forget_task(state, i, sched.tget(state, i, sched.T_PID))
     free_space(state, i)
     return sched.reap(state, i)
+}
+
+// ====================================== RUNDE SYSTEMBUS: EIN FREMDER RAHMEN
+//
+// `map_page` legt einen NEUEN Rahmen an. Ein geteiltes Segment ist das
+// Gegenteil: der Rahmen ist da, und zwei Adressraeume sollen auf ihn
+// zeigen. Das ist der ganze Unterschied, und es sind acht Zeilen.
+//
+// Der Rahmen wird beim Abraeumen des Adressraums NICHT freigegeben --
+// `free_space` gibt zurueck, was in seinen Tabellen steht, und ein
+// Segment, das zwei Prozesse eingeblendet haben, waere danach beim
+// zweiten ein Zeiger auf fremden Speicher. Deshalb traegt der Eintrag
+// PAGE_SHARED (Bit 9, von der Hardware ignoriert und fuer das
+// Betriebssystem frei), und `page_drop` sieht danach.
+fn map_frame(state: u64, i: u64, addr: u64, frame: u64,
+    writable: bool) -> bool {
+    let s: u64 = pt_slot(addr)
+    if s >= 512 {
+        return false
+    }
+    let pt: u64 = pt_for(state, i, addr, true)
+    if pt == 0 {
+        return false
+    }
+    if (read_entry(pt, s) & PAGE_PRESENT) != 0 {
+        return false
+    }
+    var bits: u64 = PAGE_PRESENT | PAGE_USER | PAGE_SHARED | nx(state)
+    if writable {
+        bits = bits | PAGE_WRITE
+    }
+    write_entry(pt, s, (frame & ADDR_MASK) | bits)
+    return true
 }
 
 // A child gets the CONTENTS of its parent's data page -- that is the
@@ -1004,7 +1056,9 @@ fn page_drop(state: u64, i: u64, addr: u64) -> bool {
         return false
     }
     write_entry(pt, s, 0)
-    mem.frame_free(state, e & ADDR_MASK)
+    if (e & PAGE_SHARED) == 0 {
+        mem.frame_free(state, e & ADDR_MASK)
+    }
     // The tables of the CURRENT process are the ones the processor has
     // cached. A page that is gone from the table but still in the TLB is a
     // page a program can go on writing to -- so the cache goes, the way
