@@ -196,7 +196,7 @@ ausdruecklich.
 ## 4. WAS GEMESSEN WURDE
 
 `bash tools/wlan/run2.sh`, Abschnitt 43 der Abnahme.
-**22 Zusagen, 0 Fehler.**
+**29 Zusagen, 0 Fehler.**
 
 Dazu laeuft der geerbte Abschnitt 42 (Runde WLAN) auf dieser Grundlage
 unveraendert weiter: **185 Zusagen, 0 Fehler**.
@@ -207,9 +207,10 @@ unveraendert weiter: **185 Zusagen, 0 Fehler**.
 | Vollstaendige 4-Wege-Handschlaege gegen die Gegenstelle, jedes Mal mit **neuen** Zufallszahlen | **40** |
 | davon einig ueber PMK, PTK, alle vier Pruefwerte, GTK und dessen Nummer | alle 40 |
 | CCMP in **beide** Richtungen in jedem Lauf (AP verschluesselt/Osum oeffnet und umgekehrt) | alle 40 |
-| Boesartige Faelle, die Osum ablehnen muss | 5 |
+| Boesartige Faelle im Handschlag, die Osum ablehnen muss | 5 |
+| Boesartige Faelle im ganzen Weg (`weg.py`), in denen NULL Schluessel ins Geraet gehen | 6 |
 | USB-Nummern, die Familie **und** Klarnamen richtig ergeben | 15 geprueft von 40 in der Tabelle |
-| Neue Zeilen in `lib/wlan/` | 1.341 |
+| Neue Zeilen in `lib/wlan/` | 1.400 |
 
 ### Die vier Fehler, die dieser Lauf gefunden hat
 
@@ -295,7 +296,7 @@ und als solche gekennzeichnet; die Staende sind Messungen.
 | Krypto darunter | 10 % | **fertig, gegen Normvektoren gemessen** |
 | 4-Wege-Handschlag als Automat | 9 % | **fertig -- jetzt auch gegen ein ZWEITES Programm** |
 | CCMP | 5 % | **fertig, gegen Normvektor UND Gegenstelle** |
-| Der Weg als Vorgang (Suchlauf→Wahl→Handschlag→Schluessel→Daten) | 4 % | **fertig, ueber der Naht gemessen** |
+| Der Weg als Vorgang (Suchlauf→Wahl→Handschlag→Schluessel→Daten) | 4 % | **fertig, ueber der Naht gemessen, auch gegen boesartige Verlaeufe** |
 | Die Naht zum Geraet | 2 % | **fertig, gemessen** |
 | Den Stick BENENNEN | 1 % | **fertig** |
 | SAE (WPA3-Anmeldung) | 5 % | offen, ohne Vektoren nicht sinnvoll pruefbar |
@@ -336,11 +337,22 @@ damit die Zahl nicht falsch gelesen wird:
   erste Treiber daran haengt. Die vier Aufrufe sind aus dem
   hergeleitet, was `zustand.fi` braucht, nicht aus dem, was ein
   USB-Chip liefert.
-* **T4 -- `verbinden.fi` ist gegen keinen boesartigen Verlauf
-  gemessen.** Der Handschlag ist es (Abschnitt 1.3), der Automat
-  darunter ist es erschoepfend (Runde WLAN: 30.940 Folgen), aber der
-  Draht dazwischen -- die Datei, die beides verbindet -- hat nur den
-  glaeubigen Weg gesehen.
+* **T4 -- GESCHLOSSEN, noch in dieser Runde.**
+  `tools/wlan/weg.py` faehrt den ganzen Weg und luegt dabei an sechs
+  Stellen (offenes Netz, falscher Pruefwert, falsches Passwort,
+  Handschlag bricht ab, ein Datenrahmen als Beacon, gekuerzte
+  Beacons). Gemessen wird nicht ein Merker, sondern `skeys` -- **wie
+  viele Schluessel wirklich im GERAET liegen**. In jedem boesen Fall:
+  null. 7 Zusagen, 0 Fehler.
+
+  **Und er hat sofort einen echten Fehler gefunden**, den einzigen
+  dieser Runde in Osum-Quelltext: `verbinden.fi` fuetterte den
+  Automaten nach der Netzwahl nicht mit Authentifizierung und
+  Assoziation. Der glaeubige Weg endete deshalb mit zwei Schluesseln
+  im Geraet, waehrend `darf_daten` falsch blieb -- genau die halbe
+  Verbindung, gegen die `zustand.fi` gebaut ist. Der Automat hat sie
+  gemeldet; `auth_angenommen`/`assoz_angenommen` schliessen die
+  Luecke.
 * **T5 -- Unveraendert S1 und S3 aus `WLAN-BEFUND.md`:** die
   802.11-spezifische CCMP-Konstruktion haengt an einem einzigen
   veroeffentlichten Vektor (jetzt immerhin gegen ein zweites Programm
@@ -359,7 +371,6 @@ braucht.
 | # | Was | Aufwand | Stick? |
 |---:|---|---|---|
 | 1 | Die `wifi-usb:`-Zeile am echten Blech ablesen und die VID/PID festhalten | ein Foto | **JA** |
-| 2 | `verbinden.fi` gegen boesartige Verlaeufe messen (T4) | ~200 Zeilen | nein |
 | 3 | 802.11w (BIP-CMAC-128, IGTK) erkennen UND umsetzen | ~350 Zeilen | nein |
 | 4 | Ein Ring-3-Programm `wlan` (suchen, verbinden, Zustand) plus Kachel, ueber `wlib` | ~700 Zeilen | nein |
 | 5 | SAE (WPA3): P-256 auf `big.fi`, hunting-and-pecking | ~900 Zeilen | nein -- aber ohne Vektoren nicht sinnvoll pruefbar |
@@ -387,7 +398,8 @@ falschen Chip ist nutzlos.
 | `lib/wlan/usbchip.fi` | 368 | 40 USB-Nummern auf Familie und Klarnamen |
 | `tools/wlan/gegenstelle.py` | 655 | ein **unabhaengiger** WPA2-Authenticator, an der echten Aufzeichnung geeicht |
 | `tools/wlan/handschlag.py` | 337 | Osums Supplicant gegen die Gegenstelle, glaeubig und boese |
-| `tools/wlan/run2.sh` | 220 | Abschnitt 43 der Abnahme |
+| `tools/wlan/weg.py` | 250 | der ganze Weg, und was passiert, wenn jemand luegt |
+| `tools/wlan/run2.sh` | 240 | Abschnitt 43 der Abnahme |
 | `kernel/usb.fi` | +43 | die Zeile, die den Stick benennt |
 
 Alles Neue unter `lib/` haelt die Regel des `lib/`-Baums: keine

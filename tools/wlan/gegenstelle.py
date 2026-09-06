@@ -263,10 +263,19 @@ MIC_VERSATZ = 4 + 1 + 2 + 2 + 8 + 32 + 16 + 8 + 8   # = 81
 
 
 def eapol_bauen(key_info, key_len, replay, nonce, keyrsc, keydata,
-                mic=None, iv=b'\x00' * 16, ver=2):
+                mic=None, iv=b'\x00' * 16, ver=2, deskriptor=2):
     """Setzt einen EAPOL-Key-Rahmen zusammen. `mic=None` heisst: das
-    Feld bleibt null -- so wird es fuer die MIC-Rechnung gebraucht."""
-    body = struct.pack('!BHH', 3, key_info, key_len)
+    Feld bleibt null -- so wird es fuer die MIC-Rechnung gebraucht.
+
+    DAS ERSTE OKTETT DES RUMPFES IST DIE BESCHREIBUNGSART, und sie ist
+    2 (RSN, also WPA2/WPA3) bzw. 254 (das alte WPA) -- NICHT 3. Der
+    erste Anlauf dieser Datei schrieb 3 hinein, weil daneben im
+    EAPOL-KOPF die 3 fuer 'EAPOL-Key' steht; zwei verschiedene Zahlen
+    an benachbarten Stellen, beide mit dem Wert 3 im Kopf. Osums
+    `eapol_zerlege` hat es gemerkt und den Rahmen abgelehnt -- zu
+    Recht, denn 3 ist keine gueltige Beschreibungsart.
+    """
+    body = struct.pack('!BHH', deskriptor, key_info, key_len)
     body += struct.pack('!Q', replay)
     body += nonce
     body += iv

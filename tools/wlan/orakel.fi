@@ -65,6 +65,7 @@ import wlan.zustand
 import wlan.usbchip
 import wlan.geraet
 import wlan.pruefgeraet
+import wlan.verbinden
 
 const CAP: usize = 4096
 
@@ -726,6 +727,88 @@ fn run_line(line: u64, len: usize) {
         var lzr: [u8; 8] = " zrx=\0\0\0"
         tlit((&lzr[0]) as u64)
         tnum(geraet.zaehler_empfangen(&gg))
+        temit()
+        return
+    }
+
+    // ---- RUNDE WLAN-2: der ganze Weg als Vorgang ----
+    //
+    //   weg <beaconhex> <pmkhex> <spa> <aa> <m1hex> <snonce> <m3hex>
+    //       -> Zeile mit dem Stand
+    //
+    // Das misst `lib/wlan/verbinden.fi`: Suchlauf, Netzwahl (mit der
+    // Abweisung unsicherer Netze!), Nachricht 1, Nachricht 3, die
+    // Schluessel im Geraet. Wer hier eine der Zutaten faelscht, sieht
+    // in der Antwort, dass NICHTS installiert wurde -- das ist der
+    // Punkt der Uebung.
+    var wwg: [u8; 4] = "weg\0"
+    if word_is(line, len, &at, (&wwg[0]) as u64) {
+        let bl: i64 = field_hex(line, len, &at, p0)
+        let pl: i64 = field_hex(line, len, &at, p1)
+        let sl: i64 = field_hex(line, len, &at, p2)
+        let al: i64 = field_hex(line, len, &at, p3)
+        let ml: i64 = field_hex(line, len, &at, p4)
+        if bl < 0 || pl != 32 || sl != 6 || al != 6 || ml < 0 {
+            fail()
+            return
+        }
+        var sn: [u8; 32] = [0; 32]
+        var m3: [u8; 1024] = [0; 1024]
+        let nl: i64 = field_hex(line, len, &at, (&sn[0]) as u64)
+        let tl: i64 = field_hex(line, len, &at, (&m3[0]) as u64)
+        if nl != 32 || tl < 0 { fail(); return }
+
+        var pr: pruefgeraet.Pruef = pruefgeraet.pruef_new()
+        var gg: geraet.Geraet = geraet.geraet_new()
+        if !pruefgeraet.anhaengen(&gg, &pr, false) { fail(); return }
+        var si: verbinden.Sitzung = verbinden.sitzung_new()
+        verbinden.identitaet_setzen(&si, p2, p3)
+        verbinden.pmk_setzen(&si, p1)
+        verbinden.akm_setzen(&si, 2)
+
+        verbinden.suchlauf_beginnen(&si, &gg)
+        let gefunden: bool = verbinden.beacon_aufnehmen(&si, p0,
+            bl as usize, 0 - 40)
+        let n_netze: usize = verbinden.netz_anzahl(&si)
+        // Netz 0 waehlen. Ist es kein WPA2/WPA3, MUSS das scheitern.
+        let gewaehlt: bool = verbinden.netz_waehlen(&si, &gg, 0)
+        var m1ok: i64 = 0 - 1
+        var m3ok: bool = false
+        if gewaehlt {
+            // Auth und Assoz gehoeren dazwischen -- ohne sie laesst
+            // der Automat keine EAPOL-Nachricht durch.
+            verbinden.auth_angenommen(&si, true)
+            verbinden.assoz_angenommen(&si, true)
+            m1ok = verbinden.nachricht1_behandeln(&si, &gg, p4,
+                ml as usize, (&sn[0]) as u64, po, CAP)
+            if m1ok > 0 && tl > 0 {
+                m3ok = verbinden.nachricht3_behandeln(&si, &gg,
+                    (&m3[0]) as u64, tl as usize)
+            }
+        }
+        var lg: [u8; 8] = "netze=\0\0"
+        tlit((&lg[0]) as u64)
+        tnum(n_netze as u64)
+        var lw: [u8; 8] = " wahl=\0\0"
+        tlit((&lw[0]) as u64)
+        tbit(gewaehlt)
+        var l1: [u8; 6] = " m1=\0\0"
+        tlit((&l1[0]) as u64)
+        tbit(m1ok > 0)
+        var l3: [u8; 6] = " m3=\0\0"
+        tlit((&l3[0]) as u64)
+        tbit(m3ok)
+        var ld: [u8; 8] = " daten=\0"
+        tlit((&ld[0]) as u64)
+        tbit(verbinden.darf_daten_ist(&si))
+        // Das ist die Zahl, auf die es ankommt: wie viele Schluessel
+        // wirklich im GERAET liegen.
+        var lk: [u8; 8] = " skeys=\0"
+        tlit((&lk[0]) as u64)
+        tnum(pruefgeraet.schluessel_anzahl(&pr) as u64)
+        var lgr: [u8; 8] = " grund=\0"
+        tlit((&lgr[0]) as u64)
+        tnum(verbinden.grund_von(&si))
         temit()
         return
     }
