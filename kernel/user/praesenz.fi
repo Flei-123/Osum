@@ -1,0 +1,607 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/praesenz.fi -- RUNDE PRAESENZ: DER PRAESENZDIENST AM BUS.
+//
+//     praesenz dienst [ms]           der Dienst selbst
+//     praesenz setzen <app> <text>   eine App setzt ihren Status
+//     praesenz fokus  <app>          "in <app>" (vom Fensterserver)
+//     praesenz weg | da              abwesend / wieder da
+//     praesenz unsichtbar <an|aus>   niemand sieht mich
+//     praesenz zeigen                was steht gerade
+//
+// ====================================================================
+// WAS DAS IST, UND WAS ES NICHT IST
+// ====================================================================
+//
+// Der Auftrag sagt: "man sieht, was ein Freund gerade macht, aber halt
+// im OS integriert, mit dem OS-Konto". Das sind DREI Dinge, und sie
+// gehoeren getrennt:
+//
+//   1. WER BIN ICH  -> Runde KONTO (`/bin/konto`, drei Anbieter hinter
+//      einer Schnittstelle). Diese Runde baut das NICHT nach, sie fragt.
+//   2. WAS MACHE ICH GERADE -> DIESE DATEI. Ein Dienst am Systembus,
+//      der EINEN Statustext haelt und ihn an Abonnenten verteilt.
+//   3. WER DARF ES SEHEN -> der Freundschaftsgraph am Server. Lokal ist
+//      die Grenze der Benutzer, und die zieht der Kern (A_SAMEUID).
+//
+// DER DIENST LAEUFT AUCH OHNE KONTO. Ohne Anmeldung haelt er den Status
+// lokal, veroeffentlicht ihn auf dem Bus (Leiste und Fensterserver
+// duerfen ihn sehen) und schickt NICHTS ins Netz. Das ist die Regel aus
+// Runde KONTO, woertlich: ein Konto ist eine Bequemlichkeit, es ist nie
+// eine Bedingung.
+//
+// ====================================================================
+// WARUM EIN BUSDIENST UND KEINE DATEI IN /var/run
+// ====================================================================
+//
+// Eine Statusdatei muesste jeder, der sie lesen will, POLLEN -- und der
+// Fensterserver schreibt sie bei JEDEM Fokuswechsel. Der Bus hat genau
+// das Gegenteil: `PUB` schickt eine Kopie an JEDEN Abonnenten, und wer
+// nichts abonniert hat, wird nicht geweckt.
+//
+// Dazu kommt das, was eine Datei nicht kann und `docs/SYSTEMBUS.md`
+// "der ganze Unterschied" nennt: PID UND UID TRAEGT DER KERN EIN, nicht
+// der Absender. Ein Programm kann sich nicht als ein anderes ausgeben,
+// und dieser Dienst muss keinem Absender glauben.
+//
+// Angemeldet wird mit `A_SAMEUID`: nur derselbe Benutzer (und root)
+// darf rufen. Auf einem Mehrbenutzergeraet sieht Benutzer B damit
+// NICHT, was Benutzer A tut -- nicht weil dieses Programm hoeflich ist,
+// sondern weil der Kern die Nachricht gar nicht erst zustellt.
+//
+// ====================================================================
+// DAS PROTOKOLL: 64 OKTETTE, UND WARUM DAS REICHT
+// ====================================================================
+//
+// `bus.MSG_INLINE` ist 64. Was groesser ist, braucht ein Segment -- und
+// ein Segment fuer "spielt Certus" waeren drei Systemrufe fuer dreizehn
+// Zeichen. Also passt ein Status in 64 Oktette, nach festem Bauplan:
+//
+//     Oktett 0      Art     (P_SETZEN, P_FOKUS, ...)
+//     Oktett 1      Zustand (Z_DA, Z_WEG, Z_BESCH, Z_UNSICHT)
+//     Oktett 2      Laenge der App    (0..16)
+//     Oktett 3      Laenge des Textes (0..44)
+//     Oktett 4..19  App    ("certus", "edit", ...)
+//     Oktett 20..63 Text   ("liest xoffi.ai")
+//
+// Die App ist 16 Oktette, weil ein Dienstname am Bus auch 16 ist
+// (`bus.NAME_MAX`) -- dieselbe Grenze zweimal zu fuehren waere eine
+// Einladung fuer den Tag, an dem eine davon waechst.
+//
+// DER TEXT IST 44 OKTETTE UND NICHT LAENGER. Ein abgeschnittener Text
+// ist haesslich, ein Text, der gar nicht ankommt, ist ein Fehler --
+// also wird GEKUERZT und das Kuerzen GEZAEHLT (`z_gekuerzt`, sichtbar
+// in `praesenz zeigen`), damit es beim Messen auffaellt und nicht beim
+// Benutzer.
+//
+// ====================================================================
+// DATENSCHUTZ, UND ZWAR ALS MECHANIK
+// ====================================================================
+//
+//   (a) UNSICHTBAR IST UNSICHTBAR. Steht `z_unsicht`, verlaesst KEIN
+//       Statustext dieses Programm -- der Rahmen wird gar nicht erst
+//       gefuellt (`rahmen_bauen` kehrt vorher um). Die Abonnenten
+//       bekommen Z_UNSICHT und einen LEEREN Text. Nicht "offline
+//       vortaeuschen": ein Freund sieht "unsichtbar" und weiss damit,
+//       dass er nichts sieht. Das ist ehrlicher als eine Luege und
+//       billiger als ein zweiter Zustand, der auseinanderlaufen kann.
+//
+//   (b) DER APP-TEXT IST OPT-IN, JE APP. Eine App darf ihren Text nur
+//       setzen, wenn sie in `/etc/praesenz.conf` unter `text` steht.
+//       Sonst bleibt "in <App>" -- der Name, den der Fensterserver
+//       ohnehin kennt. Der Unterschied ist der zwischen "spielt Certus"
+//       und "liest xoffi.ai", und das zweite ist eine Aussage ueber den
+//       Menschen und nicht ueber das Programm.
+//       FEHLT DIE DATEI, DARF KEINE APP EINEN TEXT SETZEN. Wer nichts
+//       eingestellt hat, verraet nichts.
+//
+//   (c) `fokus` TRAEGT NIE EINEN TEXT. Der Fensterserver kennt den
+//       Fenstertitel, und ein Fenstertitel ist ein Dateiname, eine
+//       Netzadresse oder ein Betreff. Deshalb nimmt `P_FOKUS` den Text
+//       gar nicht erst an (`mit_text` ist dort `false`), statt sich auf
+//       die Erlaubnisliste zu verlassen.
+
+profile kernel
+
+import ulib
+import libc.io
+import wlibc
+
+export { u_start }
+
+// -------------------------------------------------------------- Bus
+const SVC_NAMELEN: u64 = 8
+const A_SAMEUID: u64 = 1
+
+// die Arten einer Nachricht
+const P_SETZEN: u64 = 1   // eine App setzt ihren Status
+const P_FOKUS: u64 = 2    // der Fensterserver meldet einen Wechsel
+const P_WEG: u64 = 3      // abwesend (die Eingabe schweigt)
+const P_DA: u64 = 4       // wieder da
+const P_SICHT: u64 = 5    // unsichtbar an/aus
+const P_EREIGNIS: u64 = 7 // der Dienst veroeffentlicht (PUB)
+
+// die Zustaende
+const Z_DA: u64 = 0
+const Z_WEG: u64 = 1
+const Z_BESCH: u64 = 2
+const Z_UNSICHT: u64 = 3
+
+// der Rahmen
+const R_ART: u64 = 0
+const R_ZUSTAND: u64 = 1
+const R_APPLEN: u64 = 2
+const R_TXTLEN: u64 = 3
+const R_APP: u64 = 4
+const R_APPMAX: u64 = 16
+const R_TXT: u64 = 20
+const R_TXTMAX: u64 = 44
+const R_BYTES: u64 = 64
+
+// -------------------------------------------------------- der Zustand
+static mut z_zustand: u64 = 0
+static mut z_app: [u8; 16] = [0 as u8; 16]
+static mut z_applen: u64 = 0
+static mut z_txt: [u8; 44] = [0 as u8; 44]
+static mut z_txtlen: u64 = 0
+static mut z_unsicht: u64 = 0
+static mut z_seit: u64 = 0     // Ticks, seit wann diese App
+static mut z_gekuerzt: u64 = 0 // wie oft ein Text nicht passte
+static mut z_dienst: u64 = 0
+
+// die Erlaubnisliste aus /etc/praesenz.conf
+static mut e_apps: [u8; 512] = [0 as u8; 512]
+static mut e_len: u64 = 0
+
+static mut svcname: [u8; 9] = "praesenz\0"
+
+fn ld8(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn st8(p: u64, i: u64, v: u64) {
+    *((p + i) as *mut u8) = (v & 255) as u8
+}
+
+fn tlen(p: u64) -> u64 {
+    var n: u64 = 0
+    while ld8(p, n) != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+fn ticks() -> u64 {
+    return ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+}
+
+// ==================================================== DIE ERLAUBNIS
+//
+// /etc/praesenz.conf, eine Zeile je Schluessel:
+//
+//     text certus edit karte     -- diese Apps duerfen einen Text setzen
+//
+// Gelesen wird NUR die `text`-Zeile; alles andere darf darin stehen,
+// ohne dass dieses Programm es deuten muss.
+fn conf_lesen() {
+    e_len = 0
+    var pfad: [u8; 19] = "/etc/praesenz.conf\0"
+    var buf: [u8; 1024] = [0 as u8; 1024]
+    let fd: u64 = io.open((&pfad[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    let n: u64 = io.read(fd, (&buf[0 as usize]) as u64, 1023)
+    io.close(fd)
+    if ulib.bad(n) || n == 0 {
+        return
+    }
+    let bp: u64 = (&buf[0 as usize]) as u64
+    var i: u64 = 0
+    while i < n {
+        var za: bool = false
+        if i == 0 {
+            za = true
+        } else {
+            if ld8(bp, i - 1) == 10 {
+                za = true
+            }
+        }
+        if za && i + 5 <= n {
+            if ld8(bp, i) == 116 && ld8(bp, i + 1) == 101
+                && ld8(bp, i + 2) == 120 && ld8(bp, i + 3) == 116
+                && ld8(bp, i + 4) == 32 {
+                var j: u64 = i + 5
+                while j < n && ld8(bp, j) != 10 && e_len < 511 {
+                    e_apps[e_len as usize] = ld8(bp, j) as u8
+                    e_len = e_len + 1
+                    j = j + 1
+                }
+                if e_len < 511 {
+                    e_apps[e_len as usize] = 32 as u8
+                    e_len = e_len + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Steht diese App in der Erlaubnisliste? Verglichen wird ein GANZES
+// Wort -- "cert" darf nicht durchrutschen, weil "certus" erlaubt ist.
+fn darf_text(app: u64, alen: u64) -> bool {
+    if alen == 0 || e_len == 0 {
+        return false
+    }
+    var i: u64 = 0
+    while i < e_len {
+        var wa: bool = false
+        if i == 0 {
+            wa = true
+        } else {
+            if e_apps[(i - 1) as usize] == 32 as u8 {
+                wa = true
+            }
+        }
+        if wa {
+            var k: u64 = 0
+            var gleich: bool = true
+            while k < alen {
+                if i + k >= e_len {
+                    gleich = false
+                    k = alen
+                } else {
+                    if (e_apps[(i + k) as usize] as u64) != ld8(app, k) {
+                        gleich = false
+                        k = alen
+                    } else {
+                        k = k + 1
+                    }
+                }
+            }
+            if gleich {
+                if i + alen >= e_len {
+                    return true
+                }
+                if e_apps[(i + alen) as usize] == 32 as u8 {
+                    return true
+                }
+            }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// ==================================================== DER RAHMEN
+fn rahmen_bauen(out: u64, art: u64) {
+    var i: u64 = 0
+    while i < R_BYTES {
+        st8(out, i, 0)
+        i = i + 1
+    }
+    st8(out, R_ART, art)
+    // (a) UNSICHTBAR IST UNSICHTBAR: hier wird umgekehrt, bevor
+    // irgendein Oktett des Textes in den Rahmen kommt.
+    if z_unsicht != 0 {
+        st8(out, R_ZUSTAND, Z_UNSICHT)
+        return
+    }
+    st8(out, R_ZUSTAND, z_zustand)
+    st8(out, R_APPLEN, z_applen)
+    st8(out, R_TXTLEN, z_txtlen)
+    i = 0
+    while i < z_applen {
+        st8(out, R_APP + i, z_app[i as usize] as u64)
+        i = i + 1
+    }
+    i = 0
+    while i < z_txtlen {
+        st8(out, R_TXT + i, z_txt[i as usize] as u64)
+        i = i + 1
+    }
+}
+
+// Den eigenen Status setzen. `txt` nur, wenn die App das darf.
+fn setzen(app: u64, alen0: u64, txt: u64, tlen0: u64, mit_text: bool) {
+    var alen: u64 = alen0
+    if alen > R_APPMAX {
+        alen = R_APPMAX
+    }
+    // Wechselt die App, laeuft die Uhr neu ("spielt seit").
+    var anders: bool = alen != z_applen
+    if !anders {
+        var i: u64 = 0
+        while i < alen {
+            if (z_app[i as usize] as u64) != ld8(app, i) {
+                anders = true
+                i = alen
+            } else {
+                i = i + 1
+            }
+        }
+    }
+    var k: u64 = 0
+    while k < alen {
+        z_app[k as usize] = ld8(app, k) as u8
+        k = k + 1
+    }
+    z_applen = alen
+    if anders {
+        z_seit = ticks()
+    }
+    z_txtlen = 0
+    if mit_text && darf_text(app, alen) {
+        var tl: u64 = tlen0
+        if tl > R_TXTMAX {
+            tl = R_TXTMAX
+            z_gekuerzt = z_gekuerzt + 1
+        }
+        k = 0
+        while k < tl {
+            z_txt[k as usize] = ld8(txt, k) as u8
+            k = k + 1
+        }
+        z_txtlen = tl
+    }
+}
+
+// Veroeffentlichen: jeder Abonnent bekommt eine Kopie, und der Kern
+// prueft die Rechte je Abonnent EINZELN.
+fn verteilen() -> u64 {
+    if z_dienst == 0 {
+        return 0
+    }
+    var rahmen: [u8; 64] = [0 as u8; 64]
+    rahmen_bauen((&rahmen[0 as usize]) as u64, P_EREIGNIS)
+    let n: u64 = wlibc.bus_pub(z_dienst, (&rahmen[0 as usize]) as u64, R_BYTES)
+    if ulib.bad(n) {
+        return 0
+    }
+    return n
+}
+
+// Die vier Namen liegen STATISCH und nicht auf dem Stapel: diese
+// Funktion gibt einen Zeiger zurueck, und ein Zeiger in einen Rahmen,
+// der gleich verschwindet, ist ein Fehler, den der Uebersetzer hier
+// auch gemeldet hat ("the address of the local 'b' escapes").
+static mut n_da: [u8; 3] = "da\0"
+static mut n_weg: [u8; 9] = "abwesend\0"
+static mut n_besch: [u8; 13] = "beschaeftigt\0"
+static mut n_unsicht: [u8; 11] = "unsichtbar\0"
+
+fn zustand_name(z: u64) -> u64 {
+    if z == Z_WEG {
+        return (&n_weg[0 as usize]) as u64
+    }
+    if z == Z_BESCH {
+        return (&n_besch[0 as usize]) as u64
+    }
+    if z == Z_UNSICHT {
+        return (&n_unsicht[0 as usize]) as u64
+    }
+    return (&n_da[0 as usize]) as u64
+}
+
+fn zeigen() {
+    var t1: [u8; 19] = "praesenz: zustand=\0"
+    ulib.say((&t1[0 as usize]) as u64)
+    if z_unsicht != 0 {
+        ulib.say(zustand_name(Z_UNSICHT))
+    } else {
+        ulib.say(zustand_name(z_zustand))
+    }
+    var t2: [u8; 6] = " app=\0"
+    ulib.say((&t2[0 as usize]) as u64)
+    if z_applen > 0 {
+        ulib.put((&z_app[0 as usize]) as u64, z_applen)
+    }
+    var t3: [u8; 7] = " text=\0"
+    ulib.say((&t3[0 as usize]) as u64)
+    // (a) auch die eigene Anzeige sagt, dass nichts hinausgeht
+    if z_unsicht == 0 && z_txtlen > 0 {
+        ulib.put((&z_txt[0 as usize]) as u64, z_txtlen)
+    }
+    var t4: [u8; 7] = " seit=\0"
+    ulib.say((&t4[0 as usize]) as u64)
+    ulib.sayn(z_seit)
+    var t5: [u8; 11] = " gekuerzt=\0"
+    ulib.say((&t5[0 as usize]) as u64)
+    ulib.sayn(z_gekuerzt)
+    ulib.nl()
+}
+
+// ==================================================== DER DIENST
+//
+// Anmelden, dann Nachrichten annehmen. `RECV` auf einen leeren Eingang
+// gibt sofort -5 (der Bus blockiert nicht), also wird `sched_yield`
+// gerufen und wieder gefragt -- genau das, was die drei Messprogramme
+// des Busses tun.
+fn dienst(ms: u64) -> u64 {
+    conf_lesen()
+    z_dienst = wlibc.bus_reg((&svcname[0 as usize]) as u64, SVC_NAMELEN,
+        A_SAMEUID)
+    if ulib.bad(z_dienst) {
+        var e: [u8; 37] = "praesenz: Bus nimmt den Dienst nicht\0"
+        ulib.say((&e[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    var m1: [u8; 25] = "praesenz: dienst nummer=\0"
+    ulib.say((&m1[0 as usize]) as u64)
+    ulib.sayn(z_dienst)
+    ulib.nl()
+
+    let start: u64 = ticks()
+    var puffer: [u8; 64] = [0 as u8; 64]
+    var kopf: [u64; 6] = [0 as u64; 6]
+    let pp: u64 = (&puffer[0 as usize]) as u64
+    var lauf: bool = true
+    while lauf {
+        let n: u64 = wlibc.bus_recv(pp, R_BYTES, (&kopf[0 as usize]) as u64)
+        if !ulib.bad(n) && n > 0 {
+            let art: u64 = ld8(pp, R_ART)
+            if art == P_SETZEN || art == P_FOKUS {
+                // (c) `fokus` traegt nie einen Text -- ein Fenstertitel
+                // ist ein Dateiname, eine Adresse oder ein Betreff.
+                setzen(pp + R_APP, ld8(pp, R_APPLEN),
+                    pp + R_TXT, ld8(pp, R_TXTLEN), art == P_SETZEN)
+                if z_zustand == Z_WEG {
+                    z_zustand = Z_DA
+                }
+                verteilen()
+            }
+            if art == P_WEG {
+                z_zustand = Z_WEG
+                verteilen()
+            }
+            if art == P_DA {
+                z_zustand = Z_DA
+                verteilen()
+            }
+            if art == P_SICHT {
+                z_unsicht = ld8(pp, R_ZUSTAND)
+                verteilen()
+            }
+        } else {
+            ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
+        }
+        if ms != 0 {
+            if ticks() - start >= ms {
+                lauf = false
+            }
+        }
+    }
+    return 0
+}
+
+// Eine Nachricht AN den Dienst schicken. `setzen`/`fokus`/`weg`/`da`
+// tun nichts selbst: der Dienst ist die EINZIGE Stelle, die den Zustand
+// haelt. Zwei Programme mit je einer Wahrheit sind zwei Wahrheiten.
+fn schicken(art: u64, app: u64, txt: u64, sicht: u64) -> u64 {
+    let svc: u64 = wlibc.bus_find((&svcname[0 as usize]) as u64, SVC_NAMELEN)
+    if ulib.bad(svc) {
+        var e: [u8; 25] = "praesenz: kein Dienst da\0"
+        ulib.say((&e[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    var rahmen: [u8; 64] = [0 as u8; 64]
+    let rp: u64 = (&rahmen[0 as usize]) as u64
+    var i: u64 = 0
+    while i < R_BYTES {
+        st8(rp, i, 0)
+        i = i + 1
+    }
+    st8(rp, R_ART, art)
+    st8(rp, R_ZUSTAND, sicht)
+    if app != 0 {
+        var al: u64 = tlen(app)
+        if al > R_APPMAX {
+            al = R_APPMAX
+        }
+        st8(rp, R_APPLEN, al)
+        i = 0
+        while i < al {
+            st8(rp, R_APP + i, ld8(app, i))
+            i = i + 1
+        }
+    }
+    if txt != 0 {
+        var tl: u64 = tlen(txt)
+        if tl > R_TXTMAX {
+            tl = R_TXTMAX
+        }
+        st8(rp, R_TXTLEN, tl)
+        i = 0
+        while i < tl {
+            st8(rp, R_TXT + i, ld8(txt, i))
+            i = i + 1
+        }
+    }
+    let r: u64 = wlibc.bus_send(svc, rp, R_BYTES)
+    if ulib.bad(r) {
+        var e2: [u8; 28] = "praesenz: der Bus sagt nein\0"
+        ulib.say((&e2[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    let argc: u64 = ulib.arg_count(args)
+    if argc < 2 {
+        var h1: [u8; 43] = "praesenz dienst [ms]           der Dienst\n\0"
+        var h2: [u8; 46] = "praesenz setzen <app> <text>   Status setzen\n\0"
+        var h3: [u8; 41] = "praesenz fokus <app>           in <app>\n\0"
+        var h4: [u8; 41] = "praesenz weg | da              abwesend\n\0"
+        var h5: [u8; 46] = "praesenz unsichtbar <an|aus>   niemand sieht\n\0"
+        var h6: [u8; 42] = "praesenz zeigen                der Stand\n\0"
+        ulib.say((&h1[0 as usize]) as u64)
+        ulib.say((&h2[0 as usize]) as u64)
+        ulib.say((&h3[0 as usize]) as u64)
+        ulib.say((&h4[0 as usize]) as u64)
+        ulib.say((&h5[0 as usize]) as u64)
+        ulib.say((&h6[0 as usize]) as u64)
+        return 1
+    }
+    let cmd: u64 = ulib.arg_at(args, 1)
+    var c_dienst: [u8; 7] = "dienst\0"
+    var c_zeigen: [u8; 7] = "zeigen\0"
+    var c_setzen: [u8; 7] = "setzen\0"
+    var c_fokus: [u8; 6] = "fokus\0"
+    var c_weg: [u8; 4] = "weg\0"
+    var c_da: [u8; 3] = "da\0"
+    var c_unsicht: [u8; 11] = "unsichtbar\0"
+    var c_an: [u8; 3] = "an\0"
+
+    if ulib.streq(cmd, (&c_dienst[0 as usize]) as u64) {
+        var ms: u64 = 0
+        if argc >= 3 {
+            ms = ulib.to_num(ulib.arg_at(args, 2))
+        }
+        return dienst(ms)
+    }
+    if ulib.streq(cmd, (&c_zeigen[0 as usize]) as u64) {
+        conf_lesen()
+        zeigen()
+        return 0
+    }
+    if ulib.streq(cmd, (&c_setzen[0 as usize]) as u64) {
+        var app: u64 = 0
+        var txt: u64 = 0
+        if argc >= 3 {
+            app = ulib.arg_at(args, 2)
+        }
+        if argc >= 4 {
+            txt = ulib.arg_at(args, 3)
+        }
+        return schicken(P_SETZEN, app, txt, 0)
+    }
+    if ulib.streq(cmd, (&c_fokus[0 as usize]) as u64) {
+        var app2: u64 = 0
+        if argc >= 3 {
+            app2 = ulib.arg_at(args, 2)
+        }
+        return schicken(P_FOKUS, app2, 0, 0)
+    }
+    if ulib.streq(cmd, (&c_weg[0 as usize]) as u64) {
+        return schicken(P_WEG, 0, 0, 0)
+    }
+    if ulib.streq(cmd, (&c_da[0 as usize]) as u64) {
+        return schicken(P_DA, 0, 0, 0)
+    }
+    if ulib.streq(cmd, (&c_unsicht[0 as usize]) as u64) {
+        var an: u64 = 0
+        if argc >= 3 {
+            if ulib.streq(ulib.arg_at(args, 2), (&c_an[0 as usize]) as u64) {
+                an = 1
+            }
+        }
+        return schicken(P_SICHT, 0, 0, an)
+    }
+    var e3: [u8; 20] = "praesenz: unbekannt\0"
+    ulib.say((&e3[0 as usize]) as u64)
+    ulib.nl()
+    return 1
+}
