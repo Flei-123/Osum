@@ -1,0 +1,332 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/app/kmsg.fi -- RUNDE KONTO: der Textkatalog, im App-Profil.
+//
+// ============================== WARUM DAS NICHT kernel/user/msg.fi IST
+//
+// Es gibt in diesem Baum genau einen Textkatalog, und er liegt in
+// `kernel/user/msg.fi`. Diese Datei ist KEIN zweiter Katalog: sie liest
+// DIESELBEN DATEIEN, mit DEMSELBEN Format und DENSELBEN Schluesseln --
+//
+//     /usr/share/locale/en/messages     die Quellsprache
+//     /usr/share/locale/<code>/messages die Uebersetzung darueber
+//
+// -- und sie existiert nur, weil `msg.fi` `profile kernel` ist:
+// freistehend, ohne Halde, mit festen Plaetzen je Schluessel. Ein
+// Programm mit `--profile=app` (TLS braucht eine Halde, siehe
+// `kernel/app/fetch.fi`) kann es nicht einbinden. Die Profilgrenze
+// laeuft mitten durch das Programm, nicht durch die Daten.
+//
+// DASS ES WIRKLICH DIESELBEN TEXTE SIND, WIRD GEMESSEN und nicht
+// geglaubt: `tools/konto/run.sh` Abschnitt 2 laesst `/bin/i18nt` (das
+// ueber `msg.fi` geht) und `/bin/konto --text <schluessel>` (das ueber
+// diese Datei geht) denselben Schluessel nachschlagen und haelt die
+// Antworten gegeneinander -- auf Deutsch und auf Englisch.
+//
+// Die Reihenfolge der Sprachwahl ist die von `msg.fi`, Wort fuer Wort:
+//   1. /users/<benutzer>/config/locale   die WAHL des Benutzers
+//   2. /etc/locale.conf                  die VORGABE des Systems
+//   3. "en"                              die Quellsprache
+//
+// UND EIN FEHLENDER SCHLUESSEL ERGIBT NIE EINEN LEEREN TEXT: gibt der
+// Katalog nichts her, kommt der SCHLUESSEL zurueck. Ein Programm, das
+// ploetzlich nichts mehr sagt, ist schlimmer als eines, das einmal
+// `konto.hint.badjson` sagt.
+
+import std.rt
+import std.io
+
+export { laden, get, sprache, entfalten, benutzername }
+
+static mut geladen: bool = false
+
+// Der Katalog liegt als EIN Puffer im Speicher, und `get` gibt einen
+// Zeiger hinein. Anders als `msg.fi` braucht diese Datei dafuer keine
+// festen Plaetze: hier haengt kein Bedienelement an dem Zeiger, der
+// Text wird sofort geschrieben. Das ist der ganze Unterschied, und er
+// steht in `msg.fi` ausfuehrlich begruendet.
+static mut katalog: rt.Buf = rt.Buf { ptr: 0, len: 0, cap: 0 }
+static mut lang: rt.Buf = rt.Buf { ptr: 0, len: 0, cap: 0 }
+static mut ausgabe: rt.Buf = rt.Buf { ptr: 0, len: 0, cap: 0 }
+
+fn zeile_von(b: *mut rt.Buf, i: usize, e: *mut usize) -> usize {
+    var k: usize = i
+    while k < (*b).len && rt.ld8((*b).ptr, k) != 10 as u8 {
+        k = k + 1
+    }
+    *e = k
+    return i
+}
+
+// `lang=de` aus einer Datei im Format `schluessel=wert`.
+fn lang_aus_conf(pfad: u64, aus: *mut rt.Buf) -> bool {
+    var b: rt.Buf = rt.buf_new()
+    if !rt.read_file(pfad, &b) {
+        rt.buf_free(&b)
+        return false
+    }
+    var i: usize = 0
+    var gut: bool = false
+    while i < b.len {
+        var e: usize = 0
+        let a: usize = zeile_von(&b, i, &e)
+        var t: usize = a
+        while t < e && (rt.ld8(b.ptr, t) == 32 as u8
+            || rt.ld8(b.ptr, t) == 9 as u8) {
+            t = t + 1
+        }
+        if t < e && rt.ld8(b.ptr, t) != 35 as u8 {
+            var n: [u8; 5] = "lang\0"
+            if t + 4 <= e && rt.mem_eq(b.ptr + t as u64,
+                (&n[0]) as u64, 4) {
+                var q: usize = t + 4
+                while q < e && (rt.ld8(b.ptr, q) == 32 as u8
+                    || rt.ld8(b.ptr, q) == 9 as u8) {
+                    q = q + 1
+                }
+                if q < e && rt.ld8(b.ptr, q) == 61 as u8 {
+                    q = q + 1
+                    while q < e && (rt.ld8(b.ptr, q) == 32 as u8
+                        || rt.ld8(b.ptr, q) == 9 as u8) {
+                        q = q + 1
+                    }
+                    var f: usize = e
+                    while f > q && (rt.ld8(b.ptr, f - 1) == 13 as u8
+                        || rt.ld8(b.ptr, f - 1) == 32 as u8) {
+                        f = f - 1
+                    }
+                    if f > q {
+                        rt.buf_clear(aus)
+                        rt.buf_push_bytes(aus, b.ptr + q as u64, f - q)
+                        gut = true
+                    }
+                }
+            }
+        }
+        i = e + 1
+    }
+    rt.buf_free(&b)
+    return gut
+}
+
+// Eine Datei, deren ganzer Inhalt der Sprachcode ist
+// (/users/<x>/config/locale, so schreibt es `msg.fi`).
+fn lang_aus_datei(pfad: u64, aus: *mut rt.Buf) -> bool {
+    var b: rt.Buf = rt.buf_new()
+    if !rt.read_file(pfad, &b) {
+        rt.buf_free(&b)
+        return false
+    }
+    var n: usize = 0
+    while n < b.len {
+        let c: u8 = rt.ld8(b.ptr, n)
+        if c == 10 as u8 || c == 13 as u8 || c == 32 as u8 || c == 0 as u8 {
+            break
+        }
+        n = n + 1
+    }
+    if n == 0 {
+        rt.buf_free(&b)
+        return false
+    }
+    rt.buf_clear(aus)
+    rt.buf_push_bytes(aus, b.ptr, n)
+    rt.buf_free(&b)
+    return true
+}
+
+fn benutzername(aus: *mut rt.Buf) -> bool {
+    let uid: i64 = syscall(102, 0, 0, 0, 0, 0, 0)
+    var pw: [u8; 12] = "/etc/passwd\0"
+    var b: rt.Buf = rt.buf_new()
+    if !rt.read_file((&pw[0]) as u64, &b) {
+        rt.buf_free(&b)
+        return false
+    }
+    var i: usize = 0
+    var gut: bool = false
+    while i < b.len {
+        var e: usize = 0
+        let a: usize = zeile_von(&b, i, &e)
+        // name:x:uid:...
+        var f1: usize = a
+        while f1 < e && rt.ld8(b.ptr, f1) != 58 as u8 {
+            f1 = f1 + 1
+        }
+        var f2: usize = f1 + 1
+        while f2 < e && rt.ld8(b.ptr, f2) != 58 as u8 {
+            f2 = f2 + 1
+        }
+        var f3: usize = f2 + 1
+        var v: i64 = 0
+        var k: usize = f3
+        while k < e && rt.ld8(b.ptr, k) >= 48 as u8
+            && rt.ld8(b.ptr, k) <= 57 as u8 {
+            v = v * 10 + (rt.ld8(b.ptr, k) - 48 as u8) as i64
+            k = k + 1
+        }
+        if k > f3 && v == uid && !gut {
+            rt.buf_clear(aus)
+            rt.buf_push_bytes(aus, b.ptr + a as u64, f1 - a)
+            gut = true
+        }
+        i = e + 1
+    }
+    rt.buf_free(&b)
+    return gut
+}
+
+fn sprache_waehlen() {
+    rt.buf_clear(&lang)
+    var wer: rt.Buf = rt.buf_new()
+    if benutzername(&wer) {
+        var pf: rt.Buf = rt.buf_new()
+        var a: [u8; 8] = "/users/\0"
+        var b: [u8; 15] = "/config/locale\0"
+        rt.buf_push_bytes(&pf, (&a[0]) as u64, 7)
+        rt.buf_push_bytes(&pf, wer.ptr, wer.len)
+        rt.buf_push_bytes(&pf, (&b[0]) as u64, 14)
+        rt.buf_push(&pf, 0 as u8)
+        let da: bool = lang_aus_datei(pf.ptr, &lang)
+        rt.buf_free(&pf)
+        rt.buf_free(&wer)
+        if da {
+            return
+        }
+    } else {
+        rt.buf_free(&wer)
+    }
+    var sc: [u8; 17] = "/etc/locale.conf\0"
+    if lang_aus_conf((&sc[0]) as u64, &lang) {
+        return
+    }
+    var en: [u8; 3] = "en\0"
+    rt.buf_push_bytes(&lang, (&en[0]) as u64, 2)
+}
+
+fn katalog_datei(code: u64, cl: usize, aus: *mut rt.Buf) {
+    var a: [u8; 19] = "/usr/share/locale/\0"
+    var b: [u8; 10] = "/messages\0"
+    rt.buf_push_bytes(aus, (&a[0]) as u64, 18)
+    rt.buf_push_bytes(aus, code, cl)
+    rt.buf_push_bytes(aus, (&b[0]) as u64, 9)
+    rt.buf_push(aus, 0 as u8)
+}
+
+fn laden() {
+    if geladen {
+        return
+    }
+    geladen = true
+    sprache_waehlen()
+    rt.buf_clear(&katalog)
+    var en: [u8; 3] = "en\0"
+    var pf: rt.Buf = rt.buf_new()
+    katalog_datei((&en[0]) as u64, 2, &pf)
+    let _e: bool = rt.read_file(pf.ptr, &katalog)
+    rt.buf_free(&pf)
+    // Die Uebersetzung wird ANGEHAENGT, nicht ersetzt -- und `get` liest
+    // von HINTEN. Damit gewinnt die Uebersetzung, und was sie nicht hat,
+    // bleibt englisch. Das ist dieselbe Regel wie in `msg.fi`, mit dem
+    // billigsten Verfahren, das sie erfuellt.
+    if lang.len > 0 && !(lang.len == 2 && rt.mem_eq(lang.ptr,
+        (&en[0]) as u64, 2)) {
+        var pf2: rt.Buf = rt.buf_new()
+        katalog_datei(lang.ptr, lang.len, &pf2)
+        var zweit: rt.Buf = rt.buf_new()
+        if rt.read_file(pf2.ptr, &zweit) {
+            rt.buf_push(&katalog, 10 as u8)
+            rt.buf_push_bytes(&katalog, zweit.ptr, zweit.len)
+        }
+        rt.buf_free(&zweit)
+        rt.buf_free(&pf2)
+    }
+}
+
+fn sprache() -> u64 {
+    laden()
+    rt.buf_push(&lang, 0 as u8)
+    rt.buf_set_len(&lang, lang.len - 1)
+    return lang.ptr
+}
+
+// `\n`, `\t` und `\\` aufloesen, wie `msg.fi` es tut.
+fn entfalten(p: u64, n: usize, aus: *mut rt.Buf) {
+    var i: usize = 0
+    while i < n {
+        let c: u8 = rt.ld8(p, i)
+        if c == 92 as u8 && i + 1 < n {
+            let d: u8 = rt.ld8(p, i + 1)
+            if d == 110 as u8 {
+                rt.buf_push(aus, 10 as u8)
+                i = i + 2
+            } else if d == 116 as u8 {
+                rt.buf_push(aus, 9 as u8)
+                i = i + 2
+            } else if d == 92 as u8 {
+                rt.buf_push(aus, 92 as u8)
+                i = i + 2
+            } else {
+                rt.buf_push(aus, c)
+                i = i + 1
+            }
+        } else {
+            rt.buf_push(aus, c)
+            i = i + 1
+        }
+    }
+}
+
+// Der Text zu einem Schluessel. Der Zeiger zeigt in einen Puffer dieser
+// Datei und gilt bis zum naechsten `get` -- fuer ein Programm, das
+// sofort schreibt, ist das genug, und die Begruendung, warum das fuer
+// die OBERFLAECHE nicht genug waere, steht in `msg.fi`.
+fn get(key: u64) -> u64 {
+    laden()
+    let kl: usize = rt.c_length(key)
+    rt.buf_clear(&ausgabe)
+    var i: usize = 0
+    var treffer: usize = 0
+    var trefferende: usize = 0
+    var da: bool = false
+    while i < katalog.len {
+        var e: usize = 0
+        let a: usize = zeile_von(&katalog, i, &e)
+        var t: usize = a
+        while t < e && (rt.ld8(katalog.ptr, t) == 32 as u8
+            || rt.ld8(katalog.ptr, t) == 9 as u8) {
+            t = t + 1
+        }
+        if t + kl < e && rt.ld8(katalog.ptr, t) != 35 as u8 {
+            if rt.mem_eq(katalog.ptr + t as u64, key, kl) {
+                var q: usize = t + kl
+                while q < e && (rt.ld8(katalog.ptr, q) == 32 as u8
+                    || rt.ld8(katalog.ptr, q) == 9 as u8) {
+                    q = q + 1
+                }
+                if q < e && rt.ld8(katalog.ptr, q) == 61 as u8 {
+                    q = q + 1
+                    while q < e && rt.ld8(katalog.ptr, q) == 32 as u8 {
+                        q = q + 1
+                    }
+                    var f: usize = e
+                    while f > q && rt.ld8(katalog.ptr, f - 1) == 13 as u8 {
+                        f = f - 1
+                    }
+                    treffer = q
+                    trefferende = f
+                    da = true
+                }
+            }
+        }
+        i = e + 1
+    }
+    if !da {
+        rt.buf_push_bytes(&ausgabe, key, kl)
+    } else {
+        entfalten(katalog.ptr + treffer as u64, trefferende - treffer,
+            &ausgabe)
+    }
+    rt.buf_push(&ausgabe, 0 as u8)
+    rt.buf_set_len(&ausgabe, ausgabe.len - 1)
+    return ausgabe.ptr
+}
