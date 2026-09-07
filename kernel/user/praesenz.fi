@@ -118,6 +118,7 @@ const P_FOKUS: u64 = 2    // der Fensterserver meldet einen Wechsel
 const P_WEG: u64 = 3      // abwesend (die Eingabe schweigt)
 const P_DA: u64 = 4       // wieder da
 const P_SICHT: u64 = 5    // unsichtbar an/aus
+const P_FRAGE: u64 = 6    // "sag den Stand" -> der Dienst schickt PUB
 const P_EREIGNIS: u64 = 7 // der Dienst veroeffentlicht (PUB)
 
 // die Zustaende
@@ -146,7 +147,17 @@ static mut z_txtlen: u64 = 0
 static mut z_unsicht: u64 = 0
 static mut z_seit: u64 = 0     // Ticks, seit wann diese App
 static mut z_gekuerzt: u64 = 0 // wie oft ein Text nicht passte
-static mut z_dienst: u64 = 0
+// KEINE DIENSTNUMMER, UND ZWAR NICHT 0. Das war der teuerste Fehler
+// dieser Runde: `bus_reg` gibt die Nummer des Dienstes zurueck, und der
+// erste angemeldete Dienst im System bekommt die **0**. Der Waechter
+// `if z_dienst == 0 { return 0 }` in `verteilen` hielt genau diesen
+// Fall fuer "noch nicht angemeldet" und kehrte um, BEVOR er
+// veroeffentlichte. Der Dienst nahm Nachrichten an (`DIAG recv art=1`),
+// tat aber nichts damit -- und `praesenz zeigen` wartete auf eine
+// Antwort, die nie kam ("der Dienst schweigt"). Ein Sentinel muss
+// ausserhalb des Wertebereichs liegen; SVC_MAX ist 64.
+const KEIN_DIENST: u64 = 0xFFFFFFFF
+static mut z_dienst: u64 = 0xFFFFFFFF
 
 // die Erlaubnisliste aus /etc/praesenz.conf
 static mut e_apps: [u8; 512] = [0 as u8; 512]
@@ -348,7 +359,7 @@ fn setzen(app: u64, alen0: u64, txt: u64, tlen0: u64, mit_text: bool) {
 // Veroeffentlichen: jeder Abonnent bekommt eine Kopie, und der Kern
 // prueft die Rechte je Abonnent EINZELN.
 fn verteilen() -> u64 {
-    if z_dienst == 0 {
+    if z_dienst == KEIN_DIENST {
         return 0
     }
     var rahmen: [u8; 64] = [0 as u8; 64]
@@ -416,7 +427,9 @@ fn zeigen() {
 // gibt sofort -5 (der Bus blockiert nicht), also wird `sched_yield`
 // gerufen und wieder gefragt -- genau das, was die drei Messprogramme
 // des Busses tun.
-fn dienst(ms: u64) -> u64 {
+// `frist` zaehlt TICKS und nicht Millisekunden: `I_TICKS` laeuft mit
+// `time.TICK_HZ` = 100 Hz, ein Tick ist also 10 ms.
+fn dienst(frist: u64) -> u64 {
     conf_lesen()
     z_dienst = wlibc.bus_reg((&svcname[0 as usize]) as u64, SVC_NAMELEN,
         A_SAMEUID)
@@ -462,11 +475,19 @@ fn dienst(ms: u64) -> u64 {
                 z_unsicht = ld8(pp, R_ZUSTAND)
                 verteilen()
             }
+            // "SAG DEN STAND". Der Bus kann nur an DIENSTE senden, nicht
+            // an eine pid (docs/SYSTEMBUS.md, Tafel der Op-Woerter) --
+            // eine Antwort ist deshalb eine zweite Nachricht in die
+            // andere Richtung, und die geht hier ueber PUB an alle, die
+            // abonniert haben. Genau so fragt `praesenz zeigen`.
+            if art == P_FRAGE {
+                verteilen()
+            }
         } else {
             ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
         }
-        if ms != 0 {
-            if ticks() - start >= ms {
+        if frist != 0 {
+            if ticks() - start >= frist {
                 lauf = false
             }
         }
@@ -528,6 +549,85 @@ fn schicken(art: u64, app: u64, txt: u64, sicht: u64) -> u64 {
     return 0
 }
 
+// Den Dienst nach dem Stand fragen: abonnieren, fragen, warten.
+// Ohne laufenden Dienst gibt es keinen Stand -- und das wird gesagt,
+// statt Nullen zu drucken.
+fn fragen() -> u64 {
+    let svc: u64 = wlibc.bus_find((&svcname[0 as usize]) as u64, SVC_NAMELEN)
+    if ulib.bad(svc) {
+        var e: [u8; 25] = "praesenz: kein Dienst da\0"
+        ulib.say((&e[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    // ERST ABONNIEREN, DANN FRAGEN. Andersherum ist die Antwort
+    // vielleicht schon durch, bevor jemand zuhoert.
+    if ulib.bad(wlibc.bus_sub(svc)) {
+        var e2: [u8; 24] = "praesenz: Abo abgelehnt\0"
+        ulib.say((&e2[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    var rahmen: [u8; 64] = [0 as u8; 64]
+    let rp: u64 = (&rahmen[0 as usize]) as u64
+    var i: u64 = 0
+    while i < R_BYTES {
+        st8(rp, i, 0)
+        i = i + 1
+    }
+    st8(rp, R_ART, P_FRAGE)
+    if ulib.bad(wlibc.bus_send(svc, rp, R_BYTES)) {
+        var e3: [u8; 28] = "praesenz: der Bus sagt nein\0"
+        ulib.say((&e3[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    // Auf die Veroeffentlichung warten. Der Bus blockiert nicht, also
+    // wird gefragt und nachgegeben -- mit einer Obergrenze, damit ein
+    // stummer Dienst diesen Aufruf nicht ewig haelt.
+    var puffer: [u8; 64] = [0 as u8; 64]
+    var kopf: [u64; 6] = [0 as u64; 6]
+    let pp: u64 = (&puffer[0 as usize]) as u64
+    // AN DER UHR und nicht an Schleifenrunden: der Dienst ist ein
+    // anderer Prozess und muss vom Planer erst drangenommen werden.
+    // 200 Ticks = 2 s bei 100 Hz (time.TICK_HZ).
+    let t0: u64 = ticks()
+    while ticks() - t0 < 200 {
+        let n: u64 = wlibc.bus_recv(pp, R_BYTES, (&kopf[0 as usize]) as u64)
+        if !ulib.bad(n) && n > 0 {
+            if ld8(pp, R_ART) == P_EREIGNIS {
+                // Den empfangenen Rahmen in die eigenen Felder legen und
+                // dann drucken -- so gibt `zeigen` den Stand DES
+                // DIENSTES aus und nicht den eigenen.
+                z_zustand = ld8(pp, R_ZUSTAND)
+                z_unsicht = 0
+                if z_zustand == Z_UNSICHT {
+                    z_unsicht = 1
+                }
+                z_applen = ld8(pp, R_APPLEN)
+                z_txtlen = ld8(pp, R_TXTLEN)
+                var k: u64 = 0
+                while k < z_applen {
+                    z_app[k as usize] = ld8(pp, R_APP + k) as u8
+                    k = k + 1
+                }
+                k = 0
+                while k < z_txtlen {
+                    z_txt[k as usize] = ld8(pp, R_TXT + k) as u8
+                    k = k + 1
+                }
+                zeigen()
+                return 0
+            }
+        }
+        ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
+    }
+    var e4: [u8; 30] = "praesenz: der Dienst schweigt\0"
+    ulib.say((&e4[0 as usize]) as u64)
+    ulib.nl()
+    return 1
+}
+
 fn u_start(args: u64) -> u64 {
     let argc: u64 = ulib.arg_count(args)
     if argc < 2 {
@@ -556,16 +656,23 @@ fn u_start(args: u64) -> u64 {
     var c_an: [u8; 3] = "an\0"
 
     if ulib.streq(cmd, (&c_dienst[0 as usize]) as u64) {
-        var ms: u64 = 0
+        var frist: u64 = 0
         if argc >= 3 {
-            ms = ulib.to_num(ulib.arg_at(args, 2))
+            frist = ulib.to_num(ulib.arg_at(args, 2))
         }
-        return dienst(ms)
+        return dienst(frist)
     }
     if ulib.streq(cmd, (&c_zeigen[0 as usize]) as u64) {
+        // NICHT die eigenen Werte drucken. DAS WAR EIN FEHLER DIESER
+        // RUNDE, und die Abnahme hat ihn gefunden: `praesenz zeigen`
+        // ist ein EIGENER PROZESS mit eigenen Statics, die alle null
+        // sind. Er hat damit den Stand eines Dienstes gemeldet, den er
+        // nie gefragt hatte -- und die Zusage "zustand=unsichtbar" war
+        // rot, obwohl der Dienst recht hatte.
+        //
+        // Richtig ist: abonnieren, fragen, die Antwort abwarten.
         conf_lesen()
-        zeigen()
-        return 0
+        return fragen()
     }
     if ulib.streq(cmd, (&c_setzen[0 as usize]) as u64) {
         var app: u64 = 0
