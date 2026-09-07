@@ -1,0 +1,417 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/crypto/scrypt.fi -- scrypt nach RFC 7914, und PBKDF2-HMAC-SHA256
+// darunter, in der allgemeinen Form.
+//
+// RUNDE SYNC. Die Passphrase des Nutzers oeffnet die Daten. Zwischen
+// "was ein Mensch sich merken kann" und "ein Schluessel von 32 Oktetten"
+// steht diese Datei, und sie ist die einzige Stelle der Runde, an der
+// eine Sekunde Rechenzeit ein MERKMAL und kein Fehler ist.
+//
+// ================================ WARUM NICHT ARGON2ID, EHRLICH GESAGT
+//
+// Der Auftrag nennt Argon2id zuerst und scrypt als Rueckfall mit
+// Begruendung. Hier ist die Begruendung, und sie ist eine Tatsache ueber
+// diesen Baum und keine Meinung:
+//
+//   1. ARGON2 BRAUCHT BLAKE2b. Nicht BLAKE2s. Der Baum hat
+//      `lib/crypto/blake2s.fi` (32-Bit-Worte, 64er Block, aus Runde
+//      TUNNEL, weil WireGuard es vorschreibt) und kein BLAKE2b
+//      (64-Bit-Worte, 128er Block, andere Rotationen, andere
+//      Rundenzahl). Argon2 waere also: eine zweite Hashfunktion neu
+//      schreiben, DANN das Argon2-Mischwerk, und beides selbstgebaut.
+//      Zwei neue Kryptobausteine in einer Runde, deren Aufgabe der
+//      Abgleich ist -- das ist genau der Weg, auf dem man etwas baut,
+//      das fertig aussieht.
+//   2. SCRYPT KOMMT AUS DEM, WAS SCHON GEMESSEN IST. Es braucht
+//      PBKDF2-HMAC-SHA256 (SHA-256 steht seit Runde TRESOR gegen
+//      `hashlib`, HMAC gegen Pythons `hmac`) und Salsa20/8, den kleinen
+//      Bruder der ChaCha-Rundenfunktion, die in `chacha.fi` seit Runde
+//      TUNNEL gegen RFC 8439 gemessen ist. Der einzige wirklich neue
+//      Teil ist die Speicherschleife.
+//   3. SCRYPT IST GEGENPRUEFBAR, OHNE DASS WIR ETWAS INSTALLIEREN
+//      MUESSEN. Pythons `hashlib.scrypt` ist in der Standardbibliothek
+//      (ueber OpenSSL). `hashlib.argon2` gibt es nicht, und
+//      `argon2-cffi` ist auf diesem Wirt nicht vorhanden -- eine
+//      selbstgebaute Kryptographie ohne fremde Gegenrechnung waere die
+//      schlechteste aller Fassungen.
+//
+// Beide sind speicherhart, beide sind in seriosen Systemen im Einsatz
+// (scrypt: Tarsnap, Litecoin, `cryptsetup --pbkdf`), und der Unterschied
+// -- Argon2ids besserer Widerstand gegen Angreifer, die Seitenkanaele und
+// Zeit-Speicher-Handel kombinieren -- ist real, aber kleiner als der
+// Unterschied zwischen "gemessen" und "selbstgebaut und ungeprueft".
+// WENN BLAKE2b IN DIESEN BAUM KOMMT, IST ARGON2ID DER NAECHSTE SCHRITT,
+// und die Kopfzeile des Schluesselbunds nennt das Verfahren, damit ein
+// Wechsel nichts Bestehendes ungueltig macht.
+//
+// ================================================== WAS SPEICHERHART HEISST
+//
+// PBKDF2 ist nur RECHENhart: es braucht viele Hashrunden und ein paar
+// hundert Oktette Speicher. Eine Grafikkarte hat tausende schwacher
+// Kerne und wenig Speicher je Kern -- gegen PBKDF2 gewinnt sie deshalb
+// um Groessenordnungen. scrypt zwingt jeden Versuch, N * 128 * r Oktette
+// ZU BEHALTEN und in zufaelliger Reihenfolge wieder zu lesen. Wer den
+// Speicher spart, zahlt es quadratisch in Rechenzeit zurueck. Das ist
+// der ganze Trick, und er steht in Abschnitt 4 von RFC 7914.
+//
+// Die drei Zahlen:
+//
+//     N   Kostenfaktor, ZWEIERPOTENZ. Speicher = N * 128 * r Oktette.
+//     r   Blockgroesse. r = 8 ist der uebliche Wert (1 KiB je Element),
+//         weil er zur Zeilengroesse des Speichers passt.
+//     p   Parallelitaet. Hier immer 1: dieses Userland hat keine Faeden,
+//         und p > 1 waere Rechenzeit ohne den Nutzen.
+//
+// ============================================== DER PUFFER KOMMT VON AUSSEN
+//
+// `scrypt` bekommt den Arbeitsspeicher als Zeiger und Laenge. Das ist
+// KEIN Notbehelf, sondern die einzige ehrliche Form fuer diesen Baum:
+// ein Ring-3-Programm hier hat nur `mmap` (`libc/mem.fi`, `map_pages`),
+// der gehostete Testlauf auf dem Wirt hat ein grosses `static`, und der
+// Kern haette gar keins. Wer den Puffer stellt, entscheidet damit auch
+// ueber N -- und `scrypt_need` sagt vorher, wieviel es waere, statt es
+// hinterher zu ueberschreiben.
+//
+// ================================================================ EHRLICH
+//
+// S1 N MUSS EINE ZWEIERPOTENZ SEIN. `j = Integerify(X) mod N` wird als
+//    `& (N-1)` gerechnet, wie in jeder Umsetzung. Ein N, das keine ist,
+//    wird ABGELEHNT und nicht heimlich gerundet.
+// S2 KEIN SCHUTZ GEGEN SEITENKANAELE. Der Zugriff auf V[j] haengt vom
+//    Geheimnis ab -- das ist bei scrypt so gewollt (es ist der Grund,
+//    warum es schnell ist) und ist zugleich sein bekannter Nachteil
+//    gegenueber Argon2id auf Maschinen, auf denen ein Angreifer den
+//    Cache beobachten kann. Steht hier, statt weggelassen zu werden.
+// S3 DIE ZEIT IST NICHT KONSTANT in N und r. Beide sind oeffentlich; sie
+//    stehen im Klartext in der Kopfzeile des Schluesselbunds.
+// S4 SELBST GESCHRIEBEN, ABER NICHT SELBST ERFUNDEN. Jede Zeile folgt
+//    RFC 7914; die vier Testvektoren aus dessen Abschnitt 12 UND
+//    Zufallsfaelle gegen Pythons `hashlib.scrypt` laufen in
+//    `tools/sync/vectors.py`. Wo diese Datei falsch waere, waere sie
+//    dort rot.
+
+import crypto.sha256
+
+export { scrypt, scrypt_need, pbkdf2_sha256, salsa20_8, SCRYPT_R }
+
+const M32: u64 = 4294967295
+const SCRYPT_R: u64 = 8
+
+fn ld8(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn st8(p: u64, i: u64, v: u64) {
+    *((p + i) as *mut u8) = (v & 255) as u8
+}
+
+fn le32(p: u64, off: u64) -> u64 {
+    return (ld8(p, off) | (ld8(p, off + 1) << 8)
+        | (ld8(p, off + 2) << 16) | (ld8(p, off + 3) << 24)) & M32
+}
+
+fn put_le32(p: u64, off: u64, v: u64) {
+    st8(p, off, v & 255)
+    st8(p, off + 1, (v >> 8) & 255)
+    st8(p, off + 2, (v >> 16) & 255)
+    st8(p, off + 3, (v >> 24) & 255)
+}
+
+fn rotl32(x: u64, n: u64) -> u64 {
+    return ((x << n) | (x >> (32 - n))) & M32
+}
+
+// ------------------------------------------------------------- PBKDF2
+//
+// PBKDF2-HMAC-SHA256 (RFC 8018) in der ALLGEMEINEN Form: beliebig viele
+// Bloecke, beliebige Ausgabelaenge. Der Baum hat schon zwei PBKDF2
+// (`kernel/user/key.fi` bis 64 Oktette, `kernel/user/bsec.fi` genau 32),
+// und beide koennen nicht, was scrypt braucht: p * 128 * r Oktette, bei
+// r = 8 also 1024 und mehr.
+//
+// DER SALZPUFFER IST WEGGEFALLEN, und das ist kein Schoenheitsfehler,
+// sondern die Bedingung dafuer, dass p > 1 ueberhaupt geht: scrypts
+// ZWEITER PBKDF2-Aufruf salzt mit B, und B ist p * 128 * r Oktette --
+// bei p = 16, r = 8 also 16 KiB. Eine Umsetzung, die das Salz in ein
+// festes Feld kopiert, faellt genau dort um. Deshalb rechnet `hmac2`
+// den ersten Durchgang STROEMEND ueber zwei Puffer (Salz und
+// Blockindex), und die Salzlaenge ist unbegrenzt.
+//
+// Gemessen: ohne diese Aenderung war der Testvektor N=1024, r=8, p=16
+// aus RFC 7914 Abschnitt 12 rot und die beiden mit p=1 gruen -- der
+// Fehler haette also in jeder Benutzung dieser Runde (p ist immer 1)
+// unbemerkt dringelegen.
+
+// HMAC-SHA256 ueber die VERKETTUNG zweier Puffer, ohne sie zu verketten.
+fn hmac2(key: u64, klen: u64, m1: u64, l1: u64, m2: u64, l2: u64,
+    out: u64) {
+    var k: [u8; 64] = [0 as u8; 64]
+    let kp: u64 = (&k[0]) as u64
+    if klen > 64 {
+        sha256.hash(key, klen as usize, kp)
+    } else {
+        var i: u64 = 0
+        while i < klen {
+            st8(kp, i, ld8(key, i))
+            i = i + 1
+        }
+    }
+    var ipad: [u8; 64] = [0 as u8; 64]
+    var opad: [u8; 64] = [0 as u8; 64]
+    let ip: u64 = (&ipad[0]) as u64
+    let op: u64 = (&opad[0]) as u64
+    var i: u64 = 0
+    while i < 64 {
+        st8(ip, i, ld8(kp, i) ^ 0x36)
+        st8(op, i, ld8(kp, i) ^ 0x5C)
+        i = i + 1
+    }
+    var inner: [u8; 32] = [0 as u8; 32]
+    var s: sha256.Sha256 = sha256.sha256_new()
+    sha256.begin(&s)
+    sha256.update(&s, ip, 64)
+    sha256.update(&s, m1, l1 as usize)
+    sha256.update(&s, m2, l2 as usize)
+    sha256.finish(&s, (&inner[0]) as u64)
+    sha256.begin(&s)
+    sha256.update(&s, op, 64)
+    sha256.update(&s, (&inner[0]) as u64, 32)
+    sha256.finish(&s, out)
+}
+
+fn pbkdf2_sha256(pw: u64, plen: u64, salt: u64, slen: u64, iters: u64,
+    out: u64, dklen: u64) -> bool {
+    if iters == 0 {
+        return false
+    }
+    var idx: [u8; 4] = [0 as u8; 4]
+    var u: [u8; 32] = [0 as u8; 32]
+    var acc: [u8; 32] = [0 as u8; 32]
+    let xp: u64 = (&idx[0]) as u64
+    let up: u64 = (&u[0]) as u64
+    let ap: u64 = (&acc[0]) as u64
+    var i: u64 = 0
+    var block: u64 = 0
+    while block * 32 < dklen {
+        let bi: u64 = block + 1
+        st8(xp, 0, (bi >> 24) & 255)
+        st8(xp, 1, (bi >> 16) & 255)
+        st8(xp, 2, (bi >> 8) & 255)
+        st8(xp, 3, bi & 255)
+        hmac2(pw, plen, salt, slen, xp, 4, up)
+        i = 0
+        while i < 32 {
+            st8(ap, i, ld8(up, i))
+            i = i + 1
+        }
+        var r: u64 = 1
+        while r < iters {
+            sha256.hmac(pw, plen as usize, up, 32, up)
+            i = 0
+            while i < 32 {
+                st8(ap, i, ld8(ap, i) ^ ld8(up, i))
+                i = i + 1
+            }
+            r = r + 1
+        }
+        i = 0
+        while i < 32 && block * 32 + i < dklen {
+            st8(out, block * 32 + i, ld8(ap, i))
+            i = i + 1
+        }
+        block = block + 1
+    }
+    return true
+}
+
+// ---------------------------------------------------------- Salsa20/8
+//
+// Der Kern von Salsa20 mit ACHT statt zwanzig Runden (RFC 7914
+// Abschnitt 3): sechzehn 32-Bit-Worte, vier Doppelrunden aus derselben
+// Viertelrunde, die auch ChaCha benutzt -- nur mit anderer Reihenfolge
+// der Worte und anderen Rotationen. Am Ende wird der Eingangszustand
+// dazuaddiert; ohne diese Addition waere die Permutation umkehrbar.
+//
+// Arbeitet AN ORT UND STELLE auf 64 Oktetten.
+fn salsa20_8(b: u64) {
+    var x: [u64; 16] = [0 as u64; 16]
+    var in0: [u64; 16] = [0 as u64; 16]
+    var i: u64 = 0
+    while i < 16 {
+        let v: u64 = le32(b, i * 4)
+        x[i as usize] = v
+        in0[i as usize] = v
+        i = i + 1
+    }
+    var r: u64 = 0
+    while r < 4 {
+        // Spalten
+        x[4] = x[4] ^ rotl32((x[0] +% x[12]) & M32, 7)
+        x[8] = x[8] ^ rotl32((x[4] +% x[0]) & M32, 9)
+        x[12] = x[12] ^ rotl32((x[8] +% x[4]) & M32, 13)
+        x[0] = x[0] ^ rotl32((x[12] +% x[8]) & M32, 18)
+        x[9] = x[9] ^ rotl32((x[5] +% x[1]) & M32, 7)
+        x[13] = x[13] ^ rotl32((x[9] +% x[5]) & M32, 9)
+        x[1] = x[1] ^ rotl32((x[13] +% x[9]) & M32, 13)
+        x[5] = x[5] ^ rotl32((x[1] +% x[13]) & M32, 18)
+        x[14] = x[14] ^ rotl32((x[10] +% x[6]) & M32, 7)
+        x[2] = x[2] ^ rotl32((x[14] +% x[10]) & M32, 9)
+        x[6] = x[6] ^ rotl32((x[2] +% x[14]) & M32, 13)
+        x[10] = x[10] ^ rotl32((x[6] +% x[2]) & M32, 18)
+        x[3] = x[3] ^ rotl32((x[15] +% x[11]) & M32, 7)
+        x[7] = x[7] ^ rotl32((x[3] +% x[15]) & M32, 9)
+        x[11] = x[11] ^ rotl32((x[7] +% x[3]) & M32, 13)
+        x[15] = x[15] ^ rotl32((x[11] +% x[7]) & M32, 18)
+        // Zeilen
+        x[1] = x[1] ^ rotl32((x[0] +% x[3]) & M32, 7)
+        x[2] = x[2] ^ rotl32((x[1] +% x[0]) & M32, 9)
+        x[3] = x[3] ^ rotl32((x[2] +% x[1]) & M32, 13)
+        x[0] = x[0] ^ rotl32((x[3] +% x[2]) & M32, 18)
+        x[6] = x[6] ^ rotl32((x[5] +% x[4]) & M32, 7)
+        x[7] = x[7] ^ rotl32((x[6] +% x[5]) & M32, 9)
+        x[4] = x[4] ^ rotl32((x[7] +% x[6]) & M32, 13)
+        x[5] = x[5] ^ rotl32((x[4] +% x[7]) & M32, 18)
+        x[11] = x[11] ^ rotl32((x[10] +% x[9]) & M32, 7)
+        x[8] = x[8] ^ rotl32((x[11] +% x[10]) & M32, 9)
+        x[9] = x[9] ^ rotl32((x[8] +% x[11]) & M32, 13)
+        x[10] = x[10] ^ rotl32((x[9] +% x[8]) & M32, 18)
+        x[12] = x[12] ^ rotl32((x[15] +% x[14]) & M32, 7)
+        x[13] = x[13] ^ rotl32((x[12] +% x[15]) & M32, 9)
+        x[14] = x[14] ^ rotl32((x[13] +% x[12]) & M32, 13)
+        x[15] = x[15] ^ rotl32((x[14] +% x[13]) & M32, 18)
+        r = r + 1
+    }
+    i = 0
+    while i < 16 {
+        put_le32(b, i * 4, (x[i as usize] +% in0[i as usize]) & M32)
+        i = i + 1
+    }
+}
+
+// --------------------------------------------------------- BlockMix
+//
+// RFC 7914 Abschnitt 4. `bin` und `bout` sind je 128 * r Oktette, also
+// 2r Bloecke von 64. Die Ausgabe wird VERSCHRAENKT geschrieben: erst die
+// geraden, dann die ungeraden Y-Bloecke. Wer das vergisst, bekommt eine
+// Funktion, die vollkommen gleichmaessig aussieht und mit nichts auf der
+// Welt uebereinstimmt -- deshalb die Testvektoren.
+fn blockmix(bin: u64, bout: u64, r: u64) {
+    var x: [u8; 64] = [0 as u8; 64]
+    let xp: u64 = (&x[0]) as u64
+    var i: u64 = 0
+    // X = B[2r-1]
+    while i < 64 {
+        st8(xp, i, ld8(bin, (2 * r - 1) * 64 + i))
+        i = i + 1
+    }
+    var k: u64 = 0
+    while k < 2 * r {
+        i = 0
+        while i < 64 {
+            st8(xp, i, ld8(xp, i) ^ ld8(bin, k * 64 + i))
+            i = i + 1
+        }
+        salsa20_8(xp)
+        var dst: u64 = 0
+        if k % 2 == 0 {
+            dst = (k / 2) * 64
+        } else {
+            dst = (r + k / 2) * 64
+        }
+        i = 0
+        while i < 64 {
+            st8(bout, dst + i, ld8(xp, i))
+            i = i + 1
+        }
+        k = k + 1
+    }
+}
+
+fn integerify(b: u64, r: u64) -> u64 {
+    return le32(b, (2 * r - 1) * 64)
+}
+
+fn blk_copy(dst: u64, src: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        st8(dst, i, ld8(src, i))
+        i = i + 1
+    }
+}
+
+fn blk_xor(dst: u64, src: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        st8(dst, i, ld8(dst, i) ^ ld8(src, i))
+        i = i + 1
+    }
+}
+
+// ------------------------------------------------------------- ROMix
+//
+// RFC 7914 Abschnitt 5, in der ueblichen Fassung ohne Zwischenkopien:
+// die Schleifen laufen in Zweierschritten und tauschen X und Y ueber die
+// Rollen der Argumente, statt nach jedem Schritt zu kopieren. Das spart
+// bei N = 16384 rund 33 MiB an Umkopiererei.
+fn romix(b: u64, r: u64, n: u64, v: u64, y: u64) {
+    let blk: u64 = 128 * r
+    var i: u64 = 0
+    while i < n {
+        blk_copy(v + i * blk, b, blk)
+        blockmix(b, y, r)
+        blk_copy(v + (i + 1) * blk, y, blk)
+        blockmix(y, b, r)
+        i = i + 2
+    }
+    i = 0
+    while i < n {
+        var j: u64 = integerify(b, r) & (n - 1)
+        blk_xor(b, v + j * blk, blk)
+        blockmix(b, y, r)
+        j = integerify(y, r) & (n - 1)
+        blk_xor(y, v + j * blk, blk)
+        blockmix(y, b, r)
+        i = i + 2
+    }
+}
+
+// Wieviel Arbeitsspeicher `scrypt` braucht. Der Aufrufer fragt VORHER
+// und bekommt eine Zahl, statt hinterher eine Ablehnung.
+//
+//     B    p * 128 * r      der Zwischenzustand
+//     V    N * 128 * r      die Speicherschleife -- der eigentliche Preis
+//     Y    128 * r          ein Arbeitsblock fuer BlockMix
+fn scrypt_need(n: u64, r: u64, p: u64) -> u64 {
+    return (p + n + 1) * 128 * r
+}
+
+// scrypt(P, S, N, r, p, dkLen), RFC 7914 Abschnitt 6.
+//
+// `mem` zeigt auf `memlen` Oktette Arbeitsspeicher; ist es zu wenig oder
+// N keine Zweierpotenz, kommt `false` und es wird NICHTS geschrieben.
+fn scrypt(pw: u64, plen: u64, salt: u64, slen: u64,
+    n: u64, r: u64, p: u64, out: u64, dklen: u64,
+    mem: u64, memlen: u64) -> bool {
+    if n < 2 || r == 0 || p == 0 {
+        return false
+    }
+    if (n & (n - 1)) != 0 {
+        return false
+    }
+    if memlen < scrypt_need(n, r, p) {
+        return false
+    }
+    let blk: u64 = 128 * r
+    let bp: u64 = mem
+    let vp: u64 = mem + p * blk
+    let yp: u64 = vp + n * blk
+    if !pbkdf2_sha256(pw, plen, salt, slen, 1, bp, p * blk) {
+        return false
+    }
+    var i: u64 = 0
+    while i < p {
+        romix(bp + i * blk, r, n, vp, yp)
+        i = i + 1
+    }
+    return pbkdf2_sha256(pw, plen, bp, p * blk, 1, out, dklen)
+}

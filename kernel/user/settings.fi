@@ -191,7 +191,18 @@ const R_VORL: u64 = 7
 // Nummer, also klickt ein Testlaeufer, der Reiter 5 anklickt, weiter
 // auf dasselbe wie gestern.
 const R_KONTO: u64 = 8
-const R_ANZ: u64 = 9
+// RUNDE SYNC: DER ZEHNTE REITER. Er stand auf dem Zweig `sync` auf 8,
+// weil dort Runde KONTO nicht drin war -- BEIDE Runden haben sich
+// unabhaengig die 8 genommen. RUNDE PRAESENZ loest das auf: KONTO
+// behaelt die 8 (es kam zuerst und seine Messung liest die Nummer),
+// SYNC rueckt auf 9. Hier steht NUR, was abgeglichen wird, wie der
+// Stand ist, ob Konflikte offen sind und ob der Tresor auf ist.
+// GEAENDERT WIRD HIER NICHTS: das Anlegen eines Kontos verlangt eine
+// Passphrase, und eine Passphrase gehoert nicht in ein Fenster, das
+// auch ohne sie aufgeht. Dafuer gibt es `sync neu` auf der
+// Befehlszeile, und die Seite sagt das auch.
+const R_SYNC: u64 = 9
+const R_ANZ: u64 = 10
 
 static mut w: u64 = 0
 // 128 AND NOT 64, AND THAT IS A BUG FIX AND NOT ROOM FOR THIS ROUND.
@@ -209,6 +220,10 @@ static mut w: u64 = 0
 // Bedienelement ohne Eintrag wird von `zeige_reiter` nie versteckt
 // und steht dann auf JEDER Seite. Genau so lag "Konten auf diesem
 // Geraet" ueber der Vorschau der Vorlagen (tools/themestore).
+// RUNDE SYNC wollte hier 160 (ihre neunte Seite bringt 14 Elemente);
+// RUNDE PRAESENZ nimmt 192, weil jetzt BEIDE Seiten drin sind und die
+// Praesenzleiste noch dazukommt. Der Abstand zur Grenze wird gemessen
+// (`settings: elemente n=... max=...`), nicht geschaetzt.
 static mut ids: [u64; 192] = [0 as u64; 192]
 static mut rtr: [u64; 192] = [0 as u64; 192] // zu welchem Reiter gehoert es
 static mut nid: u64 = 0
@@ -300,6 +315,40 @@ static mut e_vid: [u8; 32] = [0 as u8; 32]
 static mut e_vfile: [u8; 96] = [0 as u8; 96]
 static mut l_vkon: [u8; 128] = [0 as u8; 128]
 static mut l_vkonto: [u8; 128] = [0 as u8; 128]
+// ---------------------------------------------------- RUNDE SYNC
+// Die Schluessel der neunten Seite. Kein Satz steht fest im Programm --
+// was hier steht, sind Schluessel; die Saetze stehen in
+// locale/{de,en}/messages.
+static mut k_y_titel: [u8; 21] = "settings.sync.title\0\0"
+static mut k_y_n1: [u8; 21] = "settings.sync.note1\0\0"
+static mut k_y_n2: [u8; 21] = "settings.sync.note2\0\0"
+static mut k_y_prov: [u8; 24] = "settings.sync.provider\0\0"
+static mut k_y_ziel: [u8; 22] = "settings.sync.target\0\0"
+static mut k_y_stand: [u8; 21] = "settings.sync.state\0\0"
+static mut k_y_was: [u8; 20] = "settings.sync.what\0\0"
+static mut k_y_kein: [u8; 22] = "settings.sync.noacct\0\0"
+static mut k_y_kein2: [u8; 23] = "settings.sync.noacct2\0\0"
+static mut k_y_konf: [u8; 25] = "settings.sync.conflicts\0\0"
+static mut k_y_nokonf: [u8; 22] = "settings.sync.noconf\0\0"
+static mut k_y_tres: [u8; 21] = "settings.sync.vault\0\0"
+static mut k_y_auf: [u8; 21] = "settings.sync.vopen\0\0"
+static mut k_y_zu: [u8; 23] = "settings.sync.vclosed\0\0"
+static mut k_y_code: [u8; 20] = "settings.sync.code\0\0"
+static mut k_y_code2: [u8; 21] = "settings.sync.code2\0\0"
+static mut k_y_code3: [u8; 21] = "settings.sync.code3\0\0"
+static mut k_y_cli: [u8; 19] = "settings.sync.cli\0\0"
+// Die drei Zeilen, die nicht aus dem Katalog kommen, sondern aus dem
+// Konto: Anbieter, Ziel und die Generation, die dieses Geraet gesehen
+// hat. Sie werden AUS DEM KATALOGTEXT ZUSAMMENGESETZT ("Anbieter: " +
+// Wert), damit auch hier kein Satz im Programm steht.
+static mut l_yprov: [u8; 160] = [0 as u8; 160]
+static mut l_yziel: [u8; 200] = [0 as u8; 200]
+static mut l_ystand: [u8; 96] = [0 as u8; 96]
+static mut l_ytres: [u8; 128] = [0 as u8; 128]
+static mut y_konf: [u8; 640] = [0 as u8; 640]
+static mut y_kn: u64 = 0
+static mut y_konto: u64 = 0
+
 static mut k_v_titel: [u8; 24] = "settings.presets.label\0\0"
 static mut k_v_note: [u8; 23] = "settings.presets.note\0\0"
 static mut k_v_use: [u8; 22] = "settings.presets.use\0\0"
@@ -804,6 +853,19 @@ fn text_an(p: u64, at: u64, q: u64) -> u64 {
     }
     __mmio_write8((p + at + k) as *mut u8, 0 as u8)
     return at + k
+}
+
+// Text -> Zahl. Es gibt hier bisher nur den Weg Zahl -> Text; Runde
+// SYNC liest `/konto/ZAEHLER`, und das ist eine Zeile mit einer Zahl.
+fn zahl_von(p: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while __mmio_read8((p + i) as *mut u8) >= 48 as u8
+        && __mmio_read8((p + i) as *mut u8) <= 57 as u8 {
+        v = v * 10 + ((__mmio_read8((p + i) as *mut u8) as u64) - 48)
+        i = i + 1
+    }
+    return v
 }
 
 fn zahl_an(p: u64, at: u64, v: u64) -> u64 {
@@ -1855,6 +1917,139 @@ fn quote_kon(p: u64, at: u64, v: u64) -> u64 {
     return text_an(p, a, (&eins[0 as usize]) as u64)
 }
 
+// ====================================================== RUNDE SYNC
+//
+// DIE SEITE LIEST NUR. Sie oeffnet drei Dateien des Kontos und eine des
+// Systems und setzt daraus vier Zeilen zusammen. Sie schreibt nichts,
+// sie fragt nach keiner Passphrase, und sie faellt nicht um, wenn es
+// gar kein Konto gibt -- der Fall OHNE Konto ist der NORMALFALL und
+// nicht der Fehlerfall.
+//
+//     /konto/KOPF          anbieter, ziel  (der Rest ist verschluesselt)
+//     /konto/ZAEHLER       die hoechste Generation, die dieses Geraet sah
+//     /konto/KONFLIKTE     ein Pfad je Zeile
+//     /system/tresor.sit   da = Tresor offen, weg = zu
+//
+// `/konto` ist der verabredete Ort. Die Programme `sync` und `tresor`
+// nehmen ihn als Argument -- ein Fenster hat aber keine Befehlszeile,
+// auf der man ihn mitgeben koennte, also steht er hier fest. Das ist
+// eine Verabredung und keine Einschraenkung: wer sein Konto woanders
+// hat, benutzt die Befehlszeile, und die Seite sagt "kein Konto".
+const Y_LESEMAX: u64 = 1024
+
+fn sync_feld(text: u64, name: u64, out: u64, max: u64) -> bool {
+    // Eine Zeile "<name> <wert>" aus dem KOPF holen. Kein Katalog, kein
+    // Satz -- ein Schluesselwort, das genau so in der Datei steht.
+    var i: u64 = 0
+    var zeilenanfang: bool = true
+    while __mmio_read8((text + i) as *mut u8) != 0 as u8 {
+        if zeilenanfang {
+            var k: u64 = 0
+            var passt: bool = true
+            while __mmio_read8((name + k) as *mut u8) != 0 as u8 {
+                if __mmio_read8((text + i + k) as *mut u8)
+                    != __mmio_read8((name + k) as *mut u8) {
+                    passt = false
+                }
+                k = k + 1
+            }
+            if passt && __mmio_read8((text + i + k) as *mut u8) == 32 as u8 {
+                var q: u64 = i + k + 1
+                var a: u64 = 0
+                while a + 1 < max
+                    && __mmio_read8((text + q) as *mut u8) != 0 as u8
+                    && __mmio_read8((text + q) as *mut u8) != 10 as u8 {
+                    __mmio_write8((out + a) as *mut u8,
+                        __mmio_read8((text + q) as *mut u8))
+                    a = a + 1
+                    q = q + 1
+                }
+                __mmio_write8((out + a) as *mut u8, 0 as u8)
+                return true
+            }
+        }
+        zeilenanfang = __mmio_read8((text + i) as *mut u8) == 10 as u8
+        i = i + 1
+    }
+    __mmio_write8((out) as *mut u8, 0 as u8)
+    return false
+}
+
+fn sync_lesen() {
+    var p_kopf: [u8; 12] = "/konto/KOPF\0"
+    var p_zaehl: [u8; 15] = "/konto/ZAEHLER\0"
+    var p_konf: [u8; 17] = "/konto/KONFLIKTE\0"
+    var p_sit: [u8; 19] = "/system/tresor.sit\0"
+    var n_anb: [u8; 9] = "anbieter\0"
+    var n_ziel: [u8; 5] = "ziel\0"
+    var puffer: [u8; 1024] = [0 as u8; 1024]
+    var wert: [u8; 128] = [0 as u8; 128]
+    let pp: u64 = (&puffer[0 as usize]) as u64
+    let wp: u64 = (&wert[0 as usize]) as u64
+    let lp: u64 = (&l_yprov[0 as usize]) as u64
+    let lz: u64 = (&l_yziel[0 as usize]) as u64
+    let ls: u64 = (&l_ystand[0 as usize]) as u64
+    let lt: u64 = (&l_ytres[0 as usize]) as u64
+    y_konto = 0
+    __mmio_write8((lp) as *mut u8, 0 as u8)
+    __mmio_write8((lz) as *mut u8, 0 as u8)
+    __mmio_write8((ls) as *mut u8, 0 as u8)
+    if datei_lesen((&p_kopf[0 as usize]) as u64, pp, Y_LESEMAX) > 0 {
+        y_konto = 1
+        var a: u64 = text_an(lp, 0, msg.get((&k_y_prov[0 as usize]) as u64))
+        if sync_feld(pp, (&n_anb[0 as usize]) as u64, wp, 128) {
+            a = text_an(lp, a, wp)
+        }
+        var b: u64 = text_an(lz, 0, msg.get((&k_y_ziel[0 as usize]) as u64))
+        if sync_feld(pp, (&n_ziel[0 as usize]) as u64, wp, 128) {
+            b = text_an(lz, b, wp)
+        }
+        var c: u64 = text_an(ls, 0, msg.get((&k_y_stand[0 as usize]) as u64))
+        var gen: u64 = 0
+        if datei_lesen((&p_zaehl[0 as usize]) as u64, pp, Y_LESEMAX) > 0 {
+            gen = zahl_von(pp)
+        }
+        let _c2: u64 = zahl_an(ls, c, gen)
+    }
+    // Der Tresor: die Sitzungsdatei ist da oder sie ist es nicht. Mehr
+    // will diese Seite gar nicht wissen -- ob die Frist schon abgelaufen
+    // ist, weiss `tresor` selbst, und die Seite luegen zu lassen waere
+    // schlimmer als sie ungenau sein zu lassen.
+    let t: u64 = text_an(lt, 0, msg.get((&k_y_tres[0 as usize]) as u64))
+    if datei_lesen((&p_sit[0 as usize]) as u64, pp, Y_LESEMAX) > 0 {
+        let _t1: u64 = text_an(lt, t, msg.get((&k_y_auf[0 as usize]) as u64))
+    } else {
+        let _t2: u64 = text_an(lt, t, msg.get((&k_y_zu[0 as usize]) as u64))
+    }
+    // Die Konflikte, ein Pfad je Zeile -- genau das Format, das die
+    // Listenanzeige erwartet.
+    y_kn = 0
+    let kb: u64 = (&y_konf[0 as usize]) as u64
+    __mmio_write8((kb) as *mut u8, 0 as u8)
+    if datei_lesen((&p_konf[0 as usize]) as u64, pp, Y_LESEMAX) > 0 {
+        var i: u64 = 0
+        var o: u64 = 0
+        while __mmio_read8((pp + i) as *mut u8) != 0 as u8 && o + 2 < 640 {
+            let ch: u64 = __mmio_read8((pp + i) as *mut u8) as u64
+            if ch == 10 {
+                if o > 0 && __mmio_read8((kb + o - 1) as *mut u8) != 10 as u8 {
+                    __mmio_write8((kb + o) as *mut u8, 10 as u8)
+                    o = o + 1
+                    y_kn = y_kn + 1
+                }
+            } else {
+                __mmio_write8((kb + o) as *mut u8, ch as u8)
+                o = o + 1
+            }
+            i = i + 1
+        }
+        if o > 0 && __mmio_read8((kb + o - 1) as *mut u8) != 10 as u8 {
+            y_kn = y_kn + 1
+        }
+        __mmio_write8((kb + o) as *mut u8, 0 as u8)
+    }
+}
+
 fn vorlage_kon_zeigen() {
     let k: u64 = (&l_vkon[0 as usize]) as u64
     if v_n == 0 {
@@ -2539,6 +2734,13 @@ fn u_start(args: u64) -> u64 {
     // Runde SOFTUI). 760 laesst 740 fuer die Leiste; der Schirm ist
     // 800 breit, also liegt 20..780 noch darin.
     //
+    // RUNDE PRAESENZ: jetzt sind es ZEHN Reiter (KONTO 8, SYNC 9).
+    // `tab_breite` rechnet alle anteilig kleiner und nie unter 24
+    // Bildpunkte; keiner wird ausserhalb der Leiste gemalt. Die 760
+    // bleiben, weil ein breiteres Fenster JEDES Bedienelement
+    // verschieben und damit tools/i18n/run.sh reihenweise rot machen
+    // wuerde (das war der Befund von Runde SYNC an dieser Stelle).
+    //
     // DIE ZAHL WIRD NACHGEMESSEN und nicht geglaubt:
     // `tools/konto/run.sh` Abschnitt 9 liest die Breite der Reiterleiste
     // aus dem laufenden Programm und wird rot, wenn sie ueber die
@@ -2709,7 +2911,48 @@ fn u_start(args: u64) -> u64 {
         tids[(tk) as usize] = merke(wlib.tile(tspec_at(tk)), R_VORL)
         tk = tk + 1
     }
+    // ==================================== RUNDE SYNC: die neunte Seite
+    //
+    // Nur Beschriftungen und eine Liste. Kein Knopf, weil es hier
+    // nichts zu druecken gibt, was ohne Passphrase richtig waere.
     wlib.box_use(cfull)
+    sync_lesen()
+    let _y0: u64 = merke(wlib.label(msg.get((&k_y_titel[0 as usize]) as u64)),
+        R_SYNC)
+    let _y1: u64 = merke(wlib.label(msg.get((&k_y_n1[0 as usize]) as u64)),
+        R_SYNC)
+    let _y2: u64 = merke(wlib.label(msg.get((&k_y_n2[0 as usize]) as u64)),
+        R_SYNC)
+    if y_konto != 0 {
+        let _y3: u64 = merke(wlib.label((&l_yprov[0 as usize]) as u64), R_SYNC)
+        let _y4: u64 = merke(wlib.label((&l_yziel[0 as usize]) as u64), R_SYNC)
+        let _y5: u64 = merke(wlib.label((&l_ystand[0 as usize]) as u64), R_SYNC)
+        let _y6: u64 = merke(wlib.label(msg.get((&k_y_was[0 as usize]) as u64)),
+            R_SYNC)
+    } else {
+        let _y7: u64 = merke(wlib.label(msg.get((&k_y_kein[0 as usize]) as u64)),
+            R_SYNC)
+        let _y8: u64 = merke(wlib.label(msg.get((&k_y_kein2[0 as usize]) as u64)),
+            R_SYNC)
+    }
+    let _y9: u64 = merke(wlib.label((&l_ytres[0 as usize]) as u64), R_SYNC)
+    if y_kn > 0 {
+        let _ya: u64 = merke(wlib.label(msg.get((&k_y_konf[0 as usize]) as u64)),
+            R_SYNC)
+        wlib.size(0, 90)
+        let _yb: u64 = merke(wlib.list((&y_konf[0 as usize]) as u64, 4), R_SYNC)
+    } else {
+        let _yc: u64 = merke(wlib.label(msg.get((&k_y_nokonf[0 as usize]) as u64)),
+            R_SYNC)
+    }
+    let _yd: u64 = merke(wlib.label(msg.get((&k_y_code[0 as usize]) as u64)),
+        R_SYNC)
+    let _ye: u64 = merke(wlib.label(msg.get((&k_y_code2[0 as usize]) as u64)),
+        R_SYNC)
+    let _yf: u64 = merke(wlib.label(msg.get((&k_y_code3[0 as usize]) as u64)),
+        R_SYNC)
+    let _yg: u64 = merke(wlib.label(msg.get((&k_y_cli[0 as usize]) as u64)),
+        R_SYNC)
     // ---- Bildschirm (RUNDE DISPLAY)
     let _s1: u64 = merke(wlib.label((&l_schirm[0 as usize]) as u64),
         R_SCHIRM)
