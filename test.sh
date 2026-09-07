@@ -1470,6 +1470,21 @@ lauf "43. der Systembus: Dienste, Rechte, Zwischenablage, Segmente (tools/system
 lauf "44. das Kernprotokoll, die Absturzberichte und der Panik-Bildschirm (tools/protokoll/run.sh, Runde PROTOKOLL)" \
      tools/protokoll/run.sh protokoll '^PROTOKOLL: |^  OK    |^        '
 
+# RUNDE PRAESENZ: Freunde, Praesenz und ein 1:1-Chat, den der Server
+# nicht mitlesen kann. Drei Zusagen tragen diesen Abschnitt, und alle
+# drei haben eine Gegenprobe, damit "gruen" nicht auch dann herauskommt,
+# wenn gar nichts ankommt:
+#   * der Status eines Freundes ist binnen 2 s da (gemessen: 40 ms),
+#   * "unsichtbar" heisst, dass KEIN Statustext das Geraet verlaesst --
+#     und sichtbar zeigt denselben Text sehr wohl,
+#   * der Klartext einer Chatnachricht steht in KEINEM Oktett des
+#     Servermaterials (0 Treffer), und dieselbe Suche findet ihn, wenn
+#     man ihn absichtlich hineinlegt.
+# Der Abschnitt braucht node fuer den Kontodienst; fehlt es, sagt er das
+# und ueberspringt diesen Teil, statt still gruen zu sein.
+lauf "45. Freunde, Praesenz und ein Chat ohne Mitleser (tools/praesenz/run.sh, Runde PRAESENZ)" \
+     tools/praesenz/run.sh praesenz '^PRAESENZ: |^  OK    |^  FAIL  |^        (/bin/praesenz|104 Bereiche)'
+
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
 abschnitte_abarbeiten
