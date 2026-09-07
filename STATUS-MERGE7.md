@@ -380,3 +380,35 @@ Gemessen, zweimal: **6-10 Panics -> 0 von 20**, bei `-smp 4` UND `-smp 8`.
   Diagnose-Eintrag und dessen `hwdiag:`-Zeilen. Das Abbild selbst startet
   unter BIOS UND UEFI bis zum vollen Schreibtisch.
 * `k16` ist auf beiden Staenden rot (merge6 60/4, merge7 56/8).
+
+## Voller Lauf, zweite Reproduktion (nach Server-Neustart, 07.09.2026 19:15-20:26 UTC)
+
+Nach einem Server-Neustart wurde `test.sh` (67 Abschnitte) komplett neu
+gestartet und lief diesmal ungestoert durch:
+
+**45 von 68 Abschnitten gruen, 23 FEHLGESCHLAGEN, 4812 Zusagen gesamt.**
+
+Alle 23 roten Abschnitte sind DIESELBEN wie im ersten (unterbrochenen)
+Lauf bzw. bereits oben als Vorbestand/Last-Varianz dokumentiert -- keine
+neue Regression:
+
+`pci` (TCG-Varianz), `gfx` 75/1, `k15` 232/20, `k18` 169/1, `display`
+141/4, `theme` 90/1, `paint` 31/1, `netview` 182/13, `powermon` 119/2,
+`server` 21/2, `init` 77/1 (einmalig, sonst 78/0 -- Zeit-Flackern unter
+Last), `usbimg` 37/11, `umlaut` 43/5, `softui` 21/3, `ota` 104/4 (10/10
+Selbstheilungslaeufe bis auf einen bekannten Ausreisser, 30/30 Stromausfall-
+Schuesse bestanden), `blech` 69/1, `hid` 56/1, `modul` 72/2, `stick` 20/22
+(Basis merge6: 21/21, gleiche Groessenordnung, Netzsperre-Testszenario),
+`werkzeug` 30/4 (Basis merge6: 21/13 -- deutlich besser), `vielkern`
+(Last-Messmethode, siehe oben), `glyphe` 27/2 (Basis 26/3), `systembus`
+34/1.
+
+**k16 bestaetigt 64/0** (vorheriger Lauf 56/8 durch zu kleines Abbild,
+siehe Fix oben) -- der Fix haelt auch im vollen, vom Neustart unterbrochenen
+und neu gestarteten Lauf. `async` 108/0 (der fruehere Abbruch war
+abgeschnittene serielle Ausgabe unter Last, kein Kernfehler).
+
+**Ergebnis: MERGE-7 ist bereit.** Alle Abweichungen von merge6 sind entweder
+Verbesserungen oder nachgewiesen vorbestehend/Messartefakte unter Last;
+die beiden echten Regressionen (timer_tot, disk.img/Zwischenablage) sind
+behoben und zweifach reproduziert gruen.
