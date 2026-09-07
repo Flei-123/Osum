@@ -233,7 +233,16 @@ num "Zeilen der Naht im Kernel (ohne Kommentar/Leer) -- so wenig Kernel wie moeg
 python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
     && ok "der Verzeichnisbaum fuer den Dateimanager ist gebaut ($(head -1 "$TMPD/baum.log"))" \
     || bad "tools/k15/tree.py fehlgeschlagen"
-ARGS=(build "$TMPD/disk.img" 4096 /lib/
+# RUNDE MERGE-7: 4096 -> 6144 Bloecke (2 -> 3 MiB). Allein die neun
+# Programme dieses Laeufers und die zwei Schriften brauchen nach dem
+# Zusammenfuehren 2067124 Oktette = 4037 von 4096 Bloecken -- OHNE
+# Bitmap, Inode-Tafel, Journal, Verzeichnisse, den Baum aus tree.py und
+# die Sprachdateien. `/bin/explorer` allein ist von 871984 auf 907360
+# Oktette gewachsen (SYSTEMBUS/PROTOKOLL/TON haben wlib/wlibc erweitert,
+# die der Dateimanager einbindet). "mkfs: the disk is full" sieht wie
+# ein Codefehler aus, ist aber eine feste Bloeckezahl, die keine Marge
+# mehr hatte.
+ARGS=(build "$TMPD/disk.img" 6144 /lib/
       "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/${p}0.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
@@ -509,7 +518,19 @@ warte 0.6
 mouse_move 120 120
 mouse_move 60 60
 EOF
-foto tast "gfx wm wig wmhold wiglong $GRUND" "$M"
+# RUNDE MERGE-7: `nobus` dazu. Seit RUNDE SYSTEMBUS versucht
+# wlibc.clip_put/clip_hist_take ZUERST den Bus (kernel/user/wlibc.fi,
+# bus5(BUS_CLIPSET_OP/...)) und faellt erst bei einem FEHLER auf den
+# alten Weg ueber wig.clip_set/clip_get zurueck. Der Bus ist in JEDEM
+# Lauf ohne `nobus` initialisiert (kernel/kmain.fi: "der Bus steht VOR
+# dem ersten Nutzerprozess"), also nimmt Kopieren/Einfuegen hier immer
+# den Bus -- der Text kommt bildpunktgenau an ("Kopiermich-ab"), aber
+# der ALTE Zaehler wig.clip_writes/clip_reads (`wig: blits ...
+# clipset=0 clipget=0`) bleibt bei 0, weil er nie mehr angefasst wird.
+# Das ist keine Regression: der Weg, den diese Zusage misst, gibt es
+# nur noch OHNE Bus. `nobus` erzwingt genau den Fall, fuer den
+# wlibc.fi seinen Rueckfall gebaut hat.
+foto tast "gfx wm wig wmhold wiglong nobus $GRUND" "$M"
 num "der Kern beendet sich sauber" "$RC" eq 21
 # DEN INHALT AUS EINER ZEILE HOLEN, DIE WIRKLICH VOLLSTAENDIG IST. Die
 # serielle Leitung teilen sich der Kernel und die Anwendung; gelegentlich
@@ -977,7 +998,9 @@ num "Farben, die aus /etc/theme gelesen wurden" "$tn" eq "$soll"
 # ANDEREN Datei hat er eine andere -- das ist die Gegenprobe, ohne die
 # "es gibt ein Farbschema" eine Behauptung ueber eine Zahl waere.
 sed 's/^btn=.*/btn=804020/' "$TMPD/baum/theme" > "$TMPD/theme2"
-ARGS2=(build "$TMPD/disk2.img" 4096 /lib/
+# RUNDE MERGE-7: dieselbe Erweiterung wie bei ARGS oben -- dasselbe
+# Programmpaket, dieselbe Enge.
+ARGS2=(build "$TMPD/disk2.img" 6144 /lib/
       "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
 for p in $PROGS; do ARGS2+=("/bin/$p=$TMPD/${p}0.elf"); done
 ARGS2+=("/bin/files@/bin/explorer")
@@ -1108,8 +1131,34 @@ foto start "gfx wm wigstart wmhold wiglong $GRUND"
 num "der Kern beendet sich sauber" "$RC" eq 21
 has "$TMPD/start.txt" "k15: start /bin/launcher" "der Starter kommt von der Platte"
 na=$(feld "$TMPD/start.txt" "launcher: apps" apps)
-soll=$(ls -d assets/apps/*.osp | wc -l)
-num "er findet so viele Programme, wie .osp-Buendel im Baum liegen" "$na" eq "$soll"
+# RUNDE MERGE-7: hier stand `ls -d assets/apps/*.osp | wc -l` -- die
+# rohe Zahl der Buendel im QUELLBAUM, unabhaengig davon, ob deren
+# Programm ueberhaupt auf DIESEM Testabbild liegt. Seit RUNDE WERKZEUGE
+# (taskmgr.osp) und RUNDE CERTUS-AUF-OSUM (certus.osp) sind zwei
+# Buendel dazugekommen, deren Programme NICHT in der PROGS-Liste dieses
+# Laeufers stehen -- `tools/k15/bundle.py nur=$PROGS` laesst sie zu
+# Recht aus (das ist die Abhilfe der Runde WERKZEUGE selbst, siehe
+# bundle.py:30). Die Erwartung hier zaehlte trotzdem den Quellbaum und
+# nicht das gefilterte Ergebnis: "5, erwartet eq 7". Jetzt wird
+# dieselbe Regel wie in bundle.py nachgerechnet -- ein Buendel zaehlt
+# nur, wenn sein start.txt auf ein Programm aus $PROGS zeigt.
+soll=$(python3 -c "
+import os, sys
+progs = set('/bin/' + w for w in sys.argv[1].split())
+n = 0
+for name in sorted(os.listdir('assets/apps')):
+    if not name.endswith('.osp'):
+        continue
+    p = os.path.join('assets/apps', name, 'start.txt')
+    for zeile in open(p, encoding='ascii'):
+        zeile = zeile.strip()
+        if zeile and not zeile.startswith('#'):
+            if zeile in progs:
+                n += 1
+            break
+print(n)
+" "$PROGS")
+num "er findet so viele Programme, wie .osp-Buendel mit einem Programm dieser Platte im Baum liegen" "$na" eq "$soll"
 has "$TMPD/start.txt" "launcher: treffer i=0 name=[Datei-Explorer] exec=[/apps/explorer.osp/start]" \
     "und das Buendel fuehrt den Dateimanager mit Name UND Befehl"
 # EIN PROGRAMM IST EIN VERZEICHNIS, und das steht nicht im Quelltext,
