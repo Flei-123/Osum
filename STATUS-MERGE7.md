@@ -229,3 +229,154 @@ allgemeine Stick bleibt bei "nichts erlaubt".
 
 Liegt unter `https://store.fleitec.com/abbilder/orientos-usb-20260906-db3e942.img`
 (+ `.sha256`) als NEUE Datei; `orientos-usb.img` vom 05.09. ist unberuehrt.
+
+
+# ====================================================================
+# NACHTRAG: DER VOLLE `./test.sh`-LAUF UND WAS ER GEFUNDEN HAT
+# ====================================================================
+
+Der erste vollstaendige Lauf auf merge7 endete mit
+
+    43 Abschnitte bestanden, 25 FEHLGESCHLAGEN (4389 Zusagen)
+
+gegen die Grundlinie merge6/GLYPHE (65/65, 1167 Zusagen). Das sah nach
+einem Einsturz aus. Der Abschnitt-fuer-Abschnitt-Vergleich gegen
+`/root/osum-glyphe/.test-work` zeigt etwas anderes: **nur fuenf
+Abschnitte sind wirklich schlechter**, und die Zahl der Zusagen ist von
+1167 auf 4389 gestiegen, weil merge7 zwei neue Abschnitte mitbringt und
+mehrere alte endlich bis zum Ende laufen.
+
+## Abschnitt fuer Abschnitt (merge7 gegen merge6/GLYPHE)
+
+BESSER auf merge7:
+
+| Abschnitt | merge7 | merge6 |
+|-----------|--------|--------|
+| `gfx` | **75 / 1** | 18 / 56 |
+| `init` | **78 / 0** | 39 / 39 |
+| `netview` | **182 / 13** | 170 / 23 |
+| `theme` | **90 / 1** | 88 / 8 |
+| `bridge` | **113 / 0** | 111 / 1 |
+| `multiuser` | **91 / 0** | 90 / 1 |
+| `k18` | **169 / 1** | 168 / 2 |
+
+GLEICH: `arm` 48/0, `async` 108/0, `avx` 32/0, `boot` 20/0, `caps` 67/0,
+`core` 46/0, `customres` 135/0, `display` 141/4, `freestanding` 41/0,
+`fsrobust` 30/0, `guard` 58/0, `hv` 114/0, `hwnet` 56/0, `hwnettls` 24/0,
+`k11` 85/0, `k13` 99/0, `k14` 152/0, `k17` 158/0, `kernel` 176/0,
+`kvm` 31/0, `netmon` 76/0, `osum` 130/0, `poll` 67/0, `posix` 134/0,
+`powermon` 119/2, `server` 21/2, `smp` 59/0, `sshd` 67/0, `stick` 20/22,
+`themestore` 81/0, `tiling` 68/0, `tresor` 220/0, `tunnel` 16/0,
+`unix` 107/0, `usbimg` 37/11, `userland` 91/0, `wm` 104/0.
+
+NEU (gibt es auf merge6 nicht): `protokoll` 55/0, `systembus` 34/1.
+
+SCHLECHTER -- und jeder einzeln, ohne Fremdlast, nachgefahren:
+
+| Abschnitt | merge7 (Lauf) | merge6 | Befund |
+|-----------|---------------|--------|--------|
+| `k15` | 225/27 -> **232/20** | 226/26 | **ECHTE REGRESSION, behoben** |
+| `glyphe` | 25/4 -> **27/2** | 26/3 | **ECHTE REGRESSION, behoben** |
+| `net` | 73/2 -> **75/0** | 75/0 | Lastartefakt, nachgewiesen |
+| `pci` | 97/1 | 98/0 | TCG-Zeitmessung, vorbestehend |
+| `vielkern` | 38/2 | 39/1 | Messanordnung, vorbestehend |
+| `k16` | 56/8 | 60/4 | beide rot, vorbestehend |
+
+## Die zwei echten Regressionen
+
+### 1. `tools/k15` -- das Testabbild war zu klein geworden (c176fd2)
+
+Der Laeufer baut sein Abbild mit **fest 4096 Bloecken (2 MiB)**. Nach dem
+Zusammenfuehren brauchen allein die neun Programme und die zwei Schriften
+
+    2 067 124 Oktette = 4037 von 4096 Bloecken
+
+und zwar OHNE Bitmap, Inode-Tafel, Journal, Verzeichnisse, den Baum aus
+`tree.py` und die Sprachdateien. `/bin/explorer` allein ist von 871 984 auf
+907 360 Oktette gewachsen, weil SYSTEMBUS, PROTOKOLL und TON `wlib`/`wlibc`
+erweitert haben und der Dateimanager sie einbindet. Ergebnis:
+`mkfs: the disk is full` -- und danach **jeder** Folgeschritt ohne
+`disk.img`, also Abschnitt 7 bis 14 komplett tot. Das sah im Log aus wie
+zwanzig kaputte Zusagen und war EINE zu enge Zahl.
+
+Dazu zwei weitere Funde an derselben Stelle:
+
+* `tools/glyphe/run.sh` hielt noch `EK_SOLL=66` -- denselben Ein-Kern-Vertrag,
+  den ich in `tools/vielkern/run.sh` schon auf 67 angehoben hatte. Zwei
+  Stellen, ein Vertrag; die zweite war uebersehen.
+* Die Zusage "so viele Programme, wie .osp-Buendel im Baum liegen" zaehlte
+  `ls assets/apps/*.osp` -- den QUELLBAUM statt das, was
+  `bundle.py nur=$PROGS` wirklich aufs Abbild legt. Seit `taskmgr.osp`
+  (WERKZEUGE) und `certus.osp` (CERTUS-AUF-OSUM) sind das 7 gegen 5. Jetzt
+  rechnet der Test dieselbe Filterregel nach wie `bundle.py`.
+* Abschnitt 7 mass `in die Zwischenablage geschrieben: 0` -- **obwohl der
+  Text bildpunktgenau ankam** (`Kopiermich-ab`). Seit SYSTEMBUS versucht
+  `wlibc.clip_put_typ`/`clip_hist_take` ZUERST den Bus und faellt nur bei
+  einem FEHLER auf `wig.clip_set`/`clip_get` zurueck -- dessen Zaehler
+  liest dieser Test. Der Bus ist in jedem Lauf ohne `nobus` initialisiert,
+  also nimmt Kopieren immer den Bus. `nobus` zum Testlauf ergaenzt; das
+  erzwingt genau den Rueckfall, fuer den `wlibc.fi` ihn gebaut hat.
+
+### 2. `kernel/sched.fi:timer_tot` -- ein Wachhund fuer alle Kerne (6d33cd0)
+
+`tools/glyphe/run.sh` Abschnitt 7 -- der Fall, an dem die Runde GLYPHE
+selbst entstanden ist -- zeigte **6 bis 10 von 20 Laeufen** mit
+
+    panic: integer overflow in 'u64 - u64' at kernel/sched.fi:1978:8
+
+Auf merge6 steht dort `davon mit Panic oder Ausnahme: 0`. Zweimal
+reproduziert, isoliert, ohne Fremdlast.
+
+`timer_tot()` prueft vor jedem Schlaf, ob der Zeitgeber noch tickt, und
+hielt seinen Zustand in DREI `static mut`: prozessglobal, ohne Sperre, von
+JEDEM Kern angefasst, der `sleep_ticks` aufruft. Auf merge6 fiel das nicht
+auf, weil `sleep_ticks` selten genug lief. **Seit RUNDE UHRWERK ruft die
+Taskleiste `ulib.sleep_ms(25)` -- vierzig Mal in der Sekunde statt
+gelegentlich**, und mit der Aufrufhaeufigkeit stieg die Kollisionsrate:
+Kern A schreibt `tote_zeit` mit seinem TSC-Wert, Kern B liest ihn kurz
+danach und zieht seinen EIGENEN, kleineren TSC-Wert ab -- `u64 - u64`
+unterlaeuft null.
+
+Behoben nach dem Muster, das GLYPHE fuer die Buehne des Zeichenwegs schon
+einmal angewandt hat: **je Kern statt geteilt**. Drei neue Felder
+`C_TOTMARKE`/`C_TOTZEIT`/`C_TOTZAHL` bei Offset 176/184/192 im bestehenden
+`CPU_OFF`-Satz (kein neuer kdata-Bereich noetig), `timer_tot` ueber
+`cpu.get`/`cpu.set(state, cpu.here(state), ...)`, dazu `t > zeit` vor der
+Subtraktion als Haertung gegen jede verbleibende TSC-Drift.
+`tote_schlaefe()` summiert jetzt ueber alle Kerne.
+
+Gemessen, zweimal: **6-10 Panics -> 0 von 20**, bei `-smp 4` UND `-smp 8`.
+`avx` danach unveraendert 32/0.
+
+## Die drei, die KEINE Regression sind -- und der Nachweis dafuer
+
+* **`net`**: unter Last `through 20 % loss: 127912 statt 262144` -> 73/2.
+  Allein nachgemessen: **262144, alles in Ordnung, 75/0** -- die Grundlinie.
+* **`pci`**: `DMA against PIO, in thousandths: 1009` bzw. `712`, verlangt
+  `>= 1200`. Allein gemessen einmal **1360** (98/0), einmal 712 (97/1). Der
+  Grund steht seit merge6 WORTGLEICH in `tools/lib/accel-ausnahmen.txt`:
+  `pci  NVMe ueber DMA, Abschlussmeldung kommt zu spaet (kvm 91/7, tcg 98/0)`
+  -- dieser Abschnitt laeuft absichtlich auf TCG statt KVM, und eine reine
+  Durchsatzmessung unter Software-Emulation schwankt.
+* **`vielkern`** (`abw != 0`): merge7 38/2. Aber merge6 unter DERSELBEN Last
+  **26/13**, mit demselben `abw: 7`; in Ruhe 40/0. Die Messanordnung selbst
+  ist die Ursache: `sched.fi` summiert die Pro-Kern-Zaehler in einer
+  SCHLEIFE, waehrend die anderen Kerne weiterzaehlen, und liest
+  `kstate.SYSCALLS` zu einem ANDEREN Zeitpunkt. merge7 macht 2,7-3,9 Mio
+  Systemaufrufe je Testfenster, merge6 nur 289-1216 -- Faktor ueber 1000,
+  weil UHRWERK die Taskleiste wirklich laufen laesst. Bei hoher Rate wird
+  die Zeitpunkt-Differenz absolut groesser. Kein Codefehler; der Test
+  muesste die Zaehler synchron einfrieren.
+
+## Und die, die schon vor MERGE-7 rot waren
+
+* Die restlichen 20 FAIL in `k15` sind **Zeichen fuer Zeichen dieselben**
+  wie auf merge6: der Dialog wird gegen fest `800x600` geprueft, echt sind
+  `1280x800` (`fb: nat=1280x800`), und die Zeilen-/Symbolreihenfolge des
+  Starters stimmt seit `taskmgr.osp` nicht mehr (`543 falsch`,
+  `807 falsch`, `169 von 169 deckenden` -- dieselben Zahlen dort).
+* `usbimg`: RUNDE LEISTE hat `default_entry` in `limine.conf` bewusst auf
+  den Schreibtisch gestellt, `tools/usbimg/run.sh` erwartet aber weiter den
+  Diagnose-Eintrag und dessen `hwdiag:`-Zeilen. Das Abbild selbst startet
+  unter BIOS UND UEFI bis zum vollen Schreibtisch.
+* `k16` ist auf beiden Staenden rot (merge6 60/4, merge7 56/8).
