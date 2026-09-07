@@ -37,7 +37,7 @@ num() { local n=$1 v=${2:-} o=$3 w=$4
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
 BLOCKS=20000
-PROGS="sh ls cat echo praesenz freunde"
+PROGS="sh ls cat echo sleep praesenz freunde desktop taskbar"
 : "${OSUM_QEMU_ACCEL:=tcg}"
 
 echo "== 1. bauen =="
@@ -65,17 +65,28 @@ fi
 command -v qemu-system-x86_64 >/dev/null 2>&1 || {
     echo "PRAESENZ: uebersprungen, qemu fehlt"; echo "PRAESENZ: $pass passed, $fail failed"; exit 0; }
 
+# EIN GERAET MIT SCHRIFTEN. `/lib/mono.ttf` und `/lib/sans.ttf` sind
+# NICHT Beiwerk: ohne sie meldet der Kern "ttf: keine Schrift gefunden",
+# der Fensterserver kommt nicht hoch, und JEDES Fensterprogramm bleibt
+# still. Genau daran lagen vier rote Zusagen in Abschnitt 9, und keine
+# davon lag am Programm -- der Gast hatte schlicht keine Schrift.
+# tools/glyphe/run.sh legt sie aus demselben Grund an dieselbe Stelle.
 geraet() { # <abbild> <skript> [etcverz]
     local img=$1 skript=$2 ed=${3:-}
-    local spec=""
+    local -a A=(build "$img" $BLOCKS /lib/
+        "/lib/mono.ttf=assets/osum-mono.ttf"
+        "/lib/sans.ttf=assets/osum-sans.ttf"
+        /bin/ /t/ /proc/ /dev/ /system/ /etc/)
+    local p
+    for p in $PROGS; do A+=("/bin/$p=$TMPD/bin/$p.elf"); done
+    A+=("/t/s.sh=$skript")
     if [ -n "$ed" ] && [ -d "$ed" ]; then
-        spec="/etc/"
-        for f in "$ed"/*; do [ -f "$f" ] && spec="$spec /etc/$(basename "$f")=$f"; done
+        local f
+        for f in "$ed"/*; do
+            [ -f "$f" ] && A+=("/etc/$(basename "$f")=$f")
+        done
     fi
-    python3 tools/osum/mkfs.py build "$img" $BLOCKS \
-        /bin/ /t/ /proc/ /dev/ /system/ \
-        $(for p in $PROGS; do echo "/bin/$p=$TMPD/bin/$p.elf"; done) \
-        /t/s.sh="$skript" $spec > "$TMPD/mkfs.txt" 2>&1
+    python3 tools/osum/mkfs.py "${A[@]}" > "$TMPD/mkfs.txt" 2>&1
 }
 
 lauf() { # <abbild> <ausgabename> [ms]
@@ -272,8 +283,15 @@ sleep 2
 kill -9 "$QP" 2>/dev/null; wait "$QP" 2>/dev/null
 tr -cd '\11\12\15\40-\176' < "$TMPD/o9.txt" > "$TMPD/o9.klar" 2>/dev/null || true
 if [ -f docs/shots/praesenz/leiste.ppm ]; then
+    # PPM -> PNG. `convert` (ImageMagick) gibt es auf diesem Wirt nicht;
+    # Pythons Pillow ist da, und ein PPM ist ohnehin ein Format, das man
+    # notfalls von Hand liest. Bleibt beides aus, bleibt das PPM liegen
+    # -- ein Bild in einem sperrigen Format ist mehr als kein Bild.
     if command -v convert >/dev/null 2>&1; then
         convert docs/shots/praesenz/leiste.ppm docs/shots/praesenz/leiste.png 2>/dev/null \
+            && rm -f docs/shots/praesenz/leiste.ppm
+    else
+        python3 -c "from PIL import Image; Image.open('docs/shots/praesenz/leiste.ppm').save('docs/shots/praesenz/leiste.png')" 2>/dev/null \
             && rm -f docs/shots/praesenz/leiste.ppm
     fi
     ok "ein Schirmbild der Freundesleiste entstand"
