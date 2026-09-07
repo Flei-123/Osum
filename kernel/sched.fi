@@ -1955,28 +1955,34 @@ fn on_tick(state: u64) {
 // Die Zahl unten ist grosszuegig: bei 100 Hz kommt alle 10 ms eine
 // Marke; 300 ms ohne eine einzige heisst, dass etwas kaputt ist und
 // nicht, dass die Maschine beschaeftigt war.
-static mut tote_marke: u64 = 0
-static mut tote_zeit: u64 = 0
-static mut tote_zahl: u64 = 0
-
+// RUNDE MERGE-7: JE KERN statt drei geteilte `static mut`. Der Wachhund
+// beobachtet, ob DIESER Kern noch Zeitgebermarken sieht -- das ist eine
+// Frage je Kern, keine gemeinsame, und ein gemeinsamer Zustand ohne
+// Sperre hiess: Kern A schreibt `tote_zeit` mit seinem TSC-Wert, Kern B
+// liest ihn im selben Augenblick und zieht seinen EIGENEN, kleineren
+// TSC-Wert ab -- `t - tote_zeit` unterlaeuft null. Siehe kernel/cpu.fi,
+// C_TOTMARKE/C_TOTZEIT/C_TOTZAHL, fuer die Messung, die das zeigt.
 fn timer_tot(state: u64) -> bool {
     let hz: u64 = apic.tsc_hz(state)
     if hz == 0 {
         return false
     }
+    let k: u64 = cpu.here(state)
     let jetzt: u64 = kstate.get(state, kstate.TICKS)
     let t: u64 = apic.tsc()
-    if jetzt != tote_marke {
-        tote_marke = jetzt
-        tote_zeit = t
+    let marke: u64 = cpu.get(state, k, cpu.C_TOTMARKE)
+    if jetzt != marke {
+        cpu.set(state, k, cpu.C_TOTMARKE, jetzt)
+        cpu.set(state, k, cpu.C_TOTZEIT, t)
         return false
     }
-    if tote_zeit == 0 {
-        tote_zeit = t
+    let zeit: u64 = cpu.get(state, k, cpu.C_TOTZEIT)
+    if zeit == 0 {
+        cpu.set(state, k, cpu.C_TOTZEIT, t)
         return false
     }
-    if t - tote_zeit > hz / 3 {
-        tote_zahl = tote_zahl + 1
+    if t > zeit && t - zeit > hz / 3 {
+        cpu.add(state, k, cpu.C_TOTZAHL, 1)
         return true
     }
     return false
@@ -1985,8 +1991,16 @@ fn timer_tot(state: u64) -> bool {
 // Wie oft ein Schlaf abgelehnt wurde, weil keine Marke mehr kam. Steht
 // auf der Messtafel: ist die Zahl groesser als null, war der Zeitgeber
 // wirklich stehen -- gemessen, nicht vermutet.
-fn tote_schlaefe() -> u64 {
-    return tote_zahl
+// RUNDE MERGE-7: Summe ueber alle Kerne -- C_TOTZAHL liegt jetzt je
+// Kern, die Messtafel will trotzdem EINE Zahl fuer die ganze Maschine.
+fn tote_schlaefe(state: u64) -> u64 {
+    var summe: u64 = 0
+    var k: u64 = 0
+    while k < cpu.count(state) {
+        summe = summe + cpu.get(state, k, cpu.C_TOTZAHL)
+        k = k + 1
+    }
+    return summe
 }
 
 // `ticks` timer ticks, 10 ms each at 100 Hz. Zero is a yield.
