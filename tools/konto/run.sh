@@ -208,7 +208,14 @@ else
     bad "die deutschen Konto-Texte haben keinen einzigen Umlaut"
 fi
 TABS_DE=$(grep -a '^settings.tabs' locale/de/messages | tr '\\' '\n' | grep -c '^n')
-num "Reiter in settings.tabs (deutsch)" "$((TABS_DE + 1))" eq 9
+# RUNDE PRAESENZ: ZEHN STATT NEUN. Auf dem Zweig `konto` allein war
+# "Konten" der neunte Reiter. Runde PRAESENZ hat `konto` UND `sync` auf
+# einen Zweig geholt, und `sync` bringt "Abgleich" als zehnten mit
+# (beide Runden hatten sich unabhaengig die Nummer 8 genommen; KONTO
+# behaelt 8, SYNC rueckt auf 9). Die Zahl steht hier weiterhin fest und
+# wird nicht aus der Datei abgeleitet -- eine Zusage, die sich selbst
+# nachrechnet, faellt nie auf.
+num "Reiter in settings.tabs (deutsch)" "$((TABS_DE + 1))" eq 10
 
 # ======================================================================
 echo "== 3. der Aufbau: Kern, Userland, Zertifikat, Attrappe =="
