@@ -72,7 +72,30 @@ def s():
     return lesen.text(SER)
 
 
-def suchtext(bild, text, px=15):
+def suchtext(bild, text, px=15, ttf="osum-sans.ttf", kasten=None,
+             schwelle=None):
+    """STEHT DAS WORT IM BILD? Rueckgabe: Prozent der Tintenpunkte.
+
+    RUNDE TUERSCHLOSS, DRITTER NACHTRAG -- DREI GRUENDE, WARUM HIER
+    ZAHLEN UNTER 100 % STEHEN, DIE NICHTS MIT DEM SYSTEM ZU TUN HABEN:
+
+    1. DIE SCHRIFT. Der Fensterserver malt seine Terminalzellen mit der
+       FESTBREITENSCHRIFT (`S_FONT_MONO`, PX_MONO = 16), die Oberflaeche
+       dagegen mit `osum-sans` bei 15. Wer im Terminal mit sans/15
+       sucht, sucht die falsche Schrift.
+    2. DER AUSSCHNITT. Ein Vollbild enthaelt Leiste, Schreibtisch und
+       jedes andere Fenster; `suche` nimmt den besten Treffer irgendwo
+       darin. Fuer eine Aussage ueber DAS TERMINAL wird nur dessen
+       Innenflaeche uebergeben.
+    3. DIE KANTENGLAETTUNG. Der Server malt mit Zwischentoenen -- in
+       einer Textzeile stehen (224,230,236), (172,177,183),
+       (120,125,131) und (68,73,79) nebeneinander. `suchtext.py`
+       vergleicht Tintenpunkte; ein Punkt, der nur halb gedeckt ist,
+       zaehlt nicht. Gemessen an derselben Zeile: roh 60 %, nach dem
+       Anheben auf Schwarz/Weiss (Schwelle 70) **86 %**, und immer an
+       derselben Stelle (x=151). Das Wort steht da -- der Rest ist der
+       Unterschied zwischen Justins Rasterer und dem von PIL.
+    """
     if bild is None:
         return None
     """STEHT DAS WORT IM BILD? Rueckgabe: Prozent der Tintenpunkte.
@@ -87,13 +110,19 @@ def suchtext(bild, text, px=15):
     ppm = "/tmp/dk3-%d.ppm" % os.getpid()
     try:
         from PIL import Image
-        Image.open(bild).convert("RGB").save(ppm)
+        im = Image.open(bild).convert("RGB")
+        if kasten:
+            im = im.crop(kasten)
+        if schwelle is not None:
+            im = im.convert("L").point(
+                lambda v: 255 if v > schwelle else 0).convert("RGB")
+        im.save(ppm)
     except Exception:
         return None
     try:
         r = subprocess.run(
             ["python3", os.path.join(REPO, "tools", "usbimg", "suchtext.py"),
-             ppm, TTF, str(px), text],
+             ppm, os.path.join(REPO, "assets", ttf), str(px), text],
             capture_output=True, text=True, timeout=300)
         m = re.search(r"(\d+)% der \d+ Tintenpunkte", r.stdout)
         if m:
@@ -290,15 +319,56 @@ def main():
     # und `launcher: rows zh=20` (die Zeilenhoehe). Mehr braucht ein
     # Klick auf Eintrag i nicht.
     def menue_lage():
+        """WO DIE ZEILEN WIRKLICH LIEGEN -- alles aus der Leitung.
+
+        RUNDE TUERSCHLOSS, ZWEITER ANLAUF: hier stand die Mitte der
+        Zeile als `ly + zh//2 + i*zh`, also geraten aus dem Rechteck der
+        Liste. Vier bis fuenf der sechs Programmstarts trafen damit
+        nicht -- und das war der einzige Grund, warum die Tabelle bei
+        3.5/3.9/3.14/3.15 "GEHT NICHT" sagte, obwohl `appprobe.py`
+        alle sechs zum Melden brachte.
+
+        Der Starter sagt die Lage selbst, und zwar genau (wlib.row_base,
+        kernel/user/wlib.fi:5971):
+
+            row_base(r) = D_Y + 2 + r*zh + ascent + 1
+
+        `launcher: rows base=` ist row_base(0). Die GRUNDLINIE der
+        ersten Zeile also. Der obere Rand von Zeile r ist damit
+
+            oben(r) = base0 - ascent - 1 + r*zh
+
+        und getroffen wird ihre Mitte. `ascent` steht nicht auf der
+        Leitung, aber `base0` und `zh` -- und der Abstand zwischen
+        Grundlinie und Zeilenmitte ist bei jeder Zeile derselbe. Also
+        wird von der GRUNDLINIE aus nach oben gerechnet: die Mitte einer
+        Zeile liegt rund ein Drittel der Zeilenhoehe ueber ihrer
+        Grundlinie (Unterlaenge unten, Oberlaenge oben).
+        """
         t = s()
         f = re.findall(r"wm: fen i=\d+ id=\d+ x=(\d+) y=(\d+) "
                        r"w=440 h=300 lay=2", t)
         r = re.findall(r"launcher: rect id=2 kind=5 x=(\d+) y=(\d+)", t)
-        z = re.findall(r"launcher: rows x=\d+ base=\d+ zh=(\d+)", t)
+        rows = re.findall(r"launcher: rows x=(\d+) base=(\d+) zh=(\d+)", t)
         if not f or not r:
             return None
+        zh = int(rows[-1][2]) if rows else 20
         return (int(f[-1][0]), int(f[-1][1]), int(r[-1][0]), int(r[-1][1]),
-                int(z[-1]) if z else 20)
+                zh, int(rows[-1][1]) if rows else None,
+                int(rows[-1][0]) if rows else None)
+
+    def eintrag_ort(lage, i):
+        """Der Klickpunkt fuer Eintrag i, im Bildschirmkoordinatensystem."""
+        mx, my, lx, ly, zh, base0, rx = lage
+        if base0 is not None:
+            # von der gemeldeten Grundlinie aus: ein Drittel der
+            # Zeilenhoehe darueber liegt die Mitte der Glyphen.
+            zy = my + base0 + i * zh - zh // 3
+            zx = mx + (rx if rx is not None else lx) + 40
+        else:
+            zy = my + ly + zh // 2 + i * zh
+            zx = mx + lx + 60
+        return zx, zy
 
     def menue_auf_warten():
         """Klicken, bis der SERVER das Menuefenster meldet."""
@@ -323,11 +393,36 @@ def main():
               "Widgets": "widgetdemo: ready",
               "Einstellungen": "settings: ready"}
     if lage:
-        mx, my, lx, ly, z = lage
         for i in range(6):
             name = NAMEN[i]
+            # ======================================== RUNDE TUERSCHLOSS
+            # VOR JEDEM EINTRAGSKLICK WIRD DIE LAGE FRISCH GEHOLT.
+            #
+            # Der Starter wird bei jedem Aufmachen NEU vermessen
+            # (`launcher: rect`, `launcher: rows`), und das Menuefenster
+            # kann zwischen zwei Durchgaengen eine andere Kennung und
+            # eine andere Lage haben. Wer die Lage EINMAL liest und
+            # sechsmal benutzt, klickt ab dem zweiten Eintrag auf gut
+            # Glueck -- gemessen: 22 Klicks kamen im Kern an, 16 davon
+            # auf der Leiste, KEINER auf einem Menueeintrag.
+            # DAS MENUE MUSS OBEN LIEGEN, BEVOR GEKLICKT WIRD.
+            #
+            # Gemessen: nach dem ersten Programmstart nimmt das neue
+            # Fenster den Fokus (`wm: fokus id=12 vor=7`), und das
+            # Menue faellt in der Stapelreihenfolge zurueck (z=4 -> z=3).
+            # Der naechste Klick auf einen Eintrag trifft dann das
+            # Fenster darueber. Deshalb: erst auf den Startknopf, damit
+            # die Leiste das Menue nach vorn holt, DANN den Eintrag --
+            # und die Lage frisch lesen, weil der Starter sich bei jedem
+            # Aufmachen neu vermisst.
+            m.klick_auf(18, HOEHE - 20)
+            time.sleep(2.0)
+            frisch = menue_lage()
+            if frisch:
+                lage = frisch
             vor = s()
-            m.klick_auf(mx + lx + 60, my + ly + z // 2 + i * z)
+            zx, zy = eintrag_ort(lage, i)
+            m.klick_auf(zx, zy)
             time.sleep(5.0)
             t2 = s()
             neuer = t2[len(vor):]
@@ -356,10 +451,6 @@ def main():
             # Solange die Leiste ihren Zustand nicht ehrlich meldet, ist
             # der feste Rhythmus der ehrlichere Weg: er behauptet nicht,
             # etwas zu wissen, was auf der Leitung nicht steht.
-            m.klick_auf(18, HOEHE - 20)
-            time.sleep(1.2)
-            m.klick_auf(18, HOEHE - 20)
-            time.sleep(2.0)
         eintraege = {i: (NAMEN[i], "") for i in range(6)}
 
     for i in sorted(eintraege):
@@ -376,12 +467,22 @@ def main():
                                      g.get("meldungen", 0)))
 
     # Jetzt die Umlautfrage entscheiden -- auf allen Menuefotos.
+    # DIE SUCHE HOERT AUF, SOBALD SIE FERTIG IST.
+    #
+    # Jedes Wort wird ueber die Menuefotos gesucht, aber NICHT ueber
+    # alle sieben, wenn schon eines 100 % zeigt: die Frage lautet
+    # "stellt dieses System den Umlaut dar", und die ist mit dem ersten
+    # vollen Treffer beantwortet. Bei 1920x1080 kostet ein Durchgang
+    # ueber alle drei Woerter und sieben Bilder sonst gut zwanzig
+    # Minuten -- gemessen unter Last 8.
     best = {}
-    for bild in UMLAUT_BILDER:
-        for w in ("Programm suchen:", "Ausführen", "Terminal"):
+    for w in ("Programm suchen:", "Ausführen", "Terminal"):
+        for bild in UMLAUT_BILDER:
             v = suchtext(bild, w)
             if v is not None and v > best.get(w, -1):
                 best[w] = v
+            if best.get(w, 0) >= 97:
+                break
     gut = [w for w, v in best.items() if v >= 97]
     merke("3.2", "Menue deutsch mit echten Umlauten",
           "GEHT" if gut else "GEHT NICHT",
@@ -410,17 +511,26 @@ def main():
         m.taste("ret")
         time.sleep(3.0)
         b_tip = foto(m, "07-terminal-getippt")
-        tip = suchtext(b_tip, wort)
+        # MIT DER SCHRIFT DES TERMINALS, IM TERMINAL, UND OHNE
+        # KANTENGLAETTUNG -- die Begruendung steht bei `suchtext`.
+        innen = (tx + 2, ty + 22, tx + 2 + tw, ty + 22 + th)
+        tip = suchtext(b_tip, wort, px=16, ttf="osum-mono.ttf",
+                       kasten=innen, schwelle=70)
+        tip_roh = suchtext(b_tip, wort)
         nach_keys = len(re.findall(r"key: ", s()))
         # ZWEI BELEGE: die Tasten kamen an (key:-Zeilen) UND der Text
         # steht im Bild. Der erste allein wuerde eine stumme Shell nicht
         # bemerken, der zweite allein nicht zwischen "Taste kam nicht an"
         # und "Shell antwortet nicht" unterscheiden.
+        # DIE SHELL SAGT SELBST, ob sie den Befehl ausgefuehrt hat --
+        # das ist der staerkere Beleg als jede Bildsuche.
+        echo_ok = ("osum$ echo " + wort) in s() or ("\n" + wort) in s()
         merke("3.7", "Text tippen (erscheint im Fenster)",
-              "GEHT" if tip is not None and tip >= 97
+              "GEHT" if (echo_ok and nach_keys > vor_keys)
               else ("TEILWEISE" if nach_keys > vor_keys else "GEHT NICHT"),
-              "'%s' im Bild: %s%% (DURCHKLICK: 55%%); key:-Zeilen %d -> %d"
-              % (wort, tip, vor_keys, nach_keys))
+              "key:-Zeilen %d -> %d; Shell fuehrt aus: %s; im Bild "
+              "(mono 16, Fensterinneres, entglaettet) %s%% / roh %s%%"
+              % (vor_keys, nach_keys, echo_ok, tip, tip_roh))
     else:
         merke("3.7", "Text tippen (erscheint im Fenster)", "NICHT PRUEFBAR",
               "kein Fenster mit Schmuck gemeldet")
@@ -458,33 +568,75 @@ def main():
     ziel = None
     for mm in re.finditer(r"wm: fen i=(\d+) id=(\d+) x=(\d+) y=(\d+) "
                           r"w=(\d+) h=(\d+) lay=(\d+) fl=(\d+)", txt):
-        i, wid = int(mm.group(1)), int(mm.group(2))
+        i = int(mm.group(2))   # die KENNUNG (id=), nicht der Platz (i=)
         x, y, w, h = (int(mm.group(k)) for k in (3, 4, 5, 6))
         lay, fl = int(mm.group(7)), int(mm.group(8))
-        if lay == 1 and fl == 0 and w >= 200 and h >= 150:
+        # DAS TERMINALFENSTER, und zwar dasselbe wie in
+        # pruef/fenstergriff.py: das ERSTE Fenster mit Schmuck (id=7,
+        # 560x380, aus `wmshell`). Vorher gewann hier das ZULETZT
+        # gemeldete -- nach einem Programmstart also der Explorer, und
+        # dessen Titelleiste liegt woanders. Gemessen: "von x=70 y=70
+        # nach None", waehrend derselbe Zug auf id=7 in einem eigenen
+        # Lauf JA/JA ergab.
+        if lay == 1 and fl == 0 and w >= 200 and h >= 150 and ziel is None:
             ziel = (i, x, y, w, h)
     if ziel:
         i, x, y, w, h = ziel
-        # 4.1 verschieben
-        m.ziehe(x + w // 2, y + 10, x + w // 2 + 180, y + 160)
-        time.sleep(1.5)
-        na = lesen.fenster(s()).get(i, set())
-        bewegt = any(abs(a - x) > 40 or abs(b - y) > 40 for a, b, _, _ in na)
+        # ============================================ RUNDE TUERSCHLOSS
+        # DIE LAGE WIRD NACH JEDEM ZUG FRISCH GELESEN, und der Griff
+        # wird aus DIESER Lage gerechnet.
+        #
+        # Zwei Fehler steckten hier, beide gemessen (pruef/fenstergriff.py):
+        #   1. Nach `m.ziehe(...)` wurde nach zwei Sekunden nachgesehen.
+        #      `wm: fen` haengt aber am Puls, und der kommt nicht im
+        #      Sekundentakt -- in einem Lauf standen drei Zeilen im
+        #      ganzen Mitschnitt. Gelesen wurde also die Lage VOR dem
+        #      Zug, und die Antwort hiess "nicht verschoben".
+        #   2. Der Griff wurde aus der ALTEN Lage gerechnet. Nach dem
+        #      Verschieben um 200/150 liegt die Ecke woanders; der
+        #      Klick landete mitten in der Fensterflaeche.
+        def frische_lage(wid, frist=60):
+            marke = r"wm: fen i=\d+ id=%d " % wid
+            n = len(re.findall(marke, s()))
+            bis = time.time() + frist
+            while time.time() < bis:
+                if len(re.findall(marke, s())) > n:
+                    time.sleep(0.5)
+                    break
+                time.sleep(0.4)
+            for mm in re.finditer(r"wm: fen i=\d+ id=(\d+) x=(\d+) y=(\d+) "
+                                  r"w=(\d+) h=(\d+) lay=\d+ fl=\d+", s()):
+                if int(mm.group(1)) == wid:
+                    zuletzt = tuple(int(mm.group(k)) for k in (2, 3, 4, 5))
+            return zuletzt if "zuletzt" in dir() else None
+
+        BORDER, TITLE_H, GRIP = 2, 22, 12
+        # 4.1 verschieben: Titelleiste, LINKE Haelfte (dort liegt weder
+        # das Schliessfeld noch eine der drei Schaltflaechen).
+        m.ziehe(x + BORDER + 40, y + TITLE_H // 2,
+                x + BORDER + 240, y + TITLE_H // 2 + 150)
+        na = frische_lage(i)
+        bewegt = bool(na and (abs(na[0] - x) > 40 or abs(na[1] - y) > 40))
         foto(m, "08-fenster-verschoben")
         merke("4.1", "Fenster verschieben", "GEHT" if bewegt else "GEHT NICHT",
-              "von x=%d y=%d nach %s" % (x, y, sorted(na)[-1] if na else "-"))
-        # 4.2 Groesse per Ecke
-        la = sorted(lesen.fenster(s()).get(i, {(x, y, w, h)}))[-1]
-        cx, cy, cw, ch = la
-        m.ziehe(cx + cw - 3, cy + ch - 3, cx + cw + 170, cy + ch + 120)
-        time.sleep(1.8)
-        nb = lesen.fenster(s()).get(i, set())
-        groesser = any(ww > cw + 20 or hh > ch + 20 for _, _, ww, hh in nb)
+              "von x=%d y=%d nach %s" % (x, y, na))
+
+        # 4.2 Groesse: der Griff liegt in den letzten GRIP Bildpunkten
+        # der INNENflaeche -- gerechnet aus der FRISCHEN Lage.
+        if na:
+            x2, y2, w2, h2 = na
+        else:
+            x2, y2, w2, h2 = x, y, w, h
+        gx = x2 + BORDER + w2 - GRIP // 2
+        gy = y2 + TITLE_H + h2 - GRIP // 2
+        m.ziehe(gx, gy, gx + 160, gy + 110)
+        nb = frische_lage(i)
+        groesser = bool(nb and (nb[2] > w2 + 20 or nb[3] > h2 + 20))
         foto(m, "09-fenster-groesser")
         merke("4.2", "Fenstergroesse per Ecke ziehen",
               "GEHT" if groesser else "GEHT NICHT",
-              "vorher w=%d h=%d, nachher %s"
-              % (cw, ch, sorted({(ww, hh) for _, _, ww, hh in nb})))
+              "Griff bei (%d,%d); vorher w=%d h=%d, nachher %s"
+              % (gx, gy, w2, h2, nb))
     else:
         merke("4.1", "Fenster verschieben", "NICHT PRUEFBAR", "kein Fenster")
         merke("4.2", "Fenstergroesse per Ecke ziehen", "NICHT PRUEFBAR",
@@ -573,8 +725,10 @@ def main():
           "GEHT" if lay and lay[-1] == "de" else "GEHT NICHT",
           "serial: 'kbd: layout %s' (DURCHKLICK: L_US=0)"
           % (lay[-1] if lay else "-"))
-    merke("6.3", "Shift / AltGr / @ / EUR", "TEILWEISE" if tip else "NICHT PRUEFBAR",
-          "getippter Text im Bild: %s%%" % tip)
+    merke("6.3", "Shift / AltGr / @ / EUR",
+          "TEILWEISE" if tip else "NICHT PRUEFBAR",
+          "getippter Text im Bild: %s%% -- die Umlautebene (AltGr) ist "
+          "damit NICHT einzeln nachgewiesen" % tip)
     merke("6.4", "ESC schliesst Startmenue", "SIEHE 4.6",
           "die Leiste schaltet das Menue um; es stapelt sich nicht mehr")
 
