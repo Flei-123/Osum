@@ -102,3 +102,41 @@ Gelernt beim Bauen (Stufe-0-`firnc`), damit der Erzeuger nichts Falsches ausgibt
 - **Feldlängen sind Literale.** `[u8; MAX]` mit `MAX` als Konstante wird
   abgelehnt (schon Fallstrick 8 aus SCHLEUSE).
 - **`main` hat die Form `fn main(start: u64) -> i32`** im Profil `app`.
+
+
+---
+
+## 2. Das Umlauf-Problem — gelöst, ohne Spracherweiterung
+
+**Der Auftrag nannte das als Kernproblem und fragte, ob Firn eine
+Erweiterung bräuchte. Antwort: nein.**
+
+`firnc` Stufe 0 hat `+% -% *%` (umlaufend) und `+| -| *|` (sättigend)
+bereits eingebaut. Sie sind in `/root/firn/SPEC.md` (~Zeile 1238)
+beschrieben und im Codegenerator umgesetzt — Beleg in Abschnitt 0 dieser
+Datei: ein `lea`, kein `jc`, kein Panik-Block.
+
+Damit sieht die Übersetzung so aus:
+
+| WASM | erzeugtes Firn |
+|---|---|
+| `i32.add` | `(a +% b) & 4294967295` |
+| `i32.sub` | `(a -% b) & 4294967295` |
+| `i32.mul` | `(a *% b) & 4294967295` |
+| `i64.add` | `a +% b` |
+| `i32.div_s` | `i32_div_s(a, b)` — mit Nullprüfung → WASM-Falle |
+
+Die 32-Bit-Werte liegen in den unteren 32 Bit einer `u64` und werden nach
+jeder Rechnung mit `& 4294967295` beschnitten. Das ist genau der Weg, den
+der Auftrag als „billigster korrekter Weg" beschrieben hat — nur dass die
+Rechnung selbst ungeprüft ist und nicht durch einen Funktionsaufruf geht.
+
+**Was der Deuter dafür brauchte:** `wadd`/`wsub`/`wmul` als eigene
+Funktionen, `wmul` sogar über vier 32-Bit-Hälften. Jeder `i32.add` des
+Gastes war ein Aufruf mit Verzweigung. Das ist ein guter Teil der 158×.
+
+### Division ist kein Sonderweg, sondern eine Falle
+
+WASM verlangt bei Division durch Null und bei `INT_MIN / -1` eine **Falle**,
+kein stilles Ergebnis. Beides steht in `i32_div_s`/`i64_div_s` der Laufzeit
+und endet über `div_falle()` mit einem Abbruch — nicht mit einer Zahl.
