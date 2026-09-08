@@ -449,6 +449,33 @@ def _ueberlesen(l, op):
 #
 # Erkannt wird der Turm daran, dass am Stueck (ohne einen anderen
 # Befehl dazwischen) mehr als GRENZE Bloecke geoeffnet werden.
+# Kennungen fuer `br_ziel`, die keinen Blockebenen entsprechen, sondern
+# einem VERTEILER. Blockebenen sind klein (< 300), diese hier nicht.
+TURM_KENNUNG = 1000000
+
+
+def _in_verteiler_rumpf(stapel, marke):
+    """Stehen wir unmittelbar im Rumpf des Verteilers `marke` -- also
+    ohne eine echte Schleife dazwischen? Nur dann traegt `continue`."""
+    for x in reversed(stapel):
+        if x.art == 'turm':
+            return x.turm_marke == marke
+        if x.art == 'loop' or (x.art == 'block' and x.schleife):
+            return False
+    return False
+
+
+def _verteiler_ohne_schleife(stapel):
+    """Der innerste Verteiler, zu dem von HIER aus ein `continue`
+    traegt -- oder None."""
+    for x in reversed(stapel):
+        if x.art == 'turm':
+            return x.turm_marke
+        if x.art == 'loop' or (x.art == 'block' and x.schleife):
+            return None
+    return None
+
+
 def turm_messen(code, at):
     """Wie viele `block`/`loop` werden ab `at` unmittelbar
     hintereinander geoeffnet? Gibt (anzahl, position_danach, arten)
@@ -795,9 +822,23 @@ class Erzeuger:
                 self.e(tiefe + 2, 'return')
             self.e(tiefe + 1, '}')
         else:
-            self.e(tiefe + 1,
-                   'if br_ziel == %d { br_ziel = -1 } else { break }'
-                   % ziel_tiefe)
+            m = _verteiler_ohne_schleife(stapel) if stapel is not None else None
+            if m is not None:
+                # Von hier aus traegt ein `continue` bis in den
+                # Verteiler -- also die Verteilerkennung abfangen.
+                self.e(tiefe + 1, 'if br_ziel == %d {' % ziel_tiefe)
+                self.e(tiefe + 2, 'br_ziel = -1')
+                self.e(tiefe + 1, '} else if br_ziel == %d {'
+                       % (TURM_KENNUNG + m))
+                self.e(tiefe + 2, 'br_ziel = -1')
+                self.e(tiefe + 2, 'continue')
+                self.e(tiefe + 1, '} else {')
+                self.e(tiefe + 2, 'break')
+                self.e(tiefe + 1, '}')
+            else:
+                self.e(tiefe + 1,
+                       'if br_ziel == %d { br_ziel = -1 } else { break }'
+                       % ziel_tiefe)
         self.e(tiefe, '}')
 
     # ------------------------------------------------- ein Befehl
@@ -983,7 +1024,19 @@ class Erzeuger:
             # die Verteilerschleife neu durchlaufen.
             E('fall%d = %d' % (ziel.turm_marke,
                                0 if ziel.turm_schleife else ziel.turm_fall))
-            E('continue')
+            # ACHTUNG (durch pruefung/turm.wat, Fall $tinner, gefunden):
+            # `continue` setzt die INNERSTE Schleife fort. Stehen wir
+            # nicht unmittelbar im Verteilerrumpf, sondern in einer
+            # Schleife darin, muss erst aus allen dazwischenliegenden
+            # Schleifen herausgebrochen werden. Dafuer traegt `br_ziel`
+            # eine Kennung des Verteilers; jedes `nach_block` innerhalb
+            # des Verteilers erkennt sie und macht daraus `continue`.
+            if _in_verteiler_rumpf(stapel, ziel.turm_marke):
+                E('continue')
+            else:
+                self.br_benutzt = True
+                E('br_ziel = %d' % (TURM_KENNUNG + ziel.turm_marke))
+                E('break')
         elif ziel.art == 'func':
             if self.res:
                 E('return %s' % self.sv(sp - 1))
