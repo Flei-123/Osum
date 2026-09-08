@@ -386,6 +386,27 @@ say "$F" "err execmis" -2 "execve of a file that is not there: -ENOENT"
 say "$F" "err sleep" -22 "a sleep of a thousand seconds: -EINVAL"
 say "$F" "errno" 2 "and the libc turns the same refusal into -1 with errno = ENOENT"
 
+# --------------------------------------------- RUNDE FREMDLAND
+# Die Nummern, die diese Runde ergaenzt hat. Zu jeder eine Antwort, die
+# nachpruefbar ist, und wo es eine gibt eine GEGENPROBE -- eine Nummer,
+# die nur "kein -ENOSYS" liefert, ist nicht gemessen.
+say "$F" "uname sys" 0 "uname(63) fuellt seine sechs Felder"
+say "$F" "uname mach" 120 "und Feld 4 faengt mit 'x' an (x86_64) -- die Felder liegen 65 Oktette auseinander"
+say "$F" "uname faul" -14 "GEGENPROBE: uname auf einen Zeiger in den Kern: -EFAULT"
+say "$F" "prctl name" 0 "prctl(157) PR_SET_NAME wird still angenommen -- es gibt keinen Prozessnamen"
+say "$F" "prctl getnm" -22 "GEGENPROBE: PR_GET_NAME MUSS scheitern, ein Puffer den niemand fuellt gilt nicht als gefuellt"
+say "$F" "prctl bad" -22 "GEGENPROBE: ein Unterbefehl, den es nicht gibt: -EINVAL"
+say "$F" "mprotect" 0 "mprotect(10) nimmt eine seitenweise Adresse an"
+say "$F" "mprotect un" -22 "GEGENPROBE: eine Adresse mitten in einer Seite: -EINVAL"
+say "$F" "futex weck" 0 "futex(202) FUTEX_WAKE: niemand wartet, also null geweckt"
+say "$F" "futex wert" -11 "FUTEX_WAIT mit dem falschen Wert kommt SOFORT zurueck (-EAGAIN) -- das ist der Wertvergleich im Kern"
+say "$F" "futex schr" -22 "GEGENPROBE: eine Adresse, die nicht durch vier teilbar ist: -EINVAL"
+say "$F" "lock setzt" 0 "fcntl(72) F_SETLK setzt eine echte Schreibsperre auf Oktett 0..15"
+say "$F" "lock frage" 2 "F_GETLK auf denselben Bereich gibt F_UNLCK (2) -- der eigene Halter steht sich nie im Weg"
+say "$F" "lock loest" 0 "F_UNLCK gibt sie wieder frei"
+say "$F" "lock bloed" -22 "GEGENPROBE: eine Sperrart, die es nicht gibt: -EINVAL"
+say "$F" "tid gleich" 1 "getpid == gettid, solange es einen Faden gibt -- die Umstellung auf die Fadengruppe hat nichts verschoben"
+
 lines=$(value_of "$F" lines)
 seen=$(grep -ac '^posix: ' "$F")
 num "measurements the program printed" "${lines:-0}" ge 50

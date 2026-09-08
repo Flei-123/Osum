@@ -37,3 +37,68 @@ Ergaenzte Systemaufrufe: 17 `pread64`, 18 `pwrite64`, 19 `readv`,
 `osum_main.c` baut den Hilfsvektor (`auxv`), den musl braucht und den
 `elf.fi` nicht liefert, und ruft `__init_libc`. `start.s` macht aus
 Osums Argumentblock in RDI die drei Zeiger von `main`.
+
+---
+
+# RUNDE FREMDLAND
+
+**busybox 1.36.1 laeuft auf Osum** -- ein Binary, 35 Applets, eigene
+Shell mit Roehren. Dazu musl-Faeden und echte Dateisperren.
+Vollstaendig in `STATUS-FREMDLAND.md`.
+
+## Herkunft: fremd UND unveraendert
+
+`herkunft.sh` fuehrt den Nachweis. Die Archive liegen unter
+`/root/fremdquellen/`, ihre SHA-256 in `STATUS-FREMDLAND.md`
+Abschnitt 0. Das Skript packt jedes Archiv ein ZWEITES Mal aus und
+vergleicht mit dem Baubaum:
+
+    lua-5.4.7                    diff LEER
+    quickjs-2024-01-13           diff LEER (ausser Erzeugtem)
+    sqlite-amalgamation-3460000  diff LEER
+    busybox-1.36.1               0 Dateien differ
+
+Kein `differ`, kein "Only in Original". Was zusaetzlich dasteht, ist
+vom Bau erzeugt (`.o`, `.cmd`, `autoconf.h`, `applet_tables.h`, und bei
+QuickJS `repl.c`/`qjscalc.c` aus seinem eigenen `qjsc`).
+
+## Ergaenzte Systemaufrufe
+
+| Nr | Name | Zweck |
+|---|---|---|
+| 10 | `mprotect` | antwortet 0, aendert nichts (s. STATUS, Mangel benannt) |
+| 56 | `clone` | FADEN mit CLONE_VM, sonst `fork` |
+| 63 | `uname` | sechs Felder zu 65 Oktetten, sysname "Linux" |
+| 157 | `prctl` | PR_SET_NAME still, PR_GET_NAME scheitert |
+| 202 | `futex` | Warten MIT NACHSEHEN, keine Warteschlange |
+
+Und ECHT gemacht: `fcntl` 72 (Bereichssperren statt "gewaehrt ohne
+Wirkung"), `set_tid_address` 218 (Adresse wird gemerkt und geloescht).
+
+## Der Fund dieser Runde
+
+`proc.map_page` gab frische Rahmen UNGENULLT an Ring 3 -- ein Leck
+zwischen Prozessen, und der Grund, aus dem jede Roehre im zweiten Glied
+starb (musls mallocng ruft `a_crash()`, ein `hlt`, wenn es Muell in
+seiner Verwaltung findet). Gemessen: nach einem `execve` 8 von 8192
+Oktetten ungleich null, danach 0. `proc.map_page_zero` an den fuenf
+Stellen, die frischen Speicher ausgeben.
+
+WARNUNG FUER DEN NAECHSTEN: zeigt eine Meldung `vector=13` und ein `rip`
+mitten in musls Halde, ist es NICHT die Halde. Bei #GP ist `cr2` alt --
+die Adresse dort ist eine Faehrte ins Leere.
+
+## Die Programme dieser Runde
+
+| Datei | misst |
+|---|---|
+| `argvdump.c` | was von `argv` wirklich ankommt (Shell-Anfuehrungszeichen) |
+| `brkzero2.c` | ob frische `brk`-Seiten null sind -- ruft `brk` direkt |
+| `forktest.c` | `fork`, Halde im Kind, Ende des Kindes beim Vater |
+| `threads.c` | 4 Faeden a 25 000 Runden, Summe und Sperre |
+| `locktest.c` | Sperren aus zwei Prozessen, sechs Faelle |
+| `sqlock.c` | SQLite aus zwei Prozessen: SQLITE_BUSY statt Schaden |
+
+Bauen wie in LAUFZEIT (`osum.ld`, `start.s`, `osum_main.c`);
+`busybox-config.sh` erzeugt die Konfiguration, `busybox-applets.txt`
+nennt die 35 Namen fuer die harten Verweise.
