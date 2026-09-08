@@ -1,0 +1,658 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/korb.fi -- Runde ALLTAG: DER PAPIERKORB, ALS BIBLIOTHEK.
+//
+// Er steht hier und nicht im Papierkorbfenster, weil ZWEI Programme ihn
+// brauchen: der Dateimanager legt etwas hinein (die Taste Entf), das
+// Papierkorbfenster holt es wieder heraus. Ein Papierkorb, den nur sein
+// eigenes Fenster kennt, ist eine Liste in einem Fenster.
+//
+// PRO DATENTRAEGER, und das ist keine Bequemlichkeit. Eine Datei von
+// einem USB-Stick in einen Papierkorb auf der Systemplatte zu
+// verschieben heisst, sie zu KOPIEREN -- eine halbe Sekunde bei einer
+// kleinen Datei, eine Minute bei einem Film, und wenn der Stick vorher
+// abgezogen wird, ist sie an keiner der beiden Stellen ganz. Also liegt
+// der Korb auf demselben Datentraeger, und das Loeschen ist ein
+// `rename` (ein Verzeichniseintrag, unabhaengig von der Groesse).
+//
+//   <wurzel>/.papierkorb/<n>        die Datei selbst, unter einer Nummer
+//   <wurzel>/.papierkorb/<n>.info   woher sie kam, wann, und wie gross
+//
+// WARUM EINE NUMMER UND NICHT DER NAME. Zwei Dateien namens `notizen`
+// aus zwei Ordnern muessen beide im Korb liegen koennen. Der Name steht
+// in der Infodatei; im Korb selbst ist er eine Nummer, und damit kann
+// es keinen Namensstreit geben.
+//
+// DIE GRENZE steht in /etc/papierkorb.conf (`grenze=<MiB>`, Vorgabe
+// 64). Wird sie ueberschritten, fliegt das AELTESTE heraus, bis es
+// wieder passt -- und das steht auf der seriellen Leitung, weil ein
+// Papierkorb, der stillschweigend etwas endgueltig loescht, schlimmer
+// ist als keiner.
+
+profile kernel
+
+import ulib
+import libc.io
+import tools
+
+export {
+    hinein, zurueck, entfernen, leeren, laden, anzahl, id_von,
+    name_von, pfad_von, zeit_von, groesse_von, summe, grenze,
+    korb_von, loesche_rekursiv, zeit_text, MAXK
+}
+
+const MAXK: u64 = 128
+const NAMEC: u64 = 128
+
+static mut k_id: [u64; 128] = [0; 128]
+static mut k_zeit: [u64; 128] = [0; 128]
+static mut k_gr: [u64; 128] = [0; 128]
+static mut k_pfad: [u8; 16384] = [0 as u8; 16384]
+static mut nk: u64 = 0
+static mut ksumme: u64 = 0
+static mut kwurzel: [u8; 128] = [0 as u8; 128]
+static mut korbp: [u8; 160] = [0 as u8; 160]
+static mut tmp1: [u8; 512] = [0 as u8; 512]
+static mut tmp2: [u8; 512] = [0 as u8; 512]
+static mut ibuf: [u8; 512] = [0 as u8; 512]
+static mut zbuf: [u8; 32] = [0 as u8; 32]
+
+fn pf_at(i: u64) -> u64 {
+    return (&k_pfad[(0) as usize]) as u64 + i * NAMEC
+}
+
+fn anzahl() -> u64 {
+    return nk
+}
+
+fn id_von(i: u64) -> u64 {
+    return k_id[(i) as usize]
+}
+
+fn zeit_von(i: u64) -> u64 {
+    return k_zeit[(i) as usize]
+}
+
+fn groesse_von(i: u64) -> u64 {
+    return k_gr[(i) as usize]
+}
+
+fn pfad_von(i: u64) -> u64 {
+    return pf_at(i)
+}
+
+fn name_von(i: u64) -> u64 {
+    return ulib.base_name(pf_at(i))
+}
+
+fn summe() -> u64 {
+    return ksumme
+}
+
+// ------------------------------------------------ wo der Korb liegt
+
+// Der laengste eingehaengte Pfad, der ein Anfang dieses Pfades ist.
+// Ohne VFS-Tafel (SYS_MNTSTAT sagt dann nichts) bleibt es bei "/", und
+// das ist genau richtig: dann gibt es nur einen Datentraeger.
+fn wurzel_von(pfad: u64, out: u64) {
+    var wurzel: [u8; 2] = "/\0"
+    ulib.strcpy(out, (&wurzel[(0) as usize]) as u64)
+    let n: u64 = ulib.sys(ulib.SYS_MNTSTAT, 0, ulib.MS_COUNT, 0)
+    if ulib.bad(n) || n == 0 {
+        return
+    }
+    var best: u64 = 1
+    var i: u64 = 0
+    while i < n {
+        if ulib.sys(ulib.SYS_MNTSTAT, i, ulib.MS_USED, 0) == 1 {
+            let plen: u64 = ulib.sys(ulib.SYS_MNTSTAT, i, ulib.MS_PATHLEN, 0)
+            if plen > best && plen < 120 {
+                var p: [u8; 128] = [0 as u8; 128]
+                var k: u64 = 0
+                while k < plen {
+                    p[(k) as usize] = ulib.sys(ulib.SYS_MNTSTAT, i,
+                        ulib.MS_PATHCH + k, 0) as u8
+                    k = k + 1
+                }
+                p[(k) as usize] = 0 as u8
+                // Ein Anfang IST er nur, wenn danach ein Schraegstrich
+                // oder das Ende kommt: /mnt2 faengt nicht mit /mnt an.
+                if ulib.strneq(pfad, (&p[(0) as usize]) as u64, plen) {
+                    let c: u64 = (*((pfad + plen) as *mut u8)) as u64
+                    if c == 47 || c == 0 {
+                        ulib.strcpy(out, (&p[(0) as usize]) as u64)
+                        best = plen
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Der Korbpfad zu einem Datentraeger. Gibt einen Zeiger auf einen
+// eigenen Puffer zurueck -- er gilt bis zum naechsten Aufruf.
+fn korb_von(pfad: u64) -> u64 {
+    var teil: [u8; 12] = ".papierkorb\0"
+    var slash: [u8; 2] = "/\0"
+    let w: u64 = (&kwurzel[(0) as usize]) as u64
+    let k: u64 = (&korbp[(0) as usize]) as u64
+    wurzel_von(pfad, w)
+    ulib.strncpy(k, w, 120)
+    if ulib.length(k) > 0
+        && *((k + ulib.length(k) - 1) as *mut u8) != 47 as u8 {
+        ulib.strcat(k, (&slash[(0) as usize]) as u64)
+    }
+    ulib.strcat(k, (&teil[(0) as usize]) as u64)
+    return k
+}
+
+fn zusammen(out: u64, korb: u64, id: u64, info: bool) {
+    var slash: [u8; 2] = "/\0"
+    var suffix: [u8; 6] = ".info\0"
+    var z: [u8; 24] = [0 as u8; 24]
+    let n: u64 = ulib.digits(id, (&z[(0) as usize]) as u64)
+    z[(n) as usize] = 0 as u8
+    ulib.strcpy(out, korb)
+    ulib.strcat(out, (&slash[(0) as usize]) as u64)
+    ulib.strcat(out, (&z[(0) as usize]) as u64)
+    if info {
+        ulib.strcat(out, (&suffix[(0) as usize]) as u64)
+    }
+}
+
+fn gibt_es(pfad: u64) -> bool {
+    let fd: u64 = io.open(pfad, 0)
+    if ulib.bad(fd) {
+        return ulib.is_dir(pfad)
+    }
+    io.close(fd)
+    return true
+}
+
+// ------------------------------------------------------ die Infodatei
+
+fn info_schreiben(pfad_info: u64, orig: u64, zeit: u64, gr: u64) -> bool {
+    var k_p: [u8; 6] = "pfad=\0"
+    var k_z: [u8; 7] = "\nzeit=\0"
+    var k_g: [u8; 10] = "\ngroesse=\0"
+    var k_e: [u8; 2] = "\n\0"
+    let b: u64 = (&ibuf[(0) as usize]) as u64
+    var z: [u8; 24] = [0 as u8; 24]
+    ulib.strcpy(b, (&k_p[(0) as usize]) as u64)
+    ulib.strcat(b, orig)
+    ulib.strcat(b, (&k_z[(0) as usize]) as u64)
+    var n: u64 = ulib.digits(zeit, (&z[(0) as usize]) as u64)
+    z[(n) as usize] = 0 as u8
+    ulib.strcat(b, (&z[(0) as usize]) as u64)
+    ulib.strcat(b, (&k_g[(0) as usize]) as u64)
+    n = ulib.digits(gr, (&z[(0) as usize]) as u64)
+    z[(n) as usize] = 0 as u8
+    ulib.strcat(b, (&z[(0) as usize]) as u64)
+    ulib.strcat(b, (&k_e[(0) as usize]) as u64)
+    let fd: u64 = tools.openw(pfad_info)
+    if ulib.bad(fd) {
+        return false
+    }
+    let len: u64 = ulib.length(b)
+    let g: u64 = io.write_all(fd, b, len)
+    io.close(fd)
+    return !ulib.bad(g) && g >= len
+}
+
+// Einen Wert hinter einem Schluessel holen. Der Wert endet am
+// Zeilenende; was nicht dasteht, ist leer.
+fn wert_von(text: u64, schluessel: u64, out: u64, max: u64) -> bool {
+    let at: u64 = ulib.find(text, schluessel)
+    if at == 0xFFFFFFFFFFFFFFFF {
+        return false
+    }
+    var p: u64 = text + at + ulib.length(schluessel)
+    var n: u64 = 0
+    while *((p) as *mut u8) != 0 as u8 && *((p) as *mut u8) != 10 as u8
+        && n + 1 < max {
+        __mmio_write8((out + n) as *mut u8, *((p) as *mut u8))
+        n = n + 1
+        p = p + 1
+    }
+    __mmio_write8((out + n) as *mut u8, 0 as u8)
+    return true
+}
+
+fn info_lesen(pfad_info: u64, i: u64) -> bool {
+    var k_p: [u8; 6] = "pfad=\0"
+    var k_z: [u8; 6] = "zeit=\0"
+    var k_g: [u8; 9] = "groesse=\0"
+    let fd: u64 = io.open(pfad_info, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    let b: u64 = (&ibuf[(0) as usize]) as u64
+    let n: u64 = io.read(fd, b, 500)
+    io.close(fd)
+    if ulib.bad(n) || n == 0 {
+        return false
+    }
+    __mmio_write8((b + n) as *mut u8, 0 as u8)
+    var z: [u8; 32] = [0 as u8; 32]
+    if !wert_von(b, (&k_p[(0) as usize]) as u64, pf_at(i), NAMEC) {
+        return false
+    }
+    if wert_von(b, (&k_z[(0) as usize]) as u64, (&z[(0) as usize]) as u64,
+        30) {
+        k_zeit[(i) as usize] = ulib.to_num((&z[(0) as usize]) as u64)
+    }
+    if wert_von(b, (&k_g[(0) as usize]) as u64, (&z[(0) as usize]) as u64,
+        30) {
+        k_gr[(i) as usize] = ulib.to_num((&z[(0) as usize]) as u64)
+    }
+    return true
+}
+
+// ------------------------------------------------------------- lesen
+
+fn endet_auf_info(name: u64) -> u64 {
+    // Gibt die Laenge OHNE ".info" zurueck, oder 0.
+    let n: u64 = ulib.length(name)
+    if n < 6 {
+        return 0
+    }
+    if *((name + n - 5) as *mut u8) != 46 as u8 {
+        return 0
+    }
+    if *((name + n - 4) as *mut u8) != 105 as u8 {
+        return 0
+    }
+    if *((name + n - 3) as *mut u8) != 110 as u8 {
+        return 0
+    }
+    if *((name + n - 2) as *mut u8) != 102 as u8 {
+        return 0
+    }
+    if *((name + n - 1) as *mut u8) != 111 as u8 {
+        return 0
+    }
+    return n - 5
+}
+
+// Den Korb eines Datentraegers einlesen. `bei` ist irgendein Pfad auf
+// ihm -- "/" fuer den Systemtraeger.
+fn laden(bei: u64) -> u64 {
+    nk = 0
+    ksumme = 0
+    let korb: u64 = korb_von(bei)
+    let fd: u64 = io.dir_open(korb)
+    if ulib.bad(fd) {
+        return 0
+    }
+    var buf: [u8; 1024] = [0 as u8; 1024]
+    var weiter: bool = true
+    while weiter {
+        let n: u64 = io.dir_read(fd, (&buf[(0) as usize]) as u64, 1024)
+        if ulib.bad(n) || n == 0 {
+            weiter = false
+        } else {
+            var at: u64 = 0
+            while at < n {
+                let rec: u64 = (&buf[(0) as usize]) as u64 + at
+                let nm: u64 = io.dir_name(rec)
+                let kurz: u64 = endet_auf_info(nm)
+                if kurz > 0 && nk < MAXK {
+                    var idt: [u8; 24] = [0 as u8; 24]
+                    var m: u64 = kurz
+                    if m > 20 {
+                        m = 20
+                    }
+                    ulib.copy((&idt[(0) as usize]) as u64, nm, m)
+                    idt[(m) as usize] = 0 as u8
+                    let id: u64 = ulib.to_num((&idt[(0) as usize]) as u64)
+                    k_id[(nk) as usize] = id
+                    k_zeit[(nk) as usize] = 0
+                    k_gr[(nk) as usize] = 0
+                    zusammen((&tmp1[(0) as usize]) as u64, korb, id, true)
+                    if info_lesen((&tmp1[(0) as usize]) as u64, nk) {
+                        ksumme = ksumme + k_gr[(nk) as usize]
+                        nk = nk + 1
+                    }
+                }
+                at = at + io.dir_reclen(rec)
+            }
+        }
+    }
+    io.close(fd)
+    return nk
+}
+
+// ------------------------------------------------------ hineinlegen
+
+fn kopieren(von: u64, nach: u64) -> bool {
+    var puffer: [u8; 4096] = [0 as u8; 4096]
+    let q: u64 = io.open(von, 0)
+    if ulib.bad(q) {
+        return false
+    }
+    let z: u64 = io.create(nach)
+    if ulib.bad(z) {
+        io.close(q)
+        return false
+    }
+    var gut: bool = true
+    var weiter: bool = true
+    while weiter {
+        let n: u64 = io.read(q, (&puffer[(0) as usize]) as u64, 4096)
+        if ulib.bad(n) || n == 0 {
+            weiter = false
+        } else {
+            let g: u64 = io.write_all(z, (&puffer[(0) as usize]) as u64, n)
+            if ulib.bad(g) || g < n {
+                gut = false
+                weiter = false
+            }
+        }
+    }
+    io.close(q)
+    io.close(z)
+    return gut
+}
+
+fn naechste_id(korb: u64) -> u64 {
+    var id: u64 = 1
+    while id < 100000 {
+        zusammen((&tmp1[(0) as usize]) as u64, korb, id, true)
+        if !gibt_es((&tmp1[(0) as usize]) as u64) {
+            zusammen((&tmp1[(0) as usize]) as u64, korb, id, false)
+            if !gibt_es((&tmp1[(0) as usize]) as u64) {
+                return id
+            }
+        }
+        id = id + 1
+    }
+    return 0
+}
+
+fn grenze() -> u64 {
+    var pfad: [u8; 21] = "/etc/papierkorb.conf\0"
+    var k_g: [u8; 8] = "grenze=\0"
+    var mib: u64 = 64
+    let fd: u64 = io.open((&pfad[(0) as usize]) as u64, 0)
+    if !ulib.bad(fd) {
+        let b: u64 = (&ibuf[(0) as usize]) as u64
+        let n: u64 = io.read(fd, b, 500)
+        io.close(fd)
+        if !ulib.bad(n) && n > 0 {
+            __mmio_write8((b + n) as *mut u8, 0 as u8)
+            var z: [u8; 32] = [0 as u8; 32]
+            if wert_von(b, (&k_g[(0) as usize]) as u64,
+                (&z[(0) as usize]) as u64, 30) {
+                let v: u64 = ulib.to_num((&z[(0) as usize]) as u64)
+                if v > 0 && v < 1000000 {
+                    mib = v
+                }
+            }
+        }
+    }
+    return mib * 1048576
+}
+
+// Das Aelteste hinauswerfen, bis die Grenze wieder eingehalten wird.
+// Es steht auf der seriellen Leitung, weil hier das einzige ist, was
+// dieser Papierkorb ohne Auftrag endgueltig loescht.
+fn aufraeumen(bei: u64) {
+    var s_weg: [u8; 46] = "korb: Grenze ueberschritten, endgueltig weg: \0"
+    let g: u64 = grenze()
+    var runden: u64 = 0
+    while runden < MAXK {
+        runden = runden + 1
+        let n: u64 = laden(bei)
+        if n == 0 || ksumme <= g {
+            runden = MAXK
+        } else {
+            var aeltest: u64 = 0
+            var i: u64 = 1
+            while i < n {
+                if k_zeit[(i) as usize] < k_zeit[(aeltest) as usize] {
+                    aeltest = i
+                }
+                i = i + 1
+            }
+            ulib.say((&s_weg[(0) as usize]) as u64)
+            ulib.say(pf_at(aeltest))
+            ulib.nl()
+            let _r: bool = entfernen(bei, k_id[(aeltest) as usize])
+        }
+    }
+}
+
+// Eine Datei oder einen Ordner in den Korb. Der Rueckgabewert ist die
+// Nummer im Korb, oder 0.
+fn hinein(pfad: u64) -> u64 {
+    var slash: [u8; 2] = "/\0"
+    var cwd: [u8; 256] = [0 as u8; 256]
+    let abs: u64 = (&tmp2[(0) as usize]) as u64
+    if *((pfad) as *mut u8) == 47 as u8 {
+        ulib.strncpy(abs, pfad, 400)
+    } else {
+        let r: u64 = io.cwd((&cwd[(0) as usize]) as u64, 250)
+        if ulib.bad(r) {
+            ulib.strcpy(abs, (&slash[(0) as usize]) as u64)
+        } else {
+            ulib.strncpy(abs, (&cwd[(0) as usize]) as u64, 250)
+        }
+        if ulib.length(abs) > 0
+            && *((abs + ulib.length(abs) - 1) as *mut u8) != 47 as u8 {
+            ulib.strcat(abs, (&slash[(0) as usize]) as u64)
+        }
+        ulib.strcat(abs, pfad)
+    }
+    let korb: u64 = korb_von(abs)
+    let _m: u64 = io.make_dir(korb)
+    let id: u64 = naechste_id(korb)
+    if id == 0 {
+        return 0
+    }
+    let gr: u64 = io.size_of(abs)
+    var ziel: [u8; 256] = [0 as u8; 256]
+    zusammen((&ziel[(0) as usize]) as u64, korb, id, false)
+    // ERST VERSCHIEBEN, DANN DIE INFODATEI. Andersherum stuende bei
+    // einem gescheiterten Verschieben eine Infodatei ohne Inhalt im
+    // Korb, und die Liste zeigte eine Datei, die es nicht gibt.
+    var g: u64 = ulib.sys(ulib.SYS_RENAME, abs, (&ziel[(0) as usize]) as u64,
+        0)
+    if ulib.bad(g) {
+        if ulib.is_dir(abs) {
+            return 0
+        }
+        if !kopieren(abs, (&ziel[(0) as usize]) as u64) {
+            return 0
+        }
+        let u: u64 = io.unlink(abs)
+        if ulib.bad(u) {
+            let _x: u64 = io.unlink((&ziel[(0) as usize]) as u64)
+            return 0
+        }
+    }
+    var info: [u8; 256] = [0 as u8; 256]
+    zusammen((&info[(0) as usize]) as u64, korb, id, true)
+    var zeit: u64 = io.now_sec()
+    if ulib.bad(zeit) {
+        zeit = 0
+    }
+    if !info_schreiben((&info[(0) as usize]) as u64, abs, zeit, gr) {
+        // Zurueck an seinen Platz -- lieber gar nicht geloescht als
+        // geloescht und nicht auffindbar.
+        let _z: u64 = ulib.sys(ulib.SYS_RENAME,
+            (&ziel[(0) as usize]) as u64, abs, 0)
+        return 0
+    }
+    aufraeumen(abs)
+    return id
+}
+
+// ------------------------------------------------- heraus und wegwerfen
+
+fn zurueck(bei: u64, id: u64) -> u64 {
+    let korb: u64 = korb_von(bei)
+    var info: [u8; 256] = [0 as u8; 256]
+    var quelle: [u8; 256] = [0 as u8; 256]
+    zusammen((&info[(0) as usize]) as u64, korb, id, true)
+    zusammen((&quelle[(0) as usize]) as u64, korb, id, false)
+    nk = 0
+    if !info_lesen((&info[(0) as usize]) as u64, 0) {
+        return 1
+    }
+    let ziel: u64 = pf_at(0)
+    if gibt_es(ziel) {
+        return 2
+    }
+    let g: u64 = ulib.sys(ulib.SYS_RENAME, (&quelle[(0) as usize]) as u64,
+        ziel, 0)
+    if ulib.bad(g) {
+        if !kopieren((&quelle[(0) as usize]) as u64, ziel) {
+            return 3
+        }
+        let _u: u64 = io.unlink((&quelle[(0) as usize]) as u64)
+    }
+    let _i: u64 = io.unlink((&info[(0) as usize]) as u64)
+    return 0
+}
+
+// Einen Ordner mit allem darin. Die Rekursion laeuft ueber einen
+// eigenen Pfadpuffer je Ebene -- 512 Oktette auf dem Stapel, und die
+// Tiefe ist auf zwoelf begrenzt.
+fn loesche_rekursiv(pfad: u64, tiefe: u64) -> bool {
+    if tiefe > 10 {
+        return false
+    }
+    if !ulib.is_dir(pfad) {
+        return !ulib.bad(io.unlink(pfad))
+    }
+    // IMMER NUR DEN ERSTEN EINTRAG, dann neu aufmachen.
+    //
+    // Der erste Anlauf hat den Ordner EINMAL gelesen und waehrend des
+    // Lesens geloescht -- und danach war er nicht leer, weil das
+    // Weiterlesen an einer Stelle ansetzte, die es nicht mehr gab.
+    // GEMESSEN: `explorer: tat 5 rc=1`, die Dateien weg, der Ordner
+    // noch da. Also wird je Runde genau ein Eintrag geholt, der Ordner
+    // geschlossen, der Eintrag geloescht -- und von vorn.
+    var runden: u64 = 0
+    var gut: bool = true
+    var leer: bool = false
+    while !leer && runden < 4096 {
+        runden = runden + 1
+        var kind: [u8; 512] = [0 as u8; 512]
+        var buf: [u8; 1024] = [0 as u8; 1024]
+        var gefunden: bool = false
+        let fd: u64 = io.dir_open(pfad)
+        if ulib.bad(fd) {
+            return false
+        }
+        var weiter: bool = true
+        while weiter && !gefunden {
+            let n: u64 = io.dir_read(fd, (&buf[(0) as usize]) as u64, 1024)
+            if ulib.bad(n) || n == 0 {
+                weiter = false
+            } else {
+                var at: u64 = 0
+                while at < n && !gefunden {
+                    let rec: u64 = (&buf[(0) as usize]) as u64 + at
+                    let nm: u64 = io.dir_name(rec)
+                    var ist_punkt: bool = *((nm) as *mut u8) == 46 as u8
+                        && (*((nm + 1) as *mut u8) == 0 as u8
+                            || (*((nm + 1) as *mut u8) == 46 as u8
+                                && *((nm + 2) as *mut u8) == 0 as u8))
+                    if !ist_punkt {
+                        tools.join((&kind[(0) as usize]) as u64, pfad, nm)
+                        gefunden = true
+                    }
+                    at = at + io.dir_reclen(rec)
+                }
+            }
+        }
+        io.close(fd)
+        if !gefunden {
+            leer = true
+        } else if !loesche_rekursiv((&kind[(0) as usize]) as u64,
+            tiefe + 1) {
+            gut = false
+            leer = true
+        }
+    }
+    // Ein Verzeichnis geht ueber `rmdir` und nicht ueber `unlink` --
+    // das sagt zu jedem Verzeichnis EISDIR, und das ist richtig so.
+    if !ulib.bad(io.remove_dir(pfad)) {
+        return gut
+    }
+    return false
+}
+
+fn entfernen(bei: u64, id: u64) -> bool {
+    let korb: u64 = korb_von(bei)
+    var info: [u8; 256] = [0 as u8; 256]
+    var datei: [u8; 256] = [0 as u8; 256]
+    zusammen((&info[(0) as usize]) as u64, korb, id, true)
+    zusammen((&datei[(0) as usize]) as u64, korb, id, false)
+    let a: bool = loesche_rekursiv((&datei[(0) as usize]) as u64, 0)
+    let b: u64 = io.unlink((&info[(0) as usize]) as u64)
+    return a && !ulib.bad(b)
+}
+
+fn leeren(bei: u64) -> u64 {
+    let n: u64 = laden(bei)
+    var weg: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        if entfernen(bei, k_id[(i) as usize]) {
+            weg = weg + 1
+        }
+        i = i + 1
+    }
+    nk = 0
+    ksumme = 0
+    return weg
+}
+
+// ------------------------------------------------------------- die Zeit
+
+fn zwei(out: u64, at: u64, v: u64) -> u64 {
+    __mmio_write8((out + at) as *mut u8, (48 + (v / 10) % 10) as u8)
+    __mmio_write8((out + at + 1) as *mut u8, (48 + v % 10) as u8)
+    return at + 2
+}
+
+// Sekunden seit 1970 als "JJJJ-MM-TT SS:MM". Die Rechnung ist die
+// uebliche ueber die Tage seit dem 1. Maerz 0000; sie kennt Schaltjahre
+// und braucht keine Tabelle.
+fn zeit_text(sek: u64) -> u64 {
+    let out: u64 = (&zbuf[(0) as usize]) as u64
+    let tage: u64 = sek / 86400
+    let rest: u64 = sek % 86400
+    let z: u64 = tage + 719468
+    let era: u64 = z / 146097
+    let doe: u64 = z % 146097
+    let yoe: u64 = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    let y: u64 = yoe + era * 400
+    let doy: u64 = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    let mp: u64 = (5 * doy + 2) / 153
+    let d: u64 = doy - (153 * mp + 2) / 5 + 1
+    var m: u64 = mp + 3
+    var jahr: u64 = y
+    if mp >= 10 {
+        m = mp - 9
+        jahr = y + 1
+    }
+    var at: u64 = 0
+    __mmio_write8((out + 0) as *mut u8, (48 + (jahr / 1000) % 10) as u8)
+    __mmio_write8((out + 1) as *mut u8, (48 + (jahr / 100) % 10) as u8)
+    __mmio_write8((out + 2) as *mut u8, (48 + (jahr / 10) % 10) as u8)
+    __mmio_write8((out + 3) as *mut u8, (48 + jahr % 10) as u8)
+    at = 4
+    __mmio_write8((out + at) as *mut u8, 45 as u8)
+    at = zwei(out, at + 1, m)
+    __mmio_write8((out + at) as *mut u8, 45 as u8)
+    at = zwei(out, at + 1, d)
+    __mmio_write8((out + at) as *mut u8, 32 as u8)
+    at = zwei(out, at + 1, rest / 3600)
+    __mmio_write8((out + at) as *mut u8, 58 as u8)
+    at = zwei(out, at + 1, (rest / 60) % 60)
+    __mmio_write8((out + at) as *mut u8, 0 as u8)
+    return out
+}

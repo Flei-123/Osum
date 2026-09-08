@@ -242,7 +242,18 @@ python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
 # die der Dateimanager einbindet). "mkfs: the disk is full" sieht wie
 # ein Codefehler aus, ist aber eine feste Bloeckezahl, die keine Marge
 # mehr hatte.
-ARGS=(build "$TMPD/disk.img" 6144 /lib/
+# MERGE-8: beide Runden haben aus demselben Grund vergroessert;
+# 8192 (ALLTAG) deckt 6144 (MERGE-7) mit ab.
+# RUNDE ALLTAG: DAS ABBILD IST GEWACHSEN, WEIL DIE BIBLIOTHEK GEWACHSEN
+# IST. 4096 Bloecke sind 16 MiB und zugleich die Decke der FASSUNG 2 --
+# ihre Blockkarte war EIN Block. Die Runde ALLTAG hat wlib um die
+# Bildflaeche, den Schieberegler und das Vierer-Raster erweitert; jedes
+# Programm, das wlib einbindet, traegt das mit, und mkfs sagte "the disk
+# is full". Also 8192 Bloecke (32 MiB). Die FASSUNG bleibt 2: seit
+# Runde INSTALL darf auch sie eine mehrblockige Karte haben, und
+# `fs.mount` liest die Zahl aus dem Superblock -- an den Dateien des
+# Abbilds aendert sich nichts, nur der Platz dahinter.
+ARGS=(build "$TMPD/disk.img" 8192 /lib/
       "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/${p}0.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
@@ -1000,7 +1011,9 @@ num "Farben, die aus /etc/theme gelesen wurden" "$tn" eq "$soll"
 sed 's/^btn=.*/btn=804020/' "$TMPD/baum/theme" > "$TMPD/theme2"
 # RUNDE MERGE-7: dieselbe Erweiterung wie bei ARGS oben -- dasselbe
 # Programmpaket, dieselbe Enge.
-ARGS2=(build "$TMPD/disk2.img" 6144 /lib/
+# MERGE-8: beide Runden haben aus demselben Grund vergroessert;
+# 8192 (ALLTAG) deckt 6144 (MERGE-7) mit ab.
+ARGS2=(build "$TMPD/disk2.img" 8192 /lib/
       "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
 for p in $PROGS; do ARGS2+=("/bin/$p=$TMPD/${p}0.elf"); done
 ARGS2+=("/bin/files@/bin/explorer")
