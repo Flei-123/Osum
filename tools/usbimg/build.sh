@@ -64,6 +64,16 @@
 #    liest dieses Skript das FERTIGE Dateisystem mit `mkfs.py list`
 #    zurueck und bricht ab, wenn auch nur einer der Pflichtpfade fehlt.
 #    Die Liste steht unten unter PFLICHT.
+#
+#    RUNDE TUERSCHLOSS: UND DIE BUENDEL STEHEN JETZT AUCH DARIN.
+#    `/bin/settings` war gebaut, 635 600 Oktette gross und im Abbild --
+#    aber ohne `/apps/settings.osp/` stand es in keinem Menue und war
+#    ueber die Oberflaeche nicht erreichbar (Runde DURCHKLICK, 3.9).
+#    Die Pflichtliste hat das nicht gemerkt, weil sie nur nach `/bin`
+#    gesehen hat: ein Programm ist auf diesem System aber erst dann
+#    da, wenn es auch sein Buendel hat. Also stehen die sechs Buendel
+#    hier, und ein siebtes, das jemand vergisst, faellt beim naechsten
+#    Bau auf und nicht erst beim Durchklicken.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -131,7 +141,7 @@ PROGS=${PROGS:-"desktop taskbar settings launcher explorer netview \
 widgetdemo locate edit sh echo ls cat ps uname date df mkdir rm cp mv \
 grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
-dhcp host ota jsig jarvisctl pollbr reboot"}
+dhcp host ota jsig jarvisctl pollbr reboot shutdown power fas"}
 
 # RUNDE STICK: DIE SIEBEN, DIE GEFEHLT HABEN -- UND WARUM AUSGERECHNET
 # DIESE.
@@ -151,6 +161,31 @@ dhcp host ota jsig jarvisctl pollbr reboot"}
 #   pollbr      der Wartedienst der Runde POLL (hiess bis BLECH-ECHT
 #               ebenfalls jarvisd, siehe docs/RUNDE-BLECH-ECHT.md 2.4)
 #   reboot      nach `ota einspielen` will jemand neu starten
+#
+# RUNDE TUERSCHLOSS: UND VIER, DIE GEBAUT WAREN UND TROTZDEM GEFEHLT HABEN.
+#
+#   shutdown    die Maschine AUSSCHALTEN. `kernel/user/shutdown.fi`
+#               gibt es seit Runde K18 und es kann genau das, was ein
+#               Herunterfahren ist (ueber init: SIGTERM an die Dienste,
+#               warten, SIGKILL, sync, aushaengen, ACPI S5; ohne init
+#               wenigstens sync und der Aufruf). Es stand nur nicht in
+#               dieser Zeile -- Runde DURCHKLICK 7.4 hat daraus zu
+#               Recht "kein Herunterfahren ueber die Oberflaeche"
+#               gemacht: der einzige Weg aus dem System war der
+#               Netzschalter, und der riskiert bei jedem Mal das
+#               Dateisystem.
+#   power       das Bedienprogramm der Energieverwaltung (Runde K18).
+#               Gehoert daneben: wer ausschalten kann, will auch die
+#               Helligkeit und den Akkustand sehen.
+#   firnc, fas  DER UEBERSETZER UND SEIN ASSEMBLER -- der Punkt, an dem
+#               dieses System aufhoert, ein Vorfuehrstueck zu sein.
+#               `tools/k16/run.sh` ist mit 64/0 gruen: firnc laeuft AUF
+#               Osum, liest eine .fi von der Platte, schreibt eine .s,
+#               und `fas` macht daraus ein laufendes Programm. Beides
+#               war im Abbild bisher nicht enthalten (DURCHKLICK 8.1:
+#               "auf dem Stick laesst sich kein Firn-Programm
+#               uebersetzen"). Ein selbsttragendes System, das sich
+#               selbst nicht fortsetzen kann, ist keines.
 #
 # UND ZWEI, DIE ANDERS GEBAUT WERDEN MUESSEN:
 #
@@ -226,6 +261,54 @@ if [ -n "$gebaut_app" ]; then
     sagen "apps        $(echo $gebaut_app | wc -w) Stueck ($asz Oktette, TLS 1.3)"
 fi
 export FIRNLIB="$ROOT/lib"
+
+# ======================================== 2c. DER UEBERSETZER SELBST
+#
+# RUNDE TUERSCHLOSS: `firnc` KOMMT MIT AUF DEN STICK.
+#
+# WARUM DAS DER WICHTIGSTE NACHTRAG DIESER RUNDE IST. Runde DURCHKLICK
+# hat die vollstaendige Dateiliste des Abbilds gelesen und festgestellt
+# (8.1): kein `firnc`, kein `fas` -- "auf dem Stick laesst sich kein
+# Firn-Programm uebersetzen". Ein System, das sich selbst nicht
+# fortsetzen kann, ist ein Vorfuehrstueck. `tools/k16/run.sh` ist dabei
+# mit 64/0 gruen: der Uebersetzer LAEUFT auf Osum, er lag nur nicht
+# darauf.
+#
+# WOHER DIE QUELLE KOMMT. `firnc` ist nicht Teil dieses Baums; es ist
+# `bin/firnc1.fi` aus dem Firn-Baum, uebersetzt vom festgenagelten
+# `firnc0` und gegen `kernel/user/user.ld` gebunden -- Abbild ab
+# 0x40100000 statt 0x400000. Das ist woertlich der Weg aus
+# `tools/k16/run.sh` Abschnitt 4, und er steht hier nicht noch einmal
+# anders: dieselben zwei Befehle, damit nicht zwei Wege entstehen, aus
+# derselben Quelle zwei verschiedene Uebersetzer zu machen.
+#
+# KEIN crt.o: `firnc1.fi` hat ein `fn main`, und dafuer erzeugt der
+# Uebersetzer sein `_start` selbst (genau deshalb legt `kernel/elf.fi`
+# den Argumentblock auf den Stapelzeiger).
+#
+# WENN DIE QUELLE FEHLT, ist das kein Abbruch: der Stick ist ohne
+# Uebersetzer schlechter, aber nicht kaputt. Dann sagt diese Stelle,
+# dass er fehlt, und der Rest laeuft weiter.
+FIRNQ=""
+for k in "${FIRN_REPO:-}" "$ROOT/../firn" "$ROOT/../../firn"; do
+    [ -n "$k" ] && [ -f "$k/bin/firnc1.fi" ] && FIRNQ=$(cd "$k" && pwd) && break
+done
+if [ -n "$FIRNQ" ]; then
+    if ( cd "$FIRNQ" && FIRNLIB="$FIRNQ/lib" "$ROOT/$CC" -c \
+            -o "$OUT/firnc-osum.o" bin/firnc1.fi ) > "$OUT/firnc-osum.err" 2>&1 \
+       && ld -T kernel/user/user.ld -o "$OUT/firnc.elf" "$OUT/firnc-osum.o" \
+            2>> "$OUT/firnc-osum.err"; then
+        strip --strip-all "$OUT/firnc.elf"
+        gebaut="$gebaut firnc"
+        sagen "uebersetzer $(stat -c%s "$OUT/firnc.elf") Oktette (firnc aus $FIRNQ)"
+    else
+        echo "== firnc laesst sich nicht fuer Osum bauen" >&2
+        head -8 "$OUT/firnc-osum.err" >&2
+        fehler "der Uebersetzer laesst sich nicht fuer den Stick bauen"
+    fi
+else
+    echo "== HINWEIS: kein Firn-Baum gefunden, /bin/firnc fehlt im Abbild" >&2
+fi
 
 # ================================================ 3. was sonst auf die Platte
 python3 tools/netview/icons.py bauen "$OUT/icons" > "$OUT/icons.log" 2>&1 \
@@ -428,6 +511,18 @@ ARGS+=(/users/ /users/root/ /users/root/config/
 ARGS+=(/boot/ "/boot/osum.mb=$OUT/osum.mb"
        "/boot/BOOTX64.EFI=$LIMINE/BOOTX64.EFI")
 ARGS+=(/dev/ /proc/ /mnt/ /tmp/ /store/ /apps/ /system/)
+# RUNDE TUERSCHLOSS: EIN BEISPIEL ZUM UEBERSETZEN.
+#
+# Seit dieser Runde liegen `firnc` und `fas` auf dem Stick. Eine Quelle
+# daneben zu legen kostet 591 Oktette und erspart dem, der es
+# ausprobieren will, das Tippen einer Datei in einem Editor, den er
+# gerade erst kennenlernt.
+#
+# Und es ist der Pruefstein fuer den Uebersetzer AUF dem System:
+#     firnc /beispiel/hallo.fi -o /tmp/hallo.s
+#     fas /tmp/hallo.s -o /tmp/hallo
+#     /tmp/hallo ; echo $?     -> 42
+ARGS+=(/beispiel/ "/beispiel/hallo.fi=assets/beispiel/hallo.fi")
 # RUNDE STICK: die Verzeichnisse, in denen die neuen Programme leben.
 ARGS+=(/etc/ssl/ /etc/jarvis/ /var/ /var/log/ /var/jarvis/)
 if [ -n "$ROOTS" ] && [ -s "$ROOTS" ]; then
@@ -463,7 +558,11 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /bin/desktop /bin/taskbar /bin/netview /bin/explorer /boot/osum.mb \
 /bin/ota /bin/fetch /bin/host /bin/dhcp /bin/jarvisd /bin/jsig \
 /bin/jarvisctl /bin/pollbr /etc/ota.conf /etc/jarvis/rechte.conf \
-/system/FASSUNG /system/SCHLUESSELGEN"
+/system/FASSUNG /system/SCHLUESSELGEN \
+/apps/explorer.osp/start /apps/editor.osp/start /apps/terminal.osp/start \
+/apps/launcher.osp/start /apps/widgets.osp/start /apps/settings.osp/start \
+/apps/settings.osp/INFO /apps/settings.osp/symbol \
+/bin/shutdown /bin/power /bin/firnc /bin/fas /beispiel/hallo.fi"
 python3 tools/osum/mkfs.py list "$OUT/root.img" > "$OUT/liste.txt" 2>&1 \
     || fehler "das fertige Dateisystem laesst sich nicht lesen"
 fehlt=0

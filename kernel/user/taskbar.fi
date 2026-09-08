@@ -3599,20 +3599,79 @@ static mut s_noqs: [u8; 28] = "taskbar: no quick settings\0\0"
 // sofort da und kostet keinen Programmstart.
 static mut menue_pid: u64 = 0
 
+// ===================================================== RUNDE TUERSCHLOSS
+//
+// DIESE SUCHE HAT DEN STARTER NIE GEFUNDEN, UND DARUM STAPELTEN SICH
+// DIE STARTMENUES.
+//
+// Hier wurde ueber `nk` gelaufen -- die KNOPFLISTE der Leiste. Die
+// fuellt `list_read` aber ausdruecklich nur mit Fenstern der Ebene
+// `L_NORMAL` ("everything on that layer gets a button in this bar").
+// Der Starter ist seit Runde STARTKNOPF `L_TOP`: er ist ein Feld an
+// der Leiste und bekommt mit Absicht KEINEN Knopf. Er stand also nie
+// in `nk`, `launcher_fenster` gab immer 0, `startmenue_um` sprang
+// jedes Mal in den Zweig darunter und startete EIN WEITERES
+// /bin/launcher.
+//
+// GEMESSEN (Runde DURCHKLICK, 4.6): nach 20 Klicks auf Start standen
+// 16 Fenster (id=7..22), alle an derselben Stelle, keines wurde je
+// abgeraeumt -- ein Leck, das mit der Laufzeit waechst. Und in dieser
+// Runde noch einmal nachgesehen: id=11 und id=12, beide 440x300 bei
+// x=8 y=452, waehrend die Knopfliste nur id=7 kannte.
+//
+// Also wird jetzt dort gesucht, wo der Starter WIRKLICH steht: in der
+// Fensterliste des Servers, ueber ALLE Ebenen. Das ist dieselbe
+// Quelle, die `list_read` liest -- nur ohne den Filter, der hier
+// falsch ist. Gefunden wird ueber `WL_APP` ("launcher"), den der
+// Starter selbst mit `wlib.window_app` setzt; der Titel taugt dafuer
+// nicht, weil er uebersetzt wird.
 fn launcher_fenster() -> u64 {
-    var i: u64 = 0
-    while i < nk {
-        if ulib.streq((&kapp[0 as usize]) as u64 + i * 24,
-            (&a_launcher[0 as usize]) as u64) {
-            return kid[(i) as usize]
+    var slot: u64 = 0
+    while slot < 16 {
+        let r: u64 = wlibc.win_list(slot, (&rec[0 as usize]) as u64)
+        if ulib.bad(r) {
+            return 0
         }
-        i = i + 1
+        if r == 1 {
+            let b: u64 = (&rec[0 as usize]) as u64
+            if ulib.streq(b + wlibc.WL_APP,
+                (&a_launcher[0 as usize]) as u64) {
+                // Nebenbei den Zustand mitnehmen, damit der Aufrufer
+                // sagen kann, WOHIN er geschaltet hat (siehe
+                // `startmenue_um`). Ein Fenster gilt als "offen", wenn
+                // es weder verborgen noch unbeachtet ist.
+                let fl: u64 = __mmio_read64((b + wlibc.WL_FLAGS) as *mut u64)
+                let id: u64 = __mmio_read64((b + wlibc.WL_ID) as *mut u64)
+                menue_war_offen = 1
+                if (fl & wlibc.F_HIDDEN) != 0 {
+                    menue_war_offen = 0
+                }
+                // WL_FOCUS steht im Satz selbst -- der Server sagt
+                // je Fenster, ob es das aktive ist. Dieselbe Regel wie
+                // in `sysgui` bei WA_TOGGLE: verborgen ODER nicht aktiv
+                // heisst "wird aufgemacht".
+                let fo: u64 = __mmio_read64((b + wlibc.WL_FOCUS) as *mut u64)
+                if fo == 0 as u64 {
+                    menue_war_offen = 0
+                }
+                return id
+            }
+        }
+        slot = slot + 1
     }
     return 0
 }
 
 static mut a_launcher: [u8; 9] = "launcher\0"
+// RUNDE TUERSCHLOSS: ZWEI Meldungen statt einer. Bis hierher stand hier
+// nur "startmenue zu" -- und sie wurde bei JEDEM Umschalten gesagt,
+// also auch beim Aufmachen. Wer die Leitung liest, um zu wissen, ob das
+// Menue offen ist (ein Testlaeufer tut genau das), bekam dreimal
+// hintereinander "zu" und schloss daraus, das Menue gehe nicht auf.
+// Eine Meldung, die die Richtung verschweigt, ist keine Messung.
 static mut s_tog: [u8; 24] = "taskbar: startmenue zu\0\0"
+static mut s_tog_auf: [u8; 25] = "taskbar: startmenue auf\0\0"
+static mut menue_war_offen: u64 = 0
 
 // ============================================== RUNDE STARTKNOPF
 // DIE SUPER-TASTE, GELESEN NACH DEM ZAEHLERPROTOKOLL AUS kbd.fi.
@@ -3724,9 +3783,16 @@ static mut s_hkt: [u8; 9] = "  taste=\0"
 fn startmenue_um() {
     let w: u64 = launcher_fenster()
     if w != 0 {
-        say((&s_tog[0 as usize]) as u64)
-        ulib.nl()
         let _rc: u64 = wlibc.win_act(w, wlibc.WA_TOGGLE)
+        // NACH dem Umschalten gesagt, und mit der Richtung, in die
+        // geschaltet wurde: `menue_war_offen` hat `launcher_fenster`
+        // eine Zeile vorher aus den Fahnen des Servers gelesen.
+        if menue_war_offen != 0 {
+            say((&s_tog[0 as usize]) as u64)
+        } else {
+            say((&s_tog_auf[0 as usize]) as u64)
+        }
+        ulib.nl()
         return
     }
     // ============================================== RUNDE BLECHKERN

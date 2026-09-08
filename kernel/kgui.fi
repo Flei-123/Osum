@@ -35,6 +35,7 @@ import file
 import shot
 import fs
 import hw
+import kbd
 import kstate
 import mem
 import netdev
@@ -2914,9 +2915,52 @@ fn i18n_bench(state: u64, f: u64, px: u64) {
 //
 // Ohne `lang=` passiert hier nichts -- ein Stick ohne den Schalter
 // verhaelt sich Oktett fuer Oktett wie vorher.
+// ===================================================== RUNDE TUERSCHLOSS
+//
+// DIE TASTATUR FOLGT DER SPRACHE, und zwar hier und an keiner zweiten
+// Stelle.
+//
+// GEMESSEN (Runde DURCHKLICK, Punkt 6.2): die Oberflaeche kam
+// durchgehend deutsch hoch -- "Programm suchen:", "Ausfuehren" mit
+// echtem `ue`, 100 % Trefferquote -- und die Tastatur stand dabei auf
+// `L_US`. `KB_LAYOUT` wird nirgends gesetzt, und ein nicht gesetztes
+// Feld ist null, und null ist `L_US`. Wer `z` drueckt, bekommt `y`;
+// `@`, `ue`, `oe`, `ae`, `ss` liegen falsch. Der deutsche Satz liegt in
+// `kbd.fi` fertig da (`de_code`, `de_shift`, `de_altgr`) -- er war nur
+// nie die Vorgabe.
+//
+// WARUM IN DIESER FUNKTION. Sie ist die Stelle, an der die Sprache
+// dieses Laufes feststeht, und sie laeuft VOR dem ersten
+// Ring-3-Programm. Die Belegung wird damit aus DERSELBEN Quelle
+// abgeleitet wie die Texte -- es entsteht kein zweiter Weg zur Sprache,
+// und `settings` kann sie nachher weiter mit `kbd.set_layout`
+// umstellen (der Zaehler `KB_SWITCH` zaehlt beides).
+fn tastatur_zur_sprache(state: u64, en: bool) {
+    var lay: u64 = kbd.L_DE
+    if en {
+        lay = kbd.L_US
+    }
+    var s_kb: [u8; 17] = "kbd: layout de   "
+    if en {
+        s_kb[12 as usize] = 101 as u8 // 'e'
+        s_kb[13 as usize] = 110 as u8 // 'n'
+    }
+    if kbd.set_layout(state, lay) {
+        serial.puts((&s_kb[0]) as u64)
+        serial.nl()
+    }
+}
+
 fn locale_setzen(state: u64) {
     let en: bool = kstate.mode_on(state, kstate.M_LANGEN)
     let de: bool = kstate.mode_on(state, kstate.M_LANGDE)
+    // DIE BELEGUNG WIRD IMMER GESETZT, auch ohne `lang=` auf der
+    // Kommandozeile: der Bau schreibt `de` in
+    // /users/root/config/locale, die Oberflaeche kommt deutsch hoch,
+    // und die Tastatur hat dann deutsch zu sein. `lang=en` dreht beides
+    // zusammen um -- Sprache und Belegung koennen nicht auseinander
+    // laufen, weil sie aus demselben `en` folgen.
+    tastatur_zur_sprache(state, en)
     if !en && !de {
         return
     }
@@ -5662,6 +5706,42 @@ fn tafel_boot(state: u64, stufe: u64) {
 
 fn kopf_malen(state: u64) {
     if !fb.ready(state) {
+        return
+    }
+    // ===================================================== RUNDE TUERSCHLOSS
+    //
+    // OHNE `tafel` WIRD KEINE TAFEL GEMALT -- und bis hierher wurde sie
+    // es doch.
+    //
+    // Diese Funktion laeuft nach JEDEM `compose` (Zeile 3438), ohne
+    // jede Bedingung, und sie endet unten mit `tafel_streichen` -- dem
+    // Anstrich der 24 Diagnosezeilen. `tafel_streichen` selbst fragt
+    // `M_TAFEL` NICHT ab (das tun nur `tafel_tick` und `tafel_boot`),
+    // also stand die Tafel auf jedem Schreibtisch, auch auf dem eines
+    // Menschen, der nie danach gefragt hat.
+    //
+    // GEMESSEN in Runde TUERSCHLOSS, Kommandozeile OHNE das Wort
+    // `tafel` (Bildschirmfoto pruef/shots/tp/getippt.png):
+    //
+    //   * gruene Tinte von x=4 bis x=764 und y=40 bis y=633,
+    //     dreizehn Textbaender -- waehrend das Terminalfenster nur
+    //     x=24..584, y=40..420 gross ist;
+    //   * 2605 gruene Bildpunkte AUSSERHALB des Fensters;
+    //   * die Glyphen sind ein verdoppeltes 8x16-Bitmuster (Zellbreite
+    //     16, Zeilenabstand 32) und damit nicht die TTF-Schrift, mit
+    //     der der Fensterserver seine Zellen malt;
+    //   * 168 `tafel:`-Zeilen auf der seriellen Leitung.
+    //
+    // Der Schaden ist genau der, den Runde DURCHKLICK bei Punkt 3.7
+    // gemessen und dem Terminal angelastet hat: was ein Mensch tippt,
+    // steht unter der Tafel und ist im Bild nicht wiederzufinden (77 %
+    // statt der geforderten 97 %). Nicht die Shell war stumm, nicht die
+    // Tastatur -- die Diagnose lag darueber.
+    //
+    // `M_NOTAFEL` bleibt zusaetzlich wirksam: wer `notafel` schreibt,
+    // hat schon vorher nichts sehen wollen.
+    if !kstate.mode_on(state, kstate.M_TAFEL)
+        || kstate.mode_on(state, kstate.M_NOTAFEL) {
         return
     }
     let jetzt: u64 = kstate.get(state, kstate.TICKS)

@@ -237,7 +237,16 @@ echo "== 3. der Baum: vierundzwanzig Zusagen ueber sich selbst =="
 lauf "$K0" "gfx wm tile tilefuzz $GRUND" "$TMPD/t.txt" "$DISK"
 num "der Kern beendet sich sauber" "$?" eq 21
 st=$(zahl "$TMPD/t.txt" 'tile: selftest [0-9]+')
-num "die Zusagen des Fensterbaums ueber sich selbst" "$st" eq 24
+# RUNDE TUERSCHLOSS: DIE ZAHL KOMMT AUS DER QUELLE UND NICHT AUS DIESER
+# ZEILE. Hier stand `eq 24`, festgenagelt. Diese Runde hat eine
+# fuenfundzwanzigste Zusage dazugelegt (Alt+Tab ist ohne tiling.conf
+# belegt), und ein Laeufer, der die alte Zahl festhaelt, meldet ab dann
+# jede Runde einen Fehler, den es nicht gibt. Genau diese Begruendung
+# steht schon in Abschnitt 8 dieses Skripts fuer den Fensterserver --
+# hier fehlte sie nur.
+tsoll=$(grep -aoE 'return [0-9]+' <<< "$(sed -n '/fn selftest_max/,/^}/p' kernel/tile.fi)" \
+    | head -1 | grep -oE '[0-9]+')
+num "die Zusagen des Fensterbaums ueber sich selbst" "$st" eq "${tsoll:-24}"
 fbits=$(grep -aoE 'failed=0x[0-9A-Fa-f]+' "$TMPD/t.txt" | head -1 | sed 's/.*=//')
 if [ "$fbits" = "0x0" ]; then ok "und KEINE davon ist gefallen ($fbits)"
 else bad "gefallene Zusagen: $fbits (ein Bit je Nummer)"; fi
