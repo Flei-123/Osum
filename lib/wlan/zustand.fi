@@ -1,0 +1,306 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/wlan/zustand.fi -- der Ablauf einer Verbindung als Automat.
+//
+// ==================================================================
+// WARUM EIN AUTOMAT UND NICHT EINE FOLGE VON IF
+// ==================================================================
+//
+// Eine WLAN-Verbindung ist ein Wechselspiel mit einer Gegenseite, die
+// niemand kennt und die sich nicht an die Reihenfolge halten muss. Der
+// Zugangspunkt kann Nachricht 3 schicken, bevor Nachricht 1 kam. Er
+// kann Nachricht 1 zweimal schicken. Er kann mitten im Handschlag einen
+// Deauth werfen. Ein Angreifer kann all das absichtlich tun.
+//
+// Wenn die Antwort darauf im Quelltext verstreut ist -- hier ein
+// `if`, dort ein Merker --, gibt es GARANTIERT einen Weg, auf dem eine
+// halbe Verbindung entsteht: Schluessel gesetzt, aber Handschlag nicht
+// zu Ende; oder verbunden, aber ohne installierten Schluessel. Beides
+// sind Sicherheitsluecken und nicht Schoenheitsfehler.
+//
+// Deshalb: EIN Automat, EINE Tafel, und die Regel
+//
+//   ALLES, WAS IN EINEM ZUSTAND NICHT AUSDRUECKLICH ERLAUBT IST,
+//   FUEHRT IN DEN FEHLERZUSTAND.
+//
+// Nicht "wird ignoriert". Ignorieren ist die Haltung, aus der halbe
+// Verbindungen entstehen.
+//
+// ==================================================================
+// DIE WIEDERHOLUNG IST EIN ABBRUCH -- UND ZWAR MIT ABSICHT
+// ==================================================================
+//
+// Das ist die eine Entscheidung dieser Datei, ueber die man streiten
+// kann, also steht die Begruendung hier:
+//
+// KRACK (2017) beruht darauf, dass ein Klient auf eine WIEDERHOLTE
+// Nachricht 3 den Sitzungsschluessel noch einmal installiert und dabei
+// den Paketzaehler auf null zuruecksetzt. Ein Zaehler, der sich
+// wiederholt, macht bei CCMP den Schluesselstrom wiederholbar, und
+// damit ist die Verschluesselung offen.
+//
+// Die uebliche Abwehr ist: die Nachricht annehmen, aber den Schluessel
+// nicht noch einmal installieren. Das ist richtig und es ist
+// fehleranfaellig, weil es einen Merker braucht, den man vergessen
+// kann.
+//
+// Diese Datei geht den strengeren Weg: EINE WIEDERHOLTE
+// HANDSCHLAGNACHRICHT BRICHT AB. Das kostet etwas -- ein Zugangspunkt,
+// dessen Nachricht 3 auf dem Weg verloren geht, wiederholt sie
+// berechtigterweise. Der Preis ist bezahlbar, weil die Antwort darauf
+// nicht "Verbindung tot" ist, sondern "Handschlag von vorne", und ein
+// neuer Handschlag bringt eine neue Zufallszahl und damit einen neuen
+// Schluessel. Der Weg dahin fuehrt ueber `beginn` und ist damit
+// dieselbe Tuer wie beim ersten Mal -- es gibt keine zweite.
+//
+// ==================================================================
+// DAS EREIGNISALPHABET
+// ==================================================================
+//
+// Ein Ereignis ist EIN Oktett. Das ist keine Sparsamkeit, das ist
+// Pruefbarkeit: eine ganze Verbindung ist damit eine Zeichenkette, und
+// `tools/wlan/vektoren.py` kann alle Folgen bis zu einer Laenge
+// durchprobieren und nachsehen, dass keine davon in einer halben
+// Verbindung endet.
+//
+//   's'  Suchlauf begonnen
+//   'b'  ein Beacon eines brauchbaren Netzes gehoert
+//   'a'  Authentifizierung angenommen
+//   'A'  Authentifizierung abgelehnt
+//   'c'  Assoziation angenommen
+//   'C'  Assoziation abgelehnt
+//   '1'  EAPOL-Key Nachricht 1 empfangen
+//   '2'  Nachricht 2 gesendet
+//   '3'  Nachricht 3 empfangen, Pruefwert stimmt
+//   '4'  Nachricht 4 gesendet
+//   'x'  Nachricht 3 empfangen, Pruefwert stimmt NICHT
+//   'd'  Deauthentifizierung oder Disassoziation
+//   't'  Zeitueberschreitung
+
+export {
+    Lauf, lauf_new, beginn, ereignis, verbunden, darf_daten,
+    Z_AUS, Z_SUCHT, Z_GEFUNDEN, Z_AUTH, Z_ASSOZ,
+    Z_M1, Z_M2, Z_M3, Z_VERBUNDEN, Z_FEHLER,
+    G_KEIN, G_REIHENFOLGE, G_ABGELEHNT, G_ZEIT, G_DEAUTH,
+    G_WIEDERHOLUNG, G_MIC, G_UNBEKANNT
+}
+
+const Z_AUS: u64 = 0
+const Z_SUCHT: u64 = 1
+const Z_GEFUNDEN: u64 = 2
+const Z_AUTH: u64 = 3
+const Z_ASSOZ: u64 = 4
+const Z_M1: u64 = 5       // Nachricht 1 ist da
+const Z_M2: u64 = 6       // Nachricht 2 ist raus
+const Z_M3: u64 = 7       // Nachricht 3 ist da und stimmt
+const Z_VERBUNDEN: u64 = 8
+const Z_FEHLER: u64 = 9
+
+const G_KEIN: u64 = 0
+const G_REIHENFOLGE: u64 = 1
+const G_ABGELEHNT: u64 = 2
+const G_ZEIT: u64 = 3
+const G_DEAUTH: u64 = 4
+const G_WIEDERHOLUNG: u64 = 5
+const G_MIC: u64 = 6
+const G_UNBEKANNT: u64 = 7
+
+struct Lauf {
+    zustand: u64,
+    grund: u64,
+    schluessel_installiert: bool,
+    schritte: u64,
+    // Wie oft der Schluessel installiert wurde. Muss am Ende jeder
+    // gelungenen Verbindung GENAU EINS sein -- das ist die Zahl, die
+    // KRACK auf zwei getrieben haette.
+    installationen: u64,
+}
+
+fn lauf_new() -> Lauf {
+    return Lauf { zustand: Z_AUS, grund: G_KEIN,
+        schluessel_installiert: false, schritte: 0,
+        installationen: 0 }
+}
+
+fn beginn(l: *mut Lauf) {
+    (*l).zustand = Z_AUS
+    (*l).grund = G_KEIN
+    (*l).schluessel_installiert = false
+    (*l).schritte = 0
+    (*l).installationen = 0
+}
+
+// Der Fehlerzustand ist eine Sackgasse: der ERSTE Grund bleibt stehen.
+// Was danach noch hereinkommt, aendert nichts mehr -- sonst wuerde ein
+// Angreifer, der nach dem Abbruch noch ein 't' schickt, die Meldung
+// austauschen koennen.
+fn abbrechen(l: *mut Lauf, grund: u64) {
+    if (*l).zustand != Z_FEHLER {
+        (*l).zustand = Z_FEHLER
+        (*l).grund = grund
+    }
+    (*l).schluessel_installiert = false
+}
+
+fn ereignis(l: *mut Lauf, e: u8) {
+    (*l).schritte = (*l).schritte + 1
+    if (*l).zustand == Z_FEHLER {
+        return
+    }
+    let c: u64 = e as u64
+
+    // Deauth und Zeitueberschreitung gelten ueberall -- ausser im
+    // Ruhezustand, wo sie nichts zu suchen haben.
+    if c == 100 { // 'd'
+        if (*l).zustand == Z_AUS {
+            abbrechen(l, G_REIHENFOLGE)
+        } else {
+            abbrechen(l, G_DEAUTH)
+        }
+        return
+    }
+    if c == 116 { // 't'
+        if (*l).zustand == Z_AUS || (*l).zustand == Z_VERBUNDEN {
+            abbrechen(l, G_REIHENFOLGE)
+        } else {
+            abbrechen(l, G_ZEIT)
+        }
+        return
+    }
+    // Ein Pruefwert, der nicht stimmt, ist NIE ein Grund
+    // weiterzumachen. Er ist auch kein "vielleicht war es Rauschen":
+    // ein EAPOL-Rahmen mit falschem Pruefwert kommt entweder von
+    // jemandem, der den Schluessel nicht hat, oder er ist verfaelscht
+    // worden. Beides heisst Abbruch.
+    if c == 120 { // 'x'
+        abbrechen(l, G_MIC)
+        return
+    }
+
+    if (*l).zustand == Z_AUS {
+        if c == 115 { // 's'
+            (*l).zustand = Z_SUCHT
+            return
+        }
+        abbrechen(l, G_REIHENFOLGE)
+        return
+    }
+    if (*l).zustand == Z_SUCHT {
+        if c == 98 { // 'b'
+            (*l).zustand = Z_GEFUNDEN
+            return
+        }
+        if c == 115 { // 's' -- weitersuchen ist erlaubt
+            return
+        }
+        abbrechen(l, G_REIHENFOLGE)
+        return
+    }
+    if (*l).zustand == Z_GEFUNDEN {
+        if c == 97 { // 'a'
+            (*l).zustand = Z_AUTH
+            return
+        }
+        if c == 65 { // 'A'
+            abbrechen(l, G_ABGELEHNT)
+            return
+        }
+        if c == 98 { // 'b' -- noch ein Beacon, kein Fortschritt
+            return
+        }
+        abbrechen(l, G_REIHENFOLGE)
+        return
+    }
+    if (*l).zustand == Z_AUTH {
+        if c == 99 { // 'c'
+            (*l).zustand = Z_ASSOZ
+            return
+        }
+        if c == 67 { // 'C'
+            abbrechen(l, G_ABGELEHNT)
+            return
+        }
+        if c == 97 { // 'a' -- zweimal authentifiziert
+            abbrechen(l, G_WIEDERHOLUNG)
+            return
+        }
+        abbrechen(l, G_REIHENFOLGE)
+        return
+    }
+    if (*l).zustand == Z_ASSOZ {
+        if c == 49 { // '1'
+            (*l).zustand = Z_M1
+            return
+        }
+        if c == 99 { // 'c' -- zweimal assoziiert
+            abbrechen(l, G_WIEDERHOLUNG)
+            return
+        }
+        abbrechen(l, G_REIHENFOLGE)
+        return
+    }
+    if (*l).zustand == Z_M1 {
+        if c == 50 { // '2'
+            (*l).zustand = Z_M2
+            return
+        }
+        if c == 49 { // '1' noch einmal
+            abbrechen(l, G_WIEDERHOLUNG)
+            return
+        }
+        abbrechen(l, G_REIHENFOLGE)
+        return
+    }
+    if (*l).zustand == Z_M2 {
+        if c == 51 { // '3'
+            (*l).zustand = Z_M3
+            return
+        }
+        if c == 50 { // '2' noch einmal
+            abbrechen(l, G_WIEDERHOLUNG)
+            return
+        }
+        if c == 49 { // '1' -- rueckwaerts
+            abbrechen(l, G_WIEDERHOLUNG)
+            return
+        }
+        abbrechen(l, G_REIHENFOLGE)
+        return
+    }
+    if (*l).zustand == Z_M3 {
+        if c == 52 { // '4'
+            // DIE EINE STELLE, an der ein Schluessel installiert wird.
+            (*l).zustand = Z_VERBUNDEN
+            (*l).schluessel_installiert = true
+            (*l).installationen = (*l).installationen + 1
+            return
+        }
+        if c == 51 { // '3' noch einmal -- genau der KRACK-Weg
+            abbrechen(l, G_WIEDERHOLUNG)
+            return
+        }
+        abbrechen(l, G_REIHENFOLGE)
+        return
+    }
+    if (*l).zustand == Z_VERBUNDEN {
+        // Nach der Verbindung ist eine Handschlagnachricht KEIN
+        // Ereignis mehr, das etwas installiert. Der
+        // Gruppenschluesseltausch waere ein eigener, zweiteiliger
+        // Ablauf; er ist hier nicht umgesetzt und wird deshalb
+        // abgelehnt statt still verschluckt.
+        abbrechen(l, G_REIHENFOLGE)
+        return
+    }
+    abbrechen(l, G_UNBEKANNT)
+}
+
+fn verbunden(l: *mut Lauf) -> bool {
+    return (*l).zustand == Z_VERBUNDEN
+}
+
+// Die Frage, die vor jedem Nutzdatenrahmen steht. Sie ist absichtlich
+// NICHT dasselbe wie `verbunden`: hier stehen beide Bedingungen, und
+// wenn sie je auseinanderfallen, ist das ein Fehler, den der Test
+// findet.
+fn darf_daten(l: *mut Lauf) -> bool {
+    return (*l).zustand == Z_VERBUNDEN && (*l).schluessel_installiert
+}

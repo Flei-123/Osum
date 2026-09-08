@@ -724,7 +724,13 @@ zusagen() {
     # RUNDE MERGE-2: `bestanden` dazu -- der Laeufer der Runde USBIMG
     # meldet auf deutsch ("USBIMG: 46 bestanden, 0 gescheitert"), und mit
     # dem alten Muster waeren seine 46 Zusagen still verschwunden.
-    n=$(grep -aoE '^[A-Z][A-Z0-9]*: [0-9]+ (passed|proofs|bestanden)' "$log" | tail -1 | grep -oE '[0-9]+' | tail -1)
+    # RUNDE WLAN: `Zusagen` dazu. Der Laeufer von tools/wlan/run.sh
+    # meldet "WLAN: 183 Zusagen, 0 Fehler" -- das ist genau das Wort,
+    # das diese Datei selbst fuer eine gepruefte Aussage benutzt, und
+    # ohne diesen Zusatz waeren die Zusagen still verschwunden. Die
+    # Ergaenzung ist rein additiv: kein bisher passendes Muster faellt
+    # dadurch weg.
+    n=$(grep -aoE '^[A-Z][A-Z0-9]*: [0-9]+ (passed|proofs|bestanden|Zusagen)' "$log" | tail -1 | grep -oE '[0-9]+' | tail -1)
     [ -n "${n:-}" ] && ZUSAGEN=$((ZUSAGEN + n))
 }
 
@@ -1542,11 +1548,73 @@ lauf "46. der Mischer von Ring 3 aus: zwei Programme, Lautstaerke je Strom, Saet
 #      Bewegung samt Gegenprobe `noanim` (die denselben Endzustand
 #      erreichen MUSS, nur ohne Zwischenbilder) und der Nachweis, dass
 #      die Sparsamkeit der Runde UHRWERK unveraendert geblieben ist.
-lauf "43. die Bildgrenze und die Fensterbewegung (tools/vsync/run.sh, Runde VSYNC)" \
+lauf "48. die Bildgrenze und die Fensterbewegung (tools/vsync/run.sh, Runde VSYNC)" \
      tools/vsync/run.sh vsync '^VSYNC: |^    ok  |^    NICHT |^        '
 
-lauf "43. der Puffer, der bei knappem Speicher schweigt -- und der Aufrufer, der darueber hinausschreibt (tools/haertung/run.sh, Runde HAERTUNG-2)" \
+lauf "49. der Puffer, der bei knappem Speicher schweigt -- und der Aufrufer, der darueber hinausschreibt (tools/haertung/run.sh, Runde HAERTUNG-2)" \
      tools/haertung/run.sh haertung '^HAERTUNG: |^  OK    |^  FEHL  |^     fall='
+# ABSCHNITT 47 -- RUNDE WLAN/WLAN-2. (MERGE-8: der Zweig nannte ihn 42;
+# die 42 gehoert seit MERGE-7 dem Zeichenweg (GLYPHE), 46 seit dieser
+# Runde dem Mischer (TON-2). Also 47.) Der einzige Abschnitt dieser Abnahme, der
+# KEIN QEMU startet, und der einzige, der dafuer eine gemessene
+# Begruendung mitbringt: `qemu-system-x86_64 -device help` kennt NULL
+# 802.11-Geraete. Es gibt keinen Weg, eine WLAN-Karte zu emulieren, und
+# damit keinen Weg, in QEMU einen einzigen WLAN-Rahmen zu erzeugen.
+#
+# Gemessen wird deshalb auf dem WIRT, gegen dieselben Firn-Dateien, die
+# der Kern binden wird (`tools/wlan/orakel.fi` bindet `lib/crypto/` und
+# `lib/wlan/`) -- dasselbe Werkzeug, das die Runden TUNNEL und UPDATE
+# fuer Ed25519 gebaut haben.
+#
+# Drei Arten von Vergleich, und die dritte ist die, auf die es ankommt:
+# gegen die Normen (FIPS 197, RFC 3394, RFC 4493, RFC 6070, IEEE 802.11i
+# und 802.11-2012 M.6.4/M.9.2), gegen OpenSSL, und gegen eine ECHTE
+# AUFZEICHNUNG eines echten WPA2-Netzes -- aus dem Passwort `Induction`
+# und dem Namen `Coherer` wird ein PMK, daraus mit den Zufallszahlen des
+# echten Handschlags ein PTK, dessen KCK die Pruefwerte nachrechnet, die
+# damals wirklich auf dem Draht standen, und dessen TK die echten
+# verschluesselten Rahmen aufmacht.
+#
+# Dazu ein Fuzz-Lauf ueber Zehntausende verstuemmelte Rahmen UNTER
+# VALGRIND: ein Beacon kommt von einem Fremden, ist von niemandem
+# beglaubigt und trifft den Kernel, bevor es einen Schluessel gibt.
+#
+# WAS DIESER ABSCHNITT AUSDRUECKLICH NICHT ZEIGT: dass Osum sich mit
+# einem WLAN verbindet. Es gibt keinen Treiber, und es wird auf diesem
+# Rechner auch keinen geben. `docs/WLAN-BEFUND.md` sagt, warum, was das
+# kostet und wie weit der Weg damit ist.
+lauf "47. WLAN ohne eine einzige Karte: 802.11, WPA2/WPA3 und CCMP gegen die Normen und gegen eine echte Aufzeichnung (tools/wlan/run.sh, Runde WLAN)" \
+     tools/wlan/run.sh wlan '^WLAN: |^WLAN-FUZZ: |^== |^  OK    (QEMU |tools/wlan/orakel|das Orakel lehnt|die Aufzeichnung liegt|SHA-1 gegen|HMAC-SHA1 gegen|PRF-SHA1, IEEE|PBKDF2-SHA1, RFC|PMK aus|AES gegen OpenSSL|AES-CMAC, RFC|Key Wrap, RFC|AES-CCM|IEEE Std 802\.11|Beacon 1|die Ketten|EAPOL-Rahmen|PTK aus dem echten|Pruefwert von Nachricht|Gruppenschluessel aus|DIE GANZE KETTE|mit einem TK|ueber ALLE|die richtige Folge|und hat den Schluessel|alle [0-9]+ Verstuemmelungen|Nachricht 3 zweimal|ERSCHOEPFEND|der Fehlerzustand|alle [0-9]+ Abschnitte|ein RSN-Element|EAPOL: alle|[0-9]+ verstuemmelte Rahmen|jede der [0-9]+|von den [0-9]+|valgrind ueber|keine WLAN-PCI|SAE ist NICHT|TKIP und WEP|die Runde in Zeilen|PTK mit KDF-SHA256|beide Seiten)'
+# ABSCHNITT 43 -- RUNDE WLAN-2. Der Abschnitt, der die zwei ehrlichsten
+# Saetze aus docs/WLAN-BEFUND.md einloest:
+#
+#     S2 -- Der 4-Wege-Handschlag ist gegen sich selbst und gegen die
+#     Normvektoren der Primitiven gemessen, NICHT gegen einen echten
+#     Zugangspunkt.
+#     S4 -- Nichts davon ist gegen einen boesartigen Zugangspunkt
+#     gemessen.
+#
+# Beides ist jetzt gemessen. Osums Supplicant tritt gegen
+# `tools/wlan/gegenstelle.py` an -- einen vollstaendigen
+# WPA2-Authenticator, der mit Osum keine Zeile teilt, unter sich
+# OpenSSL statt lib/crypto/ benutzt und bei JEDEM Lauf neue
+# Zufallszahlen wuerfelt. Vorher eicht er sich an der echten
+# Aufzeichnung von 2007 (Coherer/Induction), damit der Massstab selbst
+# einen Massstab hat.
+#
+# Warum nicht hostapd: gemessen und im Kopf von gegenstelle.py
+# festgehalten. Debian baut hostapd ohne CONFIG_TESTING_OPTIONS
+# (EAPOL_RX -> 'Unknown command'), driver=wired ist auf 802.1X
+# verdrahtet und ruehrt die WPA-PSK-Maschine nicht an, und
+# mac80211_hwsim gibt es auf diesem Kern nicht.
+#
+# Dazu die Naht zum Blech (lib/wlan/geraet.fi) und -- nach Justins
+# Zwischenruf, dass in seinem Rechner ein USB-STICK und keine
+# PCIe-Karte steckt -- die Tabelle, die einen Stick an seiner
+# USB-Nummer BENENNT, damit die Zeile am echten Blech fotografierbar
+# ist. Sie bindet keinen Treiber; das waere eine Behauptung.
+lauf "50. WLAN gegen ein ZWEITES Programm: 4-Wege-Handschlag gegen einen unabhaengigen Authenticator, die Naht zum Blech, der USB-Stick beim Namen (tools/wlan/run2.sh, Runde WLAN-2)" \
+     tools/wlan/run2.sh wlan2 '^WLAN2: |^== |^  OK    (tools/wlan/orakel|die Gegenstelle|PMK aus|Pruefwert von|Schluesseldaten von|[0-9]+ vollstaendige|in jedem Lauf|Nachricht 3 mit|Schluesseldaten OHNE|Automat: |die Naht|ein Geraet OHNE|alle [0-9]+ USB|kernel/usb\.fi|SAE ist NICHT|kein USB-WLAN|die neuen Dateien)'
 
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.

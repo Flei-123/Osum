@@ -1,0 +1,909 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/crypto/aes.fi -- AES (FIPS 197) und die vier Betriebsarten, die
+// 802.11 braucht.
+//
+// ==================================================================
+// WARUM ES DIESE DATEI GIBT, obwohl im Baum schon ein AES liegt
+// ==================================================================
+//
+// `vendor/firn/lib/std/crypto/aes.fi` sagt in seinem eigenen Kopf, was
+// es ist: AES-128 mit CBC und CFB8. Das ist fuer den Zweck, fuer den es
+// geschrieben wurde, richtig, und fuer WLAN reicht es an vier Stellen
+// nicht:
+//
+//   * KEIN CCM. CCMP -- die Verschluesselung, die WPA2 und WPA3 fuer
+//     jeden einzelnen Rahmen benutzen -- ist AES im CCM-Modus. Ohne CCM
+//     gibt es kein WPA2.
+//   * KEIN CMAC. Der Pruefwert (MIC) der EAPOL-Key-Rahmen ist bei den
+//     SHA-256-Verfahren und bei WPA3 AES-CMAC und nicht HMAC.
+//   * KEIN KEY WRAP. Der Gruppenschluessel GTK kommt in Nachricht 3
+//     des Handschlags eingepackt nach RFC 3394 an. Ohne Auspacken gibt
+//     es keinen Rundruf-Empfang.
+//   * NUR 128 BIT. Fuer CCMP-128 reicht das; fuer die
+//     256-Bit-Verfahren nicht.
+//
+// Und `kernel/user/key.fi` sagt an seiner Zeile 16 dasselbe ueber
+// dieselbe Datei. Diese hier ist deshalb eine eigene, nach denselben
+// Regeln wie `sha256.fi` und `sha1.fi`: KEINE `profile`-Zeile, KEIN
+// `import`, kein Allokator, kein Systemaufruf, aller Zustand beim
+// Aufrufer.
+//
+// ==================================================================
+// WIE AES HIER GERECHNET WIRD, und warum ohne die grossen Tabellen
+// ==================================================================
+//
+// Die uebliche schnelle Umsetzung faltet SubBytes, ShiftRows und
+// MixColumns in vier Tabellen zu je 1 KiB (T0..T3). Das ist schnell und
+// hat zwei Nachteile, die hier beide zaehlen:
+//
+//   1. 4 KiB Tabellen in einem statisch gelinkten Kern (Roadmap A9),
+//      fuer eine Rechnung, die pro Rahmen einmal laeuft.
+//   2. Tabellenzugriffe, deren INDEX vom Schluessel abhaengt, sind der
+//      klassische Weg fuer Zwischenspeicher-Angriffe.
+//
+// Diese Datei rechnet deshalb Oktett fuer Oktett: eine S-Box von 256
+// Eintraegen, ihre Umkehrung, und die Multiplikation im Koerper ueber
+// Verdopplung. Das ist langsamer und fuer eine WLAN-Verbindung, die
+// ueber die Firmware laeuft, vollkommen ausreichend.
+//
+// EHRLICH DAZU: das ist NICHT konstantzeitig. Die S-Box ist eine
+// Tabelle, und `sbox[x]` mit geheimem x hat auf einem Rechner mit
+// Zwischenspeicher eine Laufzeit, die vom Wert abhaengt. Wer das
+// wirklich braucht, braucht AES-NI (die Befehle AESENC/AESENCLAST), und
+// die stehen auf jedem x86-64 seit 2010 zur Verfuegung. Das waere eine
+// eigene Runde und steht in `docs/WLAN-BEFUND.md` NICHT als erledigt.
+//
+// ==================================================================
+// WAS DRIN IST
+// ==================================================================
+//
+//   key_set / encrypt_block / decrypt_block    FIPS 197
+//   cmac                                        RFC 4493 (OMAC1)
+//   key_wrap / key_unwrap                       RFC 3394
+//   ccm_encrypt / ccm_decrypt                   RFC 3610
+//
+// Gemessen (tools/wlan/vektoren.py) gegen die Vektoren aus FIPS 197
+// Anhang C, RFC 4493, RFC 3394 Abschnitt 4 und gegen OpenSSL ueber
+// Pythons `cryptography` fuer CCM.
+
+export { Key, key_new, key_set, encrypt_block, decrypt_block,
+    cmac, key_wrap, key_unwrap, ccm_encrypt, ccm_decrypt,
+    BLOCK, MAX_RK }
+
+const BLOCK: usize = 16
+// 4 * (14 + 1) * 4 = 240 Oktette Rundenschluessel bei AES-256.
+const MAX_RK: usize = 240
+
+struct Key {
+    rk: [u8; 240],
+    nr: usize, // Zahl der Runden: 10, 12 oder 14
+    gesetzt: bool,
+}
+
+fn ld8(p: u64, i: usize) -> u8 {
+    return *((p + i as u64) as *mut u8)
+}
+
+fn st8(p: u64, i: usize, v: u8) {
+    *((p + i as u64) as *mut u8) = v
+}
+
+// ------------------------------------------------------------ S-Box
+//
+// FIPS 197, Abbildung 7. Das ist die einzige Tabelle in dieser Datei,
+// die man nicht rechnen kann, ohne den Koerper zu invertieren.
+fn sbox(i: u64) -> u8 {
+    let t: [u8; 256] = [
+    0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
+    0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
+    0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
+    0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
+    0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
+    0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
+    0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
+    0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
+    0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
+    0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
+    0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
+    0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
+    0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
+    0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
+    0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
+    0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16]
+    return t[i as usize]
+}
+
+fn rsbox(i: u64) -> u8 {
+    let t: [u8; 256] = [
+    0x52,0x09,0x6a,0xd5,0x30,0x36,0xa5,0x38,0xbf,0x40,0xa3,0x9e,0x81,0xf3,0xd7,0xfb,
+    0x7c,0xe3,0x39,0x82,0x9b,0x2f,0xff,0x87,0x34,0x8e,0x43,0x44,0xc4,0xde,0xe9,0xcb,
+    0x54,0x7b,0x94,0x32,0xa6,0xc2,0x23,0x3d,0xee,0x4c,0x95,0x0b,0x42,0xfa,0xc3,0x4e,
+    0x08,0x2e,0xa1,0x66,0x28,0xd9,0x24,0xb2,0x76,0x5b,0xa2,0x49,0x6d,0x8b,0xd1,0x25,
+    0x72,0xf8,0xf6,0x64,0x86,0x68,0x98,0x16,0xd4,0xa4,0x5c,0xcc,0x5d,0x65,0xb6,0x92,
+    0x6c,0x70,0x48,0x50,0xfd,0xed,0xb9,0xda,0x5e,0x15,0x46,0x57,0xa7,0x8d,0x9d,0x84,
+    0x90,0xd8,0xab,0x00,0x8c,0xbc,0xd3,0x0a,0xf7,0xe4,0x58,0x05,0xb8,0xb3,0x45,0x06,
+    0xd0,0x2c,0x1e,0x8f,0xca,0x3f,0x0f,0x02,0xc1,0xaf,0xbd,0x03,0x01,0x13,0x8a,0x6b,
+    0x3a,0x91,0x11,0x41,0x4f,0x67,0xdc,0xea,0x97,0xf2,0xcf,0xce,0xf0,0xb4,0xe6,0x73,
+    0x96,0xac,0x74,0x22,0xe7,0xad,0x35,0x85,0xe2,0xf9,0x37,0xe8,0x1c,0x75,0xdf,0x6e,
+    0x47,0xf1,0x1a,0x71,0x1d,0x29,0xc5,0x89,0x6f,0xb7,0x62,0x0e,0xaa,0x18,0xbe,0x1b,
+    0xfc,0x56,0x3e,0x4b,0xc6,0xd2,0x79,0x20,0x9a,0xdb,0xc0,0xfe,0x78,0xcd,0x5a,0xf4,
+    0x1f,0xdd,0xa8,0x33,0x88,0x07,0xc7,0x31,0xb1,0x12,0x10,0x59,0x27,0x80,0xec,0x5f,
+    0x60,0x51,0x7f,0xa9,0x19,0xb5,0x4a,0x0d,0x2d,0xe5,0x7a,0x9f,0x93,0xc9,0x9c,0xef,
+    0xa0,0xe0,0x3b,0x4d,0xae,0x2a,0xf5,0xb0,0xc8,0xeb,0xbb,0x3c,0x83,0x53,0x99,0x61,
+    0x17,0x2b,0x04,0x7e,0xba,0x77,0xd6,0x26,0xe1,0x69,0x14,0x63,0x55,0x21,0x0c,0x7d]
+    return t[i as usize]
+}
+
+// Verdopplung im Koerper GF(2^8) mit dem Modulpolynom x^8+x^4+x^3+x+1
+// (0x11B). FIPS 197 4.2.1.
+fn xtime(a: u64) -> u64 {
+    let s: u64 = (a << 1) & 255
+    if (a & 128) != 0 {
+        return s ^ 0x1B
+    }
+    return s
+}
+
+// Multiplikation im Koerper, russische Bauernmultiplikation.
+fn gmul(a: u64, b: u64) -> u64 {
+    var x: u64 = a & 255
+    var y: u64 = b & 255
+    var r: u64 = 0
+    var i: usize = 0
+    while i < 8 {
+        if (y & 1) != 0 {
+            r = r ^ x
+        }
+        x = xtime(x)
+        y = y >> 1
+        i = i + 1
+    }
+    return r & 255
+}
+
+fn key_new() -> Key {
+    return Key { rk: [0 as u8; 240], nr: 0, gesetzt: false }
+}
+
+// FIPS 197 5.2, Schluesselplan. `klen` in Oktetten: 16, 24 oder 32.
+// Alles andere wird ABGELEHNT und nicht etwa aufgefuellt.
+fn key_set(k: *mut Key, key: u64, klen: usize) -> bool {
+    (*k).gesetzt = false
+    if klen != 16 && klen != 24 && klen != 32 {
+        return false
+    }
+    let nk: usize = klen / 4
+    let nr: usize = nk + 6
+    (*k).nr = nr
+    var i: usize = 0
+    while i < klen {
+        (*k).rk[i] = ld8(key, i)
+        i = i + 1
+    }
+    // Rcon: 1, 2, 4, 8, ... im Koerper verdoppelt.
+    var rcon: u64 = 1
+    var w: usize = nk
+    let gesamt: usize = 4 * (nr + 1)
+    while w < gesamt {
+        var t: [u8; 4] = [0 as u8; 4]
+        var j: usize = 0
+        while j < 4 {
+            t[j] = (*k).rk[(w - 1) * 4 + j]
+            j = j + 1
+        }
+        if w % nk == 0 {
+            // RotWord, dann SubWord, dann Rcon auf das erste Oktett.
+            let tmp: u8 = t[0]
+            t[0] = sbox(t[1] as u64)
+            t[1] = sbox(t[2] as u64)
+            t[2] = sbox(t[3] as u64)
+            t[3] = sbox(tmp as u64)
+            t[0] = (t[0] as u64 ^ rcon) as u8
+            rcon = xtime(rcon)
+        } else {
+            // Nur bei AES-256 gibt es die zweite Ausnahme.
+            if nk > 6 && w % nk == 4 {
+                j = 0
+                while j < 4 {
+                    t[j] = sbox(t[j] as u64)
+                    j = j + 1
+                }
+            }
+        }
+        j = 0
+        while j < 4 {
+            (*k).rk[w * 4 + j] = (*k).rk[(w - nk) * 4 + j] ^ t[j]
+            j = j + 1
+        }
+        w = w + 1
+    }
+    (*k).gesetzt = true
+    return true
+}
+
+fn add_round_key(s: *mut [u8; 16], k: *mut Key, r: usize) {
+    var i: usize = 0
+    while i < 16 {
+        (*s)[i] = (*s)[i] ^ (*k).rk[r * 16 + i]
+        i = i + 1
+    }
+}
+
+// Der Zustand liegt spaltenweise: s[r + 4c]. ShiftRows verschiebt Zeile
+// r um r Stellen nach LINKS.
+fn shift_rows(s: *mut [u8; 16]) {
+    let t1: u8 = (*s)[1]
+    (*s)[1] = (*s)[5]
+    (*s)[5] = (*s)[9]
+    (*s)[9] = (*s)[13]
+    (*s)[13] = t1
+    let t2: u8 = (*s)[2]
+    let t6: u8 = (*s)[6]
+    (*s)[2] = (*s)[10]
+    (*s)[10] = t2
+    (*s)[6] = (*s)[14]
+    (*s)[14] = t6
+    let t3: u8 = (*s)[15]
+    (*s)[15] = (*s)[11]
+    (*s)[11] = (*s)[7]
+    (*s)[7] = (*s)[3]
+    (*s)[3] = t3
+}
+
+fn inv_shift_rows(s: *mut [u8; 16]) {
+    let t1: u8 = (*s)[13]
+    (*s)[13] = (*s)[9]
+    (*s)[9] = (*s)[5]
+    (*s)[5] = (*s)[1]
+    (*s)[1] = t1
+    let t2: u8 = (*s)[2]
+    let t6: u8 = (*s)[6]
+    (*s)[2] = (*s)[10]
+    (*s)[10] = t2
+    (*s)[6] = (*s)[14]
+    (*s)[14] = t6
+    let t3: u8 = (*s)[3]
+    (*s)[3] = (*s)[7]
+    (*s)[7] = (*s)[11]
+    (*s)[11] = (*s)[15]
+    (*s)[15] = t3
+}
+
+fn mix_columns(s: *mut [u8; 16]) {
+    var c: usize = 0
+    while c < 4 {
+        let a0: u64 = (*s)[c * 4] as u64
+        let a1: u64 = (*s)[c * 4 + 1] as u64
+        let a2: u64 = (*s)[c * 4 + 2] as u64
+        let a3: u64 = (*s)[c * 4 + 3] as u64
+        (*s)[c * 4] = (gmul(a0, 2) ^ gmul(a1, 3) ^ a2 ^ a3) as u8
+        (*s)[c * 4 + 1] = (a0 ^ gmul(a1, 2) ^ gmul(a2, 3) ^ a3) as u8
+        (*s)[c * 4 + 2] = (a0 ^ a1 ^ gmul(a2, 2) ^ gmul(a3, 3)) as u8
+        (*s)[c * 4 + 3] = (gmul(a0, 3) ^ a1 ^ a2 ^ gmul(a3, 2)) as u8
+        c = c + 1
+    }
+}
+
+fn inv_mix_columns(s: *mut [u8; 16]) {
+    var c: usize = 0
+    while c < 4 {
+        let a0: u64 = (*s)[c * 4] as u64
+        let a1: u64 = (*s)[c * 4 + 1] as u64
+        let a2: u64 = (*s)[c * 4 + 2] as u64
+        let a3: u64 = (*s)[c * 4 + 3] as u64
+        (*s)[c * 4] = (gmul(a0, 14) ^ gmul(a1, 11) ^ gmul(a2, 13)
+            ^ gmul(a3, 9)) as u8
+        (*s)[c * 4 + 1] = (gmul(a0, 9) ^ gmul(a1, 14) ^ gmul(a2, 11)
+            ^ gmul(a3, 13)) as u8
+        (*s)[c * 4 + 2] = (gmul(a0, 13) ^ gmul(a1, 9) ^ gmul(a2, 14)
+            ^ gmul(a3, 11)) as u8
+        (*s)[c * 4 + 3] = (gmul(a0, 11) ^ gmul(a1, 13) ^ gmul(a2, 9)
+            ^ gmul(a3, 14)) as u8
+        c = c + 1
+    }
+}
+
+// FIPS 197 5.1. `in` und `out` duerfen dieselbe Stelle sein.
+fn encrypt_block(k: *mut Key, inp: u64, out: u64) {
+    var s: [u8; 16] = [0 as u8; 16]
+    var i: usize = 0
+    while i < 16 {
+        s[i] = ld8(inp, i)
+        i = i + 1
+    }
+    add_round_key(&s, k, 0)
+    var r: usize = 1
+    while r < (*k).nr {
+        i = 0
+        while i < 16 {
+            s[i] = sbox(s[i] as u64)
+            i = i + 1
+        }
+        shift_rows(&s)
+        mix_columns(&s)
+        add_round_key(&s, k, r)
+        r = r + 1
+    }
+    i = 0
+    while i < 16 {
+        s[i] = sbox(s[i] as u64)
+        i = i + 1
+    }
+    shift_rows(&s)
+    add_round_key(&s, k, (*k).nr)
+    i = 0
+    while i < 16 {
+        st8(out, i, s[i])
+        i = i + 1
+    }
+}
+
+// FIPS 197 5.3, die geradlinige Umkehrung (nicht die aequivalente
+// Form). CCM und CMAC brauchen sie nicht -- CCM benutzt AES
+// ausschliesslich vorwaerts --, das Auspacken nach RFC 3394 schon.
+fn decrypt_block(k: *mut Key, inp: u64, out: u64) {
+    var s: [u8; 16] = [0 as u8; 16]
+    var i: usize = 0
+    while i < 16 {
+        s[i] = ld8(inp, i)
+        i = i + 1
+    }
+    add_round_key(&s, k, (*k).nr)
+    var r: usize = (*k).nr
+    while r > 1 {
+        inv_shift_rows(&s)
+        i = 0
+        while i < 16 {
+            s[i] = rsbox(s[i] as u64)
+            i = i + 1
+        }
+        add_round_key(&s, k, r - 1)
+        inv_mix_columns(&s)
+        r = r - 1
+    }
+    inv_shift_rows(&s)
+    i = 0
+    while i < 16 {
+        s[i] = rsbox(s[i] as u64)
+        i = i + 1
+    }
+    add_round_key(&s, k, 0)
+    i = 0
+    while i < 16 {
+        st8(out, i, s[i])
+        i = i + 1
+    }
+}
+
+// ------------------------------------------------- CMAC, RFC 4493
+//
+// Die Verschiebung um ein Bit nach links mit 0x87 als Ruecknahme ist
+// die Multiplikation mit x im Koerper GF(2^128). RFC 4493 3.2.
+fn shift_left_1(b: *mut [u8; 16]) {
+    var uebertrag: u64 = 0
+    var i: usize = 16
+    while i > 0 {
+        i = i - 1
+        let v: u64 = (*b)[i] as u64
+        (*b)[i] = (((v << 1) & 255) | uebertrag) as u8
+        uebertrag = (v >> 7) & 1
+    }
+}
+
+fn subkey(k: *mut Key, k1: *mut [u8; 16], k2: *mut [u8; 16]) {
+    var null: [u8; 16] = [0 as u8; 16]
+    var l: [u8; 16] = [0 as u8; 16]
+    encrypt_block(k, (&null[0]) as u64, (&l[0]) as u64)
+    var i: usize = 0
+    while i < 16 {
+        (*k1)[i] = l[i]
+        i = i + 1
+    }
+    let msb1: bool = (l[0] & (128 as u8)) != 0 as u8
+    shift_left_1(k1)
+    if msb1 {
+        (*k1)[15] = (*k1)[15] ^ (0x87 as u8)
+    }
+    i = 0
+    while i < 16 {
+        (*k2)[i] = (*k1)[i]
+        i = i + 1
+    }
+    let msb2: bool = ((*k1)[0] & (128 as u8)) != 0 as u8
+    shift_left_1(k2)
+    if msb2 {
+        (*k2)[15] = (*k2)[15] ^ (0x87 as u8)
+    }
+}
+
+// AES-CMAC ueber eine Nachricht. `out` bekommt 16 Oktette.
+//
+// DIE ZWEI FAELLE, und sie sind der ganze Unterschied: eine Nachricht,
+// deren Laenge ein Vielfaches von 16 ist UND groesser als null, nimmt
+// K1 und wird NICHT aufgefuellt. Alles andere -- auch die LEERE
+// Nachricht -- nimmt K2 und bekommt ein 0x80 und Nullen. Die leere
+// Nachricht dem ersten Fall zuzuschlagen ist der haeufigste Fehler und
+// faellt nur mit dem ersten Vektor aus RFC 4493 auf.
+fn cmac(key: u64, klen: usize, msg: u64, mlen: usize, out: u64) -> bool {
+    var k: Key = key_new()
+    if !key_set(&k, key, klen) {
+        return false
+    }
+    var k1: [u8; 16] = [0 as u8; 16]
+    var k2: [u8; 16] = [0 as u8; 16]
+    subkey(&k, &k1, &k2)
+
+    var x: [u8; 16] = [0 as u8; 16]
+    var b: [u8; 16] = [0 as u8; 16]
+    var voll: usize = 0
+    if mlen > 0 {
+        voll = (mlen - 1) / 16
+    }
+    var n: usize = 0
+    while n < voll {
+        var i: usize = 0
+        while i < 16 {
+            b[i] = x[i] ^ ld8(msg, n * 16 + i)
+            i = i + 1
+        }
+        encrypt_block(&k, (&b[0]) as u64, (&x[0]) as u64)
+        n = n + 1
+    }
+    // Der letzte Block.
+    var rest: usize = mlen - voll * 16
+    var last: [u8; 16] = [0 as u8; 16]
+    if mlen > 0 && rest == 16 {
+        var i: usize = 0
+        while i < 16 {
+            last[i] = ld8(msg, voll * 16 + i) ^ k1[i]
+            i = i + 1
+        }
+    } else {
+        var i: usize = 0
+        while i < rest {
+            last[i] = ld8(msg, voll * 16 + i)
+            i = i + 1
+        }
+        last[rest] = 0x80 as u8
+        i = rest + 1
+        while i < 16 {
+            last[i] = 0 as u8
+            i = i + 1
+        }
+        i = 0
+        while i < 16 {
+            last[i] = last[i] ^ k2[i]
+            i = i + 1
+        }
+    }
+    var i: usize = 0
+    while i < 16 {
+        b[i] = x[i] ^ last[i]
+        i = i + 1
+    }
+    encrypt_block(&k, (&b[0]) as u64, out)
+    return true
+}
+
+// --------------------------------------------- Key Wrap, RFC 3394
+//
+// Der Anfangswert A6A6A6A6A6A6A6A6 ist die ganze Pruefung: beim
+// Auspacken muss er wieder herauskommen. Das ist kein MAC, aber es ist
+// genug, um einen falschen Schluessel und ein verdrehtes Paket zu
+// erkennen -- und genau dafuer benutzt der 4-Wege-Handschlag es.
+//
+// GRENZE: bis zu 256 Oktette Klartext. Die erste Fassung stand auf 64
+// -- mit der Begruendung "das reicht fuer jeden GTK". Das war falsch
+// und der Test hat es sofort gefunden: die Schluesseldaten einer echten
+// Nachricht 3 (wpa-Induction.pcap) sind 80 Oktette eingepackt, weil
+// darin nicht nur der Gruppenschluessel steht, sondern auch noch
+// einmal das ganze RSN-Element. 256 ist die Obergrenze fuer alles, was
+// in einen EAPOL-Key-Rahmen passt, und kostet 256 Oktette Stapel.
+const WRAP_MAX: usize = 256
+
+fn key_wrap(kek: u64, keklen: usize, plain: u64, plen: usize,
+    out: u64) -> bool {
+    if plen < 16 || plen % 8 != 0 || plen > WRAP_MAX {
+        return false
+    }
+    var k: Key = key_new()
+    if !key_set(&k, kek, keklen) {
+        return false
+    }
+    let n: usize = plen / 8
+    var a: [u8; 8] = [0xA6 as u8; 8]
+    var r: [u8; 256] = [0 as u8; 256]
+    var i: usize = 0
+    while i < plen {
+        r[i] = ld8(plain, i)
+        i = i + 1
+    }
+    var b: [u8; 16] = [0 as u8; 16]
+    var c: [u8; 16] = [0 as u8; 16]
+    var j: usize = 0
+    while j < 6 {
+        var t: usize = 1
+        while t <= n {
+            i = 0
+            while i < 8 {
+                b[i] = a[i]
+                b[8 + i] = r[(t - 1) * 8 + i]
+                i = i + 1
+            }
+            encrypt_block(&k, (&b[0]) as u64, (&c[0]) as u64)
+            let zaehler: u64 = (n * j + t) as u64
+            i = 0
+            while i < 8 {
+                a[i] = c[i]
+                i = i + 1
+            }
+            // Der Zaehler wird auf die UNTEREN Oktette von A gelegt,
+            // hoechstwertiges zuerst; bei n <= 8 beruehrt er nur das
+            // letzte. Trotzdem alle acht, damit es auch fuer grosse n
+            // stimmt.
+            i = 0
+            while i < 8 {
+                a[7 - i] = a[7 - i] ^ (((zaehler >> (i as u64 * 8))
+                    & 255) as u8)
+                i = i + 1
+            }
+            i = 0
+            while i < 8 {
+                r[(t - 1) * 8 + i] = c[8 + i]
+                i = i + 1
+            }
+            t = t + 1
+        }
+        j = j + 1
+    }
+    i = 0
+    while i < 8 {
+        st8(out, i, a[i])
+        i = i + 1
+    }
+    i = 0
+    while i < plen {
+        st8(out, 8 + i, r[i])
+        i = i + 1
+    }
+    return true
+}
+
+fn key_unwrap(kek: u64, keklen: usize, cipher: u64, clen: usize,
+    out: u64) -> bool {
+    if clen < 24 || clen % 8 != 0 || clen > WRAP_MAX + 8 {
+        return false
+    }
+    var k: Key = key_new()
+    if !key_set(&k, kek, keklen) {
+        return false
+    }
+    let n: usize = clen / 8 - 1
+    var a: [u8; 8] = [0 as u8; 8]
+    var r: [u8; 256] = [0 as u8; 256]
+    var i: usize = 0
+    while i < 8 {
+        a[i] = ld8(cipher, i)
+        i = i + 1
+    }
+    i = 0
+    while i < n * 8 {
+        r[i] = ld8(cipher, 8 + i)
+        i = i + 1
+    }
+    var b: [u8; 16] = [0 as u8; 16]
+    var c: [u8; 16] = [0 as u8; 16]
+    var j: usize = 6
+    while j > 0 {
+        j = j - 1
+        var t: usize = n
+        while t >= 1 {
+            let zaehler: u64 = (n * j + t) as u64
+            i = 0
+            while i < 8 {
+                b[i] = a[i]
+                i = i + 1
+            }
+            i = 0
+            while i < 8 {
+                b[7 - i] = b[7 - i] ^ (((zaehler >> (i as u64 * 8))
+                    & 255) as u8)
+                i = i + 1
+            }
+            i = 0
+            while i < 8 {
+                b[8 + i] = r[(t - 1) * 8 + i]
+                i = i + 1
+            }
+            decrypt_block(&k, (&b[0]) as u64, (&c[0]) as u64)
+            i = 0
+            while i < 8 {
+                a[i] = c[i]
+                r[(t - 1) * 8 + i] = c[8 + i]
+                i = i + 1
+            }
+            t = t - 1
+        }
+    }
+    // DIE PRUEFUNG. Ohne sie ist das Auspacken wertlos.
+    var gut: bool = true
+    i = 0
+    while i < 8 {
+        if a[i] != 0xA6 as u8 {
+            gut = false
+        }
+        i = i + 1
+    }
+    if !gut {
+        return false
+    }
+    i = 0
+    while i < n * 8 {
+        st8(out, i, r[i])
+        i = i + 1
+    }
+    return true
+}
+
+// ------------------------------------------------------ CCM, RFC 3610
+//
+// CCM ist Zaehlermodus zur Verschluesselung plus CBC-MAC zur Sicherung,
+// mit DEMSELBEN Schluessel. Das ist normalerweise ein Fehler; hier ist
+// es bewiesen sicher, weil die beiden Rechnungen durch die Kennzeichen
+// im ersten Block streng getrennte Eingaberaeume haben.
+//
+// DIE DREI ZAHLEN, die alles bestimmen:
+//   L   Groesse des Laengenfeldes, 2..8. Ergibt sich aus der Nonce:
+//       L = 15 - Noncelaenge.
+//   M   Groesse des Pruefwerts, gerade, 4..16.
+//   n   Laenge der Nachricht, muss in L Oktette passen.
+//
+// CCMP setzt L = 2 (Nonce 13 Oktette) und M = 8. Diese Funktion kann
+// mehr, damit sie gegen die allgemeinen Vektoren messbar ist.
+
+fn ccm_pruefe(nlen: usize, mlen: usize, m: usize) -> bool {
+    if nlen < 7 || nlen > 13 {
+        return false
+    }
+    if m < 4 || m > 16 || m % 2 != 0 {
+        return false
+    }
+    let l: usize = 15 - nlen
+    // Passt die Laenge in L Oktette? Bei L >= 8 immer.
+    if l < 8 {
+        var grenze: u64 = 1
+        var i: usize = 0
+        while i < l {
+            grenze = grenze * 256
+            i = i + 1
+        }
+        if (mlen as u64) >= grenze {
+            return false
+        }
+    }
+    return true
+}
+
+// Ein Schritt CBC-MAC: X = E(K, X xor block).
+fn cbc_schritt(k: *mut Key, x: *mut [u8; 16], blk: *mut [u8; 16]) {
+    var t: [u8; 16] = [0 as u8; 16]
+    var i: usize = 0
+    while i < 16 {
+        t[i] = (*x)[i] ^ (*blk)[i]
+        i = i + 1
+    }
+    encrypt_block(k, (&t[0]) as u64, (&(*x)[0]) as u64)
+}
+
+// Der Pruefwert T ueber B0, die zusaetzlichen Daten und die Nachricht.
+// `msg` ist immer der KLARTEXT -- auch beim Entschluesseln, deshalb
+// wird dort erst entschluesselt und dann gerechnet.
+fn ccm_mac(k: *mut Key, nonce: u64, nlen: usize, aad: u64, alen: usize,
+    msg: u64, mlen: usize, m: usize, t: u64) {
+    let l: usize = 15 - nlen
+    var x: [u8; 16] = [0 as u8; 16]
+    var b: [u8; 16] = [0 as u8; 16]
+
+    // B0: Kennzeichen, Nonce, Laenge.
+    var flags: u64 = ((m as u64 - 2) / 2) * 8 + (l as u64 - 1)
+    if alen > 0 {
+        flags = flags + 64
+    }
+    b[0] = flags as u8
+    var i: usize = 0
+    while i < nlen {
+        b[1 + i] = ld8(nonce, i)
+        i = i + 1
+    }
+    i = 0
+    while i < l {
+        b[15 - i] = (((mlen as u64) >> (i as u64 * 8)) & 255) as u8
+        i = i + 1
+    }
+    cbc_schritt(k, &x, &b)
+
+    // Die zusaetzlichen Daten, mit vorangestellter Laenge.
+    // RFC 3610 zaehlt drei Faelle; hier ist nur der erste umgesetzt
+    // (0 < a < 2^16 - 2^8), weil 802.11 nie mehr als ein paar Dutzend
+    // Oktette an AAD hat. Groesseres wird nicht falsch gerechnet,
+    // sondern von `ccm_encrypt` abgelehnt.
+    if alen > 0 {
+        i = 0
+        while i < 16 {
+            b[i] = 0 as u8
+            i = i + 1
+        }
+        b[0] = (((alen as u64) >> 8) & 255) as u8
+        b[1] = ((alen as u64) & 255) as u8
+        var im_block: usize = 2
+        var gelesen: usize = 0
+        while gelesen < alen {
+            b[im_block] = ld8(aad, gelesen)
+            im_block = im_block + 1
+            gelesen = gelesen + 1
+            if im_block == 16 {
+                cbc_schritt(k, &x, &b)
+                im_block = 0
+                i = 0
+                while i < 16 {
+                    b[i] = 0 as u8
+                    i = i + 1
+                }
+            }
+        }
+        if im_block > 0 {
+            i = im_block
+            while i < 16 {
+                b[i] = 0 as u8
+                i = i + 1
+            }
+            cbc_schritt(k, &x, &b)
+        }
+    }
+
+    // Die Nachricht, mit Nullen aufgefuellt.
+    if mlen > 0 {
+        var im_block: usize = 0
+        var gelesen: usize = 0
+        i = 0
+        while i < 16 {
+            b[i] = 0 as u8
+            i = i + 1
+        }
+        while gelesen < mlen {
+            b[im_block] = ld8(msg, gelesen)
+            im_block = im_block + 1
+            gelesen = gelesen + 1
+            if im_block == 16 {
+                cbc_schritt(k, &x, &b)
+                im_block = 0
+                i = 0
+                while i < 16 {
+                    b[i] = 0 as u8
+                    i = i + 1
+                }
+            }
+        }
+        if im_block > 0 {
+            i = im_block
+            while i < 16 {
+                b[i] = 0 as u8
+                i = i + 1
+            }
+            cbc_schritt(k, &x, &b)
+        }
+    }
+    var i2: usize = 0
+    while i2 < m {
+        st8(t, i2, x[i2])
+        i2 = i2 + 1
+    }
+}
+
+// Der Zaehlerblock A_i.
+fn ccm_a(nonce: u64, nlen: usize, i: u64, a: *mut [u8; 16]) {
+    let l: usize = 15 - nlen
+    var j: usize = 0
+    while j < 16 {
+        (*a)[j] = 0 as u8
+        j = j + 1
+    }
+    (*a)[0] = (l as u64 - 1) as u8
+    j = 0
+    while j < nlen {
+        (*a)[1 + j] = ld8(nonce, j)
+        j = j + 1
+    }
+    j = 0
+    while j < l {
+        (*a)[15 - j] = ((i >> (j as u64 * 8)) & 255) as u8
+        j = j + 1
+    }
+}
+
+// Zaehlermodus ueber `n` Oktette ab `src` nach `dst`, beginnend bei
+// Block `start`. Fuer S_0 (den Schleier des Pruefwerts) wird `start`
+// auf 0 gesetzt und genau ein Block gebraucht.
+fn ccm_ctr(k: *mut Key, nonce: u64, nlen: usize, start: u64,
+    src: u64, dst: u64, n: usize) {
+    var a: [u8; 16] = [0 as u8; 16]
+    var s: [u8; 16] = [0 as u8; 16]
+    var at: usize = 0
+    var blk: u64 = start
+    while at < n {
+        ccm_a(nonce, nlen, blk, &a)
+        encrypt_block(k, (&a[0]) as u64, (&s[0]) as u64)
+        var i: usize = 0
+        while i < 16 && at + i < n {
+            st8(dst, at + i, ld8(src, at + i) ^ s[i])
+            i = i + 1
+        }
+        at = at + 16
+        blk = blk + 1
+    }
+}
+
+const AAD_MAX: usize = 65280
+
+// Ausgabe: `mlen` Oktette Schluesseltext, dann `m` Oktette Pruefwert.
+fn ccm_encrypt(k: *mut Key, nonce: u64, nlen: usize, aad: u64,
+    alen: usize, msg: u64, mlen: usize, m: usize, out: u64) -> bool {
+    if !(*k).gesetzt {
+        return false
+    }
+    if !ccm_pruefe(nlen, mlen, m) {
+        return false
+    }
+    if alen > AAD_MAX {
+        return false
+    }
+    var t: [u8; 16] = [0 as u8; 16]
+    ccm_mac(k, nonce, nlen, aad, alen, msg, mlen, m, (&t[0]) as u64)
+    // Der Pruefwert wird mit S_0 verschleiert, die Nachricht ab S_1.
+    var s0: [u8; 16] = [0 as u8; 16]
+    var null: [u8; 16] = [0 as u8; 16]
+    ccm_ctr(k, nonce, nlen, 0, (&null[0]) as u64, (&s0[0]) as u64, 16)
+    ccm_ctr(k, nonce, nlen, 1, msg, out, mlen)
+    var i: usize = 0
+    while i < m {
+        st8(out, mlen + i, t[i] ^ s0[i])
+        i = i + 1
+    }
+    return true
+}
+
+// `clen` schliesst den Pruefwert EIN. Ausgabe: `clen - m` Oktette.
+// Rueckgabe false heisst: der Pruefwert stimmt nicht. Dann steht in
+// `out` zwar schon entschluesselter Unsinn -- der Aufrufer darf ihn
+// NICHT benutzen, und `ccmp.fi` tut das auch nicht.
+fn ccm_decrypt(k: *mut Key, nonce: u64, nlen: usize, aad: u64,
+    alen: usize, ct: u64, clen: usize, m: usize, out: u64) -> bool {
+    if !(*k).gesetzt {
+        return false
+    }
+    if clen < m {
+        return false
+    }
+    let mlen: usize = clen - m
+    if !ccm_pruefe(nlen, mlen, m) {
+        return false
+    }
+    if alen > AAD_MAX {
+        return false
+    }
+    ccm_ctr(k, nonce, nlen, 1, ct, out, mlen)
+    var t: [u8; 16] = [0 as u8; 16]
+    ccm_mac(k, nonce, nlen, aad, alen, out, mlen, m, (&t[0]) as u64)
+    var s0: [u8; 16] = [0 as u8; 16]
+    var null: [u8; 16] = [0 as u8; 16]
+    ccm_ctr(k, nonce, nlen, 0, (&null[0]) as u64, (&s0[0]) as u64, 16)
+    // Vergleich OHNE fruehen Ausstieg: die Laufzeit darf nicht sagen,
+    // wieviele Oktette gestimmt haben.
+    var diff: u64 = 0
+    var i: usize = 0
+    while i < m {
+        diff = diff | ((t[i] ^ s0[i] ^ ld8(ct, mlen + i)) as u64)
+        i = i + 1
+    }
+    return diff == 0
+}

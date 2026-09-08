@@ -32,7 +32,7 @@ mkdir -p "$OUT/bin"
 # dieser Runde; es hat nichts mit dem Browser zu tun und wird hier
 # trotzdem behoben, weil es JEDEN Bau dieses Skripts betrifft.
 GUI=${GUI:-"desktop taskbar launcher settings explorer widgetdemo themetest netmon theme taskmgr rechner papierkorb viewer snip lock"}
-CLI=${CLI:-"sh ls cat echo edit cp mv rm mkdir rmdir touch head tail wc grep sort sleep ps kill uname date df install opk ota dhcp host reboot find du chmod id whoami top netview locate tar mount umount env which zip"}
+CLI=${CLI:-"sh ls cat echo edit cp mv rm mkdir rmdir touch head tail wc grep sort sleep ps kill uname date df install opk ota dhcp host reboot find du chmod id whoami top netview locate tar mount umount env which zip wlan"}
 APPS=${APPS:-"fetch"}
 
 bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1 || {
