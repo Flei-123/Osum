@@ -131,7 +131,7 @@ TURM_GRENZE = 8
 # kurzer. Grund: firncs `escape`-Durchgang kostet je Ebene grob das
 # Achtfache (24 Ebenen 0 s, 26 Ebenen 70 s -- gemessen, TIEFE.md).
 # Unter ~20 Ebenen ist er unauffaellig.
-TIEFE_DECKEL = 12
+TIEFE_DECKEL = 20
 
 
 def typname(t):
@@ -359,6 +359,7 @@ class Block:
         # Nur fuer Ebenen eines Turms (siehe turm_erzeugen/TIEFE.md)
         self.turm_marke = None
         self.turm_fall = 0
+        self.turm_schleife = False
 
 
 # ====================================================================
@@ -449,22 +450,30 @@ def _ueberlesen(l, op):
 # Erkannt wird der Turm daran, dass am Stueck (ohne einen anderen
 # Befehl dazwischen) mehr als GRENZE Bloecke geoeffnet werden.
 def turm_messen(code, at):
-    """Wie viele `block` werden ab `at` unmittelbar hintereinander
-    geoeffnet? Gibt (anzahl, position_danach) zurueck."""
+    """Wie viele `block`/`loop` werden ab `at` unmittelbar
+    hintereinander geoeffnet? Gibt (anzahl, position_danach, arten)
+    zurueck; `arten` sagt je Ebene, ob es eine Schleife ist.
+
+    AUCH SCHLEIFEN: SQLite schachtelt block und loop im Wechsel
+    (f878: 30 Ebenen, davon 6 loop). Zaehlte man nur `block`, blieben
+    die Laeufe kurz und der Turm wurde nie flachgelegt. Im Verteiler
+    ist eine Schleifenebene genauso billig: ein `br` dorthin heisst
+    "wieder von vorne", also fall = 0 und weiter -- denn der Rumpf
+    einer solchen Ebene faengt genau dort an, wo Fall 0 anfaengt."""
     l = Leser(code, at)
-    n = 0
+    arten = []
     while l.at < len(code):
         merk = l.at
         op = l.u8()
-        if op != 0x02:
+        if op not in (0x02, 0x03):
             l.at = merk
             break
         bt = l.sleb()
         if bt != -64:            # nur leere Blocktypen sind so einfach
             l.at = merk
             break
-        n += 1
-    return n, l.at
+        arten.append(op == 0x03)
+    return len(arten), l.at, arten
 
 
 # Verlaesst IRGENDEIN Sprung diese Blockebene -- sie selbst oder eine
@@ -656,16 +665,16 @@ class Erzeuger:
             # SCHACHTELBAR: `im_turm` war frueher ein einziger
             # Schalter -- damit blieb JEDER Turm INNERHALB eines Turms
             # ungeflacht. Genau daran hing f564 mit 66 Ebenen.
-            if op == 0x02:
+            if op in (0x02, 0x03):
                 merk = l.at
-                anzahl, danach = turm_messen(code, l.at - 1)
+                anzahl, danach, arten = turm_messen(code, l.at - 1)
                 # Ein Turm wird flachgelegt, wenn er entweder LANG ist
                 # (eine Sprungtabelle) ODER wenn wir ohnehin schon tief
                 # stehen -- denn jede weitere Ebene kostet firnc
                 # exponentiell (TIEFE.md).
                 if anzahl > TURM_GRENZE or (anzahl >= 3 and tiefe >= TIEFE_DECKEL):
                     sp = self.turm_erzeugen(l, code, anzahl, danach, sp,
-                                            stapel, tiefe)
+                                            stapel, tiefe, arten)
                     tiefe += 1
                     continue
                 l.at = merk
@@ -972,7 +981,8 @@ class Erzeuger:
         if ziel.art == 'turm':
             # Sprung in einen Fall des Verteilers: Nummer setzen und
             # die Verteilerschleife neu durchlaufen.
-            E('fall%d = %d' % (ziel.turm_marke, ziel.turm_fall))
+            E('fall%d = %d' % (ziel.turm_marke,
+                               0 if ziel.turm_schleife else ziel.turm_fall))
             E('continue')
         elif ziel.art == 'func':
             if self.res:
@@ -1222,7 +1232,7 @@ class Erzeuger:
     #     }
     #
     # Der Kontrollfluss ist derselbe, die Tiefe ist 1 statt n.
-    def turm_erzeugen(self, l, code, anzahl, danach, sp, stapel, tiefe):
+    def turm_erzeugen(self, l, code, anzahl, danach, sp, stapel, tiefe, arten=None):
         self.br_benutzt = True
         self.im_turm = True
         self.turm_faelle = anzahl
@@ -1245,6 +1255,8 @@ class Erzeuger:
             b.schleife = False
             b.turm_marke = marke
             b.turm_fall = anzahl - k        # br k -> fall = anzahl-k
+            # Schleifenebene: `br` dorthin heisst "von vorne" -> Fall 0.
+            b.turm_schleife = bool(arten[k]) if arten else False
             stapel.append(b)
         l.at = danach
         return sp
