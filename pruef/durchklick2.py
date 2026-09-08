@@ -82,7 +82,13 @@ def start_qemu():
     t0 = time.time()
     bis = t0 + 120
     while time.time() < bis:
-        if "taskbar: STEHT" in s():
+        # NICHT auf "taskbar: STEHT" warten: die Zeile kommt genau
+        # EINMAL und kann im Gedraenge auf der Leitung zerrissen werden
+        # (gemessen: in einem Lauf 0 Treffer, obwohl die Leiste stand).
+        # "taskbar: start x=" schreibt sie bei JEDEM Anstrich neu --
+        # was einmal vorkommt, ist eine Hoffnung; was 120-mal vorkommt,
+        # ist eine Messung.
+        if "taskbar: start x=" in s():
             return time.time() - t0
         time.sleep(0.3)
     return None
@@ -125,12 +131,7 @@ def main():
     # Danach ist kein Eintrag mehr sicher zu lesen. Der Dienst ist nach
     # `resolv.conf geschrieben` fertig; wer bis dahin wartet, misst den
     # Starter und nicht das Gedraenge auf der Leitung.
-    bis = time.time() + 25
-    while time.time() < bis:
-        if "resolv.conf geschrieben" in s():
-            time.sleep(1.5)
-            break
-        time.sleep(0.4)
+    time.sleep(2.0)
 
     b_desk = foto(m, "01-schreibtisch")
     txt = s()
@@ -179,14 +180,22 @@ def main():
           "Bildpunkte geaendert: %s %%" % d_menue)
 
     txt = s()
-    ip = re.search(r"dhcp: ack ip=(\S+)", txt)
-    merke("2.6", "Netzanzeige / DHCP", "GEHT" if ip else "GEHT NICHT",
-          ip.group(0) if ip else "-")
+    # 2.6 wird in einem EIGENEN Lauf gemessen (netz.py): mit DHCP im
+    # Hauptlauf ist keine Zeile des Starters mehr sicher zu lesen.
+    merke("2.6", "Netzanzeige / DHCP", "EIGENER LAUF",
+          "siehe laeufe/netz -- hier aus, weil der Dienst in die "
+          "Zeilen des Starters schreibt")
     merke("2.7", "Uhr mit Datum", "GEHT" if uhr2 else "GEHT NICHT",
           uhr2[-1] if uhr2 else "-")
 
     # ============================================ 3. Die Anwendungen
-    eintraege = lesen.apps(txt)
+    # NUR DIE LETZTE LISTUNG AUSWERTEN. Die erste faellt mit dem
+    # DHCP-Dienst zusammen, der in dieselben Zeilen schreibt; jede
+    # spaetere ist ungestoert. Der Starter listet bei jedem Aufmachen
+    # neu, also gibt es immer eine spaetere.
+    bloecke = [mm.start() for mm in re.finditer(r"launcher: suche ", txt)]
+    letzter = txt[bloecke[-1]:] if bloecke else txt
+    eintraege = lesen.apps(letzter)
     tr, ap = lesen.app_zahl(txt)
     merke("3.1", "Startmenue listet Apps",
           "GEHT" if ap >= 6 else ("TEILWEISE" if ap >= 5 else "GEHT NICHT"),

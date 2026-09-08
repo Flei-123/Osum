@@ -117,9 +117,21 @@ def app_zahl(s):
 
 
 def fenster(s):
-    """Jede gemeldete Fensterlage `id=<n> x=.. y=.. w=.. h=..`."""
+    """Jede vom FENSTERSERVER gemeldete Fensterlage.
+
+    ACHTUNG, hier lag ein Fehler: gesucht wurde nach `id=<n> x=..`, und
+    das trifft AUCH die Knopfliste der Leiste --
+
+        wm: fen     i=0 id=7 x=24 y=40 w=560 h=380   das Fenster
+        taskbar: btn i=0 id=7 x=42 y=7  w=34  h=26   sein Knopf
+
+    Beide sagen `id=7` und meinen etwas anderes. Wer sie mischt, misst
+    ein 560x380 grosses Fenster, das ploetzlich 34x26 ist, und nennt
+    das "Groesse aendern geht nicht". Also nur `wm: fen`.
+    """
     aus = {}
-    for m in re.finditer(r"\bid=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)", s):
+    for m in re.finditer(
+            r"wm: fen i=\d+ id=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)", s):
         i = int(m.group(1))
         aus.setdefault(i, set()).add(tuple(int(m.group(k)) for k in (2, 3, 4, 5)))
     return aus
