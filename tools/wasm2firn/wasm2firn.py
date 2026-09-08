@@ -1249,6 +1249,13 @@ def erzeugen(m, wasi_txt, laufzeit_txt, name):
     o.append('static mut wasi_spur: bool = false')
     o.append('')
     o.append('// `unreachable` ist in WASM eine FALLE, kein stiller Ausgang.')
+    o.append('fn zahl_aus2(x: u64) {')
+    o.append('    var b: rt.Buf = rt.buf_new()')
+    o.append('    rt.buf_push_dec_u64(&b, x)')
+    o.append('    rt.write_everything(1, b.ptr, b.len)')
+    o.append('    rt.buf_free(&b)')
+    o.append('}')
+    o.append('')
     o.append('fn wasm_unreachable() {')
     o.append('    io.print("wasm: unreachable erreicht\\n")')
     o.append('    rt.finish(132)')
@@ -1293,7 +1300,17 @@ def erzeugen(m, wasi_txt, laufzeit_txt, name):
                 o.append('    rt.finish(a0 as i64)')
                 o.append('}')
             elif res:
-                o.append('    return %s' % ruf)
+                # SPUR: mit gesetztem wasi_spur nennt jeder abschlaegige
+                # Ruf sich selbst -- derselbe Dienst, den `wasm -s` im
+                # Deuter leistet. Ohne das sucht man bei einem Modul mit
+                # zwanzig Importen im Dunkeln.
+                o.append('    let r: u64 = %s' % ruf)
+                o.append('    if wasi_spur && r != 0 {')
+                o.append('        io.print("wasi: %s -> errno=")' % nam)
+                o.append('        zahl_aus2(r)')
+                o.append('        io.print("\\n")')
+                o.append('    }')
+                o.append('    return r')
                 o.append('}')
             else:
                 o.append('    %s' % ruf)
@@ -1456,7 +1473,23 @@ def start_erzeugen(m, name):
     o.append('fn main(start: u64) -> i32 {')
     o.append('    wasi_start = start')
     o.append('    wasi_argc = rt.arg_count(start)')
+    # DIE ARGUMENTE. Anders als beim Deuter ist das erzeugte Programm
+    # SELBST das Modul -- argv[0] ist also schon der Modulpfad, und die
+    # Argumente fangen bei 0 an. (Im Deuter musste `argv_von` erst auf
+    # den Modulpfad gesetzt werden, weil davor noch `wasm` und `-s`
+    # standen; siehe Fallstrick 7 in STATUS-SCHLEUSE.)
     o.append('    wasi_argv_von = 0')
+    o.append('    // WASMSPUR=1 in der Umgebung gibt es hier nicht --')
+    o.append('    // die Spur haengt an einem eigenen Schalter, der dem')
+    o.append('    // Gast NICHT als Argument untergeschoben wird.')
+    o.append('    if wasi_argc > 1 {')
+    o.append('        let a1: u64 = rt.arg_ptr(start, wasi_argc - 1)')
+    o.append('        if rt.c_length(a1) == 7 && rt.ld8(a1, 0) == 45 as u8')
+    o.append('            && rt.ld8(a1, 1) == 45 as u8 {')
+    o.append('            wasi_spur = true')
+    o.append('            wasi_argc = wasi_argc - 1')
+    o.append('        }')
+    o.append('    }')
     o.append('    // Der lineare Speicher: gleich auf die Hoechstgroesse,')
     o.append('    // damit memory.grow nur eine Grenze vorrueckt.')
     o.append('    mem_max = %d' % (m.mem_max if m.mem_max else max(m.mem_min * 4, m.mem_min + 256)))
