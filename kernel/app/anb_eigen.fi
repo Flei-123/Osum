@@ -1,0 +1,653 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/app/anb_eigen.fi -- RUNDE KONTO: der eigene Ort.
+//
+// ============================================ WOZU DIESER RUECKEN DA IST
+//
+// Er ist der BEWEIS und die RUECKFALLEBENE. Der Beweis, weil eine
+// Schnittstelle mit zwei Ruecken, die beide "ein Server mit einer
+// JSON-API" sind, noch nichts belegt -- erst der dritte, der ANDERS
+// gebaut ist, zeigt, ob sie wirklich austauschbar ist. Und die
+// Rueckfallebene, weil beide anderen Anbieter Firmen sind, und Firmen
+// gehen weg.
+//
+// ZWEI VERKEHRSFORMEN, EIN RUECKEN:
+//
+//   https://<zahl>[:port]   ein eigener Server (NAS, Wurzelserver) mit
+//                           dem unten beschriebenen kleinen Protokoll.
+//   datei:///pfad           EIN ORDNER. Ein Stick, eine eingehaengte
+//                           Freigabe, ein Verzeichnis auf der Platte.
+//                           OHNE NETZ. Das ist die Form, die auch dann
+//                           noch geht, wenn gar nichts mehr geht.
+//
+// Beides ist EIN Ruecken und nicht zwei, weil beides derselbe ANBIETER
+// ist: der Nutzer selbst. Was sich unterscheidet, ist der Transport --
+// und der ist die Sache eines Ruecken.
+//
+// =================================================== DAS PROTOKOLL (HTTPS)
+//
+//   POST <ziel>/konto/anmelden
+//        { "kennung": ..., "geheim": ..., "code": ..., "bereich": ... }
+//     -> 200 { "subjekt", "anzeige", "zugriff", "erneuerung",
+//              "ablauf", "datenort" }
+//     -> 401 { "fehler": ... }
+//     -> 202 { "zweitfaktor": true, "zwischen": ... }
+//     -> 409 { "bereiche": [ ... ] }
+//   POST <ziel>/konto/erneuern  { "erneuerung": ... }
+//   POST <ziel>/konto/abmelden  (Bearer)
+//   GET  <ziel>/konto/pruefen   (Bearer)
+//
+// Die Feldnamen sind DEUTSCH, weil das Protokoll uns gehoert. Bei
+// fremden APIs bleiben deren Namen deren Namen -- das ist dieselbe
+// Regel wie bei Pfaden in docs/I18N.md.
+//
+// ===================================================== DER ORDNER (DATEI)
+//
+//   <ordner>/konten/<kennung>       der Nachweis, wie ihn PLAN-FORMAT.md
+//                                   fuer `account` verlangt: NIE das
+//                                   Merkmal, nur eine Ableitung davon.
+//        eigen1
+//        kennung   <anmeldename>
+//        salz      <32 Hexziffern>
+//        runden    <n>
+//        nachweis  <64 Hexziffern>   PBKDF2-HMAC-SHA256(geheim, salz, n)
+//        subjekt   <stabile Kennung>
+//        anzeige   <Anzeigename>
+//   <ordner>/sitzungen/<tokenhex>   ablauf + subjekt
+//
+// EHRLICH, UND ES IST DIE WICHTIGSTE ZEILE DIESER DATEI: wer den ORDNER
+// hat, hat den Nachweis und kann offline raten. Dagegen hilft nur die
+// Rundenzahl -- 8192, dieselbe wie in `kernel/user/pw.fi`, aus der
+// Messung von Runde MULTIUSER (0,27 s je Pruefung auf echter CPU). Ein
+// Ordner auf einem Stick ist damit so sicher wie das Passwort darin,
+// und nicht sicherer. Wer mehr will, nimmt einen Server.
+
+import std.rt
+import std.io
+import std.str
+import std.crypto.hmac
+import std.crypto.sha256
+import std.crypto.random
+import knetz
+import kjson
+import anbieter
+import ksiegel
+
+export { ruecken }
+
+const RUNDEN: u64 = 8192
+
+static mut p_an: [u8; 17] = "/konto/anmelden\0\0"
+static mut p_er: [u8; 17] = "/konto/erneuern\0\0"
+static mut p_ab: [u8; 17] = "/konto/abmelden\0\0"
+static mut p_pr: [u8; 16] = "/konto/pruefen\0\0"
+
+static mut m_post: [u8; 5] = "POST\0"
+static mut m_get: [u8; 4] = "GET\0"
+
+static mut f_kennung: [u8; 8] = "kennung\0"
+static mut f_geheim: [u8; 7] = "geheim\0"
+static mut f_code: [u8; 5] = "code\0"
+static mut f_bereich: [u8; 8] = "bereich\0"
+static mut f_subjekt: [u8; 8] = "subjekt\0"
+static mut f_anzeige: [u8; 8] = "anzeige\0"
+static mut f_zugriff: [u8; 8] = "zugriff\0"
+static mut f_erneuerung: [u8; 11] = "erneuerung\0"
+static mut f_ablauf: [u8; 7] = "ablauf\0"
+static mut f_datenort: [u8; 9] = "datenort\0"
+static mut f_zweit: [u8; 12] = "zweitfaktor\0"
+static mut f_zwischen: [u8; 9] = "zwischen\0"
+static mut f_bereiche: [u8; 9] = "bereiche\0"
+
+static mut h_form: [u8; 20] = "konto.hint.badjson\0\0"
+static mut h_ordner: [u8; 22] = "konto.hint.no_folder\0\0"
+static mut h_status: [u8; 21] = "konto.hint.badstatus\0"
+
+static mut nm: [u8; 6] = "eigen\0"
+
+fn ruecken() -> anbieter.Ruecken {
+    return anbieter.Ruecken { name: (&nm[0]) as u64, anmelden: anmelden,
+        erneuern: erneuern, abmelden: abmelden, pruefen: pruefen }
+}
+
+fn fehl_bool(b: *mut bool) -> bool {
+    *b = true
+    return false
+}
+
+fn hinweis(s: *mut anbieter.Sitzung, k: u64) {
+    rt.buf_clear(&(*s).hinweis)
+    rt.buf_push_bytes(&(*s).hinweis, k, rt.c_length(k))
+}
+
+fn ist_ordner(ziel: u64) -> bool {
+    var p: [u8; 9] = "datei://\0"
+    var i: usize = 0
+    while i < 8 {
+        if rt.ld8(ziel, i) != rt.ld8((&p[0]) as u64, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn jetzt() -> u64 {
+    var ts: [i64; 2] = [0; 2]
+    syscall(228, 0, (&ts[0]) as i64, 0, 0, 0, 0)
+    return ts[0] as u64
+}
+
+// ----------------------------------------------------------- PBKDF2
+//
+// Ein Block, 32 Oktette, HMAC-SHA256. RFC 8018 in seiner kleinsten
+// ehrlichen Form -- und sie ist vollstaendig, weil ein Block genau die
+// 32 Oktette liefert, die gebraucht werden.
+fn pbkdf2(pw: u64, pwl: usize, salz: u64, sl: usize, runden: u64,
+    aus: u64) {
+    var msg: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&msg, salz, sl)
+    rt.buf_push(&msg, 0 as u8)
+    rt.buf_push(&msg, 0 as u8)
+    rt.buf_push(&msg, 0 as u8)
+    rt.buf_push(&msg, 1 as u8)
+    var u: [u8; 32] = [0; 32]
+    var t: [u8; 32] = [0; 32]
+    hmac.hmac_sha256(pw, pwl, msg.ptr, msg.len, (&u[0]) as u64)
+    var i: usize = 0
+    while i < 32 {
+        t[i] = u[i]
+        i = i + 1
+    }
+    var r: u64 = 1
+    while r < runden {
+        hmac.hmac_sha256(pw, pwl, (&u[0]) as u64, 32, (&u[0]) as u64)
+        var k: usize = 0
+        while k < 32 {
+            t[k] = t[k] ^ u[k]
+            k = k + 1
+        }
+        r = r + 1
+    }
+    rt.mem_copy(aus, (&t[0]) as u64, 32)
+    rt.buf_free(&msg)
+}
+
+fn hex_an(aus: *mut rt.Buf, p: u64, n: usize) {
+    var i: usize = 0
+    while i < n {
+        rt.buf_push_hex_u64(aus, rt.ld8(p, i) as u64, 2)
+        i = i + 1
+    }
+}
+
+fn hex_wert(c: u8) -> i32 {
+    if c >= 48 as u8 && c <= 57 as u8 { return (c - 48 as u8) as i32 }
+    if c >= 97 as u8 && c <= 102 as u8 { return (c - 87 as u8) as i32 }
+    if c >= 65 as u8 && c <= 70 as u8 { return (c - 55 as u8) as i32 }
+    return -1
+}
+
+fn hex_lesen(p: u64, n: usize, aus: u64, max: usize) -> usize {
+    var i: usize = 0
+    var k: usize = 0
+    while i + 1 < n && k < max {
+        let a: i32 = hex_wert(rt.ld8(p, i))
+        let b: i32 = hex_wert(rt.ld8(p, i + 1))
+        if a < 0 || b < 0 {
+            return k
+        }
+        rt.st8(aus, k, ((a * 16 + b) as u32) as u8)
+        k = k + 1
+        i = i + 2
+    }
+    return k
+}
+
+// ------------------------------------------------- der Ordner als Server
+
+fn pfad_bauen(ziel: u64, teil: u64, tl: usize, name: u64, nl: usize,
+    aus: *mut rt.Buf) {
+    let zl: usize = rt.c_length(ziel)
+    rt.buf_push_bytes(aus, ziel + 8, zl - 8)
+    rt.buf_push_bytes(aus, teil, tl)
+    if nl > 0 {
+        rt.buf_push_bytes(aus, name, nl)
+    }
+    rt.buf_push(aus, 0 as u8)
+}
+
+fn zeile_wert(b: *mut rt.Buf, name: u64, nn: usize,
+    aus: *mut rt.Buf) -> bool {
+    var i: usize = 0
+    while i < (*b).len {
+        var e: usize = i
+        while e < (*b).len && rt.ld8((*b).ptr, e) != 10 as u8 {
+            e = e + 1
+        }
+        if e - i > nn && rt.ld8((*b).ptr, i + nn) == 9 as u8 {
+            if rt.mem_eq((*b).ptr + i as u64, name, nn) {
+                rt.buf_push_bytes(aus, (*b).ptr + (i + nn + 1) as u64,
+                    e - i - nn - 1)
+                return true
+            }
+        }
+        i = e + 1
+    }
+    return false
+}
+
+fn zu_zahl(p: u64, n: usize) -> u64 {
+    var v: u64 = 0
+    var i: usize = 0
+    while i < n {
+        let c: u8 = rt.ld8(p, i)
+        if c < 48 as u8 || c > 57 as u8 {
+            return v
+        }
+        v = v * 10 + (c - 48 as u8) as u64
+        i = i + 1
+    }
+    return v
+}
+
+fn ordner_anmelden(z: *mut anbieter.Zugang,
+    s: *mut anbieter.Sitzung) -> u32 {
+    var t_k: [u8; 9] = "/konten/\0"
+    var pf: rt.Buf = rt.buf_new()
+    pfad_bauen((*z).ziel, (&t_k[0]) as u64, 8, (*z).kennung,
+        rt.c_length((*z).kennung), &pf)
+    var b: rt.Buf = rt.buf_new()
+    if !rt.read_file(pf.ptr, &b) {
+        rt.buf_free(&pf)
+        rt.buf_free(&b)
+        // KEINE AUSKUNFT DARUEBER, OB ES DAS KONTO GIBT. Ein Ordner, der
+        // "kenne ich nicht" sagt, ist ein Verzeichnis aller Konten.
+        (*s).stand = anbieter.S_FALSCH
+        return (*s).stand
+    }
+    var n_salz: [u8; 5] = "salz\0"
+    var n_run: [u8; 7] = "runden\0"
+    var n_pr: [u8; 9] = "nachweis\0"
+    var n_sub: [u8; 8] = "subjekt\0"
+    var n_anz: [u8; 8] = "anzeige\0"
+    var salzhex: rt.Buf = rt.buf_new()
+    var runhex: rt.Buf = rt.buf_new()
+    var pruefhex: rt.Buf = rt.buf_new()
+    let hat_s: bool = zeile_wert(&b, (&n_salz[0]) as u64, 4, &salzhex)
+    let hat_p: bool = zeile_wert(&b, (&n_pr[0]) as u64, 8, &pruefhex)
+    let _r: bool = zeile_wert(&b, (&n_run[0]) as u64, 6, &runhex)
+    var runden: u64 = RUNDEN
+    if runhex.len > 0 {
+        runden = zu_zahl(runhex.ptr, runhex.len)
+        if runden == 0 {
+            runden = RUNDEN
+        }
+    }
+    if !hat_s || !hat_p {
+        rt.buf_free(&pf)
+        rt.buf_free(&b)
+        rt.buf_free(&salzhex)
+        rt.buf_free(&runhex)
+        rt.buf_free(&pruefhex)
+        (*s).stand = anbieter.S_FEHLER
+        hinweis(s, (&h_form[0]) as u64)
+        return (*s).stand
+    }
+    var salz: [u8; 32] = [0; 32]
+    let sl: usize = hex_lesen(salzhex.ptr, salzhex.len,
+        (&salz[0]) as u64, 32)
+    var soll: [u8; 32] = [0; 32]
+    let _pl: usize = hex_lesen(pruefhex.ptr, pruefhex.len,
+        (&soll[0]) as u64, 32)
+    var ist: [u8; 32] = [0; 32]
+    pbkdf2((*z).geheim, rt.c_length((*z).geheim), (&salz[0]) as u64, sl,
+        runden, (&ist[0]) as u64)
+    let passt: bool = hmac.hmac_equal((&ist[0]) as u64, (&soll[0]) as u64,
+        32)
+    rt.buf_free(&salzhex)
+    rt.buf_free(&runhex)
+    rt.buf_free(&pruefhex)
+    if !passt {
+        rt.buf_free(&pf)
+        rt.buf_free(&b)
+        (*s).stand = anbieter.S_FALSCH
+        return (*s).stand
+    }
+    if !zeile_wert(&b, (&n_sub[0]) as u64, 7, &(*s).subjekt) {
+        rt.buf_push_bytes(&(*s).subjekt, (*z).kennung,
+            rt.c_length((*z).kennung))
+    }
+    if !zeile_wert(&b, (&n_anz[0]) as u64, 7, &(*s).anzeige) {
+        rt.buf_push_bytes(&(*s).anzeige, (*s).subjekt.ptr,
+            (*s).subjekt.len)
+    }
+    // Ein Token, das nur dieser Ordner kennt: 32 Zufallsoktette, in
+    // Hexziffern, und daneben eine Datei mit dem Ablauf.
+    var roh: [u8; 32] = [0; 32]
+    if !random.random_bytes((&roh[0]) as u64, 32) {
+        rt.buf_free(&pf)
+        rt.buf_free(&b)
+        (*s).stand = anbieter.S_FEHLER
+        return (*s).stand
+    }
+    hex_an(&(*s).zugriff, (&roh[0]) as u64, 32)
+    let ab: u64 = jetzt() + 604800
+    (*s).ablauf = ab
+    if !sitzung_ablegen(z, &(*s).zugriff, (*s).subjekt.ptr,
+        (*s).subjekt.len, ab) {
+        rt.buf_free(&pf)
+        rt.buf_free(&b)
+        anbieter.sitzung_leeren(s)
+        (*s).stand = anbieter.S_FEHLER
+        hinweis(s, (&h_ordner[0]) as u64)
+        return (*s).stand
+    }
+    rt.buf_push_bytes(&(*s).datenort, (*z).ziel, rt.c_length((*z).ziel))
+    rt.buf_free(&pf)
+    rt.buf_free(&b)
+    (*s).stand = anbieter.S_OK
+    return (*s).stand
+}
+
+fn sitzung_ablegen(z: *mut anbieter.Zugang, tok: *mut rt.Buf,
+    subjekt: u64, sl: usize, ablauf: u64) -> bool {
+    var t_s: [u8; 12] = "/sitzungen/\0"
+    var t_leer: [u8; 11] = "/sitzungen\0"
+    var d: rt.Buf = rt.buf_new()
+    pfad_bauen((*z).ziel, (&t_leer[0]) as u64, 10, 0, 0, &d)
+    let _v: bool = ksiegel.verzeichnis(d.ptr)
+    rt.buf_free(&d)
+    var pf: rt.Buf = rt.buf_new()
+    pfad_bauen((*z).ziel, (&t_s[0]) as u64, 11, (*tok).ptr, (*tok).len,
+        &pf)
+    var inhalt: rt.Buf = rt.buf_new()
+    var n_ab: [u8; 7] = "ablauf\0"
+    var n_sub: [u8; 8] = "subjekt\0"
+    rt.buf_push_bytes(&inhalt, (&n_ab[0]) as u64, 6)
+    rt.buf_push(&inhalt, 9 as u8)
+    rt.buf_push_dec_u64(&inhalt, ablauf)
+    rt.buf_push(&inhalt, 10 as u8)
+    rt.buf_push_bytes(&inhalt, (&n_sub[0]) as u64, 7)
+    rt.buf_push(&inhalt, 9 as u8)
+    rt.buf_push_bytes(&inhalt, subjekt, sl)
+    rt.buf_push(&inhalt, 10 as u8)
+    let ok: bool = ksiegel.datei_schreiben_0600(pf.ptr, inhalt.ptr,
+        inhalt.len)
+    rt.buf_free(&pf)
+    rt.buf_free(&inhalt)
+    return ok
+}
+
+fn ordner_pruefen(z: *mut anbieter.Zugang,
+    s: *mut anbieter.Sitzung) -> u32 {
+    var t_s: [u8; 12] = "/sitzungen/\0"
+    var pf: rt.Buf = rt.buf_new()
+    pfad_bauen((*z).ziel, (&t_s[0]) as u64, 11, (*z).zugriff,
+        rt.c_length((*z).zugriff), &pf)
+    var b: rt.Buf = rt.buf_new()
+    if !rt.read_file(pf.ptr, &b) {
+        rt.buf_free(&pf)
+        rt.buf_free(&b)
+        (*s).stand = anbieter.S_ABGELAUFEN
+        return (*s).stand
+    }
+    var n_ab: [u8; 7] = "ablauf\0"
+    var w: rt.Buf = rt.buf_new()
+    var stand: u32 = anbieter.S_OK
+    if zeile_wert(&b, (&n_ab[0]) as u64, 6, &w) {
+        if zu_zahl(w.ptr, w.len) < jetzt() {
+            stand = anbieter.S_ABGELAUFEN
+        }
+    }
+    rt.buf_free(&w)
+    rt.buf_free(&pf)
+    rt.buf_free(&b)
+    (*s).stand = stand
+    return stand
+}
+
+fn ordner_abmelden(z: *mut anbieter.Zugang,
+    s: *mut anbieter.Sitzung) -> u32 {
+    var t_s: [u8; 12] = "/sitzungen/\0"
+    var pf: rt.Buf = rt.buf_new()
+    pfad_bauen((*z).ziel, (&t_s[0]) as u64, 11, (*z).zugriff,
+        rt.c_length((*z).zugriff), &pf)
+    let _l: bool = ksiegel.sicher_loeschen(pf.ptr)
+    rt.buf_free(&pf)
+    (*s).stand = anbieter.S_OK
+    return (*s).stand
+}
+
+// ------------------------------------------------------ ueber das Netz
+
+fn ziel_aus(z: *mut anbieter.Zugang, zl: *mut knetz.Ziel) -> bool {
+    return knetz.ziel_lesen((*z).ziel, rt.c_length((*z).ziel),
+        (*z).zielname, (*z).wurzeln, zl)
+}
+
+fn netz_stand(a: *mut knetz.Antw) -> u32 {
+    if (*a).fehler == knetz.F_TLS {
+        return anbieter.S_TLS
+    }
+    if (*a).fehler == knetz.F_KEINNETZ || (*a).fehler == knetz.F_LESEN {
+        return anbieter.S_KEINNETZ
+    }
+    return anbieter.S_FEHLER
+}
+
+fn netz_anmelden(z: *mut anbieter.Zugang,
+    s: *mut anbieter.Sitzung) -> u32 {
+    var zl: knetz.Ziel = knetz.ziel_neu()
+    if !ziel_aus(z, &zl) {
+        (*s).stand = anbieter.S_FEHLER
+        hinweis(s, (&h_status[0]) as u64)
+        return (*s).stand
+    }
+    var koerper: rt.Buf = rt.buf_new()
+    var w: kjson.Schreiber = kjson.schreiber_neu(&koerper)
+    kjson.feld(&w, (&f_kennung[0]) as u64, (*z).kennung,
+        rt.c_length((*z).kennung))
+    kjson.feld(&w, (&f_geheim[0]) as u64, (*z).geheim,
+        rt.c_length((*z).geheim))
+    if (*z).code != 0 && rt.c_length((*z).code) > 0 {
+        kjson.feld(&w, (&f_code[0]) as u64, (*z).code,
+            rt.c_length((*z).code))
+    }
+    if (*z).bereich != 0 && rt.c_length((*z).bereich) > 0 {
+        kjson.feld(&w, (&f_bereich[0]) as u64, (*z).bereich,
+            rt.c_length((*z).bereich))
+    }
+    kjson.feld_frei(&w)
+    var a: knetz.Antw = knetz.antw_neu()
+    let da: bool = knetz.sende(&zl, (&m_post[0]) as u64, 4,
+        (&p_an[0]) as u64, 15, koerper.ptr, koerper.len, 0, 0, 0, 0, &a)
+    rt.mem_set(koerper.ptr, 0 as u8, koerper.len)
+    rt.buf_free(&koerper)
+    if !da {
+        (*s).stand = netz_stand(&a)
+        knetz.antw_frei(&a)
+        return (*s).stand
+    }
+    let r: u32 = netz_lesen(z, s, &a)
+    knetz.antw_frei(&a)
+    return r
+}
+
+fn netz_lesen(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung,
+    a: *mut knetz.Antw) -> u32 {
+    if (*a).code == 429 as u32 {
+        (*s).stand = anbieter.S_GEBREMST
+        return (*s).stand
+    }
+    var d: kjson.Json = kjson.json_new()
+    var kaputt: bool = false
+    if !kjson.json_parse(&d, (*a).koerper.ptr, (*a).koerper.len) {
+        kaputt = true
+    }
+    if kaputt || !kjson.json_valid(&d) {
+        kjson.json_free(&d)
+        if (*a).code == 401 as u32 {
+            (*s).stand = anbieter.S_FALSCH
+        } else {
+            (*s).stand = anbieter.S_FEHLER
+            hinweis(s, (&h_form[0]) as u64)
+        }
+        return (*s).stand
+    }
+    let w: u32 = kjson.json_root(&d)
+    if kjson.hat(&d, w, (&f_bereiche[0]) as u64) {
+        let arr: u32 = kjson.json_get_c(&d, w, (&f_bereiche[0]) as u64)
+        if kjson.json_kind(&d, arr) == kjson.JSON_ARRAY
+            && kjson.json_count(&d, arr) > 1 {
+            var kind: u32 = kjson.json_child(&d, arr)
+            while kind != kjson.JSON_NONE {
+                if kjson.json_kind(&d, kind) == kjson.JSON_STRING {
+                    let sp: str.Span = kjson.json_string(&d, kind)
+                    rt.buf_push_bytes(&(*s).auswahl, sp.p as u64, sp.n)
+                    rt.buf_push(&(*s).auswahl, 10 as u8)
+                }
+                kind = kjson.json_next(&d, kind)
+            }
+            kjson.json_free(&d)
+            (*s).stand = anbieter.S_MEHRDEUTIG
+            return (*s).stand
+        }
+    }
+    if kjson.wahr(&d, w, (&f_zweit[0]) as u64) {
+        if kjson.text(&d, w, (&f_zwischen[0]) as u64, &(*s).temp) {
+            kjson.json_free(&d)
+            (*s).stand = anbieter.S_ZWEITFAKTOR
+            return (*s).stand
+        }
+    }
+    if (*a).code == 401 as u32 {
+        kjson.json_free(&d)
+        (*s).stand = anbieter.S_FALSCH
+        return (*s).stand
+    }
+    if (*a).code != 200 as u32 {
+        kjson.json_free(&d)
+        (*s).stand = anbieter.S_FEHLER
+        hinweis(s, (&h_status[0]) as u64)
+        return (*s).stand
+    }
+    if !kjson.text(&d, w, (&f_zugriff[0]) as u64, &(*s).zugriff) {
+        kjson.json_free(&d)
+        (*s).stand = anbieter.S_FEHLER
+        hinweis(s, (&h_form[0]) as u64)
+        return (*s).stand
+    }
+    let _e: bool = kjson.text(&d, w, (&f_erneuerung[0]) as u64,
+        &(*s).erneuerung)
+    let _s: bool = kjson.text(&d, w, (&f_subjekt[0]) as u64, &(*s).subjekt)
+    let _n: bool = kjson.text(&d, w, (&f_anzeige[0]) as u64, &(*s).anzeige)
+    let _b: bool = kjson.text(&d, w, (&f_bereich[0]) as u64, &(*s).bereich)
+    if !kjson.text(&d, w, (&f_datenort[0]) as u64, &(*s).datenort) {
+        rt.buf_push_bytes(&(*s).datenort, (*z).ziel,
+            rt.c_length((*z).ziel))
+    }
+    var da: bool = false
+    let ab: i64 = kjson.ganz(&d, w, (&f_ablauf[0]) as u64, &da)
+    if da && ab > 0 {
+        (*s).ablauf = ab as u64
+    }
+    kjson.json_free(&d)
+    (*s).stand = anbieter.S_OK
+    return (*s).stand
+}
+
+// ------------------------------------------------------- die vier Wege
+
+fn anmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
+    anbieter.sitzung_leeren(s)
+    if ist_ordner((*z).ziel) {
+        return ordner_anmelden(z, s)
+    }
+    return netz_anmelden(z, s)
+}
+
+fn erneuern(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
+    if ist_ordner((*z).ziel) {
+        // Ein Ordner hat keine Erneuerung: die Sitzung liegt dort und
+        // gilt, bis ihr Ablauf da ist. Danach: neu anmelden.
+        return ordner_pruefen(z, s)
+    }
+    var zl: knetz.Ziel = knetz.ziel_neu()
+    if !ziel_aus(z, &zl) {
+        (*s).stand = anbieter.S_FEHLER
+        return (*s).stand
+    }
+    var koerper: rt.Buf = rt.buf_new()
+    var w: kjson.Schreiber = kjson.schreiber_neu(&koerper)
+    kjson.feld(&w, (&f_erneuerung[0]) as u64, (*z).erneuerung,
+        rt.c_length((*z).erneuerung))
+    kjson.feld_frei(&w)
+    var a: knetz.Antw = knetz.antw_neu()
+    let da: bool = knetz.sende(&zl, (&m_post[0]) as u64, 4,
+        (&p_er[0]) as u64, 15, koerper.ptr, koerper.len, 0, 0, 0, 0, &a)
+    rt.mem_set(koerper.ptr, 0 as u8, koerper.len)
+    rt.buf_free(&koerper)
+    if !da {
+        (*s).stand = netz_stand(&a)
+        knetz.antw_frei(&a)
+        return (*s).stand
+    }
+    if a.code != 200 as u32 {
+        knetz.antw_frei(&a)
+        (*s).stand = anbieter.S_ABGELAUFEN
+        return (*s).stand
+    }
+    let r: u32 = netz_lesen(z, s, &a)
+    knetz.antw_frei(&a)
+    return r
+}
+
+fn abmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
+    if ist_ordner((*z).ziel) {
+        return ordner_abmelden(z, s)
+    }
+    var zl: knetz.Ziel = knetz.ziel_neu()
+    if !ziel_aus(z, &zl) {
+        (*s).stand = anbieter.S_FEHLER
+        return (*s).stand
+    }
+    var a: knetz.Antw = knetz.antw_neu()
+    let da: bool = knetz.sende(&zl, (&m_post[0]) as u64, 4,
+        (&p_ab[0]) as u64, 15, 0, 0, (*z).zugriff,
+        rt.c_length((*z).zugriff), 0, 0, &a)
+    var stand: u32 = anbieter.S_OK
+    if !da {
+        stand = netz_stand(&a)
+    } else if a.code != 200 as u32 {
+        stand = anbieter.S_FEHLER
+    }
+    knetz.antw_frei(&a)
+    (*s).stand = stand
+    return stand
+}
+
+fn pruefen(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
+    if ist_ordner((*z).ziel) {
+        return ordner_pruefen(z, s)
+    }
+    var zl: knetz.Ziel = knetz.ziel_neu()
+    if !ziel_aus(z, &zl) {
+        (*s).stand = anbieter.S_FEHLER
+        return (*s).stand
+    }
+    var a: knetz.Antw = knetz.antw_neu()
+    let da: bool = knetz.sende(&zl, (&m_get[0]) as u64, 3,
+        (&p_pr[0]) as u64, 14, 0, 0, (*z).zugriff,
+        rt.c_length((*z).zugriff), 0, 0, &a)
+    var stand: u32 = anbieter.S_OK
+    if !da {
+        stand = netz_stand(&a)
+    } else if a.code == 401 as u32 {
+        stand = anbieter.S_ABGELAUFEN
+    } else if a.code != 200 as u32 {
+        stand = anbieter.S_FEHLER
+    }
+    knetz.antw_frei(&a)
+    (*s).stand = stand
+    return stand
+}
