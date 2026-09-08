@@ -65,7 +65,7 @@ PROGS=${PROGS:-"sh ls cat echo cp mv rm mkdir rmdir touch head tail wc grep sort
 # aus demselben Grund wie `fetch` -- der Deuter legt den linearen
 # Speicher des Gastes auf der Halde an, und eine Halde hat `profile
 # kernel` nicht.
-APPS=${APPS:-"fetch wasm"}
+APPS=${APPS:-"fetch wasm prim"}
 
 bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1 || {
     echo "== firnc laesst sich nicht bauen"; tail -20 "$OUT/firnc.log"; exit 1; }
