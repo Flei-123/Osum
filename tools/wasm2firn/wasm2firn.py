@@ -653,14 +653,17 @@ class Erzeuger:
             # ist das eine Sprungtabelle in Blockform. Sie wird nicht
             # geschachtelt, sondern als Verteiler erzeugt: eine Ebene
             # statt 276.
-            if op == 0x02 and not self.im_turm:
+            # SCHACHTELBAR: `im_turm` war frueher ein einziger
+            # Schalter -- damit blieb JEDER Turm INNERHALB eines Turms
+            # ungeflacht. Genau daran hing f564 mit 66 Ebenen.
+            if op == 0x02:
                 merk = l.at
                 anzahl, danach = turm_messen(code, l.at - 1)
                 # Ein Turm wird flachgelegt, wenn er entweder LANG ist
                 # (eine Sprungtabelle) ODER wenn wir ohnehin schon tief
                 # stehen -- denn jede weitere Ebene kostet firnc
                 # exponentiell (TIEFE.md).
-                if anzahl > TURM_GRENZE or (anzahl >= 1 and tiefe >= TIEFE_DECKEL):
+                if anzahl > TURM_GRENZE or (anzahl >= 3 and tiefe >= TIEFE_DECKEL):
                     sp = self.turm_erzeugen(l, code, anzahl, danach, sp,
                                             stapel, tiefe)
                     tiefe += 1
