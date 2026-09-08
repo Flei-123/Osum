@@ -125,6 +125,12 @@ I32, I64, F32, F64, EMPTY = 0x7F, 0x7E, 0x7D, 0x7C, 0x40
 # neben den echten Sprungtabellen auch gewoehnliche Schachtelung --
 # und genau das ist erwuenscht, denn jede eingesparte Ebene zaehlt
 # exponentiell.
+# RUNDE SCHLEUSE-3: EIN flacher Verteiler je Funktion statt
+# geschachtelter Bloecke. Siehe flach.py und FIRN-ESCAPE-TIEFE.md.
+# Mit FLACH = True bleibt die Tiefe bei 3, egal wie tief das WASM
+# schachtelt -- der einzige Weg, SQLite in ertraeglicher Zeit zu bauen.
+FLACH = True
+
 TURM_GRENZE = 8
 
 # Ab dieser Schachtelungstiefe wird JEDER Turm flachgelegt, auch ein
@@ -547,6 +553,7 @@ class Fehler(Exception):
 
 class Erzeuger:
     def __init__(self, m, opt):
+        self.indirekte_typen = set()
         self.m = m
         self.opt = opt
         self.out = []
@@ -597,7 +604,12 @@ class Erzeuger:
         self.im_turm = False
         self.turm_faelle = 0
         try:
-            self.rumpf(code, par, res)
+            if FLACH:
+                import flach
+                fe = flach.FlachErzeuger(self)
+                self.koerper = fe.rumpf(code, par, res)
+            else:
+                self.rumpf(code, par, res)
         except Fehler:
             raise
         # Stapelvariablen anlegen
@@ -936,6 +948,7 @@ class Erzeuger:
             idx = self.sv(sp)
             sp -= len(par)
             args = ', '.join(self.sv(sp + i) for i in range(len(par)))
+            self.indirekte_typen.add(ti)
             ruf = 'tab_ruf_%d(%s%s%s)' % (ti, idx, ', ' if args else '', args)
             if res:
                 E('%s = %s' % (self.sv(sp), ruf))
@@ -1522,7 +1535,7 @@ def erzeugen(m, wasi_txt, laufzeit_txt, name):
         o += e.out
 
     # ------------------------------------------- Tabelle
-    o += tabelle_erzeugen(m)
+    o += tabelle_erzeugen(m, e.indirekte_typen)
 
     # ------------------------------------------- Start
     o += start_erzeugen(m, name)
@@ -1573,7 +1586,7 @@ def wasi_ruf(nam, npar):
 # Kette von Vergleichen ueber die Eintraege, die diesen Typ haben.
 # Das ist der Preis dafuer, dass es ohne Funktionszeiger geht; er faellt
 # nur bei indirekten Rufen an, nicht bei gewoehnlichen.
-def tabelle_erzeugen(m):
+def tabelle_erzeugen(m, indirekte_typen=()):
     o = ['// ============================ Die Tabelle (call_indirect)']
     # index -> funcidx
     tab = {}
@@ -1590,6 +1603,15 @@ def tabelle_erzeugen(m):
     for idx, f in tab.items():
         ti = m.funktypen[f]
         typen.setdefault(ti, []).append((idx, f))
+    # ALTER FEHLER, erst durch RUNDE SCHLEUSE-3 sichtbar: ein
+    # `call_indirect` kann einen Typ nennen, der in KEINEM
+    # Tabelleneintrag vorkommt (SQLite tut das, Typ 5). Frueher blieb
+    # das unbemerkt, weil der Bau vorher in der Tiefe haengen blieb --
+    # firnc bricht sonst mit "unknown function 'tab_ruf_5'" ab.
+    # Ein solcher Aufruf kann zur Laufzeit nur scheitern; er bekommt
+    # deshalb einen Verteiler, der genau das tut: die WASM-Falle.
+    for ti in indirekte_typen:
+        typen.setdefault(ti, [])
     for ti, eintraege in sorted(typen.items()):
         par, res = m.typen[ti]
         args = ', '.join('a%d: u64' % i for i in range(len(par)))
