@@ -47,6 +47,17 @@
 #   9. Ein Userland (tools/userland/run.sh, Runde K6): eine Shell,
 #      dreiundzwanzig Werkzeuge, Roehren und Umlenkung -- alles eigene
 #      ELF-Dateien von der Platte.
+#  43. DER PUFFER, DER SCHWEIGT (tools/haertung/run.sh, Runde
+#      HAERTUNG-2): `buf_grow` kehrte bei knappem Speicher wortlos
+#      zurueck, `cap` blieb der alte Wert. Gemessen wird mit einem
+#      Kanarienvogel unmittelbar HINTER dem Puffer, bei echt
+#      erschoepfter Arena -- und das Ergebnis widerspricht der
+#      Erwartung: `buf_push` und `buf_push_bytes` laufen NICHT ueber
+#      (sie pruefen ein zweites Mal), wohl aber der Weg ueber
+#      `buf_reserve`, das keinen Rueckgabewert hatte. Die Gegenprobe
+#      (derselbe Aufrufer ohne Pruefung) MUSS fallen, sonst misst der
+#      Abschnitt nichts.
+#
 #  10. Handles statt Umgebungsautoritaet (tools/caps/run.sh): die
 #      Capability-Schicht, portiert aus OrientOS' nativer ABI
 #      (`libs/osum-abi-native/`, Rust). Eine Handle-Tabelle je Prozess mit
@@ -1533,6 +1544,9 @@ lauf "46. der Mischer von Ring 3 aus: zwei Programme, Lautstaerke je Strom, Saet
 #      die Sparsamkeit der Runde UHRWERK unveraendert geblieben ist.
 lauf "43. die Bildgrenze und die Fensterbewegung (tools/vsync/run.sh, Runde VSYNC)" \
      tools/vsync/run.sh vsync '^VSYNC: |^    ok  |^    NICHT |^        '
+
+lauf "43. der Puffer, der bei knappem Speicher schweigt -- und der Aufrufer, der darueber hinausschreibt (tools/haertung/run.sh, Runde HAERTUNG-2)" \
+     tools/haertung/run.sh haertung '^HAERTUNG: |^  OK    |^  FEHL  |^     fall='
 
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
