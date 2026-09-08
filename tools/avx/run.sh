@@ -171,13 +171,36 @@ fi
 # Funktionen darf im ganzen Kern keine einzige Vektoranweisung stehen.
 # Stuende dort eine, muesste `switch_to` den Zustand auch fuer Kernpfade
 # sichern, und die ganze Bauart dieser Runde waere falsch.
+#
+# RUNDE SCHNELLBILD: EINE DRITTE FAMILIE, UND WARUM SIE DIE ZUSAGE NICHT
+# BRICHT. `fb__hline_a_simd` mischt eine Bildzeile mit SSE2 (Faktor 30,5
+# gemessen, siehe STATUS-SCHNELLBILD.md). Sie steht damit im KERN und
+# nicht in der Probe -- das ist genau der Fall, den der Absatz oben
+# verbietet, und er wird hier ausdruecklich und mit Begruendung
+# aufgenommen, nicht stillschweigend durchgelassen:
+#
+#   Der Einwand oben lautet "dann muesste `switch_to` auch fuer
+#   Kernpfade sichern". Ein Wechsel findet in dieser Funktion aber nicht
+#   statt: der Aufrufer (`fb.hline_a`) klammert sie in
+#   `arch.irq_save`/`irq_restore`, also kann waehrend der Schleife kein
+#   Zeitgeber und kein Planer dazwischenkommen. Die Register xmm0..xmm8
+#   werden innerhalb dieser einen Sperre gesetzt UND verbraucht; nach
+#   `irq_restore` haelt die Funktion keinen Vektorzustand mehr, der zu
+#   sichern waere.
+#
+#   Die Sperre gilt je BILDZEILE (bei 3440 Punkten rund 3 Mikrosekunden)
+#   -- `flush_stripe` sperrt fuer seine 2-MiB-Bloecke laenger.
+#
+# Kaeme eine WEITERE Kernfunktion mit Vektoranweisungen dazu, faellt
+# diese Zeile wieder rot aus, und das soll sie: jede neue Familie
+# gehoert einzeln geprueft und einzeln hier begruendet.
 if command -v objdump >/dev/null 2>&1; then
     objdump -d "$TMPD/k0.mb" 2>/dev/null | awk '
         /^[0-9a-f]+ <.*>:/ { sym = $2 }
         /xmm|ymm|zmm/      { c[sym]++ }
         END { for (s in c) printf "%d %s\n", c[s], s }' \
         | sort -rn > "$TMPD/vecsym.txt"
-    ERLAUBT='<_F0\.(u_(vec|xmm|ymm|zmm)_[a-z]+|fpu__vec_[a-z]+)>:'
+    ERLAUBT='<_F0\.(u_(vec|xmm|ymm|zmm)_[a-z]+|fpu__vec_[a-z]+|fb__hline_a_simd)>:'
     FREMD=$(grep -vE " $ERLAUBT\$" "$TMPD/vecsym.txt" | wc -l)
     GES=$(awk '{s += $1} END {print s + 0}' "$TMPD/vecsym.txt")
     ERL=$(grep -cE " $ERLAUBT\$" "$TMPD/vecsym.txt")
