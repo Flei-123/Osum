@@ -1484,6 +1484,25 @@ lauf "44. das Kernprotokoll, die Absturzberichte und der Panik-Bildschirm (tools
 # und ueberspringt diesen Teil, statt still gruen zu sein.
 lauf "45. Freunde, Praesenz und ein Chat ohne Mitleser (tools/praesenz/run.sh, Runde PRAESENZ)" \
      tools/praesenz/run.sh praesenz '^PRAESENZ: |^  OK    |^  FAIL  |^        (/bin/praesenz|104 Bereiche)'
+# ================================================== RUNDE TON-2
+#
+# MERGE-8: dieser Abschnitt hiess auf dem Zweig 42 -- die Nummer gehoert
+# seit MERGE-7 dem Zeichenweg (GLYPHE). Jetzt 46, hinter PRAESENZ 45.
+#
+# DER MISCHER VON RING 3 AUS. Abschnitt 5 von tools/hda/run.sh prueft
+# ihn von INNEN -- aus einem Kernel-Pruefpfad mit zwei erfundenen
+# Stroemen -- und das ist eine Aussage ueber die Additionsschleife und
+# keine darueber, ob zwei PROGRAMME nebeneinander spielen koennen.
+# Dieser Abschnitt fragt es von aussen: zweimal /bin/play durch die
+# Shell, jeder Ton per Goertzel einzeln nachgewiesen.
+#
+# DIE 60-SEKUNDEN-ABNAHME (tools/ton/abnahme.sh) STEHT ABSICHTLICH
+# NICHT HIER. Zwoelf Laeufe zu einer Minute sind zwoelf Minuten, und
+# das gehoert nicht in einen Durchlauf, den man vor jedem Commit
+# startet. Sie wird von Hand gefahren, und ihre Zahlen stehen in
+# STATUS-TON2.md.
+lauf "46. der Mischer von Ring 3 aus: zwei Programme, Lautstaerke je Strom, Saettigung, Systemklang (tools/ton/mischer.sh, Runde TON-2)" \
+     tools/ton/mischer.sh ton2 '^== |^  OK   |^  FEHL |^    \(|^ERGEBNIS'
 
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.

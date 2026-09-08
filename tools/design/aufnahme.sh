@@ -62,6 +62,17 @@ accel=tcg
 halt=300
 extra=""
 nurbau=nein
+# RUNDE TON-2: eine Tonkarte an die Maschine, `ton=ja`.
+#
+# WARUM ES DEN SCHALTER BRAUCHT: der Lautstaerkeregler im
+# Kontrollzentrum und das Lautsprechersymbol in der Leiste folgen der
+# Regel "keine Karte, kein Feld" -- auf einer Maschine ohne Tonkarte
+# sind sie ABSICHTLICH nicht da. Ein Bildschirmfoto ohne `-device
+# intel-hda` kann sie deshalb gar nicht zeigen, und das sah beim
+# ersten Anlauf aus wie ein Fehler (`aud: aus (kein Wort)` in der
+# seriellen Ausgabe, Regler auf 0 und gedaempft). Die Vorgabe bleibt
+# AUS, damit die Bilder der anderen Runden sich nicht aendern.
+ton=nein
 drehbuch=""
 progs="desktop taskbar settings launcher explorer edit sh echo ls cat theme"
 for a in "$@"; do
@@ -76,6 +87,7 @@ for a in "$@"; do
         halt=*) halt=${a#*=} ;;
         extra=*) extra=${a#*=} ;;
         nurbau=*) nurbau=${a#*=} ;;
+        ton=*) ton=${a#*=} ;;
         *) echo "unbekannt: $a" >&2; exit 2 ;;
     esac
 done
@@ -255,6 +267,19 @@ DREH
 fi
 
 SOCK="$OUT/mon.sock"; rm -f "$SOCK" "$OUT/serial.txt"
+TONDEV=()
+if [ "$ton" = ja ]; then
+    # ZWEI DINGE, NICHT EINES. Die Karte an die Maschine reicht nicht --
+    # der Kern setzt den Ton nur auf, wenn das Wort `audio` auf der
+    # Befehlszeile steht (kernel/kmain.fi). Ohne es meldet die serielle
+    # Ausgabe `aud: aus (kein Wort)`, das Feld bleibt leer, und das sah
+    # beim ersten Anlauf wie ein Fehler im Regler aus.
+    extra="$extra audio nosounds"
+    # Die Ausgabe geht ins Nichts: hier wird ein BILD gemacht und
+    # nicht gemessen, wie es klingt. Die Karte muss nur DA sein.
+    TONDEV=(-audiodev none,id=snd0 -device intel-hda
+            -device hda-duplex,audiodev=snd0)
+fi
 ACC=()
 if [ "$accel" = kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
     ACC=(-accel kvm -cpu host)
@@ -265,6 +290,7 @@ timeout 600 qemu-system-x86_64 "${ACC[@]}" -kernel "$BUILDD/k0.mb" -m 512 \
     -device "VGA,edid=on,xres=$XRES,yres=$YRES,vgamem_mb=32" \
     -monitor "unix:$SOCK,server,nowait" \
     -drive "file=$OUT/disk.img,format=raw,if=ide,index=0" \
+    "${TONDEV[@]}" \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$OUT/qemu.log" 2>&1 &
 PID=$!
 i=0
