@@ -116,6 +116,7 @@ export {
     SYS_SETPGID, SYS_GETPGRP, SYS_SETSID, SYS_GETPGID, SYS_RT_SIGPENDING,
     SYS_TIME, SYS_FUTEX, SYS_GETTID, SYS_CLOCK_GETTIME, SYS_CLOCK_GETRES,
     SYS_CLOCK_NANOSLEEP, SYS_TGKILL, SYS_GETRANDOM,
+    SYS_UNAME, SYS_PRCTL,
     SYS_OSUM_PTY, SYS_OSUM_TTYINFO, SYS_OSUM_SIGINFO,
     SYS_VM_CREATE, SYS_VM_RUN, SYS_VM_STAT, SYS_VM_KILL, SYS_VM_VALUE,
     SYS_OSUM_SETENV, SYS_OSUM_MOUNT,
@@ -350,6 +351,16 @@ const SYS_SET_TID_ADDRESS: u64 = 218
 // Datenbank auf. SQLite liest und schreibt AUSSCHLIESSLICH mit
 // Positionsangabe (`pread`/`pwrite` in seinem Unix-VFS) und fragt vor
 // dem ersten Zugriff mit `fcntl` nach einer Sperre.
+// RUNDE FREMDLAND, GEMESSEN MIT `fremdtrace`: die beiden Nummern, nach
+// denen busybox fragt, sobald es mehr tut als schreiben. `uname` steht in
+// jedem zweiten Unix-Werkzeug (`uname -a`, aber auch in der Shell, die
+// ihre Kennung meldet), `prctl` ruft musl beim Start JEDES Programms --
+// es fragt nach PR_SET_NAME/PR_GET_DUMPABLE und kommt ohne die Antwort
+// zurecht, aber die Nummer kam bis hierher bei jedem Aufruf ins
+// Protokoll.
+const SYS_UNAME: u64 = 63
+const SYS_PRCTL: u64 = 157
+
 const SYS_PREAD64: u64 = 17
 const SYS_PWRITE64: u64 = 18
 const SYS_FCNTL: u64 = 72
@@ -2126,6 +2137,20 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     }
     if number == SYS_FCNTL {
         return do_fcntl(state, me, a0, a1, a2)
+    }
+    // RUNDE FREMDLAND: `uname`. busybox fragt danach, und nicht nur
+    // `uname -a` -- die Shell nimmt den Namen fuer ihre Kennung. Sechs
+    // Felder zu je 65 Oktetten, so wie Linux sie legt.
+    if number == SYS_UNAME {
+        return do_uname(state, me, a0)
+    }
+    // RUNDE FREMDLAND: `prctl`. musl ruft es beim Start jedes Programms.
+    // Dieser Kern fuehrt keinen Prozessnamen und keine Kernschreibe, also
+    // ist die ehrliche Antwort fuer die setzenden Unterbefehle 0 (es ist
+    // nichts zu tun) und fuer die fragenden der Wert, den dieser Kern
+    // wirklich hat -- NICHT -ENOSYS, denn die Nummer gibt es.
+    if number == SYS_PRCTL {
+        return do_prctl(state, me, a0, a1)
     }
     if number == SYS_MMAP {
         // ROUNDE K7: a4 ist der Deskriptor. Bis hierher wurde er
@@ -5571,6 +5596,88 @@ fn do_pio(state: u64, me: u64, fd: u64, buf: u64, len: u64, off: u64,
 // Der Tag, an dem zwei Prozesse dieselbe Datenbank oeffnen, ist der
 // Tag, an dem hier echte Sperren stehen muessen; bis dahin steht es
 // hier als Satz und nicht als stiller Rueckgabewert.
+// RUNDE FREMDLAND: `uname`. Die Struktur von Linux ist sechs Felder zu
+// je 65 Oktetten hintereinander (sysname, nodename, release, version,
+// machine, domainname) -- 390 Oktette am Stueck. Sie wird HIER auf dem
+// Kernstapel gebaut und in einem Zug hinausgeschrieben; ein Feld nach
+// dem anderen zu kopieren hiesse, sechsmal zu pruefen, ob der Zeiger
+// noch dem Prozess gehoert.
+//
+// Die Zeichenketten sind ABSICHTLICH keine Markenzeichenketten aus
+// `marke.fi`: `uname -s` ist eine ABI-Auskunft, kein Produktname. Ein
+// Programm, das seinen Weg nach der Antwort waehlt, will wissen, welche
+// Systemaufrufe es hat, und die dieses Kerns sind die von Linux.
+const UTS_FELD: u64 = 65
+const UTS_BYTES: u64 = 390
+
+fn uts_setz(puffer: u64, feld: u64, text: u64, laenge: u64) {
+    var i: u64 = 0
+    while i < laenge {
+        kstate.set8(puffer + feld * UTS_FELD + i, kstate.get8(text + i) as u8)
+        i = i + 1
+    }
+}
+
+fn do_uname(state: u64, me: u64, aus: u64) -> u64 {
+    var s_sys: [u8; 6] = "Linux\0"
+    var s_node: [u8; 5] = "osum\0"
+    var s_rel: [u8; 7] = "6.1.0\0\0"
+    var s_ver: [u8; 5] = "Osum\0"
+    var s_mach: [u8; 7] = "x86_64\0"
+    var puffer: [u8; 390] = [0; 390]
+    let p: u64 = (&puffer[0]) as u64
+    var i: u64 = 0
+    while i < UTS_BYTES {
+        kstate.set8(p + i, 0)
+        i = i + 1
+    }
+    // `sysname` ist "Linux", und das ist keine Anbiederung, sondern die
+    // Wahrheit ueber die Schnittstelle: die Nummern in `rax` sind die
+    // von Linux x86-64, und ein Programm, das hier "Osum" laese, wuerde
+    // daraus schliessen, es kenne diesen Kern nicht -- und einen Pfad
+    // waehlen, den es fuer unbekannte Systeme haelt. Der NODENAME sagt,
+    // welche Maschine das ist.
+    uts_setz(p, 0, (&s_sys[0]) as u64, 5)
+    uts_setz(p, 1, (&s_node[0]) as u64, 4)
+    uts_setz(p, 2, (&s_rel[0]) as u64, 5)
+    uts_setz(p, 3, (&s_ver[0]) as u64, 4)
+    uts_setz(p, 4, (&s_mach[0]) as u64, 6)
+    // domainname bleibt leer, wie auf einem Rechner ohne NIS.
+    if !copy_out(state, me, aus, p, UTS_BYTES) {
+        return neg(errno.E_FAULT)
+    }
+    return 0
+}
+
+// RUNDE FREMDLAND: `prctl`. Nur die Unterbefehle, die dieser Kern
+// wahrheitsgemaess beantworten kann.
+const PR_SET_NAME: u64 = 15
+const PR_GET_NAME: u64 = 16
+const PR_GET_DUMPABLE: u64 = 3
+const PR_SET_DUMPABLE: u64 = 4
+
+fn do_prctl(state: u64, me: u64, was: u64, arg: u64) -> u64 {
+    // Einen Prozessnamen fuehrt dieser Kern nicht. `PR_SET_NAME` still
+    // anzunehmen ist richtig -- der Aufrufer verlangt keine Wirkung, die
+    // er nachpruefen koennte; `PR_GET_NAME` dagegen MUSS scheitern,
+    // sonst laese der Aufrufer einen Puffer, den niemand gefuellt hat.
+    if was == PR_SET_NAME {
+        return 0
+    }
+    if was == PR_GET_NAME {
+        return neg(errno.E_INVAL)
+    }
+    // Kernschreiben gibt es nicht, also ist "nicht abbildbar" die
+    // Wahrheit und 0 die richtige Antwort auf die Frage.
+    if was == PR_GET_DUMPABLE {
+        return 0
+    }
+    if was == PR_SET_DUMPABLE {
+        return 0
+    }
+    return neg(errno.E_INVAL)
+}
+
 fn do_fcntl(state: u64, me: u64, fd: u64, cmd: u64, arg: u64) -> u64 {
     let of: u64 = file.fd_check(state, me, fd, 0)
     if of >= file.MAX_OPEN {
