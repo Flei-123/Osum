@@ -588,6 +588,25 @@ fn phases(state: u64, index: u64) {
                 return
             }
         }
+        // RUNDE VSYNC: DER ABLESER DER ZERREISSPROBE LAEUFT HIER, UND
+        // NUR HIER KANN ER LAUFEN.
+        //
+        // Reissen entsteht, wenn jemand den Vorderpuffer LIEST, waehrend
+        // ein anderer ihn SCHREIBT. Auf einem Kern gibt es diesen
+        // Augenblick nicht: `compose`, `flush` und jeder Ableser sind
+        // derselbe Faden, und der Ableser kommt erst dran, wenn die
+        // Uebertragung fertig ist -- er faende NIE ein halbes Bild,
+        // auch dann nicht, wenn es reisst. Gemessen: mit `nopresent`
+        // (Bildgrenze ausdruecklich aus) blieb die Probe auf einem Kern
+        // bei risse=0, obwohl sie haette anschlagen muessen.
+        //
+        // Dieser Kern hier tut, was ein Bildschirm tut: er liest,
+        // waehrend der Startprozessor malt. Das ist keine Nachbildung
+        // des Reissens, sondern das Reissen selbst.
+        //
+        // Er laeuft nur im Signaturbetrieb (`wmsig`); ohne ihn ist das
+        // ein Vergleich zweier Zahlen und kostet nichts.
+        gfx.leser_tick(state)
         atomic.pause()
     }
 }
@@ -1467,6 +1486,20 @@ fn scheduler_core(state: u64, index: u64) {
     idt.enable()
     while true {
         cpu.add(state, index, cpu.C_IDLERUNS, 1)
+        // RUNDE VSYNC: DER ABLESER GEHOERT HIERHER UND NICHT IN
+        // `phases`. Ein gestarteter Kern verlaesst `phases` mit
+        // PH_SCHED fuer immer und kommt nie zurueck -- der Ableser
+        // dort lief also nur bis zum Start des Ablaufplaners.
+        // GEMESSEN: 14 202 Ablesungen auf 4 735 Bilder, also drei je
+        // Bild; eine Uebertragung dauert Mikrosekunden und wurde so gut
+        // wie nie getroffen. Hier, im Leerlauf, liest er dicht.
+        //
+        // `idt.halt()` erst DANACH: wer schlaeft, liest nicht.
+        var lz: u64 = 0
+        while lz < 256 {
+            gfx.leser_tick(state)
+            lz = lz + 1
+        }
         sched.yield_now(state)
         idt.halt()
     }
