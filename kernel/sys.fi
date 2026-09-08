@@ -116,6 +116,7 @@ export {
     SYS_SETPGID, SYS_GETPGRP, SYS_SETSID, SYS_GETPGID, SYS_RT_SIGPENDING,
     SYS_TIME, SYS_FUTEX, SYS_GETTID, SYS_CLOCK_GETTIME, SYS_CLOCK_GETRES,
     SYS_CLOCK_NANOSLEEP, SYS_TGKILL, SYS_GETRANDOM,
+    SYS_UNAME, SYS_PRCTL, SYS_MPROTECT,
     SYS_OSUM_PTY, SYS_OSUM_TTYINFO, SYS_OSUM_SIGINFO,
     SYS_VM_CREATE, SYS_VM_RUN, SYS_VM_STAT, SYS_VM_KILL, SYS_VM_VALUE,
     SYS_OSUM_SETENV, SYS_OSUM_MOUNT,
@@ -350,6 +351,37 @@ const SYS_SET_TID_ADDRESS: u64 = 218
 // Datenbank auf. SQLite liest und schreibt AUSSCHLIESSLICH mit
 // Positionsangabe (`pread`/`pwrite` in seinem Unix-VFS) und fragt vor
 // dem ersten Zugriff mit `fcntl` nach einer Sperre.
+// RUNDE FREMDLAND, GEMESSEN MIT `fremdtrace`: die beiden Nummern, nach
+// denen busybox fragt, sobald es mehr tut als schreiben. `uname` steht in
+// jedem zweiten Unix-Werkzeug (`uname -a`, aber auch in der Shell, die
+// ihre Kennung meldet), `prctl` ruft musl beim Start JEDES Programms --
+// es fragt nach PR_SET_NAME/PR_GET_DUMPABLE und kommt ohne die Antwort
+// zurecht, aber die Nummer kam bis hierher bei jedem Aufruf ins
+// Protokoll.
+// RUNDE FREMDLAND: die beiden, ohne die musl keine Faeden macht.
+// `clone` mit den Fadenflaggen ist `pthread_create`, `futex` ist die
+// Sperre darunter -- musl benutzt sie AUCH BEI EINEM EINZIGEN Faden,
+// sobald `libc.threaded` gesetzt ist.
+const SYS_MPROTECT: u64 = 10
+// Die Flaggen von `clone`, die ein Faden setzt (Linux `sched.h`).
+const CLONE_VM: u64 = 0x100
+const CLONE_FS: u64 = 0x200
+const CLONE_FILES: u64 = 0x400
+const CLONE_SIGHAND: u64 = 0x800
+const CLONE_THREAD: u64 = 0x10000
+const CLONE_SETTLS: u64 = 0x80000
+const CLONE_PARENT_SETTID: u64 = 0x100000
+const CLONE_CHILD_CLEARTID: u64 = 0x200000
+const CLONE_SYSVSEM: u64 = 0x40000
+// Die Unterbefehle von `futex`, die wirklich vorkommen.
+const FUTEX_WAIT: u64 = 0
+const FUTEX_WAKE: u64 = 1
+const FUTEX_PRIVATE: u64 = 128
+const FUTEX_CLOCK_RT: u64 = 256
+
+const SYS_UNAME: u64 = 63
+const SYS_PRCTL: u64 = 157
+
 const SYS_PREAD64: u64 = 17
 const SYS_PWRITE64: u64 = 18
 const SYS_FCNTL: u64 = 72
@@ -363,6 +395,26 @@ const F_SETLK: u64 = 6
 const F_SETLKW: u64 = 7
 const F_GETLK: u64 = 5
 const F_DUPFD_CLOEXEC: u64 = 1030
+// RUNDE FREMDLAND: die Arten einer Sperre und der Aufbau von `struct
+// flock`, so wie Linux x86-64 sie legt.
+const F_RDLCK: u64 = 0
+const F_WRLCK: u64 = 1
+const F_UNLCK: u64 = 2
+// struct flock: l_type(2) l_whence(2) [4 Fuellung] l_start(8) l_len(8)
+// l_pid(4) -- 32 Oktette.
+const FL_TYPE: u64 = 0
+const FL_WHENCE: u64 = 2
+const FL_START: u64 = 8
+const FL_LEN: u64 = 16
+const FL_PID: u64 = 24
+const FL_BYTES: u64 = 32
+// Die Felder eines Eintrags in der Sperrtafel (kstate.FLOCK_BYTES = 48).
+const L_INO: u64 = 0
+const L_VON: u64 = 8
+const L_BIS: u64 = 16   // letztes Oktett, EINSCHLIESSLICH
+const L_ART: u64 = 24
+const L_PID: u64 = 32
+const L_MNT: u64 = 40
 const ARCH_SET_FS: u64 = 0x1002
 const ARCH_GET_FS: u64 = 0x1003
 
@@ -2112,6 +2164,14 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // Aufraeumen zu versprechen, das nicht stattfindet. musl will von
     // dem Aufruf ohnehin nur die tid.
     if number == SYS_SET_TID_ADDRESS {
+        // RUNDE FREMDLAND: JETZT WIRD SIE GEMERKT. LAUFZEIT liess das
+        // ABSICHTLICH bleiben, mit der richtigen Begruendung, dass ein
+        // Aufraeumversprechen ohne Aufraeumen schlimmer ist als keines.
+        // Seit `clone`/`exit_task` das Wort wirklich loeschen, ist das
+        // Versprechen gedeckt.
+        if proc.user_ok(state, me, a0, 4) {
+            sched.tset(state, me, sched.T_FUTEX, a0)
+        }
         return sched.tget(state, me, sched.T_PID)
     }
     // RUNDE LAUFZEIT: Lesen und Schreiben MIT POSITION, ohne die
@@ -2127,6 +2187,38 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     if number == SYS_FCNTL {
         return do_fcntl(state, me, a0, a1, a2)
     }
+    // RUNDE FREMDLAND: `uname`. busybox fragt danach, und nicht nur
+    // `uname -a` -- die Shell nimmt den Namen fuer ihre Kennung. Sechs
+    // Felder zu je 65 Oktetten, so wie Linux sie legt.
+    if number == SYS_UNAME {
+        return do_uname(state, me, a0)
+    }
+    // RUNDE FREMDLAND: `prctl`. musl ruft es beim Start jedes Programms.
+    // Dieser Kern fuehrt keinen Prozessnamen und keine Kernschreibe, also
+    // ist die ehrliche Antwort fuer die setzenden Unterbefehle 0 (es ist
+    // nichts zu tun) und fuer die fragenden der Wert, den dieser Kern
+    // wirklich hat -- NICHT -ENOSYS, denn die Nummer gibt es.
+    if number == SYS_PRCTL {
+        return do_prctl(state, me, a0, a1)
+    }
+    // RUNDE FREMDLAND: `clone` mit den Fadenflaggen -- das ist
+    // `pthread_create`. Ohne die Flaggen (also als `fork`-Ersatz) geht
+    // es denselben Weg wie `fork`.
+    if number == SYS_CLONE {
+        return do_clone(state, me, frame, a0, a1, a2, a3, a4)
+    }
+    // RUNDE FREMDLAND: `futex`. musl sperrt damit, und zwar auch dann,
+    // wenn nur ein Faden laeuft.
+    if number == SYS_FUTEX {
+        return do_futex(state, me, a0, a1, a2, a3)
+    }
+    // RUNDE FREMDLAND: `mprotect`. Dieser Kern gibt jede Seite eines
+    // Programms mit den Rechten aus, die sein Programmkopf verlangt, und
+    // kennt kein nachtraegliches Umschalten. musl ruft es beim Anlegen
+    // eines Fadenstapels (Schutzseite) und kommt mit einem Ja zurecht.
+    if number == SYS_MPROTECT {
+        return do_mprotect(state, me, a0, a1, a2)
+    }
     if number == SYS_MMAP {
         // ROUNDE K7: a4 ist der Deskriptor. Bis hierher wurde er
         // weggelassen, weil nur MAP_ANONYMOUS ging und Linux ihn dabei
@@ -2137,6 +2229,17 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
         return do_unmap(state, me, a0, a1)
     }
     if number == SYS_GETPID {
+        // RUNDE FREMDLAND: DIE FADENGRUPPE, nicht die Aufgabe.
+        // `getpid` muss in jedem Faden desselben Prozesses dieselbe Zahl
+        // geben -- das ist der Unterschied zu `gettid` (SYS_GETTID, eine
+        // Zeile weiter unten), und ohne ihn haelt sich jeder Faden fuer
+        // einen eigenen Prozess. Fuer alles, was nicht mit `clone`
+        // entstanden ist, IST `T_TGID` die eigene pid (`signal.init_task`),
+        // also aendert sich dort nichts.
+        let g: u64 = sched.tget(state, me, sched.T_TGID)
+        if g != 0 {
+            return g
+        }
         return sched.tget(state, me, sched.T_PID)
     }
     if number == SYS_GETPPID {
@@ -2181,6 +2284,23 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
         // 12345 did not leave with 57.
         // ROUND POWERMON: the last ticks of this process, before the
         // scheduler stops being able to tell anybody about them.
+        // RUNDE FREMDLAND: DAS WORT, AUF DAS `pthread_join` WARTET.
+        // `clone` mit CLONE_CHILD_CLEARTID (und `set_tid_address`) hat
+        // seine Adresse in `T_FUTEX` gelegt; sie MUSS auf 0 gehen,
+        // BEVOR die Aufgabe Zombie wird -- danach ist ihr Adressraum
+        // bei einem Prozess weg, und wer wartet, wartete ewig.
+        // Gemessen, bevor das hier stand: `pthread_join` kam nie zurueck.
+        //
+        // Steht in `sys.fi` und nicht in `sched.exit_task`, weil das
+        // Schreiben durch die Seitentabellen der Aufgabe geht und
+        // `sched.fi` `proc.fi` nicht kennen darf -- der Modulgraph ist
+        // ein Baum, und `proc.fi` steht auf `sched.fi`.
+        clear_child_tid(state, me)
+        // RUNDE FREMDLAND: UND DIE SPERREN DIESES HALTERS FALLEN.
+        // Ohne diese Zeile bliebe eine Datenbank fuer immer belegt,
+        // sobald ein Prozess stirbt, waehrend er sie hielt -- der
+        // haeufigste Weg, wie ein System mit Sperren unbrauchbar wird.
+        locks_drop(state, me)
         pmon.flush(state, me)
         sched.exit_task(state, a0)
         return 0 // not reached
@@ -5571,6 +5691,88 @@ fn do_pio(state: u64, me: u64, fd: u64, buf: u64, len: u64, off: u64,
 // Der Tag, an dem zwei Prozesse dieselbe Datenbank oeffnen, ist der
 // Tag, an dem hier echte Sperren stehen muessen; bis dahin steht es
 // hier als Satz und nicht als stiller Rueckgabewert.
+// RUNDE FREMDLAND: `uname`. Die Struktur von Linux ist sechs Felder zu
+// je 65 Oktetten hintereinander (sysname, nodename, release, version,
+// machine, domainname) -- 390 Oktette am Stueck. Sie wird HIER auf dem
+// Kernstapel gebaut und in einem Zug hinausgeschrieben; ein Feld nach
+// dem anderen zu kopieren hiesse, sechsmal zu pruefen, ob der Zeiger
+// noch dem Prozess gehoert.
+//
+// Die Zeichenketten sind ABSICHTLICH keine Markenzeichenketten aus
+// `marke.fi`: `uname -s` ist eine ABI-Auskunft, kein Produktname. Ein
+// Programm, das seinen Weg nach der Antwort waehlt, will wissen, welche
+// Systemaufrufe es hat, und die dieses Kerns sind die von Linux.
+const UTS_FELD: u64 = 65
+const UTS_BYTES: u64 = 390
+
+fn uts_setz(puffer: u64, feld: u64, text: u64, laenge: u64) {
+    var i: u64 = 0
+    while i < laenge {
+        kstate.set8(puffer + feld * UTS_FELD + i, kstate.get8(text + i) as u8)
+        i = i + 1
+    }
+}
+
+fn do_uname(state: u64, me: u64, aus: u64) -> u64 {
+    var s_sys: [u8; 6] = "Linux\0"
+    var s_node: [u8; 5] = "osum\0"
+    var s_rel: [u8; 7] = "6.1.0\0\0"
+    var s_ver: [u8; 5] = "Osum\0"
+    var s_mach: [u8; 7] = "x86_64\0"
+    var puffer: [u8; 390] = [0; 390]
+    let p: u64 = (&puffer[0]) as u64
+    var i: u64 = 0
+    while i < UTS_BYTES {
+        kstate.set8(p + i, 0)
+        i = i + 1
+    }
+    // `sysname` ist "Linux", und das ist keine Anbiederung, sondern die
+    // Wahrheit ueber die Schnittstelle: die Nummern in `rax` sind die
+    // von Linux x86-64, und ein Programm, das hier "Osum" laese, wuerde
+    // daraus schliessen, es kenne diesen Kern nicht -- und einen Pfad
+    // waehlen, den es fuer unbekannte Systeme haelt. Der NODENAME sagt,
+    // welche Maschine das ist.
+    uts_setz(p, 0, (&s_sys[0]) as u64, 5)
+    uts_setz(p, 1, (&s_node[0]) as u64, 4)
+    uts_setz(p, 2, (&s_rel[0]) as u64, 5)
+    uts_setz(p, 3, (&s_ver[0]) as u64, 4)
+    uts_setz(p, 4, (&s_mach[0]) as u64, 6)
+    // domainname bleibt leer, wie auf einem Rechner ohne NIS.
+    if !copy_out(state, me, aus, p, UTS_BYTES) {
+        return neg(errno.E_FAULT)
+    }
+    return 0
+}
+
+// RUNDE FREMDLAND: `prctl`. Nur die Unterbefehle, die dieser Kern
+// wahrheitsgemaess beantworten kann.
+const PR_SET_NAME: u64 = 15
+const PR_GET_NAME: u64 = 16
+const PR_GET_DUMPABLE: u64 = 3
+const PR_SET_DUMPABLE: u64 = 4
+
+fn do_prctl(state: u64, me: u64, was: u64, arg: u64) -> u64 {
+    // Einen Prozessnamen fuehrt dieser Kern nicht. `PR_SET_NAME` still
+    // anzunehmen ist richtig -- der Aufrufer verlangt keine Wirkung, die
+    // er nachpruefen koennte; `PR_GET_NAME` dagegen MUSS scheitern,
+    // sonst laese der Aufrufer einen Puffer, den niemand gefuellt hat.
+    if was == PR_SET_NAME {
+        return 0
+    }
+    if was == PR_GET_NAME {
+        return neg(errno.E_INVAL)
+    }
+    // Kernschreiben gibt es nicht, also ist "nicht abbildbar" die
+    // Wahrheit und 0 die richtige Antwort auf die Frage.
+    if was == PR_GET_DUMPABLE {
+        return 0
+    }
+    if was == PR_SET_DUMPABLE {
+        return 0
+    }
+    return neg(errno.E_INVAL)
+}
+
 fn do_fcntl(state: u64, me: u64, fd: u64, cmd: u64, arg: u64) -> u64 {
     let of: u64 = file.fd_check(state, me, fd, 0)
     if of >= file.MAX_OPEN {
@@ -5593,14 +5795,248 @@ fn do_fcntl(state: u64, me: u64, fd: u64, cmd: u64, arg: u64) -> u64 {
     if cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC {
         return do_dup(state, me, fd)
     }
-    if cmd == F_SETLK || cmd == F_SETLKW {
-        return 0
-    }
-    if cmd == F_GETLK {
-        return 0
+    // RUNDE FREMDLAND: DIE SPERREN SIND ECHT.
+    if cmd == F_SETLK || cmd == F_SETLKW || cmd == F_GETLK {
+        return do_lock(state, me, of, cmd, arg)
     }
     return neg(errno.E_INVAL)
 }
+
+// ------------------------------------------------- RUNDE FREMDLAND: SPERREN
+//
+// LAUFZEIT schrieb: "`fcntl` meldet Sperren als gewaehrt, ohne zu
+// sperren. Das ist eine bewusste Luege... Der Tag, an dem zwei Prozesse
+// dieselbe Datenbank oeffnen, ist der Tag, an dem hier echte Sperren
+// stehen muessen." Sie stehen jetzt.
+//
+// WAS GEBAUT IST: Bereichssperren auf der INODE, wie POSIX sie
+// beschreibt. Ein Eintrag ist (Inode, Einhaengung, erstes Oktett,
+// letztes Oktett, Art, Halter-pid). Eine Lesesperre vertraegt sich mit
+// anderen Lesesperren, eine Schreibsperre mit nichts. Sperren desselben
+// Halters stehen sich nie im Weg -- das ist POSIX und der Grund, warum
+// SQLite seine eigene Sperre verschaerfen darf.
+//
+// WAS NICHT GEBAUT IST, und es steht hier, weil ein ungenannter Mangel
+// ein Fehler ist:
+//   * F_SETLKW WARTET NICHT, es antwortet wie F_SETLK. Wer wartet,
+//     wartet auf einen anderen Prozess, und dieser Kern hat keinen, der
+//     eine Verklemmung aufloesen koennte. SQLite fragt ohnehin mit
+//     F_SETLK und behandelt die Absage selbst (SQLITE_BUSY) -- genau
+//     das misst diese Runde.
+//   * Sperren werden beim `close` eines Deskriptors NICHT einzeln
+//     aufgeraeumt, sondern beim Prozessende als Ganzes. POSIX verlangt
+//     das Erste; wer es braucht, merkt es an einer Sperre, die nach dem
+//     Schliessen noch steht.
+
+fn lock_at(state: u64, i: u64) -> u64 {
+    return state + kstate.FLOCK_OFF + i * kstate.FLOCK_BYTES
+}
+
+fn lock_get(state: u64, i: u64, feld: u64) -> u64 {
+    return kstate.get(state, lock_at(state, i) + feld)
+}
+
+fn lock_set(state: u64, i: u64, feld: u64, v: u64) {
+    kstate.set(state, lock_at(state, i) + feld, v)
+}
+
+// Ueberschneiden sich zwei Bereiche? Beide sind einschliesslich.
+fn lock_trifft(a_von: u64, a_bis: u64, b_von: u64, b_bis: u64) -> bool {
+    if a_bis < b_von {
+        return false
+    }
+    if b_bis < a_von {
+        return false
+    }
+    return true
+}
+
+// Der Bereich aus einem `struct flock`, auf absolute Oktette gebracht.
+// Rueckgabe ueber die beiden Zeiger; false heisst: unbrauchbar.
+fn do_lock(state: u64, me: u64, of: u64, cmd: u64, arg: u64) -> u64 {
+    if !proc.user_ok(state, me, arg, FL_BYTES) {
+        return neg(errno.E_FAULT)
+    }
+    let art: u64 = user_half(state, me, arg + FL_TYPE)
+    let whence: u64 = user_half(state, me, arg + FL_WHENCE)
+    let start: u64 = user_word(state, me, arg + FL_START)
+    let laenge: u64 = user_word(state, me, arg + FL_LEN)
+    if art != F_RDLCK && art != F_WRLCK && art != F_UNLCK {
+        return neg(errno.E_INVAL)
+    }
+    // Der Bezugspunkt. SEEK_END braeuchte die Groesse der Datei; SQLite
+    // benutzt ausschliesslich SEEK_SET, und was dieser Kern nicht
+    // richtig rechnen kann, weist er ab, statt es zu raten.
+    var von: u64 = start
+    if whence == SEEK_CUR {
+        von = file.open_off(state, of) + start
+    }
+    if whence == SEEK_END {
+        return neg(errno.E_INVAL)
+    }
+    if whence != SEEK_SET && whence != SEEK_CUR {
+        return neg(errno.E_INVAL)
+    }
+    // l_len = 0 heisst "bis ans Ende der Datei, wie gross sie auch
+    // werde". Das ist die Form, in der eine Datei als GANZES gesperrt
+    // wird.
+    var bis: u64 = 0xFFFFFFFFFFFFFFFF
+    if laenge != 0 {
+        if (laenge >> 63) != 0 {
+            return neg(errno.E_INVAL)
+        }
+        bis = von + laenge - 1
+    }
+    let ino: u64 = file.open_ino(state, of)
+    if ino == 0 {
+        return neg(errno.E_BADF)
+    }
+    let mnt: u64 = file.open_mnt(state, of)
+    let wer: u64 = sched.tget(state, me, sched.T_TGID)
+
+    // ---- F_GETLK: nur fragen, nichts aendern ----------------------
+    if cmd == F_GETLK {
+        var k: u64 = 0
+        while k < kstate.FLOCK_SLOTS {
+            if lock_get(state, k, L_INO) == ino
+                && lock_get(state, k, L_MNT) == mnt
+                && lock_get(state, k, L_PID) != wer {
+                let hart: u64 = lock_get(state, k, L_ART)
+                // Eine Lesesperre stoert eine andere Lesesperre nicht.
+                var stoert: bool = true
+                if art == F_RDLCK && hart == F_RDLCK {
+                    stoert = false
+                }
+                if stoert && lock_trifft(von, bis,
+                    lock_get(state, k, L_VON), lock_get(state, k, L_BIS)) {
+                    // Der Frager bekommt die SPERRE beschrieben, die im
+                    // Weg steht -- das ist der ganze Zweck von F_GETLK.
+                    put_half(state, me, arg + FL_TYPE, hart)
+                    put_half(state, me, arg + FL_WHENCE, SEEK_SET)
+                    put64(state, me, arg + FL_START,
+                        lock_get(state, k, L_VON))
+                    var l: u64 = 0
+                    if lock_get(state, k, L_BIS) != 0xFFFFFFFFFFFFFFFF {
+                        l = lock_get(state, k, L_BIS)
+                            - lock_get(state, k, L_VON) + 1
+                    }
+                    put64(state, me, arg + FL_LEN, l)
+                    put_word32(state, me, arg + FL_PID,
+                        lock_get(state, k, L_PID))
+                    return 0
+                }
+            }
+            k = k + 1
+        }
+        // Niemand steht im Weg. POSIX: l_type wird F_UNLCK.
+        put_half(state, me, arg + FL_TYPE, F_UNLCK)
+        return 0
+    }
+
+    // ---- F_UNLCK: die eigenen Sperren in diesem Bereich raeumen ----
+    if art == F_UNLCK {
+        var k: u64 = 0
+        while k < kstate.FLOCK_SLOTS {
+            if lock_get(state, k, L_INO) == ino
+                && lock_get(state, k, L_MNT) == mnt
+                && lock_get(state, k, L_PID) == wer
+                && lock_trifft(von, bis, lock_get(state, k, L_VON),
+                    lock_get(state, k, L_BIS)) {
+                lock_frei(state, k)
+            }
+            k = k + 1
+        }
+        return 0
+    }
+
+    // ---- F_SETLK / F_SETLKW: steht jemand im Weg? -----------------
+    var k2: u64 = 0
+    while k2 < kstate.FLOCK_SLOTS {
+        if lock_get(state, k2, L_INO) == ino
+            && lock_get(state, k2, L_MNT) == mnt
+            && lock_get(state, k2, L_PID) != wer {
+            let hart2: u64 = lock_get(state, k2, L_ART)
+            var stoert2: bool = true
+            if art == F_RDLCK && hart2 == F_RDLCK {
+                stoert2 = false
+            }
+            if stoert2 && lock_trifft(von, bis, lock_get(state, k2, L_VON),
+                lock_get(state, k2, L_BIS)) {
+                // DIE ABSAGE, AUF DIE SQLITE WARTET. POSIX nennt
+                // EACCES oder EAGAIN; Linux gibt EAGAIN, und SQLite
+                // macht daraus SQLITE_BUSY.
+                return neg(errno.E_AGAIN)
+            }
+        }
+        k2 = k2 + 1
+    }
+    // Der Weg ist frei. Eigene Sperren im selben Bereich werden
+    // ERSETZT -- eine Lesesperre, die zur Schreibsperre wird, ist eine
+    // Sperre und nicht zwei.
+    var k3: u64 = 0
+    while k3 < kstate.FLOCK_SLOTS {
+        if lock_get(state, k3, L_INO) == ino
+            && lock_get(state, k3, L_MNT) == mnt
+            && lock_get(state, k3, L_PID) == wer
+            && lock_trifft(von, bis, lock_get(state, k3, L_VON),
+                lock_get(state, k3, L_BIS)) {
+            lock_frei(state, k3)
+        }
+        k3 = k3 + 1
+    }
+    var frei: u64 = kstate.FLOCK_SLOTS
+    var k4: u64 = 0
+    while k4 < kstate.FLOCK_SLOTS {
+        if lock_get(state, k4, L_INO) == 0 && frei == kstate.FLOCK_SLOTS {
+            frei = k4
+        }
+        k4 = k4 + 1
+    }
+    if frei >= kstate.FLOCK_SLOTS {
+        // Die Tafel ist voll. POSIX nennt dafuer ENOLCK, und das ist
+        // ehrlicher als eine Sperre zu gewaehren, die nicht eingetragen
+        // ist -- genau die Luege, die diese Runde beseitigt.
+        return neg(errno.E_NOLCK)
+    }
+    lock_set(state, frei, L_INO, ino)
+    lock_set(state, frei, L_MNT, mnt)
+    lock_set(state, frei, L_VON, von)
+    lock_set(state, frei, L_BIS, bis)
+    lock_set(state, frei, L_ART, art)
+    lock_set(state, frei, L_PID, wer)
+    kstate.add(state, kstate.FLOCKS, 1)
+    return 0
+}
+
+fn lock_frei(state: u64, k: u64) {
+    lock_set(state, k, L_INO, 0)
+    lock_set(state, k, L_MNT, 0)
+    lock_set(state, k, L_VON, 0)
+    lock_set(state, k, L_BIS, 0)
+    lock_set(state, k, L_ART, 0)
+    lock_set(state, k, L_PID, 0)
+}
+
+// Beim Prozessende: alles, was dieser Halter hielt. Ohne das bliebe eine
+// Datenbank fuer immer gesperrt, wenn ein Prozess stirbt, und der
+// naechste Start faende sie belegt -- der haeufigste Weg, wie ein System
+// mit Sperren unbrauchbar wird.
+fn locks_drop(state: u64, me: u64) {
+    let wer: u64 = sched.tget(state, me, sched.T_TGID)
+    if wer == 0 {
+        return
+    }
+    var k: u64 = 0
+    while k < kstate.FLOCK_SLOTS {
+        if lock_get(state, k, L_INO) != 0
+            && lock_get(state, k, L_PID) == wer {
+            lock_frei(state, k)
+        }
+        k = k + 1
+    }
+}
+
+
 
 fn do_writev(state: u64, me: u64, fd: u64, iov: u64, n: u64, schreiben: bool) -> u64 {
     if n > 1024 {
@@ -5679,7 +6115,10 @@ fn do_brk(state: u64, me: u64, want: u64) -> u64 {
     if want > cur {
         while p < want {
             if proc.page_free(state, me, p) {
-                if proc.map_page(state, me, p, true, false) == 0 {
+                // RUNDE FREMDLAND: GENULLT. Was `brk` dazunimmt, ist
+                // nach POSIX mit Nullen gefuellt -- und musls Halde
+                // legt genau hier ihre Verwaltung ab und prueft sie.
+                if proc.map_page_zero(state, me, p, true, false) == 0 {
                     return cur
                 }
                 kstate.add(state, kstate.MAPS, 1)
@@ -5736,7 +6175,10 @@ fn big_map(state: u64, me: u64, pages: u64, prot: u64) -> u64 {
     }
     var p: u64 = base
     while p < top {
-        if proc.map_page(state, me, p, true, (prot & PROT_EXEC) != 0) == 0 {
+        // RUNDE FREMDLAND: GENULLT -- `mmap(MAP_ANONYMOUS)` liefert
+        // Nullen, und was der vorige Besitzer des Rahmens dort liegen
+        // liess, geht den neuen nichts an.
+        if proc.map_page_zero(state, me, p, true, (prot & PROT_EXEC) != 0) == 0 {
             return neg(errno.E_NOMEM)
         }
         kstate.add(state, kstate.MAPS, 1)
@@ -5787,7 +6229,10 @@ fn do_map(state: u64, me: u64, len: u64, prot: u64, flags: u64,
     }
     var p: u64 = base
     while p < top {
-        if proc.map_page(state, me, p, true, (prot & PROT_EXEC) != 0) == 0 {
+        // RUNDE FREMDLAND: GENULLT -- `mmap(MAP_ANONYMOUS)` liefert
+        // Nullen, und was der vorige Besitzer des Rahmens dort liegen
+        // liess, geht den neuen nichts an.
+        if proc.map_page_zero(state, me, p, true, (prot & PROT_EXEC) != 0) == 0 {
             return neg(errno.E_NOMEM)
         }
         kstate.add(state, kstate.MAPS, 1)
@@ -6216,6 +6661,39 @@ fn get_user64(state: u64, me: u64, addr: u64) -> u64 {
     return v
 }
 
+// RUNDE FREMDLAND: zwei Oktette lesen bzw. schreiben. `struct flock`
+// hat seine beiden Arten als `short`, und wer dort acht Oktette laese,
+// laese die Fuellung mit.
+fn user_half(state: u64, me: u64, addr: u64) -> u64 {
+    let phys: u64 = proc.translate(state, me, addr)
+    if phys == 0 {
+        return 0
+    }
+    guard.stac(state)
+    let v: u64 = (kstate.get8(phys) as u64)
+        | ((kstate.get8(phys + 1) as u64) << 8)
+    guard.clac(state)
+    return v
+}
+
+fn put_half(state: u64, me: u64, addr: u64, v: u64) -> bool {
+    if !poke(state, me, addr, v & 255) {
+        return false
+    }
+    return poke(state, me, addr + 1, (v >> 8) & 255)
+}
+
+fn put_word32(state: u64, me: u64, addr: u64, v: u64) -> bool {
+    var i: u64 = 0
+    while i < 4 {
+        if !poke(state, me, addr + i, (v >> (i * 8)) & 255) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
 fn put64(state: u64, me: u64, addr: u64, v: u64) -> bool {
     var i: u64 = 0
     while i < 8 {
@@ -6244,6 +6722,256 @@ fn do_getppid(state: u64, me: u64) -> u64 {
 // counts references is a round of its own) and it is why `fork` +
 // `execve` is the expensive way to start a program here; `SYS_OSUM_EXEC`
 // is the cheap one.
+// RUNDE FREMDLAND: `clone`, und zwar der Fall, der zaehlt -- ein FADEN.
+//
+// musls `pthread_create` ruft es mit genau diesen Flaggen:
+//   CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|
+//   CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID
+// und uebergibt in a1 den fertigen Stapel des neuen Fadens, in a4 den
+// Fadenzeiger (TLS). Der Faden faengt NICHT bei einem Einsprungpunkt an,
+// den der Kern kennt: musl legt die Startadresse selbst auf den Stapel
+// und kehrt dorthin zurueck. Der Kern muss also nur eines richtig
+// machen -- den neuen Faden mit demselben `rip` wie den Erzeuger
+// starten, mit dem UEBERGEBENEN `rsp` und `rax = 0`.
+//
+// OHNE CLONE_VM ist `clone` in diesem Kern `fork`. Das ist keine
+// Bequemlichkeit: ein Kind mit eigenem Adressraum IST ein fork, und
+// alles andere waere eine zweite Umsetzung derselben Sache.
+// RUNDE FREMDLAND: das Fadenkennungswort auf 0, wenn eines hinterlegt
+// ist. Vier Oktette, denn es ist ein `int`.
+fn clear_child_tid(state: u64, me: u64) {
+    let addr: u64 = sched.tget(state, me, sched.T_FUTEX)
+    if addr == 0 {
+        return
+    }
+    sched.tset(state, me, sched.T_FUTEX, 0)
+    let phys: u64 = proc.translate(state, me, addr)
+    if phys == 0 {
+        return
+    }
+    guard.stac(state)
+    kstate.set8(phys, 0)
+    kstate.set8(phys + 1, 0)
+    kstate.set8(phys + 2, 0)
+    kstate.set8(phys + 3, 0)
+    guard.clac(state)
+}
+
+fn do_clone(state: u64, me: u64, frame: u64, flags: u64, stapel: u64,
+    ptid: u64, ctid: u64, tls: u64) -> u64 {
+    if sched.tget(state, me, sched.T_KIND) != sched.K_USER {
+        return neg(errno.E_NOSYS)
+    }
+    // Kein gemeinsamer Adressraum: das ist ein Prozess, kein Faden.
+    if (flags & CLONE_VM) == 0 {
+        return do_fork(state, me, frame)
+    }
+    // Ein gemeinsamer Adressraum OHNE eigenen Stapel waere zwei
+    // Ausfuehrungen auf demselben Stapelzeiger -- der eine schriebe dem
+    // anderen den Rahmen um. Linux verlangt den Stapel hier ebenso.
+    if stapel == 0 {
+        return neg(errno.E_INVAL)
+    }
+    if !proc.user_ok(state, me, stapel - 8, 8) {
+        return neg(errno.E_FAULT)
+    }
+    let irq: u64 = sched.irq_save()
+    let faden: u64 = proc.create_thread(state, me,
+        sched.tget(state, me, sched.T_PRIO))
+    if faden == 0 {
+        sched.irq_restore(irq)
+        return neg(errno.E_AGAIN)
+    }
+    // Die Deskriptoren: POSIX teilt sie unter Faeden, dieser Kern haelt
+    // sie je Aufgabe -- also werden sie kopiert. Der Unterschied steht
+    // in STATUS-FREMDLAND.md.
+    file.inherit_task(state, me, faden)
+    sched.fpu_inherit(state, me, faden)
+    signal.inherit(state, me, faden)
+    sched.tset(state, faden, sched.T_CWD,
+        sched.tget(state, me, sched.T_CWD))
+    uio.adopt(state, me, faden)
+    // Halde und Abbildungsgrenze sind GEMEINSAM -- sie beschreiben
+    // denselben Adressraum. Ein Faden mit eigener `T_BRK` liesse
+    // `malloc` im einen Faden Seiten anlegen, die der andere fuer frei
+    // haelt.
+    sched.tset(state, faden, sched.T_BRK, brk_of(state, me))
+    sched.tset(state, faden, sched.T_MMAP, map_bottom(state, me))
+    sched.tset(state, faden, sched.T_BIG, sched.tget(state, me, sched.T_BIG))
+    sched.tset(state, faden, sched.T_USTACK, stapel)
+    netview.inherit(state, me, faden)
+    // DIE FADENGRUPPE. `CLONE_THREAD` heisst: derselbe Prozess nach
+    // aussen. `getpid` muss in jedem Faden dieselbe Zahl geben, `gettid`
+    // verschiedene -- deshalb bleibt `T_PID` eigen und `T_TGID` wird die
+    // des Erzeugers.
+    if (flags & CLONE_THREAD) != 0 {
+        sched.tset(state, faden, sched.T_TGID,
+            sched.tget(state, me, sched.T_TGID))
+    }
+    // DER FADENZEIGER. Ohne ihn liest der neue Faden `%fs:0` des alten
+    // -- und das ist der Fehler, den diese Runde bei `fork` schon einmal
+    // gefunden hat.
+    if (flags & CLONE_SETTLS) != 0 {
+        sched.tset(state, faden, sched.T_FSBASE, tls)
+    }
+    let neue_tid: u64 = sched.tget(state, faden, sched.T_PID)
+    // Die beiden Kennungsspeicher. `CHILD_SETTID` schreibt IN DEN
+    // ADRESSRAUM, den beide teilen, also darf er hier stehen.
+    if (flags & CLONE_PARENT_SETTID) != 0 {
+        if proc.user_ok(state, me, ptid, 8) {
+            put64(state, me, ptid, neue_tid)
+        }
+    }
+    // CLONE_CHILD_CLEARTID: die Adresse, die beim Fadenende auf 0 gesetzt
+    // werden MUSS. Daran haengt `pthread_join`: es wartet mit `futex` auf
+    // genau dieses Wort. Ohne das Loeschen wartet es ewig -- gemessen,
+    // bevor diese Zeilen standen: `th1` druckte "im faden" und blieb
+    // dann stehen.
+    //
+    // Gemerkt wird sie in `T_FUTEX` (das Feld steht seit Langem in
+    // `sched.fi` und war unbenutzt); `sched.exit_task` liest sie.
+    // LAUFZEIT hatte fuer `set_tid_address` ausdruecklich entschieden,
+    // NICHTS zu merken, weil kein Aufraeumen stattfand -- jetzt findet
+    // es statt, also wird gemerkt.
+    if (flags & CLONE_CHILD_CLEARTID) != 0 {
+        if proc.user_ok(state, me, ctid, 4) {
+            sched.tset(state, faden, sched.T_FUTEX, ctid)
+        }
+    }
+    // Der Rahmen des neuen Fadens: der des Erzeugers, mit eigenem
+    // Stapel und 0 als Antwort.
+    let ctx: u64 = state + kstate.CTX_OFF + faden * F_BYTES
+    var i: u64 = 0
+    while i < F_BYTES / 8 {
+        __mmio_write64((ctx + i * 8) as *mut u64,
+            __mmio_read64((frame + i * 8) as *mut u64))
+        i = i + 1
+    }
+    __mmio_write64((ctx + F_RAX) as *mut u64, 0)
+    __mmio_write64((ctx + F_RSP) as *mut u64, stapel)
+    sched.tset(state, faden, sched.T_ARG, proc.ARG_RESUME)
+    kstate.add(state, kstate.SPAWNS, 1)
+    sched.start(state, faden)
+    sched.irq_restore(irq)
+    return neue_tid
+}
+
+// RUNDE FREMDLAND: `futex` -- die Sperre, auf der musl steht.
+//
+// WAS HIER WIRKLICH GEBAUT IST, und der Satz gehoert in den Quelltext
+// und nicht in eine Zusage, die niemand nachliest: dies ist ein
+// WARTEN MIT NACHSEHEN, keine Warteschlange. `FUTEX_WAIT` prueft den
+// Wert, und solange er steht, schlaeft der Faden eine Marke und sieht
+// wieder nach. `FUTEX_WAKE` tut deshalb NICHTS ausser zu zaehlen -- es
+// gibt keine Liste, aus der zu wecken waere.
+//
+// Warum das reicht: eine Sperre, die gehalten wird, wird von IHREM
+// HALTER freigegeben, und der laeuft. Der Wartende sieht die Aenderung
+// spaetestens eine Marke (10 ms) spaeter. Das kostet Zeit und keine
+// Richtigkeit -- was NICHT passieren kann, ist ein verpasstes Wecken,
+// denn es wird nicht auf ein Wecksignal gewartet, sondern auf den WERT.
+//
+// Was es nicht kann und was deshalb hier steht: eine Sperre, die
+// hochfrequent gewechselt wird, kostet 10 ms je Wechsel statt Mikro-
+// sekunden. Eine echte Warteschlange an `T_FUTEX`/`T_FUTEXVAL` (die
+// Felder stehen seit Langem in `sched.fi`) ist der naechste Schritt.
+fn do_futex(state: u64, me: u64, adresse: u64, befehl: u64, wert: u64,
+    zeit: u64) -> u64 {
+    // Die beiden Zusatzbits sagen nur, ob die Sperre prozesslokal ist
+    // und welche Uhr gilt; fuer das Verhalten hier macht beides nichts.
+    // Die Maske wird ABGEZOGEN und nicht negiert: `!` ist in dieser
+    // Sprache der logische Nicht-Operator und nimmt nur bool.
+    var was: u64 = befehl
+    if (was & FUTEX_PRIVATE) != 0 {
+        was = was - FUTEX_PRIVATE
+    }
+    if (was & FUTEX_CLOCK_RT) != 0 {
+        was = was - FUTEX_CLOCK_RT
+    }
+    if (adresse & 3) != 0 {
+        return neg(errno.E_INVAL)
+    }
+    if !proc.user_ok(state, me, adresse, 4) {
+        return neg(errno.E_FAULT)
+    }
+    if was == FUTEX_WAKE {
+        // Es gibt keine Warteschlange, aus der zu wecken waere: die
+        // Wartenden sehen selbst nach. Die Antwort ist die Zahl der
+        // geweckten Faeden, und ehrlich ist hier 0.
+        return 0
+    }
+    if was != FUTEX_WAIT {
+        return neg(errno.E_INVAL)
+    }
+    // Steht der Wert nicht mehr, hat der Aufrufer die Aenderung
+    // verpasst und darf sofort weiter -- das ist der ganze Sinn des
+    // Wertvergleichs im Kern.
+    if user_word32(state, me, adresse) != (wert & 0xFFFFFFFF) {
+        return neg(errno.E_AGAIN)
+    }
+    // Ohne Zeitangabe wird nicht ewig gewartet, sondern hoechstens
+    // FUTEX_MAX Marken. Ein Faden, der wirklich ewig wartet, ist von
+    // einem verklemmten nicht zu unterscheiden, und dieser Kern hat
+    // keinen, der ihn loesen koennte.
+    var rest: u64 = FUTEX_MAX
+    while rest > 0 {
+        if signal.interrupted(state, me) {
+            return neg(errno.E_INTR)
+        }
+        sched.sleep_ticks(state, 1)
+        if user_word32(state, me, adresse) != (wert & 0xFFFFFFFF) {
+            return 0
+        }
+        rest = rest - 1
+    }
+    return neg(errno.E_TIMEDOUT)
+}
+
+const FUTEX_MAX: u64 = 1000 // 10 Sekunden bei 100 Hz
+
+// Vier Oktette aus dem Adressraum des Aufrufers. `futex` vergleicht
+// einen `int`, nicht ein Wort -- wer hier 64 Bit laese, verglich vier
+// Oktette Nachbarschaft mit.
+fn user_word32(state: u64, me: u64, addr: u64) -> u64 {
+    let phys: u64 = proc.translate(state, me, addr)
+    if phys == 0 {
+        return 0
+    }
+    guard.stac(state)
+    let v: u64 = (kstate.get8(phys) as u64)
+        | ((kstate.get8(phys + 1) as u64) << 8)
+        | ((kstate.get8(phys + 2) as u64) << 16)
+        | ((kstate.get8(phys + 3) as u64) << 24)
+    guard.clac(state)
+    return v
+}
+
+// RUNDE FREMDLAND: `mprotect`. Dieser Kern legt die Rechte einer Seite
+// beim Abbilden fest (`elf.fi` nach dem Programmkopf, `map_page` sonst)
+// und hat keinen Weg, sie danach zu aendern.
+//
+// musl ruft es beim Anlegen eines Fadenstapels, um eine SCHUTZSEITE
+// ohne Rechte darunterzulegen. Faellt der Aufruf durch, legt musl
+// keinen Faden an -- gemessen: `pthread_create` gab EAGAIN (11).
+//
+// Die Antwort ist deshalb 0, und was das heisst, steht hier: die
+// Schutzseite ist KEINE. Ein Faden, der seinen Stapel ueberlaeuft,
+// schreibt in die Nachbarseite, statt einen Seitenfehler zu bekommen.
+// Das ist ein ehrlich benannter Mangel und kein Versehen -- die
+// Alternative waere, gar keine Faeden zu koennen.
+fn do_mprotect(state: u64, me: u64, addr: u64, len: u64, prot: u64) -> u64 {
+    if (addr & 4095) != 0 {
+        return neg(errno.E_INVAL)
+    }
+    if len == 0 {
+        return 0
+    }
+    if !proc.user_ok(state, me, addr, 1) {
+        return neg(errno.E_FAULT)
+    }
+    return 0
+}
+
 fn do_fork(state: u64, me: u64, frame: u64) -> u64 {
     if sched.tget(state, me, sched.T_KIND) != sched.K_USER {
         return neg(errno.E_NOSYS)
@@ -6285,6 +7013,24 @@ fn do_fork(state: u64, me: u64, frame: u64) -> u64 {
     // eines `fork`-Kindes nicht wachsen -- ein Fehler, der erst beim
     // ersten tiefen Aufruf im Kind sichtbar wuerde.
     sched.tset(state, child, sched.T_USTACK, sched.tget(state, me, sched.T_USTACK))
+    // RUNDE FREMDLAND, UND DAS WAR EIN ECHTER FEHLER SEIT LAUFZEIT.
+    // Das Kind erbt die FS-BASIS, also seinen Fadenzeiger.
+    //
+    // GEMESSEN, bevor diese Zeile stand: `busybox sh -c 'seq 5 | sort'`
+    // starb im ZWEITEN Glied der Roehre mit #GP auf `hlt` mitten in
+    // musls `alloc_slot` -- das ist musls `a_crash()`, die Prueffrage
+    // seiner Halde. Der Grund war nicht die Halde. `arch_prctl` legt die
+    // Basis in `T_FSBASE`, `fork` kopierte sie nicht, das Kind bekam
+    // also 0 -- und `sched.fsbase_apply` laesst bei 0 ABSICHTLICH die
+    // Basis des vorigen Fadens stehen (fuer Osum-eigene Programme, die
+    // %fs nie anfassen, ist das richtig). Fuer ein musl-Kind heisst es:
+    // sein `%fs:0` zeigte in den Adressraum eines FREMDEN Prozesses.
+    //
+    // Der erste Zweig einer Roehre lief deshalb (er war ein Kind, das
+    // gleich `execve` rief und dabei einen frischen Zeiger setzte), der
+    // zweite starb -- er las durch den Zeiger, bevor er ihn setzte.
+    sched.tset(state, child, sched.T_FSBASE,
+        sched.tget(state, me, sched.T_FSBASE))
     // The context the child comes back on. `proc.resume_start` hands this
     // copy to `user_resume` in isr.s.
     let ctx: u64 = state + kstate.CTX_OFF + child * F_BYTES
@@ -6401,6 +7147,15 @@ fn do_execve(state: u64, me: u64, frame: u64, path: u64, argv: u64) -> u64 {
     proc.discard(state, t)
     sched.tset(state, me, sched.T_ENTRY, entry)
     sched.tset(state, me, sched.T_USTACK, ustack)
+    // RUNDE FREMDLAND: UND DER FADENZEIGER GEHT AUF NULL.
+    // Aus demselben Grund wie die Signalroutinen und MXCSR weiter oben:
+    // die FS-Basis des ALTEN Abbilds zeigt in Speicher, den es nach
+    // diesem Aufruf nicht mehr gibt. Das neue Abbild setzt sich seine
+    // eigene mit `arch_prctl`, bevor es irgendetwas durch %fs liest --
+    // bliebe die alte stehen, laese ein Programm, das (wie jedes
+    // Osum-eigene) %fs nie anfasst, im Fehlerfall durch einen Zeiger
+    // auf fremde Seiten.
+    sched.tset(state, me, sched.T_FSBASE, 0)
     sched.tset(state, me, sched.T_BRK, 0)
     sched.tset(state, me, sched.T_MMAP, 0)
     sched.tset(state, me, sched.T_BIG, 0)
