@@ -201,3 +201,43 @@ ab):
 - `br_table` (bei SQLite bis zu 185 Ziele) → ebenso
 
 Ausführlich in `tools/wasm2firn/TIEFE.md`.
+
+
+---
+
+## 5. Die Prüfung — dasselbe Modul durch beide Wege
+
+`tools/wasm2firn/pruefung/run.sh`. Der Gedanke: ein handgeschriebenes
+`.wat` läuft **einmal im Deuter und einmal durch `wasm2firn` + `firnc`**,
+und die Ausgaben werden Zeile für Zeile verglichen.
+
+Das trennt zwei Fehlerarten sauber:
+
+- **Ausgaben verschieden** → der Fehler liegt im Übersetzer.
+- **beide gleich falsch** → der Fehler liegt in der gemeinsamen
+  WASI-Schicht (die ja aus dem Deuter gezogen wird).
+
+Stand: **6 Module, 55 Fälle, alle grün.**
+
+| Modul | Fälle | was es prüft |
+|---|---|---|
+| `arith` | 13 | Schieben, Division, Vergleiche mit Vorzeichen, `clz`/`ctz`/`popcnt` |
+| `cf` | 8 | `br`, `br_if`, `br_table`, mehrstufige Sprünge, `loop` |
+| `i64` | 18 | die 64-Bit-Seite, alle `i64.load*`-Breiten |
+| `mem` | 13 | alle Ladebreiten, `memory.copy` mit Überlappung, `fill`, `size`, `grow` |
+| `tab` | 3 | `call_indirect` über die Tabelle |
+| `po` | — | `path_open` mit `CREAT` legt wirklich eine Datei an |
+
+### Was die Prüfung gefunden hat
+
+**`i32.load8_s` erweiterte auf 64 statt auf 32 Bit.** Aus `0xFF` wurde
+`0xFFFFFFFFFFFFFFFF` statt `0xFFFFFFFF` — und damit schlug jeder Vergleich
+mit einer `i32`-Konstante fehl. Die Breite stand in der Tabelle des
+Erzeugers, wurde aber nie ausgewertet.
+
+Ein solcher Fehler ist im Quelltext unsichtbar und in einem großen Modul
+nicht zu finden; ein 20-zeiliges `.wat` zeigt ihn in einer Sekunde.
+
+**Nebenbei:** in einem Fall war die Erwartung im Test falsch, nicht der
+Code — `memory.copy` mit Überlappung verhält sich wie `memmove`. Beide
+Ausführungen waren richtig.
