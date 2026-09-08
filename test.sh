@@ -1504,6 +1504,36 @@ lauf "45. Freunde, Praesenz und ein Chat ohne Mitleser (tools/praesenz/run.sh, R
 lauf "46. der Mischer von Ring 3 aus: zwei Programme, Lautstaerke je Strom, Saettigung, Systemklang (tools/ton/mischer.sh, Runde TON-2)" \
      tools/ton/mischer.sh ton2 '^== |^  OK   |^  FEHL |^    \(|^ERGEBNIS'
 
+#  43. DIE BILDGRENZE UND DIE FENSTERBEWEGUNG (tools/vsync/run.sh, Runde
+#      VSYNC). Zwei Zusagen: beim Zeichnen darf nie eine halbe Bildseite
+#      auf dem Schirm stehen, und Fenster gehen mit Skalieren und Alpha
+#      auf und zu statt zu springen.
+#
+#      DER BEFUND DIESER RUNDE, und er ist der Grund, warum der
+#      Abschnitt DREI Stufen misst und nicht eine: der Rueckpuffer aus
+#      Runde SCHIRM beseitigt das Reissen NICHT. `flush` kopiert Zeile
+#      fuer Zeile, und waehrend dieser Schleife steht oben das neue und
+#      unten das alte Bild. Das Sammeln der Zeichnungen zu EINEM Bild
+#      (`vsync`) senkt nur die Zahl der Gelegenheiten. Erst der Wechsel
+#      der ganzen Bildseite ueber VBE_YOFF (`flip`) macht daraus null.
+#
+#      GEMESSEN am stehenden, aber staendig neu gemalten Fenster, mit
+#      einem Ableser auf einem ZWEITEN Kern (anders geht es nicht: auf
+#      einem Kern sind Maler und Ableser derselbe Faden und ein halbes
+#      Bild ist per Bauart unsichtbar -- und unter QEMU ist es auch
+#      nicht zu fotografieren, `screendump` liest atomar):
+#
+#          ohne alles        20 453 Risse
+#          nur sammeln       20 041 Risse
+#          + Seitenwechsel        0 Risse
+#
+#      Dazu die Bildzeit (unter 16 ms auf 1280x800 und 1920x1080), die
+#      Bewegung samt Gegenprobe `noanim` (die denselben Endzustand
+#      erreichen MUSS, nur ohne Zwischenbilder) und der Nachweis, dass
+#      die Sparsamkeit der Runde UHRWERK unveraendert geblieben ist.
+lauf "43. die Bildgrenze und die Fensterbewegung (tools/vsync/run.sh, Runde VSYNC)" \
+     tools/vsync/run.sh vsync '^VSYNC: |^    ok  |^    NICHT |^        '
+
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
 abschnitte_abarbeiten
