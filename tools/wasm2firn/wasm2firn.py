@@ -127,6 +127,12 @@ I32, I64, F32, F64, EMPTY = 0x7F, 0x7E, 0x7D, 0x7C, 0x40
 # exponentiell.
 TURM_GRENZE = 8
 
+# Ab dieser Schachtelungstiefe wird JEDER Turm flachgelegt, auch ein
+# kurzer. Grund: firncs `escape`-Durchgang kostet je Ebene grob das
+# Achtfache (24 Ebenen 0 s, 26 Ebenen 70 s -- gemessen, TIEFE.md).
+# Unter ~20 Ebenen ist er unauffaellig.
+TIEFE_DECKEL = 12
+
 
 def typname(t):
     return {I32: 'i32', I64: 'i64', F32: 'f32', F64: 'f64'}.get(t, '?')
@@ -650,7 +656,11 @@ class Erzeuger:
             if op == 0x02 and not self.im_turm:
                 merk = l.at
                 anzahl, danach = turm_messen(code, l.at - 1)
-                if anzahl > TURM_GRENZE:
+                # Ein Turm wird flachgelegt, wenn er entweder LANG ist
+                # (eine Sprungtabelle) ODER wenn wir ohnehin schon tief
+                # stehen -- denn jede weitere Ebene kostet firnc
+                # exponentiell (TIEFE.md).
+                if anzahl > TURM_GRENZE or (anzahl >= 1 and tiefe >= TIEFE_DECKEL):
                     sp = self.turm_erzeugen(l, code, anzahl, danach, sp,
                                             stapel, tiefe)
                     tiefe += 1
