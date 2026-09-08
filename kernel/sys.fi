@@ -333,6 +333,21 @@ const SYS_CLOCK_NANOSLEEP: u64 = 230
 const SYS_TGKILL: u64 = 234
 const SYS_GETRANDOM: u64 = 318
 
+// RUNDE LAUFZEIT: `arch_prctl`. Die eine Nummer, an der jedes gegen musl
+// oder glibc gelinkte Programm haengt -- es setzt damit seinen
+// Fadenzeiger, und ohne ihn ist `%fs:0x0` ein Zugriff auf die Null.
+const SYS_ARCH_PRCTL: u64 = 158
+
+// RUNDE LAUFZEIT, GEMESSEN: das sind die beiden Nummern, nach denen ein
+// gegen musl gelinktes Programm fragt und die dieser Kern nicht hatte.
+// Gefunden mit `fremdtrace` -- Lua rief sie, bekam -ENOSYS und schwieg
+// deshalb: seine ganze Ausgabe geht durch `writev`.
+const SYS_READV: u64 = 19
+const SYS_WRITEV: u64 = 20
+const SYS_SET_TID_ADDRESS: u64 = 218
+const ARCH_SET_FS: u64 = 0x1002
+const ARCH_GET_FS: u64 = 0x1003
+
 // Und die drei, die Linux nicht hat, im Hunderterblock dieser Runde:
 //   1100 openpty(aus)   -> legt ein Paar aus Steuer- und Nutzerseite an
 //                          und schreibt zwei Deskriptoren nach `aus`
@@ -1883,6 +1898,19 @@ fn fset(frame: u64, off: u64, v: u64) {
 // rsp und die drei Argumentregister der Behandlungsroutine.
 fn entry(number: u64, frame: u64, state: u64) -> u64 {
     let r: u64 = dispatch(number, frame, state)
+    // RUNDE LAUFZEIT: welche Nummer kennt dieser Kern NICHT? Ein fremdes
+    // Programm legt seine Nummer in rax und bekommt -ENOSYS zurueck --
+    // ohne diese Zeile sieht man davon nur, dass der Prozess starb.
+    // Nur mit `fremdtrace` auf der Befehlszeile, und der Rueckgabewert
+    // bleibt derselbe.
+    if kstate.mode_on(state, kstate.M_FREMDTRACE) {
+        if r == neg(errno.E_NOSYS) {
+            var s_ns: [u8; 15] = "sys: ENOSYS nr\0"
+            serial.puts((&s_ns[0]) as u64)
+            serial.dec(number)
+            serial.nl()
+        }
+    }
     // RUNDE POLL, UND ES IST EIN ECHTER FEHLER, DER HIER SEIT K9 LAG.
     // Der Satz darueber stimmte nicht: `isr.s` schreibt die Antwort
     // NACH diesem Aufruf in den Rahmen -- also stand beim Zustellen des
@@ -2044,6 +2072,29 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     }
     if number == SYS_BRK {
         return do_brk(state, me, a0)
+    }
+    // RUNDE LAUFZEIT: der Fadenzeiger. Steht neben `brk`, weil beide
+    // dasselbe tun -- ein Programm richtet sich seinen Adressraum ein,
+    // bevor es anfaengt zu arbeiten.
+    if number == SYS_ARCH_PRCTL {
+        return do_arch_prctl(state, me, a0, a1)
+    }
+    // RUNDE LAUFZEIT: `writev`/`readv`. Der Grund, aus dem Lua auf
+    // diesem Kern stumm blieb -- stdio schreibt gepuffert, und gepuffert
+    // heisst bei musl `writev` und nicht `write`.
+    if number == SYS_WRITEV {
+        return do_writev(state, me, a0, a1, a2, true)
+    }
+    if number == SYS_READV {
+        return do_writev(state, me, a0, a1, a2, false)
+    }
+    // `set_tid_address` gibt nur die eigene Kennung zurueck. Dieser Kern
+    // raeumt keine Futex-Adresse beim Fadenende auf, also wird die
+    // Adresse NICHT gemerkt -- was hier gelogen waere, ist ein
+    // Aufraeumen zu versprechen, das nicht stattfindet. musl will von
+    // dem Aufruf ohnehin nur die tid.
+    if number == SYS_SET_TID_ADDRESS {
+        return sched.tget(state, me, sched.T_PID)
     }
     if number == SYS_MMAP {
         // ROUNDE K7: a4 ist der Deskriptor. Bis hierher wurde er
@@ -5398,6 +5449,103 @@ fn map_bottom(state: u64, me: u64) -> u64 {
 // `brk(0)` asks where the break is; `brk(x)` moves it. Linux answers a
 // refusal with the OLD break, not with an error, and a libc reads that as
 // "no". Osum does the same.
+// RUNDE LAUFZEIT: `arch_prctl(code, addr)`.
+//
+// ZWEI der vier Unterfunktionen von Linux, und zwar die beiden, die ein
+// Programm im Benutzerraum wirklich ruft:
+//
+//   ARCH_SET_FS (0x1002)  die FS-Basis setzen -- der Fadenzeiger.
+//   ARCH_GET_FS (0x1003)  sie zurueckgeben, nach `*addr`.
+//
+// ARCH_SET_GS/ARCH_GET_GS gibt es NICHT und sie geben -EINVAL: `%gs`
+// gehoert in diesem Kern dem Prozessorblock (`cpu.fi`, `swapgs`), und
+// ein Programm, das sie umbiegen duerfte, koennte den Kern beim
+// naechsten Systemaufruf auf einen Zeiger seiner Wahl schicken.
+//
+// DIE ADRESSE WIRD GEPRUEFT. Sie muss kanonisch sein und in der unteren
+// Haelfte liegen -- eine Kernadresse in IA32_FS_BASE waere genau der
+// Weg, auf dem ein Prozess den Kern dazu bringt, fuer ihn zu lesen.
+// `wrmsr` mit einem nichtkanonischen Wert ist ausserdem ein #GP, also
+// waere die Maschine ohne diese Zeile tot statt der Prozess.
+// RUNDE LAUFZEIT: `writev(fd, iov, iovcnt)` und `readv` in EINER
+// Funktion -- sie unterscheiden sich in genau einem `if`.
+//
+// Ein `struct iovec` ist zwei Woerter: Zeiger, Laenge. Der Vektor wird
+// Eintrag fuer Eintrag abgearbeitet und auf `do_write`/`do_read`
+// zurueckgefuehrt, die die Rechte, die Grenzen und das Terminal schon
+// koennen. Was hier dazukommt, ist nur das Zaehlen.
+//
+// DIE REGELN VON POSIX, und jede hat ihren Grund:
+//   * IOV_MAX ist 1024. Ein groesserer Vektor ist -EINVAL, damit
+//     niemand den Kern mit einer Zahl aus dem Nutzerraum in eine lange
+//     Schleife schickt.
+//   * Ein TEILERFOLG ist ein Erfolg. Wer drei Stuecke schreiben will
+//     und nach dem zweiten nicht mehr kann, bekommt die Summe der
+//     ersten beiden -- nicht den Fehler. Der Fehler kommt erst, wenn
+//     KEIN Oktett durchging.
+//   * Ein Eintrag der Laenge 0 wird uebersprungen, nicht abgelehnt.
+fn do_writev(state: u64, me: u64, fd: u64, iov: u64, n: u64, schreiben: bool) -> u64 {
+    if n > 1024 {
+        return neg(errno.E_INVAL)
+    }
+    if n == 0 {
+        return 0
+    }
+    if !proc.user_ok(state, me, iov, n * 16) {
+        return neg(errno.E_FAULT)
+    }
+    var total: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let base: u64 = get_user64(state, me, iov + i * 16)
+        let len: u64 = get_user64(state, me, iov + i * 16 + 8)
+        if len != 0 {
+            var r: u64 = 0
+            if schreiben {
+                r = do_write(state, me, fd, base, len)
+            } else {
+                r = do_read(state, me, fd, base, len)
+            }
+            // Ein negativer Rueckgabewert ist ein Fehler: er steht als
+            // Zweierkomplement da, also ist sein oberstes Bit gesetzt.
+            if (r >> 63) != 0 {
+                if total == 0 {
+                    return r
+                }
+                return total
+            }
+            total = total + r
+            // Kurz geschrieben heisst: mehr geht gerade nicht.
+            if r < len {
+                return total
+            }
+        }
+        i = i + 1
+    }
+    return total
+}
+
+fn do_arch_prctl(state: u64, me: u64, code: u64, addr: u64) -> u64 {
+    if code == ARCH_SET_FS {
+        if (addr >> 47) != 0 {
+            return neg(errno.E_INVAL)
+        }
+        sched.tset(state, me, sched.T_FSBASE, addr)
+        // Sofort wirksam: dieser Faden laeuft gerade, und der naechste
+        // Wechsel legt sie aus dem Aufgabensatz erneut hin.
+        sched.fsbase_apply(state, me)
+        return 0
+    }
+    if code == ARCH_GET_FS {
+        if !proc.user_ok(state, me, addr, 8) {
+            return neg(errno.E_FAULT)
+        }
+        put64(state, me, addr, sched.tget(state, me, sched.T_FSBASE))
+        return 0
+    }
+    return neg(errno.E_INVAL)
+}
+
 fn do_brk(state: u64, me: u64, want: u64) -> u64 {
     let cur: u64 = brk_of(state, me)
     if want == 0 {
@@ -5936,6 +6084,20 @@ fn do_siginfo(state: u64, me: u64, what: u64, arg: u64) -> u64 {
 }
 
 // Acht Oktette nach Ring 3, mit Pruefung je Seite.
+// RUNDE LAUFZEIT: acht Oktette AUS dem Nutzerraum, das Gegenstueck zu
+// `put64`. `writev` braucht es, um einen `struct iovec` zu lesen.
+// Ueber `peek`, also durch dieselbe Uebersetzung und dasselbe
+// SMAP-Fenster wie jeder andere Zugriff auf Ring-3-Speicher.
+fn get_user64(state: u64, me: u64, addr: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < 8 {
+        v = v | (peek(state, me, addr + i) << (i * 8))
+        i = i + 1
+    }
+    return v
+}
+
 fn put64(state: u64, me: u64, addr: u64, v: u64) -> bool {
     var i: u64 = 0
     while i < 8 {
