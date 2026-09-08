@@ -262,6 +262,54 @@ if [ -n "$gebaut_app" ]; then
 fi
 export FIRNLIB="$ROOT/lib"
 
+# ======================================== 2c. DER UEBERSETZER SELBST
+#
+# RUNDE TUERSCHLOSS: `firnc` KOMMT MIT AUF DEN STICK.
+#
+# WARUM DAS DER WICHTIGSTE NACHTRAG DIESER RUNDE IST. Runde DURCHKLICK
+# hat die vollstaendige Dateiliste des Abbilds gelesen und festgestellt
+# (8.1): kein `firnc`, kein `fas` -- "auf dem Stick laesst sich kein
+# Firn-Programm uebersetzen". Ein System, das sich selbst nicht
+# fortsetzen kann, ist ein Vorfuehrstueck. `tools/k16/run.sh` ist dabei
+# mit 64/0 gruen: der Uebersetzer LAEUFT auf Osum, er lag nur nicht
+# darauf.
+#
+# WOHER DIE QUELLE KOMMT. `firnc` ist nicht Teil dieses Baums; es ist
+# `bin/firnc1.fi` aus dem Firn-Baum, uebersetzt vom festgenagelten
+# `firnc0` und gegen `kernel/user/user.ld` gebunden -- Abbild ab
+# 0x40100000 statt 0x400000. Das ist woertlich der Weg aus
+# `tools/k16/run.sh` Abschnitt 4, und er steht hier nicht noch einmal
+# anders: dieselben zwei Befehle, damit nicht zwei Wege entstehen, aus
+# derselben Quelle zwei verschiedene Uebersetzer zu machen.
+#
+# KEIN crt.o: `firnc1.fi` hat ein `fn main`, und dafuer erzeugt der
+# Uebersetzer sein `_start` selbst (genau deshalb legt `kernel/elf.fi`
+# den Argumentblock auf den Stapelzeiger).
+#
+# WENN DIE QUELLE FEHLT, ist das kein Abbruch: der Stick ist ohne
+# Uebersetzer schlechter, aber nicht kaputt. Dann sagt diese Stelle,
+# dass er fehlt, und der Rest laeuft weiter.
+FIRNQ=""
+for k in "${FIRN_REPO:-}" "$ROOT/../firn" "$ROOT/../../firn"; do
+    [ -n "$k" ] && [ -f "$k/bin/firnc1.fi" ] && FIRNQ=$(cd "$k" && pwd) && break
+done
+if [ -n "$FIRNQ" ]; then
+    if ( cd "$FIRNQ" && FIRNLIB="$FIRNQ/lib" "$ROOT/$CC" -c \
+            -o "$OUT/firnc-osum.o" bin/firnc1.fi ) > "$OUT/firnc-osum.err" 2>&1 \
+       && ld -T kernel/user/user.ld -o "$OUT/firnc.elf" "$OUT/firnc-osum.o" \
+            2>> "$OUT/firnc-osum.err"; then
+        strip --strip-all "$OUT/firnc.elf"
+        gebaut="$gebaut firnc"
+        sagen "uebersetzer $(stat -c%s "$OUT/firnc.elf") Oktette (firnc aus $FIRNQ)"
+    else
+        echo "== firnc laesst sich nicht fuer Osum bauen" >&2
+        head -8 "$OUT/firnc-osum.err" >&2
+        fehler "der Uebersetzer laesst sich nicht fuer den Stick bauen"
+    fi
+else
+    echo "== HINWEIS: kein Firn-Baum gefunden, /bin/firnc fehlt im Abbild" >&2
+fi
+
 # ================================================ 3. was sonst auf die Platte
 python3 tools/netview/icons.py bauen "$OUT/icons" > "$OUT/icons.log" 2>&1 \
     || { tail -10 "$OUT/icons.log" >&2; fehler "die Symbole lassen sich nicht bauen"; }
@@ -501,7 +549,8 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /system/FASSUNG /system/SCHLUESSELGEN \
 /apps/explorer.osp/start /apps/editor.osp/start /apps/terminal.osp/start \
 /apps/launcher.osp/start /apps/widgets.osp/start /apps/settings.osp/start \
-/apps/settings.osp/INFO /apps/settings.osp/symbol"
+/apps/settings.osp/INFO /apps/settings.osp/symbol \
+/bin/shutdown /bin/power /bin/firnc /bin/fas"
 python3 tools/osum/mkfs.py list "$OUT/root.img" > "$OUT/liste.txt" 2>&1 \
     || fehler "das fertige Dateisystem laesst sich nicht lesen"
 fehlt=0
