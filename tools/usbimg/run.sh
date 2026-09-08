@@ -136,16 +136,74 @@ lauf() { # name zusatzargumente...
     # nicht von selbst. Auf das Zeitlimit zu warten waere bei sechs
     # Laeufen eine Viertelstunde Leerlauf; also wird auf die letzte Zeile
     # des Berichts gewartet und dann abgeschaltet.
+    #
+    # ================================================ RUNDE TUERSCHLOSS
+    # DER DIAGNOSE-EINTRAG WIRD AUSGEWAEHLT UND NICHT MEHR VORAUSGESETZT.
+    #
+    # Dieser Laeufer startete das Abbild und erwartete den
+    # hwdiag-Bericht auf der Leitung -- weil `default_entry` frueher auf
+    # die Hardware-Diagnose zeigte. Runde HAENGER hat das aus gutem
+    # Grund umgestellt (Commit 4ca1d9e): ein Stick, der nach zwanzig
+    # Sekunden von selbst in einen Bericht laeuft, der ABSICHTLICH
+    # stehenbleibt, kommt nie bis zum Schreibtisch. Seither zeigt
+    # `default_entry: 1` auf den Schreibtisch -- und dieser Laeufer
+    # meldete elf Fehlschlaege, die alle denselben Satz sagen:
+    # "hwdiag: ... fehlt im Bericht". Gemessen: im Mitschnitt steht
+    # stattdessen `desktop: ready w=1280 h=800`. Der Stick tat das
+    # Richtige, die Erwartung war alt.
+    #
+    # Statt `default_entry` zurueckzudrehen (das waere der Fehler, den
+    # HAENGER behoben hat) wird der Eintrag jetzt AUSGEWAEHLT: Limine
+    # nimmt Pfeiltasten und Eingabe entgegen, und der Diagnose-Eintrag
+    # ist der achte. `sendkey` ueber den Monitor ist der Weg, den
+    # tools/wm/monitor.py fuer die Tastatur ohnehin geht.
     local name=$1; shift
     local out="$TMPD/$name.txt"
     cp -f "$IMG" "$TMPD/$name.img"
     rm -f "$out"
+    local mon="$TMPD/$name.mon"
+    rm -f "$mon"
     timeout 200 qemu-system-x86_64 "${KVM[@]}" -m 2048 \
         -drive "file=$TMPD/$name.img,format=raw,if=none,id=stick" \
         "$@" \
         -serial "file:$out" -display none -no-reboot \
+        -monitor "unix:$mon,server,nowait" \
         > "$TMPD/$name.qemu" 2>&1 &
     local pid=$!
+    # DEN ACHTEN EINTRAG WAEHLEN. Limine malt sein Menue erst, wenn die
+    # Firmware durch ist; vorher gehen die Tasten ins Leere. Also wird
+    # gewartet, bis der Anschluss da ist, und dann siebenmal nach unten.
+    ( local w=0
+      while [ $w -lt 100 ] && [ ! -S "$mon" ]; do sleep 0.1; w=$((w+1)); done
+      # AUF DAS MENUE WARTEN UND NICHT AUF EINE FRIST. Unter BIOS ist
+      # Limine nach gut einer Sekunde da; unter UEFI laeuft erst OVMF
+      # (`BdsDxe: loading Boot0001 ...`), und drei Sekunden reichen
+      # nicht -- gemessen: die Pfeiltasten gingen ins Leere, der
+      # Standardeintrag lief los, und der UEFI-Lauf meldete
+      # "erkannte Firmware: ?". Limine loescht beim Zeichnen seines
+      # Menues den Schirm; auf der SERIELLEN Leitung steht zu diesem
+      # Zeitpunkt noch nichts vom Kern. Also wird gewartet, bis der
+      # Kern NOCH NICHT da ist, aber die Firmware fertig -- messbar
+      # daran, dass die Datei seit einer Sekunde nicht mehr waechst.
+      local vor=-1 jetzt=0 ruhe=0 t=0
+      while [ $t -lt 300 ]; do
+          jetzt=$(stat -c%s "$out" 2>/dev/null || echo 0)
+          if [ "$jetzt" = "$vor" ]; then
+              ruhe=$((ruhe+1))
+              [ $ruhe -ge 5 ] && break
+          else
+              ruhe=0
+          fi
+          vor=$jetzt
+          sleep 0.2; t=$((t+1))
+      done
+      for _ in 1 2 3 4 5 6 7; do
+          printf 'sendkey down\n' | timeout 3 socat - "UNIX-CONNECT:$mon" \
+              >/dev/null 2>&1
+          sleep 0.2
+      done
+      printf 'sendkey ret\n' | timeout 3 socat - "UNIX-CONNECT:$mon" \
+          >/dev/null 2>&1 ) &
     local i=0
     while [ $i -lt 1000 ]; do
         grep -qa 'ENDE DER DIAGNOSE' "$out" 2>/dev/null && break
