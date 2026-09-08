@@ -812,6 +812,16 @@ class Erzeuger:
         # erkannt und brach weiter nach aussen aus -- der Rest der
         # Funktion wurde uebersprungen.
         ziel_tiefe = b.tiefe
+        # WAR EIN ECHTER FEHLER (f177 in dateitest.wasm): ein `br` auf
+        # eine SCHLEIFE bedeutet ZURUECK an ihren Anfang, nicht hinter
+        # ihr Ende. Stand hinter dem `}` der Schleife die Pruefung
+        # `br_ziel == <ihre Tiefe>`, wurde der Sprung dort als erfuellt
+        # abgehakt -- und die Schleife war verlassen statt neu
+        # durchlaufen. Hinter einer Schleife wird deshalb NICHTS mehr
+        # abgehakt; erfuellt wird ein Schleifensprung INNERHALB der
+        # Schleife (siehe `umgebende Schleife` weiter unten).
+        if b.art == 'loop':
+            ziel_tiefe = -2
         self.e(tiefe, 'if br_ziel >= 0 {')
         if not umschliesst:
             self.e(tiefe + 1, 'if br_ziel == %d { br_ziel = -1 } else {'
@@ -822,6 +832,22 @@ class Erzeuger:
                 self.e(tiefe + 2, 'return')
             self.e(tiefe + 1, '}')
         else:
+            # Ist die UMGEBENDE Ebene eine Schleife, dann heisst ein
+            # Sprung auf sie: von vorne. Das wird hier abgefangen --
+            # `continue` traegt genau bis zu ihr, denn sie ist die
+            # innerste Schleife um diese Stelle.
+            umg = stapel[-1] if stapel else None
+            if umg is not None and umg.art == 'loop':
+                self.e(tiefe + 1, 'if br_ziel == %d {' % ziel_tiefe)
+                self.e(tiefe + 2, 'br_ziel = -1')
+                self.e(tiefe + 1, '} else if br_ziel == %d {' % umg.tiefe)
+                self.e(tiefe + 2, 'br_ziel = -1')
+                self.e(tiefe + 2, 'continue')
+                self.e(tiefe + 1, '} else {')
+                self.e(tiefe + 2, 'break')
+                self.e(tiefe + 1, '}')
+                self.e(tiefe, '}')
+                return
             m = _verteiler_ohne_schleife(stapel) if stapel is not None else None
             if m is not None:
                 # Von hier aus traegt ein `continue` bis in den
