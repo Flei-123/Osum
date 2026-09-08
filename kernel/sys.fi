@@ -116,7 +116,7 @@ export {
     SYS_SETPGID, SYS_GETPGRP, SYS_SETSID, SYS_GETPGID, SYS_RT_SIGPENDING,
     SYS_TIME, SYS_FUTEX, SYS_GETTID, SYS_CLOCK_GETTIME, SYS_CLOCK_GETRES,
     SYS_CLOCK_NANOSLEEP, SYS_TGKILL, SYS_GETRANDOM,
-    SYS_UNAME, SYS_PRCTL,
+    SYS_UNAME, SYS_PRCTL, SYS_MPROTECT,
     SYS_OSUM_PTY, SYS_OSUM_TTYINFO, SYS_OSUM_SIGINFO,
     SYS_VM_CREATE, SYS_VM_RUN, SYS_VM_STAT, SYS_VM_KILL, SYS_VM_VALUE,
     SYS_OSUM_SETENV, SYS_OSUM_MOUNT,
@@ -358,6 +358,27 @@ const SYS_SET_TID_ADDRESS: u64 = 218
 // es fragt nach PR_SET_NAME/PR_GET_DUMPABLE und kommt ohne die Antwort
 // zurecht, aber die Nummer kam bis hierher bei jedem Aufruf ins
 // Protokoll.
+// RUNDE FREMDLAND: die beiden, ohne die musl keine Faeden macht.
+// `clone` mit den Fadenflaggen ist `pthread_create`, `futex` ist die
+// Sperre darunter -- musl benutzt sie AUCH BEI EINEM EINZIGEN Faden,
+// sobald `libc.threaded` gesetzt ist.
+const SYS_MPROTECT: u64 = 10
+// Die Flaggen von `clone`, die ein Faden setzt (Linux `sched.h`).
+const CLONE_VM: u64 = 0x100
+const CLONE_FS: u64 = 0x200
+const CLONE_FILES: u64 = 0x400
+const CLONE_SIGHAND: u64 = 0x800
+const CLONE_THREAD: u64 = 0x10000
+const CLONE_SETTLS: u64 = 0x80000
+const CLONE_PARENT_SETTID: u64 = 0x100000
+const CLONE_CHILD_CLEARTID: u64 = 0x200000
+const CLONE_SYSVSEM: u64 = 0x40000
+// Die Unterbefehle von `futex`, die wirklich vorkommen.
+const FUTEX_WAIT: u64 = 0
+const FUTEX_WAKE: u64 = 1
+const FUTEX_PRIVATE: u64 = 128
+const FUTEX_CLOCK_RT: u64 = 256
+
 const SYS_UNAME: u64 = 63
 const SYS_PRCTL: u64 = 157
 
@@ -2123,6 +2144,14 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // Aufraeumen zu versprechen, das nicht stattfindet. musl will von
     // dem Aufruf ohnehin nur die tid.
     if number == SYS_SET_TID_ADDRESS {
+        // RUNDE FREMDLAND: JETZT WIRD SIE GEMERKT. LAUFZEIT liess das
+        // ABSICHTLICH bleiben, mit der richtigen Begruendung, dass ein
+        // Aufraeumversprechen ohne Aufraeumen schlimmer ist als keines.
+        // Seit `clone`/`exit_task` das Wort wirklich loeschen, ist das
+        // Versprechen gedeckt.
+        if proc.user_ok(state, me, a0, 4) {
+            sched.tset(state, me, sched.T_FUTEX, a0)
+        }
         return sched.tget(state, me, sched.T_PID)
     }
     // RUNDE LAUFZEIT: Lesen und Schreiben MIT POSITION, ohne die
@@ -2152,6 +2181,24 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     if number == SYS_PRCTL {
         return do_prctl(state, me, a0, a1)
     }
+    // RUNDE FREMDLAND: `clone` mit den Fadenflaggen -- das ist
+    // `pthread_create`. Ohne die Flaggen (also als `fork`-Ersatz) geht
+    // es denselben Weg wie `fork`.
+    if number == SYS_CLONE {
+        return do_clone(state, me, frame, a0, a1, a2, a3, a4)
+    }
+    // RUNDE FREMDLAND: `futex`. musl sperrt damit, und zwar auch dann,
+    // wenn nur ein Faden laeuft.
+    if number == SYS_FUTEX {
+        return do_futex(state, me, a0, a1, a2, a3)
+    }
+    // RUNDE FREMDLAND: `mprotect`. Dieser Kern gibt jede Seite eines
+    // Programms mit den Rechten aus, die sein Programmkopf verlangt, und
+    // kennt kein nachtraegliches Umschalten. musl ruft es beim Anlegen
+    // eines Fadenstapels (Schutzseite) und kommt mit einem Ja zurecht.
+    if number == SYS_MPROTECT {
+        return do_mprotect(state, me, a0, a1, a2)
+    }
     if number == SYS_MMAP {
         // ROUNDE K7: a4 ist der Deskriptor. Bis hierher wurde er
         // weggelassen, weil nur MAP_ANONYMOUS ging und Linux ihn dabei
@@ -2162,6 +2209,17 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
         return do_unmap(state, me, a0, a1)
     }
     if number == SYS_GETPID {
+        // RUNDE FREMDLAND: DIE FADENGRUPPE, nicht die Aufgabe.
+        // `getpid` muss in jedem Faden desselben Prozesses dieselbe Zahl
+        // geben -- das ist der Unterschied zu `gettid` (SYS_GETTID, eine
+        // Zeile weiter unten), und ohne ihn haelt sich jeder Faden fuer
+        // einen eigenen Prozess. Fuer alles, was nicht mit `clone`
+        // entstanden ist, IST `T_TGID` die eigene pid (`signal.init_task`),
+        // also aendert sich dort nichts.
+        let g: u64 = sched.tget(state, me, sched.T_TGID)
+        if g != 0 {
+            return g
+        }
         return sched.tget(state, me, sched.T_PID)
     }
     if number == SYS_GETPPID {
@@ -2206,6 +2264,18 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
         // 12345 did not leave with 57.
         // ROUND POWERMON: the last ticks of this process, before the
         // scheduler stops being able to tell anybody about them.
+        // RUNDE FREMDLAND: DAS WORT, AUF DAS `pthread_join` WARTET.
+        // `clone` mit CLONE_CHILD_CLEARTID (und `set_tid_address`) hat
+        // seine Adresse in `T_FUTEX` gelegt; sie MUSS auf 0 gehen,
+        // BEVOR die Aufgabe Zombie wird -- danach ist ihr Adressraum
+        // bei einem Prozess weg, und wer wartet, wartete ewig.
+        // Gemessen, bevor das hier stand: `pthread_join` kam nie zurueck.
+        //
+        // Steht in `sys.fi` und nicht in `sched.exit_task`, weil das
+        // Schreiben durch die Seitentabellen der Aufgabe geht und
+        // `sched.fi` `proc.fi` nicht kennen darf -- der Modulgraph ist
+        // ein Baum, und `proc.fi` steht auf `sched.fi`.
+        clear_child_tid(state, me)
         pmon.flush(state, me)
         sched.exit_task(state, a0)
         return 0 // not reached
@@ -6360,6 +6430,256 @@ fn do_getppid(state: u64, me: u64) -> u64 {
 // counts references is a round of its own) and it is why `fork` +
 // `execve` is the expensive way to start a program here; `SYS_OSUM_EXEC`
 // is the cheap one.
+// RUNDE FREMDLAND: `clone`, und zwar der Fall, der zaehlt -- ein FADEN.
+//
+// musls `pthread_create` ruft es mit genau diesen Flaggen:
+//   CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|
+//   CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID
+// und uebergibt in a1 den fertigen Stapel des neuen Fadens, in a4 den
+// Fadenzeiger (TLS). Der Faden faengt NICHT bei einem Einsprungpunkt an,
+// den der Kern kennt: musl legt die Startadresse selbst auf den Stapel
+// und kehrt dorthin zurueck. Der Kern muss also nur eines richtig
+// machen -- den neuen Faden mit demselben `rip` wie den Erzeuger
+// starten, mit dem UEBERGEBENEN `rsp` und `rax = 0`.
+//
+// OHNE CLONE_VM ist `clone` in diesem Kern `fork`. Das ist keine
+// Bequemlichkeit: ein Kind mit eigenem Adressraum IST ein fork, und
+// alles andere waere eine zweite Umsetzung derselben Sache.
+// RUNDE FREMDLAND: das Fadenkennungswort auf 0, wenn eines hinterlegt
+// ist. Vier Oktette, denn es ist ein `int`.
+fn clear_child_tid(state: u64, me: u64) {
+    let addr: u64 = sched.tget(state, me, sched.T_FUTEX)
+    if addr == 0 {
+        return
+    }
+    sched.tset(state, me, sched.T_FUTEX, 0)
+    let phys: u64 = proc.translate(state, me, addr)
+    if phys == 0 {
+        return
+    }
+    guard.stac(state)
+    kstate.set8(phys, 0)
+    kstate.set8(phys + 1, 0)
+    kstate.set8(phys + 2, 0)
+    kstate.set8(phys + 3, 0)
+    guard.clac(state)
+}
+
+fn do_clone(state: u64, me: u64, frame: u64, flags: u64, stapel: u64,
+    ptid: u64, ctid: u64, tls: u64) -> u64 {
+    if sched.tget(state, me, sched.T_KIND) != sched.K_USER {
+        return neg(errno.E_NOSYS)
+    }
+    // Kein gemeinsamer Adressraum: das ist ein Prozess, kein Faden.
+    if (flags & CLONE_VM) == 0 {
+        return do_fork(state, me, frame)
+    }
+    // Ein gemeinsamer Adressraum OHNE eigenen Stapel waere zwei
+    // Ausfuehrungen auf demselben Stapelzeiger -- der eine schriebe dem
+    // anderen den Rahmen um. Linux verlangt den Stapel hier ebenso.
+    if stapel == 0 {
+        return neg(errno.E_INVAL)
+    }
+    if !proc.user_ok(state, me, stapel - 8, 8) {
+        return neg(errno.E_FAULT)
+    }
+    let irq: u64 = sched.irq_save()
+    let faden: u64 = proc.create_thread(state, me,
+        sched.tget(state, me, sched.T_PRIO))
+    if faden == 0 {
+        sched.irq_restore(irq)
+        return neg(errno.E_AGAIN)
+    }
+    // Die Deskriptoren: POSIX teilt sie unter Faeden, dieser Kern haelt
+    // sie je Aufgabe -- also werden sie kopiert. Der Unterschied steht
+    // in STATUS-FREMDLAND.md.
+    file.inherit_task(state, me, faden)
+    sched.fpu_inherit(state, me, faden)
+    signal.inherit(state, me, faden)
+    sched.tset(state, faden, sched.T_CWD,
+        sched.tget(state, me, sched.T_CWD))
+    uio.adopt(state, me, faden)
+    // Halde und Abbildungsgrenze sind GEMEINSAM -- sie beschreiben
+    // denselben Adressraum. Ein Faden mit eigener `T_BRK` liesse
+    // `malloc` im einen Faden Seiten anlegen, die der andere fuer frei
+    // haelt.
+    sched.tset(state, faden, sched.T_BRK, brk_of(state, me))
+    sched.tset(state, faden, sched.T_MMAP, map_bottom(state, me))
+    sched.tset(state, faden, sched.T_BIG, sched.tget(state, me, sched.T_BIG))
+    sched.tset(state, faden, sched.T_USTACK, stapel)
+    netview.inherit(state, me, faden)
+    // DIE FADENGRUPPE. `CLONE_THREAD` heisst: derselbe Prozess nach
+    // aussen. `getpid` muss in jedem Faden dieselbe Zahl geben, `gettid`
+    // verschiedene -- deshalb bleibt `T_PID` eigen und `T_TGID` wird die
+    // des Erzeugers.
+    if (flags & CLONE_THREAD) != 0 {
+        sched.tset(state, faden, sched.T_TGID,
+            sched.tget(state, me, sched.T_TGID))
+    }
+    // DER FADENZEIGER. Ohne ihn liest der neue Faden `%fs:0` des alten
+    // -- und das ist der Fehler, den diese Runde bei `fork` schon einmal
+    // gefunden hat.
+    if (flags & CLONE_SETTLS) != 0 {
+        sched.tset(state, faden, sched.T_FSBASE, tls)
+    }
+    let neue_tid: u64 = sched.tget(state, faden, sched.T_PID)
+    // Die beiden Kennungsspeicher. `CHILD_SETTID` schreibt IN DEN
+    // ADRESSRAUM, den beide teilen, also darf er hier stehen.
+    if (flags & CLONE_PARENT_SETTID) != 0 {
+        if proc.user_ok(state, me, ptid, 8) {
+            put64(state, me, ptid, neue_tid)
+        }
+    }
+    // CLONE_CHILD_CLEARTID: die Adresse, die beim Fadenende auf 0 gesetzt
+    // werden MUSS. Daran haengt `pthread_join`: es wartet mit `futex` auf
+    // genau dieses Wort. Ohne das Loeschen wartet es ewig -- gemessen,
+    // bevor diese Zeilen standen: `th1` druckte "im faden" und blieb
+    // dann stehen.
+    //
+    // Gemerkt wird sie in `T_FUTEX` (das Feld steht seit Langem in
+    // `sched.fi` und war unbenutzt); `sched.exit_task` liest sie.
+    // LAUFZEIT hatte fuer `set_tid_address` ausdruecklich entschieden,
+    // NICHTS zu merken, weil kein Aufraeumen stattfand -- jetzt findet
+    // es statt, also wird gemerkt.
+    if (flags & CLONE_CHILD_CLEARTID) != 0 {
+        if proc.user_ok(state, me, ctid, 4) {
+            sched.tset(state, faden, sched.T_FUTEX, ctid)
+        }
+    }
+    // Der Rahmen des neuen Fadens: der des Erzeugers, mit eigenem
+    // Stapel und 0 als Antwort.
+    let ctx: u64 = state + kstate.CTX_OFF + faden * F_BYTES
+    var i: u64 = 0
+    while i < F_BYTES / 8 {
+        __mmio_write64((ctx + i * 8) as *mut u64,
+            __mmio_read64((frame + i * 8) as *mut u64))
+        i = i + 1
+    }
+    __mmio_write64((ctx + F_RAX) as *mut u64, 0)
+    __mmio_write64((ctx + F_RSP) as *mut u64, stapel)
+    sched.tset(state, faden, sched.T_ARG, proc.ARG_RESUME)
+    kstate.add(state, kstate.SPAWNS, 1)
+    sched.start(state, faden)
+    sched.irq_restore(irq)
+    return neue_tid
+}
+
+// RUNDE FREMDLAND: `futex` -- die Sperre, auf der musl steht.
+//
+// WAS HIER WIRKLICH GEBAUT IST, und der Satz gehoert in den Quelltext
+// und nicht in eine Zusage, die niemand nachliest: dies ist ein
+// WARTEN MIT NACHSEHEN, keine Warteschlange. `FUTEX_WAIT` prueft den
+// Wert, und solange er steht, schlaeft der Faden eine Marke und sieht
+// wieder nach. `FUTEX_WAKE` tut deshalb NICHTS ausser zu zaehlen -- es
+// gibt keine Liste, aus der zu wecken waere.
+//
+// Warum das reicht: eine Sperre, die gehalten wird, wird von IHREM
+// HALTER freigegeben, und der laeuft. Der Wartende sieht die Aenderung
+// spaetestens eine Marke (10 ms) spaeter. Das kostet Zeit und keine
+// Richtigkeit -- was NICHT passieren kann, ist ein verpasstes Wecken,
+// denn es wird nicht auf ein Wecksignal gewartet, sondern auf den WERT.
+//
+// Was es nicht kann und was deshalb hier steht: eine Sperre, die
+// hochfrequent gewechselt wird, kostet 10 ms je Wechsel statt Mikro-
+// sekunden. Eine echte Warteschlange an `T_FUTEX`/`T_FUTEXVAL` (die
+// Felder stehen seit Langem in `sched.fi`) ist der naechste Schritt.
+fn do_futex(state: u64, me: u64, adresse: u64, befehl: u64, wert: u64,
+    zeit: u64) -> u64 {
+    // Die beiden Zusatzbits sagen nur, ob die Sperre prozesslokal ist
+    // und welche Uhr gilt; fuer das Verhalten hier macht beides nichts.
+    // Die Maske wird ABGEZOGEN und nicht negiert: `!` ist in dieser
+    // Sprache der logische Nicht-Operator und nimmt nur bool.
+    var was: u64 = befehl
+    if (was & FUTEX_PRIVATE) != 0 {
+        was = was - FUTEX_PRIVATE
+    }
+    if (was & FUTEX_CLOCK_RT) != 0 {
+        was = was - FUTEX_CLOCK_RT
+    }
+    if (adresse & 3) != 0 {
+        return neg(errno.E_INVAL)
+    }
+    if !proc.user_ok(state, me, adresse, 4) {
+        return neg(errno.E_FAULT)
+    }
+    if was == FUTEX_WAKE {
+        // Es gibt keine Warteschlange, aus der zu wecken waere: die
+        // Wartenden sehen selbst nach. Die Antwort ist die Zahl der
+        // geweckten Faeden, und ehrlich ist hier 0.
+        return 0
+    }
+    if was != FUTEX_WAIT {
+        return neg(errno.E_INVAL)
+    }
+    // Steht der Wert nicht mehr, hat der Aufrufer die Aenderung
+    // verpasst und darf sofort weiter -- das ist der ganze Sinn des
+    // Wertvergleichs im Kern.
+    if user_word32(state, me, adresse) != (wert & 0xFFFFFFFF) {
+        return neg(errno.E_AGAIN)
+    }
+    // Ohne Zeitangabe wird nicht ewig gewartet, sondern hoechstens
+    // FUTEX_MAX Marken. Ein Faden, der wirklich ewig wartet, ist von
+    // einem verklemmten nicht zu unterscheiden, und dieser Kern hat
+    // keinen, der ihn loesen koennte.
+    var rest: u64 = FUTEX_MAX
+    while rest > 0 {
+        if signal.interrupted(state, me) {
+            return neg(errno.E_INTR)
+        }
+        sched.sleep_ticks(state, 1)
+        if user_word32(state, me, adresse) != (wert & 0xFFFFFFFF) {
+            return 0
+        }
+        rest = rest - 1
+    }
+    return neg(errno.E_TIMEDOUT)
+}
+
+const FUTEX_MAX: u64 = 1000 // 10 Sekunden bei 100 Hz
+
+// Vier Oktette aus dem Adressraum des Aufrufers. `futex` vergleicht
+// einen `int`, nicht ein Wort -- wer hier 64 Bit laese, verglich vier
+// Oktette Nachbarschaft mit.
+fn user_word32(state: u64, me: u64, addr: u64) -> u64 {
+    let phys: u64 = proc.translate(state, me, addr)
+    if phys == 0 {
+        return 0
+    }
+    guard.stac(state)
+    let v: u64 = (kstate.get8(phys) as u64)
+        | ((kstate.get8(phys + 1) as u64) << 8)
+        | ((kstate.get8(phys + 2) as u64) << 16)
+        | ((kstate.get8(phys + 3) as u64) << 24)
+    guard.clac(state)
+    return v
+}
+
+// RUNDE FREMDLAND: `mprotect`. Dieser Kern legt die Rechte einer Seite
+// beim Abbilden fest (`elf.fi` nach dem Programmkopf, `map_page` sonst)
+// und hat keinen Weg, sie danach zu aendern.
+//
+// musl ruft es beim Anlegen eines Fadenstapels, um eine SCHUTZSEITE
+// ohne Rechte darunterzulegen. Faellt der Aufruf durch, legt musl
+// keinen Faden an -- gemessen: `pthread_create` gab EAGAIN (11).
+//
+// Die Antwort ist deshalb 0, und was das heisst, steht hier: die
+// Schutzseite ist KEINE. Ein Faden, der seinen Stapel ueberlaeuft,
+// schreibt in die Nachbarseite, statt einen Seitenfehler zu bekommen.
+// Das ist ein ehrlich benannter Mangel und kein Versehen -- die
+// Alternative waere, gar keine Faeden zu koennen.
+fn do_mprotect(state: u64, me: u64, addr: u64, len: u64, prot: u64) -> u64 {
+    if (addr & 4095) != 0 {
+        return neg(errno.E_INVAL)
+    }
+    if len == 0 {
+        return 0
+    }
+    if !proc.user_ok(state, me, addr, 1) {
+        return neg(errno.E_FAULT)
+    }
+    return 0
+}
+
 fn do_fork(state: u64, me: u64, frame: u64) -> u64 {
     if sched.tget(state, me, sched.T_KIND) != sched.K_USER {
         return neg(errno.E_NOSYS)
