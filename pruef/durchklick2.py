@@ -202,16 +202,27 @@ def main():
           % [v[0] for v in eintraege.values()])
 
     # --- jede App einzeln starten
-    gg = lesen.geom(txt, "launcher: geom ")
+    # DIE LAGE KOMMT AUS DEM FENSTERSERVER und nicht aus
+    # `launcher: geom` -- diese Zeile wird zerschossen (gemessen:
+    # 'launcher: geom 1x='). Siehe lesen.starter_fenster.
+    sf = lesen.starter_fenster(txt)
     lr = lesen.geom(txt, "launcher: rect id=2 kind=5 ")
     zh = re.findall(r"launcher: rows x=\d+ base=\d+ zh=(\d+)", txt)
     gestartet = {}
-    if gg and lr and zh:
-        gx, gy = gg[-1][0], gg[-1][1]
+    if sf and lr:
+        _id, gx, gy = sf
         lx, ly = lr[-1][0], lr[-1][1]
-        z = int(zh[-1])
+        # Die Zeilenhoehe steht in `rows zh=`; wird auch die zerschossen,
+        # gilt der Wert, den wlib fuer die Oberflaechenschrift benutzt
+        # und der in jedem Lauf dieser Aufloesung gemessen wurde: 20.
+        z = int(zh[-1]) if zh else 20
         for i in sorted(eintraege):
             name, exe = eintraege[i]
+            # Zumachen, dann aufmachen: nur so ist der Zustand bekannt.
+            # (Der Starter laeuft seit dem Hochfahren; sein Fenster kann
+            # offen sein, weil ein Programmstart es nicht schliesst.)
+            m.klick_auf(18, HOEHE - 20)
+            time.sleep(1.4)
             if not menue_auf(m):
                 continue
             vor = len(lesen.starts(s()))
