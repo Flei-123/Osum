@@ -3142,6 +3142,34 @@ fn set_focus(state: u64, i: u64) {
         ev_push(state, alt, E_FOCUS, 0, 0, 0)
     }
     ss(state, S_FOCUS, i + 1)
+    // ================================================ RUNDE TUERSCHLOSS
+    //
+    // DER FOKUSWECHSEL WIRD GESAGT, und ohne diese Zeile war Punkt 4.3
+    // der Vorrunde gar nicht messbar.
+    //
+    // Runde DURCHKLICK schrieb "`focus=1` bleibt ueber 137 Meldungen
+    // konstant" und belegte damit, dass Alt+Tab nichts tut. Nachgesehen:
+    // das `focus=1` in jenen Mitschnitten stammt aus
+    // `taskbar: btn ... hidden=0 focus=1` -- der KNOPFLISTE der Leiste --
+    // und aus `wm: 1280x800 ... focus=1`, der EINSCHALTMELDUNG des
+    // Servers. Keines von beiden ist der Eingabefokus. Der Befund war
+    // richtig, sein Beleg zeigte aber auf etwas anderes.
+    //
+    // Der Eingabefokus stand nirgends auf der Leitung. Jetzt steht er
+    // da: eine Zeile je WIRKLICHEM Wechsel (die Abfrage `alt == i`
+    // weiter oben laesst Wiederholungen gar nicht bis hierher), mit dem
+    // Fenster davor und danach.
+    var s_fk: [u8; 14] = "wm: fokus id=\0"
+    var s_fv: [u8; 7] = " vor=\0\0"
+    serial.puts((&s_fk[0]) as u64)
+    serial.dec(wg(state, i, W_ID))
+    serial.puts((&s_fv[0]) as u64)
+    if alt < MAX_WIN {
+        serial.dec(wg(state, alt, W_ID))
+    } else {
+        serial.dec(0)
+    }
+    serial.nl()
     ev_push(state, i, E_FOCUS, 0, 0, 1)
     // RUNDE TILING: DER BAUM FUEHRT SEINEN EIGENEN FOKUS, und die beiden
     // muessen derselbe sein. Ohne diese zwei Zeilen teilt ein neues
@@ -7209,12 +7237,85 @@ fn hotkeys(state: u64) -> u64 {
             n = n + 1
             ss(state, S_HOTS, gs(state, S_HOTS) + 1)
             let act: u64 = tile.bind_lookup(state, v & 0xFF, (v >> 8) & 0xFF)
-            if tile_action(state, act) {
+            // RUNDE TUERSCHLOSS: WAS DER RING HERGAB UND WAS DARAUS
+            // WURDE. Drei Zahlen, und sie trennen die drei Faelle, die
+            // sonst gleich aussehen: Taste kam nicht an (keine Zeile),
+            // Taste kam an, aber keine Bindung (act=0), Bindung da, aber
+            // die Handlung tat nichts (getan=0).
+            var s_hk: [u8; 12] = "wm: hot c=\0\0"
+            var s_hm: [u8; 6] = " mod=\0"
+            var s_ha: [u8; 6] = " act=\0"
+            serial.puts((&s_hk[0]) as u64)
+            serial.dec(v & 0xFF)
+            serial.puts((&s_hm[0]) as u64)
+            serial.dec((v >> 8) & 0xFF)
+            serial.puts((&s_ha[0]) as u64)
+            serial.dec(act)
+            // DIE ZEILE WIRD ZUERST FERTIG. `tile_action` ruft
+            // `set_focus`, und das schreibt seit dieser Runde selbst auf
+            // die Leitung -- mitten in diese Zeile hinein. Gemessen:
+            //     wm: hot c=9 mod=1 act=30wm: fokus id=7 vor=15
+            // Beide Angaben stimmen, aber `act=30` und die Fokuszeile
+            // kleben aneinander, und ein Muster, das auf das Zeilenende
+            // wartet, findet keines von beiden. Also: Zeilenumbruch vor
+            // der Handlung, das Ergebnis kommt in eine eigene Zeile.
+            serial.nl()
+            let getan: bool = tile_action(state, act)
+            var s_hr: [u8; 15] = "wm: hot getan=\0"
+            serial.puts((&s_hr[0]) as u64)
+            if getan {
+                serial.dec(1)
+            } else {
+                serial.dec(0)
+            }
+            serial.nl()
+            if getan {
                 ss(state, S_ACTS, gs(state, S_ACTS) + 1)
             }
         }
     }
     return n
+}
+
+// RUNDE TUERSCHLOSS: DAS NAECHSTE FENSTER, das ein Mensch meint.
+//
+// WELCHE FENSTER MITZAEHLEN. Nicht jedes Fenster ist eines, zu dem man
+// wechseln will: der Schreibtisch (`L_DESK`) ist der Hintergrund, die
+// Taskleiste (`L_TOP`) ist Bedienung, und ein verborgenes (`F_HIDDEN`)
+// steht nicht auf dem Schirm. Es bleiben die gewoehnlichen Anwendungen
+// auf `L_NORMAL` -- genau die, die auch eine Titelleiste tragen.
+//
+// WARUM IM KREIS AB DEM FOKUS und nicht immer von vorn: sonst wechselt
+// Alt+Tab bei drei Fenstern ewig zwischen den ersten beiden. Der Ring
+// laeuft `von+1 .. von+MAX_WIN` und rechnet modulo -- damit kommt jedes
+// Fenster genau einmal vorbei, und das eigene zuletzt.
+//
+// Der Rueckgabewert sagt, ob sich WIRKLICH etwas geaendert hat: bei
+// einem einzigen Fenster ist Alt+Tab folgenlos, und das ist kein
+// Fehler, sondern die Wahrheit.
+fn wechselbar(state: u64, i: u64) -> bool {
+    if !valid(state, i) {
+        return false
+    }
+    if (wg(state, i, W_FLAGS) & F_HIDDEN) != 0 {
+        return false
+    }
+    return wg(state, i, W_LAYER) == L_NORMAL
+}
+
+fn naechstes_fenster(state: u64, von: u64) -> bool {
+    var k: u64 = 1
+    while k <= MAX_WIN {
+        let j: u64 = (von + k) % MAX_WIN
+        if wechselbar(state, j) && j != von {
+            raise_win(state, j)
+            set_focus(state, j)
+            damage_win(state, j)
+            return true
+        }
+        k = k + 1
+    }
+    return false
 }
 
 // EINE HANDLUNG AUSFUEHREN. Welche Taste welche Handlung ausloest, steht
@@ -7243,6 +7344,25 @@ fn tile_action(state: u64, act: u64) -> bool {
     }
     if act >= tile.A_SNAP_LEFT && act <= tile.A_SNAP_BR {
         return tile_snap(state, i, act - tile.A_SNAP_LEFT)
+    }
+    // ================================================ RUNDE TUERSCHLOSS
+    //
+    // ALT+TAB. Diese Abfrage steht VOR `let nd = wg(state, i, W_NODE)`
+    // und dessen `if nd == 0 { return false }` -- und das ist der ganze
+    // Grund, warum sie wirkt.
+    //
+    // GEMESSEN (Runde DURCHKLICK, 4.3): `focus=1` stand ueber 137
+    // Meldungen still. Die vorhandenen Fokushandlungen fragen alle den
+    // KACHELBAUM (`dir_search`); ein schwebendes Fenster hat `W_NODE ==
+    // 0` und faellt aus jeder von ihnen heraus, bevor irgendetwas
+    // passiert. Auf dem Schreibtisch dieses Systems schwebt aber jedes
+    // Fenster -- der Kachelmodus ist standardmaessig aus.
+    //
+    // Alt+Tab geht deshalb durch die FENSTERLISTE DES SERVERS und nicht
+    // durch den Baum: ab dem Fenster mit dem Fokus aufwaerts, im Kreis,
+    // und nimmt das erste, das ein Mensch auch anklicken koennte.
+    if act == tile.A_NEXT_WIN {
+        return naechstes_fenster(state, i)
     }
     let nd: u64 = wg(state, i, W_NODE)
     if nd == 0 {

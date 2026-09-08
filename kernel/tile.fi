@@ -92,7 +92,7 @@ export {
     A_LAYOUT_STACKED, A_ROTATE, A_MIRROR, A_BALANCE, A_FLOAT, A_CLOSE,
     A_GROW, A_SHRINK, A_SNAP_LEFT, A_SNAP_RIGHT, A_SNAP_TOP,
     A_SNAP_BOTTOM, A_SNAP_TL, A_SNAP_TR, A_SNAP_BL, A_SNAP_BR,
-    A_TILE_TOGGLE, A_MAX
+    A_TILE_TOGGLE, A_NEXT_WIN, A_MAX
 }
 
 // ------------------------------------------------------- die Zahlen
@@ -183,7 +183,26 @@ const A_SNAP_TR: u64 = 26
 const A_SNAP_BL: u64 = 27
 const A_SNAP_BR: u64 = 28
 const A_TILE_TOGGLE: u64 = 29
-const A_MAX: u64 = 30
+// ===================================================== RUNDE TUERSCHLOSS
+//
+// ALT+TAB -- DER FENSTERWECHSEL, DEN ES IN DIESEM SYSTEM NIE GAB.
+//
+// GEMESSEN (Runde DURCHKLICK, Punkt 4.3/8): Alt+Tab aenderte 0,21 % der
+// Bildpunkte (nur den Herzschlag), und `focus=1` stand ueber 137
+// Meldungen still. Der Grund ist NICHT eine fehlende Bindung: die Taste
+// kam bis in `tile.bind_lookup` und fand dort nichts, weil es die
+// HANDLUNG nicht gab. Die acht Richtungshandlungen oben (`focus-left`
+// und Geschwister) laufen alle ueber den KACHELBAUM -- sie fragen
+// `dir_search` nach dem Nachbarn IM BAUM und geben `false` zurueck,
+// sobald das Fenster gar nicht darin haengt (`W_NODE == 0`). Genau das
+// ist der Normalfall auf diesem Schreibtisch: die Fenster schweben.
+//
+// Alt+Tab ist deshalb die erste Handlung, die den Baum NICHT braucht.
+// Sie geht der Reihe nach durch die sichtbaren Fenster des
+// Fensterservers -- die Umsetzung steht in `wm.fi` (`tile_action`), weil
+// nur der Fensterserver seine Fensterliste kennt.
+const A_NEXT_WIN: u64 = 30
+const A_MAX: u64 = 31
 
 // die Felder eines Knotens
 const N_USED: u64 = 0x00
@@ -519,6 +538,34 @@ fn init(state: u64, x: u64, y: u64, w: u64, h: u64) -> bool {
     ts(state, S_COLLAPSES, 0)
     ts(state, S_SEED, 0x2545F4914F6CDD1D)
     mark(state, x, y, w, h)
+    // ================================================ RUNDE TUERSCHLOSS
+    //
+    // ALT+TAB GILT AUCH OHNE tiling.conf, und das ist hier der ganze
+    // Punkt.
+    //
+    // GEMESSEN beim Bau dieser Runde: das Wurzelabbild des Sticks
+    // enthaelt `/users/root/config/locale` und sonst nichts unter
+    // `/users` -- KEINE `tiling.conf`. Die Belegung kommt aber
+    // ausschliesslich aus Ring 3 (`/bin/tiling` liest die Datei und
+    // schiebt den Text mit `SYS_TILECONF` herueber, sysgui.do_tileconf).
+    // Ohne Datei wird nie eine Bindung angelegt, `bind_lookup` gibt
+    // A_NONE, und Alt+Tab tut nichts -- auf dem Stick genau der Befund
+    // 4.3 aus Runde DURCHKLICK, obwohl die Handlung existiert.
+    //
+    // Eine Voreinstellung IM KERN ist die einzige Stelle, die ein
+    // Abbild ohne Konfigurationsdatei erreicht. Sie belegt Platz 0 und
+    // steht damit VOR allem, was `bind_parse` spaeter nachlegt; wer
+    // `bind mod+tab ...` in seine tiling.conf schreibt, bekommt einen
+    // zweiten Eintrag, und `bind_lookup` nimmt den ersten Treffer --
+    // deshalb wird beim Einlesen einer Datei zuerst `bind_reset`
+    // gerufen (kernel/user/tiling.fi), und die Vorgabe verschwindet
+    // mit. Wer nichts konfiguriert, behaelt Alt+Tab.
+    //
+    // NUR DIESE EINE: die acht Richtungskuerzel gehoeren zum
+    // Kachelmodus, der standardmaessig aus ist. Alt+Tab ist die
+    // Fensterumschaltung, die jedes System der Welt hat.
+    bind_reset(state)
+    let _b: bool = bind_add(state, 9, MOD_ALT, A_NEXT_WIN, 0, 0, 0)
     ts(state, S_READY, 1)
     return true
 }
@@ -2569,6 +2616,11 @@ fn action_of2(p: u64, a: u64, b: u64) -> u64 {
     var m7: [u8; 16] = "snap-bottomleft\0"
     var m8: [u8; 17] = "snap-bottomright\0"
     var m9: [u8; 14] = "tiling-toggle\0"
+    // RUNDE TUERSCHLOSS: der Name zu A_NEXT_WIN. Er heisst `next-window`
+    // und nicht `alt-tab`, weil in dieser Datei HANDLUNGEN benannt
+    // werden und keine Tasten -- welche Taste sie ausloest, steht in
+    // tiling.conf und darf dort jeder aendern.
+    var m10: [u8; 12] = "next-window\0"
     if eqs(p, a, b, (&m1[0]) as u64, 9) {
         return A_SNAP_LEFT
     }
@@ -2595,6 +2647,9 @@ fn action_of2(p: u64, a: u64, b: u64) -> u64 {
     }
     if eqs(p, a, b, (&m9[0]) as u64, 13) {
         return A_TILE_TOGGLE
+    }
+    if eqs(p, a, b, (&m10[0]) as u64, 11) {
+        return A_NEXT_WIN
     }
     return A_NONE
 }
@@ -2705,7 +2760,7 @@ fn pass_ok(state: u64, nr: u64) {
 
 fn selftest(state: u64) -> u64 {
     var n: u64 = 0
-    ts(state, S_FAIL, 0x1FFFFFE)
+    ts(state, S_FAIL, 0x3FFFFFE)
     if !init(state, 0, 0, 800, 600) {
         return 0
     }
@@ -2908,11 +2963,27 @@ fn selftest(state: u64) -> u64 {
             }
         }
     }
+    // 25. RUNDE TUERSCHLOSS: ALT+TAB IST OHNE JEDE DATEI BELEGT.
+    //
+    //     Die Zusage, die auf dem Stick zaehlt. `init` legt die
+    //     Vorgabe an; ein Abbild ohne tiling.conf -- und genau so eines
+    //     baut tools/usbimg/build.sh -- hat Alt+Tab trotzdem. Geprueft
+    //     wird gegen einen FRISCHEN `init`, weil Punkt 24 die Belegung
+    //     eben durch eine eigene Datei ersetzt hat: das ist das
+    //     Verhalten, das dort zugesagt wird, und hier ist der Beweis,
+    //     dass es sich nach einem Neuanfang wieder einstellt.
+    if init(state, 0, 0, 800, 600) {
+        if bind_lookup(state, 9, MOD_ALT) == A_NEXT_WIN {
+            if bind_lookup(state, 9, 0) == A_NONE {
+                n = n + 1
+            pass_ok(state, 25)}
+        }
+    }
     clear_tree(state)
     bind_reset(state)
     return n
 }
 
 fn selftest_max() -> u64 {
-    return 24
+    return 25
 }
