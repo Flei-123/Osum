@@ -141,3 +141,21 @@ def starts(s):
         aus.append((pfad.group(1) if pfad else "?",
                     int(pid.group(1)) if pid else None))
     return aus
+
+
+def starter_fenster(s, breite=440, hoehe=300):
+    """Wo das Startmenue WIRKLICH steht.
+
+    Nicht aus `launcher: geom` -- diese Zeile wird vom DHCP-Dienst
+    zerschossen (gemessen: 'launcher: geom 1x='). Der FENSTERSERVER
+    meldet dieselbe Lage in einer viel kuerzeren Zeile
+    (`id=11 x=8 y=452 w=440 h=300`), und kurze Zeilen ueberleben das
+    Gedraenge auf der Leitung. Gesucht wird nach der GROESSE, die der
+    Starter sich gibt -- die steht als Festwert in launcher.fi.
+    """
+    f = fenster(s)
+    for i in sorted(f, reverse=True):
+        for x, y, w, h in f[i]:
+            if w == breite and h == hoehe:
+                return i, x, y
+    return None
