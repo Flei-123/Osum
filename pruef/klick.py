@@ -61,10 +61,57 @@ class Maschine:
                 self.s = s
                 time.sleep(0.3)
                 self._leeren()
+                self.relative_maus()
                 return True
             except OSError:
                 time.sleep(0.2)
         raise RuntimeError("kein Monitor an %s" % self.sockpfad)
+
+    def relative_maus(self):
+        """AUF DAS RELATIVE ZEIGEGERAET UMSCHALTEN -- der Fund dieser Runde.
+
+        `-device usb-tablet` haengt ZWEI Zeigegeraete an die Maschine,
+        und der Monitor bedient von sich aus das TABLET:
+
+              Mouse #2: QEMU PS/2 Mouse
+            * Mouse #3: QEMU HID Tablet (absolute)
+
+        Ein Tablet ist ABSOLUT. Diese Datei rechnet aber RELATIV (siehe
+        `ecke`): sie faehrt in die linke obere Ecke, verlaesst sich auf
+        den Anschlag und zaehlt von dort. Fuer ein absolutes Geraet ist
+        `mouse_move dx dy` kein Schritt, sondern ein Ort -- und damit
+        stimmt ab dem zweiten Sprung nichts mehr.
+
+        GEMESSEN, derselbe Zug auf derselben Maschine
+        (pruef/mausquelle.py):
+
+            tablet (absolut)  kl 0 -> 0   Fenster (24,40) -> (24,40)
+            ps2    (relativ)  kl 0 -> 0   Fenster (24,40) -> (204,170)
+
+        Der Zug ueber die PS/2-Maus verschiebt das Fenster um genau die
+        180/130 Bildpunkte, die er verschieben soll. Genau das ist der
+        Grund, warum Runde DURCHKLICK und der erste Durchgang dieser
+        Runde bei 4.1/4.2 "GEHT NICHT" gemessen haben: nicht der
+        Fensterserver, sondern der Monitor hat die Bewegung verschluckt.
+        Einzelne Klicks wirkten trotzdem -- ein Klick braucht keine
+        Wegstrecke, nur einen Ort, und den setzt das Tablet selbst.
+
+        ABER: DER SCHALTER GILT NUR FUERS ZIEHEN, und das ist gemessen.
+        Der KERN sieht in diesem Aufbau ausschliesslich die USB-Maus --
+
+            usb: port=5 ... class=03:00:00 driver=mouse
+
+        -- eine PS/2-Maus taucht in seinem Mitschnitt nirgends auf.
+        Schaltet man den Monitor dauerhaft auf `mouse_set 2`, gehen die
+        Ereignisse an ein Geraet, das der Kern nicht abfragt: gemessen
+        blieb der Zeiger dann ueber den ganzen Lauf auf `xy=639,399`
+        stehen, `kl=0`, und kein einziger `taskbar: click` kam an.
+
+        Beim ZIEHEN ist es umgekehrt: dort wirkt nur die PS/2-Maus
+        (siehe `ziehe`). Also wird pro Vorgang umgeschaltet und danach
+        zurueck -- der Zustand steht in `self.relativ`.
+        """
+        self.relativ = False
 
     def _leeren(self):
         try:
@@ -120,6 +167,16 @@ class Maschine:
         self.gehe(x, y)
         self.klick(knopf)
 
+    def _maus(self, nummer):
+        """Das Zeigegeraet des Monitors umschalten (1 = Tablet, 2 = PS/2)."""
+        try:
+            self.s.sendall(("mouse_set %d\n" % nummer).encode())
+            time.sleep(0.35)
+            self._leeren()
+            return True
+        except OSError:
+            return False
+
     def ziehe(self, x1, y1, x2, y2):
         """Druecken, fahren, loslassen -- fuer Fenster verschieben.
 
@@ -139,6 +196,11 @@ class Maschine:
            breit ist, entscheidet das. Jetzt wird die Strecke
            aufgeteilt und der Rest im letzten Schritt mitgenommen.
         """
+        # ZUM ZIEHEN AUF DIE RELATIVE MAUS. Begruendung siehe
+        # `relative_maus`: mit dem Tablet zaehlt der Kern beim Ziehen
+        # nicht eine Taste (kl 0 -> 0), mit der PS/2-Maus verschiebt
+        # sich das Fenster um genau die verlangte Strecke.
+        self._maus(2)
         self.gehe(x1, y1)
         self.sag("mouse_button 1", 0.2)
         try:
@@ -155,6 +217,8 @@ class Maschine:
         finally:
             self.sag("mouse_button 0", 0.2)
             self.sag("mouse_button 0", 0.1)
+            # ... und zurueck auf das Tablet, mit dem die KLICKS wirken.
+            self._maus(1)
         self.x, self.y = x2, y2
         time.sleep(0.5)
 
