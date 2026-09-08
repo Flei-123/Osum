@@ -112,6 +112,11 @@ class Leser:
 
 I32, I64, F32, F64, EMPTY = 0x7F, 0x7E, 0x7D, 0x7C, 0x40
 
+# Ab so vielen Bloecken am Stueck wird aus dem Turm ein Verteiler.
+# firnc laesst 200 Ebenen zu; 64 ist reichlich Abstand und trifft nur
+# echte Sprungtabellen, keine gewoehnliche Schachtelung.
+TURM_GRENZE = 64
+
 
 def typname(t):
     return {I32: 'i32', I64: 'i64', F32: 'f32', F64: 'f64'}.get(t, '?')
@@ -332,11 +337,119 @@ class Block:
         self.res = res
         self.marke = marke
         self.hat_else = False
+        # Wird dieser Block als `while true` erzeugt? Nur dann darf
+        # ein `break` darin stehen, und nur dann gibt es ein `continue`.
+        self.schleife = (art == 'loop')
+        # Nur fuer Ebenen eines Turms (siehe turm_erzeugen/TIEFE.md)
+        self.turm_marke = None
+        self.turm_fall = 0
 
 
 # ====================================================================
 #                          Der Erzeuger
 # ====================================================================
+
+# ------------------------------- braucht dieser `block` eine Schleife?
+#
+# Ein `block` wird nur dann zu `while true { ... break }`, wenn
+# WIRKLICH jemand aus ihm herausspringt. Sonst reicht ein nackter
+# Firn-Block `{ ... }`, und genau das entscheidet bei SQLite ueber
+# Bauen oder Nicht-Bauen: mit `while` je Block erreichte die
+# Verschachtelung 278 Ebenen, firnc laesst 200 zu.
+#
+# Gesucht wird ein `br`/`br_if`/`br_table`, das GENAU auf diesen Block
+# zeigt -- also mit einer Sprungweite, die der Zahl der seither
+# geoeffneten Ebenen entspricht.
+def _block_braucht_schleife(b, at):
+    tiefe = 0
+    l = Leser(b, at)
+    n = len(b)
+    while l.at < n:
+        op = l.u8()
+        if op in (0x02, 0x03, 0x04):
+            l.sleb()
+            tiefe += 1
+        elif op == 0x0B:
+            if tiefe == 0:
+                return False              # Ende dieses Blocks erreicht
+            tiefe -= 1
+        elif op == 0x05:
+            pass
+        elif op in (0x0C, 0x0D):
+            if l.uleb() == tiefe:
+                return True
+        elif op == 0x0E:
+            k = l.uleb()
+            treffer = False
+            for _ in range(k):
+                if l.uleb() == tiefe:
+                    treffer = True
+            if l.uleb() == tiefe:
+                treffer = True
+            if treffer:
+                return True
+        else:
+            _ueberlesen(l, op)
+    return False
+
+
+def _ueberlesen(l, op):
+    if op in (0x10, 0x20, 0x21, 0x22, 0x23, 0x24):
+        l.uleb()
+    elif op == 0x11:
+        l.uleb()
+        l.uleb()
+    elif op in (0x41, 0x42):
+        l.sleb()
+    elif op == 0x43:
+        l.f32()
+    elif op == 0x44:
+        l.f64()
+    elif 0x28 <= op <= 0x3E:
+        l.uleb()
+        l.uleb()
+    elif op in (0x3F, 0x40):
+        l.u8()
+    elif op == 0x1C:
+        for _ in range(l.uleb()):
+            l.u8()
+    elif op == 0xFC:
+        u = l.uleb()
+        if u == 10:
+            l.u8()
+            l.u8()
+        elif u == 11:
+            l.u8()
+
+
+# ============================================================
+#   Der Turm aus Bloecken -> ein Verteiler  (siehe TIEFE.md)
+# ============================================================
+#
+# Ein `block`-Turm, der nur dazu da ist, dass ein `br_table` in einen
+# von n Faellen springt, sprengt firncs Grenze von 200 Ebenen. SQLite
+# hat genau eine solche Stelle: `yy_reduce` mit 276 Bloecken.
+#
+# Erkannt wird der Turm daran, dass am Stueck (ohne einen anderen
+# Befehl dazwischen) mehr als GRENZE Bloecke geoeffnet werden.
+def turm_messen(code, at):
+    """Wie viele `block` werden ab `at` unmittelbar hintereinander
+    geoeffnet? Gibt (anzahl, position_danach) zurueck."""
+    l = Leser(code, at)
+    n = 0
+    while l.at < len(code):
+        merk = l.at
+        op = l.u8()
+        if op != 0x02:
+            l.at = merk
+            break
+        bt = l.sleb()
+        if bt != -64:            # nur leere Blocktypen sind so einfach
+            l.at = merk
+            break
+        n += 1
+    return n, l.at
+
 
 class Fehler(Exception):
     pass
@@ -391,6 +504,8 @@ class Erzeuger:
         self.koerper = []
         self.maxstack = 0
         self.br_benutzt = False
+        self.im_turm = False
+        self.turm_faelle = 0
         try:
             self.rumpf(code, par, res)
         except Fehler:
@@ -407,7 +522,12 @@ class Erzeuger:
         self.w('')
 
     def e(self, tiefe, s):
-        self.koerper.append('    ' + '    ' * tiefe + s)
+        # EIN Leerzeichen je Ebene, nicht vier. Bei SQLite wird bis zu
+        # 278 Ebenen tief geschachtelt; mit vier Leerzeichen waeren das
+        # 1112 Spalten Einrueckung je Zeile und ein Vielfaches an
+        # Dateigroesse. Lesbar ist der erzeugte Text ohnehin nicht --
+        # er ist Zwischenerzeugnis, kein Quelltext zum Anschauen.
+        self.koerper.append(' ' + ' ' * tiefe + s)
 
     def sv(self, i):
         if i + 1 > self.maxstack:
@@ -439,17 +559,26 @@ class Erzeuger:
                 b = stapel.pop()
                 if b.art == 'func':
                     break
+                if b.art == 'turm':
+                    # Das `end` einer Turmebene schliesst keinen
+                    # Firn-Block -- es beendet einen FALL. Der Code
+                    # dahinter gehoert in den naechsten Zweig.
+                    self.turm_ende(b, tiefe, stapel)
+                    sp = b.stack_ein + len(b.res)
+                    unerreichbar = False
+                    continue
                 tiefe -= 1
                 if b.art in ('block', 'loop'):
-                    # Eine `while true`-Schleife darf nicht von selbst
-                    # noch einmal laufen: ein `block` ist am Ende zu
-                    # Ende, und ein `loop` faellt nach dem letzten
-                    # Befehl ebenfalls heraus (nur ein `br` geht
-                    # zurueck). Deshalb schliesst JEDE dieser Schleifen
-                    # mit einem `break`.
-                    self.e(tiefe, 'break')
+                    # Eine `while true` darf nicht von selbst noch
+                    # einmal laufen: ein `loop` faellt nach dem letzten
+                    # Befehl heraus (nur ein `br` geht zurueck), ein
+                    # `block` ist am Ende ohnehin zu Ende. Also
+                    # schliesst jede ECHTE Schleife mit `break`.
+                    if b.schleife:
+                        self.e(tiefe, 'break')
                     self.e(tiefe - 1, '}')
-                    self.nach_block(b, tiefe - 1)
+                    if b.schleife:
+                        self.nach_block(b, tiefe - 1, stapel)
                 else:                            # if
                     self.e(tiefe - 1, '}')
                 sp = b.stack_ein + len(b.res)
@@ -464,6 +593,22 @@ class Erzeuger:
                 unerreichbar = False
                 continue
 
+            # ------------------------------ der Turm (siehe TIEFE.md)
+            #
+            # Werden hier mehr als GRENZE Bloecke am Stueck geoeffnet,
+            # ist das eine Sprungtabelle in Blockform. Sie wird nicht
+            # geschachtelt, sondern als Verteiler erzeugt: eine Ebene
+            # statt 276.
+            if op == 0x02 and not self.im_turm:
+                merk = l.at
+                anzahl, danach = turm_messen(code, l.at - 1)
+                if anzahl > TURM_GRENZE:
+                    sp = self.turm_erzeugen(l, code, anzahl, danach, sp,
+                                            stapel, tiefe)
+                    tiefe += 1
+                    continue
+                l.at = merk
+
             # --------------------------------------------- Bloecke
             if op in (0x02, 0x03, 0x04):
                 bt = l.sleb()
@@ -472,15 +617,28 @@ class Erzeuger:
                 self.marke += 1
                 b = Block({0x02: 'block', 0x03: 'loop', 0x04: 'if'}[op],
                           tiefe, sp, bres, self.marke)
+                b.schleife = (op == 0x03)
                 if op == 0x04:
                     sp -= 1
                     self.e(tiefe - 1, 'if %s != 0 {' % self.sv(sp))
-                else:
-                    # block UND loop werden zur selben Firn-Schleife.
-                    # Der Unterschied liegt im Sprung: `br` aus einem
-                    # `loop` geht an den ANFANG zurueck (continue), aus
-                    # einem `block` ans Ende (break).
+                elif op == 0x03:
+                    # NUR `loop` braucht wirklich eine Schleife: allein
+                    # dorthin kann ein `br` ZURUECKspringen.
                     self.e(tiefe - 1, 'while true {')
+                else:
+                    # `block` ist KEINE Schleife -- ein `br` daraus
+                    # geht immer VORWAERTS ans Ende. Frueher stand hier
+                    # ebenfalls `while true`, und genau das hat SQLite
+                    # gesprengt: die Verschachtelung erreichte 278
+                    # Ebenen, firnc laesst 200 zu. Ein `block` wird
+                    # deshalb zu einem EINMAL durchlaufenen `while`,
+                    # der nur dann entsteht, wenn wirklich jemand
+                    # herausspringt -- sonst gar nichts.
+                    b.schleife = self.block_braucht_schleife(l.b, l.at)
+                    if b.schleife:
+                        self.e(tiefe - 1, 'while true {')
+                    else:
+                        self.e(tiefe - 1, '{')
                 sp += len(bpar)
                 b.stack_ein = sp - len(bpar)
                 stapel.append(b)
@@ -509,7 +667,7 @@ class Erzeuger:
             else:
                 self.e(0, 'return 0')
 
-    def nach_block(self, b, tiefe):
+    def nach_block(self, b, tiefe, stapel=None):
         """Direkt hinter einer verlassenen Schleife: trug der Sprung
         eine AEUSSERE Tiefe, dann galt er nicht dieser Ebene -- also
         weiter hinausbrechen. Das kostet einen Vergleich je verlassener
@@ -521,8 +679,20 @@ class Erzeuger:
         Sprung zum `return`."""
         if not self.br_benutzt:
             return
+        # Steht ueberhaupt noch eine Schleife um diese Stelle herum?
+        # Nur dann darf hier `break` stehen. Sonst ist der Sprung nur
+        # noch als `return` aus der Funktion zu erfuellen -- das ist
+        # der Fall, wenn ein `block` (der KEINE Schleife erzeugt) die
+        # aeusserste Ebene ist.
+        umschliesst = False
+        if stapel is not None:
+            for x in stapel:
+                if x.art == 'loop' or (x.art == 'block' and x.schleife) \
+                        or x.art == 'turm':
+                    umschliesst = True
+                    break
         self.e(tiefe, 'if br_ziel >= 0 {')
-        if tiefe == 0:
+        if not umschliesst:
             self.e(tiefe + 1, 'if br_ziel == %d { br_ziel = -1 } else {' % b.tiefe)
             if self.res:
                 self.e(tiefe + 2, 'return %s' % self.sv(0))
@@ -567,20 +737,19 @@ class Erzeuger:
             sonst = l.uleb()
             sp -= 1
             wahl = self.sv(sp)
-            erst = True
+            # KEINE else-if-Kette: sie schachtelt in firncs Parser, und
+            # `br_table` hat bei SQLite bis zu 185 Ziele -- zusammen mit
+            # dem umgebenden Code reisst das die Grenze von 200 Ebenen.
+            # Unabhaengige `if`-Bloecke sind flach. Jeder Zweig endet
+            # ohnehin mit `continue`/`break`/`return`, also kann keiner
+            # in den naechsten durchfallen.
             for i, lab in enumerate(ziele):
-                E('%sif %s == %d {' % ('' if erst else '} else ', wahl, i))
-                erst = False
+                E('if %s == %d {' % (wahl, i))
                 z = stapel[len(stapel) - 1 - lab]
                 self.sprung(z, stapel, tiefe + 1, None, sp)
-            if ziele:
-                E('} else {')
-                z = stapel[len(stapel) - 1 - sonst]
-                self.sprung(z, stapel, tiefe + 1, None, sp)
                 E('}')
-            else:
-                z = stapel[len(stapel) - 1 - sonst]
-                self.sprung(z, stapel, tiefe, None, sp)
+            z = stapel[len(stapel) - 1 - sonst]
+            self.sprung(z, stapel, tiefe, None, sp)
             return sp, True
 
         # ------------------------------------------------------ Rufe
@@ -713,14 +882,19 @@ class Erzeuger:
             E('if %s != 0 {' % bed)
             tiefe += 1
             E = lambda s: self.e(tiefe - 1, s)
-        if ziel.art == 'func':
+        if ziel.art == 'turm':
+            # Sprung in einen Fall des Verteilers: Nummer setzen und
+            # die Verteilerschleife neu durchlaufen.
+            E('fall%d = %d' % (ziel.turm_marke, ziel.turm_fall))
+            E('continue')
+        elif ziel.art == 'func':
             if self.res:
                 E('return %s' % self.sv(sp - 1))
             else:
                 E('return')
         elif ziel is innen and ziel.art == 'loop':
             E('continue')
-        elif ziel is innen:
+        elif ziel is innen and ziel.schleife:
             E('break')
         else:
             self.br_benutzt = True
@@ -936,6 +1110,67 @@ class Erzeuger:
         if op == 0xC3: return ein('sext16_64(%s)' % x)
         if op == 0xC4: return ein('sext32_64(%s)' % x)
         return None
+
+    # ---------------------------------------- der Turm als Verteiler
+    #
+    # Aus
+    #     block block block ... (n mal)  RUMPF  end end end ...
+    # wird
+    #     var fall = 0
+    #     while true {
+    #         if fall == 0 { RUMPF }            // br k setzt fall = n-k
+    #         else if fall == 1 { ...hinter dem innersten end... }
+    #         ...
+    #         break
+    #     }
+    #
+    # Der Kontrollfluss ist derselbe, die Tiefe ist 1 statt n.
+    def turm_erzeugen(self, l, code, anzahl, danach, sp, stapel, tiefe):
+        self.br_benutzt = True
+        self.im_turm = True
+        self.turm_faelle = anzahl
+        marke = self.marke + 1
+        self.marke += 1
+        E = lambda t, x: self.e(t, x)
+        E(tiefe - 1, '// %d Bloecke am Stueck -> Verteiler (TIEFE.md)' % anzahl)
+        E(tiefe - 1, 'var fall%d: u64 = 0' % marke)
+        E(tiefe - 1, 'while true {')
+        # KEINE else-if-Kette: die schachtelt in firncs Parser und
+        # sprengt bei 276 Faellen dieselbe Grenze von 200 noch einmal
+        # (gemessen). Stattdessen unabhaengige `if`-Bloecke, jeder mit
+        # `break` am Ende -- das ist flach und traegt auch 300 Faelle.
+        E(tiefe, 'if fall%d == 0 {' % marke)
+        # Die n Blockebenen werden als Block-Objekte gefuehrt, damit
+        # `br k` weiterhin die richtige Ebene findet -- sie erzeugen nur
+        # keine Einrueckung mehr.
+        for k in range(anzahl):
+            b = Block('turm', tiefe + k, sp, [], marke)
+            b.schleife = False
+            b.turm_marke = marke
+            b.turm_fall = anzahl - k        # br k -> fall = anzahl-k
+            stapel.append(b)
+        l.at = danach
+        return sp
+
+    def turm_ende(self, b, tiefe, stapel):
+        """Das `end` einer Turmebene: der bisherige Fall ist zu Ende,
+        der naechste faengt an. Jeder Fall ist ein EIGENES `if` mit
+        `break` -- keine else-if-Kette (die schachtelt im Parser)."""
+        self.e(tiefe + 1, 'break')
+        self.e(tiefe, '}')
+        self.e(tiefe, 'if fall%d == %d {' % (b.turm_marke, b.turm_fall))
+        # War das die letzte Ebene, schliesst der Verteiler.
+        noch = [x for x in stapel if x.art == 'turm'
+                and x.turm_marke == b.turm_marke]
+        if not noch:
+            self.e(tiefe + 1, 'break')
+            self.e(tiefe, '}')
+            self.e(tiefe, 'break')
+            self.e(tiefe - 1, '}')
+            self.im_turm = False
+
+    def block_braucht_schleife(self, b, at):
+        return _block_braucht_schleife(b, at)
 
     # ------------------------------------- toten Code ueberspringen
     #
