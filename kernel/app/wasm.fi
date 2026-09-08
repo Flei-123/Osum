@@ -885,6 +885,7 @@ struct VM {
     code: i32,
     // Zaehler, damit eine Endlosschleife nicht ewig laeuft
     schritte: u64,
+    spur: bool,
 }
 
 fn push(v: *mut VM, x: u64) {
@@ -1325,6 +1326,139 @@ fn w_environ_sizes_get(v: *mut VM, c: u64, s: u64) -> u64 {
     return E_OK
 }
 
+// fd_filestat_get(fd, buf) -> errno
+// Die filestat-Struktur ist 64 Oktette: dev u64, ino u64, filetype u8
+// (+7 Fuellung), nlink u64, size u64, atim u64, mtim u64, ctim u64.
+// Rusts `read_to_string` fragt damit die GROESSE ab, um den Puffer in
+// einem Zug richtig zu waehlen -- ohne Antwort liest es in Stuecken
+// weiter, mit falscher Antwort schneidet es ab.
+//
+// Die Groesse holen wir ehrlich: mit `lseek` ans Ende und zurueck.
+// Osum hat `fstat` (Nummer 5), aber seine Strukturform muesste hier
+// nachgebaut werden -- zwei `lseek` sind kuerzer und benutzen nur, was
+// schon gemessen ist.
+fn w_fd_filestat_get(v: *mut VM, fd: u64, buf: u64) -> u64 {
+    if !mem_bound(v, buf, 64) {
+        return E_INVAL
+    }
+    let jetzt: i64 = syscall(SYS_LSEEK, fd as i64, 0, 1, 0, 0, 0)
+    if jetzt < 0 {
+        return E_BADF
+    }
+    let ende: i64 = syscall(SYS_LSEEK, fd as i64, 0, 2, 0, 0, 0)
+    syscall(SYS_LSEEK, fd as i64, jetzt, 0, 0, 0, 0)
+    var groesse: u64 = 0
+    if ende > 0 {
+        groesse = ende as u64
+    }
+    var i: usize = 0
+    while i < 64 {
+        g_st8(v, buf + i as u64, 0)
+        i = i + 1
+    }
+    var art: u64 = FT_REGULAR_FILE
+    if fd < 3 {
+        art = FT_CHARACTER_DEVICE
+    }
+    g_st8(v, buf + 16, art)
+    g_st64(v, buf + 24, 1)         // nlink
+    g_st64(v, buf + 32, groesse)
+    return E_OK
+}
+
+// Einen Gastpfad in eine C-Zeichenkette holen. WASI reicht Zeiger UND
+// Laenge, Osums Syscalls wollen eine Null am Ende -- diese Umpackung
+// braucht jede Pfadfunktion, also steht sie einmal hier.
+// Liefert die Laenge oder 0, wenn der Pfad nicht taugt.
+fn pfad_holen(v: *mut VM, path: u64, plen: usize, ziel: u64) -> usize {
+    if plen == 0 || plen > 1024 || !mem_bound(v, path, plen) {
+        return 0
+    }
+    var at: usize = 0
+    if g_ld8(v, path) != 47 {
+        rt.st8(ziel, 0, 47 as u8)
+        at = 1
+    }
+    var i: usize = 0
+    while i < plen {
+        rt.st8(ziel, at + i, g_ld8(v, path + i as u64) as u8)
+        i = i + 1
+    }
+    rt.st8(ziel, at + plen, 0 as u8)
+    return at + plen
+}
+
+// path_filestat_get(dirfd, flags, path, path_len, buf) -> errno
+//
+// DIE FUNKTION, AN DER SQLITE HING. Vor dem Oeffnen fragt SQLites
+// VFS, ob die Datei existiert und wie gross sie ist; ohne Antwort
+// endet das in "unable to open database file" -- eine Meldung, die
+// nicht verraet, dass ein STAT und nicht das OPEN gefehlt hat.
+// Gefunden mit der Spur (`wasm -s`), die genau darum eingebaut wurde.
+//
+// Umgesetzt ueber `open` + `lseek` statt `stat`: Osum hat `stat`
+// (Nummer 4), aber dessen Strukturform muesste hier nachgebaut werden;
+// oeffnen, ans Ende springen, schliessen benutzt nur, was schon
+// gemessen ist. Der Preis sind drei Syscalls statt einem.
+fn w_path_filestat_get(v: *mut VM, path: u64, plen: usize, buf: u64) -> u64 {
+    if !mem_bound(v, buf, 64) {
+        return E_INVAL
+    }
+    var puffer: [u8; 1088] = [0; 1088]
+    if pfad_holen(v, path, plen, (&puffer[0]) as u64) == 0 {
+        return E_INVAL
+    }
+    let fd: i64 = syscall(SYS_OPEN, (&puffer[0]) as i64, O_RDONLY, 0, 0, 0, 0)
+    if fd < 0 {
+        return E_NOENT
+    }
+    let ende: i64 = syscall(SYS_LSEEK, fd, 0, 2, 0, 0, 0)
+    syscall(SYS_CLOSE, fd, 0, 0, 0, 0, 0)
+    var i: usize = 0
+    while i < 64 {
+        g_st8(v, buf + i as u64, 0)
+        i = i + 1
+    }
+    g_st8(v, buf + 16, FT_REGULAR_FILE)
+    g_st64(v, buf + 24, 1)
+    var gr: u64 = 0
+    if ende > 0 {
+        gr = ende as u64
+    }
+    g_st64(v, buf + 32, gr)
+    return E_OK
+}
+
+// path_unlink_file(dirfd, path, path_len) -> errno
+const SYS_UNLINK: i64 = 87
+
+fn w_path_unlink(v: *mut VM, path: u64, plen: usize) -> u64 {
+    var puffer: [u8; 1088] = [0; 1088]
+    if pfad_holen(v, path, plen, (&puffer[0]) as u64) == 0 {
+        return E_INVAL
+    }
+    let r: i64 = syscall(SYS_UNLINK, (&puffer[0]) as i64, 0, 0, 0, 0, 0)
+    if r < 0 {
+        return E_NOENT
+    }
+    return E_OK
+}
+
+// path_create_directory(dirfd, path, path_len) -> errno
+const SYS_MKDIR: i64 = 83
+
+fn w_path_mkdir(v: *mut VM, path: u64, plen: usize) -> u64 {
+    var puffer: [u8; 1088] = [0; 1088]
+    if pfad_holen(v, path, plen, (&puffer[0]) as u64) == 0 {
+        return E_INVAL
+    }
+    let r: i64 = syscall(SYS_MKDIR, (&puffer[0]) as i64, 493, 0, 0, 0, 0)
+    if r < 0 {
+        return E_INVAL
+    }
+    return E_OK
+}
+
 // ---------------------------------------------------- der Verteiler
 //
 // Eine WASI-Funktion nimmt ihre Argumente vom Stapel (in umgekehrter
@@ -1388,12 +1522,39 @@ fn wasi_rufen(v: *mut VM, nr: i32, npar: usize, nres: usize) {
     } else if nr == W_CLOCK_RES_GET {
         g_st64(v, a[1], 1000)
         r = E_OK
+    } else if nr == W_PATH_FILESTAT_GET {
+        r = w_path_filestat_get(v, a[2], a[3] as usize, a[4])
+    } else if nr == W_PATH_UNLINK_FILE {
+        r = w_path_unlink(v, a[1], a[2] as usize)
+    } else if nr == W_PATH_CREATE_DIRECTORY {
+        r = w_path_mkdir(v, a[1], a[2] as usize)
+    } else if nr == W_FD_FILESTAT_SET_SIZE {
+        // SQLite kuerzt die Datei beim Aufraeumen. Ohne ftruncate im
+        // System ist das ein stilles Ja -- die Datei bleibt dann laenger
+        // als noetig, was SQLite vertraegt (es liest nach Kopfdaten,
+        // nicht nach Dateilaenge).
+        r = E_OK
+    } else if nr == W_POLL_ONEOFF {
+        r = E_OK
+    } else if nr == W_FD_FILESTAT_GET {
+        r = w_fd_filestat_get(v, a[0], a[1])
     } else if nr == W_FD_TELL {
         r = w_fd_seek(v, a[0], 0, 1, a[1])
     } else if nr == W_UNBEKANNT {
         // Ein Import, den wir nicht kennen. Das Programm bekommt eine
         // ehrliche Absage statt eines stillen Nulls.
         r = E_NOSYS
+    }
+    // SPUR: wer eine Absage bekommt, wird genannt. Ohne das sucht man
+    // bei einem Programm wie SQLite, das zwanzig Funktionen ruft, im
+    // Dunkeln -- "unable to open database file" sagt nicht, WELCHER
+    // Ruf gefehlt hat.
+    if (*v).spur && r != E_OK {
+        io.print("wasm: WASI nr=")
+        zahl_aus(nr as u64)
+        io.print(" -> errno=")
+        zahl_aus(r)
+        io.print("\n")
     }
     if nres > 0 {
         push(v, r)
@@ -1573,8 +1734,9 @@ fn springen(v: *mut VM, f: *mut Rahmen, tiefe: usize) {
             i = i + 1
         }
     }
-    // die Label darueber verwerfen
-    (*f).nlabel = (*f).label_at + (*f).nlabel - li
+    // Die Label OBERHALB des Sprungziels verwerfen. (Hier standen zwei
+    // Zuweisungen; die erste war falsch und wurde von der zweiten
+    // sofort ueberschrieben -- sie ist ersatzlos weg.)
     (*f).nlabel = li - (*f).label_at
     if lab.schleife {
         // eine Schleife: der Sprung geht an ihren Anfang, und das Label
@@ -1633,6 +1795,17 @@ fn eintreten(v: *mut VM, fi: usize) -> bool {
     var lab_at: usize = 0
     if fr > 0 {
         lab_at = (*v).frames[fr - 1].label_at + (*v).frames[fr - 1].nlabel
+    }
+    if lab_at >= 1024 {
+        // DIE GRENZE, DIE FEHLTE. Ohne sie schreibt eine tief
+        // geschachtelte Funktion hinter das Labelfeld -- und weil
+        // `frames` unmittelbar dahinter liegt, wird der Rahmenzeiger
+        // ueberschrieben statt ein Fehler gemeldet. Genau so ist
+        // SQLite abgestuerzt (Segmentation fault in `ausfuehren`),
+        // nicht an einem fehlenden Befehl.
+        io.print("wasm: zu viele Bloecke im Aufrufkeller\n")
+        (*v).falle = true
+        return false
     }
     (*v).frames[fr].label_at = lab_at
     (*v).frames[fr].nlabel = 0
@@ -1725,6 +1898,7 @@ fn ausfuehren(v: *mut VM) -> i32 {
             let li2: usize = (*v).frames[fr].label_at
                 + (*v).frames[fr].nlabel
             if li2 >= 1024 {
+                io.print("wasm: zu viele verschachtelte Bloecke\n")
                 (*v).falle = true
             } else {
                 (*v).label[li2].ziel = ende
@@ -2671,6 +2845,22 @@ fn wurzel32(x: f32) -> f32 {
 //                            Das Programm
 // ====================================================================
 
+// Der Schalter `WASMSPUR=1` als erstes Argument: `wasm -s modul.wasm`.
+// Ein Umgebungsvariablen-Weg waere schoener, aber Osums `exec` reicht
+// keine Umgebung durch -- ein Argument ist das, was sicher ankommt.
+fn spur_an(start: u64, argc: usize) -> bool {
+    var i: usize = 1
+    while i < argc {
+        let a: u64 = rt.arg_ptr(start, i)
+        if rt.c_length(a) == 2 && rt.ld8(a, 0) == 45 as u8
+            && rt.ld8(a, 1) == 115 as u8 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
 fn main(start: u64) -> i32 {
     let argc: usize = rt.arg_count(start)
     if argc < 2 {
@@ -2678,7 +2868,21 @@ fn main(start: u64) -> i32 {
         io.print("  fuehrt ein WebAssembly-Modul aus (WASI preview1).\n")
         return 2
     }
-    let pfad: u64 = rt.arg_ptr(start, 1)
+    var pfad: u64 = 0
+    var pi: usize = 1
+    while pi < argc {
+        let a0: u64 = rt.arg_ptr(start, pi)
+        if !(rt.c_length(a0) == 2 && rt.ld8(a0, 0) == 45 as u8
+            && rt.ld8(a0, 1) == 115 as u8) {
+            pfad = a0
+            pi = argc
+        }
+        pi = pi + 1
+    }
+    if pfad == 0 {
+        io.print("wasm: keine Moduldatei genannt\n")
+        return 2
+    }
 
     var datei: rt.Buf = rt.buf_new()
     if !rt.read_file(pfad, &datei) {
@@ -2727,12 +2931,21 @@ fn main(start: u64) -> i32 {
     // Die Maschine. Auch sie auf die Halde: Stapel, Lokale und Label
     // sind zusammen ueber achtzig Kilooktette, und der Stapel eines
     // Osum-Prozesses ist kleiner.
-    let vp: u64 = rt.heap_alloc(131072)
+    // 512 KiB, und die Zahl ist NICHT gegriffen. Die Maschine besteht
+    // aus vier festen Feldern: Stapel 8192*8 = 64 KiB, Lokale 2048*8 =
+    // 16 KiB, Label 1024*32 = 32 KiB, Rahmen 512*64 = 32 KiB, zusammen
+    // rund 144 KiB. Hier standen 128 KiB, und das ist der Grund, warum
+    // SQLite mit "Segmentation fault" endete statt mit einer Meldung:
+    // die Rahmen liegen im Bauplan HINTER den Labeln, also schrieb
+    // jeder tiefere Aufruf hinter die Halde. Gefunden, indem die
+    // Feldgroessen einmal zusammengezaehlt wurden -- gdb zeigte nur die
+    // Stelle, nicht die Ursache.
+    let vp: u64 = rt.heap_alloc(524288)
     if vp == 0 {
         io.print("wasm: kein Speicher fuer die Maschine\n")
         return 1
     }
-    rt.mem_set(vp, 0 as u8, 131072)
+    rt.mem_set(vp, 0 as u8, 524288)
     let v: *mut VM = vp as *mut VM
     (*v).m = m
     (*v).sp = 0
@@ -2744,6 +2957,7 @@ fn main(start: u64) -> i32 {
     (*v).beendet = false
     (*v).code = 0
     (*v).schritte = 0
+    (*v).spur = spur_an(start, argc)
 
     // Die `start`-Sektion zuerst, wenn es eine gibt: sie richtet das
     // Modul ein, bevor irgendetwas anderes laeuft.
