@@ -107,7 +107,8 @@ export {
     SYS_LSEEK, SYS_MMAP, SYS_MUNMAP, SYS_BRK, SYS_PIPE, SYS_YIELD,
     SYS_POLL, POLLIN, POLLPRI, POLLOUT, POLLERR, POLLHUP, POLLNVAL,
     SYS_DUP, SYS_DUP2, SYS_NANOSLEEP, SYS_GETPID, SYS_FORK, SYS_EXECVE,
-    SYS_EXIT, SYS_WAIT4, SYS_GETCWD, SYS_MKDIR, SYS_UNLINK, SYS_GETPPID,
+    SYS_EXIT, SYS_WAIT4, SYS_GETCWD, SYS_MKDIR, SYS_RMDIR, SYS_UNLINK,
+    SYS_GETPPID,
     SYS_GETDENTS64, SYS_EXIT_GROUP, SYS_OSUM_SPAWN, SYS_OSUM_EXEC,
     SYS_CHDIR, SYS_OSUM_SYSINFO, SYS_OSUM_PSTAT, SYS_OSUM_KILL,
     SYS_RT_SIGACTION, SYS_RT_SIGPROCMASK, SYS_RT_SIGRETURN, SYS_IOCTL,
@@ -140,6 +141,7 @@ export {
     SYS_OSUM_KLOG, SYS_OSUM_KRACH,
     KL_SEQ, KL_FIRST, KL_LOST, KL_FILT, KL_MIN, KL_SER, KL_NENT,
     KL_LINE, KL_SETMIN, KL_SETSER, KL_WRITE, KL_CRASH,
+    SYS_OSUM_SPERRE,
     CAP_BASE, CAP_VERSION, CAP_READ, CAP_WRITE, CAP_CLOSE, CAP_DUP,
     CAP_INSPECT, CAP_TRANSFER, CAP_COUNT, CAP_MAXNR,
     SYS_SOCKET, SYS_CONNECT, SYS_ACCEPT, SYS_SENDTO, SYS_RECVFROM,
@@ -297,6 +299,7 @@ const SYS_GETCWD: u64 = 79
 // answering "/".
 const SYS_CHDIR: u64 = 80
 const SYS_MKDIR: u64 = 83
+const SYS_RMDIR: u64 = 84 // RUNDE ALLTAG
 const SYS_UNLINK: u64 = 87
 const SYS_GETPPID: u64 = 110
 const SYS_GETDENTS64: u64 = 217
@@ -1246,6 +1249,30 @@ const SI_ARMS: u64 = 11 // ausgestellte Scheine
 const SI_NEXT: u64 = 12 // welche Zeile als naechstes drankaeme
 const SI_KEY: u64 = 13 // welche Taste als Bildschirmfoto-Taste gilt
 const SI_COUNT: u64 = 14
+// ============================================ RUNDE ALLTAG: DIE SPERRE
+//
+//   1870  osum_sperre(op, arg)
+//
+//     op 0  steht sie?           -> 0 oder 1
+//     op 1  sperren              -> 0   (darf jeder: sich selbst
+//                                        aussperren ist erlaubt)
+//     op 2  aufsperren           -> 0 oder -EPERM
+//     op 3  Leerlauf in ms       -> wie lange nichts eingegeben wurde
+//     op 4  ich bin der Sperrer  -> 0 oder -EPERM
+//     op 5  falscher Versuch     -> die neue Zahl
+//     op 6  Zaehler lesen (arg: 0 Sperrungen, 1 Aufsperrungen,
+//           2 Fehlversuche, 3 Neustarts des Sperrers, 4 Sperrer-PID)
+//
+// AUFSPERREN DARF NUR DER SPERRER, und das ist die ganze Sicherheit
+// dieser Sache: das Kennwort prueft ein Programm in Ring 3
+// (kernel/user/lock.fi, gegen /etc/shadow mit PBKDF2), aber WER das
+// darf, entscheidet der Kern. Ein anderes Programm, das `op 2` ruft,
+// bekommt -EPERM -- auch dann, wenn es das Kennwort kennt.
+//
+// SICH ZUM SPERRER MACHEN (op 4) geht nur, wenn es keinen gibt oder der
+// eingetragene tot ist. Sonst koennte ein Programm sich waehrend der
+// Sperre dazwischenschieben und danach aufsperren.
+const SYS_OSUM_SPERRE: u64 = 1870
 
 const CS_COUNT: u64 = 0 // wie viele Kerne die Firmware gemeldet hat
 const CS_ONLINE: u64 = 1 // wie viele davon Firn-Code erreicht haben
@@ -1875,6 +1902,9 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     if number == SYS_UNLINK {
         return do_unlink(state, me, a0)
     }
+    if number == SYS_RMDIR {
+        return do_rmdir(state, me, a0)
+    }
     if number == SYS_GETCWD {
         return do_getcwd(state, me, a0, a1)
     }
@@ -2244,6 +2274,9 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     }
     if number == SYS_OSUM_AUDSEND {
         return do_audsend(state, me, a0, a1, a2)
+    }
+    if number == SYS_OSUM_SPERRE {
+        return do_sperre(state, me, a0, a1)
     }
     // ------------------------------------------------------ RUNDE K13
     //
@@ -4513,6 +4546,73 @@ fn do_unlink(state: u64, me: u64, name: u64) -> u64 {
     return 0
 }
 
+// ================================================== RUNDE ALLTAG: rmdir
+//
+// EIN LEERES VERZEICHNIS ENTFERNEN -- und bis zu dieser Runde konnte
+// dieses System das nicht. `/bin/rmdir` rief `unlink` auf, `do_unlink`
+// antwortet jedem Verzeichnis mit EISDIR (zu Recht, so steht es in
+// POSIX), und also blieb jeder je angelegte Ordner fuer immer stehen.
+// GEMESSEN: `mkdir /x; rmdir /x; ls /` -- und /x ist noch da.
+//
+// Aufgefallen ist es dem Papierkorb: er leert einen Ordner, den jemand
+// weggeworfen hat, und wird ihn danach nicht los.
+//
+// Also der richtige Weg statt eines aufgeweichten `unlink`: Linux'
+// Nummer 84, eine eigene Funktion, und die Unterscheidung, die POSIX
+// verlangt -- was KEIN Verzeichnis ist, bekommt ENOTDIR, was noch
+// Eintraege hat, ENOTEMPTY. `fs.unlink_path` prueft die Leere selbst
+// (mehr als `.` und `..`); es kam nur nie dorthin.
+fn do_rmdir(state: u64, me: u64, name: u64) -> u64 {
+    let buf: u64 = state + kstate.NAME_OFF
+    let len: u64 = fetch_path(state, me, name, buf, MAX_NAME)
+    if errno.is_error(len) {
+        return len
+    }
+    if !perm.walk(state, me, buf) {
+        return neg(errno.E_ACCES)
+    }
+    if vfs.ready(state) {
+        let m: u64 = vfs.mount_for(state, buf)
+        if m < vfs.MAX_MNT {
+            if m != 0 || vfs.all_mode(state) {
+                let node: u64 = vfs.node_for(state, m, buf)
+                if node == 0 {
+                    return neg(errno.E_NOENT)
+                }
+                if vfs.v_attr(state, m, node, vfsops.A_TYPE)
+                    != vfsops.N_DIR {
+                    return neg(errno.E_NOTDIR)
+                }
+                let r: u64 = vfs.v_unlink(state, m, buf)
+                if r != 0 {
+                    return neg(r)
+                }
+                return 0
+            }
+        }
+    }
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return neg(errno.E_NOSYS)
+    }
+    let ino: u64 = fs.path(state, buf)
+    if ino == 0 {
+        return neg(errno.E_NOENT)
+    }
+    if fs.inode_type(state, ino) != fs.T_DIR {
+        return neg(errno.E_NOTDIR)
+    }
+    let dir: u64 = fs.parent_ino(state, buf)
+    if dir != 0 {
+        if !perm.may(state, me, dir, perm.R_WRITE | perm.R_EXEC) {
+            return neg(errno.E_ACCES)
+        }
+    }
+    if !fs.unlink_path(state, buf) {
+        return neg(errno.E_NOTEMPTY)
+    }
+    return 0
+}
+
 fn do_mkdir(state: u64, me: u64, name: u64) -> u64 {
     let buf: u64 = state + kstate.NAME_OFF
     let len: u64 = fetch_path(state, me, name, buf, MAX_NAME)
@@ -6617,6 +6717,80 @@ fn do_pstat(state: u64, index: u64, field: u64) -> u64 {
 
 // Ein Feld eines Kerns. Alles daraus steht im Satz des Kerns
 // (`kernel/cpu.fi`) oder in der Aufgabe, die gerade auf ihm laeuft.
+// RUNDE ALLTAG: die Sperre. Siehe die Nummer 1850 weiter oben.
+fn do_sperre(state: u64, me: u64, op: u64, arg: u64) -> u64 {
+    let ich: u64 = sched.tget(state, me, sched.T_PID)
+    let sp: u64 = kstate.K11_OFF
+    if op == 0 {
+        return kstate.get(state, sp + kstate.SP_ON)
+    }
+    if op == 1 {
+        if kstate.get(state, sp + kstate.SP_ON) == 0 {
+            kstate.set(state, sp + kstate.SP_ON, 1)
+            kstate.add(state, sp + kstate.SP_LOCKS, 1)
+        }
+        return 0
+    }
+    if op == 2 {
+        if kstate.get(state, sp + kstate.SP_PID) != ich {
+            return neg(errno.E_PERM)
+        }
+        kstate.set(state, sp + kstate.SP_ON, 0)
+        kstate.set(state, sp + kstate.SP_PID, 0)
+        kstate.set(state, sp + kstate.SP_SLOT, 0)
+        kstate.add(state, sp + kstate.SP_UNLOCKS, 1)
+        kstate.set(state, sp + kstate.SP_LAST, time.mono_ns(state))
+        return 0
+    }
+    if op == 3 {
+        var l: u64 = kstate.get(state, sp + kstate.SP_LAST)
+        let jetzt: u64 = time.mono_ns(state)
+        // NOCH NIE ETWAS EINGEGEBEN heisst nicht "kein Leerlauf",
+        // sondern "der Leerlauf faengt jetzt an". Ohne diese zwei
+        // Zeilen zaehlt der Waechter auf einer Maschine ohne
+        // Fensterserver nie hoch -- gemessen: `lock -d` sperrte auf der
+        // Konsole nie, weil `SP_LAST` dort niemand setzt.
+        if l == 0 {
+            kstate.set(state, sp + kstate.SP_LAST, jetzt)
+            l = jetzt
+        }
+        if jetzt < l {
+            return 0
+        }
+        return (jetzt - l) / 1000000
+    }
+    if op == 4 {
+        let alt: u64 = kstate.get(state, sp + kstate.SP_PID)
+        if alt != 0 && alt != ich {
+            if sched.find_pid(state, alt) < kstate.MAX_TASKS {
+                return neg(errno.E_PERM)
+            }
+        }
+        kstate.set(state, sp + kstate.SP_PID, ich)
+        kstate.set(state, sp + kstate.SP_SLOT, me)
+        return 0
+    }
+    if op == 5 {
+        return kstate.add(state, sp + kstate.SP_TRIES, 1)
+    }
+    if op == 6 {
+        if arg == 0 {
+            return kstate.get(state, sp + kstate.SP_LOCKS)
+        }
+        if arg == 1 {
+            return kstate.get(state, sp + kstate.SP_UNLOCKS)
+        }
+        if arg == 2 {
+            return kstate.get(state, sp + kstate.SP_TRIES)
+        }
+        if arg == 3 {
+            return kstate.get(state, sp + kstate.SP_SPAWNS)
+        }
+        return kstate.get(state, sp + kstate.SP_PID)
+    }
+    return neg(errno.E_INVAL)
+}
+
 fn do_cpustat(state: u64, index: u64, field: u64) -> u64 {
     if field == CS_COUNT {
         return cpu.count(state)

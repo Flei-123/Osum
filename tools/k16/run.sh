@@ -362,7 +362,7 @@ lauf() { # abbild anhang ausgabe [zeitlimit]
 }
 
 if [ -x "$TMPD/o/firnc" ]; then
-python3 tools/osum/mkfs.py build "$TMPD/d.img" 4096 /bin/ \
+python3 tools/osum/mkfs.py build "$TMPD/d.img" 8192 /bin/ \
     /bin/sh="$TMPD/o/sh" /bin/echo="$TMPD/o/echo" /bin/fas="$TMPD/o/fas" \
     /bin/firun="$TMPD/o/firun" /bin/k16="$TMPD/o/k16" \
     /bin/firnc="$TMPD/o/firnc" \
@@ -474,7 +474,7 @@ printf '#!/bin/echo ausleger\nrest egal\n' > "$TMPD/d/s1.sh"
 printf '#!/r2.sh\n' > "$TMPD/d/r1.sh"
 printf '#!/r1.sh\n' > "$TMPD/d/r2.sh"
 
-python3 tools/osum/mkfs.py build "$TMPD/t.img" 4096 /bin/ \
+python3 tools/osum/mkfs.py build "$TMPD/t.img" 8192 /bin/ \
     /bin/sh="$TMPD/o/sh" /bin/cat="$TMPD/o/cat" /bin/echo="$TMPD/o/echo" \
     /bin/hello="$TMPD/o/hello" /bin/k16="$TMPD/o/k16" \
     /p.fi="$TMPD/d/p.fi" /q.txt="$TMPD/d/q.txt" /tarn.fi="$TMPD/d/tarn.fi" \

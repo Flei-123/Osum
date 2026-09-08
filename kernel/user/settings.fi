@@ -516,6 +516,15 @@ static mut k_m_kbad: [u8; 24] = "konto.ui.status.failed\0\0"
 static mut k_m_kout: [u8; 26] = "konto.ui.status.removed\0\0\0"
 static mut k_m_ksel: [u8; 26] = "konto.ui.status.select\0\0\0\0"
 static mut kf_text: [u8; 5] = "text\0"
+// RUNDE ALLTAG: der Leerlaufzaehler des Sperrbildschirms. Er gehoert
+// auf die Seite BENUTZER -- die Sperre ist eine Sache des Kontos und
+// nicht der Darstellung.
+static mut k_l_sp: [u8; 21] = "settings.lock.label\0\0"
+static mut k_c_sp: [u8; 23] = "settings.lock.choices\0\0"
+static mut k_b_sp: [u8; 21] = "settings.lock.apply\0\0"
+static mut k_m_sp: [u8; 21] = "settings.lock.saved\0\0"
+static mut sp_conf: [u8; 17] = "/etc/sperre.conf\0"
+static mut sp_buf: [u8; 128] = [0 as u8; 128]
 // ADDENDUM TASKBAR. English, as every new name in this tree is; the
 // older labels around them are still German and the round RENAME owns
 // that. What these five widgets write is /etc/taskbar.conf and nothing
@@ -2595,6 +2604,80 @@ fn rects_alle() {
     }
 }
 
+// ================================ RUNDE ALLTAG: DIE SPERRE EINSTELLEN
+//
+// Fuenf Stufen und keine Eingabe einer Zahl: "nach wie vielen Minuten"
+// ist eine Frage mit fuenf vernuenftigen Antworten, und ein Textfeld
+// dafuer laedt nur dazu ein, 0 oder 100000 hineinzuschreiben.
+fn sperre_sekunden(stufe: u64) -> u64 {
+    if stufe == 1 {
+        return 60
+    }
+    if stufe == 2 {
+        return 300
+    }
+    if stufe == 3 {
+        return 600
+    }
+    if stufe == 4 {
+        return 900
+    }
+    return 0
+}
+
+fn sperre_stufe() -> u64 {
+    var k: [u8; 10] = "leerlauf=\0"
+    let fd: u64 = io.open((&sp_conf[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    let b: u64 = (&sp_buf[0 as usize]) as u64
+    let n: u64 = io.read(fd, b, 120)
+    io.close(fd)
+    if ulib.bad(n) || n == 0 {
+        return 0
+    }
+    __mmio_write8((b + n) as *mut u8, 0 as u8)
+    let at: u64 = ulib.find(b, (&k[0 as usize]) as u64)
+    if at == 0xFFFFFFFFFFFFFFFF {
+        return 0
+    }
+    let sek: u64 = ulib.to_num(b + at + 9)
+    if sek >= 900 {
+        return 4
+    }
+    if sek >= 600 {
+        return 3
+    }
+    if sek >= 300 {
+        return 2
+    }
+    if sek >= 60 {
+        return 1
+    }
+    return 0
+}
+
+fn sperre_schreiben(sek: u64) -> bool {
+    var kopf: [u8; 54] = "# /etc/sperre.conf -- von den Einstellungen\nleerlauf=\0"
+    var nl2: [u8; 2] = "\n\0"
+    var z: [u8; 24] = [0 as u8; 24]
+    let b: u64 = (&sp_buf[0 as usize]) as u64
+    ulib.strcpy(b, (&kopf[0 as usize]) as u64)
+    let n: u64 = ulib.digits(sek, (&z[0 as usize]) as u64)
+    z[(n) as usize] = 0 as u8
+    ulib.strcat(b, (&z[0 as usize]) as u64)
+    ulib.strcat(b, (&nl2[0 as usize]) as u64)
+    let fd: u64 = io.create((&sp_conf[0 as usize]) as u64)
+    if ulib.bad(fd) {
+        return false
+    }
+    let len: u64 = ulib.length(b)
+    let g: u64 = io.write_all(fd, b, len)
+    io.close(fd)
+    return !ulib.bad(g) && g >= len
+}
+
 fn u_start(args: u64) -> u64 {
     var s_bad: [u8; 24] = "settings: keine Flaeche\0"
     var s_rd: [u8; 19] = "settings: ready w=\0"
@@ -3043,6 +3126,14 @@ fn u_start(args: u64) -> u64 {
         R_BENUT)
     wlib.size(160, 26)
     let b5: u64 = merke(wlib.button(msg.get((&k_b_kw[0 as usize]) as u64)), R_BENUT)
+    // ---- RUNDE ALLTAG: der Leerlaufzaehler der Sperre
+    let _sp1: u64 = merke(wlib.label(msg.get((&k_l_sp[0 as usize]) as u64)),
+        R_BENUT)
+    let csp: u64 = merke(wlib.choice(msg.get((&k_c_sp[0 as usize]) as u64),
+        sperre_stufe()), R_BENUT)
+    wlib.size(160, 26)
+    let bsp: u64 = merke(wlib.button(msg.get((&k_b_sp[0 as usize]) as u64)),
+        R_BENUT)
     // ---- Netzzugriff (ROUND NETVIEW)
     let _v1: u64 = merke(wlib.label(msg.get((&k_l_nv1[0 as usize]) as u64)), R_NETV)
     let _v2: u64 = merke(wlib.label(msg.get((&k_l_nv2[0 as usize]) as u64)), R_NETV)
@@ -3698,6 +3789,16 @@ fn u_start(args: u64) -> u64 {
                     stand_lesen()
                     wlib.set_text(st, (&l_stat[0 as usize]) as u64)
                     melde_stand()
+                } else if id == bsp {
+                    // RUNDE ALLTAG: /etc/sperre.conf schreiben. Der
+                    // Waechter (`lock -d`) liest sie beim naechsten
+                    // Start; laeuft schon einer, gilt seine Zahl bis
+                    // zum naechsten Mal -- das steht so in der Datei.
+                    let sek: u64 = sperre_sekunden(wlib.value(csp))
+                    if sperre_schreiben(sek) {
+                        let _ss: u64 = text_an((&l_stat[0 as usize]) as u64,
+                            0, msg.get((&k_m_sp[0 as usize]) as u64))
+                    }
                 } else if id == b5 {
                     if !ulib.streq((&e_pw1[0 as usize]) as u64,
                         (&e_pw2[0 as usize]) as u64) {
