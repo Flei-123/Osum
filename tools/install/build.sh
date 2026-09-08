@@ -61,7 +61,11 @@ PROGS=${PROGS:-"sh ls cat echo cp mv rm mkdir rmdir touch head tail wc grep sort
 # hat das als ersten Punkt der Fehlliste benannt: "es fehlt die
 # Verdrahtung, nicht die Kryptographie". Von hier an ist es drin, und
 # damit kann das Geraet selbst holen, was es einspielt.
-APPS=${APPS:-"fetch"}
+# RUNDE SCHLEUSE: `wasm` ist die zweite App. Sie braucht `--profile=app`
+# aus demselben Grund wie `fetch` -- der Deuter legt den linearen
+# Speicher des Gastes auf der Halde an, und eine Halde hat `profile
+# kernel` nicht.
+APPS=${APPS:-"fetch wasm"}
 
 bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1 || {
     echo "== firnc laesst sich nicht bauen"; tail -20 "$OUT/firnc.log"; exit 1; }
