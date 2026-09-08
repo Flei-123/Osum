@@ -84,7 +84,18 @@ STUFE=${STUFE:-0}
 CC=${FIRNC:-vendor/firn/bin/firnc}
 LIMINE=${LIMINE_DIR:-/root/jarvis/projects/u_DiS4in7esMF1/orientos/vendor/limine}
 ESP_MIB=${ESP_MIB:-96}
-FS_BLOCKS=${FS_BLOCKS:-40960}
+# RUNDE MERGE9: 65536 Bloecke (32 MiB) statt 40960 (20 MiB).
+# GEMESSEN: das Abbild der Runde MERGE-8 hatte bei 40960 Bloecken noch
+# free=8945, also 4,4 MiB frei. Certus ist 6 493 760 Oktette (6,19 MiB)
+# und passte damit NICHT. Mit 65536 bleiben nach Certus noch rund 10 MiB
+# fuer busybox, lua und sqlite.
+# WARUM DAS GEHT: seit OFS v3 ist die Blockkarte MEHRBLOCKIG
+# (SB_BMBLOCKS, kernel/fs.fi). FS_KARTEN=128 traegt 128*4096 = 524 288
+# Bloecke = 256 MiB; 65536 Bloecke brauchen davon 16. Der Satz in
+# STATUS-FREMDLAND.md ("4096 Bloecke = 2 MB je Platte") und der
+# Kommentar in fs.fi:236 stammen aus der Zeit VOR OFS v3 und gelten
+# nicht mehr -- das gebaute Abbild meldet bmblocks=128.
+FS_BLOCKS=${FS_BLOCKS:-65536}
 FS_INODES=${FS_INODES:-1024}
 FS_KARTEN=${FS_KARTEN:-128}
 
@@ -528,6 +539,31 @@ ARGS+=(/etc/ssl/ /etc/jarvis/ /var/ /var/log/ /var/jarvis/)
 if [ -n "$ROOTS" ] && [ -s "$ROOTS" ]; then
     ARGS+=("/etc/ssl/roots.pem=$ROOTS")
 fi
+# ================================ RUNDE MERGE9: DIE GROSSEN MITBRINGSEL
+#
+# Certus, busybox, lua und sqlite liegen NICHT in diesem Baum -- sie
+# werden anderswo gebaut (Certus im eigenen Repo, die drei Fremdlinge
+# nach tools/fremd/README.md). Wer sie hat, gibt ihren Pfad an; wer
+# nicht, bekommt einen Stick ohne sie und keinen Abbruch. Genau so
+# haelt es die Stelle oben mit `firnc`.
+#
+#   CERTUS=/pfad/certus  BUSYBOX=...  LUA=...  SQLITE=...
+#
+# WARUM SIE HIER STEHEN: das Wurzelabbild fasst seit dieser Runde
+# 65536 Bloecke (32 MiB) statt 40960; Certus allein ist 6,19 MiB und
+# passte vorher nicht (free war 4,4 MiB).
+for mit in "CERTUS:/bin/certus" "BUSYBOX:/bin/busybox" \
+           "LUA:/bin/lua" "SQLITE:/bin/sqlite3"; do
+    mvar=${mit%%:*}; mziel=${mit##*:}
+    mpfad=$(eval "printf '%s' \"\${$mvar:-}\"")
+    if [ -n "$mpfad" ] && [ -s "$mpfad" ]; then
+        ARGS+=("$mziel=$mpfad")
+        gebaut="$gebaut ${mziel##*/}"
+        sagen "mitbringsel $(stat -c%s "$mpfad") Oktette  $mziel aus $mpfad"
+    elif [ -n "$mpfad" ]; then
+        echo "== HINWEIS: $mvar=$mpfad ist leer oder fehlt -- $mziel bleibt weg" >&2
+    fi
+done
 ARGS+=("/etc/ota.conf=$OUT/ota.conf")
 ARGS+=("/etc/jarvis/rechte.conf=$OUT/rechte.conf")
 ARGS+=("/system/SCHLUESSELGEN=$OUT/SCHLUESSELGEN")
