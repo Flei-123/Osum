@@ -1,0 +1,364 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/wlan/rahmen.fi -- der 802.11-Rahmen, zerlegt.
+//
+// ==================================================================
+// WAS DIESE DATEI IST
+// ==================================================================
+//
+// Die unterste Schicht der Runde WLAN und die einzige, die JEDER Rahmen
+// durchlaeuft, der aus der Luft kommt. Sie ist damit die groesste
+// Angriffsflaeche dieses Kernels ueberhaupt: ein Beacon kommt von einem
+// Geraet, das niemand kennt, wird von niemandem beglaubigt, kommt an,
+// BEVOR es einen Schluessel gibt, und ein Angreifer darf sich beliebig
+// viele davon ausdenken.
+//
+// Deshalb ist die Regel dieser Datei nicht "richtig zerlegen", sondern:
+//
+//   JEDE Funktion hier bekommt Zeiger UND Laenge, prueft VOR jedem
+//   Zugriff, ob das Feld noch in die Laenge passt, und gibt bei jedem
+//   Zweifel einen DEFINIERTEN Fehler zurueck. Es gibt keinen Pfad, auf
+//   dem ein Laengenfeld aus dem Rahmen bestimmt, wie weit gelesen wird,
+//   ohne dass es vorher gegen die tatsaechliche Laenge geprueft wurde.
+//
+// `tools/wlan/fuzz.py` wirft verstuemmelte Rahmen hinein und prueft
+// genau das nach.
+//
+// ==================================================================
+// DER RAHMENKOPF, IEEE 802.11-2016 9.2.3
+// ==================================================================
+//
+//   Frame Control   2   kleinstwertiges Oktett zuerst
+//   Duration/ID     2
+//   Address 1       6   Empfaenger
+//   Address 2       6   Sender
+//   Address 3       6   je nach ToDS/FromDS: BSSID, Quelle oder Ziel
+//   Sequence Ctrl   2   Bruchstuecknummer (4 Bit) und Folgenummer (12)
+//   Address 4       6   NUR wenn ToDS UND FromDS -- also von Vermittler
+//                       zu Vermittler
+//   QoS Control     2   NUR bei Daten-Untertypen mit gesetztem Bit 3
+//   HT Control      4   NUR wenn das Ordnungsbit gesetzt ist
+//
+// Das ist der Punkt, an dem 802.11 sich von Ethernet unterscheidet und
+// an dem die meisten Fehler entstehen: DIE KOPFLAENGE IST NICHT FEST.
+// Sie ist 24, 26, 28, 30, 32 oder 36 Oktette, und welche, steht in
+// Bits, die im Rahmen selbst stehen.
+//
+// Frame Control, Bit fuer Bit:
+//   0-1   Protokollversion. MUSS 0 sein. Alles andere wird verworfen.
+//   2-3   Art: 0 Verwaltung, 1 Steuerung, 2 Daten, 3 vorbehalten
+//   4-7   Untertyp
+//   8     ToDS
+//   9     FromDS
+//   10    weitere Bruchstuecke
+//   11    Wiederholung
+//   12    Stromsparen
+//   13    weitere Daten
+//   14    geschuetzt
+//   15    Ordnung / +HTC
+
+export {
+    IeIter, ie_beginn, ie_weiter,
+    fc, art, untertyp, tods, fromds, geschuetzt, ordnung, wiederholung,
+    kopf_laenge, rumpf_versatz, adr1, adr2, adr3, folge, bruchstueck,
+    qos_tid, hat_qos, hat_adr4,
+    ART_VERWALTUNG, ART_STEUERUNG, ART_DATEN,
+    UT_ASSOC_ANFRAGE, UT_ASSOC_ANTWORT, UT_PROBE_ANFRAGE,
+    UT_PROBE_ANTWORT, UT_BEACON, UT_DISASSOC, UT_AUTH, UT_DEAUTH,
+    UT_ACTION,
+    IE_SSID, IE_RATEN, IE_DS, IE_TIM, IE_LAND, IE_HT_FAEHIG, IE_RSN,
+    IE_HT_BETRIEB, IE_ERWEITERTE_RATEN, IE_VHT_BETRIEB, IE_HERSTELLER,
+    IE_ERWEITERUNG,
+    MIN_KOPF
+}
+
+const MIN_KOPF: usize = 24
+
+const ART_VERWALTUNG: u64 = 0
+const ART_STEUERUNG: u64 = 1
+const ART_DATEN: u64 = 2
+
+const UT_ASSOC_ANFRAGE: u64 = 0
+const UT_ASSOC_ANTWORT: u64 = 1
+const UT_PROBE_ANFRAGE: u64 = 4
+const UT_PROBE_ANTWORT: u64 = 5
+const UT_BEACON: u64 = 8
+const UT_DISASSOC: u64 = 10
+const UT_AUTH: u64 = 11
+const UT_DEAUTH: u64 = 12
+const UT_ACTION: u64 = 13
+
+const IE_SSID: u64 = 0
+const IE_RATEN: u64 = 1
+const IE_DS: u64 = 3
+const IE_TIM: u64 = 5
+const IE_LAND: u64 = 7
+const IE_HT_FAEHIG: u64 = 45
+const IE_RSN: u64 = 48
+const IE_ERWEITERTE_RATEN: u64 = 50
+const IE_HT_BETRIEB: u64 = 61
+const IE_VHT_BETRIEB: u64 = 192
+const IE_HERSTELLER: u64 = 221
+const IE_ERWEITERUNG: u64 = 255
+
+fn ld8(p: u64, i: usize) -> u8 {
+    return *((p + i as u64) as *mut u8)
+}
+
+// Zwei Oktette, kleinstwertiges zuerst. 802.11 ist durchgehend
+// kleinstwertig-zuerst -- das ist die Gegenrichtung zu allem, was
+// dieser Kernel sonst vom Netz liest (IP, TCP, DNS sind
+// hoechstwertig-zuerst), und deshalb steht es hier einmal an einer
+// Stelle und wird nirgends von Hand nachgerechnet.
+fn le16(p: u64, i: usize) -> u64 {
+    return (ld8(p, i) as u64) | ((ld8(p, i + 1) as u64) << 8)
+}
+
+// Frame Control. Der Aufrufer muss vorher sichergestellt haben, dass
+// der Rahmen mindestens zwei Oktette hat.
+fn fc(p: u64, n: usize) -> u64 {
+    if n < 2 {
+        return 0
+    }
+    return le16(p, 0)
+}
+
+fn art(f: u64) -> u64 {
+    return (f >> 2) & 3
+}
+
+fn untertyp(f: u64) -> u64 {
+    return (f >> 4) & 15
+}
+
+fn tods(f: u64) -> bool {
+    return (f & 256) != 0
+}
+
+fn fromds(f: u64) -> bool {
+    return (f & 512) != 0
+}
+
+fn wiederholung(f: u64) -> bool {
+    return (f & 2048) != 0
+}
+
+fn geschuetzt(f: u64) -> bool {
+    return (f & 16384) != 0
+}
+
+fn ordnung(f: u64) -> bool {
+    return (f & 32768) != 0
+}
+
+fn hat_adr4(f: u64) -> bool {
+    return tods(f) && fromds(f)
+}
+
+// Nur Daten-Untertypen mit Bit 3 tragen ein QoS-Feld.
+fn hat_qos(f: u64) -> bool {
+    if art(f) != ART_DATEN {
+        return false
+    }
+    return (untertyp(f) & 8) != 0
+}
+
+// Die Kopflaenge, ausgerechnet aus dem, was im Kopf steht.
+// Rueckgabe -1 heisst: der Rahmen ist zu kurz fuer seinen eigenen Kopf,
+// oder die Protokollversion stimmt nicht.
+//
+// STEUERRAHMEN sind der Sonderfall: sie haben keinen dritten Adressteil
+// und teils nur eine Adresse. Diese Datei zerlegt sie NICHT -- der
+// Kernel dieser Runde sendet und empfaengt keine, und ein Formatpfad,
+// den niemand braucht, ist nur eine Angriffsflaeche mehr. Sie bekommen
+// -1.
+fn kopf_laenge(p: u64, n: usize) -> i64 {
+    if n < 2 {
+        return -1
+    }
+    let f: u64 = le16(p, 0)
+    if (f & 3) != 0 {
+        return -1 // Protokollversion
+    }
+    let a: u64 = art(f)
+    if a == ART_STEUERUNG || a == 3 {
+        return -1
+    }
+    var l: usize = MIN_KOPF
+    if a == ART_DATEN {
+        if hat_adr4(f) {
+            l = l + 6
+        }
+        if hat_qos(f) {
+            l = l + 2
+        }
+    }
+    // Das Ordnungsbit bedeutet bei Verwaltungs- und QoS-Datenrahmen ein
+    // HT-Control-Feld von vier Oktetten (802.11-2016 9.2.4.6). Bei
+    // Datenrahmen OHNE QoS bedeutet dasselbe Bit "streng geordnet" und
+    // fuegt nichts hinzu.
+    if ordnung(f) {
+        if a == ART_VERWALTUNG || (a == ART_DATEN && hat_qos(f)) {
+            l = l + 4
+        }
+    }
+    if n < l {
+        return -1
+    }
+    return l as i64
+}
+
+// Wo der Rumpf anfaengt -- dasselbe wie die Kopflaenge, aber unter
+// einem Namen, der sagt, wofuer man ihn benutzt.
+fn rumpf_versatz(p: u64, n: usize) -> i64 {
+    return kopf_laenge(p, n)
+}
+
+// Die drei Adressen. Der Aufrufer bekommt einen Zeiger auf sechs
+// Oktette IM RAHMEN, oder 0. Kopiert wird nichts -- wer die Adresse
+// behalten will, kopiert sie selbst.
+fn adr1(p: u64, n: usize) -> u64 {
+    if n < 10 {
+        return 0
+    }
+    return p + 4
+}
+
+fn adr2(p: u64, n: usize) -> u64 {
+    if n < 16 {
+        return 0
+    }
+    return p + 10
+}
+
+fn adr3(p: u64, n: usize) -> u64 {
+    if n < 22 {
+        return 0
+    }
+    return p + 16
+}
+
+// Folgenummer (12 Bit) und Bruchstuecknummer (4 Bit) aus dem
+// Sequence-Control-Feld.
+fn folge(p: u64, n: usize) -> i64 {
+    if n < 24 {
+        return -1
+    }
+    return ((le16(p, 22) >> 4) & 4095) as i64
+}
+
+fn bruchstueck(p: u64, n: usize) -> i64 {
+    if n < 24 {
+        return -1
+    }
+    return (le16(p, 22) & 15) as i64
+}
+
+// Die Verkehrsklasse aus dem QoS-Feld. -1, wenn der Rahmen keines hat.
+// Sie steht in der Nonce von CCMP und ist damit sicherheitsrelevant:
+// zwei Rahmen mit derselben Paketnummer und verschiedener Klasse
+// bekommen verschiedene Nonces.
+fn qos_tid(p: u64, n: usize) -> i64 {
+    if n < 2 {
+        return -1
+    }
+    let f: u64 = le16(p, 0)
+    if !hat_qos(f) {
+        return -1
+    }
+    var at: usize = MIN_KOPF
+    if hat_adr4(f) {
+        at = at + 6
+    }
+    if n < at + 2 {
+        return -1
+    }
+    return (ld8(p, at) as u64 & 15) as i64
+}
+
+// ==================================================================
+// DIE INFORMATIONSELEMENTE
+// ==================================================================
+//
+// Ein Beacon besteht nach einem festen Kopf aus einer Kette von
+// Elementen, jedes: eine Kennung (1 Oktett), eine Laenge (1 Oktett),
+// dann so viele Oktette. Die Laenge ist ein Feld AUS DEM RAHMEN, also
+// aus der Hand eines Fremden -- und sie ist genau die Stelle, an der in
+// den letzten zwanzig Jahren die meisten WLAN-Luecken gesteckt haben.
+//
+// Deshalb hat dieser Wanderer keine Ausnahme:
+//
+//   * Steht fuer Kennung und Laenge zusammen weniger als zwei Oktette
+//     zur Verfuegung, ist die Kette ZU ENDE. Ein einzelnes uebriges
+//     Oktett ist KEIN Element.
+//   * Reicht die Laenge ueber das Ende hinaus, wird `kaputt` gesetzt
+//     und die Wanderung endet. Nichts wird gelesen.
+//   * Es gibt keinen Rueckwaertsschritt und keinen Sprung; `at` waechst
+//     in jedem Schritt um mindestens zwei. Eine Endlosschleife ist
+//     damit ausgeschlossen, auch bei einem Element der Laenge null.
+//
+// `kaputt` ist ABSICHTLICH kein Abbruch, sondern eine Meldung: ein
+// Beacon mit einem abgeschnittenen letzten Element ist in der Praxis
+// haeufig (der Empfangspuffer war voll), und die Elemente DAVOR sind
+// trotzdem gueltig. Wer strenger sein will, prueft `kaputt`.
+struct IeIter {
+    p: u64,
+    n: usize,
+    at: usize,
+    id: u64,
+    ext: u64,     // bei Kennung 255: die erweiterte Kennung, sonst 0
+    laenge: usize,
+    daten: u64,   // Zeiger auf die Daten IM RAHMEN, 0 wenn leer
+    kaputt: bool,
+}
+
+fn ie_beginn(p: u64, n: usize, at: usize) -> IeIter {
+    return IeIter { p: p, n: n, at: at, id: 0, ext: 0, laenge: 0,
+        daten: 0, kaputt: false }
+}
+
+fn ie_weiter(it: *mut IeIter) -> bool {
+    let at: usize = (*it).at
+    let n: usize = (*it).n
+    if at >= n {
+        return false
+    }
+    if at + 2 > n {
+        // Ein einzelnes Oktett am Ende: das ist kein Element.
+        (*it).kaputt = true
+        (*it).at = n
+        return false
+    }
+    let id: u64 = ld8((*it).p, at) as u64
+    let l: usize = ld8((*it).p, at + 1) as usize
+    if at + 2 + l > n {
+        (*it).kaputt = true
+        (*it).at = n
+        return false
+    }
+    (*it).id = id
+    (*it).laenge = l
+    if l > 0 {
+        (*it).daten = (*it).p + (at as u64) + 2
+    } else {
+        (*it).daten = 0
+    }
+    (*it).ext = 0
+    if id == IE_ERWEITERUNG {
+        if l < 1 {
+            (*it).kaputt = true
+            (*it).at = n
+            return false
+        }
+        (*it).ext = ld8((*it).p, at + 2) as u64
+        // Bei einem erweiterten Element gehoert das erste Oktett zur
+        // Kennung und nicht zu den Daten.
+        (*it).laenge = l - 1
+        if l - 1 > 0 {
+            (*it).daten = (*it).p + (at as u64) + 3
+        } else {
+            (*it).daten = 0
+        }
+    }
+    (*it).at = at + 2 + l
+    return true
+}

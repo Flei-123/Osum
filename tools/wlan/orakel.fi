@@ -1,0 +1,837 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/wlan/orakel.fi -- die Rechnung der Runde WLAN, auf dem WIRT.
+//
+// ==================================================================
+// WARUM ES DIESES PROGRAMM GIBT
+// ==================================================================
+//
+// QEMU hat kein 802.11-Geraet. Gemessen, auf dieser Maschine:
+//
+//     $ qemu-system-x86_64 -device help | grep -icE 'wifi|802\.11|iwl'
+//     2
+//     267:name "athlon-v1-x86_64-cpu"
+//     268:name "athlon-x86_64-cpu"
+//
+// Es gibt also keinen Weg, eine WLAN-Karte zu emulieren, und damit
+// keinen Weg, in QEMU auch nur einen einzigen 802.11-Rahmen zu
+// erzeugen. Das ist in `docs/WLAN-BEFUND.md` Abschnitt 5 ausgefuehrt.
+//
+// Ein 802.11-Rahmen ist aber eine Folge von Oktetten, und ob er richtig
+// zerlegt wird, haengt an keiner Karte. Genau dafuer haben die Runden
+// TUNNEL und UPDATE das Werkzeug gebaut, das hier wieder benutzt wird:
+// ein Programm in Firn, das auf Linux laeuft, DIESELBEN `lib/`-Dateien
+// bindet, die der Kern spaeter binden wird, eine Zeile liest und eine
+// Zeile antwortet.
+//
+//   sha1     <msghex|->                          20 Oktette
+//   hmacsha1 <keyhex> <msghex|->                 20 Oktette
+//   prf      <keyhex> <labelhex> <datahex|-> <n> n Oktette
+//   pbkdf2   <pwhex> <salthex> <iters> <n>       n Oktette
+//   aesenc   <keyhex> <blockhex>                 16 Oktette
+//   aesdec   <keyhex> <blockhex>                 16 Oktette
+//   cmac     <keyhex> <msghex|->                 16 Oktette
+//   wrap     <kekhex> <plainhex>                 n+8 Oktette
+//   unwrap   <kekhex> <cipherhex>                n-8 Oktette / FAIL
+//   ccmenc   <key> <nonce> <aad|-> <plain|-> <M> C||T
+//   ccmdec   <key> <nonce> <aad|-> <ct> <M>      P / FAIL
+//   ccmpenc  <tk> <pn> <frame>                   geschuetzte MPDU
+//   ccmpdec  <tk> <mpdu>                         Kopf||Klartext / FAIL
+//   beacon   <frame>                             Zeile mit Feldern
+//   ies      <frame>                             Kennungen und Laengen
+//   kanal    <freq>                              Kanalnummer / FAIL
+//   freq     <kanal> <band>                      MHz / FAIL
+//   etsi     <band> <kanal>                      Zeile mit der Regel
+//   ptk      <pmk> <aa> <spa> <anonce> <snonce> <akm> <n>
+//   mic      <kck> <eapol> <akm>                 16 Oktette
+//   eapol    <frame>                             Zeile mit Feldern
+//   gtk      <kek> <keydata>                     ausgepackter GTK
+//   automat  <folge>                             Endzustand und Grund
+//   pmk      <pwhex> <ssidhex>                   32 Oktette
+//
+// `-` steht fuer die leere Zeichenkette. `FAIL` heisst: die Eingabe
+// wurde abgelehnt. Genau das ist bei der Haelfte der Faelle die
+// richtige Antwort, und ein Orakel, das nie FAIL sagt, misst nichts.
+import std.rt
+import std.io
+import crypto.sha1
+import crypto.sha256
+import crypto.aes
+import wlan.rahmen
+import wlan.beacon
+import wlan.kanal
+import wlan.wpa
+import wlan.ccmp
+import wlan.zustand
+import wlan.usbchip
+import wlan.geraet
+import wlan.pruefgeraet
+import wlan.verbinden
+
+const CAP: usize = 4096
+
+static mut a0: [u8; 4096] = [0; 4096]
+static mut a1: [u8; 4096] = [0; 4096]
+static mut a2: [u8; 4096] = [0; 4096]
+static mut a3: [u8; 4096] = [0; 4096]
+static mut a4: [u8; 4096] = [0; 4096]
+static mut outb: [u8; 4096] = [0; 4096]
+static mut hexb: [u8; 8200] = [0; 8200]
+static mut txtb: [u8; 4096] = [0; 4096]
+static mut tlen: usize = 0
+
+fn hexval(c: u64) -> i64 {
+    if c >= 48 && c <= 57 { return (c - 48) as i64 }
+    if c >= 97 && c <= 102 { return (c - 87) as i64 }
+    if c >= 65 && c <= 70 { return (c - 55) as i64 }
+    return -1
+}
+
+fn field_hex(line: u64, len: usize, at: *mut usize, dst: u64) -> i64 {
+    var i: usize = *at
+    while i < len && rt.ld8(line, i) == 32 as u8 { i = i + 1 }
+    var start: usize = i
+    while i < len && rt.ld8(line, i) != 32 as u8 { i = i + 1 }
+    *at = i
+    let n: usize = i - start
+    if n == 0 { return -1 }
+    if n == 1 && rt.ld8(line, start) == 45 as u8 { return 0 }
+    if n % 2 != 0 { return -1 }
+    if n / 2 > CAP { return -1 }
+    var o: usize = 0
+    while o < n / 2 {
+        let hi: i64 = hexval(rt.ld8(line, start + o * 2) as u64)
+        let lo: i64 = hexval(rt.ld8(line, start + o * 2 + 1) as u64)
+        if hi < 0 || lo < 0 { return -1 }
+        rt.st8(dst, o, ((hi * 16 + lo) & 255) as u8)
+        o = o + 1
+    }
+    return (n / 2) as i64
+}
+
+fn field_num(line: u64, len: usize, at: *mut usize) -> i64 {
+    var i: usize = *at
+    while i < len && rt.ld8(line, i) == 32 as u8 { i = i + 1 }
+    let start: usize = i
+    var v: i64 = 0
+    while i < len && rt.ld8(line, i) >= 48 as u8
+        && rt.ld8(line, i) <= 57 as u8 {
+        v = v * 10 + ((rt.ld8(line, i) as i64) - 48)
+        i = i + 1
+    }
+    if i == start { return -1 }
+    *at = i
+    return v
+}
+
+fn field_word(line: u64, len: usize, at: *mut usize, dst: u64) -> i64 {
+    var i: usize = *at
+    while i < len && rt.ld8(line, i) == 32 as u8 { i = i + 1 }
+    let start: usize = i
+    while i < len && rt.ld8(line, i) != 32 as u8 { i = i + 1 }
+    *at = i
+    let n: usize = i - start
+    if n == 0 { return -1 }
+    if n > 256 { return -1 }
+    var o: usize = 0
+    while o < n {
+        rt.st8(dst, o, rt.ld8(line, start + o))
+        o = o + 1
+    }
+    return n as i64
+}
+
+fn word_is(line: u64, len: usize, at: *mut usize, w: u64) -> bool {
+    var i: usize = *at
+    while i < len && rt.ld8(line, i) == 32 as u8 { i = i + 1 }
+    let start: usize = i
+    var j: usize = i
+    while j < len && rt.ld8(line, j) != 32 as u8 { j = j + 1 }
+    let n: usize = j - start
+    if rt.c_length(w) != n { return false }
+    var o: usize = 0
+    while o < n {
+        if rt.ld8(line, start + o) != rt.ld8(w, o) { return false }
+        o = o + 1
+    }
+    *at = j
+    return true
+}
+
+fn emit(p: u64, n: usize) {
+    let h: u64 = (&hexb[0]) as u64
+    let d: [u8; 16] = [48, 49, 50, 51, 52, 53, 54, 55,
+        56, 57, 97, 98, 99, 100, 101, 102]
+    var i: usize = 0
+    while i < n {
+        let v: u64 = rt.ld8(p, i) as u64
+        rt.st8(h, i * 2, d[(v >> 4) as usize])
+        rt.st8(h, i * 2 + 1, d[(v & 15) as usize])
+        i = i + 1
+    }
+    if n == 0 {
+        rt.st8(h, 0, 45 as u8)
+        io.print_line_bytes(h, 1)
+        return
+    }
+    io.print_line_bytes(h, n * 2)
+}
+
+fn fail() {
+    var m: [u8; 4] = [70, 65, 73, 76]
+    io.print_line_bytes((&m[0]) as u64, 4)
+}
+
+// ---- ein kleiner Textbauer fuer die Antwortzeilen mit Feldern ----
+
+fn tch(c: u64) {
+    if tlen < 4090 {
+        txtb[tlen] = (c & 255) as u8
+        tlen = tlen + 1
+    }
+}
+
+fn tlit(w: u64) {
+    let n: usize = rt.c_length(w)
+    var i: usize = 0
+    while i < n {
+        tch(rt.ld8(w, i) as u64)
+        i = i + 1
+    }
+}
+
+fn tnum(v: u64) {
+    if v >= 10 { tnum(v / 10) }
+    tch(48 + (v % 10))
+}
+
+fn tsnum(v: i64) {
+    if v < 0 {
+        tch(45)
+        tnum((0 - v) as u64)
+    } else {
+        tnum(v as u64)
+    }
+}
+
+fn tbit(b: bool) {
+    if b { tch(49) } else { tch(48) }
+}
+
+fn thex(p: u64, n: usize) {
+    let d: [u8; 16] = [48, 49, 50, 51, 52, 53, 54, 55,
+        56, 57, 97, 98, 99, 100, 101, 102]
+    var i: usize = 0
+    while i < n {
+        let v: u64 = rt.ld8(p, i) as u64
+        tch(d[(v >> 4) as usize] as u64)
+        tch(d[(v & 15) as usize] as u64)
+        i = i + 1
+    }
+}
+
+fn temit() {
+    io.print_line_bytes((&txtb[0]) as u64, tlen)
+    tlen = 0
+}
+
+// ==================================================================
+fn run_line(line: u64, len: usize) {
+    var at: usize = 0
+    let p0: u64 = (&a0[0]) as u64
+    let p1: u64 = (&a1[0]) as u64
+    let p2: u64 = (&a2[0]) as u64
+    let p3: u64 = (&a3[0]) as u64
+    let p4: u64 = (&a4[0]) as u64
+    let po: u64 = (&outb[0]) as u64
+    tlen = 0
+
+    var w: [u8; 5] = "sha1\0"
+    if word_is(line, len, &at, (&w[0]) as u64) {
+        let ml: i64 = field_hex(line, len, &at, p0)
+        if ml < 0 { fail(); return }
+        sha1.hash(p0, ml as usize, po)
+        emit(po, 20)
+        return
+    }
+    var w2: [u8; 9] = "hmacsha1\0"
+    if word_is(line, len, &at, (&w2[0]) as u64) {
+        let kl: i64 = field_hex(line, len, &at, p0)
+        let ml: i64 = field_hex(line, len, &at, p1)
+        if kl < 0 || ml < 0 { fail(); return }
+        sha1.hmac(p0, kl as usize, p1, ml as usize, po)
+        emit(po, 20)
+        return
+    }
+    var w3: [u8; 4] = "prf\0"
+    if word_is(line, len, &at, (&w3[0]) as u64) {
+        let kl: i64 = field_hex(line, len, &at, p0)
+        let ll: i64 = field_hex(line, len, &at, p1)
+        let dl: i64 = field_hex(line, len, &at, p2)
+        let n: i64 = field_num(line, len, &at)
+        if kl < 0 || ll < 0 || dl < 0 || n < 0 { fail(); return }
+        if !sha1.prf(p0, kl as usize, p1, ll as usize, p2, dl as usize,
+            po, n as usize) { fail(); return }
+        emit(po, n as usize)
+        return
+    }
+    var w4: [u8; 7] = "pbkdf2\0"
+    if word_is(line, len, &at, (&w4[0]) as u64) {
+        let pl: i64 = field_hex(line, len, &at, p0)
+        let sl: i64 = field_hex(line, len, &at, p1)
+        let it: i64 = field_num(line, len, &at)
+        let n: i64 = field_num(line, len, &at)
+        if pl < 0 || sl < 0 || it < 0 || n < 0 { fail(); return }
+        if !sha1.pbkdf2(p0, pl as usize, p1, sl as usize, it as usize,
+            po, n as usize) { fail(); return }
+        emit(po, n as usize)
+        return
+    }
+    var wpk: [u8; 4] = "pmk\0"
+    if word_is(line, len, &at, (&wpk[0]) as u64) {
+        let pl: i64 = field_hex(line, len, &at, p0)
+        let sl: i64 = field_hex(line, len, &at, p1)
+        if pl < 0 || sl < 0 { fail(); return }
+        if !wpa.pmk_aus_passwort(p0, pl as usize, p1, sl as usize, po) {
+            fail()
+            return
+        }
+        emit(po, 32)
+        return
+    }
+    var w5: [u8; 7] = "aesenc\0"
+    if word_is(line, len, &at, (&w5[0]) as u64) {
+        let kl: i64 = field_hex(line, len, &at, p0)
+        let bl: i64 = field_hex(line, len, &at, p1)
+        if kl < 0 || bl != 16 { fail(); return }
+        var k: aes.Key = aes.key_new()
+        if !aes.key_set(&k, p0, kl as usize) { fail(); return }
+        aes.encrypt_block(&k, p1, po)
+        emit(po, 16)
+        return
+    }
+    var w6: [u8; 7] = "aesdec\0"
+    if word_is(line, len, &at, (&w6[0]) as u64) {
+        let kl: i64 = field_hex(line, len, &at, p0)
+        let bl: i64 = field_hex(line, len, &at, p1)
+        if kl < 0 || bl != 16 { fail(); return }
+        var k: aes.Key = aes.key_new()
+        if !aes.key_set(&k, p0, kl as usize) { fail(); return }
+        aes.decrypt_block(&k, p1, po)
+        emit(po, 16)
+        return
+    }
+    var w7: [u8; 5] = "cmac\0"
+    if word_is(line, len, &at, (&w7[0]) as u64) {
+        let kl: i64 = field_hex(line, len, &at, p0)
+        let ml: i64 = field_hex(line, len, &at, p1)
+        if kl < 0 || ml < 0 { fail(); return }
+        if !aes.cmac(p0, kl as usize, p1, ml as usize, po) {
+            fail()
+            return
+        }
+        emit(po, 16)
+        return
+    }
+    var w8: [u8; 5] = "wrap\0"
+    if word_is(line, len, &at, (&w8[0]) as u64) {
+        let kl: i64 = field_hex(line, len, &at, p0)
+        let pl: i64 = field_hex(line, len, &at, p1)
+        if kl < 0 || pl < 0 { fail(); return }
+        if !aes.key_wrap(p0, kl as usize, p1, pl as usize, po) {
+            fail()
+            return
+        }
+        emit(po, (pl as usize) + 8)
+        return
+    }
+    var w9: [u8; 7] = "unwrap\0"
+    if word_is(line, len, &at, (&w9[0]) as u64) {
+        let kl: i64 = field_hex(line, len, &at, p0)
+        let cl: i64 = field_hex(line, len, &at, p1)
+        if kl < 0 || cl < 8 { fail(); return }
+        if !aes.key_unwrap(p0, kl as usize, p1, cl as usize, po) {
+            fail()
+            return
+        }
+        emit(po, (cl as usize) - 8)
+        return
+    }
+    var wa: [u8; 7] = "ccmenc\0"
+    if word_is(line, len, &at, (&wa[0]) as u64) {
+        let kl: i64 = field_hex(line, len, &at, p0)
+        let nl: i64 = field_hex(line, len, &at, p1)
+        let al: i64 = field_hex(line, len, &at, p2)
+        let ml: i64 = field_hex(line, len, &at, p3)
+        let m: i64 = field_num(line, len, &at)
+        if kl < 0 || nl < 0 || al < 0 || ml < 0 || m < 0 {
+            fail()
+            return
+        }
+        var k: aes.Key = aes.key_new()
+        if !aes.key_set(&k, p0, kl as usize) { fail(); return }
+        if !aes.ccm_encrypt(&k, p1, nl as usize, p2, al as usize,
+            p3, ml as usize, m as usize, po) { fail(); return }
+        emit(po, (ml as usize) + (m as usize))
+        return
+    }
+    var wb: [u8; 7] = "ccmdec\0"
+    if word_is(line, len, &at, (&wb[0]) as u64) {
+        let kl: i64 = field_hex(line, len, &at, p0)
+        let nl: i64 = field_hex(line, len, &at, p1)
+        let al: i64 = field_hex(line, len, &at, p2)
+        let cl: i64 = field_hex(line, len, &at, p3)
+        let m: i64 = field_num(line, len, &at)
+        if kl < 0 || nl < 0 || al < 0 || cl < 0 || m < 0 {
+            fail()
+            return
+        }
+        if cl < m { fail(); return }
+        var k: aes.Key = aes.key_new()
+        if !aes.key_set(&k, p0, kl as usize) { fail(); return }
+        if !aes.ccm_decrypt(&k, p1, nl as usize, p2, al as usize,
+            p3, cl as usize, m as usize, po) { fail(); return }
+        emit(po, (cl as usize) - (m as usize))
+        return
+    }
+    var wc: [u8; 8] = "ccmpenc\0"
+    if word_is(line, len, &at, (&wc[0]) as u64) {
+        let tl: i64 = field_hex(line, len, &at, p0)
+        let nl: i64 = field_hex(line, len, &at, p1)
+        let fl: i64 = field_hex(line, len, &at, p2)
+        if tl != 16 || nl != 6 || fl < 0 { fail(); return }
+        let n: i64 = ccmp.protect(p0, p1, p2, fl as usize, po, CAP)
+        if n < 0 { fail(); return }
+        emit(po, n as usize)
+        return
+    }
+    var wd: [u8; 8] = "ccmpdec\0"
+    if word_is(line, len, &at, (&wd[0]) as u64) {
+        let tl: i64 = field_hex(line, len, &at, p0)
+        let fl: i64 = field_hex(line, len, &at, p1)
+        if tl != 16 || fl < 0 { fail(); return }
+        let n: i64 = ccmp.unprotect(p0, p1, fl as usize, po, CAP)
+        if n < 0 { fail(); return }
+        emit(po, n as usize)
+        return
+    }
+    var we: [u8; 7] = "beacon\0"
+    if word_is(line, len, &at, (&we[0]) as u64) {
+        let fl: i64 = field_hex(line, len, &at, p0)
+        if fl < 0 { fail(); return }
+        var b: beacon.Netz = beacon.netz_new()
+        if !beacon.zerlege(&b, p0, fl as usize) { fail(); return }
+        var ls: [u8; 6] = "ssid=\0"
+        tlit((&ls[0]) as u64)
+        thex((&b.ssid[0]) as u64, b.ssid_len)
+        var lh: [u8; 10] = " verbrg=\0\0"
+        tlit((&lh[0]) as u64)
+        tbit(b.ssid_verborgen)
+        var lk: [u8; 8] = " kanal=\0"
+        tlit((&lk[0]) as u64)
+        tnum(b.kanal)
+        var lb: [u8; 7] = " band=\0"
+        tlit((&lb[0]) as u64)
+        tnum(b.band)
+        var lz: [u8; 7] = " sich=\0"
+        tlit((&lz[0]) as u64)
+        tnum(b.sicherheit)
+        var lp: [u8; 7] = " paar=\0"
+        tlit((&lp[0]) as u64)
+        tnum(b.paar_chiffre)
+        var lg: [u8; 9] = " gruppe=\0"
+        tlit((&lg[0]) as u64)
+        tnum(b.gruppen_chiffre)
+        var la: [u8; 6] = " akm=\0"
+        tlit((&la[0]) as u64)
+        tnum(b.akm)
+        var lm: [u8; 6] = " pmf=\0"
+        tlit((&lm[0]) as u64)
+        tnum(b.pmf)
+        var li: [u8; 7] = " intv=\0"
+        tlit((&li[0]) as u64)
+        tnum(b.intervall)
+        var lc: [u8; 8] = " bssid=\0"
+        tlit((&lc[0]) as u64)
+        thex((&b.bssid[0]) as u64, 6)
+        temit()
+        return
+    }
+    var wf: [u8; 4] = "ies\0"
+    if word_is(line, len, &at, (&wf[0]) as u64) {
+        let fl: i64 = field_hex(line, len, &at, p0)
+        if fl < 0 { fail(); return }
+        let start: i64 = rahmen.rumpf_versatz(p0, fl as usize)
+        if start < 0 { fail(); return }
+        var it: rahmen.IeIter = rahmen.ie_beginn(p0, fl as usize,
+            (start as usize) + 12)
+        var erst: bool = true
+        while rahmen.ie_weiter(&it) {
+            if !erst { tch(32) }
+            erst = false
+            tnum(it.id)
+            tch(58)
+            tnum(it.laenge as u64)
+        }
+        if it.kaputt {
+            if !erst { tch(32) }
+            var kk: [u8; 7] = "KAPUTT\0"
+            tlit((&kk[0]) as u64)
+        }
+        if erst && !it.kaputt {
+            var lr: [u8; 5] = "LEER\0"
+            tlit((&lr[0]) as u64)
+        }
+        temit()
+        return
+    }
+    var wg: [u8; 6] = "kanal\0"
+    if word_is(line, len, &at, (&wg[0]) as u64) {
+        let f: i64 = field_num(line, len, &at)
+        if f < 0 { fail(); return }
+        let k: i64 = kanal.aus_frequenz(f as u64)
+        if k < 0 { fail(); return }
+        tsnum(k)
+        tch(32)
+        tnum(kanal.band_von_frequenz(f as u64))
+        temit()
+        return
+    }
+    var wh: [u8; 5] = "freq\0"
+    if word_is(line, len, &at, (&wh[0]) as u64) {
+        let k: i64 = field_num(line, len, &at)
+        let b: i64 = field_num(line, len, &at)
+        if k < 0 || b < 0 { fail(); return }
+        let f: i64 = kanal.zu_frequenz(k as u64, b as u64)
+        if f < 0 { fail(); return }
+        tsnum(f)
+        temit()
+        return
+    }
+    var wi: [u8; 5] = "etsi\0"
+    if word_is(line, len, &at, (&wi[0]) as u64) {
+        let b: i64 = field_num(line, len, &at)
+        let kn: i64 = field_num(line, len, &at)
+        if b < 0 || kn < 0 { fail(); return }
+        var r: kanal.Regel = kanal.regel_new()
+        let ok: bool = kanal.etsi_regel(b as u64, kn as u64, &r)
+        var le: [u8; 9] = "erlaubt=\0"
+        tlit((&le[0]) as u64)
+        tbit(ok)
+        var ld2: [u8; 6] = " dbm=\0"
+        tlit((&ld2[0]) as u64)
+        tnum(r.dbm)
+        var lf: [u8; 6] = " dfs=\0"
+        tlit((&lf[0]) as u64)
+        tbit(r.dfs)
+        var lin: [u8; 8] = " innen=\0"
+        tlit((&lin[0]) as u64)
+        tbit(r.nur_innen)
+        var lp2: [u8; 9] = " passiv=\0"
+        tlit((&lp2[0]) as u64)
+        tbit(r.nur_passiv)
+        var lsd: [u8; 9] = " senden=\0"
+        tlit((&lsd[0]) as u64)
+        tbit(kanal.darf_senden(b as u64, kn as u64))
+        var lak: [u8; 9] = " aktiv=\0\0"
+        tlit((&lak[0]) as u64)
+        tbit(kanal.darf_aktiv_suchen(b as u64, kn as u64))
+        temit()
+        return
+    }
+    var wj: [u8; 4] = "ptk\0"
+    if word_is(line, len, &at, (&wj[0]) as u64) {
+        let pl: i64 = field_hex(line, len, &at, p0)
+        let al: i64 = field_hex(line, len, &at, p1)
+        let sl: i64 = field_hex(line, len, &at, p2)
+        let anl: i64 = field_hex(line, len, &at, p3)
+        let snl: i64 = field_hex(line, len, &at, p4)
+        let akm: i64 = field_num(line, len, &at)
+        let n: i64 = field_num(line, len, &at)
+        if pl < 0 || al != 6 || sl != 6 || anl != 32 || snl != 32
+            || akm < 0 || n < 0 { fail(); return }
+        if !wpa.ptk_ableiten(p0, pl as usize, p1, p2, p3, p4,
+            akm as u64, po, n as usize) { fail(); return }
+        emit(po, n as usize)
+        return
+    }
+    var wk: [u8; 4] = "mic\0"
+    if word_is(line, len, &at, (&wk[0]) as u64) {
+        let kl: i64 = field_hex(line, len, &at, p0)
+        let el: i64 = field_hex(line, len, &at, p1)
+        let akm: i64 = field_num(line, len, &at)
+        if kl < 0 || el < 0 || akm < 0 { fail(); return }
+        if !wpa.mic_rechnen(p0, kl as usize, p1, el as usize,
+            akm as u64, po) { fail(); return }
+        emit(po, 16)
+        return
+    }
+    var wgt: [u8; 4] = "gtk\0"
+    if word_is(line, len, &at, (&wgt[0]) as u64) {
+        let kl: i64 = field_hex(line, len, &at, p0)
+        let dl: i64 = field_hex(line, len, &at, p1)
+        if kl < 0 || dl < 0 { fail(); return }
+        let n: i64 = wpa.schluesseldaten_auspacken(p0, kl as usize,
+            p1, dl as usize, p2, CAP)
+        if n < 0 { fail(); return }
+        var nummer: u64 = 0
+        let g: i64 = wpa.gtk_finden(p2, n as usize, po, CAP, &nummer)
+        if g < 0 { fail(); return }
+        thex(po, g as usize)
+        tch(32)
+        tnum(nummer)
+        temit()
+        return
+    }
+    var wl: [u8; 6] = "eapol\0"
+    if word_is(line, len, &at, (&wl[0]) as u64) {
+        let el: i64 = field_hex(line, len, &at, p0)
+        if el < 0 { fail(); return }
+        var e: wpa.Eapol = wpa.eapol_new()
+        if !wpa.eapol_zerlege(&e, p0, el as usize) { fail(); return }
+        var ln: [u8; 4] = "nr=\0"
+        tlit((&ln[0]) as u64)
+        tnum(e.nachricht)
+        var lki: [u8; 7] = " info=\0"
+        tlit((&lki[0]) as u64)
+        tnum(e.key_info)
+        var ldv: [u8; 6] = " dv=\0\0"
+        tlit((&ldv[0]) as u64)
+        tnum(e.desc_version)
+        var lpa: [u8; 7] = " paar=\0"
+        tlit((&lpa[0]) as u64)
+        tbit(e.paarweise)
+        var lac: [u8; 6] = " ack=\0"
+        tlit((&lac[0]) as u64)
+        tbit(e.ack)
+        var lmi: [u8; 6] = " mic=\0"
+        tlit((&lmi[0]) as u64)
+        tbit(e.hat_mic)
+        var lse: [u8; 9] = " sicher=\0"
+        tlit((&lse[0]) as u64)
+        tbit(e.sicher)
+        var lin2: [u8; 8] = " insta=\0"
+        tlit((&lin2[0]) as u64)
+        tbit(e.installieren)
+        var lenc: [u8; 7] = " kdec=\0"
+        tlit((&lenc[0]) as u64)
+        tbit(e.daten_verschluesselt)
+        var lrc: [u8; 5] = " rc=\0"
+        tlit((&lrc[0]) as u64)
+        tnum(e.zaehler_lo)
+        var ldl: [u8; 7] = " dlen=\0"
+        tlit((&ldl[0]) as u64)
+        tnum(e.daten_len as u64)
+        temit()
+        return
+    }
+    var wm: [u8; 8] = "automat\0"
+    if word_is(line, len, &at, (&wm[0]) as u64) {
+        let n: i64 = field_word(line, len, &at, p0)
+        if n < 0 { fail(); return }
+        var z: zustand.Lauf = zustand.lauf_new()
+        zustand.beginn(&z)
+        var i: usize = 0
+        while i < (n as usize) {
+            zustand.ereignis(&z, rt.ld8(p0, i))
+            i = i + 1
+        }
+        var lz2: [u8; 3] = "z=\0"
+        tlit((&lz2[0]) as u64)
+        tnum(z.zustand)
+        var lgr: [u8; 8] = " grund=\0"
+        tlit((&lgr[0]) as u64)
+        tnum(z.grund)
+        var lvb: [u8; 10] = " verbund=\0"
+        tlit((&lvb[0]) as u64)
+        tbit(zustand.verbunden(&z))
+        var ldd: [u8; 8] = " daten=\0"
+        tlit((&ldd[0]) as u64)
+        tbit(zustand.darf_daten(&z))
+        var lii: [u8; 8] = " inst=\0\0"
+        tlit((&lii[0]) as u64)
+        tnum(z.installationen)
+        temit()
+        return
+    }
+    // ---- RUNDE WLAN-2: der USB-Stick, an seiner Nummer erkannt ----
+    //
+    //   usbchip <vid> <pid>   ->  <familie> <klarname>
+    //
+    // Damit laesst sich die Tabelle aus lib/wlan/usbchip.fi auf dem
+    // WIRT ablaufen, obwohl hier kein Stick steckt. Sie ist der
+    // einzige Weg, auf dem wir erfahren, welcher Chip in Justins
+    // Rechner sitzt -- und ein Tippfehler in einer der vierzig
+    // Nummern faellt sonst erst am echten Blech auf.
+    var wuc: [u8; 8] = "usbchip\0"
+    if word_is(line, len, &at, (&wuc[0]) as u64) {
+        let vid: i64 = field_num(line, len, &at)
+        let pid: i64 = field_num(line, len, &at)
+        if vid < 0 || pid < 0 { fail(); return }
+        var nb: [u8; 40] = [0; 40]
+        let fam: u64 = usbchip.familie(vid as u64, pid as u64)
+        usbchip.familie_name_holen(fam, (&nb[0]) as u64)
+        var i: usize = 0
+        while nb[i] != 0 as u8 { tch(nb[i] as u64); i = i + 1 }
+        tch(32)
+        var nb2: [u8; 40] = [0; 40]
+        usbchip.name_holen(vid as u64, pid as u64, (&nb2[0]) as u64)
+        i = 0
+        while nb2[i] != 0 as u8 { tch(nb2[i] as u64); i = i + 1 }
+        temit()
+        return
+    }
+
+    // ---- RUNDE WLAN-2: die Naht und das Geraet dahinter ----
+    //
+    //   geraet <rahmenhex>  ->  Zeile mit den Zaehlern
+    //
+    // Ein Rahmen geht durch die Tafel hinein und wieder heraus. Das
+    // misst, was `lib/wlan/geraet.fi` zusagt: dass ein Rahmen
+    // unveraendert durchkommt, dass die Zaehler stimmen und dass ein
+    // Geraet OHNE Tafel nicht in einen Nullzeiger springt.
+    var wgr: [u8; 7] = "geraet\0"
+    if word_is(line, len, &at, (&wgr[0]) as u64) {
+        let fl: i64 = field_hex(line, len, &at, p0)
+        if fl < 0 { fail(); return }
+        var pr: pruefgeraet.Pruef = pruefgeraet.pruef_new()
+        var gg: geraet.Geraet = geraet.geraet_new()
+        // Ein frisches Geraet MUSS ablehnen -- vor der Tafel gibt es
+        // kein Senden.
+        let vorher: i64 = geraet.senden(&gg, p0, fl as usize)
+        if !pruefgeraet.anhaengen(&gg, &pr, false) { fail(); return }
+        let gesendet: i64 = geraet.senden(&gg, p0, fl as usize)
+        if !pruefgeraet.einspeisen(&pr, p0, fl as usize) { fail(); return }
+        let empfangen: i64 = geraet.empfangen(&gg, p1, CAP)
+        // Kam derselbe Rahmen zurueck?
+        var gleich: bool = empfangen == (fl as i64)
+        var j: usize = 0
+        while j < (fl as usize) {
+            if rt.ld8(p0, j) != rt.ld8(p1, j) { gleich = false }
+            j = j + 1
+        }
+        var lv: [u8; 8] = "vorher=\0"
+        tlit((&lv[0]) as u64)
+        tnum((0 - vorher) as u64)
+        var lg: [u8; 8] = " gesd=\0\0"
+        tlit((&lg[0]) as u64)
+        tnum(gesendet as u64)
+        var le: [u8; 8] = " empf=\0\0"
+        tlit((&le[0]) as u64)
+        tnum(empfangen as u64)
+        var lgl: [u8; 8] = " same=\0\0"
+        tlit((&lgl[0]) as u64)
+        tbit(gleich)
+        var lz: [u8; 8] = " ztx=\0\0\0"
+        tlit((&lz[0]) as u64)
+        tnum(geraet.zaehler_gesendet(&gg))
+        var lzr: [u8; 8] = " zrx=\0\0\0"
+        tlit((&lzr[0]) as u64)
+        tnum(geraet.zaehler_empfangen(&gg))
+        temit()
+        return
+    }
+
+    // ---- RUNDE WLAN-2: der ganze Weg als Vorgang ----
+    //
+    //   weg <beaconhex> <pmkhex> <spa> <aa> <m1hex> <snonce> <m3hex>
+    //       -> Zeile mit dem Stand
+    //
+    // Das misst `lib/wlan/verbinden.fi`: Suchlauf, Netzwahl (mit der
+    // Abweisung unsicherer Netze!), Nachricht 1, Nachricht 3, die
+    // Schluessel im Geraet. Wer hier eine der Zutaten faelscht, sieht
+    // in der Antwort, dass NICHTS installiert wurde -- das ist der
+    // Punkt der Uebung.
+    var wwg: [u8; 4] = "weg\0"
+    if word_is(line, len, &at, (&wwg[0]) as u64) {
+        let bl: i64 = field_hex(line, len, &at, p0)
+        let pl: i64 = field_hex(line, len, &at, p1)
+        let sl: i64 = field_hex(line, len, &at, p2)
+        let al: i64 = field_hex(line, len, &at, p3)
+        let ml: i64 = field_hex(line, len, &at, p4)
+        if bl < 0 || pl != 32 || sl != 6 || al != 6 || ml < 0 {
+            fail()
+            return
+        }
+        var sn: [u8; 32] = [0; 32]
+        var m3: [u8; 1024] = [0; 1024]
+        let nl: i64 = field_hex(line, len, &at, (&sn[0]) as u64)
+        let tl: i64 = field_hex(line, len, &at, (&m3[0]) as u64)
+        if nl != 32 || tl < 0 { fail(); return }
+
+        var pr: pruefgeraet.Pruef = pruefgeraet.pruef_new()
+        var gg: geraet.Geraet = geraet.geraet_new()
+        if !pruefgeraet.anhaengen(&gg, &pr, false) { fail(); return }
+        var si: verbinden.Sitzung = verbinden.sitzung_new()
+        verbinden.identitaet_setzen(&si, p2, p3)
+        verbinden.pmk_setzen(&si, p1)
+        verbinden.akm_setzen(&si, 2)
+
+        verbinden.suchlauf_beginnen(&si, &gg)
+        let gefunden: bool = verbinden.beacon_aufnehmen(&si, p0,
+            bl as usize, 0 - 40)
+        let n_netze: usize = verbinden.netz_anzahl(&si)
+        // Netz 0 waehlen. Ist es kein WPA2/WPA3, MUSS das scheitern.
+        let gewaehlt: bool = verbinden.netz_waehlen(&si, &gg, 0)
+        var m1ok: i64 = 0 - 1
+        var m3ok: bool = false
+        if gewaehlt {
+            // Auth und Assoz gehoeren dazwischen -- ohne sie laesst
+            // der Automat keine EAPOL-Nachricht durch.
+            verbinden.auth_angenommen(&si, true)
+            verbinden.assoz_angenommen(&si, true)
+            m1ok = verbinden.nachricht1_behandeln(&si, &gg, p4,
+                ml as usize, (&sn[0]) as u64, po, CAP)
+            if m1ok > 0 && tl > 0 {
+                m3ok = verbinden.nachricht3_behandeln(&si, &gg,
+                    (&m3[0]) as u64, tl as usize)
+            }
+        }
+        var lg: [u8; 8] = "netze=\0\0"
+        tlit((&lg[0]) as u64)
+        tnum(n_netze as u64)
+        var lw: [u8; 8] = " wahl=\0\0"
+        tlit((&lw[0]) as u64)
+        tbit(gewaehlt)
+        var l1: [u8; 6] = " m1=\0\0"
+        tlit((&l1[0]) as u64)
+        tbit(m1ok > 0)
+        var l3: [u8; 6] = " m3=\0\0"
+        tlit((&l3[0]) as u64)
+        tbit(m3ok)
+        var ld: [u8; 8] = " daten=\0"
+        tlit((&ld[0]) as u64)
+        tbit(verbinden.darf_daten_ist(&si))
+        // Das ist die Zahl, auf die es ankommt: wie viele Schluessel
+        // wirklich im GERAET liegen.
+        var lk: [u8; 8] = " skeys=\0"
+        tlit((&lk[0]) as u64)
+        tnum(pruefgeraet.schluessel_anzahl(&pr) as u64)
+        var lgr: [u8; 8] = " grund=\0"
+        tlit((&lgr[0]) as u64)
+        tnum(verbinden.grund_von(&si))
+        temit()
+        return
+    }
+
+    fail()
+}
+
+fn main() -> i32 {
+    var inp: rt.Buf = rt.buf_new()
+    if !rt.read_stdin(&inp) { return 1 }
+    let p: u64 = rt.buf_ptr(&inp)
+    let n: usize = rt.buf_len(&inp)
+    var at: usize = 0
+    while at < n {
+        var e: usize = at
+        while e < n && rt.ld8(p, e) != 10 as u8 { e = e + 1 }
+        var len: usize = e - at
+        while len > 0 && rt.ld8(p, at + len - 1) == 13 as u8 {
+            len = len - 1
+        }
+        if len > 0 { run_line(p + at as u64, len) }
+        at = e + 1
+    }
+    rt.buf_free(&inp)
+    return 0
+}

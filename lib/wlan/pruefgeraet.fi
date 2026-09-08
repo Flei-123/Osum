@@ -1,0 +1,234 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/wlan/pruefgeraet.fi -- ein 802.11-Geraet ohne Antenne.
+//
+// ==================================================================
+// WAS DAS IST UND WAS ES AUSDRUECKLICH NICHT IST
+// ==================================================================
+//
+// Das hier ist die Umsetzung (a) der Tafel aus `lib/wlan/geraet.fi`:
+// ein Geraet, dessen "Luft" zwei Puffer sind. Was gesendet wird, landet
+// im Sendepuffer; was empfangen wird, kommt aus dem Empfangspuffer, den
+// der Testlaeufer vorher gefuellt hat.
+//
+// DAS IST KEIN TREIBER UND KEINE EMULATION EINER KARTE. Es simuliert
+// keinen AX200, es hat keine Register, keine Firmware und keine Ringe.
+// Wer daraus liest, Osum koenne WLAN, hat es falsch verstanden --
+// `docs/WLAN-BEFUND.md` Abschnitt 5 sagt unveraendert, dass der
+// Treiber auf diesem Rechner nicht messbar ist.
+//
+// Was es IST: der Beweis, dass die Naht traegt. Ueber diesem Geraet
+// laeuft derselbe Quelltext, der spaeter ueber einer echten Karte
+// laufen soll -- Suchlauf, Netzwahl, Assoziation, 4-Wege-Handschlag,
+// Schluessel setzen, verschluesselte Daten. Wenn das hier gruen ist,
+// dann ist an dem Tag, an dem eine Karte kommt, NUR NOCH DER TREIBER
+// offen und nicht auch noch die Frage, ob der Rest zusammenpasst.
+//
+// Der Vergleich, der das einordnet: `tools/net/bridge.c` gibt Osums
+// e1000 eine echte Leitung zu einem echten Linux. So etwas gibt es
+// fuer WLAN nicht, weil es kein virtuelles 802.11-Geraet gibt (weder
+// in QEMU noch in diesem Kern). Das Pruefgeraet ist der Ersatz, der
+// ohne beides auskommt -- und es ist ehrlich gesagt der schwaechere:
+// die Gegenseite ist ein Testlaeufer und kein zweites Betriebssystem.
+// Deshalb steht neben ihm `tools/wlan/gegenstelle.py`, die die
+// KRYPTOGRAFISCHE Seite gegen ein wirklich unabhaengiges Programm
+// misst.
+//
+// ==================================================================
+// KEIN ALLOKATOR
+// ==================================================================
+//
+// Aller Zustand steht in einem `Pruef`-Block, den der Aufrufer haelt.
+// Dieselbe Regel wie im ganzen `lib/`-Baum.
+
+import wlan.geraet
+
+export {
+    Pruef, pruef_new, anhaengen,
+    einspeisen, einspeisen_leeren,
+    gesendet_anzahl, gesendet_holen, gesendet_leeren,
+    schluessel_anzahl, schluessel_art_von, schluessel_holen,
+    kanal_gesetzt, kanal_anzahl,
+    p_senden, p_empfangen, p_kanal, p_schluessel
+}
+
+const MAX_RAHMEN: usize = 2400
+// Wie viele Rahmen in jede Richtung zwischengehalten werden. Acht
+// reicht fuer einen ganzen Handschlag (Auth, Assoc, vier
+// EAPOL-Nachrichten, ein Datenrahmen) mit Luft.
+const MAX_HALTEN: usize = 8
+const MAX_SCHLUESSEL: usize = 4
+
+struct Pruef {
+    // Was der Stapel gesendet hat -- der Testlaeufer liest es.
+    tx: [u8; 19200],          // MAX_HALTEN * MAX_RAHMEN
+    tx_len: [usize; 8],
+    tx_n: usize,
+    // Was der Stapel empfangen soll -- der Testlaeufer legt es hin.
+    rx: [u8; 19200],
+    rx_len: [usize; 8],
+    rx_n: usize,
+    rx_gelesen: usize,
+    // Welche Schluessel gesetzt wurden. Das ist der Teil, den ein
+    // echter Treiber an die Firmware weitergibt.
+    sk: [u8; 64],             // MAX_SCHLUESSEL * 16
+    sk_art: [u64; 4],
+    sk_kennung: [u64; 4],
+    sk_n: usize,
+    kanal: u64,
+    band: u64,
+    kanal_n: usize
+}
+
+fn pruef_new() -> Pruef {
+    var p: Pruef = Pruef {
+        tx: [0; 19200], tx_len: [0; 8], tx_n: 0,
+        rx: [0; 19200], rx_len: [0; 8], rx_n: 0, rx_gelesen: 0,
+        sk: [0; 64], sk_art: [0; 4], sk_kennung: [0; 4], sk_n: 0,
+        kanal: 0, band: 0, kanal_n: 0
+    }
+    return p
+}
+
+// ------------------------------------------------------------------
+// Die vier Funktionen der Tafel. `ctx` ist die Adresse eines `Pruef`.
+// ------------------------------------------------------------------
+
+fn p_senden(ctx: u64, rahmen: u64, len: usize) -> i64 {
+    let p: *mut Pruef = ctx as *mut Pruef
+    if (*p).tx_n >= MAX_HALTEN { return -1 }
+    if len > MAX_RAHMEN { return -1 }
+    let basis: usize = (*p).tx_n * MAX_RAHMEN
+    var i: usize = 0
+    while i < len {
+        (*p).tx[basis + i] = *((rahmen + i as u64) as *mut u8)
+        i = i + 1
+    }
+    (*p).tx_len[(*p).tx_n] = len
+    (*p).tx_n = (*p).tx_n + 1
+    return len as i64
+}
+
+fn p_empfangen(ctx: u64, puffer: u64, platz: usize) -> i64 {
+    let p: *mut Pruef = ctx as *mut Pruef
+    if (*p).rx_gelesen >= (*p).rx_n { return 0 }
+    let k: usize = (*p).rx_gelesen
+    let len: usize = (*p).rx_len[k]
+    if len > platz { return -1 }
+    let basis: usize = k * MAX_RAHMEN
+    var i: usize = 0
+    while i < len {
+        *((puffer + i as u64) as *mut u8) = (*p).rx[basis + i]
+        i = i + 1
+    }
+    (*p).rx_gelesen = (*p).rx_gelesen + 1
+    return len as i64
+}
+
+fn p_kanal(ctx: u64, kanal: u64, band: u64) -> i64 {
+    let p: *mut Pruef = ctx as *mut Pruef
+    // Ein Geraet, das jeden Kanal annimmt, misst nichts. Die
+    // Regulatorik prueft `lib/wlan/kanal.fi`; hier wird nur das
+    // Offensichtliche abgewiesen, damit ein Tippfehler auffaellt.
+    if kanal == 0 || kanal > 196 { return -1 }
+    (*p).kanal = kanal
+    (*p).band = band
+    (*p).kanal_n = (*p).kanal_n + 1
+    return 0
+}
+
+fn p_schluessel(ctx: u64, art: u64, kennung: u64, schluessel: u64,
+    len: usize) -> i64 {
+    let p: *mut Pruef = ctx as *mut Pruef
+    if art == geraet.SCHLUESSEL_AUS {
+        // Loeschen heisst loeschen: die Ablage wird wirklich
+        // ueberschrieben und nicht nur ein Zaehler zurueckgesetzt.
+        var j: usize = 0
+        while j < MAX_SCHLUESSEL * 16 {
+            (*p).sk[j] = 0 as u8
+            j = j + 1
+        }
+        (*p).sk_n = 0
+        return 0
+    }
+    if (*p).sk_n >= MAX_SCHLUESSEL { return -1 }
+    if len != 16 { return -1 }
+    let basis: usize = (*p).sk_n * 16
+    var i: usize = 0
+    while i < 16 {
+        (*p).sk[basis + i] = *((schluessel + i as u64) as *mut u8)
+        i = i + 1
+    }
+    (*p).sk_art[(*p).sk_n] = art
+    (*p).sk_kennung[(*p).sk_n] = kennung
+    (*p).sk_n = (*p).sk_n + 1
+    return 0
+}
+
+// Haengt ein `Pruef` an ein `Geraet`. Danach ist das Geraet bereit.
+fn anhaengen(g: *mut geraet.Geraet, p: *mut Pruef, kann_ccmp: bool) -> bool {
+    return geraet.tafel_setzen(g, p as u64, p_senden, p_empfangen,
+        p_kanal, p_schluessel, kann_ccmp)
+}
+
+// ------------------------------------------------------------------
+// Was der Testlaeufer braucht
+// ------------------------------------------------------------------
+
+// Einen Rahmen in die "Luft" legen, den der Stapel dann empfaengt.
+fn einspeisen(p: *mut Pruef, rahmen: u64, len: usize) -> bool {
+    if (*p).rx_n >= MAX_HALTEN { return false }
+    if len > MAX_RAHMEN { return false }
+    let basis: usize = (*p).rx_n * MAX_RAHMEN
+    var i: usize = 0
+    while i < len {
+        (*p).rx[basis + i] = *((rahmen + i as u64) as *mut u8)
+        i = i + 1
+    }
+    (*p).rx_len[(*p).rx_n] = len
+    (*p).rx_n = (*p).rx_n + 1
+    return true
+}
+
+fn einspeisen_leeren(p: *mut Pruef) {
+    (*p).rx_n = 0
+    (*p).rx_gelesen = 0
+}
+
+fn gesendet_anzahl(p: *mut Pruef) -> usize { return (*p).tx_n }
+
+// Holt den k-ten gesendeten Rahmen. Rueckgabe ist die Laenge oder -1.
+fn gesendet_holen(p: *mut Pruef, k: usize, out: u64, platz: usize) -> i64 {
+    if k >= (*p).tx_n { return -1 }
+    let len: usize = (*p).tx_len[k]
+    if len > platz { return -1 }
+    let basis: usize = k * MAX_RAHMEN
+    var i: usize = 0
+    while i < len {
+        *((out + i as u64) as *mut u8) = (*p).tx[basis + i]
+        i = i + 1
+    }
+    return len as i64
+}
+
+fn gesendet_leeren(p: *mut Pruef) { (*p).tx_n = 0 }
+
+fn schluessel_anzahl(p: *mut Pruef) -> usize { return (*p).sk_n }
+
+fn schluessel_art_von(p: *mut Pruef, k: usize) -> u64 {
+    if k >= (*p).sk_n { return 0 }
+    return (*p).sk_art[k]
+}
+
+fn schluessel_holen(p: *mut Pruef, k: usize, out: u64) -> bool {
+    if k >= (*p).sk_n { return false }
+    let basis: usize = k * 16
+    var i: usize = 0
+    while i < 16 {
+        *((out + i as u64) as *mut u8) = (*p).sk[basis + i]
+        i = i + 1
+    }
+    return true
+}
+
+fn kanal_gesetzt(p: *mut Pruef) -> u64 { return (*p).kanal }
+fn kanal_anzahl(p: *mut Pruef) -> usize { return (*p).kanal_n }
