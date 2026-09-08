@@ -241,3 +241,71 @@ nicht zu finden; ein 20-zeiliges `.wat` zeigt ihn in einer Sekunde.
 **Nebenbei:** in einem Fall war die Erwartung im Test falsch, nicht der
 Code — `memory.copy` mit Überlappung verhält sich wie `memmove`. Beide
 Ausführungen waren richtig.
+
+---
+
+## 6. Der Tag, an dem die Prüfung fünf echte Fehler fand (08.09.2026)
+
+Die Prüfung wurde von 55 auf **86 Fälle in 10 Dateien** ausgebaut. Jeder
+neue Fall kam aus einer konkreten Vermutung — und **vier davon haben
+sofort einen echten Übersetzerfehler aufgedeckt**. Das ist der ganze
+Wert einer Differenzprüfung: sie behauptet nichts, sie vergleicht.
+
+### Die fünf Fehler
+
+| # | Was falsch war | Gefunden durch |
+|---|---|---|
+| 1 | Ein nackter Firn-Block `{ }` schluckt kein `break` | `dateitest` |
+| 2 | Tiefe falsch **gemessen** (`indent//4`, aber der Erzeuger rückt mit **einem** Leerzeichen ein) — echte Tiefe war 67, nicht 16 | Nachrechnen |
+| 3 | Jeder Verteilerfall endete mit `break` und verließ damit den **ganzen** Verteiler; die Reste der äußeren Ebenen fielen aus | `turm.wat` |
+| 4 | Ein Sprung in eine Verteilerebene aus einer **inneren Schleife**: `continue` setzte die innere Schleife fort statt den Verteiler → Endlosschleife | `turm.wat` (`$tinner`) |
+| 5 | Ein `br` auf eine **Schleife** aus einem geschachtelten Block: hinter dem `}` der Schleife wurde der Sprung als erfüllt abgehakt — die Schleife war damit **verlassen** statt neu durchlaufen | `dateitest`, jetzt `schleife.wat` |
+
+Fehler 5 ist der interessanteste, weil er die Grundregel verletzt:
+**`br` auf einen `block` geht ans ENDE, `br` auf eine `loop` geht an den
+ANFANG.** Der Erzeuger behandelte beide gleich. Jetzt wird ein
+Schleifensprung *innerhalb* der Schleife erfüllt (`continue`), hinter
+ihr gar nicht mehr.
+
+### `dateitest.wasm` läuft
+
+Zum ersten Mal geben Deuter und AOT dasselbe aus:
+
+```
+zurueckgelesen: Diese Zeile hat ein WASM-Modul geschrieben.
+laenge: 44 oktette, gleich: true
+```
+
+Einziger Unterschied bleibt `argv[0]` — der Deuter sieht den Modulpfad,
+das übersetzte Programm seinen eigenen. Das ist richtig so.
+
+Ebenfalls geprüft und gleich: `hallo`, `hello2`, `schleife`, `prim`.
+
+### Wie Fehler 5 gefunden wurde — die Methode ist wiederverwendbar
+
+Ein Fehler tief in 41 000 Zeilen erzeugtem Firn ist nicht durch Lesen
+zu finden. Drei Schritte, jeder mechanisch:
+
+1. **Aufrufspur beider Seiten diffen.** Im Deuter druckt `eintreten`
+   unter `-s` „VON *Aufrufer* RUF *Funktion*"; die erzeugte `.fi`
+   bekommt per Python vor jeder Aufrufzeile dasselbe. Die erste
+   abweichende Zeile nennt die Funktion — hier `f177`, nach 32
+   identischen Aufrufen.
+2. **Speicherabbild an derselben WASI-Stelle vergleichen.** Genau
+   **ein** Byte unterschied sich: Adresse 1 062 400, Deuter `0`,
+   AOT `47` (`/`).
+3. **Schreibspur.** In `mem_st8/16/32/64`, `mem_st32_roh`, `mem_copy`,
+   `mem_fill` je eine Bedingung „schreibt diese Adresse?" — es war
+   `memory.copy`. Deren Argumente verrieten alles:
+
+   | | Ziel | Quelle | n |
+   |---|---|---|---|
+   | Deuter | 1062400 | 106233**7** | **1** |
+   | AOT | 1062400 | 106233**6** | **2** |
+
+   Der Zeiger war um eins zu klein: die Pfad-Normalisierung hatte das
+   führende `/` nicht übersprungen. Und genau dort steht ein
+   `br_table`, dessen Standardzweig auf eine **Schleife** zeigt.
+
+Der ganze Weg von „hängt" bis „Zeile gefunden" dauerte etwa eine
+Stunde und braucht keinen Debugger.
