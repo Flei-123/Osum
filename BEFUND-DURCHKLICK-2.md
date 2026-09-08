@@ -420,17 +420,17 @@ UEFI-Lauf und ist nicht abschließend geklärt.
 
 | | |
 |---|---|
-| Stand | `81ac54b` (TÜRSCHLOSS 11/n) |
-| Abbild | `/root/abbilder/orientos-usb-20260908-81ac54b.img` — 123 731 968 Oktett (118 MiB), GPT, EFI 96 MiB + Wurzel 20 MiB |
-| Prüfsumme | `2b8c8237be17b397be9a2c1bdad92ded41061902a01f1470397eef7756a0289b` (`.sha256` daneben) |
+| Stand | `5041c0d` (TÜRSCHLOSS 15/n) |
+| Abbild | `/root/abbilder/orientos-usb-20260908-5041c0d.img` — 123 731 968 Oktett (118 MiB), GPT, EFI 96 MiB + Wurzel 20 MiB |
+| Prüfsumme | `ca6a1d8851609740661cae550af5d8d98d26dce326146468f5f0dd706f1a8317` (`.sha256` daneben) |
 | Rechte | die **mitgelieferte** Fassung: `/etc/jarvis/rechte.conf` erlaubt **nichts** — kein Server, keine Befehle. Die richtige Voreinstellung für einen Stick, den irgendjemand irgendwo hineinsteckt |
-| Justins Fassung | `/srv/store/abbilder/orientos-usb-20260908-81ac54b.img`, gebaut mit `JARVIS_CONF=assets/jarvis/rechte-justin.conf`. Prüfsumme `b2e11f5c01c5b1b56827c0b155c938ec2b14dc2e00cc72035dd7e04464a88cb9`. Im Abbild nachgelesen: `server = 192.168.1.54:8443`, `servername = jarvis.fleitec.com`, `befehle = ja` samt Freigabeliste — im Standardabbild steht davon **keine einzige Zeile** |
+| Justins Fassung | `/srv/store/abbilder/orientos-usb-20260908-5041c0d.img`, gebaut mit `JARVIS_CONF=assets/jarvis/rechte-justin.conf`. Prüfsumme `9ecd59eff9fd103af3fa72c5507d84c5d648210ab59fcbb9fd0162d9788d7339`. Im Abbild nachgelesen: `server = 192.168.1.54:8443`, `servername = jarvis.fleitec.com`, `befehle = ja` samt Freigabeliste — im Standardabbild steht davon **keine einzige Zeile** |
 | Inhalt | Kern 5 391 676 Oktett, **54 Programme** in `/bin`, **6 Bündel** unter `/apps` (Datei-Explorer, Editor, **Einstellungen**, Suchen, Terminal, Widgets), `firnc` + `fas`, `/beispiel/hallo.fi`, 50 Pflichtpfade geprüft, 190 UTF-8-Umlautfolgen |
 
 Auf den Stick:
 
 ```
-sudo dd if=/root/abbilder/orientos-usb-20260908-81ac54b.img of=/dev/sdX \
+sudo dd if=/root/abbilder/orientos-usb-20260908-5041c0d.img of=/dev/sdX \
         bs=4M conv=fsync status=progress
 ```
 
