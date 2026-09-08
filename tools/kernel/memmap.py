@@ -169,6 +169,7 @@ BEREICHE = [
     ("WIG",        "kstate.fi", "WIG_OFF",        "WIG_MAX"),
     ("WIGST",      "kstate.fi", "WIGST_OFF",      "WIGST_MAX"),
     ("SCANB",      "kstate.fi", "SCANB_OFF",      "SCANB_MAX"),
+    ("NAMEK",      "kstate.fi", "NAMEK_OFF",      "NAMEK_MAX"),
     # RUNDE OFS3: die Pfadpuffer des Dateisystems.  Sie sind hier ein
     # EIGENER Bereich und kein Versatz -- die zwei Seiten gehoeren
     # dieser Runde allein, und genau das soll die Karte nachrechnen.

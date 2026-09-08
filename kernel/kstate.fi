@@ -172,6 +172,7 @@ export {
     KILLED, SYSCALLS, DISK_DEV, IDT_OFF, BITMAP_OFF, BITMAP_BYTES,
     PT_OFF, KDATA_SIZE, TASK_OFF, TASK_BYTES, MAX_TASKS, TRACE_OFF, POLLSEQ,
     TRACE_MAX, CONSOLE_OFF, CONSOLE_MAX, BLOCK_OFF, BLOCK_MAX, NAME_OFF,
+    NAMEK_OFF, NAMEK_MAX,
     NAME_MAX, FS_OFF, FS_MAX, KEYPOS, NX_OK, EXECS,
     ELF_ERR, ELF_BYTES, ELF_PAGES, ELF_LOADS, ELF_OFF, ELF_MAX,
     EARG_OFF, EARG_MAX, LOAD_OFF, LOAD_MAX, EXCURSION, FORKS,
@@ -188,7 +189,7 @@ export {
     MOD_BASE, MOD_BYTES, MOD_CRC, MOD_WANT, MOD_OK, MOD_MODE,
     GUARD_APS, K11_OFF, K11_MAX, KB_SHIFT, KB_CTRL, KB_EXT,
     FPU_WORDS, FPU_MODE, FPU_XCR0, FPU_SIZE, FPU_APS, FPU_CR4,
-    FPU_SAVES, FPU_RESTORES, FPU_NM, FPU_AREAS, FPU_FEAT,
+    FPU_SAVES, FPU_RESTORES, FPU_NM, FPU_AREAS, FPU_FEAT, FUZZ_K,
     KB_SEQS, KB_SUPER, HK_SEQ, HK_KEY, HK_NS,
     AN_STATE, AN_NPAR, AN_PRIV, AN_SEQS, AN_REV,
     AN_PAR, AN_MAXPAR, ENV_N, ENV_LEN, ENV_BUF, ENV_MAX,
@@ -265,7 +266,7 @@ export {
     // ---- Runde HANDLE ----
     HND_OFF, HND_MAX, HOBJ_OFF, HOBJ_MAX, HREQ_OFF, HREQ_MAX,
     HNON_OFF, HNON_MAX, HCNT_OFF, HCNT_MAX,
-    M_HANDLE, M_NOGEN, M_NOFLIGHT, M_NORIGHTS, M_HSTRICT, M_HBENCH,
+    M_HANDLE, M_NOGEN, M_NOFLIGHT, M_NORIGHTS, M_HSTRICT, M_HBENCH, M_FUZZ,
     H_CHECKS, H_DENIED, H_STALE, H_CANCELS, H_INFLIGHT, H_DEFERRED,
     H_OPENED, H_CLOSED, H_PASSED, H_ESCALATE,
     // ---- RUNDE HDA: der Ton ----
@@ -1264,6 +1265,55 @@ const WIGST_MAX: u64 = 0x8000 // MAX_CPUS * 0x1000
 const SCANB_OFF: u64 = 0xB8000
 const SCANB_MAX: u64 = 0x8000 // MAX_CPUS * 0x1000
 
+// ==================================================== RUNDE HAERTUNG-2
+// DER PFADPUFFER JE KERN -- DER GROESSTE POSTEN AUS MERGE-6 6.2.
+//
+// `kstate.NAME_OFF` ist EINE Seite fuer die GANZE MASCHINE, und fast
+// jeder Systemaufruf mit einem Pfad legt seinen Namen dort ab:
+// `do_open`, `do_stat`, `do_unlink`, `do_mkdir`, `do_rename`,
+// `do_chdir`, `do_exec` und dreizehn weitere. Der Ablauf ist immer
+// derselbe:
+//
+//     let buf: u64 = state + kstate.NAME_OFF
+//     fetch_path(state, me, name, buf, MAX_NAME)   // Ring 3 -> Kern
+//     ... und danach wird AUS buf gearbeitet
+//
+// Zwischen dem Fuellen und dem Gebrauch liegt kein Riegel. Zwei
+// Ring-3-Prozesse auf zwei Kernen in `open` oeffnen damit den Namen des
+// jeweils anderen. MERGE-6 hat das gezaehlt (dreiundvierzig Wege,
+// docs/RUNDE-MERGE6.md 6.2) und als VERTRAG stehen lassen; GLYPHE hat
+// den ersten davon geschlossen, weil er nachweislich zuschlug
+// (`do_scan`/`do_jrnl` -> SCANB_OFF, eine Etage tiefer derselbe Fehler).
+//
+// WARUM JE KERN UND NICHT EINE SPERRE -- und das ist gemessen, nicht
+// geraten: `fs.path` nimmt die Dateisystemsperre ohnehin, und zwar
+// NACHDEM der Name im Puffer steht. Eine zweite Sperre um Fuellen und
+// Gebrauch waere also eine Sperre um eine Sperre, und sie laege auf dem
+// heissesten Weg des Systems (jeder `open`, jeder `stat`). Die Bauform,
+// die Runde GLYPHE gegen die gemeinsame Sperre GEMESSEN hat, war um den
+// Faktor 2,25 (smp4) bis 2,46 (smp8) schneller -- dieselbe Wahl, aus
+// demselben Grund.
+//
+// WARUM DAS SICHER IST: derselbe Satz wie bei WIGST_OFF und SCANB_OFF.
+// Der Puffer wird AUSSCHLIESSLICH innerhalb eines Systemaufrufs
+// angefasst, und `MSR_SFMASK` (kernel/arch/x86_64/user.fi) haelt IF
+// fuer den GANZEN Systemaufruf unten. Eine Aufgabe kann darin nicht
+// verdraengt und auf einem anderen Kern fortgesetzt werden.
+//
+// EINE Seite je Kern reicht: `MAX_NAME` ist 1024, und `uio.resolve`
+// arbeitet in derselben Seite weiter.
+//
+// DER PLATZ: es gibt kein Loch von acht Seiten mehr. Die vollstaendige
+// Karte (tools/kernel/memmap.py, ALLE Dateien -- nicht nur kstate.fi)
+// hat als groesstes freies Stueck 16 KiB bei 0xAC000; die 40 KiB bei
+// 0x9F000, die eine Zaehlung nur ueber kstate.fi zeigt, sind in
+// Wahrheit von hidrep.fi und hidin.fi belegt. Also waechst KDATA_SIZE
+// um 32 KiB auf 0xE0000 -- genau wie in Runde GLYPHE, und aus
+// demselben Grund unbedenklich: das ist `.bss` und kostet im Abbild
+// KEIN Oktett (boot.s legt es mit `.skip` an und nullt es beim Start).
+const NAMEK_OFF: u64 = 0xE8000
+const NAMEK_MAX: u64 = 0x8000 // MAX_CPUS * 0x1000
+
 // RUNDE K15, ZWEITER NACHTRAG: DIE SEITE DER SKALARE WIRD GETEILT.
 //
 // `wig.fi` braucht von der ersten Seite dieses Vorrats 0x40 Oktette.
@@ -1945,6 +1995,13 @@ const M_NORIGHTS: u64 = 643 // Wort 10, Bit 3
 const M_HSTRICT: u64 = 644 // Wort 10, Bit 4
 const M_HBENCH: u64 = 645 // Wort 10, Bit 5
 
+// RUNDE HAERTUNG-2: der Fuzzer in Ring 3 (`uprog.u_fuzz`). Er ruft jeden
+// Systemaufruf mit Zufalls- und Grenzwerten; die Zusage ist, dass der
+// Kern das aushaelt. Wort 10, Bit 6 -- daneben, weil er dieselbe Bauart
+// hat wie der Selbsttest der Handle-Schicht: ein Programm in Ring 3,
+// das der Kern startet und dessen Ende er meldet.
+const M_FUZZ: u64 = 652 // Wort 10, Bit 12
+
 // Die Zaehler der Runde HANDLE. Sie stehen als SKALARE hier und nicht in
 // HCNT_OFF, weil sie aus den Testlaeufern gelesen werden wie jeder
 // andere Zaehler dieses Kernels auch. Die Versaetze 1400 aufwaerts waren
@@ -2005,6 +2062,18 @@ const H_ESCALATE: u64 = 1472 // versuchte Rechteerweiterung beim Weitergeben
 // `tools/hv/run.sh` liest beide und vergleicht sie.
 const KDATA_SIZE: u64 = 0x100000
 
+// 
+// RUNDE HAERTUNG-2, eingefuegt in MERGE-8: der Pfadpuffer je Kern
+// (NAMEK_OFF) schliesst den groessten Posten aus MERGE-6 6.2 -- die
+// dreiundvierzig Wege in sys.fi um `kstate.NAME_OFF`. Der Zweig hat
+// `kdata` dafuer von 768 auf 896 KiB wachsen lassen und den Puffer auf
+// 0xC0000 gelegt: auf SEINER Grundlage (merge6) war das die erste freie
+// Adresse. Auf merge7 liegt dort der BUS (SYSTEMBUS). Zwei Bereiche auf
+// einer Adresse, und keine gemeinsame Zeile fuer den Textverschmelzer --
+// derselbe Fall wie SYSTEMBUS/PROTOKOLL/TON in MERGE-7 selbst.
+// KDATA_SIZE bleibt deshalb 0x100000 (1024 KiB, GROESSER als die 0xE0000
+// des Zweigs), und der Puffer zieht in die 96 KiB, die MERGE-7 hinter
+// dem Ton frei gelassen hat: 0xE8000..0xF0000.
 // ============================================== RUNDE SYSTEMBUS
 //
 // 0xC0000..0xC8000 -- acht Seiten fuer den Systembus. Die Untergliederung
@@ -2256,6 +2325,12 @@ const FPU_RESTORES: u64 = 1656 // geladene Zustaende
 const FPU_NM: u64 = 1664 // #NM-Faelle auf dem traegen Weg
 const FPU_AREAS: u64 = 1672 // angelegte Bereiche
 const FPU_FEAT: u64 = 1680 // cpuid Blatt 1: ECX<<32 | EDX
+
+// RUNDE HAERTUNG-2: wie viele TAUSEND Runden der Fuzzer dreht. 0 heisst
+// hundert Tausend (`uprog.u_fuzz` setzt den Vorgabewert). Ein Skalar
+// und kein Modusbit, weil es eine ZAHL ist -- `fuzzrunden=200` auf der
+// Befehlszeile.
+const FUZZ_K: u64 = 1688
 
 
 // ================================================== DER MODUSVEKTOR

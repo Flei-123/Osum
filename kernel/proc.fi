@@ -920,7 +920,30 @@ fn user_ok(state: u64, i: u64, addr: u64, len: u64) -> bool {
     if addr < USER_DATA {
         return false
     }
-    if addr + len < addr {
+    // RUNDE HAERTUNG-2: `+%` UND NICHT `+`, UND DAS IST DER GANZE PUNKT
+    // DIESER ZEILE.
+    //
+    // Sie ist die Ueberlaufpruefung -- und sie lief seit Runde 72 selbst
+    // in den Ueberlauf, den sie abfangen soll. Dort wurde `+` zur
+    // GEPRUEFTEN Addition; `addr + len` mit len = 0xFFFFFFFFFFFFFFFF ruft
+    // seither `osum_panic`, BEVOR der Vergleich stattfindet. Die Zeile
+    // konnte ihre Arbeit nie tun.
+    //
+    // GEFUNDEN VOM FUZZER (tools/haertung/fuzz.sh, erster Lauf, nach
+    // weniger als tausend Aufrufen):
+    //
+    //     panic: integer overflow in 'u64 + u64' at kernel/proc.fi:812
+    //
+    // Ein Programm in Ring 3 konnte den Kern also mit EINEM Aufruf
+    // anhalten -- `read(fd, irgendwas, 0xFFFFFFFFFFFFFFFF)` genuegte.
+    // Das ist kein Rechenfehler, sondern ein Riegel, der von aussen
+    // umlegbar war.
+    //
+    // `+%` rechnet umlaufend, wie es die Pruefung braucht: laeuft die
+    // Summe um, ist sie kleiner als `addr`, und genau das wird gefragt.
+    // `sys.fi` ist bei derselben Runde 72 auf `+%`/`-%` umgestellt
+    // worden; diese Datei wurde uebersehen.
+    if addr +% len < addr {
         return false // it wrapped around
     }
     // ROUNDE K7: die Obergrenze deckt jetzt ZWEI Kacheln statt einer.
@@ -935,11 +958,15 @@ fn user_ok(state: u64, i: u64, addr: u64, len: u64) -> bool {
     // weiterhin nur, WELCHEN Fehler ein Prozess bekommt -- entschieden
     // wird beim Durchgehen der Tabellen darunter, und wer die Kachel
     // nicht abgebildet hat, hat dort keine Seite mit Benutzerbit.
-    if addr + len > USER_DATA + USER_SPAN * PRIV_SLOTS {
+    // Auch hier `+%`: nach der Zeile oben KANN `addr + len` nicht mehr
+    // umlaufen, aber die gepruefte Addition weiss das nicht -- sie
+    // rechnet und panikt, bevor der Vergleich kommt. Der Wert ist
+    // derselbe.
+    if addr +% len > USER_DATA + USER_SPAN * PRIV_SLOTS {
         return false
     }
     var p: u64 = addr
-    let last: u64 = addr + len - 1
+    let last: u64 = addr +% len -% 1
     while p <= last {
         let pml4: u64 = sched.tget(state, i, sched.T_CR3)
         let e4: u64 = read_entry(pml4, (p >> 39) & 0x1FF)
