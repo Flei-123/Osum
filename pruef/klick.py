@@ -121,18 +121,42 @@ class Maschine:
         self.klick(knopf)
 
     def ziehe(self, x1, y1, x2, y2):
-        """Druecken, fahren, loslassen -- fuer Fenster verschieben."""
+        """Druecken, fahren, loslassen -- fuer Fenster verschieben.
+
+        RUNDE TUERSCHLOSS, ZWEI FEHLER DARIN BEHOBEN:
+
+        1. DIE TASTE MUSS WIRKLICH LOSGEHEN. Blieb sie haengen, stand
+           danach der ganze Schreibtisch: der Zeiger klebte bei
+           (566,437), die Leiste hoerte bei `paints=68` auf zu malen und
+           kein Tastendruck kam mehr an. Von aussen sah das aus wie ein
+           Absturz -- es war eine gedrueckte Maustaste. Das Loslassen
+           steht jetzt in einem `finally` und wird zweimal geschickt;
+           ein zweites `mouse_button 0` schadet nicht.
+
+        2. DER REST DER STRECKE GING VERLOREN. `dx // schritte` mal
+           `schritte` ist nicht `dx` -- bei 260 Bildpunkten in 5
+           Schritten fehlten 4. Fuer einen Griff, der 12 Bildpunkte
+           breit ist, entscheidet das. Jetzt wird die Strecke
+           aufgeteilt und der Rest im letzten Schritt mitgenommen.
+        """
         self.gehe(x1, y1)
-        self.sag("mouse_button 1", 0.15)
-        dx, dy = x2 - x1, y2 - y1
-        schritte = max(abs(dx), abs(dy)) // 60 + 1
-        for i in range(schritte):
-            sx = dx // schritte
-            sy = dy // schritte
-            self.sag("mouse_move %d %d" % (sx, sy), 0.05)
-        self.sag("mouse_button 0", 0.15)
+        self.sag("mouse_button 1", 0.2)
+        try:
+            dx, dy = x2 - x1, y2 - y1
+            schritte = max(1, max(abs(dx), abs(dy)) // 40 + 1)
+            gx = gy = 0
+            for i in range(schritte):
+                # bis hierher soll gefahren sein -- die Differenz zum
+                # schon Gefahrenen ist der Schritt. So bleibt kein Rest.
+                zx = dx * (i + 1) // schritte
+                zy = dy * (i + 1) // schritte
+                self.sag("mouse_move %d %d" % (zx - gx, zy - gy), 0.06)
+                gx, gy = zx, zy
+        finally:
+            self.sag("mouse_button 0", 0.2)
+            self.sag("mouse_button 0", 0.1)
         self.x, self.y = x2, y2
-        time.sleep(0.4)
+        time.sleep(0.5)
 
     # -------------------------------------------------------- Tastatur
     def taste(self, name):
