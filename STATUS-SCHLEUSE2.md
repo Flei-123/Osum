@@ -407,8 +407,11 @@ derselbe Algorithmus liegt als C für den nativen Vergleich bei.
 
 | Grenze | nativ | AOT | Deuter |
 |---|---:|---:|---:|
-| 2 000 000 | 712 ms | **1 533 ms (2,15×)** | — |
+| 2 000 000 | 712 ms | **1 533 ms (2,15×)** | 239 642 ms (337×) |
 | 200 000 | 29 ms | 132 ms (4,6×) | 7 703 ms (265×) |
+
+**Der AOT ist 156× schneller als der Deuter** (1 533 ms gegen
+239 642 ms bei gleicher Last).
 
 **Faktor 2,15 gegenüber nativem C** bei echter Rechenlast — das Ziel
 war ≤ 3×, der Deuter lag bei 158×. Bei der kleinen Grenze dominiert der
