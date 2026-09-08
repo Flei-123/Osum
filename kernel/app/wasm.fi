@@ -866,6 +866,33 @@ struct Rahmen {
     nres: usize,
 }
 
+// ------------------------------------------------- Der Sprungspeicher
+//
+// WARUM ES IHN GIBT -- eine Messung. Ohne ihn hat der Deuter fuer
+// `prim.wasm` (Primzahlen unter 200000) folgendes getan:
+//
+//     befehle=67284765  blockscans=900585  scanoktette=51472015
+//
+// 900 585 Mal wurde nach dem `end` eines Blocks gesucht, und dabei
+// wurden 51,5 MILLIONEN Oktette Bytecode ueberflogen -- fuer eine
+// Schleife, deren Rumpf immer derselbe ist und immer an derselben
+// Stelle endet. Das war der Grund, warum der Deuter 212x langsamer war
+// als nativ statt der ~11x, die wasm3 misst: nicht die Deutung der
+// Befehle war teuer, sondern das wiederholte SUCHEN.
+//
+// Die Abhilfe ist ein direkt adressierter Zwischenspeicher: die
+// Position des Blockbefehls ist der Schluessel, Ende und else-Zweig
+// sind der Wert. Ein Block hat in einem gegebenen Modul immer dasselbe
+// Ende -- der Eintrag altert also nie und braucht keine Verdraengung
+// ausser der Kollision.
+const SPRUNG_N: usize = 8192
+
+struct Sprung {
+    schluessel: usize,   // Position + 1, damit 0 "leer" heisst
+    ende: usize,
+    sonst: usize,
+}
+
 struct VM {
     m: *mut Modul,
     stack: [u64; 8192],
@@ -886,6 +913,9 @@ struct VM {
     // Zaehler, damit eine Endlosschleife nicht ewig laeuft
     schritte: u64,
     spur: bool,
+    scans: u64,
+    scan_oktette: u64,
+    sprung: [Sprung; 8192],
 }
 
 fn push(v: *mut VM, x: u64) {
@@ -1444,8 +1474,31 @@ fn w_path_unlink(v: *mut VM, path: u64, plen: usize) -> u64 {
     return E_OK
 }
 
+// path_remove_directory(dirfd, path, path_len) -> errno
+//
+// Die Gegenseite zu `path_create_directory`: SQLite gibt die Sperre
+// frei, indem es das `.lock`-Verzeichnis wieder entfernt. Fehlt diese
+// Funktion, bleibt die Sperre nach dem ERSTEN Lauf liegen und jeder
+// weitere endet mit "database is locked" -- gemessen, genau so.
+const SYS_RMDIR: i64 = 84
+
+fn w_path_rmdir(v: *mut VM, path: u64, plen: usize) -> u64 {
+    var puffer: [u8; 1088] = [0; 1088]
+    if pfad_holen(v, path, plen, (&puffer[0]) as u64) == 0 {
+        return E_INVAL
+    }
+    let r: i64 = syscall(SYS_RMDIR, (&puffer[0]) as i64, 0, 0, 0, 0, 0)
+    if r < 0 {
+        return E_NOENT
+    }
+    return E_OK
+}
+
 // path_create_directory(dirfd, path, path_len) -> errno
 const SYS_MKDIR: i64 = 83
+
+const E_EXIST: u64 = 20
+const LINUX_EEXIST: i64 = 17
 
 fn w_path_mkdir(v: *mut VM, path: u64, plen: usize) -> u64 {
     var puffer: [u8; 1088] = [0; 1088]
@@ -1454,6 +1507,18 @@ fn w_path_mkdir(v: *mut VM, path: u64, plen: usize) -> u64 {
     }
     let r: i64 = syscall(SYS_MKDIR, (&puffer[0]) as i64, 493, 0, 0, 0, 0)
     if r < 0 {
+        // "GIBT ES SCHON" IST KEIN FEHLER WIE JEDER ANDERE, und das ist
+        // hier keine Feinheit, sondern der Unterschied zwischen einer
+        // laufenden und einer toten Datenbank: SQLites Standard-VFS
+        // sperrt eine Datei, indem es ein VERZEICHNIS `<datei>.lock`
+        // anlegt. Bleibt so ein Verzeichnis von einem abgebrochenen
+        // Lauf liegen, kommt beim naechsten Mal EEXIST -- und wer das
+        // pauschal als EINVAL zurueckgibt, bekommt von SQLite ein
+        // "disk I/O error" und findet nie heraus, warum.
+        // Osum meldet Linux' EEXIST = 17, WASI nennt es 20.
+        if r == 0 - LINUX_EEXIST {
+            return E_EXIST
+        }
         return E_INVAL
     }
     return E_OK
@@ -1528,6 +1593,8 @@ fn wasi_rufen(v: *mut VM, nr: i32, npar: usize, nres: usize) {
         r = w_path_unlink(v, a[1], a[2] as usize)
     } else if nr == W_PATH_CREATE_DIRECTORY {
         r = w_path_mkdir(v, a[1], a[2] as usize)
+    } else if nr == W_PATH_REMOVE_DIRECTORY {
+        r = w_path_rmdir(v, a[1], a[2] as usize)
     } else if nr == W_FD_FILESTAT_SET_SIZE {
         // SQLite kuerzt die Datei beim Aufraeumen. Ohne ftruncate im
         // System ist das ein stilles Ja -- die Datei bleibt dann laenger
@@ -1672,6 +1739,23 @@ fn block_ende(m: *mut Modul, von: usize, bis: usize, else_out: *mut usize)
         }
     }
     return bis
+}
+
+// Das Ende eines Blocks, aus dem Zwischenspeicher oder frisch gesucht.
+fn block_ende_schnell(v: *mut VM, m: *mut Modul, von: usize, bis: usize,
+    else_out: *mut usize) -> usize {
+    let idx: usize = von % SPRUNG_N
+    if (*v).sprung[idx].schluessel == von + 1 {
+        *else_out = (*v).sprung[idx].sonst
+        return (*v).sprung[idx].ende
+    }
+    (*v).scans = (*v).scans + 1
+    let e: usize = block_ende(m, von, bis, else_out)
+    (*v).scan_oktette = (*v).scan_oktette + (e - von) as u64
+    (*v).sprung[idx].schluessel = von + 1
+    (*v).sprung[idx].ende = e
+    (*v).sprung[idx].sonst = *else_out
+    return e
 }
 
 // Wie viele Ergebnisse ein Blocktyp liefert.
@@ -1880,7 +1964,7 @@ fn ausfuehren(v: *mut VM) -> i32 {
                     (*v).label[li].schleife = true
                     (*v).label[li].nres = 0
                 } else {
-                    (*v).label[li].ziel = block_ende(m, l.at,
+                    (*v).label[li].ziel = block_ende_schnell(v, m, l.at,
                         (*v).frames[fr].ende, &elsepos)
                     (*v).label[li].schleife = false
                     (*v).label[li].nres = nres
@@ -1893,8 +1977,8 @@ fn ausfuehren(v: *mut VM) -> i32 {
             let nres2: usize = blocktyp_nres(m, bt2)
             let c: u64 = pop(v)
             var elsepos2: usize = 0
-            let ende: usize = block_ende(m, l.at, (*v).frames[fr].ende,
-                &elsepos2)
+            let ende: usize = block_ende_schnell(v, m, l.at,
+                (*v).frames[fr].ende, &elsepos2)
             let li2: usize = (*v).frames[fr].label_at
                 + (*v).frames[fr].nlabel
             if li2 >= 1024 {
@@ -2958,6 +3042,8 @@ fn main(start: u64) -> i32 {
     (*v).code = 0
     (*v).schritte = 0
     (*v).spur = spur_an(start, argc)
+    (*v).scans = 0
+    (*v).scan_oktette = 0
 
     // Die `start`-Sektion zuerst, wenn es eine gibt: sie richtet das
     // Modul ein, bevor irgendetwas anderes laeuft.
@@ -2980,6 +3066,15 @@ fn main(start: u64) -> i32 {
         ergebnis = ausfuehren(v)
     }
 
+    if (*v).spur {
+        io.print("wasm: befehle=")
+        zahl_aus((*v).schritte)
+        io.print(" blockscans=")
+        zahl_aus((*v).scans)
+        io.print(" scanoktette=")
+        zahl_aus((*v).scan_oktette)
+        io.print("\n")
+    }
     if (*v).falle {
         io.print("wasm: das Modul ist abgebrochen\n")
         return 1
