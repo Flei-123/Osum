@@ -3636,7 +3636,25 @@ fn launcher_fenster() -> u64 {
             let b: u64 = (&rec[0 as usize]) as u64
             if ulib.streq(b + wlibc.WL_APP,
                 (&a_launcher[0 as usize]) as u64) {
-                return __mmio_read64((b + wlibc.WL_ID) as *mut u64)
+                // Nebenbei den Zustand mitnehmen, damit der Aufrufer
+                // sagen kann, WOHIN er geschaltet hat (siehe
+                // `startmenue_um`). Ein Fenster gilt als "offen", wenn
+                // es weder verborgen noch unbeachtet ist.
+                let fl: u64 = __mmio_read64((b + wlibc.WL_FLAGS) as *mut u64)
+                let id: u64 = __mmio_read64((b + wlibc.WL_ID) as *mut u64)
+                menue_war_offen = 1
+                if (fl & wlibc.F_HIDDEN) != 0 {
+                    menue_war_offen = 0
+                }
+                // WL_FOCUS steht im Satz selbst -- der Server sagt
+                // je Fenster, ob es das aktive ist. Dieselbe Regel wie
+                // in `sysgui` bei WA_TOGGLE: verborgen ODER nicht aktiv
+                // heisst "wird aufgemacht".
+                let fo: u64 = __mmio_read64((b + wlibc.WL_FOCUS) as *mut u64)
+                if fo == 0 as u64 {
+                    menue_war_offen = 0
+                }
+                return id
             }
         }
         slot = slot + 1
@@ -3645,7 +3663,15 @@ fn launcher_fenster() -> u64 {
 }
 
 static mut a_launcher: [u8; 9] = "launcher\0"
+// RUNDE TUERSCHLOSS: ZWEI Meldungen statt einer. Bis hierher stand hier
+// nur "startmenue zu" -- und sie wurde bei JEDEM Umschalten gesagt,
+// also auch beim Aufmachen. Wer die Leitung liest, um zu wissen, ob das
+// Menue offen ist (ein Testlaeufer tut genau das), bekam dreimal
+// hintereinander "zu" und schloss daraus, das Menue gehe nicht auf.
+// Eine Meldung, die die Richtung verschweigt, ist keine Messung.
 static mut s_tog: [u8; 24] = "taskbar: startmenue zu\0\0"
+static mut s_tog_auf: [u8; 25] = "taskbar: startmenue auf\0\0"
+static mut menue_war_offen: u64 = 0
 
 // ============================================== RUNDE STARTKNOPF
 // DIE SUPER-TASTE, GELESEN NACH DEM ZAEHLERPROTOKOLL AUS kbd.fi.
@@ -3757,9 +3783,16 @@ static mut s_hkt: [u8; 9] = "  taste=\0"
 fn startmenue_um() {
     let w: u64 = launcher_fenster()
     if w != 0 {
-        say((&s_tog[0 as usize]) as u64)
-        ulib.nl()
         let _rc: u64 = wlibc.win_act(w, wlibc.WA_TOGGLE)
+        // NACH dem Umschalten gesagt, und mit der Richtung, in die
+        // geschaltet wurde: `menue_war_offen` hat `launcher_fenster`
+        // eine Zeile vorher aus den Fahnen des Servers gelesen.
+        if menue_war_offen != 0 {
+            say((&s_tog[0 as usize]) as u64)
+        } else {
+            say((&s_tog_auf[0 as usize]) as u64)
+        }
+        ulib.nl()
         return
     }
     // ============================================== RUNDE BLECHKERN
