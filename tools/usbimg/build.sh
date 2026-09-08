@@ -64,6 +64,16 @@
 #    liest dieses Skript das FERTIGE Dateisystem mit `mkfs.py list`
 #    zurueck und bricht ab, wenn auch nur einer der Pflichtpfade fehlt.
 #    Die Liste steht unten unter PFLICHT.
+#
+#    RUNDE TUERSCHLOSS: UND DIE BUENDEL STEHEN JETZT AUCH DARIN.
+#    `/bin/settings` war gebaut, 635 600 Oktette gross und im Abbild --
+#    aber ohne `/apps/settings.osp/` stand es in keinem Menue und war
+#    ueber die Oberflaeche nicht erreichbar (Runde DURCHKLICK, 3.9).
+#    Die Pflichtliste hat das nicht gemerkt, weil sie nur nach `/bin`
+#    gesehen hat: ein Programm ist auf diesem System aber erst dann
+#    da, wenn es auch sein Buendel hat. Also stehen die sechs Buendel
+#    hier, und ein siebtes, das jemand vergisst, faellt beim naechsten
+#    Bau auf und nicht erst beim Durchklicken.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -463,7 +473,10 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /bin/desktop /bin/taskbar /bin/netview /bin/explorer /boot/osum.mb \
 /bin/ota /bin/fetch /bin/host /bin/dhcp /bin/jarvisd /bin/jsig \
 /bin/jarvisctl /bin/pollbr /etc/ota.conf /etc/jarvis/rechte.conf \
-/system/FASSUNG /system/SCHLUESSELGEN"
+/system/FASSUNG /system/SCHLUESSELGEN \
+/apps/explorer.osp/start /apps/editor.osp/start /apps/terminal.osp/start \
+/apps/launcher.osp/start /apps/widgets.osp/start /apps/settings.osp/start \
+/apps/settings.osp/INFO /apps/settings.osp/symbol"
 python3 tools/osum/mkfs.py list "$OUT/root.img" > "$OUT/liste.txt" 2>&1 \
     || fehler "das fertige Dateisystem laesst sich nicht lesen"
 fehlt=0
