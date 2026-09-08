@@ -567,21 +567,31 @@ def main():
     # Das trifft in diesem Abbild genau das Terminal (id=7, 560x380).
     ziel = None
     for mm in re.finditer(r"wm: fen i=(\d+) id=(\d+) x=(\d+) y=(\d+) "
-                          r"w=(\d+) h=(\d+) lay=(\d+) fl=(\d+)", txt):
+                          r"w=(\d+) h=(\d+) lay=(\d+) fl=(\d+) z=(\d+)", txt):
         i = int(mm.group(2))   # die KENNUNG (id=), nicht der Platz (i=)
         x, y, w, h = (int(mm.group(k)) for k in (3, 4, 5, 6))
         lay, fl = int(mm.group(7)), int(mm.group(8))
-        # DAS TERMINALFENSTER, und zwar dasselbe wie in
-        # pruef/fenstergriff.py: das ERSTE Fenster mit Schmuck (id=7,
-        # 560x380, aus `wmshell`). Vorher gewann hier das ZULETZT
-        # gemeldete -- nach einem Programmstart also der Explorer, und
-        # dessen Titelleiste liegt woanders. Gemessen: "von x=70 y=70
-        # nach None", waehrend derselbe Zug auf id=7 in einem eigenen
-        # Lauf JA/JA ergab.
-        if lay == 1 and fl == 0 and w >= 200 and h >= 150 and ziel is None:
-            ziel = (i, x, y, w, h)
+        zz = re.search(r"z=(\d+)", mm.group(0))
+        z = int(zz.group(1)) if zz else 0
+        # DAS OBERSTE FENSTER MIT SCHMUCK -- und "oberste" heisst: mit
+        # dem groessten `z`.
+        #
+        # Zwei Anlaeufe waren falsch, beide gemessen:
+        #   * das ZULETZT gemeldete zu nehmen traf nach einem
+        #     Programmstart den Explorer (x=70 y=70);
+        #   * das ERSTE zu nehmen traf das Terminal (id=7, x=24 y=40) --
+        #     das aber inzwischen VERDECKT war: der Editor (id=13,
+        #     x=20 y=3, 760x566, z=3) liegt darueber, und `wm.hit`
+        #     nimmt bei ueberlappenden Fenstern das mit dem groesseren
+        #     z. Der Zug ging also an den Editor, und das Terminal
+        #     stand still.
+        # Wer den Menschen nachmacht, muss das Fenster greifen, das er
+        # sieht -- und das ist das oberste.
+        if lay == 1 and fl == 0 and w >= 200 and h >= 150:
+            if ziel is None or z > ziel[5]:
+                ziel = (i, x, y, w, h, z)
     if ziel:
-        i, x, y, w, h = ziel
+        i, x, y, w, h = ziel[0], ziel[1], ziel[2], ziel[3], ziel[4]
         # ============================================ RUNDE TUERSCHLOSS
         # DIE LAGE WIRD NACH JEDEM ZUG FRISCH GELESEN, und der Griff
         # wird aus DIESER Lage gerechnet.
