@@ -982,7 +982,17 @@ class Erzeuger:
         if op in LAD:
             fn, breite = LAD[op]
             adr = self.sv(sp - 1)
-            E('%s = %s(%s +%% %d)' % (self.sv(sp - 1), fn, adr, off))
+            # DIE BREITE ZAEHLT. `i32.load8_s` von 0xFF ist 0xFFFFFFFF
+            # (32 Bit), NICHT 0xFFFFFFFFFFFFFFFF -- der Wert liegt in
+            # den unteren 32 Bit eines i32. `i64.load8_s` dagegen
+            # erweitert auf volle 64 Bit. Wer das gleich behandelt,
+            # bekommt bei jedem Vergleich mit einer i32-Konstante ein
+            # falsches Ergebnis; die Pruefung mem.wat faengt genau das.
+            if breite == 32:
+                E('%s = %s(%s +%% %d) & 4294967295'
+                  % (self.sv(sp - 1), fn, adr, off))
+            else:
+                E('%s = %s(%s +%% %d)' % (self.sv(sp - 1), fn, adr, off))
             return sp, False
         fn = SPE[op]
         sp -= 2
