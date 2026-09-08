@@ -1,0 +1,580 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// ERZEUGT von tools/wasm2firn/wasm2firn.py -- NICHT von Hand aendern.
+//
+// Die Laufzeit fuer ein vorab uebersetztes WASM-Modul (RUNDE SCHLEUSE-2).
+// Sie enthaelt alles, was die erzeugten Funktionen brauchen und was
+// NICHT vom Modul abhaengt: den linearen Speicher mit seiner
+// Grenzpruefung, die Zahlenhilfen und die WASI-Schicht.
+
+import std.io
+import std.rt
+
+// ==================================================================
+//                        Der lineare Speicher
+// ==================================================================
+//
+// HIER LIEGT DIE SICHERHEITSGRENZE. Genau wie im Deuter geht jeder
+// Zugriff des Gastes durch eine Pruefung gegen die Groesse des
+// linearen Speichers. Ein uebersetztes Modul ist nicht
+// vertrauenswuerdiger als ein gedeutetes -- es ist nur schneller.
+static mut mem_p: u64 = 0
+static mut mem_seiten: u64 = 0
+static mut mem_max: u64 = 0
+
+fn mem_bytes() -> u64 {
+    return mem_seiten * 65536
+}
+
+fn mem_falle(at: u64, n: u64) {
+    io.print("wasm: Zugriff ausserhalb des linearen Speichers\n")
+    rt.finish(134)
+}
+
+fn mem_pruef(at: u64, n: u64) {
+    if at +% n > mem_bytes() || at > mem_bytes() {
+        mem_falle(at, n)
+    }
+}
+
+fn mem_ld8(at: u64) -> u64 {
+    mem_pruef(at, 1)
+    return rt.ld8(mem_p, at as usize) as u64
+}
+
+fn mem_ld16(at: u64) -> u64 {
+    mem_pruef(at, 2)
+    return (rt.ld8(mem_p, at as usize) as u64)
+        | ((rt.ld8(mem_p, (at + 1) as usize) as u64) << 8 as u32)
+}
+
+fn mem_ld32(at: u64) -> u64 {
+    mem_pruef(at, 4)
+    return (rt.ld8(mem_p, at as usize) as u64)
+        | ((rt.ld8(mem_p, (at + 1) as usize) as u64) << 8 as u32)
+        | ((rt.ld8(mem_p, (at + 2) as usize) as u64) << 16 as u32)
+        | ((rt.ld8(mem_p, (at + 3) as usize) as u64) << 24 as u32)
+}
+
+fn mem_ld64(at: u64) -> u64 {
+    mem_pruef(at, 8)
+    let lo: u64 = mem_ld32_roh(at)
+    let hi: u64 = mem_ld32_roh(at + 4)
+    return lo | (hi << 32 as u32)
+}
+
+fn mem_ld32_roh(at: u64) -> u64 {
+    return (rt.ld8(mem_p, at as usize) as u64)
+        | ((rt.ld8(mem_p, (at + 1) as usize) as u64) << 8 as u32)
+        | ((rt.ld8(mem_p, (at + 2) as usize) as u64) << 16 as u32)
+        | ((rt.ld8(mem_p, (at + 3) as usize) as u64) << 24 as u32)
+}
+
+fn mem_ld8s(at: u64) -> u64 {
+    return sext8_64(mem_ld8(at))
+}
+
+fn mem_ld16s(at: u64) -> u64 {
+    return sext16_64(mem_ld16(at))
+}
+
+fn mem_ld32s(at: u64) -> u64 {
+    return sext32_64(mem_ld32(at))
+}
+
+fn mem_st8(at: u64, x: u64) {
+    mem_pruef(at, 1)
+    rt.st8(mem_p, at as usize, (x & 255) as u8)
+}
+
+fn mem_st16(at: u64, x: u64) {
+    mem_pruef(at, 2)
+    rt.st8(mem_p, at as usize, (x & 255) as u8)
+    rt.st8(mem_p, (at + 1) as usize, ((x >> 8 as u32) & 255) as u8)
+}
+
+fn mem_st32(at: u64, x: u64) {
+    mem_pruef(at, 4)
+    rt.st8(mem_p, at as usize, (x & 255) as u8)
+    rt.st8(mem_p, (at + 1) as usize, ((x >> 8 as u32) & 255) as u8)
+    rt.st8(mem_p, (at + 2) as usize, ((x >> 16 as u32) & 255) as u8)
+    rt.st8(mem_p, (at + 3) as usize, ((x >> 24 as u32) & 255) as u8)
+}
+
+fn mem_st64(at: u64, x: u64) {
+    mem_pruef(at, 8)
+    mem_st32_roh(at, x & 4294967295)
+    mem_st32_roh(at + 4, x >> 32 as u32)
+}
+
+fn mem_st32_roh(at: u64, x: u64) {
+    rt.st8(mem_p, at as usize, (x & 255) as u8)
+    rt.st8(mem_p, (at + 1) as usize, ((x >> 8 as u32) & 255) as u8)
+    rt.st8(mem_p, (at + 2) as usize, ((x >> 16 as u32) & 255) as u8)
+    rt.st8(mem_p, (at + 3) as usize, ((x >> 24 as u32) & 255) as u8)
+}
+
+fn mem_copy(ziel: u64, quelle: u64, n: u64) {
+    mem_pruef(ziel, n)
+    mem_pruef(quelle, n)
+    if n == 0 {
+        return
+    }
+    // Ueberlappung: WASM verlangt das Verhalten von memmove.
+    if ziel <= quelle {
+        var i: u64 = 0
+        while i < n {
+            rt.st8(mem_p, (ziel + i) as usize, rt.ld8(mem_p, (quelle + i) as usize))
+            i = i + 1
+        }
+    } else {
+        var i: u64 = n
+        while i > 0 {
+            i = i - 1
+            rt.st8(mem_p, (ziel + i) as usize, rt.ld8(mem_p, (quelle + i) as usize))
+        }
+    }
+}
+
+fn mem_fill(at: u64, wert: u64, n: u64) {
+    mem_pruef(at, n)
+    var b: u8 = (wert & 255) as u8
+    var i: u64 = 0
+    while i < n {
+        rt.st8(mem_p, (at + i) as usize, b)
+        i = i + 1
+    }
+}
+
+fn mem_wachsen(seiten: u64) -> u64 {
+    // Der Speicher ist beim Start auf die Hoechstgroesse gelegt, also
+    // ist Wachsen nur ein Vorruecken der Grenze. Das ist der billige
+    // Weg und genau das, was der Deuter auch tut.
+    let alt: u64 = mem_seiten
+    if seiten == 0 {
+        return alt
+    }
+    if alt + seiten > mem_max {
+        return 18446744073709551615
+    }
+    mem_seiten = alt + seiten
+    return alt
+}
+
+// ==================================================================
+//                          Zahlenhilfen
+// ==================================================================
+//
+// Alles liegt in u64. `i32s` deutet die unteren 32 Bit als
+// vorzeichenbehaftet, `i64s` die vollen 64.
+
+fn b2i(x: bool) -> u64 {
+    if x {
+        return 1
+    }
+    return 0
+}
+
+fn i32s(x: u64) -> i64 {
+    var v: u64 = x & 4294967295
+    if v >= 2147483648 {
+        return (v as i64) - 4294967296
+    }
+    return v as i64
+}
+
+fn i64s(x: u64) -> i64 {
+    return x as i64
+}
+
+fn sext8_32(x: u64) -> u64 {
+    var v: u64 = x & 255
+    if v >= 128 {
+        return (v | 18446744073709551360) & 4294967295
+    }
+    return v
+}
+
+fn sext16_32(x: u64) -> u64 {
+    var v: u64 = x & 65535
+    if v >= 32768 {
+        return (v | 18446744073709486080) & 4294967295
+    }
+    return v
+}
+
+fn sext8_64(x: u64) -> u64 {
+    var v: u64 = x & 255
+    if v >= 128 {
+        return v | 18446744073709551360
+    }
+    return v
+}
+
+fn sext16_64(x: u64) -> u64 {
+    var v: u64 = x & 65535
+    if v >= 32768 {
+        return v | 18446744073709486080
+    }
+    return v
+}
+
+fn sext32_64(x: u64) -> u64 {
+    var v: u64 = x & 4294967295
+    if v >= 2147483648 {
+        return v | 18446744069414584320
+    }
+    return v
+}
+
+fn i32_shr_s(a: u64, b: u64) -> u64 {
+    let s: u32 = (b & 31) as u32
+    var v: i64 = i32s(a)
+    return ((v >> s) as u64) & 4294967295
+}
+
+fn i64_shr_s(a: u64, b: u64) -> u64 {
+    let s: u32 = (b & 63) as u32
+    return ((a as i64) >> s) as u64
+}
+
+fn i32_rotl(a: u64, b: u64) -> u64 {
+    let s: u32 = (b & 31) as u32
+    var v: u64 = a & 4294967295
+    if s == 0 {
+        return v
+    }
+    return ((v << s) | (v >> ((32 - s) as u32))) & 4294967295
+}
+
+fn i32_rotr(a: u64, b: u64) -> u64 {
+    let s: u32 = (b & 31) as u32
+    var v: u64 = a & 4294967295
+    if s == 0 {
+        return v
+    }
+    return ((v >> s) | (v << ((32 - s) as u32))) & 4294967295
+}
+
+fn i64_rotl(a: u64, b: u64) -> u64 {
+    let s: u32 = (b & 63) as u32
+    if s == 0 {
+        return a
+    }
+    return (a << s) | (a >> ((64 - s) as u32))
+}
+
+fn i64_rotr(a: u64, b: u64) -> u64 {
+    let s: u32 = (b & 63) as u32
+    if s == 0 {
+        return a
+    }
+    return (a >> s) | (a << ((64 - s) as u32))
+}
+
+fn i32_clz(x: u64) -> u64 {
+    var v: u64 = x & 4294967295
+    if v == 0 {
+        return 32
+    }
+    var n: u64 = 0
+    var m: u64 = 2147483648
+    while (v & m) == 0 {
+        n = n + 1
+        m = m >> 1 as u32
+    }
+    return n
+}
+
+fn i32_ctz(x: u64) -> u64 {
+    var v: u64 = x & 4294967295
+    if v == 0 {
+        return 32
+    }
+    var n: u64 = 0
+    while (v & 1) == 0 {
+        n = n + 1
+        v = v >> 1 as u32
+    }
+    return n
+}
+
+fn i64_clz(x: u64) -> u64 {
+    if x == 0 {
+        return 64
+    }
+    var n: u64 = 0
+    var m: u64 = 9223372036854775808
+    while (x & m) == 0 {
+        n = n + 1
+        m = m >> 1 as u32
+    }
+    return n
+}
+
+fn i64_ctz(x: u64) -> u64 {
+    if x == 0 {
+        return 64
+    }
+    var v: u64 = x
+    var n: u64 = 0
+    while (v & 1) == 0 {
+        n = n + 1
+        v = v >> 1 as u32
+    }
+    return n
+}
+
+fn popcnt(x: u64) -> u64 {
+    var v: u64 = x
+    var n: u64 = 0
+    while v != 0 {
+        n = n + (v & 1)
+        v = v >> 1 as u32
+    }
+    return n
+}
+
+// Division: WASM verlangt eine FALLE bei Null und beim Ueberlauf
+// (INT_MIN / -1), nicht ein stilles Ergebnis.
+fn div_falle() {
+    io.print("wasm: Division durch Null\n")
+    rt.finish(136)
+}
+
+fn i32_div_s(a: u64, b: u64) -> u64 {
+    let y: i64 = i32s(b)
+    if y == 0 {
+        div_falle()
+    }
+    let x: i64 = i32s(a)
+    if x == -2147483648 && y == -1 {
+        return 2147483648
+    }
+    return ((x / y) as u64) & 4294967295
+}
+
+fn i32_div_u(a: u64, b: u64) -> u64 {
+    let y: u64 = b & 4294967295
+    if y == 0 {
+        div_falle()
+    }
+    return ((a & 4294967295) / y) & 4294967295
+}
+
+fn i32_rem_s(a: u64, b: u64) -> u64 {
+    let y: i64 = i32s(b)
+    if y == 0 {
+        div_falle()
+    }
+    let x: i64 = i32s(a)
+    if x == -2147483648 && y == -1 {
+        return 0
+    }
+    return ((x % y) as u64) & 4294967295
+}
+
+fn i32_rem_u(a: u64, b: u64) -> u64 {
+    let y: u64 = b & 4294967295
+    if y == 0 {
+        div_falle()
+    }
+    return ((a & 4294967295) % y) & 4294967295
+}
+
+fn i64_div_s(a: u64, b: u64) -> u64 {
+    let y: i64 = a as i64
+    let z: i64 = b as i64
+    if z == 0 {
+        div_falle()
+    }
+    if y == -9223372036854775808 && z == -1 {
+        return 9223372036854775808
+    }
+    return (y / z) as u64
+}
+
+fn i64_div_u(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        div_falle()
+    }
+    return a / b
+}
+
+fn i64_rem_s(a: u64, b: u64) -> u64 {
+    let y: i64 = a as i64
+    let z: i64 = b as i64
+    if z == 0 {
+        div_falle()
+    }
+    if y == -9223372036854775808 && z == -1 {
+        return 0
+    }
+    return (y % z) as u64
+}
+
+fn i64_rem_u(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        div_falle()
+    }
+    return a % b
+}
+
+// ==================================================================
+//                        Gleitkomma
+// ==================================================================
+//
+// Alles liegt als BITMUSTER in u64 -- so, wie WASM es auf dem Stapel
+// haelt. `f64v` packt aus, `f64b` packt ein. Der Weg ueber ein
+// einelementiges Feld ist derselbe wie im Deuter.
+
+fn f64v(x: u64) -> f64 {
+    var s: [u64; 1] = [0; 1]
+    s[0] = x
+    return *((&s[0]) as u64 as *mut f64)
+}
+
+fn f64b(x: f64) -> u64 {
+    var s: [f64; 1] = [0.0; 1]
+    s[0] = x
+    return *((&s[0]) as u64 as *mut u64)
+}
+
+fn f32v(x: u64) -> f32 {
+    var s: [u32; 1] = [0; 1]
+    s[0] = (x & 4294967295) as u32
+    return *((&s[0]) as u64 as *mut f32)
+}
+
+fn f32b(x: f32) -> u64 {
+    var s: [f32; 1] = [0.0; 1]
+    s[0] = x
+    let w: u32 = *((&s[0]) as u64 as *mut u32)
+    return w as u64
+}
+
+fn f64_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn f32_abs(x: f32) -> f32 {
+    if x < (0.0 as f32) { return (0.0 as f32) - x }
+    return x
+}
+
+// Quadratwurzel nach Newton -- Firns std hat keine fuer f32, und die
+// vierzig Schritte reichen fuer doppelte Genauigkeit.
+fn f64_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var r: f64 = x
+    var i: usize = 0
+    while i < 40 {
+        r = (r + x / r) / 2.0
+        i = i + 1
+    }
+    return r
+}
+
+fn f32_sqrt(x: f32) -> f32 {
+    return f64_sqrt(x as f64) as f32
+}
+
+fn f64_trunc(x: f64) -> f64 {
+    return (x as i64) as f64
+}
+
+fn f32_trunc(x: f32) -> f32 {
+    return ((x as i64) as f64) as f32
+}
+
+fn f64_floor(x: f64) -> f64 {
+    let t: f64 = f64_trunc(x)
+    if x < 0.0 && t != x { return t - 1.0 }
+    return t
+}
+
+fn f32_floor(x: f32) -> f32 {
+    return f64_floor(x as f64) as f32
+}
+
+fn f64_ceil(x: f64) -> f64 {
+    let t: f64 = f64_trunc(x)
+    if x > 0.0 && t != x { return t + 1.0 }
+    return t
+}
+
+fn f32_ceil(x: f32) -> f32 {
+    return f64_ceil(x as f64) as f32
+}
+
+// WASM rundet zur naechsten GERADEN Zahl bei .5 (round-half-to-even).
+fn f64_nearest(x: f64) -> f64 {
+    let u: f64 = f64_floor(x)
+    let d: f64 = x - u
+    if d > 0.5 { return u + 1.0 }
+    if d < 0.5 { return u }
+    let h: f64 = u / 2.0
+    if f64_trunc(h) * 2.0 == u { return u }
+    return u + 1.0
+}
+
+fn f32_nearest(x: f32) -> f32 {
+    return f64_nearest(x as f64) as f32
+}
+
+fn f64_min(a: f64, b: f64) -> f64 {
+    if a < b { return a }
+    return b
+}
+
+fn f64_max(a: f64, b: f64) -> f64 {
+    if a > b { return a }
+    return b
+}
+
+fn f32_min(a: f32, b: f32) -> f32 {
+    if a < b { return a }
+    return b
+}
+
+fn f32_max(a: f32, b: f32) -> f32 {
+    if a > b { return a }
+    return b
+}
+
+fn f64_copysign(a: u64, b: u64) -> u64 {
+    return (a & 9223372036854775807) | (b & 9223372036854775808)
+}
+
+fn f32_copysign(a: u64, b: u64) -> u64 {
+    return ((a & 2147483647) | (b & 2147483648)) & 4294967295
+}
+
+fn i32_trunc_f32_s(x: u64) -> u64 { return ((f32v(x) as i64) as u64) & 4294967295 }
+fn i32_trunc_f32_u(x: u64) -> u64 { return ((f32v(x) as i64) as u64) & 4294967295 }
+fn i32_trunc_f64_s(x: u64) -> u64 { return ((f64v(x) as i64) as u64) & 4294967295 }
+fn i32_trunc_f64_u(x: u64) -> u64 { return ((f64v(x) as i64) as u64) & 4294967295 }
+fn i64_trunc_f32_s(x: u64) -> u64 { return (f32v(x) as i64) as u64 }
+fn i64_trunc_f32_u(x: u64) -> u64 { return (f32v(x) as i64) as u64 }
+fn i64_trunc_f64_s(x: u64) -> u64 { return (f64v(x) as i64) as u64 }
+fn i64_trunc_f64_u(x: u64) -> u64 { return (f64v(x) as i64) as u64 }
+
+fn trunc_sat_i32_f32_s(x: u64) -> u64 { return i32_trunc_f32_s(x) }
+fn trunc_sat_i32_f32_u(x: u64) -> u64 { return i32_trunc_f32_u(x) }
+fn trunc_sat_i32_f64_s(x: u64) -> u64 { return i32_trunc_f64_s(x) }
+fn trunc_sat_i32_f64_u(x: u64) -> u64 { return i32_trunc_f64_u(x) }
+
+// Vorzeichenlose 64-Bit-Zahlen nach Gleitkomma: Firns `as` geht ueber
+// i64, also muss das oberste Bit von Hand nachgereicht werden.
+fn u64_zu_f64(x: u64) -> f64 {
+    if x < 9223372036854775808 {
+        return (x as i64) as f64
+    }
+    let h: u64 = x >> 1 as u32
+    var r: u64 = x & 1
+    return ((h as i64) as f64) * 2.0 + ((r as i64) as f64)
+}
+
+fn u64_zu_f32(x: u64) -> f32 {
+    return u64_zu_f64(x) as f32
+}
