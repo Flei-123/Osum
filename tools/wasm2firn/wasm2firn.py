@@ -113,9 +113,19 @@ class Leser:
 I32, I64, F32, F64, EMPTY = 0x7F, 0x7E, 0x7D, 0x7C, 0x40
 
 # Ab so vielen Bloecken am Stueck wird aus dem Turm ein Verteiler.
-# firnc laesst 200 Ebenen zu; 64 ist reichlich Abstand und trifft nur
-# echte Sprungtabellen, keine gewoehnliche Schachtelung.
-TURM_GRENZE = 64
+#
+# DIE ZAHL IST GEMESSEN, NICHT GERATEN. firncs `escape`-Durchgang ist in
+# der Verschachtelungstiefe EXPONENTIELL (siehe TIEFE.md, Abschnitt
+# "Der zweite Grund"): eine Funktion mit 24 geschachtelten `while true`
+# uebersetzt in 0 s, dieselbe mit 26 braucht 70 s -- Faktor ~8 je Ebene.
+# Bei SQLite reicht die Schachtelung bis 54 Ebenen; damit baut das
+# Modul gar nicht mehr fertig.
+#
+# Deshalb wird der Turm schon ab 8 Bloecken flachgelegt. Das trifft
+# neben den echten Sprungtabellen auch gewoehnliche Schachtelung --
+# und genau das ist erwuenscht, denn jede eingesparte Ebene zaehlt
+# exponentiell.
+TURM_GRENZE = 8
 
 
 def typname(t):
