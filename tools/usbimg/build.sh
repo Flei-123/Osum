@@ -141,7 +141,7 @@ PROGS=${PROGS:-"desktop taskbar settings launcher explorer netview \
 widgetdemo locate edit sh echo ls cat ps uname date df mkdir rm cp mv \
 grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
-dhcp host ota jsig jarvisctl pollbr reboot"}
+dhcp host ota jsig jarvisctl pollbr reboot shutdown power fas"}
 
 # RUNDE STICK: DIE SIEBEN, DIE GEFEHLT HABEN -- UND WARUM AUSGERECHNET
 # DIESE.
@@ -161,6 +161,31 @@ dhcp host ota jsig jarvisctl pollbr reboot"}
 #   pollbr      der Wartedienst der Runde POLL (hiess bis BLECH-ECHT
 #               ebenfalls jarvisd, siehe docs/RUNDE-BLECH-ECHT.md 2.4)
 #   reboot      nach `ota einspielen` will jemand neu starten
+#
+# RUNDE TUERSCHLOSS: UND VIER, DIE GEBAUT WAREN UND TROTZDEM GEFEHLT HABEN.
+#
+#   shutdown    die Maschine AUSSCHALTEN. `kernel/user/shutdown.fi`
+#               gibt es seit Runde K18 und es kann genau das, was ein
+#               Herunterfahren ist (ueber init: SIGTERM an die Dienste,
+#               warten, SIGKILL, sync, aushaengen, ACPI S5; ohne init
+#               wenigstens sync und der Aufruf). Es stand nur nicht in
+#               dieser Zeile -- Runde DURCHKLICK 7.4 hat daraus zu
+#               Recht "kein Herunterfahren ueber die Oberflaeche"
+#               gemacht: der einzige Weg aus dem System war der
+#               Netzschalter, und der riskiert bei jedem Mal das
+#               Dateisystem.
+#   power       das Bedienprogramm der Energieverwaltung (Runde K18).
+#               Gehoert daneben: wer ausschalten kann, will auch die
+#               Helligkeit und den Akkustand sehen.
+#   firnc, fas  DER UEBERSETZER UND SEIN ASSEMBLER -- der Punkt, an dem
+#               dieses System aufhoert, ein Vorfuehrstueck zu sein.
+#               `tools/k16/run.sh` ist mit 64/0 gruen: firnc laeuft AUF
+#               Osum, liest eine .fi von der Platte, schreibt eine .s,
+#               und `fas` macht daraus ein laufendes Programm. Beides
+#               war im Abbild bisher nicht enthalten (DURCHKLICK 8.1:
+#               "auf dem Stick laesst sich kein Firn-Programm
+#               uebersetzen"). Ein selbsttragendes System, das sich
+#               selbst nicht fortsetzen kann, ist keines.
 #
 # UND ZWEI, DIE ANDERS GEBAUT WERDEN MUESSEN:
 #
