@@ -32,6 +32,7 @@ import mem
 import atomic
 import cpu
 import arch.x86_64.fpu
+import msr
 // RUNDE BLECHEINGABE: der Zyklenzaehler, um einen STEHENDEN Zeitgeber
 // zu erkennen. `apic.fi` bindet nur serial/kstate/pci ein -- kein Kreis.
 import arch.x86_64.apic
@@ -71,6 +72,8 @@ export {
     groups_clear, groups_inherit, GROUPS_MAX,
     // ---- RUNDE AVX ----
     T_FPU, fpu_area, fpu_set_area, fpu_inherit, fpu_reset,
+    // ---- RUNDE LAUFZEIT ----
+    T_FSBASE, fsbase_apply,
 }
 
 // ------------------------------------------------------ the task record
@@ -295,6 +298,24 @@ const T_NGROUPS: u64 = 512
 // Maschine ohne SSE. Der Platz liegt hinter den Zusatzgruppen
 // (512 + GROUPS_MAX * 8 = 640) und damit noch weit unter TASK_BYTES.
 const T_FPU: u64 = 640
+
+// RUNDE LAUFZEIT: DIE FS-BASIS DIESER AUFGABE.
+//
+// Jedes gegen musl (oder glibc) gelinkte Programm liest seinen
+// Fadenzeiger als `%fs:0x0` und den Stapelwaechter als `%fs:0x28`. Ohne
+// eine FS-Basis ist beides ein Zugriff auf die Adresse 0x0 bzw. 0x28 --
+// gemessen in dieser Runde als `user fault: err=0x5 cr2=0x28` mitten in
+// musls `__malloc_alloc_meta`. Das ist der EINE Grund, aus dem ein
+// fremdes Programm hier nicht laeuft; die Systemaufrufnummern stimmen
+// laengst.
+//
+// Das Programm setzt die Basis selbst, mit `arch_prctl(ARCH_SET_FS)`
+// (Nummer 158). Sie gehoert der AUFGABE und nicht dem Prozessor: bei
+// jedem Wechsel schreibt `switch_to` sie wieder in IA32_FS_BASE, sonst
+// liest der naechste Faden den Fadenzeiger des vorigen. 0 heisst "hat
+// keine gesetzt" -- der Zustand jedes Osum-eigenen Programms, das ohne
+// TLS gebaut ist.
+const T_FSBASE: u64 = 648
 const GROUPS_MAX: u64 = 16
 
 // The three descriptor slots of round 62. Nothing writes them any more;
@@ -1794,10 +1815,40 @@ fn switch_to(state: u64, from: u64, to: u64) {
     // Abbild findet null xmm/ymm/zmm), also darf zwischen dem Laden und
     // dem Stapelwechsel noch Firn-Code stehen.
     fpu.switch(state, me, fpu_area(state, from), fpu_area(state, to))
+    // RUNDE LAUFZEIT: DIE FS-BASIS, aus demselben Grund wie die
+    // Vektorregister eine Zeile darueber -- sie steht in einem
+    // Modellregister des PROZESSORS und nicht im Aufgabensatz, also
+    // faende der naechste Faden sonst den Fadenzeiger des vorigen vor.
+    // Kostet nur etwas, wenn eine Aufgabe wirklich eine gesetzt hat.
+    fsbase_apply(state, to)
     asm("call rax", in("rax") vector(state, V_SWITCH),
         in("rdi") task_at(state, from) + T_RSP,
         in("rsi") tget(state, to, T_RSP), clobber("memory"))
 }
+
+// RUNDE LAUFZEIT: die FS-Basis dieser Aufgabe in den Prozessor legen.
+//
+// IA32_FS_BASE ist 0xC0000100. Geschrieben wird ueber `msr.wr`, also
+// ueber den Faengerpfad aus `msr.fi`: ein Prozessor, der das Register
+// nicht annimmt, gibt `false` zurueck statt die Maschine mit einem #GP
+// anzuhalten.
+//
+// EINE AUFGABE OHNE TLS KOSTET NICHTS. Jedes Osum-eigene Programm hat
+// `T_FSBASE == 0`, und dann passiert hier gar nichts -- die Basis des
+// vorigen Fadens bleibt stehen, und das ist richtig so: sie ist fuer
+// ein Programm, das `%fs` nie anfasst, nicht zu unterscheiden.
+fn fsbase_apply(state: u64, i: u64) {
+    if i >= kstate.MAX_TASKS {
+        return
+    }
+    let b: u64 = tget(state, i, T_FSBASE)
+    if b == 0 {
+        return
+    }
+    msr.wr(state, MSR_FS_BASE, b)
+}
+
+const MSR_FS_BASE: u64 = 0xC0000100
 
 // RUNDE AVX: der Vektorbereich einer Aufgabe. Zwei Zeilen, damit
 // `proc.fi` und `trap.fi` ihn erreichen, ohne T_FPU selbst zu kennen.
