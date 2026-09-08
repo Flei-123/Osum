@@ -102,7 +102,22 @@ echo "   programme $(echo "$gebaut" | wc -w) Stueck"
 gebaut_app=""
 for p in $APPS; do
     [ -f "kernel/app/$p.fi" ] || continue
-    if ! FIRNLIB="$ROOT/lib" "$CC" -c --profile=app \
+    # RUNDE SCHLEUSE: `--no-pass=inline` fuer die Apps, und das ist
+    # GEMESSEN und nicht geraten. Der WASM-Deuter besteht aus einer sehr
+    # langen if/else-Kette ueber die Befehlsnummer; das Einsetzen der
+    # Aufrufe blaeht genau diese Kette auf und verdraengt sie aus dem
+    # Befehlszwischenspeicher. `prim.wasm` (Primzahlen unter 200000),
+    # derselbe Deuter, nur andere Uebersetzung:
+    #
+    #     dev            30,06 s
+    #     dev-fast        4,98 s   <- Standard
+    #     release-safe    9,14 s
+    #     release-fast    8,21 s
+    #     release-fast --no-pass=inline   4,80 s   <- das hier
+    #
+    # Eine hoehere Optimierungsstufe war also LANGSAMER, bis das
+    # Einsetzen abgeschaltet wurde.
+    if ! FIRNLIB="$ROOT/lib" "$CC" -c --profile=app --no-pass=inline \
             -o "$OUT/app-$p.o" "kernel/app/$p.fi" > "$OUT/app-$p.err" 2>&1; then
         echo "== $p (app): der Uebersetzer sagt nein"
         head -20 "$OUT/app-$p.err"

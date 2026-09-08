@@ -904,6 +904,7 @@ struct VM {
     nframe: usize,
     // Argumente des Programms, fuer args_get/args_sizes_get
     argc: usize,
+    argv_von: usize,
     argv0: u64,
     start: u64,
     // Abbruch
@@ -1315,7 +1316,7 @@ fn w_random_get(v: *mut VM, p: u64, n: usize) -> u64 {
 fn w_args_sizes_get(v: *mut VM, c: u64, s: u64) -> u64 {
     var n: usize = 0
     var ganz: usize = 0
-    var i: usize = 1
+    var i: usize = (*v).argv_von
     while i < (*v).argc {
         let a: u64 = rt.arg_ptr((*v).start, i)
         ganz = ganz + rt.c_length(a) + 1
@@ -1330,7 +1331,7 @@ fn w_args_sizes_get(v: *mut VM, c: u64, s: u64) -> u64 {
 fn w_args_get(v: *mut VM, zeiger: u64, puffer: u64) -> u64 {
     var schreib: u64 = puffer
     var k: usize = 0
-    var i: usize = 1
+    var i: usize = (*v).argv_von
     while i < (*v).argc {
         let a: u64 = rt.arg_ptr((*v).start, i)
         let l: usize = rt.c_length(a)
@@ -1927,6 +1928,15 @@ const SCHRITT_GRENZE: u64 = 4000000000
 
 fn ausfuehren(v: *mut VM) -> i32 {
     let m: *mut Modul = (*v).m
+    // DER LESER STEHT AUSSERHALB DER SCHLEIFE, und das ist keine
+    // Kosmetik, sondern die groesste einzelne Tempoquelle dieses
+    // Deuters. Bis hierher wurde er JE BEFEHL neu gebaut
+    // (`leser_new(...)` legt vier Felder an, die Schleife lief 67
+    // Millionen Mal) und danach weggeworfen -- gemessen 82 ns bzw. rund
+    // 245 Takte pro Befehl, wo ein einfacher Deuter bei 10-30 liegt.
+    // Jetzt wird nur noch fortgeschrieben, was sich wirklich aendert:
+    // `at` und `len`.
+    var l: Leser = leser_new((*m).p, 0)
     while (*v).nframe > 0 && !(*v).falle && !(*v).beendet {
         (*v).schritte = (*v).schritte + 1
         if (*v).schritte > SCHRITT_GRENZE {
@@ -1934,8 +1944,9 @@ fn ausfuehren(v: *mut VM) -> i32 {
             return 1
         }
         let fr: usize = (*v).nframe - 1
-        var l: Leser = leser_new((*m).p, (*v).frames[fr].ende)
+        l.len = (*v).frames[fr].ende
         l.at = (*v).frames[fr].ip
+        l.fehler = false
         if l.at >= (*v).frames[fr].ende {
             // das Ende der Funktion ist ein stilles `return`
             verlassen(v)
@@ -1943,8 +1954,40 @@ fn ausfuehren(v: *mut VM) -> i32 {
         }
         let op: u8 = u8_lesen(&l)
 
+        // ------------------------------------ DIE HAEUFIGSTEN ZUERST
+        //
+        // Firn uebersetzt diese Kette in eine Folge von Vergleichen,
+        // nicht in eine Sprungtabelle -- ein Befehl, der weit hinten
+        // steht, kostet also alle Vergleiche davor. `local.get` und
+        // `i32.add` sind in echtem Code mit Abstand am haeufigsten und
+        // standen bei 32 bzw. weit hinten in der Zahlenwerkstatt.
+        // Diese fuenf Zeilen sind reine Reihenfolge, keine neue Logik.
+        if op == 32 as u8 {                      // local.get
+            let i0: usize = uleb(&l) as usize
+            if i0 >= (*v).frames[fr].nlocals {
+                (*v).falle = true
+            } else {
+                push(v, (*v).locals[(*v).frames[fr].locals_at + i0])
+            }
+        } else if op == 65 as u8 {               // i32.const
+            push(v, sleb(&l) as u64 & 4294967295)
+        } else if op == 106 as u8 {              // i32.add
+            let b0: u64 = pop(v)
+            push(v, wadd(pop(v), b0) & 4294967295)
+        } else if op == 33 as u8 {               // local.set
+            let i1: usize = uleb(&l) as usize
+            let x0: u64 = pop(v)
+            if i1 >= (*v).frames[fr].nlocals {
+                (*v).falle = true
+            } else {
+                (*v).locals[(*v).frames[fr].locals_at + i1] = x0
+            }
+        } else if op == 107 as u8 {              // i32.sub
+            let b1: u64 = pop(v)
+            push(v, wsub(pop(v), b1) & 4294967295)
+
         // ---------------------------------------------- Kontrollfluss
-        if op == 0 as u8 {                       // unreachable
+        } else if op == 0 as u8 {                // unreachable
             io.print("wasm: das Modul hat `unreachable` erreicht\n")
             (*v).falle = true
         } else if op == 1 as u8 {                // nop
@@ -2953,12 +2996,14 @@ fn main(start: u64) -> i32 {
         return 2
     }
     var pfad: u64 = 0
+    var pfad_i: usize = 0
     var pi: usize = 1
     while pi < argc {
         let a0: u64 = rt.arg_ptr(start, pi)
         if !(rt.c_length(a0) == 2 && rt.ld8(a0, 0) == 45 as u8
             && rt.ld8(a0, 1) == 115 as u8) {
             pfad = a0
+            pfad_i = pi
             pi = argc
         }
         pi = pi + 1
@@ -3036,6 +3081,12 @@ fn main(start: u64) -> i32 {
     (*v).nloc = 0
     (*v).nframe = 0
     (*v).argc = argc
+    // DIE ARGUMENTE DES GASTES FANGEN BEIM MODULPFAD AN, nicht bei 1:
+    // sonst sieht das Modul ein `-s`, das dem Deuter gilt, haelt es fuer
+    // sein eigenes Argument und rechnet mit seinem Standardwert weiter.
+    // Genau das hat die Tempomessung verfaelscht -- jede Grenze ergab
+    // dieselbe Befehlszahl.
+    (*v).argv_von = pfad_i
     (*v).start = start
     (*v).falle = false
     (*v).beendet = false
