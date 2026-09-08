@@ -140,3 +140,64 @@ Gastes war ein Aufruf mit Verzweigung. Das ist ein guter Teil der 158×.
 WASM verlangt bei Division durch Null und bei `INT_MIN / -1` eine **Falle**,
 kein stilles Ergebnis. Beides steht in `i32_div_s`/`i64_div_s` der Laufzeit
 und endet über `div_falle()` mit einem Abbruch — nicht mit einer Zahl.
+
+
+---
+
+## 3. Wie WASM nach Firn wird — die drei Entscheidungen, die zählen
+
+### (a) Der Stapel wird zu Variablen
+
+WASM ist eine Stapelmaschine, aber die Stapelhöhe ist **an jeder Stelle
+statisch bekannt**. Also bekommt jeder Stapelplatz eine eigene lokale
+Variable:
+
+```
+local.get 0 ; local.get 1 ; i32.add     →     s0 = l0
+                                              s1 = l1
+                                              s0 = (s0 +% s1) & 4294967295
+```
+
+Kein Stapelzeiger, kein Speicherzugriff, keine Grenzprüfung je Befehl —
+und genau das war im Deuter der Preis (`push`/`pop` als echter Aufruf mit
+288 Oktett Rahmen).
+
+### (b) `block` und `loop` werden Firn-Schleifen — aber nicht blind
+
+`loop` wird `while true { … }` (ein `br` springt zurück = `continue`),
+`block` wird `while true { … break }` (ein `br` springt vorwärts = `break`).
+Mehrstufige Sprünge (`br 2`) tragen die Zieltiefe in `br_ziel`; jede
+verlassene Schleife prüft, ob sie gemeint war, und bricht sonst weiter aus.
+
+**Der Fallstrick, der diese Runde am meisten gekostet hat** steht in
+Abschnitt 5.
+
+### (c) `call_indirect` ohne Funktionszeiger
+
+Firn Stufe 0 hat keine Funktionszeiger. Also erzeugt `wasm2firn` **je
+Signatur** eine Verteilerfunktion `tab_ruf_<typ>(idx, …)`, die über die
+Tabelleneinträge dieses Typs vergleicht. Der Preis fällt nur bei
+indirekten Rufen an.
+
+---
+
+## 4. Die Grenze von 200 Ebenen — und `yy_reduce`
+
+`firnc` (`compiler/src/parser.rs`, `MAX_DEPTH = 200`) lässt 200
+Verschachtelungsebenen zu. SQLite überschreitet das an **genau einer**
+Stelle von 1362 Funktionen: `yy_reduce`, der LALR-Parser, mit **276
+Blöcken am Stück** — das Sprungtabellen-Muster, das LLVM erzeugt, weil
+WASM kein `goto` hat.
+
+`wasm2firn` erkennt einen solchen Turm (mehr als 64 Blöcke ohne einen
+Befehl dazwischen) und macht daraus **einen Verteiler**: eine Schleife mit
+einer Fallnummer statt 276 Rahmen. Aus 278 Ebenen werden **54**.
+
+Zwei weitere Stellen mussten ebenfalls flach werden, weil `firncs` Parser
+auch **`else if`-Ketten** schachtelt (gemessen: bei 300 Zweigen bricht er
+ab):
+
+- die Fälle des Verteilers → unabhängige `if`-Blöcke mit `break`
+- `br_table` (bei SQLite bis zu 185 Ziele) → ebenso
+
+Ausführlich in `tools/wasm2firn/TIEFE.md`.
