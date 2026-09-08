@@ -359,8 +359,8 @@ beides vorher an Minimalprogrammen nachgemessen.
 | `wasm2firn` selbst | 4,6 s | 3 s |
 
 Gegenprobe mit gleicher Codemenge (~9 000 Anweisungen): flach **1 s**,
-22 Ebenen tief **über 30 Minuten**. Nicht die Menge ist das Problem,
-sondern allein die Tiefe.
+22 Ebenen tief **1 477 s** — Faktor 1 477. Nicht die Menge ist das
+Problem, sondern allein die Tiefe.
 
 ### Der zweite große Posten: Speicherzugriffe
 
