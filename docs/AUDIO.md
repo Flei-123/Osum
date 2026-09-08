@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: GPL-2.0-only -->
 # Ton in Osum — die Grenze, der Treiber, der Mischer
 
-Stand: Runde HDA, 30.08.2026.
+Stand: Runde HDA, 30.08.2026 — ergänzt um Runde TON-2, 06.09.2026 (Abschnitt 5b).
 Treiber: `kernel/hda.fi` (Intel HD-Audio) · `kernel/ac97.fi` (AC97)
 Schicht: `kernel/audio.fi` · Mischer: `kernel/mix.fi`
 Aufrufe: `kernel/sys.fi` 1850–1854 (Runde TON: umnummeriert, 1840 ist seit Runde WERKZEUGE `SYS_OSUM_CPUSTAT`) · Ring 3: `kernel/user/play.fi`
@@ -168,6 +168,137 @@ zu verschweigen.
 **Ausgabelatenz Mischerweg:** bis zu 426 ms, wenn das Programm seinen
 Puffer vollschreibt. Wer weniger will, nimmt den Einstromweg
 (`/bin/play -1`) — deshalb gibt es ihn.
+
+---
+
+## 5b. Runde TON-2: der Leerlauf, der Mischer von aussen, der Regler
+
+Stand: 06.09.2026, Zweig `ton2`.
+
+### Der Abspieler drehte leer
+
+Runde TON hat die Aussetzer aus der **Platte** geholt (4982 ms Lesen auf
+84 ms, siehe `kernel/blk.fi`). Übrig blieben zwei, und die kamen aus dem
+Abspieler selbst.
+
+Gemessen für **eine Sekunde** Ton (`/ton.wav`, `-smp 4`, IDE):
+
+| | vorher | nachher |
+|---|---:|---:|
+| Wartedrehungen | 139 290 | **26** |
+| Systemaufrufe gesamt | 418 952 | **963** |
+| Schübe | 139 713 | **126** |
+| Lücken in der Ausgabedatei | 0 | **0** |
+
+Für 46 540 Rahmen braucht es rund **45** echte Schübe. Gezählt wurden
+139 290 Wartedrehungen zu je **zwei** Systemaufrufen (`A_PLAYED` +
+`SYS_YIELD`) — 278 580 von 418 952 Aufrufen, also **zwei Drittel aller
+Systemaufrufe**, und keiner davon hat einen Rahmen bewegt.
+
+`rechnen_us` (436 ms) war dabei eine **Falle im eigenen Messgerät**: es
+wurde in `play.fi` als *Differenz* gebildet (gesamt − lesen − senden) und
+war damit kein Maß für Rechenzeit, sondern ein Sammelbecken für alles,
+was sonst nirgends gezählt wurde — also für genau diesen Leerlauf. Jetzt
+misst eine Uhr die Aufbereitung (`aufbereit_us`) und eine zweite die
+Wartezeit (`warten_us`); zusammen erklären sie `ring3_us` **ohne
+Restgröße**.
+
+### `AS_WAITSPACE` (audset 15)
+
+Der Ausweg `sleep_ms(1)` geht in diesem Kernel **nicht**: `do_nanosleep`
+rechnet in ganzen Zeitgeberschlägen und rundet **auf** (`TICK_HZ = 100`),
+die kürzeste Bitte schläft also volle 10 ms. Runde TON hat das gemessen
+(158 Aussetzer) und deshalb bewusst den Spin behalten.
+
+Also wandert das Warten dahin, wo es hingehört — `mix.fi` sagt es selbst
+seit Runde HDA: *„das gehört in den Systemaufruf, wo es einen Prozess
+gibt, den man schlafen legen kann.“*
+
+    osum_audset(AS_WAITSPACE, ((Kennung + 1) << 8) | Rahmen/16)
+        -> Rahmen, die jetzt Platz haben
+
+Der Kern pumpt den Mischer, rechnet aus Füllstand und Abtastrate die
+Wartezeit und legt den Prozess genau so lange schlafen.
+
+**Drei Fallen, alle gemessen:**
+
+1. **Die Sperre.** `audio.hold` ist eine Drehsperre **mit
+   abgeschalteten Unterbrechungen**. Wer damit schlafen geht, hält den
+   Rechner an. Also: unter der Sperre *rechnen*, ohne sie *schlafen*,
+   danach neu nachsehen.
+2. **Die Kennung.** `mix.open` gibt für den ersten Strom die `0` zurück
+   — dieselbe `0`, die „Einstromweg“ heißt. Deshalb um eins verschoben.
+3. **Auf einen ganzen Schlag aufrunden**, sobald überhaupt gewartet
+   wird. Rahmengenau gerechnet wird `us / 10000` fast immer null, es
+   bleibt beim `yield`, und der Aufruf kommt nach ~724 µs zurück:
+   74 361 Drehungen in 60 s statt 2 604.
+
+**Ein negatives Ergebnis, das im Code steht:** das `SYS_YIELD` nach jedem
+Schub sieht mit `AS_WAITSPACE` überflüssig aus. Entfernen ergab
+Aussetzer 1 → 4 und Systemaufrufe 2095 → 3594. `AS_WAITSPACE` läuft
+**nur bei vollem Ring**; solange Platz ist, läuft die Schleife durch,
+ohne je in den Kern zu gehen. Die Zeile bleibt.
+
+### Die 60-Sekunden-Abnahme
+
+`bash tools/ton/abnahme.sh` — zwölf Läufe: `-smp 1` und `-smp 4`, Quelle
+`ide` und `ram`, je **drei** Mal. Drei und nicht einer, weil der
+Aussetzerzähler (`hda.fi`, `S_UNDER`) nur fortgeschrieben wird, wenn
+jemand die Position abfragt, und über eine Sekunde bei gleichem Code
+zwischen 1 und 5 schwankte. **Die Zahl, die zählt, ist `gaps`** — echte
+Nullstrecken in dem, was das Gerät ausgegeben hat.
+
+Sechzig Sekunden gehen **nicht als eine Datei**: ein Inode fasst hier
+2 134 016 Oktette (8 direkte, 64 einfach und 4096 doppelt indirekte
+Blöcke, `kernel/fs.fi`) = **12,1 s** bei 44 100 Hz stereo. Deshalb
+`/bin/play -w N` — dieselbe Datei N mal an **einem offenen Strom**; die
+Nähte dazwischen sind zusätzlich eine Prüfung, die eine lange Datei gar
+nicht hätte.
+
+### Der Mischer, von Ring 3 aus
+
+`bash tools/ton/mischer.sh`. `tools/hda/run.sh` Abschnitt 5 prüft den
+Mischer **von innen** (Kernel-Prüfpfad `audmix`, zwei erfundene Ströme);
+das ist eine Aussage über die Additionsschleife und keine darüber, ob
+zwei **Programme** nebeneinander spielen. Diese Abnahme fragt es von
+außen: zweimal `/bin/play` durch die Shell, jeder Ton einzeln per
+Goertzel nachgewiesen.
+
+Neue Optionen: `/bin/play -v <0..100>` (Lautstärke **dieses** Stroms,
+`AS_SVOL`), `-m <0..100>` (Master, `AS_VOLUME`), `-w <N>` (Wiederholungen).
+
+**Eine Korrektur am Messgerät, die hierher gehört:** der erste Anlauf
+stellte einen von *zwei gleichzeitigen* Strömen leiser und verglich beide
+Leistungen mit dem Lauf davor. Das war falsch — der Ton, der **gar nicht
+angefasst** wurde, stand in drei Läufen bei 4522, 2397 und 6000. Grund:
+die Shell startet A im Hintergrund und B danach, die beiden überlappen
+sich je Lauf verschieden lang, und eine Goertzel-Auswertung über die
+ganze Datei misst dann die **Überlappung** und nicht die Lautstärke. Die
+Lautstärke je Strom wird jetzt mit **einem** Strom gemessen, wo die
+Amplitude eindeutig ist; die Unabhängigkeit zweier Ströme weist der
+Abschnitt mit `-v 0` nach, wo ein Ton **ganz** fehlt.
+
+### Der Lautstärkeregler
+
+* `wlib.slider(text, wert)` — **K_SLIDER**, 0..100, mit Ziehen und
+  Tastatur (links/rechts, Pos1/Ende). Er kommt in die **Bibliothek**,
+  nicht ins Programm: ein Regler, den ein Programm selbst malt, ist ein
+  Programm, das an wlib vorbeizeichnet, und genau das zählt
+  `tools/design/messen.py` als Fehler.
+* `/bin/qs` bekommt die Lautstärke als zweite Reglerzeile — gebaut wie
+  die Helligkeit darüber, aus denselben Themenmarken (`T_SCROLL`,
+  `T_ACCENT`, `T_BTN`, `T_LINE`). **Kein fester Farbwert.**
+* Vier neue Glyphen (`icon.volume.high/low/zero/muted`, Block
+  E010..E01F) über `assets/icons/icons.map` erzeugt — kein Codepunkt
+  steht im Zeichencode.
+* Bedient wird es auf vier Wegen: Klick in die Rinne, Klick auf die
+  Beschriftung (stumm), Klick auf das Symbol in der Leiste (öffnet das
+  Panel), **Super+M**. `m` und keine Multimediataste, weil
+  `kernel/kbd.fi` Buchstaben liefert und keine erweiterten Abtastcodes.
+* **Keine Karte, kein Feld** — dieselbe Regel wie beim Akku und beim
+  Netz. `A_READY` sagt es. Ein Bildschirmfoto ohne `-device intel-hda`
+  zeigt den Regler deshalb **absichtlich** nicht;
+  `tools/design/aufnahme.sh ton=ja` hängt eine Karte an.
 
 ---
 
