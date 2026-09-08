@@ -496,9 +496,18 @@ class Erzeuger:
 
             sp, unerreichbar = self.befehl(l, op, sp, stapel, tiefe)
 
-        # Rueckgabe der Funktion
+        # Rueckgabe der Funktion.
+        #
+        # `sp` kann hier 0 sein: dann endete der Rumpf mit `br`,
+        # `return` oder `unreachable`, und das `end` der Funktion ist
+        # gar nicht erreichbar. Firn will trotzdem einen Rueckgabewert
+        # sehen -- der Erzeuger haengt ihn hinter der letzten
+        # Anweisung an, er wird nie ausgefuehrt.
         if res:
-            self.e(0, 'return %s' % self.sv(sp - 1))
+            if sp >= 1:
+                self.e(0, 'return %s' % self.sv(sp - 1))
+            else:
+                self.e(0, 'return 0')
 
     def nach_block(self, b, tiefe):
         """Direkt hinter einer verlassenen Schleife: trug der Sprung
@@ -533,7 +542,7 @@ class Erzeuger:
 
         # ---------------------------------------------- Kontrollfluss
         if op == 0x00:                                    # unreachable
-            E('rt.abbruch("wasm: unreachable")')
+            E('wasm_unreachable()')
             return sp, True
         if op == 0x01:                                    # nop
             return sp, False
@@ -1004,6 +1013,12 @@ def erzeugen(m, wasi_txt, laufzeit_txt, name):
     o.append('static mut wasi_start: u64 = 0')
     o.append('static mut wasi_spur: bool = false')
     o.append('')
+    o.append('// `unreachable` ist in WASM eine FALLE, kein stiller Ausgang.')
+    o.append('fn wasm_unreachable() {')
+    o.append('    io.print("wasm: unreachable erreicht\\n")')
+    o.append('    rt.finish(132)')
+    o.append('}')
+    o.append('')
     o.append('fn mem_ok(at: u64, n: usize) -> bool {')
     o.append('    if at > mem_bytes() || at +% (n as u64) > mem_bytes() {')
     o.append('        return false')
@@ -1141,7 +1156,10 @@ def tabelle_erzeugen(m):
             if res:
                 o.append('    if idx == %d { return %s(%s) }' % (idx, ziel, ruf_args))
             else:
-                o.append('    if idx == %d { %s(%s)  return }' % (idx, ziel, ruf_args))
+                o.append('    if idx == %d {' % idx)
+                o.append('        %s(%s)' % (ziel, ruf_args))
+                o.append('        return')
+                o.append('    }')
         o.append('    tab_falle(idx)')
         if res:
             o.append('    return 0')
@@ -1165,16 +1183,34 @@ def start_erzeugen(m, name):
     o.append('')
     # Datensegmente als eine einzige Zeichenkette: Firn kann lange
     # Byte-Literale, und der Startcode kopiert sie in den Speicher.
+    # DIE DATENSEGMENTE.
+    #
+    # Sie sind BELIEBIGE OKTETTE -- der Datenbereich eines Rust- oder
+    # C-Programms enthaelt Zeiger, Sprungtabellen und Zahlen, kein
+    # Text. Ein Firn-Zeichenkettenliteral verlangt aber gueltiges
+    # UTF-8 ("\xNN above 0x7F does not yield valid UTF-8"), also
+    # scheidet der bequeme Weg aus.
+    #
+    # Stattdessen: ein `const`-Feld aus u8. Das ist genau das, was ein
+    # Datensegment ist, und firnc legt es unveraendert in den
+    # Datenbereich des Programms.
+    for k, (off, b) in enumerate(m.data):
+        if not b:
+            continue
+        o.append('static mut DATA%d: [u8; %d] = [' % (k, len(b)))
+        for z in range(0, len(b), 32):
+            stueck = ', '.join(str(c) for c in b[z:z + 32])
+            o.append('    %s,' % stueck)
+        o.append(']')
+        o.append('')
     o.append('fn data_legen() {')
     for k, (off, b) in enumerate(m.data):
         if not b:
             continue
-        o.append('    let d%d: str = "%s"' % (k, firn_bytes(b)))
-        o.append('    data_kopieren(%d, d%d, %d)' % (off, k, len(b)))
+        o.append('    data_kopieren(%d, (&DATA%d[0]) as u64, %d)' % (off, k, len(b)))
     o.append('}')
     o.append('')
-    o.append('fn data_kopieren(ziel: u64, s: str, n: u64) {')
-    o.append('    let p: u64 = s.p as u64')
+    o.append('fn data_kopieren(ziel: u64, p: u64, n: u64) {')
     o.append('    var i: u64 = 0')
     o.append('    while i < n {')
     o.append('        rt.st8(mem_p, (ziel + i) as usize, rt.ld8(p, i as usize))')
