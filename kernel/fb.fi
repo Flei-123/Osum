@@ -65,6 +65,7 @@ import kstate
 import font
 import msr
 import arch.arch
+import arch.x86_64.fpu
 
 export {
     wc,
@@ -81,6 +82,8 @@ export {
     SRC_NONE, SRC_MB, SRC_VBE, FB_OFF, FB_MAX, FONT_OFF, USER_BASE,
     M_GFX, M_NODBL, M_UC, M_BIG, M_NOCUR, M_HOLD, M_PATTERN, M_USER, M_WB,
     M_FLIP, M_NOFLIP,
+    // RUNDE SCHNELLBILD: der Vierersprung und sein Schalter.
+    M_NOSIMD, simd_ok, simd_px,
     WIDTH_STD, HEIGHT_STD,
     WIDTH_BIG, HEIGHT_BIG,
     // RUNDE DISPLAY -- der Moduswechsel und das Umrechnen beim Uebertragen.
@@ -305,6 +308,12 @@ const S_FLIPS: u64 = 0x7E0 // wie oft umgeschaltet wurde
 const S_VH: u64 = 0x7E8 // die angeforderte virtuelle Hoehe
 const S_MAPPED: u64 = 0x7F0 // wie viele Oktette wirklich abgebildet sind
 const S_SEQ: u64 = 0x7F8 // Folgenummer: ungerade = Seitenwechsel laeuft
+// RUNDE SCHNELLBILD: wie viele Bildpunkte WIRKLICH ueber den
+// Vierersprung gelaufen sind. Ohne diesen Zaehler ist "SIMD ist an"
+// eine Behauptung -- die Laufzeit allein sagt es nicht, weil eine
+// Messung, die den Weg gar nicht nimmt, genauso aussieht wie eine, die
+// ihn nimmt und nichts bringt.
+const S_SIMDPX: u64 = 0x800
 
 // Die drei Arten, ein Bild auf eine Tafel anderer Groesse zu bringen.
 // Dieselben drei, die ein Monitor in seiner eigenen Elektronik hat und
@@ -345,6 +354,9 @@ const M_WB: u64 = 512 // "fbwb" -- WC ausdruecklich NICHT einschalten
 // -- und die entsteht in `fb.init`, lange bevor `kgui` etwas sagt.
 const M_FLIP: u64 = 1024 // "flip"   -- doppelte Hoehe abbilden
 const M_NOFLIP: u64 = 2048 // "noflip" -- die Gegenprobe
+// RUNDE SCHNELLBILD: den Vierersprung von Hand herausnehmen -- die
+// Gegenprobe, die beide Wege in DERSELBEN Maschine vergleichbar macht.
+const M_NOSIMD: u64 = 4096 // "fbnosimd"
 
 // 800 x 600 x 4 sind 1 920 000 Oktette und passen in EINE 2-MiB-Kachel;
 // 1024 x 768 x 4 sind 3 145 728 und brauchen zwei. Beides steht in der
@@ -1791,6 +1803,109 @@ fn hline_mask(state: u64, x: u64, y: u64, n: u64, color: u64, maske: u64,
     }
 }
 
+// =====================================================================
+// RUNDE SCHNELLBILD: VIER BILDPUNKTE JE DURCHGANG MIT SSE2
+// =====================================================================
+//
+// GEMESSEN, WARUM DIESE FUNKTION GEBRAUCHT WIRD (`paintbench`, QEMU):
+//
+//     1280x800    fill=442/1000 Takte je Punkt   fill_a=53929/1000
+//     1920x1080   fill=849/1000                  fill_a=53788/1000
+//     3440x1440   fill=1602/1000                 fill_a=62479/1000
+//
+// Das Mischen ist also RUND VIERZIGMAL so teuer wie das Fuellen, und
+// nicht etwa gleich teuer. Der Grund steht in `hline_a`: je Bildpunkt
+// ein Ladebefehl, drei Multiplikationen, drei Divisionen durch 255 und
+// ein Schreibbefehl -- skalar, einer nach dem anderen.
+//
+// SSE2 rechnet dieselbe Formel auf VIER Bildpunkten gleichzeitig. Der
+// Weg ist der uebliche fuer 8-Bit-Farben:
+//
+//     movdqu   vier Bildpunkte (16 Oktette) laden
+//     punpcklbw/punpckhbw mit Null -> je acht 16-Bit-Werte
+//     pmullw   mit a bzw. ia, addieren, +128
+//     das Teilen durch 255 wird zu (t + (t>>8)) >> 8
+//     packuswb zurueck auf acht Oktette, movdqu schreiben
+//
+// WARUM HIER `(t + (t>>8)) >> 8` STEHT UND IN `mix8` DIE DIVISION.
+// `mix8` ist skalar, dort hat die Messung die Division gewinnen lassen
+// (der Kommentar oben sagt es mit Zahlen). In SSE2 gibt es KEINE
+// Ganzzahldivision -- `pmulhuw` mit 0x8081 waere der andere Weg. Die
+// Schiebefassung ist exakt fuer alle 16,7 Mio Tripel (dieselbe Tafel
+// wie oben) und kostet zwei Befehle statt einer nicht vorhandenen
+// Division.
+//
+// DIE UNTERBRECHUNGEN BLEIBEN WAEHREND DES RECHNENS AUS, und das ist
+// kein Schmuck: dieser Kern sichert die Vektorregister NUR beim Wechsel
+// zwischen Ring-3-Prozessen (`fpu.vec_put`/`vec_take`, Runde AVX). Ein
+// Zeitgeber, der mitten in dieser Schleife eine andere Aufgabe
+// einplant, faende xmm0..xmm5 veraendert vor. Die Sperre gilt je
+// BILDZEILE, nicht je Bildpunkt -- bei 3440 Punkten sind das rund
+// 3 Mikrosekunden, und `flush_stripe` sperrt fuer seine 2-MiB-Bloecke
+// laenger.
+//
+// OHNE FREISCHALTUNG GIBT ES KEINEN SIMD-WEG. `fpu.enabled` ist der
+// Riegel; ist er zu (Kernwort `nofpu`), waere schon das erste `movdqu`
+// ein #UD in Ring 0, also im Kern. Dann rechnet die skalare Schleife
+// weiter, und das Bild ist dasselbe -- nur langsamer.
+const SIMD_MIN: u64 = 8 // darunter lohnt der Vorlauf nicht
+
+// Ob der SIMD-Weg benutzt wird. Zwei Bedingungen, und beide muessen
+// abschaltbar sein: die Vektoreinheit MUSS freigeschaltet sein (sonst
+// #UD in Ring 0), und `fbnosimd` nimmt den Weg von Hand heraus -- ohne
+// diesen Schalter gaebe es keine Gegenprobe auf DERSELBEN Maschine.
+fn simd_ok(state: u64) -> bool {
+    if want(state, M_NOSIMD) {
+        return false
+    }
+    return fpu.enabled(state)
+}
+
+fn hline_a_simd(p0: u64, len: u64, color: u64, a: u64) -> u64 {
+    let vier: u64 = len / 4
+    if vier == 0 {
+        return 0
+    }
+    // Die Quellfarbe viermal nebeneinander, die Deckung achtmal als
+    // 16-Bit-Wert -- beides einmal je Bildzeile statt je Bildpunkt.
+    // EIN zusammenhaengendes Feld statt vier einzelner, und der Grund
+    // ist der Uebersetzer: firnc laesst `rbx` in einem asm-Block nicht
+    // zu (es traegt den Rahmen). Mit einem Basiszeiger reicht `rax`
+    // fuer alle vier Werte -- 0 Quelle, 16 Deckung, 32 Gegendeckung,
+    // 48 die 128 der Rundung.
+    var konst: [u64; 8] = [0, 0, 0, 0, 0, 0, 0, 0]
+    let c: u64 = color & 0xFFFFFFFF
+    let ia: u64 = 255 - a
+    let a16: u64 = (a << 48) | (a << 32) | (a << 16) | a
+    let i16: u64 = (ia << 48) | (ia << 32) | (ia << 16) | ia
+    let a128: u64 = (128 << 48) | (128 << 32) | (128 << 16) | 128
+    konst[0] = (c << 32) | c
+    konst[1] = (c << 32) | c
+    konst[2] = a16
+    konst[3] = a16
+    konst[4] = i16
+    konst[5] = i16
+    konst[6] = a128
+    konst[7] = a128
+
+    // xmm4 = Quellfarbe (schon 16-Bit-entfaltet, zweimal),
+    // xmm5 = a, xmm6 = ia, xmm7 = 128, xmm3 = Null.
+    asm("pxor xmm3,xmm3\nmovdqu xmm4,[rax]\nmovdqu xmm5,[rax+16]\nmovdqu xmm6,[rax+32]\nmovdqu xmm7,[rax+48]\nmovdqa xmm8,xmm4\npunpcklbw xmm4,xmm3\npunpckhbw xmm8,xmm3\npmullw xmm4,xmm5\npmullw xmm8,xmm5",
+        in("rax") (&konst[0]) as u64, clobber("memory"))
+    // DIE SCHLEIFE STEHT IM ASM-BLOCK, NICHT IN FIRN. Erste Fassung
+    // rief je VIER Bildpunkte einen eigenen asm-Block: gemessen
+    // faktor=19951/1000 gegen 38470/1000 skalar, also nur Faktor 1,9
+    // statt der erwarteten 4 bis 8. Der Grund ist nicht die Rechnung,
+    // sondern der Rahmen darum -- je Durchgang Registerbelegung,
+    // Speicherbarriere und Schleifenpruefung in Firn, fuer sechzehn
+    // Oktette Nutzarbeit. Mit `dec rcx / jnz` INNERHALB des Blocks
+    // faellt genau das weg.
+    asm("test rcx,rcx\njz 2f\n1:\nmovdqu xmm0,[rdi]\nmovdqa xmm1,xmm0\npunpcklbw xmm0,xmm3\npunpckhbw xmm1,xmm3\npmullw xmm0,xmm6\npmullw xmm1,xmm6\npaddw xmm0,xmm4\npaddw xmm1,xmm8\npaddw xmm0,xmm7\npaddw xmm1,xmm7\nmovdqa xmm2,xmm0\npsrlw xmm2,8\npaddw xmm0,xmm2\npsrlw xmm0,8\nmovdqa xmm2,xmm1\npsrlw xmm2,8\npaddw xmm1,xmm2\npsrlw xmm1,8\npackuswb xmm0,xmm1\nmovdqu [rdi],xmm0\nadd rdi,16\ndec rcx\njnz 1b\n2:",
+        in("rdi") p0, in("rcx") vier,
+        clobber("rdi"), clobber("rcx"), clobber("memory"))
+    return vier * 4
+}
+
 // EINE GEMISCHTE BILDZEILE. Kein `rep stosq`: jeder Bildpunkt haengt von
 // dem ab, was schon da steht. Der Adressvorschub ist aber eine Addition
 // statt einer Multiplikation je Punkt, und die Grenzen werden EINMAL
@@ -1822,6 +1937,17 @@ fn hline_a(state: u64, x: u64, y: u64, n: u64, color: u64, a: u64) {
     let sb: u64 = color & 0xFF
     var p: u64 = kstate.get(state, FB_OFF + S_DRAW) +% spot(state, x, y)
     var k: u64 = 0
+    // RUNDE SCHNELLBILD: der Vierersprung, solange genug Punkte
+    // uebrig sind. Der Rest geht darunter skalar weiter -- dieselbe
+    // Formel, also dasselbe Bild.
+    if simd_ok(state) && len >= SIMD_MIN {
+        let fl: u64 = arch.irq_save()
+        k = hline_a_simd(p, len, color, a)
+        arch.irq_restore(fl)
+        p = p +% k *% 4
+        kstate.set(state, FB_OFF + S_SIMDPX,
+            kstate.get(state, FB_OFF + S_SIMDPX) +% k)
+    }
     while k < len {
         let alt: u64 = __mmio_read32(p as *mut u32) as u64
         let r: u64 = mix8((alt >> 16) & 0xFF, sr, a, ia)
@@ -1858,10 +1984,15 @@ fn blend_skips(state: u64) -> u64 {
     return kstate.get(state, FB_OFF + S_BLENDS0)
 }
 
+fn simd_px(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_SIMDPX)
+}
+
 fn blend_reset(state: u64) {
     kstate.set(state, FB_OFF + S_BLENDS, 0)
     kstate.set(state, FB_OFF + S_BLENDR, 0)
     kstate.set(state, FB_OFF + S_BLENDS0, 0)
+    kstate.set(state, FB_OFF + S_SIMDPX, 0)
 }
 
 // Eine Bildzeile in einem Rutsch. Der innere Kern jedes Rechtecks und
@@ -2614,6 +2745,7 @@ fn parse(state: u64, cmd: u64) {
     var w_res: [u8; 7] = "fbres=\0"
     var w_pad: [u8; 7] = "fbpad=\0"
     var w_wb: [u8; 5] = "fbwb\0"
+    var w_nosimd: [u8; 9] = "fbnosimd\0"
     var m: u64 = 0
     if cmd != 0 {
         pad_setzen(zahl_hinter(state, cmd, (&w_pad[0]) as u64, 6))
@@ -2628,6 +2760,9 @@ fn parse(state: u64, cmd: u64) {
         }
         if find(cmd, (&w_wb[0]) as u64, 4) != 0 {
             m = m | M_WB
+        }
+        if find(cmd, (&w_nosimd[0]) as u64, 8) != 0 {
+            m = m | M_NOSIMD
         }
         if find(cmd, (&w_big[0]) as u64, 5) != 0 {
             m = m | M_BIG
