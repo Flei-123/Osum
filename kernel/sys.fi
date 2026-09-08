@@ -5786,7 +5786,10 @@ fn do_brk(state: u64, me: u64, want: u64) -> u64 {
     if want > cur {
         while p < want {
             if proc.page_free(state, me, p) {
-                if proc.map_page(state, me, p, true, false) == 0 {
+                // RUNDE FREMDLAND: GENULLT. Was `brk` dazunimmt, ist
+                // nach POSIX mit Nullen gefuellt -- und musls Halde
+                // legt genau hier ihre Verwaltung ab und prueft sie.
+                if proc.map_page_zero(state, me, p, true, false) == 0 {
                     return cur
                 }
                 kstate.add(state, kstate.MAPS, 1)
@@ -5843,7 +5846,10 @@ fn big_map(state: u64, me: u64, pages: u64, prot: u64) -> u64 {
     }
     var p: u64 = base
     while p < top {
-        if proc.map_page(state, me, p, true, (prot & PROT_EXEC) != 0) == 0 {
+        // RUNDE FREMDLAND: GENULLT -- `mmap(MAP_ANONYMOUS)` liefert
+        // Nullen, und was der vorige Besitzer des Rahmens dort liegen
+        // liess, geht den neuen nichts an.
+        if proc.map_page_zero(state, me, p, true, (prot & PROT_EXEC) != 0) == 0 {
             return neg(errno.E_NOMEM)
         }
         kstate.add(state, kstate.MAPS, 1)
@@ -5894,7 +5900,10 @@ fn do_map(state: u64, me: u64, len: u64, prot: u64, flags: u64,
     }
     var p: u64 = base
     while p < top {
-        if proc.map_page(state, me, p, true, (prot & PROT_EXEC) != 0) == 0 {
+        // RUNDE FREMDLAND: GENULLT -- `mmap(MAP_ANONYMOUS)` liefert
+        // Nullen, und was der vorige Besitzer des Rahmens dort liegen
+        // liess, geht den neuen nichts an.
+        if proc.map_page_zero(state, me, p, true, (prot & PROT_EXEC) != 0) == 0 {
             return neg(errno.E_NOMEM)
         }
         kstate.add(state, kstate.MAPS, 1)
@@ -6392,6 +6401,24 @@ fn do_fork(state: u64, me: u64, frame: u64) -> u64 {
     // eines `fork`-Kindes nicht wachsen -- ein Fehler, der erst beim
     // ersten tiefen Aufruf im Kind sichtbar wuerde.
     sched.tset(state, child, sched.T_USTACK, sched.tget(state, me, sched.T_USTACK))
+    // RUNDE FREMDLAND, UND DAS WAR EIN ECHTER FEHLER SEIT LAUFZEIT.
+    // Das Kind erbt die FS-BASIS, also seinen Fadenzeiger.
+    //
+    // GEMESSEN, bevor diese Zeile stand: `busybox sh -c 'seq 5 | sort'`
+    // starb im ZWEITEN Glied der Roehre mit #GP auf `hlt` mitten in
+    // musls `alloc_slot` -- das ist musls `a_crash()`, die Prueffrage
+    // seiner Halde. Der Grund war nicht die Halde. `arch_prctl` legt die
+    // Basis in `T_FSBASE`, `fork` kopierte sie nicht, das Kind bekam
+    // also 0 -- und `sched.fsbase_apply` laesst bei 0 ABSICHTLICH die
+    // Basis des vorigen Fadens stehen (fuer Osum-eigene Programme, die
+    // %fs nie anfassen, ist das richtig). Fuer ein musl-Kind heisst es:
+    // sein `%fs:0` zeigte in den Adressraum eines FREMDEN Prozesses.
+    //
+    // Der erste Zweig einer Roehre lief deshalb (er war ein Kind, das
+    // gleich `execve` rief und dabei einen frischen Zeiger setzte), der
+    // zweite starb -- er las durch den Zeiger, bevor er ihn setzte.
+    sched.tset(state, child, sched.T_FSBASE,
+        sched.tget(state, me, sched.T_FSBASE))
     // The context the child comes back on. `proc.resume_start` hands this
     // copy to `user_resume` in isr.s.
     let ctx: u64 = state + kstate.CTX_OFF + child * F_BYTES
@@ -6508,6 +6535,15 @@ fn do_execve(state: u64, me: u64, frame: u64, path: u64, argv: u64) -> u64 {
     proc.discard(state, t)
     sched.tset(state, me, sched.T_ENTRY, entry)
     sched.tset(state, me, sched.T_USTACK, ustack)
+    // RUNDE FREMDLAND: UND DER FADENZEIGER GEHT AUF NULL.
+    // Aus demselben Grund wie die Signalroutinen und MXCSR weiter oben:
+    // die FS-Basis des ALTEN Abbilds zeigt in Speicher, den es nach
+    // diesem Aufruf nicht mehr gibt. Das neue Abbild setzt sich seine
+    // eigene mit `arch_prctl`, bevor es irgendetwas durch %fs liest --
+    // bliebe die alte stehen, laese ein Programm, das (wie jedes
+    // Osum-eigene) %fs nie anfasst, im Fehlerfall durch einen Zeiger
+    // auf fremde Seiten.
+    sched.tset(state, me, sched.T_FSBASE, 0)
     sched.tset(state, me, sched.T_BRK, 0)
     sched.tset(state, me, sched.T_MMAP, 0)
     sched.tset(state, me, sched.T_BIG, 0)
