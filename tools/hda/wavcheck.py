@@ -31,6 +31,7 @@ sie mit einem grep holen kann):
 Verwendung:
     wavcheck.py datei.wav [--hz 440] [--zweite 660] [--rate 48000]
                           [--schwelle 64] [--nur-rms] [--luecke-still]
+                          [--von-ms N] [--bis-ms N]
 """
 import argparse
 import array
@@ -57,6 +58,22 @@ def main():
     ap.add_argument("--schwelle", type=int, default=64)
     ap.add_argument("--nur-rms", action="store_true")
     ap.add_argument("--luecke-still", action="store_true")
+    # RUNDE TON-2: NUR EIN FENSTER MESSEN, in Millisekunden ab dem
+    # ersten Ton.
+    #
+    # WARUM ES DAS BRAUCHT: laufen zwei Programme nebeneinander und
+    # endet eines frueher, steht am Dateiende die STILLE des laengeren
+    # allein -- `catch_up` in kernel/audio.fi holt den Schreibzeiger
+    # dann auf die Position und nullt den Rest, und das ist der
+    # dokumentierte Entwurf und kein Fehler. Ueber die GANZE Datei
+    # gemessen ist dieses Ende eine "Luecke", die keine ist. Wer die
+    # Mischung pruefen will, misst das Fenster, in dem BEIDE spielen.
+    #
+    # Dasselbe umgekehrt fuer einen kurzen Systemklang: 180 ms in
+    # einer 5-Sekunden-Datei mittelt eine Auswertung ueber alles auf
+    # ein Dreissigstel herunter.
+    ap.add_argument("--von-ms", type=int, default=0)
+    ap.add_argument("--bis-ms", type=int, default=0)
     a = ap.parse_args()
 
     try:
@@ -78,6 +95,13 @@ def main():
         print("nutz=0 gaps=0 still=0 luecke_rest=0 max=0 min=0 rms=0 peak_hz=0 p1=0 p2=0")
         return 0
     lo, hi = nz[0], nz[-1]
+    if a.von_ms or a.bis_ms:
+        v = lo + a.von_ms * fr // 1000
+        b = lo + a.bis_ms * fr // 1000 if a.bis_ms else hi + 1
+        lo, hi = max(lo, v), min(hi, b - 1)
+        if hi <= lo:
+            print("fensterfehler=1")
+            return 1
     seg = links[lo:hi + 1]
     print("nutz=%d ab=%d" % (len(seg), lo))
 

@@ -143,16 +143,35 @@ const W: u64 = PAD + TW + GAP + TW + PAD // 388
 //                 und fuenfzig Schritte hintereinander kosten nichts.
 //                 Deshalb steht hier jetzt ein Schieberegler.
 //
-// UND LAUTSTAERKE STEHT WEITER NICHT DA. Nachgemessen in diesem Baum,
-// nicht angenommen: `grep -ril audio kernel/` findet zwei Treffer, und
-// beide sind Kommentare (kernel/usb.fi ueber Audioklassen, und der
-// Kopf dieser Datei). Es gibt keinen Tontreiber, keinen Mischer und
-// keine Lautstaerke, die man setzen koennte. Ein Regler dafuer bewegte
-// eine Zahl, die keinen Lautsprecher erreicht.
+// UND JETZT STEHT LAUTSTAERKE DOCH DA -- RUNDE TON-2.
+//
+// Der Satz von damals stimmte, als er geschrieben wurde: "es gibt
+// keinen Tontreiber, keinen Mischer und keine Lautstaerke, die man
+// setzen koennte". Seit Runde MEDIA1 gibt es einen Treiber (AC97),
+// seit Runde HDA einen zweiten und einen Mischer mit Lautstaerke JE
+// STROM, und seit Runde TON einen Master samt Stummschaltung
+// (`audset AS_VOLUME`, `AS_MUTE`). Die Begruendung ist damit
+// hinfaellig, und die Regel dieser Datei -- nur was WIRKLICH da ist --
+// verlangt jetzt das Gegenteil: der Regler gehoert hierher.
+//
+// NACHGEMESSEN UND NICHT ANGENOMMEN, wie es der Kopf dieser Datei
+// vorschreibt: `kernel/audio.fi` und `kernel/mix.fi` sind da,
+// `audio.set_volume` schreibt `L_MASTER`, und `A_VOLGEN` zaehlt jede
+// Aenderung mit -- damit dieses Panel weiss, wann es neu malen muss,
+// ohne in einer Schleife zu fragen.
+//
+// DER MASTER IST LINEAR IN PROZENT, 0..100, und er wird auf die
+// ABTASTWERTE angewandt und nicht auf den Verstaerker des Codecs
+// (Runde TON hat das umgestellt). Deshalb wirkt er auf BEIDE Wege --
+// Einstrom wie Mischer -- und auf jeder Maschine gleich.
 const TOP2: u64 = PAD + 3 * TH + 2 * GAP // unter den sechs Kacheln
 const SLY: u64 = TOP2 + GAP // der Helligkeitsregler
 const SLH: u64 = 34
-const BAY: u64 = SLY + SLH + GAP // der Akkustand
+// RUNDE TON-2: der Lautstaerkeregler, eine Zeile unter der Helligkeit.
+// Gleiche Hoehe, gleiche Rinne, gleicher Griff -- zwei Regler
+// untereinander, die verschieden aussehen, sind zwei Regler zu viel.
+const VLY: u64 = SLY + SLH + GAP
+const BAY: u64 = VLY + SLH + GAP // der Akkustand
 const L1Y: u64 = BAY + FH + GAP // Verknuepfung: Aufgabenverwaltung
 const L2Y: u64 = L1Y + FH + GAP // Verknuepfung: Alle Einstellungen
 const H: u64 = L2Y + FH + PAD
@@ -185,6 +204,17 @@ const PG_BATPRESENT: u64 = 24
 const PG_BATPERCENT: u64 = 25
 const PG_BATSTATE: u64 = 27
 const PS_PROFILE: u64 = 0
+// RUNDE TON-2: die Tonschnittstelle. Dieselben Nummern wie in
+// /bin/play und kernel/sys.fi -- kein zweiter Weg zu derselben Sache.
+const SYS_AUDGET: u64 = 1850
+const SYS_AUDSET: u64 = 1851
+const A_VOLUME: u64 = 4
+const A_MUTED: u64 = 21
+const A_READY: u64 = 0
+const A_VOLGEN: u64 = 44
+const AS_VOLUME: u64 = 0
+const AS_MUTE: u64 = 2
+
 const SYS_TILEGET: u64 = 1820
 const SYS_TILEDO: u64 = 1821
 const TL_ON: u64 = 0
@@ -242,6 +272,7 @@ static mut k_on: [u8; 6] = "qs.on\0"
 static mut k_off: [u8; 7] = "qs.off\0"
 static mut k_na: [u8; 6] = "qs.na\0"
 static mut k_bright: [u8; 10] = "qs.bright\0"
+static mut k_volume: [u8; 10] = "qs.volume\0"
 static mut k_bat: [u8; 11] = "qs.battery\0"
 static mut k_nobat: [u8; 13] = "qs.nobattery\0"
 static mut k_chg: [u8; 12] = "qs.charging\0"
@@ -304,6 +335,16 @@ static mut s_sx: [u8; 4] = " x=\0"
 static mut s_hell: [u8; 15] = "qs: hell auf =\0"
 static mut s_druck: [u8; 13] = "qs: druck x=\0"
 static mut s_hellist: [u8; 14] = "qs: hell ist=\0"
+// RUNDE TON-2: dieselbe Bauart wie die Helligkeitszeile -- ein
+// Pruefstand liest diese Zeilen und muss nicht raten, was gemalt wurde.
+static mut s_volist: [u8; 13] = "qs: vol ist=\0"
+static mut s_vomute: [u8; 8] = " stumm=\0"
+static mut s_vol: [u8; 9] = "qs: vol=\0"
+static mut s_geo: [u8; 11] = "qs: geo x=\0"
+static mut s_gy2: [u8; 4] = " y=\0"
+static mut s_gw: [u8; 4] = " w=\0"
+static mut s_gh: [u8; 4] = " h=\0"
+static mut s_mute: [u8; 10] = "qs: mute=\0"
 
 fn say(p: u64) {
     ulib.say(p)
@@ -678,6 +719,22 @@ fn place() {
     }
     px_ = x
     py_ = y
+    // RUNDE TON-2: WO DAS PANEL STEHT, auf der Leitung.
+    //
+    // Ohne diese Zeile ist jedes Bildschirmfoto des Panels eine
+    // Suchaufgabe: die Texte melden PANEL-Koordinaten (`qs: text x=10
+    // y=320`), das Bild hat BILDSCHIRM-Koordinaten, und der Ursprung
+    // stand nirgends. Ein Pruefer, der ihn raten muss, misst
+    // irgendwann die falsche Stelle und glaubt das Ergebnis.
+    say((&s_geo[0 as usize]) as u64)
+    ulib.sayn(px_)
+    say((&s_gy2[0 as usize]) as u64)
+    ulib.sayn(py_)
+    say((&s_gw[0 as usize]) as u64)
+    ulib.sayn(W)
+    say((&s_gh[0 as usize]) as u64)
+    ulib.sayn(H)
+    ulib.nl()
     if open_ != 0 {
         let _m: u64 = wlibc.sys3w(wlibc.WM_MOVE, w_h, (px_ << 16) | py_, 0)
     }
@@ -921,6 +978,56 @@ fn click(x: u64, y: u64) {
         paint(true)
         return
     }
+    // RUNDE TON-2: DER LAUTSTAERKEREGLER. Die Stelle des Klicks IST
+    // der Wert, genau wie bei der Helligkeit darueber und aus
+    // demselben Grund: das Panel schliesst sich bei einem Druck
+    // ausserhalb, ein Ziehen ueber den Rand waere so ein Druck.
+    //
+    // EIN KLICK AUF DIE BESCHRIFTUNG (links von der Rinne) SCHALTET
+    // STUMM. Das ist die Klickfaehigkeit, die der Auftrag verlangt,
+    // und sie sitzt da, wo sonst nichts passiert -- ein eigener Knopf
+    // haette die Zeile schmaler gemacht als die Helligkeitszeile
+    // darueber.
+    if y >= VLY && y < VLY + SLH {
+        if ulib.sys(SYS_AUDGET, A_READY, 0, 0) != 1 {
+            return
+        }
+        if x < SL_X {
+            let an: u64 = ulib.sys(SYS_AUDGET, A_MUTED, 0, 0)
+            var neu: u64 = 1
+            if an == 1 {
+                neu = 0
+            }
+            let rc: u64 = ulib.sys(SYS_AUDSET, AS_MUTE, neu, 0)
+            say((&s_mute[0 as usize]) as u64)
+            ulib.sayn(neu)
+            say((&s_rc[0 as usize]) as u64)
+            ulib.sayn(rc)
+            ulib.nl()
+            paint(true)
+            return
+        }
+        let spur: u64 = W - PAD - SL_X
+        var rel: u64 = x - SL_X
+        if rel > spur {
+            rel = spur
+        }
+        let v: u64 = rel * 100 / spur
+        let rc: u64 = ulib.sys(SYS_AUDSET, AS_VOLUME, v, 0)
+        // WER DIE LAUTSTAERKE ZIEHT, WILL SIE HOEREN. Stumm bleibt
+        // stumm waere hier die falsche Treue zum Zustand: das Ziehen
+        // IST die Ansage, dass wieder Ton kommen soll.
+        if v > 0 && ulib.sys(SYS_AUDGET, A_MUTED, 0, 0) == 1 {
+            ulib.sys(SYS_AUDSET, AS_MUTE, 0, 0)
+        }
+        say((&s_vol[0 as usize]) as u64)
+        ulib.sayn(v)
+        say((&s_rc[0 as usize]) as u64)
+        ulib.sayn(rc)
+        ulib.nl()
+        paint(true)
+        return
+    }
     if y >= L1Y && y < L1Y + FH {
         let pid: u64 = ulib.sys(ulib.SYS_SPAWN,
             (&p_taskmgr[0 as usize]) as u64, 0, 0)
@@ -1094,6 +1201,61 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
                 wlibc.theme(wlibc.T_PANEL), lb)
             say((&s_hellist[0 as usize]) as u64)
             ulib.sayn(v)
+            say((&s_sx[0 as usize]) as u64)
+            ulib.sayn(kx)
+            ulib.nl()
+        }
+    }
+    // ------------------------------------------------ RUNDE TON-2:
+    // DER LAUTSTAERKEREGLER. Gebaut wie der Helligkeitsregler darueber,
+    // Bildpunkt fuer Bildpunkt, und aus denselben Themenmarken --
+    // T_SCROLL fuer die Rinne, T_ACCENT fuer den gefuellten Teil,
+    // T_BTN fuer den Griff, T_LINE fuer die Kante. Kein fester
+    // Farbwert, kein eigener Zeichenweg.
+    //
+    // IST STUMM GESCHALTET, wird die Rinne NICHT gefuellt und der
+    // Wert in der gedaempften Farbe geschrieben: "stumm bei 70" ist
+    // ein anderer Zustand als "auf null gedreht", und ein Regler, der
+    // beides gleich zeigt, verschweigt den Unterschied.
+    if VLY + SLH > y0 && VLY < y0 + hh {
+        let lb: u64 = msg.get((&k_volume[0 as usize]) as u64)
+        let base: u64 = VLY + (SLH + asc) / 2 - 1
+        let da: bool = ulib.sys(SYS_AUDGET, A_READY, 0, 0) == 1
+        var vfg: u64 = wlibc.theme(wlibc.T_FG)
+        if !da {
+            vfg = wlibc.theme(wlibc.T_DIM)
+        }
+        let _h2: u64 = wlibc.text_at(wlibc.F_UI, wlibc.px_ui(), PAD, base,
+            lb, tlen(lb), vfg)
+        let spur: u64 = W - PAD - SL_X
+        let mitte: u64 = VLY + SLH / 2
+        wlibc.rect(SL_X, mitte - 2, spur, 4, wlibc.theme(wlibc.T_SCROLL))
+        var v: u64 = 0
+        var stumm: bool = false
+        if da {
+            v = ulib.sys(SYS_AUDGET, A_VOLUME, 0, 0)
+            if v > 100 {
+                v = 100
+            }
+            stumm = ulib.sys(SYS_AUDGET, A_MUTED, 0, 0) == 1
+        }
+        let kx: u64 = SL_X + v * (spur - SL_KN) / 100
+        if !stumm && v > 0 {
+            wlibc.rect(SL_X, mitte - 2, kx - SL_X, 4,
+                wlibc.theme(wlibc.T_ACCENT))
+        }
+        wlibc.rect(kx, mitte - 8, SL_KN, 16, wlibc.theme(wlibc.T_BTN))
+        wlibc.frame(kx, mitte - 8, SL_KN, 16, wlibc.theme(wlibc.T_LINE))
+        if report && VLY >= y0 && VLY < y0 + hh {
+            say_text(PAD, base, vfg, wlibc.theme(wlibc.T_PANEL), lb)
+            say((&s_volist[0 as usize]) as u64)
+            ulib.sayn(v)
+            say((&s_vomute[0 as usize]) as u64)
+            if stumm {
+                ulib.sayn(1)
+            } else {
+                ulib.sayn(0)
+            }
             say((&s_sx[0 as usize]) as u64)
             ulib.sayn(kx)
             ulib.nl()
