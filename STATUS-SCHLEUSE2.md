@@ -309,3 +309,120 @@ zu finden. Drei Schritte, jeder mechanisch:
 
 Der ganze Weg von „hängt" bis „Zeile gefunden" dauerte etwa eine
 Stunde und braucht keinen Debugger.
+
+---
+
+## 7. RUNDE SCHLEUSE-3 — ein flacher Verteiler je Funktion
+
+Der geschachtelte Erzeuger aus Abschnitt 6 war korrekt, aber
+**unbaubar**: `firncs` `escape`-Durchgang ist exponentiell in der
+Blocktiefe (Messreihe in `/root/osum-roadmap/FIRN-ESCAPE-TIEFE.md`).
+Bei 25 Ebenen lief der SQLite-Bau 1,5 Stunden bei 682 MB — ohne
+Ergebnis.
+
+### Die Form
+
+Statt Blöcke zu schachteln, wird jeder Funktionsrumpf **ein
+Zustandsautomat** (`tools/wasm2firn/flach.py`):
+
+```firn
+var fall: u64 = 0
+while true {
+    match fall {
+        0 => { …  fall = 3  continue }
+        1 => { …  break }
+        _ => { break }
+    }
+}
+```
+
+Jede WASM-Blockebene bekommt **zwei** Marken — `beginn` (Anfang ihres
+Rumpfes) und `ende` (hinter ihrem `end`). Damit ist `br k` in jedem
+Fall nur eine Zuweisung, und die Kernunterscheidung von WASM steht in
+**einer Zeile**:
+
+> `br` auf einen `block` → `ende`.  `br` auf eine `loop` → `beginn`.
+
+Genau diese Unterscheidung war der Fehler Nr. 5 aus Abschnitt 6. In der
+flachen Form ist sie nicht mehr zu verwechseln.
+
+`firnc` Stufe 0 kann `match` mit Zahlliteralen, und `break`/`continue`
+tragen aus einem `match`-Arm heraus zur umgebenden Schleife —
+beides vorher an Minimalprogrammen nachgemessen.
+
+### Was das bringt
+
+| | vorher (geschachtelt) | jetzt (flach) |
+|---|---:|---:|
+| Blocktiefe der **erzeugten** Funktionen | bis 25 | **4** (alle 1340) |
+| `firnc` für `sqlite.fi` | **> 1,5 h, nie fertig** | **79 s** |
+| `wasm2firn` selbst | 4,6 s | 3 s |
+
+Gegenprobe mit gleicher Codemenge (~9 000 Anweisungen): flach **1 s**,
+22 Ebenen tief **über 30 Minuten**. Nicht die Menge ist das Problem,
+sondern allein die Tiefe.
+
+### Der zweite große Posten: Speicherzugriffe
+
+Eine Stichprobe des Rückverfolgungsstapels im laufenden SQLite landete
+fast immer in `mem_ld32`/`mem_ld64`/`mem_st64`. Der Grund: ein
+`i32.load` war **vier** Einzelbyte-Ladungen mit Schieben und Verodern,
+ein `i64.load` acht.
+
+x86 kann unausgerichtet zugreifen, und Firn lässt den Zeigerzugriff zu
+(nachgemessen). Jetzt ist es **ein** Maschinenbefehl:
+
+```firn
+fn mem_ld32(at: u64) -> u64 {
+    mem_pruef(at, 4)                      // die Grenzprüfung BLEIBT
+    let w: u32 = *((mem_p + at) as *mut u32)
+    return w as u64
+}
+```
+
+`pruefung/mem.wat` wurde um **8 Fälle mit unausgerichteten Adressen**
+erweitert — genau das Risiko dieser Änderung.
+
+### Ein alter Fehler, den erst der flache Bau sichtbar machte
+
+`firnc` brach mit `unknown function 'tab_ruf_5'` ab: ein
+`call_indirect` kann einen Typ nennen, der in **keinem**
+Tabelleneintrag vorkommt (SQLite tut das). Der geschachtelte Bau hat
+diese Stelle nie erreicht, weil er vorher in der Tiefe hängen blieb.
+Solche Typen bekommen jetzt einen Verteiler, der die WASM-Falle
+auslöst.
+
+### Abnahme
+
+* `sqlite.bin` läuft auf Osum. Ausgabe **zeichengleich** mit
+  `beleg-schleuse2-deuter-sqlite.txt` (`diff` leer) — sowohl
+  unoptimiert als auch mit `--opt-level=release-fast`.
+* Prüfung: **10 Dateien, 94 Fälle**, alle grün, Deuter = AOT.
+* `hallo`, `hello2`, `schleife`, `prim`, `dateitest`: alle gleich.
+
+### Tempo
+
+`prim.wasm` — der in `HERKUNFT.md` ausgewiesene Tempo-Bench,
+derselbe Algorithmus liegt als C für den nativen Vergleich bei.
+
+| Grenze | nativ | AOT | Deuter |
+|---|---:|---:|---:|
+| 2 000 000 | 712 ms | **1 533 ms (2,15×)** | — |
+| 200 000 | 29 ms | 132 ms (4,6×) | 7 703 ms (265×) |
+
+**Faktor 2,15 gegenüber nativem C** bei echter Rechenlast — das Ziel
+war ≤ 3×, der Deuter lag bei 158×. Bei der kleinen Grenze dominiert der
+Programmstart, deshalb sieht der Faktor dort schlechter aus; die
+Aussage steckt in der großen Messung.
+
+### Offen: eine Lücke der WASI-Schicht, nicht des Übersetzers
+
+Ein Bench mit 20 000 Zeilen **auf Platte** liefert 0 Zeilen — in
+**Deuter und AOT gleichermaßen**. Ursache: `kernel/app/wasm.fi` gibt
+für `fd_pread`/`fd_pwrite` bewusst `ENOSYS` zurück (Osum hat kein
+`pread`/`pwrite`). Sobald eine Datenbank größer wird als der
+Seitenpuffer, braucht SQLite genau diese beiden. Mit `:memory:` oder
+kleiner Datenbank läuft alles.
+
+Das ist die nächste echte Lücke, wenn SQLite auf Osum ernsthaft
+benutzt werden soll — und sie liegt im Kern, nicht im Übersetzer.
