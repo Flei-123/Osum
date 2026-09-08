@@ -451,6 +451,44 @@ def turm_messen(code, at):
     return n, l.at
 
 
+# Verlaesst IRGENDEIN Sprung diese Blockebene -- sie selbst oder eine
+# weiter aussen? Dann muss der Block eine `while true` sein, denn nur
+# aus einer Schleife traegt `break`. Ein nackter `{ }` wuerde das
+# `break` an die naechste umgebende Schleife weiterreichen und den Rest
+# des Blocks ueberspringen (siehe Kommentar an der Aufrufstelle).
+def _block_hat_sprung(b, at):
+    tiefe = 0
+    l = Leser(b, at)
+    n = len(b)
+    while l.at < n:
+        op = l.u8()
+        if op in (0x02, 0x03, 0x04):
+            l.sleb()
+            tiefe += 1
+        elif op == 0x0B:
+            if tiefe == 0:
+                return False
+            tiefe -= 1
+        elif op == 0x05:
+            pass
+        elif op in (0x0C, 0x0D):
+            if l.uleb() >= tiefe:
+                return True
+        elif op == 0x0E:
+            k = l.uleb()
+            treffer = False
+            for _ in range(k):
+                if l.uleb() >= tiefe:
+                    treffer = True
+            if l.uleb() >= tiefe:
+                treffer = True
+            if treffer:
+                return True
+        else:
+            _ueberlesen(l, op)
+    return False
+
+
 class Fehler(Exception):
     pass
 
@@ -634,7 +672,19 @@ class Erzeuger:
                     # deshalb zu einem EINMAL durchlaufenen `while`,
                     # der nur dann entsteht, wenn wirklich jemand
                     # herausspringt -- sonst gar nichts.
-                    b.schleife = self.block_braucht_schleife(l.b, l.at)
+                    # FALLSTRICK, teuer bezahlt: ein nackter Firn-Block
+                    # `{ }` schluckt kein `break`. Springt IRGENDWER von
+                    # innen ueber diese Ebene hinweg nach aussen, laeuft
+                    # sein `break` in die naechste UMGEBENDE Schleife und
+                    # ueberspringt den Rest dieses Blocks. Genau daran
+                    # ist dateitest.wasm gestorben: `path_open` wurde nie
+                    # gerufen, weil ein `br 1` den umgebenden Block mit
+                    # verlassen hat.
+                    #
+                    # Deshalb wird ein `block` NUR dann nackt erzeugt,
+                    # wenn aus ihm heraus GAR NICHT gesprungen wird --
+                    # weder auf ihn selbst noch an ihm vorbei.
+                    b.schleife = self.block_hat_sprung(l.b, l.at)
                     if b.schleife:
                         self.e(tiefe - 1, 'while true {')
                     else:
@@ -1172,6 +1222,9 @@ class Erzeuger:
     def block_braucht_schleife(self, b, at):
         return _block_braucht_schleife(b, at)
 
+    def block_hat_sprung(self, b, at):
+        return _block_hat_sprung(b, at)
+
     # ------------------------------------- toten Code ueberspringen
     #
     # Nach `br`/`return`/`unreachable` ist der Rest des Blocks nicht
@@ -1484,7 +1537,7 @@ def start_erzeugen(m, name):
     o.append('    // Gast NICHT als Argument untergeschoben wird.')
     o.append('    if wasi_argc > 1 {')
     o.append('        let a1: u64 = rt.arg_ptr(start, wasi_argc - 1)')
-    o.append('        if rt.c_length(a1) == 7 && rt.ld8(a1, 0) == 45 as u8')
+    o.append('        if rt.c_length(a1) == 6 && rt.ld8(a1, 0) == 45 as u8')
     o.append('            && rt.ld8(a1, 1) == 45 as u8 {')
     o.append('            wasi_spur = true')
     o.append('            wasi_argc = wasi_argc - 1')
