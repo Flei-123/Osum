@@ -59,6 +59,36 @@ macht, steht es in der Zeile.
 
 ---
 
+## NACHTRAG 30.08.2026 -- DIE ZEILE "WLAN"
+
+Die Zeile **WLAN** in der Tabelle oben sagt in allen drei Spalten
+dasselbe: nichts, nichts, "ALLES: 802.11-MAC, Firmwareladen, Netzwahl,
+WPA2/3-Supplicant, Regulatorik". Runde WLAN (Zweig `wlan`, 30.08.2026)
+hat davon einen Teil abgearbeitet, und die Zeile ist deshalb so zu
+lesen:
+
+| | |
+|---|---|
+| **Was es jetzt gibt** | `lib/wlan/` (Rahmen, Beacon, Kanal/Regulatorik, WPA-Handschlag, CCMP, Zustandsautomat) und `lib/crypto/sha1.fi` + `lib/crypto/aes.fi`. Zusammen 3.842 Zeilen, 184 Zusagen gruen (`tools/wlan/run.sh`, Abschnitt 32) |
+| **Was weiter fehlt** | **DER TREIBER.** PCI-Anbindung, Firmwareladen, Kommando- und Empfangsringe, Interrupts, die Kommando-API der Firmware. Dazu SAE (die WPA3-Anmeldung) und 802.11w |
+| **Was das heisst** | **Osum verbindet sich NICHT mit einem WLAN.** Es gibt keine Karte, die es ansprechen koennte |
+
+**UND DER SATZ, DER DAZUGEHOERT:** das Fehlende laesst sich auf diesem
+Rechner nicht einmal ansatzweise pruefen. QEMU 7.2.22 hat **NULL**
+802.11-Geraete -- gemessen mit `qemu-system-x86_64 -device help`, und
+`tools/wlan/run.sh` misst es bei jedem Lauf neu nach. Der naechste
+Schritt ist deshalb nicht "den Treiber schreiben", sondern **eine
+AX200-Karte in Reichweite dieses Rechners bringen**; sonst waere der
+Treiber genau die Art von Behauptung, die Runde HWNET beim RTL8168 zu
+Recht abgelehnt hat (siehe den Abschnitt darueber weiter unten).
+
+Alles Weitere -- welche Chips, welche Firmware unter welcher Lizenz,
+wieviele Zeilen der Treiber realistisch hat, was in QEMU pruefbar ist
+und was nicht, und wie weit der Weg damit wirklich ist -- steht in
+**`docs/WLAN-BEFUND.md`**.
+
+---
+
 ## WIE DIESE ZAHLEN ZUSTANDE KAMEN
 
 * Netzwerktreiber vorher: `grep -rln 'e1000\|8139\|rtl8\|igb\|ixgbe' --include=*.fi kernel/` → nur `nvme.fi`, `pci.fi`, `virtio.fi`, und in den ersten beiden sind es Konstanten. Netzkartentreiber: **genau einer**.
