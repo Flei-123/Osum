@@ -60,9 +60,36 @@ Erweiterung erübrigt sich — der ausführliche Befund steht in Abschnitt 2.
 
 ---
 
-## 1. Stand der Arbeit
+## 1. TEMPO — die Zahl, um die es ging
 
-Läuft. Zahlen folgen in dieser Datei, sobald gemessen.
+Derselbe Bench wie in SCHLEUSE: `prim.wasm` (Rust, Primzahlen per
+Probedivision), Grenze 500000. **Alle drei liefern 41538** — sonst wäre der
+Vergleich wertlos.
+
+| | Zeit | Faktor gegen nativ |
+|---|---|---|
+| Firn/Rust **nativ** | 0,100 s | **1,00×** |
+| **AOT (`wasm2firn` + `firnc`)** | **0,214 s** | **2,14×** |
+| Deuter aus SCHLEUSE | 15,99 s | 159,9× |
+
+**Der AOT-Weg ist 74,7× schneller als der Deuter** und liegt bei **2,14×**
+gegen nativ. Das Ziel war „unter 5×"; `wasm2c` selbst erreicht ~2,0×, wir
+liegen also auf dem Stand der Technik.
+
+Damit ist die These der Runde belegt: Die 158× des Deuters kamen aus dem
+**Deuten** (Oktett lesen, verteilen, Stapel im Speicher bewegen) plus Firns
+Prüfarithmetik — nicht aus etwas Unvermeidlichem an WASM.
+
+### Übersetzungszeiten
+
+| Schritt | Zeit |
+|---|---|
+| `wasm2firn` für `sqlite.wasm` (1,34 MB → 664 310 Zeilen Firn) | **4,6 s** |
+| `firnc` für `hallo` (1240 Zeilen) | 0,4 s |
+| `firnc` für `hello2` (27 046 Zeilen) | 123,7 s |
+| `firnc` für `prim` (33 900 Zeilen) | 165,2 s |
+
+Der Übersetzer ist **nicht** der langsame Teil — `firnc` ist es.
 
 ---
 
