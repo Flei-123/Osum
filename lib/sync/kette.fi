@@ -1,0 +1,535 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/sync/kette.fi -- RUNDE SYNC: die Schluesselkette und der
+// versiegelte Block.
+//
+// Diese Datei ist der KERN der Runde. Alles, was danach kommt --
+// Abgleich, Tresor, drei Anbieter --, ist Buchhaltung um das herum, was
+// hier steht. Sie rechnet nur; sie liest keine Datei, oeffnet keine
+// Verbindung und kennt kein Betriebssystem. Deshalb kann sie vom
+// gehosteten Testprogramm auf dem Wirt UND von den Programmen in Ring 3
+// gebunden werden, und deshalb ist sie gegen Python messbar.
+//
+// ========================================================== DIE KETTE
+//
+//   Passphrase --scrypt--> HAUPTSCHLUESSEL --HKDF--> fuenf Unterschluessel
+//
+// EIN Hauptschluessel je Konto. Er wird NIE benutzt, um etwas zu
+// verschluesseln; er ist nur das, woraus die anderen kommen. Das ist
+// nicht Vorsicht um ihrer selbst willen: die Unterschluessel gehen an
+// verschiedene Verfahren (ein AEAD, ein MAC, ein Namensbildner), und ein
+// Schluessel, der in zwei Verfahren steckt, ist eine Annahme darueber,
+// dass die beiden einander nicht ins Gehege kommen.
+//
+//     0  INHALT   verschluesselt den Blockinhalt (XChaCha20-Poly1305)
+//     1  NAME     bildet den Namen, den der Server zu sehen bekommt
+//     2  SIEGEL   beglaubigt den Wurzelzeiger (Schutz gegen Rueckschritt)
+//     3  TRESOR   die Geheimnisse -- eigener Schluessel, eigene Freigabe
+//     4  PRUEF    KEIN Schluessel, sondern ein Erkennungswert: er steht
+//                 im Kopf des Speichers, und daran wird eine falsche
+//                 Passphrase in der ersten Sekunde abgewiesen, statt
+//                 dass irgendwo Muell entschluesselt wird.
+//
+// DER GERAETESCHLUESSEL GEHOERT NICHT HIERHER. Ed25519 in `system/`
+// beweist, WELCHES GERAET spricht; die Passphrase oeffnet die DATEN. Wer
+// beides zusammenlegt, hat ein System, in dem ein gestohlenes Geraet die
+// Daten aufmacht oder in dem ein neues Geraet nicht mehr an die eigenen
+// Daten kommt. Beides ist falsch, also sind es zwei Dinge.
+//
+// ============================================ DIE FALLE MIT DEN HASHES
+//
+// Ein inhaltsadressierter Speicher nennt einen Block bei seinem Hash.
+// Das ist bequem und es ist -- in dieser einfachen Form -- ein LECK, und
+// zwar das groesste der ganzen Runde:
+//
+//     Der Server sieht `sha256(P)`. Wer eine Datei VERMUTET, rechnet
+//     ihren Hash aus und sucht ihn in der Liste. Er braucht kein
+//     Passwort, keinen Schluessel und keine Rechenzeit. Der Speicher
+//     beantwortet damit die Frage "hat dieser Mensch GENAU DIESE Datei"
+//     fuer jede Datei, die der Fragende beschaffen kann.
+//
+// Das ist der bekannte Angriff gegen konvergente Verschluesselung
+// (confirmation-of-a-file). Deshalb ist der Name hier
+//
+//     NAME = HMAC-SHA256(K_NAME, P)
+//
+// und nicht `sha256(P)`. Ein Angreifer ohne K_NAME kann den Namen einer
+// vermuteten Datei nicht ausrechnen, und die Doppelspeicherung innerhalb
+// EINES Kontos bleibt trotzdem erhalten, weil derselbe Klartext denselben
+// Namen ergibt. Der Preis steht ehrlich in `docs/RUNDE-SYNC.md`: zwei
+// Konten teilen sich keine Bloecke mehr.
+//
+// `block_name_naiv` steht absichtlich daneben. Sie ist die falsche
+// Fassung, sie wird von nichts benutzt ausser vom Testlauf, und
+// `tools/sync/run.sh` Abschnitt (c) fuehrt mit ihr den Angriff vor und
+// zeigt, dass er mit `block_name` nicht mehr geht. Eine Gefahr, die man
+// nur beschreibt, ist eine Behauptung.
+//
+// ========================================== DER BLOCK UND SEIN SIEGEL
+//
+//     kb    = HMAC-SHA256(K_INHALT, name)              Schluessel des Blocks
+//     nonce = HMAC-SHA256(K_INHALT, "nonce" || name)[0..24]
+//     C||T  = XChaCha20-Poly1305(kb, nonce, AAD = name, P)
+//
+// WARUM SCHLUESSEL UND NONCE AUS DEM NAMEN KOMMEN, obwohl "Nonce =
+// Zufall" die Regel ist: weil der Name eine Funktion des Klartextes ist.
+// Zwei Bloecke mit demselben Schluessel-Nonce-Paar sind hier BUCHSTAEBLICH
+// DIESELBEN OKTETTE -- der Strom wird nur auf der Nachricht wiederholt,
+// die er schon verschluesselt hat. Ein Zufalls-Nonce wuerde nichts
+// hinzufuegen und die Doppelspeicherung zerstoeren, die der einzige
+// Grund fuer einen inhaltsadressierten Speicher ist. Die Bedingung, unter
+// der das gilt, steht damit hier und nicht im Kopf des Autors: DER NAME
+// DARF NIE VON ETWAS ANDEREM ALS DEM KLARTEXT ABHAENGEN.
+//
+// DAS AAD IST DER NAME. Damit ist ein Block an seinen Platz gebunden: ein
+// Server, der Block A unter dem Namen von Block B ausliefert, wird beim
+// Oeffnen erwischt und nicht erst dann, wenn der Inhalt komisch aussieht.
+//
+// ================================================================ EHRLICH
+//
+// K1 SELBST GESCHRIEBEN IST: scrypt (`lib/crypto/scrypt.fi`), HKDF
+//    (`lib/crypto/hkdf.fi`), diese Datei und der Wiederherstellungscode.
+//    NICHT von dieser Runde: SHA-256/HMAC (Runde TRESOR, gegen
+//    `hashlib`), XChaCha20-Poly1305 (Runde TUNNEL, gegen RFC 8439). Alles
+//    Neue laeuft in `tools/sync/vectors.py` gegen eine zweite Umsetzung,
+//    die nicht aus diesem Baum stammt (Pythons `hashlib.scrypt`,
+//    `hmac`, und libsodium ueber PyNaCl). Was dort nicht steht, ist
+//    ungeprueft -- und es steht alles dort.
+// K2 DIE SCHLUESSEL LIEGEN IN GEWOEHNLICHEM SPEICHER, den der Aufrufer
+//    stellt. Dieser Kern hat keinen Schluesselbund und keine gepinnten
+//    Seiten. `bund_loeschen` ueberschreibt, mehr geht hier nicht -- und
+//    ob der Uebersetzer das Ueberschreiben wegoptimiert, ist NICHT
+//    geprueft. Siehe Abschnitt (h) des Testlaufs.
+// K3 KEINE SIGNATUR IM BLOCK. Ein Block ist durch seinen Namen und sein
+//    Poly1305-Siegel gebunden; WER ihn geschrieben hat, steht nicht
+//    darin. Fuer ein Konto mit einem Menschen und mehreren Geraeten
+//    reicht das (alle Geraete haben denselben Schluessel). Fuer ein
+//    geteiltes Konto reicht es nicht, und das ist hier nicht gebaut.
+
+import crypto.sha256
+import crypto.chacha
+import crypto.scrypt
+import crypto.hkdf
+
+export {
+    SALTLEN, KEYLEN, NAMELEN, TAGLEN, BUNDLEN,
+    K_INHALT, K_NAME, K_SIEGEL, K_TRESOR, K_PRUEF,
+    bund_ableiten, bund_aus_haupt, bund_key, bund_loeschen, bund_gleich,
+    block_name, block_name_naiv, block_siegeln, block_oeffnen,
+    code_schreiben, code_lesen, CODELEN,
+    geheim_siegeln, geheim_oeffnen,
+    huelle_schreiben, huelle_lesen, HUELLELEN
+}
+
+const SALTLEN: u64 = 16
+const KEYLEN: u64 = 32
+const NAMELEN: u64 = 32
+const TAGLEN: u64 = 16
+const BUNDLEN: u64 = 160 // fuenf Unterschluessel zu 32
+
+const K_INHALT: u64 = 0
+const K_NAME: u64 = 1
+const K_SIEGEL: u64 = 2
+const K_TRESOR: u64 = 3
+const K_PRUEF: u64 = 4
+
+fn ld8(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn st8(p: u64, i: u64, v: u64) {
+    *((p + i) as *mut u8) = (v & 255) as u8
+}
+
+// Ein Zeiger auf den Unterschluessel `which` im Bund.
+fn bund_key(bund: u64, which: u64) -> u64 {
+    return bund + which * KEYLEN
+}
+
+// Passphrase + Salz -> fuenf Unterschluessel, in `bund` (BUNDLEN
+// Oktette). `mem`/`memlen` ist der Arbeitsspeicher fuer scrypt; wieviel
+// noetig ist, sagt `scrypt.scrypt_need(n, r, 1)`.
+fn bund_ableiten(bund: u64, pw: u64, plen: u64, salt: u64,
+    n: u64, r: u64, mem: u64, memlen: u64) -> bool {
+    var mk: [u8; 32] = [0 as u8; 32]
+    let mkp: u64 = (&mk[0]) as u64
+    if !scrypt.scrypt(pw, plen, salt, SALTLEN, n, r, 1, mkp, KEYLEN,
+        mem, memlen) {
+        return false
+    }
+    let ok: bool = bund_aus_haupt(bund, mkp, salt)
+    // Der Hauptschluessel selbst wird nicht aufgehoben: alles darunter
+    // braucht nur die Unterschluessel, also liegt eine Sache weniger im
+    // Speicher herum.
+    var i: u64 = 0
+    while i < 32 {
+        st8(mkp, i, 0)
+        i = i + 1
+    }
+    return ok
+}
+
+// Derselbe Weg, aber mit einem Hauptschluessel, der schon da ist -- das
+// ist der Pfad des Wiederherstellungscodes: er bringt den
+// Hauptschluessel zurueck, ohne dass jemand die Passphrase kennt.
+fn bund_aus_haupt(bund: u64, mk: u64, salt: u64) -> bool {
+    var etikett: [u8; 25] = "osum sync v1 unterkette\0\0"
+    var prk: [u8; 32] = [0 as u8; 32]
+    let prkp: u64 = (&prk[0]) as u64
+    hkdf.hkdf_extract(salt, SALTLEN as usize, mk, KEYLEN as usize, prkp)
+    let r: bool = hkdf.hkdf_expand(prkp, (&etikett[0]) as u64, 23,
+        bund, BUNDLEN as usize)
+    var i: u64 = 0
+    while i < 32 {
+        st8(prkp, i, 0)
+        i = i + 1
+    }
+    return r
+}
+
+fn bund_loeschen(bund: u64) {
+    var i: u64 = 0
+    while i < BUNDLEN {
+        st8(bund, i, 0)
+        i = i + 1
+    }
+}
+
+// Konstantzeitiger Vergleich zweier Pruefwerte. Ein Vergleich, der beim
+// ersten falschen Oktett aufhoert, verraet, wie weit jemand richtig lag.
+fn bund_gleich(a: u64, b: u64, n: u64) -> bool {
+    var d: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        d = d | (ld8(a, i) ^ ld8(b, i))
+        i = i + 1
+    }
+    return d == 0
+}
+
+// ------------------------------------------------------ die Blocknamen
+
+// DER RICHTIGE: HMAC-SHA256(K_NAME, P).
+fn block_name(namekey: u64, p: u64, n: u64, out: u64) {
+    sha256.hmac(namekey, KEYLEN as usize, p, n as usize, out)
+}
+
+// DER FALSCHE, absichtlich mitgebaut: der blanke SHA-256. Wird von
+// nichts ausser dem Testlauf benutzt -- dort fuehrt er den
+// Wiedererkennungsangriff vor. Siehe den Kopf dieser Datei.
+fn block_name_naiv(p: u64, n: u64, out: u64) {
+    sha256.hash(p, n as usize, out)
+}
+
+// ------------------------------------------------------- der Blocksiegel
+
+fn block_schluessel(inhaltkey: u64, name: u64, out: u64) {
+    sha256.hmac(inhaltkey, KEYLEN as usize, name, NAMELEN as usize, out)
+}
+
+fn block_nonce(inhaltkey: u64, name: u64, out24: u64) {
+    var vor: [u8; 38] = [0 as u8; 38]
+    let vp: u64 = (&vor[0]) as u64
+    var m: [u8; 6] = "nonce\0"
+    var i: u64 = 0
+    while i < 5 {
+        st8(vp, i, ld8((&m[0]) as u64, i))
+        i = i + 1
+    }
+    i = 0
+    while i < NAMELEN {
+        st8(vp, 5 + i, ld8(name, i))
+        i = i + 1
+    }
+    var voll: [u8; 32] = [0 as u8; 32]
+    sha256.hmac(inhaltkey, KEYLEN as usize, vp, (5 + NAMELEN) as usize,
+        (&voll[0]) as u64)
+    i = 0
+    while i < 24 {
+        st8(out24, i, ld8((&voll[0]) as u64, i))
+        i = i + 1
+    }
+}
+
+// Versiegelt `n` Oktette nach `out` (n + TAGLEN Oktette) und gibt die
+// geschriebene Laenge zurueck; 0 heisst abgelehnt.
+fn block_siegeln(inhaltkey: u64, name: u64, p: u64, n: u64,
+    out: u64) -> u64 {
+    if n == 0 {
+        return 0
+    }
+    var kb: [u8; 32] = [0 as u8; 32]
+    var nc: [u8; 24] = [0 as u8; 24]
+    block_schluessel(inhaltkey, name, (&kb[0]) as u64)
+    block_nonce(inhaltkey, name, (&nc[0]) as u64)
+    chacha.xaead_seal((&kb[0]) as u64, (&nc[0]) as u64, name,
+        NAMELEN as usize, p, n as usize, out)
+    var i: u64 = 0
+    while i < 32 {
+        st8((&kb[0]) as u64, i, 0)
+        i = i + 1
+    }
+    return n + TAGLEN
+}
+
+// Oeffnet `n` Oktette (Geheimtext samt Siegel) nach `out`. `got` bekommt
+// die Klartextlaenge. `false` heisst: NICHT echt -- und dann steht in
+// `out` nichts, worauf sich jemand verlassen sollte.
+fn block_oeffnen(inhaltkey: u64, name: u64, ct: u64, n: u64,
+    out: u64, got: *mut u64) -> bool {
+    if n <= TAGLEN {
+        return false
+    }
+    var kb: [u8; 32] = [0 as u8; 32]
+    var nc: [u8; 24] = [0 as u8; 24]
+    block_schluessel(inhaltkey, name, (&kb[0]) as u64)
+    block_nonce(inhaltkey, name, (&nc[0]) as u64)
+    let ok: bool = chacha.xaead_open((&kb[0]) as u64, (&nc[0]) as u64,
+        name, NAMELEN as usize, ct, n as usize, out)
+    var i: u64 = 0
+    while i < 32 {
+        st8((&kb[0]) as u64, i, 0)
+        i = i + 1
+    }
+    if !ok {
+        return false
+    }
+    *got = n - TAGLEN
+    return true
+}
+
+// ------------------------------------------------------ ein Geheimnis
+//
+// Der Tresor ist NICHT inhaltsadressiert, und deshalb darf und muss er
+// eine ZUFAELLIGE Nonce nehmen. Der Unterschied zum Block oben ist
+// wichtig genug fuer zwei eigene Funktionen:
+//
+//   * Ein BLOCK heisst nach seinem Inhalt. Schluessel und Nonce aus dem
+//     Namen abzuleiten ist dort sicher, weil dieselbe Nonce nur denselben
+//     Klartext sieht -- und es ist noetig, sonst gibt es keine
+//     Doppelspeicherung.
+//   * Ein GEHEIMNIS heisst nach seinem Zweck ("bank"), und derselbe
+//     Zweck bekommt im Laufe eines Lebens verschiedene Werte. Eine aus
+//     dem Namen abgeleitete Nonce wuerde beim ZWEITEN Passwort denselben
+//     Strom noch einmal benutzen -- der klassische Zwei-Zeit-Block, und
+//     beide Passwoerter waeren aus ihrem XOR zu holen.
+//
+// Deshalb: Nonce vom Zufallsgeber, und der NAME als AAD, damit ein
+// vertauschtes Geheimnis auffaellt.
+fn geheim_siegeln(key: u64, nonce24: u64, aad: u64, aadlen: u64,
+    p: u64, n: u64, out: u64) -> u64 {
+    if n == 0 {
+        return 0
+    }
+    chacha.xaead_seal(key, nonce24, aad, aadlen as usize, p, n as usize, out)
+    return n + TAGLEN
+}
+
+fn geheim_oeffnen(key: u64, nonce24: u64, aad: u64, aadlen: u64,
+    ct: u64, n: u64, out: u64, got: *mut u64) -> bool {
+    if n <= TAGLEN {
+        return false
+    }
+    if !chacha.xaead_open(key, nonce24, aad, aadlen as usize, ct,
+        n as usize, out) {
+        return false
+    }
+    *got = n - TAGLEN
+    return true
+}
+
+// ------------------------------------------ der Wiederherstellungscode
+//
+// 32 Oktette Hauptschluessel + 2 Oktette Pruefsumme = 34 Oktette,
+// geschrieben in einem Alphabet von 32 Zeichen: 55 Zeichen, in elf
+// Gruppen zu fuenf, mit Bindestrichen. Also 65 Zeichen zum Abschreiben.
+//
+//     N7QK4-2M0XV-...-9GHTB
+//
+// WARUM NICHT ZWOELF WOERTER (BIP-39). Weil eine Wortliste 2048 Woerter
+// hat, in diesem Userland ohne Allokator als festes Feld im Programm
+// liegen muesste (etwa 12 KiB in jedem Programm, das den Code kennt) und
+// weil sie ein SPRACHPROBLEM mitbringt: die englische Liste ist fuer
+// einen deutschsprachigen Nutzer schwerer richtig abzuschreiben als
+// Buchstaben und Ziffern, und zwei Listen waeren zwei Formate. Der
+// Vorteil von Woertern -- man kann sie diktieren -- bleibt hier ueber
+// das Alphabet erhalten: es ist Crockfords Base32, aus dem die
+// verwechselbaren Zeichen I, L, O und U entfernt sind, und beim Lesen
+// werden I und L als 1 und O als 0 angenommen.
+//
+// DIE PRUEFSUMME ist nicht Zierrat. Ohne sie fuehrt ein Tippfehler zu
+// einem falschen Hauptschluessel, und ein falscher Hauptschluessel sieht
+// bis zur ersten Entschluesselung genauso aus wie der richtige. Mit ihr
+// sagt das Programm sofort "abgeschrieben, nicht falsch gemerkt".
+const CODELEN: u64 = 65 // 55 Zeichen + 10 Bindestriche
+const CODEROH: u64 = 55
+
+fn alpha(v: u64) -> u64 {
+    var a: [u8; 33] = "0123456789ABCDEFGHJKMNPQRSTVWXYZ\0"
+    return ld8((&a[0]) as u64, v & 31)
+}
+
+fn unalpha(c: u64) -> i64 {
+    var x: u64 = c
+    if x >= 97 && x <= 122 {
+        x = x - 32 // klein wie gross
+    }
+    if x == 73 || x == 76 {
+        x = 49 // I, L -> 1
+    }
+    if x == 79 {
+        x = 48 // O -> 0
+    }
+    var a: [u8; 33] = "0123456789ABCDEFGHJKMNPQRSTVWXYZ\0"
+    var i: u64 = 0
+    while i < 32 {
+        if ld8((&a[0]) as u64, i) == x {
+            return i as i64
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// Schreibt den Code nach `out` und gibt die Zahl der Zeichen zurueck.
+fn code_schreiben(key32: u64, out: u64) -> u64 {
+    var roh: [u8; 34] = [0 as u8; 34]
+    let rp: u64 = (&roh[0]) as u64
+    var i: u64 = 0
+    while i < 32 {
+        st8(rp, i, ld8(key32, i))
+        i = i + 1
+    }
+    var pr: [u8; 32] = [0 as u8; 32]
+    sha256.hash(key32, 32, (&pr[0]) as u64)
+    st8(rp, 32, ld8((&pr[0]) as u64, 0))
+    st8(rp, 33, ld8((&pr[0]) as u64, 1))
+
+    var at: u64 = 0
+    var bitpuffer: u64 = 0
+    var bits: u64 = 0
+    var geschrieben: u64 = 0
+    i = 0
+    while i < 34 {
+        bitpuffer = (bitpuffer << 8) | ld8(rp, i)
+        bits = bits + 8
+        while bits >= 5 {
+            bits = bits - 5
+            let v: u64 = (bitpuffer >> bits) & 31
+            if geschrieben > 0 && geschrieben % 5 == 0 {
+                st8(out, at, 45) // Bindestrich
+                at = at + 1
+            }
+            st8(out, at, alpha(v))
+            at = at + 1
+            geschrieben = geschrieben + 1
+        }
+        i = i + 1
+    }
+    if bits > 0 {
+        let v: u64 = (bitpuffer << (5 - bits)) & 31
+        if geschrieben > 0 && geschrieben % 5 == 0 {
+            st8(out, at, 45)
+            at = at + 1
+        }
+        st8(out, at, alpha(v))
+        at = at + 1
+        geschrieben = geschrieben + 1
+    }
+    return at
+}
+
+// Liest einen Code (Bindestriche, Leerzeichen und Klein-/Grossschreibung
+// egal) und legt die 32 Oktette nach `out`. `false` heisst: das ist kein
+// gueltiger Code -- und zwar entweder ein falsches Zeichen, eine falsche
+// Laenge oder eine Pruefsumme, die nicht stimmt.
+fn code_lesen(text: u64, len: u64, out: u64) -> bool {
+    var roh: [u8; 34] = [0 as u8; 34]
+    let rp: u64 = (&roh[0]) as u64
+    var bitpuffer: u64 = 0
+    var bits: u64 = 0
+    var voll: u64 = 0
+    var zeichen: u64 = 0
+    var i: u64 = 0
+    while i < len {
+        let c: u64 = ld8(text, i)
+        i = i + 1
+        if c == 45 || c == 32 || c == 9 || c == 13 || c == 10 {
+            continue
+        }
+        let v: i64 = unalpha(c)
+        if v < 0 {
+            return false
+        }
+        zeichen = zeichen + 1
+        if zeichen > CODEROH {
+            return false
+        }
+        bitpuffer = (bitpuffer << 5) | (v as u64)
+        bits = bits + 5
+        if bits >= 8 {
+            bits = bits - 8
+            if voll >= 34 {
+                return false
+            }
+            st8(rp, voll, (bitpuffer >> bits) & 255)
+            voll = voll + 1
+        }
+    }
+    if zeichen != CODEROH || voll != 34 {
+        return false
+    }
+    // DIE DREI UEBERZAEHLIGEN BITS. 34 Oktette sind 272 Bit, 55 Zeichen
+    // sind 275 Bit: die letzten drei Bit des letzten Zeichens gehoeren
+    // zu keinem Oktett. `code_schreiben` fuellt sie mit Null. Wer sie
+    // beim Lesen nicht prueft, uebersieht genau die Tippfehler, die nur
+    // in diesen drei Bit sitzen -- ein Achtel aller Vertipper im letzten
+    // Zeichen kaeme durch, und die Pruefsumme merkt davon nichts, weil
+    // sie ueber die Oktette rechnet und nicht ueber die Zeichen.
+    // Gemessen in tools/sync/vectors.py (t_code, alle 55 Stellen).
+    if bits > 0 {
+        if (bitpuffer & ((1 << bits) - 1)) != 0 {
+            return false
+        }
+    }
+    var pr: [u8; 32] = [0 as u8; 32]
+    sha256.hash(rp, 32, (&pr[0]) as u64)
+    if ld8((&pr[0]) as u64, 0) != ld8(rp, 32) {
+        return false
+    }
+    if ld8((&pr[0]) as u64, 1) != ld8(rp, 33) {
+        return false
+    }
+    var j: u64 = 0
+    while j < 32 {
+        st8(out, j, ld8(rp, j))
+        j = j + 1
+    }
+    return true
+}
+
+// ------------------------------------------------------- die Huelle
+//
+// Der Hauptschluessel, eingepackt unter einem anderen Schluessel. Damit
+// gibt es ZWEI Wege zu denselben Daten -- die Passphrase und der
+// Wiederherstellungscode --, ohne dass die Daten zweimal verschluesselt
+// werden muessten:
+//
+//     Huelle = XChaCha20-Poly1305(einpackschluessel, nonce, AAD, MK)
+//
+// Die Huelle ist 32 + 16 = 48 Oktette und liegt im Kopf des Speichers.
+// Wer die Passphrase aendert, packt 32 Oktette neu ein; kein Block der
+// Daten wird angefasst. Das ist derselbe Zwei-Schluessel-Aufbau, den
+// `kernel/user/key.fi` in Runde TRESOR beschrieben hat -- nur mit einem
+// echten AEAD statt einem Einmalblock mit HMAC daneben.
+const HUELLELEN: u64 = 48
+
+fn huelle_schreiben(einpack: u64, nonce24: u64, mk: u64, out: u64) {
+    var aad: [u8; 20] = "osum sync v1 huelle\0"
+    chacha.xaead_seal(einpack, nonce24, (&aad[0]) as u64, 19, mk, 32, out)
+}
+
+fn huelle_lesen(einpack: u64, nonce24: u64, huelle: u64, out: u64) -> bool {
+    var aad: [u8; 20] = "osum sync v1 huelle\0"
+    return chacha.xaead_open(einpack, nonce24, (&aad[0]) as u64, 19,
+        huelle, HUELLELEN as usize, out)
+}
