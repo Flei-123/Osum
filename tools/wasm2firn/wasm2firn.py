@@ -1265,7 +1265,13 @@ class Erzeuger:
         """Das `end` einer Turmebene: der bisherige Fall ist zu Ende,
         der naechste faengt an. Jeder Fall ist ein EIGENES `if` mit
         `break` -- keine else-if-Kette (die schachtelt im Parser)."""
-        self.e(tiefe + 1, 'break')
+        # WICHTIG (durch pruefung/turm.wat gefunden): hier stand
+        # `break` -- und das verliess den GANZEN Verteiler. Faellt der
+        # Code aber nur unten aus einer Blockebene heraus, muessen die
+        # Reste ALLER weiter aussen liegenden Ebenen noch laufen. Der
+        # naechste Fall ist genau der, der gleich geoeffnet wird.
+        self.e(tiefe + 1, 'fall%d = %d' % (b.turm_marke, b.turm_fall))
+        self.e(tiefe + 1, 'continue')
         self.e(tiefe, '}')
         self.e(tiefe, 'if fall%d == %d {' % (b.turm_marke, b.turm_fall))
         # War das die letzte Ebene, schliesst der Verteiler.
