@@ -741,9 +741,22 @@ class Erzeuger:
                         or x.art == 'turm':
                     umschliesst = True
                     break
+        # WELCHE TIEFE HIER STEHEN MUSS -- der Fehler, der f175 zerlegt
+        # hat. Wir stehen DIREKT HINTER dem `}` des gerade verlassenen
+        # Blocks `b`, also wieder auf der Ebene, die ihn UMGIBT. Ein
+        # Sprung ist genau dann erfuellt, wenn er DIESE umgebende Ebene
+        # meinte -- nicht die des verlassenen Blocks.
+        #
+        # `b.tiefe` ist die Ebene, auf der `b` selbst lag; die Ebene
+        # dahinter ist `b.tiefe - 1`. Stand vorher `b.tiefe` da, wurde
+        # ein `br 1` (Ziel: die umgebende Ebene) nie als erfuellt
+        # erkannt und brach weiter nach aussen aus -- der Rest der
+        # Funktion wurde uebersprungen.
+        ziel_tiefe = b.tiefe
         self.e(tiefe, 'if br_ziel >= 0 {')
         if not umschliesst:
-            self.e(tiefe + 1, 'if br_ziel == %d { br_ziel = -1 } else {' % b.tiefe)
+            self.e(tiefe + 1, 'if br_ziel == %d { br_ziel = -1 } else {'
+                   % ziel_tiefe)
             if self.res:
                 self.e(tiefe + 2, 'return %s' % self.sv(0))
             else:
@@ -751,7 +764,8 @@ class Erzeuger:
             self.e(tiefe + 1, '}')
         else:
             self.e(tiefe + 1,
-                   'if br_ziel == %d { br_ziel = -1 } else { break }' % b.tiefe)
+                   'if br_ziel == %d { br_ziel = -1 } else { break }'
+                   % ziel_tiefe)
         self.e(tiefe, '}')
 
     # ------------------------------------------------- ein Befehl
