@@ -1,0 +1,2715 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/app/wasm.fi -- RUNDE SCHLEUSE: die Schleuse.
+//
+//     wasm <datei.wasm> [argumente...]
+//
+// WAS DAS IST. Ein Deuter fuer WebAssembly, in Firn, in RING 3. Er laedt
+// ein `.wasm`-Modul, das NIEMAND fuer Osum geschrieben hat, und fuehrt es
+// aus. Die Verbindung zur Aussenwelt ist WASI preview1: das Modul ruft
+// `wasi_snapshot_preview1::fd_write` und landet in Osums `write`.
+//
+// WARUM DAS DER KUERZESTE WEG ZU FREMDER SOFTWARE IST -- eine Zahl:
+//
+//     POSIX hat rund 1200 Funktionen. WASI preview1 hat 46.
+//     Fuer Hallo-Welt mit Dateizugriff reichen davon 8-10.
+//
+// Gemessen an einem echten Rust-Programm (`rustc --target wasm32-wasip1`)
+// waren es sogar VIER: environ_get, environ_sizes_get, fd_write, proc_exit.
+// Das ist der ganze Preis fuer Zugang zu allem, was nach WASM uebersetzt
+// wurde -- CPython, SQLite, ffmpeg, Doom, Ruby, PHP.
+//
+// WARUM EIN DEUTER UND NICHT wasm2c. wasm2c (aus wabt) uebersetzt WASM
+// nach C, und C uebersetzt hier niemand: Osum baut mit `firnc`. Der Weg
+// haette einen C-Compiler im System gebraucht (groesseres Projekt als
+// dieser Deuter) oder C-nach-Firn-Uebersetzung (laut CRUST-Bench 22 %
+// Erfolgsquote, bei generiertem Pointer-C effektiv null). Und er haette
+// pro fremdem Programm einen Bauserver-Lauf gebraucht -- das Gegenteil
+// einer Schleuse. Der Preis des Deuters ist Tempo: ~11x langsamer als
+// nativ (wasm3-Messung). Dieser Faktor wird in dieser Runde GEMESSEN.
+//
+// WAS DIESER DEUTER IST UND WAS NICHT. Er ist eine Stapelmaschine, die
+// den Bytecode direkt liest -- kein JIT, keine Vorcodierung in Threads
+// wie bei wasm3. Er prueft die Form des Moduls, aber er ist KEIN
+// Validierer im Sinne der Spezifikation: ein boesartig gebautes Modul
+// kann ihn zum Anhalten bringen, nicht aber aus seinem linearen Speicher
+// heraus. Alle Speicherzugriffe des Gastes werden gegen die Groesse des
+// linearen Speichers geprueft (`mem_bound`), und das ist die Grenze, die
+// zaehlt: der Gast sieht nur seine eigenen Seiten.
+//
+// RING 3, NICHT DER KERN. Diese Datei liegt in `kernel/app/`, wird mit
+// `--profile=app` gebaut und laeuft als gewoehnliches Programm. Ein
+// fremdes Modul, das sich verrechnet, nimmt nichts mit als sich selbst.
+
+import std.io
+import std.rt
+
+// ------------------------------------------------------------ Grenzen
+//
+// Feste Obergrenzen statt wachsender Felder: dieser Deuter soll ein
+// Modul ausfuehren und dabei nicht selbst zur Fehlerquelle werden. Wer
+// eine Grenze reisst, bekommt einen Satz und keinen stillen Schaden.
+const MAX_TYPES: usize = 512
+const MAX_FUNCS: usize = 4096
+const MAX_IMPORTS: usize = 256
+const MAX_EXPORTS: usize = 512
+const MAX_GLOBALS: usize = 512
+const MAX_TABLE: usize = 8192
+const MAX_STACK: usize = 8192
+const MAX_LOCALS: usize = 2048
+const MAX_FRAMES: usize = 512
+const MAX_LABELS: usize = 1024
+const MAX_PARAMS: usize = 32
+const MAX_RESULTS: usize = 8
+
+const PAGE_SIZE: usize = 65536
+const MAX_PAGES: usize = 1024        // 64 MiB Gastspeicher, reicht weit
+
+// ------------------------------------------------------- WASM-Typen
+const T_I32: u8 = 127                // 0x7f
+const T_I64: u8 = 126                // 0x7e
+const T_F32: u8 = 125                // 0x7d
+const T_F64: u8 = 124                // 0x7c
+const T_FUNCREF: u8 = 112            // 0x70
+const T_EMPTY: u8 = 64               // 0x40
+
+// --------------------------------------------------------- Der Leser
+//
+// Ein Zeiger in die Moduldatei mit einer Grenze. JEDES Lesen geht hier
+// durch, und jedes prueft. Eine abgeschnittene Datei ist der
+// Normalfall, nicht die Ausnahme -- ein Modul kommt von aussen.
+struct Leser {
+    p: u64,
+    len: usize,
+    at: usize,
+    fehler: bool,
+}
+
+fn leser_new(p: u64, len: usize) -> Leser {
+    return Leser { p: p, len: len, at: 0, fehler: false }
+}
+
+fn u8_lesen(l: *mut Leser) -> u8 {
+    if (*l).at >= (*l).len {
+        (*l).fehler = true
+        return 0 as u8
+    }
+    let v: u8 = rt.ld8((*l).p, (*l).at)
+    (*l).at = (*l).at + 1
+    return v
+}
+
+// LEB128 ohne Vorzeichen. Die Zahlform von WASM: sieben Bit je Oktett,
+// das achte sagt "es kommt noch was". Bei mehr als zehn Oktetten ist
+// etwas faul -- 10 * 7 = 70 Bit, und mehr als 64 gibt es nicht.
+fn uleb(l: *mut Leser) -> u64 {
+    var r: u64 = 0
+    var s: u32 = 0
+    var n: usize = 0
+    while n < 10 {
+        let b: u8 = u8_lesen(l)
+        if (*l).fehler {
+            return 0
+        }
+        r = r | ((b & 127 as u8) as u64 << s)
+        if b & 128 as u8 == 0 as u8 {
+            return r
+        }
+        s = s + 7 as u32
+        n = n + 1
+    }
+    (*l).fehler = true
+    return 0
+}
+
+// LEB128 mit Vorzeichen. Der Unterschied ist das letzte Oktett: steht
+// dort das Vorzeichenbit, wird der Rest mit Einsen aufgefuellt. Wer das
+// vergisst, liest -1 als 4294967295 und merkt es erst, wenn eine
+// Schleife nicht endet.
+fn sleb(l: *mut Leser) -> i64 {
+    var r: u64 = 0
+    var s: u32 = 0
+    var n: usize = 0
+    while n < 10 {
+        let b: u8 = u8_lesen(l)
+        if (*l).fehler {
+            return 0
+        }
+        r = r | ((b & 127 as u8) as u64 << s)
+        s = s + 7 as u32
+        if b & 128 as u8 == 0 as u8 {
+            if s < 64 as u32 && b & 64 as u8 != 0 as u8 {
+                // Vorzeichen ausdehnen
+                r = r | (0 as u64 - 1 as u64) << s
+            }
+            return r as i64
+        }
+        n = n + 1
+    }
+    (*l).fehler = true
+    return 0
+}
+
+fn u32_roh(l: *mut Leser) -> u32 {
+    let a: u32 = u8_lesen(l) as u32
+    let b: u32 = u8_lesen(l) as u32
+    let c: u32 = u8_lesen(l) as u32
+    let d: u32 = u8_lesen(l) as u32
+    return a | b << 8 as u32 | c << 16 as u32 | d << 24 as u32
+}
+
+fn u64_roh(l: *mut Leser) -> u64 {
+    let lo: u64 = u32_roh(l) as u64
+    let hi: u64 = u32_roh(l) as u64
+    return lo | hi << 32 as u32
+}
+
+fn ueberspringen(l: *mut Leser, n: usize) {
+    if (*l).at + n > (*l).len {
+        (*l).fehler = true
+        (*l).at = (*l).len
+        return
+    }
+    (*l).at = (*l).at + n
+}
+
+// ------------------------------------------------------- Die Tabellen
+//
+// Ein Funktionstyp: Parameter und Ergebnisse. Flach gehalten, weil ein
+// Typ in WASM selten mehr als eine Handvoll von beidem hat.
+struct Ftyp {
+    npar: usize,
+    nres: usize,
+    par: [u8; 32],
+    res: [u8; 8],
+}
+
+// Eine Funktion: entweder importiert (dann `wasi` >= 0 und der Rumpf
+// leer) oder eigen (dann Rumpf zwischen `code_at` und `code_end`).
+struct Funk {
+    typ: usize,
+    importiert: bool,
+    wasi: i32,           // Nummer der WASI-Funktion, -1 wenn keine
+    code_at: usize,
+    code_end: usize,
+    nloc: usize,         // Anzahl der Lokalen OHNE Parameter
+    loctyp_at: usize,    // wo die Lokalendeklaration steht
+}
+
+struct Modul {
+    // Datei
+    p: u64,
+    len: usize,
+
+    // Typen
+    ntyp: usize,
+    typ: [Ftyp; 512],
+
+    // Funktionen
+    nfunk: usize,
+    funk: [Funk; 4096],
+    nimport_funk: usize,
+
+    // Globale
+    nglob: usize,
+    glob: [u64; 512],
+    glob_typ: [u8; 512],
+
+    // Tabelle (nur eine, funcref -- mehr braucht preview1 nicht)
+    ntab: usize,
+    tab: [u32; 8192],
+
+    // Linearer Speicher
+    mem: u64,
+    mem_pages: usize,
+    mem_max: usize,
+
+    // Einsprung
+    start_funk: i32,     // `start`-Sektion, -1 wenn keine
+    haupt_funk: i32,     // Export `_start`, -1 wenn keiner
+
+    ok: bool,
+}
+
+// ------------------------------------------------- Namen vergleichen
+fn name_gleich(p: u64, at: usize, n: usize, s: u64, sn: usize) -> bool {
+    if n != sn {
+        return false
+    }
+    var i: usize = 0
+    while i < n {
+        if rt.ld8(p, at + i) != rt.ld8(s, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// ---------------------------------------------------- WASI-Nummern
+//
+// DIE LISTE, DIE ZAEHLT. WASI preview1 hat 46 Funktionen; hier stehen
+// die, die dieser Deuter kennt. Die Reihenfolge ist die der
+// Wichtigkeit, nicht die der Spezifikation: was oben steht, braucht
+// fast jedes Programm beim Start.
+const W_UNBEKANNT: i32 = -1
+const W_ARGS_GET: i32 = 0
+const W_ARGS_SIZES_GET: i32 = 1
+const W_ENVIRON_GET: i32 = 2
+const W_ENVIRON_SIZES_GET: i32 = 3
+const W_CLOCK_TIME_GET: i32 = 4
+const W_FD_CLOSE: i32 = 5
+const W_FD_FDSTAT_GET: i32 = 6
+const W_FD_READ: i32 = 7
+const W_FD_SEEK: i32 = 8
+const W_FD_WRITE: i32 = 9
+const W_PATH_OPEN: i32 = 10
+const W_PROC_EXIT: i32 = 11
+const W_RANDOM_GET: i32 = 12
+const W_FD_PRESTAT_GET: i32 = 13
+const W_FD_PRESTAT_DIR_NAME: i32 = 14
+const W_PATH_UNLINK_FILE: i32 = 15
+const W_FD_FDSTAT_SET_FLAGS: i32 = 16
+const W_PATH_CREATE_DIRECTORY: i32 = 17
+const W_PATH_FILESTAT_GET: i32 = 18
+const W_FD_FILESTAT_GET: i32 = 19
+const W_CLOCK_RES_GET: i32 = 20
+const W_SCHED_YIELD: i32 = 21
+const W_PROC_RAISE: i32 = 22
+const W_FD_SYNC: i32 = 23
+const W_FD_DATASYNC: i32 = 24
+const W_FD_TELL: i32 = 25
+const W_PATH_RENAME: i32 = 26
+const W_PATH_REMOVE_DIRECTORY: i32 = 27
+const W_FD_RENUMBER: i32 = 28
+const W_FD_ADVISE: i32 = 29
+const W_POLL_ONEOFF: i32 = 30
+const W_FD_READDIR: i32 = 31
+const W_FD_FILESTAT_SET_SIZE: i32 = 32
+const W_PATH_SYMLINK: i32 = 33
+const W_PATH_READLINK: i32 = 34
+
+fn wasi_nummer(p: u64, at: usize, n: usize) -> i32 {
+    var s_args_get: [u8; 9] = "args_get\0"
+    if name_gleich(p, at, n, (&s_args_get[0]) as u64, 8) { return W_ARGS_GET }
+    var s_args_sizes: [u8; 15] = "args_sizes_get\0"
+    if name_gleich(p, at, n, (&s_args_sizes[0]) as u64, 14) { return W_ARGS_SIZES_GET }
+    var s_env_get: [u8; 12] = "environ_get\0"
+    if name_gleich(p, at, n, (&s_env_get[0]) as u64, 11) { return W_ENVIRON_GET }
+    var s_env_sizes: [u8; 18] = "environ_sizes_get\0"
+    if name_gleich(p, at, n, (&s_env_sizes[0]) as u64, 17) { return W_ENVIRON_SIZES_GET }
+    var s_clock_time: [u8; 15] = "clock_time_get\0"
+    if name_gleich(p, at, n, (&s_clock_time[0]) as u64, 14) { return W_CLOCK_TIME_GET }
+    var s_fd_close: [u8; 9] = "fd_close\0"
+    if name_gleich(p, at, n, (&s_fd_close[0]) as u64, 8) { return W_FD_CLOSE }
+    var s_fdstat: [u8; 14] = "fd_fdstat_get\0"
+    if name_gleich(p, at, n, (&s_fdstat[0]) as u64, 13) { return W_FD_FDSTAT_GET }
+    var s_fd_read: [u8; 8] = "fd_read\0"
+    if name_gleich(p, at, n, (&s_fd_read[0]) as u64, 7) { return W_FD_READ }
+    var s_fd_seek: [u8; 8] = "fd_seek\0"
+    if name_gleich(p, at, n, (&s_fd_seek[0]) as u64, 7) { return W_FD_SEEK }
+    var s_fd_write: [u8; 9] = "fd_write\0"
+    if name_gleich(p, at, n, (&s_fd_write[0]) as u64, 8) { return W_FD_WRITE }
+    var s_path_open: [u8; 10] = "path_open\0"
+    if name_gleich(p, at, n, (&s_path_open[0]) as u64, 9) { return W_PATH_OPEN }
+    var s_proc_exit: [u8; 10] = "proc_exit\0"
+    if name_gleich(p, at, n, (&s_proc_exit[0]) as u64, 9) { return W_PROC_EXIT }
+    var s_random: [u8; 11] = "random_get\0"
+    if name_gleich(p, at, n, (&s_random[0]) as u64, 10) { return W_RANDOM_GET }
+    var s_prestat: [u8; 15] = "fd_prestat_get\0"
+    if name_gleich(p, at, n, (&s_prestat[0]) as u64, 14) { return W_FD_PRESTAT_GET }
+    var s_prestat_n: [u8; 20] = "fd_prestat_dir_name\0"
+    if name_gleich(p, at, n, (&s_prestat_n[0]) as u64, 19) { return W_FD_PRESTAT_DIR_NAME }
+    var s_unlink: [u8; 17] = "path_unlink_file\0"
+    if name_gleich(p, at, n, (&s_unlink[0]) as u64, 16) { return W_PATH_UNLINK_FILE }
+    var s_setflags: [u8; 20] = "fd_fdstat_set_flags\0"
+    if name_gleich(p, at, n, (&s_setflags[0]) as u64, 19) { return W_FD_FDSTAT_SET_FLAGS }
+    var s_mkdir: [u8; 22] = "path_create_directory\0"
+    if name_gleich(p, at, n, (&s_mkdir[0]) as u64, 21) { return W_PATH_CREATE_DIRECTORY }
+    var s_pfstat: [u8; 19] = "path_filestat_get\0\0"
+    if name_gleich(p, at, n, (&s_pfstat[0]) as u64, 17) { return W_PATH_FILESTAT_GET }
+    var s_ffstat: [u8; 17] = "fd_filestat_get\0\0"
+    if name_gleich(p, at, n, (&s_ffstat[0]) as u64, 15) { return W_FD_FILESTAT_GET }
+    var s_clockres: [u8; 14] = "clock_res_get\0"
+    if name_gleich(p, at, n, (&s_clockres[0]) as u64, 13) { return W_CLOCK_RES_GET }
+    var s_yield: [u8; 12] = "sched_yield\0"
+    if name_gleich(p, at, n, (&s_yield[0]) as u64, 11) { return W_SCHED_YIELD }
+    var s_raise: [u8; 11] = "proc_raise\0"
+    if name_gleich(p, at, n, (&s_raise[0]) as u64, 10) { return W_PROC_RAISE }
+    var s_sync: [u8; 8] = "fd_sync\0"
+    if name_gleich(p, at, n, (&s_sync[0]) as u64, 7) { return W_FD_SYNC }
+    var s_dsync: [u8; 12] = "fd_datasync\0"
+    if name_gleich(p, at, n, (&s_dsync[0]) as u64, 11) { return W_FD_DATASYNC }
+    var s_tell: [u8; 8] = "fd_tell\0"
+    if name_gleich(p, at, n, (&s_tell[0]) as u64, 7) { return W_FD_TELL }
+    var s_rename: [u8; 12] = "path_rename\0"
+    if name_gleich(p, at, n, (&s_rename[0]) as u64, 11) { return W_PATH_RENAME }
+    var s_rmdir: [u8; 22] = "path_remove_directory\0"
+    if name_gleich(p, at, n, (&s_rmdir[0]) as u64, 21) { return W_PATH_REMOVE_DIRECTORY }
+    var s_renum: [u8; 13] = "fd_renumber\0\0"
+    if name_gleich(p, at, n, (&s_renum[0]) as u64, 11) { return W_FD_RENUMBER }
+    var s_advise: [u8; 10] = "fd_advise\0"
+    if name_gleich(p, at, n, (&s_advise[0]) as u64, 9) { return W_FD_ADVISE }
+    var s_poll: [u8; 12] = "poll_oneoff\0"
+    if name_gleich(p, at, n, (&s_poll[0]) as u64, 11) { return W_POLL_ONEOFF }
+    var s_readdir: [u8; 11] = "fd_readdir\0"
+    if name_gleich(p, at, n, (&s_readdir[0]) as u64, 10) { return W_FD_READDIR }
+    var s_setsize: [u8; 22] = "fd_filestat_set_size\0\0"
+    if name_gleich(p, at, n, (&s_setsize[0]) as u64, 20) { return W_FD_FILESTAT_SET_SIZE }
+    var s_symlink: [u8; 13] = "path_symlink\0"
+    if name_gleich(p, at, n, (&s_symlink[0]) as u64, 12) { return W_PATH_SYMLINK }
+    var s_readlink: [u8; 14] = "path_readlink\0"
+    if name_gleich(p, at, n, (&s_readlink[0]) as u64, 13) { return W_PATH_READLINK }
+    return W_UNBEKANNT
+}
+
+// ------------------------------------------------------ Modul laden
+//
+// Die Sektionen in der Reihenfolge, in der sie in der Datei stehen
+// muessen: 1 type, 2 import, 3 function, 4 table, 5 memory, 6 global,
+// 7 export, 8 start, 9 element, 10 code, 11 data. 0 ist custom und wird
+// uebersprungen -- dort steckt bei einem Rust-Modul die Debug-Info, und
+// das sind schnell zwei Megaoktette, die niemanden interessieren.
+
+fn typ_lesen(m: *mut Modul, l: *mut Leser) {
+    let n: usize = uleb(l) as usize
+    if n > MAX_TYPES {
+        (*m).ok = false
+        return
+    }
+    (*m).ntyp = n
+    var i: usize = 0
+    while i < n {
+        let form: u8 = u8_lesen(l)
+        if form != 96 as u8 {        // 0x60 = func
+            (*m).ok = false
+            return
+        }
+        let np: usize = uleb(l) as usize
+        if np > MAX_PARAMS {
+            (*m).ok = false
+            return
+        }
+        (*m).typ[i].npar = np
+        var k: usize = 0
+        while k < np {
+            (*m).typ[i].par[k] = u8_lesen(l)
+            k = k + 1
+        }
+        let nr: usize = uleb(l) as usize
+        if nr > MAX_RESULTS {
+            (*m).ok = false
+            return
+        }
+        (*m).typ[i].nres = nr
+        k = 0
+        while k < nr {
+            (*m).typ[i].res[k] = u8_lesen(l)
+            k = k + 1
+        }
+        i = i + 1
+    }
+}
+
+// Ein Grenzenpaar (limits): ein Flag, dann das Minimum, bei Flag 1 auch
+// ein Maximum.
+fn limits_lesen(l: *mut Leser, min: *mut usize, max: *mut usize) {
+    let f: u8 = u8_lesen(l)
+    *min = uleb(l) as usize
+    if f & 1 as u8 != 0 as u8 {
+        *max = uleb(l) as usize
+    } else {
+        *max = 0
+    }
+}
+
+fn import_lesen(m: *mut Modul, l: *mut Leser) {
+    let n: usize = uleb(l) as usize
+    var i: usize = 0
+    var s_wasi: [u8; 23] = "wasi_snapshot_preview1\0"
+    while i < n {
+        let modl: usize = uleb(l) as usize
+        let mod_at: usize = (*l).at
+        ueberspringen(l, modl)
+        let feldl: usize = uleb(l) as usize
+        let feld_at: usize = (*l).at
+        ueberspringen(l, feldl)
+        if (*l).fehler {
+            (*m).ok = false
+            return
+        }
+        let art: u8 = u8_lesen(l)
+        if art == 0 as u8 {
+            // eine Funktion
+            let t: usize = uleb(l) as usize
+            if (*m).nfunk >= MAX_FUNCS {
+                (*m).ok = false
+                return
+            }
+            var w: i32 = W_UNBEKANNT
+            if name_gleich((*m).p, mod_at, modl, (&s_wasi[0]) as u64, 22) {
+                w = wasi_nummer((*m).p, feld_at, feldl)
+            }
+            let f: usize = (*m).nfunk
+            (*m).funk[f].typ = t
+            (*m).funk[f].importiert = true
+            (*m).funk[f].wasi = w
+            (*m).funk[f].code_at = feld_at    // fuer die Fehlermeldung
+            (*m).funk[f].code_end = feld_at + feldl
+            (*m).nfunk = f + 1
+            (*m).nimport_funk = (*m).nimport_funk + 1
+        } else if art == 1 as u8 {
+            // eine Tabelle
+            ueberspringen(l, 1)
+            var mi: usize = 0
+            var ma: usize = 0
+            limits_lesen(l, &mi, &ma)
+        } else if art == 2 as u8 {
+            // ein Speicher
+            var mi2: usize = 0
+            var ma2: usize = 0
+            limits_lesen(l, &mi2, &ma2)
+        } else {
+            // ein Globales
+            ueberspringen(l, 1)
+            ueberspringen(l, 1)
+        }
+        i = i + 1
+    }
+}
+
+fn funktion_lesen(m: *mut Modul, l: *mut Leser) {
+    let n: usize = uleb(l) as usize
+    var i: usize = 0
+    while i < n {
+        let t: usize = uleb(l) as usize
+        if (*m).nfunk >= MAX_FUNCS {
+            (*m).ok = false
+            return
+        }
+        let f: usize = (*m).nfunk
+        (*m).funk[f].typ = t
+        (*m).funk[f].importiert = false
+        (*m).funk[f].wasi = W_UNBEKANNT
+        (*m).nfunk = f + 1
+        i = i + 1
+    }
+}
+
+// Ein konstanter Ausdruck, wie er in `global`, `data` und `element`
+// steht: i32.const/i64.const/f-const oder global.get, dann `end`.
+fn konst_ausdruck(m: *mut Modul, l: *mut Leser) -> u64 {
+    var v: u64 = 0
+    let op: u8 = u8_lesen(l)
+    if op == 65 as u8 {              // i32.const
+        v = sleb(l) as u64 & 4294967295
+    } else if op == 66 as u8 {       // i64.const
+        v = sleb(l) as u64
+    } else if op == 67 as u8 {       // f32.const
+        v = u32_roh(l) as u64
+    } else if op == 68 as u8 {       // f64.const
+        v = u64_roh(l)
+    } else if op == 35 as u8 {       // global.get
+        let g: usize = uleb(l) as usize
+        if g < (*m).nglob {
+            v = (*m).glob[g]
+        }
+    } else if op == 208 as u8 {      // ref.null
+        ueberspringen(l, 1)
+        v = 0
+    } else if op == 210 as u8 {      // ref.func
+        v = uleb(l)
+    } else {
+        (*m).ok = false
+        return 0
+    }
+    // das abschliessende `end`
+    let e: u8 = u8_lesen(l)
+    if e != 11 as u8 {
+        (*m).ok = false
+    }
+    return v
+}
+
+fn global_lesen(m: *mut Modul, l: *mut Leser) {
+    let n: usize = uleb(l) as usize
+    if n > MAX_GLOBALS {
+        (*m).ok = false
+        return
+    }
+    var i: usize = 0
+    while i < n {
+        let t: u8 = u8_lesen(l)
+        ueberspringen(l, 1)          // mutable-Flag
+        (*m).glob_typ[i] = t
+        (*m).glob[i] = konst_ausdruck(m, l)
+        (*m).nglob = i + 1
+        i = i + 1
+    }
+}
+
+fn export_lesen(m: *mut Modul, l: *mut Leser) {
+    let n: usize = uleb(l) as usize
+    var i: usize = 0
+    var s_start: [u8; 7] = "_start\0"
+    while i < n {
+        let nl: usize = uleb(l) as usize
+        let n_at: usize = (*l).at
+        ueberspringen(l, nl)
+        let art: u8 = u8_lesen(l)
+        let idx: usize = uleb(l) as usize
+        if art == 0 as u8 {
+            if name_gleich((*m).p, n_at, nl, (&s_start[0]) as u64, 6) {
+                (*m).haupt_funk = idx as i32
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn element_lesen(m: *mut Modul, l: *mut Leser) {
+    let n: usize = uleb(l) as usize
+    var i: usize = 0
+    while i < n {
+        let art: u64 = uleb(l)
+        if art == 0 {
+            // aktiv, Tabelle 0, Offset als konstanter Ausdruck
+            let off: usize = konst_ausdruck(m, l) as usize
+            let cnt: usize = uleb(l) as usize
+            var k: usize = 0
+            while k < cnt {
+                let fi: u32 = uleb(l) as u32
+                if off + k < MAX_TABLE {
+                    (*m).tab[off + k] = fi
+                    if off + k + 1 > (*m).ntab {
+                        (*m).ntab = off + k + 1
+                    }
+                }
+                k = k + 1
+            }
+        } else if art == 1 {
+            ueberspringen(l, 1)      // elemkind
+            let cnt2: usize = uleb(l) as usize
+            var k2: usize = 0
+            while k2 < cnt2 {
+                uleb(l)
+                k2 = k2 + 1
+            }
+        } else if art == 2 {
+            uleb(l)                  // Tabellenindex
+            let off3: usize = konst_ausdruck(m, l) as usize
+            ueberspringen(l, 1)      // elemkind
+            let cnt3: usize = uleb(l) as usize
+            var k3: usize = 0
+            while k3 < cnt3 {
+                let fi3: u32 = uleb(l) as u32
+                if off3 + k3 < MAX_TABLE {
+                    (*m).tab[off3 + k3] = fi3
+                    if off3 + k3 + 1 > (*m).ntab {
+                        (*m).ntab = off3 + k3 + 1
+                    }
+                }
+                k3 = k3 + 1
+            }
+        } else {
+            // die uebrigen Formen (passive/deklarative) ueberspringen wir
+            // nicht sauber -- ein Modul, das sie benutzt, wird abgelehnt,
+            // statt still falsch zu laufen.
+            (*m).ok = false
+            return
+        }
+        i = i + 1
+    }
+}
+
+fn code_lesen(m: *mut Modul, l: *mut Leser) {
+    let n: usize = uleb(l) as usize
+    var fi: usize = (*m).nimport_funk
+    var i: usize = 0
+    while i < n {
+        let sz: usize = uleb(l) as usize
+        let ende: usize = (*l).at + sz
+        if fi >= (*m).nfunk || ende > (*l).len {
+            (*m).ok = false
+            return
+        }
+        // die Lokalendeklaration: Gruppen aus Anzahl und Typ
+        (*m).funk[fi].loctyp_at = (*l).at
+        let grp: usize = uleb(l) as usize
+        var nloc: usize = 0
+        var g: usize = 0
+        while g < grp {
+            let cnt: usize = uleb(l) as usize
+            ueberspringen(l, 1)
+            nloc = nloc + cnt
+            g = g + 1
+        }
+        (*m).funk[fi].nloc = nloc
+        (*m).funk[fi].code_at = (*l).at
+        (*m).funk[fi].code_end = ende
+        (*l).at = ende
+        fi = fi + 1
+        i = i + 1
+    }
+}
+
+fn data_lesen(m: *mut Modul, l: *mut Leser) {
+    let n: usize = uleb(l) as usize
+    var i: usize = 0
+    while i < n {
+        let art: u64 = uleb(l)
+        var off: usize = 0
+        if art == 0 {
+            off = konst_ausdruck(m, l) as usize
+        } else if art == 2 {
+            uleb(l)
+            off = konst_ausdruck(m, l) as usize
+        } else {
+            // passiv: kein Offset, wird von memory.init benutzt. Wir
+            // ueberspringen den Inhalt und merken uns nichts.
+            let sz0: usize = uleb(l) as usize
+            ueberspringen(l, sz0)
+            i = i + 1
+            continue
+        }
+        let sz: usize = uleb(l) as usize
+        if (*l).at + sz > (*l).len {
+            (*m).ok = false
+            return
+        }
+        // in den linearen Speicher schreiben
+        if off + sz > (*m).mem_pages * PAGE_SIZE {
+            (*m).ok = false
+            return
+        }
+        rt.mem_copy((*m).mem + off as u64, (*l).p + (*l).at as u64, sz)
+        (*l).at = (*l).at + sz
+        i = i + 1
+    }
+}
+
+fn modul_laden(m: *mut Modul, p: u64, len: usize) -> bool {
+    (*m).p = p
+    (*m).len = len
+    (*m).ntyp = 0
+    (*m).nfunk = 0
+    (*m).nimport_funk = 0
+    (*m).nglob = 0
+    (*m).ntab = 0
+    (*m).mem = 0
+    (*m).mem_pages = 0
+    (*m).mem_max = MAX_PAGES
+    (*m).start_funk = -1
+    (*m).haupt_funk = -1
+    (*m).ok = true
+
+    var l: Leser = leser_new(p, len)
+    // 0x00 0x61 0x73 0x6d = "\0asm", dann die Version 1.
+    if len < 8 {
+        io.print("wasm: die Datei ist zu kurz fuer ein Modul\n")
+        return false
+    }
+    let magic: u32 = u32_roh(&l)
+    let ver: u32 = u32_roh(&l)
+    if magic != 1836278016 as u32 {   // 0x6d736100
+        io.print("wasm: das ist kein WASM-Modul (die Kennung stimmt nicht)\n")
+        return false
+    }
+    if ver != 1 as u32 {
+        io.print("wasm: unbekannte Modulversion\n")
+        return false
+    }
+
+    // Der Speicher wird angelegt, sobald die memory-Sektion gelesen ist;
+    // data kommt spaeter, also passt die Reihenfolge.
+    while l.at < len && (*m).ok {
+        let sid: u8 = u8_lesen(&l)
+        let sz: usize = uleb(&l) as usize
+        if l.fehler || l.at + sz > len {
+            io.print("wasm: eine Sektion reicht ueber das Dateiende hinaus\n")
+            return false
+        }
+        let sende: usize = l.at + sz
+        if sid == 1 as u8 {
+            typ_lesen(m, &l)
+        } else if sid == 2 as u8 {
+            import_lesen(m, &l)
+        } else if sid == 3 as u8 {
+            funktion_lesen(m, &l)
+        } else if sid == 4 as u8 {
+            let cnt: usize = uleb(&l) as usize
+            var t: usize = 0
+            while t < cnt {
+                ueberspringen(&l, 1)  // Elementtyp
+                var mi: usize = 0
+                var ma: usize = 0
+                limits_lesen(&l, &mi, &ma)
+                if mi > MAX_TABLE {
+                    (*m).ok = false
+                }
+                if mi > (*m).ntab {
+                    (*m).ntab = mi
+                }
+                t = t + 1
+            }
+        } else if sid == 5 as u8 {
+            let cnt2: usize = uleb(&l) as usize
+            if cnt2 > 0 {
+                var mi2: usize = 0
+                var ma2: usize = 0
+                limits_lesen(&l, &mi2, &ma2)
+                if mi2 > MAX_PAGES {
+                    io.print("wasm: das Modul will mehr Speicher als erlaubt\n")
+                    return false
+                }
+                (*m).mem_pages = mi2
+                if ma2 > 0 && ma2 < MAX_PAGES {
+                    (*m).mem_max = ma2
+                }
+            }
+        } else if sid == 6 as u8 {
+            global_lesen(m, &l)
+        } else if sid == 7 as u8 {
+            export_lesen(m, &l)
+        } else if sid == 8 as u8 {
+            (*m).start_funk = uleb(&l) as i32
+        } else if sid == 9 as u8 {
+            element_lesen(m, &l)
+        } else if sid == 10 as u8 {
+            code_lesen(m, &l)
+        } else if sid == 11 as u8 {
+            data_lesen(m, &l)
+        }
+        // Sektion 0 (custom) und alles Unbekannte: ueberspringen. Bei
+        // einem Rust-Modul sind das ueber zwei Megaoktette Debug-Info.
+        l.at = sende
+    }
+    if l.fehler || !(*m).ok {
+        io.print("wasm: das Modul liess sich nicht lesen\n")
+        return false
+    }
+    return true
+}
+
+// Den linearen Speicher anlegen. Getrennt vom Laden, weil `data` ihn
+// schon braucht -- er wird angelegt, sobald die memory-Sektion durch
+// ist. Hier ist der Fall "gar keine memory-Sektion" abgedeckt.
+fn mem_anlegen(m: *mut Modul) -> bool {
+    if (*m).mem != 0 {
+        return true
+    }
+    var seiten: usize = (*m).mem_pages
+    if seiten == 0 {
+        seiten = 1
+    }
+    let n: usize = seiten * PAGE_SIZE
+    let p: u64 = rt.heap_alloc(n)
+    if p == 0 {
+        io.print("wasm: kein Speicher fuer den linearen Speicher des Moduls\n")
+        return false
+    }
+    rt.mem_set(p, 0 as u8, n)
+    (*m).mem = p
+    (*m).mem_pages = seiten
+    return true
+}
+
+// ====================================================================
+//                        DIE AUSFUEHRUNG
+// ====================================================================
+//
+// Eine Stapelmaschine. WASM-Werte sind hier durchweg `u64` -- i32 liegt
+// in den unteren 32 Bit, f32 als Bitmuster in den unteren 32, f64 als
+// Bitmuster in allen 64. Das ist die Darstellung, die wasm3 auch waehlt:
+// ein Slot pro Wert, der Typ steckt im Befehl und nicht im Wert.
+//
+// WARUM KEINE TYPPRUEFUNG ZUR LAUFZEIT. Ein gueltiges WASM-Modul ist
+// statisch typisiert -- der Uebersetzer, der es erzeugt hat, hat das
+// schon garantiert. Dieser Deuter prueft die FORM (Sektionen, Grenzen,
+// Speicherzugriffe), nicht die Typen. Ein von Hand verbogenes Modul kann
+// ihn damit zu Unsinn bringen; es kann ihn NICHT aus dem linearen
+// Speicher herausbringen, und das ist die Grenze, die zaehlt.
+
+struct Label {
+    // Wohin `br` springt: bei block/if hinter das `end`, bei loop
+    // zurueck zum Anfang.
+    ziel: usize,
+    // Die Stapelhoehe, auf die beim Sprung zurueckgeschnitten wird.
+    sp: usize,
+    // Wie viele Werte der Block liefert (0 oder 1 -- Mehrfachergebnisse
+    // braucht preview1 nicht).
+    nres: usize,
+    // true = loop (Sprung geht an den Anfang, liefert nichts)
+    schleife: bool,
+}
+
+struct Rahmen {
+    funk: usize,
+    ip: usize,
+    ende: usize,
+    locals_at: usize,    // Index in das Lokalenfeld
+    nlocals: usize,
+    label_at: usize,     // Index in das Labelfeld
+    nlabel: usize,
+    sp_ein: usize,       // Stapelhoehe beim Eintritt
+    nres: usize,
+}
+
+struct VM {
+    m: *mut Modul,
+    stack: [u64; 8192],
+    sp: usize,
+    locals: [u64; 2048],
+    nloc: usize,
+    label: [Label; 1024],
+    frames: [Rahmen; 512],
+    nframe: usize,
+    // Argumente des Programms, fuer args_get/args_sizes_get
+    argc: usize,
+    argv0: u64,
+    start: u64,
+    // Abbruch
+    falle: bool,
+    beendet: bool,
+    code: i32,
+    // Zaehler, damit eine Endlosschleife nicht ewig laeuft
+    schritte: u64,
+}
+
+fn push(v: *mut VM, x: u64) {
+    if (*v).sp >= 8192 {
+        (*v).falle = true
+        return
+    }
+    (*v).stack[(*v).sp] = x
+    (*v).sp = (*v).sp + 1
+}
+
+fn pop(v: *mut VM) -> u64 {
+    if (*v).sp == 0 {
+        (*v).falle = true
+        return 0
+    }
+    (*v).sp = (*v).sp - 1
+    return (*v).stack[(*v).sp]
+}
+
+// ------------------------------------------------- Speicherzugriffe
+//
+// HIER LIEGT DIE SICHERHEITSGRENZE DES GANZEN DEUTERS. Jeder Zugriff des
+// Gastes geht durch `mem_bound`. Wer hier eine Pruefung vergisst, gibt
+// einem fremden Modul den Adressraum des Deuters.
+fn mem_bound(v: *mut VM, at: u64, n: usize) -> bool {
+    let m: *mut Modul = (*v).m
+    let groesse: u64 = ((*m).mem_pages * PAGE_SIZE) as u64
+    if at > groesse {
+        (*v).falle = true
+        return false
+    }
+    if at + n as u64 > groesse {
+        (*v).falle = true
+        return false
+    }
+    return true
+}
+
+fn g_ld8(v: *mut VM, at: u64) -> u64 {
+    if !mem_bound(v, at, 1) { return 0 }
+    return rt.ld8((*(*v).m).mem, at as usize) as u64
+}
+
+fn g_ld16(v: *mut VM, at: u64) -> u64 {
+    if !mem_bound(v, at, 2) { return 0 }
+    let b: u64 = (*(*v).m).mem
+    let a: usize = at as usize
+    return rt.ld8(b, a) as u64 | (rt.ld8(b, a + 1) as u64) << 8 as u32
+}
+
+fn g_ld32(v: *mut VM, at: u64) -> u64 {
+    if !mem_bound(v, at, 4) { return 0 }
+    let b: u64 = (*(*v).m).mem
+    let a: usize = at as usize
+    return rt.ld8(b, a) as u64
+        | (rt.ld8(b, a + 1) as u64) << 8 as u32
+        | (rt.ld8(b, a + 2) as u64) << 16 as u32
+        | (rt.ld8(b, a + 3) as u64) << 24 as u32
+}
+
+fn g_ld64(v: *mut VM, at: u64) -> u64 {
+    if !mem_bound(v, at, 8) { return 0 }
+    let lo: u64 = g_ld32(v, at)
+    let hi: u64 = g_ld32(v, at + 4)
+    return lo | hi << 32 as u32
+}
+
+fn g_st8(v: *mut VM, at: u64, x: u64) {
+    if !mem_bound(v, at, 1) { return }
+    rt.st8((*(*v).m).mem, at as usize, (x & 255) as u8)
+}
+
+fn g_st16(v: *mut VM, at: u64, x: u64) {
+    if !mem_bound(v, at, 2) { return }
+    let b: u64 = (*(*v).m).mem
+    let a: usize = at as usize
+    rt.st8(b, a, (x & 255) as u8)
+    rt.st8(b, a + 1, (x >> 8 as u32 & 255) as u8)
+}
+
+fn g_st32(v: *mut VM, at: u64, x: u64) {
+    if !mem_bound(v, at, 4) { return }
+    let b: u64 = (*(*v).m).mem
+    let a: usize = at as usize
+    rt.st8(b, a, (x & 255) as u8)
+    rt.st8(b, a + 1, (x >> 8 as u32 & 255) as u8)
+    rt.st8(b, a + 2, (x >> 16 as u32 & 255) as u8)
+    rt.st8(b, a + 3, (x >> 24 as u32 & 255) as u8)
+}
+
+fn g_st64(v: *mut VM, at: u64, x: u64) {
+    if !mem_bound(v, at, 8) { return }
+    g_st32(v, at, x & 4294967295)
+    g_st32(v, at + 4, x >> 32 as u32)
+}
+
+// ====================================================================
+//                    WASI preview1 -- die Schleuse
+// ====================================================================
+//
+// HIER TRIFFT FREMDE SOFTWARE AUF OSUM. Ein WASM-Modul ruft
+// `wasi_snapshot_preview1::fd_write`, und was unten passiert, ist Osums
+// `write` mit der Nummer 1.
+//
+// DAS GEHT SO GLATT AUS EINEM GRUND, und der steht in Abschnitt 0 der
+// FREMDSOFTWARE.md: OSUMS SYSTEMAUFRUFE TRAGEN LINUX' NUMMERN (Runde
+// K4). `open` ist 2, `read` ist 0, `write` ist 1, `lseek` ist 8,
+// `close` ist 3. WASI ist nach POSIX modelliert, POSIX-Nummern sind
+// hier Linux-Nummern, also ist die Abbildung fast durchweg eins zu eins.
+// Der Teil, der Arbeit macht, ist nicht die Semantik -- es sind die
+// STRUKTUREN: WASI reicht Zeiger IN DEN LINEAREN SPEICHER DES GASTES,
+// und die muessen ent- und wieder eingepackt werden.
+//
+// FEHLERNUMMERN: WASI hat eigene (errno), sie stimmen NICHT mit Linux'
+// ueberein. 0 = Erfolg, 8 = EBADF, 28 = EINVAL, 44 = ENOENT, 76 = ENOTCAPABLE.
+const E_OK: u64 = 0
+const E_BADF: u64 = 8
+const E_INVAL: u64 = 28
+const E_NOENT: u64 = 44
+const E_NOSYS: u64 = 52
+const E_NOTCAPABLE: u64 = 76
+
+const SYS_READ: i64 = 0
+const SYS_WRITE: i64 = 1
+const SYS_OPEN: i64 = 2
+const SYS_CLOSE: i64 = 3
+const SYS_LSEEK: i64 = 8
+const SYS_GETRANDOM: i64 = 318
+const SYS_CLOCK_GETTIME: i64 = 228
+
+// Ein iovec des Gastes: zwei u32 (Zeiger, Laenge) -- WASM ist 32-bittig,
+// also ist ein iovec acht Oktette und nicht sechzehn wie auf x86-64.
+// DAS IST DER ERSTE FALLSTRICK DIESER RUNDE: wer hier `ld64` nimmt, weil
+// iovec auf dem Wirt so aussieht, liest Muell.
+fn iov_ptr(v: *mut VM, iov: u64, i: usize) -> u64 {
+    return g_ld32(v, iov + (i * 8) as u64)
+}
+
+fn iov_len(v: *mut VM, iov: u64, i: usize) -> usize {
+    return g_ld32(v, iov + (i * 8) as u64 + 4) as usize
+}
+
+// fd_write(fd, iovs, iovs_len, nwritten_ptr) -> errno
+fn w_fd_write(v: *mut VM, fd: u64, iov: u64, n: usize, ret: u64) -> u64 {
+    var ganz: usize = 0
+    var i: usize = 0
+    while i < n {
+        let p: u64 = iov_ptr(v, iov, i)
+        let l: usize = iov_len(v, iov, i)
+        if l > 0 {
+            if !mem_bound(v, p, l) {
+                return E_INVAL
+            }
+            // Osums `write`, Nummer 1, auf die Adresse IM GAST -- die
+            // liegt im Adressraum dieses Prozesses, also darf der Kern
+            // sie lesen.
+            let w: i64 = syscall(SYS_WRITE, fd as i64,
+                ((*(*v).m).mem + p) as i64, l as i64, 0, 0, 0)
+            if w < 0 {
+                return E_BADF
+            }
+            ganz = ganz + w as usize
+        }
+        i = i + 1
+    }
+    g_st32(v, ret, ganz as u64)
+    return E_OK
+}
+
+// fd_read(fd, iovs, iovs_len, nread_ptr) -> errno
+fn w_fd_read(v: *mut VM, fd: u64, iov: u64, n: usize, ret: u64) -> u64 {
+    var ganz: usize = 0
+    var i: usize = 0
+    while i < n {
+        let p: u64 = iov_ptr(v, iov, i)
+        let l: usize = iov_len(v, iov, i)
+        if l > 0 {
+            if !mem_bound(v, p, l) {
+                return E_INVAL
+            }
+            let r: i64 = syscall(SYS_READ, fd as i64,
+                ((*(*v).m).mem + p) as i64, l as i64, 0, 0, 0)
+            if r < 0 {
+                return E_BADF
+            }
+            ganz = ganz + r as usize
+            if r as usize < l {
+                // kurz gelesen: Dateiende oder Zeilenende
+                i = n
+            }
+        }
+        i = i + 1
+    }
+    g_st32(v, ret, ganz as u64)
+    return E_OK
+}
+
+// fd_seek(fd, offset:i64, whence:u8, newoffset_ptr) -> errno
+// WASI' whence: 0 = SET, 1 = CUR, 2 = END. Linux' lseek: 0, 1, 2.
+// Gleiche Zahlen, kein Umrechnen -- aber geprueft, nicht angenommen.
+fn w_fd_seek(v: *mut VM, fd: u64, off: u64, whence: u64, ret: u64) -> u64 {
+    if whence > 2 {
+        return E_INVAL
+    }
+    let r: i64 = syscall(SYS_LSEEK, fd as i64, off as i64, whence as i64,
+        0, 0, 0)
+    if r < 0 {
+        return E_BADF
+    }
+    g_st64(v, ret, r as u64)
+    return E_OK
+}
+
+// fd_fdstat_get(fd, buf) -> errno
+// Die Struktur ist 24 Oktette: fs_filetype u8, 3 Fuellung, fs_flags u16,
+// 2 Fuellung, fs_rights_base u64, fs_rights_inheriting u64.
+//
+// WARUM DAS NOETIG IST, obwohl es nichts tut: Rusts Standardbibliothek
+// fragt beim ERSTEN `println!` danach, ob fd 1 ein Terminal ist. Ohne
+// eine Antwort bricht sie ab, bevor irgendetwas erscheint.
+const FT_UNKNOWN: u64 = 0
+const FT_CHARACTER_DEVICE: u64 = 2
+const FT_DIRECTORY: u64 = 3
+const FT_REGULAR_FILE: u64 = 4
+
+fn w_fd_fdstat_get(v: *mut VM, fd: u64, buf: u64) -> u64 {
+    if !mem_bound(v, buf, 24) {
+        return E_INVAL
+    }
+    var art: u64 = FT_REGULAR_FILE
+    if fd < 3 {
+        art = FT_CHARACTER_DEVICE
+    }
+    if fd == 3 {
+        art = FT_DIRECTORY
+    }
+    g_st8(v, buf, art)
+    g_st8(v, buf + 1, 0)
+    g_st16(v, buf + 2, 0)
+    g_st16(v, buf + 4, 0)          // fs_flags
+    g_st16(v, buf + 6, 0)
+    // alle Rechte -- der Deuter macht keine Rechteverwaltung, die
+    // Grenze zieht Osums Dateisystem darunter.
+    g_st64(v, buf + 8, 0 as u64 - 1 as u64)
+    g_st64(v, buf + 16, 0 as u64 - 1 as u64)
+    return E_OK
+}
+
+// fd_prestat_get(fd, buf) -> errno
+//
+// DIE FUNKTION, OHNE DIE FAST NICHTS STARTET. Ein WASI-Programm fragt
+// beim Start der Reihe nach die Deskriptoren ab 3 ab: "bist du ein
+// vorgeoeffnetes Verzeichnis, und wie heisst du?". Erst damit weiss es,
+// unter welchem Namen es sein Wurzelverzeichnis ansprechen darf.
+// Antwortet niemand, findet das Programm keinen Pfad -- und Rusts
+// `File::open` gibt dann NotFound zurueck, egal was da ist.
+//
+// Wir melden GENAU EINEN: fd 3 ist "/". Danach EBADF, was das Signal
+// "keine weiteren" ist.
+const PRESTAT_DIR: u64 = 0
+const WURZEL_FD: u64 = 3
+const WURZEL_LEN: usize = 1
+
+fn w_fd_prestat_get(v: *mut VM, fd: u64, buf: u64) -> u64 {
+    if fd != WURZEL_FD {
+        return E_BADF
+    }
+    if !mem_bound(v, buf, 8) {
+        return E_INVAL
+    }
+    g_st8(v, buf, PRESTAT_DIR)
+    g_st32(v, buf + 4, WURZEL_LEN as u64)
+    return E_OK
+}
+
+fn w_fd_prestat_dir_name(v: *mut VM, fd: u64, p: u64, n: usize) -> u64 {
+    if fd != WURZEL_FD {
+        return E_BADF
+    }
+    if n < WURZEL_LEN || !mem_bound(v, p, WURZEL_LEN) {
+        return E_INVAL
+    }
+    g_st8(v, p, 47)                // '/'
+    return E_OK
+}
+
+// path_open(dirfd, dirflags, path, path_len, oflags, rights_base,
+//           rights_inheriting, fdflags, opened_fd_ptr) -> errno
+//
+// WASIs oflags: 1 = CREAT, 2 = DIRECTORY, 4 = EXCL, 8 = TRUNC.
+// Die Schreibrichtung steckt NICHT in oflags, sondern in den Rechten:
+// RIGHT_FD_WRITE ist Bit 6 (64). Das ist der zweite Fallstrick -- wer
+// nach O_WRONLY in oflags sucht, findet es nie und oeffnet alles
+// lesend.
+const O_RDONLY: i64 = 0
+const O_WRONLY: i64 = 1
+const O_RDWR: i64 = 2
+const O_CREAT: i64 = 64
+const O_TRUNC: i64 = 512
+const O_EXCL: i64 = 128
+const RIGHT_FD_READ: u64 = 2
+const RIGHT_FD_WRITE: u64 = 64
+
+fn w_path_open(v: *mut VM, path: u64, plen: usize, oflags: u64,
+    rechte: u64, ret: u64) -> u64 {
+    if plen == 0 || plen > 1024 || !mem_bound(v, path, plen) {
+        return E_INVAL
+    }
+    // Der Pfad des Gastes ist NICHT nullterminiert -- WASI reicht
+    // Zeiger und Laenge. Osums `open` will eine C-Zeichenkette.
+    var puffer: [u8; 1088] = [0; 1088]
+    var at: usize = 0
+    // relative Pfade an die Wurzel haengen, damit "datei.txt" unter
+    // "/datei.txt" landet und nicht ins Leere zeigt.
+    if g_ld8(v, path) != 47 {
+        puffer[0] = 47 as u8
+        at = 1
+    }
+    var i: usize = 0
+    while i < plen {
+        puffer[at + i] = g_ld8(v, path + i as u64) as u8
+        i = i + 1
+    }
+    puffer[at + plen] = 0 as u8
+
+    var fl: i64 = O_RDONLY
+    let kann_schreiben: bool = rechte & RIGHT_FD_WRITE != 0
+    let kann_lesen: bool = rechte & RIGHT_FD_READ != 0
+    if kann_schreiben && kann_lesen {
+        fl = O_RDWR
+    } else if kann_schreiben {
+        fl = O_WRONLY
+    }
+    if oflags & 1 != 0 { fl = fl | O_CREAT }
+    if oflags & 4 != 0 { fl = fl | O_EXCL }
+    if oflags & 8 != 0 { fl = fl | O_TRUNC }
+
+    let fd: i64 = syscall(SYS_OPEN, (&puffer[0]) as i64, fl, 420, 0, 0, 0)
+    if fd < 0 {
+        return E_NOENT
+    }
+    g_st32(v, ret, fd as u64)
+    return E_OK
+}
+
+fn w_fd_close(v: *mut VM, fd: u64) -> u64 {
+    if fd < 3 {
+        // die drei Standarddeskriptoren bleiben offen -- ein Gast, der
+        // sie schliesst, wuerde dem Deuter die Ausgabe wegnehmen.
+        return E_OK
+    }
+    let r: i64 = syscall(SYS_CLOSE, fd as i64, 0, 0, 0, 0, 0)
+    if r < 0 {
+        return E_BADF
+    }
+    return E_OK
+}
+
+// clock_time_get(id, precision:u64, time_ptr) -> errno
+// WASI zaehlt in NANOSEKUNDEN seit der Epoche; Osums clock_gettime
+// liefert Sekunden und Nanosekunden getrennt.
+fn w_clock_time_get(v: *mut VM, id: u64, ret: u64) -> u64 {
+    var ts: [i64; 2] = [0; 2]
+    var welche: i64 = 0            // CLOCK_REALTIME
+    if id == 1 {
+        welche = 1                 // CLOCK_MONOTONIC
+    }
+    syscall(SYS_CLOCK_GETTIME, welche, (&ts[0]) as i64, 0, 0, 0, 0)
+    let ns: u64 = ts[0] as u64 * 1000000000 + ts[1] as u64
+    g_st64(v, ret, ns)
+    return E_OK
+}
+
+fn w_random_get(v: *mut VM, p: u64, n: usize) -> u64 {
+    if !mem_bound(v, p, n) {
+        return E_INVAL
+    }
+    let r: i64 = syscall(SYS_GETRANDOM, ((*(*v).m).mem + p) as i64,
+        n as i64, 0, 0, 0, 0)
+    if r < 0 {
+        // Kein getrandom: lieber etwas Schwaches als ein Abbruch, aber
+        // die Zeile sagt es, damit niemand das fuer Zufall haelt.
+        io.print("wasm: WARNUNG random_get ohne Kern-Zufall\n")
+        var i: usize = 0
+        while i < n {
+            g_st8(v, p + i as u64, (i * 37 + 11) as u64 & 255)
+            i = i + 1
+        }
+    }
+    return E_OK
+}
+
+// args_sizes_get(argc_ptr, argv_buf_size_ptr) -> errno
+// Die Argumente des Gastes sind die des Deuters ab Position 2:
+// `wasm datei.wasm a b c` heisst fuer das Modul `datei.wasm a b c`.
+fn w_args_sizes_get(v: *mut VM, c: u64, s: u64) -> u64 {
+    var n: usize = 0
+    var ganz: usize = 0
+    var i: usize = 1
+    while i < (*v).argc {
+        let a: u64 = rt.arg_ptr((*v).start, i)
+        ganz = ganz + rt.c_length(a) + 1
+        n = n + 1
+        i = i + 1
+    }
+    g_st32(v, c, n as u64)
+    g_st32(v, s, ganz as u64)
+    return E_OK
+}
+
+fn w_args_get(v: *mut VM, zeiger: u64, puffer: u64) -> u64 {
+    var schreib: u64 = puffer
+    var k: usize = 0
+    var i: usize = 1
+    while i < (*v).argc {
+        let a: u64 = rt.arg_ptr((*v).start, i)
+        let l: usize = rt.c_length(a)
+        g_st32(v, zeiger + (k * 4) as u64, schreib)
+        var j: usize = 0
+        while j < l {
+            g_st8(v, schreib + j as u64, rt.ld8(a, j) as u64)
+            j = j + 1
+        }
+        g_st8(v, schreib + l as u64, 0)
+        schreib = schreib + (l + 1) as u64
+        k = k + 1
+        i = i + 1
+    }
+    return E_OK
+}
+
+// environ: leer. Ein Programm, das eine Variable braucht, bekommt keine
+// -- das ist ehrlicher als eine erfundene.
+fn w_environ_sizes_get(v: *mut VM, c: u64, s: u64) -> u64 {
+    g_st32(v, c, 0)
+    g_st32(v, s, 0)
+    return E_OK
+}
+
+// ---------------------------------------------------- der Verteiler
+//
+// Eine WASI-Funktion nimmt ihre Argumente vom Stapel (in umgekehrter
+// Reihenfolge) und legt genau einen Wert zurueck: die Fehlernummer.
+// `proc_exit` ist die Ausnahme -- sie legt nichts zurueck und beendet.
+fn wasi_rufen(v: *mut VM, nr: i32, npar: usize, nres: usize) {
+    // Argumente einsammeln: der letzte Parameter liegt oben.
+    var a: [u64; 16] = [0; 16]
+    var i: usize = npar
+    while i > 0 {
+        i = i - 1
+        if i < 16 {
+            a[i] = pop(v)
+        } else {
+            pop(v)
+        }
+    }
+    if (*v).falle {
+        return
+    }
+    var r: u64 = E_NOSYS
+
+    if nr == W_FD_WRITE {
+        r = w_fd_write(v, a[0], a[1], a[2] as usize, a[3])
+    } else if nr == W_PROC_EXIT {
+        (*v).beendet = true
+        (*v).code = a[0] as i32
+        return
+    } else if nr == W_FD_READ {
+        r = w_fd_read(v, a[0], a[1], a[2] as usize, a[3])
+    } else if nr == W_FD_SEEK {
+        r = w_fd_seek(v, a[0], a[1], a[2], a[3])
+    } else if nr == W_FD_CLOSE {
+        r = w_fd_close(v, a[0])
+    } else if nr == W_FD_FDSTAT_GET {
+        r = w_fd_fdstat_get(v, a[0], a[1])
+    } else if nr == W_PATH_OPEN {
+        r = w_path_open(v, a[2], a[3] as usize, a[4], a[5], a[8])
+    } else if nr == W_ENVIRON_SIZES_GET {
+        r = w_environ_sizes_get(v, a[0], a[1])
+    } else if nr == W_ENVIRON_GET {
+        r = E_OK
+    } else if nr == W_ARGS_SIZES_GET {
+        r = w_args_sizes_get(v, a[0], a[1])
+    } else if nr == W_ARGS_GET {
+        r = w_args_get(v, a[0], a[1])
+    } else if nr == W_CLOCK_TIME_GET {
+        r = w_clock_time_get(v, a[0], a[2])
+    } else if nr == W_RANDOM_GET {
+        r = w_random_get(v, a[0], a[1] as usize)
+    } else if nr == W_FD_PRESTAT_GET {
+        r = w_fd_prestat_get(v, a[0], a[1])
+    } else if nr == W_FD_PRESTAT_DIR_NAME {
+        r = w_fd_prestat_dir_name(v, a[0], a[1], a[2] as usize)
+    } else if nr == W_SCHED_YIELD {
+        r = E_OK
+    } else if nr == W_FD_SYNC || nr == W_FD_DATASYNC {
+        r = E_OK
+    } else if nr == W_FD_FDSTAT_SET_FLAGS {
+        r = E_OK
+    } else if nr == W_CLOCK_RES_GET {
+        g_st64(v, a[1], 1000)
+        r = E_OK
+    } else if nr == W_FD_TELL {
+        r = w_fd_seek(v, a[0], 0, 1, a[1])
+    } else if nr == W_UNBEKANNT {
+        // Ein Import, den wir nicht kennen. Das Programm bekommt eine
+        // ehrliche Absage statt eines stillen Nulls.
+        r = E_NOSYS
+    }
+    if nres > 0 {
+        push(v, r)
+    }
+}
+
+// ====================================================================
+//                   Der Befehlszaehler und die Bloecke
+// ====================================================================
+//
+// WASM hat keine Sprungziele als Zahlen, sondern GESCHACHTELTE BLOECKE.
+// `br 0` heisst "verlasse den innersten Block", `br 2` heisst "zwei
+// Ebenen hinaus". Damit ein Sprung weiss, WOHIN, muss der Deuter das
+// passende `end` finden -- und dazu muss er ueber den Bytecode
+// hinweglesen koennen, ohne ihn auszufuehren.
+//
+// `block_ende` ist genau das: es zaehlt Bloecke auf und ab und liefert
+// die Stelle hinter dem zugehoerigen `end`. DAS IST DER TEUERSTE TEIL
+// EINES EINFACHEN DEUTERS -- wasm3 loest es, indem es den Code einmal
+// vorcodiert. Wir zahlen den Preis bei jedem Sprung; dafuer ist der
+// Deuter halb so gross. Der gemessene Faktor am Ende sagt, was das
+// gekostet hat.
+
+// Wie viele unmittelbare Oktette hinter einem Befehl stehen, damit
+// `block_ende` sie ueberspringen kann, ohne sie zu deuten.
+fn immediate_ueberspringen(l: *mut Leser, op: u8) {
+    if op == 2 as u8 || op == 3 as u8 || op == 4 as u8 {
+        // block/loop/if: ein Blocktyp
+        let b: u8 = u8_lesen(l)
+        if b != T_EMPTY && b != T_I32 && b != T_I64 && b != T_F32
+            && b != T_F64 && b != T_FUNCREF {
+            // ein Typindex als sleb -- das Oktett gehoert schon dazu
+            (*l).at = (*l).at - 1
+            sleb(l)
+        }
+    } else if op == 12 as u8 || op == 13 as u8 {
+        uleb(l)                    // br, br_if
+    } else if op == 14 as u8 {
+        // br_table: eine Liste und der Auffangwert
+        let n: usize = uleb(l) as usize
+        var i: usize = 0
+        while i <= n {
+            uleb(l)
+            i = i + 1
+        }
+    } else if op == 16 as u8 {
+        uleb(l)                    // call
+    } else if op == 17 as u8 {
+        uleb(l)
+        uleb(l)                    // call_indirect
+    } else if op == 32 as u8 || op == 33 as u8 || op == 34 as u8
+        || op == 35 as u8 || op == 36 as u8 {
+        uleb(l)                    // local.*/global.*
+    } else if op >= 40 as u8 && op <= 62 as u8 {
+        uleb(l)                    // load/store: Ausrichtung
+        uleb(l)                    // und Versatz
+    } else if op == 63 as u8 || op == 64 as u8 {
+        uleb(l)                    // memory.size/grow
+    } else if op == 65 as u8 {
+        sleb(l)                    // i32.const
+    } else if op == 66 as u8 {
+        sleb(l)                    // i64.const
+    } else if op == 67 as u8 {
+        ueberspringen(l, 4)        // f32.const
+    } else if op == 68 as u8 {
+        ueberspringen(l, 8)        // f64.const
+    } else if op == 208 as u8 {
+        ueberspringen(l, 1)        // ref.null
+    } else if op == 210 as u8 {
+        uleb(l)                    // ref.func
+    } else if op == 252 as u8 {
+        // die 0xFC-Gruppe: memory.copy/fill, i32.trunc_sat u. a.
+        let sub: u64 = uleb(l)
+        if sub == 8 {
+            uleb(l)
+            ueberspringen(l, 1)
+        } else if sub == 9 || sub == 13 {
+            uleb(l)
+        } else if sub == 10 {
+            ueberspringen(l, 2)
+        } else if sub == 11 {
+            ueberspringen(l, 1)
+        }
+    }
+}
+
+// Die Stelle HINTER dem `end`, das zu dem Block bei `von` gehoert.
+// `von` zeigt hinter das block/loop/if-Opcode und seinen Blocktyp.
+// Liefert zusaetzlich, wo ein `else` steht (0 wenn keins).
+fn block_ende(m: *mut Modul, von: usize, bis: usize, else_out: *mut usize)
+    -> usize {
+    var l: Leser = leser_new((*m).p, bis)
+    l.at = von
+    var tiefe: usize = 0
+    *else_out = 0
+    while l.at < bis {
+        let op: u8 = u8_lesen(&l)
+        if l.fehler {
+            return bis
+        }
+        if op == 2 as u8 || op == 3 as u8 || op == 4 as u8 {
+            tiefe = tiefe + 1
+            immediate_ueberspringen(&l, op)
+        } else if op == 11 as u8 {
+            if tiefe == 0 {
+                return l.at
+            }
+            tiefe = tiefe - 1
+        } else if op == 5 as u8 {
+            if tiefe == 0 && *else_out == 0 {
+                *else_out = l.at
+            }
+        } else {
+            immediate_ueberspringen(&l, op)
+        }
+    }
+    return bis
+}
+
+// Wie viele Ergebnisse ein Blocktyp liefert.
+fn blocktyp_nres(m: *mut Modul, b: u8) -> usize {
+    if b == T_EMPTY {
+        return 0
+    }
+    if b == T_I32 || b == T_I64 || b == T_F32 || b == T_F64
+        || b == T_FUNCREF {
+        return 1
+    }
+    return 0
+}
+
+// ====================================================================
+//                        Die Hauptschleife
+// ====================================================================
+
+// Vorzeichen ausdehnen: i32 -> i64, damit Vergleiche und Division
+// stimmen. Ein i32 liegt in den unteren 32 Bit; ist Bit 31 gesetzt,
+// muessen die oberen 32 Einsen werden.
+fn s32(x: u64) -> i64 {
+    let v: u64 = x & 4294967295
+    if v & 2147483648 != 0 {
+        return (v | 18446744069414584320) as i64
+    }
+    return v as i64
+}
+
+fn u32v(x: u64) -> u64 {
+    return x & 4294967295
+}
+
+// Ein Sprung um `tiefe` Ebenen hinaus.
+fn springen(v: *mut VM, f: *mut Rahmen, tiefe: usize) {
+    if tiefe >= (*f).nlabel {
+        // ueber die Funktion hinaus = return
+        (*f).ip = (*f).ende
+        return
+    }
+    let li: usize = (*f).label_at + (*f).nlabel - 1 - tiefe
+    let lab: Label = (*v).label[li]
+    // die Ergebnisse des Blocks retten
+    var res: [u64; 8] = [0; 8]
+    var i: usize = 0
+    if !lab.schleife {
+        while i < lab.nres && i < 8 {
+            res[lab.nres - 1 - i] = pop(v)
+            i = i + 1
+        }
+    }
+    // den Stapel zurueckschneiden
+    if (*v).sp > lab.sp {
+        (*v).sp = lab.sp
+    }
+    if !lab.schleife {
+        i = 0
+        while i < lab.nres && i < 8 {
+            push(v, res[i])
+            i = i + 1
+        }
+    }
+    // die Label darueber verwerfen
+    (*f).nlabel = (*f).label_at + (*f).nlabel - li
+    (*f).nlabel = li - (*f).label_at
+    if lab.schleife {
+        // eine Schleife: der Sprung geht an ihren Anfang, und das Label
+        // BLEIBT stehen -- sonst endet die zweite Runde im Nichts.
+        (*f).nlabel = (*f).nlabel + 1
+    }
+    (*f).ip = lab.ziel
+}
+
+// Eine Funktion betreten: Rahmen anlegen, Parameter vom Stapel in die
+// Lokalen, Lokale auf null.
+fn eintreten(v: *mut VM, fi: usize) -> bool {
+    let m: *mut Modul = (*v).m
+    if fi >= (*m).nfunk {
+        (*v).falle = true
+        return false
+    }
+    if (*v).nframe >= 512 {
+        io.print("wasm: zu tief verschachtelte Aufrufe\n")
+        (*v).falle = true
+        return false
+    }
+    let t: usize = (*m).funk[fi].typ
+    if t >= (*m).ntyp {
+        (*v).falle = true
+        return false
+    }
+    let npar: usize = (*m).typ[t].npar
+    let nloc: usize = (*m).funk[fi].nloc
+    if (*v).nloc + npar + nloc > 2048 {
+        io.print("wasm: zu viele Lokale\n")
+        (*v).falle = true
+        return false
+    }
+    let basis: usize = (*v).nloc
+    // Parameter: der letzte liegt oben auf dem Stapel
+    var i: usize = npar
+    while i > 0 {
+        i = i - 1
+        (*v).locals[basis + i] = pop(v)
+    }
+    // Lokale sind null
+    i = 0
+    while i < nloc {
+        (*v).locals[basis + npar + i] = 0
+        i = i + 1
+    }
+    (*v).nloc = basis + npar + nloc
+
+    let fr: usize = (*v).nframe
+    (*v).frames[fr].funk = fi
+    (*v).frames[fr].ip = (*m).funk[fi].code_at
+    (*v).frames[fr].ende = (*m).funk[fi].code_end
+    (*v).frames[fr].locals_at = basis
+    (*v).frames[fr].nlocals = npar + nloc
+    var lab_at: usize = 0
+    if fr > 0 {
+        lab_at = (*v).frames[fr - 1].label_at + (*v).frames[fr - 1].nlabel
+    }
+    (*v).frames[fr].label_at = lab_at
+    (*v).frames[fr].nlabel = 0
+    (*v).frames[fr].sp_ein = (*v).sp
+    (*v).frames[fr].nres = (*m).typ[t].nres
+    (*v).nframe = fr + 1
+    return true
+}
+
+// Eine Funktion verlassen: Ergebnisse retten, Stapel und Lokale
+// zurueckgeben.
+fn verlassen(v: *mut VM) {
+    if (*v).nframe == 0 {
+        return
+    }
+    let fr: usize = (*v).nframe - 1
+    let nres: usize = (*v).frames[fr].nres
+    var res: [u64; 8] = [0; 8]
+    var i: usize = 0
+    while i < nres && i < 8 {
+        res[nres - 1 - i] = pop(v)
+        i = i + 1
+    }
+    (*v).sp = (*v).frames[fr].sp_ein
+    (*v).nloc = (*v).frames[fr].locals_at
+    (*v).nframe = fr
+    i = 0
+    while i < nres && i < 8 {
+        push(v, res[i])
+        i = i + 1
+    }
+}
+
+const SCHRITT_GRENZE: u64 = 4000000000
+
+fn ausfuehren(v: *mut VM) -> i32 {
+    let m: *mut Modul = (*v).m
+    while (*v).nframe > 0 && !(*v).falle && !(*v).beendet {
+        (*v).schritte = (*v).schritte + 1
+        if (*v).schritte > SCHRITT_GRENZE {
+            io.print("wasm: das Modul laeuft zu lange, Abbruch\n")
+            return 1
+        }
+        let fr: usize = (*v).nframe - 1
+        var l: Leser = leser_new((*m).p, (*v).frames[fr].ende)
+        l.at = (*v).frames[fr].ip
+        if l.at >= (*v).frames[fr].ende {
+            // das Ende der Funktion ist ein stilles `return`
+            verlassen(v)
+            continue
+        }
+        let op: u8 = u8_lesen(&l)
+
+        // ---------------------------------------------- Kontrollfluss
+        if op == 0 as u8 {                       // unreachable
+            io.print("wasm: das Modul hat `unreachable` erreicht\n")
+            (*v).falle = true
+        } else if op == 1 as u8 {                // nop
+            // nichts
+        } else if op == 2 as u8 || op == 3 as u8 {   // block, loop
+            let bt: u8 = u8_lesen(&l)
+            let nres: usize = blocktyp_nres(m, bt)
+            let li: usize = (*v).frames[fr].label_at + (*v).frames[fr].nlabel
+            if li >= 1024 {
+                io.print("wasm: zu viele verschachtelte Bloecke\n")
+                (*v).falle = true
+            } else {
+                var elsepos: usize = 0
+                if op == 3 as u8 {
+                    // loop: das Ziel ist der Anfang des Rumpfes
+                    (*v).label[li].ziel = l.at
+                    (*v).label[li].schleife = true
+                    (*v).label[li].nres = 0
+                } else {
+                    (*v).label[li].ziel = block_ende(m, l.at,
+                        (*v).frames[fr].ende, &elsepos)
+                    (*v).label[li].schleife = false
+                    (*v).label[li].nres = nres
+                }
+                (*v).label[li].sp = (*v).sp
+                (*v).frames[fr].nlabel = (*v).frames[fr].nlabel + 1
+            }
+        } else if op == 4 as u8 {                // if
+            let bt2: u8 = u8_lesen(&l)
+            let nres2: usize = blocktyp_nres(m, bt2)
+            let c: u64 = pop(v)
+            var elsepos2: usize = 0
+            let ende: usize = block_ende(m, l.at, (*v).frames[fr].ende,
+                &elsepos2)
+            let li2: usize = (*v).frames[fr].label_at
+                + (*v).frames[fr].nlabel
+            if li2 >= 1024 {
+                (*v).falle = true
+            } else {
+                (*v).label[li2].ziel = ende
+                (*v).label[li2].sp = (*v).sp
+                (*v).label[li2].nres = nres2
+                (*v).label[li2].schleife = false
+                (*v).frames[fr].nlabel = (*v).frames[fr].nlabel + 1
+                if u32v(c) == 0 {
+                    // falsch: in den else-Zweig oder hinter das end
+                    if elsepos2 != 0 {
+                        l.at = elsepos2
+                    } else {
+                        l.at = ende
+                        if (*v).frames[fr].nlabel > 0 {
+                            (*v).frames[fr].nlabel =
+                                (*v).frames[fr].nlabel - 1
+                        }
+                    }
+                }
+            }
+        } else if op == 5 as u8 {                // else
+            // Wer hier ankommt, hat den then-Zweig zu Ende gelaufen und
+            // muss ueber den else-Zweig hinweg.
+            if (*v).frames[fr].nlabel > 0 {
+                let li3: usize = (*v).frames[fr].label_at
+                    + (*v).frames[fr].nlabel - 1
+                l.at = (*v).label[li3].ziel
+                (*v).frames[fr].nlabel = (*v).frames[fr].nlabel - 1
+            }
+        } else if op == 11 as u8 {               // end
+            if (*v).frames[fr].nlabel > 0 {
+                (*v).frames[fr].nlabel = (*v).frames[fr].nlabel - 1
+            } else {
+                (*v).frames[fr].ip = l.at
+                verlassen(v)
+                continue
+            }
+        } else if op == 12 as u8 {               // br
+            let d: usize = uleb(&l) as usize
+            (*v).frames[fr].ip = l.at
+            springen(v, &(*v).frames[fr], d)
+            continue
+        } else if op == 13 as u8 {               // br_if
+            let d2: usize = uleb(&l) as usize
+            let c2: u64 = pop(v)
+            (*v).frames[fr].ip = l.at
+            if u32v(c2) != 0 {
+                springen(v, &(*v).frames[fr], d2)
+                continue
+            }
+        } else if op == 14 as u8 {               // br_table
+            let n: usize = uleb(&l) as usize
+            let idx: u64 = u32v(pop(v))
+            var ziel: usize = 0
+            var i: usize = 0
+            var gefunden: bool = false
+            while i < n {
+                let d3: usize = uleb(&l) as usize
+                if i as u64 == idx {
+                    ziel = d3
+                    gefunden = true
+                }
+                i = i + 1
+            }
+            let dflt: usize = uleb(&l) as usize
+            if !gefunden {
+                ziel = dflt
+            }
+            (*v).frames[fr].ip = l.at
+            springen(v, &(*v).frames[fr], ziel)
+            continue
+        } else if op == 15 as u8 {               // return
+            (*v).frames[fr].ip = l.at
+            verlassen(v)
+            continue
+        } else if op == 16 as u8 {               // call
+            let fi: usize = uleb(&l) as usize
+            (*v).frames[fr].ip = l.at
+            if fi >= (*m).nfunk {
+                io.print("wasm: Aufruf einer Funktion, die es nicht gibt\n")
+                (*v).falle = true
+            } else if (*m).funk[fi].importiert {
+                let t2: usize = (*m).funk[fi].typ
+                wasi_rufen(v, (*m).funk[fi].wasi, (*m).typ[t2].npar,
+                    (*m).typ[t2].nres)
+            } else {
+                eintreten(v, fi)
+            }
+            continue
+        } else if op == 17 as u8 {               // call_indirect
+            let ti: usize = uleb(&l) as usize
+            uleb(&l)                             // Tabellenindex
+            let e: u64 = u32v(pop(v))
+            (*v).frames[fr].ip = l.at
+            if e as usize >= (*m).ntab {
+                io.print("wasm: indirekter Aufruf ausserhalb der Tabelle\n")
+                (*v).falle = true
+            } else {
+                let fi2: usize = (*m).tab[e as usize] as usize
+                if fi2 >= (*m).nfunk {
+                    io.print("wasm: die Tabelle zeigt auf keine Funktion\n")
+                    (*v).falle = true
+                } else if (*m).funk[fi2].typ != ti {
+                    io.print("wasm: indirekter Aufruf mit falschem Typ\n")
+                    (*v).falle = true
+                } else if (*m).funk[fi2].importiert {
+                    let t3: usize = (*m).funk[fi2].typ
+                    wasi_rufen(v, (*m).funk[fi2].wasi, (*m).typ[t3].npar,
+                        (*m).typ[t3].nres)
+                } else {
+                    eintreten(v, fi2)
+                }
+            }
+            continue
+
+        // ------------------------------------------------ Parametrisch
+        } else if op == 26 as u8 {               // drop
+            pop(v)
+        } else if op == 27 as u8 {               // select
+            let c3: u64 = u32v(pop(v))
+            let b: u64 = pop(v)
+            let a: u64 = pop(v)
+            if c3 != 0 { push(v, a) } else { push(v, b) }
+        } else if op == 28 as u8 {               // select mit Typ
+            let cnt: usize = uleb(&l) as usize
+            ueberspringen(&l, cnt)
+            let c4: u64 = u32v(pop(v))
+            let b2: u64 = pop(v)
+            let a2: u64 = pop(v)
+            if c4 != 0 { push(v, a2) } else { push(v, b2) }
+
+        // --------------------------------------------- Lokale/Globale
+        } else if op == 32 as u8 {               // local.get
+            let i2: usize = uleb(&l) as usize
+            if i2 >= (*v).frames[fr].nlocals {
+                (*v).falle = true
+            } else {
+                push(v, (*v).locals[(*v).frames[fr].locals_at + i2])
+            }
+        } else if op == 33 as u8 {               // local.set
+            let i3: usize = uleb(&l) as usize
+            let x: u64 = pop(v)
+            if i3 >= (*v).frames[fr].nlocals {
+                (*v).falle = true
+            } else {
+                (*v).locals[(*v).frames[fr].locals_at + i3] = x
+            }
+        } else if op == 34 as u8 {               // local.tee
+            let i4: usize = uleb(&l) as usize
+            let x2: u64 = pop(v)
+            push(v, x2)
+            if i4 >= (*v).frames[fr].nlocals {
+                (*v).falle = true
+            } else {
+                (*v).locals[(*v).frames[fr].locals_at + i4] = x2
+            }
+        } else if op == 35 as u8 {               // global.get
+            let g: usize = uleb(&l) as usize
+            if g >= (*m).nglob {
+                (*v).falle = true
+            } else {
+                push(v, (*m).glob[g])
+            }
+        } else if op == 36 as u8 {               // global.set
+            let g2: usize = uleb(&l) as usize
+            let x3: u64 = pop(v)
+            if g2 >= (*m).nglob {
+                (*v).falle = true
+            } else {
+                (*m).glob[g2] = x3
+            }
+
+        // ------------------------------------------------- Speicher
+        } else if op >= 40 as u8 && op <= 62 as u8 {
+            uleb(&l)                             // Ausrichtung: uns egal,
+            // weil wir ohnehin oktettweise lesen. Genau deshalb ist
+            // dieser Deuter gegen unausgerichtete Zugriffe unempfindlich.
+            let off: u64 = uleb(&l)
+            if op <= 53 as u8 {
+                // Laden
+                let adr: u64 = u32v(pop(v)) + off
+                if op == 40 as u8 {              // i32.load
+                    push(v, g_ld32(v, adr))
+                } else if op == 41 as u8 {       // i64.load
+                    push(v, g_ld64(v, adr))
+                } else if op == 42 as u8 {       // f32.load
+                    push(v, g_ld32(v, adr))
+                } else if op == 43 as u8 {       // f64.load
+                    push(v, g_ld64(v, adr))
+                } else if op == 44 as u8 {       // i32.load8_s
+                    let b3: u64 = g_ld8(v, adr)
+                    if b3 & 128 != 0 {
+                        push(v, b3 | 4294967040)
+                    } else { push(v, b3) }
+                } else if op == 45 as u8 {       // i32.load8_u
+                    push(v, g_ld8(v, adr))
+                } else if op == 46 as u8 {       // i32.load16_s
+                    let h: u64 = g_ld16(v, adr)
+                    if h & 32768 != 0 {
+                        push(v, h | 4294901760)
+                    } else { push(v, h) }
+                } else if op == 47 as u8 {       // i32.load16_u
+                    push(v, g_ld16(v, adr))
+                } else if op == 48 as u8 {       // i64.load8_s
+                    let b4: u64 = g_ld8(v, adr)
+                    if b4 & 128 != 0 {
+                        push(v, b4 | 18446744073709551360)
+                    } else { push(v, b4) }
+                } else if op == 49 as u8 {       // i64.load8_u
+                    push(v, g_ld8(v, adr))
+                } else if op == 50 as u8 {       // i64.load16_s
+                    let h2: u64 = g_ld16(v, adr)
+                    if h2 & 32768 != 0 {
+                        push(v, h2 | 18446744073709486080)
+                    } else { push(v, h2) }
+                } else if op == 51 as u8 {       // i64.load16_u
+                    push(v, g_ld16(v, adr))
+                } else if op == 52 as u8 {       // i64.load32_s
+                    let w: u64 = g_ld32(v, adr)
+                    if w & 2147483648 != 0 {
+                        push(v, w | 18446744069414584320)
+                    } else { push(v, w) }
+                } else {                         // i64.load32_u
+                    push(v, g_ld32(v, adr))
+                }
+            } else {
+                // Speichern: der Wert liegt oben, die Adresse darunter
+                let x4: u64 = pop(v)
+                let adr2: u64 = u32v(pop(v)) + off
+                if op == 54 as u8 {              // i32.store
+                    g_st32(v, adr2, x4)
+                } else if op == 55 as u8 {       // i64.store
+                    g_st64(v, adr2, x4)
+                } else if op == 56 as u8 {       // f32.store
+                    g_st32(v, adr2, x4)
+                } else if op == 57 as u8 {       // f64.store
+                    g_st64(v, adr2, x4)
+                } else if op == 58 as u8 {       // i32.store8
+                    g_st8(v, adr2, x4)
+                } else if op == 59 as u8 {       // i32.store16
+                    g_st16(v, adr2, x4)
+                } else if op == 60 as u8 {       // i64.store8
+                    g_st8(v, adr2, x4)
+                } else if op == 61 as u8 {       // i64.store16
+                    g_st16(v, adr2, x4)
+                } else {                         // i64.store32
+                    g_st32(v, adr2, x4)
+                }
+            }
+        } else if op == 63 as u8 {               // memory.size
+            uleb(&l)
+            push(v, (*m).mem_pages as u64)
+        } else if op == 64 as u8 {               // memory.grow
+            uleb(&l)
+            let dazu: usize = u32v(pop(v)) as usize
+            let alt: usize = (*m).mem_pages
+            if dazu == 0 {
+                push(v, alt as u64)
+            } else if alt + dazu > (*m).mem_max || alt + dazu > MAX_PAGES {
+                push(v, 4294967295)              // -1: geht nicht
+            } else {
+                // Ein groesserer Block, umkopieren, den alten zurueck.
+                let neu: usize = alt + dazu
+                let p2: u64 = rt.heap_alloc(neu * PAGE_SIZE)
+                if p2 == 0 {
+                    push(v, 4294967295)
+                } else {
+                    rt.mem_set(p2, 0 as u8, neu * PAGE_SIZE)
+                    rt.mem_copy(p2, (*m).mem, alt * PAGE_SIZE)
+                    rt.heap_free((*m).mem, alt * PAGE_SIZE)
+                    (*m).mem = p2
+                    (*m).mem_pages = neu
+                    push(v, alt as u64)
+                }
+            }
+
+        // ------------------------------------------------ Konstanten
+        } else if op == 65 as u8 {               // i32.const
+            push(v, sleb(&l) as u64 & 4294967295)
+        } else if op == 66 as u8 {               // i64.const
+            push(v, sleb(&l) as u64)
+        } else if op == 67 as u8 {               // f32.const
+            push(v, u32_roh(&l) as u64)
+        } else if op == 68 as u8 {               // f64.const
+            push(v, u64_roh(&l))
+        } else {
+            // alles Weitere in der Zahlenwerkstatt
+            if !zahl_op(v, op, &l) {
+                io.print("wasm: unbekannter Befehl ")
+                zahl_aus(op as u64)
+                io.print("\n")
+                (*v).falle = true
+            }
+        }
+        if (*v).nframe > 0 {
+            (*v).frames[(*v).nframe - 1].ip = l.at
+        }
+    }
+    if (*v).falle {
+        return 1
+    }
+    return 0
+}
+
+// ====================================================================
+//                        Die Zahlenwerkstatt
+// ====================================================================
+//
+// Alles ab 0x45: Vergleiche, Arithmetik, Umwandlungen. Ausgelagert,
+// damit die Hauptschleife lesbar bleibt.
+//
+// ZU DEN GLEITKOMMAZAHLEN. Firn hat `f32`/`f64`, und die Werte liegen
+// hier als BITMUSTER in einem u64. Umgerechnet wird mit
+// `__bitcast`-artigen Umwegen ueber den Speicher, weil das die einzige
+// Form ist, die der Uebersetzer in beide Richtungen sicher macht.
+
+fn zahl_aus(x: u64) {
+    var b: rt.Buf = rt.buf_new()
+    rt.buf_push_dec_u64(&b, x)
+    rt.write_everything(1, b.ptr, b.len)
+    rt.buf_free(&b)
+}
+
+// Bitmuster <-> Gleitkomma, ueber den Speicher.
+fn bits_zu_f64(x: u64) -> f64 {
+    var s: [u64; 1] = [0; 1]
+    s[0] = x
+    return *((&s[0]) as u64 as *mut f64)
+}
+
+fn f64_zu_bits(x: f64) -> u64 {
+    var s: [f64; 1] = [0.0; 1]
+    s[0] = x
+    return *((&s[0]) as u64 as *mut u64)
+}
+
+fn bits_zu_f32(x: u64) -> f32 {
+    var s: [u32; 1] = [0; 1]
+    s[0] = (x & 4294967295) as u32
+    return *((&s[0]) as u64 as *mut f32)
+}
+
+fn f32_zu_bits(x: f32) -> u64 {
+    var s: [f32; 1] = [0.0; 1]
+    s[0] = x
+    let w: u32 = *((&s[0]) as u64 as *mut u32)
+    return w as u64
+}
+
+fn b2i(b: bool) -> u64 {
+    if b { return 1 }
+    return 0
+}
+
+// i32 rotieren -- WASM hat rotl/rotr, Firn nicht.
+fn rotl32(x: u64, n: u64) -> u64 {
+    let k: u64 = n & 31
+    if k == 0 { return x & 4294967295 }
+    return ((x << k as u32) | (x & 4294967295) >> (32 - k) as u32) & 4294967295
+}
+
+fn rotr32(x: u64, n: u64) -> u64 {
+    let k: u64 = n & 31
+    if k == 0 { return x & 4294967295 }
+    return (((x & 4294967295) >> k as u32) | x << (32 - k) as u32) & 4294967295
+}
+
+fn rotl64(x: u64, n: u64) -> u64 {
+    let k: u64 = n & 63
+    if k == 0 { return x }
+    return x << k as u32 | x >> (64 - k) as u32
+}
+
+fn rotr64(x: u64, n: u64) -> u64 {
+    let k: u64 = n & 63
+    if k == 0 { return x }
+    return x >> k as u32 | x << (64 - k) as u32
+}
+
+fn clz32(x: u64) -> u64 {
+    let v: u64 = x & 4294967295
+    if v == 0 { return 32 }
+    var n: u64 = 0
+    var b: u64 = 2147483648
+    while b != 0 && v & b == 0 {
+        n = n + 1
+        b = b >> 1 as u32
+    }
+    return n
+}
+
+fn ctz32(x: u64) -> u64 {
+    let v: u64 = x & 4294967295
+    if v == 0 { return 32 }
+    var n: u64 = 0
+    var b: u64 = 1
+    while v & b == 0 {
+        n = n + 1
+        b = b << 1 as u32
+    }
+    return n
+}
+
+fn popcnt64(x: u64) -> u64 {
+    var n: u64 = 0
+    var i: u32 = 0
+    while i < 64 as u32 {
+        if x >> i & 1 != 0 { n = n + 1 }
+        i = i + 1 as u32
+    }
+    return n
+}
+
+fn clz64(x: u64) -> u64 {
+    if x == 0 { return 64 }
+    var n: u64 = 0
+    var b: u64 = 9223372036854775808
+    while b != 0 && x & b == 0 {
+        n = n + 1
+        b = b >> 1 as u32
+    }
+    return n
+}
+
+fn ctz64(x: u64) -> u64 {
+    if x == 0 { return 64 }
+    var n: u64 = 0
+    var b: u64 = 1
+    while x & b == 0 {
+        n = n + 1
+        b = b << 1 as u32
+    }
+    return n
+}
+
+fn zahl_op(v: *mut VM, op: u8, l: *mut Leser) -> bool {
+    // ------------------------------------------------ i32-Vergleiche
+    if op == 69 as u8 {                          // i32.eqz
+        push(v, b2i(u32v(pop(v)) == 0))
+    } else if op == 70 as u8 {                   // i32.eq
+        let b: u64 = pop(v)
+        push(v, b2i(u32v(pop(v)) == u32v(b)))
+    } else if op == 71 as u8 {                   // i32.ne
+        let b: u64 = pop(v)
+        push(v, b2i(u32v(pop(v)) != u32v(b)))
+    } else if op == 72 as u8 {                   // i32.lt_s
+        let b: u64 = pop(v)
+        push(v, b2i(s32(pop(v)) < s32(b)))
+    } else if op == 73 as u8 {                   // i32.lt_u
+        let b: u64 = pop(v)
+        push(v, b2i(u32v(pop(v)) < u32v(b)))
+    } else if op == 74 as u8 {                   // i32.gt_s
+        let b: u64 = pop(v)
+        push(v, b2i(s32(pop(v)) > s32(b)))
+    } else if op == 75 as u8 {                   // i32.gt_u
+        let b: u64 = pop(v)
+        push(v, b2i(u32v(pop(v)) > u32v(b)))
+    } else if op == 76 as u8 {                   // i32.le_s
+        let b: u64 = pop(v)
+        push(v, b2i(s32(pop(v)) <= s32(b)))
+    } else if op == 77 as u8 {                   // i32.le_u
+        let b: u64 = pop(v)
+        push(v, b2i(u32v(pop(v)) <= u32v(b)))
+    } else if op == 78 as u8 {                   // i32.ge_s
+        let b: u64 = pop(v)
+        push(v, b2i(s32(pop(v)) >= s32(b)))
+    } else if op == 79 as u8 {                   // i32.ge_u
+        let b: u64 = pop(v)
+        push(v, b2i(u32v(pop(v)) >= u32v(b)))
+
+    // ------------------------------------------------ i64-Vergleiche
+    } else if op == 80 as u8 {                   // i64.eqz
+        push(v, b2i(pop(v) == 0))
+    } else if op == 81 as u8 {                   // i64.eq
+        let b: u64 = pop(v)
+        push(v, b2i(pop(v) == b))
+    } else if op == 82 as u8 {                   // i64.ne
+        let b: u64 = pop(v)
+        push(v, b2i(pop(v) != b))
+    } else if op == 83 as u8 {                   // i64.lt_s
+        let b: u64 = pop(v)
+        push(v, b2i((pop(v) as i64) < (b as i64)))
+    } else if op == 84 as u8 {                   // i64.lt_u
+        let b: u64 = pop(v)
+        push(v, b2i(pop(v) < b))
+    } else if op == 85 as u8 {                   // i64.gt_s
+        let b: u64 = pop(v)
+        push(v, b2i((pop(v) as i64) > (b as i64)))
+    } else if op == 86 as u8 {                   // i64.gt_u
+        let b: u64 = pop(v)
+        push(v, b2i(pop(v) > b))
+    } else if op == 87 as u8 {                   // i64.le_s
+        let b: u64 = pop(v)
+        push(v, b2i((pop(v) as i64) <= (b as i64)))
+    } else if op == 88 as u8 {                   // i64.le_u
+        let b: u64 = pop(v)
+        push(v, b2i(pop(v) <= b))
+    } else if op == 89 as u8 {                   // i64.ge_s
+        let b: u64 = pop(v)
+        push(v, b2i((pop(v) as i64) >= (b as i64)))
+    } else if op == 90 as u8 {                   // i64.ge_u
+        let b: u64 = pop(v)
+        push(v, b2i(pop(v) >= b))
+
+    // ------------------------------------------------- f-Vergleiche
+    } else if op == 91 as u8 {                   // f32.eq
+        let b: f32 = bits_zu_f32(pop(v))
+        push(v, b2i(bits_zu_f32(pop(v)) == b))
+    } else if op == 92 as u8 {                   // f32.ne
+        let b: f32 = bits_zu_f32(pop(v))
+        push(v, b2i(bits_zu_f32(pop(v)) != b))
+    } else if op == 93 as u8 {                   // f32.lt
+        let b: f32 = bits_zu_f32(pop(v))
+        push(v, b2i(bits_zu_f32(pop(v)) < b))
+    } else if op == 94 as u8 {                   // f32.gt
+        let b: f32 = bits_zu_f32(pop(v))
+        push(v, b2i(bits_zu_f32(pop(v)) > b))
+    } else if op == 95 as u8 {                   // f32.le
+        let b: f32 = bits_zu_f32(pop(v))
+        push(v, b2i(bits_zu_f32(pop(v)) <= b))
+    } else if op == 96 as u8 {                   // f32.ge
+        let b: f32 = bits_zu_f32(pop(v))
+        push(v, b2i(bits_zu_f32(pop(v)) >= b))
+    } else if op == 97 as u8 {                   // f64.eq
+        let b: f64 = bits_zu_f64(pop(v))
+        push(v, b2i(bits_zu_f64(pop(v)) == b))
+    } else if op == 98 as u8 {                   // f64.ne
+        let b: f64 = bits_zu_f64(pop(v))
+        push(v, b2i(bits_zu_f64(pop(v)) != b))
+    } else if op == 99 as u8 {                   // f64.lt
+        let b: f64 = bits_zu_f64(pop(v))
+        push(v, b2i(bits_zu_f64(pop(v)) < b))
+    } else if op == 100 as u8 {                  // f64.gt
+        let b: f64 = bits_zu_f64(pop(v))
+        push(v, b2i(bits_zu_f64(pop(v)) > b))
+    } else if op == 101 as u8 {                  // f64.le
+        let b: f64 = bits_zu_f64(pop(v))
+        push(v, b2i(bits_zu_f64(pop(v)) <= b))
+    } else if op == 102 as u8 {                  // f64.ge
+        let b: f64 = bits_zu_f64(pop(v))
+        push(v, b2i(bits_zu_f64(pop(v)) >= b))
+
+    // -------------------------------------------------- i32-Rechnen
+    } else if op == 103 as u8 {                  // i32.clz
+        push(v, clz32(pop(v)))
+    } else if op == 104 as u8 {                  // i32.ctz
+        push(v, ctz32(pop(v)))
+    } else if op == 105 as u8 {                  // i32.popcnt
+        push(v, popcnt64(u32v(pop(v))))
+    } else if op == 106 as u8 {                  // i32.add
+        let b: u64 = pop(v)
+        push(v, (pop(v) + b) & 4294967295)
+    } else if op == 107 as u8 {                  // i32.sub
+        let b: u64 = pop(v)
+        push(v, (pop(v) - b) & 4294967295)
+    } else if op == 108 as u8 {                  // i32.mul
+        let b: u64 = pop(v)
+        push(v, (pop(v) * b) & 4294967295)
+    } else if op == 109 as u8 {                  // i32.div_s
+        let b: i64 = s32(pop(v))
+        let a: i64 = s32(pop(v))
+        if b == 0 {
+            io.print("wasm: Division durch null\n")
+            (*v).falle = true
+        } else {
+            push(v, (a / b) as u64 & 4294967295)
+        }
+    } else if op == 110 as u8 {                  // i32.div_u
+        let b: u64 = u32v(pop(v))
+        let a: u64 = u32v(pop(v))
+        if b == 0 {
+            io.print("wasm: Division durch null\n")
+            (*v).falle = true
+        } else {
+            push(v, a / b)
+        }
+    } else if op == 111 as u8 {                  // i32.rem_s
+        let b: i64 = s32(pop(v))
+        let a: i64 = s32(pop(v))
+        if b == 0 {
+            io.print("wasm: Rest bei Division durch null\n")
+            (*v).falle = true
+        } else {
+            push(v, (a % b) as u64 & 4294967295)
+        }
+    } else if op == 112 as u8 {                  // i32.rem_u
+        let b: u64 = u32v(pop(v))
+        let a: u64 = u32v(pop(v))
+        if b == 0 {
+            io.print("wasm: Rest bei Division durch null\n")
+            (*v).falle = true
+        } else {
+            push(v, a % b)
+        }
+    } else if op == 113 as u8 {                  // i32.and
+        let b: u64 = pop(v)
+        push(v, (pop(v) & b) & 4294967295)
+    } else if op == 114 as u8 {                  // i32.or
+        let b: u64 = pop(v)
+        push(v, (pop(v) | b) & 4294967295)
+    } else if op == 115 as u8 {                  // i32.xor
+        let b: u64 = pop(v)
+        push(v, (pop(v) ^ b) & 4294967295)
+    } else if op == 116 as u8 {                  // i32.shl
+        let b: u64 = pop(v) & 31
+        push(v, (pop(v) << b as u32) & 4294967295)
+    } else if op == 117 as u8 {                  // i32.shr_s
+        let b: u64 = pop(v) & 31
+        push(v, (s32(pop(v)) >> b as u32) as u64 & 4294967295)
+    } else if op == 118 as u8 {                  // i32.shr_u
+        let b: u64 = pop(v) & 31
+        push(v, u32v(pop(v)) >> b as u32)
+    } else if op == 119 as u8 {                  // i32.rotl
+        let b: u64 = pop(v)
+        push(v, rotl32(pop(v), b))
+    } else if op == 120 as u8 {                  // i32.rotr
+        let b: u64 = pop(v)
+        push(v, rotr32(pop(v), b))
+
+    // -------------------------------------------------- i64-Rechnen
+    } else if op == 121 as u8 {                  // i64.clz
+        push(v, clz64(pop(v)))
+    } else if op == 122 as u8 {                  // i64.ctz
+        push(v, ctz64(pop(v)))
+    } else if op == 123 as u8 {                  // i64.popcnt
+        push(v, popcnt64(pop(v)))
+    } else if op == 124 as u8 {                  // i64.add
+        let b: u64 = pop(v)
+        push(v, pop(v) + b)
+    } else if op == 125 as u8 {                  // i64.sub
+        let b: u64 = pop(v)
+        push(v, pop(v) - b)
+    } else if op == 126 as u8 {                  // i64.mul
+        let b: u64 = pop(v)
+        push(v, pop(v) * b)
+    } else if op == 127 as u8 {                  // i64.div_s
+        let b: i64 = pop(v) as i64
+        let a: i64 = pop(v) as i64
+        if b == 0 {
+            io.print("wasm: Division durch null\n")
+            (*v).falle = true
+        } else {
+            push(v, (a / b) as u64)
+        }
+    } else if op == 128 as u8 {                  // i64.div_u
+        let b: u64 = pop(v)
+        let a: u64 = pop(v)
+        if b == 0 {
+            io.print("wasm: Division durch null\n")
+            (*v).falle = true
+        } else {
+            push(v, a / b)
+        }
+    } else if op == 129 as u8 {                  // i64.rem_s
+        let b: i64 = pop(v) as i64
+        let a: i64 = pop(v) as i64
+        if b == 0 {
+            io.print("wasm: Rest bei Division durch null\n")
+            (*v).falle = true
+        } else {
+            push(v, (a % b) as u64)
+        }
+    } else if op == 130 as u8 {                  // i64.rem_u
+        let b: u64 = pop(v)
+        let a: u64 = pop(v)
+        if b == 0 {
+            io.print("wasm: Rest bei Division durch null\n")
+            (*v).falle = true
+        } else {
+            push(v, a % b)
+        }
+    } else if op == 131 as u8 {                  // i64.and
+        let b: u64 = pop(v)
+        push(v, pop(v) & b)
+    } else if op == 132 as u8 {                  // i64.or
+        let b: u64 = pop(v)
+        push(v, pop(v) | b)
+    } else if op == 133 as u8 {                  // i64.xor
+        let b: u64 = pop(v)
+        push(v, pop(v) ^ b)
+    } else if op == 134 as u8 {                  // i64.shl
+        let b: u64 = pop(v) & 63
+        push(v, pop(v) << b as u32)
+    } else if op == 135 as u8 {                  // i64.shr_s
+        let b: u64 = pop(v) & 63
+        push(v, ((pop(v) as i64) >> b as u32) as u64)
+    } else if op == 136 as u8 {                  // i64.shr_u
+        let b: u64 = pop(v) & 63
+        push(v, pop(v) >> b as u32)
+    } else if op == 137 as u8 {                  // i64.rotl
+        let b: u64 = pop(v)
+        push(v, rotl64(pop(v), b))
+    } else if op == 138 as u8 {                  // i64.rotr
+        let b: u64 = pop(v)
+        push(v, rotr64(pop(v), b))
+
+    // ------------------------------------------------- f32-Rechnen
+    } else if op == 139 as u8 {                  // f32.abs
+        let a: f32 = bits_zu_f32(pop(v))
+        if a < 0.0 as f32 { push(v, f32_zu_bits(0.0 as f32 - a)) }
+        else { push(v, f32_zu_bits(a)) }
+    } else if op == 140 as u8 {                  // f32.neg
+        push(v, f32_zu_bits(0.0 as f32 - bits_zu_f32(pop(v))))
+    } else if op == 145 as u8 {                  // f32.sqrt
+        push(v, f32_zu_bits(wurzel32(bits_zu_f32(pop(v)))))
+    } else if op == 146 as u8 {                  // f32.add
+        let b: f32 = bits_zu_f32(pop(v))
+        push(v, f32_zu_bits(bits_zu_f32(pop(v)) + b))
+    } else if op == 147 as u8 {                  // f32.sub
+        let b: f32 = bits_zu_f32(pop(v))
+        push(v, f32_zu_bits(bits_zu_f32(pop(v)) - b))
+    } else if op == 148 as u8 {                  // f32.mul
+        let b: f32 = bits_zu_f32(pop(v))
+        push(v, f32_zu_bits(bits_zu_f32(pop(v)) * b))
+    } else if op == 149 as u8 {                  // f32.div
+        let b: f32 = bits_zu_f32(pop(v))
+        push(v, f32_zu_bits(bits_zu_f32(pop(v)) / b))
+    } else if op == 150 as u8 {                  // f32.min
+        let b: f32 = bits_zu_f32(pop(v))
+        let a: f32 = bits_zu_f32(pop(v))
+        if a < b { push(v, f32_zu_bits(a)) } else { push(v, f32_zu_bits(b)) }
+    } else if op == 151 as u8 {                  // f32.max
+        let b: f32 = bits_zu_f32(pop(v))
+        let a: f32 = bits_zu_f32(pop(v))
+        if a > b { push(v, f32_zu_bits(a)) } else { push(v, f32_zu_bits(b)) }
+
+    // ------------------------------------------------- f64-Rechnen
+    } else if op == 153 as u8 {                  // f64.abs
+        let a: f64 = bits_zu_f64(pop(v))
+        if a < 0.0 { push(v, f64_zu_bits(0.0 - a)) }
+        else { push(v, f64_zu_bits(a)) }
+    } else if op == 154 as u8 {                  // f64.neg
+        push(v, f64_zu_bits(0.0 - bits_zu_f64(pop(v))))
+    } else if op == 159 as u8 {                  // f64.sqrt
+        push(v, f64_zu_bits(wurzel64(bits_zu_f64(pop(v)))))
+    } else if op == 160 as u8 {                  // f64.add
+        let b: f64 = bits_zu_f64(pop(v))
+        push(v, f64_zu_bits(bits_zu_f64(pop(v)) + b))
+    } else if op == 161 as u8 {                  // f64.sub
+        let b: f64 = bits_zu_f64(pop(v))
+        push(v, f64_zu_bits(bits_zu_f64(pop(v)) - b))
+    } else if op == 162 as u8 {                  // f64.mul
+        let b: f64 = bits_zu_f64(pop(v))
+        push(v, f64_zu_bits(bits_zu_f64(pop(v)) * b))
+    } else if op == 163 as u8 {                  // f64.div
+        let b: f64 = bits_zu_f64(pop(v))
+        push(v, f64_zu_bits(bits_zu_f64(pop(v)) / b))
+    } else if op == 164 as u8 {                  // f64.min
+        let b: f64 = bits_zu_f64(pop(v))
+        let a: f64 = bits_zu_f64(pop(v))
+        if a < b { push(v, f64_zu_bits(a)) } else { push(v, f64_zu_bits(b)) }
+    } else if op == 165 as u8 {                  // f64.max
+        let b: f64 = bits_zu_f64(pop(v))
+        let a: f64 = bits_zu_f64(pop(v))
+        if a > b { push(v, f64_zu_bits(a)) } else { push(v, f64_zu_bits(b)) }
+
+    // ----------------------------------------------- Umwandlungen
+    } else if op == 167 as u8 {                  // i32.wrap_i64
+        push(v, pop(v) & 4294967295)
+    } else if op == 168 as u8 || op == 169 as u8 {  // i32.trunc_f32_s/u
+        push(v, (bits_zu_f32(pop(v)) as i64) as u64 & 4294967295)
+    } else if op == 170 as u8 || op == 171 as u8 {  // i32.trunc_f64_s/u
+        push(v, (bits_zu_f64(pop(v)) as i64) as u64 & 4294967295)
+    } else if op == 172 as u8 {                  // i64.extend_i32_s
+        push(v, s32(pop(v)) as u64)
+    } else if op == 173 as u8 {                  // i64.extend_i32_u
+        push(v, u32v(pop(v)))
+    } else if op == 174 as u8 || op == 175 as u8 {  // i64.trunc_f32_s/u
+        push(v, (bits_zu_f32(pop(v)) as i64) as u64)
+    } else if op == 176 as u8 || op == 177 as u8 {  // i64.trunc_f64_s/u
+        push(v, (bits_zu_f64(pop(v)) as i64) as u64)
+    } else if op == 178 as u8 {                  // f32.convert_i32_s
+        push(v, f32_zu_bits(s32(pop(v)) as f32))
+    } else if op == 179 as u8 {                  // f32.convert_i32_u
+        push(v, f32_zu_bits(u32v(pop(v)) as f32))
+    } else if op == 180 as u8 {                  // f32.convert_i64_s
+        push(v, f32_zu_bits((pop(v) as i64) as f32))
+    } else if op == 181 as u8 {                  // f32.convert_i64_u
+        push(v, f32_zu_bits(pop(v) as f32))
+    } else if op == 182 as u8 {                  // f32.demote_f64
+        push(v, f32_zu_bits(bits_zu_f64(pop(v)) as f32))
+    } else if op == 183 as u8 {                  // f64.convert_i32_s
+        push(v, f64_zu_bits(s32(pop(v)) as f64))
+    } else if op == 184 as u8 {                  // f64.convert_i32_u
+        push(v, f64_zu_bits(u32v(pop(v)) as f64))
+    } else if op == 185 as u8 {                  // f64.convert_i64_s
+        push(v, f64_zu_bits((pop(v) as i64) as f64))
+    } else if op == 186 as u8 {                  // f64.convert_i64_u
+        push(v, f64_zu_bits(pop(v) as f64))
+    } else if op == 187 as u8 {                  // f64.promote_f32
+        push(v, f64_zu_bits(bits_zu_f32(pop(v)) as f64))
+    } else if op == 188 as u8 {                  // i32.reinterpret_f32
+        push(v, u32v(pop(v)))
+    } else if op == 189 as u8 {                  // i64.reinterpret_f64
+        push(v, pop(v))
+    } else if op == 190 as u8 {                  // f32.reinterpret_i32
+        push(v, u32v(pop(v)))
+    } else if op == 191 as u8 {                  // f64.reinterpret_i64
+        push(v, pop(v))
+
+    // ------------------------------------- Vorzeichen ausdehnen (0xC0+)
+    } else if op == 192 as u8 {                  // i32.extend8_s
+        let x: u64 = pop(v) & 255
+        if x & 128 != 0 { push(v, (x | 4294967040)) } else { push(v, x) }
+    } else if op == 193 as u8 {                  // i32.extend16_s
+        let x: u64 = pop(v) & 65535
+        if x & 32768 != 0 { push(v, (x | 4294901760)) } else { push(v, x) }
+    } else if op == 194 as u8 {                  // i64.extend8_s
+        let x: u64 = pop(v) & 255
+        if x & 128 != 0 { push(v, x | 18446744073709551360) }
+        else { push(v, x) }
+    } else if op == 195 as u8 {                  // i64.extend16_s
+        let x: u64 = pop(v) & 65535
+        if x & 32768 != 0 { push(v, x | 18446744073709486080) }
+        else { push(v, x) }
+    } else if op == 196 as u8 {                  // i64.extend32_s
+        push(v, s32(pop(v)) as u64)
+
+    // ------------------------------------------------ die 0xFC-Gruppe
+    } else if op == 252 as u8 {
+        let sub: u64 = uleb(l)
+        if sub == 10 {                           // memory.copy
+            ueberspringen(l, 2)
+            let n: u64 = u32v(pop(v))
+            let q: u64 = u32v(pop(v))
+            let z: u64 = u32v(pop(v))
+            if mem_bound(v, z, n as usize) && mem_bound(v, q, n as usize) {
+                // ueberlappend richtig: von hinten, wenn das Ziel hoeher liegt
+                if z > q {
+                    var i: u64 = n
+                    while i > 0 {
+                        i = i - 1
+                        g_st8(v, z + i, g_ld8(v, q + i))
+                    }
+                } else {
+                    var i2: u64 = 0
+                    while i2 < n {
+                        g_st8(v, z + i2, g_ld8(v, q + i2))
+                        i2 = i2 + 1
+                    }
+                }
+            }
+        } else if sub == 11 {                    // memory.fill
+            ueberspringen(l, 1)
+            let n2: u64 = u32v(pop(v))
+            let wert: u64 = pop(v) & 255
+            let z2: u64 = u32v(pop(v))
+            if mem_bound(v, z2, n2 as usize) {
+                var i3: u64 = 0
+                while i3 < n2 {
+                    g_st8(v, z2 + i3, wert)
+                    i3 = i3 + 1
+                }
+            }
+        } else if sub <= 7 {
+            // i32/i64.trunc_sat_f32/f64_s/u -- saettigend statt fallend
+            if sub <= 3 {
+                let f: f64 = bits_zu_f64(pop(v))
+                push(v, (f as i64) as u64 & 4294967295)
+            } else {
+                let f2: f64 = bits_zu_f64(pop(v))
+                push(v, (f2 as i64) as u64)
+            }
+        } else {
+            return false
+        }
+    } else {
+        return false
+    }
+    return true
+}
+
+// Quadratwurzel nach Newton. Firn hat kein `sqrt` in `std`, und WASM
+// hat `f64.sqrt` als Kernbefehl -- also hier, mit zwanzig Schritten,
+// die fuer doppelte Genauigkeit reichen.
+fn wurzel64(x: f64) -> f64 {
+    if x <= 0.0 {
+        return 0.0
+    }
+    var r: f64 = x
+    var i: usize = 0
+    while i < 40 {
+        r = (r + x / r) / 2.0
+        i = i + 1
+    }
+    return r
+}
+
+fn wurzel32(x: f32) -> f32 {
+    return wurzel64(x as f64) as f32
+}
+
+// ====================================================================
+//                            Das Programm
+// ====================================================================
+
+fn main(start: u64) -> i32 {
+    let argc: usize = rt.arg_count(start)
+    if argc < 2 {
+        io.print("Aufruf: wasm <datei.wasm> [argumente...]\n")
+        io.print("  fuehrt ein WebAssembly-Modul aus (WASI preview1).\n")
+        return 2
+    }
+    let pfad: u64 = rt.arg_ptr(start, 1)
+
+    var datei: rt.Buf = rt.buf_new()
+    if !rt.read_file(pfad, &datei) {
+        io.print("wasm: die Datei liess sich nicht lesen\n")
+        return 1
+    }
+
+    // Das Modul ist gross und liegt besser auf der Halde als auf dem
+    // Stapel -- ein Rust-Modul bringt viertausend Funktionen mit.
+    let mp: u64 = rt.heap_alloc(4194304)
+    if mp == 0 {
+        io.print("wasm: kein Speicher fuer die Modultabellen\n")
+        return 1
+    }
+    rt.mem_set(mp, 0 as u8, 4194304)
+    let m: *mut Modul = mp as *mut Modul
+
+    if !modul_laden(m, datei.ptr, datei.len) {
+        return 1
+    }
+    if !mem_anlegen(m) {
+        return 1
+    }
+    // `data` konnte erst laufen, als der Speicher stand -- die
+    // Sektionen werden deshalb ein zweites Mal ueberflogen, nur fuer
+    // data. Das kostet einen Durchgang und spart eine Zwischenablage.
+    var l2: Leser = leser_new(datei.ptr, datei.len)
+    l2.at = 8
+    while l2.at < datei.len {
+        let sid: u8 = u8_lesen(&l2)
+        let sz: usize = uleb(&l2) as usize
+        let sende: usize = l2.at + sz
+        if sende > datei.len {
+            break
+        }
+        if sid == 11 as u8 {
+            data_lesen(m, &l2)
+        }
+        l2.at = sende
+    }
+    if !(*m).ok {
+        io.print("wasm: die Datenabschnitte passen nicht in den Speicher\n")
+        return 1
+    }
+
+    // Die Maschine. Auch sie auf die Halde: Stapel, Lokale und Label
+    // sind zusammen ueber achtzig Kilooktette, und der Stapel eines
+    // Osum-Prozesses ist kleiner.
+    let vp: u64 = rt.heap_alloc(131072)
+    if vp == 0 {
+        io.print("wasm: kein Speicher fuer die Maschine\n")
+        return 1
+    }
+    rt.mem_set(vp, 0 as u8, 131072)
+    let v: *mut VM = vp as *mut VM
+    (*v).m = m
+    (*v).sp = 0
+    (*v).nloc = 0
+    (*v).nframe = 0
+    (*v).argc = argc
+    (*v).start = start
+    (*v).falle = false
+    (*v).beendet = false
+    (*v).code = 0
+    (*v).schritte = 0
+
+    // Die `start`-Sektion zuerst, wenn es eine gibt: sie richtet das
+    // Modul ein, bevor irgendetwas anderes laeuft.
+    if (*m).start_funk >= 0 {
+        if eintreten(v, (*m).start_funk as usize) {
+            ausfuehren(v)
+        }
+    }
+
+    var ergebnis: i32 = 0
+    if !(*v).beendet {
+        if (*m).haupt_funk < 0 {
+            io.print("wasm: das Modul hat kein `_start` -- es ist keine Anwendung\n")
+            return 1
+        }
+        if !eintreten(v, (*m).haupt_funk as usize) {
+            io.print("wasm: `_start` liess sich nicht betreten\n")
+            return 1
+        }
+        ergebnis = ausfuehren(v)
+    }
+
+    if (*v).falle {
+        io.print("wasm: das Modul ist abgebrochen\n")
+        return 1
+    }
+    if (*v).beendet {
+        return (*v).code
+    }
+    return ergebnis
+}
