@@ -1,0 +1,509 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/tresor.fi -- RUNDE SYNC: der Tresor.
+//
+//   tresor neu   <konto> <tresor> <pass>
+//   tresor auf   <konto> <tresor> <pass> <frist>
+//   tresor zu    <tresor>
+//   tresor legen <tresor> <name> <wert>
+//   tresor gib   <tresor> <name>
+//   tresor liste <tresor>
+//
+// ============================================ WAS DER TRESOR ANDERS MACHT
+//
+// Ein Geheimnis ist keine Datei. Es ist eine Datei, die man ANDERS
+// behandeln muss, und die drei Unterschiede sind der ganze Inhalt dieses
+// Programms:
+//
+//   1. EIGENER SCHLUESSEL. K_TRESOR ist ein Unterschluessel wie die
+//      anderen (`lib/sync/kette.fi`), aber er verschluesselt NUR den
+//      Tresor. Wer den Inhaltsschluessel hat -- etwa weil er einen
+//      Abgleich mitliest --, hat den Tresor damit NICHT.
+//   2. EIGENE FREIGABE. Der Tresor geht NICHT mit der Sitzung auf. Er
+//      verlangt die Passphrase noch einmal, und er schliesst nach einer
+//      Frist von selbst. Das ist der Unterschied zwischen "ich bin
+//      angemeldet" und "ich will jetzt an mein Bankpasswort".
+//   3. KEIN KLARTEXT IM DATEISYSTEM. `tresor gib` schreibt das
+//      Geheimnis auf DATEIDESKRIPTOR 1 und nirgendwo sonst. Es gibt in
+//      diesem Programm keinen Weg, ein Geheimnis in eine Datei zu legen.
+//      Wer es weiterreichen will, tut das ueber eine Roehre -- also
+//      wieder ueber ein Handle und nicht ueber einen Pfad.
+//
+// ============================================== DIE SITZUNG, UND IHR PREIS
+//
+//     <tresor>/SITZUNG    <ablaufzeit> <K_TRESOR, versiegelt>
+//     /system/tresor.sit  32 Oktette Zufall, Modus 0600, root
+//
+// `tresor auf` leitet K_TRESOR aus der Passphrase ab, versiegelt ihn
+// unter dem Sitzungsschluessel und schreibt die Ablaufzeit dazu. Danach
+// kommt `tresor gib` ohne Passphrase an ein Geheimnis -- bis die Frist um
+// ist.
+//
+// WER DAS DARF, ENTSCHEIDET DER MODUS VON `/system/tresor.sit`. Ein
+// Programm, das diese Datei nicht lesen darf (also jeder, der nicht root
+// ist), bekommt kein Geheimnis, auch wenn der Tresor offen ist. Das ist
+// mit der Rechteschicht der Runde MULTIUSER gemessen und nicht behauptet.
+//
+// EHRLICH, UND DAS IST DIE WICHTIGSTE ZEILE DIESER DATEI: DAS IST NICHT
+// DIE HANDLE-SCHICHT. `kernel/handle.fi` hat eine Objekttafel mit
+// Verweiszaehler, Generation und dreizehn Rechten; ein Geheimnis gehoert
+// dort als eigene Objektart hinein, und `tresor gib` waere dann kein
+// Schreiben auf fd 1, sondern das Uebergeben eines Handles mit R_READ und
+// ohne R_DUP. Was dafuer fehlt, ist eine neue Objektart im Kern und zwei
+// Systemaufrufe -- eine Aenderung am Kern, die diese Runde nicht macht,
+// weil sie eine eigene waere. Was HIER steht, ist die ehrliche Haelfte:
+// ein Dateideskriptor IST ein Handle im Sinne von POSIX, die Rechte
+// kommen aus der Rechteschicht, und der Klartext beruehrt nie einen
+// Pfad. Der Rest steht in `docs/RUNDE-SYNC.md` unter "was fehlt".
+//
+// ================================================================ EHRLICH
+//
+// T1 DER NAME EINES GEHEIMNISSES IST HOECHSTENS 22 ZEICHEN LANG. Ein
+//    Verzeichniseintrag dieses Dateisystems hat 24 Zeichen Platz und
+//    "G-" gehen davon ab. Laengere Namen werden ABGELEHNT.
+// T2 DIE NAMEN DER GEHEIMNISSE STEHEN IM KLARTEXT auf der Platte
+//    (`G-bank`, `G-vpn`). Der WERT ist versiegelt, der NAME nicht. Auf
+//    dem Server ist auch der Name weg, weil der Tresor als gewoehnliche
+//    Datei durch die Blockschicht geht -- aber wer die Platte in der
+//    Hand hat, sieht, WOVON es ein Geheimnis gibt.
+// T3 DIE FRIST HAENGT AN DER UHR DES SYSTEMS. Wer die Uhr zurueckstellen
+//    darf, verlaengert die Frist. Auf diesem System darf das nur root,
+//    und root kann ohnehin `/system/tresor.sit` lesen.
+// T4 `tresor zu` LOESCHT DIE SITZUNGSDATEI. Ob die Oktette danach
+//    physisch weg sind, haengt an der Platte -- dasselbe, was
+//    `docs/CRYPTO-ERASE.md` seit Runde TRESOR sagt.
+
+profile kernel
+
+import ulib
+import libc.io
+import libc.errno
+import crypto.sha256
+import sync.kette
+import kbund
+
+export { u_start }
+
+const PATHMAX: u64 = 256
+const NAMEMAX: u64 = 22
+const WERTMAX: u64 = 512
+const SYS_GETRANDOM: u64 = 318
+
+static mut z_tresor: [u8; 256] = [0 as u8; 256]
+static mut sitkey: [u8; 32] = [0 as u8; 32]
+static mut tkey: [u8; 32] = [0 as u8; 32]
+static mut puf: [u8; 1024] = [0 as u8; 1024]
+static mut puf2: [u8; 1024] = [0 as u8; 1024]
+static mut hexb: [u8; 512] = [0 as u8; 512]
+
+fn ld8(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn st8(p: u64, i: u64, v: u64) {
+    *((p + i) as *mut u8) = (v & 255) as u8
+}
+
+fn sag(t: u64) {
+    ulib.say(t)
+    ulib.nl()
+}
+
+fn sag_kt(t: u64, v: u64) {
+    ulib.say(t)
+    ulib.say(v)
+    ulib.nl()
+}
+
+fn sag_kv(t: u64, v: u64) {
+    ulib.say(t)
+    ulib.sayn(v)
+    ulib.nl()
+}
+
+fn tdatei(name: u64) -> u64 {
+    return kbund.pfad2((&z_tresor[0]) as u64, name)
+}
+
+static mut sitp: [u8; 19] = "/system/tresor.sit\0"
+
+fn sitpfad() -> u64 {
+    return (&sitp[0]) as u64
+}
+
+fn text_lesen(pfad: u64, out: u64, max: u64, len: *mut u64) -> bool {
+    let fd: u64 = io.open(pfad, 0)
+    if ulib.bad(fd) {
+        *len = 0
+        return false
+    }
+    let n: u64 = io.read_full(fd, out, max)
+    io.close(fd)
+    if ulib.bad(n) {
+        *len = 0
+        return false
+    }
+    *len = n
+    return true
+}
+
+fn text_schreiben(pfad: u64, p: u64, n: u64) -> bool {
+    let fd: u64 = io.create(pfad)
+    if ulib.bad(fd) {
+        return false
+    }
+    let ok: bool = !ulib.bad(io.write_all(fd, p, n))
+    io.fsync(fd)
+    io.close(fd)
+    return ok
+}
+
+// Der Sitzungsschluessel. Er entsteht EINMAL und liegt in `/system`,
+// wo nur root hinkommt. Ohne ihn ist die Sitzungsdatei 48 Oktette
+// Rauschen -- und genau das ist die Rechteprobe.
+fn sitkey_holen(machen: bool) -> bool {
+    var l: u64 = 0
+    if text_lesen(sitpfad(), (&sitkey[0]) as u64, 32, &l) {
+        if l == 32 {
+            return true
+        }
+    }
+    if !machen {
+        return false
+    }
+    if ulib.bad(ulib.sys(SYS_GETRANDOM, (&sitkey[0]) as u64, 32, 0)) {
+        return false
+    }
+    if !text_schreiben(sitpfad(), (&sitkey[0]) as u64, 32) {
+        return false
+    }
+    return true
+}
+
+fn jetzt() -> u64 {
+    return io.now_sec()
+}
+
+// -------------------------------------------------------- die Sitzung
+
+// `<ablauf> <hex der versiegelten 32 Oktette>`
+fn sitzung_schreiben(bis: u64) -> bool {
+    var n_s: [u8; 8] = "SITZUNG\0"
+    var nonce: [u8; 24] = [0 as u8; 24]
+    if ulib.bad(ulib.sys(SYS_GETRANDOM, (&nonce[0]) as u64, 24, 0)) {
+        return false
+    }
+    var siegel: [u8; 48] = [0 as u8; 48]
+    kette.huelle_schreiben((&sitkey[0]) as u64, (&nonce[0]) as u64,
+        (&tkey[0]) as u64, (&siegel[0]) as u64)
+    let bp: u64 = (&puf[0]) as u64
+    var at: u64 = kbund.num_aus(bp, bis)
+    st8(bp, at, 32)
+    at = at + 1
+    kbund.hex_aus((&nonce[0]) as u64, 24, bp + at)
+    at = at + 48
+    st8(bp, at, 32)
+    at = at + 1
+    kbund.hex_aus((&siegel[0]) as u64, 48, bp + at)
+    at = at + 96
+    st8(bp, at, 10)
+    at = at + 1
+    return text_schreiben(tdatei((&n_s[0]) as u64), bp, at)
+}
+
+// 0 = keine Sitzung, 1 = offen (tkey steht), 2 = abgelaufen,
+// 3 = da, aber nicht zu oeffnen (kein Recht auf den Sitzungsschluessel)
+fn sitzung_lesen() -> u64 {
+    var n_s: [u8; 8] = "SITZUNG\0"
+    var l: u64 = 0
+    if !text_lesen(tdatei((&n_s[0]) as u64), (&puf[0]) as u64, 1000, &l) {
+        return 0
+    }
+    let bp: u64 = (&puf[0]) as u64
+    let bis: u64 = kbund.num_ein(bp)
+    var at: u64 = 0
+    while at < l && ld8(bp, at) != 32 {
+        at = at + 1
+    }
+    at = at + 1
+    var nonce: [u8; 24] = [0 as u8; 24]
+    var siegel: [u8; 48] = [0 as u8; 48]
+    if !kbund.hex_ein(bp + at, 24, (&nonce[0]) as u64) {
+        return 0
+    }
+    at = at + 49
+    if !kbund.hex_ein(bp + at, 48, (&siegel[0]) as u64) {
+        return 0
+    }
+    // DIE FRIST WIRD VOR DEM SCHLUESSEL GEPRUEFT. Ein abgelaufener
+    // Tresor soll nicht einmal versuchen, etwas zu oeffnen.
+    if jetzt() > bis {
+        io.unlink(tdatei((&n_s[0]) as u64))
+        return 2
+    }
+    if !sitkey_holen(false) {
+        return 3
+    }
+    if !kette.huelle_lesen((&sitkey[0]) as u64, (&nonce[0]) as u64,
+        (&siegel[0]) as u64, (&tkey[0]) as u64) {
+        return 3
+    }
+    return 1
+}
+
+// ------------------------------------------------------ die Geheimnisse
+
+fn gname(name: u64, out: u64) -> bool {
+    var vor: [u8; 3] = "G-\0"
+    if ulib.length(name) > NAMEMAX {
+        return false
+    }
+    ulib.strcpy(out, (&vor[0]) as u64)
+    ulib.strcat(out, name)
+    return true
+}
+
+fn legen(name: u64, wert: u64) -> bool {
+    var gn: [u8; 32] = [0 as u8; 32]
+    if !gname(name, (&gn[0]) as u64) {
+        return false
+    }
+    let wl: u64 = ulib.length(wert)
+    if wl == 0 || wl > WERTMAX {
+        return false
+    }
+    var nonce: [u8; 24] = [0 as u8; 24]
+    if ulib.bad(ulib.sys(SYS_GETRANDOM, (&nonce[0]) as u64, 24, 0)) {
+        return false
+    }
+    // Das AAD ist der NAME. Damit haengt ein Geheimnis an seinem Namen:
+    // wer die Datei `G-bank` durch `G-vpn` ersetzt, wird beim Oeffnen
+    // erwischt statt beim Bezahlen.
+    let n: u64 = kette.geheim_siegeln((&tkey[0]) as u64, (&nonce[0]) as u64,
+        name, ulib.length(name), wert, wl, (&puf2[0]) as u64)
+    if n == 0 {
+        return false
+    }
+    let bp: u64 = (&puf[0]) as u64
+    kbund.hex_aus((&nonce[0]) as u64, 24, bp)
+    var at: u64 = 48
+    st8(bp, at, 32)
+    at = at + 1
+    kbund.hex_aus((&puf2[0]) as u64, n, bp + at)
+    at = at + n * 2
+    st8(bp, at, 10)
+    at = at + 1
+    return text_schreiben(tdatei((&gn[0]) as u64), bp, at)
+}
+
+// Schreibt das Geheimnis auf fd 1. NIRGENDWO SONST HIN.
+fn geben(name: u64) -> bool {
+    var gn: [u8; 32] = [0 as u8; 32]
+    if !gname(name, (&gn[0]) as u64) {
+        return false
+    }
+    var l: u64 = 0
+    if !text_lesen(tdatei((&gn[0]) as u64), (&puf[0]) as u64, 1000, &l) {
+        return false
+    }
+    let bp: u64 = (&puf[0]) as u64
+    var nonce: [u8; 24] = [0 as u8; 24]
+    if !kbund.hex_ein(bp, 24, (&nonce[0]) as u64) {
+        return false
+    }
+    var at: u64 = 49
+    var hn: u64 = 0
+    while at + hn < l && ld8(bp, at + hn) != 10 && ld8(bp, at + hn) != 0 {
+        hn = hn + 1
+    }
+    if hn % 2 != 0 || hn / 2 > 900 {
+        return false
+    }
+    if !kbund.hex_ein(bp + at, hn / 2, (&puf2[0]) as u64) {
+        return false
+    }
+    var got: u64 = 0
+    var klar: [u8; 600] = [0 as u8; 600]
+    if !kette.geheim_oeffnen((&tkey[0]) as u64, (&nonce[0]) as u64,
+        name, ulib.length(name), (&puf2[0]) as u64, hn / 2,
+        (&klar[0]) as u64, &got) {
+        return false
+    }
+    io.write_all(1, (&klar[0]) as u64, got)
+    var nl: [u8; 2] = "\n\0"
+    io.write_all(1, (&nl[0]) as u64, 1)
+    // Der Klartext wird gleich wieder ueberschrieben. Was das NICHT
+    // kann, steht in kette.fi K2.
+    var i: u64 = 0
+    while i < got {
+        st8((&klar[0]) as u64, i, 0)
+        i = i + 1
+    }
+    return true
+}
+
+fn liste() {
+    var dot: [u8; 2] = ".\0"
+    var dotdot: [u8; 3] = "..\0"
+    var db: [u8; 1024] = [0 as u8; 1024]
+    let fd: u64 = io.dir_open((&z_tresor[0]) as u64)
+    if ulib.bad(fd) {
+        return
+    }
+    var weiter: bool = true
+    while weiter {
+        let n: u64 = io.dir_read(fd, (&db[0]) as u64, 1024)
+        if n == 0 || ulib.bad(n) {
+            weiter = false
+            continue
+        }
+        var at: u64 = 0
+        while at < n {
+            let rec: u64 = (&db[0]) as u64 + at
+            let nm: u64 = io.dir_name(rec)
+            at = at + io.dir_reclen(rec)
+            if ulib.streq(nm, (&dot[0]) as u64) {
+                continue
+            }
+            if ulib.streq(nm, (&dotdot[0]) as u64) {
+                continue
+            }
+            if ld8(nm, 0) == 71 && ld8(nm, 1) == 45 {
+                sag(nm + 2)
+            }
+        }
+    }
+    io.close(fd)
+}
+
+// ------------------------------------------------------------- Befehle
+
+fn hilfe() {
+    var h1: [u8; 32] = "tresor neu   <konto> <t> <pass>\0"
+    var h2: [u8; 40] = "tresor auf   <konto> <t> <pass> <frist>\0"
+    var h3: [u8; 17] = "tresor zu    <t>\0"
+    var h4: [u8; 31] = "tresor legen <t> <name> <wert>\0"
+    var h5: [u8; 24] = "tresor gib   <t> <name>\0"
+    var h6: [u8; 19] = "tresor liste <t>\0\0\0"
+    sag((&h1[0]) as u64)
+    sag((&h2[0]) as u64)
+    sag((&h3[0]) as u64)
+    sag((&h4[0]) as u64)
+    sag((&h5[0]) as u64)
+    sag((&h6[0]) as u64)
+}
+
+fn u_start(args: u64) -> u64 {
+    var c_neu: [u8; 4] = "neu\0"
+    var c_auf: [u8; 4] = "auf\0"
+    var c_zu: [u8; 3] = "zu\0"
+    var c_legen: [u8; 6] = "legen\0"
+    var c_gib: [u8; 4] = "gib\0"
+    var c_liste: [u8; 6] = "liste\0"
+    var t_pass: [u8; 47] = "tresor: falsche Passphrase -- nichts geoeffnet\0"
+    var t_auf: [u8; 13] = "tresor: auf \0"
+    var t_zu: [u8; 11] = "tresor: zu\0"
+    var t_frist: [u8; 34] = "tresor: die Frist ist abgelaufen\0\0"
+    var t_kein: [u8; 30] = "tresor: keine offene Sitzung\0\0"
+    var t_recht: [u8; 54] = "tresor: kein Recht auf den Sitzungsschluessel -- nein\0"
+    var t_ok: [u8; 15] = "tresor: gelegt\0"
+    var t_bad: [u8; 45] = "tresor: das Geheimnis gibt es nicht (oder es\0"
+    var t_bad2: [u8; 33] = "ist nicht echt) -- nichts heraus\0"
+
+    let n: u64 = ulib.arg_count(args)
+    if n < 3 {
+        hilfe()
+        return 1
+    }
+    let a1: u64 = ulib.arg_at(args, 1)
+
+    if ulib.streq(a1, (&c_neu[0]) as u64) || ulib.streq(a1, (&c_auf[0]) as u64) {
+        if n < 5 {
+            hilfe()
+            return 1
+        }
+        let konto: u64 = ulib.arg_at(args, 2)
+        ulib.strncpy((&z_tresor[0]) as u64, ulib.arg_at(args, 3), PATHMAX)
+        let pw: u64 = ulib.arg_at(args, 4)
+        var frist: u64 = 300
+        if n >= 6 {
+            frist = kbund.num_ein(ulib.arg_at(args, 5))
+        }
+        if !kbund.kb_oeffnen(konto, pw, ulib.length(pw)) {
+            sag((&t_pass[0]) as u64)
+            return 2
+        }
+        var i: u64 = 0
+        while i < 32 {
+            st8((&tkey[0]) as u64, i, ld8(kbund.kb_key(kette.K_TRESOR), i))
+            i = i + 1
+        }
+        kbund.kb_zu()
+        io.make_dir((&z_tresor[0]) as u64)
+        if !sitkey_holen(true) {
+            sag((&t_recht[0]) as u64)
+            return 3
+        }
+        if !sitzung_schreiben(jetzt() + frist) {
+            return 3
+        }
+        sag_kv((&t_auf[0]) as u64, frist)
+        return 0
+    }
+
+    ulib.strncpy((&z_tresor[0]) as u64, ulib.arg_at(args, 2), PATHMAX)
+
+    if ulib.streq(a1, (&c_zu[0]) as u64) {
+        var n_s: [u8; 8] = "SITZUNG\0"
+        io.unlink(tdatei((&n_s[0]) as u64))
+        sag((&t_zu[0]) as u64)
+        return 0
+    }
+
+    if ulib.streq(a1, (&c_liste[0]) as u64) {
+        liste()
+        return 0
+    }
+
+    // Alles Weitere braucht eine offene Sitzung.
+    let st: u64 = sitzung_lesen()
+    if st == 2 {
+        sag((&t_frist[0]) as u64)
+        return 4
+    }
+    if st == 3 {
+        sag((&t_recht[0]) as u64)
+        return 5
+    }
+    if st == 0 {
+        sag((&t_kein[0]) as u64)
+        return 6
+    }
+
+    if ulib.streq(a1, (&c_legen[0]) as u64) {
+        if n < 5 {
+            hilfe()
+            return 1
+        }
+        if !legen(ulib.arg_at(args, 3), ulib.arg_at(args, 4)) {
+            return 7
+        }
+        sag((&t_ok[0]) as u64)
+        return 0
+    }
+
+    if ulib.streq(a1, (&c_gib[0]) as u64) {
+        if n < 4 {
+            hilfe()
+            return 1
+        }
+        if !geben(ulib.arg_at(args, 3)) {
+            sag((&t_bad[0]) as u64)
+            sag((&t_bad2[0]) as u64)
+            return 8
+        }
+        return 0
+    }
+
+    hilfe()
+    return 1
+}
