@@ -54,7 +54,8 @@ export {
     create, user_start, free_space, space_pages, reap, translate, user_ok,
     map_programs,
     badentry_zahl,
-    inherit, create_bare, discard, page_free, page_exec, map_page, map_huge, nx,
+    inherit, create_bare, discard, page_free, page_exec, map_page,
+    map_page_zero, map_huge, nx,
     map_frame,
     create_cap,
     copy_space, swap_space, use_space, page_drop, ARG_RESUME,
@@ -716,6 +717,42 @@ fn map_page(state: u64, i: u64, addr: u64, writable: bool,
     return frame
 }
 
+// RUNDE FREMDLAND: EINE SEITE, DIE WIRKLICH LEER IST.
+//
+// `map_page` gibt einen Rahmen aus, wie der Rahmenallokator ihn
+// hergibt -- mit dem Inhalt, den der VORIGE Besitzer daringelassen hat.
+// Fuer den ELF-Lader ist das richtig: er beschreibt jede Seite sofort
+// selbst und nullt den Rest (`elf.fi`, `fill_bytes`), ein Nullen hier
+// waere die zweite Runde ueber dieselben 4096 Oktette.
+//
+// Fuer JEDE ANDERE Seite ist es zweierlei falsch:
+//
+//   1. EIN LECK. Was ein Prozess in einem Rahmen liegen liess, liest der
+//      naechste. GEMESSEN mit `tools/posix` (Abschnitt "brk"): frisch
+//      gestartet fand ein Programm in zwei frischen brk-Seiten 0
+//      Oktette ungleich null, NACH einem `execve` acht -- das erste
+//      0x27 an Offset 0. Das sind die Reste des vorigen Abbilds im
+//      selben Prozess, und zwischen zwei Prozessen waeren es dessen.
+//   2. EIN FEHLER, DEN MAN NICHT SIEHT. musls Halde (mallocng) legt ihre
+//      Verwaltung in genau diese Seiten und prueft sie bei jedem
+//      `malloc`/`free`. Findet sie dort Muell, ruft sie `a_crash()` --
+//      ein `hlt`, in Ring 3 ein #GP. So starb `busybox sh -c 'seq 5 |
+//      sort'` im zweiten Glied der Roehre, und die Meldung
+//      (`vector=13 rip=... in __libc_free`) zeigte auf die Halde, waehrend
+//      der Fehler im Kern lag.
+//
+// POSIX verlangt es ausserdem ausdruecklich: was `mmap(MAP_ANONYMOUS)`
+// liefert, ist mit Nullen gefuellt, und was `brk` dazunimmt ebenso.
+fn map_page_zero(state: u64, i: u64, addr: u64, writable: bool,
+    runnable: bool) -> u64 {
+    let frame: u64 = map_page(state, i, addr, writable, runnable)
+    if frame == 0 {
+        return 0
+    }
+    zero_frame(frame)
+    return frame
+}
+
 // ================================ RUNDE K16: DER STAPEL WAECHST BEI BEDARF
 //
 // Was jedes Unix seit den Siebzigern tut und dieses System bis hierher
@@ -780,7 +817,11 @@ fn grow_stack(state: u64, i: u64, addr: u64, rsp: u64) -> bool {
     if !page_free(state, i, seite) {
         return false
     }
-    if map_page(state, i, seite, true, false) == 0 {
+    // RUNDE FREMDLAND: GENULLT. Eine frische Stapelseite mit den
+    // Resten eines fremden Prozesses darin waere dasselbe Leck wie bei
+    // brk und mmap -- nur an der Stelle, an der ein Programm am
+    // wenigsten damit rechnet.
+    if map_page_zero(state, i, seite, true, false) == 0 {
         return false
     }
     kstate.add(state, kstate.STACKGROW, 1)
