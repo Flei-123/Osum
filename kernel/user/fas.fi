@@ -47,11 +47,17 @@
 //      fest, und im zweiten Durchgang ist jede Marke eine Zahl.
 //   3. WAS NICHT VORKOMMT, WIRD ABGELEHNT -- LAUT. Ein Befehl, den dieses
 //      Programm nicht kennt, ist ein Abbruch mit Zeilennummer und Text,
-//      kein stilles Auslassen. Die Gleitkommabefehle (`movsd`, `mulsd`,
-//      `divsd`, `cvtsi2sd`, `cvtsd2ss`, `movd`) sind AUSDRUECKLICH nicht
-//      unterstuetzt: `firnc1` erzeugt sie nur fuer `f64`-Rechnung, kein
-//      Programm dieses Userlands hat eine, und ein halb richtiger
-//      SSE-Encoder waere schlimmer als keiner.
+//      kein stilles Auslassen.
+//
+//      RUNDE ALLTAG: DIE GLEITKOMMABEFEHLE KOMMEN JETZT VOR. Hier stand,
+//      sie seien ausdruecklich nicht unterstuetzt, weil "kein Programm
+//      dieses Userlands eine f64 hat". Der Taschenrechner hat eine (er
+//      zerteilt und rechnet in f64) und die IDCT des JPEG-Decoders auch.
+//      Also stehen sie jetzt drin -- genau die dreizehn, die `firnc1`
+//      dafuer erzeugt, jeder gegen `as` gemessen (tools/k16/run.sh
+//      vergleicht Oktett fuer Oktett gegen `as`+`ld`). Ein halb
+//      richtiger SSE-Encoder waere schlimmer als keiner; ein
+//      gemessener ist besser als eine Ausnahme in der Abnahme.
 //
 // AUFRUF:
 //     fas quelle.s -o ziel            ein Programm fuer Osum (0x40100000)
@@ -1058,6 +1064,26 @@ fn setz_code(a: u64, b: u64) -> u64 {
     if ist(a, b, (&wd[0]) as u64) {
         return 0x199
     }
+    // RUNDE ALLTAG: DIE PARITAETSBEDINGUNG. `comisd` setzt PF, wenn
+    // einer der beiden Werte NaN ist, und `firnc1` fragt genau das ab
+    // ("ist der Vergleich ueberhaupt geordnet?"). Ohne diese beiden
+    // Zeilen bricht der Assembler mitten im Taschenrechner ab.
+    var we: [u8; 6] = "setnp\0"
+    if ist(a, b, (&we[0]) as u64) {
+        return 0x19B
+    }
+    var wf: [u8; 5] = "setp\0"
+    if ist(a, b, (&wf[0]) as u64) {
+        return 0x19A
+    }
+    var wg: [u8; 6] = "setpe\0"
+    if ist(a, b, (&wg[0]) as u64) {
+        return 0x19A
+    }
+    var wh: [u8; 6] = "setpo\0"
+    if ist(a, b, (&wh[0]) as u64) {
+        return 0x19B
+    }
     return 0
 }
 
@@ -1232,7 +1258,232 @@ fn rm_form(w: bool, gr: u64, reg: u64, rmreg: u64, wo_mem: u64,
     }
 }
 
+// ================================================== RUNDE ALLTAG: SSE2
+//
+// Bis hierher stand oben im Kopf dieser Datei, die Gleitkommabefehle
+// seien AUSDRUECKLICH nicht unterstuetzt, mit der Begruendung "kein
+// Programm dieses Userlands hat eine f64". Diese Runde hat zwei
+// gebracht: der Taschenrechner zerteilt und rechnet in f64, und die
+// IDCT des JPEG-Decoders ebenso. `firnc1` erzeugt dafuer genau
+// dreizehn Befehle, und tools/k16/run.sh hat sie namentlich gemeldet
+// ("fas kennt 'movsd' nicht"), also werden sie hier kodiert -- nicht
+// mehr und nicht weniger als die dreizehn.
+//
+// DIE FORM IST IMMER DIESELBE: ein Praefix (F2 fuer double, F3 fuer
+// single, 66 fuer den Ganzzahlweg), dann REX, dann 0F, dann das
+// Opcode-Oktett, dann ModRM. Das Praefix steht VOR REX -- steht es
+// dahinter, kodiert der Prozessor etwas anderes.
+//
+//   movsd  xmm, m64   F2 0F 10      movsd m64, xmm    F2 0F 11
+//   movss  xmm, m32   F3 0F 10      movss m32, xmm    F3 0F 11
+//   addsd/subsd/mulsd/divsd         F2 0F 58/5C/59/5E
+//   comisd/ucomisd    66 0F 2F/2E   comiss/ucomiss    0F 2F/2E
+//   cvtsi2sd xmm, r   F2 [W] 0F 2A  cvttsd2si r, xmm  F2 [W] 0F 2C
+//   cvtss2sd          F3 0F 5A      cvtsd2ss          F2 0F 5A
+//   movd/movq r, xmm  66 [W] 0F 7E  movd/movq xmm, r  66 [W] 0F 6E
+//
+// `wr` sagt, welcher der beiden Operanden ins Registerfeld gehoert;
+// der andere ist rm und darf Speicher sein.
+fn sse_emit(pre: u64, op: u64, wr: u64, w: bool) {
+    var reg: u64 = r0
+    var rmnr: u64 = 1
+    if wr == 1 {
+        reg = r1
+        rmnr = 0
+    }
+    var kr: u64 = k1
+    var rmreg: u64 = r1
+    if rmnr == 0 {
+        kr = k0
+        rmreg = r0
+    }
+    var wo_mem: u64 = 2
+    var bb: u64 = rmreg
+    if kr == K_MEM {
+        wo_mem = rmnr
+        bb = mem_base(rmnr)
+    }
+    if pre != 0 {
+        emit(pre)
+    }
+    rex(w, reg, 0, bb, false)
+    emit(0x0F)
+    emit(op)
+    if wo_mem < 2 {
+        modrm_mem(reg, wo_mem)
+    } else {
+        modrm_reg(reg, rmreg)
+    }
+}
+
+// Sind beide Operanden da? Ein SSE-Befehl mit einem ist ein Fehler und
+// keine stille Null.
+fn sse_zwei() -> bool {
+    if k0 == K_NONE || k1 == K_NONE {
+        var t: [u8; 30] = "SSE-Befehl braucht zwei Teile\0"
+        oops((&t[0]) as u64)
+        return false
+    }
+    return true
+}
+
+// 0 = kein SSE-Befehl. Sonst ist er hier fertig kodiert.
+fn sse(a: u64, m: u64) -> bool {
+    var w_movsd: [u8; 6] = "movsd\0"
+    if ist(a, m, (&w_movsd[0]) as u64) {
+        if !sse_zwei() {
+            return true
+        }
+        if k0 == K_MEM {
+            sse_emit(0xF2, 0x11, 1, false)
+        } else {
+            sse_emit(0xF2, 0x10, 0, false)
+        }
+        return true
+    }
+    var w_movss: [u8; 6] = "movss\0"
+    if ist(a, m, (&w_movss[0]) as u64) {
+        if !sse_zwei() {
+            return true
+        }
+        if k0 == K_MEM {
+            sse_emit(0xF3, 0x11, 1, false)
+        } else {
+            sse_emit(0xF3, 0x10, 0, false)
+        }
+        return true
+    }
+    var w_addsd: [u8; 6] = "addsd\0"
+    if ist(a, m, (&w_addsd[0]) as u64) {
+        if sse_zwei() {
+            sse_emit(0xF2, 0x58, 0, false)
+        }
+        return true
+    }
+    var w_subsd: [u8; 6] = "subsd\0"
+    if ist(a, m, (&w_subsd[0]) as u64) {
+        if sse_zwei() {
+            sse_emit(0xF2, 0x5C, 0, false)
+        }
+        return true
+    }
+    var w_mulsd: [u8; 6] = "mulsd\0"
+    if ist(a, m, (&w_mulsd[0]) as u64) {
+        if sse_zwei() {
+            sse_emit(0xF2, 0x59, 0, false)
+        }
+        return true
+    }
+    var w_divsd: [u8; 6] = "divsd\0"
+    if ist(a, m, (&w_divsd[0]) as u64) {
+        if sse_zwei() {
+            sse_emit(0xF2, 0x5E, 0, false)
+        }
+        return true
+    }
+    var w_sqrtsd: [u8; 7] = "sqrtsd\0"
+    if ist(a, m, (&w_sqrtsd[0]) as u64) {
+        if sse_zwei() {
+            sse_emit(0xF2, 0x51, 0, false)
+        }
+        return true
+    }
+    var w_comisd: [u8; 7] = "comisd\0"
+    if ist(a, m, (&w_comisd[0]) as u64) {
+        if sse_zwei() {
+            sse_emit(0x66, 0x2F, 0, false)
+        }
+        return true
+    }
+    var w_ucomisd: [u8; 8] = "ucomisd\0"
+    if ist(a, m, (&w_ucomisd[0]) as u64) {
+        if sse_zwei() {
+            sse_emit(0x66, 0x2E, 0, false)
+        }
+        return true
+    }
+    var w_comiss: [u8; 7] = "comiss\0"
+    if ist(a, m, (&w_comiss[0]) as u64) {
+        if sse_zwei() {
+            sse_emit(0, 0x2F, 0, false)
+        }
+        return true
+    }
+    var w_ucomiss: [u8; 8] = "ucomiss\0"
+    if ist(a, m, (&w_ucomiss[0]) as u64) {
+        if sse_zwei() {
+            sse_emit(0, 0x2E, 0, false)
+        }
+        return true
+    }
+    var w_cvtsi2sd: [u8; 9] = "cvtsi2sd\0"
+    if ist(a, m, (&w_cvtsi2sd[0]) as u64) {
+        if sse_zwei() {
+            // Die Breite kommt von der GANZZAHL, nicht vom xmm.
+            sse_emit(0xF2, 0x2A, 0, s1 == 8)
+        }
+        return true
+    }
+    var w_cvtsi2ss: [u8; 9] = "cvtsi2ss\0"
+    if ist(a, m, (&w_cvtsi2ss[0]) as u64) {
+        if sse_zwei() {
+            sse_emit(0xF3, 0x2A, 0, s1 == 8)
+        }
+        return true
+    }
+    var w_cvttsd2si: [u8; 10] = "cvttsd2si\0"
+    if ist(a, m, (&w_cvttsd2si[0]) as u64) {
+        if sse_zwei() {
+            sse_emit(0xF2, 0x2C, 0, s0 == 8)
+        }
+        return true
+    }
+    var w_cvtsd2si: [u8; 9] = "cvtsd2si\0"
+    if ist(a, m, (&w_cvtsd2si[0]) as u64) {
+        if sse_zwei() {
+            sse_emit(0xF2, 0x2D, 0, s0 == 8)
+        }
+        return true
+    }
+    var w_cvtss2sd: [u8; 9] = "cvtss2sd\0"
+    if ist(a, m, (&w_cvtss2sd[0]) as u64) {
+        if sse_zwei() {
+            sse_emit(0xF3, 0x5A, 0, false)
+        }
+        return true
+    }
+    var w_cvtsd2ss: [u8; 9] = "cvtsd2ss\0"
+    if ist(a, m, (&w_cvtsd2ss[0]) as u64) {
+        if sse_zwei() {
+            sse_emit(0xF2, 0x5A, 0, false)
+        }
+        return true
+    }
+    var w_movd: [u8; 5] = "movd\0"
+    var w_movq: [u8; 5] = "movq\0"
+    let ismovd: bool = ist(a, m, (&w_movd[0]) as u64)
+    let ismovq: bool = ist(a, m, (&w_movq[0]) as u64)
+    if ismovd || ismovq {
+        if !sse_zwei() {
+            return true
+        }
+        // Welche Seite ist das xmm? Es steht im Registerfeld, die
+        // Ganzzahlseite ist rm -- in BEIDE Richtungen.
+        if k0 == K_REG && s0 == 16 {
+            sse_emit(0x66, 0x6E, 0, ismovq)
+        } else {
+            sse_emit(0x66, 0x7E, 1, ismovq)
+        }
+        return true
+    }
+    return false
+}
+
 fn kodiere(a: u64, m: u64) {
+    if sse(a, m) {
+        return
+    }
+
     // ---- ohne Operanden
     var w_ret: [u8; 4] = "ret\0"
     if ist(a, m, (&w_ret[0]) as u64) {

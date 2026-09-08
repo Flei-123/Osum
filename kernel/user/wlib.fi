@@ -61,9 +61,10 @@ import utf8
 
 export {
     begin, window, window_app, window_plain, window_kind, close, closed, handle,
-    trace, set_trace, set_menu_title, reshape,
+    trace, set_trace, set_menu_title, reshape, say_rects,
     win_w, win_h, win_x, win_y, win_hide, win_layer,
     box_v, box_h, box_grid, box_end, box_at, box_use, size, gap_after,
+    setz_groesse,
     label, button, check, entry, list, table, tabs, menubar, choice,
     tile, TILE_FIELDS, TL_SURFACE, TL_RAISED, TL_ACCENT, TL_ONACCENT,
     TL_TEXT, TL_FRAME, TL_TASKBAR, TL_TBTEXT, TL_BUTTON, TL_RADW,
@@ -91,6 +92,7 @@ export {
     mal_radius, mal_rahmen, mal_linie, mal_kante3,
     MR_FLAECHE, MR_TAFEL, MR_KNOPF, MR_FELD,
     AN_WIN_OPEN, AN_WIN_CLOSE, AN_MENU, AN_HOVER, AN_PRESS, AN_NOTIFY,
+    key_seq,
     theme_watch, theme_now, theme_switches, theme_polls, theme_pixels,
     theme_stales, paint_all, THEME_POLL_TICKS,
     rect_x, rect_y, rect_w, rect_h, kind_of, tab_x, tab_w,
@@ -111,10 +113,16 @@ export {
     K_LEINWAND, leinwand, leinwand_setzen, leinwand_neu, leinwand_neu_teil,
     leinwand_ereignis, leinwand_anstehend,
     LE_DOWN, LE_UP, LE_MOVE, LE_KEY, LE_FELDER,
+    K_BILD, K_SLIDER, bild, bild_setzen, bild_zoom, bild_set_zoom,
+    bild_schieben, bild_drehen, bild_dreh_von, bild_anpassen,
+    bild_werkzeug, bild_aus_da, bild_aus_x0, bild_aus_y0, bild_aus_x1,
+    bild_aus_y1, bild_aus_weg, bild_px, bild_py,
+    bild_bw, bild_bh, slider,
     K_MENUBAR, K_CHOICE, K_SEP, K_SCROLL,
     NK_MAIN, NK_MENU, NK_DLG,
     KEY_TAB, KEY_ENTER, KEY_BS, KEY_ESC, KEY_UP, KEY_DOWN, KEY_LEFT,
     KEY_RIGHT, KEY_HOME, KEY_END, KEY_PGUP, KEY_PGDN, KEY_DEL,
+    KEY_SDEL,
     MAXWD, MAXWN,
     // ================================================ RUNDE SYSTEMBUS
     //
@@ -211,6 +219,18 @@ const K_CARD: u64 = 13
 // bekommt einen Zeiger auf GRAPH_FIELDS Woerter und liest sie bei
 // jedem Anstrich frisch. Diese Bibliothek fuehrt keine Messreihe.
 const K_GRAPH: u64 = 14
+// RUNDE ALLTAG: ZWEI NEUE BEDIENELEMENTE, UND SIE STEHEN HIER UND NICHT
+// IN EINEM PROGRAMM.
+//
+// Der Bildbetrachter braucht eine Flaeche, auf der ein Bild steht, das
+// man vergroessern und schieben kann; das Ausschnittwerkzeug braucht
+// dieselbe, um den Ausschnitt zu zeigen; die Einstellungen haetten
+// gerne einen Schieberegler. Ein Programm, das sich das selbst malt,
+// malt an der Bibliothek vorbei -- und die Regel dieses Projekts ist,
+// dass es das nicht gibt. Also: K_BILD und K_SLIDER, gemalt von wlib,
+// bedient von wlib, in jedem Farbschema richtig.
+const K_BILD: u64 = 16
+const K_SLIDER: u64 = 17
 
 // ========================================== RUNDE CERTUS-AUF-OSUM
 // EINE LEINWAND: DAS WIDGET, DESSEN BILDPUNKTE DEM AUFRUFER GEHOEREN.
@@ -289,7 +309,16 @@ const D_CT: u64 = 15 // der Kasten
 // column widths for a table), and a third meaning in the same slot is
 // how a widget ends up drawing a column width as a picture.
 const D_ICONS: u64 = 16
-const D_FIELDS: u64 = 17
+// RUNDE ALLTAG: die Felder der Bildflaeche und des Schiebereglers.
+const D_E: u64 = 17 // Bildzeiger / Kleinstwert
+const D_F: u64 = 18 // Bildbreite / Groesstwert
+const D_G: u64 = 19 // Bildhoehe / Schrittweite
+const D_ZOOM: u64 = 20 // Vergroesserung in Hundertsteln
+const D_PX: u64 = 21 // Verschiebung waagerecht
+const D_PY: u64 = 22 // Verschiebung senkrecht
+const D_DREH: u64 = 23 // 0, 1, 2, 3 -- Vielfache von 90 Grad
+const D_WZ: u64 = 24 // 0 = schieben, 1 = Ausschnitt ziehen
+const D_FIELDS: u64 = 25
 
 const F_FOCUSABLE: u64 = 1
 const F_PRESSED: u64 = 2
@@ -353,10 +382,15 @@ const KEY_END: u64 = 0x106
 const KEY_PGUP: u64 = 0x107
 const KEY_PGDN: u64 = 0x108
 const KEY_DEL: u64 = 0x109
+// RUNDE ALLTAG: UMSCHALT+ENTF IST EINE ANDERE TASTE. Der Dateimanager
+// legt bei Entf in den Papierkorb und loescht bei Umschalt+Entf
+// endgueltig; ohne eine eigene Nummer waere das nicht zu unterscheiden.
+// Der Kern schickt dafuer `ESC [ 3 ; 2 ~` (kernel/kbd.fi, `arrow`).
+const KEY_SDEL: u64 = 0x10A
 
 // ------------------------------------------------------- der Zustand
 
-static mut wd: [u64; 2720] = [0 as u64; 2720] // MAXWD * D_FIELDS
+static mut wd: [u64; 4000] = [0 as u64; 4000] // MAXWD * D_FIELDS
 static mut wn: [u64; 56] = [0 as u64; 56] // MAXWN * N_FIELDS
 static mut ct: [u64; 312] = [0 as u64; 312] // MAXCT * C_FIELDS
 static mut nwd: u64 = 0
@@ -377,7 +411,24 @@ static mut s_findex: u64 = 0
 static mut s_fwin: u64 = 0
 static mut s_blits: u64 = 0
 static mut s_keylast: u64 = 0
+static mut s_keyseq: u64 = 0
+// RUNDE ALLTAG: die Zahl und der Modifikator einer Fluchtfolge
+// `ESC [ n ; m ~`. Vorher stand die Zahl im Zustand selbst
+// (`s_esc = 3 + Ziffer`) und mehr als eine Ziffer gab es nicht.
+static mut s_num: u64 = 0
+static mut s_mod: u64 = 0
 static mut s_down: u64 = 0 // gedruecktes Widget + 1
+// RUNDE ALLTAG: wo das Ziehen anfing (Bildflaeche und Schieberegler).
+static mut s_dragx: u64 = 0
+static mut s_dragy: u64 = 0
+// Der gezogene Ausschnitt, in BILDPUNKTEN des Bildes und nicht des
+// Schirms -- ein Programm, das darin etwas veraendert, rechnet sonst
+// jede Vergroesserung selbst zurueck.
+static mut s_aus_x0: u64 = 0
+static mut s_aus_y0: u64 = 0
+static mut s_aus_x1: u64 = 0
+static mut s_aus_y1: u64 = 0
+static mut s_aus_da: u64 = 0
 static mut s_esc: u64 = 0 // Zustand der Fluchtfolge
 static mut s_lastclick: u64 = 0
 static mut s_lastwd: u64 = 0
@@ -638,6 +689,13 @@ fn key_last() -> u64 {
     return s_keylast
 }
 
+// WIE OFT SCHON EINE TASTE KAM. Ein Programm, das auf Entf reagieren
+// will, kann `key_last` nicht vergleichen -- zweimal Entf ist zweimal
+// dieselbe Zahl. Es vergleicht diesen Zaehler.
+fn key_seq() -> u64 {
+    return s_keyseq
+}
+
 fn alive() -> bool {
     return s_alive != 0
 }
@@ -810,6 +868,49 @@ static mut an_was: [u8; 5] = "was=\0"
 static mut an_p: [u8; 4] = " p=\0"
 static mut an_dur: [u8; 6] = " dur=\0"
 static mut an_wd: [u8; 5] = " wd=\0"
+// RUNDE ALLTAG: DIE ANWENDUNG SAGT, WO SIE ALLES HINGELEGT HAT.
+//
+// In einer Zeile je Bedienelement, im Format, das
+// `tools/design/messen.py` und `tools/alltag/shotcheck.py` lesen:
+//
+//     <name>: rect id=3 kind=2 x=8 y=40 w=100 h=32
+//
+// Bis hierher hat jedes Programm diese Schleife selbst geschrieben
+// (widgetdemo, explorer, settings -- dreimal derselbe Code mit drei
+// Puffern). Sie gehoert in die Bibliothek: WAS ein Programm hingelegt
+// hat, weiss die Bibliothek besser als das Programm, und ein Pruefer,
+// der fuenf verschiedene Schreibweisen lesen muss, misst irgendwann
+// eine davon nicht mehr.
+fn say_rects(name: u64) {
+    var s_r: [u8; 8] = ": rect \0"
+    var s_id: [u8; 4] = "id=\0"
+    var s_k: [u8; 7] = " kind=\0"
+    var s_x: [u8; 4] = " x=\0"
+    var s_y: [u8; 4] = " y=\0"
+    var s_w: [u8; 4] = " w=\0"
+    var s_h: [u8; 4] = " h=\0"
+    var i: u64 = 0
+    while i < nwd {
+        if (g(i, D_FLAGS) & F_HIDE) == 0 {
+            ulib.say(name)
+            ulib.say((&s_r[0 as usize]) as u64)
+            ulib.say((&s_id[0 as usize]) as u64)
+            ulib.sayn(i)
+            ulib.say((&s_k[0 as usize]) as u64)
+            ulib.sayn(g(i, D_KIND))
+            ulib.say((&s_x[0 as usize]) as u64)
+            ulib.sayn(g(i, D_X))
+            ulib.say((&s_y[0 as usize]) as u64)
+            ulib.sayn(g(i, D_Y))
+            ulib.say((&s_w[0 as usize]) as u64)
+            ulib.sayn(g(i, D_W))
+            ulib.say((&s_h[0 as usize]) as u64)
+            ulib.sayn(g(i, D_H))
+            ulib.nl()
+        }
+        i = i + 1
+    }
+}
 
 fn say_window(i: u64) {
     if s_trace == 0 || i >= MAXWN {
@@ -1077,6 +1178,26 @@ fn dirty_wd(i: u64) {
 // der Grund, warum die Kaesten ueberhaupt gespeichert werden statt die
 // Rechtecke nur einmal auszurechnen.
 
+// RUNDE ALLTAG: DAS VIERER-RASTER, EINMAL IN DER BIBLIOTHEK.
+//
+// Jede Laenge, die ein Kasten vergibt, liegt auf einem Vielfachen von
+// vier. Vorher kam sie aus der Textbreite eines Knopfes (78, 90, 112)
+// oder aus der Schrifthoehe (18) -- Zahlen, die kein Raster kennen,
+// und ein Bild, in dem nichts auf einer gemeinsamen Linie steht.
+// Gemessen wird das von tools/design/messen.py; hier wird es
+// hergestellt, damit KEIN Programm es selbst rechnen muss.
+fn r4ab(v: u64) -> u64 {
+    return v - (v % 4)
+}
+
+fn r4auf(v: u64) -> u64 {
+    let r: u64 = v % 4
+    if r == 0 {
+        return v
+    }
+    return v + 4 - r
+}
+
 fn box_v(w: u64, x: u64, y: u64, bw: u64, bh: u64, pad: u64,
     gp: u64) -> u64 {
     return new_box(w, 1, x, y, bw, bh, pad, gp, 1)
@@ -1100,8 +1221,14 @@ fn new_box(w: u64, kind: u64, x: u64, y: u64, bw: u64, bh: u64, pad: u64,
     let c: u64 = nct
     nct = nct + 1
     cs(c, C_KIND, kind)
-    cs(c, C_X, x)
-    cs(c, C_Y, y)
+    // RUNDE ALLTAG: auch die ECKE eines Kastens liegt auf dem Raster.
+    // Ein mittig gesetzter Kasten rechnet (1280-420)/2 = 430 aus, und
+    // damit stand im Sperrbildschirm KEINE einzige Laenge auf einer
+    // Vierer-Linie. Aufgerundet, nicht abgerundet: nach unten koennte
+    // ein Kasten, der unter einer Reiterleiste beginnt, in sie
+    // hineinrutschen.
+    cs(c, C_X, r4auf(x))
+    cs(c, C_Y, r4auf(y))
     cs(c, C_W, bw)
     cs(c, C_H, bh)
     cs(c, C_PAD, pad)
@@ -1148,8 +1275,8 @@ fn box_at(c: u64, x: u64, y: u64, bw: u64, bh: u64) {
     if c >= nct {
         return
     }
-    cs(c, C_X, x)
-    cs(c, C_Y, y)
+    cs(c, C_X, r4auf(x))
+    cs(c, C_Y, r4auf(y))
     cs(c, C_W, bw)
     cs(c, C_H, bh)
     reset_box(c)
@@ -1161,6 +1288,21 @@ fn box_at(c: u64, x: u64, y: u64, bw: u64, bh: u64) {
 fn size(w: u64, h: u64) {
     want_w = w
     want_h = h
+}
+
+// RUNDE ALLTAG: die Wunschgroesse NACHTRAEGLICH aendern.
+//
+// `size` gilt fuer das naechste Bedienelement; danach war die Groesse
+// fest. Ein Fenster, das seinen Inhalt an seine eigene Hoehe anpasst
+// (die Bildflaeche des Betrachters), braucht genau das -- sonst bleibt
+// unter dem Bild ein Streifen Luft stehen, der von nichts kommt.
+// `neu_setzen` danach ordnet an.
+fn setz_groesse(i: u64, w: u64, h: u64) {
+    if i >= nwd {
+        return
+    }
+    s(i, D_PW, w)
+    s(i, D_PH, h)
 }
 
 fn gap_after(n: u64) {
@@ -1179,12 +1321,13 @@ fn place(i: u64) {
     if ph == 0 {
         ph = 24
     }
+    ph = r4auf(ph)
     if kind == 1 {
         s(i, D_X, cg(c, C_CX))
         s(i, D_Y, cg(c, C_CY))
-        var bw: u64 = innen
-        if pw != 0 && pw < innen {
-            bw = pw
+        var bw: u64 = r4ab(innen)
+        if pw != 0 && r4auf(pw) < bw {
+            bw = r4auf(pw)
         }
         s(i, D_W, bw)
         s(i, D_H, ph)
@@ -1192,9 +1335,9 @@ fn place(i: u64) {
     } else if kind == 2 {
         let rest: u64 = sub(cg(c, C_X) + cg(c, C_W) - cg(c, C_PAD),
             cg(c, C_CX))
-        var bw2: u64 = pw
-        if bw2 == 0 || bw2 > rest {
-            bw2 = rest
+        var bw2: u64 = r4auf(pw)
+        if pw == 0 || bw2 > r4ab(rest) {
+            bw2 = r4ab(rest)
         }
         s(i, D_X, cg(c, C_CX))
         s(i, D_Y, cg(c, C_CY))
@@ -1202,7 +1345,7 @@ fn place(i: u64) {
         var bh2: u64 = ph
         let hoch: u64 = sub(cg(c, C_H), 2 * cg(c, C_PAD))
         if g(i, D_PH) == 0 && hoch > 0 {
-            bh2 = hoch
+            bh2 = r4ab(hoch)
         }
         s(i, D_H, bh2)
         cs(c, C_CX, cg(c, C_CX) + bw2 + cg(c, C_GAP))
@@ -1214,6 +1357,7 @@ fn place(i: u64) {
             if zw > cg(c, C_GAP) {
                 zw = zw - cg(c, C_GAP)
             }
+            zw = r4ab(zw)
         }
         s(i, D_X, cg(c, C_CX))
         s(i, D_Y, cg(c, C_CY))
@@ -1693,6 +1837,264 @@ fn choice(txt: u64, sel: u64) -> u64 {
     return i
 }
 
+// ============================ RUNDE ALLTAG: DIE BILDFLAECHE
+//
+// Sie bekommt einen Zeiger auf ein Feld aus u32 (0xAARRGGBB, eine Zahl
+// je Bildpunkt, zeilenweise) und malt es -- vergroessert, verschoben,
+// gedreht. Die Bibliothek KOPIERT das Bild nicht: ein Foto sind
+// Megabytes, und ein Prozess dieses Systems hat sechs davon.
+//
+// VERGROESSERT WIRD MIT DEM NAECHSTEN NACHBARN. Das ist die richtige
+// Wahl fuer das, wofuer diese Flaeche da ist: ein Bildschirmfoto beim
+// Hineinzoomen soll KANTEN zeigen und keine weichgezeichnete Ahnung
+// davon, wo der Text stand.
+fn bild(p: u64, w: u64, h: u64) -> u64 {
+    let i: u64 = add(K_BILD, 0, 0, 0, true)
+    s(i, D_E, p)
+    s(i, D_F, w)
+    s(i, D_G, h)
+    s(i, D_ZOOM, 100)
+    s(i, D_PX, 0)
+    s(i, D_PY, 0)
+    s(i, D_DREH, 0)
+    return i
+}
+
+fn bild_setzen(i: u64, p: u64, w: u64, h: u64) {
+    if i >= nwd || g(i, D_KIND) != K_BILD {
+        return
+    }
+    s(i, D_E, p)
+    s(i, D_F, w)
+    s(i, D_G, h)
+    s(i, D_PX, 0)
+    s(i, D_PY, 0)
+    s(i, D_DREH, 0)
+    s(i, D_ZOOM, 100)
+    dirty_wd(i)
+}
+
+fn bild_bw(i: u64) -> u64 {
+    if g(i, D_DREH) == 1 || g(i, D_DREH) == 3 {
+        return g(i, D_G)
+    }
+    return g(i, D_F)
+}
+
+fn bild_bh(i: u64) -> u64 {
+    if g(i, D_DREH) == 1 || g(i, D_DREH) == 3 {
+        return g(i, D_F)
+    }
+    // D_G ist die Hoehe DES BILDES. Hier stand D_H -- die Hoehe des
+    // WIDGETS -- und damit war das Bild nie senkrecht mittig und
+    // "Anpassen" rechnete mit der falschen Zahl. Im Bild zu sehen: das
+    // Foto klebte oben am Rand.
+    return g(i, D_G)
+}
+
+// Welches Werkzeug die Maus auf der Bildflaeche ist: 0 schiebt das
+// Bild, 1 zieht einen Ausschnitt auf. Das Ausschnittwerkzeug braucht
+// das zweite, der Betrachter das erste.
+fn bild_werkzeug(i: u64, m: u64) {
+    if i >= nwd || g(i, D_KIND) != K_BILD {
+        return
+    }
+    s(i, D_WZ, m)
+    s_aus_da = 0
+    dirty_wd(i)
+}
+
+// Die Ecke des Bildes auf dem Schirm -- dieselbe Rechnung wie in
+// `paint_bild`, und deshalb steht sie einmal hier und nicht zweimal.
+fn bild_ox(i: u64) -> u64 {
+    let zw: u64 = bild_bw(i) * g(i, D_ZOOM) / 100
+    var ox: u64 = g(i, D_X)
+    if zw < g(i, D_W) {
+        ox = g(i, D_X) + (g(i, D_W) - zw) / 2
+    }
+    return ox +% g(i, D_PX)
+}
+
+fn bild_oy(i: u64) -> u64 {
+    let zh: u64 = bild_bh(i) * g(i, D_ZOOM) / 100
+    var oy: u64 = g(i, D_Y)
+    if zh < g(i, D_H) {
+        oy = g(i, D_Y) + (g(i, D_H) - zh) / 2
+    }
+    return oy +% g(i, D_PY)
+}
+
+// Ein Punkt auf dem Schirm als Punkt IM BILD. Ausserhalb wird auf den
+// Rand geklemmt -- wer ueber den Rand hinauszieht, meint den Rand.
+fn bild_px(i: u64, x: u64) -> u64 {
+    let ox: u64 = bild_ox(i)
+    if x <= ox {
+        return 0
+    }
+    let v: u64 = (x - ox) * 100 / g(i, D_ZOOM)
+    if v >= g(i, D_F) {
+        return g(i, D_F) - 1
+    }
+    return v
+}
+
+fn bild_py(i: u64, y: u64) -> u64 {
+    let oy: u64 = bild_oy(i)
+    if y <= oy {
+        return 0
+    }
+    let v: u64 = (y - oy) * 100 / g(i, D_ZOOM)
+    if v >= g(i, D_G) {
+        return g(i, D_G) - 1
+    }
+    return v
+}
+
+fn bild_aus_da() -> bool {
+    return s_aus_da != 0
+}
+
+fn bild_aus_x0() -> u64 {
+    if s_aus_x1 < s_aus_x0 {
+        return s_aus_x1
+    }
+    return s_aus_x0
+}
+
+fn bild_aus_y0() -> u64 {
+    if s_aus_y1 < s_aus_y0 {
+        return s_aus_y1
+    }
+    return s_aus_y0
+}
+
+fn bild_aus_x1() -> u64 {
+    if s_aus_x1 < s_aus_x0 {
+        return s_aus_x0
+    }
+    return s_aus_x1
+}
+
+fn bild_aus_y1() -> u64 {
+    if s_aus_y1 < s_aus_y0 {
+        return s_aus_y0
+    }
+    return s_aus_y1
+}
+
+fn bild_aus_weg() {
+    s_aus_da = 0
+}
+
+fn bild_zoom(i: u64) -> u64 {
+    return g(i, D_ZOOM)
+}
+
+fn bild_set_zoom(i: u64, z: u64) {
+    if i >= nwd || g(i, D_KIND) != K_BILD {
+        return
+    }
+    var v: u64 = z
+    if v < 5 {
+        v = 5
+    }
+    if v > 3200 {
+        v = 3200
+    }
+    s(i, D_ZOOM, v)
+    dirty_wd(i)
+}
+
+fn bild_schieben(i: u64, dx: u64, dy: u64) {
+    if i >= nwd || g(i, D_KIND) != K_BILD {
+        return
+    }
+    s(i, D_PX, g(i, D_PX) +% dx)
+    s(i, D_PY, g(i, D_PY) +% dy)
+    dirty_wd(i)
+}
+
+fn bild_drehen(i: u64, r: u64) {
+    if i >= nwd || g(i, D_KIND) != K_BILD {
+        return
+    }
+    s(i, D_DREH, (g(i, D_DREH) + r) & 3)
+    s(i, D_PX, 0)
+    s(i, D_PY, 0)
+    dirty_wd(i)
+}
+
+fn bild_dreh_von(i: u64) -> u64 {
+    return g(i, D_DREH)
+}
+
+// So gross, dass es ganz hineinpasst -- und nie ueber 100 Prozent, denn
+// ein kleines Symbol auf Fensterbreite gezogen ist kein Bild mehr.
+fn bild_anpassen(i: u64) {
+    if i >= nwd || g(i, D_KIND) != K_BILD {
+        return
+    }
+    let bw: u64 = bild_bw(i)
+    let bh: u64 = bild_bh(i)
+    if bw == 0 || bh == 0 {
+        return
+    }
+    var z: u64 = g(i, D_W) * 100 / bw
+    let zy: u64 = g(i, D_H) * 100 / bh
+    if zy < z {
+        z = zy
+    }
+    if z > 100 {
+        z = 100
+    }
+    if z < 5 {
+        z = 5
+    }
+    s(i, D_ZOOM, z)
+    s(i, D_PX, 0)
+    s(i, D_PY, 0)
+    dirty_wd(i)
+}
+
+// ============================ RUNDE ALLTAG: DER SCHIEBEREGLER
+//
+// Wert zwischen `min` und `max`. Er meldet sich beim Ziehen UND beim
+// Loslassen; wer nur das Ergebnis will, sieht auf `value` beim
+// Loslassen, wer mitziehen will (die Vergroesserung im Bildbetrachter),
+// nimmt jede Meldung.
+fn slider(min: u64, max: u64, wert: u64) -> u64 {
+    let i: u64 = add(K_SLIDER, 0, 0, ctrl_small(), true)
+    s(i, D_E, min)
+    s(i, D_F, max)
+    if max <= min {
+        s(i, D_F, min + 1)
+    }
+    s(i, D_VAL, wert)
+    return i
+}
+
+fn slider_setz(i: u64, x: u64) {
+    let lo: u64 = g(i, D_E)
+    let hi: u64 = g(i, D_F)
+    let bx: u64 = g(i, D_X) + thumb_w() / 2
+    let bw: u64 = g(i, D_W) - thumb_w()
+    var v: u64 = lo
+    if bw > 0 {
+        if x > bx {
+            let d: u64 = x - bx
+            if d >= bw {
+                v = hi
+            } else {
+                v = lo + (hi - lo) * d / bw
+            }
+        }
+    }
+    if v != g(i, D_VAL) {
+        s(i, D_VAL, v)
+        dirty_wd(i)
+    }
+}
+
 fn sep() -> u64 {
     return add(K_SEP, 0, 0, sep_h(), false)
 }
@@ -1759,16 +2161,24 @@ fn tile(spec: u64) -> u64 {
     return i
 }
 
-// ONE ROW PLUS TEN PIXELS: 30 under `classic`, 34 under `modern`.
+// ONE ROW PLUS EIGHT PIXELS: 28 under `classic`, 32 under `modern`.
 //
 // That is not a taste, it is the answer to a subtraction. The window
 // has 542 usable pixels, the tab bar and the status line take 92 of
 // them, and ten tiles plus their heading plus the gaps have to fit in
-// what is left. 34 fits with 46 to spare; 38 does not fit at all. The
-// number is derived from the `row` token so that it follows the shape
-// instead of being measured once for one of them.
+// what is left. The number is derived from the `row` token so that it
+// follows the shape instead of being measured once for one of them.
+//
+// RUNDE ALLTAG: ACHT UND NICHT ZEHN. Seit dieser Runde liegt jede
+// Laenge, die ein Kasten vergibt, auf dem Vierer-Raster; `row + 10`
+// ergab 34, wurde auf 36 aufgerundet, und die zehnte Kachel fiel
+// unten aus dem Kasten heraus -- sichtbar daran, dass "Werkstatt"
+// gemalt wurde und im Bild kein einziger Bildpunkt davon ankam.
+// `row + 8` ist selbst schon ein Vielfaches von vier (32 unter
+// `modern`), wird also nicht mehr gerundet, und zehn Kacheln haben
+// wieder Luft.
 fn tile_h() -> u64 {
-    return wlibc.metric(wlibc.M_ROW) + 10
+    return wlibc.metric(wlibc.M_ROW) + 8
 }
 
 fn tspec(i: u64, f: u64) -> u64 {
@@ -3331,12 +3741,154 @@ fn paint_card(i: u64) {
     wlibc.rrect(x, y, w, h, r, wlibc.theme(wlibc.C_PANEL_BG))
 }
 
+// Die Bildflaeche. Erst der Grund (ein Bild mit Deckung unter eins
+// braucht einen), dann das Bild, dann der Rahmen. Beschnitten wird auf
+// das Widget: `wlibc.clip_set` -- ohne das malte ein vergroessertes
+// Bild ueber die halbe Fensterbreite.
+fn paint_bild(i: u64) {
+    let x: u64 = g(i, D_X)
+    let y: u64 = g(i, D_Y)
+    let w: u64 = g(i, D_W)
+    let h: u64 = g(i, D_H)
+    wlibc.rect(x, y, w, h, wlibc.theme(wlibc.T_ENTRY))
+    let p: u64 = g(i, D_E)
+    let iw: u64 = g(i, D_F)
+    let ih: u64 = g(i, D_G)
+    if p == 0 || iw == 0 || ih == 0 || w < 4 || h < 4 {
+        wlibc.frame(x, y, w, h, wlibc.theme(wlibc.T_LINE))
+        return
+    }
+    let z: u64 = g(i, D_ZOOM)
+    let dreh: u64 = g(i, D_DREH)
+    let bw: u64 = bild_bw(i)
+    let bh: u64 = bild_bh(i)
+    let zw: u64 = bw * z / 100
+    let zh: u64 = bh * z / 100
+    // Die linke obere Ecke: mittig, plus die Verschiebung.
+    var ox: u64 = x
+    if zw < w {
+        ox = x + (w - zw) / 2
+    }
+    var oy: u64 = y
+    if zh < h {
+        oy = y + (h - zh) / 2
+    }
+    ox = ox +% g(i, D_PX)
+    oy = oy +% g(i, D_PY)
+    let a_x0: u64 = wlibc.clip_x0()
+    let a_y0: u64 = wlibc.clip_y0()
+    let a_x1: u64 = wlibc.clip_x1()
+    let a_y1: u64 = wlibc.clip_y1()
+    wlibc.clip_set(x, y, x + w, y + h)
+    var sy: u64 = 0
+    while sy < h {
+        let py: u64 = y + sy
+        // Welcher Bildpunkt liegt hier? Rueckwaerts gerechnet, damit
+        // jeder Bildschirmpunkt genau einmal gesetzt wird.
+        let dy: u64 = py -% oy
+        if dy < zh {
+            let qy: u64 = dy * 100 / z
+            var sx: u64 = 0
+            while sx < w {
+                let px: u64 = x + sx
+                let dx: u64 = px -% ox
+                if dx < zw {
+                    let qx: u64 = dx * 100 / z
+                    var bx: u64 = qx
+                    var by: u64 = qy
+                    if dreh == 1 {
+                        bx = qy
+                        by = ih - 1 - qx
+                    } else if dreh == 2 {
+                        bx = iw - 1 - qx
+                        by = ih - 1 - qy
+                    } else if dreh == 3 {
+                        bx = iw - 1 - qy
+                        by = qx
+                    }
+                    if bx < iw && by < ih {
+                        let f: u64 = (__mmio_read32((p + (by * iw + bx) * 4)
+                            as *mut u32)) as u64
+                        let a: u64 = f >> 24
+                        if a == 255 {
+                            wlibc.px(px, py, f & wlibc.RGB24)
+                        } else if a > 0 {
+                            wlibc.px(px, py, wlibc.blend(wlibc.get(px, py),
+                                f & wlibc.RGB24, a))
+                        }
+                    }
+                }
+                sx = sx + 1
+            }
+        }
+        sy = sy + 1
+    }
+    // Der gezogene Ausschnitt: ein Rahmen in der Akzentfarbe, INNEN
+    // beschnitten wie das Bild selbst.
+    if g(i, D_WZ) == 1 && s_aus_da != 0 {
+        let ox2: u64 = bild_ox(i)
+        let oy2: u64 = bild_oy(i)
+        let ax: u64 = ox2 + bild_aus_x0() * z / 100
+        let ay: u64 = oy2 + bild_aus_y0() * z / 100
+        let aw: u64 = (bild_aus_x1() - bild_aus_x0() + 1) * z / 100
+        let ah: u64 = (bild_aus_y1() - bild_aus_y0() + 1) * z / 100
+        wlibc.frame(ax, ay, aw, ah, wlibc.theme(wlibc.T_ACCENT))
+        if aw > 2 && ah > 2 {
+            wlibc.frame(ax + 1, ay + 1, aw - 2, ah - 2,
+                wlibc.theme(wlibc.T_ACCENT))
+        }
+    }
+    wlibc.clip_set(a_x0, a_y0, a_x1, a_y1)
+    wlibc.frame(x, y, w, h, wlibc.theme(wlibc.T_LINE))
+    focus_ring(i)
+}
+
+// Der Schieberegler: eine Rinne, ein gefuellter Teil bis zum Griff, der
+// Griff. Die Farben sind die des Farbschemas, die Hoehen die der
+// Vorlage -- keine Zahl davon steht hier.
+fn paint_slider(i: u64) {
+    let x: u64 = g(i, D_X)
+    let y: u64 = g(i, D_Y)
+    let w: u64 = g(i, D_W)
+    let h: u64 = g(i, D_H)
+    let tw: u64 = thumb_w()
+    let rinne: u64 = h / 6 + 2
+    let my: u64 = y + h / 2 - rinne / 2
+    wlibc.rrect(x + tw / 2, my, w - tw, rinne, rinne / 2,
+        wlibc.theme(wlibc.T_SCROLL))
+    let lo: u64 = g(i, D_E)
+    let hi: u64 = g(i, D_F)
+    var t: u64 = 0
+    if hi > lo && g(i, D_VAL) > lo {
+        t = (w - tw) * (g(i, D_VAL) - lo) / (hi - lo)
+    }
+    if t > w - tw {
+        t = w - tw
+    }
+    wlibc.rrect(x + tw / 2, my, t, rinne, rinne / 2,
+        wlibc.theme(wlibc.T_ACCENT))
+    var farbe: u64 = wlibc.theme(wlibc.T_BTN)
+    if (g(i, D_FLAGS) & F_PRESSED) != 0 {
+        farbe = wlibc.theme(wlibc.T_BTNDN)
+    } else if (g(i, D_FLAGS) & F_HOVER) != 0 {
+        farbe = wlibc.theme(wlibc.T_BTNHI)
+    }
+    let gh: u64 = h - 4
+    wlibc.rrect(x + t, y + 2, tw, gh, tw / 2, wlibc.theme(wlibc.T_LINE))
+    wlibc.rrect(x + t + 1, y + 3, tw - 2, gh - 2, tw / 2 - 1, farbe)
+    focus_ring(i)
+}
+
 fn paint_one(i: u64) {
     let k: u64 = g(i, D_KIND)
     if (g(i, D_FLAGS) & F_HIDE) != 0 {
         return
     }
-    if k == K_LABEL {
+    if k == K_BILD {
+        paint_bild(i)
+    } else if k == K_SLIDER {
+        paint_slider(i)
+    } else if k == K_LABEL {
         paint_label(i)
     } else if k == K_BUTTON {
         paint_button(i)
@@ -3988,6 +4540,29 @@ fn on_down(w: u64, x: u64, y: u64, btn: u64) {
         s_down = i + 1
         return
     }
+    // RUNDE ALLTAG. Ein Schieberegler springt dorthin, wo geklickt
+    // wurde, und zieht dann mit. Eine Bildflaeche schiebt das Bild.
+    if k == K_SLIDER {
+        s(i, D_FLAGS, g(i, D_FLAGS) | F_PRESSED)
+        s_down = i + 1
+        slider_setz(i, x)
+        fire(i, K_SLIDER, g(i, D_VAL), w)
+        return
+    }
+    if k == K_BILD {
+        s_down = i + 1
+        s_dragx = x
+        s_dragy = y
+        if g(i, D_WZ) == 1 {
+            s_aus_x0 = bild_px(i, x)
+            s_aus_y0 = bild_py(i, y)
+            s_aus_x1 = s_aus_x0
+            s_aus_y1 = s_aus_y0
+            s_aus_da = 1
+            dirty_wd(i)
+        }
+        return
+    }
     // ROUND THEMESTORE: A TILE IS A BIG BUTTON. It reports the click
     // at once instead of on release -- there is no "pressed" look to
     // show, because the tile already shows a preset and dimming it
@@ -4149,6 +4724,16 @@ fn on_up(w: u64, x: u64, y: u64) {
                 0)
             return
         }
+        if g(i, D_KIND) == K_SLIDER {
+            s(i, D_FLAGS, g(i, D_FLAGS) & ~F_PRESSED)
+            dirty_wd(i)
+            fire(i, K_SLIDER, g(i, D_VAL), w)
+            return
+        }
+        if g(i, D_KIND) == K_BILD {
+            fire(i, K_BILD, 0, w)
+            return
+        }
         if g(i, D_KIND) == K_BUTTON {
             s(i, D_FLAGS, g(i, D_FLAGS) & ~F_PRESSED)
             dirty_wd(i)
@@ -4192,6 +4777,26 @@ fn on_move(w: u64, x: u64, y: u64, btn: u64) {
     // Ziehen im Textfeld waehlt aus. Umschalt-Pfeil gibt es hier nicht:
     // die Zeilendisziplin liefert das FERTIGE Zeichen, die Umschalttaste
     // kommt nie als eigenes Ereignis an. Also waehlt die Maus.
+    if s_down != 0 && (btn & 1) != 0 {
+        let dd: u64 = s_down - 1
+        if g(dd, D_KIND) == K_SLIDER {
+            slider_setz(dd, x)
+            fire(dd, K_SLIDER, g(dd, D_VAL), w)
+            return
+        }
+        if g(dd, D_KIND) == K_BILD {
+            if g(dd, D_WZ) == 1 {
+                s_aus_x1 = bild_px(dd, x)
+                s_aus_y1 = bild_py(dd, y)
+                dirty_wd(dd)
+                return
+            }
+            bild_schieben(dd, x -% s_dragx, y -% s_dragy)
+            s_dragx = x
+            s_dragy = y
+            return
+        }
+    }
     if s_down != 0 && (btn & 1) != 0 {
         let d: u64 = s_down - 1
         if g(d, D_KIND) == K_ENTRY {
@@ -4261,6 +4866,18 @@ fn decode(c: u64) -> u64 {
         if c == 14 {
             return KEY_UP
         }
+        // RUNDE ALLTAG: DIE EINGABETASTE KOMMT ALS ZEILENVORSCHUB.
+        //
+        // `KEY_ENTER` ist 13, die Tastatur dieses Systems liefert 10
+        // (kernel/kbd.fi, us-Tabelle). Damit hat in JEDEM Fenster die
+        // Eingabetaste nichts getan -- kein Knopf, kein Dialog, kein
+        // Textfeld. Gemessen an einem Dialog, der sich mit
+        // `sendkey ret` nicht schliessen liess. Hier wird aus dem
+        // einen das andere, an der einen Stelle, an der alle Tasten
+        // vorbeikommen.
+        if c == 10 {
+            return KEY_ENTER
+        }
         return c
     }
     if s_esc == 1 {
@@ -4273,7 +4890,9 @@ fn decode(c: u64) -> u64 {
     }
     if s_esc == 2 {
         if c >= 48 && c <= 57 {
-            s_esc = 3 + (c - 48)
+            s_num = c - 48
+            s_mod = 0
+            s_esc = 3
             return 0
         }
         s_esc = 0
@@ -4297,12 +4916,35 @@ fn decode(c: u64) -> u64 {
         }
         return 0
     }
-    // `ESC [ n ~`
-    let n: u64 = s_esc - 3
+    // `ESC [ n ~` und `ESC [ n ; m ~`. Der Modifikator m ist der von
+    // xterm: 2 = Umschalt, 3 = Alt, 5 = Steuerung, jeweils plus eins.
+    if s_esc == 3 {
+        if c >= 48 && c <= 57 {
+            s_num = s_num * 10 + (c - 48)
+            return 0
+        }
+        if c == 59 {
+            s_esc = 4
+            return 0
+        }
+        s_esc = 0
+        if c != 126 {
+            return 0
+        }
+        return tilde(s_num, 0)
+    }
+    if c >= 48 && c <= 57 {
+        s_mod = s_mod * 10 + (c - 48)
+        return 0
+    }
     s_esc = 0
     if c != 126 {
         return 0
     }
+    return tilde(s_num, s_mod)
+}
+
+fn tilde(n: u64, m: u64) -> u64 {
     if n == 5 {
         return KEY_PGUP
     }
@@ -4310,6 +4952,9 @@ fn decode(c: u64) -> u64 {
         return KEY_PGDN
     }
     if n == 3 {
+        if m == 2 {
+            return KEY_SDEL
+        }
         return KEY_DEL
     }
     if n == 1 {
@@ -4517,12 +5162,28 @@ fn entry_key(i: u64, k: u64) {
     dirty_wd(i)
 }
 
-fn on_key(w: u64, c: u64) {
+fn on_key(wein: u64, c: u64) {
     let k: u64 = decode(c)
     if k == 0 {
         return
     }
     s_keylast = k
+    s_keyseq = s_keyseq + 1
+    // RUNDE ALLTAG: EIN DIALOG IST MODAL, AUCH FUER DIE TASTATUR.
+    //
+    // Der Fensterserver schickt die Taste an das Fenster mit dem
+    // Fokus, und das ist nach `dlg_ask` weiterhin das Hauptfenster --
+    // der Dialog ist gerade erst entstanden und noch nicht angeklickt
+    // worden. Also landete jede Taste bei der Tabelle darunter, und
+    // ein Dialog liess sich mit der Eingabetaste nicht schliessen
+    // (gemessen mit `sendkey ret`). Solange einer offen ist, gehoert
+    // die Tastatur ihm.
+    var w: u64 = wein
+    if dl_win != 0xFFFFFFFFFFFFFFFF && ng(dl_win, N_H) != 0 {
+        w = dl_win
+    } else if mn_win != 0xFFFFFFFFFFFFFFFF && ng(mn_win, N_H) != 0 {
+        w = mn_win
+    }
     if ng(w, N_KIND) == NK_MENU {
         let zh: u64 = ng(w, N_CNT)
         if k == KEY_DOWN && ng(w, N_VAL) < zh {
@@ -4536,6 +5197,24 @@ fn on_key(w: u64, c: u64) {
         } else if k == KEY_ESC {
             ns(w, N_VAL, 0)
             fire(ng(w, N_OWNER), K_MENUBAR, 0xFFFF, w)
+        }
+        return
+    }
+    // EIN DIALOG HAT ZWEI TASTEN, und beide muessen ohne Maus gehen:
+    // Eingabe ist "ja", Flucht ist "nein". Sein Textfeld bekommt alles
+    // andere -- der Fokus liegt nach `dlg_open` darauf, nach `dlg_ask`
+    // gibt es keines.
+    if ng(w, N_KIND) == NK_DLG {
+        if k == KEY_ENTER {
+            fire(dl_ok, K_BUTTON, 0, w)
+            return
+        }
+        if k == KEY_ESC {
+            fire(dl_no, K_BUTTON, 0, w)
+            return
+        }
+        if dl_ent < MAXWD {
+            entry_key(dl_ent, k)
         }
         return
     }
