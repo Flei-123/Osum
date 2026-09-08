@@ -366,8 +366,13 @@ INNER=$((${WH:-566} - 24))
 # BEIDE Seiten, nicht nur die sichtbare: die Kacheln der Seite Vorlagen
 # sind Widgets wie alle anderen und muessen genauso ins Fenster passen.
 # Die Seite wird hier gebaut und in Abschnitt 9 und 10 wiederverwendet.
+# RUNDE MERGE8: 548,41 statt 680,51. Die Reiterleiste hat seit den
+# Runden KONTO und ABGLEICH ZEHN Reiter statt acht -- der alte Punkt
+# 680,51 traf damit nicht mehr "Vorlagen" (Reiter 7, x=526..601),
+# sondern den letzten Reiter "Abgleich". Gemessen wurden dann elf
+# Beschriftungen der Abgleich-Seite statt der zwoelf der Vorlagen.
 bash tools/themestore/build.sh "$TMPD/setv" extra='einst' uitrace=yes keep=yes \
-    click=680,51 > "$TMPD/setv.log" 2>&1
+    click=548,41 > "$TMPD/setv.log" 2>&1
 SEV="$TMPD/setv/serial.txt"
 NR=$({ grep -ac 'settings: rect name=w[a-z][a-z] ' "$SE" "$SEV" || true; } \
      | cut -d: -f2 | awk '{n=n+$1} END {print n+0}')

@@ -61,8 +61,8 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 
 export FIRNLIB="$ROOT/lib"
-TMPD=$(mktemp -d)
-trap 'rm -rf "$TMPD"' EXIT
+TMPD=${TILING_TMPD:-$(mktemp -d)}
+[ -n "${TILING_KEEP:-}" ] || trap 'rm -rf "$TMPD"' EXIT
 
 pass=0
 fail=0

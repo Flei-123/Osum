@@ -54,8 +54,8 @@ LUCIDE=${LUCIDE:-/root/icon-src/lucide/font/lucide.ttf}
 LUCIDE_INFO=${LUCIDE_INFO:-/root/icon-src/lucide/font/info.json}
 SHOTS=docs/icons
 
-TMPD=$(mktemp -d)
-trap 'rm -rf "$TMPD"' EXIT
+TMPD=${ICONS_TMPD:-$(mktemp -d)}
+[ -n "${ICONS_KEEP:-}" ] || trap 'rm -rf "$TMPD"' EXIT
 
 pass=0
 fail=0

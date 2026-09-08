@@ -223,3 +223,125 @@ Die Uhr in der Leiste ist auf beiden Bildern lesbar und steht auf
 12:20 bzw. 12:21 (Ortszeit, TZ 120 = CEST), das Datum unveraendert
 08.09. Dazu `taskbar: round=3201 ... px=5222400 soll=5222400 null=0`
 und **0 Paniken** im seriellen Mitschnitt.
+
+## Volllauf 1 + Fixes (08.09.2026)
+
+test.sh, OSUM_JOBS=4: **50 von 74 Abschnitten gruen, 5066 Zusagen**.
+Gegen merge7 verglichen: alles gleich oder besser -- vier echte
+Regressionen, alle behoben und einzeln nachgemessen:
+
+| Abschnitt  | Volllauf | merge7 | Ursache | Fix | solo danach |
+|------------|----------|--------|---------|-----|-------------|
+| tiling     | 55/12 | 68/0  | `find()` sucht Teilzeichenketten: `tilefuzz` enthaelt `fuzz` -> Aufruf-Fuzzer (HAERTUNG-2) mit 100000 Runden -> QEMU rc=124 | `find_wort()` in kernel/kmain.fi, fuer `fuzz` benutzt | **68/0** |
+| netview    | 121/29 | 182/13 | Zustandsabbilder fest 8192 Bloecke, Programme gewachsen -> mkfs failed | 16384 Bloecke | **182/13** |
+| themestore | 78/3  | 81/0  | (a) Klick 680,51 traf bei zehn Reitern "Abgleich" statt "Vorlagen" (b) Konten-Seite: 17 Elemente links, Ende 632 > 542 | (a) click=548,41 (b) Geheimnis/Bereich nach rechts | **81/0** |
+| userland   | 90/1  | 91/0  | Lastartefakt (QEMU exit 0 statt 21) | keiner noetig | **91/0** |
+
+Besser als merge7: ota 107/0 (104/4), k15 232/20 (228/24), display 142/3,
+k18 170/0, gfx 76/0, init 78/0, usbimg 37/11, vielkern 36/4.
+Neu und gruen: praesenz 36/0, vsync 14/0.
+umlaut bleibt 5 rot -- in merge7 identisch, keine Regression.
+
+Bestaetigungslauf: systemd-Unit `m8-test2`, Log /tmp/m8-test2sh.log.
+
+## Volllauf 2 (Bestaetigung) + Endtafel gegen MERGE-7
+
+`test.sh`, OSUM_JOBS=4, Unit `m8-test2`, Log /tmp/m8-test2sh.log:
+
+**56 von 74 Abschnitten gruen, 18 rot, 5138 Zusagen.**
+(Volllauf 1 davor: 50/74. Die vier Fixes aus Volllauf 1 -- tiling,
+netview, themestore, userland -- sind alle gruen geblieben.)
+
+Der Lauf stand unter Fremdlast: Lastmittel 8-10, bis zu 7 fremde QEMUs
+anderer Runden. Deshalb ist jeder rote Abschnitt EINZELN gegen
+STATUS-MERGE7.md gestellt und im Zweifel solo nachgefahren.
+
+### Die Endtafel: alle 18 roten Abschnitte
+
+| Abschnitt | merge7 | merge8 (Volllauf) | Urteil |
+|-----------|--------|-------------------|--------|
+| `k15`       | 228/24 | **232/20** | besser als merge7 |
+| `display`   | 141/4  | **142/3**  | besser als merge7 |
+| `theme`     | 90/1   | 90/1   | vorbestehend, identisch |
+| `icons`     | 25/0   | 23/2   | **REGRESSION -> gefixt, jetzt 25/0** |
+| `paint`     | 32/1   | 32/1   | vorbestehend, identisch |
+| `netview`   | 182/13 | 182/13 | vorbestehend, identisch |
+| `powermon`  | 119/2  | 119/2  | vorbestehend, identisch |
+| `server`    | 21/2   | 21/2   | vorbestehend, identisch |
+| `usbimg`    | 36/12  | **37/11** | besser als merge7 |
+| `umlaut`    | 43/5   | 43/5   | vorbestehend, identisch |
+| `softui`    | 21/3   | 21/3   | vorbestehend, FAIL-Menge bitgleich |
+| `hid`       | 56/1   | 56/1   | vorbestehend, identisch |
+| `modul`     | 72/2   | 72/2   | vorbestehend, identisch |
+| `stick`     | 20/22  | 20/22  | vorbestehend, identisch |
+| `vielkern`  | 35/5   | **38/2**  | besser als merge7 |
+| `werkzeug`  | 30/4   | 23/11  | Lastflake -> solo **31/3**, Teilmenge von merge7 |
+| `glyphe`    | 27/2   | 28/1   | besser; solo 27/2 = merge7-Menge |
+| `systembus` | 34/1   | 34/1   | vorbestehend, identisch |
+
+**Kein einziger Abschnitt ist schlechter als merge7 -- ausser `icons`,
+und der ist behoben.** Sechs sind besser.
+
+### Die Einzelnachfahrten (ruhige Maschine, Mitschnitte aufgehoben)
+
+* **`glyphe` solo: 27/2**, rc=1 -- FAIL-Menge **identisch** mit merge7
+  (`diff` leer). Beide FAILs sind GEGENPROBEN, die absichtlich einen
+  Fehler provozieren sollen und ihn nicht sehen (Abschnitt 5
+  `glyphtafelfrei`, Abschnitt 8 `glyphblind`) -- Schwaechen des
+  Testaufbaus, keine Kernfehler.
+  **Der ALLTAG-Panikfall ist weg**: Abschnitt 7 meldet
+  `-smp 4: 20 Laeufe, 0 mit Panic` UND `-smp 8: 20 Laeufe, 0 mit Panic`.
+  In Runde ALLTAG war das 1 von 40 mit `-smp 8` (apic.fi:452).
+  Mitschnitt: `.test-work/glyphe-solo.log`.
+* **`systembus` solo: 34/1**, rc=1 -- derselbe einzelne FAIL wie merge7,
+  wortgleich ("der Editor ist nie gestartet -- die Tasten kamen nicht
+  an"). Auch ohne Fremdlast reproduzierbar, also **kein** Lastflake,
+  aber auch keine Regression. Mitschnitt: `.test-work/systembus-solo.log`.
+* **`werkzeug` solo: 31/3** (Volllauf 23/11) -- die acht Maus- und
+  Panel-Fehler waren reiner Lastflake. Die drei verbliebenen sind eine
+  **echte Teilmenge** von merge7s vier FAILs; merge7s
+  "gemessene Beschriftungen im Bild: 2" ist in merge8 sogar gruen (4).
+  Mitschnitt: `.test-work/werkzeug-solo.log`.
+* **`icons` solo: 24/1** (Volllauf 23/2) -- der Font-FAIL war Lastflake,
+  der Tooltip-FAIL blieb reproduzierbar. Siehe Regression unten.
+  Mitschnitte: `.test-work/icons-solo.log`, `.test-work/icons-solo2.log`.
+
+### Die einzige echte Regression: `icons` (behoben)
+
+    icons=49 tips=45 missing=4 extra=0
+    no tooltip: icon.volume.high / .low / .muted / .zero
+
+Runde TON-2 hat vier Lautstaerkesymbole nach `assets/icons/icons.map`
+gelegt (E010..E013), aber keine Sprechnamen in die Kataloge. `merge7`
+kennt die vier Symbole gar nicht, deshalb war der Abschnitt dort gruen.
+`tools/icons/run.sh` Abschnitt 3 haelt jedes Symbol gegen
+`locale/en/icons` und verlangt zusaetzlich, dass der deutsche Katalog
+GENAUSO viele traegt (`de == tips`) -- also mussten BEIDE ergaenzt
+werden, sonst kippt die dritte Zusage.
+
+FIX: vier `.tip`-Zeilen in `locale/en/icons` und `locale/de/icons`.
+Danach `icons=49 tips=49 missing=0 extra=0 de=49`, Abschnitt
+**25/0, rc=0** -- wieder auf merge7-Stand.
+
+### Die beiden geforderten Nachweise
+
+* **Zeitgeber-Wachhund (MERGE-7, `sched.fi:timer_tot`) ist in merge8
+  wirklich drin.** `kernel/cpu.fi` traegt `C_TOTMARKE`/`C_TOTZEIT`/
+  `C_TOTZAHL` auf 176/184/192, `timer_tot()` arbeitet ueber
+  `cpu.here`/`cpu.get`/`cpu.set` je Kern statt ueber `static mut`, und
+  die Haertung `t > zeit` vor der Subtraktion steht ebenfalls. Belegt
+  durch 0 Panics in 20 Laeufen `-smp 8` (siehe oben).
+* **SYSTEMBUS' kdata-Bereich stimmt nach der ALLTAG/PRAESENZ-
+  Neuaufteilung noch.** `tools/kernel/memmap.py`: *105 Bereiche in
+  0x100000 Oktetten kdata, 11 Vektoren, 182 Modusnamen in 16 Woertern,
+  **0 Kollisionen***. `BUS_OFF` steht weiterhin auf 0xC0000 (MERGE-7
+  hatte es von 0xAC000 wegverschoben), kollidiert also nicht mit
+  `WIGST_OFF` 0xB0000..0xB8000 oder `SCANB_OFF` 0xB8000..0xC0000.
+
+### Werkzeug-Nachruestung
+
+`tools/glyphe/run.sh`, `tools/systembus/run.sh` und `tools/icons/run.sh`
+verstehen jetzt -- wie `tools/werkzeug/run.sh` mit `WZ_OUT` und
+`tools/tiling/run.sh` mit `TILING_KEEP` -- die Umgebungsvariablen
+`<RUNDE>_KEEP=1` und `<RUNDE>_TMPD=<dir>`, damit das Arbeitsverzeichnis
+nach einem roten Lauf zum Nachsehen stehen bleibt.
