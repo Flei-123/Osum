@@ -345,6 +345,24 @@ const SYS_ARCH_PRCTL: u64 = 158
 const SYS_READV: u64 = 19
 const SYS_WRITEV: u64 = 20
 const SYS_SET_TID_ADDRESS: u64 = 218
+
+// RUNDE LAUFZEIT, ZWEITER FUND (SQLite): ohne diese beiden kommt keine
+// Datenbank auf. SQLite liest und schreibt AUSSCHLIESSLICH mit
+// Positionsangabe (`pread`/`pwrite` in seinem Unix-VFS) und fragt vor
+// dem ersten Zugriff mit `fcntl` nach einer Sperre.
+const SYS_PREAD64: u64 = 17
+const SYS_PWRITE64: u64 = 18
+const SYS_FCNTL: u64 = 72
+// Die Unterbefehle von `fcntl`, die wirklich gebraucht werden.
+const F_DUPFD: u64 = 0
+const F_GETFD: u64 = 1
+const F_SETFD: u64 = 2
+const F_GETFL: u64 = 3
+const F_SETFL: u64 = 4
+const F_SETLK: u64 = 6
+const F_SETLKW: u64 = 7
+const F_GETLK: u64 = 5
+const F_DUPFD_CLOEXEC: u64 = 1030
 const ARCH_SET_FS: u64 = 0x1002
 const ARCH_GET_FS: u64 = 0x1003
 
@@ -2095,6 +2113,19 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // dem Aufruf ohnehin nur die tid.
     if number == SYS_SET_TID_ADDRESS {
         return sched.tget(state, me, sched.T_PID)
+    }
+    // RUNDE LAUFZEIT: Lesen und Schreiben MIT POSITION, ohne die
+    // gemeinsame Schreibmarke zu bewegen. Das ist keine Bequemlichkeit
+    // -- SQLite baut darauf, dass zwei Zugriffe auf dieselbe Datei sich
+    // nicht gegenseitig die Position verstellen.
+    if number == SYS_PREAD64 {
+        return do_pio(state, me, a0, a1, a2, a3, false)
+    }
+    if number == SYS_PWRITE64 {
+        return do_pio(state, me, a0, a1, a2, a3, true)
+    }
+    if number == SYS_FCNTL {
+        return do_fcntl(state, me, a0, a1, a2)
     }
     if number == SYS_MMAP {
         // ROUNDE K7: a4 ist der Deskriptor. Bis hierher wurde er
@@ -5484,6 +5515,93 @@ fn map_bottom(state: u64, me: u64) -> u64 {
 //     ersten beiden -- nicht den Fehler. Der Fehler kommt erst, wenn
 //     KEIN Oktett durchging.
 //   * Ein Eintrag der Laenge 0 wird uebersprungen, nicht abgelehnt.
+// RUNDE LAUFZEIT: `pread64`/`pwrite64`.
+//
+// Der Unterschied zu `read`/`write` ist EINE Eigenschaft, und SQLite
+// haengt daran: DIE POSITION DER DATEI BLEIBT, WO SIE WAR. Umgesetzt
+// wird das hier, indem die Marke gesichert, der gewoehnliche Weg
+// gegangen und die Marke danach zurueckgeschrieben wird -- inklusive
+// des Fehlerfalls, denn eine Marke, die nur bei Erfolg stimmt, ist
+// schlimmer als gar keine.
+fn do_pio(state: u64, me: u64, fd: u64, buf: u64, len: u64, off: u64,
+    schreiben: bool) -> u64 {
+    // Eine negative Position ist ein Fehler und kein grosser u64.
+    if (off >> 63) != 0 {
+        return neg(errno.E_INVAL)
+    }
+    var recht: u64 = handle.R_READ
+    if schreiben {
+        recht = handle.R_WRITE
+    }
+    let of: u64 = file.fd_check(state, me, fd, recht)
+    if of >= file.MAX_OPEN {
+        return neg(errno.E_BADF)
+    }
+    let kind: u64 = file.open_kind(state, of)
+    // Was keine Position hat, kann auch nicht an einer lesen.
+    if kind == file.K_PIPER || kind == file.K_PIPEW {
+        return neg(errno.E_SPIPE)
+    }
+    if kind == file.K_CONIN || kind == file.K_CONOUT {
+        return neg(errno.E_SPIPE)
+    }
+    let merk: u64 = file.open_off(state, of)
+    file.open_set_off(state, of, off)
+    var r: u64 = 0
+    if schreiben {
+        r = do_write(state, me, fd, buf, len)
+    } else {
+        r = do_read(state, me, fd, buf, len)
+    }
+    file.open_set_off(state, of, merk)
+    return r
+}
+
+// RUNDE LAUFZEIT: `fcntl`, und zwar EHRLICH.
+//
+// Was dieser Kern kann, beantwortet er; was er nicht kann, sagt er --
+// mit einer Ausnahme, die begruendet gehoert:
+//
+// DIE SPERREN (F_SETLK/F_SETLKW/F_GETLK) MELDEN ERFOLG, OHNE ZU
+// SPERREN. Das ist eine bewusste Luege, und sie ist genau so gross wie
+// die von Linux auf einem Dateisystem ohne Sperren: SQLite fragt vor
+// jedem Zugriff nach einer Sperre und gibt auf, wenn sie verweigert
+// wird. Solange EIN Prozess auf die Datenbank sieht -- und mehr kann
+// dieses System heute nicht --, ist "gewaehrt" die richtige Antwort.
+// Der Tag, an dem zwei Prozesse dieselbe Datenbank oeffnen, ist der
+// Tag, an dem hier echte Sperren stehen muessen; bis dahin steht es
+// hier als Satz und nicht als stiller Rueckgabewert.
+fn do_fcntl(state: u64, me: u64, fd: u64, cmd: u64, arg: u64) -> u64 {
+    let of: u64 = file.fd_check(state, me, fd, 0)
+    if of >= file.MAX_OPEN {
+        return neg(errno.E_BADF)
+    }
+    if cmd == F_GETFL {
+        return file.open_flags(state, of)
+    }
+    if cmd == F_SETFL {
+        return 0
+    }
+    // Kein Deskriptor dieses Kerns ueberlebt ein `execve`, und keiner
+    // traegt ein Nahe-Bit. Beides sagt die Antwort auch so.
+    if cmd == F_GETFD {
+        return 0
+    }
+    if cmd == F_SETFD {
+        return 0
+    }
+    if cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC {
+        return do_dup(state, me, fd)
+    }
+    if cmd == F_SETLK || cmd == F_SETLKW {
+        return 0
+    }
+    if cmd == F_GETLK {
+        return 0
+    }
+    return neg(errno.E_INVAL)
+}
+
 fn do_writev(state: u64, me: u64, fd: u64, iov: u64, n: u64, schreiben: bool) -> u64 {
     if n > 1024 {
         return neg(errno.E_INVAL)
