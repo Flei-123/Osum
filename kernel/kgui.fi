@@ -26,6 +26,7 @@
 profile kernel
 
 import arch.x86_64.apic
+import arch.x86_64.fpu
 import blk
 import bootmod
 import elf
@@ -137,6 +138,9 @@ fn paint_bench(state: u64) {
     var s_rd: [u8; 10] = "  reads=\0\0"
     var s_sk: [u8; 10] = "  skips=\0\0"
     var s_db: [u8; 10] = "  dbl=\0\0\0\0"
+    var s_sp: [u8; 12] = "  simd_px=\0\0"
+    var s_so: [u8; 12] = "  simd_ok=\0\0"
+    var s_fe: [u8; 11] = "  fpu_en=\0\0"
 
     if apic.tsc_hz(state) == 0 {
         return
@@ -199,6 +203,12 @@ fn paint_bench(state: u64) {
     serial.dec(fb.blends(state))
     serial.puts((&s_rd[0]) as u64)
     serial.dec(fb.blend_reads(state))
+    serial.puts((&s_sp[0]) as u64)
+    serial.dec(fb.simd_px(state))
+    serial.puts((&s_so[0]) as u64)
+    serial.dec(bnum(fb.simd_ok(state)))
+    serial.puts((&s_fe[0]) as u64)
+    serial.dec(bnum(fpu.enabled(state)))
     serial.puts((&s_sk[0]) as u64)
     serial.dec(fb.blend_skips(state))
     serial.puts((&s_db[0]) as u64)
@@ -428,6 +438,7 @@ fn graphics(state: u64, mbi: u64) {
 
     gfx_bench(state, back)
     paint_bench(state)
+    durchsatz(state)
 
     // RUNDE DISPLAY: die Karte fragen, was sie kann. Hier und nicht
     // frueher, weil `probe` die Fensterplaetze zaehlt, die `fb.init`
@@ -1151,6 +1162,111 @@ fn gfx_bench(state: u64, back: u64) {
     serial.puts((&s_ln[0]) as u64)
     serial.dec(b_line)
     serial.puts((&s_us[0]) as u64)
+    serial.nl()
+}
+
+// =====================================================================
+// RUNDE SCHNELLBILD: DER DURCHSATZ IN MB/s, UND DIE ABBILDUNG DAZU
+// =====================================================================
+//
+// WARUM DIESE MESSUNG UND NICHT `fbbench`. `fbbench` misst Mikrosekunden
+// je Vollbild. Das ist die richtige Zahl, um zwei Wege zu vergleichen,
+// aber es ist NICHT die Zahl, an der man erkennt, ob die Abbildung
+// stimmt: 40 ms bei 1280x800 und 40 ms bei 3440x1440 sind derselbe
+// Zeitwert und ein Unterschied von Faktor 4,8 im Durchsatz.
+//
+// Die Recherche (FREMDSOFTWARE.md 4a) nennt die Schwelle:
+//     uncached (UC)     -> 50..200 MB/s
+//     write-combining   -> 2000..6000 MB/s
+// Dazwischen liegt Faktor 30, und das erkennt man nur an MB/s.
+//
+// Gemessen wird der REINE SCHREIBWEG in den Zeichenpuffer: `n` volle
+// Bilder mit `rep stosq`, ohne Mischen, ohne Text, ohne Fensterserver.
+// Was hier herauskommt, ist die OBERGRENZE -- kein Zeichner wird je
+// schneller als der Speicher darunter.
+//
+// DAZU DIE ABBILDUNG, UND ZWAR GEMESSEN, NICHT GEGLAUBT: `fb.pde_roh`
+// liest den ECHTEN Seitentafeleintrag des Fensterplatzes zurueck,
+// `fb.pat_roh` das MSR. Erst beide zusammen sagen, ob
+// Write-Combining wirklich greift:
+//     Bit 12 im Eintrag gesetzt UND Stelle 4 im PAT == 01  -> WC
+// Ohne diese zwei Zahlen ist jede Aussage ueber UC/WC eine Behauptung.
+fn durchsatz(state: u64) {
+    var s_h: [u8; 20] = "        durchsatz: \0"
+    var s_x: [u8; 2] = "x\0"
+    var s_px: [u8; 9] = "  bytes=\0"
+    var s_us: [u8; 7] = "  us=\0\0"
+    var s_mb: [u8; 9] = "  mb_s=\0\0"
+    var s_fps: [u8; 8] = "  fps=\0\0"
+    var s_pde: [u8; 8] = "  pde=\0\0"
+    var s_pat: [u8; 8] = "  pat=\0\0"
+    var s_wc: [u8; 7] = "  wc=\0\0"
+    var s_uc: [u8; 7] = "  uc=\0\0"
+    var s_st: [u8; 12] = "  streifen=\0"
+    var s_nb: [u8; 33] = "        durchsatz: no time base\0\0"
+
+    if apic.tsc_hz(state) == 0 {
+        serial.puts((&s_nb[0]) as u64)
+        serial.nl()
+        return
+    }
+    let w: u64 = fb.width(state)
+    let h: u64 = fb.height(state)
+    if w == 0 || h == 0 {
+        return
+    }
+    // Der Puffer, in den wirklich gezeichnet wird -- mit Zweitpuffer ist
+    // das der Arbeitsspeicher, ohne ihn die Karte. Genau der Unterschied
+    // soll sichtbar werden, deshalb wird hier NICHTS umgestellt.
+    let bytes: u64 = fb.pitch(state) *% h
+    let farbe: u64 = fb.rgb(state, 0x10, 0x20, 0x30)
+
+    let t: u64 = apic.tsc()
+    var i: u64 = 0
+    while i < GFX_RUNDEN {
+        fb.clear(state, farbe)
+        i = i + 1
+    }
+    let us: u64 = us_of(state, apic.tsc() -% t) / GFX_RUNDEN
+
+    serial.puts((&s_h[0]) as u64)
+    serial.dec(w)
+    serial.puts((&s_x[0]) as u64)
+    serial.dec(h)
+    serial.puts((&s_px[0]) as u64)
+    serial.dec(bytes)
+    serial.puts((&s_us[0]) as u64)
+    serial.dec(us)
+    // MB/s aus Oktetten und Mikrosekunden, ohne Fliesskomma und ohne
+    // Ueberlauf: Oktette/us ist bereits MB/s (1e6/1e6 kuerzt sich weg).
+    serial.puts((&s_mb[0]) as u64)
+    if us != 0 {
+        serial.dec(bytes / us)
+    } else {
+        serial.dec(0)
+    }
+    // Die Obergrenze in Bildern je Sekunde, die aus genau dieser Zeit
+    // folgt. Mehr kann der Bildweg nie, egal was darueber laeuft.
+    serial.puts((&s_fps[0]) as u64)
+    if us != 0 {
+        serial.dec(1000000 / us)
+    } else {
+        serial.dec(0)
+    }
+    serial.nl()
+
+    // Die Abbildung, aus der Seitentafel selbst.
+    serial.puts((&s_h[0]) as u64)
+    serial.puts((&s_pde[0]) as u64)
+    serial.hex(fb.pde_roh(state))
+    serial.puts((&s_pat[0]) as u64)
+    serial.hex(fb.pat_roh(state))
+    serial.puts((&s_wc[0]) as u64)
+    serial.dec(fb.wc(state))
+    serial.puts((&s_uc[0]) as u64)
+    serial.dec(bnum(fb.uncached(state)))
+    serial.puts((&s_st[0]) as u64)
+    serial.dec(bnum(fb.stripe(state)))
     serial.nl()
 }
 
@@ -2144,12 +2260,15 @@ fn say_vsync(state: u64) {
     var s_p: [u8; 8] = "  r_un=\0"
     var s_q: [u8; 11] = "  ohnesig=\0"
     var s_r: [u8; 8] = "  halt=\0"
+    var s_ps: [u8; 10] = "  pxsum=\0\0"
     serial.puts((&s_a[0]) as u64)
     serial.dec(bool_zahl(wm.vsync_on(state)))
     serial.puts((&s_b[0]) as u64)
     serial.dec(wm.composites(state))
     serial.puts((&s_c[0]) as u64)
     serial.dec(wm.presents(state))
+    serial.puts((&s_ps[0]) as u64)
+    serial.dec(wm.pxsum(state))
     serial.puts((&s_d[0]) as u64)
     serial.dec(wm.skipped(state))
     serial.puts((&s_e[0]) as u64)
