@@ -740,6 +740,13 @@ abschnitt_ausfuehren() { # index
     local i=$1
     local skript=${A_SKRIPT[$i]} name=${A_NAME[$i]}
     local rc=0 s e
+    # RUNDE MERGE-8 (Nebenbefund aus ALLTAG): ein altes `.netto.$i` aus
+    # einem FRUEHEREN Lauf gehoert nicht zu diesem Abschnitt. Nur der
+    # Netz-Zweig unten schreibt die Datei; ein Nicht-Netz-Abschnitt mit
+    # demselben Index las sie trotzdem (Zeile "davon ... Warten auf die
+    # Netzsperre" bei `update`, obwohl die Maschine frei war -- mit
+    # OSUM_NUR bekommen andere Abschnitte dieselben Indizes).
+    rm -f "$WORK/.netto.$i"
     s=$(date +%s%N)
     if [[ "$skript" =~ $SERIELL_RE ]]; then
         # GEFUNDEN BEIM MESSEN: die Zeit VOR dieser Zeile ist Wartezeit
