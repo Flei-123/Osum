@@ -22,6 +22,23 @@
     (call $pruef (i32.load16_u (i32.const 820)) (i32.const 0x1234))
     (i32.store8 (i32.const 830) (i32.const 0xff))
     (call $pruef (i32.load8_s (i32.const 830)) (i32.const -1))
+    ;; UNAUSGERICHTET (RUNDE SCHLEUSE-3): die Laufzeit liest/schreibt
+    ;; 16/32/64 Bit jetzt in EINEM Zugriff statt byteweise. WASM erlaubt
+    ;; ausdruecklich unausgerichtete Adressen -- also wird genau das
+    ;; hier geprueft, sonst faellt es erst bei SQLite auf.
+    (i32.store (i32.const 1003) (i32.const 0x11223344))
+    (call $pruef (i32.load (i32.const 1003)) (i32.const 0x11223344))
+    (call $pruef (i32.load8_u (i32.const 1003)) (i32.const 0x44))
+    (call $pruef (i32.load8_u (i32.const 1006)) (i32.const 0x11))
+    (i64.store (i32.const 1015) (i64.const 0x0102030405060708))
+    (call $pruef (i32.load (i32.const 1015)) (i32.const 0x05060708))
+    (call $pruef (i32.load (i32.const 1019)) (i32.const 0x01020304))
+    (i32.store16 (i32.const 1031) (i32.const 0xbeef))
+    (call $pruef (i32.load16_u (i32.const 1031)) (i32.const 0xbeef))
+    (call $pruef (i32.load8_u (i32.const 1032)) (i32.const 0xbe))
+    ;; Vorzeichen bei unausgerichteter Adresse
+    (i32.store16 (i32.const 1041) (i32.const 0xfffe))
+    (call $pruef (i32.load16_s (i32.const 1041)) (i32.const -2))
     ;; memory.copy mit Ueberlappung nach vorn
     (memory.copy (i32.const 701) (i32.const 700) (i32.const 4))
     (call $pruef (i32.load8_u (i32.const 701)) (i32.const 97))
