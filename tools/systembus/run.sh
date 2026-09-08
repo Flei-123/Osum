@@ -28,8 +28,8 @@
 # Messung, die auch ohne die Eigenschaft dasselbe sagt, misst nichts.
 set -u
 cd "$(dirname "$0")/../.."
-TMPD=$(mktemp -d)
-trap 'rm -rf "$TMPD"' EXIT
+TMPD=${SYSBUS_TMPD:-$(mktemp -d)}
+[ -n "${SYSBUS_KEEP:-}" ] || trap 'rm -rf "$TMPD"' EXIT
 pass=0; fail=0
 ok()  { echo "  OK   $*"; pass=$((pass + 1)); }
 bad() { echo "  FAIL $*"; fail=$((fail + 1)); }

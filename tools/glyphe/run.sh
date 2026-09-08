@@ -56,8 +56,8 @@ cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-TMPD=$(mktemp -d)
-trap 'rm -rf "$TMPD"' EXIT
+TMPD=${GLYPHE_TMPD:-$(mktemp -d)}
+[ -n "${GLYPHE_KEEP:-}" ] || trap 'rm -rf "$TMPD"' EXIT
 
 LAEUFE=${OSUM_GLYPHE_LAEUFE:-20}
 PAR=${OSUM_GLYPHE_PAR:-4}
