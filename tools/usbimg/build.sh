@@ -511,6 +511,18 @@ ARGS+=(/users/ /users/root/ /users/root/config/
 ARGS+=(/boot/ "/boot/osum.mb=$OUT/osum.mb"
        "/boot/BOOTX64.EFI=$LIMINE/BOOTX64.EFI")
 ARGS+=(/dev/ /proc/ /mnt/ /tmp/ /store/ /apps/ /system/)
+# RUNDE TUERSCHLOSS: EIN BEISPIEL ZUM UEBERSETZEN.
+#
+# Seit dieser Runde liegen `firnc` und `fas` auf dem Stick. Eine Quelle
+# daneben zu legen kostet 591 Oktette und erspart dem, der es
+# ausprobieren will, das Tippen einer Datei in einem Editor, den er
+# gerade erst kennenlernt.
+#
+# Und es ist der Pruefstein fuer den Uebersetzer AUF dem System:
+#     firnc /beispiel/hallo.fi -o /tmp/hallo.s
+#     fas /tmp/hallo.s -o /tmp/hallo
+#     /tmp/hallo ; echo $?     -> 42
+ARGS+=(/beispiel/ "/beispiel/hallo.fi=assets/beispiel/hallo.fi")
 # RUNDE STICK: die Verzeichnisse, in denen die neuen Programme leben.
 ARGS+=(/etc/ssl/ /etc/jarvis/ /var/ /var/log/ /var/jarvis/)
 if [ -n "$ROOTS" ] && [ -s "$ROOTS" ]; then
@@ -550,7 +562,7 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /apps/explorer.osp/start /apps/editor.osp/start /apps/terminal.osp/start \
 /apps/launcher.osp/start /apps/widgets.osp/start /apps/settings.osp/start \
 /apps/settings.osp/INFO /apps/settings.osp/symbol \
-/bin/shutdown /bin/power /bin/firnc /bin/fas"
+/bin/shutdown /bin/power /bin/firnc /bin/fas /beispiel/hallo.fi"
 python3 tools/osum/mkfs.py list "$OUT/root.img" > "$OUT/liste.txt" 2>&1 \
     || fehler "das fertige Dateisystem laesst sich nicht lesen"
 fehlt=0
