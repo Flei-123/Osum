@@ -71,13 +71,16 @@ export {
     init, ready, echo, geometry_ok,
     width, height, pitch, bpp, bytes, addr, phys, source, back, draw_at,
     cols, rows, cx, cy, chars, flushes, scrolls, huges, block, offset,
-    rgb, pixel, get_pixel, fill, line, blit, clear, flush, dirty_all, dirty,
+    rgb, pixel, get_pixel, front_pixel, fill, line, blit, clear, flush, dirty_all, dirty,
+    // RUNDE VSYNC: die Seitenumschaltung.
+    flip_setup, flip_on, flip, flips, seite, draw_base, front_paar,
     scroll, write_bytes, read_bytes,
     putc, puts, text, nl, set_color, set_cursor, cursor_on, home, goto,
     set_echo, echo_on, double_buffered, uncached, set_back, hline_mask,
     parse, mode, want, selftest, selftest_max, failbits,
     SRC_NONE, SRC_MB, SRC_VBE, FB_OFF, FB_MAX, FONT_OFF, USER_BASE,
     M_GFX, M_NODBL, M_UC, M_BIG, M_NOCUR, M_HOLD, M_PATTERN, M_USER, M_WB,
+    M_FLIP, M_NOFLIP,
     WIDTH_STD, HEIGHT_STD,
     WIDTH_BIG, HEIGHT_BIG,
     // RUNDE DISPLAY -- der Moduswechsel und das Umrechnen beim Uebertragen.
@@ -267,6 +270,42 @@ const S_UIWANT: u64 = 0x7A8 // "uiscale=" von der Befehlszeile, 0 = keiner
 const S_BAND: u64 = 0x7B8 // reservierte Bildzeilen ganz oben, 0 = keine
 const S_BANDOPEN: u64 = 0x7C0 // 1 = der Tafelmaler darf hinein
 
+// ================== RUNDE VSYNC: DAS UMSCHALTEN DER BILDSEITE
+//
+// WARUM ZEILENWEISES UEBERTRAGEN NICHT REICHT, UND DAS IST GEMESSEN.
+//
+// Der Zweitpuffer allein beseitigt das Reissen NICHT. Er verlegt es
+// nur: `flush` kopiert Zeile fuer Zeile in den Vorderpuffer, und
+// waehrend dieser Schleife steht oben schon das neue und unten noch
+// das alte Bild. Wer in diesem Augenblick abliest -- der Bildaufbau
+// tut es staendig --, sieht beides. GEMESSEN mit dem Ableser auf
+// einem zweiten Kern, 1,8 Millionen Ablesungen waehrend eines Zuges:
+//
+//     ohne Bildgrenze (`nopresent`)   25 487 Risse
+//     mit Bildgrenze  (`vsync`)       21 454 Risse
+//
+// Das Sammeln hat die Zahl der Uebertragungen von 174 auf 30 gesenkt
+// und damit die GELEGENHEITEN zum Reissen -- beseitigt hat es sie
+// nicht, denn jede einzelne Uebertragung ist weiter zerlegbar.
+//
+// DIE ANTWORT IST, GAR NICHT ZU KOPIEREN. Der Bochs-VBE-Baustein (QEMU
+// `-vga std`) kann mehr Bildspeicher verwalten, als der Schirm zeigt,
+// und mit VBE_YOFF sagt man ihm, AB WELCHER ZEILE er auslesen soll.
+// Also: zweimal die Bildhoehe anfordern, abwechselnd in die eine und
+// in die andere Haelfte malen, und am Bildende EINEN Registerschreib
+// -- die ganze Seite wechselt auf einmal. Ein halbes Bild kann es
+// dann nicht mehr geben, weil nie in die Haelfte geschrieben wird,
+// die gerade gezeigt wird.
+//
+// Das ist der einzige Weg zu WIRKLICH null Rissen ohne einen echten
+// Vblank-IRQ, den VESA/GOP nicht anbietet.
+const S_FLIP: u64 = 0x7D0 // 1 = Seitenumschaltung moeglich und an
+const S_SEITE: u64 = 0x7D8 // welche Haelfte gerade GEMALT wird (0/1)
+const S_FLIPS: u64 = 0x7E0 // wie oft umgeschaltet wurde
+const S_VH: u64 = 0x7E8 // die angeforderte virtuelle Hoehe
+const S_MAPPED: u64 = 0x7F0 // wie viele Oktette wirklich abgebildet sind
+const S_SEQ: u64 = 0x7F8 // Folgenummer: ungerade = Seitenwechsel laeuft
+
 // Die drei Arten, ein Bild auf eine Tafel anderer Groesse zu bringen.
 // Dieselben drei, die ein Monitor in seiner eigenen Elektronik hat und
 // die ein Treiberbedienfeld "Vollbild / Seitenverhaeltnis / keine
@@ -301,6 +340,11 @@ const M_RES: u64 = 256
 // Rahmenpuffer write-back abgebildet, so wie bis zu dieser Runde --
 // damit laesst sich der Unterschied MESSEN statt behaupten.
 const M_WB: u64 = 512 // "fbwb" -- WC ausdruecklich NICHT einschalten
+// RUNDE VSYNC: die Seitenumschaltung. Sie steht in DIESEM Moduswort und
+// nicht in `kstate`, weil sie die ABBILDUNG des Rahmenpuffers aendert
+// -- und die entsteht in `fb.init`, lange bevor `kgui` etwas sagt.
+const M_FLIP: u64 = 1024 // "flip"   -- doppelte Hoehe abbilden
+const M_NOFLIP: u64 = 2048 // "noflip" -- die Gegenprobe
 
 // 800 x 600 x 4 sind 1 920 000 Oktette und passen in EINE 2-MiB-Kachel;
 // 1024 x 768 x 4 sind 3 145 728 und brauchen zwei. Beides steht in der
@@ -811,7 +855,22 @@ fn init(state: u64, mbi: u64, want_w: u64, want_h: u64,
     let inner: u64 = p - blk
     // Wie viele 2-MiB-Seiten der Puffer beruehrt, den Versatz im ersten
     // Block eingerechnet.
-    var kacheln: u64 = (inner + n + HUGE_SIZE - 1) / HUGE_SIZE
+    // RUNDE VSYNC: MIT `flip` WIRD DIE DOPPELTE HOEHE ABGEBILDET.
+    //
+    // Die Seitenumschaltung malt in die zweite Bildhoehe und laesst die
+    // Karte dorthin schauen. Beides braucht, dass die zweite Haelfte
+    // ueberhaupt IM FENSTER liegt -- eine Abbildung ueber eine
+    // Bildhoehe hinaus waere ein Schreibzugriff ins Leere.
+    //
+    // Das steht hier und nicht in `flip_setup`, weil die Abbildung des
+    // Rahmenpuffers an EINER Stelle entsteht. `flip_setup` prueft
+    // danach nur noch nach, ob es gereicht hat, und sagt sonst ehrlich
+    // `false`.
+    var nn: u64 = n
+    if want(state, M_FLIP) && !want(state, M_NOFLIP) {
+        nn = n * 2
+    }
+    var kacheln: u64 = (inner + nn + HUGE_SIZE - 1) / HUGE_SIZE
     // RUNDE ZWISCHENSPEICHER: PAT ZUERST, DANN ABBILDEN.
     //
     // Ohne `fbuc` und ohne `fbwb` bekommt der Rahmenpuffer
@@ -889,6 +948,9 @@ fn init(state: u64, mbi: u64, want_w: u64, want_h: u64,
     kstate.set(state, FB_OFF + S_PRESENTS, 0)
     kstate.set(state, FB_OFF + S_BPP, bp)
     kstate.set(state, FB_OFF + S_BYTES, n)
+    // RUNDE VSYNC: wie viel WIRKLICH abgebildet ist -- die
+    // Seitenumschaltung fragt danach, und `n` waere die halbe Wahrheit.
+    kstate.set(state, FB_OFF + S_MAPPED, kacheln *% HUGE_SIZE -% inner)
     kstate.set(state, FB_OFF + S_SOURCE, quelle)
     kstate.set(state, FB_OFF + S_RSHIFT, rs)
     kstate.set(state, FB_OFF + S_GSHIFT, gs)
@@ -1279,6 +1341,247 @@ fn pixel(state: u64, x: u64, y: u64, color: u64) {
 // Liest zurueck, was da steht -- aus dem ZIEL des Zeichnens. Damit kann
 // eine Zusage im Kernel selbst pruefen, was sie gemalt hat, ohne auf ein
 // Bildschirmfoto zu warten.
+// RUNDE VSYNC: EIN BILDPUNKT AUS DEM VORDERPUFFER, also von der KARTE
+// und nicht aus dem Zweitpuffer.
+//
+// `get_pixel` liest aus S_DRAW -- dort wird gezeichnet, und das ist bei
+// doppelter Pufferung der Arbeitsspeicher. Fuer die Zerreissprobe ist
+// genau das die falsche Stelle: gefragt ist, was der BILDSCHIRM gerade
+// sieht, und der sieht die Karte. Ein Ableser, der den Zweitpuffer
+// liest, findet nie ein halbes Bild -- er liest ja die Quelle und
+// nicht das Ziel.
+//
+// Im Streifenbetrieb ist die Karte nicht am Stueck abgebildet; dann
+// gibt es keinen billigen Weg zu einem einzelnen Bildpunkt, und die
+// Funktion sagt das mit 0xFFFFFFFF, statt zu raten.
+// DIE SEITENUMSCHALTUNG AUFSETZEN. Sie wird nur versucht, wenn die
+// Quelle wirklich der VBE-Baustein ist (bei einem Rahmenpuffer vom
+// Lader gibt es kein Register, an dem man drehen koennte), und sie
+// meldet ehrlich `false`, wenn die Karte die doppelte Hoehe nicht
+// hergibt -- dann bleibt es beim Kopieren, und der Rest des Kerns
+// merkt keinen Unterschied.
+fn flip_setup(state: u64) -> bool {
+    if kstate.get(state, FB_OFF + S_SOURCE) != SRC_VBE {
+        return false
+    }
+    if !vbe_present() {
+        return false
+    }
+    let w: u64 = kstate.get(state, FB_OFF + S_WIDTH)
+    let h: u64 = kstate.get(state, FB_OFF + S_HEIGHT)
+    let pt: u64 = kstate.get(state, FB_OFF + S_PITCH)
+    // Zwei Bildhoehen. Passt der doppelte Puffer nicht in den
+    // Bildspeicher der Karte, lehnt sie ab -- und das wird
+    // zurueckgelesen und nicht gehofft.
+    vbe_write(VBE_VHEIGHT, h * 2)
+    if vbe_read(VBE_VHEIGHT) < h * 2 {
+        return false
+    }
+    // Und die Abbildung muss auch WIRKLICH so gross sein, sonst
+    // schriebe die zweite Haelfte hinter das Fenster.
+    if kstate.get(state, FB_OFF + S_MAPPED) < h * 2 *% pt {
+        return false
+    }
+    if kstate.get(state, FB_OFF + S_STRIPE) != 0 {
+        return false
+    }
+    let _u: u64 = w
+    kstate.set(state, FB_OFF + S_VH, h * 2)
+    // DIE REGEL, DIE AB HIER GILT UND DIE NIRGENDS GEBROCHEN WERDEN
+    // DARF: gemalt wird in `S_SEITE`, GEZEIGT wird die andere. Am
+    // Anfang also: Seite 1 wird bemalt, Seite 0 steht auf dem Schirm.
+    // Die erste Fassung setzte beide auf 0 -- dann malte der Server in
+    // genau die Haelfte, die der Bildschirm gerade auslas, und die
+    // Seitenumschaltung war ein teures Nichts. GEMESSEN als 97 Prozent
+    // zerrissene Ablesungen, obwohl `flips` stieg.
+    kstate.set(state, FB_OFF + S_SEITE, 1)
+    kstate.set(state, FB_OFF + S_FLIPS, 0)
+    kstate.set(state, FB_OFF + S_FLIP, 1)
+    vbe_write(VBE_YOFF, 0)
+    return true
+}
+
+fn flip_on(state: u64) -> bool {
+    return kstate.get(state, FB_OFF + S_FLIP) != 0
+}
+
+fn flips(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_FLIPS)
+}
+
+fn seite(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_SEITE)
+}
+
+// Wo die Haelfte anfaengt, in die gerade GEMALT wird.
+fn draw_base(state: u64) -> u64 {
+    let basis: u64 = kstate.get(state, FB_OFF + S_ADDR)
+    if kstate.get(state, FB_OFF + S_FLIP) == 0 {
+        return basis
+    }
+    let h: u64 = kstate.get(state, FB_OFF + S_HEIGHT)
+    let pt: u64 = kstate.get(state, FB_OFF + S_PITCH)
+    return basis +% kstate.get(state, FB_OFF + S_SEITE) *% h *% pt
+}
+
+// DIE SEITE WECHSELN. Ein Registerschreib, und die ganze Bildflaeche
+// gilt auf einmal -- das ist der Punkt. Danach wird in die andere
+// Haelfte gemalt, also in die, die gerade NICHT gezeigt wird.
+fn flip(state: u64) {
+    if kstate.get(state, FB_OFF + S_FLIP) == 0 {
+        return
+    }
+    let h: u64 = kstate.get(state, FB_OFF + S_HEIGHT)
+    let s: u64 = kstate.get(state, FB_OFF + S_SEITE)
+    // DIE FOLGENUMMER WIRD UNGERADE, SOLANGE DER WECHSEL LAEUFT.
+    //
+    // Ein Ableser auf einem anderen Kern liest `S_SEITE` und danach
+    // zwei Bildpunkte. Faende der Wechsel dazwischen statt, gehoerten
+    // die beiden Punkte zu verschiedenen Seiten. Mit einer ungeraden
+    // Folgenummer waehrend des Wechsels sieht er das und verwirft
+    // seine Ablesung, statt sie als Riss zu zaehlen -- dieselbe
+    // Bauform wie eine Folgenummer im Ablaufplaner.
+    //
+    // Sie steht VOR dem Zaun: wer sie ungerade sieht, soll gar nicht
+    // erst weiterlesen.
+    kstate.add(state, FB_OFF + S_SEQ, 1)
+    arch.barrier_write()
+    // Erst dafuer sorgen, dass alles Gemalte wirklich im Speicher
+    // steht -- WC-Schreibzugriffe sind schwach geordnet.
+    nachspuelen(state)
+    // Die eben bemalte Haelfte zeigen ...
+    vbe_write(VBE_YOFF, s *% h)
+    // ... und ab jetzt in die andere malen. Damit gilt die Regel
+    // wieder: gemalt wird in `S_SEITE`, gezeigt die andere.
+    kstate.set(state, FB_OFF + S_SEITE, 1 - s)
+    kstate.add(state, FB_OFF + S_FLIPS, 1)
+    arch.barrier_write()
+    // Und wieder gerade: ab hier ist der Zustand stimmig.
+    kstate.add(state, FB_OFF + S_SEQ, 1)
+}
+
+// RUNDE VSYNC: ZWEI BILDPUNKTE AUS DERSELBEN BILDSEITE.
+//
+// WARUM ES DIESE FUNKTION GEBEN MUSS UND ZWEIMAL `front_pixel` NICHT
+// REICHT -- ein Fehler, der zuerst in der MESSUNG steckte und nicht im
+// Gemessenen, und der deshalb hier aufgeschrieben ist.
+//
+// Der Ableser fragt "steht oben und unten dieselbe Signatur?". Holte er
+// die beiden Punkte mit zwei Aufrufen, koennte GENAU DAZWISCHEN
+// umgeschaltet werden -- der obere Punkt kaeme dann aus der einen, der
+// untere aus der anderen Bildseite. Das Ergebnis waere ein gemeldeter
+// Riss, den es nicht gab: nicht das Bild war zerrissen, sondern die
+// Ablesung. GEMESSEN: 1 882 513 von 1 927 209 Ablesungen meldeten so
+// einen Riss, waehrend das Bild in Wahrheit stand.
+//
+// Also wird die Seite EINMAL bestimmt und beide Punkte aus ihr gelesen.
+// Was danach umschaltet, aendert an dieser Ablesung nichts mehr.
+fn front_paar(state: u64, x: u64, y0: u64, y1: u64, aus: u64) -> bool {
+    let w: u64 = kstate.get(state, FB_OFF + S_WIDTH)
+    let h: u64 = kstate.get(state, FB_OFF + S_HEIGHT)
+    if x >= w || y0 >= h || y1 >= h {
+        return false
+    }
+    if kstate.get(state, FB_OFF + S_STRIPE) != 0 {
+        return false
+    }
+    let basis: u64 = kstate.get(state, FB_OFF + S_ADDR)
+    if basis == 0 {
+        return false
+    }
+    let pt: u64 = kstate.get(state, FB_OFF + S_PITCH)
+    // DIE SEITE EINMAL -- UND DANACH NACHSEHEN, OB SIE NOCH GILT.
+    //
+    // Zwischen den beiden Ablesungen kann `flip` laufen. Dann ist die
+    // Haelfte, aus der hier gelesen wird, nicht mehr die gezeigte,
+    // sondern die BEMALTE -- und in die schreibt der naechste
+    // `flush_rect`. Was der Ableser dann findet, ist ein halbes Bild,
+    // das der Bildschirm NIE gesehen hat: er zeigt ja die andere
+    // Haelfte.
+    //
+    // GEMESSEN: mit vier Kernen (drei Ableser) schlug das in einem von
+    // sechs Laeufen zweimal zu, mit den Signaturen 7 und 0 -- also
+    // zwei aufeinanderfolgenden Bildern. Mit zwei Kernen nie.
+    //
+    // Also wird der Zaehler der Umschaltungen VOR und NACH der Ablesung
+    // gelesen. Hat er sich geaendert, ist die Ablesung ueber eine
+    // Bildgrenze gerutscht und wird VERWORFEN statt als Riss gezaehlt.
+    // Das ist dieselbe Vorsicht, die ein Leser von `TICKS` braucht --
+    // und es ist ehrlicher, als eine Zahl zu melden, die etwas anderes
+    // meint, als sie sagt.
+    // ============ DIE FOLGENUMMER, UND WARUM SIE HIER STEHEN MUSS.
+    //
+    // Der Ableser liest zwei Punkte NACHEINANDER. Wird dazwischen die
+    // Bildseite gewechselt, gehoert der eine Punkt zur einen und der
+    // andere zur anderen Seite -- und das sieht aus wie ein halbes
+    // Bild, obwohl der Bildschirm nie eines gesehen hat. Er zeigt ja
+    // IMMER eine ganze Seite; ein Zwischending gibt es bei einem
+    // Registerschreib nicht.
+    //
+    // GEMESSEN, und die Zahlen sind der ganze Beweis:
+    //
+    //     flips=1     (fast nie umgeschaltet)  0 Risse in 2 892 193
+    //     flips~4700  (staendig umgeschaltet)  ~2 Risse in ~1 200 000
+    //
+    // Die Rate haengt an der Zahl der UMSCHALTUNGEN und nicht an der
+    // Zahl der Ablesungen. Genau das ist die Signatur eines Lesers, der
+    // ueber eine Bildgrenze rutscht -- und nicht die eines zerrissenen
+    // Bildes, die mit den Ablesungen skalieren muesste.
+    //
+    // Also dieselbe Vorsicht wie bei einer Folgenummer (seqlock): der
+    // Zaehler wird VOR und NACH gelesen, und bei Ungleichheit wird die
+    // Ablesung VERWORFEN statt gezaehlt. Ein `false` heisst hier "keine
+    // Aussage", nicht "kein Riss" -- der Aufrufer zaehlt sie dann gar
+    // nicht erst, und die gemeldete Zahl meint wirklich, was sie sagt.
+    let f0: u64 = kstate.get(state, FB_OFF + S_SEQ)
+    if (f0 & 1) != 0 {
+        return false
+    }
+    arch.barrier_read()
+    var off: u64 = 0
+    if kstate.get(state, FB_OFF + S_FLIP) != 0 {
+        off = (1 - kstate.get(state, FB_OFF + S_SEITE)) *% h
+    }
+    let a: u64 = __mmio_read32((basis +% (y0 +% off) *% pt
+        +% x *% 4) as *mut u32) as u64
+    let b: u64 = __mmio_read32((basis +% (y1 +% off) *% pt
+        +% x *% 4) as *mut u32) as u64
+    arch.barrier_read()
+    if kstate.get(state, FB_OFF + S_SEQ) != f0 {
+        return false
+    }
+    __mmio_write64(aus as *mut u64, a)
+    __mmio_write64((aus + 8) as *mut u64, b)
+    return true
+}
+
+fn front_pixel(state: u64, x: u64, y: u64) -> u64 {
+    if x >= kstate.get(state, FB_OFF + S_WIDTH) {
+        return 0xFFFFFFFF
+    }
+    if y >= kstate.get(state, FB_OFF + S_HEIGHT) {
+        return 0xFFFFFFFF
+    }
+    if kstate.get(state, FB_OFF + S_STRIPE) != 0 {
+        return 0xFFFFFFFF
+    }
+    let basis: u64 = kstate.get(state, FB_OFF + S_ADDR)
+    if basis == 0 {
+        return 0xFFFFFFFF
+    }
+    let pt: u64 = kstate.get(state, FB_OFF + S_PITCH)
+    // RUNDE VSYNC: DIE GEZEIGTE HAELFTE, nicht die bemalte. Ein
+    // Ableser, der die bemalte laese, saehe genau das halbe Bild, das
+    // der Bildschirm NICHT sieht -- und meldete Reissen, wo keines
+    // ist. `S_SEITE` sagt, wohin gemalt wird; gezeigt wird die andere.
+    var vy: u64 = y
+    if kstate.get(state, FB_OFF + S_FLIP) != 0 {
+        let h: u64 = kstate.get(state, FB_OFF + S_HEIGHT)
+        vy = y +% (1 - kstate.get(state, FB_OFF + S_SEITE)) *% h
+    }
+    return __mmio_read32((basis +% vy *% pt +% x *% 4) as *mut u32) as u64
+}
+
 fn get_pixel(state: u64, x: u64, y: u64) -> u64 {
     if x >= kstate.get(state, FB_OFF + S_WIDTH) {
         return 0
@@ -1865,7 +2168,8 @@ fn flush(state: u64) {
     let pt: u64 = kstate.get(state, FB_OFF + S_PITCH)
     let von: u64 = lo *% pt
     let n: u64 = (hi - lo) *% pt
-    let dst: u64 = kstate.get(state, FB_OFF + S_ADDR) +% von
+    // RUNDE VSYNC: dieselbe Weiche wie in `flush_rect`.
+    let dst: u64 = draw_base(state) +% von
     let src: u64 = b +% von
     let worte: u64 = n / 8
     copy_words(dst, src, worte)
@@ -2339,6 +2643,14 @@ fn parse(state: u64, cmd: u64) {
         }
         if find(cmd, (&w_usr[0]) as u64, 6) != 0 {
             m = m | M_USER
+        }
+        var w_flip: [u8; 5] = "flip\0"
+        var w_nofl: [u8; 7] = "noflip\0"
+        if find(cmd, (&w_flip[0]) as u64, 4) != 0 {
+            m = m | M_FLIP
+        }
+        if find(cmd, (&w_nofl[0]) as u64, 6) != 0 {
+            m = m | M_NOFLIP
         }
     }
     if find(cmd, (&w_res[0]) as u64, 6) != 0 {
@@ -3859,7 +4171,8 @@ fn flush_rows(state: u64, lo: u64, hi: u64) {
     let pt: u64 = kstate.get(state, FB_OFF + S_PITCH)
     let von: u64 = o *% pt
     let n: u64 = (u - o) *% pt
-    let dst: u64 = kstate.get(state, FB_OFF + S_ADDR) +% von
+    // RUNDE VSYNC: auch dieser Weg schreibt in die zu MALENDE Haelfte.
+    let dst: u64 = draw_base(state) +% von
     let src: u64 = b +% von
     copy_words(dst, src, n / 8)
     arch.barrier_write()
@@ -3923,7 +4236,7 @@ fn herz(state: u64, feld: u64, an: u64) {
     //   Zeitgeber tot      -> keines blinkt
     // ...und der Grund kann das rechte Feld nicht mehr zudecken.
     fill(state, x0, y0, HERZ_W, HERZ_H, farbe)
-    let basis: u64 = kstate.get(state, FB_OFF + S_ADDR)
+    let basis: u64 = draw_base(state)
     if basis == 0 {
         return
     }
@@ -4017,7 +4330,11 @@ fn flush_rect(state: u64, x: u64, y: u64, w: u64, h: u64) {
         nachspuelen(state)
         return
     }
-    let basis: u64 = kstate.get(state, FB_OFF + S_ADDR)
+    // RUNDE VSYNC: BEI SEITENUMSCHALTUNG GEHT DIE KOPIE IN DIE
+    // HAELFTE, DIE GERADE NICHT GEZEIGT WIRD. Genau deshalb darf sie
+    // hier ruhig zeilenweise laufen: niemand sieht sie. Sichtbar wird
+    // sie erst mit `flip`, und das ist EIN Registerschreib.
+    let basis: u64 = draw_base(state)
     var r2: u64 = 0
     while r2 < hh {
         let off: u64 = (y + r2) *% pt +% x *% 4
