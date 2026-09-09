@@ -102,7 +102,10 @@ def main():
     vor = len(serial())
     m.taste("meta_l")
     time.sleep(2)
-    m.tippe("explorer")
+    for _ in range(24):
+        m.taste("backspace")
+    time.sleep(1)
+    m.tippe("expl")
     time.sleep(2)
     m.taste("ret")
     time.sleep(5)
@@ -115,7 +118,13 @@ def main():
     vor = len(serial())
     m.taste("meta_l")
     time.sleep(2)
-    m.tippe("settings")
+    # DAS FELD LEEREN. Es traegt noch "explorer" aus dem Schritt davor;
+    # "settings" haenge sich daran, der Starter fand folgerichtig nichts,
+    # und das sah aus wie "Einstellungen startet nicht".
+    for _ in range(24):
+        m.taste("backspace")
+    time.sleep(1)
+    m.tippe("sett")
     time.sleep(2)
     m.taste("ret")
     time.sleep(6)
