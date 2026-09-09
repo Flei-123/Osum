@@ -1532,6 +1532,8 @@ fn hover_step() -> bool {
 // uebersetzt, macht jeden Testlaeufer sprachabhaengig.
 static mut k_title: [u8; 14] = "taskbar.title\0"
 static mut k_start: [u8; 14] = "taskbar.start\0"
+// RUNDE ECHTHARDWARE-2: die zwei Punkte des Kontextmenues.
+static mut k_ctx: [u8; 17] = "taskbar.context\0\0"
 static mut k_batt: [u8; 16] = "taskbar.battery\0"
 static mut k_nobatt: [u8; 19] = "taskbar.no_battery\0"
 static mut k_nonet: [u8; 19] = "taskbar.no_network\0"
@@ -3878,18 +3880,250 @@ fn hover_text(m: u64) -> u64 {
 // EV_MOVE ginge es auch, aber dann haette die Leiste zwei Quellen
 // fuer dieselbe Frage "wo steht der Zeiger", und die eine wuerde
 // eines Tages von der anderen abweichen.
+// ==================================================== RUNDE ECHTHARDWARE-2
+//
+// RECHTSKLICK AUF EINEN FENSTERKNOPF -> KONTEXTMENUE (Justins Vorgabe E).
+//
+// ZWEI PUNKTE, UND BEIDE TUN WIRKLICH ETWAS.
+//
+// Justin hat "Close, Pin" genannt. SCHLIESSEN gibt es in diesem Kern
+// nicht: `WM_ACT` kennt WA_RAISE, WA_HIDE und WA_TOGGLE und KEIN
+// WA_CLOSE (kernel/sys.fi:3519-3521) -- ein fremdes Fenster zu
+// schliessen ist ein Systemaufruf, den es hier noch nicht gibt.
+//
+// Also steht im Menue, was WIRKLICH geht: MINIMIEREN (WA_HIDE) und
+// ANHEFTEN. Einen Punkt "Schliessen" anzubieten, der nichts tut, waere
+// genau die Luege mit runden Ecken, vor der der Kopf von qs.fi warnt.
+// Sobald der Kern ein WA_CLOSE hat, ist hier eine Zeile zu aendern.
+static mut ctx_knopf: u64 = 0 // welcher Knopf, 1-basiert (0 = keiner)
+static mut ctx_offen: u64 = 0
+static mut angeheftet: [u64; 10] = [0 as u64; 10]
+
+static mut s_ctxauf: [u8; 22] = "taskbar: kontext btn=\0"
+static mut s_ctxtat: [u8; 20] = "taskbar: kontext w=\0"
+static mut s_ctxpump: [u8; 27] = "taskbar: kontext pumpe mw=\0"
+static mut ctx_sagte: u64 = 0
+
+fn rechtsklick(x: u64, y: u64) {
+    let m: u64 = hover_marke(x, y)
+    if m < 1 || m > nk {
+        return
+    }
+    tip_zu()
+    ctx_knopf = m
+    ctx_offen = 1
+    ctx_sagte = 0
+    // Das Menue steht ueber der Leiste -- `menu_open` klappt nach oben
+    // auf, wenn unten kein Platz mehr ist, und unter der Leiste ist
+    // nie Platz.
+    let _w: u64 = wlib.menu_open(0, wlibc.mouse_x(), wlibc.mouse_y(),
+        msg.get((&k_ctx[0 as usize]) as u64), 2)
+    say((&s_ctxauf[0 as usize]) as u64)
+    ulib.sayn(m)
+    ulib.nl()
+}
+
+// Was gewaehlt wurde, einmal je Umlauf abgeholt.
+fn kontext_step() {
+    if ctx_offen == 0 {
+        return
+    }
+    // ===================================== RUNDE ECHTHARDWARE-2
+    // DAS MENUE BRAUCHT SEINE EIGENE EREIGNISSCHLEIFE.
+    //
+    // Die Leiste holt ihre Ereignisse SELBST (WM_EVENT auf ihr eigenes
+    // Fenster) und ruft `wlib.step` nie. Das Menue ist aber ein
+    // eigenes wlib-Fenster, und `mn_res` -- die Antwort "welcher Punkt
+    // wurde gewaehlt" -- wird AUSSCHLIESSLICH in `wlib.step` gesetzt
+    // (wlib.fi:6091 und 6111). Ohne diesen Aufruf klappt das Menue auf,
+    // nimmt Klicks entgegen und sagt nie, was gewaehlt wurde.
+    //
+    // GEMESSEN: `taskbar: kontext btn=1` kam, `kontext w=` nie -- der
+    // Klick landete richtig, die Antwort holte niemand ab.
+    let _st: u64 = wlib.step()
+    let r: u64 = wlib.menu_at()
+    // Solange die Antwort aussteht, wird EINMAL gesagt, dass ueberhaupt
+    // gepumpt wird -- sonst ist "der Klick kam nicht an" von "die
+    // Schleife laeuft nicht" nicht zu unterscheiden.
+    if ctx_sagte == 0 {
+        ctx_sagte = 1
+        say((&s_ctxpump[0 as usize]) as u64)
+        ulib.sayn(wlib.menu_win())
+        ulib.nl()
+    }
+    if r == 0xFFFFFFFFFFFFFFFF {
+        return
+    }
+    ctx_offen = 0
+    wlib.menu_close()
+    let i: u64 = ctx_knopf - 1
+    if r == 0xFFFF || i >= nk {
+        return
+    }
+    if r == 0 {
+        // MINIMIEREN
+        let _a: u64 = wlibc.win_act(knv[(i) as usize], wlibc.WA_HIDE)
+    } else {
+        // ANHEFTEN -- der Knopf bleibt, wenn das Fenster geht.
+        angeheftet[(i) as usize] = 1
+    }
+    say((&s_ctxtat[0 as usize]) as u64)
+    ulib.sayn(r)
+    ulib.nl()
+}
+
+// ==================================================== RUNDE ECHTHARDWARE-2
+//
+// DIE INFOBLASE -- HIER UND NICHT IN DER BIBLIOTHEK.
+//
+// Justins Vorgabe E: wer mit dem Zeiger auf einem Symbol der Leiste,
+// im Tray oder auf einem Fensterknopf STEHENBLEIBT, soll nach einer
+// halben Sekunde lesen koennen, was das ist.
+//
+// SIE STEHT IN DIESER DATEI, weil sie GENAU EIN Programm braucht. Der
+// erste Entwurf hatte sie in `wlib.fi`; danach brach der
+// selbstgehostete Uebersetzer `firnc1` an `netmon`, `freunde` und
+// `powermon` ab (RC=1, keine Zeile Ausgabe -- eine feste Tabelle in
+// firnc1, kein Speichermangel). `firnc0` uebersetzte dasselbe klaglos
+// und das Abbild lief; gesehen hat es nur der K16-Pruefstand: "131
+// gebunden, erwartet 134". wlib steckt in dreizehn Programmen, und was
+// dort liegt, kostet in jedem davon.
+//
+// DER ZEITGEBER SCHLAEGT 100-MAL JE SEKUNDE (TICK_HZ = 100 in
+// kernel/sys.fi), also sind Justins 500 ms FUENFZIG Schlaege und nicht
+// fuenfhundert. Mit 500 haette die Blase erst nach fuenf Sekunden
+// gestanden -- und wer fuenf Sekunden wartet, haelt sie fuer kaputt.
+const TIP_TICKS: u64 = 50 // 500 ms bei 100 Hz
+
+static mut tp_win: u64 = 0xFFFFFFFFFFFFFFFF
+static mut tp_was: u64 = 0 // welche Marke gerade gilt (0 = keine)
+static mut tp_seit: u64 = 0 // seit wann, in Schlaegen
+static mut tp_zahl: u64 = 0
+
+static mut s_tip: [u8; 12] = "wlib: tip [\0"
+static mut s_tipx: [u8; 7] = "] x=\0\0\0"
+static mut s_tipy: [u8; 5] = " y=\0\0"
+static mut s_tipn: [u8; 5] = " n=\0\0"
+static mut s_tipzu: [u8; 15] = "wlib: tip zu\0\0\0"
+static mut s_tipvoll: [u8; 21] = "wlib: tip kein Platz\0"
+
+fn tip_offen() -> bool {
+    return tp_win != 0xFFFFFFFFFFFFFFFF
+}
+
+fn tip_zu() {
+    if tp_win == 0xFFFFFFFFFFFFFFFF {
+        return
+    }
+    let i: u64 = tp_win
+    tp_win = 0xFFFFFFFFFFFFFFFF
+    wlib.tip_win_close(i)
+    say((&s_tipzu[0 as usize]) as u64)
+    ulib.nl()
+}
+
+// Die Blase AUFMACHEN. `sx`/`sy` ist der Punkt, an dem der Zeiger
+// steht; sie setzt sich DARUEBER -- unter dem Zeiger verdeckte sie das,
+// worueber sie spricht.
+fn tip_auf(text: u64, sx: u64, sy: u64) {
+    if text == 0 || tlen(text) == 0 {
+        return
+    }
+    tip_zu()
+    let n: u64 = tlen(text)
+    let sc: u64 = wlibc.ui_scale()
+    let pad: u64 = 6 * sc
+    let bw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), text, n) + 2 * pad
+    let bh: u64 = wlibc.text_h(wlibc.px_ui()) + pad
+    var x: u64 = sx
+    if x + bw + 2 > wlibc.screen_w() {
+        x = wlibc.screen_w() - bw - 2
+    }
+    var y: u64 = sy + 4 * sc
+    if sy > bh + 4 * sc {
+        y = sy - bh - 4 * sc
+    }
+    let i: u64 = wlib.tip_win_open(x, y, bw, bh, text)
+    if i >= 5 {
+        // KEIN PLATZ -- und das wird GESAGT. Eine Blase, die still
+        // ausbleibt, ist von einer Blase, die gar nicht ausgeloest
+        // wurde, nicht zu unterscheiden; genau daran ist diese Runde
+        // einmal haengengeblieben.
+        say((&s_tipvoll[0 as usize]) as u64)
+        ulib.nl()
+        return
+    }
+    tp_win = i
+    tp_zahl = tp_zahl + 1
+    tip_malen(i, text, n, bw, bh)
+    say((&s_tip[0 as usize]) as u64)
+    say(text)
+    say((&s_tipx[0 as usize]) as u64)
+    ulib.sayn(x)
+    say((&s_tipy[0 as usize]) as u64)
+    ulib.sayn(y)
+    say((&s_tipn[0 as usize]) as u64)
+    ulib.sayn(tp_zahl)
+    ulib.nl()
+}
+
+// Flaeche, Rand und Text -- durch das Rahmenwerk, damit die Blase unter
+// `osum` runde Ecken hat und unter `classic` eckige.
+fn tip_malen(i: u64, text: u64, n: u64, bw: u64, bh: u64) {
+    let hd: u64 = wlib.tip_win_id(i)
+    if hd == 0 {
+        return
+    }
+    wlibc.set_band(0)
+    wlibc.clip_set(0, 0, bw, bh)
+    wlib.mal_tafel(0, 0, bw, bh, wlib.MR_TAFEL, wlibc.EL_OVERLAY,
+        wlibc.theme(wlibc.T_MENU), wlibc.theme(wlibc.T_LINE))
+    let pad: u64 = 6 * wlibc.ui_scale()
+    let base: u64 = (bh + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())) / 2
+    let _e: u64 = wlib.mal_text(pad, base, text, n,
+        wlibc.theme(wlibc.T_FG), wlibc.TY_BODY)
+    wlibc.push(hd, 0, 0, bw, bh)
+}
+
+// DER VERWEILZEITGEBER, als reine Rechnung. Wechselt die Marke, faengt
+// die Zeit von vorn an und eine offene Blase geht zu. Bleibt sie laenger
+// als TIP_TICKS gleich, geht die Blase auf.
+fn tip_hover(was: u64, text: u64, sx: u64, sy: u64) {
+    let jetzt: u64 = ticks_now()
+    if was != tp_was {
+        tp_was = was
+        tp_seit = jetzt
+        tip_zu()
+        return
+    }
+    if was == 0 || tip_offen() {
+        return
+    }
+    if jetzt < tp_seit {
+        tp_seit = jetzt
+        return
+    }
+    if jetzt - tp_seit >= TIP_TICKS {
+        tip_auf(text, sx, sy)
+    }
+}
+
+fn ticks_now() -> u64 {
+    return ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+}
+
 fn tip_step() {
     let mx: u64 = wlibc.mouse_x()
     let my: u64 = wlibc.mouse_y()
     if !inside_bar(mx, my) {
-        wlib.tip_hover(0, 0, 0, 0)
+        tip_hover(0, 0, 0, 0)
         return
     }
     let lx: u64 = mx - bar_x
     let ly: u64 = my - bar_y
     let m: u64 = hover_marke(lx, ly)
     // Die Blase steht in SCHIRM-Koordinaten.
-    wlib.tip_hover(m, hover_text(m), mx, my)
+    tip_hover(m, hover_text(m), mx, my)
 }
 
 fn hotkey_step() {
@@ -4289,7 +4523,14 @@ fn u_start(args: u64) -> u64 {
             let typ: u64 = __mmio_read64((b) as *mut u64)
             let d: u64 = __mmio_read64((b + 8) as *mut u64)
             if typ == wlibc.EV_DOWN {
-                click((d >> 32) & 0xFFFF, (d >> 16) & 0xFFFF)
+                // DIE RECHTE TASTE IST BIT 1 (kernel/ps2m.fi: links 0,
+                // rechts 1, Mitte 2) -- dieselbe Zaehlung, die
+                // wlib.fi:5047 schon benutzt.
+                if ((d & 0xFFFF) & 2) != 0 {
+                    rechtsklick((d >> 32) & 0xFFFF, (d >> 16) & 0xFFFF)
+                } else {
+                    click((d >> 32) & 0xFFFF, (d >> 16) & 0xFFFF)
+                }
             } else if typ == wlibc.EV_CLOSE {
                 alive = false
             }
@@ -4306,6 +4547,7 @@ fn u_start(args: u64) -> u64 {
         let _qsc: bool = qs.step()
         hotkey_step()
         tip_step()
+        kontext_step()
         let hw: u64 = qs.want_hide()
         if hw != 0 {
             if hw == 1 {
