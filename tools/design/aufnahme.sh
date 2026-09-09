@@ -296,6 +296,34 @@ warte 1
 klickauf lrect3
 warteauf 'explorer: ready' || 60
 warte 3
+# ================================================== RUNDE MERGE-10
+# DAS STARTMENUE MUSS ZU SEIN, BEVOR EINE TASTE AN DEN DATEIMANAGER
+# GEHEN KANN.
+#
+# Der Starter startet das Programm und BLEIBT DABEI OFFEN -- er liegt
+# auf L_TOP und holt sich den Eingabefokus zurueck, sobald seine
+# Bewegung ausgelaufen ist. Im Mitschnitt steht das woertlich:
+#
+#     wm: fokus id=14 vor=11     <- der Dateimanager bekommt ihn
+#     explorer: ready
+#     wm: fokus id=11 vor=14     <- der Starter holt ihn zurueck
+#     key: ...                   <- und DORT landet Strg+N
+#
+# Solange das so ist, geht jedes `taste`-Kommando an das Startmenue
+# und nicht an das Fenster, das im Bild zu sehen ist. Genau daran ist
+# `04-dialog` in jedem bisherigen Lauf gescheitert -- das Bild war
+# Oktett fuer Oktett `03-explorer`, und in OFFEN.md steht seitdem
+# G-003 "Strg+N oeffnet keinen Dialog, im Emulator reproduzierbar".
+#
+# ESCAPE UND NICHT NOCH EIN KLICK AUF START. Der Klick ist ein
+# UMSCHALTER: das Menue schliesst sich beim Starten eines Programms
+# von selbst, ein Klick auf Start macht es dann WIEDER AUF -- gemessen
+# als `taskbar: state n=3` mit einem zweiten Dateimanager (id=15)
+# hinterher. `Escape` schliesst nur, es oeffnet nie, und der Starter
+# nimmt es ausdruecklich entgegen (launcher.fi, `KEY_ESC` -> return).
+# Ist das Menue schon zu, geht das Escape ins Leere und schadet nicht.
+taste esc
+warte 1
 foto 03-explorer
 # --- ein Dialog aus dem Dateimanager
 taste ctrl-n
