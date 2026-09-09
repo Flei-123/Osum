@@ -100,8 +100,32 @@ Tafelzeile 19 zeigt dazu `U 0` (Ortszeit) bzw. `U 1` (UTC).
 | Stand | Ergebnis |
 |---|---|
 | WM | **104 bestanden, 0 gescheitert** |
+| USERLAND | **91 bestanden, 0 gescheitert** |
+| K16 | **64 bestanden, 0 gescheitert** |
+| USBIMG | **46 bestanden, 2 gescheitert** |
 | Abbildbau | 55 Pflichtpfade geprueft, 181 Umlautfolgen |
 | Durchklick 2560x1440 uiscale=2 | 0 panics, Starten und Tippen belegt |
+
+Die **zwei** bei USBIMG sind dieselben wie in der Vorrunde und liegen
+beide im **UEFI-Lauf** (`erkannte Firmware: ?`, `kein Rahmenpuffer im
+Bericht`) — sie haengen an OVMF und nicht an dieser Runde. Der
+BIOS-Lauf, der AHCI-Lauf und der e1000-Lauf sind gruen.
+
+Nebenbefund aus demselben Lauf, der diese Runde bestaetigt: der Stand
+prueft selbst, dass **„Ausfuehren" mit Umlaut** im Bild steht und die
+ASCII-Ersatzschreibung *nicht* — `'Programm suchen:' 100 %`.
+
+### Eine Messfalle, die hier festgehalten gehoert
+
+Nach vielen Oeffnen/Schliessen-Zyklen in **einer** langen QEMU-Sitzung
+reagiert die Liste des Starters nicht mehr auf Klicks: die Ereignisse
+kommen an (`RING` und `APP` steigen), der Starter meldet nichts. Nach
+einem **frischen Boot** geht es sofort wieder.
+
+Deshalb gilt ab hier: **Durchklick-Punkte immer auf frischem Boot
+messen.** Wer das nicht tut, misst Sitzungsdrift und haelt sie fuer
+einen Fehler des Systems — genau das ist mir in dieser Runde einmal
+passiert, bevor der Gegenlauf es zeigte.
 
 ## 4. ABBILD
 
