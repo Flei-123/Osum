@@ -126,6 +126,7 @@ export {
     selftest, selftest_max, failbits, diag1, diag2,
     tile_on, set_tile_on, tile_take, tile_release, tile_apply,
     tile_node, tile_float, tile_snap, tile_action, hotkeys, hotkeys_seen,
+    kachelbar,
     on_screen_resize, win_tabbed, tiled,
     MAX_WIN, K_RAW, K_TERM, title_h, border, grip, max_w, max_h,
     titel_beschnitten, titel_fehlt,
@@ -6888,10 +6889,33 @@ fn set_tile_on(state: u64, on: bool) {
     }
     if on {
         ss(state, S_TILE, 1)
-        // Alles, was jetzt schon offen ist, kommt in den Baum.
+        // ================================================ RUNDE ECHTHARDWARE-3
+        // NICHT ALLES, WAS OFFEN IST, GEHOERT IN DEN BAUM.
+        //
+        // Justins Befund: "Tiling ein-/ausschalten zerschiesst den
+        // Zustand -- danach geht fast gar nichts mehr." Hier stand
+        // "Alles, was jetzt schon offen ist, kommt in den Baum", und
+        // das war woertlich gemeint: der SCHREIBTISCH (L_DESK, deckt
+        // den ganzen Schirm), die TASKLEISTE (L_TOP, reserviert eine
+        // Kante), das Startmenue, ein Klappmenue, eine Blase -- alle
+        // wurden zu Kacheln.
+        //
+        // Was daraus folgt, ist genau das, was er sieht: die Leiste
+        // bekommt eine halbe Bildschirmflaeche zugeteilt und liegt
+        // nicht mehr an ihrer Kante, der Schreibtisch wird zur Kachel
+        // neben ihr, und `restore_geom` beim Ausschalten setzt beide
+        // auf Masse zurueck, die inzwischen nichts mehr bedeuten --
+        // die Leiste ist weg, der Schreibtisch sitzt schief, und ohne
+        // Leiste gibt es keinen Knopf mehr, mit dem man es zuruecknimmt.
+        //
+        // GEKACHELT WIRD, WAS EIN MENSCH ALS FENSTER BENUTZT: die
+        // Ebene L_NORMAL, sichtbar, und ohne reservierte Kante.
         var i: u64 = 0
         while i < MAX_WIN {
-            if wg(state, i, W_USED) != 0 && wg(state, i, W_NODE) == 0 {
+            if wg(state, i, W_USED) != 0 && wg(state, i, W_NODE) == 0
+                && wg(state, i, W_LAYER) == L_NORMAL
+                && wg(state, i, W_STRUT) == 0
+                && (wg(state, i, W_FLAGS) & F_HIDDEN) == 0 {
                 save_geom(state, i)
                 tile_take(state, i)
             }
@@ -7051,8 +7075,37 @@ fn tile_apply(state: u64) {
     }
 }
 
+// ==================================================== RUNDE ECHTHARDWARE-3
+// WER UEBERHAUPT GEKACHELT WERDEN DARF.
+//
+// Die Regel steht HIER und nicht bei den Rufern: `tile_take` hat vier
+// davon (2444 neues Fenster, 6919 Kachelmodus an, 7119 und 7128), und
+// eine Regel an vier Stellen ist vier Gelegenheiten, sie zu vergessen.
+// Genau so ist die Taskleiste in den Baum geraten.
+//
+// Eine Kachel ist ein Fenster, das ein Mensch benutzt: normale Ebene,
+// keine reservierte Bildschirmkante, nicht minimiert. Schreibtisch,
+// Leiste, Startmenue, Klappmenue und Blase sind Teile der Oberflaeche
+// selbst -- sie haben ihren Platz, und der Baum darf ihn nicht neu
+// verteilen.
+fn kachelbar(state: u64, i: u64) -> bool {
+    if !valid(state, i) {
+        return false
+    }
+    if wg(state, i, W_LAYER) != L_NORMAL {
+        return false
+    }
+    if wg(state, i, W_STRUT) != 0 {
+        return false
+    }
+    return (wg(state, i, W_FLAGS) & F_HIDDEN) == 0
+}
+
 fn tile_take(state: u64, i: u64) -> bool {
     if !valid(state, i) || wg(state, i, W_NODE) != 0 {
+        return false
+    }
+    if !kachelbar(state, i) {
         return false
     }
     let n: u64 = tile.insert(state, i + 1)
