@@ -38,26 +38,29 @@
 //
 // DREI EHRLICHE ANGABEN, und sie stehen hier und nicht im Kleingedruckten:
 //
-//   1. DIE SPALTE "ZEIT" IST LEER, und zwar bei jeder Datei. Das
-//      Dateisystem dieses Systems hat keinen Zeitstempel: ein Inode ist
-//      128 Oktette und traegt Art, Groesse, Verweiszahl, elf direkte
-//      Bloecke, einen einfach und einen doppelt indirekten Block --
-//      und danach ist er voll (`kernel/fs.fi`). Eine Zeit dort
-//      unterzubringen hiesse, das Format auf der Platte zu aendern,
-//      also auch `tools/osum/mkfs.py`, also auch jedes bestehende
-//      Abbild. Die Spalte steht trotzdem da, weil sie sortierbar sein
-//      soll, sobald es die Zeit gibt -- und sie zeigt "--", weil eine
-//      erfundene Zeit schlimmer waere als eine leere.
+//   1. DIE SPALTE "ZEIT" ZEIGT SEIT RUNDE EXPLORER-2 DIE ECHTE ZEIT.
+//      Bis dahin stand hier, das Dateisystem habe keine Zeitstempel und
+//      die Spalte zeige darum "--". Das galt fuer das alte Format; OFS
+//      v3 legt mtime, ctime und atime im Inode ab, `stat` gibt sie
+//      heraus (`io.stat_mtime/ctime/atime`), und `expmodell` rechnet
+//      sie mit dem Versatz aus `/etc/time.conf` in Ortszeit um --
+//      derselben Quelle, aus der die Taskleiste ihre Uhr nimmt. Wo
+//      wirklich keine Zeit steht (0), steht weiterhin "--", denn eine
+//      erfundene Zeit waere schlimmer als eine leere.
 //   2. DIE SPALTE "RECHTE" ZEIGT, WAS `stat` WIRKLICH MELDET. Der
 //      Kernel gibt 0755 fuer ein Verzeichnis und 0644 fuer eine Datei
 //      (`kernel/sys.fi`, `fill_stat`) -- es gibt keinen Eigentuemer und
 //      keine Rechte auf der Platte. Die Zeichenkette wird aus den
 //      gemeldeten Bits gebaut und nicht als Text hingeschrieben; damit
 //      zeigt sie am Tag, an dem es echte Bits gibt, die echten.
-//   3. UMBENENNEN IST KOPIEREN UND LOESCHEN. Dieser Kernel hat kein
-//      `rename` -- `kernel/user/mv.fi` sagt es seit Runde K11 in
-//      denselben Worten. Der Dateimanager macht es genauso und nennt
-//      es hier.
+//   3. UMBENENNEN HAENGT DEN VERZEICHNISEINTRAG UM. Hier stand
+//      "Umbenennen ist Kopieren und Loeschen", weil dieser Kernel kein
+//      `rename` hatte. Er hat eins (`io.rename`, Runde EXPLORER-2), und
+//      das ist mehr als eine Feinheit: der alte Weg oeffnete die Datei,
+//      schrieb sie neu und loeschte das Original -- bei einem ORDNER
+//      kam dabei eine leere Datei heraus und der Ordner war weg.
+//      `expakt.umbenennen` ruft `io.rename`; nur wenn am Ziel schon
+//      etwas liegt, kommt der Konfliktdialog mit vier Antworten.
 
 profile kernel
 
@@ -84,10 +87,23 @@ import expdlg
 
 export { u_start }
 
-const MAXENT: u64 = 96
-const NAMEB: u64 = 32
+// ================================ RUNDE EXPLORER-2, ZWEITER DURCHGANG
+//
+// DIESE ZWEI GRENZEN GELTEN NUR NOCH FUER DEN SICHERUNGSMODUS, und der
+// Name sagt es jetzt auch. Das echte Verzeichnis liegt seit dieser
+// Runde in `expmodell` mit MAXENT 4096 und NAMEB 256 (Namensblob plus
+// Offsettafel, siehe dort); die kleinen Felder hier tragen nur noch
+// die beiden Ansichten, die KEIN Verzeichnis sind: die Liste der
+// Sicherungen eines Speichers (`vmodus 1`) und der Inhalt einer
+// Sicherung (`vmodus 2`). Beide kommen aus einer Textdatei, sind nach
+// Messung dieses Baums nie mehr als ein paar Dutzend Zeilen, und
+// `scan_speicher`/`scan_sicherung` pruefen die Grenze vor jedem
+// Schreiben. Wer 96 fuer die Grenze des Dateimanagers haelt, liest
+// hier die falsche Zahl -- deshalb heissen sie SIC_.
+const SIC_MAXENT: u64 = 96
+const SIC_NAMEB: u64 = 32
 
-static mut namen: [u8; 3072] = [0 as u8; 3072] // MAXENT * NAMEB
+static mut namen: [u8; 3072] = [0 as u8; 3072] // SIC_MAXENT * SIC_NAMEB
 static mut groesse: [u64; 96] = [0 as u64; 96]
 static mut art: [u64; 96] = [0 as u64; 96] // 1 = Verzeichnis
 static mut modus: [u64; 96] = [0 as u64; 96]
@@ -109,8 +125,18 @@ static mut dlgpuffer: [u8; 128] = [0 as u8; 128]
 static mut spalten: [u64; 4] = [0 as u64; 4]
 static mut lauf: [u8; 96] = [0 as u8; 96]
 
-// Der Weg, den man gegangen ist -- acht Schritte zurueck und wieder vor.
-static mut hist: [u8; 1024] = [0 as u8; 1024]
+// DER WEG, DEN MAN GEGANGEN IST -- VIERUNDSECHZIG SCHRITTE zurueck und
+// wieder vor (Pflichtpunkt 11; vorher waren es acht).
+//
+// GERECHNET, NICHT GERATEN: 64 Plaetze * 128 Oktette je Pfad = 8192
+// Oktette. Das Programmabbild hat von `kernel/proc.fi` 11 MiB
+// (IMAGE_BASE 0x40100000 .. IMAGE_END 0x40C00000); 8 KiB mehr BSS
+// faellt darin nicht auf. 128 Oktette je Eintrag sind dieselbe Laenge,
+// die `pfad` selbst hat -- ein Pfad, der nicht in `pfad` passt,
+// existiert in diesem Programm nicht.
+const HISTN: u64 = 64
+const HISTB: u64 = 128
+static mut hist: [u8; 8192] = [0 as u8; 8192]
 static mut hist_n: u64 = 0
 static mut hist_at: u64 = 0
 
@@ -175,7 +201,7 @@ static mut vunter: [u8; 160] = [0 as u8; 160]    // wo darin
 static mut vctx: [u8; 528] = [0 as u8; 528]
 static mut vpfad: [u8; 256] = [0 as u8; 256]
 static mut vinfo: [u64; 4] = [0 as u64; 4]
-static mut zeiten: [u8; 1920] = [0 as u8; 1920]  // MAXENT * 20, das Datum
+static mut zeiten: [u8; 1920] = [0 as u8; 1920]  // SIC_MAXENT * 20, das Datum
 static mut pbuf: [u8; 128] = [0 as u8; 128]      // der Fortschrittstext
 static mut plabel: u64 = 0xFFFFFFFFFFFFFFFF
 static mut pziel: [u8; 128] = [0 as u8; 128]
@@ -214,7 +240,7 @@ fn kv(name: u64, v: u64) {
 }
 
 fn nptr(i: u64) -> u64 {
-    return (&namen[0 as usize]) as u64 + i * NAMEB
+    return (&namen[0 as usize]) as u64 + i * SIC_NAMEB
 }
 
 // ============================================ RUNDE EXPLORER-2: DAS MODELL
@@ -331,13 +357,13 @@ fn scan_speicher() -> u64 {
     while weiter {
         if !bstore.snaps_next(fd, (&namebuf[0 as usize]) as u64, 60) {
             weiter = false
-        } else if anzahl < MAXENT {
+        } else if anzahl < SIC_MAXENT {
             if bstore.snap_head((&vspeicher[0 as usize]) as u64,
                     (&namebuf[0 as usize]) as u64, zptr(anzahl),
                     (&vinfo[0 as usize]) as u64) {
                 if vinfo[(2) as usize] != 0 {
                     ulib.strncpy(nptr(anzahl), (&namebuf[0 as usize]) as u64,
-                        NAMEB - 1)
+                        SIC_NAMEB - 1)
                     groesse[(anzahl) as usize] = vinfo[(1) as usize]
                     art[(anzahl) as usize] = 1
                     modus[(anzahl) as usize] = 16877
@@ -367,7 +393,7 @@ fn scan_sicherung() -> u64 {
         if !bstore.entries_next(fd, (&vctx[0 as usize]) as u64,
                 (&vpfad[0 as usize]) as u64, (&vinfo[0 as usize]) as u64) {
             weiter = false
-        } else if anzahl < MAXENT {
+        } else if anzahl < SIC_MAXENT {
             // Passt der Anfang? Und ist danach GENAU EIN Namensteil?
             if pl == 0 || ulib.strneq((&vpfad[0 as usize]) as u64,
                     (&vunter[0 as usize]) as u64, pl) {
@@ -382,7 +408,7 @@ fn scan_sicherung() -> u64 {
                         k = k + 1
                     }
                     if !tiefer && k > 1 {
-                        ulib.strncpy(nptr(anzahl), rest + 1, NAMEB - 1)
+                        ulib.strncpy(nptr(anzahl), rest + 1, SIC_NAMEB - 1)
                         groesse[(anzahl) as usize] = vinfo[(1) as usize]
                         modus[(anzahl) as usize] = vinfo[(0) as usize]
                         if (vinfo[(0) as usize] & 61440) == 16384 {
@@ -759,22 +785,51 @@ fn anhaengen(lp0: u64, d: u64, v: u64, txt: u64) -> u64 {
 
 // ------------------------------------------------------------- gehen
 
+// EIN SCHRITT IN DIE HISTORIE. Voll heisst NICHT "ab jetzt nichts
+// mehr": bis zu dieser Runde stand hier `if hist_n >= 8 { return }` --
+// nach acht Ordnern merkte sich der Dateimanager stumm gar nichts mehr,
+// und "Zurueck" fuehrte an eine Stelle, an der man vor einer Stunde
+// war. Jetzt RUTSCHT die Reihe: der aelteste Eintrag faellt vorn
+// heraus, alle anderen ruecken einen Platz nach unten, und der neue
+// kommt hinten dazu -- das Verhalten jedes Browsers und jedes
+// Dateimanagers.
 fn hist_push(p: u64) {
-    if hist_n >= 8 {
-        return
+    if hist_at >= HISTN {
+        // Voll: einen Platz nach vorn schieben. 63 * 128 Oktette sind
+        // 8 KiB Umkopieren im schlimmsten Fall, und der Fall tritt
+        // frueheste beim 65. Ordnerwechsel ein.
+        var i: u64 = 0
+        while i < HISTN - 1 {
+            var q: u64 = 0
+            while q < HISTB {
+                hist[(i * HISTB + q) as usize] =
+                    hist[((i + 1) * HISTB + q) as usize]
+                q = q + 1
+            }
+            i = i + 1
+        }
+        hist_at = HISTN - 1
+        hist_n = HISTN - 1
     }
     var k: u64 = 0
-    while k < 120 && (*((p + k) as *mut u8)) != 0 as u8 {
-        hist[(hist_at * 128 + k) as usize] = *((p + k) as *mut u8)
+    while k < HISTB - 8 && (*((p + k) as *mut u8)) != 0 as u8 {
+        hist[(hist_at * HISTB + k) as usize] = *((p + k) as *mut u8)
         k = k + 1
     }
-    hist[(hist_at * 128 + k) as usize] = 0 as u8
+    hist[(hist_at * HISTB + k) as usize] = 0 as u8
     hist_at = hist_at + 1
     hist_n = hist_at
+    var s_h: [u8; 18] = "explorer: hist n=\0"
+    var s_a: [u8; 5] = " at=\0"
+    say((&s_h[0 as usize]) as u64)
+    ulib.sayn(hist_n)
+    say((&s_a[0 as usize]) as u64)
+    ulib.sayn(hist_at)
+    ulib.nl()
 }
 
 fn hist_get(i: u64) -> u64 {
-    return (&hist[0 as usize]) as u64 + i * 128
+    return (&hist[0 as usize]) as u64 + i * HISTB
 }
 
 fn eltern(p: u64) {
@@ -792,6 +847,871 @@ fn eltern(p: u64) {
         n = n - 1
     }
     __mmio_write8((p + n) as *mut u8, 0 as u8)
+}
+
+// ==================================================== DIE ANORDNUNG
+//
+// RUNDE EXPLORER-2, Beleg 18-maximiert.png: DAS LAYOUT WIRD BEI JEDER
+// GROESSENAENDERUNG NEU GERECHNET.
+//
+// Befund, gemessen: die vier Kaesten dieser Seite (Menueleiste,
+// Werkzeugleiste, Inhalt, Statuszeile) bekamen ihre Ecken und Masse
+// EINMAL beim Aufbau, aus `bh` = 430. `wlib.relayout` zieht bei einem
+// Groessenwechsel nur Kaesten mit, deren Breite 0 ist -- diese hier
+// haben eine gerechnete Breite. Nach dem Maximieren stand die
+// Statuszeile also weiter bei y 390, die Tabelle war 300 hoch, und
+// darunter lagen 400 Bildpunkte leere Flaeche: genau das leere Bild
+// aus 18-maximiert.png.
+//
+// Darum stehen die Masse jetzt in EINER Funktion (`masse`), die
+// Kastennummern und die zwei Bedienelemente, deren Groesse mitwaechst,
+// in Statiks -- und `anordnen` setzt beides mit `box_at` /
+// `setz_groesse` neu und laesst `wlib.neu_setzen` alles noch einmal
+// anordnen. Aufgerufen wird es beim Aufbau UND bei jedem Durchlauf der
+// Ereignisschleife, in dem sich `wlib.win_w/win_h` geaendert haben.
+// RUNDE EXPLORER-2, Pflichtpunkt 6: SEITENLEISTE UND BROSAMEN.
+//
+// Die Seite hat jetzt fuenf Reihen statt vier -- Menueleiste,
+// Werkzeugleiste, Brosamenleiste, Inhalt, Statuszeile -- und der
+// Inhalt zwei Spalten: links ein SENKRECHTER Kasten mit den Orten
+// (aus `exporte`, oben) und dem Baum (darunter), rechts die Tabelle.
+// Die Brosamenleiste traegt je ein GLIED als eigenen Knopf; Strg+L
+// blendet sie aus und das Textfeld ein, wie es Nautilus und der
+// Explorer tun.
+static mut c_krume: u64 = 0xFFFFFFFFFFFFFFFF
+static mut c_seite: u64 = 0xFFFFFFFFFFFFFFFF
+static mut a_orte: u64 = 0xFFFFFFFFFFFFFFFF
+static mut a_pfad: u64 = 0xFFFFFFFFFFFFFFFF
+// MAXKRUME aus `exporte` ist 12; mehr Glieder zeigt kein Weg an.
+static mut krumeb: [u64; 12] = [0xFFFFFFFFFFFFFFFF as u64; 12]
+static mut krume_n: u64 = 0
+static mut pfadfeld_an: bool = false
+static mut c_menu: u64 = 0xFFFFFFFFFFFFFFFF
+static mut c_werk: u64 = 0xFFFFFFFFFFFFFFFF
+static mut c_inh: u64 = 0xFFFFFFFFFFFFFFFF
+static mut c_stat: u64 = 0xFFFFFFFFFFFFFFFF
+static mut a_baum: u64 = 0xFFFFFFFFFFFFFFFF
+static mut a_tab: u64 = 0xFFFFFFFFFFFFFFFF
+static mut letzte_w: u64 = 0
+static mut letzte_h: u64 = 0
+// Die gerechneten Masse. Sie stehen hier und nicht in `u_start`, weil
+// sie an ZWEI Stellen gebraucht werden: beim Aufbau und bei jeder
+// Groessenaenderung. Zwei Rechnungen waeren zwei Wahrheiten.
+static mut g_rand: u64 = 0
+static mut g_luft: u64 = 0
+static mut g_ch: u64 = 0
+static mut g_mbh: u64 = 0
+static mut g_sth: u64 = 0
+static mut g_innen: u64 = 0
+static mut g_ywerk: u64 = 0
+static mut g_yinh: u64 = 0
+static mut g_hinh: u64 = 0
+static mut g_ystat: u64 = 0
+static mut g_bbaum: u64 = 0
+static mut g_ykrume: u64 = 0
+static mut g_horte: u64 = 0
+static mut g_hbaum: u64 = 0
+static mut g_binh: u64 = 0
+
+// RUNDE EXPLORER-2, Pflichtpunkt 5: DIE BREITE DER ZEIT-SPALTE WIRD
+// GEMESSEN UND NICHT GERATEN.
+//
+// Hier standen 186/80/76/108. 76 Bildpunkte reichen fuer "2026-09-"
+// und nicht fuer die volle Zeitangabe -- die Spalte war gefuellt, und
+// man konnte sie trotzdem nicht lesen (erste Aufnahme dieser Runde,
+// gemessen bei 1280x800). Gemessen wird jetzt mit derselben Schrift,
+// in der gemalt wird, und an einer Zeichenkette, die
+// `expmodell.zeit_text` selbst erzeugt -- so kann das Muster nicht von
+// dem abweichen, was in der Spalte steht. Die Probe wird nie gemalt;
+// sichtbarer Text kommt weiterhin nur aus dem Katalog.
+fn spalten_setzen(tbreite: u64) {
+    var probe: [u8; 32] = [0 as u8; 32]
+    // Ein fester Zeitpunkt (1893456000 Sekunden = 2030-01-01 UTC):
+    // die laengste Form der Ausgabe, vierstelliges Jahr und Uhrzeit.
+    let pp: u64 = expmodell.zeit_text(1893456000,
+        (&probe[0 as usize]) as u64)
+    let wz: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), pp,
+        ulib.length(pp))
+    let luft: u64 = wlibc.metric(wlibc.M_PAD_X)
+    // Die Bildlaufleiste einer Tabelle ist 16 breit (wlib.fi, Zweig
+    // "die Bildlaufleiste?" in `on_down`), dazu der Einzug der Zellen.
+    let leiste: u64 = 16 + wlibc.space(1)
+    let w_zeit: u64 = wz + luft
+    // Rechte sind zehn Zeichen, Groessen hoechstens acht -- an
+    // derselben Probe gemessen, damit alle drei mit der Schrift wachsen.
+    let w_recht: u64 = wz * 10 / 16 + luft
+    let w_gr: u64 = wz * 8 / 16 + luft
+    var w_name: u64 = 0
+    if tbreite > leiste + w_zeit + w_recht + w_gr {
+        w_name = tbreite - leiste - w_zeit - w_recht - w_gr
+    }
+    // Der Name bekommt den Rest, aber nie weniger als die Zeit-Spalte:
+    // ein Dateimanager, in dem der Name die schmalste Spalte ist, zeigt
+    // eine Liste von Auslassungspunkten.
+    if w_name < w_zeit {
+        w_name = w_zeit
+    }
+    spalten[(0) as usize] = w_name
+    spalten[(1) as usize] = w_gr
+    spalten[(2) as usize] = w_zeit
+    spalten[(3) as usize] = w_recht
+}
+
+fn masse(bw: u64, bh: u64) {
+    g_rand = wlibc.space(1) // der Rand der Seite
+    g_luft = wlibc.space(1) // zwischen zwei Reihen
+    g_ch = wlibc.metric(wlibc.M_CTRL_H) // die Klickflaeche
+    g_mbh = wlib.ctrl_thin() // die Menueleiste ist zwei flacher
+    g_sth = wlibc.type_lh(wlibc.TY_CAPTION) // die Statuszeile
+    g_innen = 0
+    if bw > 2 * g_rand {
+        g_innen = bw - 2 * g_rand
+    }
+    g_ywerk = g_mbh + g_luft
+    // Die Brosamenleiste liegt zwischen Werkzeugleiste und Inhalt:
+    // Seitenleiste | Kopfzeile mit Brosamen | Inhalt | Statuszeile.
+    g_ykrume = g_ywerk + g_ch + g_luft
+    g_yinh = g_ykrume + g_ch + g_luft
+    g_hinh = 0
+    if bh > g_yinh + g_sth + 2 * g_luft {
+        g_hinh = bh - g_yinh - g_sth - 2 * g_luft
+    }
+    g_ystat = g_yinh + g_hinh + g_luft
+    // Der Baum links: ein Viertel der Breite, aber nie schmaler als
+    // fuenf Klickflaechen -- darunter passt kein Verzeichnisname mehr
+    // hinein, und ein Baum, in dem alles abgeschnitten ist, ist eine
+    // Spalte Auslassungspunkte.
+    g_bbaum = wlibc.snap(g_innen / 4)
+    if g_bbaum < g_ch * 5 {
+        g_bbaum = g_ch * 5
+    }
+    // Die Orte oben, der Baum darunter: die Orte bekommen die Haelfte
+    // der Hoehe, aber hoechstens acht Zeilen -- es sind acht feste
+    // Orte plus die gefundenen Datentraeger, und eine halbleere Liste
+    // ueber einem abgeschnittenen Baum waere die falsche Verteilung.
+    g_horte = wlibc.snap(g_hinh / 2)
+    if g_horte > g_ch * 8 {
+        g_horte = wlibc.snap(g_ch * 8)
+    }
+    g_hbaum = 0
+    if g_hinh > g_horte + g_luft {
+        g_hbaum = g_hinh - g_horte - g_luft
+    }
+    g_binh = 0
+    if g_innen > g_bbaum + g_luft {
+        g_binh = g_innen - g_bbaum - g_luft
+    }
+    // Die Spalten der Tabelle haengen an DEREN Breite und die an der
+    // des Fensters -- also werden sie hier mitgerechnet und nicht
+    // einmal beim Aufbau gesetzt.
+    spalten_setzen(g_binh)
+}
+
+// Die Seite mit den JETZIGEN Innenmassen des Fensters neu aufteilen.
+// Sie meldet sich mit Zahlen, damit die Abnahme das Maximieren MESSEN
+// kann statt es an einem Bild zu erraten.
+fn anordnen(w: u64) {
+    var s_an: [u8; 20] = "explorer: anordnen \0"
+    var sw: [u8; 3] = "w=\0"
+    var sh: [u8; 3] = "h=\0"
+    var si: [u8; 8] = "inhalt=\0"
+    var sb: [u8; 6] = "baum=\0"
+    var ss: [u8; 6] = "stat=\0"
+    let bw: u64 = wlib.win_w(w)
+    let bh: u64 = wlib.win_h(w)
+    masse(bw, bh)
+    letzte_w = bw
+    letzte_h = bh
+    wlib.box_at(c_menu, 0, 0, bw, g_mbh)
+    wlib.box_at(c_werk, g_rand, g_ywerk, g_innen, g_ch)
+    wlib.box_at(c_krume, g_rand, g_ykrume, g_innen, g_ch)
+    wlib.box_at(c_seite, g_rand, g_yinh, g_bbaum, g_hinh)
+    wlib.box_at(c_inh, g_rand + g_bbaum + g_luft, g_yinh, g_binh, g_hinh)
+    wlib.box_at(c_stat, g_rand, g_ystat, g_innen, g_sth)
+    // Orte, Baum und Tabelle sind das, was mitwachsen soll -- ihre
+    // Wunschgroesse haengt an der Fenstergroesse und nicht am Aufbau.
+    wlib.setz_groesse(a_orte, g_bbaum, g_horte)
+    wlib.setz_groesse(a_baum, g_bbaum, g_hbaum)
+    wlib.setz_groesse(a_tab, 0, g_hinh)
+    wlib.neu_setzen()
+    wlib.draw_all()
+    say((&s_an[0 as usize]) as u64)
+    kv((&sw[0 as usize]) as u64, bw)
+    kv((&sh[0 as usize]) as u64, bh)
+    kv((&si[0 as usize]) as u64, g_hinh)
+    kv((&sb[0 as usize]) as u64, g_bbaum)
+    kv((&ss[0 as usize]) as u64, g_ystat)
+    ulib.nl()
+}
+
+// ============================ RUNDE EXPLORER-2: DIE ZWEITE ANSICHT
+//
+// LISTE ODER SYMBOLE (Pflichtpunkt 10). Die Symbolansicht ist EIN
+// Bedienelement mehr und kein zweites Programm: dieselbe Ordnung,
+// dieselben Symbole wie in der Tabelle, nur ohne Spalten -- Name und
+// Sinnbild, gross genug zum Zeigen. Sie liegt im selben Kasten wie die
+// Tabelle; sichtbar ist immer genau eine von beiden.
+//
+// Gemessene Grenze: 512 Zeilen und 16 KiB Namen. Was darueber liegt,
+// wird GEZAEHLT und in der Meldung gesagt -- die Tabelle zeigt in dem
+// Fall ohnehin mehr, und sie ist einen Menuepunkt entfernt.
+const SYMMAX: u64 = 512
+static mut symansicht: u64 = 0
+static mut a_sym: u64 = 0xFFFFFFFFFFFFFFFF
+static mut symblob: [u8; 16384] = [0 as u8; 16384]
+static mut symicons: [u64; 512] = [0 as u64; 512]
+static mut sym_weg: u64 = 0
+static mut s_lz1: [u8; 2] = " \0"
+
+fn symbolansicht_bauen() {
+    var sp: u64 = 0
+    var z: u64 = 0
+    sym_weg = 0
+    let n: u64 = m_anzahl()
+    while z < n {
+        let e: u64 = m_ord(z)
+        let name: u64 = m_name(e)
+        let len: u64 = ulib.length(name)
+        if z >= SYMMAX || sp + len + 2 >= 16380 {
+            sym_weg = sym_weg + 1
+        } else {
+            if vmodus == 0 {
+                symicons[(z) as usize] = expmodell.symbol_fuer(e)
+            } else {
+                symicons[(z) as usize] = symbol_fuer(e)
+            }
+            var k: u64 = 0
+            while k < len {
+                symblob[(sp) as usize] = *((name + k) as *mut u8)
+                sp = sp + 1
+                k = k + 1
+            }
+            symblob[(sp) as usize] = 10 as u8
+            sp = sp + 1
+        }
+        z = z + 1
+    }
+    symblob[(sp) as usize] = 0 as u8
+}
+
+// Zwischen Liste (0) und Symbolen (1) umschalten. Beide Bedienelemente
+// stehen schon da; getauscht wird nur, welches sichtbar ist -- ein
+// Bedienelement anzulegen und wieder wegzuwerfen waere bei MAXWD 160
+// Plaetzen ein Leck mit Ansage.
+fn ansicht_setzen(welche: u64, tab: u64, baum: u64, stat: u64,
+    fpfad: u64) {
+    var s_v: [u8; 16] = "explorer: view \0"
+    var s_n: [u8; 3] = "n=\0"
+    var s_w: [u8; 5] = "weg=\0"
+    symansicht = welche
+    if a_sym >= wlib.MAXWD {
+        return
+    }
+    symbolansicht_bauen()
+    wlib.set_text(a_sym, (&symblob[0 as usize]) as u64)
+    wlib.row_icons(a_sym, (&symicons[0 as usize]) as u64)
+    wlib.show(a_sym, welche == 1)
+    wlib.show(tab, welche == 0)
+    wlib.neu_setzen()
+    wlib.draw_all()
+    say((&s_v[0 as usize]) as u64)
+    ulib.sayn(welche)
+    say((&s_lz1[0 as usize]) as u64)
+    kv((&s_n[0 as usize]) as u64, m_anzahl())
+    kv((&s_w[0 as usize]) as u64, sym_weg)
+    ulib.nl()
+}
+
+// ============================ RUNDE EXPLORER-2: ORTE UND BROSAMEN
+//
+// Beide Listen kommen aus `exporte` und werden hier nur ANGEZEIGT:
+// die Orte als Zeilen einer `wlib`-Liste, der Weg als eine Reihe
+// Knoepfe. Die Rueckgabewerte von `orte_bauen`/`krume_bauen` wurden
+// bis hierher in `_no`/`_nk` weggeworfen -- gezeigt hat sie niemand.
+
+// Die Orte neu einlesen (die Datentraeger koennen sich aendern) und
+// in die Liste haengen. Die Zeiger sind stabil, `wlib` liest sie beim
+// naechsten Malen erneut.
+fn orte_anzeigen() {
+    if a_orte >= wlib.MAXWD {
+        return
+    }
+    let n: u64 = exporte.orte_bauen()
+    wlib.set_text(a_orte, exporte.orte_ptr())
+    wlib.row_icons(a_orte, exporte.orte_symbole())
+    var s_o: [u8; 16] = "explorer: orte \0"
+    var s_n: [u8; 3] = "n=\0"
+    var s_t: [u8; 9] = "traeger=\0"
+    say((&s_o[0 as usize]) as u64)
+    kv((&s_n[0 as usize]) as u64, n)
+    kv((&s_t[0 as usize]) as u64, exporte.traeger_zahl())
+    ulib.nl()
+}
+
+// Auf einen Ort springen. Kopfzeilen ("Orte", "Datentraeger") sind
+// keine Ziele -- sie haben keinen Pfad, und ein Sprung ins Leere waere
+// schlimmer als ein Klick, der nichts tut.
+fn ort_gehen(zeile: u64, baum: u64, tab: u64, stat: u64, fpfad: u64) {
+    var s_g: [u8; 21] = "explorer: ortsprung \0"
+    if zeile >= exporte.orte_zahl() {
+        return
+    }
+    if exporte.ort_ist_kopf(zeile) {
+        return
+    }
+    let ziel: u64 = exporte.ort_pfad(zeile)
+    if ziel == 0 || (*((ziel) as *mut u8)) == 0 as u8 {
+        return
+    }
+    vmodus = 0
+    ulib.strncpy((&pfad[0 as usize]) as u64, ziel, 126)
+    hist_push((&pfad[0 as usize]) as u64)
+    neu_lesen(baum, tab, stat, fpfad)
+    say((&s_g[0 as usize]) as u64)
+    say((&pfad[0 as usize]) as u64)
+    ulib.nl()
+}
+
+// Die Brosamenleiste an den aktuellen Weg anpassen: jedes Glied
+// bekommt seinen Knopf, der Rest wird ausgeblendet. Die Knopfbreite
+// wird NACHGEZOGEN, weil sie beim Anlegen aus dem damaligen Text kam.
+fn krume_anzeigen() {
+    var s_k: [u8; 17] = "explorer: krume \0"
+    var s_n: [u8; 3] = "n=\0"
+    var s_f: [u8; 6] = "feld=\0"
+    let n: u64 = exporte.krume_bauen((&pfad[0 as usize]) as u64)
+    krume_n = n
+    if krume_n > 12 {
+        krume_n = 12
+    }
+    let pad: u64 = wlibc.metric(wlibc.M_PAD_X)
+    var i: u64 = 0
+    while i < 12 {
+        let id: u64 = krumeb[(i) as usize]
+        if id < wlib.MAXWD {
+            if i < krume_n && !pfadfeld_an {
+                let t: u64 = exporte.krume_text(i)
+                wlib.set_text(id, t)
+                wlib.setz_groesse(id, wlibc.text_w(wlibc.F_UI,
+                    wlibc.px_ui(), t, ulib.length(t)) + 2 * pad, g_ch)
+                wlib.show(id, true)
+            } else {
+                wlib.show(id, false)
+            }
+        }
+        i = i + 1
+    }
+    if a_pfad < wlib.MAXWD {
+        wlib.show(a_pfad, pfadfeld_an)
+    }
+    wlib.neu_setzen()
+    var feld: u64 = 0
+    if pfadfeld_an {
+        feld = 1
+    }
+    say((&s_k[0 as usize]) as u64)
+    kv((&s_n[0 as usize]) as u64, n)
+    kv((&s_f[0 as usize]) as u64, feld)
+    ulib.nl()
+}
+
+// STRG+L: aus der Leiste wird das Textfeld und zurueck. Genau eines
+// von beiden ist da -- zwei Pfadanzeigen nebeneinander waeren zwei
+// Wahrheiten ueber denselben Ort.
+fn krume_umschalten(fpfad: u64) {
+    pfadfeld_an = !pfadfeld_an
+    if pfadfeld_an {
+        wlib.set_text(fpfad, (&pfad[0 as usize]) as u64)
+        wlib.set_focus(fpfad)
+    }
+    krume_anzeigen()
+    wlib.draw_all()
+}
+
+// Ein Glied anklicken: dorthin springen. Gibt zurueck, ob der Klick
+// einem Glied galt.
+fn krume_klick(id: u64, baum: u64, tab: u64, stat: u64, fpfad: u64) -> bool {
+    var s_g: [u8; 23] = "explorer: krumesprung \0"
+    var i: u64 = 0
+    while i < krume_n {
+        if krumeb[(i) as usize] == id {
+            let ziel: u64 = exporte.krume_pfad(i)
+            if ziel != 0 && (*((ziel) as *mut u8)) != 0 as u8 {
+                vmodus = 0
+                ulib.strncpy((&pfad[0 as usize]) as u64, ziel, 126)
+                hist_push((&pfad[0 as usize]) as u64)
+                neu_lesen(baum, tab, stat, fpfad)
+                say((&s_g[0 as usize]) as u64)
+                say((&pfad[0 as usize]) as u64)
+                ulib.nl()
+            }
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// ================================== RUNDE EXPLORER-2: DIE KUERZEL
+//
+// WAS EINE TASTE HIER TUT, TUT SIE UEBER `expakt` -- nicht daneben.
+// Der Tastenblock ist die EINZIGE Stelle, an der aus einem Kuerzel
+// eine Tat wird; die Tat selbst (Ablage, Einfuegen, Umbenennen,
+// Rueckgaengig) steht in `expakt.fi` und wird von Menue, Kontextmenue
+// und Taste gleichermassen gerufen. Drei Wege, eine Umsetzung.
+//
+// DIE STEUEROKTETTE SIND GEMESSEN, nicht geraten: `kernel/kbd.fi`
+// bildet Strg+Buchstabe auf die unteren fuenf Bit ab (Strg+A = 1,
+// Strg+Z = 26). Die zwei Ausnahmen -- Strg+H und Strg+N -- kommen als
+// `ESC [ 30/31 ; 5 ~` und haben in `wlib` eigene Nummern, weil 8 der
+// Ruecklauf und 14 die Pfeiltaste hoch ist.
+const T_STRG_A: u64 = 1
+const T_STRG_C: u64 = 3
+const T_STRG_F: u64 = 6
+const T_STRG_L: u64 = 12
+const T_STRG_V: u64 = 22
+const T_STRG_X: u64 = 24
+const T_STRG_Z: u64 = 26
+
+static mut k_errtit: [u8; 19] = "explorer.err.title\0"
+static mut k_konftit: [u8; 24] = "explorer.conflict.title\0"
+static mut k_konfbtn: [u8; 26] = "explorer.conflict.buttons\0"
+static mut k_konfask: [u8; 22] = "explorer.conflict.ask\0"
+static mut k_proptit: [u8; 20] = "explorer.prop.title\0"
+static mut k_filter: [u8; 16] = "explorer.filter\0"
+static mut k_medit: [u8; 19] = "explorer.menu.edit\0"
+static mut k_mgo: [u8; 17] = "explorer.menu.go\0"
+static mut k_newfile: [u8; 17] = "explorer.newfile\0"
+static mut k_newfname: [u8; 22] = "explorer.newfile.name\0"
+static mut k_owtit: [u8; 24] = "explorer.openwith.title\0"
+static mut k_delperm: [u8; 29] = "explorer.confirm_delete_perm\0"
+static mut k_mtitel: [u8; 16] = "wlib.menu.title\0"
+
+// Woher der Konflikt kam, damit die Antwort des Vierfachdialogs die
+// abgebrochene Tat WIEDERHOLEN kann: 1 = Einfuegen, 2 = Umbenennen.
+static mut kfl_op: u64 = 0
+static mut kfl_alt: [u8; 256] = [0 as u8; 256]
+static mut kfl_neu: [u8; 128] = [0 as u8; 128]
+// Der Filtertext (Strg+F) -- er muss statisch liegen, weil `expmodell`
+// den Zeiger behaelt und bei jedem Lesen erneut hineinschaut.
+static mut fbuf: [u8; 64] = [0 as u8; 64]
+
+// Wie viele Eintraege ein Katalogtext hat. Hier stand an drei Stellen
+// die Zahl 3, waehrend `explorer.menu.file` sechs Zeilen hat -- die
+// letzten drei waren nicht anzuklicken. Gezaehlt wird, was dasteht.
+// Wo unter der Menueleiste das Wort Nummer m anfaengt -- gerechnet
+// wie `wlib.paint_menubar` rechnet (Textbreite plus 16), damit das
+// Aufklappmenue unter SEINEM Wort haengt und nicht daneben.
+fn menue_x(mb: u64, m: u64) -> u64 {
+    var x: u64 = wlib.rect_x(mb) + 4
+    let p: u64 = msg.get((&k_menu[0 as usize]) as u64)
+    var t: u64 = 0
+    var at: u64 = 0
+    while t < m {
+        var n: u64 = 0
+        while (*((p + at + n) as *mut u8)) != 0 as u8
+            && (*((p + at + n) as *mut u8)) != 10 as u8 {
+            n = n + 1
+        }
+        if n == 0 {
+            return x
+        }
+        x = x + wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), p + at, n) + 16
+        at = at + n
+        if (*((p + at) as *mut u8)) == 10 as u8 {
+            at = at + 1
+        }
+        t = t + 1
+    }
+    return x
+}
+
+fn eintraege(p: u64) -> u64 {
+    if p == 0 {
+        return 0
+    }
+    var n: u64 = 0
+    var k: u64 = 0
+    var offen: bool = false
+    while (*((p + k) as *mut u8)) != 0 as u8 {
+        if (*((p + k) as *mut u8)) == 10 as u8 {
+            n = n + 1
+            offen = false
+        } else {
+            offen = true
+        }
+        k = k + 1
+    }
+    if offen {
+        n = n + 1
+    }
+    return n
+}
+
+// Der volle Pfad einer ANSICHTSZEILE. Ueber `m_ord`/`m_name`, denn die
+// Zeile ist nicht der Eintrag: dazwischen liegt die Sortierung.
+fn voll_von(zeile: u64) -> u64 {
+    if zeile >= m_anzahl() {
+        return 0
+    }
+    return join((&pfad[0 as usize]) as u64, m_name(m_ord(zeile)))
+}
+
+// DIE GANZE AUSWAHL, nicht die eine Zeile. `wlib.sel_hat` fragt das
+// Bitfeld ab, das `neu_lesen` angemeldet hat; ist nichts markiert,
+// gilt die Zeile unter dem Zeiger -- so wie in jedem Dateimanager.
+fn auswahl_liste(tab: u64) -> u64 {
+    var s_sel: [u8; 15] = "explorer: sel \0"
+    var s_n: [u8; 3] = "n=\0"
+    var s_a: [u8; 7] = "anker=\0"
+    expakt.liste_leeren()
+    var n: u64 = 0
+    var z: u64 = 0
+    let ganz: u64 = m_anzahl()
+    while z < ganz {
+        if wlib.sel_hat(tab, z) {
+            if expakt.liste_add(voll_von(z)) {
+                n = n + 1
+            }
+        }
+        z = z + 1
+    }
+    if n == 0 {
+        let v: u64 = wlib.value(tab)
+        if v < ganz {
+            if expakt.liste_add(voll_von(v)) {
+                n = 1
+            }
+        }
+    }
+    say((&s_sel[0 as usize]) as u64)
+    kv((&s_n[0 as usize]) as u64, n)
+    kv((&s_a[0 as usize]) as u64, wlib.value(tab))
+    ulib.nl()
+    return n
+}
+
+// KEIN STUMMER FEHLSCHLAG (Pflichtpunkt 8). Jede Nummer ungleich null
+// wird zu einem Schluessel aus `explorer.err.*` und zu einem Fenster;
+// der Satz steht im Katalog und in beiden Sprachen.
+fn fehler_zeigen(rc: u64) -> bool {
+    var s_f: [u8; 21] = "explorer: fehler rc=\0"
+    var s_k: [u8; 6] = " key=\0"
+    if rc == 0 {
+        return false
+    }
+    let schl: u64 = expakt.fehler_schluessel(rc)
+    say((&s_f[0 as usize]) as u64)
+    ulib.sayn(rc)
+    say((&s_k[0 as usize]) as u64)
+    say(schl)
+    ulib.nl()
+    // EIN HINWEIS FRAGT NICHTS. Hier stand `dlg_ask` -- der Dialog mit
+    // "Ja" und "Nein"; auf die Mitteilung "Kein Platz mehr auf dem
+    // Datentraeger" ist keine der beiden Antworten eine. `dlg_hinweis`
+    // (Runde EXPLORER-2, wlib.fi) hat genau einen Knopf.
+    let _d: u64 = wlib.dlg_hinweis(msg.get((&k_errtit[0 as usize]) as u64),
+        msg.get(schl))
+    return true
+}
+
+// DER KONFLIKTDIALOG MIT VIER WAHLMOEGLICHKEITEN. Ein `wlib`-Dialog
+// hat zwei Knoepfe, der Katalog verlangt vier Antworten -- also ein
+// Fenster mit vier Zeilen, und die Reihenfolge ist die des Katalogs
+// (Ersetzen, Umbenennen, Ueberspringen, Abbrechen = K_* 0..3).
+fn konflikt_zeigen(besitzer: u64) -> bool {
+    var s_k: [u8; 20] = "explorer: konflikt \0"
+    if !expakt.konflikt_da() {
+        return false
+    }
+    let _b: u64 = besitzer
+    // VIER KNOEPFE IN DER ORDNUNG DES KATALOGS: Ersetzen, Umbenennen,
+    // Ueberspringen, Abbrechen -- genau `expakt.K_ERSETZEN` ..
+    // `K_ABBRUCH` (0..3). Bis hierher war das ein Aufklappmenue an der
+    // Mausstelle; eine FRAGE mit vier Antworten ist aber ein Dialog,
+    // und `wlib.dlg_wahl` (Runde EXPLORER-2) kann ihn seit dieser
+    // Runde stellen. Der Block kommt aus dem Katalog, wie er dasteht.
+    let _d: u64 = wlib.dlg_wahl(msg.get((&k_konftit[0 as usize]) as u64),
+        msg.get((&k_konfask[0 as usize]) as u64),
+        msg.get((&k_konfbtn[0 as usize]) as u64), 4)
+    say_dlgrect()
+    say((&s_k[0 as usize]) as u64)
+    say(expakt.konflikt_pfad())
+    ulib.nl()
+    return true
+}
+
+// EINFUEGEN, und zwar ueber `expakt`: im selben Datentraeger benennt
+// es um, sonst kopiert es Block fuer Block. Bei einem belegten Namen
+// kommt der Vierfachdialog, und die Antwort wiederholt die Tat.
+fn einfuegen_tun(besitzer: u64, baum: u64, tab: u64, stat: u64,
+    fpfad: u64) -> u64 {
+    var s_p: [u8; 17] = "explorer: paste \0"
+    var s_n: [u8; 3] = "n=\0"
+    var s_rc: [u8; 4] = "rc=\0"
+    kfl_op = 1
+    let rc: u64 = expakt.einfuegen((&pfad[0 as usize]) as u64)
+    say((&s_p[0 as usize]) as u64)
+    kv((&s_n[0 as usize]) as u64, expakt.ablage_zahl())
+    kv((&s_rc[0 as usize]) as u64, rc)
+    ulib.nl()
+    neu_lesen(baum, tab, stat, fpfad)
+    if konflikt_zeigen(besitzer) {
+        return 9
+    }
+    let _f: bool = fehler_zeigen(rc)
+    return 0
+}
+
+// UMBENENNEN UEBER `io.rename` (Pflichtpunkt 2). Der alte Weg --
+// kopieren und loeschen -- hat einen Ordner nicht mitgenommen, sondern
+// verloren; er steht nicht mehr in dieser Datei.
+fn umbenennen_tun(besitzer: u64, alt: u64, neu: u64, baum: u64, tab: u64,
+    stat: u64, fpfad: u64) -> u64 {
+    ulib.strncpy((&kfl_alt[0 as usize]) as u64, alt, 250)
+    ulib.strncpy((&kfl_neu[0 as usize]) as u64, neu, 120)
+    kfl_op = 2
+    let rc: u64 = expakt.umbenennen((&kfl_alt[0 as usize]) as u64,
+        (&kfl_neu[0 as usize]) as u64)
+    neu_lesen(baum, tab, stat, fpfad)
+    if konflikt_zeigen(besitzer) {
+        return 9
+    }
+    let _f: bool = fehler_zeigen(rc)
+    return 0
+}
+
+// Die Antwort auf den Vierfachdialog: merken und die abgebrochene Tat
+// noch einmal versuchen -- `expakt` verbraucht die Wahl dabei.
+fn konflikt_antwort(wahl: u64, besitzer: u64, baum: u64, tab: u64,
+    stat: u64, fpfad: u64) -> u64 {
+    expakt.konflikt_antwort(wahl)
+    if wahl == expakt.K_ABBRUCH {
+        return 0
+    }
+    if kfl_op == 2 {
+        return umbenennen_tun(besitzer, (&kfl_alt[0 as usize]) as u64,
+            (&kfl_neu[0 as usize]) as u64, baum, tab, stat, fpfad)
+    }
+    return einfuegen_tun(besitzer, baum, tab, stat, fpfad)
+}
+
+// DIE EIGENSCHAFTEN (Pflichtpunkt 4, Alt+Eingabe). Der Block kommt aus
+// `expdlg` -- Name, Art, Groesse, rekursiv gezaehlte Ordnergroesse,
+// die drei Zeiten aus `stat`, Rechte und Eigentuemer. Gezeigt wird er
+// in einem eigenen Fenster von `wlib`, weil ein Dialog dieser
+// Bibliothek EINE Zeile hat und diese Auskunft zehn.
+fn eigenschaften_zeigen(besitzer: u64, tab: u64) -> u64 {
+    var s_p: [u8; 18] = "explorer: props \0\0"
+    var s_z: [u8; 8] = "zeilen=\0"
+    var s_b: [u8; 7] = "bytes=\0"
+    var s_s: [u8; 8] = "stueck=\0"
+    let z: u64 = wlib.value(tab)
+    if z >= m_anzahl() {
+        return 0
+    }
+    let voll: u64 = voll_von(z)
+    let n: u64 = expdlg.eig_bauen(voll, m_name(m_ord(z)),
+        expmodell.zeit_offset())
+    wlib.set_menu_title(msg.get((&k_proptit[0 as usize]) as u64))
+    let _m: u64 = wlib.menu_open(besitzer, wlibc.mouse_x(),
+        wlibc.mouse_y(), expdlg.eig_ptr(), n)
+    wlib.set_menu_title(msg.get((&k_mtitel[0 as usize]) as u64))
+    say_menurect()
+    say((&s_p[0 as usize]) as u64)
+    kv((&s_z[0 as usize]) as u64, n)
+    kv((&s_b[0 as usize]) as u64, expdlg.eig_groesse())
+    kv((&s_s[0 as usize]) as u64, expdlg.eig_stuecke())
+    ulib.nl()
+    return 8
+}
+
+// ====================================== DER TASTENBLOCK (Punkt 7)
+//
+// Rueckgabe: (offen << 8) | wartet -- `offen` sagt, welches Menue
+// aufgeklappt ist, `wartet` sagt, worauf ein Dialog wartet. Beides
+// gehoert der Ereignisschleife; hier wird es nur ausgerechnet.
+fn taste_block(taste: u64, baum: u64, tab: u64, stat: u64,
+    fpfad: u64) -> u64 {
+    var s_t: [u8; 17] = "explorer: taste \0"
+    var s_n: [u8; 3] = "n=\0"
+    var s_rc: [u8; 4] = "rc=\0"
+    var s_art: [u8; 5] = "art=\0"
+    var s_an: [u8; 4] = "an=\0"
+    if taste == T_STRG_C || taste == T_STRG_X {
+        let n: u64 = auswahl_liste(tab)
+        var schnitt: bool = false
+        if taste == T_STRG_X {
+            schnitt = true
+        }
+        let rc: u64 = expakt.kopieren_merken(schnitt)
+        say((&s_t[0 as usize]) as u64)
+        ulib.sayn(taste)
+        say((&s_lz1[0 as usize]) as u64)
+        kv((&s_n[0 as usize]) as u64, n)
+        kv((&s_rc[0 as usize]) as u64, rc)
+        ulib.nl()
+        let _f: bool = fehler_zeigen(rc)
+        return 0
+    }
+    if taste == T_STRG_V {
+        say((&s_t[0 as usize]) as u64)
+        ulib.sayn(taste)
+        say((&s_lz1[0 as usize]) as u64)
+        kv((&s_n[0 as usize]) as u64, expakt.ablage_zahl())
+        ulib.nl()
+        return einfuegen_tun(tab, baum, tab, stat, fpfad)
+    }
+    if taste == T_STRG_A {
+        wlib.sel_alle(tab)
+        wlib.draw_all()
+        say((&s_t[0 as usize]) as u64)
+        ulib.sayn(taste)
+        say((&s_lz1[0 as usize]) as u64)
+        kv((&s_n[0 as usize]) as u64, wlib.sel_zahl(tab))
+        ulib.nl()
+        return 0
+    }
+    if taste == T_STRG_Z {
+        let art: u64 = expakt.undo_art()
+        let rc: u64 = expakt.rueckgaengig()
+        neu_lesen(baum, tab, stat, fpfad)
+        say((&s_t[0 as usize]) as u64)
+        ulib.sayn(taste)
+        say((&s_lz1[0 as usize]) as u64)
+        kv((&s_art[0 as usize]) as u64, art)
+        kv((&s_rc[0 as usize]) as u64, rc)
+        ulib.nl()
+        let _f: bool = fehler_zeigen(rc)
+        return 0
+    }
+    if taste == wlib.KEY_F2 {
+        let z: u64 = wlib.value(tab)
+        if z >= m_anzahl() {
+            return 0
+        }
+        ulib.strncpy((&dlgpuffer[0 as usize]) as u64, m_name(m_ord(z)), 120)
+        let _d: u64 = wlib.dlg_open(msg.get((&k_rename[0 as usize]) as u64),
+            msg.get((&k_name[0 as usize]) as u64),
+            (&dlgpuffer[0 as usize]) as u64)
+        say((&s_t[0 as usize]) as u64)
+        ulib.sayn(taste)
+        say(m_name(m_ord(z)))
+        ulib.nl()
+        return 1
+    }
+    if taste == wlib.KEY_ALT_ENTER {
+        say((&s_t[0 as usize]) as u64)
+        ulib.sayn(taste)
+        ulib.nl()
+        return eigenschaften_zeigen(tab, tab) << 8
+    }
+    if taste == wlib.KEY_F5 {
+        neu_lesen(baum, tab, stat, fpfad)
+        say((&s_t[0 as usize]) as u64)
+        ulib.sayn(taste)
+        ulib.nl()
+        return 0
+    }
+    if taste == wlib.KEY_ALT_UP || taste == wlib.KEY_BS {
+        eltern((&pfad[0 as usize]) as u64)
+        hist_push((&pfad[0 as usize]) as u64)
+        neu_lesen(baum, tab, stat, fpfad)
+        say((&s_t[0 as usize]) as u64)
+        ulib.sayn(taste)
+        say((&s_lz1[0 as usize]) as u64)
+        say((&pfad[0 as usize]) as u64)
+        ulib.nl()
+        return 0
+    }
+    if taste == wlib.KEY_ALT_LEFT {
+        if hist_at > 1 {
+            hist_at = hist_at - 1
+            ulib.strcpy((&pfad[0 as usize]) as u64, hist_get(hist_at - 1))
+            neu_lesen(baum, tab, stat, fpfad)
+        }
+        say((&s_t[0 as usize]) as u64)
+        ulib.sayn(taste)
+        say((&s_lz1[0 as usize]) as u64)
+        kv((&s_n[0 as usize]) as u64, hist_at)
+        ulib.nl()
+        return 0
+    }
+    if taste == wlib.KEY_ALT_RIGHT {
+        if hist_at < hist_n {
+            hist_at = hist_at + 1
+            ulib.strcpy((&pfad[0 as usize]) as u64, hist_get(hist_at - 1))
+            neu_lesen(baum, tab, stat, fpfad)
+        }
+        say((&s_t[0 as usize]) as u64)
+        ulib.sayn(taste)
+        say((&s_lz1[0 as usize]) as u64)
+        kv((&s_n[0 as usize]) as u64, hist_at)
+        ulib.nl()
+        return 0
+    }
+    if taste == wlib.KEY_CTRL_H {
+        expmodell.setz_versteckt(!expmodell.versteckt())
+        neu_lesen(baum, tab, stat, fpfad)
+        var an: u64 = 0
+        if expmodell.versteckt() {
+            an = 1
+        }
+        say((&s_t[0 as usize]) as u64)
+        ulib.sayn(taste)
+        say((&s_lz1[0 as usize]) as u64)
+        kv((&s_an[0 as usize]) as u64, an)
+        ulib.nl()
+        return 0
+    }
+    if taste == T_STRG_F {
+        ulib.strncpy((&dlgpuffer[0 as usize]) as u64,
+            (&fbuf[0 as usize]) as u64, 60)
+        let _d: u64 = wlib.dlg_open(msg.get((&k_filter[0 as usize]) as u64),
+            msg.get((&k_filter[0 as usize]) as u64),
+            (&dlgpuffer[0 as usize]) as u64)
+        say((&s_t[0 as usize]) as u64)
+        ulib.sayn(taste)
+        ulib.nl()
+        return 6
+    }
+    if taste == wlib.KEY_CTRL_N {
+        let _d: u64 = wlib.dlg_open(msg.get((&k_newdir[0 as usize]) as u64),
+            msg.get((&k_name[0 as usize]) as u64), 0)
+        say((&s_t[0 as usize]) as u64)
+        ulib.sayn(taste)
+        ulib.nl()
+        return 2
+    }
+    if taste == wlib.KEY_DEL {
+        let n: u64 = auswahl_liste(tab)
+        if n == 0 {
+            return 0
+        }
+        let _d: u64 = wlib.dlg_ask(msg.get((&k_rename[0 as usize]) as u64),
+            msg.get((&k_del[0 as usize]) as u64))
+        say((&s_t[0 as usize]) as u64)
+        ulib.sayn(taste)
+        say((&s_lz1[0 as usize]) as u64)
+        kv((&s_n[0 as usize]) as u64, n)
+        ulib.nl()
+        return 3
+    }
+    if taste == wlib.KEY_SDEL {
+        let n: u64 = auswahl_liste(tab)
+        if n == 0 {
+            return 0
+        }
+        let _d: u64 = wlib.dlg_ask(msg.get((&k_rename[0 as usize]) as u64),
+            msg.get((&k_delperm[0 as usize]) as u64))
+        say((&s_t[0 as usize]) as u64)
+        ulib.sayn(taste)
+        say((&s_lz1[0 as usize]) as u64)
+        kv((&s_n[0 as usize]) as u64, n)
+        ulib.nl()
+        return 5
+    }
+    return 0
 }
 
 // ------------------------------------------------------------- Programm
@@ -845,18 +1765,12 @@ fn u_start(args: u64) -> u64 {
             (&start[0 as usize]) as u64)
     }
     // DIE SPALTEN MUESSEN IN DIE TABELLE PASSEN, UND ZWAR VOR DER
-    // BILDLAUFLEISTE. Die erste Fassung nahm 200+92+84+96 = 472 und
-    // dazu sechs Bildpunkte Einzug -- zusammen 478 in einer Tabelle von
-    // 476, von denen die Bildlaufleiste die letzten sechzehn nimmt. Die
-    // Spalte "Rechte" lief also unter die Leiste, und die wird NACH den
-    // Zeilen gemalt: von 373 Tintenpunkten waren vier weg. Vier. Genau
-    // die Sorte Fehler, die man im Bild nicht sieht und die der Pruefer
-    // je Zeichen findet. 186+80+76+108 = 450, plus 6 Einzug = 456, und
-    // 476 - 16 = 460 sind da.
-    spalten[(0) as usize] = 186
-    spalten[(1) as usize] = 80
-    spalten[(2) as usize] = 76
-    spalten[(3) as usize] = 108
+    // BILDLAUFLEISTE. Hier standen vier Zahlen (186/80/76/108); sie
+    // passten in eine 476 breite Tabelle und in keine andere, und die
+    // Zeit-Spalte war mit 76 zu schmal fuer das, was in ihr steht.
+    // Gerechnet wird das jetzt in `spalten_setzen`, gemessen an der
+    // Schrift und an der jetzigen Breite der Tabelle -- `masse` ruft es
+    // beim Aufbau und bei jeder Groessenaenderung.
 
     // DER ANZEIGENAME KOMMT AUS DEN DATEN. Gesucht wird der Eintrag,
     // dessen `exec` auf dieses Programm zeigt -- nicht der mit einem
@@ -930,33 +1844,27 @@ fn u_start(args: u64) -> u64 {
     // die einer Seite: Menueleiste, Werkzeugleiste, Inhalt, Statuszeile.
     // Was uebrigbleibt, bekommt der Inhalt -- er ist das, was groesser
     // werden soll, wenn das Fenster groesser wird.
-    let rand: u64 = wlibc.space(1) // der Rand der Seite
-    let luft: u64 = wlibc.space(1) // zwischen zwei Reihen
-    let ch: u64 = wlibc.metric(wlibc.M_CTRL_H) // die Klickflaeche
-    let mbh: u64 = wlib.ctrl_thin() // die Menueleiste ist zwei flacher
-    let sth: u64 = wlibc.type_lh(wlibc.TY_CAPTION) // die Statuszeile
-    let innen: u64 = bw - 2 * rand
-    let y_werk: u64 = mbh + luft
-    let y_inhalt: u64 = y_werk + ch + luft
-    var h_inhalt: u64 = 0
-    if bh > y_inhalt + sth + 2 * luft {
-        h_inhalt = bh - y_inhalt - sth - 2 * luft
-    }
-    let y_stat: u64 = y_inhalt + h_inhalt + luft
-    // Der Baum links: ein Viertel der Breite, aber nie schmaler als
-    // zehn Klickflaechen -- darunter passt kein Verzeichnisname mehr
-    // hinein, und ein Baum, in dem alles abgeschnitten ist, ist eine
-    // Spalte Auslassungspunkte.
-    var b_baum: u64 = wlibc.snap(innen / 4)
-    if b_baum < ch * 5 {
-        b_baum = ch * 5
-    }
+    // Die Masse stehen in `masse`, weil sie bei JEDER Groessenaenderung
+    // erneut gebraucht werden (siehe `anordnen` oben).
+    masse(bw, bh)
+    let rand: u64 = g_rand
+    let luft: u64 = g_luft
+    let ch: u64 = g_ch
+    let mbh: u64 = g_mbh
+    let sth: u64 = g_sth
+    let innen: u64 = g_innen
+    let y_werk: u64 = g_ywerk
+    let y_inhalt: u64 = g_yinh
+    let h_inhalt: u64 = g_hinh
+    let y_stat: u64 = g_ystat
+    let b_baum: u64 = g_bbaum
+    let y_krume: u64 = g_ykrume
 
-    wlib.box_v(w, 0, 0, bw, mbh, 0, 0)
+    c_menu = wlib.box_v(w, 0, 0, bw, mbh, 0, 0)
     let mb: u64 = wlib.menubar(msg.get((&k_menu[0 as usize]) as u64))
     wlib.box_end()
 
-    wlib.box_h(w, rand, y_werk, innen, ch, 0, wlibc.space(0))
+    c_werk = wlib.box_h(w, rand, y_werk, innen, ch, 0, wlibc.space(0))
     // RUNDE EXPLORER-2, Pflichtpunkt 12: SYMBOLE STATT "<" ">" "^".
     // Der Text daneben ist nicht die Beschriftung, sondern das, was
     // ein Vorleser sagt und was `say_painted` meldet -- gemalt wird
@@ -978,13 +1886,44 @@ fn u_start(args: u64) -> u64 {
     // aufmachen kann, ist keines.
     wlib.size(wlibc.snap(ch * 2), ch)
     let bstart: u64 = wlib.button(msg.get((&k_start[0 as usize]) as u64))
-    wlib.size(0, ch)
-    let fpfad: u64 = wlib.entry((&pfad[0 as usize]) as u64, 126)
     wlib.box_end()
 
-    wlib.box_h(w, rand, y_inhalt, innen, h_inhalt, 0, luft)
-    wlib.size(b_baum, h_inhalt)
+    // DIE BROSAMENLEISTE (Pflichtpunkt 6). Zwoelf Knoepfe werden
+    // EINMAL angelegt und danach nur noch beschriftet, ein- und
+    // ausgeblendet -- `wlib` gibt Widgetnummern nicht zurueck, und
+    // eine Leiste, die bei jedem Ordnerwechsel neue anlegt, waere nach
+    // MAXWD Schritten am Ende. Dahinter liegt das Textfeld; genau
+    // eines von beiden ist sichtbar (Strg+L schaltet um).
+    c_krume = wlib.box_h(w, rand, y_krume, innen, ch, 0, wlibc.space(0))
+    let _kn: u64 = exporte.krume_bauen((&pfad[0 as usize]) as u64)
+    var ki: u64 = 0
+    while ki < 12 {
+        wlib.size(0, ch)
+        krumeb[(ki) as usize] = wlib.button(exporte.krume_text(ki))
+        ki = ki + 1
+    }
+    wlib.size(0, ch)
+    let fpfad: u64 = wlib.entry((&pfad[0 as usize]) as u64, 126)
+    a_pfad = fpfad
+    wlib.box_end()
+
+    // DIE SEITENLEISTE: erst die Orte (Start, Zuhause, Dokumente,
+    // Bilder, Downloads, Papierkorb, Netz und die Datentraeger aus
+    // SYS_MNTSTAT), darunter der Baum des aktuellen Ortes.
+    c_seite = wlib.box_v(w, rand, y_inhalt, b_baum, h_inhalt, 0, luft)
+    let _on: u64 = exporte.orte_bauen()
+    wlib.size(b_baum, g_horte)
+    let orte: u64 = wlib.list(exporte.orte_ptr(), 12)
+    a_orte = orte
+    wlib.row_icons(orte, exporte.orte_symbole())
+    // Ein Ort ist ein Sprung und keine Auswahl: EIN Klick genuegt.
+    wlib.list_einklick(orte, true)
+    wlib.size(b_baum, g_hbaum)
     let baum: u64 = wlib.list((&bblob[0 as usize]) as u64, 12)
+    wlib.box_end()
+
+    c_inh = wlib.box_h(w, rand + b_baum + luft, y_inhalt, g_binh,
+        h_inhalt, 0, luft)
     wlib.size(0, h_inhalt)
     let tab: u64 = wlib.table((&tblob[0 as usize]) as u64, 12, 4,
         (&spalten[0 as usize]) as u64)
@@ -995,12 +1934,26 @@ fn u_start(args: u64) -> u64 {
     // into a folder cannot leave the icons behind.
     wlib.row_icons(tab, (&symbole[0 as usize]) as u64)
     wlib.row_icons(baum, (&bsymbole[0 as usize]) as u64)
+    // Die Symbolansicht liegt im selben Kasten und ist verborgen,
+    // solange die Liste gilt (Menue Ansicht -> Symbole).
+    wlib.size(0, h_inhalt)
+    let symliste: u64 = wlib.list((&symblob[0 as usize]) as u64, 12)
+    a_sym = symliste
+    wlib.row_icons(symliste, (&symicons[0 as usize]) as u64)
+    wlib.show(symliste, false)
     wlib.box_end()
 
-    wlib.box_v(w, rand, y_stat, innen, sth, 0, 0)
+    c_stat = wlib.box_v(w, rand, y_stat, innen, sth, 0, 0)
     wlib.size(0, sth)
     let stat: u64 = wlib.label((&lauf[0 as usize]) as u64)
     wlib.box_end()
+
+    // Was beim Groessenwechsel mitwachsen muss, merkt sich `anordnen`
+    // (Beleg 18-maximiert.png).
+    a_baum = baum
+    a_tab = tab
+    letzte_w = bw
+    letzte_h = bh
 
     hist_push((&pfad[0 as usize]) as u64)
     neu_lesen(baum, tab, stat, fpfad)
@@ -1017,6 +1970,11 @@ fn u_start(args: u64) -> u64 {
     let _nk: u64 = exporte.krume_bauen((&pfad[0 as usize]) as u64)
     expakt.melde()
     expdlg.melde()
+    // Die Orte und der Weg: beide Listen kommen aus `exporte` und
+    // stehen JETZT in der Oberflaeche, nicht nur in einer Meldung.
+    orte_anzeigen()
+    krume_anzeigen()
+    wlib.draw_all()
     say_rects(mb, bzur, bvor, bauf, fpfad, baum, tab, stat)
     say_rect(bstart)
 
@@ -1025,25 +1983,69 @@ fn u_start(args: u64) -> u64 {
                         // 5 = endgueltig loeschen
     var runden: u64 = 0
     var tasten: u64 = wlib.key_seq()
-    while wlib.alive() && runden < 4000000 {
+    var rahmen_zahl: u64 = wlib.sel_rahmen()
+    // RUNDE EXPLORER-2, gemessen am 09.09.2026: DIE OBERGRENZE WAR ZU
+    // KLEIN. Hier stand 4 000 000. Ein Durchlauf dieser Schleife ist im
+    // Leerlauf ein `SYS_YIELD` -- unter TCG rund 25 Mikrosekunden --,
+    // also war das Fenster nach ungefaehr zwei Minuten tot: es nahm
+    // keinen Klick mehr an und malte nach dem Maximieren nichts mehr.
+    // Genau das zeigte 18-maximiert.png der ersten Runde, und es sah
+    // aus wie ein Fehler im Neuzeichnen. Die Grenze bleibt (eine
+    // Schleife ohne Ausgang ist im Selbsttest nicht zu gebrauchen), sie
+    // steht jetzt aber bei vier Milliarden -- rund einem Tag Leerlauf.
+    while wlib.alive() && runden < 4000000000 {
         runden = runden + 1
         let id: u64 = wlib.step()
+        // HAT SICH DIE FENSTERGROESSE GEAENDERT? Dann wird die Seite neu
+        // aufgeteilt. `wlib.step` traegt das Ereignis EV_RESIZE in
+        // `win_w/win_h` ein und ordnet die Kaesten an, die mitwachsen
+        // duerfen -- die vier dieser Seite haben gerechnete Masse und
+        // muessen mit den NEUEN Innenmassen erneut gesetzt werden,
+        // sonst bleibt nach dem Maximieren alles auf 660x430 stehen
+        // (Befund 18-maximiert.png: Inhaltsflaeche leer).
+        if wlib.win_w(w) != letzte_w || wlib.win_h(w) != letzte_h {
+            anordnen(w)
+        }
+        // EIN MENUE, DAS MIT DER FLUCHTTASTE ZUGEHT, MELDET SICH NICHT.
+        // Gemessen: `wlib.step` faengt die Absage (`idx == 0xFFFF`) ab
+        // und gibt gar kein Ereignis zurueck -- `offen` blieb also auf
+        // der Nummer des zuletzt aufgeklappten Menues stehen, und weil
+        // der Tastenblock nur bei `offen == 0` greift, tat danach KEINE
+        // Taste mehr etwas (im Lauf: nach Alt+Eingabe kein F2, kein
+        // Strg+L). Ist kein Menuefenster mehr da, ist auch keines offen.
+        if offen != 0 && wlib.menu_win() >= wlib.MAXWN {
+            offen = 0
+        }
+        // DER MAUSRAHMEN MELDET SICH (Pflichtpunkt 3). `wlib` zaehlt
+        // jede Ziehbewegung, die eine Auswahl gesetzt hat; aendert sich
+        // die Zahl, sagt der Dateimanager, wie viele Zeilen jetzt
+        // markiert sind -- damit die Abnahme das Ziehen MESSEN kann und
+        // nicht ein Standbild deuten muss.
+        if wlib.sel_rahmen() != rahmen_zahl {
+            rahmen_zahl = wlib.sel_rahmen()
+            sag_auswahl(tab)
+        }
         // ENTF UND UMSCHALT+ENTF. Eine Taste, die kein Widget
         // verbraucht hat, meldet wlib ueber `key_last`; der Zaehler
         // daneben unterscheidet zweimal Entf von einmal.
         if wlib.key_seq() != tasten {
             tasten = wlib.key_seq()
             let taste: u64 = wlib.key_last()
-            if vmodus == 0 && wlib.value(tab) < m_anzahl()
-                && wlib.dlg_state() == 0 {
-                if taste == wlib.KEY_DEL {
-                    vollziehen(3, tab, baum, stat, fpfad)
-                } else if taste == wlib.KEY_SDEL {
-                    ulib.strncpy((&dlgpuffer[0 as usize]) as u64,
-                        m_name(m_ord(wlib.value(tab))), 60)
-                    wlib.dlg_ask(msg.get((&k_rename[0 as usize]) as u64),
-                        msg.get((&k_del[0 as usize]) as u64))
-                    wartet = 5
+            // RUNDE EXPLORER-2, Pflichtpunkt 7: DER GANZE KUERZELSATZ.
+            // Bis hierher standen hier zwei Tasten (Entf und
+            // Umschalt+Entf); alles andere -- Strg+C/X/V/A/Z, F2, F5,
+            // Alt+Eingabe, die Alt-Pfeile, Strg+H/N/F/L -- war
+            // gedruckt und tat nichts. `taste_block` gibt zurueck,
+            // welches Menue aufgeklappt und worauf ein Dialog wartet.
+            if vmodus == 0 && wlib.dlg_state() == 0 && offen == 0 {
+                if taste == T_STRG_L {
+                    krume_umschalten(fpfad)
+                } else {
+                    let r: u64 = taste_block(taste, baum, tab, stat, fpfad)
+                    wartet = r & 255
+                    if (r >> 8) != 0 {
+                        offen = r >> 8
+                    }
                 }
             }
         }
@@ -1073,14 +2075,21 @@ fn u_start(args: u64) -> u64 {
                     }
                 } else if id == bneu {
                     // Aktualisieren: dasselbe wie F5, und derselbe Weg.
+                    orte_anzeigen()
                     neu_lesen(baum, tab, stat, fpfad)
+                } else {
+                    // Ein Glied der Brosamenleiste? Dann dorthin.
+                    let _kk: bool = krume_klick(id, baum, tab, stat, fpfad)
                 }
             } else if kind == wlib.K_ENTRY && id == fpfad {
                 hist_push((&pfad[0 as usize]) as u64)
                 neu_lesen(baum, tab, stat, fpfad)
             } else if kind == wlib.K_LIST {
-                // Doppelklick oder Eingabetaste
-                if id == tab {
+                // Doppelklick oder Eingabetaste -- und bei der
+                // Ortsliste der einfache Klick (`list_einklick`).
+                if id == a_orte {
+                    ort_gehen(idx, baum, tab, stat, fpfad)
+                } else if id == tab {
                     // ============================ RUNDE SYSTEMBUS
                     //
                     // WAS ANGEFASST WIRD, LIEGT AUF DEM ZIEHPLATZ. Der
@@ -1105,15 +2114,18 @@ fn u_start(args: u64) -> u64 {
                     sortby = idx
                     sortrev = 0
                 }
-                sortiere()
-                baue_tabelle()
-                baue_baum()
-                wlib.set_text(tab, (&tblob[0 as usize]) as u64)
-                wlib.set_text(baum, (&bblob[0 as usize]) as u64)
+                // DER TEXT KOMMT AUS DEM MODELL, DAS GERADE GILT.
+                // Hier stand `&tblob` -- der Block des kleinen
+                // Sicherungsmodells. Im Normalfall fuellt ihn niemand:
+                // die Tabelle bekam nach einem Klick auf den
+                // Spaltenkopf denselben (alten) Text zurueck, und die
+                // Sortierung war unsichtbar (16/17-sortiert-*.png).
+                ansicht_frisch(baum, tab)
                 say((&s_op[0 as usize]) as u64)
                 kv((&sw[0 as usize]) as u64, sortby)
                 kv((&sh[0 as usize]) as u64, sortrev)
                 ulib.nl()
+                sag_sortierung()
             } else if kind == wlib.K_SCROLL {
                 // rechte Taste auf der Tabelle
                 if id == tab {
@@ -1122,29 +2134,61 @@ fn u_start(args: u64) -> u64 {
                     // ein Eintrag in einer Textdatei. Also ein anderes
                     // Menue, statt Punkte anzubieten, die nicht gehen.
                     if vmodus != 0 {
+                        let tb: u64 = msg.get((&k_t_popb[0 as usize]) as u64)
                         wlib.menu_open(id, wlibc.mouse_x(), wlibc.mouse_y(),
-                            msg.get((&k_t_popb[0 as usize]) as u64), 2)
+                            tb, eintraege(tb))
                         say_menurect()
                         offen = 4
                     } else {
+                        // VIERZEHN EINTRAEGE, und alle vierzehn sind
+                        // anzuklicken: `explorer.context` hat sie, und
+                        // die feste 7 hier hat die Haelfte davon
+                        // verschluckt (31-kontextmenue.png).
+                        let tc: u64 = msg.get((&k_ctx[0 as usize]) as u64)
                         wlib.menu_open(id, wlibc.mouse_x(), wlibc.mouse_y(),
-                            msg.get((&k_ctx[0 as usize]) as u64), 7)
+                            tc, eintraege(tc))
                         say_menurect()
                         offen = 1
                     }
+                } else if id == baum {
+                    // Rechts auf die Baumseite: der Sicherungspunkt.
+                    // Er hat hier seinen Platz, weil "hierhin sichern"
+                    // sich auf einen ORT bezieht und nicht auf eine
+                    // Datei -- und weil `explorer.context` keinen
+                    // Eintrag dafuer hat.
+                    let tp2: u64 = msg.get((&k_t_pop[0 as usize]) as u64)
+                    wlib.menu_open(id, wlibc.mouse_x(), wlibc.mouse_y(),
+                        tp2, eintraege(tp2))
+                    say_menurect()
+                    offen = 11
                 }
             } else if kind == wlib.K_MENUBAR {
                 if idx >= 0x1000 {
+                    // RUNDE EXPLORER-2: VIER MENUES STATT ZWEI.
+                    //
+                    // Hier standen zwei Zweige und zweimal die Zahl 3:
+                    // "Bearbeiten" und "Gehe zu" klappten die
+                    // Ansichtsliste auf, und von den sechs Eintraegen
+                    // in `explorer.menu.file` waren drei zu sehen. Die
+                    // Zahl kommt jetzt aus dem Katalog (`eintraege`),
+                    // die Stelle aus der Breite der Beschriftungen --
+                    // ein Menue soll unter SEINEM Wort haengen.
                     let m: u64 = idx - 0x1000
-                    if m == 0 {
-                        wlib.menu_open(id, bx + 10, by + 22 + 30,
-                            msg.get((&k_mfile[0 as usize]) as u64), 3)
-                        offen = 2
-                    } else {
-                        wlib.menu_open(id, bx + 70, by + 22 + 30,
-                            msg.get((&k_mview[0 as usize]) as u64), 3)
+                    var mtxt: u64 = msg.get((&k_mfile[0 as usize]) as u64)
+                    offen = 2
+                    if m == 1 {
+                        mtxt = msg.get((&k_medit[0 as usize]) as u64)
+                        offen = 6
+                    } else if m == 2 {
+                        mtxt = msg.get((&k_mview[0 as usize]) as u64)
                         offen = 3
+                    } else if m == 3 {
+                        mtxt = msg.get((&k_mgo[0 as usize]) as u64)
+                        offen = 7
                     }
+                    wlib.menu_open(id, bx + wlib.menubar_x(mb, m),
+                        by + 22 + wlib.rect_y(mb) + wlib.rect_h(mb),
+                        mtxt, eintraege(mtxt))
                     // RUNDE OBERFLAECHE: AUCH DIESES MENUE MELDET SICH.
                     //
                     // `say_menurect` stand bis hierher nur an den zwei
@@ -1158,21 +2202,13 @@ fn u_start(args: u64) -> u64 {
                     // selbst sagt.
                     say_menurect()
                 } else if idx != 0xFFFF {
-                    // ROUND NETVIEW: "Netzzugriff" is the one entry that
-                    // opens a SECOND menu instead of doing something.
-                    // The four views are not a dialogue and not a
-                    // settings page -- they are four words, and a menu
-                    // is what four words are.
-                    if offen == 1 && idx == 4 {
-                        wlib.menu_open(id, wlibc.mouse_x(),
-                            wlibc.mouse_y(),
-                            (&t_views[0 as usize]) as u64, 4)
-                        offen = 4
-                    } else {
-                        wartet = menue_wahl(offen, idx, tab, baum, stat,
-                            fpfad)
-                        offen = 0
-                    }
+                    // Was der Punkt bedeutet, entscheidet EINE Stelle
+                    // (`menue_wahl`); sie gibt zurueck, welches Menue
+                    // danach offen ist und worauf ein Dialog wartet.
+                    let mr: u64 = menue_wahl(offen, idx, tab, baum, stat,
+                        fpfad)
+                    wartet = mr & 255
+                    offen = mr >> 8
                 } else {
                     offen = 0
                 }
@@ -1188,11 +2224,22 @@ fn u_start(args: u64) -> u64 {
             dlg_gemeldet = false
         }
         if wlib.dlg_state() > 1 {
-            if wlib.dlg_state() == 2 {
-                vollziehen(wartet, tab, baum, stat, fpfad)
-            }
+            // ERST SCHLIESSEN, DANN TUN -- und das ist kein Geschmack,
+            // sondern Pflichtpunkt 8. Solange der alte Dialog offen
+            // ist, gibt `wlib` fuer JEDEN weiteren MAXWN zurueck (ein
+            // Fenster, ein Dialog); das Hinweisfenster nach einem
+            // Fehlschlag und der Konfliktdialog erschienen also genau
+            // an der Stelle nie, an der etwas schiefgehen kann. Der
+            // eingetippte Text ueberlebt das Schliessen: `dlgbuf` in
+            // wlib ist statisch und wird erst vom naechsten Dialog
+            // ueberschrieben.
+            let bestaetigt: bool = wlib.dlg_state() == 2
+            let was: u64 = wartet
             wartet = 0
             wlib.dlg_close()
+            if bestaetigt {
+                wartet = vollziehen(was, tab, baum, stat, fpfad)
+            }
             wlib.draw_all()
         }
     }
@@ -1212,6 +2259,50 @@ fn launcher_open() {
         0, 0)
     say((&s_go[0 as usize]) as u64)
     ulib.sayn(pid)
+    ulib.nl()
+}
+
+// RUNDE EXPLORER-2, Pflichtpunkt 5: DER BEFUND ZUR ZEIT-SPALTE.
+//
+// Die Spalte zeigte "--", und die Frage war, an welcher der drei
+// Stellen es haengt: an `expmodell.tabelle_bauen` (schreibt es die
+// Zeichenkette ueberhaupt in die dritte Spalte?), an `zeit_text`
+// (rechnet es die Ortszeit?) oder an `stat` selbst. Gemessen: die
+// ersten beiden sind in Ordnung -- `tabelle_bauen` setzt `zeit_text`
+// zwischen das zweite und dritte Tabulatorzeichen. Null kommt aus dem
+// ABBILD: `mkfs.py` legt ohne `--v3` eine Platte der Fassung 2 an, und
+// `fs.inode_mtime` gibt dort ausdruecklich 0 zurueck (kernel/fs.fi:707).
+// Darum sagt diese Zeile bei jedem Verzeichniswechsel, wie viele der
+// Eintraege eine echte Zeit haben und welche die erste ist -- damit die
+// Abnahme "--" nicht mit einem Fehler im Dateimanager verwechselt.
+fn melde_zeit() {
+    var s_z: [u8; 16] = "explorer: zeit \0"
+    var s_m: [u8; 7] = "mtime=\0"
+    var s_e: [u8; 5] = "mit=\0"
+    var s_v: [u8; 5] = "von=\0"
+    var s_o: [u8; 7] = "tzoff=\0"
+    if vmodus != 0 {
+        return
+    }
+    var mit: u64 = 0
+    var erste: u64 = 0
+    var i: u64 = 0
+    let n: u64 = m_anzahl()
+    while i < n {
+        let t: u64 = expmodell.mtime_at(expmodell.ord_at(i))
+        if t != 0 {
+            mit = mit + 1
+            if erste == 0 {
+                erste = t
+            }
+        }
+        i = i + 1
+    }
+    say((&s_z[0 as usize]) as u64)
+    kv((&s_m[0 as usize]) as u64, erste)
+    kv((&s_e[0 as usize]) as u64, mit)
+    kv((&s_v[0 as usize]) as u64, n)
+    kv((&s_o[0 as usize]) as u64, expmodell.zeit_offset())
     ulib.nl()
 }
 
@@ -1253,11 +2344,20 @@ fn neu_lesen(baum: u64, tab: u64, stat: u64, fpfad: u64) {
     // falschen.
     wlib.sel_an(tab, (&selbits[0 as usize]) as u64, m_anzahl())
     wlib.sel_leeren(tab)
+    // Die Symbolansicht zeigt DIESELBE Ordnung wie die Tabelle; sie
+    // wird deshalb im selben Atemzug nachgezogen.
+    if a_sym < wlib.MAXWD {
+        symbolansicht_bauen()
+        wlib.set_text(a_sym, (&symblob[0 as usize]) as u64)
+        wlib.row_icons(a_sym, (&symicons[0 as usize]) as u64)
+    }
+    krume_anzeigen()
     say((&s_cd[0 as usize]) as u64)
     say((&pfad[0 as usize]) as u64)
     say((&s_n[0 as usize]) as u64)
     ulib.sayn(m_anzahl())
     ulib.nl()
+    melde_zeit()
 }
 
 // RUNDE SYSTEMBUS: den vollen Pfad der Zeile auf den Ziehplatz UND in
@@ -1269,7 +2369,11 @@ fn ziehen(zeile: u64) {
         return
     }
     let e: u64 = m_ord(zeile)
-    let voll: u64 = join((&pfad[0 as usize]) as u64, nptr(e))
+    // NICHT `nptr(e)`: das ist der Name aus dem KLEINEN Modell dieser
+    // Datei (Sicherungsansicht). Im Normalfall kommt der Eintrag aus
+    // `expmodell`, und `nptr` zeigt dann auf einen leeren Platz --
+    // gezogen und kopiert wurde bis hier ein Pfad ohne Dateinamen.
+    let voll: u64 = join((&pfad[0 as usize]) as u64, m_name(e))
     let n: u64 = ulib.length(voll)
     let _d: u64 = wlib.drag_put(wlib.CT_PATH | wlib.CT_TEXT, voll, n)
     let _c: u64 = wlib.clip_put_typ(wlib.CT_PATH | wlib.CT_TEXT, voll, n)
@@ -1285,11 +2389,21 @@ fn oeffnen(zeile: u64, baum: u64, tab: u64, stat: u64, fpfad: u64,
         return
     }
     let e: u64 = m_ord(zeile)
-    let name: u64 = nptr(e)
+    // RUNDE EXPLORER-2, Befund 15-unterordner.png: DER DOPPELKLICK
+    // GING INS LEERE.
+    //
+    // Hier stand `nptr(e)` und weiter unten zweimal `art[e]` -- beides
+    // greift in die kleinen Felder DIESER Datei, die nur im
+    // Sicherungsmodus gefuellt sind. Ein echtes Verzeichnis kommt seit
+    // dieser Runde aus `expmodell`; dort war `art[e]` immer 0, der
+    // Zweig "ist ein Ordner" wurde nie genommen, und der Pfad blieb
+    // auf /data stehen. Beide Zugriffe gehen jetzt durch die Adapter
+    // `m_name`/`m_art`, die wissen, welches Modell gerade gilt.
+    let name: u64 = m_name(e)
     // IN EINER SICHERUNG: hineingehen heisst tiefer in den
     // Schnappschuss, nicht auf die Platte.
     if vmodus == 2 {
-        if art[(e) as usize] != 0 {
+        if m_art(e) != 0 {
             var sl2: [u8; 2] = "/\0"
             ulib.strcat((&vunter[0 as usize]) as u64,
                 (&sl2[0 as usize]) as u64)
@@ -1308,7 +2422,7 @@ fn oeffnen(zeile: u64, baum: u64, tab: u64, stat: u64, fpfad: u64,
         neu_lesen(baum, tab, stat, fpfad)
         return
     }
-    if art[(e) as usize] != 0 {
+    if m_art(e) != 0 {
         let voll: u64 = join((&pfad[0 as usize]) as u64, name)
         ulib.strncpy((&pfad[0 as usize]) as u64, voll, 126)
         // EIN SICHERUNGSSPEICHER SIEHT AUS WIE EIN ORDNER UND IST
@@ -1609,14 +2723,22 @@ fn baum_gehen(zeile: u64, baum: u64, tab: u64, stat: u64, fpfad: u64) {
         return
     }
     // Zeile n zeigt auf das n-te Verzeichnis in der Folge.
+    //
+    // DURCH DIE ADAPTER, NICHT AN IHNEN VORBEI. Hier stand `art[e]` und
+    // `nptr(e)` -- die Felder des KLEINEN Modells, das nur im
+    // Sicherungsmodus gefuellt ist. Im Normalfall (`vmodus 0`) sind sie
+    // leer: `art[e]` war immer 0, also fand die Schleife kein einziges
+    // Verzeichnis, und ein Klick auf "bilder" im Baum liess die Tabelle
+    // stehen (Befund 32-baum-navigation.png). `m_art`/`m_name` fragen
+    // das Modell, das gerade gilt.
     var gesehen: u64 = 0
     var i: u64 = 0
     while i < m_anzahl() {
         let e: u64 = m_ord(i)
-        if art[(e) as usize] != 0 {
+        if m_art(e) != 0 {
             gesehen = gesehen + 1
             if gesehen == zeile {
-                let voll: u64 = join((&pfad[0 as usize]) as u64, nptr(e))
+                let voll: u64 = join((&pfad[0 as usize]) as u64, m_name(e))
                 ulib.strncpy((&pfad[0 as usize]) as u64, voll, 126)
                 hist_push((&pfad[0 as usize]) as u64)
                 neu_lesen(baum, tab, stat, fpfad)
@@ -1669,71 +2791,116 @@ fn zip_starten(voll: u64, packen: bool, baum: u64, tab: u64, stat: u64,
     neu_lesen(baum, tab, stat, fpfad)
 }
 
+// ================================ RUNDE EXPLORER-2: DIE MENUEPUNKTE
+//
+// EINE NUMMER JE MENUE, und jede Nummer genau einmal vergeben. Vorher
+// stand `if welches == 4` ZWEIMAL in dieser Funktion: der zweite
+// Zweig -- der Netzzugriff -- war unerreichbar, weil der erste
+// (Sicherung zurueckholen) ihn abfing. Die Tafel steht hier, damit
+// eine neue Nummer nicht wieder eine alte trifft:
+//
+//    1  Kontextmenue der Tabelle   `explorer.context`      14 Zeilen
+//    2  Datei                      `explorer.menu.file`     6
+//    3  Ansicht                    `explorer.menu.view`     8
+//    4  Kontextmenue IN einer Sicherung `explorer.context.restore` 2
+//    5  Netzansichten              `t_views`                4
+//    6  Bearbeiten                 `explorer.menu.edit`     5
+//    7  Gehe zu                    `explorer.menu.go`       5
+//    8  Eigenschaften (nur lesen)  `expdlg.eig_ptr`
+//    9  Konflikt                   `explorer.conflict.buttons` 4
+//   10  Oeffnen mit                `expdlg.oeffnenmit_ptr`
+//   11  Kontextmenue der Baumseite `explorer.context.backup` 5
+//
+// Rueckgabe: (offen << 8) | wartet -- dasselbe Paar wie beim
+// Tastenblock, damit die Ereignisschleife nur EINE Form kennt.
+// ================================ RUNDE EXPLORER-2, ZWEITER DURCHGANG
+//
+// EIN MENUE, EINE NUMMER -- UND JEDE NUMMER GENAU EINMAL.
+//
+// Befund vor dieser Runde: `menue_wahl` pruefte ZWEIMAL `welches == 4`.
+// Der erste Zweig war das Sicherungs-Kontextmenue, der zweite die vier
+// Netzansichten -- und weil Firn den ersten passenden Zweig nimmt, war
+// der NETVIEW-Punkt "Netzzugriff" unerreichbar. Er stand im Katalog,
+// er war anklickbar, und er tat nichts. Jetzt hat jedes Menue seine
+// eigene Nummer, und hier steht die vollstaendige Liste:
+//
+//   0  keines offen
+//   1  Kontextmenue der Tabelle    `explorer.context`        14 Zeilen
+//   2  Menue "Datei"               `explorer.menu.file`       6
+//   3  Menue "Ansicht"             `explorer.menu.view`       8
+//   4  Kontextmenue IN einer Sicherung `explorer.context.restore` 2
+//   5  die vier Netzansichten      `t_views`                  4
+//   6  Menue "Bearbeiten"          `explorer.menu.edit`       5
+//   7  Menue "Gehe zu"             `explorer.menu.go`         5
+//   8  Eigenschaften (nur Anzeige) aus `expdlg.eig_ptr`
+//   9  Konfliktdialog              `explorer.conflict.buttons` 4
+//  10  "Oeffnen mit"               aus `expdlg.oeffnenmit_ptr`
+//  11  Kontextmenue der Seitenleiste `explorer.context.backup` 5
+//
+// DIE INDIZES SIND EIN VERTRAG mit dem Katalog (PLAN.md, Abschnitt 4):
+// die Reihenfolge der Zeilen dort ist die Reihenfolge der Zweige hier.
+// Wer eine Zeile einschiebt, verschiebt eine Tat -- deshalb steht die
+// Zeile als Kommentar neben jedem Zweig.
+//
+// Rueckgabe wie beim Tastenblock: (offen << 8) | wartet.
 fn menue_wahl(welches: u64, idx: u64, tab: u64, baum: u64, stat: u64,
     fpfad: u64) -> u64 {
     if welches == 1 {
-        if idx == 5 || idx == 6 {
-            let z: u64 = wlib.value(tab)
-            if z < m_anzahl() {
-                let voll: u64 = join((&pfad[0 as usize]) as u64,
-                    m_name(m_ord(z)))
-                zip_starten(voll, idx == 5, baum, tab, stat, fpfad)
-            }
-            return 0
-        }
+        return ctx_wahl(idx, tab, baum, stat, fpfad)
+    }
+    if welches == 2 {
+        // explorer.menu.file: 0 Neuer Ordner, 1 Neue Datei,
+        // 2 Oeffnen mit, 3 Eigenschaften, 4 Aktualisieren, 5 Beenden.
         if idx == 0 {
-            var leer: [u8; 4] = "\0\0\0\0"
-            oeffnen(wlib.value(tab), baum, tab, stat, fpfad,
-                (&leer[0 as usize]) as u64)
-            return 0
-        }
-        if idx == 1 {
-            let z: u64 = wlib.value(tab)
-            if z < m_anzahl() {
-                ulib.strncpy((&dlgpuffer[0 as usize]) as u64,
-                    m_name(m_ord(z)), 120)
-                wlib.dlg_open(msg.get((&k_rename[0 as usize]) as u64),
-                    msg.get((&k_name[0 as usize]) as u64),
-                    (&dlgpuffer[0 as usize]) as u64)
-                return 1
-            }
-            return 0
-        }
-        if idx == 2 {
-            wlib.dlg_ask(msg.get((&k_rename[0 as usize]) as u64),
-                msg.get((&k_del[0 as usize]) as u64))
-            return 3
-        }
-        if idx == 3 {
-            wlib.dlg_open(msg.get((&k_newdir[0 as usize]) as u64),
+            let _d: u64 = wlib.dlg_open(
+                msg.get((&k_newdir[0 as usize]) as u64),
                 msg.get((&k_name[0 as usize]) as u64), 0)
             return 2
         }
-        // BACKUP HIERHIN SICHERN. Wohin: in das Verzeichnis, in dem man
-        // steht, oder in das ausgewaehlte, wenn eines ausgewaehlt ist --
-        // so wie man es von "hier ablegen" erwartet.
-        ulib.strncpy((&pziel[0 as usize]) as u64,
-            (&pfad[0 as usize]) as u64, 120)
-        let z2: u64 = wlib.value(tab)
-        if z2 < m_anzahl() {
-            let e2: u64 = m_ord(z2)
-            if art[(e2) as usize] != 0 {
-                ulib.strncpy((&pziel[0 as usize]) as u64,
-                    join((&pfad[0 as usize]) as u64, nptr(e2)), 120)
-            }
+        if idx == 1 {
+            return neue_datei_fragen()
         }
-        // LIEGT DA SCHON EIN SPEICHER, wird ohne Rueckfrage eine WEITERE
-        // Sicherung hineingelegt -- nicht ein zweiter Speicher daneben.
-        // Nur beim ERSTEN Mal wird gefragt.
-        if bstore.is_store((&pziel[0 as usize]) as u64) {
-            sichern((&pziel[0 as usize]) as u64, baum, tab, stat, fpfad)
+        if idx == 2 {
+            return oeffnenmit_zeigen(tab) << 8
+        }
+        if idx == 3 {
+            return eigenschaften_zeigen(tab, tab) << 8
+        }
+        if idx == 4 {
+            neu_lesen(baum, tab, stat, fpfad)
             return 0
         }
-        wlib.dlg_ask(msg.get((&k_t_bak[0 as usize]) as u64),
-            msg.get((&k_t_bfrage[0 as usize]) as u64))
-        return 4
+        if idx == 5 {
+            wlib.quit()
+        }
+        return 0
+    }
+    if welches == 3 {
+        // explorer.menu.view: 0 Liste, 1 Symbole, 2 Nach Name,
+        // 3 Nach Groesse, 4 Nach Zeit, 5 Nach Rechten, 6 Umgekehrt,
+        // 7 Versteckte Dateien.
+        if idx == 0 || idx == 1 {
+            // Liste oder Symbole -- `ansicht_setzen` blendet das eine
+            // Bedienelement ein und das andere aus.
+            ansicht_setzen(idx, tab, baum, stat, fpfad)
+            return 0
+        }
+        if idx >= 2 && idx <= 5 {
+            sortby = idx - 2
+            sortrev = 0
+        } else if idx == 6 {
+            sortrev = 1 - sortrev
+        } else if idx == 7 {
+            expmodell.setz_versteckt(!expmodell.versteckt())
+            neu_lesen(baum, tab, stat, fpfad)
+            return 0
+        }
+        sag_sortierung()
+        ansicht_frisch(baum, tab)
+        return 0
     }
     if welches == 4 {
+        // explorer.context.restore: 0 Oeffnen, 1 Zurueckholen.
         if idx == 0 {
             oeffnen(wlib.value(tab), baum, tab, stat, fpfad,
                 msg.get((&k_t_bak[0 as usize]) as u64))
@@ -1742,174 +2909,496 @@ fn menue_wahl(welches: u64, idx: u64, tab: u64, baum: u64, stat: u64,
         zurueckholen(baum, tab, stat, fpfad)
         return 0
     }
-    if welches == 2 {
-        if idx == 0 {
-            wlib.dlg_open(msg.get((&k_newdir[0 as usize]) as u64),
-                msg.get((&k_name[0 as usize]) as u64), 0)
-            return 2
-        }
-        if idx == 1 {
-            neu_lesen(baum, tab, stat, fpfad)
-            return 0
-        }
-        wlib.quit()
+    if welches == 5 {
+        netview_starten(idx, tab)
         return 0
     }
-    // ROUND NETVIEW: start the selected file with the chosen view. It
-    // goes through `/bin/netview`, which is the SAME mechanism the shell
-    // and the launcher use -- the file manager gets no privileged path
-    // of its own, and there is one place that knows how a view is put
-    // on a program.
-    if welches == 4 {
+    if welches == 6 {
+        // explorer.menu.edit: 0 Ausschneiden, 1 Kopieren, 2 Einfuegen,
+        // 3 Alles auswaehlen, 4 Rueckgaengig.
+        if idx == 0 || idx == 1 {
+            return ablage_tun(tab, idx == 0)
+        }
+        if idx == 2 {
+            return einfuegen_tun(tab, baum, tab, stat, fpfad)
+        }
+        if idx == 3 {
+            wlib.sel_alle(tab)
+            wlib.draw_all()
+            sag_auswahl(tab)
+            return 0
+        }
+        return rueckgaengig_tun(baum, tab, stat, fpfad)
+    }
+    if welches == 7 {
+        // explorer.menu.go: 0 Zurueck, 1 Vorwaerts, 2 Hinauf,
+        // 3 Zuhause, 4 Papierkorb.
+        return gehe_zu(idx, baum, tab, stat, fpfad)
+    }
+    if welches == 10 {
         let z: u64 = wlib.value(tab)
         if z < m_anzahl() {
-            let e: u64 = m_ord(z)
-            if art[(e) as usize] == 0 {
-                var v0: [u8; 5] = "real\0"
-                var v1: [u8; 9] = "filtered\0"
-                var v2: [u8; 6] = "faked\0"
-                var v3: [u8; 5] = "none\0"
-                var tool: [u8; 13] = "/bin/netview\0"
-                var voll2: [u8; 200] = [0 as u8; 200]
-                var argv: [u64; 3] = [0 as u64; 3]
-                ulib.strncpy((&voll2[0 as usize]) as u64,
-                    join((&pfad[0 as usize]) as u64, nptr(e)), 190)
-                var word: u64 = (&v0[0 as usize]) as u64
-                if idx == 1 {
-                    word = (&v1[0 as usize]) as u64
-                } else if idx == 2 {
-                    word = (&v2[0 as usize]) as u64
-                } else if idx == 3 {
-                    word = (&v3[0 as usize]) as u64
-                }
-                argv[0 as usize] = (&tool[0 as usize]) as u64
-                argv[1 as usize] = word
-                argv[2 as usize] = (&voll2[0 as usize]) as u64
-                var s_nv: [u8; 19] = "explorer: netview \0"
-                var s_sp2: [u8; 2] = " \0"
-                var s_pid: [u8; 8] = " pid=\0\0\0"
-                let pid: u64 = ulib.sys(ulib.SYS_EXEC,
-                    (&tool[0 as usize]) as u64,
-                    (&argv[0 as usize]) as u64, 3)
-                say((&s_nv[0 as usize]) as u64)
-                say(word)
-                say((&s_sp2[0 as usize]) as u64)
-                say((&voll2[0 as usize]) as u64)
-                say((&s_pid[0 as usize]) as u64)
-                ulib.sayn(pid)
-                ulib.nl()
+            let rc: u64 = expdlg.oeffnenmit_start(idx, voll_von(z))
+            if ulib.bad(rc) {
+                let _f: bool = fehler_zeigen(rc)
             }
         }
         return 0
     }
-    if welches == 3 {
+    if welches == 11 {
+        // explorer.context.backup: 0 Oeffnen, 1 Umbenennen, 2 Loeschen,
+        // 3 Neuer Ordner, 4 Backup hierhin sichern.
         if idx == 0 {
-            sortby = 0
-            sortrev = 0
-        } else if idx == 1 {
-            sortby = 1
-            sortrev = 0
-        } else {
-            sortrev = 1 - sortrev
+            baum_gehen(wlib.value(baum), baum, tab, stat, fpfad)
+            return 0
         }
-        sortiere()
-        baue_tabelle()
-        baue_baum()
-        wlib.set_text(tab, (&tblob[0 as usize]) as u64)
-        wlib.set_text(baum, (&bblob[0 as usize]) as u64)
-        return 0
+        if idx == 1 {
+            return umbenennen_fragen(tab)
+        }
+        if idx == 2 {
+            return loeschen_fragen(tab, false)
+        }
+        if idx == 3 {
+            let _d: u64 = wlib.dlg_open(
+                msg.get((&k_newdir[0 as usize]) as u64),
+                msg.get((&k_name[0 as usize]) as u64), 0)
+            return 2
+        }
+        return sichern_fragen(tab, baum, stat, fpfad)
     }
     return 0
 }
 
-// Der Dialog wurde bestaetigt. HIER steht die einzige Stelle, an der
-// dieser Dateimanager die Platte AENDERT -- und sie steht an einer
-// Stelle, nicht an fuenf.
-fn vollziehen(was: u64, tab: u64, baum: u64, stat: u64, fpfad: u64) {
-    var s_op: [u8; 16] = "explorer: tat \0\0"
-    var s_rc: [u8; 8] = " rc=\0\0\0\0"
-    if was == 0 {
+// DAS KONTEXTMENUE DER TABELLE, Zeile fuer Zeile aus `explorer.context`
+// (die Ordnung dort ist Vertrag, siehe PLAN.md Abschnitt 4).
+fn ctx_wahl(idx: u64, tab: u64, baum: u64, stat: u64, fpfad: u64) -> u64 {
+    if idx == 0 { // Oeffnen
+        var leer: [u8; 4] = "\0\0\0\0"
+        oeffnen(wlib.value(tab), baum, tab, stat, fpfad,
+            (&leer[0 as usize]) as u64)
+        return 0
+    }
+    if idx == 1 { // Oeffnen mit
+        return oeffnenmit_zeigen(tab) << 8
+    }
+    if idx == 2 || idx == 3 { // Ausschneiden, Kopieren
+        return ablage_tun(tab, idx == 2)
+    }
+    if idx == 4 { // Einfuegen
+        return einfuegen_tun(tab, baum, tab, stat, fpfad)
+    }
+    if idx == 5 { // Umbenennen
+        return umbenennen_fragen(tab)
+    }
+    if idx == 6 { // Loeschen (in den Papierkorb)
+        return loeschen_fragen(tab, false)
+    }
+    if idx == 7 { // Endgueltig loeschen
+        return loeschen_fragen(tab, true)
+    }
+    if idx == 8 { // Neuer Ordner
+        let _d: u64 = wlib.dlg_open(msg.get((&k_newdir[0 as usize]) as u64),
+            msg.get((&k_name[0 as usize]) as u64), 0)
+        return 2
+    }
+    if idx == 9 { // Neue Datei
+        return neue_datei_fragen()
+    }
+    if idx == 10 || idx == 11 { // Packen (ZIP), Entpacken
+        let z: u64 = wlib.value(tab)
+        if z < m_anzahl() {
+            zip_starten(voll_von(z), idx == 10, baum, tab, stat, fpfad)
+        }
+        return 0
+    }
+    if idx == 12 { // Netzzugriff -- die vier Ansichten als eigenes Menue
+        let _m: u64 = wlib.menu_open(tab, wlibc.mouse_x(), wlibc.mouse_y(),
+            (&t_views[0 as usize]) as u64, 4)
+        say_menurect()
+        return 5 << 8
+    }
+    if idx == 13 { // Eigenschaften
+        return eigenschaften_zeigen(tab, tab) << 8
+    }
+    return 0
+}
+
+// ROUND NETVIEW: start the selected file with the chosen view. It goes
+// through `/bin/netview`, which is the SAME mechanism the shell and the
+// launcher use -- the file manager gets no privileged path of its own.
+// RUNDE EXPLORER-2: dieser Zweig war unerreichbar (zweimal
+// `welches == 4`); jetzt hat er die Nummer 5 und wird vom Punkt
+// "Netzzugriff" des Kontextmenues aufgerufen.
+fn netview_starten(idx: u64, tab: u64) {
+    var v0: [u8; 5] = "real\0"
+    var v1: [u8; 9] = "filtered\0"
+    var v2: [u8; 6] = "faked\0"
+    var v3: [u8; 5] = "none\0"
+    var tool: [u8; 13] = "/bin/netview\0"
+    var voll2: [u8; 200] = [0 as u8; 200]
+    var argv: [u64; 3] = [0 as u64; 3]
+    var s_nv: [u8; 19] = "explorer: netview \0"
+    var s_sp2: [u8; 2] = " \0"
+    var s_pid: [u8; 8] = " pid=\0\0\0"
+    let z: u64 = wlib.value(tab)
+    if z >= m_anzahl() {
         return
     }
+    let e: u64 = m_ord(z)
+    if m_art(e) != 0 {
+        return
+    }
+    ulib.strncpy((&voll2[0 as usize]) as u64,
+        join((&pfad[0 as usize]) as u64, m_name(e)), 190)
+    var word: u64 = (&v0[0 as usize]) as u64
+    if idx == 1 {
+        word = (&v1[0 as usize]) as u64
+    } else if idx == 2 {
+        word = (&v2[0 as usize]) as u64
+    } else if idx == 3 {
+        word = (&v3[0 as usize]) as u64
+    }
+    argv[0 as usize] = (&tool[0 as usize]) as u64
+    argv[1 as usize] = word
+    argv[2 as usize] = (&voll2[0 as usize]) as u64
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&tool[0 as usize]) as u64,
+        (&argv[0 as usize]) as u64, 3)
+    say((&s_nv[0 as usize]) as u64)
+    say(word)
+    say((&s_sp2[0 as usize]) as u64)
+    say((&voll2[0 as usize]) as u64)
+    say((&s_pid[0 as usize]) as u64)
+    ulib.sayn(pid)
+    ulib.nl()
+}
+
+// KOPIEREN UND AUSSCHNEIDEN AUF DIE GANZE AUSWAHL (Pflichtpunkt 3).
+// `auswahl_liste` sammelt jede Zeile mit `wlib.sel_hat`; erst wenn
+// nichts markiert ist, gilt die Zeile unter dem Zeiger.
+fn ablage_tun(tab: u64, schnitt: bool) -> u64 {
+    var s_c: [u8; 16] = "explorer: clip \0"
+    var s_n: [u8; 3] = "n=\0"
+    var s_s: [u8; 9] = "schnitt=\0"
+    var s_rc: [u8; 4] = "rc=\0"
+    let n: u64 = auswahl_liste(tab)
+    if n == 0 {
+        return 0
+    }
+    let rc: u64 = expakt.kopieren_merken(schnitt)
+    var sn: u64 = 0
+    if schnitt {
+        sn = 1
+    }
+    say((&s_c[0 as usize]) as u64)
+    kv((&s_n[0 as usize]) as u64, n)
+    kv((&s_s[0 as usize]) as u64, sn)
+    kv((&s_rc[0 as usize]) as u64, rc)
+    ulib.nl()
+    let _f: bool = fehler_zeigen(rc)
+    return 0
+}
+
+fn rueckgaengig_tun(baum: u64, tab: u64, stat: u64, fpfad: u64) -> u64 {
+    var s_u: [u8; 16] = "explorer: undo \0"
+    var s_a: [u8; 5] = "art=\0"
+    var s_rc: [u8; 4] = "rc=\0"
+    let art0: u64 = expakt.undo_art()
+    let rc: u64 = expakt.rueckgaengig()
+    neu_lesen(baum, tab, stat, fpfad)
+    say((&s_u[0 as usize]) as u64)
+    kv((&s_a[0 as usize]) as u64, art0)
+    kv((&s_rc[0 as usize]) as u64, rc)
+    ulib.nl()
+    let _f: bool = fehler_zeigen(rc)
+    return 0
+}
+
+// Der Umbenennen-Dialog. Er nimmt die erste markierte Zeile -- bei
+// einer Mehrfachauswahl ist Umbenennen das eine, was sich NICHT auf
+// alle anwenden laesst, und ein Dialog je Datei waere eine Zumutung.
+fn umbenennen_fragen(tab: u64) -> u64 {
+    let z: u64 = erste_auswahl(tab)
+    if z >= m_anzahl() {
+        return 0
+    }
+    wlib.set_value(tab, z)
+    ulib.strncpy((&dlgpuffer[0 as usize]) as u64, m_name(m_ord(z)), 120)
+    let _d: u64 = wlib.dlg_open(msg.get((&k_rename[0 as usize]) as u64),
+        msg.get((&k_name[0 as usize]) as u64),
+        (&dlgpuffer[0 as usize]) as u64)
+    return 1
+}
+
+// Loeschen fragt IMMER nach, und die Frage nennt die Zahl der Stuecke,
+// die die Auswahl traegt (sie steht in `expakt.liste_zahl`).
+fn loeschen_fragen(tab: u64, endgueltig: bool) -> u64 {
+    let n: u64 = auswahl_liste(tab)
+    if n == 0 {
+        return 0
+    }
+    var frage: u64 = msg.get((&k_del[0 as usize]) as u64)
+    if endgueltig {
+        frage = msg.get((&k_delperm[0 as usize]) as u64)
+    }
+    let _d: u64 = wlib.dlg_ask(msg.get((&k_rename[0 as usize]) as u64),
+        frage)
+    if endgueltig {
+        return 5
+    }
+    return 3
+}
+
+fn neue_datei_fragen() -> u64 {
+    let _d: u64 = wlib.dlg_open(msg.get((&k_newfile[0 as usize]) as u64),
+        msg.get((&k_name[0 as usize]) as u64),
+        msg.get((&k_newfname[0 as usize]) as u64))
+    return 7
+}
+
+// "Backup hierhin sichern" -- wohin: in den Ordner, in dem man steht,
+// oder in den ausgewaehlten, wenn einer ausgewaehlt ist.
+fn sichern_fragen(tab: u64, baum: u64, stat: u64, fpfad: u64) -> u64 {
+    ulib.strncpy((&pziel[0 as usize]) as u64, (&pfad[0 as usize]) as u64,
+        120)
+    let z2: u64 = wlib.value(tab)
+    if z2 < m_anzahl() {
+        let e2: u64 = m_ord(z2)
+        // UEBER DIE ADAPTER: `art[]`/`nptr()` sind die Felder des
+        // kleinen Sicherungsmodells und im Normalfall leer.
+        if m_art(e2) != 0 {
+            ulib.strncpy((&pziel[0 as usize]) as u64,
+                join((&pfad[0 as usize]) as u64, m_name(e2)), 120)
+        }
+    }
+    if bstore.is_store((&pziel[0 as usize]) as u64) {
+        // Liegt da schon ein Speicher, kommt ohne Rueckfrage eine
+        // WEITERE Sicherung hinein -- nur beim ersten Mal wird gefragt.
+        // Gesichert wird sofort: `vollziehen` laeuft nur nach einem
+        // bestaetigten Dialog, und hier wird keiner gestellt.
+        sichern((&pziel[0 as usize]) as u64, baum, tab, stat, fpfad)
+        return 0
+    }
+    let _d: u64 = wlib.dlg_ask(msg.get((&k_t_bak[0 as usize]) as u64),
+        msg.get((&k_t_bfrage[0 as usize]) as u64))
+    return 4
+}
+
+// Die erste markierte Zeile; ohne Markierung die unter dem Zeiger.
+fn erste_auswahl(tab: u64) -> u64 {
+    var z: u64 = 0
+    let ganz: u64 = m_anzahl()
+    while z < ganz {
+        if wlib.sel_hat(tab, z) {
+            return z
+        }
+        z = z + 1
+    }
+    return wlib.value(tab)
+}
+
+// Das Menue "Gehe zu". Zuhause und Papierkorb sind ORTE und keine
+// Texte: der eine kommt aus dem Dateisystem, der andere aus
+// `korb.korb_von` -- derselbe Ort, den `papierkorb` benutzt.
+fn gehe_zu(idx: u64, baum: u64, tab: u64, stat: u64, fpfad: u64) -> u64 {
+    var t_home: [u8; 8] = "/home\0\0\0"
+    var t_data: [u8; 8] = "/data\0\0\0"
+    var s_g: [u8; 18] = "explorer: gehezu \0"
+    if idx == 0 {
+        if hist_at > 1 {
+            hist_at = hist_at - 1
+            ulib.strcpy((&pfad[0 as usize]) as u64, hist_get(hist_at - 1))
+            neu_lesen(baum, tab, stat, fpfad)
+        }
+    } else if idx == 1 {
+        if hist_at < hist_n {
+            hist_at = hist_at + 1
+            ulib.strcpy((&pfad[0 as usize]) as u64, hist_get(hist_at - 1))
+            neu_lesen(baum, tab, stat, fpfad)
+        }
+    } else if idx == 2 {
+        eltern((&pfad[0 as usize]) as u64)
+        hist_push((&pfad[0 as usize]) as u64)
+        neu_lesen(baum, tab, stat, fpfad)
+    } else if idx == 3 {
+        var wohin: u64 = (&t_data[0 as usize]) as u64
+        if ulib.is_dir((&t_home[0 as usize]) as u64) {
+            wohin = (&t_home[0 as usize]) as u64
+        }
+        vmodus = 0
+        ulib.strncpy((&pfad[0 as usize]) as u64, wohin, 126)
+        hist_push((&pfad[0 as usize]) as u64)
+        neu_lesen(baum, tab, stat, fpfad)
+    } else if idx == 4 {
+        let k: u64 = korb.korb_von((&pfad[0 as usize]) as u64)
+        if k != 0 {
+            vmodus = 0
+            ulib.strncpy((&pfad[0 as usize]) as u64, k, 126)
+            hist_push((&pfad[0 as usize]) as u64)
+            neu_lesen(baum, tab, stat, fpfad)
+        }
+    }
+    say((&s_g[0 as usize]) as u64)
+    ulib.sayn(idx)
+    var sp: [u8; 2] = " \0"
+    say((&sp[0 as usize]) as u64)
+    say((&pfad[0 as usize]) as u64)
+    ulib.nl()
+    return 0
+}
+
+// "Oeffnen mit": die Programme aus /apps als Menue. Die Nummer im
+// Menue ist die Nummer in `expdlg.oeffnenmit_exec` -- eine Liste, ein
+// Index, keine zweite Tabelle.
+fn oeffnenmit_zeigen(tab: u64) -> u64 {
+    let n: u64 = expdlg.oeffnenmit_bauen()
+    if n == 0 {
+        return 0
+    }
+    wlib.set_menu_title(msg.get((&k_owtit[0 as usize]) as u64))
+    let _m: u64 = wlib.menu_open(tab, wlibc.mouse_x(), wlibc.mouse_y(),
+        expdlg.oeffnenmit_ptr(), n)
+    wlib.set_menu_title(msg.get((&k_mtitel[0 as usize]) as u64))
+    say_menurect()
+    return 10
+}
+
+// Tabelle, Baum und Symbole aus dem GERADE geltenden Modell neu
+// setzen. Hier stand dreimal `&tblob` -- der Textblock des kleinen
+// Sicherungsmodells; im Normalfall zeigte die Tabelle danach den
+// Block, den `expmodell` gar nicht fuellt, und eine Sortierung aenderte
+// sichtbar nichts (Befund 16/17-sortiert-*.png).
+fn ansicht_frisch(baum: u64, tab: u64) {
+    sortiere()
+    baue_tabelle()
+    baue_baum()
+    wlib.set_text(tab, tab_text())
+    wlib.row_icons(tab, tab_icons())
+    wlib.set_text(baum, (&bblob[0 as usize]) as u64)
+    wlib.draw_all()
+}
+
+fn sag_sortierung() {
+    var s_s: [u8; 17] = "explorer: sort \0\0"
+    var s_sp: [u8; 8] = "spalte=\0"
+    var s_r: [u8; 5] = "rev=\0"
+    say((&s_s[0 as usize]) as u64)
+    kv((&s_sp[0 as usize]) as u64, sortby)
+    kv((&s_r[0 as usize]) as u64, sortrev)
+    ulib.nl()
+}
+
+fn sag_auswahl(tab: u64) {
+    var s_sel: [u8; 15] = "explorer: sel \0"
+    var s_n: [u8; 3] = "n=\0"
+    var s_a: [u8; 7] = "anker=\0"
+    var s_r: [u8; 8] = "rahmen=\0"
+    say((&s_sel[0 as usize]) as u64)
+    kv((&s_n[0 as usize]) as u64, wlib.sel_zahl(tab))
+    kv((&s_a[0 as usize]) as u64, wlib.sel_anker_von(tab))
+    kv((&s_r[0 as usize]) as u64, wlib.sel_rahmen())
+    ulib.nl()
+}
+
+// Der Dialog wurde bestaetigt. HIER steht die einzige Stelle, an der
+// dieser Dateimanager die Platte AENDERT -- und sie steht an einer
+// Stelle, nicht an fuenf. Jede Tat geht durch `expakt`, jede
+// Rueckmeldung ungleich null durch `fehler_zeigen`.
+// Rueckgabe: worauf danach gewartet wird (0 = auf nichts). Ein
+// Konflikt macht einen zweiten Dialog auf, und die Schleife muss davon
+// wissen -- sonst laege seine Antwort auf keinem Tisch.
+fn vollziehen(was: u64, tab: u64, baum: u64, stat: u64,
+    fpfad: u64) -> u64 {
+    var s_op: [u8; 16] = "explorer: tat \0\0"
+    var s_rc: [u8; 8] = " rc=\0\0\0\0"
+    var s_n: [u8; 4] = " n=\0"
+    var danach: u64 = 0
+    if was == 0 {
+        return 0
+    }
     var rc: u64 = 0
+    var getan: u64 = 0
     if was == 4 {
         sichern((&pziel[0 as usize]) as u64, baum, tab, stat, fpfad)
-        return
+        return 0
+    }
+    if was == 9 {
+        // DIE ANTWORT AUF DEN KONFLIKTDIALOG. Welcher Knopf es war,
+        // sagt `wlib.dlg_wahl_at` -- 0..3 wie im Katalog. Die Tat, die
+        // stehengeblieben ist, wird damit wiederholt.
+        return konflikt_antwort(wlib.dlg_wahl_at(), tab, baum, tab, stat,
+            fpfad)
     }
     if was == 2 {
         let voll: u64 = join((&pfad[0 as usize]) as u64, wlib.dlg_text())
         rc = io.make_dir(voll)
-    } else if was == 3 {
-        // RUNDE ALLTAG: LOESCHEN HEISST IN DEN PAPIERKORB.
-        //
-        // Hier stand `io.unlink`, und damit war jeder Fehlgriff in
-        // diesem Fenster endgueltig. Er ist es nicht mehr: die Datei
-        // wandert nach <datentraeger>/.papierkorb, und `papierkorb`
-        // holt sie zurueck. WER ES WIRKLICH MEINT, nimmt
-        // Umschalt+Entf -- das ist `was == 5` und geht weiterhin
-        // geradewegs an `unlink` vorbei am Korb.
-        let z: u64 = wlib.value(tab)
-        if z < m_anzahl() {
-            let voll: u64 = join((&pfad[0 as usize]) as u64,
-                m_name(m_ord(z)))
-            if korb.hinein(voll) == 0 {
-                rc = 1
-            }
+        if ulib.bad(rc) {
+            getan = 0
+        } else {
+            rc = 0
+            getan = 1
         }
-    } else if was == 5 {
-        let z5: u64 = wlib.value(tab)
-        if z5 < m_anzahl() {
-            let voll5: u64 = join((&pfad[0 as usize]) as u64,
-                m_name(m_ord(z5)))
-            if !korb.loesche_rekursiv(voll5, 0) {
-                rc = 1
+    } else if was == 7 {
+        // NEUE DATEI (Pflichtpunkt 10) -- leer angelegt von `expdlg`.
+        let voll: u64 = join((&pfad[0 as usize]) as u64, wlib.dlg_text())
+        rc = expdlg.neue_datei(voll, 0)
+        if rc == 0 {
+            getan = 1
+        }
+    } else if was == 6 {
+        // STRG+F: der Filter. Der Puffer liegt statisch, weil
+        // `expmodell` den Zeiger behaelt.
+        ulib.strncpy((&fbuf[0 as usize]) as u64, wlib.dlg_text(), 60)
+        if (fbuf[(0) as usize]) == 0 as u8 {
+            expmodell.setz_filter(0)
+        } else {
+            expmodell.setz_filter((&fbuf[0 as usize]) as u64)
+        }
+    } else if was == 3 || was == 5 {
+        // LOESCHEN, UND ZWAR DIE GANZE AUSWAHL. Die Liste hat
+        // `auswahl_liste` gefuellt, als der Dialog aufging -- was
+        // danach angeklickt wird, aendert sie nicht mehr.
+        var i: u64 = 0
+        while i < expakt.liste_zahl() {
+            var r2: u64 = 0
+            if was == 3 {
+                r2 = expakt.in_korb(expakt.liste_at(i))
+            } else {
+                r2 = expakt.endgueltig(expakt.liste_at(i))
             }
+            if r2 != 0 {
+                rc = r2
+            } else {
+                getan = getan + 1
+            }
+            i = i + 1
         }
     } else if was == 1 {
-        let z: u64 = wlib.value(tab)
+        // DIE ERSTE MARKIERTE Zeile, nicht die unter dem Zeiger:
+        // Umbenennen ist das eine, was sich nicht auf zwanzig Stuecke
+        // anwenden laesst -- aber es muss die Datei treffen, die der
+        // Benutzer markiert hat (Pflichtpunkt 3).
+        let z: u64 = erste_auswahl(tab)
         if z < m_anzahl() {
-            rc = umbenennen(m_name(m_ord(z)), wlib.dlg_text())
+            danach = umbenennen_tun(tab, voll_von(z), wlib.dlg_text(),
+                baum, tab, stat, fpfad)
+            rc = expakt.letzter_rc()
+            if rc == 0 {
+                getan = 1
+            }
         }
     }
     say((&s_op[0 as usize]) as u64)
     ulib.sayn(was)
+    say((&s_n[0 as usize]) as u64)
+    ulib.sayn(getan)
     say((&s_rc[0 as usize]) as u64)
     ulib.sayn(rc)
     ulib.nl()
     neu_lesen(baum, tab, stat, fpfad)
-}
-
-// UMBENENNEN IST KOPIEREN UND LOESCHEN, weil dieser Kernel kein
-// `rename` hat. Steht im Kopf dieser Datei, steht seit Runde K11 in
-// `kernel/user/mv.fi`, und steht hier noch einmal an der Stelle, an
-// der es passiert.
-fn umbenennen(alt: u64, neu: u64) -> u64 {
-    var apfad: [u8; 200] = [0 as u8; 200]
-    var puffer: [u8; 512] = [0 as u8; 512]
-    let av: u64 = join((&pfad[0 as usize]) as u64, alt)
-    ulib.strncpy((&apfad[0 as usize]) as u64, av, 190)
-    let nv: u64 = join((&pfad[0 as usize]) as u64, neu)
-    let q: u64 = io.open((&apfad[0 as usize]) as u64, 0)
-    if ulib.bad(q) {
-        return q
+    if rc != 0 && danach == 0 {
+        let _f: bool = fehler_zeigen(rc)
     }
-    let z: u64 = io.create(nv)
-    if ulib.bad(z) {
-        io.close(q)
-        return z
-    }
-    var weiter: bool = true
-    while weiter {
-        let n: u64 = io.read(q, (&puffer[0 as usize]) as u64, 512)
-        if ulib.bad(n) || n == 0 {
-            weiter = false
-        } else {
-            io.write_all(z, (&puffer[0 as usize]) as u64, n)
-        }
-    }
-    io.close(q)
-    io.close(z)
-    return io.unlink((&apfad[0 as usize]) as u64)
+    return danach
 }
 
 // Was die Anordnung ausgerechnet hat -- fuer den Testlaeufer.
@@ -1923,6 +3412,17 @@ fn say_rects(mb: u64, bzur: u64, bvor: u64, bauf: u64, fpfad: u64,
     say_rect(baum)
     say_rect(tab)
     say_rect(stat)
+    // RUNDE EXPLORER-2: die neuen Bedienelemente melden sich mit --
+    // die Ortsliste, die Symbolansicht und JEDES Glied der
+    // Brosamenleiste. Ohne das muesste ein Laeufer ihre Rechtecke aus
+    // dem Quelltext nachrechnen, und dann prueft er seinen Nachbau.
+    say_rect(a_orte)
+    say_rect(a_sym)
+    var q: u64 = 0
+    while q < krume_n {
+        say_rect(krumeb[(q) as usize])
+        q = q + 1
+    }
     var a: [u8; 16] = "explorer: rows \0"
     var sx: [u8; 4] = "x=\0\0"
     var sb: [u8; 8] = "base=\0\0\0"
