@@ -391,7 +391,12 @@ has "$U" "tiling: der Kachelbetrieb läuft" "das Programm sieht den Kachelbetrie
 has "$U" "Fenster: 2 von 48" "es nennt die Zahl der Fenster und die Obergrenze"
 has "$U" "Aufbau:  split" "es nennt den Modus des Containers"
 has "$U" "Invariante: hält" "und es laesst den Kern die Invariante NACHRECHNEN"
-has "$U" "21 tiling: Einträge gelesen" \
+# RUNDE MERGE9: die Zahl kommt aus der DATEI und steht nicht mehr im
+# Test. Runde TUERSCHLOSS hat `bind mod+tab next-window` (Alt+Tab)
+# ergaenzt -- damit sind es 22 statt 21, und die fest getippte 21 machte
+# den Abschnitt rot, obwohl Kern und Ring 3 einig waren. Abschnitt 8
+# rechnet `soll` schon so aus; hier wird dieselbe Zahl benutzt.
+has "$U" "$soll tiling: Einträge gelesen" \
     "es liest /users/osum/config/tiling.conf und schiebt sie in den Kern"
 has "$U" "mod+h  focus-left" "es liest die Belegung wieder heraus"
 has "$U" "mod+shift+l  move-right" "mit Modifikatoren"
