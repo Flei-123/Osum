@@ -43,16 +43,32 @@ def read_ppm(p):
 
 
 def blaustich(px, w, h):
-    """B-R, gewichtet ueber die sechs haeufigsten Farben (die Flaechen).
+    """B-R der GRAUFLAECHEN, gewichtet nach Flaeche.
 
     Nicht ueber das ganze Bild: Text und Symbole sind bunt und wuerden
     das Mittel verwaschen. Was hier gemessen wird, ist der Farbton der
     FLAECHEN -- und um den geht es, wenn jemand sagt "das Grau ist blau".
+
+    UND DIE AKZENTFARBE ZAEHLT NICHT MIT. Sie ist mit Absicht bunt:
+    `#8b5cf6` hat B-R = +107, `#ad84f3` (ihre helle Stufe) +70. Ein
+    Fenster mit einer markierten Zeile bekaeme dadurch einen
+    "Blaustich" von +6,6, obwohl seine drei groessten Flaechen
+    #09090b/#18181b/#27272a sind -- also +2/+3. Gemessen am
+    Dateimanager im Dunkelmodus, 2560x1440: die 3,4 Prozent Akzent
+    haben das Mittel von +2,9 auf +6,6 gehoben.
+
+    Als GRAU gilt, was in keinem Kanal weiter als GRAU_TOL vom
+    Mittelwert abweicht. Das laesst jede Rampe dieses Systems durch
+    (Slate weicht um 27 ab und ist genau das, was gefunden werden
+    soll) und schliesst nur wirklich Buntes aus.
     """
+    GRAU_TOL = 40
     c = collections.Counter()
     for k in range(0, len(px), 3):
         c[(px[k], px[k + 1], px[k + 2])] += 1
-    top = c.most_common(6)
+    grau = [(f, n) for f, n in c.most_common(40)
+            if max(f) - min(f) <= GRAU_TOL]
+    top = grau[:6] or c.most_common(6)
     ws = sum((b - r) * n for (r, g, b), n in top)
     wt = sum(n for _, n in top)
     return (ws / wt if wt else 0.0), top
