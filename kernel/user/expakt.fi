@@ -1,0 +1,483 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/expakt.fi -- RUNDE EXPLORER-2: DIE TATEN.
+//
+// Zwischenablage, Einfuegen, Umbenennen, Papierkorb, Rueckgaengig --
+// und die eine Stelle, die aus einer Fehlernummer einen KATALOG-
+// SCHLUESSEL macht. Der Dateimanager selbst soll Fenster aufmachen und
+// Zeilen malen; was eine Datei mit einer anderen tut, steht hier.
+//
+// DREI GRUENDE FUER EINE EIGENE DATEI:
+//
+//   1. `explorer.fi` ist die Oberflaeche. Eine Oberflaeche, die
+//      nebenbei rekursiv kopiert, hat beim Kopieren keine Ereignisse
+//      mehr gelesen -- und genau daran ist der Fortschrittsdialog der
+//      letzten Runde stehen geblieben.
+//   2. DIE ZWISCHENABLAGE IST EINE LISTE UND KEIN PFAD. Mehrfachauswahl
+//      heisst: n Pfade, mit "\n" getrennt, als CT_FILES auf dem Bus
+//      (`wlib.clip_put_typ`). Ein einzelner Pfad geht zusaetzlich als
+//      CT_PATH hinaus, damit der Editor und jedes andere Programm ihn
+//      weiter versteht -- derselbe Inhalt, zwei Lesarten.
+//   3. RUECKGAENGIG BRAUCHT EIN GEDAECHTNIS. Es liegt hier, neben dem,
+//      was es rueckgaengig macht, und nicht in der Zeichenschleife.
+//
+// KEIN FEHLSCHLAG IST STUMM. Jede Funktion gibt 0 oder die Nummer des
+// Kerns zurueck, `fehler_schluessel` macht daraus `explorer.err.*`, und
+// der Aufrufer macht daraus ein Fenster. Wer den Rueckgabewert
+// wegwirft, hat die Regel gebrochen, nicht diese Datei.
+
+profile kernel
+
+import ulib
+import libc.io
+import libc.errno
+import wlib
+import dateiop
+import korb
+
+export {
+    MAXLIST, MAXUNDO,
+    liste_leeren, liste_add, liste_zahl, liste_at,
+    kopieren_merken, schnitt_an, einfuegen, ablage_zahl, ablage_at,
+    umbenennen, in_korb, endgueltig,
+    rueckgaengig, undo_zahl, undo_art, undo_name,
+    konflikt_da, konflikt_pfad, konflikt_antwort,
+    K_ERSETZEN, K_UMBENENNEN, K_UEBERSPRINGEN, K_ABBRUCH,
+    fehler_schluessel, letzter_rc, getan_dateien, getan_oktette,
+    abbrechen, melde
+}
+
+// Wie viele Pfade eine Auswahl traegt. 256 * 320 = 80 KiB -- eine
+// Auswahl von 256 Stuecken ist mehr, als ein Mensch in einem Zug
+// anfasst, und das Rechteck bleibt bezahlbar.
+const MAXLIST: u64 = 256
+const PFADB: u64 = 320
+const MAXUNDO: u64 = 64
+
+// Die vier Antworten des Konfliktdialogs.
+const K_ERSETZEN: u64 = 0
+const K_UMBENENNEN: u64 = 1
+const K_UEBERSPRINGEN: u64 = 2
+const K_ABBRUCH: u64 = 3
+
+// Was `rueckgaengig` kennt.
+const U_UMBENANNT: u64 = 1
+const U_VERSCHOBEN: u64 = 2
+const U_KORB: u64 = 3
+
+static mut liste: [u8; 81920] = [0 as u8; 81920]   // MAXLIST * PFADB
+static mut n_liste: u64 = 0
+static mut ablage: [u8; 81920] = [0 as u8; 81920]
+static mut n_ablage: u64 = 0
+static mut ist_schnitt: u64 = 0
+
+static mut u_art: [u64; 64] = [0 as u64; 64]
+static mut u_id: [u64; 64] = [0 as u64; 64]
+static mut u_alt: [u8; 20480] = [0 as u8; 20480]  // MAXUNDO * PFADB
+static mut u_neu: [u8; 20480] = [0 as u8; 20480]
+static mut n_undo: u64 = 0
+
+static mut k_da: u64 = 0
+static mut k_pfad: [u8; 320] = [0 as u8; 320]
+static mut k_wahl: u64 = 0
+
+static mut rc_letzt: u64 = 0
+static mut tmp: [u8; 320] = [0 as u8; 320]
+static mut tmp2: [u8; 320] = [0 as u8; 320]
+
+static mut ks_ok: [u8; 20] = "explorer.err.other\0\0"
+static mut ks_noent: [u8; 20] = "explorer.err.noent\0\0"
+static mut ks_acces: [u8; 20] = "explorer.err.acces\0\0"
+static mut ks_exist: [u8; 20] = "explorer.err.exist\0\0"
+static mut ks_nospc: [u8; 20] = "explorer.err.nospc\0\0"
+static mut ks_isdir: [u8; 20] = "explorer.err.isdir\0\0"
+static mut ks_rofs: [u8; 20] = "explorer.err.rofs\0\0\0"
+static mut ks_busy: [u8; 20] = "explorer.err.busy\0\0\0"
+static mut ks_inval: [u8; 20] = "explorer.err.inval\0\0"
+
+static mut s_clip: [u8; 28] = "explorer: clip n=\0\0\0\0\0\0\0\0\0\0\0"
+static mut s_paste: [u8; 28] = "explorer: paste n=\0\0\0\0\0\0\0\0\0\0"
+static mut s_undo: [u8; 28] = "explorer: undo art=\0\0\0\0\0\0\0\0\0"
+static mut s_ren: [u8; 28] = "explorer: rename rc=\0\0\0\0\0\0\0\0"
+static mut s_trash: [u8; 28] = "explorer: trash rc=\0\0\0\0\0\0\0\0\0"
+static mut s_lz: [u8; 2] = " \0"
+static mut s_rc: [u8; 6] = "rc=\0\0\0"
+static mut s_n: [u8; 4] = "n=\0\0"
+
+fn p_at(feld: u64, i: u64) -> u64 {
+    return feld + i * PFADB
+}
+
+// ------------------------------------------------------- die Auswahl
+
+fn liste_leeren() {
+    n_liste = 0
+}
+
+fn liste_add(pfad: u64) -> bool {
+    if n_liste >= MAXLIST {
+        return false
+    }
+    ulib.strncpy(p_at((&liste[(0) as usize]) as u64, n_liste), pfad,
+        PFADB - 1)
+    n_liste = n_liste + 1
+    return true
+}
+
+fn liste_zahl() -> u64 {
+    return n_liste
+}
+
+fn liste_at(i: u64) -> u64 {
+    return p_at((&liste[(0) as usize]) as u64, i)
+}
+
+fn ablage_zahl() -> u64 {
+    return n_ablage
+}
+
+fn ablage_at(i: u64) -> u64 {
+    return p_at((&ablage[(0) as usize]) as u64, i)
+}
+
+fn schnitt_an() -> bool {
+    return ist_schnitt != 0
+}
+
+// Strg+C / Strg+X: die Auswahl auf den Bus. Der Text ist die Liste der
+// Pfade, mit "\n" getrennt -- CT_FILES, und bei genau einem Pfad
+// zusaetzlich CT_PATH.
+fn kopieren_merken(schnitt: bool) -> u64 {
+    var text: [u8; 4096] = [0 as u8; 4096]
+    var tp: u64 = 0
+    n_ablage = 0
+    var i: u64 = 0
+    while i < n_liste {
+        let q: u64 = liste_at(i)
+        ulib.strncpy(p_at((&ablage[(0) as usize]) as u64, n_ablage), q,
+            PFADB - 1)
+        n_ablage = n_ablage + 1
+        var k: u64 = 0
+        while (__mmio_read8((q + k) as *mut u8)) != 0 as u8 && tp < 4090 {
+            text[(tp) as usize] = __mmio_read8((q + k) as *mut u8)
+            tp = tp + 1
+            k = k + 1
+        }
+        if i + 1 < n_liste && tp < 4090 {
+            text[(tp) as usize] = 10 as u8
+            tp = tp + 1
+        }
+        i = i + 1
+    }
+    text[(tp) as usize] = 0 as u8
+    if schnitt {
+        ist_schnitt = 1
+    } else {
+        ist_schnitt = 0
+    }
+    var typen: u64 = wlib.CT_FILES
+    if n_ablage == 1 {
+        typen = wlib.CT_FILES | wlib.CT_PATH | wlib.CT_TEXT
+    }
+    let rc: u64 = wlib.clip_put_typ(typen, (&text[(0) as usize]) as u64, tp)
+    ulib.say((&s_clip[(0) as usize]) as u64)
+    ulib.sayn(n_ablage)
+    ulib.say((&s_lz[(0) as usize]) as u64)
+    ulib.say((&s_rc[(0) as usize]) as u64)
+    ulib.sayn(ist_schnitt)
+    ulib.nl()
+    rc_letzt = 0
+    if ulib.bad(rc) {
+        rc_letzt = rc
+    }
+    return rc_letzt
+}
+
+// Den letzten Namensteil eines Pfades.
+fn letzter_teil(pfad: u64) -> u64 {
+    let n: u64 = ulib.length(pfad)
+    var i: u64 = n
+    while i > 0 {
+        if (__mmio_read8((pfad + i - 1) as *mut u8)) == 47 as u8 {
+            return pfad + i
+        }
+        i = i - 1
+    }
+    return pfad
+}
+
+fn fuege(out: u64, dir: u64, name: u64) {
+    var n: u64 = 0
+    while (__mmio_read8((dir + n) as *mut u8)) != 0 as u8 && n < 250 {
+        __mmio_write8((out + n) as *mut u8,
+            __mmio_read8((dir + n) as *mut u8))
+        n = n + 1
+    }
+    if n > 0 && (__mmio_read8((out + n - 1) as *mut u8)) != 47 as u8 {
+        __mmio_write8((out + n) as *mut u8, 47 as u8)
+        n = n + 1
+    }
+    var k: u64 = 0
+    while (__mmio_read8((name + k) as *mut u8)) != 0 as u8 && n < PFADB - 2 {
+        __mmio_write8((out + n) as *mut u8,
+            __mmio_read8((name + k) as *mut u8))
+        n = n + 1
+        k = k + 1
+    }
+    __mmio_write8((out + n) as *mut u8, 0 as u8)
+}
+
+// Strg+V: die Ablage in `zielordner`. Verschieben nimmt `io.rename`,
+// solange beide Orte auf demselben Traeger liegen -- der Kern sagt
+// EXDEV, wenn nicht, und dann kopiert `dateiop` und loescht danach.
+fn einfuegen(zielordner: u64) -> u64 {
+    var fehler: u64 = 0
+    var getan: u64 = 0
+    k_da = 0
+    var i: u64 = 0
+    while i < n_ablage {
+        let q: u64 = ablage_at(i)
+        let ziel: u64 = (&tmp[(0) as usize]) as u64
+        fuege(ziel, zielordner, letzter_teil(q))
+        var rc: u64 = 0
+        if dateiop.gibt_es(ziel) {
+            // -EEXIST: der Aufrufer macht den Konfliktdialog auf. Bis
+            // seine Antwort da ist, wird NICHTS ueberschrieben.
+            k_da = 1
+            ulib.strncpy((&k_pfad[(0) as usize]) as u64, ziel, PFADB - 1)
+            rc = 0 -% errno.E_EXIST
+        } else if ist_schnitt != 0 {
+            rc = dateiop.verschiebe(q, ziel)
+            if !ulib.bad(rc) {
+                undo_push(U_VERSCHOBEN, ziel, q, 0)
+            }
+        } else if dateiop.ist_verzeichnis(q) {
+            rc = dateiop.kopiere_baum(q, ziel, 0)
+        } else {
+            rc = dateiop.kopiere(q, ziel)
+        }
+        if ulib.bad(rc) {
+            fehler = rc
+            i = n_ablage
+        } else {
+            getan = getan + 1
+            i = i + 1
+        }
+    }
+    if ist_schnitt != 0 && fehler == 0 {
+        n_ablage = 0
+        ist_schnitt = 0
+    }
+    ulib.say((&s_paste[(0) as usize]) as u64)
+    ulib.sayn(getan)
+    ulib.say((&s_lz[(0) as usize]) as u64)
+    ulib.say((&s_rc[(0) as usize]) as u64)
+    ulib.sayn(fehler)
+    ulib.nl()
+    rc_letzt = fehler
+    return fehler
+}
+
+fn konflikt_da() -> bool {
+    return k_da != 0
+}
+
+fn konflikt_pfad() -> u64 {
+    return (&k_pfad[(0) as usize]) as u64
+}
+
+fn konflikt_antwort(wahl: u64) {
+    k_wahl = wahl
+    k_da = 0
+}
+
+// ------------------------------------------------------ umbenennen
+
+// F2. EIN AUFRUF, und der Ordner bleibt ganz: `io.rename` haengt den
+// Verzeichniseintrag um. Die Runde davor hat kopiert und geloescht --
+// und ein Verzeichnis dabei verloren.
+fn umbenennen(alt: u64, neuname: u64) -> u64 {
+    let neu: u64 = (&tmp2[(0) as usize]) as u64
+    ulib.strncpy((&tmp[(0) as usize]) as u64, alt, PFADB - 1)
+    let ende: u64 = letzter_teil((&tmp[(0) as usize]) as u64)
+    __mmio_write8((ende) as *mut u8, 0 as u8)
+    fuege(neu, (&tmp[(0) as usize]) as u64, neuname)
+    let rc: u64 = io.rename(alt, neu)
+    ulib.say((&s_ren[(0) as usize]) as u64)
+    ulib.sayn(rc)
+    ulib.nl()
+    if !ulib.bad(rc) {
+        undo_push(U_UMBENANNT, neu, alt, 0)
+    }
+    rc_letzt = 0
+    if ulib.bad(rc) {
+        rc_letzt = rc
+    }
+    return rc_letzt
+}
+
+// ------------------------------------------------------ Papierkorb
+
+fn in_korb(pfad: u64) -> u64 {
+    let id: u64 = korb.hinein(pfad)
+    ulib.say((&s_trash[(0) as usize]) as u64)
+    ulib.sayn(id)
+    ulib.nl()
+    if ulib.bad(id) {
+        rc_letzt = id
+        return id
+    }
+    undo_push(U_KORB, pfad, pfad, id)
+    rc_letzt = 0
+    return 0
+}
+
+fn endgueltig(pfad: u64) -> u64 {
+    let rc: u64 = dateiop.loesche(pfad, 0)
+    rc_letzt = 0
+    if ulib.bad(rc) {
+        rc_letzt = rc
+    }
+    return rc_letzt
+}
+
+// ----------------------------------------------------- rueckgaengig
+
+fn undo_push(art: u64, neu: u64, alt: u64, id: u64) {
+    if n_undo >= MAXUNDO {
+        // Der aelteste faellt heraus -- ein Stapel, der voll ist und
+        // dann nichts mehr merkt, vergisst das Juengste, und das ist
+        // genau das, was man zurueckhaben will.
+        var i: u64 = 1
+        while i < MAXUNDO {
+            u_art[((i - 1)) as usize] = u_art[(i) as usize]
+            u_id[((i - 1)) as usize] = u_id[(i) as usize]
+            ulib.strncpy(p_at((&u_alt[(0) as usize]) as u64, i - 1),
+                p_at((&u_alt[(0) as usize]) as u64, i), PFADB - 1)
+            ulib.strncpy(p_at((&u_neu[(0) as usize]) as u64, i - 1),
+                p_at((&u_neu[(0) as usize]) as u64, i), PFADB - 1)
+            i = i + 1
+        }
+        n_undo = MAXUNDO - 1
+    }
+    u_art[(n_undo) as usize] = art
+    u_id[(n_undo) as usize] = id
+    ulib.strncpy(p_at((&u_alt[(0) as usize]) as u64, n_undo), alt,
+        PFADB - 1)
+    ulib.strncpy(p_at((&u_neu[(0) as usize]) as u64, n_undo), neu,
+        PFADB - 1)
+    n_undo = n_undo + 1
+}
+
+fn undo_zahl() -> u64 {
+    return n_undo
+}
+
+fn undo_art() -> u64 {
+    if n_undo == 0 {
+        return 0
+    }
+    return u_art[((n_undo - 1)) as usize]
+}
+
+// Was zuletzt geschah, als Pfad -- fuer den Hinweis in der Statuszeile.
+fn undo_name() -> u64 {
+    if n_undo == 0 {
+        return (&u_alt[(0) as usize]) as u64
+    }
+    return p_at((&u_alt[(0) as usize]) as u64, n_undo - 1)
+}
+
+// Strg+Z. Umbenennen und Verschieben gehen mit `rename` zurueck, der
+// Papierkorb ueber `korb.zurueck` -- die Datei liegt noch, also gibt
+// es etwas zurueckzuholen.
+fn rueckgaengig() -> u64 {
+    if n_undo == 0 {
+        rc_letzt = 0
+        return 0
+    }
+    let i: u64 = n_undo - 1
+    let art: u64 = u_art[(i) as usize]
+    let alt: u64 = p_at((&u_alt[(0) as usize]) as u64, i)
+    let neu: u64 = p_at((&u_neu[(0) as usize]) as u64, i)
+    var rc: u64 = 0
+    if art == U_UMBENANNT || art == U_VERSCHOBEN {
+        rc = io.rename(neu, alt)
+    } else if art == U_KORB {
+        rc = korb.zurueck(alt, u_id[(i) as usize])
+    }
+    ulib.say((&s_undo[(0) as usize]) as u64)
+    ulib.sayn(art)
+    ulib.say((&s_lz[(0) as usize]) as u64)
+    ulib.say((&s_rc[(0) as usize]) as u64)
+    ulib.sayn(rc)
+    ulib.nl()
+    rc_letzt = 0
+    if ulib.bad(rc) {
+        rc_letzt = rc
+        return rc
+    }
+    n_undo = n_undo - 1
+    return 0
+}
+
+// ------------------------------------------------ Fehler -> Schluessel
+
+fn letzter_rc() -> u64 {
+    return rc_letzt
+}
+
+// Aus der Nummer des Kerns wird der Schluessel eines Textes. HIER
+// steht kein sichtbarer Satz -- nur der Name eines Eintrags im
+// Katalog, den `msg.get` in beiden Sprachen findet.
+fn fehler_schluessel(rc: u64) -> u64 {
+    var e: u64 = rc
+    if rc > 0x8000000000000000 {
+        e = 0 -% rc
+    }
+    if e == errno.E_NOENT {
+        return (&ks_noent[(0) as usize]) as u64
+    }
+    if e == errno.E_ACCES || e == errno.E_PERM {
+        return (&ks_acces[(0) as usize]) as u64
+    }
+    if e == errno.E_EXIST {
+        return (&ks_exist[(0) as usize]) as u64
+    }
+    if e == errno.E_NOSPC {
+        return (&ks_nospc[(0) as usize]) as u64
+    }
+    if e == errno.E_ISDIR || e == errno.E_NOTDIR {
+        return (&ks_isdir[(0) as usize]) as u64
+    }
+    if e == errno.E_ROFS {
+        return (&ks_rofs[(0) as usize]) as u64
+    }
+    if e == errno.E_BUSY {
+        return (&ks_busy[(0) as usize]) as u64
+    }
+    if e == errno.E_INVAL {
+        return (&ks_inval[(0) as usize]) as u64
+    }
+    return (&ks_ok[(0) as usize]) as u64
+}
+
+fn getan_dateien() -> u64 {
+    return dateiop.getan_dateien()
+}
+
+fn getan_oktette() -> u64 {
+    return dateiop.getan_oktette()
+}
+
+fn abbrechen() {
+    dateiop.abbrechen()
+}
+
+fn melde() {
+    ulib.say((&s_clip[(0) as usize]) as u64)
+    ulib.sayn(n_ablage)
+    ulib.say((&s_lz[(0) as usize]) as u64)
+    ulib.say((&s_n[(0) as usize]) as u64)
+    ulib.sayn(n_undo)
+    ulib.nl()
+}

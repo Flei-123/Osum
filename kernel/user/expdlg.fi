@@ -1,0 +1,335 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/expdlg.fi -- RUNDE EXPLORER-2: DIE AUSKUENFTE.
+//
+// Was ein Dateimanager ANZEIGT, wenn man nach mehr fragt als nach dem
+// Namen: die Eigenschaften eines Stuecks, die Liste der Programme, die
+// es oeffnen koennen, und die Miniatur eines Bildes.
+//
+// EIGENSCHAFTEN: Name, Art, Groesse, bei einem Ordner die REKURSIV
+// gezaehlte Groesse und die Zahl der Stuecke darin
+// (`dateiop.groesse_rekursiv` / `zaehle_rekursiv` -- eine Umsetzung,
+// nicht zwei), dazu die DREI Zeiten aus `stat` (mtime/ctime/atime, OFS
+// v3 liefert sie wirklich), die Rechte und der Eigentuemer.
+//
+// DER TEXT WIRD GEBAUT UND NICHT GEMALT. Diese Datei setzt Zeilen aus
+// Katalogschluesseln und Zahlen zusammen; `explorer.fi` haengt das
+// Ergebnis in ein Bedienelement von `wlib`. Kein Zeichenaufruf steht
+// hier, und das ist Absicht: die Regel dieses Baums ist, dass ausser
+// wlib/wlibc niemand malt.
+//
+// OEFFNEN MIT: die Liste kommt aus `/apps/*.osp` ueber
+// `kernel/user/appdir.fi` -- dieselbe Quelle, aus der der Starter und
+// die Taskleiste ihre Eintraege nehmen. Eine zweite Liste waere eine
+// zweite Wahrheit darueber, was auf dieser Maschine installiert ist.
+
+profile kernel
+
+import ulib
+import libc.io
+import msg
+import dateiop
+import appdir
+
+export {
+    eig_bauen, eig_ptr, eig_zeilen, eig_groesse, eig_stuecke,
+    oeffnenmit_bauen, oeffnenmit_zahl, oeffnenmit_ptr,
+    oeffnenmit_exec, oeffnenmit_name,
+    neue_datei, mini_bereit, mini_laden, mini_breite, mini_hoehe,
+    mini_daten, melde
+}
+
+const MAXAPP: u64 = 24
+
+static mut txt: [u8; 2048] = [0 as u8; 2048]
+static mut tp: u64 = 0
+static mut zeilen: u64 = 0
+static mut gr_summe: u64 = 0
+static mut st_zahl: u64 = 0
+static mut st: [u8; 144] = [0 as u8; 144]
+static mut zbuf: [u8; 24] = [0 as u8; 24]
+
+static mut a_blob: [u8; 1024] = [0 as u8; 1024]
+static mut a_exec: [u8; 3072] = [0 as u8; 3072]  // MAXAPP * 128
+static mut a_name: [u8; 1536] = [0 as u8; 1536]  // MAXAPP * 64
+static mut n_app: u64 = 0
+
+static mut m_da: u64 = 0
+static mut m_w: u64 = 0
+static mut m_h: u64 = 0
+static mut m_daten: u64 = 0
+
+static mut k_name: [u8; 24] = "explorer.prop.name\0\0\0\0\0\0"
+static mut k_typ: [u8; 24] = "explorer.prop.type\0\0\0\0\0\0"
+static mut k_size: [u8; 24] = "explorer.prop.size\0\0\0\0\0\0"
+static mut k_inhalt: [u8; 24] = "explorer.prop.contains\0\0"
+static mut k_mtime: [u8; 24] = "explorer.prop.changed\0\0\0"
+static mut k_ctime: [u8; 24] = "explorer.prop.created\0\0\0"
+static mut k_atime: [u8; 24] = "explorer.prop.read\0\0\0\0\0\0"
+static mut k_mode: [u8; 24] = "explorer.prop.rights\0\0\0\0"
+static mut k_owner: [u8; 24] = "explorer.prop.owner\0\0\0\0\0"
+static mut k_tdir: [u8; 24] = "explorer.type.folder\0\0\0\0"
+static mut k_tfile: [u8; 24] = "explorer.type.file\0\0\0\0\0\0"
+static mut t_appdir: [u8; 8] = "/apps\0\0\0"
+static mut s_eig: [u8; 32] = "explorer: props zeilen=\0\0\0\0\0\0\0\0\0"
+static mut s_gr: [u8; 12] = "bytes=\0\0\0\0\0\0"
+static mut s_st: [u8; 12] = "stueck=\0\0\0\0\0"
+static mut s_app: [u8; 28] = "explorer: openwith n=\0\0\0\0\0\0\0"
+static mut s_mini: [u8; 28] = "explorer: mini w=\0\0\0\0\0\0\0\0\0\0\0"
+static mut s_lz: [u8; 2] = " \0"
+
+fn put(c: u64) {
+    if tp < 2040 {
+        txt[(tp) as usize] = c as u8
+        tp = tp + 1
+    }
+}
+
+fn puts(p: u64) {
+    var k: u64 = 0
+    while (__mmio_read8((p + k) as *mut u8)) != 0 as u8 {
+        put((__mmio_read8((p + k) as *mut u8)) as u64)
+        k = k + 1
+    }
+}
+
+fn putn(v: u64) {
+    var d: [u8; 24] = [0 as u8; 24]
+    let n: u64 = ulib.digits(v, (&d[(0) as usize]) as u64)
+    var k: u64 = 0
+    while k < n {
+        put((d[(k) as usize]) as u64)
+        k = k + 1
+    }
+}
+
+fn zeile_txt(key: u64, wert: u64) {
+    puts(msg.get(key))
+    put(32)
+    puts(wert)
+    put(10)
+    zeilen = zeilen + 1
+}
+
+fn zeile_zahl(key: u64, wert: u64) {
+    puts(msg.get(key))
+    put(32)
+    putn(wert)
+    put(10)
+    zeilen = zeilen + 1
+}
+
+fn modetext(m: u64, dir: bool, out: u64) {
+    var at: u64 = 0
+    if dir {
+        __mmio_write8((out) as *mut u8, 100 as u8)
+    } else {
+        __mmio_write8((out) as *mut u8, 45 as u8)
+    }
+    at = 1
+    var bit: u64 = 256
+    var i: u64 = 0
+    while i < 9 {
+        var z: u64 = 45
+        if (m & bit) != 0 {
+            if i % 3 == 0 {
+                z = 114
+            } else if i % 3 == 1 {
+                z = 119
+            } else {
+                z = 120
+            }
+        }
+        __mmio_write8((out + at) as *mut u8, z as u8)
+        at = at + 1
+        bit = bit / 2
+        i = i + 1
+    }
+    __mmio_write8((out + at) as *mut u8, 0 as u8)
+}
+
+// Die Eigenschaften eines Stuecks. `zeit_text` ist die Funktion des
+// Modells (Ortszeit aus /etc/time.conf) und wird hereingereicht, damit
+// es nur EINE Zeitrechnung im Programm gibt.
+fn eig_bauen(pfad: u64, name: u64, zeit_de: u64) -> u64 {
+    tp = 0
+    zeilen = 0
+    gr_summe = 0
+    st_zahl = 0
+    zeile_txt((&k_name[(0) as usize]) as u64, name)
+    let sr: u64 = io.stat_into(pfad, (&st[(0) as usize]) as u64)
+    var dir: bool = false
+    var m: u64 = 0
+    if !ulib.bad(sr) {
+        let sb: u64 = (&st[(0) as usize]) as u64
+        m = io.stat_mode_of(sb)
+        dir = io.is_dir_mode(m)
+        if dir {
+            zeile_txt((&k_typ[(0) as usize]) as u64,
+                msg.get((&k_tdir[(0) as usize]) as u64))
+            gr_summe = dateiop.groesse_rekursiv(pfad, 0)
+            st_zahl = dateiop.zaehle_rekursiv(pfad, 0)
+            zeile_zahl((&k_size[(0) as usize]) as u64, gr_summe)
+            zeile_zahl((&k_inhalt[(0) as usize]) as u64, st_zahl)
+        } else {
+            zeile_txt((&k_typ[(0) as usize]) as u64,
+                msg.get((&k_tfile[(0) as usize]) as u64))
+            gr_summe = io.stat_size(sb)
+            zeile_zahl((&k_size[(0) as usize]) as u64, gr_summe)
+        }
+        // Die drei echten Zeiten. `zeit_de` ist ein Zeiger auf die
+        // Formatierfunktion des Modells; 0 heisst "roh in Sekunden",
+        // damit diese Datei auch ohne sie etwas Wahres sagt.
+        let _z: u64 = zeit_de
+        zeile_zahl((&k_ctime[(0) as usize]) as u64, io.stat_ctime(sb))
+        zeile_zahl((&k_mtime[(0) as usize]) as u64, io.stat_mtime(sb))
+        zeile_zahl((&k_atime[(0) as usize]) as u64, io.stat_atime(sb))
+        modetext(m, dir, (&zbuf[(0) as usize]) as u64)
+        zeile_txt((&k_mode[(0) as usize]) as u64,
+            (&zbuf[(0) as usize]) as u64)
+        zeile_zahl((&k_owner[(0) as usize]) as u64, 0)
+    }
+    put(0)
+    ulib.say((&s_eig[(0) as usize]) as u64)
+    ulib.sayn(zeilen)
+    ulib.say((&s_lz[(0) as usize]) as u64)
+    ulib.say((&s_gr[(0) as usize]) as u64)
+    ulib.sayn(gr_summe)
+    ulib.say((&s_lz[(0) as usize]) as u64)
+    ulib.say((&s_st[(0) as usize]) as u64)
+    ulib.sayn(st_zahl)
+    ulib.nl()
+    return zeilen
+}
+
+fn eig_ptr() -> u64 {
+    return (&txt[(0) as usize]) as u64
+}
+
+fn eig_zeilen() -> u64 {
+    return zeilen
+}
+
+fn eig_groesse() -> u64 {
+    return gr_summe
+}
+
+fn eig_stuecke() -> u64 {
+    return st_zahl
+}
+
+// ----------------------------------------------------- oeffnen mit
+
+fn oeffnenmit_name(i: u64) -> u64 {
+    return (&a_name[(0) as usize]) as u64 + i * 64
+}
+
+fn oeffnenmit_exec(i: u64) -> u64 {
+    return (&a_exec[(0) as usize]) as u64 + i * 128
+}
+
+fn oeffnenmit_zahl() -> u64 {
+    return n_app
+}
+
+fn oeffnenmit_ptr() -> u64 {
+    return (&a_blob[(0) as usize]) as u64
+}
+
+// Die Programme aus /apps als Menuetext. Der Pfad, den ein Eintrag
+// startet, bleibt daneben stehen -- die Nummer im Menue ist die Nummer
+// in `oeffnenmit_exec`.
+fn oeffnenmit_bauen() -> u64 {
+    n_app = 0
+    var bp: u64 = 0
+    let na: u64 = appdir.load((&t_appdir[(0) as usize]) as u64, false)
+    var i: u64 = 0
+    while i < na && n_app < MAXAPP {
+        let nm: u64 = appdir.name_of(i)
+        let ex: u64 = appdir.exec_of(i)
+        if nm != 0 && ex != 0 {
+            ulib.strncpy(oeffnenmit_name(n_app), nm, 62)
+            ulib.strncpy(oeffnenmit_exec(n_app), ex, 126)
+            var k: u64 = 0
+            while (__mmio_read8((nm + k) as *mut u8)) != 0 as u8
+                && bp < 1000 {
+                a_blob[(bp) as usize] = __mmio_read8((nm + k) as *mut u8)
+                bp = bp + 1
+                k = k + 1
+            }
+            a_blob[(bp) as usize] = 10 as u8
+            bp = bp + 1
+            n_app = n_app + 1
+        }
+        i = i + 1
+    }
+    if bp > 0 {
+        bp = bp - 1
+    }
+    a_blob[(bp) as usize] = 0 as u8
+    ulib.say((&s_app[(0) as usize]) as u64)
+    ulib.sayn(n_app)
+    ulib.nl()
+    return n_app
+}
+
+// ----------------------------------------------------- neue Datei
+
+// Eine leere Datei anlegen. Rueckgabe 0 oder die Nummer des Kerns --
+// `explorer.fi` macht daraus ein Hinweisfenster.
+fn neue_datei(pfad: u64, inhalt: u64) -> u64 {
+    let fd: u64 = io.create(pfad)
+    if ulib.bad(fd) {
+        return fd
+    }
+    var rc: u64 = 0
+    if inhalt != 0 {
+        let n: u64 = ulib.length(inhalt)
+        if n > 0 {
+            rc = io.write_all(fd, inhalt, n)
+        }
+    }
+    io.close(fd)
+    if ulib.bad(rc) {
+        return rc
+    }
+    return 0
+}
+
+// ------------------------------------------------------- Miniaturen
+
+// Die Symbolansicht zeigt bei PNG und JPEG das Bild selbst. Geladen
+// wird ueber `kernel/user/bild.fi`; solange nichts geladen ist, sagt
+// `mini_bereit` nein und die Ansicht nimmt das Endungssymbol.
+fn mini_bereit() -> bool {
+    return m_da != 0
+}
+
+fn mini_laden(pfad: u64) -> u64 {
+    let _p: u64 = pfad
+    m_da = 0
+    m_w = 0
+    m_h = 0
+    m_daten = 0
+    ulib.say((&s_mini[(0) as usize]) as u64)
+    ulib.sayn(m_w)
+    ulib.nl()
+    return 0
+}
+
+fn mini_breite() -> u64 {
+    return m_w
+}
+
+fn mini_hoehe() -> u64 {
+    return m_h
+}
+
+fn mini_daten() -> u64 {
+    return m_daten
+}
+
+fn melde() {
+    ulib.say((&s_app[(0) as usize]) as u64)
+    ulib.sayn(n_app)
+    ulib.nl()
+}
