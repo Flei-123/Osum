@@ -174,6 +174,16 @@ printf '# /etc/time.conf\noffset=120\n' > "$OUT/time.conf"
 #
 # Englisch ist die Hauptsprache der Oberflaeche (Dauerregel). Wer ein
 # deutsches Bild braucht, setzt `lang=de` beim Aufruf.
+#
+# UND DIE SPRACHE MUSS AUCH AUF DIE KOMMANDOZEILE (siehe `-append`
+# weiter unten), nicht nur in diese Datei. Der Kern leitet aus
+# `lang=` die TASTATURBELEGUNG ab (kgui.fi, `tastatur_zur_sprache`),
+# und ohne das Wort blieb sie deutsch, waehrend die Oberflaeche
+# englisch war. Gemessen: `sendkey ctrl-n` kam als `key: [` an -- auf
+# einer deutschen Belegung liegt dort die eckige Klammer. Deshalb ging
+# in JEDEM Abnahmelauf der Strg+N-Dialog nicht auf, und das sah aus
+# wie ein Fehler des Dateimanagers (OFFEN.md G-003). Das Abbild selbst
+# faehrt `lang=en` auf der Kommandozeile (tools/usbimg/build.sh).
 printf 'lang=%s\n' "$lang" > "$OUT/locale.conf"
 printf 'on\n' > "$OUT/uitrace"
 cat > "$OUT/passwd" <<'EOF'
@@ -324,7 +334,7 @@ if [ "$accel" = kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
     ACC=(-accel kvm -cpu host)
 fi
 timeout 600 qemu-system-x86_64 "${ACC[@]}" -kernel "$BUILDD/k0.mb" -m 512 \
-    -append "gfx fbres=${XRES}x${YRES} wm desk wmhold wighalt=$halt nokbd nosched noproc nofs $extra" \
+    -append "gfx fbres=${XRES}x${YRES} wm desk wmhold wighalt=$halt nokbd nosched noproc nofs lang=$lang $extra" \
     -serial "file:$OUT/serial.txt" -display none -no-reboot \
     -device "VGA,edid=on,xres=$XRES,yres=$YRES,vgamem_mb=32" \
     -monitor "unix:$SOCK,server,nowait" \
