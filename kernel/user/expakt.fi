@@ -40,6 +40,7 @@ export {
     kopieren_merken, schnitt_an, einfuegen, ablage_zahl, ablage_at,
     umbenennen, in_korb, endgueltig,
     rueckgaengig, undo_zahl, undo_art, undo_name,
+    U_UMBENANNT, U_VERSCHOBEN, U_KORB,
     konflikt_da, konflikt_pfad, konflikt_antwort,
     K_ERSETZEN, K_UMBENENNEN, K_UEBERSPRINGEN, K_ABBRUCH,
     fehler_schluessel, letzter_rc, getan_dateien, getan_oktette,
@@ -59,7 +60,9 @@ const K_UMBENENNEN: u64 = 1
 const K_UEBERSPRINGEN: u64 = 2
 const K_ABBRUCH: u64 = 3
 
-// Was `rueckgaengig` kennt.
+// Was `rueckgaengig` kennt. Die Nummern sind ausgefuehrt, weil
+// `undo_art()` sie herausgibt und der Dateimanager daraus den Satz in
+// der Statuszeile waehlt -- eine nackte 2 im Aufrufer waere geraten.
 const U_UMBENANNT: u64 = 1
 const U_VERSCHOBEN: u64 = 2
 const U_KORB: u64 = 3
@@ -76,13 +79,36 @@ static mut u_alt: [u8; 20480] = [0 as u8; 20480]  // MAXUNDO * PFADB
 static mut u_neu: [u8; 20480] = [0 as u8; 20480]
 static mut n_undo: u64 = 0
 
+// DER KONFLIKT HAT EINEN BESITZER. `k_quelle` sagt, WER stehen
+// geblieben ist -- Einfuegen (Q_PASTE) oder Umbenennen (Q_RENAME).
+// Ohne diese Nummer wuerde eine Antwort, die fuer das Umbenennen
+// gedacht war, beim naechsten Einfuegen eine Datei ueberschreiben.
+const Q_KEINE: u64 = 0
+const Q_PASTE: u64 = 1
+const Q_RENAME: u64 = 2
+
+// "Es liegt keine Antwort vor". Muss ausserhalb von K_ERSETZEN..
+// K_ABBRUCH (0..3) liegen, sonst waere "keine Antwort" dasselbe wie
+// "Ersetzen" -- und der Vorgabefall duerfte niemals ueberschreiben.
+const K_OFFEN: u64 = 9
+
 static mut k_da: u64 = 0
 static mut k_pfad: [u8; 320] = [0 as u8; 320]
-static mut k_wahl: u64 = 0
+static mut k_wahl: u64 = K_OFFEN
+static mut k_quelle: u64 = 0
+
+// Einfuegen ist unterbrechbar: bei einem bestehenden Ziel kehrt es
+// zurueck, der Dateimanager fragt, und der naechste Aufruf setzt bei
+// `p_pos` fort. Ohne diese Marke finge das Einfuegen nach jeder
+// Antwort von vorn an und kopierte das Erledigte ein zweites Mal.
+static mut p_pos: u64 = 0
+static mut p_getan: u64 = 0
+static mut p_sprung: u64 = 0
 
 static mut rc_letzt: u64 = 0
 static mut tmp: [u8; 320] = [0 as u8; 320]
 static mut tmp2: [u8; 320] = [0 as u8; 320]
+static mut tmp3: [u8; 320] = [0 as u8; 320]
 
 static mut ks_ok: [u8; 20] = "explorer.err.other\0\0"
 static mut ks_noent: [u8; 20] = "explorer.err.noent\0\0"
@@ -93,15 +119,26 @@ static mut ks_isdir: [u8; 20] = "explorer.err.isdir\0\0"
 static mut ks_rofs: [u8; 20] = "explorer.err.rofs\0\0\0"
 static mut ks_busy: [u8; 20] = "explorer.err.busy\0\0\0"
 static mut ks_inval: [u8; 20] = "explorer.err.inval\0\0"
+static mut ks_spawn: [u8; 20] = "explorer.err.spawn\0\0"
 
 static mut s_clip: [u8; 28] = "explorer: clip n=\0\0\0\0\0\0\0\0\0\0\0"
 static mut s_paste: [u8; 28] = "explorer: paste n=\0\0\0\0\0\0\0\0\0\0"
 static mut s_undo: [u8; 28] = "explorer: undo art=\0\0\0\0\0\0\0\0\0"
 static mut s_ren: [u8; 28] = "explorer: rename rc=\0\0\0\0\0\0\0\0"
 static mut s_trash: [u8; 28] = "explorer: trash rc=\0\0\0\0\0\0\0\0\0"
+static mut s_purge: [u8; 24] = "explorer: purge rc=\0\0\0\0\0"
+static mut s_konf: [u8; 28] = "explorer: konflikt wahl=\0\0\0\0"
+static mut s_chmod: [u8; 24] = "explorer: chmod rc=\0\0\0\0\0"
 static mut s_lz: [u8; 2] = " \0"
 static mut s_rc: [u8; 6] = "rc=\0\0\0"
 static mut s_n: [u8; 4] = "n=\0\0"
+static mut s_schnitt: [u8; 9] = "schnitt=\0"
+static mut s_sprung: [u8; 8] = "sprung=\0"
+static mut s_undo2: [u8; 6] = "undo=\0"
+static mut s_quelle: [u8; 8] = "quelle=\0"
+static mut s_pos: [u8; 5] = "pos=\0"
+static mut s_id: [u8; 4] = "id=\0"
+static mut s_max: [u8; 5] = "max=\0"
 
 fn p_at(feld: u64, i: u64) -> u64 {
     return feld + i * PFADB
@@ -179,11 +216,18 @@ fn kopieren_merken(schnitt: bool) -> u64 {
         typen = wlib.CT_FILES | wlib.CT_PATH | wlib.CT_TEXT
     }
     let rc: u64 = wlib.clip_put_typ(typen, (&text[(0) as usize]) as u64, tp)
+    // Die Belegzeile nennt BEIDE Zahlen getrennt: wie viele Pfade auf
+    // dem Bus liegen, ob es ein Schnitt war, und was der Bus sagte.
+    // Vorher stand `ist_schnitt` hinter `rc=` -- eine Zahl, die wie ein
+    // Fehler aussah und keiner war.
     ulib.say((&s_clip[(0) as usize]) as u64)
     ulib.sayn(n_ablage)
     ulib.say((&s_lz[(0) as usize]) as u64)
-    ulib.say((&s_rc[(0) as usize]) as u64)
+    ulib.say((&s_schnitt[(0) as usize]) as u64)
     ulib.sayn(ist_schnitt)
+    ulib.say((&s_lz[(0) as usize]) as u64)
+    ulib.say((&s_rc[(0) as usize]) as u64)
+    ulib.sayn(rc)
     ulib.nl()
     rc_letzt = 0
     if ulib.bad(rc) {
@@ -226,55 +270,284 @@ fn fuege(out: u64, dir: u64, name: u64) {
     __mmio_write8((out + n) as *mut u8, 0 as u8)
 }
 
+// Eine Zahl 0..99 hinten an den Puffer. Firn hat kein sprintf im
+// Ring 3; zwei Ziffern reichen, weil `freier_name` bei 99 aufgibt.
+fn zahl_an(out: u64, n: u64) -> u64 {
+    var p: u64 = out + ulib.length(out)
+    if n >= 10 {
+        __mmio_write8((p) as *mut u8, (48 + n / 10) as u8)
+        p = p + 1
+    }
+    __mmio_write8((p) as *mut u8, (48 + n % 10) as u8)
+    p = p + 1
+    __mmio_write8((p) as *mut u8, 0 as u8)
+    return out
+}
+
+// "name (2)" -- und bei einer Datei mit Endung "bild (2).png".
+//
+// WARUM VOR DIE ENDUNG: die Liste waehlt ihr Symbol nach der Endung
+// aus (`expmodell.symbol_fuer`). "bild.png (2)" haette keine Endung
+// mehr und stuende danach als namenlose Datei da. Der geforderte Fall
+// ohne Punkt bleibt woertlich "name (2)".
+//
+// Gibt 0 zurueck, wenn auch (2)..(99) alle belegt sind -- der Aufrufer
+// macht daraus -EEXIST und wirft nichts weg.
+fn freier_name(voll: u64, out: u64) -> u64 {
+    let name: u64 = letzter_teil(voll)
+    // Ordner (voll ohne den letzten Teil) merken.
+    var basis: [u8; 320] = [0 as u8; 320]
+    let b: u64 = (&basis[(0) as usize]) as u64
+    var i: u64 = 0
+    while voll + i < name {
+        __mmio_write8((b + i) as *mut u8, __mmio_read8((voll + i) as *mut u8))
+        i = i + 1
+    }
+    __mmio_write8((b + i) as *mut u8, 0 as u8)
+    // Stamm und Endung trennen. Ein fuehrender Punkt (".bashrc") ist
+    // KEINE Endung, sondern die Punkt-Konvention fuer versteckt.
+    var stamm: [u8; 256] = [0 as u8; 256]
+    var endung: [u8; 64] = [0 as u8; 64]
+    let st: u64 = (&stamm[(0) as usize]) as u64
+    let en: u64 = (&endung[(0) as usize]) as u64
+    let nl: u64 = ulib.length(name)
+    var punkt: u64 = nl
+    var k: u64 = nl
+    while k > 1 {
+        if (__mmio_read8((name + k - 1) as *mut u8)) == 46 as u8 {
+            punkt = k - 1
+            k = 1
+        } else {
+            k = k - 1
+        }
+    }
+    var j: u64 = 0
+    while j < punkt && j < 240 {
+        __mmio_write8((st + j) as *mut u8,
+            __mmio_read8((name + j) as *mut u8))
+        j = j + 1
+    }
+    __mmio_write8((st + j) as *mut u8, 0 as u8)
+    var m: u64 = 0
+    while punkt + m < nl && m < 60 {
+        __mmio_write8((en + m) as *mut u8,
+            __mmio_read8((name + punkt + m) as *mut u8))
+        m = m + 1
+    }
+    __mmio_write8((en + m) as *mut u8, 0 as u8)
+    var klammer: [u8; 3] = " (\0"
+    var zu: [u8; 2] = ")\0"
+    var nr: u64 = 2
+    while nr < 100 {
+        var kand: [u8; 320] = [0 as u8; 320]
+        let kp: u64 = (&kand[(0) as usize]) as u64
+        ulib.strncpy(kp, st, 240)
+        ulib.strcat(kp, (&klammer[(0) as usize]) as u64)
+        let _z: u64 = zahl_an(kp, nr)
+        ulib.strcat(kp, (&zu[(0) as usize]) as u64)
+        ulib.strcat(kp, en)
+        fuege(out, b, kp)
+        if !dateiop.gibt_es(out) {
+            return out
+        }
+        nr = nr + 1
+    }
+    return 0
+}
+
+// `kernel/sys.fi::SYS_CHMOD`. `ulib` fuehrt die Nummer nicht, also
+// steht sie hier -- mit dem Ort, an dem sie definiert ist, damit die
+// beiden nicht auseinanderlaufen, ohne dass es jemand merkt.
+const SYS_CHMOD: u64 = 90
+
+// DIE RECHTE NACHZIEHEN. GEMESSEN: `dateiop.kopiere` liest den Modus
+// der Quelle (`st_q`), legt das Ziel aber mit `io.create` an und laesst
+// den Wert danach liegen (`let _m: u64 = modus`, dateiop.fi ~Z.209) --
+// eine kopierte Datei bekam also die Vorgaberechte des Erzeugens.
+// `dateiop` gehoert einem anderen Modul, deshalb steht die Nachbesserung
+// hier, beim Aufrufer, und nur fuer das eingefuegte Stueck selbst.
+// Der Rueckgabewert wird gemeldet und nicht weggeworfen; ein
+// Datentraeger ohne Rechte (FAT) sagt hier -EINVAL, und das darf das
+// Einfuegen nicht scheitern lassen.
+fn rechte_nachziehen(quelle: u64, ziel: u64) -> u64 {
+    let m: u64 = io.stat_mode(quelle)
+    if ulib.bad(m) {
+        return m
+    }
+    return ulib.sys(SYS_CHMOD, ziel, m & 4095, 0)
+}
+
+// Liegt `ziel` INNERHALB von `quelle`? Einen Ordner in sich selbst zu
+// kopieren laeuft sonst, bis der Datentraeger voll ist. Geprueft wird
+// auf Praefix mit Schraegstrich dahinter, damit "/a/bc" nicht als
+// Kind von "/a/b" gilt.
+fn in_sich(quelle: u64, ziel: u64) -> bool {
+    let n: u64 = ulib.length(quelle)
+    var i: u64 = 0
+    while i < n {
+        if (__mmio_read8((ziel + i) as *mut u8))
+            != (__mmio_read8((quelle + i) as *mut u8)) {
+            return false
+        }
+        i = i + 1
+    }
+    let c: u8 = __mmio_read8((ziel + n) as *mut u8)
+    return c == 0 as u8 || c == 47 as u8
+}
+
 // Strg+V: die Ablage in `zielordner`. Verschieben nimmt `io.rename`,
 // solange beide Orte auf demselben Traeger liegen -- der Kern sagt
 // EXDEV, wenn nicht, und dann kopiert `dateiop` und loescht danach.
+//
+// UNTERBRECHBAR: bei einem bestehenden Ziel kehrt der Aufruf mit
+// -EEXIST zurueck, `konflikt_da()` steht, `konflikt_pfad()` nennt das
+// Ziel. Der Dateimanager macht seinen Dialog auf, meldet die Antwort
+// mit `konflikt_antwort` und ruft `einfuegen` mit DEMSELBEN Zielordner
+// erneut -- dann geht es bei `p_pos` weiter, nicht wieder bei null.
 fn einfuegen(zielordner: u64) -> u64 {
     var fehler: u64 = 0
-    var getan: u64 = 0
-    k_da = 0
     var i: u64 = 0
+    var abbruch: bool = false
+    var wahl: u64 = K_OFFEN
+    if k_quelle == Q_PASTE && k_wahl != K_OFFEN {
+        // Fortsetzung: die Antwort gilt genau fuer den einen Eintrag,
+        // an dem es stehen blieb.
+        i = p_pos
+        wahl = k_wahl
+        k_wahl = K_OFFEN
+        k_quelle = Q_KEINE
+    } else {
+        p_getan = 0
+        p_sprung = 0
+        p_pos = 0
+        // Der Fortschritt zaehlt ab hier; der Dateimanager liest
+        // `getan_dateien`/`getan_oktette` aus seiner eigenen Schleife.
+        // NUR BEIM FRISCHEN ANFANG: `fortschritt_an` setzt die Zaehler
+        // auf null, und nach einem Konfliktdialog fiele der Balken
+        // sonst mitten im Vorgang wieder auf Anfang zurueck.
+        dateiop.fortschritt_an()
+    }
+    k_da = 0
     while i < n_ablage {
         let q: u64 = ablage_at(i)
         let ziel: u64 = (&tmp[(0) as usize]) as u64
         fuege(ziel, zielordner, letzter_teil(q))
+        var tun: bool = true
         var rc: u64 = 0
-        if dateiop.gibt_es(ziel) {
-            // -EEXIST: der Aufrufer macht den Konfliktdialog auf. Bis
-            // seine Antwort da ist, wird NICHTS ueberschrieben.
-            k_da = 1
-            ulib.strncpy((&k_pfad[(0) as usize]) as u64, ziel, PFADB - 1)
-            rc = 0 -% errno.E_EXIST
-        } else if ist_schnitt != 0 {
-            rc = dateiop.verschiebe(q, ziel)
-            if !ulib.bad(rc) {
-                undo_push(U_VERSCHOBEN, ziel, q, 0)
-            }
-        } else if dateiop.ist_verzeichnis(q) {
-            rc = dateiop.kopiere_baum(q, ziel, 0)
-        } else {
-            rc = dateiop.kopiere(q, ziel)
-        }
-        if ulib.bad(rc) {
+        if in_sich(q, ziel) {
+            rc = 0 -% errno.E_INVAL
+            tun = false
             fehler = rc
             i = n_ablage
-        } else {
-            getan = getan + 1
+        } else if dateiop.gibt_es(ziel) {
+            if wahl == K_ERSETZEN {
+                // ERST WEG, DANN HIN. `kopiere` legt neu an, aber ein
+                // bestehender ORDNER liesse sich nicht ueberschreiben.
+                rc = dateiop.loesche(ziel, 0)
+                if ulib.bad(rc) {
+                    fehler = rc
+                    tun = false
+                    i = n_ablage
+                }
+            } else if wahl == K_UMBENENNEN {
+                let neu: u64 = freier_name(ziel, (&tmp3[(0) as usize]) as u64)
+                if neu == 0 {
+                    fehler = 0 -% errno.E_EXIST
+                    tun = false
+                    i = n_ablage
+                } else {
+                    ulib.strncpy(ziel, neu, PFADB - 1)
+                }
+            } else if wahl == K_UEBERSPRINGEN {
+                tun = false
+                p_sprung = p_sprung + 1
+            } else if wahl == K_ABBRUCH {
+                // Abbruch heisst: der Rest bleibt liegen, und zwar
+                // ohne Fehlerfenster -- der Mensch hat es so gewollt.
+                tun = false
+                abbruch = true
+                i = n_ablage
+            } else {
+                // Keine Antwort: NICHTS ueberschreiben, sondern fragen.
+                k_da = 1
+                k_quelle = Q_PASTE
+                p_pos = i
+                ulib.strncpy((&k_pfad[(0) as usize]) as u64, ziel, PFADB - 1)
+                dateiop.fortschritt_aus()
+                fehler = 0 -% errno.E_EXIST
+                rc_letzt = fehler
+                melde_paste(fehler)
+                return fehler
+            }
+        }
+        // Eine Antwort gilt fuer EINEN Konflikt. Der naechste fragt neu.
+        wahl = K_OFFEN
+        if tun {
+            if ist_schnitt != 0 {
+                rc = dateiop.verschiebe(q, ziel)
+                if !ulib.bad(rc) {
+                    undo_push(U_VERSCHOBEN, ziel, q, 0)
+                }
+            } else if dateiop.ist_verzeichnis(q) {
+                rc = dateiop.kopiere_baum(q, ziel, 0)
+            } else {
+                rc = dateiop.kopiere(q, ziel)
+            }
+            if !ulib.bad(rc) && ist_schnitt == 0 {
+                // Nur die Kopie braucht das: ein `rename` nimmt die
+                // Rechte von selbst mit, es ist dieselbe Inode.
+                let cr: u64 = rechte_nachziehen(q, ziel)
+                if ulib.bad(cr) {
+                    ulib.say((&s_chmod[(0) as usize]) as u64)
+                    ulib.sayn(cr)
+                    ulib.nl()
+                }
+            }
+            if rc == (0 -% errno.E_INTR) {
+                // ABBRUCH IST KEIN FEHLER. `dateiop` gibt -EINTR
+                // zurueck, wenn `abbrechen()` gedrueckt wurde; daraus
+                // ein Fehlerfenster zu machen, waere eine Meldung ueber
+                // etwas, das der Mensch selbst wollte.
+                abbruch = true
+                i = n_ablage
+            } else if ulib.bad(rc) {
+                fehler = rc
+                i = n_ablage
+            } else {
+                p_getan = p_getan + 1
+                i = i + 1
+            }
+        } else if i < n_ablage {
             i = i + 1
         }
     }
-    if ist_schnitt != 0 && fehler == 0 {
+    dateiop.fortschritt_aus()
+    if ist_schnitt != 0 && fehler == 0 && !abbruch {
+        // Ausschneiden ist EINMAL. Danach ist die Ablage leer, sonst
+        // verschoebe das zweite Einfuegen Dateien, die es nicht gibt.
+        // NACH EINEM ABBRUCH bleibt sie stehen: die uebrigen Stuecke
+        // liegen noch an ihrem Platz und sollen einfuegbar bleiben.
         n_ablage = 0
         ist_schnitt = 0
     }
+    rc_letzt = fehler
+    melde_paste(fehler)
+    return fehler
+}
+
+fn melde_paste(fehler: u64) {
     ulib.say((&s_paste[(0) as usize]) as u64)
-    ulib.sayn(getan)
+    ulib.sayn(p_getan)
+    ulib.say((&s_lz[(0) as usize]) as u64)
+    ulib.say((&s_sprung[(0) as usize]) as u64)
+    ulib.sayn(p_sprung)
+    ulib.say((&s_lz[(0) as usize]) as u64)
+    ulib.say((&s_pos[(0) as usize]) as u64)
+    ulib.sayn(p_pos)
     ulib.say((&s_lz[(0) as usize]) as u64)
     ulib.say((&s_rc[(0) as usize]) as u64)
     ulib.sayn(fehler)
     ulib.nl()
-    rc_letzt = fehler
-    return fehler
 }
 
 fn konflikt_da() -> bool {
@@ -285,9 +558,18 @@ fn konflikt_pfad() -> u64 {
     return (&k_pfad[(0) as usize]) as u64
 }
 
+// Die Antwort des Dialogs. Sie wird GEMERKT und beim naechsten Aufruf
+// von `einfuegen`/`umbenennen` verbraucht -- diese Datei macht kein
+// Fenster auf und wartet auf nichts.
 fn konflikt_antwort(wahl: u64) {
     k_wahl = wahl
     k_da = 0
+    ulib.say((&s_konf[(0) as usize]) as u64)
+    ulib.sayn(wahl)
+    ulib.say((&s_lz[(0) as usize]) as u64)
+    ulib.say((&s_quelle[(0) as usize]) as u64)
+    ulib.sayn(k_quelle)
+    ulib.nl()
 }
 
 // ------------------------------------------------------ umbenennen
@@ -301,10 +583,50 @@ fn umbenennen(alt: u64, neuname: u64) -> u64 {
     let ende: u64 = letzter_teil((&tmp[(0) as usize]) as u64)
     __mmio_write8((ende) as *mut u8, 0 as u8)
     fuege(neu, (&tmp[(0) as usize]) as u64, neuname)
+    // Dieselbe Antwort wie beim Einfuegen, derselbe Dialog. Sie gilt
+    // nur, wenn der Konflikt AUS DEM UMBENENNEN kam.
+    var wahl: u64 = K_OFFEN
+    if k_quelle == Q_RENAME && k_wahl != K_OFFEN {
+        wahl = k_wahl
+        k_wahl = K_OFFEN
+        k_quelle = Q_KEINE
+    }
+    k_da = 0
+    if dateiop.gibt_es(neu) {
+        if wahl == K_ERSETZEN {
+            let d: u64 = dateiop.loesche(neu, 0)
+            if ulib.bad(d) {
+                rc_letzt = d
+                melde_ren(d)
+                return d
+            }
+        } else if wahl == K_UMBENENNEN {
+            let frei: u64 = freier_name(neu, (&tmp3[(0) as usize]) as u64)
+            if frei == 0 {
+                rc_letzt = 0 -% errno.E_EXIST
+                melde_ren(rc_letzt)
+                return rc_letzt
+            }
+            ulib.strncpy(neu, frei, PFADB - 1)
+        } else if wahl == K_UEBERSPRINGEN || wahl == K_ABBRUCH {
+            // Nichts tun ist kein Fehler: der Name bleibt, wie er war.
+            rc_letzt = 0
+            melde_ren(0)
+            return 0
+        } else {
+            // -EEXIST GIBT DEN KONFLIKT ZURUECK und benennt nicht um.
+            // Ein `rename` auf ein bestehendes Ziel loescht dieses auf
+            // manchen Datentraegern still -- das darf hier niemand.
+            k_da = 1
+            k_quelle = Q_RENAME
+            ulib.strncpy((&k_pfad[(0) as usize]) as u64, neu, PFADB - 1)
+            rc_letzt = 0 -% errno.E_EXIST
+            melde_ren(rc_letzt)
+            return rc_letzt
+        }
+    }
     let rc: u64 = io.rename(alt, neu)
-    ulib.say((&s_ren[(0) as usize]) as u64)
-    ulib.sayn(rc)
-    ulib.nl()
+    melde_ren(rc)
     if !ulib.bad(rc) {
         undo_push(U_UMBENANNT, neu, alt, 0)
     }
@@ -315,24 +637,52 @@ fn umbenennen(alt: u64, neuname: u64) -> u64 {
     return rc_letzt
 }
 
+fn melde_ren(rc: u64) {
+    ulib.say((&s_ren[(0) as usize]) as u64)
+    ulib.sayn(rc)
+    ulib.nl()
+}
+
 // ------------------------------------------------------ Papierkorb
 
+// GEMESSEN: `korb.hinein` gibt bei Erfolg die Nummer (immer > 0) und
+// im Fehlerfall NULL zurueck -- keine Kernnummer. `ulib.bad(0)` ist
+// falsch, also haette der alte Test jeden Fehlschlag als Erfolg
+// gezaehlt und einen Rueckgaengig-Schritt fuer eine Datei angelegt,
+// die noch da liegt. Aus der Null wird hier -EIO, damit
+// `fehler_schluessel` etwas zu sagen hat.
 fn in_korb(pfad: u64) -> u64 {
     let id: u64 = korb.hinein(pfad)
+    var rc: u64 = 0
+    if id == 0 {
+        rc = 0 -% errno.E_IO
+    } else if ulib.bad(id) {
+        rc = id
+    }
+    // Hinter `rc=` steht der FEHLER und nicht die Korbnummer -- die
+    // Nummer ist bei Erfolg gross und saehe wie ein Fehlschlag aus.
     ulib.say((&s_trash[(0) as usize]) as u64)
+    ulib.sayn(rc)
+    ulib.say((&s_lz[(0) as usize]) as u64)
+    ulib.say((&s_id[(0) as usize]) as u64)
     ulib.sayn(id)
     ulib.nl()
-    if ulib.bad(id) {
-        rc_letzt = id
-        return id
+    if rc != 0 {
+        rc_letzt = rc
+        return rc
     }
     undo_push(U_KORB, pfad, pfad, id)
     rc_letzt = 0
     return 0
 }
 
+// Umschalt+Entf. Endgueltig ist endgueltig: es gibt keinen
+// Rueckgaengig-Schritt dafuer, weil es nichts mehr zurueckzuholen gibt.
 fn endgueltig(pfad: u64) -> u64 {
     let rc: u64 = dateiop.loesche(pfad, 0)
+    ulib.say((&s_purge[(0) as usize]) as u64)
+    ulib.sayn(rc)
+    ulib.nl()
     rc_letzt = 0
     if ulib.bad(rc) {
         rc_letzt = rc
@@ -401,9 +751,33 @@ fn rueckgaengig() -> u64 {
     let neu: u64 = p_at((&u_neu[(0) as usize]) as u64, i)
     var rc: u64 = 0
     if art == U_UMBENANNT || art == U_VERSCHOBEN {
-        rc = io.rename(neu, alt)
+        if dateiop.gibt_es(alt) {
+            // RUECKGAENGIG UEBERSCHREIBT NICHTS. Am alten Platz liegt
+            // inzwischen etwas anderes; der Schritt bleibt auf dem
+            // Stapel, und der Dateimanager sagt "gibt es schon".
+            rc = 0 -% errno.E_EXIST
+        } else {
+            rc = io.rename(neu, alt)
+            if rc == (0 -% errno.E_XDEV) {
+                // Das Verschieben ging ueber Traegergrenzen (Kopie und
+                // Loeschen); der Weg zurueck muss denselben nehmen.
+                rc = dateiop.verschiebe(neu, alt)
+            }
+        }
     } else if art == U_KORB {
-        rc = korb.zurueck(alt, u_id[(i) as usize])
+        // GEMESSEN: `korb.zurueck` antwortet mit EIGENEN Nummern
+        // (0 gut, 1 Infodatei fehlt, 2 Ziel belegt, 3 Kopie
+        // gescheitert) und nicht mit denen des Kerns. Unuebersetzt
+        // saehe `fehler_schluessel` in der 2 ein E_NOENT und zeigte
+        // den falschen Satz an.
+        let kr: u64 = korb.zurueck(alt, u_id[(i) as usize])
+        if kr == 1 {
+            rc = 0 -% errno.E_NOENT
+        } else if kr == 2 {
+            rc = 0 -% errno.E_EXIST
+        } else if kr != 0 {
+            rc = 0 -% errno.E_IO
+        }
     }
     ulib.say((&s_undo[(0) as usize]) as u64)
     ulib.sayn(art)
@@ -440,10 +814,16 @@ fn fehler_schluessel(rc: u64) -> u64 {
     if e == errno.E_ACCES || e == errno.E_PERM {
         return (&ks_acces[(0) as usize]) as u64
     }
-    if e == errno.E_EXIST {
+    if e == errno.E_EXIST || e == errno.E_NOTEMPTY {
+        // Ein nicht leerer Ordner ist derselbe Satz wie "gibt es
+        // schon": beide Male steht am Ziel etwas, das im Weg ist.
         return (&ks_exist[(0) as usize]) as u64
     }
-    if e == errno.E_NOSPC {
+    if e == errno.E_NOSPC || e == errno.E_FBIG || e == errno.E_NOMEM
+        || e == errno.E_MFILE || e == errno.E_NFILE
+        || e == errno.E_OVERFLOW {
+        // Alles, was heisst "es passt nicht mehr" -- ob Platte,
+        // Speicher oder Deskriptortafel.
         return (&ks_nospc[(0) as usize]) as u64
     }
     if e == errno.E_ISDIR || e == errno.E_NOTDIR {
@@ -452,12 +832,22 @@ fn fehler_schluessel(rc: u64) -> u64 {
     if e == errno.E_ROFS {
         return (&ks_rofs[(0) as usize]) as u64
     }
-    if e == errno.E_BUSY {
+    if e == errno.E_BUSY || e == errno.E_AGAIN || e == errno.E_INTR
+        || e == errno.E_TIMEDOUT {
         return (&ks_busy[(0) as usize]) as u64
     }
-    if e == errno.E_INVAL {
+    if e == errno.E_INVAL || e == errno.E_NAMETOOLONG || e == errno.E_LOOP
+        || e == errno.E_BADF || e == errno.E_FAULT || e == errno.E_RANGE
+        || e == errno.E_XDEV || e == errno.E_MLINK {
         return (&ks_inval[(0) as usize]) as u64
     }
+    if e == errno.E_NOEXEC || e == errno.E_CHILD || e == errno.E_SRCH
+        || e == errno.E_NOSYS {
+        // "Oeffnen mit" konnte das Programm nicht starten.
+        return (&ks_spawn[(0) as usize]) as u64
+    }
+    // JEDE andere Nummer landet hier -- kein Fehlschlag bleibt ohne
+    // Satz, auch der, den heute niemand vorhergesehen hat.
     return (&ks_ok[(0) as usize]) as u64
 }
 
@@ -473,11 +863,23 @@ fn abbrechen() {
     dateiop.abbrechen()
 }
 
+// Der Beleg beim Start: was auf dem Bus liegt, wie viele Schritte
+// zurueckgenommen werden koennen und wo die Grenzen stehen. Die
+// Abnahme soll die Zahlen LESEN, nicht schaetzen.
 fn melde() {
     ulib.say((&s_clip[(0) as usize]) as u64)
     ulib.sayn(n_ablage)
     ulib.say((&s_lz[(0) as usize]) as u64)
-    ulib.say((&s_n[(0) as usize]) as u64)
+    ulib.say((&s_schnitt[(0) as usize]) as u64)
+    ulib.sayn(ist_schnitt)
+    ulib.say((&s_lz[(0) as usize]) as u64)
+    ulib.say((&s_undo2[(0) as usize]) as u64)
     ulib.sayn(n_undo)
+    ulib.say((&s_lz[(0) as usize]) as u64)
+    ulib.say((&s_max[(0) as usize]) as u64)
+    ulib.sayn(MAXUNDO)
+    ulib.say((&s_lz[(0) as usize]) as u64)
+    ulib.say((&s_n[(0) as usize]) as u64)
+    ulib.sayn(MAXLIST)
     ulib.nl()
 }

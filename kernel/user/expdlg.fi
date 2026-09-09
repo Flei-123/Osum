@@ -9,7 +9,8 @@
 // gezaehlte Groesse und die Zahl der Stuecke darin
 // (`dateiop.groesse_rekursiv` / `zaehle_rekursiv` -- eine Umsetzung,
 // nicht zwei), dazu die DREI Zeiten aus `stat` (mtime/ctime/atime, OFS
-// v3 liefert sie wirklich), die Rechte und der Eigentuemer.
+// v3 liefert sie wirklich), die Rechte als rwx-Kette und der
+// Eigentuemer mit Namen aus /etc/passwd (`pw.name_of_uid`).
 //
 // DER TEXT WIRD GEBAUT UND NICHT GEMALT. Diese Datei setzt Zeilen aus
 // Katalogschluesseln und Zahlen zusammen; `explorer.fi` haengt das
@@ -17,28 +18,67 @@
 // hier, und das ist Absicht: die Regel dieses Baums ist, dass ausser
 // wlib/wlibc niemand malt.
 //
+// ZEIT: es gibt in diesem Programm genau EINE Zeitrechnung, die des
+// Modells (`expmodell.zeit_text`, Versatz aus /etc/time.conf, dieselbe
+// Quelle wie die Taskleiste). Der Plan nennt den dritten Wert von
+// `eig_bauen` "zeit_fn_oder_0"; Firn kennt keine Funktionszeiger, also
+// ist er hier ein SCHALTER: != 0 heisst "lesbare Ortszeit ueber das
+// Modell", 0 heisst "rohe Sekunden" (fuer Aufrufer ohne Modell, etwa
+// eine Probe). Die Rechnung bleibt so oder so an einer Stelle.
+//
 // OEFFNEN MIT: die Liste kommt aus `/apps/*.osp` ueber
 // `kernel/user/appdir.fi` -- dieselbe Quelle, aus der der Starter und
 // die Taskleiste ihre Eintraege nehmen. Eine zweite Liste waere eine
 // zweite Wahrheit darueber, was auf dieser Maschine installiert ist.
+//
+// MINIATUREN: PNG/BMP ueber `bild.fi`, JPEG ueber `jpeg.fi` -- dieselben
+// Umsetzer, die der Bildbetrachter (`viewer.fi`) benutzt. Die grossen
+// Puffer stehen NICHT im BSS: gemessen sind 4.210.688 Oktette fuer die
+// Bildpunkte (1280*800 plus Luft) und 786.432 fuer die Datei; das waere
+// mehr, als sich dieses Programm statisch nehmen darf (PLAN.md 1:
+// hoechstens rund 1 MiB BSS). Sie werden beim ERSTEN Miniaturwunsch
+// ueber `mem.map_pages` geholt -- wer nur die Liste ansieht, zahlt
+// nichts. Passt ein Bild nicht in den Puffer, sagt `mini_bereit` nein
+// und die Symbolansicht nimmt das Endungssymbol; halb geladen wird
+// nichts.
 
 profile kernel
 
 import ulib
 import libc.io
+import libc.mem
 import msg
 import dateiop
 import appdir
+import expmodell
+import bild
+import jpeg
+import pw
 
 export {
     eig_bauen, eig_ptr, eig_zeilen, eig_groesse, eig_stuecke,
     oeffnenmit_bauen, oeffnenmit_zahl, oeffnenmit_ptr,
-    oeffnenmit_exec, oeffnenmit_name,
+    oeffnenmit_exec, oeffnenmit_name, oeffnenmit_start,
     neue_datei, mini_bereit, mini_laden, mini_breite, mini_hoehe,
-    mini_daten, melde
+    mini_daten, mini_slot_laden, mini_slot_daten, mini_slot_breite,
+    mini_slot_hoehe, mini_slots, mini_kante, melde
 }
 
 const MAXAPP: u64 = 24
+
+// Der Puffer fuer die Bildpunkte (1280*800*4 plus eine Seite Luft) und
+// fuer die Datei -- die Zahlen sind aus viewer.fi uebernommen, damit
+// beide Programme dieselben Bilder schaffen und nicht jedes andere.
+const PIXCAP: u64 = 4210688
+const DATCAP: u64 = 786432
+const MINIW: u64 = 64        // Kantenlaenge einer Miniatur
+const MINSLOT: u64 = 16      // so viele Miniaturen haelt die Symbolansicht
+
+// Der Eigentuemer steht im stat-Puffer an Versatz 28 als 32-Bit-Zahl
+// (kernel/sys.fi:1850 `ST_UID`); lib/libc/io.fi gibt ihn heute nicht
+// heraus, deshalb steht die gemessene Zahl hier und nicht als Vermutung
+// irgendwo im Code.
+const ST_UID: u64 = 28
 
 static mut txt: [u8; 2048] = [0 as u8; 2048]
 static mut tp: u64 = 0
@@ -47,35 +87,63 @@ static mut gr_summe: u64 = 0
 static mut st_zahl: u64 = 0
 static mut st: [u8; 144] = [0 as u8; 144]
 static mut zbuf: [u8; 24] = [0 as u8; 24]
+static mut tbuf: [u8; 24] = [0 as u8; 24]
+static mut obuf: [u8; 64] = [0 as u8; 64]
 
 static mut a_blob: [u8; 1024] = [0 as u8; 1024]
 static mut a_exec: [u8; 3072] = [0 as u8; 3072]  // MAXAPP * 128
 static mut a_name: [u8; 1536] = [0 as u8; 1536]  // MAXAPP * 64
 static mut n_app: u64 = 0
+static mut ow_arg: [u8; 256] = [0 as u8; 256]
+static mut ow_argv: [u64; 2] = [0 as u64; 2]
 
 static mut m_da: u64 = 0
 static mut m_w: u64 = 0
 static mut m_h: u64 = 0
 static mut m_daten: u64 = 0
+static mut m_pix: u64 = 0
+static mut m_dat: u64 = 0
+static mut m_cache: u64 = 0
+static mut m_kein: u64 = 0     // 1 = Abbilden ist schon fehlgeschlagen
+static mut bw: u64 = 0
+static mut bh: u64 = 0
+static mut s_w: [u64; 16] = [0 as u64; 16]
+static mut s_h: [u64; 16] = [0 as u64; 16]
 
-static mut k_name: [u8; 24] = "explorer.prop.name\0\0\0\0\0\0"
-static mut k_typ: [u8; 24] = "explorer.prop.type\0\0\0\0\0\0"
-static mut k_size: [u8; 24] = "explorer.prop.size\0\0\0\0\0\0"
-static mut k_inhalt: [u8; 24] = "explorer.prop.contains\0\0"
-static mut k_mtime: [u8; 24] = "explorer.prop.changed\0\0\0"
-static mut k_ctime: [u8; 24] = "explorer.prop.created\0\0\0"
-static mut k_atime: [u8; 24] = "explorer.prop.read\0\0\0\0\0\0"
-static mut k_mode: [u8; 24] = "explorer.prop.rights\0\0\0\0"
-static mut k_owner: [u8; 24] = "explorer.prop.owner\0\0\0\0\0"
-static mut k_tdir: [u8; 24] = "explorer.type.folder\0\0\0\0"
-static mut k_tfile: [u8; 24] = "explorer.type.file\0\0\0\0\0\0"
-static mut t_appdir: [u8; 8] = "/apps\0\0\0"
-static mut s_eig: [u8; 32] = "explorer: props zeilen=\0\0\0\0\0\0\0\0\0"
-static mut s_gr: [u8; 12] = "bytes=\0\0\0\0\0\0"
-static mut s_st: [u8; 12] = "stueck=\0\0\0\0\0"
-static mut s_app: [u8; 28] = "explorer: openwith n=\0\0\0\0\0\0\0"
-static mut s_mini: [u8; 28] = "explorer: mini w=\0\0\0\0\0\0\0\0\0\0\0"
+static mut k_name: [u8; 19] = "explorer.prop.name\0"
+static mut k_typ: [u8; 19] = "explorer.prop.type\0"
+static mut k_size: [u8; 19] = "explorer.prop.size\0"
+static mut k_inhalt: [u8; 23] = "explorer.prop.contains\0"
+static mut k_mtime: [u8; 22] = "explorer.prop.changed\0"
+static mut k_ctime: [u8; 22] = "explorer.prop.created\0"
+static mut k_atime: [u8; 19] = "explorer.prop.read\0"
+static mut k_mode: [u8; 21] = "explorer.prop.rights\0"
+static mut k_owner: [u8; 20] = "explorer.prop.owner\0"
+static mut k_tdir: [u8; 21] = "explorer.type.folder\0"
+static mut k_tfile: [u8; 19] = "explorer.type.file\0"
+static mut k_tprog: [u8; 22] = "explorer.type.program\0"
+static mut k_timg: [u8; 20] = "explorer.type.image\0"
+static mut k_ttext: [u8; 19] = "explorer.type.text\0"
+static mut t_appdir: [u8; 6] = "/apps\0"
+static mut s_eig: [u8; 24] = "explorer: props zeilen=\0"
+static mut s_gr: [u8; 7] = "bytes=\0"
+static mut s_st: [u8; 8] = "stueck=\0"
+static mut s_app: [u8; 22] = "explorer: openwith n=\0"
+static mut s_start: [u8; 26] = "explorer: openwith start=\0"
+static mut s_pid: [u8; 6] = "pid=\0\0"
+static mut s_mini: [u8; 18] = "explorer: mini w=\0"
+static mut s_mh: [u8; 3] = "h=\0"
+static mut s_ms: [u8; 6] = "slot=\0"
 static mut s_lz: [u8; 2] = " \0"
+
+static mut e_png: [u8; 4] = "png\0"
+static mut e_bmp: [u8; 4] = "bmp\0"
+static mut e_jpg: [u8; 4] = "jpg\0"
+static mut e_jpeg: [u8; 5] = "jpeg\0"
+static mut e_txt: [u8; 4] = "txt\0"
+static mut e_md: [u8; 3] = "md\0"
+static mut e_conf: [u8; 5] = "conf\0"
+static mut e_log: [u8; 4] = "log\0"
 
 fn put(c: u64) {
     if tp < 2040 {
@@ -118,6 +186,104 @@ fn zeile_zahl(key: u64, wert: u64) {
     zeilen = zeilen + 1
 }
 
+// Eine Zeit als Zeile. `als_ort` != 0 heisst: durch das Modell, also
+// "JJJJ-MM-TT SS:MM" in Ortszeit; sonst die rohe Sekunde.
+fn zeile_zeit(key: u64, sek: u64, als_ort: u64) {
+    if als_ort != 0 {
+        let _p: u64 = expmodell.zeit_text(sek, (&tbuf[(0) as usize]) as u64)
+        zeile_txt(key, (&tbuf[(0) as usize]) as u64)
+    } else {
+        zeile_zahl(key, sek)
+    }
+}
+
+fn kleinbuch(c: u64) -> u64 {
+    if c >= 65 && c <= 90 {
+        return c + 32
+    }
+    return c
+}
+
+// Endet der Name auf ".<endung>"? Gross und klein gilt gleich -- OFS
+// unterscheidet die Schreibweise, die Endung sagt sie nicht.
+fn endet_auf(name: u64, endung: u64) -> bool {
+    let n: u64 = ulib.length(name)
+    let e: u64 = ulib.length(endung)
+    if n < e + 1 {
+        return false
+    }
+    if (__mmio_read8((name + n - e - 1) as *mut u8)) != 46 as u8 {
+        return false
+    }
+    var i: u64 = 0
+    while i < e {
+        let a: u64 = kleinbuch((__mmio_read8((name + n - e + i)
+            as *mut u8)) as u64)
+        let b: u64 = kleinbuch((__mmio_read8((endung + i)
+            as *mut u8)) as u64)
+        if a != b {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn ist_bildname(name: u64) -> bool {
+    if endet_auf(name, (&e_png[(0) as usize]) as u64) {
+        return true
+    }
+    if endet_auf(name, (&e_bmp[(0) as usize]) as u64) {
+        return true
+    }
+    if endet_auf(name, (&e_jpg[(0) as usize]) as u64) {
+        return true
+    }
+    if endet_auf(name, (&e_jpeg[(0) as usize]) as u64) {
+        return true
+    }
+    return false
+}
+
+fn ist_textname(name: u64) -> bool {
+    if endet_auf(name, (&e_txt[(0) as usize]) as u64) {
+        return true
+    }
+    if endet_auf(name, (&e_md[(0) as usize]) as u64) {
+        return true
+    }
+    if endet_auf(name, (&e_conf[(0) as usize]) as u64) {
+        return true
+    }
+    if endet_auf(name, (&e_log[(0) as usize]) as u64) {
+        return true
+    }
+    return false
+}
+
+// Die Art eines Stuecks als Katalogschluessel. Die ENDUNG kommt vor dem
+// Rechtebit, und das ist gemessen: `tools/osum/mkfs.py` legt JEDE Datei
+// eines Abbilds mit 0755 an -- entschiede das x-Bit zuerst, hiesse auf
+// einem frisch installierten System auch `eins.txt` "Programm". Ein
+// Bild und ein Text sind an ihrer Endung sicher zu erkennen; erst was
+// keine kennbare Endung hat, wird ueber das x-Bit zum Programm (auf
+// diesem System heisst ein Programm nicht ".exe").
+fn artschluessel(dir: bool, m: u64, name: u64) -> u64 {
+    if dir {
+        return (&k_tdir[(0) as usize]) as u64
+    }
+    if ist_bildname(name) {
+        return (&k_timg[(0) as usize]) as u64
+    }
+    if ist_textname(name) {
+        return (&k_ttext[(0) as usize]) as u64
+    }
+    if (m & 73) != 0 {
+        return (&k_tprog[(0) as usize]) as u64
+    }
+    return (&k_tfile[(0) as usize]) as u64
+}
+
 fn modetext(m: u64, dir: bool, out: u64) {
     var at: u64 = 0
     if dir {
@@ -147,10 +313,24 @@ fn modetext(m: u64, dir: bool, out: u64) {
     __mmio_write8((out + at) as *mut u8, 0 as u8)
 }
 
-// Die Eigenschaften eines Stuecks. `zeit_text` ist die Funktion des
-// Modells (Ortszeit aus /etc/time.conf) und wird hereingereicht, damit
-// es nur EINE Zeitrechnung im Programm gibt.
-fn eig_bauen(pfad: u64, name: u64, zeit_de: u64) -> u64 {
+// Der Eigentuemer: erst die Nummer aus dem stat-Puffer, dann der Name
+// aus /etc/passwd. Findet sich kein Eintrag (fremder Datentraeger,
+// geloeschtes Konto), bleibt die Nummer stehen -- lieber eine wahre
+// Zahl als ein erfundener Name.
+fn eigner_text(sb: u64, out: u64) {
+    let uid: u64 = (__mmio_read32((sb + ST_UID) as *mut u32)) as u64
+    if pw.name_of_uid(uid, out, 60) {
+        if (__mmio_read8((out) as *mut u8)) != 0 as u8 {
+            return
+        }
+    }
+    let n: u64 = ulib.digits(uid, out)
+    __mmio_write8((out + n) as *mut u8, 0 as u8)
+}
+
+// Die Eigenschaften eines Stuecks. `zeit_ort` != 0 laesst die drei
+// Zeiten durch die Ortszeit des Modells laufen (siehe Kopf).
+fn eig_bauen(pfad: u64, name: u64, zeit_ort: u64) -> u64 {
     tp = 0
     zeilen = 0
     gr_summe = 0
@@ -163,30 +343,35 @@ fn eig_bauen(pfad: u64, name: u64, zeit_de: u64) -> u64 {
         let sb: u64 = (&st[(0) as usize]) as u64
         m = io.stat_mode_of(sb)
         dir = io.is_dir_mode(m)
+        zeile_txt((&k_typ[(0) as usize]) as u64,
+            msg.get(artschluessel(dir, m, name)))
         if dir {
-            zeile_txt((&k_typ[(0) as usize]) as u64,
-                msg.get((&k_tdir[(0) as usize]) as u64))
+            // Ein Ordner hat keine eigene Groesse, die einen Menschen
+            // interessiert -- gefragt ist, was drin liegt. Beides kommt
+            // aus dateiop, damit `du` und dieses Fenster dasselbe sagen.
             gr_summe = dateiop.groesse_rekursiv(pfad, 0)
             st_zahl = dateiop.zaehle_rekursiv(pfad, 0)
             zeile_zahl((&k_size[(0) as usize]) as u64, gr_summe)
             zeile_zahl((&k_inhalt[(0) as usize]) as u64, st_zahl)
         } else {
-            zeile_txt((&k_typ[(0) as usize]) as u64,
-                msg.get((&k_tfile[(0) as usize]) as u64))
             gr_summe = io.stat_size(sb)
+            st_zahl = 1
             zeile_zahl((&k_size[(0) as usize]) as u64, gr_summe)
         }
-        // Die drei echten Zeiten. `zeit_de` ist ein Zeiger auf die
-        // Formatierfunktion des Modells; 0 heisst "roh in Sekunden",
-        // damit diese Datei auch ohne sie etwas Wahres sagt.
-        let _z: u64 = zeit_de
-        zeile_zahl((&k_ctime[(0) as usize]) as u64, io.stat_ctime(sb))
-        zeile_zahl((&k_mtime[(0) as usize]) as u64, io.stat_mtime(sb))
-        zeile_zahl((&k_atime[(0) as usize]) as u64, io.stat_atime(sb))
+        // Die drei ECHTEN Zeiten -- OFS v3 fuellt sie, sie sind nicht
+        // mehr das "--" von frueher.
+        zeile_zeit((&k_ctime[(0) as usize]) as u64, io.stat_ctime(sb),
+            zeit_ort)
+        zeile_zeit((&k_mtime[(0) as usize]) as u64, io.stat_mtime(sb),
+            zeit_ort)
+        zeile_zeit((&k_atime[(0) as usize]) as u64, io.stat_atime(sb),
+            zeit_ort)
         modetext(m, dir, (&zbuf[(0) as usize]) as u64)
         zeile_txt((&k_mode[(0) as usize]) as u64,
             (&zbuf[(0) as usize]) as u64)
-        zeile_zahl((&k_owner[(0) as usize]) as u64, 0)
+        eigner_text(sb, (&obuf[(0) as usize]) as u64)
+        zeile_txt((&k_owner[(0) as usize]) as u64,
+            (&obuf[(0) as usize]) as u64)
     }
     put(0)
     ulib.say((&s_eig[(0) as usize]) as u64)
@@ -272,10 +457,33 @@ fn oeffnenmit_bauen() -> u64 {
     return n_app
 }
 
+// Den Eintrag `i` mit der Datei `datei` starten. SYS_EXEC ist der
+// Aufruf MIT Argumenten (SYS_SPAWN nimmt keine) -- genau so startet
+// explorer.fi seit RUNDE TUERSCHLOSS auch alles andere. Rueckgabe ist
+// die Nummer des neuen Prozesses oder ein Kernfehler; wer sie nicht
+// prueft, verschluckt einen Fehlschlag, und das ist hier verboten.
+fn oeffnenmit_start(i: u64, datei: u64) -> u64 {
+    if i >= n_app {
+        return 0 -% 22
+    }
+    ulib.strncpy((&ow_arg[(0) as usize]) as u64, datei, 250)
+    ow_argv[(0) as usize] = oeffnenmit_exec(i)
+    ow_argv[(1) as usize] = (&ow_arg[(0) as usize]) as u64
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, oeffnenmit_exec(i),
+        (&ow_argv[(0) as usize]) as u64, 2)
+    ulib.say((&s_start[(0) as usize]) as u64)
+    ulib.sayn(i)
+    ulib.say((&s_lz[(0) as usize]) as u64)
+    ulib.say((&s_pid[(0) as usize]) as u64)
+    ulib.sayn(pid)
+    ulib.nl()
+    return pid
+}
+
 // ----------------------------------------------------- neue Datei
 
-// Eine leere Datei anlegen. Rueckgabe 0 oder die Nummer des Kerns --
-// `explorer.fi` macht daraus ein Hinweisfenster.
+// Eine leere Datei oder eine mit Inhalt anlegen. Rueckgabe 0 oder die
+// Nummer des Kerns -- `explorer.fi` macht daraus ein Hinweisfenster.
 fn neue_datei(pfad: u64, inhalt: u64) -> u64 {
     let fd: u64 = io.create(pfad)
     if ulib.bad(fd) {
@@ -297,23 +505,254 @@ fn neue_datei(pfad: u64, inhalt: u64) -> u64 {
 
 // ------------------------------------------------------- Miniaturen
 
-// Die Symbolansicht zeigt bei PNG und JPEG das Bild selbst. Geladen
-// wird ueber `kernel/user/bild.fi`; solange nichts geladen ist, sagt
-// `mini_bereit` nein und die Ansicht nimmt das Endungssymbol.
+// Die Puffer erst beim ersten Wunsch holen (siehe Kopf). Geht das
+// Abbilden schief, wird es NICHT jedes Mal neu versucht -- `m_kein`
+// merkt sich das, damit eine Symbolansicht auf einer engen Maschine
+// nicht bei jeder Zeile in denselben Fehler laeuft.
+fn puffer_da() -> bool {
+    if m_kein != 0 {
+        return false
+    }
+    if m_pix != 0 && m_dat != 0 && m_cache != 0 {
+        return true
+    }
+    if m_pix == 0 {
+        let p: u64 = mem.map_pages(PIXCAP)
+        if ulib.bad(p) || p == 0 {
+            m_kein = 1
+            return false
+        }
+        m_pix = p
+    }
+    if m_dat == 0 {
+        let d: u64 = mem.map_pages(DATCAP)
+        if ulib.bad(d) || d == 0 {
+            m_kein = 1
+            return false
+        }
+        m_dat = d
+    }
+    if m_cache == 0 {
+        let c: u64 = mem.map_pages(MINSLOT * MINIW * MINIW * 4)
+        if ulib.bad(c) || c == 0 {
+            m_kein = 1
+            return false
+        }
+        m_cache = c
+    }
+    return true
+}
+
+fn datei_lesen(pfad: u64) -> u64 {
+    let fd: u64 = io.open(pfad, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    var n: u64 = 0
+    var weiter: bool = true
+    while weiter {
+        let g: u64 = io.read(fd, m_dat + n, DATCAP - n)
+        if ulib.bad(g) || g == 0 {
+            weiter = false
+        } else {
+            n = n + g
+            if n >= DATCAP {
+                weiter = false
+            }
+        }
+    }
+    io.close(fd)
+    return n
+}
+
+// Ein Bild in den grossen Puffer holen. PNG und BMP macht `bild.fi`,
+// JPEG `jpeg.fi` -- dieselben Umsetzer wie im Bildbetrachter.
+fn bild_holen(pfad: u64) -> bool {
+    bw = 0
+    bh = 0
+    let n: u64 = datei_lesen(pfad)
+    if n == 0 {
+        return false
+    }
+    if bild.ist_png(m_dat, n) {
+        if !bild.png_lesen(m_dat, n, m_pix, PIXCAP) {
+            return false
+        }
+        bw = bild.breite()
+        bh = bild.hoehe()
+        return bw != 0 && bh != 0
+    }
+    if bild.ist_bmp(m_dat, n) {
+        if !bild.bmp_lesen(m_dat, n, m_pix, PIXCAP) {
+            return false
+        }
+        bw = bild.breite()
+        bh = bild.hoehe()
+        return bw != 0 && bh != 0
+    }
+    if jpeg.ist_jpeg(m_dat, n) {
+        if !jpeg.jpeg_lesen(m_dat, n, m_pix, PIXCAP) {
+            return false
+        }
+        bw = jpeg.breite()
+        bh = jpeg.hoehe()
+        return bw != 0 && bh != 0
+    }
+    return false
+}
+
+// Verkleinern mit dem naechsten Bildpunkt: eine Miniatur von 64 Kante
+// ist zu klein, als dass Mitteln sich lohnte, und ein Filter ueber ein
+// ganzes Bild kostet bei jedem Ordnerwechsel Zeit. Das Seitenverhaeltnis
+// bleibt: die laengere Kante wird MINIW, die kuerzere entsprechend
+// kleiner, damit nichts verzerrt.
+fn verkleinern(ziel: u64) -> u64 {
+    var i: u64 = 0
+    while i < MINIW * MINIW {
+        __mmio_write32((ziel + i * 4) as *mut u32, 0 as u32)
+        i = i + 1
+    }
+    var lang: u64 = bw
+    if bh > lang {
+        lang = bh
+    }
+    if lang == 0 {
+        return 0
+    }
+    var zw: u64 = bw * MINIW / lang
+    var zh: u64 = bh * MINIW / lang
+    if zw == 0 {
+        zw = 1
+    }
+    if zh == 0 {
+        zh = 1
+    }
+    var y: u64 = 0
+    while y < zh {
+        var x: u64 = 0
+        while x < zw {
+            let sx: u64 = x * bw / zw
+            let sy: u64 = y * bh / zh
+            if sx < bw && sy < bh {
+                let c: u64 = (__mmio_read32((m_pix + (sy * bw + sx) * 4)
+                    as *mut u32)) as u64
+                __mmio_write32((ziel + (y * zw + x) * 4) as *mut u32,
+                    c as u32)
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    m_w = zw
+    m_h = zh
+    return zw
+}
+
 fn mini_bereit() -> bool {
     return m_da != 0
 }
 
+fn mini_kante() -> u64 {
+    return MINIW
+}
+
+fn mini_slots() -> u64 {
+    return MINSLOT
+}
+
+fn slot_ptr(s: u64) -> u64 {
+    if m_cache == 0 || s >= MINSLOT {
+        return 0
+    }
+    return m_cache + s * MINIW * MINIW * 4
+}
+
+// Eine einzelne Miniatur. Rueckgabe ist die BREITE der Miniatur; 0
+// heisst "geht nicht" -- dann sagt `mini_bereit` ebenfalls nein und die
+// Symbolansicht nimmt das Endungssymbol. Der Zeiger aus `mini_daten`
+// gilt bis zum naechsten `mini_laden`; wer mehrere Bilder gleichzeitig
+// zeigen will, nimmt die Faecher (`mini_slot_laden`). ACHTUNG: dies
+// hier IST das Fach 0 -- die Symbolansicht faengt deshalb bei Fach 1
+// an, wenn sie daneben noch eine einzelne Vorschau haelt.
 fn mini_laden(pfad: u64) -> u64 {
-    let _p: u64 = pfad
     m_da = 0
     m_w = 0
     m_h = 0
     m_daten = 0
+    if puffer_da() {
+        if bild_holen(pfad) {
+            let z: u64 = slot_ptr(0)
+            if z != 0 {
+                if verkleinern(z) != 0 {
+                    m_daten = z
+                    m_da = 1
+                    s_w[(0) as usize] = m_w
+                    s_h[(0) as usize] = m_h
+                }
+            }
+        }
+    }
     ulib.say((&s_mini[(0) as usize]) as u64)
     ulib.sayn(m_w)
+    ulib.say((&s_lz[(0) as usize]) as u64)
+    ulib.say((&s_mh[(0) as usize]) as u64)
+    ulib.sayn(m_h)
     ulib.nl()
-    return 0
+    return m_w
+}
+
+// Dasselbe in ein Fach der Symbolansicht. Der Zeiger eines Fachs bleibt
+// stehen, solange kein anderes Bild in DIESES Fach geladen wird -- wlib
+// liest ihn beim naechsten Malen erneut, also darf er nicht wandern.
+fn mini_slot_laden(pfad: u64, slot: u64) -> u64 {
+    if slot >= MINSLOT {
+        return 0
+    }
+    s_w[(slot) as usize] = 0
+    s_h[(slot) as usize] = 0
+    var b: u64 = 0
+    if puffer_da() {
+        if bild_holen(pfad) {
+            let z: u64 = slot_ptr(slot)
+            if z != 0 {
+                b = verkleinern(z)
+                s_w[(slot) as usize] = m_w
+                s_h[(slot) as usize] = m_h
+                if b != 0 {
+                    m_da = 1
+                    m_daten = z
+                }
+            }
+        }
+    }
+    ulib.say((&s_mini[(0) as usize]) as u64)
+    ulib.sayn(b)
+    ulib.say((&s_lz[(0) as usize]) as u64)
+    ulib.say((&s_ms[(0) as usize]) as u64)
+    ulib.sayn(slot)
+    ulib.nl()
+    return b
+}
+
+fn mini_slot_daten(slot: u64) -> u64 {
+    if slot >= MINSLOT || s_w[(slot) as usize] == 0 {
+        return 0
+    }
+    return slot_ptr(slot)
+}
+
+fn mini_slot_breite(slot: u64) -> u64 {
+    if slot >= MINSLOT {
+        return 0
+    }
+    return s_w[(slot) as usize]
+}
+
+fn mini_slot_hoehe(slot: u64) -> u64 {
+    if slot >= MINSLOT {
+        return 0
+    }
+    return s_h[(slot) as usize]
 }
 
 fn mini_breite() -> u64 {
@@ -331,5 +770,11 @@ fn mini_daten() -> u64 {
 fn melde() {
     ulib.say((&s_app[(0) as usize]) as u64)
     ulib.sayn(n_app)
+    ulib.nl()
+    ulib.say((&s_mini[(0) as usize]) as u64)
+    ulib.sayn(m_w)
+    ulib.say((&s_lz[(0) as usize]) as u64)
+    ulib.say((&s_mh[(0) as usize]) as u64)
+    ulib.sayn(m_h)
     ulib.nl()
 }
