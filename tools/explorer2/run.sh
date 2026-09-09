@@ -195,8 +195,14 @@ warte 2
 taste f2
 warte 5
 foto 17-umbenennen
-taste esc
-warte 3
+# Der Dialog steht mit dem alten Namen im Feld und dem Text markiert;
+# ein angehaengtes `9` macht daraus einen anderen Namen, die
+# Eingabetaste fuehrt es aus. ERST DANN hat Strg+Z etwas zu tun.
+taste 9
+warte 2
+taste ret
+warteauf explorer: rename rc=0 || 60
+warte 4
 # --- RUECKGAENGIG, Strg+Z (Punkt 9)
 #
 # GEMESSEN: `sendkey ctrl-z` kam im Gast als `^Y` an. Die Platte ist
