@@ -80,6 +80,13 @@ def main():
     m.taste("ret")
     time.sleep(6)
 
+    # DAS STARTMENUE WIEDER ZUMACHEN. Es liegt auf Ebene 2 (L_TOP) und
+    # ist 880x600 gross -- es deckt die Stelle ab, an der gleich das
+    # Kontextmenue aufklappt, und schluckt den Klick darauf. Gemessen:
+    # `wm: fen i=4 id=11 x=8 y=792 w=880 h=600 lay=2`, und im Menue kam
+    # nie eine `wlib: mnklick`-Zeile an.
+    m.taste("esc")
+    time.sleep(1.5)
     s = serial()
     bar_top = HOEHE - 80 if SCALE == 2 else HOEHE - 40
     b = re.findall(r"taskbar: btn i=(\d+) id=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)", s)
