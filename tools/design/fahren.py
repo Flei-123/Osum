@@ -195,16 +195,38 @@ class Fahrer:
     # genau die hat vorher auch schon funktioniert. Also in Schritten,
     # damit wirklich mehrere `EV_MOVE` entstehen.
     def ziehe(self, x0, y0, x1, y1, schritte=8):
+        # ======================================== RUNDE ECHTHARDWARE-3
+        # WAEHREND DES ZIEHENS DARF DER ZEIGER NICHT UEBER DIE ECKE.
+        #
+        # `fahre` faehrt IMMER erst nach 0,0 (`ecke`) und von dort zum
+        # Ziel -- absolut positionieren geht ueber `mouse_move` nur so.
+        # Beim ZIEHEN ist das toedlich: die gedrueckte Taste wandert
+        # mit, das Kontrollzentrum sieht einen Druck bei 0,0 und
+        # schliesst sich voellig zu Recht (`qs: closed by outside`).
+        # Es sah aus, als taete der Regler nichts -- der Fehler lag im
+        # LAEUFER, und er hat mich drei Laeufe gekostet.
+        #
+        # Also: zum Startpunkt absolut fahren, druecken, und ab da nur
+        # noch RELATIV bewegen.
         self.fahre(x0, y0)
         time.sleep(0.35)
         self.cmd("mouse_button 1")
-        time.sleep(0.2)
+        time.sleep(0.25)
+        cx, cy = x0, y0
         for k in range(1, schritte + 1):
             zx = x0 + (x1 - x0) * k // schritte
             zy = y0 + (y1 - y0) * k // schritte
-            self.fahre(zx, zy)
-            time.sleep(0.12)
-        time.sleep(0.3)
+            dx, dy = zx - cx, zy - cy
+            while dx or dy:
+                sx = max(-120, min(120, dx))
+                sy = max(-120, min(120, dy))
+                self.cmd("mouse_move %d %d" % (sx, sy))
+                dx -= sx
+                dy -= sy
+            cx, cy = zx, zy
+            time.sleep(0.15)
+        self.x, self.y = cx, cy
+        time.sleep(0.35)
         self.cmd("mouse_button 0")
         time.sleep(1.2)
 
