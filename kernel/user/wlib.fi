@@ -76,7 +76,7 @@ export {
     list_einklick,
     focus_id, set_focus, fired_kind, fired_index, fired_win,
     step, draw_all, dirty, dirty_all, alive, quit,
-    menu_open, menu_at, menu_win, dlg_text, dlg_open, dlg_ask, dlg_state,
+    menu_open, menu_at, menu_win, menu_close, dlg_text, dlg_open, dlg_ask, dlg_state,
     dlg_close, dlg_button, dlg_win, dlg_label,
     counts, blits_done, key_last,
     // RUNDE DESIGN-2: die Bewegung. Ein Programm braucht davon im
@@ -120,7 +120,7 @@ export {
     bild_bw, bild_bh, slider,
     K_MENUBAR, K_CHOICE, K_SEP, K_SCROLL,
     NK_MAIN, NK_MENU, NK_DLG, NK_TIP,
-    tip_show, tip_hide, tip_open, tip_hover, TIP_MS, TIP_TICKS,
+    tip_win_open, tip_win_close, tip_win_id,
     KEY_TAB, KEY_ENTER, KEY_BS, KEY_ESC, KEY_UP, KEY_DOWN, KEY_LEFT,
     KEY_RIGHT, KEY_HOME, KEY_END, KEY_PGUP, KEY_PGDN, KEY_DEL,
     KEY_SDEL,
@@ -319,6 +319,20 @@ const NK_DLG: u64 = 2
 // mit einer Zeile: sie nimmt KEINE Klicks an, hat keinen Rahmen zum
 // Anfassen und verschwindet von selbst. Ein Menue, das nichts kann,
 // waere ein Menue, das man versehentlich bedient.
+//
+// DIE ART STEHT HIER, DIE BLASE SELBST NICHT -- und das ist keine
+// Geschmacksfrage, sondern eine Messung. Der erste Entwurf hatte
+// `tip_show`/`tip_hide`/`tip_hover`/`paint_tip` in dieser Datei. Danach
+// brach der SELBSTGEHOSTETE Uebersetzer `firnc1` an `netmon`,
+// `freunde` und `powermon` ab -- RC=1, keine Zeile Ausgabe, 4 MB
+// Speicher (also keine Wirtsknappheit, sondern eine feste Tabelle in
+// firnc1). `firnc0` uebersetzte dasselbe klaglos, das Abbild lief, und
+// nur der K16-Pruefstand sah es: "131 gebunden, erwartet 134".
+//
+// EINZELN uebersetzt jeder Bestandteil; es ist die SUMME. wlib ist in
+// dreizehn Programme gelinkt, und was hier liegt, kostet in jedem
+// davon. Die Blase braucht GENAU EIN Programm -- die Taskleiste --,
+// also liegt sie dort (kernel/user/taskbar.fi, Abschnitt INFOBLASE).
 const NK_TIP: u64 = 3
 
 // Die Felder eines Widgets. Sechzehn Woerter, ein Feld je Wort -- Firn
@@ -428,7 +442,21 @@ const KEY_SDEL: u64 = 0x10A
 // ------------------------------------------------------- der Zustand
 
 static mut wd: [u64; 4000] = [0 as u64; 4000] // MAXWD * D_FIELDS
-static mut wn: [u64; 56] = [0 as u64; 56] // MAXWN * N_FIELDS
+// RUNDE ECHTHARDWARE-2: 70 UND NICHT 56 -- MAXWN IST 5 GEWORDEN.
+//
+// Diese Zeile ist beim Anheben von MAXWN (4 -> 5, fuer die Infoblase)
+// stehengeblieben, und das ist genau die Sorte Fehler, die eine
+// Konstante mit einer HANDGERECHNETEN Feldgroesse danebenstellt: 56
+// ist 4 * 14, gebraucht werden 5 * 14 = 70. Das fuenfte Fenster hat
+// damit ueber das Feldende hinausgeschrieben.
+//
+// GEFUNDEN HAT ES DER K16-PRUEFSTAND, nicht das laufende System: der
+// selbstgehostete Uebersetzer `firnc1` brach an `netmon`, `freunde`
+// und `powermon` ohne eine Zeile Ausgabe ab (131 gebundene Programme
+// statt 134). Im Abbild lief unterdessen alles -- `firnc0` uebersetzt
+// dasselbe klaglos. Ein Pruefstand, der zwei Uebersetzer gegeneinander
+// haelt, ist genau dafuer da.
+static mut wn: [u64; 70] = [0 as u64; 70] // MAXWN * N_FIELDS
 static mut ct: [u64; 312] = [0 as u64; 312] // MAXCT * C_FIELDS
 static mut nwd: u64 = 0
 static mut nwn: u64 = 0
@@ -1058,7 +1086,10 @@ fn close(w: u64) {
 // hinzufuegt -- so bleibt die Zahl beschraenkt und die Flaeche klein.
 const DIRT_MAX: u64 = 4
 
-static mut dr: [u64; 64] = [0 as u64; 64] // MAXWN * DIRT_MAX * 4
+// RUNDE ECHTHARDWARE-2: 80 statt 64 -- dieselbe Rechnung wie bei `wn`
+// eine Seite weiter oben, und derselbe Grund: MAXWN ist 5.
+// 5 * DIRT_MAX(4) * 4 = 80.
+static mut dr: [u64; 80] = [0 as u64; 80] // MAXWN * DIRT_MAX * 4
 
 fn dg(w: u64, k: u64, f: u64) -> u64 {
     return dr[((w * DIRT_MAX + k) * 4 + f) as usize]
@@ -4135,181 +4166,47 @@ fn paint_one(i: u64) {
 // waere eine Verwaltung ohne Nutzen.
 // ==================================================== RUNDE ECHTHARDWARE-2
 //
-// DIE INFOBLASE (TOOLTIP).
+// EIN FENSTER FUER EINE INFOBLASE -- ANGELEGT UND WIEDER WEGGERAEUMT.
 //
-// Justins Vorgabe E: wer mit dem Zeiger auf einem Symbol der Leiste,
-// im Tray, auf einem Eintrag des Startmenues oder auf einem
-// Fensterknopf STEHENBLEIBT, soll nach einer halben Sekunde lesen
-// koennen, was das ist.
+// Das ist ALLES, was die Bibliothek zur Blase beitraegt: das Fenster.
+// Gezeichnet wird sie vom Programm, dem sie gehoert (die Taskleiste),
+// und zwar mit denselben `mal_*`-Aufrufen wie jede andere Flaeche.
 //
-// DREI ENTSCHEIDUNGEN, und jede hat einen Grund:
-//
-// 1. EIN EIGENES FENSTER (NK_TIP) und kein Rechteck im Fenster
-//    darunter. Eine Blase am oberen Rand der Taskleiste muss UEBER dem
-//    Fensterrand stehen koennen -- innerhalb des Leistenfensters
-//    gemalt waere sie an der Leistenkante abgeschnitten.
-//
-// 2. SIE NIMMT KEINE KLICKS AN. `hit_win` gibt fuer NK_TIP nichts
-//    zurueck; wer auf eine Blase klickt, trifft, was darunter liegt.
-//    Eine Blase, die den Klick schluckt, waere schlimmer als keine.
-//
-// 3. DIE ZEIT WIRD VOM AUFRUFER GEZAEHLT, nicht hier. `tip_hover` ist
-//    eine reine Rechnung: "der Zeiger steht seit `seit` auf Marke
-//    `was` -- zeig oder verbirg". Diese Bibliothek hat keine eigene
-//    Schleife, in der eine halbe Sekunde vergehen koennte, und ein
-//    Zeitgeber, den niemand tickt, ginge nie los.
-//
-// GEMESSEN wird sie ueber `wlib: tip` auf der seriellen Leitung --
-// sonst ist "die Blase kam" von "die Blase kam nicht" nicht zu
-// unterscheiden.
-// DER ZEITGEBER SCHLAEGT 100-MAL JE SEKUNDE (TICK_HZ = 100 in
-// kernel/sys.fi), also sind Justins 500 ms FUENFZIG Schlaege und
-// nicht fuenfhundert. Mit 500 haette die Blase erst nach fuenf
-// Sekunden gestanden -- und wer fuenf Sekunden wartet, haelt sie fuer
-// kaputt.
-const TIP_TICKS: u64 = 50 // 500 ms bei 100 Hz
-const TIP_MS: u64 = 500 // dieselbe Zeit in Millisekunden, fuer den Bericht
-
-static mut tp_win: u64 = 0xFFFFFFFFFFFFFFFF
-static mut tp_text: u64 = 0
-static mut tp_was: u64 = 0 // welche Marke gerade gilt (0 = keine)
-static mut tp_seit: u64 = 0 // seit wann, in Ticks
-static mut tp_zahl: u64 = 0
-
-static mut s_tip: [u8; 12] = "wlib: tip [\0"
-static mut s_tipx: [u8; 7] = "] x=\0\0\0"
-static mut s_tipy: [u8; 5] = " y=\0\0"
-static mut s_tipn: [u8; 5] = " n=\0\0"
-static mut s_tipzu: [u8; 15] = "wlib: tip zu\0\0\0"
-static mut s_tipvoll: [u8; 22] = "wlib: tip kein Platz\0\0"
-
-fn tip_open() -> bool {
-    return tp_win != 0xFFFFFFFFFFFFFFFF
+// WARUM DIE TEILUNG. Der erste Entwurf hatte die ganze Blase hier --
+// Aufmachen, Zumachen, Verweilzeit, Zeichnen. Danach brach `firnc1` an
+// drei Programmen ab (siehe die Begruendung bei NK_TIP). wlib steckt in
+// dreizehn Programmen; die Blase braucht eines. Also bleibt hier der
+// Teil, der ohne die Fenstertafel dieser Datei nicht ginge, und der
+// Rest zieht dorthin, wo er gebraucht wird.
+fn tip_win_open(x: u64, y: u64, w: u64, h: u64, titel: u64) -> u64 {
+    let i: u64 = new_win(x, y, w, h, titel, NK_TIP)
+    if i >= MAXWN {
+        return MAXWN
+    }
+    // Ohne das kommt die Blase mit Titelleiste -- gemessen: tp=30,
+    // dreissig Bildpunkte Schmuck ueber einer Zeile Text.
+    let _d: u64 = wlibc.win_state(ng(i, N_H), wlibc.WS_DECO, 0)
+    dirty_all(i)
+    return i
 }
 
-// Die Blase AUFMACHEN, an einer Stelle des Schirms. `sx`/`sy` ist der
-// Punkt, an dem der Zeiger steht; die Blase setzt sich darueber, wie
-// es jedes System tut -- unter dem Zeiger verdeckte sie das, worueber
-// sie spricht.
-fn tip_show(text: u64, sx: u64, sy: u64) {
-    if text == 0 || tlen(text) == 0 {
+fn tip_win_close(i: u64) {
+    if i >= MAXWN {
         return
     }
-    tip_hide()
-    let n: u64 = tlen(text)
-    let pad: u64 = 6 * wlibc.ui_scale()
-    let bw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), text, n)
-        + 2 * pad
-    let bh: u64 = zeilen_hoehe() + pad
-    // Nicht ueber den Rand: links wie rechts, oben wie unten.
-    var x: u64 = sx
-    if x + bw + 2 > wlibc.screen_w() {
-        x = sub(wlibc.screen_w(), bw + 2)
-    }
-    var y: u64 = sub(sy, bh + 4 * wlibc.ui_scale())
-    if sy < bh + 4 * wlibc.ui_scale() {
-        y = sy + 4 * wlibc.ui_scale()
-    }
-    let w: u64 = new_win(x, y, bw, bh, text, NK_TIP)
-    if w >= MAXWN {
-        // KEIN PLATZ -- und das wird GESAGT. Eine Blase, die still
-        // ausbleibt, ist von einer Blase, die nicht ausgeloest wurde,
-        // nicht zu unterscheiden; genau daran ist diese Runde einmal
-        // haengengeblieben.
-        say((&s_tipvoll[0 as usize]) as u64)
-        ulib.nl()
-        return
-    }
-    // KEIN TITELBALKEN. Ohne das kommt die Blase mit der Dekoration
-    // eines gewoehnlichen Fensters -- auf der Leitung stand im ersten
-    // Lauf `tp=30`, also dreissig Bildpunkte Titelleiste ueber einem
-    // Text von einer Zeile. Eine Blase mit Titelbalken ist keine
-    // Blase, sondern ein winziges Fenster.
-    let _d: u64 = wlibc.win_state(ng(w, N_H), wlibc.WS_DECO, 0)
-    tp_win = w
-    tp_text = text
-    tp_zahl = tp_zahl + 1
-    ns(w, N_DATA, text)
-    ns(w, N_CNT, n)
-    dirty_all(w)
-    say((&s_tip[0 as usize]) as u64)
-    say(text)
-    say((&s_tipx[0 as usize]) as u64)
-    ulib.sayn(x)
-    say((&s_tipy[0 as usize]) as u64)
-    ulib.sayn(y)
-    say((&s_tipn[0 as usize]) as u64)
-    ulib.sayn(tp_zahl)
-    ulib.nl()
-}
-
-fn tip_hide() {
-    if tp_win == 0xFFFFFFFFFFFFFFFF {
-        return
-    }
-    let w: u64 = tp_win
-    tp_win = 0xFFFFFFFFFFFFFFFF
-    tp_text = 0
-    close(w)
+    close(i)
     // Der Platz wird wieder frei -- wie bei `menu_close`. Eine Leiste,
     // die tausendmal am Tag eine Blase zeigt, darf die Fenstertafel
     // nicht vollaufen lassen.
-    if w + 1 == nwn {
+    if i + 1 == nwn {
         nwn = nwn - 1
     }
-    say((&s_tipzu[0 as usize]) as u64)
-    ulib.nl()
 }
 
-// DER VERWEILZEITGEBER, als reine Rechnung.
-//
-//   was   eine Zahl, die die Marke unter dem Zeiger benennt (0 = keine)
-//   text  der Text zu dieser Marke
-//   sx/sy wo der Zeiger steht
-//
-// Der Aufrufer ruft das in seiner Ereignisschleife. Wechselt `was`,
-// faengt die Zeit von vorn an und eine offene Blase geht zu. Bleibt
-// `was` laenger als TIP_MS gleich, geht sie auf.
-fn tip_hover(was: u64, text: u64, sx: u64, sy: u64) {
-    let jetzt: u64 = ticks()
-    if was != tp_was {
-        tp_was = was
-        tp_seit = jetzt
-        tip_hide()
-        return
-    }
-    if was == 0 || tip_open() {
-        return
-    }
-    if jetzt < tp_seit {
-        tp_seit = jetzt
-        return
-    }
-    // `ticks` zaehlt Millisekunden (kernel: I_TICKS).
-    if jetzt - tp_seit >= TIP_TICKS {
-        tip_show(text, sx, sy)
-    }
-}
-
-fn paint_tip(w: u64) {
-    let bw: u64 = ng(w, N_W)
-    let bh: u64 = ng(w, N_HH)
-    wlib_tip_flaeche(bw, bh)
-    let p: u64 = ng(w, N_DATA)
-    if p == 0 {
-        return
-    }
-    let pad: u64 = 6 * wlibc.ui_scale()
-    let base: u64 = (bh + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())) / 2
-    let _e: u64 = put_text(wlibc.F_UI, wlibc.px_ui(), pad, base,
-        sub(bw, 2 * pad), p, ng(w, N_CNT), wlibc.theme(wlibc.T_FG), 0)
-}
-
-// Flaeche und Rand der Blase -- durch das Rahmenwerk, damit sie unter
-// `osum` runde Ecken hat und unter `classic` eckige.
-fn wlib_tip_flaeche(bw: u64, bh: u64) {
-    mal_tafel(0, 0, bw, bh, MR_TAFEL, wlibc.EL_OVERLAY,
-        wlibc.theme(wlibc.T_MENU), wlibc.theme(wlibc.T_LINE))
+// Die Kennung beim Fensterserver -- die braucht der Eigentuemer, um
+// seine Blase zu bemalen und auf den Schirm zu schieben.
+fn tip_win_id(i: u64) -> u64 {
+    return ng(i, N_H)
 }
 
 fn paint_menu(w: u64) {
@@ -4374,8 +4271,6 @@ fn flush_rect(w: u64, x0: u64, y0: u64, x1: u64, y1: u64) -> u64 {
         paint_bg(w, x0, yb, x1 - x0, ye - yb)
         if ng(w, N_KIND) == NK_MENU {
             paint_menu(w)
-        } else if ng(w, N_KIND) == NK_TIP {
-            paint_tip(w)
         } else {
             var i: u64 = 0
             while i < nwd {
