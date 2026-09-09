@@ -120,7 +120,7 @@ export {
     on_mouse, on_key, term_write, term_out, term_cols, term_rows, term_cx, term_cy,
     bind_tty, key_tty, tty_of, NO_TTY,
     poll, composites, blits, pixels, last_us, cursor_on, set_cursor,
-    shape, set_shape,
+    shape, set_shape, set_keys,
     downs, moves_seen, hits_seen, win_keys,
     set_fonts, font_ui, font_mono, px_ui, px_mono,
     selftest, selftest_max, failbits, diag1, diag2,
@@ -137,7 +137,7 @@ export {
     win_paints, win_px, win_flags, top_layer_win, wins_say,
     MAX_W_HARD, MAX_H_HARD,
     E_KEY, E_DOWN, E_UP, E_MOVE, E_CLOSE, E_FOCUS, E_RESIZE,
-    L_DESK, L_NORMAL, L_TOP, F_HIDDEN, F_NODECO, F_TABBED,
+    L_DESK, L_NORMAL, L_TOP, F_HIDDEN, F_NODECO, F_TABBED, F_KEYS,
     EDGE_BOTTOM, EDGE_TOP, EDGE_LEFT, EDGE_RIGHT, F_MAXIMIZED,
     // RUNDE BLECHZWEI: wie breit die Tafel wirklich ist, und wo eine
     // einzelne Zeile steht -- damit nur SIE uebertragen werden muss.
@@ -236,6 +236,22 @@ const F_MAXIMIZED: u64 = 4
 // dasselbe wie F_HIDDEN (minimiert): ein Klick auf den Reiter holt es
 // zurueck, ein Klick auf den Fensterknopf der Leiste nicht.
 const F_TABBED: u64 = 8
+
+// ============================================ RUNDE ECHTHARDWARE-1
+// EIN FENSTER DER OBERSTEN EBENE, DAS DIE TASTATUR TROTZDEM WILL.
+//
+// Justins Befund vom 09.09.: im Startmenue laesst sich nichts tippen.
+// Die Ursache ist eine Regel, die fuer die Taskleiste richtig ist und
+// fuer das Startmenue falsch: `on_mouse` gibt den Fokus NUR an
+// Fenster der Ebene L_NORMAL (Runde DESKTOP -- "ein Schreibtisch, der
+// den Fokus an sich zieht, macht jeden Tastendruck danach
+// wirkungslos"). Der Starter liegt aber auf L_TOP, weil er UEBER allem
+// stehen muss -- und bekam damit nie eine Taste.
+//
+// Die Ebene zu wechseln waere die falsche Abhilfe: dann verschwindet
+// das Menue hinter Fenstern. Also sagt das Fenster selbst, was es
+// will. Vorgabe ist NEIN, also bleibt die Leiste, was sie war.
+const F_KEYS: u64 = 16
 
 // ADDENDUM TASKBAR: the four screen edges. The numbers are written to
 // /etc/taskbar.conf as words ("bottom", "top", "left", "right") and
@@ -2735,7 +2751,8 @@ fn set_layer(state: u64, i: u64, l: u64) {
     wsv(state, i, W_LAYER, l)
     // Ein Fenster, das aus der normalen Ebene verschwindet, darf den
     // Eingabefokus nicht mitnehmen.
-    if l != L_NORMAL && focus(state) == i {
+    if l != L_NORMAL && focus(state) == i
+        && (wg(state, i, W_FLAGS) & F_KEYS) == 0 {
         ss(state, S_FOCUS, 0)
         let o: u64 = top_visible(state)
         if o < MAX_WIN {
@@ -3157,6 +3174,26 @@ fn maximize(state: u64, i: u64, on: bool) -> bool {
 // selbst gebaut hat. Eine Diagnosezeile, die eine andere zerschneidet,
 // ist keine Diagnose.
 static mut fokus_still: u64 = 0
+
+// RUNDE ECHTHARDWARE-1: das Fenster sagt, ob es die Tastatur will.
+//
+// Wird es JETZT gesetzt und das Fenster liegt schon oben und ist
+// sichtbar, bekommt es den Fokus sofort -- sonst muesste man es erst
+// noch einmal anklicken, und genau dieser zweite Klick war der Punkt,
+// an dem Justins Startmenue "nichts tut" aussah.
+fn set_keys(state: u64, i: u64, an: bool) {
+    if !valid(state, i) {
+        return
+    }
+    if an {
+        wsv(state, i, W_FLAGS, wg(state, i, W_FLAGS) | F_KEYS)
+        if (wg(state, i, W_FLAGS) & F_HIDDEN) == 0 {
+            set_focus(state, i)
+        }
+    } else {
+        wsv(state, i, W_FLAGS, wg(state, i, W_FLAGS) & ~F_KEYS)
+    }
+}
 
 fn set_focus(state: u64, i: u64) {
     if !valid(state, i) {
@@ -5724,7 +5761,10 @@ fn on_mouse(state: u64) {
             // Fenster wechseln und nicht in die Leiste tippen -- und
             // ein Schreibtisch, der den Fokus an sich zieht, macht
             // jeden Tastendruck danach wirkungslos.
-            if wg(state, i, W_LAYER) == L_NORMAL {
+            // RUNDE ECHTHARDWARE-1: ... ODER WENN DAS FENSTER
+            // AUSDRUECKLICH DARUM GEBETEN HAT (F_KEYS).
+            if wg(state, i, W_LAYER) == L_NORMAL
+                || (wg(state, i, W_FLAGS) & F_KEYS) != 0 {
                 set_focus(state, i)
             }
             if mit_schmuck {

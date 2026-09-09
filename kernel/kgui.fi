@@ -370,6 +370,23 @@ fn graphics(state: u64, mbi: u64) {
             let _sc: bool = fb.set_uiscale(state, ds)
         }
     }
+    // ============================================ RUNDE ECHTHARDWARE-1
+    // `uiscale=<n>` SCHLAEGT DAS EDID.
+    //
+    // Justins Fehler vom 09.09. (Kacheltitel ueber dem Zustandswort,
+    // "Ausfuehre" statt "Ausfuehren") treten NUR bei Vervielfachung 2
+    // auf, und die kommt aus dem EDID seines Monitors. QEMU liefert
+    // kein EDID, also stand im Emulator immer 1 -- und deshalb war
+    // KEINER dieser Fehler im Emulator zu sehen, obwohl beide seit
+    // Wochen im Baum lagen.
+    //
+    // Ein Fehler, den der Pruefstand nicht ausloesen kann, ist ein
+    // Fehler, der wiederkommt. `kmain` liest das Wort und legt die Zahl
+    // ab; hier wird sie angewandt, NACH dem EDID, damit sie es schlaegt.
+    let uw: u64 = kstate.get(state, kstate.UISCALE_WUNSCH)
+    if uw >= 1 && uw <= 4 {
+        let _sw: bool = fb.set_uiscale(state, uw)
+    }
 
     serial.puts((&s_geo[0]) as u64)
     serial.dec(fb.width(state))
@@ -5042,7 +5059,22 @@ fn tafel_streichen(state: u64) {
     tn = puls_zwei(state, tp, tn, time.rtc_field(time.R_DAY))
     tn = puls_text(state, tp, tn, (&u_pt[0]) as u64)
     tn = puls_zwei(state, tp, tn, time.rtc_field(time.R_MONTH))
-    // Gruen, solange Kernuhr und RTC in derselben Minute stehen.
+    // RUNDE ECHTHARDWARE-1: DIE UHR HAT JETZT EINE QUELLE, und diese
+    // Zeile prueft genau das.
+    //
+    // `KRN` ist ORTSZEIT (`now_local`), die RTC steht -- Vorgabe --
+    // ebenfalls auf Ortszeit. Beide muessen deshalb DIESELBE Minute
+    // zeigen. Vorher wurde der Versatz zweimal gezaehlt und die Zeile
+    // stand auf Justins Foto rot bei 14:38 gegen 12:38; jetzt ist ein
+    // Unterschied wieder das, was er sein soll: ein Fehler.
+    //
+    // `U` sagt dazu, WIE die RTC gelesen wurde -- 0 Ortszeit (Vorgabe,
+    // wie Windows), 1 UTC (`rtcutc`). Ohne diese Ziffer laesst sich aus
+    // einem Foto nicht entscheiden, ob eine falsche Uhr am Versatz oder
+    // an der Auslegung liegt.
+    var u_u: [u8; 4] = " U \0"
+    tn = puls_text(state, tp, tn, (&u_u[0]) as u64)
+    tn = puls_zahl(state, tp, tn, time.rtc_utc(state))
     var ufarb: u64 = wm.mess_rot(state)
     if (ks / 60) % 60 == time.rtc_field(time.R_MIN) {
         ufarb = wm.mess_gruen(state)
@@ -5143,7 +5175,23 @@ fn tafel_streichen(state: u64) {
     tn = puls_text(state, tp, 0, (&t21[0]) as u64)
     var fi: u64 = 0
     var fvoll: u64 = 0
-    while fi < usb.fund_count(state) && fi < 6 {
+    // ==================================== RUNDE ECHTHARDWARE-1
+    // FUENF FUNDE UND NICHT SECHS -- die Zeile war um genau drei
+    // Zeichen zu lang, und das hat die Tafel rot gemacht.
+    //
+    // Gerechnet: Kopf "21 FUND  " sind 9 Zeichen, je Fund kommen
+    // "<Anschluss>:ADCB " -- eine Ziffer, ein Doppelpunkt, vier Marken,
+    // ein Leerzeichen, also 7. Sechs Funde sind 9 + 42 = 51, die Tafel
+    // ist 48 breit (TAFEL_SP). Auf Justins Foto stand deshalb
+    // "23 SICHER ... LG 2 Z21 51": zwei Zeilen abgeschnitten, die
+    // laengste war Zeile 21 mit 51 Zeichen -- und Zeile 23 wird rot,
+    // sobald `zu_lang` nicht null ist.
+    //
+    // Das war also KEIN Schwellwert und kein Sicherheitsproblem: es
+    // war eine Zeile, die nicht auf den Schirm passt, und die Tafel
+    // hat genau das gemeldet, wofuer sie gebaut wurde. Fuenf Funde
+    // sind 9 + 35 = 44 und passen.
+    while fi < usb.fund_count(state) && fi < 5 {
         let fl: u64 = usb.fund_flags(state, fi)
         tn = puls_zahl(state, tp, tn, usb.fund_port(state, fi))
         tn = puls_text(state, tp, tn, (&f_dp[0]) as u64)
@@ -5170,6 +5218,12 @@ fn tafel_streichen(state: u64) {
         }
         tn = puls_text(state, tp, tn, (&f_sp[0]) as u64)
         fi = fi + 1
+    }
+    // WAS NICHT MEHR HINPASST, WIRD GEZAEHLT UND NICHT VERSCHWIEGEN.
+    if usb.fund_count(state) > 5 {
+        var f_pl: [u8; 2] = "+\0"
+        tn = puls_text(state, tp, tn, (&f_pl[0]) as u64)
+        tn = puls_zahl(state, tp, tn, usb.fund_count(state) - 5)
     }
     tafel_merken(21, tp, tn, wm.mess_ampel(state, fvoll))
     tafel_zeile_sagen(state, tp, tn)
@@ -5199,7 +5253,12 @@ fn tafel_streichen(state: u64) {
     //        DHCP hat nichts gebracht; steht dort etwas aus seinem
     //        Heimnetz, ist die Leitung fertig und `jarvisd` kann
     //        hinaus.
-    var t22: [u8; 10] = "22 NETZ  \0"
+    // RUNDE ECHTHARDWARE-1: EIN LEERZEICHEN WENIGER IM KOPF.
+    // Mit dem DHCP-Buchstaben am Ende waere die Zeile 49 Zeichen lang
+    // gewesen -- eines ueber der Tafelbreite, und damit rot. Gemessen,
+    // nicht geschaetzt: "22 NETZ K3 BDF 0900 L 1 ABL 0 IP 169.254.10.1 DA"
+    // sind 48.
+    var t22: [u8; 9] = "22 NETZ \0"
     var n_k: [u8; 3] = "K\0\0"
     var n_b: [u8; 6] = " BDF \0"
     var n_l: [u8; 4] = " L \0"
@@ -5237,6 +5296,66 @@ fn tafel_streichen(state: u64) {
     tn = puls_zahl(state, tp, tn, (adr >> 8) & 255)
     tn = puls_text(state, tp, tn, (&n_p[0]) as u64)
     tn = puls_zahl(state, tp, tn, adr & 255)
+    // RUNDE ECHTHARDWARE-1: WIE WEIT DER DHCP-KLIENT GEKOMMEN IST.
+    //
+    //   D  0 nicht gelaufen  1 DISCOVER  2 OFFER  3 REQUEST
+    //      4 ACK (Adresse steht)  5 aufgegeben  6 NAK
+    //   S  Pakete hinaus   E  Antworten herein   V  Versuch
+    //
+    // Aus diesen vier Zahlen ist die Ursache aus EINEM Foto ablesbar:
+    // `D 1 S 0` heisst, der Stapel liess nichts hinaus (der Rundruf
+    // haengt an ARP, siehe Kopf von kernel/user/dhcp.fi).
+    // `D 1 S 4 E 0` heisst, es ging hinaus und niemand antwortete --
+    // dann liegt es am Netz und nicht an uns.
+    // ================================== RUNDE ECHTHARDWARE-1
+    // WIE WEIT DER DHCP-KLIENT KAM -- VIER ZEICHEN, NICHT SECHZEHN.
+    //
+    // Justins Foto zeigt "K3 BDF 0900 L 1 ABL 0 IP 169.254.10.1":
+    // Treiber da, Kabel da, und trotzdem die feste Adresse von der
+    // Kommandozeile. Woran es lag, stand nirgends -- der Klient meldet
+    // es auf die serielle Leitung, und sein Brett hat keine.
+    //
+    // Es steht jetzt hier, aber KOMPAKT: die Zeile hat 46 von 48
+    // Zeichen gebraucht, und Zeile 21 hat gerade vorgefuehrt, was
+    // passiert, wenn man das ignoriert (LG 2, Z21 51, Tafel rot).
+    // Also EIN Buchstabe fuer den Zustand statt vier Zahlen:
+    //
+    //   .  gar nicht gelaufen   d  DISCOVER hinaus
+    //   o  OFFER da             r  REQUEST hinaus
+    //   A  ACK -- Adresse steht t  aufgegeben (Zeitablauf)
+    //   n  NAK vom Server       x  DISCOVER ging NICHT hinaus
+    //
+    // `x` ist der Fall, auf den es ankommt: Zustand 1 mit null
+    // gesendeten Paketen heisst, der Stapel liess nichts hinaus (der
+    // Rundruf haengt an ARP, siehe Kopf von kernel/user/dhcp.fi) --
+    // das ist ein anderer Fehler als "niemand hat geantwortet".
+    var n_dh: [u8; 3] = " D\0"
+    let dst: u64 = inet.dhcp_get(0)
+    let dtx: u64 = inet.dhcp_get(1)
+    var dz: [u8; 2] = ".\0"
+    if dst == 1 {
+        dz[0] = 100 as u8 // d
+        if dtx == 0 {
+            dz[0] = 120 as u8 // x -- nichts ging hinaus
+        }
+    }
+    if dst == 2 {
+        dz[0] = 111 as u8 // o
+    }
+    if dst == 3 {
+        dz[0] = 114 as u8 // r
+    }
+    if dst == 4 {
+        dz[0] = 65 as u8 // A
+    }
+    if dst == 5 {
+        dz[0] = 116 as u8 // t
+    }
+    if dst == 6 {
+        dz[0] = 110 as u8 // n
+    }
+    tn = puls_text(state, tp, tn, (&n_dh[0]) as u64)
+    tn = puls_text(state, tp, tn, (&dz[0]) as u64)
     // GRUEN erst, wenn wirklich eine Adresse steht UND ein Treiber da
     // ist. Eine gelbe Zeile heisst "Karte erkannt, aber keine
     // Verbindung", eine rote "kein Treiber".
@@ -5246,6 +5365,8 @@ fn tafel_streichen(state: u64) {
     }
     tafel_merken(22, tp, tn, nfarb)
     tafel_zeile_sagen(state, tp, tn)
+
+
 
     // ---- Zeile 23: DIE ZAHLEN, DIE NULL SEIN MUESSEN ----
     //

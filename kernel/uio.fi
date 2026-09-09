@@ -43,6 +43,7 @@ import kstate
 import sched
 import fs
 import serial
+import time
 
 export {
     reset, adopt,
@@ -364,6 +365,62 @@ fn rtc(what: u64) -> u64 {
     return v
 }
 
+// Die Ortszeit des Kerns in ihre Felder zerlegt. Dieselbe Rechnung wie
+// `time.epoch_of` rueckwaerts -- Tage seit 1970, dann das Datum daraus.
+fn zeit_feld(state: u64, what: u64) -> u64 {
+    let jetzt: u64 = time.now_local(state)
+    let tag_s: u64 = jetzt % 86400
+    if what == I_HOUR {
+        return tag_s / 3600
+    }
+    if what == I_MIN {
+        return (tag_s % 3600) / 60
+    }
+    if what == I_SEC {
+        return tag_s % 60
+    }
+    // Das Datum: Tage seit dem 1.1.1970 in Jahr/Monat/Tag.
+    var tage: u64 = jetzt / 86400
+    var jahr: u64 = 1970
+    while true {
+        var laenge: u64 = 365
+        if (jahr % 4) == 0 && ((jahr % 100) != 0 || (jahr % 400) == 0) {
+            laenge = 366
+        }
+        if tage < laenge {
+            break
+        }
+        tage = tage - laenge
+        jahr = jahr + 1
+    }
+    if what == I_YEAR {
+        return jahr
+    }
+    var schalt: u64 = 0
+    if (jahr % 4) == 0 && ((jahr % 100) != 0 || (jahr % 400) == 0) {
+        schalt = 1
+    }
+    var mon: u64 = 1
+    while mon <= 12 {
+        var d: u64 = 31
+        if mon == 4 || mon == 6 || mon == 9 || mon == 11 {
+            d = 30
+        }
+        if mon == 2 {
+            d = 28 + schalt
+        }
+        if tage < d {
+            break
+        }
+        tage = tage - d
+        mon = mon + 1
+    }
+    if what == I_MONTH {
+        return mon
+    }
+    return tage + 1
+}
+
 fn sysinfo(state: u64, what: u64) -> u64 {
     if what == I_TICKS {
         return kstate.get(state, kstate.TICKS)
@@ -422,8 +479,21 @@ fn sysinfo(state: u64, what: u64) -> u64 {
     if what == I_VERSION {
         return VERSION
     }
+    // ==================================== RUNDE ECHTHARDWARE-1
+    // DIE UHR DER LEISTE KOMMT AUS DERSELBEN QUELLE WIE DIE TAFEL.
+    //
+    // Bis hierher las diese Stelle bei jedem Aufruf den CMOS-Baustein
+    // FRISCH -- und zwar roh, ohne den Versatz. Die Tafel rechnete
+    // daneben mit `time.now_local`. Auf Justins Foto standen deshalb
+    // drei verschiedene Zeiten gleichzeitig: Leiste 12:37, RTC 12:38,
+    // Kern 14:38.
+    //
+    // Jetzt beantwortet EINE Funktion die Frage "wie spaet ist es" --
+    // `time.now_local`, die Ortszeit. Die RTC wird dafuer genau einmal
+    // beim Start gelesen; die Sekunden kommen seither aus dem
+    // Zyklenzaehler, der nicht springt.
     if what >= I_YEAR && what <= I_SEC {
-        return rtc(what)
+        return zeit_feld(state, what)
     }
     return err(E_INVAL)
 }
