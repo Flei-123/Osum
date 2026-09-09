@@ -74,10 +74,19 @@ nurbau=nein
 # AUS, damit die Bilder der anderen Runden sich nicht aendern.
 ton=nein
 drehbuch=""
+# RUNDE MERGE-10: die Sprache der Bilder, Vorgabe Englisch wie im Abbild.
+lang=en
+# RUNDE FARBE: das Schema des Dunkelmodus und ein Akzent, beide leer =
+# "wie das Schema es selbst sagt".
+dark_scheme=""
+accent=""
 progs="desktop taskbar settings launcher explorer edit sh echo ls cat theme"
 for a in "$@"; do
     case "$a" in
         shape=*) shape=${a#*=} ;;
+        lang=*) lang=${a#*=} ;;
+        dark_scheme=*) dark_scheme=${a#*=} ;;
+        accent=*) accent=${a#*=} ;;
         scheme=*) scheme=${a#*=} ;;
         mode=*) mode=${a#*=} ;;
         res=*) res=${a#*=} ;;
@@ -141,16 +150,37 @@ python3 tools/k15/tree.py "$OUT/baum" > "$OUT/baum.log" 2>&1 || exit 1
 # SENKRECHTEN Leiste und die haengt an der Breite der Beschriftungen.
 printf '# taskbar.conf\nedge=bottom\nwidth=104\nautohide=0\nontop=1\nalign=left\n' \
     > "$OUT/taskbar.conf"
-printf '# /etc/theme.conf\nscheme=%s\nmode=%s\naccent=\nshape=%s\nlight_start=07:00\ndark_start=19:00\n' \
-    "$scheme" "$mode" "$shape" > "$OUT/theme.conf"
+# RUNDE FARBE: `dark_scheme=` nur schreiben, wenn er gesetzt ist -- eine
+# leere Zeile waere ein leerer DATEINAME und der Dunkelmodus faende gar
+# kein Schema mehr.
+{
+  printf '# /etc/theme.conf\nscheme=%s\n' "$scheme"
+  [ -n "$dark_scheme" ] && printf 'dark_scheme=%s\n' "$dark_scheme"
+  printf 'mode=%s\naccent=%s\nshape=%s\nlight_start=07:00\ndark_start=19:00\n' \
+    "$mode" "$accent" "$shape"
+} > "$OUT/theme.conf"
 printf '# /etc/time.conf\noffset=120\n' > "$OUT/time.conf"
-printf 'lang=de\n' > "$OUT/locale.conf"
+# ================================================== RUNDE MERGE-10
+# DIE ABNAHMEBILDER SPRECHEN DIESELBE SPRACHE WIE DAS ABBILD: ENGLISCH.
+#
+# Hier stand `lang=de` (und unten `de` in /etc/userlocale), waehrend
+# tools/usbimg/build.sh dem Stick seit Runde ECHTHARDWARE-1
+# ausdruecklich `lang=en` mitgibt. Die Bilder, an denen die Oberflaeche
+# beurteilt wurde, zeigten also eine Sprache, die auf Justins Blech
+# gar nicht laeuft -- und ein deutsches Wort ist im Schnitt laenger als
+# das englische, so dass gerade die Fehler, um die es hier geht
+# (abgeschnittene Beschriftungen, ueberlappende Spaltenkoepfe), im Bild
+# ANDERS aussehen als in Wirklichkeit.
+#
+# Englisch ist die Hauptsprache der Oberflaeche (Dauerregel). Wer ein
+# deutsches Bild braucht, setzt `lang=de` beim Aufruf.
+printf 'lang=%s\n' "$lang" > "$OUT/locale.conf"
 printf 'on\n' > "$OUT/uitrace"
 cat > "$OUT/passwd" <<'EOF'
 root:x:0:0:root:/users/justin:/bin/sh
 justin:x:1000:1000:Justin:/users/justin:/bin/sh
 EOF
-printf 'de\n' > "$OUT/userlocale"
+printf '%s\n' "$lang" > "$OUT/userlocale"
 
 # RUNDE EXPLORER-2, Pflichtpunkt 5: DIE PLATTE TRAEGT ZEITEN.
 #
