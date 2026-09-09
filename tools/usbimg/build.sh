@@ -389,9 +389,28 @@ lies_preset() {
 T_SCHEME=$(lies_preset scheme); T_SCHEME=${T_SCHEME:-day}
 T_MODE=$(lies_preset mode);     T_MODE=${T_MODE:-light}
 T_SHAPE=$(lies_preset shape);   T_SHAPE=${T_SHAPE:-osum}
-printf '# /etc/theme.conf -- Runde ECHTHARDWARE-1\nscheme=%s\nmode=%s\naccent=\nshape=%s\nlight_start=07:00\ndark_start=19:00\n' \
-    "$T_SCHEME" "$T_MODE" "$T_SHAPE" > "$OUT/theme.conf"
-sagen "thema       $THEMA (scheme=$T_SCHEME mode=$T_MODE shape=$T_SHAPE)"
+T_ACCENT=$(lies_preset accent)
+# ==================================================== RUNDE FARBE
+# `dark_scheme=` UND `accent=` GEHOEREN MIT INS ABBILD.
+#
+# Ohne die erste Zeile schaltet der Dunkelmodus nur das ANDERE ENDE
+# DERSELBEN RAMPE ein -- und die Rampe von `tageslicht` ist Slate,
+# also blau (#0f172a hat B-R = +27). Die Vorlage sagt seit dieser
+# Runde `dark_scheme=midnight` (Zinc, B-R = +3); wer sie hier nicht
+# ausliest, baut ein Abbild, dessen Dunkelmodus wieder blau ist,
+# obwohl die Vorlage daneben es besser weiss.
+#
+# Beide Zeilen werden NUR geschrieben, wenn die Vorlage sie hat: ein
+# leeres `dark_scheme=` waere kein leerer Wert, sondern ein leerer
+# DATEINAME, und `wlibc` faende im Dunkelmodus gar kein Schema mehr.
+T_DSCHEME=$(lies_preset dark_scheme)
+{
+  printf '# /etc/theme.conf -- Runde FARBE (MERGE-10)\nscheme=%s\n' "$T_SCHEME"
+  [ -n "$T_DSCHEME" ] && printf 'dark_scheme=%s\n' "$T_DSCHEME"
+  printf 'mode=%s\naccent=%s\nshape=%s\nlight_start=07:00\ndark_start=19:00\n' \
+    "$T_MODE" "$T_ACCENT" "$T_SHAPE"
+} > "$OUT/theme.conf"
+sagen "thema       $THEMA (scheme=$T_SCHEME dark_scheme=${T_DSCHEME:--} mode=$T_MODE shape=$T_SHAPE accent=${T_ACCENT:--})"
 
 # ==================== RUNDE BLECH-HID: DER NOTAUSGANG OHNE TASTATUR
 #
