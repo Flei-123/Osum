@@ -349,8 +349,79 @@ fn on_code(state: u64, code: u64) {
     // einem eigenen Ring, den `wm.poll` abholt. Diese Richtung ist die
     // gleiche wie beim Zeigegeraet, und sie ist der Grund, warum `kbd.fi`
     // den Fensterserver dafuer nicht kennen muss.
+    // ================================================ RUNDE EXPLORER-2
+    //
+    // ALT+EINGABE UND ALT+PFEIL GEHOEREN DEM FENSTER, NICHT DEM RING.
+    //
+    // Die Zeile darunter schickt JEDE Taste mit gehaltenem Alt in den
+    // Kuerzelring des Fensterservers (Runde TILING). Fuer Alt+H, mit
+    // dem man den Fokus verschiebt, ist das richtig. Fuer die drei
+    // Tastenkuerzel, die JEDER Dateimanager hat, ist es falsch:
+    //
+    //     Alt+Eingabe   Eigenschaften des angefassten Stuecks
+    //     Alt+Links     zurueck        Alt+Rechts  vorwaerts
+    //     Alt+Hoch      eine Ebene hinauf
+    //
+    // Sie sind ANWENDUNGSkuerzel und keine Fensterkuerzel -- der Server
+    // hat fuer sie keine Bindung, sie fielen also bis hier lautlos in
+    // den Ring und kamen nirgends an. Gemessen: `sendkey alt-ret` liess
+    // `wm: hot c=28 mod=1 act=0` stehen und im Fenster passierte nichts.
+    //
+    // Geliefert werden sie als das, was xterm liefert -- `ESC [ n ; 3 ~`
+    // mit dem Modifikator 3 fuer Alt --, weil `wlib.decode` diese Form
+    // schon zerlegt und `tilde` den Modifikator schon als Parameter
+    // bekommt. Kein neuer Weg, nur ein weiterer Wert auf dem alten.
     if kstate.get(state, kstate.K11_OFF + kstate.KB_ALT) == 1 {
+        // 0x1C ist die Eingabetaste, 0x4B/0x4D/0x48 sind die Pfeile
+        // links/rechts/hoch (dieselben Abtastcodes, die `alt_key`
+        // oben auf 0x81..0x84 abbildet).
+        var an: u64 = 0
+        if code == 0x1C {
+            an = 27 // ESC [ 27 ; 3 ~  -- Alt+Eingabe
+        } else if code == 0x4B {
+            an = 20 // Alt+Links
+        } else if code == 0x4D {
+            an = 21 // Alt+Rechts
+        } else if code == 0x48 {
+            an = 22 // Alt+Hoch
+        }
+        if an != 0 {
+            deliver(state, 27)
+            deliver(state, 91)
+            zahl_senden(state, an)
+            deliver(state, 59)
+            deliver(state, 51) // ';3' = Alt
+            deliver(state, 126)
+            kstate.add(state, kstate.K11_OFF + kstate.KB_SEQS, 1)
+            say_seq(an)
+            return
+        }
         alt_key(state, code)
+        return
+    }
+    // ================================================ RUNDE EXPLORER-2
+    //
+    // DIE F-TASTEN. Sie hat dieses System nie gehabt: die Tabelle in
+    // `translate` reicht bis Abtastcode 57, F1 faengt bei 0x3B an, und
+    // was darueber liegt, gab eine Null zurueck -- die Taste wurde
+    // lautlos verschluckt. Gemerkt hat es diese Runde daran, dass F2
+    // (umbenennen) und F5 (neu laden) im Dateimanager nicht gehen
+    // KONNTEN, egal was das Programm tut.
+    //
+    // Geliefert als `ESC [ n ~` mit den Nummern, die xterm seit je
+    // benutzt: F1..F5 = 11,12,13,14,15 und F6..F10 = 17..21. Die
+    // Luecke bei 16 ist keine Schlamperei, sie ist die Ueberlieferung.
+    if code >= 0x3B && code <= 0x44 {
+        var fn_n: u64 = 11 + (code - 0x3B)
+        if code >= 0x40 {
+            fn_n = 17 + (code - 0x40) // F6 an, ueber die Luecke 16
+        }
+        deliver(state, 27)
+        deliver(state, 91)
+        zahl_senden(state, fn_n)
+        deliver(state, 126)
+        kstate.add(state, kstate.K11_OFF + kstate.KB_SEQS, 1)
+        say_seq(fn_n)
         return
     }
     // Die Pfeiltaste nach oben: ein Oktett, unveraendert seit Runde K6.
@@ -396,6 +467,43 @@ fn on_code(state: u64, code: u64) {
         return
     }
     if kstate.get(state, kstate.K11_OFF + kstate.KB_CTRL) == 1 {
+        // ============================================ RUNDE EXPLORER-2
+        //
+        // ZWEI VON SECHSUNDZWANZIG SIND KEINE STEUEROKTETTE MEHR.
+        //
+        // Strg+Buchstabe wird unten auf 1..26 abgebildet, und das ist
+        // fuer vierundzwanzig davon richtig und seit je so. Zwei
+        // kollidieren mit Tasten, die dieses System schon hat:
+        //
+        //     Strg+H  -> 8   und 8 ist der RUECKSCHRITT
+        //     Strg+N  -> 14  und 14 ist die PFEILTASTE HOCH (Zeile 357)
+        //
+        // Ein Programm, das die Oktette liest, kann die beiden Paare
+        // nicht auseinanderhalten -- "versteckte Dateien zeigen" und
+        // "eine Ebene hinauf" waeren dieselbe Taste, und im
+        // Dateimanager ist genau das der Unterschied zwischen zwei
+        // Befehlen, die jeder Mensch getrennt erwartet.
+        //
+        // Also gehen diese ZWEI als `ESC [ n ; 5 ~` (Modifikator 5 =
+        // Steuerung, die Form, die `wlib.tilde` schon zerlegt). Alle
+        // anderen bleiben Steueroktette -- die Shell, der Editor und
+        // jedes bestehende Programm sehen keinen Unterschied.
+        let low0: u64 = c | 32
+        if low0 == 104 || low0 == 110 { // 'h' oder 'n'
+            var cn: u64 = 30 // Strg+H
+            if low0 == 110 {
+                cn = 31 // Strg+N
+            }
+            deliver(state, 27)
+            deliver(state, 91)
+            zahl_senden(state, cn)
+            deliver(state, 59)
+            deliver(state, 53) // ';5' = Steuerung
+            deliver(state, 126)
+            kstate.add(state, kstate.K11_OFF + kstate.KB_SEQS, 1)
+            say_seq(cn)
+            return
+        }
         // STRG-A ist 1, STRG-Z ist 26 -- die unteren fuenf Bit des
         // Buchstabens. Was kein Buchstabe ist, bleibt, wie es ist.
         let low: u64 = c | 32
@@ -648,6 +756,17 @@ fn take(state: u64) -> u64 {
 // die AMERIKANISCHE Belegung. Sie ist weiterhin exportiert und wird
 // weiterhin von den Testlaeufern der Runden 59 und K11 direkt
 // aufgerufen; wer sie aendert, aendert eine gemessene Zusage.
+// RUNDE EXPLORER-2: eine Dezimalzahl als Oktette auf die Leitung.
+// Zwei Stellen reichen -- jede Nummer, die hier durchgeht, ist
+// kleiner als hundert -- und mehr als das Noetige zu bauen hiesse,
+// Code zu schreiben, den kein Aufrufer je erreicht.
+fn zahl_senden(state: u64, v: u64) {
+    if v >= 10 {
+        deliver(state, 48 + (v / 10))
+    }
+    deliver(state, 48 + (v % 10))
+}
+
 fn translate(code: u64) -> u8 {
     if code == 14 {
         return 8 as u8

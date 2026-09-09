@@ -73,6 +73,9 @@ export {
     value, set_value, text_of, set_text, set_rows, set_cols, enable,
     show, shown, neu_setzen,
     list_icons, row_icons, icon_id, ICON_TAG,
+    // RUNDE EXPLORER-2: die Mehrfachauswahl.
+    sel_an, sel_hat, sel_setz, sel_leeren, sel_alle, sel_bereich,
+    sel_anker, sel_zahl,
     list_einklick,
     focus_id, set_focus, fired_kind, fired_index, fired_win,
     step, draw_all, dirty, dirty_all, alive, quit,
@@ -123,6 +126,10 @@ export {
     KEY_TAB, KEY_ENTER, KEY_BS, KEY_ESC, KEY_UP, KEY_DOWN, KEY_LEFT,
     KEY_RIGHT, KEY_HOME, KEY_END, KEY_PGUP, KEY_PGDN, KEY_DEL,
     KEY_SDEL,
+    KEY_F1, KEY_F2, KEY_F3, KEY_F4, KEY_F5, KEY_F6, KEY_F7, KEY_F8,
+    KEY_F9, KEY_F10,
+    KEY_ALT_ENTER, KEY_ALT_LEFT, KEY_ALT_RIGHT, KEY_ALT_UP,
+    KEY_CTRL_H, KEY_CTRL_N,
     MAXWD, MAXWN,
     // ================================================ RUNDE SYSTEMBUS
     //
@@ -336,7 +343,31 @@ const D_PX: u64 = 21 // Verschiebung waagerecht
 const D_PY: u64 = 22 // Verschiebung senkrecht
 const D_DREH: u64 = 23 // 0, 1, 2, 3 -- Vielfache von 90 Grad
 const D_WZ: u64 = 24 // 0 = schieben, 1 = Ausschnitt ziehen
-const D_FIELDS: u64 = 25
+// ================================================== RUNDE EXPLORER-2
+//
+// DIE MEHRFACHAUSWAHL, und sie liegt HIER und nicht im Dateimanager.
+//
+// Bis zu dieser Runde konnte eine Liste GENAU EINE Zeile tragen
+// (`D_VAL`). Damit ist "die drei markieren und loeschen" -- das, was
+// ein Mensch als erstes von einem Dateimanager erwartet -- nicht
+// ausdrueckbar, und zwar in KEINEM Programm dieses Systems.
+//
+// Drei Felder, und kein einziges davon ist eine Liste von Zeilen:
+//
+//   D_SELP   Zeiger auf ein Bitfeld des AUFRUFERS, ein Bit je Zeile.
+//            Warum beim Aufrufer und nicht hier: eine Auswahl ueber
+//            viertausend Zeilen sind fuenfhundert Oktette, und die je
+//            Widget vorzuhalten hiesse, sie hundertsechzigmal
+//            vorzuhalten -- fuer Knoepfe und Beschriftungen mit.
+//   D_SELN   wie viele Zeilen das Bitfeld traegt (Ueberlaufschutz).
+//   D_ANKER  wo ein Bereich angefangen hat, fuer Umschalt+Klick.
+//
+// Ohne `D_SELP` ist alles wie vorher: ein Widget ohne Bitfeld kennt
+// nur `D_VAL`, und jedes bestehende Programm bleibt unveraendert.
+const D_SELP: u64 = 25
+const D_SELN: u64 = 26
+const D_ANKER: u64 = 27
+const D_FIELDS: u64 = 28
 
 const F_FOCUSABLE: u64 = 1
 const F_PRESSED: u64 = 2
@@ -406,9 +437,38 @@ const KEY_DEL: u64 = 0x109
 // Der Kern schickt dafuer `ESC [ 3 ; 2 ~` (kernel/kbd.fi, `arrow`).
 const KEY_SDEL: u64 = 0x10A
 
+// ================================================== RUNDE EXPLORER-2
+//
+// DIE TASTEN, DIE EIN DATEIMANAGER BRAUCHT, und die dieses System bis
+// zu dieser Runde nicht hatte. Sie stehen hier und nicht im
+// Dateimanager, weil eine Taste, die nur EIN Programm kennt, fuer
+// jedes zweite neu erfunden werden muesste.
+//
+// Wo sie herkommen, steht in `kernel/kbd.fi`: die F-Tasten als
+// `ESC [ 11..21 ~`, Alt+Eingabe und die Alt-Pfeile als
+// `ESC [ n ; 3 ~`, Strg+H und Strg+N als `ESC [ 30..31 ; 5 ~`.
+const KEY_F1: u64 = 0x110
+const KEY_F2: u64 = 0x111
+const KEY_F3: u64 = 0x112
+const KEY_F4: u64 = 0x113
+const KEY_F5: u64 = 0x114
+const KEY_F6: u64 = 0x115
+const KEY_F7: u64 = 0x116
+const KEY_F8: u64 = 0x117
+const KEY_F9: u64 = 0x118
+const KEY_F10: u64 = 0x119
+// Alt + etwas.
+const KEY_ALT_ENTER: u64 = 0x120
+const KEY_ALT_LEFT: u64 = 0x121
+const KEY_ALT_RIGHT: u64 = 0x122
+const KEY_ALT_UP: u64 = 0x123
+// Die zwei Steuerungskuerzel, die als Oktett mehrdeutig waeren.
+const KEY_CTRL_H: u64 = 0x130
+const KEY_CTRL_N: u64 = 0x131
+
 // ------------------------------------------------------- der Zustand
 
-static mut wd: [u64; 4000] = [0 as u64; 4000] // MAXWD * D_FIELDS
+static mut wd: [u64; 4480] = [0 as u64; 4480] // MAXWD * D_FIELDS
 static mut wn: [u64; 56] = [0 as u64; 56] // MAXWN * N_FIELDS
 static mut ct: [u64; 312] = [0 as u64; 312] // MAXCT * C_FIELDS
 static mut nwd: u64 = 0
@@ -3197,6 +3257,130 @@ fn row_icons(i: u64, p: u64) {
     dirty_wd(i)
 }
 
+// ================================================== RUNDE EXPLORER-2
+// DIE MEHRFACHAUSWAHL, nach aussen. Sieben kurze Funktionen, und alle
+// arbeiten auf DEM Bitfeld, das der Aufrufer angemeldet hat -- die
+// Bibliothek haelt keine zweite Wahrheit darueber, welche Zeile
+// markiert ist.
+fn sel_an(i: u64, feld: u64, zeilen: u64) {
+    if i >= MAXWD {
+        return
+    }
+    s(i, D_SELP, feld)
+    s(i, D_SELN, zeilen)
+    s(i, D_ANKER, 0)
+    dirty_wd(i)
+}
+
+fn sel_hat(i: u64, z: u64) -> bool {
+    let p: u64 = g(i, D_SELP)
+    if p == 0 || z >= g(i, D_SELN) {
+        return false
+    }
+    let byte: u64 = __mmio_read8((p + z / 8) as *mut u8) as u64
+    return (byte & (1 << (z % 8))) != 0
+}
+
+fn sel_setz(i: u64, z: u64, an: bool) {
+    let p: u64 = g(i, D_SELP)
+    if p == 0 || z >= g(i, D_SELN) {
+        return
+    }
+    let at: u64 = p + z / 8
+    var byte: u64 = __mmio_read8((at) as *mut u8) as u64
+    let bit: u64 = 1 << (z % 8)
+    if an {
+        byte = byte | bit
+    } else {
+        byte = byte & ~bit
+    }
+    __mmio_write8((at) as *mut u8, byte as u8)
+    dirty_wd(i)
+}
+
+fn sel_leeren(i: u64) {
+    let p: u64 = g(i, D_SELP)
+    if p == 0 {
+        return
+    }
+    var k: u64 = 0
+    let n: u64 = (g(i, D_SELN) + 7) / 8
+    while k < n {
+        __mmio_write8((p + k) as *mut u8, 0 as u8)
+        k = k + 1
+    }
+    dirty_wd(i)
+}
+
+// ALLE markieren -- Strg+A. Die Zeilenzahl kommt aus dem Widget und
+// nicht vom Aufrufer, damit "alle" auch nach einem Wechsel des
+// Verzeichnisses wirklich alle sind.
+fn sel_alle(i: u64) {
+    let p: u64 = g(i, D_SELP)
+    if p == 0 {
+        return
+    }
+    var ganz: u64 = g(i, D_A)
+    if g(i, D_KIND) == K_TABLE {
+        ganz = sub(ganz, 1)
+    }
+    if ganz > g(i, D_SELN) {
+        ganz = g(i, D_SELN)
+    }
+    sel_leeren(i)
+    var z: u64 = 0
+    while z < ganz {
+        sel_setz(i, z, true)
+        z = z + 1
+    }
+    dirty_wd(i)
+}
+
+// Ein BEREICH, vom Anker bis hierher -- Umschalt+Klick. Der Anker ist
+// die Zeile, auf der die Auswahl angefangen hat; ohne einen ist die
+// angefasste Zeile selbst der Anfang.
+fn sel_bereich(i: u64, bis: u64) {
+    if g(i, D_SELP) == 0 {
+        return
+    }
+    var von: u64 = g(i, D_ANKER)
+    var b: u64 = bis
+    if von > b {
+        let t: u64 = von
+        von = b
+        b = t
+    }
+    sel_leeren(i)
+    var z: u64 = von
+    while z <= b {
+        sel_setz(i, z, true)
+        z = z + 1
+    }
+    dirty_wd(i)
+}
+
+fn sel_anker(i: u64, z: u64) {
+    s(i, D_ANKER, z)
+}
+
+// Wie viele Zeilen markiert sind. Gezaehlt und nicht mitgefuehrt: ein
+// Zaehler, der neben dem Bitfeld herlaeuft, ist ein zweiter Ort, an dem
+// dieselbe Wahrheit stehen kann.
+fn sel_zahl(i: u64) -> u64 {
+    if g(i, D_SELP) == 0 {
+        return 0
+    }
+    var n: u64 = 0
+    var z: u64 = 0
+    while z < g(i, D_SELN) {
+        if sel_hat(i, z) {
+            n = n + 1
+        }
+        z = z + 1
+    }
+    return n
+}
+
 // The icon of visible row `z`, or 0.  One place where the array is
 // read, so a list and a table cannot disagree about what is in it.
 fn icon_at_row(i: u64, z: u64) -> u64 {
@@ -3391,7 +3575,13 @@ fn paint_list(i: u64) {
             let ln: u64 = row_len(q)
             let ry: u64 = y + 2 + r * zh
             var farbe: u64 = wlibc.theme(wlibc.T_FG)
-            if z == g(i, D_VAL) {
+            // RUNDE EXPLORER-2: der Balken gilt fuer die Zeile mit
+            // dem Zeiger UND fuer jede markierte. Zwei Farben (eine
+            // fuer "markiert", eine fuer "hier steht der Zeiger")
+            // waeren ehrlicher, aber dieses Thema hat nur EIN
+            // Auswahlblau -- und zwei erfundene Toene waeren eine
+            // Farbe, die in keinem Schema steht.
+            if z == g(i, D_VAL) || sel_hat(i, z) {
                 wlibc.rect(x + 1, ry, sub(bw, 16), zh,
                     wlibc.theme(wlibc.T_SEL))
                 farbe = wlibc.theme_selfg()
@@ -3470,7 +3660,8 @@ fn paint_list(i: u64) {
             let _rt: u64 = put_text(wlibc.F_UI, wlibc.px_ui(),
                 x + 6 + ein, rgrund, sub(bw, 16), qq, qn, farbe, 0)
             var rhg: u64 = wlibc.theme(wlibc.T_ENTRY)
-            if z == g(i, D_VAL) {
+            // RUNDE EXPLORER-2: markiert ODER die Zeile mit dem Zeiger.
+            if z == g(i, D_VAL) || sel_hat(i, z) {
                 rhg = wlibc.theme(wlibc.T_SEL)
             }
             // GEMELDET WIRD, WAS GEMALT WURDE -- nicht, was gewuenscht
@@ -3551,7 +3742,13 @@ fn paint_table(i: u64) {
             let ln: u64 = row_len(q)
             let ry: u64 = y + kopf + 1 + r * zh
             var farbe: u64 = wlibc.theme(wlibc.T_FG)
-            if z == g(i, D_VAL) {
+            // RUNDE EXPLORER-2: der Balken gilt fuer die Zeile mit
+            // dem Zeiger UND fuer jede markierte. Zwei Farben (eine
+            // fuer "markiert", eine fuer "hier steht der Zeiger")
+            // waeren ehrlicher, aber dieses Thema hat nur EIN
+            // Auswahlblau -- und zwei erfundene Toene waeren eine
+            // Farbe, die in keinem Schema steht.
+            if z == g(i, D_VAL) || sel_hat(i, z) {
                 wlibc.rect(x + 1, ry, sub(bw, 16), zh,
                     wlibc.theme(wlibc.T_SEL))
                 farbe = wlibc.theme_selfg()
@@ -4752,6 +4949,32 @@ fn on_down(w: u64, x: u64, y: u64, btn: u64) {
                     doppelt = true
                 }
             }
+            // ==================================== RUNDE EXPLORER-2
+            //
+            // STRG-KLICK UND UMSCHALT-KLICK. Die zwei Bits kommen aus
+            // `kernel/wm.fi` in derselben Maske wie die Maustasten
+            // (M_CTRL = 16, M_SHIFT = 8); eine Liste OHNE angemeldetes
+            // Bitfeld sieht davon nichts und verhaelt sich wie immer.
+            if g(i, D_SELP) != 0 && (btn & 2) == 0 {
+                if (btn & 16) != 0 {
+                    // Strg: dieses eine Stueck umschalten, der Rest
+                    // bleibt stehen. Der Anker wandert mit, damit ein
+                    // Umschalt-Klick danach von HIER aus misst.
+                    sel_setz(i, r, !sel_hat(i, r))
+                    sel_anker(i, r)
+                } else if (btn & 8) != 0 {
+                    // Umschalt: vom Anker bis hierher, alles dazwischen.
+                    sel_bereich(i, r)
+                } else {
+                    // Ein Klick ohne Umschalttaste ist ein NEUER
+                    // Anfang -- er wirft die alte Auswahl weg. Das ist
+                    // die Regel jedes Dateimanagers, und ohne sie
+                    // sammelt sich die Auswahl klammheimlich an.
+                    sel_leeren(i)
+                    sel_setz(i, r, true)
+                    sel_anker(i, r)
+                }
+            }
             s(i, D_VAL, r)
             s_lastclick = jetzt
             s_lastwd = i + 1
@@ -5056,6 +5279,40 @@ fn decode(c: u64) -> u64 {
 }
 
 fn tilde(n: u64, m: u64) -> u64 {
+    // RUNDE EXPLORER-2: die F-Tasten und die Kombinationen. Sie stehen
+    // VOR den alten Nummern, weil sie eigene Nummern haben und keine
+    // der alten ueberdecken -- die Reihenfolge ist hier nur Lesbarkeit.
+    if n >= 11 && n <= 15 {
+        return KEY_F1 + (n - 11)
+    }
+    if n >= 17 && n <= 21 {
+        // Die Luecke bei 16 ist xterms, nicht unsere: F6 ist 17.
+        if m == 3 {
+            // `ESC [ 20..22 ; 3 ~` sind die Alt-Pfeile, und die haben
+            // dieselben Nummern wie F9/F10 -- der Modifikator trennt
+            // sie, so wie er bei Entf zwischen Entf und Umschalt+Entf
+            // trennt.
+            if n == 20 {
+                return KEY_ALT_LEFT
+            }
+            if n == 21 {
+                return KEY_ALT_RIGHT
+            }
+        }
+        return KEY_F6 + (n - 17)
+    }
+    if n == 22 && m == 3 {
+        return KEY_ALT_UP
+    }
+    if n == 27 && m == 3 {
+        return KEY_ALT_ENTER
+    }
+    if n == 30 && m == 5 {
+        return KEY_CTRL_H
+    }
+    if n == 31 && m == 5 {
+        return KEY_CTRL_N
+    }
     if n == 5 {
         return KEY_PGUP
     }

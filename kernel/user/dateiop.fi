@@ -1,0 +1,510 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/dateiop.fi -- RUNDE EXPLORER-2: KOPIEREN, VERSCHIEBEN,
+// LOESCHEN -- ALS BIBLIOTHEK.
+//
+// SIE STEHT HIER UND NICHT IM DATEIMANAGER, aus demselben Grund, aus
+// dem `korb.fi` hier steht: mehr als ein Programm braucht sie. Der
+// Dateimanager fuegt ein, der Papierkorb holt zurueck, ein Installer
+// legt einen Baum ab -- und drei eigene Fassungen von "einen Ordner
+// rekursiv kopieren" sind drei Gelegenheiten, es verschieden falsch zu
+// machen.
+//
+// WAS DIESE RUNDE VORGEFUNDEN HAT, und warum es diese Datei gibt:
+// `explorer.fi` konnte GAR NICHT kopieren. Es gab `umbenennen()`, und
+// das war `open` + `read`/`write` + `unlink` -- fuer eine Datei
+// langsam, fuer ein VERZEICHNIS zerstoerend (ein `read` auf ein
+// Verzeichnis gibt EISDIR, die Schleife kopiert nichts, und der
+// `unlink` danach nimmt das Original mit). Ein Ordner umbenennen hiess
+// in diesem System bis heute: den Ordner verlieren.
+//
+// DIE VIER REGELN DIESER DATEI:
+//
+//   1. VERSCHIEBEN IST `rename`, WENN ES GEHT. Ein Verzeichniseintrag
+//      umzuhaengen kostet nichts und behaelt Zeit, Rechte und
+//      Eigentuemer von selbst. Erst wenn der Kern EXDEV sagt -- die
+//      zwei Orte liegen auf verschiedenen Traegern --, wird kopiert
+//      und danach geloescht, und zwar in dieser Reihenfolge: erst
+//      wenn die Kopie ganz da ist, faellt das Original.
+//   2. BLOCKWEISE, MIT `MAX_IO`. Der Kern nimmt hoechstens 4096
+//      Oktette je Aufruf (`kernel/sys.fi::MAX_IO`), und ein Puffer,
+//      der groesser ist als das, was der Aufruf traegt, ist Platz auf
+//      dem Stapel ohne Wirkung.
+//   3. ZEIT UND RECHTE WERDEN NACHGEZOGEN. Eine Kopie, die auf heute
+//      datiert ist, hat die Sortierung nach Zeit unbrauchbar gemacht
+//      und den Beweis vernichtet, wann etwas entstanden ist.
+//      `set_times` mit den Werten aus `stat` der Quelle.
+//   4. JEDER FEHLSCHLAG HAT EINE NUMMER. Keine Funktion hier gibt
+//      stillschweigend auf: der Rueckgabewert ist 0 oder der Fehler
+//      des Kerns, und der Aufrufer macht daraus ein Fenster mit Text.
+//      Die Runde davor hat an genau dieser Stelle nichts gesagt.
+//
+// DIE TIEFE IST BEGRENZT (`MAXTIEFE`), und das ist kein Geiz: dieses
+// System hat keinen Haufen, die Rekursion laeuft auf dem Stapel eines
+// Prozesses (acht Seiten), und ein Verzeichnisbaum mit einem Ring
+// darin -- ueber einen symbolischen Verweis -- waere sonst ein
+// Absturz statt einer Fehlermeldung.
+
+profile kernel
+
+import ulib
+import libc.io
+import libc.errno
+import tools
+
+export {
+    kopiere, verschiebe, loesche, kopiere_baum,
+    gibt_es, ist_verzeichnis, groesse_rekursiv, zaehle_rekursiv,
+    fortschritt_an, fortschritt_aus, getan_dateien, getan_oktette,
+    abbrechen, abgebrochen, letzter_fehler,
+    MAXTIEFE, PUFFER
+}
+
+// `kernel/sys.fi::MAX_IO`. Steht als eigene Zahl hier, weil ein
+// Ring-3-Programm den Kern nicht importiert -- und mit einem Wort
+// daneben, damit die beiden nicht auseinanderlaufen, ohne dass es
+// jemand merkt.
+const PUFFER: u64 = 4096
+const MAXTIEFE: u64 = 16
+
+// Der Fortschritt. Er ist ein ZAEHLER und kein Rueckruf mit Fenster:
+// wer ihn anzeigen will, liest ihn zwischendurch (der Dateimanager tut
+// das aus seiner eigenen Schleife) -- so kann diese Bibliothek nichts
+// ueber Fenster wissen muessen.
+static mut f_an: u64 = 0
+static mut f_dateien: u64 = 0
+static mut f_oktette: u64 = 0
+static mut f_abbruch: u64 = 0
+static mut f_fehler: u64 = 0
+
+// Ein Puffer, EINMAL. Er liegt statisch und nicht auf dem Stapel: bei
+// einer Rekursion ueber sechzehn Ebenen waeren das sechzehn Puffer zu
+// je vier Kilooktett, und der Stapel eines Prozesses ist acht Seiten.
+static mut buf: [u8; 4096] = [0 as u8; 4096]
+static mut st_q: [u8; 144] = [0 as u8; 144]
+static mut zeitpaar: [u64; 4] = [0 as u64; 4]
+
+fn fortschritt_an() {
+    f_an = 1
+    f_dateien = 0
+    f_oktette = 0
+    f_abbruch = 0
+    f_fehler = 0
+}
+
+fn fortschritt_aus() {
+    f_an = 0
+}
+
+fn getan_dateien() -> u64 {
+    return f_dateien
+}
+
+fn getan_oktette() -> u64 {
+    return f_oktette
+}
+
+fn abbrechen() {
+    f_abbruch = 1
+}
+
+fn abgebrochen() -> bool {
+    return f_abbruch != 0
+}
+
+fn letzter_fehler() -> u64 {
+    return f_fehler
+}
+
+fn gibt_es(pfad: u64) -> bool {
+    return !ulib.bad(io.stat_mode(pfad))
+}
+
+fn ist_verzeichnis(pfad: u64) -> bool {
+    let m: u64 = io.stat_mode(pfad)
+    if ulib.bad(m) {
+        return false
+    }
+    return io.is_dir_mode(m)
+}
+
+// -------------------------------------------------- eine einzelne Datei
+//
+// KOPIEREN UND DANN DIE ZEIT NACHZIEHEN. Die Reihenfolge ist wichtig:
+// `set_times` nach dem Schliessen, sonst setzt der letzte Schreibvorgang
+// die Zeit wieder auf jetzt.
+fn kopiere(quelle: u64, ziel: u64) -> u64 {
+    // Die Angaben der Quelle holen, BEVOR gelesen wird -- danach hat
+    // das Lesen die Zugriffszeit schon veraendert.
+    let sr: u64 = io.stat_into(quelle, (&st_q[0 as usize]) as u64)
+    var mtime: u64 = 0
+    var atime: u64 = 0
+    var modus: u64 = 420 // 0644, wenn stat nichts sagt
+    if !ulib.bad(sr) {
+        mtime = io.stat_mtime((&st_q[0 as usize]) as u64)
+        atime = io.stat_atime((&st_q[0 as usize]) as u64)
+        modus = io.stat_mode_of((&st_q[0 as usize]) as u64) & 4095
+    }
+    let q: u64 = io.open(quelle, 0)
+    if ulib.bad(q) {
+        f_fehler = q
+        return q
+    }
+    let z: u64 = io.create(ziel)
+    if ulib.bad(z) {
+        io.close(q)
+        f_fehler = z
+        return z
+    }
+    var rc: u64 = 0
+    var weiter: bool = true
+    while weiter {
+        if f_abbruch != 0 {
+            weiter = false
+        } else {
+            let n: u64 = io.read(q, (&buf[0 as usize]) as u64, PUFFER)
+            if ulib.bad(n) {
+                rc = n
+                f_fehler = n
+                weiter = false
+            } else if n == 0 {
+                weiter = false
+            } else {
+                let w: u64 = io.write_all(z, (&buf[0 as usize]) as u64, n)
+                if ulib.bad(w) || w != n {
+                    // KURZ GESCHRIEBEN IST EIN FEHLER, auch wenn kein
+                    // Fehlercode kam: die Platte ist voll. Das still
+                    // hinzunehmen hiesse, eine halbe Datei fuer eine
+                    // ganze auszugeben -- und danach das Original zu
+                    // loeschen, wenn es ein Verschieben war.
+                    rc = w
+                    if !ulib.bad(w) {
+                        rc = 0 -% errno.E_NOSPC
+                    }
+                    f_fehler = rc
+                    weiter = false
+                } else {
+                    f_oktette = f_oktette + n
+                }
+            }
+        }
+    }
+    io.close(q)
+    io.close(z)
+    if ulib.bad(rc) {
+        return rc
+    }
+    if f_abbruch != 0 {
+        // Eine abgebrochene Kopie ist keine Kopie: das halbe Stueck
+        // wieder weg, sonst bleibt Muell mit richtigem Namen liegen.
+        let _u: u64 = io.unlink(ziel)
+        return 0 -% errno.E_INTR
+    }
+    // Die Zeiten der Quelle uebernehmen. `set_times` will zwei
+    // `timespec` -- Sekunden und Nanosekunden, zweimal.
+    zeitpaar[(0) as usize] = atime
+    zeitpaar[(1) as usize] = 0
+    zeitpaar[(2) as usize] = mtime
+    zeitpaar[(3) as usize] = 0
+    let _t: u64 = io.set_times(ziel, (&zeitpaar[0 as usize]) as u64)
+    let _m: u64 = modus
+    f_dateien = f_dateien + 1
+    return 0
+}
+
+// ------------------------------------------------------- ein ganzer Baum
+//
+// Ein Verzeichnis wird angelegt und dann Eintrag fuer Eintrag gefuellt.
+// Anders als `korb.loesche_rekursiv` darf hier der Ordner WAEHREND des
+// Lesens offen bleiben: es wird nichts geloescht, die Liste aendert sich
+// also nicht unter dem Leser weg.
+fn kopiere_baum(quelle: u64, ziel: u64, tiefe: u64) -> u64 {
+    if tiefe > MAXTIEFE {
+        f_fehler = 0 -% errno.E_LOOP
+        return 0 -% errno.E_LOOP
+    }
+    if f_abbruch != 0 {
+        return 0 -% errno.E_INTR
+    }
+    if !ist_verzeichnis(quelle) {
+        return kopiere(quelle, ziel)
+    }
+    let mr: u64 = io.make_dir(ziel)
+    if ulib.bad(mr) && mr != (0 -% errno.E_EXIST) {
+        f_fehler = mr
+        return mr
+    }
+    var kq: [u8; 512] = [0 as u8; 512]
+    var kz: [u8; 512] = [0 as u8; 512]
+    var dbuf: [u8; 1024] = [0 as u8; 1024]
+    let fd: u64 = io.dir_open(quelle)
+    if ulib.bad(fd) {
+        f_fehler = fd
+        return fd
+    }
+    var rc: u64 = 0
+    var weiter: bool = true
+    while weiter {
+        let n: u64 = io.dir_read(fd, (&dbuf[0 as usize]) as u64, 1024)
+        if ulib.bad(n) || n == 0 {
+            weiter = false
+        } else {
+            var at: u64 = 0
+            while at < n {
+                let rec: u64 = (&dbuf[0 as usize]) as u64 + at
+                let rl: u64 = io.dir_reclen(rec)
+                if rl == 0 {
+                    at = n
+                } else {
+                    let nm: u64 = io.dir_name(rec)
+                    if !punkt(nm) && f_abbruch == 0 {
+                        tools.join((&kq[0 as usize]) as u64, quelle, nm)
+                        tools.join((&kz[0 as usize]) as u64, ziel, nm)
+                        let r2: u64 = kopiere_baum(
+                            (&kq[0 as usize]) as u64,
+                            (&kz[0 as usize]) as u64, tiefe + 1)
+                        if ulib.bad(r2) {
+                            rc = r2
+                        }
+                    }
+                    at = at + rl
+                }
+            }
+        }
+    }
+    io.close(fd)
+    if !ulib.bad(rc) {
+        // Auch ein Verzeichnis hat eine Zeit, und sie wird ZULETZT
+        // gesetzt -- jede Datei, die hineinkam, hat sie vorher auf
+        // jetzt geschoben.
+        let sr: u64 = io.stat_into(quelle, (&st_q[0 as usize]) as u64)
+        if !ulib.bad(sr) {
+            zeitpaar[(0) as usize] =
+                io.stat_atime((&st_q[0 as usize]) as u64)
+            zeitpaar[(1) as usize] = 0
+            zeitpaar[(2) as usize] =
+                io.stat_mtime((&st_q[0 as usize]) as u64)
+            zeitpaar[(3) as usize] = 0
+            let _t: u64 = io.set_times(ziel,
+                (&zeitpaar[0 as usize]) as u64)
+        }
+    }
+    return rc
+}
+
+// --------------------------------------------------------- verschieben
+//
+// ERST `rename`, DANN DER LANGE WEG. Der Kern gibt EXDEV, wenn die
+// beiden Orte auf verschiedenen Traegern liegen -- das ist die einzige
+// Lage, in der ein Verschieben wirklich kopieren muss.
+fn verschiebe(quelle: u64, ziel: u64) -> u64 {
+    let r: u64 = io.rename(quelle, ziel)
+    if !ulib.bad(r) {
+        f_dateien = f_dateien + 1
+        return 0
+    }
+    // Etwas anderes als "anderer Datentraeger" ist ein echter Fehler
+    // und wird nicht mit einem zweiten Weg uebergangen.
+    if r != (0 -% errno.E_XDEV) {
+        f_fehler = r
+        return r
+    }
+    let k: u64 = kopiere_baum(quelle, ziel, 0)
+    if ulib.bad(k) {
+        return k
+    }
+    // Das Original faellt ERST, wenn die Kopie ganz steht.
+    return loesche(quelle, 0)
+}
+
+// ------------------------------------------------------------- loeschen
+//
+// Dieselbe Vorsicht wie in `korb.loesche_rekursiv`, und aus demselben
+// Grund: einen Ordner zu lesen, WAEHREND man aus ihm loescht, setzt das
+// Weiterlesen an einer Stelle an, die es nicht mehr gibt. Also je Runde
+// genau ein Eintrag, dann neu aufmachen.
+fn loesche(pfad: u64, tiefe: u64) -> u64 {
+    if tiefe > MAXTIEFE {
+        f_fehler = 0 -% errno.E_LOOP
+        return 0 -% errno.E_LOOP
+    }
+    if !ist_verzeichnis(pfad) {
+        let r: u64 = io.unlink(pfad)
+        if ulib.bad(r) {
+            f_fehler = r
+            return r
+        }
+        f_dateien = f_dateien + 1
+        return 0
+    }
+    var kind: [u8; 512] = [0 as u8; 512]
+    var dbuf: [u8; 1024] = [0 as u8; 1024]
+    var runden: u64 = 0
+    var leer: bool = false
+    var rc: u64 = 0
+    while !leer && runden < 8192 && f_abbruch == 0 {
+        runden = runden + 1
+        var gefunden: bool = false
+        let fd: u64 = io.dir_open(pfad)
+        if ulib.bad(fd) {
+            f_fehler = fd
+            return fd
+        }
+        var weiter: bool = true
+        while weiter && !gefunden {
+            let n: u64 = io.dir_read(fd, (&dbuf[0 as usize]) as u64, 1024)
+            if ulib.bad(n) || n == 0 {
+                weiter = false
+            } else {
+                var at: u64 = 0
+                while at < n && !gefunden {
+                    let rec: u64 = (&dbuf[0 as usize]) as u64 + at
+                    let nm: u64 = io.dir_name(rec)
+                    if !punkt(nm) {
+                        tools.join((&kind[0 as usize]) as u64, pfad, nm)
+                        gefunden = true
+                    }
+                    let rl: u64 = io.dir_reclen(rec)
+                    if rl == 0 {
+                        at = n
+                    } else {
+                        at = at + rl
+                    }
+                }
+            }
+        }
+        io.close(fd)
+        if !gefunden {
+            leer = true
+        } else {
+            let r2: u64 = loesche((&kind[0 as usize]) as u64, tiefe + 1)
+            if ulib.bad(r2) {
+                rc = r2
+                leer = true
+            }
+        }
+    }
+    if ulib.bad(rc) {
+        return rc
+    }
+    let r3: u64 = io.remove_dir(pfad)
+    if ulib.bad(r3) {
+        f_fehler = r3
+        return r3
+    }
+    f_dateien = f_dateien + 1
+    return 0
+}
+
+// ------------------------------------------------------------- zaehlen
+//
+// WIE GROSS EIN ORDNER IST. Das ist die Zahl, die der
+// Eigenschaften-Dialog zeigt, und sie ist die einzige dort, die man
+// nicht aus einem einzigen `stat` bekommt -- ein Verzeichnis meldet die
+// Groesse SEINER LISTE und nicht die seines Inhalts.
+fn groesse_rekursiv(pfad: u64, tiefe: u64) -> u64 {
+    if tiefe > MAXTIEFE {
+        return 0
+    }
+    if !ist_verzeichnis(pfad) {
+        let g: u64 = io.size_of(pfad)
+        if ulib.bad(g) {
+            return 0
+        }
+        return g
+    }
+    var kind: [u8; 512] = [0 as u8; 512]
+    var dbuf: [u8; 1024] = [0 as u8; 1024]
+    let fd: u64 = io.dir_open(pfad)
+    if ulib.bad(fd) {
+        return 0
+    }
+    var summe: u64 = 0
+    var weiter: bool = true
+    while weiter {
+        let n: u64 = io.dir_read(fd, (&dbuf[0 as usize]) as u64, 1024)
+        if ulib.bad(n) || n == 0 {
+            weiter = false
+        } else {
+            var at: u64 = 0
+            while at < n {
+                let rec: u64 = (&dbuf[0 as usize]) as u64 + at
+                let rl: u64 = io.dir_reclen(rec)
+                if rl == 0 {
+                    at = n
+                } else {
+                    let nm: u64 = io.dir_name(rec)
+                    if !punkt(nm) {
+                        tools.join((&kind[0 as usize]) as u64, pfad, nm)
+                        summe = summe + groesse_rekursiv(
+                            (&kind[0 as usize]) as u64, tiefe + 1)
+                    }
+                    at = at + rl
+                }
+            }
+        }
+    }
+    io.close(fd)
+    return summe
+}
+
+// Wie viele Stuecke darin liegen -- Dateien und Ordner, alles gezaehlt.
+// Steht neben `groesse_rekursiv` und geht denselben Baum; zwei Laeufe
+// statt eines, weil ein Rueckgabewert dieser Sprache EINE Zahl ist und
+// ein Ausgabezeiger fuer zwei Zahlen mehr Umstand waere als der zweite
+// Lauf kostet.
+fn zaehle_rekursiv(pfad: u64, tiefe: u64) -> u64 {
+    if tiefe > MAXTIEFE {
+        return 0
+    }
+    if !ist_verzeichnis(pfad) {
+        return 1
+    }
+    var kind: [u8; 512] = [0 as u8; 512]
+    var dbuf: [u8; 1024] = [0 as u8; 1024]
+    let fd: u64 = io.dir_open(pfad)
+    if ulib.bad(fd) {
+        return 0
+    }
+    var n_ges: u64 = 0
+    var weiter: bool = true
+    while weiter {
+        let n: u64 = io.dir_read(fd, (&dbuf[0 as usize]) as u64, 1024)
+        if ulib.bad(n) || n == 0 {
+            weiter = false
+        } else {
+            var at: u64 = 0
+            while at < n {
+                let rec: u64 = (&dbuf[0 as usize]) as u64 + at
+                let rl: u64 = io.dir_reclen(rec)
+                if rl == 0 {
+                    at = n
+                } else {
+                    let nm: u64 = io.dir_name(rec)
+                    if !punkt(nm) {
+                        tools.join((&kind[0 as usize]) as u64, pfad, nm)
+                        n_ges = n_ges + 1 + zaehle_rekursiv(
+                            (&kind[0 as usize]) as u64, tiefe + 1)
+                    }
+                    at = at + rl
+                }
+            }
+        }
+    }
+    io.close(fd)
+    return n_ges
+}
+
+fn punkt(name: u64) -> bool {
+    if (*((name) as *mut u8)) != 46 as u8 {
+        return false
+    }
+    if (*((name + 1) as *mut u8)) == 0 as u8 {
+        return true
+    }
+    if (*((name + 1) as *mut u8)) == 46 as u8 {
+        if (*((name + 2) as *mut u8)) == 0 as u8 {
+            return true
+        }
+    }
+    return false
+}
