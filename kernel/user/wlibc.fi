@@ -894,8 +894,14 @@ fn rring(x: u64, y: u64, w: u64, h: u64, r0: u64, bw: u64, color: u64) {
         r = h / 2
     }
     if r == 0 {
+        // RUNDE ECHTHARDWARE-2: derselbe Fehler wie in `drop_shadow`,
+        // eine Schleife weiter. `w - 2 * k` laeuft unter null, sobald
+        // der Ring breiter ist als das halbe Bedienelement -- bei
+        // uiscale=2 ist `bw` doppelt so breit, das Element aber nicht
+        // zwangslaeufig. Es wird abgebrochen statt gerechnet: ein Ring,
+        // fuer den kein Platz mehr ist, wird nicht gemalt.
         var k: u64 = 0
-        while k < bw {
+        while k < bw && 2 * k < w && 2 * k < h {
             frame(x + k, y + k, w - 2 * k, h - 2 * k, color)
             k = k + 1
         }
@@ -953,6 +959,52 @@ fn rring(x: u64, y: u64, w: u64, h: u64, r0: u64, bw: u64, color: u64) {
 //
 // `strength` is 0..100 and 0 draws nothing at all -- which is what
 // `classic` asks for, so classic pays nothing.
+// ================================================ RUNDE ECHTHARDWARE-2
+//
+// `x - i` WAR JUSTINS PANIC -- DIE, DIE ER ZWEIMAL FOTOGRAFIERT HAT.
+//
+// Auf seinem Foto steht
+//
+//     panic: integer overflow in 'u64 - u64'
+//            at kernel/user/wlib.fi:969:25
+//
+// und diese Angabe fuehrt in die Irre: die Datei heisst `wlibc.fi` und
+// nicht `wlib.fi`, und die Zeile ist 970. Beides ist kein Lesefehler
+// von ihm -- die serielle Leitung schreibt die Meldung MITTEN in eine
+// andere Zeile hinein, weil zwei Prozesse gleichzeitig schreiben:
+//
+//     taskbar: field panic: integer overflow in 'u64 - u64'
+//              at kernel/user/wlibc.fi:970:25net x=2012 y=8 w=248 ...
+//
+// Wer das abliest, liest `wlib` und eine Zahl daneben. NACHGESTELLT in
+// dieser Runde (pruef/einst.py, Lauf einst1): Spalte 25 der Zeile 970
+// ist woertlich `x - i`.
+//
+// WAS PASSIERT. `drop_shadow` malt `reach` Ringe UM ein Fenster, jeder
+// einen Bildpunkt weiter aussen. Der linke Rand des Ringes liegt bei
+// `x - i`. Steht das Fenster naeher als `reach` am linken Schirmrand --
+// bei x=0 also immer --, ist das in `u64` keine negative Zahl, sondern
+// eine in der Naehe von 2^64, und der Kern erschlaegt den Prozess.
+//
+// WARUM ES ERST JETZT ZUSCHLUG: Schatten gibt es nur unter `shape=osum`
+// (unter `classic` ist `strength` 0 und die Funktion kehrt sofort um),
+// und `shape=osum` bringt der Stick erst seit Runde ECHTHARDWARE-1 mit.
+// Getroffen hat es die EINSTELLUNGEN, weil deren Fenster als erstes
+// gross genug ist, um am Rand zu stehen.
+//
+// DIE WURZEL UND NICHT DIE STELLE: es wird nicht nur hier abgefangen,
+// sondern es gibt jetzt `sub()` in dieser Datei -- dieselbe saettigende
+// Subtraktion, die `wlib.fi` seit Langem hat. Ein Ring, der links oder
+// oben aus dem Schirm ragt, wird BESCHNITTEN und nicht verschoben:
+// wuerde man ihn nur nach rechts ruecken, saesse der Schatten schief
+// unter dem Fenster.
+fn sub(a: u64, b: u64) -> u64 {
+    if b >= a {
+        return 0
+    }
+    return a - b
+}
+
 fn drop_shadow(x: u64, y: u64, w: u64, h: u64, r: u64, strength: u64,
     reach: u64, color: u64) {
     if strength == 0 || reach == 0 || w == 0 || h == 0 {
@@ -967,8 +1019,21 @@ fn drop_shadow(x: u64, y: u64, w: u64, h: u64, r: u64, strength: u64,
             // pixel of downward offset per ring is what every system
             // that draws one does, and it is what makes the thing read
             // as "above" instead of "glowing".
-            shadow_edge(x - i, y - i + 1, w + 2 * i, h + 2 * i, r + i,
-                color, a)
+            //
+            // RUNDE ECHTHARDWARE-2: links und oben gesaettigt. Was
+            // ueber den Rand hinausragt, wird von der Breite bzw. der
+            // Hoehe abgezogen -- der Ring endet am Schirmrand, statt
+            // um 2^64 zu springen.
+            let lx: u64 = sub(x, i)
+            let fehlt_x: u64 = sub(i, x)
+            let oy: u64 = y + 1
+            var ly: u64 = 0
+            if oy > i {
+                ly = oy - i
+            }
+            let fehlt_y: u64 = sub(i, oy)
+            shadow_edge(lx, ly, sub(w + 2 * i, fehlt_x),
+                sub(h + 2 * i, fehlt_y), r + i, color, a)
         }
         i = i - 1
     }
