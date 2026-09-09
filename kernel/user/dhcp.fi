@@ -57,6 +57,18 @@ export { u_start }
 
 const SYS_NETGET: u64 = 1300
 const SYS_NETSET: u64 = 1301
+// RUNDE ECHTHARDWARE-1: der Fortschritt geht in den Kern, damit die
+// Messtafel ihn zeigen kann -- Justins Brett hat keine serielle
+// Leitung, und ohne die war jede Meldung dieses Programms unsichtbar.
+const SYS_DHCPST: u64 = 1302
+const D_ST: u64 = 0
+const D_TX: u64 = 1
+const D_RX: u64 = 2
+const D_TRY: u64 = 3
+
+fn melde(was: u64, wert: u64) {
+    ulib.sys(SYS_DHCPST, was, wert, 0)
+}
 const NG_READY: u64 = 0
 const NG_IP: u64 = 1
 const NG_GW: u64 = 3
@@ -507,6 +519,8 @@ fn u_start(args: u64) -> u64 {
     //    Adresse, deren Hardwareadresse der Stapel nicht kennt, wird
     //    gegen eine ARP-Frage getauscht. Das ist kein Fehler, das ist
     //    ein Grund, es gleich noch einmal zu sagen.
+    var tx: u64 = 0
+    var rx: u64 = 0
     while runde < versuche && art != 2 {
         let n: u64 = bauen(1)
         var ziel: u64 = rund
@@ -515,15 +529,28 @@ fn u_start(args: u64) -> u64 {
         }
         let _s: u64 = net.sendto_ip(fd, (&aus[0 as usize]) as u64, n, ziel,
             PORT_S)
+        // NUR EIN WIRKLICH ABGESCHICKTES PAKET ZAEHLT. `sendto_ip`
+        // gibt einen Fehler zurueck, wenn der Stapel es nicht
+        // loswurde -- und genau dieser Fall ("TX 0 trotz Link") ist
+        // die Diagnose, die auf Justins Tafel fehlte.
+        if !net.failed(_s) {
+            tx = tx + 1
+        }
+        melde(D_TX, tx)
+        melde(D_TRY, runde + 1)
+        melde(D_ST, 1)
         var warte: u64 = 0
         while warte < 60 && art != 2 {
             let g: u64 = net.recvfrom_ip(fd, (&ein[0 as usize]) as u64, 1024,
                 &von)
             if !net.failed(g) && g > 0 {
+                rx = rx + 1
+                melde(D_RX, rx)
                 let t: u64 = lesen((&ein[0 as usize]) as u64, g)
                 if t == 2 {
                     art = 2
                     weg = runde % 2
+                    melde(D_ST, 2)
                 }
             } else {
                 ulib.sleep_ms(50)
@@ -533,6 +560,7 @@ fn u_start(args: u64) -> u64 {
         runde = runde + 1
     }
     if art != 2 {
+        melde(D_ST, 5) // aufgegeben: kein Angebot
         say((&s_to[0 as usize]) as u64)
         ulib.sayn(runde)
         say((&s_ve[0 as usize]) as u64)
@@ -559,15 +587,23 @@ fn u_start(args: u64) -> u64 {
         }
         let _s2: u64 = net.sendto_ip(fd, (&aus[0 as usize]) as u64, n2, ziel2,
             PORT_S)
+        if !net.failed(_s2) {
+            tx = tx + 1
+        }
+        melde(D_TX, tx)
+        melde(D_ST, 3)
         var warte2: u64 = 0
         while warte2 < 60 && art != 5 {
             let g2: u64 = net.recvfrom_ip(fd, (&ein[0 as usize]) as u64,
                 1024, &von)
             if !net.failed(g2) && g2 > 0 {
+                rx = rx + 1
+                melde(D_RX, rx)
                 let t2: u64 = lesen((&ein[0 as usize]) as u64, g2)
                 if t2 == 5 {
                     art = 5
                 } else if t2 == 6 {
+                    melde(D_ST, 6) // NAK
                     runde = versuche // NAK: nicht weiter fragen
                 }
             } else {
@@ -583,12 +619,16 @@ fn u_start(args: u64) -> u64 {
     // Platz, den es nicht mehr gibt.
     net.close(fd)
     if art != 5 {
+        if ulib.sys(SYS_DHCPST, D_ST, 0, 0) != 6 {
+            melde(D_ST, 5)
+        }
         say((&s_to[0 as usize]) as u64)
         ulib.sayn(runde)
         say((&s_ve[0 as usize]) as u64)
         ulib.nl()
         return 1
     }
+    melde(D_ST, 4) // ACK -- die Adresse steht
     sag_ip((&s_ak[0 as usize]) as u64, o_ip)
     say((&s_ls[0 as usize]) as u64)
     ulib.sayn(o_lease)
