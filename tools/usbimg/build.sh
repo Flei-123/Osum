@@ -352,6 +352,47 @@ EOF
 printf '# taskbar.conf\nedge=bottom\nheight=40\nwidth=104\nautohide=0\nontop=1\nalign=left\nlabels=never\nclock_seconds=1\nclock_date=1\nclock_weekday=0\nclock_lines=1\nhide_missing=1\n' \
     > "$OUT/taskbar.conf"
 
+# ============================================ RUNDE ECHTHARDWARE-1
+# DAS ABBILD BEKOMMT DAS AUSSEHEN, DAS DIE DEMO HATTE.
+#
+# Justin, vor den Fotos vom 09.09.: "alles komplett eckig -- nicht die
+# Demo, die du mir damals gezeigt hast". Er hat recht, und der Grund
+# stand nicht im Kernel, sondern in DIESER Datei.
+#
+# Die Demo (.design-shots/nachher/*.png) entstand mit
+# tools/design/aufnahme.sh, und dieses Skript legt VIER Dinge ins
+# Abbild, die hier bis heute fehlten:
+#
+#     /etc/theme.conf   scheme=, mode=, shape=
+#     /etc/schemas/     die Farbschemata
+#     /etc/shapes/      die Formsaetze (osum.shape: radius_window=12)
+#     /etc/themes/      die fertigen Voreinstellungen
+#
+# OHNE /etc/shapes/ UND OHNE `shape=` BLEIBT `wlibc.met` AUF `classic`,
+# und classic ist radius_window=0. Die Taskleiste ruft `form_push()`
+# treu bei jedem Start -- sie schickt dann eben lauter Nullen an
+# `wm.FM_RADIUS`, und der Server malt gehorsam rechteckig. Es war also
+# nie ein fehlender Zeichenweg, es war eine fehlende Datei.
+#
+# Und die Farben: bis hierher kam /etc/theme aus tools/k15/tree.py --
+# zwoelf DUNKLE Flaechenfarben aus Runde K15, ohne Schriftfarbe. Die
+# Demo lief auf `scheme=day mode=light`. Das ist der zweite Teil von
+# "die Farben passen nicht zusammen".
+#
+# GEWAEHLT IST `tageslicht`, weil dessen Preset Zeile fuer Zeile die
+# Kombination der Demo ist (scheme=day, mode=light, shape=osum).
+THEMA=${THEMA:-tageslicht}
+lies_preset() {
+    grep -a "^$1=" "assets/themes/$THEMA.preset" 2>/dev/null \
+        | head -1 | cut -d= -f2-
+}
+T_SCHEME=$(lies_preset scheme); T_SCHEME=${T_SCHEME:-day}
+T_MODE=$(lies_preset mode);     T_MODE=${T_MODE:-light}
+T_SHAPE=$(lies_preset shape);   T_SHAPE=${T_SHAPE:-osum}
+printf '# /etc/theme.conf -- Runde ECHTHARDWARE-1\nscheme=%s\nmode=%s\naccent=\nshape=%s\nlight_start=07:00\ndark_start=19:00\n' \
+    "$T_SCHEME" "$T_MODE" "$T_SHAPE" > "$OUT/theme.conf"
+sagen "thema       $THEMA (scheme=$T_SCHEME mode=$T_MODE shape=$T_SHAPE)"
+
 # ==================== RUNDE BLECH-HID: DER NOTAUSGANG OHNE TASTATUR
 #
 # Justins erster Blech-Lauf hat den Stick gestartet und ein Bild
@@ -509,9 +550,46 @@ ARGS+=(/lib/
 ARGS+=(/bin/)
 for p in $gebaut; do ARGS+=("/bin/$p=$OUT/$p.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
-ARGS+=(/etc/ "/etc/theme=$OUT/baum/theme" "/etc/passwd=$OUT/passwd"
+# ============================================ RUNDE ECHTHARDWARE-1
+# /etc/theme WIRD NICHT MEHR MITGELIEFERT -- UND DAS IST DER ZWEITE
+# TEIL VON "DIE FARBEN PASSEN NICHT ZUSAMMEN".
+#
+# `wlibc.reload_inner` liest die Dateien in dieser Reihenfolge:
+#   1. /etc/theme.conf   (scheme=, mode=, shape=)
+#   2. /etc/schemas/<scheme>
+#   3. /etc/shapes/<shape>
+#   4. /etc/theme        -- ZULETZT, und es ueberschreibt alles davor
+#
+# Punkt 4 ist Absicht (eine Maschine aus Runde K15 soll aussehen wie
+# vorher), aber die Datei, die dieser Stick bisher mitgab, kam aus
+# tools/k15/tree.py und traegt ZWOELF DUNKLE FLAECHENFARBEN ohne eine
+# einzige Schriftfarbe. Sie hat also das helle Tagschema wieder
+# zugeschuettet -- gemessen am 09.09.: Schreibtisch hell (#f1f5f9),
+# Panel dunkel (#26303c), weisse Schrift auf hellem Cyan. Genau das
+# Bild, das Justin fotografiert hat.
+#
+# Ein Abbild, das ein Schema mitbringt, darf keine Ueberschreibungsdatei
+# mitbringen. Wer eine eigene will, legt sie selbst an.
+ARGS+=(/etc/ "/etc/passwd=$OUT/passwd"
        "/etc/taskbar.conf=$OUT/taskbar.conf"
+       "/etc/theme.conf=$OUT/theme.conf"
        "/etc/netlauf.sh=$OUT/netlauf.sh")
+# RUNDE ECHTHARDWARE-1: die drei Verzeichnisse, ohne die `shape=` und
+# `scheme=` ins Leere zeigen. Derselbe Weg wie in
+# tools/design/aufnahme.sh -- dieselben Dateien, damit der Stick zeigt,
+# was die Demo gezeigt hat.
+ARGS+=(/etc/schemas/)
+for s_ in assets/schemes/*.scheme; do
+    ARGS+=("/etc/schemas/$(basename "$s_" .scheme)=$s_")
+done
+ARGS+=(/etc/shapes/)
+for s_ in assets/shapes/*.shape; do
+    ARGS+=("/etc/shapes/$(basename "$s_" .shape)=$s_")
+done
+ARGS+=(/etc/themes/)
+for s_ in assets/themes/*.preset; do
+    ARGS+=("/etc/themes/$(basename "$s_" .preset)=$s_")
+done
 ARGS+=(/etc/netview/)
 for q in $SYMBOLE; do ARGS+=("/etc/netview/$q=$OUT/icons/$q"); done
 ARGS+=(/usr/ /usr/share/ /usr/share/locale/
@@ -590,7 +668,9 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /etc/netview/state-noip /etc/netview/state-noroute \
 /etc/netview/mark-filtered /etc/netview/mark-faked /etc/netview/mark-none \
 /etc/netview/sys-faking /etc/netview/tile-fake /etc/netview/tile-net \
-/etc/netview/tile-hide /etc/theme /etc/taskbar.conf /etc/netlauf.sh \
+/etc/netview/tile-hide /etc/taskbar.conf /etc/netlauf.sh \
+/etc/theme.conf /etc/shapes/osum /etc/shapes/classic \
+/etc/schemas/day /etc/schemas/night /etc/themes/tageslicht \
 /bin/desktop /bin/taskbar /bin/netview /bin/explorer /boot/osum.mb \
 /bin/ota /bin/fetch /bin/host /bin/dhcp /bin/jarvisd /bin/jsig \
 /bin/jarvisctl /bin/pollbr /etc/ota.conf /etc/jarvis/rechte.conf \
