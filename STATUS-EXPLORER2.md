@@ -57,8 +57,25 @@ Belege sind Zeilen der seriellen Leitung aus dem Abnahmelauf
 | 11 | Grenzen: MAXENT 96→4096, NAMEB 32→256, Historie 8→64; toter Zweig weg | **fertig** | `MAXENT = 4096` · `NAMEB = 256` · `HISTN = 64` · `explorer: modell n=… ueberlauf=0` · `if welches == 4` nur noch **einmal** |
 | 12 | Werkzeugleiste mit Symbolen statt `<` `>` `^` | **fertig** | `wlib.icon_button(icons.NAV_BACK/FORWARD/UP)`; die Zeichen `t_zur/t_vor/t_auf` sind aus dem Quelltext verschwunden |
 
-**Abnahmestand:** 48 Prüfungen gut, 1 offen im vorletzten Lauf (die
-Ctrl+Z-Prüfung, deren *Drehbuch* falsch war — siehe §5), danach grün.
+**Abnahmestand: 49 Prüfungen gut, 0 Mängel.**
+
+### Sichtprüfung, beide Auflösungen
+
+Die Bilder liegen unter
+`/srv/store/belege/orientos-explorer2/2026-09-09/` und im Baum unter
+`.explorer2-shots/`.
+
+| Auflösung | Zustände | Messung |
+|---|---|---|
+| **1280x800** | Grundansicht, Mehrfachauswahl, nach dem Einfügen, Kontextmenü, Eigenschaften, versteckte Dateien, Pfadfeld, Umbenennen-Dialog, Ende | 9 Bilder, **cut 0** in jedem |
+| **2560x1440, uiscale=2** | Grundansicht, Mehrfachauswahl, Kontextmenü, Eigenschaften | 4 Bilder, **cut 0, overlapping 0** in jedem |
+
+Bei `uiscale=2` verdoppelt sich die Seite wirklich statt nur zu
+skalieren: `explorer: anordnen w=1320 h=860 inhalt=598 baum=328` — die
+Maße werden aus den Marken **gerechnet** und nicht getippt.
+
+Zum Vergleich liegt `00-vorher-1280x800.png` dabei: derselbe
+Dateimanager auf `cad06fb`, vor dieser Runde.
 
 ---
 
