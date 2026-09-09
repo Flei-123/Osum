@@ -41,6 +41,10 @@ mkdir -p "$OUT"
 # eine eigene Maschine; "schreibtisch", "startmenue" und
 # "taskleiste-nah" kommen aus dem Drehbuch-Lauf, weil sie NUR im
 # Zusammenspiel entstehen (eine Leiste ohne Schreibtisch ist keine).
+# Die Programme, die je eine eigene Maschine bekommen. `explorer` ist
+# zweimal da: einmal fuer sein Fenster und einmal (mit `dlg`) fuer den
+# Strg+N-Dialog -- in einer Maschine, in der KEIN Startmenue offen ist
+# und ihm die Taste wegnimmt.
 EIGEN="settings explorer sh dispctl"
 
 blau() { python3 "$ROOT/tools/design/blaustich.py" "$1" 2>/dev/null; }
@@ -64,15 +68,17 @@ lauf() {
     # `extra=` kann schon von aussen kommen (wigapp=...); beides muss in
     # EIN `extra=` gehen, sonst gewinnt das letzte.
     local ex="$sc"
+    local rest=()
     local a
     for a in "$@"; do
         case "$a" in
             extra=*) ex="$ex ${a#extra=}" ;;
+            *) rest+=("$a") ;;
         esac
     done
     bash tools/design/aufnahme.sh "$d" \
         scheme=day $ds mode="$mode" res="$res" lang=en \
-        extra="$ex" \
+        extra="$ex" ${rest[@]+"${rest[@]}"} \
         > "$d/bau.log" 2>&1
     echo $? > "$d/rc"
 }
@@ -86,8 +92,25 @@ for res in 1280x800 2560x1440; do
     lauf durchklick "$res" "$mode"
     # 2. je Programm eine eigene Maschine
     for p in $EIGEN; do
-        lauf "$p" "$res" "$mode" extra="wigapp=/bin/$p"
+        lauf "$p" "$res" "$mode" extra="wigapp=/bin/$p" \
+            drehbuch=tools/design/einzeln.txt
     done
+    # 3. DER DATEIDIALOG, und warum er eine eigene Maschine braucht.
+    #
+    # Im Durchklick-Lauf startet der Dateimanager AUS DEM STARTMENUE,
+    # und der Starter holt sich danach den Eingabefokus zurueck (er
+    # liegt auf L_TOP und laeuft nach dem Start noch seine Bewegung
+    # zu Ende -- `wlib: anim ... dur=12`). Strg+N landet dann bei IHM
+    # und nicht beim Dateimanager; gemessen als `wm: fokus id=11
+    # vor=14` unmittelbar vor der Taste, und das ist der Grund, warum
+    # `04-dialog` seit Runden Oktett fuer Oktett `03-explorer` war
+    # (OFFEN.md G-003).
+    #
+    # `wigapp=/bin/explorer` startet den Dateimanager als EINZIGES
+    # Fenster -- kein Startmenue, kein Fokusdieb. Was hier gemessen
+    # wird, ist damit wirklich der Dialog und nicht die Klickfolge.
+    lauf dialog "$res" "$mode" extra="wigapp=/bin/explorer" \
+        drehbuch=tools/design/dlg.txt
   done
 done
 echo "== fertig, Bilder unter $OUT =="
