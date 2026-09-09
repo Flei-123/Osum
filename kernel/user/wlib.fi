@@ -119,7 +119,8 @@ export {
     bild_aus_y1, bild_aus_weg, bild_px, bild_py,
     bild_bw, bild_bh, slider,
     K_MENUBAR, K_CHOICE, K_SEP, K_SCROLL,
-    NK_MAIN, NK_MENU, NK_DLG,
+    NK_MAIN, NK_MENU, NK_DLG, NK_TIP,
+    tip_show, tip_hide, tip_open, tip_hover, TIP_MS, TIP_TICKS,
     KEY_TAB, KEY_ENTER, KEY_BS, KEY_ESC, KEY_UP, KEY_DOWN, KEY_LEFT,
     KEY_RIGHT, KEY_HOME, KEY_END, KEY_PGUP, KEY_PGDN, KEY_DEL,
     KEY_SDEL,
@@ -155,7 +156,20 @@ const CT_FILES: u64 = 16
 // rectangles per tab, and the number before this change was 86 on
 // every tab. Two limits, one silent overflow each.
 const MAXWD: u64 = 160 // Widgets insgesamt
-const MAXWN: u64 = 4 // Fenster: das Hauptfenster, ein Menue, ein Dialog
+// RUNDE ECHTHARDWARE-2: FUENF UND NICHT VIER -- DIE INFOBLASE BRAUCHT
+// EINEN PLATZ.
+//
+// GEMESSEN, nicht vermutet: der erste Lauf mit der Blase meldete auf
+// der Leitung brav `wlib: tip [Terminal -- sh] x=120 y=1324`, und im
+// Bild war an dieser Stelle NICHTS -- 0,0 % Tinte auf 300x50
+// Bildpunkten. Der Grund steht in `new_win`: bei `nwn >= MAXWN` gibt
+// es MAXWN zurueck und malt nicht. Die Leiste hatte ihre vier Plaetze
+// schon (Hauptfenster + die Vorschaurahmen), die Blase bekam keinen,
+// und der Fehler war still -- `tip_show` hat die Zeile trotzdem
+// gedruckt, weil sie VOR dem Anlegen steht.
+//
+// Genau die Sorte Fehler, die man nur im Bild sieht und nie im Log.
+const MAXWN: u64 = 5 // Hauptfenster, Menue, Dialog, Vorschau, Infoblase
 const MAXCT: u64 = 24 // Kaesten
 
 const K_LABEL: u64 = 1
@@ -301,6 +315,11 @@ const GR_MAX: u64 = 4 // der Wert, der ganz oben liegt (z. B. 1000)
 const NK_MAIN: u64 = 0
 const NK_MENU: u64 = 1
 const NK_DLG: u64 = 2
+// RUNDE ECHTHARDWARE-2: DIE INFOBLASE. Eigene Art und nicht ein Menue
+// mit einer Zeile: sie nimmt KEINE Klicks an, hat keinen Rahmen zum
+// Anfassen und verschwindet von selbst. Ein Menue, das nichts kann,
+// waere ein Menue, das man versehentlich bedient.
+const NK_TIP: u64 = 3
 
 // Die Felder eines Widgets. Sechzehn Woerter, ein Feld je Wort -- Firn
 // hat keine Verbunde, und eine Tabelle aus Woertern ist ehrlicher als
@@ -2683,6 +2702,11 @@ fn paint_bg(w: u64, x: u64, y: u64, bw: u64, bh: u64) {
     if ng(w, N_KIND) == NK_MENU {
         c = wlibc.theme(wlibc.T_MENU)
     }
+    // Die Blase nimmt die Menuefarbe: sie schwebt ueber allem, wie ein
+    // Menue, und muss sich vom Fenster darunter abheben.
+    if ng(w, N_KIND) == NK_TIP {
+        c = wlibc.theme(wlibc.T_MENU)
+    }
     wlibc.rect(x, y, bw, bh, c)
 }
 
@@ -2980,7 +3004,7 @@ fn bg_of(w: u64) -> u64 {
     if ng(w, N_KIND) == NK_DLG {
         return wlibc.theme(wlibc.T_DLG)
     }
-    if ng(w, N_KIND) == NK_MENU {
+    if ng(w, N_KIND) == NK_MENU || ng(w, N_KIND) == NK_TIP {
         return wlibc.theme(wlibc.T_MENU)
     }
     return wlibc.theme(wlibc.T_BG)
@@ -4109,6 +4133,185 @@ fn paint_one(i: u64) {
 // Zeilen und ein Rahmen. Der Grund: ein Menue ist der einzige Fall, in
 // dem ein FENSTER genau ein Widget ist, und eine Widgetliste dafuer
 // waere eine Verwaltung ohne Nutzen.
+// ==================================================== RUNDE ECHTHARDWARE-2
+//
+// DIE INFOBLASE (TOOLTIP).
+//
+// Justins Vorgabe E: wer mit dem Zeiger auf einem Symbol der Leiste,
+// im Tray, auf einem Eintrag des Startmenues oder auf einem
+// Fensterknopf STEHENBLEIBT, soll nach einer halben Sekunde lesen
+// koennen, was das ist.
+//
+// DREI ENTSCHEIDUNGEN, und jede hat einen Grund:
+//
+// 1. EIN EIGENES FENSTER (NK_TIP) und kein Rechteck im Fenster
+//    darunter. Eine Blase am oberen Rand der Taskleiste muss UEBER dem
+//    Fensterrand stehen koennen -- innerhalb des Leistenfensters
+//    gemalt waere sie an der Leistenkante abgeschnitten.
+//
+// 2. SIE NIMMT KEINE KLICKS AN. `hit_win` gibt fuer NK_TIP nichts
+//    zurueck; wer auf eine Blase klickt, trifft, was darunter liegt.
+//    Eine Blase, die den Klick schluckt, waere schlimmer als keine.
+//
+// 3. DIE ZEIT WIRD VOM AUFRUFER GEZAEHLT, nicht hier. `tip_hover` ist
+//    eine reine Rechnung: "der Zeiger steht seit `seit` auf Marke
+//    `was` -- zeig oder verbirg". Diese Bibliothek hat keine eigene
+//    Schleife, in der eine halbe Sekunde vergehen koennte, und ein
+//    Zeitgeber, den niemand tickt, ginge nie los.
+//
+// GEMESSEN wird sie ueber `wlib: tip` auf der seriellen Leitung --
+// sonst ist "die Blase kam" von "die Blase kam nicht" nicht zu
+// unterscheiden.
+// DER ZEITGEBER SCHLAEGT 100-MAL JE SEKUNDE (TICK_HZ = 100 in
+// kernel/sys.fi), also sind Justins 500 ms FUENFZIG Schlaege und
+// nicht fuenfhundert. Mit 500 haette die Blase erst nach fuenf
+// Sekunden gestanden -- und wer fuenf Sekunden wartet, haelt sie fuer
+// kaputt.
+const TIP_TICKS: u64 = 50 // 500 ms bei 100 Hz
+const TIP_MS: u64 = 500 // dieselbe Zeit in Millisekunden, fuer den Bericht
+
+static mut tp_win: u64 = 0xFFFFFFFFFFFFFFFF
+static mut tp_text: u64 = 0
+static mut tp_was: u64 = 0 // welche Marke gerade gilt (0 = keine)
+static mut tp_seit: u64 = 0 // seit wann, in Ticks
+static mut tp_zahl: u64 = 0
+
+static mut s_tip: [u8; 12] = "wlib: tip [\0"
+static mut s_tipx: [u8; 7] = "] x=\0\0\0"
+static mut s_tipy: [u8; 5] = " y=\0\0"
+static mut s_tipn: [u8; 5] = " n=\0\0"
+static mut s_tipzu: [u8; 15] = "wlib: tip zu\0\0\0"
+static mut s_tipvoll: [u8; 22] = "wlib: tip kein Platz\0\0"
+
+fn tip_open() -> bool {
+    return tp_win != 0xFFFFFFFFFFFFFFFF
+}
+
+// Die Blase AUFMACHEN, an einer Stelle des Schirms. `sx`/`sy` ist der
+// Punkt, an dem der Zeiger steht; die Blase setzt sich darueber, wie
+// es jedes System tut -- unter dem Zeiger verdeckte sie das, worueber
+// sie spricht.
+fn tip_show(text: u64, sx: u64, sy: u64) {
+    if text == 0 || tlen(text) == 0 {
+        return
+    }
+    tip_hide()
+    let n: u64 = tlen(text)
+    let pad: u64 = 6 * wlibc.ui_scale()
+    let bw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), text, n)
+        + 2 * pad
+    let bh: u64 = zeilen_hoehe() + pad
+    // Nicht ueber den Rand: links wie rechts, oben wie unten.
+    var x: u64 = sx
+    if x + bw + 2 > wlibc.screen_w() {
+        x = sub(wlibc.screen_w(), bw + 2)
+    }
+    var y: u64 = sub(sy, bh + 4 * wlibc.ui_scale())
+    if sy < bh + 4 * wlibc.ui_scale() {
+        y = sy + 4 * wlibc.ui_scale()
+    }
+    let w: u64 = new_win(x, y, bw, bh, text, NK_TIP)
+    if w >= MAXWN {
+        // KEIN PLATZ -- und das wird GESAGT. Eine Blase, die still
+        // ausbleibt, ist von einer Blase, die nicht ausgeloest wurde,
+        // nicht zu unterscheiden; genau daran ist diese Runde einmal
+        // haengengeblieben.
+        say((&s_tipvoll[0 as usize]) as u64)
+        ulib.nl()
+        return
+    }
+    // KEIN TITELBALKEN. Ohne das kommt die Blase mit der Dekoration
+    // eines gewoehnlichen Fensters -- auf der Leitung stand im ersten
+    // Lauf `tp=30`, also dreissig Bildpunkte Titelleiste ueber einem
+    // Text von einer Zeile. Eine Blase mit Titelbalken ist keine
+    // Blase, sondern ein winziges Fenster.
+    let _d: u64 = wlibc.win_state(ng(w, N_H), wlibc.WS_DECO, 0)
+    tp_win = w
+    tp_text = text
+    tp_zahl = tp_zahl + 1
+    ns(w, N_DATA, text)
+    ns(w, N_CNT, n)
+    dirty_all(w)
+    say((&s_tip[0 as usize]) as u64)
+    say(text)
+    say((&s_tipx[0 as usize]) as u64)
+    ulib.sayn(x)
+    say((&s_tipy[0 as usize]) as u64)
+    ulib.sayn(y)
+    say((&s_tipn[0 as usize]) as u64)
+    ulib.sayn(tp_zahl)
+    ulib.nl()
+}
+
+fn tip_hide() {
+    if tp_win == 0xFFFFFFFFFFFFFFFF {
+        return
+    }
+    let w: u64 = tp_win
+    tp_win = 0xFFFFFFFFFFFFFFFF
+    tp_text = 0
+    close(w)
+    // Der Platz wird wieder frei -- wie bei `menu_close`. Eine Leiste,
+    // die tausendmal am Tag eine Blase zeigt, darf die Fenstertafel
+    // nicht vollaufen lassen.
+    if w + 1 == nwn {
+        nwn = nwn - 1
+    }
+    say((&s_tipzu[0 as usize]) as u64)
+    ulib.nl()
+}
+
+// DER VERWEILZEITGEBER, als reine Rechnung.
+//
+//   was   eine Zahl, die die Marke unter dem Zeiger benennt (0 = keine)
+//   text  der Text zu dieser Marke
+//   sx/sy wo der Zeiger steht
+//
+// Der Aufrufer ruft das in seiner Ereignisschleife. Wechselt `was`,
+// faengt die Zeit von vorn an und eine offene Blase geht zu. Bleibt
+// `was` laenger als TIP_MS gleich, geht sie auf.
+fn tip_hover(was: u64, text: u64, sx: u64, sy: u64) {
+    let jetzt: u64 = ticks()
+    if was != tp_was {
+        tp_was = was
+        tp_seit = jetzt
+        tip_hide()
+        return
+    }
+    if was == 0 || tip_open() {
+        return
+    }
+    if jetzt < tp_seit {
+        tp_seit = jetzt
+        return
+    }
+    // `ticks` zaehlt Millisekunden (kernel: I_TICKS).
+    if jetzt - tp_seit >= TIP_TICKS {
+        tip_show(text, sx, sy)
+    }
+}
+
+fn paint_tip(w: u64) {
+    let bw: u64 = ng(w, N_W)
+    let bh: u64 = ng(w, N_HH)
+    wlib_tip_flaeche(bw, bh)
+    let p: u64 = ng(w, N_DATA)
+    if p == 0 {
+        return
+    }
+    let pad: u64 = 6 * wlibc.ui_scale()
+    let base: u64 = (bh + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())) / 2
+    let _e: u64 = put_text(wlibc.F_UI, wlibc.px_ui(), pad, base,
+        sub(bw, 2 * pad), p, ng(w, N_CNT), wlibc.theme(wlibc.T_FG), 0)
+}
+
+// Flaeche und Rand der Blase -- durch das Rahmenwerk, damit sie unter
+// `osum` runde Ecken hat und unter `classic` eckige.
+fn wlib_tip_flaeche(bw: u64, bh: u64) {
+    mal_tafel(0, 0, bw, bh, MR_TAFEL, wlibc.EL_OVERLAY,
+        wlibc.theme(wlibc.T_MENU), wlibc.theme(wlibc.T_LINE))
+}
+
 fn paint_menu(w: u64) {
     let zh: u64 = zeilen_hoehe() + 2
     wlibc.rect(0, 0, ng(w, N_W), ng(w, N_HH), wlibc.theme(wlibc.T_MENU))
@@ -4171,6 +4374,8 @@ fn flush_rect(w: u64, x0: u64, y0: u64, x1: u64, y1: u64) -> u64 {
         paint_bg(w, x0, yb, x1 - x0, ye - yb)
         if ng(w, N_KIND) == NK_MENU {
             paint_menu(w)
+        } else if ng(w, N_KIND) == NK_TIP {
+            paint_tip(w)
         } else {
             var i: u64 = 0
             while i < nwd {
