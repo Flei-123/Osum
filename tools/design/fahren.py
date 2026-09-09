@@ -184,6 +184,30 @@ class Fahrer:
             self.cmd("mouse_button 0")
         time.sleep(1.2)
 
+    # ============================================ RUNDE ECHTHARDWARE-3
+    # ZIEHEN: DRUECKEN, IN SCHRITTEN FAHREN, LOSLASSEN.
+    #
+    # Zwei Befunde dieser Runde lassen sich mit `klick` gar nicht
+    # pruefen, weil sie eine BEWEGUNG BEI GEDRUECKTER TASTE verlangen:
+    # die Fenstergroesse (`wm.fi` `S_SIZING`) und der Helligkeitsregler
+    # (`qs.fi`, seit dieser Runde `EV_MOVE`). Ein Sprung von A nach B
+    # waere kein Ziehen -- der Server sieht dann EINE Bewegung, und
+    # genau die hat vorher auch schon funktioniert. Also in Schritten,
+    # damit wirklich mehrere `EV_MOVE` entstehen.
+    def ziehe(self, x0, y0, x1, y1, schritte=8):
+        self.fahre(x0, y0)
+        time.sleep(0.35)
+        self.cmd("mouse_button 1")
+        time.sleep(0.2)
+        for k in range(1, schritte + 1):
+            zx = x0 + (x1 - x0) * k // schritte
+            zy = y0 + (y1 - y0) * k // schritte
+            self.fahre(zx, zy)
+            time.sleep(0.12)
+        time.sleep(0.3)
+        self.cmd("mouse_button 0")
+        time.sleep(1.2)
+
     def taste(self, name):
         self.cmd("sendkey %s" % name)
         time.sleep(0.4)
@@ -251,6 +275,20 @@ class Fahrer:
         # Versuch dieser Runde hat die beiden verwechselt und auf
         # (19,14) geklickt -- oben links auf den Schreibtisch.  Genau
         # deshalb steht hier eine Umrechnung und keine Zahl.
+        # ==================================== RUNDE ECHTHARDWARE-3
+        # `hellspur` -- die Rinne des Helligkeitsreglers, so wie das
+        # Kontrollzentrum sie SELBST meldet:
+        #     qs: hell spur von=898 bis=1266 ym=592
+        # Damit muss niemand mehr PAD/GAP/TOP2/ZH nachrechnen. Ich habe
+        # genau das in dieser Runde zweimal getan und zweimal
+        # danebengegriffen -- beide Male lag der Griff ausserhalb des
+        # Panels, das sich daraufhin voellig zu Recht schloss.
+        if name == "hellspur":
+            m = letzte(r"qs: hell spur von=(\d+) bis=(\d+) ym=(\d+)")
+            if m is None:
+                return None
+            x0, x1, ym = (int(m.group(i)) for i in (1, 2, 3))
+            return (x0, ym - 4, x1 - x0, 8)
         gm = letzte(r"taskbar: geom edge=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
         tb = (int(gm.group(1)), int(gm.group(2))) if gm else (0, 0)
         if name == "start":
@@ -457,6 +495,48 @@ def main():
                 f.klick(x, y, 1, taste=2)
             else:
                 f.klick(x, y, 2 if b == "doppelauf" else 1)
+        # RUNDE ECHTHARDWARE-3: `ziehe <x0>,<y0> <x1>,<y1>` und
+        # `zieheauf <name> <dx>,<dy>` -- die Bewegung bei gedrueckter
+        # Taste, ohne die sich weder die Fenstergroesse noch ein
+        # Schieberegler pruefen laesst.
+        elif b == "ziehe":
+            t = arg.split()
+            x0, y0 = (int(v) for v in t[0].split(","))
+            x1, y1 = (int(v) for v in t[1].split(","))
+            f.ziehe(x0, y0, x1, y1)
+            print("ziehe %d,%d -> %d,%d" % (x0, y0, x1, y1))
+        elif b == "zieheauf":
+            t = arg.split()
+            r = f.rechteck(t[0])
+            if r is None:
+                print("zieheauf %s -> KEIN RECHTECK GEMELDET" % t[0])
+                fehler += 1
+                continue
+            dx, dy = (int(v) for v in t[1].split(","))
+            # DIE UNTERE RECHTE ECKE des gemeldeten Rechtecks, zwei
+            # Punkte hinein -- das ist der Griff.
+            x0, y0 = r[0] + r[2] - 2, r[1] + r[3] - 2
+            f.ziehe(x0, y0, x0 + dx, y0 + dy)
+            print("zieheauf %s -> von %d,%d um %d,%d  (rect %d,%d %dx%d)"
+                  % (t[0], x0, y0, dx, dy, r[0], r[1], r[2], r[3]))
+        # RUNDE ECHTHARDWARE-3: `ziehespur <name> <von%>,<bis%>` --
+        # entlang eines gemeldeten Rechtecks ziehen, in Prozent seiner
+        # Breite. Fuer Schieberegler: die Zahlen bleiben richtig, auch
+        # wenn sich das Panel verschiebt oder die Aufloesung wechselt.
+        elif b == "ziehespur":
+            t = arg.split()
+            r = f.rechteck(t[0])
+            if r is None:
+                print("ziehespur %s -> KEIN RECHTECK GEMELDET" % t[0])
+                fehler += 1
+                continue
+            p0, p1 = (int(v) for v in t[1].split(","))
+            y = r[1] + r[3] // 2
+            x0 = r[0] + r[2] * p0 // 100
+            x1 = r[0] + r[2] * p1 // 100
+            f.ziehe(x0, y, x1, y)
+            print("ziehespur %s -> %d,%d nach %d,%d  (rect %d,%d %dx%d)"
+                  % (t[0], x0, y, x1, y, r[0], r[1], r[2], r[3]))
         elif b == "taste":
             f.taste(arg)
         elif b == "foto":
