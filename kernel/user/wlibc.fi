@@ -106,7 +106,8 @@ export {
     theme_probe_high, PAIR_COUNT, theme_accent_own, ACCENT_BLACK,
     // ---- ROUND NETVIEW, addendum: icons whose colours come from
     // the scheme (OSYM coverage 1..5 = a role, not an alpha).
-    icon_ok, icon_w, icon_h, icon_role, icon_draw, ICON_ROLES,
+    icon_ok, icon_w, icon_h, icon_role, icon_draw, icon_draw_sc,
+    icon_draw_w, icon_draw_h, ICON_ROLES,
     F_UI, F_MONO, F_ICON, px_ui, map_surface, px_mono, ui_scale,
     RGB24, MODE_LIGHT, MODE_DARK, MODE_AUTO,
     NEUTRAL_STEPS, RAMP_STEPS, R_ACCENT, R_DANGER, R_WARNING, R_SUCCESS,
@@ -4987,10 +4988,71 @@ fn icon_h(p: u64) -> u64 {
 // alone -- so an icon on a taskbar button keeps the button's face, and
 // a pixel checker that measures the face at the corners still finds it.
 fn icon_draw(p: u64, x: u64, y: u64) -> bool {
+    return icon_draw_sc(p, x, y, ui_scale())
+}
+
+// ==================================================== RUNDE ECHTHARDWARE-2
+//
+// WIE GROSS DAS BILD AM ENDE WIRKLICH IST.
+//
+// Wer ein Symbol senkrecht mittig setzen will, rechnet `(h - GROESSE)
+// / 2` -- und GROESSE muss die Zahl sein, die auch gemalt wird. Bis zu
+// dieser Runde stand dort `gl_w()` (16 * Vervielfachung = 32), gemalt
+// wurden aber `icon_h() * Vervielfachung`. Bei einem 14 Punkte hohen
+// Bild in einem 16er Feld sind das 28 statt 32, und das Symbol sass
+// GEMESSEN fuenf Punkte zu hoch -- genau Justins "Symbol und Text
+// nicht auf gleicher Hoehe".
+//
+// Also gibt es die Zahl jetzt zum Nachfragen, statt sie an jeder
+// Malstelle neu zu schaetzen.
+fn icon_draw_w(p: u64) -> u64 {
+    return icon_w(p) * ui_scale()
+}
+
+fn icon_draw_h(p: u64) -> u64 {
+    return icon_h(p) * ui_scale()
+}
+
+// ==================================================== RUNDE ECHTHARDWARE-2
+//
+// DAS SYMBOL WAECHST MIT DEM SCHIRM -- UND DAS WAR DIE WURZEL DER
+// "WINZIGEN SYMBOLE".
+//
+// Justin hat auf 2560x1440 fotografiert: die Zeichen in der Taskleiste
+// sind Stecknadelkoepfe in einem 80 Bildpunkte hohen Streifen. Auf der
+// seriellen Leitung stand dazu
+//
+//     taskbar: sym btn=0 app=terminal w=16 ink=196
+//
+// und diese 16 sind NICHT die Zeichengroesse, sondern `icon_w()` --
+// die Groesse der Bilddatei. Genau hier lag der Fehler: `icon_draw`
+// hat das Feld PUNKT FUER PUNKT ausgegeben, ohne die Vervielfachung
+// auch nur zu kennen. Jede andere Groesse im System (Schrift ueber
+// `px_ui()`, Knopfhoehen, `gl_w()`) nimmt `ui_scale()` mit -- dieses
+// eine Blit nicht. Die Leiste wurde doppelt so hoch, das Symbol blieb
+// 16 Punkte.
+//
+// GENOMMEN WIRD DIE NAECHSTE NACHBARSCHAFT und keine Glaettung: die
+// Quellen sind Flaechenzeichnungen mit harten Kanten (siehe
+// assets/apps/*/symbol.txt), und eine Glaettung machte daraus bei
+// ganzzahliger Vervielfachung nur einen weichen Rand. Ganzzahlig
+// vervielfacht ist ein Kaestchen ein Kaestchen.
+//
+// `icon_draw_sc` steht daneben, damit ein Aufrufer, der eine ANDERE
+// Groesse braucht (die Vorschau in den Einstellungen), sie nennen
+// kann, ohne dass hier eine zweite Schleife entsteht.
+fn icon_draw_sc(p: u64, x: u64, y: u64, sc: u64) -> bool {
     let w: u64 = icon_w(p)
     let h: u64 = icon_h(p)
     if w == 0 || h == 0 || w > 64 || h > 64 {
         return false
+    }
+    var s: u64 = sc
+    if s == 0 {
+        s = 1
+    }
+    if s > 8 {
+        s = 8
     }
     var r: u64 = 0
     while r < h {
@@ -5000,10 +5062,19 @@ fn icon_draw(p: u64, x: u64, y: u64) -> bool {
                 as *mut u32) as u64
             let a: u64 = (v >> 24) & 0xFF
             if a != 0 {
-                if a == 255 {
-                    px(x + c, y + r, v & RGB24)
-                } else {
-                    px(x + c, y + r, icon_role(a))
+                var f: u64 = v & RGB24
+                if a != 255 {
+                    f = icon_role(a)
+                }
+                // Ein Quellpunkt wird zu einem s-mal-s-Kaestchen.
+                var dy: u64 = 0
+                while dy < s {
+                    var dx: u64 = 0
+                    while dx < s {
+                        px(x + c * s + dx, y + r * s + dy, f)
+                        dx = dx + 1
+                    }
+                    dy = dy + 1
                 }
             }
             c = c + 1
