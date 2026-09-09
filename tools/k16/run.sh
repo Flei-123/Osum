@@ -245,6 +245,53 @@ gleich "GEGENPROBE: mit einem MiB weniger Adressraum geht es nicht" \
 gleich "GEGENPROBE: mit acht KiB weniger Stapel geht es nicht" \
     "$(wert "$TMPD/mess.txt" 'weniger_stapel [0-9]+' | grep -oE '[0-9]+$')" "0"
 
+# ================================================== RUNDE MERGE-10
+# `firnc1` SCHWEIGT, WO `firnc0` REDET -- UND DAS IST DER GANZE D-019.
+#
+# Der alte Befund D-019 lautete: "firnc1 bricht still ab, wenn wlib.fi
+# zu gross wird", und daraus wurde eine Zeitbombe gefolgert, die jede
+# Runde treffen kann, die wlib.fi wachsen laesst.
+#
+# ES IST KEINE GROESSENGRENZE. Gemessen in Runde MERGE-10: dieselbe
+# Datei (md5 gleich) uebersetzt sich in `kernel/user/` fehlerfrei und
+# scheitert in `/tmp/` -- weil dort die importierte Nachbardatei
+# `ulib.fi` fehlt. `firnc0` sagt genau das mit Zeilennummer; `firnc1`
+# gibt 2 zurueck und schreibt NULL Oktett.
+#
+# Hier wird beides festgenagelt, damit die Diagnose nicht ein zweites
+# Mal einen halben Tag kostet:
+#   * dass `firnc1` bei fehlendem Import schweigt (der Mangel selbst),
+#   * dass `firnc0` an derselben Stelle den Dateinamen nennt (der Weg
+#     zur Antwort, solange der Mangel besteht).
+# Faellt einer der beiden Punkte, hat sich `vendor/firn` geaendert --
+# und dann gehoert BEFUND-FIRNC1-STILL.md nachgezogen.
+echo "== 2b. der stille Abbruch von firnc1 (D-019) =="
+LEER="$TMPD/leerimport"
+rm -rf "$LEER"; mkdir -p "$LEER"
+cp kernel/user/wlib.fi "$LEER/" 2>/dev/null
+FIRNLIB="$PWD/lib" "$FC1" -c -o "$LEER/x.o" "$LEER/wlib.fi" \
+    > "$LEER/c1.out" 2> "$LEER/c1.err"
+RC1=$?
+FIRNLIB="$PWD/lib" "$FIRNC" -c -o "$LEER/x0.o" "$LEER/wlib.fi" \
+    > "$LEER/c0.out" 2> "$LEER/c0.err"
+RC0=$?
+gleich "firnc1 geht bei fehlendem Import mit 2" "$RC1" "2"
+gleich "und schreibt dabei KEIN Oktett (das ist der Mangel)" \
+    "$(cat "$LEER/c1.out" "$LEER/c1.err" | wc -c)" "0"
+[ "$RC0" -ne 0 ] \
+    && ok "firnc0 scheitert an derselben Stelle (rc=$RC0)" \
+    || bad "firnc0 haette auch scheitern muessen"
+grep -q "ulib.fi" "$LEER/c0.err" \
+    && ok "firnc0 NENNT die fehlende Datei -- so kommt man an die Ursache" \
+    || bad "firnc0 nennt die fehlende Datei nicht mehr"
+# Und die Gegenprobe, dass es NICHT die Groesse ist: dieselbe Datei an
+# ihrem Platz, mit ihren Nachbarn, geht durch.
+FIRNLIB="$PWD/lib" "$FC1" -c -o "$TMPD/wlib-gross.o" kernel/user/wlib.fi \
+    > "$TMPD/gross.err" 2>&1
+RCG=$?
+gleich "DIESELBE Datei an ihrem Platz uebersetzt firnc1 klaglos (keine Groessengrenze)" \
+    "$RCG" "0"
+
 # ===================================================================
 echo "== 3. die Speicherkarte: der Bereich dieser Runde ueberschneidet keinen =="
 if python3 tools/kernel/memmap.py kernel > "$TMPD/karte.txt" 2>&1; then
