@@ -129,11 +129,21 @@ passiert, bevor der Gegenlauf es zeigte.
 
 ## 4. ABBILD
 
-`orientos-usb-20260909-2b5fd03.img`
-`de83bb448350d3ab34dcea68871969fc5b092859fc0eb4cdaa909ad7f6fa3186`
+`orientos-usb-20260909-1bdd599.img`
+`de4ce0a960d7b62eb5e92b7c9a6b1a1467052fd7f5037fe688b2d2304933e312`
 
 - `/root/abbilder/` und `/srv/store/abbilder/`
 - **NICHT als aktuell markiert** — der Verweis zeigt unveraendert auf das alte Abbild.
+
+### Gegenprobe am FERTIGEN Abbild (frischer Boot, 2560x1440, uiscale=2)
+
+| Punkt | Ergebnis |
+|---|---|
+| Abstuerze | **0 panics** |
+| Form | `taskbar: shape file=osum name=OrientOS keys=26`, `form n=8` |
+| Uhr | Systemzeit **UTC 12:00** → Leiste **14:00:38** (genau +2 h) |
+| Klick auf Eintrag | `launcher: start /apps/explorer.osp/start pid=19` |
+| Tippen | `[e]` 18 Treffer → `[ed]` 6 → `[edi]` 4 — die Liste wird mit jedem Zeichen kuerzer |
 
 ## 5. BELEGE
 
