@@ -423,10 +423,30 @@ echo "=================================================="
 echo "  ENDE DES NETZ-SELBSTLAUFS"
 echo "=================================================="
 EOFNL
-# DIE SPRACHE DES STICKS IST DEUTSCH. Das ist die Wahl des Benutzers und
-# steht deshalb unter /users/root/config/ und NICHT unter /etc/ -- die
-# Regel aus docs/I18N.md, die tools/i18n/run.sh nachprueft.
-printf 'de\n' > "$OUT/locale-de"
+# ===================================================== RUNDE ECHTHARDWARE-2
+#
+# DIE SPRACHE DES STICKS IST ENGLISCH. Dauerregel von Justin vom
+# 09.09.2026: Englisch ist die Hauptsprache der Oberflaeche, Deutsch
+# bleibt als waehlbare Uebersetzung.
+#
+# HIER UND NUR HIER. Der Katalog (kernel/user/msg.fi, Runde I18N) hat
+# das immer schon gekonnt: `init` liest ZUERST locale/en/messages, und
+# Englisch ist die Rueckfallsprache fuer jeden Schluessel, den eine
+# Uebersetzung nicht hat. Was den Stick trotzdem deutsch machte, war
+# diese eine Zeile -- sie schrieb `de` in /users/root/config/locale,
+# und der Katalog legte die Uebersetzung folgsam ueber das Englische.
+# GEMESSEN auf Justins Abbild: `taskbar: lang=de src=1 keys=288`
+# (src=1 = die Wahl des Benutzers, genau diese Datei).
+#
+# Es waren also NICHT 71 Stellen im Quelltext zu aendern, sondern ein
+# Wort in einer Datei. Beide Kataloge bleiben im Abbild, und wer
+# Deutsch will, waehlt es in den Einstellungen -- die Datei wird dann
+# mit `de` ueberschrieben.
+#
+# Die Datei heisst weiterhin `locale-de` im Baubaum; sie ist nur der
+# Zwischenspeicher fuer den Inhalt und wird nach
+# /users/root/config/locale kopiert.
+printf 'en\n' > "$OUT/locale-de"
 
 # ---------------------------------------------- RUNDE STICK: DAS NETZ
 #
