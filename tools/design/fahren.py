@@ -134,10 +134,26 @@ class Fahrer:
         time.sleep(0.35)
         for i in range(mal):
             self.cmd("mouse_button %d" % taste)
-            time.sleep(0.05)
+            # RUNDE EXPLORER-2, GEMESSEN: DER DOPPELKLICK WAR ZU LANGSAM.
+            #
+            # `wlib.on_down` nimmt zwei Klicks als Doppelklick, wenn
+            # zwischen ihnen WENIGER ALS 100 TICKS liegen -- der Ticker
+            # laeuft mit 100 Hz, das ist also eine Sekunde. Der Abstand
+            # hier war 0.05 + 0.12 + 0.05 = 0.22 s, und trotzdem hat der
+            # Gast 109 Ticks gemessen (`wlib: klick r=0 dop=0 dt=109`):
+            # jedes `self.cmd` schickt ueber den Monitor und WARTET auf
+            # die Antwort, und unter TCG kostet dieser Umlauf ein
+            # Vielfaches der Schlafzeit. Der Doppelklick fiel damit
+            # knapp aus dem Fenster, und ein Doppelklick auf einen
+            # Ordner tat nichts -- was wie ein Fehler des Programms
+            # aussah und keiner war.
+            #
+            # Also: zwischen den zwei Klicks eines Doppelklicks wird
+            # NICHT geschlafen. Die Umlaufzeit des Monitors ist schon
+            # mehr Abstand, als ein Mensch je erzeugt.
+            if mal == 1:
+                time.sleep(0.05)
             self.cmd("mouse_button 0")
-            if i + 1 < mal:
-                time.sleep(0.12)
         time.sleep(1.2)
 
     def taste(self, name):
@@ -303,6 +319,46 @@ class Fahrer:
                 return None
             return (o[0] + int(m.group(1)), o[1] + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
+        if name.startswith("ftabzeile"):
+            # RUNDE EXPLORER-2: EINE BESTIMMTE ZEILE DER DATEITABELLE.
+            # Ohne sie kann ein Drehbuch nur die MITTE der Tabelle
+            # treffen (`klickauf ftab`), und welche Zeile da liegt,
+            # haengt daran, wie viele Dateien der Ordner hat -- ein
+            # Test, der "geh in den ersten Ordner" sagen will, koennte
+            # es nicht sagen.
+            #
+            # Gerechnet aus dem, was das Programm SELBST meldet: `kopf=`
+            # ist die Grundlinie der Kopfzeile und `zh=` die
+            # Zeilenhoehe (`explorer: rows ... zh= kopf=`). Die erste
+            # Datenzeile faengt eine Kopfhoehe unter dem Tabellenrand an
+            # -- dieselbe Rechnung wie `wlib.row_under`, nur andersherum.
+            n = int(name[9:])
+            m = letzte(r"explorer: rect id=\d+ kind=6 "
+                       r"x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            z = letzte(r"explorer: rows x=\d+ base=\d+ zh=(\d+)")
+            o = self.fenster("explorer")
+            if m is None or z is None or o is None:
+                return None
+            zh = int(z.group(1))
+            # Die Kopfzeile ist zh + 4 hoch (wlib.paint_table `kopf`),
+            # danach beginnt Zeile 0.
+            y0 = int(m.group(2)) + zh + 5 + n * zh
+            return (o[0] + int(m.group(1)), o[1] + y0, int(m.group(3)), zh)
+        if name in ("ftab", "fbaum"):
+            # RUNDE EXPLORER-2: DIE TABELLE UND DIE SEITENLEISTE, OHNE
+            # IHRE NUMMER ZU KENNEN. `frect<N>` verlangt die Widgetzahl,
+            # und die verschiebt sich mit jedem Bedienelement, das
+            # dazukommt (die Brosamenleiste sind allein zwoelf). Die ART
+            # verschiebt sich nicht: kind=6 ist die Tabelle, kind=5 eine
+            # Liste (`wlib.K_TABLE` / `K_LIST`).
+            art = 6 if name == "ftab" else 5
+            m = letzte(r"explorer: rect id=\d+ kind=%d "
+                       r"x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % art)
+            o = self.fenster("explorer")
+            if m is None or o is None:
+                return None
+            return (o[0] + int(m.group(1)), o[1] + int(m.group(2)),
+                    int(m.group(3)), int(m.group(4)))
         if name.startswith("frect"):
             n = int(name[5:])
             m = letzte(r"explorer: rect id=%d kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % n)
@@ -344,12 +400,20 @@ def main():
             print("warteauf %s -> %s" % (muster, "da" if ok else "NICHT DA"))
             if not ok:
                 fehler += 1
+        # RUNDE EXPLORER-2, GEMESSEN: DIE RECHTE TASTE IST 2 UND NICHT 4.
+        # `mouse_button` des QEMU-Monitors legt links auf Bit 0, RECHTS
+        # auf Bit 1 und die Mitte auf Bit 2 -- dieselbe Reihenfolge, die
+        # `kernel/ps2m.fi` liefert und die `wlib.on_down` mit `btn & 2`
+        # prueft. Hier stand 4, also die MITTLERE Taste: jedes `rklick`
+        # dieses Laeufers ging als Mittelklick durch, kein Kontextmenue
+        # klappte auf, und das Bild 31-kontextmenue.png zeigte deshalb
+        # keines -- ein Fehler des Laeufers, nicht des Programms.
         elif b in ("klick", "doppel", "fahre", "rklick"):
             x, y = (int(v) for v in arg.split(","))
             if b == "fahre":
                 f.fahre(x, y)
             elif b == "rklick":
-                f.klick(x, y, 1, taste=4)
+                f.klick(x, y, 1, taste=2)
             else:
                 f.klick(x, y, 2 if b == "doppel" else 1)
         elif b in ("klickauf", "doppelauf", "rklickauf"):
@@ -362,7 +426,7 @@ def main():
             print("klickauf %s -> %d,%d  (rect %d,%d %dx%d)"
                   % (arg, x, y, r[0], r[1], r[2], r[3]))
             if b == "rklickauf":
-                f.klick(x, y, 1, taste=4)
+                f.klick(x, y, 1, taste=2)
             else:
                 f.klick(x, y, 2 if b == "doppelauf" else 1)
         elif b == "taste":

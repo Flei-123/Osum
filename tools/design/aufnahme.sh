@@ -152,7 +152,16 @@ justin:x:1000:1000:Justin:/users/justin:/bin/sh
 EOF
 printf 'de\n' > "$OUT/userlocale"
 
-ARGS=(build "$OUT/disk.img" 20480 /lib/
+# RUNDE EXPLORER-2, Pflichtpunkt 5: DIE PLATTE TRAEGT ZEITEN.
+#
+# Ohne `--v3` legt mkfs.py ein Abbild der Fassung 2 an, und dort gibt
+# `fs.inode_mtime` (kernel/fs.fi:707) fuer JEDE Datei ausdruecklich 0
+# zurueck. Der Dateimanager hat deshalb in der Zeit-Spalte "--" gezeigt
+# -- nicht, weil er die Zeit nicht liest, sondern weil keine da war.
+# `--time=` setzt dazu die Zeit, mit der die Dateien entstehen (die des
+# Wirtes beim Bauen des Abbildes), sonst waeren alle drei Zeiten null
+# und die Spalte bliebe leer wie zuvor.
+ARGS=(build "$OUT/disk.img" 20480 --v3 "--time=$(date +%s)" /lib/
       "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
       "/lib/icons.ttf=assets/osum-icons.ttf" /bin/)
 for p in $progs; do ARGS+=("/bin/$p=$BUILDD/$p.elf"); done
