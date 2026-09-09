@@ -2209,6 +2209,28 @@ static mut sch_warning: u64 = 0
 static mut sch_success: u64 = 0
 static mut sch_name: [u8; 32] = [0 as u8; 32]
 static mut sch_file: [u8; 32] = [0 as u8; 32]
+// ======================================================= RUNDE FARBE
+// DER ZWEITE SCHEMANAME: WELCHE RAMPE DER DUNKELMODUS NIMMT.
+//
+// GEMESSEN, warum es ihn braucht (Justins Schirm, 2560x1440):
+//   scheme=day  mode=dark  ->  window-bg #0f172a  panel-bg #1e293b
+// Das sind die Slate-Toene, und Slate ist eine BLAUE Graustufenrampe:
+//   #0f172a  B-R = +27      #1e293b  B-R = +29
+// Zum Vergleich dieselbe Messung an fremden Systemen:
+//   Windows 11 dunkel  0    GNOME 46 dunkel  0    KDE 6 dunkel  +6
+// und an der neutralen Rampe, die dieses System schon mitbringt:
+//   scheme=midnight (Zinc) ->  #18181b B-R = +3   #27272a B-R = +2
+//
+// Ein Schema traegt EINE Rampe. `mode=dark` waehlt darin nur das
+// andere Ende -- es wechselt NICHT die Rampe. Darum ist der
+// Dunkelmodus von `tageslicht` blau: es ist dieselbe Slate-Rampe,
+// von unten gelesen.
+//
+// DIE LOESUNG IST EIN PAAR UND KEINE NEUE RAMPE: `dark_scheme=` nennt
+// das Schema, das im Dunkelmodus gilt. Steht die Zeile nicht da,
+// bleibt alles wie vorher (dasselbe Schema in beiden Modi) -- kein
+// bestehendes Abbild und kein Bildschirmfoto aendert sich dadurch.
+static mut sch_dark_file: [u8; 32] = [0 as u8; 32]
 static mut sch_keys: u64 = 0
 static mut kv_bad: u64 = 0
 
@@ -3333,6 +3355,7 @@ fn scheme_key(kp: u64, kn: u64, vp: u64, vn: u64) -> bool {
 
 fn conf_key(kp: u64, kn: u64, vp: u64, vn: u64) -> bool {
     var k_scheme: [u8; 7] = "scheme\0"
+    var k_dscheme: [u8; 12] = "dark_scheme\0"
     var k_shape: [u8; 6] = "shape\0"
     var k_mode: [u8; 5] = "mode\0"
     var k_accent: [u8; 7] = "accent\0"
@@ -3343,6 +3366,12 @@ fn conf_key(kp: u64, kn: u64, vp: u64, vn: u64) -> bool {
 
     if name_eq(kp, kn, (&k_scheme[0 as usize]) as u64) {
         copy_bounded((&sch_file[0 as usize]) as u64, vp, vn, 32)
+        return true
+    }
+    // RUNDE FARBE: das Schema fuer den Dunkelmodus. Siehe die
+    // Begruendung bei `sch_dark_file`.
+    if name_eq(kp, kn, (&k_dscheme[0 as usize]) as u64) {
+        copy_bounded((&sch_dark_file[0 as usize]) as u64, vp, vn, 32)
         return true
     }
     // ROUND LOOK: the second axis, in the same file and beside the
@@ -4223,6 +4252,7 @@ fn reload_inner(aus_kopie: bool) -> u64 {
     set_mode = MODE_AUTO
     set_accent = 0
     __mmio_write8(((&sch_file[0 as usize]) as u64) as *mut u8, 0 as u8)
+    __mmio_write8(((&sch_dark_file[0 as usize]) as u64) as *mut u8, 0 as u8)
     __mmio_write8(((&sch_name[0 as usize]) as u64) as *mut u8, 0 as u8)
     var nc: u64 = 0
     if aus_kopie && conf_len > 0 {
@@ -4231,9 +4261,42 @@ fn reload_inner(aus_kopie: bool) -> u64 {
         nc = kv_read((&p_conf[0 as usize]) as u64, 1)
     }
     let _nc: u64 = nc
-    if *(((&sch_file[0 as usize]) as u64) as *mut u8) != 0 as u8 {
-        path_join((&p_dir[0 as usize]) as u64,
-            (&sch_file[0 as usize]) as u64,
+    // ==================================================== RUNDE FARBE
+    // WELCHE RAMPE GILT: die des Tag-Schemas oder die des Nacht-Schemas.
+    //
+    // Die Entscheidung faellt HIER und nicht in `theme_apply`, weil sie
+    // bestimmt, welche DATEI gelesen wird -- `theme_apply` bindet nur
+    // noch die Zahlen, die dann in `neutral` stehen.
+    //
+    // DREI DINGE MUESSEN VORHER FESTSTEHEN, sonst antwortet
+    // `effective_dark()` hier anders als gleich in `theme_apply`, und
+    // dann liest diese Runde die Rampe des einen Modus und malt den
+    // anderen:
+    //
+    //   1. die Einstellungsdatei ist gelesen  -> `set_mode` steht
+    //   2. `set_mode = sch_mode`, falls es KEINE Einstellungsdatei gibt
+    //      (die Begruendung dafuer steht unten bei `nc == 0` und ist
+    //      aelter als diese Runde)
+    //   3. `timezone_read()`, denn `mode=auto` fragt die ORTSZEIT --
+    //      ohne den Versatz stuende hier die UTC-Stunde und der
+    //      Dunkelmodus begaenne bis zu zwei Stunden zu frueh
+    //
+    // Punkt 2 und 3 standen vor dieser Runde WEITER UNTEN. Sie sind
+    // hier heraufgezogen und nicht verdoppelt worden; darunter steht
+    // an ihrer alten Stelle nichts mehr.
+    if nc == 0 {
+        set_mode = sch_mode
+    }
+    timezone_read()
+    // Ohne `dark_scheme=` ist `sch_dark_file` leer und es bleibt bei
+    // `sch_file`: dann verhaelt sich alles wie vor dieser Runde.
+    var pick: u64 = (&sch_file[0 as usize]) as u64
+    if *(((&sch_dark_file[0 as usize]) as u64) as *mut u8) != 0 as u8
+        && effective_dark() {
+        pick = (&sch_dark_file[0 as usize]) as u64
+    }
+    if *((pick) as *mut u8) != 0 as u8 {
+        path_join((&p_dir[0 as usize]) as u64, pick,
             (&path[0 as usize]) as u64, 64)
         sch_keys = kv_read((&path[0 as usize]) as u64, 0)
     } else {
@@ -4272,14 +4335,16 @@ fn reload_inner(aus_kopie: bool) -> u64 {
     //
     // `auto` ist eine ausdrueckliche Wahl und darf keine Voreinstellung
     // sein. Ohne Datei gilt, wofuer das Schema gezeichnet wurde.
-    if nc == 0 {
-        set_mode = sch_mode
-    }
+    //
+    // RUNDE FARBE: diese zwei Zeilen und `timezone_read()` stehen jetzt
+    // WEITER OBEN, vor der Wahl der Rampe -- siehe dort. Hier bleibt
+    // die Begruendung stehen, weil sie zu der Regel gehoert und nicht
+    // zu der Stelle.
+    //
     // Die alte Ueberschreibungsdatei ZULETZT, damit eine Maschine aus
     // Runde K15 aussieht wie vorher. Sie ist das einzige im System, was
     // noch eine Farbe benennen darf -- und sie ist eine DATEI, kein Code.
     let _no: u64 = kv_read((&p_theme[0 as usize]) as u64, 2)
-    timezone_read()
     theme_apply()
     booted = 1
     let _c: bool = conf_changed()

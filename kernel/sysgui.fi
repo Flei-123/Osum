@@ -673,9 +673,49 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         if w >= wm.MAX_WIN {
             return cap.err(cap.E_NOTFOUND)
         }
-        // Die Leiste fasst nur gewoehnliche Fenster an. Sie kann den
-        // Schreibtisch nicht minimieren und sich selbst nicht schliessen.
-        if wm.win_layer(state, w) != wm.L_NORMAL {
+        // ============================================== RUNDE GRIFF
+        // WARUM DER STARTKNOPF NICHTS GESTARTET HAT.
+        //
+        // Hier stand:
+        //
+        //     if wm.win_layer(state, w) != wm.L_NORMAL {
+        //         return cap.err(cap.E_RIGHTS)
+        //     }
+        //
+        // Die Absicht ist richtig und bleibt: die Leiste soll den
+        // SCHREIBTISCH nicht wegraeumen und sich SELBST nicht
+        // schliessen koennen. Der Satz sagt aber mehr, als er meint --
+        // er sperrt JEDES Fenster aus, das nicht auf der normalen
+        // Ebene liegt, und das STARTMENUE liegt mit Absicht auf L_TOP
+        // (sonst verschwindet es hinter dem naechsten Fenster).
+        //
+        // GEMESSEN (1280x800, Abnahmelauf dieser Runde, serial.txt):
+        //
+        //     taskbar: click x=24 y=20 hits=start
+        //     taskbar: startmenue auf
+        //     wm: fokus id=7 vor=0        <- id 7 ist die LEISTE
+        //
+        // Jeder Klick auf Start lief in dieses `E_RIGHTS`. Die Leiste
+        // hat den Rueckgabewert nicht angesehen und trotzdem
+        // "startmenue auf" gesagt -- deshalb sah es im Mitschnitt so
+        // aus, als geschehe etwas, waehrend in Wahrheit nichts
+        // geschah: das Bild 02-startmenue.ppm war Oktett fuer Oktett
+        // dasselbe wie 01-schreibtisch.ppm.
+        //
+        // DIE REGEL, DIE WIRKLICH GEMEINT IST, nennt die zwei Faelle
+        // beim Namen statt sie ueber die Ebene zu erraten:
+        //
+        //   1. den SCHREIBTISCH nicht (L_DESK) -- er ist der Grund,
+        //      auf dem alles liegt,
+        //   2. und kein Fenster, das der LEISTE SELBST gehoert.
+        //
+        // Alles andere darf sie umschalten, auch ein L_TOP-Fenster wie
+        // das Startmenue. Ein Menue, das man aufmachen, aber nie wieder
+        // zumachen kann, ist kein Menue.
+        if wm.win_layer(state, w) == wm.L_DESK {
+            return cap.err(cap.E_RIGHTS)
+        }
+        if wm.win_owner(state, w) == me {
             return cap.err(cap.E_RIGHTS)
         }
         if a1 == sys.WA_HIDE {
@@ -688,7 +728,41 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
             // DIE REGEL EINER TASKLEISTE, in zwei Zeilen: ist das
             // Fenster verborgen ODER nicht das aktive, hol es nach
             // vorn; ist es beides nicht, leg es weg.
-            if wm.win_hidden(state, w) || wm.focus(state) != w {
+            //
+            // ============================================ RUNDE GRIFF
+            // ... UND DER FOKUS ZAEHLT NUR AUF DER NORMALEN EBENE.
+            //
+            // Fuer ein gewoehnliches Fenster ist "nicht das aktive"
+            // das richtige Zeichen fuer "es liegt hinten, hol es
+            // vor". Fuer das STARTMENUE ist es falsch, und zwar
+            // IMMER: es liegt auf L_TOP, also ganz vorn, und den
+            // Eingabefokus hat es nur, solange niemand anders ihn
+            // genommen hat. Ein Klick auf die Leiste nimmt ihn (die
+            // Leiste ist ein Fenster wie jedes andere).
+            //
+            // GEMESSEN, nachdem die Ebenensperre eine Zeile weiter
+            // oben gefallen war (1280x800, dieser Runde):
+            //
+            //     01-schreibtisch.ppm enthaelt #ad84f3 und #efe7fc
+            //     im Rechteck des Menues -- das Menue IST ZU SEHEN
+            //     serial: taskbar: startmenue auf ... auf
+            //
+            // Zweimal "auf" bei zwei Klicks: der erste haette
+            // schliessen muessen. `wm.focus(state) != w` war wahr,
+            // weil der Fokus auf der LEISTE lag (id=7) -- also wurde
+            // das schon offene Menue noch einmal "geoeffnet" und
+            // blieb stehen. Ein Menue, das sich nicht schliessen
+            // laesst, verdeckt danach jeden Klick dahinter.
+            //
+            // Auf L_TOP entscheidet deshalb allein, ob das Fenster
+            // VERBORGEN ist. Das ist dieselbe Frage, die ein Mensch
+            // stellt ("sehe ich es?"), und sie hat fuer ein Fenster,
+            // das immer vorn liegt, nur diese eine Antwort.
+            var offen: bool = !wm.win_hidden(state, w)
+            if wm.win_layer(state, w) == wm.L_NORMAL {
+                offen = offen && wm.focus(state) == w
+            }
+            if !offen {
                 wm.set_hidden(state, w, false)
                 wm.raise_win(state, w)
                 wm.set_focus(state, w)

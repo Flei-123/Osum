@@ -939,6 +939,33 @@ fn set_deco_colour(state: u64, i: u64, v: u64) -> bool {
                     wsv(state, k, W_FG, deco(state, DK_TERM_FG))
                 } else {
                     wsv(state, k, W_BG, deco(state, DK_TERM_BG))
+                    // ==================================== RUNDE FARBE
+                    // DIE NEUE FARBE MUSS AUCH GEMALT WERDEN.
+                    //
+                    // Hier wurde bis zu dieser Runde NUR `W_BG`
+                    // gesetzt. Das ist die Farbe, mit der das Terminal
+                    // KUENFTIG loescht -- die Bildpunkte, die schon im
+                    // Puffer stehen, behalten die alte. Ein Terminal,
+                    // das beim Start des Systems entsteht (der
+                    // Schreibtisch macht genau das) und dessen Flaeche
+                    // sich danach nicht mehr ganz erneuert, bleibt
+                    // deshalb fuer immer in der eingebauten Farbe.
+                    //
+                    // GEMESSEN (1280x800, mode=dark, dieser Runde):
+                    // #10141a auf 20,4 Prozent der Bildflaeche,
+                    // Blaustich B-R = +10, waehrend der Rest des
+                    // Schirms schon auf der neutralen Rampe stand
+                    // (#18181b, B-R = +3). Genau das Fenster, von dem
+                    // Justin sagt, es sei "immer noch blau".
+                    //
+                    // Der Reihenfolge wegen ist das kein Sonderfall,
+                    // sondern die Regel: die Leiste schickt ihre elf
+                    // Farben, WENN sie laeuft -- und das ist immer
+                    // NACH dem ersten Fenster.
+                    fill(state, k, 0, 0, wg(state, k, W_W),
+                        wg(state, k, W_H), deco(state, DK_TERM_BG))
+                    term_redraw(state, k)
+                    damage_win(state, k)
                 }
             }
             k = k + 1
@@ -3278,7 +3305,37 @@ fn resize_win(state: u64, i: u64, w: u64, h: u64) -> bool {
     // Deckel von 2048, den jeder Schirm ueber 2048 Bildpunkten Breite
     // reisst. Die Grenze, die es wirklich gibt, ist der PUFFER des
     // Fensters, und die steht zwei Zeilen tiefer.
-    if w < 32 || h < 16 || w > MAX_W_HARD || h > MAX_H_HARD {
+    // ================================================== RUNDE GRIFF
+    // WARUM DIE LEISTE SICH NICHT AUF IHREN SPALT ZUSAMMENZIEHEN KANN.
+    //
+    // GEMESSEN (Justins Blech, 2560x1440, ECHTHARDWARE-2):
+    //
+    //     taskbar: size w=2560 h=2 rc=-4
+    //
+    // `-4` ist E_INVALID und kommt aus genau dieser Zeile: die
+    // Taskleiste mit `autohide=1` will sich auf ihren SLIVER von zwei
+    // Bildpunkten zurueckziehen (kernel/user/taskbar.fi, `SLIVER`),
+    // und `h < 16` weist das ab. Die Leiste bleibt in voller Hoehe
+    // stehen -- das automatische Verbergen ist damit gebaut, gemeldet
+    // und wirkungslos.
+    //
+    // WOFUER DIE 32x16 DA SIND: fuer ein Fenster MIT SCHMUCK. Unter
+    // einer Titelleiste plus zwei Rahmen ist ein Fenster von 8x8
+    // sinnlos, und `wm_strut` beruft sich weiter oben ausdruecklich auf
+    // diese Zahl. Fuer ein Fenster OHNE Schmuck gilt die Begruendung
+    // nicht: ein Spalt am Bildschirmrand IST die richtige Groesse.
+    //
+    // Also gilt die Untergrenze weiter -- aber sie fragt vorher, ob das
+    // Fenster ueberhaupt Schmuck traegt. Ein undekoriertes Fenster darf
+    // bis auf 1x1 herunter; kleiner als ein Bildpunkt ist nichts, und
+    // `w * h * 4` weiter unten bleibt damit wohldefiniert.
+    var min_w: u64 = 32
+    var min_h: u64 = 16
+    if !win_deco(state, i) {
+        min_w = 1
+        min_h = 1
+    }
+    if w < min_w || h < min_h || w > MAX_W_HARD || h > MAX_H_HARD {
         return false
     }
     // RUNDE HIDPUNKTE: HIER STAND "OHNE NEUEN PUFFER NICHT GROESSER ALS
@@ -6109,6 +6166,33 @@ fn cell_paint(state: u64, i: u64, c: u64, r: u64) {
         draw_glyph_clip(state, i, slot, (c * cw) as i64,
             (r * ch) as i64 + ttf.ascent(state, f, px), wg(state, i, W_FG),
             (c * cw) as i64, ((c + 1) * cw) as i64)
+    }
+}
+
+// ==================================================== RUNDE FARBE
+// DAS GANZE RASTER NOCH EINMAL MALEN.
+//
+// Gebraucht wird das genau einmal: wenn die Taskleiste die beiden
+// Terminalfarben setzt, NACHDEM das Fenster schon steht (siehe
+// `set_deco_colour`). `cell_paint` fuellt je Zelle erst den Grund in
+// `W_BG` und setzt dann das Zeichen in `W_FG` -- beides sind die
+// NEUEN Farben, sobald sie im Fenster stehen. Also ist "alles neu
+// malen" genau "jede Zelle neu malen", und es braucht keinen zweiten
+// Zeichenweg, der mit dem ersten auseinanderlaufen koennte.
+fn term_redraw(state: u64, i: u64) {
+    if !valid(state, i) || wg(state, i, W_KIND) != K_TERM {
+        return
+    }
+    let cols: u64 = wg(state, i, W_COLS)
+    let rows: u64 = wg(state, i, W_ROWS)
+    var r: u64 = 0
+    while r < rows {
+        var c: u64 = 0
+        while c < cols {
+            cell_paint(state, i, c, r)
+            c = c + 1
+        }
+        r = r + 1
     }
 }
 
