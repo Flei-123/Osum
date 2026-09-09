@@ -138,7 +138,8 @@ export {
     MAX_W_HARD, MAX_H_HARD,
     E_KEY, E_DOWN, E_UP, E_MOVE, E_CLOSE, E_FOCUS, E_RESIZE,
     M_SHIFT, M_CTRL,
-    L_DESK, L_NORMAL, L_TOP, F_HIDDEN, F_NODECO, F_TABBED, F_KEYS,
+    L_DESK, L_NORMAL, L_TOP, L_MENUE, L_POPUP, L_TIP, L_MAX,
+    F_HIDDEN, F_NODECO, F_TABBED, F_KEYS,
     EDGE_BOTTOM, EDGE_TOP, EDGE_LEFT, EDGE_RIGHT, F_MAXIMIZED,
     // RUNDE BLECHZWEI: wie breit die Tafel wirklich ist, und wo eine
     // einzelne Zeile steht -- damit nur SIE uebertragen werden muss.
@@ -173,7 +174,11 @@ const EV_RING: u64 = 512 // EV_SLOTS * EV_BYTES
 // Oktett 21) oder, wenn die Tafel dazu schweigt, aus ihrer Bildpunktzahl.
 const TITLE_H0: u64 = 22 // die Titelleiste
 const BORDER0: u64 = 2 // der Rand links, rechts und unten
-const GRIP0: u64 = 12 // das Feld unten rechts zum Groessenaendern
+// RUNDE ECHTHARDWARE-3: 12 -> 8, aber jetzt am GANZEN Rand statt nur
+// in der Ecke. Multipliziert mit `uisc` sind das auf Justins Schirm 16
+// Bildpunkte Rand -- breit genug zum Treffen, schmal genug, dass ein
+// Klick in die Flaeche noch ein Klick in die Flaeche ist.
+const GRIP0: u64 = 8 // der Rand, an dem die Groesse gezogen wird
 const CLOSE_W0: u64 = 14
 
 const K_RAW: u64 = 0 // die Anwendung malt selbst
@@ -217,7 +222,34 @@ const MAX_H_HARD: u64 = 2304
 // Klick nach vorn und verdeckt alles.
 const L_DESK: u64 = 0 // der Schreibtisch, immer ganz hinten
 const L_NORMAL: u64 = 1 // gewoehnliche Anwendungen
-const L_TOP: u64 = 2 // die Taskleiste, immer ganz vorn
+const L_TOP: u64 = 2 // die Taskleiste
+// ================================================== RUNDE ECHTHARDWARE-3
+// DREI EBENEN WAREN ZU WENIG, UND DAS IST DIE WURZEL MEHRERER FEHLER.
+//
+// Justins Befund vom 09.09.: der Tooltip verschwindet HINTER der
+// Taskleiste, das Kontextmenue ist ein echtes Fenster mit Titelleiste
+// und Kreuz, und das Startmenue ueberlappt die Leiste. Alle drei sind
+// dasselbe Problem: es gab nur `L_TOP`, und wer dort hin musste, lag
+// mit der Leiste auf EINER Ebene -- die Reihenfolge entschied dann,
+// wer spaeter angelegt wurde, und das ist keine Ordnung, sondern ein
+// Zufall.
+//
+// DIE ORDNUNG, VON UNTEN NACH OBEN, und sie ist ab hier eine ZUSAGE:
+//
+//     L_DESK    0  Schreibtisch
+//     L_NORMAL  1  gewoehnliche Fenster und Dialoge
+//     L_TOP     2  die Taskleiste
+//     L_MENUE   3  Startmenue/Ueberlagerung -- ueber der Leiste
+//     L_POPUP   4  Klappmenues und Kontextmenues
+//     L_TIP     5  Blasen, ueber ALLEM
+//
+// Die Zahlen 0..2 bleiben, was sie waren: jedes Programm, das `L_TOP`
+// sagt, meint weiter die Leiste und liegt weiter dort. Neu ist nur,
+// dass ueber ihr noch etwas sein KANN.
+const L_MENUE: u64 = 3 // Startmenue: ueber der Leiste, unter den Menues
+const L_POPUP: u64 = 4 // Klapp- und Kontextmenue
+const L_TIP: u64 = 5 // die Blase, ueber allem
+const L_MAX: u64 = 5
 
 // Die Merkmale eines Fensters.
 //   F_HIDDEN  minimiert: es wird nicht zusammengesetzt und nimmt keinen
@@ -2770,7 +2802,7 @@ fn raise_win(state: u64, i: u64) {
 // Oberkante der neuen Ebene -- ein Schreibtisch, der seine Ebene
 // bekommt und liegen bleibt, wo er war, waere kein Schreibtisch.
 fn set_layer(state: u64, i: u64, l: u64) {
-    if !valid(state, i) || l > L_TOP {
+    if !valid(state, i) || l > L_MAX {
         return
     }
     if wg(state, i, W_LAYER) == l {
@@ -5685,18 +5717,57 @@ fn ev_push(state: u64, i: u64, typ: u64, a: u64, b: u64, c: u64) {
         }
     }
     if kopf - schwanz >= EV_SLOTS {
-        // Ein Ring, der ueberlaeuft, verliert das AELTESTE. Eine
-        // Anwendung, die nicht abholt, soll nicht den Server anhalten.
-        // Nach dem Umbau oben heisst VERL > 0 nur noch: 32 Tasten oder
-        // Klicks ohne eine einzige Abholrunde -- ein Programm, das
-        // wirklich nicht mehr abholt.
-        wsv(state, i, W_ETAIL, schwanz + 1)
-        ss(state, S_EVDROP, gs(state, S_EVDROP) + 1)
+        // ============================================ RUNDE ECHTHARDWARE-3
+        // WENN DER RING VOLL IST, FLIEGT KEINE TASTE MEHR RAUS.
+        //
+        // Justins Tafel: `4 RING 3663 VERL 151`. Bis hierher verlor
+        // ein voller Ring IMMER das aelteste Ereignis -- und weil in
+        // einem vollen Ring fast nur Mausbewegungen liegen (die Maus
+        // meldet tausendmal je Sekunde, ein Mensch tippt fuenfmal),
+        // war das aelteste fast immer eine Bewegung. Fast immer, aber
+        // eben nicht immer: stand vorn ein TASTENDRUCK, war er weg,
+        // und der Mensch sieht einen verschluckten Buchstaben.
+        //
+        // Eine Bewegung darf man verlieren -- die naechste sagt
+        // dasselbe und mehr. Eine TASTE nicht: sie kommt nie wieder.
+        // Also wird der Ring von vorn nach der ersten BEWEGUNG
+        // durchsucht und die geopfert; nur wenn wirklich keine drin
+        // steht (32 Tasten ohne eine Abholrunde -- ein Programm, das
+        // steht), faellt das aelteste Ereignis.
+        var op: u64 = schwanz
+        var weg: u64 = kopf // kopf = "nichts gefunden"
+        while op < kopf {
+            if kstate.get(ev_at(state, i, op), 0) == E_MOVE {
+                weg = op
+                op = kopf
+            } else {
+                op = op + 1
+            }
+        }
+        if weg < kopf {
+            // Die Bewegung herausnehmen und alles danach eine Stelle
+            // nach vorn ruecken. Der Kopf sinkt um eins, der Schwanz
+            // bleibt -- die Reihenfolge der Tasten bleibt erhalten.
+            var q: u64 = weg
+            while q + 1 < kopf {
+                let a1: u64 = ev_at(state, i, q)
+                let b1: u64 = ev_at(state, i, q + 1)
+                kstate.set(a1, 0, kstate.get(b1, 0))
+                kstate.set(a1, 8, kstate.get(b1, 8))
+                q = q + 1
+            }
+            wsv(state, i, W_EHEAD, kopf - 1)
+            ss(state, S_EVKOAL, gs(state, S_EVKOAL) + 1)
+        } else {
+            wsv(state, i, W_ETAIL, schwanz + 1)
+            ss(state, S_EVDROP, gs(state, S_EVDROP) + 1)
+        }
     }
-    let p: u64 = ev_at(state, i, kopf)
+    let kopf2: u64 = wg(state, i, W_EHEAD)
+    let p: u64 = ev_at(state, i, kopf2)
     kstate.set(p, 0, typ)
     kstate.set(p, 8, daten)
-    wsv(state, i, W_EHEAD, kopf + 1)
+    wsv(state, i, W_EHEAD, kopf2 + 1)
     // RUNDE MESSTAFEL, Stufe 4a: hier verlaesst das Ereignis den Kern.
     ss(state, S_EVPUSH, gs(state, S_EVPUSH) + 1)
 }
@@ -5734,7 +5805,13 @@ fn hit(state: u64, x: i64, y: i64) -> u64 {
     while z > 0 {
         z = z - 1
         let i: u64 = at_z(state, z)
-        if i < MAX_WIN && (wg(state, i, W_FLAGS) & (F_HIDDEN | F_TABBED)) == 0 {
+        // ================================== RUNDE ECHTHARDWARE-3
+        // EINE BLASE NIMMT KEINEN KLICK. Sie liegt ueber allem, damit
+        // man sie SIEHT -- wer dorthin klickt, meint das, was darunter
+        // liegt. Ohne diese Bedingung faengt die Blase den Klick weg,
+        // und der Knopf darunter tut nichts.
+        if i < MAX_WIN && wg(state, i, W_LAYER) != L_TIP
+            && (wg(state, i, W_FLAGS) & (F_HIDDEN | F_TABBED)) == 0 {
             let rx: i64 = win_x(state, i) + outer_w(state, i) as i64
             let ry: i64 = win_y(state, i) + outer_h(state, i) as i64
             if x >= win_x(state, i) && y >= win_y(state, i) {
@@ -5896,12 +5973,28 @@ fn on_mouse(state: u64) {
                     ss(state, S_DRAGY, (y - win_y(state, i)) as u64)
                     return
                 }
-                // der Griff unten rechts
-                let gx: bool = lokal_x
-                    >= wg(state, i, W_W) as i64 - grip(state) as i64
-                let gy: bool = lokal_y
-                    >= wg(state, i, W_H) as i64 - grip(state) as i64
-                if gx && gy {
+                // ==================================== RUNDE ECHTHARDWARE-3
+                // DER GRIFF WAR EIN QUADRAT VON ZWOELF BILDPUNKTEN.
+                //
+                // Justins Befund: "Fenstergroesse aendern funktioniert
+                // nicht". Es funktionierte -- aber nur in der EINEN
+                // Ecke unten rechts, und dort auf 12x12 Bildpunkten
+                // (GRIP0). Auf seinem 2560x1440-Schirm mit uiscale 2
+                // sind das 24x24, also ein knapper Millimeter Ziel:
+                // wer den nicht trifft, ZIEHT DAS FENSTER, weil der
+                // Klick daneben ein gewoehnlicher Klick ist. Das sieht
+                // aus, als ginge es nicht.
+                //
+                // Jetzt ist der ganze RAND ein Griff: die rechte
+                // Kante, die untere Kante und die Ecke dazwischen.
+                // Das ist die Bedienung, die jedes andere System hat.
+                let rand: i64 = grip(state) as i64
+                let am_rechts: bool = lokal_x
+                    >= wg(state, i, W_W) as i64 - rand
+                let am_unten: bool = lokal_y
+                    >= wg(state, i, W_H) as i64 - rand
+                let im_fenster: bool = lokal_x >= 0 && lokal_y >= 0
+                if im_fenster && (am_rechts || am_unten) {
                     ss(state, S_SIZING, i + 1)
                     return
                 }
