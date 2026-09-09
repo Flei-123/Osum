@@ -114,8 +114,36 @@ class Fahrer:
     # die linke obere Ecke, wo der Anschlag die Vorgeschichte loescht,
     # dann in Schritten unter 128 heraus.  Dieselbe Route wie
     # tools/themestore/click.py, nur dass die Verbindung stehen bleibt.
+    # ================================================== RUNDE MERGE-10
+    # ACHT SCHRITTE REICHEN NUR BIS 960 BILDPUNKTE.
+    #
+    # Hier standen acht Bewegungen um -120, also -960 in jede Richtung.
+    # Der Zeiger wird an der Bildschirmkante angehalten, deshalb ist
+    # "weit genug nach links oben" dasselbe wie "in der Ecke" -- aber
+    # eben nur, solange der Schirm nicht groesser ist als 960.
+    #
+    # Auf 1280x800 geht das auf (-960 < -800). Auf 2560x1440 NICHT:
+    # der Zeiger bleibt 1440-960 = 480 Bildpunkte ueber dem oberen Rand
+    # stehen, und JEDE Fahrt danach ist um genau diesen Betrag
+    # verschoben.
+    #
+    # GEMESSEN (Abnahme dieser Runde, 2560x1440):
+    #   taskbar: click x=40 y=36  hits=start   <- der erste Klick sitzt
+    #   taskbar: click x=40 y=71  hits=none    <- alle weiteren nicht
+    # Der zweite Klick auf Start kam nie an, das Startmenue blieb zu,
+    # und die Klicks auf seine Zeilen gingen ins Leere -- der
+    # Dateimanager startete nicht, und `03-explorer` zeigte den
+    # Schreibtisch. Das sah aus wie ein Fehler der Oberflaeche bei
+    # hoher Aufloesung und war einer des Fahrers.
+    #
+    # Genug ist: mehr Schritte, als der groesste denkbare Schirm hoch
+    # ist. 32 x 120 = 3840 traegt 4K in beiden Richtungen; die
+    # Bewegungen kosten je einen Monitorumlauf und laufen nur einmal je
+    # Klick.
+    ECKSCHRITTE = 32
+
     def ecke(self):
-        for _ in range(8):
+        for _ in range(self.ECKSCHRITTE):
             self.cmd("mouse_move -120 -120")
         self.x, self.y = 0, 0
 
