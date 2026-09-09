@@ -1,0 +1,327 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/exporte.fi -- RUNDE EXPLORER-2: DIE ORTE UND DER WEG.
+//
+// Zwei Dinge, die jeder Dateimanager hat und dieser nicht hatte:
+//
+//   DIE SEITENLEISTE. Oben die Orte -- Start, Zuhause, Dokumente,
+//   Bilder, Downloads, Papierkorb, Netz --, darunter die DATENTRAEGER,
+//   und die sind nicht getippt: sie kommen aus `ulib.SYS_MNTSTAT`
+//   (MS_COUNT sagt wie viele, MS_PATHCH gibt den Pfad Zeichen fuer
+//   Zeichen, MS_BLOCKS und MS_USED sagen, wie voll er ist). Ein
+//   Datentraeger, den man abzieht, verschwindet damit beim naechsten
+//   Aufbau von selbst -- eine getippte Liste taete das nicht.
+//
+//   DIE BROSAMENLEISTE. Der Pfad zerfaellt in Glieder, jedes Glied ist
+//   anklickbar, und `krume_pfad(i)` sagt, wohin ein Klick fuehrt. Die
+//   Leiste MALT NICHTS: sie liefert Text und Ziel, und `explorer.fi`
+//   haengt sie an Knoepfe aus `wlib`. So bleibt die Regel gewahrt,
+//   dass ausserhalb von wlib/wlibc nichts gezeichnet wird.
+//
+// DIE ZEIGER SIND STABIL. `ort_text`, `ort_pfad`, `krume_text` und
+// `krume_pfad` geben Adressen in statische Felder dieser Datei --
+// `wlib.set_text` behaelt einen Zeiger und liest ihn beim naechsten
+// Malen wieder. Ein Zeiger auf den Stapel waere ein Bild aus Muell.
+
+profile kernel
+
+import ulib
+import libc.io
+import icons
+import wlib
+import msg
+
+export {
+    MAXORT, MAXKRUME,
+    orte_bauen, orte_zahl, orte_ptr, orte_symbole,
+    ort_text, ort_pfad, ort_ist_traeger,
+    traeger_zahl, traeger_bloecke, traeger_benutzt,
+    krume_bauen, krume_zahl, krume_text, krume_pfad,
+    melde
+}
+
+const MAXORT: u64 = 32
+const MAXKRUME: u64 = 12
+const ORTB: u64 = 64
+const KRUMEB: u64 = 256
+
+static mut o_text: [u8; 2048] = [0 as u8; 2048]   // MAXORT * ORTB
+static mut o_pfad: [u8; 8192] = [0 as u8; 8192]   // MAXORT * 256
+static mut o_traeger: [u64; 32] = [0 as u64; 32]
+static mut o_bloecke: [u64; 32] = [0 as u64; 32]
+static mut o_benutzt: [u64; 32] = [0 as u64; 32]
+static mut o_symbol: [u64; 32] = [0 as u64; 32]
+static mut o_blob: [u8; 2048] = [0 as u8; 2048]
+static mut n_orte: u64 = 0
+static mut n_traeger: u64 = 0
+
+static mut kr_text: [u8; 768] = [0 as u8; 768]    // MAXKRUME * 64
+static mut kr_pfad: [u8; 3072] = [0 as u8; 3072]  // MAXKRUME * KRUMEB
+static mut n_krume: u64 = 0
+
+// Die Schluessel der Orte. Der sichtbare Text steht im Katalog, hier
+// steht nur, wie er heisst.
+static mut k_start: [u8; 24] = "explorer.place.root\0\0\0\0\0"
+static mut k_home: [u8; 24] = "explorer.place.home\0\0\0\0\0"
+static mut k_doc: [u8; 24] = "explorer.place.docs\0\0\0\0\0"
+static mut k_pic: [u8; 24] = "explorer.place.pics\0\0\0\0\0"
+static mut k_dl: [u8; 24] = "explorer.place.downloads"
+static mut k_trash: [u8; 24] = "explorer.place.trash\0\0\0\0"
+static mut k_net: [u8; 24] = "explorer.place.net\0\0\0\0\0\0"
+static mut k_vols: [u8; 24] = "explorer.place.volumes\0\0"
+
+static mut p_root: [u8; 8] = "/\0\0\0\0\0\0\0"
+static mut p_home: [u8; 8] = "/data\0\0\0"
+static mut p_doc: [u8; 24] = "/data/dokumente\0\0\0\0\0\0\0\0\0"
+static mut p_pic: [u8; 24] = "/data/bilder\0\0\0\0\0\0\0\0\0\0\0\0"
+static mut p_dl: [u8; 24] = "/data/downloads\0\0\0\0\0\0\0\0\0"
+static mut p_trash: [u8; 24] = "/data/.korb\0\0\0\0\0\0\0\0\0\0\0\0\0"
+static mut p_net: [u8; 8] = "/net\0\0\0\0"
+
+static mut s_orte: [u8; 28] = "explorer: orte n=\0\0\0\0\0\0\0\0\0\0\0"
+static mut s_vol: [u8; 12] = "traeger=\0\0\0\0"
+static mut s_kr: [u8; 28] = "explorer: krume n=\0\0\0\0\0\0\0\0\0\0"
+static mut s_lz: [u8; 2] = " \0"
+
+fn t_at(i: u64) -> u64 {
+    return (&o_text[(0) as usize]) as u64 + i * ORTB
+}
+
+fn pf_at(i: u64) -> u64 {
+    return (&o_pfad[(0) as usize]) as u64 + i * 256
+}
+
+fn ort_text(i: u64) -> u64 {
+    return t_at(i)
+}
+
+fn ort_pfad(i: u64) -> u64 {
+    return pf_at(i)
+}
+
+fn ort_ist_traeger(i: u64) -> bool {
+    if i >= n_orte {
+        return false
+    }
+    return o_traeger[(i) as usize] != 0
+}
+
+fn orte_zahl() -> u64 {
+    return n_orte
+}
+
+fn traeger_zahl() -> u64 {
+    return n_traeger
+}
+
+fn traeger_bloecke(i: u64) -> u64 {
+    if i >= n_orte {
+        return 0
+    }
+    return o_bloecke[(i) as usize]
+}
+
+fn traeger_benutzt(i: u64) -> u64 {
+    if i >= n_orte {
+        return 0
+    }
+    return o_benutzt[(i) as usize]
+}
+
+fn orte_ptr() -> u64 {
+    return (&o_blob[(0) as usize]) as u64
+}
+
+fn orte_symbole() -> u64 {
+    return (&o_symbol[(0) as usize]) as u64
+}
+
+// Einen Ort eintragen. `nurwenn_da` heisst: ein Ordner, den es nicht
+// gibt, steht auch nicht in der Leiste -- eine Zeile "Bilder", die ins
+// Leere fuehrt, ist eine Luege mit Symbol.
+fn eintrag(text: u64, pfad: u64, sym: u64, traeger: u64,
+        nurwenn_da: bool) {
+    if n_orte >= MAXORT {
+        return
+    }
+    if nurwenn_da && !ulib.is_dir(pfad) {
+        return
+    }
+    ulib.strncpy(t_at(n_orte), text, ORTB - 1)
+    ulib.strncpy(pf_at(n_orte), pfad, 254)
+    o_symbol[(n_orte) as usize] = sym
+    o_traeger[(n_orte) as usize] = traeger
+    o_bloecke[(n_orte) as usize] = 0
+    o_benutzt[(n_orte) as usize] = 0
+    n_orte = n_orte + 1
+}
+
+// Die Datentraeger aus der Einhaengetafel des Kerns.
+fn traeger_lesen() {
+    var pfad: [u8; 256] = [0 as u8; 256]
+    let n: u64 = ulib.sys4(ulib.SYS_MNTSTAT, ulib.MS_COUNT, 0, 0, 0)
+    if ulib.bad(n) {
+        return
+    }
+    var i: u64 = 0
+    while i < n && n_orte < MAXORT {
+        let benutzt: u64 = ulib.sys4(ulib.SYS_MNTSTAT, ulib.MS_USED, i,
+            0, 0)
+        if !ulib.bad(benutzt) && benutzt != 0 {
+            let len: u64 = ulib.sys4(ulib.SYS_MNTSTAT, ulib.MS_PATHLEN, i,
+                0, 0)
+            var k: u64 = 0
+            while k < len && k < 250 {
+                let c: u64 = ulib.sys4(ulib.SYS_MNTSTAT, ulib.MS_PATHCH, i,
+                    k, 0)
+                pfad[(k) as usize] = c as u8
+                k = k + 1
+            }
+            pfad[(k) as usize] = 0 as u8
+            if k > 0 {
+                eintrag((&pfad[(0) as usize]) as u64,
+                    (&pfad[(0) as usize]) as u64,
+                    wlib.icon_id(icons.FILE_DRIVE), 1, false)
+                let bl: u64 = ulib.sys4(ulib.SYS_MNTSTAT, ulib.MS_BLOCKS,
+                    i, 0, 0)
+                if !ulib.bad(bl) {
+                    o_bloecke[((n_orte - 1)) as usize] = bl
+                }
+                o_benutzt[((n_orte - 1)) as usize] = benutzt
+                n_traeger = n_traeger + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Den Textblock fuer die Liste bauen -- eine Zeile je Ort, wie
+// `wlib.list` ihn erwartet.
+fn blob_bauen() {
+    var bp: u64 = 0
+    var i: u64 = 0
+    while i < n_orte {
+        let p: u64 = t_at(i)
+        var k: u64 = 0
+        while (__mmio_read8((p + k) as *mut u8)) != 0 as u8 && bp < 2040 {
+            o_blob[(bp) as usize] = __mmio_read8((p + k) as *mut u8)
+            bp = bp + 1
+            k = k + 1
+        }
+        o_blob[(bp) as usize] = 10 as u8
+        bp = bp + 1
+        i = i + 1
+    }
+    o_blob[(bp) as usize] = 0 as u8
+}
+
+// Die ganze Seitenleiste neu bauen. Rueckgabe: die Zahl der Zeilen.
+fn orte_bauen() -> u64 {
+    n_orte = 0
+    n_traeger = 0
+    eintrag(msg.get((&k_home[(0) as usize]) as u64),
+        (&p_home[(0) as usize]) as u64,
+        wlib.icon_id(icons.FILE_FOLDER), 0, true)
+    eintrag(msg.get((&k_doc[(0) as usize]) as u64),
+        (&p_doc[(0) as usize]) as u64,
+        wlib.icon_id(icons.FILE_TEXT), 0, true)
+    eintrag(msg.get((&k_pic[(0) as usize]) as u64),
+        (&p_pic[(0) as usize]) as u64,
+        wlib.icon_id(icons.FILE_IMAGE), 0, true)
+    eintrag(msg.get((&k_dl[(0) as usize]) as u64),
+        (&p_dl[(0) as usize]) as u64,
+        wlib.icon_id(icons.FILE_FOLDER), 0, true)
+    eintrag(msg.get((&k_start[(0) as usize]) as u64),
+        (&p_root[(0) as usize]) as u64,
+        wlib.icon_id(icons.FILE_DRIVE), 0, false)
+    eintrag(msg.get((&k_trash[(0) as usize]) as u64),
+        (&p_trash[(0) as usize]) as u64,
+        wlib.icon_id(icons.TRASH), 0, false)
+    eintrag(msg.get((&k_net[(0) as usize]) as u64),
+        (&p_net[(0) as usize]) as u64,
+        wlib.icon_id(icons.NETWORK_WIRED), 0, false)
+    traeger_lesen()
+    blob_bauen()
+    ulib.say((&s_orte[(0) as usize]) as u64)
+    ulib.sayn(n_orte)
+    ulib.say((&s_lz[(0) as usize]) as u64)
+    ulib.say((&s_vol[(0) as usize]) as u64)
+    ulib.sayn(n_traeger)
+    ulib.nl()
+    let _u: u64 = (&k_vols[(0) as usize]) as u64
+    return n_orte
+}
+
+// ------------------------------------------------------ die Brosamen
+
+fn kt_at(i: u64) -> u64 {
+    return (&kr_text[(0) as usize]) as u64 + i * 64
+}
+
+fn kp_at(i: u64) -> u64 {
+    return (&kr_pfad[(0) as usize]) as u64 + i * KRUMEB
+}
+
+fn krume_zahl() -> u64 {
+    return n_krume
+}
+
+fn krume_text(i: u64) -> u64 {
+    return kt_at(i)
+}
+
+fn krume_pfad(i: u64) -> u64 {
+    return kp_at(i)
+}
+
+// Den Pfad in Glieder zerlegen. Das erste Glied ist die Wurzel und
+// heisst wie der Ort "Start"; jedes weitere traegt seinen Namen und
+// den Pfad BIS DORTHIN -- ein Klick auf das dritte Glied geht drei
+// Ebenen tief, nicht eine.
+fn krume_bauen(pfad: u64) -> u64 {
+    n_krume = 0
+    ulib.strncpy(kt_at(0), msg.get((&k_start[(0) as usize]) as u64), 62)
+    ulib.strcpy(kp_at(0), (&p_root[(0) as usize]) as u64)
+    n_krume = 1
+    var i: u64 = 0
+    var lauf: u64 = 0
+    var namen: [u8; 64] = [0 as u8; 64]
+    var np: u64 = 0
+    while (__mmio_read8((pfad + i) as *mut u8)) != 0 as u8 {
+        let c: u64 = (__mmio_read8((pfad + i) as *mut u8)) as u64
+        if c == 47 {
+            if np > 0 && n_krume < MAXKRUME {
+                namen[(np) as usize] = 0 as u8
+                ulib.strncpy(kt_at(n_krume), (&namen[(0) as usize]) as u64,
+                    62)
+                ulib.strncpy(kp_at(n_krume), pfad, i)
+                __mmio_write8((kp_at(n_krume) + i) as *mut u8, 0 as u8)
+                n_krume = n_krume + 1
+            }
+            np = 0
+        } else if np < 62 {
+            namen[(np) as usize] = c as u8
+            np = np + 1
+        }
+        i = i + 1
+        lauf = lauf + 1
+    }
+    if np > 0 && n_krume < MAXKRUME {
+        namen[(np) as usize] = 0 as u8
+        ulib.strncpy(kt_at(n_krume), (&namen[(0) as usize]) as u64, 62)
+        ulib.strncpy(kp_at(n_krume), pfad, KRUMEB - 2)
+        n_krume = n_krume + 1
+    }
+    ulib.say((&s_kr[(0) as usize]) as u64)
+    ulib.sayn(n_krume)
+    ulib.nl()
+    return n_krume
+}
+
+fn melde() {
+    ulib.say((&s_orte[(0) as usize]) as u64)
+    ulib.sayn(n_orte)
+    ulib.say((&s_lz[(0) as usize]) as u64)
+    ulib.say((&s_vol[(0) as usize]) as u64)
+    ulib.sayn(n_traeger)
+    ulib.nl()
+}
