@@ -121,6 +121,8 @@ export {
     on_mouse, on_key, term_write, term_out, term_cols, term_rows, term_cx, term_cy,
     bind_tty, key_tty, tty_of, NO_TTY,
     poll, composites, blits, pixels, last_us, cursor_on, set_cursor,
+    // RUNDE VEKTOR: die Bildzeit, damit die Abnahme sie holen kann.
+    frame_us_sum, frame_us_n, frame_us_max, frame_us_last, frame_ueber16,
     shape, set_shape, set_keys,
     downs, moves_seen, hits_seen, win_keys,
     set_fonts, font_ui, font_mono, px_ui, px_mono,
@@ -676,6 +678,28 @@ const S_TICKS: u64 = 0x1128 // wie oft `anim_tick` lief
 // GEMESSEN von tools/paint/run.sh ("Skalare ueberschneiden sich").
 // 0x11C8 ist das erste freie Wort hinter S_VERWORF (0x11C0).
 const S_PXSUM: u64 = 0x11C8
+
+// ---------------------------------------------- RUNDE VEKTOR: DIE BILDZEIT
+//
+// Bis hierher gab es KEINE Zahl fuer "wie lange dauert ein Bild". Es
+// gab die Zahl der Bilder und die der Bildpunkte, aber nicht die Zeit
+// -- und damit liess sich die Auflage "kein Bild ueber 16 ms" weder
+// vorher noch nachher belegen, sondern nur behaupten.
+//
+// Gemessen wird um `compose` herum, also um das Zusammensetzen des
+// Bildes: Hintergrund, Fenster, Leiste, Zeiger. Die Uhr ist der
+// Zyklenzaehler (`time.tsc`), umgerechnet ueber `time.khz`.
+//
+// Vier Zahlen, weil ein Mittelwert allein den schlimmsten Fall
+// versteckt -- und der schlimmste Fall ist der, den ein Mensch als
+// Ruckeln sieht.
+const S_FRUS: u64 = 0x11D0    // Summe der Bildzeiten in Mikrosekunden
+const S_FRN: u64 = 0x11D8     // wie viele Bilder darin stecken
+const S_FRMAX: u64 = 0x11E0   // die laengste Bildzeit
+const S_FRLAST: u64 = 0x11E8  // die letzte Bildzeit
+// Wie viele Bilder ueber 16 ms lagen. Die Auflage dieser Runde in
+// einer Zahl: sie MUSS null bleiben.
+const S_FRUEBER: u64 = 0x11F0
 
 // Die Arten einer Fensterbewegung. Oeffnen waechst, Schliessen und
 // Minimieren schrumpfen -- der Unterschied zwischen den letzten beiden
@@ -4478,6 +4502,8 @@ fn compose(state: u64) -> u64 {
     // Uebertragen. Alles, was in diesem Lauf gemalt wird, gehoert zu
     // EINEM Bild und traegt dieselbe Signatur.
     ss(state, S_FRAME, gs(state, S_FRAME) + 1)
+    // RUNDE VEKTOR: die Uhr fuer dieses Bild.
+    let t_anfang: u64 = time.tsc()
     // 1. der Hintergrund
     fb.fill(state, x0, y0, x1 - x0, y1 - y0, gs(state, S_DESK))
     // 1b. die Reiter- und Stapelzeilen des Baumes. Sie liegen UNTER den
@@ -4550,7 +4576,56 @@ fn compose(state: u64) -> u64 {
     }
     ss(state, S_COMPOSITES, gs(state, S_COMPOSITES) + 1)
     ss(state, S_PIXELS, gs(state, S_PIXELS) + (x1 - x0) * (y1 - y0))
+    // RUNDE VEKTOR: die Bildzeit. `khz` ist die Zyklenzahl je
+    // Millisekunde; geteilt durch 1000 sind es die je Mikrosekunde.
+    // Ist die Uhr noch nicht geeicht (khz == 0), wird nichts gezaehlt
+    // -- eine Division durch null waere hier ein Absturz im Bildtakt.
+    let kh: u64 = time.khz(state)
+    if kh >= 1000 {
+        let t_ende: u64 = time.tsc()
+        // Als Subtraktion auf der Seite, die gross genug ist: der
+        // Zyklenzaehler kann zwischen zwei Ablesungen nicht kleiner
+        // werden, aber ein Weltwechsel in eine Gastmaschine kann ihn
+        // zuruecksetzen. Dann wird dieses eine Bild nicht gezaehlt.
+        if t_ende > t_anfang {
+            let us: u64 = (t_ende - t_anfang) / (kh / 1000)
+            ss(state, S_FRUS, gs(state, S_FRUS) + us)
+            ss(state, S_FRN, gs(state, S_FRN) + 1)
+            ss(state, S_FRLAST, us)
+            if us > gs(state, S_FRMAX) {
+                ss(state, S_FRMAX, us)
+            }
+            if us > 16000 {
+                ss(state, S_FRUEBER, gs(state, S_FRUEBER) + 1)
+            }
+        }
+    }
     return (x1 - x0) * (y1 - y0)
+}
+
+// ------------------------------------------- RUNDE VEKTOR: DIE BILDZEIT
+//
+// Fuenf Ableser, damit die Abnahme die Zahlen holen kann, ohne die
+// Offsets zu kennen.
+
+fn frame_us_sum(state: u64) -> u64 {
+    return gs(state, S_FRUS)
+}
+
+fn frame_us_n(state: u64) -> u64 {
+    return gs(state, S_FRN)
+}
+
+fn frame_us_max(state: u64) -> u64 {
+    return gs(state, S_FRMAX)
+}
+
+fn frame_us_last(state: u64) -> u64 {
+    return gs(state, S_FRLAST)
+}
+
+fn frame_ueber16(state: u64) -> u64 {
+    return gs(state, S_FRUEBER)
 }
 
 // WIE VIELE TASTEN BEI DIESEM FENSTER ANGEKOMMEN SIND. Die Zahl ist die
