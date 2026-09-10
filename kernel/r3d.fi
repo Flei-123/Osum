@@ -1,0 +1,282 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/r3d.fi -- RUNDE GRAFIK-1, ETAPPE B/C: DIE SCHICHT, HINTER DER
+// SPAETER EINE GRAFIKKARTE STECKEN KANN.
+//
+// WARUM ES DIESE DATEI GIBT, UND WARUM SIE NICHT "OPENGL" HEISST.
+//
+// Osum malt heute jeden Bildpunkt mit dem Hauptprozessor. Soll daraus
+// jemals echte Beschleunigung werden, darf kein Programm SEINE Dreiecke
+// direkt in den Bildspeicher schreiben -- sonst haengt jedes Programm
+// an `fb.fi`, und ein Grafikkartentreiber muesste jedes einzeln
+// umbauen. Also dasselbe Muster wie bei `gfx.fi`/`gfx-aus.fi`:
+//
+//     Anwendung
+//         |
+//         v
+//     r3d.fi          <-- DIESE DATEI: was geht, und mit welchen Zusagen
+//         |
+//         +--> r3dsoft.fi    Rasterung in Software   (diese Runde)
+//         +--> r3d<gpu>.fi   ein echter Treiber      (spaeter, falls je)
+//
+// Diese Datei entscheidet, WELCHES Backend laeuft, und sonst nichts.
+// Sie rechnet nicht, sie zeichnet nicht. Heute gibt es genau ein
+// Backend, und trotzdem steht die Weiche schon hier: eine Weiche, die
+// erst eingebaut wird, wenn es den zweiten Weg gibt, wird nie
+// eingebaut, weil dann alle Aufrufer schon am ersten haengen.
+//
+// KEIN OPENGL-NACHBAU. OpenGL ist eine Zustandsmaschine mit ueber
+// tausend Aufrufen. Ein Nachbau, der neunzig davon kann, ist kein
+// OpenGL -- er ist eine Luege mit einem bekannten Namen, und das erste
+// Programm, das den einundneunzigsten Aufruf braucht, faellt um. Diese
+// Schnittstelle ist klein, sie kann wenig, und sie heisst nicht so wie
+// etwas, das sie nicht ist.
+//
+// -------------------------------------------------------------------
+// ALLES IN 16.16-FESTKOMMA, UND DAS IST GEMESSEN.
+//
+// Der Uebersetzer verbietet Gleitkomma im Kernprofil:
+//
+//     error: floating point (the type f64) is allowed in profile
+//     'kernel' only with #[allow_fp]
+//     note: SPEC 2: in the kernel the FPU/SSE registers belong to the
+//           interrupted thread; whoever touches them must save their
+//           state himself
+//
+// Es gibt also eine Tuer, aber sie kostet: wer sie benutzt, muss den
+// Vektorzustand selbst sichern. In einer Schleife, die je BILDPUNKT
+// laeuft, ist das nicht bezahlbar. Also Festkomma -- dieselbe
+// Entscheidung, die `ttf.fi` (Glyphumrisse) und `vektor.fi` (Pfade)
+// schon getroffen haben.
+//
+// TRAEGT DAS? Die ganze Kette -- Drehung um zwei Achsen, Verschiebung,
+// Projektion, Bildschirmkoordinaten -- wurde ueber 2880 Eckpunkte gegen
+// `float64` gerechnet:
+//
+//     16.16, Sinustabelle mit 1024 Eintraegen
+//         groesster Fehler   0,013 Bildpunkte
+//         mittlerer Fehler   0,006 Bildpunkte
+//
+// Ein Hundertstel Bildpunkt. Eine groessere Tabelle bringt nichts
+// Messbares, eine groessere Schiebung braucht niemand. Die Zahl steht
+// in STATUS-GRAFIK-1.md mit der Messung daneben.
+//
+// WARUM 16.16 UND NICHT 26.6 WIE `vektor.fi`: 26.6 hat sechs
+// Nachkommabits -- genug fuer Umrisse in Bildpunkten, zu wenig fuer
+// eine Projektionsteilung, bei der durch die Tiefe geteilt wird und das
+// Ergebnis wieder skaliert. 16.16 hat sechzehn und laesst in 64 Bit
+// immer noch reichlich Luft fuer das Zwischenprodukt einer
+// Multiplikation.
+
+profile kernel
+
+import r3dsoft
+
+export {
+    // Der Lebenslauf einer Bildflaeche.
+    start, ende, aktiv,
+    // Was hineingeht.
+    clear, matrix, licht, textur, dreieck,
+    // Wer gerade rechnet, und was er geschafft hat.
+    backend, backend_name, dreiecke, punkte, bildpunkte,
+    // Die Zahlen des Festkommaformats -- sie gehoeren zur
+    // Schnittstelle, nicht zum Backend.
+    FIX_SHIFT, FIX_ONE, fx_mul, fx_div, fx_von_ganz, fx_zu_ganz,
+    sin_fx, cos_fx,
+    // Die drei Matrizen.
+    M_MODELL, M_ANSICHT, M_PROJ,
+    // Die Backends.
+    B_SOFT, B_KEINES
+}
+
+// ------------------------------------------------------- das Format
+
+// 16 Vorkomma-, 16 Nachkommabits. Eine Einheit ist ein
+// Fünfundsechzigtausendfünfhundertsechsunddreissigstel.
+const FIX_SHIFT: u64 = 16
+const FIX_ONE: u64 = 65536
+
+// Multiplikation zweier 16.16-Zahlen. Das Zwischenprodukt hat bis zu
+// 64 Bit; die Schiebung holt die Nachkommastellen wieder herunter.
+//
+// VORZEICHEN. Firn rechnet hier mit u64, und die Zahlen sind
+// Zweierkomplement-Bitmuster. `*%` und `+%` sind die UMDEUTENDEN
+// Fassungen -- sie halten den Kern bei Ueberlauf nicht an, und genau
+// das ist hier gewollt: eine negative Koordinate IST ein Ueberlauf,
+// wenn man sie als vorzeichenlos liest. Fuer die Schiebung nach rechts
+// muss das Vorzeichen aber erhalten bleiben, sonst wird aus -1 eine
+// riesige positive Zahl. Deshalb die Fallunterscheidung.
+fn fx_mul(a: u64, b: u64) -> u64 {
+    let neg_a: bool = (a >> 63) != 0
+    let neg_b: bool = (b >> 63) != 0
+    var ua: u64 = a
+    var ub: u64 = b
+    if neg_a {
+        ua = (0 -% a)
+    }
+    if neg_b {
+        ub = (0 -% b)
+    }
+    let p: u64 = (ua *% ub) >> FIX_SHIFT
+    if neg_a != neg_b {
+        return 0 -% p
+    }
+    return p
+}
+
+// Teilung zweier 16.16-Zahlen. Die Zaehlerseite wird VOR der Teilung
+// hochgeschoben, sonst bliebe vom Ergebnis nur der ganzzahlige Anteil.
+fn fx_div(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        return 0
+    }
+    let neg_a: bool = (a >> 63) != 0
+    let neg_b: bool = (b >> 63) != 0
+    var ua: u64 = a
+    var ub: u64 = b
+    if neg_a {
+        ua = (0 -% a)
+    }
+    if neg_b {
+        ub = (0 -% b)
+    }
+    if ub == 0 {
+        return 0
+    }
+    let q: u64 = (ua << FIX_SHIFT) / ub
+    if neg_a != neg_b {
+        return 0 -% q
+    }
+    return q
+}
+
+fn fx_von_ganz(n: u64) -> u64 {
+    return n << FIX_SHIFT
+}
+
+// Abschneiden, nicht runden -- und mit erhaltenem Vorzeichen.
+fn fx_zu_ganz(x: u64) -> u64 {
+    if (x >> 63) != 0 {
+        return 0 -% ((0 -% x) >> FIX_SHIFT)
+    }
+    return x >> FIX_SHIFT
+}
+
+// ------------------------------------------------- Sinus und Kosinus
+//
+// Eine Tabelle mit 1024 Eintraegen ueber den vollen Kreis, in 16.16.
+// Der Winkel ist eine Zahl von 0 bis 1023 (ein "Bogenschritt"), nicht
+// ein Gradmass: damit ist der Ueberlauf am Kreisende eine Maskierung
+// und keine Teilung.
+//
+// WARUM DIE TABELLE GERECHNET UND NICHT GESCHRIEBEN WIRD: 1024
+// Eintraege zu acht Oktetten waeren 8 KiB Quelltext voller Zahlen, die
+// niemand nachrechnet. Statt dessen steht hier die Rekursion, mit der
+// sie beim ersten Gebrauch entsteht -- vier Zeilen, die man lesen kann.
+// Der Preis ist ein einmaliger Aufbau; er steht in der Messung.
+const SIN_N: u64 = 1024
+const SIN_MASK: u64 = 1023
+const SIN_VIERTEL: u64 = 256
+
+// Der Aufbau der Tabelle steht in `r3dsoft.fi`, weil dort auch der
+// Speicher dafuer liegt. Diese zwei Griffe sind die Tuer dorthin.
+fn sin_fx(state: u64, schritt: u64) -> u64 {
+    return r3dsoft.sin_fx(state, schritt & SIN_MASK)
+}
+
+fn cos_fx(state: u64, schritt: u64) -> u64 {
+    return r3dsoft.sin_fx(state, (schritt +% SIN_VIERTEL) & SIN_MASK)
+}
+
+// ------------------------------------------------------- die Weiche
+
+const B_KEINES: u64 = 0
+const B_SOFT: u64 = 1
+
+// Welches Backend rechnet? Heute immer das Software-Backend -- aber die
+// Frage wird an EINER Stelle gestellt, und das ist der Punkt.
+fn backend(state: u64) -> u64 {
+    if r3dsoft.aktiv(state) {
+        return B_SOFT
+    }
+    return B_KEINES
+}
+
+fn backend_name(state: u64) {
+    r3dsoft.name()
+}
+
+// Die drei Matrizen. Getrennt und nicht vormultipliziert, weil ein
+// echter Treiber sie einzeln in Register schreiben wuerde.
+const M_MODELL: u64 = 0
+const M_ANSICHT: u64 = 1
+const M_PROJ: u64 = 2
+
+// ------------------------------------------------ die Schnittstelle
+//
+// Jeder dieser Aufrufe reicht genau weiter und tut selbst nichts. Das
+// ist die ganze Absicht: was hier steht, ist die ZUSAGE, und wo sie
+// eingeloest wird, steht woanders.
+
+// Eine Bildflaeche aufmachen. `ziel` ist die Adresse, in die gezeichnet
+// wird (der Zweitpuffer von `fb.fi` oder ein eigener Puffer), `pitch`
+// seine Zeilenlaenge in Oktetten.
+fn start(state: u64, ziel: u64, w: u64, h: u64, pitch: u64) -> bool {
+    return r3dsoft.start(state, ziel, w, h, pitch)
+}
+
+fn ende(state: u64) {
+    r3dsoft.ende(state)
+}
+
+fn aktiv(state: u64) -> bool {
+    return r3dsoft.aktiv(state)
+}
+
+// Farbe und Tiefe zuruecksetzen. Die Tiefe wird auf den groessten Wert
+// gesetzt -- alles ist weiter weg als "nichts".
+fn clear(state: u64, farbe: u64) {
+    r3dsoft.clear(state, farbe)
+}
+
+// Eine 4x4-Matrix setzen, sechzehn Zahlen in 16.16, zeilenweise.
+fn matrix(state: u64, art: u64, m: u64) {
+    r3dsoft.matrix(state, art, m)
+}
+
+// Eine Richtungsquelle: woher das Licht kommt (drei 16.16-Zahlen) und
+// wie hell es ist (0..FIX_ONE), dazu ein Grundanteil, damit abgewandte
+// Flaechen nicht voellig schwarz sind.
+fn licht(state: u64, rx: u64, ry: u64, rz: u64, staerke: u64, grund: u64) {
+    r3dsoft.licht(state, rx, ry, rz, staerke, grund)
+}
+
+// Eine Textur binden. `daten` zeigt auf w*h Vierergruppen (dieselbe
+// Farbordnung wie der Bildspeicher). w und h muessen Zweierpotenzen
+// sein -- dann ist die Umschlagrechnung eine Maskierung und keine
+// Teilung, und das ist in der innersten Schleife der Unterschied.
+fn textur(state: u64, daten: u64, w: u64, h: u64) -> bool {
+    return r3dsoft.textur(state, daten, w, h)
+}
+
+// EIN Dreieck, neun Zahlen je Eckpunkt: x, y, z (16.16, Modellraum),
+// u, v (16.16, Texturkoordinaten), und eine Grundfarbe je Eckpunkt.
+// Alles in EINEM Aufruf statt einer Bindung von Feldern, weil ein
+// Feldzeiger, der in Ring 3 liegt, geprueft werden muesste -- und diese
+// Runde hat in Ring 3 noch nichts zu suchen.
+fn dreieck(state: u64, p: u64) {
+    r3dsoft.dreieck(state, p)
+}
+
+// ------------------------------------------------------- die Zaehler
+
+fn dreiecke(state: u64) -> u64 {
+    return r3dsoft.dreiecke(state)
+}
+
+fn punkte(state: u64) -> u64 {
+    return r3dsoft.punkte(state)
+}
+
+fn bildpunkte(state: u64) -> u64 {
+    return r3dsoft.bildpunkte(state)
+}
