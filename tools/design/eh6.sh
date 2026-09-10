@@ -344,7 +344,7 @@ ACC=()
 if [ "$accel" = kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
     ACC=(-accel kvm -cpu host)
 fi
-timeout 900 qemu-system-x86_64 "${ACC[@]}" -kernel "$BUILDD/k0.mb" -m 512 \
+timeout 5400 qemu-system-x86_64 "${ACC[@]}" -kernel "$BUILDD/k0.mb" -m 512 \
     -append "$APPEND" \
     -serial "file:$OUT/serial.txt" -display none -no-reboot \
     -device "VGA,edid=on,xres=$XRES,yres=$YRES,vgamem_mb=32" \
