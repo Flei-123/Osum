@@ -406,6 +406,22 @@ class Fahrer:
             sk = 2
         return (x, y, w, h, 2 * sk, 22 * sk)
 
+    # RUNDE FENSTER: WELCHES FENSTER HAT DEN FOKUS.
+    #
+    # Die Kennungen werden zur Laufzeit vergeben (7, 11, ...) und
+    # aendern sich mit jedem Lauf -- eine ins Drehbuch getippte Zahl
+    # ist deshalb falsch, sobald ein Programm mehr startet. F11 wirkt
+    # auf das Fenster mit dem Fokus, also muss das Drehbuch dasselbe
+    # Fenster greifen koennen. `wm: fokus id=<neu> vor=<alt>`.
+    def fokus_id(self):
+        t = lies(self.serial)
+        m = None
+        for m in re.finditer(r"wm: fokus id=(\d+) vor=\d+", t):
+            pass
+        if m is None:
+            return None
+        return int(m.group(1))
+
     def rechteck(self, name):
         t = lies(self.serial)
 
@@ -742,6 +758,40 @@ def main():
             print("ziehkante id=%d %s von %d,%d um %d,%d "
                   "(fenster %d,%d %dx%d bo=%d ti=%d)"
                   % (wid, kante, x0, y0, dx, dy, wx, wy, ww, wh, bo, ti))
+        # ==================================== RUNDE FENSTER
+        # `ziehtitel <id> <dx>,<dy>` -- das Fenster <id> an seiner
+        # TITELLEISTE um dx/dy verschieben.
+        #
+        # WARUM NICHT `ziehe` MIT ZAHLEN. Justins Frage ist, ob ein
+        # Fenster UNTER die Leiste rutschen darf. Das laesst sich nur
+        # messen, wenn man das Fenster gezielt so weit nach unten
+        # zieht, dass seine Unterkante die Leiste ueberschreitet --
+        # und wo es vorher stand, weiss nur der Server. Getippte
+        # Zahlen treffen nach dem ersten Ziehen daneben, genau wie bei
+        # `ziehkante`. Die Greifstelle ist die MITTE der Titelleiste.
+        elif b == "ziehtitel":
+            t = arg.split()
+            if t[0] == "fokus":
+                wid = f.fokus_id()
+                if wid is None:
+                    print("ziehtitel fokus -> KEIN FOKUS gemeldet")
+                    fehler += 1
+                    continue
+            else:
+                wid = int(t[0])
+            dx, dy = (int(v) for v in t[1].split(","))
+            g = f.fenstergeom(wid)
+            if g is None:
+                print("ziehtitel %d -> KEINE GEOMETRIE gemeldet" % wid)
+                fehler += 1
+                continue
+            wx, wy, ww, wh, bo, ti = g
+            x0 = wx + bo + ww // 2
+            y0 = wy + ti // 2
+            f.ziehe(x0, y0, x0 + dx, y0 + dy)
+            print("ziehtitel id=%d von %d,%d um %d,%d "
+                  "(fenster %d,%d %dx%d bo=%d ti=%d)"
+                  % (wid, x0, y0, dx, dy, wx, wy, ww, wh, bo, ti))
         # RUNDE ECHTHARDWARE-5: klicken OHNE den Weg ueber die Ecke.
         # Fuer alles, was sich bei einem Druck daneben schliesst --
         # also fuer das Kontrollzentrum.
