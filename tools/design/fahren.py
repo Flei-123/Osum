@@ -219,6 +219,39 @@ class Fahrer:
         self.cmd("mouse_button 0")
         time.sleep(1.2)
 
+    # ============================================== RUNDE ANHEFTEN
+    # ZIEHEN MIT EINEM FOTO MITTENDRIN. Ohne das gibt es kein Bild vom
+    # ZUSTAND WAEHREND des Zugs -- und genau das ist der Beleg dafuer,
+    # dass die Luecke mitwandert. Vorher und nachher zu fotografieren
+    # beweist nur das Ergebnis, nicht die Bewegung.
+    def ziehe_mit_foto(self, x0, y0, x1, y1, name, schritte=8):
+        self.fahre(x0, y0)
+        time.sleep(0.35)
+        self.cmd("mouse_button 1")
+        time.sleep(0.25)
+        cx, cy = x0, y0
+        halt = schritte // 2
+        for k in range(1, schritte + 1):
+            zx = x0 + (x1 - x0) * k // schritte
+            zy = y0 + (y1 - y0) * k // schritte
+            ddx, ddy = zx - cx, zy - cy
+            while ddx or ddy:
+                sx = max(-120, min(120, ddx))
+                sy = max(-120, min(120, ddy))
+                self.cmd("mouse_move %d %d" % (sx, sy))
+                ddx -= sx
+                ddy -= sy
+            cx, cy = zx, zy
+            time.sleep(0.15)
+            if k == halt and name:
+                # Die Taste bleibt gedrueckt: das Bild zeigt den Zug.
+                time.sleep(0.6)
+                self.foto(name)
+        self.x, self.y = cx, cy
+        time.sleep(0.35)
+        self.cmd("mouse_button 0")
+        time.sleep(1.2)
+
     def klick(self, x, y, mal=1, taste=1):
         self.fahre(x, y)
         time.sleep(0.35)
@@ -419,6 +452,36 @@ class Fahrer:
             return (x0, ym - 4, x1 - x0, 8)
         gm = letzte(r"taskbar: geom edge=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
         tb = (int(gm.group(1)), int(gm.group(2))) if gm else (0, 0)
+        # ============================================ RUNDE ANHEFTEN
+        # `pin0`..`pin5` -- die ANGEHEFTETEN Knoepfe, so wie die Leiste
+        # sie selbst meldet:
+        #     taskbar: pin certus x=96 y=8 w=64 h=64 sym=1 laeuft=0
+        # Der Name im Drehbuch ist die STELLE und nicht das Programm,
+        # weil die Stelle genau das ist, was diese Runde veraendert.
+        if name.startswith("pin") and name[3:].isdigit():
+            k = int(name[3:])
+            alle = list(re.finditer(
+                r"taskbar: pin (\w+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)", t))
+            if not alle:
+                return None
+            # NUR DER LETZTE ANSTRICH ZAEHLT. Die Leiste meldet diese
+            # Zeilen bei JEDEM Anstrich neu; davor stehen dieselben
+            # Namen mit den Koordinaten von vorher, und nach einem
+            # Ziehen sind das die FALSCHEN. Wie viele Anhefter es gibt,
+            # sagt der Abstand zwischen zwei Vorkommen desselben
+            # Namens -- gezaehlt wird vom Ende her.
+            letzter = alle[-1].group(1)
+            n = 1
+            for m2 in reversed(alle[:-1]):
+                if m2.group(1) == letzter:
+                    break
+                n += 1
+            letzten = alle[-n:]
+            if k >= len(letzten):
+                return None
+            m = letzten[k]
+            return (tb[0] + int(m.group(2)), tb[1] + int(m.group(3)),
+                    int(m.group(4)), int(m.group(5)))
         if name == "start":
             m = letzte(r"taskbar: start x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None:
@@ -716,6 +779,25 @@ def main():
         # dasselbe wie `klicknah`, nur mit gedrueckter Taste. Fuer die
         # zwei Regler im Kontrollzentrum, das sich sonst unterwegs
         # schliesst.
+        # ============================================ RUNDE ANHEFTEN
+        # `ziehfoto <rechteck> <dx> <bildname>` -- das Rechteck an
+        # seiner MITTE greifen, um dx BILDPUNKTE waagerecht ziehen und
+        # mittendrin fotografieren. In Punkten, nicht in Prozent: eine
+        # Verschiebung um "zwei Plaetze" ist eine Strecke und kein
+        # Anteil der Knopfbreite.
+        elif b == "ziehfoto":
+            t = arg.split()
+            r = f.rechteck(t[0])
+            if r is None:
+                print("ziehfoto %s -> KEIN RECHTECK GEMELDET" % t[0])
+                fehler += 1
+                continue
+            dx = int(t[1])
+            x0 = r[0] + r[2] // 2
+            y0 = r[1] + r[3] // 2
+            f.ziehe_mit_foto(x0, y0, x0 + dx, y0, t[2] if len(t) > 2 else None)
+            print("ziehfoto %s -> %d,%d nach %d,%d  (rect %d,%d %dx%d)"
+                  % (t[0], x0, y0, x0 + dx, y0, r[0], r[1], r[2], r[3]))
         elif b == "ziehspurnah":
             t = arg.split()
             r = f.rechteck(t[0])
