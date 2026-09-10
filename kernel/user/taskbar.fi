@@ -97,6 +97,19 @@ const BAND: u64 = 80 // rows of the drawing surface used at a time
 const TASK_MAX: u64 = 132
 const TASK_MIN: u64 = 48
 const MAXK: u64 = 10 // that many window buttons at most
+// ==================================================== RUNDE ANHEFTEN
+// ANGEHEFTETE PROGRAMME. Justins Wunsch: Certus ab Werk in der Leiste,
+// wie bei Windows -- das Symbol steht dort, OB DAS PROGRAMM LAEUFT
+// ODER NICHT. Klick startet es; laeuft es schon, holt der Klick das
+// Fenster nach vorn, statt ein zweites zu oeffnen.
+//
+// WARUM EINE EIGENE LISTE UND NICHT EIN FLAG AN kapp[]: die
+// Fensterliste kommt vom Server und ist fluechtig -- sie kennt nur,
+// was JETZT laeuft. Ein angehefteter Knopf muss aber gerade dann
+// dastehen, wenn nichts laeuft. Also zwei Quellen, EIN Streifen
+// Knoepfe: erst die Anhefter, dann die uebrigen Fenster.
+const MAXPIN: u64 = 6
+
 const PREV_T: u64 = 3 // thickness of the preview outline
 
 // ================================== ROUND LOOK: WHERE THE BUTTONS SIT
@@ -561,6 +574,19 @@ static mut f_full: [u8; 160] = [0 as u8; 160] // 5 fields x 32, unshortened
 static mut kx: [u64; 10] = [0 as u64; 10]
 // RUNDE PAINT: der Buendelname je Knopf, 24 Oktette, aus WL_APP.
 static mut kapp: [u8; 240] = [0 as u8; 240]
+// Die Namen der angehefteten Buendel ("certus"), je 24 Oktette --
+// dasselbe Format wie `kapp`, damit `sym_of` unveraendert passt.
+static mut pinname: [u8; 144] = [0 as u8; 144] // MAXPIN * 24
+static mut npin: u64 = 0
+// Fuer jeden Anhefter: welcher Fensterknopf gehoert dazu (Index in
+// kid[], oder MAXK wenn das Programm nicht laeuft).
+static mut pinwin: [u64; 6] = [0 as u64; 6]
+// Lage des Anhefter-Knopfes in der Leiste.
+static mut px_: [u64; 6] = [0 as u64; 6]
+static mut py_: [u64; 6] = [0 as u64; 6]
+static mut pw_: [u64; 6] = [0 as u64; 6]
+static mut ph_: [u64; 6] = [0 as u64; 6]
+
 static mut ky: [u64; 10] = [0 as u64; 10]
 static mut kw: [u64; 10] = [0 as u64; 10]
 static mut kh: [u64; 10] = [0 as u64; 10]
@@ -669,6 +695,38 @@ static mut ub_soll: u64 = 0   // Bildpunkte, die hinueber SOLLTEN
 static mut ub_null: u64 = 0   // Pushs, die NICHTS hinuebergebracht haben
 
 // the drag
+// ==================================================== RUNDE ANHEFTEN
+// DAS ZIEHEN EINES ANHEFTERS. Dieselbe Zustandsfolge wie beim Ziehen
+// der Leiste an eine andere Kante (`dragging`/`drag_step`) und wie beim
+// Fensterziehen im Fensterverwalter (S_DRAGX/S_DRAGY, `move_win`):
+// aufnehmen -- bewegen -- loslassen. Eine zweite Mechanik daneben waere
+// eine zweite Stelle, an der dasselbe schiefgehen kann.
+//
+// pdrag  0 = nichts, 1 = Taste haelt einen Anhefter (noch KEIN Ziehen),
+//        2 = es wird wirklich gezogen
+// pdrag_i   welcher Anhefter (Index in pinname)
+// pdrag_x0  wo die Taste gedrueckt wurde -- die Schwelle misst dagegen
+// pdrag_ziel wohin er beim Loslassen kaeme (Einfuegestelle)
+static mut pdrag: u64 = 0
+static mut pdrag_i: u64 = 0
+static mut pdrag_x0: u64 = 0
+static mut pdrag_y0: u64 = 0
+static mut pdrag_ziel: u64 = 0
+// DIE SCHWELLE. Justins Punkt 3: erst ab ein paar Bildpunkten wird aus
+// dem Klick ein Ziehen -- sonst verschiebt ein leicht verwackelter
+// Klick das Programm, statt es zu starten.
+//
+// SECHS PUNKTE MAL DER VERVIELFACHUNG, und die Zahl ist nicht geraten:
+// auf Justins Schirm (uiscale=2) sind das 12 Bildpunkte bei einem
+// Knopf von 64 -- also gut ein Sechstel der Knopfbreite. Weniger
+// (3-4) loest beim Loslassen einer Maus mit schwergaengiger Taste
+// schon aus; deutlich mehr fuehlt sich an, als klebte das Symbol fest.
+// Windows nimmt dafuer SM_CXDRAG, ueblicherweise 4 logische Punkte;
+// hier ist es etwas mehr, weil ein Anhefter im Gegensatz zu einer
+// Datei beim Fehlgriff ein PROGRAMM STARTET und das teurer ist als
+// ein misslungener Zug.
+const PDRAG_SCHWELLE: u64 = 6
+
 static mut dragging: u64 = 0
 static mut drag_edge: u64 = 9
 static mut prev_h: [u64; 5] = [0 as u64; 5]
@@ -743,6 +801,8 @@ fn width_of(p: u64) -> u64 {
 
 static mut p_conf: [u8; 19] = "/etc/taskbar.conf\0\0"
 static mut k_edge: [u8; 5] = "edge\0"
+static mut k_pins: [u8; 5] = "pins\0"
+
 static mut k_height: [u8; 7] = "height\0"
 static mut k_width: [u8; 6] = "width\0"
 static mut k_autohide: [u8; 9] = "autohide\0"
@@ -885,7 +945,62 @@ fn conf_read() -> bool {
             }
             __mmio_write8((wp + k) as *mut u8, 0 as u8)
             let kl: u64 = ke - ks
-            if key_is(b + ks, kl, (&k_edge[0 as usize]) as u64) {
+            if key_is(b + ks, kl, (&k_pins[0 as usize]) as u64) && pdrag == 0 {
+                // ================================ RUNDE ANHEFTEN
+                // `&& pdrag == 0` IST KEIN SCHMUCK: die Leiste liest
+                // diese Datei JEDE halbe Sekunde neu (siehe die
+                // Hauptschleife: so kommt eine Aenderung aus
+                // /bin/settings ohne Neustart an). Waehrend ein
+                // Anhefter gezogen wird, steht die neue Reihenfolge
+                // aber nur im Speicher -- geschrieben wird erst beim
+                // Loslassen. Ohne diese Bedingung ueberschreibt die
+                // Datei den Zug, WAEHREND er laeuft.
+                //
+                // GEMESSEN, bevor die Bedingung hier stand: die
+                // Leitung meldete `pin ziel=1`, `pin ziel=2` -- der
+                // Zug lief also -- und danach `pin folge
+                // certus,explorer,terminal,settings`, also die ALTE
+                // Reihenfolge. Genau dieses Zurueckschreiben war es.
+                //
+                // AUS DEM ROHPUFFER UND NICHT AUS `wp`. Der
+                // Wert-Zwischenspeicher `word` ist 24 Oktette lang;
+                // "certus,terminal,explorer" sind 24 und die Liste
+                // waere still hinter "explore" abgeschnitten -- ein
+                // Anhefter mit falschem Namen findet kein Symbol und
+                // die Leiste haette eine Luecke, die niemand erklaert.
+                // Also wird die Zeile hier direkt zerlegt.
+                npin = 0
+                var q: u64 = vs
+                while q < ve && npin < MAXPIN {
+                    var l: u64 = 0
+                    let zp: u64 = (&pinname[0 as usize]) as u64 + npin * 24
+                    while q < ve && l < 23 {
+                        let ch: u64 = __mmio_read8((b + q) as *mut u8) as u64
+                        if ch == 44 {
+                            break
+                        }
+                        // Leerzeichen um das Komma gehoeren nicht zum
+                        // Namen: "certus, terminal" ist dieselbe Liste
+                        // wie "certus,terminal".
+                        if ch != 32 && ch != 9 {
+                            __mmio_write8((zp + l) as *mut u8, ch as u8)
+                            l = l + 1
+                        }
+                        q = q + 1
+                    }
+                    __mmio_write8((zp + l) as *mut u8, 0 as u8)
+                    if l > 0 {
+                        npin = npin + 1
+                    }
+                    while q < ve
+                        && __mmio_read8((b + q) as *mut u8) != 44 as u8 {
+                        q = q + 1
+                    }
+                    if q < ve {
+                        q = q + 1
+                    }
+                }
+            } else if key_is(b + ks, kl, (&k_edge[0 as usize]) as u64) {
                 let e: u64 = wlibc.edge_by_name(wp)
                 if e < 4 {
                     cf_edge = e
@@ -987,6 +1102,30 @@ fn conf_write() -> bool {
     __mmio_write8((b + at) as *mut u8, 61 as u8)
     at = text_at_p(b, at + 1, align_name(cf_align))
     __mmio_write8((b + at) as *mut u8, 10 as u8)
+    // ==================================================== RUNDE ANHEFTEN
+    // DIE ANHEFTER MUESSEN MIT HINAUS, SONST LOESCHT SIE DAS SPEICHERN.
+    //
+    // Diese Routine schreibt die Datei NEU und nicht fort: was sie
+    // nicht kennt, ist nach dem naechsten Kantenwechsel weg. Ohne diese
+    // Zeilen haette ein Ziehen der Leiste an den oberen Rand Justins
+    // angeheftete Programme stillschweigend entfernt -- ein Datenverlust
+    // aus einer Bewegung, die mit Anheftern nichts zu tun hat.
+    if npin > 0 {
+        at = text_at_p(b, at + 1, (&k_pins[0 as usize]) as u64)
+        __mmio_write8((b + at) as *mut u8, 61 as u8)
+        at = at + 1
+        var pw3: u64 = 0
+        while pw3 < npin {
+            if pw3 > 0 {
+                __mmio_write8((b + at) as *mut u8, 44 as u8)
+                at = at + 1
+            }
+            at = text_at_p(b, at,
+                (&pinname[0 as usize]) as u64 + pw3 * 24)
+            pw3 = pw3 + 1
+        }
+        __mmio_write8((b + at) as *mut u8, 10 as u8)
+    }
     at = at + 1
     let fd: u64 = io.create((&p_conf[0 as usize]) as u64)
     if ulib.bad(fd) {
@@ -2423,10 +2562,70 @@ fn layout() {
         }
     }
     st_x = gx
-    let left2: u64 = st_x + st_w + gap()
+    // ==================================================== RUNDE ANHEFTEN
+    // DIE ANHEFTER STEHEN VOR DEN FENSTERN, und jeder von ihnen bekommt
+    // ein QUADRAT (btn_h x btn_h) und nicht die Fensterbreite: ein
+    // Anhefter traegt nie eine Beschriftung, weil er auch dann dasteht,
+    // wenn es kein Fenster und also keinen Titel gibt.
+    //
+    // ZUERST WIRD ZUGEORDNET, DANN GELEGT: laeuft ein angehefteten
+    // Programm, gehoert SEIN Fensterknopf zum Anhefter und bekommt
+    // keinen eigenen Platz -- sonst stuende Certus zweimal in der
+    // Leiste, einmal kalt und einmal laufend. Genau das unterscheidet
+    // eine Anheftleiste von einer Liste offener Fenster.
+    var pi: u64 = 0
+    while pi < npin {
+        pinwin[(pi) as usize] = MAXK
+        var wj: u64 = 0
+        while wj < nk {
+            if sym_eq((&pinname[0 as usize]) as u64 + pi * 24,
+                (&kapp[0 as usize]) as u64 + wj * 24) {
+                pinwin[(pi) as usize] = wj
+                break
+            }
+            wj = wj + 1
+        }
+        pi = pi + 1
+    }
+    let pinbr: u64 = btn_h()
+    var pl: u64 = st_x + st_w + gap()
+    pi = 0
+    while pi < npin {
+        px_[(pi) as usize] = pl
+        py_[(pi) as usize] = st_y
+        pw_[(pi) as usize] = pinbr
+        ph_[(pi) as usize] = btn_h()
+        pl = pl + pinbr + gap()
+        pi = pi + 1
+    }
+    let left2: u64 = pl
     i = 0
+    // Wieviele Fensterknoepfe schon vergeben sind: ein Fenster, das zu
+    // einem Anhefter gehoert, belegt keinen eigenen Platz -- und darf
+    // auch keine LUECKE hinterlassen. Darum zaehlt `gelegt` die
+    // wirklich gelegten Knoepfe und nicht den Schleifenindex.
+    var gelegt: u64 = 0
     while i < nk {
-        kx[(i) as usize] = left2 + i * (width + gap())
+        var istpin: bool = false
+        var pz: u64 = 0
+        while pz < npin {
+            if pinwin[(pz) as usize] == i {
+                istpin = true
+                break
+            }
+            pz = pz + 1
+        }
+        if istpin {
+            // Der Knopf wird nicht gemalt; der Anhefter zeigt ihn.
+            kw[(i) as usize] = 0
+            kx[(i) as usize] = px_[(pz) as usize]
+            ky[(i) as usize] = py_[(pz) as usize]
+            kh[(i) as usize] = ph_[(pz) as usize]
+            i = i + 1
+            continue
+        }
+        kx[(i) as usize] = left2 + gelegt * (width + gap())
+        gelegt = gelegt + 1
         ky[(i) as usize] = st_y
         kh[(i) as usize] = btn_h()
         if cf_labels == LB_NEVER || width < TASK_MIN {
@@ -2667,6 +2866,25 @@ static mut s_sy: [u8; 18] = "taskbar: sym btn=\0"
 static mut s_syn: [u8; 7] = " app=\0\0"
 static mut s_syw: [u8; 5] = " w=\0\0"
 static mut s_syi: [u8; 7] = " ink=\0\0"
+static mut s_leer: [u8; 2] = "\0\0"
+static mut s_pin: [u8; 16] = "taskbar: pin \0\0\0"
+static mut s_pinx: [u8; 4] = " x=\0"
+static mut s_piny: [u8; 4] = " y=\0"
+static mut s_pinw: [u8; 4] = " w=\0"
+static mut s_pinh: [u8; 4] = " h=\0"
+static mut s_pinsy: [u8; 6] = " sym=\0"
+static mut s_pinrun: [u8; 9] = " laeuft=\0"
+static mut s_pinact: [u8; 22] = "taskbar: pin schalte \0"
+static mut s_pinexec: [u8; 21] = "taskbar: pin starte \0"
+static mut s_pinpid: [u8; 6] = " pid=\0"
+static mut s_pd0: [u8; 22] = "taskbar: pin ziehe \0\0\0"
+static mut s_pdd: [u8; 5] = " dx=\0"
+static mut s_pdm: [u8; 21] = "taskbar: pin ziel=\0\0\0"
+static mut s_pd1: [u8; 24] = "taskbar: pin folge \0\0\0\0\0"
+static mut s_komma: [u8; 2] = ",\0"
+
+
+
 // RUNDE ECHTHARDWARE-4: die zwei Zahlen, an denen "zu kleines Symbol"
 // zu messen ist -- die gemalte Kante und die Hoehe des Knopfes.
 static mut s_syg: [u8; 10] = " gemalt=\0\0"
@@ -3120,7 +3338,24 @@ fn button_sym(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
     let luft: u64 = 4 * wlibc.ui_scale()
     var gruppe: u64 = tw
     if sym != 0 {
-        gruppe = gruppe + symw + luft
+        // ============================================ RUNDE ANHEFTEN
+        // DIE LUFT GEHOERT ZWISCHEN SYMBOL UND TEXT -- gibt es keinen
+        // Text, gibt es auch kein Dazwischen.
+        //
+        // GEMESSEN am angehefteten Knopf (3440x1440, uiscale=2): das
+        // Symbol sass bei links=7 / rechts=15, also acht Punkte zu weit
+        // links -- und acht ist genau `luft`. Ein Anhefter traegt nie
+        // eine Beschriftung (`tw == 0`), die Gruppe war aber trotzdem
+        // um den Abstand zum Text breiter, und um dessen Haelfte
+        // rutschte alles nach links.
+        //
+        // Dieselbe Lehre wie beim Kreuz und in der KNOPF-VORLAGE: eine
+        // Zahl, die fuer einen Nachbarn reserviert wird, den es nicht
+        // gibt, verschiebt das, was da ist.
+        gruppe = gruppe + symw
+        if tw != 0 {
+            gruppe = gruppe + luft
+        }
     }
     if mark != 0 {
         gruppe = gruppe + mk_w() + luft
@@ -3153,8 +3388,12 @@ fn button_sym(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
         let _s: bool = wlibc.icon_draw_sc(sym, mx, sy2, symsc)
         // Der Abstand zum Text waechst mit: 8 Punkte bei einfacher
         // Vervielfachung sind bei doppelter 16, sonst klebt das
-        // groessere Symbol am Wort.
-        mx = mx + symw + luft
+        // groessere Symbol am Wort. Ohne Text entfaellt er (RUNDE
+        // ANHEFTEN, siehe oben).
+        mx = mx + symw
+        if tw != 0 {
+            mx = mx + luft
+        }
     }
     // RUNDE PAINT: WO DIE MARKE WIRKLICH STEHT, UND NUR HIER.
     //
@@ -3371,6 +3610,66 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
         if !gemalt {
             marke_malen(st_x, st_y, st_w, st_h, report)
         }
+    }
+    // ==================================================== RUNDE ANHEFTEN
+    // DIE ANGEHEFTETEN KNOEPFE. Sie stehen zwischen Startknopf und
+    // Fenstern und werden mit DERSELBEN Routine gemalt wie ein
+    // Fensterknopf (`button_sym`) -- gleiche Kachel, gleicher
+    // Schwebezustand, gleiche Druckfarbe. Das ist der Punkt: es soll
+    // kein zweiter Knopftyp entstehen, der bei der naechsten
+    // Formaenderung vergessen wird.
+    //
+    // DIE LAUFANZEIGE IST DIESELBE PILLE wie beim Fensterknopf, und sie
+    // erscheint NUR, wenn das Programm laeuft (`pinwin < MAXK`). Ein
+    // kalter Anhefter hat keinen Strich -- genau wie bei Windows.
+    var pz2: u64 = 0
+    while pz2 < npin {
+        if pw_[(pz2) as usize] != 0 {
+            let pnm: u64 = (&pinname[0 as usize]) as u64 + pz2 * 24
+            let psy: u64 = sym_of(pnm)
+            let pw2: u64 = pinwin[(pz2) as usize]
+            let laeuft: bool = pw2 < MAXK
+            var vorn: bool = false
+            if laeuft && kfok[(pw2) as usize] != 0 {
+                vorn = true
+            }
+            // Kein Text: ein Anhefter ist ein Symbol. `leer` ist die
+            // leere Zeichenkette, damit `button_sym` nichts schreibt.
+            let prc: u64 = button_sym(px_[(pz2) as usize], py_[(pz2) as usize],
+                pw_[(pz2) as usize], ph_[(pz2) as usize],
+                (&s_leer[0 as usize]) as u64, vorn, false, 0, psy)
+            if laeuft {
+                pill(px_[(pz2) as usize], py_[(pz2) as usize],
+                    pw_[(pz2) as usize], ph_[(pz2) as usize], vorn)
+            }
+            if report {
+                say((&s_pin[0 as usize]) as u64)
+                say(pnm)
+                say((&s_pinx[0 as usize]) as u64)
+                ulib.sayn(px_[(pz2) as usize])
+                say((&s_piny[0 as usize]) as u64)
+                ulib.sayn(py_[(pz2) as usize])
+                say((&s_pinw[0 as usize]) as u64)
+                ulib.sayn(pw_[(pz2) as usize])
+                say((&s_pinh[0 as usize]) as u64)
+                ulib.sayn(ph_[(pz2) as usize])
+                say((&s_pinsy[0 as usize]) as u64)
+                if psy != 0 {
+                    ulib.sayn(1)
+                } else {
+                    ulib.sayn(0)
+                }
+                say((&s_pinrun[0 as usize]) as u64)
+                if laeuft {
+                    ulib.sayn(1)
+                } else {
+                    ulib.sayn(0)
+                }
+                ulib.nl()
+            }
+            let _pu: u64 = prc
+        }
+        pz2 = pz2 + 1
     }
     var i: u64 = 0
     while i < nk {
@@ -3896,6 +4195,175 @@ fn nearest_edge(mx: u64, my: u64) -> u64 {
         best = wlibc.WE_BOTTOM
     }
     return best
+}
+
+// ==================================================== RUNDE ANHEFTEN
+// WOHIN EIN GEZOGENER ANHEFTER GEHOERT. Gerechnet wird gegen die
+// MITTEN der Plaetze und nicht gegen die Kanten: wer die Mitte des
+// Nachbarn ueberschritten hat, hat ihn ueberholt. Das ist dieselbe
+// Regel, nach der jede Leiste mit ziehbaren Symbolen arbeitet, und sie
+// ist die einzige, die sich beim Hin- und Herwackeln nicht aufschaukelt.
+// Welcher Anhefter liegt unter diesem Punkt? `npin` heisst: keiner.
+fn pin_unter(x: u64, y: u64) -> u64 {
+    var k: u64 = 0
+    while k < npin {
+        if pw_[(k) as usize] != 0
+            && x >= px_[(k) as usize]
+            && x < px_[(k) as usize] + pw_[(k) as usize]
+            && y >= py_[(k) as usize]
+            && y < py_[(k) as usize] + ph_[(k) as usize] {
+            return k
+        }
+        k = k + 1
+    }
+    return npin
+}
+
+fn pin_ziel(mx: u64) -> u64 {
+    if npin == 0 {
+        return 0
+    }
+    let br: u64 = pw_[(0) as usize] + gap()
+    let links: u64 = px_[(0) as usize]
+    if mx < links {
+        return 0
+    }
+    var k: u64 = 0
+    while k < npin {
+        let mitte: u64 = links + k * br + br / 2
+        if mx < mitte {
+            return k
+        }
+        k = k + 1
+    }
+    return npin - 1
+}
+
+// Den Anhefter von `von` nach `nach` umhaengen; die dazwischen ruecken
+// auf. Ein Feld von 24 Oktetten wandert, nicht ein Zeiger -- die Liste
+// IST der Speicher und es gibt keine zweite Abschrift davon.
+fn pin_umhaengen(von: u64, nach: u64) {
+    if von == nach || von >= npin || nach >= npin {
+        return
+    }
+    var tmp: [u8; 24] = [0 as u8; 24]
+    let qp: u64 = (&pinname[0 as usize]) as u64 + von * 24
+    var k: u64 = 0
+    while k < 24 {
+        tmp[(k) as usize] = *((qp + k) as *mut u8)
+        k = k + 1
+    }
+    if nach > von {
+        var i2: u64 = von
+        while i2 < nach {
+            let a2: u64 = (&pinname[0 as usize]) as u64 + i2 * 24
+            let b2: u64 = a2 + 24
+            k = 0
+            while k < 24 {
+                __mmio_write8((a2 + k) as *mut u8,
+                    *((b2 + k) as *mut u8))
+                k = k + 1
+            }
+            i2 = i2 + 1
+        }
+    } else {
+        var i3: u64 = von
+        while i3 > nach {
+            let a3: u64 = (&pinname[0 as usize]) as u64 + i3 * 24
+            let b3: u64 = a3 - 24
+            k = 0
+            while k < 24 {
+                __mmio_write8((a3 + k) as *mut u8,
+                    *((b3 + k) as *mut u8))
+                k = k + 1
+            }
+            i3 = i3 - 1
+        }
+    }
+    let zp: u64 = (&pinname[0 as usize]) as u64 + nach * 24
+    k = 0
+    while k < 24 {
+        __mmio_write8((zp + k) as *mut u8, tmp[(k) as usize])
+        k = k + 1
+    }
+}
+
+// Ein Schritt im Ziehen eines Anhefters. Wird jede Runde gerufen,
+// solange `pdrag` nicht 0 ist.
+fn pin_drag_step() {
+    let mx: u64 = wlibc.mouse_x()
+    let my: u64 = wlibc.mouse_y()
+    let los: bool = (wlibc.mouse_btn() & 1) == 0
+    // Noch nicht ueber der Schwelle: entscheidet sich hier.
+    if pdrag == 1 {
+        var d: u64 = 0
+        if mx > pdrag_x0 {
+            d = mx - pdrag_x0
+        } else {
+            d = pdrag_x0 - mx
+        }
+        if los {
+            // KLICK OHNE ZIEHEN -- das ist der Normalfall und er muss
+            // das Programm starten. Genau das hier ist die Stelle, an
+            // der ein eingebautes Ziehen das Anheften kaputtmacht,
+            // wenn man sie vergisst.
+            pdrag = 0
+            click(pdrag_x0, pdrag_y0)
+            return
+        }
+        if d >= PDRAG_SCHWELLE * wlibc.ui_scale() {
+            pdrag = 2
+            pdrag_ziel = pdrag_i
+            say((&s_pd0[0 as usize]) as u64)
+            say((&pinname[0 as usize]) as u64 + pdrag_i * 24)
+            say((&s_pdd[0 as usize]) as u64)
+            ulib.sayn(d)
+            ulib.nl()
+        }
+        return
+    }
+    // Es wird gezogen: die Einfuegestelle wandert mit.
+    let z: u64 = pin_ziel(mx)
+    if z != pdrag_ziel {
+        pdrag_ziel = z
+        // Die LUECKE WANDERT SICHTBAR: die Liste wird schon jetzt
+        // umgehaengt und neu gemalt, statt erst beim Loslassen. Damit
+        // ist das Bild waehrend des Ziehens die Wahrheit und nicht
+        // eine Vorschau, die von ihr abweichen kann.
+        pin_umhaengen(pdrag_i, z)
+        pdrag_i = z
+        let _l: bool = list_read()
+        layout()
+        paint(true)
+        say((&s_pdm[0 as usize]) as u64)
+        ulib.sayn(z)
+        ulib.nl()
+    }
+    if los {
+        pdrag = 0
+        // DIE REIHENFOLGE UEBERLEBT DEN NEUSTART -- sonst war das
+        // Ziehen eine Geste ohne Wirkung.
+        var ok: u64 = 0
+        if conf_write() {
+            ok = 1
+        }
+        say((&s_pd1[0 as usize]) as u64)
+        var q: u64 = 0
+        while q < npin {
+            if q > 0 {
+                say((&s_komma[0 as usize]) as u64)
+            }
+            say((&pinname[0 as usize]) as u64 + q * 24)
+            q = q + 1
+        }
+        say((&s_wr[0 as usize]) as u64)
+        ulib.sayn(ok)
+        ulib.nl()
+        let _l2: bool = list_read()
+        layout()
+        paint(true)
+    }
+    let _my: u64 = my
 }
 
 fn drag_step() {
@@ -4711,6 +5179,72 @@ fn click(x: u64, y: u64) {
         startmenue_um()
         return
     }
+    // ==================================================== RUNDE ANHEFTEN
+    // KLICK AUF EINEN ANHEFTER. Zwei Faelle, und der Unterschied ist
+    // der ganze Sinn der Sache:
+    //   laeuft nicht -> STARTEN (`SYS_EXEC` auf /apps/<name>.osp/start,
+    //                  denselben Pfad benutzt der Starter)
+    //   laeuft       -> das Fenster schalten, wie ein Fensterknopf.
+    // Ein Anhefter, der ein zweites Certus startet, waere ein Fehler
+    // und keine Bequemlichkeit.
+    var pk: u64 = 0
+    while pk < npin {
+        if pw_[(pk) as usize] != 0
+            && x >= px_[(pk) as usize]
+            && x < px_[(pk) as usize] + pw_[(pk) as usize]
+            && y >= py_[(pk) as usize]
+            && y < py_[(pk) as usize] + ph_[(pk) as usize] {
+            let w2: u64 = pinwin[(pk) as usize]
+            if w2 < MAXK {
+                let rc2: u64 = wlibc.win_act(kid[(w2) as usize],
+                    wlibc.WA_TOGGLE)
+                acts = acts + 1
+                say((&s_pinact[0 as usize]) as u64)
+                say((&pinname[0 as usize]) as u64 + pk * 24)
+                say((&s_rc[0 as usize]) as u64)
+                ulib.sayn(rc2)
+                ulib.nl()
+            } else {
+                // Der Pfad wird hier gebaut: /apps/<name>.osp/start
+                var pp: [u8; 64] = [0 as u8; 64]
+                var pv: [u8; 7] = "/apps/\0"
+                var pn2: [u8; 11] = ".osp/start\0"
+                var q2: u64 = 0
+                var k2: u64 = 0
+                while k2 < 6 {
+                    pp[(q2) as usize] = pv[(k2) as usize]
+                    q2 = q2 + 1
+                    k2 = k2 + 1
+                }
+                let src: u64 = (&pinname[0 as usize]) as u64 + pk * 24
+                k2 = 0
+                while k2 < 23 && kstate8(src + k2) != 0 {
+                    pp[(q2) as usize] = *((src + k2) as *mut u8)
+                    q2 = q2 + 1
+                    k2 = k2 + 1
+                }
+                k2 = 0
+                while k2 < 10 {
+                    pp[(q2) as usize] = pn2[(k2) as usize]
+                    q2 = q2 + 1
+                    k2 = k2 + 1
+                }
+                pp[(q2) as usize] = 0 as u8
+                let pid2: u64 = ulib.sys(ulib.SYS_EXEC,
+                    (&pp[0 as usize]) as u64, 0, 0)
+                say((&s_pinexec[0 as usize]) as u64)
+                say((&pp[0 as usize]) as u64)
+                say((&s_pinpid[0 as usize]) as u64)
+                ulib.sayn(pid2)
+                ulib.nl()
+            }
+            let _a2: bool = list_read()
+            layout()
+            paint(true)
+            return
+        }
+        pk = pk + 1
+    }
     var i: u64 = 0
     while i < nk {
         if kw[(i) as usize] != 0 {
@@ -4964,7 +5498,24 @@ fn u_start(args: u64) -> u64 {
                 if ((d & 0xFFFF) & 2) != 0 {
                     rechtsklick((d >> 32) & 0xFFFF, (d >> 16) & 0xFFFF)
                 } else {
-                    click((d >> 32) & 0xFFFF, (d >> 16) & 0xFFFF)
+                    // ============================ RUNDE ANHEFTEN
+                    // EIN DRUCK AUF EINEN ANHEFTER IST NOCH KEIN
+                    // KLICK. Er wird erst zu einem, wenn die Taste
+                    // losgelassen wird, OHNE dass die Schwelle
+                    // ueberschritten wurde -- `pin_drag_step` ruft
+                    // `click` dann selbst nach. Jeder andere Druck
+                    // geht unveraendert durch.
+                    let cx: u64 = (d >> 32) & 0xFFFF
+                    let cy: u64 = (d >> 16) & 0xFFFF
+                    let pg: u64 = pin_unter(cx, cy)
+                    if pg < npin {
+                        pdrag = 1
+                        pdrag_i = pg
+                        pdrag_x0 = cx
+                        pdrag_y0 = cy
+                    } else {
+                        click(cx, cy)
+                    }
                 }
             } else if typ == wlibc.EV_KEY {
                 // ======================= RUNDE ECHTHARDWARE-3
@@ -4988,6 +5539,9 @@ fn u_start(args: u64) -> u64 {
                 alive = false
             }
             n = n + 1
+        }
+        if pdrag != 0 {
+            pin_drag_step()
         }
         if dragging != 0 {
             drag_step()
