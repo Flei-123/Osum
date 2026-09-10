@@ -65,6 +65,10 @@ nurbau=nein
 ton=nein
 netz=nein
 usb=ja
+# RUNDE ECHTHARDWARE-6: der Schattenschalter. Vorgabe `aus` -- genau
+# wie im System selbst. `schatten=an` schaltet ihn fuer die Gegenprobe
+# zurueck, mit der Punkt A belegt wird.
+schatten=aus
 extra=""
 # DIE PROGRAMME. Das ist die Liste des Sticks, gekuerzt um die, die
 # dieser Laeufer nicht braucht -- ABER MIT `taskmgr` UND `sh`, weil
@@ -91,6 +95,7 @@ for a in "$@"; do
         ton=*) ton=${a#*=} ;;
         netz=*) netz=${a#*=} ;;
         usb=*) usb=${a#*=} ;;
+        schatten=*) schatten=${a#*=} ;;
         extra=*) extra=${a#*=} ;;
         *) echo "unbekannt: $a" >&2; exit 2 ;;
     esac
@@ -172,6 +177,7 @@ printf '# taskbar.conf\nedge=bottom\nwidth=104\nautohide=0\nontop=1\nalign=left\
   [ -n "$dark_scheme" ] && printf 'dark_scheme=%s\n' "$dark_scheme"
   printf 'mode=%s\naccent=%s\nshape=osum\nlight_start=07:00\ndark_start=19:00\n' \
     "$mode" "$accent"
+  if [ "$schatten" = an ]; then printf 'shadow=on\n'; else printf 'shadow=off\n'; fi
 } > "$OUT/theme.conf"
 printf '# /etc/time.conf\noffset=120\n' > "$OUT/time.conf"
 printf 'lang=%s\n' "$lang" > "$OUT/locale.conf"

@@ -357,6 +357,20 @@ const M_NOFLIP: u64 = 2048 // "noflip" -- die Gegenprobe
 // RUNDE SCHNELLBILD: den Vierersprung von Hand herausnehmen -- die
 // Gegenprobe, die beide Wege in DERSELBEN Maschine vergleichbar macht.
 const M_NOSIMD: u64 = 4096 // "fbnosimd"
+// ============================================== RUNDE ECHTHARDWARE-6
+// `fbstreifen` -- DEN STREIFENBETRIEB ERZWINGEN.
+//
+// Justins Brett faehrt ihn (19,8 MB Puffer gegen ein Fenster von acht
+// 2-MiB-Kacheln, `fb: ... streifen=1`); QEMU bildet den ganzen Puffer
+// am Stueck ab und meldet `streifen=0`. Damit lief bei jeder bisherigen
+// Messung der ANDERE Zweig von `flush` -- und Justins Kammstreifen
+// sitzen genau im Streifenzweig. Ein Fehler, den der Pruefstand per
+// Bauart nicht erreicht, wird auch nicht gefunden.
+//
+// Mit diesem Wort nimmt `init` den Streifenweg, obwohl der Puffer am
+// Stueck passte. Es ist eine GEGENPROBE und keine Betriebsart:
+// derselbe Kern, dieselbe Aufloesung, nur der Weg ist Justins.
+const M_STRIPE: u64 = 8192 // "fbstreifen"
 
 // 800 x 600 x 4 sind 1 920 000 Oktette und passen in EINE 2-MiB-Kachel;
 // 1024 x 768 x 4 sind 3 145 728 und brauchen zwei. Beides steht in der
@@ -898,6 +912,10 @@ fn init(state: u64, mbi: u64, want_w: u64, want_h: u64,
     kstate.set(state, FB_OFF + S_WC, wc)
     var fenster: u64 = map_run(state, blk, kacheln, uncached)
     var streifen: u64 = 0
+    // RUNDE ECHTHARDWARE-6: `fbstreifen` erzwingt Justins Weg.
+    if want(state, M_STRIPE) {
+        fenster = 0
+    }
     if fenster == 0 {
         // RUNDE SCHIRM -- DER STREIFENBETRIEB.
         //
@@ -2280,8 +2298,17 @@ fn flush(state: u64) {
         present(state)
         return
     }
+    // RUNDE ECHTHARDWARE-6: LESEN UND WEGNEHMEN IN EINEM ZUG.
+    // Stuende das Lesen ausserhalb der Sperre, gaebe es dasselbe
+    // Fenster nur eine Zeile weiter oben: eine Anmeldung zwischen dem
+    // Lesen und dem Wegnehmen waere gelesen worden, ohne uebertragen
+    // zu werden -- und danach geloescht.
+    let flr: u64 = arch.irq_save()
     var lo: u64 = kstate.get(state, FB_OFF + S_DIRTY_LO)
     var hi: u64 = kstate.get(state, FB_OFF + S_DIRTY_HI)
+    kstate.set(state, FB_OFF + S_DIRTY_LO, 0)
+    kstate.set(state, FB_OFF + S_DIRTY_HI, 0)
+    arch.irq_restore(flr)
     if hi <= lo {
         return
     }
@@ -2290,9 +2317,42 @@ fn flush(state: u64) {
         hi = h
     }
     if kstate.get(state, FB_OFF + S_STRIPE) != 0 {
+        // ======================================== RUNDE ECHTHARDWARE-6
+        // DIE SCHMUTZMARKE WIRD GENOMMEN, NICHT NACHTRAEGLICH GELOESCHT.
+        //
+        // JUSTINS KAMMSTREIFEN, UND WARUM DIE VORRUNDE SIE NICHT
+        // GEFUNDEN HAT.
+        //
+        // Hier stand: Bereich lesen -> `flush_stripe` -> Bereich auf
+        // null setzen. Dazwischen laufen in `flush_stripe` die
+        // Unterbrechungen wieder an (die Sperre dort umfasst nur EINEN
+        // 2-MiB-Block, absichtlich -- eine Sperre ueber den ganzen
+        // Schirm waeren Millisekunden). In genau diesem Fenster malt
+        // die Messtafel aus dem ZEITGEBER (`gfx.tafel_tick`, seit
+        // Runde HAENGER) und ruft `dirty` fuer ihre Zeilen.
+        //
+        // Die beiden Zeilen darunter haben diese Marke dann GELOESCHT.
+        // Was die Tafel gerade angemeldet hatte, wurde nie uebertragen
+        // -- die Zeile blieb im Zweitpuffer stehen, auf dem Schirm
+        // blieb der ALTE Inhalt. Das ist Zeile fuer Zeile das Bild,
+        // das Justin fotografiert hat: Kammstreifen entlang der
+        // Kanten, die beim Ziehen und beim Groessenaendern entstehen,
+        // also GENAU DANN, wenn viele Zeilen schmutzig werden und der
+        // Schub lange genug dauert, um einen Zeitgeberschlag zu
+        // erwischen.
+        //
+        // DASS DER SCHATTEN VERDAECHTIG WAR, IST NACHVOLLZIEHBAR: er
+        // macht den schmutzigen Bereich um `shadow_r` groesser, also
+        // den Schub laenger und das Fenster fuer den Verlust breiter.
+        // Er ist aber nicht die Ursache, sondern verschlimmert sie.
+        // Deshalb hat `sfence` auch nichts geholfen -- es ordnet
+        // Schreibzugriffe, und hier ging kein Schreibzugriff verloren,
+        // sondern eine ANMELDUNG.
+        //
+        // DIE REGEL: WER EINEN BEREICH UEBERTRAEGT, NIMMT IHN VORHER
+        // WEG. Was danach angemeldet wird, gehoert dem naechsten
+        // Durchlauf und wird nicht mitgeloescht.
         flush_stripe(state, lo, hi)
-        kstate.set(state, FB_OFF + S_DIRTY_LO, 0)
-        kstate.set(state, FB_OFF + S_DIRTY_HI, 0)
         kstate.add(state, FB_OFF + S_FLUSHES, 1)
         return
     }
@@ -2326,8 +2386,12 @@ fn flush(state: u64) {
     // Pfad.
     arch.barrier_write()
     nachspuelen(state)
-    kstate.set(state, FB_OFF + S_DIRTY_LO, 0)
-    kstate.set(state, FB_OFF + S_DIRTY_HI, 0)
+    // RUNDE ECHTHARDWARE-6: siehe die lange Begruendung im
+    // Streifenzweig oben. Auf dem geraden Weg ist das Fenster kleiner
+    // (keine Sperre, kein Umbiegen), aber es ist da: `copy_words` ueber
+    // einen ganzen Schirm laeuft lange genug fuer einen
+    // Zeitgeberschlag. Was waehrenddessen angemeldet wurde, darf nicht
+    // verlorengehen.
     kstate.add(state, FB_OFF + S_FLUSHES, 1)
 }
 
@@ -2746,6 +2810,7 @@ fn parse(state: u64, cmd: u64) {
     var w_pad: [u8; 7] = "fbpad=\0"
     var w_wb: [u8; 5] = "fbwb\0"
     var w_nosimd: [u8; 9] = "fbnosimd\0"
+    var w_str: [u8; 12] = "fbstreifen\0\0"
     var m: u64 = 0
     if cmd != 0 {
         pad_setzen(zahl_hinter(state, cmd, (&w_pad[0]) as u64, 6))
@@ -2760,6 +2825,9 @@ fn parse(state: u64, cmd: u64) {
         }
         if find(cmd, (&w_wb[0]) as u64, 4) != 0 {
             m = m | M_WB
+        }
+        if find(cmd, (&w_str[0]) as u64, 10) != 0 {
+            m = m | M_STRIPE
         }
         if find(cmd, (&w_nosimd[0]) as u64, 8) != 0 {
             m = m | M_NOSIMD
