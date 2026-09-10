@@ -38,6 +38,34 @@ export { u_start }
 // starten, das die Tabelle im Kern fuer ihre Art fuehrt.
 const SYS_FOPEN: u64 = 1901
 
+// ======================================== RUNDE ECHTHARDWARE-4
+// DIE EIGENE FENSTERNUMMER, damit `starten` zumachen kann.
+//
+// `starten` ist eine freie Funktion (sie wird aus drei Stellen der
+// Schleife gerufen) und kannte das Fenster nicht. Ein Startmenue,
+// das nach dem Start des Programms offen stehen bleibt, ist genau
+// das, was Justin auf jedem Belegbild gesehen hat.
+static mut g_win: u64 = 0
+static mut g_offen: bool = false
+// ======================================== RUNDE ECHTHARDWARE-4
+// EINE GNADENFRIST NACH DEM AUFGEHEN.
+//
+// GEMESSEN an menue-2560/serial.txt: nach `klickauf start` stand
+// `taskbar: startmenue auf` und `wm: fokus id=11` -- und rund
+// achtzig Zeilen spaeter war das Menue wieder zu, ohne dass jemand
+// daneben geklickt haette. Der Klick, der das Menue AUFMACHT, geht
+// durch die Leiste, und in dem Augenblick wandert der Fokus kurz
+// woandershin. Die Regel "Fokus weg heisst zu" hat das als Klick
+// daneben gelesen.
+//
+// Also zaehlt die Regel erst ein halbes Sekundenmass nach dem
+// Aufgehen. Ein Mensch, der daneben klickt, braucht laenger als
+// 300 Millisekunden dafuer; ein Klick, der das Menue gerade erst
+// geoeffnet hat, ist in dieser Zeit laengst vorbei.
+static mut g_gnade: u64 = 0
+// Der Stand des Tastenzaehlers, den diese Schleife schon gesehen hat.
+static mut g_kseq: u64 = 0
+const GNADE_TICKS: u64 = 30 // 300 ms bei 100 Hz
 static mut suchfeld: [u8; 64] = [0 as u8; 64]
 static mut liste: [u8; 1024] = [0 as u8; 1024]
 // EIN PLATZ JE ZEILE DER LISTE, und die Liste traegt Programme UND
@@ -101,7 +129,7 @@ fn neu_suchen(ls: u64) {
     ntreffer = napp
     var lp: u64 = 0
     var k: u64 = 0
-    while k < ntreffer {
+    while k < ntreffer && k < 16 {
         let a: u64 = treffer[(k) as usize]
         farben[(k) as usize] = appdir.symbol_load(a)
         let nm: u64 = appdir.name_of(a)
@@ -155,13 +183,64 @@ fn neu_suchen(ls: u64) {
             // vorkam; jetzt ist es die Marke fuer gedaempften Text.
             farben[((napp + d)) as usize] =
                 wlibc.theme(wlibc.C_TEXT_MUTED)
+            // ================================= RUNDE ECHTHARDWARE-4
+            // KLARNAME UND NICHT DER ROHE PFAD.
+            //
+            // Hier wurde der VOLLE Pfad in die Zeile geschrieben, und
+            // genau das steht auf Justins Bildern aus ECHTHARDWARE-3:
+            // wer "edi" tippt, sieht `/apps/editor.osp` statt
+            // "editor.osp". Ein Pfad ist eine Ortsangabe fuer die
+            // Maschine, kein Name fuer einen Menschen -- und in einer
+            // Liste, die daneben "Editor  --  Write and change text"
+            // zeigt, faellt er auf wie ein Fremdkoerper.
+            //
+            // Die Zeile hat jetzt DIESELBE FORM wie die eines
+            // Programms: Name, zwei Striche, Beschreibung. Der Name ist
+            // der Dateiname (`nidx.name_at`), die Beschreibung der
+            // Ordner, in dem die Datei liegt -- das ist die Auskunft,
+            // die man beim Suchen wirklich braucht ("welche der drei
+            // gleichnamigen ist es"), und sie ist kuerzer als der Pfad.
+            //
+            // DER VOLLE PFAD GEHT NICHT VERLOREN: er steht weiter auf
+            // der seriellen Leitung (`launcher: datei ... name=[...]`),
+            // wo der Laeufer ihn nachrechnet, und `starten()` oeffnet
+            // ohnehin ueber `nidx.path_of` und nicht ueber diesen Text.
+            let dnm: u64 = nidx.name_at(t)
             var j2: u64 = 0
-            while (*(((&pfad[0 as usize]) as u64 + j2) as *mut u8))
-                != 0 as u8 && lp < 990 {
-                liste[(lp) as usize] =
-                    *(((&pfad[0 as usize]) as u64 + j2) as *mut u8)
+            while (*((dnm + j2) as *mut u8)) != 0 as u8 && lp < 900 {
+                liste[(lp) as usize] = *((dnm + j2) as *mut u8)
                 lp = lp + 1
                 j2 = j2 + 1
+            }
+            var dstrich: [u8; 6] = "  --  "
+            j2 = 0
+            while j2 < 6 && lp < 900 {
+                liste[(lp) as usize] = dstrich[(j2) as usize]
+                lp = lp + 1
+                j2 = j2 + 1
+            }
+            // Der Ordner: der Pfad ohne den letzten Namensteil. Steht
+            // die Datei im Wurzelverzeichnis, bleibt der Schraegstrich
+            // allein stehen -- und das ist richtig so.
+            var schnitt: u64 = 0
+            var j3: u64 = 0
+            while (*(((&pfad[0 as usize]) as u64 + j3) as *mut u8))
+                != 0 as u8 {
+                if (*(((&pfad[0 as usize]) as u64 + j3) as *mut u8))
+                    == 47 as u8 {
+                    schnitt = j3
+                }
+                j3 = j3 + 1
+            }
+            if schnitt == 0 {
+                schnitt = 1
+            }
+            j3 = 0
+            while j3 < schnitt && lp < 980 {
+                liste[(lp) as usize] =
+                    *(((&pfad[0 as usize]) as u64 + j3) as *mut u8)
+                lp = lp + 1
+                j3 = j3 + 1
             }
             liste[(lp) as usize] = 10 as u8
             lp = lp + 1
@@ -194,8 +273,30 @@ fn neu_suchen(ls: u64) {
         ulib.nl()
         d2 = d2 + 1
     }
+    // ===================================================== RUNDE ECHTHARDWARE-1
+    //
+    // `napp` UND NICHT `ntreffer` -- SONST LIEST DIESE SCHLEIFE UEBER
+    // DAS FELD HINAUS.
+    //
+    // `treffer` hat 16 Plaetze und traegt nur die PROGRAMME
+    // (`appdir.search(..., 16)`). `ntreffer` ist aber `napp + ndatei`
+    // und darf bis 32 gehen -- die Dateitreffer stehen in `dtreffer`,
+    // einem ganz anderen Feld. Wer hier bis `ntreffer` zaehlt, greift
+    // ab dem 17. Eintrag ins Leere:
+    //
+    //   panic: index out of bounds in '[u64; 16]'
+    //          at kernel/user/launcher.fi:199
+    //
+    // Gemessen in dieser Runde, sobald zum ersten Mal wirklich getippt
+    // werden konnte: "edi" liefert Programme UND Dateien, und der
+    // Starter starb an seiner eigenen Meldeschleife. Vorher fiel es
+    // nicht auf, weil ohne Tastatureingabe die Dateisuche gar nicht
+    // lief (sie braucht ein nichtleeres Suchfeld).
+    //
+    // Die Dateien werden acht Zeilen weiter oben schon eigens gemeldet
+    // (`launcher: datei`), hier gehoeren nur die Programme hin.
     k = 0
-    while k < ntreffer {
+    while k < napp && k < 16 {
         let a: u64 = treffer[(k) as usize]
         say((&s_e[0 as usize]) as u64)
         kv((&si[0 as usize]) as u64, k)
@@ -271,7 +372,13 @@ fn starten(zeile: u64) {
         appdir.name_of(a))
     var pid: u64 = 0
     if v == ulib.V_REAL {
-        pid = ulib.sys(ulib.SYS_SPAWN, (&arg[0 as usize]) as u64, 0, 0)
+        // RUNDE TUERSCHLOSS: SYS_SPAWN (1000) nimmt eine NUMMER aus
+        // uprog.fi (`if prog == 0 || prog > 16 { return -EINVAL }`),
+        // KEINEN Pfad. Ein Zeiger ist immer > 16, also kam hier bei
+        // JEDEM App-Start -22 zurueck und nichts lief je an. Der Weg
+        // mit Pfad ist SYS_EXEC (1001) -- derselbe, auf den die Leiste
+        // in Runde BLECHKERN umgestellt wurde (taskbar.fi:3563 ff.).
+        pid = ulib.sys(ulib.SYS_EXEC, (&arg[0 as usize]) as u64, 0, 0)
     } else {
         var word: u64 = (&v0[0 as usize]) as u64
         if v == ulib.V_FILTERED {
@@ -295,6 +402,141 @@ fn starten(zeile: u64) {
     say((&s_p[0 as usize]) as u64)
     ulib.sayn(pid)
     ulib.nl()
+    // ==================================== RUNDE ECHTHARDWARE-4
+    // NACH DEM START GEHT DAS MENUE ZU. So macht es jedes System,
+    // und ohne das steht die Trefferliste vor dem Programm, das
+    // gerade aufgeht.
+    zumachen()
+}
+
+// EINE STELLE, an der das Menue zugeht -- gerufen von Escape, vom
+// Fokusverlust und vom Programmstart. Drei Wege, ein Zustand.
+fn zumachen() {
+    var s_zu: [u8; 21] = "launcher: zugemacht\0\0"
+    if !g_offen {
+        return
+    }
+    let _h: u64 = wlib.win_hide(g_win, true)
+    g_offen = false
+    say((&s_zu[0 as usize]) as u64)
+    ulib.nl()
+}
+
+// ============================================== RUNDE STARTKNOPF
+// WO DAS MENUE AUFGEHT.
+//
+// Gelesen wird dieselbe Datei, die die Leiste liest. Ohne sie (oder
+// ohne den Schluessel) bleibt es bei `left` -- das ist die Vorgabe der
+// Leiste, also ist es hier dieselbe.
+static mut lp_conf: [u8; 20] = "/etc/taskbar.conf\0\0\0"
+static mut lk_align: [u8; 6] = "align\0"
+static mut lw_center: [u8; 7] = "center\0"
+static mut lk_height: [u8; 7] = "height\0"
+static mut l_align: u64 = 0 // 0 = links, 1 = mittig
+static mut l_bar: u64 = 40 // Hoehe der Leiste
+
+fn conf_lesen() {
+    var buf: [u8; 256] = [0 as u8; 256]
+    var wort: [u8; 24] = [0 as u8; 24]
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&lp_conf[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    let b: u64 = (&buf[0 as usize]) as u64
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, b, 255)
+    let _c: u64 = ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) || n == 0 {
+        return
+    }
+    var i: u64 = 0
+    while i < n {
+        let ks: u64 = i
+        var ke: u64 = i
+        while ke < n && __mmio_read8((b + ke) as *mut u8) != 61 as u8
+            && __mmio_read8((b + ke) as *mut u8) != 10 as u8 {
+            ke = ke + 1
+        }
+        if ke < n && __mmio_read8((b + ke) as *mut u8) == 61 as u8 {
+            let vs: u64 = ke + 1
+            var ve: u64 = vs
+            while ve < n && __mmio_read8((b + ve) as *mut u8) != 10 as u8
+                && __mmio_read8((b + ve) as *mut u8) != 13 as u8 {
+                ve = ve + 1
+            }
+            let wp: u64 = (&wort[0 as usize]) as u64
+            var k: u64 = 0
+            var v: u64 = 0
+            var ziffern: u64 = 0
+            while vs + k < ve && k < 23 {
+                let c: u64 = __mmio_read8((b + vs + k) as *mut u8) as u64
+                __mmio_write8((wp + k) as *mut u8, c as u8)
+                if c >= 48 && c <= 57 {
+                    v = v * 10 + (c - 48)
+                    ziffern = ziffern + 1
+                }
+                k = k + 1
+            }
+            __mmio_write8((wp + k) as *mut u8, 0 as u8)
+            if schluessel_ist(b + ks, ke - ks, (&lk_align[0 as usize]) as u64) {
+                if ulib.streq(wp, (&lw_center[0 as usize]) as u64) {
+                    l_align = 1
+                }
+            } else if schluessel_ist(b + ks, ke - ks,
+                (&lk_height[0 as usize]) as u64) {
+                if ziffern > 0 && v > 0 && v < 400 {
+                    l_bar = v
+                }
+            }
+            i = ve + 1
+        } else {
+            i = ke + 1
+        }
+    }
+}
+
+fn schluessel_ist(p: u64, n: u64, name: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = __mmio_read8((p + i) as *mut u8) as u64
+        let d: u64 = __mmio_read8((name + i) as *mut u8) as u64
+        if d == 0 || c != d {
+            return false
+        }
+        i = i + 1
+    }
+    return __mmio_read8((name + n) as *mut u8) == 0 as u8
+}
+
+// Waagerecht: an der Kante des Startknopfes (links) oder mittig ueber
+// ihm. Der Startknopf steht bei `pad()+1` bzw. mittig im freien Lauf --
+// die Leiste rechnet dasselbe, und wenn beide dieselbe Datei lesen,
+// stehen sie an derselben Stelle.
+fn anker_x(bw: u64) -> u64 {
+    let sw: u64 = wlibc.screen_w()
+    if l_align == 1 {
+        if sw > bw {
+            return (sw - bw) / 2
+        }
+        return 0
+    }
+    return 8
+}
+
+// Senkrecht: unmittelbar ueber der Leiste, und nie ueber den oberen
+// Rand der Arbeitsflaeche hinaus (dort liegt das reservierte Band).
+fn anker_y(bh: u64) -> u64 {
+    // Die Arbeitsflaeche (`work_*`) braucht ein FENSTER, und das gibt
+    // es hier noch nicht. Gerechnet wird deshalb aus Schirmhoehe und
+    // Leistenhoehe -- und das ist dieselbe Zahl: die Leiste ist der
+    // einzige Streifen unter dem Menue. Das reservierte Band der
+    // Messtafel liegt OBEN und kann von einem Feld, das unten
+    // verankert ist, nicht getroffen werden.
+    let sh2: u64 = wlibc.screen_h()
+    let unten: u64 = sh2 - l_bar
+    if unten > bh + 8 {
+        return unten - bh - 8
+    }
+    return 0
 }
 
 fn u_start(args: u64) -> u64 {
@@ -302,9 +544,17 @@ fn u_start(args: u64) -> u64 {
     var s_nc: [u8; 8] = "noclip\0\0"
     var s_nk: [u8; 8] = "nokeys\0\0"
     var s_ni: [u8; 8] = "noidx\0\0\0"
+    // RUNDE ECHTHARDWARE-4: `versteckt` -- der Starter legt sein
+    // Fenster an, malt es einmal und MINIMIERT es sofort.
+    var s_vs: [u8; 11] = "versteckt\0\0"
+    var versteckt: bool = false
     var s_bad: [u8; 25] = "launcher: keine Flaeche\0\0"
     var s_n: [u8; 21] = "launcher: apps=\0\0\0\0\0\0"
     var s_go: [u8; 21] = "launcher: ready\0\0\0\0\0\0"
+    // Die Zeile, an der die Abnahme sieht, dass der Starter WIRKLICH
+    // unsichtbar hochgekommen ist -- ein Bild allein koennte auch
+    // heissen, dass er gar nicht erst startete.
+    var s_vers: [u8; 21] = "launcher: versteckt\0\0"
     var s_geo: [u8; 21] = "launcher: geom \0\0\0\0\0\0"
     var sx: [u8; 4] = "x=\0\0"
     var sy: [u8; 4] = "y=\0\0"
@@ -332,6 +582,11 @@ fn u_start(args: u64) -> u64 {
             noclip = true
         } else if ulib.streq(p, (&s_nk[0 as usize]) as u64) {
             nokeys = true
+        } else if ulib.streq(p, (&s_vs[0 as usize]) as u64) {
+            // RUNDE ECHTHARDWARE-4: MIT DIESEM WORT KOMMT DER STARTER
+            // UNSICHTBAR HOCH. Siehe der Block bei `wlib.win_hide`
+            // weiter unten -- das ist der Normalfall beim Systemstart.
+            versteckt = true
         } else if ulib.streq(p, (&s_ni[0 as usize]) as u64) {
             // GEGENPROBE: derselbe Starter ohne Namensindex. Dann findet
             // "blau" das Programm nicht (es heisst nicht so) und die
@@ -396,47 +651,211 @@ fn u_start(args: u64) -> u64 {
         ulib.nl()
     }
 
-    let bx: u64 = 190
-    let by: u64 = 110
-    let bw: u64 = 440
-    let bh: u64 = 300
-    let w: u64 = wlib.window(bx, by, bw, bh, (&t_titel[0 as usize]) as u64)
+    // ===================================================== RUNDE ECHTHARDWARE-1
+    //
+    // 440 MAL 300 WAREN BILDPUNKTE UND SIND JETZT EIN VERHAELTNIS.
+    //
+    // Justins Foto vom 09.09. zeigt den Knopf unten rechts als
+    // "Ausfuehre" -- rechts abgeschnitten. Die Ursache ist dieselbe wie
+    // beim Kontrollzentrum: sein Monitor laeuft mit
+    // `wlibc.ui_scale() == 2`, die Schrift ist damit 30 statt 15
+    // Bildpunkte hoch, und dieses Fenster war 440 Bildpunkte breit --
+    // eine Zahl, die bei Schrifthoehe 15 gewaehlt wurde. Der Kasten
+    // fuer den Knopf war zusaetzlich mit `118 x 30` und `size(110, 28)`
+    // festgenagelt; "Ausfuehren" braucht bei 30er Schrift deutlich mehr
+    // als 110 Bildpunkte, und `wlib` schneidet, was nicht passt.
+    //
+    // Ab hier haengt jedes Mass an der Vervielfachung, und der Knopf
+    // bekommt gar keine feste Breite mehr: `wlib.button` rechnet sich
+    // aus Textbreite plus Polsterung selbst aus, wie breit er sein
+    // muss. Ein Knopf, dem man seine Breite vorschreibt, ist ein Knopf,
+    // der in der naechsten Sprache wieder abgeschnitten ist.
+    let sk: u64 = wlibc.ui_scale()
+    let bw: u64 = 440 * sk
+    let bh: u64 = 300 * sk
+    // ============================================== RUNDE STARTKNOPF
+    // KEIN FENSTER MIT TITELLEISTE, SONDERN EIN FELD AN DER LEISTE.
+    //
+    // Justins Hauptkritik am Starter: er ist ein Fenster mit Rahmen und
+    // rotem Kreuz, taucht in der Fensterliste auf und steht irgendwo im
+    // Bild. Ein Startmenue ist nichts davon -- es geht ueber dem
+    // Schreibtisch auf, unten an der Leiste verankert, und ist wieder
+    // weg, wenn man daneben klickt.
+    //
+    // STUFE 1 dieser Runde: kein Schmuck, oberste Ebene, VERANKERT AN
+    // DER ECHTEN LAGE DES STARTKNOPFES -- und die kommt nicht aus einer
+    // festen Zahl, sondern aus der Ausrichtung der Leiste
+    // (`/etc/taskbar.conf`, `align=`). Steht die Leiste links, geht das
+    // Menue unten links bündig auf; steht sie mittig, waagerecht
+    // mittig ueber dem Startknopf. Dieselbe Datei, dieselbe Regel --
+    // eine zweite Stelle, die entscheidet, wo der Startknopf ist, waere
+    // die zweite Wahrheit darueber.
+    //
+    // Die Arbeitsflaeche (`work_*`) und nicht der Schirm ist der
+    // Rahmen: unter der Leiste (und unter dem reservierten Band der
+    // Messtafel) hat das Menue nichts verloren.
+    conf_lesen()
+    let anker: u64 = anker_x(bw)
+    let ay: u64 = anker_y(bh)
+    // RUNDE ECHTHARDWARE-3: das Startmenue liegt auf SEINER eigenen
+    // Ebene -- ueber der Taskleiste (sonst deckt die Leiste es zu),
+    // aber UNTER Klappmenues und Blasen.
+    let w: u64 = wlib.window_plain(anker, ay, bw, bh,
+        (&t_titel[0 as usize]) as u64, wlibc.L_MENUE)
     // RUNDE PAINT: welchem Buendel dieses Fenster gehoert --
     // damit die Taskleiste sein Symbol findet.
     var a_app: [u8; 9] = "launcher\0"
+    g_win = w
     let _ap: u64 = wlib.window_app(w, (&a_app[0 as usize]) as u64)
+    // ===================================================== RUNDE ECHTHARDWARE-1
+    //
+    // "ICH WILL DIE TASTATUR" -- UND OHNE DIESE ZEILE KAM NIE EINE AN.
+    //
+    // Justins Befund vom 09.09.: im Startmenue laesst sich nichts
+    // tippen, das Suchfeld bleibt leer, obwohl die Tastatur erkannt
+    // ist (TAS 23 FAIL 0) und der Kern jede Taste meldet (`key: e`).
+    // Zwischen Kern und Feld liegt genau eine Regel:
+    //
+    //   wm.on_mouse:  if wg(state, i, W_LAYER) == L_NORMAL {
+    //                     set_focus(state, i)   }
+    //
+    // Dieses Fenster liegt auf L_TOP -- es MUSS dort liegen, sonst
+    // verschwindet das Menue hinter Fenstern. Damit war es aber von
+    // jedem Fokus ausgeschlossen, und `wm.on_key` gibt die Taste nur
+    // an den Fokus. Die Tasten kamen also bis in den Fensterserver und
+    // fielen dort auf den Boden.
+    //
+    // Die Regel bleibt richtig (eine Taskleiste, die den Fokus zieht,
+    // macht jeden Tastendruck danach wirkungslos) -- also sagt dieses
+    // Fenster ausdruecklich, dass es eine Ausnahme ist.
+    let _k: u64 = wlib.win_keys(w, true)
     if w >= wlib.MAXWN {
         say((&s_bad[0 as usize]) as u64)
         ulib.nl()
         return 1
     }
+    // ===================================================== RUNDE TUERSCHLOSS
+    //
+    // HIER STANDEN `bx` UND `by`, UND DAS WAREN DIE FALSCHEN ZAHLEN.
+    //
+    // `bx=190 by=110` sind seit Runde STARTKNOPF tot: das Fenster wird
+    // eine Handvoll Zeilen darueber mit `anker_x(bw)` / `anker_y(bh)`
+    // angelegt, weil das Menue an der Leiste haengt und nicht in der
+    // Bildmitte. Die MELDUNG hat weiter die alten Festwerte gesagt.
+    //
+    // Das ist keine Schoenheitsfrage, sondern eine falsche Messung: wer
+    // sich auf diese Zeile verlaesst, um einen Eintrag anzuklicken --
+    // ein Testlaeufer, ein Mensch mit einem Skript --, klickt 340
+    // Bildpunkte daneben ins Leere und misst danach "der Start geht
+    // nicht". Genau das ist in dieser Runde zweimal passiert, bevor die
+    // echte Lage aus den Fensterberichten des Servers kam (id=11 und
+    // id=12 bei x=8 y=452, waehrend hier x=190 y=110 stand).
+    //
+    // Eine Meldung ueber eine Lage, die das Programm selbst nicht
+    // benutzt, ist schlimmer als keine.
     say((&s_geo[0 as usize]) as u64)
-    kv((&sx[0 as usize]) as u64, bx)
-    kv((&sy[0 as usize]) as u64, by)
+    kv((&sx[0 as usize]) as u64, anker)
+    kv((&sy[0 as usize]) as u64, ay)
     kv((&sw[0 as usize]) as u64, bw)
     kv((&sh[0 as usize]) as u64, bh)
     ulib.nl()
 
-    wlib.box_v(w, 0, 0, bw, 84, 12, 8)
+    wlib.box_v(w, 0, 0, bw, 84 * sk, 12 * sk, 8 * sk)
     let lb: u64 = wlib.label(msg.get((&k_prompt[0 as usize]) as u64))
-    wlib.size(0, 26)
+    wlib.size(0, 26 * sk)
     let fe: u64 = wlib.entry((&suchfeld[0 as usize]) as u64, 62)
     wlib.box_end()
 
-    wlib.box_v(w, 12, 82, bw - 24, 170, 0, 0)
-    wlib.size(0, 166)
+    wlib.box_v(w, 12 * sk, 82 * sk, bw - 24 * sk, 170 * sk, 0, 0)
+    wlib.size(0, 166 * sk)
     let ls: u64 = wlib.list((&liste[0 as usize]) as u64, 7)
+    // ============================================== RUNDE STARTKNOPF
+    // EIN KLICK GENUEGT.
+    //
+    // Justin klickt einen Eintrag an, und nichts geschieht. Die
+    // Trefferflaeche stimmt und die Auswahl WIRD gesetzt -- eine Liste
+    // loeste bis hierher nur beim DOPPELKLICK aus (`wlib.fi`,
+    // `s_lastclick`). Fuer einen Dateimanager ist das richtig: dort
+    // waehlt man oft und oeffnet selten. Fuer ein STARTMENUE ist es
+    // falsch, denn dort ist der einzige Zweck eines Klicks, das
+    // Programm zu starten -- und kein System der Welt verlangt dafuer
+    // zwei Klicks.
+    //
+    // Die Regel haengt deshalb an DIESER Liste und nicht in der
+    // Bibliothek; der Explorer behaelt seinen Doppelklick.
+    wlib.list_einklick(ls, true)
     wlib.box_end()
 
-    wlib.box_h(w, bw - 130, 256, 118, 30, 0, 8)
-    wlib.size(110, 28)
-    let bt: u64 = wlib.button(msg.get((&k_run[0 as usize]) as u64))
+    // DER KNOPF BEKOMMT KEINE FESTE BREITE MEHR -- er misst sich
+    // selbst. Der Kasten ist so breit wie der Inhalt des Fensters und
+    // rechtsbuendig; damit steht der Knopf rechts unten und ist in
+    // JEDER Sprache und bei jeder Vervielfachung ganz zu lesen.
+    // DER KNOPF MISST SICH SELBST, UND DER KASTEN IST GENAU SO
+    // BREIT WIE ER.
+    //
+    // Der erste Versuch dieser Runde stellte ein leeres Schild mit
+    // Wunschbreite 0 davor, damit es "den Rest nimmt". Das ist genau
+    // falsch herum: `wlib.add` liest eine Wunschbreite von 0 als
+    // "nimm deine NATUERLICHE Breite" (Zeile 1497), und die eines
+    // leeren Schildes ist null. Gemessen hat das ein schwarzes Band
+    // ueber die ganze Fensterbreite ergeben -- ein Kasten, in dem
+    // nichts steht, wird nicht uebermalt.
+    //
+    // Also andersherum und ohne jede Wette: die Breite des Knopfes
+    // wird AUSGERECHNET (Text + zweimal Polsterung, dieselbe Rechnung
+    // wie in `wlib.button`), und der Kasten bekommt genau diese
+    // Breite, rechtsbuendig gesetzt. Nichts bleibt leer, nichts wird
+    // geraten, und in einer anderen Sprache wird der Knopf einfach
+    // breiter.
+    let kh: u64 = wlibc.metric(wlibc.M_CTRL_H)
+    let ktxt: u64 = msg.get((&k_run[0 as usize]) as u64)
+    let kbr: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), ktxt,
+        ulib.length(ktxt)) + 2 * wlibc.metric(wlibc.M_PAD_X)
+    let ky: u64 = bh - kh - 12 * sk
+    var kx: u64 = 12 * sk
+    if bw > kbr + 12 * sk {
+        kx = bw - kbr - 12 * sk
+    }
+    wlib.box_h(w, kx, ky, kbr, kh, 0, 0)
+    let bt: u64 = wlib.button(ktxt)
     wlib.box_end()
 
     wlib.set_focus(fe)
     neu_suchen(ls)
     wlib.draw_all()
     say_rects(lb, fe, ls, bt)
+    // ============================================ RUNDE ECHTHARDWARE-4
+    // DER SCHREIBTISCH IST LEER, BIS JEMAND SUPER DRUECKT.
+    //
+    // Justin an ALLEN 44 Bildern aus ECHTHARDWARE-3: "Search programs"
+    // klebt unten links am Schreibtisch, auf jedem einzelnen Bild, in
+    // hell wie dunkel, bei 1280 wie bei 2560. Er will es wie bei
+    // Windows: unsichtbar, bis die Super-Taste kommt oder das Logo
+    // angeklickt wird.
+    //
+    // DIE URSACHE WAR DER SYSTEMSTART UND NICHT DIESES FENSTER.
+    // `kgui.desk_start` startet `/bin/launcher` mit, damit das Menue
+    // beim ersten Super-Druck SOFORT da ist (ein Programmstart kostet
+    // sonst eine knappe Sekunde, und ein Startmenue, das erst denkt,
+    // fuehlt sich kaputt an). Das ist richtig -- nur darf das Fenster
+    // dann nicht SICHTBAR herumstehen.
+    //
+    // ALSO: anlegen, EINMAL malen (damit alle Masse, Rechtecke und
+    // Meldungen stehen, an denen die Abnahme misst), und sofort
+    // minimieren. `WA_TOGGLE` aus der Leiste holt es danach in
+    // Nullzeit zurueck -- derselbe Weg, den der zweite Super-Druck
+    // schon immer genommen hat.
+    //
+    // Ohne `versteckt` aendert sich nichts: wer den Starter von Hand
+    // aufruft, will ihn sehen.
+    if versteckt {
+        let _vh: u64 = wlib.win_hide(w, true)
+        g_offen = false
+        say((&s_vers[0 as usize]) as u64)
+        ulib.nl()
+    } else {
+        g_offen = true
+    }
     say((&s_go[0 as usize]) as u64)
     ulib.nl()
 
@@ -456,11 +875,131 @@ fn u_start(args: u64) -> u64 {
                 starten(wlib.value(ls))
             }
         }
+        // ============================================ RUNDE STARTKNOPF
+        // ESCAPE SCHLIESST DAS MENUE.
+        //
+        // Ein Feld ohne Titelleiste hat kein Kreuz -- also braucht es
+        // einen anderen Weg hinaus, und der ist auf jedem System
+        // derselbe. (Der zweite Druck auf Super geht ueber die
+        // Taskleiste; die kennt das Fenster und schaltet es um.)
+        // ======================================== RUNDE ECHTHARDWARE-4
+        // ESCAPE SCHLIESST, ES BEENDET NICHT.
+        //
+        // Hier stand `return 0` -- der Starter war danach WEG, und der
+        // naechste Super-Druck musste ihn neu starten (`SYS_EXEC` in
+        // `taskbar.startmenue_um`, weil `launcher_fenster()` nichts
+        // mehr findet). Das kostet nicht nur Zeit; es ist auch der
+        // Grund, warum sich in frueheren Runden Starter gestapelt
+        // haben.
+        //
+        // Ein Startmenue ist ein Fenster, das man ZUMACHT. Also wird
+        // es minimiert und die Schleife laeuft weiter -- genau der
+        // Zustand, den `versteckt` beim Systemstart herstellt.
+        // ==================================== RUNDE ECHTHARDWARE-4
+        // EINE TASTE ZAEHLT EINMAL, NICHT IN JEDER RUNDE.
+        //
+        // GEMESSEN an menue-2560/serial.txt: das Menue ging per Super
+        // auf und mit Escape zu -- richtig. Beim NAECHSTEN Aufmachen
+        // (Klick aufs Logo) war es sofort wieder zu, ohne dass jemand
+        // etwas gedrueckt haette. `key_last()` ist die ZULETZT
+        // gedrueckte Taste und bleibt es fuer immer; die Bedingung
+        // hier war also ab dem ersten Escape in JEDER Schleifenrunde
+        // wahr. wlib fuehrt fuer genau diesen Fall einen Zaehler
+        // (`key_seq`, siehe die Anmerkung dort: "zweimal Entf ist
+        // zweimal dieselbe Zahl").
+        let ks: u64 = wlib.key_seq()
+        if ks != g_kseq && wlib.key_last() == wlib.KEY_ESC {
+            g_kseq = ks
+            zumachen()
+            // Das Suchfeld wird geleert: wer das Menue neu aufmacht,
+            // faengt bei der vollen Liste an und nicht bei der
+            // Trefferliste von vorhin.
+            suchfeld[0 as usize] = 0 as u8
+            wlib.set_text(fe, (&suchfeld[0 as usize]) as u64)
+            vorher = 0
+            neu_suchen(ls)
+        }
         // WAEHREND MAN TIPPT wird die Liste kuerzer. Das Textfeld meldet
         // keinen Tastendruck (es meldet die Eingabetaste), also wird
         // hier nachgesehen, ob sich der Inhalt geaendert hat -- eine
         // Zeile, und sie ist der Unterschied zwischen einem Suchfeld und
         // einem Eingabefeld mit einem Knopf daneben.
+        // ==================================== RUNDE ECHTHARDWARE-4
+        // KLICK DANEBEN UND FOKUSVERLUST SCHLIESSEN EBENFALLS.
+        //
+        // Ein Klick auf ein fremdes Fenster kommt hier nie an -- er
+        // geht an das fremde Fenster. Sichtbar ist nur die Folge:
+        // der Eingabefokus ist woanders (`wlib.win_fokus`). Das ist
+        // dieselbe Bedingung wie "Fokusverlust", also braucht es
+        // dafuer auch nur diese eine Abfrage.
+        //
+        // `g_offen` muss dazu wissen, dass das Fenster GERADE offen
+        // ist: waehrend es verborgen liegt, hat es selbstredend auch
+        // keinen Fokus, und ohne diese Bedingung schriebe der Starter
+        // dann in jeder Runde eine Zeile.
+        g_kseq = ks
+        let nun: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+        if g_offen && !wlib.win_fokus(w) {
+            // Diagnose: WANN der Fokus wegging und ob die Gnadenfrist
+            // noch lief. Ohne diese Zeile ist "das Menue ging von
+            // selbst zu" nicht von "jemand hat daneben geklickt" zu
+            // unterscheiden.
+            var s_bl: [u8; 23] = "launcher: fokus weg t=\0"
+            var s_bg: [u8; 9] = " gnade=\0\0"
+            say((&s_bl[0 as usize]) as u64)
+            ulib.sayn(nun)
+            say((&s_bg[0 as usize]) as u64)
+            ulib.sayn(g_gnade)
+            ulib.nl()
+        }
+        if g_offen && nun >= g_gnade && !wlib.win_fokus(w) {
+            zumachen()
+        }
+        // Umgekehrt: die Leiste holt das Fenster mit WA_TOGGLE zurueck,
+        // ohne dass dieses Programm davon erfaehrt. Der Fokus ist dann
+        // wieder hier -- daran merkt es, dass es offen ist.
+        if !g_offen && wlib.win_fokus(w) {
+            g_offen = true
+            g_gnade = nun + GNADE_TICKS
+            // ==================================== RUNDE ECHTHARDWARE-5
+            // BEIM AUFGEHEN: FARBEN NACHSEHEN, ALLES NEU MALEN,
+            // UND DER CURSOR GEHOERT INS SUCHFELD.
+            //
+            // Justins Befund A: das Suchfenster steht im Dunkelmodus
+            // WEISS da, und er kann darin nichts anklicken und nichts
+            // tippen.
+            //
+            // OFFEN GESAGT: im Nachbau ist das nicht aufgetreten --
+            // weder hell noch dunkel, weder beim Umschalten mit
+            // offenem Menue noch beim Neuaufmachen danach; getippt,
+            // gefiltert und gestartet wird jedes Mal (gemessen an
+            // `launcher: suche [term] treffer=3` und `launcher: start
+            // ... pid=7`). Was hier steht, behebt also nicht einen
+            // gemessenen Fehler, sondern SCHLIESST DIE LUECKE, durch
+            // die er entstehen KANN -- und die ist real:
+            //
+            // Das Fenster wird von der LEISTE mit `WA_TOGGLE` wieder
+            // sichtbar gemacht. Dieses Programm erfaehrt davon nichts;
+            // es merkt es erst hier, am Fokus. Zwischen dem Sichtbar-
+            // werden und dem naechsten Anstrich liegt der alte Inhalt
+            // auf dem Schirm -- mit den Farben, die beim letzten Malen
+            // galten. Hat jemand in der Zwischenzeit das Thema
+            // gewechselt, ist das genau das weisse Fenster im dunklen
+            // Schreibtisch. `theme_now()` fragt SOFORT nach (statt auf
+            // den 250-ms-Takt von `theme_watch` zu warten), `dirty_all`
+            // sorgt fuer den vollen Anstrich.
+            //
+            // Und der Eingabefokus: ein Suchfeld, das aufgeht, muss
+            // den Cursor haben. Ohne `set_focus` landet jede Taste bei
+            // dem Bedienelement, das zuletzt dran war -- beim
+            // Startknopf etwa, und dann tippt man ins Leere. Das ist
+            // die zweite Haelfte von Justins Befund, und sie ist hier
+            // beantwortet, egal woher der Zustand kam.
+            let _tn: bool = wlib.theme_now()
+            wlib.set_focus(fe)
+            wlib.dirty_all(w)
+            wlib.draw_all()
+        }
         let jetzt: u64 = ulib.length((&suchfeld[0 as usize]) as u64)
         if jetzt != vorher {
             vorher = jetzt

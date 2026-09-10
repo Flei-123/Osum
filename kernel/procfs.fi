@@ -63,6 +63,9 @@
 profile kernel
 
 import kstate
+import klog
+// RUNDE MARKE: der Produktname kommt aus EINER Quelle.
+import marke
 import mnt
 import vfsops
 import sched
@@ -108,7 +111,22 @@ const G_VERSION: u64 = 6
 // /proc gut kann: ein Blick auf den Kernzustand, den ein Programm in Ring
 // 3 ohne eigene ABI lesen darf.
 const G_HWID: u64 = 7
-const G_LAST: u64 = 7
+// ==================================================== RUNDE PROTOKOLL
+//
+// /proc/klog -- DAS KERNPROTOKOLL, SO WEIT ES AUF EINE SEITE PASST.
+//
+// UND DAS IST DIE EINSCHRAENKUNG, DIE HIER STEHT UND NICHT IN EINER
+// FUSSNOTE: eine Datei dieses Dateisystems entsteht in EINEM
+// Seitenpuffer (`kstate.PROCFS_OFF`, 4096 Oktette). Der Ring haelt 510
+// Zeilen zu bis zu 130 Oktetten -- das ist das Sechzehnfache. Also
+// stehen hier die LETZTEN Zeilen, so viele wie hineinpassen, und die
+// erste Zeile sagt, wie viele es sind und wie viele fehlen.
+//
+// WER ALLES WILL, NIMMT /dev/klog (der Strom hat keine Grenze) oder
+// /bin/log (das liest nach Laufnummern). Diese Datei ist die bequeme
+// Antwort auf "was ist gerade los", nicht das Archiv.
+const G_KLOG: u64 = 8
+const G_LAST: u64 = 8
 
 // Die Dateien je Prozess.
 const F_STATUS: u64 = 1
@@ -386,8 +404,8 @@ fn make_uptime(state: u64) -> u64 {
 // "/dev/ram0" davorzusetzen waere eine Erfindung: /proc liegt auf gar
 // keinem Geraet.
 fn source_text(state: u64, at: u64, m: u64) -> u64 {
-    var t_proc: [u8; 5] = "proc "
-    var t_dev: [u8; 6] = "devfs "
+    var t_proc: [u8; 6] = "proc \0"
+    var t_dev: [u8; 7] = "devfs \0"
     let t: u64 = mnt.fstype(state, m)
     if t == vfsops.FS_PROC {
         return w_str(state, at, (&t_proc[0]) as u64)
@@ -421,8 +439,8 @@ fn dev_text(state: u64, at: u64, dev: u64) -> u64 {
 
 fn type_text(state: u64, at: u64, t: u64) -> u64 {
     var t_ofs: [u8; 4] = "ofs\0"
-    var t_proc: [u8; 5] = "proc\0"
-    var t_dev: [u8; 6] = "devfs\0"
+    var t_proc: [u8; 6] = "proc \0"
+    var t_dev: [u8; 7] = "devfs \0"
     var t_fat: [u8; 6] = "vfat\0\0"
     var t_none: [u8; 5] = "none\0"
     if t == vfsops.FS_OFS {
@@ -507,7 +525,14 @@ fn make_stat(state: u64) -> u64 {
 }
 
 fn make_version(state: u64) -> u64 {
-    var v: [u8; 30] = "Osum (Firn) version \0\0\0\0\0\0\0\0\0\0"
+    // RUNDE MARKE: was `uname` zeigt, ist Anzeigetext. Der NAME kommt
+    // aus `marke.conf`; die Sprache dahinter ("(Firn)") nicht -- die
+    // ist eine Tatsache ueber den Kern und keine Marke.
+    var v: [u8; 64] = [0 as u8; 64]
+    var vr: [u8; 22] = " (Firn) version \0\0\0\0\0\0"
+    var vn: u64 = marke.anhaengen((&v[0]) as u64, 0, marke.produkt(), 63)
+    vn = marke.anhaengen((&v[0]) as u64, vn, (&vr[0]) as u64, 63)
+    kstate.set8((&v[0]) as u64 + vn, 0)
     var p: u64 = 0
     p = w_str(state, p, (&v[0]) as u64)
     p = w_num(state, p, uio.sysinfo(state, uio.I_VERSION))
@@ -669,6 +694,54 @@ fn make_hwid(state: u64) -> u64 {
 }
 
 // ------------------------------------------------- die Dateien je Prozess
+
+// RUNDE PROTOKOLL: die letzten Zeilen des Rings in den Seitenpuffer.
+//
+// RUECKWAERTS GEZAEHLT, VORWAERTS GESCHRIEBEN. Erst wird von der
+// juengsten Zeile aus rueckwaerts gegangen, bis der Platz aufgebraucht
+// ist -- so bleiben die NEUESTEN Zeilen stehen und nicht die aeltesten.
+// Dann wird von dort vorwaerts geschrieben.
+fn make_klog(state: u64) -> u64 {
+    var s_kopf: [u8; 8] = "# klog \0"
+    var s_von: [u8; 6] = " von \0"
+    var s_z: [u8; 9] = " Zeilen\0\0"
+    var s_l: [u8; 9] = ", Ring \0\0"
+    let last: u64 = klog.seq(state)
+    let erste: u64 = klog.first_seq(state)
+    let raum: u64 = kstate.PROCFS_MAX - 256
+    // WIE VIELE ZEILEN SICHER PASSEN. Eine Zeile ist hoechstens so
+    // lang wie ihr Eintrag: 88 Oktette Text, 8 Quelle und der Kopf mit
+    // Zeit, Kern, pid und Stufe -- zusammen unter 144. Also
+    // raum/144 Zeilen, ohne dass etwas gemessen werden muss. Passt
+    // hinterher mehr, bleibt Platz ungenutzt; das ist der Preis dafuer,
+    // dass diese Rechnung keine zweite Schleife braucht.
+    var passt: u64 = raum / 144
+    if passt == 0 {
+        passt = 1
+    }
+    var von: u64 = erste
+    if last > passt && last - passt + 1 > erste {
+        von = last - passt + 1
+    }
+    var p: u64 = 0
+    p = w_str(state, p, (&s_kopf[0]) as u64)
+    p = w_num(state, p, last)
+    p = w_str(state, p, (&s_z[0]) as u64)
+    p = w_str(state, p, (&s_l[0]) as u64)
+    p = w_num(state, p, klog.N_ENT)
+    p = w_str(state, p, (&s_von[0]) as u64)
+    p = w_num(state, p, von)
+    p = w_ch(state, p, 10)
+    var sq: u64 = von
+    while sq <= last {
+        if p + 160 >= raum {
+            return p
+        }
+        p = p + klog.line_at(state, sq, buf(state) + p, raum - p)
+        sq = sq + 1
+    }
+    return p
+}
 
 fn make_status(state: u64, t: u64) -> u64 {
     var l1: [u8; 10] = "Name:   \0\0"
@@ -942,6 +1015,9 @@ fn build(state: u64, n: u64) -> u64 {
         if sub == G_HWID {
             return make_hwid(state)
         }
+        if sub == G_KLOG {
+            return make_klog(state)
+        }
         return 0
     }
     if art == K_PIDFILE {
@@ -1028,8 +1104,12 @@ fn global_of(name: u64) -> u64 {
     var e: [u8; 5] = "stat\0"
     var f: [u8; 8] = "version\0"
     var g: [u8; 5] = "hwid\0"
+    var k: [u8; 5] = "klog\0"
     if streq(name, (&a[0]) as u64) {
         return G_MEMINFO
+    }
+    if streq(name, (&k[0]) as u64) {
+        return G_KLOG
     }
     if streq(name, (&g[0]) as u64) {
         return G_HWID
@@ -1093,11 +1173,48 @@ fn p_lookup(state: u64, m: u64, path: u64) -> u64 {
         }
         return node(K_GLOBAL, 0, g)
     }
-    let pid: u64 = to_num((&seg[0]) as u64)
-    if pid == 0xFFFFFFFF {
-        return 0
+    // ===================================== RUNDE CERTUS: `/proc/self`
+    //
+    // WARUM DIESER NAME FEHLTE UND WARUM ER DIE RUNDE AUFGEHALTEN HAT.
+    //
+    // Certus (der Browser) startete auf Osum, wurde geladen, kam in Ring
+    // 3 an -- und gab sofort 90 zurueck. 90 ist in der Wurzeldatei des
+    // Browsers die Zeile `if !gc_init() { return 90 }`.
+    //
+    // Der Sammler von Firn scannt den Stapel KONSERVATIV (SPEC 3.5.3):
+    // er liest jedes Wort zwischen dem aktuellen Stapelzeiger und dem
+    // BODEN des Stapels und behandelt alles, was wie ein Zeiger
+    // aussieht, als eine Wurzel. Dafuer muss er wissen, wo der Boden
+    // liegt -- und er kann es nicht selbst wissen, weil das
+    // Betriebssystem den Stapel angelegt hat. Also fragt er danach, so
+    // wie jede Laufzeit auf jedem Unix danach fragt:
+    // `/proc/self/maps`, und wenn das nichts hergibt,
+    // `/proc/self/stat` (`vendor/firn/lib/gc/gc.fi`,
+    // `__gc_stack_bottom_maps` und `__gc_stack_bottom`).
+    //
+    // Dieses Dateisystem hatte `/proc/<pid>/maps` und
+    // `/proc/<pid>/stat` seit Runde K11 -- aber `self` nicht, und ein
+    // Prozess kennt seine eigene Nummer erst, wenn er `getpid` gerufen
+    // hat. Ein Programm mit Sammler konnte hier also nicht starten, und
+    // die Fehlermeldung dafuer war eine Zahl.
+    //
+    // `self` ist der laufende Prozess, und nichts weiter: dieselben
+    // Dateien, dieselben Rechte, ein Name mehr. `sched.current` ist der
+    // Platz, dem der Kern gerade gehoert -- und weil ein Systemaufruf
+    // im Zusammenhang des Rufenden laeuft, ist das der Rufende.
+    // (Runde CERTUS vom 28.08.2026, in Runde CERTUS-AUF-OSUM auf
+    // `merge6` nachgezogen.)
+    var w_self: [u8; 5] = "self\0"
+    var slot: u64 = kstate.MAX_TASKS
+    if streq((&seg[0]) as u64, (&w_self[0]) as u64) {
+        slot = sched.current(state)
+    } else {
+        let pid: u64 = to_num((&seg[0]) as u64)
+        if pid == 0xFFFFFFFF {
+            return 0
+        }
+        slot = slot_of_pid(state, pid)
     }
-    let slot: u64 = slot_of_pid(state, pid)
     if slot >= kstate.MAX_TASKS {
         return 0
     }
@@ -1151,6 +1268,7 @@ fn global_name(state: u64, sub: u64, out: u64) {
     var e: [u8; 5] = "stat\0"
     var f: [u8; 8] = "version\0"
     var g: [u8; 5] = "hwid\0"
+    var k: [u8; 5] = "klog\0"
     var src: u64 = (&a[0]) as u64
     if sub == G_CPUINFO {
         src = (&b[0]) as u64
@@ -1164,6 +1282,8 @@ fn global_name(state: u64, sub: u64, out: u64) {
         src = (&f[0]) as u64
     } else if sub == G_HWID {
         src = (&g[0]) as u64
+    } else if sub == G_KLOG {
+        src = (&k[0]) as u64
     }
     var i: u64 = 0
     while kstate.get8(src + i) != 0 {

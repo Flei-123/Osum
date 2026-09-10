@@ -1,0 +1,476 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/app/kspeicher.fi -- RUNDE KONTO: wo ein Konto liegt.
+//
+// ZWEI ORTE, und die Trennung zwischen ihnen ist der ganze Punkt:
+//
+//   /etc/konten                     WAS fuer Konten es gibt.
+//                                   Klartext, mit `cat` lesbar, ein Konto
+//                                   je Zeile, Felder durch Tabulator.
+//                                   KEIN GEHEIMNIS DARIN. Diese Datei
+//                                   darf in eine Sicherung, sie darf auf
+//                                   einen Stick, sie darf auf ein neues
+//                                   Geraet -- sie sagt nur, dass es ein
+//                                   Konto gibt, nicht wie man hineinkommt.
+//
+//   /state/session/konto/<kennung>  DASS dieses Geraet angemeldet ist.
+//                                   Gesiegelt (`ksiegel.fi`), also auch
+//                                   fuer den, der die Platte ausbaut,
+//                                   Rauschen. `/state/session` ist in
+//                                   `kernel/user/bsec.fi` Klasse NIE:
+//                                   keine Sicherung nimmt eine Sitzung
+//                                   mit, und das ist richtig so -- eine
+//                                   Sitzung ist die Behauptung "DIESES
+//                                   Geraet ist angemeldet", und sie zu
+//                                   kopieren ist genau der Diebstahl, den
+//                                   docs/THEFT.md abwehrt.
+//
+// WARUM DIE LISTE UND DAS TOKEN GETRENNT SIND. Weil ein Umzug beides
+// unterschiedlich behandeln muss: die LISTE soll mit, das TOKEN nicht.
+// Nach einem Umzug steht das Konto wieder da und will einmal angemeldet
+// werden -- was genau das ist, was ein Mensch erwartet, und was jedes
+// System falsch macht, das ein Token mitschleppt.
+//
+// DIE ZEILEN SIND SORTIERT, nach den Oktetten der ganzen Zeile, wie der
+// PLAN es ist (docs/PLAN-FORMAT.md). Das kostet nichts und macht die
+// Datei vergleichbar: zwei Geraete mit denselben Konten haben dieselbe
+// Datei, Oktett fuer Oktett, und `diff` sagt etwas.
+
+import std.rt
+import anbieter
+import ksiegel
+
+export {
+    Konto, konto_neu,
+    liste_lesen, zeilen, zeile_holen, feld_holen, konto_lesen,
+    konto_setzen, konto_entfernen, konto_suchen,
+    sitzung_speichern, sitzung_laden, sitzung_loeschen, sitzung_pfad,
+    PFAD_KONTEN, F_KENNUNG, F_ANBIETER, F_BEREICH, F_SUBJEKT,
+    F_ANZEIGE, F_DATENORT, F_LOKAL, FELDER,
+}
+
+const FELDER: usize = 7
+const F_KENNUNG: usize = 0
+const F_ANBIETER: usize = 1
+const F_BEREICH: usize = 2
+const F_SUBJEKT: usize = 3
+const F_ANZEIGE: usize = 4
+const F_DATENORT: usize = 5
+const F_LOKAL: usize = 6
+
+const PFAD_KONTEN: usize = 0 // nur damit der Name exportiert ist
+
+struct Konto {
+    kennung: rt.Buf,
+    anbieter: rt.Buf,
+    bereich: rt.Buf,
+    subjekt: rt.Buf,
+    anzeige: rt.Buf,
+    datenort: rt.Buf,
+    lokal: rt.Buf,
+}
+
+fn konto_neu() -> Konto {
+    return Konto { kennung: rt.buf_new(), anbieter: rt.buf_new(),
+        bereich: rt.buf_new(), subjekt: rt.buf_new(),
+        anzeige: rt.buf_new(), datenort: rt.buf_new(),
+        lokal: rt.buf_new() }
+}
+
+// ------------------------------------------------------------ die Liste
+
+fn pfad_konten(aus: *mut rt.Buf) {
+    var p: [u8; 12] = "/etc/konten\0"
+    rt.buf_push_bytes(aus, (&p[0]) as u64, 11)
+    rt.buf_push(aus, 0 as u8)
+}
+
+fn liste_lesen(aus: *mut rt.Buf) -> bool {
+    var p: [u8; 12] = "/etc/konten\0"
+    return rt.read_file((&p[0]) as u64, aus)
+}
+
+fn zeilen(b: *mut rt.Buf) -> usize {
+    var n: usize = 0
+    var i: usize = 0
+    var offen: bool = false
+    while i < (*b).len {
+        if rt.ld8((*b).ptr, i) == 10 as u8 {
+            if offen {
+                n = n + 1
+            }
+            offen = false
+        } else {
+            offen = true
+        }
+        i = i + 1
+    }
+    if offen {
+        n = n + 1
+    }
+    return n
+}
+
+// Zeile Nummer `k` (ab 0), ohne Zeilenende. `false` heisst: so viele
+// gibt es nicht.
+fn zeile_holen(b: *mut rt.Buf, k: usize, von: *mut usize,
+    bis: *mut usize) -> bool {
+    var n: usize = 0
+    var i: usize = 0
+    while i < (*b).len {
+        var e: usize = i
+        while e < (*b).len && rt.ld8((*b).ptr, e) != 10 as u8 {
+            e = e + 1
+        }
+        if e > i {
+            if n == k {
+                *von = i
+                *bis = e
+                return true
+            }
+            n = n + 1
+        }
+        i = e + 1
+    }
+    return false
+}
+
+// Feld `f` aus der Zeile `p[von..bis)`, an `aus` angehaengt.
+fn feld_holen(p: u64, von: usize, bis: usize, f: usize,
+    aus: *mut rt.Buf) -> bool {
+    var k: usize = 0
+    var a: usize = von
+    var i: usize = von
+    while i <= bis {
+        if i == bis || rt.ld8(p, i) == 9 as u8 {
+            if k == f {
+                rt.buf_push_bytes(aus, p + a as u64, i - a)
+                return true
+            }
+            k = k + 1
+            a = i + 1
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn konto_lesen(b: *mut rt.Buf, k: usize, ko: *mut Konto) -> bool {
+    var von: usize = 0
+    var bis: usize = 0
+    if !zeile_holen(b, k, &von, &bis) {
+        return false
+    }
+    rt.buf_clear(&(*ko).kennung)
+    rt.buf_clear(&(*ko).anbieter)
+    rt.buf_clear(&(*ko).bereich)
+    rt.buf_clear(&(*ko).subjekt)
+    rt.buf_clear(&(*ko).anzeige)
+    rt.buf_clear(&(*ko).datenort)
+    rt.buf_clear(&(*ko).lokal)
+    let p: u64 = (*b).ptr
+    let _a: bool = feld_holen(p, von, bis, F_KENNUNG, &(*ko).kennung)
+    let _b: bool = feld_holen(p, von, bis, F_ANBIETER, &(*ko).anbieter)
+    let _c: bool = feld_holen(p, von, bis, F_BEREICH, &(*ko).bereich)
+    let _d: bool = feld_holen(p, von, bis, F_SUBJEKT, &(*ko).subjekt)
+    let _e: bool = feld_holen(p, von, bis, F_ANZEIGE, &(*ko).anzeige)
+    let _f: bool = feld_holen(p, von, bis, F_DATENORT, &(*ko).datenort)
+    let _g: bool = feld_holen(p, von, bis, F_LOKAL, &(*ko).lokal)
+    return true
+}
+
+fn puffer_gleich(a: *mut rt.Buf, p: u64, n: usize) -> bool {
+    if (*a).len != n {
+        return false
+    }
+    return rt.mem_eq((*a).ptr, p, n)
+}
+
+// Die Nummer der Zeile mit dieser Kennung, oder -1.
+fn konto_suchen(b: *mut rt.Buf, kennung: u64, kl: usize) -> i64 {
+    var k: usize = 0
+    var such: rt.Buf = rt.buf_new()
+    while true {
+        var von: usize = 0
+        var bis: usize = 0
+        if !zeile_holen(b, k, &von, &bis) {
+            rt.buf_free(&such)
+            return -1
+        }
+        rt.buf_clear(&such)
+        if feld_holen((*b).ptr, von, bis, F_KENNUNG, &such) {
+            if puffer_gleich(&such, kennung, kl) {
+                rt.buf_free(&such)
+                return k as i64
+            }
+        }
+        k = k + 1
+    }
+    rt.buf_free(&such)
+    return -1
+}
+
+fn zeile_bauen(ko: *mut Konto, aus: *mut rt.Buf) {
+    rt.buf_push_bytes(aus, (*ko).kennung.ptr, (*ko).kennung.len)
+    rt.buf_push(aus, 9 as u8)
+    rt.buf_push_bytes(aus, (*ko).anbieter.ptr, (*ko).anbieter.len)
+    rt.buf_push(aus, 9 as u8)
+    rt.buf_push_bytes(aus, (*ko).bereich.ptr, (*ko).bereich.len)
+    rt.buf_push(aus, 9 as u8)
+    rt.buf_push_bytes(aus, (*ko).subjekt.ptr, (*ko).subjekt.len)
+    rt.buf_push(aus, 9 as u8)
+    rt.buf_push_bytes(aus, (*ko).anzeige.ptr, (*ko).anzeige.len)
+    rt.buf_push(aus, 9 as u8)
+    rt.buf_push_bytes(aus, (*ko).datenort.ptr, (*ko).datenort.len)
+    rt.buf_push(aus, 9 as u8)
+    rt.buf_push_bytes(aus, (*ko).lokal.ptr, (*ko).lokal.len)
+}
+
+// Ein Konto eintragen oder ersetzen. Danach ist die Datei sortiert.
+fn konto_setzen(ko: *mut Konto) -> bool {
+    var alt: rt.Buf = rt.buf_new()
+    let _r: bool = liste_lesen(&alt)
+    var neu: rt.Buf = rt.buf_new()
+    zeile_bauen(ko, &neu)
+
+    // alle alten Zeilen ausser der mit derselben Kennung, plus die neue,
+    // sortiert eingefuegt
+    var raus: rt.Buf = rt.buf_new()
+    var k: usize = 0
+    var gesetzt: bool = false
+    while true {
+        var von: usize = 0
+        var bis: usize = 0
+        if !zeile_holen(&alt, k, &von, &bis) {
+            break
+        }
+        var kn: rt.Buf = rt.buf_new()
+        let _f: bool = feld_holen(alt.ptr, von, bis, F_KENNUNG, &kn)
+        let selbe: bool = puffer_gleich(&kn, (*ko).kennung.ptr,
+            (*ko).kennung.len)
+        rt.buf_free(&kn)
+        if !selbe {
+            if !gesetzt && kleiner(neu.ptr, neu.len, alt.ptr + von as u64,
+                bis - von) {
+                rt.buf_push_bytes(&raus, neu.ptr, neu.len)
+                rt.buf_push(&raus, 10 as u8)
+                gesetzt = true
+            }
+            rt.buf_push_bytes(&raus, alt.ptr + von as u64, bis - von)
+            rt.buf_push(&raus, 10 as u8)
+        }
+        k = k + 1
+    }
+    if !gesetzt {
+        rt.buf_push_bytes(&raus, neu.ptr, neu.len)
+        rt.buf_push(&raus, 10 as u8)
+    }
+    var p: [u8; 12] = "/etc/konten\0"
+    let ok: bool = rt.write_file((&p[0]) as u64, raus.ptr, raus.len)
+    rt.buf_free(&alt)
+    rt.buf_free(&neu)
+    rt.buf_free(&raus)
+    return ok
+}
+
+fn kleiner(a: u64, an: usize, b: u64, bn: usize) -> bool {
+    var i: usize = 0
+    while i < an && i < bn {
+        let x: u8 = rt.ld8(a, i)
+        let y: u8 = rt.ld8(b, i)
+        if x < y {
+            return true
+        }
+        if x > y {
+            return false
+        }
+        i = i + 1
+    }
+    return an < bn
+}
+
+fn konto_entfernen(kennung: u64, kl: usize) -> bool {
+    var alt: rt.Buf = rt.buf_new()
+    if !liste_lesen(&alt) {
+        rt.buf_free(&alt)
+        return false
+    }
+    var raus: rt.Buf = rt.buf_new()
+    var k: usize = 0
+    var weg: bool = false
+    while true {
+        var von: usize = 0
+        var bis: usize = 0
+        if !zeile_holen(&alt, k, &von, &bis) {
+            break
+        }
+        var kn: rt.Buf = rt.buf_new()
+        let _f: bool = feld_holen(alt.ptr, von, bis, F_KENNUNG, &kn)
+        let selbe: bool = puffer_gleich(&kn, kennung, kl)
+        rt.buf_free(&kn)
+        if selbe {
+            weg = true
+        } else {
+            rt.buf_push_bytes(&raus, alt.ptr + von as u64, bis - von)
+            rt.buf_push(&raus, 10 as u8)
+        }
+        k = k + 1
+    }
+    var p: [u8; 12] = "/etc/konten\0"
+    let ok: bool = rt.write_file((&p[0]) as u64, raus.ptr, raus.len)
+    rt.buf_free(&alt)
+    rt.buf_free(&raus)
+    return ok && weg
+}
+
+// ----------------------------------------------------------- die Sitzung
+
+fn sitzung_pfad(kennung: u64, kl: usize, aus: *mut rt.Buf) {
+    var d: [u8; 23] = "/state/session/konto/\0\0"
+    rt.buf_push_bytes(aus, (&d[0]) as u64, 21)
+    rt.buf_push_bytes(aus, kennung, kl)
+    rt.buf_push(aus, 0 as u8)
+}
+
+fn ordner() {
+    var a: [u8; 7] = "/state\0"
+    var b: [u8; 15] = "/state/session\0"
+    var c: [u8; 21] = "/state/session/konto\0"
+    let _1: bool = ksiegel.verzeichnis((&a[0]) as u64)
+    let _2: bool = ksiegel.verzeichnis((&b[0]) as u64)
+    let _3: bool = ksiegel.verzeichnis((&c[0]) as u64)
+}
+
+fn kv(aus: *mut rt.Buf, k: u64, kn: usize, v: u64, vn: usize) {
+    rt.buf_push_bytes(aus, k, kn)
+    rt.buf_push(aus, 9 as u8)
+    rt.buf_push_bytes(aus, v, vn)
+    rt.buf_push(aus, 10 as u8)
+}
+
+// Der Klartext IM Siegel. Er verlaesst diese Datei nie ungesiegelt.
+fn sitzung_speichern(kennung: u64, kl: usize, s: *mut anbieter.Sitzung,
+    ziel: u64, zielname: u64) -> bool {
+    ordner()
+    var k_z: [u8; 8] = "zugriff\0"
+    var k_e: [u8; 11] = "erneuerung\0"
+    var k_a: [u8; 7] = "ablauf\0"
+    var k_o: [u8; 5] = "ziel\0"
+    var k_n: [u8; 9] = "zielname\0"
+    var klar: rt.Buf = rt.buf_new()
+    var kopf: [u8; 8] = "konto1\n\0"
+    rt.buf_push_bytes(&klar, (&kopf[0]) as u64, 7)
+    kv(&klar, (&k_z[0]) as u64, 7, (*s).zugriff.ptr, (*s).zugriff.len)
+    kv(&klar, (&k_e[0]) as u64, 10, (*s).erneuerung.ptr,
+        (*s).erneuerung.len)
+    rt.buf_push_bytes(&klar, (&k_a[0]) as u64, 6)
+    rt.buf_push(&klar, 9 as u8)
+    rt.buf_push_dec_u64(&klar, (*s).ablauf)
+    rt.buf_push(&klar, 10 as u8)
+    if ziel != 0 {
+        kv(&klar, (&k_o[0]) as u64, 4, ziel, rt.c_length(ziel))
+    }
+    if zielname != 0 {
+        kv(&klar, (&k_n[0]) as u64, 8, zielname, rt.c_length(zielname))
+    }
+    var gesiegelt: rt.Buf = rt.buf_new()
+    if !ksiegel.siegeln(klar.ptr, klar.len, &gesiegelt) {
+        rt.buf_free(&klar)
+        rt.buf_free(&gesiegelt)
+        return false
+    }
+    var pf: rt.Buf = rt.buf_new()
+    sitzung_pfad(kennung, kl, &pf)
+    let ok: bool = ksiegel.datei_schreiben_0600(pf.ptr, gesiegelt.ptr,
+        gesiegelt.len)
+    // Der Klartext ist noch im Speicher dieses Prozesses. Er wird
+    // ueberschrieben, bevor der Puffer freigegeben wird -- der Allokator
+    // gibt Seiten weiter, und "war mal ein Token" ist kein Zustand, den
+    // man einem fremden Puffer wuenscht.
+    rt.mem_set(klar.ptr, 0 as u8, klar.len)
+    rt.buf_free(&klar)
+    rt.buf_free(&gesiegelt)
+    rt.buf_free(&pf)
+    return ok
+}
+
+fn zeile_wert(b: *mut rt.Buf, name: u64, nn: usize,
+    aus: *mut rt.Buf) -> bool {
+    var k: usize = 0
+    while true {
+        var von: usize = 0
+        var bis: usize = 0
+        if !zeile_holen(b, k, &von, &bis) {
+            return false
+        }
+        if bis - von > nn && rt.ld8((*b).ptr, von + nn) == 9 as u8 {
+            if rt.mem_eq((*b).ptr + von as u64, name, nn) {
+                rt.buf_push_bytes(aus, (*b).ptr + (von + nn + 1) as u64,
+                    bis - von - nn - 1)
+                return true
+            }
+        }
+        k = k + 1
+    }
+    return false
+}
+
+fn zu_zahl(p: u64, n: usize) -> u64 {
+    var v: u64 = 0
+    var i: usize = 0
+    while i < n {
+        let c: u8 = rt.ld8(p, i)
+        if c < 48 as u8 || c > 57 as u8 {
+            return v
+        }
+        v = v * 10 + (c - 48 as u8) as u64
+        i = i + 1
+    }
+    return v
+}
+
+fn sitzung_laden(kennung: u64, kl: usize, s: *mut anbieter.Sitzung,
+    ziel: *mut rt.Buf, zielname: *mut rt.Buf) -> bool {
+    var pf: rt.Buf = rt.buf_new()
+    sitzung_pfad(kennung, kl, &pf)
+    var roh: rt.Buf = rt.buf_new()
+    if !rt.read_file(pf.ptr, &roh) {
+        rt.buf_free(&pf)
+        rt.buf_free(&roh)
+        return false
+    }
+    var klar: rt.Buf = rt.buf_new()
+    if !ksiegel.oeffnen(roh.ptr, roh.len, &klar) {
+        rt.buf_free(&pf)
+        rt.buf_free(&roh)
+        rt.buf_free(&klar)
+        return false
+    }
+    var k_z: [u8; 8] = "zugriff\0"
+    var k_e: [u8; 11] = "erneuerung\0"
+    var k_a: [u8; 7] = "ablauf\0"
+    var k_o: [u8; 5] = "ziel\0"
+    var k_n: [u8; 9] = "zielname\0"
+    let _1: bool = zeile_wert(&klar, (&k_z[0]) as u64, 7, &(*s).zugriff)
+    let _2: bool = zeile_wert(&klar, (&k_e[0]) as u64, 10,
+        &(*s).erneuerung)
+    var ab: rt.Buf = rt.buf_new()
+    if zeile_wert(&klar, (&k_a[0]) as u64, 6, &ab) {
+        (*s).ablauf = zu_zahl(ab.ptr, ab.len)
+    }
+    rt.buf_free(&ab)
+    let _3: bool = zeile_wert(&klar, (&k_o[0]) as u64, 4, ziel)
+    let _4: bool = zeile_wert(&klar, (&k_n[0]) as u64, 8, zielname)
+    rt.mem_set(klar.ptr, 0 as u8, klar.len)
+    rt.buf_free(&klar)
+    rt.buf_free(&roh)
+    rt.buf_free(&pf)
+    return true
+}
+
+fn sitzung_loeschen(kennung: u64, kl: usize) -> bool {
+    var pf: rt.Buf = rt.buf_new()
+    sitzung_pfad(kennung, kl, &pf)
+    let ok: bool = ksiegel.sicher_loeschen(pf.ptr)
+    rt.buf_free(&pf)
+    return ok
+}

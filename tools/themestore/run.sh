@@ -241,7 +241,12 @@ python3 tools/osum/mkfs.py cat "$TMPD/ap/disk.img" /etc/taskbar.conf \
 same "und /etc/theme.conf traegt das Schema der Vorlage" "midnight" \
     "$(grep -a '^scheme=' "$TMPD/theme.conf" | cut -d= -f2)"
 same "den Modus" "dark" "$(grep -a '^mode=' "$TMPD/theme.conf" | cut -d= -f2)"
-same "den Formsatz" "modern" "$(grep -a '^shape=' "$TMPD/theme.conf" | cut -d= -f2)"
+# RUNDE OBERFLAECHE: die Vorlage `studio` nennt jetzt die HAUSFORM
+# (assets/shapes/osum.shape) und nicht mehr `modern`.  Die Zeile hier
+# wird mitgezogen und nicht weggelassen: sie prueft, dass `theme apply`
+# den Formsatz der Vorlage in die Datei schreibt, und das ist unabhaengig
+# davon, wie er heisst.
+same "den Formsatz" "osum" "$(grep -a '^shape=' "$TMPD/theme.conf" | cut -d= -f2)"
 same "die Akzentfarbe" "0891b2" "$(grep -a '^accent=' "$TMPD/theme.conf" | cut -d= -f2)"
 same "und /etc/taskbar.conf die Kante" "left" \
     "$(grep -a '^edge=' "$TMPD/taskbar.conf" | cut -d= -f2)"
@@ -361,8 +366,13 @@ INNER=$((${WH:-566} - 24))
 # BEIDE Seiten, nicht nur die sichtbare: die Kacheln der Seite Vorlagen
 # sind Widgets wie alle anderen und muessen genauso ins Fenster passen.
 # Die Seite wird hier gebaut und in Abschnitt 9 und 10 wiederverwendet.
+# RUNDE MERGE8: 548,41 statt 680,51. Die Reiterleiste hat seit den
+# Runden KONTO und ABGLEICH ZEHN Reiter statt acht -- der alte Punkt
+# 680,51 traf damit nicht mehr "Vorlagen" (Reiter 7, x=526..601),
+# sondern den letzten Reiter "Abgleich". Gemessen wurden dann elf
+# Beschriftungen der Abgleich-Seite statt der zwoelf der Vorlagen.
 bash tools/themestore/build.sh "$TMPD/setv" extra='einst' uitrace=yes keep=yes \
-    click=680,51 > "$TMPD/setv.log" 2>&1
+    click=548,41 > "$TMPD/setv.log" 2>&1
 SEV="$TMPD/setv/serial.txt"
 NR=$({ grep -ac 'settings: rect name=w[a-z][a-z] ' "$SE" "$SEV" || true; } \
      | cut -d: -f2 | awk '{n=n+$1} END {print n+0}')

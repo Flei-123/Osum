@@ -1,0 +1,368 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/wlan/usbchip.fi -- welcher WLAN-Stick steckt da?
+//
+// ==================================================================
+// WOZU EINE TABELLE OHNE TREIBER
+// ==================================================================
+//
+// Weil die Frage, die gerade offen ist, nicht "wie fahre ich den
+// Stick" lautet, sondern "WELCHER STICK IST ES". In Justins Rechner
+// steckt ein USB-WLAN-Stick, dessen Chip niemand kennt. Solange das so
+// ist, waere jeder Treiber ein Ratespiel: die USB-WLAN-Welt hat
+// mindestens sechs Familien, die untereinander NICHTS gemeinsam
+// haben -- anderer Firmwareweg, andere Register, andere
+// Kommandostruktur.
+//
+// Diese Datei loest die Frage mit dem billigsten Mittel, das es gibt:
+// sie erkennt den Chip an seiner USB-Nummer und SAGT SEINEN NAMEN.
+// Mehr nicht. Ein Rechner, der
+//
+//     wifi-usb: Realtek RTL8812AU (0bda:8812), kein Treiber
+//
+// auf die Tafel schreibt, ist ein Rechner, dessen fehlendes Stueck man
+// FOTOGRAFIEREN kann. Das ist derselbe Gedanke, den Runde HWNET beim
+// RTL8168 und Runde BLECH bei den Intel-I225-Karten hatten, und er ist
+// hier noch mehr wert, weil die Antwort die naechste Runde bestimmt.
+//
+// DIESE DATEI IST KEIN TREIBER. Sie sendet nichts, sie empfaengt
+// nichts, sie laedt keine Firmware. Sie beantwortet eine Frage.
+//
+// ==================================================================
+// WOHER DIE NUMMERN KOMMEN
+// ==================================================================
+//
+// Alle Nummern sind aus den Treibertabellen des Linux-Baums und aus
+// `linux-hardware`-Listen uebernommen; bei jeder Familie steht, welcher
+// Treiber sie fuehrt. Sie sind NICHT gemessen -- auf diesem Rechner
+// steckt kein Stick. Das ist der Grund, warum diese Datei nur BENENNT
+// und nichts tut: eine Nummer, die man nicht nachgesehen hat, darf
+// keinen Treiber ausloesen.
+//
+// Die Auswahl ist nach Haeufigkeit bei billigen Sticks sortiert, nicht
+// nach Schoenheit:
+//
+//   Realtek  -- mit Abstand am haeufigsten. rtl8xxxu (im Kern) bzw.
+//               die aus dem Netz beziehbaren rtl88xxau-Baeume.
+//               Firmware kommt per USB-Bulk in den Chip.
+//   MediaTek -- mt7601u, mt76x0u/mt76x2u, mt7921u. Der offenste der
+//               drei, kleinste Firmware.
+//   Ralink   -- rt2800usb. Alt, aber immer noch in Umlauf.
+//   Atheros  -- ath9k_htc (AR9271). Die Karte, die in vielen
+//               Bastelrechnern steckt, weil ihre Firmware frei ist.
+//   Broadcom -- brcmfmac. In Raspberry-Pi-naher Hardware.
+//
+// ==================================================================
+// KEIN ALLOKATOR, KEIN SYSTEMAUFRUF
+// ==================================================================
+//
+// Dieselbe Regel wie im ganzen `lib/`-Baum: die Tabelle ist eine
+// Funktion aus (VID, PID) auf eine Familie und einen Namen, der
+// Aufrufer haelt den Puffer. Damit ist sie im Kern, in einem
+// Ring-3-Programm UND auf dem Wirt dieselbe -- und `tools/wlan/`
+// kann sie messen, ohne dass ein Stick da ist.
+
+export {
+    familie, name_holen, ist_wlan_stick, familie_name_holen,
+    eintrag_anzahl, eintrag_vid, eintrag_pid,
+    F_UNBEKANNT, F_REALTEK, F_MEDIATEK, F_RALINK, F_ATHEROS, F_BROADCOM
+}
+
+const F_UNBEKANNT: u64 = 0
+const F_REALTEK: u64 = 1
+const F_MEDIATEK: u64 = 2
+const F_RALINK: u64 = 3
+const F_ATHEROS: u64 = 4
+const F_BROADCOM: u64 = 5
+
+// Wie viele Eintraege die Tabelle hat. Der Test laeuft sie ab, damit
+// kein Eintrag stillschweigend verschwindet.
+const N_EINTRAEGE: usize = 40
+
+fn st8(p: u64, i: usize, v: u8) {
+    *((p + i as u64) as *mut u8) = v
+}
+
+// Schreibt eine nullbeendete Zeichenkette in `out` und gibt die Laenge
+// ohne die Null zurueck.
+fn schreibe(out: u64, s: u64) -> usize {
+    var i: usize = 0
+    while *((s + i as u64) as *mut u8) != 0 as u8 {
+        st8(out, i, *((s + i as u64) as *mut u8))
+        i = i + 1
+    }
+    st8(out, i, 0 as u8)
+    return i
+}
+
+// ------------------------------------------------------------------
+// Die Tabelle. Sie ist bewusst als Kette von Vergleichen geschrieben
+// und nicht als Feld von Strukturen: im `lib/`-Baum gibt es keinen
+// Allokator, und ein statisches Feld mit Zeigern auf Zeichenketten
+// waere in Firn eine Verrenkung. Vierzig Vergleiche sind bei einem
+// Ereignis, das einmal beim Anstecken passiert, kostenlos.
+// ------------------------------------------------------------------
+
+fn familie(vid: u64, pid: u64) -> u64 {
+    // ---- Realtek, 0x0BDA ----
+    if vid == 0x0BDA {
+        // 8188EU / 8188EUS -- der haeufigste billige Nano-Stick
+        if pid == 0x8179 || pid == 0x0179 { return F_REALTEK }
+        // 8188CUS / 8192CU -- die Generation davor
+        if pid == 0x8176 || pid == 0x8178 || pid == 0x817A
+            || pid == 0x817B { return F_REALTEK }
+        // 8192EU
+        if pid == 0x818B || pid == 0x818C { return F_REALTEK }
+        // 8812AU -- AC1200, sehr verbreitet
+        if pid == 0x8812 || pid == 0x881A || pid == 0x881B
+            || pid == 0x881C { return F_REALTEK }
+        // 8811AU / 8821AU
+        if pid == 0x0811 || pid == 0x8821 || pid == 0x0821 {
+            return F_REALTEK
+        }
+        // 8821CU / 8811CU
+        if pid == 0xC821 || pid == 0xC820 || pid == 0xC82A
+            || pid == 0xC82B { return F_REALTEK }
+        // 8822BU / 8822CU
+        if pid == 0xB812 || pid == 0xC82C || pid == 0xC82E {
+            return F_REALTEK
+        }
+        // 8187 -- ganz alt, aber es gibt sie noch
+        if pid == 0x8187 || pid == 0x8189 { return F_REALTEK }
+    }
+    // Realtek verkauft auch unter fremden Nummern.
+    if vid == 0x2357 {
+        // TP-Link: Archer T2U/T4U (8812AU/8821AU-Familie)
+        if pid == 0x0101 || pid == 0x0103 || pid == 0x010D
+            || pid == 0x010E || pid == 0x010F || pid == 0x0115 {
+            return F_REALTEK
+        }
+    }
+    if vid == 0x0846 {
+        // Netgear A6210 (8812AU), WNA1000M (8188CUS)
+        if pid == 0x9052 || pid == 0x9041 { return F_REALTEK }
+    }
+    if vid == 0x7392 {
+        // Edimax EW-7811Un (8188CUS), EW-7822UAC (8812AU)
+        if pid == 0x7811 || pid == 0xA812 || pid == 0xB822 {
+            return F_REALTEK
+        }
+    }
+
+    // ---- MediaTek / Ralink, 0x0E8D und 0x148F ----
+    if vid == 0x0E8D {
+        // MT7601U -- der billige n-Stick
+        if pid == 0x7601 { return F_MEDIATEK }
+        // MT7610U / MT7612U
+        if pid == 0x7610 || pid == 0x7612 || pid == 0x7650 {
+            return F_MEDIATEK
+        }
+        // MT7921AU / MT7961
+        if pid == 0x7961 || pid == 0x7922 { return F_MEDIATEK }
+    }
+    if vid == 0x148F {
+        // Ralink, heute MediaTek: RT5370, RT5372, RT3070
+        if pid == 0x5370 || pid == 0x5372 || pid == 0x3070
+            || pid == 0x3072 || pid == 0x2870 || pid == 0x3572 {
+            return F_RALINK
+        }
+    }
+
+    // ---- Atheros, 0x0CF3 ----
+    if vid == 0x0CF3 {
+        // AR9271 -- die Karte mit der freien Firmware
+        if pid == 0x9271 || pid == 0x1006 { return F_ATHEROS }
+        // AR7010
+        if pid == 0x7015 || pid == 0x7010 { return F_ATHEROS }
+    }
+
+    // ---- Broadcom, 0x0A5C ----
+    if vid == 0x0A5C {
+        if pid == 0xBD1D || pid == 0xBD16 || pid == 0xBD17 {
+            return F_BROADCOM
+        }
+    }
+
+    return F_UNBEKANNT
+}
+
+fn ist_wlan_stick(vid: u64, pid: u64) -> bool {
+    return familie(vid, pid) != F_UNBEKANNT
+}
+
+fn familie_name_holen(f: u64, out: u64) -> usize {
+    var r: [u8; 8] = "Realtek\0"
+    var m: [u8; 9] = "MediaTek\0"
+    var l: [u8; 7] = "Ralink\0"
+    var a: [u8; 8] = "Atheros\0"
+    var b: [u8; 9] = "Broadcom\0"
+    var u: [u8; 10] = "unbekannt\0"
+    if f == F_REALTEK { return schreibe(out, (&r[0]) as u64) }
+    if f == F_MEDIATEK { return schreibe(out, (&m[0]) as u64) }
+    if f == F_RALINK { return schreibe(out, (&l[0]) as u64) }
+    if f == F_ATHEROS { return schreibe(out, (&a[0]) as u64) }
+    if f == F_BROADCOM { return schreibe(out, (&b[0]) as u64) }
+    return schreibe(out, (&u[0]) as u64)
+}
+
+// Der Klarname des Chips. Das ist die Zeichenkette, die auf der Tafel
+// landet und die Justin fotografieren soll.
+fn name_holen(vid: u64, pid: u64, out: u64) -> usize {
+    var n8188eu: [u8; 21] = "Realtek RTL8188EU\0\0\0\0"
+    var n8192cu: [u8; 21] = "Realtek RTL8192CU\0\0\0\0"
+    var n8192eu: [u8; 21] = "Realtek RTL8192EU\0\0\0\0"
+    var n8812au: [u8; 21] = "Realtek RTL8812AU\0\0\0\0"
+    var n8821au: [u8; 21] = "Realtek RTL8821AU\0\0\0\0"
+    var n8821cu: [u8; 21] = "Realtek RTL8821CU\0\0\0\0"
+    var n8822bu: [u8; 21] = "Realtek RTL8822BU\0\0\0\0"
+    var n8187:   [u8; 19] = "Realtek RTL8187\0\0\0\0"
+    var n7601:   [u8; 20] = "MediaTek MT7601U\0\0\0\0"
+    var n7612:   [u8; 20] = "MediaTek MT7612U\0\0\0\0"
+    var n7610:   [u8; 20] = "MediaTek MT7610U\0\0\0\0"
+    var n7921:   [u8; 21] = "MediaTek MT7921AU\0\0\0\0"
+    var nrt5370: [u8; 18] = "Ralink RT5370\0\0\0\0\0"
+    var nrt3070: [u8; 18] = "Ralink RT3070\0\0\0\0\0"
+    var nar9271: [u8; 18] = "Atheros AR9271\0\0\0\0"
+    var nar7010: [u8; 18] = "Atheros AR7010\0\0\0\0"
+    var nbrcm:   [u8; 18] = "Broadcom BCM43xx\0\0"
+    var nunb:    [u8; 16] = "WLAN-Stick (?)\0\0"
+
+    if vid == 0x0BDA {
+        if pid == 0x8179 || pid == 0x0179 {
+            return schreibe(out, (&n8188eu[0]) as u64)
+        }
+        if pid == 0x8176 || pid == 0x8178 || pid == 0x817A
+            || pid == 0x817B {
+            return schreibe(out, (&n8192cu[0]) as u64)
+        }
+        if pid == 0x818B || pid == 0x818C {
+            return schreibe(out, (&n8192eu[0]) as u64)
+        }
+        if pid == 0x8812 || pid == 0x881A || pid == 0x881B
+            || pid == 0x881C {
+            return schreibe(out, (&n8812au[0]) as u64)
+        }
+        if pid == 0x0811 || pid == 0x8821 || pid == 0x0821 {
+            return schreibe(out, (&n8821au[0]) as u64)
+        }
+        if pid == 0xC821 || pid == 0xC820 || pid == 0xC82A
+            || pid == 0xC82B {
+            return schreibe(out, (&n8821cu[0]) as u64)
+        }
+        if pid == 0xB812 || pid == 0xC82C || pid == 0xC82E {
+            return schreibe(out, (&n8822bu[0]) as u64)
+        }
+        if pid == 0x8187 || pid == 0x8189 {
+            return schreibe(out, (&n8187[0]) as u64)
+        }
+    }
+    if vid == 0x2357 {
+        if pid == 0x0101 || pid == 0x010D || pid == 0x010E {
+            return schreibe(out, (&n8812au[0]) as u64)
+        }
+        if pid == 0x0103 || pid == 0x010F || pid == 0x0115 {
+            return schreibe(out, (&n8821au[0]) as u64)
+        }
+    }
+    if vid == 0x0846 {
+        if pid == 0x9052 { return schreibe(out, (&n8812au[0]) as u64) }
+        if pid == 0x9041 { return schreibe(out, (&n8192cu[0]) as u64) }
+    }
+    if vid == 0x7392 {
+        if pid == 0x7811 { return schreibe(out, (&n8192cu[0]) as u64) }
+        if pid == 0xA812 || pid == 0xB822 {
+            return schreibe(out, (&n8812au[0]) as u64)
+        }
+    }
+    if vid == 0x0E8D {
+        if pid == 0x7601 { return schreibe(out, (&n7601[0]) as u64) }
+        if pid == 0x7612 || pid == 0x7650 {
+            return schreibe(out, (&n7612[0]) as u64)
+        }
+        if pid == 0x7610 { return schreibe(out, (&n7610[0]) as u64) }
+        if pid == 0x7961 || pid == 0x7922 {
+            return schreibe(out, (&n7921[0]) as u64)
+        }
+    }
+    if vid == 0x148F {
+        if pid == 0x5370 || pid == 0x5372 || pid == 0x2870
+            || pid == 0x3572 {
+            return schreibe(out, (&nrt5370[0]) as u64)
+        }
+        if pid == 0x3070 || pid == 0x3072 {
+            return schreibe(out, (&nrt3070[0]) as u64)
+        }
+    }
+    if vid == 0x0CF3 {
+        if pid == 0x9271 || pid == 0x1006 {
+            return schreibe(out, (&nar9271[0]) as u64)
+        }
+        if pid == 0x7015 || pid == 0x7010 {
+            return schreibe(out, (&nar7010[0]) as u64)
+        }
+    }
+    if vid == 0x0A5C {
+        if pid == 0xBD1D || pid == 0xBD16 || pid == 0xBD17 {
+            return schreibe(out, (&nbrcm[0]) as u64)
+        }
+    }
+    return schreibe(out, (&nunb[0]) as u64)
+}
+
+// ------------------------------------------------------------------
+// Damit ein Test die Tabelle ABLAUFEN kann, ohne sie abzuschreiben.
+// Ein Eintrag, der hier fehlt, faellt im Test auf.
+// ------------------------------------------------------------------
+
+fn eintrag_anzahl() -> usize { return N_EINTRAEGE }
+
+fn eintrag_vid(k: usize) -> u64 {
+    if k < 20 { return 0x0BDA }
+    if k < 26 { return 0x2357 }
+    if k < 28 { return 0x0846 }
+    if k < 31 { return 0x7392 }
+    if k < 37 { return 0x0E8D }
+    return 0x0CF3
+}
+
+fn eintrag_pid(k: usize) -> u64 {
+    if k == 0 { return 0x8179 }
+    if k == 1 { return 0x0179 }
+    if k == 2 { return 0x8176 }
+    if k == 3 { return 0x8178 }
+    if k == 4 { return 0x817A }
+    if k == 5 { return 0x817B }
+    if k == 6 { return 0x818B }
+    if k == 7 { return 0x818C }
+    if k == 8 { return 0x8812 }
+    if k == 9 { return 0x881A }
+    if k == 10 { return 0x881B }
+    if k == 11 { return 0x881C }
+    if k == 12 { return 0x0811 }
+    if k == 13 { return 0x8821 }
+    if k == 14 { return 0x0821 }
+    if k == 15 { return 0xC821 }
+    if k == 16 { return 0xC820 }
+    if k == 17 { return 0xB812 }
+    if k == 18 { return 0x8187 }
+    if k == 19 { return 0x8189 }
+    if k == 20 { return 0x0101 }
+    if k == 21 { return 0x0103 }
+    if k == 22 { return 0x010D }
+    if k == 23 { return 0x010E }
+    if k == 24 { return 0x010F }
+    if k == 25 { return 0x0115 }
+    if k == 26 { return 0x9052 }
+    if k == 27 { return 0x9041 }
+    if k == 28 { return 0x7811 }
+    if k == 29 { return 0xA812 }
+    if k == 30 { return 0xB822 }
+    if k == 31 { return 0x7601 }
+    if k == 32 { return 0x7610 }
+    if k == 33 { return 0x7612 }
+    if k == 34 { return 0x7650 }
+    if k == 35 { return 0x7961 }
+    if k == 36 { return 0x7922 }
+    if k == 37 { return 0x9271 }
+    if k == 38 { return 0x1006 }
+    return 0x7015
+}

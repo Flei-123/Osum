@@ -62,6 +62,7 @@ profile kernel
 
 import serial
 import kstate
+import klog
 import pci
 import arch.x86_64.apic
 import atomic
@@ -74,6 +75,7 @@ export {
     port_reset, port_clear_changes, port_has_change,
     slot_enable, slot_disable, address_device, configure_endpoint,
     evaluate_context, reset_endpoint, stop_endpoint, set_dequeue,
+    ep_state, ep_halted,
     devctx, inctx, in_control, in_slot, in_ep, dev_slot_ctx, dev_ep_ctx,
     ep_open, ep_find, ep_ring, ep_seq, ep_code, ep_resid, ep_reset_ring,
     control, bulk, int_queue, doorbell, dcbaa_set,
@@ -82,7 +84,9 @@ export {
     // RUNDE BLECH-HID: was ein zweiter Regler und eine fremde Firmware
     // von diesem Treiber verlangen.
     count_hc, nth_hc, init_at, unit, udelay, power_all, melde_art,
-    uebersicht, bericht, owned_by_bios, hcs_seen, legtest
+    uebersicht, bericht, owned_by_bios, hcs_seen, legtest,
+    // RUNDE BLECHVIER: was die Ruecksetzung der Anschluesse gekostet hat.
+    reset_fails, reset_vorbelegt, bar_pde
 }
 
 // ------------------------------------------------- der Vorrat dieser Runde
@@ -179,6 +183,15 @@ const S_HALTOK: u64 = 0x118
 const S_RSTOK: u64 = 0x120
 const S_HCIVER: u64 = 0x128
 const S_BAR: u64 = 0x130
+// RUNDE BLECHVIER: Ruecksetzungen, die nicht durchkamen. Eine Zahl
+// groesser null heisst: an diesem Anschluss ist ein Geraet, das die
+// Ruecksetzung nicht quittiert -- und dann ist jede folgende Aussage
+// ueber dieses Geraet mit Vorsicht zu lesen.
+const S_RESETFAIL: u64 = 0x138
+// Wie oft ein Anschluss zurueckgesetzt wurde, OBWOHL er schon
+// freigeschaltet war. Das ist die Zahl der Geraete, die die Firmware
+// vor uns angefasst hatte.
+const S_RESETVOR: u64 = 0x140
 
 // -------------------------------------- die Felder eines Endpunktplatzes
 
@@ -746,6 +759,47 @@ fn set_dequeue(state: u64, slot: u64, dci: u64, i: u64) -> u64 {
         (T_SET_DEQ << 10) | ((slot & 0xFF) << 24) | ((dci & 0x1F) << 16))
 }
 
+// ============================================== RUNDE STARTKNOPF
+// WAS DER REGLER SELBST UEBER DEN ENDPUNKT SAGT.
+//
+// Bis zu dieser Runde war der einzige Blick auf einen Endpunkt der
+// Fertigmeldungscode des letzten Transfers -- also unsere eigene
+// Buchfuehrung. Die sagt NICHT, ob der Regler den Endpunkt noch
+// bedient. Genau das ist die offene Frage auf Justins Brett: "KBD 2
+// TAS 0" heisst, das Geraet ist da und liefert nichts, und ein
+// ANGEHALTENER Endpunkt sieht von aussen genauso aus wie ein Geraet,
+// das nicht tippt.
+//
+// Der GERAETEZUSAMMENHANG steht im Speicher des Reglers und wird von
+// IHM geschrieben (xHCI 1.2, 6.2.3): Endpunktzusammenhang `dci`,
+// Doppelwort 0, Bits 0..2 -- der ENDPUNKTZUSTAND:
+//   0 disabled  1 running  2 halted  3 stopped  4 error
+// Steht dort 2 oder 4, nimmt der Endpunkt keinen Block mehr an, egal
+// wie oft `arm` klingelt. Diese Zahl beantwortet die Frage mit EINEM
+// Foto -- und sie ist der Grund, warum die Wiederbelebung unten
+// ueberhaupt gebaut werden konnte.
+fn dev_ctx(state: u64, slot: u64) -> u64 {
+    if slot == 0 || slot > 127 {
+        return 0
+    }
+    return __mmio_read64((state + DCBAA_OFF + slot * 8) as *mut u64)
+}
+
+fn ep_state(state: u64, slot: u64, dci: u64) -> u64 {
+    let c: u64 = dev_ctx(state, slot)
+    if c == 0 || dci == 0 || dci > 31 {
+        return 0
+    }
+    return rd32(c + dci * ctx_size(state), 0) & 7
+}
+
+// Ein Endpunkt, der nichts mehr annimmt. `halted` und `error` sind die
+// beiden Zustaende, aus denen er von selbst nicht zurueckkommt.
+fn ep_halted(state: u64, slot: u64, dci: u64) -> bool {
+    let st: u64 = ep_state(state, slot, dci)
+    return st == 2 || st == 4
+}
+
 // ---------------------------------------------------- die Zusammenhaenge
 
 // Wo der Regler den Zusammenhang eines Steckplatzes SUCHT. Die Tafel
@@ -835,6 +889,21 @@ fn port_connected(state: u64, p: u64) -> bool {
     return (portsc(state, p) & PSC_CCS) != 0
 }
 
+// DAS CACHE-ATTRIBUT DES EIGENEN REGISTERSATZES, aus der Seitentafel
+// zurueckgelesen. MMIO MUSS unbeschreibbar sein: eine Tuerklingel, die
+// im L1 liegenbleibt, klingelt nie. 0x1B = PRESENT|WRITE|PWT|PCD|HUGE.
+fn bar_pde(state: u64) -> u64 {
+    return apic.pde_bei(state, g(state, S_BASE))
+}
+
+fn reset_fails(state: u64) -> u64 {
+    return g(state, S_RESETFAIL)
+}
+
+fn reset_vorbelegt(state: u64) -> u64 {
+    return g(state, S_RESETVOR)
+}
+
 fn port_enabled(state: u64, p: u64) -> bool {
     return (portsc(state, p) & PSC_PED) != 0
 }
@@ -904,10 +973,52 @@ fn port_clear_changes(state: u64, p: u64) {
 // QEMU beide anbietet: die ersten Anschluesse von `qemu-xhci` sind
 // USB 2, die hinteren USB 3.
 fn port_reset(state: u64, p: u64) -> bool {
-    if port_enabled(state, p) {
+    // ================================================ RUNDE BLECHVIER
+    // ============ DIE RUECKSETZUNG WIRD ERZWUNGEN, NICHT ERSPART.
+    //
+    // HIER STAND: `if port_enabled(state, p) { return true }` -- ein
+    // freigeschalteter Anschluss galt als fertig. Auf einem Brett mit
+    // UEFI ist das falsch, und es ist die beste Erklaerung, die es fuer
+    // Justins flatternde Aufzaehlung gibt.
+    //
+    // Die Firmware zaehlt Tastatur und Maus SELBST auf, bevor der Lader
+    // laeuft: sie adressiert die Geraete und schaltet die Anschluesse
+    // frei. Nach unserem `HCRST` sind UNSERE Steckplaetze weg -- das
+    // GERAET aber behaelt seine von der Firmware vergebene Adresse, bis
+    // es einen echten Anschluss-Reset sieht. Wer den Reset ueberspringt,
+    // weil PED schon steht, vergibt Adresse 1 an ein Geraet, das noch
+    // auf die alte Adresse hoert: `Address Device` wird quittiert, die
+    // Aufzaehlung gilt formal als geglueckt, und JEDER folgende
+    // Steuertransfer laeuft ins Leere.
+    //
+    // UND ES FLATTERT GENAU RICHTIG: ob die Firmware ein Geraet
+    // angefasst hat, haengt davon ab, ob im Bootmenue eine Taste
+    // gedrueckt wurde. Zwei Startvorgaenge desselben Sticks, zwei
+    // verschiedene Ergebnisse, bei UNVERAENDERTER Zahl von
+    // Unterbrechungen und Ereignissen -- und genau das hat Justin
+    // gemeldet.
+    //
+    // In QEMU faellt es nicht auf, weil dort niemand vor uns
+    // aufgezaehlt hat.
+    //
+    // `usbnoreset` ist die Gegenprobe und stellt das alte Verhalten her.
+    let war_an: bool = port_enabled(state, p)
+    if war_an && kstate.mode_on(state, kstate.M_USBNORESET) {
         port_clear_changes(state, p)
         return true
     }
+    // ============ UND DAS ALTE AENDERUNGSBIT ZUERST WEG.
+    //
+    // `PSC_PRC` ist RW1C. Steht es noch von einer frueheren
+    // Ruecksetzung, kehrt die Warteschleife unten SOFORT zurueck und
+    // meldet einen Reset, den es nie gab. Es wird deshalb hier
+    // ausdruecklich geloescht -- vor `PR`, nicht danach, denn danach
+    // wuerde es die gerade erst gemeldete Ruecksetzung wegwerfen.
+    if war_an {
+        s(state, S_RESETVOR, g(state, S_RESETVOR) + 1)
+    }
+    let vor: u64 = portsc(state, p)
+    portsc_write(state, p, (vor & PSC_KEEP) | PSC_PRC)
     // RUNDE BLECH-HID: DIE PRELLZEIT. Ein Anschluss, der gerade
     // "verbunden" gemeldet hat, ist noch nicht ruhig -- USB 2.0,
     // 7.1.7.3 verlangt 100 ms (TATTDB), bevor zurueckgesetzt wird. Ein
@@ -928,6 +1039,15 @@ fn port_reset(state: u64, p: u64) -> bool {
         }
     }
     if !fertig {
+        // Die Ruecksetzung kam nicht durch. War der Anschluss vorher
+        // freigeschaltet, ist das immer noch besser als gar nichts --
+        // aber es wird GEMELDET und nicht stillschweigend als Erfolg
+        // verbucht.
+        s(state, S_RESETFAIL, g(state, S_RESETFAIL) + 1)
+        if war_an {
+            port_clear_changes(state, p)
+            return port_enabled(state, p)
+        }
         return false
     }
     port_clear_changes(state, p)
@@ -1265,7 +1385,22 @@ fn init(state: u64, armed: bool) -> bool {
     return init_at(state, 0, armed)
 }
 
+// RUNDE PROTOKOLL: die Quelle dieses Treibers im Ring. Siehe `nvme.lq`.
+// Der Name liegt als `static mut` im Modul und nicht als `var` in
+// dieser Funktion: eine lokale Zeichenkette stirbt mit dem Rahmen,
+// und firnc faengt genau das ab ("the address of the local escapes
+// through the return value"). Der Protokollring liest den Namen
+// erst im Aufruf danach.
+static mut q_xhci: [u8; 5] = "xhci\0"
+
+fn lq() -> u64 {
+    return (&q_xhci[0]) as u64
+}
+
 fn init_at(state: u64, einheit: u64, armed: bool) -> bool {
+    var l_kein: [u8; 32] = "kein xHCI-Regler an Einheit \0\0\0\0"
+    var l_bar: [u8; 25] = "BAR0 unbrauchbar, phys \0\0"
+    var l_los: [u8; 24] = "Regler gefunden, BAR0 \0\0"
     s(state, S_READY, 0)
     s(state, S_UNIT, einheit)
     s(state, S_HCS, count_hc(state))
@@ -1273,12 +1408,15 @@ fn init_at(state: u64, einheit: u64, armed: bool) -> bool {
     s(state, S_RSTOK, 0)
     let idx: u64 = nth_hc(state, einheit)
     if idx >= pci.MAX_DEV {
+        klog.sayn(state, klog.L_DEBUG, lq(), (&l_kein[0]) as u64, einheit)
         return false
     }
     let phys: u64 = pci.bar(state, idx, 0)
     if phys == 0 || pci.bar_is_io(state, idx, 0) {
+        klog.sayh(state, klog.L_ERROR, lq(), (&l_bar[0]) as u64, phys)
         return false
     }
+    klog.sayh(state, klog.L_INFO, lq(), (&l_los[0]) as u64, phys)
     let b: u64 = apic.map_device(state, phys)
     if b == 0 {
         return false

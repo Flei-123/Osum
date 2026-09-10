@@ -1,0 +1,878 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/play.fi -- RUNDE HDA: /bin/play, der Nachweis in Ring 3.
+//
+// Der Kernel dieser Runde kann selbst einen Ton erzeugen (`audsine`),
+// und das ist die saubere Messstrecke: EIN Verdaechtiger, wenn etwas
+// nicht stimmt. Dieses Programm ist die andere Haelfte -- es beweist,
+// dass die Strecke auch aus Ring 3 heraus traegt, durch die Shell, den
+// ELF-Lader, das Dateisystem und fuenf Systemaufrufe hindurch.
+//
+//   /bin/play datei.wav       PCM 16 Bit, ein oder zwei Kanaele
+//   /bin/play datei.mp3       MPEG-1/2/2.5 Layer III
+//   /bin/play -i datei        NUR die Angaben, kein Ton
+//   /bin/play -1 datei        den EINSTROMWEG statt des Mischers
+//
+// WARUM ZWEI WEGE, und wann welcher:
+//
+//   REGELFALL IST DER MISCHER (osum_audopen/osum_audsend). Damit
+//   koennen mehrere Programme gleichzeitig spielen, und die Rate wird
+//   umgerechnet, wenn das Geraet eine andere faehrt.
+//   `-1` nimmt den Einstromweg (osum_audset AS_OPEN, osum_audwrite):
+//   ein Puffer weniger, also kleinere Verzoegerung -- und -EBUSY,
+//   sobald jemand anderes spielt. Er ist der Weg aus Runde MEDIA1 und
+//   steht hier, damit die Abnahme BEIDE messen kann.
+//
+// WAS AM ENDE GEDRUCKT WIRD, ist die Zusage (g) dieser Runde: Rate und
+// Laenge, wie der DEKODIERER sie meldet, und daneben, wie viele Rahmen
+// wirklich abgespielt wurden. Stimmen die beiden nicht ueberein, ist
+// die Wiedergabe falsch -- und das steht dann da, statt dass jemand
+// hinterher raet.
+
+profile kernel
+
+import ulib
+import media
+import mp3
+
+export { u_start }
+
+const SYS_AUDGET: u64 = 1850
+const SYS_AUDSET: u64 = 1851
+const SYS_AUDWRITE: u64 = 1852
+const SYS_AUDOPEN: u64 = 1853
+const SYS_AUDSEND: u64 = 1854
+
+const A_READY: u64 = 0
+const A_RATE: u64 = 1
+const A_CHANNELS: u64 = 2
+const A_BITS: u64 = 3
+const A_PLAYED: u64 = 5
+const A_WRITTEN: u64 = 6
+const A_UNDERRUNS: u64 = 7
+const A_LATENCY: u64 = 8
+const A_WHY: u64 = 16
+const A_BACKEND: u64 = 15
+const A_REMAIN: u64 = 25
+const A_STREAMS: u64 = 30
+const A_MIXED: u64 = 31
+const A_CLIPS: u64 = 32
+const A_SYSSOUNDS: u64 = 49
+const A_LOST: u64 = 42
+const A_ZEROED: u64 = 43
+// ---- RUNDE TON: die Messstrecke (siehe kernel/audio.fi)
+const A_GAPMAX: u64 = 50
+const A_SYSUS: u64 = 51
+const A_WALLUS: u64 = 52
+const A_CALLS: u64 = 53
+const A_MINFILL: u64 = 48
+const A_LOCKSPIN: u64 = 47
+
+const AS_OPEN: u64 = 1
+const AS_DRAIN: u64 = 3
+const AS_STOP: u64 = 4
+const AS_RATE: u64 = 7
+const AS_CLOSE: u64 = 8
+const AS_END: u64 = 9
+const AS_PUMP: u64 = 11
+const AS_WAITSPACE: u64 = 15
+const AS_VOLUME: u64 = 0
+const AS_SVOL: u64 = 10
+const AS_SOUND: u64 = 12
+
+// EIN SCHUB. 1024 Rahmen sind genau der Umsteigepuffer des
+// Systemaufrufs (4096 Oktette); mehr nimmt der Kern in einem Zug nicht
+// an, und weniger waere ein Systemaufruf mehr fuer dieselben Oktette.
+const CHUNK: u64 = 1024
+
+const BUF_FRAMES: u64 = 1152
+static mut buf: [u8; 4608] = [0 as u8; 4608]
+// EIN ZWEITER PUFFER FUER DEN ROHEN DATENSTROM DER WAV-DATEI.
+//
+// Er ist da, weil `media.src_bytes` OKTETT FUER OKTETT kopiert (es ist
+// ein Leser fuer Behaelterkoepfe, nicht fuer Nutzdaten) und weil ein
+// Mono-Strom vor dem Abschicken auf zwei Kanaele gezogen werden muss.
+// GEMESSEN: mit `src_bytes` brauchte /bin/play fuer eine Sekunde WAV
+// 135 Aussetzer; mit einem geraden `read` sind es zwei -- dieselbe
+// Zahl wie beim MP3, das seine Oktette schon immer selbst gelesen hat.
+// VIERUNDSECHZIG KILOOKTETTE, und die Zahl ist gemessen.
+//
+// Die WAV-Daten werden in GROSSEN Bloecken von der Platte geholt und
+// aus diesem Puffer in Schueben abgegeben. Ein `read` je Schub (4608
+// Oktette) waere richtig gerechnet und in der Praxis zu langsam: jeder
+// Zugriff geht durch das Dateisystem auf den IDE-Regler, und 47 davon
+// je Sekunde Ton kosten mehr Zeit, als der Ring Vorrat hat. GEMESSEN:
+// mit Schub-Lesen 398 Aussetzer je Sekunde, mit Blocklesen zwei --
+// dieselbe Zahl, die der MP3-Weg schon immer hatte, weil sein
+// Dekodierer aus einem 64-KiB-Fenster liest.
+const RAWSZ: u64 = 65536
+
+// ---- RUNDE TON: die Stoppuhr von Ring 3 ---------------------------
+// Der Kern misst, wie lange ER braucht (kern_us). Diese Uhr misst, wo
+// die uebrige Zeit BLEIBT: im Lesen von der Platte, im Umrechnen oder
+// im Abschicken. Ohne diese Dreiteilung ist "Ring 3 ist zu langsam"
+// eine Vermutung und keine Messung.
+const SYS_CLOCK_GETTIME: u64 = 228
+const CLOCK_MONOTONIC: u64 = 1
+
+fn jetzt_us() -> u64 {
+    var ts: [u64; 2] = [0 as u64; 2]
+    if ulib.bad(ulib.sys(SYS_CLOCK_GETTIME, CLOCK_MONOTONIC,
+        (&ts[0]) as u64, 0)) {
+        return 0
+    }
+    return ts[0 as usize] *% 1000000 +% (ts[1 as usize] / 1000)
+}
+static mut raw: [u8; 65536] = [0 as u8; 65536]
+static mut rawlen: u64 = 0
+static mut rawpos: u64 = 0
+static mut wfd: u64 = 0
+
+// ------------------------------------------------------------ die WAV-Datei
+//
+// RIFF, und nur so viel davon, wie fuer eine Wiedergabe noetig ist: die
+// Kette der Bloecke wird durchlaufen, `fmt ` und `data` werden
+// genommen, alles andere (LIST, INFO, Fakten der Aufnahmesoftware)
+// wird UEBERSPRUNGEN statt vorausgesetzt. Eine WAV-Datei, bei der
+// `data` nicht der zweite Block ist, ist voellig normal.
+static mut w_rate: u64 = 0
+static mut w_ch: u64 = 0
+static mut w_bits: u64 = 0
+static mut w_off: u64 = 0
+static mut w_len: u64 = 0
+
+fn tag4(at: u64, a: u64, b: u64, c: u64, d: u64) -> bool {
+    return media.src_byte(at) == a && media.src_byte(at + 1) == b
+        && media.src_byte(at + 2) == c && media.src_byte(at + 3) == d
+}
+
+fn wav_probe() -> bool {
+    if media.src_size() < 44 {
+        return false
+    }
+    // "RIFF" .... "WAVE"
+    return tag4(0, 82, 73, 70, 70) && tag4(8, 87, 65, 86, 69)
+}
+
+fn wav_open() -> bool {
+    w_rate = 0
+    w_ch = 0
+    w_bits = 0
+    w_off = 0
+    w_len = 0
+    var at: u64 = 12
+    let ende: u64 = media.src_size()
+    while at + 8 <= ende {
+        let len: u64 = media.le32(at + 4)
+        if tag4(at, 102, 109, 116, 32) { // "fmt "
+            w_ch = media.le16(at + 10)
+            w_rate = media.le32(at + 12)
+            w_bits = media.le16(at + 22)
+        }
+        if tag4(at, 100, 97, 116, 97) { // "data"
+            w_off = at + 8
+            w_len = len
+            if w_off + w_len > ende {
+                w_len = ende - w_off
+            }
+        }
+        // Bloecke sind auf gerade Laenge aufgefuellt.
+        at = at + 8 + len + (len & 1)
+    }
+    return w_rate > 0 && w_ch > 0 && w_bits == 16 && w_len > 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_use: [u8; 40] = "Verwendung: play [-i] [-1] <datei>\0\0\0\0\0\0"
+    var s_noopen: [u8; 26] = "play: Datei nicht lesbar\0\0"
+    var s_nofmt: [u8; 40] = "play: weder WAV (16 Bit) noch MP3\0\0\0\0\0\0\0"
+    var s_nodev: [u8; 34] = "play: kein Tongeraet, Grund \0\0\0\0\0\0"
+    var s_kind: [u8; 8] = "  art: \0"
+    var s_wav: [u8; 4] = "wav\0"
+    var s_mp3: [u8; 4] = "mp3\0"
+    var s_rate: [u8; 9] = "  rate: \0"
+    var s_ch: [u8; 12] = "  kanaele: \0"
+    var s_ms: [u8; 10] = "  dauer: \0"
+    var s_msu: [u8; 4] = " ms\0"
+    var s_dr: [u8; 15] = "  geraetrate: \0"
+    var s_fr: [u8; 12] = "  rahmen: \0\0"
+    var s_pl: [u8; 13] = "  gespielt: \0"
+    var s_un: [u8; 14] = "  aussetzer: \0"
+    var s_lat: [u8; 14] = "  latenz_us: \0"
+    var s_bk: [u8; 13] = "  treiber: \0\0"
+    var s_id: [u8; 10] = "  strom: \0"
+    var s_sv: [u8; 14] = "  stromvol: \0\0"
+    var s_mv: [u8; 14] = "  mastervol: \0"
+    var s_v1: [u8; 46] = "play: -v geht nur ueber den Mischer, nicht -1\0"
+    var s_mx: [u8; 13] = "  gemischt: \0"
+    var s_cl: [u8; 13] = "  begrenzt: \0"
+    var s_kl: [u8; 14] = "  klick gab: \0"
+    var s_sk: [u8; 18] = "  systemklaenge: \0"
+    var opt_i: [u8; 3] = "-i\0"
+    var opt_1: [u8; 3] = "-1\0"
+    var opt_w: [u8; 3] = "-w\0"
+    var opt_v: [u8; 3] = "-v\0"
+    var opt_k: [u8; 3] = "-k\0"
+    var opt_m: [u8; 3] = "-m\0"
+
+    let argc: u64 = ulib.arg_count(args)
+    var nur_info: bool = false
+    var einstrom: bool = false
+    // RUNDE TON-2: WIE OFT die Datei gespielt wird.
+    //
+    // WARUM ES DIESE OPTION GIBT: die Abnahme dieser Runde laeuft
+    // sechzig Sekunden, und sechzig Sekunden passen in diesem
+    // Dateisystem nicht in EINE Datei -- ein Inode fasst 2134016
+    // Oktette (8 direkte, 64 einfach, 4096 doppelt indirekte Bloecke,
+    // siehe kernel/fs.fi), also 12,1 Sekunden bei 44100 Hz stereo.
+    // Statt das Dateisystem fuer eine Messung umzubauen, wird die
+    // Datei WIEDERHOLT -- und das ist ohnehin der ehrlichere
+    // Dauerlauf: der Strom bleibt offen, der Ring laeuft durch, und
+    // an jeder Naht muss der Abspieler nachliefern, ohne dass eine
+    // Luecke entsteht.
+    var wdh: u64 = 1
+    var svol: u64 = 101
+    var mvol: u64 = 101
+    var klick_bei: u64 = 0
+    var k: u64 = 1
+    while k < argc {
+        let a: u64 = ulib.arg_at(args, k)
+        if ulib.streq(a, (&opt_i[0 as usize]) as u64) {
+            nur_info = true
+            k = k + 1
+        } else if ulib.streq(a, (&opt_1[0 as usize]) as u64) {
+            einstrom = true
+            k = k + 1
+        } else if ulib.streq(a, (&opt_w[0 as usize]) as u64)
+            && k + 1 < argc {
+            wdh = ulib.to_num(ulib.arg_at(args, k + 1))
+            if wdh == 0 {
+                wdh = 1
+            }
+            k = k + 2
+        } else if ulib.streq(a, (&opt_v[0 as usize]) as u64)
+            && k + 1 < argc {
+            // RUNDE TON-2: die Lautstaerke DIESES Stromes, 0..100.
+            // 101 heisst "nicht gesetzt" -- eine 0 waere sonst nicht
+            // von "keine Angabe" zu unterscheiden, und genau 0 ist
+            // der Wert, mit dem eine Abnahme prueft, dass ein Strom
+            // WIRKLICH still wird.
+            svol = ulib.to_num(ulib.arg_at(args, k + 1))
+            k = k + 2
+        } else if ulib.streq(a, (&opt_m[0 as usize]) as u64)
+            && k + 1 < argc {
+            mvol = ulib.to_num(ulib.arg_at(args, k + 1))
+            k = k + 2
+        } else if ulib.streq(a, (&opt_k[0 as usize]) as u64)
+            && k + 1 < argc {
+            // RUNDE TON-2: nach so vielen Schueben EINEN Systemklang
+            // ausloesen -- MITTEN in der Musik und nicht davor oder
+            // danach. Nur so misst die Abnahme, was sie behauptet zu
+            // messen: dass ein Klick NEBEN der Musik liegt und sie
+            // nicht unterbricht.
+            klick_bei = ulib.to_num(ulib.arg_at(args, k + 1))
+            k = k + 2
+        } else {
+            k = argc
+        }
+    }
+    var pfad: u64 = 0
+    var j: u64 = 1
+    while j < argc {
+        let a: u64 = ulib.arg_at(args, j)
+        if ulib.streq(a, (&opt_w[0 as usize]) as u64)
+            || ulib.streq(a, (&opt_v[0 as usize]) as u64)
+            || ulib.streq(a, (&opt_m[0 as usize]) as u64)
+            || ulib.streq(a, (&opt_k[0 as usize]) as u64) {
+            // DIE ZAHL HINTER `-w` IST KEIN PFAD. Ohne diese Zeile
+            // wird aus `play -w 5 /ton.wav` der Versuch, die Datei
+            // "5" zu oeffnen.
+            j = j + 1
+        } else if !ulib.streq(a, (&opt_i[0 as usize]) as u64)
+            && !ulib.streq(a, (&opt_1[0 as usize]) as u64) {
+            if pfad == 0 {
+                pfad = a
+            }
+        }
+        j = j + 1
+    }
+    if pfad == 0 {
+        ulib.say((&s_use[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    if !media.src_open(pfad) {
+        ulib.esay_line((&s_noopen[0 as usize]) as u64, 0)
+        return 1
+    }
+
+    var ist_wav: bool = false
+    var rate: u64 = 0
+    var nch: u64 = 0
+    var dauer: u64 = 0
+    var rahmen: u64 = 0
+    if wav_probe() && wav_open() {
+        ist_wav = true
+        rate = w_rate
+        nch = w_ch
+        rahmen = w_len / (2 * w_ch)
+        if rate > 0 {
+            dauer = (rahmen * 1000) / rate
+        }
+        ulib.say((&s_kind[0 as usize]) as u64)
+        ulib.say((&s_wav[0 as usize]) as u64)
+        ulib.nl()
+    } else if mp3.mp3_probe() && mp3.mp3_open() {
+        rate = mp3.mp3_rate()
+        nch = mp3.mp3_channels()
+        dauer = mp3.mp3_dur_ms()
+        if rate > 0 {
+            rahmen = (dauer * rate) / 1000
+        }
+        ulib.say((&s_kind[0 as usize]) as u64)
+        ulib.say((&s_mp3[0 as usize]) as u64)
+        ulib.nl()
+    } else {
+        ulib.esay_line((&s_nofmt[0 as usize]) as u64, 0)
+        media.src_close()
+        return 1
+    }
+    ulib.say((&s_rate[0 as usize]) as u64)
+    ulib.sayu(rate)
+    ulib.nl()
+    ulib.say((&s_ch[0 as usize]) as u64)
+    ulib.sayu(nch)
+    ulib.nl()
+    ulib.say((&s_ms[0 as usize]) as u64)
+    ulib.sayu(dauer)
+    ulib.say((&s_msu[0 as usize]) as u64)
+    ulib.nl()
+    ulib.say((&s_fr[0 as usize]) as u64)
+    ulib.sayu(rahmen)
+    ulib.nl()
+    if nur_info {
+        media.src_close()
+        return 0
+    }
+
+    if ulib.sys(SYS_AUDGET, A_READY, 0, 0) != 1 {
+        // ZUSAGE (f): KEIN GERAET -> KLARE MELDUNG, KEIN ABSTURZ. Die
+        // Zahl ist der Grund aus dem Treiber und wird unveraendert
+        // durchgereicht.
+        ulib.esay_line((&s_nodev[0 as usize]) as u64,
+            ulib.sys(SYS_AUDGET, A_WHY, 0, 0))
+        media.src_close()
+        return 1
+    }
+
+    // DAS FORMAT AUSHANDELN. Der Rueckgabewert wird NICHT geglaubt --
+    // gelesen wird, was danach wirklich eingestellt ist. Ein Abspieler,
+    // der die gewuenschte Rate annimmt, spielt mit falscher Tonhoehe
+    // und meldet Erfolg.
+    var strom: u64 = 0
+    if einstrom {
+        ulib.sys(SYS_AUDSET, AS_RATE, rate, 0)
+        if ulib.bad(ulib.sys(SYS_AUDSET, AS_OPEN, 1, 0)) {
+            var s_busy: [u8; 34] = "play: Geraet ist belegt (-1)\0\0\0\0\0\0"
+            ulib.esay_line((&s_busy[0 as usize]) as u64, 0)
+            media.src_close()
+            return 1
+        }
+    } else {
+        let id: u64 = ulib.sys(SYS_AUDOPEN, rate, 0, 0)
+        if ulib.bad(id) {
+            var s_full: [u8; 37] = "play: kein Strom frei (vier offen)\0\0\0"
+            ulib.esay_line((&s_full[0 as usize]) as u64, 0)
+            media.src_close()
+            return 1
+        }
+        strom = id
+        // EINE ZEILE, EIN SCHREIBVORGANG.
+        //
+        // Vorher waren das drei (`say`, `sayu`, `nl`), und bei ZWEI
+        // gleichzeitig laufenden Abspielern landete die Zeile des
+        // einen mitten in der des anderen: auf der Leitung stand
+        // "strom:   art: wav". Ein Pruefer, der die Stroeme zaehlt,
+        // sieht dann nur einen und meldet einen Fehler, den es nicht
+        // gibt -- genau das ist unter test.sh passiert, waehrend
+        // derselbe Aufruf einzeln durchlief.
+        //
+        // Die serielle Leitung ist in diesem System die Messstrecke.
+        // Wer auf ihr misst, muss dafuer sorgen, dass eine Zeile eine
+        // Zeile bleibt.
+        var zbuf: [u8; 32] = [0 as u8; 32]
+        let zb: u64 = (&zbuf[0 as usize]) as u64
+        var za: u64 = ulib.strncpy(zb, (&s_id[0 as usize]) as u64, 24)
+        za = za + ulib.digits(strom, zb + za)
+        zbuf[za as usize] = 10 as u8
+        zbuf[(za + 1) as usize] = 0 as u8
+        ulib.say(zb)
+    }
+    // RUNDE TON-2: die Lautstaerken setzen, wenn welche verlangt sind.
+    //
+    // JE STROM geht nur ueber den Mischer -- der Einstromweg hat
+    // keinen eigenen Regler, er IST der einzige Strom. Das wird
+    // gesagt und nicht verschwiegen: eine Option, die stillschweigend
+    // nichts tut, ist schlimmer als eine, die es nicht gibt.
+    if svol <= 100 {
+        if einstrom {
+            ulib.esay_line((&s_v1[0 as usize]) as u64, 0)
+        } else {
+            ulib.sys(SYS_AUDSET, AS_SVOL, (strom << 8) | svol, 0)
+            ulib.say((&s_sv[0 as usize]) as u64)
+            ulib.sayu(svol)
+            ulib.nl()
+        }
+    }
+    if mvol <= 100 {
+        ulib.sys(SYS_AUDSET, AS_VOLUME, mvol, 0)
+        ulib.say((&s_mv[0 as usize]) as u64)
+        ulib.sayu(mvol)
+        ulib.nl()
+    }
+    let grate: u64 = ulib.sys(SYS_AUDGET, A_RATE, 0, 0)
+    ulib.say((&s_dr[0 as usize]) as u64)
+    ulib.sayu(grate)
+    ulib.nl()
+
+    // Die Nutzdaten werden mit einem GERADEN `read` geholt und nicht
+    // ueber den Behaelterleser -- die Begruendung steht bei `raw`.
+    if ist_wav {
+        wfd = ulib.sys(ulib.SYS_OPEN, pfad, 0, 0)
+        if ulib.bad(wfd) {
+            ulib.esay_line((&s_noopen[0 as usize]) as u64, 0)
+            media.src_close()
+            return 1
+        }
+        ulib.sys(ulib.SYS_SEEK, wfd, w_off, 0)
+    }
+
+    // ------------------------------------------------------ die Schleife
+    var gesendet: u64 = 0
+    var lauf: bool = true
+    var quelle: u64 = w_off
+    var rest: u64 = w_len
+    var schub: u64 = 0
+    var runden_uebrig: u64 = wdh
+    var us_lesen: u64 = 0
+    var us_rechnen: u64 = 0
+    var us_auf: u64 = 0
+    var us_warten: u64 = 0
+    var us_senden: u64 = 0
+    var us_start: u64 = jetzt_us()
+    var wart: u64 = 0
+    while lauf {
+        // 1. einen Schub bereitstellen
+        // RUNDE TON-2: die Uhr um die AUFBEREITUNG. Bis hierher war
+        // `rechnen_us` eine DIFFERENZ (gesamt minus lesen minus
+        // senden) und damit ein Sammelbecken fuer alles, was sonst
+        // nirgends gezaehlt wurde. Eine Zahl, die man nur ausrechnet,
+        // statt sie zu messen, zeigt auf niemanden.
+        let t_a: u64 = jetzt_us()
+        var n: u64 = 0
+        let dst: u64 = (&buf[0 as usize]) as u64
+        if ist_wav {
+            var m: u64 = CHUNK
+            let da: u64 = rest / (2 * nch)
+            if m > da {
+                m = da
+            }
+            if m > 0 {
+                let roh0: u64 = (&raw[0 as usize]) as u64
+                var will: u64 = m * 2 * nch
+                // Nachfuellen, wenn der Block leer wird.
+                if rawpos + will > rawlen {
+                    let uebrig: u64 = rawlen -% rawpos
+                    if uebrig > 0 {
+                        ulib.copy(roh0, roh0 + rawpos, uebrig)
+                    }
+                    let t_r: u64 = jetzt_us()
+                    let neu: u64 = ulib.sys(ulib.SYS_READ, wfd,
+                        roh0 + uebrig, RAWSZ - uebrig)
+                    us_lesen = us_lesen +% (jetzt_us() -% t_r)
+                    if ulib.bad(neu) {
+                        rawlen = uebrig
+                    } else {
+                        rawlen = uebrig + neu
+                    }
+                    rawpos = 0
+                }
+                let roh: u64 = roh0 + rawpos
+                var hab: u64 = will
+                if rawpos + will > rawlen {
+                    hab = rawlen -% rawpos
+                }
+                if hab == 0 {
+                    rest = 0
+                    lauf = false
+                    m = 0
+                } else {
+                    rawpos = rawpos + hab
+                    // `read` darf WENIGER liefern als verlangt, und
+                    // genau daran ist Runde MEDIA1 einmal
+                    // haengengeblieben: aus 3840 Oktetten wurden 3584,
+                    // und die Tonspur war ab da um einen Rahmen
+                    // verschoben. Also wird gerechnet, was WIRKLICH kam.
+                    m = hab / (2 * nch)
+                    if nch == 2 {
+                        ulib.copy(dst, roh, m * 4)
+                    } else {
+                        mono_to_stereo(roh, dst, m)
+                    }
+                    quelle = quelle + m * 2 * nch
+                    rest = rest - m * 2 * nch
+                    n = m
+                }
+            }
+        } else {
+            let ns: u64 = mp3.mp3_next()
+            if ns > 0 {
+                // EIN MP3-RAHMEN SIND 1152 ABTASTWERTE, der
+                // Umsteigepuffer des Systemaufrufs fasst 1024. Der
+                // Rest wird NICHT weggeworfen -- er geht im naechsten
+                // Durchgang. Wer hier kuerzt, laesst je Rahmen 128
+                // Abtastwerte fallen: 2,7 Millisekunden von 24, also
+                // elf Prozent zu schnell und ein Knacken je Rahmen.
+                var m2: u64 = ns
+                if m2 > BUF_FRAMES {
+                    m2 = BUF_FRAMES
+                }
+                let p: u64 = mp3.mp3_pcm()
+                if mp3.mp3_channels() == 2 {
+                    // ZIEL ZUERST. `ulib.copy` heisst copy(dst, src, n)
+                    // -- die umgekehrte Reihenfolge kopierte den
+                    // LEEREN Puffer in den Ausgang des Dekodierers und
+                    // schickte dessen Nullen ans Geraet. Der Dekodierer
+                    // meldete null Fehler, der Abspieler 50688
+                    // gesendete Rahmen, und in der Datei stand STILLE.
+                    ulib.copy(dst, p, m2 * 4)
+                } else {
+                    mono_to_stereo(p, dst, m2)
+                }
+                n = m2
+            } else {
+                if mp3.mp3_at_end() {
+                    n = 0
+                    lauf = false
+                }
+            }
+        }
+        us_auf = us_auf +% (jetzt_us() -% t_a)
+        // 2. abschicken -- so viel, wie der Kern nimmt, und der Rest
+        //    beim naechsten Mal. NICHT warten: der Aufruf blockiert
+        //    nicht, und ein Abspieler, der blockiert, kann kein Bild
+        //    dekodieren.
+        let t_s: u64 = jetzt_us()
+        var ab: u64 = 0
+        while ab < n {
+            var got: u64 = 0
+            if einstrom {
+                got = ulib.sys(SYS_AUDWRITE, dst + ab * 4, n - ab, 0)
+            } else {
+                got = ulib.sys4(SYS_AUDSEND, strom, dst + ab * 4, n - ab, 0)
+            }
+            if ulib.bad(got) {
+                ab = n
+                lauf = false
+            } else {
+                ab = ab + got
+                gesendet = gesendet + got
+                if got == 0 {
+                    // KEIN PLATZ. Die Position abfragen dreht zugleich
+                    // den Mischer -- ein Abspieler muss dafuer nichts
+                    // Eigenes tun -- und danach wird der Prozessor
+                    // ABGEGEBEN und nicht GESCHLAFEN.
+                    //
+                    // DER UNTERSCHIED IST GEMESSEN. `sleep_ms(1)`
+                    // schlaeft in diesem System bis zum naechsten
+                    // Zeitgeberschlag, also bis zu zehn
+                    // Millisekunden. Der Ring fasst 85; wer bei jedem
+                    // vollen Puffer zehn Millisekunden schlaeft,
+                    // verliert seinen Platz in der Warteschlange und
+                    // kommt zu spaet zurueck. GEMESSEN: 158 Aussetzer
+                    // und 19499 aufgegebene Rahmen fuer eine Sekunde
+                    // Ton. Mit `yield` sind es null.
+                    // RUNDE TON-2: WARTEN STATT LEER DREHEN.
+                    //
+                    // HIER STAND EIN SPIN, und er war gemessen teuer:
+                    // `A_PLAYED` + `SYS_YIELD` in einer engen Schleife,
+                    // 139290 Durchgaenge fuer EINE Sekunde Ton. Das
+                    // sind 278580 Systemaufrufe -- zwei Drittel aller
+                    // 418952 Aufrufe des Laufes, und keiner davon hat
+                    // einen einzigen Rahmen bewegt. Er stand hier aus
+                    // einem guten Grund: `sleep_ms(1)` schlaeft in
+                    // diesem Kernel volle zehn Millisekunden.
+                    //
+                    // JETZT RECHNET DER KERN. `AS_WAITSPACE` sagt ihm,
+                    // wie viele Rahmen gebraucht werden; er kennt
+                    // Fuellstand und Abtastrate, schlaeft genau so
+                    // lange und gibt zurueck, wie viel Platz ist. Ein
+                    // Aufruf statt zweien, und dazwischen laeuft der
+                    // Prozessor woanders.
+                    let bitte: u64 = n -% ab
+                    var v: u64 = bitte / 16
+                    if v > 255 {
+                        v = 255
+                    }
+                    if v == 0 {
+                        v = 1
+                    }
+                    // KENNUNG UM EINS VERSCHOBEN -- der erste
+                    // Mischerstrom hat die Nummer 0, und die ist im
+                    // Argument fuer den Einstromweg vergeben.
+                    var kenn: u64 = strom + 1
+                    if einstrom {
+                        kenn = 0
+                    }
+                    wart = wart + 1
+                    // Die WARTEZEIT gehoert getrennt gezaehlt: sie ist
+                    // die Zeit, in der das GERAET arbeitet und der
+                    // Abspieler nichts zu tun hat. Sie mit dem
+                    // Abschicken in eine Zahl zu werfen, laesst einen
+                    // gesunden Lauf wie einen langsamen aussehen.
+                    let t_w: u64 = jetzt_us()
+                    ulib.sys(SYS_AUDSET, AS_WAITSPACE,
+                        (kenn << 8) | v, 0)
+                    us_warten = us_warten +% (jetzt_us() -% t_w)
+                }
+            }
+        }
+        // NACH JEDEM SCHUB EINMAL ABGEBEN -- und diese Zeile BLEIBT,
+        // obwohl `AS_WAITSPACE` sie ueberfluessig erscheinen laesst.
+        //
+        // GEMESSEN, WEIL VERMUTET: mit dem blockierenden Warten sah
+        // sie nach totem Aufwand aus (der Kern weckt doch selbst, und
+        // er pumpt im selben Aufruf). Sie zu entfernen war ein
+        // eigener Lauf, und er ging in die falsche Richtung --
+        // Aussetzer 1 -> 4, Systemaufrufe 2095 -> 3594, Wartedrehungen
+        // 329 -> 662.
+        //
+        // DER GRUND: `AS_WAITSPACE` laeuft NUR, wenn der Ring voll ist.
+        // Solange Platz da ist, laeuft die Schleife durch, ohne je in
+        // den Kern zu gehen -- und fuellt in einem Zug so viel nach,
+        // dass der Mischer danach mehr zu tun hat, als in einen
+        // Zeitgeberschlag passt. Das Abgeben verteilt die Arbeit.
+        ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
+        us_senden = us_senden +% (jetzt_us() -% t_s)
+        // RUNDE TON-2: DER SYSTEMKLANG MITTEN IM STUECK.
+        //
+        // `schub` zaehlt die Durchgaenge; beim verlangten wird EIN
+        // Hinweiston ausgeloest. Der geht durch den Mischer (`AS_SOUND`,
+        // audio.sys_sound) und bekommt einen eigenen Strom -- die
+        // Musik laeuft dabei weiter, und genau das weist die Abnahme
+        // nach: die Musik hat hinterher keine Luecke.
+        schub = schub + 1
+        if klick_bei > 0 && schub == klick_bei {
+            let r: u64 = ulib.sys(SYS_AUDSET, AS_SOUND, 1, 0)
+            ulib.say((&s_kl[0 as usize]) as u64)
+            ulib.sayu(r)
+            ulib.nl()
+        }
+        if ist_wav && rest == 0 {
+            // RUNDE TON-2: AM ENDE DER DATEI NOCH EINMAL VON VORN.
+            //
+            // Der Strom wird NICHT geschlossen und der Ring NICHT
+            // geleert -- es wird nur wieder an den Anfang der
+            // Nutzdaten gesprungen. Genau das macht die Naht zur
+            // Pruefung: waere hier eine Luecke, stuende sie als
+            // Nullstrecke in der Ausgabedatei, und `wavcheck.py`
+            // zaehlt sie (`gaps=`).
+            if runden_uebrig > 1 {
+                runden_uebrig = runden_uebrig -% 1
+                rest = w_len
+                quelle = w_off
+                rawpos = 0
+                rawlen = 0
+                ulib.sys(ulib.SYS_SEEK, wfd, w_off, 0)
+            } else {
+                lauf = false
+            }
+        }
+    }
+
+    // 3. auslaufen lassen
+    if einstrom {
+        ulib.sys(SYS_AUDSET, AS_DRAIN, 0, 0)
+    } else {
+        ulib.sys(SYS_AUDSET, AS_END, strom, 0)
+    }
+    // AUSLAUFEN. Die Bedingung ist EINE: im Geraetering ist nichts
+    // mehr. `AS_PUMP` steht davor, damit der Mischer vorher noch
+    // hergibt, was er hat -- danach heisst "der Ring ist leer" wirklich
+    // "es kommt nichts mehr".
+    //
+    // FRUEHER STAND HIER ZUSAETZLICH "und der Mischer hat keine
+    // Stroeme mehr". Das war eine Bedingung zu viel: der Strom wird
+    // erst geschlossen, wenn der Mischer ihn leer gelesen hat, und
+    // gelesen wird nur, wenn im Ring Platz ist. Ein Abspieler, der auf
+    // beides wartet, dreht seine Schleife leer -- GEMESSEN: 4000
+    // Runden, viereinhalb Sekunden fuer eine Sekunde Ton.
+    var runde: u64 = 0
+    var fertig: bool = false
+    while !fertig && runde < 2000 {
+        ulib.sys(SYS_AUDSET, AS_PUMP, 0, 0)
+        let r: u64 = ulib.sys(SYS_AUDGET, A_REMAIN, 0, 0)
+        if r == 0 {
+            fertig = true
+        } else {
+            // HIER wird GESCHLAFEN und nicht abgegeben, und das ist
+            // der Unterschied zur Schleife oben: dort wartet das
+            // Programm auf PLATZ (Mikrosekunden), hier auf das
+            // AUSLAUFEN des Puffers (bis zu vierhundert
+            // Millisekunden). Eine Schleife, die dabei nur abgibt,
+            // dreht in zwanzig Millisekunden zweitausend Runden und
+            // laeuft in ihre eigene Obergrenze -- gemessen, und es sah
+            // aus wie eine Verklemmung.
+            ulib.sleep_ms(2)
+        }
+        runde = runde + 1
+    }
+    let gespielt: u64 = ulib.sys(SYS_AUDGET, A_PLAYED, 0, 0)
+    let unter: u64 = ulib.sys(SYS_AUDGET, A_UNDERRUNS, 0, 0)
+    let lat: u64 = ulib.sys(SYS_AUDGET, A_LATENCY, 0, 0)
+    let bk: u64 = ulib.sys(SYS_AUDGET, A_BACKEND, 0, 0)
+    let gm: u64 = ulib.sys(SYS_AUDGET, A_MIXED, 0, 0)
+    if einstrom {
+        ulib.sys(SYS_AUDSET, AS_STOP, 0, 0)
+        ulib.sys(SYS_AUDSET, AS_OPEN, 0, 0)
+    } else {
+        ulib.sys(SYS_AUDSET, AS_CLOSE, strom, 0)
+    }
+    if ist_wav {
+        ulib.sys(ulib.SYS_CLOSE, wfd, 0, 0)
+    }
+    media.src_close()
+
+    ulib.say((&s_pl[0 as usize]) as u64)
+    ulib.sayu(gesendet)
+    ulib.nl()
+    ulib.say((&s_un[0 as usize]) as u64)
+    ulib.sayu(unter)
+    ulib.nl()
+    ulib.say((&s_lat[0 as usize]) as u64)
+    ulib.sayu(lat)
+    ulib.nl()
+    ulib.say((&s_bk[0 as usize]) as u64)
+    ulib.sayu(bk)
+    ulib.nl()
+    // RUNDE TON-2: WAS DER MISCHER GETAN HAT. `begrenzt` ist die
+    // Zahl, mit der "ohne Uebersteuerung" eine Messung wird und keine
+    // Hoffnung; `systemklaenge` zeigt, dass ein Klick NEBEN der Musik
+    // durchgegangen ist und sie nicht unterbrochen hat.
+    ulib.say((&s_cl[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(SYS_AUDGET, A_CLIPS, 0, 0))
+    ulib.nl()
+    ulib.say((&s_sk[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(SYS_AUDGET, A_SYSSOUNDS, 0, 0))
+    ulib.nl()
+    ulib.say((&s_mx[0 as usize]) as u64)
+    ulib.sayu(gm)
+    ulib.nl()
+    var s_me: [u8; 14] = "  mp3fehler: \0"
+    var s_ms2: [u8; 14] = "  mp3rahmen: \0"
+    if !ist_wav {
+        ulib.say((&s_me[0 as usize]) as u64)
+        ulib.sayu(mp3.mp3_errors())
+        ulib.nl()
+        ulib.say((&s_ms2[0 as usize]) as u64)
+        ulib.sayu(mp3.mp3_skipped())
+        ulib.nl()
+    }
+    var s_wa: [u8; 12] = "  wartete: \0"
+    var s_tk: [u8; 12] = "  marken: \0\0"
+    ulib.say((&s_wa[0 as usize]) as u64)
+    ulib.sayu(wart)
+    ulib.nl()
+    ulib.say((&s_tk[0 as usize]) as u64)
+    ulib.sayu(runde)
+    ulib.nl()
+    var s_lo: [u8; 14] = "  verloren: \0\0"
+    var s_zo: [u8; 13] = "  genullt: \0\0"
+    var s_gp: [u8; 14] = "  luecke_us: \0"
+    var s_sy: [u8; 13] = "  kern_us: \0\0"
+    var s_wl: [u8; 13] = "  wand_us: \0\0"
+    var s_ca: [u8; 12] = "  schuebe: \0"
+    var s_mf: [u8; 14] = "  minvorrat: \0"
+    var s_ls: [u8; 14] = "  drehungen: \0"
+    var s_r1: [u8; 14] = "  lesen_us: \0\0"
+    var s_r2: [u8; 15] = "  rechnen_us: \0"
+    var s_r3: [u8; 14] = "  senden_us: \0"
+    var s_r4: [u8; 14] = "  ring3_us: \0\0"
+    var s_r5: [u8; 17] = "  aufbereit_us: \0"
+    var s_r6: [u8; 14] = "  warten_us: \0"
+    ulib.say((&s_lo[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(SYS_AUDGET, A_LOST, 0, 0))
+    ulib.nl()
+    ulib.say((&s_zo[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(SYS_AUDGET, A_ZEROED, 0, 0))
+    ulib.nl()
+    // DIE VIER ZAHLEN, DIE EINEN AUSSETZER ERKLAEREN. luecke_us ist
+    // die groesste Pause zwischen zwei Schueben; ist sie groesser als
+    // die Ringlatenz, kam Ring 3 zu spaet. kern_us gegen wand_us sagt,
+    // wie viel davon der Kern selbst verbraucht hat.
+    ulib.say((&s_gp[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(SYS_AUDGET, A_GAPMAX, 0, 0))
+    ulib.nl()
+    ulib.say((&s_sy[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(SYS_AUDGET, A_SYSUS, 0, 0))
+    ulib.nl()
+    ulib.say((&s_wl[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(SYS_AUDGET, A_WALLUS, 0, 0))
+    ulib.nl()
+    ulib.say((&s_ca[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(SYS_AUDGET, A_CALLS, 0, 0))
+    ulib.nl()
+    ulib.say((&s_mf[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(SYS_AUDGET, A_MINFILL, 0, 0))
+    ulib.nl()
+    ulib.say((&s_ls[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(SYS_AUDGET, A_LOCKSPIN, 0, 0))
+    ulib.nl()
+    // WO DIE ZEIT BLEIBT. ring3_us ist die ganze Schleife; lesen,
+    // rechnen und senden teilen sie auf. Was uebrig bleibt, ist die
+    // Schleife selbst.
+    us_rechnen = (jetzt_us() -% us_start) -% us_lesen -% us_senden
+    ulib.say((&s_r1[0 as usize]) as u64)
+    ulib.sayu(us_lesen)
+    ulib.nl()
+    ulib.say((&s_r2[0 as usize]) as u64)
+    ulib.sayu(us_rechnen)
+    ulib.nl()
+    ulib.say((&s_r3[0 as usize]) as u64)
+    ulib.sayu(us_senden)
+    ulib.nl()
+    ulib.say((&s_r4[0 as usize]) as u64)
+    ulib.sayu(jetzt_us() -% us_start)
+    ulib.nl()
+    // RUNDE TON-2: die beiden GEMESSENEN Zahlen daneben.
+    // aufbereit_us ist das Lesen+Umrechnen eines Schubes,
+    // warten_us die Zeit im blockierenden `AS_WAITSPACE`.
+    // Zusammen mit lesen_us und senden_us erklaeren sie ring3_us
+    // OHNE eine Restgroesse.
+    ulib.say((&s_r5[0 as usize]) as u64)
+    ulib.sayu(us_auf)
+    ulib.nl()
+    ulib.say((&s_r6[0 as usize]) as u64)
+    ulib.sayu(us_warten)
+    ulib.nl()
+    let gp: u64 = gespielt
+    if gp == 0 {
+        return 0
+    }
+    return 0
+}
+
+// Mono auf zwei Kanaele. Sie steht als eigene Funktion da, weil sie
+// zweimal gebraucht wird und weil sie die einzige Stelle ist, an der
+// dieses Programm Abtastwerte anfasst.
+fn mono_to_stereo(src: u64, dst: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        let lo: u64 = __mmio_read8((src + i * 2) as *mut u8) as u64
+        let hi: u64 = __mmio_read8((src + i * 2 + 1) as *mut u8) as u64
+        __mmio_write8((dst + i * 4) as *mut u8, lo as u8)
+        __mmio_write8((dst + i * 4 + 1) as *mut u8, hi as u8)
+        __mmio_write8((dst + i * 4 + 2) as *mut u8, lo as u8)
+        __mmio_write8((dst + i * 4 + 3) as *mut u8, hi as u8)
+        i = i + 1
+    }
+}

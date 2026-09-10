@@ -1,0 +1,685 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/zip.fi -- Runde ALLTAG: PACKEN UND ENTPACKEN.
+//
+//   zip -c archiv.zip datei [datei ...]   packen (Ordner werden begangen)
+//   zip -x archiv.zip [zielordner]        entpacken
+//   zip -t archiv.zip                     nur aufzaehlen
+//   zip -0c archiv.zip datei              packen OHNE zu verkleinern
+//
+// WARUM ZIP UND NICHT TAR. Es gibt `tar` in diesem System, und es ist
+// das bessere Archivformat. Nur bekommt niemand ein tar geschickt: was
+// aus einem Browser, aus einer Mail und von jedem anderen Betriebssystem
+// kommt, ist ein ZIP. Ein Schreibtisch, der es nicht aufmachen kann,
+// ist am ersten Tag unbrauchbar -- das ist die ganze Begruendung.
+//
+// DER ALGORITHMUS IST SCHON DA. `kernel/user/flate.fi` (Runde GZIP)
+// kann deflate und inflate mit festen UND dynamischen Baeumen und
+// rechnet CRC-32; ein ZIP ist im Kern nichts anderes als deflate-Bloecke
+// mit Buchhaltung davor und dahinter. Hier steht also nur die
+// Buchhaltung:
+//
+//   lokaler Kopf   50 4B 03 04, je Eintrag, direkt vor den Daten
+//   Verzeichnis    50 4B 01 02, alle Eintraege noch einmal, am Ende
+//   Abschluss      50 4B 05 06, sagt, wo das Verzeichnis anfaengt
+//
+// GELESEN WIRD UEBER DAS VERZEICHNIS und nicht ueber die lokalen
+// Koepfe: ein ZIP, an das etwas angehaengt wurde, hat gueltige Daten
+// nur dort, und jedes fremde Werkzeug macht es so.
+//
+// WAS ES NICHT KANN, und es steht hier und nicht in einer Fussnote:
+// keine Verschluesselung, kein ZIP64 (also nichts ueber 4 GiB und nicht
+// mehr als 65535 Eintraege), kein bzip2/lzma/zstd als Verfahren. Trifft
+// es auf eines davon, sagt es das und bricht ab, statt Unsinn
+// auszupacken.
+
+profile kernel
+
+import ulib
+import libc.io
+import tools
+import flate
+
+export { u_start }
+
+const ARCH_CAP: u64 = 786432 // das ganze Archiv beim Lesen
+const FILE_CAP: u64 = 262144 // eine Datei, unverpackt
+const COMP_CAP: u64 = 278528 // dieselbe Datei, verpackt (mit Luft)
+const MAXE: u64 = 256 // Eintraege
+const NAMEC: u64 = 112 // Oktette je Name
+
+static mut arch: [u8; 786432] = [0 as u8; 786432]
+static mut fbuf: [u8; 262144] = [0 as u8; 262144]
+static mut cbuf: [u8; 278528] = [0 as u8; 278528]
+static mut hdr: [u8; 128] = [0 as u8; 128]
+static mut namen: [u8; 28672] = [0 as u8; 28672]
+static mut e_off: [u64; 256] = [0; 256]
+static mut e_crc: [u64; 256] = [0; 256]
+static mut e_csz: [u64; 256] = [0; 256]
+static mut e_usz: [u64; 256] = [0; 256]
+static mut e_dir: [u64; 256] = [0; 256]
+static mut e_verf: [u64; 256] = [0; 256]
+static mut ne: u64 = 0
+static mut afd: u64 = 0
+static mut apos: u64 = 0
+static mut store_only: bool = false
+static mut verbose: bool = true
+static mut pfad: [u8; 512] = [0 as u8; 512]
+static mut ziel: [u8; 512] = [0 as u8; 512]
+
+fn say(p: u64) {
+    ulib.say(p)
+}
+
+fn nl() {
+    ulib.nl()
+}
+
+fn name_at(i: u64) -> u64 {
+    return (&namen[(0) as usize]) as u64 + i * NAMEC
+}
+
+// -------------------------------------------------- Oktette und Zahlen
+
+fn ld8(p: u64, at: u64) -> u64 {
+    return (*((p + at) as *mut u8)) as u64
+}
+
+fn ld16(p: u64, at: u64) -> u64 {
+    return ld8(p, at) | (ld8(p, at + 1) << 8)
+}
+
+fn ld32(p: u64, at: u64) -> u64 {
+    return ld16(p, at) | (ld16(p, at + 2) << 16)
+}
+
+fn st8(p: u64, at: u64, v: u64) {
+    __mmio_write8((p + at) as *mut u8, (v & 255) as u8)
+}
+
+fn st16(p: u64, at: u64, v: u64) {
+    st8(p, at, v)
+    st8(p, at + 1, v >> 8)
+}
+
+fn st32(p: u64, at: u64, v: u64) {
+    st16(p, at, v)
+    st16(p, at + 2, v >> 16)
+}
+
+// ------------------------------------------------------------ schreiben
+
+fn aus(p: u64, n: u64) -> bool {
+    let g: u64 = io.write_all(afd, p, n)
+    if ulib.bad(g) || g < n {
+        return false
+    }
+    apos = apos + n
+    return true
+}
+
+// Ein lokaler Kopf. Die Zeit steht als Null darin und nicht als
+// erfundene Zahl: dieses System hat beim Packen eine Uhr (io.now_sec),
+// aber keine Ortszeit-Zerlegung in die MS-DOS-Form, und ein falsches
+// Datum ist schlimmer als gar keines.
+fn kopf_lokal(i: u64, nlen: u64) -> bool {
+    let h: u64 = (&hdr[(0) as usize]) as u64
+    ulib.fill(h, 0, 30)
+    st32(h, 0, 0x04034B50)
+    st16(h, 4, 20) // Fassung, die es braucht: 2.0
+    st16(h, 6, 0)
+    st16(h, 8, e_verf[(i) as usize])
+    st16(h, 10, 0)
+    st16(h, 12, 0)
+    st32(h, 14, e_crc[(i) as usize])
+    st32(h, 18, e_csz[(i) as usize])
+    st32(h, 22, e_usz[(i) as usize])
+    st16(h, 26, nlen)
+    st16(h, 28, 0)
+    return aus(h, 30)
+}
+
+fn kopf_zentral(i: u64, nlen: u64) -> bool {
+    let h: u64 = (&hdr[(0) as usize]) as u64
+    ulib.fill(h, 0, 46)
+    st32(h, 0, 0x02014B50)
+    st16(h, 4, 20)
+    st16(h, 6, 20)
+    st16(h, 8, 0)
+    st16(h, 10, e_verf[(i) as usize])
+    st32(h, 16, e_crc[(i) as usize])
+    st32(h, 20, e_csz[(i) as usize])
+    st32(h, 24, e_usz[(i) as usize])
+    st16(h, 28, nlen)
+    // Aussenattribute: bei einem Ordner das Verzeichnisbit, damit
+    // fremde Werkzeuge ihn als Ordner anlegen.
+    if e_dir[(i) as usize] != 0 {
+        st32(h, 38, 0x41FF0010)
+    } else {
+        st32(h, 38, 0x81A40000)
+    }
+    st32(h, 42, e_off[(i) as usize])
+    return aus(h, 46)
+}
+
+fn schluss(vz_off: u64, vz_len: u64) -> bool {
+    let h: u64 = (&hdr[(0) as usize]) as u64
+    ulib.fill(h, 0, 22)
+    st32(h, 0, 0x06054B50)
+    st16(h, 8, ne)
+    st16(h, 10, ne)
+    st32(h, 12, vz_len)
+    st32(h, 16, vz_off)
+    return aus(h, 22)
+}
+
+fn lesen_ganz(pfad_p: u64) -> u64 {
+    let fd: u64 = tools.openr(pfad_p)
+    if ulib.bad(fd) {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    var n: u64 = 0
+    var weiter: bool = true
+    while weiter {
+        let g: u64 = io.read(fd, (&fbuf[(0) as usize]) as u64 + n,
+            FILE_CAP - n)
+        if ulib.bad(g) || g == 0 {
+            weiter = false
+        } else {
+            n = n + g
+            if n >= FILE_CAP {
+                weiter = false
+            }
+        }
+    }
+    io.close(fd)
+    return n
+}
+
+// Eine Datei ins Archiv. Verkleinert wird nur, wenn es sich lohnt --
+// ein schon verkleinertes Bild wird durch deflate GROESSER, und dann
+// steht es unverpackt darin (Verfahren 0), wie es jedes andere
+// Packprogramm auch macht.
+fn eintrag(fs_pfad: u64, name: u64, ist_dir: bool) -> bool {
+    var s_gross: [u8; 24] = "zip: zu viele Eintraege\0"
+    var s_lang: [u8; 20] = "zip: Name zu lang: \0"
+    var s_lesen: [u8; 24] = "zip: kann nicht lesen: \0"
+    var s_gr: [u8; 32] = "zip: zu gross (ueber 256 KiB): \0"
+    if ne >= MAXE {
+        say((&s_gross[(0) as usize]) as u64)
+        nl()
+        return false
+    }
+    let nlen: u64 = ulib.length(name)
+    if nlen >= NAMEC {
+        ulib.esay_line((&s_lang[(0) as usize]) as u64, name)
+        return false
+    }
+    ulib.strncpy(name_at(ne), name, NAMEC)
+    var roh: u64 = 0
+    if !ist_dir {
+        let g: u64 = lesen_ganz(fs_pfad)
+        if g == 0xFFFFFFFFFFFFFFFF {
+            ulib.esay_line((&s_lesen[(0) as usize]) as u64, fs_pfad)
+            return false
+        }
+        if g >= FILE_CAP {
+            ulib.esay_line((&s_gr[(0) as usize]) as u64, fs_pfad)
+            return false
+        }
+        roh = g
+    }
+    e_dir[(ne) as usize] = 0
+    if ist_dir {
+        e_dir[(ne) as usize] = 1
+    }
+    e_usz[(ne) as usize] = roh
+    e_crc[(ne) as usize] = flate.crc32((&fbuf[(0) as usize]) as u64, roh)
+    e_off[(ne) as usize] = apos
+    // DAS VERFAHREN JE EINTRAG, und nicht ein Schalter, der beim
+    // zentralen Verzeichnis schon wieder anders steht. Genau das war
+    // hier zuerst falsch: der lokale Kopf sagte 0, das Verzeichnis 8,
+    // und ein fremdes Werkzeug haette den Eintrag als kaputt gemeldet.
+    var clen: u64 = roh
+    var daten: u64 = (&fbuf[(0) as usize]) as u64
+    e_verf[(ne) as usize] = 0
+    if roh > 0 && !store_only {
+        var raus: u64 = 0
+        let rc: u64 = flate.deflate((&fbuf[(0) as usize]) as u64, roh,
+            (&cbuf[(0) as usize]) as u64, COMP_CAP,
+            (&raus) as u64)
+        if rc == flate.E_OK && raus < roh {
+            clen = raus
+            daten = (&cbuf[(0) as usize]) as u64
+            e_verf[(ne) as usize] = 8
+        }
+    }
+    e_csz[(ne) as usize] = clen
+    if !kopf_lokal(ne, nlen) {
+        return false
+    }
+    if !aus(name, nlen) {
+        return false
+    }
+    if clen > 0 && !aus(daten, clen) {
+        return false
+    }
+    if verbose {
+        say(name)
+        nl()
+    }
+    ne = ne + 1
+    return true
+}
+
+fn punkt(name: u64) -> bool {
+    if *((name) as *mut u8) != 46 as u8 {
+        return false
+    }
+    if *((name + 1) as *mut u8) == 0 as u8 {
+        return true
+    }
+    return *((name + 1) as *mut u8) == 46 as u8
+        && *((name + 2) as *mut u8) == 0 as u8
+}
+
+// Einen Ordner begehen. Die Rekursion laeuft ueber den Pfadpuffer, der
+// waehrenddessen laenger und wieder kuerzer wird -- kein zweiter Puffer
+// je Ebene, weil dieses System keine Halde in Ring 3 hat.
+fn begehen(fs_pfad: u64, name: u64, tiefe: u64) -> bool {
+    var s_tief: [u8; 29] = "zip: zu tief verschachtelt: \0"
+    var slash: [u8; 2] = "/\0"
+    if tiefe > 12 {
+        ulib.esay_line((&s_tief[(0) as usize]) as u64, fs_pfad)
+        return false
+    }
+    var dname: [u8; 128] = [0 as u8; 128]
+    var kind: [u8; 512] = [0 as u8; 512]
+    var kname: [u8; 128] = [0 as u8; 128]
+    ulib.strncpy((&dname[(0) as usize]) as u64, name, 120)
+    ulib.strcat((&dname[(0) as usize]) as u64, (&slash[(0) as usize]) as u64)
+    if !eintrag(fs_pfad, (&dname[(0) as usize]) as u64, true) {
+        return false
+    }
+    let fd: u64 = io.dir_open(fs_pfad)
+    if ulib.bad(fd) {
+        return false
+    }
+    var buf: [u8; 1024] = [0 as u8; 1024]
+    var gut: bool = true
+    var weiter: bool = true
+    while weiter {
+        let n: u64 = io.dir_read(fd, (&buf[(0) as usize]) as u64, 1024)
+        if ulib.bad(n) || n == 0 {
+            weiter = false
+        } else {
+            var at: u64 = 0
+            while at < n {
+                let rec: u64 = (&buf[(0) as usize]) as u64 + at
+                let nm: u64 = io.dir_name(rec)
+                if !punkt(nm) {
+                    tools.join((&kind[(0) as usize]) as u64, fs_pfad, nm)
+                    ulib.strncpy((&kname[(0) as usize]) as u64,
+                        (&dname[(0) as usize]) as u64, 120)
+                    ulib.strcat((&kname[(0) as usize]) as u64, nm)
+                    if ulib.is_dir((&kind[(0) as usize]) as u64) {
+                        if !begehen((&kind[(0) as usize]) as u64,
+                            (&kname[(0) as usize]) as u64, tiefe + 1) {
+                            gut = false
+                        }
+                    } else {
+                        if !eintrag((&kind[(0) as usize]) as u64,
+                            (&kname[(0) as usize]) as u64, false) {
+                            gut = false
+                        }
+                    }
+                }
+                at = at + io.dir_reclen(rec)
+            }
+        }
+    }
+    io.close(fd)
+    return gut
+}
+
+fn packen(archiv: u64, args: u64, ab: u64, argc: u64) -> u64 {
+    var s_auf: [u8; 28] = "zip: kann nicht schreiben: \0"
+    var s_leer: [u8; 22] = "zip: nichts zu packen\0"
+    afd = tools.openw(archiv)
+    if ulib.bad(afd) {
+        ulib.esay_line((&s_auf[(0) as usize]) as u64, archiv)
+        return 1
+    }
+    apos = 0
+    ne = 0
+    var gut: bool = true
+    var a: u64 = ab
+    while a < argc {
+        let p: u64 = ulib.arg_at(args, a)
+        let base: u64 = ulib.base_name(p)
+        if ulib.is_dir(p) {
+            if !begehen(p, base, 0) {
+                gut = false
+            }
+        } else {
+            if !eintrag(p, base, false) {
+                gut = false
+            }
+        }
+        a = a + 1
+    }
+    if ne == 0 {
+        say((&s_leer[(0) as usize]) as u64)
+        nl()
+        io.close(afd)
+        return 1
+    }
+    let vz: u64 = apos
+    var i: u64 = 0
+    while i < ne && gut {
+        let nlen: u64 = ulib.length(name_at(i))
+        if !kopf_zentral(i, nlen) {
+            gut = false
+        } else if !aus(name_at(i), nlen) {
+            gut = false
+        }
+        i = i + 1
+    }
+    if gut {
+        gut = schluss(vz, apos - vz)
+    }
+    io.close(afd)
+    if !gut {
+        return 1
+    }
+    var s_fertig: [u8; 16] = "zip: Eintraege \0"
+    var s_okt: [u8; 10] = " Oktette \0"
+    say((&s_fertig[(0) as usize]) as u64)
+    ulib.sayn(ne)
+    say((&s_okt[(0) as usize]) as u64)
+    ulib.sayn(apos)
+    nl()
+    return 0
+}
+
+// -------------------------------------------------------------- lesen
+
+static mut alen: u64 = 0
+
+fn archiv_lesen(pfad_p: u64) -> bool {
+    let fd: u64 = tools.openr(pfad_p)
+    if ulib.bad(fd) {
+        return false
+    }
+    alen = 0
+    var weiter: bool = true
+    while weiter {
+        let g: u64 = io.read(fd, (&arch[(0) as usize]) as u64 + alen,
+            ARCH_CAP - alen)
+        if ulib.bad(g) || g == 0 {
+            weiter = false
+        } else {
+            alen = alen + g
+            if alen >= ARCH_CAP {
+                weiter = false
+            }
+        }
+    }
+    io.close(fd)
+    return alen > 22
+}
+
+// Den Abschlussblock suchen -- von hinten, weil hinter ihm ein
+// Kommentar stehen darf.
+fn eocd_suchen() -> u64 {
+    let a: u64 = (&arch[(0) as usize]) as u64
+    var at: u64 = alen - 22
+    var gefunden: u64 = 0xFFFFFFFFFFFFFFFF
+    var schritte: u64 = 0
+    while schritte < 65558 && gefunden == 0xFFFFFFFFFFFFFFFF {
+        if ld32(a, at) == 0x06054B50 {
+            gefunden = at
+        }
+        if at == 0 {
+            schritte = 65558
+        } else {
+            at = at - 1
+            schritte = schritte + 1
+        }
+    }
+    return gefunden
+}
+
+// Die Ordner ueber einer Datei anlegen, von links nach rechts.
+fn dirs_machen(p: u64) {
+    var i: u64 = 1
+    while *((p + i) as *mut u8) != 0 as u8 {
+        if *((p + i) as *mut u8) == 47 as u8 {
+            __mmio_write8((p + i) as *mut u8, 0 as u8)
+            let _r: u64 = io.make_dir(p)
+            __mmio_write8((p + i) as *mut u8, 47 as u8)
+        }
+        i = i + 1
+    }
+}
+
+fn ist_boese(name: u64) -> bool {
+    // Ein Eintrag, der mit / anfaengt oder .. enthaelt, schreibt aus
+    // dem Zielordner heraus. Das ist der aelteste Fehler beim
+    // Entpacken, und er wird hier abgelehnt und nicht repariert.
+    if *((name) as *mut u8) == 47 as u8 {
+        return true
+    }
+    var i: u64 = 0
+    while *((name + i) as *mut u8) != 0 as u8 {
+        if *((name + i) as *mut u8) == 46 as u8
+            && *((name + i + 1) as *mut u8) == 46 as u8 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn entpacken(archiv: u64, zielp: u64, nur_liste: bool) -> u64 {
+    var s_auf: [u8; 24] = "zip: kann nicht lesen: \0"
+    var s_kein: [u8; 45] = "zip: kein ZIP-Archiv (kein Abschlussblock): \0"
+    var s_verf: [u8; 32] = "zip: unbekanntes Verfahren bei \0"
+    var s_crypt: [u8; 42] = "zip: verschluesselt, das kann ich nicht: \0"
+    var s_boese: [u8; 39] = "zip: gefaehrlicher Name, uebergangen: \0"
+    var s_crc: [u8; 28] = "zip: Pruefsumme falsch bei \0"
+    var s_schr: [u8; 28] = "zip: kann nicht schreiben: \0"
+    var s_gr: [u8; 24] = "zip: Eintrag zu gross: \0"
+    var s_n: [u8; 16] = "zip: Eintraege \0"
+    var s_ok: [u8; 11] = " entpackt \0"
+    var slash: [u8; 2] = "/\0"
+    if !archiv_lesen(archiv) {
+        ulib.esay_line((&s_auf[(0) as usize]) as u64, archiv)
+        return 1
+    }
+    let a: u64 = (&arch[(0) as usize]) as u64
+    let eo: u64 = eocd_suchen()
+    if eo == 0xFFFFFFFFFFFFFFFF {
+        ulib.esay_line((&s_kein[(0) as usize]) as u64, archiv)
+        return 1
+    }
+    let anz: u64 = ld16(a, eo + 10)
+    var vz: u64 = ld32(a, eo + 16)
+    var fehler: u64 = 0
+    var getan: u64 = 0
+    var i: u64 = 0
+    while i < anz && vz + 46 <= alen {
+        if ld32(a, vz) != 0x02014B50 {
+            i = anz
+        } else {
+            let flags: u64 = ld16(a, vz + 8)
+            let verf: u64 = ld16(a, vz + 10)
+            let crc: u64 = ld32(a, vz + 16)
+            let csz: u64 = ld32(a, vz + 20)
+            let usz: u64 = ld32(a, vz + 24)
+            let nlen: u64 = ld16(a, vz + 28)
+            let elen: u64 = ld16(a, vz + 30)
+            let klen: u64 = ld16(a, vz + 32)
+            let lo: u64 = ld32(a, vz + 42)
+            // Der Name steht IM Puffer, also a + Offset. Hier stand
+            // `vz + 46` -- eine Adresse von 369, und der Prozess starb
+            // an ihr (user fault cr2=0x171).
+            let nm: u64 = a + vz + 46
+            var name: [u8; 256] = [0 as u8; 256]
+            var n2: u64 = nlen
+            if n2 > 250 {
+                n2 = 250
+            }
+            ulib.copy((&name[(0) as usize]) as u64, nm, n2)
+            __mmio_write8(((&name[(0) as usize]) as u64 + n2) as *mut u8,
+                0 as u8)
+            let ist_dir: bool = n2 > 0
+                && *((&name[((n2 - 1)) as usize]) as u64 as *mut u8)
+                    == 47 as u8
+            if nur_liste {
+                say((&name[(0) as usize]) as u64)
+                var sp: [u8; 3] = "  \0"
+                say((&sp[(0) as usize]) as u64)
+                ulib.sayn(usz)
+                nl()
+                getan = getan + 1
+            } else if (flags & 1) != 0 {
+                ulib.esay_line((&s_crypt[(0) as usize]) as u64,
+                    (&name[(0) as usize]) as u64)
+                fehler = fehler + 1
+            } else if ist_boese((&name[(0) as usize]) as u64) {
+                ulib.esay_line((&s_boese[(0) as usize]) as u64,
+                    (&name[(0) as usize]) as u64)
+                fehler = fehler + 1
+            } else if verf != 0 && verf != 8 {
+                ulib.esay_line((&s_verf[(0) as usize]) as u64,
+                    (&name[(0) as usize]) as u64)
+                fehler = fehler + 1
+            } else if usz > FILE_CAP {
+                ulib.esay_line((&s_gr[(0) as usize]) as u64,
+                    (&name[(0) as usize]) as u64)
+                fehler = fehler + 1
+            } else {
+                let z: u64 = (&ziel[(0) as usize]) as u64
+                ulib.strncpy(z, zielp, 400)
+                if ulib.length(z) > 0
+                    && *((z + ulib.length(z) - 1) as *mut u8) != 47 as u8 {
+                    ulib.strcat(z, (&slash[(0) as usize]) as u64)
+                }
+                ulib.strcat(z, (&name[(0) as usize]) as u64)
+                dirs_machen(z)
+                if ist_dir {
+                    let _r: u64 = io.make_dir(z)
+                    getan = getan + 1
+                } else {
+                    // Der lokale Kopf sagt, wie lang SEIN Name und SEIN
+                    // Zusatzfeld sind; die Zahlen aus dem Verzeichnis
+                    // gelten dafuer nicht (fremde Packer schreiben in
+                    // beide Verschiedenes).
+                    let lnl: u64 = ld16(a, lo + 26)
+                    let lel: u64 = ld16(a, lo + 28)
+                    let daten: u64 = lo + 30 + lnl + lel
+                    var raus: u64 = 0
+                    var ok: bool = true
+                    if verf == 0 {
+                        ulib.copy((&fbuf[(0) as usize]) as u64, a + daten,
+                            csz)
+                        raus = csz
+                    } else {
+                        let rc: u64 = flate.inflate(a + daten, csz,
+                            (&fbuf[(0) as usize]) as u64, FILE_CAP,
+                            (&raus) as u64)
+                        if rc != flate.E_OK {
+                            ok = false
+                        }
+                    }
+                    if ok && flate.crc32((&fbuf[(0) as usize]) as u64, raus)
+                        != crc {
+                        ok = false
+                        ulib.esay_line((&s_crc[(0) as usize]) as u64,
+                            (&name[(0) as usize]) as u64)
+                    }
+                    if !ok {
+                        fehler = fehler + 1
+                    } else {
+                        let fd: u64 = tools.openw(z)
+                        if ulib.bad(fd) {
+                            ulib.esay_line((&s_schr[(0) as usize]) as u64, z)
+                            fehler = fehler + 1
+                        } else {
+                            let g: u64 = io.write_all(fd,
+                                (&fbuf[(0) as usize]) as u64, raus)
+                            io.close(fd)
+                            if ulib.bad(g) || g < raus {
+                                ulib.esay_line((&s_schr[(0) as usize]) as u64,
+                                    z)
+                                fehler = fehler + 1
+                            } else {
+                                getan = getan + 1
+                                if verbose {
+                                    say((&name[(0) as usize]) as u64)
+                                    nl()
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            vz = vz + 46 + nlen + elen + klen
+        }
+        i = i + 1
+    }
+    say((&s_n[(0) as usize]) as u64)
+    ulib.sayn(anz)
+    say((&s_ok[(0) as usize]) as u64)
+    ulib.sayn(getan)
+    nl()
+    if fehler != 0 {
+        return 1
+    }
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_use: [u8; 50] = "zip: zip -c|-x|-t archiv.zip [dateien|zielordner]\0"
+    var s_hier: [u8; 2] = ".\0"
+    let argc: u64 = ulib.arg_count(args)
+    var modus: u64 = 0
+    var at: u64 = 1
+    if at < argc {
+        let a: u64 = ulib.arg_at(args, at)
+        var i: u64 = 0
+        if *((a) as *mut u8) == 45 as u8 {
+            i = 1
+        }
+        while *((a + i) as *mut u8) != 0 as u8 {
+            let c: u64 = (*((a + i) as *mut u8)) as u64
+            if c == 99 || c == 120 || c == 116 {
+                modus = c
+            } else if c == 48 {
+                store_only = true
+            } else if c == 113 {
+                verbose = false
+            }
+            i = i + 1
+        }
+        at = at + 1
+    }
+    if modus == 0 || at >= argc {
+        ulib.esay_line((&s_use[(0) as usize]) as u64, 0)
+        return 2
+    }
+    let archiv: u64 = ulib.arg_at(args, at)
+    at = at + 1
+    if modus == 99 {
+        if at >= argc {
+            ulib.esay_line((&s_use[(0) as usize]) as u64, 0)
+            return 2
+        }
+        return packen(archiv, args, at, argc)
+    }
+    var z: u64 = (&s_hier[(0) as usize]) as u64
+    if at < argc {
+        z = ulib.arg_at(args, at)
+    }
+    return entpacken(archiv, z, modus == 116)
+}

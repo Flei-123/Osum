@@ -61,6 +61,7 @@ fn u_start(args: u64) -> u64 {
     memory()
     pipes()
     children()
+    fremdland()
     errors()
     var done: [u8; 21] = "posix: lines = \0\0\0\0\0\0"
     stdio.say((&done[0]) as u64)
@@ -68,6 +69,116 @@ fn u_start(args: u64) -> u64 {
     stdio.nl()
     stdio.flush()
     return lines
+}
+
+// ------------------------------- RUNDE FREMDLAND: die neuen Nummern
+//
+// Jede Nummer, die diese Runde ergaenzt hat, mit einer Antwort, die
+// nachpruefbar ist -- und zu jeder eine GEGENPROBE, wo es eine gibt.
+// Eine Nummer, die nur "kein -ENOSYS" liefert, ist nicht gemessen.
+fn fremdland() {
+    var n_uname: [u8; 12] = "uname sys\0\0\0"
+    var n_unamem: [u8; 13] = "uname mach\0\0\0"
+    var n_unamef: [u8; 13] = "uname faul\0\0\0"
+    var n_prctl: [u8; 12] = "prctl name\0\0"
+    var n_prctlg: [u8; 13] = "prctl getnm\0\0"
+    var n_prctlb: [u8; 12] = "prctl bad\0\0\0"
+    var n_mprot: [u8; 9] = "mprotect\0"
+    var n_mprotb: [u8; 13] = "mprotect un\0\0"
+    var n_futexa: [u8; 12] = "futex weck\0\0"
+    var n_futexb: [u8; 12] = "futex wert\0\0"
+    var n_futexc: [u8; 12] = "futex schr\0\0"
+    var n_lockw: [u8; 11] = "lock setzt\0"
+    var n_lockg: [u8; 11] = "lock frage\0"
+    var n_locku: [u8; 11] = "lock loest\0"
+    var n_lockb: [u8; 11] = "lock bloed\0"
+    var n_tid: [u8; 11] = "tid gleich\0"
+
+    // ---- uname (63): sechs Felder zu 65 Oktetten -------------------
+    var uts: [u8; 390] = [0 as u8; 390]
+    let ur: u64 = ulib.sys(kcall.SYS_UNAME, (&uts[0]) as u64, 0, 0)
+    tell((&n_uname[0]) as u64, ur)
+    // Feld 0 faengt mit 'L' an (Linux -- die Schnittstelle, nicht der
+    // Produktname), Feld 4 mit 'x' (x86_64). Das misst, dass die Felder
+    // wirklich 65 Oktette auseinanderliegen.
+    tell((&n_unamem[0]) as u64, (uts[4 * 65]) as u64)
+    // GEGENPROBE: ein Zeiger, der dem Prozess nicht gehoert.
+    tell((&n_unamef[0]) as u64, ulib.sys(kcall.SYS_UNAME, 0x100000, 0, 0))
+
+    // ---- prctl (157) ----------------------------------------------
+    var nm: [u8; 8] = "posix\0\0\0"
+    // PR_SET_NAME = 15: still angenommen, es gibt keinen Prozessnamen.
+    tell((&n_prctl[0]) as u64, ulib.sys(kcall.SYS_PRCTL, 15,
+            (&nm[0]) as u64, 0))
+    // PR_GET_NAME = 16 MUSS scheitern: ein Puffer, den niemand fuellt,
+    // darf nicht als gefuellt gelten.
+    tell((&n_prctlg[0]) as u64, ulib.sys(kcall.SYS_PRCTL, 16,
+            (&nm[0]) as u64, 0))
+    tell((&n_prctlb[0]) as u64, ulib.sys(kcall.SYS_PRCTL, 999, 0, 0))
+
+    // ---- mprotect (10) --------------------------------------------
+    var seite: [u8; 8] = [0 as u8; 8]
+    tell((&n_mprot[0]) as u64, ulib.sys(kcall.SYS_MPROTECT,
+            ((&seite[0]) as u64) & 0xFFFFFFFFFFFFF000, 4096, 3))
+    // GEGENPROBE: eine Adresse, die nicht auf einer Seite anfaengt.
+    tell((&n_mprotb[0]) as u64, ulib.sys(kcall.SYS_MPROTECT, 1, 4096, 3))
+
+    // ---- futex (202) ----------------------------------------------
+    var f: [u64; 2] = [0 as u64; 2]
+    f[0] = 7
+    // FUTEX_WAKE (1|privat 128): niemand wartet, also 0 geweckt.
+    tell((&n_futexa[0]) as u64, ulib.sys(kcall.SYS_FUTEX,
+            (&f[0]) as u64, 129, 1))
+    // FUTEX_WAIT mit dem FALSCHEN Wert kommt sofort zurueck (-EAGAIN);
+    // das ist der Wertvergleich im Kern, und ohne ihn wuerde dieser
+    // Aufruf zehn Sekunden schlafen.
+    tell((&n_futexb[0]) as u64, ulib.sys(kcall.SYS_FUTEX,
+            (&f[0]) as u64, 128, 999))
+    // GEGENPROBE: eine Adresse, die nicht durch vier teilbar ist.
+    tell((&n_futexc[0]) as u64, ulib.sys(kcall.SYS_FUTEX,
+            ((&f[0]) as u64) + 1, 128, 7))
+
+    // ---- fcntl-Sperren (72) ---------------------------------------
+    // struct flock: l_type(2) l_whence(2) fuell(4) l_start(8) l_len(8)
+    var fl: [u64; 4] = [0 as u64; 4]
+    var here2: [u8; 13] = "/bin/posix\0\0\0"
+    let lfd: u64 = io.open((&here2[0]) as u64, 0)
+    // F_WRLCK = 1, SEEK_SET = 0, Oktette 0..15
+    fl[0] = 1
+    fl[1] = 0
+    fl[2] = 16
+    tell((&n_lockw[0]) as u64, ulib.sys(kcall.SYS_FCNTL, lfd, 6,
+            (&fl[0]) as u64))
+    // F_GETLK auf denselben Bereich: der eigene Halter steht sich nicht
+    // im Weg, also kommt F_UNLCK (2) zurueck.
+    fl[0] = 1
+    fl[1] = 0
+    fl[2] = 16
+    let gr: u64 = ulib.sys(kcall.SYS_FCNTL, lfd, 5, (&fl[0]) as u64)
+    tell((&n_lockg[0]) as u64, (fl[0] & 0xFFFF))
+    // F_UNLCK = 2
+    fl[0] = 2
+    fl[1] = 0
+    fl[2] = 16
+    tell((&n_locku[0]) as u64, ulib.sys(kcall.SYS_FCNTL, lfd, 6,
+            (&fl[0]) as u64))
+    // GEGENPROBE: eine Sperrart, die es nicht gibt.
+    fl[0] = 99
+    tell((&n_lockb[0]) as u64, ulib.sys(kcall.SYS_FCNTL, lfd, 6,
+            (&fl[0]) as u64))
+    io.close(lfd)
+
+    // ---- getpid == gettid, solange es nur einen Faden gibt ---------
+    // Der Unterschied entsteht erst mit `clone`; ohne Faden MUESSEN
+    // beide dieselbe Zahl geben, sonst haette die Umstellung von
+    // `getpid` auf die Fadengruppe etwas kaputtgemacht.
+    let pid: u64 = ulib.sys(kcall.SYS_GETPID, 0, 0, 0)
+    let tid: u64 = ulib.sys(kcall.SYS_GETTID, 0, 0, 0)
+    var gleich: u64 = 0
+    if pid == tid {
+        gleich = 1
+    }
+    tell((&n_tid[0]) as u64, gleich)
 }
 
 // ------------------------------------------- open, write, read, close

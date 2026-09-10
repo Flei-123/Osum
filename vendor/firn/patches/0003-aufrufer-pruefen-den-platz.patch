@@ -1,0 +1,142 @@
+# vendor/firn/patches/0003-aufrufer-pruefen-den-platz.patch
+#
+# RUNDE HAERTUNG-2 (Osum, 06.09.2026) -- DIE AUFRUFER SEHEN HIN.
+#
+# Flicken 0002 gibt `buf_reserve` eine Antwort. Dieser hier sorgt dafuer,
+# dass die Aufrufer sie auch ANSEHEN -- ein Rueckgabewert, den niemand
+# liest, aendert nichts.
+#
+# BETROFFEN SIND NUR DIE STELLEN, DIE RESERVIEREN UND DANACH SELBST
+# SCHREIBEN. Von den vierundzwanzig `buf_reserve`-Aufrufern im Baum
+# pruefen die meisten seit jeher nach (`if cap < n { return }`) -- tls.fi
+# 293/420, http.fi, x11.fi, httpstate.fi und fuenf der sechs Stellen in
+# deflate.fi. Die bleiben unberuehrt.
+#
+# ES BLEIBEN SIEBEN, die es NICHT taten:
+#
+#   std/crypto/crypto_main.fi (sechs Stellen) -- reservieren, setzen
+#   `len` und lassen dann chacha20/aead_seal/aead_open/gcm_seal/
+#   gcm_open/hkdf_expand in `o.ptr` schreiben. `buf_set_len` deckelt
+#   zwar `len` auf `cap`, aber die Kryptofunktion bekommt `n` und
+#   schreibt `n` -- der Deckel schuetzt den Puffer nicht.
+#
+#   tls/tls.fi 468 -- reserviert `at + clen` und laesst `aead_seal_suite`
+#   clen Oktett ab `out.ptr + at` schreiben.
+#
+# Diese Dateien gibt es im Firn-Repo NICHT (dort liegen weder tls/ noch
+# std/crypto/); sie leben nur im vendor-Baum von Osum. Deshalb ein
+# eigener Flicken und kein Firn-Commit.
+diff -ru lib-vor/std/crypto/crypto_main.fi /root/osum-haertung2/vendor/firn/lib/std/crypto/crypto_main.fi
+--- a/std/crypto/crypto_main.fi
++++ b/std/crypto/crypto_main.fi
+@@ -236,7 +236,13 @@
+     if name_is(np, nn, (&n_cc[0]) as u64, 8) {
+         let n: usize = field_len(j, 4)
+         var o: rt.Buf = rt.buf_new()
+-        rt.buf_reserve(&o, n + 1)
++        // RUNDE HAERTUNG-2: ohne den Platz laeuft die Kryptofunktion
++        // nicht -- sie schreibt n Oktett nach o.ptr.
++        if !rt.buf_reserve(&o, n + 1) {
++            say(out, 0 as u64, 0)
++            rt.buf_free(&o)
++            return
++        }
+         rt.buf_set_len(&o, n)
+         chacha.chacha20(field_ptr(j, 1), field_ptr(j, 2),
+             field_dec(j, 3) as u32, field_ptr(j, 4), n, o.ptr)
+@@ -254,7 +260,11 @@
+     if name_is(np, nn, (&n_acc[0]) as u64, 6) {
+         let n: usize = field_len(j, 4)
+         var o: rt.Buf = rt.buf_new()
+-        rt.buf_reserve(&o, n + 17)
++        if !rt.buf_reserve(&o, n + 17) {
++            say(out, 0 as u64, 0)
++            rt.buf_free(&o)
++            return
++        }
+         rt.buf_set_len(&o, n + 16)
+         chacha.aead_seal(field_ptr(j, 1), field_ptr(j, 2), field_ptr(j, 3),
+             field_len(j, 3), field_ptr(j, 4), n, o.ptr)
+@@ -269,7 +279,11 @@
+             return
+         }
+         var o: rt.Buf = rt.buf_new()
+-        rt.buf_reserve(&o, n + 1)
++        if !rt.buf_reserve(&o, n + 1) {
++            say(out, 0 as u64, 0)
++            rt.buf_free(&o)
++            return
++        }
+         rt.buf_set_len(&o, n)
+         let ok: bool = chacha.aead_open(field_ptr(j, 1), field_ptr(j, 2),
+             field_ptr(j, 3), field_len(j, 3), field_ptr(j, 4), n, o.ptr)
+@@ -284,7 +298,11 @@
+     if name_is(np, nn, (&n_agcm[0]) as u64, 7) {
+         let n: usize = field_len(j, 4)
+         var o: rt.Buf = rt.buf_new()
+-        rt.buf_reserve(&o, n + 17)
++        if !rt.buf_reserve(&o, n + 17) {
++            say(out, 0 as u64, 0)
++            rt.buf_free(&o)
++            return
++        }
+         rt.buf_set_len(&o, n + 16)
+         gcm.gcm_seal(field_ptr(j, 1), field_len(j, 1), field_ptr(j, 2),
+             field_ptr(j, 3), field_len(j, 3), field_ptr(j, 4), n, o.ptr)
+@@ -299,7 +317,11 @@
+             return
+         }
+         var o: rt.Buf = rt.buf_new()
+-        rt.buf_reserve(&o, n + 1)
++        if !rt.buf_reserve(&o, n + 1) {
++            say(out, 0 as u64, 0)
++            rt.buf_free(&o)
++            return
++        }
+         rt.buf_set_len(&o, n)
+         let ok: bool = gcm.gcm_open(field_ptr(j, 1), field_len(j, 1),
+             field_ptr(j, 2), field_ptr(j, 3), field_len(j, 3),
+@@ -334,7 +356,11 @@
+     if name_is(np, nn, (&n_hexp[0]) as u64, 7) {
+         let want: usize = field_dec(j, 3) as usize
+         var o: rt.Buf = rt.buf_new()
+-        rt.buf_reserve(&o, want + 1)
++        if !rt.buf_reserve(&o, want + 1) {
++            say(out, 0 as u64, 0)
++            rt.buf_free(&o)
++            return
++        }
+         rt.buf_set_len(&o, want)
+         let ok: bool = hkdf.hkdf_expand(field_ptr(j, 1), field_len(j, 1),
+             field_ptr(j, 2), field_len(j, 2), o.ptr, want)
+diff -ru lib-vor/tls/tls.fi lib/tls/tls.fi
+--- a/tls/tls.fi
++++ b/tls/tls.fi
+@@ -465,12 +465,23 @@
+         make_nonce((&(*t).civ[0]) as u64, (*t).cseq, (&nonce[0]) as u64)
+         rt.buf_push_bytes(&out, (&head[0]) as u64, 5)
+         let at: usize = out.len
+-        rt.buf_reserve(&out, at + clen)
+-        rt.buf_set_len(&out, at + clen)
+-        if !aead_seal_suite(t, (&nonce[0]) as u64, (&head[0]) as u64, 5,
+-            inner.ptr, inner.len, out.ptr + at as u64) {
++        // RUNDE HAERTUNG-2: `aead_seal_suite` schreibt clen Oktett ab
++        // `out.ptr + at`. Ohne diesen Platz darf es nicht laufen.
++        // MERGE-8: hier stand `break` -- aber `write_record` hat keine
++        // Schleife, und der Uebersetzer sagt genau das ('break' is
++        // outside a loop). Gemeint war "den Rest dieses Zweigs
++        // ueberspringen"; das ist hier ein `if ok`, denn `buf_free(&out)`
++        // am Ende der Funktion muss in JEDEM Fall laufen.
++        if !rt.buf_reserve(&out, at + clen) {
+             ok = false
+         }
++        if ok {
++            rt.buf_set_len(&out, at + clen)
++            if !aead_seal_suite(t, (&nonce[0]) as u64, (&head[0]) as u64, 5,
++                inner.ptr, inner.len, out.ptr + at as u64) {
++                ok = false
++            }
++        }
+         rt.buf_free(&inner)
+         if ok {
+             (*t).cseq = (*t).cseq + 1 as u64

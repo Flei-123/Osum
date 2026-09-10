@@ -169,6 +169,23 @@ isr_common:
  */
     .set KSTACK_CUR, 344            /* kstate.KSTACK_CUR -- kstate.fi */
 
+    /* RUNDE VIELKERN: DIE BEIDEN WOERTER LIEGEN JETZT JE KERN.
+     *
+     * Die Zahlen sind die Feldabstaende im `cpu`-Satz (kernel/cpu.fi,
+     * C_SYSRSP und C_KSTACK), und die GS-Basis dieses Kerns zeigt auf
+     * seinen eigenen Satz (kernel/arch/x86_64/user.fi, `gs_set`).
+     * Damit ist `%gs:CPU_KSTACK` auf jedem Kern etwas anderes -- und
+     * genau das ist der ganze Unterschied zu vorher.
+     *
+     * Kein `swapgs`. Ring 3 benutzt GS in diesem System nicht, also
+     * bleibt die Basis stehen; sie ist eine Eigenschaft des KERNS und
+     * nicht der Aufgabe, und sie ueberlebt deshalb auch, wenn eine
+     * Aufgabe mitten im Systemaufruf auf einen anderen Kern wandert.
+     * Mit `swapgs` waere genau das ein Fehler gewesen. */
+    .set CPU_SYSRSP, 136            /* cpu.C_SYSRSP -- kernel/cpu.fi */
+    .set CPU_KSTACK, 144            /* cpu.C_KSTACK -- kernel/cpu.fi */
+    .set CPU_SYSCALLS, 160          /* cpu.C_SYSCALLS -- kernel/cpu.fi */
+
     .globl syscall_entry
 syscall_entry:
     /* ROUND K4. Two things changed here, and both are the reason this
@@ -209,9 +226,17 @@ syscall_entry:
      * Handed to Firn: rdi = the number, rsi = the frame, rdx = the kernel
      * data area.
      */
-    movq %rsp, sys_rsp(%rip)        /* the user stack -- no register is free */
-    movq kdata + KSTACK_CUR(%rip), %rsp
-    pushq sys_rsp(%rip)             /* user rsp */
+    movq %rsp, %gs:CPU_SYSRSP       /* the user stack -- no register is free */
+    movq %gs:CPU_KSTACK, %rsp
+    /* RUNDE VIELKERN 3: EIN BEFEHL, DER DEN BEWEIS FUEHRT.
+     *
+     * Er zaehlt in DENSELBEN Satz, aus dem eine Zeile darueber der
+     * Kernstapel kam. Zaehlt ein Kern hier hoch, dann hat sein
+     * `%gs:CPU_KSTACK` funktioniert -- er steht ja schon darauf.
+     * Kein Register wird angefasst; die Flaggen sind hier frei, die
+     * des Benutzers liegen in r11 und werden gleich gerettet. */
+    incq %gs:CPU_SYSCALLS
+    pushq %gs:CPU_SYSRSP            /* user rsp */
     pushq %r11                      /* user rflags */
     pushq %rcx                      /* user rip */
     pushq %rax                      /* the number */
@@ -538,6 +563,11 @@ vectors:
      * `osum_panic` steht in dieser Datei und ist keine Firn-Funktion.
      * Also derselbe Weg wie fuer die Faengerroutinen 70..72. */
     .quad osum_panic                /* 73: kernel/ksym.fi */
+
+    /* RUNDE BLECHKERN: das Ende des Kerncodes, aus kernel/kernel.ld.
+     * Die einzige obere Schranke, mit der sich eine Zahl auf dem
+     * Kernstapel als Ruecksprungadresse ausweisen laesst. */
+    .quad _etext                    /* 74: kernel/kernel.ld */
 
     .section .bss, "aw", @nobits
     .align 8

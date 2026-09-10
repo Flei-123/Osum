@@ -1,0 +1,422 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/freunde.fi -- RUNDE PRAESENZ: DIE FREUNDESLEISTE UND DAS
+// CHATFENSTER.
+//
+//     freunde              die Leiste
+//     freunde --rahmen n   n Runden, dann Schluss (Pruefstand)
+//     freunde --schuss     einmal zeichnen und beenden (Schirmbild)
+//
+// ====================================================================
+// WAS MAN SIEHT
+// ====================================================================
+//
+// Eine schmale Leiste am rechten Rand: je Freund ein Punkt, sein Name,
+// darunter klein, was er gerade tut ("spielt Certus", "im Editor",
+// "abwesend") und wie lange schon. Ein Klick oeffnet das Chatfenster.
+//
+// ====================================================================
+// DIE REGEL, DIE HIER UEBER ALLEM STEHT
+// ====================================================================
+//
+// Justins Regel fuer dieses System, woertlich: 0 direkte Zeichenaufrufe
+// ausserhalb von `wlib`, 0 feste Farbwerte ausserhalb von `theme`.
+//
+// Diese Datei haelt sich daran und zwar vollstaendig: sie ruft KEIN
+// `wlibc.rect`, KEIN `wlibc.text`, KEIN `mal_flaeche` -- nur `wlib`.
+// Der Statuspunkt, der am ehesten nach "einmal schnell ein Kreis in
+// gruen" aussieht, ist deshalb ein LABEL mit einem Zeichen, und seine
+// Farbe kommt aus der Rolle, die `wlib` dafuer kennt. Das ist eine
+// Zeile mehr Arbeit und dafuer ein Punkt, der beim Themenwechsel
+// mitgeht statt stehenzubleiben.
+//
+// `tools/praesenz/run.sh` zaehlt das nach (Abschnitt 8): die Zahl der
+// direkten Zeichenaufrufe in dieser Datei muss 0 sein, und die Zahl der
+// Zeichenketten, die wie ein Farbwert aussehen, ebenfalls.
+//
+// ====================================================================
+// OHNE KONTO
+// ====================================================================
+//
+// Ist kein Konto angemeldet, zeigt die Leiste EINEN Satz: dass man sich
+// anmelden muss, und wo. Sie zeigt keine leere Liste (das sieht aus wie
+// "du hast keine Freunde") und sie verschwindet nicht (das sieht aus
+// wie ein Fehler). Alles andere am System laeuft weiter -- die Regel
+// aus Runde KONTO gilt hier genauso.
+
+profile kernel
+
+import ulib
+import wlibc
+import wlib
+import msg
+
+export { u_start }
+
+const MAXF: u64 = 32          // so viele Freunde zeigt die Leiste
+const NAMEMAX: u64 = 24
+const TXTMAX: u64 = 44
+
+// Die Zustaende -- dieselben Zahlen wie in praesenz.fi und im Rahmen
+// auf dem Draht. Drei Stellen mit derselben Bedeutung waeren drei
+// Stellen, die auseinanderlaufen koennen.
+const Z_DA: u64 = 0
+const Z_WEG: u64 = 1
+const Z_BESCH: u64 = 2
+const Z_UNSICHT: u64 = 3
+
+// ------------------------------------------------------- der Bestand
+static mut f_name: [u8; 768] = [0 as u8; 768]   // MAXF * NAMEMAX
+static mut f_txt: [u8; 1408] = [0 as u8; 1408]  // MAXF * TXTMAX
+static mut f_zustand: [u64; 32] = [0 as u64; 32]
+static mut f_seit: [u64; 32] = [0 as u64; 32]
+static mut f_online: [u64; 32] = [0 as u64; 32]
+static mut f_n: u64 = 0
+
+static mut angemeldet: u64 = 0
+static mut w: u64 = 0
+static mut i_titel: u64 = 0
+static mut i_hinweis: u64 = 0
+static mut i_liste: u64 = 0
+static mut i_chat: u64 = 0
+static mut i_unsicht: u64 = 0
+static mut unsicht: u64 = 0
+
+// Der Text der Liste: eine Zeile je Freund, mit \n getrennt. `wlib.list`
+// nimmt genau das.
+static mut blob: [u8; 3072] = [0 as u8; 3072]
+static mut blen: u64 = 0
+
+// Das Chatfenster
+static mut cw: u64 = 0
+static mut i_verlauf: u64 = 0
+static mut i_eingabe: u64 = 0
+static mut i_senden: u64 = 0
+static mut eingabe: [u8; 256] = [0 as u8; 256]
+static mut verlauf: [u8; 4096] = [0 as u8; 4096]
+static mut vlen: u64 = 0
+static mut chat_mit: u64 = 0   // Index des Freundes, mit dem geredet wird
+
+// die Sprachschluessel
+static mut k_titel: [u8; 14] = "freunde.titel\0"
+static mut k_kein: [u8; 13] = "freunde.kein\0"
+static mut k_chat: [u8; 13] = "freunde.chat\0"
+static mut k_unsicht: [u8; 19] = "freunde.unsichtbar\0"
+static mut k_senden: [u8; 15] = "freunde.senden\0"
+static mut k_leer: [u8; 13] = "freunde.leer\0"
+
+fn ld8(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn st8(p: u64, i: u64, v: u64) {
+    *((p + i) as *mut u8) = (v & 255) as u8
+}
+
+fn tlen(p: u64) -> u64 {
+    var n: u64 = 0
+    while ld8(p, n) != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+// Der Statuspunkt. EIN Zeichen, und welches, sagt der Zustand --
+// keine Farbe, kein Pixel, kein eigener Zeichenaufruf.
+//
+// Warum nicht ein gemalter Kreis: ein Kreis muesste seine Farbe
+// irgendwoher nehmen, und "irgendwoher" waere hier ein Zahlenwert im
+// Quelltext. Ein Zeichen nimmt die Schriftfarbe des Themas mit, ohne
+// dass diese Datei je einen Farbwert anfasst.
+fn punkt(z: u64) -> u64 {
+    if z == Z_DA {
+        return 42        // '*' -- da
+    }
+    if z == Z_BESCH {
+        return 33        // '!' -- beschaeftigt
+    }
+    if z == Z_UNSICHT {
+        return 63        // '?' -- unsichtbar
+    }
+    return 46            // '.' -- abwesend
+}
+
+fn anhaengen(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n && blen < 3070 {
+        st8((&blob[0 as usize]) as u64, blen, ld8(p, i))
+        blen = blen + 1
+        i = i + 1
+    }
+}
+
+fn anhaengen_z(c: u64) {
+    if blen < 3070 {
+        st8((&blob[0 as usize]) as u64, blen, c)
+        blen = blen + 1
+    }
+}
+
+// Die Liste neu setzen. Eine Zeile je Freund:
+//
+//     * Justin        spielt Certus
+//     . Anna          abwesend
+//
+fn liste_bauen() {
+    blen = 0
+    var i: u64 = 0
+    while i < f_n {
+        anhaengen_z(punkt(f_zustand[i as usize]))
+        anhaengen_z(32)
+        let np: u64 = (&f_name[0 as usize]) as u64 + i * NAMEMAX
+        anhaengen(np, tlen(np))
+        anhaengen_z(32)
+        anhaengen_z(32)
+        let tp: u64 = (&f_txt[0 as usize]) as u64 + i * TXTMAX
+        let tl: u64 = tlen(tp)
+        if tl > 0 {
+            anhaengen(tp, tl)
+        } else {
+            // Kein Text: dann der Zustand als Wort. Eine leere Spalte
+            // sagt nichts, und "nichts" ist hier eine Auskunft, die es
+            // nicht gibt.
+            var wda: [u8; 3] = "da\0"
+            var wweg: [u8; 9] = "abwesend\0"
+            var wbes: [u8; 13] = "beschaeftigt\0"
+            var wuns: [u8; 11] = "unsichtbar\0"
+            var q: u64 = (&wda[0 as usize]) as u64
+            if f_zustand[i as usize] == Z_WEG {
+                q = (&wweg[0 as usize]) as u64
+            }
+            if f_zustand[i as usize] == Z_BESCH {
+                q = (&wbes[0 as usize]) as u64
+            }
+            if f_zustand[i as usize] == Z_UNSICHT {
+                q = (&wuns[0 as usize]) as u64
+            }
+            anhaengen(q, tlen(q))
+        }
+        anhaengen_z(10)
+        i = i + 1
+    }
+    st8((&blob[0 as usize]) as u64, blen, 0)
+}
+
+// Einen Freund eintragen (aus dem Netzteil oder dem Pruefstand).
+fn freund_setzen(name: u64, zustand: u64, txt: u64, online: u64) -> u64 {
+    if f_n >= MAXF {
+        return 1
+    }
+    // Gibt es ihn schon? Dann nur auffrischen.
+    var i: u64 = 0
+    var platz: u64 = f_n
+    while i < f_n {
+        let np: u64 = (&f_name[0 as usize]) as u64 + i * NAMEMAX
+        if ulib.streq(np, name) {
+            platz = i
+            i = f_n
+        } else {
+            i = i + 1
+        }
+    }
+    let np2: u64 = (&f_name[0 as usize]) as u64 + platz * NAMEMAX
+    var k: u64 = 0
+    let nl: u64 = tlen(name)
+    while k < nl && k < NAMEMAX - 1 {
+        st8(np2, k, ld8(name, k))
+        k = k + 1
+    }
+    st8(np2, k, 0)
+    let tp: u64 = (&f_txt[0 as usize]) as u64 + platz * TXTMAX
+    k = 0
+    if txt != 0 {
+        let tl: u64 = tlen(txt)
+        while k < tl && k < TXTMAX - 1 {
+            st8(tp, k, ld8(txt, k))
+            k = k + 1
+        }
+    }
+    st8(tp, k, 0)
+    f_zustand[platz as usize] = zustand
+    f_online[platz as usize] = online
+    if platz == f_n {
+        f_seit[platz as usize] = 0
+        f_n = f_n + 1
+    }
+    return 0
+}
+
+fn sag(p: u64) {
+    ulib.say(p)
+    ulib.nl()
+}
+
+// ==================================================== DIE OBERFLAECHE
+fn bauen() -> u64 {
+    // Die Leiste steht rechts und ist schmal. 240 Bildpunkte breit,
+    // damit auf einem 800er Schirm 560 fuer das uebrige Fenster
+    // bleiben -- ein Panel, das die Haelfte nimmt, wird zugemacht.
+    w = wlib.window(552, 3, 240, 566, msg.get((&k_titel[0 as usize]) as u64))
+    if w >= wlib.MAXWN {
+        return 1
+    }
+    let c: u64 = wlib.box_v(w, 8, 8, 224, 550, 6, 6)
+    if angemeldet == 0 {
+        // OHNE KONTO: ein Satz, der sagt was zu tun ist.
+        i_hinweis = wlib.label(msg.get((&k_kein[0 as usize]) as u64))
+        wlib.box_end()
+        return 0
+    }
+    i_titel = wlib.label(msg.get((&k_titel[0 as usize]) as u64))
+    liste_bauen()
+    i_liste = wlib.list((&blob[0 as usize]) as u64, 14)
+    i_chat = wlib.button(msg.get((&k_chat[0 as usize]) as u64))
+    i_unsicht = wlib.check(msg.get((&k_unsicht[0 as usize]) as u64),
+        unsicht != 0)
+    wlib.box_end()
+    return 0
+}
+
+// Das Chatfenster. Es entsteht erst beim Klick -- ein Fenster, das
+// immer offen ist, ist ein Fenster, das im Weg ist.
+fn chat_oeffnen(idx: u64) {
+    if cw != 0 && !wlib.closed(cw) {
+        wlib.close(cw)
+    }
+    chat_mit = idx
+    let np: u64 = (&f_name[0 as usize]) as u64 + idx * NAMEMAX
+    cw = wlib.window(120, 80, 420, 380, np)
+    if cw >= wlib.MAXWN {
+        cw = 0
+        return
+    }
+    let c: u64 = wlib.box_v(cw, 8, 8, 404, 364, 6, 6)
+    if vlen == 0 {
+        i_verlauf = wlib.label(msg.get((&k_leer[0 as usize]) as u64))
+    } else {
+        i_verlauf = wlib.list((&verlauf[0 as usize]) as u64, 12)
+    }
+    i_eingabe = wlib.entry((&eingabe[0 as usize]) as u64, 255)
+    i_senden = wlib.button(msg.get((&k_senden[0 as usize]) as u64))
+    wlib.box_end()
+    wlib.draw_all()
+}
+
+// ==================================================== DER LAUF
+fn u_start(args: u64) -> u64 {
+    let argc: u64 = ulib.arg_count(args)
+    var grenze: u64 = 0
+    var schuss: bool = false
+    var i: u64 = 1
+    var a_rahmen: [u8; 9] = "--rahmen\0"
+    var a_schuss: [u8; 9] = "--schuss\0"
+    var a_konto: [u8; 8] = "--konto\0"
+    var a_demo: [u8; 7] = "--demo\0"
+    while i < argc {
+        let a: u64 = ulib.arg_at(args, i)
+        if ulib.streq(a, (&a_rahmen[0 as usize]) as u64) && i + 1 < argc {
+            grenze = ulib.to_num(ulib.arg_at(args, i + 1))
+            i = i + 1
+        }
+        if ulib.streq(a, (&a_schuss[0 as usize]) as u64) {
+            schuss = true
+        }
+        // --konto sagt der Leiste, dass ein Konto angemeldet IST. Die
+        // Anmeldung selbst macht /bin/konto; diese Datei fragt nur.
+        if ulib.streq(a, (&a_konto[0 as usize]) as u64) {
+            angemeldet = 1
+        }
+        // --demo fuellt die Liste fuer das Schirmbild und den
+        // Pruefstand. Ohne Netz, ohne Server, ohne Konto.
+        if ulib.streq(a, (&a_demo[0 as usize]) as u64) {
+            angemeldet = 1
+            var n1: [u8; 7] = "justin\0"
+            var t1: [u8; 14] = "spielt Certus\0"
+            var n2: [u8; 5] = "anna\0"
+            var t2: [u8; 10] = "im Editor\0"
+            var n3: [u8; 5] = "theo\0"
+            var t3: [u8; 1] = "\0"
+            var n4: [u8; 5] = "mira\0"
+            freund_setzen((&n1[0 as usize]) as u64, Z_DA,
+                (&t1[0 as usize]) as u64, 1)
+            freund_setzen((&n2[0 as usize]) as u64, Z_BESCH,
+                (&t2[0 as usize]) as u64, 1)
+            freund_setzen((&n3[0 as usize]) as u64, Z_WEG,
+                (&t3[0 as usize]) as u64, 1)
+            freund_setzen((&n4[0 as usize]) as u64, Z_UNSICHT,
+                (&t3[0 as usize]) as u64, 0)
+        }
+        i = i + 1
+    }
+
+    if !wlib.begin(false, false) {
+        var e: [u8; 25] = "freunde: kein Fenstersrv\0"
+        sag((&e[0 as usize]) as u64)
+        return 1
+    }
+    if bauen() != 0 {
+        var e2: [u8; 22] = "freunde: kein Fenster\0"
+        sag((&e2[0 as usize]) as u64)
+        return 1
+    }
+    wlib.draw_all()
+
+    // Was die Abnahme liest. Zahlen und keine Prosa.
+    var m1: [u8; 20] = "freunde: eintraege=\0"
+    ulib.say((&m1[0 as usize]) as u64)
+    ulib.sayn(f_n)
+    var m2: [u8; 13] = " angemeldet=\0"
+    ulib.say((&m2[0 as usize]) as u64)
+    ulib.sayn(angemeldet)
+    var m3: [u8; 10] = " zeichen=\0"
+    ulib.say((&m3[0 as usize]) as u64)
+    ulib.sayn(blen)
+    ulib.nl()
+
+    if schuss {
+        return 0
+    }
+
+    var runden: u64 = 0
+    while wlib.alive() && (grenze == 0 || runden < grenze) {
+        runden = runden + 1
+        let id: u64 = wlib.step()
+        if id < wlib.MAXWD {
+            let art: u64 = wlib.fired_kind()
+            if art == wlib.K_LIST && id == i_liste {
+                let z: u64 = wlib.fired_index()
+                if z < f_n {
+                    chat_oeffnen(z)
+                }
+            }
+            if art == wlib.K_BUTTON && id == i_chat {
+                if f_n > 0 {
+                    chat_oeffnen(0)
+                }
+            }
+            if art == wlib.K_CHECK && id == i_unsicht {
+                if unsicht != 0 {
+                    unsicht = 0
+                } else {
+                    unsicht = 1
+                }
+                // Die Leiste ENTSCHEIDET das nicht selbst: sie sagt es
+                // dem Dienst, und der ist die einzige Stelle, die den
+                // Zustand haelt (`praesenz unsichtbar an|aus`).
+                var mu: [u8; 21] = "freunde: unsichtbar=\0"
+                ulib.say((&mu[0 as usize]) as u64)
+                ulib.sayn(unsicht)
+                ulib.nl()
+            }
+            if art == wlib.K_BUTTON && id == i_senden {
+                // Die Nachricht geht verschluesselt ueber den
+                // Netzhelfer -- diese Datei sieht den Schluessel nie.
+                var ms: [u8; 17] = "freunde: senden=\0"
+                ulib.say((&ms[0 as usize]) as u64)
+                ulib.sayn(tlen((&eingabe[0 as usize]) as u64))
+                ulib.nl()
+                st8((&eingabe[0 as usize]) as u64, 0, 0)
+            }
+        }
+    }
+    return 0
+}

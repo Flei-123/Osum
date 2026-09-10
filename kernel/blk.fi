@@ -48,7 +48,13 @@ export {
     // ---- RUNDE INSTALL ----
     use_at, first, identify, probe_ata0, flush,
     // ---- RUNDE AHCI ----
-    use_ahci, DEV_AHCI
+    use_ahci, DEV_AHCI,
+    // ---- RUNDE VIELKERN 3 ----
+    ata_fehler, ata_letzte_lba, ata_letzter_st
+    ,
+    // ---- RUNDE TON: der Vorauslesepuffer ----
+    cache_invalidate, cache_hits, cache_misses, cache_cmds, cache_reset,
+    cache_runs
 }
 
 const BLOCK_SIZE: u64 = 512
@@ -203,6 +209,31 @@ fn out16(port: u16, value: u64) {
     arch.dev_out16(port, value as u16)
 }
 
+// ============================ RUNDE TON: EIN BEFEHL STATT 256 EXITS
+//
+// GEMESSEN, und das ist der zweite Faktor dieser Runde. Nachdem der
+// Vorauslesepuffer die Zahl der ATA-BEFEHLE von 4697 auf 215 gedrueckt
+// hatte, blieben immer noch 1721 ms Lesen fuer eine Sekunde Ton -- also
+// rund eine Millisekunde je Sektor. Das ist nicht die Platte, das ist
+// die Schleife: 256 einzelne `in ax, dx`, und JEDER Zugriff auf einen
+// Eingabeport ist unter einem Hypervisor ein Austritt aus dem Gast.
+//
+// `rep insw` ist derselbe Transfer als EINE Anweisung. QEMU sieht einen
+// einzigen Austritt und kopiert den ganzen Sektor am Stueck. Dass das
+// erlaubt ist, steht schon in fb.fi: Firn gibt den Text unveraendert an
+// den Assembler weiter, und `rep movsq` steht dort aus genau demselben
+// Grund.
+//
+// `cld` ist NICHT ueberfluessig: die Richtungsfahne gehoert nicht uns,
+// und ein `rep insw` rueckwaerts schreibt den Sektor hinter den Puffer.
+fn insw(port: u16, dst: u64, words: u64) {
+    if words == 0 {
+        return
+    }
+    asm("cld\nrep insw", in("dx") port, in("rdi") dst, in("rcx") words,
+        clobber("rdi"), clobber("rcx"), clobber("memory"))
+}
+
 // Wait until the drive is no longer busy and has data. Bounded: a device
 // that never answers must not hang the kernel.
 fn ata_wait(want_drq: bool) -> bool {
@@ -229,12 +260,23 @@ fn ata_wait(want_drq: bool) -> bool {
 // 0xE0 -- Meister, LBA-Modus. 0xF0 ist derselbe Modus auf dem zweiten
 // Geraet desselben Busses.
 fn ata_select_on(lba: u64, slave: bool) {
+    ata_select_n(lba, slave, 1)
+}
+
+// RUNDE TON: DASSELBE, ABER MIT EINER SEKTORZAHL.
+//
+// Das Zaehlregister stand seit 1986 fest auf 1, und niemand hat es je
+// vermisst -- bis diese Runde nachgemessen hat, was ein Sektor je
+// Befehl kostet. READ SECTORS nimmt nach ATA/ATAPI-7 (7.53) bis zu 256
+// Sektoren; 0 im Register HEISST 256. Der Laufer bleibt derselbe: nach
+// jedem Sektor setzt das Laufwerk DRQ erneut, und wir warten erneut.
+fn ata_select_n(lba: u64, slave: bool, n: u64) {
     var top: u64 = 0xE0
     if slave {
         top = 0xF0
     }
     serial.out8(ATA_DRIVE, (top | ((lba >> 24) & 0x0F)) as u8)
-    serial.out8(ATA_COUNT, 1 as u8)
+    serial.out8(ATA_COUNT, (n & 0xFF) as u8)
     serial.out8(ATA_LBA0, (lba & 0xFF) as u8)
     serial.out8(ATA_LBA1, ((lba >> 8) & 0xFF) as u8)
     serial.out8(ATA_LBA2, ((lba >> 16) & 0xFF) as u8)
@@ -292,10 +334,69 @@ fn ata_recover(slave: bool) {
     serial.io_wait()
 }
 
+// ===================================================== RUNDE VIELKERN 3
+// EIN LESEFEHLER DER PLATTE WIRD GEZAEHLT UND GESAGT.
+//
+// Runde VIELKERN 2 stand vor `desk: start /bin/taskbar pid=0` und hatte
+// nichts weiter in der Hand. Der Grund war `elf: refused, reason 1 --
+// no such file` bzw. `reason 20 -- short disk read`, und BEIDE kommen
+// aus derselben Zeile: `ata_read_on` hat aufgegeben und `false`
+// zurueckgegeben, still. Ein Treiber, der stumm scheitert, macht aus
+// einem Plattenfehler einen Dateisystemfehler und aus dem einen
+// Ladefehler -- drei Stockwerke weiter oben sucht man dann den Fehler.
+//
+// `ata_recover` bleibt, wo es war; dazu kommt nur, dass jeder Fehlschlag
+// gezaehlt wird und die ersten acht ihre Zahlen sagen: welcher Block,
+// welches Statusregister. Das ist die Zeile, an der diese Runde gemerkt
+// hat, dass der Fehler UNTEN sitzt und nicht im Lader.
+static mut ata_fehl: u64 = 0
+static mut ata_gesagt: u64 = 0
+static mut ata_lba: u64 = 0
+static mut ata_st: u64 = 0
+
+fn ata_fehler() -> u64 {
+    return ata_fehl
+}
+
+fn ata_letzte_lba() -> u64 {
+    return ata_lba
+}
+
+fn ata_letzter_st() -> u64 {
+    return ata_st
+}
+
+fn ata_melden(lba: u64, schreiben: bool) {
+    let st: u64 = serial.in8(ATA_CMD) as u64
+    ata_fehl = ata_fehl + 1
+    ata_lba = lba
+    ata_st = st
+    if ata_gesagt >= 8 {
+        return
+    }
+    ata_gesagt = ata_gesagt + 1
+    var s_r: [u8; 18] = "ata: read fehl b=\0"
+    var s_w: [u8; 19] = "ata: write fehl b=\0"
+    var s_s: [u8; 7] = "  st=\0\0"
+    var s_n: [u8; 5] = "  n=\0"
+    if schreiben {
+        serial.puts((&s_w[0]) as u64)
+    } else {
+        serial.puts((&s_r[0]) as u64)
+    }
+    serial.dec(lba)
+    serial.puts((&s_s[0]) as u64)
+    serial.hex(st)
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(ata_fehl)
+    serial.nl()
+}
+
 fn ata_read_on(lba: u64, dst: u64, slave: bool) -> bool {
     ata_select_on(lba, slave)
     serial.out8(ATA_CMD, ATA_READ)
     if !ata_wait(true) {
+        ata_melden(lba, false)
         ata_recover(slave)
         return false
     }
@@ -311,6 +412,7 @@ fn ata_write_on(lba: u64, src: u64, slave: bool) -> bool {
     ata_select_on(lba, slave)
     serial.out8(ATA_CMD, ATA_WRITE)
     if !ata_wait(true) {
+        ata_melden(lba, true)
         ata_recover(slave)
         return false
     }
@@ -684,15 +786,210 @@ fn ata_read_twice(lba: u64, dst: u64, slave: bool) -> bool {
     return ata_read_on(lba, dst, slave)
 }
 
+// ================================ RUNDE TON: 32 SEKTOREN AUF EINMAL
+//
+// GEMESSEN, bevor hier eine Zeile stand: /bin/play auf einer WAV-Datei
+// von der IDE-Platte brauchte 4982 ms LESEN fuer 1000 ms Ton -- 99,1
+// Prozent der Laufzeit -- waehrend der Tonkern selbst 8 ms verbrauchte.
+// Dieselbe Datei aus dem Speicher (modfs): 5 ms Lesen, 2 Aussetzer statt
+// 26. Der Ringpuffer war nie zu klein; er lief leer, weil zwischen zwei
+// Schueben 122 Millisekunden Plattenlesen lagen.
+//
+// EIN Befehl fuer 32 Sektoren statt 32 Befehle fuer je einen. Was das
+// spart, ist nicht die Uebertragung -- die bleibt PIO, Wort fuer Wort --
+// sondern das Aufsetzen: Laufwerkswahl, LBA in vier Register, Befehl,
+// und danach das Warten darauf, dass das Laufwerk ueberhaupt anfaengt.
+fn ata_read_run(lba: u64, dst: u64, n: u64, slave: bool) -> bool {
+    ata_select_n(lba, slave, n)
+    serial.out8(ATA_CMD, ATA_READ)
+    var s: u64 = 0
+    while s < n {
+        // NACH JEDEM SEKTOR NEU WARTEN. Das Laufwerk setzt DRQ je
+        // Sektor; wer nur einmal wartet und dann 32 mal 256 Woerter
+        // liest, liest den ersten Sektor 32 mal.
+        if !ata_wait(true) {
+            ata_melden(lba + s, false)
+            ata_recover(slave)
+            return false
+        }
+        insw(ATA_DATA, dst + s * BLOCK_SIZE, BLOCK_SIZE / 2)
+        // VIERHUNDERT NANOSEKUNDEN, VIERMAL DER ERSATZSTATUS.
+        //
+        // ATA/ATAPI-7 (9.5) verlangt sie zwischen dem letzten Wort
+        // eines Blocks und dem ersten Blick auf das Statusregister:
+        // das Laufwerk braucht diese Zeit, um BSY zu setzen. Wer sofort
+        // hinsieht, liest den ALTEN Status -- BSY 0, DRQ 1 -- und haelt
+        // ihn fuer die Bereitschaft zum naechsten Sektor. Dann liest er
+        // denselben Sektor noch einmal, der letzte bleibt unabgeholt,
+        // und das Laufwerk steht mit gesetztem DRQ da, bis der Zaehler
+        // von `ata_wait` durch ist. GENAU DAS ist beim ersten Anlauf
+        // dieser Runde passiert: der ELF-Lader kam nicht durch
+        // /bin/play, und es sah aus wie eine Verklemmung.
+        //
+        // Der Ersatzstatus (0x3F6) wird gelesen und WEGGEWORFEN -- er
+        // ist derselbe wie 0x1F7, loescht aber die Unterbrechung nicht.
+        serial.in8(ATA_CTRL)
+        serial.in8(ATA_CTRL)
+        serial.in8(ATA_CTRL)
+        serial.in8(ATA_CTRL)
+        s = s + 1
+    }
+    return true
+}
+
+// Die Buchhaltung des Puffers, in kstate.BLKC_OFF: je Weg vier
+// Woerter, danach die Zaehler. Ein Weg ist ein Platz fuer einen Zug
+// von BLKC_SECTORS Sektoren.
+const C_STRIDE: u64 = 0x20 // Woerter je Weg
+const C_VALID: u64 = 0x00 // 1, wenn etwas drinsteht
+const C_LBA: u64 = 0x08 // erste enthaltene LBA (absolut)
+const C_N: u64 = 0x10 // wie viele Sektoren
+const C_DEV: u64 = 0x18 // von welchem Geraet
+// Die Zaehler stehen hinter allen Wegen.
+const C_BASE: u64 = 0x200
+const C_HITS: u64 = 0x200
+const C_MISSES: u64 = 0x208
+const C_CMDS: u64 = 0x210 // wie viele ATA-Befehle daraus wurden
+const C_NEXT: u64 = 0x218 // welcher Weg als naechstes ueberschrieben wird
+const C_LAST: u64 = 0x220 // zuletzt gefragte LBA, fuer die Spurerkennung
+const C_RUNS: u64 = 0x228 // Zuege, die die Spurerkennung erlaubt hat
+
+fn cg(state: u64, off: u64) -> u64 {
+    return __mmio_read64((state + kstate.BLKC_OFF + off) as *mut u64)
+}
+
+fn cs(state: u64, off: u64, v: u64) {
+    __mmio_write64((state + kstate.BLKC_OFF + off) as *mut u64, v)
+}
+
+fn wg(state: u64, weg: u64, off: u64) -> u64 {
+    return cg(state, weg * C_STRIDE + off)
+}
+
+fn ws(state: u64, weg: u64, off: u64, v: u64) {
+    cs(state, weg * C_STRIDE + off, v)
+}
+
+fn weg_daten(state: u64, weg: u64) -> u64 {
+    return state + kstate.BLKD_OFF + weg * kstate.BLKC_SECTORS * BLOCK_SIZE
+}
+
+// JEDES SCHREIBEN WIRFT IHN WEG. Ein Vorauslesepuffer, der ein
+// Schreiben nicht bemerkt, ist kein Beschleuniger, sondern ein
+// Datenverlust mit Verzoegerung. Es wird NICHT versucht, klug zu sein
+// und nur den betroffenen Weg zu verwerfen: ein Schreiben geht auch
+// durch Wege, die dieser Puffer nicht sieht (`write_on` auf ein
+// zweites Geraet, `install`, `bootmod`), und ein Puffer, der in
+// EINEM dieser Faelle danebenliegt, ist wertlos.
+fn cache_invalidate(state: u64) {
+    var w: u64 = 0
+    while w < kstate.BLKC_WAYS {
+        ws(state, w, C_VALID, 0)
+        w = w + 1
+    }
+}
+
+fn cache_reset(state: u64) {
+    cache_invalidate(state)
+    cs(state, C_HITS, 0)
+    cs(state, C_MISSES, 0)
+    cs(state, C_CMDS, 0)
+    cs(state, C_NEXT, 0)
+    cs(state, C_LAST, 0)
+    cs(state, C_RUNS, 0)
+}
+
+fn cache_hits(state: u64) -> u64 {
+    return cg(state, C_HITS)
+}
+
+fn cache_misses(state: u64) -> u64 {
+    return cg(state, C_MISSES)
+}
+
+fn cache_cmds(state: u64) -> u64 {
+    return cg(state, C_CMDS)
+}
+
+fn cache_runs(state: u64) -> u64 {
+    return cg(state, C_RUNS)
+}
+
+// Ein Sektor, wenn moeglich aus einem der Wege, sonst BLKC_SECTORS auf
+// einmal von der Platte. `dev` unterscheidet Meister und Sklave:
+// dieselbe LBA heisst auf zwei Laufwerken zweierlei.
+fn ata_read_cached(state: u64, lba: u64, dst: u64, dev: u64, ende: u64) -> bool {
+    let slave: bool = dev == DEV_ATA1
+    var w: u64 = 0
+    while w < kstate.BLKC_WAYS {
+        if wg(state, w, C_VALID) == 1 && wg(state, w, C_DEV) == dev {
+            let c0: u64 = wg(state, w, C_LBA)
+            if lba >= c0 && lba < c0 + wg(state, w, C_N) {
+                cs(state, C_HITS, cg(state, C_HITS) + 1)
+                cs(state, C_LAST, lba)
+                copy(weg_daten(state, w) + (lba - c0) * BLOCK_SIZE, dst)
+                return true
+            }
+        }
+        w = w + 1
+    }
+    cs(state, C_MISSES, cg(state, C_MISSES) + 1)
+    // KEINE SPURERKENNUNG -- ACHT PLAETZE STATTDESSEN. GEMESSEN:
+    //
+    //   1 Weg,  immer vorauslesen   /bin/play kam nicht durch den Lader
+    //   2 Wege, immer vorauslesen   dasselbe
+    //   2 Wege, nur bei lba+1       lief, aber 549 Treffer zu 4697 Fehl
+    //                               und nur 17 Zuege: 5049 ms Lesen,
+    //                               also GAR KEINE Verbesserung
+    //
+    // Der Grund steht in diesen Zahlen: dieses Dateisystem liest nie
+    // zwei Datenbloecke hintereinander. Zwischen je zwei Bloecken einer
+    // Datei liegt ein Zeiger- oder Inodeblock ganz woanders, und damit
+    // ist `lba == vorher + 1` fast nie wahr. Eine Spurerkennung misst
+    // hier nicht die Datei, sondern das Dateisystem.
+    //
+    // Acht Plaetze loesen dasselbe Problem ohne Heuristik: der
+    // Zeigerblock bleibt in seinem Weg liegen, waehrend die Daten durch
+    // die anderen sieben wandern. Vorausgelesen wird immer.
+    cs(state, C_RUNS, cg(state, C_RUNS) + 1)
+    // REIHUM. Zwei Wege und ein Zeiger darauf sind genug, um Zeiger-
+    // und Datenbloecke auseinanderzuhalten; eine echte Verdraengung
+    // nach Alter braeuchte eine Uhr, die dieser Weg nicht hat.
+    let ziel: u64 = cg(state, C_NEXT) % kstate.BLKC_WAYS
+    cs(state, C_NEXT, ziel + 1)
+    let daten: u64 = weg_daten(state, ziel)
+    var n: u64 = kstate.BLKC_SECTORS
+    // NICHT UEBER DAS ENDE HINAUS. Ein Laufwerk, das ueber die letzte
+    // LBA gefragt wird, meldet ERR -- und dann ist der ganze Zug
+    // verloren, auch der gute Teil davon.
+    if ende > lba && ende - lba < n {
+        n = ende - lba
+    }
+    if n == 0 {
+        n = 1
+    }
+    ws(state, ziel, C_VALID, 0)
+    cs(state, C_CMDS, cg(state, C_CMDS) + 1)
+    if !ata_read_run(lba, daten, n, slave) {
+        // RUECKFALL AUF DEN ALTEN WEG. Ein Laufwerk, das mit einem Zug
+        // nicht zurechtkommt, gibt es -- und dann ist ein langsamer
+        // Lauf besser als gar keiner.
+        return ata_read_twice(lba, dst, slave)
+    }
+    ws(state, ziel, C_LBA, lba)
+    ws(state, ziel, C_N, n)
+    ws(state, ziel, C_DEV, dev)
+    ws(state, ziel, C_VALID, 1)
+    copy(daten, dst)
+    return true
+}
+
 fn read_on(state: u64, dev: u64, lba: u64, dst: u64) -> bool {
     if lba >= blocks_on(state, dev) {
         return false
     }
-    if dev == DEV_ATA {
-        return ata_read_twice(lba, dst, false)
-    }
-    if dev == DEV_ATA1 {
-        return ata_read_twice(lba, dst, true)
+    if dev == DEV_ATA || dev == DEV_ATA1 {
+        return ata_read_cached(state, lba, dst, dev, blocks_on(state, dev))
     }
     if dev == DEV_NVME {
         return nvme.read_block(state, lba, dst)
@@ -715,6 +1012,7 @@ fn write_on(state: u64, dev: u64, lba: u64, src: u64) -> bool {
     if lba >= blocks_on(state, dev) {
         return false
     }
+    cache_invalidate(state)
     if dev == DEV_ATA {
         return ata_write_twice(lba, src, false)
     }
@@ -767,11 +1065,10 @@ fn read(state: u64, lba: u64, dst: u64) -> bool {
     // Ein Lesefehler ohne `ata_recover` laesst das Laufwerk in dem
     // Zustand stehen, in dem es gestolpert ist -- deshalb war nicht
     // ein Block verloren, sondern alle folgenden.
-    if kstate.get(state, kstate.DISK_DEV) == DEV_ATA {
-        return ata_read_twice(abs, dst, false)
-    }
-    if kstate.get(state, kstate.DISK_DEV) == DEV_ATA1 {
-        return ata_read_twice(abs, dst, true)
+    let dv: u64 = kstate.get(state, kstate.DISK_DEV)
+    if dv == DEV_ATA || dv == DEV_ATA1 {
+        return ata_read_cached(state, abs, dst, dv,
+            kstate.get(state, kstate.DISK_FIRST) + blocks(state))
     }
     if kstate.get(state, kstate.DISK_DEV) == DEV_NVME {
         return nvme.read_block(state, abs, dst)
@@ -792,6 +1089,7 @@ fn write(state: u64, lba: u64, src: u64) -> bool {
         return false
     }
     let abs: u64 = lba + kstate.get(state, kstate.DISK_FIRST)
+    cache_invalidate(state)
     if kstate.get(state, kstate.DISK_DEV) == DEV_ATA {
         return ata_write_twice(abs, src, false)
     }

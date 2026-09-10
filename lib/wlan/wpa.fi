@@ -1,0 +1,633 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/wlan/wpa.fi -- der 4-Wege-Handschlag.
+//
+// ==================================================================
+// WORUM ES GEHT
+// ==================================================================
+//
+// Nach der Assoziation kennen Zugangspunkt und Rechner einander, und es
+// ist noch nichts verschluesselt. Der 4-Wege-Handschlag ist der
+// Vorgang, an dessen Ende beide dieselben Sitzungsschluessel haben, ohne
+// dass einer von beiden dem anderen jemals das Passwort geschickt hat,
+// und an dessen Ende BEIDE wissen, dass der andere das Passwort kennt.
+//
+//   PMK   Der Hauptschluessel. Bei WPA2-PSK ist er 32 Oktette und
+//         entsteht AUS DEM PASSWORT UND DEM NETZNAMEN:
+//             PMK = PBKDF2-HMAC-SHA1(Passwort, SSID, 4096, 32)
+//         Er ist damit fuer jeden gleich, der dasselbe Passwort im
+//         selben Netz benutzt -- das ist die grundsaetzliche Schwaeche
+//         von WPA2-PSK und der Grund fuer WPA3.
+//
+//   PTK   Der Sitzungsschluessel, je Verbindung neu. Er entsteht aus
+//         dem PMK, den beiden Adressen und zwei Zufallszahlen:
+//             PTK = PRF(PMK, "Pairwise key expansion",
+//                       min(AA,SPA) || max(AA,SPA) ||
+//                       min(ANonce,SNonce) || max(ANonce,SNonce))
+//         Er zerfaellt in drei Teile:
+//             KCK  16 Oktette  sichert die Handschlagnachrichten
+//             KEK  16 Oktette  packt den Gruppenschluessel ein
+//             TK   16 Oktette  verschluesselt die Nutzdaten (CCMP)
+//
+//   GTK   Der Gruppenschluessel, fuer Rundrufe. Er wird in Nachricht 3
+//         eingepackt mitgeschickt.
+//
+// DIE VIER NACHRICHTEN:
+//   1  AP -> Rechner   ANonce, kein Pruefwert
+//   2  Rechner -> AP   SNonce, Pruefwert (jetzt kann der AP den PTK
+//                      ausrechnen und den Pruefwert nachrechnen)
+//   3  AP -> Rechner   Pruefwert, eingepackter GTK
+//   4  Rechner -> AP   Pruefwert, leer -- die Bestaetigung
+//
+// ==================================================================
+// DIE STELLE, AN DER DAS SEIT 2017 SCHIEFGEHT
+// ==================================================================
+//
+// KRACK. Wenn Nachricht 3 wiederholt ankommt und der Klient darauf
+// jedesmal den TK neu installiert, faengt der Paketzaehler wieder bei
+// null an -- und ein Zaehler, der sich wiederholt, macht bei CCMP den
+// Schluesselstrom wiederholbar. Das ist der Angriff, und die Abwehr ist
+// eine Zeile: EIN SCHLUESSEL WIRD GENAU EINMAL INSTALLIERT.
+//
+// Diese Datei rechnet nur; der Zustand liegt in `zustand.fi`, und dort
+// ist die Regel scharf gestellt: eine wiederholte Handschlagnachricht
+// ist ein ABBRUCH und keine Wiederholung. Ein Zugangspunkt, der
+// wirklich wiederholen muss, faengt den Handschlag von vorne an, und
+// dann gibt es auch eine neue Zufallszahl.
+//
+// ==================================================================
+// WAS HIER NICHT DRIN IST
+// ==================================================================
+//
+// KEIN SAE. Die WPA3-Anmeldung ist ein eigenes Verfahren VOR diesem
+// Handschlag, das aus dem Passwort einen PMK macht, der sich nicht
+// offline durchprobieren laesst. Sie braucht Rechnen auf einer
+// elliptischen Kurve mit Quadratwurzeln und das Verfahren aus RFC 7664,
+// und es gibt dafuer keine veroeffentlichten Testvektoren. Begruendung
+// in `docs/WLAN-BEFUND.md` Abschnitt 6.
+//
+// WAS DAGEGEN DA IST: der Handschlag kann AKM 8 (SAE). Sobald ein PMK
+// auf irgendeinem Weg vorliegt, laeuft der Rest von WPA3 -- Ableitung
+// mit KDF-SHA256, Pruefwert mit AES-CMAC.
+//
+// KEIN TKIP, KEIN WEP. Beide gebrochen, beide abgelehnt.
+
+import crypto.sha1
+import crypto.sha256
+import crypto.aes
+
+export {
+    Eapol, eapol_new, eapol_zerlege, eapol_mic_versatz,
+    pmk_aus_passwort, ptk_ableiten, mic_rechnen, mic_pruefen,
+    schluesseldaten_auspacken, gtk_finden,
+    KCK_LEN, KEK_LEN, TK_LEN, PTK_LEN, NONCE_LEN, MIC_LEN,
+    EAPOL_KOPF, EAPOL_FEST,
+    MIC_HMAC_SHA1, MIC_AES_CMAC, MIC_UNBEKANNT
+}
+
+const NONCE_LEN: usize = 32
+const KCK_LEN: usize = 16
+const KEK_LEN: usize = 16
+const TK_LEN: usize = 16
+const PTK_LEN: usize = 48
+const MIC_LEN: usize = 16
+
+// Der EAPOL-Kopf (IEEE 802.1X-2010 11.3): Version, Typ, Laenge.
+const EAPOL_KOPF: usize = 4
+// Alles vom Deskriptortyp bis einschliesslich der Laenge der
+// Schluesseldaten: 1 + 2 + 2 + 8 + 32 + 16 + 8 + 8 + 16 + 2 = 95.
+const EAPOL_FEST: usize = 95
+
+const MIC_UNBEKANNT: u64 = 0
+const MIC_HMAC_SHA1: u64 = 1
+const MIC_AES_CMAC: u64 = 2
+
+fn ld8(p: u64, i: usize) -> u8 {
+    return *((p + i as u64) as *mut u8)
+}
+
+fn st8(p: u64, i: usize, v: u8) {
+    *((p + i as u64) as *mut u8) = v
+}
+
+// EAPOL rechnet HOECHSTWERTIG-ZUERST -- anders als der 802.11-Rahmen,
+// in dem es steckt. Das ist keine Nachlaessigkeit der Norm: EAPOL
+// stammt aus 802.1X und damit aus der Ethernet-Welt. Wer das
+// verwechselt, bekommt einen Wiederholungszaehler von 72 Billiarden und
+// merkt es nie.
+fn be16(p: u64, i: usize) -> u64 {
+    return ((ld8(p, i) as u64) << 8) | (ld8(p, i + 1) as u64)
+}
+
+// ==================================================================
+// DER EAPOL-KEY-RAHMEN, IEEE 802.11-2016 12.7.2
+// ==================================================================
+//
+//   0    EAPOL-Version            1
+//   1    EAPOL-Typ                1   3 = EAPOL-Key
+//   2    Rumpflaenge              2
+//   4    Deskriptortyp            1   2 = RSN, 254 = WPA
+//   5    Key Information          2
+//   7    Key Length               2
+//   9    Replay Counter           8
+//   17   Key Nonce               32
+//   49   Key IV                  16
+//   65   Key RSC                  8
+//   73   Reserviert               8
+//   81   Key MIC                 16
+//   97   Key Data Length          2
+//   99   Key Data                 n
+//
+// Key Information, Bit fuer Bit:
+//   0-2   Deskriptorversion: 1 HMAC-MD5/RC4, 2 HMAC-SHA1/AES,
+//         3 AES-CMAC/AES
+//   3     Schluesselart: 1 paarweise, 0 Gruppe
+//   4-5   Schluesselnummer (veraltet)
+//   6     installieren
+//   7     Bestaetigung erbeten (Ack)
+//   8     Pruefwert vorhanden
+//   9     gesichert
+//   10    Fehler
+//   11    Anforderung
+//   12    Schluesseldaten verschluesselt
+//   13    SMK-Nachricht
+struct Eapol {
+    version: u64,
+    typ: u64,
+    rumpf_len: usize,
+    deskriptor: u64,
+    key_info: u64,
+    desc_version: u64,
+    key_len: u64,
+    zaehler_lo: u64, // die unteren 32 Bit des Wiederholungszaehlers
+    nonce: u64,      // Zeiger IN den Rahmen, 32 Oktette
+    rsc: u64,        // Zeiger IN den Rahmen, 8 Oktette
+    mic: u64,        // Zeiger IN den Rahmen, 16 Oktette
+    daten: u64,      // Zeiger IN den Rahmen
+    daten_len: usize,
+    paarweise: bool,
+    installieren: bool,
+    ack: bool,
+    hat_mic: bool,
+    sicher: bool,
+    fehler: bool,
+    anforderung: bool,
+    daten_verschluesselt: bool,
+    nachricht: u64, // 1..4, 0 = keine der vier
+    gesamt: usize,  // Laenge des ganzen Rahmens, wie er gerechnet wird
+}
+
+fn eapol_new() -> Eapol {
+    return Eapol { version: 0, typ: 0, rumpf_len: 0, deskriptor: 0,
+        key_info: 0, desc_version: 0, key_len: 0, zaehler_lo: 0,
+        nonce: 0, rsc: 0, mic: 0, daten: 0, daten_len: 0,
+        paarweise: false, installieren: false, ack: false,
+        hat_mic: false, sicher: false, fehler: false,
+        anforderung: false, daten_verschluesselt: false,
+        nachricht: 0, gesamt: 0 }
+}
+
+// Wo im Rahmen der Pruefwert steht. Der Pruefwert wird ueber den Rahmen
+// gerechnet, in dem er selbst mit Nullen gefuellt ist -- deshalb muss
+// diese Stelle an genau einem Ort stehen.
+fn eapol_mic_versatz() -> usize {
+    return EAPOL_KOPF + 77
+}
+
+// Rueckgabe `false`: das ist kein EAPOL-Key-Rahmen, oder er ist kuerzer
+// als sein eigener fester Teil, oder das Laengenfeld der
+// Schluesseldaten reicht ueber das Ende hinaus.
+//
+// DIE ZWEI LAENGENFELDER sind beide aus der Luft. `rumpf_len` steht im
+// EAPOL-Kopf und `daten_len` im Schluesselrahmen, und sie muessen
+// ZUEINANDER passen und BEIDE in das passen, was wirklich angekommen
+// ist. Genau hier hoert man auf zu glauben und faengt an zu pruefen.
+fn eapol_zerlege(e: *mut Eapol, p: u64, n: usize) -> bool {
+    if n < EAPOL_KOPF + EAPOL_FEST {
+        return false
+    }
+    (*e).version = ld8(p, 0) as u64
+    (*e).typ = ld8(p, 1) as u64
+    if (*e).typ != 3 {
+        return false // kein EAPOL-Key
+    }
+    (*e).rumpf_len = be16(p, 2) as usize
+    if EAPOL_KOPF + (*e).rumpf_len > n {
+        return false // der Kopf verspricht mehr, als da ist
+    }
+    if (*e).rumpf_len < EAPOL_FEST {
+        return false
+    }
+    (*e).deskriptor = ld8(p, 4) as u64
+    // 2 = RSN (WPA2/WPA3), 254 = das alte WPA. Alles andere ist
+    // entweder WEP-Zeug oder erfunden.
+    if (*e).deskriptor != 2 && (*e).deskriptor != 254 {
+        return false
+    }
+    let ki: u64 = be16(p, 5)
+    (*e).key_info = ki
+    (*e).desc_version = ki & 7
+    (*e).key_len = be16(p, 7)
+    // Von den acht Oktetten des Wiederholungszaehlers werden hier die
+    // unteren vier als Zahl gefuehrt. Der VOLLE Zaehler steht im
+    // Rahmen; wer ihn vergleicht, vergleicht alle acht Oktette.
+    (*e).zaehler_lo = ((ld8(p, 13) as u64) << 24)
+        | ((ld8(p, 14) as u64) << 16)
+        | ((ld8(p, 15) as u64) << 8)
+        | (ld8(p, 16) as u64)
+    (*e).nonce = p + 17
+    (*e).rsc = p + 65
+    (*e).mic = p + 81
+    let dl: usize = be16(p, 97) as usize
+    // Das Laengenfeld der Schluesseldaten muss in den Rumpf passen, den
+    // der EAPOL-Kopf angesagt hat, UND in das, was angekommen ist.
+    if EAPOL_KOPF + EAPOL_FEST + dl > EAPOL_KOPF + (*e).rumpf_len {
+        return false
+    }
+    if EAPOL_KOPF + EAPOL_FEST + dl > n {
+        return false
+    }
+    (*e).daten_len = dl
+    if dl > 0 {
+        (*e).daten = p + (EAPOL_KOPF as u64) + (EAPOL_FEST as u64)
+    } else {
+        (*e).daten = 0
+    }
+    (*e).gesamt = EAPOL_KOPF + EAPOL_FEST + dl
+
+    (*e).paarweise = (ki & 8) != 0
+    (*e).installieren = (ki & 64) != 0
+    (*e).ack = (ki & 128) != 0
+    (*e).hat_mic = (ki & 256) != 0
+    (*e).sicher = (ki & 512) != 0
+    (*e).fehler = (ki & 1024) != 0
+    (*e).anforderung = (ki & 2048) != 0
+    (*e).daten_verschluesselt = (ki & 4096) != 0
+
+    // Welche der vier Nachrichten das ist. Es gibt in 802.11 kein Feld
+    // dafuer -- man erkennt sie an der Kombination der Bits, und das
+    // ist genau der Grund, warum ein Zustandsautomat noetig ist: die
+    // Nachricht sagt nicht, wo im Ablauf sie hingehoert, sie sagt nur,
+    // wie sie aussieht.
+    (*e).nachricht = 0
+    if (*e).paarweise {
+        if (*e).ack && !(*e).hat_mic {
+            (*e).nachricht = 1
+        }
+        if !(*e).ack && (*e).hat_mic && !(*e).sicher {
+            (*e).nachricht = 2
+        }
+        if (*e).ack && (*e).hat_mic {
+            (*e).nachricht = 3
+        }
+        if !(*e).ack && (*e).hat_mic && (*e).sicher {
+            (*e).nachricht = 4
+        }
+    }
+    return true
+}
+
+// ==================================================================
+// DIE ABLEITUNGEN
+// ==================================================================
+
+// PMK = PBKDF2-HMAC-SHA1(Passwort, SSID, 4096, 32).
+//
+// Die 4096 Wiederholungen stehen in der Norm und sind KEIN Parameter.
+// Die SSID ist das Salz -- und weil sie kein Zufall ist, sind
+// vorgerechnete Tabellen fuer haeufige Netznamen ("FRITZ!Box 7590")
+// moeglich und es gibt sie wirklich. Wer das nicht will, nimmt WPA3.
+fn pmk_aus_passwort(pw: u64, pwlen: usize, ssid: u64, ssidlen: usize,
+    out: u64) -> bool {
+    // Die Norm laesst 8 bis 63 druckbare Zeichen. Kuerzer wird
+    // ABGELEHNT und nicht aufgefuellt: ein zu kurzes Passwort, das
+    // trotzdem einen Schluessel ergibt, ist ein stiller Schaden.
+    if pwlen < 8 || pwlen > 63 {
+        return false
+    }
+    if ssidlen > 32 {
+        return false
+    }
+    return sha1.pbkdf2(pw, pwlen, ssid, ssidlen, 4096, out, 32)
+}
+
+// Die Schluesselableitungsfunktion aus IEEE 802.11-2016 12.7.1.6.2,
+// mit SHA-256. Sie sieht der PRF von 802.11i aehnlich und ist an drei
+// Stellen anders, und alle drei sind Fallen:
+//
+//   1. Der Zaehler steht VORNE, nicht hinten.
+//   2. Der Zaehler faengt bei EINS an, nicht bei null, und ist
+//      ZWEI Oktette, KLEINSTWERTIG ZUERST.
+//   3. HINTEN steht die gewuenschte Laenge in BIT, ebenfalls zwei
+//      Oktette kleinstwertig zuerst.
+//   4. Zwischen Marke und Daten steht KEIN Nulloktett. Die PRF von
+//      802.11i hat eines. Das ist der Unterschied, den man nur findet,
+//      wenn man beide nebeneinander legt.
+fn kdf_sha256(key: u64, klen: usize, label: u64, llen: usize,
+    data: u64, dlen: usize, out: u64, outlen: usize) -> bool {
+    if outlen > 128 || llen > 64 || dlen > 256 {
+        return false
+    }
+    // Ein Puffer fuer Zaehler || Marke || Daten || Laenge. Alle Teile
+    // sind hier bekannt gross und kommen NICHT vom Netz: die Marke aus
+    // dem eigenen Quelltext, die Daten sind zwei Adressen und zwei
+    // Zufallszahlen fester Groesse.
+    var buf: [u8; 326] = [0 as u8; 326]
+    let gesamt: usize = 2 + llen + dlen + 2
+    var i: usize = 0
+    while i < llen {
+        buf[2 + i] = ld8(label, i)
+        i = i + 1
+    }
+    i = 0
+    while i < dlen {
+        buf[2 + llen + i] = ld8(data, i)
+        i = i + 1
+    }
+    let bits: u64 = (outlen as u64) * 8
+    buf[2 + llen + dlen] = (bits & 255) as u8
+    buf[2 + llen + dlen + 1] = ((bits >> 8) & 255) as u8
+
+    var blk: [u8; 32] = [0 as u8; 32]
+    var pos: usize = 0
+    var c: u64 = 1
+    while pos < outlen {
+        buf[0] = (c & 255) as u8
+        buf[1] = ((c >> 8) & 255) as u8
+        sha256.hmac(key, klen, (&buf[0]) as u64, gesamt,
+            (&blk[0]) as u64)
+        var j: usize = 0
+        while j < 32 && pos + j < outlen {
+            st8(out, pos + j, blk[j])
+            j = j + 1
+        }
+        pos = pos + 32
+        c = c + 1
+    }
+    return true
+}
+
+// Welches Verfahren zu welchem Anmeldeverfahren gehoert.
+//
+// AKM 1 und 2 (802.1X und PSK) rechnen mit SHA-1, AKM 5, 6, 8 und 9
+// (die SHA-256-Fassungen, SAE und FT-SAE) mit SHA-256. Das ist nicht
+// die Wahl dieses Programms, das steht in Tabelle 9-133.
+fn ist_sha256_akm(akm: u64) -> bool {
+    return akm == 5 || akm == 6 || akm == 8 || akm == 9 || akm == 18
+}
+
+// PTK = PRF(PMK, "Pairwise key expansion", min||max||min||max).
+//
+// DIE SORTIERUNG IST DER GANZE WITZ. Beide Seiten rechnen dieselbe
+// Zeichenkette, obwohl jede ihre eigene Adresse als "meine" kennt --
+// deshalb steht nicht "meine, deine", sondern "die kleinere, die
+// groessere". Wer das vergisst, bekommt auf beiden Seiten einen
+// anderen Schluessel und einen Handschlag, der bei Nachricht 3
+// abbricht, ohne dass irgendwo etwas Falsches steht.
+//
+// `aa` ist die Adresse des Zugangspunkts, `spa` die des Rechners.
+fn ptk_ableiten(pmk: u64, pmklen: usize, aa: u64, spa: u64,
+    anonce: u64, snonce: u64, akm: u64, out: u64,
+    outlen: usize) -> bool {
+    if pmklen == 0 || pmklen > 64 {
+        return false
+    }
+    if outlen < 16 || outlen > 128 {
+        return false
+    }
+    var data: [u8; 76] = [0 as u8; 76]
+    // Adressen vergleichen, Oktett fuer Oktett, hoechstwertiges zuerst.
+    var kleiner: u64 = aa
+    var groesser: u64 = spa
+    var i: usize = 0
+    var entschieden: bool = false
+    while i < 6 {
+        if !entschieden {
+            let x: u8 = ld8(aa, i)
+            let y: u8 = ld8(spa, i)
+            if x < y {
+                kleiner = aa
+                groesser = spa
+                entschieden = true
+            }
+            if x > y {
+                kleiner = spa
+                groesser = aa
+                entschieden = true
+            }
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < 6 {
+        data[i] = ld8(kleiner, i)
+        data[6 + i] = ld8(groesser, i)
+        i = i + 1
+    }
+    // Dasselbe fuer die beiden Zufallszahlen.
+    var nk: u64 = anonce
+    var ng: u64 = snonce
+    entschieden = false
+    i = 0
+    while i < NONCE_LEN {
+        if !entschieden {
+            let x: u8 = ld8(anonce, i)
+            let y: u8 = ld8(snonce, i)
+            if x < y {
+                nk = anonce
+                ng = snonce
+                entschieden = true
+            }
+            if x > y {
+                nk = snonce
+                ng = anonce
+                entschieden = true
+            }
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < NONCE_LEN {
+        data[12 + i] = ld8(nk, i)
+        data[12 + NONCE_LEN + i] = ld8(ng, i)
+        i = i + 1
+    }
+
+    var marke: [u8; 23] = "Pairwise key expansion\0"
+    if ist_sha256_akm(akm) {
+        return kdf_sha256(pmk, pmklen, (&marke[0]) as u64, 22,
+            (&data[0]) as u64, 76, out, outlen)
+    }
+    return sha1.prf(pmk, pmklen, (&marke[0]) as u64, 22,
+        (&data[0]) as u64, 76, out, outlen)
+}
+
+// ==================================================================
+// DER PRUEFWERT
+// ==================================================================
+//
+// Er geht ueber DEN GANZEN EAPOL-RAHMEN -- vom Versionsoktett bis zum
+// letzten Oktett der Schluesseldaten --, in dem das Pruefwertfeld
+// selbst mit sechzehn Nullen gefuellt ist.
+//
+// Welche Rechnung, sagt die Deskriptorversion beziehungsweise das
+// Anmeldeverfahren:
+//   HMAC-SHA1, davon die ersten 16 Oktette   AKM 1, 2 (Version 2)
+//   AES-CMAC                                 AKM 5, 6, 8, 9 (Version 3)
+//   HMAC-MD5                                 Version 1 -- WIRD NICHT
+//                                            UMGESETZT. Das ist der
+//                                            TKIP-Weg, und TKIP ist
+//                                            gebrochen.
+fn mic_verfahren(akm: u64) -> u64 {
+    if akm == 1 || akm == 2 || akm == 3 || akm == 4 {
+        return MIC_HMAC_SHA1
+    }
+    if ist_sha256_akm(akm) {
+        return MIC_AES_CMAC
+    }
+    return MIC_UNBEKANNT
+}
+
+const EAPOL_MAX: usize = 2048
+
+fn mic_rechnen(kck: u64, kcklen: usize, eapol: u64, elen: usize,
+    akm: u64, out: u64) -> bool {
+    if elen < EAPOL_KOPF + EAPOL_FEST || elen > EAPOL_MAX {
+        return false
+    }
+    if kcklen != KCK_LEN {
+        return false
+    }
+    let v: u64 = mic_verfahren(akm)
+    if v == MIC_UNBEKANNT {
+        return false
+    }
+    // Eine Abschrift mit genulltem Pruefwertfeld. Der Rahmen des
+    // Aufrufers wird NICHT veraendert -- er kommt vom Netz, und ihn
+    // waehrend der Pruefung umzuschreiben waere die Art von
+    // Nebenwirkung, die man drei Runden spaeter nicht mehr findet.
+    var buf: [u8; 2048] = [0 as u8; 2048]
+    var i: usize = 0
+    while i < elen {
+        buf[i] = ld8(eapol, i)
+        i = i + 1
+    }
+    let mo: usize = eapol_mic_versatz()
+    i = 0
+    while i < MIC_LEN {
+        buf[mo + i] = 0 as u8
+        i = i + 1
+    }
+    if v == MIC_HMAC_SHA1 {
+        var voll: [u8; 20] = [0 as u8; 20]
+        sha1.hmac(kck, kcklen, (&buf[0]) as u64, elen,
+            (&voll[0]) as u64)
+        i = 0
+        while i < MIC_LEN {
+            st8(out, i, voll[i])
+            i = i + 1
+        }
+        return true
+    }
+    return aes.cmac(kck, kcklen, (&buf[0]) as u64, elen, out)
+}
+
+// Vergleich OHNE fruehen Ausstieg. Ein Pruefwertvergleich, der beim
+// ersten falschen Oktett abbricht, verraet ueber die Laufzeit, wieviel
+// gestimmt hat -- und ein Angreifer, der das oft genug messen darf,
+// raet den Pruefwert Oktett fuer Oktett.
+fn mic_pruefen(kck: u64, kcklen: usize, eapol: u64, elen: usize,
+    akm: u64) -> bool {
+    var soll: [u8; 16] = [0 as u8; 16]
+    if !mic_rechnen(kck, kcklen, eapol, elen, akm, (&soll[0]) as u64) {
+        return false
+    }
+    let mo: usize = eapol_mic_versatz()
+    if elen < mo + MIC_LEN {
+        return false
+    }
+    var diff: u64 = 0
+    var i: usize = 0
+    while i < MIC_LEN {
+        diff = diff | ((soll[i] ^ ld8(eapol, mo + i)) as u64)
+        i = i + 1
+    }
+    return diff == 0
+}
+
+// ==================================================================
+// DIE SCHLUESSELDATEN
+// ==================================================================
+//
+// In Nachricht 3 sind sie mit dem KEK eingepackt -- nach RFC 3394 bei
+// den AES-Verfahren. Ausgepackt sind sie eine Kette von
+// Herstellerelementen (KDE), aufgebaut wie die Informationselemente
+// eines Beacons:
+//
+//   0xDD  Laenge  00-0F-AC  Typ  Inhalt
+//
+// Typ 1 ist der Gruppenschluessel:
+//   Oktett 0: Bits 0-1 Schluesselnummer, Bit 2 "wird gesendet"
+//   Oktett 1: vorbehalten
+//   ab 2:     der Schluessel
+//
+// Rueckgabe: Laenge der ausgepackten Daten, oder -1. -1 heisst hier
+// wirklich "der Pruefwert des Einpackens stimmt nicht" -- also
+// falscher KEK oder verdrehtes Paket -- und darf NIE als "dann eben
+// unverschluesselt" gelesen werden.
+fn schluesseldaten_auspacken(kek: u64, keklen: usize, daten: u64,
+    dlen: usize, out: u64, outmax: usize) -> i64 {
+    if dlen < 24 || dlen % 8 != 0 || dlen > 264 {
+        return -1
+    }
+    if dlen - 8 > outmax {
+        return -1
+    }
+    if !aes.key_unwrap(kek, keklen, daten, dlen, out) {
+        return -1
+    }
+    return (dlen - 8) as i64
+}
+
+// Sucht in den ausgepackten Schluesseldaten den Gruppenschluessel.
+// Rueckgabe: seine Laenge, oder -1. `nummer` bekommt die
+// Schluesselnummer.
+fn gtk_finden(daten: u64, dlen: usize, out: u64, outmax: usize,
+    nummer: *mut u64) -> i64 {
+    var at: usize = 0
+    while at + 2 <= dlen {
+        let id: u64 = ld8(daten, at) as u64
+        let l: usize = ld8(daten, at + 1) as usize
+        if at + 2 + l > dlen {
+            return -1 // ein Laengenfeld, das ueber das Ende zeigt
+        }
+        if id == 0xDD && l >= 6 {
+            if (ld8(daten, at + 2) as u64) == 0
+                && (ld8(daten, at + 3) as u64) == 0x0F
+                && (ld8(daten, at + 4) as u64) == 0xAC
+                && (ld8(daten, at + 5) as u64) == 1 {
+                // KDE-Kopf 4 Oktette OUI+Typ, dann 2 Oktette
+                // Schluesselnummer und Vorbehalt.
+                let kl: usize = l - 6
+                if kl == 0 || kl > outmax {
+                    return -1
+                }
+                *nummer = (ld8(daten, at + 6) as u64) & 3
+                var i: usize = 0
+                while i < kl {
+                    st8(out, i, ld8(daten, at + 8 + i))
+                    i = i + 1
+                }
+                return kl as i64
+            }
+        }
+        // Ein Element der Laenge null wuerde die Schleife anhalten;
+        // deshalb geht `at` immer um mindestens zwei weiter. Die
+        // Auffuellung am Ende (0xDD 0x00 oder Nullen) endet damit von
+        // selbst.
+        if id == 0 && l == 0 {
+            return -1
+        }
+        at = at + 2 + l
+    }
+    return -1
+}

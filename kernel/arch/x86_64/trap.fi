@@ -33,6 +33,7 @@ import sched
 import apic
 import nvme
 import usb
+import audio
 import netdev
 import inet
 import cpu
@@ -41,9 +42,19 @@ import time
 import signal
 import proc
 import msr
+import arch.arch
 import fpu
+import klog
+import ksymtab
+import absturz
 
-export { entry }
+export {
+    entry,
+    // RUNDE BLECHVIER: was der Zeitgeberbehandler ueber sich selbst weiss.
+    isr_us_last, isr_us_max, ticks_lost, ticks_late, ticks_lost_at, bh_tief,
+    // RUNDE LEISTE: der letzte gestorbene Prozess, fuer die Tafel.
+    tote_pid, tote_zahl
+}
 
 // Offsets in the trap frame (see isr.s).
 const F_VECTOR: u64 = 120
@@ -98,6 +109,14 @@ const VEC_NET: u64 = 45
 // einer Zahl waeren genau der Fehler, an dem Runde K10 haengengeblieben
 // ist.
 const VEC_XHCI: u64 = 43
+// RUNDE HDA: der Tonregler meldet auf 42. Die Zahl ist die naechste
+// freie unterhalb der fuenf vergebenen (43 USB, 44 Platte, 45 Netz,
+// 46 Zeiger, 47 verirrt) und liegt in den 48 Einsprungpunkten, die
+// `isr.s` bereithaelt -- fuer diese Runde musste kein Assembler
+// geaendert werden. BEIDE Tontreiber melden auf DIESER Nummer: es
+// laeuft immer nur einer, und die Weiche unten fragt, welcher.
+// `tools/kernel/memmap.py` rechnet die Vektortafel nach.
+const VEC_AUDIO: u64 = 42
 const VEC_SPURIOUS: u64 = 47
 // RUNDE KVMFIX: die Nummer der allgemeinen Schutzverletzung. Sie steht
 // als eigener Name da, weil `tools/kvm/run.sh` genau diese Zeile
@@ -116,6 +135,23 @@ fn word(frame: u64, off: u64) -> u64 {
 
 // `KERNEL_TRAP` out of isr.s. rdi = frame, rsi = kernel data area.
 fn entry(frame: u64, state: u64) {
+    // ================================================== RUNDE BLECHKERN
+    // WENN EIN KERN GESTORBEN IST, HALTEN DIE ANDEREN AUCH AN.
+    //
+    // `power.halt_forever` ist `cli; hlt` und haelt DEN KERN AN, AUF DEM
+    // ES LAEUFT -- nicht die Maschine. Justin hat genau das gesehen: die
+    // rote Anzeige stand da, und der Rechner lief weiter, malte weiter
+    // und ueberschrieb die Anzeige beim naechsten Anstrich. Schlimmer
+    // als die Anzeige ist der Zustand: die uebrigen Kerne arbeiten auf
+    // Speicher weiter, den gerade jemand zerstoert hat.
+    //
+    // Also schickt der sterbende Kern einen NMI an alle anderen (siehe
+    // `alle_stoppen`), und dieser Riegel hier ist die Gegenseite: der
+    // ERSTE Befehl des Fangnetzes, vor jedem Zaehler und jeder Ausgabe.
+    // Wer hier mit gesetzter Marke ankommt, geht nicht mehr weiter.
+    if halt_alle != 0 {
+        power.halt_forever()
+    }
     let vector: u64 = word(frame, F_VECTOR)
     kstate.add(state, kstate.TRAPS, 1)
     kstate.set(state, kstate.LAST_TRAP, vector)
@@ -215,8 +251,9 @@ fn entry(frame: u64, state: u64) {
         // a second" -- not "one hundredth divided by the number of cores".
         // So the BOOT processor counts it and the others count their own
         // (`cpu.C_TICKS`, in `sched.on_tick`).
+        let isr_t0: u64 = time.tsc()
         if cpu.here(state) == 0 {
-            kstate.add(state, kstate.TICKS, 1)
+            marken_nachfuehren(state)
         }
         // ROUND K9: DER SAMMLER DES ZUFALLSGENERATORS. Der genaue
         // Zyklenzaehler zum Zeitpunkt eines Zeitgeberschlags haengt an
@@ -228,7 +265,56 @@ fn entry(frame: u64, state: u64) {
         // The end-of-interrupt has to go out BEFORE the switch: the
         // controller lets nothing through until it has seen it, and the
         // task that is switched to would run without a timer.
+        //
+        // RUNDE BLECHVIER, ZUR RICHTIGSTELLUNG: der Bericht sagte, das
+        // EOI stehe erst am Ende des Behandlers (Zeile 391). Das gilt
+        // fuer den DURCHFALL am Ende, nicht fuer den Zeitgeber -- hier
+        // steht es seit jeher weit vorne. Die Koaleszenz kommt nicht
+        // vom EOI, sondern von IF=0 waehrend des Anstrichs; das ISR-Bit
+        // ist da laengst geloescht.
         eoi(state, vector)
+        // ================================================ RUNDE BLECHVIER
+        // EIN GENESTETER SCHLAG MACHT NUR DIE BUCHFUEHRUNG.
+        //
+        // `unteres_stueck` schaltet die Unterbrechungen fuer die Dauer
+        // des Anstrichs EIN. Damit kann ein Zeitgeberschlag mitten
+        // hinein fallen -- und das ist genau der Sinn der Sache: die
+        // Marke geht dann NICHT mehr verloren. Was ein solcher Schlag
+        // aber auf KEINEN FALL tun darf, ist `sched.on_tick` zu rufen:
+        // das endet in `schedule_locked` und WECHSELT DEN STAPEL, aus
+        // einer geschachtelten Unterbrechung heraus. Also kehrt er hier
+        // um, sobald er sieht, dass unten schon einer arbeitet.
+        //
+        // Die Sperre gilt NUR fuer den Startprozessor -- nur dort wird
+        // gemalt, und nur dort werden die Unterbrechungen zwischendurch
+        // eingeschaltet. Ein zweiter Kern soll seinen `on_tick` behalten.
+        if cpu.here(state) == 0 && bh_drin != 0 {
+            ticks_spaet = ticks_spaet + 1
+            return
+        }
+        // ============================== RUNDE BLECHEINGABE: DER HERZSCHLAG
+        //
+        // GANZ VORNE, vor allem anderen in diesem Behandler. Justins
+        // Bild steht seit dem ersten Vollbild still -- die Uhr der
+        // Taskleiste zeigte um 14:51 und um 14:54 dieselbe Minute.
+        // Damit sind zwei Erklaerungen uebrig, und sie sind nur mit
+        // etwas zu trennen, das sich SICHTBAR bewegt, ohne
+        // Fensterserver, ohne Schreibtischschleife und ohne serielle
+        // Leitung (er hat keinen UART, das steht in Zeile 9 der Tafel).
+        //
+        // Zwei Blinkfelder am rechten Bildrand und die Rollen-Lampe der
+        // Tastatur. Steht hier ganz vorne, damit es auch dann noch
+        // schlaegt, wenn alles DAHINTER haengt -- und genau das
+        // unterscheidet "der Zeitgeber ist tot" von "der Behandler
+        // kommt nicht zurueck".
+        // ============================== RUNDE BLECHVIER
+        // WAS HIER STAND UND WARUM ES WEG IST, siehe `unteres_stueck`
+        // weiter unten: Herzschlag und Messtafel malen jetzt MIT
+        // EINGESCHALTETEN UNTERBRECHUNGEN, hinter einer
+        // Wiedereintrittssperre. Vorher liefen beide hier, mit
+        // IF=0 -- und ein Anstrich von 396 ms bei UC-Abbildung hat
+        // damit neununddreissig von vierzig Zeitgeberschlaegen
+        // verschluckt.
         // ROUND POWERMON: the power accounting takes its sample here,
         // and it stands BEFORE `sched.on_tick` for a reason that cost a
         // measurement to find. `on_tick` ends in `schedule_locked`, and
@@ -243,6 +329,30 @@ fn entry(frame: u64, state: u64) {
         // On nine ticks in ten this compares two numbers and returns;
         // what the tenth costs is measured, not asserted (`PM_COST`).
         pmon.tick(state)
+        // RUNDE HDA: DIE TONUHR WIRD BEI JEDEM SCHLAG ABGELESEN, und
+        // das ist keine Bequemlichkeit, sondern die Bedingung, unter
+        // der sie ueberhaupt gilt.
+        //
+        // Die Wiedergabeposition kommt aus einem Zaehler, der am Ende
+        // des Ringes UMLAEUFT (4096 Rahmen, 85 ms). Wer seltener
+        // hinsieht als der Ring lang ist, verliert einen ganzen Umlauf
+        // und weiss es nicht -- die Uhr geht ab da um 85 ms nach, und
+        // zwar bei JEDEM verpassten Umlauf noch einmal.
+        //
+        // IM KERN war das nie ein Problem: die Messschleife dieser
+        // Runde fragt tausendmal je Sekunde. AUS RING 3 IST ES EINES.
+        // GEMESSEN: /bin/play schickte seine 48000 Rahmen, meldete
+        // null Aussetzer -- und in der Datei standen 256118 Rahmen
+        // Dauerton. Die Uhr war bei 21500 stehengeblieben, damit hielt
+        // die Schicht den Ring fuer randvoll, der Schreiber wartete auf
+        // Platz, den es gab, und der Regler spielte fuenf Sekunden lang
+        // dieselben 85 Millisekunden im Kreis.
+        //
+        // Zehn Millisekunden gegen 85 sind ein Sicherheitsabstand von
+        // acht. Es kostet EINEN Speicherzugriff je Schlag (die Position
+        // steht im DMA-Positionspuffer, nicht in einem Register --
+        // siehe `hda.position_raw`), also hundert je Sekunde.
+        audio.tick(state)
         // RUNDE K17: ANSTECKEN UND ABZIEHEN IM BETRIEB.
         //
         // Ein Anschluss meldet keinen Wechsel, den niemand abholt. Alle
@@ -260,11 +370,61 @@ fn entry(frame: u64, state: u64) {
         // woanders -- und sie laeuft NUR, wenn dieser Lauf ueberhaupt
         // USB aufgesetzt hat. Jede Messung der Runden 52 bis K16 sieht
         // damit den Kernel, den sie vorher gesehen hat.
+        // ==================== RUNDE BLECHEINGABE: NUR NOCH HINSEHEN.
+        //
+        // HIER STAND `usb.unplug_check(state)`, und der Kommentar
+        // darueber hat es selbst zugegeben ("EHRLICH GESAGT: eine
+        // Aufzaehlung im Zeitgeberbehandler ist nicht schoen. Sie
+        // dauert einige Millisekunden"). Es sind nicht einige
+        // Millisekunden. `unplug_check` ruft `attach`, `attach` ruft
+        // `xhci.port_reset`, und darin stehen `udelay(100000)`, eine
+        // Warteschleife von bis zu 500 ms und noch einmal
+        // `udelay(20000)` -- ZEHNTELSEKUNDEN BIS SEKUNDEN MIT
+        // ABGESCHALTETEN UNTERBRECHUNGEN. In dieser Zeit schlaegt der
+        // Zeitgeber nicht, niemand weckt einen Schlaefer, die Uhr steht
+        // und kein Bild entsteht. Kommt ein Anschluss dabei nicht zur
+        // Ruhe, steht der Rechner endgueltig -- und das ist Oktett fuer
+        // Oktett das Bild, das Justin am 04.09. um 14:54 fotografiert
+        // hat.
+        //
+        // Der Zeitgeber liest jetzt nur noch je Anschluss ein Register
+        // und merkt sich, wo sich etwas geaendert hat. Die Arbeit macht
+        // `usb.hotplug_work` in der Schreibtischschleife -- in
+        // Aufgabenkontext, wo sie dauern darf.
         if cpu.here(state) == 0 && usb.ready(state) {
             if (kstate.get(state, kstate.TICKS) % 25) == 0 {
-                usb.unplug_check(state)
+                usb.port_watch(state)
+                // ==================== RUNDE ECHTHARDWARE-6
+                // DER WACHHUND FUER EINEN STILL GEWORDENEN RING.
+                //
+                // Ein Unterbrechungsblock liegt auf dem Ring, die
+                // Meldung dazu geht verloren -- und danach legt
+                // niemand mehr einen nach, denn nachgelegt wird nur
+                // in `service`, und `service` laeuft nur auf eine
+                // Meldung hin. Eine einzige verlorene Meldung legt
+                // die Tastatur damit fuer den Rest der Sitzung still.
+                //
+                // Hier wird viermal je Sekunde nachgesehen. Das ist
+                // billig (ein Blick in den Ereignisring, kein
+                // Kontrolltransfer, keine Warteschleife) und steht
+                // deshalb im Zeitgeber richtig -- anders als die
+                // Aufzaehlung, die die Runde BLECHEINGABE aus genau
+                // diesem Behandler entfernt hat.
+                usb.stille_pruefen(state)
             }
         }
+        // RUNDE HAENGER: DIE MESSTAFEL, VOR `on_tick`.
+        //
+        // Sie steht hier aus demselben Grund wie `pmon.tick`
+        // darueber: `on_tick` endet in `schedule_locked` und
+        // WECHSELT DEN STAPEL -- was dahinter steht, laeuft nicht
+        // beim Schlag, sondern irgendwann spaeter. Eine Tafel, die
+        // nur gemalt wird, wenn der Ablaufplaner mitspielt, ist
+        // genau in dem Fall blind, fuer den sie gebaut wurde.
+        //
+        // Nur der Startprozessor malt: zwei Kerne, die gleichzeitig
+        // denselben Balken schreiben, ergaeben ein zerrissenes Bild.
+        unteres_stueck(state, isr_t0)
         sched.on_tick(state)
         // ROUND K9. ZWEI DINGE, DIE NUR HIER GEHEN. Die Frist von
         // `alarm` laeuft in Marken, also wird sie hier faellig. Und ein
@@ -316,6 +476,17 @@ fn entry(frame: u64, state: u64) {
         rand.stir(state, time.tsc())
         usb.irq(state)
         gfx.wm_poll(state)
+        eoi(state, vector)
+        return
+    }
+    // RUNDE HDA: der Ton. Die Unterbrechung tut hier NICHTS ausser
+    // quittieren und zaehlen -- die Oktette holt der Regler selbst per
+    // DMA, und nachgelegt wird aus dem Systemaufruf heraus, wo es
+    // einen Prozess gibt. Wer im Unterbrechungsbehandler mischen
+    // wollte, haette den Mischer in einem Zusammenhang, in dem er
+    // keine Sperre nehmen darf.
+    if vector == VEC_AUDIO {
+        audio.irq(state)
         eoi(state, vector)
         return
     }
@@ -392,6 +563,335 @@ fn report_user(frame: u64, state: u64, vector: u64, cur: u64, dies: bool) {
         signal.say_name(signal.signal_of(vector))
     }
     serial.nl()
+    // ================================================== RUNDE LEISTE
+    // UND JETZT DIE SPUR, DIE DIE ZEILE DARUEBER SCHULDIG BLEIBT.
+    //
+    // "rip=0xd70" sagt, WOHIN gesprungen wurde, und nichts darueber,
+    // WOHER. Genau daran hat diese Runde zwei Stunden verloren: 0xd70
+    // ist 3440, die Bildschirmbreite, also stand in einer
+    // Ruecksprungadresse eine Zahl, die dort nichts zu suchen hat --
+    // und welche Adresse das war, stand nirgends.
+    //
+    // Gedruckt werden deshalb der Stapelzeiger und die ersten Woerter
+    // des BENUTZERSTAPELS, die wie Programmcode aussehen. Das ist
+    // keine echte Rueckverfolgung (dafuer braeuchte es die
+    // Rahmenzeiger), aber es ist die Kette der Ruecksprungadressen,
+    // und `addr2line` macht daraus Quellzeilen.
+    //
+    // Gelesen wird ueber `proc.translate`, also ueber die
+    // Seitentafel DIESES Prozesses -- der Kern steht hier auf seinem
+    // eigenen Stapel, und der Benutzerstapel ist nur ueber die
+    // Uebersetzung erreichbar.
+    spur_sagen(state, cur, word(frame, F_RSP))
+    // ==================================================== RUNDE PROTOKOLL
+    // UND DARAUS EIN BERICHT AUF DER PLATTE -- aber nur, wenn der
+    // Prozess wirklich stirbt. Ein Programm, das SIGSEGV abfaengt und
+    // weiterlaeuft, hat keinen Absturz gehabt; einen Bericht darueber
+    // zu schreiben hiesse, /var/crash mit Nichtigkeiten zu fuellen.
+    //
+    // Der Kern ist hier GESUND: es ist ein Fehler in Ring 3, kein
+    // Fehler im Kern. Es wird also ganz gewoehnlich geschrieben, ohne
+    // Sonderweg und ohne Riegel.
+    if dies {
+        var nm: [u8; 24] = [0 as u8; 24]
+        var k: u64 = 0
+        while k < 23 && pmon.name_at(state, cur, k) != 0 {
+            nm[k as usize] = (pmon.name_at(state, cur, k) & 0xFF) as u8
+            k = k + 1
+        }
+        nm[k as usize] = 0 as u8
+        let _ok: bool = absturz.prog_bericht(state,
+            regblock_fuellen(frame), word(frame, F_RIP),
+            word(frame, F_CS), word(frame, F_RFLAGS),
+            word(frame, F_RSP), word(frame, F_SS),
+            word(frame, F_ERROR), cr2(), vector,
+            sched.tget(state, cur, sched.T_PID),
+            (&nm[0 as usize]) as u64,
+            (&uspur[0 as usize]) as u64, uspur_n)
+    }
+}
+
+// Die Grenzen, zwischen denen eine Zahl auf dem Benutzerstapel wie
+// eine Ruecksprungadresse aussieht: der Stummel in `.utext` (0x400000)
+// und alles, was der Lader nach 0x40100000 legt.
+//
+// ==================================================== RUNDE PROTOKOLL
+// ES WAREN ZWEI BEREICHE UND NICHT EINER, und der Unterschied ist der
+// ganze Wert dieser Spur.
+//
+// Bis zu dieser Runde galt EIN Bereich, 0x400000 bis 0x40400000. Darin
+// liegt aber auch der BENUTZERSTAPEL: `proc.ARGS_BASE` ist 0x4007F000.
+// Jede Zahl auf dem Stapel, die auf den Stapel zeigt -- also jeder
+// gerettete Rahmenzeiger und jeder Zeiger auf eine lokale Variable --
+// sah damit aus wie Code. Gemessen an einem Bericht dieser Runde:
+//
+//     #0 0x4007f056  #1 0x4007e202  #2 0x4007e201  #3 0x4007e200 ...
+//
+// Acht Eintraege, davon acht Stapelzeiger und keine einzige
+// Ruecksprungadresse. Die Spur war voll und leer zugleich.
+//
+// Jetzt sind es die zwei Bereiche, in denen wirklich Code steht:
+// der handgeschriebene Stummel aus `isr.s` und `uprog.fi` unten, und
+// das geladene Programm ab 0x40100000. Dazwischen (0x40000000 bis
+// 0x40100000) liegen Argumente und Stapel -- und nichts davon ist Code.
+const U_TEXT_LO: u64 = 0x400000
+const U_TEXT_HI: u64 = 0x500000
+const U_PROG_LO: u64 = 0x40100000
+const U_PROG_HI: u64 = 0x40400000
+
+fn wie_code(v: u64) -> bool {
+    if v >= U_TEXT_LO && v < U_TEXT_HI {
+        return true
+    }
+    return v >= U_PROG_LO && v < U_PROG_HI
+}
+
+// RUNDE PROTOKOLL: die Kette des BENUTZERSTAPELS, mitgeschrieben.
+static mut uspur: [u64; 8] = [0 as u64; 8]
+static mut uspur_n: u64 = 0
+
+fn spur_sagen(state: u64, cur: u64, rsp: u64) {
+    var s_sp: [u8; 14] = "  spur rsp=\0\0\0"
+    var s_at: [u8; 3] = " \0\0"
+    var s_no: [u8; 12] = "  (keine)\0\0\0"
+    serial.puts((&s_sp[0]) as u64)
+    serial.hex(rsp)
+    if rsp == 0 {
+        serial.nl()
+        return
+    }
+    // ================================================== RUNDE LEISTE
+    // DIE FRAGE, DIE DIESE RUNDE ENTSCHEIDET: LIEGT DER BENUTZERSTAPEL
+    // AUF EINEM RAHMEN, DER SCHON JEMAND ANDEREM GEHOERT?
+    //
+    // Auf dem Benutzerstapel des Starters standen Zahlen, die dort
+    // nicht hingehoeren -- KERNADRESSEN (`wm.mess_kol+0x79`) und ein
+    // Zeiger in den Kernstapel-Bereich. Beides ist unmoeglich, solange
+    // der Rahmen hinter dem Stapel NUR diesem Prozess gehoert.
+    //
+    // Also wird er gedruckt: die physische Adresse hinter `rsp`, der
+    // Kernstapel dieses Prozesses und der Abstand. Sind sie gleich
+    // oder liegen sie in derselben Kachel, ist der Fall geklaert und
+    // die Ursache liegt im Rahmenverwalter, nicht im Programm.
+    var s_ph: [u8; 8] = "  phys=\0"
+    var s_ks: [u8; 10] = "  kstack=\0"
+    serial.puts((&s_ph[0]) as u64)
+    serial.hex(proc.translate(state, cur, rsp))
+    serial.puts((&s_ks[0]) as u64)
+    serial.hex(sched.tget(state, cur, sched.T_KSTACK))
+    var i: u64 = 0
+    var n: u64 = 0
+    // 256 Woerter, also 2 KiB Stapel -- weit genug fuer die Kette und
+    // nah genug, um in einer Zeile zu bleiben.
+    while i < 256 && n < 8 {
+        let a: u64 = rsp + i * 8
+        let phys: u64 = proc.translate(state, cur, a)
+        if phys != 0 {
+            let v: u64 = __mmio_read64(phys as *mut u64)
+            if wie_code(v) {
+                serial.puts((&s_at[0]) as u64)
+                serial.hex(v)
+                // RUNDE PROTOKOLL: mitschreiben, nicht nur drucken --
+                // der Bericht braucht dieselbe Kette.
+                if n < 8 {
+                    uspur[n as usize] = v
+                }
+                n = n + 1
+            }
+        }
+        i = i + 1
+    }
+    uspur_n = n
+    if uspur_n > 8 {
+        uspur_n = 8
+    }
+    if n == 0 {
+        serial.puts((&s_no[0]) as u64)
+    }
+    serial.nl()
+    // UND FUER JUSTINS FOTO: der letzte Prozesstod bleibt stehen.
+    tot_pid = sched.tget(state, cur, sched.T_PID)
+    tot_zahl = tot_zahl + 1
+}
+
+// Der letzte gestorbene Prozess -- fuer die Messtafel, damit ein Foto
+// die Frage "ist mir da etwas weggestorben?" beantwortet, ohne dass
+// eine serielle Leitung noetig waere (Justins Brett hat keine).
+static mut tot_pid: u64 = 0
+static mut tot_zahl: u64 = 0
+
+fn tote_pid() -> u64 {
+    return tot_pid
+}
+
+fn tote_zahl() -> u64 {
+    return tot_zahl
+}
+
+// =====================================================================
+// RUNDE BLECHVIER: DER ZEITGEBERBEHANDLER, DER SICH SELBST MISST
+// =====================================================================
+//
+// DIE RECHNUNG, DIE DIESEN UMBAU ERZWUNGEN HAT -- und sie stammt nicht
+// von hier, sondern aus Justins Recherche, nachgerechnet an unseren
+// eigenen Messwerten:
+//
+//   Vollbild-Blit auf 3440x1440 bei UNCACHED-Abbildung: 396 531 us.
+//   1 / 0,3965 s = 2,52 Marken je Sekunde. Justin hat rund 3 gemessen.
+//
+// Das ist keine schlechte Eichung, das ist INTERRUPT-KOALESZENZ. Intel
+// SDM Band 3, Abschnitt 10.8.4: IRR und ISR haben GENAU EIN BIT JE
+// VEKTOR. Hoechstens zwei Schlaege desselben Vektors sind unterwegs
+// (einer im IRR, einer im ISR); jeder weitere faellt in dasselbe Bit
+// und ist weg. Es gibt keinen Zaehler, keine Warteschlange und beim
+// LAPIC-Zeitgeber auch kein Ueberlaufbit -- der Verlust ist STILL.
+//
+// Bei 10 ms Periode und 396 ms Behandlerlaufzeit laufen 39,6 Marken
+// auf, GENAU EINE wird gerettet. Der Faktor 39,6 passt zu keiner
+// LAPIC-Teilerstufe (die kann nur 2, 4, 8, ... 128), aber punktgenau
+// zur Laufzeit des Behandlers. Damit ist die Ursache benannt.
+//
+// Drei Dinge folgen daraus, und alle drei stehen hier:
+//
+//   1. GEMALT WIRD MIT EINGESCHALTETEN UNTERBRECHUNGEN. Dann geht
+//      waehrend eines langen Anstrichs keine Marke mehr verloren.
+//   2. DIE ZEIT KOMMT AUS DEM ZYKLENZAEHLER, nicht aus der Zahl der
+//      Schlaege. Selbst wenn doch einmal welche verlorengehen, geht
+//      nicht auch noch die UHR falsch -- und genau das war Justins
+//      stehende Taskleistenuhr.
+//   3. DER BEHANDLER MISST SICH SELBST und schreibt die Zahl auf die
+//      Tafel. Eine Laufzeit, ueber die man streiten muss, ist keine.
+
+// Wie lange der Behandler zuletzt und wie lange er am laengsten
+// gebraucht hat, in Mikrosekunden. Und wie viele Marken nachgefuehrt
+// werden mussten, weil kein Schlag fuer sie kam.
+static mut isr_us_l: u64 = 0
+static mut isr_us_m: u64 = 0
+static mut tick_tsc: u64 = 0
+static mut ticks_verloren: u64 = 0
+static mut ticks_spaet: u64 = 0
+// RUNDE BLECH2: die Marke, bei der zuletzt nachgetragen werden musste.
+static mut ticks_verl_marke: u64 = 0
+static mut bh_drin: u64 = 0
+static mut bh_max: u64 = 0
+
+fn isr_us_last() -> u64 {
+    return isr_us_l
+}
+
+fn isr_us_max() -> u64 {
+    return isr_us_m
+}
+
+// Marken, die der Zyklenzaehler nachtragen musste, weil kein eigener
+// Schlag fuer sie kam. Groesser null heisst: es sind welche
+// verlorengegangen -- und die Uhr stimmt trotzdem.
+fn ticks_lost() -> u64 {
+    return ticks_verloren
+}
+
+// Schlaege, die in einen laufenden Anstrich gefallen sind. Sie haben
+// ihre Marke gezaehlt und sind dann umgekehrt. Groesser null heisst:
+// die Sperre arbeitet, und ohne sie waeren genau das die verlorenen.
+fn ticks_late() -> u64 {
+    return ticks_spaet
+}
+
+// RUNDE BLECH2: WANN zuletzt. Justins Tafel sagt `VERL 4 SPAET 1`, und
+// die Zahl allein sagt nicht, ob die vier beim Start fielen (die
+// Anschlussruecksetzung des USB wartet mit gesperrten Unterbrechungen)
+// oder ob der Betrieb laufend welche verliert. Steht LM klein und
+// bleibt stehen: Start. Laeuft LM mit der Uhr: Betrieb.
+fn ticks_lost_at() -> u64 {
+    return ticks_verl_marke
+}
+
+fn bh_tief() -> u64 {
+    return bh_max
+}
+
+// DIE MARKEN AUS DEM ZYKLENZAEHLER NACHFUEHREN.
+//
+// Bis hierher stand hier `TICKS + 1` -- ein Zaehler von Schlaegen, die
+// angekommen sind. Wo Schlaege verlorengehen, ist das keine Uhr.
+// Jetzt: wie viele Marken seit dem letzten Mal WIRKLICH vergangen
+// sind, gerechnet aus `rdtsc` und der geeichten Zyklenfrequenz.
+//
+// Der Rest bleibt stehen (`tick_tsc + n * je`), damit sich kein Bruch
+// aufsummiert. Ohne Eichung (`khz` = 0) bleibt es beim alten Verhalten
+// -- eine Uhr, die auf einer geratenen Frequenz steht, waere schlimmer
+// als eine, die langsam geht.
+fn marken_nachfuehren(state: u64) {
+    let jetzt: u64 = time.tsc()
+    let khz: u64 = time.khz(state)
+    let je: u64 = khz *% (time.TICK_NS / 1000000)
+    if khz == 0 || je == 0 || tick_tsc == 0 || jetzt <= tick_tsc {
+        tick_tsc = jetzt
+        kstate.add(state, kstate.TICKS, 1)
+        return
+    }
+    var n: u64 = (jetzt - tick_tsc) / je
+    if n == 0 {
+        // Der Schlag kam frueher als eine volle Marke -- das ist kein
+        // Fehler, sondern Koernung. Die Marke wird gezaehlt, die
+        // Grundlinie NICHT verschoben, sonst laeuft die Uhr vor.
+        kstate.add(state, kstate.TICKS, 1)
+        return
+    }
+    // EINE OBERGRENZE, UND WARUM. Steht der Rechner im Fehlersuchlauf
+    // eine Minute im Einzelschritt, waeren das sechstausend Marken auf
+    // einmal -- jeder Schlaefer wuerde gleichzeitig geweckt und jede
+    // Frist auf einmal faellig. Mehr als eine Sekunde wird deshalb
+    // nicht nachgetragen.
+    if n > time.TICK_HZ {
+        n = time.TICK_HZ
+        tick_tsc = jetzt
+    } else {
+        tick_tsc = tick_tsc +% n *% je
+    }
+    if n > 1 {
+        ticks_verloren = ticks_verloren + (n - 1)
+        ticks_verl_marke = kstate.get(state, kstate.TICKS)
+    }
+    kstate.add(state, kstate.TICKS, n)
+}
+
+// DAS UNTERE STUECK: gemalt wird MIT eingeschalteten Unterbrechungen.
+//
+// Die Sperre `bh_drin` verhindert nicht das Schachteln -- sie
+// verhindert, dass ein geschachtelter Schlag den Ablaufplaner ruft
+// (siehe die Umkehr oben). Ein zweiter Anstrich kann hier nie
+// hineinlaufen, weil dieser Zweig nur erreicht wird, wenn die Sperre
+// offen war.
+fn unteres_stueck(state: u64, t0: u64) {
+    if cpu.here(state) != 0 {
+        return
+    }
+    bh_drin = 1
+    if bh_drin > bh_max {
+        bh_max = bh_drin
+    }
+    arch.irq_on()
+    gfx.herz_tick(state)
+    gfx.tafel_tick(state)
+    arch.irq_off()
+    bh_drin = 0
+    // Die eigene Laufzeit, in Mikrosekunden. `khz` sind Zyklen je
+    // Millisekunde, also ist khz/1000 die Zahl der Zyklen je
+    // Mikrosekunde.
+    let khz: u64 = time.khz(state)
+    let je: u64 = khz / 1000
+    if je == 0 {
+        return
+    }
+    let t1: u64 = time.tsc()
+    if t1 <= t0 {
+        return
+    }
+    isr_us_l = (t1 - t0) / je
+    if isr_us_l > isr_us_m {
+        isr_us_m = isr_us_l
+    }
 }
 
 fn eoi(state: u64, vector: u64) {
@@ -409,6 +909,123 @@ fn eoi(state: u64, vector: u64) {
 
 fn cr2() -> u64 {
     return asm("mov rax, cr2", out("rax"))
+}
+
+// ====================================================== RUNDE BLECHKERN
+//
+// DREI DINGE, DIE EINE TOEDLICHE AUSNAHME BISHER SCHULDIG BLIEB.
+//
+//   1. WOHER der Sprung kam. `rip=0x80` sagt, WOHIN gesprungen wurde,
+//      und 0x80 ist keine Adresse -- es ist der Rest einer Kette, die
+//      jemand ueberschrieben hat. Runde LEISTE hat dafuer `spur_sagen`
+//      gebaut, aber nur fuer RING 3: es liest ueber `proc.translate`
+//      und sucht Zahlen im Bereich der Benutzerprogramme. Ein Absturz
+//      in Ring 0 -- und Justins war einer, CS 0008 -- fiel durch.
+//      `kspur_bauen` macht dasselbe fuer den KERNSTAPEL: gelesen wird
+//      unmittelbar (der Kern steht in seinem eigenen Adressraum),
+//      gesucht wird zwischen 0x100000 und `KERNEL_END`.
+//   2. DIE ZAHLEN AUF DEN SCHIRM. Justins Brett hat keine serielle
+//      Leitung; was nur `serial.puts` erreicht, existiert fuer ihn
+//      nicht. Die Spur geht deshalb MIT auf die Tafel.
+//   3. DIE ANDEREN KERNE ANHALTEN, siehe den Riegel in `entry`.
+const KERN_LO: u64 = 0x100000
+// RUNDE PROTOKOLL: FUENF WAREN ZU WENIG.
+//
+// Fuenf Adressen reichten, solange sie roh gedruckt wurden und ein
+// Mensch sie ohnehin einzeln nachschlug. Aufgeloest passen mehr auf den
+// Schirm als in den Kopf, und die Abnahme dieser Runde verlangt
+// mindestens fuenf AUFGELOESTE -- also muessen mehr als fuenf ROHE
+// gesammelt werden: nicht jede Zahl auf dem Stapel, die im Textbereich
+// liegt, ist wirklich eine Ruecksprungadresse.
+const SPUR_MAX: u64 = 16
+
+static mut kspur: [u64; 16] = [0 as u64; 16]
+static mut kspur_n: u64 = 0
+static mut halt_alle: u64 = 0
+
+fn kspur_bauen(state: u64, rsp: u64) {
+    kspur_n = 0
+    if rsp == 0 || rsp < KERN_LO {
+        return
+    }
+    // Die obere Schranke ist das ENDE DES KERNCODES (`_etext`, Nummer 74
+    // der Tabelle aus isr.s), nicht das Ende des Kernels. Mit
+    // `KERNEL_END` standen in der Spur `kdata` und Stapelzeiger neben
+    // den echten Ruecksprungadressen -- gemessen am Lauf `knall`:
+    // `SPUR 00578000 001430BC 0055FC00 0055FBC0`, davon war genau eine
+    // Zahl Code (`sched.irq_restore`).
+    var hi: u64 = __mmio_read64((kstate.get(state, kstate.VECTORS)
+            + 74 * 8) as *mut u64)
+    if hi <= KERN_LO {
+        hi = kstate.get(state, kstate.KERNEL_END)
+    }
+    if hi <= KERN_LO {
+        return
+    }
+    var i: u64 = 0
+    while i < 512 && kspur_n < SPUR_MAX {
+        let v: u64 = __mmio_read64((rsp + i * 8) as *mut u64)
+        if v >= KERN_LO && v < hi {
+            kspur[kspur_n as usize] = v
+            kspur_n = kspur_n + 1
+        }
+        i = i + 1
+    }
+}
+
+fn kspur_sagen() {
+    var s_a: [u8; 10] = "  kspur:\0\0"
+    var s_k: [u8; 12] = "  (keine)   "
+    var s_e: [u8; 7] = "      \0"
+    serial.puts((&s_a[0]) as u64)
+    if kspur_n == 0 {
+        serial.puts((&s_k[0]) as u64)
+        serial.nl()
+        return
+    }
+    // ==================================================== RUNDE PROTOKOLL
+    // EINE ZEILE JE ADRESSE, MIT NAMEN UND QUELLZEILE.
+    //
+    // Bis hierher standen die fuenf Zahlen nebeneinander in einer Zeile,
+    // und wer sie lesen wollte, brauchte `objdump` und das passende
+    // Abbild. `ksymtab.say_addr` macht daraus
+    //
+    //     sched.irq_restore+0x11 (sched.fi:1046)
+    //
+    // und braucht dafuer nichts als das Abbild, das gerade laeuft.
+    // Gibt es keine Symboltabelle (`--ohne-symbole`), druckt dieselbe
+    // Funktion die rohe Adresse -- die Zeile wird aermer, nicht falsch.
+    serial.nl()
+    var i: u64 = 0
+    while i < kspur_n {
+        serial.puts((&s_e[0]) as u64)
+        ksymtab.say_addr(kspur[i as usize])
+        serial.nl()
+        i = i + 1
+    }
+}
+
+// Ein NMI an ALLE ausser sich selbst. Die Kurzform 11 im Zielfeld
+// (Bits 19:18) braucht keine Kennung, die Zustellart 100 in Bits 10:8
+// ist NMI, Bit 14 ist die Behauptung. Also 0xC4400.
+//
+// GERUFEN WIRD ERST NACH DEM MALEN. Die Anzeige laeuft ueber den
+// Fensterserver, und ein Kern, den ein NMI mitten in einer Sperre
+// trifft, gibt sie nicht mehr her -- die Reihenfolge ist deshalb:
+// erst die Zahlen auf den Schirm, dann die Maschine stilllegen.
+fn stoppzahl(state: u64) -> u64 {
+    if !apic.active(state) || cpu.count(state) < 2 {
+        return 0
+    }
+    return cpu.count(state) - 1
+}
+
+fn alle_stoppen(state: u64) {
+    halt_alle = 1
+    if stoppzahl(state) == 0 {
+        return
+    }
+    apic.ipi(state, 0, 0xC4400)
 }
 
 fn report(frame: u64, state: u64, vector: u64) {
@@ -453,9 +1070,110 @@ fn report(frame: u64, state: u64, vector: u64) {
     serial.nl()
 
     registers(frame)
+    // RUNDE BLECHKERN: die Ruecksprungkette des KERNSTAPELS. Sie steht
+    // vor "kernel halted", weil sie die einzige Zeile ist, aus der sich
+    // die Absturzstelle zurueckrechnen laesst, wenn `rip` Muell ist.
+    kspur_bauen(state, word(frame, F_RSP))
+    kspur_sagen()
+    // ==================================================== RUNDE PROTOKOLL
+    // DIE LETZTEN FUENFZIG ZEILEN DES KERNPROTOKOLLS.
+    //
+    // Was ein Kern UNMITTELBAR VOR dem Absturz getan hat, ist die
+    // Haelfte der Antwort, und bis zu dieser Runde war sie weg: die
+    // Ausgaben der Treiber gingen auf die serielle Leitung, und auf
+    // Justins Brett gibt es keine. Jetzt stehen sie im Ring in `kdata`,
+    // und der Ring hat den Absturz ueberlebt.
+    //
+    // OHNE SPERRE (`klog.dump_tail` nimmt keine). Wer hier ankommt, ist
+    // tot; auf eine Sperre zu warten, die ein anderer Kern haelt, waere
+    // das Ende der letzten Ausgabe.
+    var s_lg: [u8; 32] = "*** die letzten Protokollzeilen\0"
+    serial.puts((&s_lg[0]) as u64)
+    serial.nl()
+    klog.dump_tail(state, 50)
+    // ==================================================== RUNDE PROTOKOLL
+    // DER BERICHT AUF DIE PLATTE, mit dem Riegel aus `absturz.fi`:
+    // steckt dieser Kern schon im Dateisystem, wird nichts geschrieben.
+    // Er steht VOR dem Panik-Bildschirm, weil das Malen ueber den
+    // Rahmenpuffer laeuft und ein Kern, der dabei ein zweites Mal
+    // faellt, den Bericht sonst nicht mehr abgelegt haette.
+    let _bok: bool = absturz.kern_bericht(state, regblock_fuellen(frame),
+        word(frame, F_RIP), word(frame, F_CS), word(frame, F_RFLAGS),
+        word(frame, F_RSP), word(frame, F_SS), word(frame, F_ERROR),
+        cr2(), vector, (&kspur[0 as usize]) as u64, kspur_n)
     serial.puts((&s_tail[0]) as u64)
     serial.nl()
+    // ======================================== RUNDE BLECHFUENF
+    // UND DASSELBE AUF DEN SCHIRM, in das reservierte Band.
+    //
+    // Justins Brett hat keine serielle Leitung (LSR FF). Alles, was
+    // ueber dieser Zeile steht, ist fuer ihn nicht vorhanden -- und
+    // `power.shutdown` darunter loescht auch noch den Bildschirm. Er
+    // hat auf ein Fensterkreuz geklickt und danach nur gesehen, dass
+    // der Rechner weg war.
+    //
+    // Die Anzeige kommt IMMER (sie kostet nichts, wenn es keinen
+    // Rahmenpuffer gibt), das ANHALTEN nur mit `absturzhalt`: die
+    // Regressionslaeufe erkennen einen Absturz daran, dass die Maschine
+    // sich mit EXIT_TRAP beendet, und ein Kern, der stattdessen ewig
+    // steht, laesst jeden dieser Laeufe in sein Zeitlimit rennen.
+    // RUNDE STARTKNOPF: die Kernnummer kommt VON HIER und wird nicht
+    // in `kgui` geholt. `kgui` haette dafuer `cpu` einbinden muessen,
+    // und ein neuer Import ordnet die Bindereihenfolge um -- in einer
+    // Runde, in der genau eine solche Umordnung im Verdacht steht,
+    // einen Speicherfehler sichtbar gemacht zu haben, wird kein
+    // Import hinzugefuegt, der sich vermeiden laesst.
+    gfx.absturz(state, vector, word(frame, F_ERROR), word(frame, F_RIP),
+        cr2(), word(frame, F_RSP), word(frame, F_CS), cpu.here(state),
+        (&kspur[0]) as u64, kspur_n, stoppzahl(state))
+    // ==================================================== RUNDE PROTOKOLL
+    // UND DANN DER GANZE SCHIRM.
+    //
+    // Die Messtafel darueber hat acht Zeilen zu achtundvierzig Spalten
+    // -- das reicht fuer Vektor, RIP und vier rohe Adressen und fuer
+    // nichts sonst. Register, aufgeloeste Rueckverfolgung und die
+    // letzten Protokollzeilen brauchen den ganzen Bildschirm, und in
+    // diesem Augenblick braucht ihn sonst niemand mehr.
+    //
+    // ER KOMMT ZULETZT, aus zwei Gruenden: der Bericht auf der Platte
+    // steht dann schon (sein Pfad ist die letzte Zeile des Bildes), und
+    // wenn das Malen selbst noch einmal faellt, ist alles andere bereits
+    // gesagt und geschrieben.
+    gfx.panikbild(state, vector, word(frame, F_ERROR), word(frame, F_RIP),
+        cr2(), word(frame, F_RSP), word(frame, F_CS),
+        word(frame, F_RFLAGS), word(frame, F_SS), cpu.here(state),
+        (&regblock[0 as usize]) as u64,
+        (&kspur[0 as usize]) as u64, kspur_n, absturz.letzte_datei())
+    if kstate.mode_on(state, kstate.M_ABSTURZ) {
+        // ERST DAS BILD, DANN DIE MASCHINE. Siehe `alle_stoppen`.
+        alle_stoppen(state)
+        power.halt_forever()
+    }
     power.shutdown(power.EXIT_TRAP)
+}
+
+// ==================================================== RUNDE PROTOKOLL
+// DIE SECHZEHN REGISTER ALS ZUSAMMENHAENGENDER BLOCK.
+//
+// `absturz.fi` schreibt sie in den Bericht und kennt die Versaetze im
+// Rahmen nicht -- die kennt nur diese Datei und `isr.s`. Also werden
+// sie hier einmal in der Reihenfolge rax..r15 abgelegt und als EIN
+// Zeiger weitergereicht. Das ist dieselbe Tabelle wie in `registers`,
+// und sie steht absichtlich nur hier: zwei Kopien einer Versatztabelle
+// sind zwei Gelegenheiten, sie auseinanderlaufen zu lassen.
+static mut regblock: [u64; 16] = [0 as u64; 16]
+
+fn regblock_fuellen(frame: u64) -> u64 {
+    var offs: [u8; 16] = [14 as u8, 11 as u8, 13 as u8, 12 as u8,
+        9 as u8, 8 as u8, 10 as u8, 20 as u8,
+        7 as u8, 6 as u8, 5 as u8, 4 as u8,
+        3 as u8, 2 as u8, 1 as u8, 0 as u8]
+    var i: u64 = 0
+    while i < 16 {
+        regblock[i as usize] = word(frame, offs[i as usize] as u64 * 8)
+        i = i + 1
+    }
+    return (&regblock[0 as usize]) as u64
 }
 
 // All sixteen, four per line. `rsp` comes out of the processor's frame,

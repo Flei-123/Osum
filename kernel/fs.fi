@@ -89,6 +89,7 @@
 
 import serial
 import kstate
+import klog
 import sched
 import blk
 import atomic
@@ -113,6 +114,14 @@ export {
     inode_gid, set_mode, set_owner, set_meta, parent_ino, OFS_V1,
     OFS_V2, S_ISUID, S_ISGID, S_ISVTX, DIRECT_V1, DIRECT_V2,
     rename_path,
+    // RUNDE GLYPHE: die Sperre selbst. `sys.do_scan` und
+    // `sys.do_jrnl` legen ihre Saetze in `kstate.BLOCK_OFF` ab --
+    // denselben Puffer, den das Dateisystem benutzt -- und brauchen
+    // deshalb dieselbe Sperre. Je Kern wiedereintrittsfaehig, also
+    // verklemmt sie sich nicht gegen die `enter` weiter innen.
+    enter, leave,
+    // ---- RUNDE PROTOKOLL ----
+    frei, ready,
     // RUNDE K15, zweiter Nachtrag: die Geometrie aus dem Superblock und
     // der Weg ueber Plaetze statt ueber "der wievielte".
     inode_count, data_start, scan, geom, entry_slot, slot_count,
@@ -131,7 +140,10 @@ export {
     SB_BLOCKS, SB_MAGIC, SB_DATA, SB_ITABLE, SB_INODES, SB_VERSION,
     link_path,
     // ---------------------------------------------------- RUNDE FSROBUST
-    SB_JSTART, SB_JBLOCKS, journal_start, journal_blocks, journal_on
+    SB_JSTART, SB_JBLOCKS, journal_start, journal_blocks, journal_on,
+    // ---------------------------------------------------- RUNDE MERGE-6
+    // Die Probe, die den Ein-Kern-Rest ERZWINGT statt ihn zu behaupten.
+    race_ino, race_soll, race_core
 }
 
 const BS: u64 = 512 // one block
@@ -544,6 +556,25 @@ const NESTED: u64 = 0x8000000000000000
 // und beide gehen hier durch; bestaetigt wird erst, wenn der aeusserste
 // wieder herauskommt. Genau dadurch ist "eine Datei anlegen" EINE
 // unteilbare Umschreibung und nicht drei.
+// ==================================================== RUNDE PROTOKOLL
+//
+// DARF ICH JETZT SCHREIBEN? Diese Frage stellt genau ein Rufer:
+// `absturz.kern_bericht`, aus einer Kernel-Panik heraus. Haelt DIESER
+// Kern die Dateisystemsperre schon, ist der Absturz mitten im
+// Dateisystem passiert -- ein `write_at` von hier aus liefe in ein
+// halb umgestelltes Journal und in Datenstrukturen, die gerade
+// auseinandergenommen sind. Dann wird nicht geschrieben.
+//
+// Es ist bewusst KEIN `lock_try`: das nimmt die Sperre und muesste sie
+// wieder hergeben. Hier wird nur GEFRAGT.
+fn frei(state: u64) -> bool {
+    return atomic.lock_owner(state, atomic.L_FS) != cpu.here(state) + 1
+}
+
+fn ready(state: u64) -> bool {
+    return kstate.get(state, kstate.FS_READY) != 0
+}
+
 fn enter(state: u64) -> u64 {
     let flags: u64 = sched.irq_save()
     let me: u64 = cpu.here(state)
@@ -865,25 +896,60 @@ fn inode_off(state: u64, ino: u64) -> u64 {
     return ((ino - 1) % inodes_per_block(state)) * inode_bytes(state)
 }
 
+// ==================================================== RUNDE VIELKERN 3
+// DAS ZWEITE `KSTACK_CUR`: EIN PUFFER FUER DIE GANZE MASCHINE.
+//
+// `buf_in` ist EIN Block von 512 Oktetten in der Datenseite, und diese
+// beiden Funktionen lesen einen Inodeblock hinein und holen sich das
+// Feld gleich danach wieder heraus. Zwischen dem Lesen und dem Holen
+// liegt nichts -- solange nur EIN Kern im Dateisystem ist. Ab dieser
+// Runde sind es alle: `inode_get` von Kern 0 liest den Block der Datei
+// A hinein, Kern 2 ueberschreibt ihn mit dem Block der Datei B, und
+// Kern 0 liest dann die ART von B aus dem Feld von A.
+//
+// GEMESSEN, `-smp 8 r3alle einst`, voller Schreibtisch:
+//
+//     desk: start /bin/taskbar  pid=0
+//     elf: refused, reason 1  no such file
+//     desk: start /bin/launcher pid=0
+//     elf: refused, reason 2  not a plain file
+//
+// `/bin/launcher` IST eine gewoehnliche Datei; was `elf.aufloesen` dort
+// gesehen hat, war der Inode eines Verzeichnisses aus dem Lauf eines
+// anderen Kerns. Der Lader war nie schuld -- er hat getreulich gemeldet,
+// was in dem Puffer stand.
+//
+// DER RIEGEL IST DERSELBE WIE UEBERALL SONST IM DATEISYSTEM: `enter` /
+// `leave`, also `atomic.L_FS`. Er ist JE KERN WIEDEREINTRITTSFAEHIG
+// (siehe `enter`), diese Funktionen werden also aus den schon
+// gesperrten Wegen heraus weiter kostenlos gerufen -- was sie kosten,
+// ist eine Sperrnahme gegen einen Blockzugriff, und der ist um
+// Groessenordnungen teurer.
 fn inode_get(state: u64, ino: u64, field: u64) -> u64 {
     if ino == 0 || ino > inode_count(state) {
         return 0
     }
-    if !ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
-        return 0
+    let flags: u64 = enter(state)
+    var v: u64 = 0
+    if ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
+        v = get64(buf_in(state) + inode_off(state, ino) + field)
     }
-    return get64(buf_in(state) + inode_off(state, ino) + field)
+    leave(state, flags)
+    return v
 }
 
 fn inode_set(state: u64, ino: u64, field: u64, v: u64) -> bool {
     if ino == 0 || ino > inode_count(state) {
         return false
     }
-    if !ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
-        return false
+    let flags: u64 = enter(state)
+    var ok: bool = false
+    if ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
+        put64(buf_in(state) + inode_off(state, ino) + field, v)
+        ok = ofsj.write(state, inode_block_of(state, ino), buf_in(state))
     }
-    put64(buf_in(state) + inode_off(state, ino) + field, v)
-    return ofsj.write(state, inode_block_of(state, ino), buf_in(state))
+    leave(state, flags)
+    return ok
 }
 
 fn inode_type(state: u64, ino: u64) -> u64 {
@@ -894,10 +960,95 @@ fn inode_size(state: u64, ino: u64) -> u64 {
     return inode_get(state, ino, I_SIZE)
 }
 
+// ==================================================== RUNDE MERGE-6
+// DER FALL WIRD ERZWUNGEN, NICHT BEHAUPTET.
+//
+// Die Vorrunde (VIELKERN 3) hat `inode_get` unter `atomic.L_FS`
+// gestellt und den Nachweis dafuer AN DER QUELLE gefuehrt: kein Weg in
+// dieser Datei erreicht einen geteilten Blockpuffer ohne `enter`. Das
+// ist eine gute Zusage, aber es ist eine Zusage ueber TEXT. Sie faellt,
+// wenn jemand die Sperre entfernt, und sie faellt nicht, wenn die
+// Sperre da ist und nicht wirkt.
+//
+// Diese drei Funktionen sind der Gegenbeweis in Zahlen. Jeder Kern
+// bekommt einen EIGENEN Inode -- und zwar einen in einem EIGENEN
+// Inodeblock, denn der geteilte Puffer `buf_in` fasst einen BLOCK und
+// nicht einen Inode: zwei Kerne, die Inodes aus demselben Block lesen,
+// wuerden sich gegenseitig dasselbe hineinlegen und nichts beweisen.
+// Dann liest jeder Kern in einer Schleife die ART seines Inodes und
+// vergleicht sie mit dem Wert, den EIN Kern in Ruhe gelesen hat.
+//
+// MIT der Sperre muss die Zahl der Abweichungen 0 sein.
+// OHNE sie (`race_core(..., blind = true)`, das ist woertlich der
+// Rumpf von `inode_get` VOR VIELKERN 3) muss sie groesser als 0 sein.
+// Eine Zusage, deren Gegenprobe nicht faellt, ist eine Behauptung --
+// dieselbe Regel wie beim Riegel der Vorrunde.
+
+// WOERTLICH DER RUMPF VON `inode_get` VOR VIELKERN 3. Er steht hier,
+// damit die Gegenprobe den ECHTEN alten Weg nimmt und nicht eine
+// Nachbildung davon. Er wird von nichts anderem gerufen als von
+// `race_core`, und `race_core` nimmt ihn nur, wenn der Laeufer
+// `fsblind` gesagt hat.
+fn inode_get_blind(state: u64, ino: u64, field: u64) -> u64 {
+    if ino == 0 || ino > inode_count(state) {
+        return 0
+    }
+    if !ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
+        return 0
+    }
+    return get64(buf_in(state) + inode_off(state, ino) + field)
+}
+
+// WELCHEN INODE KERN `index` NIMMT. Ein Schritt von einem ganzen
+// Inodeblock je Kern, damit die Bloecke verschieden sind; laeuft die
+// Tafel aus, faellt der Kern auf den ersten Inode zurueck (dann misst
+// dieser Kern nichts, und `race_soll` sagt das ueber die Zahl).
+fn race_ino(state: u64, index: u64) -> u64 {
+    let ipb: u64 = inodes_per_block(state)
+    if ipb == 0 {
+        return 1
+    }
+    let ino: u64 = 1 + index * ipb
+    if ino == 0 || ino > inode_count(state) {
+        return 1
+    }
+    return ino
+}
+
+// DER SOLLWERT, IN RUHE GELESEN. Ein Kern, kein Nebenlaeufer, die
+// gewoehnliche gesperrte Fassung.
+fn race_soll(state: u64, index: u64) -> u64 {
+    return inode_get(state, race_ino(state, index), I_TYPE)
+}
+
+// DIE SCHLEIFE, DIE JEDER KERN FAEHRT. Rueckgabe: wie oft der Puffer
+// etwas anderes hergab als das, was drinstehen musste.
+fn race_core(state: u64, index: u64, soll: u64, runden: u64,
+    blind: bool) -> u64 {
+    let ino: u64 = race_ino(state, index)
+    var fehler: u64 = 0
+    var i: u64 = 0
+    while i < runden {
+        var v: u64 = 0
+        if blind {
+            v = inode_get_blind(state, ino, I_TYPE)
+        } else {
+            v = inode_get(state, ino, I_TYPE)
+        }
+        if v != soll {
+            fehler = fehler + 1
+        }
+        i = i + 1
+    }
+    return fehler
+}
+
 // A whole inode at once: cheaper than eighteen single writes, and it is
 // the only way a new inode gets a clean state.
 fn inode_init(state: u64, ino: u64, kind: u64) -> bool {
+    let flags: u64 = enter(state)
     if !ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
+        leave(state, flags)
         return false
     }
     let at: u64 = buf_in(state) + inode_off(state, ino)
@@ -915,7 +1066,10 @@ fn inode_init(state: u64, ino: u64, kind: u64) -> bool {
         put64(at + I_MTIME, nun)
         put64(at + I_ATIME, nun)
     }
-    return ofsj.write(state, inode_block_of(state, ino), buf_in(state))
+    let ok: bool = ofsj.write(state, inode_block_of(state, ino),
+        buf_in(state))
+    leave(state, flags)
+    return ok
 }
 
 fn inode_alloc(state: u64, kind: u64) -> u64 {
@@ -937,6 +1091,7 @@ fn inode_alloc(state: u64, kind: u64) -> u64 {
 // war der Unterschied nicht zu merken; mit 4096 sind es 4096 Leseaufrufe
 // gegen 1024 fuer dieselbe Antwort, und `df` ruft das.
 fn used_inodes(state: u64) -> u64 {
+    let flags: u64 = enter(state)
     let letzte: u64 = inode_count(state)
     var n: u64 = 0
     var b: u64 = 0
@@ -954,6 +1109,7 @@ fn used_inodes(state: u64) -> u64 {
         }
         b = b + 1
     }
+    leave(state, flags)
     return n
 }
 
@@ -1072,6 +1228,7 @@ fn block_free(state: u64, b: u64) {
 // die beiden Faelle, die auf einer echten Platte fast alles ausmachen,
 // und beide kosten hier eine Abfrage statt acht.
 fn free_blocks(state: u64) -> u64 {
+    let flags: u64 = enter(state)
     let last: u64 = total_blocks(state)
     var lim: u64 = max_blocks(state)
     if last < lim {
@@ -1082,6 +1239,7 @@ fn free_blocks(state: u64) -> u64 {
     while b < lim {
         let kb: u64 = bm_block_of(state, b)
         if !ofsj.read(state, kb, buf_bm(state)) {
+            leave(state, flags)
             return n
         }
         var ende: u64 = (b / BITS_PER_BLOCK + 1) * BITS_PER_BLOCK
@@ -1113,6 +1271,7 @@ fn free_blocks(state: u64) -> u64 {
             }
         }
     }
+    leave(state, flags)
     return n
 }
 
@@ -1316,6 +1475,11 @@ fn stufe(state: u64, block: u64, k: u64, grow: bool) -> u64 {
 
 // Every block of a file back to the bitmap.
 fn file_truncate(state: u64, ino: u64) {
+    // RUNDE VIELKERN 3: `buf_ib`, `buf_i2` und `buf_dt` sind Puffer der
+    // ganzen Maschine, und diese Funktion laeuft ueber alle drei. Sie
+    // gehoert damit unter dieselbe Sperre wie alles andere, was Bloecke
+    // in diese Puffer holt.
+    let vk_flags: u64 = enter(state)
     var i: u64 = 0
     let dn: u64 = directs(state)
     while i < dn {
@@ -1396,6 +1560,7 @@ fn file_truncate(state: u64, ino: u64) {
     // Datei, die abgeschnitten wird, ohne dass der Index es erfaehrt,
     // waere in `du` fuer immer so gross wie vorher.
     size_write(state, ino, 0, false)
+    leave(state, vk_flags)
 }
 
 // Wie `free_pointers`, nur durch `buf_dt` statt durch `buf_i2` -- damit
@@ -1675,20 +1840,30 @@ fn slot_count(state: u64, dir: u64) -> u64 {
 }
 
 fn entry_at(state: u64, dir: u64, index: u64, out: u64) -> u64 {
+    // RUNDE VIELKERN 3: unter der Sperre, und zwar der GANZE Durchlauf.
+    // Ohne sie zaehlt dieser Kern die Eintraege eines Verzeichnisses
+    // durch, waehrend ein anderer eines anlegt oder loescht -- und der
+    // Aufrufer bekommt einen Eintrag, den es zweimal oder gar nicht
+    // gibt. `readdir` ueber ein lebendes Verzeichnis ist genau der Weg,
+    // auf dem der Dateimanager laeuft.
+    let flags: u64 = enter(state)
     let n: u64 = dir_entries(state, dir)
     var i: u64 = 0
     var seen: u64 = 0
+    var got: u64 = 0
     while i < n {
         let ino: u64 = entry_read(state, dir, i, out)
         if ino != 0 {
             if seen == index {
-                return ino
+                got = ino
+                i = n
             }
             seen = seen + 1
         }
         i = i + 1
     }
-    return 0
+    leave(state, flags)
+    return got
 }
 
 fn dir_add(state: u64, dir: u64, name: u64, ino: u64) -> bool {
@@ -2002,9 +2177,28 @@ fn folge(state: u64, w: u64, von: u64, bis: u64, link: u64) -> bool {
 // OP_BUILD und OP_NAME. Vier Puffer, keine Ueberdeckung.
 fn parent_of(state: u64, p: u64, out_name: u64) -> u64 {
     let buf: u64 = state + kstate.OFS3_OFF + kstate.OP_PATH
-    let len: u64 = strcopy(p, buf, PATHBUF)
+    var len: u64 = strcopy(p, buf, PATHBUF)
     if len == 0 {
         return 0
+    }
+    // RUNDE FREMDLAND: SCHRAEGSTRICHE AM ENDE FALLEN WEG.
+    //
+    // POSIX: `/w/d2/` und `/w/d2` benennen dasselbe, und bei einem
+    // Verzeichnis ist der Strich am Ende ausdruecklich erlaubt. Ohne
+    // diese Schleife zeigte `start` hinter den letzten Strich, der Name
+    // war LEER, und die Funktion gab 0 zurueck -- der Aufrufer machte
+    // daraus ENOSPC.
+    //
+    // GEMESSEN: `busybox mkdir -p /w/d2/d3` legt seine Zwischenstufen
+    // MIT Strich an (`mkdir("/w/d2/")`) und bekam
+    // "can't create directory '/w/d2/': No space left on device".
+    // Kein Platzmangel -- ein Name, den dieser Kern nicht las.
+    //
+    // Der Wurzelstrich allein bleibt stehen: `/` ist ein Name und kein
+    // leerer Rest.
+    while len > 1 && kstate.get8(buf + len - 1) == 47 {
+        len = len - 1
+        kstate.set8(buf + len, 0 as u8)
     }
     var cut: u64 = len
     var found: bool = false
@@ -2119,16 +2313,20 @@ fn symlink_path(state: u64, ziel: u64, wo: u64) -> u64 {
     // Das Ziel ZUERST in einen eigenen Puffer -- `create_path` benutzt
     // OP_PATH, OP_WORK, OP_BUILD und OP_NAME, und der Aufrufer kann
     // sein Ziel in einem davon liegen haben.
+    // RUNDE VIELKERN 3: OP_TMP gehoert der ganzen Maschine, also unter
+    // die Sperre -- sonst legt ein zweiter Kern sein Ziel dort ab,
+    // waehrend dieser seines noch schreibt.
+    let flags: u64 = enter(state)
     let t: u64 = state + kstate.OFS3_OFF + kstate.OP_TMP
     strcopy(ziel, t, PATHBUF)
-    let ino: u64 = create_path(state, wo, T_LINK)
-    if ino == 0 {
-        return 0
+    var ino: u64 = create_path(state, wo, T_LINK)
+    if ino != 0 {
+        if write_at(state, ino, 0, t, n) != n {
+            unlink_path(state, wo)
+            ino = 0
+        }
     }
-    if write_at(state, ino, 0, t, n) != n {
-        unlink_path(state, wo)
-        return 0
-    }
+    leave(state, flags)
     return ino
 }
 
@@ -2560,7 +2758,22 @@ fn journal_on(state: u64) -> bool {
 
 // Whatever does not carry the magic number is not a file system of this
 // kind. `mount` says so instead of interpreting foreign octets as inodes.
+// RUNDE PROTOKOLL: die Quelle dieses Treibers im Ring. Siehe `nvme.lq`.
+// Der Name liegt als `static mut` im Modul und nicht als `var` in
+// dieser Funktion: eine lokale Zeichenkette stirbt mit dem Rahmen,
+// und firnc faengt genau das ab ("the address of the local escapes
+// through the return value"). Der Protokollring liest den Namen
+// erst im Aufruf danach.
+static mut q_fs: [u8; 3] = "fs\0"
+
+fn lq() -> u64 {
+    return (&q_fs[0]) as u64
+}
+
 fn mount(state: u64) -> bool {
+    var l_lesen: [u8; 41] = "Superblock nicht lesbar, kein Einhaengen\0"
+    var l_magie: [u8; 33] = "falsche Kennung im Superblock, \0\0"
+    var l_ok: [u8; 30] = "eingehaengt, Fassung/Bloecke \0"
     // RUNDE FSROBUST: SOLANGE NICHT NACHGETRAGEN IST, GIBT ES KEIN
     // JOURNAL. `ofsj.replay` schreibt mit `blk.write` und nicht ueber
     // die Journalschicht -- es gaebe auch nichts zu protokollieren.
@@ -2569,10 +2782,13 @@ fn mount(state: u64) -> bool {
     kstate.set(state, kstate.FS_READY, 0)
     geom_j(state, 0, 0)
     if !blk.read(state, 0, buf_sb(state)) {
+        klog.say(state, klog.L_INFO, lq(), (&l_lesen[0]) as u64)
         leave(state, flags)
         return false
     }
     if get64(buf_sb(state) + SB_MAGIC) != MAGIC {
+        klog.sayh(state, klog.L_INFO, lq(), (&l_magie[0]) as u64,
+            get64(buf_sb(state) + SB_MAGIC))
         leave(state, flags)
         return false
     }
@@ -2733,6 +2949,8 @@ fn mount(state: u64) -> bool {
         return false
     }
     kstate.set(state, kstate.FS_ROOT, r)
+    klog.say2(state, klog.L_INFO, lq(), (&l_ok[0]) as u64,
+        version(state), total_blocks(state))
     kstate.set(state, kstate.FS_READY, 1)
     leave(state, flags)
     // RUNDE FSROBUST: JETZT erst wird das Journal scharf. Vorher waere

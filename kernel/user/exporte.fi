@@ -1,0 +1,575 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/exporte.fi -- RUNDE EXPLORER-2: DIE ORTE UND DER WEG.
+//
+// Zwei Dinge, die jeder Dateimanager hat und dieser nicht hatte:
+//
+//   DIE SEITENLEISTE. Oben die Orte -- Zuhause, Dokumente, Bilder,
+//   Downloads, Start, Papierkorb, Netz --, darunter die DATENTRAEGER,
+//   und die sind nicht getippt: sie kommen aus `ulib.SYS_MNTSTAT`
+//   (MS_COUNT sagt wie viele, MS_PATHCH + k gibt das k-te Oktett des
+//   Pfades, MS_BLOCKS die Groesse, MS_FLAGS die Schalter). Ein
+//   Datentraeger, den man abzieht, verschwindet damit beim naechsten
+//   Aufbau von selbst -- eine getippte Liste taete das nicht.
+//
+//   DIE BROSAMENLEISTE. Der Pfad zerfaellt in Glieder, jedes Glied ist
+//   anklickbar, und `krume_pfad(i)` sagt, wohin ein Klick fuehrt. Die
+//   Leiste MALT NICHTS: sie liefert Text und Ziel, und `explorer.fi`
+//   haengt sie an Knoepfe aus `wlib`. So bleibt die Regel gewahrt,
+//   dass ausserhalb von wlib/wlibc nichts gezeichnet wird.
+//
+// GEMESSENER BEFUND ZUR AUFRUFORDNUNG (der Grund, warum diese Datei
+// zweimal geschrieben wurde): `kernel/sys.fi:8417` heisst
+// `do_mntstat(state, index, field)` -- ERST der Eintrag, DANN das Feld,
+// und der Pfad kommt ueber `field = MS_PATHCH + k`, nicht ueber ein
+// drittes Argument. Der erste Wurf hier hatte Eintrag und Feld
+// vertauscht (`sys4(..., MS_COUNT, 0, ...)`), und dann fragt man den
+// Kernel nach Feld 0 des Eintrags 7 -- eine Antwort, die immer kommt
+// und nie stimmt. `kernel/user/korb.fi:99` macht es richtig herum, und
+// diese Datei macht es jetzt genauso: `ulib.sys(SYS_MNTSTAT, i, feld, 0)`.
+//
+// GEMESSENER BEFUND ZUM FUELLSTAND: die Einhaengetafel des Kerns
+// (`kernel/mnt.fi`, Felder M_USED..M_OPENS) kennt die GROESSE eines
+// Traegers (M_BLOCKS), aber KEINE Zahl freier Bloecke -- die gibt es
+// nur einmal im System, ueber `SYS_SYSINFO` I_BLOCKS/I_BFREE
+// (`kernel/uio.fi:380`), und die zaehlen den OFS-Datentraeger, von dem
+// gestartet wurde. Also: der Fuellstand wird dem Traeger zugeschlagen,
+// dessen MS_BLOCKS mit I_BLOCKS uebereinstimmt (ersatzweise der
+// Wurzel), und jeder andere meldet `traeger_benutzt(i) == 0` = nicht
+// bekannt. Eine erfundene Zahl waere schlimmer als keine.
+//
+// DIE ZEIGER SIND STABIL. `ort_text`, `ort_pfad`, `krume_text` und
+// `krume_pfad` geben Adressen in statische Felder dieser Datei --
+// `wlib.set_text` behaelt einen Zeiger und liest ihn beim naechsten
+// Malen wieder. Ein Zeiger auf den Stapel waere ein Bild aus Muell.
+
+profile kernel
+
+import ulib
+import libc.io
+import icons
+import wlib
+import msg
+import korb
+
+export {
+    MAXORT, MAXKRUME, ORT_ZEICHEN, KRUME_ZEICHEN,
+    orte_bauen, orte_zahl, orte_ptr, orte_symbole,
+    ort_text, ort_pfad, ort_ist_traeger, ort_ist_kopf,
+    traeger_zahl, traeger_bloecke, traeger_benutzt,
+    traeger_flags, traeger_prozent,
+    krume_bauen, krume_zahl, krume_text, krume_pfad,
+    melde
+}
+
+const MAXORT: u64 = 32
+const MAXKRUME: u64 = 12
+const ORTB: u64 = 64
+const KRUMEB: u64 = 256
+
+// Wie lang eine Zeile werden darf, bevor sie gekuerzt wird. Die
+// Seitenleiste ist schmal, und `wlib` kuerzt zwar selbst (Runde
+// THEMESTORE), aber es kuerzt hart am Rand -- ein "..." sagt dem
+// Benutzer, DASS etwas fehlt. Die Brosamenknoepfe sind noch enger,
+// weil zwoelf davon nebeneinander passen muessen.
+const ORT_ZEICHEN: u64 = 26
+const KRUME_ZEICHEN: u64 = 16
+
+static mut o_text: [u8; 2048] = [0 as u8; 2048]   // MAXORT * ORTB
+static mut o_pfad: [u8; 8192] = [0 as u8; 8192]   // MAXORT * 256
+static mut o_traeger: [u64; 32] = [0 as u64; 32]
+static mut o_bloecke: [u64; 32] = [0 as u64; 32]
+static mut o_benutzt: [u64; 32] = [0 as u64; 32]
+static mut o_flags: [u64; 32] = [0 as u64; 32]
+static mut o_symbol: [u64; 32] = [0 as u64; 32]
+static mut o_blob: [u8; 3072] = [0 as u8; 3072]
+static mut n_orte: u64 = 0
+static mut n_traeger: u64 = 0
+
+static mut kr_text: [u8; 768] = [0 as u8; 768]    // MAXKRUME * 64
+static mut kr_pfad: [u8; 3072] = [0 as u8; 3072]  // MAXKRUME * KRUMEB
+static mut n_krume: u64 = 0
+
+// Arbeitsflaechen. Sie liegen statisch und nicht auf dem Stapel, weil
+// `traeger_lesen` einen Pfad von bis zu 250 Oktetten Zeichen fuer
+// Zeichen zusammensetzt und `krume_bauen` bis zu 64 Gliedgrenzen
+// merkt -- ein Programm dieses Baumes bekommt 11 MiB Abbild, aber der
+// Stapel einer Funktion ist kein Ort fuer Kilobyte.
+static mut w_pfad: [u8; 256] = [0 as u8; 256]
+static mut w_name: [u8; 256] = [0 as u8; 256]
+static mut w_zahl: [u8; 32] = [0 as u8; 32]
+static mut g_anf: [u64; 64] = [0 as u64; 64]
+static mut g_end: [u64; 64] = [0 as u64; 64]
+
+// Die Schluessel der Orte. Der sichtbare Text steht im Katalog, hier
+// steht nur, wie er heisst.
+// BREITE 26 UND NICHT 24: "explorer.place.downloads" ist genau 24
+// Zeichen lang und passte damit haargenau in ein [u8; 24] -- OHNE
+// abschliessende Null. `msg.get` liest bis zur Null und lief deshalb
+// ueber das Feldende hinaus in den naechsten Statischen hinein; der
+// Schluessel war je nach Anordnung im Datenbereich
+// "explorer.place.downloadsexplorer.place.trash". Alle acht auf 26,
+// damit der laengste (24 Zeichen) zwei Nullen Rand hat.
+static mut k_start: [u8; 26] = "explorer.place.root\0\0\0\0\0\0\0"
+static mut k_home: [u8; 26] = "explorer.place.home\0\0\0\0\0\0\0"
+static mut k_doc: [u8; 26] = "explorer.place.docs\0\0\0\0\0\0\0"
+static mut k_pic: [u8; 26] = "explorer.place.pics\0\0\0\0\0\0\0"
+static mut k_dl: [u8; 26] = "explorer.place.downloads\0\0"
+static mut k_trash: [u8; 26] = "explorer.place.trash\0\0\0\0\0\0"
+static mut k_net: [u8; 26] = "explorer.place.net\0\0\0\0\0\0\0\0"
+static mut k_vols: [u8; 26] = "explorer.place.volumes\0\0\0\0"
+
+static mut p_root: [u8; 8] = "/\0\0\0\0\0\0\0"
+static mut p_home: [u8; 8] = "/data\0\0\0"
+static mut p_doc: [u8; 24] = "/data/dokumente\0\0\0\0\0\0\0\0\0"
+static mut p_pic: [u8; 24] = "/data/bilder\0\0\0\0\0\0\0\0\0\0\0\0"
+static mut p_dl: [u8; 24] = "/data/downloads\0\0\0\0\0\0\0\0\0"
+static mut p_net: [u8; 8] = "/net\0\0\0\0"
+
+// Das Kuerzungszeichen. Satzzeichen, keine Sprache -- es sieht in
+// jeder Sprache gleich aus und steht deshalb nicht im Katalog.
+static mut z_punkte: [u8; 4] = "...\0"
+
+static mut s_orte: [u8; 28] = "explorer: orte n=\0\0\0\0\0\0\0\0\0\0\0"
+static mut s_vol: [u8; 12] = "traeger=\0\0\0\0"
+static mut s_kr: [u8; 28] = "explorer: krume n=\0\0\0\0\0\0\0\0\0\0"
+static mut s_tr: [u8; 24] = "explorer: traeger i=\0\0\0\0"
+static mut s_bl: [u8; 5] = " bl=\0"
+static mut s_be: [u8; 5] = " be=\0"
+static mut s_pz: [u8; 5] = " pz=\0"
+static mut s_ro: [u8; 5] = " ro=\0"
+static mut s_gl: [u8; 5] = " gl=\0"
+static mut s_lz: [u8; 2] = " \0"
+
+fn t_at(i: u64) -> u64 {
+    return (&o_text[(0) as usize]) as u64 + i * ORTB
+}
+
+fn pf_at(i: u64) -> u64 {
+    return (&o_pfad[(0) as usize]) as u64 + i * 256
+}
+
+fn ort_text(i: u64) -> u64 {
+    return t_at(i)
+}
+
+fn ort_pfad(i: u64) -> u64 {
+    return pf_at(i)
+}
+
+// 1 = Datentraeger, 2 = Ueberschrift. Zwei Fragen, zwei Funktionen --
+// `rahmen` fragt die eine fuer den Fuellstand und die andere, um die
+// Zeile nicht wie einen Ort zu behandeln.
+fn ort_ist_traeger(i: u64) -> bool {
+    if i >= n_orte {
+        return false
+    }
+    return o_traeger[(i) as usize] == 1
+}
+
+fn ort_ist_kopf(i: u64) -> bool {
+    if i >= n_orte {
+        return false
+    }
+    return o_traeger[(i) as usize] == 2
+}
+
+fn orte_zahl() -> u64 {
+    return n_orte
+}
+
+fn traeger_zahl() -> u64 {
+    return n_traeger
+}
+
+fn traeger_bloecke(i: u64) -> u64 {
+    if i >= n_orte {
+        return 0
+    }
+    return o_bloecke[(i) as usize]
+}
+
+fn traeger_benutzt(i: u64) -> u64 {
+    if i >= n_orte {
+        return 0
+    }
+    return o_benutzt[(i) as usize]
+}
+
+fn traeger_flags(i: u64) -> u64 {
+    if i >= n_orte {
+        return 0
+    }
+    return o_flags[(i) as usize]
+}
+
+// Der Fuellstand in Hundertsteln, oder 0, wenn er nicht bekannt ist.
+// Die Division steht hier und nicht beim Aufrufer, damit nicht drei
+// Stellen im Programm dieselbe Rechnung leicht verschieden machen.
+fn traeger_prozent(i: u64) -> u64 {
+    let bl: u64 = traeger_bloecke(i)
+    let be: u64 = traeger_benutzt(i)
+    if bl == 0 || be == 0 {
+        return 0
+    }
+    if be >= bl {
+        return 100
+    }
+    return be * 100 / bl
+}
+
+fn orte_ptr() -> u64 {
+    return (&o_blob[(0) as usize]) as u64
+}
+
+fn orte_symbole() -> u64 {
+    return (&o_symbol[(0) as usize]) as u64
+}
+
+// Eine Zeile kuerzen, damit sie in die schmale Leiste passt. `hinten`
+// heisst: die letzten Zeichen bleiben stehen ("...ata/downloads") --
+// das ist bei PFADEN richtig, weil vorne bei allen dasselbe steht. Bei
+// NAMEN bleibt der Anfang stehen.
+fn kuerzen(dst: u64, src: u64, maxz: u64, hinten: bool) {
+    let n: u64 = ulib.length(src)
+    if n <= maxz || maxz < 5 {
+        ulib.strncpy(dst, src, maxz + 1)
+        return
+    }
+    if hinten {
+        ulib.strcpy(dst, (&z_punkte[(0) as usize]) as u64)
+        ulib.strncpy(dst + 3, src + (n - (maxz - 3)), maxz - 2)
+        return
+    }
+    ulib.strncpy(dst, src, maxz - 2)
+    ulib.strcat(dst, (&z_punkte[(0) as usize]) as u64)
+}
+
+// " 41%" an eine Zeile haengen. Zahl und Prozentzeichen sind keine
+// Sprache, also stehen sie nicht im Katalog.
+fn prozent_anhaengen(dst: u64, pz: u64) {
+    let b: u64 = (&w_zahl[(0) as usize]) as u64
+    let n: u64 = ulib.digits(pz, b)
+    __mmio_write8((b + n) as *mut u8, 0 as u8)
+    __mmio_write8((dst + ulib.length(dst)) as *mut u8, 32 as u8)
+    __mmio_write8((dst + ulib.length(dst) + 1) as *mut u8, 0 as u8)
+    ulib.strcat(dst, b)
+    __mmio_write8((dst + ulib.length(dst)) as *mut u8, 37 as u8)
+    __mmio_write8((dst + ulib.length(dst) + 1) as *mut u8, 0 as u8)
+}
+
+// Einen Ort eintragen. `nurwenn_da` heisst: ein Ordner, den es nicht
+// gibt, steht auch nicht in der Leiste -- eine Zeile "Bilder", die ins
+// Leere fuehrt, ist eine Luege mit Symbol.
+fn eintrag(text: u64, pfad: u64, sym: u64, traeger: u64,
+        nurwenn_da: bool) -> bool {
+    if n_orte >= MAXORT {
+        return false
+    }
+    if nurwenn_da && !ulib.is_dir(pfad) {
+        return false
+    }
+    kuerzen(t_at(n_orte), text, ORT_ZEICHEN, traeger == 1)
+    ulib.strncpy(pf_at(n_orte), pfad, 254)
+    o_symbol[(n_orte) as usize] = sym
+    o_traeger[(n_orte) as usize] = traeger
+    o_bloecke[(n_orte) as usize] = 0
+    o_benutzt[(n_orte) as usize] = 0
+    o_flags[(n_orte) as usize] = 0
+    n_orte = n_orte + 1
+    return true
+}
+
+// Der Fuellstand des Systemtraegers, in Bloecken. Siehe Kopf: der Kern
+// hat diese Zahl genau einmal, nicht je Einhaengung.
+fn sys_bloecke() -> u64 {
+    let v: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_BLOCKS, 0, 0)
+    if ulib.bad(v) {
+        return 0
+    }
+    return v
+}
+
+fn sys_benutzt() -> u64 {
+    let ganz: u64 = sys_bloecke()
+    let frei: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_BFREE, 0, 0)
+    if ganz == 0 || ulib.bad(frei) || frei > ganz {
+        return 0
+    }
+    return ganz - frei
+}
+
+// Die Datentraeger aus der Einhaengetafel des Kerns. Die Ueberschrift
+// wird erst geschrieben, wenn wirklich einer gefunden ist -- eine
+// Ueberschrift ohne Zeilen darunter ist ein leeres Versprechen.
+fn traeger_lesen() {
+    let n: u64 = ulib.sys(ulib.SYS_MNTSTAT, 0, ulib.MS_COUNT, 0)
+    if ulib.bad(n) || n == 0 {
+        return
+    }
+    let sysbl: u64 = sys_bloecke()
+    let sysbe: u64 = sys_benutzt()
+    var zugeteilt: bool = false
+    var wurzelort: u64 = MAXORT
+    var kopf_da: bool = false
+    let p: u64 = (&w_pfad[(0) as usize]) as u64
+    var i: u64 = 0
+    while i < n && n_orte < MAXORT {
+        if ulib.sys(ulib.SYS_MNTSTAT, i, ulib.MS_USED, 0) == 1 {
+            let len: u64 = ulib.sys(ulib.SYS_MNTSTAT, i, ulib.MS_PATHLEN, 0)
+            var k: u64 = 0
+            while k < len && k < 250 {
+                __mmio_write8((p + k) as *mut u8,
+                    ulib.sys(ulib.SYS_MNTSTAT, i, ulib.MS_PATHCH + k,
+                        0) as u8)
+                k = k + 1
+            }
+            __mmio_write8((p + k) as *mut u8, 0 as u8)
+            if k > 0 {
+                if !kopf_da {
+                    let _k: bool = eintrag(
+                        msg.get((&k_vols[(0) as usize]) as u64),
+                        (&p_root[(0) as usize]) as u64, 0, 2, false)
+                    kopf_da = true
+                }
+                let bl: u64 = ulib.sys(ulib.SYS_MNTSTAT, i, ulib.MS_BLOCKS, 0)
+                let fl: u64 = ulib.sys(ulib.SYS_MNTSTAT, i, ulib.MS_FLAGS, 0)
+                // Beschriftung: der Einhaengepfad selbst. `eintrag`
+                // kuerzt ihn bei einem Traeger VON VORNE ("...mnt/usb"),
+                // weil bei Pfaden der hintere Teil der ist, der die
+                // Zeilen unterscheidet. Der Fuellstand kommt weiter
+                // unten dahinter.
+                var be: u64 = 0
+                if !ulib.bad(bl) && bl != 0 && bl == sysbl && !zugeteilt {
+                    be = sysbe
+                    zugeteilt = true
+                }
+                if eintrag(p, p, wlib.icon_id(icons.FILE_DRIVE), 1,
+                        false) {
+                    let bei: u64 = n_orte - 1
+                    if !ulib.bad(bl) {
+                        o_bloecke[(bei) as usize] = bl
+                    }
+                    o_benutzt[(bei) as usize] = be
+                    if !ulib.bad(fl) {
+                        o_flags[(bei) as usize] = fl
+                    }
+                    if k == 1 {
+                        wurzelort = bei
+                    }
+                    n_traeger = n_traeger + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    // Kein Traeger hatte die Groesse des Systemtraegers: dann traegt
+    // die Wurzel den Fuellstand, denn von ihr wurde gestartet.
+    if !zugeteilt && wurzelort < n_orte && sysbl != 0 {
+        o_bloecke[(wurzelort) as usize] = sysbl
+        o_benutzt[(wurzelort) as usize] = sysbe
+    }
+    // Jetzt erst die Prozentzahl in die Beschriftung -- vorher war sie
+    // bei der Wurzel noch nicht bekannt.
+    var j: u64 = 0
+    while j < n_orte {
+        if o_traeger[(j) as usize] == 1 {
+            let pz: u64 = traeger_prozent(j)
+            if pz > 0 {
+                prozent_anhaengen(t_at(j), pz)
+            }
+            ulib.say((&s_tr[(0) as usize]) as u64)
+            ulib.sayu(j)
+            ulib.say((&s_bl[(0) as usize]) as u64)
+            ulib.sayu(o_bloecke[(j) as usize])
+            ulib.say((&s_be[(0) as usize]) as u64)
+            ulib.sayu(o_benutzt[(j) as usize])
+            ulib.say((&s_pz[(0) as usize]) as u64)
+            ulib.sayu(pz)
+            ulib.say((&s_ro[(0) as usize]) as u64)
+            ulib.sayu(o_flags[(j) as usize] & ulib.MNT_RDONLY)
+            ulib.nl()
+        }
+        j = j + 1
+    }
+}
+
+// Den Textblock fuer die Liste bauen -- eine Zeile je Ort, wie
+// `wlib.list` ihn erwartet.
+fn blob_bauen() {
+    var bp: u64 = 0
+    var i: u64 = 0
+    while i < n_orte {
+        let p: u64 = t_at(i)
+        var k: u64 = 0
+        while (__mmio_read8((p + k) as *mut u8)) != 0 as u8 && bp < 3060 {
+            o_blob[(bp) as usize] = __mmio_read8((p + k) as *mut u8)
+            bp = bp + 1
+            k = k + 1
+        }
+        o_blob[(bp) as usize] = 10 as u8
+        bp = bp + 1
+        i = i + 1
+    }
+    o_blob[(bp) as usize] = 0 as u8
+}
+
+// Die ganze Seitenleiste neu bauen. Rueckgabe: die Zahl der Zeilen.
+fn orte_bauen() -> u64 {
+    n_orte = 0
+    n_traeger = 0
+    let _h: bool = eintrag(msg.get((&k_home[(0) as usize]) as u64),
+        (&p_home[(0) as usize]) as u64,
+        wlib.icon_id(icons.FILE_FOLDER), 0, true)
+    let _d: bool = eintrag(msg.get((&k_doc[(0) as usize]) as u64),
+        (&p_doc[(0) as usize]) as u64,
+        wlib.icon_id(icons.FILE_TEXT), 0, true)
+    let _b: bool = eintrag(msg.get((&k_pic[(0) as usize]) as u64),
+        (&p_pic[(0) as usize]) as u64,
+        wlib.icon_id(icons.FILE_IMAGE), 0, true)
+    let _l: bool = eintrag(msg.get((&k_dl[(0) as usize]) as u64),
+        (&p_dl[(0) as usize]) as u64,
+        wlib.icon_id(icons.ARROW_DOWN), 0, true)
+    let _s: bool = eintrag(msg.get((&k_start[(0) as usize]) as u64),
+        (&p_root[(0) as usize]) as u64,
+        wlib.icon_id(icons.START), 0, false)
+    // Der Papierkorb liegt NICHT an einer getippten Stelle: `korb.fi`
+    // legt ihn je Datentraeger unter `<wurzel>/.papierkorb` an, und
+    // `korb_von` rechnet aus, welche Wurzel zu `/data` gehoert. So
+    // zeigt die Leiste auf denselben Ordner, in den `expakt.in_korb`
+    // wirklich hineinschiebt.
+    let _p: bool = eintrag(msg.get((&k_trash[(0) as usize]) as u64),
+        korb.korb_von((&p_home[(0) as usize]) as u64),
+        wlib.icon_id(icons.TRASH), 0, false)
+    let _n: bool = eintrag(msg.get((&k_net[(0) as usize]) as u64),
+        (&p_net[(0) as usize]) as u64,
+        wlib.icon_id(icons.NETWORK_WIRED), 0, false)
+    traeger_lesen()
+    blob_bauen()
+    melde()
+    return n_orte
+}
+
+// ------------------------------------------------------ die Brosamen
+
+fn kt_at(i: u64) -> u64 {
+    return (&kr_text[(0) as usize]) as u64 + i * 64
+}
+
+fn kp_at(i: u64) -> u64 {
+    return (&kr_pfad[(0) as usize]) as u64 + i * KRUMEB
+}
+
+fn krume_zahl() -> u64 {
+    return n_krume
+}
+
+fn krume_text(i: u64) -> u64 {
+    return kt_at(i)
+}
+
+fn krume_pfad(i: u64) -> u64 {
+    return kp_at(i)
+}
+
+// Ein Glied ablegen: Beschriftung (gekuerzt) und das Ziel eines Klicks.
+fn glied(text: u64, pfad: u64, len: u64) {
+    if n_krume >= MAXKRUME {
+        return
+    }
+    kuerzen(kt_at(n_krume), text, KRUME_ZEICHEN, false)
+    // Die Deckelung ist kein Zierat: `len` kommt aus der Laenge des
+    // uebergebenen Pfades, und ein Pfad von 256 Oktetten wuerde mit
+    // seiner Null in das NAECHSTE Glied schreiben -- beim letzten Glied
+    // hinter das Feld.
+    var l: u64 = len
+    if l > KRUMEB - 2 {
+        l = KRUMEB - 2
+    }
+    ulib.strncpy(kp_at(n_krume), pfad, l + 1)
+    n_krume = n_krume + 1
+}
+
+// Den Pfad in Glieder zerlegen. Das erste Glied ist die Wurzel und
+// heisst wie der Ort "Start"; jedes weitere traegt seinen Namen und
+// den Pfad BIS DORTHIN -- ein Klick auf das dritte Glied geht drei
+// Ebenen tief, nicht eine.
+//
+// EIN TIEFER PFAD DARF DAS LETZTE GLIED NICHT VERLIEREN. Der erste
+// Wurf hier hat einfach bei MAXKRUME aufgehoert, und dann fehlte
+// ausgerechnet der Ordner, in dem man steht. Jetzt wird zuerst
+// gezaehlt; passt es nicht, faellt die MITTE weg und an ihrer Stelle
+// steht ein "..."-Glied, das auf die Ebene darueber fuehrt.
+fn krume_bauen(pfad: u64) -> u64 {
+    n_krume = 0
+    glied(msg.get((&k_start[(0) as usize]) as u64),
+        (&p_root[(0) as usize]) as u64, 1)
+    // Erster Gang: die Grenzen aller Glieder merken.
+    var ng: u64 = 0
+    var i: u64 = 0
+    var anf: u64 = 0
+    var offen: bool = false
+    while (__mmio_read8((pfad + i) as *mut u8)) != 0 as u8 && i < KRUMEB {
+        let c: u64 = (__mmio_read8((pfad + i) as *mut u8)) as u64
+        if c == 47 {
+            if offen && ng < 64 {
+                g_anf[(ng) as usize] = anf
+                g_end[(ng) as usize] = i
+                ng = ng + 1
+            }
+            offen = false
+        } else {
+            if !offen {
+                anf = i
+                offen = true
+            }
+        }
+        i = i + 1
+    }
+    if offen && ng < 64 {
+        g_anf[(ng) as usize] = anf
+        g_end[(ng) as usize] = i
+        ng = ng + 1
+    }
+    // Zweiter Gang: eintragen. `ab` ist das erste Glied, das noch Platz
+    // hat; alles davor verschwindet hinter dem "..."-Glied.
+    var ab: u64 = 0
+    if ng > MAXKRUME - 1 {
+        ab = ng - (MAXKRUME - 2)
+    }
+    if ab > 0 {
+        // Das Kuerzungsglied fuehrt dorthin, wo die Kuerzung anfaengt --
+        // ein Klick darauf ist damit nicht ins Leere, sondern eine
+        // Ebene nach oben.
+        glied((&z_punkte[(0) as usize]) as u64, pfad,
+            g_end[((ab - 1)) as usize])
+    }
+    var j: u64 = ab
+    let nm: u64 = (&w_name[(0) as usize]) as u64
+    while j < ng {
+        let a: u64 = g_anf[(j) as usize]
+        let e: u64 = g_end[(j) as usize]
+        var l: u64 = e - a
+        if l > 250 {
+            l = 250
+        }
+        ulib.strncpy(nm, pfad + a, l + 1)
+        glied(nm, pfad, e)
+        j = j + 1
+    }
+    ulib.say((&s_kr[(0) as usize]) as u64)
+    ulib.sayu(n_krume)
+    ulib.say((&s_lz[(0) as usize]) as u64)
+    ulib.say((&s_gl[(0) as usize]) as u64)
+    ulib.sayu(ng)
+    ulib.nl()
+    return n_krume
+}
+
+fn melde() {
+    ulib.say((&s_orte[(0) as usize]) as u64)
+    ulib.sayu(n_orte)
+    ulib.say((&s_lz[(0) as usize]) as u64)
+    ulib.say((&s_vol[(0) as usize]) as u64)
+    ulib.sayu(n_traeger)
+    ulib.nl()
+}

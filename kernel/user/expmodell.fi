@@ -1,0 +1,879 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/expmodell.fi -- RUNDE EXPLORER-2: DAS MODELL DES
+// DATEIMANAGERS -- die Liste, die Zeiten, die Sortierung.
+//
+// WARUM DIESE DATEI UEBERHAUPT: `explorer.fi` trug seine Liste in
+// festen Feldern von 96 Eintraegen zu 32 Oktetten Name. Gemessen:
+// /apps hat mehr als 96 Eintraege, und ein Name von 32 Oktetten
+// schneidet `osum-icons-fallback.ttf` mitten durch. Die Grenzen
+// muessen auf 4096 Eintraege und 256 Oktette -- und 4096 * 256 sind
+// ein Megaoktett, das ein Programm OHNE HAUFEN nicht als Rechteck
+// hinlegen darf.
+//
+// DIE PUFFERSTRATEGIE, und sie ist gemessen und nicht geraten:
+//
+//   1. NAMEN LIEGEN IN EINEM BLOB, NICHT IN EINEM RECHTECK. `nblob`
+//      ist 320 KiB gross, die Namen liegen darin hintereinander, und
+//      `noff[i]` sagt, wo der Name des Eintrags i anfaengt. Gemessen
+//      auf diesem Baum: der Mittelwert eines Dateinamens ist 17
+//      Oktette (`ls -R` ueber das Wurzelabbild, 4211 Eintraege,
+//      71 604 Oktette Namen). 320 KiB fassen also die 4096 Eintraege
+//      mit dem Vierfachen Luft -- und der EINZELNE Name darf trotzdem
+//      NAMEB = 256 Oktette lang sein.
+//   2. LAEUFT EIN PUFFER VOLL, WIRD NICHT UEBERSCHRIEBEN. `ueberlauf()`
+//      zaehlt JEDEN Eintrag, der nicht mehr hineinpasste -- beim
+//      Einlesen (Namensblob oder MAXENT voll) UND beim Tabellenbau
+//      (Textblob voll). Die Statuszeile sagt die Zahl. Ein stiller
+//      Verlust waere schlimmer als eine unvollstaendige Liste, von
+//      der man weiss.
+//   3. DER TEXTBLOB IST AUS DEM NAMENSBLOB HERGELEITET, nicht geraten:
+//      eine Tabellenzeile ist der Name plus hoechstens 50 Oktette
+//      (Groesse, Zeit "JJJJ-MM-TT SS:MM", zehn Rechtezeichen, drei
+//      Tabulatoren, Zeilenende). Mehr als BLOB Oktette Namen kann es
+//      nach Regel 1 nicht geben, also reicht
+//      BLOB + MAXENT * 50 = 327680 + 204800 = 532 480; `TBLOB` ist
+//      auf 544 KiB aufgerundet und damit BEWEISBAR gross genug.
+//   4. DAS PASST INS ABBILD. `kernel/proc.fi` gibt einem Prozess
+//      0x40100000..0x40C00000 = 11 MiB fuer Text, Daten und BSS
+//      (IMAGE_BASE/IMAGE_END), und `wlibc` holt seine Malflaeche per
+//      anonymem `mmap` aus der grossen Arena ab 0x40C00000 -- die
+//      Warnung "Abbild ueber 1 MiB ODER Rahmenpuffer" gilt nur fuer
+//      Programme, die `fb.USER_BASE` selbst abbilden. Dieses tut es
+//      nicht. Zusammen belegt das Modell rund 1,13 MiB BSS
+//      (320 + 544 KiB Blobs, 9 Felder zu 32 KiB).
+//
+// GELADEN IST NICHT GEZEIGT: `lade` legt ALLE Eintraege ab, `sortiere`
+// baut daraus die Ansicht `folge[]` und laesst dabei versteckte Namen
+// (Punkt-Konvention, Strg+H) und Namen ohne Filtertreffer (Strg+F)
+// weg. Darum wirken `setz_versteckt` und `setz_filter` schon mit einem
+// blossen `sortiere()` -- der Rahmen muss nicht neu einlesen, und ein
+// Filter ueber 4096 Eintraege kostet keinen Plattenzugriff.
+//
+// SORTIERT WIRD MIT MISCHEN, NICHT MIT EINFUEGEN: bei MAXENT = 4096
+// braucht Einfuegesortierung im schlechtesten Fall rund 8 Millionen
+// Namensvergleiche; das haengt sichtbar. Aufsteigendes Mischen
+// (`hilf[]`, 32 KiB) braucht 12 Laeufe zu 4096 Vergleichen und ist
+// ausserdem stabil.
+//
+// DIE ZEIT KOMMT AUS DEM DATEISYSTEM UND DER VERSATZ AUS
+// /etc/time.conf -- DERSELBEN DATEI wie bei der Taskleiste
+// (`kernel/user/taskbar.fi::offset_read`, `offset=<Minuten>`). Zwei
+// Quellen fuer eine Ortszeit sind zwei Uhren, die verschieden gehen.
+
+profile kernel
+
+import ulib
+import libc.io
+import icons
+import wlib
+
+export {
+    MAXENT, NAMEB, BLOB,
+    lade, anzahl, ueberlauf, blob_benutzt,
+    name_at, groesse_at, art_at, modus_at,
+    mtime_at, ctime_at, atime_at,
+    ord_at, ord_finde,
+    setz_sort, sort_spalte, sort_rev, sortiere,
+    setz_versteckt, versteckt, setz_filter, filter_ptr,
+    tabelle_bauen, tabelle_ptr, symbole_ptr, symbol_fuer,
+    zeit_lade, zeit_offset, zeit_text, melde
+}
+
+const MAXENT: u64 = 4096
+const NAMEB: u64 = 256
+const BLOB: u64 = 327680     // 320 KiB Namen, siehe Kopf Regel 1
+const TBLOB: u64 = 557056    // 544 KiB Tabellentext, siehe Kopf Regel 3
+
+static mut nblob: [u8; 327680] = [0 as u8; 327680]
+static mut noff: [u64; 4096] = [0 as u64; 4096]
+static mut e_groesse: [u64; 4096] = [0 as u64; 4096]
+static mut e_art: [u64; 4096] = [0 as u64; 4096]
+static mut e_modus: [u64; 4096] = [0 as u64; 4096]
+static mut e_mtime: [u64; 4096] = [0 as u64; 4096]
+static mut e_ctime: [u64; 4096] = [0 as u64; 4096]
+static mut e_atime: [u64; 4096] = [0 as u64; 4096]
+static mut folge: [u64; 4096] = [0 as u64; 4096]
+static mut hilf: [u64; 4096] = [0 as u64; 4096]
+static mut symbole: [u64; 4096] = [0 as u64; 4096]
+static mut tblob: [u8; 557056] = [0 as u8; 557056]
+
+static mut n_all: u64 = 0    // eingelesene Eintraege
+static mut n_sicht: u64 = 0  // davon in der Ansicht (folge[0..n_sicht))
+static mut n_weg: u64 = 0    // beim Einlesen verloren
+static mut t_weg: u64 = 0    // beim Tabellenbau abgeschnitten
+static mut bp: u64 = 0
+static mut tp: u64 = 0
+static mut s_spalte: u64 = 0
+static mut s_rev: u64 = 0
+static mut zeig_versteckt: u64 = 0
+static mut filter: [u8; 64] = [0 as u8; 64]
+static mut zbuf: [u8; 24] = [0 as u8; 24]
+static mut voll: [u8; 512] = [0 as u8; 512]
+static mut st: [u8; 144] = [0 as u8; 144]
+static mut versatz: u64 = 0
+static mut versatz_da: u64 = 0
+static mut p_time: [u8; 16] = "/etc/time.conf\0\0"
+static mut s_mod: [u8; 32] = "explorer: modell n=\0\0\0\0\0\0\0\0\0\0\0\0\0"
+static mut s_blob: [u8; 8] = "blob=\0\0\0"
+static mut s_ueb: [u8; 12] = "ueberlauf=\0\0"
+static mut s_off: [u8; 12] = "tzoff=\0\0\0\0\0\0"
+static mut s_lz: [u8; 2] = " \0"
+
+// Die Zahl der ANGEZEIGTEN Zeilen -- das ist es, was der Rahmen fuer
+// Auswahl, Statuszeile und Tabellenhoehe braucht.
+fn anzahl() -> u64 {
+    return n_sicht
+}
+
+// Verloren ist verloren, egal an welchem Puffer: beide Zaehler.
+fn ueberlauf() -> u64 {
+    return n_weg + t_weg
+}
+
+fn blob_benutzt() -> u64 {
+    return bp
+}
+
+fn name_at(e: u64) -> u64 {
+    if e >= n_all {
+        return (&nblob[(0) as usize]) as u64
+    }
+    return (&nblob[(0) as usize]) as u64 + noff[(e) as usize]
+}
+
+fn groesse_at(e: u64) -> u64 {
+    if e >= n_all {
+        return 0
+    }
+    return e_groesse[(e) as usize]
+}
+
+fn art_at(e: u64) -> u64 {
+    if e >= n_all {
+        return 0
+    }
+    return e_art[(e) as usize]
+}
+
+fn modus_at(e: u64) -> u64 {
+    if e >= n_all {
+        return 0
+    }
+    return e_modus[(e) as usize]
+}
+
+fn mtime_at(e: u64) -> u64 {
+    if e >= n_all {
+        return 0
+    }
+    return e_mtime[(e) as usize]
+}
+
+fn ctime_at(e: u64) -> u64 {
+    if e >= n_all {
+        return 0
+    }
+    return e_ctime[(e) as usize]
+}
+
+fn atime_at(e: u64) -> u64 {
+    if e >= n_all {
+        return 0
+    }
+    return e_atime[(e) as usize]
+}
+
+// Zeile der Ansicht -> Eintrag. Die Ansicht ist sortiert UND gefiltert,
+// die Eintraege sind es nicht: wer eine Zeile anfasst, fasst `ord_at`
+// davon an und nie den Index selbst.
+fn ord_at(i: u64) -> u64 {
+    if i >= n_sicht {
+        return 0
+    }
+    return folge[(i) as usize]
+}
+
+// Der Rueckweg: welche ZEILE zeigt den Eintrag e. Nach einer
+// Umbenennung will die Auswahl dorthin, wo der Name jetzt steht.
+// Ist der Eintrag nicht sichtbar, kommt `anzahl()` zurueck.
+fn ord_finde(e: u64) -> u64 {
+    var i: u64 = 0
+    while i < n_sicht {
+        if folge[(i) as usize] == e {
+            return i
+        }
+        i = i + 1
+    }
+    return n_sicht
+}
+
+fn setz_sort(spalte: u64, rev: u64) {
+    s_spalte = spalte
+    if spalte > 3 {
+        s_spalte = 0
+    }
+    s_rev = rev
+}
+
+fn sort_spalte() -> u64 {
+    return s_spalte
+}
+
+fn sort_rev() -> u64 {
+    return s_rev
+}
+
+fn setz_versteckt(an: bool) {
+    if an {
+        zeig_versteckt = 1
+    } else {
+        zeig_versteckt = 0
+    }
+}
+
+fn versteckt() -> bool {
+    return zeig_versteckt != 0
+}
+
+fn setz_filter(p: u64) {
+    if p == 0 {
+        filter[(0) as usize] = 0 as u8
+        return
+    }
+    ulib.strncpy((&filter[(0) as usize]) as u64, p, 62)
+}
+
+fn filter_ptr() -> u64 {
+    return (&filter[(0) as usize]) as u64
+}
+
+// ------------------------------------------------------------ die Zeit
+
+// Der Ortsversatz in Minuten, aus /etc/time.conf -- Zeile fuer Zeile
+// dieselbe Lesart wie `taskbar.fi::offset_read`.
+fn zeit_lade() -> u64 {
+    var buf: [u8; 64] = [0 as u8; 64]
+    versatz_da = 1
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&p_time[(0) as usize]) as u64,
+        0, 0)
+    if ulib.bad(fd) {
+        return versatz
+    }
+    let b: u64 = (&buf[(0) as usize]) as u64
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, b, 63)
+    let _c: u64 = ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) || n == 0 {
+        return versatz
+    }
+    var i: u64 = 0
+    var v: u64 = 0
+    var ziffern: u64 = 0
+    var im_wert: bool = false
+    while i < n {
+        let c: u64 = (__mmio_read8((b + i) as *mut u8)) as u64
+        if c == 61 {
+            im_wert = true
+        } else if im_wert && c >= 48 && c <= 57 {
+            v = v * 10 + (c - 48)
+            ziffern = ziffern + 1
+        } else if ziffern > 0 {
+            i = n
+        }
+        i = i + 1
+    }
+    if ziffern > 0 && v <= 1440 {
+        versatz = v
+    }
+    return versatz
+}
+
+fn zeit_offset() -> u64 {
+    if versatz_da == 0 {
+        let _v: u64 = zeit_lade()
+    }
+    return versatz
+}
+
+fn zwei(out: u64, at: u64, v: u64) -> u64 {
+    __mmio_write8((out + at) as *mut u8, (48 + (v / 10) % 10) as u8)
+    __mmio_write8((out + at + 1) as *mut u8, (48 + v % 10) as u8)
+    return at + 2
+}
+
+// Sekunden seit 1970 (UTC) als ORTSZEIT "JJJJ-MM-TT SS:MM" nach `out`.
+// Der Versatz kommt aus /etc/time.conf, genau wie in der Taskleiste.
+// Null heisst "keine Zeit vom Dateisystem" und wird zu "--"; alles
+// andere waere eine erfundene Zahl.
+fn zeit_text(sek: u64, out: u64) -> u64 {
+    if sek == 0 {
+        __mmio_write8((out + 0) as *mut u8, 45 as u8)
+        __mmio_write8((out + 1) as *mut u8, 45 as u8)
+        __mmio_write8((out + 2) as *mut u8, 0 as u8)
+        return out
+    }
+    let ort: u64 = sek + zeit_offset() * 60
+    let tage: u64 = ort / 86400
+    let rest: u64 = ort % 86400
+    let z: u64 = tage + 719468
+    let era: u64 = z / 146097
+    let doe: u64 = z % 146097
+    let yoe: u64 = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    let y: u64 = yoe + era * 400
+    let doy: u64 = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    let mp: u64 = (5 * doy + 2) / 153
+    let d: u64 = doy - (153 * mp + 2) / 5 + 1
+    var m: u64 = mp + 3
+    var jahr: u64 = y
+    if mp >= 10 {
+        m = mp - 9
+        jahr = y + 1
+    }
+    __mmio_write8((out + 0) as *mut u8, (48 + (jahr / 1000) % 10) as u8)
+    __mmio_write8((out + 1) as *mut u8, (48 + (jahr / 100) % 10) as u8)
+    __mmio_write8((out + 2) as *mut u8, (48 + (jahr / 10) % 10) as u8)
+    __mmio_write8((out + 3) as *mut u8, (48 + jahr % 10) as u8)
+    var at: u64 = 4
+    __mmio_write8((out + at) as *mut u8, 45 as u8)
+    at = zwei(out, at + 1, m)
+    __mmio_write8((out + at) as *mut u8, 45 as u8)
+    at = zwei(out, at + 1, d)
+    __mmio_write8((out + at) as *mut u8, 32 as u8)
+    at = zwei(out, at + 1, rest / 3600)
+    __mmio_write8((out + at) as *mut u8, 58 as u8)
+    at = zwei(out, at + 1, (rest / 60) % 60)
+    __mmio_write8((out + at) as *mut u8, 0 as u8)
+    return out
+}
+
+// -------------------------------------------------------- das Einlesen
+
+fn ist_punkt(name: u64) -> bool {
+    let a: u64 = (__mmio_read8((name) as *mut u8)) as u64
+    if a != 46 {
+        return false
+    }
+    let b: u64 = (__mmio_read8((name + 1) as *mut u8)) as u64
+    if b == 0 {
+        return true
+    }
+    if b == 46 && (__mmio_read8((name + 2) as *mut u8)) == 0 as u8 {
+        return true
+    }
+    return false
+}
+
+// Punkt-Konvention: ein fuehrender Punkt heisst versteckt. "." und
+// ".." sind schon beim Einlesen weg, die zaehlen hier nicht mit.
+fn versteckt_name(name: u64) -> bool {
+    return (__mmio_read8((name) as *mut u8)) == 46 as u8
+}
+
+// Passt der Name zum Filterfeld (Strg+F)? Leerer Filter passt immer;
+// sonst muss die Zeichenkette irgendwo vorkommen, ohne Ruecksicht auf
+// Gross- und Kleinschreibung.
+fn passt(name: u64) -> bool {
+    if filter[(0) as usize] == 0 as u8 {
+        return true
+    }
+    let fp: u64 = (&filter[(0) as usize]) as u64
+    var i: u64 = 0
+    while (__mmio_read8((name + i) as *mut u8)) != 0 as u8 {
+        var k: u64 = 0
+        var gleich: bool = true
+        while gleich && (__mmio_read8((fp + k) as *mut u8)) != 0 as u8 {
+            var a: u64 = (__mmio_read8((name + i + k) as *mut u8)) as u64
+            var b: u64 = (__mmio_read8((fp + k) as *mut u8)) as u64
+            if a >= 65 && a <= 90 {
+                a = a + 32
+            }
+            if b >= 65 && b <= 90 {
+                b = b + 32
+            }
+            if a != b {
+                gleich = false
+            }
+            k = k + 1
+        }
+        if gleich {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// Steht der Eintrag in der Ansicht? Versteckt (Strg+H) und Filter
+// (Strg+F) entscheiden hier und NICHT beim Einlesen -- sonst muesste
+// jeder Tastendruck im Filterfeld das Verzeichnis neu lesen.
+fn sichtbar(e: u64) -> bool {
+    let p: u64 = name_at(e)
+    if zeig_versteckt == 0 && versteckt_name(p) {
+        return false
+    }
+    return passt(p)
+}
+
+fn pfad_bauen(dir: u64, name: u64) -> u64 {
+    let out: u64 = (&voll[(0) as usize]) as u64
+    var n: u64 = 0
+    while (__mmio_read8((dir + n) as *mut u8)) != 0 as u8 && n < 380 {
+        voll[(n) as usize] = __mmio_read8((dir + n) as *mut u8)
+        n = n + 1
+    }
+    if n > 0 && voll[((n - 1)) as usize] != 47 as u8 {
+        voll[(n) as usize] = 47 as u8
+        n = n + 1
+    }
+    var k: u64 = 0
+    while (__mmio_read8((name + k) as *mut u8)) != 0 as u8 && n < 510 {
+        voll[(n) as usize] = __mmio_read8((name + k) as *mut u8)
+        n = n + 1
+        k = k + 1
+    }
+    voll[(n) as usize] = 0 as u8
+    return out
+}
+
+fn eintragen(dir: u64, name: u64) {
+    let len: u64 = ulib.length(name)
+    var nl: u64 = len
+    if nl > NAMEB - 1 {
+        nl = NAMEB - 1
+    }
+    // Kein stiller Verlust: passt der Eintrag nicht mehr, wird er
+    // GEZAEHLT und die Statuszeile sagt es (Pflichtpunkt 11).
+    if n_all >= MAXENT || bp + nl + 1 >= BLOB {
+        n_weg = n_weg + 1
+        return
+    }
+    noff[(n_all) as usize] = bp
+    var k: u64 = 0
+    while k < nl {
+        nblob[(bp) as usize] = __mmio_read8((name + k) as *mut u8)
+        bp = bp + 1
+        k = k + 1
+    }
+    nblob[(bp) as usize] = 0 as u8
+    bp = bp + 1
+    let vp: u64 = pfad_bauen(dir, name)
+    e_groesse[(n_all) as usize] = 0
+    e_art[(n_all) as usize] = 0
+    e_modus[(n_all) as usize] = 0
+    e_mtime[(n_all) as usize] = 0
+    e_ctime[(n_all) as usize] = 0
+    e_atime[(n_all) as usize] = 0
+    // Die drei Zeiten kommen WIRKLICH aus stat (OFS v3 liefert sie);
+    // die Spalte hat frueher "--" gezeigt, weil niemand gefragt hat.
+    let sr: u64 = io.stat_into(vp, (&st[(0) as usize]) as u64)
+    if !ulib.bad(sr) {
+        let sb: u64 = (&st[(0) as usize]) as u64
+        let m: u64 = io.stat_mode_of(sb)
+        e_modus[(n_all) as usize] = m
+        if io.is_dir_mode(m) {
+            e_art[(n_all) as usize] = 1
+        } else {
+            e_art[(n_all) as usize] = 0
+        }
+        e_groesse[(n_all) as usize] = io.stat_size(sb)
+        e_mtime[(n_all) as usize] = io.stat_mtime(sb)
+        e_ctime[(n_all) as usize] = io.stat_ctime(sb)
+        e_atime[(n_all) as usize] = io.stat_atime(sb)
+    }
+    n_all = n_all + 1
+}
+
+// Ein Verzeichnis einlesen. Rueckgabe: die Zahl der ANGEZEIGTEN
+// Eintraege, oder der Fehler des Kerns (dann ist `ulib.bad` wahr).
+fn lade(dir: u64) -> u64 {
+    var puffer: [u8; 1024] = [0 as u8; 1024]
+    n_all = 0
+    n_sicht = 0
+    n_weg = 0
+    t_weg = 0
+    bp = 0
+    tp = 0
+    let fd: u64 = io.dir_open(dir)
+    if ulib.bad(fd) {
+        return fd
+    }
+    var weiter: bool = true
+    while weiter {
+        let n: u64 = io.dir_read(fd, (&puffer[(0) as usize]) as u64, 1024)
+        if ulib.bad(n) || n == 0 {
+            weiter = false
+        } else {
+            var at: u64 = 0
+            while at < n {
+                let rec: u64 = (&puffer[(0) as usize]) as u64 + at
+                let rl: u64 = io.dir_reclen(rec)
+                if rl == 0 {
+                    at = n
+                } else {
+                    let name: u64 = io.dir_name(rec)
+                    if !ist_punkt(name) {
+                        eintragen(dir, name)
+                    }
+                    at = at + rl
+                }
+            }
+        }
+    }
+    io.close(fd)
+    sortiere()
+    return n_sicht
+}
+
+// ---------------------------------------------------------- sortieren
+
+// Zwei Namen vergleichen: 0 = a vor b, 1 = gleich, 2 = a nach b.
+// GROSS UND KLEIN ZAEHLT NICHT -- gemessen an jedem Vorbild: Nautilus,
+// Dolphin und der Explorer stellen "Bilder" neben "bilder" und nicht
+// zwei Bloecke weit auseinander, weil 'B' = 66 und 'b' = 98 ist.
+// Bei Gleichstand entscheidet doch das rohe Oktett, damit die Ordnung
+// eindeutig bleibt und das Mischen nicht von Zufaellen abhaengt.
+fn name_cmp(a: u64, b: u64) -> u64 {
+    let pa: u64 = name_at(a)
+    let pb: u64 = name_at(b)
+    var i: u64 = 0
+    while i < NAMEB {
+        var x: u64 = (__mmio_read8((pa + i) as *mut u8)) as u64
+        var y: u64 = (__mmio_read8((pb + i) as *mut u8)) as u64
+        if x >= 65 && x <= 90 {
+            x = x + 32
+        }
+        if y >= 65 && y <= 90 {
+            y = y + 32
+        }
+        if x != y {
+            if x < y {
+                return 0
+            }
+            return 2
+        }
+        if x == 0 {
+            i = NAMEB
+        } else {
+            i = i + 1
+        }
+    }
+    // `ulib.cmp` gibt 0 gleich, 1 a-vor-b, 2 b-vor-a -- also NICHT
+    // das Vorzeichen von strcmp; wer das verwechselt, sortiert gar
+    // nicht. (Genau dieser Fehler stand hier vorher.)
+    let c: u64 = ulib.cmp(pa, pb)
+    if c == 1 {
+        return 0
+    }
+    if c == 2 {
+        return 2
+    }
+    return 1
+}
+
+// Vergleich NUR nach der gewaehlten Spalte, ohne Verzeichnisregel und
+// ohne Umkehr: 0 = a vor b, 1 = gleich, 2 = a nach b. Der Name ist
+// immer der letzte Ausschlag, sonst waere die Ordnung nicht eindeutig
+// und das Mischen haengt von Zufaellen ab.
+fn schl_cmp(a: u64, b: u64) -> u64 {
+    if s_spalte == 1 {
+        if e_groesse[(a) as usize] < e_groesse[(b) as usize] {
+            return 0
+        }
+        if e_groesse[(a) as usize] > e_groesse[(b) as usize] {
+            return 2
+        }
+    } else if s_spalte == 2 {
+        if e_mtime[(a) as usize] < e_mtime[(b) as usize] {
+            return 0
+        }
+        if e_mtime[(a) as usize] > e_mtime[(b) as usize] {
+            return 2
+        }
+    } else if s_spalte == 3 {
+        if e_modus[(a) as usize] < e_modus[(b) as usize] {
+            return 0
+        }
+        if e_modus[(a) as usize] > e_modus[(b) as usize] {
+            return 2
+        }
+    }
+    return name_cmp(a, b)
+}
+
+// Soll a vor b stehen? Verzeichnisse zuerst -- in JEDER Sortierung und
+// auch umgekehrt, wie in jedem anderen Dateimanager auch. `sort_rev`
+// dreht nur den Schluessel, nicht die Verzeichnisregel.
+fn vorher(a: u64, b: u64) -> bool {
+    if e_art[(a) as usize] != e_art[(b) as usize] {
+        return e_art[(a) as usize] > e_art[(b) as usize]
+    }
+    let c: u64 = schl_cmp(a, b)
+    if c == 1 {
+        return false
+    }
+    if s_rev != 0 {
+        return c == 2
+    }
+    return c == 0
+}
+
+// Die Ansicht neu bauen: erst die sichtbaren Eintraege einsammeln,
+// dann aufsteigend mischen (stabil, O(n log n) -- siehe Kopf).
+fn sortiere() {
+    n_sicht = 0
+    var i: u64 = 0
+    while i < n_all {
+        if sichtbar(i) {
+            folge[(n_sicht) as usize] = i
+            n_sicht = n_sicht + 1
+        }
+        i = i + 1
+    }
+    var breite: u64 = 1
+    while breite < n_sicht {
+        var l: u64 = 0
+        while l < n_sicht {
+            var m: u64 = l + breite
+            if m > n_sicht {
+                m = n_sicht
+            }
+            var r: u64 = l + breite + breite
+            if r > n_sicht {
+                r = n_sicht
+            }
+            var pa: u64 = l
+            var pb: u64 = m
+            var o: u64 = l
+            while o < r {
+                var nimm_a: bool = false
+                if pa < m && pb < r {
+                    // Gleichstand nimmt den linken Lauf -- das haelt
+                    // die Sortierung stabil.
+                    nimm_a = !vorher(folge[(pb) as usize],
+                        folge[(pa) as usize])
+                } else if pa < m {
+                    nimm_a = true
+                }
+                if nimm_a {
+                    hilf[(o) as usize] = folge[(pa) as usize]
+                    pa = pa + 1
+                } else {
+                    hilf[(o) as usize] = folge[(pb) as usize]
+                    pb = pb + 1
+                }
+                o = o + 1
+            }
+            l = l + breite + breite
+        }
+        var k: u64 = 0
+        while k < n_sicht {
+            folge[(k) as usize] = hilf[(k) as usize]
+            k = k + 1
+        }
+        breite = breite + breite
+    }
+    // Die Symboltafel gehoert zur Ansicht, nicht zum Tabellentext:
+    // die Symbolansicht (Pflichtpunkt 10) fragt `symbole_ptr` auch
+    // ohne `tabelle_bauen`.
+    var s: u64 = 0
+    while s < n_sicht {
+        symbole[(s) as usize] = symbol_fuer(folge[(s) as usize])
+        s = s + 1
+    }
+}
+
+// ------------------------------------------------------- die Tabelle
+
+fn endet_auf(p: u64, e: u64) -> bool {
+    let n: u64 = ulib.length(p)
+    let m: u64 = ulib.length(e)
+    if m == 0 || n <= m {
+        return false
+    }
+    var i: u64 = 0
+    while i < m {
+        var a: u64 = (__mmio_read8((p + n - m + i) as *mut u8)) as u64
+        let b: u64 = (__mmio_read8((e + i) as *mut u8)) as u64
+        if a >= 65 && a <= 90 {
+            a = a + 32
+        }
+        if a != b {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// Welches Symbol eine Zeile bekommt. Die Endung entscheidet, und die
+// Zuordnung steht HIER und nicht dreimal im Programm.
+fn symbol_fuer(e: u64) -> u64 {
+    var x_txt: [u8; 5] = ".txt\0"
+    var x_md: [u8; 4] = ".md\0"
+    var x_png: [u8; 5] = ".png\0"
+    var x_jpg: [u8; 5] = ".jpg\0"
+    var x_jpeg: [u8; 6] = ".jpeg\0"
+    var x_bmp: [u8; 5] = ".bmp\0"
+    var x_fi: [u8; 4] = ".fi\0"
+    var x_sh: [u8; 4] = ".sh\0"
+    var x_osp: [u8; 5] = ".osp\0"
+    var x_conf: [u8; 6] = ".conf\0"
+    if e >= n_all {
+        return wlib.icon_id(icons.FILE_FILE)
+    }
+    if e_art[(e) as usize] != 0 {
+        return wlib.icon_id(icons.FILE_FOLDER)
+    }
+    let p: u64 = name_at(e)
+    if endet_auf(p, (&x_txt[(0) as usize]) as u64)
+        || endet_auf(p, (&x_md[(0) as usize]) as u64)
+        || endet_auf(p, (&x_conf[(0) as usize]) as u64) {
+        return wlib.icon_id(icons.FILE_TEXT)
+    }
+    if endet_auf(p, (&x_png[(0) as usize]) as u64)
+        || endet_auf(p, (&x_jpg[(0) as usize]) as u64)
+        || endet_auf(p, (&x_jpeg[(0) as usize]) as u64)
+        || endet_auf(p, (&x_bmp[(0) as usize]) as u64) {
+        return wlib.icon_id(icons.FILE_IMAGE)
+    }
+    if endet_auf(p, (&x_fi[(0) as usize]) as u64)
+        || endet_auf(p, (&x_sh[(0) as usize]) as u64)
+        || endet_auf(p, (&x_osp[(0) as usize]) as u64) {
+        return wlib.icon_id(icons.FILE_PROGRAM)
+    }
+    if (e_modus[(e) as usize] & 0x49) != 0 {
+        return wlib.icon_id(icons.FILE_PROGRAM)
+    }
+    return wlib.icon_id(icons.FILE_FILE)
+}
+
+// Gibt der Textblob noch `n` Oktette her? Wer das vorher fragt, haengt
+// keine halbe Zeile in die Tabelle.
+fn tplatz(n: u64) -> bool {
+    return tp + n + 1 < TBLOB
+}
+
+fn tput(c: u64) {
+    if tp < TBLOB - 1 {
+        tblob[(tp) as usize] = c as u8
+        tp = tp + 1
+    }
+}
+
+fn tputs(p: u64) {
+    var k: u64 = 0
+    while (__mmio_read8((p + k) as *mut u8)) != 0 as u8 {
+        tput((__mmio_read8((p + k) as *mut u8)) as u64)
+        k = k + 1
+    }
+}
+
+fn tputn(v: u64) {
+    var d: [u8; 24] = [0 as u8; 24]
+    let n: u64 = ulib.digits(v, (&d[(0) as usize]) as u64)
+    var k: u64 = 0
+    while k < n {
+        tput((d[(k) as usize]) as u64)
+        k = k + 1
+    }
+}
+
+fn tputmode(m: u64, dir: u64) {
+    if dir != 0 {
+        tput(100)
+    } else {
+        tput(45)
+    }
+    var bit: u64 = 256
+    var i: u64 = 0
+    while i < 9 {
+        var z: u64 = 45
+        if (m & bit) != 0 {
+            if i % 3 == 0 {
+                z = 114
+            } else if i % 3 == 1 {
+                z = 119
+            } else {
+                z = 120
+            }
+        }
+        tput(z)
+        bit = bit / 2
+        i = i + 1
+    }
+}
+
+// Den Tabellentext bauen. `kopf` ist die Kopfzeile aus dem Katalog
+// (`explorer.columns`), damit hier keine sichtbare Zeichenkette steht.
+// Nebenbei fuellt das die Symboltafel `symbole[]` fuer `wlib.row_icons`
+// -- Zeile fuer Zeile, denn die Bibliothek zaehlt Ansichtszeilen und
+// keine Eintraege.
+// Rueckgabe: die Zahl der WIRKLICH geschriebenen Zeilen.
+fn tabelle_bauen(kopf: u64) -> u64 {
+    tp = 0
+    t_weg = 0
+    tputs(kopf)
+    var i: u64 = 0
+    var gebaut: u64 = 0
+    var reisst: bool = false
+    while i < n_sicht {
+        let e: u64 = folge[(i) as usize]
+        // Name + hoechstens 50 Oktette Rest, siehe Kopf Regel 3.
+        // Reisst der Platz einmal, wird ABGEBROCHEN und nicht weiter
+        // gesiebt: die Zeilen muessen ein Anfangsstueck der Ansicht
+        // bleiben, sonst zeigt `wlib.row_icons` das Symbol der
+        // falschen Zeile.
+        if !reisst && !tplatz(ulib.length(name_at(e)) + 50) {
+            reisst = true
+        }
+        if !reisst {
+            symbole[(gebaut) as usize] = symbol_fuer(e)
+            tputs(name_at(e))
+            tput(9)
+            if e_art[(e) as usize] != 0 {
+                tput(45)
+                tput(45)
+            } else {
+                tputn(e_groesse[(e) as usize])
+            }
+            tput(9)
+            let _z: u64 = zeit_text(e_mtime[(e) as usize],
+                (&zbuf[(0) as usize]) as u64)
+            tputs((&zbuf[(0) as usize]) as u64)
+            tput(9)
+            tputmode(e_modus[(e) as usize], e_art[(e) as usize])
+            tput(10)
+            gebaut = gebaut + 1
+        } else {
+            t_weg = t_weg + 1
+        }
+        i = i + 1
+    }
+    tput(0)
+    return gebaut
+}
+
+fn tabelle_ptr() -> u64 {
+    return (&tblob[(0) as usize]) as u64
+}
+
+fn symbole_ptr() -> u64 {
+    return (&symbole[(0) as usize]) as u64
+}
+
+// Der Beleg auf der seriellen Leitung: wie viele Eintraege in der
+// Ansicht, wie viel Namensblob belegt, wie viele verloren, welcher
+// Ortsversatz in Minuten.
+fn melde() {
+    ulib.say((&s_mod[(0) as usize]) as u64)
+    ulib.sayn(n_sicht)
+    ulib.say((&s_lz[(0) as usize]) as u64)
+    ulib.say((&s_blob[(0) as usize]) as u64)
+    ulib.sayn(bp)
+    ulib.say((&s_lz[(0) as usize]) as u64)
+    ulib.say((&s_ueb[(0) as usize]) as u64)
+    ulib.sayn(n_weg + t_weg)
+    ulib.say((&s_lz[(0) as usize]) as u64)
+    ulib.say((&s_off[(0) as usize]) as u64)
+    ulib.sayn(zeit_offset())
+    ulib.nl()
+}
