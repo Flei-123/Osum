@@ -871,11 +871,51 @@ verbose: yes
 # Was danach auf der Tafel steht, beantwortet die Frage ohne serielle
 # Leitung: Zeile 22 (NETZ) zeigt Treiber, Bus, Verbindung und die
 # Adresse, die der Stapel wirklich fuehrt.
+# ================================================ RUNDE ECHTHARDWARE-5
+# `disp` MUSSTE AUF DIESE ZEILE, SONST IST DER HELLIGKEITSREGLER TOT.
+#
+# Justins Befund E: "Helligkeit und Lautstaerke gehen nicht, die Regler
+# bewirken nichts."
+#
+# GEMESSEN, nicht vermutet. Der Regler laesst sich sehr wohl ziehen --
+# das Kontrollzentrum meldet bei jedem Schritt einen neuen Wert --,
+# aber JEDER Aufruf kam mit demselben Fehler zurueck:
+#
+#     qs: hell auf =150 rc=-19        (-19 = ENODEV)
+#
+# -19 kommt aus `sysgui.do_dispset`, erste Zeile:
+#
+#     if !vmode.ready(state) { return sys.neg(errno.E_NODEV) }
+#
+# und `vmode` wird nur bereit, wenn `vmode_stage` es untersucht --
+# was es ausdruecklich nur tut, wenn das Wort `disp` auf der
+# Befehlszeile steht (`vmode.want(state, vmode.M_DISP)`). Es stand
+# hier nicht. Der ganze Bildschirmzweig -- Helligkeit, Kontrast,
+# Gamma, Aufloesungswechsel -- war auf dem Stick damit abgeschaltet,
+# und das Bedienfeld hatte keine Moeglichkeit, das zu wissen.
+#
+# GEGENPROBE, mittlere Bildhelligkeit ueber den ganzen Schirm, derselbe
+# Zug am selben Regler:
+#     ohne `disp`:  18,78 -> 18,77 -> 18,76   (nichts passiert)
+#     mit  `disp`:  16,83 -> 13,44 -> 28,18   (dunkler, dann heller)
+#
+# Die Helligkeit ist dabei eine LUT im Rahmenpuffer und keine
+# Hintergrundbeleuchtung -- sie wirkt auf das Bild, nicht auf die
+# Lampe. Das ist ehrlich und sichtbar; eine echte Backlight-Steuerung
+# braucht ACPI und ist eine eigene Runde.
+#
+# UND `audio` AUS DEMSELBEN GRUND. Die serielle Leitung sagte
+# `aud: aus (kein Wort)` -- der Tonstapel wird nur aufgesetzt, wenn
+# das Wort dasteht (kernel/kmain.fi, `w_aud`). Ohne ihn meldet das
+# Kontrollzentrum folgerichtig `qs: vol ist=0`, graut die Beschriftung
+# aus (T_DIM) und nimmt keinen Zug an -- das ist richtig und war
+# trotzdem nicht das, was Justin wollte. Hat das Brett keine Karte,
+# bleibt die Zeile grau; hat es eine, laesst sie sich ziehen.
 /@MARKE_PRODUKT@ -- Schreibtisch
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp nosched noproc nofs
+    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp nosched noproc nofs
 
 # ================== RUNDE MESSTAFEL: DERSELBE EINTRAG AUF ENGLISCH
 #
@@ -974,7 +1014,7 @@ verbose: yes
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs lang=en
+    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs lang=en
 
 /@MARKE_PRODUKT@ -- Kommandozeile mit Netz
     protocol: multiboot1

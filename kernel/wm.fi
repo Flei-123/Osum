@@ -120,6 +120,7 @@ export {
     ev_push, ev_pop, ev_waiting,
     on_mouse, on_key, term_write, term_out, term_cols, term_rows, term_cx, term_cy,
     bind_tty, key_tty, tty_of, NO_TTY, term_outs, term_puts_n,
+    term_dump,
     poll, composites, blits, pixels, last_us, cursor_on, set_cursor,
     shape, set_shape, set_keys,
     downs, moves_seen, hits_seen, win_keys,
@@ -5969,6 +5970,36 @@ fn ev_push(state: u64, i: u64, typ: u64, a: u64, b: u64, c: u64) {
             wsv(state, i, W_EHEAD, kopf - 1)
             ss(state, S_EVKOAL, gs(state, S_EVKOAL) + 1)
         } else {
+            // ================================ RUNDE ECHTHARDWARE-5
+            // WER VERLIERT, WIRD BEIM NAMEN GENANNT.
+            //
+            // Justins Tafel: `RING 917 VERL 29`. `VERL` sagt nur, DASS
+            // etwas verlorenging -- nicht, WESSEN Ring ueberlief, und
+            // ohne das ist der Befund nicht zu beheben. Ein Verlust
+            // hier heisst: der Ring dieses Fensters ist voll UND es
+            // steht keine einzige Bewegung darin, die man opfern
+            // koennte. Das ist immer ein Fenster, das seine Ereignisse
+            // NICHT ABHOLT -- 32 Tasten/Klicks ohne eine Abholrunde.
+            //
+            // Die Zeile nennt Fenster, Kennung, Art und wie viele
+            // Ereignisse anstehen. Damit ist der Schuldige eine
+            // Ablesung und keine Vermutung.
+            var s_vl: [u8; 19] = "wm: RINGVERLUST i=\0"
+            var s_vid: [u8; 5] = " id=\0"
+            var s_vt: [u8; 6] = " typ=\0"
+            var s_vk: [u8; 7] = " kind=\0"
+            var s_vn: [u8; 5] = " an=\0"
+            serial.puts((&s_vl[0]) as u64)
+            serial.dec(i)
+            serial.puts((&s_vid[0]) as u64)
+            serial.dec(wg(state, i, W_ID))
+            serial.puts((&s_vt[0]) as u64)
+            serial.dec(typ)
+            serial.puts((&s_vk[0]) as u64)
+            serial.dec(wg(state, i, W_KIND))
+            serial.puts((&s_vn[0]) as u64)
+            serial.dec(kopf - schwanz)
+            serial.nl()
             wsv(state, i, W_ETAIL, schwanz + 1)
             ss(state, S_EVDROP, gs(state, S_EVDROP) + 1)
         }
@@ -6630,6 +6661,59 @@ fn cell_get(state: u64, i: u64, c: u64, r: u64) -> u64 {
         return 32
     }
     return kstate.get8(g + k)
+}
+
+// ==================================================== RUNDE ECHTHARDWARE-5
+// DEN INHALT EINES TERMINALFENSTERS AUF DIE SERIELLE LEITUNG.
+//
+// Der Beleg fuer Justins Befund B ist ein BILD, und ein Bild von
+// Text ist mit einem Programm schlecht zu lesen -- ich habe in dieser
+// Runde zweimal versucht, aus Bildpunkten Buchstaben zu raten, und
+// beide Male stand am Ende ein Muster, das man so oder so lesen kann.
+//
+// Das Fenster weiss selbst, was in ihm steht: sein Zellenraster. Diese
+// Funktion schreibt es Zeile fuer Zeile hinaus, und damit ist "im
+// Terminal steht eine Eingabeaufforderung" eine ABLESUNG und keine
+// Deutung eines Rasters. Leerzeilen am Ende faellt sie weg.
+fn term_dump(state: u64, i: u64) {
+    if !valid(state, i) || wg(state, i, W_KIND) != K_TERM {
+        return
+    }
+    var s_k: [u8; 15] = "wm: termzeile \0"
+    var s_g: [u8; 4] = " [\0\0"
+    var s_z: [u8; 2] = "]\0"
+    let cols: u64 = wg(state, i, W_COLS)
+    let rows: u64 = wg(state, i, W_ROWS)
+    var r: u64 = 0
+    while r < rows {
+        // Wie weit steht in dieser Zeile ueberhaupt etwas?
+        var letzte: u64 = 0
+        var c0: u64 = 0
+        while c0 < cols {
+            if cell_get(state, i, c0, r) > 32 {
+                letzte = c0 + 1
+            }
+            c0 = c0 + 1
+        }
+        if letzte != 0 {
+            serial.puts((&s_k[0]) as u64)
+            serial.dec(r)
+            serial.puts((&s_g[0]) as u64)
+            var c: u64 = 0
+            while c < letzte {
+                let z: u64 = cell_get(state, i, c, r)
+                if z >= 32 && z < 127 {
+                    serial.put(z as u8)
+                } else {
+                    serial.put(32 as u8)
+                }
+                c = c + 1
+            }
+            serial.puts((&s_z[0]) as u64)
+            serial.nl()
+        }
+        r = r + 1
+    }
 }
 
 fn cell_paint(state: u64, i: u64, c: u64, r: u64) {
