@@ -64,8 +64,8 @@ import serial
 import acpi
 
 export {
-    scan, refresh, present, ac_online, ac_known, percent, minutes, value,
-    text_at, why,
+    scan, refresh, fake, present, ac_online, ac_known, percent, minutes,
+    value, text_at, why,
     BT_PRESENT, BT_STATE, BT_RATE, BT_REMAIN, BT_VOLT, BT_UNIT,
     BT_DESIGN, BT_FULL, BT_TECH, BT_DVOLT, BT_WARN, BT_LOW,
     BT_AC, BT_ACOK, BT_TABLES, BT_WHY, BT_TZ, BT_TZOK, BT_STA,
@@ -115,6 +115,13 @@ const BT_PSRAT: u64 = 168 // Adresse der Zahl hinter _PSR
 const BT_TMPAT: u64 = 176 // Adresse der Zahl hinter _TMP
 
 // Die vier Zeichenketten aus _BIF, je 64 Oktette.
+// RUNDE LEISTE-RECHTS: merkt sich, dass dieser Akku VORGETAEUSCHT ist.
+// Ohne diese Marke setzt `refresh` -- das zehnmal je Sekunde laufen darf
+// -- `BT_PRESENT` beim naechsten Durchgang wieder auf 0, weil es keine
+// ACPI-Tabelle findet. GEMESSEN: der Kern meldete `batpresent=1`, und
+// die Leiste sah trotzdem keinen Akku.
+const BT_FAKED: u64 = 184 // 1 = die Zahlen stammen aus `fake`
+
 const BT_NAMES: u64 = 256
 const BT_MODEL: u64 = 0
 const BT_SERIAL: u64 = 1
@@ -383,6 +390,13 @@ fn find_int(t: u64, a: u64, b: u64, c: u64, d: u64, out: u64,
 // second on the serial port would bury every other measurement in the
 // acceptance run. Same walk, one caller that talks and one that does not.
 fn refresh(state: u64) {
+    // RUNDE LEISTE-RECHTS: ein vorgetaeuschter Akku wird nicht
+    // wegpoliert. `refresh` laeuft zyklisch (pmon.fi) und setzt ohne
+    // ACPI-Fundort folgerichtig alles auf null -- das ist fuer echte
+    // Hardware richtig und fuer `battfake` toedlich.
+    if g(state, BT_FAKED) != 0 {
+        return
+    }
     // DER SCHNELLE WEG: die Fundorte sind bekannt, also wird genau dort
     // noch einmal gelesen und nirgends gesucht. Das ist der Unterschied
     // zwischen einer Buchfuehrung, die zehnmal je Sekunde laufen kann,
@@ -457,6 +471,49 @@ fn scan(state: u64) {
     serial.dec(g(state, BT_ACOK))
     serial.puts((&name_t[0]) as u64)
     serial.dec(g(state, BT_TZOK))
+    serial.nl()
+}
+
+// ==================================================== RUNDE LEISTE-RECHTS
+// EIN AKKU, DER NICHT DA IST -- fuer die Messung und fuer sonst nichts.
+//
+// Dieses QEMU kennt kein `-device battery`, und ohne ACPI-Tabellen
+// meldet `scan` voellig richtig `batt=0`. Die Leiste blendet das
+// Akkufeld dann aus (`hide_missing`), wie Windows es auch tut. Damit
+// gibt es aber auch nichts zu fotografieren, und Justins Wunsch
+// ("Akkusymbol mit Prozentzahl, wie bei Windows") liesse sich nur
+// BEHAUPTEN statt belegen.
+//
+// Diese Routine setzt darum einen festen Stand, und zwar NACH `scan`:
+// findet die Firmware einen echten Akku, wird hier nichts ueberschrieben
+// -- auf Justins Brett gelten die echten Zahlen.
+//
+// DIE ZAHLEN SIND MIT ABSICHT SO GEWAEHLT:
+//   2010 von 3000 mWh = 67 % -- keine runde Zahl, also nicht mit einem
+//   Vorgabewert zu verwechseln, und ueber der 34er-Schwelle, damit am
+//   SYMBOL (drei Balken) und an der ZAHL zugleich ablesbar ist, dass
+//   beide aus derselben Quelle stammen.
+//   Zustand 1 = entladen, am Netz: so ist das Netzteil-Zeichen aus dem
+//   Bild heraus, das sonst ueber dem Symbol liegt.
+fn fake(state: u64) {
+    if g(state, BT_PRESENT) != 0 {
+        return
+    }
+    s(state, BT_PRESENT, 1)
+    s(state, BT_FULL, 3000)
+    s(state, BT_DESIGN, 3000)
+    s(state, BT_REMAIN, 2010)
+    s(state, BT_RATE, 0)
+    s(state, BT_STATE, 1)
+    s(state, BT_AC, 1)
+    s(state, BT_ACOK, 1)
+    s(state, BT_WHY, W_OK)
+    s(state, BT_FAKED, 1)
+    var nm: [u8; 22] = "batt: VORGETAEUSCHT\0\0\0"
+    serial.puts((&nm[0]) as u64)
+    serial.dec(percent(state))
+    var pz: [u8; 3] = " %\0"
+    serial.puts((&pz[0]) as u64)
     serial.nl()
 }
 
