@@ -82,6 +82,7 @@ export {
     // Kreis im Modulgraphen, und der bleibt ein Baum.
     hid_keys, hid_los, hid_bew,
     dev_reps, dev_arms, dev_cc, dev_dci, dev_iface, dev_generic, dev_roh, dev_rohw, dev_rohn,
+    stille_pruefen, wachen, kbd_taugt, maus_taugt,
     stat,
     have_kbd, have_mouse, msc_errors, msc_ios, selftest,
     rangtest, rangtest_max,
@@ -230,6 +231,8 @@ const S_HEAL: u64 = 0x150
 // wartet auf Antworten des Reglers; faellt in diese Wartezeit eine
 // zweite Meldung, stuenden zwei Durchlaeufe auf demselben Ring.
 const S_SVCBUSY: u64 = 0x158
+// RUNDE ECHTHARDWARE-6: wie oft der Wachhund nachgesehen hat.
+const S_WACHN: u64 = 0x168
 // Wie oft `alloc_dev` leer war -- ein Geraet, fuer das kein Platz mehr
 // da ist, verschwindet sonst spurlos. Justins Brett meldet FUND 5 bei
 // MAX_DEV 4; ob das je angeschlagen hat, stand nirgends.
@@ -321,6 +324,10 @@ const D_HEAL: u64 = 288 // wie oft der Endpunkt wiederbelebt wurde
 // Nullen war, und wie viele davon es gab.
 const D_ROHW: u64 = 296 // die ersten acht Oktett, als ein Wort
 const D_ROHN: u64 = 304 // wie viele nicht-leere Berichte es gab
+// RUNDE ECHTHARDWARE-6: der letzte Stand von D_REPS, den der Wachhund
+// gesehen hat. Bewegt er sich zwischen zwei Blicken nicht, wird einmal
+// nachgesehen. Siehe `stille_pruefen`.
+const D_WACH: u64 = 312
 
 const DRV_NONE: u64 = 0
 const DRV_KBD: u64 = 1
@@ -1625,20 +1632,94 @@ fn drop_dev(state: u64, d: u64) {
 
 // ------------------------------------------------------- die Zuordnung
 
+// ============================================== RUNDE ECHTHARDWARE-6
+// TAUGT DER EINTRAG, DER SCHON DASTEHT?
+//
+// "Taugen" heisst hier genau zweierlei, und beides ist nachpruefbar:
+// der Platz ist ueberhaupt belegt, UND das Geraet auf diesem Platz ist
+// noch benutzt und hat einen Unterbrechungsendpunkt. Ein Geraet, das
+// abgezogen wurde, wird in `port_gone` ohnehin auf 0 gesetzt; diese
+// Pruefung faengt zusaetzlich den Fall ab, dass dort eine Leiche steht.
+//
+// Ohne diese Frage waere die Regel "der erste gewinnt" zu streng: eine
+// Tastatur, die beim Aufsetzen scheitert, wuerde den Platz fuer immer
+// blockieren, und keine spaeter eingesteckte kaeme mehr durch.
+fn dev_taugt(state: u64, e: u64) -> bool {
+    if e == 0 {
+        return false
+    }
+    let d: u64 = e - 1
+    if d >= MAX_DEV {
+        return false
+    }
+    return dg(state, d, D_USED) != 0 && dg(state, d, D_INTDCI) != 0
+}
+
+fn kbd_taugt(state: u64) -> bool {
+    return dev_taugt(state, g(state, S_KBD))
+}
+
+fn maus_taugt(state: u64) -> bool {
+    return dev_taugt(state, g(state, S_MOUSE))
+}
+
 fn bind(state: u64, d: u64) {
     let k: u64 = dg(state, d, D_DRIVER)
     if k == DRV_HIDGEN {
         hid_start(state, d)
         return
     }
+    // ============================================ RUNDE ECHTHARDWARE-6
+    // HIER STAND `s(state, S_KBD, d + 1)` OHNE JEDE BEDINGUNG -- UND
+    // DAS IST DIE TOTE TASTATUR AUS JUSTINS TAFELZEILE 18.
+    //
+    // Sein Foto sagt woertlich
+    //     18 KEYS  D 2 BER 0 ARM 1 CC 0 RK 00000000 N 0
+    //     20 ENDP  KBD EP1 F0 H0
+    // Das ist ein Widerspruch, solange man `D` fuer die Tastatur haelt:
+    // der Endpunkt LAEUFT (EP1), hat KEINEN Fehler (F0) und musste nie
+    // wiederbelebt werden (H0) -- trotzdem ist nie ein Bericht fertig
+    // geworden. Ein angehaltener Endpunkt sieht anders aus (EP2/EP4),
+    // ein Zerlegerfehler auch (BER stiege, N bliebe 0).
+    //
+    // Die Aufloesung steht in `D` selbst. `S_KBD` ist der Geraeteplatz
+    // PLUS EINS, `D 2` heisst also Platz 1 -- das ZWEITE Geraet. Auf
+    // Justins Brett ist Platz 0 die Tastatur und Platz 1 die zweite
+    // HID-Schnittstelle seines Tastatur/Maus-Gespanns. Die Tafel zeigte
+    // die Zahlen eines Geraets, das nie eine Tastatur war: dort wurde
+    // genau einmal ein Block gelegt (ARM 1) und nichts kam zurueck.
+    //
+    // WIE `S_KBD` DORT HINKAM: `hid_start` weiter unten holt die
+    // Berichtsbeschreibung, ruft `hid_claim` -- und `hid_claim` setzt
+    // `S_KBD` KORREKT, naemlich nur, wenn noch keine Tastatur steht
+    // (usb.fi, `if g(state, S_KBD) == 0`). Danach kam diese Zeile und
+    // hat das Ergebnis BEDINGUNGSLOS ueberschrieben. Jedes spaeter
+    // aufgesetzte Geraet, dessen Klasse `kbd` sagt, hat damit die
+    // laufende Tastatur von der Tafel UND aus `hidin` verdraengt.
+    //
+    // In QEMU faellt das nie auf: dort gibt es genau EIN Geraet mit
+    // Tastaturklasse, also ueberschreibt es sich selbst mit demselben
+    // Wert. Gemessen in genau diesem Baum, `tools/design/eh6.sh`:
+    //     usb: port=5 ... class=03:01:01 driver=kbd
+    //     tafel: 18 KEYS  D 1 BER 12 ARM 13 CC 1 RK 00170000 N 6
+    // Ein Brett mit zwei HID-Schnittstellen an einem Gehaeuse -- also
+    // jede Spieletastatur mit Multimediatasten -- trifft es sofort.
+    //
+    // AB HIER GILT DIESELBE REGEL WIE IN `hid_claim`: DER ERSTE, DER
+    // WIRKLICH LAEUFT, BLEIBT. Ein zweiter Fund wird nur genommen, wenn
+    // der Platz frei ist oder der bisherige Eintrag nicht mehr taugt.
     if k == DRV_KBD {
         hid_start(state, d)
-        s(state, S_KBD, d + 1)
+        if !kbd_taugt(state) {
+            s(state, S_KBD, d + 1)
+        }
         return
     }
     if k == DRV_MOUSE {
         hid_start(state, d)
-        s(state, S_MOUSE, d + 1)
+        if !maus_taugt(state) {
+            s(state, S_MOUSE, d + 1)
+        }
         return
     }
     if k == DRV_MSC {
@@ -3208,6 +3289,65 @@ fn port_watch(state: u64) {
         }
         p = p + 1
     }
+}
+
+// ============================================== RUNDE ECHTHARDWARE-6
+// DER WACHHUND FUER EINEN RING, DER STILL GEWORDEN IST.
+//
+// Der Fehler in `bind` erklaert, warum die Tafel das FALSCHE Geraet
+// zeigte. Er erklaert nicht den zweiten, unabhaengigen Fall: ein
+// Unterbrechungsblock liegt auf dem Ring, die Meldung dazu geht
+// verloren (verlorene MSI, ein Regler, der nach dem Aufwachen keine
+// mehr schickt), und dann wartet `service` auf eine Fertigmeldung, die
+// nie kommt. Danach legt niemand mehr einen Block nach, denn genau das
+// tut `service` -- der einzige Ort, an dem `arm` gerufen wird.
+//
+// Das ist eine SELBSTHALTENDE Stille: ein einziges verlorenes
+// Ereignis legt die Tastatur fuer den Rest der Sitzung still, und von
+// aussen sieht es aus wie `ARM n, BER n-1` bei laufendem Endpunkt.
+// Genau dieses Zahlenbild stand auf Justins Foto.
+//
+// Der Wachhund haengt am selben Zeitgeber wie `port_watch` (alle 25
+// Schlaege, also rund viermal je Sekunde bei 100 Hz). Er sieht nach,
+// ob sich der Zaehler eines HID-Geraets seit dem letzten Blick bewegt
+// hat. Bewegt er sich nicht, wird EINMAL nachgesehen (`xhci.drain` +
+// `service`) -- das kostet nichts, wenn ohnehin nichts anliegt, und
+// holt eine verlorene Meldung nach, wenn eine verloren ging.
+//
+// WICHTIG, UND DESHALB STEHT ES HIER: NICHT einfach `arm` rufen. Ein
+// zweiter Block auf einem Ring, auf dem schon einer liegt, ist ein
+// Fehler und kein Rueckfall -- deshalb geht der Weg ueber `service`,
+// das den Ring liest und nur nachlegt, wenn wirklich etwas fertig
+// wurde. Wer hier `arm` schriebe, bekaeme `ARM` ins Unendliche und
+// haette den Fehler, den diese Runde beseitigt, nur verschoben.
+fn stille_pruefen(state: u64) {
+    if g(state, S_READY) == 0 || g(state, S_BUSY) != 0 {
+        return
+    }
+    var still: bool = false
+    var d: u64 = 0
+    while d < MAX_DEV {
+        if dg(state, d, D_USED) != 0 && dg(state, d, D_INTDCI) != 0 {
+            let jetzt: u64 = dg(state, d, D_REPS)
+            if jetzt == dg(state, d, D_WACH) {
+                still = true
+            }
+            ds(state, d, D_WACH, jetzt)
+        }
+        d = d + 1
+    }
+    if still {
+        s(state, S_WACHN, g(state, S_WACHN) + 1)
+        xhci.drain(state)
+        service(state)
+    }
+}
+
+// Wie oft der Wachhund nachgesehen hat. Steht diese Zahl still und die
+// Tastatur laeuft, hat er nie eingreifen muessen; laeuft sie hoch,
+// waehrend `BER` steigt, holt er wirklich Meldungen nach.
+fn wachen(state: u64) -> u64 {
+    return g(state, S_WACHN)
 }
 
 // AUS DER SCHREIBTISCHSCHLEIFE, in Aufgabenkontext. Hier darf es dauern.
