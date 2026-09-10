@@ -2611,6 +2611,10 @@ static mut s_sy: [u8; 18] = "taskbar: sym btn=\0"
 static mut s_syn: [u8; 7] = " app=\0\0"
 static mut s_syw: [u8; 5] = " w=\0\0"
 static mut s_syi: [u8; 7] = " ink=\0\0"
+// RUNDE ECHTHARDWARE-4: die zwei Zahlen, an denen "zu kleines Symbol"
+// zu messen ist -- die gemalte Kante und die Hoehe des Knopfes.
+static mut s_syg: [u8; 10] = " gemalt=\0\0"
+static mut s_syk: [u8; 9] = " knopf=\0\0"
 
 // Die Zahl der Bildpunkte des Symbols, die WIRKLICH Farbe tragen --
 // Deckung ungleich null. Ein leeres OSYM hat dieselbe Breite und
@@ -2790,28 +2794,59 @@ fn marke_malen(x: u64, y: u64, w: u64, h: u64, report: bool) {
     // genau der Zustand ist, den Justin fotografiert hat. Die 24er
     // passt ZWEIMAL: 48 von 60. Also wird durchprobiert, welches
     // Paar die groesste Flaeche ergibt, die noch hineingeht.
+    // ===================================== RUNDE ECHTHARDWARE-4
+    // NATIVE GROESSE SCHLAEGT VERVIELFACHUNG -- DAS WAR DIE
+    // "VERPIXELUNG".
+    //
+    // Justin zu den Bildern aus ECHTHARDWARE-3: links unten ein
+    // "rundes, stark verpixeltes Symbol". Die Suche hier lief bis
+    // `kn <= 32`, weil es nur drei eingebackene Groessen gab, und
+    // waehlte danach allein nach FLAECHE (`gr > best`). Auf Justins
+    // Knopf mit 60 nutzbaren Punkten gewann damit 32*1 = 32 gegen
+    // 24*2 = 48? Nein -- 48 gewann, und genau das war der Fehler:
+    // eine 24er Vorlage, ganzzahlig verdoppelt, hat Treppen an jeder
+    // runden Kante, waehrend die 48er Vorlage daneben scharf ist.
+    //
+    // Seit dieser Runde backt `tools/marke/startbild.py` auch 48 und
+    // 64 ein (die Dateien lagen laengst in assets/marke/). Also:
+    //
+    //   1. gesucht wird ueber ALLE fuenf Groessen
+    //   2. bei gleicher Endgroesse gewinnt die mit der KLEINEREN
+    //      Vervielfachung -- also die native
+    //
+    // Punkt 2 ist der eigentliche Fix. Ohne ihn nimmt die Suche
+    // weiter 24*2 statt 48*1, obwohl beides 48 ergibt und nur eines
+    // davon scharf ist.
     var qn: u64 = n
     var mal: u64 = 1
     var best: u64 = n
+    var bmal: u64 = 9
     var kn: u64 = 16
-    while kn <= 32 {
+    while kn <= 64 {
         var m2: u64 = 1
         while m2 <= 4 {
             let gr: u64 = kn * m2
-            if gr <= kante && gr > best {
-                best = gr
-                qn = kn
-                mal = m2
+            if gr <= kante {
+                if gr > best || (gr == best && m2 < bmal) {
+                    best = gr
+                    bmal = m2
+                    qn = kn
+                    mal = m2
+                }
             }
             m2 = m2 + 1
         }
-        // 16 -> 24 -> 32, die drei eingebackenen Groessen
+        // 16 -> 24 -> 32 -> 48 -> 64, die eingebackenen Groessen
         if kn == 16 {
             kn = 24
         } else if kn == 24 {
             kn = 32
+        } else if kn == 32 {
+            kn = 48
+        } else if kn == 48 {
+            kn = 64
         } else {
-            kn = 33
+            kn = 65
         }
     }
     let gz: u64 = qn * mal
@@ -2860,6 +2895,65 @@ fn marke_malen(x: u64, y: u64, w: u64, h: u64, report: bool) {
     }
 }
 
+// ========================================== RUNDE ECHTHARDWARE-4
+// DAS PROGRAMMSYMBOL FUELLT DEN KNOPF -- WIE DIE STARTMARKE SEIT EH-2.
+//
+// Justin hat es zum dritten Mal gemeldet: "die Programmsymbole in der
+// Taskleiste sind sehr klein und wirken verloren". GEMESSEN auf seiner
+// Aufloesung, aus der seriellen Leitung von ECHTHARDWARE-3:
+//
+//     taskbar: STEHT x=0 y=1400 w=2560 h=40     <- die Leiste
+//     taskbar: sym btn=0 app=terminal w=16      <- das Symbol
+//
+// 16 Bildpunkte in einem 40 Punkte hohen Streifen, also 40 Prozent --
+// und daneben steht die Startmarke, die seit ECHTHARDWARE-2 ihren
+// Knopf ausfuellt. Das ist der Unterschied, den man sieht.
+//
+// DIE URSACHE IST EINE HALBE KORREKTUR. `wlibc.icon_draw` nimmt seit
+// EH-2 `ui_scale()` mit -- das behebt "das Symbol bleibt 16, waehrend
+// die Leiste doppelt so hoch wird", aber NUR wenn die Leiste ihre
+// Hoehe auch wirklich aus der Vervielfachung bezieht. Justins Leiste
+// ist 40 hoch bei `ui_scale()==2` (die Marke `ctrl_h` deckelt sie),
+// das Symbol wird 16*1 oder 16*2 -- gemessen 16. Die Vervielfachung
+// des SCHIRMS ist eben nicht die Vervielfachung des KNOPFES.
+//
+// Also dieselbe Rechnung wie bei `marke_malen`: nicht raten, sondern
+// die groesste ganzzahlige Vervielfachung nehmen, die noch in die
+// nutzbare Hoehe passt. GANZZAHLIG, weil die Quellen Flaechen-
+// zeichnungen mit harten Kanten sind (assets/apps/*/symbol.txt) --
+// ein Kaestchen bleibt ein Kaestchen.
+//
+// `SYM_LUFT` ist der Rand, der oben und unten frei bleibt: ein Symbol,
+// das den Knopf bis auf den letzten Punkt fuellt, sieht gequetscht
+// aus. Zwei Punkte je Seite bei einfacher Vervielfachung.
+const SYM_LUFT: u64 = 2
+
+fn sym_scale(sym: u64, h: u64) -> u64 {
+    let ih: u64 = wlibc.icon_h(sym)
+    if ih == 0 {
+        return wlibc.ui_scale()
+    }
+    var luft: u64 = 2 * SYM_LUFT * wlibc.ui_scale()
+    if h <= luft {
+        luft = 0
+    }
+    let raum: u64 = h - luft
+    var s: u64 = raum / ih
+    if s < 1 {
+        s = 1
+    }
+    // Nicht groesser als das, was `icon_draw_sc` zeichnen kann, und
+    // nie kleiner als bisher -- eine Leiste, die schon passte, darf
+    // sich durch diese Runde nicht verkleinern.
+    if s > 8 {
+        s = 8
+    }
+    if s < wlibc.ui_scale() {
+        s = wlibc.ui_scale()
+    }
+    return s
+}
+
 fn button_sym(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
     dim: bool, mark: u64, sym: u64) -> u64 {
     let weich: bool = wlibc.metric(wlibc.M_RADIUS_BUTTON) != 0
@@ -2894,8 +2988,15 @@ fn button_sym(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
         }
     }
     var room: u64 = 0
+    // RUNDE ECHTHARDWARE-4: der Platz richtet sich nach der Groesse,
+    // die WIRKLICH gemalt wird -- sonst malt das groessere Symbol ueber
+    // den Text daneben (derselbe Fehler wie in EH-2 bei `ic_w`).
+    var symsc: u64 = 0
+    var symw: u64 = 0
     if sym != 0 {
-        room = room + gl_w() + 3
+        symsc = sym_scale(sym, h)
+        symw = wlibc.icon_w(sym) * symsc
+        room = room + symw + 3
     }
     if mark != 0 {
         room = room + mk_w() + 3
@@ -2909,9 +3010,37 @@ fn button_sym(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
             tw = 0
         }
     }
-    let tx: u64 = x + room + (w - room - tw) / 2
+    // ===================================== RUNDE ECHTHARDWARE-4
+    // SYMBOL UND TEXT SIND EINE GRUPPE, UND DIE GRUPPE SITZT MITTIG.
+    //
+    // GEMESSEN von Justin an hell-2560/01-schreibtisch.png: das
+    // Terminalsymbol lag bei x 57..68 in einem Knopf, dessen linke
+    // Kante bei 54 liegt -- drei Punkte links, und rechts vom Text
+    // blieben zwanzig. Der Grund stand hier: `mx = x + 3` klebte das
+    // Symbol fest an den linken Rand, und der Text wurde DANACH im
+    // Rest zentriert. Zwei Zentrierungen nebeneinander ergeben keine.
+    //
+    // Die Regel dieser Runde, und sie gilt fuer jeden Knopf der
+    // Leiste: Breite der Gruppe = Symbol + Luft + Marke + Luft + Text.
+    // Sie beginnt bei x + (w - Gruppe) / 2. Damit ist der Abstand
+    // links und rechts gleich (Unterschied hoechstens 1 Punkt, weil
+    // eine ungerade Restbreite sich nicht halbieren laesst), und
+    // tools/design/ausrichtung.py rechnet genau das nach.
+    let luft: u64 = 4 * wlibc.ui_scale()
+    var gruppe: u64 = tw
+    if sym != 0 {
+        gruppe = gruppe + symw + luft
+    }
+    if mark != 0 {
+        gruppe = gruppe + mk_w() + luft
+    }
+    var gx: u64 = x + 3
+    if w > gruppe + 6 {
+        gx = x + (w - gruppe) / 2
+    }
+    let tx: u64 = gx + gruppe - tw
     let base: u64 = y + (h + asc) / 2 - 1
-    var mx: u64 = x + 3
+    var mx: u64 = gx
     if sym != 0 {
         // ===================================== RUNDE ECHTHARDWARE-2
         // MITTIG NACH DER GEMALTEN HOEHE, NICHT NACH DER GEPLANTEN.
@@ -2922,16 +3051,19 @@ fn button_sym(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
         // GEMESSEN auf Justins Aufloesung: Knopfmitte y=1404,
         // Symbolmitte y=1399. Fuenf Punkte, und genau die sieht man
         // als "das Symbol sitzt tiefer als die Schrift".
-        let sh: u64 = wlibc.icon_draw_h(sym)
+        // RUNDE ECHTHARDWARE-4: die Hoehe kommt aus `sym_scale` und
+        // nicht mehr aus `ui_scale()` allein. Mittig bleibt mittig --
+        // gerechnet wird weiter mit der GEMALTEN Hoehe (EH-2).
+        let sh: u64 = wlibc.icon_h(sym) * symsc
         var sy2: u64 = y
         if h > sh {
             sy2 = y + (h - sh) / 2
         }
-        let _s: bool = wlibc.icon_draw(sym, mx, sy2)
+        let _s: bool = wlibc.icon_draw_sc(sym, mx, sy2, symsc)
         // Der Abstand zum Text waechst mit: 8 Punkte bei einfacher
         // Vervielfachung sind bei doppelter 16, sonst klebt das
         // groessere Symbol am Wort.
-        mx = mx + wlibc.icon_draw_w(sym) + 4 * wlibc.ui_scale()
+        mx = mx + symw + luft
     }
     // RUNDE PAINT: WO DIE MARKE WIRKLICH STEHT, UND NUR HIER.
     //
@@ -3178,6 +3310,17 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
                 say((&kapp[0 as usize]) as u64 + i * 24)
                 say((&s_syw[0 as usize]) as u64)
                 ulib.sayn(wlibc.icon_w(sy))
+                // RUNDE ECHTHARDWARE-4: `w=` ist die Groesse der
+                // DATEI und war deshalb als Beleg wertlos -- sie steht
+                // seit EH-2 auf 16, egal wie gross gemalt wird.
+                // `gemalt=` ist die Kantenlaenge auf dem Schirm,
+                // `knopf=` die Hoehe des Knopfes darum. Erst die zwei
+                // Zahlen nebeneinander sagen, ob ein Symbol "verloren"
+                // wirkt: 16 in 40 tut es, 32 in 40 nicht.
+                say((&s_syg[0 as usize]) as u64)
+                ulib.sayn(wlibc.icon_w(sy) * sym_scale(sy, kh[(i) as usize]))
+                say((&s_syk[0 as usize]) as u64)
+                ulib.sayn(kh[(i) as usize])
                 say((&s_syi[0 as usize]) as u64)
                 ulib.sayn(sym_ink(sy))
                 ulib.nl()
@@ -4183,13 +4326,44 @@ fn tip_auf(text: u64, sx: u64, sy: u64) {
     let pad: u64 = 6 * sc
     let bw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), text, n) + 2 * pad
     let bh: u64 = wlibc.text_h(wlibc.px_ui()) + pad
+    // ==================================== RUNDE ECHTHARDWARE-4
+    // DIE BLASE LIEGT NEBEN DER LEISTE UND NICHT AUF IHR.
+    //
+    // Justins Messung B an hell-2560/01-schreibtisch.png: die Blase
+    // "Start" wurde UEBER dem Startsymbol gezeichnet und verdeckte es
+    // teilweise. Der Grund stand hier: gerechnet wurde vom
+    // ZEIGERPUNKT (`sy - bh - 4`), und der Zeiger steht mitten auf dem
+    // Knopf -- vier Bildpunkte ueber der Zeigerspitze ist immer noch
+    // im Knopf.
+    //
+    // Eine Blase gehoert NEBEN das, worueber sie spricht. Jede Blase
+    // dieser Leiste spricht ueber etwas, das IN der Leiste liegt, also
+    // ist die Antwort fuer alle dieselbe: ganz aus der Leiste heraus,
+    // mit einem Abstand von der Kante. Unten liegende Leiste ->
+    // darueber, oben liegende -> darunter. Damit ueberdeckt sie kein
+    // Symbol, egal wo der Zeiger steht.
+    //
+    // Waagrecht wird sie auf dem Zeiger ZENTRIERT statt links an ihm
+    // aufgehaengt -- so steht sie auch am rechten Bildschirmrand nicht
+    // schief unter der Uhr.
+    let luft: u64 = 6 * sc
     var x: u64 = sx
+    if x > bw / 2 {
+        x = x - bw / 2
+    } else {
+        x = 0
+    }
     if x + bw + 2 > wlibc.screen_w() {
         x = wlibc.screen_w() - bw - 2
     }
-    var y: u64 = sy + 4 * sc
-    if sy > bh + 4 * sc {
-        y = sy - bh - 4 * sc
+    var y: u64 = bar_y + bar_h + luft
+    if cf_edge != wlibc.WE_TOP {
+        // Leiste unten: die Blase steht ueber ihrer Oberkante.
+        if bar_y > bh + luft {
+            y = bar_y - bh - luft
+        } else {
+            y = 0
+        }
     }
     let i: u64 = wlib.tip_win_open(x, y, bw, bh, text)
     if i >= 5 {

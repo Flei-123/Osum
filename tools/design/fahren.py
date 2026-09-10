@@ -561,6 +561,18 @@ def main():
                   % (t[0], x0, y, x1, y, r[0], r[1], r[2], r[3]))
         elif b == "taste":
             f.taste(arg)
+        # RUNDE ECHTHARDWARE-4: `tippe <wort>` -- ein Wort Zeichen fuer
+        # Zeichen. Zum Pruefen des Suchfeldes im Startmenue braucht es
+        # das: `taste t`, `taste e`, `taste r`, `taste m` untereinander
+        # zu schreiben ist dieselbe Sache, nur unleserlich, und bei
+        # einem Tippfehler im Drehbuch faellt es niemandem auf.
+        elif b == "tippe":
+            namen = {" ": "spc", "-": "minus", ".": "dot",
+                     ",": "comma", "/": "slash", "_": "shift-minus"}
+            for ch in arg:
+                f.taste(namen.get(ch, ch))
+                time.sleep(0.12)
+            print("tippe %s (%d Zeichen)" % (arg, len(arg)))
         elif b == "foto":
             if not f.foto(arg):
                 fehler += 1

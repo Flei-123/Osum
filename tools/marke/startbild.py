@@ -27,7 +27,31 @@
 import sys
 from PIL import Image
 
-GROESSEN = [16, 24, 32]
+# ============================================== RUNDE ECHTHARDWARE-4
+# FUENF GROESSEN UND NICHT MEHR DREI -- WEIL DIE LEISTE GROESSER IST
+# ALS 32.
+#
+# Justin zu den Bildern aus ECHTHARDWARE-3: "links unten ein rundes,
+# stark verpixeltes Symbol", und die Frage, ob das ueberhaupt sein
+# Logo sei. Es IST sein Logo (assets/marke/start-quelle.png, gebaut
+# aus osum-vorlage-justin.jpg) -- es war nur nie in der Groesse da,
+# in der es gebraucht wird.
+#
+# GEMESSEN: `marke_start.breit()` kannte 16, 24 und 32. Auf Justins
+# Schirm ist der Startknopf 64 Bildpunkte hoch, `marke_malen` nimmt
+# also die 32er und VERVIELFACHT sie ganzzahlig auf 64. Ein Ring von
+# einem Bildpunkt Staerke wird dabei zu einem Ring von zwei -- und
+# runde Kanten werden zu Treppen. Genau das ist die "Verpixelung".
+#
+# Dabei liegen die scharfen Vorlagen seit jeher daneben:
+# assets/marke/start-48.png und start-64.png, aus derselben Quelle
+# mit LANCZOS gerastert. Sie waren nur nie in dieser Liste.
+#
+# Ab hier wird jede Groesse, die es als eigene Datei gibt, auch
+# eingebacken, und `breit()` waehlt die groesste, die hineinpasst.
+# Damit wird das Logo in ZIELGROESSE gerastert und nicht mehr
+# hochskaliert -- was der Auftrag woertlich verlangt.
+GROESSEN = [16, 24, 32, 48, 64]
 
 
 def lade(pfad, n):
@@ -55,8 +79,9 @@ def main():
     t.append("//   tools/marke/startbild.py assets/marke "
              "kernel/user/marke_start.fi\n")
     t.append("//\n")
-    t.append("// Das Startzeichen von OrientOS als Bildpunkte, drei\n")
-    t.append("// Groessen, je Bildpunkt ein Wort 0xAARRGGBB. Warum es hier\n")
+    t.append("// Das Startzeichen von OrientOS als Bildpunkte, in\n")
+    t.append("// mehreren Groessen, je Bildpunkt ein Wort 0xAARRGGBB.\n")
+    t.append("// Warum es hier\n")
     t.append("// steht und nicht in der Symbolschrift oder in einer Datei,\n")
     t.append("// steht im Kopf von tools/marke/startbild.py.\n\n")
     t.append("profile kernel\n\n")
@@ -75,7 +100,7 @@ def main():
                 zeile = "    "
             zeile += s + " "
         t.append(zeile.rstrip() + "\n]\n\n")
-    t.append("// Welche der drei Groessen fuer eine gewuenschte Kantenlaenge\n")
+    t.append("// Welche Groesse fuer eine gewuenschte Kantenlaenge\n")
     t.append("// genommen wird: die groesste, die noch hineinpasst. Ein Ring\n")
     t.append("// von einem Bildpunkt Staerke vertraegt keine Interpolation.\n")
     t.append("fn breit(wunsch: u64) -> u64 {\n")
