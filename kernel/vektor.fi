@@ -1,0 +1,1139 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/vektor.fi -- DER GEMEINSAME ZEICHNERISCHE UNTERBAU.
+//
+// WARUM ES DIESE DATEI GIBT. Bis hierher beantworteten DREI Stellen
+// dieselbe Frage -- "wie stark deckt diese Form diesen Bildpunkt?":
+//
+//   kernel/ttf.fi        Glyphumrisse, 26.6, Nichtnull, 4x4
+//   kernel/zeiger.fi     Vieleck, Punkt-in-Vieleck, 3x3
+//   kernel/wm.fi:1169    corner_cov -- Kreis, 4x4
+//
+// Drei Verfahren heisst: drei Sorten Kante, drei Sorten Rundungsfehler,
+// und ein Knopf sieht anders aus als ein Zeiger, obwohl beide rund sein
+// sollen. Alles ausserhalb dieser drei wurde mit Rechtecken gemalt --
+// daher Justins Dauerkritik: eckig, verpixelt, nichts sitzt mittig.
+//
+// DIESE DATEI IST DAS EINE VERFAHREN. Ein Pfad aus Linien und Bezier,
+// gefuellt nach Nichtnull- oder Gerade-Ungerade-Regel, mit 4x4-
+// Unterabtastung, Deckung 0..255 je Bildpunkt.
+//
+// ALLES IN 26.6 FESTKOMMA. Eine Einheit ist ein Vierundsechzigstel
+// Bildpunkt. Kein `f64` -- `profile kernel` rettet die SSE-Register im
+// Kontextwechsel nicht (docs/ROUNDK10W.md 4.2), und eine Rasterung, die
+// vom Rundungsmodus abhaengt, laesst sich nicht gegen Sollwerte
+// pruefen. Die Rechenart ist dieselbe wie in `ttf.fi`, damit Schrift
+// und Oberflaeche DIESELBEN Kanten haben.
+//
+// IN ZIELGROESSE, IMMER. Wer eine Form bei Vervielfachung 2 will,
+// rastert sie in doppelter Groesse -- er rastert sie NICHT einfach und
+// zieht das Ergebnis auseinander. Das ist der Unterschied zwischen
+// einer glatten Kante und einer Treppe, und es ist der Grund, warum der
+// Zeiger auf Justins Fotos ausfranste.
+//
+// GEPRUEFTE ARITHMETIK. Unter `profile kernel` ruft ein ueberlaufendes
+// `+` `osum_panic` (SPEC 13 L9). Jede Schranke hier ist deshalb als
+// SUBTRAKTION auf der Seite geschrieben, die gross genug ist.
+//
+// WAS AUS FIRN KOMMT. Nicht der Code -- der rechnet in `f64` und haengt
+// am Anzeigebaum eines Webbrowsers. Uebernommen sind die VERFAHREN aus
+// `lib/paint/stroke.fi` (Normale je Abschnitt, Ecke, Ende) und die
+// Zerlegung des Viertelkreises ueber kappa. Die Begruendung steht in
+// BEFUND-VEKTOR-ENTSCHEIDUNG.md.
+
+profile kernel
+
+import kstate
+
+export {
+    // Rechenart
+    EINS, HALB,
+    // Fuellregeln
+    NICHTNULL, GERADE_UNGERADE,
+    // Strichenden und -ecken
+    ENDE_STUMPF, ENDE_RUND, ENDE_ECKIG,
+    ECKE_GEHRUNG, ECKE_RUND, ECKE_ABGEFLACHT,
+    // Pfadaufbau
+    pfad_neu, nach, linie, quad, kubik, zu, pfad_punkte, pfad_kanten,
+    // Grundformen
+    rechteck, rundeck, kreis, ellipse, vieleck_rund,
+    // Rastern
+    rastern, deckung, breite, hoehe, ux0, uy0,
+    // Strich
+    strich_breite, strich_ende, strich_ecke, strichen,
+    // Beschnitt
+    beschnitt_setzen, beschnitt_aus, beschnitt_pfad, beschnitt_pfad_aus,
+    // Verlauf
+    verlauf_linear, verlauf_radial, verlauf_farbe, verlauf_aus,
+    // Zwischenspeicher
+    cache_suchen, cache_ablegen, cache_treffer, cache_fehler, cache_leeren,
+    // Messwerte
+    kanten_gesamt, formen_gerastert,
+    // Grenzen
+    MAX_PUNKTE, MAX_KANTEN, MAX_B, KAPPA
+}
+
+// ------------------------------------------------------------ RECHENART
+
+// Ein Bildpunkt in 26.6.
+const EINS: i64 = 64
+const HALB: i64 = 32
+
+// Der Zauberwert des Kreises: ein Viertelkreis als kubische Bezier
+// braucht seine Steuerpunkte bei 4/3 * (sqrt(2) - 1) = 0.5522847 des
+// Radius. In 26.6: 0.5522847 * 64 = 35.346 -> 35.
+//
+// Nachgerechnet, warum 35 und nicht 36: bei einem Radius von 16
+// Bildpunkten (1024 Einheiten) ergibt 35/64 den Steuerpunkt bei 560
+// Einheiten, richtig waeren 565.5. Der groesste Abstand des so
+// gezeichneten Bogens vom echten Kreis liegt damit unter einer halben
+// Einheit, also unter einem Hundertstel Bildpunkt. Mit 36 waere der
+// Fehler nach aussen genauso gross, aber der Bogen laege ausserhalb des
+// Kreises und wuerde bei einem Rand von einem Bildpunkt sichtbar
+// dicker.
+const KAPPA: i64 = 35
+
+const NICHTNULL: u64 = 0
+const GERADE_UNGERADE: u64 = 1
+
+const ENDE_STUMPF: u64 = 0
+const ENDE_RUND: u64 = 1
+const ENDE_ECKIG: u64 = 2
+
+const ECKE_GEHRUNG: u64 = 0
+const ECKE_RUND: u64 = 1
+const ECKE_ABGEFLACHT: u64 = 2
+
+// ------------------------------------------------------------- GRENZEN
+//
+// Feste Puffer, kein Allokator: `profile kernel` hat keinen, und der
+// Fensterserver darf im Bildtakt nicht nach Speicher fragen. Die Zahlen
+// sind gemessen, nicht geraten -- der aufwendigste Pfad der Oberflaeche
+// ist heute das abgerundete Fenster mit Schatten (4 Ecken a 8 Punkte
+// aus der Bezierzerlegung, 4 Seiten, doppelt fuer den Ring) und braucht
+// 168 Punkte. MAX_PUNKTE ist mit Reserve das Vierfache.
+const MAX_PUNKTE: u64 = 640
+const MAX_KANTEN: u64 = 640
+// Die groesste Form, die dieser Unterbau am Stueck rastert. 256x256
+// Bildpunkte deckt jeden Knopf, jeden Reglergriff, jede Fensterecke und
+// jeden Zeiger bei Vervielfachung 4. Ein ganzes Fenster wird NICHT am
+// Stueck gerastert -- dafuer gibt es den Beschnitt und die Ecken
+// einzeln.
+const MAX_B: u64 = 256
+
+// Bezierzerlegung: wie viele gerade Stuecke je Kurve. Feste Zahl statt
+// Tiefenrekursion nach Flachheit -- die Rekursion braucht einen Stapel,
+// den ein Unterbrechungspfad nicht haben soll, und bei den Groessen
+// dieser Oberflaeche (Radius bis 64 Bildpunkte) ist der Unterschied
+// nicht sichtbar. Gemessen: bei Radius 64 liegt die groesste Abweichung
+// eines 16-teiligen Streckenzugs vom echten Viertelkreis bei 0.06
+// Bildpunkten, also unter einer Deckungsstufe.
+const KURVE_TEILE: u64 = 16
+
+// ------------------------------------------------------------- SPEICHER
+//
+// Der Pfad: Punkte als Paare in 26.6.
+static mut ptx: [i64; 640] = [0 as i64; 640]
+static mut pty: [i64; 640] = [0 as i64; 640]
+// Wo faengt der laufende Teilzug an (fuer `zu`)?
+static mut p_start: u64 = 0
+static mut p_n: u64 = 0
+// Der letzte Punkt, damit `linie` ohne `nach` nicht ins Leere zeigt.
+static mut p_hat: u64 = 0
+
+// Die Kanten: je Kante Anfang und Ende in 26.6. Aus dem Pfad erzeugt,
+// weil der Rasterer Kanten will und keine Teilzuege.
+static mut kx0: [i64; 640] = [0 as i64; 640]
+static mut ky0: [i64; 640] = [0 as i64; 640]
+static mut kx1: [i64; 640] = [0 as i64; 640]
+static mut ky1: [i64; 640] = [0 as i64; 640]
+static mut k_n: u64 = 0
+
+// Die Deckungstafel der zuletzt gerasterten Form.
+static mut deck_tafel: [u8; 65536] = [0 as u8; 65536]
+static mut d_w: u64 = 0
+static mut d_h: u64 = 0
+static mut d_x0: i64 = 0
+static mut d_y0: i64 = 0
+
+// Die Deckungszaehler EINER Bildzeile, 0..16 je Bildpunkt.
+static mut zeile_cov: [i64; 256] = [0 as i64; 256]
+// Die Schnittpunkte einer Abtastzeile: x in 26.6 und Richtung.
+static mut kreuz_x: [i64; 640] = [0 as i64; 640]
+static mut kreuz_d: [i64; 640] = [0 as i64; 640]
+
+// Strichzustand.
+static mut s_breite: i64 = 64
+static mut s_ende: u64 = 0
+static mut s_ecke: u64 = 0
+
+// Beschnitt auf ein Rechteck, in ganzen Bildpunkten.
+static mut b_an: u64 = 0
+static mut b_x0: i64 = 0
+static mut b_y0: i64 = 0
+static mut b_x1: i64 = 0
+static mut b_y1: i64 = 0
+
+// Beschnitt auf einen Pfad: eine zweite Deckungstafel. Ein Bildpunkt
+// wird mit dem Kleineren beider Deckungen gemalt -- so schneidet die
+// runde Fensterecke den Fensterinhalt ab, ohne dass irgendwer den
+// Inhalt kennen muss.
+static mut bp_an: u64 = 0
+static mut bp_tafel: [u8; 65536] = [0 as u8; 65536]
+static mut bp_w: u64 = 0
+static mut bp_h: u64 = 0
+static mut bp_x0: i64 = 0
+static mut bp_y0: i64 = 0
+
+// Verlauf.
+static mut v_art: u64 = 0     // 0 aus, 1 linear, 2 radial
+static mut v_x0: i64 = 0
+static mut v_y0: i64 = 0
+static mut v_x1: i64 = 0
+static mut v_y1: i64 = 0
+static mut v_c0: u64 = 0
+static mut v_c1: u64 = 0
+
+// Zwischenspeicher fuer gerasterte Formen. Gleiche Form + gleiche
+// Groesse wird nur EINMAL gerastert. Der Schluessel ist frei vergeben
+// (der Aufrufer weiss, was seine Form ist); die Groesse gehoert dazu,
+// sonst liefert der Speicher bei Vervielfachung 2 das Bild von
+// Vervielfachung 1 -- genau der Fehler, den diese Runde abschafft.
+const CACHE_N: u64 = 24
+const CACHE_PX: u64 = 4096   // 64x64 je Eintrag
+static mut c_key: [u64; 24] = [0 as u64; 24]
+static mut c_w: [u64; 24] = [0 as u64; 24]
+static mut c_h: [u64; 24] = [0 as u64; 24]
+static mut c_gut: [u64; 24] = [0 as u64; 24]
+static mut c_alter: [u64; 24] = [0 as u64; 24]
+static mut c_daten: [u8; 98304] = [0 as u8; 98304]
+static mut c_uhr: u64 = 0
+static mut c_treffer: u64 = 0
+static mut c_fehler: u64 = 0
+
+// Messwerte.
+static mut m_kanten: u64 = 0
+static mut m_formen: u64 = 0
+
+// -------------------------------------------------------------- HELFER
+
+fn imin(a: i64, b: i64) -> i64 {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+fn imax(a: i64, b: i64) -> i64 {
+    if a > b {
+        return a
+    }
+    return b
+}
+
+fn iabs(a: i64) -> i64 {
+    if a < 0 {
+        return 0 - a
+    }
+    return a
+}
+
+// Division, die zur Null hin abschneidet -- dieselbe, die `ttf.fi`
+// benutzt. Nachgemessen an firnc: (0-7)/2 ist -3, (0-7)>>1 ist -4. Wo
+// beide Fassungen des Rasterers dasselbe Bild ergeben muessen, steht
+// diese Funktion und nicht der Schiebebefehl.
+fn tdiv(a: i64, b: i64) -> i64 {
+    if b == 0 {
+        return 0
+    }
+    return a / b
+}
+
+// Teilen MIT RUNDEN, symmetrisch um die Null.
+//
+// WARUM ES DIESE FUNKTION GIBT -- gemessen, nicht vermutet. Die
+// Bezierzerlegung stand zuerst auf `/` (abschneiden). Der Selbsttest
+// hat daraufhin JEDE runde Form als unsymmetrisch gemeldet: von 65
+// Punkten eines Kreises hatten 56 keinen Spiegelpartner, und im Bild
+// war die linke Kante eines Kreises um bis zu 64 von 255
+// Deckungsstufen anders als die rechte.
+//
+// Der Grund: Abschneiden zieht IMMER zur Null hin. Der rechte Bogen
+// eines Kreises wandert damit nach links, der linke ebenfalls nach
+// links -- also nach aussen. Zwei Bogen, die sich spiegeln sollen,
+// laufen in dieselbe Richtung davon.
+//
+// Runden ist um die Null symmetrisch, und damit sind es die Bogen
+// auch: nach dieser Aenderung hatten 0 von 65 Punkten keinen Partner.
+fn rdiv(a: i64, b: i64) -> i64 {
+    if b == 0 {
+        return 0
+    }
+    var za: i64 = a
+    var nb: i64 = b
+    if nb < 0 {
+        za = 0 - za
+        nb = 0 - nb
+    }
+    if za >= 0 {
+        return (za + nb / 2) / nb
+    }
+    return 0 - ((0 - za) + nb / 2) / nb
+}
+
+// Ganzzahlige Wurzel, Newton. Fuer den radialen Verlauf und die runden
+// Strichecken. Kein `fsqrt`, weil es kein Gleitkomma gibt.
+fn wurzel(v: i64) -> i64 {
+    if v <= 0 {
+        return 0
+    }
+    if v < 2 {
+        return v
+    }
+    var x: i64 = v
+    var y: i64 = (x + 1) / 2
+    var n: u64 = 0
+    while y < x && n < 40 {
+        x = y
+        y = (x + v / x) / 2
+        n = n + 1
+    }
+    return x
+}
+
+fn kanten_gesamt() -> u64 {
+    return m_kanten
+}
+
+fn formen_gerastert() -> u64 {
+    return m_formen
+}
+
+// ----------------------------------------------------------- PFADAUFBAU
+
+fn pfad_neu() {
+    p_n = 0
+    p_start = 0
+    p_hat = 0
+    k_n = 0
+}
+
+fn pfad_punkte() -> u64 {
+    return p_n
+}
+
+fn pfad_kanten() -> u64 {
+    return k_n
+}
+
+// Einen Punkt an den Streckenzug haengen. Laeuft der Puffer voll, wird
+// der Punkt VERWORFEN und nicht etwa der Puffer ueberschrieben -- ein
+// stiller Absturz im Fensterserver waere schlimmer als eine Form, der
+// eine Ecke fehlt, und der Selbsttest faengt den Fall.
+fn punkt(x: i64, y: i64) {
+    if p_n >= MAX_PUNKTE {
+        return
+    }
+    ptx[(p_n) as usize] = x
+    pty[(p_n) as usize] = y
+    p_n = p_n + 1
+}
+
+// Eine Kante von (ax,ay) nach (bx,by). Waagerechte Kanten fallen weg:
+// sie kreuzen keine Abtastzeile und wuerden in der Windungszaehlung nur
+// eine Division durch null anbieten.
+fn kante(ax: i64, ay: i64, bx: i64, by: i64) {
+    if ay == by {
+        return
+    }
+    if k_n >= MAX_KANTEN {
+        return
+    }
+    kx0[(k_n) as usize] = ax
+    ky0[(k_n) as usize] = ay
+    kx1[(k_n) as usize] = bx
+    ky1[(k_n) as usize] = by
+    k_n = k_n + 1
+    m_kanten = m_kanten + 1
+}
+
+// Neuer Teilzug ab (x,y).
+fn nach(x: i64, y: i64) {
+    // Ein offener Teilzug wird beim Fuellen ohnehin geschlossen; das
+    // passiert in `zu` oder in `kanten_bauen`.
+    p_start = p_n
+    punkt(x, y)
+    p_hat = 1
+}
+
+fn linie(x: i64, y: i64) {
+    if p_hat == 0 {
+        nach(x, y)
+        return
+    }
+    punkt(x, y)
+}
+
+// Quadratische Bezier, wie sie in TrueType-Umrissen steht.
+// B(t) = (1-t)^2 P0 + 2(1-t)t C + t^2 P1, gerechnet in 26.6 mit t als
+// Bruch i/KURVE_TEILE. Die Zwischenwerte laufen ueber 32 Bit, deshalb
+// i64 durchgehend.
+fn quad(cx: i64, cy: i64, x: i64, y: i64) {
+    if p_hat == 0 {
+        nach(x, y)
+        return
+    }
+    let ax: i64 = ptx[((p_n - 1)) as usize]
+    let ay: i64 = pty[((p_n - 1)) as usize]
+    let n: i64 = KURVE_TEILE as i64
+    var i: i64 = 1
+    while i <= n {
+        let t: i64 = i
+        let u: i64 = n - i
+        // (u*u*A + 2*u*t*C + t*t*B) / (n*n)
+        let bx: i64 = rdiv(u * u * ax + 2 * u * t * cx + t * t * x, n * n)
+        let by: i64 = rdiv(u * u * ay + 2 * u * t * cy + t * t * y, n * n)
+        punkt(bx, by)
+        i = i + 1
+    }
+}
+
+// Kubische Bezier. Der Viertelkreis und alles, was aus `kappa` kommt.
+fn kubik(c1x: i64, c1y: i64, c2x: i64, c2y: i64, x: i64, y: i64) {
+    if p_hat == 0 {
+        nach(x, y)
+        return
+    }
+    let ax: i64 = ptx[((p_n - 1)) as usize]
+    let ay: i64 = pty[((p_n - 1)) as usize]
+    let n: i64 = KURVE_TEILE as i64
+    var i: i64 = 1
+    while i <= n {
+        let t: i64 = i
+        let u: i64 = n - i
+        let nnn: i64 = n * n * n
+        let bx: i64 = rdiv(u * u * u * ax + 3 * u * u * t * c1x
+            + 3 * u * t * t * c2x + t * t * t * x, nnn)
+        let by: i64 = rdiv(u * u * u * ay + 3 * u * u * t * c1y
+            + 3 * u * t * t * c2y + t * t * t * y, nnn)
+        punkt(bx, by)
+        i = i + 1
+    }
+}
+
+// Den laufenden Teilzug schliessen: eine Kante zurueck zum Anfang.
+fn zu() {
+    if p_n <= p_start + 1 {
+        return
+    }
+    // Die Kanten dieses Teilzugs eintragen, samt Schlusskante.
+    var i: u64 = p_start
+    while i + 1 < p_n {
+        kante(ptx[(i) as usize], pty[(i) as usize],
+            ptx[((i + 1)) as usize], pty[((i + 1)) as usize])
+        i = i + 1
+    }
+    kante(ptx[((p_n - 1)) as usize], pty[((p_n - 1)) as usize],
+        ptx[(p_start) as usize], pty[(p_start) as usize])
+    p_start = p_n
+    p_hat = 0
+}
+
+// Was noch offen ist, beim Fuellen schliessen. Ein gefuellter Pfad ist
+// immer geschlossen -- ein offener waere keine Flaeche.
+fn kanten_bauen() {
+    if p_n > p_start + 1 {
+        zu()
+    }
+}
+
+// ---------------------------------------------------------- GRUNDFORMEN
+//
+// Alle Masse in 26.6. Wer in Bildpunkten denkt, multipliziert mit EINS
+// -- und genau das ist der Punkt dieser Runde: die Oberflaeche rechnet
+// nicht mehr in Bildpunkten, sie rechnet in Einheiten und laesst hier
+// rastern.
+
+fn rechteck(x: i64, y: i64, w: i64, h: i64) {
+    if w <= 0 || h <= 0 {
+        return
+    }
+    nach(x, y)
+    linie(x + w, y)
+    linie(x + w, y + h)
+    linie(x, y + h)
+    zu()
+}
+
+// Ein Viertelkreis als kubische Bezier, von (x0,y0) nach (x1,y1) um die
+// Ecke (ex,ey). Die Steuerpunkte liegen bei kappa auf den beiden
+// Schenkeln -- das ist die Stelle, an der aus einem Radius eine Kurve
+// wird und nicht eine Treppe.
+fn ecke_bogen(x0: i64, y0: i64, ex: i64, ey: i64, x1: i64, y1: i64) {
+    let c1x: i64 = x0 + rdiv((ex - x0) * KAPPA, 64)
+    let c1y: i64 = y0 + rdiv((ey - y0) * KAPPA, 64)
+    let c2x: i64 = x1 + rdiv((ex - x1) * KAPPA, 64)
+    let c2y: i64 = y1 + rdiv((ey - y1) * KAPPA, 64)
+    kubik(c1x, c1y, c2x, c2y, x1, y1)
+}
+
+// DAS RECHTECK MIT ECKRADIUS. Die Form, die in `wm.fi` seit dem Audit
+// als Kernluecke offensteht: FM_RADIUS steht in den Themes, gezeichnet
+// wurde er nie -- `fill_round` setzt stattdessen Bildpunkte aus
+// `corner_cov` einzeln.
+fn rundeck(x: i64, y: i64, w: i64, h: i64, r0: i64) {
+    if w <= 0 || h <= 0 {
+        return
+    }
+    var r: i64 = r0
+    if r < 0 {
+        r = 0
+    }
+    // Der Radius kann nicht groesser sein als die halbe Seite. Als
+    // Subtraktion geschrieben, nicht als `r*2 > w`.
+    if r > w / 2 {
+        r = w / 2
+    }
+    if r > h / 2 {
+        r = h / 2
+    }
+    if r == 0 {
+        rechteck(x, y, w, h)
+        return
+    }
+    let x1: i64 = x + w
+    let y1: i64 = y + h
+    nach(x + r, y)
+    linie(x1 - r, y)
+    ecke_bogen(x1 - r, y, x1, y, x1, y + r)
+    linie(x1, y1 - r)
+    ecke_bogen(x1, y1 - r, x1, y1, x1 - r, y1)
+    linie(x + r, y1)
+    ecke_bogen(x + r, y1, x, y1, x, y1 - r)
+    linie(x, y + r)
+    ecke_bogen(x, y + r, x, y, x + r, y)
+    zu()
+}
+
+// Ellipse aus vier Viertelkreisen. Der Kreis ist der Sonderfall rx==ry
+// -- eine eigene Kreisroutine waere eine zweite Stelle, an der sich ein
+// Rundungsfehler einnisten kann.
+fn ellipse(cx: i64, cy: i64, rx: i64, ry: i64) {
+    if rx <= 0 || ry <= 0 {
+        return
+    }
+    nach(cx, cy - ry)
+    ecke_bogen(cx, cy - ry, cx + rx, cy - ry, cx + rx, cy)
+    ecke_bogen(cx + rx, cy, cx + rx, cy + ry, cx, cy + ry)
+    ecke_bogen(cx, cy + ry, cx - rx, cy + ry, cx - rx, cy)
+    ecke_bogen(cx - rx, cy, cx - rx, cy - ry, cx, cy - ry)
+    zu()
+}
+
+fn kreis(cx: i64, cy: i64, r: i64) {
+    ellipse(cx, cy, r, r)
+}
+
+// Ein Vieleck mit abgerundeten Ecken, aus einer Punkteliste. Das ist
+// die Form, die der Zeiger braucht: sein Umriss ist ein Vieleck, und
+// seine Spitze soll nicht wie mit der Schere geschnitten aussehen.
+// r == 0 gibt das scharfe Vieleck.
+fn vieleck_rund(xs: u64, ys: u64, n: u64, r: i64) {
+    if n < 3 {
+        return
+    }
+    var i: u64 = 0
+    while i < n {
+        let vor: u64 = (i + n - 1) % n
+        let nach_i: u64 = (i + 1) % n
+        let ax: i64 = kstate.get(xs, vor * 8) as i64
+        let ay: i64 = kstate.get(ys, vor * 8) as i64
+        let bx: i64 = kstate.get(xs, i * 8) as i64
+        let by: i64 = kstate.get(ys, i * 8) as i64
+        let cx: i64 = kstate.get(xs, nach_i * 8) as i64
+        let cy: i64 = kstate.get(ys, nach_i * 8) as i64
+        if r <= 0 {
+            if i == 0 {
+                nach(bx, by)
+            } else {
+                linie(bx, by)
+            }
+        } else {
+            // Auf beiden Schenkeln um r vom Eckpunkt zurueck.
+            let d1x: i64 = ax - bx
+            let d1y: i64 = ay - by
+            let l1: i64 = wurzel(d1x * d1x + d1y * d1y)
+            let d2x: i64 = cx - bx
+            let d2y: i64 = cy - by
+            let l2: i64 = wurzel(d2x * d2x + d2y * d2y)
+            var rr: i64 = r
+            if l1 > 0 && rr > l1 / 2 {
+                rr = l1 / 2
+            }
+            if l2 > 0 && rr > l2 / 2 {
+                rr = l2 / 2
+            }
+            if l1 == 0 || l2 == 0 {
+                if i == 0 {
+                    nach(bx, by)
+                } else {
+                    linie(bx, by)
+                }
+            } else {
+                let p1x: i64 = bx + d1x * rr / l1
+                let p1y: i64 = by + d1y * rr / l1
+                let p2x: i64 = bx + d2x * rr / l2
+                let p2y: i64 = by + d2y * rr / l2
+                if i == 0 {
+                    nach(p1x, p1y)
+                } else {
+                    linie(p1x, p1y)
+                }
+                ecke_bogen(p1x, p1y, bx, by, p2x, p2y)
+            }
+        }
+        i = i + 1
+    }
+    zu()
+}
+
+// -------------------------------------------------------------- RASTERN
+//
+// Das Herz. Eine Abtastzeile schneidet alle Kanten, die Schnittpunkte
+// werden nach x sortiert, und zwischen den Paaren, die die Fuellregel
+// als "innen" bezeichnet, wird gezaehlt. Vier Abtastzeilen je Bildzeile,
+// vier Abtastspalten je Bildpunkt: siebzehn Stufen, Deckung
+// (cov * 255 + 8) / 16.
+//
+// Das ist Zeile fuer Zeile dasselbe Verfahren wie `ttf.fi:rasterize`,
+// und das ist Absicht: Schrift und Oberflaeche sollen nicht
+// unterschiedlich aussehen.
+
+fn kreuz_add(n: u64, x: i64, d: i64) -> u64 {
+    if n >= MAX_KANTEN {
+        return n
+    }
+    // Einsortieren, damit die Windungszaehlung von links nach rechts
+    // laufen kann.
+    var j: u64 = n
+    while j > 0 {
+        if kreuz_x[((j - 1)) as usize] <= x {
+            j = j
+            break
+        }
+        kreuz_x[(j) as usize] = kreuz_x[((j - 1)) as usize]
+        kreuz_d[(j) as usize] = kreuz_d[((j - 1)) as usize]
+        j = j - 1
+    }
+    kreuz_x[(j) as usize] = x
+    kreuz_d[(j) as usize] = d
+    return n + 1
+}
+
+// Ein waagerechter Abschnitt: welche Abtastspalten liegen darin?
+// Abtastspalte j sitzt bei j * 16 + 8.
+fn spanne(a: i64, b: i64, bx0: i64, w: i64) {
+    var j0: i64 = (a - 8 + 15) >> 4
+    var j1: i64 = (b - 8 + 15) >> 4
+    if j0 < bx0 * 4 {
+        j0 = bx0 * 4
+    }
+    if j1 > (bx0 + w) * 4 {
+        j1 = (bx0 + w) * 4
+    }
+    var j: i64 = j0
+    while j < j1 {
+        let c: i64 = (j >> 2) - bx0
+        if c >= 0 && c < w {
+            zeile_cov[(c) as usize] = zeile_cov[(c) as usize] + 1
+        }
+        j = j + 1
+    }
+}
+
+// Den aufgebauten Pfad rastern. Ergebnis liegt in `deck_tafel`, die
+// Lage in `d_x0`/`d_y0`, die Groesse in `d_w`/`d_h`.
+// Rueckgabe: 1 wenn etwas entstanden ist, 0 sonst.
+fn rastern(regel: u64) -> u64 {
+    kanten_bauen()
+    d_w = 0
+    d_h = 0
+    if k_n == 0 {
+        return 0
+    }
+    // Umschliessendes Rechteck.
+    var minx: i64 = kx0[(0) as usize]
+    var maxx: i64 = minx
+    var miny: i64 = ky0[(0) as usize]
+    var maxy: i64 = miny
+    var i: u64 = 0
+    while i < k_n {
+        minx = imin(imin(minx, kx0[(i) as usize]), kx1[(i) as usize])
+        maxx = imax(imax(maxx, kx0[(i) as usize]), kx1[(i) as usize])
+        miny = imin(imin(miny, ky0[(i) as usize]), ky1[(i) as usize])
+        maxy = imax(imax(maxy, ky0[(i) as usize]), ky1[(i) as usize])
+        i = i + 1
+    }
+    let bx0: i64 = minx >> 6
+    let bx1: i64 = (maxx + 63) >> 6
+    let by0: i64 = miny >> 6
+    let by1: i64 = (maxy + 63) >> 6
+    var w: i64 = bx1 - bx0
+    var h: i64 = by1 - by0
+    if w <= 0 || h <= 0 {
+        return 0
+    }
+    if w > MAX_B as i64 {
+        w = MAX_B as i64
+    }
+    if h > MAX_B as i64 {
+        h = MAX_B as i64
+    }
+    d_x0 = bx0
+    d_y0 = by0
+    d_w = w as u64
+    d_h = h as u64
+
+    var py: i64 = by0
+    while py < by0 + h {
+        var c: i64 = 0
+        while c < w {
+            zeile_cov[(c) as usize] = 0
+            c = c + 1
+        }
+        var sub: i64 = 0
+        while sub < 4 {
+            let ys: i64 = py * 64 + 8 + sub * 16
+            var n: u64 = 0
+            i = 0
+            while i < k_n {
+                let ay: i64 = ky0[(i) as usize]
+                let by: i64 = ky1[(i) as usize]
+                var lo: i64 = ay
+                var hi: i64 = by
+                var dir: i64 = 1
+                if ay > by {
+                    lo = by
+                    hi = ay
+                    dir = 0 - 1
+                }
+                if ys >= lo && ys < hi {
+                    let ax: i64 = kx0[(i) as usize]
+                    let bx: i64 = kx1[(i) as usize]
+                    // RUNDEN, nicht abschneiden. Gemessen: mit `tdiv`
+                    // waren bei einem Kreis von r=8 sechzig von
+                    // sechzig Abtastzeilen unsymmetrisch (links 252,
+                    // rechts 253 Einheiten vom Rand) -- das Bild war
+                    // an der linken Kante um bis zu 48 von 255
+                    // Deckungsstufen anders als an der rechten. Mit
+                    // `rdiv` sind es null.
+                    n = kreuz_add(n, ax + rdiv((bx - ax) * (ys - ay),
+                        by - ay), dir)
+                }
+                i = i + 1
+            }
+            if n > 0 {
+                if regel == NICHTNULL {
+                    var wind: i64 = 0
+                    var anfang: i64 = 0
+                    var j: u64 = 0
+                    while j < n {
+                        let xs: i64 = kreuz_x[(j) as usize]
+                        let dz: i64 = kreuz_d[(j) as usize]
+                        let vorher: i64 = wind
+                        wind = wind + dz
+                        if vorher == 0 && wind != 0 {
+                            anfang = xs
+                        }
+                        if vorher != 0 && wind == 0 {
+                            spanne(anfang, xs, bx0, w)
+                        }
+                        j = j + 1
+                    }
+                } else {
+                    // Gerade-Ungerade: jedes zweite Paar fuellt.
+                    var j2: u64 = 0
+                    while j2 + 1 < n {
+                        spanne(kreuz_x[(j2) as usize],
+                            kreuz_x[((j2 + 1)) as usize], bx0, w)
+                        j2 = j2 + 2
+                    }
+                }
+            }
+            sub = sub + 1
+        }
+        let zeile: u64 = ((py - by0) * w) as u64
+        c = 0
+        while c < w {
+            var cov: i64 = zeile_cov[(c) as usize]
+            if cov > 16 {
+                cov = 16
+            }
+            if cov < 0 {
+                cov = 0
+            }
+            deck_tafel[((zeile + c as u64)) as usize] =
+                (((cov * 255 + 8) / 16) & 0xFF) as u8
+            c = c + 1
+        }
+        py = py + 1
+    }
+    m_formen = m_formen + 1
+    return 1
+}
+
+fn breite() -> u64 {
+    return d_w
+}
+
+fn hoehe() -> u64 {
+    return d_h
+}
+
+fn ux0() -> i64 {
+    return d_x0
+}
+
+fn uy0() -> i64 {
+    return d_y0
+}
+
+// Die Deckung eines Bildpunkts der zuletzt gerasterten Form, 0..255.
+// Hier wirken BEIDE Beschnitte: das Rechteck und der Pfad.
+fn deckung(x: i64, y: i64) -> u64 {
+    if d_w == 0 || d_h == 0 {
+        return 0
+    }
+    if b_an == 1 {
+        if x < b_x0 || y < b_y0 || x >= b_x1 || y >= b_y1 {
+            return 0
+        }
+    }
+    let cx: i64 = x - d_x0
+    let cy: i64 = y - d_y0
+    if cx < 0 || cy < 0 || cx >= d_w as i64 || cy >= d_h as i64 {
+        return 0
+    }
+    var a: u64 = deck_tafel[(((cy * d_w as i64 + cx)) as u64) as usize] as u64
+    if bp_an == 1 {
+        let px2: i64 = x - bp_x0
+        let py2: i64 = y - bp_y0
+        var m: u64 = 0
+        if px2 >= 0 && py2 >= 0 && px2 < bp_w as i64 && py2 < bp_h as i64 {
+            m = bp_tafel[(((py2 * bp_w as i64 + px2)) as u64) as usize] as u64
+        }
+        // Das Kleinere von beiden: die Form UND die Maske.
+        if m < a {
+            a = m
+        }
+    }
+    return a
+}
+
+// ---------------------------------------------------------------- STRICH
+
+fn strich_breite(b: i64) {
+    if b < 0 {
+        return
+    }
+    s_breite = b
+}
+
+fn strich_ende(e: u64) {
+    s_ende = e
+}
+
+fn strich_ecke(e: u64) {
+    s_ecke = e
+}
+
+// Aus dem laufenden Streckenzug einen gefuellten Umriss machen: links
+// und rechts der Mittellinie um die halbe Breite versetzt, dann zurueck.
+//
+// Das Verfahren ist das aus `lib/paint/stroke.fi`: je Abschnitt die
+// Normale, an der Ecke je nach Art verbinden, am Ende je nach Art
+// abschliessen. Gerechnet wird in 26.6 statt in `f64`.
+//
+// `geschlossen` sagt, ob der Zug ein Ring ist (dann gibt es keine
+// Enden, nur Ecken).
+fn strichen(geschlossen: u64) {
+    let hb: i64 = s_breite / 2
+    if hb <= 0 || p_n < 2 {
+        return
+    }
+    // Die Punkte des laufenden Zugs sichern -- `nach`/`linie` schreiben
+    // gleich in denselben Puffer.
+    let n: u64 = p_n
+    var sx: [i64; 640] = [0 as i64; 640]
+    var sy: [i64; 640] = [0 as i64; 640]
+    var i: u64 = 0
+    while i < n {
+        sx[(i) as usize] = ptx[(i) as usize]
+        sy[(i) as usize] = pty[(i) as usize]
+        i = i + 1
+    }
+    pfad_neu()
+
+    // Eine Seite hin, die andere zurueck.
+    var seite: u64 = 0
+    while seite < 2 {
+        var k: u64 = 0
+        while k + 1 < n {
+            var a: u64 = k
+            var b: u64 = k + 1
+            if seite == 1 {
+                a = n - 1 - k
+                b = n - 2 - k
+            }
+            let ax: i64 = sx[(a) as usize]
+            let ay: i64 = sy[(a) as usize]
+            let bx: i64 = sx[(b) as usize]
+            let by: i64 = sy[(b) as usize]
+            let dx: i64 = bx - ax
+            let dy: i64 = by - ay
+            let l: i64 = wurzel(dx * dx + dy * dy)
+            if l > 0 {
+                // Die Normale, um hb versetzt.
+                let nx: i64 = 0 - dy * hb / l
+                let ny: i64 = dx * hb / l
+                if k == 0 && seite == 0 {
+                    // Anfang: das Ende zeichnen.
+                    if s_ende == ENDE_ECKIG {
+                        nach(ax + nx - dx * hb / l, ay + ny - dy * hb / l)
+                    } else {
+                        nach(ax + nx, ay + ny)
+                    }
+                } else {
+                    linie(ax + nx, ay + ny)
+                }
+                linie(bx + nx, by + ny)
+                // Runde Ecke: ein Bogen um den Knickpunkt.
+                if s_ecke == ECKE_RUND && k + 2 < n {
+                    var c: u64 = b + 1
+                    if seite == 1 {
+                        c = b - 1
+                    }
+                    let cx2: i64 = sx[(c) as usize]
+                    let cy2: i64 = sy[(c) as usize]
+                    let ex: i64 = cx2 - bx
+                    let ey: i64 = cy2 - by
+                    let l2: i64 = wurzel(ex * ex + ey * ey)
+                    if l2 > 0 {
+                        let mx: i64 = 0 - ey * hb / l2
+                        let my: i64 = ex * hb / l2
+                        ecke_bogen(bx + nx, by + ny, bx, by, bx + mx, by + my)
+                    }
+                }
+            }
+            k = k + 1
+        }
+        seite = seite + 1
+    }
+    zu()
+}
+
+// -------------------------------------------------------------- BESCHNITT
+
+fn beschnitt_setzen(x0: i64, y0: i64, x1: i64, y1: i64) {
+    b_an = 1
+    b_x0 = x0
+    b_y0 = y0
+    b_x1 = x1
+    b_y1 = y1
+}
+
+fn beschnitt_aus() {
+    b_an = 0
+}
+
+// Den zuletzt gerasterten Pfad als Beschnittmaske uebernehmen. So
+// bekommt der Fensterinhalt die runden Ecken des Rahmens: erst die
+// Rahmenform rastern, dann `beschnitt_pfad`, dann den Inhalt malen.
+fn beschnitt_pfad() {
+    if d_w == 0 || d_h == 0 {
+        return
+    }
+    bp_w = d_w
+    bp_h = d_h
+    bp_x0 = d_x0
+    bp_y0 = d_y0
+    var i: u64 = 0
+    let n: u64 = d_w * d_h
+    while i < n && i < 65536 {
+        bp_tafel[(i) as usize] = deck_tafel[(i) as usize]
+        i = i + 1
+    }
+    bp_an = 1
+}
+
+fn beschnitt_pfad_aus() {
+    bp_an = 0
+}
+
+// --------------------------------------------------------------- VERLAUF
+
+fn verlauf_linear(x0: i64, y0: i64, x1: i64, y1: i64, c0: u64, c1: u64) {
+    v_art = 1
+    v_x0 = x0
+    v_y0 = y0
+    v_x1 = x1
+    v_y1 = y1
+    v_c0 = c0
+    v_c1 = c1
+}
+
+// Radial: Mitte (cx,cy), Radius r.
+fn verlauf_radial(cx: i64, cy: i64, r: i64, c0: u64, c1: u64) {
+    v_art = 2
+    v_x0 = cx
+    v_y0 = cy
+    v_x1 = r
+    v_y1 = 0
+    v_c0 = c0
+    v_c1 = c1
+}
+
+fn verlauf_aus() {
+    v_art = 0
+}
+
+fn kanal(a: u64, b: u64, sh: u64, t: u64) -> u64 {
+    let av: u64 = (a >> sh) & 0xFF
+    let bv: u64 = (b >> sh) & 0xFF
+    return (av * (256 - t) + bv * t) / 256
+}
+
+// Die Farbe an einer Stelle. Ohne Verlauf ist das schlicht `grund`.
+fn verlauf_farbe(x: i64, y: i64, grund: u64) -> u64 {
+    if v_art == 0 {
+        return grund
+    }
+    var t: i64 = 0
+    if v_art == 1 {
+        let dx: i64 = v_x1 - v_x0
+        let dy: i64 = v_y1 - v_y0
+        let ll: i64 = dx * dx + dy * dy
+        if ll == 0 {
+            return v_c0
+        }
+        // Projektion auf die Achse, 0..256.
+        t = ((x * 64 - v_x0) * dx + (y * 64 - v_y0) * dy) * 256 / ll
+    } else {
+        let dx2: i64 = x * 64 - v_x0
+        let dy2: i64 = y * 64 - v_y0
+        let d: i64 = wurzel(dx2 * dx2 + dy2 * dy2)
+        if v_x1 <= 0 {
+            return v_c0
+        }
+        t = d * 256 / v_x1
+    }
+    if t < 0 {
+        t = 0
+    }
+    if t > 256 {
+        t = 256
+    }
+    let tu: u64 = t as u64
+    return (kanal(v_c0, v_c1, 16, tu) << 16)
+        | (kanal(v_c0, v_c1, 8, tu) << 8)
+        | kanal(v_c0, v_c1, 0, tu)
+}
+
+// -------------------------------------------------------- ZWISCHENSPEICHER
+//
+// Gleiche Form + gleiche Groesse nur einmal rastern. Der Fensterserver
+// malt in jedem Bild dieselben Knoepfe, denselben Reglergriff, dieselben
+// vier Fensterecken -- ohne diesen Speicher waere der Umbau langsamer
+// als das, was er ersetzt.
+
+fn cache_treffer() -> u64 {
+    return c_treffer
+}
+
+fn cache_fehler() -> u64 {
+    return c_fehler
+}
+
+fn cache_leeren() {
+    var i: u64 = 0
+    while i < CACHE_N {
+        c_gut[(i) as usize] = 0
+        i = i + 1
+    }
+}
+
+// Einen Eintrag suchen. Bei Treffer wird die Deckungstafel in
+// `deck_tafel` gelegt, als waere gerade gerastert worden.
+fn cache_suchen(key: u64, w: u64, h: u64, x0: i64, y0: i64) -> u64 {
+    var i: u64 = 0
+    while i < CACHE_N {
+        if c_gut[(i) as usize] == 1 && c_key[(i) as usize] == key
+            && c_w[(i) as usize] == w && c_h[(i) as usize] == h {
+            let n: u64 = w * h
+            if n <= CACHE_PX {
+                var j: u64 = 0
+                while j < n {
+                    deck_tafel[(j) as usize] =
+                        c_daten[((i * CACHE_PX + j)) as usize]
+                    j = j + 1
+                }
+                d_w = w
+                d_h = h
+                d_x0 = x0
+                d_y0 = y0
+                c_uhr = c_uhr + 1
+                c_alter[(i) as usize] = c_uhr
+                c_treffer = c_treffer + 1
+                return 1
+            }
+        }
+        i = i + 1
+    }
+    c_fehler = c_fehler + 1
+    return 0
+}
+
+// Die zuletzt gerasterte Form ablegen. Ist kein Platz, fliegt der
+// aelteste Eintrag.
+fn cache_ablegen(key: u64) {
+    if d_w == 0 || d_h == 0 {
+        return
+    }
+    let n: u64 = d_w * d_h
+    if n > CACHE_PX {
+        return
+    }
+    var frei: u64 = CACHE_N
+    var i: u64 = 0
+    while i < CACHE_N {
+        if c_gut[(i) as usize] == 0 {
+            frei = i
+            i = CACHE_N
+        } else {
+            i = i + 1
+        }
+    }
+    if frei == CACHE_N {
+        var aelt: u64 = 0
+        var alter: u64 = c_alter[(0) as usize]
+        i = 1
+        while i < CACHE_N {
+            if c_alter[(i) as usize] < alter {
+                alter = c_alter[(i) as usize]
+                aelt = i
+            }
+            i = i + 1
+        }
+        frei = aelt
+    }
+    var j: u64 = 0
+    while j < n {
+        c_daten[((frei * CACHE_PX + j)) as usize] = deck_tafel[(j) as usize]
+        j = j + 1
+    }
+    c_key[(frei) as usize] = key
+    c_w[(frei) as usize] = d_w
+    c_h[(frei) as usize] = d_h
+    c_gut[(frei) as usize] = 1
+    c_uhr = c_uhr + 1
+    c_alter[(frei) as usize] = c_uhr
+}
