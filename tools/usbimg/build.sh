@@ -148,8 +148,27 @@ sagen "kern        $(stat -c%s "$OUT/osum.mb") Oktette"
 # die drei Programme sonst einfach nicht im Abbild, und erst die
 # Pflichtliste in Abschnitt 5 faellt darueber ("FEHLT IM ABBILD:
 # /bin/schreibtisch").
+# ================================================ RUNDE ECHTHARDWARE-5
+# `taskmgr` MUSSTE HIER STEHEN, UND ER STAND NICHT DA.
+#
+# Justins Befund F: "Taskmanager und Einstellungen lassen sich nicht
+# oeffnen, die Knoepfe im Kontrollzentrum reagieren nicht."
+#
+# NACHGEWIESEN, nicht vermutet: die Wurzelpartition des ausgelieferten
+# Abbildes orientos-usb-20260910-44a5af3.img, ausgelesen mit
+#
+#     python3 tools/osum/mkfs.py list <wurzel.img>
+#
+# hat 177 Inoden und darunter KEIN /bin/taskmgr. Das Kontrollzentrum
+# startet aber genau diesen Pfad (kernel/user/qs.fi, `p_taskmgr`).
+# Ein Knopf, dessen Programm nicht auf der Platte liegt, kann nicht
+# reagieren -- und weil `SYS_EXEC` still fehlschlaegt, sah es aus, als
+# waere der Knopf kaputt.
+#
+# `/bin/settings` LAG im Abbild; der Einstellungsknopf hat deshalb eine
+# andere Ursache und wird getrennt behandelt.
 PROGS=${PROGS:-"desktop taskbar settings launcher explorer netview \
-widgetdemo locate edit sh echo ls cat ps uname date df mkdir rm cp mv \
+widgetdemo taskmgr locate edit sh echo ls cat ps uname date df mkdir rm cp mv \
 grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
 dhcp host ota jsig jarvisctl pollbr reboot shutdown power fas"}
