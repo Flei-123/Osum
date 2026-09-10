@@ -75,6 +75,7 @@ import ps2m
 import time // RUNDE ALLTAG: der Leerlaufzaehler der Sperre
 import arch.arch
 import tile
+import zeiger
 import audio
 
 export {
@@ -364,6 +365,18 @@ const S_WORK_H: u64 = 0x158
 const S_NOSTRUT: u64 = 0x160 // COUNTER-TEST: ignore every strut
 const S_STRUTS: u64 = 0x168 // how often a strut was declared or cleared
 const S_WORKCALC: u64 = 0x170 // how often the work area was recomputed
+// ============================================ RUNDE ECHTHARDWARE-4
+// WELCHE FORM DIE ANWENDUNG WOLLTE.
+//
+// Ab dieser Runde setzt der Server selbst eine Form, sobald der Zeiger
+// ueber einem Fensterrand steht (Doppelpfeil), und nimmt sie zurueck,
+// sobald er ihn verlaesst. "Zuruecknehmen" heisst aber nicht "Pfeil":
+// eine Anwendung, die ueber ihrem Textfeld die Textmarke gesetzt hat
+// (`wig.set_shape` aus Ring 3), bekaeme sonst bei jeder Mausbewegung
+// den Pfeil zurueck und die Marke waere nie zu sehen. Also stehen die
+// beiden Wuensche NEBENEINANDER: was die Anwendung will, und was der
+// Rand gerade verlangt.
+const S_SHAPE_APP: u64 = 0x178
 // RUNDE TILING. Die Skalare des Kachelbetriebs. Sie lagen bei 0x120,
 // wo die Runden DESKTOP und TASKLEISTE zusammen schon elf Woerter
 // stehen haben -- zwei Runden auf denselben Adressen. Sie zogen
@@ -486,6 +499,28 @@ const S_KEYIN: u64 = 0x270 // Tasten, die der Fensterserver annahm
 // RECHNUNG neben der Konstante und nicht als Zahl im Kommentar.
 const S_DECO: u64 = 0x180 // DECO_SLOTS Woerter
 const S_DECON: u64 = 0x1D8 // wie oft ein Wert gesetzt wurde
+// ============================================ RUNDE ECHTHARDWARE-4
+// WER DEN FOKUS VORHER HATTE.
+//
+// GEMESSEN an menue-2560/serial.txt dieser Runde:
+//     wm: fokus id=11 vor=7      <- das Startmenue bekommt ihn
+//     taskbar: startmenue auf
+//     wm: fokus id=12 vor=11     <- eine INFOBLASE bekommt ihn
+//     wm: fokus id=7 vor=0       <- die Blase geht, und er faellt
+//                                   auf das Anwendungsfenster
+//     key: ^[                    <- Escape geht ins Leere
+//
+// Eine Blase ("Start", `wlib.tip_win_open`) wird als gewoehnliches
+// Fenster angelegt und bekommt dabei den Fokus; ERST DANACH setzt sie
+// ihre Ebene auf L_TIP, und `set_layer` gibt den Fokus dann an
+// `top_visible` -- das ist das oberste NORMALE Fenster und nicht das,
+// das ihn vorher hatte. Das Startmenue war ihn damit los, ohne dass
+// jemand es angeklickt haette, und Escape kam nie bei ihm an.
+//
+// Also merkt sich der Server, wer ihn zuletzt hatte, und gibt ihn
+// DORTHIN zurueck. Das ist dieselbe Regel, die jedes Fenstersystem
+// fuer transiente Fenster hat.
+const S_FOCUS_PREV: u64 = 0x1E0
 const DECO_SLOTS: u64 = 11
 
 // ==================================================== RUNDE PAINT
@@ -2815,9 +2850,19 @@ fn set_layer(state: u64, i: u64, l: u64) {
     if l != L_NORMAL && focus(state) == i
         && (wg(state, i, W_FLAGS) & F_KEYS) == 0 {
         ss(state, S_FOCUS, 0)
-        let o: u64 = top_visible(state)
-        if o < MAX_WIN {
-            set_focus(state, o)
+        // RUNDE ECHTHARDWARE-4: ZURUECK ZU DEM, DER IHN HATTE.
+        // Der Grund steht bei S_FOCUS_PREV. `top_visible` bleibt der
+        // zweite Weg -- fuer den Fall, dass der Vorbesitzer inzwischen
+        // weg oder verborgen ist.
+        let vor: u64 = gs(state, S_FOCUS_PREV)
+        if vor != 0 && vor - 1 != i && valid(state, vor - 1)
+            && (wg(state, vor - 1, W_FLAGS) & F_HIDDEN) == 0 {
+            set_focus(state, vor - 1)
+        } else {
+            let o: u64 = top_visible(state)
+            if o < MAX_WIN {
+                set_focus(state, o)
+            }
         }
     }
     raise_win(state, i)
@@ -3273,6 +3318,9 @@ fn set_focus(state: u64, i: u64) {
         damage_win(state, alt)
         ev_push(state, alt, E_FOCUS, 0, 0, 0)
     }
+    if alt < MAX_WIN {
+        ss(state, S_FOCUS_PREV, alt + 1)
+    }
     ss(state, S_FOCUS, i + 1)
     // ================================================ RUNDE TUERSCHLOSS
     //
@@ -3677,12 +3725,34 @@ const CUR_H: u64 = 18
 // nicht tat. Jetzt wird jeder Bildpunkt der Maske zu einem Block von
 // `uisc` mal `uisc` -- auf 1280x800 (uisc=1) aendert sich damit KEIN
 // einziges Bildpunkt, und das ist die Gegenprobe.
+// ============================================ RUNDE ECHTHARDWARE-4
+// DIE GROESSE KOMMT AUS `zeiger.fi`, UND SIE IST QUADRATISCH.
+//
+// Bis hierher war der Zeiger 12 mal 18 Bildpunkte mal Vervielfachung.
+// Die neun Formen (Pfeil, Textmarke, Hand, zwei Balken, zwei
+// Diagonalen, Kreuz, Sanduhr) passen nicht alle in ein hohes Rechteck
+// -- der Doppelpfeil ist breiter als hoch --, also ist das Feld
+// quadratisch: 24 Bildpunkte bei Vervielfachung 1, 48 bei 2. Justins
+// Vorgabe war "rund 24 bei 1, 48 bei 2", und das ist sie.
 fn cur_w(state: u64) -> u64 {
-    return CUR_W * uisc(state)
+    return zeiger.groesse(uisc(state))
 }
 
 fn cur_h(state: u64) -> u64 {
-    return CUR_H * uisc(state)
+    return zeiger.groesse(uisc(state))
+}
+
+// DER GRIFFPUNKT. Die Mausposition ist die SPITZE des Pfeils und die
+// MITTE der Textmarke -- ein Zeiger, dessen Griff immer in der linken
+// oberen Ecke laege, klickte bei jeder anderen Form daneben. Diese
+// beiden Zahlen sagen, um wieviel das Bild gegen die Position versetzt
+// gemalt wird, und die Schadensrechnung nimmt dieselben.
+fn cur_ox(state: u64) -> u64 {
+    return zeiger.griff_x(gs(state, S_SHAPE), cur_w(state))
+}
+
+fn cur_oy(state: u64) -> u64 {
+    return zeiger.griff_y(gs(state, S_SHAPE), cur_h(state))
 }
 
 fn cursor_row(r: u64, fuell: bool) -> u64 {
@@ -3765,11 +3835,10 @@ fn shape(state: u64) -> u64 {
     return gs(state, S_SHAPE)
 }
 
-// Das Bild wechseln und die STELLE schmutzig machen, an der der Zeiger
-// gerade steht -- sonst steht das alte Bild dort, bis sich die Maus
-// bewegt.
-fn set_shape(state: u64, s: u64) {
-    if s > 1 || !ready(state) {
+// DIESELBE UMSCHALTUNG, ABER OHNE DEN WUNSCH DER ANWENDUNG ZU
+// UEBERSCHREIBEN. Nur der Server ruft das -- fuer die Raender.
+fn shape_intern(state: u64, s: u64) {
+    if s >= zeiger.FORMEN || !ready(state) {
         return
     }
     if gs(state, S_SHAPE) == s {
@@ -3778,7 +3847,79 @@ fn set_shape(state: u64, s: u64) {
     ss(state, S_SHAPE, s)
     let mx: i64 = gs(state, S_CURX) as i64
     let my: i64 = gs(state, S_CURY) as i64
-    damage(state, mx, my, mx + cur_w(state) as i64, my + cur_h(state) as i64)
+    let gw: i64 = cur_w(state) as i64
+    damage(state, mx - gw, my - gw, mx + gw, my + gw)
+}
+
+// ============================================ RUNDE ECHTHARDWARE-4
+// DER ZEIGER SAGT, WAS DER RAND KANN.
+//
+// Seit ECHTHARDWARE-3 ist der GANZE rechte und untere Rand eines
+// Fensters ein Griff zum Groessenaendern (vorher waren es zwoelf
+// Bildpunkte in einer Ecke). Ein Griff, den man nicht SIEHT, ist
+// trotzdem einer, den man nicht findet -- deshalb wechselt der Zeiger
+// dort jetzt die Form, genau wie bei jedem anderen System:
+//
+//   rechte Kante        Doppelpfeil waagrecht
+//   untere Kante        Doppelpfeil senkrecht
+//   die Ecke dazwischen Doppelpfeil diagonal NW-SO
+//   sonst               was die Anwendung wollte
+//
+// Waehrend gezogen oder in der Groesse geaendert wird, bleibt die Form
+// stehen: der Zeiger laeuft dabei aus dem Randstreifen heraus, und ein
+// Zeiger, der mitten im Ziehen die Form wechselt, flackert.
+fn rand_zeiger(state: u64, i: u64, x: i64, y: i64) {
+    if gs(state, S_DRAG) != 0 || gs(state, S_SIZING) != 0 {
+        return
+    }
+    var will: u64 = gs(state, S_SHAPE_APP)
+    if i < MAX_WIN && valid(state, i) && deko(state, i) {
+        let lx: i64 = x - win_x(state, i) - inx(state, i) as i64
+        let ly: i64 = y - win_y(state, i) - iny(state, i) as i64
+        let rand: i64 = grip(state) as i64
+        let rechts: bool = lx >= wg(state, i, W_W) as i64 - rand
+            && lx <= wg(state, i, W_W) as i64
+        let unten: bool = ly >= wg(state, i, W_H) as i64 - rand
+            && ly <= wg(state, i, W_H) as i64
+        if lx >= 0 && ly >= 0 {
+            if rechts && unten {
+                will = zeiger.F_DIAG1
+            } else if rechts {
+                will = zeiger.F_BREITE
+            } else if unten {
+                will = zeiger.F_HOEHE
+            }
+        }
+    }
+    shape_intern(state, will)
+}
+
+// Das Bild wechseln und die STELLE schmutzig machen, an der der Zeiger
+// gerade steht -- sonst steht das alte Bild dort, bis sich die Maus
+// bewegt.
+fn set_shape(state: u64, s: u64) {
+    // RUNDE ECHTHARDWARE-4: neun Formen. Hier stand `s > 1`, und
+    // damit war jede Form ausser Pfeil und Textmarke unerreichbar --
+    // auch dann, wenn ein Programm sie gesetzt haette.
+    if s >= zeiger.FORMEN || !ready(state) {
+        return
+    }
+    // Der Wunsch wird IMMER vermerkt, auch wenn das Bild gerade
+    // ohnehin dieses ist: sonst faellt der Zeiger beim Verlassen des
+    // Fensterrandes auf einen veralteten Wunsch zurueck.
+    ss(state, S_SHAPE_APP, s)
+    if gs(state, S_SHAPE) == s {
+        return
+    }
+    ss(state, S_SHAPE, s)
+    let mx: i64 = gs(state, S_CURX) as i64
+    let my: i64 = gs(state, S_CURY) as i64
+    // Beide Formen schmutzig machen -- die alte steht noch da, und
+    // die neue kann groesser sein oder einen anderen Griffpunkt haben.
+    // Also das groesste Rechteck: Position minus voller Zeiger, plus
+    // voller Zeiger.
+    let gw: i64 = cur_w(state) as i64
+    damage(state, mx - gw, my - gw, mx + gw, my + gw)
 }
 
 // ================== RUNDE VSYNC: BEWEGUNG, BILDGRENZE, SIGNATUR
@@ -5596,27 +5737,55 @@ fn messleiste(state: u64, p: u64, n: u64) {
 }
 
 fn paint_cursor(state: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
-    let mx: i64 = gs(state, S_CURX) as i64
-    let my: i64 = gs(state, S_CURY) as i64
-    let schwarz: u64 = rgb24(state, CURSOR_EDGE)
-    let weiss: u64 = rgb24(state, CURSOR_BODY)
-    let k: u64 = uisc(state)
+    // ======================================== RUNDE ECHTHARDWARE-4
+    // DREI LAGEN MIT DECKUNG STATT ZWEI BITMASKEN.
+    //
+    // Vorher: je Bildpunkt ein Bit Fuellung und ein Bit Umriss, jedes
+    // Bit bei Vervielfachung 2 zu einem 2x2-Block aufgeblasen. Kein
+    // Zwischenwert, also keine Kantenglaettung -- und bei doppelter
+    // Vervielfachung doppelt so grobe Treppen.
+    //
+    // Jetzt liefert `zeiger.fi` je Bildpunkt DREI Deckungen (Kern,
+    // Rand, Schatten), gerastert in Zielgroesse mit neun Proben. Sie
+    // werden von hinten nach vorn ueber das fertige Bild gelegt:
+    //   Schatten, schwarz und schwach -- er hebt den Zeiger ab,
+    //   Rand, weiss -- damit er auf dunklem Grund sichtbar bleibt,
+    //   Kern, dunkel -- damit er auf hellem Grund sichtbar bleibt.
+    let form: u64 = gs(state, S_SHAPE)
+    let g: u64 = cur_w(state)
+    zeiger.karte_bauen(form, g)
+    let mx: i64 = gs(state, S_CURX) as i64 - cur_ox(state) as i64
+    let my: i64 = gs(state, S_CURY) as i64 - cur_oy(state) as i64
+    let dunkel: u64 = rgb24(state, CURSOR_EDGE)
+    let hell: u64 = rgb24(state, CURSOR_BODY)
+    let schwarz: u64 = rgb24(state, 0)
     var r: u64 = 0
-    while r < CUR_H * k {
+    while r < g {
         let py: i64 = my + r as i64
         if py >= cy0 as i64 && py < cy1 as i64 {
-            let u: u64 = cursor_row_of(gs(state, S_SHAPE), r / k, false)
-            let f: u64 = cursor_row_of(gs(state, S_SHAPE), r / k, true)
             var c: u64 = 0
-            while c < CUR_W * k {
+            while c < g {
                 let pxx: i64 = mx + c as i64
-                if pxx >= cx0 as i64 && pxx < cx1 as i64 {
-                    let bit: u64 = 1 << (11 - c / k)
-                    if (f & bit) != 0 {
-                        fb.pixel(state, pxx as u64, py as u64, weiss)
-                    } else {
-                        if (u & bit) != 0 {
-                            fb.pixel(state, pxx as u64, py as u64, schwarz)
+                if pxx >= cx0 as i64 && pxx < cx1 as i64 && pxx >= 0 {
+                    let v: u64 = zeiger.deck(g, c, r)
+                    if v != 0 {
+                        let ak: u64 = (v >> 16) & 255
+                        let ar: u64 = (v >> 8) & 255
+                        let asch: u64 = v & 255
+                        // Der Schatten deckt hoechstens zu einem
+                        // Drittel. Mehr sieht nach Rand aus, und dann
+                        // haette der Zeiger zwei davon.
+                        if asch != 0 && ak == 0 && ar == 0 {
+                            fb.pixel_a(state, pxx as u64, py as u64,
+                                schwarz, asch * 90 / 255)
+                        }
+                        if ar != 0 {
+                            fb.pixel_a(state, pxx as u64, py as u64,
+                                hell, ar)
+                        }
+                        if ak != 0 {
+                            fb.pixel_a(state, pxx as u64, py as u64,
+                                dunkel, ak)
                         }
                     }
                 }
@@ -5843,12 +6012,19 @@ fn on_mouse(state: u64) {
         // dort den Hintergrund und die Fenster neu und danach den
         // Zeiger. Ein gerettetes Rechteck waere der zweite Weg dahin
         // und muesste bei jedem Fensterwechsel nachgezogen werden.
-        damage(state, ox as i64, oy as i64, (ox + cur_w(state)) as i64,
-            (oy + cur_h(state)) as i64)
+        // RUNDE ECHTHARDWARE-4: der Griffpunkt gehoert in beide
+        // Rechtecke. Ohne ihn bliebe bei jeder Form ausser dem Pfeil
+        // ein Streifen des alten Bildes stehen -- genau die "Spuren",
+        // nach denen Justin gefragt hat.
+        let gx: u64 = cur_ox(state)
+        let gy: u64 = cur_oy(state)
+        let gw: u64 = cur_w(state)
+        damage(state, ox as i64 - gx as i64, oy as i64 - gy as i64,
+            (ox + gw) as i64 - gx as i64, (oy + gw) as i64 - gy as i64)
         ss(state, S_CURX, nx)
         ss(state, S_CURY, ny)
-        damage(state, nx as i64, ny as i64, (nx + cur_w(state)) as i64,
-            (ny + cur_h(state)) as i64)
+        damage(state, nx as i64 - gx as i64, ny as i64 - gy as i64,
+            (nx + gw) as i64 - gx as i64, (ny + gw) as i64 - gy as i64)
     }
     let x: i64 = nx as i64
     let y: i64 = ny as i64
@@ -5899,6 +6075,11 @@ fn on_mouse(state: u64) {
     // Schliessen-Knopf rot, nachdem der Zeiger das Fenster verlassen
     // hat.
     cap_track(state, i, x, y)
+    // RUNDE ECHTHARDWARE-4: die Form des Zeigers folgt dem, worueber
+    // er steht. Der Aufruf steht VOR dem Ausstieg fuer "kein Fenster
+    // getroffen" -- sonst bliebe der Doppelpfeil stehen, wenn man vom
+    // Fensterrand auf den Schreibtisch faehrt.
+    rand_zeiger(state, i, x, y)
     if i >= MAX_WIN {
         return
     }
@@ -7096,6 +7277,22 @@ fn kachelbar(state: u64, i: u64) -> bool {
         return false
     }
     if wg(state, i, W_STRUT) != 0 {
+        return false
+    }
+    // ==================================== RUNDE ECHTHARDWARE-4
+    // EIN FENSTER OHNE SCHMUCK IST KEINE KACHEL.
+    //
+    // Justins Wort zum Kachelbetrieb war "Muell", und einer der
+    // Gruende steht hier: `F_NODECO` traegt alles, was KEIN
+    // gewoehnliches Fenster ist -- das Startmenue, ein Klappmenue,
+    // eine Blase, ein rahmenloser Dialog. Ebene und Kantenreservierung
+    // haben Schreibtisch und Leiste schon herausgehalten; das
+    // Startmenue liegt aber auf der normalen Ebene und reserviert
+    // nichts, also WAERE es gekachelt worden. Ein Startmenue, das
+    // beim Aufgehen die Fenster daneben umsortiert, ist genau die Art
+    // Automatismus, die in dieser Runde ausdruecklich nicht mehr
+    // vorkommen darf.
+    if (wg(state, i, W_FLAGS) & F_NODECO) != 0 {
         return false
     }
     return (wg(state, i, W_FLAGS) & F_HIDDEN) == 0

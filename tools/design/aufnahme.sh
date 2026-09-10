@@ -80,12 +80,25 @@ lang=en
 # "wie das Schema es selbst sagt".
 dark_scheme=""
 accent=""
+# ============================================ RUNDE ECHTHARDWARE-4
+# `uiscale=<n>` -- DIE VERVIELFACHUNG DER OBERFLAECHE.
+#
+# GEMESSEN AN DEN BELEGEN AUS ECHTHARDWARE-3 (Justin, 09.09.2026):
+# in hell-2560/01-schreibtisch.png ist die Leiste 39 Bildpunkte
+# hoch. Bei uiscale 2 muesste sie rund 80 sein. Der Ordner hiess
+# "2560", der Lauf war aber Vervielfachung 1 -- weil dieses Skript
+# `uiscale=` NIE auf die Kommandozeile geschrieben hat und der Kern
+# ohne EDID-Groesse bei 1 bleibt (fb.uiscale: v == 0 -> 1).
+# Ein Ordnername ist keine Messung. Ab hier steht das Wort auf der
+# Kommandozeile, und die Leistenhoehe im Bild belegt es.
+uiscale=""
 progs="desktop taskbar settings launcher explorer edit sh echo ls cat theme"
 for a in "$@"; do
     case "$a" in
         shape=*) shape=${a#*=} ;;
         lang=*) lang=${a#*=} ;;
         dark_scheme=*) dark_scheme=${a#*=} ;;
+        uiscale=*) uiscale=${a#*=} ;;
         accent=*) accent=${a#*=} ;;
         scheme=*) scheme=${a#*=} ;;
         mode=*) mode=${a#*=} ;;
@@ -102,6 +115,9 @@ for a in "$@"; do
 done
 XRES=${res%x*}
 YRES=${res#*x}
+SKAL=""
+if [ -n "$uiscale" ]; then SKAL="uiscale=$uiscale"; fi
+echo "uiscale ${uiscale:-1 (Vorgabe)}"
 
 mkdir -p "$OUT"
 BUILDD=${DESIGNBUILD:-/tmp/osum-designbuild-$(pwd | md5sum | cut -c1-12)}
@@ -362,7 +378,7 @@ if [ "$accel" = kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
     ACC=(-accel kvm -cpu host)
 fi
 timeout 600 qemu-system-x86_64 "${ACC[@]}" -kernel "$BUILDD/k0.mb" -m 512 \
-    -append "gfx fbres=${XRES}x${YRES} wm desk wmhold wighalt=$halt nokbd nosched noproc nofs lang=$lang $extra" \
+    -append "gfx fbres=${XRES}x${YRES} wm desk wmhold wighalt=$halt nokbd nosched noproc nofs lang=$lang $SKAL $extra" \
     -serial "file:$OUT/serial.txt" -display none -no-reboot \
     -device "VGA,edid=on,xres=$XRES,yres=$YRES,vgamem_mb=32" \
     -monitor "unix:$SOCK,server,nowait" \
