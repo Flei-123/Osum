@@ -125,7 +125,7 @@ echo "== 2. Osum faehrt und spricht mit store.fleitec.com =="
 # QEMUs Benutzernetz ist NAT -- dieselbe Lage wie bei Justin: der Gast
 # kommt hinaus, von aussen kommt niemand herein.
 timeout 300 qemu-system-x86_64 -kernel "$W/k0.mb" -m 512 \
-    -append "osum nokbd nosched noproc nofs modfs nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp script=dhcp;jarvisd -v -1" \
+    -append "osum nokbd nosched noproc nofs modfs nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp script=dhcp;sleep 8" \
     -serial "file:$W/serial.txt" -display none -no-reboot \
     -drive "file=$W/probe.img,format=raw,if=ide,index=0" \
     -netdev user,id=n0 -device e1000,netdev=n0 \
