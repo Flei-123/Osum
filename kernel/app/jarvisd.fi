@@ -221,6 +221,19 @@ const SI_WIDTH: i64 = 1
 const SI_HEIGHT: i64 = 2
 const SI_ROWBYTES: i64 = 3
 const SI_CHUNKROWS: i64 = 5
+
+// RUNDE BRUECKE: die eingespeiste Eingabe (kernel/sys.fi, 1843).
+//
+// 1843 UND NICHT 1842, und das ist nachgeschlagen und nicht geraten:
+// `tools/kernel/syscalls.py --frei 1840 1844 --zweige` meldete
+// "frei: 1843 1844" -- 1842 ist in einem anderen Zweig vergeben.
+const S_TIPP: i64 = 1843
+
+const TI_ARM: i64 = 1
+const TI_DROP: i64 = 2
+const TI_KEY: i64 = 3
+const TI_MOVE: i64 = 4
+const TI_BUTTON: i64 = 5
 const S_HNDRIGHTS: i64 = 2202
 const S_HNDDUP: i64 = 2208
 
@@ -271,6 +284,8 @@ static mut k_schein: [u8; 128] = [0; 128]
 static mut k_befehle: bool = false
 static mut k_foto: bool = false
 static mut k_system: bool = false
+// RUNDE BRUECKE: darf von aussen getippt werden?
+static mut k_tipp: bool = false
 static mut k_max_ausgabe: usize = 65536
 static mut k_max_datei: usize = 262144
 
@@ -604,6 +619,7 @@ fn konf_lesen() -> bool {
     var s_aufl: [u8; 11] = "auflisten\0\0"
     var s_foto: [u8; 15] = "bildschirmfoto\0"
     var s_sys: [u8; 11] = "systeminfo\0"
+    var s_tipp: [u8; 8] = "eingabe\0"
     var s_maxa: [u8; 12] = "max_ausgabe\0"
     var s_maxd: [u8; 10] = "max_datei\0"
     var s_prot: [u8; 10] = "protokoll\0"
@@ -678,6 +694,8 @@ fn konf_lesen() -> bool {
                     k_foto = ja_ist(wp, wl)
                 } else if ist(sp, sl, (&s_sys[0]) as u64) {
                     k_system = ja_ist(wp, wl)
+                } else if ist(sp, sl, (&s_tipp[0]) as u64) {
+                    k_tipp = ja_ist(wp, wl)
                 } else if ist(sp, sl, (&s_maxa[0]) as u64) {
                     k_max_ausgabe = zahl_von(wp, wl) as usize
                 } else if ist(sp, sl, (&s_maxd[0]) as u64) {
@@ -1520,6 +1538,75 @@ fn foto_ueber_kern(aus: *mut rt.Buf) -> bool {
     return true
 }
 
+// ====================================================================
+// RUNDE BRUECKE: EINGABE EINSPEISEN
+// ====================================================================
+//
+// Der Auftrag traegt eine Zeichenkette, weil das Zeilenprotokoll
+// Zeichenketten traegt. Sie sieht so aus:
+//
+//     taste <code> <mods>      eine Taste, Code und Modifikatoren
+//     maus <x> <y>             den Zeiger dorthin setzen
+//     knopf <maske> <ab>       1=links 2=rechts 4=mitte, ab: 1 oder 0
+//
+// DER SCHEIN WIRD HIER GEHOLT UND HIER ZURUECKGEGEBEN, je Auftrag.
+// Das ist enger als noetig -- der Kern gibt zwei Minuten -- und
+// trotzdem richtig: ein Schein, der laenger lebt als der Auftrag, der
+// ihn gebraucht hat, ist ein offenes Fenster. Der Kern deckelt
+// zusaetzlich die Zahl der Anschlaege je Schein (MAX_ANSCHLAEGE),
+// damit auch ein Fehler hier keinen Tippautomaten ergibt.
+fn tue_tipp(p: u64, n: usize, aus: *mut rt.Buf) -> bool {
+    if !k_tipp {
+        return ablehnen(aus, "`eingabe = nein` in /etc/jarvis/rechte.conf")
+    }
+    // Gibt es den Aufruf ueberhaupt? Ein Kern mit `--ohne-bruecke`
+    // hat ihn NICHT, und das ist keine Ablehnung, sondern eine
+    // Abwesenheit -- der Unterschied gehoert in die Antwort.
+    let schein: i64 = syscall(S_TIPP, TI_ARM, 0, 0, 0, 0, 0)
+    if schein < 0 {
+        return ablehnen(aus, "dieser Kern hat den Eingabe-Aufruf nicht (gebaut mit --ohne-bruecke) oder die Leiste laeuft nicht")
+    }
+    var f: Felder = Felder { off: [0; 10], len: [0; 10], n: 0 }
+    zerlege(p, n, &f)
+    if f.n < 2 {
+        syscall(S_TIPP, TI_DROP, 0, 0, 0, 0, 0)
+        return ablehnen(aus, "eingabe braucht: taste <code> <mods> | maus <x> <y> | knopf <maske> <ab>")
+    }
+    var w_taste: [u8; 6] = "taste\0"
+    var w_maus: [u8; 5] = "maus\0"
+    var w_knopf: [u8; 6] = "knopf\0"
+    let wp: u64 = p + f.off[0] as u64
+    let wn: usize = f.len[0]
+    var a: u64 = 0
+    var b: u64 = 0
+    if f.n >= 2 {
+        a = zahl_von(p + f.off[1] as u64, f.len[1])
+    }
+    if f.n >= 3 {
+        b = zahl_von(p + f.off[2] as u64, f.len[2])
+    }
+    var erg: i64 = -1
+    if ist(wp, wn, (&w_taste[0]) as u64) {
+        erg = syscall(S_TIPP, TI_KEY, a as i64, b as i64, 0, 0, 0)
+    } else if ist(wp, wn, (&w_maus[0]) as u64) {
+        erg = syscall(S_TIPP, TI_MOVE, a as i64, b as i64, 0, 0, 0)
+    } else if ist(wp, wn, (&w_knopf[0]) as u64) {
+        erg = syscall(S_TIPP, TI_BUTTON, a as i64, b as i64, 0, 0, 0)
+    } else {
+        syscall(S_TIPP, TI_DROP, 0, 0, 0, 0, 0)
+        return ablehnen(aus, "unbekannte Eingabeart -- taste, maus oder knopf")
+    }
+    // DEN SCHEIN IMMER ZURUECKGEBEN, auch wenn es schiefging.
+    syscall(S_TIPP, TI_DROP, 0, 0, 0, 0, 0)
+    if erg < 0 {
+        return ablehnen(aus, "der Kern hat die Eingabe abgelehnt")
+    }
+    var s_ok: [u8; 12] = "eingespeist\0"
+    rt.buf_push_bytes(aus, (&s_ok[0]) as u64, 11)
+    rt.buf_push(aus, 10 as u8)
+    return true
+}
+
 fn tue_foto(aus: *mut rt.Buf) -> bool {
     if !k_foto {
         return ablehnen(aus, "`bildschirmfoto = nein` in /etc/jarvis/rechte.conf")
@@ -2010,6 +2097,7 @@ fn bediene(d: *mut Draht) -> bool {
         var w_list: [u8; 6] = "liste\0"
         var w_bef: [u8; 7] = "befehl\0"
         var w_foto: [u8; 5] = "foto\0"
+        var w_tipp: [u8; 8] = "eingabe\0"
         var gut: bool = false
         if ist(artp, artn, (&w_sys[0]) as u64) {
             gut = tue_system(&aus)
@@ -2023,6 +2111,8 @@ fn bediene(d: *mut Draht) -> bool {
             gut = tue_befehl(arg1.ptr, arg1.len, &aus)
         } else if ist(artp, artn, (&w_foto[0]) as u64) {
             gut = tue_foto(&aus)
+        } else if ist(artp, artn, (&w_tipp[0]) as u64) {
+            gut = tue_tipp(arg1.ptr, arg1.len, &aus)
         } else {
             gut = ablehnen(&aus, "unbekannte Auftragsart")
         }
