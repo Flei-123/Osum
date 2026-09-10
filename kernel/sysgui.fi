@@ -47,6 +47,8 @@ import proc
 import ps2m
 import sched
 import shot
+import tipp
+import kbd
 import tile
 import time
 import vmode
@@ -55,7 +57,7 @@ import wm
 
 import sys
 
-export { wm_call, wig_call, tile_call, disp_call, shot_call }
+export { wm_call, wig_call, tile_call, disp_call, shot_call, tipp_call }
 
 
 fn disp_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
@@ -1589,5 +1591,169 @@ fn shot_call(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
         shot.advance(state, rows)
         return n
     }
+    return sys.neg(errno.E_INVAL)
+}
+
+// ====================================================================
+// RUNDE BRUECKE: EINGABE EINSPEISEN
+// ====================================================================
+//
+// Der Zwilling von `shot_call`, und absichtlich daneben: wer die
+// Rechte des Bildschirmfotos aendert, sieht diese hier mit. Zwei
+// Rechtesysteme in zwei Dateien laufen auseinander, und das
+// schwaechere gewinnt.
+//
+// WER EINEN TIPPSCHEIN AUSSTELLEN DARF, ist dieselbe Frage wie beim
+// Foto und bekommt dieselbe Antwort (`shot_may_arm`): die Wurzel oder
+// die Taskleiste. Ein Programm, das tippen will, stellt sich den
+// Schein NICHT selbst aus.
+
+fn tipp_call(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
+    // ZUERST: gibt es die Bruecke in diesem Abbild ueberhaupt? Ein
+    // Kern mit `--ohne-bruecke` sagt hier nein, und zwar mit -ENOSYS
+    // ("den Aufruf gibt es nicht") und nicht mit -EPERM ("du darfst
+    // nicht"). Die Unterscheidung ist der ganze Sinn von
+    // `kernel/tipp-aus.fi`.
+    if !tipp.gebaut() {
+        return sys.neg(errno.E_NOSYS)
+    }
+    // ---- AUSKUNFT. Ohne jedes Recht, mit Absicht: wer von aussen
+    //      tippt, soll sich nicht verstecken koennen. Die Taskleiste
+    //      fragt genau hier, ob sie ihr Zeichen zeigen muss.
+    if what == sys.TI_INFO {
+        if a1 == sys.TQ_ARMED {
+            return tipp.aktiv(state)
+        }
+        if a1 == sys.TQ_ARMPID {
+            if tipp.armed(state) {
+                return tipp.arm_pid(state)
+            }
+            return 0
+        }
+        if a1 == sys.TQ_USED {
+            return kstate.get(state, kstate.TIPP_OFF + 0x18)
+        }
+        if a1 == sys.TQ_TOTAL {
+            return tipp.eingespeist(state)
+        }
+        if a1 == sys.TQ_DENIED {
+            return tipp.denied(state)
+        }
+        if a1 == sys.TQ_ARMS {
+            return tipp.arms(state)
+        }
+        if a1 == sys.TQ_LASTPID {
+            return tipp.last_pid(state)
+        }
+        if a1 == sys.TQ_MAX {
+            return tipp.MAX_ANSCHLAEGE
+        }
+        return sys.neg(errno.E_INVAL)
+    }
+
+    // Ohne Fensterserver gibt es nichts, worin eine Taste landen
+    // koennte. Das hier ist die zweite Haelfte dessen, was
+    // `gfx-aus.fi` sagt -- auch ein GEBAUTER Fensterserver kann noch
+    // ohne Bildschirm dastehen.
+    //
+    // DIE PRUEFUNG STEHT HIER UND NICHT VOR `TI_ARM`, und das ist
+    // gemessen und nicht Geschmack: stand sie davor, bekam ein
+    // `jarvisctl eingabe taste` im Skriptmodus (`wm: skipped`) die
+    // Antwort -ENODEV, und `jarvisctl` sagte dazu "Kein Schein: das
+    // darf nur die Wurzel oder die Taskleiste". Das ist eine FALSCHE
+    // FAEHRTE -- der Schein war nicht das Problem, der Fensterserver
+    // war es. Eine Fehlermeldung, die auf die falsche Ursache zeigt,
+    // kostet mehr Zeit als gar keine.
+    //
+    // Einen SCHEIN darf man deshalb auch ohne Fensterserver holen und
+    // zurueckgeben (das kostet nichts und aendert nichts); nur das
+    // EINSPEISEN selbst braucht ihn wirklich.
+
+    // ---- DEN SCHEIN AUSSTELLEN. Nur Leiste oder Wurzel.
+    if what == sys.TI_ARM {
+        if !shot_may_arm(state, me) {
+            tipp.deny(state)
+            return sys.neg(errno.E_PERM)
+        }
+        tipp.arm(state, me)
+        return 0
+    }
+
+    // ---- IHN ZURUECKGEBEN. Das darf, wer ihn hat -- und die Wurzel,
+    //      damit ein Mensch einen vergessenen Schein wegnehmen kann,
+    //      ohne den Prozess zu suchen.
+    if what == sys.TI_DROP {
+        if tipp.arm_pid(state) == me
+            || sched.tget(state, me, sched.T_EUID) == 0 {
+            tipp.drop(state)
+            return 0
+        }
+        return sys.neg(errno.E_PERM)
+    }
+
+    // ---- AB HIER WIRD WIRKLICH ETWAS EINGESPEIST.
+    //
+    // KEINE PRUEFUNG AUF `wm.ready` MEHR, und das ist gemessen und
+    // nicht nachgelassen. Der erste Entwurf verlangte einen laufenden
+    // Fensterserver, weil eine Taste ja "irgendwohin" muss. Der
+    // Prueflauf hat gezeigt, dass das die falsche Bedingung ist:
+    //
+    //   * `kbd.push_hot` schreibt in den Ring in `K11_OFF`, und den
+    //     legt `kbd.fi` an, nicht `wm.fi`. Er ist da, sobald der Kern
+    //     laeuft.
+    //   * `ps2m.set_pos` schreibt in `MOUSE_OFF`, ebenso.
+    //   * Das Bildschirmfoto (`shot.fi`) braucht `wm` auch nicht --
+    //     `tools/bridge/fotovergleich.sh` faehrt mit `gfx` ohne `wm`
+    //     und bekommt sein PNG.
+    //
+    // Mit der Pruefung antwortete jede Einspeisung im Prueflauf
+    // -ENODEV, und zwar auch dann, wenn Ring und Zeiger bereitstanden.
+    // Was WIRKLICH noetig ist, prueft `gfx-aus.fi`: ohne Grafik gibt
+    // es diesen Aufruf gar nicht.
+    //      Und ab hier gilt der Schein. `may_inject` prueft Frist,
+    //      Prozessnummer und die Zahl der schon verbrauchten
+    //      Anschlaege in einem.
+    if !tipp.may_inject(state, me) {
+        tipp.deny(state)
+        return sys.neg(errno.E_PERM)
+    }
+
+    // EINE TASTE. Sie geht in denselben Ring wie eine echte
+    // (`kbd.push_hot`), damit der Fensterserver keinen Unterschied
+    // sieht -- ein Durchklick, der einen eigenen Weg nimmt, prueft den
+    // falschen.
+    if what == sys.TI_KEY {
+        if a1 > 0xFF || a2 > 0xFF {
+            return sys.neg(errno.E_INVAL)
+        }
+        kbd.push_hot(state, a1, a2)
+        tipp.note(state)
+        return 0
+    }
+
+    // DEN ZEIGER SETZEN. `ps2m.set_pos` klemmt selbst auf den
+    // Bildschirm, also wird hier nicht ein zweites Mal gerechnet.
+    if what == sys.TI_MOVE {
+        ps2m.set_pos(state, a1, a2)
+        tipp.note(state)
+        return 0
+    }
+
+    // EINEN KNOPF. Der Weg ist `usb_packet`, weil er die Knopfmaske
+    // GANZ setzt -- ein "Knopf runter" ohne die anderen beiden waere
+    // ein Loslassen, das niemand wollte.
+    if what == sys.TI_BUTTON {
+        if a1 > 7 {
+            return sys.neg(errno.E_INVAL)
+        }
+        var maske: u64 = 0
+        if a2 != 0 {
+            maske = a1
+        }
+        ps2m.usb_packet(state, maske, 0, 0, 0, false)
+        tipp.note(state)
+        return 0
+    }
+
     return sys.neg(errno.E_INVAL)
 }

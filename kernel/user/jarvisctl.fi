@@ -7,6 +7,10 @@
 //     jarvisctl koppeln <code>       die Erstanmeldung bestaetigen
 //     jarvisctl fotoschein [sek]     EIN Bildschirmfoto erlauben
 //     jarvisctl fotoschein weg       den Schein zuruecknehmen
+//     jarvisctl eingabe              tippt gerade jemand von aussen?
+//     jarvisctl eingabe taste <c> <m>   eine Taste einspeisen (Probe)
+//     jarvisctl eingabe maus <x> <y>    den Zeiger setzen (Probe)
+//     jarvisctl eingabe weg          einen offenen Tippschein wegnehmen
 //
 // ====================================================================
 // WOFUER
@@ -286,6 +290,128 @@ fn tue_schein(sek: u64) -> u64 {
     return 0
 }
 
+// ====================================================================
+// RUNDE BRUECKE: WAS DER MENSCH UEBER DIE EINGESPEISTE EINGABE SIEHT
+// ====================================================================
+//
+// Das ist die Stelle, an der Justin OHNE Netz und OHNE den Server
+// nachsehen kann, ob gerade jemand von aussen auf seiner Tastatur
+// tippt -- und sie ist das Gegenstueck zu dem Zeichen, das die
+// Taskleiste zeigt. Beide fragen dasselbe (`TI_INFO`), damit es keine
+// zwei Wahrheiten gibt.
+//
+// `eingabe taste`/`eingabe maus` sind die PROBE: sie stellen sich
+// selbst einen Schein aus und speisen einen Anschlag ein. Das geht
+// nur als Wurzel oder aus der Leiste -- dieselbe Pruefung wie beim
+// Fotoschein. Der Prueflauf `tools/bruecke/durchklick.sh` benutzt
+// genau diesen Weg, damit er misst, was auch ein Fernauftrag tut.
+
+const S_TIPP: u64 = 1843
+const TI_INFO: u64 = 0
+const TI_ARM: u64 = 1
+const TI_DROP: u64 = 2
+const TI_KEY: u64 = 3
+const TI_MOVE: u64 = 4
+
+const TQ_ARMED: u64 = 0
+const TQ_ARMPID: u64 = 1
+const TQ_TOTAL: u64 = 3
+const TQ_DENIED: u64 = 4
+const TQ_ARMS: u64 = 5
+const TQ_MAX: u64 = 7
+
+fn tue_eingabe(args: u64, argc: u64) -> u64 {
+    // Gibt es den Aufruf ueberhaupt? Ein Kern mit `--ohne-bruecke`
+    // hat ihn NICHT, und das ist etwas anderes als "abgeschaltet".
+    let da: u64 = ulib.sys(S_TIPP, TI_INFO, TQ_ARMED, 0)
+    if ulib.failed(da) {
+        var t0: [u8; 78] = "Dieser Kern hat die Bruecke NICHT (gebaut mit --ohne-bruecke) oder keine GUI.\0"
+        zeig_zeile((&t0[0 as usize]) as u64)
+        return 1
+    }
+    if argc < 3 {
+        var t1: [u8; 30] = "Eingabe von aussen:          \0"
+        zeig((&t1[0 as usize]) as u64)
+        if da != 0 {
+            var tj: [u8; 31] = "JA -- es tippt gerade jemand.\n\0"
+            zeig((&tj[0 as usize]) as u64)
+        } else {
+            var tn: [u8; 22] = "nein, niemand tippt.\n\0"
+            zeig((&tn[0 as usize]) as u64)
+        }
+        var t2: [u8; 22] = "  Anschlaege gesamt: \0"
+        zeig((&t2[0 as usize]) as u64)
+        ulib.sayu(ulib.sys(S_TIPP, TI_INFO, TQ_TOTAL, 0))
+        ulib.nl()
+        var t3: [u8; 22] = "  Scheine bisher:    \0"
+        zeig((&t3[0 as usize]) as u64)
+        ulib.sayu(ulib.sys(S_TIPP, TI_INFO, TQ_ARMS, 0))
+        ulib.nl()
+        var t4: [u8; 22] = "  Abgelehnt:         \0"
+        zeig((&t4[0 as usize]) as u64)
+        ulib.sayu(ulib.sys(S_TIPP, TI_INFO, TQ_DENIED, 0))
+        ulib.nl()
+        var t5: [u8; 29] = "  Hoechstens je Schein:     \0"
+        zeig((&t5[0 as usize]) as u64)
+        ulib.sayu(ulib.sys(S_TIPP, TI_INFO, TQ_MAX, 0))
+        ulib.nl()
+        return 0
+    }
+    let was: u64 = ulib.arg_at(args, 2)
+    var w_weg: [u8; 4] = "weg\0"
+    var w_taste: [u8; 6] = "taste\0"
+    var w_maus: [u8; 5] = "maus\0"
+    if ulib.streq(was, (&w_weg[0 as usize]) as u64) {
+        let r: u64 = ulib.sys(S_TIPP, TI_DROP, 0, 0)
+        if ulib.failed(r) {
+            var te: [u8; 42] = "Der Schein gehoert einem anderen Prozess.\0"
+            ulib.esay_line((&te[0 as usize]) as u64, 0)
+            return 1
+        }
+        var tw: [u8; 28] = "Der Tippschein ist zurueck.\0"
+        zeig_zeile((&tw[0 as usize]) as u64)
+        return 0
+    }
+    // Ab hier wird wirklich etwas eingespeist -- also erst ein Schein.
+    let sch: u64 = ulib.sys(S_TIPP, TI_ARM, 0, 0)
+    if ulib.failed(sch) {
+        // Der Kern unterscheidet zwei Gruende, und dieses Programm
+        // sagt sie auch getrennt -- eine Meldung, die auf die falsche
+        // Ursache zeigt, kostet mehr Zeit als gar keine.
+        var te2: [u8; 58] = "Kein Schein: das darf nur die Wurzel oder die Taskleiste.\0"
+        ulib.esay_line((&te2[0 as usize]) as u64, 0)
+        return 1
+    }
+    var a: u64 = 0
+    var b: u64 = 0
+    if argc > 3 {
+        a = ulib.to_num(ulib.arg_at(args, 3))
+    }
+    if argc > 4 {
+        b = ulib.to_num(ulib.arg_at(args, 4))
+    }
+    var r2: u64 = 0
+    if ulib.streq(was, (&w_taste[0 as usize]) as u64) {
+        r2 = ulib.sys(S_TIPP, TI_KEY, a, b)
+    } else if ulib.streq(was, (&w_maus[0 as usize]) as u64) {
+        r2 = ulib.sys(S_TIPP, TI_MOVE, a, b)
+    } else {
+        ulib.sys(S_TIPP, TI_DROP, 0, 0)
+        var tu: [u8; 41] = "Aufruf: jarvisctl eingabe taste|maus|weg\0"
+        ulib.esay_line((&tu[0 as usize]) as u64, 0)
+        return 2
+    }
+    ulib.sys(S_TIPP, TI_DROP, 0, 0)
+    if ulib.failed(r2) {
+        var te3: [u8; 36] = "Der Kern hat die Eingabe abgelehnt.\0"
+        ulib.esay_line((&te3[0 as usize]) as u64, 0)
+        return 1
+    }
+    var tg: [u8; 12] = "eingespeist\0"
+    zeig_zeile((&tg[0 as usize]) as u64)
+    return 0
+}
+
 fn u_start(args: u64) -> u64 {
     let argc: u64 = ulib.arg_count(args)
     var w_zust: [u8; 8] = "zustand\0"
@@ -294,12 +420,16 @@ fn u_start(args: u64) -> u64 {
     var w_kop: [u8; 8] = "koppeln\0"
     var w_sch: [u8; 11] = "fotoschein\0"
     var w_weg: [u8; 4] = "weg\0"
+    var w_eing: [u8; 8] = "eingabe\0"
     if argc < 2 {
         return tue_zustand()
     }
     let was: u64 = ulib.arg_at(args, 1)
     if ulib.streq(was, (&w_zust[0 as usize]) as u64) {
         return tue_zustand()
+    }
+    if ulib.streq(was, (&w_eing[0 as usize]) as u64) {
+        return tue_eingabe(args, argc)
     }
     if ulib.streq(was, (&w_recht[0 as usize]) as u64) {
         let r: u64 = datei_zeigen((&PFAD_RECHTE[0 as usize]) as u64)

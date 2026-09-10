@@ -10,7 +10,7 @@
 # etwas leicht anderes.
 #
 #   ./tools/build-kernel.sh AUSGABE [--stufe 0|1] [--gui on|off]
-#                                  [--ohne-tunnel]
+#                                  [--ohne-tunnel] [--ohne-bruecke]
 #
 # RUNDE SERVERBUILD: --gui off BAUT OSUM ALS SERVERBETRIEBSSYSTEM.
 # `kernel/fb.fi`, `wm.fi`, `wig.fi`, `font.fi`, `ttf.fi`, `tile.fi`,
@@ -53,6 +53,11 @@ shift
 
 STUFE=0
 OHNE_PS2M=0
+# RUNDE BRUECKE: `--ohne-bruecke` baut den Kern mit `kernel/tipp-aus.fi`
+# statt `kernel/tipp.fi`. Der Aufruf 1843 ist dann nicht abgeschaltet,
+# sondern NICHT VORHANDEN -- der Unterschied zwischen einem Schloss und
+# einer Abwesenheit steht im Kopf von `kernel/tipp-aus.fi`.
+OHNE_BRUECKE=0
 # RUNDE PROTOKOLL: die Symbol- und Zeilentabelle im Abbild.  Vorgabe an;
 # `--ohne-symbole` laesst sie weg (siehe tools/kernel/symtab.py).
 SYMBOLE=on
@@ -81,6 +86,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --ohne-tunnel) TUNNEL=off; shift ;;
         --ohne-ps2m) OHNE_PS2M=1; shift ;;
+        --ohne-bruecke) OHNE_BRUECKE=1; shift ;;
         --ohne-symbole) SYMBOLE=off; shift ;;
         --gui) GUI=$2; shift 2 ;;
         --stufe) STUFE=$2; shift 2 ;;
@@ -178,6 +184,14 @@ if grep -qE 'static mut s_[a-z]+: \[u8; [0-9]+\] = "[^"]*\?' \
     echo "in kernel/marke.fi steht noch ein Platzhalter -- abgebrochen" >&2
     exit 1
 fi
+if [[ $OHNE_BRUECKE == 1 ]]; then
+    cp -f kernel/tipp-aus.fi "$TMP/kernel/tipp.fi" || exit 1
+fi
+# Die Gegendatei fliegt IMMER aus dem Baum, aus dem firnc liest --
+# sonst uebersetzt der Kern beide und fuehrt zwei Module desselben
+# Namens. Dasselbe tut die Zeile unter `wg-aus.fi`.
+rm -f "$TMP/kernel/tipp-aus.fi"
+
 if [[ $OHNE_TUNNEL == 1 ]]; then
     cp -f kernel/wg-aus.fi "$TMP/kernel/wg.fi" || exit 1
 fi
