@@ -94,6 +94,8 @@ export {
     GRID, HIT_MIN, grid, snap, snap_up, hit_min,
     motion, MO_FAST, MO_NORMAL, MO_SLOW,
     rrect, rframe, rring, drop_shadow, divider, aa_pixels,
+    // RUNDE VEKTOR: echte Kurven statt gesetzter Bildpunkte.
+    vrect, vkreis, vring,
     theme_semantic_count,
     theme_override_count, theme_load, theme_set, theme_sum,
     // ROUND THEMESTORE: resolve a preset WITHOUT publishing it, so that
@@ -782,6 +784,383 @@ fn corner_cov(dx: u64, dy: u64, r: u64) -> u64 {
     }
     aa_px = aa_px + 1
     return hits * 255 / 16
+}
+
+// ====================================================== RUNDE VEKTOR
+//
+// DER KURVENRASTERER FUER RING 3.
+//
+// Warum hier eine zweite Fassung steht und nicht `kernel/vektor.fi`
+// benutzt wird: `kernel/user/*.fi` wird in EIGENE Objektdateien
+// uebersetzt (tools/design/aufnahme.sh, Zeile 150) und darf nichts aus
+// dem Kern aufrufen -- dieselbe Regel, die in `kernel/uprog.fi` oben
+// steht. Ein `import vektor` waere ein undefinierter Name beim Binden.
+//
+// Was hier steht, ist deshalb der KERN desselben Verfahrens, Zeile fuer
+// Zeile mit derselben Arithmetik: 26.6 Festkomma, kubische Bezier mit
+// KAPPA = 35, vier Abtastzeilen und vier Abtastspalten je Bildpunkt,
+// Deckung (cov * 255 + 8) / 16. Was der Kern fuer den Fensterrahmen
+// malt und was diese Bibliothek fuer einen Knopf malt, hat damit
+// DIESELBE Kruemmung und DIESELBE Kante.
+//
+// `tools/design/vektorpruef.py` prueft beide gegen dieselben Sollwerte.
+
+const V_EINS: i64 = 64
+const V_KAPPA: i64 = 35
+const V_TEILE: i64 = 16
+// So viele Punkte braucht die groesste Form dieser Bibliothek: ein
+// Rechteck mit vier Ecken a 16 Kurvenstuecken plus die Geraden.
+const V_MAXP: u64 = 96
+const V_MAXK: u64 = 96
+
+static mut vpx: [i64; 96] = [0 as i64; 96]
+static mut vpy: [i64; 96] = [0 as i64; 96]
+static mut vn: u64 = 0
+static mut vkx0: [i64; 96] = [0 as i64; 96]
+static mut vky0: [i64; 96] = [0 as i64; 96]
+static mut vkx1: [i64; 96] = [0 as i64; 96]
+static mut vky1: [i64; 96] = [0 as i64; 96]
+static mut vkn: u64 = 0
+static mut vstart: u64 = 0
+// Die Schnittpunkte EINER Abtastzeile.
+static mut vcx: [i64; 96] = [0 as i64; 96]
+static mut vcd: [i64; 96] = [0 as i64; 96]
+
+// Teilen mit Runden, symmetrisch um die Null. Muss Bit fuer Bit
+// dasselbe tun wie `rdiv` in kernel/vektor.fi -- sonst rundet ein
+// Knopf anders als der Fensterrahmen daneben. Mit abschneidender
+// Division waren bei einem Kreis von r=8 sechzig von sechzig
+// Abtastzeilen unsymmetrisch; gemessen in tools/design/vektorpruef.py.
+fn vrdiv(a: i64, b: i64) -> i64 {
+    if b == 0 {
+        return 0
+    }
+    var za: i64 = a
+    var nb: i64 = b
+    if nb < 0 {
+        za = 0 - za
+        nb = 0 - nb
+    }
+    if za >= 0 {
+        return (za + nb / 2) / nb
+    }
+    return 0 - ((0 - za) + nb / 2) / nb
+}
+
+fn v_neu() {
+    vn = 0
+    vkn = 0
+    vstart = 0
+}
+
+fn v_punkt(x: i64, y: i64) {
+    if vn >= V_MAXP {
+        return
+    }
+    vpx[(vn) as usize] = x
+    vpy[(vn) as usize] = y
+    vn = vn + 1
+}
+
+fn v_kante(ax: i64, ay: i64, bx: i64, by: i64) {
+    if ay == by {
+        return
+    }
+    if vkn >= V_MAXK {
+        return
+    }
+    vkx0[(vkn) as usize] = ax
+    vky0[(vkn) as usize] = ay
+    vkx1[(vkn) as usize] = bx
+    vky1[(vkn) as usize] = by
+    vkn = vkn + 1
+}
+
+fn v_nach(x: i64, y: i64) {
+    vstart = vn
+    v_punkt(x, y)
+}
+
+fn v_linie(x: i64, y: i64) {
+    v_punkt(x, y)
+}
+
+fn v_kubik(c1x: i64, c1y: i64, c2x: i64, c2y: i64, x: i64, y: i64) {
+    if vn == 0 {
+        v_nach(x, y)
+        return
+    }
+    let ax: i64 = vpx[((vn - 1)) as usize]
+    let ay: i64 = vpy[((vn - 1)) as usize]
+    let n: i64 = V_TEILE
+    var i: i64 = 1
+    while i <= n {
+        let t: i64 = i
+        let u: i64 = n - i
+        let nnn: i64 = n * n * n
+        v_punkt(vrdiv(u * u * u * ax + 3 * u * u * t * c1x
+            + 3 * u * t * t * c2x + t * t * t * x, nnn),
+            vrdiv(u * u * u * ay + 3 * u * u * t * c1y
+            + 3 * u * t * t * c2y + t * t * t * y, nnn))
+        i = i + 1
+    }
+}
+
+// Ein Viertelkreis von (x0,y0) nach (x1,y1) um die Ecke (ex,ey).
+fn v_bogen(x0: i64, y0: i64, ex: i64, ey: i64, x1: i64, y1: i64) {
+    v_kubik(x0 + vrdiv((ex - x0) * V_KAPPA, 64),
+        y0 + vrdiv((ey - y0) * V_KAPPA, 64),
+        x1 + vrdiv((ex - x1) * V_KAPPA, 64),
+        y1 + vrdiv((ey - y1) * V_KAPPA, 64), x1, y1)
+}
+
+fn v_zu() {
+    if vn <= vstart + 1 {
+        return
+    }
+    var i: u64 = vstart
+    while i + 1 < vn {
+        v_kante(vpx[(i) as usize], vpy[(i) as usize],
+            vpx[((i + 1)) as usize], vpy[((i + 1)) as usize])
+        i = i + 1
+    }
+    v_kante(vpx[((vn - 1)) as usize], vpy[((vn - 1)) as usize],
+        vpx[(vstart) as usize], vpy[(vstart) as usize])
+    vstart = vn
+}
+
+// Rechteck mit Eckradius, alles in 26.6.
+fn v_rundeck(x: i64, y: i64, w: i64, h: i64, r0: i64) {
+    if w <= 0 || h <= 0 {
+        return
+    }
+    var r: i64 = r0
+    if r < 0 {
+        r = 0
+    }
+    if r > w / 2 {
+        r = w / 2
+    }
+    if r > h / 2 {
+        r = h / 2
+    }
+    let x1: i64 = x + w
+    let y1: i64 = y + h
+    if r == 0 {
+        v_nach(x, y)
+        v_linie(x1, y)
+        v_linie(x1, y1)
+        v_linie(x, y1)
+        v_zu()
+        return
+    }
+    v_nach(x + r, y)
+    v_linie(x1 - r, y)
+    v_bogen(x1 - r, y, x1, y, x1, y + r)
+    v_linie(x1, y1 - r)
+    v_bogen(x1, y1 - r, x1, y1, x1 - r, y1)
+    v_linie(x + r, y1)
+    v_bogen(x + r, y1, x, y1, x, y1 - r)
+    v_linie(x, y + r)
+    v_bogen(x, y + r, x, y, x + r, y)
+    v_zu()
+}
+
+fn v_ellipse(cx: i64, cy: i64, rx: i64, ry: i64) {
+    if rx <= 0 || ry <= 0 {
+        return
+    }
+    v_nach(cx, cy - ry)
+    v_bogen(cx, cy - ry, cx + rx, cy - ry, cx + rx, cy)
+    v_bogen(cx + rx, cy, cx + rx, cy + ry, cx, cy + ry)
+    v_bogen(cx, cy + ry, cx - rx, cy + ry, cx - rx, cy)
+    v_bogen(cx - rx, cy, cx - rx, cy - ry, cx, cy - ry)
+    v_zu()
+}
+
+fn v_kreuz_add(n: u64, x: i64, d: i64) -> u64 {
+    if n >= V_MAXK {
+        return n
+    }
+    var j: u64 = n
+    while j > 0 {
+        if vcx[((j - 1)) as usize] <= x {
+            break
+        }
+        vcx[(j) as usize] = vcx[((j - 1)) as usize]
+        vcd[(j) as usize] = vcd[((j - 1)) as usize]
+        j = j - 1
+    }
+    vcx[(j) as usize] = x
+    vcd[(j) as usize] = d
+    return n + 1
+}
+
+// DEN AUFGEBAUTEN PFAD MALEN, direkt in die Zeichenflaeche.
+//
+// Es gibt keine Deckungstafel wie im Kern: hier wird Zeile fuer Zeile
+// gerastert und sofort gemischt. Das spart den Puffer (ein Knopf von
+// 200x40 waere 8000 Oktette in einer Bibliothek, die in dreizehn
+// Programmen steckt) und kostet nichts, weil jede Zeile ohnehin nur
+// einmal gebraucht wird.
+fn v_fuellen(farbe: u64) {
+    if vkn == 0 {
+        return
+    }
+    var miny: i64 = vky0[(0) as usize]
+    var maxy: i64 = miny
+    var minx: i64 = vkx0[(0) as usize]
+    var maxx: i64 = minx
+    var i: u64 = 0
+    while i < vkn {
+        if vky0[(i) as usize] < miny { miny = vky0[(i) as usize] }
+        if vky1[(i) as usize] < miny { miny = vky1[(i) as usize] }
+        if vky0[(i) as usize] > maxy { maxy = vky0[(i) as usize] }
+        if vky1[(i) as usize] > maxy { maxy = vky1[(i) as usize] }
+        if vkx0[(i) as usize] < minx { minx = vkx0[(i) as usize] }
+        if vkx1[(i) as usize] < minx { minx = vkx1[(i) as usize] }
+        if vkx0[(i) as usize] > maxx { maxx = vkx0[(i) as usize] }
+        if vkx1[(i) as usize] > maxx { maxx = vkx1[(i) as usize] }
+        i = i + 1
+    }
+    let by0: i64 = miny >> 6
+    let by1: i64 = (maxy + 63) >> 6
+    let bx0: i64 = minx >> 6
+    let bx1: i64 = (maxx + 63) >> 6
+    let breite: i64 = bx1 - bx0
+    if breite <= 0 || breite > 4096 {
+        return
+    }
+    var py: i64 = by0
+    while py < by1 {
+        // Die Deckung dieser Zeile, 0..16 je Bildpunkt. Auf dem Stapel,
+        // damit die Bibliothek keinen weiteren festen Puffer braucht.
+        var cov: [u8; 4096] = [0 as u8; 4096]
+        var sub: i64 = 0
+        while sub < 4 {
+            let ys: i64 = py * 64 + 8 + sub * 16
+            var n: u64 = 0
+            i = 0
+            while i < vkn {
+                let ay: i64 = vky0[(i) as usize]
+                let by: i64 = vky1[(i) as usize]
+                var lo: i64 = ay
+                var hi: i64 = by
+                var dir: i64 = 1
+                if ay > by {
+                    lo = by
+                    hi = ay
+                    dir = 0 - 1
+                }
+                if ys >= lo && ys < hi {
+                    let ax: i64 = vkx0[(i) as usize]
+                    let bx: i64 = vkx1[(i) as usize]
+                    n = v_kreuz_add(n, ax + vrdiv((bx - ax) * (ys - ay),
+                        by - ay), dir)
+                }
+                i = i + 1
+            }
+            var wind: i64 = 0
+            var anfang: i64 = 0
+            var j: u64 = 0
+            while j < n {
+                let xs: i64 = vcx[(j) as usize]
+                let vorher: i64 = wind
+                wind = wind + vcd[(j) as usize]
+                if vorher == 0 && wind != 0 {
+                    anfang = xs
+                }
+                if vorher != 0 && wind == 0 {
+                    var j0: i64 = (anfang - 8 + 15) >> 4
+                    var j1: i64 = (xs - 8 + 15) >> 4
+                    if j0 < bx0 * 4 {
+                        j0 = bx0 * 4
+                    }
+                    if j1 > bx1 * 4 {
+                        j1 = bx1 * 4
+                    }
+                    var k: i64 = j0
+                    while k < j1 {
+                        let c: i64 = (k >> 2) - bx0
+                        if c >= 0 && c < breite {
+                            cov[(c) as usize] = cov[(c) as usize] + 1 as u8
+                        }
+                        k = k + 1
+                    }
+                }
+                j = j + 1
+            }
+            sub = sub + 1
+        }
+        if py >= 0 {
+            var c: i64 = 0
+            while c < breite {
+                let v: u64 = cov[(c) as usize] as u64
+                if v > 0 {
+                    var a: u64 = v
+                    if a > 16 {
+                        a = 16
+                    }
+                    let deck: u64 = (a * 255 + 8) / 16
+                    let xx: i64 = bx0 + c
+                    if xx >= 0 {
+                        let ux: u64 = xx as u64
+                        let uy: u64 = py as u64
+                        px(ux, uy, blend(get(ux, uy), farbe, deck))
+                    }
+                }
+                c = c + 1
+            }
+        }
+        py = py + 1
+    }
+}
+
+// ------------------------------------------------- WAS DIE WIDGETS RUFEN
+
+// Ein gefuelltes Rechteck mit ECHTEM Eckradius, in Bildpunkten.
+fn vrect(x: u64, y: u64, w: u64, h: u64, r: u64, farbe: u64) {
+    if w == 0 || h == 0 {
+        return
+    }
+    v_neu()
+    v_rundeck((x as i64) * V_EINS, (y as i64) * V_EINS,
+        (w as i64) * V_EINS, (h as i64) * V_EINS, (r as i64) * V_EINS)
+    v_fuellen(farbe)
+}
+
+// EIN KREIS -- der runde Reglergriff, den es bis hierher nicht gab.
+fn vkreis(cx: u64, cy: u64, r: u64, farbe: u64) {
+    if r == 0 {
+        return
+    }
+    v_neu()
+    v_ellipse((cx as i64) * V_EINS, (cy as i64) * V_EINS,
+        (r as i64) * V_EINS, (r as i64) * V_EINS)
+    v_fuellen(farbe)
+}
+
+// Ein Ring: aussen minus innen, ueber die Fuellregel. Beide Umrisse
+// laufen in DERSELBEN Richtung, deshalb hebt die Nichtnull-Windung den
+// inneren nicht auf -- er wird rueckwaerts gelegt.
+fn vring(cx: u64, cy: u64, r: u64, dick: u64, farbe: u64) {
+    if r == 0 || dick == 0 || dick >= r {
+        return
+    }
+    v_neu()
+    v_ellipse((cx as i64) * V_EINS, (cy as i64) * V_EINS,
+        (r as i64) * V_EINS, (r as i64) * V_EINS)
+    // der innere Kreis, gegen den Uhrzeigersinn
+    let ri: i64 = ((r - dick) as i64) * V_EINS
+    let mx: i64 = (cx as i64) * V_EINS
+    let my: i64 = (cy as i64) * V_EINS
+    v_nach(mx, my - ri)
+    v_bogen(mx, my - ri, mx - ri, my - ri, mx - ri, my)
+    v_bogen(mx - ri, my, mx - ri, my + ri, mx, my + ri)
+    v_bogen(mx, my + ri, mx + ri, my + ri, mx + ri, my)
+    v_bogen(mx + ri, my, mx + ri, my - ri, mx, my - ri)
+    v_zu()
+    v_fuellen(farbe)
 }
 
 // A FILLED RECTANGLE WITH ROUNDED CORNERS.
