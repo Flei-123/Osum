@@ -414,6 +414,12 @@ fn resolv_schreiben(p_res: u64, k_ns: u64, k_fb: u64, k_nl: u64) -> u64 {
     return w
 }
 
+// RUNDE ECHTHARDWARE-6: der wievielte Anlauf. Statisch, weil
+// `u_start` sich fuer den naechsten Anlauf selbst ruft -- eine lokale
+// Variable waere bei jedem Anlauf wieder null und der Abstand nie
+// groesser als fuenf Sekunden.
+static mut anlauf: u64 = 0
+
 fn u_start(args: u64) -> u64 {
     var s_no: [u8; 26] = "dhcp: kein Netz im Kernel\0"
     var s_ns: [u8; 26] = "dhcp: kein Socket, errno \0"
@@ -451,13 +457,40 @@ fn u_start(args: u64) -> u64 {
     var k_nl: [u8; 2] = "\n\0"
     var p_conf: [u8; 18] = "/etc/network.conf\0"
     var s_ei: [u8; 7] = "einmal\0"
+    // ============================================ RUNDE ECHTHARDWARE-6
+    // `dauer` -- NACH EINEM FEHLSCHLAG SPAETER WIEDER FRAGEN.
+    //
+    // Justins Tafel: `NET K3 BDF 0900 L 1 ABL 0 IP 169.254.10.1 Dd`.
+    // Der Buchstabe hinter `D` ist der Zustand des Klienten, und `d`
+    // heisst: DISCOVER ist HINAUSGEGANGEN (waere nichts hinausgegangen,
+    // staende dort `x`), aber es kam KEIN Angebot zurueck. `ABL 0`
+    // heisst, dass keine zweite Netzkarte abgelehnt wurde -- die Karte
+    // ist also die richtige, `L 1` sagt, das Kabel steckt.
+    //
+    // Zusammen: unsere Seite hat gefragt und niemand hat geantwortet.
+    // Im Lauf davor gab es `192.168.1.107`, also antwortet derselbe
+    // Router sonst. Das ist kein Fehler unseres Stapels, sondern eine
+    // Frage des Zeitpunkts -- ein Router, der gerade neu startet, ein
+    // Anschluss, der noch aushandelt, ein WLAN, das aus war.
+    //
+    // Der Klient hat danach AUFGEGEBEN und das System blieb fuer immer
+    // auf der Notadresse. Genau das ist der Mangel: sechs Versuche in
+    // wenigen Sekunden, und danach nie wieder. Mit `dauer` fragt er
+    // weiter -- mit wachsendem Abstand, damit ein Netz ohne
+    // DHCP-Server nicht dauerhaft mit Rundrufen belegt wird.
+    var s_da: [u8; 6] = "dauer\0"
+    var s_wdh: [u8; 34] = "dhcp: neuer Anlauf in Sekunden: \0\0"
 
     let argc: u64 = ulib.arg_count(args)
     var versuche: u64 = 6
+    var dauer: u64 = 0
     var a: u64 = 1
     while a < argc {
         if ulib.streq(ulib.arg_at(args, a), (&s_ei[0 as usize]) as u64) {
             versuche = 1
+        }
+        if ulib.streq(ulib.arg_at(args, a), (&s_da[0 as usize]) as u64) {
+            dauer = 1
         }
         a = a + 1
     }
@@ -566,6 +599,25 @@ fn u_start(args: u64) -> u64 {
         say((&s_ve[0 as usize]) as u64)
         ulib.nl()
         net.close(fd)
+        // RUNDE ECHTHARDWARE-6: mit `dauer` ist "kein Angebot" kein
+        // Ende, sondern eine Pause. Der Abstand waechst (5, 10, 20,
+        // 40, dann 60 Sekunden), damit ein Netz ohne DHCP-Server
+        // nicht dauerhaft mit Rundrufen belegt wird, ein Router, der
+        // gerade hochfaehrt, aber schnell wieder eingefangen wird.
+        if dauer != 0 {
+            var w: u64 = 5
+            if anlauf < 4 {
+                w = 5 << anlauf
+            } else {
+                w = 60
+            }
+            anlauf = anlauf + 1
+            say((&s_wdh[0 as usize]) as u64)
+            ulib.sayn(w)
+            ulib.nl()
+            ulib.sleep_ms(w * 1000)
+            return u_start(args)
+        }
         return 1
     }
     sag_ip((&s_of[0 as usize]) as u64, o_ip)
