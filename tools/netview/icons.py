@@ -75,7 +75,21 @@ SYSTEM = ["sys-faking"]
 # aufgeschrieben wurde: zwei 16x16-Zeichen, die sich nur innen
 # unterscheiden, kommen auf etwa ein Viertel verschiedene Bildpunkte und
 # fallen an genau der Schwelle durch, die diese Datei setzt.
-KACHELN = ["tile-fake", "tile-net", "tile-hide"]
+# RUNDE MERGE-11 (R7): DREI KACHELN FEHLTEN, UND DAS SAH AUS WIE EIN
+# ZEICHENFEHLER. Justin nennt die Symbole im Kontrollzentrum seit
+# Tagen "korrumpiert". GEMESSEN auf dem Abbild d832136:
+#
+#   qs: symbols n=3          <- qs.fi will N_TILE_ALL = 6
+#   /etc/netview/tile-dark   FEHLT
+#   /etc/netview/tile-power  FEHLT
+#   /etc/netview/tile-tile   FEHLT
+#
+# Die Zeichnungen liegen seit ihrer Runde unter assets/netview/, aber
+# dieses Werkzeug hat sie nie gebaut und build.sh sie nie eingepackt.
+# Drei Kacheln ohne Symbol malen, was gerade im Puffer steht -- genau
+# der Eindruck, den Justin beschreibt. Es war NICHT der Rasterer.
+KACHELN = ["tile-fake", "tile-net", "tile-hide",
+           "tile-dark", "tile-power", "tile-tile"]
 
 # UND ES MUSS SICH VON `mark-faked` UNTERSCHEIDEN. Die beiden koennen
 # gleichzeitig auf dem Schirm stehen und bedeuten Verschiedenes: das
