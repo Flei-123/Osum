@@ -524,19 +524,84 @@ fn anker_x(bw: u64) -> u64 {
 
 // Senkrecht: unmittelbar ueber der Leiste, und nie ueber den oberen
 // Rand der Arbeitsflaeche hinaus (dort liegt das reservierte Band).
+// ================================================ RUNDE MERGE-11: R5
+// DIE LEISTENHOEHE AUS DER DATEI IST NICHT DIE LEISTENHOEHE AUF DEM
+// SCHIRM.
+//
+// Justin: "search programs overlapped mit der taskbar und das soll
+// nicht sein, sondern wie bei windows drueber sein."
+//
+// GEMESSEN auf dem Abbild d832136 bei 3440x1440:
+//   taskbar: conf edge=0 ename=bottom height=80   <- auf dem Schirm
+//   /etc/taskbar.conf                height=40    <- in der Datei
+//   launcher: geom x=8 y=792 w=880 h=600
+//   Unterkante 792 + 600 = 1392
+//   Leisten-Oberkante   1440 - 80 = 1360
+//   -> das Menue ragt 32 Bildpunkte IN die Leiste
+//
+// DIE LEISTE VERVIELFACHT ihre Masse mit `wlibc.ui_scale()` (siehe
+// taskbar.fi, `btn_h`, `gl_w`): aus `height=40` in der Datei werden
+// bei Vervielfachung 2 achtzig Bildpunkte. Dieses Feld hat die 40 roh
+// genommen -- und lag damit um genau eine Vervielfachung daneben.
+//
+// Der alte Kommentar hier sagte, die Arbeitsflaeche brauche ein
+// Fenster. Das stimmt so nicht: `wm.work_y` liest einen GLOBALEN Wert
+// (wm.fi:3176), und `sysgui.fi:874` gibt ihn heraus, ohne das
+// Fensterfeld anzusehen. Die Angabe ist also schon vor dem ersten
+// eigenen Fenster zu haben -- und sie ist die RICHTIGE Quelle, weil
+// der Fensterserver dort JEDE Reservierung abzieht, nicht nur die der
+// Leiste.
+//
+// DESHALB: zuerst die Arbeitsflaeche fragen. Antwortet sie (Hoehe > 0
+// und kleiner als der Schirm), endet das Menue acht Bildpunkte ueber
+// ihrer Unterkante -- das ist der sichtbare Abstand, den Justin aus
+// Windows kennt. Antwortet sie nicht, bleibt der alte Weg, aber MIT
+// Vervielfachung.
+const LUFT: u64 = 8
+
 fn anker_y(bh: u64) -> u64 {
-    // Die Arbeitsflaeche (`work_*`) braucht ein FENSTER, und das gibt
-    // es hier noch nicht. Gerechnet wird deshalb aus Schirmhoehe und
-    // Leistenhoehe -- und das ist dieselbe Zahl: die Leiste ist der
-    // einzige Streifen unter dem Menue. Das reservierte Band der
-    // Messtafel liegt OBEN und kann von einem Feld, das unten
-    // verankert ist, nicht getroffen werden.
+    // NACHGEMESSEN: `work_y(0)` geht NICHT. `sysgui.fi:790` weist
+    // jedes Fensterfeld >= MAX_WIN ab, BEVOR es den Zweig fuer die
+    // Arbeitsflaeche erreicht -- ein Handle 0 also auch. Der alte
+    // Kommentar an dieser Stelle hatte recht, und mein erster Versuch
+    // lieferte weiter y=792 (32 Bildpunkte in der Leiste).
+    //
+    // Also zweistufig: HIER die vervielfachte Leistenhoehe, damit das
+    // Fenster gleich an der richtigen Stelle ANGELEGT wird, und nach
+    // dem Anlegen rueckt `an_arbeitsflaeche()` es auf den Wert, den
+    // der Fensterserver wirklich fuehrt.
     let sh2: u64 = wlibc.screen_h()
-    let unten: u64 = sh2 - l_bar
-    if unten > bh + 8 {
-        return unten - bh - 8
+    let bar: u64 = l_bar * wlibc.ui_scale()
+    if sh2 > bar {
+        let unten: u64 = sh2 - bar
+        if unten > bh + LUFT {
+            return unten - bh - LUFT
+        }
     }
     return 0
+}
+
+// Das Fenster auf die Arbeitsflaeche ruecken -- acht Bildpunkte ueber
+// deren Unterkante, so wie es Justin aus Windows kennt. Antwortet der
+// Server nicht (Hoehe 0 oder groesser als der Schirm), bleibt das
+// Fenster stehen, wo es angelegt wurde.
+fn an_arbeitsflaeche(w: u64, bw: u64, bh: u64) {
+    let hh: u64 = wlib.handle(w)
+    if hh == 0 {
+        return
+    }
+    let wy: u64 = wlibc.work_y(hh)
+    let wh2: u64 = wlibc.work_h(hh)
+    let sh2: u64 = wlibc.screen_h()
+    if wh2 == 0 || wy + wh2 > sh2 {
+        return
+    }
+    let unten: u64 = wy + wh2
+    var y: u64 = wy
+    if unten > bh + LUFT {
+        y = unten - bh - LUFT
+    }
+    let _m: u64 = wlibc.win_move(hh, anker_x(bw), y)
 }
 
 fn u_start(args: u64) -> u64 {
@@ -707,6 +772,13 @@ fn u_start(args: u64) -> u64 {
     var a_app: [u8; 9] = "launcher\0"
     g_win = w
     let _ap: u64 = wlib.window_app(w, (&a_app[0 as usize]) as u64)
+    // ============================================ RUNDE MERGE-11: R5
+    // JETZT erst steht das Fenster, und JETZT beantwortet der
+    // Fensterserver die Frage nach der Arbeitsflaeche. Sie ist die
+    // bessere Quelle als jede eigene Rechnung: dort ist JEDE
+    // Reservierung abgezogen, nicht nur die der Leiste (auch das
+    // reservierte Band der Messtafel oben).
+    an_arbeitsflaeche(w, bw, bh)
     // ===================================================== RUNDE ECHTHARDWARE-1
     //
     // "ICH WILL DIE TASTATUR" -- UND OHNE DIESE ZEILE KAM NIE EINE AN.
