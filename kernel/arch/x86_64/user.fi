@@ -34,12 +34,18 @@ import serial
 import kstate
 import mem
 
-export { setup, run, handle, map_user, map_user_pt, unmap_user }
+export { setup, setup_here, gs_set, gs_base, run, handle,
+    map_user, map_user_pt, unmap_user }
 
 const MSR_EFER: u64 = 0xC0000080
 const MSR_STAR: u64 = 0xC0000081
 const MSR_LSTAR: u64 = 0xC0000082
 const MSR_SFMASK: u64 = 0xC0000084
+// RUNDE VIELKERN: die GS-Basis. Sie zeigt auf den `cpu`-Satz DIESES
+// Kerns; `syscall_entry` liest daraus den Kernstapel und legt den
+// Benutzerstapel hinein. Ohne sie faende ein Systemaufruf auf einem
+// Anwendungskern die Adresse 144 als Stapel vor.
+const MSR_GS_BASE: u64 = 0xC0000101
 
 const V_SYSCALL: u64 = 48 // indices in the table out of isr.s
 const V_USER: u64 = 49
@@ -128,7 +134,21 @@ fn cpu_has_nx() -> bool {
 // den Selektor MIT RPL 3) in dieses Feld. Die Gegenprobe steht in
 // `tools/kvm/run.sh` Abschnitt 4: mit 0x18 muss der Kernel unter KVM
 // sterben und unter TCG durchlaufen.
-fn setup(state: u64) {
+// ====================================================== RUNDE VIELKERN
+// DIESELBEN VIER REGISTER, ABER JE KERN -- UND DIE GS-BASIS DAZU.
+//
+// Bis hierher lief das hier genau einmal, auf dem Startkern. Das reichte,
+// solange Ring 3 nur dort lief. Sobald ein Anwendungskern einen Prozess
+// bekommt, braucht ER: EFER.SCE (sonst ist `syscall` ein #UD), LSTAR
+// (sonst springt es irgendwohin), STAR und SFMASK -- alles vier sind
+// Register PRO KERN. Und die GS-Basis, damit der Einsprung SEINEN
+// Kernstapel findet und nicht den eines Nachbarn.
+//
+// `cpubase` ist die Adresse des `cpu`-Satzes dieses Kerns. Sie kommt von
+// aussen, damit diese Datei `cpu.fi` nicht einbinden muss -- ein Import
+// mehr ordnet die Bindereihenfolge um, und was das anrichtet, steht in
+// docs/RUNDE-STARTKNOPF.md.
+fn setup_here(state: u64, cpubase: u64) {
     wrmsr(MSR_STAR, (0x1B << 48) | (0x08 << 32))
     wrmsr(MSR_LSTAR, vector(state, V_SYSCALL))
     wrmsr(MSR_SFMASK, 0x200) // IF off during the system call
@@ -144,6 +164,24 @@ fn setup(state: u64) {
         kstate.set(state, kstate.NX_OK, 0)
     }
     wrmsr(MSR_EFER, efer)
+    gs_set(cpubase)
+}
+
+// Der Startkern. Sein Satz ist der mit der Nummer 0 -- die Firmware
+// fuehrt den Startprozessor in der MADT als ersten auf, und `smp.probe`
+// traegt sie in dieser Reihenfolge ein. Sollte eine Firmware das einmal
+// anders halten, faellt es sofort auf: `kmain` vergleicht die GS-Basis
+// nach dem Hochlauf gegen `cpu.record(cpu.here())` und sagt es.
+fn setup(state: u64) {
+    setup_here(state, state + kstate.CPU_OFF)
+}
+
+fn gs_set(cpubase: u64) {
+    wrmsr(MSR_GS_BASE, cpubase)
+}
+
+fn gs_base() -> u64 {
+    return rdmsr(MSR_GS_BASE)
 }
 
 // ----------------------------------------------------------- the paging

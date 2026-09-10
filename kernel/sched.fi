@@ -32,17 +32,28 @@ import mem
 import atomic
 import cpu
 import arch.x86_64.fpu
+import msr
+// RUNDE BLECHEINGABE: der Zyklenzaehler, um einen STEHENDEN Zeitgeber
+// zu erkennen. `apic.fi` bindet nur serial/kstate/pci ein -- kein Kreis.
+import arch.x86_64.apic
 
 export {
     init, create, start, schedule, on_tick, yield_now, sleep_ticks,
+    tote_schlaefe,
     exit_task, reap,
     kill_current, wake_pid, find_pid, current, tget, tset, task_at,
     stack_high, STACK_PAINT,
+    // RUNDE LEISTE: die Waechterseite unter jedem Kernstapel.
+    guard_faults, guard_last_pid, guard_last_depth, guard_broken,
     trace_push, trace_dump, dump_tasks, ready_count, alive_count,
     irq_save, irq_restore, set_kernel_stack,
     adopt, enter_task, set_idle, zombies, reap_all, cpu_of, cpu_mask,
     clear_signals,
-    set_affinity, affinity, ANY_CPU,
+    set_affinity, affinity, ANY_CPU, ring3_fremd,
+    gs_melden, gs_bereit, gs_fehler, ring3_kerne, gs_soll, gs_pruefen,
+    kstack_hier, kstack_wieder, ring3_alle_setzen, ring3_alle_an, hier,
+    gs_luege_setzen, gs_luege_an, r3blind_setzen, r3blind_an,
+    ring3_bericht, syscalls_of, syscalls_summe, kerne, ring3_prozesse,
     T_STATE, T_PID, T_RSP, T_KSTACK, T_KTOP, T_PRIO, T_BUDGET, T_WORK,
     T_WAKE, T_CR3, T_PARENT, T_EXIT, T_RUNS, T_ENTRY, T_USTACK, T_KIND,
     T_WAITPID, T_TICKS, T_PDPT, T_PD, T_PT, T_DATA, T_CWD, T_ARG,
@@ -61,6 +72,8 @@ export {
     groups_clear, groups_inherit, GROUPS_MAX,
     // ---- RUNDE AVX ----
     T_FPU, fpu_area, fpu_set_area, fpu_inherit, fpu_reset,
+    // ---- RUNDE LAUFZEIT ----
+    T_FSBASE, fsbase_apply,
 }
 
 // ------------------------------------------------------ the task record
@@ -285,6 +298,24 @@ const T_NGROUPS: u64 = 512
 // Maschine ohne SSE. Der Platz liegt hinter den Zusatzgruppen
 // (512 + GROUPS_MAX * 8 = 640) und damit noch weit unter TASK_BYTES.
 const T_FPU: u64 = 640
+
+// RUNDE LAUFZEIT: DIE FS-BASIS DIESER AUFGABE.
+//
+// Jedes gegen musl (oder glibc) gelinkte Programm liest seinen
+// Fadenzeiger als `%fs:0x0` und den Stapelwaechter als `%fs:0x28`. Ohne
+// eine FS-Basis ist beides ein Zugriff auf die Adresse 0x0 bzw. 0x28 --
+// gemessen in dieser Runde als `user fault: err=0x5 cr2=0x28` mitten in
+// musls `__malloc_alloc_meta`. Das ist der EINE Grund, aus dem ein
+// fremdes Programm hier nicht laeuft; die Systemaufrufnummern stimmen
+// laengst.
+//
+// Das Programm setzt die Basis selbst, mit `arch_prctl(ARCH_SET_FS)`
+// (Nummer 158). Sie gehoert der AUFGABE und nicht dem Prozessor: bei
+// jedem Wechsel schreibt `switch_to` sie wieder in IA32_FS_BASE, sonst
+// liest der naechste Faden den Fadenzeiger des vorigen. 0 heisst "hat
+// keine gesetzt" -- der Zustand jedes Osum-eigenen Programms, das ohne
+// TLS gebaut ist.
+const T_FSBASE: u64 = 648
 const GROUPS_MAX: u64 = 16
 
 // The three descriptor slots of round 62. Nothing writes them any more;
@@ -438,10 +469,61 @@ const K_YIELD: u64 = 8
 // `tools/osum/run.sh` bleiben unveraendert gueltig: der tiefste Aufruf
 // ist weiter groesser als die 8192 von Runde 62 und kleiner als der
 // Stapel.
-const KSTACK_FRAMES: u64 = 8
+// ================================================== RUNDE LEISTE
+// SECHZEHN STATT ACHT -- UND EINE WAECHTERSEITE DARUNTER.
+//
+// Der Kommentar oben endet mit "acht und nicht sechs, weil eine Zahl,
+// die zweimal nicht gereicht hat, nicht knapper wird". Sie hat ein
+// drittes Mal nicht gereicht, und diesmal ist es GEMESSEN und nicht
+// erschlossen:
+//
+//   user fault: pid=4  vector=14  err=0x15  cr2=0xd70  rip=0xd70
+//     spur rsp=0x40079dd0  phys=0x3169dd0  kstack=0x2eca000
+//         0x573068 0x573068 0x505fd0 0x505fd0 0x527000 0x3169f00 ...
+//
+// Der BENUTZERSTAPEL des Starters liegt physisch auf 0x3169dd0. Der
+// Kernstapel der Aufgabe daneben faengt bei 0x316A000 an -- also 0x230
+// Oktette darueber. Und in dem Benutzerstapel stehen KERNADRESSEN:
+// 0x527000 ist `kdata`, 0x573068 liegt in der MODUSSEITE
+// (kdata + MODE_OFF), 0x3169f00 zeigt auf sich selbst. Kein Programm in
+// Ring 3 kann diese Zahlen kennen. Der Kernstapel ist unten
+// herausgelaufen und hat in den Rahmen darunter geschrieben -- genau
+// der Fall, den der Absatz oben fuer Runde K17 beschreibt, nur mit
+// einem anderen Opfer.
+//
+// DAS IST AUCH DER "UNSICHTBARE UEBERSCHREIBER" DER RUNDE STARTKNOPF.
+// Dort hatte ein zusaetzlicher `import cpu` in `kgui.fi` den ganzen
+// Modusvektor auf null gelegt; der Import aendert die Bindereihenfolge
+// und damit die Rahmengroessen des tiefsten Aufrufs. Es war nie ein
+// Feld, das ueberlief -- es war IMMER der Kernstapel, und der Import
+// hat nur entschieden, wer darunter liegt.
+//
+// ZWEI MASSNAHMEN, und die zweite ist die wichtigere:
+//
+//   1. SECHZEHN RAHMEN, also 64 KiB. Bei 32 Aufgaben sind das 2 MiB.
+//   2. EINE WAECHTERSEITE UNTER JEDEM STAPEL. `frame_run` holt
+//      KSTACK_FRAMES + 1 Rahmen; der UNTERSTE gehoert nicht zum
+//      Stapel, wird mit einem eigenen Muster gefuellt und bei jedem
+//      Zeitgeberschlag geprueft. Ein Ueberlauf ist damit kein stiller
+//      Datenverlust irgendwo im Rechner mehr, sondern eine Meldung
+//      mit Aufgabennummer -- und das ist der Unterschied zwischen
+//      "es stuerzt manchmal ab" und "Aufgabe 5 braucht mehr Stapel".
+//
+// Eine echte, im Seitenverzeichnis UNGEMAPPTE Wache waere schoener.
+// Sie geht hier nicht: der Kern bildet den unteren Speicher mit
+// 2-MiB-Seiten ab, und eine einzelne 4-KiB-Seite daraus zu entfernen
+// hiesse, die Kachel in eine Seitentabelle aufzuloesen -- fuer jeden
+// Stapel, im Pfad, der die Aufgaben anlegt. Ein gepruefter Wachwert
+// findet denselben Fehler und kostet zwei Lesezugriffe je Schlag.
+const KSTACK_FRAMES: u64 = 16
 
 // What an untouched octet of kernel stack looks like.
 const STACK_PAINT: u64 = 0x5A5A5A5A5A5A5A5A
+
+// Und das Muster der Waechterseite -- absichtlich ein anderes als die
+// Stapelfarbe, damit ein Blick sagt, WELCHE der beiden Fragen gerade
+// beantwortet wird.
+const GUARD_PAINT: u64 = 0xC0DEFACEC0DEFACE
 
 // Indices in the table out of isr.s.
 const V_SWITCH: u64 = 55
@@ -606,6 +688,365 @@ fn may_run(state: u64, i: u64, me: u64) -> bool {
     return a == ANY_CPU || a == me
 }
 
+// ====================================================== RUNDE BLECHKERN
+// DER RIEGEL, DER NICHT VON EINER ZAHL IM SPEICHER ABHAENGT.
+//
+// Die Bindung eines Prozesses an Kern 0 steht in der Nebentabelle
+// (`TC_AFF`), also in Speicher, den ein Ueberlauf umschreiben kann -- und
+// genau davon handelt diese Runde. Deshalb steht dieselbe Bedingung hier
+// noch einmal, aus der GATTUNG der Aufgabe hergeleitet: ein Kern ungleich
+// null nimmt keinen Ring-3-Prozess, was auch immer in der Tabelle steht.
+// RUNDE VIELKERN: DER RIEGEL BLEIBT -- ER FRAGT NUR ETWAS ANDERES.
+//
+// Bis hierher hiess er "nur Kern 0 darf Ring 3". Jetzt heisst er: ein
+// Kern darf Ring 3 nur nehmen, wenn seine GS-Basis wirklich auf SEINEN
+// `cpu`-Satz zeigt. Ist sie das nicht, faende der naechste `syscall`
+// seinen Kernstapel nicht -- und das ist genau der Fehler, den diese
+// beiden Runden ausgeraeumt haben. Lieber laeuft der Prozess dann auf
+// Kern 0 weiter, als dass er die Maschine mitnimmt.
+//
+// Die Pruefung ist ein Vergleich zweier Zahlen im Speicher; das MSR
+// wird NICHT bei jeder Auswahl gelesen (das waere ein `rdmsr` je
+// Zeitgeberschlag je Kern). Gesetzt wird `C_GSOK` einmal, von dem Kern
+// selbst, in `smp.ap_main` bzw. `kmain`.
+fn darf_ring3(state: u64, i: u64, me: u64) -> bool {
+    if tget(state, i, T_KIND) != K_USER {
+        return true
+    }
+    // ================================================= RUNDE VIELKERN 3
+    // DIE GEGENPROBE ZU DIESEM RIEGEL, UND SIE GEHOERT HIERHER.
+    //
+    // Runde BLECHKERN ist genau daran gestorben, dass diese Bedingung
+    // im Kommentar stand und NICHT im Code: ein Anwendungskern durfte
+    // Ring 3 nehmen, dessen Kernstapel er nicht finden konnte. Gemerkt
+    // hat es niemand -- bis Justin auf echtem Blech ein #UD fotografiert
+    // hat. Ein Riegel, dessen Bruch niemand herbeifuehren kann, ist
+    // nicht geprueft, sondern geglaubt.
+    //
+    // `r3blind` schaltet ihn ab. Zusammen mit `gsluege` (smp.fi, gibt
+    // den Anwendungskernen eine FALSCHE GS-Basis) ist das der Zustand
+    // vom 05.09. nachgebaut, auf Bestellung, im Pruefstand --
+    // `tools/vielkern/run.sh` misst beides: mit Riegel lebt die
+    // Maschine, ohne ihn nicht.
+    if r3blind != 0 {
+        return true
+    }
+    if ring3_alle == 0 {
+        return me == 0
+    }
+    return me == 0 || gs_bereit(state, me)
+}
+
+// ==================================================== RUNDE VIELKERN 3
+// SCHARF GESCHALTET. Die Vorgabe ist EINS.
+//
+// Die Vorrunde hat sie auf null gelassen und den Grund dazugeschrieben:
+// "der Unterbau ist gebaut und belegt, und er wird erst scharf
+// geschaltet, wenn der Schreibtisch darauf steht." Er steht darauf --
+// die Ursache war `fs.inode_get`, ein Inodepuffer fuer die ganze
+// Maschine, und sie ist behoben. Gemessen mit dem VOLLEN Schreibtisch
+// (vier Ring-3-Programme) unter -smp 1, 4 und 8: alle vier bekommen
+// eine pid, R3W 0, abw 0, keine Ausnahme.
+//
+// `r3eins` auf der Kernel-Befehlszeile holt den alten Zustand zurueck --
+// Ring 3 nur auf Kern 0, Oktett fuer Oktett das Verhalten der Runde
+// BLECHKERN. Das ist die Rueckfallebene fuer den Fall, dass es auf
+// einem Brett anders aussieht als im Pruefstand, und sie kostet einen
+// Eintrag im Bootmenue statt eines neuen Kerns. `r3alle` bleibt
+// bestehen und sagt jetzt ausdruecklich, was ohnehin gilt -- alle
+// Laeufer und Menueeintraege, die es nennen, aendern sich nicht.
+static mut ring3_alle: u64 = 1
+static mut gs_luege: u64 = 0
+static mut r3blind: u64 = 0
+
+fn gs_luege_setzen(v: u64) {
+    gs_luege = v
+}
+
+fn gs_luege_an() -> u64 {
+    return gs_luege
+}
+
+fn r3blind_setzen(v: u64) {
+    r3blind = v
+}
+
+fn r3blind_an() -> u64 {
+    return r3blind
+}
+
+fn ring3_alle_setzen(v: u64) {
+    ring3_alle = v
+}
+
+fn ring3_alle_an() -> u64 {
+    return ring3_alle
+}
+
+// Hat dieser Kern eine GS-Basis, die auf seinen eigenen Satz zeigt?
+// EINMAL gemessen und hingeschrieben, von dem Kern, um den es geht.
+static mut gs_gut: [u64; 8] = [0 as u64; 8]
+
+fn gs_melden(state: u64, me: u64, gut: bool) {
+    if me >= 8 {
+        return
+    }
+    if gut {
+        gs_gut[me as usize] = 1
+    } else {
+        gs_gut[me as usize] = 2
+    }
+}
+
+// Die Adresse, auf die die GS-Basis DIESES Kerns zeigen muss.
+// Der Kernstapel, den DIESER Kern beim naechsten Systemaufruf nimmt --
+// dieselbe Zahl, die `%gs:CPU_KSTACK` in isr.s liest.
+// Den Kernstapel dieses Kerns NEU eintragen -- aus der Aufgabe, die
+// gerade laeuft. Gebraucht nach `smp.stage`: dort bekommt der Startkern
+// unter Umstaenden eine andere Satznummer als 0, und dann steht sein
+// Stapel im falschen Satz.
+fn kstack_wieder(state: u64) {
+    set_kernel_stack(state, tget(state, current(state), T_KTOP))
+}
+
+fn kstack_hier(state: u64) -> u64 {
+    return cpu.get(state, cpu.here(state), cpu.C_KSTACK)
+}
+
+// Auf welchem Kern laeuft das hier gerade. Nur durchgereicht, damit
+// Module, die `sched` ohnehin einbinden, nicht zusaetzlich `cpu`
+// einbinden muessen -- ein Import mehr ordnet die Bindereihenfolge um,
+// und was das anrichtet, steht in docs/RUNDE-STARTKNOPF.md.
+fn hier(state: u64) -> u64 {
+    return cpu.here(state)
+}
+
+fn gs_soll(state: u64) -> u64 {
+    return cpu.record(state, cpu.here(state))
+}
+
+// Gegenprobe fuer den Startkern: er kennt seine eigene Nummer erst,
+// wenn der APIC oben ist, und die MADT muss ihn nicht als ersten
+// auffuehren. Also wird nach dem Hochlauf noch einmal nachgesehen.
+fn gs_pruefen(state: u64, basis: u64) -> bool {
+    let me: u64 = cpu.here(state)
+    let gut: bool = basis == cpu.record(state, me)
+    gs_melden(state, me, gut)
+    return gut
+}
+
+fn gs_bereit(state: u64, me: u64) -> bool {
+    if me >= 8 {
+        return false
+    }
+    return gs_gut[me as usize] == 1
+}
+
+// Wie viele Kerne eine FALSCHE oder gar keine GS-Basis gemeldet haben.
+// Muss null bleiben; die Tafel zeigt es als `R3W`.
+fn gs_fehler(state: u64) -> u64 {
+    var i: u64 = 0
+    var c: u64 = 0
+    while i < 8 {
+        if gs_gut[i as usize] == 2 {
+            c = c + 1
+        }
+        i = i + 1
+    }
+    return c
+}
+
+// Auf wie vielen Kernen Ring 3 wirklich gelaufen ist -- die Zahl, die
+// diese Runde beweist. `TC_MASK` traegt je Aufgabe ein Bit je Kern.
+fn ring3_kerne(state: u64) -> u64 {
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var i: u64 = 1
+    var maske: u64 = 0
+    while i < n {
+        if tget(state, i, T_KIND) == K_USER {
+            maske = maske | tc_get(state, i, TC_MASK)
+        }
+        i = i + 1
+    }
+    var c: u64 = 0
+    var b: u64 = 0
+    while b < 8 {
+        if ((maske >> b) & 1) != 0 {
+            c = c + 1
+        }
+        b = b + 1
+    }
+    return c
+}
+
+// Wie viele Kerne die Maschine wirklich hat.
+fn kerne(state: u64) -> u64 {
+    return cpu.count(state)
+}
+
+// Systemaufrufe, die auf DIESEM Kern hereingekommen sind. Gezaehlt wird
+// in `syscall_entry` mit einem einzigen `incq %gs:CPU_SYSCALLS` -- siehe
+// den Kopf von `kernel/cpu.fi`.
+fn syscalls_of(state: u64, k: u64) -> u64 {
+    if k >= kstate.MAX_CPUS {
+        return 0
+    }
+    return cpu.get(state, k, cpu.C_SYSCALLS)
+}
+
+fn syscalls_summe(state: u64) -> u64 {
+    var k: u64 = 0
+    var n: u64 = 0
+    while k < cpu.count(state) {
+        n = n + cpu.get(state, k, cpu.C_SYSCALLS)
+        k = k + 1
+    }
+    return n
+}
+
+fn ring3_prozesse(state: u64) -> u64 {
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var i: u64 = 1
+    var c: u64 = 0
+    while i < n {
+        if tget(state, i, T_KIND) == K_USER
+        && tget(state, i, T_STATE) != S_FREE {
+            c = c + 1
+        }
+        i = i + 1
+    }
+    return c
+}
+
+// ==================================================== RUNDE VIELKERN 3
+// DIE MESSUNG, UM DIE ES IN DIESER RUNDE GEHT.
+//
+// "Ring 3 laeuft auf allen Kernen" ist eine Behauptung, solange nicht
+// dasteht, WELCHER Prozess auf WELCHEM Kern war. Drei Zahlen je Prozess
+// und zwei Summen, und alle fuenf kommen aus Stellen, die der
+// Ablaufplaner ohnehin fuehrt:
+//
+//   kern    `TC_CPU`  -- der Kern, auf dem er ZULETZT lief
+//   maske   `TC_MASK` -- ein Bit je Kern, auf dem er JE lief
+//   n       wie viele Bits das sind
+//   runs    wie oft er ueberhaupt an die Reihe kam
+//
+// und darunter die Systemaufrufe JE KERN. Die letzte Zahl ist die
+// eigentliche: sie wird in `syscall_entry` ueber DIESELBE GS-Basis
+// hochgezaehlt, aus der der Kernstapel kommt. Ein Kern mit falscher
+// Basis zaehlt in einen fremden Satz -- die Summe der Zaehler weicht
+// dann von `kstate.SYSCALLS` ab, und genau das misst `abw`.
+fn bits_in(v: u64) -> u64 {
+    var b: u64 = 0
+    var c: u64 = 0
+    while b < 64 {
+        if ((v >> b) & 1) != 0 {
+            c = c + 1
+        }
+        b = b + 1
+    }
+    return c
+}
+
+fn ring3_bericht(state: u64) {
+    var s_p: [u8; 9] = "r3: pid=\0"
+    var s_k: [u8; 8] = "  kern=\0"
+    var s_m: [u8; 9] = "  maske=\0"
+    var s_n: [u8; 5] = "  n=\0"
+    var s_r: [u8; 9] = "  runs=\0\0"
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var i: u64 = 1
+    var alle: u64 = 0
+    var proz: u64 = 0
+    while i < n {
+        if tget(state, i, T_KIND) == K_USER
+        && tget(state, i, T_STATE) != S_FREE {
+            let m: u64 = tc_get(state, i, TC_MASK)
+            alle = alle | m
+            proz = proz + 1
+            let z: u64 = serial.zeile_an(cpu.here(state))
+            serial.puts((&s_p[0]) as u64)
+            serial.dec(tget(state, i, T_PID))
+            serial.puts((&s_k[0]) as u64)
+            serial.dec(tc_get(state, i, TC_CPU))
+            serial.puts((&s_m[0]) as u64)
+            serial.hex(m)
+            serial.puts((&s_n[0]) as u64)
+            serial.dec(bits_in(m))
+            serial.puts((&s_r[0]) as u64)
+            serial.dec(tget(state, i, T_RUNS))
+            serial.nl()
+            serial.zeile_aus(z)
+        }
+        i = i + 1
+    }
+    let z2: u64 = serial.zeile_an(cpu.here(state))
+    var s_g: [u8; 15] = "r3: prozesse=\0\0"
+    var s_gk: [u8; 9] = "  kerne=\0"
+    var s_gn: [u8; 5] = "  n=\0"
+    var s_gf: [u8; 10] = "  fremd=\0\0"
+    var s_ga: [u8; 8] = "  alle=\0"
+    serial.puts((&s_g[0]) as u64)
+    serial.dec(proz)
+    serial.puts((&s_gk[0]) as u64)
+    serial.hex(alle)
+    serial.puts((&s_gn[0]) as u64)
+    serial.dec(bits_in(alle))
+    serial.puts((&s_gf[0]) as u64)
+    serial.dec(ring3_fremd(state))
+    serial.puts((&s_ga[0]) as u64)
+    serial.dec(ring3_alle)
+    serial.nl()
+    serial.zeile_aus(z2)
+    let z3: u64 = serial.zeile_an(cpu.here(state))
+    var s_s: [u8; 14] = "r3: syscalls \0"
+    var s_c: [u8; 3] = " c\0"
+    var s_e: [u8; 2] = "=\0"
+    var s_su: [u8; 10] = "  summe=\0\0"
+    var s_ab: [u8; 8] = "  abw=\0\0"
+    serial.puts((&s_s[0]) as u64)
+    var k: u64 = 0
+    var sum: u64 = 0
+    while k < cpu.count(state) {
+        let v: u64 = cpu.get(state, k, cpu.C_SYSCALLS)
+        sum = sum + v
+        serial.puts((&s_c[0]) as u64)
+        serial.dec(k)
+        serial.puts((&s_e[0]) as u64)
+        serial.dec(v)
+        k = k + 1
+    }
+    serial.puts((&s_su[0]) as u64)
+    serial.dec(sum)
+    serial.puts((&s_ab[0]) as u64)
+    let ks: u64 = kstate.get(state, kstate.SYSCALLS)
+    if ks > sum {
+        serial.dec(ks - sum)
+    } else {
+        serial.dec(sum - ks)
+    }
+    serial.nl()
+    serial.zeile_aus(z3)
+}
+
+// Wie viele Ring-3-Prozesse zuletzt auf einem Kern ungleich null gelaufen
+// sind. Muss immer 0 sein; die Tafel zeigt die Zahl, damit "es ist
+// behoben" nicht geglaubt, sondern gelesen wird.
+fn ring3_fremd(state: u64) -> u64 {
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var i: u64 = 1
+    var c: u64 = 0
+    while i < n {
+        let wo: u64 = tc_get(state, i, TC_CPU)
+        if tget(state, i, T_KIND) == K_USER && wo != 0
+        && wo < kstate.MAX_CPUS {
+            c = c + 1
+        }
+        i = i + 1
+    }
+    return c
+}
+
 // ------------------------------------------------- the interrupt flag
 
 // A critical section in a kernel is not a lock -- on one processor it is
@@ -637,7 +1078,17 @@ fn irq_restore(flags: u64) {
 fn trace_push(state: u64, v: u64) {
     let n: u64 = kstate.get(state, kstate.TRACE_LEN)
     if n < kstate.TRACE_MAX {
-        kstate.set8(state + kstate.TRACE_OFF + n, v as u8)
+        // RUNDE ALLTAG, NEBENBEFUND: `v as u8` ist bei Firn eine GEPRUEFTE
+        // Umwandlung -- die erste Prozessnummer ueber 255 haelt den Kern
+        // mit "integer overflow casting 'u64 as u8'" an. GEMESSEN in
+        // tools/init/run.sh, Abschnitt 3 (neun Dienste, einer stuerzt
+        // fuenfmal, einer endet immer sauber und wird immer wieder neu
+        // gestartet): die Nummern laufen ueber 255, bevor die Spur ihre
+        // 4096 Plaetze voll hat, und die Maschine stand -- rc 124 statt
+        // ACPI 0, und alle 29 Zusagen danach rot, auf merge6 genauso.
+        // Die Spur ist ein Beleg fuer die Verzahnung, kein Verzeichnis:
+        // das untere Oktett der Nummer belegt sie genauso.
+        kstate.set8(state + kstate.TRACE_OFF + n, (v & 0xFF) as u8)
         kstate.set(state, kstate.TRACE_LEN, n + 1)
     }
 }
@@ -818,10 +1269,16 @@ fn frame_build(state: u64, ktop: u64, entry: u64, a0: u64, a1: u64,
 // is the simplest one that cannot deadlock: NO LOCK IS EVER HELD WHILE
 // ANOTHER IS TAKEN.
 fn create(state: u64, kind: u64, prio: u64, arg: u64, entry: u64) -> u64 {
-    let stack: u64 = mem.frame_run(state, KSTACK_FRAMES)
-    if stack == 0 {
+    // RUNDE LEISTE: EIN RAHMEN MEHR ALS DER STAPEL BRAUCHT. Der
+    // unterste ist die Wache und wird nie beschrieben; `T_KSTACK`
+    // zeigt auf den ERSTEN Rahmen des Stapels, also einen darueber.
+    // `free_stack` gibt beide zusammen zurueck.
+    let roh: u64 = mem.frame_run(state, KSTACK_FRAMES + 1)
+    if roh == 0 {
         return 0
     }
+    let stack: u64 = roh + mem.FRAME_SIZE
+    guard_paint(stack)
     // RUNDE AVX: der Vektorbereich kommt aus demselben Grund VOR die
     // Sperre wie der Stapel -- der Rahmenverwalter hat eine eigene, und
     // dieser Kern haelt nie zwei Sperren gleichzeitig. `area_new`
@@ -905,7 +1362,90 @@ fn create(state: u64, kind: u64, prio: u64, arg: u64, entry: u64) -> u64 {
     }
     tc_set(state, slot, TC_CPU, kstate.MAX_CPUS)
     tc_set(state, slot, TC_MASK, 0)
-    tc_set(state, slot, TC_AFF, ANY_CPU)
+    // ================================================== RUNDE BLECHKERN
+    // RING 3 BLEIBT AUF DEM STARTKERN -- UND JETZT STEHT ES AUCH IM CODE.
+    //
+    // `kernel/arch/x86_64/smp.fi` schreibt seit Runde K5 als ausdrueck-
+    // liche Bedingung dieses Kerns hin: "Ring 3 stays on the boot
+    // processor ... the application processors run kernel tasks". Der
+    // Grund steht daneben: `syscall_entry` in isr.s holt den Kernstapel
+    // aus EINEM festen Wort der Datenseite (`kdata + KSTACK_CUR`), und
+    // `set_kernel_stack` schreibt dieses Wort nur, wenn Kern 0 es
+    // schreibt.
+    //
+    // DIE BEDINGUNG WURDE NIE DURCHGESETZT. Diese Zeile stand auf
+    // ANY_CPU -- fuer JEDE Gattung, also auch fuer K_USER. Ein
+    // Anwendungskern durfte damit einen Ring-3-Prozess nehmen; dessen
+    // naechster `syscall` landete auf dem Kernstapel der Aufgabe, die
+    // gerade auf Kern 0 lief. Zwei Kerne auf einem Stapel, und der
+    // naechste Ruecksprung geht irgendwohin.
+    //
+    // GEMESSEN, am ausgelieferten Abbild b2addaf7, Limine/UEFI, KVM,
+    // `-cpu host`, sonst identisch, nur die Kernzahl verschieden:
+    //
+    //     -smp 1   791 Zeilen Protokoll, NULL Ausnahmen, Leiste laeuft
+    //     -smp 4   Absturz: #DB rip=0x100453, danach #GP und #UD
+    //     -smp 8   Absturz: user fault err=0xf, #DB, #DF, lock stuck
+    //
+    // Justins Foto vom 05.09. zeigt denselben Abbruch an derselben
+    // Stelle: die letzte Zeile ist `taskbar: shape file= ...`, dann
+    // `VEK 6 #UD RIP 0x80` auf KERN 2 in einer Aufgabe der Gattung 1.
+    // 0x80 ist keine Adresse, sondern der Rest einer ueberschriebenen
+    // Ruecksprungkette.
+    //
+    // Die Kernaufgaben (K_WORKER, K_GRIND, K_NETD, K_AIO, ...) bleiben
+    // auf ALLEN Kernen -- sie verlassen Ring 0 nie und haben mit
+    // KSTACK_CUR nichts zu tun. Verloren geht also nichts ausser der
+    // Wanderung von Benutzerprozessen, und die war nie zugesagt.
+    //
+    // Aufgehoben wird das erst von der Runde, die KSTACK_CUR je Kern
+    // fuehrt (GS-Basis oder zweiter Tabellenzugriff im Einsprung, in
+    // Assembler, vor dem ersten Stapel) -- genau wie es smp.fi sagt.
+    // RUNDE VIELKERN: UND JETZT DARF RING 3 WIEDER AUF JEDEN KERN.
+    //
+    // Runde BLECHKERN hat hier `TC_AFF = 0` fuer K_USER eingetragen,
+    // weil `syscall_entry` den Kernstapel aus EINEM Wort fuer die ganze
+    // Maschine holte. Dieses Wort liegt jetzt im `cpu`-Satz je Kern
+    // (`set_kernel_stack` weiter oben, `%gs:CPU_KSTACK` in isr.s), und
+    // ebenso die RSP0 im Aufgabenzustandssegment jedes Kerns. Die
+    // Bedingung, die die Bindung noetig machte, gibt es nicht mehr.
+    //
+    // `sched.ring3_fremd` (Tafelzeile 12, `R3F`) misst weiter, auf wie
+    // vielen Kernen Ring 3 wirklich gelaufen ist -- die Zahl ist ab
+    // dieser Runde ein ERWARTETER Wert groesser null und keine Alarm-
+    // zahl mehr. Was NICHT null sein darf, misst `R3W`: Kerne, die
+    // Ring 3 genommen haben, OHNE eine eigene GS-Basis zu haben.
+    // DEFAULT: RING 3 BLEIBT AUF KERN 0. `r3alle` schaltet es frei.
+    //
+    // RUNDE GLYPHE, RICHTIGSTELLUNG: DIESER ABSATZ IST VON VIELKERN 2
+    // UND STIMMT SEIT VIELKERN 3 NICHT MEHR. `static mut ring3_alle`
+    // steht achthundert Zeilen weiter oben auf **1** -- Ring 3 laeuft
+    // seither ohne jedes Wort auf ALLEN Kernen, und `r3eins` ist die
+    // Rueckfallebene. Der Absatz bleibt stehen, weil er die
+    // Begruendung von damals enthaelt; wer die geltende Vorgabe sucht,
+    // liest die Zeile `static mut ring3_alle: u64 = 1` und den Absatz
+    // darueber.
+    //
+    // Es hat eine halbe Stunde gekostet: der Pruefstand dieser Runde
+    // setzte `r3alle` ausdruecklich, WEIL hier stand, dass es sonst
+    // nicht gilt. Es gilt ohnehin.
+    //
+    // Der Unterbau steht und ist belegt (Kernstapel je Kern ueber die
+    // GS-Basis, RSP0 je Kern, `R3K 4` und `R3K 7` mit null Ausnahmen).
+    // Mit dem VOLLEN Schreibtisch ist er es NICHT: `/bin/taskbar`
+    // bekommt beim Start `pid=0`, zweimal von zwei Laeufen -- der
+    // Prozess wird gar nicht erst angelegt, und die Leiste fehlt.
+    // Warum, ist nicht gefunden.
+    //
+    // Also faehrt das Abbild, das Justin brennt, wie das der Runde
+    // BLECHKERN: Ring 3 auf Kern 0. `r3alle` auf der Kernel-Befehlszeile
+    // gibt alle Kerne frei -- fuer den naechsten, der die Ursache
+    // sucht, und ohne einen zweiten Kernel bauen zu muessen.
+    if kind == K_USER && ring3_alle == 0 {
+        tc_set(state, slot, TC_AFF, 0)
+    } else {
+        tc_set(state, slot, TC_AFF, ANY_CPU)
+    }
     clear_signals(state, slot)
     atomic.lock_give(state, atomic.L_SCHED)
     irq_restore(flags)
@@ -955,11 +1495,110 @@ fn clear_signals(state: u64, i: u64) {
 }
 
 fn free_stack(state: u64, stack: u64) {
+    if stack == 0 {
+        return
+    }
+    // RUNDE LEISTE: die Wache liegt EINEN Rahmen unter `stack` und
+    // wird mit zurueckgegeben. Wer sie vergaesse, verloere je
+    // Aufgabenstart vier Kilobyte -- und `tools/wm/run.sh` zaehlt die
+    // freien Rahmen vorher und nachher.
     var k: u64 = 0
-    while k < KSTACK_FRAMES {
-        mem.frame_free(state, stack + k * mem.FRAME_SIZE)
+    while k < KSTACK_FRAMES + 1 {
+        mem.frame_free(state, stack - mem.FRAME_SIZE + k * mem.FRAME_SIZE)
         k = k + 1
     }
+}
+
+// ==================================================== RUNDE LEISTE
+// DIE WACHE: FUELLEN, PRUEFEN, MELDEN.
+//
+// Gefuellt wird beim Anlegen der Aufgabe, geprueft bei jedem
+// Zeitgeberschlag fuer die LAUFENDE Aufgabe. Zwei Lesezugriffe --
+// das oberste und das unterste Wort der Seite. Das oberste ist das,
+// was ein Ueberlauf zuerst trifft (der Stapel waechst nach unten);
+// das unterste faengt einen Sprung ueber die Seite hinweg.
+fn guard_paint(stack: u64) {
+    let g: u64 = stack - mem.FRAME_SIZE
+    var w: u64 = g
+    while w < stack {
+        __mmio_write64(w as *mut u64, GUARD_PAINT)
+        w = w + 8
+    }
+}
+
+// Wie oft eine Wache gebrochen wurde, und von wem zuletzt. Beides geht
+// auf die Messtafel: Justins Brett hat keine serielle Leitung.
+static mut wache_brueche: u64 = 0
+static mut wache_pid: u64 = 0
+static mut wache_tief: u64 = 0
+
+fn guard_broken(state: u64, i: u64) -> bool {
+    let stack: u64 = tget(state, i, T_KSTACK)
+    if stack == 0 {
+        return false
+    }
+    let g: u64 = stack - mem.FRAME_SIZE
+    if __mmio_read64((stack - 8) as *mut u64) != GUARD_PAINT {
+        return true
+    }
+    return __mmio_read64(g as *mut u64) != GUARD_PAINT
+}
+
+// Wie tief der Ueberlauf ging: das erste Wort der Wache VON OBEN, das
+// nicht mehr das Muster traegt. 0 = die Wache ist unversehrt.
+fn guard_depth(state: u64, i: u64) -> u64 {
+    let stack: u64 = tget(state, i, T_KSTACK)
+    if stack == 0 {
+        return 0
+    }
+    let g: u64 = stack - mem.FRAME_SIZE
+    var p: u64 = stack
+    while p > g {
+        p = p - 8
+        if __mmio_read64(p as *mut u64) != GUARD_PAINT {
+            return stack - p
+        }
+    }
+    return 0
+}
+
+// Aus `on_tick` gerufen, fuer die laufende Aufgabe. Meldet EINMAL je
+// Bruch auf die Leitung und faerbt die Wache danach neu -- sonst
+// stuende dieselbe Zeile hundertmal je Sekunde da und der Rest der
+// Ausgabe waere weg.
+fn guard_check(state: u64, i: u64) {
+    if !guard_broken(state, i) {
+        return
+    }
+    var s_a: [u8; 35] = "KERNSTAPEL UEBERGELAUFEN: aufgabe \0"
+    var s_p: [u8; 7] = "  pid=\0"
+    var s_t: [u8; 8] = "  tief=\0"
+    var s_k: [u8; 10] = "  kstack=\0"
+    wache_brueche = wache_brueche + 1
+    wache_pid = tget(state, i, T_PID)
+    wache_tief = guard_depth(state, i)
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(i)
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(wache_pid)
+    serial.puts((&s_t[0]) as u64)
+    serial.dec(wache_tief)
+    serial.puts((&s_k[0]) as u64)
+    serial.hex(tget(state, i, T_KSTACK))
+    serial.nl()
+    guard_paint(tget(state, i, T_KSTACK))
+}
+
+fn guard_faults() -> u64 {
+    return wache_brueche
+}
+
+fn guard_last_pid() -> u64 {
+    return wache_pid
+}
+
+fn guard_last_depth() -> u64 {
+    return wache_tief
 }
 
 // ROUND K1: the deepest this task's kernel stack has ever been, in
@@ -1008,14 +1647,36 @@ fn start(state: u64, i: u64) -> bool {
 // that wrote its kernel task's stack into that word would send the next
 // system call of a ring 3 process onto a stack somebody else is standing
 // on.
+// RUNDE VIELKERN: BEIDES JE KERN, UND DAMIT FAELLT DIE BINDUNG AN KERN 0.
+//
+// Der obige Absatz beschreibt den Zustand VOR dieser Runde und bleibt
+// stehen, weil er die Begruendung enthaelt. Was sich geaendert hat:
+//
+//   * Der Kernstapel steht nicht mehr in EINEM Wort der Datenseite,
+//     sondern im `cpu`-Satz DIESES Kerns (`C_KSTACK`). `syscall_entry`
+//     erreicht ihn ueber die GS-Basis, die auf denselben Satz zeigt.
+//   * Die RSP0 wird in das Aufgabenzustandssegment DIESES Kerns
+//     geschrieben (`C_TSSADDR`, von `smp.tables` gesetzt). Bisher
+//     bekam nur das des Startkerns eine -- eine Unterbrechung aus
+//     Ring 3 auf einem Anwendungskern waere sonst auf dessen
+//     Startstapel gelandet, also mitten in seine Leerlaufaufgabe.
+//   * `kstate.KSTACK_CUR` wird noch mitgeschrieben, aber von niemandem
+//     mehr gelesen. Es bleibt als Anzeige stehen, bis eine Runde die
+//     Datenseite aufraeumt.
 fn set_kernel_stack(state: u64, ktop: u64) {
-    if cpu.here(state) != 0 {
-        return
+    let me: u64 = cpu.here(state)
+    cpu.set(state, me, cpu.C_KSTACK, ktop)
+    // Ein gestarteter Kern traegt seins seit `smp.tables` ein; eine 0
+    // heisst also "das ist der Startkern", und der hat das aus `idt`.
+    var tss: u64 = cpu.get(state, me, cpu.C_TSSADDR)
+    if tss == 0 {
+        tss = kstate.get(state, kstate.TSS)
     }
-    kstate.set(state, kstate.KSTACK_CUR, ktop)
-    let tss: u64 = kstate.get(state, kstate.TSS)
     if tss != 0 {
         __mmio_write64((tss + 4) as *mut u64, ktop)
+    }
+    if me == 0 {
+        kstate.set(state, kstate.KSTACK_CUR, ktop)
     }
 }
 
@@ -1105,7 +1766,7 @@ fn pick(state: u64) -> u64 {
     while k <= n {
         let i: u64 = (cur + k) % n
         if tget(state, i, T_KIND) != K_IDLE && tget(state, i, T_STATE) == S_READY
-        && may_run(state, i, me) {
+        && may_run(state, i, me) && darf_ring3(state, i, me) {
             return i
         }
         k = k + 1
@@ -1154,10 +1815,56 @@ fn switch_to(state: u64, from: u64, to: u64) {
     // Abbild findet null xmm/ymm/zmm), also darf zwischen dem Laden und
     // dem Stapelwechsel noch Firn-Code stehen.
     fpu.switch(state, me, fpu_area(state, from), fpu_area(state, to))
+    // RUNDE LAUFZEIT: DIE FS-BASIS, aus demselben Grund wie die
+    // Vektorregister eine Zeile darueber -- sie steht in einem
+    // Modellregister des PROZESSORS und nicht im Aufgabensatz, also
+    // faende der naechste Faden sonst den Fadenzeiger des vorigen vor.
+    // Kostet nur etwas, wenn eine Aufgabe wirklich eine gesetzt hat.
+    fsbase_apply(state, to)
     asm("call rax", in("rax") vector(state, V_SWITCH),
         in("rdi") task_at(state, from) + T_RSP,
         in("rsi") tget(state, to, T_RSP), clobber("memory"))
 }
+
+// RUNDE LAUFZEIT: die FS-Basis dieser Aufgabe in den Prozessor legen.
+//
+// IA32_FS_BASE ist 0xC0000100. Geschrieben wird ueber `msr.wr`, also
+// ueber den Faengerpfad aus `msr.fi`: ein Prozessor, der das Register
+// nicht annimmt, gibt `false` zurueck statt die Maschine mit einem #GP
+// anzuhalten.
+//
+// EINE AUFGABE OHNE TLS KOSTET NICHTS. Jedes Osum-eigene Programm hat
+// `T_FSBASE == 0`, und dann passiert hier gar nichts -- die Basis des
+// vorigen Fadens bleibt stehen, und das ist richtig so: sie ist fuer
+// ein Programm, das `%fs` nie anfasst, nicht zu unterscheiden.
+fn fsbase_apply(state: u64, i: u64) {
+    if i >= kstate.MAX_TASKS {
+        return
+    }
+    let b: u64 = tget(state, i, T_FSBASE)
+    // RUNDE FREMDLAND: AUCH DIE NULL WIRD GESCHRIEBEN, und das ist eine
+    // Korrektur an LAUFZEIT.
+    //
+    // Der Satz von damals -- "eine Aufgabe ohne TLS kostet nichts, die
+    // Basis des vorigen Fadens bleibt stehen, sie ist fuer ein Programm,
+    // das %fs nie anfasst, nicht zu unterscheiden" -- ist genau einmal
+    // falsch, und der Fall ist gemessen: laeuft nach einem
+    // musl-Programm ein Osum-eigenes, steht in IA32_FS_BASE weiter ein
+    // Zeiger in den Adressraum des musl-Programms. Solange niemand %fs
+    // liest, faellt das nicht auf; ein Programm, das es doch tut (oder
+    // ein spaeterer Kernel-Zweig, der es tut), laese dann fremde Seiten
+    // -- und zwar STILL, weil die Seite ja da ist.
+    //
+    // Ein `wrmsr` je Aufgabenwechsel ist der Preis. Er ist klein und die
+    // Alternative ist ein Register, dessen Inhalt davon abhaengt, wer
+    // vorher lief. Sichtbar wird der Unterschied bei `fork` und
+    // `execve`: beide setzen `T_FSBASE` jetzt ausdruecklich (das Kind
+    // erbt, das neue Abbild faengt bei 0 an), und ohne diese Zeile
+    // haette das Setzen auf 0 keine Wirkung.
+    msr.wr(state, MSR_FS_BASE, b)
+}
+
+const MSR_FS_BASE: u64 = 0xC0000100
 
 // RUNDE AVX: der Vektorbereich einer Aufgabe. Zwei Zeilen, damit
 // `proc.fi` und `trap.fi` ihn erreichen, ohne T_FPU selbst zu kennen.
@@ -1274,6 +1981,21 @@ fn on_tick(state: u64) {
     }
     let cur: u64 = current(state)
     tset(state, cur, T_TICKS, tget(state, cur, T_TICKS) + 1)
+    // RUNDE WERKZEUGE: DERSELBE SCHLAG, EIN ZWEITES MAL GEZAEHLT --
+    // aber nur, wenn ihn die Leerlaufaufgabe bekommen hat. `C_TICKS`
+    // (drei Zeilen weiter oben, derselbe Kern, dieselbe Unterbrechung)
+    // ist die Gesamtzeit dieses Kerns; das hier ist der Teil davon, in
+    // dem er nichts zu tun hatte. Die Auslastung eines Kerns ist die
+    // Differenz zweier Differenzen, und ohne diese Zeile fehlt die
+    // Haelfte davon. Zwei Zeilen im Zeitgeber, kein Aufruf, keine
+    // Sperre -- der Zaehler gehoert dem Kern, auf dem er hochgeht.
+    if tget(state, cur, T_KIND) == K_IDLE {
+        cpu.add(state, me, cpu.C_IDLETICKS, 1)
+    }
+    // RUNDE LEISTE: zwei Lesezugriffe je Schlag. Der Preis dafuer,
+    // dass ein Kernstapel, der unten herauslaeuft, nicht mehr still
+    // irgendwo im Rechner Schaden anrichtet.
+    guard_check(state, cur)
     if kstate.get(state, kstate.PREEMPT) == 0 {
         atomic.lock_give(state, atomic.L_SCHED)
         return
@@ -1290,9 +2012,81 @@ fn on_tick(state: u64) {
 
 // ---------------------------------------------------------- blocking
 
+// ================================================ RUNDE BLECHEINGABE
+// ============ EIN SCHLAEFER AN EINEM TOTEN ZEITGEBER IST EINE LEICHE.
+//
+// Geweckt wird ausschliesslich in `on_tick`, und `on_tick` kommt
+// ausschliesslich aus dem Zeitgeberbehandler. Schlaegt der nicht mehr,
+// dann schlafen `wait_wm` (die Schreibtischschleife) und die
+// Taskleiste (`ulib.sleep_ms(25)`) FUER IMMER: kein Bild, keine
+// Eingabe, keine Messtafel -- und die Uhr steht auf der Minute, in der
+// es passiert ist.
+//
+// Deshalb wird hier gemessen statt vertraut. Bewegt sich die
+// Markenzahl in einem am Zyklenzaehler abgelesenen Fenster nicht, wird
+// NICHT geschlafen: die Aufgabe gibt den Prozessor einmal ab und
+// kehrt zurueck. Das ist langsamer und dreht leer -- aber ein
+// Schreibtisch, der leer dreht, ist ein Schreibtisch, und ein
+// Schreibtisch, der schlaeft, ist ein Standbild.
+//
+// Die Zahl unten ist grosszuegig: bei 100 Hz kommt alle 10 ms eine
+// Marke; 300 ms ohne eine einzige heisst, dass etwas kaputt ist und
+// nicht, dass die Maschine beschaeftigt war.
+// RUNDE MERGE-7: JE KERN statt drei geteilte `static mut`. Der Wachhund
+// beobachtet, ob DIESER Kern noch Zeitgebermarken sieht -- das ist eine
+// Frage je Kern, keine gemeinsame, und ein gemeinsamer Zustand ohne
+// Sperre hiess: Kern A schreibt `tote_zeit` mit seinem TSC-Wert, Kern B
+// liest ihn im selben Augenblick und zieht seinen EIGENEN, kleineren
+// TSC-Wert ab -- `t - tote_zeit` unterlaeuft null. Siehe kernel/cpu.fi,
+// C_TOTMARKE/C_TOTZEIT/C_TOTZAHL, fuer die Messung, die das zeigt.
+fn timer_tot(state: u64) -> bool {
+    let hz: u64 = apic.tsc_hz(state)
+    if hz == 0 {
+        return false
+    }
+    let k: u64 = cpu.here(state)
+    let jetzt: u64 = kstate.get(state, kstate.TICKS)
+    let t: u64 = apic.tsc()
+    let marke: u64 = cpu.get(state, k, cpu.C_TOTMARKE)
+    if jetzt != marke {
+        cpu.set(state, k, cpu.C_TOTMARKE, jetzt)
+        cpu.set(state, k, cpu.C_TOTZEIT, t)
+        return false
+    }
+    let zeit: u64 = cpu.get(state, k, cpu.C_TOTZEIT)
+    if zeit == 0 {
+        cpu.set(state, k, cpu.C_TOTZEIT, t)
+        return false
+    }
+    if t > zeit && t - zeit > hz / 3 {
+        cpu.add(state, k, cpu.C_TOTZAHL, 1)
+        return true
+    }
+    return false
+}
+
+// Wie oft ein Schlaf abgelehnt wurde, weil keine Marke mehr kam. Steht
+// auf der Messtafel: ist die Zahl groesser als null, war der Zeitgeber
+// wirklich stehen -- gemessen, nicht vermutet.
+// RUNDE MERGE-7: Summe ueber alle Kerne -- C_TOTZAHL liegt jetzt je
+// Kern, die Messtafel will trotzdem EINE Zahl fuer die ganze Maschine.
+fn tote_schlaefe(state: u64) -> u64 {
+    var summe: u64 = 0
+    var k: u64 = 0
+    while k < cpu.count(state) {
+        summe = summe + cpu.get(state, k, cpu.C_TOTZAHL)
+        k = k + 1
+    }
+    return summe
+}
+
 // `ticks` timer ticks, 10 ms each at 100 Hz. Zero is a yield.
 fn sleep_ticks(state: u64, ticks: u64) {
     if ticks == 0 {
+        yield_now(state)
+        return
+    }
+    if timer_tot(state) {
         yield_now(state)
         return
     }

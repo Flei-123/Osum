@@ -29,7 +29,8 @@ profile kernel
 import ulib
 
 export {
-    crc32, deflate, store, inflate, MAXBITS,
+    crc32, crc32_fort, deflate, store, inflate, MAXBITS,
+    strom_start, strom_block, strom_ende, strom_pos, strom_leeren,
     E_OK, E_INPUT, E_ROOM, E_FORMAT
 }
 
@@ -76,6 +77,24 @@ static mut ready: u64 = 0
 // eins, und jede Basis ist die vorige plus 2^Zusatzbits. Nur der letzte
 // Laengencode faellt heraus (258 ohne Zusatzbits), und genau das ist die
 // Stelle, an der eine abgeschriebene Tabelle einen Tippfehler hat.
+// Dieselbe Pruefsumme, aber in Stuecken: der Stand geht hinein und
+// kommt heraus. `crc32(p, n)` ist `crc32_fort(0, p, n)`.
+fn crc32_fort(stand: u64, p: u64, n: u64) -> u64 {
+    var crc: u64 = (stand ^ M32) & M32
+    var i: u64 = 0
+    while i < n {
+        crc = crc ^ ((*((p + i) as *mut u8)) as u64)
+        var k: u64 = 0
+        while k < 8 {
+            let mask: u64 = 0 -% (crc & 1)
+            crc = (crc >> 1) ^ (0xEDB88320 & mask)
+            k = k + 1
+        }
+        i = i + 1
+    }
+    return (crc ^ M32) & M32
+}
+
 fn setup() {
     if ready == 1 {
         return
@@ -599,8 +618,35 @@ fn hash3(p: u64, at: u64) -> u64 {
 
 // Einpacken mit den FESTEN Baeumen, ein einziger Block. Gibt E_OK oder
 // E_ROOM; `out_len` bekommt die Laenge.
+// Einpacken mit den FESTEN Baeumen, ein einziger Block. Gibt E_OK oder
+// E_ROOM; `out_len` bekommt die Laenge.
 fn deflate(in_p: u64, in_n: u64, out_p: u64, out_cap: u64,
     out_len: u64) -> u64 {
+    strom_start(out_p, out_cap)
+    let r: u64 = strom_block(in_p, in_n, true)
+    if r != E_OK {
+        return r
+    }
+    return strom_ende(out_len)
+}
+
+// ================================== RUNDE ALLTAG: DEFLATE IN STUECKEN
+//
+// `deflate` will die ganze Eingabe auf einmal und den ganzen Ausgang in
+// einem Puffer. Fuer ein Bildschirmfoto ist beides zu viel: 1280 mal
+// 800 Bildpunkte sind vier Megabyte ungepackt, und ein Prozess dieses
+// Systems hat sechs.
+//
+// Also derselbe Packer, aber in Bloecken: `strom_start` einmal,
+// `strom_block` je Streifen (jeder ein eigener deflate-Block mit
+// eigenen Uebereinstimmungen, deshalb in sich abgeschlossen),
+// dazwischen die fertigen Oktette wegschreiben und `strom_leeren`.
+// Der BITSTAND BLEIBT dabei stehen -- deshalb duerfen die Bloecke
+// aneinandergehaengt werden, ohne dass ein Entpacker aus dem Tritt
+// kommt. Das ist der ganze Unterschied zu "jeden Streifen einzeln
+// packen", was einen Strom aus lauter Schlussbloecken gaebe, von dem
+// jeder Entpacker nur den ersten liest.
+fn strom_start(out_p: u64, out_cap: u64) {
     setup()
     dst = out_p
     dpos = 0
@@ -608,6 +654,27 @@ fn deflate(in_p: u64, in_n: u64, out_p: u64, out_cap: u64,
     wbuf = 0
     wcnt = 0
     oops = E_OK
+}
+
+// Wieviele fertige Oktette im Puffer stehen.
+fn strom_pos() -> u64 {
+    return dpos
+}
+
+// Sie sind weggeschrieben -- von vorn. Die angefangenen BITS bleiben,
+// wo sie sind (in `wbuf`), sonst waere der Strom hin.
+fn strom_leeren() {
+    dpos = 0
+}
+
+fn strom_block(in_p: u64, in_n: u64, letzt: bool) -> u64 {
+    var f: u64 = 0
+    if letzt {
+        f = 1
+    }
+    // Die Streuwerttabellen JE BLOCK leeren: eine Uebereinstimmung darf
+    // nur in diesen Block zurueckzeigen, sonst waere er nicht fuer sich
+    // lesbar.
     var i: u64 = 0
     while i < WSIZE {
         head[(i) as usize] = 0
@@ -618,7 +685,7 @@ fn deflate(in_p: u64, in_n: u64, out_p: u64, out_cap: u64,
         prev[(i) as usize] = 0
         i = i + 1
     }
-    put_bits(1, 1) // BFINAL
+    put_bits(f, 1) // BFINAL nur im letzten
     put_bits(1, 2) // feste Baeume
     var at: u64 = 0
     while at < in_n && oops == E_OK {
@@ -674,6 +741,10 @@ fn deflate(in_p: u64, in_n: u64, out_p: u64, out_cap: u64,
         }
     }
     put_code(0, 7) // das Zeichen 256: Ende des Blocks
+    return oops
+}
+
+fn strom_ende(out_len: u64) -> u64 {
     if wcnt > 0 {
         emit(wbuf & 255)
         wbuf = 0

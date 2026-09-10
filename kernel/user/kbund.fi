@@ -1,0 +1,595 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/kbund.fi -- RUNDE SYNC: das Konto auf diesem Geraet.
+//
+// EIN Modul, das sowohl `/bin/sync` als auch `/bin/tresor` benutzen --
+// damit es die Schluesselkette genau EINMAL gibt. Zwei Programme mit
+// zwei Fassungen derselben Ableitung waeren zwei Fassungen, die eines
+// Tages auseinanderlaufen, und der Tag, an dem das auffaellt, ist der
+// Tag, an dem jemand nicht mehr an seine Daten kommt.
+//
+// ================================================ WAS EIN KONTO HIER IST
+//
+// FAST NICHTS. Das ist Absicht und folgt dem Satz aus der Roadmap 6.1e,
+// den diese Runde nicht antasten darf:
+//
+//     "Ein Konto ist eine Bequemlichkeit, es ist nie eine Bedingung."
+//
+// Ein Konto ist hier eine DATEI mit einem Salz und zwei Huellen. Kein
+// Server wird gefragt, keine Anmeldung findet statt, kein Name muss
+// irgendwo eingetragen sein. `/konto/KOPF` anlegen kann jeder, jederzeit,
+// ohne Netz. Was die Runde KONTO parallel baut (Anbieter, Sitzung,
+// Token), ist die BEQUEMLICHKEIT darueber und wird hier nur an genau
+// drei Stellen gebraucht -- siehe `docs/SYNC.md`, Abschnitt "Die
+// Uebergabe".
+//
+// ===================================================== DIE KOPFDATEI
+//
+//     osumkonto1
+//     kdf scrypt <N> <r> <p>
+//     salz    <32 hex>          16 Oktette, frisch je Konto
+//     pruef   <64 hex>          K_PRUEF -- daran wird eine falsche
+//                               Passphrase in der ersten Sekunde erkannt
+//     pnonce  <48 hex>          fuer die Huelle unter der Passphrase
+//     phuelle <96 hex>          MK, eingepackt unter der Passphrase
+//     rnonce  <48 hex>          fuer die Huelle unter dem Code
+//     rhuelle <96 hex>          MK, eingepackt unter dem Wiederherstellungscode
+//     anbieter <eigen|jarvis|xoffi>
+//     ziel <pfad oder URL>
+//
+// SIE IST KLARTEXT UND DARF ES SEIN. Es steht nichts darin, was die
+// Passphrase nicht schon schuetzt: die beiden Huellen sind ohne
+// Passphrase oder Code 48 Oktette Rauschen mit einem Siegel daran, und
+// `pruef` ist eine HKDF-Ausgabe aus einem Schluessel, den niemand hat.
+// Ein Kopf, den ein Mensch mit `cat` ansehen kann, ist ausserdem ein
+// Kopf, den ein Mensch reparieren kann.
+//
+// ================================================ ZWEI WEGE ZU EINEM MK
+//
+//     Passphrase --scrypt--> pass_key --oeffnet--> phuelle --> MK
+//     Code       --base32-->  rkey    --oeffnet--> rhuelle --> MK
+//
+// Der Hauptschluessel MK ist ZUFALL und kommt aus `getrandom`, nicht aus
+// der Passphrase. Drei Dinge folgen daraus, und alle drei sind der Grund
+// fuer diesen Umweg:
+//
+//   1. PASSPHRASE AENDERN heisst 48 Oktette neu schreiben. Nicht: jeden
+//      Block neu verschluesseln.
+//   2. DER WIEDERHERSTELLUNGSCODE ist ein ZWEITER, gleichberechtigter
+//      Weg -- und nicht ein Abdruck der Passphrase, den man auch raten
+//      koennte.
+//   3. EINE SCHWACHE PASSPHRASE schwaecht die Huelle, nicht die Daten.
+//      Das ist ein kleiner Trost und ein echter: wer die Huelle knackt,
+//      hat alles; wer sie nicht knackt, hat nichts, egal wieviele Bloecke
+//      er sieht.
+//
+// OHNE BEIDES SIND DIE DATEN WEG. Nicht "schwer wiederherzustellen" --
+// WEG. Es gibt keinen Notausgang, keinen Hinterschluessel und keine
+// Stelle, die helfen koennte, weil es diese Stelle absichtlich nicht
+// gibt. `sync konto neu` schreibt diesen Satz hin und verlangt, dass er
+// bestaetigt wird, BEVOR ein Konto entsteht. Das ist Teil der Runde und
+// kein Nachgedanke.
+//
+// ================================================================ EHRLICH
+//
+// B1 DIE PASSPHRASE STEHT AUF DER BEFEHLSZEILE. `ps` sieht sie, die
+//    Shell merkt sie sich. `pw.fi` hat `read_pass` (Eingabe ohne Echo),
+//    und die Oberflaeche der Runde ruft es; die Befehlszeile bleibt der
+//    Weg fuer Skripte und fuer den Testlauf. Dieselbe Grenze wie in
+//    `bsec.fi` B3, und sie wird hier genannt statt geerbt.
+// B2 N = 4096, r = 8 IST DER VOREINGESTELLTE PREIS -- 4 MiB, und im
+//    System gemessen rund 500 ms (`tools/sync/tresorzeit.sh`, KVM).
+//    HIER STAND EINMAL N = 16384, und das war schlicht falsch: 16 MiB
+//    passen nicht in die grosse Arena (siehe B3), `sync neu` scheitert
+//    damit, und danach geht der Tresor nie auf. Gemessen, nicht
+//    vermutet -- der Testlauf faehrt den Fall als Gegenprobe.
+//    Der uebrige Testlauf faehrt mit N = 256, weil er sonst in QEMU
+//    ewig braucht; WER N KLEINER SETZT, MACHT SEIN KONTO SCHWAECHER,
+//    und die Zahl steht im Kopf, damit man es sieht.
+//    EHRLICH GESAGT: 4 MiB sind WENIGER, als man heute fuer eine
+//    Passphrase empfehlen wuerde (uebliche Empfehlung: 16 MiB und
+//    mehr). Das ist eine Grenze dieses Kernels und keine Entscheidung
+//    fuer Bequemlichkeit; sie steht in docs/RUNDE-SYNC.md.
+// B3 DER ARBEITSSPEICHER FUER scrypt KOMMT AUS `mmap` (die grosse Arena
+//    aus Runde K16, 6 MiB). Damit ist N * 128 * r <= 6 MiB, also bei
+//    r = 8 hoechstens N = 4096. Fuer mehr braeuchte dieser Ring mehr
+//    Adressraum; das ist eine Grenze DIESES KERNELS und keine von
+//    scrypt, und sie steht in `docs/RUNDE-SYNC.md` unter den Messungen.
+
+profile kernel
+
+import ulib
+import libc.io
+import libc.errno
+import libc.mem
+import crypto.scrypt
+import sync.kette
+
+export {
+    kb_neu, kb_oeffnen, kb_oeffnen_code, kb_da, kb_bund, kb_key,
+    kb_ziel, kb_anbieter, kb_zu, kb_n, kb_r, kb_salz,
+    kb_code_letzt, kb_kopfpfad,
+    hex_aus, hex_ein, pfad2, num_aus, num_ein,
+    A_EIGEN, A_JARVIS, A_XOFFI, PFADMAX
+}
+
+const PFADMAX: u64 = 256
+const SYS_GETRANDOM: u64 = 318
+
+const A_EIGEN: u64 = 0
+const A_JARVIS: u64 = 1
+const A_XOFFI: u64 = 2
+
+static mut bund: [u8; 160] = [0 as u8; 160]
+static mut offen: bool = false
+static mut c_salz: [u8; 16] = [0 as u8; 16]
+static mut c_pruef: [u8; 32] = [0 as u8; 32]
+static mut c_pnonce: [u8; 24] = [0 as u8; 24]
+static mut c_phuelle: [u8; 48] = [0 as u8; 48]
+static mut c_rnonce: [u8; 24] = [0 as u8; 24]
+static mut c_rhuelle: [u8; 48] = [0 as u8; 48]
+static mut c_n: u64 = 4096
+static mut c_r: u64 = 8
+static mut c_anbieter: u64 = 0
+static mut c_ziel: [u8; 256] = [0 as u8; 256]
+static mut c_code: [u8; 80] = [0 as u8; 80] // der zuletzt erzeugte Code
+static mut kpfad: [u8; 256] = [0 as u8; 256]
+static mut zeile: [u8; 512] = [0 as u8; 512]
+static mut rdc: [u8; 528] = [0 as u8; 528]
+static mut p2: [u8; 256] = [0 as u8; 256]
+
+fn ld8(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn st8(p: u64, i: u64, v: u64) {
+    *((p + i) as *mut u8) = (v & 255) as u8
+}
+
+// `<verz>/<name>` -- eine Stelle, damit es niemand zweimal leicht anders
+// zusammensetzt.
+fn pfad2(verz: u64, name: u64) -> u64 {
+    var sl: [u8; 2] = "/\0"
+    ulib.strncpy((&p2[0]) as u64, verz, PFADMAX)
+    ulib.strcat((&p2[0]) as u64, (&sl[0]) as u64)
+    ulib.strcat((&p2[0]) as u64, name)
+    return (&p2[0]) as u64
+}
+
+fn hexch(v: u64) -> u64 {
+    if v < 10 {
+        return v + 48
+    }
+    return v + 87
+}
+
+fn unhex(c: u64) -> u64 {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    return 16
+}
+
+// `n` Oktette als Hexadezimaltext nach `out`, mit abschliessender Null.
+fn hex_aus(src: u64, n: u64, out: u64) {
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = ld8(src, i)
+        st8(out, i * 2, hexch((c >> 4) & 15))
+        st8(out, i * 2 + 1, hexch(c & 15))
+        i = i + 1
+    }
+    st8(out, n * 2, 0)
+}
+
+// Hexadezimaltext zurueck in `n` Oktette. `false` bei jedem Zeichen, das
+// keines ist -- eine halb gelesene Huelle waere schlimmer als keine.
+fn hex_ein(src: u64, n: u64, out: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        let a: u64 = unhex(ld8(src, i * 2))
+        let b: u64 = unhex(ld8(src, i * 2 + 1))
+        if a > 15 || b > 15 {
+            return false
+        }
+        st8(out, i, (a << 4) | b)
+        i = i + 1
+    }
+    return true
+}
+
+// Eine Dezimalzahl nach `p`; gibt die Zahl der Zeichen zurueck.
+fn num_aus(p: u64, v: u64) -> u64 {
+    var d: [u8; 24] = [0 as u8; 24]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        st8(p, 0, 48)
+        return 1
+    }
+    while x > 0 {
+        d[n as usize] = ((x % 10) + 48) as u8
+        x = x / 10
+        n = n + 1
+    }
+    var k: u64 = 0
+    while n > 0 {
+        n = n - 1
+        st8(p, k, d[n as usize] as u64)
+        k = k + 1
+    }
+    return k
+}
+
+fn num_ein(p: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while ld8(p, i) >= 48 && ld8(p, i) <= 57 {
+        v = v * 10 + (ld8(p, i) - 48)
+        i = i + 1
+    }
+    return v
+}
+
+fn zufall(out: u64, n: u64) -> bool {
+    return !ulib.bad(ulib.sys(SYS_GETRANDOM, out, n, 0))
+}
+
+// scrypt braucht Platz. Der kommt aus der grossen Arena (Runde K16) und
+// wird danach wieder zurueckgegeben -- ein Programm, das 4 MiB behaelt,
+// nachdem es sie einmal gebraucht hat, ist auf dieser Maschine
+// unhoeflich.
+fn ableiten(pw: u64, plen: u64, salz: u64, n: u64, r: u64, out32: u64) -> bool {
+    let need: u64 = scrypt.scrypt_need(n, r, 1)
+    let mp: u64 = mem.map_pages(need)
+    if ulib.bad(mp) {
+        return false
+    }
+    let ok: bool = scrypt.scrypt(pw, plen, salz, kette.SALTLEN, n, r, 1,
+        out32, kette.KEYLEN, mp, need)
+    mem.unmap_pages(mp, need)
+    return ok
+}
+
+fn kb_kopfpfad(verz: u64) -> u64 {
+    var n: [u8; 5] = "KOPF\0"
+    ulib.strncpy((&kpfad[0]) as u64, pfad2(verz, (&n[0]) as u64), PFADMAX)
+    return (&kpfad[0]) as u64
+}
+
+// --------------------------------------------------------- schreiben
+
+fn zeile_hex(fd: u64, name: u64, src: u64, n: u64) -> bool {
+    var out: [u8; 256] = [0 as u8; 256]
+    let op: u64 = (&out[0]) as u64
+    ulib.strcpy(op, name)
+    var l: u64 = ulib.length(op)
+    st8(op, l, 32)
+    hex_aus(src, n, op + l + 1)
+    l = ulib.length(op)
+    st8(op, l, 10)
+    return !ulib.bad(io.write_all(fd, op, l + 1))
+}
+
+fn zeile_text(fd: u64, name: u64, wert: u64) -> bool {
+    var out: [u8; 512] = [0 as u8; 512]
+    let op: u64 = (&out[0]) as u64
+    ulib.strcpy(op, name)
+    var sl: [u8; 2] = " \0"
+    ulib.strcat(op, (&sl[0]) as u64)
+    ulib.strcat(op, wert)
+    let l: u64 = ulib.length(op)
+    st8(op, l, 10)
+    return !ulib.bad(io.write_all(fd, op, l + 1))
+}
+
+fn kopf_schreiben(verz: u64) -> bool {
+    let fd: u64 = io.create(kb_kopfpfad(verz))
+    if ulib.bad(fd) {
+        return false
+    }
+    var kopf: [u8; 12] = "osumkonto1\n\0"
+    var l_kdf: [u8; 64] = [0 as u8; 64]
+    var t_kdf: [u8; 14] = "kdf scrypt \0\0\0"
+    ulib.strcpy((&l_kdf[0]) as u64, (&t_kdf[0]) as u64)
+    var at: u64 = ulib.length((&l_kdf[0]) as u64)
+    at = at + num_aus((&l_kdf[0]) as u64 + at, c_n)
+    st8((&l_kdf[0]) as u64, at, 32)
+    at = at + 1
+    at = at + num_aus((&l_kdf[0]) as u64 + at, c_r)
+    st8((&l_kdf[0]) as u64, at, 32)
+    at = at + 1
+    at = at + num_aus((&l_kdf[0]) as u64 + at, 1)
+    st8((&l_kdf[0]) as u64, at, 10)
+    at = at + 1
+    var ok: bool = true
+    if ulib.bad(io.write_all(fd, (&kopf[0]) as u64, 11)) {
+        ok = false
+    }
+    if ok && ulib.bad(io.write_all(fd, (&l_kdf[0]) as u64, at)) {
+        ok = false
+    }
+    var n_salz: [u8; 5] = "salz\0"
+    var n_pr: [u8; 6] = "pruef\0"
+    var n_pn: [u8; 7] = "pnonce\0"
+    var n_ph: [u8; 8] = "phuelle\0"
+    var n_rn: [u8; 7] = "rnonce\0"
+    var n_rh: [u8; 8] = "rhuelle\0"
+    var n_an: [u8; 9] = "anbieter\0"
+    var n_zi: [u8; 5] = "ziel\0"
+    if ok { ok = zeile_hex(fd, (&n_salz[0]) as u64, (&c_salz[0]) as u64, 16) }
+    if ok { ok = zeile_hex(fd, (&n_pr[0]) as u64, (&c_pruef[0]) as u64, 32) }
+    if ok { ok = zeile_hex(fd, (&n_pn[0]) as u64, (&c_pnonce[0]) as u64, 24) }
+    if ok { ok = zeile_hex(fd, (&n_ph[0]) as u64, (&c_phuelle[0]) as u64, 48) }
+    if ok { ok = zeile_hex(fd, (&n_rn[0]) as u64, (&c_rnonce[0]) as u64, 24) }
+    if ok { ok = zeile_hex(fd, (&n_rh[0]) as u64, (&c_rhuelle[0]) as u64, 48) }
+    var a_e: [u8; 6] = "eigen\0"
+    var a_j: [u8; 7] = "jarvis\0"
+    var a_x: [u8; 6] = "xoffi\0"
+    var ap: u64 = (&a_e[0]) as u64
+    if c_anbieter == A_JARVIS { ap = (&a_j[0]) as u64 }
+    if c_anbieter == A_XOFFI { ap = (&a_x[0]) as u64 }
+    if ok { ok = zeile_text(fd, (&n_an[0]) as u64, ap) }
+    if ok { ok = zeile_text(fd, (&n_zi[0]) as u64, (&c_ziel[0]) as u64) }
+    io.fsync(fd)
+    io.close(fd)
+    return ok
+}
+
+// Legt ein Konto an. `code_out` bekommt den Wiederherstellungscode --
+// das EINZIGE Mal, dass er entsteht; er steht danach nirgends mehr, denn
+// was auf der Platte liegt, ist die Huelle und nicht der Code.
+fn kb_neu(verz: u64, pw: u64, plen: u64, n: u64, r: u64,
+    anbieter: u64, ziel: u64, code_out: u64) -> bool {
+    c_n = n
+    c_r = r
+    c_anbieter = anbieter
+    ulib.strncpy((&c_ziel[0]) as u64, ziel, PFADMAX)
+    if !zufall((&c_salz[0]) as u64, 16) {
+        return false
+    }
+    if !zufall((&c_pnonce[0]) as u64, 24) {
+        return false
+    }
+    if !zufall((&c_rnonce[0]) as u64, 24) {
+        return false
+    }
+    var mk: [u8; 32] = [0 as u8; 32]
+    var rkey: [u8; 32] = [0 as u8; 32]
+    var pkey: [u8; 32] = [0 as u8; 32]
+    let mkp: u64 = (&mk[0]) as u64
+    let rkp: u64 = (&rkey[0]) as u64
+    let pkp: u64 = (&pkey[0]) as u64
+    if !zufall(mkp, 32) {
+        return false
+    }
+    if !zufall(rkp, 32) {
+        return false
+    }
+    if !ableiten(pw, plen, (&c_salz[0]) as u64, n, r, pkp) {
+        return false
+    }
+    kette.huelle_schreiben(pkp, (&c_pnonce[0]) as u64, mkp,
+        (&c_phuelle[0]) as u64)
+    kette.huelle_schreiben(rkp, (&c_rnonce[0]) as u64, mkp,
+        (&c_rhuelle[0]) as u64)
+    if !kette.bund_aus_haupt((&bund[0]) as u64, mkp, (&c_salz[0]) as u64) {
+        return false
+    }
+    var i: u64 = 0
+    while i < 32 {
+        st8((&c_pruef[0]) as u64, i,
+            ld8(kette.bund_key((&bund[0]) as u64, kette.K_PRUEF), i))
+        i = i + 1
+    }
+    let cl: u64 = kette.code_schreiben(rkp, (&c_code[0]) as u64)
+    st8((&c_code[0]) as u64, cl, 0)
+    ulib.strcpy(code_out, (&c_code[0]) as u64)
+    // MK und die beiden Einpackschluessel sind ab hier ueberfluessig.
+    i = 0
+    while i < 32 {
+        st8(mkp, i, 0)
+        st8(rkp, i, 0)
+        st8(pkp, i, 0)
+        i = i + 1
+    }
+    offen = true
+    return kopf_schreiben(verz)
+}
+
+// ------------------------------------------------------------ lesen
+
+fn wort_ist(p: u64, w: u64) -> bool {
+    var i: u64 = 0
+    while ld8(w, i) != 0 {
+        if ld8(p, i) != ld8(w, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return ld8(p, i) == 32 || ld8(p, i) == 0
+}
+
+fn nach_wort(p: u64) -> u64 {
+    var i: u64 = 0
+    while ld8(p, i) != 32 && ld8(p, i) != 0 {
+        i = i + 1
+    }
+    while ld8(p, i) == 32 {
+        i = i + 1
+    }
+    return p + i
+}
+
+// Liest den Kopf. Danach stehen Salz, Huellen und Ziel bereit -- aber
+// KEIN Schluessel: dafuer braucht es die Passphrase oder den Code.
+fn kb_da(verz: u64) -> bool {
+    let fd: u64 = io.open(kb_kopfpfad(verz), 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    var n_kdf: [u8; 4] = "kdf\0"
+    var n_salz: [u8; 5] = "salz\0"
+    var n_pr: [u8; 6] = "pruef\0"
+    var n_pn: [u8; 7] = "pnonce\0"
+    var n_ph: [u8; 8] = "phuelle\0"
+    var n_rn: [u8; 7] = "rnonce\0"
+    var n_rh: [u8; 8] = "rhuelle\0"
+    var n_an: [u8; 9] = "anbieter\0"
+    var n_zi: [u8; 5] = "ziel\0"
+    var a_j: [u8; 7] = "jarvis\0"
+    var a_x: [u8; 6] = "xoffi\0"
+    ulib.rd_init((&rdc[0]) as u64)
+    var gut: bool = true
+    var weiter: bool = true
+    while weiter {
+        let m: u64 = ulib.rd_line(fd, (&rdc[0]) as u64, (&zeile[0]) as u64, 500)
+        if m == ulib.EOF {
+            weiter = false
+            continue
+        }
+        let zp: u64 = (&zeile[0]) as u64
+        if wort_ist(zp, (&n_kdf[0]) as u64) {
+            // kdf scrypt N r p
+            let a: u64 = nach_wort(zp)
+            let b: u64 = nach_wort(a)
+            c_n = num_ein(b)
+            c_r = num_ein(nach_wort(b))
+        } else if wort_ist(zp, (&n_salz[0]) as u64) {
+            if !hex_ein(nach_wort(zp), 16, (&c_salz[0]) as u64) { gut = false }
+        } else if wort_ist(zp, (&n_pr[0]) as u64) {
+            if !hex_ein(nach_wort(zp), 32, (&c_pruef[0]) as u64) { gut = false }
+        } else if wort_ist(zp, (&n_pn[0]) as u64) {
+            if !hex_ein(nach_wort(zp), 24, (&c_pnonce[0]) as u64) { gut = false }
+        } else if wort_ist(zp, (&n_ph[0]) as u64) {
+            if !hex_ein(nach_wort(zp), 48, (&c_phuelle[0]) as u64) { gut = false }
+        } else if wort_ist(zp, (&n_rn[0]) as u64) {
+            if !hex_ein(nach_wort(zp), 24, (&c_rnonce[0]) as u64) { gut = false }
+        } else if wort_ist(zp, (&n_rh[0]) as u64) {
+            if !hex_ein(nach_wort(zp), 48, (&c_rhuelle[0]) as u64) { gut = false }
+        } else if wort_ist(zp, (&n_an[0]) as u64) {
+            let v: u64 = nach_wort(zp)
+            c_anbieter = A_EIGEN
+            if ulib.streq(v, (&a_j[0]) as u64) { c_anbieter = A_JARVIS }
+            if ulib.streq(v, (&a_x[0]) as u64) { c_anbieter = A_XOFFI }
+        } else if wort_ist(zp, (&n_zi[0]) as u64) {
+            ulib.strncpy((&c_ziel[0]) as u64, nach_wort(zp), PFADMAX)
+        }
+    }
+    io.close(fd)
+    return gut
+}
+
+// Der Bund stimmt, wenn K_PRUEF das ist, was im Kopf steht. DAS IST DIE
+// STELLE, an der eine falsche Passphrase abgewiesen wird -- bevor
+// irgendetwas entschluesselt wird, und ohne dass das Programm dem
+// Fragenden etwas ueber den Schluessel sagt ausser ja oder nein.
+fn bund_pruefen() -> bool {
+    return kette.bund_gleich(kette.bund_key((&bund[0]) as u64, kette.K_PRUEF),
+        (&c_pruef[0]) as u64, 32)
+}
+
+fn aus_huelle(einpack: u64, nonce: u64, huelle: u64) -> bool {
+    var mk: [u8; 32] = [0 as u8; 32]
+    let mkp: u64 = (&mk[0]) as u64
+    if !kette.huelle_lesen(einpack, nonce, huelle, mkp) {
+        return false
+    }
+    let ok: bool = kette.bund_aus_haupt((&bund[0]) as u64, mkp,
+        (&c_salz[0]) as u64)
+    var i: u64 = 0
+    while i < 32 {
+        st8(mkp, i, 0)
+        i = i + 1
+    }
+    if !ok {
+        return false
+    }
+    if !bund_pruefen() {
+        kette.bund_loeschen((&bund[0]) as u64)
+        return false
+    }
+    offen = true
+    return true
+}
+
+fn kb_oeffnen(verz: u64, pw: u64, plen: u64) -> bool {
+    if !kb_da(verz) {
+        return false
+    }
+    var pkey: [u8; 32] = [0 as u8; 32]
+    let pkp: u64 = (&pkey[0]) as u64
+    if !ableiten(pw, plen, (&c_salz[0]) as u64, c_n, c_r, pkp) {
+        return false
+    }
+    let ok: bool = aus_huelle(pkp, (&c_pnonce[0]) as u64, (&c_phuelle[0]) as u64)
+    var i: u64 = 0
+    while i < 32 {
+        st8(pkp, i, 0)
+        i = i + 1
+    }
+    return ok
+}
+
+fn kb_oeffnen_code(verz: u64, code: u64) -> bool {
+    if !kb_da(verz) {
+        return false
+    }
+    var rkey: [u8; 32] = [0 as u8; 32]
+    let rkp: u64 = (&rkey[0]) as u64
+    if !kette.code_lesen(code, ulib.length(code), rkp) {
+        return false
+    }
+    let ok: bool = aus_huelle(rkp, (&c_rnonce[0]) as u64, (&c_rhuelle[0]) as u64)
+    var i: u64 = 0
+    while i < 32 {
+        st8(rkp, i, 0)
+        i = i + 1
+    }
+    return ok
+}
+
+fn kb_bund() -> u64 {
+    return (&bund[0]) as u64
+}
+
+fn kb_key(which: u64) -> u64 {
+    return kette.bund_key((&bund[0]) as u64, which)
+}
+
+fn kb_ziel() -> u64 {
+    return (&c_ziel[0]) as u64
+}
+
+fn kb_anbieter() -> u64 {
+    return c_anbieter
+}
+
+fn kb_n() -> u64 {
+    return c_n
+}
+
+fn kb_r() -> u64 {
+    return c_r
+}
+
+fn kb_salz() -> u64 {
+    return (&c_salz[0]) as u64
+}
+
+fn kb_code_letzt() -> u64 {
+    return (&c_code[0]) as u64
+}
+
+// Schluessel weg. Was `bund_loeschen` NICHT kann, steht in kette.fi K2:
+// ob der Uebersetzer das Ueberschreiben stehenlaesst, ist hier nicht
+// geprueft, und der Testlauf sagt genau das.
+fn kb_zu() {
+    kette.bund_loeschen((&bund[0]) as u64)
+    offen = false
+}

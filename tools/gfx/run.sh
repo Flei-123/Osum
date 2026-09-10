@@ -62,6 +62,12 @@
 # Verwendung:  bash tools/gfx/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+# RUNDE MARKE: der Produktname kommt aus `marke.conf` (geschlagen von
+# OSUM_MARKE_*), nicht aus dieser Datei. Eine Zusage auf einen fest
+# getippten Namen waere nach der ersten Umbenennung eine Zusage auf
+# etwas, das es nicht mehr gibt -- sie ginge auf und pruefte nichts.
+. tools/lib/marke.sh
+marke_laden . || exit 1
 . tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 
@@ -299,13 +305,13 @@ schau "die Linie trifft ihr Ende" punkt "$TMPD/pat.ppm" 399 210 255 255 0
 # DIE eigentliche Zusage dieses Abschnitts: der Text, den `serial.puts`
 # geschrieben hat, steht als BILDPUNKTE da -- 3200 Stellen je Zeile,
 # jede einzelne gegen die Bitmaske des Zeichensatzes gerechnet.
-schau "Zeile 14 bildpunktgenau: 'OSUM K7 FRAMEBUFFER 01234'" \
-    text "$TMPD/pat.ppm" kernel/font.fi 14 0 "OSUM K7 FRAMEBUFFER 01234"
+schau "Zeile 14 bildpunktgenau: '$MARKE_PRODUKT K7 FRAMEBUFFER 01234'" \
+    text "$TMPD/pat.ppm" kernel/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
 schau "Zeile 15 bildpunktgenau: 'abcdefghijklm ABCDEFGHIJK'" \
     text "$TMPD/pat.ppm" kernel/font.fi 15 0 "abcdefghijklm ABCDEFGHIJK"
 # Dieselben zwei Zeilen stehen im seriellen Mitschnitt -- eine Ausgabe,
 # zwei Wege.
-has "$TMPD/pat.txt" "OSUM K7 FRAMEBUFFER 01234" "dieselbe Zeile steht seriell"
+has "$TMPD/pat.txt" "$MARKE_PRODUKT K7 FRAMEBUFFER 01234" "dieselbe Zeile steht seriell"
 
 echo "== 6. DIE GEGENPROBE: derselbe Kernel ohne das Wort 'gfx' =="
 # Alles bleibt gleich -- dasselbe Abbild, dieselbe Maschine, dasselbe
@@ -322,7 +328,7 @@ schau_nicht "Feld 1 ist NICHT rot" \
 schau_nicht "Feld 2 ist NICHT gruen" \
     flaeche "$TMPD/keine.ppm" 100 0 100 100 0 255 0
 schau_nicht "die Textzeile steht NICHT da" \
-    text "$TMPD/keine.ppm" kernel/font.fi 14 0 "OSUM K7 FRAMEBUFFER 01234"
+    text "$TMPD/keine.ppm" kernel/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
 # Was auf dem Textmodusbild zu sehen ist, ist die Meldung des BIOS -- also
 # durchaus Bildpunkte, nur eben keine, die dieser Kernel gemalt hat.  Die
 # Zusage ist deshalb nicht "alles schwarz", sondern: die Stellen, die
@@ -410,7 +416,7 @@ schau "das Foto ist 1024x768" groesse "$TMPD/big.ppm" 1024 768
 schau "die vier Farbfelder stehen auch hier" \
     flaeche "$TMPD/big.ppm" 200 0 100 100 0 0 255
 schau "und der Text ebenso, bildpunktgenau" \
-    text "$TMPD/big.ppm" kernel/font.fi 14 0 "OSUM K7 FRAMEBUFFER 01234"
+    text "$TMPD/big.ppm" kernel/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
 
 echo "== 11. die Shell auf dem Bildschirm =="
 # /bin/sh von der Platte, wie in Runde K1 und K6 -- nur dass die Ausgabe
@@ -450,7 +456,22 @@ if [ "$gebaut" = 1 ]; then
     # genau so sah der Fehlschlag auch aus. Der Satz steht jetzt hinter
     # `ls /bin`. Gemessen wird unveraendert, dass die Zeile durch K9s
     # Zeilendisziplin bis auf den Bildpunkt kommt.
-    foto "$K0" "osum gfx nocursor fbhold nokbd nosched noproc nofs noring3 script=ls /bin;echo OSUM SHELL ON SCREEN;echo DONE" \
+    # RUNDE ALLTAG: DIE BILANZ AM ENDE IST WIEDER LAENGER GEWORDEN.
+    # Der Schirm fasst 37 Zeilen; zwischen dem Satz und "fb: hold"
+    # standen zuletzt 36 Zeilen Bilanz (smp, netmon, share, nv, k13,
+    # mu ...), und damit stand der Satz genau eine Zeile zu hoch. Er
+    # ist jetzt die LETZTE Zeile des Skripts -- das ist die Stelle, die
+    # am weitesten unten steht und deshalb als einzige nicht davon
+    # abhaengt, wieviel eine spaetere Runde noch meldet. `DONE` rueckt
+    # dafuer eine Zeile hoch und wird weiter geprueft.
+    # ... und dieser eine Lauf bekommt den Schirm, den QEMUs EDID nennt
+    # (1280x800, 50 Zeilen) statt der eingebauten Vorgabe mit 37: die
+    # Bilanz am Ende ist ueber die Runden auf 36 Zeilen gewachsen, und
+    # damit passte der Satz der Shell nicht mehr mit ins Bild. Gemessen
+    # wird hier die Zeilendisziplin auf dem Schirm, nicht die Vorgabe --
+    # die steht in Abschnitt 2 und bleibt unangetastet.
+    VGA_STD="-vga std" \
+    foto "$K0" "osum gfx nocursor fbhold nokbd nosched noproc nofs noring3 script=ls /bin;echo DONE;echo OSUM SHELL ON SCREEN" \
         "$TMPD/sh.txt" "$TMPD/sh.ppm" \
         -drive "file=$TMPD/disk.img,format=raw,if=ide,index=0"
     num "der Kern beendet sich sauber" "$RC" eq 21
@@ -470,7 +491,7 @@ if [ "$gebaut" = 1 ]; then
     schau "die Zeile der Shell steht bildpunktgenau auf dem Schirm" \
         finde "$TMPD/sh.ppm" kernel/font.fi "$TMPD/sh.txt" \
         "fb: console mirrored to screen" "fb: hold" "OSUM SHELL ON SCREEN"
-    schau "und die Zeile, mit der das Skript endet, ebenso" \
+    schau "und die Zeile davor (DONE) ebenso" \
         finde "$TMPD/sh.ppm" kernel/font.fi "$TMPD/sh.txt" \
         "fb: console mirrored to screen" "fb: hold" "DONE"
 fi

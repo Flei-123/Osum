@@ -1,0 +1,1947 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/sync.fi -- RUNDE SYNC: /bin/sync, der Abgleich.
+//
+// Zwei Geraete, dieselben Daten, und ein Server, der nichts davon lesen
+// kann. Das ist die ganze Aufgabe, und dieser Text sagt, wie sie geloest
+// ist und was dabei NICHT geht.
+//
+//   sync neu       <konto> <pass> <anbieter> <ziel> [N] [r]
+//   sync zeigen    <konto>
+//   sync code      <konto> <code>
+//   sync abgleich  <konto> <baum> <pass>
+//   sync konflikte <konto>
+//   sync auf       <konto> <pass>
+//
+// DER NAME IST EINE ANSAGE. Auf einem Unix heisst `sync`, die Puffer auf
+// die Platte zu schreiben. Hier heisst `/bin/sync` ab jetzt ABGLEICHEN.
+// Das Leeren der Puffer gibt es weiter, aber als Systemruf (`SYS_SYNC`)
+// und ohne eigenes Programm -- eines hat es auf diesem System nie
+// gegeben, obwohl `tools/server/build.sh` den Namen schon in seiner
+// Programmliste fuehrte und der Bau stillschweigend darueber hinwegging.
+// Wer das anders haben will, benennt jetzt um; sobald Skripte da sind,
+// ist es teuer.
+//
+// ACHT WOERTER, NICHT MEHR. `proc.MAX_ARGS` ist 8, und die Shell sagt
+// "too many arguments", wenn eines mehr kommt. Deshalb heisst es `sync
+// neu` und nicht `sync konto neu`: das eine Wort, das die Untergruppe
+// huebscher gemacht haette, waere genau das Wort gewesen, das N und r
+// vom Anlegen ausgeschlossen haette.
+//
+// ===================================================== WAS AUF DEM SERVER LIEGT
+//
+// NUR BLOECKE. Jeder ist GENAU 4096 Oktette Klartext, versiegelt zu 4112,
+// und heisst nach einem HMAC ueber seinen Inhalt. Dazu eine Zeile, die
+// sagt, welcher Block das Verzeichnis ist. Mehr gibt es nicht:
+//
+//     <ziel>/PACK     die Oktette, angehaengt
+//     <ziel>/INDEX    <namehex><TAB><offset><TAB><laenge>
+//     <ziel>/ROOT     osumwurzel1 <gen> <namehex> <machex>
+//
+// ALLE BLOECKE SIND GLEICH GROSS, auch der letzte eines Files -- er wird
+// mit Nullen aufgefuellt und die wirkliche Laenge steht im (verschluessel-
+// ten) Verzeichnis. Das kostet bei einer Datei von einem Oktett 4112
+// Oktette, und es kauft dafuer, dass der Server die GROESSEN der Dateien
+// nicht sieht, sondern nur ihre Anzahl in Bloecken. Der Auftrag nennt das
+// "auffuellen, wo es billig ist"; hier ist es billig, weil dieser
+// Speicher ohnehin blockweise arbeitet.
+//
+// DER SERVER IST DUMM. Er legt Oktette unter einem Namen ab und gibt sie
+// wieder. Er prueft nichts, weiss nichts und darf nichts wissen. Je
+// duemmer er ist, desto weniger kann er verraten -- und desto weniger
+// muss man ihm glauben.
+//
+// ====================================================== DER RUECKSCHRITT
+//
+// Der gefaehrlichste Server ist nicht der, der luegt, sondern der, der
+// die WAHRHEIT VON GESTERN sagt. Er liefert eine alte, echt versiegelte
+// Wurzel; alles prueft sich sauber; und das Geraet macht mit einem
+// Zustand weiter, den der Nutzer laengst geaendert hatte.
+//
+// Dagegen hilft keine Signatur, denn die alte Wurzel IST richtig
+// signiert. Es hilft nur ein Gedaechtnis, das der Server nicht anfassen
+// kann: `<konto>/ZAEHLER`, die hoechste Generation, die dieses Geraet je
+// gesehen hat. Eine Wurzel mit kleinerer Generation wird ABGELEHNT und
+// gemeldet. Der Preis steht dabei: geht `ZAEHLER` verloren, ist der
+// Schutz weg, bis das Geraet einmal wieder eine hoehere Generation sieht.
+//
+// ========================================================= KONFLIKTE
+//
+// Beide Geraete haben dieselbe Datei geaendert. Es gibt keinen richtigen
+// Sieger, also gibt es hier keinen:
+//
+//   * die eigene Fassung bleibt, wo sie ist;
+//   * die fremde wird als `<pfad>.konflikt` daneben gelegt;
+//   * BEIDE stehen im neuen Verzeichnis, also hat auch der Server beide;
+//   * `<konto>/KONFLIKTE` sammelt die Pfade, und `sync konflikte` zeigt sie.
+//
+// Kein "letzter gewinnt", kein "groesseres gewinnt", kein Zeitstempel als
+// Schiedsrichter -- die Uhren zweier Geraete stimmen nicht ueberein, und
+// eine falsche Uhr wuerde still Arbeit vernichten.
+//
+// FUER EINSTELLUNGEN IST ES ANDERS, und zwar mit Absicht. Eine
+// Einstellung ist EIN Wert, kein Dokument; zwei Fassungen davon
+// nebeneinander sind sinnlos. Also: je Schluessel gewinnt der spaetere
+// Schreiber -- aber der unterlegene Wert wird in `<konto>/VERLAUF`
+// mitgeschrieben, damit "meine Einstellung ist weg" beantwortbar bleibt.
+// Die Zeit steht dabei IN der Einstellungsdatei (`<baum>/EINST`, Zeilen
+// `<zeit> <schluessel> <wert>`), sie wird also nicht geraten.
+//
+// ==================================================== WAS NICHT GELOESCHT WIRD
+//
+// LOESCHUNGEN WERDEN NICHT UEBERTRAGEN. Verschwindet eine Datei auf
+// Geraet A, kommt sie beim naechsten Abgleich von B zurueck. Das ist
+// keine Schlamperei, es ist die vorsichtige Haelfte einer Entscheidung:
+// Loeschungen brauchen Grabsteine, ein falscher Grabstein loescht Daten
+// auf allen Geraeten, und ein Abgleich, der Daten vernichtet, ist
+// schlimmer als einer, der zuviel behaelt. Was fehlt, um es richtig zu
+// machen, steht in `docs/RUNDE-SYNC.md`.
+//
+// ================================================================ EHRLICH
+//
+// Y1 DAS VERZEICHNIS PASST IN MANMAX (64 KiB), also rund 500 Dateien.
+//    Darueber bricht der Abgleich AB und sagt es, statt ein halbes
+//    Verzeichnis zu schreiben.
+// Y2 DER INDEX DES SPEICHERS LIEGT IM SPEICHER, MAXBLK Eintraege. Das
+//    ist dieselbe Grenze wie in `bstore.fi` H4 und aus demselben Grund
+//    (kein Allokator fuer eine Hashtabelle dieser Groesse).
+// Y3 FESTE BLOCKGROESSE. Ein Oktett vorne in eine Datei eingefuegt macht
+//    JEDEN Block neu. `bstore.fi` H1 misst das seit Runde TRESOR; hier
+//    aendert sich daran nichts.
+// Y4 KEINE VERSCHLUESSELUNG DER PFADE GEGENUEBER DEM EIGENEN GERAET --
+//    das Verzeichnis ist auf dem SERVER verschluesselt, auf der eigenen
+//    Platte liegt der Baum wie immer da. Wer die Platte hat, hat die
+//    Daten; dagegen hilft Plattenverschluesselung und nicht diese Runde.
+// Y5 EIN ABGLEICH IST NICHT NEBENLAEUFIG. Zwei Geraete, die im selben
+//    Augenblick schreiben, koennen sich ins Gehege kommen: der zweite
+//    sieht dann eine Wurzel, die er nicht erwartet hat, und faengt von
+//    vorn an. Verloren geht dabei nichts (Bloecke sind
+//    inhaltsadressiert), aber die Zeit ist weg.
+
+profile kernel
+
+import ulib
+import libc.io
+import libc.errno
+import libc.mem
+import crypto.sha256
+import sync.kette
+import kbund
+
+export { u_start }
+
+const BLOCK: u64 = 4096
+const SEAL: u64 = 4112 // BLOCK + Poly1305-Siegel
+const NAMEHEX: u64 = 64
+const MAXBLK: u64 = 3000 // Bloecke, die der Index im Speicher haelt
+const MANMAX: u64 = 65536 // ein Verzeichnis als Text
+const PATHMAX: u64 = 256
+const LINEMAX: u64 = 1024
+const MAXDEPTH: u64 = 12
+
+// ---- der Index des Speichers
+static mut ix_name: [u8; 96000] = [0 as u8; 96000] // MAXBLK * 32
+static mut ix_off: [u64; 3000] = [0 as u64; 3000]
+static mut ix_len: [u64; 3000] = [0 as u64; 3000]
+static mut ix_n: u64 = 0
+static mut ix_base: u64 = 0
+static mut pack_end: u64 = 0
+
+// ---- die drei Verzeichnisse
+static mut man_l: [u8; 65536] = [0 as u8; 65536] // hier und jetzt
+static mut man_r: [u8; 65536] = [0 as u8; 65536] // was der Server hat
+static mut man_b: [u8; 65536] = [0 as u8; 65536] // die letzte Einigkeit
+static mut man_n: [u8; 65536] = [0 as u8; 65536] // das neue
+static mut ll: u64 = 0
+static mut lr: u64 = 0
+static mut lb: u64 = 0
+static mut ln: u64 = 0
+
+// DIE NAMENSLISTE EINER DATEI. Sie stand einmal in einem Feld von 700
+// Oktetten auf dem Stapel -- 10 Namen, also 40960 Oktette Datei. Was
+// darueber lag, liess `datei_zeile` scheitern, und der Aufrufer machte
+// mit `continue` weiter: die Datei fiel STILL aus dem Abgleich, und der
+// Lauf meldete "fertig". Jetzt sammelt der Lauf die Namen hier, und ist
+// die Liste zu lang fuer eine Zeile, wird sie SELBST zur Kette (K-Form).
+const NAMBUF: u64 = 65536
+const NAMINLINE: u64 = 700 // so viele Oktette Namen passen in eine Zeile
+static mut nambuf: [u8; 65536] = [0 as u8; 65536]
+static mut blk: [u8; 4096] = [0 as u8; 4096]
+static mut sealed: [u8; 4160] = [0 as u8; 4160]
+static mut plain: [u8; 4160] = [0 as u8; 4160]
+static mut zeile: [u8; 1024] = [0 as u8; 1024]
+static mut zeile2: [u8; 1024] = [0 as u8; 1024]
+static mut relp: [u8; 256] = [0 as u8; 256]
+static mut full: [u8; 512] = [0 as u8; 512]
+static mut tmpp: [u8; 512] = [0 as u8; 512]
+static mut spath: [u8; 512] = [0 as u8; 512]
+static mut hexbuf: [u8; 160] = [0 as u8; 160]
+static mut rdc: [u8; 528] = [0 as u8; 528]
+static mut dbuf: [u8; 6144] = [0 as u8; 6144] // MAXDEPTH * 512
+static mut dfd: [u64; 12] = [0 as u64; 12]
+static mut dlen: [u64; 12] = [0 as u64; 12]
+static mut dat: [u64; 12] = [0 as u64; 12]
+static mut dcut: [u64; 12] = [0 as u64; 12]
+
+static mut z_store: [u8; 256] = [0 as u8; 256]
+static mut z_konto: [u8; 256] = [0 as u8; 256]
+static mut z_baum: [u8; 256] = [0 as u8; 256]
+
+// ---- Zaehler des Laufs, alle am Ende gemeldet
+static mut n_dateien: u64 = 0
+static mut n_bloecke: u64 = 0
+static mut n_neu: u64 = 0
+static mut n_hoch: u64 = 0
+static mut n_runter: u64 = 0
+static mut n_konflikt: u64 = 0
+static mut n_einst: u64 = 0
+static mut n_ueberholt: u64 = 0
+static mut b_gelesen: u64 = 0
+static mut b_gesendet: u64 = 0
+static mut b_geholt: u64 = 0
+static mut gen_alt: u64 = 0
+static mut gen_neu: u64 = 0
+
+fn ld8(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn st8(p: u64, i: u64, v: u64) {
+    *((p + i) as *mut u8) = (v & 255) as u8
+}
+
+// SYS_CHMOD steht nicht in `ulib.fi`; `kernel/user/chmod.fi` nennt sie
+// genauso direkt. 90 ist die Nummer aus `kernel/sys.fi`.
+const SYS_CHMOD: u64 = 90
+
+fn sag(t: u64) {
+    ulib.say(t)
+    ulib.nl()
+}
+
+fn sag_kv(t: u64, v: u64) {
+    ulib.say(t)
+    ulib.sayn(v)
+    ulib.nl()
+}
+
+// WO es schiefging, nicht nur DASS. "sync: fehler 8" hat einen halben
+// Tag gekostet; mit dem Pfad daneben ist es eine Zeile Lesen.
+static mut fehlerpfad: [u8; 512] = [0 as u8; 512]
+
+fn merk_pfad(pfad: u64) {
+    ulib.strncpy((&fehlerpfad[0]) as u64, pfad, 511)
+}
+
+fn sag_kt(t: u64, v: u64) {
+    ulib.say(t)
+    ulib.say(v)
+    ulib.nl()
+}
+
+// ------------------------------------------------------- der Speicher
+
+fn sp_pfad(name: u64) -> u64 {
+    var sl: [u8; 2] = "/\0"
+    ulib.strncpy((&spath[0]) as u64, (&z_store[0]) as u64, PATHMAX)
+    ulib.strcat((&spath[0]) as u64, (&sl[0]) as u64)
+    ulib.strcat((&spath[0]) as u64, name)
+    return (&spath[0]) as u64
+}
+
+fn ix_slot(i: u64) -> u64 {
+    return (&ix_name[0]) as u64 + i * 32
+}
+
+fn ix_find(h: u64) -> u64 {
+    var i: u64 = 0
+    while i < ix_n {
+        if kette.bund_gleich(ix_slot(i), h, 32) {
+            return i
+        }
+        i = i + 1
+    }
+    return MAXBLK
+}
+
+fn ix_add(h: u64, off: u64, len: u64) -> bool {
+    if ix_n >= MAXBLK {
+        return false
+    }
+    var i: u64 = 0
+    while i < 32 {
+        st8(ix_slot(ix_n), i, ld8(h, i))
+        i = i + 1
+    }
+    ix_off[ix_n as usize] = off
+    ix_len[ix_n as usize] = len
+    ix_n = ix_n + 1
+    return true
+}
+
+fn ix_laden() -> bool {
+    var n: [u8; 6] = "INDEX\0"
+    ix_n = 0
+    ix_base = 0
+    pack_end = 0
+    let fd: u64 = io.open(sp_pfad((&n[0]) as u64), 0)
+    if ulib.bad(fd) {
+        return true // ein Speicher, den es noch nicht gibt, ist kein Fehler
+    }
+    ulib.rd_init((&rdc[0]) as u64)
+    var weiter: bool = true
+    while weiter {
+        let m: u64 = ulib.rd_line(fd, (&rdc[0]) as u64, (&zeile[0]) as u64,
+            LINEMAX)
+        if m == ulib.EOF {
+            weiter = false
+            continue
+        }
+        if m < NAMEHEX + 3 {
+            continue
+        }
+        var h: [u8; 32] = [0 as u8; 32]
+        if !kbund.hex_ein((&zeile[0]) as u64, 32, (&h[0]) as u64) {
+            continue
+        }
+        var at: u64 = NAMEHEX + 1
+        let off: u64 = kbund.num_ein((&zeile[0]) as u64 + at)
+        while at < m && ld8((&zeile[0]) as u64, at) != 9 {
+            at = at + 1
+        }
+        at = at + 1
+        let len: u64 = kbund.num_ein((&zeile[0]) as u64 + at)
+        if !ix_add((&h[0]) as u64, off, len) {
+            io.close(fd)
+            return false
+        }
+        if off + len > pack_end {
+            pack_end = off + len
+        }
+    }
+    io.close(fd)
+    // NACH EINEM ABBRUCH IST PACK LAENGER, ALS DER INDEX SAGT.
+    //
+    // Die Reihenfolge ist Absicht: erst die Oktette in PACK, dann die
+    // Zeile in INDEX. Faellt der Schuss dazwischen, liegen Oktette da,
+    // auf die niemand zeigt. Wer dann `pack_end` aus dem INDEX rechnet,
+    // bekommt eine Zahl, die KLEINER ist als die Datei -- und schreibt
+    // sie als Offset des naechsten Blocks in den Index, waehrend
+    // O_APPEND die Oktette ans wirkliche Ende haengt. Von da an zeigt
+    // jeder neue Eintrag auf fremde Oktette, und der naechste Abgleich
+    // holt Muell (der am Siegel scheitert) statt Daten. Genau daran ist
+    // (f) gestorben: der wiederaufgenommene Lauf meldete "fertig", und
+    // das dritte Geraet bekam null von zwoelf Dateien.
+    //
+    // Also ist `pack_end` die WIRKLICHE Groesse der Datei, wenn die
+    // groesser ist. Der verwaiste Schwanz bleibt liegen -- verschwendeter
+    // Platz, und sonst nichts.
+    var pn: [u8; 5] = "PACK\0"
+    let sz: u64 = io.size_of(sp_pfad((&pn[0]) as u64))
+    if !ulib.bad(sz) && sz > pack_end {
+        pack_end = sz
+    }
+    ix_base = ix_n
+    return true
+}
+
+// DIE REIHENFOLGE IST DIE ZUSAGE: die Oktette liegen in PACK, BEVOR
+// INDEX sie nennt, und ROOT nennt sie erst, wenn beides steht. Ein Lauf,
+// der irgendwo stirbt, hinterlaesst hoechstens Oktette, auf die niemand
+// zeigt -- verschwendeter Platz, und sonst nichts. Nie eine Wurzel, die
+// Bloecke verspricht, die es nicht gibt.
+fn ix_schreiben() -> bool {
+    var n: [u8; 6] = "INDEX\0"
+    if ix_n == ix_base {
+        return true
+    }
+    let fd: u64 = io.open(sp_pfad((&n[0]) as u64), 1 | 64 | 1024)
+    if ulib.bad(fd) {
+        return false
+    }
+    var i: u64 = ix_base
+    while i < ix_n {
+        var out: [u8; 160] = [0 as u8; 160]
+        let op: u64 = (&out[0]) as u64
+        kbund.hex_aus(ix_slot(i), 32, op)
+        var k: u64 = NAMEHEX
+        st8(op, k, 9)
+        k = k + 1
+        k = k + kbund.num_aus(op + k, ix_off[i as usize])
+        st8(op, k, 9)
+        k = k + 1
+        k = k + kbund.num_aus(op + k, ix_len[i as usize])
+        st8(op, k, 10)
+        k = k + 1
+        if ulib.bad(io.write_all(fd, op, k)) {
+            io.close(fd)
+            return false
+        }
+        i = i + 1
+    }
+    io.fsync(fd)
+    io.close(fd)
+    ix_base = ix_n
+    return true
+}
+
+// Legt einen versiegelten Block ab. Ist er schon da, kostet er nichts --
+// das ist die Doppelspeicherung, und sie ist der Grund, warum der zweite
+// Abgleich fast umsonst ist.
+fn sp_put(name: u64, buf: u64, len: u64) -> bool {
+    if ix_find(name) < MAXBLK {
+        return true
+    }
+    var n: [u8; 5] = "PACK\0"
+    let fd: u64 = io.open(sp_pfad((&n[0]) as u64), 1 | 64 | 1024)
+    if ulib.bad(fd) {
+        return false
+    }
+    if ulib.bad(io.write_all(fd, buf, len)) {
+        io.close(fd)
+        return false
+    }
+    io.fsync(fd)
+    io.close(fd)
+    if !ix_add(name, pack_end, len) {
+        return false
+    }
+    pack_end = pack_end + len
+    b_gesendet = b_gesendet + len
+    n_neu = n_neu + 1
+    return true
+}
+
+fn sp_get(name: u64, out: u64, max: u64) -> u64 {
+    let i: u64 = ix_find(name)
+    if i >= MAXBLK {
+        return 0
+    }
+    let len: u64 = ix_len[i as usize]
+    if len > max {
+        return 0
+    }
+    var n: [u8; 5] = "PACK\0"
+    let fd: u64 = io.open(sp_pfad((&n[0]) as u64), 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    io.seek(fd, ix_off[i as usize], 0)
+    let got: u64 = io.read_full(fd, out, len)
+    io.close(fd)
+    if got != len {
+        return 0
+    }
+    b_geholt = b_geholt + len
+    return len
+}
+
+// ----------------------------------------------------- die Wurzel
+//
+// mac = HMAC(K_SIEGEL, "osum sync v1 wurzel" || <gen> || " " || <namehex>)
+
+fn wurzel_mac(gen: u64, namehex: u64, out: u64) {
+    var m: [u8; 160] = [0 as u8; 160]
+    var e: [u8; 20] = "osum sync v1 wurzel\0"
+    let mp: u64 = (&m[0]) as u64
+    ulib.strcpy(mp, (&e[0]) as u64)
+    var at: u64 = ulib.length(mp)
+    at = at + kbund.num_aus(mp + at, gen)
+    st8(mp, at, 32)
+    at = at + 1
+    var i: u64 = 0
+    while i < NAMEHEX {
+        st8(mp, at + i, ld8(namehex, i))
+        i = i + 1
+    }
+    at = at + NAMEHEX
+    sha256.hmac(kbund.kb_key(kette.K_SIEGEL), 32, mp, at as usize, out)
+}
+
+// 0 = keine Wurzel da, 1 = gelesen und echt, 2 = gefaelscht,
+// 3 = RUECKSCHRITT (echt, aber aelter als das, was wir schon sahen)
+fn wurzel_lesen(datei: u64, zaehler: u64, gen: *mut u64, name: u64) -> u64 {
+    let fd: u64 = io.open(sp_pfad(datei), 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    ulib.rd_init((&rdc[0]) as u64)
+    let m: u64 = ulib.rd_line(fd, (&rdc[0]) as u64, (&zeile[0]) as u64, LINEMAX)
+    io.close(fd)
+    if m == ulib.EOF || m < 12 + NAMEHEX * 2 {
+        return 2
+    }
+    var kopf: [u8; 12] = "osumwurzel1\0"
+    let zp: u64 = (&zeile[0]) as u64
+    if !ulib.strneq(zp, (&kopf[0]) as u64, 11) {
+        return 2
+    }
+    var at: u64 = 12
+    let g: u64 = kbund.num_ein(zp + at)
+    while at < m && ld8(zp, at) != 32 {
+        at = at + 1
+    }
+    at = at + 1
+    let nh: u64 = zp + at
+    at = at + NAMEHEX + 1
+    if at + NAMEHEX > m {
+        return 2
+    }
+    var soll: [u8; 32] = [0 as u8; 32]
+    var ist: [u8; 32] = [0 as u8; 32]
+    wurzel_mac(g, nh, (&soll[0]) as u64)
+    if !kbund.hex_ein(zp + at, 32, (&ist[0]) as u64) {
+        return 2
+    }
+    if !kette.bund_gleich((&soll[0]) as u64, (&ist[0]) as u64, 32) {
+        return 2
+    }
+    if g < zaehler {
+        *gen = g
+        return 3
+    }
+    if !kbund.hex_ein(nh, 32, name) {
+        return 2
+    }
+    *gen = g
+    return 1
+}
+
+fn wurzel_schreiben(gen: u64, name: u64) -> bool {
+    var nt: [u8; 7] = "ROOT.T\0"
+    var nr: [u8; 5] = "ROOT\0"
+    var out: [u8; 256] = [0 as u8; 256]
+    var kopf: [u8; 13] = "osumwurzel1 \0"
+    let op: u64 = (&out[0]) as u64
+    ulib.strcpy(op, (&kopf[0]) as u64)
+    var at: u64 = 12
+    at = at + kbund.num_aus(op + at, gen)
+    st8(op, at, 32)
+    at = at + 1
+    kbund.hex_aus(name, 32, op + at)
+    var mac: [u8; 32] = [0 as u8; 32]
+    wurzel_mac(gen, op + at, (&mac[0]) as u64)
+    at = at + NAMEHEX
+    st8(op, at, 32)
+    at = at + 1
+    kbund.hex_aus((&mac[0]) as u64, 32, op + at)
+    at = at + NAMEHEX
+    st8(op, at, 10)
+    at = at + 1
+    // Erst vollstaendig daneben, dann darueber. Eine halb geschriebene
+    // Wurzel wuerde ihr eigenes Siegel verletzen und den Speicher
+    // unbrauchbar aussehen lassen; so bleibt die alte stehen, bis die
+    // neue ganz da ist, und ROOT.T ist der Rettungsweg, wenn genau
+    // waehrend des Umkopierens der Strom ausfaellt.
+    var fd: u64 = io.create(sp_pfad((&nt[0]) as u64))
+    if ulib.bad(fd) {
+        return false
+    }
+    if ulib.bad(io.write_all(fd, op, at)) {
+        io.close(fd)
+        return false
+    }
+    io.fsync(fd)
+    io.close(fd)
+    fd = io.create(sp_pfad((&nr[0]) as u64))
+    if ulib.bad(fd) {
+        return false
+    }
+    if ulib.bad(io.write_all(fd, op, at)) {
+        io.close(fd)
+        return false
+    }
+    io.fsync(fd)
+    io.close(fd)
+    io.unlink(sp_pfad((&nt[0]) as u64))
+    return true
+}
+
+// ------------------------------------------------- Bloecke versiegeln
+
+// Einen Block (immer BLOCK Oktette Klartext) benennen und ablegen.
+// `namehex` bekommt den Namen als Text.
+fn block_ab(buf: u64, namehex: u64) -> bool {
+    var name: [u8; 32] = [0 as u8; 32]
+    let np: u64 = (&name[0]) as u64
+    kette.block_name(kbund.kb_key(kette.K_NAME), buf, BLOCK, np)
+    kbund.hex_aus(np, 32, namehex)
+    n_bloecke = n_bloecke + 1
+    if ix_find(np) < MAXBLK {
+        return true
+    }
+    let n: u64 = kette.block_siegeln(kbund.kb_key(kette.K_INHALT), np,
+        buf, BLOCK, (&sealed[0]) as u64)
+    if n != SEAL {
+        return false
+    }
+    return sp_put(np, (&sealed[0]) as u64, n)
+}
+
+// Und zurueck: Name als Text -> BLOCK Oktette Klartext in `out`.
+fn block_auf(namehex: u64, out: u64) -> bool {
+    var name: [u8; 32] = [0 as u8; 32]
+    let np: u64 = (&name[0]) as u64
+    if !kbund.hex_ein(namehex, 32, np) {
+        return false
+    }
+    let got: u64 = sp_get(np, (&sealed[0]) as u64, 4160)
+    if got == 0 {
+        return false
+    }
+    var n: u64 = 0
+    if !kette.block_oeffnen(kbund.kb_key(kette.K_INHALT), np,
+        (&sealed[0]) as u64, got, out, &n) {
+        return false
+    }
+    return n == BLOCK
+}
+
+// --------------------------------------------- das Verzeichnis als Kette
+//
+// Das Verzeichnis ist selbst nur ein Strom von Bloecken -- damit gibt es
+// auf dem Server GENAU EINE Art von Ding und keine zweite Form, an der
+// man es erkennen koennte. Der Kopfblock zaehlt die Bloecke des Textes
+// auf; die Wurzel nennt den Kopfblock.
+//
+//     Kopfblock (4096 Oktette Klartext):
+//         "osumver1 <laenge>\n" dann <namehex>\n je Block
+fn man_hoch(text: u64, len: u64, kopfname: u64) -> bool {
+    var kb: [u8; 4096] = [0 as u8; 4096]
+    let kp: u64 = (&kb[0]) as u64
+    var i: u64 = 0
+    while i < BLOCK {
+        st8(kp, i, 0)
+        i = i + 1
+    }
+    var kopf: [u8; 10] = "osumver1 \0"
+    ulib.strcpy(kp, (&kopf[0]) as u64)
+    var at: u64 = 9
+    at = at + kbund.num_aus(kp + at, len)
+    st8(kp, at, 10)
+    at = at + 1
+    var off: u64 = 0
+    while off < len {
+        var b: u64 = 0
+        while b < BLOCK {
+            if off + b < len {
+                st8((&blk[0]) as u64, b, ld8(text, off + b))
+            } else {
+                st8((&blk[0]) as u64, b, 0)
+            }
+            b = b + 1
+        }
+        if at + NAMEHEX + 1 >= BLOCK {
+            return false
+        }
+        if !block_ab((&blk[0]) as u64, kp + at) {
+            return false
+        }
+        at = at + NAMEHEX
+        st8(kp, at, 10)
+        at = at + 1
+        off = off + BLOCK
+    }
+    return block_ab(kp, kopfname)
+}
+
+fn man_runter(kopfname: u64, text: u64, out_len: *mut u64) -> bool {
+    var kb: [u8; 4160] = [0 as u8; 4160]
+    let kp: u64 = (&kb[0]) as u64
+    if !block_auf(kopfname, kp) {
+        return false
+    }
+    var kopf: [u8; 9] = "osumver1\0"
+    if !ulib.strneq(kp, (&kopf[0]) as u64, 8) {
+        return false
+    }
+    let len: u64 = kbund.num_ein(kp + 9)
+    if len > MANMAX {
+        return false
+    }
+    var at: u64 = 9
+    while ld8(kp, at) != 10 && at < BLOCK {
+        at = at + 1
+    }
+    at = at + 1
+    var off: u64 = 0
+    while off < len {
+        if at + NAMEHEX > BLOCK {
+            return false
+        }
+        if !block_auf(kp + at, (&plain[0]) as u64) {
+            return false
+        }
+        var b: u64 = 0
+        while b < BLOCK && off + b < len {
+            st8(text, off + b, ld8((&plain[0]) as u64, b))
+            b = b + 1
+        }
+        at = at + NAMEHEX + 1
+        off = off + BLOCK
+    }
+    *out_len = len
+    return true
+}
+
+// ------------------------------------------- Zeilen in einem Verzeichnis
+
+// Sucht die Zeile der Art `art` ('f' oder 'd') zum Pfad `pfad`. Der Pfad
+// steht am ZEILENENDE -- deshalb darf er Leerzeichen enthalten und
+// deshalb ist der Vergleich einfach.
+fn zeile_suchen(text: u64, len: u64, art: u64, pfad: u64) -> u64 {
+    let pl: u64 = ulib.length(pfad)
+    var at: u64 = 0
+    while at < len {
+        var e: u64 = at
+        while e < len && ld8(text, e) != 10 {
+            e = e + 1
+        }
+        if ld8(text, at) == art && e > at + pl + 2 {
+            // Pfad am Ende, davor ein Leerzeichen
+            let start: u64 = e - pl
+            if ld8(text, start - 1) == 32 {
+                var i: u64 = 0
+                var gleich: bool = true
+                while i < pl {
+                    if ld8(text, start + i) != ld8(pfad, i) {
+                        gleich = false
+                        i = pl
+                    }
+                    i = i + 1
+                }
+                if gleich {
+                    return at
+                }
+            }
+        }
+        at = e + 1
+    }
+    return len
+}
+
+// Kopiert die Zeile bei `at` nach `out` (mit Null am Ende) und gibt ihre
+// Laenge zurueck.
+fn zeile_holen(text: u64, len: u64, at: u64, out: u64) -> u64 {
+    var e: u64 = at
+    while e < len && ld8(text, e) != 10 {
+        e = e + 1
+    }
+    var i: u64 = 0
+    while i < e - at && i < LINEMAX - 1 {
+        st8(out, i, ld8(text, at + i))
+        i = i + 1
+    }
+    st8(out, i, 0)
+    return i
+}
+
+fn zeilen_gleich(a: u64, b: u64) -> bool {
+    return ulib.streq(a, b)
+}
+
+// Haengt eine Zeile (mit Null am Ende) an das neue Verzeichnis.
+fn man_neu_zeile(z: u64) -> bool {
+    let l: u64 = ulib.length(z)
+    if ln + l + 1 >= MANMAX {
+        return false
+    }
+    var i: u64 = 0
+    while i < l {
+        st8((&man_n[0]) as u64, ln + i, ld8(z, i))
+        i = i + 1
+    }
+    st8((&man_n[0]) as u64, ln + l, 10)
+    ln = ln + l + 1
+    return true
+}
+
+// --------------------------------------------------- der eigene Baum
+
+fn make_full() {
+    ulib.strncpy((&full[0]) as u64, (&z_baum[0]) as u64, PATHMAX)
+    if relp[0] != 0 as u8 {
+        ulib.strcat((&full[0]) as u64, (&relp[0]) as u64)
+    }
+}
+
+// Liest eine Datei, zerlegt sie in Bloecke, legt jeden ab und schreibt
+// die Zeile:
+//     f <mode> <groesse> <namehex>,<namehex>,... <pfad>
+fn datei_zeile(pfad: u64, mode: u64, out: u64) -> bool {
+    make_full()
+    let fd: u64 = io.open((&full[0]) as u64, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    var at: u64 = 0
+    st8(out, at, 102) // 'f'
+    at = 1
+    st8(out, at, 32)
+    at = at + 1
+    at = at + kbund.num_aus(out + at, mode)
+    st8(out, at, 32)
+    at = at + 1
+    let gr_at: u64 = at
+    // Die Groesse wissen wir erst nach dem Lesen; sie kommt in einem
+    // zweiten Durchgang an diese Stelle, deshalb wird hier Platz
+    // gelassen und der Rest in `zeile2` gesammelt.
+    let np: u64 = (&nambuf[0]) as u64
+    var nat: u64 = 0
+    var gesamt: u64 = 0
+    var weiter: bool = true
+    while weiter {
+        var got: u64 = io.read_full(fd, (&blk[0]) as u64, BLOCK)
+        if ulib.bad(got) {
+            io.close(fd)
+            return false
+        }
+        if got == 0 {
+            weiter = false
+            continue
+        }
+        gesamt = gesamt + got
+        b_gelesen = b_gelesen + got
+        // AUFFUELLEN. Der Rest des Blocks wird genullt, damit jeder
+        // Block auf dem Server gleich gross ist -- siehe den Kopf.
+        var i: u64 = got
+        while i < BLOCK {
+            st8((&blk[0]) as u64, i, 0)
+            i = i + 1
+        }
+        if nat + NAMEHEX + 2 >= NAMBUF {
+            // Ueber 1008 Bloecke, also knapp 4 MiB. Das ist eine
+            // ehrliche Grenze und KEIN stilles Weglassen mehr: der
+            // Aufrufer bricht ab und nennt den Pfad.
+            merk_pfad(pfad)
+            io.close(fd)
+            return false
+        }
+        if nat > 0 {
+            st8(np, nat, 44) // Komma
+            nat = nat + 1
+        }
+        if !block_ab((&blk[0]) as u64, np + nat) {
+            io.close(fd)
+            return false
+        }
+        nat = nat + NAMEHEX
+        if got < BLOCK {
+            weiter = false
+        }
+    }
+    io.close(fd)
+    st8(np, nat, 0)
+    at = gr_at + kbund.num_aus(out + gr_at, gesamt)
+    st8(out, at, 32)
+    at = at + 1
+    if gesamt == 0 {
+        st8(out, at, 45) // '-' : eine leere Datei hat keinen Block
+        at = at + 1
+    } else if nat < NAMINLINE {
+        var i: u64 = 0
+        while i < nat {
+            st8(out, at + i, ld8(np, i))
+            i = i + 1
+        }
+        at = at + nat
+    } else {
+        // DIE K-FORM. Die Namensliste ist zu lang fuer eine Zeile von
+        // 1024 Oktetten, also wird sie selbst abgelegt -- als GENAU
+        // DIESELBE Kette, die das Verzeichnis benutzt. Der Server sieht
+        // dadurch keine zweite Art von Ding: es sind wieder nur Bloecke
+        // zu 4096. In der Zeile steht nur noch 'K' und der Kopfblock.
+        var kh: [u8; 72] = [0 as u8; 72]
+        if !man_hoch(np, nat, (&kh[0]) as u64) {
+            merk_pfad(pfad)
+            return false
+        }
+        st8(out, at, 75) // 'K'
+        at = at + 1
+        var i: u64 = 0
+        while i < NAMEHEX {
+            st8(out, at + i, ld8((&kh[0]) as u64, i))
+            i = i + 1
+        }
+        at = at + NAMEHEX
+    }
+    st8(out, at, 32)
+    at = at + 1
+    var i: u64 = 0
+    let pl: u64 = ulib.length(pfad)
+    while i < pl {
+        st8(out, at + i, ld8(pfad, i))
+        i = i + 1
+    }
+    st8(out, at + pl, 0)
+    n_dateien = n_dateien + 1
+    return true
+}
+
+// Der Baum, einmal durchgegangen -- derselbe Aufbau wie `bstore.walk`
+// (ausdruecklicher Stapel statt Rekursion, weil ein Prozess hier acht
+// Seiten Stapel hat).
+fn baum_gehen() -> bool {
+    var dot: [u8; 2] = ".\0"
+    var dotdot: [u8; 3] = "..\0"
+    var e_ein: [u8; 3] = "d \0"
+    relp[0] = 0 as u8
+    var depth: u64 = 0
+    make_full()
+    let fd0: u64 = io.dir_open((&full[0]) as u64)
+    if ulib.bad(fd0) {
+        return false
+    }
+    dfd[0] = fd0
+    dlen[0] = 0
+    dat[0] = 0
+    dcut[0] = 0
+    var weiter: bool = true
+    while weiter {
+        if dat[depth as usize] >= dlen[depth as usize] {
+            let n: u64 = io.dir_read(dfd[depth as usize],
+                (&dbuf[0]) as u64 + depth * 512, 512)
+            if n == 0 || ulib.bad(n) {
+                io.close(dfd[depth as usize])
+                if depth == 0 {
+                    weiter = false
+                } else {
+                    depth = depth - 1
+                    relp[dcut[depth as usize] as usize] = 0 as u8
+                }
+                continue
+            }
+            dlen[depth as usize] = n
+            dat[depth as usize] = 0
+        }
+        let rec: u64 = (&dbuf[0]) as u64 + depth * 512 + dat[depth as usize]
+        let nm: u64 = io.dir_name(rec)
+        let kind: u64 = io.dir_kind(rec)
+        dat[depth as usize] = dat[depth as usize] + io.dir_reclen(rec)
+        if ulib.streq(nm, (&dot[0]) as u64) {
+            continue
+        }
+        if ulib.streq(nm, (&dotdot[0]) as u64) {
+            continue
+        }
+        let keep: u64 = ulib.length((&relp[0]) as u64)
+        var sl: [u8; 2] = "/\0"
+        ulib.strcat((&relp[0]) as u64, (&sl[0]) as u64)
+        ulib.strcat((&relp[0]) as u64, nm)
+        make_full()
+        if kind == io.DT_DIR {
+            var z: [u8; 320] = [0 as u8; 320]
+            let zp: u64 = (&z[0]) as u64
+            ulib.strcpy(zp, (&e_ein[0]) as u64)
+            var at: u64 = 2
+            at = at + kbund.num_aus(zp + at, io.stat_mode((&full[0]) as u64))
+            st8(zp, at, 32)
+            at = at + 1
+            ulib.strcpy(zp + at, (&relp[0]) as u64)
+            if !man_l_zeile(zp) {
+                return false
+            }
+            if depth + 1 >= MAXDEPTH {
+                relp[keep as usize] = 0 as u8
+                continue
+            }
+            let sub: u64 = io.dir_open((&full[0]) as u64)
+            if ulib.bad(sub) {
+                relp[keep as usize] = 0 as u8
+                continue
+            }
+            dcut[depth as usize] = keep
+            depth = depth + 1
+            dfd[depth as usize] = sub
+            dlen[depth as usize] = 0
+            dat[depth as usize] = 0
+        } else {
+            // Dateien, die dieser Lauf selbst angelegt hat, gehoeren
+            // nicht in den Abgleich: `.T` ist ein halb geschriebener
+            // Download und `.konflikt` ist bereits eine eigene Zeile.
+            if !endet_auf((&relp[0]) as u64, 2) {
+                if !datei_zeile((&relp[0]) as u64,
+                    io.stat_mode((&full[0]) as u64), (&zeile2[0]) as u64) {
+                    // FRUEHER STAND HIER `continue`. Eine Datei, die
+                    // sich nicht darstellen liess, fiel damit lautlos
+                    // aus dem Abgleich, und der Lauf meldete trotzdem
+                    // "fertig" -- der schlimmste denkbare Ausgang fuer
+                    // ein Abgleichprogramm. Jetzt bricht der Baum ab
+                    // und `fehlerpfad` sagt, welche Datei es war.
+                    merk_pfad((&relp[0]) as u64)
+                    io.close(dfd[depth as usize])
+                    return false
+                }
+                if !man_l_zeile((&zeile2[0]) as u64) {
+                    return false
+                }
+            }
+            relp[keep as usize] = 0 as u8
+        }
+    }
+    return true
+}
+
+// `.T` am Ende? (art 2 = nur `.T`)
+fn endet_auf(p: u64, art: u64) -> bool {
+    let l: u64 = ulib.length(p)
+    if l < 2 {
+        return false
+    }
+    if ld8(p, l - 2) == 46 && ld8(p, l - 1) == 84 {
+        return true
+    }
+    return false
+}
+
+fn man_l_zeile(z: u64) -> bool {
+    let l: u64 = ulib.length(z)
+    if ll + l + 1 >= MANMAX {
+        return false
+    }
+    var i: u64 = 0
+    while i < l {
+        st8((&man_l[0]) as u64, ll + i, ld8(z, i))
+        i = i + 1
+    }
+    st8((&man_l[0]) as u64, ll + l, 10)
+    ll = ll + l + 1
+    return true
+}
+
+// --------------------------------------------------- eine Datei zurueck
+
+// Schreibt die Datei einer `f`-Zeile aus dem Speicher. Erst nach `.T`,
+// dann darueber -- ein Abbruch hinterlaesst kein halbes Dokument.
+fn datei_her(z: u64, pfad: u64) -> bool {
+    // f <mode> <groesse> <namen> <pfad>
+    var at: u64 = 2
+    let mode: u64 = kbund.num_ein(z + at)
+    while ld8(z, at) != 32 && ld8(z, at) != 0 {
+        at = at + 1
+    }
+    at = at + 1
+    let groesse: u64 = kbund.num_ein(z + at)
+    while ld8(z, at) != 32 && ld8(z, at) != 0 {
+        at = at + 1
+    }
+    at = at + 1
+    let namen: u64 = at
+    ulib.strncpy((&tmpp[0]) as u64, (&z_baum[0]) as u64, PATHMAX)
+    ulib.strcat((&tmpp[0]) as u64, pfad)
+    var tn: [u8; 3] = ".T\0"
+    var zielt: [u8; 512] = [0 as u8; 512]
+    ulib.strcpy((&zielt[0]) as u64, (&tmpp[0]) as u64)
+    ulib.strcat((&zielt[0]) as u64, (&tn[0]) as u64)
+    let fd: u64 = io.create((&zielt[0]) as u64)
+    if ulib.bad(fd) {
+        return false
+    }
+    var geschrieben: u64 = 0
+    var p: u64 = namen
+    // WOHER DIE NAMEN KOMMEN: entweder direkt aus der Zeile, oder --
+    // bei der K-Form -- aus einer eigenen Kette, die erst geholt wird.
+    var quelle: u64 = z
+    if ld8(z, p) == 75 {
+        var nl: u64 = 0
+        if !man_runter(z + p + 1, (&nambuf[0]) as u64, &nl) {
+            io.close(fd)
+            io.unlink((&zielt[0]) as u64)
+            return false
+        }
+        st8((&nambuf[0]) as u64, nl, 0)
+        quelle = (&nambuf[0]) as u64
+        p = 0
+    }
+    if ld8(quelle, p) != 45 {
+        var weiter: bool = true
+        while weiter {
+            if !block_auf(quelle + p, (&plain[0]) as u64) {
+                io.close(fd)
+                io.unlink((&zielt[0]) as u64)
+                return false
+            }
+            var nimm: u64 = BLOCK
+            if geschrieben + nimm > groesse {
+                nimm = groesse - geschrieben
+            }
+            if ulib.bad(io.write_all(fd, (&plain[0]) as u64, nimm)) {
+                io.close(fd)
+                io.unlink((&zielt[0]) as u64)
+                return false
+            }
+            geschrieben = geschrieben + nimm
+            p = p + NAMEHEX
+            if ld8(quelle, p) == 44 {
+                p = p + 1
+            } else {
+                weiter = false
+            }
+        }
+    }
+    io.fsync(fd)
+    io.close(fd)
+    // DIE RECHTE AUS DEM VERZEICHNIS. Sie standen bisher in der Zeile
+    // und wurden nicht benutzt -- mit der Folge, dass eine
+    // heruntergeladene Datei andere Rechte hatte als dieselbe Datei
+    // drueben, die Zeilen also fuer immer verschieden blieben und jeder
+    // Abgleich sie erneut fuer geaendert hielt.
+    ulib.sys(SYS_CHMOD, (&zielt[0]) as u64, mode & 4095, 0)
+    // Umbenennen gibt es seit Runde K14 (SYS_RENAME).
+    //
+    // DER KERNEL UEBERSCHREIBT NICHT STILL: liegt am Ziel schon etwas,
+    // gibt `rename` EEXIST (siehe `kernel/user/mv.fi`, Runde OFS3).
+    // Deshalb erst der saubere Weg -- klappt er, war der Austausch
+    // unteilbar --, und nur wenn er scheitert, wird das alte Stueck
+    // weggenommen und noch einmal umbenannt. Zwischen diesen beiden
+    // Schritten liegt ein Fenster, in dem ein Stromausfall die Datei
+    // fehlen laesst; das ist ehrlich gesagt eine Schwaeche und keine
+    // Loesung, aber der VOLLSTAENDIGE neue Inhalt liegt dann noch unter
+    // `<pfad>.T`, und der naechste Abgleich holt ihn ohnehin wieder.
+    // Besser ginge es nur mit einem `rename`, das ersetzen darf -- das
+    // waere eine Kernaenderung und gehoert nicht in diese Runde.
+    if ulib.bad(ulib.sys4(ulib.SYS_RENAME, (&zielt[0]) as u64,
+        (&tmpp[0]) as u64, 0, 0)) {
+        io.unlink((&tmpp[0]) as u64)
+        if ulib.bad(ulib.sys4(ulib.SYS_RENAME, (&zielt[0]) as u64,
+            (&tmpp[0]) as u64, 0, 0)) {
+            io.unlink((&zielt[0]) as u64)
+            return false
+        }
+    }
+    return true
+}
+
+// Die Verzeichnisse einer `d`-Zeile anlegen.
+fn ordner_her(pfad: u64) -> bool {
+    ulib.strncpy((&tmpp[0]) as u64, (&z_baum[0]) as u64, PATHMAX)
+    ulib.strcat((&tmpp[0]) as u64, pfad)
+    io.make_dir((&tmpp[0]) as u64)
+    return true
+}
+
+// ------------------------------------------------------- Datei-Hilfen
+
+fn text_lesen(pfad: u64, out: u64, max: u64, len: *mut u64) -> bool {
+    let fd: u64 = io.open(pfad, 0)
+    if ulib.bad(fd) {
+        *len = 0
+        return false
+    }
+    let n: u64 = io.read_full(fd, out, max)
+    io.close(fd)
+    if ulib.bad(n) {
+        *len = 0
+        return false
+    }
+    *len = n
+    return true
+}
+
+fn text_schreiben(pfad: u64, p: u64, n: u64) -> bool {
+    let fd: u64 = io.create(pfad)
+    if ulib.bad(fd) {
+        return false
+    }
+    let ok: bool = !ulib.bad(io.write_all(fd, p, n))
+    io.fsync(fd)
+    io.close(fd)
+    return ok
+}
+
+fn text_anhaengen(pfad: u64, p: u64) -> bool {
+    let fd: u64 = io.open(pfad, 1 | 64 | 1024)
+    if ulib.bad(fd) {
+        return false
+    }
+    let l: u64 = ulib.length(p)
+    let ok: bool = !ulib.bad(io.write_all(fd, p, l))
+    io.close(fd)
+    return ok
+}
+
+fn konto_datei(name: u64) -> u64 {
+    return kbund.pfad2((&z_konto[0]) as u64, name)
+}
+
+fn zaehler_lesen() -> u64 {
+    var n: [u8; 8] = "ZAEHLER\0"
+    var b: [u8; 32] = [0 as u8; 32]
+    var l: u64 = 0
+    if !text_lesen(konto_datei((&n[0]) as u64), (&b[0]) as u64, 30, &l) {
+        return 0
+    }
+    st8((&b[0]) as u64, l, 0)
+    return kbund.num_ein((&b[0]) as u64)
+}
+
+fn zaehler_schreiben(v: u64) -> bool {
+    var n: [u8; 8] = "ZAEHLER\0"
+    var b: [u8; 32] = [0 as u8; 32]
+    let l: u64 = kbund.num_aus((&b[0]) as u64, v)
+    st8((&b[0]) as u64, l, 10)
+    return text_schreiben(konto_datei((&n[0]) as u64), (&b[0]) as u64, l + 1)
+}
+
+// ------------------------------------------------------- der Abgleich
+
+fn abgleichen() -> u64 {
+    var n_basis: [u8; 6] = "BASIS\0"
+    var n_konf: [u8; 10] = "KONFLIKTE\0"
+    var t_kein: [u8; 39] = "sync: der Speicher ist noch leer\0\0\0\0\0\0\0"
+    var t_falsch: [u8; 62] = "sync: die Wurzel des Speichers ist gefaelscht -- abgebrochen\0\0"
+    var t_rueck: [u8; 74] = "sync: RUECKSCHRITT -- der Speicher bietet eine aeltere Generation an\0\0\0\0\0\0"
+    var t_gen: [u8; 13] = "generation: \0"
+    var t_up: [u8; 12] = "hochgeladen\0"
+    var kf: [u8; 10] = ".konflikt\0"
+
+    if !ix_laden() {
+        return 3
+    }
+    let zaehler: u64 = zaehler_lesen()
+    var rname: [u8; 80] = [0 as u8; 80]
+    var gen: u64 = 0
+    var nr: [u8; 5] = "ROOT\0"
+    var nt: [u8; 7] = "ROOT.T\0"
+    var st: u64 = wurzel_lesen((&nr[0]) as u64, zaehler, &gen,
+        (&rname[0]) as u64)
+    if st == 2 {
+        // Die Rettung: eine Wurzel, die gerade geschrieben wurde, als
+        // der Strom ausfiel, steht noch vollstaendig in ROOT.T.
+        //
+        // ABER SIE DARF NICHTS VERSCHLECHTERN. Frueher stand hier eine
+        // schlichte Zuweisung, und die hat den schlimmsten Fehler dieser
+        // Runde gemacht: gibt es KEIN ROOT.T, liefert `wurzel_lesen` 0
+        // ("keine Wurzel da") -- und aus "die Wurzel ist gefaelscht"
+        // wurde damit "der Speicher ist noch leer". Ein Server, der ROOT
+        // nur kaputtmacht, haette so erreicht, dass das Geraet den
+        // Speicher fuer neu haelt und den ganzen Abgleich von vorn
+        // beginnt; auf einem leeren Geraet heisst das: alles weg. Der
+        // Testlauf hat es an (e) wurzelluege und (e) halbe gezeigt.
+        //
+        // Also: ROOT.T zaehlt nur, wenn dort WIRKLICH etwas Lesbares
+        // steht. Sonst bleibt eine Faelschung eine Faelschung.
+        let st2: u64 = wurzel_lesen((&nt[0]) as u64, zaehler, &gen,
+            (&rname[0]) as u64)
+        if st2 != 0 {
+            st = st2
+        }
+    }
+    if st == 3 {
+        sag((&t_rueck[0]) as u64)
+        sag_kv((&t_gen[0]) as u64, gen)
+        return 4
+    }
+    if st == 2 {
+        sag((&t_falsch[0]) as u64)
+        return 5
+    }
+    lr = 0
+    if st == 1 {
+        var nh: [u8; 80] = [0 as u8; 80]
+        kbund.hex_aus((&rname[0]) as u64, 32, (&nh[0]) as u64)
+        if !man_runter((&nh[0]) as u64, (&man_r[0]) as u64, &lr) {
+            sag((&t_falsch[0]) as u64)
+            return 5
+        }
+        gen_alt = gen
+    } else {
+        sag((&t_kein[0]) as u64)
+        gen_alt = 0
+    }
+    // Die letzte Einigkeit, falls es sie gibt.
+    lb = 0
+    text_lesen(konto_datei((&n_basis[0]) as u64), (&man_b[0]) as u64,
+        MANMAX, &lb)
+    // Die Einstellungen werden VOR dem Baumgang gemischt, damit der
+    // Baumgang die gemischte Datei sieht und genau sie hochlaedt.
+    if !einst_holen() {
+        return 9
+    }
+    if !einst_mischen() {
+        return 9
+    }
+    // Der Baum, wie er jetzt ist. DAS LEGT SCHON ALLE NEUEN BLOECKE AB --
+    // Bloecke zuerst, Wurzel zuletzt, das ist die Reihenfolge aus dem Kopf.
+    ll = 0
+    if !baum_gehen() {
+        return 6
+    }
+    ln = 0
+    // ---- Durchgang 1: alles, was hier steht
+    var at: u64 = 0
+    while at < ll {
+        let e0: u64 = zeile_holen((&man_l[0]) as u64, ll, at,
+            (&zeile[0]) as u64)
+        var pfad: u64 = pfad_von((&zeile[0]) as u64)
+        let art: u64 = ld8((&zeile[0]) as u64, 0)
+        let rat: u64 = zeile_suchen((&man_r[0]) as u64, lr, art, pfad)
+        let bat: u64 = zeile_suchen((&man_b[0]) as u64, lb, art, pfad)
+        if rat >= lr {
+            // Der Server kennt das hier nicht.
+            if !man_neu_zeile((&zeile[0]) as u64) {
+                return 7
+            }
+            if art == 102 {
+                n_hoch = n_hoch + 1
+            }
+        } else {
+            zeile_holen((&man_r[0]) as u64, lr, rat, (&zeile2[0]) as u64)
+            if zeilen_gleich((&zeile[0]) as u64, (&zeile2[0]) as u64) {
+                if !man_neu_zeile((&zeile[0]) as u64) {
+                    return 7
+                }
+            } else if art == 102 && ist_einst(pfad) {
+                // Die Einstellungen sind schon gemischt -- die eigene
+                // (gemischte) Zeile gilt, und sie geht hoch.
+                if !man_neu_zeile((&zeile[0]) as u64) {
+                    return 7
+                }
+                n_hoch = n_hoch + 1
+            } else {
+                var basis_gleich_l: bool = false
+                var basis_gleich_r: bool = false
+                if bat < lb {
+                    var zb: [u8; 1024] = [0 as u8; 1024]
+                    zeile_holen((&man_b[0]) as u64, lb, bat, (&zb[0]) as u64)
+                    basis_gleich_l = zeilen_gleich((&zeile[0]) as u64,
+                        (&zb[0]) as u64)
+                    basis_gleich_r = zeilen_gleich((&zeile2[0]) as u64,
+                        (&zb[0]) as u64)
+                }
+                if basis_gleich_l {
+                    // nur drueben geaendert -> holen
+                    if art == 102 {
+                        if !datei_her((&zeile2[0]) as u64, pfad) {
+                            merk_pfad(pfad)
+                            return 8
+                        }
+                        n_runter = n_runter + 1
+                    }
+                    if !man_neu_zeile((&zeile2[0]) as u64) {
+                        return 7
+                    }
+                } else if basis_gleich_r {
+                    // nur hier geaendert -> die eigene Zeile gilt
+                    if !man_neu_zeile((&zeile[0]) as u64) {
+                        return 7
+                    }
+                    if art == 102 {
+                        n_hoch = n_hoch + 1
+                    }
+                } else {
+                    // BEIDE. Kein Sieger.
+                    if art == 102 {
+                        var kp: [u8; 300] = [0 as u8; 300]
+                        ulib.strcpy((&kp[0]) as u64, pfad)
+                        ulib.strcat((&kp[0]) as u64, (&kf[0]) as u64)
+                        if !datei_her((&zeile2[0]) as u64, (&kp[0]) as u64) {
+                            merk_pfad((&kp[0]) as u64)
+                            return 8
+                        }
+                        // Die fremde Fassung bekommt ihren eigenen Pfad,
+                        // damit sie auch auf dem Server ueberlebt.
+                        pfad_ersetzen((&zeile2[0]) as u64, (&kp[0]) as u64)
+                        if !man_neu_zeile((&zeile[0]) as u64) {
+                            return 7
+                        }
+                        if !man_neu_zeile((&zeile2[0]) as u64) {
+                            return 7
+                        }
+                        n_konflikt = n_konflikt + 1
+                        var kz: [u8; 320] = [0 as u8; 320]
+                        var nl: [u8; 2] = "\n\0"
+                        ulib.strcpy((&kz[0]) as u64, pfad)
+                        ulib.strcat((&kz[0]) as u64, (&nl[0]) as u64)
+                        text_anhaengen(konto_datei((&n_konf[0]) as u64),
+                            (&kz[0]) as u64)
+                    } else {
+                        if !man_neu_zeile((&zeile[0]) as u64) {
+                            return 7
+                        }
+                    }
+                }
+            }
+        }
+        at = at + e0 + 1
+    }
+    // ---- Durchgang 2: was nur drueben steht
+    at = 0
+    while at < lr {
+        let e0: u64 = zeile_holen((&man_r[0]) as u64, lr, at,
+            (&zeile[0]) as u64)
+        let art: u64 = ld8((&zeile[0]) as u64, 0)
+        let pfad: u64 = pfad_von((&zeile[0]) as u64)
+        if zeile_suchen((&man_l[0]) as u64, ll, art, pfad) >= ll {
+            if art == 100 {
+                ordner_her(pfad)
+                if !man_neu_zeile((&zeile[0]) as u64) {
+                    return 7
+                }
+            } else if art == 102 {
+                if !datei_her((&zeile[0]) as u64, pfad) {
+                    merk_pfad(pfad)
+                    return 8
+                }
+                n_runter = n_runter + 1
+                if !man_neu_zeile((&zeile[0]) as u64) {
+                    return 7
+                }
+            }
+        }
+        at = at + e0 + 1
+    }
+    // ---- das neue Verzeichnis hoch, dann die Wurzel
+    if !ix_schreiben() {
+        return 10
+    }
+    // WENN SICH NICHTS GEAENDERT HAT, gibt es keine neue Generation.
+    // Eine Wurzel, die bei jedem Lauf hochzaehlt, obwohl nichts passiert
+    // ist, macht den Rueckschrittschutz stumpf und den Verlauf
+    // unlesbar -- und sie schreibt auf einen Stick, der nichts zu
+    // schreiben haette.
+    var gleich: bool = ln == lr
+    if gleich {
+        var q: u64 = 0
+        while q < ln {
+            if ld8((&man_n[0]) as u64, q) != ld8((&man_r[0]) as u64, q) {
+                gleich = false
+                q = ln
+            }
+            q = q + 1
+        }
+    }
+    if gleich && gen_alt > 0 {
+        gen_neu = gen_alt
+        if !zaehler_schreiben(gen_alt) {
+            return 13
+        }
+        if !text_schreiben(konto_datei((&n_basis[0]) as u64),
+            (&man_n[0]) as u64, ln) {
+            return 14
+        }
+        return 0
+    }
+    var kopfname: [u8; 80] = [0 as u8; 80]
+    if !man_hoch((&man_n[0]) as u64, ln, (&kopfname[0]) as u64) {
+        return 11
+    }
+    if !ix_schreiben() {
+        return 10
+    }
+    var kn: [u8; 32] = [0 as u8; 32]
+    if !kbund.hex_ein((&kopfname[0]) as u64, 32, (&kn[0]) as u64) {
+        return 11
+    }
+    gen_neu = gen_alt + 1
+    if !wurzel_schreiben(gen_neu, (&kn[0]) as u64) {
+        return 12
+    }
+    if !zaehler_schreiben(gen_neu) {
+        return 13
+    }
+    if !text_schreiben(konto_datei((&n_basis[0]) as u64),
+        (&man_n[0]) as u64, ln) {
+        return 14
+    }
+    return 0
+}
+
+// Der Pfad einer Zeile: alles nach dem letzten Leerzeichen bis zum Ende.
+static mut pv: [u8; 300] = [0 as u8; 300]
+
+fn pfad_von(z: u64) -> u64 {
+    let l: u64 = ulib.length(z)
+    var i: u64 = l
+    while i > 0 && ld8(z, i - 1) != 32 {
+        i = i - 1
+    }
+    var k: u64 = 0
+    while i + k < l {
+        st8((&pv[0]) as u64, k, ld8(z, i + k))
+        k = k + 1
+    }
+    st8((&pv[0]) as u64, k, 0)
+    return (&pv[0]) as u64
+}
+
+// IST DAS DIE EINSTELLUNGSDATEI? Sie steht als Zeile im Verzeichnis
+// (sonst kaeme sie nie zum anderen Geraet), aber sie wird NICHT wie ein
+// Dokument behandelt: `einst_holen`/`einst_mischen` haben sie schon vor
+// dem Baumgang je Schluessel gemischt, und was danach im Baum liegt, IST
+// bereits das Ergebnis. Wer sie trotzdem durch den Dreiwegvergleich
+// schickt, findet zwangslaeufig einen Konflikt -- die gemischte Fassung
+// ist ja weder die eigene noch die fremde -- und legt `EINST.konflikt`
+// an. Genau das ist passiert: JEDER Abgleich mit einer geaenderten
+// Einstellung meldete einen Konflikt und hinterliess eine Kopie.
+fn ist_einst(pfad: u64) -> bool {
+    var pe: [u8; 7] = "/EINST\0"
+    return ulib.strneq(pfad, (&pe[0]) as u64, 7)
+}
+
+fn pfad_ersetzen(z: u64, neu: u64) {
+    let l: u64 = ulib.length(z)
+    var i: u64 = l
+    while i > 0 && ld8(z, i - 1) != 32 {
+        i = i - 1
+    }
+    var k: u64 = 0
+    let nl: u64 = ulib.length(neu)
+    while k < nl {
+        st8(z, i + k, ld8(neu, k))
+        k = k + 1
+    }
+    st8(z, i + nl, 0)
+}
+
+// ------------------------------------------------------ Einstellungen
+//
+// `<baum>/EINST`, eine Zeile je Schluessel:  `<zeit> <schluessel> <wert>`
+//
+// EINE EINSTELLUNG IST KEIN DOKUMENT. Zwei Fassungen von "Hintergrundbild
+// = blau" nebeneinander sind sinnlos, also gilt hier, was fuer Dateien
+// ausdruecklich NICHT gilt: je Schluessel gewinnt der spaetere Schreiber.
+//
+// DAMIT DAS KEIN STILLER VERLUST IST, wandert der unterlegene Wert nach
+// `<konto>/VERLAUF`. Die Frage "wer hat meine Einstellung geaendert und
+// was stand vorher da" hat damit eine Antwort, und der Nutzer muss sie
+// nicht raten.
+//
+// DIE ZEIT STEHT IN DER DATEI und wird nicht vom Abgleich geraten. Wenn
+// zwei Geraete ungleiche Uhren haben, gewinnt das mit der weiter
+// vorgestellten Uhr -- das ist die bekannte Schwaeche von
+// "letzter gewinnt", sie steht hier, und sie ist der Grund, warum
+// DOKUMENTE so NICHT behandelt werden.
+static mut e_lokal: [u8; 8192] = [0 as u8; 8192]
+static mut e_fern: [u8; 8192] = [0 as u8; 8192]
+static mut e_neu: [u8; 8192] = [0 as u8; 8192]
+static mut e_ll: u64 = 0
+static mut e_lf: u64 = 0
+static mut e_ln: u64 = 0
+static mut e_key: [u8; 128] = [0 as u8; 128]
+
+fn feld2(text: u64, at: u64, ende: u64, out: u64) -> bool {
+    var i: u64 = at
+    while i < ende && ld8(text, i) != 32 {
+        i = i + 1
+    }
+    if i >= ende {
+        return false
+    }
+    i = i + 1
+    var k: u64 = 0
+    while i + k < ende && ld8(text, i + k) != 32 && k < 120 {
+        st8(out, k, ld8(text, i + k))
+        k = k + 1
+    }
+    st8(out, k, 0)
+    return k > 0
+}
+
+fn zeit_von(text: u64, at: u64) -> u64 {
+    return kbund.num_ein(text + at)
+}
+
+// Sucht die Zeile zu `key` und gibt ihren Anfang zurueck, sonst `len`.
+fn einst_suchen(text: u64, len: u64, key: u64) -> u64 {
+    var kb2: [u8; 128] = [0 as u8; 128]
+    var at: u64 = 0
+    while at < len {
+        var e: u64 = at
+        while e < len && ld8(text, e) != 10 {
+            e = e + 1
+        }
+        if feld2(text, at, e, (&kb2[0]) as u64) {
+            if ulib.streq((&kb2[0]) as u64, key) {
+                return at
+            }
+        }
+        at = e + 1
+    }
+    return len
+}
+
+fn einst_anhaengen(text: u64, at: u64, ende: u64) {
+    var i: u64 = 0
+    while at + i < ende && e_ln + i < 8000 {
+        st8((&e_neu[0]) as u64, e_ln + i, ld8(text, at + i))
+        i = i + 1
+    }
+    e_ln = e_ln + i
+    st8((&e_neu[0]) as u64, e_ln, 10)
+    e_ln = e_ln + 1
+}
+
+fn verlauf_anhaengen(text: u64, at: u64, ende: u64) {
+    var n_v: [u8; 8] = "VERLAUF\0"
+    var z: [u8; 512] = [0 as u8; 512]
+    var vor: [u8; 12] = "ueberholt: \0"
+    ulib.strcpy((&z[0]) as u64, (&vor[0]) as u64)
+    var l: u64 = ulib.length((&z[0]) as u64)
+    var i: u64 = 0
+    while at + i < ende && l + i < 500 {
+        st8((&z[0]) as u64, l + i, ld8(text, at + i))
+        i = i + 1
+    }
+    st8((&z[0]) as u64, l + i, 10)
+    st8((&z[0]) as u64, l + i + 1, 0)
+    text_anhaengen(konto_datei((&n_v[0]) as u64), (&z[0]) as u64)
+    n_ueberholt = n_ueberholt + 1
+}
+
+// Mischt die ferne Fassung (schon nach `<konto>/EINST.fern` geholt) in
+// die eigene. Wird VOR dem Baumgang aufgerufen, damit der Baumgang die
+// gemischte Datei sieht und hochlaedt.
+fn einst_mischen() -> bool {
+    var n_e: [u8; 6] = "EINST\0"
+    var n_f: [u8; 11] = "EINST.fern\0"
+    var sl: [u8; 2] = "/\0"
+    e_ll = 0
+    e_lf = 0
+    e_ln = 0
+    ulib.strncpy((&tmpp[0]) as u64, (&z_baum[0]) as u64, PATHMAX)
+    ulib.strcat((&tmpp[0]) as u64, (&sl[0]) as u64)
+    ulib.strcat((&tmpp[0]) as u64, (&n_e[0]) as u64)
+    text_lesen((&tmpp[0]) as u64, (&e_lokal[0]) as u64, 8000, &e_ll)
+    text_lesen(konto_datei((&n_f[0]) as u64), (&e_fern[0]) as u64, 8000, &e_lf)
+    if e_ll == 0 && e_lf == 0 {
+        return true
+    }
+    // 1. jede eigene Zeile gegen die ferne
+    var at: u64 = 0
+    while at < e_ll {
+        var e: u64 = at
+        while e < e_ll && ld8((&e_lokal[0]) as u64, e) != 10 {
+            e = e + 1
+        }
+        if feld2((&e_lokal[0]) as u64, at, e, (&e_key[0]) as u64) {
+            let fat: u64 = einst_suchen((&e_fern[0]) as u64, e_lf,
+                (&e_key[0]) as u64)
+            if fat >= e_lf {
+                einst_anhaengen((&e_lokal[0]) as u64, at, e)
+            } else {
+                var fe: u64 = fat
+                while fe < e_lf && ld8((&e_fern[0]) as u64, fe) != 10 {
+                    fe = fe + 1
+                }
+                let tl: u64 = zeit_von((&e_lokal[0]) as u64, at)
+                let tf: u64 = zeit_von((&e_fern[0]) as u64, fat)
+                if tf > tl {
+                    einst_anhaengen((&e_fern[0]) as u64, fat, fe)
+                    verlauf_anhaengen((&e_lokal[0]) as u64, at, e)
+                } else {
+                    einst_anhaengen((&e_lokal[0]) as u64, at, e)
+                    if tf < tl {
+                        verlauf_anhaengen((&e_fern[0]) as u64, fat, fe)
+                    }
+                }
+            }
+            n_einst = n_einst + 1
+        }
+        at = e + 1
+    }
+    // 2. was es nur drueben gibt
+    at = 0
+    while at < e_lf {
+        var e: u64 = at
+        while e < e_lf && ld8((&e_fern[0]) as u64, e) != 10 {
+            e = e + 1
+        }
+        if feld2((&e_fern[0]) as u64, at, e, (&e_key[0]) as u64) {
+            if einst_suchen((&e_lokal[0]) as u64, e_ll,
+                (&e_key[0]) as u64) >= e_ll {
+                einst_anhaengen((&e_fern[0]) as u64, at, e)
+                n_einst = n_einst + 1
+            }
+        }
+        at = e + 1
+    }
+    if e_ln > 0 {
+        if !text_schreiben((&tmpp[0]) as u64, (&e_neu[0]) as u64, e_ln) {
+            return false
+        }
+    }
+    io.unlink(konto_datei((&n_f[0]) as u64))
+    return true
+}
+
+// Holt die ferne Einstellungsdatei nach `<konto>/EINST.fern`, falls das
+// ferne Verzeichnis eine hat.
+fn einst_holen() -> bool {
+    var n_f: [u8; 11] = "EINST.fern\0"
+    var pf: [u8; 7] = "/EINST\0"
+    let rat: u64 = zeile_suchen((&man_r[0]) as u64, lr, 102, (&pf[0]) as u64)
+    if rat >= lr {
+        return true
+    }
+    var z: [u8; 1024] = [0 as u8; 1024]
+    zeile_holen((&man_r[0]) as u64, lr, rat, (&z[0]) as u64)
+    // dieselbe Rechnung wie `datei_her`, nur mit einem Ziel im Konto
+    var at: u64 = 2
+    while ld8((&z[0]) as u64, at) != 32 {
+        at = at + 1
+    }
+    at = at + 1
+    let groesse: u64 = kbund.num_ein((&z[0]) as u64 + at)
+    while ld8((&z[0]) as u64, at) != 32 {
+        at = at + 1
+    }
+    at = at + 1
+    let fd: u64 = io.create(konto_datei((&n_f[0]) as u64))
+    if ulib.bad(fd) {
+        return false
+    }
+    var geschrieben: u64 = 0
+    var p: u64 = at
+    if ld8((&z[0]) as u64, p) != 45 {
+        var weiter: bool = true
+        while weiter {
+            if !block_auf((&z[0]) as u64 + p, (&plain[0]) as u64) {
+                io.close(fd)
+                return false
+            }
+            var nimm: u64 = BLOCK
+            if geschrieben + nimm > groesse {
+                nimm = groesse - geschrieben
+            }
+            io.write_all(fd, (&plain[0]) as u64, nimm)
+            geschrieben = geschrieben + nimm
+            p = p + NAMEHEX
+            if ld8((&z[0]) as u64, p) == 44 {
+                p = p + 1
+            } else {
+                weiter = false
+            }
+        }
+    }
+    io.close(fd)
+    return true
+}
+
+// ------------------------------------------------------------- Befehle
+
+fn hilfe() {
+    var h1: [u8; 56] = "sync neu       <konto> <pass> <anbieter> <ziel> [N] [r]\0"
+    var h2: [u8; 26] = "sync zeigen    <konto>\0\0\0\0"
+    var h3: [u8; 33] = "sync code      <konto> <code>\0\0\0\0"
+    var h4: [u8; 40] = "sync abgleich  <konto> <baum> <pass>\0\0\0\0"
+    var h5: [u8; 26] = "sync konflikte <konto>\0\0\0\0"
+    var h6: [u8; 33] = "sync auf       <konto> <pass>\0\0\0\0"
+    sag((&h1[0]) as u64)
+    sag((&h2[0]) as u64)
+    sag((&h3[0]) as u64)
+    sag((&h4[0]) as u64)
+    sag((&h5[0]) as u64)
+    sag((&h6[0]) as u64)
+}
+
+// DIE WARNUNG. Sie steht hier und nicht in einer Fussnote, weil sie die
+// wichtigste Zeile ist, die dieses Programm je ausgibt: nach ihr gibt es
+// keine Stelle mehr, die helfen kann.
+fn warnung() {
+    var w1: [u8; 66] = "ACHTUNG: ohne Passphrase UND ohne Wiederherstellungscode sind die\0"
+    var w2: [u8; 68] = "Daten dieses Kontos fuer immer verloren. Es gibt keine Hintertuer\0\0\0"
+    var w3: [u8; 69] = "und keine Stelle, die helfen koennte. Schreiben Sie den Code auf.\0\0\0\0"
+    sag((&w1[0]) as u64)
+    sag((&w2[0]) as u64)
+    sag((&w3[0]) as u64)
+}
+
+fn u_start(args: u64) -> u64 {
+    var c_neu: [u8; 4] = "neu\0"
+    var c_zeigen: [u8; 7] = "zeigen\0"
+    var c_code: [u8; 5] = "code\0"
+    var c_abg: [u8; 9] = "abgleich\0"
+    var c_konf: [u8; 10] = "konflikte\0"
+    var c_auf: [u8; 4] = "auf\0"
+    var a_e: [u8; 6] = "eigen\0"
+    var a_j: [u8; 7] = "jarvis\0"
+    var a_x: [u8; 6] = "xoffi\0"
+    var t_code: [u8; 25] = "wiederherstellungscode: \0"
+    var t_kein: [u8; 33] = "sync: dieses Konto gibt es nicht\0"
+    var t_pass: [u8; 45] = "sync: falsche Passphrase -- nichts geoeffnet\0"
+    var t_bad: [u8; 37] = "sync: dieser Code ist nicht gueltig\0\0"
+    var t_ok: [u8; 11] = "konto: auf\0"
+    var t_anb: [u8; 11] = "anbieter: \0"
+    var t_ziel: [u8; 7] = "ziel: \0"
+    var t_n: [u8; 4] = "N: \0"
+    var t_r: [u8; 4] = "r: \0"
+    var t_d: [u8; 10] = "dateien: \0"
+    var t_b: [u8; 10] = "bloecke: \0"
+    var t_nn: [u8; 13] = "neubloecke: \0"
+    var t_h: [u8; 14] = "hochgeladen: \0"
+    var t_r2: [u8; 14] = "heruntergel: \0"
+    var t_k: [u8; 12] = "konflikte: \0"
+    var t_g: [u8; 13] = "generation: \0"
+    var t_e: [u8; 16] = "einstellungen: \0"
+    var t_u: [u8; 12] = "ueberholt: \0"
+    var t_bs: [u8; 11] = "gesendet: \0"
+    var t_bg: [u8; 9] = "geholt: \0"
+    var t_bl: [u8; 10] = "gelesen: \0"
+    var t_zeit: [u8; 11] = "sekunden: \0"
+    var t_fertig: [u8; 7] = "fertig\0"
+    var t_fehler: [u8; 14] = "sync: fehler \0"
+    var t_fwo: [u8; 13] = "sync: bei:  \0"
+
+    let n: u64 = ulib.arg_count(args)
+    if n < 2 {
+        hilfe()
+        return 1
+    }
+    let a1: u64 = ulib.arg_at(args, 1)
+
+    if ulib.streq(a1, (&c_neu[0]) as u64) {
+        if n < 6 {
+            hilfe()
+            return 1
+        }
+        ulib.strncpy((&z_konto[0]) as u64, ulib.arg_at(args, 2), PATHMAX)
+        let pw: u64 = ulib.arg_at(args, 3)
+        let anb: u64 = ulib.arg_at(args, 4)
+        let ziel: u64 = ulib.arg_at(args, 5)
+        var nn: u64 = 4096
+        var rr: u64 = 8
+        if n >= 7 {
+            nn = kbund.num_ein(ulib.arg_at(args, 6))
+        }
+        if n >= 8 {
+            rr = kbund.num_ein(ulib.arg_at(args, 7))
+        }
+        var ai: u64 = kbund.A_EIGEN
+        if ulib.streq(anb, (&a_j[0]) as u64) { ai = kbund.A_JARVIS }
+        if ulib.streq(anb, (&a_x[0]) as u64) { ai = kbund.A_XOFFI }
+        var codeb: [u8; 80] = [0 as u8; 80]
+        warnung()
+        if !kbund.kb_neu((&z_konto[0]) as u64, pw, ulib.length(pw),
+            nn, rr, ai, ziel, (&codeb[0]) as u64) {
+            sag((&t_fehler[0]) as u64)
+            return 2
+        }
+        sag_kt((&t_code[0]) as u64, (&codeb[0]) as u64)
+        sag((&t_ok[0]) as u64)
+        kbund.kb_zu()
+        return 0
+    }
+
+    if ulib.streq(a1, (&c_zeigen[0]) as u64) {
+        if n < 3 {
+            hilfe()
+            return 1
+        }
+        ulib.strncpy((&z_konto[0]) as u64, ulib.arg_at(args, 2), PATHMAX)
+        if !kbund.kb_da((&z_konto[0]) as u64) {
+            sag((&t_kein[0]) as u64)
+            return 2
+        }
+        var ap: u64 = (&a_e[0]) as u64
+        if kbund.kb_anbieter() == kbund.A_JARVIS { ap = (&a_j[0]) as u64 }
+        if kbund.kb_anbieter() == kbund.A_XOFFI { ap = (&a_x[0]) as u64 }
+        sag_kt((&t_anb[0]) as u64, ap)
+        sag_kt((&t_ziel[0]) as u64, kbund.kb_ziel())
+        sag_kv((&t_n[0]) as u64, kbund.kb_n())
+        sag_kv((&t_r[0]) as u64, kbund.kb_r())
+        return 0
+    }
+
+    if ulib.streq(a1, (&c_code[0]) as u64) {
+        if n < 4 {
+            hilfe()
+            return 1
+        }
+        ulib.strncpy((&z_konto[0]) as u64, ulib.arg_at(args, 2), PATHMAX)
+        if !kbund.kb_oeffnen_code((&z_konto[0]) as u64, ulib.arg_at(args, 3)) {
+            sag((&t_bad[0]) as u64)
+            return 2
+        }
+        sag((&t_ok[0]) as u64)
+        kbund.kb_zu()
+        return 0
+    }
+
+    if ulib.streq(a1, (&c_auf[0]) as u64) {
+        if n < 4 {
+            hilfe()
+            return 1
+        }
+        ulib.strncpy((&z_konto[0]) as u64, ulib.arg_at(args, 2), PATHMAX)
+        let pw: u64 = ulib.arg_at(args, 3)
+        if !kbund.kb_oeffnen((&z_konto[0]) as u64, pw, ulib.length(pw)) {
+            sag((&t_pass[0]) as u64)
+            return 2
+        }
+        sag((&t_ok[0]) as u64)
+        kbund.kb_zu()
+        return 0
+    }
+
+    if ulib.streq(a1, (&c_konf[0]) as u64) {
+        if n < 3 {
+            hilfe()
+            return 1
+        }
+        ulib.strncpy((&z_konto[0]) as u64, ulib.arg_at(args, 2), PATHMAX)
+        var n_konf: [u8; 10] = "KONFLIKTE\0"
+        var buf: [u8; 4096] = [0 as u8; 4096]
+        var l: u64 = 0
+        if text_lesen(konto_datei((&n_konf[0]) as u64), (&buf[0]) as u64,
+            4000, &l) {
+            io.write_all(1, (&buf[0]) as u64, l)
+        }
+        return 0
+    }
+
+    if ulib.streq(a1, (&c_abg[0]) as u64) {
+        if n < 5 {
+            hilfe()
+            return 1
+        }
+        ulib.strncpy((&z_konto[0]) as u64, ulib.arg_at(args, 2), PATHMAX)
+        ulib.strncpy((&z_baum[0]) as u64, ulib.arg_at(args, 3), PATHMAX)
+        let pw: u64 = ulib.arg_at(args, 4)
+        if !kbund.kb_da((&z_konto[0]) as u64) {
+            sag((&t_kein[0]) as u64)
+            return 2
+        }
+        if !kbund.kb_oeffnen((&z_konto[0]) as u64, pw, ulib.length(pw)) {
+            sag((&t_pass[0]) as u64)
+            return 2
+        }
+        ulib.strncpy((&z_store[0]) as u64, kbund.kb_ziel(), PATHMAX)
+        io.make_dir((&z_store[0]) as u64)
+        // WIE LANGE ES GEDAUERT HAT. Ohne diese Zahl kann der Testlauf
+        // nur die GANZE virtuelle Maschine stoppen -- Systemstart,
+        // Anlegen des Kontos und drei Abgleiche in einer Summe --, und
+        // daraus laesst sich kein Durchsatz rechnen. Sekunden reichen:
+        // dieser Kern hat SYS_TIME und keine feinere Uhr, und ein
+        // Abgleich, der unter einer Sekunde bleibt, ist ohnehin kein
+        // Messfall.
+        let t0: u64 = io.now_sec()
+        let rc: u64 = abgleichen()
+        let t1: u64 = io.now_sec()
+        sag_kv((&t_zeit[0]) as u64, t1 - t0)
+        sag_kv((&t_d[0]) as u64, n_dateien)
+        sag_kv((&t_b[0]) as u64, n_bloecke)
+        sag_kv((&t_nn[0]) as u64, n_neu)
+        sag_kv((&t_h[0]) as u64, n_hoch)
+        sag_kv((&t_r2[0]) as u64, n_runter)
+        sag_kv((&t_k[0]) as u64, n_konflikt)
+        sag_kv((&t_e[0]) as u64, n_einst)
+        sag_kv((&t_u[0]) as u64, n_ueberholt)
+        sag_kv((&t_g[0]) as u64, gen_neu)
+        sag_kv((&t_bl[0]) as u64, b_gelesen)
+        sag_kv((&t_bs[0]) as u64, b_gesendet)
+        sag_kv((&t_bg[0]) as u64, b_geholt)
+        kbund.kb_zu()
+        if rc != 0 {
+            sag_kv((&t_fehler[0]) as u64, rc)
+            if ld8((&fehlerpfad[0]) as u64, 0) != 0 {
+                sag_kt((&t_fwo[0]) as u64, (&fehlerpfad[0]) as u64)
+            }
+            return rc
+        }
+        sag((&t_fertig[0]) as u64)
+        return 0
+    }
+
+    hilfe()
+    return 1
+}

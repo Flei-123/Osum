@@ -1,0 +1,355 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/sync/oracle.fi -- die Bausteine der Runde SYNC, auf dem WIRT.
+//
+// Dasselbe Instrument wie `tools/sshd/oracle.fi` und aus demselben
+// Grund: scrypt, HKDF, die Blocknamen und das versiegelte Format muessen
+// gegen etwas gemessen werden, das NICHT aus diesem Baum stammt. Einen
+// Kern je Testvektor in QEMU zu starten wuerde Stunden dauern und QEMU
+// messen.
+//
+// Dieses Programm bindet GENAU DIESELBEN Dateien wie die Programme in
+// Ring 3 -- `lib/crypto/sha256.fi`, `lib/crypto/chacha.fi`,
+// `lib/crypto/scrypt.fi`, `lib/crypto/hkdf.fi`, `lib/sync/kette.fi` --,
+// laeuft auf Linux, liest einen Befehl je Zeile und antwortet mit einer
+// Hexadezimalzeile.
+//
+//   pbkdf2  <pwhex|-> <salthex|-> <iters> <dklen>
+//   salsa   <64hex>                    Salsa20/8 an Ort und Stelle
+//   scrypt  <pwhex|-> <salthex|-> <N> <r> <p> <dklen>
+//   hkdfext <salthex|-> <ikmhex|->
+//   hkdfexp <prkhex> <infohex|-> <len>
+//   keys    <passhex> <salt16hex> <N> <r>     der ganze Schluesselbund
+//   name    <namekeyhex> <blockhex|->         der Name, den der Server sieht
+//   naiv    <blockhex|->                      der BLANKE SHA-256 -- die Falle
+//   seal    <keyhex> <namehex> <blockhex>     versiegeln
+//   open    <keyhex> <namehex> <cthex>        oeffnen, oder FAIL
+//   rcenc   <32hex>                           Wiederherstellungscode
+//   rcdec   <codehex>                         zurueck, oder FAIL
+//   hwrap   <keyhex> <nonce24hex> <mk32hex>   den Hauptschluessel einpacken
+//   hopen   <keyhex> <nonce24hex> <48hex>     ihn wieder auspacken
+//
+// `-` ist die leere Zeichenkette. `FAIL` heisst, dass eine Eingabe
+// abgelehnt wurde -- und bei `open` ist genau das die Zusage, die zaehlt.
+import std.rt
+import std.io
+import crypto.sha256
+import crypto.chacha
+import crypto.scrypt
+import crypto.hkdf
+import sync.kette
+
+const CAP: usize = 70000
+
+static mut a0: [u8; 70000] = [0; 70000]
+static mut a1: [u8; 70000] = [0; 70000]
+static mut a2: [u8; 70000] = [0; 70000]
+static mut outb: [u8; 70000] = [0; 70000]
+static mut hexb: [u8; 141000] = [0; 141000]
+// Der Arbeitsspeicher fuer scrypt. N = 16384, r = 8 braucht gut 16 MiB;
+// hier steht Platz fuer genau das, damit auch der groesste Testvektor
+// von RFC 7914 durchlaeuft.
+static mut smem: [u8; 16787456] = [0; 16787456]
+
+fn hexval(c: u64) -> i64 {
+    if c >= 48 && c <= 57 { return (c - 48) as i64 }
+    if c >= 97 && c <= 102 { return (c - 87) as i64 }
+    if c >= 65 && c <= 70 { return (c - 55) as i64 }
+    return 0 - 1
+}
+
+fn field_hex(line: u64, len: usize, at: *mut usize, dst: u64) -> i64 {
+    var i: usize = *at
+    while i < len && rt.ld8(line, i) == 32 as u8 { i = i + 1 }
+    var start: usize = i
+    while i < len && rt.ld8(line, i) != 32 as u8 { i = i + 1 }
+    *at = i
+    let n: usize = i - start
+    if n == 0 { return 0 - 1 }
+    if n == 1 && rt.ld8(line, start) == 45 as u8 { return 0 }
+    if n % 2 != 0 { return 0 - 1 }
+    if n / 2 > CAP { return 0 - 1 }
+    var o: usize = 0
+    while o < n / 2 {
+        let hi: i64 = hexval(rt.ld8(line, start + o * 2) as u64)
+        let lo: i64 = hexval(rt.ld8(line, start + o * 2 + 1) as u64)
+        if hi < 0 || lo < 0 { return 0 - 1 }
+        rt.st8(dst, o, ((hi * 16 + lo) & 255) as u8)
+        o = o + 1
+    }
+    return (n / 2) as i64
+}
+
+fn field_num(line: u64, len: usize, at: *mut usize) -> i64 {
+    var i: usize = *at
+    while i < len && rt.ld8(line, i) == 32 as u8 { i = i + 1 }
+    let start: usize = i
+    var v: u64 = 0
+    while i < len && rt.ld8(line, i) >= 48 as u8
+        && rt.ld8(line, i) <= 57 as u8 {
+        v = v * 10 + ((rt.ld8(line, i) as u64) - 48)
+        i = i + 1
+    }
+    if i == start { return 0 - 1 }
+    *at = i
+    return v as i64
+}
+
+fn word_is(line: u64, len: usize, at: *mut usize, w: u64) -> bool {
+    var i: usize = *at
+    while i < len && rt.ld8(line, i) == 32 as u8 { i = i + 1 }
+    let start: usize = i
+    var j: usize = i
+    while j < len && rt.ld8(line, j) != 32 as u8 { j = j + 1 }
+    let n: usize = j - start
+    if rt.c_length(w) != n { return false }
+    var o: usize = 0
+    while o < n {
+        if rt.ld8(line, start + o) != rt.ld8(w, o) { return false }
+        o = o + 1
+    }
+    *at = j
+    return true
+}
+
+fn emit(p: u64, n: usize) {
+    let h: u64 = (&hexb[0]) as u64
+    let d: [u8; 16] = [48, 49, 50, 51, 52, 53, 54, 55,
+        56, 57, 97, 98, 99, 100, 101, 102]
+    var i: usize = 0
+    while i < n {
+        let v: u64 = rt.ld8(p, i) as u64
+        rt.st8(h, i * 2, d[(v >> 4) as usize])
+        rt.st8(h, i * 2 + 1, d[(v & 15) as usize])
+        i = i + 1
+    }
+    if n == 0 {
+        rt.st8(h, 0, 45 as u8)
+        io.print_line_bytes(h, 1)
+        return
+    }
+    io.print_line_bytes(h, n * 2)
+}
+
+fn fail() {
+    var m: [u8; 4] = [70, 65, 73, 76]
+    io.print_line_bytes((&m[0]) as u64, 4)
+}
+
+fn run_line(line: u64, len: usize) {
+    var at: usize = 0
+    let p0: u64 = (&a0[0]) as u64
+    let p1: u64 = (&a1[0]) as u64
+    let p2: u64 = (&a2[0]) as u64
+    let po: u64 = (&outb[0]) as u64
+
+    var n0: [u8; 7] = "pbkdf2\0"
+    if word_is(line, len, &at, (&n0[0]) as u64) {
+        let pl: i64 = field_hex(line, len, &at, p0)
+        let sl: i64 = field_hex(line, len, &at, p1)
+        let it: i64 = field_num(line, len, &at)
+        let dk: i64 = field_num(line, len, &at)
+        if pl < 0 || sl < 0 || it <= 0 || dk <= 0 || dk > (CAP as i64) {
+            fail()
+            return
+        }
+        if !scrypt.pbkdf2_sha256(p0, pl as u64, p1, sl as u64,
+            it as u64, po, dk as u64) {
+            fail()
+            return
+        }
+        emit(po, dk as usize)
+        return
+    }
+    var n1: [u8; 6] = "salsa\0"
+    if word_is(line, len, &at, (&n1[0]) as u64) {
+        let bl: i64 = field_hex(line, len, &at, p0)
+        if bl != 64 { fail(); return }
+        scrypt.salsa20_8(p0)
+        emit(p0, 64)
+        return
+    }
+    var n2: [u8; 7] = "scrypt\0"
+    if word_is(line, len, &at, (&n2[0]) as u64) {
+        let pl: i64 = field_hex(line, len, &at, p0)
+        let sl: i64 = field_hex(line, len, &at, p1)
+        let nn: i64 = field_num(line, len, &at)
+        let rr: i64 = field_num(line, len, &at)
+        let pp: i64 = field_num(line, len, &at)
+        let dk: i64 = field_num(line, len, &at)
+        if pl < 0 || sl < 0 || nn <= 0 || rr <= 0 || pp <= 0 || dk <= 0 {
+            fail()
+            return
+        }
+        if !scrypt.scrypt(p0, pl as u64, p1, sl as u64, nn as u64,
+            rr as u64, pp as u64, po, dk as u64,
+            (&smem[0]) as u64, 16787456) {
+            fail()
+            return
+        }
+        emit(po, dk as usize)
+        return
+    }
+    var n3: [u8; 8] = "hkdfext\0"
+    if word_is(line, len, &at, (&n3[0]) as u64) {
+        let sl: i64 = field_hex(line, len, &at, p0)
+        let il: i64 = field_hex(line, len, &at, p1)
+        if sl < 0 || il < 0 { fail(); return }
+        hkdf.hkdf_extract(p0, sl as usize, p1, il as usize, po)
+        emit(po, 32)
+        return
+    }
+    var n4: [u8; 8] = "hkdfexp\0"
+    if word_is(line, len, &at, (&n4[0]) as u64) {
+        let kl: i64 = field_hex(line, len, &at, p0)
+        let il: i64 = field_hex(line, len, &at, p1)
+        let ln: i64 = field_num(line, len, &at)
+        if kl != 32 || il < 0 || ln <= 0 { fail(); return }
+        if !hkdf.hkdf_expand(p0, p1, il as usize, po, ln as usize) {
+            fail()
+            return
+        }
+        emit(po, ln as usize)
+        return
+    }
+    var n5: [u8; 5] = "keys\0"
+    if word_is(line, len, &at, (&n5[0]) as u64) {
+        let pl: i64 = field_hex(line, len, &at, p0)
+        let sl: i64 = field_hex(line, len, &at, p1)
+        let nn: i64 = field_num(line, len, &at)
+        let rr: i64 = field_num(line, len, &at)
+        if pl < 0 || sl != 16 || nn <= 0 || rr <= 0 {
+            fail()
+            return
+        }
+        if !kette.bund_ableiten(po, p0, pl as u64, p1, nn as u64,
+            rr as u64, (&smem[0]) as u64, 16787456) {
+            fail()
+            return
+        }
+        // Alle fuenf Unterschluessel hintereinander, damit der Wirt
+        // JEDEN einzeln nachrechnen kann.
+        emit(po, kette.BUNDLEN as usize)
+        return
+    }
+    // DER BUND AUS DEM HAUPTSCHLUESSEL. `keys` leitet den Hauptschluessel
+    // aus der Passphrase ab -- das ist der Weg des Testvektors, ABER NICHT
+    // DER WEG DES ECHTEN KONTOS: dort ist der Hauptschluessel ZUFAELLIG
+    // und liegt eingepackt in der Huelle (`kbund.kb_neu`). Wer den
+    // Speicher eines echten Kontos nachrechnen will, braucht diesen
+    // Befehl. Dass die beiden Wege verschieden sind, hat den Gegenprobe-
+    // teil von (c) einmal auf 0 Treffer laufen lassen -- die Zusage war
+    // richtig, das Werkzeug war falsch.
+    var nB: [u8; 7] = "bundmk\0"
+    if word_is(line, len, &at, (&nB[0]) as u64) {
+        let ml: i64 = field_hex(line, len, &at, p0)
+        let sl2: i64 = field_hex(line, len, &at, p1)
+        if ml != 32 || sl2 != 16 { fail(); return }
+        if !kette.bund_aus_haupt(po, p0, p1) { fail(); return }
+        emit(po, kette.BUNDLEN as usize)
+        return
+    }
+    var n6: [u8; 5] = "name\0"
+    if word_is(line, len, &at, (&n6[0]) as u64) {
+        let kl: i64 = field_hex(line, len, &at, p0)
+        let bl: i64 = field_hex(line, len, &at, p1)
+        if kl != 32 || bl < 0 { fail(); return }
+        kette.block_name(p0, p1, bl as u64, po)
+        emit(po, kette.NAMELEN as usize)
+        return
+    }
+    var n7: [u8; 5] = "naiv\0"
+    if word_is(line, len, &at, (&n7[0]) as u64) {
+        let bl: i64 = field_hex(line, len, &at, p0)
+        if bl < 0 { fail(); return }
+        kette.block_name_naiv(p0, bl as u64, po)
+        emit(po, kette.NAMELEN as usize)
+        return
+    }
+    var n8: [u8; 5] = "seal\0"
+    if word_is(line, len, &at, (&n8[0]) as u64) {
+        let kl: i64 = field_hex(line, len, &at, p0)
+        let nl: i64 = field_hex(line, len, &at, p1)
+        let bl: i64 = field_hex(line, len, &at, p2)
+        if kl != 32 || nl != 32 || bl <= 0 {
+            fail()
+            return
+        }
+        let n: u64 = kette.block_siegeln(p0, p1, p2, bl as u64, po)
+        if n == 0 { fail(); return }
+        emit(po, n as usize)
+        return
+    }
+    var n9: [u8; 5] = "open\0"
+    if word_is(line, len, &at, (&n9[0]) as u64) {
+        let kl: i64 = field_hex(line, len, &at, p0)
+        let nl: i64 = field_hex(line, len, &at, p1)
+        let cl: i64 = field_hex(line, len, &at, p2)
+        if kl != 32 || nl != 32 || cl <= 0 {
+            fail()
+            return
+        }
+        var got: u64 = 0
+        if !kette.block_oeffnen(p0, p1, p2, cl as u64, po, &got) {
+            fail()
+            return
+        }
+        emit(po, got as usize)
+        return
+    }
+    var na: [u8; 6] = "rcenc\0"
+    if word_is(line, len, &at, (&na[0]) as u64) {
+        let kl: i64 = field_hex(line, len, &at, p0)
+        if kl != 32 { fail(); return }
+        let n: u64 = kette.code_schreiben(p0, po)
+        if n == 0 { fail(); return }
+        emit(po, n as usize)
+        return
+    }
+    var nb: [u8; 6] = "rcdec\0"
+    if word_is(line, len, &at, (&nb[0]) as u64) {
+        let cl: i64 = field_hex(line, len, &at, p0)
+        if cl <= 0 { fail(); return }
+        if !kette.code_lesen(p0, cl as u64, po) { fail(); return }
+        emit(po, 32)
+        return
+    }
+    var nc: [u8; 6] = "hwrap\0"
+    if word_is(line, len, &at, (&nc[0]) as u64) {
+        let kl: i64 = field_hex(line, len, &at, p0)
+        let nl: i64 = field_hex(line, len, &at, p1)
+        let ml: i64 = field_hex(line, len, &at, p2)
+        if kl != 32 || nl != 24 || ml != 32 { fail(); return }
+        kette.huelle_schreiben(p0, p1, p2, po)
+        emit(po, kette.HUELLELEN as usize)
+        return
+    }
+    var nd: [u8; 6] = "hopen\0"
+    if word_is(line, len, &at, (&nd[0]) as u64) {
+        let kl: i64 = field_hex(line, len, &at, p0)
+        let nl: i64 = field_hex(line, len, &at, p1)
+        let hl: i64 = field_hex(line, len, &at, p2)
+        if kl != 32 || nl != 24 || hl != 48 { fail(); return }
+        if !kette.huelle_lesen(p0, p1, p2, po) { fail(); return }
+        emit(po, 32)
+        return
+    }
+    fail()
+}
+
+fn main() -> i32 {
+    var inp: rt.Buf = rt.buf_new()
+    if !rt.read_stdin(&inp) { return 1 }
+    let p: u64 = rt.buf_ptr(&inp)
+    let n: usize = rt.buf_len(&inp)
+    var at: usize = 0
+    while at < n {
+        var e: usize = at
+        while e < n && rt.ld8(p, e) != 10 as u8 { e = e + 1 }
+        var len: usize = e - at
+        while len > 0 && rt.ld8(p, at + len - 1) == 13 as u8 { len = len - 1 }
+        if len > 0 { run_line(p + at as u64, len) }
+        at = e + 1
+    }
+    rt.buf_free(&inp)
+    return 0
+}

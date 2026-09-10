@@ -72,10 +72,15 @@ import arch.x86_64.fpu
 import bootmod
 import modul
 import ksym
+import ksymtab
+import absturz
+import klog
 import modtab
 import modidx
 import ab
 import hwdiag
+import grafik
+import r3dtest
 import rootsel
 import ehci
 import blkdev
@@ -97,6 +102,12 @@ import usb
 import hidrep
 import hidin
 import i2chid
+import bus
+import arch.arch
+import ac97
+import hda
+import mix
+import audio
 
 // Indices in the table out of isr.s.
 const V_DF_STACK: u64 = 52
@@ -127,11 +138,18 @@ const P_CAPS: u64 = 12
 const P_HBENCH: u64 = 49
 // RUNDE HANDLE: der Selbsttest der Handle-Schicht in Ring 3.
 const P_HANDLE: u64 = 48
+// RUNDE HAERTUNG-2: der Fuzzer in Ring 3 (kernel/uprog.fi).
+const P_FUZZ: u64 = 54
 // RUNDE ASYNC: der Selbsttest der Auftragsschicht und ihre Messung.
 const P_ASYNC: u64 = 50
 const P_ABENCH: u64 = 51
 const P_ASYNCFS: u64 = 52
 const P_VEC: u64 = 53 // RUNDE AVX
+// RUNDE SYSTEMBUS: die vier Programme der Abnahme (kernel/uprog.fi).
+const P_BUSA: u64 = 60
+const P_BUSB: u64 = 61
+const P_BUSD: u64 = 62
+const P_BUSS: u64 = 63
 // RUNDE K13: die beiden Programmnummern dieser Runde (kernel/uprog.fi).
 const P_PWR: u64 = 45
 const P_PWRIDLE: u64 = 46
@@ -180,6 +198,13 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     var s_done: [u8; 13] = "kernel: done\0"
 
     serial.init()
+    // ============ RUNDE KABEL: SITZT DA UEBERHAUPT EIN BAUSTEIN?
+    //
+    // Die allererste Frage, noch vor der ersten Zeile Text -- denn wenn
+    // hier nichts sitzt, wartet JEDES Oktett danach vergeblich. Der
+    // Test schreibt ins Notizregister und liest zurueck; der rohe LSR
+    // wird mitgenommen und steht spaeter auf der Messtafel.
+    let _uart: bool = serial.probe()
     // RUNDE FASSUNG: DIE ERSTE ZEILE SAGT, WELCHE FASSUNG DAS IST.
     // Sie steht vor dem Banner und vor allem anderen, damit sie auch
     // auf einem Foto der ersten Bildschirmseite noch drauf ist.
@@ -193,6 +218,11 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     kstate.set(state, kstate.TSS, tss)
     kstate.set(state, kstate.KERNEL_END, kernel_end)
 
+    // ==================================================== RUNDE PROTOKOLL
+    // DAS PROTOKOLL WIRD VOR DER BEFEHLSZEILE EINGERICHTET, weil
+    // `mode_of` die Schwellen setzt und dafuer den Ring braucht -- und
+    // weil ab hier jede Zeile dieses Kernels protokolliert werden kann.
+    klog.init(state)
     let cmd: u64 = mem.cmdline(mbi)
     mode_of(state, cmd)
     // ROUND K2: read here and not down in `hw.stage`, and the reason is
@@ -264,6 +294,24 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // Laufes passiert lange vor `wig.init` -- ein Journal, das erst mit
     // der Oberflaeche entsteht, hat die halbe Wurzel schon verpasst.
     nidx.init(state)
+    // RUNDE SYSTEMBUS: der Bus steht VOR dem ersten Nutzerprozess. Ein
+    // Dienst, der sich anmelden will, bevor die Tafel genullt ist,
+    // schreibt in einen Platz, den es noch nicht gibt -- und `init`
+    // (pid 1) ist der erste, der einen anmeldet.
+    if !kstate.mode_on(state, kstate.M_NOBUS) {
+        bus.init(state)
+        // RUNDE SYSTEMBUS, `notidemo`: EINE Meldung, damit die Leiste
+        // etwas zu zeigen hat, das nicht sie selbst erfunden hat. Sie
+        // kommt vom Kern (Aufgabe 0) und geht denselben Weg wie jede
+        // andere -- der Bildbeweis der Zusage e) ist deshalb ein
+        // Bildbeweis fuer den Bus und nicht fuer eine Zeichenroutine.
+        if kstate.mode_on(state, kstate.M_NOTIDEMO) {
+            var s_n1: [u8; 23] = "Datentraeger verbunden\0"
+            var s_n2: [u8; 22] = "Aktualisierung bereit\0"
+            bus.noti_post(state, 0, 1, 22, (&s_n1[0]) as u64)
+            bus.noti_post(state, 0, 2, 21, (&s_n2[0]) as u64)
+        }
+    }
     serial.puts((&s_mb[0]) as u64)
     serial.hex(kstate.get32(mbi))
     serial.puts((&s_cmd[0]) as u64)
@@ -320,12 +368,36 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     `hw.fi`, `pci.fi`, `apic.fi`.
     hw.stage(state)
 
+    // 3b2. RUNDE BLECHVIER: DIE BLECH-DIAGNOSE.
+    //
+    //      Hier und nicht frueher: `blech_stage` braucht die
+    //      Fensterplaetze von `apic.map_device` (fuer die IOMMU-
+    //      Register), und die richtet `hw.stage` gerade ein. Und hier
+    //      und nicht spaeter: die GPE-Bits werden abgeschaltet, BEVOR
+    //      irgendein Geraet den SCI ziehen kann.
+    hw.blech_stage(state)
+
     // 3c. ROUNDE K7: DER BILDSCHIRM. Hier und nicht frueher, weil der
     //     Rahmenpuffer oberhalb des abgebildeten Gigabytes liegt und die
     //     Fensterplaetze dafuer aus derselben Liste kommen wie die des
     //     APIC (`apic.map_device`) -- und weil der Zweitpuffer aus dem
     //     Rahmenverwalter kommt, den Abschnitt 3 gerade erst aufgebaut
     //     hat. Ohne das Wort `gfx` kehrt das hier sofort zurueck.
+    // RUNDE SCHNELLBILD: DIE VEKTOREINHEIT VOR DEM ERSTEN BILD.
+    //
+    // GEMESSEN, und der Zaehler hat es gefunden: `fb.hline_a` nimmt den
+    // SSE2-Weg nur, wenn `fpu.enabled` wahr ist -- und `fpu.apply` stand
+    // BIS HIERHER erst in Abschnitt 3b, also NACH `stage_graphics`.
+    // Damit lief jedes Mischen waehrend des Hochlaufs (Messtafel,
+    // `paintbench`, der ganze Bildaufbau vor dem Planer) skalar, und
+    // `simd_px=0` sagte es: nicht ein einziger Bildpunkt ueber den
+    // schnellen Weg, obwohl `fpu: mode=3` zwei Zeilen weiter stand.
+    //
+    // `fpu.apply` ist mehrfach aufrufbar (`probe` + Register setzen,
+    // keine Zuteilung), und es MUSS spaeter trotzdem noch einmal vor
+    // `sched.init` stehen -- der Kommentar dort erklaert warum. Hier
+    // steht es zusaetzlich, nicht stattdessen.
+    fpu.apply(state)
     gfx.stage_graphics(state, mbi)
 
     // 3c-bis. RUNDE USBIMG: DIE HARDWARE-DIAGNOSE. Hier und an keiner
@@ -356,6 +428,46 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     Zeile in dem einen Augenblick kopiert, in dem sie noch lesbar
     //     war; diese Kopie ueberlebt den ganzen Lauf.
     hwdiag.stage(state, hw.cmd_copy(state))
+
+    // 3b-ter. RUNDE GRAFIK-1: DIE GRAFIK-ERHEBUNG.
+    //     Osum hat einen Bildspeicher-Treiber und sonst nichts -- kein
+    //     Grafikkartentreiber, kein OpenGL, keine Schattierungsprogramme.
+    //     Bevor sich daran etwas aendern kann, muss dastehen, WELCHE
+    //     Grafikeinheit in dieser Maschine sitzt, unter welchen Adressen
+    //     sie spricht und woher der Bildspeicher kommt, in den `fb.fi`
+    //     gerade schreibt. `hwdiag` sagt davon heute eine Zeile; die
+    //     Adressbereiche, ohne die kein Treiber anfangen kann, sagt es
+    //     nicht.
+    //
+    //     DIE ZEILE `weg tafel=... bild=... gezogen=...` ist ausserdem
+    //     die Messung zu einem offenen Raetsel: auf echter Hardware sind
+    //     die Fensterecken eckig, im Pruefstand rund. Steht dort
+    //     `gezogen=JA`, dann zieht `present` das Bild mit naechstem
+    //     Nachbarn auf eine Tafel anderer Groesse, und eine Rundung von
+    //     drei Bildpunkten ueberlebt das nicht. Steht dort `NEIN`, ist
+    //     dieser Verdaechtige ausgeschlossen.
+    //
+    //     Steht direkt hinter `hwdiag` und aus demselben Grund frueh:
+    //     bevor irgendein Treiber hochgezogen wird. Ohne das Wort
+    //     `grafik` ist das hier ein Zeichenkettenvergleich und sonst
+    //     nichts, und es FASST NICHTS AN -- kein Register wird
+    //     geschrieben, kein Modus gesetzt.
+    grafik.stage(state, hw.cmd_copy(state))
+
+    // 3b-quater. RUNDE GRAFIK-1, ETAPPE C: DER RASTERER ZEIGT SICH.
+    //     Ein Rasterer, den niemand ansieht, ist eine Behauptung. Mit
+    //     dem Wort `r3d` malt der Kern einen texturierten, beleuchteten
+    //     Wuerfel mit Tiefenpuffer und MISST, wie lange er dafuer
+    //     braucht -- die Zahl steht als `ns/bild` und `fps` auf der
+    //     Leitung. Davor laeuft der Selbsttest des Festkommas: ein
+    //     Rasterer, der falsch rechnet, malt ein Bild, das falsch
+    //     AUSSIEHT, und das faellt niemandem auf, der die Zahlen nicht
+    //     hat.
+    //
+    //     Steht hier, weil `gfx` zu diesem Zeitpunkt eingerichtet ist
+    //     und noch kein Fensterserver das Bild ueberschreibt. Ohne das
+    //     Wort ist es ein Zeichenkettenvergleich und sonst nichts.
+    r3dtest.stage(state, hw.cmd_copy(state))
 
     // 3c-ter. RUNDE BLECH, NACHTRAG: DIE PLATTENTABELLE, OHNE PLATTE.
     //     Dasselbe, was `nictab` fuer Netz tut -- und aus demselben
@@ -392,6 +504,16 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // not only before the excursion of round 59. Without EFER.SCE the
     // `sysretq` of `enter_user_task` is an invalid opcode.
     user.setup(state)
+    // RUNDE VIELKERN: die GS-Basis und der Kernstapel, sofort nach dem
+    // Setzen. Ohne diese Zeile war eine 0 in einem der beiden nur als
+    // Dreifachfehler im Einsprung sichtbar (rsp=0 beim ersten push).
+    var s_g0: [u8; 16] = "user: gs-basis  "
+    var s_g1: [u8; 10] = "  kstack  "
+    serial.puts((&s_g0[0]) as u64)
+    serial.hex(user.gs_base())
+    serial.puts((&s_g1[0]) as u64)
+    serial.hex(sched.kstack_hier(state))
+    serial.nl()
     // ROUNDE K10: SMEP und SMAP, und zwar hier -- direkt hinter den
     // vier Modellregistern und VOR der ersten Seite mit Benutzerbit.
     // Ein Schutzbit, das erst nach dem ersten unprivilegierten
@@ -441,6 +563,12 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // und nicht den Regelbetrieb. `hbench` allein ist die Messung, die
     // gilt.
     handle_bench(state)
+    // 7b-sexies. RUNDE HAERTUNG-2: der Fuzzer. Hier, weil er dieselben
+    //     Voraussetzungen hat wie der Selbsttest der Handle-Schicht --
+    //     Ring 3 und sonst nichts -- und weil er VOR dem Dateisystem
+    //     laufen soll: ein Kern, der an einem Zufallswert stirbt, soll
+    //     das sagen, bevor eine Platte im Spiel ist.
+    fuzzer(state)
     // 7b-quinquies. RUNDE ASYNC: die asynchrone Auftragsschicht. Hier
     //     und direkt hinter HANDLE, weil sie auf ihr steht und aus
     //     demselben Grund kein Dateisystem braucht -- gearbeitet wird
@@ -466,6 +594,7 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     der ohne Platte auskommt, kann sich nicht an ihr vertun.
     //     Ohne das Wort `k13` eine Zeile und sonst nichts.
     users(state)
+    busround(state)
 
     // 7b-ter. RUNDE K18: DIE ENERGIESCHICHT UND IHRE MESSUNG.
     //     Hier und nicht weiter unten, und der Grund ist derselbe wie
@@ -486,6 +615,17 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
 
     // 7c. the file system.
     filesystem(state)
+    // ==================================================== RUNDE PROTOKOLL
+    // LIEGT EIN ABSTURZBERICHT VOM LETZTEN START?
+    //
+    // Erst hier -- vorher gibt es kein Dateisystem, in dem man
+    // nachsehen koennte. Die Antwort wird gemerkt; der Systemaufruf
+    // 1860/KL_CRASH gibt sie an die Oberflaeche weiter, und die
+    // Benachrichtigung selbst entsteht in Ring 3 (`/bin/absturz`,
+    // ueber wlib). Der Kern MALT hier nichts -- die einzige Ausnahme
+    // von dieser Regel ist der Panik-Bildschirm, und der Grund dafuer
+    // steht in `kernel/kgui.fi` bei `panikbild`.
+    absturz.init(state)
     // 7c-bis. RUNDE ASYNC, zweiter Teil: die Arten, die ein
     //     DATEISYSTEM brauchen -- asynchron oeffnen, lesen, auf den
     //     Traeger druecken, schliessen. Sie stehen hier und nicht oben
@@ -554,6 +694,17 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
         ehci.report(state)
     }
 
+    // 7e-quater. RUNDE HDA: DER TON. Hier und nicht frueher, weil er
+    //     den Bus braucht (`hw.stage`, Runde K2), den Rahmenverwalter
+    //     (die DMA-Ringe sind je 16 KiB aus `mem.frame_run`) und die
+    //     Uhr (`hda.fi` wartet 521 us nach dem Ruecksetzen des
+    //     Reglers, und das ist eine ZEIT und kein Schleifenzaehler) --
+    //     und nicht spaeter, weil `osum(state)` gleich darunter die
+    //     Shell startet und /bin/play ein aufgesetztes Geraet
+    //     vorfinden soll. Ohne das Wort `audio` ist das hier EINE
+    //     gedruckte Zeile.
+    audio_stage(state)
+
     // 7e-ter. RUNDE TRESOR: DIE GERAETEIDENTITAET (`kernel/hwid.fi`).
     //     Hier und nicht frueher, weil die MAC-Adresse erst existiert,
     //     wenn `netsvc.stage` die Karte hochgezogen hat -- und nicht
@@ -593,6 +744,31 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     kernel behaves as it did; under `-smp 4` it starts the other
     //     three and hands them work.
     smp.stage(state)
+    // ================================================== RUNDE VIELKERN
+    // DIE GS-BASIS DES STARTKERNS, JETZT MIT SEINER ECHTEN NUMMER.
+    //
+    // `user.setup` weiter oben hat sie auf den Satz 0 gesetzt -- zu dem
+    // Zeitpunkt gibt es den APIC noch nicht, also auch keine Kernnummer.
+    // Hier ist beides da. Stimmt es schon, kostet die Zeile ein `wrmsr`
+    // und einen Vergleich; stimmt es nicht (eine MADT, die den
+    // Startprozessor nicht als ersten auffuehrt), ist es der
+    // Unterschied zwischen einem laufenden System und einem, dessen
+    // erster Systemaufruf in den Speicher unterhalb des Kerns springt.
+    user.gs_set(sched.gs_soll(state))
+    // Und der Kernstapel dazu: bekommt der Startkern hier eine andere
+    // Satznummer als 0, stuende sein Stapel sonst im falschen Satz.
+    sched.kstack_wieder(state)
+    let gs_ok: bool = sched.gs_pruefen(state, user.gs_base())
+    var s_gs: [u8; 22] = "smp: gs-basis kern 0  "
+    var s_gsj: [u8; 4] = "ok  "
+    var s_gsn: [u8; 7] = "FALSCH "
+    serial.puts((&s_gs[0]) as u64)
+    if gs_ok {
+        serial.puts((&s_gsj[0]) as u64)
+    } else {
+        serial.puts((&s_gsn[0]) as u64)
+    }
+    serial.nl()
     // RUNDE AVX, ZWEITER DURCHGANG: dieselben vier Prozesse NOCH EINMAL,
     // jetzt aber mit allen Kernen oben. Der erste Durchgang oben lief
     // auf einem Prozessor -- er misst, dass der Wechsel sichert; dieser
@@ -653,9 +829,37 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     }
 
     sercon.report(state)
+    // ==================================================== RUNDE PROTOKOLL
+    // `krachjetzt` -- DER KNALL OHNE RING 3.
+    //
+    // Der gewoehnliche Weg zu einer erzwungenen Panik ist der Aufruf
+    // 1861 aus einem Programm heraus. Der hier ist der zweite, und er
+    // wird gebraucht: er funktioniert AUCH DANN, wenn es gar kein
+    // Userland gibt (`noring3`), und er ist damit der Weg, mit dem
+    // `tools/protokoll/run.sh` den Panik-Bildschirm misst, ohne vorher
+    // eine Platte mit einer Shell bauen zu muessen. Er hat denselben
+    // Riegel: ohne `krach` auf der Befehlszeile passiert nichts.
+    if kstate.mode_on(state, kstate.M_KRACH)
+            && kstate.mode_on(state, kstate.M_KRACHJETZT) {
+        absturz.knall(state, 0)
+    }
     serial.puts((&s_done[0]) as u64)
     serial.nl()
     power.shutdown(power.EXIT_OK)
+}
+
+// RUNDE PROTOKOLL: eine Zeile beim Start, wenn ein Bericht offen ist.
+// Sie geht auf die serielle Leitung -- das ist keine Oberflaeche,
+// sondern das Startprotokoll, und ein Testlaeufer liest sie.
+fn absturz_melden(state: u64) {
+    var s_j: [u8; 52] = "absturz: ein Bericht vom letzten Start liegt vor\0\0\0\0"
+    var s_n: [u8; 32] = "absturz: kein offener Bericht\0\0\0"
+    if absturz.offen(state) != 0 {
+        serial.puts((&s_j[0]) as u64)
+    } else {
+        serial.puts((&s_n[0]) as u64)
+    }
+    serial.nl()
 }
 
 // ------------------------------------- RUNDE K12: eine Gastmaschine aus Ring 3
@@ -949,9 +1153,31 @@ fn ticks(state: u64) {
     idt.enable()
     serial.puts((&s_wait[0]) as u64)
     serial.nl()
+    // ================================ RUNDE BLECHEINGABE: MIT GRENZE.
+    //
+    // HIER STAND EINE SCHLEIFE OHNE AUSWEG. Kommt keine Marke, dreht sie
+    // fuer immer -- und der Rechner steht mit schwarzem Schirm, ohne
+    // dass irgendjemand sagen koennte, warum. Dass Justins Brett hier
+    // DURCHKOMMT (es erreicht den Schreibtisch), ist damit ein
+    // MESSWERT und keine Vermutung: der oertliche Zeitgeber schlaegt
+    // beim Start, mit bereits abgeschaltetem alten Regler. Trotzdem
+    // gehoert eine Grenze hierher -- ein Kern, der an einer Zeile
+    // haengt, kann nicht einmal sagen, an welcher.
+    var s_keine: [u8; 30] = "ticks: KEINE MARKE, weiter!!!\0"
     let start: u64 = kstate.get(state, kstate.TICKS)
-    while kstate.get(state, kstate.TICKS) - start < TICKS_WANTED {
-        idt.halt()
+    let thz: u64 = apic.tsc_hz(state)
+    let t0: u64 = apic.tsc()
+    var warte: bool = true
+    while warte {
+        if kstate.get(state, kstate.TICKS) - start >= TICKS_WANTED {
+            warte = false
+        } else if thz != 0 && apic.tsc() - t0 > thz * 3 {
+            warte = false
+            serial.puts((&s_keine[0]) as u64)
+            serial.nl()
+        } else {
+            idt.halt()
+        }
     }
     serial.puts((&s_got[0]) as u64)
     serial.dec(kstate.get(state, kstate.TICKS))
@@ -1344,6 +1570,62 @@ fn capabilities(state: u64) {
 //      Rechtepruefung, die niemand aufruft, ist von einer, die immer ja
 //      sagt, sonst nicht zu unterscheiden -- das ist die Lehre aus
 //      Runde K13, und sie gilt hier genauso.
+// ==================================================== RUNDE HAERTUNG-2
+// DER FUZZER. Der Rumpf liegt in `kernel/uprog.fi` (`u_fuzz`), in Ring
+// 3, und das ist der Punkt: er ruft die Systemaufrufe von DRAUSSEN, mit
+// denselben Rechten wie jedes andere Programm.
+//
+// Was hier gemessen wird, ist nicht der Rueckgabewert eines einzelnen
+// Aufrufs -- das tun tools/kernel/run.sh und tools/posix/run.sh
+// ausfuehrlich -- sondern DASS DER KERN ES UEBERLEBT. Ein Aufruf, der
+// einen Zeiger aus Ring 3 ungeprueft benutzt, faellt nicht beim
+// ordentlichen Gebrauch auf, sondern bei genau den Werten, die dieses
+// Programm schickt.
+//
+// Der Kern meldet den Endestand des Programms; bleibt die Maschine
+// haengen oder faellt sie in eine Ausnahme, sieht das der Laeufer an
+// der fehlenden Schlusszeile und am Rueckgabewert von QEMU.
+fn fuzzer(state: u64) {
+    var s_skip: [u8; 14] = "fuzz: skipped\0"
+    var s_begin: [u8; 13] = "fuzz: begin\0\0"
+    var s_exit: [u8; 19] = "fuzz: ring 3 exit=\0"
+    var s_done: [u8; 12] = "fuzz: done\0\0"
+    if !kstate.mode_on(state, kstate.M_FUZZ) {
+        serial.puts((&s_skip[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_begin[0]) as u64)
+    serial.nl()
+    // Das Argument ist die Rundenzahl in Tausend; 0 heisst hundert
+    // Tausend. Der Laeufer setzt sie ueber `fuzzrunden`.
+    var tausend: u64 = kstate.get(state, kstate.FUZZ_K)
+    let t: u64 = proc.create(state, P_FUZZ, tausend, 2)
+    // EIGENE WARTESCHLEIFE STATT `kutil.wait_for`. Dessen Frist sind
+    // 2000 Runden, und hunderttausend Systemaufrufe unter TCG brauchen
+    // laenger -- GEMESSEN: das Programm lief richtig durch und bekam
+    // trotzdem -2, weil der WARTENDE aufgab und nicht der Laufende.
+    // Eine Frist, die vom Wirt abhaengt, ist keine Zusage; hier wartet
+    // der Kern, bis das Programm fertig ist, und der Laeufer setzt die
+    // Grenze aussen (`timeout` um QEMU).
+    var e: u64 = 0
+    var lauf: bool = true
+    while lauf {
+        if sched.tget(state, t, sched.T_STATE) == sched.S_ZOMBIE {
+            e = sched.tget(state, t, sched.T_EXIT)
+            proc.reap(state, t)
+            lauf = false
+        } else {
+            sched.sleep_ticks(state, 1)
+        }
+    }
+    serial.puts((&s_exit[0]) as u64)
+    serial.dec(e)
+    serial.nl()
+    serial.puts((&s_done[0]) as u64)
+    serial.nl()
+}
+
 fn handles(state: u64) {
     var s_skip: [u8; 16] = "handle: skipped\0"
     var s_begin: [u8; 15] = "handle: begin\0\0"
@@ -1668,6 +1950,92 @@ fn handle_bench(state: u64) {
 // eine Meldung verloren haben und die Objekttafel wieder auf ihren drei
 // Konsoleneintraegen stehen. Eine Refcount-Schicht, die niemand
 // nachzaehlt, ist eine Behauptung.
+// ==================================================== RUNDE SYSTEMBUS
+//
+// DREI LAEUFE UND EIN SATZ ZAHLEN. Sie stehen hier und nicht in einem
+// Userland-Programm, weil sie messen sollen, was der KERN kann -- ein
+// Abbild, das nicht baut, darf die Abnahme des Busses nicht mitnehmen.
+//
+//   1. Schreiber und Leser, hundert Runden, verschiedene Kerne.
+//      `busa: abw=0` ist die Zusage.
+//   2. Der Unberechtigte. `busd: ruf=-3` ist die Zusage, und darueber
+//      MUSS eine Zeile `bus: ABGELEHNT` stehen.
+//   3. Ein Megabyte durch ein Segment. `buss: us=` ist die Zahl.
+//
+// Danach die Zaehler des Busses. Ein Bus, dessen Zaehler niemand
+// nachliest, ist ein Bus, dessen Verluste niemand sieht: `drops` und
+// `denied` stehen deshalb daneben.
+fn busround(state: u64) {
+    var s_skip: [u8; 13] = "bus: skipped\0"
+    var s_begin: [u8; 11] = "bus: begin\0"
+    var s_a: [u8; 14] = "bus: a exit=\0\0"
+    var s_d: [u8; 14] = "bus: d exit=\0\0"
+    var s_s: [u8; 14] = "bus: s exit=\0\0"
+    var s_regs: [u8; 11] = "bus: regs=\0"
+    var s_snd: [u8; 12] = "bus: sends=\0"
+    var s_rcv: [u8; 12] = "bus: recvs=\0"
+    var s_den: [u8; 13] = "bus: denied=\0"
+    var s_dro: [u8; 12] = "bus: drops=\0"
+    var s_cls: [u8; 15] = "bus: clipsets=\0"
+    var s_clg: [u8; 15] = "bus: clipgets=\0"
+    var s_hst: [u8; 14] = "bus: verlauf=\0"
+    var s_seg: [u8; 11] = "bus: segs=\0"
+    var s_sgp: [u8; 16] = "bus: segseiten=\0"
+    var s_lck: [u8; 13] = "bus: sperre=\0"
+    var s_done: [u8; 10] = "bus: done\0"
+    if !kstate.mode_on(state, kstate.M_BUSBENCH) {
+        serial.puts((&s_skip[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_begin[0]) as u64)
+    serial.nl()
+    let a: u64 = proc.create(state, P_BUSA, 0, 2)
+    let ea: u64 = kutil.wait_for(state, a)
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(ea)
+    serial.nl()
+    let d: u64 = proc.create(state, P_BUSD, 0, 2)
+    let ed: u64 = kutil.wait_for(state, d)
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(ed)
+    serial.nl()
+    let g: u64 = proc.create(state, P_BUSS, 0, 2)
+    let eg: u64 = kutil.wait_for(state, g)
+    serial.puts((&s_s[0]) as u64)
+    serial.dec(eg)
+    serial.nl()
+    var s_nti: [u8; 16] = "bus: meldungen=\0"
+    var s_nne: [u8; 10] = "bus: neu=\0"
+    serial.puts((&s_nti[0]) as u64)
+    serial.dec(bus.noti_count(state))
+    serial.nl()
+    serial.puts((&s_nne[0]) as u64)
+    serial.dec(bus.noti_seen(state))
+    serial.nl()
+    buszahl(state, (&s_regs[0]) as u64, bus.S_REGS)
+    buszahl(state, (&s_snd[0]) as u64, bus.S_SENDS)
+    buszahl(state, (&s_rcv[0]) as u64, bus.S_RECVS)
+    buszahl(state, (&s_den[0]) as u64, bus.S_DENIED)
+    buszahl(state, (&s_dro[0]) as u64, bus.S_DROPS)
+    buszahl(state, (&s_cls[0]) as u64, bus.S_CLIPSETS)
+    buszahl(state, (&s_clg[0]) as u64, bus.S_CLIPGETS)
+    buszahl(state, (&s_seg[0]) as u64, bus.S_SEGS)
+    buszahl(state, (&s_sgp[0]) as u64, bus.S_SEGPAGES)
+    buszahl(state, (&s_lck[0]) as u64, bus.S_LOCKED)
+    serial.puts((&s_hst[0]) as u64)
+    serial.dec(bus.clip_count(state))
+    serial.nl()
+    serial.puts((&s_done[0]) as u64)
+    serial.nl()
+}
+
+fn buszahl(state: u64, p: u64, welcher: u64) {
+    serial.puts(p)
+    serial.dec(bus.stat(state, welcher))
+    serial.nl()
+}
+
 fn asyncs(state: u64) {
     var s_skip: [u8; 15] = "async: skipped\0"
     var s_begin: [u8; 14] = "async: begin\0\0"
@@ -2785,6 +3153,16 @@ fn osum(state: u64) {
     // Shell, die /proc erst nach ihrem Start bekaeme, haette es zum
     // Zeitpunkt ihres eigenen `open` noch nicht.
     k14_setup(state)
+    // ==================================================== RUNDE PROTOKOLL
+    // JETZT ERST NACH DEM ABSTURZBERICHT SEHEN, UND WARUM ERST JETZT:
+    // `absturz.init` weiter oben lief unmittelbar hinter
+    // `filesystem(state)` -- und das ist die RAM-Platte des
+    // Selbsttests, nicht die Wurzel, auf der /var/crash liegt. Der
+    // erste Anlauf meldete deshalb bei jedem Start "kein offener
+    // Bericht", obwohl einer dalag. Hier ist die richtige Wurzel
+    // eingehaengt und der erste Prozess laeuft noch nicht.
+    absturz.init(state)
+    absturz_melden(state)
     // RUNDE UPDATE: DER ERPROBUNGSZAEHLER. Hier und nicht spaeter -- die
     // Wurzel ist eingehaengt, der erste Prozess laeuft noch nicht, und
     // genau dazwischen liegt die einzige Stelle, an der ein Kern ueber
@@ -2950,6 +3328,23 @@ fn osum(state: u64) {
     serial.dec(mem.frames_free(state))
     serial.puts((&s_of[0]) as u64)
     serial.dec(before)
+    serial.nl()
+    // RUNDE TON: WAS DER VORAUSLESEPUFFER DER PLATTE GETAN HAT.
+    // Ohne diese Zeile ist jede Aussage ueber die Lesegeschwindigkeit
+    // eine Vermutung: `treffer` gegen `fehl` sagt, ob er ueberhaupt
+    // greift, `zuege` gegen `befehle`, ob die Spurerkennung anschlaegt.
+    var s_c1: [u8; 15] = "blk: treffer=\0\0"
+    var s_c2: [u8; 8] = "  fehl=\0"
+    var s_c3: [u8; 10] = "  zuege=\0\0"
+    var s_c4: [u8; 11] = "  befehle=\0"
+    serial.puts((&s_c1[0]) as u64)
+    serial.dec(blk.cache_hits(state))
+    serial.puts((&s_c2[0]) as u64)
+    serial.dec(blk.cache_misses(state))
+    serial.puts((&s_c3[0]) as u64)
+    serial.dec(blk.cache_runs(state))
+    serial.puts((&s_c4[0]) as u64)
+    serial.dec(blk.cache_cmds(state))
     serial.nl()
     say_k14(state)
     say_posix(state)
@@ -3419,6 +3814,38 @@ fn mode_of(state: u64, cmd: u64) {
     var nokbd: [u8; 6] = "nokbd\0"
     var noring: [u8; 8] = "noring3\0"
     var notimer: [u8; 8] = "notimer\0"
+    var dtaf: [u8; 6] = "tafel\0"
+    var dnos: [u8; 9] = "noserial\0"
+    var dfbf: [u8; 8] = "fbflush\0"
+    var dherz: [u8; 5] = "herz\0"
+    var dnhub: [u8; 6] = "nohub\0"
+    var dusaf: [u8; 8] = "usbsafe\0"
+    var dnotaf: [u8; 8] = "notafel\0"
+    var dnores: [u8; 11] = "usbnoreset\0"
+    // RUNDE BLECHFUENF: drei neue Woerter. `absturzhalt` haelt bei einer
+    // Ausnahme an und schreibt sie auf den Schirm; `pulsled` bringt den
+    // LED-Herzschlag zurueck (Vorgabe: AUS, die Lampen gehoeren dem
+    // Menschen); `nopuls` haelt die Diagnosezeile aus dem Terminal.
+    var dabst: [u8; 12] = "absturzhalt\0"
+    var dpled: [u8; 8] = "pulsled\0"
+    var dnopu: [u8; 7] = "nopuls\0"
+    var dzuma: [u8; 9] = "zumachen\0"
+    var dtz: [u8; 4] = "tz=\0"
+    var drtcu: [u8; 7] = "rtcutc\0"
+    var duis: [u8; 9] = "uiscale=\0"
+    var dknall: [u8; 6] = "knall\0"
+    var deins: [u8; 11] = "einsprung\0\0"
+    // RUNDE GLYPHE: der Nachweis und seine zwei Gegenproben.
+    var dgr: [u8; 11] = "glyphrace\0\0"
+    var dgb: [u8; 12] = "glyphblind\0\0"
+    var dgs: [u8; 13] = "glyphsperre\0\0"
+    var dgt: [u8; 16] = "glyphtafelfrei\0\0"
+    // RUNDE PROTOKOLL: die drei Worte des Kernprotokolls.
+    var dlogd: [u8; 9] = "logdebug\0"
+    var dlogq: [u8; 9] = "logquiet\0"
+    var dkrach: [u8; 6] = "krach\0"
+    var dkrachj: [u8; 11] = "krachjetzt\0"
+    var dloga: [u8; 7] = "logall\0"
     var r3fault: [u8; 11] = "ring3fault\0"
     var nosched: [u8; 8] = "nosched\0"
     var nopre: [u8; 10] = "nopreempt\0"
@@ -3461,6 +3888,176 @@ fn mode_of(state: u64, cmd: u64) {
     if find(cmd, (&noring[0]) as u64, 7) != 0 {
         kstate.mode_add(state, kstate.M_NORING3)
     }
+    // RUNDE VIELKERN: `r3alle` -- Ring 3 auf ALLEN Kernen. Siehe
+    // `sched.create`. Ohne das Wort bleibt es bei Kern 0, so wie in
+    // der Runde BLECHKERN.
+    var r3a: [u8; 7] = "r3alle "
+    if find(cmd, (&r3a[0]) as u64, 6) != 0 {
+        sched.ring3_alle_setzen(1)
+    }
+    // RUNDE VIELKERN 3: DIE BEIDEN GEGENPROBEN ZUM RIEGEL.
+    // `gsluege`  -- Anwendungskerne bekommen eine FALSCHE GS-Basis
+    //               (der Zustand der Runde BLECHKERN, auf Bestellung).
+    // `r3blind`  -- `sched.darf_ring3` fragt nicht mehr nach der
+    //               GS-Basis. NUR mit beiden zusammen entsteht wieder
+    //               Justins #UD; mit `gsluege` allein MUSS der Riegel
+    //               halten und die Maschine leben. Genau dieses Paar
+    //               misst tools/vielkern/run.sh.
+    // RUNDE VIELKERN 3: die Rueckfallebene. `r3eins` haelt Ring 3 auf
+    // Kern 0, so wie es seit der Runde BLECHKERN war. Sie wird NACH
+    // `r3alle` gefragt, damit sie gewinnt, wenn jemand beides schreibt
+    // -- die vorsichtigere Angabe schlaegt die kuehnere.
+    var r3e: [u8; 7] = "r3eins "
+    if find(cmd, (&r3e[0]) as u64, 6) != 0 {
+        sched.ring3_alle_setzen(0)
+    }
+    var gsl: [u8; 8] = "gsluege "
+    if find(cmd, (&gsl[0]) as u64, 7) != 0 {
+        sched.gs_luege_setzen(1)
+    }
+    var r3b: [u8; 8] = "r3blind "
+    if find(cmd, (&r3b[0]) as u64, 7) != 0 {
+        sched.r3blind_setzen(1)
+    }
+    // RUNDE STANDBILD: die Messtafel wird ausdruecklich eingeschaltet.
+    // RUNDE BLECHDREI: `notafel` gewinnt -- und es MUSS zuerst gefragt
+    // werden, weil das Wort "tafel" in "notafel" steckt und `find` es
+    // dort auch findet. Wer nur auf "tafel" prueft, schaltet mit dem
+    // Ausschalter ein.
+    let aus_tafel: bool = find(cmd, (&dnotaf[0]) as u64, 7) != 0
+    if aus_tafel {
+        kstate.mode_add(state, kstate.M_NOTAFEL)
+    } else if find(cmd, (&dtaf[0]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_TAFEL)
+    }
+    // ================================ RUNDE BLECHEINGABE: VIER WOERTER.
+    // `fbflush` -- nach jedem Blit `wbinvd` (Justins zweiter, von `fbuc`
+    //              unabhaengiger Beweis derselben Ursache).
+    // `herz`    -- die zwei Blinkfelder und die Lampe der Tastatur.
+    // `nohub`   -- den Hub-Treiber stilllegen (Gegenprobe).
+    // `usbsafe` -- der Zeitgeber sieht gar nicht mehr nach Anschluessen.
+    if find(cmd, (&dfbf[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_FBFLUSH)
+    }
+    if find(cmd, (&dherz[0]) as u64, 4) != 0 {
+        kstate.mode_add(state, kstate.M_HERZ)
+    }
+    if find(cmd, (&dnhub[0]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_NOHUB)
+    }
+    if find(cmd, (&dusaf[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_USBSAFE)
+    }
+    // RUNDE BLECHVIER: die Gegenprobe zur erzwungenen Ruecksetzung.
+    if find(cmd, (&dnores[0]) as u64, 10) != 0 {
+        kstate.mode_add(state, kstate.M_USBNORESET)
+    }
+    // RUNDE BLECHFUENF.
+    if find(cmd, (&dabst[0]) as u64, 11) != 0 {
+        kstate.mode_add(state, kstate.M_ABSTURZ)
+    }
+    if find(cmd, (&dpled[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_PULSLED)
+    }
+    if find(cmd, (&dnopu[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_NOPULS)
+    }
+    if find(cmd, (&dzuma[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_ZUMACHEN)
+    }
+    if find(cmd, (&dknall[0]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_KNALL)
+    }
+    if find(cmd, (&deins[0]) as u64, 9) != 0 {
+        kstate.mode_add(state, kstate.M_EINSPRUNG)
+    }
+    // RUNDE GLYPHE. `glyphblind` schaltet `glyphrace` mit ein.
+    if find(cmd, (&dgr[0]) as u64, 9) != 0 {
+        kstate.mode_add(state, kstate.M_GRACE)
+    }
+    if find(cmd, (&dgb[0]) as u64, 10) != 0 {
+        kstate.mode_add(state, kstate.M_GRACE)
+        kstate.mode_add(state, kstate.M_GBLIND)
+    }
+    if find(cmd, (&dgs[0]) as u64, 11) != 0 {
+        kstate.mode_add(state, kstate.M_GLOCK)
+    }
+    if find(cmd, (&dgt[0]) as u64, 14) != 0 {
+        kstate.mode_add(state, kstate.M_GTFREI)
+    }
+    // ==================================================== RUNDE PROTOKOLL
+    // `logdebug` senkt beide Schwellen des Protokolls auf debug,
+    // `logquiet` laesst nur noch Fehler auf die serielle Leitung, und
+    // `krach` macht den Testausloeser scharf. Die Schwellen selbst
+    // stehen in `klog.fi`; hier steht nur, welches Wort welche setzt.
+    if find(cmd, (&dlogd[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_LOGDEBUG)
+        klog.set_min(state, klog.L_DEBUG)
+        klog.set_ser(state, klog.L_DEBUG)
+    }
+    if find(cmd, (&dlogq[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_LOGQUIET)
+        klog.set_min(state, klog.L_INFO)
+        klog.set_ser(state, klog.L_ERROR)
+    }
+    if find(cmd, (&dloga[0]) as u64, 6) != 0 {
+        // `logall` -- ALLES aufzeichnen, aber nur ab `warn` seriell
+        // ausgeben. Das ist die Einstellung fuer die Fehlersuche auf
+        // echter Hardware und fuer die Abnahme: vierzigtausend Zeilen
+        // ueber eine 115200-Leitung waeren vier Minuten Leitung und
+        // keine Messung.
+        kstate.mode_add(state, kstate.M_LOGDEBUG)
+        klog.set_min(state, klog.L_DEBUG)
+        klog.set_ser(state, klog.L_WARN)
+    }
+    if find(cmd, (&dkrach[0]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_KRACH)
+    }
+    if find(cmd, (&dkrachj[0]) as u64, 10) != 0 {
+        kstate.mode_add(state, kstate.M_KRACHJETZT)
+    }
+    // RUNDE BLECHFUENF: `tz=<minuten>` -- der Versatz auf Ortszeit.
+    let tzp: u64 = find(cmd, (&dtz[0]) as u64, 3)
+    if tzp != 0 {
+        var tzv: u64 = 0
+        var tzi: u64 = tzp + 3
+        var tzn: u64 = 0
+        while tzn < 5 && kstate.get8(tzi) >= 48 && kstate.get8(tzi) <= 57 {
+            tzv = tzv * 10 + (kstate.get8(tzi) - 48)
+            tzi = tzi + 1
+            tzn = tzn + 1
+        }
+        if tzn != 0 {
+            time.set_tz(state, tzv)
+        }
+    }
+    // RUNDE ECHTHARDWARE-1: `rtcutc` -- die Uhr im Baustein steht auf
+    // UTC (so haelt es Linux). OHNE dieses Wort gilt ORTSZEIT, weil
+    // dieses System neben Windows startet und Windows es so haelt.
+    //
+    // Und DANACH die einmalige Umrechnung: ab hier ist TIME_BOOT UTC,
+    // `now_local` addiert den Versatz genau einmal, und Tafel wie
+    // Taskleiste lesen dieselbe Zahl. Der Aufruf steht hinter BEIDEN
+    // Auswertungen -- er braucht `tz=` und `rtcutc` fertig gelesen.
+    if find(cmd, (&drtcu[0]) as u64, 6) != 0 {
+        time.set_rtc_utc(state, 1)
+    }
+    time.tz_anwenden(state)
+    // RUNDE ECHTHARDWARE-1: `uiscale=<n>` -- die Vervielfachung von
+    // Hand. Sie wird hier nur GELESEN; angewandt wird sie in
+    // `kgui.gui_start`, nach dem EDID, damit sie es schlaegt.
+    let usp: u64 = find(cmd, (&duis[0]) as u64, 8)
+    if usp != 0 {
+        let uz: u64 = kstate.get8(usp + 8)
+        if uz >= 49 && uz <= 52 {
+            kstate.set(state, kstate.UISCALE_WUNSCH, uz - 48)
+        }
+    }
+    // RUNDE KABEL: die Leitung von Hand stilllegen.
+    if find(cmd, (&dnos[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_NOSERIAL)
+        serial.set_aus(1)
+    }
     if find(cmd, (&notimer[0]) as u64, 7) != 0 {
         kstate.mode_add(state, kstate.M_NOTIMER)
     }
@@ -3475,6 +4072,15 @@ fn mode_of(state: u64, cmd: u64) {
     }
     if find(cmd, (&noproc[0]) as u64, 6) != 0 {
         kstate.mode_add(state, kstate.M_NOPROC)
+    }
+    // RUNDE MESSTAFEL: die Sprache der Oberflaeche aus dem Bootmenue.
+    var l_en: [u8; 8] = "lang=en\0"
+    var l_de: [u8; 8] = "lang=de\0"
+    if find(cmd, (&l_en[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_LANGEN)
+    }
+    if find(cmd, (&l_de[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_LANGDE)
     }
     if find(cmd, (&nofs[0]) as u64, 4) != 0 {
         kstate.mode_add(state, kstate.M_NOFS)
@@ -3536,6 +4142,34 @@ fn mode_of(state: u64, cmd: u64) {
     var nrgw: [u8; 9] = "norights\0"
     var hstw: [u8; 8] = "hstrict\0"
     var hbw: [u8; 7] = "hbench\0"
+    // RUNDE HAERTUNG-2
+    var fuzzw: [u8; 5] = "fuzz\0"
+    var fuzzrw: [u8; 11] = "fuzzrunden\0"
+    if find_wort(cmd, (&fuzzw[0]) as u64, 4) != 0 {
+        kstate.mode_add(state, kstate.M_FUZZ)
+    }
+    // `fuzzrunden=<n>` -- n in TAUSEND. Der Wert steht hinter dem
+    // Gleichheitszeichen; `find` gibt die Fundstelle, die Ziffern
+    // dahinter liest diese Schleife.
+    let fr: u64 = find(cmd, (&fuzzrw[0]) as u64, 10)
+    if fr != 0 {
+        var at: u64 = fr + 10
+        if kstate.get8(at) == 61 {
+            at = at + 1
+        }
+        var v: u64 = 0
+        var lese: bool = true
+        while lese {
+            let c: u64 = kstate.get8(at) as u64
+            if c >= 48 && c <= 57 {
+                v = v * 10 + (c - 48)
+                at = at + 1
+            } else {
+                lese = false
+            }
+        }
+        kstate.set(state, kstate.FUZZ_K, v)
+    }
     if find(cmd, (&hndw[0]) as u64, 6) != 0 {
         kstate.mode_add(state, kstate.M_HANDLE)
     }
@@ -3592,6 +4226,32 @@ fn mode_of(state: u64, cmd: u64) {
     }
     if find(cmd, (&mdaw[0]) as u64, 8) != 0 {
         kstate.mode_add(state, kstate.M_MODULAUS)
+    }
+    // RUNDE SYSTEMBUS. `bus` redet auf die Leitung, `nobus` ist die
+    // Gegenprobe (der Bus wird gar nicht erst aufgesetzt, und jeder Ruf
+    // muss dann E_NOENT geben statt still zu tun als ob), `busbench`
+    // sind die Messungen im Kern, `clipdemo` und `notidemo` die beiden
+    // Bilder der Abnahme.
+    var busw: [u8; 4] = "bus\0"
+    var nbuw: [u8; 6] = "nobus\0"
+    var bbew: [u8; 9] = "busbench\0"
+    var cldw: [u8; 9] = "clipdemo\0"
+    var ntdw: [u8; 9] = "notidemo\0"
+    if find(cmd, (&nbuw[0]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_NOBUS)
+    } else {
+        if find(cmd, (&busw[0]) as u64, 3) != 0 {
+            kstate.mode_add(state, kstate.M_BUS)
+        }
+    }
+    if find(cmd, (&bbew[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_BUSBENCH)
+    }
+    if find(cmd, (&cldw[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_CLIPDEMO)
+    }
+    if find(cmd, (&ntdw[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_NOTIDEMO)
     }
     if find(cmd, (&k13w[0]) as u64, 6) != 0 {
         kstate.mode_add(state, kstate.M_K13)
@@ -3728,6 +4388,8 @@ fn mode_of(state: u64, cmd: u64) {
     // ROUND MEM: the stress test of the frame allocator.
     var msw: [u8; 11] = "memstress\0\0"
     var nsw: [u8; 12] = "nostackgrow\0"
+    // RUNDE LAUFZEIT: die Nummern melden, die dieser Kern nicht kennt.
+    var ftw: [u8; 11] = "fremdtrace\0"
     if find(cmd, (&wmw[0]) as u64, 2) != 0 {
         kstate.mode_add(state, kstate.M_WM)
     }
@@ -3760,6 +4422,9 @@ fn mode_of(state: u64, cmd: u64) {
     }
     if find(cmd, (&nsw[0]) as u64, 11) != 0 {
         kstate.mode_add(state, kstate.M_NOSTACK)
+    }
+    if find(cmd, (&ftw[0]) as u64, 10) != 0 {
+        kstate.mode_add(state, kstate.M_FREMDTRACE)
     }
     // RUNDE K15. `wig` startet die Anwendung, die auf der
     // Widget-Bibliothek sitzt, `wigfiles` den Dateimanager; die beiden
@@ -3828,11 +4493,52 @@ fn mode_of(state: u64, cmd: u64) {
     var dnm: [u8; 6] = "nomin\0"
     var ddh: [u8; 5] = "dhcp\0"
     var dnd: [u8; 7] = "nodhcp\0"
+    // RUNDE MERGE-11: der JARVIS-Helfer.
+    var djv: [u8; 7] = "jarvis\0"
+    var dnj: [u8; 9] = "nojarvis\0"
     if find(cmd, (&dkw[0]) as u64, 4) != 0 {
         kstate.mode_add(state, kstate.M_DESK)
     }
     if find(cmd, (&dwd[0]) as u64, 7) != 0 {
         kstate.mode_add(state, kstate.M_WMDAUER)
+    }
+    // RUNDE VSYNC: die Bildgrenze, die Bewegung, die Zerreissprobe --
+    // und die zwei Gegenproben. `nopresent` und `noanim` stehen NACH
+    // ihren Schaltern, aber sie sind keine Reihenfolge: beide werden
+    // im Server getrennt abgefragt, und `vsync nopresent` heisst
+    // "gebaut, aber abgeschaltet" -- genau der Lauf, der zeigt, dass
+    // die Zusage an der Bildgrenze haengt und nicht am Zufall.
+    var vsw: [u8; 6] = "vsync\0"
+    var vnp: [u8; 10] = "nopresent\0"
+    var vaw: [u8; 7] = "wmanim\0"
+    var naw: [u8; 7] = "noanim\0"
+    var vsg: [u8; 6] = "wmsig\0"
+    if find(cmd, (&vsw[0]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_VSYNC)
+    }
+    if find(cmd, (&vnp[0]) as u64, 9) != 0 {
+        kstate.mode_add(state, kstate.M_NOPRESENT)
+    }
+    if find(cmd, (&vaw[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_WMANIM)
+    }
+    if find(cmd, (&naw[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_NOANIM)
+    }
+    if find(cmd, (&vsg[0]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_WMSIG)
+    }
+    var vfl: [u8; 5] = "flip\0"
+    var vnf: [u8; 7] = "noflip\0"
+    if find(cmd, (&vfl[0]) as u64, 4) != 0 {
+        kstate.mode_add(state, kstate.M_FLIP)
+    }
+    if find(cmd, (&vnf[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_NOFLIP)
+    }
+    var vru: [u8; 7] = "wmruhe\0"
+    if find(cmd, (&vru[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_WMRUHE)
     }
     if find(cmd, (&dew[0]) as u64, 5) != 0 {
         kstate.mode_add(state, kstate.M_EINST)
@@ -3872,6 +4578,16 @@ fn mode_of(state: u64, cmd: u64) {
     if find(cmd, (&ddh[0]) as u64, 4) != 0 {
         if !kstate.mode_on(state, kstate.M_NODHCP) {
             kstate.mode_add(state, kstate.M_DHCP)
+        }
+    }
+    // DIESELBE FALLE WIE BEI `nodhcp`: ZUERST das lange Wort suchen,
+    // sonst findet "jarvis" sich selbst INNERHALB von "nojarvis".
+    if find(cmd, (&dnj[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_NOJARVIS)
+    }
+    if find(cmd, (&djv[0]) as u64, 6) != 0 {
+        if !kstate.mode_on(state, kstate.M_NOJARVIS) {
+            kstate.mode_add(state, kstate.M_JARVIS)
         }
     }
     // ADDENDUM TASKBAR: maximize, and the counter-test to the struts.
@@ -4100,6 +4816,138 @@ fn mode_of(state: u64, cmd: u64) {
     if find(cmd, (&w_hid[0]) as u64, 6) != 0 {
         kstate.mode_add(state, kstate.M_HID)
     }
+    aud_words(state, cmd)
+}
+
+// RUNDE HDA. `audio` schaltet den Ton an; die uebrigen neunzehn sind
+// GEGENPROBEN und Schalter der Abnahme. Dieselbe Bauart wie Runde K17:
+// `noaudio` loescht kein Bit, es setzt ein zweites, und `audio_stage`
+// sieht beide an -- ein Schalter, den sein eigenes Argument aufhebt,
+// ist keiner.
+//
+// EIGENE FUNKTION UND NICHT UNTEN ANGEHAENGT: `mode_of` war vor dieser
+// Runde 557 Zeilen lang, und der Uebersetzer legt fuer jede der
+// Zeichenketten darin einen Platz auf dem Stapel an. Zwanzig weitere
+// haetten den Rahmen dieser einen Funktion ueber die Seite getrieben,
+// auf der er liegt.
+fn aud_words(state: u64, cmd: u64) {
+    var w_aud: [u8; 6] = "audio\0"
+    var w_noaud: [u8; 8] = "noaudio\0"
+    var w_sine: [u8; 8] = "audsine\0"
+    var w_asay: [u8; 7] = "audsay\0"
+    var w_nomix: [u8; 9] = "audnomix\0"
+    var w_starve: [u8; 10] = "audstarve\0"
+    var w_abeep: [u8; 8] = "audbeep\0"
+    var w_nosnd: [u8; 9] = "nosounds\0"
+    var w_ahalf: [u8; 8] = "audhalf\0"
+    var w_along: [u8; 8] = "audlong\0"
+    var w_nohda: [u8; 6] = "nohda\0"
+    var w_noac: [u8; 7] = "noac97\0"
+    var w_amix: [u8; 7] = "audmix\0"
+    var w_aclip: [u8; 8] = "audclip\0"
+    var w_a441: [u8; 7] = "aud441\0"
+    var w_acls: [u8; 9] = "audclose\0"
+    var w_apos: [u8; 7] = "audpos\0"
+    var w_aload: [u8; 8] = "audload\0"
+    var w_noirq: [u8; 10] = "noaudirq\0\0"
+    var w_agr: [u8; 9] = "audgraph\0"
+    if find(cmd, (&w_aud[0]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_AUDIO)
+    }
+    if find(cmd, (&w_noaud[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_NOAUDIO)
+    }
+    if find(cmd, (&w_sine[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_AUDSINE)
+    }
+    if find(cmd, (&w_asay[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_AUDSAY)
+    }
+    if find(cmd, (&w_nomix[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_AUDNOMIX)
+    }
+    if find(cmd, (&w_starve[0]) as u64, 9) != 0 {
+        kstate.mode_add(state, kstate.M_AUDSTARVE)
+    }
+    if find(cmd, (&w_abeep[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_AUDBEEP)
+    }
+    if find(cmd, (&w_nosnd[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_NOSOUNDS)
+    }
+    if find(cmd, (&w_ahalf[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_AUDHALF)
+    }
+    if find(cmd, (&w_along[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_AUDLONG)
+    }
+    if find(cmd, (&w_nohda[0]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_NOHDA)
+    }
+    if find(cmd, (&w_noac[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_NOAC97)
+    }
+    if find(cmd, (&w_amix[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_AUDMIX)
+    }
+    if find(cmd, (&w_aclip[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_AUDCLIP)
+    }
+    if find(cmd, (&w_a441[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_AUD441)
+    }
+    if find(cmd, (&w_acls[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_AUDCLOSE)
+    }
+    if find(cmd, (&w_apos[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_AUDPOS)
+    }
+    if find(cmd, (&w_aload[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_AUDLOAD)
+    }
+    if find(cmd, (&w_noirq[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_NOAUDIRQ)
+    }
+    if find(cmd, (&w_agr[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_AUDGRAPH)
+    }
+}
+
+// RUNDE MERGE8: EIN WORT IST EIN WORT.
+//
+// `find` sucht eine Zeichenfolge IRGENDWO in der Kommandozeile. Fuer
+// `fuzz` war das falsch: die Zeile der Runde TILING traegt `tilefuzz`,
+// und darin steckt `fuzz`. GEMESSEN in tools/tiling/run.sh Abschnitt 3
+// -- der Kern startete den Aufrufe-Fuzzer der Runde HAERTUNG-2 mit
+// hunderttausend Runden, QEMU lief in die Zeitgrenze (rc 124 statt 21)
+// und alle zwoelf Zusagen danach waren rot. Diese Fassung nimmt einen
+// Treffer nur an, wenn LINKS Zeilenanfang oder Leerzeichen steht und
+// RECHTS Leerzeichen, Gleichheitszeichen oder das Ende.
+fn find_wort(hay: u64, needle: u64, n: u64) -> u64 {
+    var at: u64 = hay
+    while true {
+        let t: u64 = find(at, needle, n)
+        if t == 0 {
+            return 0
+        }
+        var links: bool = true
+        if t > hay {
+            let c: u64 = kstate.get8(t - 1)
+            if c != 32 {
+                links = false
+            }
+        }
+        let d: u64 = kstate.get8(t + n)
+        var rechts: bool = false
+        if d == 0 || d == 32 || d == 61 {
+            rechts = true
+        }
+        if links && rechts {
+            return t
+        }
+        at = t + 1
+    }
+    return 0
 }
 
 // Address of the first occurrence, or 0. The command line is a C string.
@@ -4769,4 +5617,926 @@ fn bench_parts(state: u64) {
     serial.dec(bt / BENCH_IN)
     serial.nl()
     mem.frame_free(state, area)
+}
+// ==================================================================
+// RUNDE HDA -- DER TON
+//
+// Was hier steht, ist die REIHENFOLGE und die MESSUNG; die Chips
+// stehen in `kernel/hda.fi` und `kernel/ac97.fi`, die Schicht darueber
+// in `kernel/audio.fi`, der Mischer in `kernel/mix.fi`.
+//
+// WARUM DER KERNEL SELBST TON SPIELT, wo es doch /bin/play gibt: weil
+// ein Testlauf, der durch die Shell, das Dateisystem und einen
+// ELF-Lader hindurch messen muss, bei jedem Fehler drei Verdaechtige
+// hat. Ein Sinus, der hier entsteht und in derselben Runde in einer
+// Datei auf dem Wirt landet, hat einen. /bin/play wird DANACH
+// gemessen, gegen dieselbe Datei.
+//
+// Der Abschnitt ist die Fassung aus Runde MEDIA1, um die Messungen
+// dieser Runde erweitert: zwei Stroeme gleichzeitig (`audmix`), die
+// Uebersteuerungsprobe (`audclip`), der Positionsgang ueber zehn
+// Sekunden (`audpos`, mit `audload` unter Rechenlast), 44,1 kHz
+// (`aud441`) und das Schliessen mitten im Lauf (`audclose`).
+// ==================================================================
+
+const AUD_HZ: u64 = 440
+const AUD_MS: u64 = 1000
+const AUD_MS_LONG: u64 = 5000
+const AUD_AMP: u64 = 24000 // etwa -2,7 dBFS; Platz nach oben bleibt
+// Die Nachfrist am Ende. Der Regler hat alles gelesen, was im Ring
+// stand -- das heisst noch nicht, dass QEMU es auch in die Datei
+// geschrieben hat: zwischen dem DMA und der Datei liegen der Mischer
+// und ein Puffer, und der Zeitgeber der Tonschicht schlaegt alle
+// 10 ms. GEMESSEN in Runde MEDIA1: ohne diese Nachfrist fehlten 167
+// Rahmen (3,5 ms) am Ende der Datei.
+const AUD_GRACE_NS: u64 = 150000000
+
+fn aud_num(name: u64, v: u64) {
+    var s_p: [u8; 6] = "aud: \0"
+    var s_e: [u8; 2] = "=\0"
+    serial.puts((&s_p[0]) as u64)
+    serial.puts(name)
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn audio_stage(state: u64) {
+    var s_off: [u8; 21] = "aud: aus (kein Wort)\0"
+    var s_no: [u8; 22] = "aud: kein Geraet, why\0"
+    if !kstate.mode_on(state, kstate.M_AUDIO)
+        || kstate.mode_on(state, kstate.M_NOAUDIO) {
+        serial.puts((&s_off[0]) as u64)
+        serial.nl()
+        return
+    }
+    audio.init(state)
+    if !audio.ready(state) {
+        // ZUSAGE (f): KEIN GERAET -> KLARE MELDUNG, SYSTEM LAEUFT
+        // WEITER. Es wird eine ZAHL gedruckt und nicht angehalten; der
+        // Lauf geht unter `osum(state)` ganz normal in die Shell.
+        serial.puts((&s_no[0]) as u64)
+        serial.dec(audio.why(state))
+        serial.nl()
+        return
+    }
+    // Der Vektor. `noaudirq` laesst ihn maskiert -- die Gegenprobe
+    // dafuer, dass der abfragende Weg fuer sich allein traegt.
+    audio.arm_irq(state, !kstate.mode_on(state, kstate.M_NOAUDIRQ))
+    if kstate.mode_on(state, kstate.M_AUD441) {
+        audio.set_rate(state, 44100)
+    }
+    if kstate.mode_on(state, kstate.M_NOSOUNDS) {
+        audio.set_sounds(state, false)
+    }
+    if kstate.mode_on(state, kstate.M_AUDHALF) {
+        audio.set_volume(state, 50)
+    }
+    if kstate.mode_on(state, kstate.M_AUDNOMIX) {
+        audio.set_muted(state, true)
+    }
+    if kstate.mode_on(state, kstate.M_AUDGRAPH) {
+        hda.say_graph(state)
+    }
+    if kstate.mode_on(state, kstate.M_AUDSINE) {
+        audio_sine(state)
+    }
+    if kstate.mode_on(state, kstate.M_AUDSTARVE) {
+        audio_starve(state)
+    }
+    if kstate.mode_on(state, kstate.M_AUDMIX) {
+        audio_two(state)
+    }
+    if kstate.mode_on(state, kstate.M_AUDCLIP) {
+        audio_clip(state)
+    }
+    if kstate.mode_on(state, kstate.M_AUDPOS) {
+        audio_pos(state)
+    }
+    if kstate.mode_on(state, kstate.M_AUDCLOSE) {
+        audio_close(state)
+    }
+    if kstate.mode_on(state, kstate.M_AUDBEEP) {
+        audio_beep(state)
+    }
+    if kstate.mode_on(state, kstate.M_AUDSAY) {
+        audio_say(state)
+    }
+}
+
+// Warten, bis der Ring leer gespielt ist, danach die Nachfrist
+// abwarten. Das Warten ist BEGRENZT: ein Geraet, das nicht faehrt, darf
+// den Kernel nicht anhalten, sonst haengt die Gegenprobe statt zu
+// fallen.
+fn audio_drain(state: u64) {
+    let deadline: u64 = time.mono_ns(state) +% 10000000000
+    var done: bool = false
+    while !done {
+        audio.samples_played(state)
+        audio.zero_rest(state)
+        if audio.remaining(state) == 0 {
+            done = true
+        }
+        if time.mono_ns(state) > deadline {
+            done = true
+        }
+        arch.pause()
+    }
+    // WAEHREND DER NACHFRIST WEITER AUSNULLEN. Der Regler laeuft bei
+    // HD-Audio bis zum `stop` weiter und faengt dabei VON VORN im Ring
+    // an. `zero_rest` kann immer nur bis `Position + Ringgroesse`
+    // nullen -- alles darueber gehoert noch dem Regler. Also wird es
+    // wiederholt gerufen, waehrend die Position weiterlaeuft, bis der
+    // ganze Ring still ist.
+    //
+    // GEMESSEN: ohne diese Schleife stand hinter dem Ton noch einmal
+    // eine ganze Ringlaenge desselben Tons in der Datei (4052 Rahmen).
+    let grace: u64 = time.mono_ns(state) +% AUD_GRACE_NS
+    var w2: bool = true
+    while w2 {
+        audio.samples_played(state)
+        audio.zero_rest(state)
+        arch.pause()
+        if time.mono_ns(state) > grace {
+            w2 = false
+        }
+    }
+}
+
+fn aud_wait(state: u64, ns: u64) {
+    let bis: u64 = time.mono_ns(state) +% ns
+    var w: bool = true
+    while w {
+        arch.pause()
+        if time.mono_ns(state) > bis {
+            w = false
+        }
+    }
+}
+
+// DIE MESSSTRECKE. Der Sinus wird in Stuecken geschrieben, so wie ein
+// Abspieler es taete, und BEI JEDEM STUECK wird die Uhr abgelesen --
+// nicht erst am Ende. Der Grund steht in einer Zahl: schreibt man erst
+// alles und misst dann beim Leerlaufen, ist die Messstrecke so lang
+// wie der Ring, also 85 ms. Ueber 85 ms sind ein paar Mikrosekunden
+// Ablesefehler schon zweistellige ppm; ueber die ganze Sekunde nicht.
+//
+// Jedes Paar wird als (t vorher, Position, t danach) genommen und die
+// Zeit gemittelt; die beiden Registerlesungen dazwischen kosten unter
+// KVM ein bis zwei Mikrosekunden, und die gingen sonst als Rauschen in
+// eine Zahl ein, die in ppm gemessen wird.
+//
+// Der erste Messpunkt liegt einen ganzen Ring hinter dem Start: davor
+// faehrt der Regler erst an, und ein Anfahrvorgang in der Messstrecke
+// waere ein Fehler, den man der Uhr anlastet.
+fn audio_sine(state: u64) {
+    audio.open(state)
+    var ms: u64 = AUD_MS
+    if kstate.mode_on(state, kstate.M_AUDLONG) {
+        ms = AUD_MS_LONG
+    }
+    let want: u64 = audio.rate(state) * ms / 1000
+    var written: u64 = 0
+    var t0: u64 = 0
+    var p0: u64 = 0
+    var k0: u64 = 0
+    var t1: u64 = 0
+    var p1: u64 = 0
+    var k1: u64 = 0
+    var back: u64 = 0
+    var last: u64 = 0
+    var polls: u64 = 0
+    let deadline: u64 = time.mono_ns(state) +% 20000000000
+    var give_up: bool = false
+    var filling: bool = true
+    while filling {
+        var got: u64 = 0
+        if written < want {
+            got = audio.tone_push(state, AUD_HZ, AUD_AMP, want -% written)
+            written = written + got
+        }
+        if written >= want {
+            audio.pad_and_submit(state)
+        }
+        let ta: u64 = time.mono_ns(state)
+        let p: u64 = audio.samples_played(state)
+        let tb: u64 = time.mono_ns(state)
+        let t: u64 = ta + (tb -% ta) / 2
+        polls = polls + 1
+        if p < last {
+            back = back + 1
+        }
+        last = p
+        if p0 == 0 && p >= audio.ring_frames(state) {
+            p0 = p
+            t0 = t
+            k0 = kstate.get(state, kstate.TICKS)
+        }
+        // DER ZWEITE MESSPUNKT NUR, SOLANGE ES ECHTE WIEDERGABE IST.
+        // Bei HD-Audio laeuft der Regler nach dem letzten Rahmen
+        // weiter (er haelt erst beim `stop` an) und die Position
+        // rennt dabei durch den ausgenullten Ring. Wer diese Strecke
+        // in die Messung nimmt, misst, wie schnell Stille ist.
+        if p0 != 0 && p > p0 && p <= written {
+            p1 = p
+            t1 = t
+            k1 = kstate.get(state, kstate.TICKS)
+        }
+        if written >= want && audio.remaining(state) == 0 {
+            filling = false
+        }
+        if got == 0 {
+            arch.pause()
+            if time.mono_ns(state) > deadline {
+                filling = false
+                give_up = true
+            }
+        }
+    }
+    audio_drain(state)
+    audio.stop(state)
+    audio.close(state)
+    var s_dt: [u8; 6] = "dt_ns\0"
+    var s_df: [u8; 8] = "dframes\0"
+    var s_dk: [u8; 9] = "dt_ticks\0"
+    var s_khz: [u8; 8] = "tsc_khz\0"
+    var s_bk: [u8; 10] = "backsteps\0"
+    var s_pl: [u8; 6] = "polls\0"
+    var s_hz: [u8; 6] = "sinhz\0"
+    var s_ms: [u8; 6] = "sinms\0"
+    var s_amp: [u8; 7] = "sinamp\0"
+    var s_ask: [u8; 7] = "sinask\0"
+    var s_gu: [u8; 7] = "giveup\0"
+    var dt: u64 = 0
+    var df: u64 = 0
+    var dk: u64 = 0
+    if t1 > t0 && p1 > p0 {
+        dt = t1 -% t0
+        df = p1 -% p0
+    }
+    if k1 > k0 {
+        dk = k1 -% k0
+    }
+    aud_num((&s_dt[0]) as u64, dt)
+    aud_num((&s_df[0]) as u64, df)
+    // DIE DRITTE UHR. Der Zeitgeber schlaegt hundertmal in der Sekunde
+    // und wird von QEMU gegen die Wirtsuhr getaktet -- er ist damit von
+    // dem Zyklenzaehler UNABHAENGIG, den `time.calibrate` gegen ihn
+    // eicht. Weichen Ton und Zyklenzaehler voneinander ab, sagt genau
+    // diese Zahl, welcher der beiden recht hat.
+    aud_num((&s_dk[0]) as u64, dk)
+    aud_num((&s_khz[0]) as u64, time.khz(state))
+    aud_num((&s_bk[0]) as u64, back + audio.backsteps(state))
+    aud_num((&s_pl[0]) as u64, polls)
+    aud_num((&s_hz[0]) as u64, AUD_HZ)
+    aud_num((&s_ms[0]) as u64, ms)
+    aud_num((&s_amp[0]) as u64, AUD_AMP)
+    aud_num((&s_ask[0]) as u64, written)
+    var gu: u64 = 0
+    if give_up {
+        gu = 1
+    }
+    aud_num((&s_gu[0]) as u64, gu)
+}
+
+// GEGENPROBE: den Ring absichtlich leerlaufen lassen (Zusage d). Erst
+// ein kurzer Ton, kuerzer als der Ring, dann drei Zehntelsekunden
+// nichts, dann wieder Ton. Der Zaehler `underruns` MUSS danach groesser
+// als null sein -- ist er es nicht, zaehlt der Treiber Aussetzer nicht,
+// und dann ist die Null im Regellauf nichts wert.
+//
+// BEI HD-AUDIO PRUEFT DIESE PROBE ZUGLEICH DAS VORAUSNULLEN: der Regler
+// laeuft waehrend der drei Zehntelsekunden weiter und liest den Ring
+// weiter. Steht dort noch der alte Ton, hoert man ihn WIEDER -- die
+// Datei auf dem Wirt haette dann in der Luecke Signal statt Stille, und
+// `tools/hda/run.sh` misst genau das.
+fn audio_starve(state: u64) {
+    audio.open(state)
+    // HUNDERT MILLISEKUNDEN UND KEIN `pad_and_submit`. Beides ist
+    // noetig, damit die Probe misst, was sie messen soll:
+    //
+    //   Hundert Millisekunden sind 4800 Rahmen und damit MEHR als der
+    //   Vorlauf (24 Eintraege, 3072 Rahmen) -- der Lauf faehrt also von
+    //   selbst an. Sechzig Millisekunden taeten das nicht, und dann
+    //   haette man einen Ring gemessen, der nie gelaufen ist.
+    //
+    //   KEIN `pad_and_submit`, weil das die Endmarke setzt ("ab hier
+    //   kommt nichts mehr") -- und mit gesetzter Endmarke zaehlt der
+    //   Treiber die folgende Stille ZU RECHT nicht als Aussetzer. Die
+    //   Probe braucht aber genau diese Zaehlung.
+    audio.tone(state, AUD_HZ, 100, AUD_AMP)
+    let until: u64 = time.mono_ns(state) +% 300000000
+    var wait: bool = true
+    while wait {
+        audio.samples_played(state)
+        arch.pause()
+        if time.mono_ns(state) > until {
+            wait = false
+        }
+    }
+    audio.tone(state, AUD_HZ, 60, AUD_AMP)
+    audio.pad_and_submit(state)
+    audio_drain(state)
+    audio.stop(state)
+    audio.close(state)
+    var n_un: [u8; 10] = "underruns\0"
+    aud_num((&n_un[0]) as u64, audio.underruns(state))
+}
+
+fn audio_beep(state: u64) {
+    audio.error_beep(state)
+    audio_drain(state)
+    audio.stop(state)
+}
+
+// ============================== ZUSAGE (c): ZWEI PROGRAMME GLEICHZEITIG
+//
+// Zwei Stroeme, 440 Hz und 660 Hz, je 12000 Aussteuerung. Die Zahlen
+// sind nicht beliebig:
+//
+//   * 440 UND 660 sind eine reine Quinte und liegen im Spektrum weit
+//     genug auseinander, dass der Wirt sie mit einer FFT EINZELN
+//     wiederfindet. Zwei benachbarte Frequenzen waeren im Bild ein
+//     Berg statt zweier.
+//   * 12000 + 12000 = 24000, und das ist KLEINER als 32767. Damit ist
+//     "die Mischung uebersteuert nicht" keine Hoffnung, sondern eine
+//     RECHNUNG: `mix.clips` MUSS null sein und `mix.peak` MUSS bei
+//     24000 liegen. Ein Mischer, der hier begrenzt, hat einen Fehler
+//     im Vorzeichen; einer, der ueber 24000 kommt, addiert doppelt.
+//
+// GEPRUEFT WIRD BEIDES -- die Zahlen hier UND die Datei auf dem Wirt.
+// Die Zahlen sagen, dass die Summe stimmt; die Datei sagt, dass sie
+// auch wirklich am Lautsprecher ankommt.
+fn audio_two(state: u64) {
+    let hz: u64 = audio.rate(state)
+    let a: u64 = audio.open_stream(state, 1, hz)
+    let b: u64 = audio.open_stream(state, 2, hz)
+    var n_a: [u8; 8] = "mix_ida\0"
+    var n_b: [u8; 8] = "mix_idb\0"
+    aud_num((&n_a[0]) as u64, a)
+    aud_num((&n_b[0]) as u64, b)
+    if a >= mix.MAX_STREAMS || b >= mix.MAX_STREAMS {
+        return
+    }
+    let t_start: u64 = time.mono_ns(state)
+    var t_pump: u64 = 0
+    var t_gen: u64 = 0
+    var runden: u64 = 0
+    let want: u64 = hz // genau eine Sekunde
+    var wa: u64 = 0
+    var wb: u64 = 0
+    var pa: u64 = 0
+    var pb: u64 = 0
+    let sc: u64 = audio.scratch(state)
+    let deadline: u64 = time.mono_ns(state) +% 20000000000
+    var lauf: bool = true
+    while lauf {
+        var tat: u64 = 0
+        if wa < want {
+            var n: u64 = mix.space(state, a)
+            if n > audio.SCRATCH_FRAMES {
+                n = audio.SCRATCH_FRAMES
+            }
+            if n > want -% wa {
+                n = want -% wa
+            }
+            if n > 0 {
+                pa = audio.tone_into(state, sc, n, 440, 12000, pa)
+                let got: u64 = mix.write(state, a, sc, n)
+                wa = wa + got
+                tat = tat + got
+            }
+        }
+        if wb < want {
+            var n2: u64 = mix.space(state, b)
+            if n2 > audio.SCRATCH_FRAMES {
+                n2 = audio.SCRATCH_FRAMES
+            }
+            if n2 > want -% wb {
+                n2 = want -% wb
+            }
+            if n2 > 0 {
+                pb = audio.tone_into(state, sc, n2, 660, 12000, pb)
+                let got2: u64 = mix.write(state, b, sc, n2)
+                wb = wb + got2
+                tat = tat + got2
+            }
+        }
+        let tp0: u64 = time.mono_ns(state)
+        audio.mix_pump(state)
+        t_pump = t_pump +% (time.mono_ns(state) -% tp0)
+        runden = runden + 1
+        if wa >= want && wb >= want {
+            lauf = false
+        }
+        if tat == 0 {
+            arch.pause()
+            if time.mono_ns(state) > deadline {
+                lauf = false
+            }
+        }
+    }
+    let t_fill: u64 = time.mono_ns(state) -% t_start
+    mix.mark_end(state, a)
+    mix.mark_end(state, b)
+    // AB HIER KOMMT NICHTS MEHR -- und das muss der Treiber wissen,
+    // BEVOR der Ring leerlaeuft. Sonst zaehlt jede Sekunde Nachlauf
+    // als Aussetzer, und "Aussetzer je Minute" waere eine Zahl ueber
+    // die Zahl der abgespielten Stuecke.
+    audio.drain_mark(state)
+    // Leerspielen: pumpen, bis der Mischer nichts mehr hergibt, UND
+    // dabei den Ring hinter dem Schreibzeiger ausnullen. Ohne das
+    // zweite spielt der Regler den Ring noch einmal ab -- gemessen:
+    // hinter der einen Sekunde Ton standen 33 weitere Ringlaengen
+    // desselben Tons in der Datei, jede mit einem 132 Rahmen langen
+    // Loch an der Naht.
+    let bis: u64 = time.mono_ns(state) +% 3000000000
+    var leer: bool = false
+    while !leer {
+        audio.mix_pump(state)
+        audio.samples_played(state)
+        audio.zero_rest(state)
+        if mix.streams(state) == 0 && audio.remaining(state) == 0 {
+            leer = true
+        }
+        if time.mono_ns(state) > bis {
+            leer = true
+        }
+        arch.pause()
+    }
+    audio.pad_and_submit(state)
+    audio_drain(state)
+    audio.close_stream(state, a)
+    audio.close_stream(state, b)
+    audio.stop(state)
+    var n_t1: [u8; 10] = "mix_tfill\0"
+    var n_t2: [u8; 10] = "mix_tpump\0"
+    var n_t3: [u8; 11] = "mix_runden\0"
+    aud_num((&n_t1[0]) as u64, t_fill / 1000)
+    aud_num((&n_t2[0]) as u64, t_pump / 1000)
+    aud_num((&n_t3[0]) as u64, runden)
+    t_gen = t_gen
+    var n_wa: [u8; 8] = "mix_wa\0\0"
+    var n_wb: [u8; 8] = "mix_wb\0\0"
+    var n_mx: [u8; 10] = "mix_mixed\0"
+    var n_cl: [u8; 10] = "mix_clips\0"
+    var n_pk: [u8; 9] = "mix_peak\0"
+    var n_un: [u8; 10] = "mix_under\0"
+    var n_pu: [u8; 10] = "mix_pumps\0"
+    var n_pd: [u8; 9] = "mix_play\0"
+    aud_num((&n_wa[0]) as u64, wa)
+    aud_num((&n_wb[0]) as u64, wb)
+    aud_num((&n_mx[0]) as u64, mix.mixed(state))
+    aud_num((&n_cl[0]) as u64, mix.clips(state))
+    aud_num((&n_pk[0]) as u64, mix.peak(state))
+    aud_num((&n_un[0]) as u64, mix.underruns(state, mix.MAX_STREAMS))
+    aud_num((&n_pu[0]) as u64, mix.pumps(state))
+    aud_num((&n_pd[0]) as u64, audio.samples_played(state))
+}
+
+// GEGENPROBE ZU (c): ZWEI STROEME MIT VOLLER AUSSTEUERUNG. 32000 plus
+// 32000 sind 64000 und passen nicht in 16 Bit. Der Zaehler `mix_clips`
+// MUSS steigen und `mix_peak` MUSS ueber 32767 liegen -- und in der
+// Datei auf dem Wirt muss ein FLACHER SCHEITEL stehen und kein Sprung
+// ans andere Ende. Ohne diese Probe waere die Null im Regellauf
+// wertlos: ein Zaehler, der nie ausschlaegt, misst nichts.
+fn audio_clip(state: u64) {
+    let hz: u64 = audio.rate(state)
+    let a: u64 = audio.open_stream(state, 1, hz)
+    let b: u64 = audio.open_stream(state, 2, hz)
+    if a >= mix.MAX_STREAMS || b >= mix.MAX_STREAMS {
+        return
+    }
+    let want: u64 = hz / 2
+    var wa: u64 = 0
+    var wb: u64 = 0
+    var pa: u64 = 0
+    var pb: u64 = 0
+    let sc: u64 = audio.scratch(state)
+    let deadline: u64 = time.mono_ns(state) +% 15000000000
+    var lauf: bool = true
+    while lauf {
+        var tat: u64 = 0
+        if wa < want {
+            var n: u64 = mix.space(state, a)
+            if n > audio.SCRATCH_FRAMES { n = audio.SCRATCH_FRAMES }
+            if n > want -% wa { n = want -% wa }
+            if n > 0 {
+                pa = audio.tone_into(state, sc, n, 440, 32000, pa)
+                wa = wa + mix.write(state, a, sc, n)
+                tat = tat + 1
+            }
+        }
+        if wb < want {
+            var n2: u64 = mix.space(state, b)
+            if n2 > audio.SCRATCH_FRAMES { n2 = audio.SCRATCH_FRAMES }
+            if n2 > want -% wb { n2 = want -% wb }
+            if n2 > 0 {
+                pb = audio.tone_into(state, sc, n2, 440, 32000, pb)
+                wb = wb + mix.write(state, b, sc, n2)
+                tat = tat + 1
+            }
+        }
+        audio.mix_pump(state)
+        if wa >= want && wb >= want { lauf = false }
+        if tat == 0 {
+            arch.pause()
+            if time.mono_ns(state) > deadline { lauf = false }
+        }
+    }
+    mix.mark_end(state, a)
+    mix.mark_end(state, b)
+    audio.drain_mark(state)
+    let bis: u64 = time.mono_ns(state) +% 3000000000
+    var leer: bool = false
+    while !leer {
+        audio.mix_pump(state)
+        audio.samples_played(state)
+        audio.zero_rest(state)
+        if mix.streams(state) == 0 && audio.remaining(state) == 0 { leer = true }
+        if time.mono_ns(state) > bis { leer = true }
+        arch.pause()
+    }
+    audio.pad_and_submit(state)
+    audio_drain(state)
+    audio.close_stream(state, a)
+    audio.close_stream(state, b)
+    audio.stop(state)
+    var n_ia: [u8; 9] = "clip_ida\0"
+    var n_ib: [u8; 9] = "clip_idb\0"
+    var n_wa2: [u8; 8] = "clip_wa\0"
+    var n_wb2: [u8; 8] = "clip_wb\0"
+    aud_num((&n_ia[0]) as u64, a)
+    aud_num((&n_ib[0]) as u64, b)
+    aud_num((&n_wa2[0]) as u64, wa)
+    aud_num((&n_wb2[0]) as u64, wb)
+    var n_cl: [u8; 11] = "clip_clips\0"
+    var n_pk: [u8; 10] = "clip_peak\0"
+    var n_mx: [u8; 11] = "clip_mixed\0"
+    aud_num((&n_cl[0]) as u64, mix.clips(state))
+    aud_num((&n_pk[0]) as u64, mix.peak(state))
+    aud_num((&n_mx[0]) as u64, mix.mixed(state))
+}
+
+// ====================== ZUSAGE (b): DER POSITIONSGANG UEBER ZEHN SEKUNDEN
+//
+// Zehn Sekunden Ton, und dabei wird die Position gegen ZWEI unabhaengige
+// Uhren gehalten: die monotone Uhr (Zyklenzaehler, `time.mono_ns`) und
+// den Zeitgeber (100 Hz, `kstate.TICKS`).
+//
+// WARUM ZEHN SEKUNDEN UND NICHT EINE. Der feste Versatz zwischen "der
+// Regler hat es geholt" und "der Lautsprecher hat es gesagt" ist eine
+// Konstante der Hardware (Runde MEDIA1 hat +9 ms gemessen). Ueber eine
+// Sekunde sieht ein Versatz von 9 ms aus wie 9000 ppm Gangfehler, ueber
+// zehn wie 900. Erst zwei verschieden lange Strecken trennen Versatz
+// und Gangfehler -- die kurze misst `audsine`, die lange diese hier.
+//
+// MIT `audload` LAEUFT DAZWISCHEN RECHENLAST. Das ist keine Zugabe: die
+// Zusage der Runde lautet, dass es unter Last KEINE Aussetzer gibt, und
+// eine Messung ohne Last sagt darueber nichts. Gerechnet wird etwas,
+// das der Uebersetzer nicht wegwerfen kann -- eine Summe, die hinterher
+// gedruckt wird.
+fn audio_pos(state: u64) {
+    audio.open(state)
+    let hz: u64 = audio.rate(state)
+    let want: u64 = hz * 10
+    var written: u64 = 0
+    var t0: u64 = 0
+    var p0: u64 = 0
+    var k0: u64 = 0
+    var t1: u64 = 0
+    var p1: u64 = 0
+    var k1: u64 = 0
+    var last: u64 = 0
+    var back: u64 = 0
+    var polls: u64 = 0
+    var last_ph: u64 = 0
+    var burn: u64 = 0
+    let load: bool = kstate.mode_on(state, kstate.M_AUDLOAD)
+    let deadline: u64 = time.mono_ns(state) +% 40000000000
+    var lauf: bool = true
+    while lauf {
+        var got: u64 = 0
+        if written < want {
+            got = audio.tone_push(state, AUD_HZ, AUD_AMP, want -% written)
+            written = written + got
+        }
+        if written >= want {
+            audio.pad_and_submit(state)
+        }
+        let ta: u64 = time.mono_ns(state)
+        let p: u64 = audio.samples_played(state)
+        let tb: u64 = time.mono_ns(state)
+        let t: u64 = ta + (tb -% ta) / 2
+        polls = polls + 1
+        if p < last {
+            back = back + 1
+        }
+        last = p
+        if p0 == 0 && p >= audio.ring_frames(state) {
+            p0 = p
+            t0 = t
+            k0 = kstate.get(state, kstate.TICKS)
+        }
+        // DER ZWEITE MESSPUNKT NUR, SOLANGE ES ECHTE WIEDERGABE IST.
+        // Bei HD-Audio laeuft der Regler nach dem letzten Rahmen
+        // weiter (er haelt erst beim `stop` an) und die Position
+        // rennt dabei durch den ausgenullten Ring. Wer diese Strecke
+        // in die Messung nimmt, misst, wie schnell Stille ist.
+        if p0 != 0 && p > p0 && p <= written {
+            p1 = p
+            t1 = t
+            k1 = kstate.get(state, kstate.TICKS)
+        }
+        if written >= want && audio.remaining(state) == 0 {
+            lauf = false
+        }
+        if got == 0 {
+            if load {
+                // RECHENLAST. Achttausend Umdrehungen einer Summe, die
+                // hinterher gedruckt wird -- der Uebersetzer kann sie
+                // deshalb nicht wegwerfen. Das ist ungefaehr die
+                // Arbeit, die ein Bilddekoder je Bild leistet, und
+                // genau in solchen Luecken laeuft ein Tonpuffer leer,
+                // wenn die Kette falsch ausgelegt ist.
+                var q: u64 = 0
+                while q < 8000 {
+                    burn = burn +% (q * 2654435761)
+                    q = q + 1
+                }
+            } else {
+                arch.pause()
+            }
+            if time.mono_ns(state) > deadline {
+                lauf = false
+            }
+        }
+    }
+    audio_drain(state)
+    audio.stop(state)
+    audio.close(state)
+    var s_dt: [u8; 9] = "pos_dtns\0"
+    var s_df: [u8; 8] = "pos_dfr\0"
+    var s_dk: [u8; 9] = "pos_dtck\0"
+    var s_bk: [u8; 9] = "pos_back\0"
+    var s_un: [u8; 10] = "pos_under\0"
+    var s_pl: [u8; 10] = "pos_polls\0"
+    var s_wr: [u8; 12] = "pos_written\0"
+    var s_bu: [u8; 9] = "pos_burn\0"
+    var s_di: [u8; 13] = "pos_disagree\0"
+    var dt: u64 = 0
+    var df: u64 = 0
+    var dk: u64 = 0
+    if t1 > t0 && p1 > p0 {
+        dt = t1 -% t0
+        df = p1 -% p0
+    }
+    if k1 > k0 {
+        dk = k1 -% k0
+    }
+    aud_num((&s_dt[0]) as u64, dt)
+    aud_num((&s_df[0]) as u64, df)
+    aud_num((&s_dk[0]) as u64, dk)
+    aud_num((&s_bk[0]) as u64, back + audio.backsteps(state))
+    aud_num((&s_un[0]) as u64, audio.underruns(state))
+    aud_num((&s_pl[0]) as u64, polls)
+    aud_num((&s_wr[0]) as u64, written)
+    aud_num((&s_bu[0]) as u64, burn & 0xFFFF)
+    var dis: u64 = 0
+    if audio.backend(state) == audio.B_HDA {
+        dis = hda.pos_disagree(state)
+    }
+    aud_num((&s_di[0]) as u64, dis)
+    last_ph = last_ph
+}
+
+// ========= ZUSAGE (e): MITTEN IN DER WIEDERGABE SCHLIESSEN
+//
+// Eine halbe Sekunde Ton anwerfen, NICHT leerspielen, und mitten hinein
+// schliessen. Danach muss gelten:
+//
+//   * der DMA steht (`running` ist falsch) -- sonst liest der Regler
+//     weiter in einem Ring, den niemand mehr fuellt, und bei HD-Audio
+//     wiederholt er dabei die letzten 85 ms fuer immer;
+//   * das Geraet ist wieder zu haben (`open` gelingt sofort danach) --
+//     sonst waere ein abgestuerztes Programm gleichbedeutend mit
+//     einem Rechner ohne Ton bis zum Neustart;
+//   * die Buchfuehrung faengt bei null an -- sonst truege der naechste
+//     Lauf die Position des vorigen weiter, und `samples_played` waere
+//     als Uhr fuer das zweite Stueck unbrauchbar.
+//
+// KEIN LECK: die Ringpuffer werden NICHT freigegeben. Das ist Absicht
+// und steht in `mix.open` begruendet -- vier feste Laeufe zu 16 KiB,
+// einmal geholt. Ein System, das bei jedem Programmstart vier
+// zusammenhaengende Rahmen holt und wieder freigibt, findet nach einer
+// Woche keine vier zusammenhaengenden mehr.
+fn audio_close(state: u64) {
+    audio.open(state)
+    let hz: u64 = audio.rate(state)
+    var written: u64 = 0
+    let want: u64 = hz / 2
+    let deadline: u64 = time.mono_ns(state) +% 5000000000
+    var lauf: bool = true
+    while lauf {
+        let got: u64 = audio.tone_push(state, AUD_HZ, AUD_AMP, want -% written)
+        written = written + got
+        audio.samples_played(state)
+        if written >= want {
+            lauf = false
+        }
+        if got == 0 {
+            arch.pause()
+            if time.mono_ns(state) > deadline {
+                lauf = false
+            }
+        }
+    }
+    // MITTEN IM LAUF. Nicht leerspielen, nicht warten.
+    let vor_pos: u64 = audio.samples_played(state)
+    let vor_rest: u64 = audio.remaining(state)
+    audio.close(state)
+    var lief: u64 = 0
+    if audio.backend(state) == audio.B_HDA {
+        if hda.running(state) {
+            lief = 1
+        }
+    }
+    if audio.backend(state) == audio.B_AC97 {
+        if ac97.running(state) {
+            lief = 1
+        }
+    }
+    var wieder: u64 = 0
+    if audio.open(state) {
+        wieder = 1
+    }
+    let neu_wr: u64 = audio.frames_written(state)
+    let neu_pos: u64 = audio.samples_played(state)
+    audio.close(state)
+    var n_vp: [u8; 9] = "cls_vpos\0"
+    var n_vr: [u8; 10] = "cls_vrest\0"
+    var n_ru: [u8; 12] = "cls_running\0"
+    var n_re: [u8; 11] = "cls_reopen\0"
+    var n_nw: [u8; 12] = "cls_written\0"
+    var n_np: [u8; 9] = "cls_npos\0"
+    var n_st: [u8; 11] = "cls_stops\0\0"
+    aud_num((&n_vp[0]) as u64, vor_pos)
+    aud_num((&n_vr[0]) as u64, vor_rest)
+    aud_num((&n_ru[0]) as u64, lief)
+    aud_num((&n_re[0]) as u64, wieder)
+    aud_num((&n_nw[0]) as u64, neu_wr)
+    aud_num((&n_np[0]) as u64, neu_pos)
+    var st: u64 = 0
+    if audio.backend(state) == audio.B_HDA {
+        st = hda.stops(state)
+    } else {
+        st = ac97.stops(state)
+    }
+    aud_num((&n_st[0]) as u64, st)
+}
+
+// DER BERICHT. Jede Zahl, die eine Zusage traegt, EINMAL gedruckt --
+// und zwar so, dass `tools/hda/run.sh` sie mit einem `grep` findet und
+// nicht aus einem Satz herausschneiden muss.
+fn audio_say(state: u64) {
+    var n_ready: [u8; 6] = "ready\0"
+    var n_back: [u8; 8] = "backend\0"
+    var n_rate: [u8; 5] = "rate\0"
+    var n_ch: [u8; 9] = "channels\0"
+    var n_bits: [u8; 5] = "bits\0"
+    var n_ent: [u8; 8] = "entries\0"
+    var n_ef: [u8; 12] = "entryframes\0"
+    var n_rf: [u8; 11] = "ringframes\0"
+    var n_lat: [u8; 10] = "latencyus\0"
+    var n_eus: [u8; 8] = "entryus\0"
+    var n_vol: [u8; 7] = "volume\0"
+    var n_mu: [u8; 6] = "muted\0"
+    var n_wr: [u8; 8] = "written\0"
+    var n_pd: [u8; 7] = "played\0"
+    var n_un: [u8; 10] = "underruns\0"
+    var n_bp: [u8; 6] = "beeps\0"
+    var n_sn: [u8; 7] = "sounds\0"
+    var n_why: [u8; 4] = "why\0"
+    var n_oc: [u8; 7] = "octets\0"
+    var n_wc: [u8; 7] = "writes\0"
+    var n_ir: [u8; 5] = "irqs\0"
+    var n_ia: [u8; 9] = "irqarmed\0"
+    var n_st: [u8; 8] = "streams\0"
+    aud_num((&n_ready[0]) as u64, 1)
+    aud_num((&n_back[0]) as u64, audio.backend(state))
+    aud_num((&n_rate[0]) as u64, audio.rate(state))
+    aud_num((&n_ch[0]) as u64, audio.channels(state))
+    aud_num((&n_bits[0]) as u64, audio.bits(state))
+    aud_num((&n_rf[0]) as u64, audio.ring_frames(state))
+    aud_num((&n_lat[0]) as u64, audio.latency_us(state))
+    aud_num((&n_eus[0]) as u64, audio.entry_us(state))
+    aud_num((&n_vol[0]) as u64, audio.volume(state))
+    var mu: u64 = 0
+    if audio.muted(state) {
+        mu = 1
+    }
+    aud_num((&n_mu[0]) as u64, mu)
+    aud_num((&n_wr[0]) as u64, audio.frames_written(state))
+    aud_num((&n_pd[0]) as u64, audio.samples_played(state))
+    aud_num((&n_un[0]) as u64, audio.underruns(state))
+    aud_num((&n_bp[0]) as u64, audio.beeps(state))
+    var sn: u64 = 0
+    if audio.sounds_on(state) {
+        sn = 1
+    }
+    aud_num((&n_sn[0]) as u64, sn)
+    aud_num((&n_why[0]) as u64, audio.why(state))
+    aud_num((&n_oc[0]) as u64, audio.octets_written(state))
+    aud_num((&n_wc[0]) as u64, audio.writes(state))
+    aud_num((&n_st[0]) as u64, mix.streams(state))
+
+    // Die Zahlen des Treibers, der wirklich unten steht. Sie stehen
+    // AUSEINANDER und nicht in einer gemeinsamen Zeile: `hda_` und
+    // `ac97_` sind zwei verschiedene Chips mit zwei verschiedenen
+    // Fehlerbildern, und ein Testlaeufer, der sie unterscheiden kann,
+    // sagt "der Codec meldet sich nicht" statt "kein Ton".
+    if audio.backend(state) == audio.B_HDA {
+        var h_ent: [u8; 12] = "hda_entries\0"
+        var h_ef: [u8; 16] = "hda_entryframes\0"
+        var h_sb: [u8; 12] = "hda_submits\0"
+        var h_sa: [u8; 11] = "hda_starts\0"
+        var h_cd: [u8; 14] = "hda_codecaddr\0"
+        var h_wd: [u8; 12] = "hda_widgets\0"
+        var h_dc: [u8; 8] = "hda_dac\0"
+        var h_pn: [u8; 8] = "hda_pin\0"
+        var h_pl: [u8; 12] = "hda_pathlen\0"
+        var h_cp: [u8; 13] = "hda_cmdpath\0\0"
+        var h_cf: [u8; 14] = "hda_cmdfails\0\0"
+        var h_sd: [u8; 11] = "hda_stream\0"
+        var h_tg: [u8; 8] = "hda_tag\0"
+        var h_ve: [u8; 11] = "hda_vendor\0"
+        var h_de: [u8; 11] = "hda_device\0"
+        var h_di: [u8; 13] = "hda_disagree\0"
+        var h_lp: [u8; 9] = "hda_lpib\0"
+        var h_dp: [u8; 9] = "hda_dpib\0"
+        var h_ir: [u8; 9] = "hda_irqs\0"
+        aud_num((&h_ent[0]) as u64, hda.entries(state))
+        aud_num((&h_ef[0]) as u64, hda.entry_frames(state))
+        aud_num((&h_sb[0]) as u64, hda.submits(state))
+        aud_num((&h_sa[0]) as u64, hda.starts(state))
+        aud_num((&h_cd[0]) as u64, hda.codec_addr(state))
+        aud_num((&h_wd[0]) as u64, hda.widgets(state))
+        aud_num((&h_dc[0]) as u64, hda.dac_nid(state))
+        aud_num((&h_pn[0]) as u64, hda.pin_nid(state))
+        aud_num((&h_pl[0]) as u64, hda.path_len(state))
+        aud_num((&h_cp[0]) as u64, hda.cmd_path(state))
+        aud_num((&h_cf[0]) as u64, hda.cmd_fails(state))
+        aud_num((&h_sd[0]) as u64, hda.out_stream(state))
+        aud_num((&h_tg[0]) as u64, hda.stream_tag(state))
+        aud_num((&h_ve[0]) as u64, hda.vendor(state))
+        aud_num((&h_de[0]) as u64, hda.device(state))
+        aud_num((&h_di[0]) as u64, hda.pos_disagree(state))
+        aud_num((&h_lp[0]) as u64, hda.lpib(state))
+        aud_num((&h_dp[0]) as u64, hda.dpib(state))
+        aud_num((&h_ir[0]) as u64, hda.irqs(state))
+    }
+    if audio.backend(state) == audio.B_AC97 {
+        var a_ent: [u8; 13] = "ac97_entries\0"
+        var a_ef: [u8; 17] = "ac97_entryframes\0"
+        var a_sb: [u8; 13] = "ac97_submits\0"
+        var a_sa: [u8; 12] = "ac97_starts\0"
+        var a_mr: [u8; 15] = "ac97_masterreg\0"
+        var a_pr: [u8; 12] = "ac97_pcmreg\0"
+        var a_cd: [u8; 11] = "ac97_codec\0"
+        var a_dh: [u8; 9] = "ac97_dch\0"
+        var a_vr: [u8; 9] = "ac97_vra\0"
+        var a_ir: [u8; 10] = "ac97_irqs\0"
+        aud_num((&a_ent[0]) as u64, ac97.entries(state))
+        aud_num((&a_ef[0]) as u64, ac97.entry_frames(state))
+        aud_num((&a_sb[0]) as u64, ac97.submits(state))
+        aud_num((&a_sa[0]) as u64, ac97.starts(state))
+        aud_num((&a_mr[0]) as u64, ac97.master_reg(state))
+        aud_num((&a_pr[0]) as u64, ac97.pcm_reg(state))
+        var cd: u64 = 0
+        if ac97.codec_ready(state) {
+            cd = 1
+        }
+        aud_num((&a_cd[0]) as u64, cd)
+        aud_num((&a_dh[0]) as u64, ac97.dch_seen(state))
+        var vr: u64 = 0
+        if ac97.vra(state) {
+            vr = 1
+        }
+        aud_num((&a_vr[0]) as u64, vr)
+        aud_num((&a_ir[0]) as u64, ac97.irqs(state))
+    }
+    var ia: u64 = 0
+    if audio.backend(state) == audio.B_HDA {
+        if hda.irq_armed(state) {
+            ia = 1
+        }
+    } else {
+        if ac97.irq_armed(state) {
+            ia = 1
+        }
+    }
+    aud_num((&n_ia[0]) as u64, ia)
+    aud_num((&n_ir[0]) as u64, 0)
+    aud_num((&n_ent[0]) as u64, 0)
+    aud_num((&n_ef[0]) as u64, 0)
 }

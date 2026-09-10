@@ -463,7 +463,7 @@ set_edge() { # edge
         "$1" > "$TMPD/taskbar.conf"
 }
 
-# ROUND MERGE: 8192 blocks and not 4096. The fourteen programs of this
+# ROUND MERGE8: 16384 blocks (was 8192, before that 4096). The fourteen programs of this
 # graphical image have grown past the two mebioctets that were an OFS
 # disk's ceiling before round OFS3 -- every one of them links ulib,
 # tools, wlib and the libc, and those grew with every round. `mkfs.py`
@@ -472,7 +472,7 @@ set_edge() { # edge
 # as in tools/userland/run.sh and tests/theme/build.sh.
 mk_gimage() { # image theme-file
     local img=$1 th=$2
-    local ARGS=(build "$img" 8192 /lib/
+    local ARGS=(build "$img" 16384 /lib/
         "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
     local q
     for q in $GPROGS; do ARGS+=("/bin/$q=$TMPD/g$q.elf"); done
@@ -484,7 +484,7 @@ mk_gimage() { # image theme-file
              tile-fake tile-net tile-hide; do
         ARGS+=("/etc/netview/$q=$TMPD/icons/$q")
     done
-    while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel")
+    while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel" nur="$PROGS")
     while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
     python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfsg.txt" 2>&1
 }

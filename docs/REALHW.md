@@ -59,6 +59,36 @@ macht, steht es in der Zeile.
 
 ---
 
+## NACHTRAG 30.08.2026 -- DIE ZEILE "WLAN"
+
+Die Zeile **WLAN** in der Tabelle oben sagt in allen drei Spalten
+dasselbe: nichts, nichts, "ALLES: 802.11-MAC, Firmwareladen, Netzwahl,
+WPA2/3-Supplicant, Regulatorik". Runde WLAN (Zweig `wlan`, 30.08.2026)
+hat davon einen Teil abgearbeitet, und die Zeile ist deshalb so zu
+lesen:
+
+| | |
+|---|---|
+| **Was es jetzt gibt** | `lib/wlan/` (Rahmen, Beacon, Kanal/Regulatorik, WPA-Handschlag, CCMP, Zustandsautomat) und `lib/crypto/sha1.fi` + `lib/crypto/aes.fi`. Zusammen 3.842 Zeilen, 184 Zusagen gruen (`tools/wlan/run.sh`, Abschnitt 32) |
+| **Was weiter fehlt** | **DER TREIBER.** PCI-Anbindung, Firmwareladen, Kommando- und Empfangsringe, Interrupts, die Kommando-API der Firmware. Dazu SAE (die WPA3-Anmeldung) und 802.11w |
+| **Was das heisst** | **Osum verbindet sich NICHT mit einem WLAN.** Es gibt keine Karte, die es ansprechen koennte |
+
+**UND DER SATZ, DER DAZUGEHOERT:** das Fehlende laesst sich auf diesem
+Rechner nicht einmal ansatzweise pruefen. QEMU 7.2.22 hat **NULL**
+802.11-Geraete -- gemessen mit `qemu-system-x86_64 -device help`, und
+`tools/wlan/run.sh` misst es bei jedem Lauf neu nach. Der naechste
+Schritt ist deshalb nicht "den Treiber schreiben", sondern **eine
+AX200-Karte in Reichweite dieses Rechners bringen**; sonst waere der
+Treiber genau die Art von Behauptung, die Runde HWNET beim RTL8168 zu
+Recht abgelehnt hat (siehe den Abschnitt darueber weiter unten).
+
+Alles Weitere -- welche Chips, welche Firmware unter welcher Lizenz,
+wieviele Zeilen der Treiber realistisch hat, was in QEMU pruefbar ist
+und was nicht, und wie weit der Weg damit wirklich ist -- steht in
+**`docs/WLAN-BEFUND.md`**.
+
+---
+
 ## WIE DIESE ZAHLEN ZUSTANDE KAMEN
 
 * Netzwerktreiber vorher: `grep -rln 'e1000\|8139\|rtl8\|igb\|ixgbe' --include=*.fi kernel/` → nur `nvme.fi`, `pci.fi`, `virtio.fi`, und in den ersten beiden sind es Konstanten. Netzkartentreiber: **genau einer**.
@@ -1051,3 +1081,38 @@ Bericht **buchstäblich derselbe** ist wie bei USB -- dieselbe Funktion.
 Sie ist höher als „USB generisch", weil dort eine Tastatur ohne
 Anschlagsgrenze mit 128 Bit gemessen wird und nicht eine mit 64.
 
+
+## Ton (Runde HDA, 30.08.2026)
+
+**Was gemessen ist:** `kernel/hda.fi` hat mit GENAU EINEM Codec geredet --
+QEMUs `hda-duplex` (0x1af4:0x0022), vier Knoten, ein Wandler, eine
+Buchse, Weglaenge 2. Alles, was unten ueber ein Brett steht, ist eine
+Aussage ueber die Spezifikation (Intel High Definition Audio 1.0a) und
+NICHT ueber gemessene Hardware.
+
+**Was auf echtem Blech trotzdem fehlen kann:**
+
+| Punkt | Was passiert | Woran man es erkennt |
+|---|---|---|
+| Buchsenbelegung leer oder falsch | der Treiber waehlt eine Buchse, aus der nichts kommt | `audgraph` drucken: `cfg=` ist 0x00000000 oder `punkt=1` bei allen |
+| EAPD ueber GPIO statt ueber Verb 0x70C | alles richtig eingestellt, Lautsprecher bleibt still | `audgraph`: die Buchse hat PINCAP Bit 16 nicht |
+| Kopfhoererbuchse | wird beim Aufsetzen einmal gewaehlt; Einstecken im Betrieb schaltet nicht um | fehlende unaufgeforderte Antworten |
+| zwei analoge Codecs | der erste mit einem Weg gewinnt -- das kann der falsche sein | `hda_codecaddr` im Bericht |
+| Regler ohne DMA-Positionspuffer | wird ERKANNT und auf LPIB umgeschaltet | `posfix` = 1 |
+| nur MSI, keine Leitung im I/O-APIC | bleibt abfragend | `irqarmed` = 0 -- der Ton laeuft trotzdem (Gegenprobe `noaudirq`) |
+| `SDnFIFOS`/`SDnFIFOW` | Vorgabewerte, nicht angefasst | Knacken bei knappem FIFO |
+| HDMI/DisplayPort | wird UEBERSPRUNGEN (digitale Knoten) | kein Ton am Bildschirm |
+| Aufnahme | nicht gebaut | -- |
+
+**Die drei Zahlen, die man auf einem fremden Brett zuerst ansieht**
+(`osum audio audgraph audsay`):
+
+```
+hda: statests 0x....     welche Codecs sich melden
+hda: codec 0 p=1 w=1 c=1 p = antwortet, w = Graph gelesen, c = Weg gefunden
+hda: bereit ... dac=N pin=M len=L
+```
+
+Bleibt `c=0`, ist der Graph gelesen und kein Weg zu einer analogen Buchse
+gefunden -- dann sagt `hda-graph:` Knoten fuer Knoten, was der Codec
+anbietet und wie die Buchsen bewertet wurden.

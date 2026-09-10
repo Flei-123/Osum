@@ -62,6 +62,8 @@ import kstate
 import mem
 import font
 import fb
+// RUNDE MESSTAFEL: die Fensterliste geht auf die serielle Leitung.
+import serial
 // RUNDE NETVIEW, NACHTRAG: die einzigen zwei Zeilen, die diese Runde
 // in den Fensterserver legt. `netview` sagt, welche Netzsicht der
 // Besitzer eines Fensters hat, `netmark` traegt das Zeichen dafuer.
@@ -70,18 +72,26 @@ import netmark
 import ttf
 import utf8
 import ps2m
+import time // RUNDE ALLTAG: der Leerlaufzaehler der Sperre
 import arch.arch
 import tile
+import zeiger
+import vektor
+import audio
 
 export {
+    sperre_an, sperrer, sperr_platz, darf, eingabe_gesehen,
     init, ready, compose, damage, damage_all, dirty_x0, dirty_y0,
     dirty_x1, dirty_y1,
     create, destroy, valid, count, focus, set_focus, raise_win,
+    // RUNDE BLECHFUENF: der Schliessweg des Kreuzes, von aussen rufbar.
+    close_top, close_term, top_visible, kreuz_punkt, term_win,
     move_win, resize_win, win_x, win_y, win_w, win_h, win_z, win_buf,
     win_owner, win_kind, win_id, outer_w, outer_h,
     win_layer, set_layer, win_hidden, set_hidden, win_deco, set_deco,
     win_title, by_id, hides, shows, top_visible, deko, inx, iny,
     set_nolayer, set_nomin, nolayer, nomin,
+    panel_win, mess_zeilen,
     set_strut, win_strut_edge, win_strut_size, work_x, work_y, work_w,
     work_h, recalc_work, maximize, is_max, struts, workcalcs,
     set_nostrut, nostrut,
@@ -92,28 +102,57 @@ export {
     shadow_builds, set_shadow_old, cap_hover, cap_hits,
     CAP_MIN, CAP_MAX, CAP_CLOSE,
     FORM_SLOTS, FM_RADIUS, FM_SHADOW, FM_SHADOW_R, FM_SHADOW_C,
-    FM_SHADOW2, FM_SHADOW_R2, FM_GRAD, FM_CAPTION,
+    FM_SHADOW2, FM_SHADOW_R2, FM_GRAD, FM_CAPTION, FM_MOTION,
     RADIUS_MAX, SHADOW_MAX,
     DK_FRAME, DK_TITLE, DK_TEXT, DK_FRAME_ON, DK_TITLE_ON, DK_TEXT_ON,
     DK_CLOSE, DK_CLOSE_MARK, DK_DESK, DK_TERM_FG, DK_TERM_BG,
+    // RUNDE VSYNC: die Bildgrenze, die Bewegung und die Zerreissprobe.
+    present, set_vsync, vsync_on, presents, skipped, pending,
+    // RUNDE SCHNELLBILD: die Summe der uebertragenen Bildpunkte.
+    pxsum,
+    anim_start, anim_tick, anim_laeuft, anims, anim_frames, anim_ticks,
+    set_noanim, close_anim, minimize_anim, open_anim,
+    set_sig, sig_on, frame_no, sig_colour,
+    set_leser, leser_tick, liest, risse, riss_oben, riss_unten, ohne_sig,
+    riss_y0, riss_y1, riss_frame, verworfen,
+    vor_t0, set_vor_t0, vor_step, set_vor_step, vor_win, set_vor_win,
+    AN_OPEN, AN_CLOSE, AN_MIN, MOTION_DEF, SIG_H,
     fill, text, blit_in, flush_win, hit,
     ev_push, ev_pop, ev_waiting,
     on_mouse, on_key, term_write, term_out, term_cols, term_rows, term_cx, term_cy,
-    bind_tty, key_tty, tty_of, NO_TTY,
+    bind_tty, key_tty, tty_of, NO_TTY, term_outs, term_puts_n,
+    term_dump,
     poll, composites, blits, pixels, last_us, cursor_on, set_cursor,
-    shape, set_shape,
+    // RUNDE VEKTOR: die Bildzeit, damit die Abnahme sie holen kann.
+    frame_us_sum, frame_us_n, frame_us_max, frame_us_last, frame_ueber16,
+    frame_fach, frame_us_maxw, frame_ueber16w,
+    cap_glyph_treffer, cap_glyph_bauten,
+    shape, set_shape, set_keys,
     downs, moves_seen, hits_seen, win_keys,
     set_fonts, font_ui, font_mono, px_ui, px_mono,
     selftest, selftest_max, failbits, diag1, diag2,
     tile_on, set_tile_on, tile_take, tile_release, tile_apply,
     tile_node, tile_float, tile_snap, tile_action, hotkeys, hotkeys_seen,
+    kachelbar,
     on_screen_resize, win_tabbed, tiled,
     MAX_WIN, K_RAW, K_TERM, title_h, border, grip, max_w, max_h,
+    titel_beschnitten, titel_fehlt,
     set_uiscale, uisc, messleiste,
+    // RUNDE MESSTAFEL
+    mess_grund, messzeile, messhoehe, messk,
+    mess_gruen, mess_rot, mess_weiss, mess_gelb, mess_ampel,
+    evpush, evpop, keyin, curx, cury, evdrops, evkoal, evterm, titel_alt,
+    win_paints, win_px, win_flags, top_layer_win, wins_say,
     MAX_W_HARD, MAX_H_HARD,
     E_KEY, E_DOWN, E_UP, E_MOVE, E_CLOSE, E_FOCUS, E_RESIZE,
-    L_DESK, L_NORMAL, L_TOP, F_HIDDEN, F_NODECO, F_TABBED,
-    EDGE_BOTTOM, EDGE_TOP, EDGE_LEFT, EDGE_RIGHT, F_MAXIMIZED
+    M_SHIFT, M_CTRL,
+    L_DESK, L_NORMAL, L_TOP, L_MENUE, L_POPUP, L_TIP, L_MAX,
+    F_HIDDEN, F_NODECO, F_TABBED, F_KEYS,
+    EDGE_BOTTOM, EDGE_TOP, EDGE_LEFT, EDGE_RIGHT, F_MAXIMIZED,
+    // RUNDE BLECHZWEI: wie breit die Tafel wirklich ist, und wo eine
+    // einzelne Zeile steht -- damit nur SIE uebertragen werden muss.
+    mess_breite, messzeile_y, messzeile_x, messzeile_h,
+    mess_vollbreite, mess_kol
 }
 
 // ------------------------------------------------------- die Zahlen
@@ -133,6 +172,9 @@ const EV_OFF: u64 = 0x2000 // die Ereignisringe, ebenfalls in DSK_OFF
 const EV_SLOTS: u64 = 32
 const EV_BYTES: u64 = 16
 const EV_RING: u64 = 512 // EV_SLOTS * EV_BYTES
+// RUNDE ECHTHARDWARE-6: so viele Ringverluste werden EINZELN gemeldet,
+// danach nur noch gezaehlt. Siehe die Begruendung bei `ev_push`.
+const VERL_SAGEN: u64 = 32
 
 // RUNDE SCHIRM -- DIESE VIER ZAHLEN WAREN BILDPUNKTE UND SIND JETZT
 // GRUNDMASSE. Eine Titelleiste von 22 Bildpunkten ist auf 1024x768 eine
@@ -143,7 +185,11 @@ const EV_RING: u64 = 512 // EV_SLOTS * EV_BYTES
 // Oktett 21) oder, wenn die Tafel dazu schweigt, aus ihrer Bildpunktzahl.
 const TITLE_H0: u64 = 22 // die Titelleiste
 const BORDER0: u64 = 2 // der Rand links, rechts und unten
-const GRIP0: u64 = 12 // das Feld unten rechts zum Groessenaendern
+// RUNDE ECHTHARDWARE-3: 12 -> 8, aber jetzt am GANZEN Rand statt nur
+// in der Ecke. Multipliziert mit `uisc` sind das auf Justins Schirm 16
+// Bildpunkte Rand -- breit genug zum Treffen, schmal genug, dass ein
+// Klick in die Flaeche noch ein Klick in die Flaeche ist.
+const GRIP0: u64 = 8 // der Rand, an dem die Groesse gezogen wird
 const CLOSE_W0: u64 = 14
 
 const K_RAW: u64 = 0 // die Anwendung malt selbst
@@ -187,7 +233,34 @@ const MAX_H_HARD: u64 = 2304
 // Klick nach vorn und verdeckt alles.
 const L_DESK: u64 = 0 // der Schreibtisch, immer ganz hinten
 const L_NORMAL: u64 = 1 // gewoehnliche Anwendungen
-const L_TOP: u64 = 2 // die Taskleiste, immer ganz vorn
+const L_TOP: u64 = 2 // die Taskleiste
+// ================================================== RUNDE ECHTHARDWARE-3
+// DREI EBENEN WAREN ZU WENIG, UND DAS IST DIE WURZEL MEHRERER FEHLER.
+//
+// Justins Befund vom 09.09.: der Tooltip verschwindet HINTER der
+// Taskleiste, das Kontextmenue ist ein echtes Fenster mit Titelleiste
+// und Kreuz, und das Startmenue ueberlappt die Leiste. Alle drei sind
+// dasselbe Problem: es gab nur `L_TOP`, und wer dort hin musste, lag
+// mit der Leiste auf EINER Ebene -- die Reihenfolge entschied dann,
+// wer spaeter angelegt wurde, und das ist keine Ordnung, sondern ein
+// Zufall.
+//
+// DIE ORDNUNG, VON UNTEN NACH OBEN, und sie ist ab hier eine ZUSAGE:
+//
+//     L_DESK    0  Schreibtisch
+//     L_NORMAL  1  gewoehnliche Fenster und Dialoge
+//     L_TOP     2  die Taskleiste
+//     L_MENUE   3  Startmenue/Ueberlagerung -- ueber der Leiste
+//     L_POPUP   4  Klappmenues und Kontextmenues
+//     L_TIP     5  Blasen, ueber ALLEM
+//
+// Die Zahlen 0..2 bleiben, was sie waren: jedes Programm, das `L_TOP`
+// sagt, meint weiter die Leiste und liegt weiter dort. Neu ist nur,
+// dass ueber ihr noch etwas sein KANN.
+const L_MENUE: u64 = 3 // Startmenue: ueber der Leiste, unter den Menues
+const L_POPUP: u64 = 4 // Klapp- und Kontextmenue
+const L_TIP: u64 = 5 // die Blase, ueber allem
+const L_MAX: u64 = 5
 
 // Die Merkmale eines Fensters.
 //   F_HIDDEN  minimiert: es wird nicht zusammengesetzt und nimmt keinen
@@ -207,6 +280,22 @@ const F_MAXIMIZED: u64 = 4
 // dasselbe wie F_HIDDEN (minimiert): ein Klick auf den Reiter holt es
 // zurueck, ein Klick auf den Fensterknopf der Leiste nicht.
 const F_TABBED: u64 = 8
+
+// ============================================ RUNDE ECHTHARDWARE-1
+// EIN FENSTER DER OBERSTEN EBENE, DAS DIE TASTATUR TROTZDEM WILL.
+//
+// Justins Befund vom 09.09.: im Startmenue laesst sich nichts tippen.
+// Die Ursache ist eine Regel, die fuer die Taskleiste richtig ist und
+// fuer das Startmenue falsch: `on_mouse` gibt den Fokus NUR an
+// Fenster der Ebene L_NORMAL (Runde DESKTOP -- "ein Schreibtisch, der
+// den Fokus an sich zieht, macht jeden Tastendruck danach
+// wirkungslos"). Der Starter liegt aber auf L_TOP, weil er UEBER allem
+// stehen muss -- und bekam damit nie eine Taste.
+//
+// Die Ebene zu wechseln waere die falsche Abhilfe: dann verschwindet
+// das Menue hinter Fenstern. Also sagt das Fenster selbst, was es
+// will. Vorgabe ist NEIN, also bleibt die Leiste, was sie war.
+const F_KEYS: u64 = 16
 
 // ADDENDUM TASKBAR: the four screen edges. The numbers are written to
 // /etc/taskbar.conf as words ("bottom", "top", "left", "right") and
@@ -285,6 +374,18 @@ const S_WORK_H: u64 = 0x158
 const S_NOSTRUT: u64 = 0x160 // COUNTER-TEST: ignore every strut
 const S_STRUTS: u64 = 0x168 // how often a strut was declared or cleared
 const S_WORKCALC: u64 = 0x170 // how often the work area was recomputed
+// ============================================ RUNDE ECHTHARDWARE-4
+// WELCHE FORM DIE ANWENDUNG WOLLTE.
+//
+// Ab dieser Runde setzt der Server selbst eine Form, sobald der Zeiger
+// ueber einem Fensterrand steht (Doppelpfeil), und nimmt sie zurueck,
+// sobald er ihn verlaesst. "Zuruecknehmen" heisst aber nicht "Pfeil":
+// eine Anwendung, die ueber ihrem Textfeld die Textmarke gesetzt hat
+// (`wig.set_shape` aus Ring 3), bekaeme sonst bei jeder Mausbewegung
+// den Pfeil zurueck und die Marke waere nie zu sehen. Also stehen die
+// beiden Wuensche NEBENEINANDER: was die Anwendung will, und was der
+// Rand gerade verlangt.
+const S_SHAPE_APP: u64 = 0x178
 // RUNDE TILING. Die Skalare des Kachelbetriebs. Sie lagen bei 0x120,
 // wo die Runden DESKTOP und TASKLEISTE zusammen schon elf Woerter
 // stehen haben -- zwei Runden auf denselben Adressen. Sie zogen
@@ -357,6 +458,30 @@ const S_DRAGT: u64 = 0x248 // das gezogene Fenster kam AUS dem Baum
 const S_HOTS: u64 = 0x250 // wie viele Tastenkuerzel ausgefuehrt wurden
 const S_ACTS: u64 = 0x258 // wie viele davon wirklich etwas getan haben
 
+// ===================================== RUNDE MESSTAFEL: DER EINGABEWEG
+//
+// Drei Zaehler, die es vorher nicht gab, und jeder beantwortet GENAU
+// eine Frage aus Justins Kette "wo bleibt mein Tastendruck":
+//
+//   S_KEYIN   wie oft `on_key` gerufen wurde -- also wie viele Tasten
+//             der FENSTERSERVER entgegengenommen hat. Vorher war das
+//             nicht zu sehen: `usb.hid_keys` zaehlt, was `hidin` an
+//             `kbd` gab, und danach klaffte eine Luecke bis zum Fenster.
+//   S_EVPUSH  wie viele Ereignisse in einen Fensterring GELEGT wurden.
+//   S_EVPOP   wie viele ein RING-3-PROGRAMM daraus ABGEHOLT hat.
+//
+// Das letzte Paar ist der Kern der Sache. Stehen beide hoch, arbeitet
+// der Schreibtisch. Laeuft `S_EVPUSH` hoch und `S_EVPOP` bleibt null,
+// dann liefert der Kern und NIEMAND holt ab -- dann laeuft kein
+// Ring-3-Prozess mehr, und das erklaert die tote Eingabe UND die
+// unsichtbare Taskleiste mit EINER Ursache statt mit zweien.
+//
+// Die Luecke 0x260..0x278 war frei; `tools/paint/scalars.py` prueft das
+// mechanisch nach und ist nach dieser Aenderung gelaufen.
+const S_EVPUSH: u64 = 0x260 // Ereignisse in einen Fensterring gelegt
+const S_EVPOP: u64 = 0x268 // Ereignisse von einem Programm abgeholt
+const S_KEYIN: u64 = 0x270 // Tasten, die der Fensterserver annahm
+
 // ---------------------------------------------------- RUNDE THEME
 //
 // DIE ACHT FARBEN DER FENSTERDEKORATION, und der Grund, warum sie hier
@@ -383,6 +508,28 @@ const S_ACTS: u64 = 0x258 // wie viele davon wirklich etwas getan haben
 // RECHNUNG neben der Konstante und nicht als Zahl im Kommentar.
 const S_DECO: u64 = 0x180 // DECO_SLOTS Woerter
 const S_DECON: u64 = 0x1D8 // wie oft ein Wert gesetzt wurde
+// ============================================ RUNDE ECHTHARDWARE-4
+// WER DEN FOKUS VORHER HATTE.
+//
+// GEMESSEN an menue-2560/serial.txt dieser Runde:
+//     wm: fokus id=11 vor=7      <- das Startmenue bekommt ihn
+//     taskbar: startmenue auf
+//     wm: fokus id=12 vor=11     <- eine INFOBLASE bekommt ihn
+//     wm: fokus id=7 vor=0       <- die Blase geht, und er faellt
+//                                   auf das Anwendungsfenster
+//     key: ^[                    <- Escape geht ins Leere
+//
+// Eine Blase ("Start", `wlib.tip_win_open`) wird als gewoehnliches
+// Fenster angelegt und bekommt dabei den Fokus; ERST DANACH setzt sie
+// ihre Ebene auf L_TIP, und `set_layer` gibt den Fokus dann an
+// `top_visible` -- das ist das oberste NORMALE Fenster und nicht das,
+// das ihn vorher hatte. Das Startmenue war ihn damit los, ohne dass
+// jemand es angeklickt haette, und Escape kam nie bei ihm an.
+//
+// Also merkt sich der Server, wer ihn zuletzt hatte, und gibt ihn
+// DORTHIN zurueck. Das ist dieselbe Regel, die jedes Fenstersystem
+// fuer transiente Fenster hat.
+const S_FOCUS_PREV: u64 = 0x1E0
 const DECO_SLOTS: u64 = 11
 
 // ==================================================== RUNDE PAINT
@@ -431,6 +578,18 @@ const S_CAPHITS: u64 = 0x2E0
 // RUNDE SCHIRM: die Vervielfachung des Fensterschmucks. 0 heisst "noch
 // nicht gesetzt" und wird als 1 gelesen.
 const S_UISC: u64 = 0x2E8 // wie oft eine davon geklickt wurde
+// ====================================================== RUNDE BLECH2
+// ZWEI ZAEHLER FUER DEN EREIGNISRING, siehe `ev_push`:
+//   S_EVKOAL -- Bewegungen, die in ein NOCH NICHT ABGEHOLTES E_MOVE
+//               desselben Fensters zusammengefasst wurden. Das ist
+//               kein Verlust: die Anwendung bekommt die letzte Stelle,
+//               und genau die will sie.
+//   S_EVTERM -- Ereignisse an das Terminalfenster des KERNS, das
+//               keinen Abholer in Ring 3 hat. Sie werden gezaehlt und
+//               nicht eingereiht -- vorher fielen sie nach 32 Stueck
+//               als VERL aus dem Ring (Justins 1283).
+const S_EVKOAL: u64 = 0x2F0
+const S_EVTERM: u64 = 0x2F8
 // DIE MASKE SELBST. Zwei Baenke -- aktiv und unscharf -- mal
 // SHMASK_SIDE^2 Oktette. 40 ist RADIUS_MAX + SHADOW_MAX, also die
 // groesste Ecke, die dieser Server ueberhaupt malen darf.
@@ -439,8 +598,238 @@ const S_SHEDGE: u64 = 0x1080 // 32 Oktette
 const S_FAIL: u64 = 0x10A8 // Bitmaske
 const S_DIAG1: u64 = 0x10B0 // Diagnose des Selbsttests
 const S_DIAG2: u64 = 0x10B8 // Bitmaske der NICHT bestandenen Zusagen
+
+// ================== RUNDE VSYNC: DIE BILDGRENZE UND DIE BEWEGUNG
+//
+// Bis hierher rief `compose` am Ende `fb.flush`, und `flush` uebertrug
+// die schmutzigen Zeilen SOFORT. Bei einer Bewegung liegen zwischen zwei
+// Mauspaketen aber mehrere `compose`-Laeufe, und jeder davon schob seinen
+// Streifen einzeln auf die Karte. Wer in diesem Augenblick abliest --
+// der Bildaufbau des Schirms tut es staendig --, sieht die obere Haelfte
+// des Fensters aus dem einen und die untere aus dem naechsten Zustand.
+// Das ist das Reissen, und es entsteht NICHT durch einen fehlenden
+// Rueckpuffer (den gibt es seit Runde SCHIRM), sondern durch die
+// FEHLENDE BILDGRENZE: es war nie gesagt, welche Zeichenschritte
+// zusammen EIN Bild sind.
+//
+// Also wird die Uebertragung von der Zeichnung getrennt:
+//
+//   `compose`  zeichnet in den Rueckpuffer und merkt den Bereich vor.
+//   `present`  uebertraegt EINMAL, im Zeitgebertakt.
+//
+// S_VSYNC schaltet das an, S_PEND sammelt das Rechteck ueber mehrere
+// `compose`-Laeufe hinweg. `nopresent` ist die Gegenprobe: dann geht es
+// wieder den alten Weg, und die Zerreissprobe MUSS fehlschlagen.
+const S_VSYNC: u64 = 0x10C0 // 1 = Uebertragen erst im Tick
+const S_PEND: u64 = 0x10C8 // 1 = es liegt ein ungezeigtes Bild
+const S_PX0: u64 = 0x10D0 // das gesammelte Rechteck
+const S_PY0: u64 = 0x10D8
+const S_PX1: u64 = 0x10E0
+const S_PY1: u64 = 0x10E8
+const S_PRESENTS: u64 = 0x10F0 // wie oft wirklich uebertragen wurde
+const S_SKIPPED: u64 = 0x10F8 // Zeichnungen ohne eigene Uebertragung
+// DIE ZERREISSPROBE. Jedes Bild bekommt eine Nummer; malt der Server im
+// Signaturbetrieb, faerbt er den oberen und den unteren Rand JEDES
+// Fensters mit einer Farbe, die aus dieser Nummer faellt. Ein
+// Bildschirmfoto, das im selben Fenster ZWEI verschiedene Signaturen
+// zeigt, hat ein halb uebertragenes Bild erwischt -- und genau das ist
+// Reissen, sichtbar gemacht.
+const S_SIG: u64 = 0x1100 // 1 = Signaturbetrieb
+const S_FRAME: u64 = 0x1108 // die laufende Bildnummer
+// DIE BEWEGUNG BEIM OEFFNEN UND SCHLIESSEN. Vier Zahlen je Fenster
+// liegen im Fenstersatz (W_AN*), hier stehen nur die Zaehler und der
+// Takt. Die Zeiten kommen aus den Formmarken (FM_MOTION) und nicht aus
+// eigenen Konstanten -- DESIGN-2 hat sie in wlib gesetzt, und zwei
+// Wahrheiten ueber dieselbe Dauer waeren eine zu viel.
+// DER ABLESER DER ZERREISSPROBE. Er tut, was ein Bildschirm tut: er
+// liest den VORDERPUFFER, oben und unten, und vergleicht die beiden
+// Signaturen. Sind sie verschieden, hat er ein halb uebertragenes Bild
+// erwischt -- und genau das ist Reissen.
+const S_LESER: u64 = 0x1130 // 1 = der Ableser laeuft
+const S_LIEST: u64 = 0x1138 // wie oft abgelesen wurde
+const S_RISS: u64 = 0x1140 // wie oft es dabei nicht zusammenpasste
+const S_LX: u64 = 0x1148 // wo abgelesen wird (Fenstermitte)
+const S_LY0: u64 = 0x1150 // die obere Zeile
+const S_LY1: u64 = 0x1158 // und die untere
+const S_R0: u64 = 0x1160 // die erste beobachtete Signatur oben, +1
+const S_R1: u64 = 0x1168 // und die untere, +1
+const S_KEIN: u64 = 0x1170 // Ablesungen ohne Signatur an einer Stelle
+const S_LPAAR: u64 = 0x1178 // zwei Woerter: die beiden abgelesenen Punkte
+const S_LFEST: u64 = 0x1188 // 1 = die Ablesestelle steht fest
+const S_RY0: u64 = 0x11A8 // wo der erste Riss gesehen wurde
+const S_RY1: u64 = 0x11B0
+const S_RFR: u64 = 0x11B8 // und bei welcher Bildnummer
+const S_VERWORF: u64 = 0x11C0 // Ablesungen ueber eine Bildgrenze hinweg
+// Die drei Zahlen der Vorfuehrung (kgui ruft sie). Sie liegen HIER und
+// nicht in `kstate`, weil dort jede Seite gezaehlt ist und diese drei
+// nur die Oberflaeche etwas angehen.
+const S_VT0: u64 = 0x1190 // Tick, an dem das Halten begann
+const S_VSTEP: u64 = 0x1198 // wie weit die Vorfuehrung ist
+const S_VWIN: u64 = 0x11A0 // das vorgefuehrte Fenster + 1
+const S_ANIMS: u64 = 0x1110 // begonnene Bewegungen
+const S_ANFRAMES: u64 = 0x1118 // gezeichnete Zwischenbilder
+const S_NOANIM: u64 = 0x1120 // GEGENPROBE: keine Bewegung
+const S_TICKS: u64 = 0x1128 // wie oft `anim_tick` lief
+// RUNDE SCHNELLBILD: die SUMME der uebertragenen Bildpunkte, ueber
+// alle Bilder. Zusammen mit S_PRESENTS ergibt das den Anteil, den ein
+// Bild wirklich anfasst -- die Zahl, die FREMDSOFTWARE.md 4a mit
+// "1 bis 5 Prozent" veranschlagt. `present` gibt die Flaeche schon
+// zurueck, aber niemand hat sie bisher aufsummiert, und ohne Summe ist
+// der Anteil nicht messbar.
+// RUNDE MERGE9: 0x11C8 statt 0x1130. Auf 0x1130 liegt seit Runde
+// GLYPHE S_LESER (kernel/wm.fi:554) -- die Runde SCHNELLBILD hat
+// S_PXSUM auf ihrem Zweig dorthin gelegt, weil die Stelle DORT frei
+// war. Zusammengefuehrt schrieben beide dasselbe Wort: der Ableser
+// haette die Pixelsumme als "laeuft/laeuft nicht" gelesen und die
+// Summe waere bei jedem Anstrich ueberschrieben worden.
+// GEMESSEN von tools/paint/run.sh ("Skalare ueberschneiden sich").
+// 0x11C8 ist das erste freie Wort hinter S_VERWORF (0x11C0).
+const S_PXSUM: u64 = 0x11C8
+
+// ==================================== ZUSAMMENFUEHRUNG VEKTOR + ECHTHARDWARE-5
+// BEIDE RUNDEN HABEN SICH DIESELBEN WORTE GENOMMEN.
+//
+// ECHTHARDWARE-5 legte S_TOUT/S_TPUT (Terminalzaehler) und die fuenf
+// Woerter des Kantenziehens auf 0x11D0..0x1200; die Bildzeitmessung
+// dieser Runde lag auf DENSELBEN 0x11D0..0x1248. Sechs Worte
+// ueberschnitten sich -- 0x11D0, 0x11D8, 0x11E0, 0x11E8, 0x11F0 und
+// 0x1200. Das haette keinen Uebersetzungsfehler gegeben, sondern das
+// hier: die Bildzeit haette den Ankerwert der gezogenen Kante
+// ueberschrieben, und ein Fenster waere beim Ziehen gesprungen,
+// waehrend die Bildzeitfaecher Unsinn zeigen. Genau die Sorte Fehler,
+// die man auf einem Foto sieht und im Quelltext nicht.
+//
+// AUFGELOEST ZUGUNSTEN VON ECHTHARDWARE-5 AN SEINER STELLE: dessen
+// Zahlen stehen in einem ausgelieferten Abbild und sind auf echtem
+// Blech gemessen; die Bildzeitmessung ist juenger und noch in keinem
+// Abbild. Sie zieht deshalb auf 0x1300..0x1378 um, wo nichts liegt
+// (WM_MAX ist 0x2000). Keine der beiden Runden verliert ein Feld.
+
+// ==================================================== RUNDE ECHTHARDWARE-5
+// WIE VIELE OKTETTE IM TERMINALFENSTER ANGEKOMMEN SIND.
+//
+// Justins Befund B: das Fenster "Terminal -- sh" ist LEER, obwohl die
+// Tafel `sh14` meldet -- die Shell laeuft also. Zwischen der Shell und
+// der Zeichenflaeche versickert die Ausgabe, und ohne eine Zahl ist
+// nicht zu unterscheiden, ob (a) nie ein Oktett hier ankommt, (b) sie
+// ankommen und in kein Feld gemalt werden, oder (c) sie gemalt und
+// gleich wieder ueberdeckt werden. Diese zwei Zaehler trennen die
+// Faelle: `S_TOUT` zaehlt JEDEN Ruf von `term_out`, `S_TPUT` nur die,
+// die wirklich eine Zelle gesetzt haben.
+const S_TOUT: u64 = 0x11D0
+const S_TPUT: u64 = 0x11D8
+
+// ==================================================== RUNDE ECHTHARDWARE-5
+// AN WELCHER KANTE DIE GROESSE GEZOGEN WIRD -- UND WOGEGEN.
+//
+// Justins Befund D: "Ziehen funktioniert nur an der rechten Kante."
+// Das stimmte, und es stand so im Quelltext: `on_mouse` nahm nur
+// `am_rechts || am_unten` an, und `resize_win` rechnet die neue
+// Groesse IMMER aus der linken oberen Ecke (`x - win_x`). Damit KANN
+// die linke und die obere Kante nicht gehen -- eine Bewegung nach
+// links macht das Fenster dort schmaler statt breiter.
+//
+// `S_SZEDGE` ist eine Bitmaske: 1 links, 2 rechts, 4 oben, 8 unten.
+// Eine Ecke ist zwei Bits gleichzeitig, und genau das macht "beide
+// Achsen zugleich" aus. Die vier Ankerwerte halten die
+// GEGENUEBERLIEGENDE Kante fest: zieht man links, bleibt rechts stehen,
+// und das Fenster springt nicht.
+const S_SZEDGE: u64 = 0x11E0
+const S_SZAX: u64 = 0x11E8 // die festgehaltene x-Kante (Bildschirm)
+const S_SZAY: u64 = 0x11F0 // die festgehaltene y-Kante
+const S_SZAW: u64 = 0x11F8 // Breite beim Anfassen
+const S_SZAH: u64 = 0x1200 // Hoehe beim Anfassen
+
+const SZ_L: u64 = 1
+const SZ_R: u64 = 2
+const SZ_T: u64 = 4
+const SZ_B: u64 = 8
+
+// ---------------------------------------------- RUNDE VEKTOR: DIE BILDZEIT
+//
+// Bis hierher gab es KEINE Zahl fuer "wie lange dauert ein Bild". Es
+// gab die Zahl der Bilder und die der Bildpunkte, aber nicht die Zeit
+// -- und damit liess sich die Auflage "kein Bild ueber 16 ms" weder
+// vorher noch nachher belegen, sondern nur behaupten.
+//
+// Gemessen wird um `compose` herum, also um das Zusammensetzen des
+// Bildes: Hintergrund, Fenster, Leiste, Zeiger. Die Uhr ist der
+// Zyklenzaehler (`time.tsc`), umgerechnet ueber `time.khz`.
+//
+// Vier Zahlen, weil ein Mittelwert allein den schlimmsten Fall
+// versteckt -- und der schlimmste Fall ist der, den ein Mensch als
+// Ruckeln sieht.
+const S_FRUS: u64 = 0x1300    // Summe der Bildzeiten in Mikrosekunden
+const S_FRN: u64 = 0x1308     // wie viele Bilder darin stecken
+const S_FRMAX: u64 = 0x1310   // die laengste Bildzeit
+const S_FRLAST: u64 = 0x1318  // die letzte Bildzeit
+// Wie viele Bilder ueber 16 ms lagen. Die Auflage dieser Runde in
+// einer Zahl: sie MUSS null bleiben.
+const S_FRUEBER: u64 = 0x1320
+// Ein Histogramm, acht Faecher, je eine Verdoppelung: <1ms, <2, <4,
+// <8, <16, <32, <64, darueber. Ein Mittelwert und ein Groesstwert
+// sagen nicht, OB die langen Bilder am Anfang stehen (Moduswechsel,
+// kalter Zwischenspeicher) oder mitten im Betrieb -- und genau das
+// ist der Unterschied zwischen "faellt niemandem auf" und "ruckelt".
+const S_FRH: u64 = 0x1330      // acht Worte, 0x1330..0x1368
+// Die laengste Bildzeit NACH den ersten zehn Bildern. Die ersten zehn
+// sind der Start: erstes Bild ueberhaupt, erster Moduswechsel, erste
+// Schrift. Was danach kommt, ist der Betrieb.
+const S_FRMAXW: u64 = 0x1370
+const S_FRUEBERW: u64 = 0x1378
+
+// ------------------------------- RUNDE VEKTOR: DIE ZEICHEN LIEGEN FERTIG
+//
+// Ein Fensterzeichen ist in jedem Bild dasselbe: dieselbe Form,
+// dieselbe Groesse, dieselbe Kantenglaettung. Es JE BILD neu zu
+// rastern -- Bezier zerlegen, Kanten bauen, vier Abtastzeilen je
+// Bildzeile -- ist Arbeit, deren Ergebnis schon dasteht.
+//
+// GEMESSEN, warum das noetig ist: ohne diesen Speicher stieg bei
+// 2560x1440 und Vervielfachung 2 die mittlere Bildzeit von 4234 auf
+// 5211 Mikrosekunden, und im Betrieb rutschten sechsundzwanzig Bilder
+// aus dem Fach 4..8 ms in das Fach 8..16 ms. Die Formen sind billig,
+// aber sie sind es NICHT dreimal je Fenster und Bild.
+//
+// Vier Zeichen: Minimieren, Maximieren, Wiederherstellen, Schliessen.
+// Je Zeichen die Deckung als ein Oktett pro Bildpunkt, hoechstens
+// 40x40 (10 * Vervielfachung 4).
+const CG_N: u64 = 4
+const CG_MAX: u64 = 1600      // 40 * 40
+
+// RUNDE VEKTOR: die vier gerasterten Zeichen. `cg_gr` ist die
+// Kantenlaenge, mit der sie gerastert wurden -- wechselt die
+// Vervielfachung, gilt der Speicher nicht mehr.
+static mut cg_deck: [u8; 6400] = [0 as u8; 6400]
+static mut cg_gut: [u64; 4] = [0 as u64; 4]
+static mut cg_gr: u64 = 0
+static mut cg_w: [u64; 4] = [0 as u64; 4]
+static mut cg_h: [u64; 4] = [0 as u64; 4]
+static mut cg_treffer: u64 = 0
+static mut cg_bauten: u64 = 0
+
+// Die Arten einer Fensterbewegung. Oeffnen waechst, Schliessen und
+// Minimieren schrumpfen -- der Unterschied zwischen den letzten beiden
+// liegt NICHT im Bild, sondern darin, was danach passiert.
+const AN_OPEN: u64 = 1
+const AN_CLOSE: u64 = 2
+const AN_MIN: u64 = 3
+// Ein Tick sind zehn Millisekunden, weil `time.TICK_HZ` 100 ist. Die
+// Zahl steht hier als Konstante und nicht als Division im Quelltext,
+// damit ein Takt von 250 Hz an EINER Stelle nachgezogen wird.
+const MS_PRO_TICK: u64 = 10
+// Die Vorgabe, wenn keine Formmarke da ist: MO_FAST aus wlibc.
+const MOTION_DEF: u64 = 120
+const MOTION_MAX: u64 = 500
+// Wie hoch der Signaturstreifen ist. Vier Zeilen sind im PPM sicher zu
+// finden und im Bild klein genug, um den Rest nicht zu verdecken.
+const SIG_H: u64 = 4
+// Wie klein ein Fenster am Anfang der Oeffnungsbewegung ist, in
+// Tausendsteln. 850 heisst: es waechst aus 85 Prozent heraus -- der
+// Sprung, den man sieht, ohne dass es zappelt.
+const AN_SCALE0: u64 = 850
 const SHMASK_SIDE: u64 = 40
-const FORM_SLOTS: u64 = 8
+const FORM_SLOTS: u64 = 9
 const FM_RADIUS: u64 = 0 // Eckenradius des Fensterrahmens, 0 = eckig
 const FM_SHADOW: u64 = 1 // Staerke des Schattens, 0..100, 0 = keiner
 const FM_SHADOW_R: u64 = 2 // wie weit er reicht, in Bildpunkten
@@ -459,6 +848,13 @@ const FM_GRAD: u64 = 6
 // 0 = das alte Schliessfeld (ein rotes Quadrat mit Kreuz), 1 = die
 // drei Windows-Schaltflaechen rechts oben.
 const FM_CAPTION: u64 = 7
+// RUNDE VSYNC: DIE DAUER EINER FENSTERBEWEGUNG, in Millisekunden.
+// Sie kommt aus derselben Quelle wie alle anderen Formmarken -- die
+// Taskleiste schickt sie beim Start --, damit "Animationen reduzieren"
+// EINE Stelle hat und nicht zwei. 0 heisst SOFORT FERTIG und nicht
+// uebersprungen: der Endzustand wird in beiden Faellen erreicht.
+// Vorgabe ist MO_FAST aus wlibc (120 ms), siehe DESIGN-2.
+const FM_MOTION: u64 = 8
 // Die Obergrenzen. Sie stehen hier und nicht beim Aufrufer, weil ein
 // Radius von 4000 den Rahmen nicht rund macht, sondern den Server in
 // eine Schleife ueber vier Millionen Eckpunkte schickt.
@@ -610,6 +1006,39 @@ const W_SAVWH: u64 = 0x110
 // leeren Namen und die Taskleiste faellt auf reinen Text zurueck --
 // dieselbe Regel wie bei Netz und Akku.
 const W_APP: u64 = 0x118 // APP_LEN Oktette
+
+// ================= RUNDE MESSTAFEL: WURDE DIESES FENSTER GEMALT ODER NICHT
+//
+// Justins Taskleiste meldet Erfolg (`rc=0`, richtige Groesse, richtige
+// Kante) und ist trotzdem nicht zu sehen. Zwischen "das Fenster gibt es"
+// und "die Bildpunkte stehen auf dem Schirm" lagen bisher vier Stufen
+// ohne eine einzige Zahl. Diese beiden Zaehler schliessen die groesste
+// Luecke davon:
+//
+//   W_PAINTS  wie oft `paint_win` dieses Fenster wirklich gemalt hat
+//   W_PX      wie viele Bildpunkte dabei zusammenkamen
+//
+// Steht bei der Leiste PAINTS=0, hat `compose` sie UEBERGANGEN -- dann
+// ist sie verborgen, nicht in der Stapelfolge, oder ihr Rechteck liegt
+// ausserhalb des schmutzigen Bereichs. Steht PAINTS hoch und man sieht
+// sie trotzdem nicht, sind die Bildpunkte gemalt und der Fehler liegt
+// DAHINTER (Zweitpuffer, Flush, Zeilenabstand). Das ist der Unterschied,
+// den kein Foto bisher machen konnte.
+//
+// 0x118 + APP_LEN endet bei 0x130, WIN_BYTES ist 512 -- der Platz ist da.
+const W_PAINTS: u64 = 0x130 // wie oft compose dieses Fenster malte
+const W_PX: u64 = 0x138 // und wie viele Bildpunkte dabei herauskamen
+
+// RUNDE VSYNC: DIE BEWEGUNG EINES FENSTERS. Vier Zahlen, und keine
+// davon ist eine Dauer in Bildern: `W_AN0` ist der Tick, an dem sie
+// begann, `W_ANMS` die zugesagte Dauer in Millisekunden. Erst
+// `anim_p` rechnet daraus den Fortschritt -- dieselbe Trennung wie in
+// wlib (DESIGN-2), damit ein Kernel mit TICK_HZ=100 und eine
+// Bibliothek, die in Millisekunden zusagt, dieselbe Bewegung meinen.
+const W_ANK: u64 = 0x140 // Art: 0 keine, AN_OPEN, AN_CLOSE, AN_MIN
+const W_AN0: u64 = 0x148 // Starttick
+const W_ANMS: u64 = 0x150 // zugesagte Dauer in Millisekunden
+const W_ANP: u64 = 0x158 // zuletzt gezeichneter Fortschritt, 0..1000
 const APP_LEN: u64 = 24
 
 // "kein Terminal". Absichtlich eine Zahl und kein Ruf nach `tty.fi`:
@@ -709,6 +1138,33 @@ fn set_deco_colour(state: u64, i: u64, v: u64) -> bool {
                     wsv(state, k, W_FG, deco(state, DK_TERM_FG))
                 } else {
                     wsv(state, k, W_BG, deco(state, DK_TERM_BG))
+                    // ==================================== RUNDE FARBE
+                    // DIE NEUE FARBE MUSS AUCH GEMALT WERDEN.
+                    //
+                    // Hier wurde bis zu dieser Runde NUR `W_BG`
+                    // gesetzt. Das ist die Farbe, mit der das Terminal
+                    // KUENFTIG loescht -- die Bildpunkte, die schon im
+                    // Puffer stehen, behalten die alte. Ein Terminal,
+                    // das beim Start des Systems entsteht (der
+                    // Schreibtisch macht genau das) und dessen Flaeche
+                    // sich danach nicht mehr ganz erneuert, bleibt
+                    // deshalb fuer immer in der eingebauten Farbe.
+                    //
+                    // GEMESSEN (1280x800, mode=dark, dieser Runde):
+                    // #10141a auf 20,4 Prozent der Bildflaeche,
+                    // Blaustich B-R = +10, waehrend der Rest des
+                    // Schirms schon auf der neutralen Rampe stand
+                    // (#18181b, B-R = +3). Genau das Fenster, von dem
+                    // Justin sagt, es sei "immer noch blau".
+                    //
+                    // Der Reihenfolge wegen ist das kein Sonderfall,
+                    // sondern die Regel: die Leiste schickt ihre elf
+                    // Farben, WENN sie laeuft -- und das ist immer
+                    // NACH dem ersten Fenster.
+                    fill(state, k, 0, 0, wg(state, k, W_W),
+                        wg(state, k, W_H), deco(state, DK_TERM_BG))
+                    term_redraw(state, k)
+                    damage_win(state, k)
                 }
             }
             k = k + 1
@@ -770,6 +1226,11 @@ fn set_form(state: u64, i: u64, v: u64) -> bool {
     }
     if i == FM_CAPTION && w > 1 {
         w = 1
+    }
+    // RUNDE VSYNC: eine halbe Sekunde ist die Obergrenze. Laenger ist
+    // keine Rueckmeldung mehr, sondern Warten.
+    if i == FM_MOTION && w > MOTION_MAX {
+        w = MOTION_MAX
     }
     ss(state, S_FORM + i * 8, w + 1)
     ss(state, S_FORMN, gs(state, S_FORMN) + 1)
@@ -1450,6 +1911,217 @@ fn composites(state: u64) -> u64 {
     return gs(state, S_COMPOSITES)
 }
 
+// RUNDE MESSTAFEL -- die fuenf Stufen, von aussen lesbar.
+fn evpush(state: u64) -> u64 {
+    return gs(state, S_EVPUSH)
+}
+
+fn evpop(state: u64) -> u64 {
+    return gs(state, S_EVPOP)
+}
+
+fn keyin(state: u64) -> u64 {
+    return gs(state, S_KEYIN)
+}
+
+// WO DER ZEIGER LAUT FENSTERSERVER STEHT. Nicht `ps2m.x` -- das ist
+// die Stelle, die der Treiber fuehrt. Wenn die beiden auseinander
+// laufen, holt der Server nicht ab, und genau das soll man sehen.
+fn curx(state: u64) -> u64 {
+    return gs(state, S_CURX)
+}
+
+fn cury(state: u64) -> u64 {
+    return gs(state, S_CURY)
+}
+
+fn evdrops(state: u64) -> u64 {
+    return gs(state, S_EVDROP)
+}
+
+// RUNDE BLECH2: zusammengefasste Bewegungen und Ereignisse an das
+// abholerlose Terminal des Kerns -- beides KEIN Verlust, beides eine
+// Zahl auf Tafelzeile 4 bzw. in `wm: fen`.
+fn evkoal(state: u64) -> u64 {
+    return gs(state, S_EVKOAL)
+}
+
+fn evterm(state: u64) -> u64 {
+    return gs(state, S_EVTERM)
+}
+
+fn win_paints(state: u64, i: u64) -> u64 {
+    if !valid(state, i) {
+        return 0
+    }
+    return wg(state, i, W_PAINTS)
+}
+
+fn win_px(state: u64, i: u64) -> u64 {
+    if !valid(state, i) {
+        return 0
+    }
+    return wg(state, i, W_PX)
+}
+
+fn win_flags(state: u64, i: u64) -> u64 {
+    if !valid(state, i) {
+        return 0
+    }
+    return wg(state, i, W_FLAGS)
+}
+
+// ==================================================== RUNDE LEISTE
+// DIESE FUNKTION HAT EINE RUNDE LANG DAS FALSCHE FENSTER GEMESSEN.
+//
+// Der Satz darunter -- "dorthin legt `taskbar.fi` sich, und sonst
+// nichts" -- stimmte, als er geschrieben wurde. Seit der Runde
+// STARTKNOPF legt sich das STARTMENUE (`launcher.fi`, `window_plain`)
+// ebenfalls auf `L_TOP`, und weil es SPAETER kommt, liegt es weiter
+// oben im Stapel: `top_layer_win` liefert seitdem den Starter.
+//
+// Damit hat Tafelzeile 7 die ganze letzte Runde die Anstriche und den
+// Aufgabenzustand des STARTMENUES gezeigt und "die Leiste lebt"
+// gemeldet, waehrend die Leiste stand. Eine Messung, die auf das
+// falsche Ding zeigt, ist schlimmer als keine.
+//
+// `panel_win` fragt deshalb nach dem, was eine Taskleiste WIRKLICH
+// ausmacht und was ein Menue nie tut: sie reserviert eine Kante des
+// Schirms (`W_STRUT != 0`). Das ist dieselbe Regel, nach der
+// `sysgui.fi` entscheidet, wer eine Leiste sein darf.
+fn panel_win(state: u64) -> u64 {
+    var z: u64 = gs(state, S_COUNT)
+    while z > 0 {
+        z = z - 1
+        let i: u64 = at_z(state, z)
+        if i < MAX_WIN && wg(state, i, W_USED) != 0 {
+            if wg(state, i, W_LAYER) == L_TOP && wg(state, i, W_STRUT) != 0 {
+                return i
+            }
+        }
+    }
+    // Keine Leiste mit Kante: dann taugt die alte Antwort immer noch
+    // besser als gar keine -- aber der Rufende sieht am fehlenden
+    // Strut, dass es die Leiste nicht ist.
+    return MAX_WIN
+}
+
+// DAS FENSTER DER TASKLEISTE, ohne dass der Kern die Leiste kennen muss:
+// das oberste benutzte Fenster auf der Ebene L_TOP. Genau dorthin legt
+// `taskbar.fi` sich (`WS_LAYER = L_TOP`), und sonst nichts.
+// RUNDE LEISTE: NICHT MEHR FUER DIE LEISTE BENUTZEN -- dafuer gibt es
+// `panel_win`. Diese hier liefert das oberste Fenster der obersten
+// Ebene, was seit dem Startmenue etwas anderes ist.
+fn top_layer_win(state: u64) -> u64 {
+    var z: u64 = gs(state, S_COUNT)
+    while z > 0 {
+        z = z - 1
+        let i: u64 = at_z(state, z)
+        if i < MAX_WIN && wg(state, i, W_USED) != 0 {
+            if wg(state, i, W_LAYER) == L_TOP {
+                return i
+            }
+        }
+    }
+    return MAX_WIN
+}
+
+// ================== RUNDE MESSTAFEL: DIE FENSTERLISTE AUF DIE LEITUNG
+//
+// Eine Zeile je Fenster, mit ALLEM, was zwischen "angelegt" und
+// "sichtbar" schiefgehen kann: Kennung, Lage, Groesse, Ebene, die
+// Merkerbits, der Platz in der Stapelfolge -- und die beiden neuen
+// Zaehler. Wer diese Liste hat, muss ueber die Taskleiste nicht mehr
+// raten.
+fn wins_say(state: u64) {
+    if !ready(state) {
+        return
+    }
+    var s_h: [u8; 11] = "wm: fen i=\0"
+    var s_id: [u8; 5] = " id=\0"
+    var s_x: [u8; 4] = " x=\0"
+    var s_y: [u8; 4] = " y=\0"
+    var s_w: [u8; 4] = " w=\0"
+    var s_hh: [u8; 4] = " h=\0"
+    var s_l: [u8; 6] = " lay=\0"
+    var s_f: [u8; 5] = " fl=\0"
+    var s_z: [u8; 4] = " z=\0"
+    var s_p: [u8; 8] = " malen=\0"
+    var s_px: [u8; 5] = " px=\0"
+    var i: u64 = 0
+    while i < MAX_WIN {
+        if wg(state, i, W_USED) != 0 {
+            serial.puts((&s_h[0]) as u64)
+            serial.dec(i)
+            serial.puts((&s_id[0]) as u64)
+            serial.dec(wg(state, i, W_ID))
+            serial.puts((&s_x[0]) as u64)
+            serial.dec(win_x(state, i) as u64)
+            serial.puts((&s_y[0]) as u64)
+            serial.dec(win_y(state, i) as u64)
+            serial.puts((&s_w[0]) as u64)
+            serial.dec(wg(state, i, W_W))
+            serial.puts((&s_hh[0]) as u64)
+            serial.dec(wg(state, i, W_H))
+            serial.puts((&s_l[0]) as u64)
+            serial.dec(wg(state, i, W_LAYER))
+            serial.puts((&s_f[0]) as u64)
+            serial.dec(wg(state, i, W_FLAGS))
+            serial.puts((&s_z[0]) as u64)
+            serial.dec(wg(state, i, W_Z))
+            serial.puts((&s_p[0]) as u64)
+            serial.dec(wg(state, i, W_PAINTS))
+            serial.puts((&s_px[0]) as u64)
+            serial.dec(wg(state, i, W_PX))
+            // ============================================== RUNDE BLECH2
+            // WO DER TITEL STEHT, damit ein Laeufer ihn im Bild
+            // bildpunktgenau nachrechnen kann (tools/blech2/run.sh mit
+            // `checkshot.py tkette`): Anfang, Grundlinie, Schriftgroesse,
+            // Schrift- und Leistenfarbe -- und `tka`, die alte
+            // TK-Zaehlweise, zum Vergleich mit dem Bild.
+            if deko(state, i) {
+                var s_tx: [u8; 5] = " tx=\0"
+                var s_tb: [u8; 5] = " tb=\0"
+                var s_tp: [u8; 5] = " tp=\0"
+                var s_tf: [u8; 5] = " tf=\0"
+                var s_tg: [u8; 5] = " tg=\0"
+                var s_tk: [u8; 6] = " tka=\0"
+                let f: u64 = gs(state, S_FONT_UI)
+                let px: u64 = gs(state, S_PX_UI)
+                var vor: i64 = 0
+                let sicht: u64 = netview.view_of(state, win_owner(state, i))
+                if sicht != netview.V_REAL && sicht <= 3 {
+                    vor = netmark.W as i64 + 4
+                }
+                var tf: u64 = deco_rgb(state, DK_TEXT)
+                var tg: u64 = deco_rgb(state, DK_TITLE)
+                if focus(state) == i {
+                    tf = deco_rgb(state, DK_TEXT_ON)
+                    tg = deco_rgb(state, DK_TITLE_ON)
+                }
+                var tb: i64 = win_y(state, i) + border(state) as i64
+                if f < ttf.MAX_FONTS {
+                    tb = tb + ttf.ascent(state, f, px)
+                }
+                serial.puts((&s_tx[0]) as u64)
+                serial.dec((win_x(state, i) + border(state) as i64 + 5 + vor) as u64)
+                serial.puts((&s_tb[0]) as u64)
+                serial.dec(tb as u64)
+                serial.puts((&s_tp[0]) as u64)
+                serial.dec(px)
+                serial.puts((&s_tf[0]) as u64)
+                serial.hex(tf)
+                serial.puts((&s_tg[0]) as u64)
+                serial.hex(tg)
+                serial.puts((&s_tk[0]) as u64)
+                serial.dec(titel_schnitt_alt)
+            }
+            serial.nl()
+        }
+        i = i + 1
+    }
+}
+
 fn blits(state: u64) -> u64 {
     return gs(state, S_BLITS)
 }
@@ -1878,8 +2550,28 @@ fn create(state: u64, owner: u64, x: i64, y: i64, w: u64, h: u64,
             wsv(state, i, W_ID, gs(state, S_NEXTID))
             ss(state, S_NEXTID, gs(state, S_NEXTID) + 1)
             wsv(state, i, W_OWNER, owner)
+            // ==================================== RUNDE BLECHDREI
+            // EIN FENSTER FAENGT UNTER DER ARBEITSFLAECHE AN.
+            //
+            // Der Schreibtisch legt sein Terminalfenster auf feste
+            // Koordinaten (x=24, y=40). Mit dem reservierten Band der
+            // Messtafel lag es damit VOLLSTAENDIG darunter und wurde von
+            // `fb` weggeschnitten -- ein Fenster, das es gibt, das man
+            // aber nicht sieht. Ein Strut, den nur die Maximierung
+            // beachtet, ist keiner.
+            //
+            // Nur nach UNTEN geschoben, nie verkleinert, und nur wenn es
+            // ein Band gibt: bei `nostrut` und auf schmalen Schirmen ist
+            // `work_y` null und diese Zeilen tun nichts. Deshalb sehen
+            // die Laeufe in tools/wm/run.sh dieselben Koordinaten wie
+            // vorher.
+            var wy: i64 = y
+            let oben: i64 = gs(state, S_WORK_Y) as i64
+            if wy < oben {
+                wy = oben
+            }
             wsv(state, i, W_X, x as u64)
-            wsv(state, i, W_Y, y as u64)
+            wsv(state, i, W_Y, wy as u64)
             wsv(state, i, W_W, w)
             wsv(state, i, W_H, h)
             wsv(state, i, W_BUF, buf)
@@ -2023,10 +2715,141 @@ fn destroy(state: u64, i: u64) -> bool {
     if gs(state, S_SIZING) == i + 1 {
         ss(state, S_SIZING, 0)
     }
+    // ==================================== RUNDE BLECHFUENF
+    // WAS SONST NOCH AUF DIESES FENSTER ZEIGT.
+    //
+    // Justin klickt auf das Kreuz, und danach ist die Maschine weg.
+    // `S_DRAG` und `S_SIZING` waren gedacht, `S_CAPHOV` nicht -- und
+    // GENAU DAS ist der Zustand nach einem Klick auf das Kreuz: der
+    // Zeiger stand ueber dem Knopf, also stand dort die Nummer dieses
+    // Fensters, und der naechste `cap_track` faerbt eine Schaltflaeche
+    // an einem Fenster, das es nicht mehr gibt. Wird der Platz danach
+    // neu vergeben, faerbt er die des NEUEN.
+    if gs(state, S_CAPHOV) != 0 && (gs(state, S_CAPHOV) - 1) / 4 == i {
+        ss(state, S_CAPHOV, 0)
+    }
+    // UND DIE MASSE AUF NULL. `destroy` hat den Puffer freigegeben und
+    // W_BUF genullt, die BREITE und HOEHE aber stehen gelassen. Ein
+    // Weg, der die Gueltigkeit nicht prueft, rechnet damit ein
+    // plausibles Rechteck aus und schreibt es an die Anschrift null --
+    // also mitten in die Seitentafeln des Kerns. Mit Nullen kommt er
+    // ueber die erste Schleifenbedingung nicht hinaus.
+    wsv(state, i, W_W, 0)
+    wsv(state, i, W_H, 0)
+    wsv(state, i, W_COLS, 0)
+    wsv(state, i, W_ROWS, 0)
+    wsv(state, i, W_CX, 0)
+    wsv(state, i, W_CY, 0)
+    wsv(state, i, W_KIND, 0)
+    wsv(state, i, W_EHEAD, 0)
+    wsv(state, i, W_ETAIL, 0)
     if hatte_strut {
         recalc_work(state)
     }
     return true
+}
+
+// ============================================ RUNDE BLECHFUENF
+// DAS OBERSTE FENSTER ZUMACHEN -- GENAU SO WIE DAS KREUZ.
+//
+// Kein zweiter Weg neben `on_mouse`, sondern DIESELBEN ZWEI ZEILEN:
+// erst das Ereignis in den Ring des Fensters, dann `destroy`. Waere es
+// ein anderer Weg, waere die Gegenprobe wertlos.
+// DIE MITTE DES SCHLIESSKREUZES eines Fensters, gepackt (x << 32) | y.
+// Damit kann die Gegenprobe wirklich DORTHIN klicken, wo Justin
+// geklickt hat -- und nicht einen zweiten Schliessweg neben dem Kreuz
+// benutzen, der die Haelfte der Arbeit auslaesst.
+fn kreuz_punkt(state: u64, i: u64) -> u64 {
+    if !valid(state, i) {
+        return 0
+    }
+    let bx: i64 = cap_x0(state, i) + (CAP_CLOSE * cap_w(state)) as i64
+        + (cap_w(state) / 2) as i64
+    let by: i64 = win_y(state, i) + border(state) as i64
+        + ((title_h(state) - 1 - border(state)) / 2) as i64
+    if bx < 0 || by < 0 {
+        return 0
+    }
+    return ((bx as u64) << 32) | (by as u64)
+}
+
+fn term_win(state: u64) -> u64 {
+    var i: u64 = 0
+    while i < MAX_WIN {
+        if wg(state, i, W_USED) != 0 && wg(state, i, W_KIND) == K_TERM {
+            return i
+        }
+        i = i + 1
+    }
+    return MAX_WIN
+}
+
+// ---------------------------------------------------- die drei Anlaesse
+//
+// DREI EINSTIEGE UND EIN FALLBACK, und der Fallback ist der Kern der
+// Sache: ist die Bewegung abgeschaltet (Formmarke motion=0 oder die
+// Gegenprobe `noanim`), tut jede dieser Funktionen SOFORT das, was sie
+// zusagt. Der Endzustand haengt nie an der Bewegung -- ein Fenster, das
+// geschlossen werden soll, wird geschlossen, ob es dabei schrumpft oder
+// nicht. Das ist der Unterschied zwischen "reduziert" und "kaputt".
+
+// Ein neues Fenster waechst auf. Der Aufrufer hat es schon angelegt.
+fn open_anim(state: u64, i: u64) -> bool {
+    return anim_start(state, i, AN_OPEN)
+}
+
+// Schliessen ueber die Bewegung. Das Fenster verschwindet erst, wenn
+// sie durch ist -- `anim_tick` ruft dann `destroy`. Ohne Bewegung
+// geschieht genau das sofort.
+fn close_anim(state: u64, i: u64) -> bool {
+    if !valid(state, i) {
+        return false
+    }
+    ev_push(state, i, E_CLOSE, 0, 0, 0)
+    if !anim_start(state, i, AN_CLOSE) {
+        destroy(state, i)
+        return false
+    }
+    return true
+}
+
+// Minimieren ueber die Bewegung. Dasselbe Bild wie beim Schliessen,
+// aber am Ende steht `set_hidden` und nicht `destroy`.
+fn minimize_anim(state: u64, i: u64) -> bool {
+    if !valid(state, i) {
+        return false
+    }
+    if !anim_start(state, i, AN_MIN) {
+        set_hidden(state, i, true)
+        return false
+    }
+    return true
+}
+
+fn close_top(state: u64) -> u64 {
+    let i: u64 = top_visible(state)
+    if i >= MAX_WIN {
+        return MAX_WIN
+    }
+    ev_push(state, i, E_CLOSE, 0, 0, 0)
+    destroy(state, i)
+    return i
+}
+
+// DAS TERMINALFENSTER. Justins Foto zeigt "Terminal -- sh" mit dem
+// Kreuz, auf das er geklickt hat -- also ist DAS das Fenster, das die
+// Gegenprobe zuerst zumachen muss und nicht irgendeines.
+fn close_term(state: u64) -> u64 {
+    var i: u64 = 0
+    while i < MAX_WIN {
+        if wg(state, i, W_USED) != 0 && wg(state, i, W_KIND) == K_TERM {
+            ev_push(state, i, E_CLOSE, 0, 0, 0)
+            destroy(state, i)
+            return i
+        }
+        i = i + 1
+    }
+    return MAX_WIN
 }
 
 fn topmost(state: u64) -> u64 {
@@ -2146,7 +2969,7 @@ fn raise_win(state: u64, i: u64) {
 // Oberkante der neuen Ebene -- ein Schreibtisch, der seine Ebene
 // bekommt und liegen bleibt, wo er war, waere kein Schreibtisch.
 fn set_layer(state: u64, i: u64, l: u64) {
-    if !valid(state, i) || l > L_TOP {
+    if !valid(state, i) || l > L_MAX {
         return
     }
     if wg(state, i, W_LAYER) == l {
@@ -2155,11 +2978,22 @@ fn set_layer(state: u64, i: u64, l: u64) {
     wsv(state, i, W_LAYER, l)
     // Ein Fenster, das aus der normalen Ebene verschwindet, darf den
     // Eingabefokus nicht mitnehmen.
-    if l != L_NORMAL && focus(state) == i {
+    if l != L_NORMAL && focus(state) == i
+        && (wg(state, i, W_FLAGS) & F_KEYS) == 0 {
         ss(state, S_FOCUS, 0)
-        let o: u64 = top_visible(state)
-        if o < MAX_WIN {
-            set_focus(state, o)
+        // RUNDE ECHTHARDWARE-4: ZURUECK ZU DEM, DER IHN HATTE.
+        // Der Grund steht bei S_FOCUS_PREV. `top_visible` bleibt der
+        // zweite Weg -- fuer den Fall, dass der Vorbesitzer inzwischen
+        // weg oder verborgen ist.
+        let vor: u64 = gs(state, S_FOCUS_PREV)
+        if vor != 0 && vor - 1 != i && valid(state, vor - 1)
+            && (wg(state, vor - 1, W_FLAGS) & F_HIDDEN) == 0 {
+            set_focus(state, vor - 1)
+        } else {
+            let o: u64 = top_visible(state)
+            if o < MAX_WIN {
+                set_focus(state, o)
+            }
         }
     }
     raise_win(state, i)
@@ -2393,6 +3227,11 @@ fn recalc_work(state: u64) {
     var x1: u64 = sw
     var y1: u64 = sh
     if gs(state, S_NOSTRUT) == 0 {
+        // RUNDE BLECHDREI: das reservierte Band der Messtafel ist ein
+        // Strut wie jeder andere -- nur einer, den kein Fenster haelt.
+        // Ohne diese Zeile legte der Schreibtisch seine Fenster unter
+        // die Tafel, und `fb` schnitte sie dort ab.
+        y0 = fb.band(state)
         var i: u64 = 0
         while i < MAX_WIN {
             if wg(state, i, W_USED) != 0 && wg(state, i, W_STRUT) != 0 {
@@ -2556,6 +3395,43 @@ fn maximize(state: u64, i: u64, on: bool) -> bool {
     return true
 }
 
+// ======================================================= RUNDE TUERSCHLOSS
+// WAEHREND DES SELBSTTESTS SAGT DER FOKUS NICHTS.
+//
+// `set_focus` meldet seit dieser Runde jeden Wechsel als
+// `wm: fokus id=<neu> vor=<alt>` -- und das ist der Beleg, ohne den
+// Alt+Tab nicht messbar waere. Der Selbsttest ruft `set_focus` aber in
+// seiner Zusage 7 auf, und zwar MITTEN in die Zeile hinein, die
+// `kgui` gerade schreibt:
+//
+//     wm: selftest wm: fokus id=1 vor=0
+//
+// Damit war die Zahl hinter `selftest` weg, und tools/wm/run.sh meldete
+// "keine Zahl gefunden (erwartet eq 30)" -- ein Fehler, den diese Runde
+// selbst gebaut hat. Eine Diagnosezeile, die eine andere zerschneidet,
+// ist keine Diagnose.
+static mut fokus_still: u64 = 0
+
+// RUNDE ECHTHARDWARE-1: das Fenster sagt, ob es die Tastatur will.
+//
+// Wird es JETZT gesetzt und das Fenster liegt schon oben und ist
+// sichtbar, bekommt es den Fokus sofort -- sonst muesste man es erst
+// noch einmal anklicken, und genau dieser zweite Klick war der Punkt,
+// an dem Justins Startmenue "nichts tut" aussah.
+fn set_keys(state: u64, i: u64, an: bool) {
+    if !valid(state, i) {
+        return
+    }
+    if an {
+        wsv(state, i, W_FLAGS, wg(state, i, W_FLAGS) | F_KEYS)
+        if (wg(state, i, W_FLAGS) & F_HIDDEN) == 0 {
+            set_focus(state, i)
+        }
+    } else {
+        wsv(state, i, W_FLAGS, wg(state, i, W_FLAGS) & ~F_KEYS)
+    }
+}
+
 fn set_focus(state: u64, i: u64) {
     if !valid(state, i) {
         return
@@ -2573,7 +3449,40 @@ fn set_focus(state: u64, i: u64) {
         damage_win(state, alt)
         ev_push(state, alt, E_FOCUS, 0, 0, 0)
     }
+    if alt < MAX_WIN {
+        ss(state, S_FOCUS_PREV, alt + 1)
+    }
     ss(state, S_FOCUS, i + 1)
+    // ================================================ RUNDE TUERSCHLOSS
+    //
+    // DER FOKUSWECHSEL WIRD GESAGT, und ohne diese Zeile war Punkt 4.3
+    // der Vorrunde gar nicht messbar.
+    //
+    // Runde DURCHKLICK schrieb "`focus=1` bleibt ueber 137 Meldungen
+    // konstant" und belegte damit, dass Alt+Tab nichts tut. Nachgesehen:
+    // das `focus=1` in jenen Mitschnitten stammt aus
+    // `taskbar: btn ... hidden=0 focus=1` -- der KNOPFLISTE der Leiste --
+    // und aus `wm: 1280x800 ... focus=1`, der EINSCHALTMELDUNG des
+    // Servers. Keines von beiden ist der Eingabefokus. Der Befund war
+    // richtig, sein Beleg zeigte aber auf etwas anderes.
+    //
+    // Der Eingabefokus stand nirgends auf der Leitung. Jetzt steht er
+    // da: eine Zeile je WIRKLICHEM Wechsel (die Abfrage `alt == i`
+    // weiter oben laesst Wiederholungen gar nicht bis hierher), mit dem
+    // Fenster davor und danach.
+    if fokus_still == 0 {
+        var s_fk: [u8; 14] = "wm: fokus id=\0"
+        var s_fv: [u8; 7] = " vor=\0\0"
+        serial.puts((&s_fk[0]) as u64)
+        serial.dec(wg(state, i, W_ID))
+        serial.puts((&s_fv[0]) as u64)
+        if alt < MAX_WIN {
+            serial.dec(wg(state, alt, W_ID))
+        } else {
+            serial.dec(0)
+        }
+        serial.nl()
+    }
     ev_push(state, i, E_FOCUS, 0, 0, 1)
     // RUNDE TILING: DER BAUM FUEHRT SEINEN EIGENEN FOKUS, und die beiden
     // muessen derselbe sein. Ohne diese zwei Zeilen teilt ein neues
@@ -2608,7 +3517,37 @@ fn resize_win(state: u64, i: u64, w: u64, h: u64) -> bool {
     // Deckel von 2048, den jeder Schirm ueber 2048 Bildpunkten Breite
     // reisst. Die Grenze, die es wirklich gibt, ist der PUFFER des
     // Fensters, und die steht zwei Zeilen tiefer.
-    if w < 32 || h < 16 || w > MAX_W_HARD || h > MAX_H_HARD {
+    // ================================================== RUNDE GRIFF
+    // WARUM DIE LEISTE SICH NICHT AUF IHREN SPALT ZUSAMMENZIEHEN KANN.
+    //
+    // GEMESSEN (Justins Blech, 2560x1440, ECHTHARDWARE-2):
+    //
+    //     taskbar: size w=2560 h=2 rc=-4
+    //
+    // `-4` ist E_INVALID und kommt aus genau dieser Zeile: die
+    // Taskleiste mit `autohide=1` will sich auf ihren SLIVER von zwei
+    // Bildpunkten zurueckziehen (kernel/user/taskbar.fi, `SLIVER`),
+    // und `h < 16` weist das ab. Die Leiste bleibt in voller Hoehe
+    // stehen -- das automatische Verbergen ist damit gebaut, gemeldet
+    // und wirkungslos.
+    //
+    // WOFUER DIE 32x16 DA SIND: fuer ein Fenster MIT SCHMUCK. Unter
+    // einer Titelleiste plus zwei Rahmen ist ein Fenster von 8x8
+    // sinnlos, und `wm_strut` beruft sich weiter oben ausdruecklich auf
+    // diese Zahl. Fuer ein Fenster OHNE Schmuck gilt die Begruendung
+    // nicht: ein Spalt am Bildschirmrand IST die richtige Groesse.
+    //
+    // Also gilt die Untergrenze weiter -- aber sie fragt vorher, ob das
+    // Fenster ueberhaupt Schmuck traegt. Ein undekoriertes Fenster darf
+    // bis auf 1x1 herunter; kleiner als ein Bildpunkt ist nichts, und
+    // `w * h * 4` weiter unten bleibt damit wohldefiniert.
+    var min_w: u64 = 32
+    var min_h: u64 = 16
+    if !win_deco(state, i) {
+        min_w = 1
+        min_h = 1
+    }
+    if w < min_w || h < min_h || w > MAX_W_HARD || h > MAX_H_HARD {
         return false
     }
     // RUNDE HIDPUNKTE: HIER STAND "OHNE NEUEN PUFFER NICHT GROESSER ALS
@@ -2672,7 +3611,11 @@ fn wget(state: u64, i: u64, x: u64, y: u64) -> u64 {
 }
 
 fn fill(state: u64, i: u64, x: u64, y: u64, w: u64, h: u64, color: u64) {
-    if !valid(state, i) {
+    // RUNDE BLECHFUENF: KEIN PUFFER, KEIN SCHREIBEN. `valid` prueft den
+    // Belegungsmerker; der Puffer ist eine zweite Zusage, und nach
+    // `destroy` ist sie null. Eine Fuellung ohne diese Zeile schriebe
+    // ab Anschrift null.
+    if !valid(state, i) || wg(state, i, W_BUF) == 0 {
         return
     }
     let ww: u64 = wg(state, i, W_W)
@@ -2913,12 +3856,34 @@ const CUR_H: u64 = 18
 // nicht tat. Jetzt wird jeder Bildpunkt der Maske zu einem Block von
 // `uisc` mal `uisc` -- auf 1280x800 (uisc=1) aendert sich damit KEIN
 // einziges Bildpunkt, und das ist die Gegenprobe.
+// ============================================ RUNDE ECHTHARDWARE-4
+// DIE GROESSE KOMMT AUS `zeiger.fi`, UND SIE IST QUADRATISCH.
+//
+// Bis hierher war der Zeiger 12 mal 18 Bildpunkte mal Vervielfachung.
+// Die neun Formen (Pfeil, Textmarke, Hand, zwei Balken, zwei
+// Diagonalen, Kreuz, Sanduhr) passen nicht alle in ein hohes Rechteck
+// -- der Doppelpfeil ist breiter als hoch --, also ist das Feld
+// quadratisch: 24 Bildpunkte bei Vervielfachung 1, 48 bei 2. Justins
+// Vorgabe war "rund 24 bei 1, 48 bei 2", und das ist sie.
 fn cur_w(state: u64) -> u64 {
-    return CUR_W * uisc(state)
+    return zeiger.groesse(uisc(state))
 }
 
 fn cur_h(state: u64) -> u64 {
-    return CUR_H * uisc(state)
+    return zeiger.groesse(uisc(state))
+}
+
+// DER GRIFFPUNKT. Die Mausposition ist die SPITZE des Pfeils und die
+// MITTE der Textmarke -- ein Zeiger, dessen Griff immer in der linken
+// oberen Ecke laege, klickte bei jeder anderen Form daneben. Diese
+// beiden Zahlen sagen, um wieviel das Bild gegen die Position versetzt
+// gemalt wird, und die Schadensrechnung nimmt dieselben.
+fn cur_ox(state: u64) -> u64 {
+    return zeiger.griff_x(gs(state, S_SHAPE), cur_w(state))
+}
+
+fn cur_oy(state: u64) -> u64 {
+    return zeiger.griff_y(gs(state, S_SHAPE), cur_h(state))
 }
 
 fn cursor_row(r: u64, fuell: bool) -> u64 {
@@ -3001,11 +3966,10 @@ fn shape(state: u64) -> u64 {
     return gs(state, S_SHAPE)
 }
 
-// Das Bild wechseln und die STELLE schmutzig machen, an der der Zeiger
-// gerade steht -- sonst steht das alte Bild dort, bis sich die Maus
-// bewegt.
-fn set_shape(state: u64, s: u64) {
-    if s > 1 || !ready(state) {
+// DIESELBE UMSCHALTUNG, ABER OHNE DEN WUNSCH DER ANWENDUNG ZU
+// UEBERSCHREIBEN. Nur der Server ruft das -- fuer die Raender.
+fn shape_intern(state: u64, s: u64) {
+    if s >= zeiger.FORMEN || !ready(state) {
         return
     }
     if gs(state, S_SHAPE) == s {
@@ -3014,7 +3978,614 @@ fn set_shape(state: u64, s: u64) {
     ss(state, S_SHAPE, s)
     let mx: i64 = gs(state, S_CURX) as i64
     let my: i64 = gs(state, S_CURY) as i64
-    damage(state, mx, my, mx + cur_w(state) as i64, my + cur_h(state) as i64)
+    let gw: i64 = cur_w(state) as i64
+    damage(state, mx - gw, my - gw, mx + gw, my + gw)
+}
+
+// ============================================ RUNDE ECHTHARDWARE-4
+// DER ZEIGER SAGT, WAS DER RAND KANN.
+//
+// Seit ECHTHARDWARE-3 ist der GANZE rechte und untere Rand eines
+// Fensters ein Griff zum Groessenaendern (vorher waren es zwoelf
+// Bildpunkte in einer Ecke). Ein Griff, den man nicht SIEHT, ist
+// trotzdem einer, den man nicht findet -- deshalb wechselt der Zeiger
+// dort jetzt die Form, genau wie bei jedem anderen System:
+//
+//   rechte Kante        Doppelpfeil waagrecht
+//   untere Kante        Doppelpfeil senkrecht
+//   die Ecke dazwischen Doppelpfeil diagonal NW-SO
+//   sonst               was die Anwendung wollte
+//
+// Waehrend gezogen oder in der Groesse geaendert wird, bleibt die Form
+// stehen: der Zeiger laeuft dabei aus dem Randstreifen heraus, und ein
+// Zeiger, der mitten im Ziehen die Form wechselt, flackert.
+fn rand_zeiger(state: u64, i: u64, x: i64, y: i64) {
+    if gs(state, S_DRAG) != 0 || gs(state, S_SIZING) != 0 {
+        return
+    }
+    var will: u64 = gs(state, S_SHAPE_APP)
+    if i < MAX_WIN && valid(state, i) && deko(state, i) {
+        let lx: i64 = x - win_x(state, i) - inx(state, i) as i64
+        let ly: i64 = y - win_y(state, i) - iny(state, i) as i64
+        let rand: i64 = grip(state) as i64
+        let rechts: bool = lx >= wg(state, i, W_W) as i64 - rand
+            && lx <= wg(state, i, W_W) as i64
+        let unten: bool = ly >= wg(state, i, W_H) as i64 - rand
+            && ly <= wg(state, i, W_H) as i64
+        if lx >= 0 && ly >= 0 {
+            if rechts && unten {
+                will = zeiger.F_DIAG1
+            } else if rechts {
+                will = zeiger.F_BREITE
+            } else if unten {
+                will = zeiger.F_HOEHE
+            }
+        }
+    }
+    shape_intern(state, will)
+}
+
+// Das Bild wechseln und die STELLE schmutzig machen, an der der Zeiger
+// gerade steht -- sonst steht das alte Bild dort, bis sich die Maus
+// bewegt.
+fn set_shape(state: u64, s: u64) {
+    // RUNDE ECHTHARDWARE-4: neun Formen. Hier stand `s > 1`, und
+    // damit war jede Form ausser Pfeil und Textmarke unerreichbar --
+    // auch dann, wenn ein Programm sie gesetzt haette.
+    if s >= zeiger.FORMEN || !ready(state) {
+        return
+    }
+    // Der Wunsch wird IMMER vermerkt, auch wenn das Bild gerade
+    // ohnehin dieses ist: sonst faellt der Zeiger beim Verlassen des
+    // Fensterrandes auf einen veralteten Wunsch zurueck.
+    ss(state, S_SHAPE_APP, s)
+    if gs(state, S_SHAPE) == s {
+        return
+    }
+    ss(state, S_SHAPE, s)
+    let mx: i64 = gs(state, S_CURX) as i64
+    let my: i64 = gs(state, S_CURY) as i64
+    // Beide Formen schmutzig machen -- die alte steht noch da, und
+    // die neue kann groesser sein oder einen anderen Griffpunkt haben.
+    // Also das groesste Rechteck: Position minus voller Zeiger, plus
+    // voller Zeiger.
+    let gw: i64 = cur_w(state) as i64
+    damage(state, mx - gw, my - gw, mx + gw, my + gw)
+}
+
+// ================== RUNDE VSYNC: BEWEGUNG, BILDGRENZE, SIGNATUR
+
+// Die zugesagte Dauer einer Fensterbewegung. Steht keine Formmarke da,
+// gilt MO_FAST -- dieselben 120 ms, die wlib seit DESIGN-2 fuer Hover
+// und Menue nimmt. Die Zahl steht hier EINMAL; wer sie aendern will,
+// aendert die Formmarke und nicht den Quelltext.
+fn motion_ms(state: u64) -> u64 {
+    if gs(state, S_FORM + FM_MOTION * 8) == 0 {
+        return MOTION_DEF
+    }
+    return form(state, FM_MOTION)
+}
+
+// Sind Bewegungen abgeschaltet? Zwei Wege fuehren dahin, und sie
+// bedeuten dasselbe: die Formmarke sagt 0 (das ist "Animationen
+// reduzieren"), oder die Gegenprobe `noanim` steht auf der
+// Befehlszeile. In beiden Faellen ist eine Bewegung SOFORT FERTIG.
+fn anim_aus(state: u64) -> bool {
+    return gs(state, S_NOANIM) != 0 || motion_ms(state) == 0
+}
+
+// ease-out, ganzzahlig: 1-(1-t)^2 in Tausendsteln. Dieselbe Kurve wie
+// `wlib.ease(EASE_OUT)` -- absichtlich, damit ein Fenster, das
+// aufgeht, und ein Knopf, der hell wird, sich gleich anfuehlen.
+// Keine Fliesskommazahl: der Kernel rettet in `syscall` kein SSE.
+fn ease_out(t: u64) -> u64 {
+    var pp: u64 = t
+    if pp > 1000 {
+        pp = 1000
+    }
+    let inv: u64 = 1000 - pp
+    return 1000 - inv * inv / 1000
+}
+
+// Der Fortschritt einer laufenden Bewegung, 0..1000. Er faellt aus der
+// VERGANGENEN ZEIT und nicht aus der Zahl der Bilder: bei TICK_HZ=100
+// ist ein Tick 10 ms, und eine Zusage von 120 ms sind zwoelf Ticks --
+// aber wenn der Server einmal langsamer ist, springt die Bewegung
+// weiter, statt sich zu dehnen.
+fn anim_p(state: u64, i: u64) -> u64 {
+    let ms: u64 = wg(state, i, W_ANMS)
+    if ms == 0 {
+        return 1000
+    }
+    let jetzt: u64 = kstate.get(state, kstate.TICKS)
+    let ab: u64 = wg(state, i, W_AN0)
+    if jetzt <= ab {
+        return 0
+    }
+    let vergangen: u64 = (jetzt - ab) * MS_PRO_TICK
+    if vergangen >= ms {
+        return 1000
+    }
+    return vergangen * 1000 / ms
+}
+
+// Eine Bewegung anmelden. `art` ist AN_OPEN, AN_CLOSE oder AN_MIN.
+// Ist sie abgeschaltet, wird NICHTS angemeldet -- der Aufrufer sieht
+// `false` und macht seinen Endzustand sofort.
+fn anim_start(state: u64, i: u64, art: u64) -> bool {
+    if !valid(state, i) || anim_aus(state) {
+        return false
+    }
+    wsv(state, i, W_ANK, art)
+    wsv(state, i, W_AN0, kstate.get(state, kstate.TICKS))
+    wsv(state, i, W_ANMS, motion_ms(state))
+    wsv(state, i, W_ANP, 0)
+    ss(state, S_ANIMS, gs(state, S_ANIMS) + 1)
+    damage_win(state, i)
+    return true
+}
+
+fn anim_laeuft(state: u64, i: u64) -> bool {
+    return valid(state, i) && wg(state, i, W_ANK) != 0
+}
+
+fn anims(state: u64) -> u64 {
+    return gs(state, S_ANIMS)
+}
+
+fn anim_frames(state: u64) -> u64 {
+    return gs(state, S_ANFRAMES)
+}
+
+fn anim_ticks(state: u64) -> u64 {
+    return gs(state, S_TICKS)
+}
+
+fn set_noanim(state: u64, on: bool) {
+    ss(state, S_NOANIM, 0)
+    if on {
+        ss(state, S_NOANIM, 1)
+    }
+}
+
+// Der Fortschritt, den `paint_win` gerade sehen soll -- schon durch die
+// Kurve gelaufen. Beim Schliessen und Minimieren laeuft er rueckwaerts:
+// dieselbe Kurve, gespiegelt, statt einer zweiten.
+fn anim_mix(state: u64, i: u64) -> u64 {
+    let art: u64 = wg(state, i, W_ANK)
+    if art == 0 {
+        return 1000
+    }
+    let e: u64 = ease_out(anim_p(state, i))
+    if art == AN_OPEN {
+        return e
+    }
+    return 1000 - e
+}
+
+// EIN TICK DER BEWEGUNGEN, und er gehoert in den Zeitgeber und nicht
+// ins Zeichnen. Er macht drei Dinge: abgelaufene Bewegungen beenden,
+// laufende schmutzig machen (sonst zeichnet `compose` sie nicht), und
+// beim Ende einer Schliessbewegung das Fenster WIRKLICH wegnehmen.
+// Gibt zurueck, wie viele Bewegungen noch laufen.
+fn anim_tick(state: u64) -> u64 {
+    if !ready(state) {
+        return 0
+    }
+    ss(state, S_TICKS, gs(state, S_TICKS) + 1)
+    var offen: u64 = 0
+    var i: u64 = 0
+    while i < MAX_WIN {
+        if valid(state, i) && wg(state, i, W_ANK) != 0 {
+            let p: u64 = anim_p(state, i)
+            let art: u64 = wg(state, i, W_ANK)
+            // Der Bereich wird IMMER schmutzig, auch wenn der
+            // Fortschritt gleich blieb -- am Ende der Bewegung steht
+            // sonst das letzte Zwischenbild auf dem Schirm.
+            damage_win(state, i)
+            if p >= 1000 {
+                wsv(state, i, W_ANK, 0)
+                wsv(state, i, W_ANP, 1000)
+                // DAS FENSTER GEHT ERST JETZT. Waere es beim Klick
+                // verschwunden, haette die Bewegung nichts mehr zu
+                // zeigen gehabt -- das ist der ganze Grund, warum
+                // Schliessen ueber diesen Umweg laeuft.
+                if art == AN_CLOSE {
+                    destroy(state, i)
+                } else {
+                    if art == AN_MIN {
+                        set_hidden(state, i, true)
+                    }
+                }
+            } else {
+                wsv(state, i, W_ANP, p)
+                ss(state, S_ANFRAMES, gs(state, S_ANFRAMES) + 1)
+                offen = offen + 1
+            }
+        }
+        i = i + 1
+    }
+    return offen
+}
+
+// ---------------------------------------------------- DIE BILDGRENZE
+
+fn set_vsync(state: u64, on: bool) {
+    ss(state, S_VSYNC, 0)
+    if on {
+        ss(state, S_VSYNC, 1)
+    }
+}
+
+fn vsync_on(state: u64) -> bool {
+    return gs(state, S_VSYNC) != 0
+}
+
+fn pxsum(state: u64) -> u64 {
+    return gs(state, S_PXSUM)
+}
+
+fn presents(state: u64) -> u64 {
+    return gs(state, S_PRESENTS)
+}
+
+fn skipped(state: u64) -> u64 {
+    return gs(state, S_SKIPPED)
+}
+
+fn pending(state: u64) -> bool {
+    return gs(state, S_PEND) != 0
+}
+
+// Das gezeichnete Rechteck vormerken, statt es zu uebertragen. Mehrere
+// `compose`-Laeufe zwischen zwei Ticks wachsen so zu EINEM Rechteck
+// zusammen, und der Schirm sieht sie zusammen oder gar nicht.
+fn pend_add(state: u64, x0: u64, y0: u64, x1: u64, y1: u64) {
+    if gs(state, S_PEND) == 0 {
+        ss(state, S_PX0, x0)
+        ss(state, S_PY0, y0)
+        ss(state, S_PX1, x1)
+        ss(state, S_PY1, y1)
+        ss(state, S_PEND, 1)
+        return
+    }
+    if x0 < gs(state, S_PX0) {
+        ss(state, S_PX0, x0)
+    }
+    if y0 < gs(state, S_PY0) {
+        ss(state, S_PY0, y0)
+    }
+    if x1 > gs(state, S_PX1) {
+        ss(state, S_PX1, x1)
+    }
+    if y1 > gs(state, S_PY1) {
+        ss(state, S_PY1, y1)
+    }
+}
+
+// DAS BILD ZEIGEN. Eine Uebertragung, ein Rechteck -- und der Zaehler
+// steigt nur, wenn wirklich etwas anlag. Wer das im Takt ruft, hat
+// genau die Bildgrenze, die vorher fehlte.
+fn present(state: u64) -> u64 {
+    if !ready(state) || !fb.ready(state) {
+        return 0
+    }
+    if gs(state, S_PEND) == 0 {
+        return 0
+    }
+    let x0: u64 = gs(state, S_PX0)
+    let y0: u64 = gs(state, S_PY0)
+    let x1: u64 = gs(state, S_PX1)
+    let y1: u64 = gs(state, S_PY1)
+    ss(state, S_PEND, 0)
+    if x1 <= x0 || y1 <= y0 {
+        return 0
+    }
+    // `flush_rect` statt `flush`: nur die Spalten, die wirklich
+    // schmutzig waren. `flush` haette die ganze Bildbreite genommen,
+    // weil es nur Zeilen kennt.
+    // MIT SEITENUMSCHALTUNG MUSS DIE GANZE SEITE STIMMEN, nicht nur
+    // das schmutzige Rechteck: gezeigt wird gleich die ANDERE Haelfte,
+    // und in der steht das vorletzte Bild. Was seitdem woanders
+    // gemalt wurde, fehlte dort. Also die volle Flaeche kopieren --
+    // sie ist unsichtbar, solange nicht umgeschaltet ist, und der
+    // Preis dafuer steht in docs/VSYNC.md.
+    if fb.flip_on(state) {
+        fb.flush_rect(state, 0, 0, gs(state, S_SW), gs(state, S_SH))
+        fb.flip(state)
+    } else {
+        fb.flush_rect(state, x0, y0, x1 - x0, y1 - y0)
+    }
+    ss(state, S_PRESENTS, gs(state, S_PRESENTS) + 1)
+    let flaeche: u64 = (x1 - x0) * (y1 - y0)
+    ss(state, S_PXSUM, gs(state, S_PXSUM) +% flaeche)
+    return flaeche
+}
+
+// ------------------------------------------- DER ABLESER (SCANOUT)
+//
+// WARUM ES DIESEN ABLESER GEBEN MUSS, UND WARUM ER IM KERNEL SITZT.
+//
+// Die erste Fassung der Zerreissprobe hat von aussen fotografiert und
+// die Signaturen im Bild verglichen. Sie fand NIE ein zerrissenes Bild
+// -- auch dann nicht, wenn die Bildgrenze ausdruecklich abgeschaltet
+// war (`nopresent`) und es also reissen MUSSTE. Der Grund liegt in
+// QEMU: `screendump` liest die Bildflaeche in EINEM Zug, waehrend
+// niemand schreibt. Ein halb uebertragenes Bild ist darin nicht zu
+// sehen. Eine Messung, die auch bei abgeschalteter Zusage gruen
+// bleibt, misst nichts -- also war sie zu verwerfen.
+//
+// Der Ableser stellt dieselbe Frage an der Stelle, an der sie
+// beantwortbar ist: er liest den VORDERPUFFER (die Karte), oben und
+// unten, GENAU SO, wie ein Bildschirm ihn ausliest -- und er tut es
+// waehrend der Server malt. Findet er oben und unten verschiedene
+// Signaturen, hat er ein halbes Bild in der Hand.
+//
+// Das ist keine Nachbildung des Reissens, sondern das Reissen selbst:
+// ein Bildschirm, der in diesem Augenblick abgelesen haette, haette
+// dasselbe gesehen.
+fn set_leser(state: u64, on: bool) {
+    ss(state, S_LESER, 0)
+    if on {
+        ss(state, S_LESER, 1)
+    }
+}
+
+fn liest(state: u64) -> u64 {
+    return gs(state, S_LIEST)
+}
+
+fn risse(state: u64) -> u64 {
+    return gs(state, S_RISS)
+}
+
+fn riss_oben(state: u64) -> u64 {
+    return gs(state, S_R0)
+}
+
+fn riss_unten(state: u64) -> u64 {
+    return gs(state, S_R1)
+}
+
+fn ohne_sig(state: u64) -> u64 {
+    return gs(state, S_KEIN)
+}
+
+fn riss_y0(state: u64) -> u64 {
+    return gs(state, S_RY0)
+}
+
+fn riss_y1(state: u64) -> u64 {
+    return gs(state, S_RY1)
+}
+
+fn riss_frame(state: u64) -> u64 {
+    return gs(state, S_RFR)
+}
+
+// Wie viele Ablesungen verworfen wurden, weil zwischen ihren beiden
+// Punkten umgeschaltet wurde. Sie sind KEIN Riss -- die Zahl steht
+// daneben, damit man sieht, wie oft es vorkam.
+fn verworfen(state: u64) -> u64 {
+    return gs(state, S_VERWORF)
+}
+
+// Die drei Zahlen der Vorfuehrung, von `kgui` gelesen und gesetzt.
+fn vor_t0(state: u64) -> u64 {
+    return gs(state, S_VT0)
+}
+
+fn set_vor_t0(state: u64, v: u64) {
+    ss(state, S_VT0, v)
+}
+
+fn vor_step(state: u64) -> u64 {
+    return gs(state, S_VSTEP)
+}
+
+fn set_vor_step(state: u64, v: u64) {
+    ss(state, S_VSTEP, v)
+}
+
+fn vor_win(state: u64) -> u64 {
+    return gs(state, S_VWIN)
+}
+
+fn set_vor_win(state: u64, v: u64) {
+    ss(state, S_VWIN, v)
+}
+
+// Welche Farbnummer steht an dieser Stelle? MAX_SIG heisst "keine der
+// acht" -- dort steht dann Fensterinhalt oder Hintergrund, und das ist
+// kein Widerspruch, sondern nur nichts zu vergleichen.
+fn sig_nr(c: u64) -> u64 {
+    var k: u64 = 0
+    while k < 8 {
+        if sig_colour(k) == (c & RGB24) {
+            return k
+        }
+        k = k + 1
+    }
+    return 8
+}
+
+// EINMAL ABLESEN. Er nimmt das oberste sichtbare Fenster, liest dessen
+// oberen und unteren Signaturstreifen aus dem VORDERPUFFER und
+// vergleicht. Der Aufrufer ruft das dicht -- je dichter, desto eher
+// erwischt er die Uebertragung mitten im Lauf.
+fn leser_tick(state: u64) {
+    if gs(state, S_LESER) == 0 || gs(state, S_SIG) == 0 {
+        return
+    }
+    let i: u64 = top_visible(state)
+    if i >= MAX_WIN {
+        return
+    }
+    // NUR AN EINEM FENSTER, DAS SICH GERADE NICHT BEWEGT UND NICHT
+    // AUFGEHT. Waehrend einer Oeffnungsbewegung wird die Flaeche
+    // skaliert und gemischt gemalt -- die Signaturstreifen liegen dann
+    // nicht dort, wo dieser Ableser sie aus `win_x`/`win_y` errechnet,
+    // und was er findet, ist wieder eine Aussage ueber die Messung.
+    // Dasselbe gilt fuer ein gezogenes Fenster.
+    if wg(state, i, W_ANK) != 0 || gs(state, S_DRAG) != 0 {
+        return
+    }
+    let wx: i64 = win_x(state, i)
+    let wy: i64 = win_y(state, i)
+    let ow: i64 = outer_w(state, i) as i64
+    let oh: i64 = outer_h(state, i) as i64
+    if ow <= 0 || oh < 2 * SIG_H as i64 || wx < 0 || wy < 0 {
+        return
+    }
+    // DIE STELLE WIRD AUS EINER EINZIGEN ABLESUNG DES ORTES GERECHNET.
+    //
+    // Der Ableser rechnete sie zuerst bei jeder Ablesung frisch aus
+    // `win_x`/`win_y` -- und zwar ZWEIMAL, einmal fuer oben und einmal
+    // fuer unten. Waehrend eines Zuges wandert das Fenster dazwischen,
+    // und dann las er oben an der neuen und unten an der alten Stelle:
+    // zwei Signaturen, die nichts miteinander zu tun hatten. GEMESSEN
+    // als 97 Prozent "Risse" bei stehender Bildgrenze, waehrend
+    // derselbe Ableser am STEHENDEN Bild null fand. Der Fehler lag in
+    // der Messung.
+    //
+    // Eine feste Stelle war die naechste Fassung und auch falsch: das
+    // Fenster wandert unter ihr weg, und dann misst sie Hintergrund
+    // (gemessen: 1 165 276 Ablesungen ohne Signatur von 1 210 449).
+    //
+    // Richtig ist: den Ort EINMAL lesen und BEIDE Punkte daraus
+    // rechnen. Bewegt sich das Fenster danach, gehoert die Ablesung
+    // eben zum vorigen Ort -- aber zu EINEM Ort, und genau darauf
+    // kommt es an.
+    let x: u64 = (wx + ow / 2) as u64
+    let y0: u64 = (wy + 1) as u64
+    let y1: u64 = (wy + oh - 2) as u64
+    // BEIDE PUNKTE AUS DERSELBEN BILDSEITE, in einem Zug. Zwei
+    // getrennte Ablesungen haetten den Seitenwechsel dazwischen
+    // erwischt und einen Riss gemeldet, den es nicht gab -- siehe
+    // `fb.front_paar`.
+    let puffer: u64 = state + kstate.WM_OFF + S_LPAAR
+    // BIS ZU DREI VERSUCHE. `front_paar` sagt `false`, wenn zwischen
+    // den beiden Punkten die Bildseite gewechselt wurde -- dann hat die
+    // Ablesung KEINE Aussage (siehe die Begruendung dort). Ein neuer
+    // Versuch trifft die naechste ruhige Spanne; klappt es dreimal
+    // nicht, wird gar nichts gezaehlt. Eine verworfene Ablesung ist
+    // KEIN Riss, und sie als einen zu zaehlen waere die eine Zahl, auf
+    // die sich diese Runde nicht verlassen duerfte.
+    var versuch: u64 = 0
+    var gut: bool = false
+    while versuch < 3 && !gut {
+        gut = fb.front_paar(state, x, y0, y1, puffer)
+        versuch = versuch + 1
+    }
+    if !gut {
+        ss(state, S_VERWORF, gs(state, S_VERWORF) + 1)
+        return
+    }
+    let a: u64 = kstate.get(state, kstate.WM_OFF + S_LPAAR)
+    let b: u64 = kstate.get(state, kstate.WM_OFF + S_LPAAR + 8)
+    let ka: u64 = sig_nr(a)
+    let kb: u64 = sig_nr(b)
+    ss(state, S_LIEST, gs(state, S_LIEST) + 1)
+    // Nur wenn BEIDE eine Signatur tragen, ist die Frage gestellt.
+    // Steht an einer Stelle Fensterinhalt, wurde dort gerade nichts
+    // uebertragen -- das ist kein Riss.
+    if ka < 8 && kb < 8 && ka != kb {
+        ss(state, S_RISS, gs(state, S_RISS) + 1)
+        // Die ERSTE Beobachtung festhalten: welche zwei Signaturen,
+        // an welchen Zeilen. Ohne sie ist "es reisst" eine Zahl ohne
+        // Anhalt, und die Suche nach dem Grund faengt bei null an.
+        if gs(state, S_R0) == 0 {
+            ss(state, S_R0, ka + 1)
+            ss(state, S_R1, kb + 1)
+            // Und WO es passiert ist: die Zeilen und die Bildnummer.
+            // Ohne sie bleibt "es reisst noch ein bisschen" eine Zahl
+            // ohne Anhalt.
+            ss(state, S_RY0, y0)
+            ss(state, S_RY1, y1)
+            ss(state, S_RFR, gs(state, S_FRAME))
+        }
+    }
+    if ka >= 8 || kb >= 8 {
+        ss(state, S_KEIN, gs(state, S_KEIN) + 1)
+    }
+}
+
+// ---------------------------------------------------- DIE SIGNATUR
+
+fn set_sig(state: u64, on: bool) {
+    ss(state, S_SIG, 0)
+    if on {
+        ss(state, S_SIG, 1)
+    }
+}
+
+fn sig_on(state: u64) -> bool {
+    return gs(state, S_SIG) != 0
+}
+
+fn frame_no(state: u64) -> u64 {
+    return gs(state, S_FRAME)
+}
+
+// Die Farbe einer Bildnummer. Acht gut unterscheidbare Volltoene --
+// keine Rechnung mit kleinen Unterschieden, denn ein Foto wird
+// maschinell gelesen und ein Unterschied von eins waere keiner.
+fn sig_colour(n: u64) -> u64 {
+    let k: u64 = n & 7
+    if k == 0 {
+        return 0xFF0000
+    }
+    if k == 1 {
+        return 0x00FF00
+    }
+    if k == 2 {
+        return 0x0000FF
+    }
+    if k == 3 {
+        return 0xFFFF00
+    }
+    if k == 4 {
+        return 0xFF00FF
+    }
+    if k == 5 {
+        return 0x00FFFF
+    }
+    if k == 6 {
+        return 0xFF8000
+    }
+    return 0xFFFFFF
+}
+
+// DIE ZERREISSPROBE, und warum sie so und nicht anders aussieht.
+//
+// Reissen ist unter QEMU nicht zu sehen: `screendump` liest die
+// Bildflaeche, nachdem der Bildaufbau fertig ist, und ein halb
+// uebertragenes Bild sieht dabei aus wie ein ganzes. Also wird die
+// Frage umgestellt. Jedes Bild traegt eine Nummer; im Signaturbetrieb
+// malt der Server einen Streifen dieser Farbe an den OBEREN und einen
+// an den UNTEREN Rand jedes Fensters. Beide Streifen entstehen im
+// SELBEN `compose`-Lauf und tragen deshalb dieselbe Farbe.
+//
+// Wird nun mitten in der Uebertragung abgelesen, steht oben noch das
+// alte und unten schon das neue Bild -- ZWEI Farben in einem Fenster.
+// Das ist Reissen, und ein Programm kann es zaehlen. Steht die
+// Bildgrenze, MUSS jedes Foto in jedem Fenster genau eine Farbe zeigen.
+fn paint_sig(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
+    cy1: i64) {
+    if gs(state, S_SIG) == 0 {
+        return
+    }
+    let farbe: u64 = sig_colour(gs(state, S_FRAME))
+    let wx: i64 = win_x(state, i)
+    let wy: i64 = win_y(state, i)
+    let ow: i64 = outer_w(state, i) as i64
+    let oh: i64 = outer_h(state, i) as i64
+    if oh < 2 * SIG_H as i64 {
+        return
+    }
+    fill_clip(state, wx, wy, ow, SIG_H as i64, farbe, cx0, cy0, cx1, cy1)
+    fill_clip(state, wx, wy + oh - SIG_H as i64, ow, SIG_H as i64, farbe,
+        cx0, cy0, cx1, cy1)
 }
 
 // Eine Bildzeile des zusammengesetzten Bildes. Der Hintergrund, dann
@@ -3034,6 +4605,12 @@ fn compose(state: u64) -> u64 {
     if x1 <= x0 || y1 <= y0 {
         return 0
     }
+    // RUNDE VSYNC: DIE BILDNUMMER STEIGT HIER und nicht beim
+    // Uebertragen. Alles, was in diesem Lauf gemalt wird, gehoert zu
+    // EINEM Bild und traegt dieselbe Signatur.
+    ss(state, S_FRAME, gs(state, S_FRAME) + 1)
+    // RUNDE VEKTOR: die Uhr fuer dieses Bild.
+    let t_anfang: u64 = time.tsc()
     // 1. der Hintergrund
     fb.fill(state, x0, y0, x1 - x0, y1 - y0, gs(state, S_DESK))
     // 1b. die Reiter- und Stapelzeilen des Baumes. Sie liegen UNTER den
@@ -3054,10 +4631,34 @@ fn compose(state: u64) -> u64 {
         // Runde TILING hatte dafuer ein eigenes Wort, aber "minimiert"
         // und "hinter einem Reiter" muessen sich getrennt aufheben
         // lassen.
-        if i < MAX_WIN && (wg(state, i, W_FLAGS) & (F_HIDDEN | F_TABBED)) == 0 {
+        // RUNDE ALLTAG: WAEHREND DER SPERRE WIRD NUR DER SPERRER
+        // GEMALT. Eine Ebene ueber allem waere zu wenig: der Starter
+        // liegt auch oben, und im ersten Anlauf stand er im Bild des
+        // Sperrbildschirms. Was nicht dem Sperrer gehoert, ist waehrend
+        // der Sperre nicht auf dem Schirm -- und der Inhalt eines
+        // fremden Fensters ist damit auch nicht ablesbar.
+        if i < MAX_WIN && (wg(state, i, W_FLAGS) & (F_HIDDEN | F_TABBED)) == 0
+            && darf(state, i) {
             paint_win(state, i, x0, y0, x1, y1)
         }
         z = z + 1
+    }
+    // 2a. RUNDE VSYNC: die Signatur der Zerreissprobe, ueber der
+    //     Fensterflaeche und unter allem, was darueber liegt. Sie wird
+    //     je Fenster gemalt, damit ein Foto sie JE FENSTER vergleichen
+    //     kann -- ein Streifen quer ueber den Schirm haette nicht
+    //     gezeigt, welches Fenster zerrissen ist.
+    if gs(state, S_SIG) != 0 {
+        var zs: u64 = 0
+        while zs < gs(state, S_COUNT) {
+            let si: u64 = at_z(state, zs)
+            if si < MAX_WIN
+                && (wg(state, si, W_FLAGS) & (F_HIDDEN | F_TABBED)) == 0 {
+                paint_sig(state, si, x0 as i64, y0 as i64, x1 as i64,
+                    y1 as i64)
+            }
+            zs = zs + 1
+        }
     }
     // 2b. das Vorschaurechteck beim Ziehen -- ueber den Fenstern, unter
     //     dem Zeiger.
@@ -3068,11 +4669,104 @@ fn compose(state: u64) -> u64 {
     if gs(state, S_CURON) != 0 {
         paint_cursor(state, x0, y0, x1, y1)
     }
-    fb.dirty(state, y0, y1)
-    fb.flush(state)
+    // RUNDE VSYNC: DIE WEICHE. Mit Bildgrenze wird das Rechteck nur
+    // VORGEMERKT -- `present` uebertraegt es im Takt, und zwar als
+    // Ganzes. Ohne (die Gegenprobe `nopresent`) geht es den alten Weg
+    // und wird sofort geschoben; dann MUSS die Zerreissprobe wieder
+    // gemischte Signaturen finden.
+    if gs(state, S_VSYNC) != 0 {
+        pend_add(state, x0, y0, x1, y1)
+        ss(state, S_SKIPPED, gs(state, S_SKIPPED) + 1)
+    } else {
+        fb.dirty(state, y0, y1)
+        fb.flush(state)
+    }
     ss(state, S_COMPOSITES, gs(state, S_COMPOSITES) + 1)
     ss(state, S_PIXELS, gs(state, S_PIXELS) + (x1 - x0) * (y1 - y0))
+    // RUNDE VEKTOR: die Bildzeit. `khz` ist die Zyklenzahl je
+    // Millisekunde; geteilt durch 1000 sind es die je Mikrosekunde.
+    // Ist die Uhr noch nicht geeicht (khz == 0), wird nichts gezaehlt
+    // -- eine Division durch null waere hier ein Absturz im Bildtakt.
+    let kh: u64 = time.khz(state)
+    if kh >= 1000 {
+        let t_ende: u64 = time.tsc()
+        // Als Subtraktion auf der Seite, die gross genug ist: der
+        // Zyklenzaehler kann zwischen zwei Ablesungen nicht kleiner
+        // werden, aber ein Weltwechsel in eine Gastmaschine kann ihn
+        // zuruecksetzen. Dann wird dieses eine Bild nicht gezaehlt.
+        if t_ende > t_anfang {
+            let us: u64 = (t_ende - t_anfang) / (kh / 1000)
+            ss(state, S_FRUS, gs(state, S_FRUS) + us)
+            ss(state, S_FRN, gs(state, S_FRN) + 1)
+            ss(state, S_FRLAST, us)
+            if us > gs(state, S_FRMAX) {
+                ss(state, S_FRMAX, us)
+            }
+            if us > 16000 {
+                ss(state, S_FRUEBER, gs(state, S_FRUEBER) + 1)
+            }
+            // Das Fach: die Verdoppelung, in der diese Zeit liegt.
+            var fach: u64 = 0
+            var g: u64 = 1000
+            while fach < 7 && us >= g {
+                g = g * 2
+                fach = fach + 1
+            }
+            ss(state, S_FRH + fach * 8, gs(state, S_FRH + fach * 8) + 1)
+            // Und dasselbe noch einmal, aber erst ab dem elften Bild.
+            if gs(state, S_FRN) > 10 {
+                if us > gs(state, S_FRMAXW) {
+                    ss(state, S_FRMAXW, us)
+                }
+                if us > 16000 {
+                    ss(state, S_FRUEBERW, gs(state, S_FRUEBERW) + 1)
+                }
+            }
+        }
+    }
     return (x1 - x0) * (y1 - y0)
+}
+
+// ------------------------------------------- RUNDE VEKTOR: DIE BILDZEIT
+//
+// Fuenf Ableser, damit die Abnahme die Zahlen holen kann, ohne die
+// Offsets zu kennen.
+
+fn frame_us_sum(state: u64) -> u64 {
+    return gs(state, S_FRUS)
+}
+
+fn frame_us_n(state: u64) -> u64 {
+    return gs(state, S_FRN)
+}
+
+fn frame_us_max(state: u64) -> u64 {
+    return gs(state, S_FRMAX)
+}
+
+fn frame_us_last(state: u64) -> u64 {
+    return gs(state, S_FRLAST)
+}
+
+fn frame_ueber16(state: u64) -> u64 {
+    return gs(state, S_FRUEBER)
+}
+
+// Ein Fach des Histogramms, 0..7.
+fn frame_fach(state: u64, i: u64) -> u64 {
+    if i > 7 {
+        return 0
+    }
+    return gs(state, S_FRH + i * 8)
+}
+
+// Der Betrieb, also ohne die ersten zehn Bilder.
+fn frame_us_maxw(state: u64) -> u64 {
+    return gs(state, S_FRMAXW)
+}
+
+fn frame_ueber16w(state: u64) -> u64 {
+    return gs(state, S_FRUEBERW)
 }
 
 // WIE VIELE TASTEN BEI DIESEM FENSTER ANGEKOMMEN SIND. Die Zahl ist die
@@ -3115,6 +4809,82 @@ fn imin(a: i64, b: i64) -> i64 {
 
 // Ein Fenster in den schmutzigen Bereich. Rahmen, Titelleiste,
 // Schliessfeld, Groessengriff -- und dann die Flaeche der Anwendung.
+// RUNDE VSYNC: EIN FENSTER IN BEWEGUNG, und warum es NICHT der
+// gewoehnliche Weg mit anderen Zahlen ist.
+//
+// Beim Oeffnen und Schliessen soll das Fenster skalieren UND
+// durchscheinen. Skalieren heisst: die Fensterflaeche (`W_BUF`) wird
+// beim Uebertragen abgetastet, nicht Zeile fuer Zeile kopiert.
+// Durchscheinen heisst: jeder Bildpunkt wird mit dem gemischt, was
+// schon dasteht. Beides zusammen geht nur, wenn man an die Flaeche VOR
+// dem Uebertragen herankommt -- genau das, was DESIGN-2 in wlib
+// vermisst hat und was hier, im Server, selbstverstaendlich ist.
+//
+// Der Rahmen wird dabei NICHT mitgemalt: ein Rahmen, der mitskaliert,
+// hat an jeder Kante eine andere Strichstaerke und sieht nach Fehler
+// aus. Gemalt wird die Flaeche, mittig um denselben Punkt, um den auch
+// das fertige Fenster steht.
+fn paint_win_anim(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
+    cy1: i64) {
+    let p: u64 = anim_mix(state, i)
+    // Die Groesse laeuft von AN_SCALE0 nach 1000, die Deckung von 0
+    // nach 255. Beide aus DEMSELBEN p -- zwei Kurven waeren zwei
+    // Bewegungen, die nur zufaellig zusammen enden.
+    let sk: u64 = AN_SCALE0 + (1000 - AN_SCALE0) * p / 1000
+    let a: u64 = 255 * p / 1000
+    if a == 0 {
+        return
+    }
+    let bw: i64 = wg(state, i, W_W) as i64
+    let bh: i64 = wg(state, i, W_H) as i64
+    if bw <= 0 || bh <= 0 {
+        return
+    }
+    // Die verkleinerte Flaeche, mittig zur gewachsenen.
+    let nw: i64 = bw * sk as i64 / 1000
+    let nh: i64 = bh * sk as i64 / 1000
+    if nw <= 0 || nh <= 0 {
+        return
+    }
+    let ix: i64 = win_x(state, i) + border(state) as i64
+    let iy: i64 = win_y(state, i) + title_h(state) as i64
+    let ox: i64 = ix + (bw - nw) / 2
+    let oy: i64 = iy + (bh - nh) / 2
+    let ax0: i64 = imax(ox, cx0)
+    let ay0: i64 = imax(oy, cy0)
+    let ax1: i64 = imin(ox + nw, cx1)
+    let ay1: i64 = imin(oy + nh, cy1)
+    if ax1 <= ax0 || ay1 <= ay0 {
+        return
+    }
+    let buf: u64 = wg(state, i, W_BUF)
+    let stride: u64 = wg(state, i, W_W)
+    var y: i64 = ay0
+    while y < ay1 {
+        // Die Quellzeile: Nachbarabtastung. Ein gewichtetes Mittel
+        // waere schoener und kostet bei zwoelf Zwischenbildern mehr,
+        // als es zeigt -- die Bewegung dauert 120 ms.
+        let sy: i64 = (y - oy) * bh / nh
+        if sy >= 0 && sy < bh {
+            var x: i64 = ax0
+            while x < ax1 {
+                let sx: i64 = (x - ox) * bw / nw
+                if sx >= 0 && sx < bw {
+                    let zeile: u64 = (sy as u64) *% stride *% 4
+                    let q: u64 = buf +% zeile +% (sx as u64) *% 4
+                    let c: u64 = __mmio_read32(q as *mut u32) as u64
+                    fb.pixel_a(state, x as u64, y as u64, c & RGB24, a)
+                }
+                x = x + 1
+            }
+        }
+        y = y + 1
+    }
+    wsv(state, i, W_PAINTS, wg(state, i, W_PAINTS) + 1)
+    wsv(state, i, W_PX,
+        wg(state, i, W_PX) + ((ax1 - ax0) * (ay1 - ay0)) as u64)
+}
+
 fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     let wx: i64 = win_x(state, i)
     let wy: i64 = win_y(state, i)
@@ -3127,6 +4897,20 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     if ax1 <= ax0 || ay1 <= ay0 {
         return
     }
+    // RUNDE VSYNC: laeuft eine Oeffnungs- oder Schliessbewegung, wird
+    // das Fenster ANDERS gemalt -- skaliert und durchscheinend -- und
+    // der gewoehnliche Weg entfaellt vollstaendig.
+    if wg(state, i, W_ANK) != 0 {
+        paint_win_anim(state, i, cx0 as i64, cy0 as i64, cx1 as i64,
+            cy1 as i64)
+        return
+    }
+    // RUNDE MESSTAFEL: AB HIER WIRD GEMALT. Der Zaehler steht vor der
+    // Verzweigung nach `deko`, weil beide Zweige malen -- ein Zaehler je
+    // Zweig waere zweimal dieselbe Aussage mit doppelter Fehlerquelle.
+    wsv(state, i, W_PAINTS, wg(state, i, W_PAINTS) + 1)
+    wsv(state, i, W_PX,
+        wg(state, i, W_PX) + ((ax1 - ax0) * (ay1 - ay0)) as u64)
     // OHNE SCHMUCK: kein Rahmen, keine Titelleiste, kein Schliessfeld.
     // Die Flaeche der Anwendung faengt am aeusseren Rechteck an, und der
     // ganze Rest dieser Funktion entfaellt. Ein Schreibtisch mit
@@ -3543,27 +5327,154 @@ fn cap_face(state: u64, x: i64, y: i64, h: i64, tr: u64, farbe: u64,
 //              versetzte, weil der Knopf dann "wiederherstellen"
 //              heisst und nicht "maximieren"
 //   CAP_CLOSE  ein Kreuz aus zwei Diagonalen
+// ==================================================== RUNDE VEKTOR
+//
+// DIE DREI ZEICHEN, GESTRICHEN STATT GESETZT.
+//
+// Was hier stand, waren gesetzte Bildpunkte: `cap_px` in einer
+// Schleife fuer das Kreuz, `cap_box` aus vier Linien fuer das
+// Quadrat -- und alles auf FESTE ZEHN MAL ZEHN Bildpunkte.
+//
+// Der Fehler daran ist nicht der Geschmack, sondern die Rechnung:
+// `cap_w` ist `CAP_W0 * uisc` und waechst mit der Oberflaeche
+// (wm.fi:3043), die Zehn hier wuchs nicht mit. Bei Vervielfachung 2
+// war die Schaltflaeche sechzig Bildpunkte breit und das Kreuz darin
+// zehn -- ein Fliegendreck in einem Feld. Dazu war die Diagonale eine
+// Treppe aus einzelnen Punkten, weil eine gesetzte Diagonale nichts
+// anderes sein kann.
+//
+// Jetzt: die Groesse ist `10 * uisc`, und die Striche sind STRICHE --
+// `vektor.strichen` mit Breite und runden Enden, gerastert mit
+// derselben Kantenglaettung wie alles andere. Der Aufrufer uebergibt
+// weiter die linke obere Ecke eines Quadrats; wie gross das ist,
+// rechnet diese Funktion selbst.
 fn cap_glyph(state: u64, n: u64, x: i64, y: i64, farbe: u64, i: u64,
     ax0: i64, ay0: i64, ax1: i64, ay1: i64) {
-    if n == CAP_MIN {
-        cap_h(state, x, y + 5, 10, farbe, ax0, ay0, ax1, ay1)
+    let sk: u64 = uisc(state)
+    let d: u64 = 10 * sk
+    // Welches der vier Zeichen? Maximieren und Wiederherstellen sind
+    // zwei verschiedene, auch wenn derselbe Knopf sie zeigt.
+    var k: u64 = n
+    if n == CAP_MAX && (wg(state, i, W_FLAGS) & F_MAXIMIZED) != 0 {
+        k = 3
+    }
+    if k >= CG_N {
         return
     }
-    if n == CAP_MAX {
-        if (wg(state, i, W_FLAGS) & F_MAXIMIZED) != 0 {
-            cap_box(state, x + 2, y, 8, 8, farbe, ax0, ay0, ax1, ay1)
-            cap_box(state, x, y + 2, 8, 8, farbe, ax0, ay0, ax1, ay1)
-            return
+    cg_bauen(state, k, d, sk)
+    if cg_gut[(k) as usize] == 0 {
+        return
+    }
+    cg_treffer = cg_treffer + 1
+    // Die fertige Deckung in den Bildpuffer mischen.
+    let bw: u64 = cg_w[(k) as usize]
+    let bh: u64 = cg_h[(k) as usize]
+    var r: u64 = 0
+    while r < bh {
+        var c: u64 = 0
+        while c < bw {
+            let a: u64 = cg_deck[((k * CG_MAX + r * bw + c)) as usize] as u64
+            if a != 0 {
+                px_clip(state, x + c as i64, y + r as i64, farbe, a,
+                    ax0, ay0, ax1, ay1)
+            }
+            c = c + 1
         }
-        cap_box(state, x, y, 10, 10, farbe, ax0, ay0, ax1, ay1)
+        r = r + 1
+    }
+}
+
+// EIN ZEICHEN RASTERN -- aber nur, wenn es noch nicht dasteht.
+//
+// Wechselt die Vervielfachung, gilt der ganze Speicher nicht mehr:
+// ein Zeichen in Zielgroesse 20 ist kein vergroessertes Zeichen der
+// Groesse 10, und genau darum geht es in dieser Runde.
+fn cg_bauen(state: u64, k: u64, d: u64, sk: u64) {
+    if cg_gr != d {
+        var j: u64 = 0
+        while j < CG_N {
+            cg_gut[(j) as usize] = 0
+            j = j + 1
+        }
+        cg_gr = d
+    }
+    if cg_gut[(k) as usize] == 1 {
         return
     }
-    var k: i64 = 0
-    while k < 10 {
-        cap_px(state, x + k, y + k, farbe, ax0, ay0, ax1, ay1)
-        cap_px(state, x + k, y + 9 - k, farbe, ax0, ay0, ax1, ay1)
-        k = k + 1
+    let di: i64 = d as i64
+    // Die Strichbreite: anderthalb Bildpunkte mal Vervielfachung. Ein
+    // Haarstrich verschwindet auf einem dichten Schirm.
+    let sb: i64 = (3 * sk as i64 * vektor.EINS) / 2
+    // Das Zeichen wird bei (0,0) gebaut und liegt danach bei (0,0) in
+    // der Tafel -- der Aufrufer verschiebt beim Malen.
+    vektor.pfad_neu()
+    vektor.strich_breite(sb)
+    vektor.strich_ende(vektor.ENDE_RUND)
+    vektor.strich_ecke(vektor.ECKE_RUND)
+    if k == CAP_MIN {
+        vektor.nach(0, (di / 2) * vektor.EINS)
+        vektor.linie(di * vektor.EINS, (di / 2) * vektor.EINS)
+        vektor.strichen(0)
+    } else if k == CAP_MAX {
+        cg_kasten(0, 0, di, di)
+    } else if k == 3 {
+        // Wiederherstellen: zwei versetzte Quadrate.
+        let e: i64 = 2 * sk as i64
+        cg_kasten(e, 0, di - e, di - e)
+        cg_kasten(0, e, di - e, di - e)
+    } else {
+        vektor.nach(0, 0)
+        vektor.linie(di * vektor.EINS, di * vektor.EINS)
+        vektor.strichen(0)
+        vektor.nach(di * vektor.EINS, 0)
+        vektor.linie(0, di * vektor.EINS)
+        vektor.strichen(0)
     }
+    if vektor.rastern(vektor.NICHTNULL) == 0 {
+        return
+    }
+    let bw: u64 = vektor.breite()
+    let bh: u64 = vektor.hoehe()
+    if bw * bh > CG_MAX || bw == 0 || bh == 0 {
+        return
+    }
+    let ox: i64 = vektor.ux0()
+    let oy: i64 = vektor.uy0()
+    var r: u64 = 0
+    while r < bh {
+        var c: u64 = 0
+        while c < bw {
+            cg_deck[((k * CG_MAX + r * bw + c)) as usize] =
+                (vektor.deckung(ox + c as i64, oy + r as i64) & 0xFF) as u8
+            c = c + 1
+        }
+        r = r + 1
+    }
+    cg_w[(k) as usize] = bw
+    cg_h[(k) as usize] = bh
+    cg_gut[(k) as usize] = 1
+    cg_bauten = cg_bauten + 1
+}
+
+// Ein Quadrat als Rahmen, in den laufenden Pfad.
+fn cg_kasten(x: i64, y: i64, w: i64, h: i64) {
+    vektor.nach(x * vektor.EINS, y * vektor.EINS)
+    vektor.linie((x + w) * vektor.EINS, y * vektor.EINS)
+    vektor.linie((x + w) * vektor.EINS, (y + h) * vektor.EINS)
+    vektor.linie(x * vektor.EINS, (y + h) * vektor.EINS)
+    vektor.linie(x * vektor.EINS, y * vektor.EINS)
+    vektor.strichen(1)
+}
+
+// Wie oft ein fertiges Zeichen benutzt und wie oft eines gerastert
+// wurde. Die zweite Zahl MUSS klein bleiben -- sie ist der Beleg,
+// dass der Speicher wirkt.
+fn cap_glyph_treffer() -> u64 {
+    return cg_treffer
+}
+
+fn cap_glyph_bauten() -> u64 {
+    return cg_bauten
 }
 
 fn cap_px(state: u64, x: i64, y: i64, farbe: u64, ax0: i64, ay0: i64,
@@ -3633,6 +5544,14 @@ fn damage_caption(state: u64, i: u64) {
 // Bildschirms. Ueber `rep movsq`, wie alles andere in `fb.fi` -- eine
 // Schleife aus Einzelzugriffen kostete dort gemessen den Faktor acht.
 fn fb_row(state: u64, x: u64, y: u64, src: u64, n: u64) {
+    // RUNDE BLECHDREI: DIESER WEG GEHT AN `fb.hline` VORBEI -- er
+    // kopiert die Fensterflaeche wortweise direkt in den Zweitpuffer.
+    // Ohne die Grenze hier waere das reservierte Band der Messtafel
+    // genau von dem ueberschrieben worden, der es am haeufigsten
+    // ueberschrieben hat: dem Fensterserver.
+    if y < fb.band_lo(state) {
+        return
+    }
     let ziel: u64 = fb.draw_at(state) +% y *% fb.pitch(state) +% x *% 4
     copy_words(ziel, src, n *% 4 / 8)
     if (n & 1) != 0 {
@@ -3673,6 +5592,24 @@ fn title_mark(state: u64, m: u64, x: i64, y: i64, color: u64,
     }
 }
 
+static mut titel_schnitt: u64 = 0
+static mut titel_max: u64 = 0
+// RUNDE BLECH2: die ALTE Zaehlweise (Schnittfenster beginnt rechts vom
+// Titelanfang), nur noch fuer `wm: fen` -- siehe `title_text`.
+static mut titel_schnitt_alt: u64 = 0
+
+fn titel_beschnitten() -> u64 {
+    return titel_schnitt
+}
+
+fn titel_alt() -> u64 {
+    return titel_schnitt_alt
+}
+
+fn titel_fehlt() -> u64 {
+    return titel_max
+}
+
 fn title_text(state: u64, i: u64, f: u64, x: i64, y: i64, color: u64,
     ax0: i64, ay0: i64, ax1: i64, ay1: i64, grenze: i64) {
     // RUNDE I18N: derselbe Umbau wie in `text` -- der Titel eines
@@ -3692,6 +5629,54 @@ fn title_text(state: u64, i: u64, f: u64, x: i64, y: i64, color: u64,
     // worden, diese Stelle nicht. Die Runde I18N hat die Schleife
     // darunter auf UTF-8 umgebaut und die falsche Basis dabei
     // uebernommen; hier stehen beide Aenderungen zusammen.
+    // ============================================== RUNDE VIELKERN
+    // WIRD DER TITEL LINKS ABGESCHNITTEN? DIE ZAHL DAZU.
+    //
+    // Justin sieht auf mehreren Fotos bei 3440x1440 `inal -- sh` statt
+    // `Terminal -- sh`: die ersten vier bis fuenf Zeichen fehlen,
+    // waehrend der Rahmen richtig sitzt. Der Verdacht war eine
+    // Zeilenbreitenrechnung, die bei 3440 bricht. GEMESSEN und
+    // WIDERLEGT (docs/RUNDE-VIELKERN.md): mit pitch 13760 bei 3424
+    // Bildpunkten Breite -- genau der Fall echter Firmware -- ist das
+    // Bild bildpunktgleich mit dem ungepolsterten Lauf.
+    //
+    // Bleibt der andere Weg, auf dem Zeichen links verschwinden
+    // koennen: das SCHNITTFENSTER. `fb_glyph` laesst jeden Bildpunkt
+    // mit `pxx < ax0` aus. Liegt `ax0` rechts vom Titelanfang, fehlt
+    // genau der linke Teil des Textes und sonst nichts -- der Rahmen
+    // wird in einem anderen Aufruf mit einem anderen Schnitt gemalt
+    // und bleibt heil. Das ist keine Behauptung, sondern jetzt eine
+    // ZAHL: `TK` auf Tafelzeile 7 sagt, wie oft und wie weit.
+    // ====================================================== RUNDE BLECH2
+    // TK ZAEHLTE DAS FALSCHE. Justins Tafel: `7 LEISTE ... TK 643`, und
+    // auf demselben Foto steht `Terminal -- sh` VOLLSTAENDIG in der
+    // Titelleiste. `x < ax0` heisst nur: das Schnittfenster dieses
+    // Anstrichs faengt rechts vom Titelanfang an -- und das ist bei
+    // JEDEM Teilanstrich so, dessen schmutziges Rechteck nicht am linken
+    // Fensterrand beginnt: der Zeiger, der ueber die Fensterflaeche
+    // laeuft, ein Fenster, das darueber aufgeht. Die Bildpunkte links
+    // vom Schnitt stehen unveraendert im Zweitpuffer und werden mit der
+    // Zeile zusammen uebertragen; es fehlt nichts. GEMESSEN in
+    // tools/blech2/run.sh: alte Zaehlweise in die Hunderte, Titel im
+    // Bild bildpunktgenau vollstaendig (`checkshot.py tkette`).
+    //
+    // Was einen Titel WIRKLICH verschwinden laesst, ist das Band der
+    // Messtafel: `fb.pixel` weist jede Zeile unter `band_lo` ab, still.
+    // Ein Fenster, das nach oben in das Band geschoben wird, verliert
+    // seinen Titel genau dort. DAS zaehlt TK jetzt: Titelzeilen, die im
+    // Band liegen. Die alte Zahl bleibt als `tka=` in `wm: fen`.
+    if x < ax0 {
+        titel_schnitt_alt = titel_schnitt_alt + 1
+    }
+    let oben: i64 = y - ttf.ascent(state, f, px)
+    let band: i64 = fb.band_lo(state) as i64
+    if oben < band {
+        titel_schnitt = titel_schnitt + 1
+        let fehlt: u64 = (band - oben) as u64
+        if fehlt > titel_max {
+            titel_max = fehlt
+        }
+    }
     let tp: u64 = state + wat(i) + W_TITLE
     var cx: i64 = x * 64
     var vorher: u64 = 0
@@ -3754,36 +5739,283 @@ fn fb_glyph(state: u64, slot: u64, x: i64, y: i64, color: u64,
 }
 
 // ==================================== RUNDE HIDPUNKTE: DIE MESSLEISTE
+// ======================================= RUNDE MESSTAFEL: SIEBEN ZEILEN
 //
-// EINE ZEILE, DIE NICHT VOM FENSTERSYSTEM ABHAENGT.
+// EINE ANZEIGE, DIE NICHT VOM FENSTERSYSTEM ABHAENGT.
 //
 // Der Eingabepuls stand bisher IM Terminalfenster. Auf Justins Brett
 // war genau dieses Fenster zu schmal und links abgeschnitten -- die
 // Diagnose war also da, wo man sie am wenigsten lesen konnte. Diese
-// Zeile wird NACH `compose` unmittelbar in den Rahmenpuffer gemalt,
+// Zeilen werden NACH `compose` unmittelbar in den Rahmenpuffer gemalt,
 // mit dem eingebauten Bitmapzeichensatz (kein TTF, kein Fenster, kein
-// Puffer, keine Arena). Sie steht deshalb auch dann da, wenn der
+// Puffer, keine Arena). Sie stehen deshalb auch dann da, wenn der
 // Fensterserver, die Taskleiste und die Schrift allesamt versagen.
 //
-// Oben links, schwarz hinterlegt, mit `uisc` vergroessert.
-fn messleiste(state: u64, p: u64, n: u64) {
+// RUNDE MESSTAFEL, UND DAS IST DER GRUND FUER DEN UMBAU: Justin
+// fotografiert den Bildschirm mit dem Mobiltelefon AUS ZWEI METERN.
+// Eine Zeile mit zwanzig Zahlen in `uisc`-Groesse ist auf so einem
+// Foto nicht zu lesen. Also: sieben kurze Zeilen, ein Maszstab GROESSER
+// als der der Oberflaeche, und -- das ist das eigentliche Werkzeug --
+// JEDE STUFE BEKOMMT EINE FARBE. Gruen heiszt "hier kam etwas an", rot
+// heiszt "hier kam nichts an". Die ERSTE ROTE ZEILE ist die Stelle, an
+// der der Eingabeweg abreiszt. Das kann man aus zwei Metern erkennen,
+// ohne eine einzige Ziffer zu entziffern.
+// So breit ist die laengste Tafelzeile (kgui.TAFEL_SPALTEN). Hier
+// noch einmal, weil `wm` `kgui` nicht einbinden darf -- der
+// Modulgraph ist ein Baum und kgui haengt ueber wm.
+// ================================================== RUNDE BLECHDREI
+// Justins Foto zeigte "11 USB DEV 0 FUND 3 HUB 0 KBD" -- mitten im
+// Wort abgeschnitten. Der Grund war eine ZWEITE Zahl: `kgui` merkt
+// sich 40 Zeichen je Zeile, gemalt und uebertragen wurden aber nur
+// `MESS_SPALTEN` = 30. Alles ab Zeichen 31 stand im Zweitpuffer und
+// kam nie ueber den Bus. Zwei Zahlen fuer eine Sache, und die
+// kleinere gewinnt still.
+const MESS_SPALTEN: u64 = 48
+// Wie viele Zeilen die Tafel hat. Spiegel von `kgui.TAFEL_ZEILEN` --
+// `wm` darf `kgui` nicht einbinden (der Modulgraph ist ein Baum).
+// ============================================== RUNDE STARTKNOPF
+// ZUM DRITTEN MAL DIESELBE ZAHL AN ZWEI STELLEN.
+//
+// Der Kommentar in `messzeile_x` warnt seit BLECHDREI davor ("Zwei
+// Zahlen fuer eine Sache, schon wieder") -- und genau das stand hier
+// wieder: `kgui.TAFEL_ZEILEN` war 24, `MESS_ZEILEN` 20. Die Folge:
+// `mess_projespalte` rechnete zehn Zeilen je Spalte, waehrend
+// `messhoehe` fuer 24 Zeilen ein Band von 582 Bildpunkten reserviert
+// hat -- die Zeilen 20..23 landeten auf 10..13, und ein Drittel des
+// Bandes blieb schwarz.
+// ================================================== RUNDE LEISTE
+// ZUM VIERTEN MAL, UND JETZT MIT EINEM RIEGEL DAVOR.
+//
+// Der Absatz darueber sagt "zum dritten Mal dieselbe Zahl an zwei
+// Stellen" -- und beim vierten Mal hat sie den Kern umgebracht:
+//
+//     *** EXCEPTION 14 #PF  err=0xb  cr2=0x622140
+//       rip=0x26d0b7 (fb.fill_words+0xa7)  rsp=0x5096e0
+//
+// `kgui.TAFEL_ZEILEN` war 24, diese Zahl 20. `messzeile_x` rechnet aus
+// ihr die Spalte; fuer die Zeilen 20..23 kam eine Spalte heraus, die
+// es nicht gibt, und der Balken, der die Zeile loescht, lief aus dem
+// Puffer heraus.
+//
+// ZWEI DINGE, NICHT EINS. Die Zahl steht jetzt auf 24 -- und weil
+// dieselbe Verwechslung viermal passiert ist, gibt es zusaetzlich
+// einen RIEGEL: `messzeile` und `messzeile_x` nehmen keine Zeilennummer
+// mehr an, die es nicht gibt. Eine falsche Zahl malt dann nichts, und
+// nichts malen ist immer besser als woanders hinmalen.
+const MESS_ZEILEN: u64 = 25
+
+fn messk(state: u64) -> u64 {
+    // Eine Stufe groesser als die Oberflaeche, hoechstens 4. Auf
+    // 3440x1440 ist `uisc` 2, die Tafel also 3: 24 x 48 Bildpunkte je
+    // Zeichen, rund elf Millimeter hoch. Das ist aus zwei Metern
+    // dieselbe Winkelgroesse wie 6-mm-Text aus einem Meter.
+    // ============================================ RUNDE BLECHDREI
+    // AUS DER BILDBREITE, NICHT AUS `uisc`.
+    //
+    // Zwei Gruende. Erstens steht `uisc` erst nach `surface` fest, die
+    // Tafel malt aber schon aus dem Boot-Protokoll heraus -- auf
+    // Justins 3440x1440 kam damit k=2 heraus, obwohl dort k=3 gemeint
+    // war. Zweitens ist die Frage hier eine andere als bei der
+    // Oberflaeche: nicht "wie gross ist ein Knopf", sondern "was kann
+    // ein Mensch aus einem Meter mit dem Handy noch fotografieren".
+    // 3440 / 900 = 3 -> Zeichen von 24 x 48 Bildpunkten, auf einem
+    // 34-Zoll-Schirm rund elf Millimeter hoch.
+    var k: u64 = fb.width(state) / 900
+    if k < 2 {
+        k = 2
+    }
+    if k > 4 {
+        k = 4
+    }
+    return k
+}
+
+fn messhoehe(state: u64, zeilen: u64) -> u64 {
+    var z: u64 = zeilen
+    // RUNDE BLECHDREI: bei mehreren Spalten ist die Tafel nur so hoch
+    // wie EINE Spalte. `messleiste` ruft weiter mit einer Zeile.
+    if z > 1 {
+        z = (z + mess_kol(state) - 1) / mess_kol(state)
+    }
+    return font.GLYPH_H * messk(state) * z + 2 * messk(state)
+}
+
+// DER GRUND WIRD EINMAL GEFUELLT, nicht je Zeile. Sieben schwarze
+// Balken ueber die volle Schirmbreite waeren auf 3440 Punkten 1,15
+// Millionen Bildpunkte JE RUNDE -- der Grund hoert deshalb dort auf,
+// wo die laengste Zeile aufhoert (`spalten` Zeichen).
+// RUNDE TAFEL: UEBER DIE VOLLE BREITE, AB BILDPUNKT NULL.
+//
+// Vorher hoerte der schwarze Grund dort auf, wo die laengste Zeile
+// aufhoerte -- 726 von 3440 Bildpunkten. Auf Justins Foto war davon
+// nichts zu erkennen: ein schmaler dunkler Streifen links oben sieht
+// aus wie ein Fensterrand. Ein Messgeraet, das man fuer Zierat haelt,
+// ist keines.
+//
+// Jetzt: schwarzer Balken ueber die GANZE Breite, ab Bildpunkt 0,
+// darunter eine helle Trennlinie. Aus zwei Metern ist das ein Balken
+// und kein Fensterrand. `spalten` bleibt in der Aufrufliste, weil die
+// einzeilige `messleiste` sie noch benutzt.
+// ================================================== RUNDE BLECHZWEI
+// Wie breit die Tafel wirklich ist. Bis zu dieser Runde ging der
+// schwarze Balken ueber die GANZE Bildbreite -- gut auf einem Foto,
+// aber 3440 Bildpunkte je Zeile, und die muessen alle ueber PCIe. Der
+// Text ist `spalten` Zeichen breit; der Balken bekommt einen halben
+// Zeichenrand dazu und hoert dann auf. Auf 3440 sind das rund 780 statt
+// 3440 Bildpunkte, also ein Fuenftel der Uebertragung.
+fn mess_breite(state: u64, spalten: u64) -> u64 {
+    let k: u64 = messk(state)
+    var b: u64 = font.GLYPH_W * k * (spalten + 1) + 2 * k
+    if b > fb.width(state) {
+        b = fb.width(state)
+    }
+    return b
+}
+
+// Wo eine einzelne Tafelzeile anfaengt und wie hoch sie ist. Damit
+// uebertraegt `kgui` nur die Zeilen, die sich WIRKLICH geaendert haben.
+// ================================================== RUNDE BLECHDREI
+// ZWEI SPALTEN NEBENEINANDER, UND WARUM.
+//
+// Die Tafel bekommt in dieser Runde ein FEST RESERVIERTES Band am
+// oberen Rand, das niemand ueberschreibt (`fb.set_band`). Vierzehn
+// Zeilen uebereinander waeren auf Justins 3440x1440 aber 14 * 48 =
+// 678 Bildpunkte, also fast die halbe Bildhoehe -- ein Messgeraet,
+// das den Messgegenstand verdeckt.
+//
+// Also sieben Zeilen in zwei Spalten: 342 Bildpunkte hoch, 2 * 1182
+// breit. Passen zwei Spalten nicht nebeneinander (schmale Schirme der
+// Regressionslaeufe), faellt es von selbst auf eine zurueck.
+// ============================================ RUNDE BLECHFUENF
+// DIE DRITTE SPALTE, UND WARUM SIE SEIN MUSS.
+//
+// Die Tafel hat zwei Zeilen mehr bekommen (die Tastatur und die Uhr),
+// und mit zwanzig Zeilen in ZWEI Spalten wurde das Band 487 Bildpunkte
+// hoch. `fb.set_band` lehnt alles ueber einem Drittel des Schirms ab --
+// bei 1440 sind das 480 -- und lehnte es AB: `BAND H 0`, gemessen.
+// Damit war der Schutz weg, den die Vorrunde eingezogen hat, und die
+// Tafel haette wieder uebermalt werden koennen.
+//
+// Justins Schirm ist 3440 breit; drei Spalten zu 1178 Bildpunkten
+// passen zweimal hinein. Sieben Zeilen statt zehn, Band 170 statt 487.
+// Die Breite war nie das Problem, die Hoehe ist es.
+fn mess_kol(state: u64) -> u64 {
+    let b: u64 = mess_breite(state, MESS_SPALTEN)
+    if 3 * b <= fb.width(state) {
+        return 3
+    }
+    if 2 * b <= fb.width(state) {
+        return 2
+    }
+    return 1
+}
+
+// RUNDE LEISTE: die Zahl NACH AUSSEN, damit `kgui` sie mit seiner
+// eigenen vergleichen kann. Vier Runden sind daran verlorengegangen,
+// dass zwei Dateien dieselbe Zahl getrennt fuehren und niemand merkt,
+// wenn sie auseinanderlaufen. `wm` darf `kgui` nicht einbinden -- aber
+// `kgui` darf `wm` fragen, und genau das tut es jetzt beim Start.
+fn mess_zeilen() -> u64 {
+    return MESS_ZEILEN
+}
+
+// Zeilen JE SPALTE -- aufgerundet, damit keine Zeile herausfaellt.
+fn mess_projespalte(state: u64) -> u64 {
+    let k: u64 = mess_kol(state)
+    return (MESS_ZEILEN + k - 1) / k
+}
+
+// Die volle Breite der Tafel: alle Spalten nebeneinander.
+fn mess_vollbreite(state: u64) -> u64 {
+    var b: u64 = mess_kol(state) * mess_breite(state, MESS_SPALTEN)
+    if b > fb.width(state) {
+        b = fb.width(state)
+    }
+    return b
+}
+
+fn messzeile_x(state: u64, zeile: u64) -> u64 {
+    // GEMESSEN UND KORRIGIERT: im ersten Lauf stand `MESS_ZEILEN` auf
+    // 14, waehrend `kgui` schon sechzehn Zeilen schickte. Die beiden
+    // letzten landeten damit in einer DRITTEN Spalte bei x=2364 --
+    // ausserhalb des schwarzen Grundes, mitten auf dem Schreibtisch,
+    // gruen auf blau. Zwei Zahlen fuer eine Sache, schon wieder. Die
+    // Klemme hier sorgt dafuer, dass eine solche Zeile schlimmstenfalls
+    // eine andere ueberschreibt, statt aus der Tafel zu fallen.
+    var kol: u64 = zeile / mess_projespalte(state)
+    if kol >= mess_kol(state) {
+        kol = mess_kol(state) - 1
+    }
+    return kol * mess_breite(state, MESS_SPALTEN)
+}
+
+fn messzeile_y(state: u64, zeile: u64) -> u64 {
+    let k: u64 = messk(state)
+    return k + (zeile % mess_projespalte(state)) * font.GLYPH_H * k
+}
+
+fn messzeile_h(state: u64) -> u64 {
+    return font.GLYPH_H * messk(state)
+}
+
+fn mess_grund(state: u64, zeilen: u64, spalten: u64) {
     if !fb.ready(state) {
         return
     }
-    let k: u64 = uisc(state)
-    let gw: u64 = font.GLYPH_W * k
-    let gh: u64 = font.GLYPH_H * k
-    let breite: u64 = fb.width(state)
-    let hoehe: u64 = gh + 2 * k
+    let k: u64 = messk(state)
+    let hoehe: u64 = messhoehe(state, zeilen)
     if hoehe >= fb.height(state) {
         return
     }
-    let bg: u64 = fb.rgb(state, 0x00, 0x00, 0x00)
-    let fg: u64 = fb.rgb(state, 0x00, 0xFF, 0x66)
-    fb.fill(state, 0, 0, breite, hoehe, bg)
+    let breite: u64 = mess_vollbreite(state)
+    fb.fill(state, 0, 0, breite, hoehe, fb.rgb(state, 0x00, 0x00, 0x00))
+    // Die Trennlinie unten -- damit die Tafel auf einem Foto eine
+    // KANTE hat und nicht in den Schreibtisch ausfranst.
+    let rand: u64 = fb.rgb(state, 0xFF, 0xE0, 0x00)
+    fb.fill(state, 0, hoehe - k, breite, k, rand)
+    fb.dirty(state, 0, hoehe)
+}
+
+// EINE ZEILE. `zeile` zaehlt ab null, `fg` ist die Farbe.
+fn messzeile(state: u64, zeile: u64, p: u64, n: u64, fg: u64) {
+    if !fb.ready(state) {
+        return
+    }
+    // RUNDE LEISTE: DER RIEGEL. Eine Zeile, die es nicht gibt, wird
+    // nicht gemalt -- statt an einer ausgerechneten Stelle ausserhalb
+    // des Bandes zu landen. Siehe MESS_ZEILEN.
+    if zeile >= MESS_ZEILEN {
+        return
+    }
+    let k: u64 = messk(state)
+    let gw: u64 = font.GLYPH_W * k
+    let gh: u64 = font.GLYPH_H * k
+    let y0: u64 = messzeile_y(state, zeile)
+    let x0: u64 = messzeile_x(state, zeile)
+    if y0 + gh >= fb.height(state) || x0 >= fb.width(state) {
+        return
+    }
+    // ============ RUNDE BLECHZWEI: DIE ZEILE ZUERST LOESCHEN.
+    //
+    // Justin fotografiert ein DOPPELBILD: alte und neue Zeichen an
+    // derselben Stelle uebereinander. Bis zu dieser Runde loeschte nur
+    // `mess_grund` den Grund, und `mess_grund` malt einen Balken ueber
+    // ALLE Zeilen -- das ist teuer, und im Streifenbetrieb hat es die
+    // Unterbrechung mitten hineingeschlagen (siehe `fb.flush_stripe`).
+    // Wird eine Zahl kuerzer ("MAL 130" -> "MAL 61"), stehen die alten
+    // Ziffern rechts daneben weiter da.
+    //
+    // Jetzt loescht JEDE Zeile ihr eigenes Feld, unmittelbar bevor sie
+    // gemalt wird. Es kostet einen Balken je Zeile statt einen fuer
+    // alle -- dieselbe Flaeche, aber lueckenlos.
+    var breite: u64 = mess_breite(state, MESS_SPALTEN)
+    if x0 + breite > fb.width(state) {
+        breite = fb.width(state) - x0
+    }
+    fb.fill(state, x0, y0, breite, gh, fb.rgb(state, 0x00, 0x00, 0x00))
     var i: u64 = 0
-    var x: u64 = k
-    while i < n && x + gw <= breite {
+    var x: u64 = x0 + k
+    while i < n && x + gw <= x0 + breite {
         let ch: u64 = kstate.get8(p + i)
         var r: u64 = 0
         while r < font.GLYPH_H {
@@ -3796,7 +6028,7 @@ fn messleiste(state: u64, p: u64, n: u64) {
                         var dx: u64 = 0
                         while dx < k {
                             fb.pixel(state, x + c * k + dx,
-                                k + r * k + dy, fg)
+                                y0 + r * k + dy, fg)
                             dx = dx + 1
                         }
                         dy = dy + 1
@@ -3809,31 +6041,94 @@ fn messleiste(state: u64, p: u64, n: u64) {
         x = x + gw
         i = i + 1
     }
-    fb.dirty(state, 0, hoehe)
+    fb.dirty(state, y0, y0 + gh)
+}
+
+// DIE FARBEN DER TAFEL. Gruen: hier kam etwas an. Rot: hier nicht.
+fn mess_gruen(state: u64) -> u64 {
+    return fb.rgb(state, 0x00, 0xFF, 0x66)
+}
+
+fn mess_rot(state: u64) -> u64 {
+    return fb.rgb(state, 0xFF, 0x40, 0x40)
+}
+
+fn mess_weiss(state: u64) -> u64 {
+    return fb.rgb(state, 0xFF, 0xFF, 0xFF)
+}
+
+fn mess_gelb(state: u64) -> u64 {
+    return fb.rgb(state, 0xFF, 0xE0, 0x00)
+}
+
+// Gruen, wenn der Zaehler laeuft -- sonst rot.
+fn mess_ampel(state: u64, v: u64) -> u64 {
+    if v == 0 {
+        return mess_rot(state)
+    }
+    return mess_gruen(state)
+}
+
+// DIE ALTE EINZEILIGE FASSUNG, unveraendert im Verhalten: sie malt
+// ihren eigenen Grund und steht in Zeile null. Sie bleibt, weil die
+// Runde FASSUNG mit ihr belegt hat, dass eine Zeile ueber `compose`
+// hinweg stehenbleibt, und weil ein Kern ohne Tafel (Selbsttest) sie
+// weiter braucht.
+fn messleiste(state: u64, p: u64, n: u64) {
+    mess_grund(state, 1, n + 1)
+    messzeile(state, 0, p, n, mess_gruen(state))
 }
 
 fn paint_cursor(state: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
-    let mx: i64 = gs(state, S_CURX) as i64
-    let my: i64 = gs(state, S_CURY) as i64
-    let schwarz: u64 = rgb24(state, CURSOR_EDGE)
-    let weiss: u64 = rgb24(state, CURSOR_BODY)
-    let k: u64 = uisc(state)
+    // ======================================== RUNDE ECHTHARDWARE-4
+    // DREI LAGEN MIT DECKUNG STATT ZWEI BITMASKEN.
+    //
+    // Vorher: je Bildpunkt ein Bit Fuellung und ein Bit Umriss, jedes
+    // Bit bei Vervielfachung 2 zu einem 2x2-Block aufgeblasen. Kein
+    // Zwischenwert, also keine Kantenglaettung -- und bei doppelter
+    // Vervielfachung doppelt so grobe Treppen.
+    //
+    // Jetzt liefert `zeiger.fi` je Bildpunkt DREI Deckungen (Kern,
+    // Rand, Schatten), gerastert in Zielgroesse mit neun Proben. Sie
+    // werden von hinten nach vorn ueber das fertige Bild gelegt:
+    //   Schatten, schwarz und schwach -- er hebt den Zeiger ab,
+    //   Rand, weiss -- damit er auf dunklem Grund sichtbar bleibt,
+    //   Kern, dunkel -- damit er auf hellem Grund sichtbar bleibt.
+    let form: u64 = gs(state, S_SHAPE)
+    let g: u64 = cur_w(state)
+    zeiger.karte_bauen(form, g)
+    let mx: i64 = gs(state, S_CURX) as i64 - cur_ox(state) as i64
+    let my: i64 = gs(state, S_CURY) as i64 - cur_oy(state) as i64
+    let dunkel: u64 = rgb24(state, CURSOR_EDGE)
+    let hell: u64 = rgb24(state, CURSOR_BODY)
+    let schwarz: u64 = rgb24(state, 0)
     var r: u64 = 0
-    while r < CUR_H * k {
+    while r < g {
         let py: i64 = my + r as i64
         if py >= cy0 as i64 && py < cy1 as i64 {
-            let u: u64 = cursor_row_of(gs(state, S_SHAPE), r / k, false)
-            let f: u64 = cursor_row_of(gs(state, S_SHAPE), r / k, true)
             var c: u64 = 0
-            while c < CUR_W * k {
+            while c < g {
                 let pxx: i64 = mx + c as i64
-                if pxx >= cx0 as i64 && pxx < cx1 as i64 {
-                    let bit: u64 = 1 << (11 - c / k)
-                    if (f & bit) != 0 {
-                        fb.pixel(state, pxx as u64, py as u64, weiss)
-                    } else {
-                        if (u & bit) != 0 {
-                            fb.pixel(state, pxx as u64, py as u64, schwarz)
+                if pxx >= cx0 as i64 && pxx < cx1 as i64 && pxx >= 0 {
+                    let v: u64 = zeiger.deck(g, c, r)
+                    if v != 0 {
+                        let ak: u64 = (v >> 16) & 255
+                        let ar: u64 = (v >> 8) & 255
+                        let asch: u64 = v & 255
+                        // Der Schatten deckt hoechstens zu einem
+                        // Drittel. Mehr sieht nach Rand aus, und dann
+                        // haette der Zeiger zwei davon.
+                        if asch != 0 && ak == 0 && ar == 0 {
+                            fb.pixel_a(state, pxx as u64, py as u64,
+                                schwarz, asch * 90 / 255)
+                        }
+                        if ar != 0 {
+                            fb.pixel_a(state, pxx as u64, py as u64,
+                                hell, ar)
+                        }
+                        if ak != 0 {
+                            fb.pixel_a(state, pxx as u64, py as u64,
+                                dunkel, ak)
                         }
                     }
                 }
@@ -3851,24 +6146,198 @@ fn ev_at(state: u64, i: u64, k: u64) -> u64 {
         + (k % EV_SLOTS) * EV_BYTES
 }
 
+// ================================================== RUNDE EXPLORER-2
+//
+// WELCHE UMSCHALTTASTEN BEIM KLICK UNTEN WAREN.
+//
+// Ein Klick trug bis zu dieser Runde nur die Maustasten (Bit 0..2 aus
+// `ps2m`). Damit ist Strg-Klick von einem gewoehnlichen Klick nicht zu
+// unterscheiden -- und Strg-Klick und Umschalt-Klick sind die beiden
+// Griffe, mit denen ein Mensch in JEDEM Dateimanager mehrere Stuecke
+// auswaehlt.
+//
+// Die Tastenmaske hat oberhalb der drei Maustasten Platz; also gehen
+// die zwei Umschalttasten in Bit 3 und Bit 4 mit. Kein zweiter Weg,
+// kein neues Ereignis -- ein Programm, das die neuen Bits nicht kennt,
+// sieht dieselbe Maske wie vorher, weil es nur die unteren drei prueft.
+const M_SHIFT: u64 = 8
+const M_CTRL: u64 = 16
+
+fn mods_of(state: u64) -> u64 {
+    var m: u64 = 0
+    if kstate.get(state, kstate.K11_OFF + kstate.KB_SHIFT) == 1 {
+        m = m | M_SHIFT
+    }
+    if kstate.get(state, kstate.K11_OFF + kstate.KB_CTRL) == 1 {
+        m = m | M_CTRL
+    }
+    return m
+}
+
 fn ev_push(state: u64, i: u64, typ: u64, a: u64, b: u64, c: u64) {
     if !valid(state, i) {
         return
     }
-    let kopf: u64 = wg(state, i, W_EHEAD)
-    if kopf - wg(state, i, W_ETAIL) >= EV_SLOTS {
-        // Ein Ring, der ueberlaeuft, verliert das AELTESTE. Eine
-        // Anwendung, die nicht abholt, soll nicht den Server anhalten.
-        wsv(state, i, W_ETAIL, wg(state, i, W_ETAIL) + 1)
-        ss(state, S_EVDROP, gs(state, S_EVDROP) + 1)
-    }
     if typ == E_KEY {
         wsv(state, i, W_KEYS, wg(state, i, W_KEYS) + 1)
     }
-    let p: u64 = ev_at(state, i, kopf)
+    // ====================================================== RUNDE BLECH2
+    // EIN RING OHNE ABHOLER IST KEIN RING.
+    //
+    // Justins Tafel vom 05.09. 22:46: `4 RING 5226 VERL 1283` -- ein
+    // Viertel aller Ereignisse aus dem Fensterring gefallen, in QEMU
+    // stand dort immer 0. Der Grund ist nicht die Ringgroesse und nicht
+    // ein langsamer Abholer, sondern EIN FENSTER OHNE ABHOLER: das
+    // Terminalfenster legt der KERN an (`kgui`), seine Tasten gehen
+    // ueber `key_tty` an die Zeilendisziplin, und aus seinem Ring holt
+    // NIEMAND -- der einzige `ev_pop` sitzt im Systemaufruf WM_EVENT,
+    // und dazu braucht es ein Ring-3-Programm mit einem Handle darauf.
+    // Jede Bewegung ueber dem Terminal ging trotzdem in den Ring; nach
+    // 32 Stueck fiel fuer jede weitere die aelteste heraus, und der
+    // Zaehler VERL zaehlte einen Verlust, der keiner war. In QEMU faehrt
+    // kein Laeufer die Maus ueber das Terminal -- deshalb dort 0.
+    //
+    // Ein Terminalfenster mit gebundenem tty (W_TTY) bekommt deshalb
+    // nichts eingereiht: gezaehlt (S_EVTERM, und W_KEYS wie bisher),
+    // sonst nichts. Das Terminal des Selbsttests hat kein tty und
+    // verhaelt sich wie vorher.
+    if wg(state, i, W_KIND) == K_TERM && wg(state, i, W_TTY) != 0 {
+        ss(state, S_EVTERM, gs(state, S_EVTERM) + 1)
+        return
+    }
+    let kopf: u64 = wg(state, i, W_EHEAD)
+    let schwanz: u64 = wg(state, i, W_ETAIL)
+    let daten: u64 = ((a & 0xFFFF) << 32) | ((b & 0xFFFF) << 16)
+        | (c & 0xFFFF)
+    // KOALESZENZ DER BEWEGUNG. Eine Maus mit 1000 Berichten je Sekunde
+    // legt in die 25 ms, die die Leiste zwischen zwei Abholrunden
+    // schlaeft, 25 Bewegungen -- der Ring hat 32 Plaetze, und ein
+    // Anstrich dazwischen reicht fuer den Ueberlauf. Von einer Bewegung
+    // interessiert eine Anwendung aber nur die LETZTE Stelle: liegt als
+    // juengstes, noch nicht abgeholtes Ereignis schon ein E_MOVE, wird
+    // es ueberschrieben statt eines neuen eingereiht. Tasten, Klicks,
+    // Schliessen, Fokus, Groesse: jedes ein eigener Platz, nie verworfen.
+    //
+    // Der Abholer liest Art und Daten eines Platzes und rueckt danach
+    // den Schwanz vor; wird das Datenwort waehrenddessen ueberschrieben,
+    // liest er die neuere Stelle -- auch das ist die richtige.
+    if typ == E_MOVE && kopf > schwanz {
+        let letzt: u64 = ev_at(state, i, kopf - 1)
+        if kstate.get(letzt, 0) == E_MOVE {
+            kstate.set(letzt, 8, daten)
+            ss(state, S_EVKOAL, gs(state, S_EVKOAL) + 1)
+            return
+        }
+    }
+    if kopf - schwanz >= EV_SLOTS {
+        // ============================================ RUNDE ECHTHARDWARE-3
+        // WENN DER RING VOLL IST, FLIEGT KEINE TASTE MEHR RAUS.
+        //
+        // Justins Tafel: `4 RING 3663 VERL 151`. Bis hierher verlor
+        // ein voller Ring IMMER das aelteste Ereignis -- und weil in
+        // einem vollen Ring fast nur Mausbewegungen liegen (die Maus
+        // meldet tausendmal je Sekunde, ein Mensch tippt fuenfmal),
+        // war das aelteste fast immer eine Bewegung. Fast immer, aber
+        // eben nicht immer: stand vorn ein TASTENDRUCK, war er weg,
+        // und der Mensch sieht einen verschluckten Buchstaben.
+        //
+        // Eine Bewegung darf man verlieren -- die naechste sagt
+        // dasselbe und mehr. Eine TASTE nicht: sie kommt nie wieder.
+        // Also wird der Ring von vorn nach der ersten BEWEGUNG
+        // durchsucht und die geopfert; nur wenn wirklich keine drin
+        // steht (32 Tasten ohne eine Abholrunde -- ein Programm, das
+        // steht), faellt das aelteste Ereignis.
+        var op: u64 = schwanz
+        var weg: u64 = kopf // kopf = "nichts gefunden"
+        while op < kopf {
+            if kstate.get(ev_at(state, i, op), 0) == E_MOVE {
+                weg = op
+                op = kopf
+            } else {
+                op = op + 1
+            }
+        }
+        if weg < kopf {
+            // Die Bewegung herausnehmen und alles danach eine Stelle
+            // nach vorn ruecken. Der Kopf sinkt um eins, der Schwanz
+            // bleibt -- die Reihenfolge der Tasten bleibt erhalten.
+            var q: u64 = weg
+            while q + 1 < kopf {
+                let a1: u64 = ev_at(state, i, q)
+                let b1: u64 = ev_at(state, i, q + 1)
+                kstate.set(a1, 0, kstate.get(b1, 0))
+                kstate.set(a1, 8, kstate.get(b1, 8))
+                q = q + 1
+            }
+            wsv(state, i, W_EHEAD, kopf - 1)
+            ss(state, S_EVKOAL, gs(state, S_EVKOAL) + 1)
+        } else {
+            // ================================ RUNDE ECHTHARDWARE-5
+            // WER VERLIERT, WIRD BEIM NAMEN GENANNT.
+            //
+            // Justins Tafel: `RING 917 VERL 29`. `VERL` sagt nur, DASS
+            // etwas verlorenging -- nicht, WESSEN Ring ueberlief, und
+            // ohne das ist der Befund nicht zu beheben. Ein Verlust
+            // hier heisst: der Ring dieses Fensters ist voll UND es
+            // steht keine einzige Bewegung darin, die man opfern
+            // koennte. Das ist immer ein Fenster, das seine Ereignisse
+            // NICHT ABHOLT -- 32 Tasten/Klicks ohne eine Abholrunde.
+            //
+            // Die Zeile nennt Fenster, Kennung, Art und wie viele
+            // Ereignisse anstehen. Damit ist der Schuldige eine
+            // Ablesung und keine Vermutung.
+            // ==================================== RUNDE ECHTHARDWARE-6
+            // DIESE ZEILE WIRD GEDECKELT -- SIE WAR SELBST EIN TEIL
+            // DES FEHLERS, DEN SIE MELDET.
+            //
+            // Justins Tafel nach 42 Minuten: `RING 23320 VERL 8908
+            // KOAL 57944`. Achttausendneunhundert Verluste heissen
+            // achttausendneunhundert Zeilen ueber die serielle
+            // Leitung -- byteweise, blockierend, und zwar AUS
+            // `ev_push`, das aus dem Unterbrechungsweg der Maus
+            // gerufen wird. Jede gemeldete verlorene Bewegung kostet
+            // dabei so viel Zeit, dass die naechsten Bewegungen
+            // ebenfalls nicht abgeholt werden. Die Meldung erzeugt
+            // also genau den Zustand, den sie beschreibt.
+            //
+            // Dasselbe Muster wie beim Taskmanager in dieser Runde:
+            // ein Messausgang, der im Normalbetrieb laeuft, misst vor
+            // allem sich selbst.
+            //
+            // Die ersten VERL_SAGEN Verluste werden weiter voll
+            // gemeldet -- damit bleibt der Schuldige eine Ablesung und
+            // keine Vermutung, und genau dafuer ist die Zeile da.
+            // Danach zaehlt nur noch `S_EVDROP`, und die Zahl steht
+            // auf der Tafel.
+            if gs(state, S_EVDROP) < VERL_SAGEN {
+            var s_vl: [u8; 19] = "wm: RINGVERLUST i=\0"
+            var s_vid: [u8; 5] = " id=\0"
+            var s_vt: [u8; 6] = " typ=\0"
+            var s_vk: [u8; 7] = " kind=\0"
+            var s_vn: [u8; 5] = " an=\0"
+            serial.puts((&s_vl[0]) as u64)
+            serial.dec(i)
+            serial.puts((&s_vid[0]) as u64)
+            serial.dec(wg(state, i, W_ID))
+            serial.puts((&s_vt[0]) as u64)
+            serial.dec(typ)
+            serial.puts((&s_vk[0]) as u64)
+            serial.dec(wg(state, i, W_KIND))
+            serial.puts((&s_vn[0]) as u64)
+            serial.dec(kopf - schwanz)
+            serial.nl()
+            }
+            wsv(state, i, W_ETAIL, schwanz + 1)
+            ss(state, S_EVDROP, gs(state, S_EVDROP) + 1)
+        }
+    }
+    let kopf2: u64 = wg(state, i, W_EHEAD)
+    let p: u64 = ev_at(state, i, kopf2)
     kstate.set(p, 0, typ)
-    kstate.set(p, 8, ((a & 0xFFFF) << 32) | ((b & 0xFFFF) << 16) | (c & 0xFFFF))
-    wsv(state, i, W_EHEAD, kopf + 1)
+    kstate.set(p, 8, daten)
+    wsv(state, i, W_EHEAD, kopf2 + 1)
+    // RUNDE MESSTAFEL, Stufe 4a: hier verlaesst das Ereignis den Kern.
+    ss(state, S_EVPUSH, gs(state, S_EVPUSH) + 1)
 }
 
 fn ev_waiting(state: u64, i: u64) -> u64 {
@@ -3888,6 +6357,10 @@ fn ev_pop(state: u64, i: u64, out: u64) -> bool {
     kstate.set(out, 0, kstate.get(p, 0))
     kstate.set(out, 8, kstate.get(p, 8))
     wsv(state, i, W_ETAIL, schwanz + 1)
+    // RUNDE MESSTAFEL, Stufe 4b: und hier holt es ein Programm ab.
+    // Diese Zeile ist der einzige Beleg dafuer, dass ueberhaupt noch
+    // ein Ring-3-Prozess laeuft.
+    ss(state, S_EVPOP, gs(state, S_EVPOP) + 1)
     return true
 }
 
@@ -3900,7 +6373,13 @@ fn hit(state: u64, x: i64, y: i64) -> u64 {
     while z > 0 {
         z = z - 1
         let i: u64 = at_z(state, z)
-        if i < MAX_WIN && (wg(state, i, W_FLAGS) & (F_HIDDEN | F_TABBED)) == 0 {
+        // ================================== RUNDE ECHTHARDWARE-3
+        // EINE BLASE NIMMT KEINEN KLICK. Sie liegt ueber allem, damit
+        // man sie SIEHT -- wer dorthin klickt, meint das, was darunter
+        // liegt. Ohne diese Bedingung faengt die Blase den Klick weg,
+        // und der Knopf darunter tut nichts.
+        if i < MAX_WIN && wg(state, i, W_LAYER) != L_TIP
+            && (wg(state, i, W_FLAGS) & (F_HIDDEN | F_TABBED)) == 0 {
             let rx: i64 = win_x(state, i) + outer_w(state, i) as i64
             let ry: i64 = win_y(state, i) + outer_h(state, i) as i64
             if x >= win_x(state, i) && y >= win_y(state, i) {
@@ -3931,12 +6410,19 @@ fn on_mouse(state: u64) {
         // dort den Hintergrund und die Fenster neu und danach den
         // Zeiger. Ein gerettetes Rechteck waere der zweite Weg dahin
         // und muesste bei jedem Fensterwechsel nachgezogen werden.
-        damage(state, ox as i64, oy as i64, (ox + cur_w(state)) as i64,
-            (oy + cur_h(state)) as i64)
+        // RUNDE ECHTHARDWARE-4: der Griffpunkt gehoert in beide
+        // Rechtecke. Ohne ihn bliebe bei jeder Form ausser dem Pfeil
+        // ein Streifen des alten Bildes stehen -- genau die "Spuren",
+        // nach denen Justin gefragt hat.
+        let gx: u64 = cur_ox(state)
+        let gy: u64 = cur_oy(state)
+        let gw: u64 = cur_w(state)
+        damage(state, ox as i64 - gx as i64, oy as i64 - gy as i64,
+            (ox + gw) as i64 - gx as i64, (oy + gw) as i64 - gy as i64)
         ss(state, S_CURX, nx)
         ss(state, S_CURY, ny)
-        damage(state, nx as i64, ny as i64, (nx + cur_w(state)) as i64,
-            (ny + cur_h(state)) as i64)
+        damage(state, nx as i64 - gx as i64, ny as i64 - gy as i64,
+            (nx + gw) as i64 - gx as i64, (ny + gw) as i64 - gy as i64)
     }
     let x: i64 = nx as i64
     let y: i64 = ny as i64
@@ -3967,15 +6453,149 @@ fn on_mouse(state: u64) {
             // RUNDE DESKTOP: der Rand kommt aus `inx`/`iny` und nicht
             // aus BORDER/TITLE_H -- ein Fenster ohne Schmuck (F_NODECO,
             // Schreibtisch und Taskleiste) hat keinen.
-            var nw: i64 = x - win_x(state, i) - inx(state, i) as i64
-            var nh: i64 = y - win_y(state, i) - iny(state, i) as i64
-            if nw < 32 {
-                nw = 32
+            // ==================================== RUNDE ECHTHARDWARE-5
+            // GEGEN DEN ANKER RECHNEN, NICHT GEGEN DIE LINKE OBERE ECKE.
+            //
+            // Hier stand `x - win_x(...)`: die neue Breite war immer der
+            // Abstand vom LINKEN Rand zum Zeiger. Fuer die rechte Kante
+            // ist das richtig; fuer die linke ist es genau verkehrt
+            // herum, und fuer die obere ebenso. Das ist der ganze Grund,
+            // warum bei Justin nur rechts (und unten) etwas passierte.
+            //
+            // Jetzt: die angefasste Kante folgt dem Zeiger, die
+            // GEGENUEBERLIEGENDE steht fest. Aus beiden ergibt sich die
+            // Groesse -- und, wenn links oder oben gezogen wurde, ein
+            // neuer Ursprung. Beides wird in EINEM Schritt gesetzt,
+            // sonst zappelt das Fenster.
+            let kanten: u64 = gs(state, S_SZEDGE)
+            let ax: i64 = gs(state, S_SZAX) as i64
+            let ay: i64 = gs(state, S_SZAY) as i64
+            let ix: i64 = inx(state, i) as i64
+            let iy: i64 = iny(state, i) as i64
+            var nw: i64 = gs(state, S_SZAW) as i64
+            var nh: i64 = gs(state, S_SZAH) as i64
+            var nx: i64 = win_x(state, i)
+            var ny: i64 = win_y(state, i)
+            // RUNDE ECHTHARDWARE-6: der Zustand VOR dem Zug, fuer die
+            // Meldung weiter unten.
+            let alt_w: u64 = wg(state, i, W_W)
+            let alt_h: u64 = wg(state, i, W_H)
+            let alt_x: i64 = win_x(state, i)
+            let alt_y: i64 = win_y(state, i)
+            if (kanten & SZ_R) != 0 {
+                nw = x - (win_x(state, i) + ix)
+            } else if (kanten & SZ_L) != 0 {
+                // Die rechte Kante steht bei `ax`; der Zeiger ist die
+                // neue linke. Die Breite ist der Abstand dazwischen.
+                nw = ax - x
             }
-            if nh < 16 {
-                nh = 16
+            if (kanten & SZ_B) != 0 {
+                nh = y - (win_y(state, i) + iy)
+            } else if (kanten & SZ_T) != 0 {
+                nh = ay - y
             }
-            resize_win(state, i, nw as u64, nh as u64)
+            // DIE MINDESTGROESSE, UND ZWAR VOR DEM VERSCHIEBEN.
+            // Wer sie erst danach begrenzt, laesst das Fenster beim
+            // Unterschreiten weiterwandern, obwohl es nicht mehr
+            // schrumpft -- das ist das "Springen", das Justin
+            // ausdruecklich nicht will.
+            // DIESELBE UNTERGRENZE, DIE `resize_win` SELBST ZIEHT
+            // (32x16 mit Schmuck, 1x1 ohne) -- hier noch einmal, weil
+            // sie VOR dem Verschieben gebraucht wird und nicht erst
+            // beim Ablehnen.
+            var minw: i64 = 32
+            var minh: i64 = 16
+            if !win_deco(state, i) {
+                minw = 1
+                minh = 1
+            }
+            if nw < minw {
+                nw = minw
+            }
+            if nh < minh {
+                nh = minh
+            }
+            if (kanten & SZ_L) != 0 {
+                nx = ax - nw - ix
+            }
+            if (kanten & SZ_T) != 0 {
+                ny = ay - nh - iy
+            }
+            // ==================================== RUNDE ECHTHARDWARE-5
+            // NICHT UEBER DEN LINKEN ODER OBEREN RAND HINAUS.
+            //
+            // GEMESSEN in dieser Runde: zieht man die linke Kante ueber
+            // den Bildschirmrand, wird `nx` negativ (der Server meldete
+            // `x=18446744073709551608`, also -8 als Zweierkomplement),
+            // und der naechste Anstrich rechnet mit einer Adresse
+            // ausserhalb des Rahmenpuffers. Ein Fenster, das man aus
+            // dem Schirm herausziehen kann, ist kein Fenster mehr.
+            //
+            // Also: der Ursprung bleibt auf dem Schirm, und die Breite
+            // wird entsprechend gekappt -- die angefasste Kante bleibt
+            // damit unter dem Zeiger, bis der Rand erreicht ist, und
+            // steht dann still.
+            if (kanten & SZ_L) != 0 && nx < 0 {
+                nw = nw + nx
+                nx = 0
+                if nw < minw {
+                    nw = minw
+                }
+            }
+            if (kanten & SZ_T) != 0 && ny < 0 {
+                nh = nh + ny
+                ny = 0
+                if nh < minh {
+                    nh = minh
+                }
+            }
+            // RUNDE ECHTHARDWARE-5: die Spur des Ziehens. Ohne sie
+            // ist "die Groesse aendert sich nicht" nicht von "die
+            // Kante wurde nie angefasst" zu unterscheiden.
+            var s_sz: [u8; 12] = "wm: zieh k=\0"
+            var s_szw: [u8; 5] = " w=\0\0"
+            var s_szh: [u8; 5] = " h=\0\0"
+            var s_szx: [u8; 5] = " x=\0\0"
+            var s_szr: [u8; 6] = " rc=\0\0"
+            serial.puts((&s_sz[0]) as u64)
+            serial.dec(kanten)
+            serial.puts((&s_szw[0]) as u64)
+            serial.dec(nw as u64)
+            serial.puts((&s_szh[0]) as u64)
+            serial.dec(nh as u64)
+            serial.puts((&s_szx[0]) as u64)
+            serial.dec(nx as u64)
+            let ok: bool = resize_win(state, i, nw as u64, nh as u64)
+            // ==================================== RUNDE ECHTHARDWARE-6
+            // WAS DAS FENSTER VORHER WAR. Ohne diese vier Zahlen ist
+            // `rc=1` nur eine Zusage: `resize_win` gibt auch dann true,
+            // wenn es die Groesse auf die Untergrenze gekappt hat, und
+            // von aussen sieht "gekappt" wie "nicht gewirkt" aus.
+            // Justins Befund B ist genau diese Unterscheidung.
+            var s_va: [u8; 8] = " vorw=\0\0"
+            var s_vb: [u8; 8] = " vorh=\0\0"
+            var s_vx: [u8; 8] = " vorx=\0\0"
+            var s_vy: [u8; 8] = " vory=\0\0"
+            serial.puts((&s_va[0]) as u64)
+            serial.dec(alt_w)
+            serial.puts((&s_vb[0]) as u64)
+            serial.dec(alt_h)
+            serial.puts((&s_vx[0]) as u64)
+            serial.dec(alt_x as u64)
+            serial.puts((&s_vy[0]) as u64)
+            serial.dec(alt_y as u64)
+            serial.puts((&s_szr[0]) as u64)
+            if ok {
+                serial.dec(1)
+            } else {
+                serial.dec(0)
+            }
+            serial.nl()
+            if ok {
+                if (kanten & SZ_L) != 0 || (kanten & SZ_T) != 0 {
+                    move_win(state, i, nx, ny)
+                }
+            }
             return
         }
     }
@@ -3987,7 +6607,19 @@ fn on_mouse(state: u64) {
     // Schliessen-Knopf rot, nachdem der Zeiger das Fenster verlassen
     // hat.
     cap_track(state, i, x, y)
+    // RUNDE ECHTHARDWARE-4: die Form des Zeigers folgt dem, worueber
+    // er steht. Der Aufruf steht VOR dem Ausstieg fuer "kein Fenster
+    // getroffen" -- sonst bliebe der Doppelpfeil stehen, wenn man vom
+    // Fensterrand auf den Schreibtisch faehrt.
+    rand_zeiger(state, i, x, y)
     if i >= MAX_WIN {
+        return
+    }
+    // RUNDE ALLTAG: waehrend die Sperre steht, bekommt nur der Sperrer
+    // etwas. Die Bewegung des Zeigers selbst laeuft weiter (sonst
+    // klebte er fest), die EREIGNISSE gehen nicht hinaus.
+    eingabe_gesehen(state)
+    if !darf(state, i) {
         return
     }
     ss(state, S_HITS, gs(state, S_HITS) + 1)
@@ -4006,7 +6638,10 @@ fn on_mouse(state: u64) {
             // Fenster wechseln und nicht in die Leiste tippen -- und
             // ein Schreibtisch, der den Fokus an sich zieht, macht
             // jeden Tastendruck danach wirkungslos.
-            if wg(state, i, W_LAYER) == L_NORMAL {
+            // RUNDE ECHTHARDWARE-1: ... ODER WENN DAS FENSTER
+            // AUSDRUECKLICH DARUM GEBETEN HAT (F_KEYS).
+            if wg(state, i, W_LAYER) == L_NORMAL
+                || (wg(state, i, W_FLAGS) & F_KEYS) != 0 {
                 set_focus(state, i)
             }
             if mit_schmuck {
@@ -4042,6 +6677,72 @@ fn on_mouse(state: u64) {
                     destroy(state, i)
                     return
                 }
+                // ================================ RUNDE ECHTHARDWARE-5
+                // ALLE VIER KANTEN UND ALLE VIER ECKEN.
+                //
+                // Justins Befund D, woertlich: "Ziehen funktioniert nur
+                // an der rechten Kante." Hier stand `am_rechts ||
+                // am_unten` -- die linke und die obere Kante wurden gar
+                // nicht erst angefasst. Und sie HAETTEN auch nicht
+                // funktionieren koennen: `resize_win` rechnet die neue
+                // Groesse aus der linken oberen Ecke, die beim Ziehen an
+                // der linken Kante ja gerade die ist, die sich bewegt.
+                //
+                // Also wird jetzt gemerkt, WELCHE Kanten angefasst
+                // wurden (Bitmaske) und WO die gegenueberliegende Kante
+                // steht (`S_SZAX`/`S_SZAY`). Die Bewegung rechnet dann
+                // gegen diesen Anker: die festgehaltene Kante bleibt
+                // stehen, das Fenster springt nicht, und eine Ecke
+                // aendert beide Achsen zugleich, weil zwei Bits gesetzt
+                // sind.
+                //
+                // DIESE PRUEFUNG STEHT VOR DEM ZIEHEN DER TITELLEISTE,
+                // und das ist der eigentliche Fix. Stuende sie danach,
+                // waere die OBERE Kante nie erreichbar: `lokal_y < 0`
+                // ist die Titelleiste, und die faengt jeden Klick dort
+                // ab. Ein Mensch, der ein Fenster oben groesser ziehen
+                // will, greift genau dorthin.
+                //
+                // `lokal_y` ist relativ zur ARBEITSFLAECHE: 0 ist deren
+                // Oberkante, die Titelleiste liegt bei negativem
+                // `lokal_y`, und der aeussere Rahmen noch darueber. Die
+                // obere Greifkante ist deshalb der schmale Streifen
+                // GANZ OBEN im Schmuck -- nicht die ganze Titelleiste,
+                // sonst liesse sich das Fenster nicht mehr schieben.
+                let rand: i64 = grip(state) as i64
+                let iw: i64 = wg(state, i, W_W) as i64
+                let ih: i64 = wg(state, i, W_H) as i64
+                let oben: i64 = 0 - iny(state, i) as i64
+                var kanten: u64 = 0
+                if lokal_x > 0 - rand && lokal_x < rand {
+                    kanten = kanten | SZ_L
+                }
+                if lokal_x >= iw - rand && lokal_x < iw + rand {
+                    kanten = kanten | SZ_R
+                }
+                if lokal_y >= oben && lokal_y < oben + rand {
+                    kanten = kanten | SZ_T
+                }
+                if lokal_y >= ih - rand && lokal_y < ih + rand {
+                    kanten = kanten | SZ_B
+                }
+                // Innerhalb des Fensters SAMT Schmuck -- weiter aussen
+                // gehoert der Klick nicht mehr diesem Fenster.
+                let im_rahmen: bool = lokal_x > 0 - rand
+                    && lokal_y >= oben
+                    && lokal_x < iw + rand && lokal_y < ih + rand
+                if im_rahmen && kanten != 0 {
+                    ss(state, S_SIZING, i + 1)
+                    ss(state, S_SZEDGE, kanten)
+                    // Die Kante, die STEHENBLEIBT, in Bildschirmmass.
+                    ss(state, S_SZAX,
+                        (win_x(state, i) + inx(state, i) as i64 + iw) as u64)
+                    ss(state, S_SZAY,
+                        (win_y(state, i) + iny(state, i) as i64 + ih) as u64)
+                    ss(state, S_SZAW, iw as u64)
+                    ss(state, S_SZAH, ih as u64)
+                    return
+                }
                 if lokal_y < 0 {
                     // die Titelleiste: ziehen
                     // RUNDE TILING: wer aus dem Baum gezogen wird, muss
@@ -4052,18 +6753,30 @@ fn on_mouse(state: u64) {
                     ss(state, S_DRAGY, (y - win_y(state, i)) as u64)
                     return
                 }
-                // der Griff unten rechts
-                let gx: bool = lokal_x
-                    >= wg(state, i, W_W) as i64 - grip(state) as i64
-                let gy: bool = lokal_y
-                    >= wg(state, i, W_H) as i64 - grip(state) as i64
-                if gx && gy {
-                    ss(state, S_SIZING, i + 1)
-                    return
-                }
+                // ==================================== RUNDE ECHTHARDWARE-3
+                // DER GRIFF WAR EIN QUADRAT VON ZWOELF BILDPUNKTEN.
+                //
+                // Justins Befund: "Fenstergroesse aendern funktioniert
+                // nicht". Es funktionierte -- aber nur in der EINEN
+                // Ecke unten rechts, und dort auf 12x12 Bildpunkten
+                // (GRIP0). Auf seinem 2560x1440-Schirm mit uiscale 2
+                // sind das 24x24, also ein knapper Millimeter Ziel:
+                // wer den nicht trifft, ZIEHT DAS FENSTER, weil der
+                // Klick daneben ein gewoehnlicher Klick ist. Das sieht
+                // aus, als ginge es nicht.
+                //
+                // Jetzt ist der ganze RAND ein Griff: die rechte
+                // Kante, die untere Kante und die Ecke dazwischen.
+                // Das ist die Bedienung, die jedes andere System hat.
             }
             ss(state, S_DOWNS, gs(state, S_DOWNS) + 1)
-            ev_push(state, i, E_DOWN, lokal_x as u64, lokal_y as u64, btn)
+            // RUNDE TON: der Klickton. HIER, im Fensterserver, weil
+            // hier JEDER Druck der linken Taste vorbeikommt -- kein
+            // Programm muss dafuer etwas tun, und keines kann ihn
+            // vergessen. Ohne das Wort `audio` ist es ein Vergleich.
+            audio.click(state)
+            ev_push(state, i, E_DOWN, lokal_x as u64, lokal_y as u64,
+                btn | mods_of(state))
             return
         }
         if (btn & ps2m.B_LEFT) == 0 && (alt & ps2m.B_LEFT) != 0 {
@@ -4082,7 +6795,7 @@ fn on_mouse(state: u64) {
             if lokal_x >= 0 && lokal_y >= 0 {
                 ss(state, S_DOWNS, gs(state, S_DOWNS) + 1)
                 ev_push(state, i, E_DOWN, lokal_x as u64, lokal_y as u64,
-                    btn)
+                    btn | mods_of(state))
             }
             return
         }
@@ -4101,22 +6814,86 @@ fn on_mouse(state: u64) {
 
 // Eine Taste. Sie geht an das Fenster mit dem EINGABEFOKUS -- und mit
 // `nofocus` an alle, damit die Zusage darueber etwas wert ist.
+// ============================================ RUNDE ALLTAG: DIE SPERRE
+//
+// Sie steht hier, wo die Eingabe ihren Weg zu einem Fenster nimmt --
+// das ist die einzige Stelle, an der sie WIRKT. Ein Sperrbildschirm,
+// der nur ein Fenster ganz vorne ist, ist ein Vorhang: das Fenster
+// darunter bekommt jede Taste weiter, und wer den Vorhang abschiesst,
+// steht in der Sitzung. Hier bekommt es sie nicht.
+fn sperre_an(state: u64) -> bool {
+    return kstate.get(state, kstate.K11_OFF + kstate.SP_ON) != 0
+}
+
+fn sperrer(state: u64) -> u64 {
+    return kstate.get(state, kstate.K11_OFF + kstate.SP_PID)
+}
+
+// Der PLATZ des Sperrers in der Aufgabentafel -- das ist die Zahl, die
+// in `W_OWNER` steht. Die Prozessnummer daneben ist die, die Ring 3
+// sieht; sie sind NICHT dasselbe, und der erste Anlauf hat sie
+// verwechselt: der Sperrbildschirm war danach unsichtbar, weil sein
+// eigenes Fenster ihm nicht zu gehoeren schien.
+fn sperr_platz(state: u64) -> u64 {
+    return kstate.get(state, kstate.K11_OFF + kstate.SP_SLOT)
+}
+
+// Darf dieses Fenster jetzt etwas bekommen? Ohne Sperre: jedes. Mit
+// Sperre: nur, was dem Sperrer gehoert.
+fn darf(state: u64, i: u64) -> bool {
+    if !sperre_an(state) {
+        return true
+    }
+    let p: u64 = sperr_platz(state)
+    if sperrer(state) == 0 {
+        return false
+    }
+    return wg(state, i, W_OWNER) == p
+}
+
+fn eingabe_gesehen(state: u64) {
+    kstate.set(state, kstate.K11_OFF + kstate.SP_LAST, time.mono_ns(state))
+}
+
 fn on_key(state: u64, c: u64) {
     if !ready(state) || c == 0 {
         return
     }
+    eingabe_gesehen(state)
+    // RUNDE MESSTAFEL, Stufe 3 fuer die Tastatur.
+    ss(state, S_KEYIN, gs(state, S_KEYIN) + 1)
     if gs(state, S_NOFOCUS) != 0 {
         var i: u64 = 0
         while i < MAX_WIN {
-            if wg(state, i, W_USED) != 0 {
+            if wg(state, i, W_USED) != 0 && darf(state, i) {
                 ev_push(state, i, E_KEY, c, 0, 0)
             }
             i = i + 1
         }
         return
     }
+    // RUNDE ALLTAG: WAEHREND DER SPERRE GEHT DIE TASTE AN DEN SPERRER,
+    // ohne nach dem Fokus zu fragen.
+    //
+    // Sein Fenster liegt auf der obersten Ebene, und Fenster dieser
+    // Ebene bekommen den Fokus mit Absicht NICHT (das ist die Regel,
+    // die die Taskleiste braucht). Der erste Anlauf hat deshalb jede
+    // Taste weggeworfen: der Sperrbildschirm stand da und nahm kein
+    // Kennwort an. Gemessen mit `sendkey`.
+    if sperre_an(state) {
+        var k: u64 = 0
+        while k < MAX_WIN {
+            if wg(state, k, W_USED) != 0 && darf(state, k) {
+                ev_push(state, k, E_KEY, c, 0, 0)
+                k = MAX_WIN
+            } else {
+                k = k + 1
+            }
+        }
+        return
+    }
     let f: u64 = focus(state)
-    if f < MAX_WIN {
+    if f < MAX_WIN && darf(state, f) {
         ev_push(state, f, E_KEY, c, 0, 0)
     }
 }
@@ -4237,6 +7014,59 @@ fn cell_get(state: u64, i: u64, c: u64, r: u64) -> u64 {
     return kstate.get8(g + k)
 }
 
+// ==================================================== RUNDE ECHTHARDWARE-5
+// DEN INHALT EINES TERMINALFENSTERS AUF DIE SERIELLE LEITUNG.
+//
+// Der Beleg fuer Justins Befund B ist ein BILD, und ein Bild von
+// Text ist mit einem Programm schlecht zu lesen -- ich habe in dieser
+// Runde zweimal versucht, aus Bildpunkten Buchstaben zu raten, und
+// beide Male stand am Ende ein Muster, das man so oder so lesen kann.
+//
+// Das Fenster weiss selbst, was in ihm steht: sein Zellenraster. Diese
+// Funktion schreibt es Zeile fuer Zeile hinaus, und damit ist "im
+// Terminal steht eine Eingabeaufforderung" eine ABLESUNG und keine
+// Deutung eines Rasters. Leerzeilen am Ende faellt sie weg.
+fn term_dump(state: u64, i: u64) {
+    if !valid(state, i) || wg(state, i, W_KIND) != K_TERM {
+        return
+    }
+    var s_k: [u8; 15] = "wm: termzeile \0"
+    var s_g: [u8; 4] = " [\0\0"
+    var s_z: [u8; 2] = "]\0"
+    let cols: u64 = wg(state, i, W_COLS)
+    let rows: u64 = wg(state, i, W_ROWS)
+    var r: u64 = 0
+    while r < rows {
+        // Wie weit steht in dieser Zeile ueberhaupt etwas?
+        var letzte: u64 = 0
+        var c0: u64 = 0
+        while c0 < cols {
+            if cell_get(state, i, c0, r) > 32 {
+                letzte = c0 + 1
+            }
+            c0 = c0 + 1
+        }
+        if letzte != 0 {
+            serial.puts((&s_k[0]) as u64)
+            serial.dec(r)
+            serial.puts((&s_g[0]) as u64)
+            var c: u64 = 0
+            while c < letzte {
+                let z: u64 = cell_get(state, i, c, r)
+                if z >= 32 && z < 127 {
+                    serial.put(z as u8)
+                } else {
+                    serial.put(32 as u8)
+                }
+                c = c + 1
+            }
+            serial.puts((&s_z[0]) as u64)
+            serial.nl()
+        }
+        r = r + 1
+    }
+}
+
 fn cell_paint(state: u64, i: u64, c: u64, r: u64) {
     let cw: u64 = wg(state, i, W_CELLW)
     let ch: u64 = wg(state, i, W_CELLH)
@@ -4252,6 +7082,33 @@ fn cell_paint(state: u64, i: u64, c: u64, r: u64) {
         draw_glyph_clip(state, i, slot, (c * cw) as i64,
             (r * ch) as i64 + ttf.ascent(state, f, px), wg(state, i, W_FG),
             (c * cw) as i64, ((c + 1) * cw) as i64)
+    }
+}
+
+// ==================================================== RUNDE FARBE
+// DAS GANZE RASTER NOCH EINMAL MALEN.
+//
+// Gebraucht wird das genau einmal: wenn die Taskleiste die beiden
+// Terminalfarben setzt, NACHDEM das Fenster schon steht (siehe
+// `set_deco_colour`). `cell_paint` fuellt je Zelle erst den Grund in
+// `W_BG` und setzt dann das Zeichen in `W_FG` -- beides sind die
+// NEUEN Farben, sobald sie im Fenster stehen. Also ist "alles neu
+// malen" genau "jede Zelle neu malen", und es braucht keinen zweiten
+// Zeichenweg, der mit dem ersten auseinanderlaufen koennte.
+fn term_redraw(state: u64, i: u64) {
+    if !valid(state, i) || wg(state, i, W_KIND) != K_TERM {
+        return
+    }
+    let cols: u64 = wg(state, i, W_COLS)
+    let rows: u64 = wg(state, i, W_ROWS)
+    var r: u64 = 0
+    while r < rows {
+        var c: u64 = 0
+        while c < cols {
+            cell_paint(state, i, c, r)
+            c = c + 1
+        }
+        r = r + 1
     }
 }
 
@@ -4278,6 +7135,11 @@ fn term_scroll(state: u64, i: u64) {
     let ch: u64 = wg(state, i, W_CELLH)
     let ww: u64 = wg(state, i, W_W)
     let buf: u64 = wg(state, i, W_BUF)
+    // RUNDE BLECHFUENF: dieselbe Zusage wie in `fill`. Hier waere sie
+    // die teuerste -- `copy_words` schreibt ZEILENWEISE ab null.
+    if buf == 0 || ww == 0 || ch == 0 {
+        return
+    }
     var y: u64 = 0
     while y + ch < rows * ch {
         copy_words(buf +% y *% ww *% 4, buf +% (y + ch) *% ww *% 4,
@@ -4397,11 +7259,22 @@ fn key_tty(state: u64) -> u64 {
 
 // EIN Oktett in ein Terminalfenster. Der Weg von `tty.emit`.
 fn term_out(state: u64, i: u64, c: u64) {
+    ss(state, S_TOUT, gs(state, S_TOUT) + 1)
     if !valid(state, i) || wg(state, i, W_KIND) != K_TERM {
         return
     }
+    ss(state, S_TPUT, gs(state, S_TPUT) + 1)
     term_putc(state, i, c)
     damage_win(state, i)
+}
+
+// Die zwei Zaehler nach aussen, fuer die Tafel und die Abnahme.
+fn term_outs(state: u64) -> u64 {
+    return gs(state, S_TOUT)
+}
+
+fn term_puts_n(state: u64) -> u64 {
+    return gs(state, S_TPUT)
 }
 
 fn diag1(state: u64) -> u64 {
@@ -4417,6 +7290,9 @@ fn pass_ok(state: u64, nr: u64) {
     ss(state, S_FAIL, gs(state, S_FAIL) & ~(1 << nr))
 }
 fn selftest(state: u64) -> u64 {
+    // Siehe `fokus_still`: der Selbsttest laeuft mitten in einer Zeile,
+    // die `kgui` schreibt.
+    fokus_still = 1
     if !ready(state) {
         return 0
     }
@@ -4764,6 +7640,9 @@ fn selftest(state: u64) -> u64 {
     destroy(state, a)
     set_nostrut(state, strut_was)
     damage_all(state)
+    // Und die Fokusmeldung wieder an -- sie ist der Beleg fuer Alt+Tab
+    // und darf nach dem Selbsttest nicht stumm bleiben.
+    fokus_still = 0
     return n
 }
 
@@ -4843,10 +7722,33 @@ fn set_tile_on(state: u64, on: bool) {
     }
     if on {
         ss(state, S_TILE, 1)
-        // Alles, was jetzt schon offen ist, kommt in den Baum.
+        // ================================================ RUNDE ECHTHARDWARE-3
+        // NICHT ALLES, WAS OFFEN IST, GEHOERT IN DEN BAUM.
+        //
+        // Justins Befund: "Tiling ein-/ausschalten zerschiesst den
+        // Zustand -- danach geht fast gar nichts mehr." Hier stand
+        // "Alles, was jetzt schon offen ist, kommt in den Baum", und
+        // das war woertlich gemeint: der SCHREIBTISCH (L_DESK, deckt
+        // den ganzen Schirm), die TASKLEISTE (L_TOP, reserviert eine
+        // Kante), das Startmenue, ein Klappmenue, eine Blase -- alle
+        // wurden zu Kacheln.
+        //
+        // Was daraus folgt, ist genau das, was er sieht: die Leiste
+        // bekommt eine halbe Bildschirmflaeche zugeteilt und liegt
+        // nicht mehr an ihrer Kante, der Schreibtisch wird zur Kachel
+        // neben ihr, und `restore_geom` beim Ausschalten setzt beide
+        // auf Masse zurueck, die inzwischen nichts mehr bedeuten --
+        // die Leiste ist weg, der Schreibtisch sitzt schief, und ohne
+        // Leiste gibt es keinen Knopf mehr, mit dem man es zuruecknimmt.
+        //
+        // GEKACHELT WIRD, WAS EIN MENSCH ALS FENSTER BENUTZT: die
+        // Ebene L_NORMAL, sichtbar, und ohne reservierte Kante.
         var i: u64 = 0
         while i < MAX_WIN {
-            if wg(state, i, W_USED) != 0 && wg(state, i, W_NODE) == 0 {
+            if wg(state, i, W_USED) != 0 && wg(state, i, W_NODE) == 0
+                && wg(state, i, W_LAYER) == L_NORMAL
+                && wg(state, i, W_STRUT) == 0
+                && (wg(state, i, W_FLAGS) & F_HIDDEN) == 0 {
                 save_geom(state, i)
                 tile_take(state, i)
             }
@@ -5006,8 +7908,53 @@ fn tile_apply(state: u64) {
     }
 }
 
+// ==================================================== RUNDE ECHTHARDWARE-3
+// WER UEBERHAUPT GEKACHELT WERDEN DARF.
+//
+// Die Regel steht HIER und nicht bei den Rufern: `tile_take` hat vier
+// davon (2444 neues Fenster, 6919 Kachelmodus an, 7119 und 7128), und
+// eine Regel an vier Stellen ist vier Gelegenheiten, sie zu vergessen.
+// Genau so ist die Taskleiste in den Baum geraten.
+//
+// Eine Kachel ist ein Fenster, das ein Mensch benutzt: normale Ebene,
+// keine reservierte Bildschirmkante, nicht minimiert. Schreibtisch,
+// Leiste, Startmenue, Klappmenue und Blase sind Teile der Oberflaeche
+// selbst -- sie haben ihren Platz, und der Baum darf ihn nicht neu
+// verteilen.
+fn kachelbar(state: u64, i: u64) -> bool {
+    if !valid(state, i) {
+        return false
+    }
+    if wg(state, i, W_LAYER) != L_NORMAL {
+        return false
+    }
+    if wg(state, i, W_STRUT) != 0 {
+        return false
+    }
+    // ==================================== RUNDE ECHTHARDWARE-4
+    // EIN FENSTER OHNE SCHMUCK IST KEINE KACHEL.
+    //
+    // Justins Wort zum Kachelbetrieb war "Muell", und einer der
+    // Gruende steht hier: `F_NODECO` traegt alles, was KEIN
+    // gewoehnliches Fenster ist -- das Startmenue, ein Klappmenue,
+    // eine Blase, ein rahmenloser Dialog. Ebene und Kantenreservierung
+    // haben Schreibtisch und Leiste schon herausgehalten; das
+    // Startmenue liegt aber auf der normalen Ebene und reserviert
+    // nichts, also WAERE es gekachelt worden. Ein Startmenue, das
+    // beim Aufgehen die Fenster daneben umsortiert, ist genau die Art
+    // Automatismus, die in dieser Runde ausdruecklich nicht mehr
+    // vorkommen darf.
+    if (wg(state, i, W_FLAGS) & F_NODECO) != 0 {
+        return false
+    }
+    return (wg(state, i, W_FLAGS) & F_HIDDEN) == 0
+}
+
 fn tile_take(state: u64, i: u64) -> bool {
     if !valid(state, i) || wg(state, i, W_NODE) != 0 {
+        return false
+    }
+    if !kachelbar(state, i) {
         return false
     }
     let n: u64 = tile.insert(state, i + 1)
@@ -5487,12 +8434,85 @@ fn hotkeys(state: u64) -> u64 {
             n = n + 1
             ss(state, S_HOTS, gs(state, S_HOTS) + 1)
             let act: u64 = tile.bind_lookup(state, v & 0xFF, (v >> 8) & 0xFF)
-            if tile_action(state, act) {
+            // RUNDE TUERSCHLOSS: WAS DER RING HERGAB UND WAS DARAUS
+            // WURDE. Drei Zahlen, und sie trennen die drei Faelle, die
+            // sonst gleich aussehen: Taste kam nicht an (keine Zeile),
+            // Taste kam an, aber keine Bindung (act=0), Bindung da, aber
+            // die Handlung tat nichts (getan=0).
+            var s_hk: [u8; 12] = "wm: hot c=\0\0"
+            var s_hm: [u8; 6] = " mod=\0"
+            var s_ha: [u8; 6] = " act=\0"
+            serial.puts((&s_hk[0]) as u64)
+            serial.dec(v & 0xFF)
+            serial.puts((&s_hm[0]) as u64)
+            serial.dec((v >> 8) & 0xFF)
+            serial.puts((&s_ha[0]) as u64)
+            serial.dec(act)
+            // DIE ZEILE WIRD ZUERST FERTIG. `tile_action` ruft
+            // `set_focus`, und das schreibt seit dieser Runde selbst auf
+            // die Leitung -- mitten in diese Zeile hinein. Gemessen:
+            //     wm: hot c=9 mod=1 act=30wm: fokus id=7 vor=15
+            // Beide Angaben stimmen, aber `act=30` und die Fokuszeile
+            // kleben aneinander, und ein Muster, das auf das Zeilenende
+            // wartet, findet keines von beiden. Also: Zeilenumbruch vor
+            // der Handlung, das Ergebnis kommt in eine eigene Zeile.
+            serial.nl()
+            let getan: bool = tile_action(state, act)
+            var s_hr: [u8; 15] = "wm: hot getan=\0"
+            serial.puts((&s_hr[0]) as u64)
+            if getan {
+                serial.dec(1)
+            } else {
+                serial.dec(0)
+            }
+            serial.nl()
+            if getan {
                 ss(state, S_ACTS, gs(state, S_ACTS) + 1)
             }
         }
     }
     return n
+}
+
+// RUNDE TUERSCHLOSS: DAS NAECHSTE FENSTER, das ein Mensch meint.
+//
+// WELCHE FENSTER MITZAEHLEN. Nicht jedes Fenster ist eines, zu dem man
+// wechseln will: der Schreibtisch (`L_DESK`) ist der Hintergrund, die
+// Taskleiste (`L_TOP`) ist Bedienung, und ein verborgenes (`F_HIDDEN`)
+// steht nicht auf dem Schirm. Es bleiben die gewoehnlichen Anwendungen
+// auf `L_NORMAL` -- genau die, die auch eine Titelleiste tragen.
+//
+// WARUM IM KREIS AB DEM FOKUS und nicht immer von vorn: sonst wechselt
+// Alt+Tab bei drei Fenstern ewig zwischen den ersten beiden. Der Ring
+// laeuft `von+1 .. von+MAX_WIN` und rechnet modulo -- damit kommt jedes
+// Fenster genau einmal vorbei, und das eigene zuletzt.
+//
+// Der Rueckgabewert sagt, ob sich WIRKLICH etwas geaendert hat: bei
+// einem einzigen Fenster ist Alt+Tab folgenlos, und das ist kein
+// Fehler, sondern die Wahrheit.
+fn wechselbar(state: u64, i: u64) -> bool {
+    if !valid(state, i) {
+        return false
+    }
+    if (wg(state, i, W_FLAGS) & F_HIDDEN) != 0 {
+        return false
+    }
+    return wg(state, i, W_LAYER) == L_NORMAL
+}
+
+fn naechstes_fenster(state: u64, von: u64) -> bool {
+    var k: u64 = 1
+    while k <= MAX_WIN {
+        let j: u64 = (von + k) % MAX_WIN
+        if wechselbar(state, j) && j != von {
+            raise_win(state, j)
+            set_focus(state, j)
+            damage_win(state, j)
+            return true
+        }
+        k = k + 1
+    }
+    return false
 }
 
 // EINE HANDLUNG AUSFUEHREN. Welche Taste welche Handlung ausloest, steht
@@ -5521,6 +8541,25 @@ fn tile_action(state: u64, act: u64) -> bool {
     }
     if act >= tile.A_SNAP_LEFT && act <= tile.A_SNAP_BR {
         return tile_snap(state, i, act - tile.A_SNAP_LEFT)
+    }
+    // ================================================ RUNDE TUERSCHLOSS
+    //
+    // ALT+TAB. Diese Abfrage steht VOR `let nd = wg(state, i, W_NODE)`
+    // und dessen `if nd == 0 { return false }` -- und das ist der ganze
+    // Grund, warum sie wirkt.
+    //
+    // GEMESSEN (Runde DURCHKLICK, 4.3): `focus=1` stand ueber 137
+    // Meldungen still. Die vorhandenen Fokushandlungen fragen alle den
+    // KACHELBAUM (`dir_search`); ein schwebendes Fenster hat `W_NODE ==
+    // 0` und faellt aus jeder von ihnen heraus, bevor irgendetwas
+    // passiert. Auf dem Schreibtisch dieses Systems schwebt aber jedes
+    // Fenster -- der Kachelmodus ist standardmaessig aus.
+    //
+    // Alt+Tab geht deshalb durch die FENSTERLISTE DES SERVERS und nicht
+    // durch den Baum: ab dem Fenster mit dem Fokus aufwaerts, im Kreis,
+    // und nimmt das erste, das ein Mensch auch anklicken koennte.
+    if act == tile.A_NEXT_WIN {
+        return naechstes_fenster(state, i)
     }
     let nd: u64 = wg(state, i, W_NODE)
     if nd == 0 {

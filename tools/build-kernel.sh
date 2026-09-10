@@ -10,7 +10,7 @@
 # etwas leicht anderes.
 #
 #   ./tools/build-kernel.sh AUSGABE [--stufe 0|1] [--gui on|off]
-#                                  [--ohne-tunnel]
+#                                  [--ohne-tunnel] [--ohne-bruecke]
 #
 # RUNDE SERVERBUILD: --gui off BAUT OSUM ALS SERVERBETRIEBSSYSTEM.
 # `kernel/fb.fi`, `wm.fi`, `wig.fi`, `font.fi`, `ttf.fi`, `tile.fi`,
@@ -53,6 +53,14 @@ shift
 
 STUFE=0
 OHNE_PS2M=0
+# RUNDE BRUECKE: `--ohne-bruecke` baut den Kern mit `kernel/tipp-aus.fi`
+# statt `kernel/tipp.fi`. Der Aufruf 1843 ist dann nicht abgeschaltet,
+# sondern NICHT VORHANDEN -- der Unterschied zwischen einem Schloss und
+# einer Abwesenheit steht im Kopf von `kernel/tipp-aus.fi`.
+OHNE_BRUECKE=0
+# RUNDE PROTOKOLL: die Symbol- und Zeilentabelle im Abbild.  Vorgabe an;
+# `--ohne-symbole` laesst sie weg (siehe tools/kernel/symtab.py).
+SYMBOLE=on
 
 # --------------------------------------------------- die Baukonfiguration
 #
@@ -78,6 +86,8 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --ohne-tunnel) TUNNEL=off; shift ;;
         --ohne-ps2m) OHNE_PS2M=1; shift ;;
+        --ohne-bruecke) OHNE_BRUECKE=1; shift ;;
+        --ohne-symbole) SYMBOLE=off; shift ;;
         --gui) GUI=$2; shift 2 ;;
         --stufe) STUFE=$2; shift 2 ;;
         *) echo "unbekannte Option: $1" >&2; exit 1 ;;
@@ -140,10 +150,48 @@ if git status --porcelain 2>/dev/null | grep -q .; then
     # den der Hash zeigt. Das Pluszeichen sagt das.
     FASSUNG_HASH="${FASSUNG_HASH:0:7}+"
 fi
-sed -i "s/osum ????????/osum $FASSUNG_HASH/" "$TMP/kernel/fassung.fi" || exit 1
-grep -q "osum $FASSUNG_HASH" "$TMP/kernel/fassung.fi" || {
+# ================================ RUNDE MARKE: DER NAME UND DIE FASSUNG
+#
+# Bis hierher stand `osum` in diesem sed fest verdrahtet -- der
+# Kurzname des Produkts, in einer Zeile eines Bauskripts. Genau das
+# war Justins Beanstandung.
+#
+# Jetzt macht es `tools/marke-einsetzen.py`: es liest `marke.conf`,
+# laesst `OSUM_MARKE_*` aus der Umgebung darueberschlagen (Firns Ersatz
+# fuer `option_env!` aus /root/projects/freeviewer/src/brand.rs) und
+# setzt beides in die /tmp-Kopie ein -- die sechs Markenfelder in
+# `kernel/marke.fi` und die Fassungszeile `<KURZ> <hash>` in
+# `kernel/fassung.fi`. Es BRICHT AB, wenn ein Feld fehlt, leer ist,
+# nicht passt oder ein Platzhalter stehenbleibt.
+#
+# Der Arbeitsbaum wird dabei nicht angefasst; `git status` meldet nach
+# einem Bau weiterhin nichts.
+python3 "$(dirname "$0")/marke-einsetzen.py" "$TMP" \
+    "$(dirname "$0")/../marke.conf" "$FASSUNG_HASH" || {
+    echo "die Marke wurde NICHT eingesetzt -- Bau abgebrochen" >&2
+    exit 1; }
+# GEGENPROBE AM ERGEBNIS, nicht am Werkzeug: steht die Fassungszeile
+# wirklich in der Datei, aus der uebersetzt wird?
+grep -q " $FASSUNG_HASH" "$TMP/kernel/fassung.fi" || {
     echo "die Fassungsnummer wurde NICHT eingesetzt -- Bau abgebrochen" >&2
     exit 1; }
+# Und dieselbe Gegenprobe fuer die Marke: kein Feld darf noch ein
+# Fragezeichen tragen. (Das Werkzeug prueft es auch; hier steht es
+# NOCH EINMAL am Ergebnis, weil eine Pruefung im Werkzeug nur das
+# Werkzeug prueft.)
+if grep -qE 'static mut s_[a-z]+: \[u8; [0-9]+\] = "[^"]*\?' \
+        "$TMP/kernel/marke.fi"; then
+    echo "in kernel/marke.fi steht noch ein Platzhalter -- abgebrochen" >&2
+    exit 1
+fi
+if [[ $OHNE_BRUECKE == 1 ]]; then
+    cp -f kernel/tipp-aus.fi "$TMP/kernel/tipp.fi" || exit 1
+fi
+# Die Gegendatei fliegt IMMER aus dem Baum, aus dem firnc liest --
+# sonst uebersetzt der Kern beide und fuehrt zwei Module desselben
+# Namens. Dasselbe tut die Zeile unter `wg-aus.fi`.
+rm -f "$TMP/kernel/tipp-aus.fi"
+
 if [[ $OHNE_TUNNEL == 1 ]]; then
     cp -f kernel/wg-aus.fi "$TMP/kernel/wg.fi" || exit 1
 fi
@@ -162,7 +210,7 @@ rm -f "$TMP/kernel/wg-aus.fi"
 # gemeldet: 37 Stellen ausserhalb der Naht. Der Weg dorthin fuer den
 # uebrigen Kern sind die zwei Tueren `gfx.disp_poll` und
 # `gfx.disp_restore`.
-GFX_DATEIEN="fb wm wig font ttf tile vmode ansi ps2m kgui sysgui dispsave"
+GFX_DATEIEN="fb wm wig font ttf tile vmode ansi ps2m kgui sysgui dispsave zeiger"
 if [[ $GUI == off ]]; then
     for f in $GFX_DATEIEN; do
         rm -f "$TMP/kernel/$f.fi" || exit 1
@@ -203,19 +251,59 @@ KDIR="$TMP/kernel"
 # firnc0 stellt jedem Symbol `_F0.` voran, firnc1 `_F1.`
 # (docs/SELF_HOSTING.md im Firn-Repo).
 P="_F${STUFE}."
-ld -n -T kernel/kernel.ld \
-    --defsym=KERNEL_MAIN="${P}kernel_main" \
-    --defsym=KERNEL_TRAP="${P}trap__entry" \
-    --defsym=KERNEL_SYSCALL="${P}sys__entry" \
-    --defsym=KERNEL_TASK_MAIN="${P}tasks__main" \
-    --defsym=KERNEL_USER_START="${P}proc__user_start" \
-    --defsym=KERNEL_AP_MAIN="${P}smp__ap_main" \
-    --defsym=USER_MAIN="${P}u_enter" \
-    -o "$TMP/osum.elf" "$TMP/boot.o" "$TMP/isr.o" "$TMP/switch.o" \
-    "$TMP/smp.o" "$TMP/hv.o" "$TMP/k.o" "$TMP/uprog.o" 2> >(grep -vE \
-        'GNU-stack|deprecated|LOAD segment with RWX' >&2) || exit 1
+
+# ==================================================== RUNDE PROTOKOLL
+# ZWEIMAL BINDEN, UND DANACH NACHRECHNEN.
+#
+# Die Symbol- und Zeilentabelle (`tools/kernel/symtab.py`) entsteht aus
+# einem FERTIG GEBUNDENEN Abbild -- vorher gibt es keine Adressen.  Also:
+# einmal binden mit dem Stummel aus `kernel/arch/x86_64/osym.s`, die
+# Tabelle daraus erzeugen, noch einmal binden.
+#
+# Das geht nur auf, wenn der zweite Durchgang keine einzige
+# Funktionsadresse verschiebt.  Er tut es nicht, weil die Tabelle in
+# `.rodata` liegt und `.rodata` im Bindeskript hinter `.text` und
+# `.utext` steht -- aber das wird hier NICHT GEGLAUBT, sondern gemessen:
+# `nm` auf beide Abbilder, und wenn eine Adresse gewandert ist, bricht
+# der Bau ab.  Waere das je der Fall, zeigte der Panik-Bildschirm falsche
+# Namen, und ein falscher Name ist schlimmer als gar keiner.
+binde() { # $1 = osym-Objekt, $2 = Ausgabe
+    ld -n -T kernel/kernel.ld \
+        --defsym=KERNEL_MAIN="${P}kernel_main" \
+        --defsym=KERNEL_TRAP="${P}trap__entry" \
+        --defsym=KERNEL_SYSCALL="${P}sys__entry" \
+        --defsym=KERNEL_TASK_MAIN="${P}tasks__main" \
+        --defsym=KERNEL_USER_START="${P}proc__user_start" \
+        --defsym=KERNEL_AP_MAIN="${P}smp__ap_main" \
+        --defsym=USER_MAIN="${P}u_enter" \
+        -o "$2" "$TMP/boot.o" "$TMP/isr.o" "$TMP/switch.o" \
+        "$TMP/smp.o" "$TMP/hv.o" "$TMP/k.o" "$TMP/uprog.o" $1 \
+        2> >(grep -vE 'GNU-stack|deprecated|LOAD segment with RWX' >&2)
+}
+
+# Durchgang 1: OHNE Tabelle. `osym_tab` ist trotzdem aufgeloest -- es
+# steht als SCHWACHES Symbol in `boot.s`, und das ist der Grund, aus dem
+# jeder andere Laeufer dieses Repos den Kernel weiterhin mit seiner
+# eigenen ld-Zeile binden kann.
+binde "" "$TMP/osum.elf" || exit 1
+
+if [[ $SYMBOLE == on ]]; then
+    nm -n "$TMP/osum.elf" | awk '$2=="T"||$2=="t"' > "$TMP/sym1.txt"
+    python3 "$(dirname "$0")/kernel/symtab.py" "$TMP/osum.elf" \
+        "$TMP/osym2.s" || { echo "symtab.py fehlgeschlagen" >&2; exit 1; }
+    as --64 -o "$TMP/osym2.o" "$TMP/osym2.s" || exit 1
+    binde "$TMP/osym2.o" "$TMP/osum2.elf" || exit 1
+    nm -n "$TMP/osum2.elf" | awk '$2=="T"||$2=="t"' > "$TMP/sym2.txt"
+    if ! cmp -s "$TMP/sym1.txt" "$TMP/sym2.txt"; then
+        echo "PROTOKOLL: der zweite Bindedurchgang hat Funktionsadressen" \
+             "verschoben -- die Symboltabelle waere falsch. Bau abgebrochen." >&2
+        diff "$TMP/sym1.txt" "$TMP/sym2.txt" | head -5 >&2
+        exit 1
+    fi
+    mv -f "$TMP/osum2.elf" "$TMP/osum.elf"
+fi
 
 mkdir -p "$(dirname "$AUS")"
 cp -f "$TMP/osum.elf" "$AUS.elf"
 objcopy -O elf32-i386 "$TMP/osum.elf" "$AUS" || exit 1
-echo "$AUS ($(stat -c%s "$AUS") Oktette, Stufe $STUFE, gui=$GUI, tunnel=$TUNNEL, ps2m=$([[ $OHNE_PS2M == 1 ]] && echo modul || echo fest))"
+echo "$AUS ($(stat -c%s "$AUS") Oktette, Stufe $STUFE, gui=$GUI, tunnel=$TUNNEL, ps2m=$([[ $OHNE_PS2M == 1 ]] && echo modul || echo fest), symbole=$SYMBOLE)"

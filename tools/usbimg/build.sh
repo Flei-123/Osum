@@ -4,7 +4,11 @@
 # STARTET.
 #
 #   bash tools/usbimg/build.sh [ausgabeverzeichnis]
-#   -> <ausgabeverzeichnis>/osum-usb.img, mit dd auf einen Stick zu schreiben
+#   -> <ausgabeverzeichnis>/orientos-usb.img, mit dd auf einen Stick zu
+#      schreiben. Der alte Name osum-usb.img liegt als VERWEIS daneben,
+#      damit Lesezeichen und Skripte nicht brechen (Runde MESSTAFEL:
+#      das Abbild ist das SYSTEM, also OrientOS -- der Kern darin
+#      heisst weiter osum.mb).
 #
 # ==================================================================
 # WARUM ES SO UND NICHT ANDERS GEBAUT IST
@@ -60,6 +64,16 @@
 #    liest dieses Skript das FERTIGE Dateisystem mit `mkfs.py list`
 #    zurueck und bricht ab, wenn auch nur einer der Pflichtpfade fehlt.
 #    Die Liste steht unten unter PFLICHT.
+#
+#    RUNDE TUERSCHLOSS: UND DIE BUENDEL STEHEN JETZT AUCH DARIN.
+#    `/bin/settings` war gebaut, 635 600 Oktette gross und im Abbild --
+#    aber ohne `/apps/settings.osp/` stand es in keinem Menue und war
+#    ueber die Oberflaeche nicht erreichbar (Runde DURCHKLICK, 3.9).
+#    Die Pflichtliste hat das nicht gemerkt, weil sie nur nach `/bin`
+#    gesehen hat: ein Programm ist auf diesem System aber erst dann
+#    da, wenn es auch sein Buendel hat. Also stehen die sechs Buendel
+#    hier, und ein siebtes, das jemand vergisst, faellt beim naechsten
+#    Bau auf und nicht erst beim Durchklicken.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -70,12 +84,43 @@ STUFE=${STUFE:-0}
 CC=${FIRNC:-vendor/firn/bin/firnc}
 LIMINE=${LIMINE_DIR:-/root/jarvis/projects/u_DiS4in7esMF1/orientos/vendor/limine}
 ESP_MIB=${ESP_MIB:-96}
-FS_BLOCKS=${FS_BLOCKS:-40960}
+# RUNDE MERGE9: 65536 Bloecke (32 MiB) statt 40960 (20 MiB).
+# GEMESSEN: das Abbild der Runde MERGE-8 hatte bei 40960 Bloecken noch
+# free=8945, also 4,4 MiB frei. Certus ist 6 493 760 Oktette (6,19 MiB)
+# und passte damit NICHT. Mit 65536 bleiben nach Certus noch rund 10 MiB
+# fuer busybox, lua und sqlite.
+# WARUM DAS GEHT: seit OFS v3 ist die Blockkarte MEHRBLOCKIG
+# (SB_BMBLOCKS, kernel/fs.fi). FS_KARTEN=128 traegt 128*4096 = 524 288
+# Bloecke = 256 MiB; 65536 Bloecke brauchen davon 16. Der Satz in
+# STATUS-FREMDLAND.md ("4096 Bloecke = 2 MB je Platte") und der
+# Kommentar in fs.fi:236 stammen aus der Zeit VOR OFS v3 und gelten
+# nicht mehr -- das gebaute Abbild meldet bmblocks=128.
+FS_BLOCKS=${FS_BLOCKS:-65536}
 FS_INODES=${FS_INODES:-1024}
 FS_KARTEN=${FS_KARTEN:-128}
 
 mkdir -p "$OUT"
-IMG="$OUT/osum-usb.img"
+# ============================== RUNDE MARKE: DER NAME AUS EINER QUELLE
+#
+# Bis hierher stand "orientos" in dieser Zeile. Jetzt kommt er aus
+# `marke.conf`, geschlagen von `OSUM_MARKE_*` aus der Umgebung -- genau
+# wie im Kern und wie in der Vorlage
+# /root/projects/freeviewer/src/brand.rs. Eine Umbenennung ist damit
+# ein Bauaufruf:
+#
+#   OSUM_MARKE_PRODUKT="Xoffi OS" bash tools/usbimg/build.sh /tmp/bau
+#
+# `MARKE_DATEI` ist der abgeleitete Dateiname (PRODUKT kleingeschrieben,
+# ohne Leerzeichen) -- die Entsprechung zu `reg_key()` in der Vorlage:
+# abgeleitet, nicht gespeichert.
+. tools/lib/marke.sh
+marke_laden . || fehler "marke.conf laesst sich nicht lesen"
+
+IMG="$OUT/${MARKE_DATEI}-usb.img"
+# DER ALTE NAME BLEIBT ERREICHBAR. Er haengt am KURZnamen und nicht am
+# Produktnamen -- Justins Lesezeichen zeigt auf osum-usb.img, und ein
+# Verweis, der bei jeder Umbenennung mitwandert, waere kein Verweis.
+IMG_ALT="$OUT/${MARKE_KURZ}-usb.img"
 
 sagen() { printf '   %s\n' "$*"; }
 fehler() { printf '== %s\n' "$*" >&2; exit 1; }
@@ -103,11 +148,30 @@ sagen "kern        $(stat -c%s "$OUT/osum.mb") Oktette"
 # die drei Programme sonst einfach nicht im Abbild, und erst die
 # Pflichtliste in Abschnitt 5 faellt darueber ("FEHLT IM ABBILD:
 # /bin/schreibtisch").
+# ================================================ RUNDE ECHTHARDWARE-5
+# `taskmgr` MUSSTE HIER STEHEN, UND ER STAND NICHT DA.
+#
+# Justins Befund F: "Taskmanager und Einstellungen lassen sich nicht
+# oeffnen, die Knoepfe im Kontrollzentrum reagieren nicht."
+#
+# NACHGEWIESEN, nicht vermutet: die Wurzelpartition des ausgelieferten
+# Abbildes orientos-usb-20260910-44a5af3.img, ausgelesen mit
+#
+#     python3 tools/osum/mkfs.py list <wurzel.img>
+#
+# hat 177 Inoden und darunter KEIN /bin/taskmgr. Das Kontrollzentrum
+# startet aber genau diesen Pfad (kernel/user/qs.fi, `p_taskmgr`).
+# Ein Knopf, dessen Programm nicht auf der Platte liegt, kann nicht
+# reagieren -- und weil `SYS_EXEC` still fehlschlaegt, sah es aus, als
+# waere der Knopf kaputt.
+#
+# `/bin/settings` LAG im Abbild; der Einstellungsknopf hat deshalb eine
+# andere Ursache und wird getrennt behandelt.
 PROGS=${PROGS:-"desktop taskbar settings launcher explorer netview \
-widgetdemo locate edit sh echo ls cat ps uname date df mkdir rm cp mv \
+widgetdemo taskmgr locate edit sh echo ls cat ps uname date df mkdir rm cp mv \
 grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
-dhcp host ota jsig jarvisctl pollbr reboot"}
+dhcp host ota jsig jarvisctl pollbr reboot shutdown power fas"}
 
 # RUNDE STICK: DIE SIEBEN, DIE GEFEHLT HABEN -- UND WARUM AUSGERECHNET
 # DIESE.
@@ -127,6 +191,31 @@ dhcp host ota jsig jarvisctl pollbr reboot"}
 #   pollbr      der Wartedienst der Runde POLL (hiess bis BLECH-ECHT
 #               ebenfalls jarvisd, siehe docs/RUNDE-BLECH-ECHT.md 2.4)
 #   reboot      nach `ota einspielen` will jemand neu starten
+#
+# RUNDE TUERSCHLOSS: UND VIER, DIE GEBAUT WAREN UND TROTZDEM GEFEHLT HABEN.
+#
+#   shutdown    die Maschine AUSSCHALTEN. `kernel/user/shutdown.fi`
+#               gibt es seit Runde K18 und es kann genau das, was ein
+#               Herunterfahren ist (ueber init: SIGTERM an die Dienste,
+#               warten, SIGKILL, sync, aushaengen, ACPI S5; ohne init
+#               wenigstens sync und der Aufruf). Es stand nur nicht in
+#               dieser Zeile -- Runde DURCHKLICK 7.4 hat daraus zu
+#               Recht "kein Herunterfahren ueber die Oberflaeche"
+#               gemacht: der einzige Weg aus dem System war der
+#               Netzschalter, und der riskiert bei jedem Mal das
+#               Dateisystem.
+#   power       das Bedienprogramm der Energieverwaltung (Runde K18).
+#               Gehoert daneben: wer ausschalten kann, will auch die
+#               Helligkeit und den Akkustand sehen.
+#   firnc, fas  DER UEBERSETZER UND SEIN ASSEMBLER -- der Punkt, an dem
+#               dieses System aufhoert, ein Vorfuehrstueck zu sein.
+#               `tools/k16/run.sh` ist mit 64/0 gruen: firnc laeuft AUF
+#               Osum, liest eine .fi von der Platte, schreibt eine .s,
+#               und `fas` macht daraus ein laufendes Programm. Beides
+#               war im Abbild bisher nicht enthalten (DURCHKLICK 8.1:
+#               "auf dem Stick laesst sich kein Firn-Programm
+#               uebersetzen"). Ein selbsttragendes System, das sich
+#               selbst nicht fortsetzen kann, ist keines.
 #
 # UND ZWEI, DIE ANDERS GEBAUT WERDEN MUESSEN:
 #
@@ -203,6 +292,54 @@ if [ -n "$gebaut_app" ]; then
 fi
 export FIRNLIB="$ROOT/lib"
 
+# ======================================== 2c. DER UEBERSETZER SELBST
+#
+# RUNDE TUERSCHLOSS: `firnc` KOMMT MIT AUF DEN STICK.
+#
+# WARUM DAS DER WICHTIGSTE NACHTRAG DIESER RUNDE IST. Runde DURCHKLICK
+# hat die vollstaendige Dateiliste des Abbilds gelesen und festgestellt
+# (8.1): kein `firnc`, kein `fas` -- "auf dem Stick laesst sich kein
+# Firn-Programm uebersetzen". Ein System, das sich selbst nicht
+# fortsetzen kann, ist ein Vorfuehrstueck. `tools/k16/run.sh` ist dabei
+# mit 64/0 gruen: der Uebersetzer LAEUFT auf Osum, er lag nur nicht
+# darauf.
+#
+# WOHER DIE QUELLE KOMMT. `firnc` ist nicht Teil dieses Baums; es ist
+# `bin/firnc1.fi` aus dem Firn-Baum, uebersetzt vom festgenagelten
+# `firnc0` und gegen `kernel/user/user.ld` gebunden -- Abbild ab
+# 0x40100000 statt 0x400000. Das ist woertlich der Weg aus
+# `tools/k16/run.sh` Abschnitt 4, und er steht hier nicht noch einmal
+# anders: dieselben zwei Befehle, damit nicht zwei Wege entstehen, aus
+# derselben Quelle zwei verschiedene Uebersetzer zu machen.
+#
+# KEIN crt.o: `firnc1.fi` hat ein `fn main`, und dafuer erzeugt der
+# Uebersetzer sein `_start` selbst (genau deshalb legt `kernel/elf.fi`
+# den Argumentblock auf den Stapelzeiger).
+#
+# WENN DIE QUELLE FEHLT, ist das kein Abbruch: der Stick ist ohne
+# Uebersetzer schlechter, aber nicht kaputt. Dann sagt diese Stelle,
+# dass er fehlt, und der Rest laeuft weiter.
+FIRNQ=""
+for k in "${FIRN_REPO:-}" "$ROOT/../firn" "$ROOT/../../firn"; do
+    [ -n "$k" ] && [ -f "$k/bin/firnc1.fi" ] && FIRNQ=$(cd "$k" && pwd) && break
+done
+if [ -n "$FIRNQ" ]; then
+    if ( cd "$FIRNQ" && FIRNLIB="$FIRNQ/lib" "$ROOT/$CC" -c \
+            -o "$OUT/firnc-osum.o" bin/firnc1.fi ) > "$OUT/firnc-osum.err" 2>&1 \
+       && ld -T kernel/user/user.ld -o "$OUT/firnc.elf" "$OUT/firnc-osum.o" \
+            2>> "$OUT/firnc-osum.err"; then
+        strip --strip-all "$OUT/firnc.elf"
+        gebaut="$gebaut firnc"
+        sagen "uebersetzer $(stat -c%s "$OUT/firnc.elf") Oktette (firnc aus $FIRNQ)"
+    else
+        echo "== firnc laesst sich nicht fuer Osum bauen" >&2
+        head -8 "$OUT/firnc-osum.err" >&2
+        fehler "der Uebersetzer laesst sich nicht fuer den Stick bauen"
+    fi
+else
+    echo "== HINWEIS: kein Firn-Baum gefunden, /bin/firnc fehlt im Abbild" >&2
+fi
+
 # ================================================ 3. was sonst auf die Platte
 python3 tools/netview/icons.py bauen "$OUT/icons" > "$OUT/icons.log" 2>&1 \
     || { tail -10 "$OUT/icons.log" >&2; fehler "die Symbole lassen sich nicht bauen"; }
@@ -217,8 +354,82 @@ cat > "$OUT/passwd" <<'EOF'
 root:x:0:0:root:/:/bin/sh
 justin:x:1000:1000:Justin:/users/justin:/bin/sh
 EOF
-printf '# taskbar.conf\nedge=bottom\nheight=28\nwidth=104\nautohide=0\nontop=1\n' \
+# ============================================== RUNDE STARTKNOPF
+# Die Vorgaben der Leiste, nach Justins Vorlage (Windows 11):
+#   labels=never    Programmknoepfe nur als Symbol -- ein Symbol wird
+#                   nie abgeschnitten ("St", "Termina" waren die Folge
+#                   einer festen Hoechstbreite, nicht von Platzmangel).
+#   clock_seconds=1 Die Uhr tickt SICHTBAR. Ohne Sekunden wird die
+#                   Leiste hoechstens einmal je Minute neu gemalt, und
+#                   das ist von "eingefroren" nicht zu unterscheiden --
+#                   genau der Befund, den Justin gemeldet hat.
+#   clock_date=1    Datum daneben; die Feldbreite waechst mit.
+#   hide_missing=1  Kein Symbol und kein Text fuer Hardware, die es
+#                   nicht gibt. Das "kein Akku" auf einem Tischrechner
+#                   war keine Auskunft.
+#   height=40       28 war auf 3440x1440 ein Strich.
+printf '# taskbar.conf\nedge=bottom\nheight=40\nwidth=104\nautohide=0\nontop=1\nalign=left\nlabels=never\nclock_seconds=1\nclock_date=1\nclock_weekday=0\nclock_lines=1\nhide_missing=1\n' \
     > "$OUT/taskbar.conf"
+
+# ============================================ RUNDE ECHTHARDWARE-1
+# DAS ABBILD BEKOMMT DAS AUSSEHEN, DAS DIE DEMO HATTE.
+#
+# Justin, vor den Fotos vom 09.09.: "alles komplett eckig -- nicht die
+# Demo, die du mir damals gezeigt hast". Er hat recht, und der Grund
+# stand nicht im Kernel, sondern in DIESER Datei.
+#
+# Die Demo (.design-shots/nachher/*.png) entstand mit
+# tools/design/aufnahme.sh, und dieses Skript legt VIER Dinge ins
+# Abbild, die hier bis heute fehlten:
+#
+#     /etc/theme.conf   scheme=, mode=, shape=
+#     /etc/schemas/     die Farbschemata
+#     /etc/shapes/      die Formsaetze (osum.shape: radius_window=12)
+#     /etc/themes/      die fertigen Voreinstellungen
+#
+# OHNE /etc/shapes/ UND OHNE `shape=` BLEIBT `wlibc.met` AUF `classic`,
+# und classic ist radius_window=0. Die Taskleiste ruft `form_push()`
+# treu bei jedem Start -- sie schickt dann eben lauter Nullen an
+# `wm.FM_RADIUS`, und der Server malt gehorsam rechteckig. Es war also
+# nie ein fehlender Zeichenweg, es war eine fehlende Datei.
+#
+# Und die Farben: bis hierher kam /etc/theme aus tools/k15/tree.py --
+# zwoelf DUNKLE Flaechenfarben aus Runde K15, ohne Schriftfarbe. Die
+# Demo lief auf `scheme=day mode=light`. Das ist der zweite Teil von
+# "die Farben passen nicht zusammen".
+#
+# GEWAEHLT IST `tageslicht`, weil dessen Preset Zeile fuer Zeile die
+# Kombination der Demo ist (scheme=day, mode=light, shape=osum).
+THEMA=${THEMA:-tageslicht}
+lies_preset() {
+    grep -a "^$1=" "assets/themes/$THEMA.preset" 2>/dev/null \
+        | head -1 | cut -d= -f2-
+}
+T_SCHEME=$(lies_preset scheme); T_SCHEME=${T_SCHEME:-day}
+T_MODE=$(lies_preset mode);     T_MODE=${T_MODE:-light}
+T_SHAPE=$(lies_preset shape);   T_SHAPE=${T_SHAPE:-osum}
+T_ACCENT=$(lies_preset accent)
+# ==================================================== RUNDE FARBE
+# `dark_scheme=` UND `accent=` GEHOEREN MIT INS ABBILD.
+#
+# Ohne die erste Zeile schaltet der Dunkelmodus nur das ANDERE ENDE
+# DERSELBEN RAMPE ein -- und die Rampe von `tageslicht` ist Slate,
+# also blau (#0f172a hat B-R = +27). Die Vorlage sagt seit dieser
+# Runde `dark_scheme=midnight` (Zinc, B-R = +3); wer sie hier nicht
+# ausliest, baut ein Abbild, dessen Dunkelmodus wieder blau ist,
+# obwohl die Vorlage daneben es besser weiss.
+#
+# Beide Zeilen werden NUR geschrieben, wenn die Vorlage sie hat: ein
+# leeres `dark_scheme=` waere kein leerer Wert, sondern ein leerer
+# DATEINAME, und `wlibc` faende im Dunkelmodus gar kein Schema mehr.
+T_DSCHEME=$(lies_preset dark_scheme)
+{
+  printf '# /etc/theme.conf -- Runde FARBE (MERGE-10)\nscheme=%s\n' "$T_SCHEME"
+  [ -n "$T_DSCHEME" ] && printf 'dark_scheme=%s\n' "$T_DSCHEME"
+  printf 'mode=%s\naccent=%s\nshape=%s\nlight_start=07:00\ndark_start=19:00\n' \
+    "$T_MODE" "$T_ACCENT" "$T_SHAPE"
+} > "$OUT/theme.conf"
+sagen "thema       $THEMA (scheme=$T_SCHEME dark_scheme=${T_DSCHEME:--} mode=$T_MODE shape=$T_SHAPE accent=${T_ACCENT:--})"
 
 # ==================== RUNDE BLECH-HID: DER NOTAUSGANG OHNE TASTATUR
 #
@@ -250,10 +461,30 @@ echo "=================================================="
 echo "  ENDE DES NETZ-SELBSTLAUFS"
 echo "=================================================="
 EOFNL
-# DIE SPRACHE DES STICKS IST DEUTSCH. Das ist die Wahl des Benutzers und
-# steht deshalb unter /users/root/config/ und NICHT unter /etc/ -- die
-# Regel aus docs/I18N.md, die tools/i18n/run.sh nachprueft.
-printf 'de\n' > "$OUT/locale-de"
+# ===================================================== RUNDE ECHTHARDWARE-2
+#
+# DIE SPRACHE DES STICKS IST ENGLISCH. Dauerregel von Justin vom
+# 09.09.2026: Englisch ist die Hauptsprache der Oberflaeche, Deutsch
+# bleibt als waehlbare Uebersetzung.
+#
+# HIER UND NUR HIER. Der Katalog (kernel/user/msg.fi, Runde I18N) hat
+# das immer schon gekonnt: `init` liest ZUERST locale/en/messages, und
+# Englisch ist die Rueckfallsprache fuer jeden Schluessel, den eine
+# Uebersetzung nicht hat. Was den Stick trotzdem deutsch machte, war
+# diese eine Zeile -- sie schrieb `de` in /users/root/config/locale,
+# und der Katalog legte die Uebersetzung folgsam ueber das Englische.
+# GEMESSEN auf Justins Abbild: `taskbar: lang=de src=1 keys=288`
+# (src=1 = die Wahl des Benutzers, genau diese Datei).
+#
+# Es waren also NICHT 71 Stellen im Quelltext zu aendern, sondern ein
+# Wort in einer Datei. Beide Kataloge bleiben im Abbild, und wer
+# Deutsch will, waehlt es in den Einstellungen -- die Datei wird dann
+# mit `de` ueberschrieben.
+#
+# Die Datei heisst weiterhin `locale-de` im Baubaum; sie ist nur der
+# Zwischenspeicher fuer den Inhalt und wird nach
+# /users/root/config/locale kopiert.
+printf 'en\n' > "$OUT/locale-de"
 
 # ---------------------------------------------- RUNDE STICK: DAS NETZ
 #
@@ -288,7 +519,12 @@ else
     sagen "wurzeln     KEINE -- /bin/fetch wird nichts vertrauen"
 fi
 
-STORE=${STORE_URL:-https://store.fleitec.com/osum}
+# RUNDE MARKE, zweite Entwurfsentscheidung der Vorlage: "Ein
+# Xoffi-Build darf sich nie zum FreeViewer aktualisieren." Der Feed
+# gehoert zur MARKE. Ein umbenannter Bau holt damit nie die Pakete der
+# anderen Marke. STORE_URL schlaegt beides -- das ist der Weg fuer
+# einen Testspeicher und aendert an der Regel nichts.
+STORE=${STORE_URL:-$MARKE_FEED}
 if [ -n "${OTA_CONF:-}" ] && [ -s "${OTA_CONF}" ]; then
     [ "$OTA_CONF" -ef "$OUT/ota.conf" ] || cp -f "$OTA_CONF" "$OUT/ota.conf"
 else
@@ -372,9 +608,46 @@ ARGS+=(/lib/
 ARGS+=(/bin/)
 for p in $gebaut; do ARGS+=("/bin/$p=$OUT/$p.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
-ARGS+=(/etc/ "/etc/theme=$OUT/baum/theme" "/etc/passwd=$OUT/passwd"
+# ============================================ RUNDE ECHTHARDWARE-1
+# /etc/theme WIRD NICHT MEHR MITGELIEFERT -- UND DAS IST DER ZWEITE
+# TEIL VON "DIE FARBEN PASSEN NICHT ZUSAMMEN".
+#
+# `wlibc.reload_inner` liest die Dateien in dieser Reihenfolge:
+#   1. /etc/theme.conf   (scheme=, mode=, shape=)
+#   2. /etc/schemas/<scheme>
+#   3. /etc/shapes/<shape>
+#   4. /etc/theme        -- ZULETZT, und es ueberschreibt alles davor
+#
+# Punkt 4 ist Absicht (eine Maschine aus Runde K15 soll aussehen wie
+# vorher), aber die Datei, die dieser Stick bisher mitgab, kam aus
+# tools/k15/tree.py und traegt ZWOELF DUNKLE FLAECHENFARBEN ohne eine
+# einzige Schriftfarbe. Sie hat also das helle Tagschema wieder
+# zugeschuettet -- gemessen am 09.09.: Schreibtisch hell (#f1f5f9),
+# Panel dunkel (#26303c), weisse Schrift auf hellem Cyan. Genau das
+# Bild, das Justin fotografiert hat.
+#
+# Ein Abbild, das ein Schema mitbringt, darf keine Ueberschreibungsdatei
+# mitbringen. Wer eine eigene will, legt sie selbst an.
+ARGS+=(/etc/ "/etc/passwd=$OUT/passwd"
        "/etc/taskbar.conf=$OUT/taskbar.conf"
+       "/etc/theme.conf=$OUT/theme.conf"
        "/etc/netlauf.sh=$OUT/netlauf.sh")
+# RUNDE ECHTHARDWARE-1: die drei Verzeichnisse, ohne die `shape=` und
+# `scheme=` ins Leere zeigen. Derselbe Weg wie in
+# tools/design/aufnahme.sh -- dieselben Dateien, damit der Stick zeigt,
+# was die Demo gezeigt hat.
+ARGS+=(/etc/schemas/)
+for s_ in assets/schemes/*.scheme; do
+    ARGS+=("/etc/schemas/$(basename "$s_" .scheme)=$s_")
+done
+ARGS+=(/etc/shapes/)
+for s_ in assets/shapes/*.shape; do
+    ARGS+=("/etc/shapes/$(basename "$s_" .shape)=$s_")
+done
+ARGS+=(/etc/themes/)
+for s_ in assets/themes/*.preset; do
+    ARGS+=("/etc/themes/$(basename "$s_" .preset)=$s_")
+done
 ARGS+=(/etc/netview/)
 for q in $SYMBOLE; do ARGS+=("/etc/netview/$q=$OUT/icons/$q"); done
 ARGS+=(/usr/ /usr/share/ /usr/share/locale/
@@ -385,11 +658,48 @@ ARGS+=(/users/ /users/root/ /users/root/config/
 ARGS+=(/boot/ "/boot/osum.mb=$OUT/osum.mb"
        "/boot/BOOTX64.EFI=$LIMINE/BOOTX64.EFI")
 ARGS+=(/dev/ /proc/ /mnt/ /tmp/ /store/ /apps/ /system/)
+# RUNDE TUERSCHLOSS: EIN BEISPIEL ZUM UEBERSETZEN.
+#
+# Seit dieser Runde liegen `firnc` und `fas` auf dem Stick. Eine Quelle
+# daneben zu legen kostet 591 Oktette und erspart dem, der es
+# ausprobieren will, das Tippen einer Datei in einem Editor, den er
+# gerade erst kennenlernt.
+#
+# Und es ist der Pruefstein fuer den Uebersetzer AUF dem System:
+#     firnc /beispiel/hallo.fi -o /tmp/hallo.s
+#     fas /tmp/hallo.s -o /tmp/hallo
+#     /tmp/hallo ; echo $?     -> 42
+ARGS+=(/beispiel/ "/beispiel/hallo.fi=assets/beispiel/hallo.fi")
 # RUNDE STICK: die Verzeichnisse, in denen die neuen Programme leben.
 ARGS+=(/etc/ssl/ /etc/jarvis/ /var/ /var/log/ /var/jarvis/)
 if [ -n "$ROOTS" ] && [ -s "$ROOTS" ]; then
     ARGS+=("/etc/ssl/roots.pem=$ROOTS")
 fi
+# ================================ RUNDE MERGE9: DIE GROSSEN MITBRINGSEL
+#
+# Certus, busybox, lua und sqlite liegen NICHT in diesem Baum -- sie
+# werden anderswo gebaut (Certus im eigenen Repo, die drei Fremdlinge
+# nach tools/fremd/README.md). Wer sie hat, gibt ihren Pfad an; wer
+# nicht, bekommt einen Stick ohne sie und keinen Abbruch. Genau so
+# haelt es die Stelle oben mit `firnc`.
+#
+#   CERTUS=/pfad/certus  BUSYBOX=...  LUA=...  SQLITE=...
+#
+# WARUM SIE HIER STEHEN: das Wurzelabbild fasst seit dieser Runde
+# 65536 Bloecke (32 MiB) statt 40960; Certus allein ist 6,19 MiB und
+# passte vorher nicht (free war 4,4 MiB).
+for mit in "CERTUS:/bin/certus" "BUSYBOX:/bin/busybox" \
+           "LUA:/bin/lua" "SQLITE:/bin/sqlite3"; do
+    mvar=${mit%%:*}; mziel=${mit##*:}
+    mpfad=$(eval "printf '%s' \"\${$mvar:-}\"")
+    if [ -n "$mpfad" ] && [ -s "$mpfad" ]; then
+        ARGS+=("$mziel=$mpfad")
+        gebaut="$gebaut ${mziel##*/}"
+        sagen "mitbringsel $(stat -c%s "$mpfad") Oktette  $mziel aus $mpfad"
+    elif [ -n "$mpfad" ]; then
+        echo "== HINWEIS: $mvar=$mpfad ist leer oder fehlt -- $mziel bleibt weg" >&2
+    fi
+done
 ARGS+=("/etc/ota.conf=$OUT/ota.conf")
 ARGS+=("/etc/jarvis/rechte.conf=$OUT/rechte.conf")
 ARGS+=("/system/SCHLUESSELGEN=$OUT/SCHLUESSELGEN")
@@ -403,7 +713,7 @@ fi
 if [ -n "${OTA_ERSATZ:-}" ] && [ -s "${OTA_ERSATZ}" ]; then
     ARGS+=("/system/ersatz.pub=$OTA_ERSATZ")
 fi
-while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$OUT/buendel")
+while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$OUT/buendel" nur="$PROGS")
 while read -r z; do ARGS+=("$z"); done < "$OUT/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 \
     || { tail -20 "$OUT/mkfs.log" >&2; fehler "mkfs.py fehlgeschlagen"; }
@@ -416,11 +726,17 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /etc/netview/state-noip /etc/netview/state-noroute \
 /etc/netview/mark-filtered /etc/netview/mark-faked /etc/netview/mark-none \
 /etc/netview/sys-faking /etc/netview/tile-fake /etc/netview/tile-net \
-/etc/netview/tile-hide /etc/theme /etc/taskbar.conf /etc/netlauf.sh \
+/etc/netview/tile-hide /etc/taskbar.conf /etc/netlauf.sh \
+/etc/theme.conf /etc/shapes/osum /etc/shapes/classic \
+/etc/schemas/day /etc/schemas/night /etc/themes/tageslicht \
 /bin/desktop /bin/taskbar /bin/netview /bin/explorer /boot/osum.mb \
 /bin/ota /bin/fetch /bin/host /bin/dhcp /bin/jarvisd /bin/jsig \
 /bin/jarvisctl /bin/pollbr /etc/ota.conf /etc/jarvis/rechte.conf \
-/system/FASSUNG /system/SCHLUESSELGEN"
+/system/FASSUNG /system/SCHLUESSELGEN \
+/apps/explorer.osp/start /apps/editor.osp/start /apps/terminal.osp/start \
+/apps/launcher.osp/start /apps/widgets.osp/start /apps/settings.osp/start \
+/apps/settings.osp/INFO /apps/settings.osp/symbol \
+/bin/shutdown /bin/power /bin/firnc /bin/fas /beispiel/hallo.fi"
 python3 tools/osum/mkfs.py list "$OUT/root.img" > "$OUT/liste.txt" 2>&1 \
     || fehler "das fertige Dateisystem laesst sich nicht lesen"
 fehlt=0
@@ -478,13 +794,252 @@ sagen "umlaute     $UML UTF-8-Umlautfolgen im fertigen Wurzelabbild"
 # Terminalfenster, und `kmain.surface` wartet auf diese Shell; solange
 # sie laeuft, laeuft der Schreibtisch. Ohne sie kaeme der Kern nach dem
 # Zeichnen zurueck und schaltete ab.
+# DAS HEREDOC BLEIBT ZITIERT ('EOF'), und der Name kommt ueber einen
+# PLATZHALTER hinein, der danach ersetzt wird.
+#
+# Der erste Versuch war ein unzitiertes Heredoc mit ${MARKE_PRODUKT}
+# darin -- und das waere ein echter Fehler gewesen: in einem
+# unzitierten Heredoc fuehrt die Schale auch das aus, was in
+# KOMMENTARZEILEN steht. In diesem Text stehen siebzehn Rueckwaerts-
+# Anfuehrungszeichen (`Linux`, `dhcp`, `usbstop` ...), und jedes davon
+# waere ein Befehlsaufruf beim Bauen geworden. Ein Platzhalter mit
+# einem sed danach kann das nicht.
 cat > "$OUT/limine.conf" <<'EOF'
-# limine.conf -- Osum auf dem Stick (Runde USBIMG)
-timeout: 10
+# limine.conf -- @MARKE_PRODUKT@ auf dem Stick (Runde USBIMG)
+#
+# DIE NAMEN, UND WARUM SIE HIER AUSEINANDERGEHEN (Runde MESSTAFEL).
+# docs/ROADMAP-UPDATE.md:28 sagt es seit langem: der KERN und das
+# SYSTEM darum sind zwei Namen. Auf dem Schirm stand trotzdem ueberall
+# der des Kerns. Justins Vergleich trifft: der Kern heisst Linux, der
+# Startschirm sagt Ubuntu -- niemand nennt seine Verteilung "Linux 6.8".
+#
+# Ab hier: was der BENUTZER liest, traegt den PRODUKTnamen aus
+# marke.conf. Was den KERN meint, traegt den KERNnamen -- die Datei
+# /osum.mb, das Startprotokoll, die Fassungszeile, die Panikmeldungen.
+# Genau wie `Linux` im dmesg steht und nicht im Startbildschirm.
+#
+# RUNDE MARKE: in dieser Datei steht deshalb KEIN Produktname mehr,
+# auch nicht im Kommentar. Ein Kommentar, der den alten Namen nennt,
+# ist nach der ersten Umbenennung schlicht falsch -- und er stuende
+# ausgerechnet in der Datei, die der Bau fuer jede Marke neu schreibt.
+# `docs/NAMING.md` steht dem nicht
+# entgegen: jenes Dokument regelt DEUTSCH GEGEN ENGLISCH in Pfaden und
+# Anzeigetexten, nicht den Produktnamen.
+timeout: 20
 default_entry: 1
 verbose: yes
 
-/Osum -- Hardware-Diagnose (bleibt stehen)
+# ================== RUNDE MENUE: VIER EINTRAEGE FUER MENSCHEN, DER REST
+# EINE ETAGE TIEFER.
+#
+# Hier standen zehn gleichwertige Eintraege untereinander. Das war eine
+# gewachsene TESTLISTE, keine Auswahl: wer den Stick in einen fremden
+# Rechner steckt, will den Schreibtisch, und musste ihn zwischen
+# Vektoreinheit, USB-Diagnose und zwei Aufloesungsvarianten suchen.
+#
+# Oben stehen jetzt die vier, die ein Mensch wirklich waehlt. Alles
+# uebrige liegt unter "Werkzeuge und Diagnose" -- ein Baumeintrag, den
+# Limine seit Fassung 8 kann (ein Eintrag OHNE `protocol`, dessen Kinder
+# einen Schraegstrich mehr haben). Nichts ist weg, nichts hat eine
+# andere `cmdline`; es ist reine Ordnung.
+#
+# WARTEZEIT 20 SEKUNDEN, und danach startet der Standardeintrag von
+# selbst -- ein echter Countdown, kein Warten auf eine Taste. Das ist
+# genau der Fall, um den es die ganze Runde geht: auf einem Brett, auf
+# dem die Tastatur nicht antwortet, MUSS das Menue von allein
+# weiterlaufen, sonst kommt man nie bis zum Schreibtisch.
+#
+# `default_entry: 1` zeigt jetzt auf den Schreibtisch. Vorher war es
+# ebenfalls die 1 -- nur stand dort die Hardware-Diagnose, und die
+# BLEIBT ABSICHTLICH STEHEN. Der Stick lief also nach zehn Sekunden von
+# selbst in einen Bericht, der nie weitergeht.
+
+# ==================================================== RUNDE LEISTE
+# `dhcp` STEHT JETZT IM HAUPTEINTRAG.
+#
+# Justin will den JARVIS-Helfer auf dem Blech. Der braucht eine Route
+# ins Internet, und `nip=169.254.10.1/16` ist eine
+# VERBINDUNGSLOS-Adresse: kein Tor, kein Nameserver, kein Weg hinaus.
+# `dhcp` startet /bin/dhcp in Ring 3, sobald der Schreibtisch steht.
+#
+# DIE FESTE ADRESSE BLEIBT TROTZDEM STEHEN, und das ist Absicht: sie
+# gilt, bis der Klient etwas Besseres bekommt. Kommt kein Angebot
+# (kein Kabel, kein Server, kein Treiber fuer den Chip), bleibt der
+# Rechner genau so bedienbar wie vorher -- nur eben ohne Netz. Ein
+# Schreibtisch, der auf ein DHCP-Angebot WARTET, waere ein Rueckschritt.
+#
+# Was danach auf der Tafel steht, beantwortet die Frage ohne serielle
+# Leitung: Zeile 22 (NETZ) zeigt Treiber, Bus, Verbindung und die
+# Adresse, die der Stapel wirklich fuehrt.
+# ================================================ RUNDE ECHTHARDWARE-5
+# `disp` MUSSTE AUF DIESE ZEILE, SONST IST DER HELLIGKEITSREGLER TOT.
+#
+# Justins Befund E: "Helligkeit und Lautstaerke gehen nicht, die Regler
+# bewirken nichts."
+#
+# GEMESSEN, nicht vermutet. Der Regler laesst sich sehr wohl ziehen --
+# das Kontrollzentrum meldet bei jedem Schritt einen neuen Wert --,
+# aber JEDER Aufruf kam mit demselben Fehler zurueck:
+#
+#     qs: hell auf =150 rc=-19        (-19 = ENODEV)
+#
+# -19 kommt aus `sysgui.do_dispset`, erste Zeile:
+#
+#     if !vmode.ready(state) { return sys.neg(errno.E_NODEV) }
+#
+# und `vmode` wird nur bereit, wenn `vmode_stage` es untersucht --
+# was es ausdruecklich nur tut, wenn das Wort `disp` auf der
+# Befehlszeile steht (`vmode.want(state, vmode.M_DISP)`). Es stand
+# hier nicht. Der ganze Bildschirmzweig -- Helligkeit, Kontrast,
+# Gamma, Aufloesungswechsel -- war auf dem Stick damit abgeschaltet,
+# und das Bedienfeld hatte keine Moeglichkeit, das zu wissen.
+#
+# GEGENPROBE, mittlere Bildhelligkeit ueber den ganzen Schirm, derselbe
+# Zug am selben Regler:
+#     ohne `disp`:  18,78 -> 18,77 -> 18,76   (nichts passiert)
+#     mit  `disp`:  16,83 -> 13,44 -> 28,18   (dunkler, dann heller)
+#
+# Die Helligkeit ist dabei eine LUT im Rahmenpuffer und keine
+# Hintergrundbeleuchtung -- sie wirkt auf das Bild, nicht auf die
+# Lampe. Das ist ehrlich und sichtbar; eine echte Backlight-Steuerung
+# braucht ACPI und ist eine eigene Runde.
+#
+# UND `audio` AUS DEMSELBEN GRUND. Die serielle Leitung sagte
+# `aud: aus (kein Wort)` -- der Tonstapel wird nur aufgesetzt, wenn
+# das Wort dasteht (kernel/kmain.fi, `w_aud`). Ohne ihn meldet das
+# Kontrollzentrum folgerichtig `qs: vol ist=0`, graut die Beschriftung
+# aus (T_DIM) und nimmt keinen Zug an -- das ist richtig und war
+# trotzdem nicht das, was Justin wollte. Hat das Brett keine Karte,
+# bleibt die Zeile grau; hat es eine, laesst sie sich ziehen.
+/@MARKE_PRODUKT@ -- Schreibtisch
+    protocol: multiboot1
+    path: boot():/osum.mb
+    module_path: boot():/root.img
+    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs
+
+# ================== RUNDE MESSTAFEL: DERSELBE EINTRAG AUF ENGLISCH
+#
+# Beide Textkataloge liegen im Abbild (`/usr/share/locale/de/messages`
+# und `.../en/messages`, beide in der PFLICHT-Liste weiter oben). Was
+# fehlte, war der Schalter: die Sprache stand fest in
+# /users/root/config/locale, und das Einstellungsprogramm, das sie
+# umstellen kann, braucht Maus oder Tastatur -- also genau das, was bei
+# Justin klemmt. `lang=en` setzt die Datei VOR dem ersten
+# Ring-3-Programm; sonst aendert sich an diesem Eintrag nichts.
+
+# ================== RUNDE ZWISCHENSPEICHER: DER EINE EINTRAG, DER DIE
+# FRAGE MIT EINEM FOTO ENTSCHEIDET
+#
+# Justins Rechner hat KEINE eingebaute Grafik: der Rahmenpuffer ist ein
+# PCIe-Fenster der RTX 3060. Er war bis zu dieser Runde WRITE-BACK
+# abgebildet -- kleine Aenderungen (Taskleiste, Messtafel, ein Fenster)
+# bleiben dann in der Zwischenspeicherhierarchie der CPU liegen und
+# gehen nie ueber PCIe zur Karte. Nur das erste Vollbild (19,8 MB, mehr
+# als jeder L3) verdraengt sich selbst und wird sichtbar. Genau das
+# zeigt sein Foto: blauer Grund und Zeiger, sonst nichts.
+#
+# Der Kern bildet den Puffer seit dieser Runde write-combining ab. DIESER
+# Eintrag ist die GEGENPROBE mit dem groebsten Mittel: `fbuc` schaltet
+# den Zwischenspeicher fuer das Fenster ganz ab (PCD|PWT). Das ist
+# langsam -- jeder Bildpunkt geht einzeln auf den Bus --, aber es kann
+# per Bauart nichts liegenbleiben.
+#
+# ERSCHEINEN HIER TASKLEISTE, TERMINALFENSTER UND MESSTAFEL, waehrend
+# sie im ersten Eintrag fehlen, dann ist die Ursache bewiesen und es
+# war die Abbildungsart. Erscheinen sie auch hier nicht, ist sie
+# widerlegt und der Fehler liegt woanders.
+/@MARKE_PRODUKT@ -- Schreibtisch (Rahmenpuffer uncached, Test)
+    protocol: multiboot1
+    path: boot():/osum.mb
+    module_path: boot():/root.img
+    cmdline: modfs osum gfx fbuc wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+
+# ============ RUNDE BLECHEINGABE: DER ZWEITE, UNABHAENGIGE BEWEIS
+#
+# `fbuc` bildet den Rahmenpuffer ohne Zwischenspeicher ab -- eine andere
+# ABBILDUNG. `fbflush` laesst die Abbildung, wie sie ist (write-combining
+# seit der Vorrunde), und raeumt nach jedem Blit den ganzen
+# Zwischenspeicher mit `wbinvd` hinaus. Zwei verschiedene Mittel gegen
+# DIESELBE Ursache: hilft eines von beiden und das erste nicht, lag es am
+# Zwischenspeicher. Hilft keines, lag es woanders -- und dann sagen die
+# zwei Herzschlagfelder am rechten Bildrand, wo.
+/@MARKE_PRODUKT@ -- Schreibtisch (Cache leeren je Bild, Test)
+    protocol: multiboot1
+    path: boot():/osum.mb
+    module_path: boot():/root.img
+    cmdline: modfs osum gfx fbflush wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+
+# ============ RUNDE BLECHZWEI: DER DRITTE VERGLEICHSFALL
+#
+# GEMESSEN, Vollbild-Blit in QEMU, alle drei Betriebsarten mit
+# demselben Kern und derselben Aufloesung:
+#
+#   write-combining (Vorgabe)   1 751 us   PDE 10E3
+#   write-back      (`fbwb`)    3 402 us   PDE 00E3
+#   uncached        (`fbuc`)  396 531 us   PDE 00FB
+#
+# UC ist 226-mal langsamer als WC. Der Eintrag ist deshalb AUSDRUECKLICH
+# ein Messeintrag und kein Betriebsmodus -- er macht das Bild sichtbar,
+# aber der Rechner verbringt seine Zeit im Bildspeicher. `fbwb` ist die
+# dritte Ecke des Dreiecks: schnell, aber es kann liegenbleiben.
+/@MARKE_PRODUKT@ -- Schreibtisch (Rahmenpuffer write-back, Test)
+    protocol: multiboot1
+    path: boot():/osum.mb
+    module_path: boot():/root.img
+    cmdline: modfs osum gfx fbwb wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+
+# ============================================ RUNDE BLECHFUENF
+# DER DIAGNOSE-EINTRAG, UND WARUM ER EIN EIGENER IST.
+#
+# Justin hat gemeldet, dass an seiner Tastatur die Lampen DAUERND
+# blinken und Nummernfeststell sich nicht mehr schalten laesst. Das war
+# der LED-Herzschlag aus der Runde BLECHVIER: er legt zweimal je Sekunde
+# die Rollen-Lampe ueber den Tastenzustand. Als Messgeraet hat er seine
+# Frage beantwortet (der Zeitgeber laeuft, HZ 99); als Dauerzustand
+# macht er die Feststelltasten unbrauchbar. Dasselbe gilt fuer die zwei
+# blinkenden Kaestchen am rechten Bildrand, die er fuer einen
+# Zeichenfehler gehalten hat.
+#
+# Beides haengt jetzt an `pulsled` und ist in den Schreibtisch-
+# Eintraegen AUS. Hier ist es an -- fuer den Fall, dass wieder einmal
+# ohne Bild und ohne serielle Leitung entschieden werden muss, ob
+# ueberhaupt noch etwas laeuft.
+/@MARKE_PRODUKT@ -- Schreibtisch (Diagnose: Lampe und Blinkfelder)
+    protocol: multiboot1
+    path: boot():/osum.mb
+    module_path: boot():/root.img
+    cmdline: modfs osum gfx wm wig desk wmshell wmdauer tafel herz pulsled absturzhalt tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+
+/@MARKE_PRODUKT@ -- Desktop (English)
+    protocol: multiboot1
+    path: boot():/osum.mb
+    module_path: boot():/root.img
+    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs lang=en
+
+/@MARKE_PRODUKT@ -- Kommandozeile mit Netz
+    protocol: multiboot1
+    path: boot():/osum.mb
+    module_path: boot():/root.img
+    cmdline: modfs osum vfs usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 console=ttyS0 nosched noproc nofs
+
+# ============ RUNDE BLECH-HID: DER NETZ-SELBSTLAUF, OHNE EINE TASTE
+#
+# Der Eintrag, den Justin am 03.09.2026 gebraucht haette und nicht
+# hatte. Der Stick startete, zeigte ein Bild -- und nahm keine Eingabe
+# an; damit war jeder der 52 Befehle auf dem Abbild unerreichbar.
+#
+# `netlauf` gibt der Shell `/etc/netlauf.sh` als Argument mit
+# (`kernel/kmain.fi`, Abschnitt `osum`), sie faehrt es von oben nach
+# unten -- `dhcp`, `resolv.conf`, `host store.fleitec.com`,
+# `fetch https://store.fleitec.com/index.json`, `ota suchen` -- und
+# danach BLEIBT DER BILDSCHIRM STEHEN (`hwdiag.park_after_shell`). Ein
+# Foto davon ist die erste Messung des Netzwegs auf echtem Blech.
+#
+# `usb hidgen` steht mit drin, obwohl niemand tippen muss: findet der
+# Baum Tastatur und Maus, sagt der Bericht das mit -- und dann weiss
+# Justin im selben Foto, ob die Uebernahme dieser Runde greift.
+
+/@MARKE_PRODUKT@ -- Hardware-Diagnose (bleibt stehen)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
@@ -508,34 +1063,162 @@ verbose: yes
 # WARUM ZWEI EINTRAEGE UND NICHT EINER: der erste fasst nichts an und
 # kann deshalb nicht haengen. Wenn dieser hier auf einem fremden Brett
 # stehenbleibt, ist der andere immer noch da.
-/Osum -- USB-Diagnose: Regler uebernehmen und jeden Anschluss zeigen
-    protocol: multiboot1
-    path: boot():/osum.mb
-    module_path: boot():/root.img
-    cmdline: hwdiag usb hidgen usbleg usbstop gfx nokbd nosched noproc nofs noring3
 
-/Osum -- Diagnose und danach der Schreibtisch
+# ------------------------------------------------------------------
+# DER BAUMEINTRAG. Er hat selbst KEIN `protocol` -- genau daran
+# erkennt Limine ein Untermenue statt eines Starteintrags.
+#
+# ZU DEN ZWEI AUFLOESUNGSEINTRAEGEN, und warum sie NICHT verschwinden:
+# Justins Vorschlag war, die Aufloesung einfach von der Firmware
+# uebernehmen zu lassen. Das tut der Lader bereits -- alle Eintraege
+# ohne `resolution:` bekommen, was die Firmware anbietet, und auf
+# Justins 3440x1440 ist das richtig. Es ist nur NICHT verlaesslich:
+# gemessen (docs/SCHIRM.md, "Unter dem Lader") gibt derselbe Lader auf
+# einem 3840x2160-Schirm von sich aus 1280x800. Nach
+# ExitBootServices gibt es kein GOP mehr, der Kern kann das also nicht
+# nachbessern. Wer auf so einem Schirm ein scharfes Bild will, muss den
+# LADER waehlen lassen -- deshalb bleiben die zwei Eintraege. Sie
+# gehoeren nur nicht ins Hauptmenue.
+/Werkzeuge und Diagnose
+
+//@MARKE_PRODUKT@ -- Diagnose und danach der Schreibtisch
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: hwdiag modfs osum gfx wm wig desk wmshell wmdauer usb hidgen nosched noproc nofs
+    cmdline: hwdiag modfs osum gfx wm wig desk wmshell wmdauer tafel herz usb hidgen nosched noproc nofs
 
 # RUNDE STICK: DIESER EINTRAG HAT JETZT AUCH EINE NETZKARTE. Ohne
 # `nic` blieb der Schreibtisch fuer immer bei "kein Netz", und das
 # Terminal darin konnte `dhcp` nicht fahren -- der Stapel stand gar
 # nicht. Die Adresse ist dieselbe verbindungslokale Platzhalteradresse
 # wie im Kommandozeilen-Eintrag; `dhcp` ersetzt sie.
-/Osum -- nur der Schreibtisch (deutsch)
+
+//@MARKE_PRODUKT@ -- USB-Diagnose: Regler und jeder Anschluss
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx wm wig desk wmshell wmdauer usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+    cmdline: hwdiag usb hidgen usbleg usbstop gfx nokbd nosched noproc nofs noring3
 
-/Osum -- Vektoreinheit pruefen (bleibt stehen)
+//@MARKE_PRODUKT@ -- Netz-Selbstlauf ohne Tastatur (dhcp, ota)
+    protocol: multiboot1
+    path: boot():/osum.mb
+    module_path: boot():/root.img
+    cmdline: modfs osum vfs netlauf usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 console=ttyS0 nosched noproc nofs
+
+# RUNDE SCHIRM: ZWEI EINTRAEGE FUER GROSSE SCHIRME.
+#
+# GEMESSEN: auf einem 3840x2160-Schirm gibt der Lader dem Kern von sich
+# aus 1280x800 (docs/SCHIRM.md, Abschnitt "Unter dem Lader"). Der Kern
+# kann das NICHT nachbessern -- nach ExitBootServices gibt es kein GOP
+# mehr, und der Bochs-Weg, ueber den er ohne Lader den Modus setzt, ist
+# auf echter Hardware nicht da. Wer den Modus will, muss ihn den LADER
+# waehlen lassen, und genau das tun diese zwei Eintraege.
+#
+# Passt die Aufloesung dem Bildschirm nicht, faellt Limine auf seine
+# Vorgabe zurueck; es bleibt also immer ein Bild.
+
+//@MARKE_PRODUKT@ -- Vektoreinheit pruefen (bleibt stehen)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
     cmdline: hwdiag hwdiagstop vecproc gfx nokbd nosched noproc nofs noring3
+
+# =============== RUNDE MERGE-11: DIE GRAFIK-ERHEBUNG ALS MENUEEINTRAG
+#
+# JUSTIN SOLL NICHTS TIPPEN MUESSEN. Die Erhebung aus GRAFIK-1 Etappe A
+# beantwortet eine Frage, die seit Tagen offen ist: auf echtem Blech
+# sieht er eckige Fenster, groben Bildbrei und einen klotzigen Zeiger,
+# waehrend der Pruefstand in QEMU saubere runde Ecken MISST (VEKTORs
+# Eckenmesswerkzeug: 0 Fuellpixel ausserhalb des Radius). Beides kann
+# nicht gleichzeitig stimmen -- es sei denn, zwischen dem gezeichneten
+# Bild und der Tafel liegt noch eine Streckung.
+#
+# Genau die zeigt die Zeile `weg`:
+#
+#   grafik: weg tafel=AxB bild=CxD gezogen=JA/NEIN pitch=../..
+#
+# `gezogen=JA` heisst: es wird ein KLEINERER Puffer gerendert und vom
+# Anzeige-Controller mit naechstem Nachbarn hochgestreckt. Dann sind
+# alle drei Beschwerden EINE Ursache, und eine Rundung von drei
+# Bildpunkten ueberlebt so eine Streckung nicht. `gezogen=NEIN`
+# schliesst den Verdaechtigen aus, und wir suchen woanders -- auch das
+# ist ein Ergebnis, und es kostet Justin einen Tastendruck statt einer
+# weiteren Woche.
+#
+# `hwdiagstop` haelt das Bild an, damit er es abfotografieren kann;
+# `nokbd`/`noring3` halten alles heraus, was das Bild ueberschreiben
+# koennte. Die Erhebung FASST NICHTS AN: kein Register wird
+# geschrieben, kein Modus gesetzt (kernel/grafik.fi, `bericht`).
+
+//@MARKE_PRODUKT@ -- Grafik erheben (bleibt stehen)
+    protocol: multiboot1
+    path: boot():/osum.mb
+    module_path: boot():/root.img
+    cmdline: hwdiag hwdiagstop grafik gfx nokbd nosched noproc nofs noring3
+
+# ================= RUNDE VIELKERN 3: DER EINTRAG FUER DAS BLECH
+#
+# Bis zur Runde BLECHKERN lief die ganze Oberflaeche auf EINEM Kern --
+# nicht aus Bequemlichkeit, sondern weil `syscall_entry` den Kernstapel
+# aus einem Wort fuer die ganze Maschine holte. Justins Foto vom 05.09.
+# (`VEK 6 #UD RIP 0x80`, Kern 2) ist genau das gewesen.
+#
+# Der Unterbau dafuer steht seit VIELKERN 1 (Kernstapel je Kern ueber
+# die GS-Basis), und seit VIELKERN 3 kommt auch der volle Schreibtisch
+# damit hoch -- die zweite Ursache war ein Inodepuffer fuer die ganze
+# Maschine (`fs.inode_get`), der nur solange hielt, wie nie zwei Kerne
+# gleichzeitig hinsahen.
+#
+# GEMESSEN IST DAS BISHER NUR IN QEMU (-smp 1, 4 und 8). DIESER EINTRAG
+# IST DIE MESSUNG AUF BLECH, und er ist deshalb ein EIGENER Eintrag und
+# keine Aenderung am Schreibtisch darueber: geht etwas schief, nimmt
+# man den anderen.
+#
+# WAS AUF DEM SCHREIBTISCH-EINTRAG ZU FOTOGRAFIEREN IST -- Tafelzeile 23,
+# unten rechts:
+#
+#     23 SICHER WA 0 KS <n> R3W 0 R3K <n> LG 0
+#
+#   R3K   auf WIE VIELEN Kernen Ring 3 wirklich gelaufen ist. Auf
+#         Justins Brett muss dort etwas GROESSER ALS 1 stehen; steht
+#         dort 1, hat kein Anwendungskern einen Prozess bekommen.
+#   R3W   Kerne, deren GS-Basis NICHT auf ihren eigenen Satz zeigt.
+#         MUSS 0 sein. Steht dort etwas anderes, hat der Riegel in
+#         `sched.darf_ring3` gegriffen und Ring 3 auf Kern 0 gehalten
+#         -- die Maschine lebt dann, aber die Runde ist nicht erfuellt.
+#   WA    Ueberlauf einer Kernstapel-Waechterseite. MUSS 0 sein.
+#
+# Und Zeile 7 (LEISTE) sagt, ob der Schreibtisch dabei wirklich malt.
+# DER SCHREIBTISCH-EINTRAG GANZ OBEN BRAUCHT DAFUER KEIN WORT MEHR:
+# seit VIELKERN 3 ist Ring 3 auf allen Kernen die VORGABE. Was hier
+# steht, sind die beiden Eintraege, mit denen sich das ueberpruefen und
+# zurueckdrehen laesst.
+#
+# DIE RUECKFALLEBENE. `r3eins` haelt Ring 3 auf Kern 0 -- Oktett fuer
+# Oktett das Verhalten der Runde BLECHKERN. Wenn der Schreibtisch mit
+# allen Kernen auf diesem Brett nicht so laeuft wie mit einem, ist das
+# der Eintrag, der es beweist: derselbe Kern, dieselbe Wurzel, ein Wort
+# Unterschied.
+/@MARKE_PRODUKT@ -- Schreibtisch, Ring 3 nur Kern 0 (Rueckfall)
+    protocol: multiboot1
+    path: boot():/osum.mb
+    module_path: boot():/root.img
+    cmdline: modfs osum r3eins gfx wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs
+
+# Und die GEGENPROBE dazu, auf demselben Stick: `gsluege` gibt jedem
+# Anwendungskern eine FALSCHE GS-Basis. Der Riegel MUSS das sehen und
+# Ring 3 auf Kern 0 halten -- auf der Tafel steht dann `R3W` groesser
+# null und `R3K 1`, UND DIE MASCHINE LAEUFT WEITER. Das ist derselbe
+# Nachweis, den tools/vielkern/run.sh in QEMU fuehrt, nur auf Blech.
+# (`r3blind` gibt es auf dem Stick absichtlich NICHT: das ist der
+# Eintrag, der die Maschine mit Absicht umbringt, und der gehoert in
+# den Pruefstand und nicht in die Hand eines Menschen vor einem
+# echten Rechner.)
+/@MARKE_PRODUKT@ -- Gegenprobe: falsche GS-Basis (Riegel haelt?)
+    protocol: multiboot1
+    path: boot():/osum.mb
+    module_path: boot():/root.img
+    cmdline: modfs osum r3alle gsluege gfx wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
 
 # RUNDE STICK: DIE KOMMANDOZEILE MIT NETZ.
 #
@@ -562,59 +1245,43 @@ verbose: yes
 #     osum$ fetch https://store.fleitec.com/index.json
 #     osum$ ota suchen
 #     osum$ jarvisd -n
-/Osum -- Kommandozeile mit Netz (dhcp, host, fetch, ota, jarvisd)
-    protocol: multiboot1
-    path: boot():/osum.mb
-    module_path: boot():/root.img
-    cmdline: modfs osum vfs usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 console=ttyS0 nosched noproc nofs
 
-# ============ RUNDE BLECH-HID: DER NETZ-SELBSTLAUF, OHNE EINE TASTE
-#
-# Der Eintrag, den Justin am 03.09.2026 gebraucht haette und nicht
-# hatte. Der Stick startete, zeigte ein Bild -- und nahm keine Eingabe
-# an; damit war jeder der 52 Befehle auf dem Abbild unerreichbar.
-#
-# `netlauf` gibt der Shell `/etc/netlauf.sh` als Argument mit
-# (`kernel/kmain.fi`, Abschnitt `osum`), sie faehrt es von oben nach
-# unten -- `dhcp`, `resolv.conf`, `host store.fleitec.com`,
-# `fetch https://store.fleitec.com/index.json`, `ota suchen` -- und
-# danach BLEIBT DER BILDSCHIRM STEHEN (`hwdiag.park_after_shell`). Ein
-# Foto davon ist die erste Messung des Netzwegs auf echtem Blech.
-#
-# `usb hidgen` steht mit drin, obwohl niemand tippen muss: findet der
-# Baum Tastatur und Maus, sagt der Bericht das mit -- und dann weiss
-# Justin im selben Foto, ob die Uebernahme dieser Runde greift.
-/Osum -- Netz-Selbstlauf ohne Tastatur (dhcp, host, fetch, ota)
-    protocol: multiboot1
-    path: boot():/osum.mb
-    module_path: boot():/root.img
-    cmdline: modfs osum vfs netlauf usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 console=ttyS0 nosched noproc nofs
-
-# RUNDE SCHIRM: ZWEI EINTRAEGE FUER GROSSE SCHIRME.
-#
-# GEMESSEN: auf einem 3840x2160-Schirm gibt der Lader dem Kern von sich
-# aus 1280x800 (docs/SCHIRM.md, Abschnitt "Unter dem Lader"). Der Kern
-# kann das NICHT nachbessern -- nach ExitBootServices gibt es kein GOP
-# mehr, und der Bochs-Weg, ueber den er ohne Lader den Modus setzt, ist
-# auf echter Hardware nicht da. Wer den Modus will, muss ihn den LADER
-# waehlen lassen, und genau das tun diese zwei Eintraege.
-#
-# Passt die Aufloesung dem Bildschirm nicht, faellt Limine auf seine
-# Vorgabe zurueck; es bleibt also immer ein Bild.
-/Osum -- Schreibtisch auf einem WQHD-Schirm (2560x1440)
+//@MARKE_PRODUKT@ -- Schreibtisch auf einem WQHD-Schirm (2560x1440)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
     resolution: 2560x1440
-    cmdline: modfs osum gfx wm wig desk wmshell wmdauer usb hidgen nosched noproc nofs
+    cmdline: modfs osum gfx wm wig desk wmshell wmdauer tafel herz usb hidgen nosched noproc nofs
 
-/Osum -- Schreibtisch auf einem 4K-Schirm (3840x2160)
+//@MARKE_PRODUKT@ -- Schreibtisch auf einem 4K-Schirm (3840x2160)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
     resolution: 3840x2160
-    cmdline: modfs osum gfx wm wig desk wmshell wmdauer usb hidgen nosched noproc nofs
+    cmdline: modfs osum gfx wm wig desk wmshell wmdauer tafel herz usb hidgen nosched noproc nofs
+
 EOF
+
+# Und JETZT der Name hinein. `@MARKE_PRODUKT@` ist der einzige
+# Platzhalter in dieser Datei; bleibt einer stehen, bricht der Bau ab --
+# ein Bootmenue, in dem "@MARKE_PRODUKT@" steht, waere schlimmer als
+# eines mit dem alten Namen.
+sed -i "s|@MARKE_PRODUKT@|$MARKE_PRODUKT|g" "$OUT/limine.conf" \
+    || fehler "der Produktname liess sich nicht in limine.conf einsetzen"
+if grep -q '@MARKE_PRODUKT@' "$OUT/limine.conf"; then
+    fehler "in limine.conf steht noch ein Platzhalter"
+fi
+# RUNDE BLECH2: KEIN MENUEEINTRAG LAENGER ALS 60 ZEICHEN. Justins Foto
+# vom 05.09.: "OrientOS -- Schreibtisch (Zwischenspeicher nach jedem Bild
+# lee" -- Limine schneidet den Text an der Spaltenzahl des Menues ab, und
+# der Rest stand nirgends. Gezaehlt wird NACH dem Einsetzen des
+# Produktnamens: ein laengerer Name aus marke.conf nimmt dem Rest den
+# Platz, und dann soll der Bau das sagen und nicht der Bildschirm.
+zu_lang=$(grep -E '^/' "$OUT/limine.conf" | sed 's|^/*||' | awk 'length($0) > 60')
+if [ -n "$zu_lang" ]; then
+    fehler "Menueeintrag laenger als 60 Zeichen: $zu_lang"
+fi
+sagen "menue       $(grep -cE '^/' "$OUT/limine.conf") Eintraege, laengster $(grep -E '^/' "$OUT/limine.conf" | sed 's|^/*||' | awk '{ if (length($0) > m) m = length($0) } END { print m }') Zeichen"
 
 # ================================================== 7. das Abbild
 FS_MIB=$(( ( $(stat -c%s "$OUT/root.img") + 1048575 ) / 1048576 ))
@@ -656,7 +1323,14 @@ dd if="$OUT/root.img" of="$IMG" bs=512 seek="$P2_ANF" conv=notrunc status=none
 "$LIMINE/limine" bios-install "$IMG" > "$OUT/limine.log" 2>&1 \
     || { cat "$OUT/limine.log" >&2; fehler "limine bios-install fehlgeschlagen"; }
 
+# RUNDE MESSTAFEL: DER ALTE NAME BLEIBT ERREICHBAR. Ein Verweis und
+# keine Kopie -- zwei Dateien mit demselben Inhalt sind zwei Dinge, die
+# auseinanderlaufen koennen, und genau daran ist diese Runde schon
+# einmal fast gescheitert.
+ln -sf "$(basename "$IMG")" "$IMG_ALT"
+
 sagen "abbild      $IMG"
+sagen "            (alter Name als Verweis: $IMG_ALT)"
 sagen "            $(stat -c%s "$IMG") Oktette (${GES_MIB} MiB), GPT, EFI ${ESP_MIB} MiB + Wurzel ${FS_MIB} MiB"
 sagen "            auf den Stick:  sudo dd if=$IMG of=/dev/sdX bs=4M conv=fsync status=progress"
 exit 0

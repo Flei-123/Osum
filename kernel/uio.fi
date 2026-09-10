@@ -43,6 +43,7 @@ import kstate
 import sched
 import fs
 import serial
+import time
 
 export {
     reset, adopt,
@@ -50,8 +51,9 @@ export {
     SLOT, CWD_MAX, PATH_MAX,
     I_TICKS, I_UPTIME, I_FRAMES_FREE, I_FRAMES_ALL, I_BLOCKS, I_BFREE,
     I_INODES, I_IUSED, I_BSIZE, I_TASKS, I_SYSCALLS, I_VERSION,
-    I_YEAR, I_MONTH, I_DAY, I_HOUR, I_MIN, I_SEC,
-    P_STATE, P_PID, P_PPID, P_KIND, P_PRIO, P_TICKS, P_EXIT, P_FAULTS
+    I_YEAR, I_MONTH, I_DAY, I_HOUR, I_MIN, I_SEC, I_TZMIN,
+    P_STATE, P_PID, P_PPID, P_KIND, P_PRIO, P_TICKS, P_EXIT, P_FAULTS,
+    P_CPU, P_PAGES
 }
 
 // ------------------------------------------------------------ the slot
@@ -158,11 +160,21 @@ fn cwd_at(state: u64, t: u64, i: u64) -> u64 {
 
 // A path out of ring 3, completed. An absolute one is left alone; a
 // relative one gets the working directory in front of it. `buf` is a
-// buffer OF THE KERNEL (`kstate.NAME_OFF`), never one of the process --
-// by the time this runs the name has already been copied in.
+// buffer OF THE KERNEL (`sys.nameb`, the per-core path page), never one
+// of the process -- by the time this runs the name has already been
+// copied in.
 //
 // The work happens in a scratch area and is copied back, because source
 // and destination are the same buffer.
+//
+// RUNDE HAERTUNG-2: DIE ARBEITSFLAECHE HAENGT AM UEBERGEBENEN PUFFER
+// und nicht mehr an `state + kstate.NAME_OFF`. Der Aufrufer reicht seit
+// dieser Runde die Seite SEINES Kerns herein (`sys.nameb`); die
+// Arbeitsflaeche muss in derselben Seite liegen, sonst arbeiten zwei
+// Kerne wieder in einer gemeinsamen. `+2048` ist derselbe Versatz wie
+// vorher -- nur eben relativ zum Puffer statt absolut. Dass dort Platz
+// ist, ist unveraendert: MAX_NAME ist 1024, und die Seite ist 4096
+// gross.
 fn resolve(state: u64, t: u64, buf: u64, len: u64) -> u64 {
     if len > 0 && kstate.get8(buf) == 47 {
         if len >= PATH_MAX {
@@ -171,7 +183,7 @@ fn resolve(state: u64, t: u64, buf: u64, len: u64) -> u64 {
         return len
     }
     let n: u64 = cwd_len(state, t)
-    let s: u64 = state + kstate.NAME_OFF + 2048
+    let s: u64 = buf + 2048
     var at: u64 = 0
     var i: u64 = 0
     while i < n {
@@ -294,6 +306,10 @@ const I_DAY: u64 = 14
 const I_HOUR: u64 = 15
 const I_MIN: u64 = 16
 const I_SEC: u64 = 17
+// RUNDE ECHTHARDWARE-3: DER VERSATZ, DEN DER KERN SCHON EINGERECHNET
+// HAT. Ring 3 muss unterscheiden koennen, ob die Zeit oben bereits
+// Ortszeit ist (dann darf niemand mehr etwas addieren) oder nicht.
+const I_TZMIN: u64 = 18
 
 const VERSION: u64 = 6 // osum, round K6
 
@@ -351,6 +367,62 @@ fn rtc(what: u64) -> u64 {
         v = v + 2000
     }
     return v
+}
+
+// Die Ortszeit des Kerns in ihre Felder zerlegt. Dieselbe Rechnung wie
+// `time.epoch_of` rueckwaerts -- Tage seit 1970, dann das Datum daraus.
+fn zeit_feld(state: u64, what: u64) -> u64 {
+    let jetzt: u64 = time.now_local(state)
+    let tag_s: u64 = jetzt % 86400
+    if what == I_HOUR {
+        return tag_s / 3600
+    }
+    if what == I_MIN {
+        return (tag_s % 3600) / 60
+    }
+    if what == I_SEC {
+        return tag_s % 60
+    }
+    // Das Datum: Tage seit dem 1.1.1970 in Jahr/Monat/Tag.
+    var tage: u64 = jetzt / 86400
+    var jahr: u64 = 1970
+    while true {
+        var laenge: u64 = 365
+        if (jahr % 4) == 0 && ((jahr % 100) != 0 || (jahr % 400) == 0) {
+            laenge = 366
+        }
+        if tage < laenge {
+            break
+        }
+        tage = tage - laenge
+        jahr = jahr + 1
+    }
+    if what == I_YEAR {
+        return jahr
+    }
+    var schalt: u64 = 0
+    if (jahr % 4) == 0 && ((jahr % 100) != 0 || (jahr % 400) == 0) {
+        schalt = 1
+    }
+    var mon: u64 = 1
+    while mon <= 12 {
+        var d: u64 = 31
+        if mon == 4 || mon == 6 || mon == 9 || mon == 11 {
+            d = 30
+        }
+        if mon == 2 {
+            d = 28 + schalt
+        }
+        if tage < d {
+            break
+        }
+        tage = tage - d
+        mon = mon + 1
+    }
+    if what == I_MONTH {
+        return mon
+    }
+    return tage + 1
 }
 
 fn sysinfo(state: u64, what: u64) -> u64 {
@@ -411,8 +483,24 @@ fn sysinfo(state: u64, what: u64) -> u64 {
     if what == I_VERSION {
         return VERSION
     }
+    // ==================================== RUNDE ECHTHARDWARE-1
+    // DIE UHR DER LEISTE KOMMT AUS DERSELBEN QUELLE WIE DIE TAFEL.
+    //
+    // Bis hierher las diese Stelle bei jedem Aufruf den CMOS-Baustein
+    // FRISCH -- und zwar roh, ohne den Versatz. Die Tafel rechnete
+    // daneben mit `time.now_local`. Auf Justins Foto standen deshalb
+    // drei verschiedene Zeiten gleichzeitig: Leiste 12:37, RTC 12:38,
+    // Kern 14:38.
+    //
+    // Jetzt beantwortet EINE Funktion die Frage "wie spaet ist es" --
+    // `time.now_local`, die Ortszeit. Die RTC wird dafuer genau einmal
+    // beim Start gelesen; die Sekunden kommen seither aus dem
+    // Zyklenzaehler, der nicht springt.
     if what >= I_YEAR && what <= I_SEC {
-        return rtc(what)
+        return zeit_feld(state, what)
+    }
+    if what == I_TZMIN {
+        return time.tz_min(state)
     }
     return err(E_INVAL)
 }
@@ -427,6 +515,21 @@ const P_PRIO: u64 = 4
 const P_TICKS: u64 = 5
 const P_EXIT: u64 = 6
 const P_FAULTS: u64 = 7
+// ================================================== RUNDE WERKZEUGE
+// ZWEI FELDER MEHR, ANGEHAENGT UND NICHT EINGESCHOBEN.
+//
+// Die Nummern 0..7 stehen in `/bin/ps`, `/bin/top` und in jedem
+// Programm, das seit Runde K6 gegen diese Tafel gebaut wurde; eine
+// eingeschobene Nummer haette sie alle stillschweigend verschoben.
+//
+// BEANTWORTET WERDEN SIE IN `kernel/sys.fi` (`do_pstat`) UND NICHT
+// HIER, und der Grund ist der Abhaengigkeitsgraph: `proc.fi` importiert
+// diese Datei, also darf diese Datei `proc.fi` nicht importieren -- und
+// der Speicher eines Prozesses steht in seinen Seitentabellen, die
+// `proc.fi` fuehrt. Die NUMMERN gehoeren trotzdem hierher, weil sie zu
+// dieser Tafel gehoeren und nirgends sonst.
+const P_CPU: u64 = 8 // der Kern, auf dem die Aufgabe zuletzt lief
+const P_PAGES: u64 = 9 // Rahmen, die ihr Adressraum belegt (4 KiB je Stueck)
 
 // One field of one slot of the task table. `ps` asks eight times per
 // task, which is eight system calls and no buffer -- a table that a

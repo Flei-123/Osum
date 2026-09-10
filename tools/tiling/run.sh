@@ -61,8 +61,8 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 
 export FIRNLIB="$ROOT/lib"
-TMPD=$(mktemp -d)
-trap 'rm -rf "$TMPD"' EXIT
+TMPD=${TILING_TMPD:-$(mktemp -d)}
+[ -n "${TILING_KEEP:-}" ] || trap 'rm -rf "$TMPD"' EXIT
 
 pass=0
 fail=0
@@ -237,7 +237,16 @@ echo "== 3. der Baum: vierundzwanzig Zusagen ueber sich selbst =="
 lauf "$K0" "gfx wm tile tilefuzz $GRUND" "$TMPD/t.txt" "$DISK"
 num "der Kern beendet sich sauber" "$?" eq 21
 st=$(zahl "$TMPD/t.txt" 'tile: selftest [0-9]+')
-num "die Zusagen des Fensterbaums ueber sich selbst" "$st" eq 24
+# RUNDE TUERSCHLOSS: DIE ZAHL KOMMT AUS DER QUELLE UND NICHT AUS DIESER
+# ZEILE. Hier stand `eq 24`, festgenagelt. Diese Runde hat eine
+# fuenfundzwanzigste Zusage dazugelegt (Alt+Tab ist ohne tiling.conf
+# belegt), und ein Laeufer, der die alte Zahl festhaelt, meldet ab dann
+# jede Runde einen Fehler, den es nicht gibt. Genau diese Begruendung
+# steht schon in Abschnitt 8 dieses Skripts fuer den Fensterserver --
+# hier fehlte sie nur.
+tsoll=$(grep -aoE 'return [0-9]+' <<< "$(sed -n '/fn selftest_max/,/^}/p' kernel/tile.fi)" \
+    | head -1 | grep -oE '[0-9]+')
+num "die Zusagen des Fensterbaums ueber sich selbst" "$st" eq "${tsoll:-24}"
 fbits=$(grep -aoE 'failed=0x[0-9A-Fa-f]+' "$TMPD/t.txt" | head -1 | sed 's/.*=//')
 if [ "$fbits" = "0x0" ]; then ok "und KEINE davon ist gefallen ($fbits)"
 else bad "gefallene Zusagen: $fbits (ein Bit je Nummer)"; fi
@@ -382,7 +391,12 @@ has "$U" "tiling: der Kachelbetrieb läuft" "das Programm sieht den Kachelbetrie
 has "$U" "Fenster: 2 von 48" "es nennt die Zahl der Fenster und die Obergrenze"
 has "$U" "Aufbau:  split" "es nennt den Modus des Containers"
 has "$U" "Invariante: hält" "und es laesst den Kern die Invariante NACHRECHNEN"
-has "$U" "21 tiling: Einträge gelesen" \
+# RUNDE MERGE9: die Zahl kommt aus der DATEI und steht nicht mehr im
+# Test. Runde TUERSCHLOSS hat `bind mod+tab next-window` (Alt+Tab)
+# ergaenzt -- damit sind es 22 statt 21, und die fest getippte 21 machte
+# den Abschnitt rot, obwohl Kern und Ring 3 einig waren. Abschnitt 8
+# rechnet `soll` schon so aus; hier wird dieselbe Zahl benutzt.
+has "$U" "$soll tiling: Einträge gelesen" \
     "es liest /users/osum/config/tiling.conf und schiebt sie in den Kern"
 has "$U" "mod+h  focus-left" "es liest die Belegung wieder heraus"
 has "$U" "mod+shift+l  move-right" "mit Modifikatoren"

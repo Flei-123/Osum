@@ -73,6 +73,9 @@ profile kernel
 import ulib
 import libc.io
 import wlibc
+import wlib
+import marke_start
+import nv
 import icons
 import msg
 import qs
@@ -84,11 +87,13 @@ export { u_start }
 const PAD0: u64 = 3 // margin between the bar edge and its contents
 const GAP0: u64 = 4 // between two elements
 const BTN_H0: u64 = 22 // height of every button, in both orientations
-const LINE_H: u64 = 13 // one line of a status field
+// RUNDE OBERFLAECHE: LINE_H und START_W sind Marken geworden --
+// `line_h()` ist die Zeilenhoehe der Hilfstext-Stufe, `start_w()`
+// zwei Klickflaechen breit.  Die zwei Zahlen, die hier standen,
+// waren die der Hausform, bevor es sie gab.
 const SLIVER: u64 = 2 // what is left of a hidden bar
 const REVEAL: u64 = 2 // pointer this close to the edge brings it back
 const BAND: u64 = 80 // rows of the drawing surface used at a time
-const START_W: u64 = 64
 const TASK_MAX: u64 = 132
 const TASK_MIN: u64 = 48
 const MAXK: u64 = 10 // that many window buttons at most
@@ -129,14 +134,43 @@ const V_MAX: u64 = 128
 const DEF_H0: u64 = 28
 const DEF_V: u64 = 104
 
-// The three status fields, bottom-up in a vertical bar and right to
-// left in a horizontal one.
+// The status fields, bottom-up in a vertical bar and right to left in
+// a horizontal one.
+//
+// ROUND TON-2 ADDED THE VOLUME, and it sits BEFORE the battery on
+// purpose: the order here is the order on the bar, and every system
+// that has both puts the speaker next to the clock, not out at the
+// edge. It follows the same rule as the two before it -- NO SOUND
+// CARD, NO FIELD (`snd_da`), because a symbol stands for something the
+// machine HAS.
 const F_NET: u64 = 0
-const F_BAT: u64 = 1
-const F_CLK: u64 = 2
-const F_N: u64 = 3
+// MERGE-8: TON-2 (F_SND) und SYSTEMBUS (F_NOTI) haben BEIDE von 1 an
+// weitergezaehlt -- jeder Zweig fuer sich richtig, zusammen zweimal die
+// 1/2/3. Die Felder sind ein zusammenhaengender Bereich 0..F_N (beide
+// Anordnungsketten laufen ihn ab), also bekommt jedes Feld GENAU EINE
+// Nummer und F_N waechst auf 5.
+const F_SND: u64 = 1
+const F_BAT: u64 = 2
+const F_CLK: u64 = 3
+// RUNDE SYSTEMBUS: das fuenfte Statusfeld -- die Glocke. Es ist ein FELD
+// wie die anderen und keine Sonderbehandlung: dadurch bekommt es
+// Anordnung, Ausrichtung, Bericht und Neuzeichnen umsonst und richtig,
+// und die Leiste hat weiterhin genau EINE Stelle, an der Statusfelder
+// gebaut werden.
+const F_NOTI: u64 = 4
+const F_N: u64 = 5
 
 // The calls this bar needs besides the window server.
+// ROUND TON-2: the sound interface. Same numbers as /bin/play,
+// /bin/qs and kernel/sys.fi -- one way to a thing, not two.
+const SYS_AUDGET: u64 = 1850
+const SYS_AUDSET: u64 = 1851
+const AS_MUTE: u64 = 2
+const A_READY: u64 = 0
+const A_VOLUME: u64 = 4
+const A_MUTED: u64 = 21
+const A_VOLGEN: u64 = 44
+
 const SYS_PWRGET: u64 = 1750
 const PG_BATPRESENT: u64 = 24
 const PG_BATPERCENT: u64 = 25
@@ -164,8 +198,12 @@ const NV_FBVIEW: u64 = 14
 // must not take the address off the screen with it.
 const ICON_MAX: u64 = 1100
 const MARK_MAX: u64 = 640
-const IC_W: u64 = 16
-const MK_W: u64 = 12
+// RUNDE ECHTHARDWARE-2: GRUNDWERTE. `ic_w()` und `mk_w()` weiter
+// unten nehmen die Vervielfachung mit -- seit `wlibc.icon_draw` das
+// Bild vergroessert, muss der Platz dafuer mitwachsen, sonst malt das
+// groessere Symbol ueber den Text daneben.
+const IC_W0: u64 = 16
+const MK_W0: u64 = 12
 // ROUND LOOK: the side of a status glyph. `wlibc.icon_small()` is the
 // size the icon font was cut and measured for (docs/ICONS.md: 25.0
 // solid pixels per icon at 16, against 11.4 for the runner-up), so
@@ -217,16 +255,54 @@ const GL_W0: u64 = 16 // = wlibc.icon_small()
 // Vervielfachung des Servers. Eine Leiste von 28 Bildpunkten ist auf
 // 3840x2160 ein Streifen, in dem kein Buchstabe mehr Platz hat -- und
 // die Schrift darin waechst seit dieser Runde mit.
+// ================================================== RUNDE OBERFLAECHE
+//
+// DIE LEISTE RECHNET NICHT MEHR SELBST.
+//
+// Bis hierher standen ihre Masse als eigene Konstanten in dieser Datei:
+// PAD0 = 3, GAP0 = 4, BTN_H0 = 22, DEF_H0 = 28.  Vier Zahlen, die kein
+// Formsatz erreichen konnte -- die Leiste zog also KEINE Aenderung an
+// Abstaenden, Hoehen oder Klickflaechen mit, und sie ist die Flaeche,
+// die man immer sieht.  Gemessen hat es `tools/design/messen.py`: von
+// 824 gemeldeten Laengen der ganzen Oberflaeche lagen 166 auf dem
+// Viererraster, und 559 der Ausreisser kamen aus dieser Datei allein.
+// Drei ist kein Vielfaches von vier, und 22 auch nicht.
+//
+// Jetzt kommen sie aus denselben Marken wie alles andere:
+//
+//   pad     spacing_xs   der Rand zwischen Leistenkante und Inhalt
+//   gap     spacing_s    zwischen zwei Knoepfen
+//   btn_h   ctrl_h       die Klickflaeche -- die Zusage "mindestens 32"
+//   def_h   ctrl_h + 2*spacing_xs   die Dicke, wenn niemand sie vorgibt
+//
+// UND btn_h WIRD BEGRENZT.  Eine Leiste ist so dick, wie ihre Datei
+// sagt; ein Knopf, der hoeher ist als sie, wird nicht hoeher, er wird
+// abgeschnitten.  Das Kappen steht hier und nicht in `layout`, weil es
+// sonst an vier Stellen stehen muesste (waagerecht, senkrecht,
+// Startknopf, Fensterknopf) und an einer davon vergessen wuerde.
 fn pad() -> u64 {
-    return PAD0 * wlibc.ui_scale()
+    return wlibc.space(0)
 }
 
 fn gap() -> u64 {
-    return GAP0 * wlibc.ui_scale()
+    return wlibc.space(1)
 }
 
 fn btn_h() -> u64 {
-    return BTN_H0 * wlibc.ui_scale()
+    var h: u64 = wlibc.metric(wlibc.M_CTRL_H)
+    var raum: u64 = thick
+    if raum > 2 * pad() {
+        raum = raum - 2 * pad()
+    } else {
+        raum = thick
+    }
+    if h > raum {
+        h = raum
+    }
+    if h == 0 {
+        h = BTN_H0 * wlibc.ui_scale()
+    }
+    return h
 }
 
 fn h_min() -> u64 {
@@ -237,12 +313,104 @@ fn h_max() -> u64 {
     return H_MAX0 * wlibc.ui_scale()
 }
 
+// Die Dicke, die eine Leiste OHNE Eintrag in ihrer Datei bekommt: die
+// Klickflaeche plus der Rand oben und unten.  Unter `classic` sind das
+// 26 + 2*2 = 30, unter der Hausform 32 + 2*4 = 40 -- und beides ist ein
+// Ergebnis und keine getippte Zahl.  Frueher stand hier 28, und 28 war
+// weder das eine noch das andere.
 fn def_h() -> u64 {
-    return DEF_H0 * wlibc.ui_scale()
+    let v: u64 = wlibc.metric(wlibc.M_CTRL_H) + 2 * wlibc.space(0)
+    if v < h_min() {
+        return h_min()
+    }
+    if v > h_max() {
+        return h_max()
+    }
+    return v
 }
 
+// Eine Zeile eines Statusfeldes.  Das ist die Zeilenhoehe der
+// HILFSTEXT-Stufe (`TY_CAPTION`) und nicht mehr die 13, die hier stand:
+// eine Uhrzeit und eine Netzadresse sind Hilfstext, und sie sollen
+// dieselbe Zeilenhoehe haben wie jeder andere Hilfstext des Systems.
+fn line_h() -> u64 {
+    return wlibc.type_lh(wlibc.TY_CAPTION)
+}
+
+// Die Breite des Startknopfes MIT Wort: zwei Klickflaechen breit, auf
+// das Raster gelegt.  Unter `classic` sind das 52, unter der Hausform
+// 64 -- die 64, die hier als Konstante stand, war die der Hausform,
+// bevor es sie gab.
+fn start_w() -> u64 {
+    return wlibc.snap(btn_h() * 2)
+}
+
+// ==================================================== RUNDE ECHTHARDWARE-3
+// DAS SYMBOL WAECHST MIT DER LEISTE UND NICHT NUR MIT DEM SCHIRM.
+//
+// Justins Befund: "Programm-Icons in der Taskleiste sind nicht mittig
+// und haben die falsche Groesse." Die Mitte hat Runde ECHTHARDWARE-2
+// gerichtet (gemalte statt geplanter Hoehe); die GROESSE stand noch
+// immer fest: 16 mal die Vervielfachung des Schirms, und sonst nichts.
+//
+// Die Leiste ist aber nicht so hoch, wie der Schirm gross ist -- ihre
+// Dicke kommt aus dem Formsatz (`def_h`: M_CTRL_H + zweimal Rand) und
+// aus `/etc/taskbar.conf`. Auf einer dicken Leiste schwimmt ein 16er
+// Symbol in der Mitte, auf einer duennen stoesst es oben und unten an.
+//
+// Also richtet es sich nach dem KNOPF, in dem es sitzt: zwei Drittel
+// seiner Hoehe, gerundet auf ein Vielfaches der Vervielfachung (ein
+// Symbol auf halbem Bildpunkt waere unscharf), und nach unten wie nach
+// oben begrenzt. Bei der Vorgabe (Knopf 32) kommt genau die alte 16
+// heraus -- die bisherigen Bildpunktzusagen bleiben damit gueltig.
 fn gl_w() -> u64 {
-    return GL_W0 * wlibc.ui_scale()
+    let sk: u64 = wlibc.ui_scale()
+    let h: u64 = btn_h()
+    if h == 0 {
+        return GL_W0 * sk
+    }
+    var v: u64 = h * 2 / 3
+    // auf ein Vielfaches der Vervielfachung runden
+    v = (v / sk) * sk
+    let unten: u64 = 12 * sk
+    let oben: u64 = 32 * sk
+    if v < unten {
+        v = unten
+    }
+    if v > oben {
+        v = oben
+    }
+    return v
+}
+
+// Die beiden Masse, die es bis zu dieser Runde nur als feste Zahl gab.
+// Sie stehen hier und nicht als Konstante, weil `ui_scale()` erst zur
+// Laufzeit bekannt ist -- eine Konstante koennte sie nicht kennen.
+fn ic_w() -> u64 {
+    return IC_W0 * wlibc.ui_scale()
+}
+
+fn mk_w() -> u64 {
+    return MK_W0 * wlibc.ui_scale()
+}
+
+// ROUND TON-2: THE VOLUME, AS A SHAPE.
+//
+// Three steps and a cross, and the thresholds are the same idea as the
+// battery's four: at sixteen pixels a number cannot be read, an
+// outline can. Muted is its OWN shape and not a colour -- "silent" has
+// to be visible to someone who cannot separate grey from red.
+fn snd_icon() -> u64 {
+    if snd_mute != 0 {
+        return icons.VOLUME_MUTED
+    }
+    if snd_vol == 0 {
+        return icons.VOLUME_ZERO
+    }
+    if snd_vol >= 50 {
+        return icons.VOLUME_HIGH
+    }
+    return icons.VOLUME_LOW
 }
 
 fn bat_icon() -> u64 {
@@ -267,6 +435,18 @@ fn bat_icon() -> u64 {
 // And its colour -- a ROLE and not a value, so it is right in every
 // scheme. Below ten percent the thing is an alarm and says so; the
 // rest of the time it is text and looks like text.
+// ROUND TON-2: stumm wird GEDAEMPFT gezeichnet, und das ist die
+// zweite Haelfte der Aussage neben der Form. Ein Symbol, das nur
+// blasser ist, sagt zu wenig; eines, das nur eine andere Form hat,
+// faellt in einer vollen Leiste nicht auf. Beides zusammen ist
+// eindeutig.
+fn snd_colour() -> u64 {
+    if snd_mute != 0 {
+        return wlibc.theme(wlibc.T_DIM)
+    }
+    return wlibc.theme(wlibc.T_FG)
+}
+
 fn bat_colour() -> u64 {
     if bat_have == 0 {
         return wlibc.theme(wlibc.T_DIM)
@@ -332,6 +512,19 @@ static mut cf_height: u64 = 28
 static mut cf_width: u64 = 104
 static mut cf_autohide: u64 = 0
 static mut cf_ontop: u64 = 1
+// RUNDE STARTKNOPF: die Uhr.
+static mut cf_sec: u64 = 0 // Sekunden mitzeigen
+static mut cf_date: u64 = 0 // Datum mitzeigen
+static mut cf_wday: u64 = 0 // Wochentag mitzeigen
+static mut cf_clines: u64 = 1 // 1 = einzeilig, 2 = Uhrzeit ueber Datum
+// Die Beschriftung der Programmknoepfe:
+//   0 nie (nur Symbol, wie Windows 11)  1 immer  2 solange Platz ist
+const LB_NEVER: u64 = 0
+const LB_ALWAYS: u64 = 1
+const LB_ROOM: u64 = 2
+static mut cf_labels: u64 = LB_NEVER
+// Ein Feld ohne passende Hardware wird GAR NICHT gezeichnet.
+static mut cf_hidemissing: u64 = 1
 static mut cf_from_file: u64 = 0
 
 // the geometry derived from it
@@ -352,13 +545,19 @@ static mut st_x: u64 = 0
 static mut st_y: u64 = 0
 static mut st_w: u64 = 0
 static mut st_h: u64 = 0
-static mut f_x: [u64; 3] = [0 as u64; 3]
-static mut f_y: [u64; 3] = [0 as u64; 3]
-static mut f_w: [u64; 3] = [0 as u64; 3]
-static mut f_h: [u64; 3] = [0 as u64; 3]
-static mut f_lines: [u64; 3] = [0 as u64; 3]
-static mut f_txt: [u8; 192] = [0 as u8; 192] // 3 fields x 2 lines x 32
-static mut f_full: [u8; 96] = [0 as u8; 96] // 3 fields x 32, unshortened
+static mut f_x: [u64; 5] = [0 as u64; 5]
+static mut f_y: [u64; 5] = [0 as u64; 5]
+static mut f_w: [u64; 5] = [0 as u64; 5]
+static mut f_h: [u64; 5] = [0 as u64; 5]
+static mut f_lines: [u64; 5] = [0 as u64; 5]
+// MERGE-8: F_N ist 5 (NET, SND, BAT, CLK, NOTI) -- TON-2 und
+// SYSTEMBUS haben je ein Feld gebracht. Die Felder sind ein
+// zusammenhaengender Bereich 0..F_N, und JEDE dieser Tafeln wird mit
+// dem Feldindex angesprochen: 4 Plaetze und ein Index 4 sind genau
+// die Panik, die 32 von 32 glyphe-Laeufen mit -smp 4 gezeigt haben
+// (`index out of bounds in '[u64; 4]' at taskbar.fi:2165`).
+static mut f_txt: [u8; 320] = [0 as u8; 320] // 5 fields x 2 lines x 32
+static mut f_full: [u8; 160] = [0 as u8; 160] // 5 fields x 32, unshortened
 static mut kx: [u64; 10] = [0 as u64; 10]
 // RUNDE PAINT: der Buendelname je Knopf, 24 Oktette, aus WL_APP.
 static mut kapp: [u8; 240] = [0 as u8; 240]
@@ -436,10 +635,43 @@ static mut acts: u64 = 0
 static mut paints: u64 = 0
 static mut writes: u64 = 0
 
+// ================================================== RUNDE UHRWERK
+// DIE ZAEHLER, MIT DENEN JUSTINS BEFUND ZU EINER ZAHL WIRD.
+//
+// Der Befund lautet: die Uhr steht, bis die Maus ueber die Ziffern
+// faehrt. Dafuer gibt es genau drei Verdaechtige, und jeder von ihnen
+// hat hier seinen Zaehler:
+//
+//   ub_round -- laeuft diese Schleife ueberhaupt weiter? Sie schlaeft
+//               mit `ulib.sleep_ms(25)`, und geweckt wird sie NUR aus
+//               dem Zeitgeber (kernel/sched.fi, `on_tick`). Schlaegt
+//               der nicht, steht die Zahl -- und dann ist es ein
+//               Fehler im Ablaufplaner und keiner im Zeichenweg.
+//   ub_sb    -- wie oft `status_build` gelaufen ist (alle 10 Runden).
+//   ub_sbt   -- wie oft es TRUE geliefert hat, also wie oft sich die
+//               Felder wirklich geaendert haben. Bei `clock_seconds=1`
+//               muss das ungefaehr einmal je Sekunde sein.
+//   ub_px    -- wie viele Bildpunkte diese Leiste ueber WIG_BLIT
+//               hinuebergeschoben hat. Das ist die Gegenprobe gegen
+//               "zu viel gemalt": eine Sekundenuhr darf den Schirm
+//               nicht neu setzen.
+//
+// Gemeldet wird im PULSTAKT und NICHT in jeder Runde. Der Grund steht
+// in kernel/kgui.fi bei `eingabe_puls`: eine Zeile je Runde schreibt
+// dem Menschen in vierzig Sekunden 238 Zeilen ins Terminal, und das
+// ist keine Diagnose, sondern Rauschen.
+static mut ub_round: u64 = 0
+static mut ub_sb: u64 = 0
+static mut ub_sbt: u64 = 0
+static mut ub_px: u64 = 0
+static mut ub_naechster: u64 = 0
+static mut ub_soll: u64 = 0   // Bildpunkte, die hinueber SOLLTEN
+static mut ub_null: u64 = 0   // Pushs, die NICHTS hinuebergebracht haben
+
 // the drag
 static mut dragging: u64 = 0
 static mut drag_edge: u64 = 9
-static mut prev_h: [u64; 4] = [0 as u64; 4]
+static mut prev_h: [u64; 5] = [0 as u64; 5]
 static mut prev_on: u64 = 0
 static mut prev_edge: u64 = 9
 static mut hide_t0: u64 = 0
@@ -516,6 +748,29 @@ static mut k_width: [u8; 6] = "width\0"
 static mut k_autohide: [u8; 9] = "autohide\0"
 static mut k_ontop: [u8; 6] = "ontop\0"
 static mut k_align: [u8; 6] = "align\0"
+// ============================================== RUNDE STARTKNOPF
+// DIE UHR WIRD EINSTELLBAR, UND DER INFOBEREICH HOERT AUF ZU LUEGEN.
+//
+// Justin: "in der Taskleiste ist alles falsch". Drei Dinge stecken
+// darin, und sie sind unabhaengig voneinander:
+//
+//   1. Die Uhr zeigt NUR Stunde und Minute. Sie wird deshalb hoechstens
+//      einmal je Minute neu gemalt -- und eine Leiste, die 59 Sekunden
+//      lang dasselbe Bild zeigt, ist von einer eingefrorenen nicht zu
+//      unterscheiden. Mit `clock_seconds=1` tickt sie sichtbar, und
+//      damit beantwortet ein Blick die Frage, ob sie lebt.
+//   2. "kein Akku" steht als TEXT in der Leiste. Ein Symbol fuer etwas,
+//      das die Maschine nicht hat, gehoert gar nicht gemalt -- weder
+//      als Bild noch als Satz. Das Feld faellt jetzt ganz weg.
+//   3. Die Knopfbeschriftungen werden abgeschnitten ("St", "Termina").
+//      Windows 11 loest das nicht mit mehr Platz, sondern mit einem
+//      SYMBOL statt eines Textes; `labels=` waehlt zwischen beidem.
+static mut k_seconds: [u8; 15] = "clock_seconds\0\0"
+static mut k_cdate: [u8; 12] = "clock_date\0\0"
+static mut k_cwday: [u8; 15] = "clock_weekday\0\0"
+static mut k_clines: [u8; 13] = "clock_lines\0\0"
+static mut k_labels: [u8; 8] = "labels\0\0"
+static mut k_nohw: [u8; 15] = "hide_missing\0\0\0"
 static mut v_left: [u8; 5] = "left\0"
 static mut v_center: [u8; 7] = "center\0"
 
@@ -536,6 +791,29 @@ fn key_is(p: u64, n: u64, k: u64) -> bool {
 
 // `left` or `center`, by name. Anything else is `left`, because a
 // misspelt value must not move the start button.
+// never = nur Symbol (Windows 11 im Auslieferungszustand)
+// always = Symbol und Text
+// room   = Text, solange er ohne Abschneiden hineinpasst
+fn labels_by_name(p: u64) -> u64 {
+    var w_nev: [u8; 6] = "never\0"
+    var w_alw: [u8; 7] = "always\0"
+    var w_room: [u8; 5] = "room\0"
+    var w_full: [u8; 10] = "when_full\0"
+    if ulib.streq(p, (&w_nev[0 as usize]) as u64) {
+        return LB_NEVER
+    }
+    if ulib.streq(p, (&w_alw[0 as usize]) as u64) {
+        return LB_ALWAYS
+    }
+    if ulib.streq(p, (&w_room[0 as usize]) as u64) {
+        return LB_ROOM
+    }
+    if ulib.streq(p, (&w_full[0 as usize]) as u64) {
+        return LB_ROOM
+    }
+    return cf_labels
+}
+
 fn align_by_name(p: u64) -> u64 {
     if __mmio_read8((p) as *mut u8) == 99 as u8 {
         return AL_CENTER
@@ -634,6 +912,33 @@ fn conf_read() -> bool {
                 if digits > 0 {
                     cf_ontop = v & 1
                 }
+            } else if key_is(b + ks, kl, (&k_seconds[0 as usize]) as u64) {
+                if digits > 0 {
+                    cf_sec = v & 1
+                }
+            } else if key_is(b + ks, kl, (&k_cdate[0 as usize]) as u64) {
+                if digits > 0 {
+                    cf_date = v & 1
+                }
+            } else if key_is(b + ks, kl, (&k_cwday[0 as usize]) as u64) {
+                if digits > 0 {
+                    cf_wday = v & 1
+                }
+            } else if key_is(b + ks, kl, (&k_clines[0 as usize]) as u64) {
+                if v == 2 {
+                    cf_clines = 2
+                } else if digits > 0 {
+                    cf_clines = 1
+                }
+            } else if key_is(b + ks, kl, (&k_nohw[0 as usize]) as u64) {
+                if digits > 0 {
+                    cf_hidemissing = v & 1
+                }
+            } else if key_is(b + ks, kl, (&k_labels[0 as usize]) as u64) {
+                // EIN WORT UND KEINE ZAHL, aus demselben Grund wie bei
+                // `edge=` und `align=`: `labels=never` sagt, was es
+                // tut, `labels=0` nicht.
+                cf_labels = labels_by_name(wp)
             } else if key_is(b + ks, kl, (&k_align[0 as usize]) as u64) {
                 // ROUND LOOK. A WORD AND NOT A NUMBER, like `edge=`
                 // above and unlike `ontop=`: `align=center` says what
@@ -717,6 +1022,7 @@ static mut lk_sg: [u8; 8] = " align=\0"
 static mut lk_ic: [u8; 21] = "taskbar: icon field=\0"
 static mut lk_no: [u8; 24] = "taskbar: noglyph field=\0"
 static mut lk_bat: [u8; 4] = "bat\0"
+static mut lk_snd: [u8; 4] = "snd\0"
 static mut lk_net: [u8; 4] = "net\0"
 static mut lk_id: [u8; 6] = " id=\0\0"
 static mut lk_px: [u8; 6] = " px=\0\0"
@@ -737,6 +1043,25 @@ static mut sh_b: [u8; 7] = " name=\0"
 static mut sh_c: [u8; 6] = " id=\0\0"
 static mut sh_d: [u8; 7] = " keys=\0"
 static mut sh_e: [u8; 9] = " ctrl_h=\0"
+// ================================================ RUNDE VEKTOR
+// DIE RADIEN GEHOEREN IN DIESE ZEILE.
+//
+// Justin sieht auf echtem Blech eckige Fenster; im Pruefstand ist die
+// Ecke gemessen rund (Eckprofil des Kontrollzentrums bei 2560x1440 und
+// bei 3840x2160 BYTEGLEICH: 4,3,3,2,2,1,1,1). Zwei Erklaerungen blieben
+// uebrig, und die zweite -- ein anderer Bildspeicherweg -- ist damit
+// widerlegt. Es bleibt: auf seinem Brett greift eine ANDERE
+// Formentabelle. `classic.shape` hat radius_panel=0, radius_button=0,
+// radius_input=0; `osum.shape` hat 10/8/6.
+//
+// Der Name allein genuegt nicht: er sagt, welche DATEI gelesen wurde,
+// nicht welche ZAHLEN daraus geworden sind. Eine Datei, die nicht
+// gefunden wird, hinterlaesst einen Namen und Nullen. Also stehen hier
+// die drei Zahlen selbst -- ablesbar auf einem Foto der seriellen
+// Ausgabe, ohne dass jemand raet.
+static mut sh_r: [u8; 5] = " rp=\0"
+static mut sh_s: [u8; 5] = " rb=\0"
+static mut sh_t: [u8; 5] = " ri=\0"
 
 fn shape_say() {
     say((&sh_a[0 as usize]) as u64)
@@ -749,6 +1074,12 @@ fn shape_say() {
     ulib.sayn(wlibc.shape_keys())
     say((&sh_e[0 as usize]) as u64)
     ulib.sayn(wlibc.metric(wlibc.M_CTRL_H))
+    say((&sh_r[0 as usize]) as u64)
+    ulib.sayn(wlibc.metric(wlibc.M_RADIUS_PANEL))
+    say((&sh_s[0 as usize]) as u64)
+    ulib.sayn(wlibc.metric(wlibc.M_RADIUS_BUTTON))
+    say((&sh_t[0 as usize]) as u64)
+    ulib.sayn(wlibc.metric(wlibc.M_RADIUS_INPUT))
     ulib.nl()
 }
 
@@ -1260,6 +1591,8 @@ fn hover_step() -> bool {
 // uebersetzt, macht jeden Testlaeufer sprachabhaengig.
 static mut k_title: [u8; 14] = "taskbar.title\0"
 static mut k_start: [u8; 14] = "taskbar.start\0"
+// RUNDE ECHTHARDWARE-2: die zwei Punkte des Kontextmenues.
+static mut k_ctx: [u8; 17] = "taskbar.context\0\0"
 static mut k_batt: [u8; 16] = "taskbar.battery\0"
 static mut k_nobatt: [u8; 19] = "taskbar.no_battery\0"
 static mut k_nonet: [u8; 19] = "taskbar.no_network\0"
@@ -1327,6 +1660,190 @@ fn txt(key: u64, fallback: u64) -> u64 {
     return t
 }
 
+// ============================================== RUNDE STARTKNOPF
+// DIE UHR, IN VIER SCHALTERN.
+//
+// `clock_seconds` Sekunden, `clock_date` Datum, `clock_weekday` der
+// Wochentag, `clock_lines=2` Uhrzeit ueber Datum. Die BREITE des
+// Feldes rechnet `layout` aus dem Text (`width_of(line_of(...))`) --
+// sie waechst und schrumpft also von selbst mit dem Format, und keine
+// feste Zahl muss mitgepflegt werden.
+//
+// UND DER TAG DER WOCHE WIRD GERECHNET, nicht erfragt: `SYS_SYSINFO`
+// kennt Jahr, Monat, Tag, Stunde, Minute und Sekunde und keinen
+// Wochentag. Die Formel ist Sakamotos -- vier Zeilen, gueltig ab 1752,
+// und sie kostet keine Systemschnittstelle, die es nicht gibt.
+static mut wd_namen: [u8; 24] = "SoMoDiMiDoFrSa\0\0\0\0\0\0\0\0\0\0"
+static mut c_sp: [u8; 2] = " \0"
+static mut c_ko: [u8; 3] = ", \0"
+static mut c_pt: [u8; 2] = ".\0"
+
+fn weekday(y: u64, m: u64, d: u64) -> u64 {
+    var t: [u64; 12] = [0 as u64, 3 as u64, 2 as u64, 5 as u64, 0 as u64,
+        3 as u64, 5 as u64, 1 as u64, 4 as u64, 6 as u64, 2 as u64,
+        4 as u64]
+    if y < 1 || m < 1 || m > 12 || d < 1 {
+        return 0
+    }
+    var yy: u64 = y
+    if m < 3 {
+        yy = yy - 1
+    }
+    return (yy + yy / 4 - yy / 100 + yy / 400 + t[(m - 1) as usize] + d) % 7
+}
+
+fn clock_build() {
+    let hr: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_HOUR, 0, 0)
+    let mi: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_MIN, 0, 0)
+    let se: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_SEC, 0, 0)
+    var yr: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_YEAR, 0, 0)
+    var mo: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_MONTH, 0, 0)
+    var dy: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_DAY, 0, 0)
+    // ================================================ RUNDE ECHTHARDWARE-3
+    // DER VERSATZ WURDE HIER EIN ZWEITES MAL ADDIERT.
+    //
+    // Justins Foto vom 09.09. 22:10: die Tafel sagt
+    // `RTC 22:10:18  KRN 00:10:17  TZ 120`, die Leiste zeigt
+    // `00:10:17 10.09.26`. Zwei getrennte Fehler stecken darin, und
+    // nur einer davon ist diese Zeile:
+    //
+    //  1. `SYS_SYSINFO I_HOUR` liefert seit Runde ECHTHARDWARE-1
+    //     ORTSZEIT (uio.fi `zeit_feld` -> `time.now_local`, also
+    //     TIME_BOOT + Zyklen + tz). Der Versatz ist da also SCHON
+    //     drin. Diese Funktion hat ihn danach NOCH EINMAL addiert --
+    //     jede Maschine mit einer `/etc/time.conf` ging damit zwei
+    //     Stunden vor. Der Stick schreibt die Datei nicht, die
+    //     Abnahmeskripte (tools/design/aufnahme.sh:162) schon; genau
+    //     deshalb stimmte die Uhr im Bild und auf dem Blech nicht.
+    //
+    //  2. Dass die Leiste die LAUFZEIT zeigt (00:10:17 = 10 Minuten
+    //     seit dem Start), liegt NICHT hier, sondern daran, dass
+    //     TIME_BOOT 0 war -- die Echtzeituhr wurde beim Start nicht
+    //     uebernommen. Das ist in `kernel/time.fi` behoben.
+    //
+    // Es bleibt bei EINER Quelle: der Kern rechnet die Ortszeit, die
+    // Leiste zeigt sie an. `offset` wird nur noch benutzt, wenn der
+    // Kern selbst keinen Versatz kennt (`tz=` fehlt) -- dann ist die
+    // Datei die einzige Auskunft, die es gibt.
+    let roh: u64 = hr * 60 + mi
+    var zu: u64 = 0
+    if ulib.sys(ulib.SYS_SYSINFO, ulib.I_TZMIN, 0, 0) == 0 {
+        zu = offset
+    }
+    let ganz: u64 = (roh + zu) % 1440
+    if roh + zu >= 1440 {
+        dy = dy + 1
+        if dy > tage_im_monat(yr, mo) {
+            dy = 1
+            mo = mo + 1
+            if mo > 12 {
+                mo = 1
+                yr = yr + 1
+            }
+        }
+    }
+    let c: u64 = full_of(F_CLK)
+    var at: u64 = 0
+    if cf_wday != 0 && cf_clines == 1 {
+        let w: u64 = weekday(yr, mo, dy)
+        __mmio_write8((c) as *mut u8,
+            __mmio_read8(((&wd_namen[0 as usize]) as u64 + w * 2) as *mut u8))
+        __mmio_write8((c + 1) as *mut u8,
+            __mmio_read8(((&wd_namen[0 as usize]) as u64 + w * 2 + 1) as *mut u8))
+        __mmio_write8((c + 2) as *mut u8, 0 as u8)
+        at = text_at_p(c, 2, (&c_sp[0 as usize]) as u64)
+    }
+    two(c, at, ganz / 60)
+    at = at + 2
+    __mmio_write8((c + at) as *mut u8, 58 as u8)
+    at = at + 1
+    two(c, at, ganz % 60)
+    at = at + 2
+    if cf_sec != 0 {
+        __mmio_write8((c + at) as *mut u8, 58 as u8)
+        at = at + 1
+        two(c, at, se % 60)
+        at = at + 2
+    }
+    __mmio_write8((c + at) as *mut u8, 0 as u8)
+    // ZWEIZEILIG heisst: die zweite Zeile ist das Datum, und
+    // `fit_field` faellt fuer dieses Feld aus -- die Trennung steht
+    // hier und nicht bei der Textbreite.
+    clk_zwei = 0
+    if cf_date != 0 || cf_clines == 2 {
+        if cf_clines == 2 {
+            clk_zwei = 1
+            let z: u64 = (&clk_z2[0 as usize]) as u64
+            var b: u64 = 0
+            if cf_wday != 0 {
+                let w2: u64 = weekday(yr, mo, dy)
+                __mmio_write8((z) as *mut u8,
+                    __mmio_read8(((&wd_namen[0 as usize]) as u64 + w2 * 2) as *mut u8))
+                __mmio_write8((z + 1) as *mut u8,
+                    __mmio_read8(((&wd_namen[0 as usize]) as u64 + w2 * 2 + 1) as *mut u8))
+                __mmio_write8((z + 2) as *mut u8, 0 as u8)
+                b = text_at_p(z, 2, (&c_ko[0 as usize]) as u64)
+            }
+            two(z, b, dy)
+            b = b + 2
+            __mmio_write8((z + b) as *mut u8, 46 as u8)
+            b = b + 1
+            two(z, b, mo)
+            b = b + 2
+            __mmio_write8((z + b) as *mut u8, 46 as u8)
+            b = b + 1
+            two(z, b, yr % 100)
+            b = b + 2
+            __mmio_write8((z + b) as *mut u8, 0 as u8)
+        } else {
+            at = text_at_p(c, at, (&c_sp[0 as usize]) as u64)
+            two(c, at, dy)
+            at = at + 2
+            __mmio_write8((c + at) as *mut u8, 46 as u8)
+            at = at + 1
+            two(c, at, mo)
+            at = at + 2
+            __mmio_write8((c + at) as *mut u8, 46 as u8)
+            at = at + 1
+            two(c, at, yr % 100)
+            at = at + 2
+            __mmio_write8((c + at) as *mut u8, 0 as u8)
+        }
+    }
+}
+
+fn tage_im_monat(y: u64, m: u64) -> u64 {
+    var t: [u64; 12] = [31 as u64, 28 as u64, 31 as u64, 30 as u64,
+        31 as u64, 30 as u64, 31 as u64, 31 as u64, 30 as u64, 31 as u64,
+        30 as u64, 31 as u64]
+    if m < 1 || m > 12 {
+        return 31
+    }
+    if m == 2 {
+        if (y % 4) == 0 && ((y % 100) != 0 || (y % 400) == 0) {
+            return 29
+        }
+        return 28
+    }
+    return t[(m - 1) as usize]
+}
+
+static mut clk_z2: [u8; 32] = [0 as u8; 32]
+static mut clk_zwei: u64 = 0
+static mut net_da: u64 = 1
+// RUNDE SYSTEMBUS: die Zahl auf der Glocke, gemerkt fuer den Bericht.
+static mut noti_neu: u64 = 0
+static mut s_glocke: [u8; 7] = "Meldg \0"
+
+// ROUND TON-2. `snd_da` is the same rule as `net_da` and `bat_have`:
+// no sound card, no field. `snd_gen` is the change counter the kernel
+// keeps (`A_VOLGEN`) -- the bar asks for ONE number to find out
+// whether anything moved, instead of repainting on a timer.
+static mut snd_da: u64 = 0
+static mut snd_vol: u64 = 0
+static mut snd_mute: u64 = 0
+static mut snd_gen: u64 = 0
+
 fn status_build() -> bool {
     let s_kA: u64 = txt((&k_nobatt[0 as usize]) as u64,
         (&s_nobat[0 as usize]) as u64)
@@ -1335,14 +1852,7 @@ fn status_build() -> bool {
     let s_ak: u64 = txt((&k_batt[0 as usize]) as u64,
         (&s_bat[0 as usize]) as u64)
     offset_read()
-    let hr: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_HOUR, 0, 0)
-    let mi: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_MIN, 0, 0)
-    let whole: u64 = ((hr * 60 + mi) + offset) % 1440
-    let c: u64 = full_of(F_CLK)
-    two(c, 0, whole / 60)
-    __mmio_write8((c + 2) as *mut u8, 58 as u8)
-    two(c, 3, whole % 60)
-    __mmio_write8((c + 5) as *mut u8, 0 as u8)
+    clock_build()
     let a: u64 = full_of(F_BAT)
     let have: u64 = ulib.sys(SYS_PWRGET, PG_BATPRESENT, 0, 0)
     bat_have = 0
@@ -1353,7 +1863,22 @@ fn status_build() -> bool {
         bat_chg = 1
     }
     if ulib.bad(have) || have == 0 {
-        let _q: u64 = text_at_p(a, 0, s_kA)
+        // ============================== RUNDE STARTKNOPF
+        // KEIN AKKU HEISST KEIN FELD -- und nicht der Satz "kein
+        // Akku". Justins Rechner ist ein Tischrechner; die Leiste hat
+        // ihm bei jedem Blick mitgeteilt, dass er keinen Akku hat.
+        // Das ist keine Auskunft, das ist Laerm. Windows zeigt dort
+        // nichts, und das ist richtig: ein Symbol steht fuer etwas,
+        // das die Maschine HAT.
+        //
+        // Mit `hide_missing=0` kommt der alte Text zurueck -- er ist
+        // die Gegenprobe und die Auskunft fuer den Fall, dass jemand
+        // einen Akku ERWARTET und keiner gefunden wird.
+        if cf_hidemissing != 0 {
+            __mmio_write8((a) as *mut u8, 0 as u8)
+        } else {
+            let _q: u64 = text_at_p(a, 0, s_kA)
+        }
     } else {
         bat_have = 1
         let pc: u64 = ulib.sys(SYS_PWRGET, PG_BATPERCENT, 0, 0)
@@ -1366,12 +1891,46 @@ fn status_build() -> bool {
             let _q: u64 = text_at_p(a, at, (&s_pct[0 as usize]) as u64)
         }
     }
+    // ============================== ROUND TON-2: the volume field.
+    // Same rule as the battery above -- no card, no field. The text is
+    // the percentage, and it is what a bar without a glyph path falls
+    // back to; with glyphs the symbol replaces it.
+    let sn: u64 = full_of(F_SND)
+    snd_da = 0
+    if ulib.sys(SYS_AUDGET, A_READY, 0, 0) == 1 {
+        snd_da = 1
+        let v: u64 = ulib.sys(SYS_AUDGET, A_VOLUME, 0, 0)
+        if !ulib.bad(v) {
+            snd_vol = v
+        }
+        snd_mute = 0
+        if ulib.sys(SYS_AUDGET, A_MUTED, 0, 0) == 1 {
+            snd_mute = 1
+        }
+        let g2: u64 = ulib.sys(SYS_AUDGET, A_VOLGEN, 0, 0)
+        if !ulib.bad(g2) {
+            snd_gen = g2
+        }
+        var at2: u64 = num_at(sn, 0, snd_vol)
+        let _q2: u64 = text_at_p(sn, at2, (&s_pct[0 as usize]) as u64)
+    } else {
+        __mmio_write8((sn) as *mut u8, 0 as u8)
+    }
     let ne: u64 = full_of(F_NET)
     // ROUND NETVIEW, addendum: the four states of the MACHINE. The
     // kernel works them out (`sys.NG_STATE`) so that this bar does not
     // ask three questions and draw its own conclusion -- the next
     // reader of those three would conclude something else.
     let st: u64 = ulib.sys(SYS_NETGET, NG_STATE, 0, 0)
+    // ============================== RUNDE STARTKNOPF
+    // GIBT ES UEBERHAUPT EINE NETZKARTE? Der Kern beantwortet die
+    // Frage selbst (`NG_STATE` schlaegt fehl, wenn kein Geraet da
+    // ist). Ohne Karte kein Symbol und kein "kein Netz" -- dieselbe
+    // Regel wie beim Akku, und aus demselben Grund.
+    net_da = 1
+    if ulib.bad(st) {
+        net_da = 0
+    }
     if ulib.bad(st) {
         net_state = 0
     } else {
@@ -1401,7 +1960,9 @@ fn status_build() -> bool {
             ip = 0
         }
     }
-    if ip == 0 {
+    if net_da == 0 && cf_hidemissing != 0 {
+        __mmio_write8((ne) as *mut u8, 0 as u8)
+    } else if ip == 0 {
         let _q: u64 = text_at_p(ne, 0, s_kN)
     } else {
         var at: u64 = num_at(ne, 0, (ip >> 24) & 255)
@@ -1411,6 +1972,21 @@ fn status_build() -> bool {
         at = num_at(ne, at, (ip >> 8) & 255)
         at = text_at_p(ne, at, (&s_dot[0 as usize]) as u64)
         at = num_at(ne, at, ip & 255)
+    }
+    // ================================================ RUNDE SYSTEMBUS
+    //
+    // DIE GLOCKE. Was hier steht, ist die Zahl der Meldungen, die noch
+    // NIEMAND gelesen hat -- `bus.noti_seen` im Kern. Null Meldungen
+    // heisst KEIN Feld und nicht die Ziffer 0: dieselbe Regel, nach der
+    // die Runde STARTKNOPF das Akkufeld eines Tischrechners entfernt
+    // hat. Ein Symbol steht fuer etwas, das da IST.
+    let nb: u64 = full_of(F_NOTI)
+    noti_neu = wlibc.noti_neu()
+    if noti_neu == 0 {
+        __mmio_write8((nb) as *mut u8, 0 as u8)
+    } else {
+        var nat: u64 = text_at_p(nb, 0, (&s_glocke[0 as usize]) as u64)
+        nat = num_at(nb, nat, noti_neu)
     }
     var sum: u64 = 1469598103934665603 ^ (net_state *% 2654435761)
     // The sign is not part of any of the three texts, so without this
@@ -1480,11 +2056,53 @@ fn break_at(p: u64) -> u64 {
 }
 
 // Lay a field out into one or two lines that fit into `avail` pixels.
+// ============================================== RUNDE ECHTHARDWARE-6
+// DAS NETZFELD TRAEGT EIN SYMBOL UND KEINE ADRESSE.
+//
+// Justin: unten rechts steht `169.254.10.1` als Text, und er will es
+// wie bei Windows -- ein Netzsymbol, keine Zahl. Die Adresse darf im
+// Aufklappmenue oder als Blase stehen.
+//
+// Beides ist schon da und musste nur getrennt werden:
+//   `f_full[F_NET]` ist die volle Auskunft. Daran haengt die Blase
+//       (`hover_text`, Marke 901) UND die Pruefung "ist das Feld
+//       ueberhaupt belegt" -- ein Feld mit leerem `f_full` bekommt
+//       Breite null und verschwindet samt Symbol.
+//   `f_txt[F_NET]` sind die Zeilen, die WIRKLICH in die Leiste
+//       gemalt werden.
+//
+// Also bleibt `f_full` unangetastet, und hier wird fuer F_NET keine
+// Zeile erzeugt. Das Symbol malt `paint` ohnehin getrennt davor
+// (`net_glyph`/`state_icon`), es haengt NICHT am Text.
+//
+// WARUM NICHT EINFACH `f_full` LEEREN: dann faende `hover_text` nichts
+// mehr, die Blase waere leer, und die Adresse waere nicht verschwunden
+// sondern weg. Justin will sie sehen koennen, nur nicht dauernd.
+fn feld_ohne_text(f: u64) -> bool {
+    return f == F_NET
+}
+
 fn fit_field(f: u64, avail: u64) {
     let src: u64 = full_of(f)
     let l0: u64 = line_of(f, 0)
     let l1: u64 = line_of(f, 1)
     __mmio_write8((l1) as *mut u8, 0 as u8)
+    if feld_ohne_text(f) {
+        __mmio_write8((l0) as *mut u8, 0 as u8)
+        f_lines[(f) as usize] = 0
+        return
+    }
+    // RUNDE STARTKNOPF: die ZWEIZEILIGE UHR wird nicht umgebrochen,
+    // sie IST zwei Zeilen -- Uhrzeit oben, Datum darunter, wie in
+    // Windows. Der Umbruch nach Textbreite darunter wuerde "19:09"
+    // und "04.09.2026" an irgendeiner Stelle trennen.
+    if f == F_CLK && clk_zwei != 0 {
+        copy_n(l0, src, tlen(src))
+        let z: u64 = (&clk_z2[0 as usize]) as u64
+        copy_n(l1, z, tlen(z))
+        f_lines[(f) as usize] = 2
+        return
+    }
     if width_of(src) <= avail {
         copy_n(l0, src, tlen(src))
         f_lines[(f) as usize] = 1
@@ -1546,28 +2164,50 @@ fn layout() {
             // what happened when it did not.
             var vroom: u64 = 0
             if f == F_NET && state_icon(net_state) != 0 {
-                vroom = IC_W + 2
+                vroom = ic_w() + 2
             } else if f == F_NET && glyphs_ok() {
-                vroom = IC_W + 2
+                vroom = ic_w() + 2
             }
             if f == F_BAT && glyphs_ok() {
                 vroom = gl_w() + 2
             }
             if f == F_NET && sys_icon() != 0 {
-                vroom = vroom + MK_W + 2
+                vroom = vroom + mk_w() + 2
             }
+            if tlen(full_of(f)) == 0 {
+                f_x[(f) as usize] = pad()
+                f_y[(f) as usize] = y
+                f_w[(f) as usize] = 0
+                f_h[(f) as usize] = 0
+                f_lines[(f) as usize] = 0
+            } else {
             fit_field(f, inner - 8 - vroom)
-            let hh: u64 = f_lines[(f) as usize] * LINE_H + 4
+            let hh: u64 = f_lines[(f) as usize] * line_h() + 4
             y = y - hh
             f_x[(f) as usize] = pad()
             f_y[(f) as usize] = y
             f_w[(f) as usize] = inner
             f_h[(f) as usize] = hh
             y = y - gap()
+            }
+            // ROUND TON-2: the volume sits between the battery and
+            // the network. Two chains walk these fields (here and in
+            // the horizontal layout below) and BOTH have to name the
+            // same order -- a field that only one of them knows is a
+            // field that is laid out on one edge and not on the other.
             if f == F_CLK {
                 f = F_BAT
             } else if f == F_BAT {
+                f = F_SND
+            } else if f == F_SND {
                 f = F_NET
+            } else if f == F_NET {
+                // RUNDE SYSTEMBUS: die Glocke steht am Ende der Kette,
+                // also am weitesten vom Rand weg. Sie ist das Feld,
+                // das am seltensten etwas zeigt -- und ein Feld, das
+                // meistens leer ist, darf nicht die Stelle bestimmen,
+                // an der Uhr und Akku stehen.
+                f = F_NOTI
             } else {
                 f = F_N
             }
@@ -1610,9 +2250,19 @@ fn layout() {
         }
         return
     }
-    st_x = pad() + 1
+    // RUNDE OBERFLAECHE: `pad()` und nicht `pad() + 1`.
+    //
+    // Das eine Bildpunkt Zugabe stand hier seit der ersten Fassung der
+    // Leiste und war der Grund, warum JEDE waagerechte Stelle darin um
+    // eins neben dem Raster lag -- der Startknopf bei 5, der erste
+    // Fensterknopf bei 53, und so weiter durch die ganze Zeile.
+    st_x = pad()
     st_y = (bar_h - btn_h()) / 2
-    st_w = START_W
+    // RUNDE STARTKNOPF: ohne Wort ist der Knopf quadratisch.
+    st_w = start_w()
+    if cf_labels == LB_NEVER {
+        st_w = btn_h() + 8
+    }
     st_h = btn_h()
     var x: u64 = bar_w - pad()
     var f: u64 = F_CLK
@@ -1626,13 +2276,13 @@ fn layout() {
         // right, and this is why that run stays in the suite.
         var room: u64 = 0
         if f == F_NET && state_icon(net_state) != 0 {
-            room = IC_W + 2
+            room = ic_w() + 2
         } else if f == F_NET && glyphs_ok() {
             // ROUND LOOK: the glyph takes exactly the room the OSYM
             // picture would have taken, so a bar with the icon font and
             // no /etc/netview looks like a bar with both minus the
             // drawing -- and no rectangle moves.
-            room = IC_W + 2
+            room = ic_w() + 2
         }
         if f == F_BAT && glyphs_ok() {
             room = gl_w() + 2
@@ -1642,8 +2292,21 @@ fn layout() {
         // it had to be learned twice: an icon that is added ON TOP of
         // the field's width pushes the address into the battery.
         if f == F_NET && sys_icon() != 0 {
-            room = room + MK_W + 2
+            room = room + mk_w() + 2
         }
+        // ============================== RUNDE STARTKNOPF
+        // EIN LEERES FELD BEKOMMT KEINEN PLATZ. `status_build` laesst
+        // den Text weg, wenn es die Hardware nicht gibt; ohne diese
+        // vier Zeilen bliebe an der Stelle ein leeres Rechteck von
+        // zehn Bildpunkten plus Symbolplatz stehen -- ein Loch, das
+        // aussieht wie ein Fehler.
+        if tlen(full_of(f)) == 0 {
+            f_x[(f) as usize] = x
+            f_y[(f) as usize] = st_y
+            f_w[(f) as usize] = 0
+            f_h[(f) as usize] = 0
+            f_lines[(f) as usize] = 0
+        } else {
         fit_field(f, bar_w / 4 - room)
         var ww: u64 = width_of(line_of(f, 0)) + 10 + room
         if f_lines[(f) as usize] > 1 {
@@ -1652,16 +2315,32 @@ fn layout() {
                 ww = w1
             }
         }
+        // RUNDE OBERFLAECHE: DIE BREITE EINES STATUSFELDES WIRD AUF
+        // DAS RASTER AUFGERUNDET.
+        //
+        // Sie kommt aus einer TEXTBREITE ("kein Netz" sind 87
+        // Bildpunkte, "16:32" sind 43), und eine Textbreite liegt nie
+        // auf einem Raster.  Aufgerundet wird und nicht abgerundet: das
+        // Feld darf groesser werden als sein Text, nie kleiner --
+        // sonst schneidet das Raster die Uhr ab.  Damit liegen auch
+        // die Stellen rechts davon wieder auf Vielfachen von vier,
+        // denn `gap` ist eines.
+        ww = wlibc.snap_up(ww)
         x = x - ww
         f_x[(f) as usize] = x
         f_y[(f) as usize] = st_y
         f_w[(f) as usize] = ww
         f_h[(f) as usize] = btn_h()
         x = x - gap()
+        }
         if f == F_CLK {
             f = F_BAT
         } else if f == F_BAT {
+            f = F_SND
+        } else if f == F_SND {
             f = F_NET
+        } else if f == F_NET {
+            f = F_NOTI
         } else {
             f = F_N
         }
@@ -1671,11 +2350,46 @@ fn layout() {
     if x > left {
         space = x - left
     }
+    // ============================================== RUNDE STARTKNOPF
+    // NUR SYMBOL -- DIE WINDOWS-11-LEISTE.
+    //
+    // Justins Foto: "St" statt "Start", "Termina" statt "Terminal".
+    // Das ist kein Platzmangel bei 3440 Bildpunkten Breite, sondern
+    // eine feste Hoechstbreite (TASK_MAX = 132) und ein Titel, der
+    // nicht hineinpasst. Windows 11 loest es NICHT mit mehr Platz: es
+    // zeigt gar keinen Text, nur das Symbol, quadratisch. Ein Symbol
+    // wird nie abgeschnitten.
+    //
+    // `labels=always` bringt die Beschriftung zurueck, `labels=room`
+    // zeigt sie, solange sie ohne Abschneiden passt, und `never` ist
+    // die Vorgabe. Die Zahlen (40 logische Bildpunkte je Knopf, das
+    // Quadrat aus der Leistenhoehe) stehen so in
+    // docs/RECHERCHE-TASKLEISTE-2026.md.
     var width: u64 = TASK_MAX
-    if nk > 0 {
+    if cf_labels == LB_NEVER {
+        // Quadratisch: so hoch wie der Knopf, plus etwas Luft.
+        width = btn_h() + 8
+        if width < 28 {
+            width = 28
+        }
+    } else if nk > 0 {
         width = (space - (nk - 1) * gap()) / nk
         if width > TASK_MAX {
             width = TASK_MAX
+        }
+    }
+    if nk > 0 && cf_labels != LB_NEVER {
+        // Passt der Text nicht ohne Abschneiden, faellt `room` auf das
+        // Symbol zurueck statt zu verstuemmeln.
+        if cf_labels == LB_ROOM && width < TASK_MIN {
+            width = btn_h() + 8
+        }
+    }
+    // Und die Knoepfe duerfen nie mehr Platz brauchen, als da ist.
+    if nk > 0 {
+        let hoechst: u64 = (space - (nk - 1) * gap()) / nk
+        if width > hoechst {
+            width = hoechst
         }
     }
     // ROUND LOOK: THE GROUP, AND WHERE IT STARTS.
@@ -1715,11 +2429,20 @@ fn layout() {
         kx[(i) as usize] = left2 + i * (width + gap())
         ky[(i) as usize] = st_y
         kh[(i) as usize] = btn_h()
-        if width >= TASK_MIN {
+        if cf_labels == LB_NEVER || width < TASK_MIN {
+            // NUR DAS SYMBOL. Die Beschriftung wird auf leer gesetzt
+            // und nicht abgeschnitten -- `paint` malt sie dann gar
+            // nicht, und `say_text` meldet einen leeren Text statt
+            // "Termina".
+            kw[(i) as usize] = width
+            __mmio_write8(((&klab[0 as usize]) as u64 + i * 40) as *mut u8,
+                0 as u8)
+            if width < 12 {
+                kw[(i) as usize] = 0
+            }
+        } else {
             kw[(i) as usize] = width
             shorten_title(i, width)
-        } else {
-            kw[(i) as usize] = 0
         }
         i = i + 1
     }
@@ -1806,6 +2529,11 @@ static mut m_start: [u8; 6] = "start\0"
 static mut m_clk: [u8; 6] = "clock\0"
 static mut m_bat: [u8; 8] = "battery\0"
 static mut m_net: [u8; 4] = "net\0"
+// RUNDE SYSTEMBUS: die Glocke hat einen eigenen Namen im Bericht.
+// Ohne ihn haette sie den des Netzes getragen, und ein Laeufer, der
+// `taskbar: field net` zweimal findet, sucht den Fehler an der
+// falschen Stelle.
+static mut m_noti: [u8; 5] = "noti\0"
 static mut m_btn: [u8; 7] = "button\0"
 static mut s_tx: [u8; 15] = "taskbar: text \0"
 static mut s_tX: [u8; 4] = " x=\0"
@@ -1939,6 +2667,10 @@ static mut s_sy: [u8; 18] = "taskbar: sym btn=\0"
 static mut s_syn: [u8; 7] = " app=\0\0"
 static mut s_syw: [u8; 5] = " w=\0\0"
 static mut s_syi: [u8; 7] = " ink=\0\0"
+// RUNDE ECHTHARDWARE-4: die zwei Zahlen, an denen "zu kleines Symbol"
+// zu messen ist -- die gemalte Kante und die Hoehe des Knopfes.
+static mut s_syg: [u8; 10] = " gemalt=\0\0"
+static mut s_syk: [u8; 9] = " knopf=\0\0"
 
 // Die Zahl der Bildpunkte des Symbols, die WIRKLICH Farbe tragen --
 // Deckung ungleich null. Ein leeres OSYM hat dieselbe Breite und
@@ -2068,16 +2800,262 @@ fn button_mark(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
 // der Kasten und nicht die Schrift: diese Leiste hat keine Symbole fuer
 // jedes Programm, und eine Kachel ohne Schrift und ohne Symbol waere
 // ein leeres Feld. Der Kasten ist weg, die Schrift steht.
+// DAS MARKENZEICHEN, MITTIG IN DEN KNOPF, MIT DECKUNG.
+//
+// Gemischt wird gegen die KNOPFFARBE und nicht gegen den Rahmenpuffer:
+// `wlibc` hat kein Zuruecklesen, und der Knopf ist einen Augenblick
+// vorher genau mit dieser Farbe gefuellt worden. Das ist exakt und
+// spart das Lesen.
+static mut mk_ink: u64 = 0
+
+fn marke_malen(x: u64, y: u64, w: u64, h: u64, report: bool) {
+    var s_mk: [u8; 18] = "taskbar: marke n=\0"
+    var s_mx: [u8; 4] = " x=\0"
+    var s_my: [u8; 4] = " y=\0"
+    var s_mi: [u8; 6] = " ink=\0"
+    if w < 8 || h < 8 {
+        return
+    }
+    var kante: u64 = h - 4
+    if kante > w - 4 {
+        kante = w - 4
+    }
+    let n: u64 = marke_start.breit(kante)
+    if n == 0 {
+        return
+    }
+    // ===================================== RUNDE ECHTHARDWARE-2
+    // DIE MARKE FUELLT DEN KNOPF -- SIE HAT NUR DREI GROESSEN.
+    //
+    // Justin: "OS-Symbol ganz links unten: Klick macht NICHTS." Die
+    // Klickflaeche war nie das Problem (der Knopf ist 72x64 und die
+    // Pruefung in `click` deckt ihn ganz ab) -- die MARKE DARIN war
+    // zu klein. GEMESSEN auf seiner Aufloesung: Tinte von y=1392 bis
+    // y=1414, also 24 Bildpunkte in einem 64 Punkte hohen Knopf. Wer
+    // auf das kleine Zeichen zielt, das er SIEHT, trifft daneben --
+    // und der Knopf tut dann wirklich nichts.
+    //
+    // `marke_start` hat genau drei eingebackene Groessen (16/24/32),
+    // die groesste ist 32. Auf einem Knopf von 60 nutzbaren Punkten
+    // bleibt damit die Haelfte leer. Also wird die 32er GANZZAHLIG
+    // vervielfacht -- dasselbe Kaestchenverfahren wie in
+    // `wlibc.icon_draw` seit dieser Runde. Ganzzahlig, weil ein Ring
+    // von einem Bildpunkt Staerke keine Zwischenwerte vertraegt (der
+    // Kopf von `marke_start.breit` sagt genau das).
+    // DIE BESTE KOMBINATION AUS QUELLGROESSE UND VERVIELFACHUNG.
+    //
+    // Nicht einfach "die groesste Quelle, dann verdoppeln": auf einem
+    // Knopf mit 60 nutzbaren Punkten passt die 32er GENAU EINMAL
+    // (64 waeren zu viel) -- und dann bleiben 28 Punkte leer, was
+    // genau der Zustand ist, den Justin fotografiert hat. Die 24er
+    // passt ZWEIMAL: 48 von 60. Also wird durchprobiert, welches
+    // Paar die groesste Flaeche ergibt, die noch hineingeht.
+    // ===================================== RUNDE ECHTHARDWARE-4
+    // NATIVE GROESSE SCHLAEGT VERVIELFACHUNG -- DAS WAR DIE
+    // "VERPIXELUNG".
+    //
+    // Justin zu den Bildern aus ECHTHARDWARE-3: links unten ein
+    // "rundes, stark verpixeltes Symbol". Die Suche hier lief bis
+    // `kn <= 32`, weil es nur drei eingebackene Groessen gab, und
+    // waehlte danach allein nach FLAECHE (`gr > best`). Auf Justins
+    // Knopf mit 60 nutzbaren Punkten gewann damit 32*1 = 32 gegen
+    // 24*2 = 48? Nein -- 48 gewann, und genau das war der Fehler:
+    // eine 24er Vorlage, ganzzahlig verdoppelt, hat Treppen an jeder
+    // runden Kante, waehrend die 48er Vorlage daneben scharf ist.
+    //
+    // Seit dieser Runde backt `tools/marke/startbild.py` auch 48 und
+    // 64 ein (die Dateien lagen laengst in assets/marke/). Also:
+    //
+    //   1. gesucht wird ueber ALLE fuenf Groessen
+    //   2. bei gleicher Endgroesse gewinnt die mit der KLEINEREN
+    //      Vervielfachung -- also die native
+    //
+    // Punkt 2 ist der eigentliche Fix. Ohne ihn nimmt die Suche
+    // weiter 24*2 statt 48*1, obwohl beides 48 ergibt und nur eines
+    // davon scharf ist.
+    var qn: u64 = n
+    var mal: u64 = 1
+    var best: u64 = n
+    var bmal: u64 = 9
+    var kn: u64 = 16
+    while kn <= 64 {
+        var m2: u64 = 1
+        while m2 <= 4 {
+            let gr: u64 = kn * m2
+            if gr <= kante {
+                if gr > best || (gr == best && m2 < bmal) {
+                    best = gr
+                    bmal = m2
+                    qn = kn
+                    mal = m2
+                }
+            }
+            m2 = m2 + 1
+        }
+        // 16 -> 24 -> 32 -> 48 -> 64, die eingebackenen Groessen
+        if kn == 16 {
+            kn = 24
+        } else if kn == 24 {
+            kn = 32
+        } else if kn == 32 {
+            kn = 48
+        } else if kn == 48 {
+            kn = 64
+        } else {
+            kn = 65
+        }
+    }
+    let gz: u64 = qn * mal
+    let x0: u64 = x + (w - gz) / 2
+    let y0: u64 = y + (h - gz) / 2
+    let grund: u64 = wlibc.theme(wlibc.C_BUTTON_FACE)
+    mk_ink = 0
+    var yy: u64 = 0
+    while yy < qn {
+        var xx: u64 = 0
+        while xx < qn {
+            let v: u64 = marke_start.punkt(qn, xx, yy)
+            let a: u64 = (v >> 24) & 0xFF
+            if a != 0 {
+                let f: u64 = wlibc.blend(grund, v & 0xFFFFFF, a)
+                var dy: u64 = 0
+                while dy < mal {
+                    var dx: u64 = 0
+                    while dx < mal {
+                        wlib.mal_punkt(x0 + xx * mal + dx,
+                            y0 + yy * mal + dy, f)
+                        dx = dx + 1
+                    }
+                    dy = dy + 1
+                }
+                mk_ink = mk_ink + 1
+            }
+            xx = xx + 1
+        }
+        yy = yy + 1
+    }
+    if report {
+        say((&s_mk[0 as usize]) as u64)
+        // RUNDE ECHTHARDWARE-2: die WIRKLICH gemalte Kante (`gz`) und
+        // nicht die der Quelle (`n`). Ein Bericht, der 32 sagt, waehrend
+        // 64 auf dem Schirm stehen, laesst genau den Fehler unsichtbar,
+        // den diese Runde gesucht hat.
+        ulib.sayn(gz)
+        say((&s_mx[0 as usize]) as u64)
+        ulib.sayn(x0)
+        say((&s_my[0 as usize]) as u64)
+        ulib.sayn(y0)
+        say((&s_mi[0 as usize]) as u64)
+        ulib.sayn(mk_ink)
+        ulib.nl()
+    }
+}
+
+// ========================================== RUNDE ECHTHARDWARE-4
+// DAS PROGRAMMSYMBOL FUELLT DEN KNOPF -- WIE DIE STARTMARKE SEIT EH-2.
+//
+// Justin hat es zum dritten Mal gemeldet: "die Programmsymbole in der
+// Taskleiste sind sehr klein und wirken verloren". GEMESSEN auf seiner
+// Aufloesung, aus der seriellen Leitung von ECHTHARDWARE-3:
+//
+//     taskbar: STEHT x=0 y=1400 w=2560 h=40     <- die Leiste
+//     taskbar: sym btn=0 app=terminal w=16      <- das Symbol
+//
+// 16 Bildpunkte in einem 40 Punkte hohen Streifen, also 40 Prozent --
+// und daneben steht die Startmarke, die seit ECHTHARDWARE-2 ihren
+// Knopf ausfuellt. Das ist der Unterschied, den man sieht.
+//
+// DIE URSACHE IST EINE HALBE KORREKTUR. `wlibc.icon_draw` nimmt seit
+// EH-2 `ui_scale()` mit -- das behebt "das Symbol bleibt 16, waehrend
+// die Leiste doppelt so hoch wird", aber NUR wenn die Leiste ihre
+// Hoehe auch wirklich aus der Vervielfachung bezieht. Justins Leiste
+// ist 40 hoch bei `ui_scale()==2` (die Marke `ctrl_h` deckelt sie),
+// das Symbol wird 16*1 oder 16*2 -- gemessen 16. Die Vervielfachung
+// des SCHIRMS ist eben nicht die Vervielfachung des KNOPFES.
+//
+// Also dieselbe Rechnung wie bei `marke_malen`: nicht raten, sondern
+// die groesste ganzzahlige Vervielfachung nehmen, die noch in die
+// nutzbare Hoehe passt. GANZZAHLIG, weil die Quellen Flaechen-
+// zeichnungen mit harten Kanten sind (assets/apps/*/symbol.txt) --
+// ein Kaestchen bleibt ein Kaestchen.
+//
+// `SYM_LUFT` ist der Rand, der oben und unten frei bleibt: ein Symbol,
+// das den Knopf bis auf den letzten Punkt fuellt, sieht gequetscht
+// aus. Zwei Punkte je Seite bei einfacher Vervielfachung.
+const SYM_LUFT: u64 = 2
+
+fn sym_scale(sym: u64, h: u64) -> u64 {
+    let ih: u64 = wlibc.icon_h(sym)
+    if ih == 0 {
+        return wlibc.ui_scale()
+    }
+    var luft: u64 = 2 * SYM_LUFT * wlibc.ui_scale()
+    if h <= luft {
+        luft = 0
+    }
+    let raum: u64 = h - luft
+    var s: u64 = raum / ih
+    if s < 1 {
+        s = 1
+    }
+    // Nicht groesser als das, was `icon_draw_sc` zeichnen kann, und
+    // nie kleiner als bisher -- eine Leiste, die schon passte, darf
+    // sich durch diese Runde nicht verkleinern.
+    if s > 8 {
+        s = 8
+    }
+    if s < wlibc.ui_scale() {
+        s = wlibc.ui_scale()
+    }
+    return s
+}
+
 fn button_sym(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
     dim: bool, mark: u64, sym: u64) -> u64 {
     let weich: bool = wlibc.metric(wlibc.M_RADIUS_BUTTON) != 0
         || wlibc.metric(wlibc.M_DIVIDER) < 50
     var fg: u64 = wlibc.theme(wlibc.T_FG)
+    // ============================================== RUNDE VEKTOR
+    // JEDER KNOPF DER LEISTE SAGT JETZT, DASS ER EINER IST.
+    //
+    // Justins Befund 3: "keine Button-Zustaende ... Taskleisten-
+    // Knoepfe". Er hat recht. Diese Routine kannte `on` (das
+    // Fenster ist vorn) und `dim` (nichts da) -- aber nicht, ob der
+    // Zeiger DARAUF steht. Was die Leiste "hover" nennt, ist ein
+    // TEXTFELD (`hover_txt`), also eine Sprechblase; die Flaeche
+    // selbst blieb unveraendert. Man druckt und hofft.
+    //
+    // Der Zeiger wird gepollt und nicht aus einem Ereignis genommen:
+    // die Leiste bekommt Bewegung nur INNERHALB ihres Fensters
+    // gemeldet, und genau dort sind diese Knoepfe.
+    let zx: u64 = wlibc.mouse_x()
+    let zy: u64 = wlibc.mouse_y()
+    let ox: u64 = bar_x
+    let oy: u64 = bar_y
+    let drauf: bool = zx >= ox + x && zx < ox + x + w
+        && zy >= oy + y && zy < oy + y + h
+    let gedrueckt: bool = drauf && (wlibc.mouse_btn() & 1) != 0
     if weich {
         // die Kachel
         let r: u64 = wlibc.metric(wlibc.M_RADIUS_BUTTON)
         if on {
-            wlibc.rrect(x, y, w, h, r, wlibc.theme(wlibc.C_BUTTON_HOVER))
+            var af: u64 = wlibc.theme(wlibc.C_BUTTON_HOVER)
+            if gedrueckt {
+                af = wlibc.mix(af, wlibc.theme(wlibc.T_BTNDN), 65)
+            } else if drauf {
+                af = wlibc.mix(af, wlibc.theme(wlibc.T_BTNHI), 40)
+            }
+            wlib.mal_tafel(x, y, w, h, wlib.MR_KNOPF, wlibc.EL_FLAT,
+                af, 0)
+        } else if gedrueckt {
+            // GEDRUECKT IST SICHTBAR, AUCH WENN DAS FENSTER NICHT
+            // VORN IST -- sonst gibt es auf den Druck keine Antwort.
+            wlib.mal_tafel(x, y, w, h, wlib.MR_KNOPF, wlibc.EL_FLAT,
+                wlibc.theme(wlibc.T_BTNDN), 0)
+        } else if drauf {
+            wlib.mal_tafel(x, y, w, h, wlib.MR_KNOPF, wlibc.EL_FLAT,
+                wlibc.mix(wlibc.theme(wlibc.T_PANEL),
+                    wlibc.theme(wlibc.T_BTNHI), 55), 0)
         } else if dim {
             fg = wlibc.theme(wlibc.T_DIM)
         }
@@ -2092,8 +3070,7 @@ fn button_sym(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
         } else if dim {
             bg = wlibc.theme(wlibc.T_SCROLL)
         }
-        wlibc.rect(x, y, w, h, bg)
-        wlibc.frame3(x, y, w, h, wlibc.theme(wlibc.T_BTNHI),
+        wlib.mal_kante3(x, y, w, h, bg, wlibc.theme(wlibc.T_BTNHI),
             wlibc.theme(wlibc.C_BORDER), on)
         if on {
             fg = wlibc.theme(wlibc.T_SELFG)
@@ -2102,11 +3079,18 @@ fn button_sym(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
         }
     }
     var room: u64 = 0
+    // RUNDE ECHTHARDWARE-4: der Platz richtet sich nach der Groesse,
+    // die WIRKLICH gemalt wird -- sonst malt das groessere Symbol ueber
+    // den Text daneben (derselbe Fehler wie in EH-2 bei `ic_w`).
+    var symsc: u64 = 0
+    var symw: u64 = 0
     if sym != 0 {
-        room = room + gl_w() + 3
+        symsc = sym_scale(sym, h)
+        symw = wlibc.icon_w(sym) * symsc
+        room = room + symw + 3
     }
     if mark != 0 {
-        room = room + MK_W + 3
+        room = room + mk_w() + 3
     }
     let n: u64 = tlen(txt)
     var tw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), txt, n)
@@ -2117,13 +3101,60 @@ fn button_sym(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
             tw = 0
         }
     }
-    let tx: u64 = x + room + (w - room - tw) / 2
-    let base: u64 = y + (h + asc) / 2 - 1
-    var mx: u64 = x + 3
+    // ===================================== RUNDE ECHTHARDWARE-4
+    // SYMBOL UND TEXT SIND EINE GRUPPE, UND DIE GRUPPE SITZT MITTIG.
+    //
+    // GEMESSEN von Justin an hell-2560/01-schreibtisch.png: das
+    // Terminalsymbol lag bei x 57..68 in einem Knopf, dessen linke
+    // Kante bei 54 liegt -- drei Punkte links, und rechts vom Text
+    // blieben zwanzig. Der Grund stand hier: `mx = x + 3` klebte das
+    // Symbol fest an den linken Rand, und der Text wurde DANACH im
+    // Rest zentriert. Zwei Zentrierungen nebeneinander ergeben keine.
+    //
+    // Die Regel dieser Runde, und sie gilt fuer jeden Knopf der
+    // Leiste: Breite der Gruppe = Symbol + Luft + Marke + Luft + Text.
+    // Sie beginnt bei x + (w - Gruppe) / 2. Damit ist der Abstand
+    // links und rechts gleich (Unterschied hoechstens 1 Punkt, weil
+    // eine ungerade Restbreite sich nicht halbieren laesst), und
+    // tools/design/ausrichtung.py rechnet genau das nach.
+    let luft: u64 = 4 * wlibc.ui_scale()
+    var gruppe: u64 = tw
     if sym != 0 {
-        // Das Symbol des Programms, ganz links, senkrecht mittig.
-        let _s: bool = wlibc.icon_draw(sym, mx, y + (h - gl_w()) / 2)
-        mx = mx + gl_w() + 3
+        gruppe = gruppe + symw + luft
+    }
+    if mark != 0 {
+        gruppe = gruppe + mk_w() + luft
+    }
+    var gx: u64 = x + 3
+    if w > gruppe + 6 {
+        gx = x + (w - gruppe) / 2
+    }
+    let tx: u64 = gx + gruppe - tw
+    let base: u64 = y + (h + asc) / 2 - 1
+    var mx: u64 = gx
+    if sym != 0 {
+        // ===================================== RUNDE ECHTHARDWARE-2
+        // MITTIG NACH DER GEMALTEN HOEHE, NICHT NACH DER GEPLANTEN.
+        //
+        // Hier stand `(h - gl_w()) / 2`. `gl_w()` ist 16 mal der
+        // Vervielfachung, gemalt wird aber `icon_h() * Vervielfachung`
+        // -- bei den Symbolen dieses Baums 14 von 16 Zeilen mit Tinte.
+        // GEMESSEN auf Justins Aufloesung: Knopfmitte y=1404,
+        // Symbolmitte y=1399. Fuenf Punkte, und genau die sieht man
+        // als "das Symbol sitzt tiefer als die Schrift".
+        // RUNDE ECHTHARDWARE-4: die Hoehe kommt aus `sym_scale` und
+        // nicht mehr aus `ui_scale()` allein. Mittig bleibt mittig --
+        // gerechnet wird weiter mit der GEMALTEN Hoehe (EH-2).
+        let sh: u64 = wlibc.icon_h(sym) * symsc
+        var sy2: u64 = y
+        if h > sh {
+            sy2 = y + (h - sh) / 2
+        }
+        let _s: bool = wlibc.icon_draw_sc(sym, mx, sy2, symsc)
+        // Der Abstand zum Text waechst mit: 8 Punkte bei einfacher
+        // Vervielfachung sind bei doppelter 16, sonst klebt das
+        // groessere Symbol am Wort.
+        mx = mx + symw + luft
     }
     // RUNDE PAINT: WO DIE MARKE WIRKLICH STEHT, UND NUR HIER.
     //
@@ -2137,16 +3168,15 @@ fn button_sym(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
     // rechnet die Lage genau EINE Stelle aus -- die, die auch malt --
     // und der Bericht liest sie hier ab.
     mk_x = mx
-    mk_y = y + (h - MK_W) / 2
+    mk_y = y + (h - mk_w()) / 2
     if mark != 0 {
         // FLUSH LEFT AND VERTICALLY CENTRED. Left, because a mark that
         // moves with the length of the title is a mark the eye has to
         // look for; the whole value of it is that it is always in the
         // same place.
-        let _m: bool = wlibc.icon_draw(mark, mx, y + (h - MK_W) / 2)
+        let _m: bool = wlibc.icon_draw(mark, mx, y + (h - mk_w()) / 2)
     }
-    let _e: u64 = wlibc.text_at(wlibc.F_UI, wlibc.px_ui(), tx, base, txt, n,
-        fg)
+    let _e: u64 = wlib.mal_text(tx, base, txt, n, fg, wlibc.TY_BODY)
     return (tx << 32) | base
 }
 
@@ -2182,7 +3212,7 @@ fn pill(x: u64, y: u64, w: u64, h: u64, vorne: bool) {
     if cf_edge == wlibc.WE_TOP {
         py = y
     }
-    wlibc.rrect(px, py, pw, 3, 1, c)
+    wlib.mal_balken(px, py, pw, 3, c)
 }
 
 // Where the free space of a horizontal bar begins and ends: behind the
@@ -2234,27 +3264,36 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
     let gbase: u64 = wlibc.theme(wlibc.C_TASKBAR_BG)
     let gd: u64 = wlibc.grad_room(gbase, wlibc.metric(wlibc.M_GRAD))
     if gd == 0 || hh < 2 {
-        wlibc.rect(0, y0, win_w, hh, gbase)
+        wlib.mal_flaeche(0, y0, win_w, hh, gbase)
     } else {
         var gy: u64 = 0
         while gy < hh {
             let rest: u64 = gd * (hh - 1 - gy) / (hh - 1)
-            wlibc.rect(0, y0 + gy, win_w, 1, wlibc.shade(gbase, rest))
+            wlib.mal_flaeche(0, y0 + gy, win_w, 1,
+                wlibc.shade(gbase, rest))
             gy = gy + 1
         }
     }
     // the hairline on the side that faces the desktop
     if cf_edge == wlibc.WE_BOTTOM {
-        wlibc.hline(0, 0, win_w, wlibc.theme(wlibc.C_BORDER))
+        wlib.mal_linie(0, 0, win_w, wlibc.theme(wlibc.C_BORDER))
     } else if cf_edge == wlibc.WE_TOP {
-        wlibc.hline(0, win_h - 1, win_w, wlibc.theme(wlibc.C_BORDER))
+        wlib.mal_linie(0, win_h - 1, win_w,
+            wlibc.theme(wlibc.C_BORDER))
     } else if cf_edge == wlibc.WE_LEFT {
-        wlibc.rect(win_w - 1, y0, 1, hh, wlibc.theme(wlibc.C_BORDER))
+        wlib.mal_flaeche(win_w - 1, y0, 1, hh,
+            wlibc.theme(wlibc.C_BORDER))
     } else {
-        wlibc.rect(0, y0, 1, hh, wlibc.theme(wlibc.C_BORDER))
+        wlib.mal_flaeche(0, y0, 1, hh,
+            wlibc.theme(wlibc.C_BORDER))
     }
     if shown == 0 {
         let _p0: u64 = wlibc.push(w_h, 0, y0, win_w, hh)
+        ub_px = ub_px + _p0
+        ub_soll = ub_soll + win_w * hh
+        if _p0 == 0 {
+            ub_null = ub_null + 1
+        }
         return
     }
     // RUNDE PAINT: DER STARTKNOPF BEKOMMT AUCH EINES, und zwar das des
@@ -2262,10 +3301,77 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
     // kein neu erfundenes. Gibt es das Buendel nicht, bleibt der Knopf
     // reiner Text.
     var st_app: [u8; 9] = "launcher\0"
-    let ssym: u64 = sym_of((&st_app[0 as usize]) as u64)
+    var ssym: u64 = sym_of((&st_app[0 as usize]) as u64)
+    // ============================================== RUNDE STARTKNOPF
+    // DAS MARKENZEICHEN STATT DES WORTES "Start".
+    //
+    // Justins Foto zeigte "St" -- der Text passte nicht in den Knopf.
+    // Windows 11 hat dort seit Jahren kein Wort mehr, sondern ein
+    // Zeichen, und OrientOS hat jetzt eines (assets/marke/start-*.png,
+    // als Bildpunkte in `marke_start.fi`, siehe den Kopf von
+    // tools/marke/startbild.py).
+    //
+    // Der weisse Kreis IN dem Zeichen gehoert dazu und bleibt; nur der
+    // Grund AUSSERHALB des Rings ist durchsichtig und wird gegen die
+    // Knopffarbe gemischt. Auf einer dunklen Leiste bleibt der
+    // schwarze Ring damit sichtbar, weil der weisse Kreis direkt
+    // dahinter steht -- gemessen und nicht gehofft.
+    var st_leer: [u8; 2] = "\0\0"
+    var st_txt: u64 = txt((&k_start[0 as usize]) as u64,
+        (&s_st[0 as usize]) as u64)
+    if cf_labels == LB_NEVER {
+        st_txt = (&st_leer[0 as usize]) as u64
+        ssym = 0
+    }
     let rs: u64 = button_sym(st_x, st_y, st_w, st_h,
-        txt((&k_start[0 as usize]) as u64,
-            (&s_st[0 as usize]) as u64), false, false, 0, ssym)
+        st_txt, false, false, 0, ssym)
+    if cf_labels == LB_NEVER {
+        // ======================================== RUNDE ECHTHARDWARE-3
+        // DER STARTKNOPF WAR EIN HOCHSKALIERTES BITMAP.
+        //
+        // Justins Befund: "Start-Knopf links unten ist stark
+        // GEPIXELT". Er hatte recht, und die Ursache steht in
+        // `marke_malen`: `marke_start` hat DREI eingebackene Groessen
+        // (16/24/32 Bildpunkte), und was groesser sein soll, wird
+        // GANZZAHLIG vervielfacht -- ein Quellpunkt wird zu einem
+        // s-mal-s-Kaestchen. Auf seinem 2560x1440-Schirm mit
+        // uiscale 2 ist das ein 32er Bild, viermal vergroessert:
+        // jede Kante eine Treppe. Das ist Nearest-Neighbour, und so
+        // sieht es auch aus.
+        //
+        // Das Symbolfont kann es besser. `assets/osum-icons.ttf`
+        // traegt seit Runde ICONS den Glyphen `icons.START`, und
+        // `wlibc.icon_at` RASTERT ihn in der GEWUENSCHTEN Groesse aus
+        // den Konturen -- kein Vergroessern, keine Treppen. Genau
+        // diesen Weg gehen Akku, Ton und Netz in dieser Datei
+        // laengst (Zeile 3185 ff.); der Startknopf war der letzte,
+        // der es nicht tat.
+        //
+        // ZWEITER SYMBOLWEG UNNOETIG: was hier gebraucht wird, ist
+        // eine Kontur in Zielgroesse, und die liegt bereits im Baum.
+        // `marke_start.fi` bleibt als Rueckfall stehen, falls das
+        // Font fehlt -- ein Knopf ohne Zeichen waere schlimmer als
+        // ein grobes.
+        var gemalt: bool = false
+        if glyphs_ok() {
+            var kante: u64 = st_h - 4
+            if kante > st_w - 4 {
+                kante = st_w - 4
+            }
+            let gx: u64 = st_x + (st_w - kante) / 2
+            let gy: u64 = st_y + (st_h - kante) / 2
+            gemalt = wlibc.icon_at(icons.START, gx, gy, kante,
+                wlibc.theme(wlibc.T_FG))
+            if gemalt && report {
+                say((&s_mkv[0 as usize]) as u64)
+                ulib.sayn(kante)
+                ulib.nl()
+            }
+        }
+        if !gemalt {
+            marke_malen(st_x, st_y, st_w, st_h, report)
+        }
+    }
     var i: u64 = 0
     while i < nk {
         if kw[(i) as usize] != 0 {
@@ -2295,6 +3401,17 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
                 say((&kapp[0 as usize]) as u64 + i * 24)
                 say((&s_syw[0 as usize]) as u64)
                 ulib.sayn(wlibc.icon_w(sy))
+                // RUNDE ECHTHARDWARE-4: `w=` ist die Groesse der
+                // DATEI und war deshalb als Beleg wertlos -- sie steht
+                // seit EH-2 auf 16, egal wie gross gemalt wird.
+                // `gemalt=` ist die Kantenlaenge auf dem Schirm,
+                // `knopf=` die Hoehe des Knopfes darum. Erst die zwei
+                // Zahlen nebeneinander sagen, ob ein Symbol "verloren"
+                // wirkt: 16 in 40 tut es, 32 in 40 nicht.
+                say((&s_syg[0 as usize]) as u64)
+                ulib.sayn(wlibc.icon_w(sy) * sym_scale(sy, kh[(i) as usize]))
+                say((&s_syk[0 as usize]) as u64)
+                ulib.sayn(kh[(i) as usize])
                 say((&s_syi[0 as usize]) as u64)
                 ulib.sayn(sym_ink(sy))
                 ulib.nl()
@@ -2354,8 +3471,16 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
     }
     var f: u64 = 0
     while f < F_N {
-        wlibc.rect(f_x[(f) as usize], f_y[(f) as usize], f_w[(f) as usize],
-            f_h[(f) as usize], wlibc.theme(wlibc.T_PANEL))
+        // RUNDE STARTKNOPF: ein Feld ohne Breite wird nicht gemalt --
+        // kein Rechteck, kein Symbol, keine Zeile im Bericht. Das ist
+        // die andere Haelfte von "kein Symbol ohne Hardware": ohne
+        // diese Zeile bliebe ein Farbfleck ohne Inhalt stehen.
+        if f_w[(f) as usize] == 0 {
+            f = f + 1
+        } else {
+        wlib.mal_tafel(f_x[(f) as usize], f_y[(f) as usize],
+            f_w[(f) as usize], f_h[(f) as usize], wlib.MR_KNOPF,
+            wlibc.EL_FLAT, wlibc.theme(wlibc.T_PANEL), 0)
         // ROUND NETVIEW, addendum: the state of the MACHINE, in the
         // corner, where every system has put it for thirty years. It
         // goes in FRONT of the address and not instead of it: the icon
@@ -2396,6 +3521,38 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
                 ulib.nl()
             }
         }
+        // ROUND TON-2: THE VOLUME GETS THE SAME TREATMENT AS THE
+        // BATTERY -- symbol first, percentage behind it. Built the
+        // same way on purpose: two status fields that report
+        // differently are two fields a test has to know separately.
+        if f == F_SND && glyphs_ok() {
+            let vid: u64 = snd_icon()
+            let vx: u64 = f_x[(f) as usize] + 2
+            let vy: u64 = f_y[(f) as usize] + (f_h[(f) as usize] - gl_w()) / 2
+            if wlibc.icon_at(vid, vx, vy, gl_w(), snd_colour()) {
+                icx = gl_w() + 2
+                if report {
+                    say((&lk_ic[0 as usize]) as u64)
+                    say((&lk_snd[0 as usize]) as u64)
+                    say((&lk_id[0 as usize]) as u64)
+                    ulib.sayn(vid)
+                    say((&s_tX[0 as usize]) as u64)
+                    ulib.sayn(vx)
+                    say((&s_gy[0 as usize]) as u64)
+                    ulib.sayn(vy)
+                    say((&lk_px[0 as usize]) as u64)
+                    ulib.sayn(gl_w())
+                    say((&lk_ink[0 as usize]) as u64)
+                    ulib.sayn(wlibc.icon_ink_w(vid, gl_w())
+                        * wlibc.icon_ink_h(vid, gl_w()))
+                    ulib.nl()
+                }
+            } else if report {
+                say((&lk_no[0 as usize]) as u64)
+                say((&lk_snd[0 as usize]) as u64)
+                ulib.nl()
+            }
+        }
         if f == F_NET {
             // SECOND ADDENDUM, and the ORDER is the argument: the
             // faking sign comes FIRST, before the state of the machine.
@@ -2408,8 +3565,8 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
             let sy: u64 = sys_icon()
             if sy != 0 {
                 let _s: bool = wlibc.icon_draw(sy, f_x[(f) as usize] + 2,
-                    f_y[(f) as usize] + (f_h[(f) as usize] - MK_W) / 2)
-                icx = MK_W + 2
+                    f_y[(f) as usize] + (f_h[(f) as usize] - mk_w()) / 2)
+                icx = mk_w() + 2
                 if report && nv_faking != fk_said {
                     fk_said = nv_faking
                     say((&s_fk[0 as usize]) as u64)
@@ -2418,7 +3575,7 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
                     ulib.sayn(f_x[(f) as usize] + 2)
                     say((&s_gy[0 as usize]) as u64)
                     ulib.sayn(f_y[(f) as usize]
-                        + (f_h[(f) as usize] - MK_W) / 2)
+                        + (f_h[(f) as usize] - mk_w()) / 2)
                     ulib.nl()
                 }
             } else if report && nv_faking != fk_said {
@@ -2464,8 +3621,8 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
             if ic != 0 {
                 let ix: u64 = f_x[(f) as usize] + 2 + icx
                 let _i: bool = wlibc.icon_draw(ic, ix,
-                    f_y[(f) as usize] + (f_h[(f) as usize] - IC_W) / 2)
-                icx = icx + IC_W + 2
+                    f_y[(f) as usize] + (f_h[(f) as usize] - ic_w()) / 2)
+                icx = icx + ic_w() + 2
                 if report && net_state != st_said {
                     st_said = net_state
                     say((&s_ic[0 as usize]) as u64)
@@ -2473,7 +3630,7 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
                     say((&s_tX[0 as usize]) as u64)
                     ulib.sayn(ix)
                     say((&s_gy[0 as usize]) as u64)
-                    ulib.sayn(f_y[(f) as usize] + (f_h[(f) as usize] - IC_W) / 2)
+                    ulib.sayn(f_y[(f) as usize] + (f_h[(f) as usize] - ic_w()) / 2)
                     ulib.nl()
                 }
             }
@@ -2485,16 +3642,18 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
             var tx: u64 = f_x[(f) as usize] + 4 + icx
             var base: u64 = f_y[(f) as usize] + (f_h[(f) as usize] + asc) / 2 - 1
             if f_lines[(f) as usize] > 1 {
-                base = f_y[(f) as usize] + 2 + asc + l * LINE_H
+                base = f_y[(f) as usize] + 2 + asc + l * line_h()
             }
-            let _e: u64 = wlibc.text_at(wlibc.F_UI, wlibc.px_ui(), tx, base,
-                p, n, wlibc.theme(wlibc.T_FG))
+            let _e: u64 = wlib.mal_text(tx, base, p, n,
+                wlibc.theme(wlibc.T_FG), wlibc.TY_BODY)
             if report {
                 var mark: u64 = (&m_net[0 as usize]) as u64
                 if f == F_BAT {
                     mark = (&m_bat[0 as usize]) as u64
                 } else if f == F_CLK {
                     mark = (&m_clk[0 as usize]) as u64
+                } else if f == F_NOTI {
+                    mark = (&m_noti[0 as usize]) as u64
                 }
                 say_text(mark, tx, base, wlibc.theme(wlibc.T_FG),
                     wlibc.theme(wlibc.T_PANEL), p)
@@ -2507,6 +3666,8 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
                 mark = (&m_bat[0 as usize]) as u64
             } else if f == F_CLK {
                 mark = (&m_clk[0 as usize]) as u64
+            } else if f == F_NOTI {
+                mark = (&m_noti[0 as usize]) as u64
             }
             say((&s_fl[0 as usize]) as u64)
             say(mark)
@@ -2523,6 +3684,7 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
             ulib.nl()
         }
         f = f + 1
+        }
     }
     // ROUND NETVIEW, addendum: WHAT THE POINTER IS RESTING ON, as a
     // sentence, in the empty space between the last window button and
@@ -2534,8 +3696,9 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
         let he: u64 = hover_right()
         if he > hb + 20 {
             wlibc.clip_set(hb, y0, he, y0 + hh)
-            wlibc.rect(hb, st_y, he - hb, btn_h(),
-                wlibc.theme(wlibc.T_PANEL))
+            wlib.mal_tafel(hb, st_y, he - hb, btn_h(),
+                wlib.MR_KNOPF, wlibc.EL_FLAT,
+                wlibc.theme(wlibc.T_PANEL), 0)
             let hp: u64 = (&hover_txt[0 as usize]) as u64
             var hn: u64 = tlen(hp)
             while hn > 1 && wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), hp, hn)
@@ -2543,8 +3706,8 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
                 hn = hn - 1
             }
             let hbase: u64 = st_y + (btn_h() + asc) / 2 - 1
-            let _h: u64 = wlibc.text_at(wlibc.F_UI, wlibc.px_ui(), hb + 3,
-                hbase, hp, hn, wlibc.theme(wlibc.T_DIM))
+            let _h: u64 = wlib.mal_text(hb + 3, hbase, hp, hn,
+                wlibc.theme(wlibc.T_DIM), wlibc.TY_BODY)
             wlibc.clip_set(0, y0, win_w, y0 + hh)
             if report {
                 say((&s_hv[0 as usize]) as u64)
@@ -2559,6 +3722,16 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
         }
     }
     let _p: u64 = wlibc.push(w_h, 0, y0, win_w, hh)
+    // RUNDE UHRWERK: WAS HAT `push` WIRKLICH HINUEBERGEBRACHT?
+    // `wig.blit` gibt die Zahl der Bildpunkte zurueck -- und NULL,
+    // wenn `fetch` die Quelle nicht lesen durfte. Bis zu dieser Runde
+    // hat das niemand angesehen (`let _p`), und genau darin lag der
+    // Fehler: die Leiste meldete "gemalt", waehrend nichts ankam.
+    ub_px = ub_px + _p
+    ub_soll = ub_soll + win_w * hh
+    if _p == 0 {
+        ub_null = ub_null + 1
+    }
     if report {
         // ROUND LOOK: the RECTANGLE, not only the word inside it.
         say((&lk_sx[0 as usize]) as u64)
@@ -2588,8 +3761,34 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
 fn paint(report: bool) {
     var y: u64 = 0
     var first: bool = true
+    // ================================================ RUNDE UHRWERK
+    // DIE BANDHOEHE IST NICHT MEHR EINE ZAHL IM QUELLTEXT, SONDERN
+    // DIE, DIE DIE FLAECHE WIRKLICH TRAEGT.
+    //
+    // `BAND` = 80 war richtig, solange die Flaeche 800 Bildpunkte breit
+    // war. Sie ist aber so breit wie der SCHIRM, und ihr Platz ist
+    // fest (1 MiB) -- also traegt sie auf einem breiten Schirm WENIGER
+    // Zeilen:
+    //
+    //     1920 -> 136      2560 -> 102      3440 -> 76      3840 -> 68
+    //
+    // Auf Justins 3440x1440 wollte diese Schleife 80 Zeilen schieben,
+    // wo 76 abgebildet waren. Der Kern darf die vier Zeilen dahinter
+    // nicht lesen (`proc.user_ok`), also brach `wig.blit` ab, gab null
+    // zurueck und kam nie bis `wm.damage` -- die ganze Leiste blieb auf
+    // dem Schirm stehen, wie sie beim ersten Mal gemalt war. Das ist
+    // die stehende Uhr.
+    //
+    // Mit dem Minimum aus beiden passt jedes Band immer in die Flaeche,
+    // und auf schmalen Schirmen aendert sich NICHTS: dort ist
+    // `surf_rows` groesser als 80, und es bleibt bei 80.
+    var band: u64 = BAND
+    let tragf: u64 = wlibc.surf_rows()
+    if tragf != 0 && tragf < band {
+        band = tragf
+    }
     while y < win_h {
-        var hh: u64 = BAND
+        var hh: u64 = band
         if y + hh > win_h {
             hh = win_h - y
         }
@@ -2819,6 +4018,657 @@ static mut z_none: [u8; 5] = "none\0"
 static mut z_qs: [u8; 6] = "quick\0"
 static mut s_noqs: [u8; 28] = "taskbar: no quick settings\0\0"
 
+// ============================================== RUNDE STARTKNOPF
+// DAS STARTMENUE AUF UND ZU -- UEBER DIE SUPER-TASTE ODER DEN KNOPF.
+//
+// Der Startknopf hat bis hierher IMMER `SYS_SPAWN` gerufen. Zweimal
+// druecken hiess also: zwei Starter. Ein Startmenue schaltet um, und
+// das gilt fuer die Taste genauso wie fuer den Knopf.
+//
+// ZUGEMACHT WIRD UEBER DEN FENSTERSERVER und nicht ueber ein Signal an
+// den Prozess: `WA_TOGGLE` ist genau der Weg, den der Klick auf den
+// Fensterknopf in der Leiste schon nimmt (verkleinern/hervorholen).
+// Damit ist der zweite Druck auf Super derselbe Vorgang wie ein Klick
+// auf den Knopf, und es gibt nicht zwei Wege, dasselbe zu tun. Der
+// Starter bleibt dabei am Leben -- das zweite Oeffnen ist deshalb
+// sofort da und kostet keinen Programmstart.
+static mut menue_pid: u64 = 0
+
+// ===================================================== RUNDE TUERSCHLOSS
+//
+// DIESE SUCHE HAT DEN STARTER NIE GEFUNDEN, UND DARUM STAPELTEN SICH
+// DIE STARTMENUES.
+//
+// Hier wurde ueber `nk` gelaufen -- die KNOPFLISTE der Leiste. Die
+// fuellt `list_read` aber ausdruecklich nur mit Fenstern der Ebene
+// `L_NORMAL` ("everything on that layer gets a button in this bar").
+// Der Starter ist seit Runde STARTKNOPF `L_TOP`: er ist ein Feld an
+// der Leiste und bekommt mit Absicht KEINEN Knopf. Er stand also nie
+// in `nk`, `launcher_fenster` gab immer 0, `startmenue_um` sprang
+// jedes Mal in den Zweig darunter und startete EIN WEITERES
+// /bin/launcher.
+//
+// GEMESSEN (Runde DURCHKLICK, 4.6): nach 20 Klicks auf Start standen
+// 16 Fenster (id=7..22), alle an derselben Stelle, keines wurde je
+// abgeraeumt -- ein Leck, das mit der Laufzeit waechst. Und in dieser
+// Runde noch einmal nachgesehen: id=11 und id=12, beide 440x300 bei
+// x=8 y=452, waehrend die Knopfliste nur id=7 kannte.
+//
+// Also wird jetzt dort gesucht, wo der Starter WIRKLICH steht: in der
+// Fensterliste des Servers, ueber ALLE Ebenen. Das ist dieselbe
+// Quelle, die `list_read` liest -- nur ohne den Filter, der hier
+// falsch ist. Gefunden wird ueber `WL_APP` ("launcher"), den der
+// Starter selbst mit `wlib.window_app` setzt; der Titel taugt dafuer
+// nicht, weil er uebersetzt wird.
+fn launcher_fenster() -> u64 {
+    var slot: u64 = 0
+    while slot < 16 {
+        let r: u64 = wlibc.win_list(slot, (&rec[0 as usize]) as u64)
+        if ulib.bad(r) {
+            return 0
+        }
+        if r == 1 {
+            let b: u64 = (&rec[0 as usize]) as u64
+            if ulib.streq(b + wlibc.WL_APP,
+                (&a_launcher[0 as usize]) as u64) {
+                // Nebenbei den Zustand mitnehmen, damit der Aufrufer
+                // sagen kann, WOHIN er geschaltet hat (siehe
+                // `startmenue_um`). Ein Fenster gilt als "offen", wenn
+                // es weder verborgen noch unbeachtet ist.
+                let fl: u64 = __mmio_read64((b + wlibc.WL_FLAGS) as *mut u64)
+                let id: u64 = __mmio_read64((b + wlibc.WL_ID) as *mut u64)
+                menue_war_offen = 1
+                if (fl & wlibc.F_HIDDEN) != 0 {
+                    menue_war_offen = 0
+                }
+                // ============================================ RUNDE GRIFF
+                // DER FOKUS ZAEHLT HIER NICHT MEHR -- UND ZWAR AUS
+                // DEMSELBEN GRUND WIE IN `sysgui` BEI WA_TOGGLE.
+                //
+                // Hier stand: "verborgen ODER nicht aktiv heisst: wird
+                // aufgemacht". Fuer das Startmenue ist das falsch. Es
+                // liegt auf L_TOP und damit immer vorn, aber den
+                // Eingabefokus verliert es an JEDEN Klick auf die
+                // Leiste -- und ein Klick auf die Leiste ist genau das,
+                // was gerade passiert ist, wenn diese Zeile laeuft.
+                //
+                // Die Folge war eine Meldung, die das Gegenteil dessen
+                // sagte, was geschah: zweimal "startmenue auf" bei zwei
+                // Klicks, waehrend das Menue im Bild die ganze Zeit
+                // offen stand.
+                //
+                // DIESE FUNKTION UND `sysgui` MUESSEN DIESELBE FRAGE
+                // STELLEN, sonst meldet die Leiste die eine Richtung
+                // und der Server tut die andere. Beide fragen jetzt
+                // nur noch: ist es verborgen?
+                let _fo: u64 = __mmio_read64((b + wlibc.WL_FOCUS) as *mut u64)
+                return id
+            }
+        }
+        slot = slot + 1
+    }
+    return 0
+}
+
+static mut a_launcher: [u8; 9] = "launcher\0"
+// RUNDE TUERSCHLOSS: ZWEI Meldungen statt einer. Bis hierher stand hier
+// nur "startmenue zu" -- und sie wurde bei JEDEM Umschalten gesagt,
+// also auch beim Aufmachen. Wer die Leitung liest, um zu wissen, ob das
+// Menue offen ist (ein Testlaeufer tut genau das), bekam dreimal
+// hintereinander "zu" und schloss daraus, das Menue gehe nicht auf.
+// Eine Meldung, die die Richtung verschweigt, ist keine Messung.
+static mut s_tog: [u8; 24] = "taskbar: startmenue zu\0\0"
+static mut s_tog_auf: [u8; 25] = "taskbar: startmenue auf\0\0"
+static mut s_tog_bad: [u8; 31] = "taskbar: startmenue FEHLER rc=\0"
+static mut menue_war_offen: u64 = 0
+
+// ============================================== RUNDE STARTKNOPF
+// DIE SUPER-TASTE, GELESEN NACH DEM ZAEHLERPROTOKOLL AUS kbd.fi.
+//
+// Der Kern schreibt Taste, Zeitstempel und einen ZAEHLER; wer eine
+// Zahl sieht, die er noch nicht hatte, handelt genau einmal. Zwei
+// Leser (dieser hier und `qs.step` fuer Super+A) nehmen sich den
+// Druck damit nicht gegenseitig weg -- das ist der ganze Grund fuer
+// den Zaehler statt einer Fahne.
+//
+// Taste 0 heisst SUPER ALLEIN (kein Zeichen hat den Wert null).
+static mut hk_gesehen: u64 = 0
+static mut hk_erst: u64 = 1
+
+// ==================================================== RUNDE LEISTE
+// DER ERSTE DRUCK AUF SUPER ZAEHLTE NICHT -- UND DAS WAR FALSCH.
+//
+// Gemessen am fertigen Abbild (UEFI, xHCI-Tastatur, 3440x1440):
+//
+//     hk: super allein
+//     hk: super allein
+//
+// Der Kern hat beide Male erkannt, dass Super ALLEIN gedrueckt und
+// losgelassen wurde -- und die Leiste hat nichts getan. Grund: `hk_erst`
+// verschluckte die erste Aenderung des Zaehlers UNBEDINGT, mit der
+// Begruendung "was vor dem Start der Leiste gedrueckt wurde, ist nicht
+// an sie gerichtet". Die Begruendung stimmt, die Umsetzung nicht: die
+// erste Aenderung, die die Leiste sieht, ist bei `seq == 1` der ERSTE
+// Druck ueberhaupt -- und der ist sehr wohl an sie gerichtet.
+//
+// `qs.step` (Super+A) macht es seit der Runde NETVIEW richtig und
+// genau eine Zeile anders: `if was != 0 || seq == 1`. Verschluckt wird
+// nur, was WIRKLICH vor der Leiste da war (Zaehler stand schon hoeher,
+// als sie das erste Mal hinsah). Dieselbe Regel steht jetzt hier.
+//
+// Und der Zustand wird GESAGT. Eine Klinke, die still nichts tut, ist
+// von einer Tastatur, die nichts liefert, nicht zu unterscheiden --
+// genau daran ist diese Runde beim Messen haengengeblieben.
+static mut hk_sagte: u64 = 0
+
+// ==================================================== RUNDE ECHTHARDWARE-2
+//
+// WAS UNTER DEM ZEIGER LIEGT -- UND DIE BLASE DAZU.
+//
+// Justins Vorgabe E: Verweilen auf einem Symbol der Leiste, im Tray
+// oder auf einem Fensterknopf zeigt nach einer halben Sekunde einen
+// Infotext.
+//
+// DIE MARKE IST EINE ZAHL UND KEIN ZEIGER. `wlib.tip_hover` vergleicht
+// nur, OB sich geaendert hat, worauf gedeutet wird; ein Zeiger auf
+// einen Titel waere derselbe, waehrend sich der Titel darunter aendert.
+// 1..n sind die Fensterknoepfe, 900 der Startknopf, 901 das Netzfeld,
+// 902 die Uhr.
+fn hover_marke(x: u64, y: u64) -> u64 {
+    if x >= st_x && x < st_x + st_w && y >= st_y && y < st_y + st_h {
+        return 900
+    }
+    if f_w[(F_NET) as usize] != 0
+        && x >= f_x[(F_NET) as usize]
+        && x < f_x[(F_NET) as usize] + f_w[(F_NET) as usize]
+        && y >= f_y[(F_NET) as usize]
+        && y < f_y[(F_NET) as usize] + f_h[(F_NET) as usize] {
+        return 901
+    }
+    if f_w[(F_CLK) as usize] != 0
+        && x >= f_x[(F_CLK) as usize]
+        && x < f_x[(F_CLK) as usize] + f_w[(F_CLK) as usize]
+        && y >= f_y[(F_CLK) as usize]
+        && y < f_y[(F_CLK) as usize] + f_h[(F_CLK) as usize] {
+        return 902
+    }
+    var i: u64 = 0
+    while i < nk {
+        if kver[(i) as usize] == 0
+            && x >= kx[(i) as usize]
+            && x < kx[(i) as usize] + kw[(i) as usize]
+            && y >= ky[(i) as usize]
+            && y < ky[(i) as usize] + kh[(i) as usize] {
+            return i + 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// Der Text zu einer Marke. Fuer einen Fensterknopf ist es der TITEL --
+// und das ist der eigentliche Nutzen: die Knoepfe zeigen bei Justins
+// Aufloesung nur ein Symbol, der Titel steht nirgends.
+fn hover_text(m: u64) -> u64 {
+    if m == 900 {
+        return msg.get((&k_start[0 as usize]) as u64)
+    }
+    if m == 901 {
+        return full_of(F_NET)
+    }
+    if m == 902 {
+        return full_of(F_CLK)
+    }
+    if m >= 1 && m <= nk {
+        // 40 Oktette je Titel, nicht 32 -- `ktit` ist [u8; 400] fuer
+        // zehn Knoepfe. Die Zahl steht auch in `titel_of` (Zeile 2014).
+        return (&ktit[0 as usize]) as u64 + (m - 1) * 40
+    }
+    return 0
+}
+
+// Die Blase, einmal je Umlauf. Sie liest den Zeiger SELBST -- genau
+// wie `hover_step` daneben, das seit Langem so arbeitet. Ueber
+// EV_MOVE ginge es auch, aber dann haette die Leiste zwei Quellen
+// fuer dieselbe Frage "wo steht der Zeiger", und die eine wuerde
+// eines Tages von der anderen abweichen.
+// ==================================================== RUNDE ECHTHARDWARE-2
+//
+// RECHTSKLICK AUF EINEN FENSTERKNOPF -> KONTEXTMENUE (Justins Vorgabe E).
+//
+// ZWEI PUNKTE, UND BEIDE TUN WIRKLICH ETWAS.
+//
+// Justin hat "Close, Pin" genannt. SCHLIESSEN gibt es in diesem Kern
+// nicht: `WM_ACT` kennt WA_RAISE, WA_HIDE und WA_TOGGLE und KEIN
+// WA_CLOSE (kernel/sys.fi:3519-3521) -- ein fremdes Fenster zu
+// schliessen ist ein Systemaufruf, den es hier noch nicht gibt.
+//
+// Also steht im Menue, was WIRKLICH geht: MINIMIEREN (WA_HIDE) und
+// ANHEFTEN. Einen Punkt "Schliessen" anzubieten, der nichts tut, waere
+// genau die Luege mit runden Ecken, vor der der Kopf von qs.fi warnt.
+// Sobald der Kern ein WA_CLOSE hat, ist hier eine Zeile zu aendern.
+static mut ctx_knopf: u64 = 0 // welcher Knopf, 1-basiert (0 = keiner)
+static mut ctx_offen: u64 = 0
+static mut angeheftet: [u64; 10] = [0 as u64; 10]
+
+static mut s_ctxauf: [u8; 22] = "taskbar: kontext btn=\0"
+static mut s_ctxtat: [u8; 20] = "taskbar: kontext w=\0"
+static mut s_ctxpump: [u8; 27] = "taskbar: kontext pumpe mw=\0"
+static mut ctx_sagte: u64 = 0
+
+fn rechtsklick(x: u64, y: u64) {
+    let m: u64 = hover_marke(x, y)
+    if m < 1 || m > nk {
+        return
+    }
+    tip_zu()
+    ctx_knopf = m
+    ctx_offen = 1
+    ctx_sagte = 0
+    // Das Menue steht ueber der Leiste -- `menu_open` klappt nach oben
+    // auf, wenn unten kein Platz mehr ist, und unter der Leiste ist
+    // nie Platz.
+    let mw: u64 = wlib.menu_open(0, wlibc.mouse_x(), wlibc.mouse_y(),
+        msg.get((&k_ctx[0 as usize]) as u64), 2)
+    // ===================================== RUNDE ECHTHARDWARE-3
+    // HIER STAND EINE NACHHILFE, DIE JETZT UEBERFLUESSIG IST.
+    //
+    // Die Vorrunde hat das Kontextmenue von Hand auf `L_TOP` gelegt,
+    // weil `menu_open` es auf der normalen Ebene anlegte und das
+    // Startmenue (damals ebenfalls L_TOP) darueber lag. Damit lagen
+    // Leiste, Startmenue und Kontextmenue auf EINER Ebene, und wer
+    // oben war, entschied die Reihenfolge des Anlegens.
+    //
+    // Seit dieser Runde hat jede Oberflaechenart ihre eigene Ebene
+    // (wm.fi: L_TOP < L_MENUE < L_POPUP < L_TIP), und `menu_open`
+    // legt sich selbst auf `L_POPUP`. Diese Stelle muss nichts mehr
+    // richten -- sie durfte es auch nie: `tip_win_id` auf ein
+    // MENUE-Fenster anzuwenden war ein Griff in die falsche Tabelle.
+    say((&s_ctxauf[0 as usize]) as u64)
+    ulib.sayn(m)
+    ulib.nl()
+}
+
+// ==================================================== RUNDE ECHTHARDWARE-3
+// EINE TASTE, DIE AN DIE LEISTE GING.
+//
+// Die Leiste selbst hat kein Textfeld. Was sie mit einer Taste tun
+// muss, ist trotzdem nicht nichts:
+//
+//   * Ist ein KONTEXTMENUE offen, gehoert die Taste ihm -- das Menue
+//     ist ein wlib-Fenster, und `wlib.on_key` fuehrt darin Hoch,
+//     Runter, Eingabe und Flucht. Ohne diesen Weg liess sich ein
+//     Menue nur mit der Maus bedienen.
+//   * FLUCHT schliesst ein offenes Menue, auch wenn `wlib` gerade
+//     nichts damit anfangen kann.
+//
+// Alles andere wird bewusst verworfen -- aber SICHTBAR verworfen und
+// nicht stillschweigend wie bisher.
+fn tb_key(c: u64) {
+    if ctx_offen != 0 {
+        wlib.feed_key(c)
+        return
+    }
+}
+
+// Was gewaehlt wurde, einmal je Umlauf abgeholt.
+fn kontext_step() {
+    if ctx_offen == 0 {
+        return
+    }
+    // ===================================== RUNDE ECHTHARDWARE-2
+    // DAS MENUE BRAUCHT SEINE EIGENE EREIGNISSCHLEIFE.
+    //
+    // Die Leiste holt ihre Ereignisse SELBST (WM_EVENT auf ihr eigenes
+    // Fenster) und ruft `wlib.step` nie. Das Menue ist aber ein
+    // eigenes wlib-Fenster, und `mn_res` -- die Antwort "welcher Punkt
+    // wurde gewaehlt" -- wird AUSSCHLIESSLICH in `wlib.step` gesetzt
+    // (wlib.fi:6091 und 6111). Ohne diesen Aufruf klappt das Menue auf,
+    // nimmt Klicks entgegen und sagt nie, was gewaehlt wurde.
+    //
+    // GEMESSEN: `taskbar: kontext btn=1` kam, `kontext w=` nie -- der
+    // Klick landete richtig, die Antwort holte niemand ab.
+    let _st: u64 = wlib.step()
+    let r: u64 = wlib.menu_at()
+    // Solange die Antwort aussteht, wird EINMAL gesagt, dass ueberhaupt
+    // gepumpt wird -- sonst ist "der Klick kam nicht an" von "die
+    // Schleife laeuft nicht" nicht zu unterscheiden.
+    if r == 0xFFFFFFFFFFFFFFFF {
+        return
+    }
+    ctx_offen = 0
+    wlib.menu_close()
+    let i: u64 = ctx_knopf - 1
+    if r == 0xFFFF || i >= nk {
+        return
+    }
+    if r == 0 {
+        // MINIMIEREN
+        let _a: u64 = wlibc.win_act(knv[(i) as usize], wlibc.WA_HIDE)
+    } else {
+        // ANHEFTEN -- der Knopf bleibt, wenn das Fenster geht.
+        angeheftet[(i) as usize] = 1
+    }
+    say((&s_ctxtat[0 as usize]) as u64)
+    ulib.sayn(r)
+    ulib.nl()
+}
+
+// ==================================================== RUNDE ECHTHARDWARE-2
+//
+// DIE INFOBLASE -- HIER UND NICHT IN DER BIBLIOTHEK.
+//
+// Justins Vorgabe E: wer mit dem Zeiger auf einem Symbol der Leiste,
+// im Tray oder auf einem Fensterknopf STEHENBLEIBT, soll nach einer
+// halben Sekunde lesen koennen, was das ist.
+//
+// SIE STEHT IN DIESER DATEI, weil sie GENAU EIN Programm braucht. Der
+// erste Entwurf hatte sie in `wlib.fi`; danach brach der
+// selbstgehostete Uebersetzer `firnc1` an `netmon`, `freunde` und
+// `powermon` ab (RC=1, keine Zeile Ausgabe -- eine feste Tabelle in
+// firnc1, kein Speichermangel). `firnc0` uebersetzte dasselbe klaglos
+// und das Abbild lief; gesehen hat es nur der K16-Pruefstand: "131
+// gebunden, erwartet 134". wlib steckt in dreizehn Programmen, und was
+// dort liegt, kostet in jedem davon.
+//
+// DER ZEITGEBER SCHLAEGT 100-MAL JE SEKUNDE (TICK_HZ = 100 in
+// kernel/sys.fi), also sind Justins 500 ms FUENFZIG Schlaege und nicht
+// fuenfhundert. Mit 500 haette die Blase erst nach fuenf Sekunden
+// gestanden -- und wer fuenf Sekunden wartet, haelt sie fuer kaputt.
+const TIP_TICKS: u64 = 50 // 500 ms bei 100 Hz
+
+static mut tp_win: u64 = 0xFFFFFFFFFFFFFFFF
+static mut tp_was: u64 = 0 // welche Marke gerade gilt (0 = keine)
+static mut tp_seit: u64 = 0 // seit wann, in Schlaegen
+static mut tp_zahl: u64 = 0
+
+static mut s_tip: [u8; 12] = "wlib: tip [\0"
+static mut s_tipx: [u8; 7] = "] x=\0\0\0"
+static mut s_tipy: [u8; 5] = " y=\0\0"
+static mut s_tipn: [u8; 5] = " n=\0\0"
+static mut s_tipzu: [u8; 15] = "wlib: tip zu\0\0\0"
+static mut s_tipvoll: [u8; 21] = "wlib: tip kein Platz\0"
+
+fn tip_offen() -> bool {
+    return tp_win != 0xFFFFFFFFFFFFFFFF
+}
+
+fn tip_zu() {
+    if tp_win == 0xFFFFFFFFFFFFFFFF {
+        return
+    }
+    let i: u64 = tp_win
+    tp_win = 0xFFFFFFFFFFFFFFFF
+    wlib.tip_win_close(i)
+    say((&s_tipzu[0 as usize]) as u64)
+    ulib.nl()
+}
+
+// Die Blase AUFMACHEN. `sx`/`sy` ist der Punkt, an dem der Zeiger
+// steht; sie setzt sich DARUEBER -- unter dem Zeiger verdeckte sie das,
+// worueber sie spricht.
+fn tip_auf(text: u64, sx: u64, sy: u64) {
+    if text == 0 || tlen(text) == 0 {
+        return
+    }
+    tip_zu()
+    let n: u64 = tlen(text)
+    let sc: u64 = wlibc.ui_scale()
+    let pad: u64 = 6 * sc
+    let bw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), text, n) + 2 * pad
+    let bh: u64 = wlibc.text_h(wlibc.px_ui()) + pad
+    // ==================================== RUNDE ECHTHARDWARE-4
+    // DIE BLASE LIEGT NEBEN DER LEISTE UND NICHT AUF IHR.
+    //
+    // Justins Messung B an hell-2560/01-schreibtisch.png: die Blase
+    // "Start" wurde UEBER dem Startsymbol gezeichnet und verdeckte es
+    // teilweise. Der Grund stand hier: gerechnet wurde vom
+    // ZEIGERPUNKT (`sy - bh - 4`), und der Zeiger steht mitten auf dem
+    // Knopf -- vier Bildpunkte ueber der Zeigerspitze ist immer noch
+    // im Knopf.
+    //
+    // Eine Blase gehoert NEBEN das, worueber sie spricht. Jede Blase
+    // dieser Leiste spricht ueber etwas, das IN der Leiste liegt, also
+    // ist die Antwort fuer alle dieselbe: ganz aus der Leiste heraus,
+    // mit einem Abstand von der Kante. Unten liegende Leiste ->
+    // darueber, oben liegende -> darunter. Damit ueberdeckt sie kein
+    // Symbol, egal wo der Zeiger steht.
+    //
+    // Waagrecht wird sie auf dem Zeiger ZENTRIERT statt links an ihm
+    // aufgehaengt -- so steht sie auch am rechten Bildschirmrand nicht
+    // schief unter der Uhr.
+    let luft: u64 = 6 * sc
+    var x: u64 = sx
+    if x > bw / 2 {
+        x = x - bw / 2
+    } else {
+        x = 0
+    }
+    if x + bw + 2 > wlibc.screen_w() {
+        x = wlibc.screen_w() - bw - 2
+    }
+    var y: u64 = bar_y + bar_h + luft
+    if cf_edge != wlibc.WE_TOP {
+        // Leiste unten: die Blase steht ueber ihrer Oberkante.
+        if bar_y > bh + luft {
+            y = bar_y - bh - luft
+        } else {
+            y = 0
+        }
+    }
+    let i: u64 = wlib.tip_win_open(x, y, bw, bh, text)
+    if i >= 5 {
+        // KEIN PLATZ -- und das wird GESAGT. Eine Blase, die still
+        // ausbleibt, ist von einer Blase, die gar nicht ausgeloest
+        // wurde, nicht zu unterscheiden; genau daran ist diese Runde
+        // einmal haengengeblieben.
+        say((&s_tipvoll[0 as usize]) as u64)
+        ulib.nl()
+        return
+    }
+    tp_win = i
+    tp_zahl = tp_zahl + 1
+    tip_malen(i, text, n, bw, bh)
+    say((&s_tip[0 as usize]) as u64)
+    say(text)
+    say((&s_tipx[0 as usize]) as u64)
+    ulib.sayn(x)
+    say((&s_tipy[0 as usize]) as u64)
+    ulib.sayn(y)
+    say((&s_tipn[0 as usize]) as u64)
+    ulib.sayn(tp_zahl)
+    ulib.nl()
+}
+
+// Flaeche, Rand und Text -- durch das Rahmenwerk, damit die Blase unter
+// `osum` runde Ecken hat und unter `classic` eckige.
+fn tip_malen(i: u64, text: u64, n: u64, bw: u64, bh: u64) {
+    let hd: u64 = wlib.tip_win_id(i)
+    if hd == 0 {
+        return
+    }
+    wlibc.set_band(0)
+    wlibc.clip_set(0, 0, bw, bh)
+    wlib.mal_tafel(0, 0, bw, bh, wlib.MR_TAFEL, wlibc.EL_OVERLAY,
+        wlibc.theme(wlibc.T_MENU), wlibc.theme(wlibc.T_LINE))
+    let pad: u64 = 6 * wlibc.ui_scale()
+    let base: u64 = (bh + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())) / 2
+    let _e: u64 = wlib.mal_text(pad, base, text, n,
+        wlibc.theme(wlibc.T_FG), wlibc.TY_BODY)
+    wlibc.push(hd, 0, 0, bw, bh)
+}
+
+// DER VERWEILZEITGEBER, als reine Rechnung. Wechselt die Marke, faengt
+// die Zeit von vorn an und eine offene Blase geht zu. Bleibt sie laenger
+// als TIP_TICKS gleich, geht die Blase auf.
+fn tip_hover(was: u64, text: u64, sx: u64, sy: u64) {
+    let jetzt: u64 = ticks_now()
+    if was != tp_was {
+        tp_was = was
+        tp_seit = jetzt
+        tip_zu()
+        return
+    }
+    if was == 0 || tip_offen() {
+        return
+    }
+    if jetzt < tp_seit {
+        tp_seit = jetzt
+        return
+    }
+    if jetzt - tp_seit >= TIP_TICKS {
+        tip_auf(text, sx, sy)
+    }
+}
+
+fn ticks_now() -> u64 {
+    return ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+}
+
+fn tip_step() {
+    let mx: u64 = wlibc.mouse_x()
+    let my: u64 = wlibc.mouse_y()
+    if !inside_bar(mx, my) {
+        tip_hover(0, 0, 0, 0)
+        return
+    }
+    let lx: u64 = mx - bar_x
+    let ly: u64 = my - bar_y
+    let m: u64 = hover_marke(lx, ly)
+    // Die Blase steht in SCHIRM-Koordinaten.
+    tip_hover(m, hover_text(m), mx, my)
+}
+
+fn hotkey_step() {
+    let seq: u64 = nv.hotkey_seq()
+    if seq == hk_gesehen {
+        return
+    }
+    let war: u64 = hk_gesehen
+    hk_gesehen = seq
+    let taste: u64 = nv.hotkey_key()
+    if hk_sagte < 8 {
+        hk_sagte = hk_sagte + 1
+        say((&s_hk[0 as usize]) as u64)
+        ulib.sayn(seq)
+        say((&s_hkw[0 as usize]) as u64)
+        ulib.sayn(war)
+        say((&s_hkt[0 as usize]) as u64)
+        ulib.sayn(taste)
+        ulib.nl()
+    }
+    // Verschluckt wird nur ein Stand, der schon VOR dem ersten Blick
+    // der Leiste hochgezaehlt war.
+    if war == 0 && seq != 1 {
+        hk_erst = 0
+        return
+    }
+    hk_erst = 0
+    if taste == 0 {
+        startmenue_um()
+        return
+    }
+    // ROUND TON-2: SUPER+M SILENCES THE MACHINE.
+    //
+    // `m` and not one of the multimedia keys, because this kernel's
+    // keyboard driver (kernel/kbd.fi) delivers letters and not the
+    // extended scan codes a media key sends -- a shortcut on a key
+    // that never arrives is not a shortcut. `m` for mute is what
+    // Windows, GNOME and KDE all use for the same thing.
+    //
+    // THE HOTKEY IS THE SAME LATCH AS SUPER+A: read the counter, act
+    // once. Nothing is acknowledged, so the panel and the bar can both
+    // watch it without taking the press from each other.
+    if taste == 109 {
+        if snd_da != 0 {
+            let an: u64 = ulib.sys(SYS_AUDGET, A_MUTED, 0, 0)
+            var neu2: u64 = 1
+            if an == 1 {
+                neu2 = 0
+            }
+            let rc: u64 = ulib.sys(SYS_AUDSET, AS_MUTE, neu2, 0)
+            say((&s_hkmute[0 as usize]) as u64)
+            ulib.sayn(neu2)
+            say((&s_hkrc[0 as usize]) as u64)
+            ulib.sayn(rc)
+            ulib.nl()
+            snd_mute = neu2
+            status_build()
+            paint(false)
+        }
+        return
+    }
+}
+
+static mut s_mkv: [u8; 26] = "taskbar: marke vektor px=\0"
+static mut s_hkmute: [u8; 21] = "taskbar: hk mute on=\0"
+static mut s_hkrc: [u8; 5] = " rc=\0"
+
+static mut s_hk: [u8; 21] = "taskbar: klinke seq=\0"
+static mut s_hkw: [u8; 7] = "  war=\0"
+static mut s_hkt: [u8; 9] = "  taste=\0"
+
+fn startmenue_um() {
+    let w: u64 = launcher_fenster()
+    if w != 0 {
+        // ============================================== RUNDE GRIFF
+        // DER RUECKGABEWERT WIRD ANGESEHEN, UND ZWAR VOR DER MELDUNG.
+        //
+        // Hier stand `let _rc:` -- der Wert wurde geholt und
+        // weggeworfen, und danach wurde in JEDEM Fall gesagt, das
+        // Menue sei auf- oder zugegangen. Solange `sysgui` jeden
+        // Aufruf auf ein L_TOP-Fenster mit `E_RIGHTS` abgewiesen hat
+        // (die Begruendung steht dort), meldete die Leiste also einen
+        // Erfolg, den es nicht gab: auf der Leitung stand
+        // "startmenue auf", auf dem Schirm blieb alles stehen, und
+        // zwei Abnahmebilder waren Oktett fuer Oktett gleich.
+        //
+        // Eine Meldung, die nicht nachsieht, ob die Tat gelungen ist,
+        // ist keine Messung -- sie ist eine Behauptung. Schlaegt der
+        // Aufruf fehl, wird das MIT dem Fehlercode gesagt.
+        let rc: u64 = wlibc.win_act(w, wlibc.WA_TOGGLE)
+        if ulib.bad(rc) {
+            say((&s_tog_bad[0 as usize]) as u64)
+            ulib.sayn(rc)
+            ulib.nl()
+            return
+        }
+        // NACH dem Umschalten gesagt, und mit der Richtung, in die
+        // geschaltet wurde: `menue_war_offen` hat `launcher_fenster`
+        // eine Zeile vorher aus den Fahnen des Servers gelesen.
+        if menue_war_offen != 0 {
+            say((&s_tog[0 as usize]) as u64)
+        } else {
+            say((&s_tog_auf[0 as usize]) as u64)
+        }
+        ulib.nl()
+        return
+    }
+    // ============================================== RUNDE BLECHKERN
+    // DER STARTKNOPF HAT NIE EIN PROGRAMM GESTARTET.
+    //
+    // Hier stand `SYS_SPAWN` mit dem PFAD `/bin/launcher` als erstem
+    // Argument. `SYS_SPAWN` (1000) nimmt aber keine Anschrift, sondern
+    // eine NUMMER aus `uprog.fi`:
+    //
+    //     fn do_spawn(state, me, prog, arg) {
+    //         if prog == 0 || prog > 16 { return neg(errno.E_INVAL) }
+    //
+    // Ein Zeiger ist immer groesser als 16, also kam jedes Mal -22
+    // zurueck. Auf der Leitung stand `taskbar: launcher pid=-22`, auf
+    // dem Schirm passierte nichts, und weil bis zu dieser Runde kein
+    // Lauf den 30 Bildpunkte breiten Knopf getroffen hat, ist es nie
+    // aufgefallen. Der richtige Aufruf ist `SYS_EXEC` (1001) -- der
+    // nimmt einen Pfad, so wie `explorer`, `firun` und `launcher` ihn
+    // schon benutzen.
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC,
+        (&p_start[0 as usize]) as u64, 0, 0)
+    menue_pid = pid
+    say((&s_sp[0 as usize]) as u64)
+    ulib.sayn(pid)
+    ulib.nl()
+}
+
 fn click(x: u64, y: u64) {
     clicks = clicks + 1
     say((&s_cl[0 as usize]) as u64)
@@ -2839,15 +4689,26 @@ fn click(x: u64, y: u64) {
         qs.toggle()
         return
     }
+    // ROUND TON-2: THE SPEAKER OPENS THE SAME PANEL. It is the field
+    // next door and it belongs to the same corner -- a symbol that
+    // shows a state and does nothing when it is clicked is a symbol
+    // that teaches people not to click it.
+    if snd_da != 0 && f_w[(F_SND) as usize] != 0
+        && x >= f_x[(F_SND) as usize]
+        && x < f_x[(F_SND) as usize] + f_w[(F_SND) as usize]
+        && y >= f_y[(F_SND) as usize]
+        && y < f_y[(F_SND) as usize] + f_h[(F_SND) as usize] {
+        say((&s_ct[0 as usize]) as u64)
+        say((&z_qs[0 as usize]) as u64)
+        ulib.nl()
+        qs.toggle()
+        return
+    }
     if x >= st_x && x < st_x + st_w && y >= st_y && y < st_y + st_h {
         say((&s_ct[0 as usize]) as u64)
         say((&z_start[0 as usize]) as u64)
         ulib.nl()
-        let pid: u64 = ulib.sys(ulib.SYS_SPAWN,
-            (&p_start[0 as usize]) as u64, 0, 0)
-        say((&s_sp[0 as usize]) as u64)
-        ulib.sayn(pid)
-        ulib.nl()
+        startmenue_um()
         return
     }
     var i: u64 = 0
@@ -2904,6 +4765,14 @@ static mut s_pm: [u8; 9] = " paints=\0"
 static mut s_ck: [u8; 9] = " clicks=\0"
 static mut s_ac: [u8; 7] = " acts=\0"
 static mut s_wt: [u8; 9] = " writes=\0"
+// RUNDE UHRWERK: die Pulszeile der Leiste.
+static mut s_ur: [u8; 16] = "taskbar: round=\0"
+static mut s_usb: [u8; 5] = " sb=\0"
+static mut s_usbt: [u8; 6] = " sbt=\0"
+static mut s_upx: [u8; 5] = " px=\0"
+static mut s_usoll: [u8; 7] = " soll=\0"
+static mut s_unull: [u8; 7] = " null=\0"
+static mut s_upm: [u8; 5] = " pm=\0"
 static mut s_title: [u8; 8] = "Taskbar\0"
 static mut s_theme: [u8; 11] = "/etc/theme\0"
 static mut a_once: [u8; 5] = "once\0"
@@ -3089,7 +4958,32 @@ fn u_start(args: u64) -> u64 {
             let typ: u64 = __mmio_read64((b) as *mut u64)
             let d: u64 = __mmio_read64((b + 8) as *mut u64)
             if typ == wlibc.EV_DOWN {
-                click((d >> 32) & 0xFFFF, (d >> 16) & 0xFFFF)
+                // DIE RECHTE TASTE IST BIT 1 (kernel/ps2m.fi: links 0,
+                // rechts 1, Mitte 2) -- dieselbe Zaehlung, die
+                // wlib.fi:5047 schon benutzt.
+                if ((d & 0xFFFF) & 2) != 0 {
+                    rechtsklick((d >> 32) & 0xFFFF, (d >> 16) & 0xFFFF)
+                } else {
+                    click((d >> 32) & 0xFFFF, (d >> 16) & 0xFFFF)
+                }
+            } else if typ == wlibc.EV_KEY {
+                // ======================= RUNDE ECHTHARDWARE-3
+                // HIER FIELEN DIE TASTEN AUF DEN BODEN.
+                //
+                // Justins Befund: "Tippen kommt in den Programmen
+                // nicht an", waehrend die Tafel `TAS 54` und
+                // `BER 111` zeigt -- die Tastatur liefert also
+                // sauber. Diese Schleife hat das Ereignis mit
+                // `WM_EVENT` ABGEHOLT (und damit aus dem Ring des
+                // Servers entfernt) und dann nur auf `EV_DOWN` und
+                // `EV_CLOSE` geprueft. Jede Taste, die an die Leiste
+                // ging, war damit gelesen und verworfen.
+                //
+                // Sie gehoert an dieselbe Stelle wie in jedem
+                // anderen Programm: `wlib.on_key` -- das ist der
+                // Weg, ueber den ein Menue Hoch/Runter/Eingabe/
+                // Flucht bekommt.
+                tb_key((d >> 32) & 0xFFFF)
             } else if typ == wlibc.EV_CLOSE {
                 alive = false
             }
@@ -3104,6 +4998,9 @@ fn u_start(args: u64) -> u64 {
         // of `/etc/taskbar.conf` inside one process would be two
         // answers to one question.
         let _qsc: bool = qs.step()
+        hotkey_step()
+        tip_step()
+        kontext_step()
         let hw: u64 = qs.want_hide()
         if hw != 0 {
             if hw == 1 {
@@ -3137,7 +5034,13 @@ fn u_start(args: u64) -> u64 {
             }
         }
         if (round % 10) == 0 {
+            // RUNDE UHRWERK: gezaehlt, nicht vermutet. `ub_sb` steigt
+            // bei jedem Ruf, `ub_sbt` nur, wenn sich wirklich etwas
+            // geaendert hat -- bei einer Sekundenuhr also einmal je
+            // Sekunde. Stehen beide, laeuft diese Schleife nicht.
+            ub_sb = ub_sb + 1
             if status_build() {
+                ub_sbt = ub_sbt + 1
                 fresh = true
             }
             // RUNDE THEME: `theme_poll` liest nach und sagt, ob sich
@@ -3151,6 +5054,20 @@ fn u_start(args: u64) -> u64 {
                 let _dk: u64 = wlibc.deco_push()
                 let _fk: u64 = wlibc.form_push()
                 fresh = true
+                // ================================ RUNDE ECHTHARDWARE-5
+                // UND DAS KONTROLLZENTRUM GLEICH MIT.
+                //
+                // Justins Befund J: nach dem Umschalten auf dunkel
+                // blieb das offene Panel rechts "komisch blau" und
+                // wurde erst beim Schliessen und Neuoeffnen richtig.
+                // Hier war der Grund: diese Schleife hat den Wechsel
+                // GESEHEN (`theme_poll` oben gibt wahr), aber nur sich
+                // selbst neu gemalt. Das Panel hat eine eigene
+                // Ereignisschleife und ruft `wlib.step` nie -- es
+                // erfaehrt also von sich aus nichts.
+                //
+                // Eine Zeile, und der Zwischenzustand ist weg.
+                let _qt: bool = qs.thema_neu()
             }
             // RUNDE I18N: UND DIE SPRACHE, an derselben Stelle und aus
             // demselben Grund wie das Farbschema -- eine Taskleiste,
@@ -3221,6 +5138,35 @@ fn u_start(args: u64) -> u64 {
         // before anything looks at the latch. A second look here costs
         // one system call and takes the repaint out of the wait.
         let _qs2: bool = qs.step()
+        // ============================================ RUNDE UHRWERK
+        // DER PULS DIESER LEISTE, und er steht bewusst NACH allem
+        // anderen: was hier gemeldet wird, ist der Zustand am Ende
+        // einer vollstaendigen Runde und nicht der in ihrer Mitte.
+        //
+        // Alle 200 Runden, also ungefaehr alle fuenf Sekunden --
+        // dieselbe Frequenz wie der Puls des Kerns und aus demselben
+        // Grund: eine Zeile je Runde waere eine Zeile alle 25 ms, und
+        // ein Terminal, das vierzigmal je Sekunde zurollt, ist kein
+        // Messgeraet.
+        ub_round = ub_round + 1
+        if ub_round >= ub_naechster {
+            ub_naechster = ub_round + 200
+            say((&s_ur[0 as usize]) as u64)
+            ulib.sayn(ub_round)
+            say((&s_usb[0 as usize]) as u64)
+            ulib.sayn(ub_sb)
+            say((&s_usbt[0 as usize]) as u64)
+            ulib.sayn(ub_sbt)
+            say((&s_upx[0 as usize]) as u64)
+            ulib.sayn(ub_px)
+            say((&s_usoll[0 as usize]) as u64)
+            ulib.sayn(ub_soll)
+            say((&s_unull[0 as usize]) as u64)
+            ulib.sayn(ub_null)
+            say((&s_upm[0 as usize]) as u64)
+            ulib.sayn(paints)
+            ulib.nl()
+        }
         ulib.sleep_ms(25)
     }
     return 0

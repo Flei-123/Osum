@@ -1,0 +1,352 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/lock.fi -- Runde ALLTAG: DER SPERRBILDSCHIRM.
+//
+//   lock          sperren und die Kennwortfrage zeigen
+//   lock -d       der Waechter: sperrt nach Leerlauf
+//   lock -s       sagen, wie es steht (fuer die Abnahme)
+//
+// WAS HIER STEHT UND WAS IM KERN STEHT, und die Aufteilung ist der Kern
+// der Sache:
+//
+//   Im KERN (kernel/wm.fi, kernel/sys.fi, kernel/kgui.fi): DASS
+//   gesperrt ist, WER aufsperren darf, dass kein anderes Fenster eine
+//   Taste bekommt, und dass dieses Programm NEU GESTARTET wird, wenn es
+//   verschwindet, waehrend die Sperre steht.
+//
+//   HIER: das Fenster, die Kennwortfrage und die Pruefung gegen
+//   /etc/shadow (PBKDF2-HMAC-SHA256, `pw.check_hash`, dieselbe
+//   Funktion, die die Anmeldung nimmt).
+//
+// DER AUSFALLZUSTAND IST DAMIT DER RICHTIGE: stuerzt dieses Programm ab
+// oder schiesst es jemand ab, bleibt die Sperre stehen -- der Kern
+// startet es wieder. Ein Absturz kann sperren, aber niemals aufsperren.
+// Genau das ist die Zusage, die diese Runde messen muss.
+//
+// DAS FENSTER ist bildschirmfuellend, ohne Rahmen, auf der obersten
+// Ebene (`wlib.window_plain` mit `L_TOP`). Das ist KEINE Sicherheit --
+// die Sicherheit sitzt im Fensterserver, der waehrend der Sperre nichts
+// mehr an fremde Fenster gibt --, sondern nur die Ansicht.
+
+profile kernel
+
+import ulib
+import libc.io
+import wlibc
+import wlib
+import pw
+
+export { u_start }
+
+const SYS_SPERRE: u64 = 1870
+const OP_STATE: u64 = 0
+const OP_AN: u64 = 1
+const OP_AUF: u64 = 2
+const OP_IDLE: u64 = 3
+const OP_ICH: u64 = 4
+const OP_FEHL: u64 = 5
+const OP_ZAHL: u64 = 6
+
+static mut kenn: [u8; 128] = [0 as u8; 128]
+static mut name: [u8; 64] = [0 as u8; 64]
+static mut haben: [u8; 192] = [0 as u8; 192]
+static mut kopf: [u8; 192] = [0 as u8; 192]
+
+static mut w_kenn: u64 = 0
+static mut w_kopf: u64 = 0
+static mut w_auf: u64 = 0
+static mut w_wer: u64 = 0
+
+static mut T_TITEL: [u8; 9] = "Gesperrt\0"
+static mut T_APP: [u8; 5] = "lock\0"
+static mut T_FRAGE: [u8; 44] = "Kennwort eingeben und Eingabetaste drücken\0"
+static mut T_FALSCH: [u8; 26] = "Das Kennwort stimmt nicht\0"
+static mut T_AUF: [u8; 11] = "Entsperren\0"
+static mut T_KEIN: [u8; 48] = "Kein Kennwort gesetzt -- Eingabetaste entsperrt\0"
+static mut T_CONF: [u8; 17] = "/etc/sperre.conf\0"
+static mut K_LEER: [u8; 10] = "leerlauf=\0"
+static mut T_ROOT: [u8; 5] = "root\0"
+
+fn sy(op: u64, arg: u64) -> u64 {
+    return ulib.sys(SYS_SPERRE, op, arg, 0)
+}
+
+fn say(p: u64) {
+    ulib.say(p)
+}
+
+// Wer angemeldet ist. Ohne /etc/passwd bleibt es bei "root" -- dann
+// gibt es auch kein Kennwort, und das sagt der Sperrbildschirm auch.
+fn wer_bin_ich() {
+    let n: u64 = (&name[(0) as usize]) as u64
+    ulib.strcpy(n, (&T_ROOT[(0) as usize]) as u64)
+    let uid: u64 = ulib.sys(107, 0, 0, 0) // getuid
+    if !ulib.bad(uid) {
+        var t: [u8; 64] = [0 as u8; 64]
+        if pw.name_of_uid(uid, (&t[(0) as usize]) as u64, 60) {
+            ulib.strncpy(n, (&t[(0) as usize]) as u64, 60)
+        }
+    }
+}
+
+fn hat_kennwort() -> bool {
+    return pw.shadow_of((&name[(0) as usize]) as u64,
+        (&haben[(0) as usize]) as u64, 180)
+}
+
+// DIE PRUEFUNG. Sie steht in `pw.check_hash` und nicht hier: ein
+// zweiter Vergleich waere ein zweiter Ort, an dem er falsch sein kann.
+fn stimmt() -> bool {
+    if !hat_kennwort() {
+        return true
+    }
+    return pw.check_hash((&haben[(0) as usize]) as u64,
+        (&kenn[(0) as usize]) as u64)
+}
+
+fn leeren() {
+    var i: u64 = 0
+    while i < 128 {
+        kenn[(i) as usize] = 0 as u8
+        i = i + 1
+    }
+    wlib.set_text(w_kenn, (&kenn[(0) as usize]) as u64)
+}
+
+fn versuchen() -> bool {
+    var s_ok: [u8; 20] = "sperre: aufgesperrt\0"
+    var s_no: [u8; 37] = "sperre: falsches Kennwort, bleibt zu\0"
+    if !stimmt() {
+        let _f: u64 = sy(OP_FEHL, 0)
+        leeren()
+        ulib.strcpy((&kopf[(0) as usize]) as u64,
+            (&T_FALSCH[(0) as usize]) as u64)
+        wlib.set_text(w_kopf, (&kopf[(0) as usize]) as u64)
+        say((&s_no[(0) as usize]) as u64)
+        ulib.nl()
+        return false
+    }
+    if ulib.bad(sy(OP_AUF, 0)) {
+        // Das kann nur passieren, wenn dieser Prozess NICHT der
+        // eingetragene Sperrer ist -- dann darf er es auch nicht.
+        return false
+    }
+    say((&s_ok[(0) as usize]) as u64)
+    ulib.nl()
+    return true
+}
+
+fn u_gui() -> u64 {
+    var s_bad: [u8; 20] = "lock: keine Flaeche\0"
+    var s_go: [u8; 15] = "sperre: bereit\0"
+    var s_geom: [u8; 16] = "sperre: geom w=\0"
+    var s_h: [u8; 4] = " h=\0"
+    var s_pid: [u8; 21] = "sperre: sperrer pid=\0"
+    if !wlib.begin(false, true) {
+        say((&s_bad[(0) as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    // ERST SPERREN, DANN MALEN. Andersherum gaebe es einen Augenblick,
+    // in dem ein Fenster mit der Kennwortfrage dasteht und die Tastatur
+    // noch der Sitzung darunter gehoert.
+    let _a: u64 = sy(OP_AN, 0)
+    let _i: u64 = sy(OP_ICH, 0)
+    wer_bin_ich()
+    let bw: u64 = wlibc.screen_w()
+    let bh: u64 = wlibc.screen_h()
+    let w: u64 = wlib.window_plain(0, 0, bw, bh,
+        (&T_TITEL[(0) as usize]) as u64, wlibc.L_TOP)
+    if w >= wlib.MAXWN {
+        say((&s_bad[(0) as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    let _ap: u64 = wlib.window_app(w, (&T_APP[(0) as usize]) as u64)
+    let rand: u64 = wlib.inset()
+    let luft: u64 = wlib.inset() / 2
+    let breite: u64 = 420
+    let links: u64 = (bw - breite) / 2
+    let oben: u64 = bh / 3
+
+    wlib.box_v(w, links, oben, breite, 200, rand, luft)
+    w_wer = wlib.label((&name[(0) as usize]) as u64)
+    if hat_kennwort() {
+        ulib.strcpy((&kopf[(0) as usize]) as u64,
+            (&T_FRAGE[(0) as usize]) as u64)
+    } else {
+        ulib.strcpy((&kopf[(0) as usize]) as u64,
+            (&T_KEIN[(0) as usize]) as u64)
+    }
+    w_kopf = wlib.label((&kopf[(0) as usize]) as u64)
+    wlib.size(breite - rand * 2, 0)
+    w_kenn = wlib.entry((&kenn[(0) as usize]) as u64, 120)
+    wlib.size(140, 0)
+    w_auf = wlib.button((&T_AUF[(0) as usize]) as u64)
+    wlib.box_end()
+
+    wlib.set_focus(w_kenn)
+    say((&s_geom[(0) as usize]) as u64)
+    ulib.sayn(bw)
+    say((&s_h[(0) as usize]) as u64)
+    ulib.sayn(bh)
+    ulib.nl()
+    say((&s_pid[(0) as usize]) as u64)
+    ulib.sayn(sy(OP_ZAHL, 4))
+    ulib.nl()
+    var s_nm: [u8; 5] = "lock\0"
+    wlib.say_rects((&s_nm[(0) as usize]) as u64)
+    wlib.draw_all()
+    say((&s_go[(0) as usize]) as u64)
+    ulib.nl()
+
+    var runden: u64 = 0
+    var offen: bool = false
+    while wlib.alive() && !offen && runden < 40000000 {
+        runden = runden + 1
+        let id: u64 = wlib.step()
+        if id < wlib.MAXWD {
+            let kind: u64 = wlib.fired_kind()
+            if (kind == wlib.K_ENTRY && id == w_kenn)
+                || (kind == wlib.K_BUTTON && id == w_auf) {
+                offen = versuchen()
+            }
+        }
+        // DAS FENSTER LAESST SICH NICHT SCHLIESSEN. `wlib.alive` wird
+        // falsch, wenn der Server ein Schliessereignis schickt -- hier
+        // wird es nicht angenommen, solange die Sperre steht.
+        if !wlib.alive() && sy(OP_STATE, 0) == 1 {
+            return 1
+        }
+    }
+    return 0
+}
+
+// ------------------------------------------------------- der Waechter
+
+fn leerlauf_grenze() -> u64 {
+    // Sekunden aus /etc/sperre.conf; 0 heisst: nie von selbst.
+    var buf: [u8; 512] = [0 as u8; 512]
+    let fd: u64 = io.open((&T_CONF[(0) as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    let b: u64 = (&buf[(0) as usize]) as u64
+    let n: u64 = io.read(fd, b, 500)
+    io.close(fd)
+    if ulib.bad(n) || n == 0 {
+        return 0
+    }
+    __mmio_write8((b + n) as *mut u8, 0 as u8)
+    let at: u64 = ulib.find(b, (&K_LEER[(0) as usize]) as u64)
+    if at == 0xFFFFFFFFFFFFFFFF {
+        return 0
+    }
+    return ulib.to_num(b + at + ulib.length((&K_LEER[(0) as usize]) as u64))
+}
+
+fn u_wache(einmal: bool) -> u64 {
+    var s_start: [u8; 28] = "sperre: Waechter, Leerlauf \0"
+    var s_s: [u8; 3] = " s\0"
+    var s_aus: [u8; 34] = "sperre: Waechter aus (leerlauf=0)\0"
+    var s_an: [u8; 36] = "sperre: Leerlauf abgelaufen, sperre\0"
+    let grenze: u64 = leerlauf_grenze()
+    if grenze == 0 {
+        say((&s_aus[(0) as usize]) as u64)
+        ulib.nl()
+        return 0
+    }
+    say((&s_start[(0) as usize]) as u64)
+    ulib.sayn(grenze)
+    say((&s_s[(0) as usize]) as u64)
+    ulib.nl()
+    var runden: u64 = 0
+    while runden < 4000000 {
+        runden = runden + 1
+        let _s: u64 = ulib.sleep_ms(250)
+        if sy(OP_STATE, 0) == 0 {
+            let idle: u64 = sy(OP_IDLE, 0)
+            if !ulib.bad(idle) && idle >= grenze * 1000 {
+                say((&s_an[(0) as usize]) as u64)
+                ulib.nl()
+                let _a: u64 = sy(OP_AN, 0)
+                if einmal {
+                    runden = 4000000
+                }
+            }
+        }
+    }
+    return 0
+}
+
+fn u_sagen() -> u64 {
+    var s_1: [u8; 12] = "sperre: an=\0"
+    var s_2: [u8; 13] = " sperrungen=\0"
+    var s_3: [u8; 16] = " aufsperrungen=\0"
+    var s_4: [u8; 15] = " fehlversuche=\0"
+    var s_5: [u8; 12] = " neustarts=\0"
+    var s_6: [u8; 6] = " pid=\0"
+    var s_7: [u8; 14] = " leerlauf_ms=\0"
+    say((&s_1[(0) as usize]) as u64)
+    ulib.sayn(sy(OP_STATE, 0))
+    say((&s_2[(0) as usize]) as u64)
+    ulib.sayn(sy(OP_ZAHL, 0))
+    say((&s_3[(0) as usize]) as u64)
+    ulib.sayn(sy(OP_ZAHL, 1))
+    say((&s_4[(0) as usize]) as u64)
+    ulib.sayn(sy(OP_ZAHL, 2))
+    say((&s_5[(0) as usize]) as u64)
+    ulib.sayn(sy(OP_ZAHL, 3))
+    say((&s_6[(0) as usize]) as u64)
+    ulib.sayn(sy(OP_ZAHL, 4))
+    say((&s_7[(0) as usize]) as u64)
+    ulib.sayn(sy(OP_IDLE, 0))
+    ulib.nl()
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_d: [u8; 3] = "-d\0"
+    var s_s: [u8; 3] = "-s\0"
+    var s_an: [u8; 4] = "-an\0"
+    var s_ab: [u8; 9] = "-absturz\0"
+    let argc: u64 = ulib.arg_count(args)
+    if argc >= 2 {
+        let a: u64 = ulib.arg_at(args, 1)
+        if ulib.streq(a, (&s_d[(0) as usize]) as u64) {
+            var einmal: bool = false
+            if argc >= 3 {
+                var s_e: [u8; 7] = "einmal\0"
+                einmal = ulib.streq(ulib.arg_at(args, 2),
+                    (&s_e[(0) as usize]) as u64)
+            }
+            return u_wache(einmal)
+        }
+        if ulib.streq(a, (&s_s[(0) as usize]) as u64) {
+            return u_sagen()
+        }
+        // DIE GEGENPROBE ZUM AUSFALLZUSTAND, und sie gehoert in das
+        // Programm, das sie betrifft: sperren, sich eintragen, das
+        // sagen -- und dann mit voller Absicht sterben. Was DANACH
+        // passiert, ist die Zusage: der Kern startet den Sperrer neu
+        // und die Sperre bleibt stehen. Ein Absturz darf sperren, aber
+        // niemals aufsperren.
+        if ulib.streq(a, (&s_ab[(0) as usize]) as u64) {
+            let _x: u64 = sy(OP_AN, 0)
+            let _y: u64 = sy(OP_ICH, 0)
+            var s_boom: [u8; 41] = "sperre: Sperrer stirbt jetzt mit Absicht\0"
+            say((&s_boom[(0) as usize]) as u64)
+            ulib.nl()
+            let _z: u64 = u_sagen()
+            __mmio_write8((0) as *mut u8, 1 as u8)
+            return 0
+        }
+        if ulib.streq(a, (&s_an[(0) as usize]) as u64) {
+            // Nur sperren, ohne Fenster -- der Kern startet dann den
+            // Sperrer. Das ist der Weg, den die Abnahme nimmt, um den
+            // Ausfallzustand zu pruefen.
+            let _r: u64 = sy(OP_AN, 0)
+            return u_sagen()
+        }
+    }
+    return u_gui()
+}

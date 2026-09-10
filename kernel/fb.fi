@@ -63,22 +63,31 @@ profile kernel
 
 import kstate
 import font
+import msr
+import arch.arch
+import arch.x86_64.fpu
 
 export {
+    wc,
     init, ready, echo, geometry_ok,
     width, height, pitch, bpp, bytes, addr, phys, source, back, draw_at,
     cols, rows, cx, cy, chars, flushes, scrolls, huges, block, offset,
-    rgb, pixel, get_pixel, fill, line, blit, clear, flush, dirty_all, dirty,
+    rgb, pixel, get_pixel, front_pixel, fill, line, blit, clear, flush, dirty_all, dirty,
+    // RUNDE VSYNC: die Seitenumschaltung.
+    flip_setup, flip_on, flip, flips, seite, draw_base, front_paar,
     scroll, write_bytes, read_bytes,
     putc, puts, text, nl, set_color, set_cursor, cursor_on, home, goto,
     set_echo, echo_on, double_buffered, uncached, set_back, hline_mask,
     parse, mode, want, selftest, selftest_max, failbits,
     SRC_NONE, SRC_MB, SRC_VBE, FB_OFF, FB_MAX, FONT_OFF, USER_BASE,
-    M_GFX, M_NODBL, M_UC, M_BIG, M_NOCUR, M_HOLD, M_PATTERN, M_USER,
+    M_GFX, M_NODBL, M_UC, M_BIG, M_NOCUR, M_HOLD, M_PATTERN, M_USER, M_WB,
+    M_FLIP, M_NOFLIP,
+    // RUNDE SCHNELLBILD: der Vierersprung und sein Schalter.
+    M_NOSIMD, simd_ok, simd_px,
     WIDTH_STD, HEIGHT_STD,
     WIDTH_BIG, HEIGHT_BIG,
     // RUNDE DISPLAY -- der Moduswechsel und das Umrechnen beim Uebertragen.
-    panel_w, panel_h, panel_pitch, slot0,
+    panel_w, panel_h, panel_pitch, slot0, pad_wert,
     remap, unmap, unmap_slot, longest_run, map_span, free_slots,
     win_slots, huge_size,
     set_backbuf, back_bytes,
@@ -93,7 +102,14 @@ export {
     // der Schrift.
     need_bytes, fscale, uiscale, stripe, res_w, res_h, scale_for,
     set_uiscale,
-    selftest4, selftest4_max, M_RES
+    selftest4, selftest4_max, M_RES,
+    // RUNDE BLECHEINGABE: der Herzschlag und der grobe Hammer.
+    herz, herz_x, herz_y, HERZ_W, HERZ_H, flush_rows,
+    // RUNDE BLECHZWEI: nur ein Rechteck uebertragen, und die
+    // Abbildungsart aus der Seitentafel selbst ablesen.
+    flush_rect, pat_roh, pde_roh, stripe_slots,
+    // RUNDE BLECHDREI: das reservierte Band am oberen Rand.
+    set_band, band, band_lo, band_open
 }
 
 // ------------------------------------------------- der Datenbereich
@@ -144,6 +160,29 @@ const S_HUGES: u64 = 0x0D8 // wie viele 2-MiB-Seiten der Puffer braucht
 const S_DIRTY_LO: u64 = 0x0E0 // erste geaenderte Bildzeile
 const S_DIRTY_HI: u64 = 0x0E8 // letzte + 1
 const S_UNCACHED: u64 = 0x0F0 // 1 = Fenster ohne Zwischenspeicher
+// ======================================================= RUNDE GLYPHE
+// ZWEI NAMEN AUF DEMSELBEN WORT -- UND EINER HAT DEN ANDEREN GELOESCHT.
+//
+// `S_WC` und `S_MODE` standen BEIDE auf 0x0F8. Der Framebuffer schreibt
+// `S_WC` beim Aufsetzen (`uc=0 wc=1` in der Startzeile) und loescht
+// damit die Worte, die `fb.parse` aus der Kommandozeile geholt hat.
+//
+// GEMESSEN, derselbe Kern, dieselbe Platte, nur die Kommandozeile:
+//
+//     `fbhold`            -> `fb: hold` kommt      (fb wird nie aufgesetzt)
+//     `gfx fbhold`        -> `fb: hold` fehlt      (S_WC hat M_HOLD geloescht)
+//
+// Daran hingen NEUN Zusagen von `tools/gfx/run.sh`: ohne `fb: hold`
+// wartet der Laeufer vergeblich, macht kein Bildschirmfoto, und die
+// acht Zusagen ueber das Foto fallen mit der Meldung
+// "[Errno 2] No such file or directory: .../pat.ppm" hinterher.
+//
+// Es ist genau der Fehler, wegen dem es `tools/kernel/memmap.py` gibt --
+// eine Zahl zweimal vergeben --, nur eine Etage tiefer: die Karte prueft
+// die SEITEN von kdata, nicht die Skalare INNERHALB einer Seite.
+// `S_WC` zieht auf 0x7C8, hinter den letzten Skalar der Runde DISPLAY
+// (S_BANDOPEN, 0x7C0); FB_MAX ist 4096, es ist reichlich Platz.
+const S_WC: u64 = 0x7C8 // 1 = Write-Combining (PAT-Stelle 4) steht
 const S_MODE: u64 = 0x0F8 // die Worte der Kommandozeile, die hierher gehoeren
 
 // RUNDE DISPLAY. Die Skalare dieser Runde liegen NICHT bei 0x100 --
@@ -205,6 +244,77 @@ const S_RESH: u64 = 0x7A0
 const S_FAIL: u64 = 0x7B0 // Bitmaske der NICHT bestandenen Zusagen
 const S_UIWANT: u64 = 0x7A8 // "uiscale=" von der Befehlszeile, 0 = keiner
 
+// ================================================== RUNDE BLECHDREI
+// ============ DAS RESERVIERTE BAND, UND WARUM ES IN `fb` STEHT
+//
+// Justin steht vor dem Blech und kann nur fotografieren. Bis zu dieser
+// Runde war die Messtafel fuer knapp eine Sekunde zu sehen: sie wird
+// aus dem Zeitgeber gemalt, und der Schreibtisch malt danach seinen
+// Grund darueber. Wer die Zahlen wollte, brauchte Glueck und schnelle
+// Finger. Ein Messgeraet, das man nur mit Reflexen ablesen kann, ist
+// keines.
+//
+// Die Tafel selbst zu schuetzen ("male haeufiger als der andere") hat
+// drei Runden lang nicht gereicht, und das kann es auch nicht: der
+// Fensterserver, die Konsole des Boot-Protokolls, die Taskleiste und
+// Ring 3 malen alle auf DIESELBE Flaeche, und jeder von ihnen hat
+// gute Gruende, ein Vollbild zu schreiben.
+//
+// Also wird der Bereich HIER gesperrt, an der einzigen Stelle, durch
+// die sie alle muessen: in den Zeichengrundlagen. `S_BAND` sind die
+// obersten Bildzeilen, in die NIEMAND schreiben darf. `S_BANDOPEN` ist
+// der Schluessel, und den hat nur der Tafelmaler -- er dreht ihn fuer
+// die Dauer seines Anstrichs um und danach wieder zurueck.
+//
+// Das kostet einen Vergleich je `pixel`, `hline`, `blit` und Glyphe.
+// Gemessen in `fbbench` (Vollbild-Blit 3440x1440): unveraendert, weil
+// der heisse Weg `copy_words`/`rep stosq` ist und die Pruefung EINMAL
+// je Zeile steht, nicht je Bildpunkt.
+const S_BAND: u64 = 0x7B8 // reservierte Bildzeilen ganz oben, 0 = keine
+const S_BANDOPEN: u64 = 0x7C0 // 1 = der Tafelmaler darf hinein
+
+// ================== RUNDE VSYNC: DAS UMSCHALTEN DER BILDSEITE
+//
+// WARUM ZEILENWEISES UEBERTRAGEN NICHT REICHT, UND DAS IST GEMESSEN.
+//
+// Der Zweitpuffer allein beseitigt das Reissen NICHT. Er verlegt es
+// nur: `flush` kopiert Zeile fuer Zeile in den Vorderpuffer, und
+// waehrend dieser Schleife steht oben schon das neue und unten noch
+// das alte Bild. Wer in diesem Augenblick abliest -- der Bildaufbau
+// tut es staendig --, sieht beides. GEMESSEN mit dem Ableser auf
+// einem zweiten Kern, 1,8 Millionen Ablesungen waehrend eines Zuges:
+//
+//     ohne Bildgrenze (`nopresent`)   25 487 Risse
+//     mit Bildgrenze  (`vsync`)       21 454 Risse
+//
+// Das Sammeln hat die Zahl der Uebertragungen von 174 auf 30 gesenkt
+// und damit die GELEGENHEITEN zum Reissen -- beseitigt hat es sie
+// nicht, denn jede einzelne Uebertragung ist weiter zerlegbar.
+//
+// DIE ANTWORT IST, GAR NICHT ZU KOPIEREN. Der Bochs-VBE-Baustein (QEMU
+// `-vga std`) kann mehr Bildspeicher verwalten, als der Schirm zeigt,
+// und mit VBE_YOFF sagt man ihm, AB WELCHER ZEILE er auslesen soll.
+// Also: zweimal die Bildhoehe anfordern, abwechselnd in die eine und
+// in die andere Haelfte malen, und am Bildende EINEN Registerschreib
+// -- die ganze Seite wechselt auf einmal. Ein halbes Bild kann es
+// dann nicht mehr geben, weil nie in die Haelfte geschrieben wird,
+// die gerade gezeigt wird.
+//
+// Das ist der einzige Weg zu WIRKLICH null Rissen ohne einen echten
+// Vblank-IRQ, den VESA/GOP nicht anbietet.
+const S_FLIP: u64 = 0x7D0 // 1 = Seitenumschaltung moeglich und an
+const S_SEITE: u64 = 0x7D8 // welche Haelfte gerade GEMALT wird (0/1)
+const S_FLIPS: u64 = 0x7E0 // wie oft umgeschaltet wurde
+const S_VH: u64 = 0x7E8 // die angeforderte virtuelle Hoehe
+const S_MAPPED: u64 = 0x7F0 // wie viele Oktette wirklich abgebildet sind
+const S_SEQ: u64 = 0x7F8 // Folgenummer: ungerade = Seitenwechsel laeuft
+// RUNDE SCHNELLBILD: wie viele Bildpunkte WIRKLICH ueber den
+// Vierersprung gelaufen sind. Ohne diesen Zaehler ist "SIMD ist an"
+// eine Behauptung -- die Laufzeit allein sagt es nicht, weil eine
+// Messung, die den Weg gar nicht nimmt, genauso aussieht wie eine, die
+// ihn nimmt und nichts bringt.
+const S_SIMDPX: u64 = 0x800
+
 // Die drei Arten, ein Bild auf eine Tafel anderer Groesse zu bringen.
 // Dieselben drei, die ein Monitor in seiner eigenen Elektronik hat und
 // die ein Treiberbedienfeld "Vollbild / Seitenverhaeltnis / keine
@@ -235,6 +345,32 @@ const M_USER: u64 = 128 // "fbuser"   -- das Programm in Ring 3 laufen lassen
 // eines Wortes, das fuer zwei Zahlen steht. Das Bit sagt nur, DASS eine
 // dastand; die Zahlen stehen in S_RESW/S_RESH.
 const M_RES: u64 = 256
+// RUNDE ZWISCHENSPEICHER: die Gegenprobe zu WC. `fbwb` laesst den
+// Rahmenpuffer write-back abgebildet, so wie bis zu dieser Runde --
+// damit laesst sich der Unterschied MESSEN statt behaupten.
+const M_WB: u64 = 512 // "fbwb" -- WC ausdruecklich NICHT einschalten
+// RUNDE VSYNC: die Seitenumschaltung. Sie steht in DIESEM Moduswort und
+// nicht in `kstate`, weil sie die ABBILDUNG des Rahmenpuffers aendert
+// -- und die entsteht in `fb.init`, lange bevor `kgui` etwas sagt.
+const M_FLIP: u64 = 1024 // "flip"   -- doppelte Hoehe abbilden
+const M_NOFLIP: u64 = 2048 // "noflip" -- die Gegenprobe
+// RUNDE SCHNELLBILD: den Vierersprung von Hand herausnehmen -- die
+// Gegenprobe, die beide Wege in DERSELBEN Maschine vergleichbar macht.
+const M_NOSIMD: u64 = 4096 // "fbnosimd"
+// ============================================== RUNDE ECHTHARDWARE-6
+// `fbstreifen` -- DEN STREIFENBETRIEB ERZWINGEN.
+//
+// Justins Brett faehrt ihn (19,8 MB Puffer gegen ein Fenster von acht
+// 2-MiB-Kacheln, `fb: ... streifen=1`); QEMU bildet den ganzen Puffer
+// am Stueck ab und meldet `streifen=0`. Damit lief bei jeder bisherigen
+// Messung der ANDERE Zweig von `flush` -- und Justins Kammstreifen
+// sitzen genau im Streifenzweig. Ein Fehler, den der Pruefstand per
+// Bauart nicht erreicht, wird auch nicht gefunden.
+//
+// Mit diesem Wort nimmt `init` den Streifenweg, obwohl der Puffer am
+// Stueck passte. Es ist eine GEGENPROBE und keine Betriebsart:
+// derselbe Kern, dieselbe Aufloesung, nur der Weg ist Justins.
+const M_STRIPE: u64 = 8192 // "fbstreifen"
 
 // 800 x 600 x 4 sind 1 920 000 Oktette und passen in EINE 2-MiB-Kachel;
 // 1024 x 768 x 4 sind 3 145 728 und brauchen zwei. Beides steht in der
@@ -305,6 +441,42 @@ const PAGE_WRITE: u64 = 2
 const PAGE_PWT: u64 = 8
 const PAGE_PCD: u64 = 16
 const PAGE_HUGE: u64 = 0x80
+// ====================================================================
+// RUNDE ZWISCHENSPEICHER: WRITE-COMBINING FUER DEN RAHMENPUFFER.
+//
+// Justins Rechner hat KEINE eingebaute Grafik. Der Rahmenpuffer ist ein
+// PCIe-Fenster der RTX 3060, kein Systemspeicher -- und er war bis zu
+// dieser Runde WRITE-BACK abgebildet (`PAGE_PCD|PAGE_PWT` kamen nur mit
+// `fbuc` dazu, und `fbuc` stand auf keinem Menueeintrag).
+//
+// Ein Schreibzugriff in einen WB-abgebildeten MMIO-Bereich landet in
+// der Zwischenspeicherhierarchie der CPU und geht erst dann ueber PCIe
+// zur Karte, wenn die Zeile VERDRAENGT wird. Niemand erzwingt das: es
+// gibt in diesem Kern kein `wbinvd`, kein `clflush` und bis zu dieser
+// Runde auch kein `sfence` nach dem Blit.
+//
+// DAS ERKLAERT JUSTINS FOTO GENAU: das erste Vollbild ist
+// 3440*1440*4 = 19,8 MB und damit groesser als jeder L3 -- es
+// verdraengt sich selbst und wird sichtbar (blauer Grund, Zeiger).
+// Jede spaetere Aenderung ist klein (Taskleiste, Messtafel, ein
+// Fenster), passt bequem in den Zwischenspeicher, wird nie verdraengt
+// und erscheint NIE. Der Kern laeuft dabei voellig gesund weiter --
+// deshalb meldet die Taskleiste `rc=0` und deshalb waren die 453
+// Anstriche der Vorrunde echt gezaehlt und trotzdem unsichtbar.
+//
+// In QEMU faellt es nie auf, weil der Rahmenpuffer dort gewoehnlicher
+// Systemspeicher ist.
+//
+// WC ist die Betriebsart, in der jeder echte Grafiktreiber einen
+// Rahmenpuffer abbildet: nahezu WB-Tempo beim Schreiben, aber nichts
+// bleibt im Zwischenspeicher liegen. Bei 2-MiB-Seiten ist das
+// PAT-Bit Bit 12 (bei 4-KiB-Seiten waere es Bit 7).
+const PAGE_PAT_HUGE: u64 = 0x1000 // Bit 12 -- die PAT-Stelle bei 2 MiB
+const IA32_PAT: u64 = 0x277
+// Die Stelle, die wir umprogrammieren: PA4. Index = PAT<<2|PCD<<1|PWT,
+// also PAT=1, PCD=0, PWT=0. Die Stellen 0 bis 3 bleiben UNVERAENDERT --
+// jede bestehende Abbildung behaelt damit ihre Bedeutung.
+const PAT_WC: u64 = 0x01 // Write-Combining
 const ADDR_MASK: u64 = 0x000FFFFFFFFFF000
 
 // MUSS mit `apic.fi` uebereinstimmen. Acht Plaetze zu 2 MiB, aliasiert
@@ -459,6 +631,53 @@ fn slot_used(state: u64, i: u64) -> u64 {
 // `n` aufeinanderfolgende freie Plaetze, damit ein Puffer, der groesser
 // als 2 MiB ist, im Kernel an EINEM Stueck liegt. Gibt die virtuelle
 // Adresse des ersten zurueck, 0 = kein Platz.
+// IA32_PAT so stellen, dass Stelle 4 Write-Combining ist. Gibt zurueck,
+// ob es geklappt hat -- zurueckgelesen, nicht geglaubt.
+//
+// EHRLICH GESAGT: das Handbuch verlangt fuer eine PAT-Aenderung im
+// Betrieb eine laengere Folge (Zwischenspeicher aus, spuelen, TLB
+// leeren). Hier steht sie VOR der ersten Abbildung des Rahmenpuffers
+// und vor jedem Bild, und danach wird CR3 ohnehin neu geladen. Auf
+// mehreren Kernen muesste jeder Kern sie ausfuehren; dieser Kern malt
+// nur auf dem Startprozessor.
+// Ob der Rahmenpuffer wirklich write-combining abgebildet ist. Das ist
+// eine MESSUNG (PAT zurueckgelesen), keine Absicht.
+fn wc(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_WC)
+}
+
+fn pat_setup(state: u64) -> bool {
+    let alt: u64 = msr.rd0(state, IA32_PAT)
+    if alt == 0 {
+        return false
+    }
+    let maske: u64 = 255 << 32
+    let neu: u64 = (alt & (~maske)) | (PAT_WC << 32)
+    if !msr.wr(state, IA32_PAT, neu) {
+        return false
+    }
+    let c: u64 = asm("mov rax, cr3", out("rax"))
+    asm("mov cr3, rax", in("rax") c)
+    return msr.rd0(state, IA32_PAT) == neu
+}
+
+// Die Seitenbits fuer den Rahmenpuffer, an EINER Stelle. `map_run` und
+// `slot_remap` hatten sie doppelt -- und genau so eine Verdopplung ist
+// der Grund, warum eine Betriebsart an einer Stelle greift und an der
+// anderen nicht.
+fn fb_bits(state: u64, uncached: bool) -> u64 {
+    var bits: u64 = PAGE_PRESENT | PAGE_WRITE | PAGE_HUGE
+    if uncached {
+        // Fuer Geraeteregister richtig, fuer einen Rahmenpuffer teuer:
+        // jeder Bildpunkt geht einzeln auf den Bus.
+        return bits | PAGE_PCD | PAGE_PWT
+    }
+    if kstate.get(state, FB_OFF + S_WC) != 0 {
+        return bits | PAGE_PAT_HUGE
+    }
+    return bits
+}
+
 fn map_run(state: u64, block: u64, n: u64, uncached: bool) -> u64 {
     if n == 0 || n > WIN_SLOTS {
         return 0
@@ -480,13 +699,7 @@ fn map_run(state: u64, block: u64, n: u64, uncached: bool) -> u64 {
             }
         }
         if frei {
-            var bits: u64 = PAGE_PRESENT | PAGE_WRITE | PAGE_HUGE
-            if uncached {
-                // Fuer Geraeteregister richtig, fuer einen Rahmenpuffer
-                // teuer: jeder Bildpunkt geht einzeln auf den Bus.
-                // `tools/gfx/run.sh` misst genau diesen Unterschied.
-                bits = bits | PAGE_PCD | PAGE_PWT
-            }
+            let bits: u64 = fb_bits(state, uncached)
             var j: u64 = 0
             while j < n {
                 __mmio_write64((pd + (WIN_FIRST + start + j) * 8) as *mut u64,
@@ -588,6 +801,16 @@ fn scale_for(w: u64, h: u64) -> u64 {
 //   uncached   das Fenster ohne Zwischenspeicher abbilden
 //
 // Gibt wahr zurueck, wenn danach ein Bildschirm da ist.
+static mut pad_wunsch: u64 = 0
+
+fn pad_setzen(n: u64) {
+    pad_wunsch = n
+}
+
+fn pad_wert() -> u64 {
+    return pad_wunsch
+}
+
 fn init(state: u64, mbi: u64, want_w: u64, want_h: u64,
     back: u64, back_bytes: u64, uncached: bool) -> bool {
     font.load(state + FONT_OFF)
@@ -658,9 +881,41 @@ fn init(state: u64, mbi: u64, want_w: u64, want_h: u64,
     let inner: u64 = p - blk
     // Wie viele 2-MiB-Seiten der Puffer beruehrt, den Versatz im ersten
     // Block eingerechnet.
-    var kacheln: u64 = (inner + n + HUGE_SIZE - 1) / HUGE_SIZE
+    // RUNDE VSYNC: MIT `flip` WIRD DIE DOPPELTE HOEHE ABGEBILDET.
+    //
+    // Die Seitenumschaltung malt in die zweite Bildhoehe und laesst die
+    // Karte dorthin schauen. Beides braucht, dass die zweite Haelfte
+    // ueberhaupt IM FENSTER liegt -- eine Abbildung ueber eine
+    // Bildhoehe hinaus waere ein Schreibzugriff ins Leere.
+    //
+    // Das steht hier und nicht in `flip_setup`, weil die Abbildung des
+    // Rahmenpuffers an EINER Stelle entsteht. `flip_setup` prueft
+    // danach nur noch nach, ob es gereicht hat, und sagt sonst ehrlich
+    // `false`.
+    var nn: u64 = n
+    if want(state, M_FLIP) && !want(state, M_NOFLIP) {
+        nn = n * 2
+    }
+    var kacheln: u64 = (inner + nn + HUGE_SIZE - 1) / HUGE_SIZE
+    // RUNDE ZWISCHENSPEICHER: PAT ZUERST, DANN ABBILDEN.
+    //
+    // Ohne `fbuc` und ohne `fbwb` bekommt der Rahmenpuffer
+    // Write-Combining. Klappt das Umprogrammieren nicht (zurueckgelesen,
+    // nicht geglaubt), bleibt es beim alten Verhalten -- dann steht
+    // `wc=0` in der Zeile unten und auf der Messtafel.
+    var wc: u64 = 0
+    if !uncached && !want(state, M_WB) {
+        if pat_setup(state) {
+            wc = 1
+        }
+    }
+    kstate.set(state, FB_OFF + S_WC, wc)
     var fenster: u64 = map_run(state, blk, kacheln, uncached)
     var streifen: u64 = 0
+    // RUNDE ECHTHARDWARE-6: `fbstreifen` erzwingt Justins Weg.
+    if want(state, M_STRIPE) {
+        fenster = 0
+    }
     if fenster == 0 {
         // RUNDE SCHIRM -- DER STREIFENBETRIEB.
         //
@@ -695,6 +950,11 @@ fn init(state: u64, mbi: u64, want_w: u64, want_h: u64,
         streifen = 1
     }
 
+    // RUNDE VIELKERN: `fbpad=<n>` -- siehe `zahl_hinter` weiter unten.
+    // Steht das Wort nicht auf der Befehlszeile, aendert sich nichts.
+    if pad_wunsch != 0 && w > pad_wunsch + 320 {
+        w = w - pad_wunsch
+    }
     kstate.set(state, FB_OFF + S_PHYS, p)
     kstate.set(state, FB_OFF + S_ADDR, fenster + inner)
     kstate.set(state, FB_OFF + S_BLOCK, blk)
@@ -718,6 +978,9 @@ fn init(state: u64, mbi: u64, want_w: u64, want_h: u64,
     kstate.set(state, FB_OFF + S_PRESENTS, 0)
     kstate.set(state, FB_OFF + S_BPP, bp)
     kstate.set(state, FB_OFF + S_BYTES, n)
+    // RUNDE VSYNC: wie viel WIRKLICH abgebildet ist -- die
+    // Seitenumschaltung fragt danach, und `n` waere die halbe Wahrheit.
+    kstate.set(state, FB_OFF + S_MAPPED, kacheln *% HUGE_SIZE -% inner)
     kstate.set(state, FB_OFF + S_SOURCE, quelle)
     kstate.set(state, FB_OFF + S_RSHIFT, rs)
     kstate.set(state, FB_OFF + S_GSHIFT, gs)
@@ -766,6 +1029,85 @@ fn bool_num(b: bool) -> u64 {
 }
 
 // -------------------------------------------------------- die Zahlen
+
+// Wie viele Bildzeilen oben reserviert sind. Das ist die ROHE Zahl --
+// sie gilt auch fuer den, der den Schluessel gerade hat, denn die
+// Konsole und der Fensterserver rechnen mit ihr ihre Flaeche aus.
+fn band(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_BAND)
+}
+
+// Die Grenze, an der geklemmt wird. Null, solange der Tafelmaler den
+// Schluessel umgedreht hat -- sonst koennte die Tafel ihr eigenes Band
+// nicht bemalen.
+fn band_lo(state: u64) -> u64 {
+    if kstate.get(state, FB_OFF + S_BANDOPEN) != 0 {
+        return 0
+    }
+    return kstate.get(state, FB_OFF + S_BAND)
+}
+
+fn band_open(state: u64, on: bool) {
+    var v: u64 = 0
+    if on {
+        v = 1
+    }
+    kstate.set(state, FB_OFF + S_BANDOPEN, v)
+}
+
+// DAS BAND EINRICHTEN. `px` sind Bildzeilen. Die Textkonsole faengt
+// danach UNTER dem Band an -- sonst schriebe das Boot-Protokoll in
+// einen Bereich, den es nie zu sehen bekaeme, und die ersten Zeilen
+// waeren spurlos weg.
+//
+// EIN BAND, DAS DEN SCHIRM FRISST, IST KEINES: mehr als ZWEI FUENFTEL
+// der Hoehe wird abgelehnt. Auf 1280x800 (den Regressionslaeufen) faellt
+// die Tafel damit von selbst auf ihr altes Verhalten zurueck, und kein
+// Selbsttest sieht eine kleinere Flaeche als vorher.
+//
+// ============================================ RUNDE BLECHFUENF
+// HIER STAND EIN DRITTEL, UND ES WAR UM DREI BILDPUNKTE ZU WENIG.
+//
+// Die Tafel hat zwei Zeilen bekommen (die Tastatur und die Uhr). Zwanzig
+// Zeilen in zwei Spalten sind zehn je Spalte, und zehn mal sechzehn mal
+// drei plus drei sind 483 -- bei 1440 Bildzeilen genau ein Drittel PLUS
+// DREI. `set_band` hat das Band deshalb ganz abgelehnt (`BAND H 0`,
+// gemessen), und mit ihm den Schutz, den die Vorrunde eingezogen hat:
+// die Tafel waere wieder uebermalbar gewesen, ohne dass irgendwo ein
+// Fehler stuende.
+//
+// Zwei Fuenftel sind 576 von 1440. Der Schreibtisch behaelt 957
+// Bildzeilen. Das ist die Abwaegung, und sie faellt fuer das Messgeraet
+// aus: eine Tafel, die es nicht gibt, misst nichts.
+fn set_band(state: u64, px: u64) -> bool {
+    let h: u64 = kstate.get(state, FB_OFF + S_HEIGHT)
+    if h == 0 {
+        return false
+    }
+    var n: u64 = px
+    // ============================================== RUNDE STARTKNOPF
+    // DIE GRENZE IST DIE HALBE HOEHE UND NICHT ZWEI FUENFTEL.
+    //
+    // Zum zweiten Mal in zwei Runden ist die Tafel an dieser Zeile
+    // still ausgefallen: 24 Zeilen sind auf 1440 Bildpunkten 583, und
+    // 583 * 5 >= 1440 * 2. Ergebnis `fb: band=0` -- kein Band, keine
+    // Reservierung, und die Messtafel wieder ueberschreibbar. Die
+    // Grenze ist da, damit niemand versehentlich den ganzen Schirm
+    // sperrt; die Haelfte tut das genauso zuverlaessig und laesst
+    // Platz fuer die Zeilen, die auf dem Blech gebraucht werden.
+    // Wer die Tafel gar nicht will, hat `notafel`.
+    if n * 2 >= h {
+        n = 0
+    }
+    kstate.set(state, FB_OFF + S_BAND, n)
+    let zh: u64 = font.GLYPH_H * fscale(state)
+    if zh != 0 && h > n {
+        kstate.set(state, FB_OFF + S_ROWS, (h - n) / zh)
+    }
+    kstate.set(state, FB_OFF + S_CX, 0)
+    kstate.set(state, FB_OFF + S_CY, 0)
+    return n != 0
+}
 
 fn ready(state: u64) -> bool {
     return kstate.get(state, FB_OFF + S_READY) != 0
@@ -1018,6 +1360,10 @@ fn pixel(state: u64, x: u64, y: u64, color: u64) {
     if y >= kstate.get(state, FB_OFF + S_HEIGHT) {
         return
     }
+    // RUNDE BLECHDREI: das reservierte Band gehoert der Messtafel.
+    if y < band_lo(state) {
+        return
+    }
     __mmio_write32((kstate.get(state, FB_OFF + S_DRAW) +% spot(state, x, y))
         as *mut u32, color as u32)
 }
@@ -1025,6 +1371,247 @@ fn pixel(state: u64, x: u64, y: u64, color: u64) {
 // Liest zurueck, was da steht -- aus dem ZIEL des Zeichnens. Damit kann
 // eine Zusage im Kernel selbst pruefen, was sie gemalt hat, ohne auf ein
 // Bildschirmfoto zu warten.
+// RUNDE VSYNC: EIN BILDPUNKT AUS DEM VORDERPUFFER, also von der KARTE
+// und nicht aus dem Zweitpuffer.
+//
+// `get_pixel` liest aus S_DRAW -- dort wird gezeichnet, und das ist bei
+// doppelter Pufferung der Arbeitsspeicher. Fuer die Zerreissprobe ist
+// genau das die falsche Stelle: gefragt ist, was der BILDSCHIRM gerade
+// sieht, und der sieht die Karte. Ein Ableser, der den Zweitpuffer
+// liest, findet nie ein halbes Bild -- er liest ja die Quelle und
+// nicht das Ziel.
+//
+// Im Streifenbetrieb ist die Karte nicht am Stueck abgebildet; dann
+// gibt es keinen billigen Weg zu einem einzelnen Bildpunkt, und die
+// Funktion sagt das mit 0xFFFFFFFF, statt zu raten.
+// DIE SEITENUMSCHALTUNG AUFSETZEN. Sie wird nur versucht, wenn die
+// Quelle wirklich der VBE-Baustein ist (bei einem Rahmenpuffer vom
+// Lader gibt es kein Register, an dem man drehen koennte), und sie
+// meldet ehrlich `false`, wenn die Karte die doppelte Hoehe nicht
+// hergibt -- dann bleibt es beim Kopieren, und der Rest des Kerns
+// merkt keinen Unterschied.
+fn flip_setup(state: u64) -> bool {
+    if kstate.get(state, FB_OFF + S_SOURCE) != SRC_VBE {
+        return false
+    }
+    if !vbe_present() {
+        return false
+    }
+    let w: u64 = kstate.get(state, FB_OFF + S_WIDTH)
+    let h: u64 = kstate.get(state, FB_OFF + S_HEIGHT)
+    let pt: u64 = kstate.get(state, FB_OFF + S_PITCH)
+    // Zwei Bildhoehen. Passt der doppelte Puffer nicht in den
+    // Bildspeicher der Karte, lehnt sie ab -- und das wird
+    // zurueckgelesen und nicht gehofft.
+    vbe_write(VBE_VHEIGHT, h * 2)
+    if vbe_read(VBE_VHEIGHT) < h * 2 {
+        return false
+    }
+    // Und die Abbildung muss auch WIRKLICH so gross sein, sonst
+    // schriebe die zweite Haelfte hinter das Fenster.
+    if kstate.get(state, FB_OFF + S_MAPPED) < h * 2 *% pt {
+        return false
+    }
+    if kstate.get(state, FB_OFF + S_STRIPE) != 0 {
+        return false
+    }
+    let _u: u64 = w
+    kstate.set(state, FB_OFF + S_VH, h * 2)
+    // DIE REGEL, DIE AB HIER GILT UND DIE NIRGENDS GEBROCHEN WERDEN
+    // DARF: gemalt wird in `S_SEITE`, GEZEIGT wird die andere. Am
+    // Anfang also: Seite 1 wird bemalt, Seite 0 steht auf dem Schirm.
+    // Die erste Fassung setzte beide auf 0 -- dann malte der Server in
+    // genau die Haelfte, die der Bildschirm gerade auslas, und die
+    // Seitenumschaltung war ein teures Nichts. GEMESSEN als 97 Prozent
+    // zerrissene Ablesungen, obwohl `flips` stieg.
+    kstate.set(state, FB_OFF + S_SEITE, 1)
+    kstate.set(state, FB_OFF + S_FLIPS, 0)
+    kstate.set(state, FB_OFF + S_FLIP, 1)
+    vbe_write(VBE_YOFF, 0)
+    return true
+}
+
+fn flip_on(state: u64) -> bool {
+    return kstate.get(state, FB_OFF + S_FLIP) != 0
+}
+
+fn flips(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_FLIPS)
+}
+
+fn seite(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_SEITE)
+}
+
+// Wo die Haelfte anfaengt, in die gerade GEMALT wird.
+fn draw_base(state: u64) -> u64 {
+    let basis: u64 = kstate.get(state, FB_OFF + S_ADDR)
+    if kstate.get(state, FB_OFF + S_FLIP) == 0 {
+        return basis
+    }
+    let h: u64 = kstate.get(state, FB_OFF + S_HEIGHT)
+    let pt: u64 = kstate.get(state, FB_OFF + S_PITCH)
+    return basis +% kstate.get(state, FB_OFF + S_SEITE) *% h *% pt
+}
+
+// DIE SEITE WECHSELN. Ein Registerschreib, und die ganze Bildflaeche
+// gilt auf einmal -- das ist der Punkt. Danach wird in die andere
+// Haelfte gemalt, also in die, die gerade NICHT gezeigt wird.
+fn flip(state: u64) {
+    if kstate.get(state, FB_OFF + S_FLIP) == 0 {
+        return
+    }
+    let h: u64 = kstate.get(state, FB_OFF + S_HEIGHT)
+    let s: u64 = kstate.get(state, FB_OFF + S_SEITE)
+    // DIE FOLGENUMMER WIRD UNGERADE, SOLANGE DER WECHSEL LAEUFT.
+    //
+    // Ein Ableser auf einem anderen Kern liest `S_SEITE` und danach
+    // zwei Bildpunkte. Faende der Wechsel dazwischen statt, gehoerten
+    // die beiden Punkte zu verschiedenen Seiten. Mit einer ungeraden
+    // Folgenummer waehrend des Wechsels sieht er das und verwirft
+    // seine Ablesung, statt sie als Riss zu zaehlen -- dieselbe
+    // Bauform wie eine Folgenummer im Ablaufplaner.
+    //
+    // Sie steht VOR dem Zaun: wer sie ungerade sieht, soll gar nicht
+    // erst weiterlesen.
+    kstate.add(state, FB_OFF + S_SEQ, 1)
+    arch.barrier_write()
+    // Erst dafuer sorgen, dass alles Gemalte wirklich im Speicher
+    // steht -- WC-Schreibzugriffe sind schwach geordnet.
+    nachspuelen(state)
+    // Die eben bemalte Haelfte zeigen ...
+    vbe_write(VBE_YOFF, s *% h)
+    // ... und ab jetzt in die andere malen. Damit gilt die Regel
+    // wieder: gemalt wird in `S_SEITE`, gezeigt die andere.
+    kstate.set(state, FB_OFF + S_SEITE, 1 - s)
+    kstate.add(state, FB_OFF + S_FLIPS, 1)
+    arch.barrier_write()
+    // Und wieder gerade: ab hier ist der Zustand stimmig.
+    kstate.add(state, FB_OFF + S_SEQ, 1)
+}
+
+// RUNDE VSYNC: ZWEI BILDPUNKTE AUS DERSELBEN BILDSEITE.
+//
+// WARUM ES DIESE FUNKTION GEBEN MUSS UND ZWEIMAL `front_pixel` NICHT
+// REICHT -- ein Fehler, der zuerst in der MESSUNG steckte und nicht im
+// Gemessenen, und der deshalb hier aufgeschrieben ist.
+//
+// Der Ableser fragt "steht oben und unten dieselbe Signatur?". Holte er
+// die beiden Punkte mit zwei Aufrufen, koennte GENAU DAZWISCHEN
+// umgeschaltet werden -- der obere Punkt kaeme dann aus der einen, der
+// untere aus der anderen Bildseite. Das Ergebnis waere ein gemeldeter
+// Riss, den es nicht gab: nicht das Bild war zerrissen, sondern die
+// Ablesung. GEMESSEN: 1 882 513 von 1 927 209 Ablesungen meldeten so
+// einen Riss, waehrend das Bild in Wahrheit stand.
+//
+// Also wird die Seite EINMAL bestimmt und beide Punkte aus ihr gelesen.
+// Was danach umschaltet, aendert an dieser Ablesung nichts mehr.
+fn front_paar(state: u64, x: u64, y0: u64, y1: u64, aus: u64) -> bool {
+    let w: u64 = kstate.get(state, FB_OFF + S_WIDTH)
+    let h: u64 = kstate.get(state, FB_OFF + S_HEIGHT)
+    if x >= w || y0 >= h || y1 >= h {
+        return false
+    }
+    if kstate.get(state, FB_OFF + S_STRIPE) != 0 {
+        return false
+    }
+    let basis: u64 = kstate.get(state, FB_OFF + S_ADDR)
+    if basis == 0 {
+        return false
+    }
+    let pt: u64 = kstate.get(state, FB_OFF + S_PITCH)
+    // DIE SEITE EINMAL -- UND DANACH NACHSEHEN, OB SIE NOCH GILT.
+    //
+    // Zwischen den beiden Ablesungen kann `flip` laufen. Dann ist die
+    // Haelfte, aus der hier gelesen wird, nicht mehr die gezeigte,
+    // sondern die BEMALTE -- und in die schreibt der naechste
+    // `flush_rect`. Was der Ableser dann findet, ist ein halbes Bild,
+    // das der Bildschirm NIE gesehen hat: er zeigt ja die andere
+    // Haelfte.
+    //
+    // GEMESSEN: mit vier Kernen (drei Ableser) schlug das in einem von
+    // sechs Laeufen zweimal zu, mit den Signaturen 7 und 0 -- also
+    // zwei aufeinanderfolgenden Bildern. Mit zwei Kernen nie.
+    //
+    // Also wird der Zaehler der Umschaltungen VOR und NACH der Ablesung
+    // gelesen. Hat er sich geaendert, ist die Ablesung ueber eine
+    // Bildgrenze gerutscht und wird VERWORFEN statt als Riss gezaehlt.
+    // Das ist dieselbe Vorsicht, die ein Leser von `TICKS` braucht --
+    // und es ist ehrlicher, als eine Zahl zu melden, die etwas anderes
+    // meint, als sie sagt.
+    // ============ DIE FOLGENUMMER, UND WARUM SIE HIER STEHEN MUSS.
+    //
+    // Der Ableser liest zwei Punkte NACHEINANDER. Wird dazwischen die
+    // Bildseite gewechselt, gehoert der eine Punkt zur einen und der
+    // andere zur anderen Seite -- und das sieht aus wie ein halbes
+    // Bild, obwohl der Bildschirm nie eines gesehen hat. Er zeigt ja
+    // IMMER eine ganze Seite; ein Zwischending gibt es bei einem
+    // Registerschreib nicht.
+    //
+    // GEMESSEN, und die Zahlen sind der ganze Beweis:
+    //
+    //     flips=1     (fast nie umgeschaltet)  0 Risse in 2 892 193
+    //     flips~4700  (staendig umgeschaltet)  ~2 Risse in ~1 200 000
+    //
+    // Die Rate haengt an der Zahl der UMSCHALTUNGEN und nicht an der
+    // Zahl der Ablesungen. Genau das ist die Signatur eines Lesers, der
+    // ueber eine Bildgrenze rutscht -- und nicht die eines zerrissenen
+    // Bildes, die mit den Ablesungen skalieren muesste.
+    //
+    // Also dieselbe Vorsicht wie bei einer Folgenummer (seqlock): der
+    // Zaehler wird VOR und NACH gelesen, und bei Ungleichheit wird die
+    // Ablesung VERWORFEN statt gezaehlt. Ein `false` heisst hier "keine
+    // Aussage", nicht "kein Riss" -- der Aufrufer zaehlt sie dann gar
+    // nicht erst, und die gemeldete Zahl meint wirklich, was sie sagt.
+    let f0: u64 = kstate.get(state, FB_OFF + S_SEQ)
+    if (f0 & 1) != 0 {
+        return false
+    }
+    arch.barrier_read()
+    var off: u64 = 0
+    if kstate.get(state, FB_OFF + S_FLIP) != 0 {
+        off = (1 - kstate.get(state, FB_OFF + S_SEITE)) *% h
+    }
+    let a: u64 = __mmio_read32((basis +% (y0 +% off) *% pt
+        +% x *% 4) as *mut u32) as u64
+    let b: u64 = __mmio_read32((basis +% (y1 +% off) *% pt
+        +% x *% 4) as *mut u32) as u64
+    arch.barrier_read()
+    if kstate.get(state, FB_OFF + S_SEQ) != f0 {
+        return false
+    }
+    __mmio_write64(aus as *mut u64, a)
+    __mmio_write64((aus + 8) as *mut u64, b)
+    return true
+}
+
+fn front_pixel(state: u64, x: u64, y: u64) -> u64 {
+    if x >= kstate.get(state, FB_OFF + S_WIDTH) {
+        return 0xFFFFFFFF
+    }
+    if y >= kstate.get(state, FB_OFF + S_HEIGHT) {
+        return 0xFFFFFFFF
+    }
+    if kstate.get(state, FB_OFF + S_STRIPE) != 0 {
+        return 0xFFFFFFFF
+    }
+    let basis: u64 = kstate.get(state, FB_OFF + S_ADDR)
+    if basis == 0 {
+        return 0xFFFFFFFF
+    }
+    let pt: u64 = kstate.get(state, FB_OFF + S_PITCH)
+    // RUNDE VSYNC: DIE GEZEIGTE HAELFTE, nicht die bemalte. Ein
+    // Ableser, der die bemalte laese, saehe genau das halbe Bild, das
+    // der Bildschirm NICHT sieht -- und meldete Reissen, wo keines
+    // ist. `S_SEITE` sagt, wohin gemalt wird; gezeigt wird die andere.
+    var vy: u64 = y
+    if kstate.get(state, FB_OFF + S_FLIP) != 0 {
+        let h: u64 = kstate.get(state, FB_OFF + S_HEIGHT)
+        vy = y +% (1 - kstate.get(state, FB_OFF + S_SEITE)) *% h
+    }
+    return __mmio_read32((basis +% vy *% pt +% x *% 4) as *mut u32) as u64
+}
+
 fn get_pixel(state: u64, x: u64, y: u64) -> u64 {
     if x >= kstate.get(state, FB_OFF + S_WIDTH) {
         return 0
@@ -1138,6 +1725,9 @@ fn pixel_a(state: u64, x: u64, y: u64, color: u64, a: u64) {
     if y >= kstate.get(state, FB_OFF + S_HEIGHT) {
         return
     }
+    if y < band_lo(state) {
+        return
+    }
     if a >= 255 {
         kstate.set(state, FB_OFF + S_BLENDS0,
             kstate.get(state, FB_OFF + S_BLENDS0) +% 1)
@@ -1184,6 +1774,9 @@ fn hline_mask(state: u64, x: u64, y: u64, n: u64, color: u64, maske: u64,
     if y >= kstate.get(state, FB_OFF + S_HEIGHT) || x >= w {
         return
     }
+    if y < band_lo(state) {
+        return
+    }
     var len: u64 = n
     if x + len > w {
         len = w - x
@@ -1228,6 +1821,109 @@ fn hline_mask(state: u64, x: u64, y: u64, n: u64, color: u64, maske: u64,
     }
 }
 
+// =====================================================================
+// RUNDE SCHNELLBILD: VIER BILDPUNKTE JE DURCHGANG MIT SSE2
+// =====================================================================
+//
+// GEMESSEN, WARUM DIESE FUNKTION GEBRAUCHT WIRD (`paintbench`, QEMU):
+//
+//     1280x800    fill=442/1000 Takte je Punkt   fill_a=53929/1000
+//     1920x1080   fill=849/1000                  fill_a=53788/1000
+//     3440x1440   fill=1602/1000                 fill_a=62479/1000
+//
+// Das Mischen ist also RUND VIERZIGMAL so teuer wie das Fuellen, und
+// nicht etwa gleich teuer. Der Grund steht in `hline_a`: je Bildpunkt
+// ein Ladebefehl, drei Multiplikationen, drei Divisionen durch 255 und
+// ein Schreibbefehl -- skalar, einer nach dem anderen.
+//
+// SSE2 rechnet dieselbe Formel auf VIER Bildpunkten gleichzeitig. Der
+// Weg ist der uebliche fuer 8-Bit-Farben:
+//
+//     movdqu   vier Bildpunkte (16 Oktette) laden
+//     punpcklbw/punpckhbw mit Null -> je acht 16-Bit-Werte
+//     pmullw   mit a bzw. ia, addieren, +128
+//     das Teilen durch 255 wird zu (t + (t>>8)) >> 8
+//     packuswb zurueck auf acht Oktette, movdqu schreiben
+//
+// WARUM HIER `(t + (t>>8)) >> 8` STEHT UND IN `mix8` DIE DIVISION.
+// `mix8` ist skalar, dort hat die Messung die Division gewinnen lassen
+// (der Kommentar oben sagt es mit Zahlen). In SSE2 gibt es KEINE
+// Ganzzahldivision -- `pmulhuw` mit 0x8081 waere der andere Weg. Die
+// Schiebefassung ist exakt fuer alle 16,7 Mio Tripel (dieselbe Tafel
+// wie oben) und kostet zwei Befehle statt einer nicht vorhandenen
+// Division.
+//
+// DIE UNTERBRECHUNGEN BLEIBEN WAEHREND DES RECHNENS AUS, und das ist
+// kein Schmuck: dieser Kern sichert die Vektorregister NUR beim Wechsel
+// zwischen Ring-3-Prozessen (`fpu.vec_put`/`vec_take`, Runde AVX). Ein
+// Zeitgeber, der mitten in dieser Schleife eine andere Aufgabe
+// einplant, faende xmm0..xmm5 veraendert vor. Die Sperre gilt je
+// BILDZEILE, nicht je Bildpunkt -- bei 3440 Punkten sind das rund
+// 3 Mikrosekunden, und `flush_stripe` sperrt fuer seine 2-MiB-Bloecke
+// laenger.
+//
+// OHNE FREISCHALTUNG GIBT ES KEINEN SIMD-WEG. `fpu.enabled` ist der
+// Riegel; ist er zu (Kernwort `nofpu`), waere schon das erste `movdqu`
+// ein #UD in Ring 0, also im Kern. Dann rechnet die skalare Schleife
+// weiter, und das Bild ist dasselbe -- nur langsamer.
+const SIMD_MIN: u64 = 8 // darunter lohnt der Vorlauf nicht
+
+// Ob der SIMD-Weg benutzt wird. Zwei Bedingungen, und beide muessen
+// abschaltbar sein: die Vektoreinheit MUSS freigeschaltet sein (sonst
+// #UD in Ring 0), und `fbnosimd` nimmt den Weg von Hand heraus -- ohne
+// diesen Schalter gaebe es keine Gegenprobe auf DERSELBEN Maschine.
+fn simd_ok(state: u64) -> bool {
+    if want(state, M_NOSIMD) {
+        return false
+    }
+    return fpu.enabled(state)
+}
+
+fn hline_a_simd(p0: u64, len: u64, color: u64, a: u64) -> u64 {
+    let vier: u64 = len / 4
+    if vier == 0 {
+        return 0
+    }
+    // Die Quellfarbe viermal nebeneinander, die Deckung achtmal als
+    // 16-Bit-Wert -- beides einmal je Bildzeile statt je Bildpunkt.
+    // EIN zusammenhaengendes Feld statt vier einzelner, und der Grund
+    // ist der Uebersetzer: firnc laesst `rbx` in einem asm-Block nicht
+    // zu (es traegt den Rahmen). Mit einem Basiszeiger reicht `rax`
+    // fuer alle vier Werte -- 0 Quelle, 16 Deckung, 32 Gegendeckung,
+    // 48 die 128 der Rundung.
+    var konst: [u64; 8] = [0, 0, 0, 0, 0, 0, 0, 0]
+    let c: u64 = color & 0xFFFFFFFF
+    let ia: u64 = 255 - a
+    let a16: u64 = (a << 48) | (a << 32) | (a << 16) | a
+    let i16: u64 = (ia << 48) | (ia << 32) | (ia << 16) | ia
+    let a128: u64 = (128 << 48) | (128 << 32) | (128 << 16) | 128
+    konst[0] = (c << 32) | c
+    konst[1] = (c << 32) | c
+    konst[2] = a16
+    konst[3] = a16
+    konst[4] = i16
+    konst[5] = i16
+    konst[6] = a128
+    konst[7] = a128
+
+    // xmm4 = Quellfarbe (schon 16-Bit-entfaltet, zweimal),
+    // xmm5 = a, xmm6 = ia, xmm7 = 128, xmm3 = Null.
+    asm("pxor xmm3,xmm3\nmovdqu xmm4,[rax]\nmovdqu xmm5,[rax+16]\nmovdqu xmm6,[rax+32]\nmovdqu xmm7,[rax+48]\nmovdqa xmm8,xmm4\npunpcklbw xmm4,xmm3\npunpckhbw xmm8,xmm3\npmullw xmm4,xmm5\npmullw xmm8,xmm5",
+        in("rax") (&konst[0]) as u64, clobber("memory"))
+    // DIE SCHLEIFE STEHT IM ASM-BLOCK, NICHT IN FIRN. Erste Fassung
+    // rief je VIER Bildpunkte einen eigenen asm-Block: gemessen
+    // faktor=19951/1000 gegen 38470/1000 skalar, also nur Faktor 1,9
+    // statt der erwarteten 4 bis 8. Der Grund ist nicht die Rechnung,
+    // sondern der Rahmen darum -- je Durchgang Registerbelegung,
+    // Speicherbarriere und Schleifenpruefung in Firn, fuer sechzehn
+    // Oktette Nutzarbeit. Mit `dec rcx / jnz` INNERHALB des Blocks
+    // faellt genau das weg.
+    asm("test rcx,rcx\njz 2f\n1:\nmovdqu xmm0,[rdi]\nmovdqa xmm1,xmm0\npunpcklbw xmm0,xmm3\npunpckhbw xmm1,xmm3\npmullw xmm0,xmm6\npmullw xmm1,xmm6\npaddw xmm0,xmm4\npaddw xmm1,xmm8\npaddw xmm0,xmm7\npaddw xmm1,xmm7\nmovdqa xmm2,xmm0\npsrlw xmm2,8\npaddw xmm0,xmm2\npsrlw xmm0,8\nmovdqa xmm2,xmm1\npsrlw xmm2,8\npaddw xmm1,xmm2\npsrlw xmm1,8\npackuswb xmm0,xmm1\nmovdqu [rdi],xmm0\nadd rdi,16\ndec rcx\njnz 1b\n2:",
+        in("rdi") p0, in("rcx") vier,
+        clobber("rdi"), clobber("rcx"), clobber("memory"))
+    return vier * 4
+}
+
 // EINE GEMISCHTE BILDZEILE. Kein `rep stosq`: jeder Bildpunkt haengt von
 // dem ab, was schon da steht. Der Adressvorschub ist aber eine Addition
 // statt einer Multiplikation je Punkt, und die Grenzen werden EINMAL
@@ -1240,6 +1936,9 @@ fn hline_a(state: u64, x: u64, y: u64, n: u64, color: u64, a: u64) {
     }
     let w: u64 = kstate.get(state, FB_OFF + S_WIDTH)
     if y >= kstate.get(state, FB_OFF + S_HEIGHT) || x >= w {
+        return
+    }
+    if y < band_lo(state) {
         return
     }
     var len: u64 = n
@@ -1256,6 +1955,17 @@ fn hline_a(state: u64, x: u64, y: u64, n: u64, color: u64, a: u64) {
     let sb: u64 = color & 0xFF
     var p: u64 = kstate.get(state, FB_OFF + S_DRAW) +% spot(state, x, y)
     var k: u64 = 0
+    // RUNDE SCHNELLBILD: der Vierersprung, solange genug Punkte
+    // uebrig sind. Der Rest geht darunter skalar weiter -- dieselbe
+    // Formel, also dasselbe Bild.
+    if simd_ok(state) && len >= SIMD_MIN {
+        let fl: u64 = arch.irq_save()
+        k = hline_a_simd(p, len, color, a)
+        arch.irq_restore(fl)
+        p = p +% k *% 4
+        kstate.set(state, FB_OFF + S_SIMDPX,
+            kstate.get(state, FB_OFF + S_SIMDPX) +% k)
+    }
     while k < len {
         let alt: u64 = __mmio_read32(p as *mut u32) as u64
         let r: u64 = mix8((alt >> 16) & 0xFF, sr, a, ia)
@@ -1292,10 +2002,15 @@ fn blend_skips(state: u64) -> u64 {
     return kstate.get(state, FB_OFF + S_BLENDS0)
 }
 
+fn simd_px(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_SIMDPX)
+}
+
 fn blend_reset(state: u64) {
     kstate.set(state, FB_OFF + S_BLENDS, 0)
     kstate.set(state, FB_OFF + S_BLENDR, 0)
     kstate.set(state, FB_OFF + S_BLENDS0, 0)
+    kstate.set(state, FB_OFF + S_SIMDPX, 0)
 }
 
 // Eine Bildzeile in einem Rutsch. Der innere Kern jedes Rechtecks und
@@ -1303,6 +2018,12 @@ fn blend_reset(state: u64) {
 fn hline(state: u64, x: u64, y: u64, n: u64, color: u64) {
     let w: u64 = kstate.get(state, FB_OFF + S_WIDTH)
     if y >= kstate.get(state, FB_OFF + S_HEIGHT) || x >= w {
+        return
+    }
+    // RUNDE BLECHDREI: EINE Pruefung je BILDZEILE, nicht je Bildpunkt.
+    // `fill` und `clear` gehen beide hier durch, also auch der Grund des
+    // Fensterservers und das Loeschen der Konsole.
+    if y < band_lo(state) {
         return
     }
     var len: u64 = n
@@ -1425,14 +2146,20 @@ fn blit(state: u64, sx: u64, sy: u64, dx: u64, dy: u64, w: u64, h: u64) {
     let n: u64 = w *% 4
     let worte: u64 = n / 8
     let rest: u64 = n - worte * 8
+    // RUNDE BLECHDREI: das reservierte Band bleibt stehen. Das Rollen
+    // der Textkonsole geht hier durch, und ohne diese Grenze zoege es
+    // die Tafel Zeile fuer Zeile aus dem Bild.
+    let bl: u64 = band_lo(state)
     var r: u64 = 0
     while r < h {
-        let s: u64 = base +% spot(state, sx, sy + r)
-        let d: u64 = base +% spot(state, dx, dy + r)
-        copy_words(d, s, worte)
-        if rest != 0 {
-            __mmio_write32((d +% worte *% 8) as *mut u32,
-                __mmio_read32((s +% worte *% 8) as *mut u32))
+        if dy + r >= bl {
+            let s: u64 = base +% spot(state, sx, sy + r)
+            let d: u64 = base +% spot(state, dx, dy + r)
+            copy_words(d, s, worte)
+            if rest != 0 {
+                __mmio_write32((d +% worte *% 8) as *mut u32,
+                    __mmio_read32((s +% worte *% 8) as *mut u32))
+            }
         }
         r = r + 1
     }
@@ -1495,7 +2222,27 @@ fn flush_stripe(state: u64, lo: u64, hi: u64) {
         if n > ende - off {
             n = ende - off
         }
+        // ============ RUNDE BLECHZWEI: EIN FENSTER, ZWEI SCHREIBER.
+        //
+        // DAS IST DER GRUND FUER JUSTINS DOPPELBILD ("alte und neue
+        // Zeichen an derselben Stelle uebereinander").
+        //
+        // Es gibt GENAU EIN Fenster von 2 MiB, durch das der ganze
+        // Rahmenpuffer gestreift wird, und `slot_remap` biegt es auf
+        // den naechsten Block um. Die Messtafel laeuft seit der Runde
+        // HAENGER AUS DEM ZEITGEBERBEHANDLER und ruft denselben Weg.
+        // Trifft die Unterbrechung eine Aufgabe ZWISCHEN `slot_remap`
+        // und `copy_words`, biegt sie das Fenster auf einen anderen
+        // Block -- und die Aufgabe schreibt ihren Streifen danach an
+        // die FALSCHE Stelle im Bildspeicher. Genau so sieht das aus:
+        // Bruchstuecke einer alten Zeile mitten in einer neuen.
+        //
+        // Umbiegen und Kopieren gehoeren deshalb zusammen. Es sind ein
+        // paar Mikrosekunden mit abgeschalteten Unterbrechungen je
+        // Block, und der Zeitgeber holt sie danach nach.
+        let fl: u64 = arch.irq_save()
         if !slot_remap(state, basis, blk, uc) {
+            arch.irq_restore(fl)
             return
         }
         let dst: u64 = basis +% inner
@@ -1508,7 +2255,31 @@ fn flush_stripe(state: u64, lo: u64, hi: u64) {
                 __mmio_read32((src +% i) as *mut u32))
             i = i + 4
         }
+        arch.barrier_write()
+        arch.irq_restore(fl)
         off = off +% n
+    }
+    // RUNDE ZWISCHENSPEICHER: WC-Schreibzugriffe sind schwach geordnet
+    // und sammeln sich in den Schreibpuffern. Ohne dieses `sfence` steht
+    // ein Streifen erst dann auf dem Schirm, wenn zufaellig genug
+    // nachkommt, um die Puffer zu leeren -- bei einer kleinen Aenderung
+    // also nie. Es kostet nichts Messbares und steht deshalb
+    // bedingungslos hier, auch fuer WB und UC.
+    arch.barrier_write()
+    nachspuelen(state)
+}
+
+// ================= RUNDE BLECHEINGABE: DER SCHALTER `fbflush`.
+//
+// Justins zweiter, von `fbuc` UNABHAENGIGER Beweis derselben Ursache.
+// `sfence` ordnet nur -- es raeumt keine Zeile aus dem Zwischenspeicher.
+// Steht der Rahmenpuffer WRITE-BACK, liegt eine kleine Aenderung danach
+// weiter im L3 und geht erst bei einer Verdraengung ueber PCIe.
+// `wbinvd` erzwingt genau das. Es kostet Millisekunden und ist deshalb
+// AUS, solange niemand `fbflush` sagt.
+fn nachspuelen(state: u64) {
+    if kstate.mode_on(state, kstate.M_FBFLUSH) {
+        arch.cache_writeback()
     }
 }
 
@@ -1527,8 +2298,17 @@ fn flush(state: u64) {
         present(state)
         return
     }
+    // RUNDE ECHTHARDWARE-6: LESEN UND WEGNEHMEN IN EINEM ZUG.
+    // Stuende das Lesen ausserhalb der Sperre, gaebe es dasselbe
+    // Fenster nur eine Zeile weiter oben: eine Anmeldung zwischen dem
+    // Lesen und dem Wegnehmen waere gelesen worden, ohne uebertragen
+    // zu werden -- und danach geloescht.
+    let flr: u64 = arch.irq_save()
     var lo: u64 = kstate.get(state, FB_OFF + S_DIRTY_LO)
     var hi: u64 = kstate.get(state, FB_OFF + S_DIRTY_HI)
+    kstate.set(state, FB_OFF + S_DIRTY_LO, 0)
+    kstate.set(state, FB_OFF + S_DIRTY_HI, 0)
+    arch.irq_restore(flr)
     if hi <= lo {
         return
     }
@@ -1537,16 +2317,50 @@ fn flush(state: u64) {
         hi = h
     }
     if kstate.get(state, FB_OFF + S_STRIPE) != 0 {
+        // ======================================== RUNDE ECHTHARDWARE-6
+        // DIE SCHMUTZMARKE WIRD GENOMMEN, NICHT NACHTRAEGLICH GELOESCHT.
+        //
+        // JUSTINS KAMMSTREIFEN, UND WARUM DIE VORRUNDE SIE NICHT
+        // GEFUNDEN HAT.
+        //
+        // Hier stand: Bereich lesen -> `flush_stripe` -> Bereich auf
+        // null setzen. Dazwischen laufen in `flush_stripe` die
+        // Unterbrechungen wieder an (die Sperre dort umfasst nur EINEN
+        // 2-MiB-Block, absichtlich -- eine Sperre ueber den ganzen
+        // Schirm waeren Millisekunden). In genau diesem Fenster malt
+        // die Messtafel aus dem ZEITGEBER (`gfx.tafel_tick`, seit
+        // Runde HAENGER) und ruft `dirty` fuer ihre Zeilen.
+        //
+        // Die beiden Zeilen darunter haben diese Marke dann GELOESCHT.
+        // Was die Tafel gerade angemeldet hatte, wurde nie uebertragen
+        // -- die Zeile blieb im Zweitpuffer stehen, auf dem Schirm
+        // blieb der ALTE Inhalt. Das ist Zeile fuer Zeile das Bild,
+        // das Justin fotografiert hat: Kammstreifen entlang der
+        // Kanten, die beim Ziehen und beim Groessenaendern entstehen,
+        // also GENAU DANN, wenn viele Zeilen schmutzig werden und der
+        // Schub lange genug dauert, um einen Zeitgeberschlag zu
+        // erwischen.
+        //
+        // DASS DER SCHATTEN VERDAECHTIG WAR, IST NACHVOLLZIEHBAR: er
+        // macht den schmutzigen Bereich um `shadow_r` groesser, also
+        // den Schub laenger und das Fenster fuer den Verlust breiter.
+        // Er ist aber nicht die Ursache, sondern verschlimmert sie.
+        // Deshalb hat `sfence` auch nichts geholfen -- es ordnet
+        // Schreibzugriffe, und hier ging kein Schreibzugriff verloren,
+        // sondern eine ANMELDUNG.
+        //
+        // DIE REGEL: WER EINEN BEREICH UEBERTRAEGT, NIMMT IHN VORHER
+        // WEG. Was danach angemeldet wird, gehoert dem naechsten
+        // Durchlauf und wird nicht mitgeloescht.
         flush_stripe(state, lo, hi)
-        kstate.set(state, FB_OFF + S_DIRTY_LO, 0)
-        kstate.set(state, FB_OFF + S_DIRTY_HI, 0)
         kstate.add(state, FB_OFF + S_FLUSHES, 1)
         return
     }
     let pt: u64 = kstate.get(state, FB_OFF + S_PITCH)
     let von: u64 = lo *% pt
     let n: u64 = (hi - lo) *% pt
-    let dst: u64 = kstate.get(state, FB_OFF + S_ADDR) +% von
+    // RUNDE VSYNC: dieselbe Weiche wie in `flush_rect`.
+    let dst: u64 = draw_base(state) +% von
     let src: u64 = b +% von
     let worte: u64 = n / 8
     copy_words(dst, src, worte)
@@ -1556,8 +2370,28 @@ fn flush(state: u64) {
             __mmio_read32((src +% i) as *mut u32))
         i = i + 4
     }
-    kstate.set(state, FB_OFF + S_DIRTY_LO, 0)
-    kstate.set(state, FB_OFF + S_DIRTY_HI, 0)
+    // ============ RUNDE BLECHZWEI: HIER FEHLTE DAS `sfence`.
+    //
+    // Die Vorrunde hat es an `flush_stripe` gehaengt und diesen Pfad
+    // uebersehen. WC-Schreibzugriffe sind schwach geordnet und sammeln
+    // sich in den Schreibpuffern; ohne Zaun steht ein Streifen erst
+    // dann auf dem Schirm, wenn zufaellig genug nachkommt. Bei einer
+    // grossen Uebertragung faellt das nicht auf (die Puffer laufen
+    // ohnehin ueber), bei einer kleinen -- Taskleiste, Messtafel, eine
+    // Zeile Text -- ist es der ganze Unterschied.
+    //
+    // Justins Brett faehrt im Streifenbetrieb (19,8 MB Puffer gegen ein
+    // Fenster von 8 x 2 MiB), also lief bei IHM der andere Pfad. Ein
+    // Fehler bleibt es trotzdem, und auf 1920x1080 ist es GENAU dieser
+    // Pfad.
+    arch.barrier_write()
+    nachspuelen(state)
+    // RUNDE ECHTHARDWARE-6: siehe die lange Begruendung im
+    // Streifenzweig oben. Auf dem geraden Weg ist das Fenster kleiner
+    // (keine Sperre, kein Umbiegen), aber es ist da: `copy_words` ueber
+    // einen ganzen Schirm laeuft lange genug fuer einen
+    // Zeitgeberschlag. Was waehrenddessen angemeldet wurde, darf nicht
+    // verlorengehen.
     kstate.add(state, FB_OFF + S_FLUSHES, 1)
 }
 
@@ -1647,7 +2481,9 @@ fn cell_x(state: u64) -> u64 {
 }
 
 fn cell_y(state: u64) -> u64 {
-    return kstate.get(state, FB_OFF + S_CY) *% (font.GLYPH_H * fscale(state))
+    let bd: u64 = kstate.get(state, FB_OFF + S_BAND)
+    let zh: u64 = font.GLYPH_H * fscale(state)
+    return bd +% kstate.get(state, FB_OFF + S_CY) *% zh
 }
 
 // Die Textmarke: zwei Bildpunktzeilen am unteren Rand der Zelle.
@@ -1687,6 +2523,13 @@ fn mark(state: u64, on: bool) {
 fn glyph(state: u64, ch: u64) {
     let px: u64 = cell_x(state)
     let py: u64 = cell_y(state)
+    // RUNDE BLECHDREI: der schnelle Weg schreibt an `pixel` vorbei --
+    // also steht die Grenze des Bandes hier noch einmal. `cell_y`
+    // rechnet das Band bereits ein; das hier faengt den ab, der die
+    // Schreibmarke von aussen verstellt hat.
+    if py < band_lo(state) {
+        return
+    }
     let fg: u64 = kstate.get(state, FB_OFF + S_FG)
     let bg: u64 = kstate.get(state, FB_OFF + S_BG)
     let base: u64 = state + FONT_OFF
@@ -1766,9 +2609,16 @@ fn scroll(state: u64) {
         clear(state, kstate.get(state, FB_OFF + S_BG))
         return
     }
+    // RUNDE BLECHDREI: die Konsole rollt UNTERHALB des Bandes.
+    let bd: u64 = kstate.get(state, FB_OFF + S_BAND)
     let rest: u64 = kstate.get(state, FB_OFF + S_ROWS) *% zh - zh
-    blit(state, 0, zh, 0, 0, w, rest)
-    fill(state, 0, rest, w, h - rest, kstate.get(state, FB_OFF + S_BG))
+    if bd + rest + zh > h {
+        clear(state, kstate.get(state, FB_OFF + S_BG))
+        return
+    }
+    blit(state, 0, bd + zh, 0, bd, w, rest)
+    fill(state, 0, bd + rest, w, h - bd - rest,
+        kstate.get(state, FB_OFF + S_BG))
     dirty_all(state)
     kstate.add(state, FB_OFF + S_SCROLLS, 1)
 }
@@ -1957,8 +2807,13 @@ fn parse(state: u64, cmd: u64) {
     var w_pat: [u8; 7] = "fbtest\0"
     var w_usr: [u8; 7] = "fbuser\0"
     var w_res: [u8; 7] = "fbres=\0"
+    var w_pad: [u8; 7] = "fbpad=\0"
+    var w_wb: [u8; 5] = "fbwb\0"
+    var w_nosimd: [u8; 9] = "fbnosimd\0"
+    var w_str: [u8; 12] = "fbstreifen\0\0"
     var m: u64 = 0
     if cmd != 0 {
+        pad_setzen(zahl_hinter(state, cmd, (&w_pad[0]) as u64, 6))
         if find(cmd, (&w_gfx[0]) as u64, 3) != 0 {
             m = m | M_GFX
         }
@@ -1967,6 +2822,15 @@ fn parse(state: u64, cmd: u64) {
         }
         if find(cmd, (&w_uc[0]) as u64, 4) != 0 {
             m = m | M_UC
+        }
+        if find(cmd, (&w_wb[0]) as u64, 4) != 0 {
+            m = m | M_WB
+        }
+        if find(cmd, (&w_str[0]) as u64, 10) != 0 {
+            m = m | M_STRIPE
+        }
+        if find(cmd, (&w_nosimd[0]) as u64, 8) != 0 {
+            m = m | M_NOSIMD
         }
         if find(cmd, (&w_big[0]) as u64, 5) != 0 {
             m = m | M_BIG
@@ -1982,6 +2846,14 @@ fn parse(state: u64, cmd: u64) {
         }
         if find(cmd, (&w_usr[0]) as u64, 6) != 0 {
             m = m | M_USER
+        }
+        var w_flip: [u8; 5] = "flip\0"
+        var w_nofl: [u8; 7] = "noflip\0"
+        if find(cmd, (&w_flip[0]) as u64, 4) != 0 {
+            m = m | M_FLIP
+        }
+        if find(cmd, (&w_nofl[0]) as u64, 6) != 0 {
+            m = m | M_NOFLIP
         }
     }
     if find(cmd, (&w_res[0]) as u64, 6) != 0 {
@@ -2069,6 +2941,42 @@ fn parse_zahlenpaar(state: u64, cmd: u64, wort: u64, wlen: u64) -> bool {
     kstate.set(state, FB_OFF + S_RESW, w)
     kstate.set(state, FB_OFF + S_RESH, h)
     return true
+}
+
+// ====================================================== RUNDE VIELKERN
+// "fbpad=<n>" -- EINE ZEILENBREITE, DIE GROESSER IST ALS DAS BILD.
+//
+// WOZU. Justin berichtet seit mehreren Runden, dass im FENSTERINHALT
+// bei 3440x1440 die ersten Zeichen jeder Zeile fehlen, waehrend der
+// Rahmen richtig sitzt. Im Pruefstand ist das nie aufgetreten -- und
+// der Grund dafuer steht in der eigenen Startzeile des Kerns:
+//
+//     fb: 3440x1440x32  pitch=13760      (13760 = 3440 * 4)
+//
+// Unter QEMU ist die Zeilenbreite GENAU die Bildbreite mal vier. Auf
+// echter Firmware ist sie das oft NICHT: eine GOP meldet fuer 3440
+// Bildpunkte gern 3456 je Zeile, weil die Karte ausrichtet. Jede
+// Rechnung, die `breite * 4` schreibt, wo `zeilenbreite` stehen
+// muesste, ist damit im Pruefstand richtig und auf Justins Brett
+// falsch -- Zeile fuer Zeile um genau den Unterschied.
+//
+// `fbpad=<n>` stellt diesen Fall her, ohne echte Hardware: die
+// gemeldete BREITE wird um n Bildpunkte verkleinert, die Zeilenbreite
+// bleibt. Damit gilt pitch > breite * 4, und es wird kein Oktett
+// ausserhalb des echten Rahmenpuffers beschrieben.
+fn zahl_hinter(state: u64, cmd: u64, wort: u64, wlen: u64) -> u64 {
+    if cmd == 0 {
+        return 0
+    }
+    let a: u64 = find(cmd, wort, wlen)
+    if a == 0 {
+        return 0
+    }
+    let p1: u64 = a + wlen
+    if ziffern_ab(p1) == 0 {
+        return 0
+    }
+    return zahl_bei(p1)
 }
 
 fn mode(state: u64) -> u64 {
@@ -2420,10 +3328,37 @@ fn slot_remap(state: u64, virt: u64, block: u64, uncached: bool) -> bool {
     if pd == 0 {
         return false
     }
-    var bits: u64 = PAGE_PRESENT | PAGE_WRITE | PAGE_HUGE
-    if uncached {
-        bits = bits | PAGE_PCD | PAGE_PWT
-    }
+    // ================================================ RUNDE ECHTHARDWARE-5
+    // ERST DIE SCHREIBPUFFER LEEREN, DANN UMHAENGEN.
+    //
+    // Justins Befund C: beim Verschieben eines Fensters bleiben lange
+    // waagerechte Kammstreifen ueber den halben Schirm stehen.
+    //
+    // HIER ENTSTEHEN SIE. Der Streifenbetrieb schiebt den Rahmenpuffer
+    // in 2-MiB-Scheiben durch EIN Fenster: schreiben, umhaengen,
+    // schreiben, umhaengen. Der Rahmenpuffer steht auf Justins Brett
+    // WRITE-COMBINING (seine Tafel Zeile 9: `FB WC`), und
+    // write-combining heisst, dass Schreibvorgaenge in einem Puffer
+    // der CPU LIEGENBLEIBEN und spaeter als Block hinausgehen.
+    //
+    // Wird der Platz umgehaengt, waehrend noch etwas im WC-Puffer
+    // steht, geht dieser Rest an dieselbe VIRTUELLE Adresse -- die
+    // jetzt aber auf einen ANDEREN Block des Bildspeichers zeigt.
+    // Bildpunkte der einen Bildschirmzeile landen so in einer ganz
+    // anderen: genau das Kammmuster, und genau deshalb ueber die halbe
+    // Breite.
+    //
+    // In QEMU tritt es nicht auf -- dort gibt es keine
+    // WC-Puffer-Semantik, und deshalb hat kein Laeufer dieser Runden
+    // es je gesehen. Das `sfence` kostet auf dem geraden Weg nichts
+    // (der Puffer ist dann ohnehin leer) und ist die einzige Stelle,
+    // an der die Reihenfolge ueberhaupt zu retten ist.
+    //
+    // DASSELBE gilt fuer `unmap_slot` und fuer den Weg darunter, der
+    // die Bits eines Platzes aendert: jede Aenderung an der
+    // Seitentafel eines WC-Bereichs braucht sie davor.
+    arch.barrier_write()
+    let bits: u64 = fb_bits(state, uncached)
     __mmio_write64((pd + (WIN_FIRST + i) * 8) as *mut u64, block | bits)
     kstate.set(state, WIN_LIST + i * 8, block + 1)
     let c: u64 = asm("mov rax, cr3", out("rax"))
@@ -2443,6 +3378,10 @@ fn unmap_slot(state: u64, virt: u64) {
     if pd == 0 {
         return
     }
+    // RUNDE ECHTHARDWARE-5: derselbe Grund wie in `slot_remap` --
+    // ein Platz, der abgehaengt wird, waehrend noch WC-Schreibvorgaenge
+    // auf ihn unterwegs sind, schickt sie irgendwohin.
+    arch.barrier_write()
     __mmio_write64((pd + (WIN_FIRST + i) * 8) as *mut u64, 0)
     kstate.set(state, WIN_LIST + i * 8, 0)
     let c: u64 = asm("mov rax, cr3", out("rax"))
@@ -3377,4 +4316,317 @@ fn selftest4(state: u64) -> u64 {
 
 fn selftest4_max() -> u64 {
     return 12
+}
+
+
+// ================================================ RUNDE BLECHEINGABE
+// ============ DER HERZSCHLAG: ZWEI FELDER, ZWEI VOELLIG GETRENNTE WEGE
+//
+// Justin steht vor einem Rechner, dessen Bild seit dem ersten Vollbild
+// steht: die Uhr der Taskleiste zeigte um 14:51 und um 14:54 dieselbe
+// Minute. Damit sind genau zwei Erklaerungen uebrig, und sie sind mit
+// blossem Auge zu trennen -- wenn es etwas gibt, das sich bewegt:
+//
+//   (A) DER ZEITGEBER STEHT (oder der Kern haengt im Behandler). Dann
+//       weckt niemand die Schlaefer, die Taskleiste und `wait_wm`
+//       schlafen fuer immer, und nichts wird mehr gemalt.
+//   (B) DER ZEITGEBER LAEUFT, es wird gemalt -- aber die Schreibzugriffe
+//       erreichen den Rahmenpuffer der Karte nicht (Zwischenspeicher).
+//
+// DIE ZWEI FELDER STEHEN AM RECHTEN RAND, SENKRECHT MITTIG, und beide
+// werden AUS DEM ZEITGEBERBEHANDLER gemalt -- an Fensterserver,
+// Schreibtischschleife und Ring 3 vorbei:
+//
+//   FELD LINKS  (A): ueber den NORMALEN Weg -- Zweitpuffer, Schmutz,
+//                    `flush`. Genau der Weg, den Taskleiste und
+//                    Messtafel nehmen.
+//   FELD RECHTS (B): DIREKT in das Fenster der Karte (`S_ADDR`), am
+//                    Zweitpuffer und am `flush` vorbei, mit `sfence`
+//                    und -- mit `fbflush` -- `wbinvd` dahinter.
+//
+// WIE JUSTIN DAS LIEST:
+//   beide blinken      -> Zeitgeber laeuft, Bildweg in Ordnung. Dann
+//                         liegt der Fehler ueber uns (Schleife, Ring 3).
+//   nur rechts blinkt  -> Zeitgeber laeuft, aber der NORMALE Bildweg
+//                         kommt nicht an: (B), Zwischenspeicher.
+//   keines blinkt      -> (A): der Zeitgeber schlaegt nicht mehr, oder
+//                         der Kern haengt in seinem Behandler.
+//   nur links blinkt   -> die direkte Abbildung stimmt nicht (Streifen).
+//
+// Das ist der einzige Bildkanal, der weder Fensterserver noch
+// Schreibtischschleife noch serielle Leitung braucht.
+
+const HERZ_W: u64 = 56
+const HERZ_H: u64 = 56
+
+fn herz_x(state: u64, feld: u64) -> u64 {
+    let w: u64 = kstate.get(state, FB_OFF + S_WIDTH)
+    if w < 320 {
+        return 0
+    }
+    if feld == 0 {
+        return w - 136
+    }
+    return w - 68
+}
+
+fn herz_y(state: u64) -> u64 {
+    let h: u64 = kstate.get(state, FB_OFF + S_HEIGHT)
+    if h < 2 * HERZ_H {
+        return 0
+    }
+    return h / 2 - HERZ_H / 2
+}
+
+// EIN FLUSH FUER GENAU DIESE ZEILEN, ohne den Schmutzbereich des
+// Fensterservers anzufassen. `flush` setzt DIRTY_LO/HI auf null; aus dem
+// Zeitgeber gerufen wuerde es dem gerade zusammensetzenden Fensterserver
+// seinen Schmutz unter den Fuessen wegziehen und ein halb gemaltes Bild
+// stehen lassen. Deshalb ein eigener Weg mit ausdruecklichen Grenzen.
+fn flush_rows(state: u64, lo: u64, hi: u64) {
+    let b: u64 = kstate.get(state, FB_OFF + S_BACK)
+    if b == 0 {
+        return
+    }
+    if transformed(state) {
+        present(state)
+        return
+    }
+    var o: u64 = lo
+    var u: u64 = hi
+    let h: u64 = kstate.get(state, FB_OFF + S_HEIGHT)
+    if u > h {
+        u = h
+    }
+    if u <= o {
+        return
+    }
+    if kstate.get(state, FB_OFF + S_STRIPE) != 0 {
+        flush_stripe(state, o, u)
+        return
+    }
+    let pt: u64 = kstate.get(state, FB_OFF + S_PITCH)
+    let von: u64 = o *% pt
+    let n: u64 = (u - o) *% pt
+    // RUNDE VSYNC: auch dieser Weg schreibt in die zu MALENDE Haelfte.
+    let dst: u64 = draw_base(state) +% von
+    let src: u64 = b +% von
+    copy_words(dst, src, n / 8)
+    arch.barrier_write()
+    nachspuelen(state)
+}
+
+// `feld` 0 = der normale Weg, 1 = der direkte. `an` 1 = hell, 0 = dunkel.
+fn herz(state: u64, feld: u64, an: u64) {
+    if kstate.get(state, FB_OFF + S_READY) == 0 {
+        return
+    }
+    let x0: u64 = herz_x(state, feld)
+    let y0: u64 = herz_y(state)
+    if x0 == 0 || y0 == 0 {
+        return
+    }
+    // Zwei verschiedene Farben, damit auf einem Foto ohne Zweifel
+    // feststeht, welches Feld gerade leuchtet.
+    var hell: u64 = rgb(state, 0x00, 0xFF, 0x66) // links: gruen
+    if feld == 1 {
+        hell = rgb(state, 0xFF, 0xE0, 0x00) // rechts: gelb
+    }
+    var farbe: u64 = rgb(state, 0x10, 0x10, 0x10)
+    if an != 0 {
+        farbe = hell
+    }
+    if feld == 0 {
+        // DER NORMALE WEG. Genau der, den die Taskleiste nimmt.
+        // RUNDE BLECHZWEI: `flush_rect` statt `flush_rows`. Volle
+        // Bildzeilen waren 56 * 3440 * 4 = 770 KiB je Umlegen -- in UC
+        // sind das rund acht Millisekunden IM ZEITGEBERBEHANDLER,
+        // viermal je Sekunde. Das Rechteck ist 56 * 56 * 4 = 12 KiB.
+        fill(state, x0, y0, HERZ_W, HERZ_H, farbe)
+        flush_rect(state, x0, y0, HERZ_W, HERZ_H)
+        return
+    }
+    // DER DIREKTE WEG. In das Fenster der Karte, am Zweitpuffer vorbei.
+    // Im Streifenbetrieb ist `S_ADDR` nur EINE Scheibe des Puffers --
+    // dort waere eine feste Adresse schlicht die falsche Stelle, also
+    // bleibt es in diesem Fall beim normalen Weg (und Justin sieht
+    // zwei gleich blinkende Felder, was ebenfalls eine Aussage ist).
+    if kstate.get(state, FB_OFF + S_STRIPE) != 0 {
+        fill(state, x0, y0, HERZ_W, HERZ_H, farbe)
+        flush_rect(state, x0, y0, HERZ_W, HERZ_H)
+        return
+    }
+    // ============ GEMESSEN, UND DESHALB STEHT DIESE ZEILE HIER.
+    //
+    // Im ersten Lauf blinkte das linke Feld sauber und das rechte zeigte
+    // fast immer den SCHREIBTISCHGRUND (8,14,32 statt 255,224,0) --
+    // sechzehn Bildschirmfotos im Abstand von 0,4 s haben das gezeigt.
+    // Der Grund: das rechte Feld schreibt NUR auf die Karte, im
+    // Zweitpuffer steht an seiner Stelle weiter der Grund. Das naechste
+    // `flush` -- egal von wem -- kopiert genau diesen Grund darueber.
+    //
+    // Also steht der Block JETZT AUCH IM ZWEITPUFFER. Kein `flush`
+    // dazu: das waere der normale Weg, und den misst das linke Feld.
+    // Damit gilt:
+    //   normaler Weg heil  -> beide Felder blinken
+    //   normaler Weg tot   -> nur das rechte blinkt (der direkte Weg)
+    //   Zeitgeber tot      -> keines blinkt
+    // ...und der Grund kann das rechte Feld nicht mehr zudecken.
+    fill(state, x0, y0, HERZ_W, HERZ_H, farbe)
+    let basis: u64 = draw_base(state)
+    if basis == 0 {
+        return
+    }
+    let pt: u64 = kstate.get(state, FB_OFF + S_PITCH)
+    var r: u64 = 0
+    while r < HERZ_H {
+        let zeile: u64 = basis +% (y0 + r) *% pt +% x0 *% 4
+        var c: u64 = 0
+        while c < HERZ_W {
+            __mmio_write32((zeile +% c * 4) as *mut u32, farbe as u32)
+            c = c + 1
+        }
+        r = r + 1
+    }
+    arch.barrier_write()
+    nachspuelen(state)
+}
+
+
+// ================================================== RUNDE BLECHZWEI
+// ============ NUR EIN RECHTECK UEBERTRAGEN, NICHT GANZE BILDZEILEN
+//
+// GEMESSEN AUF JUSTINS BRETT (Menueeintrag `fbuc`, drei Fotos im
+// Minutenabstand): "8 TAKT IRQ 130 MAL 13 ... IRQ 610 MAL 61" -- die
+// Messtafel malt zehnmal je Sekunde, und sie malte bis zu dieser Runde
+// 582 VOLLE BILDZEILEN: 582 * 3440 * 4 = 8,0 MB. Bei der in der
+// Vorrunde gemessenen UC-Rate (19,8 MB in 200 ms) sind das rund
+// 80 ms JE ANSTRICH -- 80 % der Rechenzeit im Zeitgeberbehandler, mit
+// abgeschalteten Unterbrechungen. Dass in derselben Messung `LOOP 0`
+// steht (die Schreibtischschleife kam nie durch), ist damit kein
+// Zufall mehr, sondern ein Verdacht mit einer Zahl dahinter.
+//
+// Der Text der Tafel ist 30 Zeichen breit. Das Rechteck ist damit rund
+// ein Fuenftel der Bildbreite, und der Anstrich kostet ein Fuenftel.
+fn flush_rect(state: u64, x: u64, y: u64, w: u64, h: u64) {
+    let b: u64 = kstate.get(state, FB_OFF + S_BACK)
+    if b == 0 {
+        return
+    }
+    if transformed(state) {
+        present(state)
+        return
+    }
+    let bw: u64 = kstate.get(state, FB_OFF + S_WIDTH)
+    let bh: u64 = kstate.get(state, FB_OFF + S_HEIGHT)
+    if x >= bw || y >= bh {
+        return
+    }
+    var ww: u64 = w
+    if x + ww > bw {
+        ww = bw - x
+    }
+    var hh: u64 = h
+    if y + hh > bh {
+        hh = bh - y
+    }
+    if ww == 0 || hh == 0 {
+        return
+    }
+    let pt: u64 = kstate.get(state, FB_OFF + S_PITCH)
+    let n: u64 = ww *% 4
+    if kstate.get(state, FB_OFF + S_STRIPE) != 0 {
+        let basis: u64 = kstate.get(state, FB_OFF + S_SLOTV)
+        let uc: bool = kstate.get(state, FB_OFF + S_UNCACHED) != 0
+        let phys0: u64 = kstate.get(state, FB_OFF + S_PHYS)
+        var r: u64 = 0
+        while r < hh {
+            let off: u64 = (y + r) *% pt +% x *% 4
+            let p: u64 = phys0 +% off
+            let blk: u64 = p & (~(HUGE_SIZE - 1))
+            let inner: u64 = p - blk
+            // Eine Zeile passt immer in einen Block, solange sie
+            // schmaler als 2 MiB ist -- sonst wird sie hier ausgelassen
+            // und der volle Weg macht sie beim naechsten Bild mit.
+            if inner + n <= HUGE_SIZE {
+                let fl: u64 = arch.irq_save()
+                if slot_remap(state, basis, blk, uc) {
+                    copy_words(basis +% inner, b +% off, n / 8)
+                    var k: u64 = (n / 8) * 8
+                    while k + 4 <= n {
+                        __mmio_write32((basis +% inner +% k) as *mut u32,
+                            __mmio_read32((b +% off +% k) as *mut u32))
+                        k = k + 4
+                    }
+                    arch.barrier_write()
+                }
+                arch.irq_restore(fl)
+            }
+            r = r + 1
+        }
+        nachspuelen(state)
+        return
+    }
+    // RUNDE VSYNC: BEI SEITENUMSCHALTUNG GEHT DIE KOPIE IN DIE
+    // HAELFTE, DIE GERADE NICHT GEZEIGT WIRD. Genau deshalb darf sie
+    // hier ruhig zeilenweise laufen: niemand sieht sie. Sichtbar wird
+    // sie erst mit `flip`, und das ist EIN Registerschreib.
+    let basis: u64 = draw_base(state)
+    var r2: u64 = 0
+    while r2 < hh {
+        let off: u64 = (y + r2) *% pt +% x *% 4
+        copy_words(basis +% off, b +% off, n / 8)
+        var k: u64 = (n / 8) * 8
+        while k + 4 <= n {
+            __mmio_write32((basis +% off +% k) as *mut u32,
+                __mmio_read32((b +% off +% k) as *mut u32))
+            k = k + 4
+        }
+        r2 = r2 + 1
+    }
+    arch.barrier_write()
+    nachspuelen(state)
+}
+
+// ============ DIE ABBILDUNGSART, AUS DER SEITENTAFEL SELBST GELESEN
+//
+// Bis zu dieser Runde stand auf der Messtafel `FB WC` -- und das war
+// eine ABSICHT (`S_WC`), keine Messung: der Wert sagt nur, dass
+// `pat_setup` zurueckgelesen hat, nicht, welche Bits wirklich in der
+// Seitentafel stehen. Genau diese Luecke ist der Grund, warum drei
+// Runden lang niemand sagen konnte, ob Write-Combining bei Justin
+// ueberhaupt greift.
+//
+// `pde_roh` liest den ECHTEN Eintrag des Fensterplatzes zurueck. Die
+// unteren Bits sind die Antwort, und sie sind aus zwei Metern lesbar:
+//
+// GEMESSEN in QEMU, alle drei Betriebsarten nacheinander (das A- und
+// das D-Bit setzt die Maschine selbst dazu, deshalb E3 und nicht 83):
+//   00E3 -> WRITE-BACK       (der stille Fall: bleibt im Speicher liegen)
+//   10E3 -> WRITE-COMBINING  (Bit 12, die PAT-Stelle, ist gesetzt)
+//   00FB -> UNCACHED         (Bit 3 PWT und Bit 4 PCD sind gesetzt)
+//
+// `pat_roh` gibt das MSR dazu: Stelle 4 (Oktett 4, also Bits 32..39)
+// muss 01 sein, sonst ist das PAT-Bit oben wirkungslos.
+fn pde_roh(state: u64) -> u64 {
+    let pd: u64 = kernel_pd(state)
+    if pd == 0 {
+        return 0
+    }
+    let s0: u64 = kstate.get(state, FB_OFF + S_SLOT0)
+    if s0 == 0 {
+        return 0
+    }
+    return __mmio_read64((pd + (WIN_FIRST + s0 - 1) * 8) as *mut u64)
+}
+
+fn pat_roh(state: u64) -> u64 {
+    return msr.rd0(state, IA32_PAT)
+}
+
+// Wie viele 2-MiB-Kacheln der Puffer braucht -- und damit, warum er im
+// Streifenbetrieb laeuft: WIN_SLOTS sind acht, Justins 3440x1440x4 sind
+// 19,8 MB, also zehn Kacheln. Zehn passen nicht in acht.
+fn stripe_slots(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_HUGES)
 }
