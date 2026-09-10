@@ -1120,6 +1120,13 @@ fn step() -> bool {
             say((&s_y[0 as usize]) as u64)
             ulib.sayn((d >> 16) & 0xFFFF)
             ulib.nl()
+            // RUNDE ECHTHARDWARE-6: die gedrueckte Kachel merken,
+            // BEVOR `click` sie umschaltet -- danach ist der Zeiger
+            // vielleicht schon woanders.
+            if druck_setzen(tile_at((d >> 32) & 0xFFFF,
+                (d >> 16) & 0xFFFF)) {
+                changed = true
+            }
             click((d >> 32) & 0xFFFF, (d >> 16) & 0xFFFF)
             zieht = 1
             changed = true
@@ -1151,8 +1158,18 @@ fn step() -> bool {
             if (d & 0xFFFF & 1) == 0 {
                 zieht = 0
             }
+            // RUNDE ECHTHARDWARE-6: der Zeigerzustand. Nur eine
+            // ECHTE Aenderung malt neu -- sonst waere jede
+            // Mausbewegung ein voller Anstrich des Panels.
+            if hover_setzen(tile_at((d >> 32) & 0xFFFF,
+                (d >> 16) & 0xFFFF)) {
+                changed = true
+            }
         } else if typ == wlibc.EV_UP {
             zieht = 0
+            if druck_setzen(99) {
+                changed = true
+            }
         } else if typ == wlibc.EV_CLOSE {
             shut((&s_esc[0 as usize]) as u64)
             return true
@@ -1217,6 +1234,65 @@ fn step() -> bool {
 }
 
 // ---------------------------------------------------------- the clicks
+
+// ============================================== RUNDE ECHTHARDWARE-6
+// DIE KACHELN BEKOMMEN EINEN ZEIGER- UND EINEN DRUCKZUSTAND.
+//
+// Justin: die Fensterknoepfe "gehen super" mit Rueckmeldung, die
+// Knoepfe im Kontrollzentrum haben GAR KEINE Hervorhebung.
+//
+// Er hat auch gleich nachgesehen, wo es liegt, und er hat recht:
+// `wlib.paint_button` (wlib.fi) kann die drei Zustaende laengst --
+// F_PRESSED -> T_BTNDN, F_HOVER -> T_BTNHI, sonst T_BTN. Diese Datei
+// benutzt `paint_button` aber gar nicht: sie malt ihre Kacheln selbst
+// mit `mal_tafel` und kannte genau ZWEI Zustaende, an und aus.
+//
+// WARUM NICHT EINFACH AUF `paint_button` UMSTELLEN: eine Kachel ist
+// kein Knopf. Sie traegt ein Symbol, eine Titelzeile UND eine
+// Zustandszeile, sie hat einen Ein-Zustand mit eigener Farbe (T_SEL),
+// und ihre zwei Grundlinien sind in der Vorrunde muehsam auf das
+// Raster gerechnet worden. `paint_button` malt einen Knopf mit EINER
+// Beschriftung. Was fehlte, waren nicht die Zeichenroutinen, sondern
+// die ZUSTAENDE -- und die holt sich diese Datei jetzt aus denselben
+// Themenfarben, die `paint_button` benutzt. Ein Erscheinungsbild,
+// zwei Zeichner, dieselbe Tabelle.
+//
+// N_TILE + 1 ist "keine": 0 waere die erste Kachel.
+static mut hov_tile: u64 = 99
+static mut dn_tile: u64 = 99
+
+fn tile_at(x: u64, y: u64) -> u64 {
+    var sl: u64 = 0
+    while sl < N_TILE {
+        let tx: u64 = tile_rect_x(sl)
+        let ty: u64 = tile_rect_y(sl)
+        if x >= tx && x < tx + TW() && y >= ty && y < ty + TH() {
+            return sl
+        }
+        sl = sl + 1
+    }
+    return 99
+}
+
+// Der Zeiger ist gewandert. Gibt zurueck, ob sich dadurch etwas
+// GEAENDERT hat -- nur dann wird neu gemalt. Ohne diese Frage maelte
+// das Panel bei jeder Mausbewegung neu, und das ist bei einer Bewegung
+// je Bericht eine Menge Anstrich fuer nichts.
+fn hover_setzen(t: u64) -> bool {
+    if t == hov_tile {
+        return false
+    }
+    hov_tile = t
+    return true
+}
+
+fn druck_setzen(t: u64) -> bool {
+    if t == dn_tile {
+        return false
+    }
+    dn_tile = t
+    return true
+}
 
 fn tile_rect_x(t: u64) -> u64 {
     if (t % 2) == 0 {
@@ -1489,6 +1565,25 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
                 bg = wlibc.theme(wlibc.T_SEL)
                 fg = wlibc.theme(wlibc.T_SELFG)
                 dim = wlibc.theme(wlibc.T_SELFG)
+            }
+            // ==================================== RUNDE ECHTHARDWARE-6
+            // DIESELBEN ZWEI FARBEN, DIE `wlib.paint_button` NIMMT.
+            // Gedrueckt sticht Zeiger-drueber; eine EINGESCHALTETE
+            // Kachel behaelt ihre Auswahlfarbe und wird nur AUFGEHELLT,
+            // sonst spraenge sie beim Ueberfahren von blau auf grau
+            // und saehe aus, als haette sie sich ausgeschaltet.
+            if sl == dn_tile {
+                if on {
+                    bg = wlibc.mix(bg, wlibc.theme(wlibc.T_BTNDN), 50)
+                } else {
+                    bg = wlibc.theme(wlibc.T_BTNDN)
+                }
+            } else if sl == hov_tile {
+                if on {
+                    bg = wlibc.mix(bg, wlibc.theme(wlibc.T_BTNHI), 50)
+                } else {
+                    bg = wlibc.theme(wlibc.T_BTNHI)
+                }
             }
             wlib.mal_tafel(tx, ty, TW(), TH(), wlib.MR_KNOPF,
                 wlibc.EL_FLAT, bg, wlibc.theme(wlibc.T_LINE))
