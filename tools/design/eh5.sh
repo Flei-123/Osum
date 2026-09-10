@@ -63,6 +63,7 @@ drehbuch=""
 accel=auto
 nurbau=nein
 ton=nein
+netz=nein
 extra=""
 # DIE PROGRAMME. Das ist die Liste des Sticks, gekuerzt um die, die
 # dieser Laeufer nicht braucht -- ABER MIT `taskmgr` UND `sh`, weil
@@ -70,7 +71,7 @@ extra=""
 progs="desktop taskbar settings launcher explorer netview taskmgr \
 edit sh echo ls cat ps uname date df mkdir rm cp mv grep head tail wc \
 find du chmod id whoami touch true false sleep kill sort uniq rmdir \
-theme locate"
+theme locate dhcp host ping netstat"
 
 for a in "$@"; do
     case "$a" in
@@ -87,6 +88,7 @@ for a in "$@"; do
         progs=*) progs=${a#*=} ;;
         nurbau=*) nurbau=${a#*=} ;;
         ton=*) ton=${a#*=} ;;
+        netz=*) netz=${a#*=} ;;
         extra=*) extra=${a#*=} ;;
         *) echo "unbekannt: $a" >&2; exit 2 ;;
     esac
@@ -133,6 +135,32 @@ for p in $progs; do
 done
 echo "programme $(echo $GEBAUT | wc -w)"
 
+# ============================================== RUNDE ECHTHARDWARE-5
+# DIE APPS (`fetch`) -- FUER JUSTINS PUNKT I.
+#
+# `fetch` ist das einzige Programm dieses Baumes, das TLS spricht, und
+# damit die einzige Antwort auf "geht ausgehendes HTTPS". Es liegt in
+# kernel/app/ und braucht ein anderes Profil (`--profile=app`) und
+# FIRNLIB=lib/ -- der Grund steht ausfuehrlich in
+# tools/usbimg/build.sh: `fetch` zieht `libc.dns` aus DIESEM Repo UND
+# `tls.tls` aus vendor/firn/lib, und nur mit FIRNLIB=lib/ sind beide
+# Haelften erreichbar.
+GEBAUT_APP=""
+for p in ${APPS:-fetch}; do
+    [ -f "kernel/app/$p.fi" ] || continue
+    if FIRNLIB="$ROOT/lib" vendor/firn/bin/firnc -c --profile=app \
+            -o "$BUILDD/app-$p.o" "kernel/app/$p.fi" \
+            > "$BUILDD/app-$p.err" 2>&1 \
+       && ld -T kernel/user/user.ld -o "$BUILDD/$p.elf" \
+            "$BUILDD/app-$p.o" 2> "$BUILDD/app-$p.lderr"; then
+        strip --strip-all "$BUILDD/$p.elf"
+        GEBAUT_APP="$GEBAUT_APP $p"
+    else
+        echo "   (app $p baut nicht -- $(head -1 "$BUILDD/app-$p.err" 2>/dev/null))"
+    fi
+done
+[ -n "$GEBAUT_APP" ] && echo "apps       $(echo $GEBAUT_APP | wc -w)"
+
 # ------------------------------------------------------------ 2. Platte
 python3 tools/k15/tree.py "$OUT/baum" > "$OUT/baum.log" 2>&1 || exit 1
 printf '# taskbar.conf\nedge=bottom\nwidth=104\nautohide=0\nontop=1\nalign=left\n' \
@@ -156,6 +184,7 @@ ARGS=(build "$OUT/disk.img" 65536 --v3 --inodes=1024 "--time=$(date +%s)" /lib/
       "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
       "/lib/icons.ttf=assets/osum-icons.ttf" /bin/)
 for p in $GEBAUT; do ARGS+=("/bin/$p=$BUILDD/$p.elf"); done
+for p in $GEBAUT_APP; do ARGS+=("/bin/$p=$BUILDD/$p.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
 ARGS+=(/etc/
        "/etc/theme.conf=$OUT/theme.conf@0644"
@@ -183,6 +212,13 @@ if python3 tools/netview/icons.py bauen "$OUT/nvicons" > "$OUT/nvicons.log" 2>&1
              tile-fake tile-net tile-hide; do
         [ -e "$OUT/nvicons/$q" ] && ARGS+=("/etc/netview/$q=$OUT/nvicons/$q")
     done
+fi
+# RUNDE ECHTHARDWARE-5: die Wurzelzertifikate. Ohne sie vertraut
+# `fetch` NICHTS und jede HTTPS-Verbindung endet an der Pruefung --
+# was wie ein Netzfehler aussaehe und keiner waere.
+if python3 tools/hwnet/mkroots.py "$OUT/roots.pem" > "$OUT/roots.log" 2>&1; then
+    ARGS+=(/etc/ssl/ "/etc/ssl/roots.pem=$OUT/roots.pem@0644")
+    echo "wurzeln    $(stat -c%s "$OUT/roots.pem") Oktette"
 fi
 ARGS+=(/usr/ /usr/share/ /usr/share/locale/
        /usr/share/locale/en/ "/usr/share/locale/en/messages=locale/en/messages"
@@ -230,6 +266,27 @@ if [ "$ton" = ja ]; then
     TONDEV=(-audiodev none,id=snd0 -device intel-hda
             -device hda-duplex,audiodev=snd0)
 fi
+# ================================================ RUNDE ECHTHARDWARE-5
+# `netz=ja` -- EINE ECHTE NETZKARTE MIT AUSGANG INS INTERNET.
+#
+# Justins Punkt I: seit ECHTHARDWARE-4 hat sein Brett einen echten
+# DHCP-Lease (Tafel Zeile 22, `IP 192.168.1.107`). Die Frage ist, ob
+# darauf DNS und ausgehendes HTTPS gehen -- die Voraussetzung fuer
+# Browser und Jarvis-Bruecke.
+#
+# QEMUs Benutzernetz beantwortet genau das: es hat einen eigenen
+# DHCP-Server (10.0.2.15 fuer den Gast, 10.0.2.2 als Router,
+# 10.0.2.3 als DNS) und leitet nach draussen weiter. `e1000` ist die
+# Karte, fuer die dieser Kern einen Treiber hat.
+NETDEV=()
+if [ "$netz" = ja ]; then
+    NETDEV=(-netdev user,id=n0 -device e1000,netdev=n0)
+    # DIESELBEN WOERTER WIE DER STICK (tools/usbimg/build.sh, Menue 1).
+    # `nic` allein genuegt NICHT: ohne `nsvc=0 nwait=0` kommt der
+    # Netzstapel nicht hoch, und `/bin/dhcp` meldet dann woertlich
+    # `dhcp: kein Netz im Kernel` -- gemessen in genau diesem Lauf.
+    APPEND="$APPEND nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp"
+fi
 ACC=()
 if [ "$accel" = kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
     ACC=(-accel kvm -cpu host)
@@ -240,7 +297,7 @@ timeout 900 qemu-system-x86_64 "${ACC[@]}" -kernel "$BUILDD/k0.mb" -m 512 \
     -device "VGA,edid=on,xres=$XRES,yres=$YRES,vgamem_mb=32" \
     -monitor "unix:$SOCK,server,nowait" \
     -drive "file=$OUT/disk.img,format=raw,if=ide,index=0" \
-    "${TONDEV[@]}" \
+    "${TONDEV[@]}" "${NETDEV[@]}" \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$OUT/qemu.log" 2>&1 &
 PID=$!
 # GEWARTET WIRD AUF DEN SCHREIBTISCH, NICHT AUF `wm: hold`.
