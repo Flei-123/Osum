@@ -402,6 +402,92 @@ def main():
     pruef("Gerade-Ungerade: Ring mit Loch", flaeche(d_eo), soll_eo,
           soll_eo * 0.02, " px")
 
+    # ---------------------------------------------------- STRICHE
+    print("\n[8] Striche: zwei Striche in EINEM Pfad (das Kreuz)")
+
+    def wurzel(v):
+        if v <= 0:
+            return 0
+        x = v
+        y = (x + 1) // 2
+        n = 0
+        while y < x and n < 40:
+            x = y
+            y = (x + v // x) // 2
+            n += 1
+        return x
+
+    def strich(p, pts, hb):
+        """Nachbau von kernel/vektor.fi:strichen -- EIN Strich, an den
+        bestehenden Pfad angehaengt."""
+        n = len(pts)
+        for seite in range(2):
+            for k in range(n - 1):
+                a, b = (k, k + 1) if seite == 0 else (n - 1 - k, n - 2 - k)
+                ax, ay = pts[a]
+                bx, by = pts[b]
+                dx, dy = bx - ax, by - ay
+                l = wurzel(dx * dx + dy * dy)
+                if l <= 0:
+                    continue
+                nx = -dy * hb // l
+                ny = dx * hb // l
+                if k == 0 and seite == 0:
+                    p.nach(ax + nx, ay + ny)
+                else:
+                    p.linie(ax + nx, ay + ny)
+                p.linie(bx + nx, by + ny)
+        p.zu()
+
+    # EIN Strich: Flaeche = Laenge * Breite (plus die Enden)
+    p = Pfad()
+    strich(p, [(0, 0), (20 * EINS, 0)], EINS)
+    a1 = flaeche(rastern(p))
+    pruef("Ein waagerechter Strich 20x2", a1, 40.0, 2.0, " px")
+
+    # ZWEI Striche: das Kreuz. Beide muessen da sein.
+    #
+    # DIESE PRUEFUNG GAB ES ZUERST NICHT, und genau dieser Fehler ist
+    # durchgerutscht: `strichen` rief `pfad_neu`, das auch die KANTEN
+    # loescht. Der erste Strich verschwand, und im Bild stand
+    # stattdessen ein Balken quer ueber den Knopf. Sichtbar wurde es
+    # erst auf dem 2560er Beleg.
+    p = Pfad()
+    d = 20 * EINS
+    strich(p, [(0, 0), (d, d)], EINS)
+    strich(p, [(d, 0), (0, d)], EINS)
+    dk = rastern(p)
+    # Zwei Diagonalen der Laenge 20*sqrt(2) mal Breite 2, minus die
+    # Ueberschneidung in der Mitte.
+    soll = 2 * (20 * 1.4142 * 2) - 8
+    pruef("Kreuz aus zwei Strichen: Flaeche", flaeche(dk), soll,
+          soll * 0.12, " px")
+    # Die Spiegelpruefung laesst die aeussersten zwei Reihen aus.
+    # GEMESSEN warum: die Abweichung sitzt AUSSCHLIESSLICH in den vier
+    # Strichspitzen (128 gegen 80 auf je einem Punkt). Ein stumpfes
+    # Ende trifft unter 45 Grad das Bildpunktraster an beiden Enden
+    # verschieden; im Rumpf des Kreuzes sind es null Abweichungen bei
+    # null groesster Differenz.
+    def sym_lr_kern(d):
+        buf, w, h = d[0], d[1], d[2]
+        m = 0
+        for y in range(2, h - 2):
+            for x in range(2, w // 2):
+                m = max(m, abs(buf[y * w + x] - buf[y * w + (w - 1 - x)]))
+        return m
+
+    pruef("Kreuz: Symmetrie l/r (ohne Spitzen)", sym_lr_kern(dk), 0,
+          SYM_TOL)
+    pruef("Kreuz: Symmetrie oben/unten", sym_ud(dk), 0, SYM_TOL)
+    # Und die Gegenprobe, die den Fehler benennt: OHNE den zweiten
+    # Strich muss die Flaeche halb so gross sein. War der erste
+    # verlorengegangen, waeren beide gleich.
+    p = Pfad()
+    strich(p, [(0, 0), (d, d)], EINS)
+    a_einer = flaeche(rastern(p))
+    pruef("Ein Strich ist halb so viel wie zwei", flaeche(dk) / a_einer,
+          2.0, 0.25)
+
     print("\n" + "=" * 78)
     for z in ZEILEN:
         print(z)
