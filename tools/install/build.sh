@@ -61,7 +61,11 @@ PROGS=${PROGS:-"sh ls cat echo cp mv rm mkdir rmdir touch head tail wc grep sort
 # hat das als ersten Punkt der Fehlliste benannt: "es fehlt die
 # Verdrahtung, nicht die Kryptographie". Von hier an ist es drin, und
 # damit kann das Geraet selbst holen, was es einspielt.
-APPS=${APPS:-"fetch"}
+# RUNDE SCHLEUSE: `wasm` ist die zweite App. Sie braucht `--profile=app`
+# aus demselben Grund wie `fetch` -- der Deuter legt den linearen
+# Speicher des Gastes auf der Halde an, und eine Halde hat `profile
+# kernel` nicht.
+APPS=${APPS:-"fetch wasm prim"}
 
 bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1 || {
     echo "== firnc laesst sich nicht bauen"; tail -20 "$OUT/firnc.log"; exit 1; }
@@ -98,7 +102,31 @@ echo "   programme $(echo "$gebaut" | wc -w) Stueck"
 gebaut_app=""
 for p in $APPS; do
     [ -f "kernel/app/$p.fi" ] || continue
-    if ! FIRNLIB="$ROOT/lib" "$CC" -c --profile=app \
+    # RUNDE SCHLEUSE: `--no-pass=inline` fuer die Apps, und das ist
+    # GEMESSEN und nicht geraten. Der WASM-Deuter besteht aus einer sehr
+    # langen if/else-Kette ueber die Befehlsnummer; das Einsetzen der
+    # Aufrufe blaeht genau diese Kette auf und verdraengt sie aus dem
+    # Befehlszwischenspeicher. `prim.wasm` (Primzahlen unter 200000),
+    # derselbe Deuter, nur andere Uebersetzung:
+    #
+    #     dev            30,06 s
+    #     dev-fast        4,98 s   <- Standard
+    #     release-safe    9,14 s
+    #     release-fast    8,21 s
+    #     release-fast --no-pass=inline   4,80 s   <- das hier
+    #
+    # Eine hoehere Optimierungsstufe war also LANGSAMER, bis das
+    # Einsetzen abgeschaltet wurde.
+    # RUNDE WASM-MERGE: die Messung oben gilt fuer den WASM-Deuter, NICHT
+    # fuer jede App. `jarvisd`, `konto` und `fetch` sind seit SCHLEUSE
+    # dazugekommen und sind KEINE lange Verteilerkette -- fuer sie ist das
+    # Einsetzen nuetzlich. Darum steht der Schalter jetzt an der Datei,
+    # fuer die er gemessen wurde, statt pauschal an allen Apps.
+    APPFLAGS=""
+    case "$p" in
+        wasm) APPFLAGS="--no-pass=inline" ;;
+    esac
+    if ! FIRNLIB="$ROOT/lib" "$CC" -c --profile=app $APPFLAGS \
             -o "$OUT/app-$p.o" "kernel/app/$p.fi" > "$OUT/app-$p.err" 2>&1; then
         echo "== $p (app): der Uebersetzer sagt nein"
         head -20 "$OUT/app-$p.err"
