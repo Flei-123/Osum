@@ -215,6 +215,7 @@ BEREICHE = [
     # frei auswies -- dort liegt ROOTSEL.  Genau dafuer gibt es diese
     # Datei; die Kollision stand in keiner gemeinsamen Zeile.
     ("SHOT",       "kstate.fi", "SHOT_OFF",       "SHOT_MAX"),
+    ("TIPP",       "kstate.fi", "TIPP_OFF",       "TIPP_MAX"),
     # RUNDE BLECH: der USB-2.0-Regler (kernel/ehci.fi).  Drei Seiten,
     # 0x4D000..0x50000 -- genau das Stueck, das diese Karte bis zu
     # dieser Runde als "frei 0x4D000..0x50000 (12 KiB)" ausgewiesen hat.
