@@ -3260,6 +3260,36 @@ fn slot_remap(state: u64, virt: u64, block: u64, uncached: bool) -> bool {
     if pd == 0 {
         return false
     }
+    // ================================================ RUNDE ECHTHARDWARE-5
+    // ERST DIE SCHREIBPUFFER LEEREN, DANN UMHAENGEN.
+    //
+    // Justins Befund C: beim Verschieben eines Fensters bleiben lange
+    // waagerechte Kammstreifen ueber den halben Schirm stehen.
+    //
+    // HIER ENTSTEHEN SIE. Der Streifenbetrieb schiebt den Rahmenpuffer
+    // in 2-MiB-Scheiben durch EIN Fenster: schreiben, umhaengen,
+    // schreiben, umhaengen. Der Rahmenpuffer steht auf Justins Brett
+    // WRITE-COMBINING (seine Tafel Zeile 9: `FB WC`), und
+    // write-combining heisst, dass Schreibvorgaenge in einem Puffer
+    // der CPU LIEGENBLEIBEN und spaeter als Block hinausgehen.
+    //
+    // Wird der Platz umgehaengt, waehrend noch etwas im WC-Puffer
+    // steht, geht dieser Rest an dieselbe VIRTUELLE Adresse -- die
+    // jetzt aber auf einen ANDEREN Block des Bildspeichers zeigt.
+    // Bildpunkte der einen Bildschirmzeile landen so in einer ganz
+    // anderen: genau das Kammmuster, und genau deshalb ueber die halbe
+    // Breite.
+    //
+    // In QEMU tritt es nicht auf -- dort gibt es keine
+    // WC-Puffer-Semantik, und deshalb hat kein Laeufer dieser Runden
+    // es je gesehen. Das `sfence` kostet auf dem geraden Weg nichts
+    // (der Puffer ist dann ohnehin leer) und ist die einzige Stelle,
+    // an der die Reihenfolge ueberhaupt zu retten ist.
+    //
+    // DASSELBE gilt fuer `unmap_slot` und fuer den Weg darunter, der
+    // die Bits eines Platzes aendert: jede Aenderung an der
+    // Seitentafel eines WC-Bereichs braucht sie davor.
+    arch.barrier_write()
     let bits: u64 = fb_bits(state, uncached)
     __mmio_write64((pd + (WIN_FIRST + i) * 8) as *mut u64, block | bits)
     kstate.set(state, WIN_LIST + i * 8, block + 1)
@@ -3280,6 +3310,10 @@ fn unmap_slot(state: u64, virt: u64) {
     if pd == 0 {
         return
     }
+    // RUNDE ECHTHARDWARE-5: derselbe Grund wie in `slot_remap` --
+    // ein Platz, der abgehaengt wird, waehrend noch WC-Schreibvorgaenge
+    // auf ihn unterwegs sind, schickt sie irgendwohin.
+    arch.barrier_write()
     __mmio_write64((pd + (WIN_FIRST + i) * 8) as *mut u64, 0)
     kstate.set(state, WIN_LIST + i * 8, 0)
     let c: u64 = asm("mov rax, cr3", out("rax"))
