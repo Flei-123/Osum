@@ -1123,6 +1123,39 @@ verbose: yes
     module_path: boot():/root.img
     cmdline: hwdiag hwdiagstop vecproc gfx nokbd nosched noproc nofs noring3
 
+# =============== RUNDE MERGE-11: DIE GRAFIK-ERHEBUNG ALS MENUEEINTRAG
+#
+# JUSTIN SOLL NICHTS TIPPEN MUESSEN. Die Erhebung aus GRAFIK-1 Etappe A
+# beantwortet eine Frage, die seit Tagen offen ist: auf echtem Blech
+# sieht er eckige Fenster, groben Bildbrei und einen klotzigen Zeiger,
+# waehrend der Pruefstand in QEMU saubere runde Ecken MISST (VEKTORs
+# Eckenmesswerkzeug: 0 Fuellpixel ausserhalb des Radius). Beides kann
+# nicht gleichzeitig stimmen -- es sei denn, zwischen dem gezeichneten
+# Bild und der Tafel liegt noch eine Streckung.
+#
+# Genau die zeigt die Zeile `weg`:
+#
+#   grafik: weg tafel=AxB bild=CxD gezogen=JA/NEIN pitch=../..
+#
+# `gezogen=JA` heisst: es wird ein KLEINERER Puffer gerendert und vom
+# Anzeige-Controller mit naechstem Nachbarn hochgestreckt. Dann sind
+# alle drei Beschwerden EINE Ursache, und eine Rundung von drei
+# Bildpunkten ueberlebt so eine Streckung nicht. `gezogen=NEIN`
+# schliesst den Verdaechtigen aus, und wir suchen woanders -- auch das
+# ist ein Ergebnis, und es kostet Justin einen Tastendruck statt einer
+# weiteren Woche.
+#
+# `hwdiagstop` haelt das Bild an, damit er es abfotografieren kann;
+# `nokbd`/`noring3` halten alles heraus, was das Bild ueberschreiben
+# koennte. Die Erhebung FASST NICHTS AN: kein Register wird
+# geschrieben, kein Modus gesetzt (kernel/grafik.fi, `bericht`).
+
+//@MARKE_PRODUKT@ -- Grafik erheben (bleibt stehen)
+    protocol: multiboot1
+    path: boot():/osum.mb
+    module_path: boot():/root.img
+    cmdline: hwdiag hwdiagstop grafik gfx nokbd nosched noproc nofs noring3
+
 # ================= RUNDE VIELKERN 3: DER EINTRAG FUER DAS BLECH
 #
 # Bis zur Runde BLECHKERN lief die ganze Oberflaeche auf EINEM Kern --
