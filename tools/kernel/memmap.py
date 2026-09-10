@@ -84,6 +84,15 @@ BEREICHE = [
     ("HIDREP_RAW", "hidrep.fi", "RAW_OFF",       "MAX_DEV * RAW_MAX"),
     ("HIDIN",      "hidin.fi",  "IN_OFF",        "0x1000"),
     ("I2CHID",     "i2chid.fi", "I2C_OFF",       "0x1000"),
+    # RUNDE GRAFIK-1 -- der Software-Rasterer und sein Wuerfel teilen
+    # sich VIER Seiten am oberen Ende.  Der Eintrag steht hier, weil
+    # die erste Fassung der Runde 0x3D000 genommen hat: dort liegt der
+    # Fensterserver aus Runde K10/K11.  Die Karte hat das NICHT
+    # gemeldet -- sie kann nur pruefen, was in dieser Liste steht, und
+    # ein neuer Bereich, der hier fehlt, ist fuer sie unsichtbar.  Das
+    # ist derselbe Fehler, den die vier Kommentare oben beschreiben,
+    # zum fuenften Mal.
+    ("R3D",        "r3dsoft.fi", "R3D_OFF",      "R3D_MAX"),
     ("I2CBUF",     "i2chid.fi", "BUF_OFF",       "0x1000"),
     ("AHCI",       "ahci.fi",   "AHCI_OFF",       "0x1000"),
     ("AHCI_ID",    "ahci.fi",   "AHCI_ID_OFF",    "0x1000"),
@@ -461,7 +470,9 @@ def main():
               # der EHCI-Treiber drei.
               "rootsel.fi", "ehci.fi", "blkdev.fi",
               # RUNDE HID -- der Zerleger, der Eingabeweg und I2C-HID.
-              "hidrep.fi", "hidin.fi", "i2chid.fi"):
+              "hidrep.fi", "hidin.fi", "i2chid.fi",
+              # RUNDE GRAFIK-1 -- der Software-Rasterer.
+              "r3dsoft.fi"):
         # RUNDE ARM: die Maschine hat seit dem Trennschnitt ein eigenes
         # Verzeichnis (`kernel/arch/x86_64/`).  `hv.fi` liegt dort, und
         # diese Schleife hat es vorher schlicht nicht mehr gefunden --
