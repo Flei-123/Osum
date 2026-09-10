@@ -306,9 +306,36 @@ foto 01-schreibtisch
 klickauf start
 warte 2
 foto 02-startmenue
+# ==================================================== RUNDE VEKTOR
+# HIER DARF NICHT GEWARTET WERDEN, UND DAS IST GEMESSEN.
+#
+# Justins Befund: "das Abnahmeskript oeffnet Explorer, Einstellungen
+# und Kontrollzentrum nie, deshalb sind 02-05 praktisch identisch".
+# Er hat recht, und der Grund stand die ganze Zeit auf der Leitung:
+#
+#     launcher: ready
+#     launcher: fokus weg t=9226 gnade=6335
+#     launcher: zugemacht
+#     ...
+#     osum: syscalls=7 forks=0 execves=0     <- NIE ein Programm
+#
+# Der Starter macht sich SELBST zu, sobald er den Fokus verliert und
+# die Gnadenfrist abgelaufen ist (launcher.fi: GNADE_TICKS = 30, also
+# 300 ms bei 100 Hz). Ein `warte 1` zwischen den Klicks ist ZEHNMAL
+# so lang. Beim Klick auf die Trefferzeile war das Menue also laengst
+# zu, der Klick landete auf dem Schreibtisch, der Dateimanager kam nie
+# hoch -- und `03-explorer`, `04-dialog` und `05-kontrollzentrum`
+# zeigten alle denselben leeren Schreibtisch. Genau das hat er als
+# "gleiche Bilder unter verschiedenen Namen" gemeldet.
+#
+# Es ist WEDER ein 4K-Fehler noch der Strg+N-Fehler aus OFFEN.md
+# G-003: die beiden Bilder waren in JEDER Aufloesung Oktett fuer
+# Oktett gleich (md5 1abb3b5236 bei 2560x1440, 5019abb57f bei
+# 3840x2160).
+#
+# Also: klicken, ohne dazwischen zu warten.
 # --- der Dateimanager: erste Zeile der Trefferliste, dann Ausfuehren
 klickauf lzeile0
-warte 1
 klickauf lrect3
 warteauf 'explorer: ready' || 60
 warte 3
