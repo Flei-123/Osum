@@ -80,7 +80,9 @@ import libc.kcall
 
 export {
     init, anchor, step, toggle, is_open, hit, want_hide, took_hide,
-    win_id, W, H
+    win_id, W, H,
+    // RUNDE ECHTHARDWARE-5: "das Thema hat gewechselt, mal dich neu".
+    thema_neu
 }
 
 // --------------------------------------------------------- the shape
@@ -521,6 +523,21 @@ static mut s_druck: [u8; 13] = "qs: druck x=\0"
 static mut s_hellist: [u8; 14] = "qs: hell ist=\0"
 // RUNDE ECHTHARDWARE-3: die Rinne in Bildschirmpunkten.
 static mut s_hellspur: [u8; 19] = "qs: hell spur von=\0"
+// ============================================== RUNDE ECHTHARDWARE-5
+// DIE ZWEI KNOPFZEILEN, IN BILDSCHIRMPUNKTEN.
+//
+// Dieselbe Regel und derselbe Grund wie bei `hell spur` darueber:
+// Justins Befund F ("Taskmanager und Einstellungen gehen nicht auf")
+// liess sich nur mit einem Klick pruefen, und die Stelle dafuer stand
+// nirgends. Die Textzeile `qs: text x=20 y=321` ist die GRUNDLINIE der
+// Schrift, nicht das Feld -- wer darauf klickt, trifft je nach
+// Schriftgroesse daneben. Ich habe in dieser Runde genau so daneben
+// geklickt und den Fehlschlag beinahe dem Programm angelastet.
+//
+// Also sagt das Panel jetzt, wo die beiden Zeilen WIRKLICH liegen.
+static mut s_zeile1: [u8; 17] = "qs: zeile tm y=\0\0"
+static mut s_zeile2: [u8; 18] = "qs: zeile set y=\0\0"
+static mut s_hoehe: [u8; 5] = " h=\0\0"
 static mut s_bis: [u8; 6] = " bis=\0"
 static mut s_ymit: [u8; 5] = " ym=\0"
 // RUNDE TON-2: dieselbe Bauart wie die Helligkeitszeile -- ein
@@ -1312,7 +1329,35 @@ fn click(x: u64, y: u64) {
         return
     }
     if y >= L1Y() && y < L1Y() + FH() {
-        let pid: u64 = ulib.sys(ulib.SYS_SPAWN,
+        // ==================================== RUNDE ECHTHARDWARE-5
+        // SYS_SPAWN KANN KEINEN PFAD -- ES MUSS SYS_EXEC SEIN.
+        //
+        // Justins Befund F: "Taskmanager und Einstellungen lassen sich
+        // nicht oeffnen, die Knoepfe reagieren nicht."
+        //
+        // GEMESSEN, nicht vermutet -- die serielle Leitung sagte es
+        // woertlich:
+        //
+        //     qs: settings pid=-22
+        //
+        // -22 ist EINVAL, und es kommt aus `sys.do_spawn`:
+        //
+        //     if prog == 0 || (prog > 16 && prog != P_BUSB_SPAWN) {
+        //         return neg(errno.E_INVAL)
+        //     }
+        //
+        // `SYS_SPAWN` (1000) startet ein EINGEBAUTES Programm des
+        // Kerns und nimmt dessen NUMMER (hoechstens 16). Hier wurde
+        // ihm ein ZEIGER auf "/bin/taskmgr" gegeben, und ein Zeiger
+        // ist immer groesser als 16 -- also kam bei JEDEM Druck auf
+        // beide Knoepfe -22 zurueck und es lief nie etwas an.
+        //
+        // Der Weg mit Pfad ist `SYS_EXEC` (1001). Genau dieser Fehler
+        // stand schon einmal in `launcher.fi` und ist dort in Runde
+        // BLECHKERN behoben worden (siehe die Anmerkung bei
+        // `SYS_EXEC` dort) -- dieses Panel ist damals uebersehen
+        // worden.
+        let pid: u64 = ulib.sys(ulib.SYS_EXEC,
             (&p_taskmgr[0 as usize]) as u64, 0, 0)
         say((&s_spawn[0 as usize]) as u64)
         say((&s_eq[0 as usize]) as u64)
@@ -1322,7 +1367,10 @@ fn click(x: u64, y: u64) {
         return
     }
     if y >= L2Y() && y < L2Y() + FH() {
-        let pid: u64 = ulib.sys(ulib.SYS_SPAWN,
+        // RUNDE ECHTHARDWARE-5: derselbe Fehler wie eine Kachel
+        // weiter oben, dieselbe Begruendung -- `SYS_SPAWN` nimmt eine
+        // Nummer, kein `/bin/settings`.
+        let pid: u64 = ulib.sys(ulib.SYS_EXEC,
             (&p_settings[0 as usize]) as u64, 0, 0)
         say((&s_spawn[0 as usize]) as u64)
         say((&s_eq[0 as usize]) as u64)
@@ -1709,6 +1757,39 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
     let _p: u64 = wlibc.push(w_h, 0, y0, W(), hh)
 }
 
+// ==================================================== RUNDE ECHTHARDWARE-5
+// DAS THEMA HAT GEWECHSELT -- UND ZWAR JETZT, NICHT BEIM NAECHSTEN
+// AUFMACHEN.
+//
+// Justins Befund J, woertlich: schaltet er von hell auf dunkel, bleibt
+// das Kontrollzentrum rechts "komisch blau" -- also im alten Schema --
+// und wird erst richtig, wenn er es SCHLIESST und NEU OEFFNET.
+//
+// DIE URSACHE, und sie ist dieselbe Wurzel wie bei den anderen
+// Oberflaechen: dieses Panel hat eine EIGENE Ereignisschleife und ruft
+// `wlib.step()` nie. `wlib.step` ist aber die Stelle, an der
+// `theme_watch()` sitzt -- der Wecker, der zehnmal je Sekunde
+// nachsieht, ob sich die aufgeloesten Marken geaendert haben, und dann
+// ALLE Fenster schmutzig macht. Ein Programm, das an `step` vorbei
+// lebt, bekommt davon nichts mit und malt weiter mit den Farben, die
+// es beim Aufmachen gelesen hat.
+//
+// Die Leiste ueber uns POLLT das Thema bereits (`wlibc.theme_poll` in
+// ihrer Schleife) -- sie hat es nur fuer sich behalten. Diese Funktion
+// ist der fehlende Weitersager: sie wird von dort gerufen, wenn sich
+// wirklich etwas geaendert hat, und malt das Panel vollstaendig neu.
+//
+// VOLLSTAENDIG und nicht teilweise: die Farben stecken in jedem Band,
+// in jeder Kachel und in beiden Reglern. Ein halber Anstrich waere
+// genau der Zwischenzustand, den Justin ausdruecklich nicht will.
+fn thema_neu() -> bool {
+    if open_ == 0 {
+        return false
+    }
+    paint(false)
+    return true
+}
+
 fn paint(report: bool) {
     if open_ == 0 {
         return
@@ -1726,4 +1807,30 @@ fn paint(report: bool) {
         y = y + hh
     }
     let _f: u64 = wlibc.sys3w(wlibc.WM_FLUSH, w_h, 0, 0)
+    // ============================================ RUNDE ECHTHARDWARE-5
+    // DIE ZWEI KNOPFZEILEN, ABSOLUT AUF DEM SCHIRM -- HIER UND NICHT
+    // IM BANDMALER.
+    //
+    // Erster Anlauf dieser Runde: die Zeilen standen in
+    // `paint_band`, und dort rechnet alles in BANDKOORDINATEN
+    // (`wlibc.set_band(y0)`). Gemeldet wurde deshalb `y=970`, waehrend
+    // der Druck bei `y=348` im Fenster ankam -- der Klick landete eine
+    // Zeile zu tief, auf `All settings` statt auf `Task manager`.
+    // Gemessen an genau diesem Lauf: `qs: druck x=194 y=348`.
+    //
+    // `paint` laeuft einmal je Anstrich und kennt `py_`, den Ursprung
+    // des Fensters. Damit ist die gemeldete Zahl die, auf die ein
+    // Klick zielen muss.
+    if report {
+        say((&s_zeile1[0 as usize]) as u64)
+        ulib.sayn(py_ + L1Y())
+        say((&s_hoehe[0 as usize]) as u64)
+        ulib.sayn(FH())
+        ulib.nl()
+        say((&s_zeile2[0 as usize]) as u64)
+        ulib.sayn(py_ + L2Y())
+        say((&s_hoehe[0 as usize]) as u64)
+        ulib.sayn(FH())
+        ulib.nl()
+    }
 }
