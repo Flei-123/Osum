@@ -124,6 +124,8 @@ export {
     poll, composites, blits, pixels, last_us, cursor_on, set_cursor,
     // RUNDE VEKTOR: die Bildzeit, damit die Abnahme sie holen kann.
     frame_us_sum, frame_us_n, frame_us_max, frame_us_last, frame_ueber16,
+    frame_fach, frame_us_maxw, frame_ueber16w,
+    cap_glyph_treffer, cap_glyph_bauten,
     shape, set_shape, set_keys,
     downs, moves_seen, hits_seen, win_keys,
     set_fonts, font_ui, font_mono, px_ui, px_mono,
@@ -701,6 +703,47 @@ const S_FRLAST: u64 = 0x11E8  // die letzte Bildzeit
 // Wie viele Bilder ueber 16 ms lagen. Die Auflage dieser Runde in
 // einer Zahl: sie MUSS null bleiben.
 const S_FRUEBER: u64 = 0x11F0
+// Ein Histogramm, acht Faecher, je eine Verdoppelung: <1ms, <2, <4,
+// <8, <16, <32, <64, darueber. Ein Mittelwert und ein Groesstwert
+// sagen nicht, OB die langen Bilder am Anfang stehen (Moduswechsel,
+// kalter Zwischenspeicher) oder mitten im Betrieb -- und genau das
+// ist der Unterschied zwischen "faellt niemandem auf" und "ruckelt".
+const S_FRH: u64 = 0x1200      // acht Worte, 0x1200..0x1238
+// Die laengste Bildzeit NACH den ersten zehn Bildern. Die ersten zehn
+// sind der Start: erstes Bild ueberhaupt, erster Moduswechsel, erste
+// Schrift. Was danach kommt, ist der Betrieb.
+const S_FRMAXW: u64 = 0x1240
+const S_FRUEBERW: u64 = 0x1248
+
+// ------------------------------- RUNDE VEKTOR: DIE ZEICHEN LIEGEN FERTIG
+//
+// Ein Fensterzeichen ist in jedem Bild dasselbe: dieselbe Form,
+// dieselbe Groesse, dieselbe Kantenglaettung. Es JE BILD neu zu
+// rastern -- Bezier zerlegen, Kanten bauen, vier Abtastzeilen je
+// Bildzeile -- ist Arbeit, deren Ergebnis schon dasteht.
+//
+// GEMESSEN, warum das noetig ist: ohne diesen Speicher stieg bei
+// 2560x1440 und Vervielfachung 2 die mittlere Bildzeit von 4234 auf
+// 5211 Mikrosekunden, und im Betrieb rutschten sechsundzwanzig Bilder
+// aus dem Fach 4..8 ms in das Fach 8..16 ms. Die Formen sind billig,
+// aber sie sind es NICHT dreimal je Fenster und Bild.
+//
+// Vier Zeichen: Minimieren, Maximieren, Wiederherstellen, Schliessen.
+// Je Zeichen die Deckung als ein Oktett pro Bildpunkt, hoechstens
+// 40x40 (10 * Vervielfachung 4).
+const CG_N: u64 = 4
+const CG_MAX: u64 = 1600      // 40 * 40
+
+// RUNDE VEKTOR: die vier gerasterten Zeichen. `cg_gr` ist die
+// Kantenlaenge, mit der sie gerastert wurden -- wechselt die
+// Vervielfachung, gilt der Speicher nicht mehr.
+static mut cg_deck: [u8; 6400] = [0 as u8; 6400]
+static mut cg_gut: [u64; 4] = [0 as u64; 4]
+static mut cg_gr: u64 = 0
+static mut cg_w: [u64; 4] = [0 as u64; 4]
+static mut cg_h: [u64; 4] = [0 as u64; 4]
+static mut cg_treffer: u64 = 0
+static mut cg_bauten: u64 = 0
 
 // Die Arten einer Fensterbewegung. Oeffnen waechst, Schliessen und
 // Minimieren schrumpfen -- der Unterschied zwischen den letzten beiden
@@ -4599,6 +4642,23 @@ fn compose(state: u64) -> u64 {
             if us > 16000 {
                 ss(state, S_FRUEBER, gs(state, S_FRUEBER) + 1)
             }
+            // Das Fach: die Verdoppelung, in der diese Zeit liegt.
+            var fach: u64 = 0
+            var g: u64 = 1000
+            while fach < 7 && us >= g {
+                g = g * 2
+                fach = fach + 1
+            }
+            ss(state, S_FRH + fach * 8, gs(state, S_FRH + fach * 8) + 1)
+            // Und dasselbe noch einmal, aber erst ab dem elften Bild.
+            if gs(state, S_FRN) > 10 {
+                if us > gs(state, S_FRMAXW) {
+                    ss(state, S_FRMAXW, us)
+                }
+                if us > 16000 {
+                    ss(state, S_FRUEBERW, gs(state, S_FRUEBERW) + 1)
+                }
+            }
         }
     }
     return (x1 - x0) * (y1 - y0)
@@ -4627,6 +4687,23 @@ fn frame_us_last(state: u64) -> u64 {
 
 fn frame_ueber16(state: u64) -> u64 {
     return gs(state, S_FRUEBER)
+}
+
+// Ein Fach des Histogramms, 0..7.
+fn frame_fach(state: u64, i: u64) -> u64 {
+    if i > 7 {
+        return 0
+    }
+    return gs(state, S_FRH + i * 8)
+}
+
+// Der Betrieb, also ohne die ersten zehn Bilder.
+fn frame_us_maxw(state: u64) -> u64 {
+    return gs(state, S_FRMAXW)
+}
+
+fn frame_ueber16w(state: u64) -> u64 {
+    return gs(state, S_FRUEBERW)
 }
 
 // WIE VIELE TASTEN BEI DIESEM FENSTER ANGEKOMMEN SIND. Die Zahl ist die
@@ -5210,92 +5287,131 @@ fn cap_face(state: u64, x: i64, y: i64, h: i64, tr: u64, farbe: u64,
 // rechnet diese Funktion selbst.
 fn cap_glyph(state: u64, n: u64, x: i64, y: i64, farbe: u64, i: u64,
     ax0: i64, ay0: i64, ax1: i64, ay1: i64) {
-    let sk: i64 = uisc(state) as i64
-    let d: i64 = 10 * sk          // Kantenlaenge des Zeichens
-    // Die Strichbreite: ein Bildpunkt mal Vervielfachung, aber
-    // mindestens anderthalb -- ein Haarstrich verschwindet auf einem
-    // dichten Schirm.
-    let sb: i64 = (3 * sk * vektor.EINS) / 2
-    if n == CAP_MIN {
-        // Ein waagerechter Strich auf halber Hoehe.
-        vektor.pfad_neu()
-        vektor.strich_breite(sb)
-        vektor.strich_ende(vektor.ENDE_RUND)
-        vektor.nach(x * vektor.EINS, (y + d / 2) * vektor.EINS)
-        vektor.linie((x + d) * vektor.EINS, (y + d / 2) * vektor.EINS)
-        vektor.strichen(0)
-        cap_mal(state, farbe, ax0, ay0, ax1, ay1)
+    let sk: u64 = uisc(state)
+    let d: u64 = 10 * sk
+    // Welches der vier Zeichen? Maximieren und Wiederherstellen sind
+    // zwei verschiedene, auch wenn derselbe Knopf sie zeigt.
+    var k: u64 = n
+    if n == CAP_MAX && (wg(state, i, W_FLAGS) & F_MAXIMIZED) != 0 {
+        k = 3
+    }
+    if k >= CG_N {
         return
     }
-    if n == CAP_MAX {
-        if (wg(state, i, W_FLAGS) & F_MAXIMIZED) != 0 {
-            // Zwei versetzte Quadrate: "wiederherstellen".
-            cap_kasten(state, x + 2 * sk, y, d - 2 * sk, d - 2 * sk, sb,
-                farbe, ax0, ay0, ax1, ay1)
-            cap_kasten(state, x, y + 2 * sk, d - 2 * sk, d - 2 * sk, sb,
-                farbe, ax0, ay0, ax1, ay1)
-            return
+    cg_bauen(state, k, d, sk)
+    if cg_gut[(k) as usize] == 0 {
+        return
+    }
+    cg_treffer = cg_treffer + 1
+    // Die fertige Deckung in den Bildpuffer mischen.
+    let bw: u64 = cg_w[(k) as usize]
+    let bh: u64 = cg_h[(k) as usize]
+    var r: u64 = 0
+    while r < bh {
+        var c: u64 = 0
+        while c < bw {
+            let a: u64 = cg_deck[((k * CG_MAX + r * bw + c)) as usize] as u64
+            if a != 0 {
+                px_clip(state, x + c as i64, y + r as i64, farbe, a,
+                    ax0, ay0, ax1, ay1)
+            }
+            c = c + 1
         }
-        cap_kasten(state, x, y, d, d, sb, farbe, ax0, ay0, ax1, ay1)
-        return
+        r = r + 1
     }
-    // Das Kreuz: zwei Diagonalen, als Strich und nicht als Treppe.
-    vektor.pfad_neu()
-    vektor.strich_breite(sb)
-    vektor.strich_ende(vektor.ENDE_RUND)
-    vektor.nach(x * vektor.EINS, y * vektor.EINS)
-    vektor.linie((x + d) * vektor.EINS, (y + d) * vektor.EINS)
-    vektor.strichen(0)
-    cap_mal(state, farbe, ax0, ay0, ax1, ay1)
-    vektor.pfad_neu()
-    vektor.strich_breite(sb)
-    vektor.strich_ende(vektor.ENDE_RUND)
-    vektor.nach((x + d) * vektor.EINS, y * vektor.EINS)
-    vektor.linie(x * vektor.EINS, (y + d) * vektor.EINS)
-    vektor.strichen(0)
-    cap_mal(state, farbe, ax0, ay0, ax1, ay1)
 }
 
-// Ein Quadrat als RAHMEN, aus vier Strichen mit Ecken.
-fn cap_kasten(state: u64, x: i64, y: i64, w: i64, h: i64, sb: i64,
-    farbe: u64, ax0: i64, ay0: i64, ax1: i64, ay1: i64) {
+// EIN ZEICHEN RASTERN -- aber nur, wenn es noch nicht dasteht.
+//
+// Wechselt die Vervielfachung, gilt der ganze Speicher nicht mehr:
+// ein Zeichen in Zielgroesse 20 ist kein vergroessertes Zeichen der
+// Groesse 10, und genau darum geht es in dieser Runde.
+fn cg_bauen(state: u64, k: u64, d: u64, sk: u64) {
+    if cg_gr != d {
+        var j: u64 = 0
+        while j < CG_N {
+            cg_gut[(j) as usize] = 0
+            j = j + 1
+        }
+        cg_gr = d
+    }
+    if cg_gut[(k) as usize] == 1 {
+        return
+    }
+    let di: i64 = d as i64
+    // Die Strichbreite: anderthalb Bildpunkte mal Vervielfachung. Ein
+    // Haarstrich verschwindet auf einem dichten Schirm.
+    let sb: i64 = (3 * sk as i64 * vektor.EINS) / 2
+    // Das Zeichen wird bei (0,0) gebaut und liegt danach bei (0,0) in
+    // der Tafel -- der Aufrufer verschiebt beim Malen.
     vektor.pfad_neu()
     vektor.strich_breite(sb)
+    vektor.strich_ende(vektor.ENDE_RUND)
     vektor.strich_ecke(vektor.ECKE_RUND)
+    if k == CAP_MIN {
+        vektor.nach(0, (di / 2) * vektor.EINS)
+        vektor.linie(di * vektor.EINS, (di / 2) * vektor.EINS)
+        vektor.strichen(0)
+    } else if k == CAP_MAX {
+        cg_kasten(0, 0, di, di)
+    } else if k == 3 {
+        // Wiederherstellen: zwei versetzte Quadrate.
+        let e: i64 = 2 * sk as i64
+        cg_kasten(e, 0, di - e, di - e)
+        cg_kasten(0, e, di - e, di - e)
+    } else {
+        vektor.nach(0, 0)
+        vektor.linie(di * vektor.EINS, di * vektor.EINS)
+        vektor.strichen(0)
+        vektor.nach(di * vektor.EINS, 0)
+        vektor.linie(0, di * vektor.EINS)
+        vektor.strichen(0)
+    }
+    if vektor.rastern(vektor.NICHTNULL) == 0 {
+        return
+    }
+    let bw: u64 = vektor.breite()
+    let bh: u64 = vektor.hoehe()
+    if bw * bh > CG_MAX || bw == 0 || bh == 0 {
+        return
+    }
+    let ox: i64 = vektor.ux0()
+    let oy: i64 = vektor.uy0()
+    var r: u64 = 0
+    while r < bh {
+        var c: u64 = 0
+        while c < bw {
+            cg_deck[((k * CG_MAX + r * bw + c)) as usize] =
+                (vektor.deckung(ox + c as i64, oy + r as i64) & 0xFF) as u8
+            c = c + 1
+        }
+        r = r + 1
+    }
+    cg_w[(k) as usize] = bw
+    cg_h[(k) as usize] = bh
+    cg_gut[(k) as usize] = 1
+    cg_bauten = cg_bauten + 1
+}
+
+// Ein Quadrat als Rahmen, in den laufenden Pfad.
+fn cg_kasten(x: i64, y: i64, w: i64, h: i64) {
     vektor.nach(x * vektor.EINS, y * vektor.EINS)
     vektor.linie((x + w) * vektor.EINS, y * vektor.EINS)
     vektor.linie((x + w) * vektor.EINS, (y + h) * vektor.EINS)
     vektor.linie(x * vektor.EINS, (y + h) * vektor.EINS)
     vektor.linie(x * vektor.EINS, y * vektor.EINS)
     vektor.strichen(1)
-    cap_mal(state, farbe, ax0, ay0, ax1, ay1)
 }
 
-// Den gerasterten Pfad in den Bildpuffer mischen, auf den schmutzigen
-// Bereich beschnitten. EINE Stelle, damit der Beschnitt nicht
-// fuenfmal dasteht.
-fn cap_mal(state: u64, farbe: u64, ax0: i64, ay0: i64, ax1: i64,
-    ay1: i64) {
-    if vektor.rastern(vektor.NICHTNULL) == 0 {
-        return
-    }
-    let bx: i64 = vektor.ux0()
-    let by: i64 = vektor.uy0()
-    let bw: i64 = vektor.breite() as i64
-    let bh: i64 = vektor.hoehe() as i64
-    var r: i64 = 0
-    while r < bh {
-        var c: i64 = 0
-        while c < bw {
-            let a: u64 = vektor.deckung(bx + c, by + r)
-            if a != 0 {
-                px_clip(state, bx + c, by + r, farbe, a, ax0, ay0, ax1,
-                    ay1)
-            }
-            c = c + 1
-        }
-        r = r + 1
-    }
+// Wie oft ein fertiges Zeichen benutzt und wie oft eines gerastert
+// wurde. Die zweite Zahl MUSS klein bleiben -- sie ist der Beleg,
+// dass der Speicher wirkt.
+fn cap_glyph_treffer() -> u64 {
+    return cg_treffer
+}
+
+fn cap_glyph_bauten() -> u64 {
+    return cg_bauten
 }
 
 fn cap_px(state: u64, x: i64, y: i64, farbe: u64, ax0: i64, ay0: i64,
