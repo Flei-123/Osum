@@ -82,7 +82,7 @@ export {
     // Kreis im Modulgraphen, und der bleibt ein Baum.
     hid_keys, hid_los, hid_bew,
     dev_reps, dev_arms, dev_cc, dev_dci, dev_iface, dev_generic, dev_roh, dev_rohw, dev_rohn,
-    stille_pruefen, wachen, kbd_taugt, maus_taugt,
+    stille_pruefen, wachen, wiedern, kbd_taugt, maus_taugt,
     stat,
     have_kbd, have_mouse, msc_errors, msc_ios, selftest,
     rangtest, rangtest_max,
@@ -233,6 +233,7 @@ const S_HEAL: u64 = 0x150
 const S_SVCBUSY: u64 = 0x158
 // RUNDE ECHTHARDWARE-6: wie oft der Wachhund nachgesehen hat.
 const S_WACHN: u64 = 0x168
+const S_WIEDERN: u64 = 0x170 // neu bestueckte stumme Endpunkte
 // Wie oft `alloc_dev` leer war -- ein Geraet, fuer das kein Platz mehr
 // da ist, verschwindet sonst spurlos. Justins Brett meldet FUND 5 bei
 // MAX_DEV 4; ob das je angeschlagen hat, stand nirgends.
@@ -328,6 +329,14 @@ const D_ROHN: u64 = 304 // wie viele nicht-leere Berichte es gab
 // gesehen hat. Bewegt er sich zwischen zwei Blicken nicht, wird einmal
 // nachgesehen. Siehe `stille_pruefen`.
 const D_WACH: u64 = 312
+// RUNDE ECHTHARDWARE-6: wie viele Blicke lang dieses Geraet noch KEINEN
+// einzigen Bericht geliefert hat, und wie oft sein Ring deshalb neu
+// bestueckt wurde.
+const D_STUMM: u64 = 320
+const D_WIEDER: u64 = 328
+// Vier Blicke je Sekunde -> rund fuenf Sekunden Stille.
+const WACH_GRENZE: u64 = 20
+const WIEDER_MAX: u64 = 3
 
 const DRV_NONE: u64 = 0
 const DRV_KBD: u64 = 1
@@ -3341,6 +3350,73 @@ fn stille_pruefen(state: u64) {
         xhci.drain(state)
         service(state)
     }
+    // ========================================== RUNDE ECHTHARDWARE-6
+    // UND WENN AUCH DAS NICHTS HILFT: DEN ENDPUNKT NEU AUFSETZEN.
+    //
+    // Justins zweites Foto (15:39, nach 42 Minuten) zeigt
+    // `USB BER 122651` -- die Tastatur lief. Beim Start davor stand
+    // `BER 0`. Der Fehler ist also NICHT dauerhaft, sondern haengt am
+    // Startablauf, und das ist schlimmer als ein harter Fehler: mal
+    // geht sie, mal nicht.
+    //
+    // `drain`+`service` holt eine VERLORENE Meldung nach. Es hilft
+    // nicht, wenn gar kein Block auf dem Ring liegt -- dann gibt es
+    // nichts, was fertig werden koennte, und der Zaehler steht fuer
+    // immer. Genau dieses Bild ist `ARM 1 BER 0` bei laufendem
+    // Endpunkt.
+    //
+    // Deshalb die zweite Stufe: bleibt EIN Geraet mit
+    // Unterbrechungsendpunkt WACH_GRENZE Blicke lang stumm (bei vier
+    // Blicken je Sekunde sind das rund fuenf Sekunden), wird sein
+    // Endpunkt einmal frisch bestueckt. `arm` ist hier richtig und
+    // oben falsch: oben lag moeglicherweise noch ein Block, hier ist
+    // seit fuenf Sekunden nachweislich nichts passiert.
+    //
+    // EINMAL, NICHT IMMER WIEDER: `D_WIEDER` zaehlt die Versuche je
+    // Geraet und deckelt sie. Ein Ring, der sich nach drei Anlaeufen
+    // nicht bewegt, ist kein Ring mehr, den man durch Klingeln
+    // ueberzeugt -- dann ist die Zahl auf der Tafel die Auskunft.
+    var e: u64 = 0
+    while e < MAX_DEV {
+        if dg(state, e, D_USED) != 0 && dg(state, e, D_INTDCI) != 0
+            && dg(state, e, D_REPS) == 0 {
+            ds(state, e, D_STUMM, dg(state, e, D_STUMM) + 1)
+            if dg(state, e, D_STUMM) >= WACH_GRENZE
+                && dg(state, e, D_WIEDER) < WIEDER_MAX {
+                ds(state, e, D_WIEDER, dg(state, e, D_WIEDER) + 1)
+                ds(state, e, D_STUMM, 0)
+                s(state, S_WIEDERN, g(state, S_WIEDERN) + 1)
+                // Der Endpunkt kann angehalten sein, ohne dass je ein
+                // Transfer fertig wurde -- dann hat `service` den
+                // Fehlercode nie gesehen. Also erst fragen, dann
+                // wiederbeleben, dann neu bestuecken.
+                if xhci.ep_halted(state, dg(state, e, D_SLOT),
+                    dg(state, e, D_INTDCI)) {
+                    unstall(state, e, dg(state, e, D_INTDCI))
+                    ds(state, e, D_HEAL, dg(state, e, D_HEAL) + 1)
+                    s(state, S_HEAL, g(state, S_HEAL) + 1)
+                }
+                let ix: u64 = xhci.ep_find(state, dg(state, e, D_SLOT),
+                    dg(state, e, D_INTDCI))
+                if ix < xhci.MAX_EP {
+                    ds(state, e, D_SEQ, xhci.ep_seq(state, ix))
+                }
+                arm(state, e)
+            }
+        } else {
+            ds(state, e, D_STUMM, 0)
+        }
+        e = e + 1
+    }
+}
+
+// Wie oft ein stummer Endpunkt neu bestueckt wurde. Auf der Tafel
+// steht die Zahl als `NEU` in Zeile 18 -- laeuft sie hoch und `BER`
+// bleibt null, hat das Geraet wirklich nichts zu sagen; laeuft sie
+// einmal hoch und `BER` steigt danach, hat die Wiederherstellung
+// gegriffen.
+fn wiedern(state: u64) -> u64 {
+    return g(state, S_WIEDERN)
 }
 
 // Wie oft der Wachhund nachgesehen hat. Steht diese Zahl still und die
