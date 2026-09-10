@@ -57,11 +57,17 @@ def deckung_direkt(k):
                 f[y][t] = 1
                 f[y][D - 1 - t] = 1
     else:
-        for i in range(D):
+        # NACHTRAG: dieselbe Ausrichtung wie kernel/wm.fi nach der
+        # Korrektur -- Kasten der Kantenlaenge kn = D-(sb-1), mittig,
+        # zweite Diagonale nach LINKS verbreitert. Vorher lief die
+        # Verbreiterung beider Diagonalen nach rechts aus dem Kasten
+        # heraus, und in der ersten/letzten Zeile fehlte ein Punkt.
+        kn = D - (sb - 1)
+        off = (D - (kn + sb - 1)) // 2
+        for k in range(kn):
             for t in range(sb):
-                if i + t < D:
-                    f[i][i + t] = 1
-                    f[D - 1 - i][i + t] = 1
+                f[off + k][off + k + t] = 1
+                f[off + k][off + kn - 1 - k + t] = 1
     return f
 
 
