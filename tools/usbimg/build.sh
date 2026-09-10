@@ -344,7 +344,7 @@ fi
 python3 tools/netview/icons.py bauen "$OUT/icons" > "$OUT/icons.log" 2>&1 \
     || { tail -10 "$OUT/icons.log" >&2; fehler "die Symbole lassen sich nicht bauen"; }
 SYMBOLE="state-nocarrier state-noip state-noroute state-online \
-mark-filtered mark-faked mark-none sys-faking tile-fake tile-net tile-hide"
+mark-filtered mark-faked mark-none sys-faking tile-fake tile-net tile-hide tile-dark tile-power tile-tile"
 sagen "symbole     $(echo $SYMBOLE | wc -w) Stueck nach /etc/netview/"
 
 python3 tools/k15/tree.py "$OUT/baum" > "$OUT/baum.log" 2>&1 \
@@ -726,7 +726,8 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /etc/netview/state-noip /etc/netview/state-noroute \
 /etc/netview/mark-filtered /etc/netview/mark-faked /etc/netview/mark-none \
 /etc/netview/sys-faking /etc/netview/tile-fake /etc/netview/tile-net \
-/etc/netview/tile-hide /etc/taskbar.conf /etc/netlauf.sh \
+/etc/netview/tile-hide /etc/netview/tile-dark \
+/etc/netview/tile-power /etc/netview/tile-tile /etc/taskbar.conf /etc/netlauf.sh \
 /etc/theme.conf /etc/shapes/osum /etc/shapes/classic \
 /etc/schemas/day /etc/schemas/night /etc/themes/tageslicht \
 /bin/desktop /bin/taskbar /bin/netview /bin/explorer /boot/osum.mb \
