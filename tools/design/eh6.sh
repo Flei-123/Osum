@@ -260,7 +260,26 @@ echo "platte $(stat -c%s "$OUT/disk.img") Oktette"
 #   tafel     die Diagnosetafel                   -> Befunde G und H
 #   herz      der Puls
 #   KEIN nokbd: der Tastaturtreiber laeuft        -> Befund A pruefbar
-APPEND="osum gfx fbres=${XRES}x${YRES} wm wig desk wmshell wmdauer tafel herz"
+# ================================================ RUNDE ECHTHARDWARE-6
+# `disp` GEHOERT DAZU, UND SEIN FEHLEN HAT PUNKT I VERDECKT.
+#
+# Der Stick faehrt (tools/usbimg/build.sh, Menue 1)
+#     modfs osum gfx disp audio wm wig desk ...
+# `eh5.sh` liess `disp` weg. Ohne dieses Wort setzt `vmode` nie auf,
+# und `do_dispset` (kernel/sysgui.fi) weist JEDEN Aufruf gleich in der
+# ersten Zeile ab:
+#     if !vmode.ready(state) { return sys.neg(errno.E_NODEV) }
+#
+# Gemessen in genau diesem Baum, Helligkeitsregler gezogen:
+#     qs: hell auf =59 rc=-19      (-19 = E_NODEV)
+#     qs: hell ist=20 x=10
+# Der Zug KAM AN -- `auf =59` ist der aus der Zeigerstelle gerechnete
+# Wert --, nur der Systemaufruf nahm ihn nicht. Das ist Justins
+# Punkt I, sauber in seine zwei Haelften zerlegt: Ereignis ja, Wirkung
+# nein.
+#
+# Mit `disp` misst dieser Laeufer denselben Weg wie sein Brett.
+APPEND="osum gfx disp fbres=${XRES}x${YRES} wm wig desk wmshell wmdauer tafel herz"
 APPEND="$APPEND absturzhalt nopuls tz=120 lang=$lang nosched noproc nofs"
 [ -n "$SKAL" ] && APPEND="$APPEND $SKAL"
 [ "$halt" != 0 ] && APPEND="$APPEND wighalt=$halt"
