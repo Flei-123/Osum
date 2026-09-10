@@ -1591,6 +1591,18 @@ fn surface(state: u64) {
     var s_cache: [u8; 12] = "  cached=\0\0\0"
     var s_hit: [u8; 8] = "  hits=\0"
     var s_miss: [u8; 9] = "  miss=\0\0"
+    // RUNDE VEKTOR: die Bildzeit, in EINER Zeile, damit
+    // tools/design/bildzeit.py sie ohne Ratespiel findet.
+    var s_bz: [u8; 12] = "bildzeit: \0\0"
+    var s_bzn: [u8; 4] = "n=\0\0"
+    var s_bzm: [u8; 12] = "  mittel=\0\0\0"
+    var s_bzx: [u8; 9] = "  max=\0\0\0"
+    var s_bzu: [u8; 12] = "  ueber16=\0\0"
+    var s_bzus: [u8; 4] = " us\0"
+    var s_bzh: [u8; 12] = "bildfach: \0\0"
+    var s_bzsp: [u8; 2] = " \0"
+    var s_bzb: [u8; 16] = "  betrieb max=\0\0"
+    var s_bzbu: [u8; 12] = "  ueber16=\0\0"
 
     if !kstate.mode_on(state, kstate.M_WM) {
         // ==================================== RUNDE STARTKNOPF
@@ -2061,6 +2073,45 @@ fn surface(state: u64) {
     serial.dec(ttf.hits(state))
     serial.puts((&s_miss[0]) as u64)
     serial.dec(ttf.misses(state))
+    serial.nl()
+    // RUNDE VEKTOR: DIE BILDZEIT.
+    //
+    // Ohne diese Zeile war "kein Bild ueber 16 ms" eine Behauptung.
+    // Der Mittelwert wird HIER gerechnet und nicht im Auswertskript,
+    // damit beide dieselbe Zahl meinen; n == 0 heisst, es wurde nichts
+    // zusammengesetzt (dann steht 0 da und nicht eine Division durch
+    // null).
+    serial.puts((&s_bz[0]) as u64)
+    serial.puts((&s_bzn[0]) as u64)
+    serial.dec(wm.frame_us_n(state))
+    serial.puts((&s_bzm[0]) as u64)
+    if wm.frame_us_n(state) > 0 {
+        serial.dec(wm.frame_us_sum(state) / wm.frame_us_n(state))
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_bzus[0]) as u64)
+    serial.puts((&s_bzx[0]) as u64)
+    serial.dec(wm.frame_us_max(state))
+    serial.puts((&s_bzus[0]) as u64)
+    serial.puts((&s_bzu[0]) as u64)
+    serial.dec(wm.frame_ueber16(state))
+    serial.nl()
+    // Das Histogramm: acht Faecher, je eine Verdoppelung ab 1 ms.
+    // Ein Mittelwert verschweigt, ob die langen Bilder am Start
+    // liegen oder im Betrieb; diese Zeile sagt es.
+    serial.puts((&s_bzh[0]) as u64)
+    var fi: u64 = 0
+    while fi < 8 {
+        serial.dec(wm.frame_fach(state, fi))
+        serial.puts((&s_bzsp[0]) as u64)
+        fi = fi + 1
+    }
+    serial.puts((&s_bzb[0]) as u64)
+    serial.dec(wm.frame_us_maxw(state))
+    serial.puts((&s_bzus[0]) as u64)
+    serial.puts((&s_bzbu[0]) as u64)
+    serial.dec(wm.frame_ueber16w(state))
     serial.nl()
     serial.puts((&s_wm[0]) as u64)
     serial.puts((&s_win[0]) as u64 + 2)
@@ -3857,7 +3908,7 @@ fn kopf_setzen(state: u64, p: u64, n: u64) {
 // 24 Zeilen sind auf 1440 Bildpunkten ein Band von 582, und 582 * 2
 // ist kleiner als 1440 -- `fb.set_band` nimmt es seit der Runde
 // STARTKNOPF an.
-const TAFEL_ZEILEN: u64 = 24
+const TAFEL_ZEILEN: u64 = 25
 const TAFEL_SPALTEN: u64 = 48
 
 fn tz_text(state: u64, buf: u64, at: u64, t: u64) -> u64 {
@@ -4010,9 +4061,9 @@ const TAFEL_SP: u64 = 48 // Zeichen je gemerkter Zeile
 // Ab hier haengen die Groessen an derselben Zahl wie die Zeilen. Wer
 // `TAFEL_ZEILEN` aendert, aendert HIER mit -- und `tafel_merken` steigt
 // weiterhin vorher aus, wenn die Zeile zu gross ist.
-static mut tafel_txt: [u8; 1152] = [0 as u8; 1152] // TAFEL_ZEILEN * TAFEL_SP
-static mut tafel_len: [u64; 24] = [0 as u64; 24]
-static mut tafel_fg: [u64; 24] = [0 as u64; 24]
+static mut tafel_txt: [u8; 1200] = [0 as u8; 1200] // TAFEL_ZEILEN * TAFEL_SP
+static mut tafel_len: [u64; 25] = [0 as u64; 25]
+static mut tafel_fg: [u64; 25] = [0 as u64; 25]
 static mut tafel_hat: u64 = 0 // steht schon Inhalt bereit?
 static mut tafel_drin: u64 = 0 // Wiedereintrittssperre
 static mut tafel_irq: u64 = 0 // Rufe aus dem Zeitgeber
@@ -5195,6 +5246,68 @@ fn tafel_streichen(state: u64) {
     tafel_merken(19, tp, tn, ufarb)
     tafel_zeile_sagen(state, tp, tn)
 
+    // ---- Zeile 20: DER BILDSPEICHER SAGT SELBST, WAS ER IST ----
+    //
+    // DIE ZEILE, DIE RUNDE 31 BEANTWORTET. Justin sieht auf echter
+    // Hardware eckige Fenster, grobe Symbole und einen gepixelten
+    // Zeiger; im Pruefstand ist die Ecke MESSBAR rund (0 Fuellpunkte
+    // ausserhalb des Radius von 121 geprueften). Zwei Erklaerungen
+    // blieben uebrig, und keine liess sich aus dem Quelltext
+    // entscheiden: ein anderer Bildspeicher-Pfad oder ein anderes
+    // Thema. Geraten wird hier nichts -- die Maschine sagt es selbst:
+    //
+    //   BR/HO  das LOGISCHE Bild, in das gemalt wird
+    //   TF     die TAFEL, also was die Karte wirklich anzeigt.
+    //          Weicht sie von BR/HO ab, wird HOCHGESTRECKT -- und
+    //          genau das frisst runde Ecken, Symbolkanten und den
+    //          Zeiger, alles aus EINER Ursache.
+    //   ZL     die Zeilenbreite (stride). Ist sie groesser als BR*4,
+    //          richtet die Karte aus, und jede Rechnung mit `BR*4`
+    //          liegt zeilenweise daneben.
+    //   T      Farbtiefe in Bit.
+    //   SK     die Vervielfachung der Oberflaeche (uiscale).
+    //   ST     1 = STREIFENBETRIEB. Der Puffer passt nicht in die acht
+    //          2-MiB-Fensterplaetze und wird scheibenweise geschoben.
+    //          Bei 3840x2160x4 (33 177 600 Oktette, sechzehn Kacheln)
+    //          ist das unvermeidlich -- und die Abnahme faehrt nur
+    //          1280x800 und 2560x1440, loest ihn also NIE aus.
+    //
+    // Rot, sobald Tafel und Bild auseinanderfallen: dann wird
+    // gestreckt, und kein Zeichenfehler darunter ist echt.
+    var t24: [u8; 7] = "24 FB \0"
+    var f_x: [u8; 2] = "x\0"
+    var f_tf: [u8; 3] = " T\0"
+    var f_zl: [u8; 3] = " Z\0"
+    var f_t: [u8; 3] = " B\0"
+    var f_sk: [u8; 3] = " S\0"
+    var f_st: [u8; 3] = " R\0"
+    let lw: u64 = fb.width(state)
+    let lh: u64 = fb.height(state)
+    let pw: u64 = fb.panel_w(state)
+    let ph: u64 = fb.panel_h(state)
+    tn = puls_text(state, tp, 0, (&t24[0]) as u64)
+    tn = puls_zahl(state, tp, tn, lw)
+    tn = puls_text(state, tp, tn, (&f_x[0]) as u64)
+    tn = puls_zahl(state, tp, tn, lh)
+    tn = puls_text(state, tp, tn, (&f_tf[0]) as u64)
+    tn = puls_zahl(state, tp, tn, pw)
+    tn = puls_text(state, tp, tn, (&f_x[0]) as u64)
+    tn = puls_zahl(state, tp, tn, ph)
+    tn = puls_text(state, tp, tn, (&f_zl[0]) as u64)
+    tn = puls_zahl(state, tp, tn, fb.pitch(state))
+    tn = puls_text(state, tp, tn, (&f_t[0]) as u64)
+    tn = puls_zahl(state, tp, tn, fb.bpp(state))
+    tn = puls_text(state, tp, tn, (&f_sk[0]) as u64)
+    tn = puls_zahl(state, tp, tn, fb.uiscale(state))
+    tn = puls_text(state, tp, tn, (&f_st[0]) as u64)
+    tn = puls_zahl(state, tp, tn, bnum(fb.stripe(state)))
+    var ffarb: u64 = wm.mess_gruen(state)
+    if lw != pw || lh != ph {
+        ffarb = wm.mess_rot(state)
+    }
+    tafel_merken(24, tp, tn, ffarb)
+    tafel_zeile_sagen(state, tp, tn)
+
     // ---- Zeile 20: DER ENDPUNKT, WIE DER REGLER IHN SIEHT ----
     //
     // Die Zeile darueber zaehlt UNSERE Sicht (Bloecke hin, Meldungen
@@ -5643,8 +5756,8 @@ fn tafel_streichen(state: u64) {
 // unsichtbar geblieben, und die Ampel ist die halbe Aussage der Tafel.
 // RUNDE LEISTE: dieselbe Groesse wie oben, aus demselben Grund.
 static mut tafel_alt: [u8; 1152] = [0 as u8; 1152]
-static mut tafel_altlen: [u64; 24] = [0 as u64; 24]
-static mut tafel_altfg: [u64; 24] = [0 as u64; 24]
+static mut tafel_altlen: [u64; 25] = [0 as u64; 25]
+static mut tafel_altfg: [u64; 25] = [0 as u64; 25]
 static mut tafel_grund: u64 = 0
 // Der Stand des Zusammensetzers beim letzten Anstrich.
 static mut tafel_comp: u64 = 0

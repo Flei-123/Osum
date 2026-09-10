@@ -76,6 +76,7 @@ import time // RUNDE ALLTAG: der Leerlaufzaehler der Sperre
 import arch.arch
 import tile
 import zeiger
+import vektor
 import audio
 
 export {
@@ -122,6 +123,10 @@ export {
     bind_tty, key_tty, tty_of, NO_TTY, term_outs, term_puts_n,
     term_dump,
     poll, composites, blits, pixels, last_us, cursor_on, set_cursor,
+    // RUNDE VEKTOR: die Bildzeit, damit die Abnahme sie holen kann.
+    frame_us_sum, frame_us_n, frame_us_max, frame_us_last, frame_ueber16,
+    frame_fach, frame_us_maxw, frame_ueber16w,
+    cap_glyph_treffer, cap_glyph_bauten,
     shape, set_shape, set_keys,
     downs, moves_seen, hits_seen, win_keys,
     set_fonts, font_ui, font_mono, px_ui, px_mono,
@@ -681,6 +686,25 @@ const S_TICKS: u64 = 0x1128 // wie oft `anim_tick` lief
 // 0x11C8 ist das erste freie Wort hinter S_VERWORF (0x11C0).
 const S_PXSUM: u64 = 0x11C8
 
+// ==================================== ZUSAMMENFUEHRUNG VEKTOR + ECHTHARDWARE-5
+// BEIDE RUNDEN HABEN SICH DIESELBEN WORTE GENOMMEN.
+//
+// ECHTHARDWARE-5 legte S_TOUT/S_TPUT (Terminalzaehler) und die fuenf
+// Woerter des Kantenziehens auf 0x11D0..0x1200; die Bildzeitmessung
+// dieser Runde lag auf DENSELBEN 0x11D0..0x1248. Sechs Worte
+// ueberschnitten sich -- 0x11D0, 0x11D8, 0x11E0, 0x11E8, 0x11F0 und
+// 0x1200. Das haette keinen Uebersetzungsfehler gegeben, sondern das
+// hier: die Bildzeit haette den Ankerwert der gezogenen Kante
+// ueberschrieben, und ein Fenster waere beim Ziehen gesprungen,
+// waehrend die Bildzeitfaecher Unsinn zeigen. Genau die Sorte Fehler,
+// die man auf einem Foto sieht und im Quelltext nicht.
+//
+// AUFGELOEST ZUGUNSTEN VON ECHTHARDWARE-5 AN SEINER STELLE: dessen
+// Zahlen stehen in einem ausgelieferten Abbild und sind auf echtem
+// Blech gemessen; die Bildzeitmessung ist juenger und noch in keinem
+// Abbild. Sie zieht deshalb auf 0x1300..0x1378 um, wo nichts liegt
+// (WM_MAX ist 0x2000). Keine der beiden Runden verliert ein Feld.
+
 // ==================================================== RUNDE ECHTHARDWARE-5
 // WIE VIELE OKTETTE IM TERMINALFENSTER ANGEKOMMEN SIND.
 //
@@ -720,6 +744,69 @@ const SZ_L: u64 = 1
 const SZ_R: u64 = 2
 const SZ_T: u64 = 4
 const SZ_B: u64 = 8
+
+// ---------------------------------------------- RUNDE VEKTOR: DIE BILDZEIT
+//
+// Bis hierher gab es KEINE Zahl fuer "wie lange dauert ein Bild". Es
+// gab die Zahl der Bilder und die der Bildpunkte, aber nicht die Zeit
+// -- und damit liess sich die Auflage "kein Bild ueber 16 ms" weder
+// vorher noch nachher belegen, sondern nur behaupten.
+//
+// Gemessen wird um `compose` herum, also um das Zusammensetzen des
+// Bildes: Hintergrund, Fenster, Leiste, Zeiger. Die Uhr ist der
+// Zyklenzaehler (`time.tsc`), umgerechnet ueber `time.khz`.
+//
+// Vier Zahlen, weil ein Mittelwert allein den schlimmsten Fall
+// versteckt -- und der schlimmste Fall ist der, den ein Mensch als
+// Ruckeln sieht.
+const S_FRUS: u64 = 0x1300    // Summe der Bildzeiten in Mikrosekunden
+const S_FRN: u64 = 0x1308     // wie viele Bilder darin stecken
+const S_FRMAX: u64 = 0x1310   // die laengste Bildzeit
+const S_FRLAST: u64 = 0x1318  // die letzte Bildzeit
+// Wie viele Bilder ueber 16 ms lagen. Die Auflage dieser Runde in
+// einer Zahl: sie MUSS null bleiben.
+const S_FRUEBER: u64 = 0x1320
+// Ein Histogramm, acht Faecher, je eine Verdoppelung: <1ms, <2, <4,
+// <8, <16, <32, <64, darueber. Ein Mittelwert und ein Groesstwert
+// sagen nicht, OB die langen Bilder am Anfang stehen (Moduswechsel,
+// kalter Zwischenspeicher) oder mitten im Betrieb -- und genau das
+// ist der Unterschied zwischen "faellt niemandem auf" und "ruckelt".
+const S_FRH: u64 = 0x1330      // acht Worte, 0x1330..0x1368
+// Die laengste Bildzeit NACH den ersten zehn Bildern. Die ersten zehn
+// sind der Start: erstes Bild ueberhaupt, erster Moduswechsel, erste
+// Schrift. Was danach kommt, ist der Betrieb.
+const S_FRMAXW: u64 = 0x1370
+const S_FRUEBERW: u64 = 0x1378
+
+// ------------------------------- RUNDE VEKTOR: DIE ZEICHEN LIEGEN FERTIG
+//
+// Ein Fensterzeichen ist in jedem Bild dasselbe: dieselbe Form,
+// dieselbe Groesse, dieselbe Kantenglaettung. Es JE BILD neu zu
+// rastern -- Bezier zerlegen, Kanten bauen, vier Abtastzeilen je
+// Bildzeile -- ist Arbeit, deren Ergebnis schon dasteht.
+//
+// GEMESSEN, warum das noetig ist: ohne diesen Speicher stieg bei
+// 2560x1440 und Vervielfachung 2 die mittlere Bildzeit von 4234 auf
+// 5211 Mikrosekunden, und im Betrieb rutschten sechsundzwanzig Bilder
+// aus dem Fach 4..8 ms in das Fach 8..16 ms. Die Formen sind billig,
+// aber sie sind es NICHT dreimal je Fenster und Bild.
+//
+// Vier Zeichen: Minimieren, Maximieren, Wiederherstellen, Schliessen.
+// Je Zeichen die Deckung als ein Oktett pro Bildpunkt, hoechstens
+// 40x40 (10 * Vervielfachung 4).
+const CG_N: u64 = 4
+const CG_MAX: u64 = 1600      // 40 * 40
+
+// RUNDE VEKTOR: die vier gerasterten Zeichen. `cg_gr` ist die
+// Kantenlaenge, mit der sie gerastert wurden -- wechselt die
+// Vervielfachung, gilt der Speicher nicht mehr.
+static mut cg_deck: [u8; 6400] = [0 as u8; 6400]
+static mut cg_gut: [u64; 4] = [0 as u64; 4]
+static mut cg_gr: u64 = 0
+static mut cg_w: [u64; 4] = [0 as u64; 4]
+static mut cg_h: [u64; 4] = [0 as u64; 4]
+static mut cg_treffer: u64 = 0
+static mut cg_bauten: u64 = 0
 
 // Die Arten einer Fensterbewegung. Oeffnen waechst, Schliessen und
 // Minimieren schrumpfen -- der Unterschied zwischen den letzten beiden
@@ -4522,6 +4609,8 @@ fn compose(state: u64) -> u64 {
     // Uebertragen. Alles, was in diesem Lauf gemalt wird, gehoert zu
     // EINEM Bild und traegt dieselbe Signatur.
     ss(state, S_FRAME, gs(state, S_FRAME) + 1)
+    // RUNDE VEKTOR: die Uhr fuer dieses Bild.
+    let t_anfang: u64 = time.tsc()
     // 1. der Hintergrund
     fb.fill(state, x0, y0, x1 - x0, y1 - y0, gs(state, S_DESK))
     // 1b. die Reiter- und Stapelzeilen des Baumes. Sie liegen UNTER den
@@ -4594,7 +4683,90 @@ fn compose(state: u64) -> u64 {
     }
     ss(state, S_COMPOSITES, gs(state, S_COMPOSITES) + 1)
     ss(state, S_PIXELS, gs(state, S_PIXELS) + (x1 - x0) * (y1 - y0))
+    // RUNDE VEKTOR: die Bildzeit. `khz` ist die Zyklenzahl je
+    // Millisekunde; geteilt durch 1000 sind es die je Mikrosekunde.
+    // Ist die Uhr noch nicht geeicht (khz == 0), wird nichts gezaehlt
+    // -- eine Division durch null waere hier ein Absturz im Bildtakt.
+    let kh: u64 = time.khz(state)
+    if kh >= 1000 {
+        let t_ende: u64 = time.tsc()
+        // Als Subtraktion auf der Seite, die gross genug ist: der
+        // Zyklenzaehler kann zwischen zwei Ablesungen nicht kleiner
+        // werden, aber ein Weltwechsel in eine Gastmaschine kann ihn
+        // zuruecksetzen. Dann wird dieses eine Bild nicht gezaehlt.
+        if t_ende > t_anfang {
+            let us: u64 = (t_ende - t_anfang) / (kh / 1000)
+            ss(state, S_FRUS, gs(state, S_FRUS) + us)
+            ss(state, S_FRN, gs(state, S_FRN) + 1)
+            ss(state, S_FRLAST, us)
+            if us > gs(state, S_FRMAX) {
+                ss(state, S_FRMAX, us)
+            }
+            if us > 16000 {
+                ss(state, S_FRUEBER, gs(state, S_FRUEBER) + 1)
+            }
+            // Das Fach: die Verdoppelung, in der diese Zeit liegt.
+            var fach: u64 = 0
+            var g: u64 = 1000
+            while fach < 7 && us >= g {
+                g = g * 2
+                fach = fach + 1
+            }
+            ss(state, S_FRH + fach * 8, gs(state, S_FRH + fach * 8) + 1)
+            // Und dasselbe noch einmal, aber erst ab dem elften Bild.
+            if gs(state, S_FRN) > 10 {
+                if us > gs(state, S_FRMAXW) {
+                    ss(state, S_FRMAXW, us)
+                }
+                if us > 16000 {
+                    ss(state, S_FRUEBERW, gs(state, S_FRUEBERW) + 1)
+                }
+            }
+        }
+    }
     return (x1 - x0) * (y1 - y0)
+}
+
+// ------------------------------------------- RUNDE VEKTOR: DIE BILDZEIT
+//
+// Fuenf Ableser, damit die Abnahme die Zahlen holen kann, ohne die
+// Offsets zu kennen.
+
+fn frame_us_sum(state: u64) -> u64 {
+    return gs(state, S_FRUS)
+}
+
+fn frame_us_n(state: u64) -> u64 {
+    return gs(state, S_FRN)
+}
+
+fn frame_us_max(state: u64) -> u64 {
+    return gs(state, S_FRMAX)
+}
+
+fn frame_us_last(state: u64) -> u64 {
+    return gs(state, S_FRLAST)
+}
+
+fn frame_ueber16(state: u64) -> u64 {
+    return gs(state, S_FRUEBER)
+}
+
+// Ein Fach des Histogramms, 0..7.
+fn frame_fach(state: u64, i: u64) -> u64 {
+    if i > 7 {
+        return 0
+    }
+    return gs(state, S_FRH + i * 8)
+}
+
+// Der Betrieb, also ohne die ersten zehn Bilder.
+fn frame_us_maxw(state: u64) -> u64 {
+    return gs(state, S_FRMAXW)
+}
+
+fn frame_ueber16w(state: u64) -> u64 {
+    return gs(state, S_FRUEBERW)
 }
 
 // WIE VIELE TASTEN BEI DIESEM FENSTER ANGEKOMMEN SIND. Die Zahl ist die
@@ -5155,27 +5327,154 @@ fn cap_face(state: u64, x: i64, y: i64, h: i64, tr: u64, farbe: u64,
 //              versetzte, weil der Knopf dann "wiederherstellen"
 //              heisst und nicht "maximieren"
 //   CAP_CLOSE  ein Kreuz aus zwei Diagonalen
+// ==================================================== RUNDE VEKTOR
+//
+// DIE DREI ZEICHEN, GESTRICHEN STATT GESETZT.
+//
+// Was hier stand, waren gesetzte Bildpunkte: `cap_px` in einer
+// Schleife fuer das Kreuz, `cap_box` aus vier Linien fuer das
+// Quadrat -- und alles auf FESTE ZEHN MAL ZEHN Bildpunkte.
+//
+// Der Fehler daran ist nicht der Geschmack, sondern die Rechnung:
+// `cap_w` ist `CAP_W0 * uisc` und waechst mit der Oberflaeche
+// (wm.fi:3043), die Zehn hier wuchs nicht mit. Bei Vervielfachung 2
+// war die Schaltflaeche sechzig Bildpunkte breit und das Kreuz darin
+// zehn -- ein Fliegendreck in einem Feld. Dazu war die Diagonale eine
+// Treppe aus einzelnen Punkten, weil eine gesetzte Diagonale nichts
+// anderes sein kann.
+//
+// Jetzt: die Groesse ist `10 * uisc`, und die Striche sind STRICHE --
+// `vektor.strichen` mit Breite und runden Enden, gerastert mit
+// derselben Kantenglaettung wie alles andere. Der Aufrufer uebergibt
+// weiter die linke obere Ecke eines Quadrats; wie gross das ist,
+// rechnet diese Funktion selbst.
 fn cap_glyph(state: u64, n: u64, x: i64, y: i64, farbe: u64, i: u64,
     ax0: i64, ay0: i64, ax1: i64, ay1: i64) {
-    if n == CAP_MIN {
-        cap_h(state, x, y + 5, 10, farbe, ax0, ay0, ax1, ay1)
+    let sk: u64 = uisc(state)
+    let d: u64 = 10 * sk
+    // Welches der vier Zeichen? Maximieren und Wiederherstellen sind
+    // zwei verschiedene, auch wenn derselbe Knopf sie zeigt.
+    var k: u64 = n
+    if n == CAP_MAX && (wg(state, i, W_FLAGS) & F_MAXIMIZED) != 0 {
+        k = 3
+    }
+    if k >= CG_N {
         return
     }
-    if n == CAP_MAX {
-        if (wg(state, i, W_FLAGS) & F_MAXIMIZED) != 0 {
-            cap_box(state, x + 2, y, 8, 8, farbe, ax0, ay0, ax1, ay1)
-            cap_box(state, x, y + 2, 8, 8, farbe, ax0, ay0, ax1, ay1)
-            return
+    cg_bauen(state, k, d, sk)
+    if cg_gut[(k) as usize] == 0 {
+        return
+    }
+    cg_treffer = cg_treffer + 1
+    // Die fertige Deckung in den Bildpuffer mischen.
+    let bw: u64 = cg_w[(k) as usize]
+    let bh: u64 = cg_h[(k) as usize]
+    var r: u64 = 0
+    while r < bh {
+        var c: u64 = 0
+        while c < bw {
+            let a: u64 = cg_deck[((k * CG_MAX + r * bw + c)) as usize] as u64
+            if a != 0 {
+                px_clip(state, x + c as i64, y + r as i64, farbe, a,
+                    ax0, ay0, ax1, ay1)
+            }
+            c = c + 1
         }
-        cap_box(state, x, y, 10, 10, farbe, ax0, ay0, ax1, ay1)
+        r = r + 1
+    }
+}
+
+// EIN ZEICHEN RASTERN -- aber nur, wenn es noch nicht dasteht.
+//
+// Wechselt die Vervielfachung, gilt der ganze Speicher nicht mehr:
+// ein Zeichen in Zielgroesse 20 ist kein vergroessertes Zeichen der
+// Groesse 10, und genau darum geht es in dieser Runde.
+fn cg_bauen(state: u64, k: u64, d: u64, sk: u64) {
+    if cg_gr != d {
+        var j: u64 = 0
+        while j < CG_N {
+            cg_gut[(j) as usize] = 0
+            j = j + 1
+        }
+        cg_gr = d
+    }
+    if cg_gut[(k) as usize] == 1 {
         return
     }
-    var k: i64 = 0
-    while k < 10 {
-        cap_px(state, x + k, y + k, farbe, ax0, ay0, ax1, ay1)
-        cap_px(state, x + k, y + 9 - k, farbe, ax0, ay0, ax1, ay1)
-        k = k + 1
+    let di: i64 = d as i64
+    // Die Strichbreite: anderthalb Bildpunkte mal Vervielfachung. Ein
+    // Haarstrich verschwindet auf einem dichten Schirm.
+    let sb: i64 = (3 * sk as i64 * vektor.EINS) / 2
+    // Das Zeichen wird bei (0,0) gebaut und liegt danach bei (0,0) in
+    // der Tafel -- der Aufrufer verschiebt beim Malen.
+    vektor.pfad_neu()
+    vektor.strich_breite(sb)
+    vektor.strich_ende(vektor.ENDE_RUND)
+    vektor.strich_ecke(vektor.ECKE_RUND)
+    if k == CAP_MIN {
+        vektor.nach(0, (di / 2) * vektor.EINS)
+        vektor.linie(di * vektor.EINS, (di / 2) * vektor.EINS)
+        vektor.strichen(0)
+    } else if k == CAP_MAX {
+        cg_kasten(0, 0, di, di)
+    } else if k == 3 {
+        // Wiederherstellen: zwei versetzte Quadrate.
+        let e: i64 = 2 * sk as i64
+        cg_kasten(e, 0, di - e, di - e)
+        cg_kasten(0, e, di - e, di - e)
+    } else {
+        vektor.nach(0, 0)
+        vektor.linie(di * vektor.EINS, di * vektor.EINS)
+        vektor.strichen(0)
+        vektor.nach(di * vektor.EINS, 0)
+        vektor.linie(0, di * vektor.EINS)
+        vektor.strichen(0)
     }
+    if vektor.rastern(vektor.NICHTNULL) == 0 {
+        return
+    }
+    let bw: u64 = vektor.breite()
+    let bh: u64 = vektor.hoehe()
+    if bw * bh > CG_MAX || bw == 0 || bh == 0 {
+        return
+    }
+    let ox: i64 = vektor.ux0()
+    let oy: i64 = vektor.uy0()
+    var r: u64 = 0
+    while r < bh {
+        var c: u64 = 0
+        while c < bw {
+            cg_deck[((k * CG_MAX + r * bw + c)) as usize] =
+                (vektor.deckung(ox + c as i64, oy + r as i64) & 0xFF) as u8
+            c = c + 1
+        }
+        r = r + 1
+    }
+    cg_w[(k) as usize] = bw
+    cg_h[(k) as usize] = bh
+    cg_gut[(k) as usize] = 1
+    cg_bauten = cg_bauten + 1
+}
+
+// Ein Quadrat als Rahmen, in den laufenden Pfad.
+fn cg_kasten(x: i64, y: i64, w: i64, h: i64) {
+    vektor.nach(x * vektor.EINS, y * vektor.EINS)
+    vektor.linie((x + w) * vektor.EINS, y * vektor.EINS)
+    vektor.linie((x + w) * vektor.EINS, (y + h) * vektor.EINS)
+    vektor.linie(x * vektor.EINS, (y + h) * vektor.EINS)
+    vektor.linie(x * vektor.EINS, y * vektor.EINS)
+    vektor.strichen(1)
+}
+
+// Wie oft ein fertiges Zeichen benutzt und wie oft eines gerastert
+// wurde. Die zweite Zahl MUSS klein bleiben -- sie ist der Beleg,
+// dass der Speicher wirkt.
+fn cap_glyph_treffer() -> u64 {
+    return cg_treffer
+}
+
+fn cap_glyph_bauten() -> u64 {
+    return cg_bauten
 }
 
 fn cap_px(state: u64, x: i64, y: i64, farbe: u64, ax0: i64, ay0: i64,
@@ -5503,7 +5802,7 @@ const MESS_SPALTEN: u64 = 48
 // einen RIEGEL: `messzeile` und `messzeile_x` nehmen keine Zeilennummer
 // mehr an, die es nicht gibt. Eine falsche Zahl malt dann nichts, und
 // nichts malen ist immer besser als woanders hinmalen.
-const MESS_ZEILEN: u64 = 24
+const MESS_ZEILEN: u64 = 25
 
 fn messk(state: u64) -> u64 {
     // Eine Stufe groesser als die Oberflaeche, hoechstens 4. Auf
