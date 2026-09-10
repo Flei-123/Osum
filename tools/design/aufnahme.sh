@@ -103,6 +103,7 @@ for a in "$@"; do
         clock_lines=*) clock_lines=${a#*=} ;;
         hide_missing=*) hide_missing=${a#*=} ;;
         pins=*) pins=${a#*=} ;;
+        battfake=*) battfake=${a#*=} ;;
         clock_seconds=*) clock_seconds=${a#*=} ;;
         scheme=*) scheme=${a#*=} ;;
         mode=*) mode=${a#*=} ;;
@@ -117,6 +118,10 @@ for a in "$@"; do
         *) echo "unbekannt: $a" >&2; exit 2 ;;
     esac
 done
+# RUNDE LEISTE-RECHTS: `battfake=ja` taeuscht dem Kern einen Akku vor,
+# damit sich Symbol und Prozentzahl UEBERHAUPT fotografieren lassen --
+# dieses QEMU kann keinen Akku nachbilden.
+[ "${battfake:-}" = ja ] && extra="$extra battfake"
 XRES=${res%x*}
 YRES=${res#*x}
 SKAL=""
