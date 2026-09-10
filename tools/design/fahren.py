@@ -157,6 +157,36 @@ class Fahrer:
             dy -= sy
         self.x, self.y = x, y
 
+    # ==================================== RUNDE ECHTHARDWARE-5
+    # `nahe=True` -- OHNE DEN UMWEG UEBER DIE ECKE.
+    #
+    # `fahre` faehrt IMMER erst nach 0,0 und von dort zum Ziel; anders
+    # laesst sich mit relativen PS/2-Bewegungen nicht absolut zielen.
+    # Fuer das Kontrollzentrum ist dieser Umweg toedlich: es pollt den
+    # Zeiger und schliesst, sobald eine Taste AUSSERHALB heruntergeht
+    # -- und schon der Weg durch die Ecke reicht, damit es sich fuer
+    # ueberfluessig haelt (`qs: closed by outside`, gemessen in genau
+    # diesem Lauf).
+    #
+    # Mit `nahe` wird vom ZULETZT bekannten Punkt aus relativ gefahren.
+    # Das setzt voraus, dass die Buchfuehrung stimmt -- sie tut es,
+    # solange nur diese Klasse den Zeiger bewegt.
+    def klick_nahe(self, x, y, mal=1, taste=1):
+        dx, dy = x - self.x, y - self.y
+        while dx or dy:
+            sx = max(-120, min(120, dx))
+            sy = max(-120, min(120, dy))
+            self.cmd("mouse_move %d %d" % (sx, sy))
+            dx -= sx
+            dy -= sy
+        self.x, self.y = x, y
+        time.sleep(0.35)
+        for _ in range(mal):
+            self.cmd("mouse_button %d" % taste)
+            time.sleep(0.05)
+            self.cmd("mouse_button 0")
+        time.sleep(1.2)
+
     def klick(self, x, y, mal=1, taste=1):
         self.fahre(x, y)
         time.sleep(0.35)
@@ -282,6 +312,35 @@ class Fahrer:
             return None
         return (int(m.group(1)) + BORDER, int(m.group(2)) + TITLE_H)
 
+    # RUNDE ECHTHARDWARE-5: die Geometrie EINES Fensters, so wie der
+    # Server sie zuletzt gemeldet hat. Rahmen und Titelhoehe stehen
+    # nicht in der Zeile -- sie sind BORDER/TITLE_H mal der
+    # Vervielfachung, und die liest sich aus der Leistenhoehe ab
+    # (`taskbar: geom ... h=`): 40 heisst 1, 80 heisst 2.
+    def fenstergeom(self, wid):
+        t = lies(self.serial)
+        m = None
+        for m in re.finditer(
+                r"wm: fen i=\d+ id=%d x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % wid,
+                t):
+            pass
+        if m is None:
+            return None
+        x, y, w, h = (int(m.group(i)) for i in (1, 2, 3, 4))
+        # 64-Bit-Zweierkomplement: der Server meldet negative Werte
+        # als sehr grosse Zahlen.
+        if x > (1 << 63):
+            x -= (1 << 64)
+        if y > (1 << 63):
+            y -= (1 << 64)
+        sk = 1
+        g = None
+        for g in re.finditer(r"taskbar: geom edge=\d+ x=\d+ y=\d+ w=\d+ h=(\d+)", t):
+            pass
+        if g is not None and int(g.group(1)) >= 60:
+            sk = 2
+        return (x, y, w, h, 2 * sk, 22 * sk)
+
     def rechteck(self, name):
         t = lies(self.serial)
 
@@ -305,6 +364,21 @@ class Fahrer:
         # genau das in dieser Runde zweimal getan und zweimal
         # danebengegriffen -- beide Male lag der Griff ausserhalb des
         # Panels, das sich daraufhin voellig zu Recht schloss.
+        # ==================================== RUNDE ECHTHARDWARE-5
+        # `qstm` und `qsset` -- die zwei Knopfzeilen des
+        # Kontrollzentrums, so wie es sie SELBST meldet:
+        #     qs: zeile tm y=987 h=32
+        # Grund siehe qs.fi: `qs: text ... y=321` ist die Grundlinie
+        # der Schrift und nicht das Feld; wer darauf klickt, trifft
+        # daneben.
+        if name in ("qstm", "qsset"):
+            wort = "tm" if name == "qstm" else "set"
+            m = letzte(r"qs: zeile %s y=(\d+) h=(\d+)" % wort)
+            g = letzte(r"qs: geo x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            if m is None or g is None:
+                return None
+            y0, hh = int(m.group(1)), int(m.group(2))
+            return (int(g.group(1)) + 8, y0, int(g.group(3)) - 16, hh)
         if name == "hellspur":
             m = letzte(r"qs: hell spur von=(\d+) bis=(\d+) ym=(\d+)")
             if m is None:
@@ -527,6 +601,67 @@ def main():
             x1, y1 = (int(v) for v in t[1].split(","))
             f.ziehe(x0, y0, x1, y1)
             print("ziehe %d,%d -> %d,%d" % (x0, y0, x1, y1))
+        # ==================================== RUNDE ECHTHARDWARE-5
+        # `ziehkante <id> <kante> <dx>,<dy>` -- an einer KANTE des
+        # Fensters <id> ziehen, die Stelle aus der zuletzt gemeldeten
+        # Geometrie gerechnet.
+        #
+        # WARUM NICHT MIT ZAHLEN AUS DEM DREHBUCH. Justins Befund D
+        # betrifft alle vier Kanten und alle vier Ecken; die Greifzone
+        # ist `GRIP0 * uiscale` = 8 bzw. 16 Bildpunkte breit. Wer sie
+        # mit getippten Zahlen sucht, trifft nach dem ERSTEN Ziehen
+        # daneben, weil das Fenster dann woanders steht -- genau das ist
+        # mir in dieser Runde zweimal passiert und hat zwei Laeufe
+        # gekostet. Hier wird die Stelle JEDES MAL neu aus
+        # `wm: fen ... x= y= w= h=` gerechnet.
+        #
+        # Kanten: l r o u  und die Ecken lo ro lu ru.
+        elif b == "ziehkante":
+            t = arg.split()
+            wid = int(t[0])
+            kante = t[1]
+            dx, dy = (int(v) for v in t[2].split(","))
+            g = f.fenstergeom(wid)
+            if g is None:
+                print("ziehkante %d -> KEINE GEOMETRIE gemeldet" % wid)
+                fehler += 1
+                continue
+            wx, wy, ww, wh, bo, ti = g
+            # Die Arbeitsflaeche liegt bei (wx+bo, wy+ti); die
+            # Greifzone ist der Rand darum. In die MITTE der Zone.
+            lx = wx + bo - 2
+            rx = wx + bo + ww + 1
+            oy = wy + 2
+            uy = wy + ti + wh + 1
+            mx = wx + bo + ww // 2
+            my = wy + ti + wh // 2
+            stelle = {"l": (lx, my), "r": (rx, my), "o": (mx, oy),
+                      "u": (mx, uy), "lo": (lx, oy), "ro": (rx, oy),
+                      "lu": (lx, uy), "ru": (rx, uy)}
+            if kante not in stelle:
+                print("ziehkante: unbekannte Kante %s" % kante)
+                fehler += 1
+                continue
+            x0, y0 = stelle[kante]
+            f.ziehe(x0, y0, x0 + dx, y0 + dy)
+            print("ziehkante id=%d %s von %d,%d um %d,%d "
+                  "(fenster %d,%d %dx%d bo=%d ti=%d)"
+                  % (wid, kante, x0, y0, dx, dy, wx, wy, ww, wh, bo, ti))
+        # RUNDE ECHTHARDWARE-5: klicken OHNE den Weg ueber die Ecke.
+        # Fuer alles, was sich bei einem Druck daneben schliesst --
+        # also fuer das Kontrollzentrum.
+        elif b == "klicknah":
+            if "," in arg:
+                x, y = (int(v) for v in arg.split(","))
+            else:
+                r = f.rechteck(arg)
+                if r is None:
+                    print("klicknah %s -> KEIN RECHTECK GEMELDET" % arg)
+                    fehler += 1
+                    continue
+                x, y = r[0] + r[2] // 2, r[1] + r[3] // 2
+            f.klick_nahe(x, y)
+            print("klicknah %s -> %d,%d" % (arg, x, y))
         elif b == "zieheauf":
             t = arg.split()
             r = f.rechteck(t[0])

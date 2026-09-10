@@ -119,7 +119,7 @@ export {
     fill, text, blit_in, flush_win, hit,
     ev_push, ev_pop, ev_waiting,
     on_mouse, on_key, term_write, term_out, term_cols, term_rows, term_cx, term_cy,
-    bind_tty, key_tty, tty_of, NO_TTY,
+    bind_tty, key_tty, tty_of, NO_TTY, term_outs, term_puts_n,
     poll, composites, blits, pixels, last_us, cursor_on, set_cursor,
     shape, set_shape, set_keys,
     downs, moves_seen, hits_seen, win_keys,
@@ -676,6 +676,46 @@ const S_TICKS: u64 = 0x1128 // wie oft `anim_tick` lief
 // GEMESSEN von tools/paint/run.sh ("Skalare ueberschneiden sich").
 // 0x11C8 ist das erste freie Wort hinter S_VERWORF (0x11C0).
 const S_PXSUM: u64 = 0x11C8
+
+// ==================================================== RUNDE ECHTHARDWARE-5
+// WIE VIELE OKTETTE IM TERMINALFENSTER ANGEKOMMEN SIND.
+//
+// Justins Befund B: das Fenster "Terminal -- sh" ist LEER, obwohl die
+// Tafel `sh14` meldet -- die Shell laeuft also. Zwischen der Shell und
+// der Zeichenflaeche versickert die Ausgabe, und ohne eine Zahl ist
+// nicht zu unterscheiden, ob (a) nie ein Oktett hier ankommt, (b) sie
+// ankommen und in kein Feld gemalt werden, oder (c) sie gemalt und
+// gleich wieder ueberdeckt werden. Diese zwei Zaehler trennen die
+// Faelle: `S_TOUT` zaehlt JEDEN Ruf von `term_out`, `S_TPUT` nur die,
+// die wirklich eine Zelle gesetzt haben.
+const S_TOUT: u64 = 0x11D0
+const S_TPUT: u64 = 0x11D8
+
+// ==================================================== RUNDE ECHTHARDWARE-5
+// AN WELCHER KANTE DIE GROESSE GEZOGEN WIRD -- UND WOGEGEN.
+//
+// Justins Befund D: "Ziehen funktioniert nur an der rechten Kante."
+// Das stimmte, und es stand so im Quelltext: `on_mouse` nahm nur
+// `am_rechts || am_unten` an, und `resize_win` rechnet die neue
+// Groesse IMMER aus der linken oberen Ecke (`x - win_x`). Damit KANN
+// die linke und die obere Kante nicht gehen -- eine Bewegung nach
+// links macht das Fenster dort schmaler statt breiter.
+//
+// `S_SZEDGE` ist eine Bitmaske: 1 links, 2 rechts, 4 oben, 8 unten.
+// Eine Ecke ist zwei Bits gleichzeitig, und genau das macht "beide
+// Achsen zugleich" aus. Die vier Ankerwerte halten die
+// GEGENUEBERLIEGENDE Kante fest: zieht man links, bleibt rechts stehen,
+// und das Fenster springt nicht.
+const S_SZEDGE: u64 = 0x11E0
+const S_SZAX: u64 = 0x11E8 // die festgehaltene x-Kante (Bildschirm)
+const S_SZAY: u64 = 0x11F0 // die festgehaltene y-Kante
+const S_SZAW: u64 = 0x11F8 // Breite beim Anfassen
+const S_SZAH: u64 = 0x1200 // Hoehe beim Anfassen
+
+const SZ_L: u64 = 1
+const SZ_R: u64 = 2
+const SZ_T: u64 = 4
+const SZ_B: u64 = 8
 
 // Die Arten einer Fensterbewegung. Oeffnen waechst, Schliessen und
 // Minimieren schrumpfen -- der Unterschied zwischen den letzten beiden
@@ -6055,15 +6095,125 @@ fn on_mouse(state: u64) {
             // RUNDE DESKTOP: der Rand kommt aus `inx`/`iny` und nicht
             // aus BORDER/TITLE_H -- ein Fenster ohne Schmuck (F_NODECO,
             // Schreibtisch und Taskleiste) hat keinen.
-            var nw: i64 = x - win_x(state, i) - inx(state, i) as i64
-            var nh: i64 = y - win_y(state, i) - iny(state, i) as i64
-            if nw < 32 {
-                nw = 32
+            // ==================================== RUNDE ECHTHARDWARE-5
+            // GEGEN DEN ANKER RECHNEN, NICHT GEGEN DIE LINKE OBERE ECKE.
+            //
+            // Hier stand `x - win_x(...)`: die neue Breite war immer der
+            // Abstand vom LINKEN Rand zum Zeiger. Fuer die rechte Kante
+            // ist das richtig; fuer die linke ist es genau verkehrt
+            // herum, und fuer die obere ebenso. Das ist der ganze Grund,
+            // warum bei Justin nur rechts (und unten) etwas passierte.
+            //
+            // Jetzt: die angefasste Kante folgt dem Zeiger, die
+            // GEGENUEBERLIEGENDE steht fest. Aus beiden ergibt sich die
+            // Groesse -- und, wenn links oder oben gezogen wurde, ein
+            // neuer Ursprung. Beides wird in EINEM Schritt gesetzt,
+            // sonst zappelt das Fenster.
+            let kanten: u64 = gs(state, S_SZEDGE)
+            let ax: i64 = gs(state, S_SZAX) as i64
+            let ay: i64 = gs(state, S_SZAY) as i64
+            let ix: i64 = inx(state, i) as i64
+            let iy: i64 = iny(state, i) as i64
+            var nw: i64 = gs(state, S_SZAW) as i64
+            var nh: i64 = gs(state, S_SZAH) as i64
+            var nx: i64 = win_x(state, i)
+            var ny: i64 = win_y(state, i)
+            if (kanten & SZ_R) != 0 {
+                nw = x - (win_x(state, i) + ix)
+            } else if (kanten & SZ_L) != 0 {
+                // Die rechte Kante steht bei `ax`; der Zeiger ist die
+                // neue linke. Die Breite ist der Abstand dazwischen.
+                nw = ax - x
             }
-            if nh < 16 {
-                nh = 16
+            if (kanten & SZ_B) != 0 {
+                nh = y - (win_y(state, i) + iy)
+            } else if (kanten & SZ_T) != 0 {
+                nh = ay - y
             }
-            resize_win(state, i, nw as u64, nh as u64)
+            // DIE MINDESTGROESSE, UND ZWAR VOR DEM VERSCHIEBEN.
+            // Wer sie erst danach begrenzt, laesst das Fenster beim
+            // Unterschreiten weiterwandern, obwohl es nicht mehr
+            // schrumpft -- das ist das "Springen", das Justin
+            // ausdruecklich nicht will.
+            // DIESELBE UNTERGRENZE, DIE `resize_win` SELBST ZIEHT
+            // (32x16 mit Schmuck, 1x1 ohne) -- hier noch einmal, weil
+            // sie VOR dem Verschieben gebraucht wird und nicht erst
+            // beim Ablehnen.
+            var minw: i64 = 32
+            var minh: i64 = 16
+            if !win_deco(state, i) {
+                minw = 1
+                minh = 1
+            }
+            if nw < minw {
+                nw = minw
+            }
+            if nh < minh {
+                nh = minh
+            }
+            if (kanten & SZ_L) != 0 {
+                nx = ax - nw - ix
+            }
+            if (kanten & SZ_T) != 0 {
+                ny = ay - nh - iy
+            }
+            // ==================================== RUNDE ECHTHARDWARE-5
+            // NICHT UEBER DEN LINKEN ODER OBEREN RAND HINAUS.
+            //
+            // GEMESSEN in dieser Runde: zieht man die linke Kante ueber
+            // den Bildschirmrand, wird `nx` negativ (der Server meldete
+            // `x=18446744073709551608`, also -8 als Zweierkomplement),
+            // und der naechste Anstrich rechnet mit einer Adresse
+            // ausserhalb des Rahmenpuffers. Ein Fenster, das man aus
+            // dem Schirm herausziehen kann, ist kein Fenster mehr.
+            //
+            // Also: der Ursprung bleibt auf dem Schirm, und die Breite
+            // wird entsprechend gekappt -- die angefasste Kante bleibt
+            // damit unter dem Zeiger, bis der Rand erreicht ist, und
+            // steht dann still.
+            if (kanten & SZ_L) != 0 && nx < 0 {
+                nw = nw + nx
+                nx = 0
+                if nw < minw {
+                    nw = minw
+                }
+            }
+            if (kanten & SZ_T) != 0 && ny < 0 {
+                nh = nh + ny
+                ny = 0
+                if nh < minh {
+                    nh = minh
+                }
+            }
+            // RUNDE ECHTHARDWARE-5: die Spur des Ziehens. Ohne sie
+            // ist "die Groesse aendert sich nicht" nicht von "die
+            // Kante wurde nie angefasst" zu unterscheiden.
+            var s_sz: [u8; 12] = "wm: zieh k=\0"
+            var s_szw: [u8; 5] = " w=\0\0"
+            var s_szh: [u8; 5] = " h=\0\0"
+            var s_szx: [u8; 5] = " x=\0\0"
+            var s_szr: [u8; 6] = " rc=\0\0"
+            serial.puts((&s_sz[0]) as u64)
+            serial.dec(kanten)
+            serial.puts((&s_szw[0]) as u64)
+            serial.dec(nw as u64)
+            serial.puts((&s_szh[0]) as u64)
+            serial.dec(nh as u64)
+            serial.puts((&s_szx[0]) as u64)
+            serial.dec(nx as u64)
+            let ok: bool = resize_win(state, i, nw as u64, nh as u64)
+            serial.puts((&s_szr[0]) as u64)
+            if ok {
+                serial.dec(1)
+            } else {
+                serial.dec(0)
+            }
+            serial.nl()
+            if ok {
+                if (kanten & SZ_L) != 0 || (kanten & SZ_T) != 0 {
+                    move_win(state, i, nx, ny)
+                }
+            }
             return
         }
     }
@@ -6145,6 +6295,72 @@ fn on_mouse(state: u64) {
                     destroy(state, i)
                     return
                 }
+                // ================================ RUNDE ECHTHARDWARE-5
+                // ALLE VIER KANTEN UND ALLE VIER ECKEN.
+                //
+                // Justins Befund D, woertlich: "Ziehen funktioniert nur
+                // an der rechten Kante." Hier stand `am_rechts ||
+                // am_unten` -- die linke und die obere Kante wurden gar
+                // nicht erst angefasst. Und sie HAETTEN auch nicht
+                // funktionieren koennen: `resize_win` rechnet die neue
+                // Groesse aus der linken oberen Ecke, die beim Ziehen an
+                // der linken Kante ja gerade die ist, die sich bewegt.
+                //
+                // Also wird jetzt gemerkt, WELCHE Kanten angefasst
+                // wurden (Bitmaske) und WO die gegenueberliegende Kante
+                // steht (`S_SZAX`/`S_SZAY`). Die Bewegung rechnet dann
+                // gegen diesen Anker: die festgehaltene Kante bleibt
+                // stehen, das Fenster springt nicht, und eine Ecke
+                // aendert beide Achsen zugleich, weil zwei Bits gesetzt
+                // sind.
+                //
+                // DIESE PRUEFUNG STEHT VOR DEM ZIEHEN DER TITELLEISTE,
+                // und das ist der eigentliche Fix. Stuende sie danach,
+                // waere die OBERE Kante nie erreichbar: `lokal_y < 0`
+                // ist die Titelleiste, und die faengt jeden Klick dort
+                // ab. Ein Mensch, der ein Fenster oben groesser ziehen
+                // will, greift genau dorthin.
+                //
+                // `lokal_y` ist relativ zur ARBEITSFLAECHE: 0 ist deren
+                // Oberkante, die Titelleiste liegt bei negativem
+                // `lokal_y`, und der aeussere Rahmen noch darueber. Die
+                // obere Greifkante ist deshalb der schmale Streifen
+                // GANZ OBEN im Schmuck -- nicht die ganze Titelleiste,
+                // sonst liesse sich das Fenster nicht mehr schieben.
+                let rand: i64 = grip(state) as i64
+                let iw: i64 = wg(state, i, W_W) as i64
+                let ih: i64 = wg(state, i, W_H) as i64
+                let oben: i64 = 0 - iny(state, i) as i64
+                var kanten: u64 = 0
+                if lokal_x > 0 - rand && lokal_x < rand {
+                    kanten = kanten | SZ_L
+                }
+                if lokal_x >= iw - rand && lokal_x < iw + rand {
+                    kanten = kanten | SZ_R
+                }
+                if lokal_y >= oben && lokal_y < oben + rand {
+                    kanten = kanten | SZ_T
+                }
+                if lokal_y >= ih - rand && lokal_y < ih + rand {
+                    kanten = kanten | SZ_B
+                }
+                // Innerhalb des Fensters SAMT Schmuck -- weiter aussen
+                // gehoert der Klick nicht mehr diesem Fenster.
+                let im_rahmen: bool = lokal_x > 0 - rand
+                    && lokal_y >= oben
+                    && lokal_x < iw + rand && lokal_y < ih + rand
+                if im_rahmen && kanten != 0 {
+                    ss(state, S_SIZING, i + 1)
+                    ss(state, S_SZEDGE, kanten)
+                    // Die Kante, die STEHENBLEIBT, in Bildschirmmass.
+                    ss(state, S_SZAX,
+                        (win_x(state, i) + inx(state, i) as i64 + iw) as u64)
+                    ss(state, S_SZAY,
+                        (win_y(state, i) + iny(state, i) as i64 + ih) as u64)
+                    ss(state, S_SZAW, iw as u64)
+                    ss(state, S_SZAH, ih as u64)
+                    return
+                }
                 if lokal_y < 0 {
                     // die Titelleiste: ziehen
                     // RUNDE TILING: wer aus dem Baum gezogen wird, muss
@@ -6170,16 +6386,6 @@ fn on_mouse(state: u64) {
                 // Jetzt ist der ganze RAND ein Griff: die rechte
                 // Kante, die untere Kante und die Ecke dazwischen.
                 // Das ist die Bedienung, die jedes andere System hat.
-                let rand: i64 = grip(state) as i64
-                let am_rechts: bool = lokal_x
-                    >= wg(state, i, W_W) as i64 - rand
-                let am_unten: bool = lokal_y
-                    >= wg(state, i, W_H) as i64 - rand
-                let im_fenster: bool = lokal_x >= 0 && lokal_y >= 0
-                if im_fenster && (am_rechts || am_unten) {
-                    ss(state, S_SIZING, i + 1)
-                    return
-                }
             }
             ss(state, S_DOWNS, gs(state, S_DOWNS) + 1)
             // RUNDE TON: der Klickton. HIER, im Fensterserver, weil
@@ -6618,11 +6824,22 @@ fn key_tty(state: u64) -> u64 {
 
 // EIN Oktett in ein Terminalfenster. Der Weg von `tty.emit`.
 fn term_out(state: u64, i: u64, c: u64) {
+    ss(state, S_TOUT, gs(state, S_TOUT) + 1)
     if !valid(state, i) || wg(state, i, W_KIND) != K_TERM {
         return
     }
+    ss(state, S_TPUT, gs(state, S_TPUT) + 1)
     term_putc(state, i, c)
     damage_win(state, i)
+}
+
+// Die zwei Zaehler nach aussen, fuer die Tafel und die Abnahme.
+fn term_outs(state: u64) -> u64 {
+    return gs(state, S_TOUT)
+}
+
+fn term_puts_n(state: u64) -> u64 {
+    return gs(state, S_TPUT)
 }
 
 fn diag1(state: u64) -> u64 {
