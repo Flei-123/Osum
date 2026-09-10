@@ -84,6 +84,8 @@ export {
     M_SHADOW, M_SHADOW_R, M_DIVIDER, M_FOCUS, M_COUNT,
     M_SP_XS, M_SP_S, M_SP_M, M_SP_L, M_GRAD, M_TONE,
     M_SHADOW2, M_SHADOW_R2, M_CAPTION, space, shade, grad_room,
+    // RUNDE ECHTHARDWARE-6: der Schattenschalter.
+    shadow_an, shadow_wert, SHDW_AUS, SHDW_AN,
     SHAPE_CLASSIC, SHAPE_MODERN,
     // RUNDE OBERFLAECHE: die fuenfte Schicht -- Schrift, Hoehe, Zeit.
     M_FONT, M_MOTION,
@@ -3276,6 +3278,7 @@ fn copy_bounded(dst: u64, src: u64, n: u64, max: u64) {
 fn scheme_key(kp: u64, kn: u64, vp: u64, vn: u64) -> bool {
     var k_name: [u8; 5] = "name\0"
     var k_mode: [u8; 5] = "mode\0"
+    var k_shadow: [u8; 7] = "shadow\0"
     var k_contrast: [u8; 9] = "contrast\0"
     var k_accent: [u8; 7] = "accent\0"
     var k_danger: [u8; 7] = "danger\0"
@@ -3287,6 +3290,18 @@ fn scheme_key(kp: u64, kn: u64, vp: u64, vn: u64) -> bool {
 
     if name_eq(kp, kn, (&k_name[0 as usize]) as u64) {
         copy_bounded((&sch_name[0 as usize]) as u64, vp, vn, 32)
+        return true
+    }
+    // RUNDE ECHTHARDWARE-6: der Schattenschalter. `on`/`1` schaltet
+    // ihn an, alles andere aus -- und nicht gesetzt heisst aus.
+    if name_eq(kp, kn, (&k_shadow[0 as usize]) as u64) {
+        var v_on: [u8; 3] = "on\0"
+        var v_eins: [u8; 2] = "1\0"
+        set_shadow = SHDW_AUS
+        if name_eq(vp, vn, (&v_on[0 as usize]) as u64)
+            || name_eq(vp, vn, (&v_eins[0 as usize]) as u64) {
+            set_shadow = SHDW_AN
+        }
         return true
     }
     if name_eq(kp, kn, (&k_mode[0 as usize]) as u64) {
@@ -3357,6 +3372,48 @@ fn scheme_key(kp: u64, kn: u64, vp: u64, vn: u64) -> bool {
         }
     }
     return false
+}
+
+// ============================================== RUNDE ECHTHARDWARE-6
+// DER SCHATTEN IST EIN SCHALTER, UND ER STEHT AUF AUS.
+//
+// Justin hat die Diagnose selbst gestellt: die Kammstreifen folgen den
+// Fensterkanten, sie entstehen beim Vergroessern und beim Verschieben,
+// und der Schatten ist das Problem. Die `sfence`-Massnahme der
+// Vorrunde hat sie NICHT beseitigt -- die Erklaerung ueber die
+// Schreibpufferordnung war also hoechstens die halbe Wahrheit.
+//
+// Der Schatten ist der einzige Teil des Anstrichs, der AUSSERHALB des
+// Fensterrechtecks malt. Alles andere bleibt in seinen Grenzen; er
+// greift `shadow_r` Bildpunkte darueber hinaus. Beim Ziehen und beim
+// Groessenaendern wandert damit eine Flaeche mit, die zu KEINEM
+// Fensterpuffer gehoert und deshalb auch von keinem Fenster wieder
+// sauber uebermalt wird -- was stehenbleibt, sieht aus wie ein Kamm
+// entlang der Kante. Das ist Justins Beobachtung, Wort fuer Wort.
+//
+// Deshalb: STANDARD AUS. Nicht entfernt -- `shadow=on` in
+// /etc/theme.conf schaltet ihn zurueck, und die Einstellungen zeigen
+// den Schalter. Wer ihn anschaltet, sieht die Streifen wieder, und
+// genau das ist zugleich der Beweis fuer die Ursache.
+//
+// -1 waere hier der schoenere Wert fuer "nicht gesetzt"; diese
+// Sprache rechnet an dieser Stelle vorzeichenlos, also 0 = aus,
+// 1 = an, 2 = die Form entscheidet.
+const SHDW_AUS: u64 = 0
+const SHDW_AN: u64 = 1
+static mut set_shadow: u64 = SHDW_AUS
+
+fn shadow_an() -> bool {
+    return set_shadow == SHDW_AN
+}
+
+// Was wirklich an den Fensterserver geht. Steht der Schalter auf aus,
+// ist es null -- unabhaengig davon, was die Formdatei sagt.
+fn shadow_wert(roh: u64) -> u64 {
+    if set_shadow == SHDW_AN {
+        return roh
+    }
+    return 0
 }
 
 fn conf_key(kp: u64, kn: u64, vp: u64, vn: u64) -> bool {
@@ -4802,7 +4859,10 @@ fn form_one(slot: u64, wert: u64) -> u64 {
 fn form_push() -> u64 {
     var n: u64 = 0
     n = n + form_one(WF_RADIUS, met[(M_RADIUS_WINDOW) as usize])
-    n = n + form_one(WF_SHADOW, met[(M_SHADOW) as usize])
+    // RUNDE ECHTHARDWARE-6: der Schalter sticht die Formdatei. Steht
+    // er auf aus, geht eine Null an den Server, und `paint_shadow`
+    // kehrt auf der ersten Zeile um (wm.fi, `FM_SHADOW == 0`).
+    n = n + form_one(WF_SHADOW, shadow_wert(met[(M_SHADOW) as usize]))
     n = n + form_one(WF_SHADOW_R, met[(M_SHADOW_R) as usize])
     // THE SHADOW HAS A ROLE AND NOT A COLOUR.  `shadow` is one of the
     // component tokens (C_SHADOW) and it is a different colour in the
@@ -4813,7 +4873,7 @@ fn form_push() -> u64 {
     // ROUND SOFTUI: the flat shadow of an unfocused window, the
     // gradient of the title bar, and whether the title bar carries
     // three Windows buttons.
-    n = n + form_one(WF_SHADOW2, met[(M_SHADOW2) as usize])
+    n = n + form_one(WF_SHADOW2, shadow_wert(met[(M_SHADOW2) as usize]))
     n = n + form_one(WF_SHADOW_R2, met[(M_SHADOW_R2) as usize])
     n = n + form_one(WF_GRAD, met[(M_GRAD) as usize])
     n = n + form_one(WF_CAPTION, met[(M_CAPTION) as usize])
