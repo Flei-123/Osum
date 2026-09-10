@@ -93,7 +93,8 @@ export {
     set_nolayer, set_nomin, nolayer, nomin,
     panel_win, mess_zeilen,
     set_strut, win_strut_edge, win_strut_size, work_x, work_y, work_w,
-    work_h, recalc_work, maximize, is_max, struts, workcalcs,
+    work_h, work_say, recalc_work, maximize, is_max, struts, workcalcs,
+    fullscreen, is_full, F_FULL, L_FULL,
     set_nostrut, nostrut,
     set_deco_colour, deco_rgb, deco_writes, DECO_SLOTS,
     set_app, win_app, APP_LEN,
@@ -257,10 +258,24 @@ const L_TOP: u64 = 2 // die Taskleiste
 // Die Zahlen 0..2 bleiben, was sie waren: jedes Programm, das `L_TOP`
 // sagt, meint weiter die Leiste und liegt weiter dort. Neu ist nur,
 // dass ueber ihr noch etwas sein KANN.
-const L_MENUE: u64 = 3 // Startmenue: ueber der Leiste, unter den Menues
-const L_POPUP: u64 = 4 // Klapp- und Kontextmenue
-const L_TIP: u64 = 5 // die Blase, ueber allem
-const L_MAX: u64 = 5
+// ================================================== RUNDE VOLLBILD
+// EINE SECHSTE EBENE, UND ZWAR ZWISCHEN LEISTE UND MENUES.
+//
+// Ein Vollbildfenster muss UEBER der Taskleiste liegen -- sonst
+// schimmert sie durch, und genau das hat Justin ausgeschlossen ("die
+// Taskleiste darf NICHT durchscheinen"). Es darf aber NICHT ueber
+// Kontextmenues und Blasen liegen: ein Menue, das ein Vollbildprogramm
+// selbst aufklappt, waere sonst unsichtbar.
+//
+// Also L_FULL = 3, und die drei darueber ruecken um eins hoch. Die
+// Zahlen 0..2 bleiben unangetastet -- das ist die Zusage aus
+// ECHTHARDWARE-3, und jedes Programm, das `L_TOP` sagt, liegt weiter
+// genau dort.
+const L_FULL: u64 = 3 // Vollbild: ueber der Leiste, unter den Menues
+const L_MENUE: u64 = 4 // Startmenue: ueber der Leiste, unter den Menues
+const L_POPUP: u64 = 5 // Klapp- und Kontextmenue
+const L_TIP: u64 = 6 // die Blase, ueber allem
+const L_MAX: u64 = 6
 
 // Die Merkmale eines Fensters.
 //   F_HIDDEN  minimiert: es wird nicht zusammengesetzt und nimmt keinen
@@ -296,6 +311,27 @@ const F_TABBED: u64 = 8
 // das Menue hinter Fenstern. Also sagt das Fenster selbst, was es
 // will. Vorgabe ist NEIN, also bleibt die Leiste, was sie war.
 const F_KEYS: u64 = 16
+
+// ================================================== RUNDE VOLLBILD
+// VOLLBILD IST NICHT MAXIMIERT, UND DAS IST DER GANZE PUNKT.
+//
+// Justins Vorgabe, und sie deckt sich mit Windows und jedem Browser:
+//
+//   MAXIMIERT = die ARBEITSFLAECHE. Die Leiste bleibt sichtbar, die
+//               Titelleiste bleibt da. Das Fenster BERUEHRT die Leiste
+//               nie. Das ist F_MAXIMIZED, und es gibt es schon.
+//
+//   VOLLBILD  = der GANZE Schirm, die Leistenflaeche eingeschlossen.
+//               Keine Titelleiste, kein Rahmen, und die Leiste ist
+//               NICHT zu sehen. Das ist F_FULL, und das ist neu.
+//
+// ZWEI ZUSTAENDE, NICHT EINER. Wer sie in ein Merkerbit legt, kann die
+// Frage "war es vorher maximiert?" beim Verlassen nicht mehr
+// beantworten -- und genau das ist der Teil, der laut Justin "gerne
+// kaputtgeht". Deshalb hat das Vollbild EIGENE Sicherungsplaetze
+// (W_FSXY/W_FSWH) und laesst F_MAXIMIZED unangetastet stehen: beim
+// Verlassen wird der alte Zustand nicht ERRATEN, sondern GELESEN.
+const F_FULL: u64 = 32
 
 // ADDENDUM TASKBAR: the four screen edges. The numbers are written to
 // /etc/taskbar.conf as words ("bottom", "top", "left", "right") and
@@ -1039,6 +1075,17 @@ const W_ANK: u64 = 0x140 // Art: 0 keine, AN_OPEN, AN_CLOSE, AN_MIN
 const W_AN0: u64 = 0x148 // Starttick
 const W_ANMS: u64 = 0x150 // zugesagte Dauer in Millisekunden
 const W_ANP: u64 = 0x158 // zuletzt gezeichneter Fortschritt, 0..1000
+// ================================================== RUNDE VOLLBILD
+// WOHIN DAS VOLLBILD ZURUECKKEHRT -- eigene Plaetze, NICHT W_SAVE.
+//
+// W_SAVE gehoert dem Maximieren. Wuerde das Vollbild denselben Platz
+// benutzen, zerstoerte der Weg "maximiert -> Vollbild -> zurueck"
+// genau die Zahl, auf die das Maximieren zurueckwill: das Fenster
+// kaeme als normales Fenster mit den Massen der Arbeitsflaeche
+// heraus, und es waere nicht mehr maximiert. Zwei Zustaende, zwei
+// Sicherungen.
+const W_FSXY: u64 = 0x160
+const W_FSWH: u64 = 0x168
 const APP_LEN: u64 = 24
 
 // "kein Terminal". Absichtlich eine Zahl und kein Ruf nach `tty.fi`:
@@ -2978,7 +3025,13 @@ fn set_layer(state: u64, i: u64, l: u64) {
     wsv(state, i, W_LAYER, l)
     // Ein Fenster, das aus der normalen Ebene verschwindet, darf den
     // Eingabefokus nicht mitnehmen.
-    if l != L_NORMAL && focus(state) == i
+    //
+    // RUNDE VOLLBILD: AUSSER ES IST DAS VOLLBILD. Ein Vollbildfenster
+    // liegt auf L_FULL und ist trotzdem das Fenster, in dem der Mensch
+    // arbeitet -- naehme man ihm hier den Fokus, ginge das zweite F11
+    // ins Leere und der Schirm waere gesperrt. Genau der Fall, den
+    // Justin als "sonst ist der Schirm gesperrt" benannt hat.
+    if l != L_NORMAL && l != L_FULL && focus(state) == i
         && (wg(state, i, W_FLAGS) & F_KEYS) == 0 {
         ss(state, S_FOCUS, 0)
         // RUNDE ECHTHARDWARE-4: ZURUECK ZU DEM, DER IHN HATTE.
@@ -3185,6 +3238,43 @@ fn work_h(state: u64) -> u64 {
     return gs(state, S_WORK_H)
 }
 
+// ================================================== RUNDE FENSTER
+// DIE ARBEITSFLAECHE ALS ZAHLEN -- und daneben der ganze Schirm.
+//
+// Justins Frage lautet, ob ein maximiertes Fenster die Leiste
+// beruehrt. Diese Frage ist nur zu beantworten, wenn beide Rechtecke
+// auf der Leitung stehen: die Arbeitsflaeche (wo maximiert enden
+// MUSS) und der Schirm (wo Vollbild enden DARF). Die Taskleiste
+// meldet ihre Sicht als `taskbar: work` -- diese Zeile ist die des
+// Fensterverwalters, und wenn die beiden auseinanderlaufen, ist genau
+// das der Fehler.
+//
+//     wm: work x=0 y=0 w=3440 h=1360  schirm=3440x1440 struts=1
+fn work_say(state: u64) {
+    var s_h: [u8; 12] = "wm: work x=\0"
+    var s_y: [u8; 4] = " y=\0"
+    var s_w: [u8; 4] = " w=\0"
+    var s_hh: [u8; 4] = " h=\0"
+    var s_s: [u8; 10] = "  schirm=\0"
+    var s_x2: [u8; 2] = "x\0"
+    var s_st: [u8; 9] = " struts=\0"
+    serial.puts((&s_h[0]) as u64)
+    serial.dec(gs(state, S_WORK_X))
+    serial.puts((&s_y[0]) as u64)
+    serial.dec(gs(state, S_WORK_Y))
+    serial.puts((&s_w[0]) as u64)
+    serial.dec(gs(state, S_WORK_W))
+    serial.puts((&s_hh[0]) as u64)
+    serial.dec(gs(state, S_WORK_H))
+    serial.puts((&s_s[0]) as u64)
+    serial.dec(gs(state, S_SW))
+    serial.puts((&s_x2[0]) as u64)
+    serial.dec(gs(state, S_SH))
+    serial.puts((&s_st[0]) as u64)
+    serial.dec(gs(state, S_STRUTS))
+    serial.nl()
+}
+
 fn struts(state: u64) -> u64 {
     return gs(state, S_STRUTS)
 }
@@ -3277,6 +3367,14 @@ fn recalc_work(state: u64) {
     ss(state, S_WORK_H, y1 - y0)
     ss(state, S_WORKCALC, gs(state, S_WORKCALC) + 1)
     refit_max(state)
+    // RUNDE VOLLBILD: UND DER KACHELBAUM FOLGT MIT. `refit_max` zieht
+    // die maximierten Fenster nach, der Baum blieb bisher stehen -- ein
+    // gekacheltes Fenster behielt die Flaeche von vor dem Strut und lag
+    // damit unter der Leiste. Dieselbe Begruendung wie bei `refit_max`
+    // eine Zeile darueber: ein Strut, den nur die Haelfte beachtet, ist
+    // keiner.
+    tile_area_work(state)
+    tile_apply(state)
 }
 
 fn set_nostrut(state: u64, on: bool) {
@@ -3393,6 +3491,153 @@ fn maximize(state: u64, i: u64, on: bool) -> bool {
     let by: i64 = ((v >> 32) & 0xFFFF) as i64 - 4096
     move_win(state, i, bx, by)
     return true
+}
+
+// ================================================== RUNDE VOLLBILD
+// F11: DER GANZE SCHIRM, OHNE LEISTE UND OHNE SCHMUCK.
+//
+// Der Unterschied zu `maximize` in Zahlen (3440x1440, Leiste 80 hoch):
+//
+//     maximiert:  x=0 y=0   w=3440 h=1360   Leiste sichtbar, Titel da
+//     Vollbild:   x=0 y=0   w=3440 h=1440   Leiste weg,      kein Titel
+//
+// WAS GESICHERT WIRD UND WARUM SO VIEL. Zurueck muss nicht nur die
+// Groesse, sondern auch die LAGE und der ZUSTAND -- war das Fenster
+// vorher maximiert, ist es hinterher wieder maximiert und nicht
+// normal. F_MAXIMIZED wird deshalb NICHT geloescht, sondern
+// stehengelassen und beim Verlassen ausgewertet.
+//
+// WARUM DIE LEISTE NICHT "VERSTECKT" WIRD. Ein `F_HIDDEN` auf der
+// Leiste waere der naheliegende Weg und der falsche: die Leiste
+// haelt einen Strut, `recalc_work` liefe, die Arbeitsflaeche
+// waechst auf den ganzen Schirm, und JEDES maximierte Fenster
+// dahinter wuerde mitwachsen. Beim Verlassen muesste alles
+// zurueckgerechnet werden. Stattdessen liegt das Vollbildfenster
+// einfach UEBER der Leiste (Ebene L_FULL) -- die Leiste bleibt, was
+// sie ist, sie ist nur verdeckt. Das ist auch, was Windows tut.
+fn fullscreen(state: u64, i: u64, on: bool) -> bool {
+    if !valid(state, i) {
+        return false
+    }
+    let f: u64 = wg(state, i, W_FLAGS)
+    if on {
+        if (f & F_FULL) != 0 {
+            return true
+        }
+        // Lage und Groesse sichern -- mit demselben Versatz von 4096
+        // wie `maximize`, weil ein Fenster negativ liegen darf.
+        let sx: u64 = ((win_x(state, i) + 4096) as u64) & 0xFFFF
+        let sy: u64 = ((win_y(state, i) + 4096) as u64) & 0xFFFF
+        wsv(state, i, W_FSXY, (sx << 32) | sy)
+        wsv(state, i, W_FSWH, ((wg(state, i, W_W) & 0xFFFF) << 32)
+            | (wg(state, i, W_H) & 0xFFFF))
+        // Der Schmuck faellt weg. Ob er vorher da war, steht im
+        // gesicherten Merkerwort -- deshalb wird F_NODECO gesetzt und
+        // nicht getauscht.
+        let hatte_deko: bool = deko(state, i)
+        wsv(state, i, W_FLAGS, f | F_FULL | F_NODECO)
+        let sw: u64 = gs(state, S_SW)
+        let sh: u64 = gs(state, S_SH)
+        if !resize_win(state, i, sw, sh) {
+            // Passt nicht -- dann ist es NICHT im Vollbild, und das
+            // zu sagen ist der Unterschied zwischen einer Messung und
+            // einer Behauptung (dieselbe Regel wie in `maximize`).
+            var zurueck: u64 = f
+            if !hatte_deko {
+                zurueck = zurueck | F_NODECO
+            }
+            wsv(state, i, W_FLAGS, zurueck)
+            return false
+        }
+        move_win(state, i, 0, 0)
+        // UEBER die Leiste. Die Ebene ist die einzige Stelle, an der
+        // "vor der Leiste" ueberhaupt ausgedrueckt werden kann.
+        set_layer(state, i, L_FULL)
+        raise_win(state, i)
+        return true
+    }
+    if (f & F_FULL) == 0 {
+        return true
+    }
+    // Zurueck auf die normale Ebene, BEVOR die Groesse kommt: sonst
+    // malt ein Anstrich dazwischen das Fenster noch ganz oben.
+    set_layer(state, i, L_NORMAL)
+    let xy: u64 = wg(state, i, W_FSXY)
+    let wh: u64 = wg(state, i, W_FSWH)
+    // Der Schmuck kommt zurueck -- ausser das Fenster hatte nie
+    // welchen (Schreibtisch, Leiste).
+    var nf: u64 = f & ~F_FULL & ~F_NODECO
+    wsv(state, i, W_FLAGS, nf)
+    // WAR ES VORHER MAXIMIERT, wird es das wieder -- und zwar ueber
+    // `fit_work`, damit es die AKTUELLE Arbeitsflaeche bekommt und
+    // nicht die von damals. Das ist der Fall, der ohne eigene
+    // Sicherungsplaetze kaputtginge.
+    if (nf & F_MAXIMIZED) != 0 {
+        if fit_work(state, i) {
+            return true
+        }
+        wsv(state, i, W_FLAGS, nf & ~F_MAXIMIZED)
+    }
+    let _r: bool = resize_win(state, i, (wh >> 32) & 0xFFFF, wh & 0xFFFF)
+    let bx: i64 = ((xy >> 32) & 0xFFFF) as i64 - 4096
+    let by: i64 = (xy & 0xFFFF) as i64 - 4096
+    move_win(state, i, bx, by)
+    return true
+}
+
+// ================================================== RUNDE VOLLBILD
+// WAS DAS VOLLBILD MIT DEM FENSTER GEMACHT HAT, ALS ZAHLEN.
+//
+// Justin will die Geometrie in ALLEN DREI Zustaenden sehen und den
+// Rueckweg geprueft haben. Ohne diese Zeile muesste man sie aus dem
+// Bild schaetzen -- und ein Zustandswechsel, den man nur sieht, ist
+// keiner, den man nachrechnen kann.
+//
+//     wm: voll id=7 an=1 x=0 y=0 w=3440 h=1440 fl=34 lay=3
+//
+// `fl` traegt beide Merker: 32 ist F_FULL, 4 waere zusaetzlich
+// F_MAXIMIZED -- daran liest ein Pruefer ab, ob der Rueckweg auf
+// "maximiert" oder auf "normal" fuehren muss.
+fn full_say(state: u64, i: u64) {
+    if !valid(state, i) {
+        return
+    }
+    var s_h: [u8; 13] = "wm: voll id=\0"
+    var s_a: [u8; 5] = " an=\0"
+    var s_x: [u8; 4] = " x=\0"
+    var s_y: [u8; 4] = " y=\0"
+    var s_w: [u8; 4] = " w=\0"
+    var s_hh: [u8; 4] = " h=\0"
+    var s_f: [u8; 5] = " fl=\0"
+    var s_l: [u8; 6] = " lay=\0"
+    serial.puts((&s_h[0]) as u64)
+    serial.dec(wg(state, i, W_ID))
+    serial.puts((&s_a[0]) as u64)
+    if (wg(state, i, W_FLAGS) & F_FULL) != 0 {
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_x[0]) as u64)
+    serial.dec(win_x(state, i) as u64)
+    serial.puts((&s_y[0]) as u64)
+    serial.dec(win_y(state, i) as u64)
+    serial.puts((&s_w[0]) as u64)
+    serial.dec(wg(state, i, W_W))
+    serial.puts((&s_hh[0]) as u64)
+    serial.dec(wg(state, i, W_H))
+    serial.puts((&s_f[0]) as u64)
+    serial.dec(wg(state, i, W_FLAGS))
+    serial.puts((&s_l[0]) as u64)
+    serial.dec(wg(state, i, W_LAYER))
+    serial.nl()
+}
+
+fn is_full(state: u64, i: u64) -> bool {
+    if !valid(state, i) {
+        return false
+    }
+    return (wg(state, i, W_FLAGS) & F_FULL) != 0
 }
 
 // ======================================================= RUNDE TUERSCHLOSS
@@ -8056,10 +8301,29 @@ fn on_screen_resize(state: u64, w: u64, h: u64) -> bool {
     }
     ss(state, S_SW, w)
     ss(state, S_SH, h)
-    tile.set_area(state, 0, 0, w, h)
+    // RUNDE VOLLBILD: der Baum bekommt die ARBEITSFLAECHE. Hier stand
+    // `0, 0, w, h` -- der ganze Schirm -- und damit reichte jedes
+    // gekachelte Fenster unter die Leiste. `recalc_work` rechnet die
+    // Flaeche aus dem neuen Schirm und den Struts; danach steht sie in
+    // S_WORK_*, und der Baum folgt ihr.
+    recalc_work(state)
+    tile_area_work(state)
     tile_apply(state)
     damage_all(state)
     return true
+}
+
+// ================================================== RUNDE VOLLBILD
+// DER KACHELBAUM FOLGT DER ARBEITSFLAECHE.
+//
+// An EINER Stelle, weil es zwei Anlaesse gibt, sie zu setzen: ein
+// Wechsel der Aufloesung und ein Wechsel der Struts (die Leiste zieht
+// an eine andere Kante, wird versteckt, kommt zurueck). Stuende die
+// Rechnung an beiden, waere sie eine Gelegenheit, sie an einer zu
+// vergessen -- so wie sie bis zu dieser Runde ganz fehlte.
+fn tile_area_work(state: u64) {
+    let _a: bool = tile.set_area(state, gs(state, S_WORK_X),
+        gs(state, S_WORK_Y), gs(state, S_WORK_W), gs(state, S_WORK_H))
 }
 
 // ------------------------------------------------ die Reiterzeilen
@@ -8260,34 +8524,52 @@ fn drag_hover(state: u64, i: u64, x: i64, y: i64) {
     ss(state, S_PVON, 0)
     ss(state, S_DROPN, 0)
     ss(state, S_DROPE, 0)
-    let sw: i64 = gs(state, S_SW) as i64
-    let sh: i64 = gs(state, S_SH) as i64
+    // ================================================== RUNDE VOLLBILD
+    // DIE VORSCHAU DES ANDOCKENS ZEIGT DIE ARBEITSFLAECHE, NICHT DEN
+    // SCHIRM.
+    //
+    // Hier stand `S_SW`/`S_SH`, also der ganze Bildschirm. Ein Fenster,
+    // das nach links angedockt wurde, bekam damit
+    // `0,0,1720x1440` -- volle Schirmhoehe, und die unteren 80
+    // Bildpunkte lagen UNTER der Taskleiste. Windows dockt an die
+    // Arbeitsflaeche an; Justins Vorgabe sagt dasselbe.
+    //
+    // Die Vorschau und die Ablage muessen dieselbe Flaeche nennen,
+    // sonst zeigt der Umriss etwas anderes an, als hinterher
+    // herauskommt -- deshalb steht die Rechnung hier UND in
+    // `tile_apply` auf derselben Quelle.
+    let wx0: i64 = gs(state, S_WORK_X) as i64
+    let wy0: i64 = gs(state, S_WORK_Y) as i64
+    let sw: i64 = gs(state, S_WORK_W) as i64
+    let sh: i64 = gs(state, S_WORK_H) as i64
     let rand: i64 = 16
     // 1. AM BILDSCHIRMRAND: die Windows-artige Schnellablage. Sie ist
     //    ein Sonderfall des Baumes und kein zweites System.
-    if x < rand {
+    if x < wx0 + rand {
         ss(state, S_DROPE, 1)
-        set_preview(state, 0, 0, (sw / 2) as u64, sh as u64)
-        preview_damage(state)
-        return
-    }
-    if x >= sw - rand {
-        ss(state, S_DROPE, 2)
-        set_preview(state, (sw - sw / 2) as u64, 0, (sw / 2) as u64,
+        set_preview(state, wx0 as u64, wy0 as u64, (sw / 2) as u64,
             sh as u64)
         preview_damage(state)
         return
     }
-    if y < rand {
-        ss(state, S_DROPE, 3)
-        set_preview(state, 0, 0, sw as u64, (sh / 2) as u64)
+    if x >= wx0 + sw - rand {
+        ss(state, S_DROPE, 2)
+        set_preview(state, (wx0 + sw - sw / 2) as u64, wy0 as u64,
+            (sw / 2) as u64, sh as u64)
         preview_damage(state)
         return
     }
-    if y >= sh - rand {
-        ss(state, S_DROPE, 4)
-        set_preview(state, 0, (sh - sh / 2) as u64, sw as u64,
+    if y < wy0 + rand {
+        ss(state, S_DROPE, 3)
+        set_preview(state, wx0 as u64, wy0 as u64, sw as u64,
             (sh / 2) as u64)
+        preview_damage(state)
+        return
+    }
+    if y >= wy0 + sh - rand {
+        ss(state, S_DROPE, 4)
+        set_preview(state, wx0 as u64, (wy0 + sh - sh / 2) as u64,
+            sw as u64, (sh / 2) as u64)
         preview_damage(state)
         return
     }
@@ -8589,6 +8871,31 @@ fn tile_action(state: u64, act: u64) -> bool {
     // und nimmt das erste, das ein Mensch auch anklicken koennte.
     if act == tile.A_NEXT_WIN {
         return naechstes_fenster(state, i)
+    }
+    // ================================================== RUNDE VOLLBILD
+    // F11 UMSCHALTEN. Steht aus demselben Grund hier oben wie Alt+Tab:
+    // das Vollbild betrifft EIN Fenster und nicht den Kachelbaum -- ein
+    // schwebendes Fenster (der Normalfall auf diesem Schreibtisch) hat
+    // `W_NODE == 0` und fiele durch die Abfrage darunter heraus, bevor
+    // irgendetwas passiert.
+    //
+    // UMSCHALTEN und nicht EINSCHALTEN: dieselbe Taste zurueck ist das,
+    // was Windows und jeder Browser tun.
+    if act == tile.A_FULL {
+        let an: bool = (wg(state, i, W_FLAGS) & F_FULL) == 0
+        let ok: bool = fullscreen(state, i, an)
+        if ok {
+            full_say(state, i)
+        }
+        return ok
+    }
+    // RUNDE FENSTER: die MESSTASTE. Sie veraendert nichts -- sie legt
+    // die Arbeitsflaeche und die ganze Fensterliste auf die Leitung.
+    // Vor dem Baum, weil sie den Baum nicht braucht.
+    if act == tile.A_SAY {
+        work_say(state)
+        wins_say(state)
+        return true
     }
     let nd: u64 = wg(state, i, W_NODE)
     if nd == 0 {
