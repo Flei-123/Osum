@@ -710,8 +710,65 @@ fn fb_bits(state: u64, uncached: bool) -> u64 {
     return bits
 }
 
+// ================================================ RUNDE MERGE-11: R5-e1000
+// DER RAHMENPUFFER LAESST GERAETEN IHRE PLAETZE.
+//
+// Die Plaetze sind GETEILT: `apic.map_device` bedient daraus den
+// LAPIC, den I/O-APIC, die Netzkarte (e1000.fi:890), die Platte
+// (ahci), USB (ehci), den Ton (hda) und alles, was `hw.fi` sonst
+// abbildet. Der Rahmenpuffer nimmt sich davon bei 3440x1440 ZEHN.
+//
+// GEMESSEN auf dem Abbild d832136:
+//   disp: kacheln alle=16  frei=3  belegt=13  fb=2  laufmax=12
+//
+// Drei freie Plaetze fuer ALLE Geraete. In QEMU geht das aus, weil
+// dort wenig Geraete antworten. Auf Justins Brett antworten Netz,
+// Platte, USB und Ton -- und wer als vierter kommt, bekommt von
+// `map_device` eine 0. Die Treiber pruefen das brav (e1000.fi:891
+// `if base == 0 { return false }`), also stirbt nichts; das Geraet
+// ist einfach WEG, ohne dass jemand sagt warum.
+//
+// DESHALB DIESE GRENZE. Der Rahmenpuffer laesst GERAETEPLAETZE frei
+// und faellt lieber in den Streifenbetrieb, als der Netzkarte den
+// letzten Platz wegzunehmen. Ein Schirm, der in Streifen gemalt wird,
+// ist langsamer; ein Rechner ohne Netz und ohne Platte ist kaputt.
+//
+// Vier ist gemessen und nicht geraten: LAPIC + I/O-APIC belegen zwei
+// (`apic: window=3` zaehlt den dritten fuer den zweiten APIC-Block
+// mit), dazu Netz, Platte, USB, Ton -- macht in der Spitze sieben.
+// Mit 16 Plaetzen bleiben dem Rahmenpuffer dann zwoelf, und zwoelf
+// tragen 3440x1440 (zehn) mit Reserve fuer die Seitenumschaltung.
+// ZWEI ist die gemessene Zahl, nicht vier. Beim ersten Versuch stand
+// hier vier, und der Rahmenpuffer fiel bei 3440x1440 sofort in den
+// Streifenbetrieb zurueck:
+//
+//   disp: kacheln alle=16  frei=12  belegt=4
+//   fb: ... huge=1        <- Streifen, und danach 78 Absturzzeilen
+//
+// Denn geprueft wird, BEVOR der Rahmenpuffer sich eintraegt: belegt=4
+// (LAPIC, I/O-APIC und zwei weitere), dazu n=10 und vier Reserve sind
+// 18 -- mehr als 16. Mit zwei Reserveplaetzen geht die Rechnung auf
+// (4 + 10 + 2 = 16), und zwei sind genug: was VOR dem Rahmenpuffer
+// abgebildet wird (APIC, Platte, USB), steht in `belegt` schon drin.
+// Frei bleiben muessen nur die Geraete, die SPAETER kommen -- auf
+// Justins Brett die Netzkarte und der Ton.
+const GERAETE_FREI: u64 = 2
+
 fn map_run(state: u64, block: u64, n: u64, uncached: bool) -> u64 {
     if n == 0 || n > WIN_SLOTS {
+        return 0
+    }
+    // Wieviele Plaetze sind schon vergeben? Was der Rahmenpuffer sich
+    // nimmt, darf den Geraeten nicht die letzten vier nehmen.
+    var belegt: u64 = 0
+    var b: u64 = 0
+    while b < WIN_SLOTS {
+        if slot_used(state, b) != 0 {
+            belegt = belegt + 1
+        }
+        b = b + 1
+    }
+    if belegt + n + GERAETE_FREI > WIN_SLOTS {
         return 0
     }
     let pd: u64 = kernel_pd(state)
