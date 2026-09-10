@@ -62,7 +62,7 @@ import utf8
 export {
     begin, window, window_app, window_plain, window_kind, close, closed, handle,
     trace, set_trace, set_menu_title, reshape, say_rects,
-    win_w, win_h, win_x, win_y, win_cx, win_cy, win_hide, win_layer,
+    win_w, win_h, win_x, win_y, win_cx, win_cy, win_hide, win_layer, win_fokus,
     box_v, box_h, box_grid, box_end, box_at, box_use, size, gap_after,
     setz_groesse,
     label, button, icon_button, check, entry, list, table, tabs, menubar, choice,
@@ -1013,6 +1013,22 @@ fn win_hide(w: u64, on: bool) -> u64 {
         v = 1
     }
     return wlibc.win_state(ng(w, N_H), wlibc.WS_HIDDEN, v)
+}
+
+// ======================================== RUNDE ECHTHARDWARE-4
+// HAT DIESES FENSTER DEN EINGABEFOKUS?
+//
+// Gebraucht fuer das Startmenue: eine Ueberlagerung schliesst, wenn
+// man DANEBEN klickt. "Daneben" laesst sich in Ring 3 nicht sehen --
+// ein Klick auf ein fremdes Fenster erzeugt hier kein Ereignis. Was
+// man sehen kann, ist die Folge davon: der Fokus ist weg. Der Server
+// beantwortet das seit jeher (`sysgui.fi`, `WI_FOCUS` ->
+// `wm.focus(state) == i`); es fehlte nur der Weg heraus.
+fn win_fokus(w: u64) -> bool {
+    if w >= MAXWN || ng(w, N_H) == 0 {
+        return false
+    }
+    return wlibc.sys3w(wlibc.WM_INFO, ng(w, N_H), wlibc.WI_FOCUS, 0) == 1
 }
 
 fn win_layer(w: u64) -> u64 {
@@ -4681,6 +4697,24 @@ fn draw_all() {
 // kommen dieselben Ereignisse an, dieselben Zaehler laufen hoch -- und
 // kein Widget erfaehrt davon. Das ist die Gegenprobe zu jeder Zusage
 // ueber einen Klick: sie MUSS damit einbrechen.
+// RUNDE ECHTHARDWARE-4: WAS EINEN KLICK BEANTWORTET.
+//
+// Die Aufzaehlung steht hier EINMAL und nicht an jeder Stelle, die
+// den Zeiger setzt. Ein abgeschalteter Knopf ist NICHT anklickbar --
+// eine Hand ueber einem Feld, das nichts tut, ist eine Luege.
+fn anklickbar(i: u64) -> bool {
+    if i >= MAXWD {
+        return false
+    }
+    if (g(i, D_FLAGS) & (F_OFF | F_HIDE)) != 0 {
+        return false
+    }
+    let k: u64 = g(i, D_KIND)
+    return k == K_BUTTON || k == K_CHECK
+        || k == K_LIST || k == K_TABS || k == K_MENUBAR || k == K_CHOICE
+        || k == K_SLIDER || k == K_TABLE || k == K_TILE
+}
+
 fn hit_at(w: u64, x: u64, y: u64) -> u64 {
     if s_nohit != 0 {
         return MAXWD
@@ -5481,8 +5515,20 @@ fn on_move(w: u64, x: u64, y: u64, btn: u64) {
     // Das Zeigerbild: ueber einem Textfeld ein Balken, sonst ein Pfeil.
     // Es ist der einzige Weg, auf dem eine Anwendung dem SERVER etwas
     // ueber den Zeiger sagt, und deshalb steht er im Logbuch.
+    // ======================================== RUNDE ECHTHARDWARE-4
+    // DREI FORMEN STATT ZWEI: Balken ueber Text, HAND ueber allem,
+    // was man anklicken kann, sonst der Pfeil.
+    //
+    // Bis hierher gab es Balken und Pfeil. Ein Knopf, ein Listeneintrag
+    // und ein Verweis sahen damit genauso aus wie der leere
+    // Fensterhintergrund -- und "was kann ich hier ueberhaupt
+    // anklicken" ist die erste Frage, die ein Mensch an eine
+    // Oberflaeche hat. Die Formen liegen in `kernel/zeiger.fi`:
+    // 0 Pfeil, 1 Textmarke, 2 Hand.
     if i < MAXWD && g(i, D_KIND) == K_ENTRY {
         wlibc.cursor_shape(1)
+    } else if i < MAXWD && anklickbar(i) {
+        wlibc.cursor_shape(2)
     } else {
         wlibc.cursor_shape(0)
     }
@@ -5996,6 +6042,34 @@ fn on_key(wein: u64, c: u64) {
     if k == 0 {
         return
     }
+    taste_verarbeiten(wein, k)
+}
+
+// ============================================== RUNDE ECHTHARDWARE-4
+// EINE EINZELNE FLUCHTTASTE MUSS AUCH ALLEIN ANKOMMEN.
+//
+// GEMESSEN an menue-2560/serial.txt dieser Runde: das Drehbuch
+// drueckte Escape, auf der Leitung stand `key: ^[`, und das Startmenue
+// blieb offen. `decode` sieht die 27, setzt `s_esc = 1` und gibt NULL
+// zurueck -- sie wartet auf das zweite Oktett, denn `^[[A` (Pfeil
+// hoch) faengt genauso an. Kommt kein zweites, wartet sie fuer immer.
+// In einem Terminal fiele das kaum auf; hier ist es der Normalfall,
+// denn dieser Kern liefert die Flucht als EINZELNES Oktett
+// (kernel/kbd.fi, Abtastcode 1).
+//
+// Die Loesung, die jedes Terminal seit jeher benutzt: eine Frist. Sie
+// heisst hier nicht "Millisekunden", sondern "das Ereignisbuendel ist
+// leer" -- `step` holt alle anstehenden Ereignisse in einem Zug ab,
+// und was nach dem letzten davon noch offen ist, war allein.
+fn esc_spuelen(w: u64) {
+    if s_esc != 1 {
+        return
+    }
+    s_esc = 0
+    taste_verarbeiten(w, KEY_ESC)
+}
+
+fn taste_verarbeiten(wein: u64, k: u64) {
     s_keylast = k
     s_keyseq = s_keyseq + 1
     // RUNDE ALLTAG: EIN DIALOG IST MODAL, AUCH FUER DIE TASTATUR.
@@ -6723,6 +6797,10 @@ fn step() -> u64 {
                     s_reseq = s_reseq + 1
                 }
             }
+            // RUNDE ECHTHARDWARE-4: das Buendel ist leer. Was von
+            // einer Fluchtfolge offen blieb, war eine EINZELNE
+            // Fluchttaste -- siehe `esc_spuelen`.
+            esc_spuelen(w)
         }
         w = w + 1
     }
