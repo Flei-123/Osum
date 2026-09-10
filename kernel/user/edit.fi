@@ -981,8 +981,8 @@ fn find_from(row: u64, col: u64, pat: u64, wrap: bool) -> bool {
 
 fn do_replace() {
     var q1: [u8; 20] = "Search (replace): \0\0"
-    var q2: [u8; 14] = "Replace with: "
-    var q3: [u8; 26] = "Replace this one? (y/n/a) "
+    var q2: [u8; 15] = "Replace with: \0"
+    var q3: [u8; 27] = "Replace this one? (y/n/a) \0"
     var m_done: [u8; 12] = "replaced \0\0\0"
     if !ask((&q1[0 as usize]) as u64, (&findbuf[0 as usize]) as u64, 128) {
         return
@@ -1123,12 +1123,58 @@ fn do_cut() {
     cut[(cutlen) as usize] = 10 as u8
     cutlen = cutlen + 1
     cutlines = cutlines + 1
+    // ==================================================== RUNDE SYSTEMBUS
+    //
+    // WAS AUSGESCHNITTEN WURDE, LIEGT AB HIER NICHT MEHR NUR IN DIESEM
+    // PROZESS. Der Kern hat eine Zwischenablage, und `cut` ist ihr
+    // Abbild in diesem Editor -- nicht ihr Ersatz. Das ist der ganze
+    // Punkt der Zusage "Text zwischen ZWEI verschiedenen Prozessen":
+    // vorher hat `edit` in seinen eigenen Puffer geschnitten, und die
+    // Kommandozeile daneben hat davon nichts erfahren.
+    //
+    // Der interne Puffer BLEIBT: er kann mehr als 192 Oktette und mehr
+    // als eine Zeile, und ein Editor, der beim Ausschneiten von zehn
+    // Zeilen neun verliert, waere fuer den Bus schlechter geworden.
+    let _b: u64 = ulib.clip_put(ulib.BT_TEXT, (&cut[0 as usize]) as u64,
+        cutlen)
     dirty = 1
     clamp()
     want_draw = W_ALL
 }
 
 fn do_paste() {
+    // RUNDE SYSTEMBUS: ERST DEN KERN FRAGEN. Liegt dort etwas Neueres
+    // als das, was dieser Editor selbst geschnitten hat, gewinnt der
+    // Kern -- sonst waere "im Terminal kopieren, im Editor einfuegen"
+    // eine Bewegung, die nichts bewirkt.
+    var ein: [u8; 192] = [0 as u8; 192]
+    let m: u64 = ulib.clip_take((&ein[0 as usize]) as u64, 192)
+    if m > 0 {
+        var k: u64 = 0
+        var gleich: bool = m == cutlen
+        while gleich && k < m {
+            if ein[(k) as usize] != cut[(k) as usize] {
+                gleich = false
+            }
+            k = k + 1
+        }
+        if !gleich {
+            k = 0
+            while k < m {
+                cut[(k) as usize] = ein[(k) as usize]
+                k = k + 1
+            }
+            // Eine Ablage ohne Zeilenende ist EINE Zeile. Ohne diese
+            // zwei Zeilen haengt die Schleife unten am fehlenden 10.
+            if m > 0 && ein[(m - 1) as usize] != 10 as u8 {
+                cut[(m) as usize] = 10 as u8
+                cutlen = m + 1
+            } else {
+                cutlen = m
+            }
+            cutlines = 1
+        }
+    }
     if cutlines == 0 {
         return
     }
@@ -1360,10 +1406,38 @@ fn u_start(args: u64) -> u64 {
             set_msg((&s_new[0 as usize]) as u64)
         }
     } else {
-        nline = 1
-        lat[0 as usize] = 0
-        llen[0 as usize] = 0
-        set_msg((&s_new[0 as usize]) as u64)
+        // ============================================ RUNDE SYSTEMBUS
+        //
+        // OHNE DATEINAMEN: LIEGT ETWAS AUF DEM ZIEHPLATZ? Dann ist das
+        // die Datei, die jemand hierher gezogen hat -- der Explorer hat
+        // sie beim Anfassen dorthin gelegt (`explorer.ziehen`), und ein
+        // Ziehen, das im Ziel nichts oeffnet, ist kein Ziehen.
+        //
+        // WAS DAS NICHT IST: eine Ziehgrafik unter dem Zeiger. Dieses
+        // System hat keine, und der Bus traegt den INHALT und nicht das
+        // Bild dazu. Wer es sieht, sieht die geoeffnete Datei.
+        var zp: [u8; 192] = [0 as u8; 192]
+        var genommen: bool = false
+        if ulib.drag_an() {
+            let zn: u64 = ulib.drag_take((&zp[0 as usize]) as u64, 190)
+            if zn > 0 && (ulib.drag_typ_pfad() != 0) {
+                zp[(zn) as usize] = 0 as u8
+                ulib.strncpy((&fname[0 as usize]) as u64,
+                    (&zp[0 as usize]) as u64, 256)
+                if load((&fname[0 as usize]) as u64) {
+                    var s_dnd: [u8; 11] = "dnd: read \0"
+                    set_msg2((&s_dnd[0 as usize]) as u64,
+                        (&fname[0 as usize]) as u64)
+                    genommen = true
+                }
+            }
+        }
+        if !genommen {
+            nline = 1
+            lat[0 as usize] = 0
+            llen[0 as usize] = 0
+            set_msg((&s_new[0 as usize]) as u64)
+        }
     }
     window()
     raw_on()

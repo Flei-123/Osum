@@ -219,7 +219,24 @@ fi
 # mkfs.py stops with "gibt es nicht" -- rightly.
 rm -rf "$OUT/apps"
 cp -a assets/apps "$OUT/apps"
-rm -rf "$OUT/apps/editor.osp" "$OUT/apps/widgets.osp"
+# RUNDE WERKZEUGE: NICHT MEHR ZWEI NAMEN, SONDERN DIE REGEL DAHINTER.
+#
+# Hier standen `editor.osp` und `widgets.osp`, weil ihre Programme
+# (/bin/edit, /bin/widgetdemo) nicht in der Programmliste dieser Runde
+# stehen und `mkfs.py` dann mit "gibt es nicht" abbricht. Die naechste
+# Runde, die ein Programm mit Buendel dazulegt, laeuft in dieselbe Wand
+# -- diese hier ist es (taskmgr.osp), und statt einen dritten Namen
+# einzutragen wird jetzt gefragt: liegt das Programm, auf das
+# `start.txt` zeigt, ueberhaupt auf DIESER Platte?
+for b in "$OUT/apps"/*.osp; do
+    [ -d "$b" ] || continue
+    ziel=$(grep -avE '^\s*#' "$b/start.txt" 2>/dev/null | grep -aoE '/bin/[a-z0-9]+' | head -1)
+    keep=no
+    for p in $progs; do
+        [ "/bin/$p" = "$ziel" ] && keep=yes
+    done
+    [ "$keep" = yes ] || rm -rf "$b"
+done
 while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py "$OUT/apps" "$OUT/buendel" 2>/dev/null || true)
 while read -r z; do ARGS+=("$z"); done < "$OUT/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 \

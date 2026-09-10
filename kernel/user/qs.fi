@@ -71,13 +71,18 @@ profile kernel
 
 import ulib
 import wlibc
+import wlib
 import nv
+import msg
+import vorlage
 import libc.io
 import libc.kcall
 
 export {
     init, anchor, step, toggle, is_open, hit, want_hide, took_hide,
-    win_id, W, H
+    win_id, W, H,
+    // RUNDE ECHTHARDWARE-5: "das Thema hat gewechselt, mal dich neu".
+    thema_neu
 }
 
 // --------------------------------------------------------- the shape
@@ -103,18 +108,300 @@ export {
 //   TH   74  icon (16) + 4 + a line of text + 12 clear + a line of
 //            text + 10. The 12 is the gap the first version did not
 //            have.
-const PAD: u64 = 10
-const TW: u64 = 180 // one tile
-const TH: u64 = 74
-const GAP: u64 = 8
-const FH: u64 = 22 // the "all settings" row
-const W: u64 = PAD + TW + GAP + TW + PAD // 388
-const H: u64 = PAD + TH + GAP + TH + PAD + FH + PAD // 208
+// ===================================================== RUNDE ECHTHARDWARE-1
+// DIESE ZAHLEN WAREN FEST, UND GENAU DAS WAR DER FEHLER.
+//
+// Justins Foto vom 09.09. 12:38 zeigt in JEDER der sechs Kacheln den
+// Titel UEBER dem Zustandswort: "Netz vortae" auf "aus", "Dunkelmo"
+// auf "an". Im Emulator stand dieselbe Kachel sauber. Der Unterschied
+// ist NICHT die Aufloesung, sondern `wlibc.ui_scale()`: sein Monitor
+// nennt im EDID seine physische Groesse, `kgui.fi` setzt daraufhin die
+// Vervielfachung auf 2, und `wlibc.px_ui()` liefert danach 30 statt 15
+// Bildpunkte Schrifthoehe -- WAEHREND TW/TH/SL_X FESTE ZAHLEN BLIEBEN.
+// Eine Kachel von 74 Bildpunkten Hoehe, in die zwei Zeilen zu je 30
+// Bildpunkten plus ein Symbol von 16 sollen, kann nicht anders als
+// uebereinanderzumalen.
+//
+// Ab hier ist JEDES Mass dieses Panels ein Vielfaches der wirklichen
+// Schrifthoehe. Bei Vervielfachung 1 kommen exakt die alten Zahlen
+// heraus (PAD 10, TW 180, TH 74) -- der Emulatorlauf aendert sich also
+// nicht --, bei 2 wird alles mitgezogen.
+const PAD0: u64 = 10
+const TW0: u64 = 180 // eine Kachel bei Vervielfachung 1
+const GAP0: u64 = 8
+const IC0: u64 = 16 // das Kachelsymbol bei Vervielfachung 1
+
+fn sk() -> u64 {
+    return wlibc.ui_scale()
+}
+
+fn PAD() -> u64 {
+    return PAD0 * sk()
+}
+
+fn GAP() -> u64 {
+    return GAP0 * sk()
+}
+
+fn IC() -> u64 {
+    return IC0 * sk()
+}
+
+// DIE BREITE EINER KACHEL. Der Kopf dieser Datei hat sie einmal durch
+// Halbieren gegen das laufende System gefunden: "Netz vortaeuschen"
+// braucht 160 Bildpunkte NUTZBARE Breite bei Schrifthoehe 15. Das
+// Verhaeltnis bleibt, die Zahl nicht -- also wird es mitgerechnet.
+fn TW() -> u64 {
+    return TW0 * sk()
+}
+
+// DIE HOEHE EINER KACHEL, GERECHNET STATT GERATEN. Sie ist die Summe
+// dessen, was wirklich hineinmuss:
+//   oben PAD/2, Symbol, Abstand, Titelzeile, Abstand, Zustandszeile,
+//   unten PAD/2.
+// Damit kann der Titel den Zustand nicht mehr erreichen, egal wie gross
+// die Schrift ist -- das ist der eigentliche Fix von Fehler 1.
+fn ZH() -> u64 {
+    return wlibc.text_h(wlibc.px_ui())
+}
+
+fn TH() -> u64 {
+    return PAD() / 2 + IC() + 4 * sk() + ZH() + 3 * sk() + ZH() + PAD() / 2
+}
+
+fn FH() -> u64 {
+    return ZH() + 6 * sk()
+}
+
+fn W() -> u64 {
+    return PAD() + TW() + GAP() + TW() + PAD()
+}
+// ============================================== RUNDE WERKZEUGE
+// DAS PANEL IST GEWACHSEN, UND JEDE NEUE ZEILE HAT EINE QUELLE.
+//
+// Drei Kacheln waren es, weil im August drei Dinge WIRKLICH da waren.
+// Seither sind vier davon dazugekommen, und die Begruendung fuer jede
+// steht neben ihr:
+//
+//   DUNKELMODUS   Runde THEME/THEMESTORE hat die Schnittstelle gebaut,
+//                 die es im August nicht gab: `wlibc.theme_set_mode`
+//                 gilt sofort in JEDEM Fenster (gemeinsame Bank,
+//                 `theme_gen` zieht die anderen Programme nach), und
+//                 `vorlage.mode_write` schreibt eine Zeile in
+//                 /etc/theme.conf, damit es den Neustart ueberlebt.
+//   ENERGIEPROFIL Runde K18 hat `osum_pwrget/pwrset`. Der Kern sagt
+//                 selbst, ob er die MSR wirklich lesen konnte
+//                 (`PG_READY`) -- steht dort eine Null, zeigt die
+//                 Kachel einen Strich und tut nichts. Eine Kachel, die
+//                 auf einer Maschine ohne diese Register etwas
+//                 verspraeche, waere genau die Luege mit runden Ecken,
+//                 vor der der Kopf dieser Datei warnt.
+//   KACHELN       Runde TILING, `osum_tileget/tiledo`. Ein Schalter,
+//                 den man wirklich oft umlegt.
+//   HELLIGKEIT    Die Begruendung von damals ist NACHGEPRUEFT und
+//                 hinfaellig: `pwr.rescale` skalierte den Rahmenpuffer
+//                 an Ort und Stelle und verlor bei jedem Schritt Bits.
+//                 Runde DISPLAY hat das ersetzt -- `vmode.set_picture`
+//                 baut eine NACHSCHLAGETABELLE, die beim Ausgeben
+//                 angewandt wird; der Rahmenpuffer bleibt unberuehrt,
+//                 und fuenfzig Schritte hintereinander kosten nichts.
+//                 Deshalb steht hier jetzt ein Schieberegler.
+//
+// UND JETZT STEHT LAUTSTAERKE DOCH DA -- RUNDE TON-2.
+//
+// Der Satz von damals stimmte, als er geschrieben wurde: "es gibt
+// keinen Tontreiber, keinen Mischer und keine Lautstaerke, die man
+// setzen koennte". Seit Runde MEDIA1 gibt es einen Treiber (AC97),
+// seit Runde HDA einen zweiten und einen Mischer mit Lautstaerke JE
+// STROM, und seit Runde TON einen Master samt Stummschaltung
+// (`audset AS_VOLUME`, `AS_MUTE`). Die Begruendung ist damit
+// hinfaellig, und die Regel dieser Datei -- nur was WIRKLICH da ist --
+// verlangt jetzt das Gegenteil: der Regler gehoert hierher.
+//
+// NACHGEMESSEN UND NICHT ANGENOMMEN, wie es der Kopf dieser Datei
+// vorschreibt: `kernel/audio.fi` und `kernel/mix.fi` sind da,
+// `audio.set_volume` schreibt `L_MASTER`, und `A_VOLGEN` zaehlt jede
+// Aenderung mit -- damit dieses Panel weiss, wann es neu malen muss,
+// ohne in einer Schleife zu fragen.
+//
+// DER MASTER IST LINEAR IN PROZENT, 0..100, und er wird auf die
+// ABTASTWERTE angewandt und nicht auf den Verstaerker des Codecs
+// (Runde TON hat das umgestellt). Deshalb wirkt er auf BEIDE Wege --
+// Einstrom wie Mischer -- und auf jeder Maschine gleich.
+// RUNDE ECHTHARDWARE-1: AUCH DIESE ZAHLEN SIND JETZT GERECHNET.
+//
+// DER SCHIEBER BEKOMMT ZWEI ZEILEN STATT EINER, und das ist der zweite
+// Teil von Justins Kritik ("die Linie geht quer durch die Schrift").
+// Vorher stand die Beschriftung bei PAD und die Rinne begann bei einer
+// FESTEN Zahl (PAD + 104). Bei Schrifthoehe 15 ging das knapp auf; bei
+// 30 ist "Lautstaerke" mehr als 104 Bildpunkte breit und die Rinne
+// beginnt MITTEN IM WORT -- im Foto sieht das aus wie durchgestrichen.
+//
+// Ein Schieber, dessen Rinne neben der Schrift liegt, ist immer eine
+// Wette darauf, wie breit ein uebersetztes Wort ist. Diese Wette wird
+// hier nicht mehr eingegangen: die Beschriftung steht in ihrer EIGENEN
+// Zeile, die Rinne in der darunter, ueber die ganze Breite. Das
+// funktioniert in jeder Sprache und bei jeder Vervielfachung.
+fn SLH() -> u64 {
+    return ZH() + 10 * sk() + ZH() // Beschriftungszeile + Rinne
+}
+
+// RUNDE ECHTHARDWARE-2: DIE REIHENZAHL WIRD GERECHNET.
+//
+// Hier stand fest `3 * TH() + 2 * GAP()` -- drei Kachelreihen. Seit
+// zwei Kacheln aus dem Tray in die Einstellungen gewandert sind, sind
+// es ZWEI Reihen, und die feste 3 haette ein leeres Feld von einer
+// ganzen Kachelhoehe zwischen den Kacheln und dem Helligkeitsregler
+// gelassen. Zwei Kacheln je Reihe, aufgerundet.
+fn ROWS() -> u64 {
+    return (N_TILE + 1) / 2
+}
+
+fn TOP2() -> u64 {
+    return PAD() + ROWS() * TH() + sub1(ROWS()) * GAP()
+}
+
+// Ein Abzug, der nicht unter null laeuft -- bei einer einzigen Reihe
+// gibt es keinen Zwischenraum.
+fn sub1(a: u64) -> u64 {
+    if a == 0 {
+        return 0
+    }
+    return a - 1
+}
+
+fn SLY() -> u64 {
+    return TOP2() + GAP()
+}
+
+fn VLY() -> u64 {
+    return SLY() + SLH() + GAP()
+}
+
+fn BAY() -> u64 {
+    return VLY() + SLH() + GAP()
+}
+
+fn L1Y() -> u64 {
+    return BAY() + FH() + GAP()
+}
+
+fn L2Y() -> u64 {
+    return L1Y() + FH() + GAP()
+}
+
+fn H() -> u64 {
+    return L2Y() + FH() + PAD()
+}
+
+// Die Rinne beginnt am linken Rand und laeuft ueber die ganze Breite --
+// sie hat ihre eigene Zeile, also braucht sie keinen Platz mehr fuer
+// eine Beschriftung neben sich.
+fn SL_X() -> u64 {
+    return PAD()
+}
+
+fn SL_KN() -> u64 {
+    return 12 * sk() // die Breite des Griffs
+}
+
+// Wo in der Schieberzeile die Rinne liegt: unter der Beschriftung.
+fn SL_RY() -> u64 {
+    return ZH() + 6 * sk()
+}
+// 20 UND NICHT 0. Der Kern nimmt 0..200; eine Null macht den Schirm
+// schwarz, und einen Regler, mit dem man sich aussperren kann, gibt
+// dieses Panel nicht her -- man saehe ihn danach nicht mehr, um ihn
+// zurueckzuschieben.
+const BR_MIN: u64 = 20
+const BR_MAX: u64 = 200
 const MARGIN: u64 = 4 // between the panel and the bar it sits beside
 const BAND: u64 = 64 // rows of the drawing surface used at a time
 const IC: u64 = 16 // the tile symbol, at its target size
 
-const N_TILE: u64 = 3
+// ================================================ RUNDE ECHTHARDWARE-2
+//
+// IN DEN TRAY GEHOERT NUR, WAS MAN WIRKLICH TAEGLICH UMLEGT.
+//
+// Justin am 09.09.: "beim Klicken passiert irgendwas ganz Komisches,
+// danach geht gar nichts mehr". NACHGESTELLT (pruef/kacheln.py, Lauf
+// kach3, 2560x1440, uiscale=2) -- und es ist KEIN Absturz: im ganzen
+// Lauf steht keine einzige panic-Zeile. Was wirklich passiert:
+//
+//   Kachel "Hide bar"  -> die Taskleiste versteckt sich. Auf der
+//                         Leitung: `taskbar: hide`, das Leistenfenster
+//                         wandert auf y=1438, also aus dem Schirm. Die
+//                         Uhr steht danach still -- fuer den, der davor
+//                         sitzt, ist das System eingefroren.
+//   Kachel "Fake net"  -> taeuscht dem System ein Netz vor.
+//   Kachel "Network"   -> schaltet das Netz ab (`t=no network`).
+//
+// Alle drei tun genau, was auf ihnen steht. Zwei davon sind aber
+// WERKZEUGE ZUM PRUEFEN und keine Schalter fuer den taeglichen
+// Gebrauch: eine Leiste, die sich wegklickt, und ein vorgetaeuschtes
+// Netz gehoeren in die Einstellungen, wo man sie sucht, wenn man sie
+// braucht -- nicht in den Tray, wo man sie AUS VERSEHEN trifft.
+//
+// Es sind deshalb VIER Kacheln: Netz, Dunkelmodus, Energieprofil,
+// Kacheln. Die beiden anderen sind nicht geloescht, sondern nur nicht
+// mehr im Tray -- `tile_on`, `tile_label`, `tile_click` kennen sie
+// weiter unter ihren alten Nummern, damit die Einstellungen sie
+// aufrufen koennen, ohne dass hier etwas doppelt steht.
+//
+// DIE ZUORDNUNG STEHT IN EINER TABELLE UND NICHT IN SECHS
+// UMNUMMERIERTEN ZWEIGEN. Ein `if t == 3` in fuenf Funktionen
+// gleichzeitig umzuschreiben ist genau die Sorte Aenderung, bei der
+// eine Stelle vergessen wird und danach die Kachel "Dunkelmodus" das
+// Netz abschaltet.
+const N_TILE_ALL: u64 = 6 // so viele gibt es
+const N_TILE: u64 = 4 // so viele stehen im Tray
+
+// Platz im Tray -> innere Kachelnummer.
+//   0 -> 1 Netz      1 -> 3 Dunkelmodus
+//   2 -> 4 Energie   3 -> 5 Kacheln
+fn tile_of(slot: u64) -> u64 {
+    if slot == 0 {
+        return 1
+    }
+    if slot == 1 {
+        return 3
+    }
+    if slot == 2 {
+        return 4
+    }
+    return 5
+}
+
+// Die Aufrufe, die die neuen Kacheln bedienen. Dieselben Nummern wie in
+// /bin/dispctl, /bin/power und /bin/tiling -- kein zweiter Weg zu
+// derselben Sache.
+const SYS_DISPGET: u64 = 1810
+const SYS_DISPSET: u64 = 1811
+const DG_BRIGHT: u64 = 16
+const DS_BRIGHT: u64 = 3
+const SYS_PWRGET: u64 = 1750
+const SYS_PWRSET: u64 = 1751
+const PG_READY: u64 = 0
+const PG_PROFILE: u64 = 1
+const PG_BATPRESENT: u64 = 24
+const PG_BATPERCENT: u64 = 25
+const PG_BATSTATE: u64 = 27
+const PS_PROFILE: u64 = 0
+// RUNDE TON-2: die Tonschnittstelle. Dieselben Nummern wie in
+// /bin/play und kernel/sys.fi -- kein zweiter Weg zu derselben Sache.
+const SYS_AUDGET: u64 = 1850
+const SYS_AUDSET: u64 = 1851
+const A_VOLUME: u64 = 4
+const A_MUTED: u64 = 21
+const A_READY: u64 = 0
+const A_VOLGEN: u64 = 44
+const AS_VOLUME: u64 = 0
+const AS_MUTE: u64 = 2
+
+const SYS_TILEGET: u64 = 1820
+const SYS_TILEDO: u64 = 1821
+const TL_ON: u64 = 0
+const A_TILE_TOGGLE: u64 = 29
 
 // ---------------------------------------------------------- the state
 
@@ -141,23 +428,52 @@ static mut ev: [u8; 16] = [0 as u8; 16]
 // in this round -- OSYM with colour ROLES, so one file is right in a
 // light scheme and in a dark one.
 const ICON_MAX: u64 = 1100
-static mut ic_buf: [u8; 3300] = [0 as u8; 3300] // 3 pictures
+static mut ic_buf: [u8; 6600] = [0 as u8; 6600] // 6 Bilder
 static mut ic_ok: u64 = 0
 
 static mut p_icons: [u8; 14] = "/etc/netview/\0"
-static mut n_ic: [u8; 33] = "tile-fake\0tile-net\0tile-hide\0\0\0\0\0"
+static mut n_ic: [u8; 76] = "tile-fake tile-net tile-hide tile-dark tile-power tile-tile                 "
 static mut p_settings: [u8; 14] = "/bin/settings\0"
 
 // The words. German, like every other string the taskbar and the
 // settings put on the screen in this tree; round I18N is the one that
 // changes that, everywhere at once.
-static mut l_fake: [u8; 18] = "Netz vortäuschen\0"
-static mut l_net: [u8; 5] = "Netz\0"
-static mut l_hide: [u8; 17] = "Leiste verbergen\0"
-static mut w_on: [u8; 4] = "an\0\0"
-static mut w_off: [u8; 4] = "aus\0"
-static mut l_all: [u8; 19] = "Alle Einstellungen\0"
+// RUNDE WERKZEUGE: DIE WOERTER STEHEN IM KATALOG, NICHT HIER.
+//
+// Bis zu dieser Runde standen "Netz vortäuschen", "Leiste verbergen"
+// und "Alle Einstellungen" als deutsche Zeichenketten im Quelltext --
+// zwei davon hat `tools/i18n/scan.py` seit Runde I18N angeschlagen, und
+// zu Recht: das Panel ist Oberflaeche, und Oberflaeche gehoert
+// uebersetzt. Was hier steht, sind SCHLUESSEL.
+static mut k_fake: [u8; 8] = "qs.fake\0"
+static mut k_net: [u8; 7] = "qs.net\0"
+static mut k_hide: [u8; 8] = "qs.hide\0"
+static mut k_dark: [u8; 8] = "qs.dark\0"
+static mut k_power: [u8; 9] = "qs.power\0"
+static mut k_tile: [u8; 8] = "qs.tile\0"
+static mut k_on: [u8; 6] = "qs.on\0"
+static mut k_off: [u8; 7] = "qs.off\0"
+static mut k_na: [u8; 6] = "qs.na\0"
+static mut k_bright: [u8; 10] = "qs.bright\0"
+static mut k_volume: [u8; 10] = "qs.volume\0"
+static mut k_bat: [u8; 11] = "qs.battery\0"
+static mut k_nobat: [u8; 13] = "qs.nobattery\0"
+static mut k_chg: [u8; 12] = "qs.charging\0"
+static mut k_all: [u8; 12] = "qs.settings\0"
+static mut k_tm: [u8; 11] = "qs.taskmgr\0"
+static mut k_p0: [u8; 13] = "qs.prof.save\0"
+static mut k_p1: [u8; 12] = "qs.prof.mid\0"
+static mut k_p2: [u8; 12] = "qs.prof.max\0"
+static mut k_title: [u8; 9] = "qs.title\0"
 static mut t_title: [u8; 16] = "Schnelleinst.\0\0\0"
+static mut p_taskmgr: [u8; 13] = "/bin/taskmgr\0"
+static mut u_pct: [u8; 3] = " %\0"
+// RUNDE ECHTHARDWARE-1: DOPPELPUNKT STATT LEERZEICHEN.
+// "Akku kein Akku" las sich wie ein Stottern; "Akku: keiner" sagt
+// dasselbe und ist eine Angabe.
+static mut u_sp: [u8; 3] = ": \0"
+static mut u_op: [u8; 3] = " (\0"
+static mut u_cl: [u8; 2] = ")\0"
 
 static mut s_open: [u8; 12] = "qs: open x=\0"
 static mut s_y: [u8; 4] = " y=\0"
@@ -175,6 +491,23 @@ static mut s_to: [u8; 5] = " to=\0"
 static mut s_rc: [u8; 5] = " rc=\0"
 static mut s_ico: [u8; 15] = "qs: symbols n=\0"
 static mut s_wid: [u8; 12] = "qs: win id=\0"
+// RUNDE HAENGER: DIE MARKEN, DIE JUSTINS FOTO LESBAR MACHEN.
+//
+// Auf dem Foto vom 04.09. 10:35 bricht die Ausgabe MITTEN in der Zeile
+// "qs: win id=" ab -- der Text steht da, die Zahl nicht. Zwischen
+// beiden liegt genau ein Aufruf (`WM_INFO`) und ein zweiter
+// Schreibvorgang. Welcher von beiden es ist, war nicht zu sehen.
+//
+// Ab hier ist es zu sehen:
+//   "qs: info?"      steht VOR dem Aufruf. Fehlt sie, kommt qs gar
+//                    nicht bis hierher.
+//   "qs: win id=N"   wird als EINE Zeile in EINEM Schreibvorgang
+//                    ausgegeben. Bricht danach immer noch etwas
+//                    mitten in dieser Zeile ab, dann schneidet die
+//                    KONSOLE, nicht das Programm -- ein ganz anderer
+//                    Fehler, und ohne diese Aenderung nicht zu trennen.
+static mut s_wfrag: [u8; 11] = "qs: info?\n\0"
+static mut s_wst: [u8; 11] = "qs: state \0"
 static mut s_spawn: [u8; 17] = "qs: settings pid\0"
 static mut s_txt: [u8; 11] = "qs: text x\0"
 static mut s_eq: [u8; 2] = "=\0"
@@ -185,6 +518,38 @@ static mut s_tt: [u8; 3] = " [\0"
 static mut s_te: [u8; 3] = "]\0\0"
 static mut s_sym: [u8; 12] = "qs: sym n=\0\0"
 static mut s_sx: [u8; 4] = " x=\0"
+static mut s_hell: [u8; 15] = "qs: hell auf =\0"
+static mut s_druck: [u8; 13] = "qs: druck x=\0"
+static mut s_hellist: [u8; 14] = "qs: hell ist=\0"
+// RUNDE ECHTHARDWARE-3: die Rinne in Bildschirmpunkten.
+static mut s_hellspur: [u8; 19] = "qs: hell spur von=\0"
+// ============================================== RUNDE ECHTHARDWARE-5
+// DIE ZWEI KNOPFZEILEN, IN BILDSCHIRMPUNKTEN.
+//
+// Dieselbe Regel und derselbe Grund wie bei `hell spur` darueber:
+// Justins Befund F ("Taskmanager und Einstellungen gehen nicht auf")
+// liess sich nur mit einem Klick pruefen, und die Stelle dafuer stand
+// nirgends. Die Textzeile `qs: text x=20 y=321` ist die GRUNDLINIE der
+// Schrift, nicht das Feld -- wer darauf klickt, trifft je nach
+// Schriftgroesse daneben. Ich habe in dieser Runde genau so daneben
+// geklickt und den Fehlschlag beinahe dem Programm angelastet.
+//
+// Also sagt das Panel jetzt, wo die beiden Zeilen WIRKLICH liegen.
+static mut s_zeile1: [u8; 17] = "qs: zeile tm y=\0\0"
+static mut s_zeile2: [u8; 18] = "qs: zeile set y=\0\0"
+static mut s_hoehe: [u8; 5] = " h=\0\0"
+static mut s_bis: [u8; 6] = " bis=\0"
+static mut s_ymit: [u8; 5] = " ym=\0"
+// RUNDE TON-2: dieselbe Bauart wie die Helligkeitszeile -- ein
+// Pruefstand liest diese Zeilen und muss nicht raten, was gemalt wurde.
+static mut s_volist: [u8; 13] = "qs: vol ist=\0"
+static mut s_vomute: [u8; 8] = " stumm=\0"
+static mut s_vol: [u8; 9] = "qs: vol=\0"
+static mut s_geo: [u8; 11] = "qs: geo x=\0"
+static mut s_gy2: [u8; 4] = " y=\0"
+static mut s_gw: [u8; 4] = " w=\0"
+static mut s_gh: [u8; 4] = " h=\0"
+static mut s_mute: [u8; 10] = "qs: mute=\0"
 
 fn say(p: u64) {
     ulib.say(p)
@@ -240,7 +605,7 @@ fn icon_read(name: u64, dst: u64, max: u64) -> u64 {
 fn icons_load() {
     ic_ok = 0
     var i: u64 = 0
-    while i < N_TILE {
+    while i < N_TILE_ALL {
         if icon_read(nth((&n_ic[0 as usize]) as u64, i),
             (&ic_buf[0 as usize]) as u64 + i * ICON_MAX, ICON_MAX) > 12 {
             ic_ok = ic_ok + 1
@@ -262,7 +627,7 @@ fn icons_load() {
 // fill. See `assets/netview/tile-net.txt`, where the reasoning sits
 // next to the drawing.
 fn tile_icon(t: u64) -> u64 {
-    if ic_ok < N_TILE {
+    if ic_ok < N_TILE_ALL {
         return 0
     }
     return (&ic_buf[0 as usize]) as u64 + t * ICON_MAX
@@ -275,6 +640,38 @@ fn tile_icon(t: u64) -> u64 {
 // first, `dhcp` can change the second, `/bin/settings` the third.
 // A panel with its own copy would show the copy.
 
+fn pget(f: u64) -> u64 {
+    let v: u64 = ulib.sys(SYS_PWRGET, f, 0, 0)
+    if ulib.bad(v) {
+        return 0
+    }
+    return v
+}
+
+fn dget(f: u64) -> u64 {
+    let v: u64 = ulib.sys(SYS_DISPGET, f, 0, 0)
+    if ulib.bad(v) {
+        return 0
+    }
+    return v
+}
+
+fn tget(f: u64) -> u64 {
+    let v: u64 = ulib.sys(SYS_TILEGET, f, 0, 0)
+    if ulib.bad(v) {
+        return 0
+    }
+    return v
+}
+
+// KANN DIE MASCHINE DAS UEBERHAUPT? Der Kern sagt es selbst: `PG_READY`
+// ist 1, wenn die Energieverwaltung ihre Register wirklich gelesen hat.
+// Steht dort eine Null, zeigt die Kachel einen Strich -- und nicht
+// "sparen", was wie eine Einstellung aussaehe.
+fn power_da() -> bool {
+    return pget(PG_READY) != 0
+}
+
 fn tile_on(t: u64) -> bool {
     if t == 0 {
         return nv.fallback_on()
@@ -282,17 +679,61 @@ fn tile_on(t: u64) -> bool {
     if t == 1 {
         return nv.net_ip() != 0 && !ulib.bad(nv.net_ip())
     }
-    return ah_on != 0
+    if t == 2 {
+        return ah_on != 0
+    }
+    if t == 3 {
+        return wlibc.theme_dark()
+    }
+    if t == 4 {
+        // "an" heisst hier: nicht auf Sparen. Das Wort darunter sagt
+        // ohnehin, welches der drei Profile laeuft.
+        return power_da() && pget(PG_PROFILE) != 0
+    }
+    return tget(TL_ON) != 0
 }
 
 fn tile_label(t: u64) -> u64 {
     if t == 0 {
-        return (&l_fake[0 as usize]) as u64
+        return msg.get((&k_fake[0 as usize]) as u64)
     }
     if t == 1 {
-        return (&l_net[0 as usize]) as u64
+        return msg.get((&k_net[0 as usize]) as u64)
     }
-    return (&l_hide[0 as usize]) as u64
+    if t == 2 {
+        return msg.get((&k_hide[0 as usize]) as u64)
+    }
+    if t == 3 {
+        return msg.get((&k_dark[0 as usize]) as u64)
+    }
+    if t == 4 {
+        return msg.get((&k_power[0 as usize]) as u64)
+    }
+    return msg.get((&k_tile[0 as usize]) as u64)
+}
+
+// DAS WORT UNTER DER KACHEL. Bei fuenf Kacheln ist es "an" oder "aus";
+// beim Energieprofil ist es der NAME des Profils, denn drei Zustaende
+// lassen sich nicht mit zwei Woertern sagen -- und ein Schalter, der
+// "an" zeigt, wenn drei Dinge moeglich sind, sagt nichts.
+fn tile_word(t: u64) -> u64 {
+    if t == 4 {
+        if !power_da() {
+            return msg.get((&k_na[0 as usize]) as u64)
+        }
+        let p: u64 = pget(PG_PROFILE)
+        if p == 0 {
+            return msg.get((&k_p0[0 as usize]) as u64)
+        }
+        if p == 1 {
+            return msg.get((&k_p1[0 as usize]) as u64)
+        }
+        return msg.get((&k_p2[0 as usize]) as u64)
+    }
+    if tile_on(t) {
+        return msg.get((&k_on[0 as usize]) as u64)
+    }
+    return msg.get((&k_off[0 as usize]) as u64)
 }
 
 // The address the machine had before "network off" took it away, so
@@ -305,6 +746,37 @@ static mut old_mask: u64 = 0
 static mut old_gw: u64 = 0
 
 fn tile_click(t: u64) -> u64 {
+    if t == 3 {
+        // SOFORT UND DAUERHAFT. `theme_set_mode` schreibt in die
+        // gemeinsame Bank, aus der JEDES Fenster liest -- die anderen
+        // Programme ziehen beim naechsten `theme_poll` nach, ohne dass
+        // hier jemand benachrichtigt werden muesste. `mode_write` legt
+        // eine Zeile in /etc/theme.conf, damit es den Neustart
+        // ueberlebt; geschrieben wird sie von dem Modul, das die Datei
+        // ohnehin schreibt, und nicht von hier.
+        var neu: u64 = wlibc.MODE_DARK
+        if wlibc.theme_dark() {
+            neu = wlibc.MODE_LIGHT
+        }
+        wlibc.theme_set_mode(neu)
+        if !vorlage.mode_write(neu) {
+            return 0 - 1
+        }
+        return 0
+    }
+    if t == 4 {
+        if !power_da() {
+            return 0 - 1
+        }
+        var p: u64 = pget(PG_PROFILE) + 1
+        if p > 2 {
+            p = 0
+        }
+        return ulib.sys(SYS_PWRSET, PS_PROFILE, p, 0)
+    }
+    if t == 5 {
+        return ulib.sys(SYS_TILEDO, A_TILE_TOGGLE, 0, 0)
+    }
     if t == 0 {
         return nv.fallback_switch(!nv.fallback_on())
     }
@@ -352,7 +824,7 @@ fn init(autohide: u64) -> bool {
     say((&s_ico[0 as usize]) as u64)
     ulib.sayn(ic_ok)
     ulib.nl()
-    let h: u64 = wlibc.sys5(wlibc.WM_CREATE, 0, (W << 16) | H,
+    let h: u64 = wlibc.sys5(wlibc.WM_CREATE, 0, (W() << 16) | H(),
         (&t_title[0 as usize]) as u64, 0, 0)
     if ulib.bad(h) || h == 0 {
         return false
@@ -378,13 +850,53 @@ fn init(autohide: u64) -> bool {
     // layer gets a button in the bar, and this one must not
     // (`taskbar.list_read` skips this id). It is part of the bar, not an
     // application.
-    let _l: u64 = wlibc.win_state(h, wlibc.WS_LAYER, wlibc.L_NORMAL)
+    // ============================================ RUNDE ECHTHARDWARE-3
+    // JETZT GEHT BEIDES: UEBER DER LEISTE *UND* MIT TASTATUR.
+    //
+    // Der Absatz darueber beschreibt eine Zwangslage, die es seit
+    // dieser Runde nicht mehr gibt. Sie lautete: entweder `L_TOP`
+    // (dann ueber der Leiste, aber ohne Tastatur, also ohne Escape)
+    // oder `L_NORMAL` (dann mit Tastatur, aber unter der Leiste und
+    // mit einem Knopf in ihr, den `taskbar.list_read` eigens
+    // wegfiltern muss).
+    //
+    // Beides ist jetzt keine Wahl mehr: `L_MENUE` liegt UEBER der
+    // Leiste (wm.fi: L_TOP < L_MENUE), und `WS_KEYS` sagt dem Server
+    // ausdruecklich, dass dieses Fenster die Tastatur will -- die
+    // Ausnahme, die `wm.on_mouse` seit ECHTHARDWARE-1 kennt (F_KEYS).
+    // Das Kontrollzentrum ist ein Teil der Leiste und gehoert dorthin,
+    // wo das Startmenue auch liegt.
+    let _l: u64 = wlibc.win_state(h, wlibc.WS_LAYER, wlibc.L_MENUE)
+    let _k: u64 = wlibc.win_state(h, wlibc.WS_KEYS, 1)
     let _v: u64 = wlibc.win_state(h, wlibc.WS_HIDDEN, 1)
-    w_id = wlibc.sys3w(wlibc.WM_INFO, h, wlibc.WI_ID, 0)
-    say((&s_wid[0 as usize]) as u64)
-    ulib.sayn(w_id)
+    // Eine Marke NACH den drei Zustandsaufrufen: kommt sie, haben alle
+    // drei zurueckgekehrt, und der Verdacht liegt allein auf WM_INFO.
+    say((&s_wst[0 as usize]) as u64)
     ulib.nl()
+    say((&s_wfrag[0 as usize]) as u64)
+    w_id = wlibc.sys3w(wlibc.WM_INFO, h, wlibc.WI_ID, 0)
+    // EIN Schreibvorgang fuer die ganze Zeile, Zeilenende eingebaut.
+    var zl: [u8; 48] = [0 as u8; 48]
+    let zp: u64 = (&zl[0 as usize]) as u64
+    var zn: u64 = 0
+    zn = anhaengen(zp, zn, (&s_wid[0 as usize]) as u64)
+    zn = zn + ulib.digits(w_id, zp + zn)
+    __mmio_write8((zp + zn) as *mut u8, 10 as u8)
+    zn = zn + 1
+    let _z: u64 = ulib.put(zp, zn)
     return true
+}
+
+// Text an einen Puffer haengen, ohne Zeilenende. Fuer die eine Zeile,
+// die in EINEM Stueck hinausgehen muss.
+fn anhaengen(buf: u64, at: u64, t: u64) -> u64 {
+    let n: u64 = ulib.length(t)
+    var i: u64 = 0
+    while i < n {
+        __mmio_write8((buf + at + i) as *mut u8, *((t + i) as *mut u8))
+        i = i + 1
+    }
+    return at + n
 }
 
 // So the bar can leave itself out of its own list of windows.
@@ -407,13 +919,13 @@ fn anchor(edge: u64, wx: u64, wy: u64, ww: u64, wh: u64) {
 fn place() {
     var x: u64 = 0
     var y: u64 = 0
-    if a_w > W + 2 * MARGIN {
-        x = a_x + a_w - W - MARGIN
+    if a_w > W() + 2 * MARGIN {
+        x = a_x + a_w - W() - MARGIN
     } else {
         x = a_x
     }
-    if a_h > H + 2 * MARGIN {
-        y = a_y + a_h - H - MARGIN
+    if a_h > H() + 2 * MARGIN {
+        y = a_y + a_h - H() - MARGIN
     } else {
         y = a_y
     }
@@ -429,6 +941,22 @@ fn place() {
     }
     px_ = x
     py_ = y
+    // RUNDE TON-2: WO DAS PANEL STEHT, auf der Leitung.
+    //
+    // Ohne diese Zeile ist jedes Bildschirmfoto des Panels eine
+    // Suchaufgabe: die Texte melden PANEL-Koordinaten (`qs: text x=10
+    // y=320`), das Bild hat BILDSCHIRM-Koordinaten, und der Ursprung
+    // stand nirgends. Ein Pruefer, der ihn raten muss, misst
+    // irgendwann die falsche Stelle und glaubt das Ergebnis.
+    say((&s_geo[0 as usize]) as u64)
+    ulib.sayn(px_)
+    say((&s_gy2[0 as usize]) as u64)
+    ulib.sayn(py_)
+    say((&s_gw[0 as usize]) as u64)
+    ulib.sayn(W())
+    say((&s_gh[0 as usize]) as u64)
+    ulib.sayn(H())
+    ulib.nl()
     if open_ != 0 {
         let _m: u64 = wlibc.sys3w(wlibc.WM_MOVE, w_h, (px_ << 16) | py_, 0)
     }
@@ -444,7 +972,7 @@ fn hit(x: u64, y: u64) -> bool {
     if open_ == 0 {
         return false
     }
-    return x >= px_ && x < px_ + W && y >= py_ && y < py_ + H
+    return x >= px_ && x < px_ + W() && y >= py_ && y < py_ + H()
 }
 
 fn open_at(when: u64) {
@@ -487,9 +1015,9 @@ fn open_at(when: u64) {
     say((&s_y[0 as usize]) as u64)
     ulib.sayn(py_)
     say((&s_w[0 as usize]) as u64)
-    ulib.sayn(W)
+    ulib.sayn(W())
     say((&s_h[0 as usize]) as u64)
-    ulib.sayn(H)
+    ulib.sayn(H())
     say((&s_ed[0 as usize]) as u64)
     ulib.sayn(a_edge)
     say((&s_up[0 as usize]) as u64)
@@ -534,6 +1062,11 @@ fn toggle() {
 // them costs anything while the panel is shut: the hotkey latch is one
 // system call, the event ring is one, and the pointer is only asked
 // while the panel is open.
+// RUNDE ECHTHARDWARE-3: laeuft gerade ein Ziehen, das mit einem Druck
+// IN diesem Fenster begonnen hat? Nur dann verstellt eine Bewegung
+// einen Regler.
+static mut zieht: u64 = 0
+
 fn step() -> bool {
     var changed: bool = false
     let seq: u64 = nv.hotkey_seq()
@@ -577,8 +1110,66 @@ fn step() -> bool {
                 return true
             }
         } else if typ == wlibc.EV_DOWN {
+            // JEDER DRUCK WIRD GEMELDET, bevor er ausgewertet wird.
+            // Ohne diese Zeile ist ein Klick, der gar nicht ankommt,
+            // nicht von einem zu unterscheiden, der ankommt und
+            // danebenliegt -- und die Abnahme dieser Runde hat genau
+            // diese beiden Faelle zweimal verwechselt.
+            say((&s_druck[0 as usize]) as u64)
+            ulib.sayn((d >> 32) & 0xFFFF)
+            say((&s_y[0 as usize]) as u64)
+            ulib.sayn((d >> 16) & 0xFFFF)
+            ulib.nl()
+            // RUNDE ECHTHARDWARE-6: die gedrueckte Kachel merken,
+            // BEVOR `click` sie umschaltet -- danach ist der Zeiger
+            // vielleicht schon woanders.
+            if druck_setzen(tile_at((d >> 32) & 0xFFFF,
+                (d >> 16) & 0xFFFF)) {
+                changed = true
+            }
             click((d >> 32) & 0xFFFF, (d >> 16) & 0xFFFF)
+            zieht = 1
             changed = true
+        } else if typ == wlibc.EV_MOVE {
+            // ==================================== RUNDE ECHTHARDWARE-3
+            // DER REGLER LIESS SICH NICHT ZIEHEN.
+            //
+            // Justins Befund: "Helligkeitsregler im Kontrollzentrum
+            // laesst sich nicht verstellen (Wert aendert sich nicht
+            // beim Ziehen)." Diese Schleife kannte genau drei
+            // Ereignisse -- EV_KEY, EV_DOWN, EV_CLOSE. Eine BEWEGUNG
+            // bei gedrueckter Taste kam nie an, also war der Regler
+            // ein Knopf: der Wert sprang auf die Stelle des Klicks
+            // und blieb dort. Wer die Maus danach zog, sah nichts
+            // mehr passieren -- genau das, was er beschreibt.
+            //
+            // `click` rechnet aus der Stelle bereits den Wert (die
+            // Stelle IST der Wert, siehe dort); es genuegt also, die
+            // Bewegung bei gedrueckter Taste durch dieselbe Rechnung
+            // zu schicken. `zieht` sorgt dafuer, dass nur eine
+            // Bewegung zaehlt, die auf einem Druck IN diesem Fenster
+            // begonnen hat -- sonst verstellt ein Zeiger, der bei
+            // gedrueckter Taste von aussen hereinfaehrt, die
+            // Helligkeit.
+            if zieht != 0 && (d & 0xFFFF & 1) != 0 {
+                click((d >> 32) & 0xFFFF, (d >> 16) & 0xFFFF)
+                changed = true
+            }
+            if (d & 0xFFFF & 1) == 0 {
+                zieht = 0
+            }
+            // RUNDE ECHTHARDWARE-6: der Zeigerzustand. Nur eine
+            // ECHTE Aenderung malt neu -- sonst waere jede
+            // Mausbewegung ein voller Anstrich des Panels.
+            if hover_setzen(tile_at((d >> 32) & 0xFFFF,
+                (d >> 16) & 0xFFFF)) {
+                changed = true
+            }
+        } else if typ == wlibc.EV_UP {
+            zieht = 0
+            if druck_setzen(99) {
+                changed = true
+            }
         } else if typ == wlibc.EV_CLOSE {
             shut((&s_esc[0 as usize]) as u64)
             return true
@@ -597,10 +1188,46 @@ fn step() -> bool {
     if btn != 0 && btn_last == 0 {
         let mx: u64 = wlibc.mouse_x()
         let my: u64 = wlibc.mouse_y()
-        if !hit(mx, my) {
+        // ============================================ RUNDE ECHTHARDWARE-3
+        // EIN ZIEHEN IST KEIN DRUCK DANEBEN.
+        //
+        // Diese Abfrage pollt den Zeiger, weil der Fensterserver einem
+        // Fenster nur erzaehlt, was INNERHALB von ihm geschieht -- ein
+        // Druck woanders erzeugt hier kein Ereignis. Sie sieht dabei
+        // aber nur "Taste unten" und "Zeiger da", und beides trifft
+        // auch auf die MITTE EINES ZIEHENS zu, sobald der Zeiger den
+        // Reglerknopf ueber den Fensterrand hinauszieht.
+        //
+        // GEMESSEN: `ziehespur` von 5 % auf 95 % der Rinne ergab
+        // `qs: closed by outside`, und der Regler stand danach
+        // unveraendert -- es sah aus, als taete er nichts. Er tat
+        // etwas, das Panel war nur schon zu.
+        //
+        // Laeuft ein Ziehen, das INNERHALB begonnen hat (`zieht`),
+        // gehoert die Taste dem Regler und nicht dem Schliessweg.
+        // ZUERST NACHSEHEN, WO DIE TASTE HERUNTERGING -- und das ist
+        // NICHT unbedingt, wo der Zeiger jetzt steht.
+        //
+        // GEMESSEN, zweiter Anlauf: der `zieht`-Merker allein genuegt
+        // nicht. Er wird in der Ereignisschleife aus `EV_DOWN`
+        // gesetzt, diese Abfrage hier pollt aber und laeuft im selben
+        // Umlauf FRUEHER -- beim ersten Bild eines Ziehens ist er
+        // deshalb noch 0, das Panel schliesst, und der `EV_DOWN`
+        // kommt nie an, weil es das Fenster nicht mehr gibt.
+        //
+        // Also entscheidet die FLANKE selbst: ging die Taste INNERHALB
+        // herunter, ist es der Anfang eines Ziehens (der Regler, eine
+        // Kachel) und nicht der Wunsch zu schliessen. Erst ein Druck,
+        // der AUSSERHALB beginnt, schliesst.
+        if hit(mx, my) {
+            zieht = 1
+        } else {
             shut((&s_out[0 as usize]) as u64)
             changed = true
         }
+    }
+    if btn == 0 {
+        zieht = 0
     }
     btn_last = btn
     return changed
@@ -608,23 +1235,84 @@ fn step() -> bool {
 
 // ---------------------------------------------------------- the clicks
 
+// ============================================== RUNDE ECHTHARDWARE-6
+// DIE KACHELN BEKOMMEN EINEN ZEIGER- UND EINEN DRUCKZUSTAND.
+//
+// Justin: die Fensterknoepfe "gehen super" mit Rueckmeldung, die
+// Knoepfe im Kontrollzentrum haben GAR KEINE Hervorhebung.
+//
+// Er hat auch gleich nachgesehen, wo es liegt, und er hat recht:
+// `wlib.paint_button` (wlib.fi) kann die drei Zustaende laengst --
+// F_PRESSED -> T_BTNDN, F_HOVER -> T_BTNHI, sonst T_BTN. Diese Datei
+// benutzt `paint_button` aber gar nicht: sie malt ihre Kacheln selbst
+// mit `mal_tafel` und kannte genau ZWEI Zustaende, an und aus.
+//
+// WARUM NICHT EINFACH AUF `paint_button` UMSTELLEN: eine Kachel ist
+// kein Knopf. Sie traegt ein Symbol, eine Titelzeile UND eine
+// Zustandszeile, sie hat einen Ein-Zustand mit eigener Farbe (T_SEL),
+// und ihre zwei Grundlinien sind in der Vorrunde muehsam auf das
+// Raster gerechnet worden. `paint_button` malt einen Knopf mit EINER
+// Beschriftung. Was fehlte, waren nicht die Zeichenroutinen, sondern
+// die ZUSTAENDE -- und die holt sich diese Datei jetzt aus denselben
+// Themenfarben, die `paint_button` benutzt. Ein Erscheinungsbild,
+// zwei Zeichner, dieselbe Tabelle.
+//
+// N_TILE + 1 ist "keine": 0 waere die erste Kachel.
+static mut hov_tile: u64 = 99
+static mut dn_tile: u64 = 99
+
+fn tile_at(x: u64, y: u64) -> u64 {
+    var sl: u64 = 0
+    while sl < N_TILE {
+        let tx: u64 = tile_rect_x(sl)
+        let ty: u64 = tile_rect_y(sl)
+        if x >= tx && x < tx + TW() && y >= ty && y < ty + TH() {
+            return sl
+        }
+        sl = sl + 1
+    }
+    return 99
+}
+
+// Der Zeiger ist gewandert. Gibt zurueck, ob sich dadurch etwas
+// GEAENDERT hat -- nur dann wird neu gemalt. Ohne diese Frage maelte
+// das Panel bei jeder Mausbewegung neu, und das ist bei einer Bewegung
+// je Bericht eine Menge Anstrich fuer nichts.
+fn hover_setzen(t: u64) -> bool {
+    if t == hov_tile {
+        return false
+    }
+    hov_tile = t
+    return true
+}
+
+fn druck_setzen(t: u64) -> bool {
+    if t == dn_tile {
+        return false
+    }
+    dn_tile = t
+    return true
+}
+
 fn tile_rect_x(t: u64) -> u64 {
     if (t % 2) == 0 {
-        return PAD
+        return PAD()
     }
-    return PAD + TW + GAP
+    return PAD() + TW() + GAP()
 }
 
 fn tile_rect_y(t: u64) -> u64 {
-    return PAD + (t / 2) * (TH + GAP)
+    return PAD() + (t / 2) * (TH() + GAP())
 }
 
 fn click(x: u64, y: u64) {
-    var t: u64 = 0
-    while t < N_TILE {
-        let tx: u64 = tile_rect_x(t)
-        let ty: u64 = tile_rect_y(t)
-        if x >= tx && x < tx + TW && y >= ty && y < ty + TH {
+    var sl: u64 = 0
+    while sl < N_TILE {
+        // RUNDE ECHTHARDWARE-2: der PLATZ ist nicht die KACHEL.
+        let t: u64 = tile_of(sl)
+        let tx: u64 = tile_rect_x(sl)
+        let ty: u64 = tile_rect_y(sl)
+        if x >= tx && x < tx + TW() && y >= ty && y < ty + TH() {
             let rc: u64 = tile_click(t)
             say((&s_tile[0 as usize]) as u64)
             ulib.sayn(t)
@@ -640,11 +1328,125 @@ fn click(x: u64, y: u64) {
             paint(true)
             return
         }
-        t = t + 1
+        sl = sl + 1
     }
-    let fy: u64 = PAD + 2 * (TH + GAP) + PAD - GAP
-    if y >= fy && y < fy + FH {
-        let pid: u64 = ulib.sys(ulib.SYS_SPAWN,
+    // DER HELLIGKEITSREGLER. Die Stelle des Klicks IST der Wert -- kein
+    // Ziehen, kein Griff, den man treffen muss: das Panel schliesst
+    // sich bei einem Druck ausserhalb, und ein Ziehen ueber den Rand
+    // hinaus waere genau so ein Druck.
+    if y >= SLY() && y < SLY() + SLH() && x >= SL_X() {
+        let spur: u64 = W() - PAD() - SL_X()
+        var rel: u64 = x - SL_X()
+        if rel > spur {
+            rel = spur
+        }
+        let v: u64 = BR_MIN + rel * (BR_MAX - BR_MIN) / spur
+        let rc: u64 = ulib.sys(SYS_DISPSET, DS_BRIGHT, v, 0)
+        say((&s_hell[0 as usize]) as u64)
+        ulib.sayn(v)
+        say((&s_rc[0 as usize]) as u64)
+        ulib.sayn(rc)
+        ulib.nl()
+        paint(true)
+        return
+    }
+    // RUNDE TON-2: DER LAUTSTAERKEREGLER. Die Stelle des Klicks IST
+    // der Wert, genau wie bei der Helligkeit darueber und aus
+    // demselben Grund: das Panel schliesst sich bei einem Druck
+    // ausserhalb, ein Ziehen ueber den Rand waere so ein Druck.
+    //
+    // EIN KLICK AUF DIE BESCHRIFTUNG (links von der Rinne) SCHALTET
+    // STUMM. Das ist die Klickfaehigkeit, die der Auftrag verlangt,
+    // und sie sitzt da, wo sonst nichts passiert -- ein eigener Knopf
+    // haette die Zeile schmaler gemacht als die Helligkeitszeile
+    // darueber.
+    if y >= VLY() && y < VLY() + SLH() {
+        if ulib.sys(SYS_AUDGET, A_READY, 0, 0) != 1 {
+            return
+        }
+        // RUNDE ECHTHARDWARE-1: STUMM LIEGT JETZT AUF DER
+        // BESCHRIFTUNGSZEILE und nicht mehr "links von der Rinne" --
+        // die Rinne laeuft ueber die ganze Breite, links von ihr ist
+        // nichts mehr.
+        if y < VLY() + SL_RY() {
+            let an: u64 = ulib.sys(SYS_AUDGET, A_MUTED, 0, 0)
+            var neu: u64 = 1
+            if an == 1 {
+                neu = 0
+            }
+            let rc: u64 = ulib.sys(SYS_AUDSET, AS_MUTE, neu, 0)
+            say((&s_mute[0 as usize]) as u64)
+            ulib.sayn(neu)
+            say((&s_rc[0 as usize]) as u64)
+            ulib.sayn(rc)
+            ulib.nl()
+            paint(true)
+            return
+        }
+        let spur: u64 = W() - PAD() - SL_X()
+        var rel: u64 = x - SL_X()
+        if rel > spur {
+            rel = spur
+        }
+        let v: u64 = rel * 100 / spur
+        let rc: u64 = ulib.sys(SYS_AUDSET, AS_VOLUME, v, 0)
+        // WER DIE LAUTSTAERKE ZIEHT, WILL SIE HOEREN. Stumm bleibt
+        // stumm waere hier die falsche Treue zum Zustand: das Ziehen
+        // IST die Ansage, dass wieder Ton kommen soll.
+        if v > 0 && ulib.sys(SYS_AUDGET, A_MUTED, 0, 0) == 1 {
+            ulib.sys(SYS_AUDSET, AS_MUTE, 0, 0)
+        }
+        say((&s_vol[0 as usize]) as u64)
+        ulib.sayn(v)
+        say((&s_rc[0 as usize]) as u64)
+        ulib.sayn(rc)
+        ulib.nl()
+        paint(true)
+        return
+    }
+    if y >= L1Y() && y < L1Y() + FH() {
+        // ==================================== RUNDE ECHTHARDWARE-5
+        // SYS_SPAWN KANN KEINEN PFAD -- ES MUSS SYS_EXEC SEIN.
+        //
+        // Justins Befund F: "Taskmanager und Einstellungen lassen sich
+        // nicht oeffnen, die Knoepfe reagieren nicht."
+        //
+        // GEMESSEN, nicht vermutet -- die serielle Leitung sagte es
+        // woertlich:
+        //
+        //     qs: settings pid=-22
+        //
+        // -22 ist EINVAL, und es kommt aus `sys.do_spawn`:
+        //
+        //     if prog == 0 || (prog > 16 && prog != P_BUSB_SPAWN) {
+        //         return neg(errno.E_INVAL)
+        //     }
+        //
+        // `SYS_SPAWN` (1000) startet ein EINGEBAUTES Programm des
+        // Kerns und nimmt dessen NUMMER (hoechstens 16). Hier wurde
+        // ihm ein ZEIGER auf "/bin/taskmgr" gegeben, und ein Zeiger
+        // ist immer groesser als 16 -- also kam bei JEDEM Druck auf
+        // beide Knoepfe -22 zurueck und es lief nie etwas an.
+        //
+        // Der Weg mit Pfad ist `SYS_EXEC` (1001). Genau dieser Fehler
+        // stand schon einmal in `launcher.fi` und ist dort in Runde
+        // BLECHKERN behoben worden (siehe die Anmerkung bei
+        // `SYS_EXEC` dort) -- dieses Panel ist damals uebersehen
+        // worden.
+        let pid: u64 = ulib.sys(ulib.SYS_EXEC,
+            (&p_taskmgr[0 as usize]) as u64, 0, 0)
+        say((&s_spawn[0 as usize]) as u64)
+        say((&s_eq[0 as usize]) as u64)
+        ulib.sayn(pid)
+        ulib.nl()
+        shut((&s_out[0 as usize]) as u64)
+        return
+    }
+    if y >= L2Y() && y < L2Y() + FH() {
+        // RUNDE ECHTHARDWARE-5: derselbe Fehler wie eine Kachel
+        // weiter oben, dieselbe Begruendung -- `SYS_SPAWN` nimmt eine
+        // Nummer, kein `/bin/settings`.
+        let pid: u64 = ulib.sys(ulib.SYS_EXEC,
             (&p_settings[0 as usize]) as u64, 0, 0)
         say((&s_spawn[0 as usize]) as u64)
         say((&s_eq[0 as usize]) as u64)
@@ -667,25 +1469,53 @@ fn click(x: u64, y: u64) {
 // after another.
 static mut cut: [u8; 64] = [0 as u8; 64]
 
+// RUNDE ECHTHARDWARE-1: GEKUERZT WIRD AN DER ZEICHENGRENZE, UND ES
+// STEHEN DREI PUNKTE DAHINTER.
+//
+// Justins Foto zeigt "Netz vortae", "Dunkelmo", "Energiepr" -- Woerter,
+// die mitten im Wort aufhoeren, ohne dass man es ihnen ansieht. Zwei
+// Fehler in einer Funktion:
+//
+//   1. Sie zaehlte OKTETTE herunter. "Netz vortaeuschen" traegt ein
+//      `ä` als zwei Oktette; wer eines davon abschneidet, laesst eine
+//      halbe UTF-8-Folge stehen, und `text_at` malt dafuer ein
+//      Ersatzzeichen. `wlibc.fit` kann das seit Runde I18N richtig --
+//      diese Datei hat es nur nicht benutzt.
+//   2. Sie schrieb kein Zeichen dafuer, DASS gekuerzt wurde. Ein Wort,
+//      das ohne Zeichen aufhoert, sieht aus wie ein falsches Wort.
+//
+// Beides macht `wlibc.fit` plus ein angehaengtes "..." -- und die
+// Kachel meldet auf der seriellen Leitung genau das, was sie malt.
 fn fit(p: u64, avail: u64) -> u64 {
-    var n: u64 = tlen(p)
+    let n: u64 = tlen(p)
     if wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), p, n) <= avail {
         return p
     }
+    var pu: [u8; 4] = "...\0"
+    let pp: u64 = (&pu[0 as usize]) as u64
+    let dw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), pp, 3)
+    var platz: u64 = 0
+    if avail > dw {
+        platz = avail - dw
+    }
+    // AN DER ZEICHENGRENZE. `wlibc.fit` gibt eine Laenge in OKTETTEN
+    // zurueck, die nie mitten in einer UTF-8-Folge endet.
+    var k: u64 = wlibc.fit(wlibc.F_UI, wlibc.px_ui(), p, n, platz)
+    if k > 59 {
+        k = 59
+    }
     let q: u64 = (&cut[0 as usize]) as u64
-    if n > 63 {
-        n = 63
+    var i: u64 = 0
+    while i < k {
+        __mmio_write8((q + i) as *mut u8, __mmio_read8((p + i) as *mut u8))
+        i = i + 1
     }
-    var k: u64 = 0
-    while k < n {
-        __mmio_write8((q + k) as *mut u8, __mmio_read8((p + k) as *mut u8))
-        k = k + 1
+    var d: u64 = 0
+    while d < 3 {
+        __mmio_write8((q + k + d) as *mut u8, 46 as u8)
+        d = d + 1
     }
-    __mmio_write8((q + n) as *mut u8, 0 as u8)
-    while n > 1 && wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), q, n) > avail {
-        n = n - 1
-        __mmio_write8((q + n) as *mut u8, 0 as u8)
-    }
+    __mmio_write8((q + k + 3) as *mut u8, 0 as u8)
     return q
 }
 
@@ -707,17 +1537,20 @@ fn say_text(x: u64, base: u64, fg: u64, bg: u64, txt: u64) {
 
 fn paint_band(y0: u64, hh: u64, report: bool) {
     wlibc.set_band(y0)
-    wlibc.clip_set(0, y0, W, y0 + hh)
-    wlibc.rect(0, y0, W, hh, wlibc.theme(wlibc.T_PANEL))
+    wlibc.clip_set(0, y0, W(), y0 + hh)
+    wlib.mal_flaeche(0, y0, W(), hh, wlibc.theme(wlibc.T_PANEL))
     // A LINE ROUND IT. Without it the panel and the bar are the same
     // grey with no edge between them, and the person cannot see where
     // one stops.
-    wlibc.frame(0, 0, W, H, wlibc.theme(wlibc.T_LINE))
-    var t: u64 = 0
-    while t < N_TILE {
-        let tx: u64 = tile_rect_x(t)
-        let ty: u64 = tile_rect_y(t)
-        if ty + TH > y0 && ty < y0 + hh {
+    wlib.mal_rahmen(0, 0, W(), H(), wlib.MR_TAFEL,
+        wlibc.theme(wlibc.T_LINE))
+    var sl: u64 = 0
+    while sl < N_TILE {
+        // RUNDE ECHTHARDWARE-2: gemalt wird der PLATZ, gefragt die KACHEL.
+        let t: u64 = tile_of(sl)
+        let tx: u64 = tile_rect_x(sl)
+        let ty: u64 = tile_rect_y(sl)
+        if ty + TH() > y0 && ty < y0 + hh {
             // DRAWN IN EVERY BAND IT TOUCHES, REPORTED IN ONE. The
             // drawing surface is 81 rows (`wlibc.SURF_ROWS`), so a
             // 62-pixel tile straddles a band boundary and is painted
@@ -733,19 +1566,38 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
                 fg = wlibc.theme(wlibc.T_SELFG)
                 dim = wlibc.theme(wlibc.T_SELFG)
             }
-            wlibc.rect(tx, ty, TW, TH, bg)
-            wlibc.frame3(tx, ty, TW, TH, wlibc.theme(wlibc.T_BTNHI),
-                wlibc.theme(wlibc.T_LINE), on)
+            // ==================================== RUNDE ECHTHARDWARE-6
+            // DIESELBEN ZWEI FARBEN, DIE `wlib.paint_button` NIMMT.
+            // Gedrueckt sticht Zeiger-drueber; eine EINGESCHALTETE
+            // Kachel behaelt ihre Auswahlfarbe und wird nur AUFGEHELLT,
+            // sonst spraenge sie beim Ueberfahren von blau auf grau
+            // und saehe aus, als haette sie sich ausgeschaltet.
+            if sl == dn_tile {
+                if on {
+                    bg = wlibc.mix(bg, wlibc.theme(wlibc.T_BTNDN), 50)
+                } else {
+                    bg = wlibc.theme(wlibc.T_BTNDN)
+                }
+            } else if sl == hov_tile {
+                if on {
+                    bg = wlibc.mix(bg, wlibc.theme(wlibc.T_BTNHI), 50)
+                } else {
+                    bg = wlibc.theme(wlibc.T_BTNHI)
+                }
+            }
+            wlib.mal_tafel(tx, ty, TW(), TH(), wlib.MR_KNOPF,
+                wlibc.EL_FLAT, bg, wlibc.theme(wlibc.T_LINE))
             let ip: u64 = tile_icon(t)
             if ip != 0 {
-                let _i: bool = wlibc.icon_draw(ip, tx + 10, ty + 10)
+                let _i: bool = wlibc.icon_draw(ip, tx + PAD() / 2,
+                    ty + PAD() / 2)
                 if mine {
                     say((&s_sym[0 as usize]) as u64)
                     ulib.sayn(t)
                     say((&s_sx[0 as usize]) as u64)
-                    ulib.sayn(px_ + tx + 10)
+                    ulib.sayn(px_ + tx + PAD() / 2)
                     say((&s_y[0 as usize]) as u64)
-                    ulib.sayn(py_ + ty + 10)
+                    ulib.sayn(py_ + ty + PAD() / 2)
                     say((&s_to[0 as usize]) as u64)
                     if on {
                         ulib.sayn(1)
@@ -760,37 +1612,246 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
             // the long label and painted a clipped one would pass a
             // checker that compares the two -- which is exactly the
             // trap round DESKTOP wrote down for the status fields.
-            let lab: u64 = fit(tile_label(t), TW - 20)
-            let lb: u64 = ty + 8 + IC + 4 + asc
-            let _e: u64 = wlibc.text_at(wlibc.F_UI, wlibc.px_ui(), tx + 10,
-                lb, lab, tlen(lab), fg)
-            var st: u64 = (&w_off[0 as usize]) as u64
-            if on {
-                st = (&w_on[0 as usize]) as u64
-            }
-            let sb: u64 = ty + TH - 10
-            let _f: u64 = wlibc.text_at(wlibc.F_UI, wlibc.px_ui(), tx + 10,
-                sb, st, tlen(st), dim)
+            // RUNDE ECHTHARDWARE-1: DIE ZWEI GRUNDLINIEN, GERECHNET
+            // AUS DEMSELBEN RASTER WIE `TH()`.
+            //
+            // Vorher: Titel bei `ty+8+16+4+asc`, Zustand bei
+            // `ty+TH-10`. Beide Zahlen waren an Schrifthoehe 15
+            // geeicht; bei 30 lag die zweite Grundlinie OBERHALB der
+            // Unterlaenge der ersten, und genau das zeigt Justins Foto.
+            //
+            // Jetzt liegt die Titelzeile in ihrem eigenen Band und die
+            // Zustandszeile im naechsten -- der Abstand zwischen ihnen
+            // ist `3 * sk()` und kann nicht mehr negativ werden.
+            let x0: u64 = tx + PAD() / 2
+            let breit: u64 = TW() - PAD()
+            let lab: u64 = fit(tile_label(t), breit)
+            let lb: u64 = ty + PAD() / 2 + IC() + 4 * sk() + asc
+            let _e: u64 = wlib.mal_text(x0, lb, lab,
+                tlen(lab), fg, wlibc.TY_BODY)
+            let st: u64 = fit(tile_word(t), breit)
+            let sb: u64 = lb + (ZH() - asc) + 3 * sk() + asc
+            let _f: u64 = wlib.mal_text(x0, sb, st,
+                tlen(st), dim, wlibc.TY_CAPTION)
             if mine {
-                say_text(tx + 10, lb, fg, bg, lab)
-                say_text(tx + 10, sb, dim, bg, st)
+                say_text(x0, lb, fg, bg, lab)
+                say_text(x0, sb, dim, bg, st)
             }
         }
-        t = t + 1
+        sl = sl + 1
     }
-    let fy: u64 = PAD + 2 * (TH + GAP) + PAD - GAP
-    if fy + FH > y0 && fy < y0 + hh {
-        wlibc.hline(PAD, fy - 4, W - 2 * PAD, wlibc.theme(wlibc.T_LINE))
-        let p: u64 = (&l_all[0 as usize]) as u64
-        let base: u64 = fy + (FH + asc) / 2 - 1
-        let _g: u64 = wlibc.text_at(wlibc.F_UI, wlibc.px_ui(), PAD + 10,
-            base, p, tlen(p), wlibc.theme(wlibc.T_FG))
-        if report && fy >= y0 && fy < y0 + hh {
-            say_text(PAD + 10, base, wlibc.theme(wlibc.T_FG),
+    // ------------------------------------------------ der Helligkeitsregler
+    if SLY() + SLH() > y0 && SLY() < y0 + hh {
+        // RUNDE ECHTHARDWARE-1: BESCHRIFTUNG OBEN, RINNE DARUNTER.
+        let lb: u64 = fit(msg.get((&k_bright[0 as usize]) as u64),
+            W() - 2 * PAD())
+        let base: u64 = SLY() + asc
+        let _h1: u64 = wlib.mal_text(PAD(), base, lb, tlen(lb),
+            wlibc.theme(wlibc.T_FG), wlibc.TY_BODY)
+        let spur: u64 = W() - PAD() - SL_X()
+        let mitte: u64 = SLY() + SL_RY() + ZH() / 2
+        let rh: u64 = 4 * sk()
+        wlib.mal_balken(SL_X(), mitte - rh / 2, spur, rh,
+            wlibc.theme(wlibc.T_SCROLL))
+        var v: u64 = dget(DG_BRIGHT)
+        if v < BR_MIN {
+            v = BR_MIN
+        }
+        if v > BR_MAX {
+            v = BR_MAX
+        }
+        let kx: u64 = SL_X() + (v - BR_MIN) * (spur - SL_KN())
+            / (BR_MAX - BR_MIN)
+        // DER TEIL LINKS VOM GRIFF IN DER AKZENTFARBE: so sieht man, wo
+        // der Regler steht, auch wenn man den Griff nicht erkennt.
+        wlib.mal_balken(SL_X(), mitte - rh / 2, kx - SL_X(), rh,
+            wlibc.theme(wlibc.T_ACCENT))
+        let kh: u64 = 16 * sk()
+        wlib.mal_tafel(kx, mitte - kh / 2, SL_KN(), kh, wlib.MR_GRIFF,
+            wlibc.EL_RAISED, wlibc.theme(wlibc.T_BTN),
+            wlibc.theme(wlibc.T_LINE))
+        if report && SLY() >= y0 && SLY() < y0 + hh {
+            say_text(PAD(), base, wlibc.theme(wlibc.T_FG),
+                wlibc.theme(wlibc.T_PANEL), lb)
+            say((&s_hellist[0 as usize]) as u64)
+            ulib.sayn(v)
+            say((&s_sx[0 as usize]) as u64)
+            ulib.sayn(kx)
+            ulib.nl()
+            // ================================ RUNDE ECHTHARDWARE-3
+            // DIE RINNE SAGT, WO SIE LIEGT -- IN BILDSCHIRMPUNKTEN.
+            //
+            // Ein Testlaeufer, der den Regler ziehen soll, musste
+            // seine Lage bisher aus PAD/GAP/TOP2/ZH nachrechnen. Ich
+            // habe das in dieser Runde zweimal getan und zweimal
+            // danebengegriffen: beide Male lag der Griff AUSSERHALB
+            // des Panels, das Panel schloss sich voellig zu Recht
+            // (`qs: closed by outside`), und es sah aus, als taete
+            // der Regler nichts. Der Fehler lag im Laeufer, nicht im
+            // Programm -- aber unterscheiden liess er sich nicht.
+            //
+            // Also sagt das Programm selbst, wo man greifen muss:
+            // linke Kante, rechte Kante und Mitte der Rinne, absolut
+            // auf dem Schirm. Dieselbe Regel wie bei `wlib: rect`.
+            say((&s_hellspur[0 as usize]) as u64)
+            ulib.sayn(px_ + SL_X())
+            say((&s_bis[0 as usize]) as u64)
+            ulib.sayn(px_ + W() - PAD())
+            say((&s_ymit[0 as usize]) as u64)
+            ulib.sayn(py_ + mitte)
+            ulib.nl()
+        }
+    }
+    // ------------------------------------------------ RUNDE TON-2:
+    // DER LAUTSTAERKEREGLER. Gebaut wie der Helligkeitsregler darueber,
+    // Bildpunkt fuer Bildpunkt, und aus denselben Themenmarken --
+    // T_SCROLL fuer die Rinne, T_ACCENT fuer den gefuellten Teil,
+    // T_BTN fuer den Griff, T_LINE fuer die Kante. Kein fester
+    // Farbwert, kein eigener Zeichenweg.
+    //
+    // IST STUMM GESCHALTET, wird die Rinne NICHT gefuellt und der
+    // Wert in der gedaempften Farbe geschrieben: "stumm bei 70" ist
+    // ein anderer Zustand als "auf null gedreht", und ein Regler, der
+    // beides gleich zeigt, verschweigt den Unterschied.
+    if VLY() + SLH() > y0 && VLY() < y0 + hh {
+        // RUNDE ECHTHARDWARE-1: BESCHRIFTUNG OBEN, RINNE DARUNTER --
+        // und gemalt mit denselben wlib-Aufrufen wie die Helligkeit
+        // darueber. Vorher lief diese Zeile ueber `wlibc.rect` und
+        // `wlibc.text_at` direkt am Widget-Satz vorbei; Justins
+        // Kritik "verwende die Bibliothek ueberall" trifft genau das.
+        let lb: u64 = fit(msg.get((&k_volume[0 as usize]) as u64),
+            W() - 2 * PAD())
+        let base: u64 = VLY() + asc
+        let da: bool = ulib.sys(SYS_AUDGET, A_READY, 0, 0) == 1
+        var vfg: u64 = wlibc.theme(wlibc.T_FG)
+        if !da {
+            vfg = wlibc.theme(wlibc.T_DIM)
+        }
+        let _h2: u64 = wlib.mal_text(PAD(), base, lb, tlen(lb), vfg,
+            wlibc.TY_BODY)
+        let spur: u64 = W() - PAD() - SL_X()
+        let mitte: u64 = VLY() + SL_RY() + ZH() / 2
+        let rh: u64 = 4 * sk()
+        wlib.mal_balken(SL_X(), mitte - rh / 2, spur, rh,
+            wlibc.theme(wlibc.T_SCROLL))
+        var v: u64 = 0
+        var stumm: bool = false
+        if da {
+            v = ulib.sys(SYS_AUDGET, A_VOLUME, 0, 0)
+            if v > 100 {
+                v = 100
+            }
+            stumm = ulib.sys(SYS_AUDGET, A_MUTED, 0, 0) == 1
+        }
+        let kx: u64 = SL_X() + v * (spur - SL_KN()) / 100
+        if !stumm && v > 0 {
+            wlib.mal_balken(SL_X(), mitte - rh / 2, kx - SL_X(), rh,
+                wlibc.theme(wlibc.T_ACCENT))
+        }
+        let kh: u64 = 16 * sk()
+        wlib.mal_tafel(kx, mitte - kh / 2, SL_KN(), kh, wlib.MR_GRIFF,
+            wlibc.EL_RAISED, wlibc.theme(wlibc.T_BTN),
+            wlibc.theme(wlibc.T_LINE))
+        if report && VLY() >= y0 && VLY() < y0 + hh {
+            say_text(PAD(), base, vfg, wlibc.theme(wlibc.T_PANEL), lb)
+            say((&s_volist[0 as usize]) as u64)
+            ulib.sayn(v)
+            say((&s_vomute[0 as usize]) as u64)
+            if stumm {
+                ulib.sayn(1)
+            } else {
+                ulib.sayn(0)
+            }
+            say((&s_sx[0 as usize]) as u64)
+            ulib.sayn(kx)
+            ulib.nl()
+        }
+    }
+    // ------------------------------------------------------ der Akkustand
+    if BAY() + FH() > y0 && BAY() < y0 + hh {
+        let base: u64 = BAY() + (FH() + asc) / 2 - 1
+        var zeile: [u8; 64] = [0 as u8; 64]
+        let z: u64 = (&zeile[0 as usize]) as u64
+        var at: u64 = ulib.strcpy(z, msg.get((&k_bat[0 as usize]) as u64))
+        at = at + ulib.strcpy(z + at, (&u_sp[0 as usize]) as u64)
+        // KEIN AKKU IST KEINE NULL PROZENT. Der Kern sagt, ob einer da
+        // ist; steht dort eine Null, steht hier ein Wort und keine Zahl.
+        if pget(PG_BATPRESENT) == 0 {
+            at = at + ulib.strcpy(z + at,
+                msg.get((&k_nobat[0 as usize]) as u64))
+        } else {
+            at = at + ulib.digits(pget(PG_BATPERCENT), z + at)
+            at = at + ulib.strcpy(z + at, (&u_pct[0 as usize]) as u64)
+            if (pget(PG_BATSTATE) & 2) != 0 {
+                at = at + ulib.strcpy(z + at, (&u_op[0 as usize]) as u64)
+                at = at + ulib.strcpy(z + at,
+                    msg.get((&k_chg[0 as usize]) as u64))
+                at = at + ulib.strcpy(z + at, (&u_cl[0 as usize]) as u64)
+            }
+        }
+        let _b: u64 = wlib.mal_text(PAD(), base, z, at,
+            wlibc.theme(wlibc.T_DIM), wlibc.TY_BODY)
+        if report && BAY() >= y0 && BAY() < y0 + hh {
+            say_text(PAD(), base, wlibc.theme(wlibc.T_DIM),
+                wlibc.theme(wlibc.T_PANEL), z)
+        }
+    }
+    // -------------------------------------------------- die Verknuepfungen
+    if L1Y() + FH() > y0 && L1Y() < y0 + hh {
+        wlib.mal_trenner(PAD(), L1Y() - 4, W() - 2 * PAD())
+        let p: u64 = msg.get((&k_tm[0 as usize]) as u64)
+        let base: u64 = L1Y() + (FH() + asc) / 2 - 1
+        let _g: u64 = wlib.mal_text(PAD() + 10, base, p, tlen(p),
+            wlibc.theme(wlibc.T_FG), wlibc.TY_BODY)
+        if report && L1Y() >= y0 && L1Y() < y0 + hh {
+            say_text(PAD() + 10, base, wlibc.theme(wlibc.T_FG),
                 wlibc.theme(wlibc.T_PANEL), p)
         }
     }
-    let _p: u64 = wlibc.push(w_h, 0, y0, W, hh)
+    if L2Y() + FH() > y0 && L2Y() < y0 + hh {
+        let p: u64 = msg.get((&k_all[0 as usize]) as u64)
+        let base: u64 = L2Y() + (FH() + asc) / 2 - 1
+        let _g: u64 = wlib.mal_text(PAD() + 10, base, p, tlen(p),
+            wlibc.theme(wlibc.T_FG), wlibc.TY_BODY)
+        if report && L2Y() >= y0 && L2Y() < y0 + hh {
+            say_text(PAD() + 10, base, wlibc.theme(wlibc.T_FG),
+                wlibc.theme(wlibc.T_PANEL), p)
+        }
+    }
+    let _p: u64 = wlibc.push(w_h, 0, y0, W(), hh)
+}
+
+// ==================================================== RUNDE ECHTHARDWARE-5
+// DAS THEMA HAT GEWECHSELT -- UND ZWAR JETZT, NICHT BEIM NAECHSTEN
+// AUFMACHEN.
+//
+// Justins Befund J, woertlich: schaltet er von hell auf dunkel, bleibt
+// das Kontrollzentrum rechts "komisch blau" -- also im alten Schema --
+// und wird erst richtig, wenn er es SCHLIESST und NEU OEFFNET.
+//
+// DIE URSACHE, und sie ist dieselbe Wurzel wie bei den anderen
+// Oberflaechen: dieses Panel hat eine EIGENE Ereignisschleife und ruft
+// `wlib.step()` nie. `wlib.step` ist aber die Stelle, an der
+// `theme_watch()` sitzt -- der Wecker, der zehnmal je Sekunde
+// nachsieht, ob sich die aufgeloesten Marken geaendert haben, und dann
+// ALLE Fenster schmutzig macht. Ein Programm, das an `step` vorbei
+// lebt, bekommt davon nichts mit und malt weiter mit den Farben, die
+// es beim Aufmachen gelesen hat.
+//
+// Die Leiste ueber uns POLLT das Thema bereits (`wlibc.theme_poll` in
+// ihrer Schleife) -- sie hat es nur fuer sich behalten. Diese Funktion
+// ist der fehlende Weitersager: sie wird von dort gerufen, wenn sich
+// wirklich etwas geaendert hat, und malt das Panel vollstaendig neu.
+//
+// VOLLSTAENDIG und nicht teilweise: die Farben stecken in jedem Band,
+// in jeder Kachel und in beiden Reglern. Ein halber Anstrich waere
+// genau der Zwischenzustand, den Justin ausdruecklich nicht will.
+fn thema_neu() -> bool {
+    if open_ == 0 {
+        return false
+    }
+    paint(false)
+    return true
 }
 
 fn paint(report: bool) {
@@ -800,14 +1861,40 @@ fn paint(report: bool) {
     var y: u64 = 0
     var first: bool = true
     let _q: bool = first
-    while y < H {
+    while y < H() {
         var hh: u64 = BAND
-        if y + hh > H {
-            hh = H - y
+        if y + hh > H() {
+            hh = H() - y
         }
         paint_band(y, hh, report)
         first = false
         y = y + hh
     }
     let _f: u64 = wlibc.sys3w(wlibc.WM_FLUSH, w_h, 0, 0)
+    // ============================================ RUNDE ECHTHARDWARE-5
+    // DIE ZWEI KNOPFZEILEN, ABSOLUT AUF DEM SCHIRM -- HIER UND NICHT
+    // IM BANDMALER.
+    //
+    // Erster Anlauf dieser Runde: die Zeilen standen in
+    // `paint_band`, und dort rechnet alles in BANDKOORDINATEN
+    // (`wlibc.set_band(y0)`). Gemeldet wurde deshalb `y=970`, waehrend
+    // der Druck bei `y=348` im Fenster ankam -- der Klick landete eine
+    // Zeile zu tief, auf `All settings` statt auf `Task manager`.
+    // Gemessen an genau diesem Lauf: `qs: druck x=194 y=348`.
+    //
+    // `paint` laeuft einmal je Anstrich und kennt `py_`, den Ursprung
+    // des Fensters. Damit ist die gemeldete Zahl die, auf die ein
+    // Klick zielen muss.
+    if report {
+        say((&s_zeile1[0 as usize]) as u64)
+        ulib.sayn(py_ + L1Y())
+        say((&s_hoehe[0 as usize]) as u64)
+        ulib.sayn(FH())
+        ulib.nl()
+        say((&s_zeile2[0 as usize]) as u64)
+        ulib.sayn(py_ + L2Y())
+        say((&s_hoehe[0 as usize]) as u64)
+        ulib.sayn(FH())
+        ulib.nl()
+    }
 }

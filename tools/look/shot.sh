@@ -247,7 +247,7 @@ if [ "$user" != "-" ]; then
     ARGS+=(/users/ /users/root/ /users/root/config/
            "/users/root/config/locale=$OUT/userlocale@0644")
 fi
-while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$OUT/buendel")
+while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$OUT/buendel" nur="$progs")
 while read -r z; do ARGS+=("$z"); done < "$OUT/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 \
     || { echo "FAILED: mkfs"; tail -20 "$OUT/mkfs.log"; exit 1; }

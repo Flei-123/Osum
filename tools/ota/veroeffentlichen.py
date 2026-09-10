@@ -63,7 +63,15 @@ nicht behalten sollte, und niemand saehe, warum.
     schluesselgen  <dezimal>
     kette          <gen>  <64hex neuer pub>  <128hex sig>     (0..n)
     gesperrt       <fassung>                                  (0..n)
-    paket          <name> <fassung> <sha256> <oktette> <datei>
+    paket          <name> <fassung> <sha256> <oktette> <datei> <plattform>
+
+RUNDE STORE-MOBIL: die sechste Spalte, `<plattform>`, sagt in EINEM
+Wort, wofuer das Paket ist -- `osum-x86_64`, `osum-aarch64` oder
+`osum-any` --, und `tools/ota/plattform.py` sagt, woher das Wort kommt
+(Metadaten, sonst der ELF-Kopf in der Nutzlast). `/bin/ota` zeigt und
+holt nur die Zeilen, die auf seine Maschine passen. Die Kennung bleibt
+OTA2: die Spalte ist keine Sicherheitsaussage, ein altes Geraet liest
+darueber hinweg.
 
 Die ersten beiden Zeilen stehen fest, damit ein Geraet die Fassung
 lesen kann, bevor es irgendetwas anderes ansieht.
@@ -98,6 +106,8 @@ import sys
 import time
 
 HIER = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HIER)
+import plattform as PLT   # noqa: E402
 OPK = os.environ.get("OPK", "/root/orientos-install/pkg/opk.py")
 BUND_PY = os.path.join(HIER, "schluesselbund.py")
 
@@ -205,8 +215,9 @@ def verzeichnis_text(fassung, gen, kette, gesperrt, pakete):
         z.append("kette\t%d\t%s\t%s" % (k["gen"], k["pub"], k["sig"]))
     for g in gesperrt:
         z.append("gesperrt\t%d" % g)
-    for name, pf, h, n, datei in pakete:
-        z.append("paket\t%s\t%s\t%s\t%d\t%s" % (name, pf, h, n, datei))
+    for name, pf, h, n, datei, plattform in pakete:
+        z.append("paket\t%s\t%s\t%s\t%d\t%s\t%s"
+                 % (name, pf, h, n, datei, plattform))
     return ("\n".join(z) + "\n").encode("ascii")
 
 
@@ -296,7 +307,9 @@ def bauen(aus, stand, bund, notiz, sperren, feste_fassung=None,
         # sich stimmig.
         signieren(bund, vorrat, os.path.join(zv, d + ".sig"), signierer)
         name, pf = meta_aus_opk(p)
-        pakete.append((name, pf, h, os.path.getsize(p), d))
+        plattform = PLT.plattform_von_opk(p)
+        pakete.append((name, pf, h, os.path.getsize(p), d, plattform))
+        print("   paket    %-14s %-8s %s" % (name, pf, plattform))
 
     # 3. INDEX (von `opk.py`, unsigniert) und die Signatur aus dem Bund.
     r = subprocess.run([sys.executable, OPK, "quelle", zv],

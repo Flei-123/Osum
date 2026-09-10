@@ -1,0 +1,5 @@
+print("hallo von lua")
+print(_VERSION)
+print(2^10, math.floor(7/2), #"abcdef")
+local t={} for i=1,5 do t[i]=i*i end print(table.concat(t,","))
+print(string.upper("osum").."!")

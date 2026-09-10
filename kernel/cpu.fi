@@ -36,7 +36,16 @@ export {
     set_online, online_count, get, set, add, record,
     C_APICID, C_ONLINE, C_CUR, C_IDLE, C_TICKS, C_SWITCHES, C_STACK,
     C_GDT, C_TSS, C_WORK, C_GO, C_SUM, C_CYCLES, C_PICKS, C_STARTED,
-    C_IDLERUNS, C_LAPIC, C_FPUOWNER
+    C_IDLERUNS, C_LAPIC, C_FPUOWNER, C_IDLETICKS,
+    // RUNDE VIELKERN: die drei Felder, die Ring 3 auf jedem Kern
+    // moeglich machen. Der Satz DIESES Kerns ist zugleich der Block,
+    // auf den seine GS-Basis zeigt -- `%gs:C_SYSRSP` und
+    // `%gs:C_KSTACK` in isr.s sind genau diese beiden Zahlen.
+    C_SYSRSP, C_KSTACK, C_TSSADDR,
+    // RUNDE VIELKERN 3: der Zaehler, der den Beweis fuehrt.
+    C_SYSCALLS,
+    // RUNDE MERGE-7: der Zeitgeber-Wachhund JE KERN statt geteilt.
+    C_TOTMARKE, C_TOTZEIT, C_TOTZAHL
 }
 
 // ---------------------------------------------------- the record fields
@@ -63,6 +72,95 @@ const C_IDLERUNS: u64 = 120 // turns of its idle loop
 // Wechsel zwischen beiden Wegen keinen halben Zustand hinterlaesst.
 // Es ist PRO KERN, weil die Register es sind.
 const C_FPUOWNER: u64 = 128
+// ====================================================== RUNDE VIELKERN
+// WO EIN SYSTEMAUFRUF AUF DIESEM KERN LANDET.
+//
+// Bis hierher stand beides EINMAL fuer die ganze Maschine: der Ablageort
+// des Benutzerstapels (`sys_rsp` in isr.s, ein .bss-Wort) und der
+// Kernstapel (`kdata + KSTACK_CUR`, ein Wort in der Datenseite). Zwei
+// Kerne, die gleichzeitig `syscall` ausfuehren, ueberschrieben sich
+// darin gegenseitig -- das war Justins #UD vom 05.09. Deshalb durfte
+// Ring 3 seit Runde BLECHKERN nur auf Kern 0 laufen.
+//
+// Jetzt liegen beide IM SATZ DES KERNS, und `syscall_entry` erreicht sie
+// ueber die GS-Basis, die auf genau diesen Satz zeigt. Kein `swapgs`:
+// Ring 3 benutzt in diesem System GS nicht (nachgezaehlt: `objdump -d`
+// findet im ganzen Abbild keinen GS-Praefix ausserhalb dieser drei
+// Stellen), also darf die Basis STEHEN bleiben und muss nicht getauscht
+// werden. Das spart die Paarung von `swapgs` in 48 Unterbrechungs-
+// stuempfen und den ganzen Zoo an Fehlern, den eine verlorene Haelfte
+// dieser Paarung macht. Wenn dieses System einmal TLS in Ring 3 bekommt,
+// ist DAS der Tag fuer `swapgs` -- und nicht frueher.
+//
+// DIE ZAHLEN STEHEN AUCH IN isr.s (`.set CPU_SYSRSP` / `.set CPU_KSTACK`)
+// und muessen mit diesen hier uebereinstimmen. `kmain` vergleicht sie
+// beim Start und sagt es, wenn sie auseinanderlaufen.
+const C_SYSRSP: u64 = 136 // Ablage des Benutzerstapels im Einsprung
+const C_KSTACK: u64 = 144 // Kernstapel der Aufgabe, die hier laeuft
+const C_TSSADDR: u64 = 152 // Aufgabenzustandssegment DIESES Kerns
+// ==================================================== RUNDE VIELKERN 3
+// WIE VIELE SYSTEMAUFRUFE AUF DIESEM KERN AUS RING 3 HEREINKAMEN.
+//
+// Gezaehlt wird in `syscall_entry` selbst, mit EINEM `incq %gs:...` --
+// nicht aus Firn heraus. Das hat zwei Gruende, und beide sind der Punkt
+// dieser Runde:
+//
+//   * ES KOSTET NICHTS. Ein `cpu.here` je Systemaufruf waere ein Lesen
+//     im APIC-Fenster, also ein Speicherzugriff auf eine nicht
+//     zwischengespeicherte Seite -- fuer einen Zaehler.
+//   * ES MISST GENAU DAS RICHTIGE. Der Zaehler liegt in demselben Satz
+//     und wird ueber DIESELBE GS-Basis erreicht wie der Kernstapel eine
+//     Zeile darueber. Steht auf einem Kern eine falsche Basis, zaehlt
+//     dieser Kern in einen fremden Satz -- und die Summe der Zaehler
+//     passt nicht mehr zu `kstate.SYSCALLS`. Der Beweis "Ring 3 lief
+//     wirklich auf diesem Kern" ist damit nicht die Abwesenheit eines
+//     Absturzes, sondern eine Zahl.
+const C_SYSCALLS: u64 = 160 // Systemaufrufe, die HIER hereinkamen
+// ================================================== RUNDE WERKZEUGE
+// WIE VIELE SCHLAEGE DIESER KERN IM LEERLAUF VERBRACHT HAT.
+//
+// `C_TICKS` zaehlt seit Runde K5 die Zeitgeberunterbrechungen EINES
+// Kerns -- also seine ganze Zeit. Was fehlte, ist die zweite Zahl, ohne
+// die die erste keine Auslastung ergibt: wie viele dieser Schlaege die
+// Leerlaufaufgabe bekommen hat. Erst die Differenz ist Arbeit, und erst
+// zwei Messungen im Abstand einer Sekunde ergeben einen Prozentsatz.
+//
+// WARUM NICHT `C_IDLERUNS`. Das zaehlt die DURCHLAEUFE der Leerlauf-
+// schleife -- eine Zahl, die von der Geschwindigkeit des Prozessors
+// abhaengt und von nichts sonst. Zwei Kerne mit gleicher Last, aber
+// verschiedenem Takt haetten verschiedene Werte. Ein Schlag ist auf
+// jedem Kern derselbe Zehntelhundertstel Sekunde.
+//
+// GEZAEHLT WIRD IM ZEITGEBER (`sched.on_tick`), auf demselben Kern und
+// im selben Atemzug wie `C_TICKS` -- also kann die eine Zahl nie ohne
+// die andere hochgehen, und `idle <= ticks` gilt immer.
+// RUNDE MERGE-6: DIE ZAHL WAR 160 UND IST JETZT 168.
+// Beide Runden haben unabhaengig voneinander das naechste freie Wort
+// des Satzes genommen, und zwar dasselbe. C_SYSCALLS behaelt 160,
+// weil isr.s diese Zahl fest eingetragen hat (`.set CPU_SYSCALLS,
+// 160`) und der Einsprung sie ohne Firn dazwischen benutzt; ein
+// Zaehler, den nur Firn anfasst, kann umziehen, einer im Assembler
+// nicht. 168 ist frei: der Satz ist kstate.CPU_BYTES = 256 gross,
+// belegt sind damit 176 von 256.
+const C_IDLETICKS: u64 = 168
+
+// RUNDE MERGE-7: der Zeitgeber-Wachhund aus sched.fi (`timer_tot`) lag
+// bis hierher in DREI static mut -- Prozessglobal, ohne Sperre, von
+// JEDEM Kern angefasst, der schlafen will. Auf merge6 fiel das nicht
+// auf: `sleep_ticks` lief selten genug, dass zwei Kerne kaum je im
+// selben Augenblick hindurchliefen. Seit RUNDE UHRWERK ruft die
+// Taskleiste `ulib.sleep_ms(25)` -- vierzig Mal in der Sekunde statt
+// gelegentlich -- und die Kollisionswahrscheinlichkeit stieg mit ihr:
+// tools/glyphe/run.sh, Abschnitt 7, zeigte danach 6 bis 10 von 20
+// Laeufen mit `panic: integer overflow in 'u64 - u64' at
+// kernel/sched.fi:1978` (davor: 0 von 20, siehe RUNDE GLYPHE). Ein
+// Kern setzt `tote_zeit` auf seinen TSC-Wert, ein zweiter liest ihn
+// kurz danach und zieht seinen EIGENEN, kleineren TSC-Wert ab -- ein
+// Wachhund, der jeden Kern fuer sich beobachten soll, braucht auch
+// einen Platz je Kern. Drei Felder, derselbe Satz wie C_SYSCALLS.
+const C_TOTMARKE: u64 = 176
+const C_TOTZEIT: u64 = 184
+const C_TOTZAHL: u64 = 192
 
 // Where the address of the local APIC window is kept. It is written once,
 // by `smp.probe`, out of what `apic.fi` measured -- this file does not
@@ -113,11 +211,38 @@ fn register(state: u64, apid: u64) -> u64 {
     if n >= kstate.MAX_CPUS {
         return kstate.MAX_CPUS
     }
+    // ================================================== RUNDE VIELKERN
+    // DER SATZ WIRD GENULLT -- ABER NICHT DIE DREI FELDER, AUS DENEN DER
+    // SYSTEMAUFRUF SEINEN STAPEL HOLT.
+    //
+    // `register` laeuft in `smp.probe`, also NACH `sched.init` und NACH
+    // `user.setup`. Fuer den Satz 0 ist das kein Anlegen, sondern ein
+    // Ueberschreiben von etwas, das schon benutzt wird: `C_KSTACK` stand
+    // auf `syscall_stack_top` und war danach 0. Der naechste `syscall`
+    // holte sich `rsp = 0` und starb im ersten `push` -- gemessen als
+    //
+    //     *** EXCEPTION 8 #DF  rip=0x1002c3  rsp=0x0
+    //
+    // und `rip` war genau das `push %gs:0x88` des Einsprungs.
+    // `tools/einsprung/run.sh` hat es gefangen (7 von 14 statt 12).
+    // RUNDE VIELKERN 3: und C_SYSCALLS dazu. Derselbe Grund, eine
+    // Runde spaeter: der Zaehler steht schon auf dem, was der
+    // Startkern bis hierher an Systemaufrufen gesehen hat (der
+    // Ring-3-Ausflug aus Runde 59 liegt davor), und ein Zaehler, den
+    // der Hochlauf zurueckdreht, macht aus `abw` eine Zufallszahl.
+    let k_sysrsp: u64 = get(state, n, C_SYSRSP)
+    let k_kstack: u64 = get(state, n, C_KSTACK)
+    let k_tss: u64 = get(state, n, C_TSSADDR)
+    let k_sysc: u64 = get(state, n, C_SYSCALLS)
     var i: u64 = 0
     while i < kstate.CPU_BYTES / 8 {
         __mmio_write64((record(state, n) + i * 8) as *mut u64, 0)
         i = i + 1
     }
+    set(state, n, C_SYSRSP, k_sysrsp)
+    set(state, n, C_KSTACK, k_kstack)
+    set(state, n, C_TSSADDR, k_tss)
+    set(state, n, C_SYSCALLS, k_sysc)
     set(state, n, C_APICID, apid)
     kstate.set(state, kstate.SMP_OFF + kstate.SMP_COUNT, n + 1)
     return n

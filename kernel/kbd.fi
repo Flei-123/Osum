@@ -63,9 +63,12 @@ import time
 
 export {
     irq, on_code, translate, shifted, take, waiting,
-    hot_take, hot_waiting, MAX_KEYS, HOT_SLOTS,
+    hot_take, hot_waiting, push_hot, MAX_KEYS, HOT_SLOTS,
     code_of, layout, set_layout, switches, LAYOUTS, L_US, L_DE,
-    super_down, hotkey_seq, hotkey_key, hotkey_ns
+    super_down, hotkey_seq, hotkey_key, hotkey_ns,
+    // RUNDE BLECHEINGABE: die drei Feststelltasten und ihre Lampen.
+    locks, locks_dirty, locks_clean, locks_set,
+    LK_NUM, LK_CAPS, LK_SCROLL
 }
 
 // How many octets fit into the buffer in the data area.
@@ -120,7 +123,82 @@ fn irq(state: u64) {
 // `-device usb-kbd` und einmal mit PS/2, und die Ausgaben werden
 // Oktett fuer Oktett verglichen. Waeren es zwei Wege, gingen sie
 // irgendwann auseinander -- und der Vergleich saehe es.
+// ================================================ RUNDE BLECHEINGABE
+// ============ DIE DREI FESTSTELLTASTEN UND IHRE LAMPEN, AN EINER STELLE
+//
+// Justin: "die Num-Lock-Taste leuchtet -- und ich kann sie auch nicht
+// togglen." Das ist zwei Aussagen: die Lampe steht so, wie die FIRMWARE
+// sie gelassen hat, und niemand aendert sie. Der Grund stand im
+// Quelltext: `SET_REPORT` gab es in diesem Baum nicht (`grep SET_REPORT
+// kernel/` -- kein Treffer), es gab nur SET_PROTOCOL und SET_IDLE. Eine
+// Tastatur schaltet ihre Lampen NICHT selbst; sie wartet auf einen
+// Ausgabebericht des Wirts.
+//
+// DER ZUSTAND STEHT HIER UND NICHT IM USB-TREIBER, und das ist der
+// Punkt: `kbd.on_code` ist die EINE Stelle, durch die beide
+// Tastaturwege gehen -- PS/2 aus IRQ 1 und USB ueber `usb.press` (siehe
+// den Kommentar zu `on_code` weiter unten). Ein Zustand je Weg waeren
+// zwei Wahrheiten. `usb.fi` liest ihn hier ab und schickt ihn mit
+// `SET_REPORT` an das Geraet; einen Kreis im Modulgraphen gibt es
+// dabei nicht, denn `usb` bindet `kbd` ein und nicht umgekehrt.
+const LK_NUM: u64 = 1
+const LK_CAPS: u64 = 2
+const LK_SCROLL: u64 = 4
+
+static mut lock_bits: u64 = 0
+// 1 = seit der letzten Uebertragung hat sich etwas geaendert. Beim Start
+// eine 1, damit die Lampen EINMAL auf einen bekannten Stand gebracht
+// werden -- was die Firmware hinterlassen hat, weiss niemand.
+static mut lock_neu: u64 = 1
+
+fn locks(state: u64) -> u64 {
+    return lock_bits
+}
+
+fn locks_dirty() -> u64 {
+    return lock_neu
+}
+
+fn locks_clean() {
+    lock_neu = 0
+}
+
+// Von aussen setzen -- der Herzschlag dieser Runde legt darueber die
+// Rollen-Lampe im Sekundentakt um, ohne den Tastenzustand zu verlieren.
+fn locks_set(v: u64) {
+    lock_bits = v & 7
+    lock_neu = 1
+}
+
+fn lock_toggle(bit: u64) {
+    lock_bits = lock_bits ^ bit
+    lock_neu = 1
+}
+
 fn on_code(state: u64, code: u64) {
+    // DIE DREI FESTSTELLTASTEN, VOR ALLEM ANDEREN. Sie erzeugen kein
+    // Zeichen; sie legen einen Zustand um und lassen eine Lampe
+    // nachziehen. Nur das DRUECKEN zaehlt (Loslassen ist Code + 0x80),
+    // sonst schaltete jede Taste zweimal und die Lampe stuende still.
+    if code == 0x45 {
+        lock_toggle(LK_NUM)
+        kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
+        return
+    }
+    if code == 0x3A {
+        lock_toggle(LK_CAPS)
+        kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
+        return
+    }
+    if code == 0x46 {
+        lock_toggle(LK_SCROLL)
+        kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
+        return
+    }
+    if code == 0xC5 || code == 0xBA || code == 0xC6 {
+        kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
+        return
+    }
     if code == 0xE0 {
         kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 1)
         return
@@ -128,6 +206,23 @@ fn on_code(state: u64, code: u64) {
     let ext: u64 = kstate.get(state, kstate.K11_OFF + kstate.KB_EXT)
     // Umschalt und Steuerung: beide Seiten, Druecken und Loslassen. Sie
     // erzeugen kein Zeichen, also auch keine Meldung.
+    // RUNDE ALLTAG: DIE VORGETAEUSCHTE UMSCHALTTASTE.
+    //
+    // Eine PS/2-Tastatur des Satzes 1 schickt, wenn Umschalt gedrueckt
+    // ist und eine ERWEITERTE Taste kommt, davor ein `E0 AA` und danach
+    // ein `E0 2A` -- ein Loslassen und ein Druecken, die niemand getan
+    // hat. Das ist ein Erbe des Ziffernblocks (der Wirt sollte die
+    // umgeschaltete Bedeutung nicht sehen), und es steht in jedem
+    // Handbuch. GEMESSEN: `sendkey shift-delete` kam hier als Entf OHNE
+    // Umschalt an, weil das vorgetaeuschte Loslassen das echte
+    // Druecken geloescht hat.
+    //
+    // Also: mit E0 davor sind diese vier Codes KEINE Umschalttaste.
+    if ext == 1 && (code == 0x2A || code == 0x36 || code == 0xAA
+        || code == 0xB6) {
+        kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
+        return
+    }
     if code == 0x2A || code == 0x36 {
         kstate.set(state, kstate.K11_OFF + kstate.KB_SHIFT, 1)
         return
@@ -189,12 +284,43 @@ fn on_code(state: u64, code: u64) {
     if code == 0x5B || code == 0x5C {
         kstate.set(state, kstate.K11_OFF + kstate.KB_SUPER, 1)
         kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
+        // ==================================== RUNDE STARTKNOPF
+        // SUPER ALLEIN OEFFNET DAS STARTMENUE.
+        //
+        // Die Klinke unten faengt bisher nur SUPER PLUS BUCHSTABE. Die
+        // Taste ALLEIN ist auf jedem System der Welt der Startknopf,
+        // und sie ist die einzige Bedienung, die ohne Maus funktioniert
+        // -- auf einem Brett, auf dem die Maus gerade nicht geht, ist
+        // sie der ganze Unterschied.
+        //
+        // DIE KLASSISCHE FALLE: Super gedrueckt HALTEN und dabei mit
+        // der Maus arbeiten (oder eine andere Taste druecken) darf
+        // NICHT ausloesen. Also wird beim Druecken nur gemerkt, dass
+        // seither nichts anderes kam; jede andere Taste loescht die
+        // Merkung, und erst das LOSLASSEN gibt den Puls.
+        //
+        // Der Code des Pulses ist 0 -- kein Zeichen hat den Wert null,
+        // also kann ihn keine Buchstabenkombination je erzeugen.
+        super_rein = 1
         return
     }
     if code == 0xDB || code == 0xDC {
         kstate.set(state, kstate.K11_OFF + kstate.KB_SUPER, 0)
         kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
+        if super_rein != 0 {
+            super_rein = 0
+            kstate.set(state, kstate.K11_OFF + kstate.HK_KEY, 0)
+            kstate.set(state, kstate.K11_OFF + kstate.HK_NS,
+                time.mono_ns(state))
+            kstate.add(state, kstate.K11_OFF + kstate.HK_SEQ, 1)
+            say_hotkey(0)
+        }
         return
+    }
+    // Irgendetwas anderes ist passiert, waehrend Super unten war --
+    // dann war es eine Kombination und kein Startknopf.
+    if code < 0x80 {
+        super_rein = 0
     }
     kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
     if code >= 0x80 {
@@ -223,8 +349,79 @@ fn on_code(state: u64, code: u64) {
     // einem eigenen Ring, den `wm.poll` abholt. Diese Richtung ist die
     // gleiche wie beim Zeigegeraet, und sie ist der Grund, warum `kbd.fi`
     // den Fensterserver dafuer nicht kennen muss.
+    // ================================================ RUNDE EXPLORER-2
+    //
+    // ALT+EINGABE UND ALT+PFEIL GEHOEREN DEM FENSTER, NICHT DEM RING.
+    //
+    // Die Zeile darunter schickt JEDE Taste mit gehaltenem Alt in den
+    // Kuerzelring des Fensterservers (Runde TILING). Fuer Alt+H, mit
+    // dem man den Fokus verschiebt, ist das richtig. Fuer die drei
+    // Tastenkuerzel, die JEDER Dateimanager hat, ist es falsch:
+    //
+    //     Alt+Eingabe   Eigenschaften des angefassten Stuecks
+    //     Alt+Links     zurueck        Alt+Rechts  vorwaerts
+    //     Alt+Hoch      eine Ebene hinauf
+    //
+    // Sie sind ANWENDUNGSkuerzel und keine Fensterkuerzel -- der Server
+    // hat fuer sie keine Bindung, sie fielen also bis hier lautlos in
+    // den Ring und kamen nirgends an. Gemessen: `sendkey alt-ret` liess
+    // `wm: hot c=28 mod=1 act=0` stehen und im Fenster passierte nichts.
+    //
+    // Geliefert werden sie als das, was xterm liefert -- `ESC [ n ; 3 ~`
+    // mit dem Modifikator 3 fuer Alt --, weil `wlib.decode` diese Form
+    // schon zerlegt und `tilde` den Modifikator schon als Parameter
+    // bekommt. Kein neuer Weg, nur ein weiterer Wert auf dem alten.
     if kstate.get(state, kstate.K11_OFF + kstate.KB_ALT) == 1 {
+        // 0x1C ist die Eingabetaste, 0x4B/0x4D/0x48 sind die Pfeile
+        // links/rechts/hoch (dieselben Abtastcodes, die `alt_key`
+        // oben auf 0x81..0x84 abbildet).
+        var an: u64 = 0
+        if code == 0x1C {
+            an = 27 // ESC [ 27 ; 3 ~  -- Alt+Eingabe
+        } else if code == 0x4B {
+            an = 20 // Alt+Links
+        } else if code == 0x4D {
+            an = 21 // Alt+Rechts
+        } else if code == 0x48 {
+            an = 22 // Alt+Hoch
+        }
+        if an != 0 {
+            deliver(state, 27)
+            deliver(state, 91)
+            zahl_senden(state, an)
+            deliver(state, 59)
+            deliver(state, 51) // ';3' = Alt
+            deliver(state, 126)
+            kstate.add(state, kstate.K11_OFF + kstate.KB_SEQS, 1)
+            say_seq(an)
+            return
+        }
         alt_key(state, code)
+        return
+    }
+    // ================================================ RUNDE EXPLORER-2
+    //
+    // DIE F-TASTEN. Sie hat dieses System nie gehabt: die Tabelle in
+    // `translate` reicht bis Abtastcode 57, F1 faengt bei 0x3B an, und
+    // was darueber liegt, gab eine Null zurueck -- die Taste wurde
+    // lautlos verschluckt. Gemerkt hat es diese Runde daran, dass F2
+    // (umbenennen) und F5 (neu laden) im Dateimanager nicht gehen
+    // KONNTEN, egal was das Programm tut.
+    //
+    // Geliefert als `ESC [ n ~` mit den Nummern, die xterm seit je
+    // benutzt: F1..F5 = 11,12,13,14,15 und F6..F10 = 17..21. Die
+    // Luecke bei 16 ist keine Schlamperei, sie ist die Ueberlieferung.
+    if code >= 0x3B && code <= 0x44 {
+        var fn_n: u64 = 11 + (code - 0x3B)
+        if code >= 0x40 {
+            fn_n = 17 + (code - 0x40) // F6 an, ueber die Luecke 16
+        }
+        deliver(state, 27)
+        deliver(state, 91)
+        zahl_senden(state, fn_n)
+        deliver(state, 126)
+        kstate.add(state, kstate.K11_OFF + kstate.KB_SEQS, 1)
+        say_seq(fn_n)
         return
     }
     // Die Pfeiltaste nach oben: ein Oktett, unveraendert seit Runde K6.
@@ -243,6 +440,16 @@ fn on_code(state: u64, code: u64) {
         deliver(state, 91)
         if final > 255 {
             deliver(state, final - 256)
+            // RUNDE ALLTAG: MIT UMSCHALT IST ES EINE ANDERE TASTE.
+            // `ESC [ 3 ; 2 ~` statt `ESC [ 3 ~` -- die Form, die xterm
+            // seit dreissig Jahren schickt und die wlib.decode liest.
+            // Der Dateimanager braucht sie: Entf legt in den
+            // Papierkorb, Umschalt+Entf loescht endgueltig, und ohne
+            // diese zwei Oktette waere das dieselbe Taste.
+            if kstate.get(state, kstate.K11_OFF + kstate.KB_SHIFT) == 1 {
+                deliver(state, 59)
+                deliver(state, 50)
+            }
             deliver(state, 126)
         } else {
             deliver(state, final)
@@ -260,6 +467,43 @@ fn on_code(state: u64, code: u64) {
         return
     }
     if kstate.get(state, kstate.K11_OFF + kstate.KB_CTRL) == 1 {
+        // ============================================ RUNDE EXPLORER-2
+        //
+        // ZWEI VON SECHSUNDZWANZIG SIND KEINE STEUEROKTETTE MEHR.
+        //
+        // Strg+Buchstabe wird unten auf 1..26 abgebildet, und das ist
+        // fuer vierundzwanzig davon richtig und seit je so. Zwei
+        // kollidieren mit Tasten, die dieses System schon hat:
+        //
+        //     Strg+H  -> 8   und 8 ist der RUECKSCHRITT
+        //     Strg+N  -> 14  und 14 ist die PFEILTASTE HOCH (Zeile 357)
+        //
+        // Ein Programm, das die Oktette liest, kann die beiden Paare
+        // nicht auseinanderhalten -- "versteckte Dateien zeigen" und
+        // "eine Ebene hinauf" waeren dieselbe Taste, und im
+        // Dateimanager ist genau das der Unterschied zwischen zwei
+        // Befehlen, die jeder Mensch getrennt erwartet.
+        //
+        // Also gehen diese ZWEI als `ESC [ n ; 5 ~` (Modifikator 5 =
+        // Steuerung, die Form, die `wlib.tilde` schon zerlegt). Alle
+        // anderen bleiben Steueroktette -- die Shell, der Editor und
+        // jedes bestehende Programm sehen keinen Unterschied.
+        let low0: u64 = c | 32
+        if low0 == 104 || low0 == 110 { // 'h' oder 'n'
+            var cn: u64 = 30 // Strg+H
+            if low0 == 110 {
+                cn = 31 // Strg+N
+            }
+            deliver(state, 27)
+            deliver(state, 91)
+            zahl_senden(state, cn)
+            deliver(state, 59)
+            deliver(state, 53) // ';5' = Steuerung
+            deliver(state, 126)
+            kstate.add(state, kstate.K11_OFF + kstate.KB_SEQS, 1)
+            say_seq(cn)
+            return
+        }
         // STRG-A ist 1, STRG-Z ist 26 -- die unteren fuenf Bit des
         // Buchstabens. Was kein Buchstabe ist, bleibt, wie es ist.
         let low: u64 = c | 32
@@ -284,6 +528,24 @@ fn on_code(state: u64, code: u64) {
     // sees a number it has not seen acts once, and two readers do not
     // take the press away from each other.
     if kstate.get(state, kstate.K11_OFF + kstate.KB_SUPER) == 1 {
+        // RUNDE ALLTAG: WIN+L SPERRT, UND ZWAR IM KERN.
+        //
+        // Nicht in der Taskleiste, nicht im Schreibtisch: die Sperre
+        // muss auch dann gehen, wenn die Oberflaeche haengt -- das ist
+        // der Fall, in dem man sie am dringendsten braucht. Sie wird
+        // hier GESETZT; das Fenster mit der Kennwortfrage startet der
+        // Kern danach (kernel/kgui.fi), und wenn es stirbt, startet er
+        // es wieder.
+        if c == 108 || c == 76 {
+            if kstate.get(state, kstate.K11_OFF + kstate.SP_ON) == 0 {
+                kstate.set(state, kstate.K11_OFF + kstate.SP_ON, 1)
+                kstate.add(state, kstate.K11_OFF + kstate.SP_LOCKS, 1)
+                var sl: [u8; 20] = "sperre: an (Win+L)\0\0"
+                serial.puts((&sl[0]) as u64)
+                serial.put(10 as u8)
+            }
+            return
+        }
         kstate.set(state, kstate.K11_OFF + kstate.HK_KEY, c)
         kstate.set(state, kstate.K11_OFF + kstate.HK_NS, time.mono_ns(state))
         kstate.add(state, kstate.K11_OFF + kstate.HK_SEQ, 1)
@@ -317,6 +579,9 @@ fn emit(state: u64, cp: u64) {
 // `/bin/netview` through the system call -- it is here so that a person
 // who wonders whether their keyboard even has a working Super key can
 // find out without guessing.
+// 1, solange Super gedrueckt ist UND seither keine andere Taste kam.
+static mut super_rein: u64 = 0
+
 fn super_down(state: u64) -> u64 {
     return kstate.get(state, kstate.K11_OFF + kstate.KB_SUPER)
 }
@@ -337,6 +602,12 @@ fn hotkey_ns(state: u64) -> u64 {
 // typed -- and because `tools/kernel/run.sh` counts `key: ` lines.
 fn say_hotkey(c: u64) {
     var label: [u8; 12] = "hk: super+\0\0"
+    var allein: [u8; 18] = "hk: super allein\0\0"
+    if c == 0 {
+        serial.puts((&allein[0]) as u64)
+        serial.put(10 as u8)
+        return
+    }
     serial.puts((&label[0]) as u64)
     serial.put(c as u8)
     serial.put(10 as u8)
@@ -485,6 +756,17 @@ fn take(state: u64) -> u64 {
 // die AMERIKANISCHE Belegung. Sie ist weiterhin exportiert und wird
 // weiterhin von den Testlaeufern der Runden 59 und K11 direkt
 // aufgerufen; wer sie aendert, aendert eine gemessene Zusage.
+// RUNDE EXPLORER-2: eine Dezimalzahl als Oktette auf die Leitung.
+// Zwei Stellen reichen -- jede Nummer, die hier durchgeht, ist
+// kleiner als hundert -- und mehr als das Noetige zu bauen hiesse,
+// Code zu schreiben, den kein Aufrufer je erreicht.
+fn zahl_senden(state: u64, v: u64) {
+    if v >= 10 {
+        deliver(state, 48 + (v / 10))
+    }
+    deliver(state, 48 + (v % 10))
+}
+
 fn translate(code: u64) -> u8 {
     if code == 14 {
         return 8 as u8
@@ -582,6 +864,22 @@ fn alt_key(state: u64, code: u64) {
     if kstate.get(state, kstate.K11_OFF + kstate.KB_CTRL) == 1 {
         m = m | 4
     }
+    // ================================================ RUNDE TUERSCHLOSS
+    // WAS IN DEN KUERZELRING GEHT, WIRD GESAGT.
+    //
+    // Ohne diese Zeile ist der Weg einer Tastenkombination genau
+    // zwischen `kbd` und `wm` unsichtbar: die Taste kommt an (`key:`
+    // steht da), im Fensterserver passiert nichts, und man kann nicht
+    // unterscheiden, ob sie nie in den Ring kam, ob der Ring nicht
+    // geleert wird oder ob die Handlung fehlt. Genau diese drei
+    // Moeglichkeiten standen in dieser Runde bei Alt+Tab offen.
+    var s_ak: [u8; 12] = "kbd: alt c=\0"
+    var s_am: [u8; 6] = " mod=\0"
+    serial.puts((&s_ak[0]) as u64)
+    serial.dec(c)
+    serial.puts((&s_am[0]) as u64)
+    serial.dec(m)
+    serial.put(10 as u8)
     push_hot(state, c, m)
 }
 
@@ -906,6 +1204,24 @@ fn say_layout(n: u64) {
     serial.nl()
 }
 
+// ==================================================== RUNDE MERGE-10
+// DIE MELDUNG ZEIGTE EIN ANDERES ZEICHEN, ALS AUSGELIEFERT WURDE.
+//
+// `zahl_senden` liefert die Zahl als ZIFFERN aus ('3','1' fuer 31 --
+// so schreibt es jede Terminalfolge). `say_seq` hat dieselbe Zahl als
+// ROHES OKTETT auf die Leitung gelegt: aus `ESC [ 31 ; 5 ~` wurde in
+// der Meldung `^[[^_`, denn Oktett 31 ist das Steuerzeichen US.
+//
+// Das ist keine Schoenheitsfrage. Wer den Mitschnitt liest, um zu
+// pruefen, ob Strg+N angekommen ist, sucht nach `31;5~` und findet
+// nichts -- und schliesst daraus, die Taste sei nie angekommen. Genau
+// das ist in dieser Runde passiert und hat eine Stunde gekostet,
+// bevor `zahl_senden` daneben gelesen wurde: AUSGELIEFERT WAR ALLES
+// RICHTIG, nur die Meldung log.
+//
+// Eine Meldung ueber eine Folge muss die Folge zeigen, die wirklich
+// hinausging -- also dieselben Ziffern, die `zahl_senden` schreibt,
+// und den Modifikator dazu.
 fn say_seq(final: u64) {
     var label: [u8; 6] = "key: \0"
     serial.puts((&label[0]) as u64)
@@ -915,7 +1231,15 @@ fn say_seq(final: u64) {
         serial.put((final - 256) as u8)
         serial.put(126 as u8)
     } else {
-        serial.put(final as u8)
+        // dieselbe Zerlegung wie in `zahl_senden`, damit Meldung und
+        // Auslieferung nicht auseinanderlaufen koennen
+        if final >= 10 {
+            serial.put((48 + (final / 10)) as u8)
+        }
+        serial.put((48 + (final % 10)) as u8)
+        serial.put(59 as u8)  // ';'
+        serial.put(53 as u8)  // '5' = Steuerung
+        serial.put(126 as u8) // '~'
     }
     serial.nl()
 }

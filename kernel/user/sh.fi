@@ -154,12 +154,43 @@ fn u_start(args: u64) -> u64 {
     }
     var running: bool = true
     while running {
+        // ==================================== RUNDE ECHTHARDWARE-5
+        // DIE EINGABEAUFFORDERUNG KOMMT VOR DEM LESEN, NICHT DANACH.
+        //
+        // Justins Befund B, Fotos vom 10.09.2026: das Fenster
+        // "Terminal -- sh" ist VOLLSTAENDIG LEER -- keine
+        // Eingabeaufforderung, kein Text, nichts. Die Tafel meldete
+        // dabei `sh14`, die Shell lief also.
+        //
+        // GEMESSEN mit zwei Zaehlern im Fensterserver (`wm.term_outs`
+        // und `wm.term_puts_n`, Tafel Zeile 0 `TO`/`TP`): TO 16, TP 16.
+        // Es kamen also GENAU SECHZEHN Oktette im Fenster an, und alle
+        // sechzehn wurden gemalt -- das ist `"sh: ready, osum\n"`, und
+        // danach kam NICHTS MEHR. Der Weg Shell -> tty -> Fenster ist
+        // also in Ordnung; die Shell hat nur nichts mehr geschrieben.
+        //
+        // Der Grund stand hier: `prompt()` lief ERST, NACHDEM
+        // `get_line` eine ganze Zeile gelesen hatte. Eine Shell, auf
+        // die niemand tippt, haengt aber fuer immer in `get_line` --
+        // also wurde die Eingabeaufforderung NIE geschrieben, und das
+        // Fenster blieb leer. Auf der seriellen Leitung fiel das nie
+        // auf, weil dort ein Skript eingespeist wird und jede Zeile
+        // sofort zurueckkommt.
+        //
+        // Jetzt steht sie VOR dem Lesen: das Fenster zeigt `osum$ `,
+        // sobald die Shell bereit ist -- so wie es jedes System tut.
+        if interactive == 1 {
+            prompt()
+        }
         let n: u64 = get_line(in_fd)
         if ulib.bad(n) {
             running = false
         } else {
             if interactive == 1 {
-                prompt()
+                // Die gelesene Zeile hinter die Aufforderung, damit im
+                // Fenster steht, was getippt wurde. Der Kern echot die
+                // Tasten einer echten Tastatur nicht ins Fenster; ohne
+                // diese Zeile tippt man ins Unsichtbare.
                 ulib.say((&line[0 as usize]) as u64)
                 ulib.nl()
             }
@@ -476,7 +507,34 @@ fn tokenize() -> bool {
                 } else if d == 34 {
                     i = i + 1
                     while ch(i) != 34 && ch(i) != 0 {
-                        if ch(i) == 36 {
+                        // RUNDE FREMDLAND: DER RUECKSTRICH IN
+                        // ANFUEHRUNGSZEICHEN.
+                        //
+                        // GEMESSEN, bevor diese vier Zeilen standen:
+                        //     sh -c 'av "print(\"A\")"'
+                        //     argv[1] = [print(\A\)]
+                        // Der Rueckstrich blieb stehen UND das
+                        // Anfuehrungszeichen dahinter verschwand -- also
+                        // genau verkehrt herum. Der Grund: die Schleife
+                        // kannte den Rueckstrich nicht, also war er ein
+                        // Zeichen wie jedes andere, und das `"` dahinter
+                        // beendete die Zeichenkette.
+                        //
+                        // POSIX: in doppelten Anfuehrungszeichen behaelt
+                        // der Rueckstrich seine Wirkung NUR vor $ ` " \
+                        // und Zeilenende. Vor allem anderen ist er ein
+                        // gewoehnlicher Rueckstrich -- `"a\b"` ist `a\b`
+                        // und nicht `ab`.
+                        if ch(i) == 92 {
+                            let n: u64 = ch(i + 1)
+                            if n == 36 || n == 96 || n == 34 || n == 92 {
+                                put_word(n)
+                                i = i + 2
+                            } else {
+                                put_word(92)
+                                i = i + 1
+                            }
+                        } else if ch(i) == 36 {
                             i = expand(i)
                         } else {
                             put_word(ch(i))
@@ -490,6 +548,24 @@ fn tokenize() -> bool {
                     i = i + 1
                 } else if d == 36 {
                     i = expand(i)
+                } else if d == 92 {
+                    // RUNDE FREMDLAND: DER RUECKSTRICH AUSSERHALB VON
+                    // ANFUEHRUNGSZEICHEN nimmt dem naechsten Zeichen
+                    // JEDE Sonderbedeutung -- auch die des Trenners.
+                    //
+                    // GEMESSEN, vorher: `av a\ b` ergab zwei Argumente
+                    // [a\] und [b]; der Rueckstrich blieb im Wort stehen
+                    // und das Leerzeichen trennte trotzdem.
+                    //
+                    // Ein Rueckstrich am Zeilenende hat nichts, was er
+                    // schuetzen koennte; er bleibt dann er selbst.
+                    if ch(i + 1) == 0 {
+                        put_word(92)
+                        i = i + 1
+                    } else {
+                        put_word(ch(i + 1))
+                        i = i + 2
+                    }
                 } else {
                     put_word(d)
                     i = i + 1
@@ -675,6 +751,24 @@ fn run_stage(from: u64, to: u64, pin: u64, pout: u64, bg: bool) -> bool {
     let alive: bool = execute(bg)
     undo()
     if interactive == 1 && did_run == 1 {
+        // RUNDE ECHTHARDWARE-5, ZWEITER ANLAUF: `prompt()` BLEIBT HIER.
+        //
+        // Im ersten Anlauf habe ich es hier herausgenommen, weil die
+        // Aufforderung jetzt am ANFANG der Schleife steht und ich sie
+        // nicht zweimal sehen wollte. Der Pruefstand hat mich
+        // korrigiert -- `tools/userland/run.sh` liest woertlich
+        //
+        //     osum$ echo -> 0
+        //
+        // Das ist die MESSZEILE, an der zwei Zusagen dieses Systems
+        // haengen ("der Rueckgabewert eines Programms wird nach ihm
+        // gemeldet"), und das `osum$ ` davor gehoert zu ihr. Es ist
+        // KEINE zweite Eingabeaufforderung, sondern der Anfang einer
+        // Ergebniszeile, die zufaellig gleich aussieht.
+        //
+        // Doppelt steht sie deshalb trotzdem nicht: die Aufforderung
+        // am Schleifenanfang kommt VOR dem Lesen, diese hier NACH dem
+        // Ausfuehren. Dazwischen liegt immer die getippte Zeile.
         var s_arrow: [u8; 5] = " -> \0"
         prompt()
         ulib.say(argv[0 as usize])
@@ -884,7 +978,17 @@ fn builtin() -> bool {
     var c_test: [u8; 5] = "test\0"
     var c_brk: [u8; 2] = "[\0"
     var c_shift: [u8; 6] = "shift\0"
+    // RUNDE SYSTEMBUS: `clip` -- die Zwischenablage auf der
+    // Kommandozeile. Sie ist EINGEBAUT und kein Programm unter /bin,
+    // weil sie sonst in einem Kindprozess laufen wuerde und der
+    // Screenshot "im Editor kopiert, im Terminal eingefuegt" damit
+    // zwei Prozesse mehr braeuchte, als er beweisen soll.
+    var c_clip: [u8; 5] = "clip\0"
     let w: u64 = argv[0 as usize]
+    if ulib.streq(w, (&c_clip[0 as usize]) as u64) {
+        do_clip()
+        return true
+    }
     if ulib.streq(w, (&c_test[0 as usize]) as u64) {
         status = do_test(false)
         return true
@@ -922,6 +1026,82 @@ fn builtin() -> bool {
         return true
     }
     return false
+}
+
+// ==================================================== RUNDE SYSTEMBUS
+//
+//   clip            zeigt, was oben liegt
+//   clip <text...>  legt den Text ab (Typ Text)
+//   clip -l         der VERLAUF, neueste zuerst, mit Besitzer-pid
+//
+// Das ist der sichtbare Teil der Zusage "Text zwischen ZWEI
+// verschiedenen Prozessen": im Editor STRG-K, hier `clip`, und was
+// erscheint, ist dasselbe.
+fn do_clip() {
+    var buf: [u8; 192] = [0 as u8; 192]
+    var s_l: [u8; 3] = "-l\0"
+    var s_leer: [u8; 22] = "clip: nichts abgelegt\0"
+    var s_kein: [u8; 25] = "clip: kein Bus (nobus?)\n\0"
+    var s_nr: [u8; 3] = " [\0"
+    var s_zu: [u8; 3] = "] \0"
+    var s_pid: [u8; 6] = " pid=\0"
+    if !ulib.bus_da() {
+        ulib.say((&s_kein[0 as usize]) as u64)
+        status = 1
+        return
+    }
+    if argc > 1 && ulib.streq(argv[1 as usize], (&s_l[0 as usize]) as u64) {
+        let n: u64 = ulib.clip_count()
+        var i: u64 = 0
+        while i < n {
+            let m: u64 = ulib.clip_hist_take(i, (&buf[0 as usize]) as u64, 191)
+            ulib.say((&s_nr[0 as usize]) as u64)
+            ulib.sayn(i)
+            ulib.say((&s_zu[0 as usize]) as u64)
+            ulib.put((&buf[0 as usize]) as u64, m)
+            ulib.say((&s_pid[0 as usize]) as u64)
+            ulib.sayn(ulib.clip_owner(i))
+            ulib.nl()
+            i = i + 1
+        }
+        status = 0
+        return
+    }
+    if argc > 1 {
+        // Alle Woerter hinter `clip`, durch Leerzeichen getrennt.
+        var at: u64 = 0
+        var k: u64 = 1
+        while k < argc && at < 190 {
+            let a: u64 = argv[(k) as usize]
+            var j: u64 = 0
+            while at < 190 && *((a + j) as *mut u8) != 0 as u8 {
+                buf[(at) as usize] = *((a + j) as *mut u8)
+                at = at + 1
+                j = j + 1
+            }
+            if k + 1 < argc && at < 190 {
+                buf[(at) as usize] = 32 as u8
+                at = at + 1
+            }
+            k = k + 1
+        }
+        let r: u64 = ulib.clip_put(ulib.BT_TEXT, (&buf[0 as usize]) as u64, at)
+        if ulib.bad(r) {
+            status = 1
+            return
+        }
+        status = 0
+        return
+    }
+    let m: u64 = ulib.clip_take((&buf[0 as usize]) as u64, 191)
+    if m == 0 {
+        ulib.say_line((&s_leer[0 as usize]) as u64, ulib.clip_count())
+        status = 1
+        return
+    }
+    ulib.put((&buf[0 as usize]) as u64, m)
+    ulib.nl()
+    status = 0
 }
 
 fn do_cd() {

@@ -113,8 +113,17 @@ done
 rm -rf "$OUT/apps"
 cp -a assets/apps "$OUT/apps"
 rm -rf "$OUT/apps/editor.osp" "$OUT/apps/widgets.osp"
+# RUNDE GLYPHE: `nur=` STATT EINER LISTE VON HAND.
+#
+# Die zwei `rm -rf` daruber sind der Stand von damals: zwei Buendel, die
+# man kannte. Die Runde WERKZEUGE hat `taskmgr.osp` dazugelegt, und
+# damit brach dieser Laeufer im ERSTEN Schritt ab --
+# `mkfs: '/bin/taskmgr' gibt es nicht`, also gar kein Abbild und kein
+# einziger gruener Punkt. `nur=` fragt statt zu raten: was nicht unter
+# /bin liegt, kommt auch nicht ins Abbild. Der naechste neue
+# Buendelname bricht damit nichts mehr.
 while read -r zeile; do ARGS+=("$zeile"); done \
-    < <(python3 tools/k15/bundle.py "$OUT/apps" "$OUT/buendel")
+    < <(python3 tools/k15/bundle.py "$OUT/apps" "$OUT/buendel" "nur=$PROGS")
 while read -r pfad; do ARGS+=("$pfad"); done < "$OUT/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 || {
     echo "== mkfs.py fehlgeschlagen"; tail -20 "$OUT/mkfs.log"; exit 1; }

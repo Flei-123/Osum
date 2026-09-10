@@ -1,0 +1,134 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/crypto/hkdf.fi -- HKDF nach RFC 5869, ueber HMAC-SHA-256.
+//
+// RUNDE SYNC. Diese Datei beantwortet EINE Frage: aus einem Geheimnis
+// mehrere Schluessel machen, die nichts voneinander verraten.
+//
+// WARUM NICHT EINFACH DENSELBEN SCHLUESSEL MEHRMALS. Weil die Schicht
+// darueber drei verschiedene Dinge damit tut -- verschluesseln, Namen
+// bilden, beglaubigen --, und jede Wiederverwendung eines Schluessels
+// ueber zwei Verfahren hinweg ist eine Annahme darueber, dass die
+// beiden Verfahren einander nicht in die Quere kommen. Diese Annahme
+// hat schon Protokolle umgebracht. HKDF macht sie unnoetig: ein
+// Ausgangsschluessel, ein Etikett je Zweck, fertig.
+//
+// DIE ZWEI SCHRITTE (RFC 5869 Abschnitt 2), und beide sind noetig:
+//
+//   EXTRAHIEREN  PRK = HMAC(salt, ikm)
+//                Presst ungleichmaessig verteiltes Material (etwa das
+//                Ergebnis einer Schluesselableitung) auf 32 gleichmaessig
+//                aussehende Oktette zusammen.
+//   AUSDEHNEN    T(1) = HMAC(PRK, info || 0x01)
+//                T(n) = HMAC(PRK, T(n-1) || info || n)
+//                OKM  = T(1) || T(2) || ...
+//                Der Zaehler ist EIN Oktett, also hoechstens 255 Bloecke
+//                = 8160 Oktette. Mehr wird abgelehnt statt still
+//                abgeschnitten.
+//
+// DAS RUECKKOPPELN VON T(n-1) IST DER PUNKT und nicht Zierrat: ohne es
+// waeren die Bloecke unabhaengige HMACs ueber sehr aehnliche Nachrichten,
+// und wer einen Block kennt, kann die Struktur des naechsten raten.
+//
+// WAS DIESE DATEI NICHT DARF. Sie wird vom Kern (`profile kernel`), von
+// Programmen in Ring 3 und von einem gehosteten Testprogramm auf dem Wirt
+// eingebunden -- also KEINE Profilzeile, KEIN Systemaufruf, KEIN
+// Allokator, KEIN veraenderlicher Modulzustand. Alles, was sie anfasst,
+// ist Speicher, den der Aufrufer ihr gibt. Dieselbe Regel wie in
+// `blake2s.fi`, und aus demselben Grund.
+//
+// ================================================================ EHRLICH
+//
+// H1 `info` IST AUF INFO_MAX OKTETTE BEGRENZT. Die Zwischenrechnung
+//    braucht T(n-1) || info || n in EINEM Puffer, und dieser Baum hat an
+//    dieser Stelle keinen Allokator. 128 Oktette reichen fuer jedes
+//    Etikett, das diese Runde vergibt (das laengste hat 24), und mehr
+//    wird ABGELEHNT (`false`) statt abgeschnitten. Ein stillschweigend
+//    gekuerztes Etikett waere zwei verschiedene Zwecke unter einem
+//    Schluessel -- genau das, was diese Datei verhindern soll.
+// H2 NICHT KONSTANTZEITIG IN DER LAENGE. Wie SHA-256 darunter. Die
+//    Laengen sind hier oeffentlich (Etiketten stehen im Quelltext).
+// H3 GEMESSEN, NICHT GEGLAUBT. `tools/sync/vectors.py` faehrt die drei
+//    Testfaelle aus RFC 5869 Anhang A (A.1, A.2, A.3) durch diesen Code
+//    UND durch Pythons `hmac`/`hashlib`, und vergleicht Ziffer fuer
+//    Ziffer. A.2 ist der Fall mit 80 Oktetten Eingabe und 82 Oktetten
+//    Ausgabe -- also mehr als ein Block, was die Rueckkopplung oben
+//    ueberhaupt erst prueft.
+
+import crypto.sha256
+
+export { hkdf_extract, hkdf_expand, hkdf, INFO_MAX, HKDF_PRK }
+
+const HKDF_PRK: usize = 32
+const INFO_MAX: usize = 128
+
+fn ld8(p: u64, i: usize) -> u8 {
+    return *((p + i as u64) as *mut u8)
+}
+
+fn st8(p: u64, i: usize, v: u8) {
+    *((p + i as u64) as *mut u8) = v
+}
+
+// PRK = HMAC-SHA-256(salt, ikm). Ein Salz der Laenge 0 ist erlaubt und
+// bedeutet nach RFC 5869 "64 Nulloktette" -- was HMAC von selbst tut,
+// wenn man ihm einen leeren Schluessel gibt, also steht hier keine
+// Sonderbehandlung.
+fn hkdf_extract(salt: u64, slen: usize, ikm: u64, ilen: usize, prk: u64) {
+    sha256.hmac(salt, slen, ikm, ilen, prk)
+}
+
+// OKM der Laenge `olen`. Gibt `false` zurueck, wenn `olen` ueber 255
+// Bloecke geht oder `info` laenger als INFO_MAX ist -- siehe H1.
+fn hkdf_expand(prk: u64, info: u64, ilen: usize, out: u64,
+    olen: usize) -> bool {
+    if ilen > INFO_MAX {
+        return false
+    }
+    if olen > 255 * 32 {
+        return false
+    }
+    var work: [u8; 161] = [0 as u8; 161] // 32 + INFO_MAX + 1
+    var t: [u8; 32] = [0 as u8; 32]
+    let wp: u64 = (&work[0]) as u64
+    var done: usize = 0
+    var n: usize = 0
+    while done < olen {
+        n = n + 1
+        // T(n-1) nur ab dem zweiten Block, danach das Etikett und der
+        // Zaehler. Die Reihenfolge ist die des RFC und nicht beliebig.
+        var at: usize = 0
+        if n > 1 {
+            var i: usize = 0
+            while i < 32 {
+                st8(wp, i, t[i])
+                i = i + 1
+            }
+            at = 32
+        }
+        var j: usize = 0
+        while j < ilen {
+            st8(wp, at + j, ld8(info, j))
+            j = j + 1
+        }
+        at = at + ilen
+        st8(wp, at, (n & 255) as u8)
+        at = at + 1
+        sha256.hmac(prk, 32, wp, at, (&t[0]) as u64)
+        var k: usize = 0
+        while k < 32 && done + k < olen {
+            st8(out, done + k, t[k])
+            k = k + 1
+        }
+        done = done + k
+    }
+    return true
+}
+
+// Beide Schritte hintereinander, fuer die Aufrufer, die kein PRK
+// aufheben wollen.
+fn hkdf(salt: u64, slen: usize, ikm: u64, ilen: usize,
+    info: u64, nlen: usize, out: u64, olen: usize) -> bool {
+    var prk: [u8; 32] = [0 as u8; 32]
+    hkdf_extract(salt, slen, ikm, ilen, (&prk[0]) as u64)
+    return hkdf_expand((&prk[0]) as u64, info, nlen, out, olen)
+}

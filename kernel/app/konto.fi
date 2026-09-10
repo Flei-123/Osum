@@ -1,0 +1,1046 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/app/konto.fi -- RUNDE KONTO: /bin/konto.
+//
+// ============================================ DAS PRINZIP, ZUERST
+//
+// "EIN KONTO IST EINE BEQUEMLICHKEIT, ES IST NIE EINE BEDINGUNG."
+// So steht es in orientos/ROADMAP.md 6.1e, und diese Runde aendert
+// daran nichts. Dieses Programm ist ZUSAETZLICH da. Ohne es laesst sich
+// das System einrichten, benutzen, sichern und auf eine andere Maschine
+// umziehen -- `tests/step-94-move.sh` misst genau das, und
+// `tools/konto/run.sh` Abschnitt 10 misst es NOCH EINMAL, mit dieser
+// Runde im Baum und ohne eine einzige Anmeldung.
+//
+// Es gibt hier keinen Punkt, an dem etwas nach einem Konto fragt, und
+// keinen, an dem etwas ohne eines nicht ginge. Wer `konto` nie aufruft,
+// merkt nicht, dass es das gibt.
+//
+// ================================================== DIE BEFEHLE
+//
+//   konto anmelden --anbieter=<name> --kennung=<name> [--ziel=<url>]
+//                  [--name=<zertifikatsname>] [--wurzeln=<pem>]
+//                  [--bereich=<mandant>] [--code=<zweiter faktor>]
+//                  [--zwischen=<token>] [--lokal=<benutzer>]
+//
+//        ZWEI SCHREIBWEISEN, UND DIE ANGEHAENGTE IST DIE WICHTIGE.
+//        `--ziel https://…` und `--ziel=https://…` gelten beide, aber
+//        dieser Kern gibt einem Programm hoechstens `proc.MAX_ARGS` = 8
+//        Woerter -- mit der getrennten Form ist eine Anmeldung mit
+//        zweitem Faktor schon bei elf und die Shell laesst sie fallen
+//        ("sh: too many arguments"). `kernel/user/backup.fi` ist aus
+//        genau demselben Grund bei `-pfoo` gelandet.
+//
+//        UND `--ziel` DARF FEHLEN: dann steht es in `/etc/konten.conf`,
+//        eine Zeile je Anbieter. Eine Adresse gehoert in eine
+//        Einstellung und nicht in jeden Tastendruck.
+//        Das Geheimnis kommt von der EINGABE, nie von der Befehlszeile:
+//        an einem Terminal wird gefragt und das Echo abgeschaltet, an
+//        einer Roehre wird eine Zeile gelesen. Ein Passwort in `argv`
+//        stuende in jeder Prozessliste.
+//   konto liste            welche Konten es gibt (aus /etc/konten)
+//   konto status           je Konto: gueltig, wie lange noch, mit Netz
+//   konto erneuern         Token erneuern, wenn es bald ablaeuft
+//   konto abmelden         beim Anbieter abmelden UND lokal loeschen
+//   konto anbieter         welche Ruecken es gibt
+//   konto uebergabe        die schmale Uebergabe an die Runde SYNC
+//   konto --text <key>     einen Katalogtext ausgeben (fuer die Messung)
+//
+// AUSGABE: Zeilen der Form `konto: <name> = <wert>`. Ein Mensch liest
+// sie, ein Abschnitt auch. Der Rueckgabewert sagt dasselbe noch einmal
+// als Zahl, damit ein Skript nicht suchen muss.
+//
+// ================================================= WAS AUF DIE PLATTE GEHT
+//
+//   /etc/konten.conf                je Anbieter: Ziel, Name, Wurzeln
+//   /etc/konten                     welche Konten -- ohne jedes Geheimnis
+//   /state/session/konto/<kennung>  GESIEGELT, Klasse NIE in der Sicherung
+//   /device/kontoschluessel         der Siegelschluessel, Klasse NIE
+//
+// Ein Passwort geht NIE auf die Platte, in keiner Form, auch nicht als
+// Hash: dieses Geraet prueft kein Passwort, es reicht es weiter.
+
+import std.io
+import std.rt
+import knetz
+import kjson
+import kmsg
+import ksiegel
+import anbieter
+import kspeicher
+import kgegen
+import anb_jarvis
+import anb_xoffi
+import anb_eigen
+
+// Wie lange VOR dem Ablauf erneuert wird. Ein Tag, und die Zahl hat
+// einen Grund: ein Geraet, das eine Woche im Schrank lag, soll beim
+// Aufwachen noch erneuern koennen, und ein Token, das in einer Stunde
+// ablaeuft, ist waehrend einer Arbeitssitzung eine Stoerung.
+const VORLAUF: u64 = 86400
+
+const RC_OK: i32 = 0
+const RC_FALSCH: i32 = 1
+const RC_AUFRUF: i32 = 2
+const RC_MEHRDEUTIG: i32 = 3
+const RC_ZWEITFAKTOR: i32 = 4
+const RC_KEINNETZ: i32 = 5
+const RC_ABGELEHNT: i32 = 6
+const RC_ABGELAUFEN: i32 = 7
+const RC_FEHLER: i32 = 8
+const RC_GEBREMST: i32 = 9
+const RC_TLS: i32 = 10
+
+static mut geheim: [u8; 256] = [0; 256]
+
+// ------------------------------------------------------------- Ausgabe
+
+fn zeile(name: str, wert: u64, wl: usize) {
+    io.print("konto: ")
+    io.print(name)
+    io.print(" = ")
+    rt.write_everything(1, wert, wl)
+    io.print("\n")
+}
+
+fn zeile_c(name: str, wert: u64) {
+    zeile(name, wert, rt.c_length(wert))
+}
+
+fn zeile_n(name: str, v: u64) {
+    var b: rt.Buf = rt.buf_new()
+    rt.buf_push_dec_u64(&b, v)
+    zeile(name, b.ptr, b.len)
+    rt.buf_free(&b)
+}
+
+fn stand_name(st: u32) -> str {
+    if st == anbieter.S_OK { return "ok" }
+    if st == anbieter.S_FALSCH { return "falsch" }
+    if st == anbieter.S_ZWEITFAKTOR { return "zweitfaktor" }
+    if st == anbieter.S_MEHRDEUTIG { return "mehrdeutig" }
+    if st == anbieter.S_KEINNETZ { return "keinnetz" }
+    if st == anbieter.S_TLS { return "tls" }
+    if st == anbieter.S_ABGELEHNT { return "abgelehnt" }
+    if st == anbieter.S_ABGELAUFEN { return "abgelaufen" }
+    if st == anbieter.S_GEBREMST { return "gebremst" }
+    return "fehler"
+}
+
+fn stand_rc(st: u32) -> i32 {
+    if st == anbieter.S_OK { return RC_OK }
+    if st == anbieter.S_FALSCH { return RC_FALSCH }
+    if st == anbieter.S_ZWEITFAKTOR { return RC_ZWEITFAKTOR }
+    if st == anbieter.S_MEHRDEUTIG { return RC_MEHRDEUTIG }
+    if st == anbieter.S_KEINNETZ { return RC_KEINNETZ }
+    if st == anbieter.S_TLS { return RC_TLS }
+    if st == anbieter.S_ABGELEHNT { return RC_ABGELEHNT }
+    if st == anbieter.S_ABGELAUFEN { return RC_ABGELAUFEN }
+    if st == anbieter.S_GEBREMST { return RC_GEBREMST }
+    return RC_FEHLER
+}
+
+// Der Schluessel, unter dem der Katalog den Satz fuer einen Stand
+// fuehrt. Es sind Schluessel und keine Saetze: der Text steht in
+// locale/*/messages, und diese Datei kennt ihn nicht.
+static mut k_ok: [u8; 17] = "konto.state.ok\0\0\0"
+static mut k_fa: [u8; 21] = "konto.state.wrongpw\0\0"
+static mut k_zw: [u8; 18] = "konto.state.mfa\0\0\0"
+static mut k_me: [u8; 24] = "konto.state.ambiguous\0\0\0"
+static mut k_kn: [u8; 22] = "konto.state.offline\0\0\0"
+static mut k_tl: [u8; 18] = "konto.state.tls\0\0\0"
+static mut k_ab: [u8; 23] = "konto.state.refused\0\0\0\0"
+static mut k_al: [u8; 23] = "konto.state.expired\0\0\0\0"
+static mut k_ge: [u8; 24] = "konto.state.throttled\0\0\0"
+static mut k_fe: [u8; 20] = "konto.state.error\0\0\0"
+
+fn stand_schluessel(st: u32) -> u64 {
+    if st == anbieter.S_OK { return (&k_ok[0]) as u64 }
+    if st == anbieter.S_FALSCH { return (&k_fa[0]) as u64 }
+    if st == anbieter.S_ZWEITFAKTOR { return (&k_zw[0]) as u64 }
+    if st == anbieter.S_MEHRDEUTIG { return (&k_me[0]) as u64 }
+    if st == anbieter.S_KEINNETZ { return (&k_kn[0]) as u64 }
+    if st == anbieter.S_TLS { return (&k_tl[0]) as u64 }
+    if st == anbieter.S_ABGELEHNT { return (&k_ab[0]) as u64 }
+    if st == anbieter.S_ABGELAUFEN { return (&k_al[0]) as u64 }
+    if st == anbieter.S_GEBREMST { return (&k_ge[0]) as u64 }
+    return (&k_fe[0]) as u64
+}
+
+fn sagen(st: u32) {
+    io.print("konto: stand = ")
+    io.print(stand_name(st))
+    io.print("\n")
+    let t: u64 = kmsg.get(stand_schluessel(st))
+    zeile_c("text", t)
+}
+
+// ------------------------------------------------------------ Argumente
+
+fn gleich(a: u64, b: u64) -> bool {
+    var i: usize = 0
+    while true {
+        let x: u8 = rt.ld8(a, i)
+        let y: u8 = rt.ld8(b, i)
+        if x != y {
+            return false
+        }
+        if x == 0 as u8 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// Ein Wort passt auf `--name`, wenn es entweder GENAU so heisst (dann
+// steht der Wert im naechsten Wort) oder mit `--name=` beginnt (dann
+// steht der Wert dahinter, im selben Wort).
+//
+// DIE ANGEHAENGTE FORM IST KEINE ZIERDE. Dieser Kern gibt einem Programm
+// hoechstens `proc.MAX_ARGS` = 8 Woerter; `konto anmelden --anbieter x
+// --ziel y --kennung z` sind schon sieben, mit `--bereich` und
+// `--zwischen` platzt die Zeile, und die Shell sagt dann "too many
+// arguments" und laesst den Befehl fallen. `kernel/user/backup.fi` ist
+// aus demselben Grund bei `-pfoo` gelandet. Beide Formen werden
+// angenommen, damit kurze Zeilen lesbar bleiben.
+fn anhang(wort: u64, name: u64) -> u64 {
+    var i: usize = 0
+    while true {
+        let y: u8 = rt.ld8(name, i)
+        if y == 0 as u8 {
+            if rt.ld8(wort, i) == 61 as u8 {
+                return wort + (i as u64) + 1
+            }
+            return 0
+        }
+        if rt.ld8(wort, i) != y {
+            return 0
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn opt(start: u64, argc: usize, name: u64) -> u64 {
+    var i: usize = 1
+    while i < argc {
+        let w: u64 = rt.arg_ptr(start, i)
+        let a: u64 = anhang(w, name)
+        if a != 0 {
+            return a
+        }
+        if i + 1 < argc && gleich(w, name) {
+            return rt.arg_ptr(start, i + 1)
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn schalter(start: u64, argc: usize, name: u64) -> bool {
+    var i: usize = 1
+    while i < argc {
+        if gleich(rt.arg_ptr(start, i), name) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// ------------------------------------------------- das Geheimnis einlesen
+//
+// Wortgleich zu `kernel/user/pw.fi`, `read_pass`, und aus demselben
+// Grund: an einem Terminal wird das Echo abgeschaltet, an einer Roehre
+// wird nicht gefragt. Der zweite Teil ist der, ohne den kein Abschnitt
+// dieses Programm messen koennte.
+fn geheim_lesen(aufforderung: u64) -> usize {
+    var t: [u8; 64] = [0; 64]
+    var alt: [u8; 64] = [0; 64]
+    var tty: bool = false
+    if syscall(16, 0, 0x5401, (&t[0]) as i64, 0, 0, 0) >= 0 {
+        tty = true
+        var i: usize = 0
+        while i < 60 {
+            alt[i] = t[i]
+            i = i + 1
+        }
+        let lf: u32 = rt.ld32((&t[0]) as u64, 3)
+        rt.st32((&t[0]) as u64, 3, lf & 4294967287 as u32)
+        syscall(16, 0, 0x5404, (&t[0]) as i64, 0, 0, 0)
+        if aufforderung != 0 {
+            io.eprint_bytes(aufforderung, rt.c_length(aufforderung))
+        }
+    }
+    var n: usize = 0
+    var c: [u8; 1] = [0; 1]
+    while true {
+        let r: i64 = syscall(0, 0, (&c[0]) as i64, 1, 0, 0, 0)
+        if r <= 0 {
+            break
+        }
+        if c[0] == 10 as u8 || c[0] == 13 as u8 {
+            break
+        }
+        if n + 1 < 256 {
+            geheim[n] = c[0]
+            n = n + 1
+        }
+    }
+    geheim[n] = 0 as u8
+    if tty {
+        syscall(16, 0, 0x5404, (&alt[0]) as i64, 0, 0, 0)
+        io.eprint("\n")
+    }
+    return n
+}
+
+fn geheim_vergessen() {
+    var i: usize = 0
+    while i < 256 {
+        geheim[i] = 0 as u8
+        i = i + 1
+    }
+}
+
+fn jetzt() -> u64 {
+    var ts: [i64; 2] = [0; 2]
+    syscall(228, 0, (&ts[0]) as i64, 0, 0, 0, 0)
+    return ts[0] as u64
+}
+
+// -------------------------------------------------- /etc/konten.conf
+//
+// EINE ZEILE JE ANBIETER, und Leerzeichen trennen:
+//
+//     xoffi  ziel=https://react.xoffi.com  name=react.xoffi.com
+//     jarvis ziel=https://jarvis.example   wurzeln=/etc/ssl/roots.pem
+//
+// Was auf der Befehlszeile steht, schlaegt die Datei -- die Datei ist
+// die Bequemlichkeit, nicht die Vorschrift. Die Werte werden IM PUFFER
+// nullterminiert, der Puffer lebt so lange wie die Anmeldung; deshalb
+// nimmt der Aufrufer ihn entgegen und gibt ihn selbst frei.
+//
+// HIER STEHT KEIN GEHEIMNIS. Diese Datei ist zum Lesen fuer jeden da,
+// sie enthaelt Adressen. Zugangsmerkmale liegen im Geheimspeicher, und
+// dass das so bleibt, misst `tools/konto/run.sh` im Abbild.
+fn wort_ende(p: u64, i: usize, n: usize) -> usize {
+    var k: usize = i
+    while k < n {
+        let c: u8 = rt.ld8(p, k)
+        if c == 32 as u8 || c == 9 as u8 || c == 10 as u8 || c == 13 as u8 {
+            return k
+        }
+        k = k + 1
+    }
+    return n
+}
+
+fn wort_anfang(p: u64, i: usize, n: usize) -> usize {
+    var k: usize = i
+    while k < n {
+        let c: u8 = rt.ld8(p, k)
+        if c != 32 as u8 && c != 9 as u8 {
+            return k
+        }
+        k = k + 1
+    }
+    return n
+}
+
+fn konf_lesen(anb: u64, b: *mut rt.Buf, ziel: *mut u64, zname: *mut u64,
+    wurzeln: *mut u64) -> bool {
+    var pfad: [u8; 18] = "/etc/konten.conf\0\0"
+    if !rt.read_file((&pfad[0]) as u64, b) {
+        return false
+    }
+    let p: u64 = rt.buf_ptr(b)
+    let n: usize = rt.buf_len(b)
+    var f_ziel: [u8; 5] = "ziel\0"
+    var f_name: [u8; 5] = "name\0"
+    var f_wu: [u8; 8] = "wurzeln\0"
+    var etwas: bool = false
+    var i: usize = 0
+    while i < n {
+        // eine Zeile abstecken und in Woerter zerlegen
+        var ze: usize = i
+        while ze < n && rt.ld8(p, ze) != 10 as u8 {
+            ze = ze + 1
+        }
+        rt.st8(p, ze, 0 as u8)
+        var w: usize = wort_anfang(p, i, ze)
+        if w < ze && rt.ld8(p, w) != 35 as u8 {
+            let we: usize = wort_ende(p, w, ze)
+            let treffer: bool = we - w == rt.c_length(anb)
+                && rt.mem_eq(p + w as u64, anb, we - w)
+            var k: usize = we
+            if we < ze {
+                rt.st8(p, we, 0 as u8)
+                k = we + 1
+            }
+            if treffer {
+                while k < ze {
+                    let a: usize = wort_anfang(p, k, ze)
+                    if a >= ze {
+                        k = ze
+                    } else {
+                        let e: usize = wort_ende(p, a, ze)
+                        if e < ze {
+                            rt.st8(p, e, 0 as u8)
+                        }
+                        let z1: u64 = anhang(p + a as u64, (&f_ziel[0]) as u64)
+                        let z2: u64 = anhang(p + a as u64, (&f_name[0]) as u64)
+                        let z3: u64 = anhang(p + a as u64, (&f_wu[0]) as u64)
+                        // DIE BEFEHLSZEILE SCHLAEGT DIE DATEI. Was
+                        // schon gesetzt ist, bleibt stehen -- sonst
+                        // koennte man einen Eintrag aus der Datei nie
+                        // mehr uebergehen.
+                        if z1 != 0 && *ziel == 0 {
+                            *ziel = z1
+                            etwas = true
+                        }
+                        if z2 != 0 && *zname == 0 {
+                            *zname = z2
+                            etwas = true
+                        }
+                        if z3 != 0 && *wurzeln == 0 {
+                            *wurzeln = z3
+                            etwas = true
+                        }
+                        k = e + 1
+                    }
+                }
+            }
+        }
+        i = ze + 1
+    }
+    return etwas
+}
+
+// ------------------------------------------------------------ die Tafel
+//
+// DIE EINZIGE STELLE IM ALLGEMEINEN TEIL, AN DER ANBIETERNAMEN STEHEN
+// DUERFEN, und `tools/konto/trennung.py` kennt genau diese drei Zeilen.
+// Ein vierter Anbieter ist eine Zeile mehr und keine Runde.
+fn ruecken_anmelden(tab: u64) {
+    anbieter.tafel_setzen(tab, anbieter.MAX_RUECKEN)
+    let _1: bool = anbieter.eintragen(anb_jarvis.ruecken())
+    let _2: bool = anbieter.eintragen(anb_xoffi.ruecken())
+    let _3: bool = anbieter.eintragen(anb_eigen.ruecken())
+}
+
+// ------------------------------------------------------------- anmelden
+
+fn befehl_anmelden(start: u64, argc: usize) -> i32 {
+    var o_anb: [u8; 11] = "--anbieter\0"
+    var o_ziel: [u8; 7] = "--ziel\0"
+    var o_name: [u8; 7] = "--name\0"
+    var o_wu: [u8; 10] = "--wurzeln\0"
+    var o_ken: [u8; 10] = "--kennung\0"
+    var o_ber: [u8; 10] = "--bereich\0"
+    var o_code: [u8; 7] = "--code\0"
+    var o_zw: [u8; 11] = "--zwischen\0"
+    var o_lok: [u8; 8] = "--lokal\0"
+
+    let anb: u64 = opt(start, argc, (&o_anb[0]) as u64)
+    var ziel: u64 = opt(start, argc, (&o_ziel[0]) as u64)
+    var zname: u64 = opt(start, argc, (&o_name[0]) as u64)
+    var wurzeln: u64 = opt(start, argc, (&o_wu[0]) as u64)
+    let kenn: u64 = opt(start, argc, (&o_ken[0]) as u64)
+    // Was die Befehlszeile nicht sagt, sagt vielleicht /etc/konten.conf.
+    var konf: rt.Buf = rt.buf_new()
+    if anb != 0 {
+        let _k: bool = konf_lesen(anb, &konf, &ziel, &zname, &wurzeln)
+    }
+    if anb == 0 || ziel == 0 || kenn == 0 {
+        io.eprint_line("konto: anmelden braucht --anbieter, --kennung und ein Ziel (--ziel oder /etc/konten.conf)")
+        rt.buf_free(&konf)
+        return RC_AUFRUF
+    }
+    let i: i64 = anbieter.waehle(anb)
+    if i < 0 {
+        io.eprint("konto: diesen Anbieter gibt es nicht. Es gibt: ")
+        var k: usize = 0
+        while k < anbieter.anzahl() {
+            if k > 0 {
+                io.eprint(" ")
+            }
+            io.eprint_bytes(anbieter.name_von(k),
+                rt.c_length(anbieter.name_von(k)))
+            k = k + 1
+        }
+        io.eprint("\n")
+        rt.buf_free(&konf)
+        return RC_AUFRUF
+    }
+
+    var z: anbieter.Zugang = anbieter.zugang_neu()
+    z.ziel = ziel
+    z.zielname = zname
+    z.wurzeln = wurzeln
+    z.kennung = kenn
+    z.bereich = opt(start, argc, (&o_ber[0]) as u64)
+    z.code = opt(start, argc, (&o_code[0]) as u64)
+    z.temp = opt(start, argc, (&o_zw[0]) as u64)
+
+    var frage: [u8; 12] = "Kennwort: \0\0"
+    let gl: usize = geheim_lesen((&frage[0]) as u64)
+    z.geheim = (&geheim[0]) as u64
+
+    var s: anbieter.Sitzung = anbieter.sitzung_neu()
+    let st: u32 = anbieter.tu_anmelden(i as usize, &z, &s)
+    geheim_vergessen()
+
+    sagen(st)
+    if st == anbieter.S_MEHRDEUTIG {
+        // ES WIRD GEFRAGT, NICHT GERATEN. Die Auswahl kommt Zeile fuer
+        // Zeile heraus, damit die Oberflaeche sie zeigen kann.
+        var a: usize = 0
+        while a < s.auswahl.len {
+            var e: usize = a
+            while e < s.auswahl.len && rt.ld8(s.auswahl.ptr, e)
+                != 10 as u8 {
+                e = e + 1
+            }
+            if e > a {
+                zeile("auswahl", s.auswahl.ptr + a as u64, e - a)
+            }
+            a = e + 1
+        }
+        anbieter.sitzung_frei(&s)
+        rt.buf_free(&konf)
+        return RC_MEHRDEUTIG
+    }
+    if st == anbieter.S_ZWEITFAKTOR {
+        zeile("zwischen", s.temp.ptr, s.temp.len)
+        anbieter.sitzung_frei(&s)
+        rt.buf_free(&konf)
+        return RC_ZWEITFAKTOR
+    }
+    if st != anbieter.S_OK {
+        if s.hinweis.len > 0 {
+            var h: rt.Buf = rt.buf_new()
+            rt.buf_push_bytes(&h, s.hinweis.ptr, s.hinweis.len)
+            rt.buf_push(&h, 0 as u8)
+            zeile_c("hinweis", kmsg.get(h.ptr))
+            rt.buf_free(&h)
+        }
+        anbieter.sitzung_frei(&s)
+        rt.buf_free(&konf)
+        return stand_rc(st)
+    }
+
+    // --------- das Konto eintragen
+    var ken: rt.Buf = rt.buf_new()
+    var berc: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&berc, s.bereich.ptr, s.bereich.len)
+    rt.buf_push(&berc, 0 as u8)
+    anbieter.kennung(anb, berc.ptr, s.subjekt.ptr, s.subjekt.len, &ken)
+
+    var ko: kspeicher.Konto = kspeicher.konto_neu()
+    rt.buf_push_bytes(&ko.kennung, ken.ptr, ken.len)
+    rt.buf_push_bytes(&ko.anbieter, anb, rt.c_length(anb))
+    rt.buf_push_bytes(&ko.bereich, s.bereich.ptr, s.bereich.len)
+    rt.buf_push_bytes(&ko.subjekt, s.subjekt.ptr, s.subjekt.len)
+    rt.buf_push_bytes(&ko.anzeige, s.anzeige.ptr, s.anzeige.len)
+    rt.buf_push_bytes(&ko.datenort, s.datenort.ptr, s.datenort.len)
+    // DER LOKALE BENUTZER BLEIBT DER EIGENTUEMER. Ein Onlinekonto wird
+    // ihm ZUGEORDNET, es ERSETZT ihn nicht -- die Dateien gehoeren
+    // weiter der uid aus Runde MULTIUSER.
+    let lok: u64 = opt(start, argc, (&o_lok[0]) as u64)
+    if lok != 0 {
+        rt.buf_push_bytes(&ko.lokal, lok, rt.c_length(lok))
+    } else {
+        var wer: rt.Buf = rt.buf_new()
+        if kmsg.benutzername(&wer) {
+            rt.buf_push_bytes(&ko.lokal, wer.ptr, wer.len)
+        }
+        rt.buf_free(&wer)
+    }
+    let _e: bool = kspeicher.konto_setzen(&ko)
+
+    // --------- die Sitzung siegeln
+    var gesiegelt: bool = true
+    if kgegen.an(kgegen.G_KLARTEXT) {
+        // Die kaputte Fassung: das Token roh auf die Platte. Abschnitt 4
+        // sucht danach im ABBILD und muss es finden.
+        var pf: rt.Buf = rt.buf_new()
+        kspeicher.sitzung_pfad(ken.ptr, ken.len, &pf)
+        let _v: bool = ksiegel.verzeichnis(pf.ptr)
+        var d1: [u8; 7] = "/state\0"
+        var d2: [u8; 15] = "/state/session\0"
+        var d3: [u8; 21] = "/state/session/konto\0"
+        let _a: bool = ksiegel.verzeichnis((&d1[0]) as u64)
+        let _b: bool = ksiegel.verzeichnis((&d2[0]) as u64)
+        let _c: bool = ksiegel.verzeichnis((&d3[0]) as u64)
+        let _w: bool = ksiegel.datei_schreiben_0600(pf.ptr, s.zugriff.ptr,
+            s.zugriff.len)
+        rt.buf_free(&pf)
+        gesiegelt = false
+    } else {
+        if !kspeicher.sitzung_speichern(ken.ptr, ken.len, &s, ziel,
+            z.zielname) {
+            io.eprint_line("konto: die Sitzung konnte nicht abgelegt werden")
+            anbieter.sitzung_frei(&s)
+            rt.buf_free(&ken)
+            rt.buf_free(&berc)
+            rt.buf_free(&konf)
+            return RC_FEHLER
+        }
+    }
+
+    zeile_c("anbieter", anb)
+    zeile("kennung", ken.ptr, ken.len)
+    zeile("bereich", s.bereich.ptr, s.bereich.len)
+    zeile("subjekt", s.subjekt.ptr, s.subjekt.len)
+    zeile("anzeige", s.anzeige.ptr, s.anzeige.len)
+    zeile("datenort", s.datenort.ptr, s.datenort.len)
+    zeile("lokal", ko.lokal.ptr, ko.lokal.len)
+    zeile_n("ablauf", s.ablauf)
+    if gesiegelt {
+        zeile_n("gesiegelt", 1)
+    } else {
+        zeile_n("gesiegelt", 0)
+    }
+    anbieter.sitzung_frei(&s)
+    rt.buf_free(&ken)
+    rt.buf_free(&berc)
+    rt.buf_free(&konf)
+    return RC_OK
+}
+
+// --------------------------------------------------------------- liste
+
+fn befehl_liste() -> i32 {
+    var b: rt.Buf = rt.buf_new()
+    let da: bool = kspeicher.liste_lesen(&b)
+    if !da {
+        zeile_n("konten", 0)
+        rt.buf_free(&b)
+        return RC_OK
+    }
+    let n: usize = kspeicher.zeilen(&b)
+    zeile_n("konten", n as u64)
+    var ko: kspeicher.Konto = kspeicher.konto_neu()
+    var k: usize = 0
+    while k < n {
+        if kspeicher.konto_lesen(&b, k, &ko) {
+            io.print("konto: eintrag = ")
+            rt.write_everything(1, ko.anbieter.ptr, ko.anbieter.len)
+            io.print("\t")
+            rt.write_everything(1, ko.bereich.ptr, ko.bereich.len)
+            io.print("\t")
+            rt.write_everything(1, ko.anzeige.ptr, ko.anzeige.len)
+            io.print("\t")
+            rt.write_everything(1, ko.kennung.ptr, ko.kennung.len)
+            io.print("\t")
+            rt.write_everything(1, ko.lokal.ptr, ko.lokal.len)
+            io.print("\n")
+        }
+        k = k + 1
+    }
+    rt.buf_free(&b)
+    return RC_OK
+}
+
+// --------------------------------------------------------------- status
+//
+// HIER ENTSCHEIDET SICH DIE WICHTIGSTE ZUSAGE DER RUNDE: was passiert
+// OHNE NETZ. Die Antwort ist: nichts. Die Sitzung bleibt, das Geraet
+// bleibt benutzbar, und `netz = nein` steht daneben. Eine Sitzung wird
+// NUR dann geloescht, wenn der Server sie AUSDRUECKLICH abgelehnt hat --
+// Schweigen ist keine Ablehnung.
+fn ein_status(ko: *mut kspeicher.Konto, ohne_netz: bool) -> u32 {
+    var s: anbieter.Sitzung = anbieter.sitzung_neu()
+    var ziel: rt.Buf = rt.buf_new()
+    var zielname: rt.Buf = rt.buf_new()
+    let da: bool = kspeicher.sitzung_laden((*ko).kennung.ptr,
+        (*ko).kennung.len, &s, &ziel, &zielname)
+    io.print("konto: eintrag = ")
+    rt.write_everything(1, (*ko).anbieter.ptr, (*ko).anbieter.len)
+    io.print("\t")
+    rt.write_everything(1, (*ko).kennung.ptr, (*ko).kennung.len)
+    io.print("\n")
+    if !da {
+        zeile_n("sitzung", 0)
+        anbieter.sitzung_frei(&s)
+        rt.buf_free(&ziel)
+        rt.buf_free(&zielname)
+        return anbieter.S_ABGELAUFEN
+    }
+    zeile_n("sitzung", 1)
+    let n: u64 = jetzt()
+    zeile_n("ablauf", s.ablauf)
+    if s.ablauf > n {
+        zeile_n("rest", s.ablauf - n)
+    } else {
+        zeile_n("rest", 0)
+    }
+    var stand: u32 = anbieter.S_OK
+    var braucht: bool = false
+    if s.ablauf > 0 && s.ablauf < n + VORLAUF {
+        braucht = true
+    }
+    zeile_n("erneuern_faellig", 0)
+    if braucht {
+        zeile_n("erneuern_faellig", 1)
+    }
+    if braucht && !ohne_netz {
+        rt.buf_push(&ziel, 0 as u8)
+        rt.buf_set_len(&ziel, ziel.len - 1)
+        rt.buf_push(&zielname, 0 as u8)
+        rt.buf_set_len(&zielname, zielname.len - 1)
+        var ken: rt.Buf = rt.buf_new()
+        rt.buf_push_bytes(&ken, s.zugriff.ptr, s.zugriff.len)
+        rt.buf_push(&ken, 0 as u8)
+        var refb: rt.Buf = rt.buf_new()
+        rt.buf_push_bytes(&refb, s.erneuerung.ptr, s.erneuerung.len)
+        rt.buf_push(&refb, 0 as u8)
+        var z: anbieter.Zugang = anbieter.zugang_neu()
+        z.ziel = ziel.ptr
+        z.zielname = zielname.ptr
+        z.zugriff = ken.ptr
+        z.erneuerung = refb.ptr
+        let i: i64 = anbieter.waehle(anbieter_name(ko))
+        if i >= 0 {
+            let r: u32 = anbieter.tu_erneuern(i as usize, &z, &s)
+            if r == anbieter.S_OK {
+                let _sp: bool = kspeicher.sitzung_speichern(
+                    (*ko).kennung.ptr, (*ko).kennung.len, &s, ziel.ptr,
+                    zielname.ptr)
+                zeile_n("erneuert", 1)
+                zeile_n("ablauf", s.ablauf)
+            } else if r == anbieter.S_KEINNETZ {
+                // KEIN NETZ IST KEINE ABLEHNUNG.
+                zeile_n("erneuert", 0)
+                zeile("netz", (&nein[0]) as u64, 4)
+                stand = anbieter.S_OK
+            } else {
+                // Der Server hat NEIN gesagt. Jetzt, und nur jetzt, endet
+                // die Sitzung -- sauber, ohne dass Daten verloren gehen:
+                // geloescht wird das Token, nicht der Kontoeintrag und
+                // keine Datei des Benutzers.
+                let _l: bool = kspeicher.sitzung_loeschen(
+                    (*ko).kennung.ptr, (*ko).kennung.len)
+                zeile_n("erneuert", 0)
+                zeile_n("abgemeldet", 1)
+                stand = anbieter.S_ABGELAUFEN
+            }
+        }
+        rt.buf_free(&ken)
+        rt.buf_free(&refb)
+    }
+    if s.ablauf > 0 && s.ablauf <= n && stand == anbieter.S_OK {
+        stand = anbieter.S_ABGELAUFEN
+    }
+    anbieter.sitzung_frei(&s)
+    rt.buf_free(&ziel)
+    rt.buf_free(&zielname)
+    return stand
+}
+
+static mut nein: [u8; 5] = "nein\0"
+static mut namenspuffer: [u8; 64] = [0; 64]
+
+fn anbieter_name(ko: *mut kspeicher.Konto) -> u64 {
+    var i: usize = 0
+    while i < (*ko).anbieter.len && i < 63 {
+        namenspuffer[i] = rt.ld8((*ko).anbieter.ptr, i)
+        i = i + 1
+    }
+    namenspuffer[i] = 0 as u8
+    return (&namenspuffer[0]) as u64
+}
+
+fn befehl_status(start: u64, argc: usize) -> i32 {
+    var o_ohne: [u8; 12] = "--ohne-netz\0"
+    var o_ken: [u8; 10] = "--kennung\0"
+    let ohne: bool = schalter(start, argc, (&o_ohne[0]) as u64)
+    let nur: u64 = opt(start, argc, (&o_ken[0]) as u64)
+    var b: rt.Buf = rt.buf_new()
+    if !kspeicher.liste_lesen(&b) {
+        // KEIN KONTO IST KEIN FEHLER. Ein Geraet ohne Anmeldung ist der
+        // Normalfall dieses Systems, und `status` sagt dann dasselbe wie
+        // sonst: es ist alles in Ordnung, es sind null Konten.
+        zeile_n("konten", 0)
+        rt.buf_free(&b)
+        sagen(anbieter.S_OK)
+        return RC_OK
+    }
+    let n: usize = kspeicher.zeilen(&b)
+    zeile_n("konten", n as u64)
+    var ko: kspeicher.Konto = kspeicher.konto_neu()
+    var k: usize = 0
+    var schlimmster: u32 = anbieter.S_OK
+    while k < n {
+        if kspeicher.konto_lesen(&b, k, &ko) {
+            var nimm: bool = true
+            if nur != 0 {
+                nimm = ko.kennung.len == rt.c_length(nur)
+                if nimm {
+                    nimm = rt.mem_eq(ko.kennung.ptr, nur, ko.kennung.len)
+                }
+            }
+            if nimm {
+                let st: u32 = ein_status(&ko, ohne)
+                if st != anbieter.S_OK {
+                    schlimmster = st
+                }
+            }
+        }
+        k = k + 1
+    }
+    rt.buf_free(&b)
+    sagen(schlimmster)
+    return stand_rc(schlimmster)
+}
+
+// ------------------------------------------------------------- abmelden
+
+fn befehl_abmelden(start: u64, argc: usize) -> i32 {
+    var o_ken: [u8; 10] = "--kennung\0"
+    let nur: u64 = opt(start, argc, (&o_ken[0]) as u64)
+    var b: rt.Buf = rt.buf_new()
+    if !kspeicher.liste_lesen(&b) {
+        zeile_n("abgemeldet", 0)
+        rt.buf_free(&b)
+        return RC_OK
+    }
+    let n: usize = kspeicher.zeilen(&b)
+    var ko: kspeicher.Konto = kspeicher.konto_neu()
+    var k: usize = 0
+    var wieviele: u64 = 0
+    var serverstand: u32 = anbieter.S_OK
+    while k < n {
+        if kspeicher.konto_lesen(&b, k, &ko) {
+            var nimm: bool = true
+            if nur != 0 {
+                nimm = ko.kennung.len == rt.c_length(nur)
+                if nimm {
+                    nimm = rt.mem_eq(ko.kennung.ptr, nur, ko.kennung.len)
+                }
+            }
+            if nimm {
+                var s: anbieter.Sitzung = anbieter.sitzung_neu()
+                var ziel: rt.Buf = rt.buf_new()
+                var zielname: rt.Buf = rt.buf_new()
+                if kspeicher.sitzung_laden(ko.kennung.ptr,
+                    ko.kennung.len, &s, &ziel, &zielname) {
+                    rt.buf_push(&ziel, 0 as u8)
+                    rt.buf_set_len(&ziel, ziel.len - 1)
+                    rt.buf_push(&zielname, 0 as u8)
+                    rt.buf_set_len(&zielname, zielname.len - 1)
+                    var tok: rt.Buf = rt.buf_new()
+                    rt.buf_push_bytes(&tok, s.zugriff.ptr, s.zugriff.len)
+                    rt.buf_push(&tok, 0 as u8)
+                    var z: anbieter.Zugang = anbieter.zugang_neu()
+                    z.ziel = ziel.ptr
+                    z.zielname = zielname.ptr
+                    z.zugriff = tok.ptr
+                    let i: i64 = anbieter.waehle(anbieter_name(&ko))
+                    if i >= 0 {
+                        let r: u32 = anbieter.tu_abmelden(i as usize, &z,
+                            &s)
+                        if r != anbieter.S_OK {
+                            serverstand = r
+                        }
+                    }
+                    rt.buf_free(&tok)
+                }
+                // DAS LOKALE ENDE IST UNABHAENGIG. Die Sperrliste des
+                // Anbieters kann ausfallen (fail-open); dieses Geraet
+                // verlaesst sich nicht darauf.
+                let _l: bool = kspeicher.sitzung_loeschen(ko.kennung.ptr,
+                    ko.kennung.len)
+                let _r: bool = kspeicher.konto_entfernen(ko.kennung.ptr,
+                    ko.kennung.len)
+                wieviele = wieviele + 1
+                anbieter.sitzung_frei(&s)
+                rt.buf_free(&ziel)
+                rt.buf_free(&zielname)
+            }
+        }
+        k = k + 1
+    }
+    rt.buf_free(&b)
+    zeile_n("abgemeldet", wieviele)
+    if serverstand != anbieter.S_OK {
+        // Lokal ist es trotzdem weg, und das steht da.
+        io.print("konto: server = ")
+        io.print(stand_name(serverstand))
+        io.print("\n")
+        zeile_n("lokal_entfernt", 1)
+    }
+    sagen(anbieter.S_OK)
+    return RC_OK
+}
+
+// ------------------------------------------------------------ uebergabe
+//
+// DIE SCHNITTSTELLE ZUR RUNDE SYNC, und mehr ist sie nicht: drei
+// Fragen, drei Zeilen. Kein Datenformat, keine Verschluesselung, kein
+// Abgleich -- das baut SYNC, und es baut es GEGEN diese Zeilen.
+// Ausfuehrlich: docs/KONTO-SYNC.md.
+fn befehl_uebergabe(start: u64, argc: usize) -> i32 {
+    var o_ken: [u8; 10] = "--kennung\0"
+    let nur: u64 = opt(start, argc, (&o_ken[0]) as u64)
+    if nur == 0 {
+        io.eprint_line("konto: hier fehlt --kennung")
+        return RC_AUFRUF
+    }
+    var b: rt.Buf = rt.buf_new()
+    if !kspeicher.liste_lesen(&b) {
+        rt.buf_free(&b)
+        return RC_ABGELAUFEN
+    }
+    let k: i64 = kspeicher.konto_suchen(&b, nur, rt.c_length(nur))
+    if k < 0 {
+        rt.buf_free(&b)
+        io.eprint_line("konto: diese Kennung gibt es nicht")
+        return RC_AUFRUF
+    }
+    var ko: kspeicher.Konto = kspeicher.konto_neu()
+    let _l: bool = kspeicher.konto_lesen(&b, k as usize, &ko)
+    var s: anbieter.Sitzung = anbieter.sitzung_neu()
+    var ziel: rt.Buf = rt.buf_new()
+    var zielname: rt.Buf = rt.buf_new()
+    let da: bool = kspeicher.sitzung_laden(ko.kennung.ptr, ko.kennung.len,
+        &s, &ziel, &zielname)
+    // (1) WER BIN ICH
+    zeile("anbieter", ko.anbieter.ptr, ko.anbieter.len)
+    zeile("bereich", ko.bereich.ptr, ko.bereich.len)
+    zeile("subjekt", ko.subjekt.ptr, ko.subjekt.len)
+    // (2) WOHIN GEHOEREN MEINE DATEN
+    zeile("datenort", ko.datenort.ptr, ko.datenort.len)
+    zeile("lokal", ko.lokal.ptr, ko.lokal.len)
+    // (3) WELCHES TOKEN
+    if da {
+        zeile("zugriff", s.zugriff.ptr, s.zugriff.len)
+        zeile_n("ablauf", s.ablauf)
+    } else {
+        zeile_n("ablauf", 0)
+    }
+    anbieter.sitzung_frei(&s)
+    rt.buf_free(&ziel)
+    rt.buf_free(&zielname)
+    rt.buf_free(&b)
+    if !da {
+        return RC_ABGELAUFEN
+    }
+    return RC_OK
+}
+
+fn befehl_anbieterliste() -> i32 {
+    zeile_n("anbieter_anzahl", anbieter.anzahl() as u64)
+    var k: usize = 0
+    while k < anbieter.anzahl() {
+        zeile_c("anbieter_name", anbieter.name_von(k))
+        k = k + 1
+    }
+    return RC_OK
+}
+
+fn hilfe() {
+    io.print("konto anmelden --anbieter=<name> --kennung=<name> [--ziel=<url>]\n")
+    io.print("               [--name=<zertifikatsname>] [--wurzeln=<pem>]\n")
+    io.print("               [--bereich=<mandant>] [--code=<faktor>]\n")
+    io.print("               [--zwischen=<token>] [--lokal=<benutzer>]\n")
+    io.print("               ohne --ziel gilt die Zeile aus /etc/konten.conf\n")
+    io.print("konto liste | status [--ohne-netz] | erneuern | abmelden\n")
+    io.print("konto anbieter | übergabe --kennung <k> | --text <key>\n")
+}
+
+// DIE TAFEL LIEGT IM RAHMEN VON `main`, und die Fluchtpruefung des
+// Uebersetzers hat recht damit, dass sie das MELDET: `anbieter` behaelt
+// den Zeiger. Sie hat nur in genau diesem Fall unrecht damit, dass es
+// ein Fehler waere -- der Rahmen von `main` lebt so lange wie das
+// Programm, und alles, was den Zeiger benutzt, endet vorher.
+//
+// Der ehrlichere Weg waere ein `static`, und er geht nicht: ein
+// `static` bekommt seinen Wert IN DIE OBJEKTDATEI geschrieben, und die
+// Adresse einer Funktion ist dort keine Konstante (dieselbe Grenze wie
+// in `kernel/app/anbieter.fi`). Also die Ausnahme, mit Begruendung.
+#[allow_escape]
+fn main(start: u64) -> i32 {
+    var tab: [anbieter.Ruecken; 8] = [anbieter.leer_ruecken(); 8]
+    ruecken_anmelden((&tab[0]) as u64)
+
+    let argc: usize = rt.arg_count(start)
+    if argc < 2 {
+        hilfe()
+        return RC_AUFRUF
+    }
+    var o_kaputt: [u8; 9] = "--kaputt\0"
+    let kw: u64 = opt(start, argc, (&o_kaputt[0]) as u64)
+    if kw != 0 {
+        if !kgegen.setzen(kw) {
+            io.eprint_line("konto: diese Gegenprobe gibt es nicht")
+            return RC_AUFRUF
+        }
+    }
+    var o_text: [u8; 7] = "--text\0"
+    let tk: u64 = opt(start, argc, (&o_text[0]) as u64)
+    if tk != 0 {
+        let t: u64 = kmsg.get(tk)
+        rt.write_everything(1, t, rt.c_length(t))
+        io.print("\n")
+        return RC_OK
+    }
+
+    // DER BEFEHL IST DAS ERSTE WORT, DAS EIN BEFEHL IST -- nicht
+    // einfach das zweite Wort. Sonst haengt es an der Reihenfolge, ob
+    // `konto --kaputt=klartext anmelden` verstanden wird oder in der
+    // Hilfe endet, und genau das ist beim ersten Lauf passiert: die
+    // Gegenprobe lief nie, sie druckte still die Hilfe.
+    var c_an: [u8; 9] = "anmelden\0"
+    var c_li: [u8; 6] = "liste\0"
+    var c_st: [u8; 7] = "status\0"
+    var c_ab: [u8; 9] = "abmelden\0"
+    var c_er: [u8; 9] = "erneuern\0"
+    var c_ue: [u8; 10] = "uebergabe\0"
+    // DIESELBE MARKE MIT UMLAUT: wer `übergabe` tippt, meint
+    // dasselbe -- docs/I18N.md und tools/i18n/quellen.py --marken.
+    var c_ue2: [u8; 10] = "übergabe\0"
+    var c_pr: [u8; 9] = "anbieter\0"
+    var cmd: u64 = 0
+    var ci: usize = 1
+    while ci < argc && cmd == 0 {
+        let w: u64 = rt.arg_ptr(start, ci)
+        if gleich(w, (&c_an[0]) as u64) || gleich(w, (&c_li[0]) as u64)
+            || gleich(w, (&c_st[0]) as u64) || gleich(w, (&c_ab[0]) as u64)
+            || gleich(w, (&c_er[0]) as u64) || gleich(w, (&c_ue[0]) as u64)
+            || gleich(w, (&c_ue2[0]) as u64)
+            || gleich(w, (&c_pr[0]) as u64) {
+            cmd = w
+        }
+        ci = ci + 1
+    }
+    if cmd == 0 {
+        cmd = rt.arg_ptr(start, 1)
+    }
+    if gleich(cmd, (&c_an[0]) as u64) {
+        return befehl_anmelden(start, argc)
+    }
+    if gleich(cmd, (&c_li[0]) as u64) {
+        return befehl_liste()
+    }
+    if gleich(cmd, (&c_st[0]) as u64) {
+        return befehl_status(start, argc)
+    }
+    if gleich(cmd, (&c_er[0]) as u64) {
+        // `erneuern` ist `status`, das die Erneuerung erzwingt: derselbe
+        // Weg, damit es nicht zwei Wege gibt, die auseinanderlaufen.
+        return befehl_status(start, argc)
+    }
+    if gleich(cmd, (&c_ab[0]) as u64) {
+        return befehl_abmelden(start, argc)
+    }
+    if gleich(cmd, (&c_ue[0]) as u64) || gleich(cmd, (&c_ue2[0]) as u64) {
+        return befehl_uebergabe(start, argc)
+    }
+    if gleich(cmd, (&c_pr[0]) as u64) {
+        return befehl_anbieterliste()
+    }
+    hilfe()
+    return RC_AUFRUF
+}

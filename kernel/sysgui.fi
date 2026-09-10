@@ -46,14 +46,18 @@ import perm
 import proc
 import ps2m
 import sched
+import shot
+import tipp
+import kbd
 import tile
+import time
 import vmode
 import wig
 import wm
 
 import sys
 
-export { wm_call, wig_call, tile_call, disp_call }
+export { wm_call, wig_call, tile_call, disp_call, shot_call, tipp_call }
 
 
 fn disp_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
@@ -671,9 +675,49 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         if w >= wm.MAX_WIN {
             return cap.err(cap.E_NOTFOUND)
         }
-        // Die Leiste fasst nur gewoehnliche Fenster an. Sie kann den
-        // Schreibtisch nicht minimieren und sich selbst nicht schliessen.
-        if wm.win_layer(state, w) != wm.L_NORMAL {
+        // ============================================== RUNDE GRIFF
+        // WARUM DER STARTKNOPF NICHTS GESTARTET HAT.
+        //
+        // Hier stand:
+        //
+        //     if wm.win_layer(state, w) != wm.L_NORMAL {
+        //         return cap.err(cap.E_RIGHTS)
+        //     }
+        //
+        // Die Absicht ist richtig und bleibt: die Leiste soll den
+        // SCHREIBTISCH nicht wegraeumen und sich SELBST nicht
+        // schliessen koennen. Der Satz sagt aber mehr, als er meint --
+        // er sperrt JEDES Fenster aus, das nicht auf der normalen
+        // Ebene liegt, und das STARTMENUE liegt mit Absicht auf L_TOP
+        // (sonst verschwindet es hinter dem naechsten Fenster).
+        //
+        // GEMESSEN (1280x800, Abnahmelauf dieser Runde, serial.txt):
+        //
+        //     taskbar: click x=24 y=20 hits=start
+        //     taskbar: startmenue auf
+        //     wm: fokus id=7 vor=0        <- id 7 ist die LEISTE
+        //
+        // Jeder Klick auf Start lief in dieses `E_RIGHTS`. Die Leiste
+        // hat den Rueckgabewert nicht angesehen und trotzdem
+        // "startmenue auf" gesagt -- deshalb sah es im Mitschnitt so
+        // aus, als geschehe etwas, waehrend in Wahrheit nichts
+        // geschah: das Bild 02-startmenue.ppm war Oktett fuer Oktett
+        // dasselbe wie 01-schreibtisch.ppm.
+        //
+        // DIE REGEL, DIE WIRKLICH GEMEINT IST, nennt die zwei Faelle
+        // beim Namen statt sie ueber die Ebene zu erraten:
+        //
+        //   1. den SCHREIBTISCH nicht (L_DESK) -- er ist der Grund,
+        //      auf dem alles liegt,
+        //   2. und kein Fenster, das der LEISTE SELBST gehoert.
+        //
+        // Alles andere darf sie umschalten, auch ein L_TOP-Fenster wie
+        // das Startmenue. Ein Menue, das man aufmachen, aber nie wieder
+        // zumachen kann, ist kein Menue.
+        if wm.win_layer(state, w) == wm.L_DESK {
+            return cap.err(cap.E_RIGHTS)
+        }
+        if wm.win_owner(state, w) == me {
             return cap.err(cap.E_RIGHTS)
         }
         if a1 == sys.WA_HIDE {
@@ -686,7 +730,41 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
             // DIE REGEL EINER TASKLEISTE, in zwei Zeilen: ist das
             // Fenster verborgen ODER nicht das aktive, hol es nach
             // vorn; ist es beides nicht, leg es weg.
-            if wm.win_hidden(state, w) || wm.focus(state) != w {
+            //
+            // ============================================ RUNDE GRIFF
+            // ... UND DER FOKUS ZAEHLT NUR AUF DER NORMALEN EBENE.
+            //
+            // Fuer ein gewoehnliches Fenster ist "nicht das aktive"
+            // das richtige Zeichen fuer "es liegt hinten, hol es
+            // vor". Fuer das STARTMENUE ist es falsch, und zwar
+            // IMMER: es liegt auf L_TOP, also ganz vorn, und den
+            // Eingabefokus hat es nur, solange niemand anders ihn
+            // genommen hat. Ein Klick auf die Leiste nimmt ihn (die
+            // Leiste ist ein Fenster wie jedes andere).
+            //
+            // GEMESSEN, nachdem die Ebenensperre eine Zeile weiter
+            // oben gefallen war (1280x800, dieser Runde):
+            //
+            //     01-schreibtisch.ppm enthaelt #ad84f3 und #efe7fc
+            //     im Rechteck des Menues -- das Menue IST ZU SEHEN
+            //     serial: taskbar: startmenue auf ... auf
+            //
+            // Zweimal "auf" bei zwei Klicks: der erste haette
+            // schliessen muessen. `wm.focus(state) != w` war wahr,
+            // weil der Fokus auf der LEISTE lag (id=7) -- also wurde
+            // das schon offene Menue noch einmal "geoeffnet" und
+            // blieb stehen. Ein Menue, das sich nicht schliessen
+            // laesst, verdeckt danach jeden Klick dahinter.
+            //
+            // Auf L_TOP entscheidet deshalb allein, ob das Fenster
+            // VERBORGEN ist. Das ist dieselbe Frage, die ein Mensch
+            // stellt ("sehe ich es?"), und sie hat fuer ein Fenster,
+            // das immer vorn liegt, nur diese eine Antwort.
+            var offen: bool = !wm.win_hidden(state, w)
+            if wm.win_layer(state, w) == wm.L_NORMAL {
+                offen = offen && wm.focus(state) == w
+            }
+            if !offen {
                 wm.set_hidden(state, w, false)
                 wm.raise_win(state, w)
                 wm.set_focus(state, w)
@@ -857,7 +935,9 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
             return cap.err(cap.E_RIGHTS)
         }
         if a1 == sys.WS_LAYER {
-            if a2 > wm.L_TOP {
+            // RUNDE ECHTHARDWARE-3: die Ebenen reichen jetzt bis L_TIP
+            // (Blase). Was darueber liegt, gibt es nicht.
+            if a2 > wm.L_MAX {
                 return cap.err(cap.E_INVALID)
             }
             // WER SICH SELBST NACH GANZ VORN LEGEN DARF, KANN JEDE
@@ -882,6 +962,13 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         if a1 == sys.WS_DECO {
             wm.set_deco(state, i, a2 != 0)
             wm.compose(state)
+            return 0
+        }
+        // RUNDE ECHTHARDWARE-1: "ich will die Tastatur, obwohl ich
+        // oben liege". Nur der eigene Prozess fuer sein eigenes
+        // Fenster -- `i` ist bereits geprueft.
+        if a1 == sys.WS_KEYS {
+            wm.set_keys(state, i, a2 != 0)
             return 0
         }
         if a1 == sys.WS_MAXIMIZED {
@@ -1241,4 +1328,432 @@ fn do_tilebind(state: u64, nr: u64, field: u64) -> u64 {
         return tile.bind_mods(state, nr)
     }
     return tile.bind_action(state, nr)
+}
+
+
+// =====================================================================
+// RUNDE FEEDBACK, IN DIESEN ZWEIG GEHOLT VON RUNDE BRIDGE-2:
+// DAS BILDSCHIRMFOTO.
+// =====================================================================
+//
+// WARUM DIESE DATEI UND NICHT `sys.fi`. Runde FEEDBACK hatte `do_shot`
+// in `sys.fi` stehen, und dort steht es hier NICHT -- aus zwei
+// gemessenen Gruenden:
+//
+//   1. `sys.fi` importiert in diesem Zweig weder `wm` noch `fb`. Der
+//      Fensterserver haengt an `gfx`, und genau dafuer gibt es diese
+//      Datei: sie faellt bei `gui=off` aus dem Uebersetzungsbaum
+//      (tools/server/build.sh nennt sie beim Namen). Ein
+//      Bildschirmfoto-Aufruf in `sys.fi` haette den GUI-losen Kern
+//      entweder mitgeschleppt oder gebrochen.
+//   2. `ist_leiste` -- die Rechtepruefung, auf der das Ganze steht --
+//      steht schon HIER, ein paar Zeilen weiter oben. FEEDBACK hatte
+//      sie in `sys.fi`. Sie zweimal zu haben waere genau die Art
+//      Doppelung, an der zwei Fassungen auseinanderlaufen.
+//
+// AN DER SACHE SELBST IST NICHTS GEAENDERT: dieselben fuenf Handlungen,
+// dieselben drei Schloesser, dieselben Zaehler. Nur die Nummer ist eine
+// andere (siehe `sys.SYS_OSUM_SHOT`).
+
+// DER WEG UEBER DIE TASTE. Vier Bedingungen, und der Kern prueft alle
+// vier -- ein Programm, das sich selbst freigeben koennte, waere kein
+// Schloss.
+//
+//   1. der letzte Tastendruck war Super+P (gross oder klein),
+//   2. er ist weniger als GRACE_NS her,
+//   3. diese Zaehlernummer hat noch keinen Schein bekommen,
+//   4. der Rufende besitzt das Fenster MIT DEM EINGABEFOKUS.
+//
+// Punkt 4 ist der wichtigste: ohne ihn koennte ein Programm im
+// Hintergrund die Bildschirmfoto-Taste eines anderen abfangen.
+fn shot_key_ok(state: u64, me: u64) -> bool {
+    let k: u64 = kstate.get(state, kstate.K11_OFF + kstate.HK_KEY)
+    if k != shot.KEY && k != shot.KEY_UPPER {
+        return false
+    }
+    let seq: u64 = kstate.get(state, kstate.K11_OFF + kstate.HK_SEQ)
+    if seq == 0 {
+        return false // es wurde ueberhaupt noch keine Taste gelatcht
+    }
+    if shot.keyseq(state) == seq {
+        return false // dieser Druck hat seinen Schein schon gehabt
+    }
+    let ns: u64 = kstate.get(state, kstate.K11_OFF + kstate.HK_NS)
+    let now: u64 = time.mono_ns(state)
+    if now < ns {
+        return false
+    }
+    if now - ns > shot.GRACE_NS {
+        return false
+    }
+    let w: u64 = wm.focus(state)
+    if w >= wm.MAX_WIN {
+        return false
+    }
+    if !wm.valid(state, w) {
+        return false
+    }
+    return wm.win_owner(state, w) == me
+}
+
+// WER DARF EINEN SCHEIN AUSSTELLEN: die Taskleiste oder die Wurzel.
+fn shot_may_arm(state: u64, me: u64) -> bool {
+    if sched.tget(state, me, sched.T_EUID) == 0 {
+        return true
+    }
+    return ist_leiste(state, me)
+}
+
+// EIN BAND BILDPUNKTE NACH RING 3.
+//
+// Die Uebersetzung Seite fuer Seite und nicht Oktett fuer Oktett: ein
+// Bild sind ueber eine Million Oktette, und `proc.translate` ist ein
+// vierstufiger Gang durch die Seitentafeln. Einmal je 4096 Oktette
+// statt einmal je Oktett ist der Unterschied zwischen Millisekunden und
+// Sekunden.
+//
+// GEPRUEFT WIRD TROTZDEM VORHER UND GANZ: `proc.user_ok` ueber den
+// vollen Bereich, und danach muss JEDE Seite wirklich uebersetzbar sein,
+// sonst bricht die Schleife mit -EFAULT ab.
+fn shot_copy(state: u64, me: u64, dst: u64, rows: u64, from: u64) -> u64 {
+    let w: u64 = shot.width(state)
+    var y: u64 = 0
+    var at: u64 = dst
+    var page: u64 = 1 // eine Adresse, die keine Seitenanfangsadresse ist
+    var phys: u64 = 0
+    while y < rows {
+        var x: u64 = 0
+        while x < w {
+            let c: u64 = shot.rgb_at(state, x, from + y)
+            var k: u64 = 0
+            while k < 3 {
+                let a: u64 = at +% k
+                let pg: u64 = a & 0xFFFFFFFFFFFFF000
+                if pg != page {
+                    phys = proc.translate(state, me, pg)
+                    if phys == 0 {
+                        return sys.neg(errno.E_FAULT)
+                    }
+                    page = pg
+                }
+                var v: u64 = c >> 16
+                if k == 1 {
+                    v = c >> 8
+                }
+                if k == 2 {
+                    v = c
+                }
+                kstate.set8(phys +% (a & 0xFFF), (v & 0xFF) as u8)
+                k = k + 1
+            }
+            at = at +% 3
+            x = x + 1
+        }
+        y = y + 1
+    }
+    return rows *% shot.row_bytes(state)
+}
+
+fn shot_call(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
+    // ---- AUSKUNFT. Ohne jedes Recht, mit Absicht: was gezaehlt wird,
+    //      kann nicht heimlich sein.
+    if what == sys.SH_INFO {
+        if a1 == sys.SI_READY {
+            if shot.ready(state) {
+                return 1
+            }
+            return 0
+        }
+        if a1 == sys.SI_WIDTH {
+            return shot.width(state)
+        }
+        if a1 == sys.SI_HEIGHT {
+            return shot.height(state)
+        }
+        if a1 == sys.SI_ROWBYTES {
+            return shot.row_bytes(state)
+        }
+        if a1 == sys.SI_BYTES {
+            return shot.image_bytes(state)
+        }
+        if a1 == sys.SI_CHUNKROWS {
+            return shot.rows_per_chunk(state)
+        }
+        if a1 == sys.SI_SHOTS {
+            return shot.shots(state)
+        }
+        if a1 == sys.SI_LASTPID {
+            return shot.last_pid(state)
+        }
+        if a1 == sys.SI_ARMED {
+            if shot.armed(state) {
+                return 1
+            }
+            return 0
+        }
+        if a1 == sys.SI_ARMPID {
+            if shot.armed(state) {
+                return shot.arm_pid(state)
+            }
+            return 0
+        }
+        if a1 == sys.SI_DENIED {
+            return shot.denied(state)
+        }
+        if a1 == sys.SI_ARMS {
+            return shot.arms(state)
+        }
+        if a1 == sys.SI_NEXT {
+            return shot.next_row(state)
+        }
+        if a1 == sys.SI_KEY {
+            return shot.KEY
+        }
+        return sys.neg(errno.E_INVAL)
+    }
+    if !shot.ready(state) {
+        return sys.neg(errno.E_NODEV)
+    }
+    // ---- DEN SCHEIN AUSSTELLEN. Nur die Taskleiste oder die Wurzel.
+    if what == sys.SH_ARM {
+        if !shot_may_arm(state, me) {
+            shot.deny(state)
+            return sys.neg(errno.E_PERM)
+        }
+        // Auf WEN. 0 heisst "auf mich" -- der uebliche Fall, wenn die
+        // Wurzel selbst fotografiert.
+        var pid: u64 = a1
+        if pid == 0 {
+            pid = sched.tget(state, me, sched.T_PID)
+        }
+        shot.arm(state, pid)
+        return 0
+    }
+    // ---- DER WEG UEBER DIE TASTE.
+    if what == sys.SH_KEY {
+        if !shot_key_ok(state, me) {
+            shot.deny(state)
+            return sys.neg(errno.E_PERM)
+        }
+        // Die Zaehlernummer wird VERBRAUCHT, bevor der Schein da ist:
+        // ein zweiter Aufruf zu demselben Druck bekommt nichts mehr.
+        shot.set_keyseq(state, kstate.get(state, kstate.K11_OFF + kstate.HK_SEQ))
+        shot.arm(state, sched.tget(state, me, sched.T_PID))
+        return 0
+    }
+    // ---- DEN SCHEIN ZURUECKGEBEN. Nur der eigene.
+    if what == sys.SH_DROP {
+        if shot.armed(state)
+            && shot.arm_pid(state) == sched.tget(state, me, sched.T_PID) {
+            shot.drop(state)
+            return 0
+        }
+        // GEZAEHLT WIE DIE ANDEREN BEIDEN: ein Schutz, dessen
+        // Umgehungsversuche nur zum Teil auffallen, ist ein Protokoll,
+        // dem man nicht glauben kann.
+        shot.deny(state)
+        return sys.neg(errno.E_PERM)
+    }
+    // ---- EIN BAND HOLEN.
+    if what == sys.SH_GRAB {
+        let mine: u64 = sched.tget(state, me, sched.T_PID)
+        let from: u64 = shot.next_row(state)
+        if !shot.may_grab(state, mine, from) {
+            shot.deny(state)
+            return sys.neg(errno.E_PERM)
+        }
+        let rb: u64 = shot.row_bytes(state)
+        if rb == 0 || a2 < rb {
+            return sys.neg(errno.E_INVAL)
+        }
+        var len: u64 = a2
+        if len > shot.MAX_CHUNK {
+            len = shot.MAX_CHUNK
+        }
+        var rows: u64 = len / rb
+        let left: u64 = shot.height(state) - from
+        if rows > left {
+            rows = left
+        }
+        if rows == 0 {
+            return 0
+        }
+        if !proc.user_ok(state, me, a1, rows *% rb) {
+            return sys.neg(errno.E_FAULT)
+        }
+        let n: u64 = shot_copy(state, me, a1, rows, from)
+        if errno.is_error(n) {
+            return n
+        }
+        // ERST KOPIEREN, DANN WEITERRUECKEN. Bricht das Kopieren mit
+        // -EFAULT ab, bleibt die Zeilenmarke stehen und der Rufende darf
+        // dasselbe Band mit einem richtigen Puffer noch einmal holen.
+        shot.advance(state, rows)
+        return n
+    }
+    return sys.neg(errno.E_INVAL)
+}
+
+// ====================================================================
+// RUNDE BRUECKE: EINGABE EINSPEISEN
+// ====================================================================
+//
+// Der Zwilling von `shot_call`, und absichtlich daneben: wer die
+// Rechte des Bildschirmfotos aendert, sieht diese hier mit. Zwei
+// Rechtesysteme in zwei Dateien laufen auseinander, und das
+// schwaechere gewinnt.
+//
+// WER EINEN TIPPSCHEIN AUSSTELLEN DARF, ist dieselbe Frage wie beim
+// Foto und bekommt dieselbe Antwort (`shot_may_arm`): die Wurzel oder
+// die Taskleiste. Ein Programm, das tippen will, stellt sich den
+// Schein NICHT selbst aus.
+
+fn tipp_call(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
+    // ZUERST: gibt es die Bruecke in diesem Abbild ueberhaupt? Ein
+    // Kern mit `--ohne-bruecke` sagt hier nein, und zwar mit -ENOSYS
+    // ("den Aufruf gibt es nicht") und nicht mit -EPERM ("du darfst
+    // nicht"). Die Unterscheidung ist der ganze Sinn von
+    // `kernel/tipp-aus.fi`.
+    if !tipp.gebaut() {
+        return sys.neg(errno.E_NOSYS)
+    }
+    // ---- AUSKUNFT. Ohne jedes Recht, mit Absicht: wer von aussen
+    //      tippt, soll sich nicht verstecken koennen. Die Taskleiste
+    //      fragt genau hier, ob sie ihr Zeichen zeigen muss.
+    if what == sys.TI_INFO {
+        if a1 == sys.TQ_ARMED {
+            return tipp.aktiv(state)
+        }
+        if a1 == sys.TQ_ARMPID {
+            if tipp.armed(state) {
+                return tipp.arm_pid(state)
+            }
+            return 0
+        }
+        if a1 == sys.TQ_USED {
+            return kstate.get(state, kstate.TIPP_OFF + 0x18)
+        }
+        if a1 == sys.TQ_TOTAL {
+            return tipp.eingespeist(state)
+        }
+        if a1 == sys.TQ_DENIED {
+            return tipp.denied(state)
+        }
+        if a1 == sys.TQ_ARMS {
+            return tipp.arms(state)
+        }
+        if a1 == sys.TQ_LASTPID {
+            return tipp.last_pid(state)
+        }
+        if a1 == sys.TQ_MAX {
+            return tipp.MAX_ANSCHLAEGE
+        }
+        return sys.neg(errno.E_INVAL)
+    }
+
+    // Ohne Fensterserver gibt es nichts, worin eine Taste landen
+    // koennte. Das hier ist die zweite Haelfte dessen, was
+    // `gfx-aus.fi` sagt -- auch ein GEBAUTER Fensterserver kann noch
+    // ohne Bildschirm dastehen.
+    //
+    // DIE PRUEFUNG STEHT HIER UND NICHT VOR `TI_ARM`, und das ist
+    // gemessen und nicht Geschmack: stand sie davor, bekam ein
+    // `jarvisctl eingabe taste` im Skriptmodus (`wm: skipped`) die
+    // Antwort -ENODEV, und `jarvisctl` sagte dazu "Kein Schein: das
+    // darf nur die Wurzel oder die Taskleiste". Das ist eine FALSCHE
+    // FAEHRTE -- der Schein war nicht das Problem, der Fensterserver
+    // war es. Eine Fehlermeldung, die auf die falsche Ursache zeigt,
+    // kostet mehr Zeit als gar keine.
+    //
+    // Einen SCHEIN darf man deshalb auch ohne Fensterserver holen und
+    // zurueckgeben (das kostet nichts und aendert nichts); nur das
+    // EINSPEISEN selbst braucht ihn wirklich.
+
+    // ---- DEN SCHEIN AUSSTELLEN. Nur Leiste oder Wurzel.
+    if what == sys.TI_ARM {
+        if !shot_may_arm(state, me) {
+            tipp.deny(state)
+            return sys.neg(errno.E_PERM)
+        }
+        tipp.arm(state, me)
+        return 0
+    }
+
+    // ---- IHN ZURUECKGEBEN. Das darf, wer ihn hat -- und die Wurzel,
+    //      damit ein Mensch einen vergessenen Schein wegnehmen kann,
+    //      ohne den Prozess zu suchen.
+    if what == sys.TI_DROP {
+        if tipp.arm_pid(state) == me
+            || sched.tget(state, me, sched.T_EUID) == 0 {
+            tipp.drop(state)
+            return 0
+        }
+        return sys.neg(errno.E_PERM)
+    }
+
+    // ---- AB HIER WIRD WIRKLICH ETWAS EINGESPEIST.
+    //
+    // KEINE PRUEFUNG AUF `wm.ready` MEHR, und das ist gemessen und
+    // nicht nachgelassen. Der erste Entwurf verlangte einen laufenden
+    // Fensterserver, weil eine Taste ja "irgendwohin" muss. Der
+    // Prueflauf hat gezeigt, dass das die falsche Bedingung ist:
+    //
+    //   * `kbd.push_hot` schreibt in den Ring in `K11_OFF`, und den
+    //     legt `kbd.fi` an, nicht `wm.fi`. Er ist da, sobald der Kern
+    //     laeuft.
+    //   * `ps2m.set_pos` schreibt in `MOUSE_OFF`, ebenso.
+    //   * Das Bildschirmfoto (`shot.fi`) braucht `wm` auch nicht --
+    //     `tools/bridge/fotovergleich.sh` faehrt mit `gfx` ohne `wm`
+    //     und bekommt sein PNG.
+    //
+    // Mit der Pruefung antwortete jede Einspeisung im Prueflauf
+    // -ENODEV, und zwar auch dann, wenn Ring und Zeiger bereitstanden.
+    // Was WIRKLICH noetig ist, prueft `gfx-aus.fi`: ohne Grafik gibt
+    // es diesen Aufruf gar nicht.
+    //      Und ab hier gilt der Schein. `may_inject` prueft Frist,
+    //      Prozessnummer und die Zahl der schon verbrauchten
+    //      Anschlaege in einem.
+    if !tipp.may_inject(state, me) {
+        tipp.deny(state)
+        return sys.neg(errno.E_PERM)
+    }
+
+    // EINE TASTE. Sie geht in denselben Ring wie eine echte
+    // (`kbd.push_hot`), damit der Fensterserver keinen Unterschied
+    // sieht -- ein Durchklick, der einen eigenen Weg nimmt, prueft den
+    // falschen.
+    if what == sys.TI_KEY {
+        if a1 > 0xFF || a2 > 0xFF {
+            return sys.neg(errno.E_INVAL)
+        }
+        kbd.push_hot(state, a1, a2)
+        tipp.note(state)
+        return 0
+    }
+
+    // DEN ZEIGER SETZEN. `ps2m.set_pos` klemmt selbst auf den
+    // Bildschirm, also wird hier nicht ein zweites Mal gerechnet.
+    if what == sys.TI_MOVE {
+        ps2m.set_pos(state, a1, a2)
+        tipp.note(state)
+        return 0
+    }
+
+    // EINEN KNOPF. Der Weg ist `usb_packet`, weil er die Knopfmaske
+    // GANZ setzt -- ein "Knopf runter" ohne die anderen beiden waere
+    // ein Loslassen, das niemand wollte.
+    if what == sys.TI_BUTTON {
+        if a1 > 7 {
+            return sys.neg(errno.E_INVAL)
+        }
+        var maske: u64 = 0
+        if a2 != 0 {
+            maske = a1
+        }
+        ps2m.usb_packet(state, maske, 0, 0, 0, false)
+        tipp.note(state)
+        return 0
+    }
+
+    return sys.neg(errno.E_INVAL)
 }

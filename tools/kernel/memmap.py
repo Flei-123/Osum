@@ -84,6 +84,15 @@ BEREICHE = [
     ("HIDREP_RAW", "hidrep.fi", "RAW_OFF",       "MAX_DEV * RAW_MAX"),
     ("HIDIN",      "hidin.fi",  "IN_OFF",        "0x1000"),
     ("I2CHID",     "i2chid.fi", "I2C_OFF",       "0x1000"),
+    # RUNDE GRAFIK-1 -- der Software-Rasterer und sein Wuerfel teilen
+    # sich VIER Seiten am oberen Ende.  Der Eintrag steht hier, weil
+    # die erste Fassung der Runde 0x3D000 genommen hat: dort liegt der
+    # Fensterserver aus Runde K10/K11.  Die Karte hat das NICHT
+    # gemeldet -- sie kann nur pruefen, was in dieser Liste steht, und
+    # ein neuer Bereich, der hier fehlt, ist fuer sie unsichtbar.  Das
+    # ist derselbe Fehler, den die vier Kommentare oben beschreiben,
+    # zum fuenften Mal.
+    ("R3D",        "r3dsoft.fi", "R3D_OFF",      "R3D_MAX"),
     ("I2CBUF",     "i2chid.fi", "BUF_OFF",       "0x1000"),
     ("AHCI",       "ahci.fi",   "AHCI_OFF",       "0x1000"),
     ("AHCI_ID",    "ahci.fi",   "AHCI_ID_OFF",    "0x1000"),
@@ -167,6 +176,14 @@ BEREICHE = [
     # gescheitert.  Der Rest der Bibliothek liegt in Ring 3 und kommt in
     # `kdata` gar nicht vor.
     ("WIG",        "kstate.fi", "WIG_OFF",        "WIG_MAX"),
+    ("WIGST",      "kstate.fi", "WIGST_OFF",      "WIGST_MAX"),
+    ("SCANB",      "kstate.fi", "SCANB_OFF",      "SCANB_MAX"),
+    ("NAMEK",      "kstate.fi", "NAMEK_OFF",      "NAMEK_MAX"),
+    # RUNDE FREMDLAND: die Tafel der Dateisperren.  Eine Seite, 64
+    # Eintraege zu 48 Oktetten -- (Inode, Einhaengung, Bereich, Art,
+    # Halter).  Sie liegt HINTER NAMEK, in den 0x1000 Oktetten, die
+    # der Ton dort frei gelassen hat.
+    ("FLOCK",      "kstate.fi", "FLOCK_OFF",      "FLOCK_MAX"),
     # RUNDE OFS3: die Pfadpuffer des Dateisystems.  Sie sind hier ein
     # EIGENER Bereich und kein Versatz -- die zwei Seiten gehoeren
     # dieser Runde allein, und genau das soll die Karte nachrechnen.
@@ -200,6 +217,14 @@ BEREICHE = [
     # (kernel/blkdev.fi) -- dasselbe, was netdev.fi fuer Netz ist.  EINE
     # Seite direkt hinter der Wurzelwahl.
     ("BLKDEV",     "blkdev.fi", "BLKDEV_OFF",     "BLKDEV_MAX"),
+    # RUNDE FEEDBACK (in diesen Zweig geholt von BRIDGE-2): der Schein
+    # fuers Bildschirmfoto (kernel/shot.fi).  EINE Seite, und zwar die
+    # LETZTE freie vor TASK_OFF.  Der erste Versuch dieser Runde nahm
+    # 0x85000, weil der Kopf von kstate.fi das Stueck ab 0x84380 als
+    # frei auswies -- dort liegt ROOTSEL.  Genau dafuer gibt es diese
+    # Datei; die Kollision stand in keiner gemeinsamen Zeile.
+    ("SHOT",       "kstate.fi", "SHOT_OFF",       "SHOT_MAX"),
+    ("TIPP",       "kstate.fi", "TIPP_OFF",       "TIPP_MAX"),
     # RUNDE BLECH: der USB-2.0-Regler (kernel/ehci.fi).  Drei Seiten,
     # 0x4D000..0x50000 -- genau das Stueck, das diese Karte bis zu
     # dieser Runde als "frei 0x4D000..0x50000 (12 KiB)" ausgewiesen hat.
@@ -219,6 +244,7 @@ BEREICHE = [
     # vier Modulsaetze, die Abschnittstafel des laufenden Ladevorgangs
     # und die TREIBERTAFEL, die ein geladenes Modul fuellt.
     ("MODUL",      "kstate.fi", "MODUL_OFF",      "MODUL_MAX"),
+    ("BUS",        "kstate.fi", "BUS_OFF",        "BUS_MAX"),
 
     # RUNDE FSROBUST: der Zustand des OFS-Journals (kernel/ofsj.fi).
     # Drei Seiten aus dem letzten freien Stueck, 0x7A000..0x80000.
@@ -270,6 +296,10 @@ BEREICHE = [
     ("ACQ",        "kstate.fi", "ACQ_OFF",        "ACQ_MAX"),
     ("ASC",        "kstate.fi", "ASC_OFF",        "ASC_MAX"),
     ("APATH",      "kstate.fi", "APATH_OFF",      "APATH_MAX"),
+    # RUNDE PROTOKOLL: der Ringpuffer des Kernprotokolls, 64 KiB am
+    # Stueck hinter allem bisherigen.  Er ist der Grund, aus dem
+    # KDATA_SIZE in dieser Runde von 0xB0000 auf 0xC0000 gewachsen ist.
+    ("LOG",        "kstate.fi", "LOG_OFF",        "LOG_MAX"),
     # RUNDE TRESOR: die Geraeteidentitaet, zwei Seiten (0x5A000..0x5C000).
     # Die erste traegt die Merkmale, die zweite ist das DMA-Ziel des
     # `identify controller` von NVMe -- und deshalb MUSS sie eine eigene,
@@ -288,6 +318,34 @@ BEREICHE = [
     # Damit ist es ein Bereich in `kdata` wie jeder andere und steht
     # NICHT mehr unten in KEINE_KDATA.
     ("JRNL",       "kstate.fi", "JRNL_OFF",       "JRNL_MAX"),
+    # RUNDE HDA: der Ton, sechs Seiten -- RUNDE TON: sieben, und auf
+    # 0xB0000..0xB7000 statt 0x92000..0x98000, wo seit Merge 2 die Runde
+    # ASYNC liegt (fuenf Kollisionen, VOR dem Bauen gefunden).  Der
+    # zweite Anlauf, 0x9F000..0xA6000, traf die Runde HID (sechs
+    # Kollisionen, ebenfalls hier gefunden).  Deshalb KDATA_SIZE
+    # 0xB0000 -> 0xC0000 und der Ton HINTER der alten Grenze.  Eine Seite Tonschicht und AC97, drei Seiten
+    # Intel HD-Audio (Skalare samt Positionspuffer, CORB/RIRB,
+    # Deskriptorliste samt Widget-Tafel), zwei Seiten Mischer.  Die
+    # DMA-Ringpuffer selbst stehen NICHT hier -- sie kommen aus dem
+    # Rahmenverwalter, weil 16 KiB je Strom in dieser Karte
+    # Verschwendung waeren und der Rahmenverwalter ohnehin
+    # seitenausgerichtet liefert.
+    ("AUD",        "kstate.fi", "AUD_OFF",        "AUD_MAX"),
+    ("HDA",        "kstate.fi", "HDA_OFF",        "HDA_MAX"),
+    ("HDARING",    "kstate.fi", "HDAR_OFF",       "HDAR_MAX"),
+    ("HDABDL",     "kstate.fi", "HDAB_OFF",       "HDAB_MAX"),
+    ("MIX",        "kstate.fi", "MIX_OFF",        "MIX_MAX"),
+    # RUNDE TON: der Umsteigepuffer der Ton-Systemaufrufe, eine Seite
+    # hinter dem Mischer -- statt des maschinenweiten BLOCK_OFF.
+    ("AUDB",       "kstate.fi", "AUDB_OFF",       "AUDB_MAX"),
+    # RUNDE TON: der Vorauslesepuffer der Platte (kernel/blk.fi) -- eine
+    # Seite Buchhaltung, acht Seiten Daten (BLKC_WAYS Wege zu
+    # BLKC_SECTORS Sektoren).  RUNDE MERGE-7: der Zweig hatte die beiden
+    # zwar in kstate.fi angelegt, aber NICHT hier eingetragen; der
+    # Pruefer hat sie beim Zusammenfuehren als "steht in keiner Karte"
+    # gemeldet.  Jetzt stehen sie hier, und ihre Lage wird mitgerechnet.
+    ("BLKCACHE",   "kstate.fi", "BLKC_OFF",       "BLKC_MAX"),
+    ("BLKDATA",    "kstate.fi", "BLKD_OFF",       "BLKD_MAX"),
 ]
 
 # `_OFF`-Konstanten, die KEINE Bereiche in `kdata` sind -- Offsets
@@ -308,13 +366,15 @@ K17_STUECKE = [
     ("xhci.fi", "DEVCTX_OFF", 0x1000),
     ("xhci.fi", "RING_OFF",   0x1000),
     ("xhci.fi", "SPARE_OFF",  0x1000),
-    ("usb.fi",  "USCAL_OFF",  0x100),
-    ("usb.fi",  "UDEV_OFF",   0x300),
+    ("usb.fi",  "USCAL_OFF",  0x180),
+    ("usb.fi",  "UDEV_OFF",   0x400),
+    ("usb.fi",  "FUND_OFF",   0x280),
     ("usb.fi",  "DESC_OFF",   0x200),
     ("usb.fi",  "REPORT_OFF", 0x100),
     ("usb.fi",  "CBW_OFF",    0x40),
     ("usb.fi",  "CSW_OFF",    0x40),
     ("usb.fi",  "BLK_OFF",    0x200),
+    ("usb.fi",  "HUB_OFF",    0x100),
 ]
 
 # RUNDE BLECH: dieselbe Buchfuehrung fuer den EHCI-Bereich.  Jedes
@@ -461,7 +521,9 @@ def main():
               # der EHCI-Treiber drei.
               "rootsel.fi", "ehci.fi", "blkdev.fi",
               # RUNDE HID -- der Zerleger, der Eingabeweg und I2C-HID.
-              "hidrep.fi", "hidin.fi", "i2chid.fi"):
+              "hidrep.fi", "hidin.fi", "i2chid.fi",
+              # RUNDE GRAFIK-1 -- der Software-Rasterer.
+              "r3dsoft.fi"):
         # RUNDE ARM: die Maschine hat seit dem Trennschnitt ein eigenes
         # Verzeichnis (`kernel/arch/x86_64/`).  `hv.fi` liegt dort, und
         # diese Schleife hat es vorher schlicht nicht mehr gefunden --

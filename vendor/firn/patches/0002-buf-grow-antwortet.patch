@@ -1,0 +1,489 @@
+# vendor/firn/patches/0002-buf-grow-antwortet.patch
+#
+# RUNDE HAERTUNG-2 (Osum, 06.09.2026) -- buf_grow ANTWORTET.
+#
+# WARUM DIESE DATEI EXISTIERT. vendor/firn/lib/ ist NICHT eingecheckt
+# (.gitignore); fetch-firnc.sh loescht das Verzeichnis und legt es aus
+# dem festgenagelten Firn-Commit neu an. Eine Aenderung, die nur dort
+# liegt, ist beim naechsten `--force` weg -- GEMESSEN in dieser Runde:
+# der erste Anlauf lag in vendor/firn/lib/, ein `fetch-firnc.sh --force`
+# lief dazwischen, und danach stand der alte Rumpf wieder da.
+#
+# DERSELBE STAND LIEGT IM FIRN-REPO als eigener Zweig `haertung2`
+# (Arbeitsbaum /root/firn-haertung2, Commit eeade326, NICHT gepusht).
+# Sobald Firn nachgezogen wird, faellt dieser Flicken ersatzlos weg.
+#
+# WAS ER TUT. `buf_grow` kehrte bei `heap_alloc == 0` wortlos zurueck:
+# `cap` blieb der alte Wert, und wer danach schrieb, schrieb ueber das
+# Pufferende.
+#
+# WIE WEIT DAS WIRKLICH TRUG, IST GEMESSEN und nicht vermutet
+# (tools/haertung/run.sh -- Kanarienvogel hinter dem Puffer, Arena echt
+# erschoepft ueber eine mmap-Absage):
+#
+#   buf_push        capnach=128 len=128 kanarie=1  -- KEIN Ueberlauf
+#   buf_push_bytes  capnach=128 len=128 kanarie=1  -- KEIN Ueberlauf
+#   buf_reserve + eigene Schreibschleife  len=192 KANARIE=0  -- Ueberlauf
+#
+# Die Behauptung "der Aufrufer schreibt ueber das Pufferende" gilt also
+# NICHT fuer buf_push/buf_push_bytes -- die pruefen die Kapazitaet ein
+# ZWEITES Mal und schreiben dann nicht -- sondern NUR fuer den Weg ueber
+# `buf_reserve`, das keinen Rueckgabewert hatte.
+#
+# rt.fi liegt im vendor-Baum DREIFACH (rt/, std/, firnc1/) und Oktett
+# fuer Oktett gleich; der Flicken fasst deshalb alle drei an.
+#
+# html/mem.fi ist die ZWEITE Pufferbauform im Baum und die schlechtere:
+# ihr `buf_push` hatte KEINE zweite Pruefung und schrieb nach einem
+# gescheiterten Wachsen bedingungslos. Das ist der stille Ueberlauf, den
+# diese Runde gesucht hat.
+diff --git a/rt/rt.fi b/rt/rt.fi
+index 3bf4a226..30714b89 100644
+--- a/rt/rt.fi
++++ b/rt/rt.fi
+@@ -18,7 +18,8 @@
+ export {
+     Buf,
+     heap_alloc, heap_free, mem_copy, mem_set, mem_eq,
+-    buf_new, buf_free, buf_clear, buf_reserve, buf_push, buf_push_bytes,
++    buf_new, buf_free, buf_clear, buf_reserve, buf_reserve_or_die,
++    buf_grow, buf_push, buf_push_bytes,
+     buf_len, buf_at, buf_ptr, buf_data, buf_set_len,
+     buf_push_dec_u64, buf_push_dec_i64, buf_push_hex_u64,
+     write_everything, read_file, read_stdin, finish,
+@@ -215,7 +216,25 @@ fn buf_at(b: *mut Buf, i: usize) -> u8 {
+ }
+ 
+ // Growing doubles the size -- that keeps the number of copies logarithmic.
+-fn buf_grow(b: *mut Buf, needed: usize) {
++//
++// ROUND HAERTUNG-2: THERE IS AN ANSWER NOW. Before, this function just
++// returned when `heap_alloc` said no; `cap` kept its old value, and
++// whoever wrote afterwards wrote past the end of the buffer.
++//
++// How far that really reached is MEASURED, not assumed (canary right
++// behind the buffer, arena genuinely exhausted):
++//
++//   * `buf_push` and `buf_push_bytes` did NOT overrun. Both check the
++//     capacity a SECOND time after growing and then simply do not
++//     write -- silent, but intact (`len=128`, canary 1).
++//   * `buf_reserve` PLUS the caller's own write loop DID overrun
++//     (`len=192`, canary 0). That is the real defect, and it hits the
++//     places that reserve and then write themselves.
++//
++// Hence `bool` and not an abort: a library that kills the process when
++// memory is tight takes the decision away from its caller. Whoever
++// cannot go on without the space uses `buf_reserve_or_die`.
++fn buf_grow(b: *mut Buf, needed: usize) -> bool {
+     var cap: usize = (*b).cap
+     if cap == 0 {
+         cap = 64
+@@ -225,7 +244,7 @@ fn buf_grow(b: *mut Buf, needed: usize) {
+     }
+     let new: u64 = heap_alloc(cap)
+     if new == 0 {
+-        return
++        return false
+     }
+     if (*b).len > 0 {
+         mem_copy(new, (*b).ptr, (*b).len)
+@@ -233,36 +252,61 @@ fn buf_grow(b: *mut Buf, needed: usize) {
+     heap_free((*b).ptr, (*b).cap)
+     (*b).ptr = new
+     (*b).cap = cap
++    return true
+ }
+ 
+-fn buf_reserve(b: *mut Buf, needed: usize) {
++// `true` means: there really are `needed` octets now. Only then may the
++// caller write up to that point.
++fn buf_reserve(b: *mut Buf, needed: usize) -> bool {
+     if (*b).cap >= needed {
++        return true
++    }
++    return buf_grow(b, needed)
++}
++
++// FOR THE PLACES THAT CANNOT GO ON WITHOUT THE SPACE.
++//
++// They are the reason `buf_reserve` returns a value instead of aborting
++// by itself: the abort stands HERE, in ONE place, with a message --
++// instead of in every caller separately.
++fn buf_reserve_or_die(b: *mut Buf, needed: usize) {
++    if buf_reserve(b, needed) {
+         return
+     }
+-    buf_grow(b, needed)
++    var m: [u8; 40] = "rt: out of memory (buf_reserve)\n\0\0\0\0\0\0\0\0"
++    write_everything(2, (&m[0]) as u64, 32)
++    finish(70)
+ }
+ 
+ // THE FAST PATH ON TOP: only the comparison lives here, the growing is a
+ // function of its own. That keeps `buf_push` small enough to inline -- measured
+ // during round 6, the capacity checks otherwise made up 33 % of all
+ // instructions of the tokenizer.
+-fn buf_push(b: *mut Buf, v: u8) {
++// ROUND HAERTUNG-2: `bool` here too -- not because these two overran
++// (they demonstrably do not, see `buf_grow`), but so that a caller who
++// WANTS to know does not have to guess. The second capacity check
++// stays: it is the reason these two paths are safe, and it is not there
++// by accident.
++fn buf_push(b: *mut Buf, v: u8) -> bool {
+     if (*b).len >= (*b).cap {
+         buf_grow(b, (*b).len + 1)
+     }
+     if (*b).len < (*b).cap {
+         st8((*b).ptr, (*b).len, v)
+         (*b).len = (*b).len + 1
++        return true
+     }
++    return false
+ }
+ 
+-fn buf_push_bytes(b: *mut Buf, p: u64, n: usize) {
++fn buf_push_bytes(b: *mut Buf, p: u64, n: usize) -> bool {
+     buf_reserve(b, (*b).len + n)
+     if (*b).len + n > (*b).cap {
+-        return
++        return false
+     }
+     mem_copy((*b).ptr + (*b).len as u64, p, n)
+     (*b).len = (*b).len + n
++    return true
+ }
+ 
+ // ---------------------------------------------------------- Number -> text
+diff --git a/std/rt.fi b/std/rt.fi
+index 3bf4a226..30714b89 100644
+--- a/std/rt.fi
++++ b/std/rt.fi
+@@ -18,7 +18,8 @@
+ export {
+     Buf,
+     heap_alloc, heap_free, mem_copy, mem_set, mem_eq,
+-    buf_new, buf_free, buf_clear, buf_reserve, buf_push, buf_push_bytes,
++    buf_new, buf_free, buf_clear, buf_reserve, buf_reserve_or_die,
++    buf_grow, buf_push, buf_push_bytes,
+     buf_len, buf_at, buf_ptr, buf_data, buf_set_len,
+     buf_push_dec_u64, buf_push_dec_i64, buf_push_hex_u64,
+     write_everything, read_file, read_stdin, finish,
+@@ -215,7 +216,25 @@ fn buf_at(b: *mut Buf, i: usize) -> u8 {
+ }
+ 
+ // Growing doubles the size -- that keeps the number of copies logarithmic.
+-fn buf_grow(b: *mut Buf, needed: usize) {
++//
++// ROUND HAERTUNG-2: THERE IS AN ANSWER NOW. Before, this function just
++// returned when `heap_alloc` said no; `cap` kept its old value, and
++// whoever wrote afterwards wrote past the end of the buffer.
++//
++// How far that really reached is MEASURED, not assumed (canary right
++// behind the buffer, arena genuinely exhausted):
++//
++//   * `buf_push` and `buf_push_bytes` did NOT overrun. Both check the
++//     capacity a SECOND time after growing and then simply do not
++//     write -- silent, but intact (`len=128`, canary 1).
++//   * `buf_reserve` PLUS the caller's own write loop DID overrun
++//     (`len=192`, canary 0). That is the real defect, and it hits the
++//     places that reserve and then write themselves.
++//
++// Hence `bool` and not an abort: a library that kills the process when
++// memory is tight takes the decision away from its caller. Whoever
++// cannot go on without the space uses `buf_reserve_or_die`.
++fn buf_grow(b: *mut Buf, needed: usize) -> bool {
+     var cap: usize = (*b).cap
+     if cap == 0 {
+         cap = 64
+@@ -225,7 +244,7 @@ fn buf_grow(b: *mut Buf, needed: usize) {
+     }
+     let new: u64 = heap_alloc(cap)
+     if new == 0 {
+-        return
++        return false
+     }
+     if (*b).len > 0 {
+         mem_copy(new, (*b).ptr, (*b).len)
+@@ -233,36 +252,61 @@ fn buf_grow(b: *mut Buf, needed: usize) {
+     heap_free((*b).ptr, (*b).cap)
+     (*b).ptr = new
+     (*b).cap = cap
++    return true
+ }
+ 
+-fn buf_reserve(b: *mut Buf, needed: usize) {
++// `true` means: there really are `needed` octets now. Only then may the
++// caller write up to that point.
++fn buf_reserve(b: *mut Buf, needed: usize) -> bool {
+     if (*b).cap >= needed {
++        return true
++    }
++    return buf_grow(b, needed)
++}
++
++// FOR THE PLACES THAT CANNOT GO ON WITHOUT THE SPACE.
++//
++// They are the reason `buf_reserve` returns a value instead of aborting
++// by itself: the abort stands HERE, in ONE place, with a message --
++// instead of in every caller separately.
++fn buf_reserve_or_die(b: *mut Buf, needed: usize) {
++    if buf_reserve(b, needed) {
+         return
+     }
+-    buf_grow(b, needed)
++    var m: [u8; 40] = "rt: out of memory (buf_reserve)\n\0\0\0\0\0\0\0\0"
++    write_everything(2, (&m[0]) as u64, 32)
++    finish(70)
+ }
+ 
+ // THE FAST PATH ON TOP: only the comparison lives here, the growing is a
+ // function of its own. That keeps `buf_push` small enough to inline -- measured
+ // during round 6, the capacity checks otherwise made up 33 % of all
+ // instructions of the tokenizer.
+-fn buf_push(b: *mut Buf, v: u8) {
++// ROUND HAERTUNG-2: `bool` here too -- not because these two overran
++// (they demonstrably do not, see `buf_grow`), but so that a caller who
++// WANTS to know does not have to guess. The second capacity check
++// stays: it is the reason these two paths are safe, and it is not there
++// by accident.
++fn buf_push(b: *mut Buf, v: u8) -> bool {
+     if (*b).len >= (*b).cap {
+         buf_grow(b, (*b).len + 1)
+     }
+     if (*b).len < (*b).cap {
+         st8((*b).ptr, (*b).len, v)
+         (*b).len = (*b).len + 1
++        return true
+     }
++    return false
+ }
+ 
+-fn buf_push_bytes(b: *mut Buf, p: u64, n: usize) {
++fn buf_push_bytes(b: *mut Buf, p: u64, n: usize) -> bool {
+     buf_reserve(b, (*b).len + n)
+     if (*b).len + n > (*b).cap {
+-        return
++        return false
+     }
+     mem_copy((*b).ptr + (*b).len as u64, p, n)
+     (*b).len = (*b).len + n
++    return true
+ }
+ 
+ // ---------------------------------------------------------- Number -> text
+diff --git a/firnc1/rt.fi b/firnc1/rt.fi
+index 3bf4a226..30714b89 100644
+--- a/firnc1/rt.fi
++++ b/firnc1/rt.fi
+@@ -18,7 +18,8 @@
+ export {
+     Buf,
+     heap_alloc, heap_free, mem_copy, mem_set, mem_eq,
+-    buf_new, buf_free, buf_clear, buf_reserve, buf_push, buf_push_bytes,
++    buf_new, buf_free, buf_clear, buf_reserve, buf_reserve_or_die,
++    buf_grow, buf_push, buf_push_bytes,
+     buf_len, buf_at, buf_ptr, buf_data, buf_set_len,
+     buf_push_dec_u64, buf_push_dec_i64, buf_push_hex_u64,
+     write_everything, read_file, read_stdin, finish,
+@@ -215,7 +216,25 @@ fn buf_at(b: *mut Buf, i: usize) -> u8 {
+ }
+ 
+ // Growing doubles the size -- that keeps the number of copies logarithmic.
+-fn buf_grow(b: *mut Buf, needed: usize) {
++//
++// ROUND HAERTUNG-2: THERE IS AN ANSWER NOW. Before, this function just
++// returned when `heap_alloc` said no; `cap` kept its old value, and
++// whoever wrote afterwards wrote past the end of the buffer.
++//
++// How far that really reached is MEASURED, not assumed (canary right
++// behind the buffer, arena genuinely exhausted):
++//
++//   * `buf_push` and `buf_push_bytes` did NOT overrun. Both check the
++//     capacity a SECOND time after growing and then simply do not
++//     write -- silent, but intact (`len=128`, canary 1).
++//   * `buf_reserve` PLUS the caller's own write loop DID overrun
++//     (`len=192`, canary 0). That is the real defect, and it hits the
++//     places that reserve and then write themselves.
++//
++// Hence `bool` and not an abort: a library that kills the process when
++// memory is tight takes the decision away from its caller. Whoever
++// cannot go on without the space uses `buf_reserve_or_die`.
++fn buf_grow(b: *mut Buf, needed: usize) -> bool {
+     var cap: usize = (*b).cap
+     if cap == 0 {
+         cap = 64
+@@ -225,7 +244,7 @@ fn buf_grow(b: *mut Buf, needed: usize) {
+     }
+     let new: u64 = heap_alloc(cap)
+     if new == 0 {
+-        return
++        return false
+     }
+     if (*b).len > 0 {
+         mem_copy(new, (*b).ptr, (*b).len)
+@@ -233,36 +252,61 @@ fn buf_grow(b: *mut Buf, needed: usize) {
+     heap_free((*b).ptr, (*b).cap)
+     (*b).ptr = new
+     (*b).cap = cap
++    return true
+ }
+ 
+-fn buf_reserve(b: *mut Buf, needed: usize) {
++// `true` means: there really are `needed` octets now. Only then may the
++// caller write up to that point.
++fn buf_reserve(b: *mut Buf, needed: usize) -> bool {
+     if (*b).cap >= needed {
++        return true
++    }
++    return buf_grow(b, needed)
++}
++
++// FOR THE PLACES THAT CANNOT GO ON WITHOUT THE SPACE.
++//
++// They are the reason `buf_reserve` returns a value instead of aborting
++// by itself: the abort stands HERE, in ONE place, with a message --
++// instead of in every caller separately.
++fn buf_reserve_or_die(b: *mut Buf, needed: usize) {
++    if buf_reserve(b, needed) {
+         return
+     }
+-    buf_grow(b, needed)
++    var m: [u8; 40] = "rt: out of memory (buf_reserve)\n\0\0\0\0\0\0\0\0"
++    write_everything(2, (&m[0]) as u64, 32)
++    finish(70)
+ }
+ 
+ // THE FAST PATH ON TOP: only the comparison lives here, the growing is a
+ // function of its own. That keeps `buf_push` small enough to inline -- measured
+ // during round 6, the capacity checks otherwise made up 33 % of all
+ // instructions of the tokenizer.
+-fn buf_push(b: *mut Buf, v: u8) {
++// ROUND HAERTUNG-2: `bool` here too -- not because these two overran
++// (they demonstrably do not, see `buf_grow`), but so that a caller who
++// WANTS to know does not have to guess. The second capacity check
++// stays: it is the reason these two paths are safe, and it is not there
++// by accident.
++fn buf_push(b: *mut Buf, v: u8) -> bool {
+     if (*b).len >= (*b).cap {
+         buf_grow(b, (*b).len + 1)
+     }
+     if (*b).len < (*b).cap {
+         st8((*b).ptr, (*b).len, v)
+         (*b).len = (*b).len + 1
++        return true
+     }
++    return false
+ }
+ 
+-fn buf_push_bytes(b: *mut Buf, p: u64, n: usize) {
++fn buf_push_bytes(b: *mut Buf, p: u64, n: usize) -> bool {
+     buf_reserve(b, (*b).len + n)
+     if (*b).len + n > (*b).cap {
+-        return
++        return false
+     }
+     mem_copy((*b).ptr + (*b).len as u64, p, n)
+     (*b).len = (*b).len + n
++    return true
+ }
+ 
+ // ---------------------------------------------------------- Number -> text
+diff --git a/html/mem.fi b/html/mem.fi
+index b905dec7..ddaceb4c 100644
+--- a/html/mem.fi
++++ b/html/mem.fi
+@@ -147,15 +147,18 @@ fn buf_ptr(b: *mut Buf) -> *mut u8 {
+ }
+ 
+ #[no_gc]
+-fn buf_reserve(b: *mut Buf, need: usize) {
++fn buf_reserve(b: *mut Buf, need: usize) -> bool {
+     if (*b).cap >= need {
+-        return
++        return true
+     }
+-    buf_grow(b, need)
++    return buf_grow(b, need)
+ }
+ 
+ #[no_gc]
+-fn buf_grow(b: *mut Buf, need: usize) {
++// ROUND HAERTUNG-2: the same answer as in `lib/rt/rt.fi`. This is the
++// SECOND buffer implementation in the tree, and it had the same silent
++// return -- here it did not even look at what `heap_alloc` gave back.
++fn buf_grow(b: *mut Buf, need: usize) -> bool {
+     var cap: usize = (*b).cap
+     if cap == 0 {
+         cap = 64
+@@ -164,21 +167,36 @@ fn buf_grow(b: *mut Buf, need: usize) {
+         cap = cap * 2
+     }
+     let p: *mut u8 = heap_alloc(cap)
++    if (p as u64) == 0 {
++        return false
++    }
+     if (*b).len > 0 {
+         mem_copy(p, (*b).ptr, (*b).len)
+     }
+     heap_free((*b).ptr, (*b).cap)
+     (*b).ptr = p
+     (*b).cap = cap
++    return true
+ }
+ 
++// ROUND HAERTUNG-2: AND HERE IT REALLY DID OVERRUN.
++//
++// `lib/rt/rt.fi` checks the capacity a SECOND time after growing and
++// then does not write. This one did NOT -- it wrote unconditionally,
++// even when `buf_grow` had just failed. That is the silent heap
++// overflow the round was looking for, and it sits in the buffer used by
++// the HTML side, not in the one everybody reads.
+ #[no_gc]
+-fn buf_push(b: *mut Buf, v: u8) {
++fn buf_push(b: *mut Buf, v: u8) -> bool {
+     if (*b).len >= (*b).cap {
+         buf_grow(b, (*b).len + 1)
+     }
++    if (*b).len >= (*b).cap {
++        return false
++    }
+     *(((*b).ptr as usize + (*b).len) as *mut u8) = v
+     (*b).len = (*b).len + 1
++    return true
+ }
+ 
+ #[no_gc]
+@@ -225,7 +243,13 @@ fn read_all_stdin(b: *mut Buf) {
+     buf_clear(b)
+     var next: bool = true
+     while next {
+-        buf_reserve(b, (*b).len + 65536)
++        // ROUND HAERTUNG-2: without the space nothing is read. The
++        // `read` below fills 65536 octets -- into a buffer that did not
++        // have to be that big.
++        if !buf_reserve(b, (*b).len + 65536) {
++            next = false
++            break
++        }
+         let r: i64 = syscall(SYS_READ, 0, ((*b).ptr as usize + (*b).len) as i64, 65536, 0, 0, 0)
+         if r <= 0 {
+             next = false
+diff --git a/std/deflate.fi b/std/deflate.fi
+index f1575a40..d2a2147c 100644
+--- a/std/deflate.fi
++++ b/std/deflate.fi
+@@ -1227,7 +1227,13 @@ fn emit_stored(d: *mut Deflater, from: usize, to: usize, last: bool) {
+         put_bits(d, 0 as u32, 2)
+         flush_bits(d)
+         let b: *mut rt.Buf = d_out(d)
+-        rt.buf_reserve(b, (*b).len + 4)
++        // ROUND HAERTUNG-2: the only place in this file that reserved
++        // and then wrote WITHOUT checking. Every other one has always
++        // looked -- these four octets did not.
++        if !rt.buf_reserve(b, (*b).len + 4) {
++            (*d).bad = true
++            return
++        }
+         rt.st8((*b).ptr, (*b).len, 0 as u8)
+         rt.st8((*b).ptr, (*b).len + 1, 0 as u8)
+         rt.st8((*b).ptr, (*b).len + 2, 255 as u8)

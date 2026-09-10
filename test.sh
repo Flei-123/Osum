@@ -47,6 +47,17 @@
 #   9. Ein Userland (tools/userland/run.sh, Runde K6): eine Shell,
 #      dreiundzwanzig Werkzeuge, Roehren und Umlenkung -- alles eigene
 #      ELF-Dateien von der Platte.
+#  43. DER PUFFER, DER SCHWEIGT (tools/haertung/run.sh, Runde
+#      HAERTUNG-2): `buf_grow` kehrte bei knappem Speicher wortlos
+#      zurueck, `cap` blieb der alte Wert. Gemessen wird mit einem
+#      Kanarienvogel unmittelbar HINTER dem Puffer, bei echt
+#      erschoepfter Arena -- und das Ergebnis widerspricht der
+#      Erwartung: `buf_push` und `buf_push_bytes` laufen NICHT ueber
+#      (sie pruefen ein zweites Mal), wohl aber der Weg ueber
+#      `buf_reserve`, das keinen Rueckgabewert hatte. Die Gegenprobe
+#      (derselbe Aufrufer ohne Pruefung) MUSS fallen, sonst misst der
+#      Abschnitt nichts.
+#
 #  10. Handles statt Umgebungsautoritaet (tools/caps/run.sh): die
 #      Capability-Schicht, portiert aus OrientOS' nativer ABI
 #      (`libs/osum-abi-native/`, Rust). Eine Handle-Tabelle je Prozess mit
@@ -713,7 +724,13 @@ zusagen() {
     # RUNDE MERGE-2: `bestanden` dazu -- der Laeufer der Runde USBIMG
     # meldet auf deutsch ("USBIMG: 46 bestanden, 0 gescheitert"), und mit
     # dem alten Muster waeren seine 46 Zusagen still verschwunden.
-    n=$(grep -aoE '^[A-Z][A-Z0-9]*: [0-9]+ (passed|proofs|bestanden)' "$log" | tail -1 | grep -oE '[0-9]+' | tail -1)
+    # RUNDE WLAN: `Zusagen` dazu. Der Laeufer von tools/wlan/run.sh
+    # meldet "WLAN: 183 Zusagen, 0 Fehler" -- das ist genau das Wort,
+    # das diese Datei selbst fuer eine gepruefte Aussage benutzt, und
+    # ohne diesen Zusatz waeren die Zusagen still verschwunden. Die
+    # Ergaenzung ist rein additiv: kein bisher passendes Muster faellt
+    # dadurch weg.
+    n=$(grep -aoE '^[A-Z][A-Z0-9]*: [0-9]+ (passed|proofs|bestanden|Zusagen)' "$log" | tail -1 | grep -oE '[0-9]+' | tail -1)
     [ -n "${n:-}" ] && ZUSAGEN=$((ZUSAGEN + n))
 }
 
@@ -723,6 +740,13 @@ abschnitt_ausfuehren() { # index
     local i=$1
     local skript=${A_SKRIPT[$i]} name=${A_NAME[$i]}
     local rc=0 s e
+    # RUNDE MERGE-8 (Nebenbefund aus ALLTAG): ein altes `.netto.$i` aus
+    # einem FRUEHEREN Lauf gehoert nicht zu diesem Abschnitt. Nur der
+    # Netz-Zweig unten schreibt die Datei; ein Nicht-Netz-Abschnitt mit
+    # demselben Index las sie trotzdem (Zeile "davon ... Warten auf die
+    # Netzsperre" bei `update`, obwohl die Maschine frei war -- mit
+    # OSUM_NUR bekommen andere Abschnitte dieselben Indizes).
+    rm -f "$WORK/.netto.$i"
     s=$(date +%s%N)
     if [[ "$skript" =~ $SERIELL_RE ]]; then
         # GEFUNDEN BEIM MESSEN: die Zeit VOR dieser Zeile ist Wartezeit
@@ -876,17 +900,51 @@ bash vendor/firn/fetch-firnc.sh > "$WORK/vendor.log" 2>&1 || \
 [ -x vendor/firn/bin/firnc ]  || S1="$S1 vendor/firn/bin/firnc fehlt;"
 [ -x vendor/firn/bin/firnc1 ] || S1="$S1 vendor/firn/bin/firnc1 fehlt;"
 [ -d vendor/firn/lib/std ]    || S1="$S1 vendor/firn/lib/std fehlt;"
-[ -f vendor/firn/.gebaut ] && [ "$(cat vendor/firn/.gebaut)" = "$COMMIT" ] || \
-    S1="$S1 vendor/firn/.gebaut passt nicht zu COMMIT;"
+# RUNDE GLYPHE: DIE MARKE IST ZWEITEILIG -- COMMIT **UND** FLICKENSTAND.
+#
+# Hier stand `[ "$(cat .gebaut)" = "$COMMIT" ]`, also der Vergleich der
+# GANZEN Zeile gegen den Commit allein. Seit Runde STICK (03.09.2026,
+# 102873b) schreibt vendor/firn/fetch-firnc.sh aber zwei Felder:
+#
+#     a751b3db...  b229d84c0efbe8b6
+#     ^ Commit     ^ sha256 der Flicken in vendor/firn/patches/
+#
+# und zwar mit Grund: vendor/firn/lib/ ist nicht eingecheckt und liegt in
+# jedem Arbeitsbaum einzeln. Stuende dort nur der Commit, waere ein Baum
+# mit ungeflicktem lib/ "aktuell" -- und man bekaeme aus demselben
+# Quelltext zwei verschiedene Kerne (gemessen: 3 844 792 gegen
+# 3 844 744 Oktette, im kleineren fehlte DHCP).
+#
+# Der Pruefer wurde damals nicht nachgezogen und war seither IMMER rot,
+# auf jedem Zweig, mit leerem Grund hinter dem Strichpunkt. Er prueft
+# jetzt beide Felder einzeln: Feld 1 gegen COMMIT, Feld 2 gegen den
+# Flickenstand, den fetch-firnc.sh selbst errechnet.
+GEB_C=$(cut -d' ' -f1 vendor/firn/.gebaut 2>/dev/null)
+GEB_P=$(cut -d' ' -f2 vendor/firn/.gebaut 2>/dev/null)
+PSUM_SOLL=$( { cat vendor/firn/patches/*.patch 2>/dev/null || true; } \
+             | sha256sum | cut -c1-16)
+[ -f vendor/firn/.gebaut ] || S1="$S1 vendor/firn/.gebaut fehlt;"
+[ "$GEB_C" = "$COMMIT" ] || \
+    S1="$S1 vendor/firn/.gebaut: Commit $GEB_C statt $COMMIT;"
+[ "$GEB_P" = "$PSUM_SOLL" ] || \
+    S1="$S1 vendor/firn/.gebaut: Flicken $GEB_P statt $PSUM_SOLL;"
 # RUNDE K8: der TCP/IP-Stack kommt MIT dem festgenagelten Uebersetzer
 # herein und nicht als Kopie. Die drei Blob-Hashes in vendor/net/BLOBS
 # sind die, die Firn im Baum dieses Commits stehen hat -- zieht jemand
 # COMMIT nach und der Stack hat sich dabei geaendert, faellt es hier auf
 # und nicht erst in einer Messung. Siehe vendor/net/PROVENANCE.md.
+# RUNDE GLYPHE, Nachtrag: vendor/net/BLOBS nennt den Stand, wie er im
+# Firn-Commit steht -- also VOR den Flicken aus vendor/firn/patches/.
+# 0001-rundruf-ohne-arp.patch aendert net/stack.fi mit Absicht; dessen
+# Streuwert ist danach ein anderer, und das ist RICHTIG so. Geprueft
+# wird deshalb gegen den ungeflickten Stand aus dem Firn-Repo, den
+# fetch-firnc.sh vor dem Auflegen weglegt.
 while read -r want name; do
     case "$want" in \#*|"") continue;; esac
-    got=$(git hash-object "vendor/firn/lib/$name" 2>/dev/null)
-    [ "$got" = "$want" ] || S1="$S1 vendor/firn/lib/$name: $got statt $want;"
+    roh="vendor/firn/lib/.roh/$name"
+    [ -f "$roh" ] || roh="vendor/firn/lib/$name"
+    got=$(git hash-object "$roh" 2>/dev/null)
+    [ "$got" = "$want" ] || S1="$S1 $roh: $got statt $want;"
 done < vendor/net/BLOBS
 # Gegenprobe zur Gegenprobe: eine Kopie des Stacks im Repo waere genau
 # das Auseinanderdriften, das diese Runde vermeidet.
@@ -1352,6 +1410,218 @@ lauf "38. der JARVIS-Helfer und seine Rechteliste (tools/bridge/run.sh, Runde BR
 # mit 0 -- wie tools/bridge/run.sh es auch tut.
 lauf "39. was man mit dem Stick TUN kann: dhcp, host, fetch, ota und die Bruecke, vom Abbild (tools/stick/run.sh, Runde STICK)" \
      tools/stick/run.sh stick '^STICK: |^  ok   |^       (SHA-256|/bin traegt|kern|programme|apps|wurzeln|ota.conf|schluessel)'
+
+#  40. RING 3 AUF ALLEN KERNEN, UND DER RIEGEL DAVOR (tools/vielkern/run.sh,
+#      Runde VIELKERN 3). Der Abschnitt, den es in der Runde BLECHKERN
+#      nicht gab -- und deshalb ist deren Fehler damals bis auf Justins
+#      Brett durchgerutscht: ein Anwendungskern durfte Ring 3 nehmen,
+#      ohne dass sein `syscall` den eigenen Kernstapel finden konnte.
+#      Kein Laeufer hat je gefragt, auf welchem Kern ein Ring-3-Prozess
+#      wirklich lief.
+#
+#      Gemessen wird jetzt beides: dass er es tut (R3K, die Maske je
+#      Prozess, die Systemaufrufe JE KERN ueber die GS-Basis gezaehlt)
+#      und dass der Riegel davor haelt -- letzteres, indem der Laeufer
+#      ihn BRICHT. `gsluege` gibt den Anwendungskernen eine falsche
+#      GS-Basis (der Riegel muss greifen, die Maschine muss leben),
+#      `gsluege r3blind` schaltet ihn dazu ab (die Maschine MUSS
+#      brechen, mit VEK 6 #UD in einer Ring-3-Aufgabe). Eine Zusage,
+#      deren Gegenprobe nicht faellt, ist eine Behauptung.
+lauf "40. Ring 3 auf ALLEN Kernen, und der Riegel davor -- der Fehler der Runde BLECHKERN, auf Bestellung (tools/vielkern/run.sh, Runde VIELKERN)" \
+     tools/vielkern/run.sh vielkern '^VIELKERN: |^  OK   |^  FAIL |^        (r3:|tafel:|absturz:)'
+
+# RUNDE MERGE-6: VIELKERN UND WERKZEUGE HABEN BEIDE DIE 40 VERGEBEN --
+# sie sind am selben Tag aus demselben Commit (1493451) entstanden und
+# haben unabhaengig voneinander die naechste freie Nummer genommen.
+# Verfahren wie bei BLECH/OTA weiter oben: beide bleiben, der zweite
+# wird 41. Die Nummer ist nur eine Ueberschrift; die Reihenfolge macht
+# die Stelle im Skript.
+# ABSCHNITT 41 -- RUNDE WERKZEUGE. Der grafische Aufgabenverwalter
+# (/bin/taskmgr) und das ausgebaute Kontrollzentrum der Taskleiste.
+#
+# Gemessen wird vor allem, dass die ZAHLEN ECHT sind: die drei
+# Kennzahlen, die es vor dieser Runde nicht gab (Leerlauf je Kern,
+# Rahmen je Prozess, Kern je Prozess), mit ihren Gegenproben -- kein
+# Kern meldet mehr Leerlauf als Zeit, ein Prozess ohne eigenen
+# Adressraum hat keine Seiten, und es kommen wirklich mehrere Kerne vor.
+# Dazu: das Fenster steht (jedes Rechteck im Fenster, keine leere und
+# keine ueberlappende Beschriftung), Sortieren und Waehlen mit der MAUS,
+# der Knopf "Prozess beenden" macht aus einem laufenden Prozess wirklich
+# eine Leiche, der Verlaufsgraph steht im BILD an den Stellen, die das
+# Programm gemeldet hat, und der Dunkelmodus-Schalter des
+# Kontrollzentrums macht das Bild messbar dunkler.
+lauf "41. der Aufgabenverwalter und das Kontrollzentrum (tools/werkzeug/run.sh, Runde WERKZEUGE)" \
+     tools/werkzeug/run.sh werkzeug '^WERKZEUGE: |^  OK    |^        '
+
+#  42. DER ZEICHENWEG AUF MEHREREN KERNEN (tools/glyphe/run.sh, Runde
+#      GLYPHE). Der Rest, an dem MERGE-6 gescheitert ist: `wig.blit` und
+#      `wig.glyph_into` bauten in EINEM Puffer der Datenseite, und nur
+#      einer der beiden Wege hatte eine Sperre. Ein Ring-3-Programm
+#      starb dadurch in einem von fuenf Laeufen mit vier Kernen
+#      (`panic: integer overflow in 'u64 * u64'`). Seit dieser Runde
+#      gehoert die Buehne dem Kern, der auf ihr zeichnet
+#      (`kstate.WIGST_OFF`, angesprochen ueber `cpu.here`), der
+#      Glyphenspeicher liegt unter einer eigenen Sperre und die
+#      Zwischenablage auch. Nachgewiesen wie `fsrace`: `glyphrace`
+#      startet alle Kerne im selben Augenblick, dazu DREI Gegenproben
+#      (`glyphblind` = der Stand von MERGE-6, `glyphsperre` = die
+#      Bauform mit einer gemeinsamen Sperre, `glyphtafelfrei` = der
+#      Glyphenspeicher ohne die seine) und zwanzig Schreibtischlaeufe
+#      je mit vier und acht Kernen.
+lauf "42. der Zeichenweg auf mehreren Kernen: eine Buehne je Kern (tools/glyphe/run.sh, Runde GLYPHE)" \
+     tools/glyphe/run.sh glyphe '^GLYPHE: |^  OK    |^  FAIL |^  ZAHL  |^        '
+#  43. DER SYSTEMBUS (tools/systembus/run.sh, Runde SYSTEMBUS)
+#
+# Der wichtigste Einzelposten der Wegkarte (A3): benannte Dienste,
+# Nachrichten mit der ECHTEN Absenderkennung aus der Aufgabentafel,
+# Rechtepruefung mit sichtbarem Nein, Abo/Ereignis, geteilte Segmente
+# ohne Kopie -- und darauf EIN Typmodell fuer Zwischenablage,
+# Drag-and-Drop und geteilten Speicher (D1-D3), plus die
+# Benachrichtigungen (A11).
+#
+# Gemessen wird mit VIER Kernen, weil ein Bus mit einem Kern nichts
+# beweist: hundert Durchlaeufe zwischen zwei Prozessen mit Pruefsumme,
+# ein abgelehnter Ruf, ein Megabyte durch ein Segment, und drei
+# Gegenproben (`nobus`, ohne `busbench`, root gegen Nicht-root).
+lauf "43. der Systembus: Dienste, Rechte, Zwischenablage, Segmente (tools/systembus/run.sh, Runde SYSTEMBUS)" \
+     tools/systembus/run.sh systembus '^SYSTEMBUS: |^  OK   |^  FAIL |^        (busa|busb|busd|buss|byt=|vor=|mit nobus|bild)'
+# RUNDE PROTOKOLL: der Ringpuffer, die Absturzberichte und der
+# Panik-Bildschirm. Fuenf Messungen, und die zwei, um die es geht:
+# vierzigtausend Zeilen aus vier Kernen ohne eine einzige verschraenkte,
+# und ein Panik-Bildschirm, dessen Text WIRKLICH GELESEN wird
+# (tools/protokoll/schirmtext.py rechnet die Glyphen aus dem
+# Bildschirmfoto zurueck).
+lauf "44. das Kernprotokoll, die Absturzberichte und der Panik-Bildschirm (tools/protokoll/run.sh, Runde PROTOKOLL)" \
+     tools/protokoll/run.sh protokoll '^PROTOKOLL: |^  OK    |^        '
+
+# RUNDE PRAESENZ: Freunde, Praesenz und ein 1:1-Chat, den der Server
+# nicht mitlesen kann. Drei Zusagen tragen diesen Abschnitt, und alle
+# drei haben eine Gegenprobe, damit "gruen" nicht auch dann herauskommt,
+# wenn gar nichts ankommt:
+#   * der Status eines Freundes ist binnen 2 s da (gemessen: 40 ms),
+#   * "unsichtbar" heisst, dass KEIN Statustext das Geraet verlaesst --
+#     und sichtbar zeigt denselben Text sehr wohl,
+#   * der Klartext einer Chatnachricht steht in KEINEM Oktett des
+#     Servermaterials (0 Treffer), und dieselbe Suche findet ihn, wenn
+#     man ihn absichtlich hineinlegt.
+# Der Abschnitt braucht node fuer den Kontodienst; fehlt es, sagt er das
+# und ueberspringt diesen Teil, statt still gruen zu sein.
+lauf "45. Freunde, Praesenz und ein Chat ohne Mitleser (tools/praesenz/run.sh, Runde PRAESENZ)" \
+     tools/praesenz/run.sh praesenz '^PRAESENZ: |^  OK    |^  FAIL  |^        (/bin/praesenz|104 Bereiche)'
+# ================================================== RUNDE TON-2
+#
+# MERGE-8: dieser Abschnitt hiess auf dem Zweig 42 -- die Nummer gehoert
+# seit MERGE-7 dem Zeichenweg (GLYPHE). Jetzt 46, hinter PRAESENZ 45.
+#
+# DER MISCHER VON RING 3 AUS. Abschnitt 5 von tools/hda/run.sh prueft
+# ihn von INNEN -- aus einem Kernel-Pruefpfad mit zwei erfundenen
+# Stroemen -- und das ist eine Aussage ueber die Additionsschleife und
+# keine darueber, ob zwei PROGRAMME nebeneinander spielen koennen.
+# Dieser Abschnitt fragt es von aussen: zweimal /bin/play durch die
+# Shell, jeder Ton per Goertzel einzeln nachgewiesen.
+#
+# DIE 60-SEKUNDEN-ABNAHME (tools/ton/abnahme.sh) STEHT ABSICHTLICH
+# NICHT HIER. Zwoelf Laeufe zu einer Minute sind zwoelf Minuten, und
+# das gehoert nicht in einen Durchlauf, den man vor jedem Commit
+# startet. Sie wird von Hand gefahren, und ihre Zahlen stehen in
+# STATUS-TON2.md.
+lauf "46. der Mischer von Ring 3 aus: zwei Programme, Lautstaerke je Strom, Saettigung, Systemklang (tools/ton/mischer.sh, Runde TON-2)" \
+     tools/ton/mischer.sh ton2 '^== |^  OK   |^  FEHL |^    \(|^ERGEBNIS'
+
+#  43. DIE BILDGRENZE UND DIE FENSTERBEWEGUNG (tools/vsync/run.sh, Runde
+#      VSYNC). Zwei Zusagen: beim Zeichnen darf nie eine halbe Bildseite
+#      auf dem Schirm stehen, und Fenster gehen mit Skalieren und Alpha
+#      auf und zu statt zu springen.
+#
+#      DER BEFUND DIESER RUNDE, und er ist der Grund, warum der
+#      Abschnitt DREI Stufen misst und nicht eine: der Rueckpuffer aus
+#      Runde SCHIRM beseitigt das Reissen NICHT. `flush` kopiert Zeile
+#      fuer Zeile, und waehrend dieser Schleife steht oben das neue und
+#      unten das alte Bild. Das Sammeln der Zeichnungen zu EINEM Bild
+#      (`vsync`) senkt nur die Zahl der Gelegenheiten. Erst der Wechsel
+#      der ganzen Bildseite ueber VBE_YOFF (`flip`) macht daraus null.
+#
+#      GEMESSEN am stehenden, aber staendig neu gemalten Fenster, mit
+#      einem Ableser auf einem ZWEITEN Kern (anders geht es nicht: auf
+#      einem Kern sind Maler und Ableser derselbe Faden und ein halbes
+#      Bild ist per Bauart unsichtbar -- und unter QEMU ist es auch
+#      nicht zu fotografieren, `screendump` liest atomar):
+#
+#          ohne alles        20 453 Risse
+#          nur sammeln       20 041 Risse
+#          + Seitenwechsel        0 Risse
+#
+#      Dazu die Bildzeit (unter 16 ms auf 1280x800 und 1920x1080), die
+#      Bewegung samt Gegenprobe `noanim` (die denselben Endzustand
+#      erreichen MUSS, nur ohne Zwischenbilder) und der Nachweis, dass
+#      die Sparsamkeit der Runde UHRWERK unveraendert geblieben ist.
+lauf "48. die Bildgrenze und die Fensterbewegung (tools/vsync/run.sh, Runde VSYNC)" \
+     tools/vsync/run.sh vsync '^VSYNC: |^    ok  |^    NICHT |^        '
+
+lauf "49. der Puffer, der bei knappem Speicher schweigt -- und der Aufrufer, der darueber hinausschreibt (tools/haertung/run.sh, Runde HAERTUNG-2)" \
+     tools/haertung/run.sh haertung '^HAERTUNG: |^  OK    |^  FEHL  |^     fall='
+# ABSCHNITT 47 -- RUNDE WLAN/WLAN-2. (MERGE-8: der Zweig nannte ihn 42;
+# die 42 gehoert seit MERGE-7 dem Zeichenweg (GLYPHE), 46 seit dieser
+# Runde dem Mischer (TON-2). Also 47.) Der einzige Abschnitt dieser Abnahme, der
+# KEIN QEMU startet, und der einzige, der dafuer eine gemessene
+# Begruendung mitbringt: `qemu-system-x86_64 -device help` kennt NULL
+# 802.11-Geraete. Es gibt keinen Weg, eine WLAN-Karte zu emulieren, und
+# damit keinen Weg, in QEMU einen einzigen WLAN-Rahmen zu erzeugen.
+#
+# Gemessen wird deshalb auf dem WIRT, gegen dieselben Firn-Dateien, die
+# der Kern binden wird (`tools/wlan/orakel.fi` bindet `lib/crypto/` und
+# `lib/wlan/`) -- dasselbe Werkzeug, das die Runden TUNNEL und UPDATE
+# fuer Ed25519 gebaut haben.
+#
+# Drei Arten von Vergleich, und die dritte ist die, auf die es ankommt:
+# gegen die Normen (FIPS 197, RFC 3394, RFC 4493, RFC 6070, IEEE 802.11i
+# und 802.11-2012 M.6.4/M.9.2), gegen OpenSSL, und gegen eine ECHTE
+# AUFZEICHNUNG eines echten WPA2-Netzes -- aus dem Passwort `Induction`
+# und dem Namen `Coherer` wird ein PMK, daraus mit den Zufallszahlen des
+# echten Handschlags ein PTK, dessen KCK die Pruefwerte nachrechnet, die
+# damals wirklich auf dem Draht standen, und dessen TK die echten
+# verschluesselten Rahmen aufmacht.
+#
+# Dazu ein Fuzz-Lauf ueber Zehntausende verstuemmelte Rahmen UNTER
+# VALGRIND: ein Beacon kommt von einem Fremden, ist von niemandem
+# beglaubigt und trifft den Kernel, bevor es einen Schluessel gibt.
+#
+# WAS DIESER ABSCHNITT AUSDRUECKLICH NICHT ZEIGT: dass Osum sich mit
+# einem WLAN verbindet. Es gibt keinen Treiber, und es wird auf diesem
+# Rechner auch keinen geben. `docs/WLAN-BEFUND.md` sagt, warum, was das
+# kostet und wie weit der Weg damit ist.
+lauf "47. WLAN ohne eine einzige Karte: 802.11, WPA2/WPA3 und CCMP gegen die Normen und gegen eine echte Aufzeichnung (tools/wlan/run.sh, Runde WLAN)" \
+     tools/wlan/run.sh wlan '^WLAN: |^WLAN-FUZZ: |^== |^  OK    (QEMU |tools/wlan/orakel|das Orakel lehnt|die Aufzeichnung liegt|SHA-1 gegen|HMAC-SHA1 gegen|PRF-SHA1, IEEE|PBKDF2-SHA1, RFC|PMK aus|AES gegen OpenSSL|AES-CMAC, RFC|Key Wrap, RFC|AES-CCM|IEEE Std 802\.11|Beacon 1|die Ketten|EAPOL-Rahmen|PTK aus dem echten|Pruefwert von Nachricht|Gruppenschluessel aus|DIE GANZE KETTE|mit einem TK|ueber ALLE|die richtige Folge|und hat den Schluessel|alle [0-9]+ Verstuemmelungen|Nachricht 3 zweimal|ERSCHOEPFEND|der Fehlerzustand|alle [0-9]+ Abschnitte|ein RSN-Element|EAPOL: alle|[0-9]+ verstuemmelte Rahmen|jede der [0-9]+|von den [0-9]+|valgrind ueber|keine WLAN-PCI|SAE ist NICHT|TKIP und WEP|die Runde in Zeilen|PTK mit KDF-SHA256|beide Seiten)'
+# ABSCHNITT 43 -- RUNDE WLAN-2. Der Abschnitt, der die zwei ehrlichsten
+# Saetze aus docs/WLAN-BEFUND.md einloest:
+#
+#     S2 -- Der 4-Wege-Handschlag ist gegen sich selbst und gegen die
+#     Normvektoren der Primitiven gemessen, NICHT gegen einen echten
+#     Zugangspunkt.
+#     S4 -- Nichts davon ist gegen einen boesartigen Zugangspunkt
+#     gemessen.
+#
+# Beides ist jetzt gemessen. Osums Supplicant tritt gegen
+# `tools/wlan/gegenstelle.py` an -- einen vollstaendigen
+# WPA2-Authenticator, der mit Osum keine Zeile teilt, unter sich
+# OpenSSL statt lib/crypto/ benutzt und bei JEDEM Lauf neue
+# Zufallszahlen wuerfelt. Vorher eicht er sich an der echten
+# Aufzeichnung von 2007 (Coherer/Induction), damit der Massstab selbst
+# einen Massstab hat.
+#
+# Warum nicht hostapd: gemessen und im Kopf von gegenstelle.py
+# festgehalten. Debian baut hostapd ohne CONFIG_TESTING_OPTIONS
+# (EAPOL_RX -> 'Unknown command'), driver=wired ist auf 802.1X
+# verdrahtet und ruehrt die WPA-PSK-Maschine nicht an, und
+# mac80211_hwsim gibt es auf diesem Kern nicht.
+#
+# Dazu die Naht zum Blech (lib/wlan/geraet.fi) und -- nach Justins
+# Zwischenruf, dass in seinem Rechner ein USB-STICK und keine
+# PCIe-Karte steckt -- die Tabelle, die einen Stick an seiner
+# USB-Nummer BENENNT, damit die Zeile am echten Blech fotografierbar
+# ist. Sie bindet keinen Treiber; das waere eine Behauptung.
+lauf "50. WLAN gegen ein ZWEITES Programm: 4-Wege-Handschlag gegen einen unabhaengigen Authenticator, die Naht zum Blech, der USB-Stick beim Namen (tools/wlan/run2.sh, Runde WLAN-2)" \
+     tools/wlan/run2.sh wlan2 '^WLAN2: |^== |^  OK    (tools/wlan/orakel|die Gegenstelle|PMK aus|Pruefwert von|Schluesseldaten von|[0-9]+ vollstaendige|in jedem Lauf|Nachricht 3 mit|Schluesseldaten OHNE|Automat: |die Naht|ein Geraet OHNE|alle [0-9]+ USB|kernel/usb\.fi|SAE ist NICHT|kein USB-WLAN|die neuen Dateien)'
 
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.

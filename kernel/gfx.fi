@@ -67,7 +67,7 @@ export {
     // Die vier Tueren zu der Datei, der die Oberflaeche gehoert.
     stage_graphics, stage_surface, stage_hold,
     mouse_adopt, mouse_packet, mouse_irq, mouse_x, mouse_y, mouse_buttons,
-    mouse_packets, mouse_clicks, wm_poll,
+    mouse_packets, mouse_clicks, wm_poll, mouse_now,
     // RUNDE MODUL: vier Tueren mehr, damit der Kern MESSEN kann, ob es
     // ein Zeigegeraet ueberhaupt gibt. Ohne sie kaeme `kmain.fi` an
     // `ps2m.present` nur vorbei, indem es die Naht umgeht.
@@ -76,13 +76,32 @@ export {
     // GUI-lose Kern ebenfalls ruft -- die Bestaetigungsfrist in der
     // Leerlaufaufgabe und der gespeicherte Modus beim Start.
     disp_poll, disp_restore,
+    // RUNDE HAENGER: die Tuer, durch die der ZEITGEBER die
+    // Messtafel malen laesst -- ohne Ring 3, ohne Hauptschleife.
+    tafel_tick, herz_tick, absturz, panikbild,
     // Die vier Aufrufbereiche der Oberflaeche und die acht Griffe,
     // die /dev/fb braucht.
-    sys_wm, sys_wig, sys_disp, sys_tile,
+    sys_wm, sys_wig, sys_disp, sys_tile, sys_shot, sys_tipp,
     fb_ready, fb_bytes, fb_pitch, fb_block, fb_offset, fb_user_base,
     fb_write_bytes, fb_read_bytes,
+    // RUNDE GLYPHE: die drei Tueren des Zeichen-Nachweises.
+    grace_bereit, grace_soll, grace_core, grace_kalt,
+    // RUNDE VSYNC: der Ableser der Zerreissprobe.
+    leser_tick,
     // RUNDE MERGE-2: die vier Zahlen der Hardware-Diagnose.
-    fb_bpp, fb_phys, fb_cols, fb_rows, fb_from_multiboot
+    fb_bpp, fb_phys, fb_cols, fb_rows, fb_from_multiboot,
+    // RUNDE GRAFIK-1. Sieben Tueren mehr, alle NUR LESEND, damit
+    // `grafik.fi` den Anzeigeweg beschreiben kann, ohne `fb.fi`
+    // einzubinden -- der Bericht muss auch im GUI-losen Bau
+    // uebersetzen, und dort gibt es `fb.fi` nicht.
+    fb_panel_w, fb_panel_h, fb_panel_pitch,
+    fb_stripe, fb_uncached, fb_double_buffered, fb_uiscale, fb_presents,
+    // RUNDE GRAFIK-1: wohin gezeichnet wird. Der Rasterer malt
+    // dorthin, wohin auch `fb` malt -- in den Zweitpuffer, wenn es
+    // einen gibt. Dann traegt `flush` das Bild hinaus, und der
+    // Rasterer muss von Fensterplaetzen und Streifenbetrieb nichts
+    // wissen.
+    fb_draw_at, fb_back
 }
 
 // --------------------------------------------------------- der Schirm
@@ -145,6 +164,8 @@ fn wm_term_out(state: u64, i: u64, c: u64) {
 fn parse(state: u64, cmd: u64) {
     fb.parse(state, cmd)
     vmode.parse(state, cmd)
+    // RUNDE BLECH2: `mausflut=<hz>`, der synthetische Zeigerstrom.
+    kgui.parse(state, cmd)
 }
 
 // ------------------------------------------- die Oberflaeche beim Start
@@ -159,6 +180,35 @@ fn stage_graphics(state: u64, mbi: u64) {
 
 fn stage_surface(state: u64) {
     kgui.stage_surface(state)
+}
+
+// ================================================== RUNDE GLYPHE
+// Der Nachweis wohnt in `wig.fi`, gefahren wird er aus
+// `smp.stage` -- und `smp.fi` darf `wig` nicht kennen: im
+// Serverbau (`--gui off`) gibt es die Datei nicht. Also durch
+// diese Naht, wie alles andere auch.
+// RUNDE VSYNC: der Ableser, durchgereicht an den Fensterserver. Er
+// steht hier und nicht in `smp.fi`, weil `smp.fi` IMMER gebaut wird --
+// auch als Serverbetriebssystem ohne Oberflaeche (`gui=off`), wo es
+// `wm.fi` gar nicht gibt. Diese Naht ist genau dafuer da.
+fn leser_tick(state: u64) {
+    kgui.leser_tick(state)
+}
+
+fn grace_bereit(state: u64) -> u64 {
+    return kgui.grace_bereit(state)
+}
+
+fn grace_soll(state: u64, index: u64) -> u64 {
+    return kgui.grace_soll(state, index)
+}
+
+fn grace_core(state: u64, index: u64, runden: u64, soll: u64) -> u64 {
+    return kgui.grace_core(state, index, runden, soll)
+}
+
+fn grace_kalt(state: u64) {
+    kgui.grace_kalt(state)
 }
 
 fn stage_hold(state: u64) {
@@ -193,6 +243,22 @@ fn wm_poll(state: u64) -> bool {
     return wm.poll(state)
 }
 
+// ====================================================== RUNDE BLECH2
+// EIN BERICHT, EIN BLICK DES FENSTERSERVERS. `usb.poll` holt ALLE
+// liegenden Berichte auf einmal ab; bis hierher sah der Fensterserver
+// danach EINMAL nach (`wm.poll`) und fand den Zustand am Ende der
+// Reihe. Zwei Berichte "Taste unten" und "Taste oben" in derselben
+// Runde -- ein Klick waehrend eines langen Anstrichs -- waren damit
+// NIE gedrueckt. Fuer PS/2 stand die Regel schon in `wm.poll` ("nach
+// jedem vollstaendigen Paket"), fuer USB fehlte sie. `hidin.maus_melden`
+// ruft das hier nach jedem Bericht.
+fn mouse_now(state: u64) {
+    if ps2m.changed(state) {
+        let _c: bool = ps2m.take_change(state)
+        wm.on_mouse(state)
+    }
+}
+
 // RUNDE CUSTOMRES: die Bestaetigungsfrist laeuft in der
 // Leerlaufaufgabe ab (`tasks.idle`). `tasks.fi` ist Kern und darf
 // `vmode.` nicht sehen -- also geht der Ruf durch diese Tuer.
@@ -205,6 +271,40 @@ fn disp_poll(state: u64) -> bool {
 // haengt an `vmode` -- also ebenfalls durch die Naht.
 fn disp_restore(state: u64) {
     dispsave.anwenden(state)
+}
+
+// RUNDE HAENGER: AUS DEM ZEITGEBERBEHANDLER. Die Messtafel darf
+// an nichts haengen, was haengen kann -- also weder an einem
+// Ring-3-Programm noch an der Schreibtischschleife. `trap.fi`
+// ruft das bei jedem Zeitgeberschlag; `kgui` entscheidet selbst,
+// wie oft wirklich gemalt wird (zehnmal je Sekunde).
+fn tafel_tick(state: u64) {
+    kgui.tafel_tick(state)
+}
+
+// RUNDE BLECHFUENF: die Absturzanzeige. `trap.report` darf `kgui` nicht
+// selbst einbinden (kgui bindet `trap` ein), also geht es wie alles
+// andere durch diese Tuer.
+fn absturz(state: u64, vec: u64, err: u64, rip: u64, cr2: u64, rsp: u64,
+    cs: u64, kern: u64, spur: u64, spurn: u64, gestoppt: u64) {
+    kgui.absturz(state, vec, err, rip, cr2, rsp, cs, kern, spur, spurn,
+        gestoppt)
+}
+
+// RUNDE PROTOKOLL: der GANZE Schirm. Warum das die einzige Stelle im
+// Kern ist, an der ohne `wlib` gemalt wird, steht in `kgui.panikbild`.
+fn panikbild(state: u64, vec: u64, err: u64, rip: u64, cr2: u64,
+    rsp: u64, cs: u64, flg: u64, ss: u64, kern: u64, regs: u64,
+    spur: u64, spurn: u64, datei: u64) {
+    kgui.panikbild(state, vec, err, rip, cr2, rsp, cs, flg, ss, kern,
+        regs, spur, spurn, datei)
+}
+
+// RUNDE BLECHEINGABE: der Herzschlag. Steht ganz vorne im
+// Zeitgeberbehandler, damit er auch dann noch schlaegt, wenn alles
+// dahinter haengt.
+fn herz_tick(state: u64) {
+    kgui.herz_tick(state)
 }
 
 fn mouse_x(state: u64) -> u64 {
@@ -252,6 +352,20 @@ fn sys_disp(state: u64, me: u64, number: u64, a0: u64, a1: u64,
 
 fn sys_tile(state: u64, me: u64, number: u64, a0: u64, a1: u64) -> u64 {
     return sysgui.tile_call(state, me, number, a0, a1)
+}
+
+// RUNDE FEEDBACK (ueber BRIDGE-2): das Bildschirmfoto. Wie die vier
+// darueber nur eine Tuer -- die Sache selbst steht in `sysgui.fi`, weil
+// sie den Fensterserver braucht.
+fn sys_shot(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
+    return sysgui.shot_call(state, me, what, a1, a2)
+}
+
+// RUNDE BRUECKE: die eingespeiste Eingabe. Dieselbe Weiterleitung wie
+// beim Bildschirmfoto -- die Pruefungen stehen in `sysgui.tipp_call`,
+// damit sie neben denen des Fotos liegen und nicht woanders.
+fn sys_tipp(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
+    return sysgui.tipp_call(state, me, what, a1, a2)
 }
 
 // ----------------------------------------------------------- /dev/fb
@@ -344,4 +458,65 @@ fn mouse_moves(state: u64) -> u64 {
 
 fn mouse_id(state: u64) -> u64 {
     return ps2m.id(state)
+}
+
+// ================================================== RUNDE GRAFIK-1
+//
+// DIE SIEBEN LESENDEN TUEREN FUER DIE GRAFIK-ERHEBUNG.
+//
+// `grafik.fi` beschreibt den Weg vom gezeichneten Bild bis zur Tafel.
+// Dafuer braucht es Zahlen, die `fb.fi` ueber sich selbst fuehrt --
+// und es darf `fb.fi` NICHT einbinden, denn der Bericht soll auch im
+// Bau mit `--gui off` uebersetzen, wo es `fb.fi` gar nicht gibt. Also
+// gehen diese Zahlen durch dieselbe Naht wie alles andere.
+//
+// Alle sieben sind Abfragen. Keine setzt etwas -- ein Bericht, der
+// etwas veraendert, beschreibt nicht mehr den Zustand, den er
+// beschreiben soll.
+
+// DIE TAFEL: was die Karte wirklich ausgibt. Weicht sie vom Bild ab,
+// laeuft `present` und ZIEHT -- und feine Einzelheiten wie eine drei
+// Bildpunkte grosse Rundung ueberleben das nicht.
+fn fb_panel_w(state: u64) -> u64 {
+    return fb.panel_w(state)
+}
+
+fn fb_panel_h(state: u64) -> u64 {
+    return fb.panel_h(state)
+}
+
+fn fb_panel_pitch(state: u64) -> u64 {
+    return fb.panel_pitch(state)
+}
+
+// Passt der Puffer nicht am Stueck ins Fenster, wird er in Scheiben
+// durch EINEN Platz geschoben (Runde SCHIRM).
+fn fb_stripe(state: u64) -> bool {
+    return fb.stripe(state)
+}
+
+fn fb_uncached(state: u64) -> bool {
+    return fb.uncached(state)
+}
+
+fn fb_double_buffered(state: u64) -> bool {
+    return fb.double_buffered(state)
+}
+
+fn fb_uiscale(state: u64) -> u64 {
+    return fb.uiscale(state)
+}
+
+// Wie oft der lange Weg (`present`) wirklich gegangen wurde. Null
+// heisst: es wurde nur kopiert, nie umgerechnet.
+fn fb_presents(state: u64) -> u64 {
+    return fb.presents(state)
+}
+
+fn fb_draw_at(state: u64) -> u64 {
+    return fb.draw_at(state)
+}
+
+fn fb_back(state: u64) -> u64 {
+    return fb.back(state)
 }

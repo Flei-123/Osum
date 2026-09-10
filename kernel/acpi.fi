@@ -36,7 +36,9 @@ import serial
 import kstate
 
 export { find, cpus, ioapic_addr, lapic_addr, revision, oem, valid, table,
-    table_count, table_at }
+    table_count, table_at,
+    // RUNDE BLECHVIER: ab dem ersten Prozess nur noch das erste Gibioctet.
+    nur_erstes_gib }
 
 // ------------------------------------------------------ the search area
 
@@ -45,6 +47,12 @@ const BIOS_LOW: u64 = 0x000E0000
 const BIOS_HIGH: u64 = 0x00100000
 
 // Offsets in the RSDP.
+// GEMESSEN UND KORRIGIERT: der Suchlauf hoerte zuerst bei einem
+// Gibioctet auf. OVMF legt die ACPI-Tabellen aber ans OBERE Ende des
+// unteren Speichers -- bei 2 GiB RAM um 0x7F000000 herum. Wie weit
+// dieser Kern wirklich abbildet, steht in `kstate.MAPPED_GIB`.
+const GIB: u64 = 0x40000000
+
 const P_REVISION: u64 = 15
 const P_RSDT: u64 = 16
 const P_LENGTH: u64 = 20
@@ -125,7 +133,12 @@ fn scan_for(from: u64, to: u64, want: u64) -> u64 {
     return 0
 }
 
-fn find_rsdp() -> u64 {
+// GEMESSEN UND KORRIGIERT: die erste Fassung holte den
+// Multiboot-Zeiger mit `kstate.get(0, MBI)` -- also aus der absoluten
+// Adresse 768 statt aus dem Datenbereich. Am fertigen Abbild stand
+// danach weiter "acpi=0". Der Zustandszeiger muss durchgereicht werden.
+fn find_rsdp(state: u64) -> u64 {
+    grenze_setzen(state)
     var want: [u8; 9] = "RSD PTR \0"
     let w: u64 = (&want[0]) as u64
     // The EBDA. Its segment stands in the BIOS data area as a paragraph
@@ -138,17 +151,198 @@ fn find_rsdp() -> u64 {
             return hit
         }
     }
-    return scan_for(BIOS_LOW, BIOS_HIGH, w)
+    let alt: u64 = scan_for(BIOS_LOW, BIOS_HIGH, w)
+    if alt != 0 {
+        return alt
+    }
+    // ================================================ RUNDE BLECHVIER
+    // ============ UNTER UEFI LIEGT DER RSDP WOANDERS.
+    //
+    // GEMESSEN, nicht vermutet: derselbe Kern meldet mit SeaBIOS
+    // (`qemu -kernel`) "smp: cpus=1 acpi=1" und ueber den Lader mit
+    // OVMF "acpi=0". Der Grund steht drei Zeilen weiter oben -- gesucht
+    // wird in der EBDA und zwischen 0xE0000 und 0x100000, und das sind
+    // die Orte, an denen ein PC-BIOS den Zeiger hinterlaesst. Eine
+    // UEFI-Firmware tut das NICHT: sie reicht ihn ueber die
+    // EFI-Konfigurationstabelle weiter und legt die Tabellen selbst in
+    // Speicher vom Typ "ACPI reclaim".
+    //
+    // JUSTINS BRETT STARTET UEFI VOM STICK. Dieser Kern hat dort also
+    // noch NIE eine ACPI-Tabelle gesehen: keine MADT (und damit keine
+    // Prozessorliste), keine FADT (und damit keine Abschaltung der
+    // GPE-Bits), keine IVRS. Das ist keine Kleinigkeit -- es ist der
+    // Grund, warum drei Diagnosen dieser Runde auf seinem Rechner leer
+    // geblieben waeren.
+    //
+    // Der Multiboot-Lader gibt uns die Speicherkarte, und darin ist
+    // Typ 3 GENAU der ACPI-Reclaim-Speicher. Dort wird gesucht, und nur
+    // dort -- ein Suchlauf ueber das ganze Gigabyte wuerde auch
+    // Registerfenster anfassen.
+    return rsdp_aus_karte(state, w)
+}
+
+// Der RSDP steht auf einer 16-Oktett-Grenze. Gesucht wird in den
+// Bereichen der Speicherkarte, die die Firmware als ACPI-Speicher
+// ausgewiesen hat (Typ 3 = reclaim, Typ 4 = NVS) -- und nur unterhalb
+// des abgebildeten Gigabytes, weil dieser Kern nicht mehr sieht.
+const MB_FLAGS: u64 = 0
+const MB_MMAP_LEN: u64 = 44
+const MB_MMAP_ADDR: u64 = 48
+
+fn rsdp_aus_karte(state: u64, w: u64) -> u64 {
+    let mbi: u64 = kstate.get(state, kstate.MBI)
+    if mbi == 0 {
+        return 0
+    }
+    if (kstate.get32(mbi + MB_FLAGS) & 64) == 0 {
+        return 0
+    }
+    let len: u64 = kstate.get32(mbi + MB_MMAP_LEN)
+    let addr: u64 = kstate.get32(mbi + MB_MMAP_ADDR)
+    // GEMESSEN UND KORRIGIERT (zum zweiten Mal, und diesmal war es der
+    // Suchlauf selbst): hier stand `MAPPED_GIB * GIB`. Damit durchsuchte
+    // der Kern auch dann noch 1,6 Gibioctete, wenn er laengst in einem
+    // Prozessadressraum stand, in dem nur das erste abgebildet ist --
+    // `cr2=0x5fb6c000`, sechzehnfach ausgerichtet, also genau ein
+    // Schritt von `scan_for`. Es gilt DIESELBE Grenze wie fuer die
+    // Tabellen; `grenze_setzen` hat sie oben schon gestellt.
+    var grenze: u64 = acpi_grenze
+    if grenze == 0 {
+        grenze = GIB
+    }
+    var p: u64 = addr
+    while p < addr + len {
+        let size: u64 = kstate.get32(p)
+        let base: u64 = __mmio_read64((p + 4) as *mut u64)
+        let laenge: u64 = __mmio_read64((p + 12) as *mut u64)
+        let art: u64 = kstate.get32(p + 20)
+        if (art == 3 || art == 4) && base < grenze && laenge != 0 {
+            var ende: u64 = base + laenge
+            if ende > grenze {
+                ende = grenze
+            }
+            let treffer: u64 = scan_for(base, ende, w)
+            if treffer != 0 {
+                return treffer
+            }
+        }
+        if size == 0 {
+            p = addr + len
+        } else {
+            p = p + size + 4
+        }
+    }
+    return 0
 }
 
 // ---------------------------------------------- step 2 and 3: the tables
+
+// ================================================== RUNDE BLECHVIER
+// KEINE TABELLE ANFASSEN, DIE AUSSERHALB DES ABGEBILDETEN LIEGT.
+//
+// GEMESSEN, und es hat einen Kern angehalten: sobald der RSDP unter
+// UEFI wirklich gefunden wurde, ging `batt.fi` ueber ALLE Tabellen
+// (`table_count`/`table_at`) und `header_ok` rechnete die Pruefsumme
+// ueber jede von ihnen. Eine davon lag ausserhalb des abgebildeten
+// Speichers, und der Kern blieb mit
+//
+//     *** EXCEPTION 14 #PF err=0x0 cr2=0x5fb7d00f  rip in kstate.get8
+//
+// stehen -- unmittelbar nach `desk: start`. Vorher fiel es nie auf,
+// weil ohne RSDP gar keine Tabelle angefasst wurde.
+//
+// Das ist genau die Auflage dieser Runde: JEDE Schleife ueber fremde
+// Daten bekommt eine Grenze. Die Grenze ist, wie weit dieser Kern
+// wirklich abbildet.
+static mut acpi_grenze: u64 = 0
+static mut acpi_eng: u64 = 0
+
+// ================================================== RUNDE BLECHVIER
+// UND WARUM DIE GRENZE SPAETER ENGER WIRD ALS BEIM START.
+//
+// GEMESSEN, mit einem angehaltenen Kern und dann im Quelltext belegt:
+// `proc.fi:264` gibt einem Prozess GENAU EINEN Eintrag des
+// Kernel-PDPT mit -- den ersten. Eintrag 1 desselben PDPT ist die
+// Flaeche des Prozesses selbst. In Prozesskontext ist der
+// Kernelspeicher oberhalb des ERSTEN Gibioctets also gar nicht
+// abgebildet, und das ist keine Nachlaessigkeit, sondern die
+// Aufteilung dieses Adressraums.
+//
+// OVMF legt die ACPI-Tabellen ans obere Ende des unteren Speichers --
+// bei 2 GiB RAM um 0x7E000000. Solange nur `smp` und `hw.blech_stage`
+// sie lesen (beide im Kernelkontext, vor dem ersten Prozess), geht das
+// gut. `batt.fi` geht sie SPAETER noch einmal durch, aus der
+// Schreibtischschleife heraus -- und da faellt der Kern mit
+//
+//     *** EXCEPTION 14 #PF err=0x0 cr2=0x5fb7d00f
+//
+// unmittelbar nach `desk: start`. Genau so ist es passiert.
+//
+// Also: beim Start die volle abgebildete Weite, ab dem ersten Prozess
+// nur noch das erste Gibioctet. Eine Tabelle darueber wird dann nicht
+// mehr angefasst -- lieber keine Auskunft als ein toter Kern.
+//
+// DIE RICHTIGE LOESUNG waere, die Tabellen beim Start in den unteren
+// Speicher zu kopieren und danach nur noch mit den Kopien zu arbeiten.
+// Das ist eine eigene Runde und steht in docs/RUNDE-BLECHVIER.md.
+fn nur_erstes_gib() {
+    acpi_eng = 1
+    acpi_grenze = GIB
+}
+
+fn grenze_setzen(state: u64) {
+    if acpi_eng != 0 {
+        acpi_grenze = GIB
+        return
+    }
+    let g: u64 = kstate.get(state, kstate.MAPPED_GIB) *% GIB
+    if g != 0 {
+        acpi_grenze = g
+    }
+}
+
+// DER ZEIGER SELBST IST DAS ERSTE, WAS ANGEFASST WIRD.
+//
+// GEMESSEN UND KORRIGIERT, und die Adresse hat es bewiesen: der Kern
+// blieb bei `cr2=0x5fb7d00f` stehen, und 0x0F ist GENAU `P_REVISION`.
+// Es war also nicht eine Tabelle, sondern der GEMERKTE RSDP selbst --
+// gefunden beim Start mit der weiten Grenze, im ACPI-Speicher bei
+// 1,6 GiB, und danach aus Prozesskontext wieder angefasst, wo dieses
+// Gibioctet nicht mehr abgebildet ist. Ein Zeiger, der gestern gueltig
+// war, ist es in einem anderen Adressraum nicht.
+fn rsdp_ok(state: u64) -> u64 {
+    let p: u64 = sget(state, S_RSDP)
+    if p == 0 || !erreichbar(p, 36) {
+        return 0
+    }
+    return p
+}
+
+fn erreichbar(p: u64, n: u64) -> bool {
+    if p < 0x1000 {
+        return false
+    }
+    if acpi_grenze == 0 {
+        return true
+    }
+    if p >= acpi_grenze {
+        return false
+    }
+    return p + n <= acpi_grenze
+}
 
 fn header_ok(p: u64) -> bool {
     if p == 0 {
         return false
     }
+    if !erreichbar(p, H_SIZE) {
+        return false
+    }
     let len: u64 = kstate.get32(p + H_LENGTH)
     if len < H_SIZE || len > 0x100000 {
+        return false
+    }
+    if !erreichbar(p, len) {
         return false
     }
     return sum_zero(p, len)
@@ -184,15 +378,16 @@ fn table_in(root: u64, width: u64, want: u64) -> u64 {
 // Also wird derselbe Weg noch einmal gegangen -- vier Oktette Kennung
 // herein, ein Zeiger heraus, 0 = nicht da.
 fn table(state: u64, want: u64) -> u64 {
+    grenze_setzen(state)
     // RUNDE K13: WENN `find` NOCH NICHT GELAUFEN IST, wird der Zeiger
     // hier selbst gesucht. Das ist kein Luxus, sondern gemessen: die
     // Abschaltung durch `init` faellt in `kmain.osum`, und `acpi.find`
     // laeuft erst danach in `smp.stage`. Ohne diese vier Zeilen meldete
     // `power.acpi_off` "keine FADT" und die Maschine blieb an.
-    var rsdp: u64 = sget(state, S_RSDP)
+    var rsdp: u64 = rsdp_ok(state)
     if rsdp == 0 {
-        rsdp = find_rsdp()
-        if rsdp == 0 {
+        rsdp = find_rsdp(state)
+        if rsdp == 0 || !erreichbar(rsdp, 36) {
             return 0
         }
         sset(state, S_RSDP, rsdp)
@@ -219,7 +414,7 @@ fn table(state: u64, want: u64) -> u64 {
 // for a machine without ACPI.
 fn find(state: u64) -> u64 {
     var w_apic: [u8; 5] = "APIC\0"
-    let rsdp: u64 = find_rsdp()
+    let rsdp: u64 = find_rsdp(state)
     sset(state, S_VALID, 0)
     if rsdp == 0 {
         return 0
@@ -359,10 +554,11 @@ fn oem(state: u64) -> u64 {
 const F_DSDT_OFF: u64 = 40
 
 fn root_of(state: u64, out_width: u64) -> u64 {
-    var rsdp: u64 = sget(state, S_RSDP)
+    grenze_setzen(state)
+    var rsdp: u64 = rsdp_ok(state)
     if rsdp == 0 {
-        rsdp = find_rsdp()
-        if rsdp == 0 {
+        rsdp = find_rsdp(state)
+        if rsdp == 0 || !erreichbar(rsdp, 36) {
             return 0
         }
         sset(state, S_RSDP, rsdp)
