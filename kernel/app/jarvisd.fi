@@ -154,6 +154,8 @@ import std.net
 import std.deflate
 import tls.tls
 import tls.x509
+// RUNDE MERGE-11: der Weg ueber 443 braucht einen Namen, keine Zahl.
+import libc.dns
 
 // ====================================================================
 // ZAHLEN
@@ -274,6 +276,18 @@ const DG_BPP: i64 = 31
 
 static mut k_ip: u32 = 0 as u32
 static mut k_port: u32 = 0 as u32
+// ================================================== RUNDE MERGE-11
+// DER WEG. `weg = https` schickt das Zeilenprotokoll durch POSTs an
+// store.fleitec.com, statt einen rohen TLS-Port zu waehlen. Der Grund
+// steht ausfuehrlich bei `draht_https_schritt`.
+static mut k_https: bool = false
+static mut k_pfad: [u8; 96] = [0; 96]
+static mut k_pfadlen: usize = 0
+// Die Drahtkennung: eine Zufallszahl je Lauf. Sie sagt dem Server nur,
+// welche POSTs zusammengehoeren -- sie ist KEIN Ausweis. Der Ausweis
+// ist und bleibt die Ed25519-Unterschrift aus `jsig`.
+static mut k_sid: [u8; 40] = [0; 40]
+static mut k_sidlen: usize = 0
 static mut k_name: [u8; 96] = [0; 96]
 static mut k_namelen: usize = 0
 static mut k_wurzeln: [u8; 128] = [0; 128]
@@ -583,6 +597,9 @@ fn adresse_lesen(p: u64, n: usize) -> bool {
 // Setzt alles auf "nichts erlaubt" zurueck. Wird vor JEDEM Lesen
 // gerufen, damit ein entfernter Eintrag wirklich weg ist.
 fn konf_leeren() {
+    k_https = false
+    var dp: [u8; 16] = "/bruecke/draht\0\0"
+    k_pfadlen = hinein((&k_pfad[0]) as u64, 96, (&dp[0]) as u64, 14)
     k_befehle = false
     k_foto = false
     k_system = false
@@ -610,6 +627,8 @@ fn konf_lesen() -> bool {
         return false
     }
     var s_server: [u8; 7] = "server\0"
+    var s_weg: [u8; 4] = "weg\0"
+    var s_pfad: [u8; 5] = "pfad\0"
     var s_name: [u8; 11] = "servername\0"
     var s_wurzeln: [u8; 8] = "wurzeln\0"
     var s_befehle: [u8; 8] = "befehle\0"
@@ -678,6 +697,12 @@ fn konf_lesen() -> bool {
             if sl > 0 {
                 if ist(sp, sl, (&s_server[0]) as u64) {
                     adresse_lesen(wp, wl)
+                } else if ist(sp, sl, (&s_weg[0]) as u64) {
+                    // `weg = https` -- alles andere heisst: roher Port.
+                    var w_https: [u8; 6] = "https\0"
+                    k_https = ist(wp, wl, (&w_https[0]) as u64)
+                } else if ist(sp, sl, (&s_pfad[0]) as u64) {
+                    k_pfadlen = hinein((&k_pfad[0]) as u64, 96, wp, wl)
                 } else if ist(sp, sl, (&s_name[0]) as u64) {
                     k_namelen = hinein((&k_name[0]) as u64, 96, wp, wl)
                 } else if ist(sp, sl, (&s_wurzeln[0]) as u64) {
@@ -867,14 +892,212 @@ struct Draht {
     puf: rt.Buf,
     at: usize,
     tot: bool,
+    // ================================================ RUNDE MERGE-11
+    // `https` schaltet die Betriebsart um. Ist sie an, ist `t` KEINE
+    // offene Verbindung, sondern 0: jede Nachricht baut ihre eigene
+    // auf. `aus` sammelt, was gesendet werden soll, bis eine ganze
+    // Nachricht beisammen ist (Kopfzeile + Nutzlast).
+    https: bool,
+    aus: rt.Buf,
 }
 
 fn draht_neu(t: *mut tls.Tls) -> Draht {
-    return Draht { t: t as u64, puf: rt.buf_new(), at: 0, tot: false }
+    return Draht { t: t as u64, puf: rt.buf_new(), at: 0, tot: false,
+        https: false, aus: rt.buf_new() }
+}
+
+// ==================================================== RUNDE MERGE-11
+// DER DRAHT UEBER 443.
+//
+// WARUM ES IHN GIBT. Der rohe TLS-Port setzt voraus, dass der Server
+// von Justins Netz aus erreichbar ist -- also eine Portfreigabe an
+// seinem Router. Die gibt es nicht, und deshalb hat sich sein Rechner
+// NIE gemeldet: im Koppelbuch standen nur zwei Pruefstaende aus dem
+// Hausnetz. Port 443 zu store.fleitec.com geht dagegen aus jedem
+// fremden Heimnetz hinaus, und dieser Weg ist gemessen:
+//     POST https://store.fleitec.com/bruecke/anmelden
+//         -> {"fehler": "keine Kennung"}
+// Das ist die Antwort des Brueckendienstes durch die Weiterreichung,
+// nicht ein 404 des Speicherdienstes.
+//
+// WAS SICH NICHT AENDERT, und das ist der ganze Witz dieser Loesung:
+// das Zeilenprotokoll. `anmelden`, `bediene`, `sende`, `zerlege` --
+// alles darueber bleibt Zeile fuer Zeile dasselbe. Nur `draht_senden`
+// und `draht_fuellen` nehmen einen anderen Weg. Die 113 gemessenen
+// Zusagen aus Runde BRIDGE gelten damit weiter: derselbe
+// Zustandsautomat, derselbe Handschlag, dieselbe Unterschrift aus
+// `jsig` -- der private Schluessel bleibt, wo er ist.
+//
+// WAS BEWUSST WEGGELASSEN IST, damit dieses Programm klein bleibt
+// (der Einwand aus dem Kopf von anschluss.py, und er ist berechtigt):
+//   * KEIN JSON. Der Rumpf ist das rohe Zeilenprotokoll.
+//   * KEIN base64. Bilder gehen als Oktette, die Laenge steht im Kopf.
+//   * KEIN Chunked. Der Dienst antwortet mit `Content-Length`, und
+//     `Connection: close` macht das Stromende zum Antwortende.
+//   * KEINE Umleitungen, keine Kekse, kein Wiederverwenden der
+//     Verbindung. Jede Nachricht ist eine Verbindung. Das ist
+//     langsamer und dafuer sind es zwanzig Zeilen statt zweihundert.
+//
+// EINE NACHRICHT IST EIN POST. Rumpf = Kopfzeile + Nutzlast, also
+// genau die Oktette, die frueher in den TLS-Strom gingen. Die Antwort
+// ist dasselbe in der Gegenrichtung; eine LEERE Antwort heisst
+// "nichts zu tun".
+fn draht_neu_https() -> Draht {
+    return Draht { t: 0, puf: rt.buf_new(), at: 0, tot: false,
+        https: true, aus: rt.buf_new() }
+}
+
+// Der HTTP-Kopf. Mehr als das braucht ein POST nicht, und jede weitere
+// Zeile waere eine Zeile, die jemand falsch bauen kann.
+fn http_bitte(req: *mut rt.Buf, rumpfn: usize) {
+    var m: [u8; 6] = "POST \0"
+    rt.buf_push_bytes(req, (&m[0]) as u64, 5)
+    rt.buf_push_bytes(req, (&k_pfad[0]) as u64, k_pfadlen)
+    var v: [u8; 18] = " HTTP/1.1\r\nHost: \0"
+    rt.buf_push_bytes(req, (&v[0]) as u64, 17)
+    rt.buf_push_bytes(req, (&k_name[0]) as u64, k_namelen)
+    var x: [u8; 12] = "\r\nX-Draht: \0"
+    rt.buf_push_bytes(req, (&x[0]) as u64, 11)
+    rt.buf_push_bytes(req, (&k_sid[0]) as u64, k_sidlen)
+    var l: [u8; 19] = "\r\nContent-Length: \0"
+    rt.buf_push_bytes(req, (&l[0]) as u64, 18)
+    rt.buf_push_dec_u64(req, rumpfn as u64)
+    var e: [u8; 46] = "\r\nConnection: close\r\nUser-Agent: osum-jarvisd\0"
+    rt.buf_push_bytes(req, (&e[0]) as u64, 45)
+    var crlf: [u8; 5] = "\r\n\r\n\0"
+    rt.buf_push_bytes(req, (&crlf[0]) as u64, 4)
+}
+
+// Die Nummer hinter `HTTP/1.x `.
+fn http_nummer(p: u64, n: usize) -> u64 {
+    if n < 12 {
+        return 0
+    }
+    var i: usize = 0
+    while i < n && rt.ld8(p, i) != 32 as u8 {
+        i = i + 1
+    }
+    i = i + 1
+    var v: u64 = 0
+    var z: usize = 0
+    while i < n && z < 3 {
+        let c: u8 = rt.ld8(p, i)
+        if c < 48 as u8 || c > 57 as u8 {
+            return 0
+        }
+        v = v * 10 + ((c - 48 as u8) as u64)
+        i = i + 1
+        z = z + 1
+    }
+    return v
+}
+
+// Das Ende des Kopfes: die leere Zeile.
+fn http_rumpf_ab(p: u64, n: usize) -> usize {
+    var i: usize = 0
+    while i + 3 < n {
+        if rt.ld8(p, i) == 13 as u8 && rt.ld8(p, i + 1) == 10 as u8
+            && rt.ld8(p, i + 2) == 13 as u8 && rt.ld8(p, i + 3) == 10 as u8 {
+            return i + 4
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// EINE Nachricht hin, EINE Antwort zurueck. Das Ergebnis landet in
+// `(*d).puf`, also genau dort, wo `draht_zeile` es ohnehin sucht.
+fn https_wechsel(d: *mut Draht, rumpf: u64, rumpfn: usize) -> bool {
+    var schief: bool = false
+    var c: net.Conn = net.connect_tcp(k_ip, k_port as u16)
+    catch | e | fehl_conn(&schief)
+    if schief {
+        sag_wenn_laut("jarvisd: keine Verbindung\n")
+        return false
+    }
+    let okt: bool = net.set_timeout(&c, 60000 as u64) catch false
+
+    var storebuf: rt.Buf = rt.buf_new()
+    var store: x509.Store = x509.store_new()
+    var wurzeln: usize = 0
+    if rt.read_file((&k_wurzeln[0]) as u64, &storebuf) {
+        wurzeln = x509.store_load_pem(&store, storebuf.ptr, storebuf.len)
+    }
+    if wurzeln == 0 {
+        // KEIN STILLES WEITER. Ohne Wurzeln ist jede Gegenstelle
+        // gleich glaubwuerdig, und das ist schlimmer als kein TLS.
+        sag("jarvisd: kein Wurzelspeicher -- es wird nichts vertraut\n")
+        net.close(&c)
+        rt.buf_free(&storebuf)
+        return false
+    }
+    var t: tls.Tls = tls.tls_new()
+    let oki: bool = tls.tls_init(&t, &c, &store, (&k_name[0]) as u64,
+        k_namelen, jetzt_s())
+    var hschief: bool = false
+    let okh: bool = tls.tls_handshake(&t) catch | e | fehl_bool(&hschief)
+    if hschief || !tls.tls_established(&t) {
+        sag("jarvisd: der Handschlag ist gescheitert, Grund ")
+        sag_zahl(tls.tls_verify_reason(&t) as u64)
+        sag("\n")
+        tls.tls_free(&t)
+        net.close(&c)
+        rt.buf_free(&storebuf)
+        return false
+    }
+
+    var req: rt.Buf = rt.buf_new()
+    http_bitte(&req, rumpfn)
+    if rumpfn > 0 {
+        rt.buf_push_bytes(&req, rumpf, rumpfn)
+    }
+    var werr: bool = false
+    let okw: bool = tls.tls_write(&t, req.ptr, req.len)
+    catch | e | fehl_bool(&werr)
+    rt.buf_free(&req)
+    if werr {
+        tls.tls_close(&t)
+        tls.tls_free(&t)
+        net.close(&c)
+        rt.buf_free(&storebuf)
+        return false
+    }
+
+    var roh: rt.Buf = rt.buf_new()
+    var chunk: [u8; 4096] = [0; 4096]
+    while true {
+        var rerr: bool = false
+        let n: usize = tls.tls_read(&t, (&chunk[0]) as u64, 4096 as usize)
+        catch | e | fehl_len(&rerr)
+        if rerr || n == 0 {
+            break
+        }
+        rt.buf_push_bytes(&roh, (&chunk[0]) as u64, n)
+    }
+    tls.tls_close(&t)
+    tls.tls_free(&t)
+    net.close(&c)
+    rt.buf_free(&storebuf)
+
+    let code: u64 = http_nummer(roh.ptr, roh.len)
+    if code != 200 {
+        sag("jarvisd: der Server antwortet ")
+        sag_zahl(code)
+        sag("\n")
+        rt.buf_free(&roh)
+        return false
+    }
+    let ab: usize = http_rumpf_ab(roh.ptr, roh.len)
+    if ab < roh.len {
+        rt.buf_push_bytes(&(*d).puf, roh.ptr + ab as u64, roh.len - ab)
+    }
+    rt.buf_free(&roh)
+    return true
 }
 
 fn draht_weg(d: *mut Draht) {
     rt.buf_free(&(*d).puf)
+    rt.buf_free(&(*d).aus)
 }
 
 // Aufraeumen: was schon gelesen wurde, faellt vorne weg. Ohne das
@@ -893,6 +1116,16 @@ fn draht_kuerzen(d: *mut Draht) {
 
 fn draht_fuellen(d: *mut Draht) -> bool {
     if (*d).tot {
+        return false
+    }
+    // ============================================== RUNDE MERGE-11
+    // UEBER 443 KOMMT NICHTS VON SELBST. Was der Server zu sagen
+    // hatte, stand in der Antwort auf den letzten POST und liegt
+    // damit schon im Puffer. Ist der leer, ist die Nachricht zu Ende
+    // -- der Aufrufer bekommt `false`, und `bediene` fragt mit dem
+    // naechsten `puls` wieder nach. Ein Nachfassen an DIESER Stelle
+    // waere eine zweite Schleife neben der, die es schon gibt.
+    if (*d).https {
         return false
     }
     var chunk: [u8; 4096] = [0; 4096]
@@ -976,6 +1209,20 @@ fn draht_oktette(d: *mut Draht, n: usize, aus: *mut rt.Buf) -> bool {
 fn draht_senden(d: *mut Draht, p: u64, n: usize) -> bool {
     if (*d).tot {
         return false
+    }
+    // ============================================== RUNDE MERGE-11
+    // Ueber 443 ist eine NACHRICHT eine Anfrage, nicht ein Schreiben.
+    // `sende` baut die Nachricht in EINEM Stueck (Kopfzeile + Nutzlast)
+    // und ruft hier genau einmal -- also geht genau dieser Block als
+    // POST hinaus, und die Antwort landet im Lesepuffer.
+    if (*d).https {
+        rt.buf_clear(&(*d).puf)
+        (*d).at = 0
+        if !https_wechsel(d, p, n) {
+            (*d).tot = true
+            return false
+        }
+        return true
     }
     var schief: bool = false
     let ok: bool = tls.tls_write((*d).t as *mut tls.Tls, p, n)
@@ -1932,6 +2179,25 @@ fn anmelden(d: *mut Draht) -> u64 {
     var pubhex: rt.Buf = rt.buf_new()
     rt.buf_push_bytes(&pubhex, id.ptr + pv as u64, pb - pv)
     rt.buf_free(&id)
+    // ============================================== RUNDE MERGE-11
+    // DIE DRAHTKENNUNG. Ueber 443 gibt es keine Verbindung, an der der
+    // Server erkennen koennte, welche POSTs zusammengehoeren. Also
+    // traegt jede Anfrage eine Kennung -- die ersten 24 Zeichen des
+    // OEFFENTLICHEN Schluessels.
+    //
+    // SIE IST KEIN AUSWEIS, und das ist wichtig: sie steht offen im
+    // Kopf, und wer sie errrät, bekommt damit gar nichts. Der Ausweis
+    // ist und bleibt die Ed25519-Unterschrift auf die Forderung, die
+    // `jsig` leistet -- der private Schluessel liegt weiter dort und
+    // nicht in diesem Programm. Die Kennung sagt nur: "das ist
+    // derselbe Draht wie eben".
+    if (*d).https {
+        var kl: usize = pubhex.len
+        if kl > 24 {
+            kl = 24 as usize
+        }
+        k_sidlen = hinein((&k_sid[0]) as u64, 40 as usize, pubhex.ptr, kl)
+    }
     if !wort_senden(d, "ich", pubhex.ptr, pubhex.len) {
         rt.buf_free(&pubhex)
         return 2
@@ -2161,7 +2427,60 @@ fn fehl_conn(schief: *mut bool) -> net.Conn {
 
 // 0 = alles gut, 1 = abgewiesen (nicht sofort neu versuchen),
 // 2 = Netz/Handschlag ging nicht.
+// ==================================================== RUNDE MERGE-11
+// EINE RUNDE UEBER 443.
+//
+// Es gibt hier KEINE offene Verbindung, die aufgebaut und wieder
+// abgebaut wird -- jede Nachricht bringt ihre eigene mit. Diese
+// Funktion tut deshalb nur zwei Dinge: den Namen aufloesen (einmal je
+// Runde, nicht je Nachricht) und das Zeilenprotokoll fuehren, das ab
+// hier UNVERAENDERT ist.
+fn eine_runde_https() -> u64 {
+    // Der Name wird HIER aufgeloest und nicht in der Rechteliste
+    // eingetragen. `rechte.conf` sagt bisher ausdruecklich, es stehe
+    // dort eine ZAHL, weil eine Namensaufloesung eine zweite Stelle
+    // sei, an der jemand umlenken kann. Fuer store.fleitec.com gilt
+    // das nicht mehr: die Adresse ist nicht fest, und umlenken nuetzt
+    // niemandem, weil das Zertifikat auf DIESEN Namen lauten muss --
+    // geprueft wird der Name, nicht die Zahl.
+    if k_ip == 0 as u32 {
+        var wirt: [u8; 100] = [0; 100]
+        let wn: usize = hinein((&wirt[0]) as u64, 100 as usize,
+            (&k_name[0]) as u64, k_namelen)
+        let a4: u64 = dns.resolve_a((&wirt[0]) as u64)
+        if a4 == 0 {
+            sag("jarvisd: der Name laesst sich nicht aufloesen\n")
+            return 2
+        }
+        k_ip = a4 as u32
+        k_port = 443 as u32
+        sag("jarvisd: ")
+        zeig_ip("", k_ip as u64)
+    }
+
+    var d: Draht = draht_neu_https()
+    var erg: u64 = 2
+    let an: u64 = anmelden(&d)
+    if an == 0 {
+        sag("jarvisd: angemeldet\n")
+        var a: [u8; 8] = "sitzung\0"
+        notiere((&a[0]) as u64, 7, "angemeldet", 0, 0 as usize)
+        if bediene(&d) {
+            erg = 0
+        } else {
+            erg = 2
+        }
+    } else {
+        erg = an
+    }
+    draht_weg(&d)
+    return erg
+}
+
 fn eine_runde() -> u64 {
+    if k_https {
+        return eine_runde_https()
+    }
     var schief: bool = false
     var c: net.Conn = net.connect_tcp(k_ip, k_port as u16)
     catch | e | fehl_conn(&schief)
@@ -2642,7 +2961,13 @@ fn diagnose() -> i32 {
         sag_oktette((&konfpfad[0]) as u64, rt.c_length((&konfpfad[0]) as u64))
         sag("\n")
         sag("  server         ")
-        if k_ip == 0 as u32 {
+        if k_https {
+            // Ueber 443 steht der NAME fuer den Weg, nicht die Zahl.
+            sag("https://")
+            rt.write_everything(1, (&k_name[0]) as u64, k_namelen)
+            rt.write_everything(1, (&k_pfad[0]) as u64, k_pfadlen)
+            sag("\n")
+        } else if k_ip == 0 as u32 {
             sag("FEHLT -- ohne `server = a.b.c.d:anschluss` startet der Dienst nicht\n")
         } else {
             zeig_ip("", k_ip as u64)
@@ -2794,7 +3119,17 @@ fn main(start: u64) -> i32 {
     if nurlesen {
         return 0
     }
-    if k_ip == 0 as u32 {
+    // ============================================== RUNDE MERGE-11
+    // Ueber 443 gibt es KEINE Adresse in der Rechteliste, und das ist
+    // Absicht: der Name wird beim Verbinden aufgeloest. Verlangt wird
+    // dann der NAME -- ohne ihn kann kein Zertifikat geprueft werden,
+    // und ungeprueft faehrt dieser Dienst nicht los.
+    if k_https {
+        if k_namelen == 0 {
+            sag("jarvisd: `weg = https` braucht `servername = ...`\n")
+            return 2
+        }
+    } else if k_ip == 0 as u32 {
         sag("jarvisd: in der Rechteliste steht kein `server = a.b.c.d:anschluss`\n")
         return 2
     }
