@@ -100,6 +100,10 @@ for a in "$@"; do
         dark_scheme=*) dark_scheme=${a#*=} ;;
         uiscale=*) uiscale=${a#*=} ;;
         accent=*) accent=${a#*=} ;;
+        clock_lines=*) clock_lines=${a#*=} ;;
+        hide_missing=*) hide_missing=${a#*=} ;;
+        pins=*) pins=${a#*=} ;;
+        clock_seconds=*) clock_seconds=${a#*=} ;;
         scheme=*) scheme=${a#*=} ;;
         mode=*) mode=${a#*=} ;;
         res=*) res=${a#*=} ;;
@@ -166,6 +170,24 @@ python3 tools/k15/tree.py "$OUT/baum" > "$OUT/baum.log" 2>&1 || exit 1
 # SENKRECHTEN Leiste und die haengt an der Breite der Beschriftungen.
 printf '# taskbar.conf\nedge=bottom\nwidth=104\nautohide=0\nontop=1\nalign=left\n' \
     > "$OUT/taskbar.conf"
+# RUNDE MERGE-11: die Uhr wie in Justins Windows-Vorlage -- Uhrzeit
+# oben, Datum darunter. `clock_lines` KANN das seit Runde STARTKNOPF
+# (taskbar.fi, `clock_build`); es stand nur auf 1. Ohne Sekunden, weil
+# eine Leiste, die jede Sekunde neu malt, jede Sekunde Arbeit macht.
+printf 'clock_seconds=%s\nclock_date=1\nclock_weekday=0\nclock_lines=%s\n' \
+    "${clock_seconds:-0}" "${clock_lines:-2}" >> "$OUT/taskbar.conf"
+# GEGENPROBE-SCHALTER: `hide_missing=0` bringt Akku-/Tonfeld auch dann
+# zurueck, wenn die Maschine das Geraet nicht hat -- so laesst sich der
+# Zeichenpfad belegen, ohne dass QEMU einen Akku emulieren kann.
+[ -n "${hide_missing:-}" ] && \
+    printf 'hide_missing=%s\n' "$hide_missing" >> "$OUT/taskbar.conf"
+# RUNDE ANHEFTEN: die Werksbelegung der Leiste. Certus steht darin,
+# weil Justin es so will; die uebrigen sind die drei, die jedes System
+# hat (Dateien, Terminal, Einstellungen). Die Zeile ist eine LISTE und
+# keine feste Zahl -- damit "anheften/loesen" spaeter nur diese Zeile
+# umschreiben muss und keinen Quelltext.
+printf 'pins=%s\n' "${pins:-certus,explorer,terminal,settings}" \
+    >> "$OUT/taskbar.conf"
 # RUNDE FARBE: `dark_scheme=` nur schreiben, wenn er gesetzt ist -- eine
 # leere Zeile waere ein leerer DATEINAME und der Dunkelmodus faende gar
 # kein Schema mehr.
