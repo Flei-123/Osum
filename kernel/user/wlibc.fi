@@ -52,7 +52,7 @@ export {
     clip_set, clip_x0, clip_y0, clip_x1, clip_y1,
     px, get, hline, vline, rect, frame, frame3, blend,
     text_at, text_w, text_h, glyph_w, ascent_of, mono_cell,
-    icon_at, icon_box, icon_have, icon_ink_w, icon_ink_h,
+    icon_at, icon_mid, icon_box, icon_have, icon_ink_w, icon_ink_h,
     icon_small, icon_menu, icon_taskbar, icon_large,
     fit, back, chars,
     push, push_rect, cursor_shape,
@@ -116,7 +116,8 @@ export {
     // ---- ROUND NETVIEW, addendum: icons whose colours come from
     // the scheme (OSYM coverage 1..5 = a role, not an alpha).
     icon_ok, icon_w, icon_h, icon_role, icon_draw, icon_draw_sc,
-    icon_draw_w, icon_draw_h, ICON_ROLES,
+    icon_draw_w, icon_draw_h, icon_ink_top, icon_ink_hgt,
+    icon_ink_lft, icon_ink_wid, ICON_ROLES,
     F_UI, F_MONO, F_ICON, px_ui, map_surface, px_mono, ui_scale,
     RGB24, MODE_LIGHT, MODE_DARK, MODE_AUTO,
     NEUTRAL_STEPS, RAMP_STEPS, R_ACCENT, R_DANGER, R_WARNING, R_SUCCESS,
@@ -5546,6 +5547,53 @@ fn icon_at(id: u64, x: u64, y: u64, px_: u64, color: u64) -> bool {
     return true
 }
 
+// ============================================== RUNDE LEISTE-RECHTS
+// EIN SYMBOL, DAS WIRKLICH IN DER MITTE SITZT.
+//
+// `icon_at` haengt den Glyphen an eine GRUNDLINIE: `draw_glyph`
+// bekommt `y + px_` und zieht davon `GC_T` ab. Fuer Schrift ist das
+// richtig -- Buchstaben einer Zeile muessen auf derselben Linie stehen,
+// sonst tanzt das Wort. Fuer ein SYMBOL im Statusfeld ist es falsch:
+// dort steht jedes Zeichen fuer sich, und was der Mensch sieht, ist
+// nicht die Grundlinie, sondern der Klotz Tinte.
+//
+// GEMESSEN (3440x1440, uiscale=2, Feld 64 hoch, gl_w()=42): WLAN und
+// Ton haben BEIDE die Oberkante 1384, weil beide dieselbe `GC_T=37`
+// tragen. Die Tinte des WLAN ist aber nur 26 Punkte hoch, die des Tons
+// 32 -- also sass WLAN bei oben=24/unten=30 und der Ton bei 24/24.
+// Sechs Punkte Unterschied zwischen zwei Symbolen, die nebeneinander
+// stehen; genau das sieht man als "das eine haengt zu hoch".
+//
+// DIESE ROUTINE ZENTRIERT NACH DER GEMALTEN HOEHE (`GC_H`) und nicht
+// nach der geplanten (`px_`). Sie bekommt den KASTEN (y, h) und rechnet
+// die Grundlinie so, dass oben und unten gleich viel Luft bleibt:
+//
+//     oberkante = y + (h - GC_H) / 2
+//     grundlinie = oberkante + GC_T
+//
+// Das ist dieselbe Lehre wie beim Kreuz und beim Anhefter: WER
+// ZENTRIERT, MUSS DIE ZAHL ERFRAGEN, DIE WIRKLICH GEMALT WIRD -- nicht
+// die, die er bestellt hat.
+fn icon_mid(id: u64, x: u64, y: u64, h: u64, px_: u64, color: u64) -> bool {
+    let at: u64 = gfind(F_ICON, px_, id)
+    if at == 0xFFFFFFFFFFFFFFFF {
+        return false
+    }
+    let gw: u64 = gc[(at + GC_W) as usize]
+    let gh: u64 = gc[(at + GC_H) as usize]
+    if gw == 0 || gh == 0 {
+        return false
+    }
+    var oben: u64 = y
+    if h > gh {
+        oben = y + (h - gh) / 2
+    }
+    draw_glyph(at, x as i64, (oben + gc[(at + GC_T) as usize]) as i64,
+        color)
+    return true
+}
+
+
 // ============================================ ROUND NETVIEW, addendum
 //
 // AN ICON WHOSE COLOURS COME FROM THE SCHEME.
@@ -5648,6 +5696,152 @@ fn icon_draw_w(p: u64) -> u64 {
 
 fn icon_draw_h(p: u64) -> u64 {
     return icon_h(p) * ui_scale()
+}
+
+// ============================================== RUNDE LEISTE-RECHTS
+// WIE VIEL VON EINEM OSYM-BILD WIRKLICH TINTE IST.
+//
+// `icon_draw_h` liefert den KASTEN (Kopfzeile mal Vervielfachung). Das
+// ist nicht dasselbe wie das, was man sieht: `state-nocarrier.txt` ist
+// ein 16x16-Bild, dessen Tinte nur in den Zeilen 0..12 steht -- die
+// unteren drei sind leer. Wer den KASTEN mittig setzt, setzt die Tinte
+// um die Haelfte der leeren Zeilen zu hoch.
+//
+// GEMESSEN (3440x1440, uiscale=2, Feld 64 hoch): das WLAN-Symbol sass
+// bei oben=24/unten=30, der Ton daneben bei 24/24. Sechs Punkte
+// Unterschied zwischen zwei Symbolen, die nebeneinander stehen.
+//
+// Diese beiden Routinen geben die ERSTE Tintenzeile und die HOEHE der
+// Tinte zurueck, beide schon mit der Vervielfachung multipliziert.
+// Damit rechnet ein Aufrufer:
+//
+//     y = kasten_y + (kasten_h - ink_h) / 2 - ink_top
+//
+// also: die TINTE steht mittig, egal wo sie im Bild liegt.
+fn icon_ink_top(p: u64) -> u64 {
+    let w: u64 = icon_w(p)
+    let h: u64 = icon_h(p)
+    if w == 0 || h == 0 || w > 64 || h > 64 {
+        return 0
+    }
+    var r: u64 = 0
+    while r < h {
+        var c: u64 = 0
+        while c < w {
+            let v: u64 = __mmio_read32((p + 12 + (r * w + c) * 4)
+                as *mut u32) as u64
+            if ((v >> 24) & 0xFF) != 0 {
+                return r * ui_scale()
+            }
+            c = c + 1
+        }
+        r = r + 1
+    }
+    return 0
+}
+
+fn icon_ink_hgt(p: u64) -> u64 {
+    let w: u64 = icon_w(p)
+    let h: u64 = icon_h(p)
+    if w == 0 || h == 0 || w > 64 || h > 64 {
+        return 0
+    }
+    var erst: u64 = h
+    var letzt: u64 = 0
+    var gab: bool = false
+    var r: u64 = 0
+    while r < h {
+        var c: u64 = 0
+        while c < w {
+            let v: u64 = __mmio_read32((p + 12 + (r * w + c) * 4)
+                as *mut u32) as u64
+            if ((v >> 24) & 0xFF) != 0 {
+                if !gab {
+                    erst = r
+                    gab = true
+                }
+                letzt = r
+                c = w
+            } else {
+                c = c + 1
+            }
+        }
+        r = r + 1
+    }
+    if !gab {
+        return 0
+    }
+    return (letzt - erst + 1) * ui_scale()
+}
+
+// ============================================== RUNDE LEISTE-RECHTS
+// DASSELBE IN DER WAAGRECHTEN -- UND AUS DEMSELBEN GRUND.
+//
+// `icon_ink_top`/`icon_ink_hgt` haben die Frage fuer die ZEILEN
+// beantwortet und die WLAN-Tinte senkrecht mittig gesetzt. Waagrecht
+// stand die Frage nie: die Feldbreite rechnete mit `ic_w()`, also mit
+// dem KASTEN (16 * 2 = 32). Die Tinte von `state-nocarrier` ist aber
+// nur 14 Spalten breit (28 gemalt) -- die vier ueberzaehligen Punkte
+// legten sich neben das Symbol und vergroesserten die LUECKE zum
+// Tonfeld. Gemessen am laufenden System: 37 Punkte zwischen WLAN und
+// Ton, 19 zwischen Ton und Akku. Gleich weit ist etwas anderes.
+//
+// Wer Abstaende gleich haben will, muss die Breite messen, die WIRKLICH
+// gemalt wird -- nicht die, die bestellt wurde.
+fn icon_ink_lft(p: u64) -> u64 {
+    let w: u64 = icon_w(p)
+    let h: u64 = icon_h(p)
+    if w == 0 || h == 0 || w > 64 || h > 64 {
+        return 0
+    }
+    var c: u64 = 0
+    while c < w {
+        var r: u64 = 0
+        while r < h {
+            let v: u64 = __mmio_read32((p + 12 + (r * w + c) * 4)
+                as *mut u32) as u64
+            if ((v >> 24) & 0xFF) != 0 {
+                return c * ui_scale()
+            }
+            r = r + 1
+        }
+        c = c + 1
+    }
+    return 0
+}
+
+fn icon_ink_wid(p: u64) -> u64 {
+    let w: u64 = icon_w(p)
+    let h: u64 = icon_h(p)
+    if w == 0 || h == 0 || w > 64 || h > 64 {
+        return 0
+    }
+    var erst: u64 = w
+    var letzt: u64 = 0
+    var gab: bool = false
+    var c: u64 = 0
+    while c < w {
+        var r: u64 = 0
+        while r < h {
+            let v: u64 = __mmio_read32((p + 12 + (r * w + c) * 4)
+                as *mut u32) as u64
+            if ((v >> 24) & 0xFF) != 0 {
+                if !gab {
+                    erst = c
+                    gab = true
+                }
+                letzt = c
+                r = h
+            } else {
+                r = r + 1
+            }
+        }
+        c = c + 1
+    }
+    if !gab {
+        return 0
+    }
+    return (letzt - erst + 1) * ui_scale()
 }
 
 // ==================================================== RUNDE ECHTHARDWARE-2
