@@ -136,6 +136,48 @@ if [[ -d $HIER/patches ]]; then
     done
 fi
 
+# --- DIE SYMLINKS INNERHALB VON lib/ WIEDER EINHAENGEN.
+#
+# RUNDE 31, gemessen. `cp -rL` oben loest ALLE Verweise auf, auch die
+# acht, die NICHT aus lib/ herausfuehren: lib/std/rt.fi -> ../rt/rt.fi
+# und seine Geschwister. Aus EINER Datei werden dadurch ZWEI, und weil
+# der Uebersetzer die Symbole einer Datei nach ihrem MODULNAMEN benennt
+# (rt__Buf, rt__ld8, ...), sind `import std.rt` und `import rt.rt`
+# danach zwei Module, die dieselben Namen anmelden:
+#
+#     error: struct 'rt__Buf' is already declared
+#
+# Vierzig solche Fehler, und kein einziger davon im eigenen Quelltext.
+# Es fiel bis Runde 31 niemandem auf, weil kein Programm dieser Platte
+# BEIDE Namen zog. fUi tut es: lib/fui/* importiert `std.rt`, und
+# lib/paint/png.fi -- das fUi fuer die Bildausgabe braucht -- `rt.rt`.
+#
+# WARUM ERST HIER, NACH DEN FLICKEN: `patch` weigert sich, einen Symlink
+# zu aendern ("File firnc1/rt.fi is not a regular file -- refusing to
+# patch"), und 0002 fasst rt.fi in ALLEN DREI Verzeichnissen getrennt
+# an. Also erst auf echten Dateien flicken, dann zusammenhaengen. Der
+# Inhalt ist danach derselbe -- die drei Fassungen sind Oktett fuer
+# Oktett gleich, das ist ja der Grund, warum sie im Firn-Baum Verweise
+# sind.
+#
+# Die Liste kommt aus dem Firn-Baum SELBST, nicht aus dem Kopf: was dort
+# ein Verweis ist, wird hier einer; was aus lib/ hinausfuehrt
+# (lib/rc/rc.fi -> ../../tests/modules/rc.fi), bleibt Kopie, sonst waere
+# es hier tot.
+if [[ -d $BAU/lib ]]; then
+    ( cd "$BAU/lib" && find . -type l -printf '%p\t%l\n' ) |
+    while IFS=$'\t' read -r ort ziel; do
+        [[ -e "$HIER/lib/$(dirname "$ort")/$ziel" ]] || continue
+        # Sicherung: der Verweis darf den Inhalt nicht veraendern.
+        if ! cmp -s "$HIER/lib/$ort" "$HIER/lib/$(dirname "$ort")/$ziel"; then
+            echo "Symlink $ort wuerde den Inhalt aendern -- bleibt Kopie" >&2
+            continue
+        fi
+        rm -f "$HIER/lib/$ort"
+        ln -s "$ziel" "$HIER/lib/$ort"
+    done
+fi
+
 echo ">> firnc1 bauen (der Uebersetzer in Firn, von firnc0 uebersetzt)"
 FIRNLIB="$HIER/lib" "$HIER/bin/firnc" "$BAU/bin/firnc1.fi" -o "$HIER/bin/firnc1"
 
