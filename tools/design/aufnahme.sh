@@ -272,7 +272,7 @@ if python3 tools/netview/icons.py bauen "$OUT/nvicons" > "$OUT/nvicons.log" 2>&1
     ARGS+=(/etc/netview/)
     for q in state-nocarrier state-noip state-noroute state-online \
              mark-filtered mark-faked mark-none sys-faking \
-             tile-fake tile-net tile-hide; do
+             tile-fake tile-net tile-hide tile-dark tile-power tile-tile; do
         [ -e "$OUT/nvicons/$q" ] && ARGS+=("/etc/netview/$q=$OUT/nvicons/$q")
     done
 fi
