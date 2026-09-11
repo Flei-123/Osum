@@ -452,6 +452,20 @@ class Fahrer:
         # Grund siehe qs.fi: `qs: text ... y=321` ist die Grundlinie
         # der Schrift und nicht das Feld; wer darauf klickt, trifft
         # daneben.
+        # RUNDE ECHT: `qskachel<N>` -- die Kachel mit der NUMMER N,
+        # so wie das Kontrollzentrum sie selbst meldet. Der Platz in
+        # der Reihe ist nicht die Nummer (`tile_of`), deshalb wird
+        # nicht gerechnet, sondern gelesen.
+        if name.startswith("qskachel"):
+            n = int(name[8:])
+            m = letzte(r"qs: kachel n=%d platz=\d+ x=(\d+) y=(\d+) "
+                       r"w=(\d+) h=(\d+) an=\d+" % n)
+            g = letzte(r"qs: geo x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            if m is None or g is None:
+                return None
+            return (int(g.group(1)) + int(m.group(1)),
+                    int(g.group(2)) + int(m.group(2)),
+                    int(m.group(3)), int(m.group(4)))
         if name in ("qstm", "qsset"):
             wort = "tm" if name == "qstm" else "set"
             m = letzte(r"qs: zeile %s y=(\d+) h=(\d+)" % wort)
@@ -576,7 +590,14 @@ class Fahrer:
                     int(m.group(3)), int(m.group(4)))
         if name.startswith("lzeile"):
             n = int(name[6:])
-            m = letzte(r"launcher: rect id=2 kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            # RUNDE ECHT: `]` am Ende erzwingen, wenn die Zeile aus dem
+            # Terminalfenster kommt (`wm: termzeile 14 [launcher: ...]`).
+            # Ohne das passt auch eine ABGESCHNITTENE Zeile, und dann
+            # wird stillschweigend eine aeltere Messung benutzt -- der
+            # Klick landet auf der Stelle von vorhin.
+            m = letzte(r"launcher: rect id=2 kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)\]")
+            if m is None:
+                m = letzte(r"launcher: rect id=2 kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             z = letzte(r"launcher: rows x=\d+ base=\d+ zh=(\d+)")
             o = self.fenster("launcher")
             if m is None or z is None or o is None:

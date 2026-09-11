@@ -7240,28 +7240,151 @@ fn term_setup(state: u64, i: u64) {
     if ch == 0 {
         ch = 16
     }
+    let alt_cols: u64 = wg(state, i, W_COLS)
+    let alt_rows: u64 = wg(state, i, W_ROWS)
+    let alt_cy: u64 = wg(state, i, W_CY)
+    let alt_cx: u64 = wg(state, i, W_CX)
     wsv(state, i, W_CELLW, cw)
     wsv(state, i, W_CELLH, ch)
     let cols: u64 = wg(state, i, W_W) / cw
     let rows: u64 = wg(state, i, W_H) / ch
     wsv(state, i, W_COLS, cols)
     wsv(state, i, W_ROWS, rows)
-    wsv(state, i, W_CX, 0)
-    wsv(state, i, W_CY, 0)
-    if wg(state, i, W_GRID) == 0 {
-        let g: u64 = mem.frame_run(state, 1)
-        wsv(state, i, W_GRID, g)
+    let neu_gitter: bool = wg(state, i, W_GRID) == 0
+    if neu_gitter {
+        let g0: u64 = mem.frame_run(state, 1)
+        wsv(state, i, W_GRID, g0)
     }
     let g: u64 = wg(state, i, W_GRID)
+    // ================================================== RUNDE ECHT
+    // DER TEXT BLEIBT STEHEN, WENN MAN DAS FENSTER ZIEHT.
+    //
+    // Justins Befund am echten Geraet: "Terminal auf, Ausgabe da,
+    // Fenster groesser ziehen -> Inhalt weg." Er hat recht, und die
+    // Ursache stand genau hier: diese Funktion hat das GANZE
+    // Zeichenraster mit Leerzeichen ueberschrieben und den Cursor auf
+    // 0,0 gesetzt -- bei JEDEM Aufruf. `resize_win` ruft sie bei jeder
+    // Groessenaenderung. Der Text war also nicht falsch umgebrochen,
+    // er war GELOESCHT.
+    //
+    // Ein Terminal, dessen Fenster sich aendert, behaelt seinen Inhalt
+    // -- das tut jedes Terminal, seit es Terminals gibt. Die Zeilen
+    // werden in das neue Raster UMKOPIERT, Zeile fuer Zeile, so weit
+    // sie hineinpassen. Was nicht mehr hineinpasst (schmaleres
+    // Fenster), wird rechts abgeschnitten; das ist dasselbe, was xterm
+    // ohne Neuumbruch tut, und es ist ehrlicher, als den Rest zu
+    // loeschen.
+    //
+    // NUR EIN FRISCHES GITTER WIRD GELEERT. Das ist der Fall, fuer den
+    // die Leerung urspruenglich gedacht war: ein neu angelegtes
+    // Terminal, dessen Rahmen noch beliebigen Speicher traegt.
     if g != 0 {
-        var k: u64 = 0
-        while k < cols * rows && k < 4096 {
-            kstate.set8(g + k, 32 as u8)
-            k = k + 1
+        if neu_gitter || alt_cols == 0 || alt_rows == 0 {
+            var k: u64 = 0
+            while k < cols * rows && k < 4096 {
+                kstate.set8(g + k, 32 as u8)
+                k = k + 1
+            }
+            wsv(state, i, W_CX, 0)
+            wsv(state, i, W_CY, 0)
+        } else if cols != alt_cols || rows != alt_rows {
+            // UMKOPIEREN, VON UNTEN NACH OBEN ODER VON OBEN NACH
+            // UNTEN -- je nachdem, wohin geschoben wird, damit sich
+            // Quelle und Ziel im selben Rahmen nicht ueberholen.
+            // Zielzeile r liegt bei r*cols, Quellzeile bei r*alt_cols.
+            // Wird das Raster BREITER, wandert jede Zeile nach hinten:
+            // dann von der letzten Zeile an arbeiten.
+            var zeilen: u64 = alt_rows
+            if rows < zeilen {
+                zeilen = rows
+            }
+            var breit: u64 = alt_cols
+            if cols < breit {
+                breit = cols
+            }
+            if cols > alt_cols {
+                var r: u64 = zeilen
+                while r > 0 {
+                    r = r - 1
+                    var c: u64 = breit
+                    while c > 0 {
+                        c = c - 1
+                        let src: u64 = r * alt_cols + c
+                        let dst: u64 = r * cols + c
+                        if src < 4096 && dst < 4096 {
+                            kstate.set8(g + dst, kstate.get8(g + src) as u8)
+                        }
+                    }
+                    // den Rest der Zielzeile leeren
+                    var c2: u64 = breit
+                    while c2 < cols {
+                        let d2: u64 = r * cols + c2
+                        if d2 < 4096 {
+                            kstate.set8(g + d2, 32 as u8)
+                        }
+                        c2 = c2 + 1
+                    }
+                }
+            } else {
+                var r2: u64 = 0
+                while r2 < zeilen {
+                    var c3: u64 = 0
+                    while c3 < breit {
+                        let s3: u64 = r2 * alt_cols + c3
+                        let d3: u64 = r2 * cols + c3
+                        if s3 < 4096 && d3 < 4096 {
+                            kstate.set8(g + d3, kstate.get8(g + s3) as u8)
+                        }
+                        c3 = c3 + 1
+                    }
+                    var c4: u64 = breit
+                    while c4 < cols {
+                        let d4: u64 = r2 * cols + c4
+                        if d4 < 4096 {
+                            kstate.set8(g + d4, 32 as u8)
+                        }
+                        c4 = c4 + 1
+                    }
+                    r2 = r2 + 1
+                }
+            }
+            // die neuen Zeilen unten sind leer
+            var r5: u64 = zeilen
+            while r5 < rows {
+                var c5: u64 = 0
+                while c5 < cols {
+                    let d5: u64 = r5 * cols + c5
+                    if d5 < 4096 {
+                        kstate.set8(g + d5, 32 as u8)
+                    }
+                    c5 = c5 + 1
+                }
+                r5 = r5 + 1
+            }
+            // DER CURSOR BLEIBT, WO ER WAR -- nur in das neue Raster
+            // hineingezwungen. Sonst schriebe die naechste Ausgabe
+            // mitten in den stehengebliebenen Text.
+            var ncx: u64 = alt_cx
+            var ncy: u64 = alt_cy
+            if ncx >= cols {
+                ncx = cols - 1
+            }
+            if ncy >= rows {
+                ncy = rows - 1
+            }
+            wsv(state, i, W_CX, ncx)
+            wsv(state, i, W_CY, ncy)
         }
     }
     fill(state, i, 0, 0, wg(state, i, W_W), wg(state, i, W_H),
         wg(state, i, W_BG))
+    // UND DER TEXT WIEDER AUF DIE FLAECHE. `fill` hat gerade den
+    // ganzen Puffer mit der Hintergrundfarbe ueberschrieben -- ohne
+    // diese Zeile stuende der gerettete Inhalt zwar im Raster, waere
+    // aber nicht zu sehen, und der Fehler saehe genauso aus wie
+    // vorher. Bei einem frischen Gitter malt sie lauter Leerzeichen,
+    // kostet also nichts.
+    term_redraw(state, i)
 }
 
 fn cell_set(state: u64, i: u64, c: u64, r: u64, ch: u64) {
