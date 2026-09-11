@@ -457,6 +457,7 @@ fn u_start(args: u64) -> u64 {
     var k_nl: [u8; 2] = "\n\0"
     var p_conf: [u8; 18] = "/etc/network.conf\0"
     var s_ei: [u8; 7] = "einmal\0"
+    var s_spaet: [u8; 44] = "dhcp: Karte war spaet, gewartet (x100ms): \0\0"
     // ============================================ RUNDE ECHTHARDWARE-6
     // `dauer` -- NACH EINEM FEHLSCHLAG SPAETER WIEDER FRAGEN.
     //
@@ -494,9 +495,63 @@ fn u_start(args: u64) -> u64 {
         }
         a = a + 1
     }
-    if ulib.sys(SYS_NETGET, NG_READY, 0, 0) != 1 {
+    // ==================================================== RUNDE ECHT
+    // DER WETTLAUF ZWISCHEN TREIBER UND KLIENT -- Justins sporadisches
+    // Netz.
+    //
+    // Gemessen an seinem Geraet: einmal `IP 0.0.0.0`, nach einem
+    // Neustart `192.168.1.109` aus demselben Router. Netzchip und DHCP
+    // gehen also GRUNDSAETZLICH; der Fehler ist eine Frage des
+    // Zeitpunkts. Und genau hier stand er: ist der Kartentreiber beim
+    // Start noch nicht fertig (`NG_READY != 1`), gab dieser Klient auf
+    // -- mit `return 1`, also OHNE die `dauer`-Schleife weiter unten
+    // anzustossen. Der Kern startet `dhcp dauer` frueh (kgui.fi), damit
+    // die Adresse da ist, wenn der Schreibtisch steht; ist die Karte
+    // in diesem Moment noch nicht angemeldet, blieb das System fuer
+    // IMMER ohne Adresse, obwohl die Karte Sekunden spaeter bereit war.
+    //
+    // Ein Klient, der auf den Treiber wartet, ist kein Sonderfall,
+    // sondern der Normalfall auf echtem Blech: dort dauert die
+    // Anmeldung einer PCI-Karte laenger als im Emulator. Also wird
+    // gewartet -- in kleinen Schritten und mit Obergrenze, damit ein
+    // Rechner OHNE Netzkarte nicht haengt.
+    var bereit: u64 = ulib.sys(SYS_NETGET, NG_READY, 0, 0)
+    if bereit != 1 {
+        var gewartet: u64 = 0
+        while bereit != 1 && gewartet < 100 {
+            ulib.sleep_ms(100)
+            gewartet = gewartet + 1
+            bereit = ulib.sys(SYS_NETGET, NG_READY, 0, 0)
+        }
+        if bereit == 1 {
+            say((&s_spaet[0 as usize]) as u64)
+            ulib.sayn(gewartet)
+            ulib.nl()
+        }
+    }
+    if bereit != 1 {
         say((&s_no[0 as usize]) as u64)
         ulib.nl()
+        // MIT `dauer` IST AUCH DAS KEIN ENDE. Eine Karte, die nach
+        // zehn Sekunden noch nicht da ist, kann nach einer Minute da
+        // sein (spaet geladenes Modul, langsamer Bus). Ohne diese
+        // Zeile war "Treiber noch nicht fertig" endgueltig, waehrend
+        // "kein Angebot" es nicht war -- zwei Maesse fuer denselben
+        // Fall.
+        if dauer != 0 {
+            var wn: u64 = 5
+            if anlauf < 4 {
+                wn = 5 << anlauf
+            } else {
+                wn = 60
+            }
+            anlauf = anlauf + 1
+            say((&s_wdh[0 as usize]) as u64)
+            ulib.sayn(wn)
+            ulib.nl()
+            ulib.sleep_ms(wn * 1000)
+            return u_start(args)
+        }
         return 1
     }
     // Die Hardwareadresse aus dem Kernel. Sie MUSS in das Paket -- ein
