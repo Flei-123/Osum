@@ -1,0 +1,237 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/fui-proto/kachel_main.fi -- DER PROTOTYP: EINE KONTROLLZENTRUM-
+// KACHEL AUS fUi, GEBAUT IN OSUMS BAUM, MIT f64.
+//
+// ====================================================== WARUM ER EXISTIERT
+//
+// Justin, 11.09.2026: "wenn fui alles kann bitte bau es ueberall ein."
+// Dagegen stand MEINE EIGENE FEHLMESSUNG: ich hatte behauptet, OSUM
+// rette die FPU nicht, also koennten fUis 378 f64-Stellen in Ring 3
+// nicht laufen. Das war falsch. Belegt:
+//
+//   * kernel/arch/x86_64/fpu.fi, 946 Zeilen: fxsave/fxrstor/xsave/
+//     xrstor, probe, apply, save, restore, fn switch mit Lazy-Pfad.
+//   * kernel/sched.fi:1817 ruft fpu.switch bei JEDEM Kontextwechsel.
+//   * fpu_en=1 in drei echten Seriellogs.
+//   * kernel/user/rechner.fi rechnet mit 22x #[allow_fp] in Ring 3.
+//   * SPEC.md:125 -- im Profil `app` ist Gleitkomma FREI.
+//
+// Dieser Prototyp ist der Gegenbeweis: dieselben Bedienelemente, die
+// das Kontrollzentrum braucht -- Umschaltkacheln und die Regler fuer
+// HELLIGKEIT und LAUTSTAERKE -- gemalt von fUi, gebaut gegen OSUMs
+// FESTGENAGELTE Bibliothek (vendor/firn/lib/fui, Pin 0e45acaf). Keine
+// kopierte Zeile, eine Quelle der Wahrheit.
+//
+// Und er beweist, was ein Bild NICHT zeigen kann: dass die Regler
+// echte Werte tragen. Der Helligkeitsregler wird per Maus gegriffen und
+// gezogen, danach wird der Wert ZURUECKGELESEN und als Zahl gedruckt.
+// Ein gemalter Griff koennte diese Zahl nicht liefern. Die Maus bleibt
+// zum Schluss auf der Kachel stehen, damit der Hover auch IM BILD
+// steht und nicht nur in der Ausgabe.
+//
+//     kachel_main <out.png> [light|dark]
+profile app
+import rt.rt
+import html.mem
+import paint.canvas
+import paint.png
+import font.metrics
+import fui.theme
+import fui.style
+import fui.widget
+import fui.painter
+import fui.render
+import fui.wave2
+import fui.control
+
+const FONTSET_BYTES: usize = 4096
+const W: usize = 440
+const H: usize = 300
+
+// Firn hat keinen if-AUSDRUCK, nur die Anweisung -- genau wie
+// tools/fui/control_main.fi es mit `b2i` macht.
+fn b2i(b: bool) -> i64 {
+    if b {
+        return 1
+    }
+    return 0
+}
+
+fn bit(v: u32, mask: u32) -> i64 {
+    if (v & mask) != 0 {
+        return 1
+    }
+    return 0
+}
+
+fn label_at(c: *mut render.Ctx, x: f64, y: f64, p: u64, n: usize) {
+    var e: widget.Widget = widget.widget_new(widget.KIND_LABEL)
+    widget.w_place(&e, x, y, 200.0, 20.0)
+    widget.w_set_text(&e, p, n)
+    let s: *mut style.Style = widget.w_style(&e)
+    *s = style.style_set_font(*s, 0, 13)
+    render.draw_label(c, &e)
+}
+
+fn main(start: u64) -> i32 {
+    if rt.arg_count(start) < 2 {
+        var u: [u8; 35] = "kachel_main <out.png> [light|dark]\n"
+        rt.write_everything(2, (&u[0]) as u64, 34)
+        return 2
+    }
+    let path: u64 = rt.arg_ptr(start, 1)
+    var dark: bool = false
+    if rt.arg_count(start) >= 3 {
+        if rt.ld8(rt.arg_ptr(start, 2), 0) == 100 as u8 {
+            dark = true
+        }
+    }
+
+    // DIE SCHRIFT: OSUMS EIGENE aus assets/, nicht die der Baumaschine.
+    // Das Bild soll aussehen wie OSUM, nicht wie Debian.
+    var fbuf: rt.Buf = rt.buf_new()
+    var f1: [u8; 21] = "assets/osum-sans.ttf\0"
+    var have: bool = rt.read_file((&f1[0]) as u64, &fbuf)
+    let fsp: *mut metrics.FontSet =
+        rt.heap_alloc(FONTSET_BYTES) as *mut metrics.FontSet
+    if fsp as usize == 0 {
+        return 3
+    }
+    *fsp = metrics.fontset_new()
+    var fm: u64 = 0
+    if have {
+        if metrics.fontset_load(fsp, fbuf.ptr as *mut u8, fbuf.len) {
+            fm = fsp as u64
+        }
+    }
+
+    // DIE FLAECHE. Genau das Format, das wlibc.surface() liefert:
+    // w * h * 4 Oktette, ein 32-Bit-Bildpunkt je Stelle, zeilenweise
+    // (wlibc.px schreibt (r * w + x) * 4). Deshalb kann dieselbe
+    // fUi-Zeichnung spaeter ohne Umweg in die Fensterflaeche malen.
+    var cv: canvas.Canvas = canvas.canvas_new()
+    if !canvas.canvas_init(&cv, W, H) {
+        return 4
+    }
+    var z: painter.Painter = painter.painter_new()
+    if !painter.painter_init(&z, &cv, W, 120) {
+        return 5
+    }
+    painter.painter_set_font(&z, fm)
+    var m: theme.Theme = theme.theme_new(dark)
+    var c: render.Ctx = render.ctx_new(&m, &z)
+
+    // Der Hintergrund kommt AUS DEM THEMA. Genau hier entsteht sonst
+    // das "weisse Fenster im dunklen System", das der Auftrag verbietet.
+    let f: *mut theme.Colors = theme.theme_colors(&m)
+    canvas.canvas_clear(&cv, theme.opaque((*f).base))
+
+    // Zwei Umschaltkacheln und zwei Regler -- der Inhalt des
+    // Kontrollzentrums.
+    var ws: [widget.Widget; 4] =
+        [widget.widget_new(widget.KIND_NONE); 4]
+
+    ws[0] = widget.widget_new(widget.KIND_TOGGLE)
+    widget.w_place(&ws[0], 20.0, 24.0, 190.0, 56.0)
+    ws[0].value = 1
+
+    ws[1] = widget.widget_new(widget.KIND_TOGGLE)
+    widget.w_place(&ws[1], 230.0, 24.0, 190.0, 56.0)
+
+    ws[2] = widget.widget_new(widget.KIND_SLIDER)
+    widget.w_place(&ws[2], 20.0, 140.0, 400.0, 24.0)
+    ws[2].value = 200
+
+    ws[3] = widget.widget_new(widget.KIND_SLIDER)
+    widget.w_place(&ws[3], 20.0, 220.0, 400.0, 24.0)
+    ws[3].value = 600
+
+    var pn: control.Panel = control.panel_new()
+    control.panel_attach(&pn, (&ws[0]) as u64, 4)
+
+    // ================= DER TEIL, DEN EIN BILD NICHT BEWEISEN KANN
+    // 1. HOVER: die Maus faehrt auf die erste Kachel. Danach muss das
+    //    Element das Bit tragen UND ein Neuzeichnen verlangen.
+    let hov0: bool = widget.w_is_hover(&ws[0])
+    let ch_h: u32 = control.mouse_move(&pn, 115.0, 52.0)
+    let hov1: bool = widget.w_is_hover(&ws[0])
+
+    // 2. ZIEHEN: der Helligkeitsregler wird links gegriffen und zur
+    //    Mitte gezogen. Der Wert danach ist die gedruckte Zahl -- aus
+    //    DIESEM Lauf, der auch das Bild erzeugt.
+    let hell0: i64 = widget.w_value(&ws[2])
+    control.mouse_down(&pn, 30.0, 152.0)
+    let ch_v: u32 = control.mouse_move(&pn, 220.0, 152.0)
+    let hell1: i64 = widget.w_value(&ws[2])
+    control.mouse_up(&pn, 220.0, 152.0)
+
+    // Die Maus bleibt auf der Kachel: der Hover soll IM BILD stehen.
+    control.mouse_move(&pn, 115.0, 52.0)
+
+    var i: usize = 0
+    while i < 4 {
+        wave2.draw_any(&c, &ws[i])
+        i = i + 1
+    }
+
+    var t0: [u8; 4] = "WLAN"
+    label_at(&c, 20.0, 92.0, (&t0[0]) as u64, 4)
+    var t0b: [u8; 9] = "Bluetooth"
+    label_at(&c, 230.0, 92.0, (&t0b[0]) as u64, 9)
+    var t1: [u8; 10] = "Helligkeit"
+    label_at(&c, 20.0, 116.0, (&t1[0]) as u64, 10)
+    var t2: [u8; 11] = "Lautstaerke"
+    label_at(&c, 20.0, 196.0, (&t2[0]) as u64, 11)
+
+    var out: mem.Buf = mem.buf_new()
+    mem.buf_init(&out)
+    if !png.write_png(&cv, &out) {
+        return 6
+    }
+    var pf: rt.Buf = rt.buf_new()
+    var k: usize = 0
+    while k < rt.c_length(path) {
+        rt.buf_push(&pf, rt.ld8(path, k))
+        k = k + 1
+    }
+    rt.buf_push(&pf, 0 as u8)
+    if !rt.write_file(rt.buf_ptr(&pf), mem.buf_ptr(&out) as u64,
+        mem.buf_len(&out)) {
+        return 7
+    }
+
+    // DIE ZAHLEN AUS DIESEM LAUF.
+    var o: rt.Buf = rt.buf_new()
+    var k1: [u8; 10] = "HOVER vor="
+    rt.buf_push_bytes(&o, (&k1[0]) as u64, 10)
+    rt.buf_push_dec_i64(&o, b2i(hov0))
+    var k2: [u8; 6] = " nach="
+    rt.buf_push_bytes(&o, (&k2[0]) as u64, 6)
+    rt.buf_push_dec_i64(&o, b2i(hov1))
+    var k3: [u8; 9] = " repaint="
+    rt.buf_push_bytes(&o, (&k3[0]) as u64, 9)
+    rt.buf_push_dec_i64(&o, bit(ch_h, control.CH_REPAINT))
+    rt.buf_push(&o, 10 as u8)
+
+    var k4: [u8; 15] = "HELLIGKEIT vor="
+    rt.buf_push_bytes(&o, (&k4[0]) as u64, 15)
+    rt.buf_push_dec_i64(&o, hell0)
+    var k5: [u8; 6] = " nach="
+    rt.buf_push_bytes(&o, (&k5[0]) as u64, 6)
+    rt.buf_push_dec_i64(&o, hell1)
+    var k6: [u8; 8] = " signal="
+    rt.buf_push_bytes(&o, (&k6[0]) as u64, 8)
+    rt.buf_push_dec_i64(&o, bit(ch_v, control.CH_VALUE))
+    rt.buf_push(&o, 10 as u8)
+
+    var k7: [u8; 5] = "DARK="
+    rt.buf_push_bytes(&o, (&k7[0]) as u64, 5)
+    rt.buf_push_dec_i64(&o, b2i(dark))
+    rt.buf_push(&o, 10 as u8)
+    rt.write_everything(1, rt.buf_ptr(&o), rt.buf_len(&o))
+    rt.buf_free(&o)
+
+    painter.painter_free(&z)
+    canvas.canvas_free(&cv)
+    return 0
+}
