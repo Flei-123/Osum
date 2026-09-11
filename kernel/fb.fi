@@ -1188,6 +1188,62 @@ fn set_band(state: u64, px: u64) -> bool {
     if n * 2 >= h {
         n = 0
     }
+    // ==================================================== RUNDE ECHT
+    // DAS RESERVIERTE BAND WIRD GELOESCHT, BEVOR ES GESPERRT WIRD.
+    //
+    // Justins Foto vom echten Geraet zeigt rechts oben einen grossen
+    // BLAUEN BLOCK, vom Ende des Tafeltextes bis zum Bildschirmrand,
+    // genau so hoch wie die Tafel. Im Pruefstand war davon nichts zu
+    // sehen -- und das ist der ganze Punkt: QEMU uebergibt einen
+    // GENULLTEN Rahmenpuffer, also ist ungenutzte Flaeche dort
+    // schwarz. Auf echtem Blech steht darin, was die FIRMWARE
+    // hinterlassen hat: UEFI-Logo, Startbild, bei Justins Brett
+    // offenbar eine blaue Flaeche.
+    //
+    // GEMESSEN (3440x1440, uiscale 1): der Tafeltext endet bei x=2363,
+    // das reservierte Band reicht bis 3439 -- 1076 Bildpunkte, die
+    // reserviert, aber NIE beschrieben werden. `mess_grund` faerbt nur
+    // bis `mess_breite`, der Rest bleibt, wie die Firmware ihn liess.
+    //
+    // HIER und nicht in `clear`: ab `S_BAND` sperrt `band_lo` jedes
+    // Schreiben in diese Zeilen -- auch das Loeschen. Es muss also
+    // geschehen, solange das Band noch nicht gilt.
+    //
+    // MIT `fill_words` UND NICHT MIT EINER PIXELSCHLEIFE. Der erste
+    // Anlauf schrieb 630 * 3440 einzelne `__mmio_write32` -- 2,2
+    // Millionen Aufrufe vor dem ersten Zeichen, und der Kern kam mit
+    // `#UD` gar nicht erst bis zur Oberflaeche (gemessen: `launcher:
+    // ready` fehlte, mit dem Kern ohne diesen Block war es da).
+    // `fill_words` ist dieselbe Routine, die `hline` benutzt.
+    // GELOESCHT WIRD NUR, WAS WIRKLICH ZUM PUFFER GEHOERT. Der erste
+    // Anlauf rechnete `w0 / 2` Woerter je Zeile und lief damit ueber
+    // das Ende hinaus (`#PF`, gemessen): `S_PITCH` ist die Oktettzahl
+    // JE ZEILE und kann groesser sein als `w0 * 4`, und der Zweitpuffer
+    // ist nur `S_BACKBYTES` gross. Also wird die Zeilenzahl aus der
+    // tatsaechlichen Puffergroesse begrenzt und je Zeile hoechstens
+    // eine Zeilenlaenge geschrieben.
+    if n != 0 {
+        let w0: u64 = kstate.get(state, FB_OFF + S_WIDTH)
+        let pitch: u64 = kstate.get(state, FB_OFF + S_PITCH)
+        let basis: u64 = kstate.get(state, FB_OFF + S_DRAW)
+        let hh0: u64 = kstate.get(state, FB_OFF + S_HEIGHT)
+        if w0 != 0 && pitch != 0 && basis != 0 && n <= hh0 {
+            var zeilen: u64 = n
+            // Beim Zweitpuffer zaehlt SEINE Groesse, nicht die der Karte.
+            let bb: u64 = kstate.get(state, FB_OFF + S_BACKBYTES)
+            if kstate.get(state, FB_OFF + S_BACK) == basis && bb != 0 {
+                let passt: u64 = bb / pitch
+                if passt < zeilen {
+                    zeilen = passt
+                }
+            }
+            var yy: u64 = 0
+            while yy < zeilen {
+                fill_words(basis +% yy *% pitch, 0, (w0 *% 4) / 8)
+                yy = yy + 1
+            }
+        }
+    }
     kstate.set(state, FB_OFF + S_BAND, n)
     let zh: u64 = font.GLYPH_H * fscale(state)
     if zh != 0 && h > n {
