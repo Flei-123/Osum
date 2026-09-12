@@ -13,7 +13,7 @@
 #   2. Derselbe Kern startet noch einmal auf DENSELBEN Oktetten.
 #      `mount` traegt das Journal nach, `fsrv` prueft, was dasteht, und
 #      `/bin/fsck` prueft die Struktur. Danach sieht der WIRT sich das
-#      Abbild noch einmal an (tools/fsrobust/pruef.py) -- zwei
+#      Abbild noch einmal an (tools/fsrobust/check.py) -- zwei
 #      Umsetzungen, und beide muessen dasselbe sagen.
 #
 # DIE PLATTE HAENGT MIT `cache=directsync` DRAN, und das ist der
@@ -97,13 +97,13 @@ JOFF=$(val fsck joffen)
 NACH=$(tr -d '\000' < "$S2" 2>/dev/null | grep -oa 'ofsj: nachgetragen=[0-9]*' | head -1 | sed 's/.*=//')
 
 # ------------------------------------------------- 3. der Wirt sieht nach
-WS=$(python3 tools/fsrobust/pruef.py struktur "$LIVE" 2>&1 | grep -c BEFUND)
-WI=$(python3 tools/fsrobust/pruef.py inhalt "$LIVE" 2>&1 | grep -c BEFUND)
+WS=$(python3 tools/fsrobust/check.py struktur "$LIVE" 2>&1 | grep -c BEFUND)
+WI=$(python3 tools/fsrobust/check.py inhalt "$LIVE" 2>&1 | grep -c BEFUND)
 WIRT=$(( WS + WI ))
 
 echo "lauf=$NR ms=$MS los=$LOS count=${COUNT:-?} schaeden=${SCH:-?}" \
      "rollok=${ROK:-?},${ROK2:-?} nachgetragen=${NACH:-0} fsck=${FSCK:-?} joffen=${JOFF:-?} wirt=$WIRT rc2=$RC2"
 if [ "$WIRT" != 0 ]; then
-    python3 tools/fsrobust/pruef.py struktur "$LIVE" 2>&1 | sed 's/^/    /'
-    python3 tools/fsrobust/pruef.py inhalt "$LIVE" 2>&1 | sed 's/^/    /'
+    python3 tools/fsrobust/check.py struktur "$LIVE" 2>&1 | sed 's/^/    /'
+    python3 tools/fsrobust/check.py inhalt "$LIVE" 2>&1 | sed 's/^/    /'
 fi

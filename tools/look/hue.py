@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/look/farbton.py -- MISST DEN FARBTON, NICHT DIE HELLIGKEIT.
+"""tools/look/hue.py -- MISST DEN FARBTON, NICHT DIE HELLIGKEIT.
 
-    farbton.py <scheme> <mode> <bild.png> [<bild.png> ...]
+    hue.py <scheme> <mode> <bild.png> [<bild.png> ...]
 
       scheme   day|night|paper|midnight|contrast  (assets/schemes/<n>.scheme)
       mode     light|dark

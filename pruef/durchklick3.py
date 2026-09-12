@@ -11,9 +11,9 @@ WAS DIESES SKRIPT VON durchklick2.py UNTERSCHEIDET
 --------------------------------------------------
 1. ES SIND ALLE 41 PUNKTE und nicht 20. Ein Bericht, der die Haelfte
    der Zeilen aus der Vorrunde nicht mehr enthaelt, ist kein Vergleich.
-2. `suchtext.py` WIRD RICHTIG AUFGERUFEN. In durchklick2.py stand
-   `suchtext.py <bild> <text> <x> <base>`; das Werkzeug will aber
-   `<ppm> <ttf> <px> <text>` (tools/usbimg/suchtext.py, Zeile 165).
+2. `searchtext.py` WIRD RICHTIG AUFGERUFEN. In durchklick2.py stand
+   `searchtext.py <bild> <text> <x> <base>`; das Werkzeug will aber
+   `<ppm> <ttf> <px> <text>` (tools/usbimg/searchtext.py, Zeile 165).
    Der Aufruf lieferte deshalb IMMER None, und die Umlautfrage wurde
    aus der seriellen Leitung beantwortet statt aus dem Bild. Jetzt
    wird wirklich im Foto gesucht -- und PNG vorher nach PPM gewandelt,
@@ -24,7 +24,7 @@ WAS DIESES SKRIPT VON durchklick2.py UNTERSCHEIDET
 
 WIE HIER "GESEHEN" WIRD. Wie in der Vorrunde: entweder die serielle
 Leitung (der Fensterserver meldet jede Fensterlage, jeden Fokus) oder
-das Bild in Zahlen (suchtext.py fuer Text, sicht.py fuer Flaechen).
+das Bild in Zahlen (searchtext.py fuer Text, sicht.py fuer Flaechen).
 Nichts steht im Befund, was nicht aus einem von beiden kommt.
 """
 import json
@@ -89,7 +89,7 @@ def suchtext(bild, text, px=15, ttf="osum-sans.ttf", kasten=None,
        Innenflaeche uebergeben.
     3. DIE KANTENGLAETTUNG. Der Server malt mit Zwischentoenen -- in
        einer Textzeile stehen (224,230,236), (172,177,183),
-       (120,125,131) und (68,73,79) nebeneinander. `suchtext.py`
+       (120,125,131) und (68,73,79) nebeneinander. `searchtext.py`
        vergleicht Tintenpunkte; ein Punkt, der nur halb gedeckt ist,
        zaehlt nicht. Gemessen an derselben Zeile: roh 60 %, nach dem
        Anheben auf Schwarz/Weiss (Schwelle 70) **86 %**, und immer an
@@ -121,7 +121,7 @@ def suchtext(bild, text, px=15, ttf="osum-sans.ttf", kasten=None,
         return None
     try:
         r = subprocess.run(
-            ["python3", os.path.join(REPO, "tools", "usbimg", "suchtext.py"),
+            ["python3", os.path.join(REPO, "tools", "usbimg", "searchtext.py"),
              ppm, os.path.join(REPO, "assets", ttf), str(px), text],
             capture_output=True, text=True, timeout=300)
         m = re.search(r"(\d+)% der \d+ Tintenpunkte", r.stdout)

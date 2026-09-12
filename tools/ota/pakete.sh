@@ -69,7 +69,7 @@ mach() { # <zielname> <quelle> <fassung>
     mkdir -p "$OUT/$1"
     cp "$OUT/$2"/* "$OUT/$1/" 2>/dev/null
     rm -f "$OUT/$1/VERZEICHNIS" "$OUT/$1/VERZEICHNIS.sig"
-    python3 tools/ota/verzeichnis.py "$OUT/$1" --fassung "$3" \
+    python3 tools/ota/listing.py "$OUT/$1" --fassung "$3" \
         --schluessel "$OUT/geheim.key" || exit 1
 }
 
@@ -82,7 +82,7 @@ rm -rf "$OUT/netzfremd"
 mkdir -p "$OUT/netzfremd"
 cp "$OUT/quelle2"/* "$OUT/netzfremd/" 2>/dev/null
 rm -f "$OUT/netzfremd/VERZEICHNIS" "$OUT/netzfremd/VERZEICHNIS.sig"
-python3 tools/ota/verzeichnis.py "$OUT/netzfremd" --fassung 2 \
+python3 tools/ota/listing.py "$OUT/netzfremd" --fassung 2 \
     --schluessel "$OUT/fremdsig.key" || exit 1
 
 # --- der veraenderte Streuwert IM richtig signierten VERZEICHNIS
@@ -90,7 +90,7 @@ rm -rf "$OUT/netzman"
 mkdir -p "$OUT/netzman"
 cp "$OUT/quelle2"/* "$OUT/netzman/" 2>/dev/null
 rm -f "$OUT/netzman/VERZEICHNIS" "$OUT/netzman/VERZEICHNIS.sig"
-python3 tools/ota/verzeichnis.py "$OUT/netzman" --fassung 2 \
+python3 tools/ota/listing.py "$OUT/netzman" --fassung 2 \
     --schluessel "$OUT/geheim.key" --kaputt hallo-2.opk || exit 1
 
 # --- richtiges VERZEICHNIS, falsche Paketsignatur
@@ -100,7 +100,7 @@ cp "$OUT/quelle2"/* "$OUT/netzbadsig/" 2>/dev/null
 rm -f "$OUT/netzbadsig/VERZEICHNIS" "$OUT/netzbadsig/VERZEICHNIS.sig"
 # die Signatur der FASSUNG 1 neben das Paket der Fassung 2 legen
 cp "$OUT/quelle1/hallo-1.opk.sig" "$OUT/netzbadsig/hallo-2.opk.sig"
-python3 tools/ota/verzeichnis.py "$OUT/netzbadsig" --fassung 2 \
+python3 tools/ota/listing.py "$OUT/netzbadsig" --fassung 2 \
     --schluessel "$OUT/geheim.key" || exit 1
 
 # --- DAS UPDATE, DAS NICHT AUF DIE PLATTE PASST
@@ -140,7 +140,7 @@ python3 "$OPK" quelle "$OUT/netzvoll" --schluessel "$OUT/geheim.key" \
     >> "$OUT/gross.log" 2>&1 || { cat "$OUT/gross.log"; exit 1; }
 python3 tools/update/signpak.py "$OUT/geheim.key" "$OUT/netzvoll"/*.opk \
     >> "$OUT/gross.log" 2>&1 || { cat "$OUT/gross.log"; exit 1; }
-python3 tools/ota/verzeichnis.py "$OUT/netzvoll" --fassung 2 \
+python3 tools/ota/listing.py "$OUT/netzvoll" --fassung 2 \
     --schluessel "$OUT/geheim.key" || exit 1
 
 for d in netz1 netz2 netz3 netzfremd netzman netzbadsig netzvoll; do

@@ -27,7 +27,7 @@
 #     Schluessel wurde vor den Daten veroeffentlicht, der Stossallokator
 #     und die Kantenliste gehoerten allen.
 #   * DIE ZWISCHENABLAGE unter dieselbe Sperre -- derselbe Fehler, vom
-#     erweiterten `tools/vielkern/einkern.py` gefunden.
+#     erweiterten `tools/vielkern/onecore.py` gefunden.
 #   * EINEN ZWEITEN RIEGEL IN RING 3 (`wlibc.gload`): ein Kopf, der
 #     nicht zur gemeldeten Laenge passt, wird verworfen statt
 #     multipliziert.
@@ -291,10 +291,10 @@ echo "== 9. die Ein-Kern-Reste, an der Quelle gezaehlt =="
 # neuen Ein-Kern-Reste sind alle in kernel/klog.fi (Runde PROTOKOLL,
 # gibt es in merge6 nicht) und haben eine EIGENE Sperre (atomic.cas auf
 # H_LK), weil alle acht kstate.LOCK_COUNT-Plaetze vergeben sind.
-# einkern.py kennt diese Bauform nicht. Belegt durch
+# onecore.py kennt diese Bauform nicht. Belegt durch
 # tools/protokoll/run.sh: 40000 Zeilen aus 4 Kernen, 0 verschraenkte.
 EK_SOLL=${EK_SOLL:-67}
-ekz=$(python3 tools/vielkern/einkern.py)
+ekz=$(python3 tools/vielkern/onecore.py)
 echo "        $ekz"
 ek=$(echo "$ekz" | sed -n 's/.*offen=\([0-9]*\).*/\1/p')
 if [ -n "$ek" ] && [ "$ek" -le "$EK_SOLL" ] 2>/dev/null; then

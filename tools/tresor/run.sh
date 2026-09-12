@@ -54,7 +54,7 @@
 #      docs/THEFT.md statt einer Ausrede.
 #
 #   9. `backup verify` FINDET SCHADEN. Der WIRT kippt EIN Oktett in der
-#      Packdatei IM ABBILD (`tools/tresor/kaputt.py`) -- von aussen, so
+#      Packdatei IM ABBILD (`tools/tresor/corrupt.py`) -- von aussen, so
 #      wie echter Schaden entsteht -- und derselbe Lauf prueft den
 #      beschaedigten UND einen heilen Speicher.
 #
@@ -579,8 +579,8 @@ is "das sind 10248 von 10248 Oktetten, also alles" "$(sfeld B2 'written bytes')"
 echo "== 9. ein gekipptes Oktett in der Packdatei, von aussen =="
 
 cp "$TMPD/live-shift.img" "$TMPD/kaputt.img"
-python3 tools/tresor/kaputt.py "$TMPD/kaputt.img" /sa/PACK 100 > "$TMPD/kaputt.txt" 2>&1 \
-    && ok "$(cat "$TMPD/kaputt.txt")" || { bad "kaputt.py fehlgeschlagen"; cat "$TMPD/kaputt.txt"; }
+python3 tools/tresor/corrupt.py "$TMPD/kaputt.img" /sa/PACK 100 > "$TMPD/kaputt.txt" 2>&1 \
+    && ok "$(cat "$TMPD/kaputt.txt")" || { bad "corrupt.py fehlgeschlagen"; cat "$TMPD/kaputt.txt"; }
 n=$(cmp -l "$TMPD/live-shift.img" "$TMPD/kaputt.img" 2>/dev/null | wc -l)
 is "genau EIN Oktett im Abbild ist anders" "$n" "1"
 

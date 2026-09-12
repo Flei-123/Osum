@@ -7,7 +7,7 @@
 # ======================================================================
 #
 #  0. DIE TRENNUNG. Kein Anbietername im allgemeinen Teil -- gemessen
-#     mit `tools/konto/trennung.py` ueber acht Dateien, plus die
+#     mit `tools/konto/split.py` ueber acht Dateien, plus die
 #     Gegenprobe, die genau EINE Zeile `if anbieter == "..."` einbaut
 #     und den Wachhund fallen laesst.
 #  1. DAS PROGRAMM BAUT UND PASST. `--profile=app`, keine undefinierte
@@ -104,7 +104,7 @@ FIRNC=${FIRNC:-vendor/firn/bin/firnc}
 # ======================================================================
 echo "== 0. die Trennung: Anbieterwissen bleibt im Ruecken =="
 # ======================================================================
-python3 tools/konto/trennung.py . --zahlen > "$TMPD/tr.txt" 2>&1
+python3 tools/konto/split.py . --zahlen > "$TMPD/tr.txt" 2>&1
 TRRC=$?
 cat "$TMPD/tr.txt" | sed 's/^/        /'
 is "die Trennungswache" "$TRRC" "0"
@@ -124,7 +124,7 @@ s = s.replace("fn befehl_liste() -> i32 {",
               'fn befehl_liste() -> i32 {\n    var wo: [u8; 6] = "xoffi\\0"\n    if gleich(wo, wo) { }\n')
 open(p, "w", encoding="utf-8").write(s)
 PY
-python3 tools/konto/trennung.py "$TMPD/kaputt" > "$TMPD/tr2.txt" 2>&1
+python3 tools/konto/split.py "$TMPD/kaputt" > "$TMPD/tr2.txt" 2>&1
 if [ $? -ne 0 ] && grep -q VERSTOSS "$TMPD/tr2.txt"; then
     ok "Gegenprobe: EIN if mit einem Anbieternamen im allgemeinen Teil faellt auf"
 else

@@ -39,7 +39,7 @@ herunterladen."*
 | `module/ps2maus.fi` | 219 | **das Modul.** Enthält eine Zeile Treiber: `import ps2m` |
 | `module/ps2maus-fremd.fi` | 187 | die Gegenprobe mit einem Namen, den der Kern nicht anbietet |
 | `tools/modul/mkomod.py` | 257 | `.omod` bauen und signieren, samt allen kaputten Fassungen |
-| `tools/modul/bau.sh` | 95 | den Modulbaum zusammenstellen und übersetzen |
+| `tools/modul/build.sh` | 95 | den Modulbaum zusammenstellen und übersetzen |
 | `tools/modul/run.sh` | 381 | die Abnahme, zehn Abschnitte |
 | `tools/modul/paket.sh` | 117 | `.omod` → `.opk` → Speicher → Platte |
 | `docs/MODUL-BEFUND.md` | 740 | Befund und Entwurf, mit 51 Quellen |
@@ -275,7 +275,7 @@ Ausfuhrtafel ohne `--defsym` aus.
 
 ```
 module/ps2maus.fi
-     │  tools/modul/bau.sh            firnc, strip, Kopf, Ed25519
+     │  tools/modul/build.sh            firnc, strip, Kopf, Ed25519
      ▼
 ps2maus.omod            58 656 Oktett     ← das prueft DER KERN
      │  pkg/opk.py bauen

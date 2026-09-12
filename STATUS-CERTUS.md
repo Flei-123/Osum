@@ -23,7 +23,7 @@ installieren?
 | Osum | `kernel/user/wlib.fi` | das Widget **Leinwand** (K_LEINWAND) + Ereignisring |
 | Osum | `kernel/user/wlibc.fi` | Glyphenspeicher ohne `libc.mem` (`gmem`) |
 | Osum | `kernel/user/sysstub.s` | die Systemruf-Tür als acht Befehlsfolgen hinter `extern fn` |
-| Osum | `kernel/user/certus/entkern.py`, `bau.sh` | wlib/wlibc/ulib/libc **ohne** `asm` + der Bau von `/bin/certus` |
+| Osum | `kernel/user/certus/entkern.py`, `build.sh` | wlib/wlibc/ulib/libc **ohne** `asm` + der Bau von `/bin/certus` |
 | Osum | `kernel/proc.fi`, `procfs.fi`, `arch/x86_64/{boot,smp,switch}.s`, `sched.fi` | Adressraum, `/proc/self`, SSE, `fxsave` |
 | Osum | `tools/laden/*`, `assets/apps/certus.osp` | das Paket `certus-1.opk` im Katalog |
 | Osum | `tools/certus/run.sh` | die Abnahme dieser Runde |

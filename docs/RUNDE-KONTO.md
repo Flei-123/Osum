@@ -98,7 +98,7 @@ ohne `crt.s` und ohne libc.
 
 * `tools/konto/attrappe.py` (400 Zeilen) — der Testaufbau: die drei
   APIs als Nachbau über TLS 1.3, mit Protokoll **jeder** Kopfzeile.
-* `tools/konto/trennung.py` (140) — die Trennungswache.
+* `tools/konto/split.py` (140) — die Trennungswache.
 * `tools/konto/run.sh` (792) — die Messung, **107 Zusicherungen**.
 * `tools/konto/dbg.sh` — die kurze Schleife zum Fehlersuchen.
 
@@ -144,7 +144,7 @@ Die wichtigsten Werte:
 | `einemandant` | Mandant fällt aus der Kennung | Bereich leer, andere Kennung |
 | `claimcheck` | prüft `master_session` nicht | Anmeldung geht durch |
 | `rechte` | macht aus `is_admin` eine lokale Berechtigung | `/etc/konto.rechte` entsteht |
-| (Trennung) | ein `if` mit Anbietername im allgemeinen Teil | `trennung.py` schlägt an |
+| (Trennung) | ein `if` mit Anbietername im allgemeinen Teil | `split.py` schlägt an |
 
 Sechs Gegenproben, gefordert waren drei.
 

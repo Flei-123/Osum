@@ -58,10 +58,10 @@ Alt+Tab, Tippen, AltGr — hat den Schalter gemessen und nicht das System.
 | Rohdaten | `pruef/laeufe/dk1280/befund.json`, `pruef/laeufe/dk1920/befund.json`, serielle Mitschnitte daneben |
 
 **Wie hier „gesehen" wird** — wie in der Vorrunde, nichts wird behauptet:
-1. `tools/usbimg/suchtext.py` rastert eine Textzeile mit `assets/osum-sans.ttf`
+1. `tools/usbimg/searchtext.py` rastert eine Textzeile mit `assets/osum-sans.ttf`
    und gibt den Anteil getroffener Tintenpunkte. 100 % = der Text steht da.
    **Korrektur gegenüber dem ersten Entwurf dieser Runde:** der Aufruf lautet
-   `suchtext.py <ppm> <ttf> <px> <text>`; ein Skript, das die Argumente anders
+   `searchtext.py <ppm> <ttf> <px> <text>`; ein Skript, das die Argumente anders
    herum übergibt, bekommt immer `None` und beantwortet die Umlautfrage dann
    versehentlich aus der seriellen Leitung.
 2. `sicht.py vergleiche` zählt geänderte Bildpunkte zwischen zwei Fotos.
@@ -343,7 +343,7 @@ fünf Punkten oben wären es 31 bis 32.
 
 Nicht aus Vergessen, sondern gemessen:
 
-* Der Bauweg existiert (`kernel/user/certus/bau.sh`, `entkern.py`) und ein
+* Der Bauweg existiert (`kernel/user/certus/build.sh`, `entkern.py`) und ein
   **fertig für Osum gebundenes Binärformat** liegt vor:
   `/root/osum-certus/.certus-bau/certus.dbg`, Einsprung **`0x401000e8`** — das
   ist Osums Ring-3-Lage aus `kernel/user/user.ld`, also ein echtes Osum-Programm.
@@ -353,7 +353,7 @@ Nicht aus Vergessen, sondern gemessen:
 **6,49 MB passen nicht in 4,63 MB.** Certus käme nur hinein, wenn das
 Wurzelabbild wächst (`FS_MIB` in `tools/usbimg/build.sh`, derzeit 20 MiB) —
 das ist eine Entscheidung über das Stick-Abbild und keine, die ich in einer
-Meßrunde nebenbei treffe. Der Quellbaum `/root/certus-sammeln`, den `bau.sh`
+Meßrunde nebenbei treffe. Der Quellbaum `/root/certus-sammeln`, den `build.sh`
 erwartet, existiert auf dieser Maschine ohnehin nicht mehr; ein Neubau wäre
 ein eigener Lauf.
 
@@ -411,7 +411,7 @@ UEFI-Lauf und ist nicht abschließend geklärt.
 | `assets/tiling.conf` | `bind mod+tab next-window` |
 | `tools/tiling/run.sh` | die erwartete Zahl der Zusagen kommt aus der Quelle |
 | `pruef/start.sh` | **`qemu-xhci` statt `usb-ehci`** — der Fund aus Abschnitt 3 |
-| `pruef/durchklick3.py` | alle 41 Punkte, `suchtext.py` richtig aufgerufen, Klickziele aus der Fensterliste des Servers |
+| `pruef/durchklick3.py` | alle 41 Punkte, `searchtext.py` richtig aufgerufen, Klickziele aus der Fensterliste des Servers |
 | `assets/beispiel/hallo.fi` | Beispielquelle auf dem Stick; der Aufruf im Kopf korrigiert (`> ziel.s`, **kein** `-o` — das schlägt auf Osum mit Code 7 fehl) |
 
 ---
@@ -501,7 +501,7 @@ gemessen:
    andere Fenster; gesucht werden muß im Inneren des Terminals.
 3. **Die Kantenglättung.** In einer Textzeile stehen `(224,230,236)`,
    `(172,177,183)`, `(120,125,131)` und `(68,73,79)` nebeneinander;
-   `suchtext.py` zählt Tintenpunkte, und ein halb gedeckter Punkt zählt nicht.
+   `searchtext.py` zählt Tintenpunkte, und ein halb gedeckter Punkt zählt nicht.
    Dieselbe Zeile: **roh 60 %, nach dem Anheben auf Schwarz/Weiß 86 %** — und
    immer an derselben Stelle (`x=151`). Das Wort steht da; der Rest ist der
    Unterschied zwischen dem Rasterer des Systems und dem von PIL.

@@ -10,7 +10,7 @@
 # Python. tools/design/knopfzoom.py schneidet daraus die drei Knoepfe
 # heraus und vergroessert sie.
 #
-# WARUM EIN EIGENER LAEUFER: `aufnahme.sh` fotografiert sieben feste
+# WARUM EIN EIGENER LAEUFER: `capture.sh` fotografiert sieben feste
 # Ansichten und braucht dafuer Minuten; hier geht es um EINE Ecke von
 # 260x80 Bildpunkten, und die muss bei Justins Aufloesung entstehen --
 # bei 1280x800 ist das Kreuz zehn Bildpunkte gross und der Fehler,

@@ -36,7 +36,7 @@ rm -f "$OUT/fehler.txt"
 
 echo "== $N Laeufe, -smp $SMP, mit Bewegungen =="
 
-bash tools/design/aufnahme.sh "$OUT/bau" nurbau=ja shape=osum \
+bash tools/design/capture.sh "$OUT/bau" nurbau=ja shape=osum \
     res=1920x1080 > "$OUT/bau.log" 2>&1 || {
     echo "FEHLGESCHLAGEN: bauen"; tail -20 "$OUT/bau.log"; exit 1; }
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""lies2.py -- den Text im Terminalfenster LESEN, auch bei 2x-Bild.
+"""read2.py -- den Text im Terminalfenster LESEN, auch bei 2x-Bild.
 
-    python3 lies2.py <ppm> [--x0 N --y0 N --skala N --cols N --rows N]
+    python3 read2.py <ppm> [--x0 N --y0 N --skala N --cols N --rows N]
 
 WAS DIE VORLAEUFER FALSCH GEMACHT HABEN, und warum das wichtig ist:
 

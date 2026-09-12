@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/bridge/gegenstelle.py -- DIE GEGENSTELLE FUER DEN PRUEFSTAND.
+# tools/bridge/peer.py -- DIE GEGENSTELLE FUER DEN PRUEFSTAND.
 #
 # DAS IST NICHT DER ECHTE JARVIS-SERVER. Der laeuft anderswo, spricht
 # ein anderes Protokoll und ist nicht Teil dieses Repos. Dieses Programm
@@ -14,7 +14,7 @@
 # getrennt: die Zahlen kommen von aussen, nicht aus Osum.
 #
 # Aufruf:
-#   gegenstelle.py --cert C --key K --port P --auftraege A --aus D
+#   peer.py --cert C --key K --port P --auftraege A --aus D
 #                  [--kopplung CODE] [--abriss] [--kein-beweis]
 #                  [--wartezeit S]
 #

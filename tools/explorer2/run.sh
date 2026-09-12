@@ -18,7 +18,7 @@
 # sie richtig geschieht (Quelltext).
 #
 # DIE MASCHINE LAEUFT EINMAL, und ein Drehbuch klickt sich durch. Der
-# Grund steht ausgeschrieben in `tools/design/aufnahme.sh`: je Bild
+# Grund steht ausgeschrieben in `tools/design/capture.sh`: je Bild
 # eine eigene Maschine sind je Bild eine eigene Uhrzeit und ein eigener
 # Zufall, und ein Vergleich mit Rauschen darin ist keiner.
 set -uo pipefail
@@ -48,7 +48,7 @@ python3 -c "import PIL" 2>/dev/null || {
 # ------------------------------------------------------------ 1. bauen
 echo "== 1. bauen =="
 export DESIGNBUILD=${DESIGNBUILD:-/tmp/osum-explorer2-build}
-bash tools/design/aufnahme.sh "$OUT/bau" nurbau=ja res="$RES" \
+bash tools/design/capture.sh "$OUT/bau" nurbau=ja res="$RES" \
     > "$OUT/bau.log" 2>&1 \
     || { echo "FEHLGESCHLAGEN: der Bau"; tail -20 "$OUT/bau.log"; exit 1; }
 ok "Kern und Programme uebersetzen"
@@ -216,7 +216,7 @@ warte 4
 foto 18-ende
 DREH
 
-bash tools/design/aufnahme.sh "$OUT/lauf" res="$RES" \
+bash tools/design/capture.sh "$OUT/lauf" res="$RES" \
     extra='nostart wigapp=/bin/explorer' drehbuch="$OUT/dreh.txt" \
     > "$OUT/lauf.log" 2>&1
 S="$OUT/lauf/serial.txt"

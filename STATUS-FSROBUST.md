@@ -41,8 +41,8 @@ danach aus dem Abbild gelesen und verglichen.
 | `kernel/user/fsrw.fi` | das Programm, dem der Strom ausgeht |
 | `kernel/user/fsrv.fi` | was danach dasteht |
 | `tools/fsrobust/crash.sh` | ein Stromausfall (SIGKILL), zwei Starts |
-| `tools/fsrobust/pruef.py` | dieselbe Prüfung auf dem Wirt — zweite Umsetzung |
-| `tools/fsrobust/kaputt.py` | dreizehn mit Absicht zerstörte Abbilder |
+| `tools/fsrobust/check.py` | dieselbe Prüfung auf dem Wirt — zweite Umsetzung |
+| `tools/fsrobust/corrupt.py` | dreizehn mit Absicht zerstörte Abbilder |
 | `tools/fsrobust/run.sh` | der Abnahmeabschnitt (Abschnitt 29 in `test.sh`) |
 | `docs/OFS-LIMITS.md` | die Grenzen |
 | `docs/OFS-JOURNAL.md` | die Entscheidung, das Verfahren, der Beweis, die Lücken |
@@ -85,7 +85,7 @@ mit Schaden; 60 mit `nojournal`, 7 Läufe mit Schaden.
 
 Geprüft wird jeder Lauf dreimal und von drei verschiedenen Stellen:
 `fsrv` in Ring 3 (durch dieselben Systemaufrufe wie jedes andere
-Programm), `/bin/fsck` roh über `/dev/hda`, und `tools/fsrobust/pruef.py`
+Programm), `/bin/fsck` roh über `/dev/hda`, und `tools/fsrobust/check.py`
 auf dem Wirt aus dem Abbild. Die Langfassung mit der Aufteilung der
 Schäden steht in `docs/OFS-JOURNAL.md` § 5.
 
@@ -100,7 +100,7 @@ Zeigerbaum auf Bereich und Doppelbelegung, die Karte gegen die
 Wirklichkeit und den Verzeichnisbaum. Mit `-r` behebt es, was eindeutig
 ist: verlorene Blöcke freigeben, benutzte in der Karte nachtragen.
 
-**Dass es fertig wird, ist gemessen.** `tools/fsrobust/kaputt.py` baut
+**Dass es fertig wird, ist gemessen.** `tools/fsrobust/corrupt.py` baut
 dreizehn Abbilder, die mit Absicht kaputt sind; auf jedem einzelnen
 schaltet der Kern selbst ab (exit 21) und `fsck` meldet eine Zahl:
 
@@ -148,7 +148,7 @@ hängen statt an eine Liste von Aufrufstellen: was später dazukommt, ist
 von selbst dabei.
 
 Gemessen wird es auch: `fsrw` setzt den Modus jeder Datei auf
-`0600 | (g % 8)`, **vor** dem Zähler; `fsrv` und `pruef.py` prüfen ihn
+`0600 | (g % 8)`, **vor** dem Zähler; `fsrv` und `check.py` prüfen ihn
 für jede Datei bis zum Zähler. Steht dort die Vorgabe 0644, ist eine
 Inode-Änderung verloren gegangen, die der Zähler für erledigt erklärt
 hat.

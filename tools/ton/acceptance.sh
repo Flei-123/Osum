@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/ton/abnahme.sh -- DIE 60-SEKUNDEN-ABNAHME DER RUNDE TON-2.
+# tools/ton/acceptance.sh -- DIE 60-SEKUNDEN-ABNAHME DER RUNDE TON-2.
 #
-#   bash tools/ton/abnahme.sh [ausgabeverzeichnis]
+#   bash tools/ton/acceptance.sh [ausgabeverzeichnis]
 #
 # ZWOELF LAEUFE: -smp 1 und -smp 4, Quelle ide und ram, je DREI Mal.
 #

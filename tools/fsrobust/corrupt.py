@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/fsrobust/kaputt.py -- Abbilder, die MIT ABSICHT kaputt sind.
+"""tools/fsrobust/corrupt.py -- Abbilder, die MIT ABSICHT kaputt sind.
 
 Die Aufgabe dieser Runde verlangt von `/bin/fsck` zwei Dinge, und das
 zweite ist das schwerere: es soll Schaeden finden UND es soll auch bei
@@ -33,7 +33,7 @@ stillschweigend machen koennte:
                Kennung und eine falsche Pruefsumme -- genau das, was
                ein halb geschriebener Sektor hinterlaesst.
 
-    kaputt.py <grundabbild> <ausgabeverzeichnis> [<fall> ...]
+    corrupt.py <grundabbild> <ausgabeverzeichnis> [<fall> ...]
 """
 
 import os

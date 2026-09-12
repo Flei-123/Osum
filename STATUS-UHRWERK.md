@@ -197,7 +197,7 @@ auf seinem Brett doch etwas anderes klemmt.
 | `tools/uhrwerk/bauen.sh` | Kern + Wurzelabbild mit `clock_seconds=1` |
 | `tools/uhrwerk/uhrprobe.sh` | fotografiert mehrmals **ohne Eingabe** und vergleicht den Uhrstreifen; sagt "DIE UHR STEHT" oder "LAEUFT" |
 | `tools/uhrwerk/messen.sh` | die Zahlen aus der seriellen Leitung (composes, TICKS, LOOP, PRE, HZ, die Zaehler der Leiste) |
-| `tools/uhrwerk/abnahme.sh` | 5 Laeufe je Kernzahl + Eingabe-Gegenprobe |
+| `tools/uhrwerk/acceptance.sh` | 5 Laeufe je Kernzahl + Eingabe-Gegenprobe |
 
 `UHR_W`/`UHR_H` in der Umgebung setzen die Aufloesung (Vorgabe
 3440x1440).

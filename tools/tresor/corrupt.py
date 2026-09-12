@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/tresor/kaputt.py -- flip ONE octet inside a file of an OFS image.
+"""tools/tresor/corrupt.py -- flip ONE octet inside a file of an OFS image.
 
 This is the counter-check of `backup verify`. A verifier that only ever sees
 healthy stores proves nothing at all; so the HOST reaches into the disk
@@ -12,7 +12,7 @@ The damage is done from OUTSIDE the kernel on purpose. That is what real
 damage looks like: a drive that flips a bit does not ask the file system
 first.
 
-    kaputt.py <image> <pfad> <versatz> [<xor>]
+    corrupt.py <image> <pfad> <versatz> [<xor>]
 
 Prints the octet before and after, so the runner can show what it did.
 """

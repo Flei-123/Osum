@@ -69,7 +69,7 @@ def fenster():
 
 
 def suche(bild, text, ttf, px, kasten=None):
-    """suchtext.py auf dem ganzen Bild -- oder nur auf einem Ausschnitt."""
+    """searchtext.py auf dem ganzen Bild -- oder nur auf einem Ausschnitt."""
     from PIL import Image
     im = Image.open(bild).convert("RGB")
     if kasten:
@@ -78,7 +78,7 @@ def suche(bild, text, ttf, px, kasten=None):
     im.save(ppm)
     try:
         r = subprocess.run(
-            ["python3", os.path.join(REPO, "tools", "usbimg", "suchtext.py"),
+            ["python3", os.path.join(REPO, "tools", "usbimg", "searchtext.py"),
              ppm, os.path.join(REPO, "assets", ttf), str(px), text],
             capture_output=True, text=True, timeout=300)
         m = re.search(r"(\d+)% der \d+ Tintenpunkte", r.stdout)

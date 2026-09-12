@@ -162,7 +162,7 @@ Sperre stirbt nicht das Bild, sondern **der Kern**.
 
 ## 4. Die Zwischenablage — derselbe Fehler, vom Werkzeug gefunden
 
-Der erweiterte `tools/vielkern/einkern.py` (Abschnitt 6) hat in
+Der erweiterte `tools/vielkern/onecore.py` (Abschnitt 6) hat in
 derselben Datei einen zweiten geteilten Puffer gemeldet:
 `wig.clip_set`/`clip_get` über `base(state) + CLIP_OFF`.
 
@@ -222,7 +222,7 @@ den es zu messen gar nicht gibt.
 
 ---
 
-## 6. `einkern.py` sieht jetzt die zweite Bauform
+## 6. `onecore.py` sieht jetzt die zweite Bauform
 
 Das Werkzeug hat den Fehler dieser Runde **nicht** gesehen, und der
 Grund ist eine Zeile Text: die Bühne heißt nicht `state +
@@ -495,7 +495,7 @@ mkfs: '/bin/taskmgr' gibt es nicht
 Wörtlich der Bruch aus MERGE-6 4.1, an einer dritten Stelle:
 `assets/apps/taskmgr.osp` ist ein Bündel, ein Bündel ist ein Verweis auf
 eine Datei unter `/bin`, und `/bin` dieses Läufers hat kein `taskmgr`.
-MERGE-6 hat den Riegel (`bundle.py nur=…`) in `tools/design/aufnahme.sh`
+MERGE-6 hat den Riegel (`bundle.py nur=…`) in `tools/design/capture.sh`
 und `tools/vielkern/run.sh` eingebaut — hier nicht, weil dieser Läufer
 in jener Runde nie lief. Dazu fehlte `$OUT/schluessel.pub`; er liegt in
 `/srv/store/osum/aktuell/` und wird jetzt von dort geholt.
@@ -534,7 +534,7 @@ geschlossen, und der Nachweis hängt nicht am Glück:
 | Das Rennen ist erzwungen | `zeichenrennen`: 0 von 8 000 / 0 von 16 000, blind 1 065 / 1 957 (Abschnitt 5) |
 | Die Gegenprobe fällt hart | `glyphtafelfrei` → Panic in `ttf.fi:975` (3.1) |
 | Nichts kaputtgegangen | 40 Schreibtischläufe, 4 und 8 Kerne, 0 Panics (Abschnitt 8) |
-| Das Werkzeug sieht die Bauform | `einkern.py`: gesperrt 13 → 18, offen 66 → **64** (Abschnitt 6) |
+| Das Werkzeug sieht die Bauform | `onecore.py`: gesperrt 13 → 18, offen 66 → **64** (Abschnitt 6) |
 | Der Laden nimmt ab | `LADEN: 31 passed, 0 failed` (Abschnitt 10) |
 | Der Prüfstand ist zu Ende gefahren | 65 von 65, 1167 grüne Zusagen (Abschnitt 9) |
 

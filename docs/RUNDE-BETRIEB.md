@@ -71,7 +71,7 @@ Geändert:
 | `kernel/user/ota.fi` | OTA2, Schlüsselkette, Ersatzschlüssel, Sperrliste (gemerkt), `name=` freiwillig |
 | `kernel/user/opk.fi` | der Ersatzschlüssel gilt auch für Paket- und INDEX-Signaturen |
 | `tools/install/build.sh` | `/system/ersatz.pub`, `/system/SCHLUESSELGEN`, `dhcp` und `host` im Abbild, Apps bauen mit `FIRNLIB=<repo>/lib` |
-| `tools/ota/verzeichnis.py` | erzeugt OTA2 |
+| `tools/ota/listing.py` | erzeugt OTA2 |
 | `tools/ota/server.py` | liefert auch Unterpfade aus (`v/2/VERZEICHNIS`) |
 
 **Berührte Dateien, vollständig** (die Runden MERGE-3 und AVX arbeiten
@@ -79,7 +79,7 @@ parallel): `lib/libc/dns.fi`, `lib/libc/dnswire.fi` (beide neu),
 `kernel/user/host.fi`, `kernel/user/dnswt.fi` (neu),
 `kernel/user/dhcp.fi`, `kernel/user/ota.fi`, `kernel/user/opk.fi`,
 `kernel/app/fetch.fi`, `tools/install/build.sh`, `tools/ota/server.py`,
-`tools/ota/verzeichnis.py`, `tools/ota/schluesselbund.py` (neu),
+`tools/ota/listing.py`, `tools/ota/schluesselbund.py` (neu),
 `tools/ota/veroeffentlichen.py` (neu), alles unter `tools/betrieb/`
 (neu), `docs/RUNDE-BETRIEB.md` (neu). **`kernel/sched.fi`,
 `kernel/cpu.fi` und `kernel/kmain.fi` sind NICHT angefasst.**
@@ -726,7 +726,7 @@ Geprüft:
   (`dhcp` und `host` sind neu darin).
 * **Das Abbild installiert sich und kommt hoch** — `install: fertig`,
   Beendigungscode 21, dreizehn Starts in diesem Lauf.
-* **`tools/ota/verzeichnis.py` erzeugt OTA2**, damit der Läufer der Runde
+* **`tools/ota/listing.py` erzeugt OTA2**, damit der Läufer der Runde
   OTA gegen den neuen `/bin/ota` weiterläuft. Ein Gerät dieser Runde
   lehnt ein OTA1-Verzeichnis ausdrücklich ab (Abschnitt 4.1); das ist
   eine **gewollte** Verhaltensänderung und keine Regression.

@@ -243,7 +243,7 @@ gegen jarvis.fleitec.com** — ein völlig anderes Protokoll als `jarvisd`
 JARVIS-Server **keinen Endpunkt**, der `jarvisd` annehmen würde.
 
 Die einzige funktionierende Gegenstelle ist
-`tools/bridge/gegenstelle.py` im Osum-Zweig — ein Prüfstandsserver mit
+`tools/bridge/peer.py` im Osum-Zweig — ein Prüfstandsserver mit
 eigenem Zertifikat, der die Aufträge aus einer Datei liest.
 
 **Was gebaut werden müsste** (ich fasse den JARVIS-Server nicht ohne

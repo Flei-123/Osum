@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/design/kreuzpruef.py -- IST DAS X DOPPELT GEZEICHNET?
+# tools/design/crosscheck.py -- IST DAS X DOPPELT GEZEICHNET?
 #
 # Justins Foto vom 10.09. 18:39: das Schliesskreuz ist zerfranst, mit
 # einem fetten schraegen Zusatzbalken. Minimieren (ein Strich) und

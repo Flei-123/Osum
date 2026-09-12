@@ -13,7 +13,7 @@ liegen; alle Bilder sind Bildschirmfotos aus QEMU in
 oder Bild.
 
 Ausgangsstand: `main` @ 163984d, `kernel/fb.fi` 2.910 Zeilen.
-Werkzeuge der Runde: `tools/schirm/bau.sh` (Kern, Programme, Platte)
+Werkzeuge der Runde: `tools/schirm/build.sh` (Kern, Programme, Platte)
 und `tools/schirm/boot.sh` (ein Start, ein Foto, ein Mitschnitt).
 
 ---

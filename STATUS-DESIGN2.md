@@ -315,7 +315,7 @@ der von meiner neuen Tafel uebermalt wird.
 
 War es nicht. Der Lauf lief zusammen mit vier anderen QEMU-Instanzen
 gleichzeitig. Einzeln nachgestellt (`shape=modern scheme=day`,
-`tools/softui/pruef.py` auf die frische Aufnahme):
+`tools/softui/check.py` auf die frische Aufnahme):
 
 ```
 pruef: 3 Beschriftungen geprueft, 0 beanstandet

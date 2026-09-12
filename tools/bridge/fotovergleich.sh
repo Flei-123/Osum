@@ -173,7 +173,7 @@ if [ -s "$W/eins.ppm" ] && [ -s "$W/zwei.ppm" ]; then
     #    selbst auf der seriellen Leitung, und `serial.put` spiegelt auf
     #    den Schirm (kernel/fb.fi, S_ECHO). Die Konsole rollt dabei. Die
     #    Baender sind darum hoechstens 13 Zeilen hoch -- Texthoehe, kein
-    #    Rauschen; `markefinden.py` rechnet das gleich darunter nach.
+    #    Rauschen; `findbrand.py` rechnet das gleich darunter nach.
     AB=$(grep -a "^abweichende Oktette in den gleichen Zeilen:" "$W/vergleich.txt" | awk "{print \$7}")
     if [ "${AB:-1}" = 0 ] && [ "${GZ:-0}" -gt 50 ] 2>/dev/null; then
         ok "in den $GZ unveraenderten Zeilen: 0 abweichende Oktette -- kein Zufallsspeicher"
@@ -191,7 +191,7 @@ if [ -s "$W/eins.ppm" ] && [ -s "$W/zwei.ppm" ]; then
     # 3. Die Gegenprobe auf den INHALT: die Marke, die zwischen den
     #    beiden Aufnahmen geschrieben wurde, muss im ZWEITEN Bild als
     #    heller Text stehen und im ERSTEN nicht.
-    python3 tools/bridge/markefinden.py "$W/eins.ppm" "$W/zwei.ppm" \
+    python3 tools/bridge/findbrand.py "$W/eins.ppm" "$W/zwei.ppm" \
         > "$W/marke.txt" 2>&1
     cat "$W/marke.txt" | sed 's/^/        /'
     grep -qa "^MARKE-GEFUNDEN" "$W/marke.txt" \

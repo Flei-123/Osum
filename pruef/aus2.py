@@ -34,7 +34,7 @@ os.makedirs(SHOTS, exist_ok=True)
 SER = os.path.join(D, "serial.txt")
 REPO = os.path.abspath(os.path.join(HIER, ".."))
 MONO = os.path.join(REPO, "assets", "osum-mono.ttf")
-SUCH = os.path.join(REPO, "tools", "usbimg", "suchtext.py")
+SUCH = os.path.join(REPO, "tools", "usbimg", "searchtext.py")
 RAND, TITEL = 2, 22
 
 

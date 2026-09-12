@@ -293,7 +293,7 @@ log -- the host reads the restored tree back **out of the disk image**
 
 `backup verify` re-reads every chunk out of the pack and hashes it again.
 Counter-check: the host flips **one octet** inside the pack file *in the
-disk image*, from outside the kernel (`tools/tresor/kaputt.py`; `cmp`
+disk image*, from outside the kernel (`tools/tresor/corrupt.py`; `cmp`
 confirms exactly 1 octet differs). The same run then checks the damaged
 store and an intact one: **1 corrupt chunk found in the damaged store, 0
 in the intact one.**

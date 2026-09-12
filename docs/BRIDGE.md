@@ -17,7 +17,7 @@ Gegenstück für Osum.
 | `kernel/user/jarvisctl.fi` | `profile kernel` | was der Mensch am Gerät sieht und entscheidet |
 | `assets/jarvis/rechte.conf` | — | die mitgelieferte Rechteliste mit Begründungen |
 | `tools/bridge/build.sh` | — | Kern + Userland + Helfer, zwei Profile in einem Abbild |
-| `tools/bridge/gegenstelle.py` | — | die Gegenstelle für den Prüfstand (TLS 1.3, Python) |
+| `tools/bridge/peer.py` | — | die Gegenstelle für den Prüfstand (TLS 1.3, Python) |
 | `tools/bridge/run.sh` | — | die Abnahme, dreizehn Abschnitte |
 
 **Es gab schon eine Datei namens `kernel/user/jarvisd.fi`** — die Runde
@@ -214,7 +214,7 @@ und das Werkzeug, das ihn sichtbar macht, dann mitkommen soll.
 
 ## Was für den echten JARVIS-Server noch fehlt
 
-Gemessen wurde gegen `tools/bridge/gegenstelle.py`, einen TLS-1.3-Server
+Gemessen wurde gegen `tools/bridge/peer.py`, einen TLS-1.3-Server
 in Python, **nicht** gegen den echten JARVIS-Server. Alles Grüne ist eine
 Aussage über Osums Seite und über das Protokoll dieser Runde. Offen:
 

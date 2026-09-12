@@ -25,7 +25,7 @@
 # keinen Treiber. `docs/WLAN.md` sagt, warum, was es kostet und was
 # genau am echten Blech noch fehlt.
 #
-# WARUM NICHT hostapd: gemessen und im Kopf von `gegenstelle.py`
+# WARUM NICHT hostapd: gemessen und im Kopf von `peer.py`
 # festgehalten -- Debian baut hostapd/wpa_supplicant ohne
 # CONFIG_TESTING_OPTIONS, damit fehlen EAPOL_RX und MGMT_RX_PROCESS;
 # `driver=wired` ist auf 802.1X verdrahtet und ruehrt die

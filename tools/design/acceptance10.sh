@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/design/abnahme10.sh -- DIE ABNAHME DER RUNDE MERGE-10.
+# tools/design/acceptance10.sh -- DIE ABNAHME DER RUNDE MERGE-10.
 #
-#   bash tools/design/abnahme10.sh <ausgabeverzeichnis>
+#   bash tools/design/acceptance10.sh <ausgabeverzeichnis>
 #
 # ACHT ANSICHTEN, ZWEI AUFLOESUNGEN, ZWEI MODI. Und jede Ansicht wird
 # WIRKLICH aufgemacht.
 #
 # WARUM DIESES SKRIPT UEBERHAUPT EXISTIERT, obwohl es
-# `tools/design/aufnahme.sh` schon gibt: der PROGRAMM-AUDIT vom
+# `tools/design/capture.sh` schon gibt: der PROGRAMM-AUDIT vom
 # 09.09.2026 hat gezaehlt, dass bei 1280x800 zuletzt SECHS von acht
 # Bildern eines Laufs Oktett-gleich waren -- Explorer, Dialog,
 # Kontrollzentrum und Einstellungen gingen nie auf, und 15 von 22
@@ -34,7 +34,7 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 
-OUT=${1:?usage: abnahme10.sh <outdir>}
+OUT=${1:?usage: acceptance10.sh <outdir>}
 mkdir -p "$OUT"
 
 # Die acht Ansichten. Vier davon sind eigene Programme und bekommen je
@@ -76,7 +76,7 @@ lauf() {
             *) rest+=("$a") ;;
         esac
     done
-    bash tools/design/aufnahme.sh "$d" \
+    bash tools/design/capture.sh "$d" \
         scheme=day $ds mode="$mode" res="$res" lang=en \
         extra="$ex" ${rest[@]+"${rest[@]}"} \
         > "$d/bau.log" 2>&1

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/konto/trennung.py -- RUNDE KONTO: DIE TRENNUNGSWACHE.
+"""tools/konto/split.py -- RUNDE KONTO: DIE TRENNUNGSWACHE.
 
 Die Zusage lautet: ANBIETERWISSEN BLEIBT IM RUECKEN. Sobald irgendwo im
 allgemeinen Teil `wenn anbieter == "..."` steht, ist die Trennung kaputt
@@ -11,8 +11,8 @@ sucht darin nach den Namen der Ruecken. Gefunden wird nichts -- ausser
 in der EINEN Anmeldeliste in `konto.fi`, die es geben muss, damit ein
 Ruecken ueberhaupt in die Tafel kommt.
 
-    trennung.py <wurzel>            prueft und meldet
-    trennung.py <wurzel> --zahlen   nur die Zahlen, fuer den Laeufer
+    split.py <wurzel>            prueft und meldet
+    split.py <wurzel> --zahlen   nur die Zahlen, fuer den Laeufer
 
 Rueckgabe 0, wenn die Trennung haelt, sonst 1.
 """
@@ -121,7 +121,7 @@ def ruecken_zahlen(wurzel):
 
 def main():
     if len(sys.argv) < 2:
-        print("trennung.py <wurzel> [--zahlen]")
+        print("split.py <wurzel> [--zahlen]")
         return 2
     wurzel = sys.argv[1]
     zahlen = "--zahlen" in sys.argv

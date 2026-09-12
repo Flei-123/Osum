@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/design/fenster.sh -- FENSTER, TASKLEISTE UND VOLLBILD WIE BEI WINDOWS
+# tools/design/window.sh -- FENSTER, TASKLEISTE UND VOLLBILD WIE BEI WINDOWS
 #
-#   bash tools/design/fenster.sh
+#   bash tools/design/window.sh
 #
 # Justins Korrektur, woertlich: "in Windows koennen die Fenster auch
 # nicht ueber die Taskleiste geschoben werden, ich hatte dir aber
@@ -34,7 +34,7 @@ SW=3440
 SH=1440
 
 # --------------------------------------------------------- 1. bauen
-# Dasselbe Rezept wie aufnahme.sh -- nur Kern und Platte, kein Foto.
+# Dasselbe Rezept wie capture.sh -- nur Kern und Platte, kein Foto.
 echo "== bauen =="
 bash vendor/firn/fetch-firnc.sh > "$BUILDD/fetch.log" 2>&1 || {
     echo "FEHLGESCHLAGEN: fetch-firnc.sh"; tail -5 "$BUILDD/fetch.log"; exit 1; }
@@ -42,7 +42,7 @@ bash vendor/firn/fetch-firnc.sh > "$BUILDD/fetch.log" 2>&1 || {
     || { echo "FEHLGESCHLAGEN: der Kern baut nicht"; tail -25 "$BUILDD/k.log"; exit 1; }
 echo "kernel $(stat -c%s "$BUILDD/k0.mb") Oktette"
 
-# DIE PLATTE. Sie wird von `aufnahme.sh` gebaut (mkfs.py mit ueber
+# DIE PLATTE. Sie wird von `capture.sh` gebaut (mkfs.py mit ueber
 # hundert Argumenten); dieses Rezept hier zu wiederholen hiesse, es
 # zweimal pflegen zu muessen. Genommen wird die zuletzt gebaute --
 # der Kern ist frisch, und nur im Kern steckt das, was diese Runde
@@ -54,7 +54,7 @@ if [ -z "$WURZEL" ]; then
 fi
 if [ ! -s "$WURZEL" ]; then
     echo "FEHLGESCHLAGEN: keine Wurzelplatte gefunden"
-    echo "  einmal 'bash tools/design/aufnahme.sh' laufen lassen,"
+    echo "  einmal 'bash tools/design/capture.sh' laufen lassen,"
     echo "  oder WURZEL=/pfad/zu/disk.img setzen"
     exit 1
 fi
@@ -77,7 +77,7 @@ qemu-system-x86_64 -kernel "$BUILDD/k0.mb" -m 2048 -append "$APPEND" \
   -monitor "unix:$W/mon,server,nowait" > "$W/qemu.log" 2>&1 &
 QP=$!
 sleep 3
-python3 tools/design/fahren.py "$W/mon" "$W/serial.txt" "$W" \
+python3 tools/design/drive.py "$W/mon" "$W/serial.txt" "$W" \
     "$W/drehbuch.txt" > "$W/fahren.log" 2>&1 || true
 kill "$QP" 2>/dev/null; wait "$QP" 2>/dev/null
 

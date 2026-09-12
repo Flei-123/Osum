@@ -1,8 +1,8 @@
 # .gauntlet-shots -- echte Aufnahmen der Oberflaeche
 
 Erzeugt am 09.09.2026 aus dem Stand 220633e ("Ausgangsstand vor Runde 1")
-mit `tools/design/aufnahme.sh` (QEMU/TCG, `nostart wigapp=/bin/explorer`),
-gesteuert ueber Drehbuecher fuer `tools/design/fahren.py`.
+mit `tools/design/capture.sh` (QEMU/TCG, `nostart wigapp=/bin/explorer`),
+gesteuert ueber Drehbuecher fuer `tools/design/drive.py`.
 Alle Bilder sind echte QEMU-screendumps (PPM -> PNG), nichts nachgemalt.
 
 | Datei | Aufloesung | Was zu sehen ist |

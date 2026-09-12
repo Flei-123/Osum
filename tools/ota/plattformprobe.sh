@@ -117,10 +117,10 @@ python3 tools/update/signpak.py "$OUT/geheim.key" "$OUT/netzmix"/*.opk \
     > "$OUT/mixsig.log" 2>&1 || { cat "$OUT/mixsig.log"; bad "signpak"; exit 1; }
 
 echo "== 2. das VERZEICHNIS und seine sechste Spalte =="
-python3 tools/ota/verzeichnis.py "$OUT/netzmix" --fassung 2 \
+python3 tools/ota/listing.py "$OUT/netzmix" --fassung 2 \
     --schluessel "$OUT/geheim.key" > "$OUT/vz.log" 2>&1 \
     && ok "$(grep -a VERZEICHNIS "$OUT/vz.log" | tr -s ' ')" \
-    || { cat "$OUT/vz.log"; bad "verzeichnis.py"; exit 1; }
+    || { cat "$OUT/vz.log"; bad "listing.py"; exit 1; }
 V="$OUT/netzmix/VERZEICHNIS"
 grep -qa "^paket	hallo	.*	osum-x86_64$"    "$V" && ok "hallo traegt osum-x86_64 (aus dem ELF-Kopf)"    || bad "hallo: falsche Spalte -- $(grep -a '^paket	hallo	' "$V")"
 grep -qa "^paket	hallo-arm	.*	osum-aarch64$" "$V" && ok "hallo-arm traegt osum-aarch64"                  || bad "hallo-arm: falsche Spalte"

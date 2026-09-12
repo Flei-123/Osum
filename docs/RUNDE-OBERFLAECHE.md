@@ -415,7 +415,7 @@ gefunden und einen, der von der Last des Wirts kommt:
 
 ## 8. Der Skalierungsfaktor
 
-Aufgenommen bei 3440×1440 (`tools/design/aufnahme.sh … res=3440x1440`),
+Aufgenommen bei 3440×1440 (`tools/design/capture.sh … res=3440x1440`),
 also dem Schirm, an dem Justin wirklich sitzt. Der Server meldet den
 Faktor 2, und **die Längen wachsen mit, nicht nur die Schrift**:
 

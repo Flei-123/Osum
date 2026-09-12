@@ -300,7 +300,7 @@ gui() { # name extra drehbuch
         kill -0 "$pid" 2>/dev/null || break
         sleep 0.2; i=$((i + 1))
     done
-    python3 -u tools/design/fahren.py "$sock" "$TMPD/$name.txt" "$SHOTS" "$dreh" \
+    python3 -u tools/design/drive.py "$sock" "$TMPD/$name.txt" "$SHOTS" "$dreh" \
         > "$TMPD/$name.fahren" 2>&1
     kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
     rm -f "$sock"

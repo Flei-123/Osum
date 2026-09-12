@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""lies.py -- den INHALT des Terminalfensters aus einem Foto LESEN.
+"""read.py -- den INHALT des Terminalfensters aus einem Foto LESEN.
 
-    python3 lies.py <ppm> [--x0 N --y0 N --cols N --rows N --cw N --ch N]
+    python3 read.py <ppm> [--x0 N --y0 N --cols N --rows N --cw N --ch N]
 
-WARUM ES DAS BRAUCHT, und warum `suchtext.py` hier nicht reicht.
+WARUM ES DAS BRAUCHT, und warum `searchtext.py` hier nicht reicht.
 
-`suchtext.py` beantwortet: "steht DIESER Text irgendwo im Bild?" -- man
+`searchtext.py` beantwortet: "steht DIESER Text irgendwo im Bild?" -- man
 muss den Text also schon kennen. Wenn eine Shell etwas antwortet, das
 man NICHT erwartet hat (eine Fehlermeldung, ein anderer Pfad, ein
 Tippfehler), raet man Woerter und bekommt "nicht gefunden" zurueck, was

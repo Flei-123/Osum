@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/ota/warte_marke.py -- WANN DER STECKER GEZOGEN WIRD, ENTSCHEIDET
+# tools/ota/wait_brand.py -- WANN DER STECKER GEZOGEN WIRD, ENTSCHEIDET
 # NICHT DIE UHR, SONDERN DIE MASCHINE SELBST.
 #
 # WARUM. Der erste Anlauf von Test (e) hat den Zeitpunkt jedes Schusses
@@ -16,7 +16,7 @@
 # Versatz zurueck. Danach zieht run.sh den Stecker. Das trifft die Phase
 # unabhaengig davon, wie schnell der Wirt gerade ist.
 #
-#   warte_marke.py <datei> <marke> <versatz_ms> <frist_s>
+#   wait_brand.py <datei> <marke> <versatz_ms> <frist_s>
 #
 # Rueckgabe 0: Marke gesehen, Versatz abgewartet.
 # Rueckgabe 3: Frist abgelaufen, ohne die Marke zu sehen -- der Aufrufer

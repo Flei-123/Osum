@@ -477,7 +477,7 @@ darunter `viewer snip lock papierkorb rechner zip` gegen die verschmolzene
 (aus dem seriellen Protokoll des Bau-Starts; `desktop.png` liegt daneben). `korb.fi` und `qs.fi` sind Bibliotheken
 ohne `u_start` und gehören nicht in die Programmliste (das war ein
 Listenfehler beim Probieren, kein Merge-Befund). Nicht gebaut: `certus` (kommt
-aus `/root/certus-sammeln` über `kernel/user/certus/bau.sh`, hängt nur an der
+aus `/root/certus-sammeln` über `kernel/user/certus/build.sh`, hängt nur an der
 gebauten `wlib`). **Nicht gelaufen:** `tools/alltag/run.sh` auf dem
 verschmolzenen Baum — das wäre QEMU-Last während der `ota`-Einzelmessung
 gewesen und ist Pflicht für die Merge-Runde.

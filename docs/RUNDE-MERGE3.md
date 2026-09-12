@@ -30,7 +30,7 @@ Arbeitsbaum.
 | `kernel/user/ofs4.fi` | 711 | neu: die Messung in Ring 3 |
 | `tools/ofs4/run.sh` | 425 | neu: die Abnahme, acht Abschnitte |
 | `tools/ofs4/crash.sh` | 148 | neu: Stromausfall mitten im Größenwechsel |
-| `tools/ofs4/pruef.py` | 197 | neu: dieselbe Prüfung auf dem Wirt |
+| `tools/ofs4/check.py` | 197 | neu: dieselbe Prüfung auf dem Wirt |
 | `docs/OFS4-ENTWURF.md` | 478 | neu: der Entwurf |
 | `docs/ROUNDOFS4.md` | 256 | neu: der Bericht der Runde |
 
@@ -63,7 +63,7 @@ fängt das Netz erst bei 9,8 s an und geschrieben wird bei 22,7 s.
 
 * `tools/ota/zeitprobe.sh` (89 Z, neu) — stempelt jede serielle Zeile
   mit der Zeit seit dem Start von QEMU.
-* `tools/ota/warte_marke.py` (48 Z, neu) — wartet auf eine **Marke, die
+* `tools/ota/wait_brand.py` (48 Z, neu) — wartet auf eine **Marke, die
   die Maschine selbst gedruckt hat**, statt auf die Uhr des Wirts.
 * `tools/ota/run.sh` — Abschnitt 5 richtet jeden Schuss an einer von
   drei Marken aus und **prüft sich selbst**: kommt kein einziges „neu"

@@ -140,7 +140,7 @@ dieser Runde.
 
 ### 4.1 Zwei Prüfstände waren tot
 
-`tools/design/aufnahme.sh` und `tools/vielkern/run.sh` löschen ein
+`tools/design/capture.sh` und `tools/vielkern/run.sh` löschen ein
 Bündel **bei Namen** (`widgets.osp`), weil dessen Programm nicht in
 ihrer Programmliste steht und `mkfs.py` sonst abbricht. WERKZEUGE hat
 ein zweites Bündel dazugelegt:
@@ -369,7 +369,7 @@ Neu im Prüfstand: `tools/vielkern/run.sh` Abschnitte 10, 11 und 12
 
 ### 6.2 Die übrigen Ein-Kern-Reste, an der Quelle gezählt
 
-`tools/vielkern/einkern.py` liest die Kernquellen und zählt jede
+`tools/vielkern/onecore.py` liest die Kernquellen und zählt jede
 Funktion, die einen Puffer der **Datenseite** (`state + kstate.X_OFF`)
 als Arbeitsfläche nimmt, ohne dass ein Sperrwort in ihrem Rumpf steht.
 
@@ -454,5 +454,5 @@ keine Abnahme -- deshalb steht hier kein Gesamtergebnis.
    Glyphen-Zwischenspeicher unter eine gemeinsame Sperre (oder je Kern),
    dazu `tools/laden/run.sh` einmal durchfahren. Danach ist der Stand
    reif — und `tools/vielkern/run.sh` Abschnitte 10–12 sowie
-   `einkern.py` sind der Prüfstand, der es beim nächsten Mal sofort
+   `onecore.py` sind der Prüfstand, der es beim nächsten Mal sofort
    sagt.

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/marke/startbild.py -- RUNDE STARTKNOPF: DAS LOGO IN DEN KERN.
+# tools/marke/startimage.py -- RUNDE STARTKNOPF: DAS LOGO IN DEN KERN.
 #
 # WARUM NICHT UEBER DIE SYMBOLSCHRIFT. Die Symbole dieses Systems sind
 # eine SCHRIFT (assets/icons/icons.map -> tools/icons/build.py ->
@@ -22,7 +22,7 @@
 # Programm in den Binaerbaum und haengen an nichts. Je Bildpunkt EIN
 # Wort 0xAARRGGBB.
 #
-#   python3 tools/marke/startbild.py assets/marke kernel/user/brand_start.fi
+#   python3 tools/marke/startimage.py assets/marke kernel/user/brand_start.fi
 
 import sys
 from PIL import Image
@@ -76,14 +76,14 @@ def main():
     t = []
     t.append("// SPDX-License-Identifier: GPL-2.0-only\n")
     t.append("// kernel/user/brand_start.fi -- ERZEUGT, NICHT VON HAND\n")
-    t.append("//   tools/marke/startbild.py assets/marke "
+    t.append("//   tools/marke/startimage.py assets/marke "
              "kernel/user/brand_start.fi\n")
     t.append("//\n")
     t.append("// Das Startzeichen von OrientOS als Bildpunkte, in\n")
     t.append("// mehreren Groessen, je Bildpunkt ein Wort 0xAARRGGBB.\n")
     t.append("// Warum es hier\n")
     t.append("// steht und nicht in der Symbolschrift oder in einer Datei,\n")
-    t.append("// steht im Kopf von tools/marke/startbild.py.\n\n")
+    t.append("// steht im Kopf von tools/marke/startimage.py.\n\n")
     t.append("profile kernel\n\n")
     t.append("export { breit, punkt }\n\n")
     for n in GROESSEN:

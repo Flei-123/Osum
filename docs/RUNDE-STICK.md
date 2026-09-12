@@ -138,7 +138,7 @@ Funktion da, weil die neue Zusage 2 sie an beiden Kanten nachrechnet.
 
 ### 1.6 Nachher, gemessen
 
-`bash tools/schirm/bau.sh` + ein Start je Auflösung, Bildschirmfoto aus
+`bash tools/schirm/build.sh` + ein Start je Auflösung, Bildschirmfoto aus
 dem QEMU-Monitor, umschließendes Rechteck der Bildpunkte, die nicht die
 häufigste Farbe sind:
 
@@ -413,7 +413,7 @@ Sekunden statt 9, sonst läuft die Menüwahl in den Vorgabeeintrag.)
 
 ### 5.3 Die Brücke
 
-Gemessen gegen `tools/bridge/gegenstelle.py`, einen TLS-1.3-Server in
+Gemessen gegen `tools/bridge/peer.py`, einen TLS-1.3-Server in
 Python — **nicht** gegen den echten JARVIS-Server; der läuft anderswo.
 
 **Das Abbild wird dafür nicht angefasst.** Die Rechteliste des

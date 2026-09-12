@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/look/bestueckung.sh -- IST DER PRUEFSTAND SO BESTUECKT WIE DAS
+# tools/look/inventory.sh -- IST DER PRUEFSTAND SO BESTUECKT WIE DAS
 # ABBILD?
 #
 # ====================================================== WARUM ES EXISTIERT
@@ -33,7 +33,7 @@
 # Dieses Skript liest BEIDE und vergleicht die Verzeichnisse unter
 # /etc/ und die Quelldateien unter assets/ und locale/.
 #
-#   tools/look/bestueckung.sh
+#   tools/look/inventory.sh
 #
 # Es ist bewusst eine TEXTPRUEFUNG auf den Skripten und kein Vergleich
 # zweier gebauter Platten: es soll laufen, ohne 40 Sekunden zu booten,
@@ -193,7 +193,7 @@ else
     done
     if [ -n "$neuer" ]; then
         echo "  NEUER ALS DAS ERZEUGTE BILD:$neuer"
-        echo "  -> python3 tools/marke/startbild.py assets/marke $GEN"
+        echo "  -> python3 tools/marke/startimage.py assets/marke $GEN"
         fehler=$((fehler + 1))
     else
         groessen=$(grep -oP '^\s+if wunsch >= \K[0-9]+' "$GEN" | tr '\n' ' ')
