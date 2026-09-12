@@ -51,12 +51,12 @@ import std.crypto.random
 export {
     key_get, siegeln, open, secure_delete,
     file_write_0600, dir,
-    KOPF, SALZ, MARKE,
+    HEADER, SALZ, BRAND,
 }
 
-const KOPF: usize = 4        // "OKS1"
+const HEADER: usize = 4        // "OKS1"
 const SALZ: usize = 16
-const MARKE: usize = 32
+const BRAND: usize = 32
 const SCHL: usize = 32
 
 const SYS_OPEN: i64 = 2
@@ -66,14 +66,14 @@ const SYS_MKDIR: i64 = 83
 const SYS_UNLINK: i64 = 87
 
 // O_WRONLY | O_CREAT | O_TRUNC
-const SCHREIBEN: i64 = 577
+const WRITE: i64 = 577
 
 // ----------------------------------------------------- Dateien mit Rechten
 //
 // `rt.write_file` legt mit 0644 an. Ein Geheimnis mit 0644 ist keines,
 // also geht dieser Weg an ihm vorbei und uebergibt den Modus selbst.
 fn file_write_0600(pfad: u64, p: u64, n: usize) -> bool {
-    let fd: i64 = syscall(SYS_OPEN, pfad as i64, SCHREIBEN, 384, 0, 0, 0)
+    let fd: i64 = syscall(SYS_OPEN, pfad as i64, WRITE, 384, 0, 0, 0)
     if fd < 0 {
         return false
     }
@@ -171,7 +171,7 @@ fn siegeln(klar: u64, n: usize, aus: *mut rt.Buf) -> bool {
 
     var magie: [u8; 5] = "OKS1\0"
     var beglaubigt: rt.Buf = rt.buf_new()
-    rt.buf_push_bytes(&beglaubigt, (&magie[0]) as u64, KOPF)
+    rt.buf_push_bytes(&beglaubigt, (&magie[0]) as u64, HEADER)
     rt.buf_push_bytes(&beglaubigt, (&salz[0]) as u64, SALZ)
     rt.buf_push_bytes(&beglaubigt, kt.ptr, n)
     var tag: [u8; 32] = [0; 32]
@@ -179,7 +179,7 @@ fn siegeln(klar: u64, n: usize, aus: *mut rt.Buf) -> bool {
         (&tag[0]) as u64)
 
     rt.buf_push_bytes(aus, beglaubigt.ptr, beglaubigt.len)
-    rt.buf_push_bytes(aus, (&tag[0]) as u64, MARKE)
+    rt.buf_push_bytes(aus, (&tag[0]) as u64, BRAND)
     rt.buf_free(&kt)
     rt.buf_free(&beglaubigt)
     return true
@@ -189,12 +189,12 @@ fn siegeln(klar: u64, n: usize, aus: *mut rt.Buf) -> bool {
 // Geraeteschluessel ist ein anderer. In JEDEM dieser Faelle bleibt `aus`
 // leer -- ein halb entsiegeltes Token waere schlimmer als keines.
 fn open(p: u64, n: usize, aus: *mut rt.Buf) -> bool {
-    if n < KOPF + SALZ + MARKE {
+    if n < HEADER + SALZ + BRAND {
         return false
     }
     var magie: [u8; 5] = "OKS1\0"
     var i: usize = 0
-    while i < KOPF {
+    while i < HEADER {
         if rt.ld8(p, i) != rt.ld8((&magie[0]) as u64, i) {
             return false
         }
@@ -204,8 +204,8 @@ fn open(p: u64, n: usize, aus: *mut rt.Buf) -> bool {
     if !key_get((&dev[0]) as u64) {
         return false
     }
-    let salz: u64 = p + KOPF as u64
-    let ktlen: usize = n - KOPF - SALZ - MARKE
+    let salz: u64 = p + HEADER as u64
+    let ktlen: usize = n - HEADER - SALZ - BRAND
     var m_k: [u8; 25] = "orientos konto v1 siegel\0"
     var m_m: [u8; 24] = "orientos konto v1 marke\0"
     var ks: [u8; 32] = [0; 32]
@@ -213,18 +213,18 @@ fn open(p: u64, n: usize, aus: *mut rt.Buf) -> bool {
     ableiten((&dev[0]) as u64, (&m_k[0]) as u64, 24, salz, (&ks[0]) as u64)
     ableiten((&dev[0]) as u64, (&m_m[0]) as u64, 23, salz, (&ms[0]) as u64)
     var tag: [u8; 32] = [0; 32]
-    hmac.hmac_sha256((&ms[0]) as u64, SCHL, p, n - MARKE, (&tag[0]) as u64)
+    hmac.hmac_sha256((&ms[0]) as u64, SCHL, p, n - BRAND, (&tag[0]) as u64)
     // ZEITGLEICHER VERGLEICH. `hmac_equal` vergleicht ohne Abbruch beim
     // ersten Unterschied; ein `while ... break` waere hier eine Uhr, an
     // der ein Angreifer die Marke ablesen kann.
-    if !hmac.hmac_equal((&tag[0]) as u64, p + (n - MARKE) as u64, MARKE) {
+    if !hmac.hmac_equal((&tag[0]) as u64, p + (n - BRAND) as u64, BRAND) {
         return false
     }
     var klar: rt.Buf = rt.buf_new()
     rt.buf_reserve(&klar, ktlen)
     rt.buf_set_len(&klar, ktlen)
     chacha.chacha20((&ks[0]) as u64, salz, 0 as u32,
-        p + (KOPF + SALZ) as u64, ktlen, klar.ptr)
+        p + (HEADER + SALZ) as u64, ktlen, klar.ptr)
     rt.buf_push_bytes(aus, klar.ptr, ktlen)
     rt.buf_free(&klar)
     return true
