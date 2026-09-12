@@ -455,7 +455,7 @@ echo "== 8. der Schreibtisch, auf deutsch, mit Umlauten im BILD =="
 # zwar mit ue-Ligatur: `Ausführen`. Dieses eine Wort traegt beide
 # Zusagen auf einmal, die deutsche Sprache und den echten Umlaut.
 #
-# `tools/usbimg/suchtext.py` sucht die Zeile im GANZEN Bild -- gerastert
+# `tools/usbimg/searchtext.py` sucht die Zeile im GANZEN Bild -- gerastert
 # mit `tools/ttf/raster.py`, der zweiten Fassung des Rasterers. Es wird
 # also nicht gegen sich selbst geprueft.
 DESKARGS="modfs osum gfx wm wig desk wmhold wiglong nokbd nosched noproc nofs"
@@ -500,7 +500,7 @@ if [ -s "$TMPD/desk.ppm" ]; then
     finde() { # was text [--nicht]
         local was=$1 text=$2; shift 2
         local aus rc
-        aus=$(python3 tools/usbimg/suchtext.py "$TMPD/desk.ppm" \
+        aus=$(python3 tools/usbimg/searchtext.py "$TMPD/desk.ppm" \
               assets/osum-sans.ttf 15 "$text" "$@" 2>&1)
         rc=$?
         if [ $rc = 0 ]; then ok "$was: $aus"; else bad "$was: $aus"; fi

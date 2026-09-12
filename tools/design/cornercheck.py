@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/design/eckpruef.py -- LIEGT FUELLFARBE AUSSERHALB DES RADIUS?
+# tools/design/cornercheck.py -- LIEGT FUELLFARBE AUSSERHALB DES RADIUS?
 #
 # Justins Befund von echter Hardware: hinter der abgerundeten Flaeche
 # (Tooltip, Kontrollzentrum) ist ein RECHTECK sichtbar. Das ist keine

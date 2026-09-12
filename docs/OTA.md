@@ -48,7 +48,7 @@ DNS. Siehe „Was für den Betrieb noch fehlt".
 | `tools/install/build.sh` | +60 | `/bin/fetch` und `/bin/ota` liegen jetzt **im Abbild**, dazu `/etc/ssl/roots.pem` und `/etc/ota.conf` |
 | `tools/install/oneshot.sh` | +35 | ein Netz für den Prüfstand (`OTA_NETZ`), und `-cpu` ist einstellbar |
 | `tools/ota/server.py` | 300 | die Gegenstelle: HTTPS, Range, Abbruch auf Ansage |
-| `tools/ota/verzeichnis.py` | 190 | das signierte VERZEICHNIS, mit Gegenprüfung durch libsodium |
+| `tools/ota/listing.py` | 190 | das signierte VERZEICHNIS, mit Gegenprüfung durch libsodium |
 | `tools/ota/mkcerts.py` | 130 | die Zertifikate, gemacht mit fremdem Werkzeug |
 | `tools/ota/pakete.sh` | 120 | sechs Quellen fürs Netz, vier davon kaputt |
 | `tools/ota/run.sh` | 560 | der Läufer, sechs Abschnitte |

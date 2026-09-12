@@ -259,7 +259,7 @@ fi
 # jarvis und ssl bleiben ABSICHTLICH draussen: der Wurzelspeicher und
 # die Rechteliste des Helfers gehoeren zu einem Geraet, nicht zu einem
 # Bildschirmfoto -- sie stehen deshalb in der Ausnahmeliste von
-# tools/look/bestueckung.sh und nicht hier.
+# tools/look/inventory.sh und nicht hier.
 if ls assets/themes/*.preset >/dev/null 2>&1; then
     ARGS+=(/etc/themes/)
     for s in assets/themes/*.preset; do
@@ -278,7 +278,7 @@ if [ "$nvicons" = yes ]; then
         # "Tiling" im Kontrollzentrum. In Runde ECHT-2 war es dieselbe
         # Stelle mit drei statt sechs Dateien.
         #
-        # Gefunden hat es diesmal tools/look/bestueckung.sh, nicht
+        # Gefunden hat es diesmal tools/look/inventory.sh, nicht
         # Justin: es zaehlt die Namen in beiden Skripten und schlaegt
         # an, wenn die Zahlen auseinandergehen. Deshalb zaehlt es und
         # prueft nicht nur, ob das Verzeichnis vorkommt -- ein fehlender

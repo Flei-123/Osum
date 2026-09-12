@@ -243,7 +243,7 @@ done
 echo "== G. die Bilder werden gemessen =="
 for d in B D F-day F-night; do
     if [ -s "$TMPD/$d/desktop.ppm" ]; then
-        python3 tools/softui/pruef.py "$TMPD/$d/desktop.ppm" \
+        python3 tools/softui/check.py "$TMPD/$d/desktop.ppm" \
             "$TMPD/$d/serial.txt" > "$TMPD/$d.pruef" 2>&1
         R=$?
         tail -1 "$TMPD/$d.pruef" | sed 's/^/        /'

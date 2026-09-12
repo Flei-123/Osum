@@ -194,7 +194,7 @@ bei einem **Ordner** schief, und dann sind die Daten weg.
 Dazu am Läufer zwei Ergänzungen: `ftabzeile<N>` klickt eine *bestimmte*
 Zeile der Dateitabelle an (vorher traf ein Drehbuch nur die Mitte, und
 welche Zeile dort liegt, hängt an der Anzahl der Dateien), und
-`aufnahme.sh` legt die Platte jetzt als **OFS v3 mit Zeiten** an —
+`capture.sh` legt die Platte jetzt als **OFS v3 mit Zeiten** an —
 ohne das gibt `fs.inode_mtime` für jede Datei 0 zurück, und die
 Zeit-Spalte wäre leer geblieben, egal was der Dateimanager tut.
 

@@ -241,7 +241,7 @@ ohne je in den Kern zu gehen. Die Zeile bleibt.
 
 ### Die 60-Sekunden-Abnahme
 
-`bash tools/ton/abnahme.sh` — zwölf Läufe: `-smp 1` und `-smp 4`, Quelle
+`bash tools/ton/acceptance.sh` — zwölf Läufe: `-smp 1` und `-smp 4`, Quelle
 `ide` und `ram`, je **drei** Mal. Drei und nicht einer, weil der
 Aussetzerzähler (`hda.fi`, `S_UNDER`) nur fortgeschrieben wird, wenn
 jemand die Position abfragt, und über eine Sekunde bei gleichem Code
@@ -298,7 +298,7 @@ Abschnitt mit `-v 0` nach, wo ein Ton **ganz** fehlt.
 * **Keine Karte, kein Feld** — dieselbe Regel wie beim Akku und beim
   Netz. `A_READY` sagt es. Ein Bildschirmfoto ohne `-device intel-hda`
   zeigt den Regler deshalb **absichtlich** nicht;
-  `tools/design/aufnahme.sh ton=ja` hängt eine Karte an.
+  `tools/design/capture.sh ton=ja` hängt eine Karte an.
 
 ---
 

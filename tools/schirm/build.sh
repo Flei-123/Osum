@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/schirm/bau.sh -- Kern, Programme und ein Plattenabbild fuer die
+# tools/schirm/build.sh -- Kern, Programme und ein Plattenabbild fuer die
 # Fotos der Runde SCHIRM.
 #
-#   bash tools/schirm/bau.sh <arbeitsverzeichnis>
+#   bash tools/schirm/build.sh <arbeitsverzeichnis>
 #
 # Danach liegen dort:  k0.mb  (Multiboot-Kern, Stufe 0)
 #                      disk.img (OFS mit /bin, /lib, /etc, /apps)

@@ -13,12 +13,12 @@
 #   5. Treffer mit PFEILTASTEN + ENTER waehlen -> startet das Programm?
 #   6. steht danach wirklich ein Fenster des gestarteten Programms da?
 #
-# GEFAHREN WIRD MIT tools/design/fahren.py, und das ist der Punkt:
+# GEFAHREN WIRD MIT tools/design/drive.py, und das ist der Punkt:
 # `mouse_move` im QEMU-Monitor ist RELATIV. Ein selbstgebauter Aufruf
 # `mouse_move 450 984` bewegt den Zeiger um 450/984 Bildpunkte WEITER,
 # er setzt ihn nicht dorthin. Mein erster Anlauf zu R4 hat genau das
 # falsch gemacht und "mouse: packets=0" gemessen -- ein Fehler des
-# Fahrers, kein Befund ueber Justins System. `fahren.py` faehrt erst
+# Fahrers, kein Befund ueber Justins System. `drive.py` faehrt erst
 # in die Ecke (32 Schritte, traegt 4K) und von dort heraus, und es
 # rechnet die Trefferflaeche aus der Zeile, die das PROGRAMM selbst
 # gemeldet hat (`launcher: rect ...`).
@@ -64,7 +64,7 @@ qemu-system-x86_64 -kernel "$KERN" -m 2048 -append "$APPEND" \
   -monitor "unix:$W/mon,server,nowait" > "$W/qemu.log" 2>&1 &
 QP=$!
 sleep 3
-python3 tools/design/fahren.py "$W/mon" "$W/serial.txt" "$W" \
+python3 tools/design/drive.py "$W/mon" "$W/serial.txt" "$W" \
     "$W/drehbuch.txt" > "$W/fahren.log" 2>&1 || true
 kill "$QP" 2>/dev/null; wait "$QP" 2>/dev/null
 

@@ -11,7 +11,7 @@ die serielle Leitung. Wer dort nach der Ausgabe sucht, findet nichts und
 haelt eine funktionierende Shell fuer tot -- genau der Fehlschluss, der
 in dieser Runde einmal gemacht wurde.
 
-Gemessen wird darum mit `tools/usbimg/suchtext.py`: es rastert eine
+Gemessen wird darum mit `tools/usbimg/searchtext.py`: es rastert eine
 Zeile mit einer ZWEITEN Fassung des Rasterers (tools/ttf/raster.py, in
 Python) und sucht ihre Tintenpunkte im Foto. Prozent = wie viel davon
 wirklich im Bild steht.
@@ -37,7 +37,7 @@ os.makedirs(SHOTS, exist_ok=True)
 SER = os.path.join(D, "serial.txt")
 REPO = os.path.abspath(os.path.join(HIER, ".."))
 MONO = os.path.join(REPO, "assets", "osum-mono.ttf")
-SUCH = os.path.join(REPO, "tools", "usbimg", "suchtext.py")
+SUCH = os.path.join(REPO, "tools", "usbimg", "searchtext.py")
 ERG = {}
 
 
@@ -51,7 +51,7 @@ def merke(nr, was, erg, beleg=""):
 
 
 def foto_ppm(m, n):
-    """PPM behalten -- suchtext.py liest PPM."""
+    """PPM behalten -- searchtext.py liest PPM."""
     p = os.path.join(SHOTS, "%s.ppm" % n)
     return m.foto(p)
 

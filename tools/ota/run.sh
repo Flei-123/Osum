@@ -193,7 +193,7 @@ bash tools/ota/pakete.sh "$OUT" > "$OUT/pak3.log" 2>&1 \
     || { cat "$OUT/pak3.log"; bad "ota/pakete.sh"; }
 grep -qa "VERZEICHNIS  fassung" "$OUT/pak3.log" \
     && ok "jede Signatur wurde von einer FREMDEN Umsetzung nachgeprueft (libsodium/cryptography)" \
-    || bad "verzeichnis.py hat nicht signiert"
+    || bad "listing.py hat nicht signiert"
 grep -qa "KEINE zweite Meinung" "$OUT/pak3.log" \
     && bad "es gab keine zweite Meinung zur Signatur -- pynacl/cryptography fehlt" \
     || ok "die zweite Meinung war wirklich da"
@@ -706,7 +706,7 @@ while [ "$i" -lt "$SCHUESSE" ]; do
     # STECKER ZIEHEN. Wird die Marke innerhalb der Frist nie gedruckt,
     # kehrt das Skript mit 3 zurueck: der Schuss zaehlt dann als
     # "Phase verfehlt" und wird unten offen ausgewiesen.
-    if python3 tools/ota/warte_marke.py "$OUT/e$i.txt" "$MARKE" "$VERSATZ" 600; then
+    if python3 tools/ota/wait_brand.py "$OUT/e$i.txt" "$MARKE" "$VERSATZ" 600; then
         getroffen=$((getroffen+1))
     else
         verfehlt=$((verfehlt+1))

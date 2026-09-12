@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/bridge/markefinden.py -- steht die neue Zeile WIRKLICH im Bild?
+"""tools/bridge/findbrand.py -- steht die neue Zeile WIRKLICH im Bild?
 
-    markefinden.py <eins.ppm> <zwei.ppm>
+    findbrand.py <eins.ppm> <zwei.ppm>
 
 DIE GEGENPROBE AUF DEN INHALT. Dass sich zwei Bilder unterscheiden, sagt
 noch nicht, dass sie den Schirm zeigen -- zwei Aufnahmen von Rauschen

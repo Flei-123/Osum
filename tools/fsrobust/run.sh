@@ -221,8 +221,8 @@ fi
 
 echo
 echo "== 5. eine halb geschriebene Bestaetigung wird NICHT nachgetragen =="
-python3 tools/fsrobust/kaputt.py "$TMPD/j.img" "$TMPD/kaputt" jmuell \
-    >/dev/null 2>&1 || bad "kaputt.py jmuell"
+python3 tools/fsrobust/corrupt.py "$TMPD/j.img" "$TMPD/kaputt" jmuell \
+    >/dev/null 2>&1 || bad "corrupt.py jmuell"
 cp --sparse=always "$TMPD/kaputt/kaputt-jmuell.img" "$TMPD/jm.img"
 lauf "$TMPD/jm.img" "script=fsck /dev/hda;exit" "$TMPD/jm.txt" 600
 num "der Kern haengt das Abbild trotzdem ein" \
@@ -234,8 +234,8 @@ num "und das Dateisystem ist unversehrt" \
 
 echo
 echo "== 6. /bin/fsck auf mutwillig zerstoerten Abbildern =="
-python3 tools/fsrobust/kaputt.py "$TMPD/j.img" "$TMPD/kaputt" \
-    > "$TMPD/kaputt.txt" 2>&1 || bad "kaputt.py"
+python3 tools/fsrobust/corrupt.py "$TMPD/j.img" "$TMPD/kaputt" \
+    > "$TMPD/kaputt.txt" 2>&1 || bad "corrupt.py"
 n_k=$(grep -c '^kaputt: ' "$TMPD/kaputt.txt")
 num "kaputte Abbilder gebaut" "$n_k" ge 13
 fertig=0

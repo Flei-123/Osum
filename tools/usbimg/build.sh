@@ -379,7 +379,7 @@ printf '# taskbar.conf\nedge=bottom\nheight=40\nwidth=104\nautohide=0\nontop=1\n
 # stand nicht im Kernel, sondern in DIESER Datei.
 #
 # Die Demo (.design-shots/nachher/*.png) entstand mit
-# tools/design/aufnahme.sh, und dieses Skript legt VIER Dinge ins
+# tools/design/capture.sh, und dieses Skript legt VIER Dinge ins
 # Abbild, die hier bis heute fehlten:
 #
 #     /etc/theme.conf   scheme=, mode=, shape=
@@ -634,7 +634,7 @@ ARGS+=(/etc/ "/etc/passwd=$OUT/passwd"
        "/etc/netlauf.sh=$OUT/netlauf.sh")
 # RUNDE ECHTHARDWARE-1: die drei Verzeichnisse, ohne die `shape=` und
 # `scheme=` ins Leere zeigen. Derselbe Weg wie in
-# tools/design/aufnahme.sh -- dieselben Dateien, damit der Stick zeigt,
+# tools/design/capture.sh -- dieselben Dateien, damit der Stick zeigt,
 # was die Demo gezeigt hat.
 ARGS+=(/etc/schemas/)
 for s_ in assets/schemes/*.scheme; do

@@ -209,7 +209,7 @@ einmal mit und einmal ohne `fbnosimd`, 1920x1080:
   Zählern (`TAKT IRQ 85 MAL 9`), die sich zwischen zwei Läufen
   zwangsläufig unterscheiden.
 
-**7b. Echter Text, mit `suchtext.py` gegen den Zeichensatz gerechnet:**
+**7b. Echter Text, mit `searchtext.py` gegen den Zeichensatz gerechnet:**
 
 | Lauf | Text | Treffer |
 |---|---|---|

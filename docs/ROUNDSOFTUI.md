@@ -418,7 +418,7 @@ Pictures in `docs/shots/softui/`:
 | `4b-knoepfe-hover-rot.png` | the same three with the close button hovered — red field, white cross |
 | `5-vollbild-hover.png` | the whole screen the close-up was cut from |
 
-All of them go through `tools/softui/pruef.py`, which holds the serial
+All of them go through `tools/softui/check.py`, which holds the serial
 log up against the picture and asks three questions a log cannot answer:
 is there ink where a label was reported, does a label reach past the
 right edge of its window, and do two different labels overlap. It found

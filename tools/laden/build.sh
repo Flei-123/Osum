@@ -92,14 +92,14 @@ done
 # zum Firn-Projekt ($CERTUS_REPO, Zweig `osum`), ist rund 105.000
 # Zeilen gross und wird mit SEINEM eigenen Uebersetzer gebaut -- nicht
 # mit dem festgenagelten aus vendor/firn, dem er voraus ist. Wie das
-# geht und warum, steht in kernel/user/certus/bau.sh.
+# geht und warum, steht in kernel/user/certus/build.sh.
 #
 # Fehlt der Baum, faellt hier nichts aus: das Abbild hat dann kein
 # /bin/certus, und tools/laden/pakete.sh laesst das Paket weg. Ein
 # Bauskript, das ohne fremdes Repo gar nicht mehr durchlaeuft, waere
 # der schlechtere Tausch.
 if [ -d "${CERTUS_REPO:-/root/certus-sammeln}/lib/browser" ]; then
-    if bash kernel/user/certus/bau.sh "$OUT/bin/certus" \
+    if bash kernel/user/certus/build.sh "$OUT/bin/certus" \
             > "$OUT/certus.log" 2>&1; then
         echo "   browser   certus ($(stat -c%s "$OUT/bin/certus") Oktette)"
     else

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/usbimg/suchtext.py -- EINE ZEILE ECHTER SCHRIFT IM GANZEN BILD SUCHEN.
+"""tools/usbimg/searchtext.py -- EINE ZEILE ECHTER SCHRIFT IM GANZEN BILD SUCHEN.
 
-    suchtext.py <ppm> <ttf> <px> <text> [--tol N] [--min P] [--nicht]
+    searchtext.py <ppm> <ttf> <px> <text> [--tol N] [--min P] [--nicht]
 
 WARUM ES DIESES WERKZEUG GIBT, obwohl `tools/gfx/checkshot.py` schon
 `ttext` und `tkette` hat.

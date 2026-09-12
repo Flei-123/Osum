@@ -28,7 +28,7 @@ Update selbst über HTTPS, prüft es und spielt es ein.
 | `tools/install/build.sh` | +60 | `fetch`, `ota`, `roots.pem`, `ota.conf` ins Abbild |
 | `tools/install/oneshot.sh` | +35 | Netz für den Prüfstand, `-cpu` einstellbar |
 | `tools/ota/server.py` | ~300 | die Gegenstelle |
-| `tools/ota/verzeichnis.py` | ~190 | das signierte VERZEICHNIS |
+| `tools/ota/listing.py` | ~190 | das signierte VERZEICHNIS |
 | `tools/ota/mkcerts.py` | ~130 | die Zertifikate |
 | `tools/ota/pakete.sh` | ~120 | sechs Quellen, vier davon kaputt |
 | `tools/ota/run.sh` | ~560 | der Läufer |

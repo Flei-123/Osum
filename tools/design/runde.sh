@@ -38,12 +38,12 @@ ARGS=("$@")
 HALT=${DESIGNHALT:-300}
 
 echo "== bauen (einmal) =="
-bash tools/design/aufnahme.sh "$OUT/bau" nurbau=ja "${ARGS[@]}" || exit 1
+bash tools/design/capture.sh "$OUT/bau" nurbau=ja "${ARGS[@]}" || exit 1
 
 lauf() { # name  extra-woerter  drehbuch-inhalt
     local name=$1 extra=$2 buch=$3
     printf '%s\n' "$buch" > "$OUT/$name.dreh"
-    bash tools/design/aufnahme.sh "$OUT/$name" halt="$HALT" \
+    bash tools/design/capture.sh "$OUT/$name" halt="$HALT" \
         extra="$extra" drehbuch="$OUT/$name.dreh" "${ARGS[@]}" \
         > "$OUT/$name.log" 2>&1
 }

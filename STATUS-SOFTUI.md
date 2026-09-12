@@ -237,7 +237,7 @@ Kein anderer Test wurde angefasst.
 | `4b-knoepfe-hover-rot.png` | dieselben mit ueberfahrenem Schliessen-Knopf — rote Flaeche, weisses Kreuz |
 | `5-vollbild-hover.png` | der ganze Schirm, aus dem die Nahaufnahme geschnitten ist |
 
-Alle vier Vollbilder durch `tools/softui/pruef.py`: **0 Beanstandungen**
+Alle vier Vollbilder durch `tools/softui/check.py`: **0 Beanstandungen**
 (keine leere Beschriftung, nichts abgeschnitten, nichts ueberlappend).
 
 ---
@@ -255,7 +255,7 @@ Voraussetzung: ein Arbeitsbaum der Grundlinie und
 `SOFTUIBASEPPM=<pfad zum classic-Bild der Grundlinie>`.
 
 Werkzeuge dieser Runde in `tools/softui/`:
-`run.sh`, `gleich.py` (Bildpunktvergleich), `pruef.py` (Bild gegen
+`run.sh`, `gleich.py` (Bildpunktvergleich), `check.py` (Bild gegen
 Mitschnitt), `knoepfe.py` (die drei Zeichen und der rote Knopf),
 `fokus.py` (Schattentiefe aktiv/inaktiv), `kontrast.py` und `titel.py`
 (WCAG aus dem Bild), `hover.py` (Zeiger fahren ohne Klick).

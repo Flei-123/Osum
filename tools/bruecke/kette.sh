@@ -19,7 +19,7 @@
 # Schnittstelle ist, fuer die der Linux-Stapel antwortet. Aus dem
 # Netzraum heraus ist `127.0.0.1` das Loopback DES NETZRAUMS, nicht
 # das des Wirts. Deshalb laeuft `anschluss.py` IM Netzraum -- genau
-# wie `gegenstelle.py` es seit Runde BRIDGE tut. Der Brueckendienst
+# wie `peer.py` es seit Runde BRIDGE tut. Der Brueckendienst
 # bleibt beim Wirt; der Anschluss erreicht ihn ueber die Adresse des
 # veth-Endes.
 set -uo pipefail

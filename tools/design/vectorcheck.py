@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/design/vektorpruef.py -- DER SELBSTTEST DES UNTERBAUS.
+# tools/design/vectorcheck.py -- DER SELBSTTEST DES UNTERBAUS.
 #
 # Warum es das gibt: der Zeiger ist in einer frueheren Runde zerfallen,
 # und niemand hat es gemerkt, weil kein Test die FORM geprueft hat --

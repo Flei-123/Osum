@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/ota/verzeichnis.py -- das signierte VERZEICHNIS einer Quelle.
+"""tools/ota/listing.py -- das signierte VERZEICHNIS einer Quelle.
 
-    verzeichnis.py <quellverzeichnis> --fassung <n> --schluessel <geheim.key>
+    listing.py <quellverzeichnis> --fassung <n> --schluessel <geheim.key>
                    [--kaputt <datei>]
 
 WAS EIN VERZEICHNIS IST UND WARUM ES NEBEN DEM INDEX STEHT.

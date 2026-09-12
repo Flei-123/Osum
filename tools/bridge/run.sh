@@ -9,7 +9,7 @@
 # Rechteliste stehen. Ein Fernhelfer, der alles kann, ist keine
 # Errungenschaft, sondern eine Hintertuer.
 #
-# GEGEN WEN GEMESSEN WIRD, ausdruecklich: gegen `tools/bridge/gegenstelle.py`,
+# GEGEN WEN GEMESSEN WIRD, ausdruecklich: gegen `tools/bridge/peer.py`,
 # einen TLS-1.3-Server in Python, NICHT gegen den echten JARVIS-Server.
 # Der laeuft anderswo, spricht ein anderes Protokoll und ist nicht Teil
 # dieses Repos. Alles, was hier gruen ist, ist damit eine Aussage ueber
@@ -22,7 +22,7 @@
 # anderen, und ein Netzraum mit der Gegenstelle darin.
 #
 #   Osum in QEMU <--e1000--> QEMU <--UDP--> tools/net/bridge
-#                <--AF_PACKET--> veth <--> gegenstelle.py im Netzraum
+#                <--AF_PACKET--> veth <--> peer.py im Netzraum
 #
 # DIE ABSCHNITTE:
 #   1. bauen: zwei Profile, ein Abbild, keine undefinierten Namen
@@ -258,7 +258,7 @@ draht_zu() {
 
 gegenstelle_an() { # <zertifikat> <auftragsdatei> <ausgabe> [zusatz...]
     local cert=$1 auf=$2 aus=$3; shift 3
-    ip netns exec "$NS" python3 tools/bridge/gegenstelle.py \
+    ip netns exec "$NS" python3 tools/bridge/peer.py \
         --cert "$TMPD/certs/$cert.pem" --key "$TMPD/certs/$cert.key" \
         --port "$SRVPORT" --auftraege "$auf" --aus "$aus" \
         --wartezeit 90 "$@" > "$aus.stderr" 2>&1 & SRVPID=$!

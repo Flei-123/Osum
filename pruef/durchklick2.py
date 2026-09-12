@@ -42,9 +42,9 @@ def s():
 
 
 def suchtext(bild, text, x, base, hoehe=None):
-    """tools/usbimg/suchtext.py aus dem Repo: wie viel Prozent der
+    """tools/usbimg/searchtext.py aus dem Repo: wie viel Prozent der
     Tintenpunkte einer gerasterten Zeile im Bild stehen."""
-    werkzeug = os.path.join(HIER, "..", "tools", "usbimg", "suchtext.py")
+    werkzeug = os.path.join(HIER, "..", "tools", "usbimg", "searchtext.py")
     if not os.path.exists(werkzeug):
         return None
     cmd = ["python3", werkzeug, bild, text, str(x), str(base)]

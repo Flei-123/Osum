@@ -41,7 +41,7 @@ Der Auftrag vermutete: Syscall-Eintrittspfade ohne Argumentprüfung, ohne
 
 Die Quelle sagt etwas Engeres (`docs/RUNDE-MERGE6.md` 6.2,
 `docs/RUNDE-GLYPHE.md` 276/568): gezählt werden von
-`tools/vielkern/einkern.py` die Funktionen, die einen Puffer der
+`tools/vielkern/onecore.py` die Funktionen, die einen Puffer der
 **Datenseite** (`state + kstate.X_OFF`) als **Arbeitsfläche** nehmen,
 ohne dass ein Sperrwort im Rumpf steht. Es ist ausdrücklich ein
 **Vertrag** („die Zahl darf nicht wachsen“) und **keine Fehlerliste** —
@@ -303,7 +303,7 @@ Zahl, die niemand gesehen hat, ist keine Abnahme.
 | `tools/haertung/run.sh` | **19 gehalten, 0 gefallen** | neu |
 | `test.sh` Abschnitt 43 | **bestanden**, 0,14 s | neu |
 | `memmap.py` | 94 Bereiche, **0 Kollisionen** | 0 |
-| `einkern.py` | gesperrt 18, **offen 47** (war 64) | Vertrag |
+| `onecore.py` | gesperrt 18, **offen 47** (war 64) | Vertrag |
 
 ### 4.1 `handle` — und eine Falle, die man kennen muss
 

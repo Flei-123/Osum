@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/uhrwerk/abnahme.sh -- DIE ABNAHME DER RUNDE UHRWERK.
+# tools/uhrwerk/acceptance.sh -- DIE ABNAHME DER RUNDE UHRWERK.
 #
 # Fuenf Laeufe je Kernzahl, und in jedem wird GEZAEHLT statt geglaubt:
 #
@@ -13,7 +13,7 @@
 #      Eingabepulses (`kl=` Klicks, `bew=` Bewegungen) muessen steigen.
 #      Eine Abhilfe, die das Bild rettet und die Maus kostet, ist keine.
 #
-#   bash tools/uhrwerk/abnahme.sh <baudir> <ergebnisdir> [laeufe]
+#   bash tools/uhrwerk/acceptance.sh <baudir> <ergebnisdir> [laeufe]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh

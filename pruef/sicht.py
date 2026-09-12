@@ -4,7 +4,7 @@
 
     sicht.py beschreibe <png>              Farben, Flaechen, Zeilen mit Inhalt
     sicht.py vergleiche <a.png> <b.png>    was hat sich geaendert (Kaesten)
-    sicht.py text <png> <wort> [px]        steht <wort> im Bild? (suchtext.py)
+    sicht.py text <png> <wort> [px]        steht <wort> im Bild? (searchtext.py)
 
 WARUM. Der Bericht dieser Runde darf nichts behaupten, was nicht
 gemessen ist. "Das Fenster ist aufgegangen" ist eine Behauptung;
@@ -78,7 +78,7 @@ def vergleiche(a, b):
 def text(p, wort, px="15"):
     ppm = "/tmp/sicht-%d.ppm" % id(wort)
     laden(p).save(ppm)
-    r = subprocess.run(["python3", REPO + "/tools/usbimg/suchtext.py", ppm,
+    r = subprocess.run(["python3", REPO + "/tools/usbimg/searchtext.py", ppm,
                         REPO + "/assets/osum-sans.ttf", px, wort],
                        capture_output=True, text=True, cwd=REPO)
     print((r.stdout + r.stderr).strip())

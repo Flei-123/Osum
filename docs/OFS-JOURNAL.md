@@ -148,7 +148,7 @@ tragen und die Zahlen noch nicht. Ohne Pruefsumme wuerde er als gueltig
 gelesen und Muell nachgetragen -- also genau der Schaden entstehen, gegen
 den das Ganze gebaut ist.
 
-**Gemessen:** `tools/fsrobust/kaputt.py jmuell` legt einen
+**Gemessen:** `tools/fsrobust/corrupt.py jmuell` legt einen
 Bestaetigungsblock mit richtiger Kennung, plausibler Anzahl und
 FALSCHER Summe an. Der Kern haengt das Abbild ein und traegt nichts nach:
 
@@ -204,7 +204,7 @@ Wort `nojournal` -- derselbe Kern, dieselbe Platte, ein Wort Unterschied
 | Platte an QEMU | `cache=directsync` -- O_DIRECT\|O_DSYNC, kein Seitenpuffer des Wirts |
 | Abschuss | `kill -9` auf QEMU, nachdem `fsrw` gemeldet hat, dass es schreibt |
 | Wartezeit | vom WIRT gewuerfelt, 1831 bis 5598 ms |
-| danach | derselbe Kern auf denselben Oktetten: `fsrv` (Ring 3), `fsck /dev/hda`, dann liest der WIRT das Abbild (`pruef.py`) |
+| danach | derselbe Kern auf denselben Oktetten: `fsrv` (Ring 3), `fsck /dev/hda`, dann liest der WIRT das Abbild (`check.py`) |
 
 **`cache=directsync` ist der wichtigste Schalter des ganzen Tests.** Ohne
 ihn landen die Schreibvorgaenge des Gastes im Seitenpuffer des Wirts, und
@@ -219,7 +219,7 @@ Test darueber, dass Linux keinen Speicher verliert.
 | Laeufe, die danach nicht mehr hochkamen | **0** |
 | **beschaedigte Faelle, in Ring 3 gemessen (`fsrv`)** | **0** |
 | **beschaedigte Faelle, von `/bin/fsck` gefunden** | **0** |
-| **beschaedigte Faelle, vom WIRT gefunden (`pruef.py`)** | **0** |
+| **beschaedigte Faelle, vom WIRT gefunden (`check.py`)** | **0** |
 | fertige Schreibrunden vor dem Abschuss | 0 bis 11, Median 6, zusammen 349 |
 
 ### Und der Beweis, dass dabei ueberhaupt etwas zu tun war

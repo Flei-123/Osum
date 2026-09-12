@@ -101,7 +101,7 @@ Begründung steht jetzt dort.
 
 ## 3. Die 60-Sekunden-Abnahme
 
-`bash tools/ton/abnahme.sh` — zwölf Läufe, `lang44.wav -w 6`:
+`bash tools/ton/acceptance.sh` — zwölf Läufe, `lang44.wav -w 6`:
 
 | smp | Quelle | gespielt | syscalls | Schübe | wartete | Aussetzer | **gaps** |
 |---|---|---:|---:|---:|---:|---:|---:|
@@ -261,7 +261,7 @@ zwei Wellen (Lucide `volume-2`), kantengeglättet, in `T_FG`:
     ....####....##..
     .....###........
 
-`tools/design/aufnahme.sh` kennt jetzt **`ton=ja`**. Es hängt **zwei**
+`tools/design/capture.sh` kennt jetzt **`ton=ja`**. Es hängt **zwei**
 Dinge an: die Karte *und* das Wort `audio` auf der Befehlszeile. Ohne das
 zweite meldet der Kern `aud: aus (kein Wort)` — beim ersten Anlauf sah
 das wie ein Fehler im Regler aus und war die Regel „keine Karte, kein
@@ -410,7 +410,7 @@ Meldung.
 
 ## Neue und geänderte Dateien
 
-**Neu:** `tools/ton/abnahme.sh` (12 × 60 s), `tools/ton/mischer.sh`
+**Neu:** `tools/ton/acceptance.sh` (12 × 60 s), `tools/ton/mischer.sh`
 (25 Zusagen), `STATUS-TON2.md`.
 
 **Geändert:** `kernel/sys.fi` (`AS_WAITSPACE`, `do_audwait`),
@@ -421,5 +421,5 @@ Meldung.
 (4 Glyphen), `locale/{de,en}/messages`, `tools/hda/mkmedia.sh`
 (`lang44`, `a4/b6`, `a5/b5`), `tools/hda/wavcheck.py`
 (`--von-ms`/`--bis-ms`), `tools/ton/mess.sh` (Plattengröße gerechnet,
-`TON_PLAYOPT`), `tools/design/aufnahme.sh` (`ton=ja`), `test.sh`
+`TON_PLAYOPT`), `tools/design/capture.sh` (`ton=ja`), `test.sh`
 (Abschnitt 42), `docs/AUDIO.md` (Abschnitt 5b).

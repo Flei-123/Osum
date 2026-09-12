@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/design/abnahme3440.sh -- DIE ABNAHME, IN JUSTINS AUFLOESUNG.
+# tools/design/acceptance3440.sh -- DIE ABNAHME, IN JUSTINS AUFLOESUNG.
 #
-#   bash tools/design/abnahme3440.sh [kern.mb] [wurzel.img] [ausgabe]
+#   bash tools/design/acceptance3440.sh [kern.mb] [wurzel.img] [ausgabe]
 #
 # DAUERREGEL SEIT DEM 10.09.: jeder Pruefstandslauf faehrt 3440x1440.
 # Ein Lauf in 1920x1080 zaehlt als NICHT GELAUFEN. Der Grund steht in

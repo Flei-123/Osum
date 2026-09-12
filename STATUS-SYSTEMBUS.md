@@ -95,7 +95,7 @@ auseinandergenommen. Der Läufer meldet es deshalb ROT und nicht
 „übersprungen“: fünf rote Zusagen, die genau diese eine Lücke benennen.
 
 Wer das aufnimmt: `tools/systembus/run.sh`, Abschnitt 9, und
-`tools/design/fahren.py` (dort sind in dieser Runde `klickauf glocke`
+`tools/design/drive.py` (dort sind in dieser Runde `klickauf glocke`
 und `klickauf tbbtn<N>` dazugekommen).
 
 ---
@@ -158,7 +158,7 @@ Ablage wirklich die neue ist.
 **Werkzeuge**
 
 * `tools/systembus/run.sh` (neu), `test.sh` Abschnitt 42,
-  `tools/kernel/memmap.py` (Bereich `BUS`), `tools/design/fahren.py`
+  `tools/kernel/memmap.py` (Bereich `BUS`), `tools/design/drive.py`
   (`glocke`, `tbbtn<N>`), `docs/SYSTEMBUS.md`.
 
 ---

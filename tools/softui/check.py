@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/softui/pruef.py -- DIE BILDER WERDEN GEMESSEN, NICHT ANGESEHEN.
+"""tools/softui/check.py -- DIE BILDER WERDEN GEMESSEN, NICHT ANGESEHEN.
 
 Justin, zu dieser Runde: *"Die Screenshots werden GEMESSEN, nicht
 angeschaut: keine leeren Beschriftungen, nichts abgeschnitten, nichts
@@ -40,7 +40,7 @@ die ein Bild beantworten kann und ein Mitschnitt nicht:
                 uebereinanderliegen, ergeben ein Bild, auf dem beide
                 unleserlich sind und beide "da" gemeldet wurden.
 
-    pruef.py <bild.ppm> <serial.txt> [--asc N] [--slop N] [--nur win=..]
+    check.py <bild.ppm> <serial.txt> [--asc N] [--slop N] [--nur win=..]
 
 Beendigungscode 0 = keine Beanstandung.  Jede Beanstandung steht mit
 Fenster, Stelle und Text da; eine Zahl ohne Ort ist keine Fundstelle.

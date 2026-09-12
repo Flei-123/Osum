@@ -292,7 +292,7 @@ Wächterseite steht, aber die Zahl ist im Auge zu behalten.
 **Nicht gebaut in dieser Runde:** Startmenü Stufe 2, Ausbau des
 Kontrollzentrums, App-Store mit echtem Inhalt, jarvisd-Ausbau. Für den
 App-Store liegt die Werkzeugkette bereit
-(`tools/ota/veroeffentlichen.py`, `verzeichnis.py`, `opk.py`), und
+(`tools/ota/veroeffentlichen.py`, `listing.py`, `opk.py`), und
 `jarvisd` hat den Bildschirmfoto-Auftrag (`jarvisd -f <pfad>`, PPM) und
 die Startdiagnose (`jarvisd -d`) schon aus der Vorrunde. Beides ist
 begonnene Arbeit, nicht fehlende.

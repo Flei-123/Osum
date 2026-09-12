@@ -96,7 +96,7 @@ Zeichenweg (GLYPHE), 43 Systembus, 44 Kernprotokoll.
    Der Zweig entstand, bevor `assets/apps/taskmgr.osp` da war; sein
    `bundle.py`-Aufruf nimmt JEDES Buendel, seine Programmliste kennt
    `taskmgr` aber nicht. Genau dieser Fall steht schon in
-   `tools/design/aufnahme.sh:196` beschrieben, mitsamt der Abhilfe der
+   `tools/design/capture.sh:196` beschrieben, mitsamt der Abhilfe der
    Runde WERKZEUGE: `nur=` ueberspringt jedes Buendel, dessen Programm
    nicht auf dieser Platte liegt. Derselbe Riegel jetzt hier.
 
@@ -177,7 +177,7 @@ dabei.
 | `tools/protokoll/run.sh` | **55 / 0** | 55 / 0 | nach dem kdata-Fix |
 | `tools/bridge/run.sh` | **113 / 0** | 16 / 0 (Zweig) | |
 | `tools/systembus/run.sh` | **34 / 1** | 30 / 5 (Zweig) | besser als der Zweig |
-| `tools/uhrwerk/abnahme.sh` | **8 / 0** | 8 / 0 | 3440x1440, smp1 und smp4 |
+| `tools/uhrwerk/acceptance.sh` | **8 / 0** | 8 / 0 | 3440x1440, smp1 und smp4 |
 | `tools/hda/run.sh` | 140 / 3 | — | die 3 sind Tempo/Aussetzer, lastabhaengig |
 | `tools/vielkern/run.sh` | 37 / 3 | **26 / 13** | merge6 unter derselben Last SCHLECHTER |
 | `tools/usbimg/run.sh` | 27 / 15 | 37 / 11 (rot) | vorbestehend rot, siehe unten |

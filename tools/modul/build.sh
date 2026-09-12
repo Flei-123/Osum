@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/modul/bau.sh -- EIN MODUL BAUEN, aus dem Repo heraus.
+# tools/modul/build.sh -- EIN MODUL BAUEN, aus dem Repo heraus.
 #
-#   ./tools/modul/bau.sh AUSGABE.omod [--stufe 0|1] [--name N] [--abi N]
+#   ./tools/modul/build.sh AUSGABE.omod [--stufe 0|1] [--name N] [--abi N]
 #                                     [weitere Optionen fuer mkomod.py]
 #
 # WARUM EIN EIGENES SKRIPT UND NICHT EIN AUFRUF VON firnc: ein Modul wird

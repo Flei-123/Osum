@@ -176,7 +176,7 @@ def teil_leiste(out, name, uisc):
         # Die Leiste meldet ihre Klickfelder in IHREN Koordinaten (der
         # Ursprung ist ihre linke obere Ecke); das Bild hat die des
         # Bildschirms. Also der Versatz der Leiste dazu -- dieselbe
-        # Rechnung, die `fahren.py` fuer `klickauf` macht.
+        # Rechnung, die `drive.py` fuer `klickauf` macht.
         for i in sorted(felder):
             x, y, w, h = felder[i]
             args.append("--feld")

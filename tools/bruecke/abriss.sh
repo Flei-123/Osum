@@ -167,7 +167,7 @@ cat > "$W/auftraege.txt" <<'AUF'
 system||
 AUF
 : > "$W/aus.txt"
-ip netns exec "$NS" python3 tools/bridge/gegenstelle.py \
+ip netns exec "$NS" python3 tools/bridge/peer.py \
     --cert "$W/certs/good.pem" --key "$W/certs/good.key" \
     --port "$TLSPORT" --auftraege "$W/auftraege.txt" --aus "$W/aus" \
     --kein-beweis --wartezeit 120 > "$W/g1.log" 2>&1 & GPID=$!
@@ -200,7 +200,7 @@ sleep 3
 
 # Und wieder hinstellen. Wenn die Bruecke taugt, meldet sich das
 # Geraet von selbst, ohne dass jemand etwas tut.
-ip netns exec "$NS" python3 tools/bridge/gegenstelle.py \
+ip netns exec "$NS" python3 tools/bridge/peer.py \
     --cert "$W/certs/good.pem" --key "$W/certs/good.key" \
     --port "$TLSPORT" --auftraege "$W/auftraege.txt" --aus "$W/aus2" \
     --kein-beweis --wartezeit 120 > "$W/g2.log" 2>&1 & GPID=$!

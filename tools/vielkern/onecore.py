@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/vielkern/einkern.py -- DIE EIN-KERN-RESTE, AN DER QUELLE GEZAEHLT.
+"""tools/vielkern/onecore.py -- DIE EIN-KERN-RESTE, AN DER QUELLE GEZAEHLT.
 
-    einkern.py [--liste] [--nur <datei.fi>]
+    onecore.py [--liste] [--nur <datei.fi>]
 
 WORUM ES GEHT. Ein Puffer in der Datenseite (`state + kstate.X_OFF`)
 gehoert der GANZEN MASCHINE. Solange nur ein Kern darin arbeitet, ist

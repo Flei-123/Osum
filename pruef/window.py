@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""fenster.py -- Fensterverwaltung und Herunterfahren.
+"""window.py -- Fensterverwaltung und Herunterfahren.
 
-    python3 fenster.py <name> <breite> <hoehe>
+    python3 window.py <name> <breite> <hoehe>
 
   4.1 verschieben      Titelleiste ziehen
   4.2 Groesse ziehen   Griff unten rechts

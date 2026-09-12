@@ -85,7 +85,7 @@ GEGENPROBE: 'Run'        steht NICHT da (bester Wert 74%)
 'kein Netz'         100% der  63 Tintenpunkte
 ```
 
-`tools/usbimg/suchtext.py` sucht die Zeile im **ganzen** Bild, gerastert
+`tools/usbimg/searchtext.py` sucht die Zeile im **ganzen** Bild, gerastert
 mit `tools/ttf/raster.py` — der zweiten Fassung des Rasterers aus
 `kernel/ttf.fi`, in einer anderen Sprache geschrieben. Es wird also
 nicht gegen sich selbst geprüft.
@@ -334,7 +334,7 @@ kernel/kmain.fi                     hwdiag.stage + Wurzel aus dem Modul in surfa
 kernel/arch/x86_64/user.fi          unmap_user -- der dritte KVM-Fehler
 tools/usbimg/build.sh               das Abbild
 tools/usbimg/run.sh                 die Abnahme, 46 Zusagen
-tools/usbimg/suchtext.py            eine Textzeile im ganzen Bild suchen
+tools/usbimg/searchtext.py            eine Textzeile im ganzen Bild suchen
 docs/USBSTICK.md                    die Anleitung für Justin
 STATUS-USBIMG.md                    diese Seite
 ```

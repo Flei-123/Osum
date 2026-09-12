@@ -4,28 +4,28 @@
 #
 #   bash tools/design/eh5.sh <ausgabeverzeichnis> [key=value ...]
 #
-# WARUM ES DIESEN LAEUFER GIBT UND aufnahme.sh NICHT GENUEGT.
+# WARUM ES DIESEN LAEUFER GIBT UND capture.sh NICHT GENUEGT.
 #
 # Justins Befunde aus ECHTHARDWARE-4 (Fotos vom 10.09.2026, 11:31-11:37,
 # Abbild orientos-usb-20260910-44a5af3.img) liessen sich mit
-# `tools/design/aufnahme.sh` NICHT nachstellen -- und zwar nicht, weil
+# `tools/design/capture.sh` NICHT nachstellen -- und zwar nicht, weil
 # sie nicht da waeren, sondern weil dieser Laeufer eine ANDERE MASCHINE
 # baut als der Stick. Drei Unterschiede, jeder einzeln nachgewiesen:
 #
-#   1. DIE BEFEHLSZEILE. aufnahme.sh faehrt
+#   1. DIE BEFEHLSZEILE. capture.sh faehrt
 #         gfx ... wm desk wmhold ... nokbd nosched noproc nofs
 #      der Stick dagegen (tools/usbimg/build.sh, Menue 1)
 #         modfs osum gfx wm wig desk wmshell wmdauer tafel herz ...
 #      `wmhold` haelt den Fensterserver an einer Stelle an, an der der
 #      Schreibtisch NOCH LAEUFT, aber `wmshell` fehlt: es wird also NIE
 #      eine Shell im Terminalfenster gestartet. Justins Befund B
-#      ("Terminalfenster ist leer") KANN unter aufnahme.sh gar nicht
+#      ("Terminalfenster ist leer") KANN unter capture.sh gar nicht
 #      auftreten, weil dort nie eine Shell im Fenster stand.
 #      Ausserdem `nokbd`: der Tastaturtreiber ist AUS. Befund A
 #      ("im Suchfenster laesst sich nichts tippen") ist damit ebenfalls
 #      nicht pruefbar -- `sendkey` kam bisher ueber einen Sonderweg an.
 #
-#   2. DIE PROGRAMMLISTE. aufnahme.sh baut elf Programme; der Stick
+#   2. DIE PROGRAMMLISTE. capture.sh baut elf Programme; der Stick
 #      baut achtundfuenfzig. `/bin/taskmgr` ist in BEIDEN nicht dabei,
 #      und genau das ist Justins Befund F: das Kontrollzentrum ruft
 #      `/bin/taskmgr` (kernel/user/qs.fi:1316), und diese Datei liegt
@@ -368,7 +368,7 @@ if ! grep -qaE 'launcher: ready|taskbar: ready|wm: dauer' "$OUT/serial.txt" 2>/d
 fi
 
 if [ -n "$drehbuch" ]; then
-    python3 -u tools/design/fahren.py "$SOCK" "$OUT/serial.txt" "$OUT" "$drehbuch" \
+    python3 -u tools/design/drive.py "$SOCK" "$OUT/serial.txt" "$OUT" "$drehbuch" \
         2>&1 | tee "$OUT/fahren.log"
 fi
 

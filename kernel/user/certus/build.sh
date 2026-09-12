@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# kernel/user/certus/bau.sh -- /bin/certus BAUEN. Runde CERTUS-AUF-OSUM.
+# kernel/user/certus/build.sh -- /bin/certus BAUEN. Runde CERTUS-AUF-OSUM.
 #
 # ============================================== WAS HIER ZUSAMMENKOMMT
 #
@@ -41,7 +41,7 @@
 # wird davon NICHT angefasst -- er kommt weiter aus vendor/firn. Zwei
 # Uebersetzer in einem Abbild, jeder fuer das, was er gebaut hat.
 #
-#     kernel/user/certus/bau.sh <ziel.elf>
+#     kernel/user/certus/build.sh <ziel.elf>
 #
 # Umgebung: CERTUS_REPO (Vorgabe /root/certus-sammeln), CERTUS_FIRNC.
 set -euo pipefail

@@ -263,7 +263,7 @@ der neue Pruefer hat sich an Osum geeicht und nicht umgekehrt.
    Fehler, den Runde WLAN in ihrer ersten Fassung auch gemacht hatte
    und den derselbe Vektor gefunden hat.
 
-Nach der Berichtigung stimmt `gegenstelle.py` oktettgleich mit dem
+Nach der Berichtigung stimmt `peer.py` oktettgleich mit dem
 Vektor IEEE Std 802.11-2012 M.6.4 -- und mit Osum.
 
 ### Eine Wache, die berichtigt werden musste

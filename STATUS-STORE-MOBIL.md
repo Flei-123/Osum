@@ -31,7 +31,7 @@ daten      1.0.0  <sha256>  <groesse>  daten-1.opk      osum-any
 `osum-any` heisst: kein ELF in der Nutzlast, laeuft auf jeder Maschine.
 `tools/ota/veroeffentlichen.py` schreibt die Spalte, `tools/ota/plattform.py`
 leitet sie ab (`arch=` im Paketkopf, sonst `e_machine` des ELF),
-`tools/ota/verzeichnis.py` liest sie.
+`tools/ota/listing.py` liest sie.
 
 **Rueckwaerts:** eine Zeile OHNE sechste Spalte wird **ausgeblendet und
 gezaehlt**, nicht stillschweigend installiert. Ein Verzeichnis von vor

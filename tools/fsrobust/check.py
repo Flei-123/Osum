@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/fsrobust/pruef.py -- dasselbe wie /bin/fsck, auf dem WIRT.
+"""tools/fsrobust/check.py -- dasselbe wie /bin/fsck, auf dem WIRT.
 
 Es gibt in diesem Baum eine Regel, und sie ist der Grund fuer diese
 Datei: JEDE Aussage ueber das Format auf der Platte hat zwei
@@ -14,9 +14,9 @@ Programm in Ring 3 nicht kann: es zaehlt die Bloecke der EINZELNEN
 Dateien nach und liest den Inhalt der Messdateien der Runde FSROBUST
 (`/d/roll`, `/d/fN`, `/d/count`) direkt aus dem Abbild.
 
-    pruef.py struktur <abbild>
-    pruef.py inhalt   <abbild>
-    pruef.py journal  <abbild>
+    check.py struktur <abbild>
+    check.py inhalt   <abbild>
+    check.py journal  <abbild>
 """
 
 import os
@@ -84,7 +84,7 @@ class Bild:
         # fremden Programms; wer sie glaubt, laeuft bei "2^40 Inodes"
         # eine Billion Mal durch eine Tabelle, die es nicht gibt. Genau
         # das ist dem ersten Entwurf dieser Datei passiert, gemessen an
-        # tools/fsrobust/kaputt.py, Fall `inodes`.
+        # tools/fsrobust/corrupt.py, Fall `inodes`.
         if self.blocks > self.geraet:
             self.blocks = self.geraet
         if not (0 < self.itable < self.data <= self.blocks):

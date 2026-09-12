@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/design/aufnahme.sh -- RUNDE OBERFLAECHE: SIEBEN ANSICHTEN, EIN START.
+# tools/design/capture.sh -- RUNDE OBERFLAECHE: SIEBEN ANSICHTEN, EIN START.
 #
-#   bash tools/design/aufnahme.sh <ausgabeverzeichnis> [key=value ...]
+#   bash tools/design/capture.sh <ausgabeverzeichnis> [key=value ...]
 #
 #     shape=classic|modern|<name>   /etc/theme.conf shape=
 #     scheme=day|paper|night|...    /etc/theme.conf scheme=
@@ -16,7 +16,7 @@
 # eigene Maschine gebootet.  Sieben Maschinen sind sieben Uhrzeiten in
 # der Leiste und sieben verschiedene Zufaelle beim Start; ein
 # Vorher/Nachher-Vergleich, in dem sich nebenbei die Uhr bewegt, misst
-# Rauschen mit.  Hier laeuft EINE Maschine, und `tools/design/fahren.py`
+# Rauschen mit.  Hier laeuft EINE Maschine, und `tools/design/drive.py`
 # klickt sich durch die Ansichten.
 #
 # DIE SIEBEN ANSICHTEN, und warum genau diese: es sind die Flaechen, die
@@ -33,7 +33,7 @@ ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 export FIRN_REPO=${FIRN_REPO:-/root/jarvis/projects/u_DiS4in7esMF1/firn}
 
-OUT=${1:?usage: aufnahme.sh <outdir> [key=value ...]}
+OUT=${1:?usage: capture.sh <outdir> [key=value ...]}
 shift || true
 
 shape=osum
@@ -258,10 +258,10 @@ printf 'lang=%s\n' "$lang" > "$OUT/locale.conf"
 #
 # Die Spur ist nicht unnuetz: acht Pruefstaende lesen die `wlib:`-Zeilen
 # (tools/design/messen.py, tools/alltag/shotcheck.py und weitere), und
-# `fahren.py` findet seine Rechtecke darin. Wer sie braucht, schaltet
+# `drive.py` findet seine Rechtecke darin. Wer sie braucht, schaltet
 # sie ein:
 #
-#     bash tools/design/aufnahme.sh /tmp/x uitrace=yes
+#     bash tools/design/capture.sh /tmp/x uitrace=yes
 #
 # Fuer ein Bild, das zeigen soll, was der Nutzer sieht, ist sie aus.
 # WICHTIG: bei "aus" wird die Datei NICHT angelegt, nicht nur geleert.
@@ -499,7 +499,7 @@ if ! grep -qaE '^wm: hold' "$OUT/serial.txt" 2>/dev/null; then
     tail -20 "$OUT/serial.txt" 2>/dev/null
 fi
 
-python3 -u tools/design/fahren.py "$SOCK" "$OUT/serial.txt" "$OUT" "$drehbuch" \
+python3 -u tools/design/drive.py "$SOCK" "$OUT/serial.txt" "$OUT" "$drehbuch" \
     2>&1 | tee "$OUT/fahren.log"
 
 wait "$PID"; RC=$?

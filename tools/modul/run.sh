@@ -94,7 +94,7 @@ else
     ok "ps2m.consume ist mit --ohne-ps2m NICHT im Abbild (kein toter Zweig, keine Zeile)"
 fi
 
-bash tools/modul/bau.sh "$TMPD/ps2maus.omod" --name ps2maus --abi 1 \
+bash tools/modul/build.sh "$TMPD/ps2maus.omod" --name ps2maus --abi 1 \
     > "$TMPD/mb.txt" 2>&1 \
     && ok "Modul gebaut ($(stat -c%s "$TMPD/ps2maus.omod") Oktette)" \
     || { bad "Modulbau"; sed 's/^/        /' "$TMPD/mb.txt" | head -8; }
@@ -108,12 +108,12 @@ ok "das Modul verlangt genau die sechs Namen, die kernel/ksym.fi anbietet"
 # Die absichtlich kaputten Fassungen. Sie entstehen HIER und nicht mit
 # `dd` hinterher -- eine Datei, die ein Skript nachtraeglich verbiegt,
 # misst am naechsten Tag etwas anderes.
-bash tools/modul/bau.sh "$TMPD/m-abi.omod"  --name ps2maus --abi 2 >/dev/null 2>&1
-bash tools/modul/bau.sh "$TMPD/m-sig.omod"  --name ps2maus --abi 1 --sig-dreh >/dev/null 2>&1
-bash tools/modul/bau.sh "$TMPD/m-nutz.omod" --name ps2maus --abi 1 --nutz-dreh 1000 >/dev/null 2>&1
-bash tools/modul/bau.sh "$TMPD/m-kenn.omod" --name ps2maus --abi 1 --kennung >/dev/null 2>&1
-bash tools/modul/bau.sh "$TMPD/m-text.omod" --name ps2maus --abi 1 --text-dreh 64 >/dev/null 2>&1
-bash tools/modul/bau.sh "$TMPD/m-fremd.omod" --quelle module/ps2maus-fremd.fi \
+bash tools/modul/build.sh "$TMPD/m-abi.omod"  --name ps2maus --abi 2 >/dev/null 2>&1
+bash tools/modul/build.sh "$TMPD/m-sig.omod"  --name ps2maus --abi 1 --sig-dreh >/dev/null 2>&1
+bash tools/modul/build.sh "$TMPD/m-nutz.omod" --name ps2maus --abi 1 --nutz-dreh 1000 >/dev/null 2>&1
+bash tools/modul/build.sh "$TMPD/m-kenn.omod" --name ps2maus --abi 1 --kennung >/dev/null 2>&1
+bash tools/modul/build.sh "$TMPD/m-text.omod" --name ps2maus --abi 1 --text-dreh 64 >/dev/null 2>&1
+bash tools/modul/build.sh "$TMPD/m-fremd.omod" --quelle module/ps2maus-fremd.fi \
     --name ps2maus --abi 1 >/dev/null 2>&1
 n=0
 for f in m-abi m-sig m-nutz m-kenn m-text m-fremd; do

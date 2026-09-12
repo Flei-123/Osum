@@ -6,7 +6,7 @@
 # DAS IST DER ABSCHNITT, DEN RUNDE BRIDGE NICHT HATTE.
 # ====================================================================
 #
-# `tools/bridge/run.sh` misst gegen `gegenstelle.py` -- einen
+# `tools/bridge/run.sh` misst gegen `peer.py` -- einen
 # TLS-Server in Python, der GENAU das Protokoll aus `jarvisd.fi`
 # spricht. Das ist eine ehrliche Messung von OSUMS SEITE, und
 # docs/BRIDGE.md sagt selbst, was damit NICHT gemessen ist: ob der
@@ -160,7 +160,7 @@ sleep 0.5
 # veth-Paares half auch nicht ("timed out"): dieses Ende gehoert
 # `tools/net/bridge.c`, das die Rahmen per AF_PACKET abholt -- es ist
 # absichtlich KEINE Schnittstelle, fuer die der Linux-Stapel antwortet.
-# `gegenstelle.py` macht es seit Runde BRIDGE richtig: sie laeuft IM
+# `peer.py` macht es seit Runde BRIDGE richtig: sie laeuft IM
 # Netzraum und lauscht dort auf 0.0.0.0.
 
 # ------------------------------------------------- 4. der echte Server

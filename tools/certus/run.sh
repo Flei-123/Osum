@@ -13,7 +13,7 @@
 #
 #   1. BAUEN. /bin/certus als eigenstaendige ELF64-Datei fuer Ring 3,
 #      gebaut mit dem EIGENEN Uebersetzer des Certus-Baumes
-#      (kernel/user/certus/bau.sh) -- und die Gegenproben dazu: keine
+#      (kernel/user/certus/build.sh) -- und die Gegenproben dazu: keine
 #      undefinierte Referenz, drei Segmente mit getrennten Rechten,
 #      kein Segment zugleich schreib- und ausfuehrbar, Ende unterhalb
 #      von proc.IMAGE_END.

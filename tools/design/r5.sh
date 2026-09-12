@@ -49,7 +49,7 @@ qemu-system-x86_64 -kernel "$KERN" -m 2048 \
   -monitor "unix:$W/mon,server,nowait" > "$W/qemu.log" 2>&1 &
 QP=$!
 sleep 3
-python3 tools/design/fahren.py "$W/mon" "$W/serial.txt" "$W" \
+python3 tools/design/drive.py "$W/mon" "$W/serial.txt" "$W" \
     "$W/drehbuch.txt" > "$W/fahren.log" 2>&1 || true
 kill "$QP" 2>/dev/null; wait "$QP" 2>/dev/null
 

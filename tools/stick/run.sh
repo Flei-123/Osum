@@ -40,7 +40,7 @@
 #   * Zusage 2 und 3 gegen den ECHTEN Server https://store.fleitec.com/
 #     im offenen Internet. Kein Pruefstand, kein selbstgemachtes
 #     Zertifikat.
-#   * Zusage 4 gegen `tools/bridge/gegenstelle.py`, einen TLS-Server in
+#   * Zusage 4 gegen `tools/bridge/peer.py`, einen TLS-Server in
 #     Python -- NICHT gegen den echten JARVIS-Server. Der laeuft
 #     anderswo und ist nicht Teil dieses Repos.
 #
@@ -188,7 +188,7 @@ stick_lauf() { # <name> <bios|uefi> <mit-gegenstelle:0|1> <console.py-args...>
     cp -f "$TMPD/probe.img" "$d/probe.img"
     local srvpid=""
     if [ "$mitsrv" = 1 ]; then
-        python3 tools/bridge/gegenstelle.py \
+        python3 tools/bridge/peer.py \
             --cert "$TMPD/certs/srv.pem" --key "$TMPD/certs/srv.key" \
             --port "$SRVPORT" --auftraege "$TMPD/auftraege.txt" \
             --aus "$d/g.log" --wartezeit 180 > "$d/g.stderr" 2>&1 &

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""bildpruef.py -- EIN BILD IN ZAHLEN, damit "ich habe hingesehen" belegbar ist.
+"""bildcheck.py -- EIN BILD IN ZAHLEN, damit "ich habe hingesehen" belegbar ist.
 
-    python3 bildpruef.py <bild.png> [x0 y0 x1 y1]
+    python3 bildcheck.py <bild.png> [x0 y0 x1 y1]
 
 Justins Regel: "bitte immer selber visuell drueberschauen". Ein Modell
 kann ein PNG nicht anschauen wie ein Mensch -- also wird es VERMESSEN,

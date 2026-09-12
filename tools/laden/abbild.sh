@@ -155,7 +155,7 @@ fi
 #     FEHLGESCHLAGEN: mkfs
 #     mkfs: '/bin/taskmgr' gibt es nicht
 #
-# MERGE-6 hat denselben Bruch in tools/design/aufnahme.sh und
+# MERGE-6 hat denselben Bruch in tools/design/capture.sh und
 # tools/vielkern/run.sh gefunden und dort denselben Riegel eingebaut;
 # HIER fiel er nicht auf, weil dieser Laeufer in jener Runde nicht
 # gefahren ist. Er ist der Grund, warum die Auflage offen blieb.

@@ -506,7 +506,7 @@ rote Zusage einzeln nachgemessen.
 | `K17` | 157 / 1 | **158 / 0** (zweimal) | **Last.** Die Grundlinie gab unter derselben Last ebenfalls 158 / 0 |
 | `NET` | 74 / 1 | **75 / 0** | **Last.** Die eine rote ist ein Durchsatz durch 20 % Paketverlust (`237247`, erwartet `262144`) — einzeln grün, siehe unten |
 | `NETVIEW` | 193 / 3 | — | **Last.** Der erste rote Haken ist `online: the kernel reported state: 2, expected eq 3` — die Maschine war gar nicht online, und die zwei anderen (`online: falsch 40 von 82`, `9c: … 599948 µs`) hängen daran. In Lauf A: 195 / 0 |
-| `FSROBUST` | 27 / 4 | **30 / 0** | **Datenträger voll.** `FAIL kaputt.py` und `kaputte Abbilder gebaut: 11, erwartet ge 13` — der Läufer konnte seine Prüfabbilder nicht anlegen |
+| `FSROBUST` | 27 / 4 | **30 / 0** | **Datenträger voll.** `FAIL corrupt.py` und `kaputte Abbilder gebaut: 11, erwartet ge 13` — der Läufer konnte seine Prüfabbilder nicht anlegen |
 | `USBIMG` | 45 / 1 | **46 / 0** | **Last.** Zweimal rot mit **verschiedenen** Zusagen (einmal „der Diagnose-Eintrag hält nicht an", einmal „der Kern kommt nach der unbekannten Karte nicht mehr bis zum Ende") — beide Male ein abgeschnittener Lauf, kein Befund |
 | `HWNETTLS` | 0 / 1 | **24 / 0** nach der Reparatur | **ECHT.** `fetch.fi does not compile` — derselbe `FIRNLIB`-Fehler wie in `tools/ota/run.sh`. Repariert, siehe Teil 1b |
 | `OTA` | 104 grün / 5 rot | **107 grün / 0 rot** | **Datenträger voll.** Alle fünf roten liegen in Abschnitt (e); zwischen ihnen steht im Protokoll `No space left on device` — siehe unten |

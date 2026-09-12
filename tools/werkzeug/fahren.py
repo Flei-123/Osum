@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """tools/werkzeug/fahren.py -- EINEN ABLAUF UEBER EINE VERBINDUNG FAHREN.
 
-    fahren.py <monitor-socket> <plan.txt> <serial.txt> <ausgabeverzeichnis>
+    drive.py <monitor-socket> <plan.txt> <serial.txt> <ausgabeverzeichnis>
 
 WARUM ES DIESE DATEI GIBT, und die Begruendung ist eine Messung.
 

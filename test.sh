@@ -1391,7 +1391,7 @@ lauf "37. ein Treiber, der nicht im Kern steht: laden, benutzen, entladen (tools
 # noetigen Rechte beschnitten, sodass ein Fehler im Pfadpruefer
 # trotzdem kein Schreibrecht gibt.
 #
-# GEGEN WEN: gegen tools/bridge/gegenstelle.py, einen TLS-Server in
+# GEGEN WEN: gegen tools/bridge/peer.py, einen TLS-Server in
 # Python -- NICHT gegen den echten JARVIS-Server. Das steht auch im
 # Kopf des Laeufers und in docs/BRIDGE.md.
 lauf "38. der JARVIS-Helfer und seine Rechteliste (tools/bridge/run.sh, Runde BRIDGE)" \
@@ -1520,7 +1520,7 @@ lauf "45. Freunde, Praesenz und ein Chat ohne Mitleser (tools/praesenz/run.sh, R
 # Dieser Abschnitt fragt es von aussen: zweimal /bin/play durch die
 # Shell, jeder Ton per Goertzel einzeln nachgewiesen.
 #
-# DIE 60-SEKUNDEN-ABNAHME (tools/ton/abnahme.sh) STEHT ABSICHTLICH
+# DIE 60-SEKUNDEN-ABNAHME (tools/ton/acceptance.sh) STEHT ABSICHTLICH
 # NICHT HIER. Zwoelf Laeufe zu einer Minute sind zwoelf Minuten, und
 # das gehoert nicht in einen Durchlauf, den man vor jedem Commit
 # startet. Sie wird von Hand gefahren, und ihre Zahlen stehen in
@@ -1609,7 +1609,7 @@ lauf "47. WLAN ohne eine einzige Karte: 802.11, WPA2/WPA3 und CCMP gegen die Nor
 # Aufzeichnung von 2007 (Coherer/Induction), damit der Massstab selbst
 # einen Massstab hat.
 #
-# Warum nicht hostapd: gemessen und im Kopf von gegenstelle.py
+# Warum nicht hostapd: gemessen und im Kopf von peer.py
 # festgehalten. Debian baut hostapd ohne CONFIG_TESTING_OPTIONS
 # (EAPOL_RX -> 'Unknown command'), driver=wired ist auf 802.1X
 # verdrahtet und ruehrt die WPA-PSK-Maschine nicht an, und

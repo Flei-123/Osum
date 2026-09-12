@@ -9,7 +9,7 @@
 # nicht pruefen KANN, weil sie in seinen Aufrufen gar nicht vorkommen:
 #
 #   1. Die Ordner hiessen "2560", der Lauf war aber Vervielfachung 1
-#      -- `aufnahme.sh` hat `uiscale=` nie auf die Kommandozeile
+#      -- `capture.sh` hat `uiscale=` nie auf die Kommandozeile
 #      geschrieben.  Gemessen: Leiste 39 Bildpunkte hoch auf einem
 #      1440p-Schirm.  Hier steht `uiscale=2` in JEDEM 2560er Lauf,
 #      und die gemessene Leistenhoehe steht im Bericht.
@@ -35,7 +35,7 @@ mkdir -p "$OUT"
 HALT=${DESIGNHALT:-420}
 
 echo "== bauen (einmal, damit sich die Laeufe nicht um das Bauverzeichnis streiten) =="
-bash tools/design/aufnahme.sh "$OUT/bau" nurbau=ja || exit 1
+bash tools/design/capture.sh "$OUT/bau" nurbau=ja || exit 1
 
 # lauf <name> <extra-woerter> <weitere key=value> <drehbuch>
 lauf() {
@@ -43,7 +43,7 @@ lauf() {
     mkdir -p "$OUT/$name"
     printf '%s\n' "$buch" > "$OUT/$name.dreh"
     # shellcheck disable=SC2086
-    bash tools/design/aufnahme.sh "$OUT/$name" halt="$HALT" \
+    bash tools/design/capture.sh "$OUT/$name" halt="$HALT" \
         extra="$extra" drehbuch="$OUT/$name.dreh" $kv \
         > "$OUT/$name.log" 2>&1
     echo "   fertig: $name ($(ls "$OUT/$name"/*.ppm 2>/dev/null | wc -l) Bilder)"

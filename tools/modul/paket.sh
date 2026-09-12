@@ -6,7 +6,7 @@
 # DIE KETTE, ganz, von der Quelldatei bis zum Gerät:
 #
 #   module/ps2maus.fi
-#        │  tools/modul/bau.sh          (firnc, strip, Kopf, Ed25519)
+#        │  tools/modul/build.sh          (firnc, strip, Kopf, Ed25519)
 #        ▼
 #   ps2maus.omod                        ← das, was der KERN prueft
 #        │  pkg/opk.py bauen            (OrientOS-Paketformat)
@@ -59,7 +59,7 @@ STORE=${STORE:-/root/orientstore/werkzeug/store}
 
 mkdir -p "$OUT"
 echo "== 1. das Modul bauen und signieren =="
-bash tools/modul/bau.sh "$OUT/ps2maus.omod" --name ps2maus --abi 1 \
+bash tools/modul/build.sh "$OUT/ps2maus.omod" --name ps2maus --abi 1 \
     | sed 's/^/   /' || exit 1
 
 echo "== 2. daraus ein OrientOS-Paket =="

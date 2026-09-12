@@ -75,7 +75,7 @@
 #       `inode_get` VOR VIELKERN 3 hatte. Sie MUSS fallen.
 #
 #   10. RUNDE MERGE-6, DIE UEBRIGEN EIN-KERN-RESTE. Ein Puffer in der
-#       Datenseite gehoert der ganzen Maschine. `tools/vielkern/einkern.py`
+#       Datenseite gehoert der ganzen Maschine. `tools/vielkern/onecore.py`
 #       zaehlt an der Quelle, wie viele Funktionen einen benutzen, ohne
 #       dass ein Sperrwort in ihrem Rumpf steht. Die Zahl ist KEINE
 #       Fehlerliste -- sie ist ein Vertrag: sie darf nicht wachsen,
@@ -393,7 +393,7 @@ echo "== 12. RUNDE MERGE-6: die uebrigen Ein-Kern-Reste, an der Quelle gezaehlt 
 # ohne dass jemand sie hier hochsetzt und in docs/RUNDE-MERGE6.md
 # aufschreibt, warum.
 # RUNDE GLYPHE: 60 -> 66. Nicht, weil sechs Stellen dazugekommen
-# waeren -- `einkern.py` SIEHT seit dieser Runde eine zweite Bauform
+# waeren -- `onecore.py` SIEHT seit dieser Runde eine zweite Bauform
 # desselben Fehlers: eine Seite, die eine Datei ueber einen EIGENEN
 # Zugriff holt (`base(state) + KONST` statt `state + kstate.X_OFF`).
 # Genau in dieser Form stand der Fehler, an dem MERGE-6 gescheitert
@@ -403,10 +403,10 @@ echo "== 12. RUNDE MERGE-6: die uebrigen Ein-Kern-Reste, an der Quelle gezaehlt 
 # RUNDE MERGE-7: 66 -> 67. Die drei neuen Stellen sind ALLE in
 # `kernel/klog.fi` (Runde PROTOKOLL, in merge6 gibt es die Datei nicht):
 # `base()`, `emit()` und `set_filter()` fassen `kstate.LOG_OFF` an, ohne
-# dass `einkern.py` ein Sperrwort SIEHT. Sie sind trotzdem gesperrt --
+# dass `onecore.py` ein Sperrwort SIEHT. Sie sind trotzdem gesperrt --
 # klog nimmt eine EIGENE Sperre mit `atomic.cas` auf `H_LK`
 # (kernel/klog.fi:300..311), weil alle acht Plaetze in `kstate.LOCK_COUNT`
-# vergeben sind und `atomic.lock_take` deshalb ausschied. `einkern.py`
+# vergeben sind und `atomic.lock_take` deshalb ausschied. `onecore.py`
 # kennt nur die Namen aus SPERRE und sieht diese Bauform nicht.
 #
 # BELEGT, nicht behauptet: tools/protokoll/run.sh laesst vier Kerne
@@ -415,13 +415,13 @@ echo "== 12. RUNDE MERGE-6: die uebrigen Ein-Kern-Reste, an der Quelle gezaehlt 
 # ungesperrte Datenseite haette dort Kopf und Text verschiedener Kerne
 # gemischt.
 EK_SOLL=${EK_SOLL:-67}
-ek=$(python3 tools/vielkern/einkern.py | sed -n 's/.*offen=\([0-9]*\).*/\1/p')
+ek=$(python3 tools/vielkern/onecore.py | sed -n 's/.*offen=\([0-9]*\).*/\1/p')
 if [ -n "$ek" ] && [ "$ek" -le "$EK_SOLL" ] 2>/dev/null; then
     ok "Funktionen mit einem Puffer der Datenseite ohne Sperrwort: $ek (Vertrag: hoechstens $EK_SOLL)"
 else
     bad "Ein-Kern-Reste: $ek, Vertrag ist hoechstens $EK_SOLL -- neue Stelle? Dann in docs/RUNDE-MERGE6.md eintragen"
 fi
-python3 tools/vielkern/einkern.py | sed 's/^/        /'
+python3 tools/vielkern/onecore.py | sed 's/^/        /'
 
 echo
 echo "VIELKERN: $pass bestanden, $fail gescheitert"

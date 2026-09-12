@@ -12,11 +12,11 @@ solches da.
 
 ## 0. ZUERST DER PRUEFSTAND -- ohne ihn war nichts davon reproduzierbar
 
-`tools/design/aufnahme.sh`, der Laeufer der letzten vier Runden, baut
+`tools/design/capture.sh`, der Laeufer der letzten vier Runden, baut
 eine **andere Maschine als der Stick**. Drei Unterschiede, jeder
 einzeln nachgewiesen:
 
-| | aufnahme.sh | der Stick |
+| | capture.sh | der Stick |
 |---|---|---|
 | Befehlszeile | `wm desk wmhold ... nokbd` | `wm wig desk wmshell wmdauer tafel herz` |
 | Programme | 11 | 58 |
@@ -328,12 +328,12 @@ im Bild, keine Regression.
   versucht, aus Bildpunkten Buchstaben zu raten, und beide Male stand
   am Ende ein Muster, das man so oder so lesen kann. Jetzt sagt das
   Fenster selbst, was in ihm steht.
-* **`fahren.py ziehkante <id> <kante> <dx>,<dy>`** -- greift die Kante
+* **`drive.py ziehkante <id> <kante> <dx>,<dy>`** -- greift die Kante
   aus der **gemeldeten** Geometrie statt aus getippten Zahlen. Eine
   Greifzone ist acht Bildpunkte breit und wandert nach jedem Zug; mit
   festen Zahlen trifft der zweite Zug daneben. Hat mich zwei Laeufe
   gekostet, bevor es das gab.
-* **`fahren.py klicknah` / `ziehspurnah`** -- klicken und ziehen ohne
+* **`drive.py klicknah` / `ziehspurnah`** -- klicken und ziehen ohne
   den Umweg ueber die Bildschirmecke. `fahre` faehrt immer erst nach
   0,0; das Kontrollzentrum schliesst sich dabei voellig zu Recht
   (`qs: closed by outside`), und es sah aus, als taeten die Regler
@@ -343,7 +343,7 @@ im Bild, keine Regression.
   `qs: text ... y=` ist die **Grundlinie der Schrift** und nicht das
   Feld; ein Klick darauf geht daneben. Mir in dieser Runde zweimal
   passiert.
-* **`fahren.py`** kennt jetzt `:` und die uebrigen URL-Zeichen
+* **`drive.py`** kennt jetzt `:` und die uebrigen URL-Zeichen
   (US-Belegung). Ohne sie fiel aus `https://example.com/` still
   `https//example.com/`, was `fetch` zu Recht ablehnte und wie ein
   Netzfehler aussah.

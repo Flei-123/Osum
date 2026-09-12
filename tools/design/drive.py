@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/design/fahren.py -- EIN START, VIELE BILDER.
+"""tools/design/drive.py -- EIN START, VIELE BILDER.
 
-    fahren.py <monitor-socket> <serial.txt> <ausgabeverzeichnis> <drehbuch>
+    drive.py <monitor-socket> <serial.txt> <ausgabeverzeichnis> <drehbuch>
 
 Die Runden davor haben je Bild eine eigene Maschine gestartet: bauen,
 booten, EIN Foto, beenden.  Fuer eine Bestandsaufnahme von sieben
