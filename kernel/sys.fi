@@ -3054,14 +3054,14 @@ fn do_write(state: u64, me: u64, fd: u64, buf: u64, want: u64) -> u64 {
 // Ausgabe ist der erste, weil sie die einzige ist, deren Bruch eine
 // ABNAHME zum Luegen bringt.
 fn conout(state: u64, me: u64, t: u64, buf: u64, len: u64) -> u64 {
-    let z: u64 = serial.zeile_an(cpu.here(state))
+    let z: u64 = serial.line_at(cpu.here(state))
     let bounce: u64 = state + kstate.BLOCK_OFF
     if !copy_in(state, me, bounce, buf, len) {
-        serial.zeile_aus(z)
+        serial.line_clear(z)
         return neg(errno.E_FAULT)
     }
     let r: u64 = tty.write_out(state, t, bounce, len)
-    serial.zeile_aus(z)
+    serial.line_clear(z)
     return r
 }
 
@@ -6067,7 +6067,7 @@ fn do_lock(state: u64, me: u64, of: u64, cmd: u64, arg: u64) -> u64 {
                 && lock_get(state, k, L_PID) == wer
                 && lock_trifft(von, bis, lock_get(state, k, L_VON),
                     lock_get(state, k, L_BIS)) {
-                lock_frei(state, k)
+                lock_free(state, k)
             }
             k = k + 1
         }
@@ -6105,35 +6105,35 @@ fn do_lock(state: u64, me: u64, of: u64, cmd: u64, arg: u64) -> u64 {
             && lock_get(state, k3, L_PID) == wer
             && lock_trifft(von, bis, lock_get(state, k3, L_VON),
                 lock_get(state, k3, L_BIS)) {
-            lock_frei(state, k3)
+            lock_free(state, k3)
         }
         k3 = k3 + 1
     }
-    var frei: u64 = kstate.FLOCK_SLOTS
+    var free: u64 = kstate.FLOCK_SLOTS
     var k4: u64 = 0
     while k4 < kstate.FLOCK_SLOTS {
-        if lock_get(state, k4, L_INO) == 0 && frei == kstate.FLOCK_SLOTS {
-            frei = k4
+        if lock_get(state, k4, L_INO) == 0 && free == kstate.FLOCK_SLOTS {
+            free = k4
         }
         k4 = k4 + 1
     }
-    if frei >= kstate.FLOCK_SLOTS {
+    if free >= kstate.FLOCK_SLOTS {
         // Die Tafel ist voll. POSIX nennt dafuer ENOLCK, und das ist
         // ehrlicher als eine Sperre zu gewaehren, die nicht eingetragen
         // ist -- genau die Luege, die diese Runde beseitigt.
         return neg(errno.E_NOLCK)
     }
-    lock_set(state, frei, L_INO, ino)
-    lock_set(state, frei, L_MNT, mnt)
-    lock_set(state, frei, L_VON, von)
-    lock_set(state, frei, L_BIS, bis)
-    lock_set(state, frei, L_ART, art)
-    lock_set(state, frei, L_PID, wer)
+    lock_set(state, free, L_INO, ino)
+    lock_set(state, free, L_MNT, mnt)
+    lock_set(state, free, L_VON, von)
+    lock_set(state, free, L_BIS, bis)
+    lock_set(state, free, L_ART, art)
+    lock_set(state, free, L_PID, wer)
     kstate.add(state, kstate.FLOCKS, 1)
     return 0
 }
 
-fn lock_frei(state: u64, k: u64) {
+fn lock_free(state: u64, k: u64) {
     lock_set(state, k, L_INO, 0)
     lock_set(state, k, L_MNT, 0)
     lock_set(state, k, L_VON, 0)
@@ -6155,7 +6155,7 @@ fn locks_drop(state: u64, me: u64) {
     while k < kstate.FLOCK_SLOTS {
         if lock_get(state, k, L_INO) != 0
             && lock_get(state, k, L_PID) == wer {
-            lock_frei(state, k)
+            lock_free(state, k)
         }
         k = k + 1
     }
@@ -8087,7 +8087,7 @@ fn do_klog(state: u64, me: u64, was: u64, arg: u64, ptr: u64,
         return klog.N_ENT
     }
     if was == KL_CRASH {
-        return absturz.offen(state)
+        return absturz.open(state)
     }
     if was == KL_LINE {
         // DER PUFFER IM KERN UND NICHT IN RING 3. `klog.line_at`
@@ -11268,7 +11268,7 @@ fn vm_of(state: u64, me: u64, h: u64, need: u64) -> u64 {
     return slot
 }
 
-fn vm_fehler(r: u64) -> u64 {
+fn vm_error(r: u64) -> u64 {
     if r == VM_E_TYPE {
         return cap.err(cap.E_WRONGTYPE)
     }
@@ -11285,7 +11285,7 @@ fn vm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64) -> u64 {
     if number == SYS_VM_RUN {
         let s: u64 = vm_of(state, me, a0, cap.R_WRITE)
         if s >= hv.MAX_VMS {
-            return vm_fehler(s)
+            return vm_error(s)
         }
         return hv.vm_run(state, s)
     }
@@ -11295,7 +11295,7 @@ fn vm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64) -> u64 {
     if number == SYS_VM_KILL {
         let s: u64 = vm_of(state, me, a0, cap.R_MANAGE)
         if s >= hv.MAX_VMS {
-            return vm_fehler(s)
+            return vm_error(s)
         }
         hv.vm_destroy(state, s)
         cap.close(state, me, a0)
@@ -11304,7 +11304,7 @@ fn vm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64) -> u64 {
     if number == SYS_VM_VALUE {
         let s: u64 = vm_of(state, me, a0, cap.R_READ)
         if s >= hv.MAX_VMS {
-            return vm_fehler(s)
+            return vm_error(s)
         }
         return hv.value_of(state, a1)
     }
@@ -11347,7 +11347,7 @@ const VMSTAT_WORDS: u64 = 5
 fn do_vm_stat(state: u64, me: u64, h: u64, aus: u64) -> u64 {
     let s: u64 = vm_of(state, me, h, cap.R_INSPECT)
     if s >= hv.MAX_VMS {
-        return vm_fehler(s)
+        return vm_error(s)
     }
     if aus == 0 {
         return 0

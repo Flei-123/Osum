@@ -79,7 +79,7 @@ export {
     shape, set_shape,
     blits, rows_copied, pixels, glyph_calls, clip_writes, clip_reads,
     buehne_verloren, stage_of, glyph_build,
-    race_bereit, race_soll, race_core, race_zeichen, RACE_PX,
+    race_ready, race_soll, race_core, race_char, RACE_PX,
     fetch,
     selftest, selftest_max,
     CLIP_MAX, G_HDR, MAX_ROW, stuecke
@@ -351,7 +351,7 @@ fn blit(state: u64, me: u64, i: u64, x: u64, y: u64, w: u64, h: u64,
     // und das war die Haelfte des Fehlers, an dem MERGE-6 gescheitert
     // ist: `glyph_into` hatte eine Sperre, `blit` nicht, und beide
     // schrieben in denselben Puffer.
-    let bz: u64 = buehne_wenn_sperre(state)
+    let bz: u64 = stage_if_lock(state)
     let stage: u64 = stage_of(state)
     var r: u64 = 0
     while r < bh {
@@ -370,7 +370,7 @@ fn blit(state: u64, me: u64, i: u64, x: u64, y: u64, w: u64, h: u64,
                 // Was schon drin steht, bleibt drin -- aber die Zusage
                 // "so viele Bildpunkte" wird nicht gegeben.
                 ss(state, S_ROWS, gs(state, S_ROWS) + r)
-                buehne_aus(bz)
+                stage_clear(bz)
                 return 0
             }
             wm.blit_in(state, i, stage, x + c, y + r, n, 1)
@@ -378,7 +378,7 @@ fn blit(state: u64, me: u64, i: u64, x: u64, y: u64, w: u64, h: u64,
         }
         r = r + 1
     }
-    buehne_aus(bz)
+    stage_clear(bz)
     ss(state, S_BLITS, gs(state, S_BLITS) + 1)
     ss(state, S_ROWS, gs(state, S_ROWS) + bh)
     ss(state, S_PIXELS, gs(state, S_PIXELS) + bw * bh)
@@ -497,7 +497,7 @@ fn buehne_an(me: u64) -> u64 {
     return 1
 }
 
-fn buehne_aus(hat: u64) {
+fn stage_clear(hat: u64) {
     if hat != 0 {
         arch.atomic_store((&buehne_wer[0]) as u64, 0)
     }
@@ -559,14 +559,14 @@ fn stage_of(state: u64) -> u64 {
 //
 // `glyphblind` bildet genau diesen Stand nach: Glyphe gesperrt, Zeile
 // frei, eine Buehne. `glyphsperre` ist Bauform A: BEIDE gesperrt.
-fn buehne_wenn_geteilt(state: u64) -> u64 {
+fn stage_if_split(state: u64) -> u64 {
     if !geteilte_buehne(state) {
         return 0
     }
     return buehne_an(cpu.here(state))
 }
 
-fn buehne_wenn_sperre(state: u64) -> u64 {
+fn stage_if_lock(state: u64) -> u64 {
     if !kstate.mode_on(state, kstate.M_GLOCK) {
         return 0
     }
@@ -637,19 +637,19 @@ fn glyph_into(state: u64, me: u64, f: u64, px: u64, c: u64, out: u64,
     if font >= ttf.MAX_FONTS {
         return 0
     }
-    let bz: u64 = buehne_wenn_geteilt(state)
+    let bz: u64 = stage_if_split(state)
     let stage: u64 = stage_of(state)
     let n: u64 = glyph_build(state, stage, font, px, c, max)
     if n == 0 {
-        buehne_aus(bz)
+        stage_clear(bz)
         return 0
     }
     if !store(state, me, out, stage, n) {
-        buehne_aus(bz)
+        stage_clear(bz)
         return 0
     }
     ss(state, S_GLYPHS, gs(state, S_GLYPHS) + 1)
-    buehne_aus(bz)
+    stage_clear(bz)
     return n
 }
 
@@ -667,23 +667,23 @@ fn glyph_into(state: u64, me: u64, f: u64, px: u64, c: u64, out: u64,
 // hat (`fetch` hinein, `wm.blit_in` heraus).
 const RACE_PX: u64 = 16
 
-fn race_zeichen(index: u64) -> u64 {
+fn race_char(index: u64) -> u64 {
     return 0x41 + index % 26
 }
 
-fn race_bereit(state: u64, font: u64) {
+fn race_ready(state: u64, font: u64) {
     ss(state, S_RACEFONT, font)
 }
 
 fn race_probe(state: u64, index: u64) -> u64 {
     // GENAU DIE SPERRE, DIE `glyph_into` NIMMT -- sonst misst der
     // Nachweis eine Bauform, die es nicht gibt.
-    let bz: u64 = buehne_wenn_geteilt(state)
+    let bz: u64 = stage_if_split(state)
     let stage: u64 = stage_of(state)
     let n: u64 = glyph_build(state, stage, gs(state, S_RACEFONT), RACE_PX,
-        race_zeichen(index), STAGE_MAX)
+        race_char(index), STAGE_MAX)
     if n == 0 {
-        buehne_aus(bz)
+        stage_clear(bz)
         return 0
     }
     var h: u64 = 1
@@ -692,7 +692,7 @@ fn race_probe(state: u64, index: u64) -> u64 {
         h = h *% 31 +% kstate.get8(stage + i) as u64
         i = i + 1
     }
-    buehne_aus(bz)
+    stage_clear(bz)
     return h
 }
 
@@ -702,10 +702,10 @@ fn race_soll(state: u64, index: u64) -> u64 {
     return race_probe(state, index)
 }
 
-fn race_zeile(state: u64, muster: u64) -> u64 {
+fn race_line(state: u64, muster: u64) -> u64 {
     // GENAU DIE SPERRE, DIE `blit` NIMMT -- also keine, ausser in
     // Bauform A.
-    let bz: u64 = buehne_wenn_sperre(state)
+    let bz: u64 = stage_if_lock(state)
     let stage: u64 = stage_of(state)
     var i: u64 = 0
     while i < STAGE_MAX / 8 {
@@ -722,7 +722,7 @@ fn race_zeile(state: u64, muster: u64) -> u64 {
             i = i + 1
         }
     }
-    buehne_aus(bz)
+    stage_clear(bz)
     return fehler
 }
 
@@ -737,7 +737,7 @@ fn race_core(state: u64, index: u64, runden: u64, soll: u64) -> u64 {
         if race_probe(state, index) != soll {
             fehler = fehler + 1
         }
-        fehler = fehler + race_zeile(state, muster +% i)
+        fehler = fehler + race_line(state, muster +% i)
         i = i + 1
     }
     return fehler
@@ -784,16 +784,16 @@ fn clip_set(state: u64, me: u64, src: u64, n: u64) -> u64 {
     if len == 0 {
         ss(state, S_CLIPLEN, 0)
         ss(state, S_CLIPW, gs(state, S_CLIPW) + 1)
-        buehne_aus(bz)
+        stage_clear(bz)
         return 0
     }
     if !fetch(state, me, base(state) + CLIP_OFF, src, len) {
-        buehne_aus(bz)
+        stage_clear(bz)
         return 0
     }
     ss(state, S_CLIPLEN, len)
     ss(state, S_CLIPW, gs(state, S_CLIPW) + 1)
-    buehne_aus(bz)
+    stage_clear(bz)
     return len
 }
 
@@ -806,15 +806,15 @@ fn clip_get(state: u64, me: u64, dst: u64, max: u64) -> u64 {
         len = max
     }
     if len == 0 {
-        buehne_aus(bz)
+        stage_clear(bz)
         return 0
     }
     if !store(state, me, dst, base(state) + CLIP_OFF, len) {
-        buehne_aus(bz)
+        stage_clear(bz)
         return 0
     }
     ss(state, S_CLIPR, gs(state, S_CLIPR) + 1)
-    buehne_aus(bz)
+    stage_clear(bz)
     return len
 }
 
