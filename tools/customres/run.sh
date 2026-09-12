@@ -199,9 +199,15 @@ done
 # Das Bedienfeld mit der neuen Seite. Nicht auf die Platte -- dazu
 # braeuchte es einen laufenden Fensterserver --, sondern damit ein Fehler
 # in den drei neuen Eingabefeldern auffaellt, bevor jemand sie oeffnet.
-if "$FIRNC" kernel/user/settings.fi -o "$TMPD/eins.o" > "$TMPD/eins.err" 2>&1 \
+# RUNDE GRUNDLINIE (A-016): Profil aus der Wurzeldatei LESEN, und im
+# Profil `app` mit -c und OHNE crt.o. Ohne das stand hier
+#     ld: input file '.../eins.o' is the same as output file
+# weil firnc im Profil `app` ohne -c gleich zu binden versucht.
+UPROF=""; UCRT="$TMPD/crt.o"
+grep -qa '^profile app' kernel/user/settings.fi && { UPROF=--profile=app; UCRT=""; }
+if "$FIRNC" $UPROF -c kernel/user/settings.fi -o "$TMPD/eins.o" > "$TMPD/eins.err" 2>&1 \
     && ld -T "$ULD" --defsym=USER_ENTRY=_F0.u_start -o "$TMPD/eins.elf" \
-        "$TMPD/crt.o" "$TMPD/eins.o" 2>/dev/null; then
+        $UCRT "$TMPD/eins.o" 2>/dev/null; then
     u=$(nm -u "$TMPD/eins.elf" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
     [ -z "$u" ] && ok "das Bedienfeld mit den drei Eingabefeldern baut frei" \
                 || bad "settings.elf hat undefinierte Symbole: $u"
