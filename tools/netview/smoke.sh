@@ -23,9 +23,11 @@ if [ ! -s "$TMPD/k0.mb" ] || [ -n "${REBUILD:-}" ]; then
 fi
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s || exit 1
 for pgm in $GPROGS; do
-    "$FIRNC" "kernel/user/$pgm.fi" -o "$TMPD/g$pgm.o" > "$TMPD/ge$pgm" 2>&1 \
+    UPROF=""; UCRT="$TMPD/crt.o"
+    grep -qa '^profile app' "kernel/user/$pgm.fi" && { UPROF=--profile=app; UCRT=""; }
+    "$FIRNC" $UPROF -c "kernel/user/$pgm.fi" -o "$TMPD/g$pgm.o" > "$TMPD/ge$pgm" 2>&1 \
         && ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" \
-            -o "$TMPD/g$pgm.elf" "$TMPD/crt.o" "$TMPD/g$pgm.o" 2>/dev/null \
+            -o "$TMPD/g$pgm.elf" $UCRT "$TMPD/g$pgm.o" 2>/dev/null \
         && strip --strip-all "$TMPD/g$pgm.elf" \
         || { echo "BUILD FAILED: $pgm"; head -8 "$TMPD/ge$pgm"; exit 1; }
 done

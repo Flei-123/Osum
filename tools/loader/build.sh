@@ -48,10 +48,12 @@ as --64 -o "$OUT/crt.o" kernel/user/crt.s || exit 1
 
 eins() { # <name>
     local p=$1
-    "$CC" "kernel/user/$p.fi" -o "$OUT/$p.o" > "$OUT/$p.err" 2>&1 || {
+    UPROF=""; UCRT="$OUT/crt.o"
+    grep -qa '^profile app' "kernel/user/$p.fi" && { UPROF=--profile=app; UCRT=""; }
+    "$CC" $UPROF -c "kernel/user/$p.fi" -o "$OUT/$p.o" > "$OUT/$p.err" 2>&1 || {
         echo "FEHLER-UEBERSETZER $p"; return 1; }
     ld -T kernel/user/user.ld --defsym=USER_ENTRY=_F0.u_start \
-       -o "$OUT/bin/$p" "$OUT/crt.o" "$OUT/$p.o" 2> "$OUT/$p.lderr" || {
+       -o "$OUT/bin/$p" $UCRT "$OUT/$p.o" 2> "$OUT/$p.lderr" || {
         echo "FEHLER-BINDER $p"; return 1; }
     strip --strip-all "$OUT/bin/$p"
     return 0

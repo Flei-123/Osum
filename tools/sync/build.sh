@@ -27,14 +27,16 @@ as --64 -o "$OUT/crt.o" kernel/user/crt.s || exit 1
 
 rc=0
 for p in $PROGS; do
-    if ! "$CC" "kernel/user/$p.fi" -o "$OUT/$p.o" > "$OUT/$p.err" 2>&1; then
+    UPROF=""; UCRT="$OUT/crt.o"
+    grep -qa '^profile app' "kernel/user/$p.fi" && { UPROF=--profile=app; UCRT=""; }
+    if ! "$CC" $UPROF -c "kernel/user/$p.fi" -o "$OUT/$p.o" > "$OUT/$p.err" 2>&1; then
         echo "FEHLER: firnc$STUFE uebersetzt $p.fi nicht"
         sed 's/^/    /' "$OUT/$p.err" | head -12
         rc=1
         continue
     fi
     if ! ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F$STUFE.u_start" \
-        -o "$OUT/$p.elf" "$OUT/crt.o" "$OUT/$p.o" 2> "$OUT/$p.lderr"; then
+        -o "$OUT/$p.elf" $UCRT "$OUT/$p.o" 2> "$OUT/$p.lderr"; then
         echo "FEHLER: ld scheitert an $p"
         sed 's/^/    /' "$OUT/$p.lderr" | head -8
         rc=1
