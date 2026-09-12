@@ -1,0 +1,244 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/fui-proto/bruecke_main.fi -- MALT DIE BRUECKE WIRKLICH, UND MALT
+// SIE IM SCHEMA DES SYSTEMS?
+//
+// ====================================================== WARUM ES EXISTIERT
+//
+// kernel/user/fuib.fi behauptet zwei Dinge, und beide sind
+// nachpruefbar, ohne ein System zu starten:
+//
+//   1. fUi malt in EINEN 32-Bit-Puffer, der zeilenweise liegt -- also
+//      in genau das, was `wlibc.surface()` hergibt.
+//   2. Die Farben kommen aus dem Schema des Systems und nicht aus fUis
+//      eigener Tafel. Ein dunkles Schema hat also kein weisses Fenster.
+//
+// Dieses Programm baut denselben Puffer selbst (statt ihn vom
+// Fensterserver zu bekommen), laesst die Farben von hier setzen und
+// schreibt das Ergebnis als PNG heraus. Damit ist die Aussage "die
+// Bruecke malt" eine Zahl und ein Bild, und nicht eine Behauptung im
+// Kopf einer Datei.
+//
+// Es laeuft auf dem BAUWIRT, nicht in Osum: die Bruecke selbst haengt
+// an `wlibc` (Syscalls), deshalb wird hier nur der Teil geprueft, der
+// ohne Kern geht -- Leinwand, Maler, Farbtafel, Elemente. Dass
+// dieselbe Leinwand auf `wlibc.surface()` zeigen KANN, ist in
+// kernel/user/fuib.fi gebunden und belegt (tools/look/shot.sh baut es
+// mit).
+//
+//     bruecke_main <out.png> [light|dark]
+profile app
+import rt.rt
+import html.mem
+import paint.canvas
+import paint.png
+import font.metrics
+import fui.theme
+import fui.style
+import fui.widget
+import fui.painter
+import fui.render
+import fui.wave2
+
+const FONTSET_BYTES: usize = 4096
+const W: usize = 460
+const H: usize = 340
+
+// DIE FARBEN, DIE OSUM FUEHRT. Das sind die Werte, die
+// `wlibc.theme(T_*)` im Schema `day` (hell) und `night` (dunkel)
+// liefert -- abgelesen aus kernel/user/wlibc.fi, damit dieses Bild
+// dieselben Farben zeigt wie das System und nicht fUis eigene.
+fn osum_light(f: *mut theme.Colors) {
+    (*f).base = 0xF2F2F2
+    (*f).surface = 0xFFFFFF
+    (*f).surface_raised = 0xFFFFFF
+    (*f).button = 0xE1E1E1
+    (*f).button_hover = 0xEDEDED
+    (*f).button_active = 0xCFCFCF
+    (*f).field = 0xFFFFFF
+    (*f).field_focus = 0xFFFFFF
+    (*f).border_col = 0xB4B4B4
+    (*f).separator = 0xD2D2D2
+    (*f).text = 0x1A1A1A
+    (*f).text_muted = 0x6E6E6E
+    (*f).text_disabled = 0x9A9A9A
+    (*f).accent = 0x2D6FD0
+    (*f).selection = 0x2D6FD0
+    (*f).selection_text = 0xFFFFFF
+    (*f).text_on_accent = 0xFFFFFF
+    (*f).dark = false
+}
+
+fn osum_dark(f: *mut theme.Colors) {
+    (*f).base = 0x1E1E1E
+    (*f).surface = 0x252525
+    (*f).surface_raised = 0x2E2E2E
+    (*f).button = 0x3A3A3A
+    (*f).button_hover = 0x454545
+    (*f).button_active = 0x2A2A2A
+    (*f).field = 0x161616
+    (*f).field_focus = 0x161616
+    (*f).border_col = 0x555555
+    (*f).separator = 0x3C3C3C
+    (*f).text = 0xF0F0F0
+    (*f).text_muted = 0xA0A0A0
+    (*f).text_disabled = 0x707070
+    (*f).accent = 0x4D8FE8
+    (*f).selection = 0x4D8FE8
+    (*f).selection_text = 0x101010
+    (*f).text_on_accent = 0x101010
+    (*f).dark = true
+}
+
+fn b2i(b: bool) -> i64 {
+    if b {
+        return 1
+    }
+    return 0
+}
+
+fn main(start: u64) -> i32 {
+    if rt.arg_count(start) < 2 {
+        var u: [u8; 36] = "bruecke_main <out.png> [light|dark]\n"
+        rt.write_everything(2, (&u[0]) as u64, 35)
+        return 2
+    }
+    let path: u64 = rt.arg_ptr(start, 1)
+    var dark: bool = false
+    if rt.arg_count(start) >= 3 {
+        if rt.ld8(rt.arg_ptr(start, 2), 0) == 100 as u8 {
+            dark = true
+        }
+    }
+
+    var fbuf: rt.Buf = rt.buf_new()
+    var f1: [u8; 21] = "assets/osum-sans.ttf\0"
+    var have: bool = rt.read_file((&f1[0]) as u64, &fbuf)
+    let fsp: *mut metrics.FontSet =
+        rt.heap_alloc(FONTSET_BYTES) as *mut metrics.FontSet
+    if fsp as usize == 0 {
+        return 3
+    }
+    *fsp = metrics.fontset_new()
+    var fm: u64 = 0
+    if have {
+        if metrics.fontset_load(fsp, fbuf.ptr as *mut u8, fbuf.len) {
+            fm = fsp as u64
+        }
+    }
+
+    // DER PUFFER. Genau die Form, die wlibc.surface() hergibt.
+    var cv: canvas.Canvas = canvas.canvas_new()
+    if !canvas.canvas_init(&cv, W, H) {
+        return 4
+    }
+    var z: painter.Painter = painter.painter_new()
+    if !painter.painter_init(&z, &cv, W, 80) {
+        return 5
+    }
+    painter.painter_set_font(&z, fm)
+
+    // DAS SCHEMA DES SYSTEMS -- wie fuib.thema_neu es setzt.
+    var m: theme.Theme = theme.theme_new(dark)
+    let f: *mut theme.Colors = theme.theme_colors(&m)
+    if dark {
+        osum_dark(f)
+    } else {
+        osum_light(f)
+    }
+    var c: render.Ctx = render.ctx_new(&m, &z)
+    canvas.canvas_clear(&cv, theme.opaque((*f).base))
+
+    // ---------------------------------------------------------------
+    // DIE ELEMENTE, DIE wlib BISHER SELBST GEMALT HAT.
+    // Links die Sorte, rechts der Zustand -- so wie paint_one sie
+    // auseinanderhaelt.
+    // ---------------------------------------------------------------
+    var ws: [widget.Widget; 9] =
+        [widget.widget_new(widget.KIND_NONE); 9]
+
+    // paint_button, drei Zustaende
+    ws[0] = widget.widget_new(widget.KIND_BUTTON)
+    widget.w_place(&ws[0], 20.0, 20.0, 120.0, 32.0)
+    ws[1] = widget.widget_new(widget.KIND_BUTTON)
+    widget.w_place(&ws[1], 160.0, 20.0, 120.0, 32.0)
+    widget.w_set_hover(&ws[1], true)
+    ws[2] = widget.widget_new(widget.KIND_BUTTON)
+    widget.w_place(&ws[2], 300.0, 20.0, 120.0, 32.0)
+    widget.w_set_active(&ws[2], true)
+
+    // paint_check
+    ws[3] = widget.widget_new(widget.KIND_CHECKBOX)
+    widget.w_place(&ws[3], 20.0, 70.0, 20.0, 20.0)
+    ws[3].value = 1
+
+    // paint_entry
+    ws[4] = widget.widget_new(widget.KIND_TEXTBOX)
+    widget.w_place(&ws[4], 60.0, 66.0, 200.0, 28.0)
+
+    // paint_tile (ein Umschalter, an)
+    ws[5] = widget.widget_new(widget.KIND_TOGGLE)
+    widget.w_place(&ws[5], 20.0, 110.0, 190.0, 56.0)
+    ws[5].value = 1
+
+    // paint_tile (aus, mit Zeiger darauf -> Hover muss sichtbar sein)
+    ws[6] = widget.widget_new(widget.KIND_TOGGLE)
+    widget.w_place(&ws[6], 230.0, 110.0, 190.0, 56.0)
+    widget.w_set_hover(&ws[6], true)
+
+    // paint_slider -- zwei verschiedene Werte, damit man im BILD sieht,
+    // dass der Wert ankommt und nicht nur im Kopf steht.
+    ws[7] = widget.widget_new(widget.KIND_SLIDER)
+    widget.w_place(&ws[7], 20.0, 190.0, 400.0, 24.0)
+    ws[7].value = 250
+    ws[8] = widget.widget_new(widget.KIND_SLIDER)
+    widget.w_place(&ws[8], 20.0, 240.0, 400.0, 24.0)
+    ws[8].value = 750
+
+    var i: usize = 0
+    while i < 9 {
+        wave2.draw_any(&c, &ws[i])
+        i = i + 1
+    }
+
+    // Ein Trenner und eine Karte -- mal_trenner und paint_card.
+    var sp: widget.Widget = widget.widget_new(widget.KIND_SEPARATOR)
+    widget.w_place(&sp, 20.0, 285.0, 400.0, 1.0)
+    wave2.draw_any(&c, &sp)
+    var ca: widget.Widget = widget.widget_new(widget.KIND_CARD)
+    widget.w_place(&ca, 20.0, 296.0, 400.0, 30.0)
+    wave2.draw_any(&c, &ca)
+
+    var out: mem.Buf = mem.buf_new()
+    mem.buf_init(&out)
+    if !png.write_png(&cv, &out) {
+        return 6
+    }
+    var pf: rt.Buf = rt.buf_new()
+    var k: usize = 0
+    while k < rt.c_length(path) {
+        rt.buf_push(&pf, rt.ld8(path, k))
+        k = k + 1
+    }
+    rt.buf_push(&pf, 0 as u8)
+    if !rt.write_file(rt.buf_ptr(&pf), mem.buf_ptr(&out) as u64,
+        mem.buf_len(&out)) {
+        return 7
+    }
+
+    var o: rt.Buf = rt.buf_new()
+    var k1: [u8; 5] = "DARK="
+    rt.buf_push_bytes(&o, (&k1[0]) as u64, 5)
+    rt.buf_push_dec_i64(&o, b2i(dark))
+    var k2: [u8; 11] = " SORTEN=9+2"
+    rt.buf_push_bytes(&o, (&k2[0]) as u64, 11)
+    var k3: [u8; 12] = " REGLER=250/"
+    rt.buf_push_bytes(&o, (&k3[0]) as u64, 12)
+    rt.buf_push_dec_i64(&o, widget.w_value(&ws[8]))
+    rt.buf_push(&o, 10 as u8)
+    rt.write_everything(1, rt.buf_ptr(&o), rt.buf_len(&o))
+    rt.buf_free(&o)
+
+    painter.painter_free(&z)
+    canvas.canvas_free(&cv)
+    return 0
+}

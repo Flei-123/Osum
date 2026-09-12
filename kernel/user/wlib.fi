@@ -58,6 +58,20 @@ import ulib
 import libc.io
 import wlibc
 import utf8
+// RUNDE 31: DIE BEDIENELEMENTE KOMMEN AUS fUi.
+//
+// Justin, 11.09.2026: "wenn fui alles kann bitte bau es ueberall ein.
+// ich will nicht dass jemand es selber hardcodiert oder eine eigene
+// library verwendet, das ergibt nur chaos, wenns ein bug gibt brauchen
+// wir nur einmal die lib aendern."
+//
+// fuib.fi ist die Naht: es nimmt Ort, Groesse und Zustand und laesst
+// fUi (lib/fui, ueber vendor/firn/COMMIT in JEDEM Baum derselbe) die
+// FLAECHE malen. Der TEXT bleibt hier -- Osum setzt seine Schrift
+// selbst (Umlaute, Kuerzung, Symbolschrift, `say_painted` fuer die
+// acht Pruefstaende, die `wlib:`-Zeilen lesen), und zwei Schriftsetzer
+// auf einer Flaeche waeren zwei Ergebnisse.
+import fuib
 
 export {
     begin, window, window_app, window_plain, window_kind, close, closed, handle,
@@ -3082,6 +3096,25 @@ fn tr_num(b: u64, at: u64, v: u64) -> u64 {
 // same corner. It is the one thing `modern` makes LOUDER (2 pixels
 // against 1), because it is the only thing on the list that somebody
 // navigating by keyboard depends on.
+// RUNDE 31: DER ZUSTAND EINES ELEMENTS, WIE fUi IHN NENNT.
+//
+// Dieselbe Rangfolge, die paint_button vorher in seinen drei Zweigen
+// hatte: gedrueckt schlaegt darueberfahren, und abgeschaltet schlaegt
+// beides. Sie steht jetzt EINMAL hier statt in jedem paint_*.
+fn fui_zustand(i: u64) -> u64 {
+    let fl: u64 = g(i, D_FLAGS)
+    if (fl & F_OFF) != 0 {
+        return fuib.Z_OFF
+    }
+    if (fl & F_PRESSED) != 0 {
+        return fuib.Z_PRESSED
+    }
+    if (fl & F_HOVER) != 0 {
+        return fuib.Z_HOVER
+    }
+    return fuib.Z_NORMAL
+}
+
 fn focus_ring(i: u64) {
     if s_focus != i + 1 {
         return
@@ -3128,9 +3161,20 @@ fn paint_button(i: u64) {
     } else if (g(i, D_FLAGS) & F_HOVER) != 0 {
         flaeche = wlibc.theme(wlibc.T_BTNHI)
     }
-    // ROUND LOOK: a rounded face and a rounded outline. With
-    // `radius_button=0` (classic) `rrect` IS `rect` and `rframe` IS
-    // `frame3`'s square outline -- the same pixels, by the same route.
+    // ============================================== RUNDE 31: fUi MALT
+    //
+    // Hier standen zwei Zweige, die einen Knopf malten: `rect`+`frame3`
+    // fuer `classic` und `rrect` zweimal fuer `osum`. Beides tut fUis
+    // `draw_button` auch -- und zwar mit demselben Radius, weil
+    // `fuib.thema_neu` ihn aus `wlibc.metric(M_RADIUS_BUTTON)` nimmt.
+    // Zwei Umsetzungen einer Optik waren genau das, was raus soll.
+    //
+    // Der Rueckweg bleibt: findet die Bruecke keine Flaeche (kein
+    // Fenster, Band noch nicht gesetzt), malt der alte Weg. Ein Knopf,
+    // der gar nicht erscheint, waere schlimmer als ein eckiger.
+    if fuib.mal(fuib.S_BUTTON, x, y, bw, bh, fui_zustand(i), 0) {
+        // fUi hat die Flaeche gemalt -- weiter beim Text.
+    } else {
     let rb: u64 = wlibc.metric(wlibc.M_RADIUS_BUTTON)
     if rb == 0 {
         wlibc.rect(x, y, bw, bh, flaeche)
@@ -3178,6 +3222,7 @@ fn paint_button(i: u64) {
         }
         wlibc.rrect(x + bo, y + bo, bw - 2 * bo, bh - 2 * bo,
             ri, flaeche)
+    }
     }
     var farbe: u64 = wlibc.theme(wlibc.T_FG)
     if (g(i, D_FLAGS) & F_OFF) != 0 {
@@ -5116,7 +5161,11 @@ fn mal_radius(rolle: u64) -> u64 {
 // Punkt: ein Programm, das seinen Hintergrund fuellt, sagt das jetzt,
 // statt ein Rechteck zu malen.
 fn mal_flaeche(x: u64, y: u64, w: u64, h: u64, farbe: u64) {
-    wlibc.rrect(x, y, w, h, 0, farbe)
+    // RUNDE 31: fUi malt, die Farbe bleibt die des Aufrufers.
+    if fuib.flaeche(x, y, w, h, farbe) {
+        return
+    }
+    wlibc.rect(x, y, w, h, farbe)
 }
 
 // EINE TAFEL: Flaeche mit dem Radius ihrer Rolle, wahlweise mit einer
@@ -5127,6 +5176,9 @@ fn mal_flaeche(x: u64, y: u64, w: u64, h: u64, farbe: u64) {
 fn mal_tafel(x: u64, y: u64, w: u64, h: u64, rolle: u64, stufe: u64,
     fuellung: u64, rand: u64) {
     let r: u64 = mal_radius(rolle)
+    // DER SCHATTEN BLEIBT HIER. Er ist keine Flaeche eines
+    // Bedienelements, sondern eine Eigenschaft der Erhebung, und
+    // wlibc.drop_shadow kennt die Tabelle dazu (elev_strength/reach).
     if stufe != wlibc.EL_FLAT {
         let s: u64 = wlibc.elev_strength(stufe)
         let reich: u64 = wlibc.elev_reach(stufe)
@@ -5134,6 +5186,23 @@ fn mal_tafel(x: u64, y: u64, w: u64, h: u64, rolle: u64, stufe: u64,
             wlibc.drop_shadow(x, y, w, h, r, s, reich,
                 wlibc.theme(wlibc.C_SHADOW))
         }
+    }
+    // ============================================== RUNDE 31: fUi MALT
+    //
+    // Die Kurve kommt ab jetzt aus fUis Rasterer, nicht aus wlibcs
+    // `rrect`/`rframe`. Die FARBE bleibt die des Aufrufers -- das
+    // Kontrollzentrum rechnet seine Kachelfarben aus Schema und
+    // Zustand, und fUi soll sie malen und nicht ueberstimmen.
+    //
+    // Warum das der wichtigere Weg ist als `paint_button`: die
+    // Taskleiste, das Kontrollzentrum und das Suchfenster benutzen
+    // KEIN einziges wlib-Widget (gemessen: 0 Aufrufe von
+    // wlib.button/label/check/...), sondern malen ihre Flaechen mit
+    // genau dieser Funktion. Ohne sie waere fUi eingebaut und auf dem
+    // Bildschirm unsichtbar.
+    if fuib.tafel(x, y, w, h, r, fuellung, rand,
+        wlibc.metric(wlibc.M_BORDER)) {
+        return
     }
     if rand == 0 {
         wlibc.rrect(x, y, w, h, r, fuellung)
@@ -5210,6 +5279,11 @@ fn mal_balken(x: u64, y: u64, w: u64, h: u64, farbe: u64) {
     var r: u64 = mal_radius(MR_FELD)
     if r * 2 > h {
         r = h / 2
+    }
+    // RUNDE 31: die Rinne eines Reglers und der Fortschrittsbalken --
+    // dieselbe Kapsel, gemalt von fUi.
+    if fuib.tafel(x, y, w, h, r, farbe, 0, 0) {
+        return
     }
     wlibc.rrect(x, y, w, h, r, farbe)
 }
