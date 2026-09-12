@@ -3077,6 +3077,28 @@ fn button_mark(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
 // spart das Lesen.
 static mut mk_ink: u64 = 0
 
+// RUNDE 32: DASSELBE, ABER ES SAGT, OB ES GEMALT HAT.
+//
+// `marke_malen` gab nichts zurueck -- als es der Rueckfall war, genuegte
+// das. Jetzt ist es der ERSTE Weg, und der Aufrufer muss wissen, ob er
+// den zweiten braucht. Es gibt genau einen Grund, warum es nicht malt:
+// der Knopf ist kleiner als acht Punkte oder `marke_start` hat fuer
+// diese Kante keine Groesse (`breit` gibt 0).
+fn marke_malen_ok(x: u64, y: u64, w: u64, h: u64, report: bool) -> bool {
+    if w < 8 || h < 8 {
+        return false
+    }
+    var kante: u64 = h - 4
+    if kante > w - 4 {
+        kante = w - 4
+    }
+    if marke_start.breit(kante) == 0 {
+        return false
+    }
+    marke_malen(x, y, w, h, report)
+    return true
+}
+
 fn marke_malen(x: u64, y: u64, w: u64, h: u64, report: bool) {
     var s_mk: [u8; 18] = "taskbar: marke n=\0"
     var s_mx: [u8; 4] = " x=\0"
@@ -3186,7 +3208,52 @@ fn marke_malen(x: u64, y: u64, w: u64, h: u64, report: bool) {
             let v: u64 = marke_start.punkt(qn, xx, yy)
             let a: u64 = (v >> 24) & 0xFF
             if a != 0 {
-                let f: u64 = wlibc.blend(grund, v & 0xFFFFFF, a)
+                // ==================================== RUNDE 32
+                // DIE DUNKLE TINTE DER MARKE FOLGT DEM THEMA.
+                //
+                // GEMESSEN im dunklen Abbild: der Ring der Marke ist
+                // (11,13,16), die Leiste (30,41,59). Der Ring WAR
+                // gemalt -- und praktisch unsichtbar, weil beides
+                // dunkel ist. Sichtbar blieb nur die cyanfarbene
+                // Diagonale (5,238,250).
+                //
+                // Die PNG-Dateien tragen eine feste Tinte, weil sie
+                // fuer einen hellen Grund gezeichnet wurden. Eine
+                // zweite Datei fuer dunkel waere eine zweite Quelle
+                // fuer dasselbe Zeichen -- genau das, was dieses
+                // Projekt sonst vermeidet.
+                //
+                // Also: der DUNKLE Anteil des Zeichens wird auf die
+                // Vordergrundfarbe des Themas gezogen. Auf hellem
+                // Grund ist T_FG dunkel (das Zeichen bleibt, wie es
+                // gezeichnet wurde), auf dunklem Grund ist T_FG hell
+                // und der Ring wird sichtbar. Die BUNTEN Punkte
+                // (die Diagonale) bleiben unangetastet -- sie sind
+                // die Marke und nicht ihre Kontur.
+                var q: u64 = v & 0xFFFFFF
+                let qr: u64 = (q >> 16) & 255
+                let qg: u64 = (q >> 8) & 255
+                let qb: u64 = q & 255
+                var hoch: u64 = qr
+                if qg > hoch {
+                    hoch = qg
+                }
+                if qb > hoch {
+                    hoch = qb
+                }
+                var tief: u64 = qr
+                if qg < tief {
+                    tief = qg
+                }
+                if qb < tief {
+                    tief = qb
+                }
+                // Unbunt (Grau/Schwarz) heisst: Spanne klein. Nur
+                // diese Punkte sind Kontur; alles Bunte ist Marke.
+                if hoch -% tief < 24 {
+                    q = wlibc.theme(wlibc.T_FG)
+                }
+                let f: u64 = wlibc.blend(grund, q, a)
                 var dy: u64 = 0
                 while dy < mal {
                     var dx: u64 = 0
@@ -3642,24 +3709,56 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
         // `marke_start.fi` bleibt als Rueckfall stehen, falls das
         // Font fehlt -- ein Knopf ohne Zeichen waere schlimmer als
         // ein grobes.
-        var gemalt: bool = false
-        if glyphs_ok() {
+        // ============================================== RUNDE 32
+        // DIE REIHENFOLGE WAR VERKEHRT: DAS SYMBOLFONT ZEIGT NICHT
+        // DIE MARKE.
+        //
+        // Justin: "warum steht im Startknopf ein komisches Zeichen,
+        // ist das eine andere Fassung als die, die ich boote?"
+        //
+        // Nein, dieselbe -- und der Knopf malte genau das, was hier
+        // stand. `icons.START` ist in lib/icons.fi auf 0xE0A2
+        // gebunden, und daneben steht der Name des Glyphen:
+        // `layout-grid`. Das ist ein Gitter aus vier Quadraten, ein
+        // generisches Startmenue-Zeichen aus dem Lucide-Satz -- und
+        // genau die "vier leeren Quadrate", die er im Bild
+        // ausgemessen hat. Ein MARKEN-Glyph existiert in
+        // assets/osum-icons.ttf nicht (geprueft: kein MARKE/BRAND/
+        // LOGO/ORIENT in lib/icons.fi), also kann dieser Weg die
+        // Marke nie zeigen.
+        //
+        // Die Marke liegt in `marke_start.fi` -- als Bildpunkte, aus
+        // assets/marke/start-{16,24,32,48,64}.png erzeugt von
+        // tools/marke/startbild.py, und EINGEBACKEN ins Programm. Sie
+        // haengt also nicht daran, ob ein Bauskript eine Datei
+        // mitkopiert.
+        //
+        // Runde ECHTHARDWARE-3 hat den Vektorweg VORGEZOGEN, weil das
+        // Bitmap auf Justins 2560x1440-Schirm hochskaliert und damit
+        // treppig war. Das Problem war echt -- aber die Loesung hat
+        // ein grobes ZEICHEN gegen ein FALSCHES getauscht. Gegen die
+        // Treppen hilft, dass `marke_start` seit derselben Runde
+        // 48 und 64 mitbringt (fn breit: 16/24/32/48/64), also fuer
+        // uebliche Knopfgroessen nicht mehr vervielfacht werden muss.
+        //
+        // Also: DIE MARKE ZUERST, das Symbolfont nur als Rueckfall.
+        var gemalt: bool = marke_malen_ok(st_x, st_y, st_w, st_h, report)
+        if !gemalt {
             var kante: u64 = st_h - 4
             if kante > st_w - 4 {
                 kante = st_w - 4
             }
             let gx: u64 = st_x + (st_w - kante) / 2
             let gy: u64 = st_y + (st_h - kante) / 2
-            gemalt = wlibc.icon_at(icons.START, gx, gy, kante,
-                wlibc.theme(wlibc.T_FG))
-            if gemalt && report {
-                say((&s_mkv[0 as usize]) as u64)
-                ulib.sayn(kante)
-                ulib.nl()
+            if glyphs_ok() {
+                gemalt = wlibc.icon_at(icons.START, gx, gy, kante,
+                    wlibc.theme(wlibc.T_FG))
+                if gemalt && report {
+                    say((&s_mkv[0 as usize]) as u64)
+                    ulib.sayn(kante)
+                    ulib.nl()
+                }
             }
-        }
-        if !gemalt {
-            marke_malen(st_x, st_y, st_w, st_h, report)
         }
     }
     // ==================================================== RUNDE ANHEFTEN

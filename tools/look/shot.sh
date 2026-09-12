@@ -242,12 +242,51 @@ if ls assets/shapes/*.shape >/dev/null 2>&1; then
         ARGS+=("/etc/shapes/$(basename "$s" .shape)=$s@0644")
     done
 fi
+# ====================================================== RUNDE 32
+# /etc/themes -- DER PRUEFSTAND HATTE SIE NICHT, DAS ABBILD SCHON.
+#
+# Justin, 12.09.2026, zum dritten Mal derselbe Fehler: "der Pruefstand
+# ist anders bestueckt als das Abbild, und die Abnahme misst deshalb
+# etwas anderes, als der Nutzer bootet." Beim ersten Mal waren es drei
+# statt sechs Symboldateien (Runde ECHT-2), beim zweiten die Marke.
+#
+# Gemessen mit `grep -oP '/etc/\K[a-z]+(?=/)'` gegen beide Skripte:
+# das Abbild legt jarvis, netview, schemas, shapes, ssl UND THEMES ab,
+# der Pruefstand nur netview, schemas, shapes. `/etc/themes` fehlte --
+# das sind die fertigen Voreinstellungen (assets/themes/*.preset), aus
+# denen `wlibc` Schema, Modus und Form zusammen liest.
+#
+# jarvis und ssl bleiben ABSICHTLICH draussen: der Wurzelspeicher und
+# die Rechteliste des Helfers gehoeren zu einem Geraet, nicht zu einem
+# Bildschirmfoto -- sie stehen deshalb in der Ausnahmeliste von
+# tools/look/bestueckung.sh und nicht hier.
+if ls assets/themes/*.preset >/dev/null 2>&1; then
+    ARGS+=(/etc/themes/)
+    for s in assets/themes/*.preset; do
+        ARGS+=("/etc/themes/$(basename "$s" .preset)=$s@0644")
+    done
+fi
 if [ "$nvicons" = yes ]; then
     if python3 tools/netview/icons.py bauen "$OUT/nvicons" > "$OUT/nvicons.log" 2>&1; then
         ARGS+=(/etc/netview/)
+        # RUNDE 32: DIESELBE LISTE WIE IM ABBILD, UND ZUM VIERTEN MAL
+        # DERSELBE FEHLER.
+        #
+        # Hier standen ELF Namen, tools/usbimg/build.sh (Zeile 346)
+        # nennt aber FUENFZEHN: tile-dark, tile-power und tile-tile
+        # fehlten -- genau die Kacheln "Dark mode", "Power" und
+        # "Tiling" im Kontrollzentrum. In Runde ECHT-2 war es dieselbe
+        # Stelle mit drei statt sechs Dateien.
+        #
+        # Gefunden hat es diesmal tools/look/bestueckung.sh, nicht
+        # Justin: es zaehlt die Namen in beiden Skripten und schlaegt
+        # an, wenn die Zahlen auseinandergehen. Deshalb zaehlt es und
+        # prueft nicht nur, ob das Verzeichnis vorkommt -- ein fehlender
+        # Name in einer vorhandenen Liste ist unsichtbar.
         for q in state-nocarrier state-noip state-noroute state-online \
                  mark-filtered mark-faked mark-none sys-faking \
-                 tile-fake tile-net tile-hide; do
+                 tile-fake tile-net tile-hide tile-dark tile-power \
+                 tile-tile; do
             [ -e "$OUT/nvicons/$q" ] && ARGS+=("/etc/netview/$q=$OUT/nvicons/$q")
         done
     fi
