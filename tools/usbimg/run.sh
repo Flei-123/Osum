@@ -458,7 +458,28 @@ echo "== 8. der Schreibtisch, auf deutsch, mit Umlauten im BILD =="
 # `tools/usbimg/searchtext.py` sucht die Zeile im GANZEN Bild -- gerastert
 # mit `tools/ttf/raster.py`, der zweiten Fassung des Rasterers. Es wird
 # also nicht gegen sich selbst geprueft.
-DESKARGS="modfs osum gfx wm wig desk wmhold wiglong nokbd nosched noproc nofs"
+# RUNDE ABBILD: `lang=de` GEHOERT AUF DIE ZEILE, WEIL DAS ABBILD
+# ENGLISCH AUSLIEFERT.
+#
+# Dieser Abschnitt misst den DEUTSCHEN Katalog: `Suchen`, `Ausfuehren`
+# mit echtem Umlaut, `Programm suchen:`, `kein Netz`. Bis zum 09.09.2026
+# kam der Stick deutsch hoch, also stimmte das ohne Zutun. Seitdem ist
+# Englisch die Hauptsprache der Oberflaeche und Deutsch die waehlbare
+# Uebersetzung (die Begruendung steht in tools/usbimg/build.sh bei
+# `locale-de`) -- der Bau schreibt `en` in /users/root/config/locale.
+#
+# Der Abschnitt hat das nicht mitbekommen und ist seitdem rot: er
+# verlangte deutschen Text von einem System, das er englisch startet.
+# GEMESSEN: `taskbar: lang=en src=1` -- src=1 ist genau diese
+# Benutzerdatei.
+#
+# `lang=de` auf der Kernel-Kommandozeile ist die vorgesehene Antwort:
+# `kgui.locale_set` schreibt damit `de` in dieselbe Datei, bevor die
+# Oberflaeche startet, und setzt die Tastaturbelegung gleich mit. Damit
+# misst dieser Abschnitt wieder, was er messen will -- dass der deutsche
+# Katalog im Abbild liegt und wirkt --, ohne die Auslieferungssprache zu
+# behaupten.
+DESKARGS="modfs osum gfx wm wig desk wmhold wiglong nokbd nosched noproc nofs lang=de"
 rm -f "$TMPD/desk.txt" "$TMPD/desk.ppm" "$TMPD/desk.sock"
 printf 'warte 5\nsendkey a\nwarte 2\nsendkey meta_l-a\nwarte 3\n' > "$TMPD/drive"
 timeout 240 qemu-system-x86_64 "${KVM[@]}" -m 512 \

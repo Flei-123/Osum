@@ -234,14 +234,42 @@ APPS=${APPS:-"fetch jarvisd"}
 as --64 -o "$OUT/crt.o" kernel/user/crt.s || fehler "crt.s laesst sich nicht assemblieren"
 gebaut=""
 rc=0
+# RUNDE ABBILD: EIN PROGRAMM IM PROFIL `app` WIRD ANDERS GEBAUT.
+#
+# Seit Runde 31 kommen die Bedienelemente der Oberflaeche aus fUi, und
+# fUi rechnet in f64 und benutzt `std.rt` -- beides ist im Profil
+# `kernel` gesperrt. Wessen Wurzeldatei deshalb `profile app` sagt
+# (desktop, settings, launcher, explorer, widgetdemo), braucht ZWEI
+# Unterschiede, und ohne sie baut der Stick nicht mehr:
+#
+#   1. `--profile=app`, sonst sagt der Uebersetzer
+#      "the module 'std.rt' belongs to the standard library and is not
+#       available in profile 'kernel'"  (vendor/firn/lib/fui/render.fi)
+#   2. KEIN crt.o. Unter `app` legt firnc dieselben vier Befehle selbst
+#      hinein, die in crt.s stehen; crt.o dazuzubinden waere
+#      "multiple definition of `_start`".
+#
+# Genau diese Unterscheidung trifft `tools/look/shot.sh` seit Runde 31,
+# und sie wird auch hier GELESEN und nicht getippt -- sonst stimmt sie
+# nach der naechsten Umstellung nicht mehr.
 for p in $PROGS; do
     [ -f "kernel/user/$p.fi" ] || continue
-    if ! "$CC" "kernel/user/$p.fi" -o "$OUT/$p.o" > "$OUT/$p.err" 2>&1; then
+    PROF=""
+    CRT="$OUT/crt.o"
+    if grep -qa '^profile app' "kernel/user/$p.fi"; then
+        PROF="--profile=app"
+        CRT=""
+    fi
+    # `-c` NUR UEBERSETZEN, NICHT BINDEN. Ohne das versucht firnc im
+    # Profil `app` gleich zu binden und sagt dann "input file is the
+    # same as output file" -- im Profil `kernel` faellt das nicht auf,
+    # weil dort ohnehin nur ein Objekt entsteht.
+    if ! "$CC" $PROF -c "kernel/user/$p.fi" -o "$OUT/$p.o" > "$OUT/$p.err" 2>&1; then
         echo "== $p: der Uebersetzer sagt nein" >&2; head -20 "$OUT/$p.err" >&2
         rc=1; continue
     fi
     if ! ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F$STUFE.u_start" \
-            -o "$OUT/$p.elf" "$OUT/crt.o" "$OUT/$p.o" 2> "$OUT/$p.lderr"; then
+            -o "$OUT/$p.elf" $CRT "$OUT/$p.o" 2> "$OUT/$p.lderr"; then
         echo "== $p: der Binder sagt nein" >&2; head -12 "$OUT/$p.lderr" >&2
         rc=1; continue
     fi
@@ -628,9 +656,23 @@ ARGS+=("/bin/files@/bin/explorer")
 #
 # Ein Abbild, das ein Schema mitbringt, darf keine Ueberschreibungsdatei
 # mitbringen. Wer eine eigene will, legt sie selbst an.
+# RUNDE ABBILD: DIE VORGABE DES SYSTEMS STEHT AUCH IM ABBILD.
+#
+# /users/root/config/locale sagt seit dem 09.09.2026 `en` -- Englisch
+# ist die Hauptsprache der Oberflaeche, Deutsch die waehlbare
+# Uebersetzung (Begruendung oben bei `locale-de`). Was fehlte, war die
+# VORGABE DES SYSTEMS daneben: ohne /etc/locale.conf gibt es nur die
+# Benutzerwahl, und wer die Datei loescht, faellt auf die eingebaute
+# Vorgabe zurueck, statt auf eine, die im Abbild steht und die man
+# lesen kann. Dieselbe Datei, die tools/look/shot.sh seit Runde LOOK
+# schreibt -- mit demselben Inhalt wie die Benutzerwahl, damit beide
+# dasselbe sagen.
+printf '# /etc/locale.conf -- the system default language.\n# A user who has chosen one overrides this in\n# /users/<name>/config/locale; the settings program writes only there.\nlang=en\n' \
+    > "$OUT/locale.conf"
 ARGS+=(/etc/ "/etc/passwd=$OUT/passwd"
        "/etc/taskbar.conf=$OUT/taskbar.conf"
        "/etc/theme.conf=$OUT/theme.conf"
+       "/etc/locale.conf=$OUT/locale.conf"
        "/etc/netlauf.sh=$OUT/netlauf.sh")
 # RUNDE ECHTHARDWARE-1: die drei Verzeichnisse, ohne die `shape=` und
 # `scheme=` ins Leere zeigen. Derselbe Weg wie in
