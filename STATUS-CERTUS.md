@@ -25,7 +25,7 @@ installieren?
 | Osum | `kernel/user/sysstub.s` | die Systemruf-Tür als acht Befehlsfolgen hinter `extern fn` |
 | Osum | `kernel/user/certus/entkern.py`, `build.sh` | wlib/wlibc/ulib/libc **ohne** `asm` + der Bau von `/bin/certus` |
 | Osum | `kernel/proc.fi`, `procfs.fi`, `arch/x86_64/{boot,smp,switch}.s`, `sched.fi` | Adressraum, `/proc/self`, SSE, `fxsave` |
-| Osum | `tools/laden/*`, `assets/apps/certus.osp` | das Paket `certus-1.opk` im Katalog |
+| Osum | `tools/loader/*`, `assets/apps/certus.osp` | das Paket `certus-1.opk` im Katalog |
 | Osum | `tools/certus/run.sh` | die Abnahme dieser Runde |
 
 ### Die Entscheidung: mit den Widgets, nicht daneben
@@ -168,7 +168,7 @@ etwa **3,6×**. Das ist der erste Punkt der nächsten Runde.
 
 **Nicht gemessen und darum nicht behauptet:** kein Lauf auf echtem
 Blech, keine HTTPS-Seite aus dem offenen Netz über Osums TLS (der
-Ladenweg über das Internet bleibt `tools/laden/run.sh`), keine
+Ladenweg über das Internet bleibt `tools/loader/run.sh`), keine
 Größenänderung des Fensters (G2), kein Systemtext (G1), kein
 hell/dunkel vom System (G3).
 
@@ -184,7 +184,7 @@ hell/dunkel vom System (G3).
 3. **Die Adresszeile im Fenster wirklich bedienen** — die Widgets sind
    da, der Weg (Klick auf `HIT_ADRESSE`, tippen, Enter) ist gebaut; was
    fehlt, ist ein Abnahmefall, der über QEMUs Monitor tippt
-   (`tools/laden/tippen.py` kann das bereits).
+   (`tools/loader/tippen.py` kann das bereits).
 
 ---
 

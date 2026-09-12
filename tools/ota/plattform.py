@@ -24,7 +24,7 @@ WOHER DAS WORT KOMMT, in dieser Reihenfolge:
   2. `arch=` in den Metadaten (die Schreibweise des Speichers);
   3. die NUTZLAST: steckt ein ELF darin, sagt sein Kopf (`e_machine`),
      fuer welche Maschine es uebersetzt wurde. Das ist der Normalfall
-     fuer alles, was `tools/laden/pakete.sh` baut, denn `opk.py` schreibt
+     fuer alles, was `tools/loader/pakete.sh` baut, denn `opk.py` schreibt
      heute weder `arch=` noch `plattform=`;
   4. kein ELF: `osum-any`.
 

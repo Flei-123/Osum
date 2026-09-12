@@ -1,6 +1,6 @@
 # Round TRESOR -- device identity, backup, key management
 
-27.08.2026. Branch `tresor`. Runner: `tools/tresor/run.sh`.
+27.08.2026. Branch `tresor`. Runner: `tools/vault/run.sh`.
 
 The question this round was given: what can an operating system actually
 do about a stolen machine? The answer turned out to be mostly a list of
@@ -24,11 +24,11 @@ was built and what the measurements said.
 | `kernel/user/explorer.fi` | *addendum 2*: "Backup hierhin sichern", and snapshots as folders |
 | `kernel/user/key.fi` | key management: wrap, unwrap, destroy |
 | `kernel/user/shat.fi` | the SHA-256 measurement, in ring 3 |
-| `tools/tresor/` | the runner, a second SMBIOS decoder, a memory dumper, a corrupter |
+| `tools/vault/` | the runner, a second SMBIOS decoder, a memory dumper, a corrupter |
 | `docs/THEFT.md` | the threat model |
 | `docs/CRYPTO-ERASE.md` | why the key and not the data, and what is missing |
 | `docs/ORPHANS.md` | *addendum*: the three backup rules and the `opk` interface |
-| `tools/tresor/orphans.py` | *addendum*: the reference producer of the orphan list |
+| `tools/vault/orphans.py` | *addendum*: the reference producer of the orphan list |
 
 kdata grew by two pages at `0x5A000` (`HWID_OFF`), entered in
 `tools/kernel/memmap.py`. The second page is not padding: it is the DMA
@@ -95,9 +95,9 @@ machine without a drive does not pay for a failing admin command on every
 ### 3.1 The parser is right, checked against a second implementation
 
 The host dumps physical memory over the QEMU monitor
-(`tools/tresor/dump.py`) and decodes SMBIOS with a **second, independent
+(`tools/vault/dump.py`) and decodes SMBIOS with a **second, independent
 implementation** written from the specification
-(`tools/tresor/smbios.py`, Python). Entry point, table address, length,
+(`tools/vault/smbios.py`, Python). Entry point, table address, length,
 structure count and every string agree with the kernel.
 
 The dump has its own lesson: the first version pulled memory immediately
@@ -280,7 +280,7 @@ on a worktree of untouched `main` (`3389fbd`), same compiler, same host.
 | `tools/k13/run.sh` (users, permissions, init) | 87 passed, **12 failed** | 87 passed, **12 failed** |
 | `tools/userland/run.sh` | -- | 91 passed, 0 failed |
 | `tools/posix/run.sh` | -- | 134 passed, 0 failed |
-| `tools/tresor/run.sh` (this round) | -- | **104 passed, 0 failed** |
+| `tools/vault/run.sh` (this round) | -- | **104 passed, 0 failed** |
 
 **The failures in k13 and k14 are not from this round.** They are present
 on untouched `main` in the same numbers: all eight k14 failures are the
@@ -327,11 +327,11 @@ there.** A plain text file, one store entry name per line, lower-case hex,
 `/store/<name>`. The name is treated as an **opaque path component**: the
 rule that shortens a SHA-256 to 20 hex digits belongs to `opk`, and if
 this side recomputed it, a change over there would break backups here
-silently. `tools/tresor/orphans.py` is a working producer that imports the
+silently. `tools/vault/orphans.py` is a working producer that imports the
 real `opk.py`; run against a tree with one published and one self-built
 package, it names exactly the self-built one.
 
-**Measured** (`tools/tresor/run.sh` § 11, 20 assertions):
+**Measured** (`tools/vault/run.sh` § 11, 20 assertions):
 
 | run | orphan entries | octets written |
 |---|---:|---:|
@@ -398,7 +398,7 @@ column, empty since round K15 because OFS inodes carry no timestamp,
 finally has something true to show: the snapshot header carries a **real
 date from the CMOS clock**, the same source `/bin/date` reads.
 
-**Measured** (`tools/tresor/run.sh` § 12):
+**Measured** (`tools/vault/run.sh` § 12):
 
 | | |
 |---|---:|
@@ -428,7 +428,7 @@ image**: 4 of 4 identical.
    with the prefix check written so that `/datakram` is not caught by it.
 
 **What is NOT proven, and it is the honest hole in this addendum:** the
-menu item is built and compiles, but `tools/tresor/gui.sh` does not yet
+menu item is built and compiles, but `tools/vault/gui.sh` does not yet
 land the mouse on the tree row that navigates up, so the **wiring between
 the menu item and the engine is not measured end to end**. The engine
 under it is measured, and it is the same module. The runner is left in
@@ -504,7 +504,7 @@ mit verschiedenen Passwoertern dedupliziert nichts mehr. Fuer einen
 persoenlichen Stick kostet das nichts; fuer einen geteilten Sicherungsserver
 schon, und dort waere die Entscheidung neu zu treffen.
 
-**Gemessen** (`tools/tresor/run.sh` § 13):
+**Gemessen** (`tools/vault/run.sh` § 13):
 
 | Lauf | Optionen | geheime Dateien | ausgelassen (b) | ausgelassen (c) |
 |---|---|---:|---:|---:|
@@ -605,10 +605,10 @@ Effort in rounds of this project:
 3. **Multiboot 2 in `boot.s`**, which makes the EFI path in `hwid.fi`
    reachable and is a prerequisite for a serious UEFI story -- 1 round.
 4. **A boot on real hardware**, to replace expectation with measurement.
-5. **`opk orphans` in PLAN2**, after which `tools/tresor/orphans.py`
+5. **`opk orphans` in PLAN2**, after which `tools/vault/orphans.py`
    becomes the cross-check rather than the source, and the runner should
    assert the two outputs are equal.
-6. **Finish `tools/tresor/gui.sh`** -- it needs the file manager to report
+6. **Finish `tools/vault/gui.sh`** -- it needs the file manager to report
    where the rows of its tree list are, the way it now reports its menu
    and its dialog. Small, and it closes the one hole in addendum 2.
 7. **A backup onto a FAT32 stick**, which `kernel/fat.fi` can already

@@ -3,8 +3,8 @@
 **Zweig:** `betrieb`, Arbeitsbaum `/root/osum-betrieb`, abgezweigt von `ota`
 (`c160d79`) · **Wirt:** AMD EPYC 7571, 12 Kerne, Linux x86-64, KVM ·
 **Firn:** `a751b3db` (festgenagelt in `vendor/firn/COMMIT`) ·
-**Ein Lauf:** `bash tools/betrieb/vorbereiten.sh $OUT` und danach
-`bash tools/betrieb/run.sh`
+**Ein Lauf:** `bash tools/operation/vorbereiten.sh $OUT` und danach
+`bash tools/operation/run.sh`
 
 Diese Runde macht die Punkte **2, 3 und 4** der Liste „WAS NOCH FEHLT —
 für den Betrieb gegen einen echten Server" am Ende von `docs/OTA.md`.
@@ -15,7 +15,7 @@ nicht angefasst.
 
 ## 0. Der Lauf in einer Zeile
 
-> **`bash tools/betrieb/run.sh` — 95 Zusagen grün, 0 rot.**
+> **`bash tools/operation/run.sh` — 95 Zusagen grün, 0 rot.**
 > Darin: **19 von 19** feindlichen DNS-Nachrichten abgewehrt (ohne ein
 > Paket zu schicken), **21 von 21** echten Namen gleich wie `dig`,
 > **24 Köder** eines Fälschers gezählt und verworfen ohne eine falsche
@@ -55,12 +55,12 @@ nicht angefasst.
 | `kernel/user/dnswt.fi` | 353 | 19 von Hand gebaute, feindliche Nachrichten |
 | `tools/ota/schluesselbund.py` | 294 | der geheime Schlüssel: verschlüsselt, und das Signieren getrennt vom Bauen |
 | `tools/ota/veroeffentlichen.py` | 442 | Register, Vorrat, Archiv, Sperrliste, Kettensätze |
-| `tools/betrieb/dnsdienst.py` | 222 | Nameserver **und Fälscher** |
-| `tools/betrieb/dnsvergleich.py` | 174 | `/bin/host` gegen `dig`, 20 Namen |
-| `tools/betrieb/run.sh` | 471 | der Läufer |
-| `tools/betrieb/vorbereiten.sh` | 107 | Pakete, Zertifikate, Bund, vier Auslieferungen, Abbild, Platte |
-| `tools/betrieb/crt-wirt.s` | 76 | zwei Zeilen Unterschied: dasselbe Programm auf dem Wirt |
-| `tools/betrieb/wirt.sh` · `masse.py` | 20 · 64 | Bauhelfer |
+| `tools/operation/dnsdienst.py` | 222 | Nameserver **und Fälscher** |
+| `tools/operation/dnsvergleich.py` | 174 | `/bin/host` gegen `dig`, 20 Namen |
+| `tools/operation/run.sh` | 471 | der Läufer |
+| `tools/operation/vorbereiten.sh` | 107 | Pakete, Zertifikate, Bund, vier Auslieferungen, Abbild, Platte |
+| `tools/operation/crt-wirt.s` | 76 | zwei Zeilen Unterschied: dasselbe Programm auf dem Wirt |
+| `tools/operation/wirt.sh` · `masse.py` | 20 · 64 | Bauhelfer |
 
 Geändert:
 
@@ -80,7 +80,7 @@ parallel): `lib/libc/dns.fi`, `lib/libc/dnswire.fi` (beide neu),
 `kernel/user/dhcp.fi`, `kernel/user/ota.fi`, `kernel/user/opk.fi`,
 `kernel/app/fetch.fi`, `tools/install/build.sh`, `tools/ota/server.py`,
 `tools/ota/listing.py`, `tools/ota/schluesselbund.py` (neu),
-`tools/ota/veroeffentlichen.py` (neu), alles unter `tools/betrieb/`
+`tools/ota/veroeffentlichen.py` (neu), alles unter `tools/operation/`
 (neu), `docs/RUNDE-BETRIEB.md` (neu). **`kernel/sched.fi`,
 `kernel/cpu.fi` und `kernel/kmain.fi` sind NICHT angefasst.**
 
@@ -93,7 +93,7 @@ und Osums Systemaufrufe tragen **Linux' Nummern** (Runde K4). Deshalb
 läuft `/bin/host` nicht nur auf Osum, sondern auch direkt auf dem Wirt —
 mit **derselben Binärdatei aus demselben Quelltext**, übersetzt vom
 selben `firnc`. Der einzige Unterschied sind zwei Zeilen Startcode
-(`tools/betrieb/crt-wirt.s`): Osums Lader übergibt den Argumentblock in
+(`tools/operation/crt-wirt.s`): Osums Lader übergibt den Argumentblock in
 `rdi`, Linux legt ihn auf den Stapel.
 
 Das ist kein Trick, sondern das, was die Messung dieser Runde erst
@@ -464,7 +464,7 @@ dem Gerät. Die Felder decken sich eins zu eins; nur `kette` und
 
 ## 6. Der Läufer und die Zahlen
 
-`bash tools/betrieb/run.sh`, dreizehn Abschnitte. Die ersten neun laufen
+`bash tools/operation/run.sh`, dreizehn Abschnitte. Die ersten neun laufen
 auf dem Wirt (Sekunden), die letzten vier in QEMU auf Osum
 (dreizehn echte Starts, unter Last des Wirts rund vierzig Minuten).
 
@@ -545,7 +545,7 @@ es vergäbe Osums Kern `40000 + (zähler & 4095)` — **4096** Werte statt
 
 ### 6.4 Der Fälscher
 
-`tools/betrieb/dnsdienst.py --boese`, je **6 Köder vor** der richtigen
+`tools/operation/dnsdienst.py --boese`, je **6 Köder vor** der richtigen
 Antwort:
 
 | Köder | Adresse stimmt trotzdem | Fremdpakete gezählt |

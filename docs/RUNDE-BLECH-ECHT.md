@@ -135,7 +135,7 @@ für den EHCI-Regler genommen, MODUL für den Lader.** EHCI bleibt liegen
 zieht auf `0xA9000..0xAC000`. Die Modusbits von MODUL (710/711) waren
 frei, seit HID auf Wort 13 gezogen war.
 
-Außerdem angemeldet: **`tools/modul/run.sh` als Abschnitt 37** — auch
+Außerdem angemeldet: **`tools/module/run.sh` als Abschnitt 37** — auch
 dieser Läufer stand in keiner Abnahme, der vierte nach `avx`, `ota` und
 `betrieb`. Gemessen: **`MODUL: 74 bestanden, 0 gefallen`**.
 

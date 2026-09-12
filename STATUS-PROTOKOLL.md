@@ -26,7 +26,7 @@ Bericht auf der Platte, der den Neustart überlebt.
 
 ---
 
-## Die Zahlen (`tools/protokoll/run.sh`, 55 Zusagen, 0 Fehler)
+## Die Zahlen (`tools/protocol/run.sh`, 55 Zusagen, 0 Fehler)
 
 | Abnahmepunkt | verlangt | gemessen |
 |---|---|---|
@@ -39,7 +39,7 @@ Bericht auf der Platte, der den Neustart überlebt.
 Zu (e), ehrlich und ohne Ausrede: unter reiner Emulation (TCG) sind es
 131 ms. Die Abnahmeschwelle ist eine Aussage über den Preis eines
 Befehls, und ein Emulator, der jeden Befehl erst übersetzt, kann diese
-Aussage nicht treffen. `tools/protokoll/run.sh` nimmt deshalb KVM, wenn
+Aussage nicht treffen. `tools/protocol/run.sh` nimmt deshalb KVM, wenn
 es da ist, misst sonst TCG **und sagt beide Zahlen**. Es entschärft die
 Prüfung nicht — es benennt, was sie misst.
 
@@ -170,7 +170,7 @@ Die Messtafel der Runde BLECHFÜNF (24 × 48 Zeichen) bleibt und läuft
 davor — sie reicht für Vektor, RIP und vier rohe Adressen und für nichts
 sonst.
 
-### 4. Der Bildschirm wird WIRKLICH GELESEN — `tools/protokoll/schirmtext.py`
+### 4. Der Bildschirm wird WIRKLICH GELESEN — `tools/protocol/schirmtext.py`
 
 Ein Testläufer, der zählt, wie viele Pixel nicht rot sind, misst nicht
 „fünf aufgelöste Symbole" — er misst, dass irgendetwas gemalt wurde. Und
@@ -284,7 +284,7 @@ Einträge zu kürzen (bei vier schreibenden Kernen sind 128 Zeilen ein
 halber Wimpernschlag) wächst `kdata` um dieselben 64 KiB, mit denen es
 schon Merge 2 und Runde BLECH-ECHT haben wachsen lassen. Es liegt in
 `.bss`; im Abbild steht davon kein Oktett. Die Zahl steht zweimal
-(`kstate.fi`, `boot.s`) — `tools/protokoll/run.sh` und `tools/hv/run.sh`
+(`kstate.fi`, `boot.s`) — `tools/protocol/run.sh` und `tools/hv/run.sh`
 vergleichen sie. `tools/kernel/memmap.py` kennt den Bereich und meldet 0
 Kollisionen.
 
@@ -295,8 +295,8 @@ Kollisionen.
 **Neu:** `kernel/klog.fi`, `kernel/ksymtab.fi`, `kernel/absturz.fi`,
 `kernel/arch/x86_64/osym.s`, `kernel/user/log.fi`,
 `kernel/user/crash.fi`, `kernel/user/noise.fi`,
-`tools/kernel/symtab.py`, `tools/protokoll/run.sh`,
-`tools/protokoll/schirmtext.py`, `STATUS-PROTOKOLL.md`.
+`tools/kernel/symtab.py`, `tools/protocol/run.sh`,
+`tools/protocol/schirmtext.py`, `STATUS-PROTOKOLL.md`.
 
 **Geändert:** `kstate.fi` (LOG_OFF, KDATA_SIZE, vier Modusworte),
 `boot.s`, `arch/x86_64/smp.fi` (Phase PH_LOG, `lograce`, `logbank`),
@@ -312,7 +312,7 @@ Naht), `fs.fi` (`frei`, `ready`, klog), `nvme/ahci/e1000/xhci/usb.fi`
 
 ## Was `./test.sh` gesagt hat
 
-`tools/protokoll/run.sh` selbst: **55 Zusagen, 0 Fehler**, als Abschnitt
+`tools/protocol/run.sh` selbst: **55 Zusagen, 0 Fehler**, als Abschnitt
 42 angemeldet.
 
 Der Gesamtlauf hat vier Regressionen in FREMDEN Läufern aufgedeckt, und

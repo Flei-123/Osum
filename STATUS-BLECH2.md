@@ -10,7 +10,7 @@ Arbeitsbaum `/root/osum-blech2`, Zweig `blech2` von `merge6` (2aa3f59),
 Commit **1730828**. Nicht gepusht, nicht gemergt, nichts nach `/srv/store`.
 
 Kurzfassung: **zwei der drei Zahlen waren echte Fehler, eine war ein
-falsches Messgerät.** Abnahme `tools/blech2/run.sh`: **33 bestanden, 0
+falsches Messgerät.** Abnahme `tools/metal2/run.sh`: **33 bestanden, 0
 gescheitert.**
 
 ---
@@ -131,9 +131,9 @@ dort steht dieselbe Zeile. Nichts an dieser Runde hat das verursacht.
 
 ## Was gemessen wurde, und womit
 
-`tools/blech2/run.sh` stellt die Bedingungen des Fotos her — 3440x1440
+`tools/metal2/run.sh` stellt die Bedingungen des Fotos her — 3440x1440
 mit `fbpad=16`, xHCI mit USB-Tastatur und -Maus — und prüft 33 Zusagen.
-`tools/blech2/maus.py` schickt den Bewegungsstrom über QMP
+`tools/metal2/maus.py` schickt den Bewegungsstrom über QMP
 (`input-send-event`), das Bootwort `mausflut=<hz>` erzeugt ihn im Kern.
 
 Eine **Korrektur am Messgerät selbst** gehört in diesen Bericht: die
@@ -144,7 +144,7 @@ zählt jede zweite Zeile vollständig mit. Die Messung prüft jetzt gegen
 **beide** Streifenfarben. Erst das Bild hat den Fehler gezeigt — der
 Zähler allein hätte eine saubere Anzeige als Fehler gemeldet.
 
-    bash tools/blech2/run.sh --aus /tmp/abn
+    bash tools/metal2/run.sh --aus /tmp/abn
     → BLECH2: 33 bestanden, 0 gescheitert
 
 ## Das Abbild für den Stick

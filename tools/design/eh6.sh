@@ -330,7 +330,7 @@ fi
 # anderen Treiber und kann Justins Befund per Bauart nicht sehen.
 #
 # `qemu-xhci` + `usb-kbd` + `usb-mouse` ist die Aufstellung, die auch
-# tools/uhrwerk/messen.sh und tools/usbimg/merge8-schuss.sh benutzen,
+# tools/clockwork/messen.sh und tools/usbimg/merge8-schuss.sh benutzen,
 # und sie erzeugt genau das Zahlenbild, gegen das Justins Foto gelesen
 # wird.
 USBDEV=()

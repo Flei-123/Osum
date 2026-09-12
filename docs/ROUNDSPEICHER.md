@@ -83,7 +83,7 @@ gerechnet:
 2. aus einem **echten Verzeichnisdurchlauf** im selben Lauf
    (`nidx.walk_total`),
 3. auf dem **Wirt**, in Python, aus der Liste, aus der das Abbild gebaut
-   wurde (`tools/speicher/tree.py` schreibt `soll`).
+   wurde (`tools/storage/tree.py` schreibt `soll`).
 
 Der dritte Weg ist der wichtigste. Die ersten beiden stehen in derselben
 Datei, lesen dieselben Inodes ueber dieselben Systemaufrufe, und ein
@@ -92,7 +92,7 @@ seine eigene Eintragstabelle mit?"), stuende in beiden gleich falsch
 drin. Der Wirt weiss vom Kernel nichts.
 
 `du -p` prueft **jedes** Verzeichnis des Abbilds.
-`tools/speicher/pruefen.py` haelt alle drei Zahlen nebeneinander:
+`tools/storage/pruefen.py` haelt alle drei Zahlen nebeneinander:
 
 ```
 pruefen: 21 Verzeichnisse aus dem Gast, davon 17 auch gegen die Arithmetik des Wirts
@@ -193,7 +193,7 @@ und wie der Wirt. Die Promilleangaben ergeben zusammen 994 ‰ (der Rest
 sind die Rundungen nach unten).
 
 **Die Kacheln werden im Bild nachgemessen**, nicht im Quelltext geglaubt
-(`tools/speicher/kachelprobe.py`). Das ist die Lehre aus Runde K7B: ein
+(`tools/storage/kachelprobe.py`). Das ist die Lehre aus Runde K7B: ein
 Programm, das die Flaechen falsch aufteilt, meldet die falschen Flaechen
 genauso zuversichtlich.
 
@@ -210,7 +210,7 @@ Jede Kachel ist im Bild genau zwei Bildpunkte schmaler als gemeldet —
 das ist ihr Rahmen, links und rechts einer.
 
 Bildschirmfotos: `docs/bilder/speicher/speicher.png` (und `-ohne-index.png`
-als Gegenprobe), erzeugt von `tools/speicher/run.sh`.
+als Gegenprobe), erzeugt von `tools/storage/run.sh`.
 
 ## Drei Pruefungen, die sich selbst bestanden haetten
 
@@ -225,7 +225,7 @@ ist.
    null, jede Kachel gleich gross — und die Gegenprobe meldete
    `okt=0 oktok=1`, weil 0 + 0 eben 0 ergibt. Ein Fehler in der
    Aufsummierung waere unsichtbar geblieben. Behoben mit
-   `tools/speicher/tree.py`.
+   `tools/storage/tree.py`.
 2. **Die Gegenprobe der Schreibprobe senkte ihre eigene Messlatte.** Sie
    setzte fuer den Lauf ohne Journal `erwartet = vorher` und bestand
    dadurch immer. Behoben in `kernel/user/du.fi`: erwartet wird in beiden
@@ -235,7 +235,7 @@ ist.
    und ging immer durch, weil die Energieschicht beim Hochfahren
    `pwr: tempok=0` und `pwr: acok=0` schreibt. Dazu gab die Hilfsfunktion
    `feld` fuer `us10=161` zwei Zahlen zurueck (die `10` aus dem
-   Feldnamen). Beides behoben in `tools/speicher/run.sh`.
+   Feldnamen). Beides behoben in `tools/storage/run.sh`.
 
 Die Lehre ist jedesmal dieselbe und steht schon im Kopf von
 `tools/k15/run.sh`: **eine Pruefung, die nicht durchfallen kann, misst
@@ -369,9 +369,9 @@ Das ist der wichtigste Abschnitt, und er ist absichtlich lang.
 | `kernel/user/nidx.fi` | Summen den Baum hinauf, `total_of_ino`, `walk_total` |
 | `kernel/user/storage.fi` | `/bin/speicher` — Baum, groesste Dateien, Treemap |
 | `kernel/user/du.fi` | `-m` messen, `-p` alles pruefen, `-w`/`-W` schreiben |
-| `tools/speicher/build.sh` | Kernel, Programme, beide Abbilder |
-| `tools/speicher/run.sh` | der Laeufer mit den Messungen |
-| `tools/speicher/tree.py` | das Abbild mit Inhalt **und** die Wahrheit dazu |
-| `tools/speicher/pruefen.py` | die drei Zahlen nebeneinander |
-| `tools/speicher/kachelprobe.py` | die Treemap im Bild nachgemessen |
+| `tools/storage/build.sh` | Kernel, Programme, beide Abbilder |
+| `tools/storage/run.sh` | der Laeufer mit den Messungen |
+| `tools/storage/tree.py` | das Abbild mit Inhalt **und** die Wahrheit dazu |
+| `tools/storage/pruefen.py` | die drei Zahlen nebeneinander |
+| `tools/storage/kachelprobe.py` | die Treemap im Bild nachgemessen |
 | `tools/gfx/ppm2png.py` | PPM → PNG, nur mit `zlib` |

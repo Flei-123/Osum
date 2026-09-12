@@ -66,7 +66,7 @@ Programm mit kaputtem Einsprung nimmt den ganzen Rechner mit.
 
 ### Gegenprobe
 
-`tools/einsprung/run.sh` mit dem neuen Kernwort `einsprung`: jedes
+`tools/entry/run.sh` mit dem neuen Kernwort `einsprung`: jedes
 Programm von der Platte bekommt einen Einsprung von
 `0xDEAD000000000000` — nicht kanonisch, also genau Justins Fall.
 Zusage: der Start wird abgelehnt, **es gibt keine Ausnahme**, und der

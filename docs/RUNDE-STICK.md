@@ -138,7 +138,7 @@ Funktion da, weil die neue Zusage 2 sie an beiden Kanten nachrechnet.
 
 ### 1.6 Nachher, gemessen
 
-`bash tools/schirm/build.sh` + ein Start je Auflösung, Bildschirmfoto aus
+`bash tools/screen/build.sh` + ein Start je Auflösung, Bildschirmfoto aus
 dem QEMU-Monitor, umschließendes Rechteck der Bildpunkte, die nicht die
 häufigste Farbe sind:
 

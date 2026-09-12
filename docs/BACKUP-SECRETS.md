@@ -2,7 +2,7 @@
 # BACKUP-SECRETS.md -- what a backup is allowed to carry
 
 Round TRESOR, third addendum. Written 27.08.2026, measured on QEMU
-7.2.22, `tools/tresor/run.sh` section 13.
+7.2.22, `tools/vault/run.sh` section 13.
 
 Every number in this document comes from a run. Where something is a
 design argument rather than a measurement, it says so.
@@ -202,7 +202,7 @@ down which of the two attacks that operator is more afraid of.
 
 ## 7. What is measured
 
-`tools/tresor/run.sh` section 13. The round runs **220 assertions, 0
+`tools/vault/run.sh` section 13. The round runs **220 assertions, 0
 failures**; 71 of them are this section. Three parts.
 
 ### 7a. The cipher is the cipher (13a)

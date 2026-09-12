@@ -207,7 +207,7 @@ ehci: selftest lba=64  ok=1  sum=17142038  first=124
 
 **Und der Wirt rechnet dieselben drei Summen** aus dem Abbild aus, aus
 dem QEMU liest — gewichtete Oktettsumme über die ersten 512 Oktett, in
-`tools/blech/run.sh` in Python. Der Kernel ist an dieser Stelle nicht
+`tools/metal/run.sh` in Python. Der Kernel ist an dieser Stelle nicht
 sein eigener Zeuge. „Der Treiber meldet Erfolg" wäre keine Messung.
 
 ### Gemessen: die Tastatur
@@ -375,7 +375,7 @@ Kein neuer Speicher: die Tafel liegt in derselben Skalarseite
 
 Diese Runde baut ausdrücklich **keinen GPU-Treiber**, und das soll so
 bleiben. Geprüft wurde stattdessen, ob der Weg über die Firmware wirklich
-trägt — `tools/blech/fb.sh`, **9 bestanden, 0 gefallen**.
+trägt — `tools/metal/fb.sh`, **9 bestanden, 0 gefallen**.
 
 Gemessen wird nicht „es kommt ein Bild", sondern die Schlüssigkeit der
 vier Zahlen, mit einer Rechnung, die eine Karte, die nur irgendetwas
@@ -426,8 +426,8 @@ eigenen Gegenstand ändert. Steht unter „was noch fehlt".
 |---|---:|---|
 | `kernel/ehci.fi` | **1581** | neu. EHCI 1.0: Übergabe, Ringe, Aufzählung, Stick (BOT/SCSI), Tastatur |
 | `kernel/rootsel.fi` | **736** | neu. Wurzelgerätewahl, RAID-Befund, USB-Reglerliste |
-| `tools/blech/run.sh` | **381** | neu. Der Läufer, 52 Zusagen, mit dem alten Kern als Vergleichsmaß |
-| `tools/blech/fb.sh` | **172** | neu. Der Rahmenpuffer über sieben Karten |
+| `tools/metal/run.sh` | **381** | neu. Der Läufer, 52 Zusagen, mit dem alten Kern als Vergleichsmaß |
+| `tools/metal/fb.sh` | **172** | neu. Der Rahmenpuffer über sieben Karten |
 | `kernel/nvme.fi` | +219 | Namensraumliste, `run_io_ns`, `ns_verify` |
 | `kernel/kmain.fi` | +81 | Modusworte, die EHCI-Stufe, die Wurzelsuche als letzter Weg |
 | `tools/kernel/memmap.py` | +70 | zwei neue Bereiche und die **innere** Nachrechnung des EHCI-Bereichs |
@@ -715,7 +715,7 @@ Alle Protokolle dieser Runde liegen unter `/root/blechlogs/`:
 
 ### Am Prüfwerk
 
-* `tools/blech/fb.sh` ist **nicht** in `test.sh` angemeldet. Der Läufer
+* `tools/metal/fb.sh` ist **nicht** in `test.sh` angemeldet. Der Läufer
   ist gebaut, gemessen und protokolliert, aber er fährt neun QEMU-Starts
   für eine Frage, die sich in der Abnahme nur selten ändert. Ob er dort
   hingehört, gehört in die Runde, die ihn zum ersten Mal braucht.
@@ -953,7 +953,7 @@ eigentliche Ertrag.
 Deshalb hat jede Behauptung dieser Runde jetzt ein Werkzeug, das sie
 widerlegen kann. Zwei sind neu.
 
-## 1. `tools/blech/chipnames.py` — 14 falsche Namen gefunden
+## 1. `tools/metal/chipnames.py` — 14 falsche Namen gefunden
 
 Das Werkzeug liest **jede** Namensbehauptung aus `kernel/chipname.fi`
 und hält sie gegen `pci.ids` (Fassung 2026-09-02) und gegen die
@@ -1001,7 +1001,7 @@ Nebenbei fand die Umstellung einen Fehler in `chipname.has_name`: sie
 **druckte**, statt nur zu antworten. Die Namensfunktionen tragen jetzt
 einen Schalter `say` — eine Nummernliste, zwei Verwendungen.
 
-## 2. `tools/blech/r8125regs.py` — ein echter Treiberfehler
+## 2. `tools/metal/r8125regs.py` — ein echter Treiberfehler
 
 Für `VAR_8125` gibt es **keinen** Testlauf, der etwas widerlegen könnte:
 QEMU 7.2 hat kein Modell des Chips. Es gibt nur eine Prüfmöglichkeit —
@@ -1228,7 +1228,7 @@ Vier Abschnitte, alle einzeln gefahren, **keiner rot**:
 
 | Abschnitt | vor dem Nachtrag | nach dem Nachtrag | Δ |
 |---|---|---|---|
-| `tools/blech/run.sh` | 60 / 0 | **72 / 0** | +12 Zusagen (Abschnitte 10 und 11) |
+| `tools/metal/run.sh` | 60 / 0 | **72 / 0** | +12 Zusagen (Abschnitte 10 und 11) |
 | `tools/rtl/run.sh` | 67 / 0 → zwischenzeitlich 66 / 1 | **67 / 0** | wiederhergestellt |
 | `tools/hwnet/run.sh` | 54 / 1 | **56 / 0** | +2 Zusagen, rote weg |
 | `tools/usbimg/run.sh` | 46 / 0 → seit dem `rtl`-Merge 45 / 1 | **48 / 0** | +3 Zusagen, Altlast repariert |
@@ -1259,7 +1259,7 @@ wieder eine Zusage, die nur zufällig grün ist.
 
 ### Was jetzt bei jeder Abnahme mitläuft
 
-`tools/blech/run.sh` Abschnitt 10 ruft die beiden Nachrechner auf. Ohne
+`tools/metal/run.sh` Abschnitt 10 ruft die beiden Nachrechner auf. Ohne
 sie wären beide Werkzeuge nach dieser Runde tote Dateien im Verzeichnis
 — derselbe Fehler, den sich der Bericht bei `fb.sh` schon einmal
 vorgeworfen hat. Ohne Netz **und** ohne zwischengespeicherte Vorlage

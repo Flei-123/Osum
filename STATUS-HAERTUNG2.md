@@ -41,7 +41,7 @@ Der Auftrag vermutete: Syscall-Eintrittspfade ohne Argumentprüfung, ohne
 
 Die Quelle sagt etwas Engeres (`docs/RUNDE-MERGE6.md` 6.2,
 `docs/RUNDE-GLYPHE.md` 276/568): gezählt werden von
-`tools/vielkern/onecore.py` die Funktionen, die einen Puffer der
+`tools/multicore/onecore.py` die Funktionen, die einen Puffer der
 **Datenseite** (`state + kstate.X_OFF`) als **Arbeitsfläche** nehmen,
 ohne dass ein Sperrwort im Rumpf steht. Es ist ausdrücklich ein
 **Vertrag** („die Zahl darf nicht wachsen“) und **keine Fehlerliste** —
@@ -126,7 +126,7 @@ nach, fällt Flicken 0002 ersatzlos weg.
 
 ### 1.5 Der Nachweis
 
-`tools/haertung/run.sh` — **19 gehalten, 0 gefallen**, Laufzeit 0,14 s.
+`tools/hardening/run.sh` — **19 gehalten, 0 gefallen**, Laufzeit 0,14 s.
 
 ```
   -- satt (Gegenprobe: heap_alloc gelingt)
@@ -300,7 +300,7 @@ Zahl, die niemand gesehen hat, ist keine Abnahme.
 | `tools/posix/run.sh` | **134 passed, 0 failed** | 134/0 ✅ |
 | `tools/caps/run.sh` | **67 passed, 0 failed** | 67/0 ✅ |
 | `tools/handle/run.sh` | **80 bestanden, 0 gefallen** | 80/0 ✅ |
-| `tools/haertung/run.sh` | **19 gehalten, 0 gefallen** | neu |
+| `tools/hardening/run.sh` | **19 gehalten, 0 gefallen** | neu |
 | `test.sh` Abschnitt 43 | **bestanden**, 0,14 s | neu |
 | `memmap.py` | 94 Bereiche, **0 Kollisionen** | 0 |
 | `onecore.py` | gesperrt 18, **offen 47** (war 64) | Vertrag |

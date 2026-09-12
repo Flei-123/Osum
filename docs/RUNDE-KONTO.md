@@ -96,18 +96,18 @@ ohne `crt.s` und ohne libc.
 
 ### Werkzeuge
 
-* `tools/konto/attrappe.py` (400 Zeilen) — der Testaufbau: die drei
+* `tools/account/attrappe.py` (400 Zeilen) — der Testaufbau: die drei
   APIs als Nachbau über TLS 1.3, mit Protokoll **jeder** Kopfzeile.
-* `tools/konto/split.py` (140) — die Trennungswache.
-* `tools/konto/run.sh` (792) — die Messung, **107 Zusicherungen**.
-* `tools/konto/dbg.sh` — die kurze Schleife zum Fehlersuchen.
+* `tools/account/split.py` (140) — die Trennungswache.
+* `tools/account/run.sh` (792) — die Messung, **107 Zusicherungen**.
+* `tools/account/dbg.sh` — die kurze Schleife zum Fehlersuchen.
 
 ---
 
 ## 3. Die Messung
 
 ```
-bash tools/konto/run.sh
+bash tools/account/run.sh
 KONTO: 107 passed, 0 failed
 ```
 
@@ -157,7 +157,7 @@ bleiben grün. Gemessen:
 
 | Lauf | Ergebnis |
 |---|---|
-| `tools/konto/run.sh` | **107 erfüllt, 0 gescheitert** |
+| `tools/account/run.sh` | **107 erfüllt, 0 gescheitert** |
 | `tools/look/run.sh` | **40 erfüllt, 0 gescheitert** |
 | `tools/wm/run.sh` (aus zwei Suiten heraus) | **103 erfüllt, 0 gescheitert** |
 | GUI-Bau `tools/hwnet/build.sh` (mit `/bin/settings`) | gebaut |
@@ -203,7 +203,7 @@ vorher rot" eine Messung ist und keine Behauptung.
 
 | Lauf | dieser Zweig | Referenzbaum 7d487fb |
 |---|---|---|
-| `tools/konto/run.sh` | **107 / 0** | — (gibt es dort nicht) |
+| `tools/account/run.sh` | **107 / 0** | — (gibt es dort nicht) |
 | `tools/look/run.sh` | **40 / 0** | — |
 | `tools/themestore/run.sh` | **81 / 0** | 81 / 0 |
 | `tools/umlaut/run.sh` | 45 grün / **2 rot** | 45 grün / **2 rot**, dieselben zwei |
@@ -237,7 +237,7 @@ behoben, beide waren im Quelltext unsichtbar.**
      (Nachweisdatei des Rückens `eigen`), `ruecken` →
      `anbieter_anzahl`, `ruecken_name` → `anbieter_name`,
      `lokal_geloescht` → `lokal_entfernt`. Der Läufer
-     `tools/konto/run.sh` und die Einstellungsseite lesen die neuen
+     `tools/account/run.sh` und die Einstellungsseite lesen die neuen
      Namen.
    * Zwei Meldungen umformuliert, weil sie den Umlaut gar nicht
      brauchten: „die Sitzung **ließ** sich nicht ablegen" → „konnte

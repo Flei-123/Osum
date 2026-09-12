@@ -45,7 +45,7 @@ bleibt es weg und der Bau laeuft weiter -- derselbe Weg, den `firnc`
 schon geht. GEMESSEN: `blocks=65536 free=19225` (9,4 MiB frei),
 `/bin/certus` 6 493 760, `/bin/busybox` 326 336, `/bin/lua` 380 488,
 dazu `/bin/firnc` und `/bin/fas`. sqlite3 liegt nur als Quelle vor
-(tools/fremd/), nicht als Binary -- der Platz dafuer ist da.
+(tools/foreign/), nicht als Binary -- der Platz dafuer ist da.
 
 ## 3. Der volle Lauf und die Endtafel
 

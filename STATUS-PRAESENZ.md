@@ -14,7 +14,7 @@ sync` = `7d487fb`).
 
 | | vor dem Merge | nach dem Merge |
 |---|---|---|
-| `tools/konto/run.sh` | 107 passed, 0 failed (Zweig `konto`) | **107 passed, 0 failed** |
+| `tools/account/run.sh` | 107 passed, 0 failed (Zweig `konto`) | **107 passed, 0 failed** |
 | `memmap.py` Kollisionen | 0 | **0** (104 Bereiche in 0x100000, 11 Vektoren, 173 Modusnamen) |
 | Kernel Stufe 0 | baut | **baut**, 5 305 332 Oktette |
 
@@ -25,7 +25,7 @@ Sprachkataloge (Vereinigung, danach 279 Schlüssel je Datei, 0 Doppelte),
 **Der echte Konflikt:** beide Runden hatten unabhängig `= 8` für ihren
 Reiter genommen. Aufgelöst als `R_KONTO = 8`, `R_SYNC = 9`,
 `R_ANZ = 10`, Elementtafel 192, Leistenbreite 760.
-`tools/konto/run.sh` zählt jetzt zehn Reiter statt neun.
+`tools/account/run.sh` zählt jetzt zehn Reiter statt neun.
 
 ---
 
@@ -37,7 +37,7 @@ Reiter genommen. Aufgelöst als `R_KONTO = 8`, `R_SYNC = 9`,
 | `kernel/user/freunde.fi` | 430 | die Freundesleiste und das Chatfenster (`/bin/freunde`) |
 | `/root/jarvis/lib/praesenzd.js` | 480 | Freundschaftsgraph, Präsenz-Push, Chat-Weiterleitung, Postfach |
 | `/root/jarvis/test/praesenzd.test.mjs` | 250 | der Prüfstand des Kontodienstes |
-| `tools/praesenz/run.sh` | 300 | die Abnahme |
+| `tools/presence/run.sh` | 300 | die Abnahme |
 | `locale/{de,en}/messages` | +12 je | die Texte der Leiste |
 
 Größen: `/bin/praesenz` **206 192** Oktette, `/bin/freunde` **394 888**

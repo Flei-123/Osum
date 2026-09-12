@@ -47,7 +47,7 @@
 #   9. Ein Userland (tools/userland/run.sh, Runde K6): eine Shell,
 #      dreiundzwanzig Werkzeuge, Roehren und Umlenkung -- alles eigene
 #      ELF-Dateien von der Platte.
-#  43. DER PUFFER, DER SCHWEIGT (tools/haertung/run.sh, Runde
+#  43. DER PUFFER, DER SCHWEIGT (tools/hardening/run.sh, Runde
 #      HAERTUNG-2): `buf_grow` kehrte bei knappem Speicher wortlos
 #      zurueck, `cap` blieb der alte Wert. Gemessen wird mit einem
 #      Kanarienvogel unmittelbar HINTER dem Puffer, bei echt
@@ -539,7 +539,7 @@
 #      /users/<name>/config/tiling.conf, und ohne die Datei gibt es
 #      KEINE Belegung. Dazu drei Bildschirmfotos (Teilung, Reiter,
 #      Drehung), bildpunktgenau nachgerechnet, und /bin/tiling in Ring 3.
-#  25. DIEBSTAHL (tools/tresor/run.sh, Runde TRESOR): was passiert, wenn
+#  25. DIEBSTAHL (tools/vault/run.sh, Runde TRESOR): was passiert, wenn
 #      die Maschine weg ist. Eine GERAETEIDENTITAET, die eine
 #      Neuinstallation ueberlebt (`kernel/hwid.fi`: SMBIOS ueber den
 #      Suchlauf im F-Segment, die Seriennummer des NVMe-Laufwerks aus
@@ -605,7 +605,7 @@ set -uo pipefail
 #      ein VERZEICHNIS aus geteilten Bloecken, nicht in ein ZIP -- zweiter
 #      Lauf 0 Oktette, ein geaendertes Oktett kostet 4096 statt 44384.
 #      Der Knopf SELBST ist noch nicht von Ende zu Ende gemessen
-#      (tools/tresor/gui.sh, docs/BACKUP-UI.md Abschnitt 7).
+#      (tools/vault/gui.sh, docs/BACKUP-UI.md Abschnitt 7).
 
 cd "$(dirname "$0")"
 ROOT=$(pwd)
@@ -1106,8 +1106,8 @@ lauf "26. der Tunnel als PAKET: was er kostet, wenn keiner laeuft (tools/tunnel/
      tools/tunnel/kosten.sh tunnelkosten '^  OK    (der Tunnel kostet|ein EINGERICHTETER|der Haken)'
 lauf "27. installieren, benutzen, entfernen -- und nichts bleibt (tools/tunnel/pakete.sh, Nachtrag TUNNEL)" \
      tools/tunnel/pakete.sh tunnelpakete '^  OK    (SPURLOS|zweimal gebaut|GEGENPROBE|das Paket .bleibt.|mit --behalte-daten)'
-lauf "25. Diebstahl: Geraeteidentitaet, Sicherung, Schluesselverwaltung (tools/tresor/run.sh, Runde TRESOR)" \
-     tools/tresor/run.sh tresor '^TRESOR: |^  OK    (SMBIOS |SHA-256 |PBKDF2|DER ZWEITE LAUF|der wiederhergestellte Baum|ACHT OKTETTE|im beschaedigten|GEGENPROBE|eine (NEUE PLATTE|ANDERE Maschine)|der Fingerabdruck ist|die Seriennummer des Laufwerks|crypto erase|open mit dem richtigen|1000 Oktette|bei 0xF1031|und seine Pruefsumme|PREIS DER AUSNAHME|MIT Liste sichert|DAS WIEDERHERGESTELLTE PAKET|das verwaiste Paket ist OKTETT|ZWEITER LAUF SCHREIBT NULL|GESCHRIEBEN nur|FAKTOR der kleinen|kein halbes Backup)'
+lauf "25. Diebstahl: Geraeteidentitaet, Sicherung, Schluesselverwaltung (tools/vault/run.sh, Runde TRESOR)" \
+     tools/vault/run.sh tresor '^TRESOR: |^  OK    (SMBIOS |SHA-256 |PBKDF2|DER ZWEITE LAUF|der wiederhergestellte Baum|ACHT OKTETTE|im beschaedigten|GEGENPROBE|eine (NEUE PLATTE|ANDERE Maschine)|der Fingerabdruck ist|die Seriennummer des Laufwerks|crypto erase|open mit dem richtigen|1000 Oktette|bei 0xF1031|und seine Pruefsumme|PREIS DER AUSNAHME|MIT Liste sichert|DAS WIEDERHERGESTELLTE PAKET|das verwaiste Paket ist OKTETT|ZWEITER LAUF SCHREIBT NULL|GESCHRIEBEN nur|FAKTOR der kleinen|kein halbes Backup)'
 # ABSCHNITT 28 UND 29 -- RUNDE HWNET. Was diesem System zu ECHTER
 # HARDWARE fehlte, waren zwei Dinge, und beide stehen hier als eigener
 # Abschnitt: eine Netzkarte, die es auf einem echten Brett WIRKLICH gibt
@@ -1349,8 +1349,8 @@ lauf "34. das Update ueber das Netz: signiertes VERZEICHNIS, Rueckschritt, Wiede
 # Die tragende Gegenprobe steht in Abschnitt 3: mit einer IDE-Wurzel
 # darf die neue Suche NULL Mal laufen. Daran haengt die Zusage, dass
 # diese Runde an den 53 Abschnitten darueber nichts aendert.
-lauf "35. Osum auf fremdem Blech: Wurzelsuche, RAID-Meldung, EHCI, NVMe-Namensraeume (tools/blech/run.sh, Runde BLECH)" \
-     tools/blech/run.sh blech '^BLECH: |^  --    (QEMU|Beschleuniger)|^  OK    (der Kern|die Speicherkarte|ein OFS|DER ALTE|DER NEUE|und haengt|und /bin|und die Shell|die LEERE|und die AHCI|eingehaengt|kein einziger|und die Wurzel|ein Controller|und mit SEINEN|und es steht|der SD|und die Reihenfolge|die Firmware|an Anschluss|READ CAPACITY|keine Uebertragung|Block |die Tastatur|sechs Tasten|und es sind|der Endpunkt|Geraet 0|Geraet 1|beide sind|und Block |alle drei|auch der mit|Namensraum |GEGENPROBE|und kein Geraet|derselbe Treiber|q35|die nackte|ein EHCI|ein OHCI|ein UHCI|und bei OHCI)'
+lauf "35. Osum auf fremdem Blech: Wurzelsuche, RAID-Meldung, EHCI, NVMe-Namensraeume (tools/metal/run.sh, Runde BLECH)" \
+     tools/metal/run.sh blech '^BLECH: |^  --    (QEMU|Beschleuniger)|^  OK    (der Kern|die Speicherkarte|ein OFS|DER ALTE|DER NEUE|und haengt|und /bin|und die Shell|die LEERE|und die AHCI|eingehaengt|kein einziger|und die Wurzel|ein Controller|und mit SEINEN|und es steht|der SD|und die Reihenfolge|die Firmware|an Anschluss|READ CAPACITY|keine Uebertragung|Block |die Tastatur|sechs Tasten|und es sind|der Endpunkt|Geraet 0|Geraet 1|beide sind|und Block |alle drei|auch der mit|Namensraum |GEGENPROBE|und kein Geraet|derselbe Treiber|q35|die nackte|ein EHCI|ein OHCI|ein UHCI|und bei OHCI)'
 
 # RUNDE BLECH-ECHT: auf dem Zweig `hid` hiess dieser Abschnitt 32 -- die
 # Nummer gehoert in `main` seit Runde MERGE-2 dem Vorlagenladen
@@ -1372,8 +1372,8 @@ lauf "36. HID: Berichtsbeschreibungen, ein Eingabeweg, Touchpad, I2C-HID (tools/
 # das Modul als signierte Datei auf der Platte, laden, die Maus wirklich
 # bewegen, entladen -- und die Gegenprobe mit einem Symbol, das der Kern
 # nicht anbietet.
-lauf "37. ein Treiber, der nicht im Kern steht: laden, benutzen, entladen (tools/modul/run.sh, Runde MODUL)" \
-     tools/modul/run.sh modul '^MODUL: |^  OK    (zwei Kernabbilder|die Ausfuhrtafel|dasselbe wie nm|ohne Modul|mit Modul|und es bewegt|und es laesst|die Signatur|ein fremdes|der Kern laedt|danach|vorher|eine Platte|der Lauf endet)'
+lauf "37. ein Treiber, der nicht im Kern steht: laden, benutzen, entladen (tools/module/run.sh, Runde MODUL)" \
+     tools/module/run.sh modul '^MODUL: |^  OK    (zwei Kernabbilder|die Ausfuhrtafel|dasselbe wie nm|ohne Modul|mit Modul|und es bewegt|und es laesst|die Signatur|ein fremdes|der Kern laedt|danach|vorher|eine Platte|der Lauf endet)'
 
 # RUNDE BLECH-ECHT: auf dem Zweig `bridge` hiess dieser Abschnitt 32 --
 # die Nummer gehoert in `main` seit Runde MERGE-2 dem Vorlagenladen.
@@ -1411,7 +1411,7 @@ lauf "38. der JARVIS-Helfer und seine Rechteliste (tools/bridge/run.sh, Runde BR
 lauf "39. was man mit dem Stick TUN kann: dhcp, host, fetch, ota und die Bruecke, vom Abbild (tools/stick/run.sh, Runde STICK)" \
      tools/stick/run.sh stick '^STICK: |^  ok   |^       (SHA-256|/bin traegt|kern|programme|apps|wurzeln|ota.conf|schluessel)'
 
-#  40. RING 3 AUF ALLEN KERNEN, UND DER RIEGEL DAVOR (tools/vielkern/run.sh,
+#  40. RING 3 AUF ALLEN KERNEN, UND DER RIEGEL DAVOR (tools/multicore/run.sh,
 #      Runde VIELKERN 3). Der Abschnitt, den es in der Runde BLECHKERN
 #      nicht gab -- und deshalb ist deren Fehler damals bis auf Justins
 #      Brett durchgerutscht: ein Anwendungskern durfte Ring 3 nehmen,
@@ -1427,8 +1427,8 @@ lauf "39. was man mit dem Stick TUN kann: dhcp, host, fetch, ota und die Bruecke
 #      `gsluege r3blind` schaltet ihn dazu ab (die Maschine MUSS
 #      brechen, mit VEK 6 #UD in einer Ring-3-Aufgabe). Eine Zusage,
 #      deren Gegenprobe nicht faellt, ist eine Behauptung.
-lauf "40. Ring 3 auf ALLEN Kernen, und der Riegel davor -- der Fehler der Runde BLECHKERN, auf Bestellung (tools/vielkern/run.sh, Runde VIELKERN)" \
-     tools/vielkern/run.sh vielkern '^VIELKERN: |^  OK   |^  FAIL |^        (r3:|tafel:|absturz:)'
+lauf "40. Ring 3 auf ALLEN Kernen, und der Riegel davor -- der Fehler der Runde BLECHKERN, auf Bestellung (tools/multicore/run.sh, Runde VIELKERN)" \
+     tools/multicore/run.sh vielkern '^VIELKERN: |^  OK   |^  FAIL |^        (r3:|tafel:|absturz:)'
 
 # RUNDE MERGE-6: VIELKERN UND WERKZEUGE HABEN BEIDE DIE 40 VERGEBEN --
 # sie sind am selben Tag aus demselben Commit (1493451) entstanden und
@@ -1450,10 +1450,10 @@ lauf "40. Ring 3 auf ALLEN Kernen, und der Riegel davor -- der Fehler der Runde 
 # eine Leiche, der Verlaufsgraph steht im BILD an den Stellen, die das
 # Programm gemeldet hat, und der Dunkelmodus-Schalter des
 # Kontrollzentrums macht das Bild messbar dunkler.
-lauf "41. der Aufgabenverwalter und das Kontrollzentrum (tools/werkzeug/run.sh, Runde WERKZEUGE)" \
-     tools/werkzeug/run.sh werkzeug '^WERKZEUGE: |^  OK    |^        '
+lauf "41. der Aufgabenverwalter und das Kontrollzentrum (tools/toolbench/run.sh, Runde WERKZEUGE)" \
+     tools/toolbench/run.sh werkzeug '^WERKZEUGE: |^  OK    |^        '
 
-#  42. DER ZEICHENWEG AUF MEHREREN KERNEN (tools/glyphe/run.sh, Runde
+#  42. DER ZEICHENWEG AUF MEHREREN KERNEN (tools/glyph/run.sh, Runde
 #      GLYPHE). Der Rest, an dem MERGE-6 gescheitert ist: `wig.blit` und
 #      `wig.glyph_into` bauten in EINEM Puffer der Datenseite, und nur
 #      einer der beiden Wege hatte eine Sperre. Ein Ring-3-Programm
@@ -1468,8 +1468,8 @@ lauf "41. der Aufgabenverwalter und das Kontrollzentrum (tools/werkzeug/run.sh, 
 #      Bauform mit einer gemeinsamen Sperre, `glyphtafelfrei` = der
 #      Glyphenspeicher ohne die seine) und zwanzig Schreibtischlaeufe
 #      je mit vier und acht Kernen.
-lauf "42. der Zeichenweg auf mehreren Kernen: eine Buehne je Kern (tools/glyphe/run.sh, Runde GLYPHE)" \
-     tools/glyphe/run.sh glyphe '^GLYPHE: |^  OK    |^  FAIL |^  ZAHL  |^        '
+lauf "42. der Zeichenweg auf mehreren Kernen: eine Buehne je Kern (tools/glyph/run.sh, Runde GLYPHE)" \
+     tools/glyph/run.sh glyphe '^GLYPHE: |^  OK    |^  FAIL |^  ZAHL  |^        '
 #  43. DER SYSTEMBUS (tools/systembus/run.sh, Runde SYSTEMBUS)
 #
 # Der wichtigste Einzelposten der Wegkarte (A3): benannte Dienste,
@@ -1489,10 +1489,10 @@ lauf "43. der Systembus: Dienste, Rechte, Zwischenablage, Segmente (tools/system
 # Panik-Bildschirm. Fuenf Messungen, und die zwei, um die es geht:
 # vierzigtausend Zeilen aus vier Kernen ohne eine einzige verschraenkte,
 # und ein Panik-Bildschirm, dessen Text WIRKLICH GELESEN wird
-# (tools/protokoll/schirmtext.py rechnet die Glyphen aus dem
+# (tools/protocol/schirmtext.py rechnet die Glyphen aus dem
 # Bildschirmfoto zurueck).
-lauf "44. das Kernprotokoll, die Absturzberichte und der Panik-Bildschirm (tools/protokoll/run.sh, Runde PROTOKOLL)" \
-     tools/protokoll/run.sh protokoll '^PROTOKOLL: |^  OK    |^        '
+lauf "44. das Kernprotokoll, die Absturzberichte und der Panik-Bildschirm (tools/protocol/run.sh, Runde PROTOKOLL)" \
+     tools/protocol/run.sh protokoll '^PROTOKOLL: |^  OK    |^        '
 
 # RUNDE PRAESENZ: Freunde, Praesenz und ein 1:1-Chat, den der Server
 # nicht mitlesen kann. Drei Zusagen tragen diesen Abschnitt, und alle
@@ -1506,8 +1506,8 @@ lauf "44. das Kernprotokoll, die Absturzberichte und der Panik-Bildschirm (tools
 #     man ihn absichtlich hineinlegt.
 # Der Abschnitt braucht node fuer den Kontodienst; fehlt es, sagt er das
 # und ueberspringt diesen Teil, statt still gruen zu sein.
-lauf "45. Freunde, Praesenz und ein Chat ohne Mitleser (tools/praesenz/run.sh, Runde PRAESENZ)" \
-     tools/praesenz/run.sh praesenz '^PRAESENZ: |^  OK    |^  FAIL  |^        (/bin/praesenz|104 Bereiche)'
+lauf "45. Freunde, Praesenz und ein Chat ohne Mitleser (tools/presence/run.sh, Runde PRAESENZ)" \
+     tools/presence/run.sh praesenz '^PRAESENZ: |^  OK    |^  FAIL  |^        (/bin/praesenz|104 Bereiche)'
 # ================================================== RUNDE TON-2
 #
 # MERGE-8: dieser Abschnitt hiess auf dem Zweig 42 -- die Nummer gehoert
@@ -1520,13 +1520,13 @@ lauf "45. Freunde, Praesenz und ein Chat ohne Mitleser (tools/praesenz/run.sh, R
 # Dieser Abschnitt fragt es von aussen: zweimal /bin/play durch die
 # Shell, jeder Ton per Goertzel einzeln nachgewiesen.
 #
-# DIE 60-SEKUNDEN-ABNAHME (tools/ton/acceptance.sh) STEHT ABSICHTLICH
+# DIE 60-SEKUNDEN-ABNAHME (tools/audio/acceptance.sh) STEHT ABSICHTLICH
 # NICHT HIER. Zwoelf Laeufe zu einer Minute sind zwoelf Minuten, und
 # das gehoert nicht in einen Durchlauf, den man vor jedem Commit
 # startet. Sie wird von Hand gefahren, und ihre Zahlen stehen in
 # STATUS-TON2.md.
-lauf "46. der Mischer von Ring 3 aus: zwei Programme, Lautstaerke je Strom, Saettigung, Systemklang (tools/ton/mischer.sh, Runde TON-2)" \
-     tools/ton/mischer.sh ton2 '^== |^  OK   |^  FEHL |^    \(|^ERGEBNIS'
+lauf "46. der Mischer von Ring 3 aus: zwei Programme, Lautstaerke je Strom, Saettigung, Systemklang (tools/audio/mischer.sh, Runde TON-2)" \
+     tools/audio/mischer.sh ton2 '^== |^  OK   |^  FEHL |^    \(|^ERGEBNIS'
 
 #  43. DIE BILDGRENZE UND DIE FENSTERBEWEGUNG (tools/vsync/run.sh, Runde
 #      VSYNC). Zwei Zusagen: beim Zeichnen darf nie eine halbe Bildseite
@@ -1558,8 +1558,8 @@ lauf "46. der Mischer von Ring 3 aus: zwei Programme, Lautstaerke je Strom, Saet
 lauf "48. die Bildgrenze und die Fensterbewegung (tools/vsync/run.sh, Runde VSYNC)" \
      tools/vsync/run.sh vsync '^VSYNC: |^    ok  |^    NICHT |^        '
 
-lauf "49. der Puffer, der bei knappem Speicher schweigt -- und der Aufrufer, der darueber hinausschreibt (tools/haertung/run.sh, Runde HAERTUNG-2)" \
-     tools/haertung/run.sh haertung '^HAERTUNG: |^  OK    |^  FEHL  |^     fall='
+lauf "49. der Puffer, der bei knappem Speicher schweigt -- und der Aufrufer, der darueber hinausschreibt (tools/hardening/run.sh, Runde HAERTUNG-2)" \
+     tools/hardening/run.sh haertung '^HAERTUNG: |^  OK    |^  FEHL  |^     fall='
 # ABSCHNITT 47 -- RUNDE WLAN/WLAN-2. (MERGE-8: der Zweig nannte ihn 42;
 # die 42 gehoert seit MERGE-7 dem Zeichenweg (GLYPHE), 46 seit dieser
 # Runde dem Mischer (TON-2). Also 47.) Der einzige Abschnitt dieser Abnahme, der

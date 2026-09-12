@@ -1,7 +1,7 @@
 # ORPHANS.md -- the one kind of program a backup has to carry
 
 *Round TRESOR, addendum of 27.08.2026. Every number here comes from a run
-of `tools/tresor/run.sh` § 11.*
+of `tools/vault/run.sh` § 11.*
 
 This document is the contract between two programs in two repositories:
 `opk` in the OrientOS tree, which knows which packages could be fetched
@@ -90,7 +90,7 @@ day somebody needed a restore.
 
 `opk`, because it is the only program that knows which sources are
 registered and what they hold. Round PLAN2 is adding the subcommand.
-Until it lands, `tools/tresor/orphans.py` is the reference producer: it
+Until it lands, `tools/vault/orphans.py` is the reference producer: it
 imports the real `opk.py` and uses its own `Wurzel`, `Plan.hashes()`,
 `quelle_lesen()` and `kurz()`, so it cannot drift from how the package
 manager actually thinks.
@@ -99,7 +99,7 @@ Verified against a real tree with one published and one self-built
 package:
 
 ```
-$ python3 tools/tresor/orphans.py --root /tmp/orph/root --source /tmp/orph/src
+$ python3 tools/vault/orphans.py --root /tmp/orph/root --source /tmp/orph/src
 8c3851919b9fcd2a889d
 2 package(s) in the plan, 1 source(s), 1 ORPHANED
    8c3851919b9fcd2a889d  8c3851919b9fcd2a...  mine
@@ -131,7 +131,7 @@ else, so it deduplicates against the rest of the backup and `restore`,
 
 ## 4. What the exception costs, measured
 
-From `tools/tresor/run.sh` § 11: the same backup set, saved twice into two
+From `tools/vault/run.sh` § 11: the same backup set, saved twice into two
 fresh stores, once without an orphan list and once with one. The set is
 sized to match the real one PLAN2 measured (44,076 octets), so the
 percentage is comparable to a real machine rather than to a toy.

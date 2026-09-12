@@ -1,7 +1,7 @@
 # BACKUP-UI.md -- backing up from the file manager
 
 *Round TRESOR, second addendum, 27.08.2026. Every number here comes from
-a run of `tools/tresor/run.sh` § 12.*
+a run of `tools/vault/run.sh` § 12.*
 
 ---
 
@@ -237,7 +237,7 @@ This matters more than the rest of the document, so it is not at the
 bottom by accident -- it is here because the next person to touch this
 needs to know exactly how far the ground is solid.
 
-**Measured, 148 assertions in `tools/tresor/run.sh`:**
+**Measured, 148 assertions in `tools/vault/run.sh`:**
 
 * the store itself -- deduplication within a backup and between backups,
   the zero-octet second run, the 11× cheaper one-octet edit;
@@ -249,7 +249,7 @@ needs to know exactly how far the ground is solid.
 
 **Built and compiling, but NOT measured end to end:**
 
-* **the context menu entry itself.** `tools/tresor/gui.sh` boots the
+* **the context menu entry itself.** `tools/vault/gui.sh` boots the
   window server and the file manager, reads their reported rectangles and
   gets as far as proving that the right mouse button opens a window --
   and then fails to land the click on the tree row that navigates up out

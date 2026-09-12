@@ -205,7 +205,7 @@ Datei meint, meint ihren SHA.
 
 | Klasse | Urteil | Beleg / was fehlt |
 |---|---|---|
-| **NVMe (M.2)** | **GEHT** (QEMU) / **ERKANNT (BLECH)** | erkannt (`disk NVMe`), gestartet, gelesen; mehrere Namensräume in `tools/blech/run.sh` gemessen (**72 bestanden, 0 gefallen**). **Auf echter M.2, 03.09.2026:** `hwdiag: disk NVMe bdf=0x100 c0a9:5426` — gefunden und beim Namen genannt. Davon LESEN ist auf Blech noch **UNGEMESSEN** |
+| **NVMe (M.2)** | **GEHT** (QEMU) / **ERKANNT (BLECH)** | erkannt (`disk NVMe`), gestartet, gelesen; mehrere Namensräume in `tools/metal/run.sh` gemessen (**72 bestanden, 0 gefallen**). **Auf echter M.2, 03.09.2026:** `hwdiag: disk NVMe bdf=0x100 c0a9:5426` — gefunden und beim Namen genannt. Davon LESEN ist auf Blech noch **UNGEMESSEN** |
 | **SATA/AHCI** | **GEHT** (QEMU) / **ERKANNT (BLECH)** | `disk AHCI bdf=0x20 8086:2922`, Gegenprobe: derselbe Bericht meldet mit `-device ide-hd` noch `IDE`. `tools/ahci/run.sh` ist in der Abnahme. **Auf echtem AMD-SATA, 03.09.2026:** `hwdiag: disk AHCI bdf=0x201 1022:43c8`, und `blkdev: reihenfolge: nvme > ahci > usb > usb` mit vier Blockgeräten. Davon LESEN: **UNGEMESSEN** |
 | **SATA im RAID-Modus (Firmware-Einstellung)** | **GEHT** (als Meldung) | der Controller wird beim Namen genannt statt eine leere Plattenliste zu zeigen. Ein Treiber dafür gibt es nicht — **im BIOS auf AHCI stellen** |
 | **IDE/ATA-PIO** | **GEHT** | `disk IDE bdf=0x9 8086:7010` |
@@ -258,7 +258,7 @@ Datei meint, meint ihren SHA.
 | **Akku / Stromzustände** | **GEHT** (QEMU) | `kernel/batt.fi`, `kernel/pwr.fi`; `tools/powermon/run.sh` in der Abnahme |
 | **Ton** | **GEHT NICHT** | kein HDA, kein AC97, keine Zeile |
 | **TPM** | **GEHT NICHT** | für den Zweck nicht nötig |
-| **Treiber nachladen (`.omod`, signiert)** | **GEHT** (QEMU) | `tools/modul/run.sh`: **74 bestanden, 0 gefallen** — Kern ohne PS/2-Maustreiber, Modul von der Platte geladen, Maus bewegt sich, Modul wieder entladen |
+| **Treiber nachladen (`.omod`, signiert)** | **GEHT** (QEMU) | `tools/module/run.sh`: **74 bestanden, 0 gefallen** — Kern ohne PS/2-Maustreiber, Modul von der Platte geladen, Maus bewegt sich, Modul wieder entladen |
 | **Update über das Netz (OTA), VOM STICK** | **GEHT** (QEMU) | Runde STICK, im laufenden System vom Abbild getippt, unter BIOS und UEFI: `dhcp` → `host store.fleitec.com` (dieselbe Adresse, die `dig` auf dem Wirt nennt) → `fetch https://store.fleitec.com/index.json`: **`fetch: roots 11`, `fetch: verify OK`, `fetch: certs 4`** — echte Let's-Encrypt-Kette gegen die Mozilla-Wurzeln **im Abbild** → `ota suchen`: `ota: fassung dort 2`, `ota: NEUE FASSUNG verfuegbar` |
 | **`ota einspielen` vom Stick** | **UNGEMESSEN** | und zwar mit Ansage: die Wurzel des Sticks ist ein Boot-Modul im Arbeitsspeicher, ein eingespieltes Update überlebt den Neustart nicht. Für ein Update, das bleibt, muss Osum erst installiert sein (`/bin/install`). Gemessen ist `ota einspielen` auf einer PLATTE (Runde OTA/MERGE-5) |
 | **JARVIS-Brücke (`/bin/jarvisd`), VOM STICK** | **GEHT** (QEMU) | Runde STICK: `jarvisd: verbunden` / `angemeldet`, und auf der Gegenseite (Python, nicht Osum) `TLSv1.3`, `BEWEIS gut` (Ed25519, von python-cryptography nachgerechnet), `ANGEMELDET`, **zwei Aufträge beantwortet** — `system` und `/bin/echo`, dessen Ausgabe auf dem Stick entstanden ist. Gegen `tools/bridge/peer.py`, **nicht** gegen den echten JARVIS-Server. Die Rechteliste des Prüfstands kam auf einer zweiten Platte herein; **das Abbild wurde dafür nicht angefasst** |

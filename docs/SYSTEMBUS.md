@@ -189,7 +189,7 @@ des jeweiligen Aufrufs**.
 
 Die Tafel steht unter einer eigenen Sperrzelle in der Busseite selbst —
 nicht unter einer der acht Sperren aus `kstate.LOCK_OFF`, deren Zaehler
-in `tools/smp` und `tools/vielkern` gemessen werden; eine neunte
+in `tools/smp` und `tools/multicore` gemessen werden; eine neunte
 Nutzerin haette `lock_total_spins` verschoben und damit eine Zusage von
 zwei Runden gebrochen, ohne dass es jemand haette sehen muessen.
 

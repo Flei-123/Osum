@@ -14,7 +14,7 @@ Drag-and-Drop, Verlauf), **A11** (Benachrichtigungen).
 |---|---|---|
 | `tools/systembus/run.sh` | **30 / 5** | die fünf roten sind Abschnitt 9, siehe unten |
 | `tools/posix/run.sh` | **134 / 0** | Baseline gehalten (merge6: 134/0) |
-| `tools/vielkern/run.sh` | **39 / 1** | merge6 war 38/2 — **besser**, kein Regress |
+| `tools/multicore/run.sh` | **39 / 1** | merge6 war 38/2 — **besser**, kein Regress |
 | `tools/design/messen.py` | **818 von 872 = 93 %** | Auflage: nicht unter 92 %. merge6: 92 % |
 | `tools/themestore/run.sh` | **nicht zu Ende gelaufen** | siehe „Offen“ |
 
@@ -179,7 +179,7 @@ benutzen** (die Befunde zu `fs.inode_get` und `wig.glyph_into` in
   Prüfer selbst, mit Begründung je Name.
 * Die Sperre ist eine **eigene Zelle in der Busseite**, nicht eine der
   acht aus `kstate.LOCK_OFF`: deren Zähler werden in `tools/smp` und
-  `tools/vielkern` gemessen, und eine neunte Nutzerin hätte
+  `tools/multicore` gemessen, und eine neunte Nutzerin hätte
   `lock_total_spins` verschoben.
 * Über `copy_in`/`copy_out` wird die Sperre **nicht** gehalten (die
   können einen Seitenfehler auslösen). Erst holen, dann sperren.

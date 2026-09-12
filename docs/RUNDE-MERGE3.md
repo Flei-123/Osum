@@ -472,7 +472,7 @@ Die Runde AVX (Zweig `avx`, von `mergeline2` abgezweigt) fasst
 `kernel/sched.fi`, `kernel/cpu.fi`, `kernel/kmain.fi` und den Fangbereich
 an. **Diese Runde hat keine dieser Dateien angefasst** — geändert wurden
 nur `tools/icons/run.sh`, `tools/k15/run.sh`, `tools/wm/run.sh`,
-`tools/tresor/run.sh` und zwei neue Dateien unter `docs/`. Da `main`
+`tools/vault/run.sh` und zwei neue Dateien unter `docs/`. Da `main`
 außerdem nur auf `mergeline2` vorgespult wurde, liegt der Abzweigpunkt
 von `avx` weiterhin direkt in der Geschichte von `main`: AVX kann danach
 sauber hineingemergt werden.
