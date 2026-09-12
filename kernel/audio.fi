@@ -1,98 +1,98 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// kernel/audio.fi -- the audio layer.
+// kernel/audio.fi -- die Tonschicht.
 //
-// ORIGIN: written in round MEDIA1 (branch `media1`), carried onto
-// `mergeline2` and extended in round HDA. What round HDA changed is
-// described below under "WHAT ROUND HDA ADDED"; everything before that
-// is the MEDIA1 version together with its reasoning.
+// HERKUNFT: entstanden in Runde MEDIA1 (Zweig `media1`), auf
+// `mergeline2` gebracht und erweitert in Runde HDA. Was Runde HDA
+// geaendert hat, steht unten unter "WAS RUNDE HDA HINZUGEFUEGT HAT";
+// alles davor ist die Fassung von MEDIA1 samt ihren Begruendungen.
 //
-// ROUND MEDIA1: the audio layer.
+// RUNDE MEDIA1: die Tonschicht.
 //
-// This file is the BORDER. Below it sits a chip (today AC97, later
-// Intel HDA), above it sits everything that makes sound -- /bin/play,
-// the system sounds, later the playback of video and audio together.
-// The point of this round is not that something beeps; the point is
-// that the HDA driver of the later round serves EXACTLY this interface
-// and that NOT ONE LINE above it changes. That is why it is written
-// down here explicitly what the border is -- and it is written down a
-// second time, mechanically checkable, in docs/AUDIO.md:
+// Diese Datei ist die GRENZE. Unter ihr liegt ein Chip (heute AC97,
+// spaeter Intel HDA), ueber ihr liegt alles, was Ton macht -- /bin/play,
+// die Systemklaenge, spaeter die Bild-und-Ton-Wiedergabe. Der Sinn
+// dieser Runde ist nicht, dass etwas piept; der Sinn ist, dass der
+// HDA-Treiber der spaeteren Runde GENAU diese Schnittstelle bedient und
+// KEINE Zeile darueber sich aendert. Deshalb steht hier ausdruecklich,
+// was die Grenze ist -- und es steht ein zweites Mal, mechanisch
+// pruefbar, in docs/AUDIO.md:
 //
-//   SIX THINGS this layer needs from a driver, no more:
-//     1. hw_ready()          does the device exist, is it set up
-//     2. hw_ring()           address and geometry of the DMA ring buffer
-//     3. hw_submit()         hand over a full entry, advance LVI
+//   SECHS DINGE braucht diese Schicht von einem Treiber, mehr nicht:
+//     1. hw_ready()          gibt es das Geraet, ist es aufgesetzt
+//     2. hw_ring()           Adresse und Geometrie des DMA-Ringpuffers
+//     3. hw_submit()         einen vollen Eintrag uebergeben, LVI nachziehen
 //     4. hw_start()/hw_stop()
-//     5. hw_position()       FRAMES played, monotonic -- the master clock
-//     6. hw_volume()         volume in percent
+//     5. hw_position()       abgespielte RAHMEN, monoton -- die Leituhr
+//     6. hw_volume()         Lautstaerke in Prozent
 //
-//   EVERYTHING ELSE -- format, ring bookkeeping, filling up with
-//   silence, underrun counting, volume policy, tones, system sounds --
-//   lives HERE and not in the driver. A second driver therefore does
-//   not bring a second copy of it along.
+//   ALLES ANDERE -- Format, Ringbuchfuehrung, Auffuellen mit Stille,
+//   Aussetzerzaehlung, Lautstaerkepolitik, Toene, Systemklaenge --
+//   steht HIER und nicht im Treiber. Ein zweiter Treiber bringt also
+//   keine zweite Kopie davon mit.
 //
-// WHY THE MASTER CLOCK IS THE AUDIO AND NOT THE PROCESSOR. The crystal
-// of the audio chip runs nominally at 48000 Hz and really at +-100 ppm;
-// over an hour that is 360 ms. Whoever hangs the picture on the timer
-// of the machine and the sound on the chip has drift, guaranteed.
-// Whoever hangs the picture on `samples_played` does not have it, by
-// construction. This round only builds the clock; the picture comes in
-// the next one.
+// WARUM DIE LEITUHR DER TON IST UND NICHT DER PROZESSOR. Der Quarz des
+// Tonchips laeuft nominell mit 48000 Hz und real mit +-100 ppm; ueber
+// eine Stunde sind das 360 ms. Wer das Bild an den Zeitgeber der
+// Maschine haengt und den Ton an den Chip, hat garantiert Versatz. Wer
+// das Bild an `samples_played` haengt, hat ihn per Konstruktion nicht.
+// Diese Runde baut nur die Uhr; das Bild kommt in der naechsten.
 //
-// THE RULE FOR LATER, taken from the research and recorded here so
-// that the video round does not have to invent it again: AUDIO HAS
-// PRIORITY. An audio buffer that has run dry is an audible click, a
-// dropped frame is seen by nobody. The refill path of the audio never
-// waits for the picture.
+// DIE REGEL FUER SPAETER, aus der Recherche und hier festgehalten,
+// damit die Videorunde sie nicht neu erfinden muss: TON HAT VORRANG.
+// Ein leergelaufener Tonpuffer ist ein hoerbarer Knacks, ein
+// ausgelassenes Bild sieht niemand. Der Nachfuellpfad des Tons wartet
+// nie auf das Bild.
 
 // ==================================================================
-// WHAT ROUND HDA ADDED -- and what checking MEDIA1's reasoning
-// actually produced
+// WAS RUNDE HDA HINZUGEFUEGT HAT -- und was die Probe auf die Rechnung
+// von MEDIA1 ergeben hat
 // ==================================================================
 //
-// MEDIA1 claimed above: "the HDA driver of the later round serves
-// EXACTLY this interface and NOT ONE LINE above it changes." This
-// round built that driver. The result, honestly:
+// MEDIA1 hat oben behauptet: "der HDA-Treiber der spaeteren Runde
+// bedient GENAU diese Schnittstelle und KEINE Zeile darueber aendert
+// sich." Diese Runde hat den Treiber gebaut. Das Ergebnis, ehrlich:
 //
-//   THE CLAIM HOLDS TO TWELVE TWELFTHS AND ONE FUNCTION WAS ADDED.
-//   `hw_drain_mark` -- "from here on nothing more is coming".
+//   DIE BEHAUPTUNG STIMMT ZU ZWOELF ZWOELFTELN UND EINE FUNKTION IST
+//   DAZUGEKOMMEN. `hw_drain_mark` -- "ab hier kommt nichts mehr".
 //
-//   The reason is not an oversight by MEDIA1 but a real difference in
-//   the hardware: with AC97 the DMA STOPS at the last valid entry,
-//   with HD-Audio it KEEPS RUNNING in a circle. The end of a piece is
-//   a state of the hardware on AC97 and a piece of information that
-//   only the caller has on HD-Audio. Without this thirteenth function
-//   the underrun counter kept counting after every piece, and
-//   "underruns per minute" would have become a number about the
-//   number of files played.
+//   Der Grund ist kein Versaeumnis von MEDIA1, sondern ein echter
+//   Unterschied der Hardware: bei AC97 HAELT der DMA am letzten
+//   gueltigen Eintrag an, bei HD-Audio LAEUFT er im Kreis weiter. Das
+//   Ende eines Stuecks ist bei AC97 ein Zustand der Hardware und bei
+//   HD-Audio eine Information, die nur der Aufrufer hat. Ohne diese
+//   dreizehnte Funktion zaehlte der Aussetzerzaehler nach jedem
+//   Stueck weiter, und "Aussetzer je Minute" waere eine Zahl ueber
+//   die Zahl der gespielten Dateien geworden.
 //
-// FROM THE SAME DIFFERENCE FOLLOWS THE SECOND CHANGE: THE RING IS
-// ZEROED AHEAD (`zero_ahead`). Whoever does not keep feeding HD-Audio
-// does not hear silence but his own last eighth of a second in an
-// endless loop -- the sequencer keeps reading whatever stands in
-// memory. Promise (d) of this round ("underrun -> defined silence") is
-// therefore not something that goes without saying, but exactly this
-// one function. It lives HERE and not in the driver because it
-// concerns the CONTENT OF THE RING, and that belongs to the layer.
+// AUS DEMSELBEN UNTERSCHIED FOLGT DIE ZWEITE AENDERUNG: DER RING WIRD
+// VORAUS AUSGENULLT (`zero_ahead`). Wer bei HD-Audio nichts nachlegt,
+// hoert nicht Stille, sondern seine eigene letzte Achtelsekunde in
+// Endlosschleife -- der Regler liest weiter, was im Speicher steht.
+// Zusage (d) dieser Runde ("Unterlauf -> definierte Stille") ist genau
+// deshalb keine Selbstverstaendlichkeit, sondern diese eine Funktion.
+// Sie steht HIER und nicht im Treiber, weil sie den RINGINHALT
+// betrifft, und der gehoert der Schicht.
 //
-// THIRDLY: THE SAMPLE RATE IS NEGOTIATED. MEDIA1 knew 48000 Hz.
-// `open_rate` asks the driver for a rate and takes what it gives; a
-// stream with a different rate is converted linearly in the mixer
-// (`mix.fi`). More conversion than the necessary minimum is expressly
-// not part of this round.
+// DRITTENS: DIE ABTASTRATE WIRD AUSGEHANDELT. MEDIA1 kannte 48000 Hz.
+// `open_rate` fragt den Treiber nach einer Rate und nimmt, was er
+// hergibt; ein Strom mit einer anderen Rate wird im Mischer linear
+// umgerechnet (`mix.fi`). Mehr Umrechnung als das noetige Minimum ist
+// ausdruecklich nicht Teil dieser Runde.
 //
-// FOURTHLY: SEVERAL PROGRAMS AT THE SAME TIME. MEDIA1 wrote: "ONE
-// user at a time -- no mixer in this round, and that is not an
-// omission but a statement." This round lifts the statement, but not
-// in the way MEDIA1 feared (a second audio server in the kernel): the
-// mixer in `kernel/mix.fi` is a table of four streams and an addition
-// loop with saturation, it needs no system bus and no policy. The
-// SINGLE-STREAM interface (`open`, `write`, `close`) stays line for
-// line as it was -- it is now the special case "exactly one stream"
-// and is still used by `kernel/kmain.fi` and the system sounds.
+// VIERTENS: MEHRERE PROGRAMME GLEICHZEITIG. MEDIA1 schrieb: "EIN
+// Nutzer zur Zeit -- kein Mischer in dieser Runde, und das ist keine
+// Auslassung, sondern eine Ansage." Diese Runde hebt die Ansage auf,
+// aber nicht so, wie MEDIA1 es befuerchtet hat (ein zweiter Tonserver
+// im Kernel): der Mischer in `kernel/mix.fi` ist eine Tafel aus vier
+// Stroemen und eine Additionsschleife mit Saettigung, er braucht
+// keinen Systembus und keine Politik. Die EINSTROM-Schnittstelle
+// (`open`, `write`, `close`) bleibt Zeile fuer Zeile, wie sie war --
+// sie ist jetzt der Sonderfall "genau ein Strom" und wird von
+// `kernel/kmain.fi` und den Systemklaengen weiter benutzt.
 //
-// FIFTHLY: `irq` -- a vector now sits on the line
-// (`trap.VEC_AUDIO` = 42), and the switch here says which driver
-// acknowledges it.
+// FUENFTENS: `irq` -- ein Vektor liegt jetzt auf der Leitung
+// (`trap.VEC_AUDIO` = 42), und die Weiche hier sagt, welcher Treiber
+// ihn quittiert.
 
 profile kernel
 
