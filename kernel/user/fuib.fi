@@ -83,7 +83,7 @@ export {
     // Behauptung: `mal` hat einen Rueckfall auf wlibs alten Weg, und
     // ein Bild sieht in beiden Faellen aehnlich aus. Diese zwei Zahlen
     // sagen, WELCHER Weg gelaufen ist -- gemalt und abgelehnt.
-    fui_gemalt, fui_abgelehnt,
+    fui_gemalt, fui_abgelehnt, fui_gruende,
     // RUNDE 31: die MALSCHICHT. wlibs `mal_tafel`/`mal_flaeche`/
     // `mal_balken` geben ihre Farbe SELBST vor (das Kontrollzentrum
     // waehlt sie sorgfaeltig) -- fUi soll sie malen, nicht ersetzen.
@@ -150,6 +150,13 @@ static mut s_ctx: render.Ctx = render.Ctx { m: 0, z: 0 }
 static mut s_fm: u64 = 0
 static mut s_n_ok: u64 = 0
 static mut s_n_no: u64 = 0
+// RUNDE 32: WARUM wurde abgelehnt? `fuix` allein sagt es nicht, und
+// ohne den Grund kann man nicht entscheiden, ob der Rueckfall noch
+// gebraucht wird. Vier Gruende, vier Zaehler.
+static mut s_no_bereit: u64 = 0
+static mut s_no_leer: u64 = 0
+static mut s_no_band: u64 = 0
+static mut s_no_art: u64 = 0
 
 fn fui_gemalt() -> u64 {
     return s_n_ok
@@ -157,6 +164,13 @@ fn fui_gemalt() -> u64 {
 
 fn fui_abgelehnt() -> u64 {
     return s_n_no
+}
+
+// Die Gruende, in einer Zahl: bereit*1000000 + leer*10000 + band*100 + art.
+// Eine Zahl, weil die Taskleiste sie in EINER Zeile meldet.
+fn fui_gruende() -> u64 {
+    return s_no_bereit * 1000000 + s_no_leer * 10000
+        + s_no_band * 100 + s_no_art
 }
 
 fn cv() -> *mut canvas.Canvas {
@@ -372,27 +386,93 @@ fn mal_flaeche_an() {
 // selbst. fUi soll hier also nicht die Farbe BESTIMMEN, sondern die
 // FLAECHE malen -- dieselbe Kurve, derselbe Radius, ein Rasterer.
 // Genau das ist `painter.round_rect`/`round_ring`.
+// ====================================================== RUNDE 32
+// DER RUECKFALL LIEGT JETZT HIER UND NICHT BEI JEDEM AUFRUFER.
+//
+// Justin: "wlib.fi ist auf 7355 Zeilen GEWACHSEN statt geschrumpft --
+// am Ende dieser Runde muss es deutlich kleiner sein. Sag die Zahl."
+//
+// Der Zuwachs war der Rueckfall: jede der 26 Stellen in wlib trug ein
+//
+//     if !fuib.tafel(...) { <der alte Weg mit wlibc> }
+//
+// also drei bis sechs zusaetzliche Zeilen. Sechsundzwanzig Mal.
+//
+// GEMESSEN, warum das weg kann (der Zaehler `fuig` aus dieser Runde):
+// in einem vollen Lauf gab es VIER Ablehnungen, alle vier "leeres
+// Rechteck" (w oder h ist 0), und NULL "nicht bereit". Und ein leeres
+// Rechteck malt auch der alte Weg nicht: `wlibc.rect` prueft in seiner
+// zweiten Zeile `if w == 0 || h == 0 { return }`, und rrect, rframe,
+// rring, vrect, vkreis und divider tun dasselbe. Der Rueckfall fuer
+// diesen Fall war also nachweislich toter Code.
+//
+// Bleibt der Fall, in dem es KEINE Fensterflaeche gibt (`bereit` ist
+// falsch). Der ist in den Messungen nie eingetreten, aber er ist
+// moeglich -- und ein Element, das dann gar nicht erscheint, waere
+// schlimmer als ein eckiges. Also malt die Bruecke in diesem Fall
+// SELBST mit wlibc, hier, an einer Stelle. Damit gibt `tafel` immer
+// `true` zurueck und der Aufrufer braucht kein `if` mehr.
 fn tafel(x: u64, y: u64, w: u64, h: u64, r: u64, fuellung: u64,
     rand: u64, randbreite: u64) -> bool {
     if !bereit() {
         s_n_no = s_n_no + 1
-        return false
+        s_no_bereit = s_no_bereit + 1
+        // Der alte Weg, EINMAL, statt sechsundzwanzigmal in wlib.
+        if rand == 0 || randbreite == 0 {
+            wlibc.rrect(x, y, w, h, r, fuellung)
+        } else {
+            wlibc.rframe(x, y, w, h, r, randbreite, rand, fuellung)
+        }
+        return true
     }
     if w == 0 || h == 0 {
         s_n_no = s_n_no + 1
+        s_no_leer = s_no_leer + 1
         return false
     }
     mal_flaeche_an()
+    // ================================================== RUNDE 32
+    // EIN RECHTECK, DAS OBEN AUS DEM BAND HERAUSRAGT, WIRD BESCHNITTEN
+    // UND NICHT ABGELEHNT.
+    //
+    // GEMESSEN (fuig=41400, der Zaehler aus dieser Runde): von 18
+    // Ablehnungen in einem vollen Lauf waren VIERZEHN `y < band_y`.
+    // Das Band ist der waagerechte Streifen, den der Fensterserver
+    // gerade neu malen laesst (`wlibc.set_band`); ein Element, das
+    // hoeher beginnt, ist kein Fehler -- es ist teilweise sichtbar.
+    // `wlibc.px` verwirft dann einfach die Punkte darueber.
+    //
+    // Vorher gab die Bruecke in diesem Fall auf, und der alte Weg
+    // malte -- also malten pro Lauf vierzehn Flaechen NICHT mit fUi,
+    // ohne dass man es im Bild sah. Jetzt wird der obere Teil
+    // abgeschnitten und der Rest von fUi gemalt.
     let b: u64 = wlibc.band_y()
-    if y < b {
-        s_n_no = s_n_no + 1
-        return false
+    var yy: u64 = y
+    var hh: u64 = h
+    if yy < b {
+        let weg: u64 = b - yy
+        if weg >= hh {
+            // Ganz oberhalb des Bandes: nichts zu malen, und das ist
+            // KEIN Rueckfall -- der alte Weg haette auch nichts
+            // gemalt. Also als Erfolg zaehlen, sonst zaehlt der
+            // Zaehler eine Ablehnung, die keine ist.
+            s_n_ok = s_n_ok + 1
+            return true
+        }
+        hh = hh - weg
+        yy = b
     }
-    let fy: f64 = (y - b) as f64
+    let fy: f64 = (yy - b) as f64
     // `rrect` deckelt den Radius auf die halbe kuerzere Seite, und
     // MR_GRIFF schickt absichtlich 0xFFFF ("so rund wie moeglich").
     // Dieselbe Deckelung hier, sonst malt fUi eine Ecke, wo wlib eine
     // Kapsel gemalt haette.
+    // Der Radius richtet sich nach der ECHTEN Groesse des Elements
+    // (h), nicht nach dem beschnittenen Teil (hh): eine Kachel, die
+    // halb im Band liegt, hat oben denselben Rundungsradius wie eine
+    // ganz sichtbare. Wuerde hier `hh` stehen, wechselte die Rundung
+    // mit dem Band -- und das Band haengt daran, was der Server gerade
+    // neu malen laesst.
     var rr: u64 = r
     var kurz: u64 = w
     if h < kurz {
@@ -401,10 +481,10 @@ fn tafel(x: u64, y: u64, w: u64, h: u64, r: u64, fuellung: u64,
     if rr > kurz / 2 {
         rr = kurz / 2
     }
-    painter.round_rect(pz(), x as f64, fy, w as f64, h as f64,
+    painter.round_rect(pz(), x as f64, fy, w as f64, hh as f64,
         rr as f64, kanal_dreh(fuellung))
     if rand != 0 && randbreite != 0 {
-        painter.round_ring(pz(), x as f64, fy, w as f64, h as f64,
+        painter.round_ring(pz(), x as f64, fy, w as f64, hh as f64,
             rr as f64, randbreite as f64, kanal_dreh(rand))
     }
     s_n_ok = s_n_ok + 1
@@ -421,16 +501,29 @@ fn ring(x: u64, y: u64, w: u64, h: u64, r: u64, breite: u64,
     farbe: u64) -> bool {
     if !bereit() {
         s_n_no = s_n_no + 1
-        return false
+        s_no_bereit = s_no_bereit + 1
+        wlibc.rring(x, y, w, h, r, breite, farbe)
+        return true
     }
     if w == 0 || h == 0 || breite == 0 {
         s_n_no = s_n_no + 1
+        s_no_leer = s_no_leer + 1
         return false
     }
     mal_flaeche_an()
+    // Wie in `tafel`: oben aus dem Band herausragen ist kein Fehler.
+    // Ein RING wird allerdings nicht beschnitten, sondern ganz
+    // weggelassen, wenn seine Oberkante fehlt -- ein halber Ring ist
+    // eine Linie, und die sieht aus wie ein Fehler. Der alte Weg
+    // (`wlibc.rring`) wuerde hier denselben oberen Teil verlieren.
     let b: u64 = wlibc.band_y()
     if y < b {
+        if b - y >= h {
+            s_n_ok = s_n_ok + 1
+            return true
+        }
         s_n_no = s_n_no + 1
+        s_no_band = s_no_band + 1
         return false
     }
     painter.round_ring(pz(), x as f64, (y - b) as f64, w as f64,
@@ -507,16 +600,19 @@ fn mal(sorte: u64, x: u64, y: u64, w: u64, h: u64, z: u64,
     wert: u64) -> bool {
     if !bereit() {
         s_n_no = s_n_no + 1
+        s_no_bereit = s_no_bereit + 1
         return false
     }
     if w == 0 || h == 0 {
         s_n_no = s_n_no + 1
+        s_no_leer = s_no_leer + 1
         return false
     }
     mal_flaeche_an()
     let art: u32 = art_von(sorte)
     if art == widget.KIND_NONE {
         s_n_no = s_n_no + 1
+        s_no_art = s_no_art + 1
         return false
     }
     var e: widget.Widget = widget.widget_new(art)
@@ -525,6 +621,7 @@ fn mal(sorte: u64, x: u64, y: u64, w: u64, h: u64, z: u64,
     let b: u64 = wlibc.band_y()
     if y < b {
         s_n_no = s_n_no + 1
+        s_no_band = s_no_band + 1
         return false
     }
     widget.w_place(&e, x as f64, (y - b) as f64, w as f64, h as f64)

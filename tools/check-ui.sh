@@ -180,7 +180,42 @@ END      { if (name != "" && roh > 0 && br == 0) print "  " name }
 #                   Mehrfachauswahl). Das ist Runde 32 -- hier stehen
 #                   sie, damit die Pruefung GRUEN ist und die Liste
 #                   trotzdem ehrlich sagt, was offen ist.
-AUSNAHMEN_LIB="paint_bg paint_leinwand paint_kurve mal_punkt mal_trenner mal_symbol say_rects paint_sep mal_kante3 mal_rahmen mal_linie paint_scroll paint_graph paint_bild bild_malen paint_list paint_table paint_tabs paint_menubar paint_choice paint_menu paint_tile"
+# RUNDE 32: DIE KATEGORIE "NOCH NICHT" IST LEER.
+#
+# paint_list, paint_table, paint_tabs, paint_menubar, paint_choice,
+# paint_menu, paint_tile und paint_scroll sind umgestellt -- jede
+# einzeln, weil an ihnen Zustaende haengen (Auswahl, Mehrfachauswahl,
+# Rollversatz, Spaltenbreiten), die WEITER von wlib gerechnet werden.
+# Umgestellt ist, WER die Rechtecke malt, nicht wer den Zustand fuehrt.
+# Das ist der Grund, warum fUis eigene draw_list/draw_table NICHT
+# benutzt werden: sie bringen ihr eigenes Modell mit, und zwei Modelle
+# gegeneinander zu uebersetzen ist der halb uebersetzte Zustand, der
+# falsch malt, ohne es zu sagen.
+#
+# Was hier stehen bleibt, wird NIE fUi, und jedes mit Grund:
+#
+#   paint_bg        der HINTERGRUND eines Fensters, kein Element.
+#   paint_leinwand  die Bildpunkte gehoeren dem Aufrufer (Certus malt
+#                   seine Seite selbst) -- da ist nichts zu gestalten.
+#   paint_kurve     ein Linienzug aus sechzig Messwerten, mit `hline`.
+#   paint_graph     der Rahmen dazu; ein Diagramm ist kein
+#                   Bedienelement, und fUi hat dafuer kein Element.
+#   mal_linie       die gerade Linie fuer genau diese Graphen.
+#   paint_bild      die Bildflaeche des Bildbetrachters -- die
+#   bild_malen      Bildpunkte gehoeren dem Bild, nicht der Gestaltung.
+#   mal_punkt       EIN Bildpunkt, fuer das gerechnete Hintergrundbild.
+#   mal_trenner     `wlibc.divider` traegt die Deckkraft aus der
+#   paint_sep       Formentabelle (sep_strength); fUis Trenner kennt
+#                   sie nicht, und eine andere Deckkraft ist eine
+#                   andere Linie.
+#   mal_symbol      die Symbolschrift des Systems (icon_at).
+#   mal_kante3      die zwei Kanten des klassischen Erscheinungsbilds
+#                   (hell oben, dunkel unten). Das IST `classic`, und
+#                   fUi malt flach.
+#   mal_rahmen      ein Rahmen OHNE Fuellung, um FREMDE Flaechen
+#                   (Leinwand, Vorschau) -- er darf nichts ausmalen.
+#   say_rects       schreibt nur Zahlen auf die serielle Leitung.
+AUSNAHMEN_LIB="paint_bg paint_leinwand paint_kurve paint_graph mal_linie paint_bild bild_malen mal_punkt mal_trenner paint_sep mal_symbol mal_kante3 mal_rahmen say_rects"
 
 uebrig=""
 while read -r fn; do
