@@ -37,6 +37,9 @@ OUT=${1:?usage: aufnahme.sh <outdir> [key=value ...]}
 shift || true
 
 shape=osum
+# RUNDE 32: die Spur ist AUS, solange niemand sie verlangt -- siehe die
+# Begruendung bei `$OUT/uitrace` weiter unten.
+uitrace=no
 scheme=day
 mode=light
 res=1280x800
@@ -96,6 +99,7 @@ progs="desktop taskbar settings launcher explorer edit sh echo ls cat theme"
 for a in "$@"; do
     case "$a" in
         shape=*) shape=${a#*=} ;;
+        uitrace=*) uitrace=${a#*=} ;;
         lang=*) lang=${a#*=} ;;
         dark_scheme=*) dark_scheme=${a#*=} ;;
         uiscale=*) uiscale=${a#*=} ;;
@@ -237,7 +241,38 @@ printf '# /etc/time.conf\noffset=120\n' > "$OUT/time.conf"
 # wie ein Fehler des Dateimanagers (OFFEN.md G-003). Das Abbild selbst
 # faehrt `lang=en` auf der Kommandozeile (tools/usbimg/build.sh).
 printf 'lang=%s\n' "$lang" > "$OUT/locale.conf"
-printf 'on\n' > "$OUT/uitrace"
+# ====================================================== RUNDE 32
+# DIE SPUR IST AB JETZT ABSCHALTBAR, UND SIE IST STANDARDMAESSIG AUS.
+#
+# Justin an den Bildern: "im Terminal stehen sichtbar Debugzeilen
+# (`wlib ...`, `fg=...`) -- die gehoeren im Normalbetrieb nicht auf den
+# Schirm."
+#
+# Er hat recht, und es ist ein Fehler DIESES SKRIPTS und nicht des
+# Systems. `/etc/uitrace` schaltet in wlib `s_trace` ein; die Meldungen
+# gehen dann mit `ulib.put` auf die STANDARDAUSGABE, und die Ausgabe
+# der Shell IST im Pruefstand das Terminalfenster. Also standen sie im
+# Bild. tools/look/shot.sh hat dafuer seit immer einen Schalter
+# (`uitrace=no` als Vorgabe) -- hier stand die Datei bedingungslos,
+# also war die Spur in JEDER Aufnahme an.
+#
+# Die Spur ist nicht unnuetz: acht Pruefstaende lesen die `wlib:`-Zeilen
+# (tools/design/messen.py, tools/alltag/shotcheck.py und weitere), und
+# `fahren.py` findet seine Rechtecke darin. Wer sie braucht, schaltet
+# sie ein:
+#
+#     bash tools/design/aufnahme.sh /tmp/x uitrace=yes
+#
+# Fuer ein Bild, das zeigen soll, was der Nutzer sieht, ist sie aus.
+# WICHTIG: bei "aus" wird die Datei NICHT angelegt, nicht nur geleert.
+# wlib prueft, OB /etc/uitrace sich oeffnen laesst (wlib.fi ~Z.845), und
+# nicht, was darin steht -- eine leere Datei schaltet die Spur genauso
+# ein. Das ist mir beim Schreiben dieser Zeilen selbst passiert.
+if [ "${uitrace:-no}" = yes ]; then
+    printf 'on\n' > "$OUT/uitrace"
+else
+    rm -f "$OUT/uitrace"
+fi
 cat > "$OUT/passwd" <<'EOF'
 root:x:0:0:root:/users/justin:/bin/sh
 justin:x:1000:1000:Justin:/users/justin:/bin/sh
@@ -263,8 +298,12 @@ ARGS+=(/etc/
        "/etc/time.conf=$OUT/time.conf@0644"
        "/etc/locale.conf=$OUT/locale.conf@0644"
        "/etc/passwd=$OUT/passwd@0644"
-       "/etc/uitrace=$OUT/uitrace@0644"
        "/etc/taskbar.conf=$OUT/taskbar.conf@0644")
+# /etc/uitrace nur, wenn die Spur an ist -- siehe oben: wlib sieht nur,
+# ob die Datei da ist.
+if [ -f "$OUT/uitrace" ]; then
+    ARGS+=("/etc/uitrace=$OUT/uitrace@0644")
+fi
 ARGS+=(/etc/schemas/)
 for s in assets/schemes/*.scheme; do
     ARGS+=("/etc/schemas/$(basename "$s" .scheme)=$s@0644")

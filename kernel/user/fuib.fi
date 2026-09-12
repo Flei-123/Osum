@@ -180,6 +180,68 @@ fn th() -> *mut theme.Theme {
 // kein `canvas_wrap`, und eines dort einzubauen waere eine Aenderung
 // an der gemeinsamen Bibliothek fuer einen Fall, den nur Osum hat.
 // ------------------------------------------------------------------
+// ==================================================================
+// RUNDE 32: DIE KANALREIHENFOLGE. DER FEHLER, DEN RUNDE 31 EINGEBAUT
+// UND DIE HELLIGKEITSMESSUNG NICHT GESEHEN HAT.
+//
+// Justin hat die Belege selbst nachgemessen, nach FARBTON und nicht
+// nach Helligkeit, und damit den Fehler gefunden:
+//
+//   dunkel-05-kontrollzentrum.png
+//     Panel und Taskleiste   RGB( 59, 41, 30)   braun
+//     dieselbe Farbe woanders RGB( 30, 41, 59)  neutral-dunkelblau
+//
+// Zweimal dieselbe Farbe im SELBEN Bild, einmal richtig und einmal mit
+// vertauschtem R und B. `night.scheme` sagt `neutral800=1e293b`, also
+// ist RGB(30,41,59) richtig und RGB(59,41,30) die Umkehrung.
+//
+// WARUM: die beiden Seiten legen einen Bildpunkt VERSCHIEDEN ab.
+//
+//   wlibc.px schreibt EIN u32 (`__mmio_write32`), und wlibc baut die
+//   Farbe als (r << 16) | (g << 8) | b. Auf x86 liegt ein u32 mit dem
+//   niedrigsten Oktett zuerst -- im Speicher steht also B, G, R, A.
+//
+//   paint/canvas.fi legt VIER OKTETTE ab, und zwar in dieser Reihe:
+//       st8(p,   (v >> 16) & 255)   // R
+//       st8(p+1, (v >>  8) & 255)   // G
+//       st8(p+2,  v        & 255)   // B
+//       st8(p+3, (v >> 24) & 255)   // A
+//   also R, G, B, A.
+//
+// Beide Wege malen in DENSELBEN Speicher (die Bruecke laesst die
+// Leinwand ja mit Absicht direkt auf `wlibc.surface()` zeigen). Wer
+// die Oktette der Leinwand als BGRA liest, sieht R und B getauscht.
+//
+// Nachgerechnet fuer 0x1E293B: canvas legt 30,41,59 ab; als BGRA
+// gelesen ist das B=30 G=41 R=59, also RGB(59,41,30) -- genau der
+// gemessene Braunton.
+//
+// WARUM ES IM HELLMODUS NICHT AUFFIEL: |R-B| ist bei Weiss 0, bei
+// f8fafc 4, bei f1f5f9 8. Grautoene sind unter der Umkehr fast
+// unveraendert, und die Abnahme hat nur die HELLIGKEIT gemessen --
+// Braun ist dunkler als Weiss, also war sie gruen. Erst eine
+// gesaettigte Dunkelfarbe zeigt es.
+//
+// WO DER FEHLER BEHOBEN WIRD, UND WO NICHT:
+//
+//   NICHT in paint/canvas.fi. Das ist die GEMEINSAME Bibliothek (Certus
+//   malt damit seine Seiten, der fUi-Pruefstand seine PNG). Dort ist
+//   R,G,B,A richtig -- ein PNG erwartet genau das. Wer sie umbaut,
+//   dreht jedes andere Bild falsch.
+//
+//   SONDERN HIER, an der Naht. Diese Bruecke ist die einzige Stelle,
+//   an der eine wlibc-Farbe in fUis Maler geht, also ist sie die
+//   einzige Stelle, an der umgerechnet werden muss -- genau einmal,
+//   fuer jede Farbe, die hinuebergeht.
+fn kanal_dreh(c: u64) -> u32 {
+    // R und B tauschen, G und A bleiben. Damit legt canvas.fi die
+    // Oktette in der Reihenfolge ab, die der Rahmenpuffer erwartet.
+    let r: u64 = (c >> 16) & 255
+    let g: u64 = (c >> 8) & 255
+    let b: u64 = c & 255
+    return ((b << 16) | (g << 8) | r) as u32
+}
+
 fn canvas_on_surface(c: *mut canvas.Canvas, px: u64, w: usize, h: usize) {
     (*c).px = px as *mut u8
     (*c).w = w
@@ -206,26 +268,26 @@ fn thema_neu() {
     let dunkel: bool = wlibc.theme_dark()
     theme.theme_set_dark(th(), dunkel)
     let f: *mut theme.Colors = theme.theme_colors(th())
-    (*f).base = wlibc.theme(wlibc.T_BG) as u32
-    (*f).surface = wlibc.theme(wlibc.T_PANEL) as u32
+    (*f).base = kanal_dreh(wlibc.theme(wlibc.T_BG))
+    (*f).surface = kanal_dreh(wlibc.theme(wlibc.T_PANEL))
     // Eine Karte und ein Menue stehen naeher am Auge als die Flaeche.
-    (*f).surface_raised = wlibc.theme(wlibc.T_MENU) as u32
-    (*f).button = wlibc.theme(wlibc.T_BTN) as u32
-    (*f).button_hover = wlibc.theme(wlibc.T_BTNHI) as u32
-    (*f).button_active = wlibc.theme(wlibc.T_BTNDN) as u32
-    (*f).field = wlibc.theme(wlibc.T_ENTRY) as u32
+    (*f).surface_raised = kanal_dreh(wlibc.theme(wlibc.T_MENU))
+    (*f).button = kanal_dreh(wlibc.theme(wlibc.T_BTN))
+    (*f).button_hover = kanal_dreh(wlibc.theme(wlibc.T_BTNHI))
+    (*f).button_active = kanal_dreh(wlibc.theme(wlibc.T_BTNDN))
+    (*f).field = kanal_dreh(wlibc.theme(wlibc.T_ENTRY))
     // Osum kennt kein eigenes "Feld hat den Fokus": der Fokusring
     // macht das sichtbar, die Flaeche bleibt.
-    (*f).field_focus = wlibc.theme(wlibc.T_ENTRY) as u32
-    (*f).border_col = wlibc.theme(wlibc.T_LINE) as u32
-    (*f).separator = wlibc.theme(wlibc.T_LINE) as u32
-    (*f).text = wlibc.theme(wlibc.T_FG) as u32
-    (*f).text_muted = wlibc.theme(wlibc.T_DIM) as u32
-    (*f).text_disabled = wlibc.theme(wlibc.T_DIM) as u32
-    (*f).accent = wlibc.theme(wlibc.T_ACCENT) as u32
-    (*f).selection = wlibc.theme(wlibc.T_SEL) as u32
-    (*f).selection_text = wlibc.theme(wlibc.T_SELFG) as u32
-    (*f).text_on_accent = wlibc.theme(wlibc.T_SELFG) as u32
+    (*f).field_focus = kanal_dreh(wlibc.theme(wlibc.T_ENTRY))
+    (*f).border_col = kanal_dreh(wlibc.theme(wlibc.T_LINE))
+    (*f).separator = kanal_dreh(wlibc.theme(wlibc.T_LINE))
+    (*f).text = kanal_dreh(wlibc.theme(wlibc.T_FG))
+    (*f).text_muted = kanal_dreh(wlibc.theme(wlibc.T_DIM))
+    (*f).text_disabled = kanal_dreh(wlibc.theme(wlibc.T_DIM))
+    (*f).accent = kanal_dreh(wlibc.theme(wlibc.T_ACCENT))
+    (*f).selection = kanal_dreh(wlibc.theme(wlibc.T_SEL))
+    (*f).selection_text = kanal_dreh(wlibc.theme(wlibc.T_SELFG))
+    (*f).text_on_accent = kanal_dreh(wlibc.theme(wlibc.T_SELFG))
     (*f).dark = dunkel
     // Die Form: Osum fuehrt die Radien in seinen Metriken, und
     // `classic` heisst Radius 0. Dieselbe Zahl, nicht eine zweite.
@@ -340,10 +402,10 @@ fn tafel(x: u64, y: u64, w: u64, h: u64, r: u64, fuellung: u64,
         rr = kurz / 2
     }
     painter.round_rect(pz(), x as f64, fy, w as f64, h as f64,
-        rr as f64, fuellung as u32)
+        rr as f64, kanal_dreh(fuellung))
     if rand != 0 && randbreite != 0 {
         painter.round_ring(pz(), x as f64, fy, w as f64, h as f64,
-            rr as f64, randbreite as f64, rand as u32)
+            rr as f64, randbreite as f64, kanal_dreh(rand))
     }
     s_n_ok = s_n_ok + 1
     return true
@@ -372,7 +434,7 @@ fn ring(x: u64, y: u64, w: u64, h: u64, r: u64, breite: u64,
         return false
     }
     painter.round_ring(pz(), x as f64, (y - b) as f64, w as f64,
-        h as f64, r as f64, breite as f64, farbe as u32)
+        h as f64, r as f64, breite as f64, kanal_dreh(farbe))
     s_n_ok = s_n_ok + 1
     return true
 }
