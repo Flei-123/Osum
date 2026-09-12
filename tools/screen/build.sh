@@ -34,10 +34,12 @@ echo "   $(stat -c%s "$TMPD/k0.mb") Oktette"
 echo ">> Programme"
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s || exit 1
 for p in $PROGS; do
-    vendor/firn/bin/firnc "kernel/user/$p.fi" -o "$TMPD/$p.o" > "$TMPD/e-$p" 2>&1 \
+    UPROF=""; UCRT="$TMPD/crt.o"
+    grep -qa '^profile app' "kernel/user/$p.fi" && { UPROF=--profile=app; UCRT=""; }
+    vendor/firn/bin/firnc $UPROF -c "kernel/user/$p.fi" -o "$TMPD/$p.o" > "$TMPD/e-$p" 2>&1 \
         || { echo "firnc $p:"; head -8 "$TMPD/e-$p"; exit 1; }
     ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" \
-        -o "$TMPD/$p.elf" "$TMPD/crt.o" "$TMPD/$p.o" || exit 1
+        -o "$TMPD/$p.elf" $UCRT "$TMPD/$p.o" || exit 1
     strip --strip-all "$TMPD/$p.elf"
 done
 echo "   $(echo $PROGS | wc -w) Stueck"

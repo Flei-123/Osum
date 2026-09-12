@@ -64,14 +64,16 @@ rc=0
 gebaut=""
 for p in $PROGS; do
     [ -f "kernel/user/$p.fi" ] || continue
-    if ! "$CC" "kernel/user/$p.fi" -o "$OUT/$p.o" > "$OUT/$p.err" 2>&1; then
+    UPROF=""; UCRT="$OUT/crt.o"
+    grep -qa '^profile app' "kernel/user/$p.fi" && { UPROF=--profile=app; UCRT=""; }
+    if ! "$CC" $UPROF -c "kernel/user/$p.fi" -o "$OUT/$p.o" > "$OUT/$p.err" 2>&1; then
         echo "== $p: der Uebersetzer sagt nein"
         head -12 "$OUT/$p.err"
         rc=1
         continue
     fi
     if ! ld -T kernel/user/user.ld --defsym=USER_ENTRY=_F0.u_start \
-            -o "$OUT/bin/$p" "$OUT/crt.o" "$OUT/$p.o" 2> "$OUT/$p.lderr"; then
+            -o "$OUT/bin/$p" $UCRT "$OUT/$p.o" 2> "$OUT/$p.lderr"; then
         echo "== $p: der Binder sagt nein"
         grep -v 'GNU-stack\|RWX\|deprecated' "$OUT/$p.lderr" | head -5
         rc=1

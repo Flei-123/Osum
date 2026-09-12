@@ -126,11 +126,13 @@ for p in $progs; do
        && [ -n "$USERNEW" ] && [ "$BUILDD/$p.elf" -nt "$USERNEW" ]; then
         GEBAUT="$GEBAUT $p"; continue
     fi
-    vendor/firn/bin/firnc "kernel/user/$p.fi" -o "$BUILDD/$p.o" \
+    UPROF=""; UCRT="$BUILDD/crt.o"
+    grep -qa '^profile app' "kernel/user/$p.fi" && { UPROF=--profile=app; UCRT=""; }
+    vendor/firn/bin/firnc $UPROF -c "kernel/user/$p.fi" -o "$BUILDD/$p.o" \
         > "$BUILDD/e-$p" 2>&1 \
         || { echo "FEHLGESCHLAGEN beim Uebersetzen von $p"; head -30 "$BUILDD/e-$p"; exit 1; }
     ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" \
-        -o "$BUILDD/$p.elf" "$BUILDD/crt.o" "$BUILDD/$p.o" 2>"$BUILDD/ld.err" \
+        -o "$BUILDD/$p.elf" $UCRT "$BUILDD/$p.o" 2>"$BUILDD/ld.err" \
         || { echo "FEHLGESCHLAGEN beim Binden von $p"; cat "$BUILDD/ld.err"; exit 1; }
     strip --strip-all "$BUILDD/$p.elf"
     GEBAUT="$GEBAUT $p"

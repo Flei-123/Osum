@@ -205,10 +205,12 @@ rc=0
 bash tools/build-kernel.sh "$TMPD/k0.mb" > "$TMPD/k0.log" 2>&1 || {
     bad "the kernel does not build"; sed 's/^/        /' "$TMPD/k0.log" | tail -8; rc=1; }
 for p in $PROGS; do
-    "$FIRNC" "kernel/user/$p.fi" -o "$TMPD/$p.o" > "$TMPD/$p.err" 2>&1 || {
+    UPROF=""; UCRT="$TMPD/crt.o"
+    grep -qa '^profile app' "kernel/user/$p.fi" && { UPROF=--profile=app; UCRT=""; }
+    "$FIRNC" $UPROF -c "kernel/user/$p.fi" -o "$TMPD/$p.o" > "$TMPD/$p.err" 2>&1 || {
         bad "firnc does not translate $p.fi"; head -6 "$TMPD/$p.err"; rc=1; continue; }
     ld -T "$ULD" --defsym=USER_ENTRY=_F0.u_start -o "$TMPD/$p.elf" \
-        "$TMPD/crt.o" "$TMPD/$p.o" 2>/dev/null || { bad "ld fails on $p"; rc=1; continue; }
+        $UCRT "$TMPD/$p.o" 2>/dev/null || { bad "ld fails on $p"; rc=1; continue; }
     strip --strip-all "$TMPD/$p.elf"
 done
 [ "$rc" = 0 ] && ok "the kernel and $(echo $PROGS | wc -w) programs are built"

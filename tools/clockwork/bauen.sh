@@ -26,10 +26,12 @@ PROGS="desktop taskbar settings launcher explorer widgetdemo locate dhcp sh echo
 as --64 -o "$OUT/crt.o" kernel/user/crt.s 2>/dev/null \
     || { echo "NEIN: crt.s"; exit 1; }
 for p in $PROGS; do
-    vendor/firn/bin/firnc "kernel/user/$p.fi" -o "$OUT/$p.o" > "$OUT/e$p" 2>&1 || {
+    UPROF=""; UCRT="$OUT/crt.o"
+    grep -qa '^profile app' "kernel/user/$p.fi" && { UPROF=--profile=app; UCRT=""; }
+    vendor/firn/bin/firnc $UPROF -c "kernel/user/$p.fi" -o "$OUT/$p.o" > "$OUT/e$p" 2>&1 || {
         echo "NEIN: firnc $p.fi"; head -10 "$OUT/e$p"; exit 1; }
     ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" \
-        -o "$OUT/$p.elf" "$OUT/crt.o" "$OUT/$p.o" 2>/dev/null \
+        -o "$OUT/$p.elf" $UCRT "$OUT/$p.o" 2>/dev/null \
         || { echo "NEIN: ld $p"; exit 1; }
     strip --strip-all "$OUT/$p.elf"
 done
