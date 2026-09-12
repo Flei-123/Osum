@@ -49,7 +49,7 @@ import knetz
 import kjson
 import anbieter
 
-export { ruecken }
+export { push }
 
 static mut p_login: [u8; 12] = "/api/login\0\0"
 static mut p_logout: [u8; 13] = "/api/logout\0\0"
@@ -73,18 +73,18 @@ static mut h_status: [u8; 21] = "konto.hint.badstatus\0"
 
 static mut nm: [u8; 7] = "jarvis\0"
 
-fn ruecken() -> anbieter.Ruecken {
+fn push() -> anbieter.Ruecken {
     return anbieter.Ruecken { name: (&nm[0]) as u64, anmelden: anmelden,
-        erneuern: erneuern, abmelden: abmelden, pruefen: pruefen }
+        erneuern: erneuern, abmelden: abmelden, check: check }
 }
 
-fn fehl_bool(b: *mut bool) -> bool {
+fn fail_bool(b: *mut bool) -> bool {
     *b = true
     return false
 }
 
-fn ziel_aus(z: *mut anbieter.Zugang, zl: *mut knetz.Ziel) -> bool {
-    return knetz.ziel_lesen((*z).ziel, rt.c_length((*z).ziel),
+fn target_from(z: *mut anbieter.Zugang, zl: *mut knetz.Ziel) -> bool {
+    return knetz.target_read((*z).ziel, rt.c_length((*z).ziel),
         (*z).zielname, (*z).wurzeln, zl)
 }
 
@@ -106,7 +106,7 @@ fn netz_stand(a: *mut knetz.Antw) -> u32 {
 // Der Rumpf des JWT: `uid`, `name`, `exp`. Ohne Signaturpruefung, aus
 // demselben Grund wie beim anderen Ruecken -- das Geheimnis liegt beim
 // Server. Genommen wird daraus nur, was ein KONTO ausmacht.
-fn rumpf_lesen(tok: u64, tl: usize, s: *mut anbieter.Sitzung) {
+fn body_read(tok: u64, tl: usize, s: *mut anbieter.Sitzung) {
     var p1: usize = 0
     while p1 < tl && rt.ld8(tok, p1) != 46 as u8 {
         p1 = p1 + 1
@@ -131,13 +131,13 @@ fn rumpf_lesen(tok: u64, tl: usize, s: *mut anbieter.Sitzung) {
     if !kaputt && kjson.json_valid(&d) {
         let w: u32 = kjson.json_root(&d)
         var da: bool = false
-        let ex: i64 = kjson.ganz(&d, w, (&f_exp[0]) as u64, &da)
+        let ex: i64 = kjson.int(&d, w, (&f_exp[0]) as u64, &da)
         if da && ex > 0 {
             (*s).ablauf = ex as u64
         }
         if (*s).subjekt.len == 0 {
             var db: bool = false
-            let uid: i64 = kjson.ganz(&d, w, (&f_uid[0]) as u64, &db)
+            let uid: i64 = kjson.int(&d, w, (&f_uid[0]) as u64, &db)
             if db {
                 rt.buf_push_dec_u64(&(*s).subjekt, uid as u64)
             } else {
@@ -156,41 +156,41 @@ fn rumpf_lesen(tok: u64, tl: usize, s: *mut anbieter.Sitzung) {
 
 fn anmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
     anbieter.sitzung_leeren(s)
-    var zl: knetz.Ziel = knetz.ziel_neu()
-    if !ziel_aus(z, &zl) {
+    var zl: knetz.Ziel = knetz.target_new()
+    if !target_from(z, &zl) {
         (*s).stand = anbieter.S_FEHLER
         hinweis(s, (&h_status[0]) as u64)
         return (*s).stand
     }
     var koerper: rt.Buf = rt.buf_new()
-    var w: kjson.Schreiber = kjson.schreiber_neu(&koerper)
-    kjson.feld(&w, (&f_username[0]) as u64, (*z).kennung,
+    var w: kjson.Schreiber = kjson.writer_new(&koerper)
+    kjson.field(&w, (&f_username[0]) as u64, (*z).kennung,
         rt.c_length((*z).kennung))
-    kjson.feld(&w, (&f_password[0]) as u64, (*z).geheim,
+    kjson.field(&w, (&f_password[0]) as u64, (*z).geheim,
         rt.c_length((*z).geheim))
-    kjson.feld_frei(&w)
-    var a: knetz.Antw = knetz.antw_neu()
+    kjson.field_free(&w)
+    var a: knetz.Antw = knetz.reply_new()
     let da: bool = knetz.sende(&zl, (&m_post[0]) as u64, 4,
         (&p_login[0]) as u64, 10, koerper.ptr, koerper.len, 0, 0, 0, 0, &a)
     rt.mem_set(koerper.ptr, 0 as u8, koerper.len)
     rt.buf_free(&koerper)
     if !da {
         (*s).stand = netz_stand(&a)
-        knetz.antw_frei(&a)
+        knetz.reply_free(&a)
         return (*s).stand
     }
     if a.code == 429 as u32 {
-        knetz.antw_frei(&a)
+        knetz.reply_free(&a)
         (*s).stand = anbieter.S_GEBREMST
         return (*s).stand
     }
     if a.code == 401 as u32 {
-        knetz.antw_frei(&a)
+        knetz.reply_free(&a)
         (*s).stand = anbieter.S_FALSCH
         return (*s).stand
     }
     if a.code != 200 as u32 {
-        knetz.antw_frei(&a)
+        knetz.reply_free(&a)
         (*s).stand = anbieter.S_FEHLER
         hinweis(s, (&h_status[0]) as u64)
         return (*s).stand
@@ -202,7 +202,7 @@ fn anmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
     }
     if kaputt || !kjson.json_valid(&d) {
         kjson.json_free(&d)
-        knetz.antw_frei(&a)
+        knetz.reply_free(&a)
         (*s).stand = anbieter.S_FEHLER
         hinweis(s, (&h_form[0]) as u64)
         return (*s).stand
@@ -210,7 +210,7 @@ fn anmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
     let wz: u32 = kjson.json_root(&d)
     if !kjson.text(&d, wz, (&f_token[0]) as u64, &(*s).zugriff) {
         kjson.json_free(&d)
-        knetz.antw_frei(&a)
+        knetz.reply_free(&a)
         (*s).stand = anbieter.S_FEHLER
         hinweis(s, (&h_form[0]) as u64)
         return (*s).stand
@@ -218,8 +218,8 @@ fn anmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
     let _u: bool = kjson.text(&d, wz, (&f_username[0]) as u64,
         &(*s).anzeige)
     kjson.json_free(&d)
-    knetz.antw_frei(&a)
-    rumpf_lesen((*s).zugriff.ptr, (*s).zugriff.len, s)
+    knetz.reply_free(&a)
+    body_read((*s).zugriff.ptr, (*s).zugriff.len, s)
     if (*s).subjekt.len == 0 {
         rt.buf_push_bytes(&(*s).subjekt, (*s).anzeige.ptr,
             (*s).anzeige.len)
@@ -246,14 +246,14 @@ fn keks_bauen(z: *mut anbieter.Zugang, aus: *mut rt.Buf) {
 }
 
 fn abmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
-    var zl: knetz.Ziel = knetz.ziel_neu()
-    if !ziel_aus(z, &zl) {
+    var zl: knetz.Ziel = knetz.target_new()
+    if !target_from(z, &zl) {
         (*s).stand = anbieter.S_FEHLER
         return (*s).stand
     }
     var keks: rt.Buf = rt.buf_new()
     keks_bauen(z, &keks)
-    var a: knetz.Antw = knetz.antw_neu()
+    var a: knetz.Antw = knetz.reply_new()
     let da: bool = knetz.sende(&zl, (&m_post[0]) as u64, 4,
         (&p_logout[0]) as u64, 11, 0, 0, (*z).zugriff,
         rt.c_length((*z).zugriff), keks.ptr, keks.len, &a)
@@ -263,21 +263,21 @@ fn abmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
     } else if a.code != 200 as u32 {
         stand = anbieter.S_FEHLER
     }
-    knetz.antw_frei(&a)
+    knetz.reply_free(&a)
     rt.buf_free(&keks)
     (*s).stand = stand
     return stand
 }
 
-fn pruefen(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
-    var zl: knetz.Ziel = knetz.ziel_neu()
-    if !ziel_aus(z, &zl) {
+fn check(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
+    var zl: knetz.Ziel = knetz.target_new()
+    if !target_from(z, &zl) {
         (*s).stand = anbieter.S_FEHLER
         return (*s).stand
     }
     var keks: rt.Buf = rt.buf_new()
     keks_bauen(z, &keks)
-    var a: knetz.Antw = knetz.antw_neu()
+    var a: knetz.Antw = knetz.reply_new()
     let da: bool = knetz.sende(&zl, (&m_get[0]) as u64, 3,
         (&p_me[0]) as u64, 7, 0, 0, (*z).zugriff,
         rt.c_length((*z).zugriff), keks.ptr, keks.len, &a)
@@ -289,7 +289,7 @@ fn pruefen(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
     } else if a.code != 200 as u32 {
         stand = anbieter.S_FEHLER
     }
-    knetz.antw_frei(&a)
+    knetz.reply_free(&a)
     rt.buf_free(&keks)
     (*s).stand = stand
     return stand
