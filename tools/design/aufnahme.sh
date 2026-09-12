@@ -156,11 +156,20 @@ for p in $progs; do
        && [ -n "$USERNEW" ] && [ "$BUILDD/$p.elf" -nt "$USERNEW" ]; then
         continue
     fi
-    vendor/firn/bin/firnc "kernel/user/$p.fi" -o "$BUILDD/$p.o" \
+    vendor/firn/bin/firnc -c "kernel/user/$p.fi" -o "$BUILDD/$p.o" \
         > "$BUILDD/e-$p" 2>&1 \
         || { echo "FEHLGESCHLAGEN beim Uebersetzen von $p"; head -30 "$BUILDD/e-$p"; exit 1; }
+    # RUNDE 31: ein Programm im Profil `app` bringt seinen `_start` mit
+    # (fUis f64/std.rt gehen nur dort). crt.o dazuzubinden waere
+    # "multiple definition of `_start`" -- also nur fuer die anderen.
+    # Gelesen und nicht getippt, damit es nach der naechsten Umstellung
+    # noch stimmt. Dieselbe Regel wie in tools/look/shot.sh.
+    CRT="$BUILDD/crt.o"
+    if grep -qa '^profile app' "kernel/user/$p.fi"; then
+        CRT=""
+    fi
     ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" \
-        -o "$BUILDD/$p.elf" "$BUILDD/crt.o" "$BUILDD/$p.o" 2>"$BUILDD/ld.err" \
+        -o "$BUILDD/$p.elf" $CRT "$BUILDD/$p.o" 2>"$BUILDD/ld.err" \
         || { echo "FEHLGESCHLAGEN beim Binden von $p"; cat "$BUILDD/ld.err"; exit 1; }
     strip --strip-all "$BUILDD/$p.elf"
 done
