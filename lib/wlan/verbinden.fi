@@ -47,12 +47,12 @@ import wlan.zustand
 export {
     Sitzung, sitzung_new,
     suchlauf_beginnen, beacon_aufnehmen, netz_anzahl, netz_ssid_len,
-    netz_ssid_holen, netz_kanal_von, netz_sicherheit_von, netz_rssi_von,
+    net_ssid_get, netz_kanal_von, netz_sicherheit_von, netz_rssi_von,
     netz_waehlen, gewaehlt_ist, auth_angenommen, assoz_angenommen,
     nachricht1_behandeln, nachricht3_behandeln,
-    identitaet_setzen, pmk_setzen, akm_setzen,
+    identity_set, pmk_set, akm_set,
     daten_senden, daten_empfangen, trennen,
-    verbunden_ist, darf_daten_ist, zustand_von, grund_von,
+    verbunden_ist, darf_daten_ist, zustand_von, reason_from,
     F_KEIN, F_KEIN_GERAET, F_ZU_KURZ, F_NICHT_UNSER, F_MIC, F_SCHLUESSEL,
     F_ZUSTAND, F_UNSICHER, F_VOLL, F_CCMP,
     MAX_NETZE
@@ -122,7 +122,7 @@ fn sitzung_new() -> Sitzung {
 // Passwort. Das steht NICHT in dieser Datei -- die Adresse kommt aus
 // dem Geraet, der PMK aus dem Passwort und der SSID, und beides weiss
 // nur der Aufrufer.
-fn identitaet_setzen(s: *mut Sitzung, spa: u64, aa: u64) {
+fn identity_set(s: *mut Sitzung, spa: u64, aa: u64) {
     var i: usize = 0
     while i < 6 {
         (*s).spa[i] = *((spa + i as u64) as *mut u8)
@@ -131,7 +131,7 @@ fn identitaet_setzen(s: *mut Sitzung, spa: u64, aa: u64) {
     }
 }
 
-fn pmk_setzen(s: *mut Sitzung, pmk: u64) {
+fn pmk_set(s: *mut Sitzung, pmk: u64) {
     var i: usize = 0
     while i < 32 {
         (*s).pmk[i] = *((pmk + i as u64) as *mut u8)
@@ -139,7 +139,7 @@ fn pmk_setzen(s: *mut Sitzung, pmk: u64) {
     }
 }
 
-fn akm_setzen(s: *mut Sitzung, akm: u64) {
+fn akm_set(s: *mut Sitzung, akm: u64) {
     (*s).akm = akm
 }
 
@@ -162,7 +162,7 @@ fn suchlauf_beginnen(s: *mut Sitzung, g: *mut geraet.Geraet) -> bool {
     }
     (*s).n_netze = 0
     (*s).gewaehlt = -1
-    zustand.beginn(&(*s).lauf)
+    zustand.begin(&(*s).lauf)
     zustand.ereignis(&(*s).lauf, 115)   // 's'
     return true
 }
@@ -228,7 +228,7 @@ fn netz_ssid_len(s: *mut Sitzung, k: usize) -> usize {
     return (*s).ssid_len[k]
 }
 
-fn netz_ssid_holen(s: *mut Sitzung, k: usize, out: u64) -> bool {
+fn net_ssid_get(s: *mut Sitzung, k: usize, out: u64) -> bool {
     if k >= (*s).n_netze { return false }
     var i: usize = 0
     while i < (*s).ssid_len[k] {
@@ -271,7 +271,7 @@ fn netz_waehlen(s: *mut Sitzung, g: *mut geraet.Geraet, k: usize) -> bool {
         (*s).fehler = F_UNSICHER
         return false
     }
-    if geraet.kanal_setzen(g, (*s).kanal[k], 2) < 0 {
+    if geraet.channel_set(g, (*s).kanal[k], 2) < 0 {
         (*s).fehler = F_KEIN_GERAET
         return false
     }
@@ -375,7 +375,7 @@ fn nachricht3_behandeln(s: *mut Sitzung, g: *mut geraet.Geraet,
     // ZUERST der Pruefwert, DANN alles andere. Ein Rahmen, dessen MIC
     // nicht stimmt, ist von einem Fremden, und aus einem fremden
     // Rahmen wird nichts ausgepackt.
-    if !wpa.mic_pruefen((&(*s).ptk[0]) as u64, 16, eapol, elen, (*s).akm) {
+    if !wpa.mic_check((&(*s).ptk[0]) as u64, 16, eapol, elen, (*s).akm) {
         (*s).fehler = F_MIC
         zustand.ereignis(&(*s).lauf, 120)   // 'x'
         return false
@@ -391,7 +391,7 @@ fn nachricht3_behandeln(s: *mut Sitzung, g: *mut geraet.Geraet,
         return false
     }
     var nummer: u64 = 0
-    let gl: i64 = wpa.gtk_finden((&daten[0]) as u64, dn as usize,
+    let gl: i64 = wpa.gtk_find((&daten[0]) as u64, dn as usize,
         (&(*s).gtk[0]) as u64, 16, &nummer)
     if gl < 0 {
         (*s).fehler = F_SCHLUESSEL
@@ -404,12 +404,12 @@ fn nachricht3_behandeln(s: *mut Sitzung, g: *mut geraet.Geraet,
     // der Gruppenschluessel. Geht einer davon nicht, wird der Automat
     // NICHT auf verbunden gestellt -- lieber keine Verbindung als eine
     // ohne Schluessel.
-    if geraet.schluessel_setzen(g, geraet.SCHLUESSEL_PTK, 0,
+    if geraet.key_set(g, geraet.SCHLUESSEL_PTK, 0,
         (&(*s).ptk[32]) as u64, 16) < 0 {
         (*s).fehler = F_KEIN_GERAET
         return false
     }
-    if geraet.schluessel_setzen(g, geraet.SCHLUESSEL_GTK, nummer,
+    if geraet.key_set(g, geraet.SCHLUESSEL_GTK, nummer,
         (&(*s).gtk[0]) as u64, (*s).gtk_len) < 0 {
         (*s).fehler = F_KEIN_GERAET
         return false
@@ -489,7 +489,7 @@ fn daten_empfangen(s: *mut Sitzung, g: *mut geraet.Geraet,
 // dem Trennen in der Karte liegen bleibt, ist genau das, wovor die
 // Runde HAERTUNG warnt.
 fn trennen(s: *mut Sitzung, g: *mut geraet.Geraet) {
-    geraet.schluessel_setzen(g, geraet.SCHLUESSEL_AUS, 0, 0, 0)
+    geraet.key_set(g, geraet.SCHLUESSEL_AUS, 0, 0, 0)
     zustand.ereignis(&(*s).lauf, 100)   // 'd'
     (*s).hat_ptk = false
     (*s).gtk_len = 0
@@ -514,4 +514,4 @@ fn darf_daten_ist(s: *mut Sitzung) -> bool {
 }
 
 fn zustand_von(s: *mut Sitzung) -> u64 { return (*s).lauf.zustand }
-fn grund_von(s: *mut Sitzung) -> u64 { return (*s).fehler }
+fn reason_from(s: *mut Sitzung) -> u64 { return (*s).fehler }

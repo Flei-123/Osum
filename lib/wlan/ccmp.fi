@@ -79,8 +79,8 @@ import wlan.rahmen
 import crypto.aes
 
 export {
-    protect, unprotect, ccmp_kopf_bauen, pn_aus_kopf,
-    wiedereinspiel_pruefen,
+    protect, unprotect, ccmp_header_build, pn_off_header,
+    replay_check,
     CCMP_KOPF, CCMP_MIC, CCMP_MEHR, PN_LEN
 }
 
@@ -125,9 +125,9 @@ fn le16(p: u64, i: usize) -> u64 {
 //   * im QoS-Feld alles ausser den vier Bits der Verkehrsklasse
 //
 // Rueckgabe: die Laenge der AAD, oder -1.
-fn aad_und_nonce(p: u64, n: usize, pn: u64, aad: *mut [u8; 30],
+fn aad_and_nonce(p: u64, n: usize, pn: u64, aad: *mut [u8; 30],
     nonce: *mut [u8; 13]) -> i64 {
-    let kl: i64 = rahmen.kopf_laenge(p, n)
+    let kl: i64 = rahmen.header_len(p, n)
     if kl < 0 {
         return -1
     }
@@ -253,7 +253,7 @@ fn aad_und_nonce(p: u64, n: usize, pn: u64, aad: *mut [u8; 30],
 // statt als `0c e7 00 20 76 97 03 b5`. Gefunden hat es der Vektor aus
 // IEEE Std 802.11-2012 M.6.4 -- beim ersten Lauf, in der ersten
 // Sekunde. Genau dafuer gibt es Normvektoren.
-fn ccmp_kopf_bauen(pn: u64, kid: u64, out: u64) {
+fn ccmp_header_build(pn: u64, kid: u64, out: u64) {
     st8(out, 0, ld8(pn, 5)) // PN0
     st8(out, 1, ld8(pn, 4)) // PN1
     st8(out, 2, 0 as u8)
@@ -269,7 +269,7 @@ fn ccmp_kopf_bauen(pn: u64, kid: u64, out: u64) {
 // Holt die sechs Oktette Paketnummer aus einem CCMP-Kopf heraus,
 // HOECHSTWERTIGES ZUERST -- also so, wie `ccmp_kopf_bauen` sie bekommt.
 // Rueckgabe false: das ExtIV-Bit fehlt, das ist kein CCMP-Kopf.
-fn pn_aus_kopf(kopf: u64, out: u64) -> bool {
+fn pn_off_header(kopf: u64, out: u64) -> bool {
     if (ld8(kopf, 3) as u64 & 32) == 0 {
         return false
     }
@@ -285,7 +285,7 @@ fn pn_aus_kopf(kopf: u64, out: u64) -> bool {
 // Ist die neue Paketnummer echt groesser als die zuletzt gesehene?
 // Beide sechs Oktette, hoechstwertiges zuerst -- also von vorne
 // vergleichen.
-fn wiedereinspiel_pruefen(neu: u64, zuletzt: u64) -> bool {
+fn replay_check(neu: u64, zuletzt: u64) -> bool {
     var i: usize = 0
     while i < PN_LEN {
         let a: u8 = ld8(neu, i)
@@ -312,7 +312,7 @@ fn wiedereinspiel_pruefen(neu: u64, zuletzt: u64) -> bool {
 // Der Rahmen des Aufrufers wird nicht veraendert.
 fn protect(tk: u64, pn: u64, p: u64, n: usize, out: u64,
     outmax: usize) -> i64 {
-    let kl: i64 = rahmen.kopf_laenge(p, n)
+    let kl: i64 = rahmen.header_len(p, n)
     if kl < 0 {
         return -1
     }
@@ -326,7 +326,7 @@ fn protect(tk: u64, pn: u64, p: u64, n: usize, out: u64,
     }
     var aad: [u8; 30] = [0 as u8; 30]
     var nonce: [u8; 13] = [0 as u8; 13]
-    let al: i64 = aad_und_nonce(p, n, pn, &aad, &nonce)
+    let al: i64 = aad_and_nonce(p, n, pn, &aad, &nonce)
     if al < 0 {
         return -1
     }
@@ -345,7 +345,7 @@ fn protect(tk: u64, pn: u64, p: u64, n: usize, out: u64,
     let f: u64 = rahmen.fc(p, n) | 16384
     st8(out, 0, (f & 255) as u8)
     st8(out, 1, ((f >> 8) & 255) as u8)
-    ccmp_kopf_bauen(pn, 0, out + (kopf as u64))
+    ccmp_header_build(pn, 0, out + (kopf as u64))
     if !aes.ccm_encrypt(&k, (&nonce[0]) as u64, NONCE_LEN,
         (&aad[0]) as u64, al as usize, p + (kopf as u64), nutz,
         CCMP_MIC, out + ((kopf + CCMP_KOPF) as u64)) {
@@ -365,7 +365,7 @@ fn protect(tk: u64, pn: u64, p: u64, n: usize, out: u64,
 // Verschluesselung, die auch etwas nuetzt.
 fn unprotect(tk: u64, p: u64, n: usize, out: u64,
     outmax: usize) -> i64 {
-    let kl: i64 = rahmen.kopf_laenge(p, n)
+    let kl: i64 = rahmen.header_len(p, n)
     if kl < 0 {
         return -1
     }
@@ -378,12 +378,12 @@ fn unprotect(tk: u64, p: u64, n: usize, out: u64,
         return -1
     }
     var pn: [u8; 6] = [0 as u8; 6]
-    if !pn_aus_kopf(p + (kopf as u64), (&pn[0]) as u64) {
+    if !pn_off_header(p + (kopf as u64), (&pn[0]) as u64) {
         return -1
     }
     var aad: [u8; 30] = [0 as u8; 30]
     var nonce: [u8; 13] = [0 as u8; 13]
-    let al: i64 = aad_und_nonce(p, n, (&pn[0]) as u64, &aad, &nonce)
+    let al: i64 = aad_and_nonce(p, n, (&pn[0]) as u64, &aad, &nonce)
     if al < 0 {
         return -1
     }
