@@ -303,10 +303,31 @@ grep -q "ulib.fi" "$LEER/c0.err" \
     || bad "firnc0 nennt die fehlende Datei nicht mehr"
 # Und die Gegenprobe, dass es NICHT die Groesse ist: dieselbe Datei an
 # ihrem Platz, mit ihren Nachbarn, geht durch.
-FIRNLIB="$PWD/lib" "$FC1" -c -o "$TMPD/wlib-gross.o" kernel/user/wlib.fi \
-    > "$TMPD/gross.err" 2>&1
+#
+# RUNDE GRUNDLINIE: GEMESSEN WIRD UEBER EINEN BENUTZER VON wlib, NICHT
+# UEBER wlib SELBST. `wlib.fi` ist eine BIBLIOTHEK: keine Profilzeile,
+# kein `u_start`, kein `main`. Einzeln uebersetzt bekommt sie darum das
+# Vorgabeprofil `kernel` und scheitert an fUi
+#
+#     error: the module 'std.rt' belongs to the standard library and
+#     is not available in profile 'kernel'
+#
+# und mit `--profile=app` an der anderen Seite:
+#
+#     error: the program has no function 'main'
+#
+# Die Gegenprobe scheiterte also an genau dem, was sie WIDERLEGEN soll,
+# und behauptete eine Groessengrenze, die es nicht gibt. Niemand baut
+# wlib.fi einzeln -- sie wird importiert. Genau so wird jetzt gemessen:
+# `taskmgr.fi` zieht wlib mit herein, steht in `kernel/user/` bei seinen
+# Nachbarn und traegt `profile app`. Geht das durch, war die Groesse von
+# wlib nie das Hindernis -- und das ist die Aussage dieses Abschnitts.
+UPROF_G=""
+grep -qa '^profile app' kernel/user/taskmgr.fi && UPROF_G=--profile=app
+FIRNLIB="$PWD/lib" "$FC1" -c $UPROF_G -o "$TMPD/wlib-gross.o" \
+    kernel/user/taskmgr.fi > "$TMPD/gross.err" 2>&1
 RCG=$?
-gleich "DIESELBE Datei an ihrem Platz uebersetzt firnc1 klaglos (keine Groessengrenze)" \
+gleich "wlib AN IHREM PLATZ, ueber taskmgr.fi eingebunden, uebersetzt firnc1 klaglos (keine Groessengrenze)" \
     "$RCG" "0"
 
 # ===================================================================
