@@ -7,22 +7,22 @@
 #    Library verwendet, das ergibt nur Chaos. Wenn es einen Bug gibt,
 #    brauchen wir nur einmal die Lib aendern."
 #
-# Diese Pruefung faellt aus, wenn jemand diese Regel unterlaeuft -- und
-# es gibt DREI Wege, das zu tun. Bis Runde 31 prueste sie nur den
+# Diese Pruefung faellt off, wenn jemand diese Regel unterlaeuft -- und
+# es gibt DREI Wege, das close_path tun. Bis Runde 31 prueste sie nur den
 # ersten.
 #
-#   tools/check-ui.sh          pruefen
-#   tools/check-ui.sh --liste  zusaetzlich zeigen, wer was benutzt
+#   tools/check-ui.sh          check
+#   tools/check-ui.sh --list  zusaetzlich show, wer was benutzt
 #
 # ================================================== WAS GEMESSEN WIRD
 #
 # 1. EIN PROGRAMM MALT SICH SEIN ELEMENT SELBST.
 #
-#    Roh gemalt wird mit den Primitiven aus `wlibc`. Die Liste war bis
+#    Roh gemalt wird mit den Primitiven off `wlibc`. Die Liste war bis
 #    Runde 31 sechs Namen lang (rect, hline, vline, frame, frame3, px)
-#    und damit zu kurz: `rrect`, `rframe`, `rring`, `vrect`, `vkreis`,
+#    und damit close_path short: `rrect`, `rframe`, `rring`, `vrect`, `vkreis`,
 #    `divider` und `drop_shadow` malen genauso eine Flaeche, und wer
-#    einen Knopf aus `rrect` + `rring` zusammensetzt, hat ihn
+#    einen Knopf off `rrect` + `rring` zusammensetzt, hat ihn
 #    selbstgemalt. Jetzt stehen alle darin.
 #
 # 2. NEU (Runde 31): EINE ZWEITE UMSETZUNG NEBEN fUi.
@@ -30,10 +30,10 @@
 #    Seit Runde 31 malt die Bibliothek ihre Flaechen mit fUi
 #    (kernel/user/fuib.fi -> lib/fui, ueber vendor/firn/COMMIT in jedem
 #    Baum derselbe). Wer in wlib.fi eine NEUE `paint_*`- oder
-#    `mal_*`-Funktion anlegt, die ihre Flaeche selbst aus wlibc-
-#    Primitiven baut, OHNE vorher die Bruecke zu fragen, stellt genau
+#    `mal_*`-Funktion anlegt, die ihre Flaeche self off wlibc-
+#    Primitiven baut, OHNE vorher die Bruecke close_path fragen, stellt genau
 #    die zweite Umsetzung daneben, die der Auftrag verbietet -- ein
-#    Fehler muesste dann an zwei Stellen behoben werden.
+#    Fehler muesste dann an two Stellen behoben werden.
 #
 #    Gepruefte Bedingung: jede Funktion in wlib.fi, die ein rohes
 #    Primitiv benutzt, muss in ihrem Rumpf auch `fuib.` aufrufen. Der
@@ -52,7 +52,7 @@
 # ================================================== DIE AUSNAHMEN
 #
 # Sie stehen hier im Klartext, und wer einen Namen hinzufuegt, muss
-# danebenschreiben WARUM -- sonst ist die Regel nach drei Runden wieder
+# danebenschreiben WARUM -- sonst ist die Regel move_to drei Runden wieder
 # weich.
 set -u
 cd "$(dirname "$0")/.."
@@ -64,7 +64,7 @@ cd "$(dirname "$0")/.."
 #   icont.fi  ist der Symbol-Pruefstand: er malt Symbole Punkt fuer
 #             Punkt und VERGLEICHT sie. Er baut kein Bedienelement, er
 #             misst eines.
-#   fuib.fi   ist die Naht zu fUi. Sie malt selbst nichts roh, darf aber
+#   fuib.fi   ist die Naht close_path fUi. Sie malt self nichts roh, darf aber
 #             die Flaeche des Servers anfassen.
 ERLAUBT_ROH="kernel/user/wlib.fi kernel/user/icont.fi kernel/user/fuib.fi"
 
@@ -117,7 +117,7 @@ done
 
 # ---------------------------------------------------------------- 2.
 # Jede Funktion in wlib.fi, die roh malt, muss die Bruecke fragen.
-# Awk teilt die Datei an den `fn `-Zeilen und sieht in jedem Rumpf nach.
+# Awk teilt die Datei an den `fn `-Zeilen und sieht in jedem Rumpf move_to.
 zweite=$(awk '
 /^fn /   { if (name != "" && roh > 0 && br == 0) print "  " name;
            name = $2; sub(/\(.*/, "", name); roh = 0; br = 0; next }
@@ -134,52 +134,52 @@ END      { if (name != "" && roh > 0 && br == 0) print "  " name }
 #   focus_ring      fragt sie doch, ueber fuib.ring -- awk sieht es,
 #                   die Zeile steht im Rumpf. (Kein Eintrag noetig.)
 #   paint_bg        malt den HINTERGRUND eines Fensters, kein Element.
-#   paint_leinwand  uebergibt dem Aufrufer seine eigenen Bildpunkte
-#                   (Certus malt seine Seite selbst) -- da ist nichts
-#                   zu gestalten.
-#   paint_kurve     eine Messreihe als Linienzug: sechzig Zahlen mit
+#   paint_canvas  uebergibt dem Aufrufer seine eigenen Bildpunkte
+#                   (Certus malt seine Seite self) -- da ist nichts
+#                   close_path gestalten.
+#   paint_curve     eine Messreihe als Linienzug: sechzig Zahlen mit
 #                   `hline`. Ein Diagramm ist kein Bedienelement, und
 #                   fUi hat dafuer kein Element.
-#   mal_punkt       EIN Bildpunkt, fuer das gerechnete Hintergrundbild
+#   draw_point       EIN Bildpunkt, fuer das gerechnete Hintergrundbild
 #                   des Schreibtisches.
-#   mal_trenner     `wlibc.divider` traegt die Deckkraft aus der
+#   draw_separator     `wlibc.divider` traegt die Deckkraft off der
 #                   Formentabelle des Systems; fUis Trenner kennt sie
 #                   nicht.
-#   mal_symbol      die Symbolschrift des Systems (icon_at), nicht eine
+#   draw_icon      die Symbolschrift des Systems (icon_at), nicht eine
 #                   Flaeche.
 #   say_rects       schreibt nur Zahlen auf die serielle Leitung.
-#   paint_sep       `wlibc.divider` traegt die Deckkraft aus der
+#   paint_sep       `wlibc.divider` traegt die Deckkraft off der
 #                   Formentabelle des Systems (sep_strength); fUis
 #                   Trenner kennt sie nicht, und eine Linie mit anderer
 #                   Deckkraft waere eine andere Linie.
-#   mal_kante3      die zwei Kanten des klassischen Erscheinungsbilds
+#   draw_edge3      die two Kanten des klassischen Erscheinungsbilds
 #                   (hell oben, dunkel unten) -- das ist `classic`, und
 #                   fUi malt flach.
-#   mal_rahmen      ein Rahmen OHNE Fuellung in wlibs Rollen; er sitzt
+#   draw_frame      ein Rahmen OHNE Fuellung in wlibs Rollen; er sitzt
 #                   um fremde Flaechen (Leinwand, Vorschau) und darf
 #                   nichts ausmalen.
-#   mal_linie       eine gerade Linie fuer die Graphen des
+#   draw_line       eine gerade Linie fuer die Graphen des
 #                   Aufgabenverwalters.
-#   paint_scroll    die Rollleiste rechnet ihren Schieber aus drei
-#                   Zahlen des Aufrufers; sie geht ueber mal_tafel,
+#   paint_scroll    die Rollleiste rechnet ihren Schieber off drei
+#                   Zahlen des Aufrufers; sie geht ueber draw_board,
 #                   sobald sie auf fUis Scrollbar umgestellt ist --
 #                   Runde 32.
 #   paint_graph     ein Verlaufsdiagramm: sechzig Zahlen. Kein
 #                   Bedienelement, fUi hat dafuer kein Element.
-#   paint_bild      die Bildflaeche des Bildbetrachters: die
+#   paint_image      die Bildflaeche des Bildbetrachters: die
 #                   Bildpunkte gehoeren dem Bild, nicht der Gestaltung.
-#   bild_malen      dasselbe, der innere Teil davon.
+#   image_paint      dasselbe, der innere Teil davon.
 #   paint_list, paint_table, paint_tabs, paint_menubar, paint_choice,
 #   paint_menu, paint_tile
 #                   NOCH NICHT UMGESTELLT. Sie malen ihre Flaechen
-#                   weiter selbst; fUi hat die Elemente dafuer
+#                   weiter self; fUi hat die Elemente dafuer
 #                   (draw_list, draw_table, draw_tabbar, draw_menubar,
 #                   draw_dropdown, draw_menu), aber sie tragen in wlib
 #                   Zustaende, die erst uebersetzt werden muessen
 #                   (Auswahl, Rollversatz, Spaltenbreiten,
 #                   Mehrfachauswahl). Das ist Runde 32 -- hier stehen
 #                   sie, damit die Pruefung GRUEN ist und die Liste
-#                   trotzdem ehrlich sagt, was offen ist.
+#                   trotzdem ehrlich sagt, was open ist.
 # RUNDE 32: DIE KATEGORIE "NOCH NICHT" IST LEER.
 #
 # paint_list, paint_table, paint_tabs, paint_menubar, paint_choice,
@@ -188,34 +188,34 @@ END      { if (name != "" && roh > 0 && br == 0) print "  " name }
 # Rollversatz, Spaltenbreiten), die WEITER von wlib gerechnet werden.
 # Umgestellt ist, WER die Rechtecke malt, nicht wer den Zustand fuehrt.
 # Das ist der Grund, warum fUis eigene draw_list/draw_table NICHT
-# benutzt werden: sie bringen ihr eigenes Modell mit, und zwei Modelle
-# gegeneinander zu uebersetzen ist der halb uebersetzte Zustand, der
-# falsch malt, ohne es zu sagen.
+# benutzt werden: sie bringen ihr eigenes Modell mit, und two Modelle
+# gegeneinander close_path uebersetzen ist der halb uebersetzte Zustand, der
+# falsch malt, ohne es close_path say.
 #
 # Was hier stehen bleibt, wird NIE fUi, und jedes mit Grund:
 #
 #   paint_bg        der HINTERGRUND eines Fensters, kein Element.
-#   paint_leinwand  die Bildpunkte gehoeren dem Aufrufer (Certus malt
-#                   seine Seite selbst) -- da ist nichts zu gestalten.
-#   paint_kurve     ein Linienzug aus sechzig Messwerten, mit `hline`.
+#   paint_canvas  die Bildpunkte gehoeren dem Aufrufer (Certus malt
+#                   seine Seite self) -- da ist nichts close_path gestalten.
+#   paint_curve     ein Linienzug off sechzig Messwerten, mit `hline`.
 #   paint_graph     der Rahmen dazu; ein Diagramm ist kein
 #                   Bedienelement, und fUi hat dafuer kein Element.
-#   mal_linie       die gerade Linie fuer genau diese Graphen.
-#   paint_bild      die Bildflaeche des Bildbetrachters -- die
-#   bild_malen      Bildpunkte gehoeren dem Bild, nicht der Gestaltung.
-#   mal_punkt       EIN Bildpunkt, fuer das gerechnete Hintergrundbild.
-#   mal_trenner     `wlibc.divider` traegt die Deckkraft aus der
+#   draw_line       die gerade Linie fuer genau diese Graphen.
+#   paint_image      die Bildflaeche des Bildbetrachters -- die
+#   image_paint      Bildpunkte gehoeren dem Bild, nicht der Gestaltung.
+#   draw_point       EIN Bildpunkt, fuer das gerechnete Hintergrundbild.
+#   draw_separator     `wlibc.divider` traegt die Deckkraft off der
 #   paint_sep       Formentabelle (sep_strength); fUis Trenner kennt
 #                   sie nicht, und eine andere Deckkraft ist eine
 #                   andere Linie.
-#   mal_symbol      die Symbolschrift des Systems (icon_at).
-#   mal_kante3      die zwei Kanten des klassischen Erscheinungsbilds
+#   draw_icon      die Symbolschrift des Systems (icon_at).
+#   draw_edge3      die two Kanten des klassischen Erscheinungsbilds
 #                   (hell oben, dunkel unten). Das IST `classic`, und
 #                   fUi malt flach.
-#   mal_rahmen      ein Rahmen OHNE Fuellung, um FREMDE Flaechen
+#   draw_frame      ein Rahmen OHNE Fuellung, um FREMDE Flaechen
 #                   (Leinwand, Vorschau) -- er darf nichts ausmalen.
 #   say_rects       schreibt nur Zahlen auf die serielle Leitung.
-AUSNAHMEN_LIB="paint_bg paint_leinwand paint_kurve paint_graph mal_linie paint_bild bild_malen mal_punkt mal_trenner paint_sep mal_symbol mal_kante3 mal_rahmen say_rects"
+AUSNAHMEN_LIB="paint_bg paint_canvas paint_curve paint_graph draw_line paint_image image_paint draw_point draw_separator paint_sep draw_icon draw_edge3 draw_frame say_rects"
 
 uebrig=""
 while read -r fn; do
@@ -246,7 +246,7 @@ if [[ $fehler -gt 0 ]]; then
     echo "  * Ein PROGRAMM nimmt das Element aus kernel/user/wlib.fi"
     echo "    (label, button, check, entry, list, table, tabs, choice,"
     echo "     tile, card, slider, sep, scrollarea, menubar, dlg_*) oder"
-    echo "    die Malschicht (mal_tafel, mal_flaeche, mal_balken)."
+    echo "    die Malschicht (draw_board, draw_area, draw_bar)."
     echo "  * Die BIBLIOTHEK laesst fUi malen: fuib.mal / fuib.tafel /"
     echo "    fuib.flaeche / fuib.ring, und das rohe Malen nur als"
     echo "    Rueckfall DAHINTER."
