@@ -294,7 +294,7 @@ Kollisionen.
 
 **Neu:** `kernel/klog.fi`, `kernel/ksymtab.fi`, `kernel/absturz.fi`,
 `kernel/arch/x86_64/osym.s`, `kernel/user/log.fi`,
-`kernel/user/absturz.fi`, `kernel/user/krach.fi`,
+`kernel/user/crash.fi`, `kernel/user/noise.fi`,
 `tools/kernel/symtab.py`, `tools/protokoll/run.sh`,
 `tools/protokoll/schirmtext.py`, `STATUS-PROTOKOLL.md`.
 

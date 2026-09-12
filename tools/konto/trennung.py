@@ -29,7 +29,7 @@ ALLGEMEIN = [
     "kernel/app/kjson.fi",
     "kernel/app/kmsg.fi",
     "kernel/app/kgegen.fi",
-    "kernel/app/konto.fi",
+    "kernel/app/account.fi",
 ]
 
 # Die Ruecken. Ihr Name IST das Anbieterwissen.

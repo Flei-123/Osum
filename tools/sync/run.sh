@@ -821,11 +821,11 @@ mkdir -p "$TMPD/kaputt"
 
 # (j1) Der Name ist wieder der blanke SHA-256 -- der Wiedererkennungs-
 #      angriff muss aufgehen.
-cp lib/sync/kette.fi "$TMPD/kaputt/kette.fi.orig"
+cp lib/sync/chain.fi "$TMPD/kaputt/kette.fi.orig"
 python3 - "$TMPD" <<'PY'
 import sys, re
 d = sys.argv[1]
-s = open("lib/sync/kette.fi").read()
+s = open("lib/sync/chain.fi").read()
 s = s.replace("""fn block_name(namekey: u64, p: u64, n: u64, out: u64) {
     sha256.hmac(namekey, KEYLEN as usize, p, n as usize, out)
 }""", """fn block_name(namekey: u64, p: u64, n: u64, out: u64) {
@@ -834,7 +834,7 @@ s = s.replace("""fn block_name(namekey: u64, p: u64, n: u64, out: u64) {
 open(d + "/kaputt/kette-naiv.fi", "w").write(s)
 PY
 # GEBAUT WIRD GEGEN EINE KOPIE DES BIBLIOTHEKSBAUMS, nicht gegen den
-# Arbeitsbaum. Die frueheren Fassungen dieses Tests haben lib/sync/kette.fi
+# Arbeitsbaum. Die frueheren Fassungen dieses Tests haben lib/sync/chain.fi
 # ueberschrieben und hinterher zurueckkopiert -- was genau so lange gut
 # geht, bis der Lauf dazwischen abbricht. Dann steht die KAPUTTE Fassung
 # im Arbeitsbaum, und der naechste Lauf misst Unsinn.
@@ -877,7 +877,7 @@ fi
 python3 - "$TMPD" <<'PYX'
 import sys
 d = sys.argv[1]
-s = open("lib/sync/kette.fi").read()
+s = open("lib/sync/chain.fi").read()
 mit = """    chacha.xaead_seal((&kb[0]) as u64, (&nc[0]) as u64, name,
         NAMELEN as usize, p, n as usize, out)"""
 ohne = """    chacha.xaead_seal((&kb[0]) as u64, (&nc[0]) as u64, name,
@@ -903,7 +903,7 @@ neu_k = """    var fest: [u8; 33] = "osum-sync-block-ohne-namensbindg\\0"
 assert t.count(alt_k) == 2, t.count(alt_k)
 open(d + "/kaputt/kette-losgeloest.fi", "w").write(t.replace(alt_k, neu_k))
 PYX
-if cmp -s "$TMPD/kaputt/kette-ohneaad.fi" lib/sync/kette.fi; then
+if cmp -s "$TMPD/kaputt/kette-ohneaad.fi" lib/sync/chain.fi; then
     bad "(j2) die kaputte Fassung ist mit dem Original identisch -- sie misst nichts"
 else
     # UND JETZT DER EIGENTLICHE NACHWEIS. Frueher stand hier nur ein

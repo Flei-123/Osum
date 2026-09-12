@@ -116,7 +116,7 @@ is "Verstoesse im allgemeinen Teil" "$VER" "0"
 cp -a kernel/app "$TMPD/appsicherung"
 mkdir -p "$TMPD/kaputt/kernel/app"
 cp kernel/app/*.fi "$TMPD/kaputt/kernel/app/"
-python3 - "$TMPD/kaputt/kernel/app/konto.fi" <<'PY'
+python3 - "$TMPD/kaputt/kernel/app/account.fi" <<'PY'
 import sys
 p = sys.argv[1]
 s = open(p, encoding="utf-8").read()
@@ -136,7 +136,7 @@ echo "== 1. das Programm baut und passt =="
 # ======================================================================
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 if FIRNLIB="$ROOT/vendor/firn/lib" "$FIRNC" -c --profile=app \
-        -o "$TMPD/konto.o" kernel/app/konto.fi > "$TMPD/cc.log" 2>&1; then
+        -o "$TMPD/konto.o" kernel/app/account.fi > "$TMPD/cc.log" 2>&1; then
     ok "firnc --profile=app: konto.fi mit std.net, std.json, tls.tls, tls.x509"
 else
     bad "konto.fi uebersetzt nicht"; head -20 "$TMPD/cc.log" | sed 's/^/        /'
@@ -151,7 +151,7 @@ ld -T kernel/user/user.ld -o "$TMPD/konto.elf" "$TMPD/konto.o" 2>"$TMPD/ld.err" 
 strip --strip-all "$TMPD/konto.elf" 2>/dev/null
 SZ=$(stat -c%s "$TMPD/konto.elf" 2>/dev/null)
 num "das Programm auf der Platte, in Oktetten" "$SZ" le 2500000
-ZEILEN=$(wc -l kernel/app/konto.fi kernel/app/anbieter.fi kernel/app/knetz.fi \
+ZEILEN=$(wc -l kernel/app/account.fi kernel/app/anbieter.fi kernel/app/knetz.fi \
     kernel/app/kspeicher.fi kernel/app/ksiegel.fi kernel/app/kjson.fi \
     kernel/app/kmsg.fi kernel/app/kgegen.fi kernel/app/anb_jarvis.fi \
     kernel/app/anb_xoffi.fi kernel/app/anb_eigen.fi | tail -1 | awk '{print $1}')

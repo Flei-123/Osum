@@ -11,7 +11,7 @@ Nichts gemergt, nichts gepusht.
 * `kernel/user/bstore.fi` ist der **Backup**-Store (Bloecke,
   Schnappschuesse, Wiederherstellung) — mit dem App-Store hat er nur den
   Namen gemein.
-* `kernel/user/speicher.fi` ist das **Plattenplatz**-Werkzeug
+* `kernel/user/storage.fi` ist das **Plattenplatz**-Werkzeug
   (Gegenstueck zu TreeSize/WizTree).
 
 Eine grafische Store-Oberflaeche gibt es auf OrientOS heute nicht;

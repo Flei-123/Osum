@@ -345,12 +345,12 @@ eigene Datei nach denselben Regeln wie `sha256.fi`.
 |---|---:|---:|
 | `lib/crypto/sha1.fi` | 407 | 261 |
 | `lib/crypto/aes.fi` | 909 | 715 |
-| `lib/wlan/rahmen.fi` | 364 | 219 |
+| `lib/wlan/frame.fi` | 364 | 219 |
 | `lib/wlan/beacon.fi` | 534 | 371 |
-| `lib/wlan/kanal.fi` | 271 | 142 |
+| `lib/wlan/channel.fi` | 271 | 142 |
 | `lib/wlan/wpa.fi` | 633 | 373 |
 | `lib/wlan/ccmp.fi` | 418 | 241 |
-| `lib/wlan/zustand.fi` | 306 | 193 |
+| `lib/wlan/state.fi` | 306 | 193 |
 | **zusammen** | **3.842** | **2.515** |
 
 Zum Vergleich die Zahlen aus Abschnitt 4: hostapds `src/rsn_supp/` +

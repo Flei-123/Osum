@@ -166,7 +166,7 @@ gegen "eine Meldung eines Befehls" "kernel/user/opk.fi" \
     'E_HASH: [u8; 23] = "opk: Prüfsumme falsch\0"' \
     'E_HASH: [u8; 23] = "opk: Pruefsumme falsch\0"' \
     python3 tools/i18n/quellen.py --streng
-gegen "eine Beschriftung im Speicher-Dialog" "kernel/user/speicher.fi" \
+gegen "eine Beschriftung im Speicher-Dialog" "kernel/user/storage.fi" \
     't_del: [u8; 12] = "Löschen\0\0\0\0"' \
     't_del: [u8; 12] = "Loeschen\0\0\0"' \
     python3 tools/i18n/quellen.py --streng
@@ -176,7 +176,7 @@ gegen "eine Beschriftung im Speicher-Dialog" "kernel/user/speicher.fi" \
 # ist der Pruefer nur laut und nicht richtig, und der Naechste, den er
 # grundlos anmeckert, schaltet ihn ab.
 k2="$TMPD/kopie2"; kopie "$k2"
-python3 - "$k2/kernel/user/speicher.fi" <<'PY'
+python3 - "$k2/kernel/user/storage.fi" <<'PY'
 import sys
 p = sys.argv[1]
 s = open(p, encoding='utf-8').read()

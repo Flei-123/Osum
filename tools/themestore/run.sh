@@ -105,7 +105,7 @@ num "und jede Vorlage hat alle sieben" "$KEYS_MISS" eq 0
 # GEGENPROBE ZU DEM, WORAUF ES ANKOMMT: das Vokabular ist im Quelltext
 # genauso eng wie in den Dateien. Ein achter Schluessel muesste hier
 # stehen; steht er nicht, kann eine fremde Vorlage keinen tragen.
-PK=$(grep -acE 'var k_(name|scheme|mode|shape|accent|edge|align): ' kernel/user/vorlage.fi)
+PK=$(grep -acE 'var k_(name|scheme|mode|shape|accent|edge|align): ' kernel/user/template.fi)
 num "und vorlage.parse_key kennt genau sieben Schluesselnamen" "$PK" eq 7
 DIFF=$(printf '%s\n' $PRESETS | while read -r p; do
     grep -aE '^(scheme|mode|shape|accent|edge|align)=' "assets/themes/$p.preset" | tr '\n' ' '; echo; done | sort -u | wc -l)

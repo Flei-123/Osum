@@ -8,7 +8,7 @@ QEMU mit `-accel kvm`). Beweisstücke eines Laufs bleiben mit `TS_OUT=<pfad>` li
 
 | Auftrag | Wo | Zustand |
 |---|---|---|
-| Vorlagen mit einem Klick | `assets/themes/*.preset` (10), `kernel/user/vorlage.fi`, `/bin/theme` | grün |
+| Vorlagen mit einem Klick | `assets/themes/*.preset` (10), `kernel/user/template.fi`, `/bin/theme` | grün |
 | Vorschaukachel aus den Token gerendert | `wlib.tile`, Seite „Vorlagen" | grün, 10 Kacheln, 7 verschiedene Flächenfarben |
 | Kontrast ist Teil der Vorlage | `theme list`, gegengerechnet mit `tools/theme/model.py` | grün, alle ≥ 4,5:1 |
 | Eigene Vorlage: sichern, benennen, ausgeben, einlesen | `theme save/export/import`, `/etc/themes.local/` | grün, lesbarer `key=value`-Text, übersteht Neustart |

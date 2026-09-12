@@ -6,7 +6,7 @@ NICHT aus diesem Baum stammt.
 Gemessen wird `.probe/syncoracle`, ein gehostetes Firn-Programm, das
 GENAU DIE DATEIEN bindet, die auch `/bin/sync` und `/bin/tresor` binden:
 lib/crypto/sha256.fi, lib/crypto/chacha.fi, lib/crypto/scrypt.fi,
-lib/crypto/hkdf.fi, lib/sync/kette.fi.
+lib/crypto/hkdf.fi, lib/sync/chain.fi.
 
 Wogegen:
 

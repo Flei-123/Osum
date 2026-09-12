@@ -60,7 +60,7 @@ fi
 # Der Nachweis importiert `rt` und `kanarie`. `rt` kommt aus der
 # Firn-Bibliothek neben dem Uebersetzer, `kanarie` liegt daneben.
 cp tools/haertung/kanarie.fi "$TMPD/kanarie.fi"
-cp tools/haertung/nachweis.fi "$TMPD/nachweis.fi"
+cp tools/haertung/proof.fi "$TMPD/nachweis.fi"
 
 # FIRNLIB zeigt auf die Firn-Bibliothek NEBEN dem Uebersetzer -- dort
 # liegt `rt`. Ohne das sucht firnc nur neben der Quelldatei.

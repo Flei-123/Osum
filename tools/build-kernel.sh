@@ -53,10 +53,10 @@ shift
 
 STUFE=0
 OHNE_PS2M=0
-# RUNDE BRUECKE: `--ohne-bruecke` baut den Kern mit `kernel/tipp-aus.fi`
-# statt `kernel/tipp.fi`. Der Aufruf 1843 ist dann nicht abgeschaltet,
+# RUNDE BRUECKE: `--ohne-bruecke` baut den Kern mit `kernel/tip-off.fi`
+# statt `kernel/tip.fi`. Der Aufruf 1843 ist dann nicht abgeschaltet,
 # sondern NICHT VORHANDEN -- der Unterschied zwischen einem Schloss und
-# einer Abwesenheit steht im Kopf von `kernel/tipp-aus.fi`.
+# einer Abwesenheit steht im Kopf von `kernel/tip-off.fi`.
 OHNE_BRUECKE=0
 # RUNDE PROTOKOLL: die Symbol- und Zeilentabelle im Abbild.  Vorgabe an;
 # `--ohne-symbole` laesst sie weg (siehe tools/kernel/symtab.py).
@@ -160,8 +160,8 @@ fi
 # laesst `OSUM_MARKE_*` aus der Umgebung darueberschlagen (Firns Ersatz
 # fuer `option_env!` aus /root/projects/freeviewer/src/brand.rs) und
 # setzt beides in die /tmp-Kopie ein -- die sechs Markenfelder in
-# `kernel/marke.fi` und die Fassungszeile `<KURZ> <hash>` in
-# `kernel/fassung.fi`. Es BRICHT AB, wenn ein Feld fehlt, leer ist,
+# `kernel/brand.fi` und die Fassungszeile `<KURZ> <hash>` in
+# `kernel/version.fi`. Es BRICHT AB, wenn ein Feld fehlt, leer ist,
 # nicht passt oder ein Platzhalter stehenbleibt.
 #
 # Der Arbeitsbaum wird dabei nicht angefasst; `git status` meldet nach
@@ -172,7 +172,7 @@ python3 "$(dirname "$0")/marke-einsetzen.py" "$TMP" \
     exit 1; }
 # GEGENPROBE AM ERGEBNIS, nicht am Werkzeug: steht die Fassungszeile
 # wirklich in der Datei, aus der uebersetzt wird?
-grep -q " $FASSUNG_HASH" "$TMP/kernel/fassung.fi" || {
+grep -q " $FASSUNG_HASH" "$TMP/kernel/version.fi" || {
     echo "die Fassungsnummer wurde NICHT eingesetzt -- Bau abgebrochen" >&2
     exit 1; }
 # Und dieselbe Gegenprobe fuer die Marke: kein Feld darf noch ein
@@ -180,17 +180,17 @@ grep -q " $FASSUNG_HASH" "$TMP/kernel/fassung.fi" || {
 # NOCH EINMAL am Ergebnis, weil eine Pruefung im Werkzeug nur das
 # Werkzeug prueft.)
 if grep -qE 'static mut s_[a-z]+: \[u8; [0-9]+\] = "[^"]*\?' \
-        "$TMP/kernel/marke.fi"; then
-    echo "in kernel/marke.fi steht noch ein Platzhalter -- abgebrochen" >&2
+        "$TMP/kernel/brand.fi"; then
+    echo "in kernel/brand.fi steht noch ein Platzhalter -- abgebrochen" >&2
     exit 1
 fi
 if [[ $OHNE_BRUECKE == 1 ]]; then
-    cp -f kernel/tipp-aus.fi "$TMP/kernel/tipp.fi" || exit 1
+    cp -f kernel/tip-off.fi "$TMP/kernel/tip.fi" || exit 1
 fi
 # Die Gegendatei fliegt IMMER aus dem Baum, aus dem firnc liest --
 # sonst uebersetzt der Kern beide und fuehrt zwei Module desselben
 # Namens. Dasselbe tut die Zeile unter `wg-aus.fi`.
-rm -f "$TMP/kernel/tipp-aus.fi"
+rm -f "$TMP/kernel/tip-off.fi"
 
 if [[ $OHNE_TUNNEL == 1 ]]; then
     cp -f kernel/wg-aus.fi "$TMP/kernel/wg.fi" || exit 1

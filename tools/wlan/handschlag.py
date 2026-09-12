@@ -190,7 +190,7 @@ def lauf_glaeubig(nr, sha256=False):
         bad("Lauf %d: Osum bekommt das GTK nicht aus Nachricht 3" % nr)
         return
     # Das Orakel antwortet mit ZWEI Feldern: dem Schluessel und seiner
-    # Nummer (siehe `gtk` in tools/wlan/orakel.fi). Beide werden
+    # Nummer (siehe `gtk` in tools/wlan/oracle.fi). Beide werden
     # geprueft -- die Nummer ist die, die der AP im KDE gesetzt hat.
     teil = ant[0].split()
     if len(teil) != 2:

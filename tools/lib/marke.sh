@@ -5,7 +5,7 @@
 #   echo "$MARKE_PRODUKT"    -> OrientOS
 #   echo "$MARKE_DATEI"      -> orientos      (fuer Dateinamen)
 #
-# Dasselbe Verhalten wie `kernel/marke.fi` und wie die Vorlage
+# Dasselbe Verhalten wie `kernel/brand.fi` und wie die Vorlage
 # `/root/projects/freeviewer/src/brand.rs`: Vorgaben aus `marke.conf`,
 # geschlagen von den Umgebungsvariablen `OSUM_MARKE_*`.
 #

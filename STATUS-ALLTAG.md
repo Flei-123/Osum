@@ -16,12 +16,12 @@ wurde **ins Framework** gebaut und wird von allen benutzt.
 | Auftrag | Wo | Zustand |
 |---|---|---|
 | Sperrbildschirm: Leerlauf, Win+L, exklusive Eingabe, Kennwort, sicherer Ausfall | `kernel/user/lock.fi`, `kernel/wm.fi`, `kernel/kstate.fi`, `kernel/sys.fi` (SYS 1850), `kernel/kbd.fi` | grün |
-| Papierkorb je Datenträger, Originalpfad + Zeit, Zurück, Leeren, Grenze | `kernel/user/korb.fi`, `papierkorb.fi`, `/etc/papierkorb.conf` | grün, Rückholung byte-gleich |
+| Papierkorb je Datenträger, Originalpfad + Zeit, Zurück, Leeren, Grenze | `kernel/user/trash.fi`, `papierkorb.fi`, `/etc/papierkorb.conf` | grün, Rückholung byte-gleich |
 | Explorer: Entf → Korb, Umschalt+Entf endgültig | `kernel/user/explorer.fi` | grün, beides gemessen |
 | Ausschnittwerkzeug: Ausschnitt/Fenster/Vollbild, Verzögerung, PNG + Übergabe | `kernel/user/snip.fi`, `bild.png_datei`, `flate.strom_*` | grün, 99,8 % Bildpunkte wie QEMUs eigenes Foto |
 | Bildbetrachter: PNG/JPEG/BMP, Zoom, Drehen, Blättern, Miniaturen | `kernel/user/viewer.fi`, `bild.fi`, `jpeg.fi` | grün, 6 Bilder exakt wie Pillow |
 | ZIP packen/entpacken, Kontextmenü im Explorer | `kernel/user/zip.fi` (Deflate aus `flate.fi`) | grün, beide Richtungen gegen Python |
-| Taschenrechner: Grund, Prozent, wissenschaftlich, Einheiten, Tastatur | `kernel/user/rechner.fi` | grün, 40 Ausdrücke = Python |
+| Taschenrechner: Grund, Prozent, wissenschaftlich, Einheiten, Tastatur | `kernel/user/calc.fi` | grün, 40 Ausdrücke = Python |
 | Alles aus dem Laden installierbar | `tools/laden/apps.tab` + sechs gezeichnete Symbole | grün, 6 signierte Pakete eingespielt |
 | Jede Oberfläche nur über wlib | `tools/alltag/run.sh` Abschnitt 10 | **0** direkte Zeichenaufrufe |
 | Vierer-Raster ≥ 92 % | `tools/design/messen.py`, je Programm geprüft | **100 %** bei allen fünf Fenstern |

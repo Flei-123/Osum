@@ -16,7 +16,7 @@ und eine Ed25519-Signatur ueber alles davor:
 
 WARUM DIE SIGNATUR AM ENDE UND NICHT IM KOPF: dann ist die signierte
 Nachricht ein zusammenhaengendes Stueck vom Anfang der Datei an, und der
-Kern muss sie nicht erst zusammenstueckeln. `kernel/modul.fi` prueft
+Kern muss sie nicht erst zusammenstueckeln. `kernel/module.fi` prueft
 genau `datei[0 .. 64+n]` gegen `datei[64+n .. 128+n]`.
 
 DIE GEGENPROBEN sind hier eingebaut und nicht nachtraeglich mit `dd`

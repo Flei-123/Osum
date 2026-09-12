@@ -74,7 +74,7 @@ Fall ab und installiert in keinem einen Schluessel.
 
 ### 1.4 Es gibt eine Naht zum Blech
 
-`lib/wlan/geraet.fi` legt fest, welche **vier** Dinge ein
+`lib/wlan/device.fi` legt fest, welche **vier** Dinge ein
 802.11-Geraet koennen muss:
 
 | Aufruf | wofuer |
@@ -424,9 +424,9 @@ falschen Chip ist nutzlos.
 
 | Datei | Zeilen | was |
 |---|---:|---|
-| `lib/wlan/geraet.fi` | 281 | die Naht: vier Aufrufe, die ein 802.11-Geraet koennen muss |
-| `lib/wlan/pruefgeraet.fi` | 234 | ein Geraet, dessen Luft zwei Puffer sind. **Kein Treiber, keine Emulation** |
-| `lib/wlan/verbinden.fi` | 458 | der ganze Weg als Vorgang, ueber der Naht |
+| `lib/wlan/device.fi` | 281 | die Naht: vier Aufrufe, die ein 802.11-Geraet koennen muss |
+| `lib/wlan/testdevice.fi` | 234 | ein Geraet, dessen Luft zwei Puffer sind. **Kein Treiber, keine Emulation** |
+| `lib/wlan/connect.fi` | 458 | der ganze Weg als Vorgang, ueber der Naht |
 | `lib/wlan/usbchip.fi` | 368 | 40 USB-Nummern auf Familie und Klarnamen |
 | `tools/wlan/gegenstelle.py` | 655 | ein **unabhaengiger** WPA2-Authenticator, an der echten Aufzeichnung geeicht |
 | `tools/wlan/handschlag.py` | 337 | Osums Supplicant gegen die Gegenstelle, glaeubig und boese |
@@ -439,5 +439,5 @@ falschen Chip ist nutzlos.
 Alles Neue unter `lib/` haelt die Regel des `lib/`-Baums: keine
 `profile`-Zeile, kein `import` ausser auf `lib/`, kein Allokator, kein
 Systemaufruf, aller Zustand beim Aufrufer. Nur deshalb kann
-`tools/wlan/orakel.fi` denselben Quelltext auf dem Wirt messen, den der
+`tools/wlan/oracle.fi` denselben Quelltext auf dem Wirt messen, den der
 Kern bindet.

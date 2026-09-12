@@ -53,9 +53,9 @@ Im Einzelnen, Abschnitt 43:
 | `tools/wlan/weg.py` | 223 | der ganze Weg, und was passiert, wenn jemand luegt |
 | `tools/wlan/prog.sh` | 117 | baut ein Abbild mit `/bin/wlan` und ruft es in Osum auf |
 | `tools/wlan/run2.sh` | 240 | Abschnitt 43 der Abnahme |
-| `lib/wlan/geraet.fi` | 281 | die **Naht**: vier Aufrufe, die ein 802.11-Geraet koennen muss |
-| `lib/wlan/pruefgeraet.fi` | 234 | ein Geraet, dessen Luft zwei Puffer sind. **Kein Treiber** |
-| `lib/wlan/verbinden.fi` | 458 | der ganze Weg als Vorgang, ueber der Naht |
+| `lib/wlan/device.fi` | 281 | die **Naht**: vier Aufrufe, die ein 802.11-Geraet koennen muss |
+| `lib/wlan/testdevice.fi` | 234 | ein Geraet, dessen Luft zwei Puffer sind. **Kein Treiber** |
+| `lib/wlan/connect.fi` | 458 | der ganze Weg als Vorgang, ueber der Naht |
 | `lib/wlan/usbchip.fi` | 368 | 40 USB-Nummern auf Familie und Klarnamen |
 | `kernel/user/wlan.fi` | 348 | `/bin/wlan` |
 | `kernel/usb.fi` | +43 | die Zeile, die den Stick benennt |
@@ -83,7 +83,7 @@ interessanten Fehler.
 
 ### 2. Die Naht traegt USB *und* PCIe
 
-`lib/wlan/geraet.fi` sagt vier Dinge zu: senden, empfangen, Kanal
+`lib/wlan/device.fi` sagt vier Dinge zu: senden, empfangen, Kanal
 setzen, Schluessel setzen. Sonst nichts. Sie war nie ein PCI-Ding —
 **deshalb hat Justins Zwischenruf mitten in der Runde (USB-Stick statt
 PCIe-Karte) keinen Umbau erzwungen.**

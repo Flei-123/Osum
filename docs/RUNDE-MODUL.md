@@ -31,7 +31,7 @@ herunterladen."*
 
 | Datei | Zeilen | Was |
 |---|---:|---|
-| `kernel/modul.fi` | 1079 | **der Lader.** `.omod`-Kopf, Schnittstellenfassung, Ed25519, ELF64-`ET_REL`, Relokationen, Symbolbindung, Ein-/Aussprung, Entladen. 25 benannte Gründe |
+| `kernel/module.fi` | 1079 | **der Lader.** `.omod`-Kopf, Schnittstellenfassung, Ed25519, ELF64-`ET_REL`, Relokationen, Symbolbindung, Ein-/Aussprung, Entladen. 25 benannte Gründe |
 | `kernel/ksym.fi` | 348 | **die Ausfuhrtafel des Kerns.** 13 Namen, und die Zahl `ABI` |
 | `kernel/modtab.fi` | 154 | die Treibertafel zwischen Lader und Stummel |
 | `kernel/modidx.fi` | 83 | die 28 Platznummern, EINMAL aufgeschrieben |
@@ -136,7 +136,7 @@ Blöcke hat.
 64+n 64   Ed25519 (RFC 8032) ueber die Oktette 0 .. 64+n
 ```
 
-Der öffentliche Schlüssel steht **im Kernabbild** (`kernel/modul.fi`,
+Der öffentliche Schlüssel steht **im Kernabbild** (`kernel/module.fi`,
 `fn schluessel`), nicht in einer Datei daneben. Wer die Platte schreiben
 kann, schriebe sonst beides.
 

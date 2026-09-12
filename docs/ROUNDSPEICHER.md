@@ -367,7 +367,7 @@ Das ist der wichtigste Abschnitt, und er ist absichtlich lang.
 | `kernel/sys.fi` | `WX_ROOT` — die Wurzelinode wird abfragbar |
 | `kernel/kmain.fi` | `wigspeicher` startet `/bin/speicher` |
 | `kernel/user/nidx.fi` | Summen den Baum hinauf, `total_of_ino`, `walk_total` |
-| `kernel/user/speicher.fi` | `/bin/speicher` — Baum, groesste Dateien, Treemap |
+| `kernel/user/storage.fi` | `/bin/speicher` — Baum, groesste Dateien, Treemap |
 | `kernel/user/du.fi` | `-m` messen, `-p` alles pruefen, `-w`/`-W` schreiben |
 | `tools/speicher/build.sh` | Kernel, Programme, beide Abbilder |
 | `tools/speicher/run.sh` | der Laeufer mit den Messungen |

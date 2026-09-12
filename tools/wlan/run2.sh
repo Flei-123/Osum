@@ -54,9 +54,9 @@ if [ "$SCHNELL" = "--schnell" ]; then LAEUFE=8; fi
 echo "== 1. der Messplatz =="
 # =====================================================================
 
-$FIRNC tools/wlan/orakel.fi -o .probe/worakel 2> "$OUT/orakel.err" \
-    && ok "tools/wlan/orakel.fi baut gegen lib/crypto/, lib/wlan/ und die neuen Dateien" \
-    || { bad "tools/wlan/orakel.fi laesst sich nicht bauen"; head -20 "$OUT/orakel.err"; }
+$FIRNC tools/wlan/oracle.fi -o .probe/worakel 2> "$OUT/orakel.err" \
+    && ok "tools/wlan/oracle.fi baut gegen lib/crypto/, lib/wlan/ und die neuen Dateien" \
+    || { bad "tools/wlan/oracle.fi laesst sich nicht bauen"; head -20 "$OUT/orakel.err"; }
 
 if [ ! -x .probe/worakel ]; then
     echo "WLAN2: ohne Orakel geht nichts weiter."
@@ -103,7 +103,7 @@ fail=$((fail+HF))
 echo "== 4. die Naht zum Blech =="
 # =====================================================================
 #
-# `lib/wlan/geraet.fi` sagt vier Dinge zu. Sie werden hier gemessen,
+# `lib/wlan/device.fi` sagt vier Dinge zu. Sie werden hier gemessen,
 # obwohl -- nein: WEIL -- es keine Karte gibt. Wenn eine kommt, ist
 # alles ueber der Naht schon gemessen.
 
@@ -244,7 +244,7 @@ else
     ok "kein USB-WLAN-Treiber und keine Firmware im Quelltext: es wird benannt, nicht behauptet"
 fi
 
-Z=$(cat lib/wlan/geraet.fi lib/wlan/pruefgeraet.fi lib/wlan/verbinden.fi \
+Z=$(cat lib/wlan/device.fi lib/wlan/testdevice.fi lib/wlan/connect.fi \
         lib/wlan/usbchip.fi kernel/user/wlan.fi 2>/dev/null | wc -l)
 ok "die neuen Dateien dieser Runde in Zeilen: $Z in lib/wlan/ und kernel/user/wlan.fi"
 
