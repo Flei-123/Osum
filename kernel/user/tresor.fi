@@ -130,7 +130,7 @@ fn sitpfad() -> u64 {
     return (&sitp[0]) as u64
 }
 
-fn text_lesen(pfad: u64, out: u64, max: u64, len: *mut u64) -> bool {
+fn text_read(pfad: u64, out: u64, max: u64, len: *mut u64) -> bool {
     let fd: u64 = io.open(pfad, 0)
     if ulib.bad(fd) {
         *len = 0
@@ -146,7 +146,7 @@ fn text_lesen(pfad: u64, out: u64, max: u64, len: *mut u64) -> bool {
     return true
 }
 
-fn text_schreiben(pfad: u64, p: u64, n: u64) -> bool {
+fn text_write(pfad: u64, p: u64, n: u64) -> bool {
     let fd: u64 = io.create(pfad)
     if ulib.bad(fd) {
         return false
@@ -160,9 +160,9 @@ fn text_schreiben(pfad: u64, p: u64, n: u64) -> bool {
 // Der Sitzungsschluessel. Er entsteht EINMAL und liegt in `/system`,
 // wo nur root hinkommt. Ohne ihn ist die Sitzungsdatei 48 Oktette
 // Rauschen -- und genau das ist die Rechteprobe.
-fn sitkey_holen(machen: bool) -> bool {
+fn sitkey_get(machen: bool) -> bool {
     var l: u64 = 0
-    if text_lesen(sitpfad(), (&sitkey[0]) as u64, 32, &l) {
+    if text_read(sitpfad(), (&sitkey[0]) as u64, 32, &l) {
         if l == 32 {
             return true
         }
@@ -173,7 +173,7 @@ fn sitkey_holen(machen: bool) -> bool {
     if ulib.bad(ulib.sys(SYS_GETRANDOM, (&sitkey[0]) as u64, 32, 0)) {
         return false
     }
-    if !text_schreiben(sitpfad(), (&sitkey[0]) as u64, 32) {
+    if !text_write(sitpfad(), (&sitkey[0]) as u64, 32) {
         return false
     }
     return true
@@ -186,7 +186,7 @@ fn now() -> u64 {
 // -------------------------------------------------------- die Sitzung
 
 // `<ablauf> <hex der versiegelten 32 Oktette>`
-fn sitzung_schreiben(bis: u64) -> bool {
+fn session_write(bis: u64) -> bool {
     var n_s: [u8; 8] = "SITZUNG\0"
     var nonce: [u8; 24] = [0 as u8; 24]
     if ulib.bad(ulib.sys(SYS_GETRANDOM, (&nonce[0]) as u64, 24, 0)) {
@@ -196,7 +196,7 @@ fn sitzung_schreiben(bis: u64) -> bool {
     kette.envelope_write((&sitkey[0]) as u64, (&nonce[0]) as u64,
         (&tkey[0]) as u64, (&siegel[0]) as u64)
     let bp: u64 = (&puf[0]) as u64
-    var at: u64 = kbund.num_aus(bp, bis)
+    var at: u64 = kbund.num_out(bp, bis)
     st8(bp, at, 32)
     at = at + 1
     kbund.hex_out((&nonce[0]) as u64, 24, bp + at)
@@ -207,19 +207,19 @@ fn sitzung_schreiben(bis: u64) -> bool {
     at = at + 96
     st8(bp, at, 10)
     at = at + 1
-    return text_schreiben(tdatei((&n_s[0]) as u64), bp, at)
+    return text_write(tdatei((&n_s[0]) as u64), bp, at)
 }
 
 // 0 = keine Sitzung, 1 = offen (tkey steht), 2 = abgelaufen,
 // 3 = da, aber nicht zu oeffnen (kein Recht auf den Sitzungsschluessel)
-fn sitzung_lesen() -> u64 {
+fn session_read() -> u64 {
     var n_s: [u8; 8] = "SITZUNG\0"
     var l: u64 = 0
-    if !text_lesen(tdatei((&n_s[0]) as u64), (&puf[0]) as u64, 1000, &l) {
+    if !text_read(tdatei((&n_s[0]) as u64), (&puf[0]) as u64, 1000, &l) {
         return 0
     }
     let bp: u64 = (&puf[0]) as u64
-    let bis: u64 = kbund.num_ein(bp)
+    let bis: u64 = kbund.num_in(bp)
     var at: u64 = 0
     while at < l && ld8(bp, at) != 32 {
         at = at + 1
@@ -227,11 +227,11 @@ fn sitzung_lesen() -> u64 {
     at = at + 1
     var nonce: [u8; 24] = [0 as u8; 24]
     var siegel: [u8; 48] = [0 as u8; 48]
-    if !kbund.hex_ein(bp + at, 24, (&nonce[0]) as u64) {
+    if !kbund.hex_in(bp + at, 24, (&nonce[0]) as u64) {
         return 0
     }
     at = at + 49
-    if !kbund.hex_ein(bp + at, 48, (&siegel[0]) as u64) {
+    if !kbund.hex_in(bp + at, 48, (&siegel[0]) as u64) {
         return 0
     }
     // DIE FRIST WIRD VOR DEM SCHLUESSEL GEPRUEFT. Ein abgelaufener
@@ -240,7 +240,7 @@ fn sitzung_lesen() -> u64 {
         io.unlink(tdatei((&n_s[0]) as u64))
         return 2
     }
-    if !sitkey_holen(false) {
+    if !sitkey_get(false) {
         return 3
     }
     if !kette.envelope_read((&sitkey[0]) as u64, (&nonce[0]) as u64,
@@ -253,16 +253,16 @@ fn sitzung_lesen() -> u64 {
 // ------------------------------------------------------ die Geheimnisse
 
 fn gname(name: u64, out: u64) -> bool {
-    var vor: [u8; 3] = "G-\0"
+    var before: [u8; 3] = "G-\0"
     if ulib.length(name) > NAMEMAX {
         return false
     }
-    ulib.strcpy(out, (&vor[0]) as u64)
+    ulib.strcpy(out, (&before[0]) as u64)
     ulib.strcat(out, name)
     return true
 }
 
-fn legen(name: u64, wert: u64) -> bool {
+fn place(name: u64, wert: u64) -> bool {
     var gn: [u8; 32] = [0 as u8; 32]
     if !gname(name, (&gn[0]) as u64) {
         return false
@@ -292,22 +292,22 @@ fn legen(name: u64, wert: u64) -> bool {
     at = at + n * 2
     st8(bp, at, 10)
     at = at + 1
-    return text_schreiben(tdatei((&gn[0]) as u64), bp, at)
+    return text_write(tdatei((&gn[0]) as u64), bp, at)
 }
 
 // Schreibt das Geheimnis auf fd 1. NIRGENDWO SONST HIN.
-fn geben(name: u64) -> bool {
+fn give(name: u64) -> bool {
     var gn: [u8; 32] = [0 as u8; 32]
     if !gname(name, (&gn[0]) as u64) {
         return false
     }
     var l: u64 = 0
-    if !text_lesen(tdatei((&gn[0]) as u64), (&puf[0]) as u64, 1000, &l) {
+    if !text_read(tdatei((&gn[0]) as u64), (&puf[0]) as u64, 1000, &l) {
         return false
     }
     let bp: u64 = (&puf[0]) as u64
     var nonce: [u8; 24] = [0 as u8; 24]
-    if !kbund.hex_ein(bp, 24, (&nonce[0]) as u64) {
+    if !kbund.hex_in(bp, 24, (&nonce[0]) as u64) {
         return false
     }
     var at: u64 = 49
@@ -318,7 +318,7 @@ fn geben(name: u64) -> bool {
     if hn % 2 != 0 || hn / 2 > 900 {
         return false
     }
-    if !kbund.hex_ein(bp + at, hn / 2, (&puf2[0]) as u64) {
+    if !kbund.hex_in(bp + at, hn / 2, (&puf2[0]) as u64) {
         return false
     }
     var got: u64 = 0
@@ -341,7 +341,7 @@ fn geben(name: u64) -> bool {
     return true
 }
 
-fn liste() {
+fn list() {
     var dot: [u8; 2] = ".\0"
     var dotdot: [u8; 3] = "..\0"
     var db: [u8; 1024] = [0 as u8; 1024]
@@ -426,9 +426,9 @@ fn u_start(args: u64) -> u64 {
         let pw: u64 = ulib.arg_at(args, 4)
         var frist: u64 = 300
         if n >= 6 {
-            frist = kbund.num_ein(ulib.arg_at(args, 5))
+            frist = kbund.num_in(ulib.arg_at(args, 5))
         }
-        if !kbund.kb_oeffnen(konto, pw, ulib.length(pw)) {
+        if !kbund.kb_open(konto, pw, ulib.length(pw)) {
             sag((&t_pass[0]) as u64)
             return 2
         }
@@ -437,13 +437,13 @@ fn u_start(args: u64) -> u64 {
             st8((&tkey[0]) as u64, i, ld8(kbund.kb_key(kette.K_TRESOR), i))
             i = i + 1
         }
-        kbund.kb_zu()
+        kbund.kb_close()
         io.make_dir((&z_tresor[0]) as u64)
-        if !sitkey_holen(true) {
+        if !sitkey_get(true) {
             sag((&t_recht[0]) as u64)
             return 3
         }
-        if !sitzung_schreiben(now() + frist) {
+        if !session_write(now() + frist) {
             return 3
         }
         sag_kv((&t_auf[0]) as u64, frist)
@@ -460,12 +460,12 @@ fn u_start(args: u64) -> u64 {
     }
 
     if ulib.streq(a1, (&c_liste[0]) as u64) {
-        liste()
+        list()
         return 0
     }
 
     // Alles Weitere braucht eine offene Sitzung.
-    let st: u64 = sitzung_lesen()
+    let st: u64 = session_read()
     if st == 2 {
         sag((&t_frist[0]) as u64)
         return 4
@@ -484,7 +484,7 @@ fn u_start(args: u64) -> u64 {
             hilfe()
             return 1
         }
-        if !legen(ulib.arg_at(args, 3), ulib.arg_at(args, 4)) {
+        if !place(ulib.arg_at(args, 3), ulib.arg_at(args, 4)) {
             return 7
         }
         sag((&t_ok[0]) as u64)
@@ -496,7 +496,7 @@ fn u_start(args: u64) -> u64 {
             hilfe()
             return 1
         }
-        if !geben(ulib.arg_at(args, 3)) {
+        if !give(ulib.arg_at(args, 3)) {
             sag((&t_bad[0]) as u64)
             sag((&t_bad2[0]) as u64)
             return 8
