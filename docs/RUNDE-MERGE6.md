@@ -140,7 +140,7 @@ dieser Runde.
 
 ### 4.1 Zwei Prüfstände waren tot
 
-`tools/design/capture.sh` und `tools/vielkern/run.sh` löschen ein
+`tools/design/capture.sh` und `tools/multicore/run.sh` löschen ein
 Bündel **bei Namen** (`widgets.osp`), weil dessen Programm nicht in
 ihrer Programmliste steht und `mkfs.py` sonst abbricht. WERKZEUGE hat
 ein zweites Bündel dazugelegt:
@@ -152,7 +152,7 @@ mkfs: '/bin/taskmgr' gibt es nicht
 
 Ohne den ersten Läufer gibt es keine Rastermessung, ohne den zweiten
 keine Vielkern-Abnahme. Gemessen am zusammengeführten Stand **vor** der
-Reparatur: `tools/vielkern/run.sh` **17 grün / 22 rot**, davon 21 allein
+Reparatur: `tools/multicore/run.sh` **17 grün / 22 rot**, davon 21 allein
 an der fehlenden Platte.
 
 Genommen ist der Riegel, den WERKZEUGE für `tools/themestore/build.sh`
@@ -178,7 +178,7 @@ er: treffetaskmgr: start bww=7=i5=3 n2ame= [bTerhmin=al5] ex2ec=4c/asppcs/...
 ```
 
 Drei Zeilen ineinander. Die Zeile `wlib: win id=…`, aus der
-`tools/werkzeug/klickplan.py` **jede** Klickkoordinate holt, war
+`tools/toolbench/klickplan.py` **jede** Klickkoordinate holt, war
 überhaupt nicht mehr zu finden:
 
 ```
@@ -239,7 +239,7 @@ Was schon richtig lag (752, 524, 116, 104, 112), geht jetzt trotzdem
 durch `snap_up`. Eine Regel, die nur im Kommentar steht, hält bis zur
 nächsten Runde.
 
-Dazu eine zweite Stelle: `tools/werkzeug/run.sh` hatte die Fensterlage
+Dazu eine zweite Stelle: `tools/toolbench/run.sh` hatte die Fensterlage
 als `--window=20,14` fest getippt, also dieselben zwei Zahlen an zwei
 Stellen. Das Programm meldet seine Lage jetzt selbst
 (`taskmgr: start bw= bh= wx= wy=`), der Läufer liest sie.
@@ -280,7 +280,7 @@ eine Bühne, und das ist eine eigene Runde.
 
 ## 5. Der Aufgabenverwalter am zusammengeführten Stand
 
-`tools/werkzeug/run.sh`, bester Lauf ohne Nebenlast: **26 von 34**.
+`tools/toolbench/run.sh`, bester Lauf ohne Nebenlast: **26 von 34**.
 Auf dem Zweig `werkzeug` allein, im abgekoppelten Baum nachgemessen:
 **37 Zusagen, 0 Fehler**.
 
@@ -308,7 +308,7 @@ Bilder: `docs/shots/merge6/taskmgr-allein.png`,
 
 ## 6. VIELKERN: der Kern-Nachweis, und der Puffer auf Bestellung
 
-`tools/vielkern/run.sh` nach der Reparatur aus 4.1: **38 grün, 2 rot**.
+`tools/multicore/run.sh` nach der Reparatur aus 4.1: **38 grün, 2 rot**.
 
 ```
 -smp 4 r3alle   R3W 0  R3K 4  Kerne in der Maske 4  abw 0  Ausnahmen 0
@@ -364,12 +364,12 @@ smp: fsrace   c0 inode=1=18784  c1 inode=5=3480  c2 inode=9=5436  c3 inode=13=38
 VIELKERN 3 hatte (`fs.inode_get_blind`), keine Nachbildung. Eine Zusage,
 deren Gegenprobe nicht fällt, ist eine Behauptung.
 
-Neu im Prüfstand: `tools/vielkern/run.sh` Abschnitte 10, 11 und 12
+Neu im Prüfstand: `tools/multicore/run.sh` Abschnitte 10, 11 und 12
 (= `test.sh` Abschnitt 40).
 
 ### 6.2 Die übrigen Ein-Kern-Reste, an der Quelle gezählt
 
-`tools/vielkern/onecore.py` liest die Kernquellen und zählt jede
+`tools/multicore/onecore.py` liest die Kernquellen und zählt jede
 Funktion, die einen Puffer der **Datenseite** (`state + kstate.X_OFF`)
 als Arbeitsfläche nimmt, ohne dass ein Sperrwort in ihrem Rumpf steht.
 
@@ -421,7 +421,7 @@ keine Abnahme -- deshalb steht hier kein Gesamtergebnis.
 
 ## 8. Was diese Runde **nicht** eingelöst hat
 
-* **`tools/laden/run.sh` ist nicht gefahren.** Der Läufer braucht das
+* **`tools/loader/run.sh` ist nicht gefahren.** Der Läufer braucht das
   offene Internet und `/srv/store` auf diesem Wirt — beides ist da
   (`curl … VERZEICHNIS` → 200, acht Pakete unter `/srv/store/osum`) —,
   aber seine QEMU-Abschnitte haben Fristen bis 3600 s, und die Runde ist
@@ -452,7 +452,7 @@ keine Abnahme -- deshalb steht hier kein Gesamtergebnis.
    und jede Abnahme, die danach misst, misst dann Rauschen.
 3. **Was fehlt, ist benannt und klein genug:** die Bühne und der
    Glyphen-Zwischenspeicher unter eine gemeinsame Sperre (oder je Kern),
-   dazu `tools/laden/run.sh` einmal durchfahren. Danach ist der Stand
-   reif — und `tools/vielkern/run.sh` Abschnitte 10–12 sowie
+   dazu `tools/loader/run.sh` einmal durchfahren. Danach ist der Stand
+   reif — und `tools/multicore/run.sh` Abschnitte 10–12 sowie
    `onecore.py` sind der Prüfstand, der es beim nächsten Mal sofort
    sagt.

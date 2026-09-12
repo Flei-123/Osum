@@ -188,7 +188,7 @@ einziges Foto entscheidet.
 
 ## 5. Der Fehler, den die Regression gefangen hat
 
-Nach dem Umbau fiel `tools/einsprung/run.sh` von **12 auf 7 von 14**,
+Nach dem Umbau fiel `tools/entry/run.sh` von **12 auf 7 von 14**,
 mit einem Dreifachfehler:
 
     *** EXCEPTION 8 #DF  rip=0x1002c3  rsp=0x0
@@ -277,7 +277,7 @@ Am **fertigen Abbild**, Limine, UEFI, `-accel kvm -cpu host`,
 | Netz | `22 NETZ K2 BDF 0020 L 1 ABL 0 IP 10.0.2.15` |
 | Klicks / davon auf den Startknopf | 7 / **4** |
 | Startmenü | `launcher pid=25` |
-| `tools/einsprung/run.sh` | **12 von 14** — dieselben zwei wie in den beiden Runden davor |
+| `tools/entry/run.sh` | **12 von 14** — dieselben zwei wie in den beiden Runden davor |
 
 `LG 0` ist neu und wichtig: **keine** Tafelzeile wird mehr
 abgeschnitten. Was auf dem Schirm steht, ist vollständig.
@@ -377,7 +377,7 @@ geteilten Puffer holen: `inode_get`, `inode_set`, `inode_init`,
 **Nachgezählt statt behauptet**, und zwar an der Quelle: von den 112
 Funktionen in `fs.fi` fassen 10 Blöcke direkt an, und **jeder** ihrer
 Wege nach draußen geht durch `enter`. Das ist Abschnitt 3 von
-`tools/vielkern/run.sh` und läuft bei jeder Abnahme mit.
+`tools/multicore/run.sh` und läuft bei jeder Abnahme mit.
 
 | voller Schreibtisch, `-smp 8 r3alle einst` | vorher | nachher |
 |---|---|---|
@@ -441,7 +441,7 @@ Und sie ist **begrenzt**: wer 20 Mio. Runden wartet, schreibt trotzdem
 sonst nichts mehr geht. Sie liegt **nicht** in `put`/`puts`, sondern um
 die Zeilen herum, deren Text gemessen wird.
 
-## 5. Der Riegel wird gebrochen — `tools/vielkern/run.sh`
+## 5. Der Riegel wird gebrochen — `tools/multicore/run.sh`
 
 Runde BLECHKERN hat ihren Fehler nicht deshalb übersehen, weil er
 schwer zu sehen war, sondern weil **niemand ihn herbeiführen konnte**.
@@ -573,4 +573,4 @@ Kern starten** — und nur die konnte das Umschalten der Vorgabe treffen:
 
 und der neue Läufer selbst:
 
-    tools/vielkern/run.sh   36 / 0
+    tools/multicore/run.sh   36 / 0

@@ -101,7 +101,7 @@ Begründung steht jetzt dort.
 
 ## 3. Die 60-Sekunden-Abnahme
 
-`bash tools/ton/acceptance.sh` — zwölf Läufe, `lang44.wav -w 6`:
+`bash tools/audio/acceptance.sh` — zwölf Läufe, `lang44.wav -w 6`:
 
 | smp | Quelle | gespielt | syscalls | Schübe | wartete | Aussetzer | **gaps** |
 |---|---|---:|---:|---:|---:|---:|---:|
@@ -149,7 +149,7 @@ als Nullstrecke in der Datei.
 
 ## 4. Der Mischer, von Ring 3 aus — 25 Zusagen, 0 beanstandet
 
-`bash tools/ton/mischer.sh`. Der Mischer selbst ist **Bestand seit Runde
+`bash tools/audio/mischer.sh`. Der Mischer selbst ist **Bestand seit Runde
 HDA** (4 Ströme, Lautstärke je Strom, Sättigung mit Zähler, Master,
 Systemklänge). Neu ist der Nachweis **von außen**.
 
@@ -385,7 +385,7 @@ Uebersetzer: vendor/firn/lib/net/stack.fi …"* — ist ebenfalls Bestand:
 `742b8e0d…`), und derselbe Abschnitt fällt auf `merge6` mit derselben
 Meldung.
 
-**`test.sh` Abschnitt 42** (`tools/ton/mischer.sh`) läuft auch unter
+**`test.sh` Abschnitt 42** (`tools/audio/mischer.sh`) läuft auch unter
 `OSUM_JOBS=10` mit **25 gut, 0 beanstandet**.
 
 ---
@@ -410,7 +410,7 @@ Meldung.
 
 ## Neue und geänderte Dateien
 
-**Neu:** `tools/ton/acceptance.sh` (12 × 60 s), `tools/ton/mischer.sh`
+**Neu:** `tools/audio/acceptance.sh` (12 × 60 s), `tools/audio/mischer.sh`
 (25 Zusagen), `STATUS-TON2.md`.
 
 **Geändert:** `kernel/sys.fi` (`AS_WAITSPACE`, `do_audwait`),
@@ -420,6 +420,6 @@ Meldung.
 `assets/icons/icons.map` + `lib/icons.fi` + `assets/osum-icons.ttf`
 (4 Glyphen), `locale/{de,en}/messages`, `tools/hda/mkmedia.sh`
 (`lang44`, `a4/b6`, `a5/b5`), `tools/hda/wavcheck.py`
-(`--von-ms`/`--bis-ms`), `tools/ton/mess.sh` (Plattengröße gerechnet,
+(`--von-ms`/`--bis-ms`), `tools/audio/mess.sh` (Plattengröße gerechnet,
 `TON_PLAYOPT`), `tools/design/capture.sh` (`ton=ja`), `test.sh`
 (Abschnitt 42), `docs/AUDIO.md` (Abschnitt 5b).

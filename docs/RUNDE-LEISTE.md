@@ -347,7 +347,7 @@ Puls kommt nicht an. Eingekreist, nicht behoben.
 
 ### Regression
 
-`tools/einsprung/run.sh`: **12 von 14**.
+`tools/entry/run.sh`: **12 von 14**.
 
 * `FAIL 'DEAD000000000000' fehlt` — der erwartete Text im Prüfskript,
   seit der Vorrunde. Kosmetik.
@@ -374,4 +374,4 @@ Puls kommt nicht an. Eingekreist, nicht behoben.
 * **Die statischen Stapel haben kein Prüfwerk**, nur Abstand. Die
   Aufgaben-Kernstapel haben eines (`WA` auf der Tafel).
 * **Super allein** öffnet das Startmenü nicht (siehe Abschnitt 6).
-* **`wm: hold` in `tools/einsprung/run.sh`** braucht länger als 240 s.
+* **`wm: hold` in `tools/entry/run.sh`** braucht länger als 240 s.

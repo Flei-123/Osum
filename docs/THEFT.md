@@ -8,7 +8,7 @@ question it answers is not "how do we build Find My" -- it is "what of
 that is physically possible for us, what is not, and what is worth
 building instead".
 
-Every number below comes from a run of `tools/tresor/run.sh`. Where
+Every number below comes from a run of `tools/vault/run.sh`. Where
 something is a design argument rather than a measurement, it says so.
 
 ---
@@ -179,7 +179,7 @@ memory, the serial number of the NVMe drive, and the MAC address.
 ### The parser is right
 
 The kernel's reading was checked against a **second, independent
-implementation** (`tools/tresor/smbios.py`, Python, written from the
+implementation** (`tools/vault/smbios.py`, Python, written from the
 specification and not from the Firn source). The host dumps the same
 physical memory over the QEMU monitor and decodes it separately. Entry
 point, table address, table length, structure count and every string
@@ -293,7 +293,7 @@ log -- the host reads the restored tree back **out of the disk image**
 
 `backup verify` re-reads every chunk out of the pack and hashes it again.
 Counter-check: the host flips **one octet** inside the pack file *in the
-disk image*, from outside the kernel (`tools/tresor/corrupt.py`; `cmp`
+disk image*, from outside the kernel (`tools/vault/corrupt.py`; `cmp`
 confirms exactly 1 octet differs). The same run then checks the damaged
 store and an intact one: **1 corrupt chunk found in the damaged store, 0
 in the intact one.**

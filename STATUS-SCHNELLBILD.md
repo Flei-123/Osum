@@ -232,7 +232,7 @@ einmal mit und einmal ohne `fbnosimd`, 1920x1080:
 | `tools/gfx/run.sh` | 76 passed, 0 failed | **76 passed, 0 failed** |
 | `tools/wm/run.sh` | 104 passed, 0 failed | **104 passed, 0 failed** |
 
-`tools/schirm/run.sh` **gibt es nicht** (im Auftrag genannt, im Baum nicht
+`tools/screen/run.sh` **gibt es nicht** (im Auftrag genannt, im Baum nicht
 vorhanden) — die Auflösungsfragen deckt `tools/gfx/run.sh` ab.
 
 **Der `fxsave`-Regress ist nicht zurück.** `tools/avx/run.sh` Abschnitt 1

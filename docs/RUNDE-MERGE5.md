@@ -29,7 +29,7 @@ nachgemessen**, genau nach dem Verfahren von MERGE-FINAL und MERGE-3.
    `https://store.fleitec.com/` — DHCP liefert den Nameserver, Osum löst
    den Namen selbst auf, prüft eine echte Let's-Encrypt-Kette (vier
    Zertifikate, Tiefe 3) und spielt ein signiertes Paket ein.
-   **`tools/betrieb/store.sh`: 37 Zusagen, 0 rot** — mit der Gegenprobe,
+   **`tools/operation/store.sh`: 37 Zusagen, 0 rot** — mit der Gegenprobe,
    dass derselbe Lauf ohne die Runde AVX an einem `#UD` stirbt.
 5. **AVX-512 ist auf diesem Wirt nicht messbar** und bleibt es. Dafür
    gibt es jetzt einen vierten Menüeintrag auf dem Stick und eine
@@ -54,7 +54,7 @@ comm -12 <(git diff --name-only 94c12fd..main) \
 `main` hat seit `mergeline2` **genau sieben Dateien** angefasst
 (`docs/AUFSETZEN.md`, `docs/RUNDE-MERGE3.md`,
 `docs/bilder/merge3-schreibtisch.png`, `tools/icons/run.sh`,
-`tools/k15/run.sh`, `tools/tresor/run.sh`, `tools/wm/run.sh`), `avx`
+`tools/k15/run.sh`, `tools/vault/run.sh`, `tools/wm/run.sh`), `avx`
 hat dreizehn — und **keine davon kommt in beiden Listen vor**. Der
 Merge (`b109e20`) war deshalb kein Glück: er konnte gar nicht
 kollidieren.
@@ -170,8 +170,8 @@ opk: Signatur geprüft /tmp/ota/hallo-2.opk
 
 ### Was NICHT angemeldet wurde, und warum
 
-`tools/betrieb/run.sh` ist **nicht** in `test.sh` aufgenommen. Er setzt
-`tools/betrieb/vorbereiten.sh` voraus (Pakete, Zertifikate,
+`tools/operation/run.sh` ist **nicht** in `test.sh` aufgenommen. Er setzt
+`tools/operation/vorbereiten.sh` voraus (Pakete, Zertifikate,
 Schlüsselbund, vier Auslieferungen, ein Abbild und eine **in QEMU
 installierte Platte**, zusammen deutlich über zehn Minuten) und misst
 gegen **echte Namen bei echten Nameservern**. Das gehört in eine
@@ -357,7 +357,7 @@ als am Prüfstand, und warum es die Mühe wert war:
 | Nameserver | von Hand in `/etc/resolv.conf` | **von DHCP** (Option 6) |
 | Weg | localhost | echtes Internet, HTTP/2-fähiges openresty davor |
 
-**Der Läufer: `tools/betrieb/store.sh` (neu). 37 Zusagen, 0 rot.**
+**Der Läufer: `tools/operation/store.sh` (neu). 37 Zusagen, 0 rot.**
 Er ist **absichtlich nicht in `test.sh` angemeldet** — er schreibt auf
 einen echten Server und braucht das offene Internet; eine Abnahme, die
 ohne fremde Infrastruktur nicht grün werden kann, ist keine Abnahme.
@@ -718,10 +718,10 @@ es entweder die Programme im Stick oder eine Installation auf Platte
 eigene, kleine Runde: PROGS erweitern, den App-Bauweg aus
 `tools/install/build.sh` übernehmen, und die 43 werden 46.
 
-### 3. `tools/betrieb/run.sh` ist nicht in der Abnahme
+### 3. `tools/operation/run.sh` ist nicht in der Abnahme
 
 Der dritte nie angemeldete Läufer (95 Zusagen auf seinem Zweig). Er
-setzt `tools/betrieb/vorbereiten.sh` voraus — Pakete, Zertifikate,
+setzt `tools/operation/vorbereiten.sh` voraus — Pakete, Zertifikate,
 Schlüsselbund, vier Auslieferungen, ein Abbild und eine **in QEMU
 installierte Platte** — und stellt sie nicht selbst her; und er misst
 gegen zwanzig echte Namen bei echten Nameservern. Anzumelden ist er
@@ -782,7 +782,7 @@ Fehler, den dieser Bericht bei anderen benennt.
 | Datei | | Was |
 |---|---:|---|
 | `tools/avx/run.sh` | 320 (neu) | der Läufer der Runde AVX, den es nicht gab. 32 Zusagen, 50 s |
-| `tools/betrieb/store.sh` | 400 (neu) | die Update-Kette gegen `store.fleitec.com`. 37 Zusagen. Nicht in `test.sh` |
+| `tools/operation/store.sh` | 400 (neu) | die Update-Kette gegen `store.fleitec.com`. 37 Zusagen. Nicht in `test.sh` |
 | `test.sh` | +37 | Abschnitt 15b (`avx`) und Abschnitt 34 (`ota`) angemeldet — 54 Abschnitte werden 56 |
 | `tools/ota/run.sh` | +19 / −1 | `FIRNLIB` auf die Bibliothek des Repos; drei Erwartungen auf echte Umlaute |
 | `tools/hwnet/tls.sh` | +17 / −1 | derselbe `FIRNLIB`-Fehler |
@@ -808,7 +808,7 @@ in `hwdiag`, und die ist in Teil 3.1 begründet.
    worden: Schnittmenge der berührten Dateien **leer** (avx) und
    **eine Datei** (betrieb).
 
-2. **`tools/betrieb/store.sh`: 37 Zusagen, 0 rot** — ein Osum in QEMU
+2. **`tools/operation/store.sh`: 37 Zusagen, 0 rot** — ein Osum in QEMU
    holt sich über den **Namen** `store.fleitec.com` ein signiertes
    Update aus dem offenen Internet: DHCP-Option 6 → eigener Auflöser →
    Let's-Encrypt-Kette mit **4 Zertifikaten, Tiefe 3** → Fassung 0 wird

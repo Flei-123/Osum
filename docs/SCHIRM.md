@@ -13,8 +13,8 @@ liegen; alle Bilder sind Bildschirmfotos aus QEMU in
 oder Bild.
 
 Ausgangsstand: `main` @ 163984d, `kernel/fb.fi` 2.910 Zeilen.
-Werkzeuge der Runde: `tools/schirm/build.sh` (Kern, Programme, Platte)
-und `tools/schirm/boot.sh` (ein Start, ein Foto, ein Mitschnitt).
+Werkzeuge der Runde: `tools/screen/build.sh` (Kern, Programme, Platte)
+und `tools/screen/boot.sh` (ein Start, ein Foto, ein Mitschnitt).
 
 ---
 
@@ -346,4 +346,4 @@ Vorgabe zurueck; es bleibt also immer ein Bild.
 | `kernel/user/wlib.fi` | `window()` nimmt logische Masse und deckelt auf den Schirm |
 | `kernel/user/taskbar.fi` | `height=` aus der Konfiguration ist logisch; Groessenaenderung wird berichtet |
 | `tools/usbimg/build.sh` | zwei Menueeintraege mit fester Laderaufloesung |
-| `tools/schirm/*.sh` | die zwei Werkzeuge dieser Runde |
+| `tools/screen/*.sh` | die zwei Werkzeuge dieser Runde |

@@ -22,8 +22,8 @@ RULES = {
     "kernel/sys.fi":        ["union", "both", "bothclose"],
     "lib/libc/kcall.fi":    ["union", "both"],
     "kernel/user/wlib.fi":  ["union", "both", "keysdel", "both", "both", "both"],
-    "tools/laden/apps.tab": ["both"],
-    "tools/laden/build.sh": ["buildsh"],
+    "tools/loader/apps.tab": ["both"],
+    "tools/loader/build.sh": ["buildsh"],
 }
 IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 

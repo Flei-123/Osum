@@ -63,19 +63,19 @@ Seite nie eingeblendet.
 Aufgelöst:
 
 * `R_KONTO = 8` behält seine Nummer (KONTO kam zuerst, und
-  `tools/konto/run.sh` Abschnitt 9 liest sie),
+  `tools/account/run.sh` Abschnitt 9 liest sie),
 * `R_SYNC = 9`,
 * `R_ANZ = 10`,
 * die Elementtafel wird **192** (KONTO wollte 192, SYNC 160 — jetzt sind
   beide Seiten drin, und der Abstand zur Grenze wird gemessen:
   `settings: elemente n=… max=…`),
-* `bw = 760` für die Reiterleiste (die von `tools/konto/run.sh` **gemessene**
+* `bw = 760` für die Reiterleiste (die von `tools/account/run.sh` **gemessene**
   Zahl; SYNC hatte 700 stehenlassen wollen, weil `tab_breite` ohnehin
   herunterskaliert — mit zehn Reitern ist 760 die belegte Zahl),
 * `settings.tabs` in beiden Katalogen zu **einer** Zeile mit zehn
   Beschriftungen.
 
-`tools/konto/run.sh` sagte „Reiter eq 9". Die Zahl steht jetzt auf 10 —
+`tools/account/run.sh` sagte „Reiter eq 9". Die Zahl steht jetzt auf 10 —
 und weiterhin **fest im Skript** und nicht aus der Datei abgeleitet:
 eine Zusage, die sich selbst nachrechnet, fällt nie auf.
 
@@ -83,7 +83,7 @@ eine Zusage, die sich selbst nachrechnet, fällt nie auf.
 
 | Messung | vor dem Merge (Zweig `konto`) | nach dem Merge |
 |---|---|---|
-| `tools/konto/run.sh` | 107 passed, 0 failed | **107 passed, 0 failed** |
+| `tools/account/run.sh` | 107 passed, 0 failed | **107 passed, 0 failed** |
 | `memmap.py` | 0 Kollisionen | **104 Bereiche in 0x100000, 11 Vektoren, 173 Modusnamen, 0 Kollisionen** |
 | Kernel Stufe 0 | baut | **baut, 5 305 332 Oktette** |
 
@@ -261,7 +261,7 @@ beschäftigt, `.` abwesend, `?` unsichtbar). Ein gemalter Kreis müsste
 seine Farbe irgendwoher nehmen, und „irgendwoher" wäre ein Zahlenwert im
 Quelltext. Ein Zeichen nimmt die Schriftfarbe des Themas mit.
 
-`tools/praesenz/run.sh` Abschnitt 8 zählt das nach — **ohne
+`tools/presence/run.sh` Abschnitt 8 zählt das nach — **ohne
 Kommentarzeilen** und **mit Gegenprobe** (siehe unten).
 
 ---
@@ -321,7 +321,7 @@ Abschnitt 9 startete `/bin/freunde` über ein Shell-Skript wie ein
 Kommandozeilenprogramm. Ohne `gfx wm wig desk` gibt es kein Fenster,
 `wlib.begin` sagt nein, und das Programm meldet gar nichts — vier rote
 Zusagen, keine davon am Programm. Gestartet wird jetzt über `wigapp`,
-wie in `tools/glyphe/run.sh`.
+wie in `tools/glyph/run.sh`.
 
 ### Und zwei am Prüfstand selbst
 
@@ -339,7 +339,7 @@ ist, wird irgendwann nicht mehr gelesen.
 
 ## 5. Was gemessen ist
 
-`tools/praesenz/run.sh` (QEMU-Gäste, echtes TLS 1.3, echte
+`tools/presence/run.sh` (QEMU-Gäste, echtes TLS 1.3, echte
 Ed25519-Schlüssel) und `test/praesenzd.test.mjs`.
 
 Die Zahlen stehen in [STATUS-PRAESENZ.md](../STATUS-PRAESENZ.md).

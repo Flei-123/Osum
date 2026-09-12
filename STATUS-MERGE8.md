@@ -56,8 +56,8 @@ Dateien, die schon die Probe gegen `merge7` gesehen hat:
 | `kernel/sys.fi` | 3 | Vereinigung, beide, beide + Klammer |
 | `lib/libc/kcall.fi` | 2 | Vereinigung, beide |
 | `kernel/user/wlib.fi` | 6 | Vereinigung, beide, KEY_SDEL, 3x beide |
-| `tools/laden/apps.tab` | 1 | beide |
-| `tools/laden/build.sh` | 1 | GUI/CLI-Listen vereinigt |
+| `tools/loader/apps.tab` | 1 | beide |
+| `tools/loader/build.sh` | 1 | GUI/CLI-Listen vereinigt |
 
 Dazu die zwei Klammern in `wlib.fi` von Hand (`on_down` K_LEINWAND,
 `on_up` LE_UP) — ohne sie: `'fn' is only allowed at top level`.
@@ -141,7 +141,7 @@ Belegung ab 0xB0000 danach, lueckenlos und ueberschneidungsfrei:
 
 ### 6. `wlan2` — drei Konflikte, dazu drei stille Abschnittsnummern
 
-`kernel/usb.fi` beide Importe, `tools/laden/build.sh` Vereinigung
+`kernel/usb.fi` beide Importe, `tools/loader/build.sh` Vereinigung
 (+ `wlan`), `test.sh` WLAN kam als 42 (gehoert GLYPHE).
 
 **Was der Textverschmelzer NICHT gesehen hat:** nach dem Zusammenfuehren
@@ -185,7 +185,7 @@ Der Abbildbau brach ab:
 Flicken 0003 laesst die Aufrufer von `buf_reserve` den Rueckgabewert
 pruefen; in `write_record` ist der Fehlerausgang als `break`
 geschrieben — die Funktion hat aber keine Schleife. **Auf dem Zweig
-faellt das nicht auf:** `tools/haertung/run.sh` prueft den Kern, nicht
+faellt das nicht auf:** `tools/hardening/run.sh` prueft den Kern, nicht
 die TLS-Bibliothek des Uebersetzers, und der Kernbau bindet `lib/tls`
 nicht ein. Erst der Stick-Abbild-Bau (der `fetch-firnc.sh` mit den
 Flicken faehrt) zeigt es.
@@ -340,8 +340,8 @@ Danach `icons=49 tips=49 missing=0 extra=0 de=49`, Abschnitt
 
 ### Werkzeug-Nachruestung
 
-`tools/glyphe/run.sh`, `tools/systembus/run.sh` und `tools/icons/run.sh`
-verstehen jetzt -- wie `tools/werkzeug/run.sh` mit `WZ_OUT` und
+`tools/glyph/run.sh`, `tools/systembus/run.sh` und `tools/icons/run.sh`
+verstehen jetzt -- wie `tools/toolbench/run.sh` mit `WZ_OUT` und
 `tools/tiling/run.sh` mit `TILING_KEEP` -- die Umgebungsvariablen
 `<RUNDE>_KEEP=1` und `<RUNDE>_TMPD=<dir>`, damit das Arbeitsverzeichnis
 nach einem roten Lauf zum Nachsehen stehen bleibt.

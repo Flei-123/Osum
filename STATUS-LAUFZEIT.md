@@ -56,7 +56,7 @@ Regel 3 ist keine Schikane: eine Seitentabelle hat **einen** Satz Rechte
 je Seite. Ein Lader, der die Vereinigung nähme, machte die Konstanten
 schreibbar und die Daten ausführbar, ohne es zu sagen.
 
-### Versuch 2 — eigenes Linkerskript (`tools/fremd/osum.ld`)
+### Versuch 2 — eigenes Linkerskript (`tools/foreign/osum.ld`)
 
 Ab `0x40100000`, `ALIGN(4096)` zwischen den Segmenten, drei `PT_LOAD` mit
 `FILEHDR PHDRS` wie in `kernel/user/user.ld`. Ergebnis: der Lader nimmt
@@ -75,7 +75,7 @@ osum$ hallo -> 0
 ersten Anlauf, ohne eine einzige Kernel-Änderung.** Das ist der Befund
 dieser Runde.
 
-Nötig war nur ein eigenes `_start` (`tools/fremd/start.s`): Osum übergibt
+Nötig war nur ein eigenes `_start` (`tools/foreign/start.s`): Osum übergibt
 den Argumentblock **in RDI** (`elf.fi`), nicht als Linux-SysV-Stapel
 (`[rsp]=argc`). Osums Block: `+0` argc, `+8` argv[], `+2048` envc,
 `+2056` envp[].
@@ -115,7 +115,7 @@ verhandelbar, also gehört es in den Kern.
 `size_t *auxv`. musls malloc liest den **Hilfsvektor** und dereferenziert
 ihn ohne Prüfung; `elf.fi` liefert keinen.
 
-**Gelöst im Benutzerraum, nicht im Kern** (`tools/fremd/osum_main.c`):
+**Gelöst im Benutzerraum, nicht im Kern** (`tools/foreign/osum_main.c`):
 argc/argv/envp/auxv werden aufgebaut (`AT_PAGESZ`, `AT_UID/GID`,
 `AT_SECURE`, `AT_CLKTCK`, `AT_PHDR/PHENT/PHNUM`) und musls eigenes
 `__init_libc()` gerufen — genau das, was ein Linux-Kern täte. Damit
@@ -297,9 +297,9 @@ wieder 134/0.
 ## 7. Wie man es nachbaut
 
 ```
-musl-gcc -static -O2 -nostartfiles -T tools/fremd/osum.ld \
+musl-gcc -static -O2 -nostartfiles -T tools/foreign/osum.ld \
     -Wl,--build-id=none -o prog \
-    tools/fremd/start.s tools/fremd/osum_main.c prog.c
+    tools/foreign/start.s tools/foreign/osum_main.c prog.c
 ```
 
 Dann mit `tools/osum/mkfs.py` ins Abbild legen und starten. Bleibt ein

@@ -10,14 +10,14 @@ Ausführlich: `docs/RUNDE-MERGE6.md`.
 |---|---|---|
 | `tools/themestore/run.sh` | **81 / 0** | Kontraste ≥ 4,5 Text und ≥ 3,0 Bedienelemente, zweimal gerechnet, Gegenprobe fällt |
 | `tools/design/messen.py` (7 Ansichten) | **691 von 744 = 92 %** | Design-Runde: 671/724 = 92 %. Nicht abgerutscht. |
-| `tools/vielkern/run.sh` | **38 / 2** | beide roten erklärt, keiner ein Regress |
+| `tools/multicore/run.sh` | **38 / 2** | beide roten erklärt, keiner ein Regress |
 | `tools/posix/run.sh` | **134 / 0** | vorher 133/1 — `SYS_OSUM_CPUSTAT` fehlte in der libc, behoben |
-| `tools/werkzeug/run.sh` | **26 / 8** | auf dem Zweig `werkzeug` allein: 37 / 0 |
-| `tools/laden/run.sh` | **nicht gefahren** | offene Auflage |
+| `tools/toolbench/run.sh` | **26 / 8** | auf dem Zweig `werkzeug` allein: 37 / 0 |
+| `tools/loader/run.sh` | **nicht gefahren** | offene Auflage |
 
 ## Die neuen Zusagen dieser Runde
 
-`tools/vielkern/run.sh`, Abschnitte 10–12 (= `test.sh` Abschnitt 40):
+`tools/multicore/run.sh`, Abschnitte 10–12 (= `test.sh` Abschnitt 40):
 
 ```
 smp: fsrace kerne=4  runden=20000  blind=0  fehler=0
@@ -56,7 +56,7 @@ Glyphenbühne, die der ganzen Maschine gehört:
 -smp 4   1 Panic in 5 Läufen (83 / 78 / 80 / 56 / 0 Meldezeilen)
 ```
 
-Offen bleiben außerdem: `tools/laden/run.sh` (nie gefahren), die
+Offen bleiben außerdem: `tools/loader/run.sh` (nie gefahren), die
 dreiundvierzig Wege in `kernel/sys.fi` um `NAME_OFF`/`BLOCK_OFF`
 (gezählt, nicht gesperrt) und der Umbenennen-Dialog des Dateimanagers
 (älter als diese Runde, im Baum `design` Zeile für Zeile derselbe).

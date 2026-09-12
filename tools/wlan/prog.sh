@@ -36,7 +36,7 @@ fi
 
 # 2. Es ist in den Programmlisten angemeldet -- sonst landet es in
 #    keinem Abbild und niemand kann es aufrufen.
-for f in tools/laden/build.sh tools/install/build.sh; do
+for f in tools/loader/build.sh tools/install/build.sh; do
     if grep -q '\bwlan\b' "$f"; then
         ok "$f fuehrt wlan in seiner Programmliste"
     else

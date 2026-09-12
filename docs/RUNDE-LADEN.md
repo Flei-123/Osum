@@ -2,7 +2,7 @@
 
 Zweig `laden`, abgezweigt von `hidweg`. **Nicht nach `main` gemerged, nicht
 nach GitHub gepusht.** Arbeitsbaum `/root/osum-laden`.
-Abnahme: `bash tools/laden/run.sh` (QEMU mit `-accel kvm`, offenes Netz).
+Abnahme: `bash tools/loader/run.sh` (QEMU mit `-accel kvm`, offenes Netz).
 
 Vorher lag im Feed **ein** Paket: `hallo-2.opk`, 34 291 Oktette, ein Programm,
 das eine Zeile schreibt und sich beendet. Nachher liegen dort **acht**
@@ -122,7 +122,7 @@ keinen Namen.
 
 ## 2. Die acht Pakete
 
-`tools/laden/apps.tab` ist die Liste, `tools/laden/pakete.sh` baut daraus je
+`tools/loader/apps.tab` ist die Liste, `tools/loader/pakete.sh` baut daraus je
 Paket eine INFO (im Format von `appdir.fi`), ein Symbol (aus einer
 Zeichnung, mit `tools/k15/icon.py` — dasselbe Werkzeug wie für die
 mitgelieferten Bündel, kein zweites Format) und ein Rezept für
@@ -201,7 +201,7 @@ tut, ist schlimmer als keiner. Eine Zeile in `/root/orientstore`
 
 ## 4. Was in QEMU wirklich passiert ist
 
-Die Platte für diese Runde baut `tools/laden/abbild.sh`, und sie ist die
+Die Platte für diese Runde baut `tools/loader/abbild.sh`, und sie ist die
 erste, die **beides** trägt: die Oberfläche (`tools/look/shot.sh` baut sie
 ohne `opk`/`ota`/`fetch`) **und** die Paketverwaltung
 (`tools/install/build.sh` baut sie ohne eine Zeile Oberfläche). Ein Laden,
@@ -335,7 +335,7 @@ Alle in `docs/shots/laden/`, 1280x1024, aus QEMU über den Monitor
 | `4-widgets-laeuft.png` | `/apps/widgetdemo.osp/start` — das Fenster steht, mit Menü, Knöpfen und Liste |
 | `5-explorer-laeuft.png` | `/apps/explorer.osp/start` — der Dateimanager zeigt `/data` |
 
-Getippt wird über die **PS/2-Tastatur** (`tools/laden/tippen.py` →
+Getippt wird über die **PS/2-Tastatur** (`tools/loader/tippen.py` →
 `tools/wm/monitor.py` → QEMU `sendkey`), nicht über `script=` auf der
 seriellen Leitung: was durch die serielle Tür geht, steht nie auf dem
 Bildschirm, und ein Bild davon gäbe es nicht.

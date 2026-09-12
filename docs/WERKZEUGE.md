@@ -182,7 +182,7 @@ und `.osp/symbol` dahinter.
   Code; jedes andere Programm bekam alle je gemalten Texte auf einmal
   vorgelegt, und eine Beschriftung, die sich jede Sekunde ändert, meldete
   damit 23 Überlappungen mit sich selbst.
-* `tools/werkzeug/fahren.py`: **eine Monitorverbindung für den ganzen
+* `tools/toolbench/fahren.py`: **eine Monitorverbindung für den ganzen
   Ablauf.** Der QEMU-Monitor nahm die zweite Verbindung nicht mehr an;
   ein verlorener Klick sieht im Gast genauso aus wie eine
   Trefferprüfung, die nicht greift.

@@ -241,7 +241,7 @@ ohne je in den Kern zu gehen. Die Zeile bleibt.
 
 ### Die 60-Sekunden-Abnahme
 
-`bash tools/ton/acceptance.sh` — zwölf Läufe: `-smp 1` und `-smp 4`, Quelle
+`bash tools/audio/acceptance.sh` — zwölf Läufe: `-smp 1` und `-smp 4`, Quelle
 `ide` und `ram`, je **drei** Mal. Drei und nicht einer, weil der
 Aussetzerzähler (`hda.fi`, `S_UNDER`) nur fortgeschrieben wird, wenn
 jemand die Position abfragt, und über eine Sekunde bei gleichem Code
@@ -257,7 +257,7 @@ nicht hätte.
 
 ### Der Mischer, von Ring 3 aus
 
-`bash tools/ton/mischer.sh`. `tools/hda/run.sh` Abschnitt 5 prüft den
+`bash tools/audio/mischer.sh`. `tools/hda/run.sh` Abschnitt 5 prüft den
 Mischer **von innen** (Kernel-Prüfpfad `audmix`, zwei erfundene Ströme);
 das ist eine Aussage über die Additionsschleife und keine darüber, ob
 zwei **Programme** nebeneinander spielen. Diese Abnahme fragt es von

@@ -145,7 +145,7 @@ trap 'kill $SRVPID 2>/dev/null' EXIT
 sleep 1
 
 echo "== 1. bauen: /bin/certus, mit dem Uebersetzer des Certus-Baumes =="
-bash tools/laden/build.sh "$OUT" > "$OUT/build.log" 2>&1 \
+bash tools/loader/build.sh "$OUT" > "$OUT/build.log" 2>&1 \
     && ok "Kern und $(wc -l < "$OUT/proglist") Programme uebersetzt" \
     || { bad "build.sh"; tail -20 "$OUT/build.log"; exit 1; }
 grep -q '^   browser' "$OUT/build.log" \
@@ -246,7 +246,7 @@ echo
 echo "== 4. die Platte, die Pakete und der Laden =="
 python3 "$OPK" schluessel "$OUT" > "$OUT/key.log" 2>&1
 cp -f "$OUT/oeffentlich.key" "$OUT/schluessel.pub"
-bash tools/laden/pakete.sh "$OUT" > "$OUT/pakete.log" 2>&1 \
+bash tools/loader/pakete.sh "$OUT" > "$OUT/pakete.log" 2>&1 \
     && ok "$(ls "$OUT"/stand/*.opk | wc -l) Pakete gebaut" \
     || { bad "pakete.sh"; tail -12 "$OUT/pakete.log"; }
 [ -s "$OUT/stand/certus-1.opk" ] \
@@ -254,10 +254,10 @@ bash tools/laden/pakete.sh "$OUT" > "$OUT/pakete.log" 2>&1 \
     || bad "certus-1.opk fehlt"
 python3 tools/update/signpak.py "$OUT/geheim.key" "$OUT"/stand/*.opk > /dev/null 2>&1 \
     && ok "jedes Paket ist signiert" || bad "signpak.py"
-grep -q '^certus|' tools/laden/apps.tab \
-    && ok "der Browser steht im Katalog des Ladens (tools/laden/apps.tab)" \
+grep -q '^certus|' tools/loader/apps.tab \
+    && ok "der Browser steht im Katalog des Ladens (tools/loader/apps.tab)" \
     || bad "certus fehlt in apps.tab"
-LADEN_STAND="$OUT/stand" bash tools/laden/abbild.sh "$OUT" > "$OUT/abbild.log" 2>&1 \
+LADEN_STAND="$OUT/stand" bash tools/loader/abbild.sh "$OUT" > "$OUT/abbild.log" 2>&1 \
     && ok "Abbild gebaut" || { bad "abbild.sh"; tail -10 "$OUT/abbild.log"; exit 1; }
 
 # ---------------------------------------------------------------- Laeufe
@@ -281,7 +281,7 @@ lauf_wig() { # <name> <url> <extraargs,mit,komma> <warte>
     local name=$1 url=$2 extra=$3 warte=$4
     cp --sparse=always -f "$OUT/platte/disk.img" "$OUT/$name.img"
     LADEN_PLATTE="$OUT/$name.img" LADEN_KILL=nein LADEN_WARTE="$warte" \
-        bash tools/laden/lauf.sh "$name" \
+        bash tools/loader/lauf.sh "$name" \
         "$WM $NETZ wigapp=/bin/certus,$url,-,1$extra" \
         "${CERTUS_LIMIT:-1500}" "k15: start" > "$OUT/$name.lauf" 2>&1
 }
@@ -351,7 +351,7 @@ echo "== 7. Zeit bis Bild =="
 # Baumbau, Kaskade, Layout, Schriftrasterer, das Blit ins Fenster.
 cp --sparse=always -f "$OUT/platte/disk.img" "$OUT/zeit.img"
 LADEN_PLATTE="$OUT/zeit.img" LADEN_KILL=ja LADEN_WARTE=15 \
-    bash tools/laden/lauf.sh zeit \
+    bash tools/loader/lauf.sh zeit \
     "$WM $NETZ wigapp=/bin/certus,http://10.0.2.2:$PORT/i.htm,-,1,--laut=1" \
     "${CERTUS_LIMIT:-1500}" "HOEHE" > "$OUT/zeit.lauf" 2>&1 &
 zpid=$!
@@ -402,7 +402,7 @@ while [ "$i" -le "$SOAK" ]; do
         n="s$i"
         cp --sparse=always -f "$OUT/platte/disk.img" "$OUT/$n.img"
         LADEN_PLATTE="$OUT/$n.img" LADEN_KILL=ja LADEN_WARTE=5 \
-            bash tools/laden/lauf.sh "$n" \
+            bash tools/loader/lauf.sh "$n" \
             "$WM $NETZ wigapp=/bin/certus,http://10.0.2.2:$PORT/i.htm,-,1" \
             "${CERTUS_LIMIT:-1500}" "k15: start" > "$OUT/$n.lauf" 2>&1 &
         pids="$pids $!"
@@ -435,11 +435,11 @@ num "Laeufe, in denen der Browser nicht hochkam" "$ohne" eq 0
 echo
 echo "== 9. aus dem Laden installiert =="
 # DAS PAKET LIEGT AUF DER PLATTE UND NICHT IM NETZ: der Laden ueber das
-# offene Internet wird von tools/laden/run.sh gemessen (er braucht einen
+# offene Internet wird von tools/loader/run.sh gemessen (er braucht einen
 # Server, der diesem Wirt gehoert). Was HIER gemessen wird, ist der Weg
 # des Pakets selbst -- Signatur, Auspacken, Buendel unter /apps.
 cp --sparse=always -f "$OUT/platte/disk.img" "$OUT/store.img"
-LADEN_PLATTE="$OUT/store.img" bash tools/laden/lauf.sh store \
+LADEN_PLATTE="$OUT/store.img" bash tools/loader/lauf.sh store \
     "osum vfs nokbd nosched noproc nofs noring3 script=opk installieren /store/certus-1.opk;opk liste;exit" \
     900 > "$OUT/store.lauf" 2>&1
 hat "$OUT/store.txt" "installiert certus" "opk hat das signierte Paket angenommen"

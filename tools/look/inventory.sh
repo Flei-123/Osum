@@ -193,7 +193,7 @@ else
     done
     if [ -n "$neuer" ]; then
         echo "  NEUER ALS DAS ERZEUGTE BILD:$neuer"
-        echo "  -> python3 tools/marke/startimage.py assets/marke $GEN"
+        echo "  -> python3 tools/brand/startimage.py assets/marke $GEN"
         fehler=$((fehler + 1))
     else
         groessen=$(grep -oP '^\s+if wunsch >= \K[0-9]+' "$GEN" | tr '\n' ' ')

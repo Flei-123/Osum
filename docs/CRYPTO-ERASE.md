@@ -145,7 +145,7 @@ the data is gone.
 
 ### Measured
 
-From `tools/tresor/run.sh`, section 10:
+From `tools/vault/run.sh`, section 10:
 
 * **PBKDF2-HMAC-SHA256 agrees with Python's `hashlib.pbkdf2_hmac`** on
   three cases (1, 2048 and 4096 iterations), each producing 64 octets --

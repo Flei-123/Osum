@@ -92,7 +92,7 @@ Zeichenweg (GLYPHE), 43 Systembus, 44 Kernprotokoll.
 
 ## Zwei Bauskripte, die am Zusammenfuehren gestorben sind
 
-1. **`tools/uhrwerk/bauen.sh`** — `mkfs: '/bin/taskmgr' gibt es nicht`.
+1. **`tools/clockwork/bauen.sh`** — `mkfs: '/bin/taskmgr' gibt es nicht`.
    Der Zweig entstand, bevor `assets/apps/taskmgr.osp` da war; sein
    `bundle.py`-Aufruf nimmt JEDES Buendel, seine Programmliste kennt
    `taskmgr` aber nicht. Genau dieser Fall steht schon in
@@ -100,7 +100,7 @@ Zeichenweg (GLYPHE), 43 Systembus, 44 Kernprotokoll.
    Runde WERKZEUGE: `nur=` ueberspringt jedes Buendel, dessen Programm
    nicht auf dieser Platte liegt. Derselbe Riegel jetzt hier.
 
-2. **`tools/protokoll/run.sh`** — die Zusage stand als `grep -q '0xC0000'`.
+2. **`tools/protocol/run.sh`** — die Zusage stand als `grep -q '0xC0000'`.
    Die Runde PROTOKOLL hatte `kdata` auf genau diesen Wert wachsen lassen
    und der Pruefstand hat die Zahl abgeschrieben. Eine Zusage, die eine
    Zahl abschreibt statt sie zu lesen, misst den Abschreibfehler mit.
@@ -174,12 +174,12 @@ dabei.
 | `tools/posix/run.sh` | **134 / 0** | 134 / 0 | nach dem SHOT-Fix (vorher 133/1) |
 | `tools/pci/run.sh` | **98 / 0** | 98 / 0 | allein gemessen (unter Last 97/1) |
 | `tools/userland/run.sh` | **91 / 0** | 91 / 0 | |
-| `tools/protokoll/run.sh` | **55 / 0** | 55 / 0 | nach dem kdata-Fix |
+| `tools/protocol/run.sh` | **55 / 0** | 55 / 0 | nach dem kdata-Fix |
 | `tools/bridge/run.sh` | **113 / 0** | 16 / 0 (Zweig) | |
 | `tools/systembus/run.sh` | **34 / 1** | 30 / 5 (Zweig) | besser als der Zweig |
-| `tools/uhrwerk/acceptance.sh` | **8 / 0** | 8 / 0 | 3440x1440, smp1 und smp4 |
+| `tools/clockwork/acceptance.sh` | **8 / 0** | 8 / 0 | 3440x1440, smp1 und smp4 |
 | `tools/hda/run.sh` | 140 / 3 | — | die 3 sind Tempo/Aussetzer, lastabhaengig |
-| `tools/vielkern/run.sh` | 37 / 3 | **26 / 13** | merge6 unter derselben Last SCHLECHTER |
+| `tools/multicore/run.sh` | 37 / 3 | **26 / 13** | merge6 unter derselben Last SCHLECHTER |
 | `tools/usbimg/run.sh` | 27 / 15 | 37 / 11 (rot) | vorbestehend rot, siehe unten |
 | `tools/certus/run.sh` | uebersprungen | — | `/root/certus-sammeln` gibt es nicht mehr |
 
@@ -301,8 +301,8 @@ zwanzig kaputte Zusagen und war EINE zu enge Zahl.
 
 Dazu zwei weitere Funde an derselben Stelle:
 
-* `tools/glyphe/run.sh` hielt noch `EK_SOLL=66` -- denselben Ein-Kern-Vertrag,
-  den ich in `tools/vielkern/run.sh` schon auf 67 angehoben hatte. Zwei
+* `tools/glyph/run.sh` hielt noch `EK_SOLL=66` -- denselben Ein-Kern-Vertrag,
+  den ich in `tools/multicore/run.sh` schon auf 67 angehoben hatte. Zwei
   Stellen, ein Vertrag; die zweite war uebersehen.
 * Die Zusage "so viele Programme, wie .osp-Buendel im Baum liegen" zaehlte
   `ls assets/apps/*.osp` -- den QUELLBAUM statt das, was
@@ -319,7 +319,7 @@ Dazu zwei weitere Funde an derselben Stelle:
 
 ### 2. `kernel/sched.fi:timer_tot` -- ein Wachhund fuer alle Kerne (6d33cd0)
 
-`tools/glyphe/run.sh` Abschnitt 7 -- der Fall, an dem die Runde GLYPHE
+`tools/glyph/run.sh` Abschnitt 7 -- der Fall, an dem die Runde GLYPHE
 selbst entstanden ist -- zeigte **6 bis 10 von 20 Laeufen** mit
 
     panic: integer overflow in 'u64 - u64' at kernel/sched.fi:1978:8

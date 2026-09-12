@@ -22,7 +22,7 @@ wurde **ins Framework** gebaut und wird von allen benutzt.
 | Bildbetrachter: PNG/JPEG/BMP, Zoom, Drehen, Blättern, Miniaturen | `kernel/user/viewer.fi`, `bild.fi`, `jpeg.fi` | grün, 6 Bilder exakt wie Pillow |
 | ZIP packen/entpacken, Kontextmenü im Explorer | `kernel/user/zip.fi` (Deflate aus `flate.fi`) | grün, beide Richtungen gegen Python |
 | Taschenrechner: Grund, Prozent, wissenschaftlich, Einheiten, Tastatur | `kernel/user/calc.fi` | grün, 40 Ausdrücke = Python |
-| Alles aus dem Laden installierbar | `tools/laden/apps.tab` + sechs gezeichnete Symbole | grün, 6 signierte Pakete eingespielt |
+| Alles aus dem Laden installierbar | `tools/loader/apps.tab` + sechs gezeichnete Symbole | grün, 6 signierte Pakete eingespielt |
 | Jede Oberfläche nur über wlib | `tools/alltag/run.sh` Abschnitt 10 | **0** direkte Zeichenaufrufe |
 | Vierer-Raster ≥ 92 % | `tools/design/messen.py`, je Programm geprüft | **100 %** bei allen fünf Fenstern |
 
@@ -237,7 +237,7 @@ gemessen.
 Der erste Einzellauf (altes Abbild, 15:16–17:10) war bis 16:40 wirklich allein
 (Load 2–4, keine fremden QEMUs): **Abschnitte 1–3: 92 grün, 0 rot; (d) „das
 Update, das nicht hochkommt": Durchläufe 1–6 grün.** Ab 16:40 kamen 11–19
-fremde QEMU-Instanzen dazu (tools/glyphe in `/root/osum-merge7`, Load bis 22).
+fremde QEMU-Instanzen dazu (tools/glyph in `/root/osum-merge7`, Load bis 22).
 Durchlauf 7 fiel — und der Mitschnitt `d7-s1.txt` sagt warum:
 
     panic: integer overflow in 'u64 - u64' at kernel/arch/x86_64/apic.fi:452:22
@@ -349,7 +349,7 @@ Damit teilen sich die 19 so auf:
 | `glyphe` (42.) | 26 / **3**, 2291 s | 27 / **2**, 2178 s | Zweig: die zwei Gegenproben „ohne die Tafelsperre passiert NICHTS" und „mit EINER Buehne passiert nichts" (LAEUFE=20; beide auch auf merge7 bei 10 gleichzeitig — sie brauchen ein Rennen, das auf 20 Wirtskernen nicht immer kommt) — und **1 von 20 Läufen mit `-smp 8` mit Panik oder Ausnahme**. Basis: dieselben zwei Gegenproben, **0 von 20** mit `-smp 8` (Zweig parallel am 06.09.: 0 von 20; merge7: 0 von 20 in beiden Läufen). |
 
 Der Sortier-Klick im Aufgabenverwalter war der eine Punkt, der nach ALLTAG
-aussah: `taskmgr.fi` und `tools/werkzeug/run.sh` sind auf Zweig und Basis
+aussah: `taskmgr.fi` und `tools/toolbench/run.sh` sind auf Zweig und Basis
 identisch, `wlib` rundet seit dieser Runde Ecken und Höhen aufs
 Vierer-Raster — ein Klick, der die Kopfzeile verfehlt, wäre genau das
 gewesen. Die Basis allein verfehlt sie genauso (und vier Zusagen mehr).
@@ -360,7 +360,7 @@ der Zweig hat und die weder im Parallel-Lauf des Zweigs noch bei merge7
 Text der Panik war weg. Darum lief `glyphe` auf dem Zweig noch einmal mit
 aufgehobenen Mitschnitten (`/tmp/glyphe-keep`, Kopie des Läufers ohne `trap`):
 **0 von 20** mit `-smp 8` und 0 von 20 mit `-smp 4` (03:00, allein, Load 8–12 aus den eigenen acht Maschinen). Damit steht sie 1-mal in 40 Läufen des Zweigs mit `-smp 8` und 0-mal in 20 der Basis, 0-mal in 40 von merge7 — zu selten, um sie in dieser Runde zu fassen, und der Text fehlt. Sie bleibt der EINE offene Punkt dieser Nachmessung: in der Merge-Runde `glyphe` mit aufgehobenen Mitschnitten fahren, bis sie wieder auftritt (der Läufer räumt sein Verzeichnis sonst ab; das Rezept ist ein `sed` auf
-`tools/glyphe/run.sh`: `TMPD=$(mktemp -d)` durch einen festen Ordner ersetzen,
+`tools/glyph/run.sh`: `TMPD=$(mktemp -d)` durch einen festen Ordner ersetzen,
 die `trap`-Zeile streichen). Das Rennen würde im Fensterserver liegen — dort sitzt `sperre_wache`, der einzige Kern-Haken dieser Runde.
 
 Nebenbefund an `test.sh`, keine Änderung in dieser Runde: bei `update` steht
@@ -429,8 +429,8 @@ Konfliktstellen:
 | `kernel/sys.fi` | 3 | Exportliste: Vereinigung. Konstante: beide. Dispatcher: beide Zweige hintereinander, die schließende Klammer der merge7-Seite dazwischen. |
 | `lib/libc/kcall.fi` | 2 | Exportliste: Vereinigung. Konstante: beide. |
 | `kernel/user/wlib.fi` | 6 | Exportlisten (3×): Vereinigung. `say_rects` neben den DESIGN-2-Wörtern: beide. Maus-runter/Maus-hoch: beide — **und die schließende Klammer der merge7-Seite zurück** (`if k == K_LEINWAND { … return }` bzw. `LE_UP`). Ohne sie: `'fn' is only allowed at top level` bei `on_up`/`on_move` — gemessen beim ersten Probe-Bau. |
-| `tools/laden/apps.tab` | 1 | beide (certus + die sechs Zeilen dieser Runde). |
-| `tools/laden/build.sh` | 1 | GUI-Liste von merge7 (mit `taskmgr`) + `rechner papierkorb viewer snip lock`; CLI + `zip`. |
+| `tools/loader/apps.tab` | 1 | beide (certus + die sechs Zeilen dieser Runde). |
+| `tools/loader/build.sh` | 1 | GUI-Liste von merge7 (mit `taskmgr`) + `rechner papierkorb viewer snip lock`; CLI + `zip`. |
 
 **Was git NICHT meldet — zwei Nummern, die doppelt vergeben sind.** Beide
 stehen in verschiedenen Zeilen, der Textverschmelzer sieht sie nicht; beide

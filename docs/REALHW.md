@@ -928,15 +928,15 @@ in den drei Intel-Familien.
 
 Ohne sie wäre die Tabelle oben eine Behauptung.
 
-* **`tools/blech/chipnames.py`** — hält jeden Namen gegen `pci.ids` und
+* **`tools/metal/chipnames.py`** — hält jeden Namen gegen `pci.ids` und
   den Linux-Quelltext. **Erster Lauf: 14 Namen falsch**, darunter sieben
   CNVi-Anschlüsse, die als „AX201" ausgegeben wurden (an `8086:02F0`
   kann ein AX201, ein AX203 **oder** ein Wireless-AC 9560 hängen — welches,
   steht erst in der Subsystemnummer).
-* **`tools/blech/r8125regs.py`** — hält den RTL8125-Zweig gegen Linux'
+* **`tools/metal/r8125regs.py`** — hält den RTL8125-Zweig gegen Linux'
   `r8169_main.c`. **Erster Lauf: der Sendeanstoß falsch** (siehe E.5).
 
-Beide sind seit diesem Nachtrag in `tools/blech/run.sh` **angemeldet**
+Beide sind seit diesem Nachtrag in `tools/metal/run.sh` **angemeldet**
 (Abschnitt 10) und laufen bei jeder Abnahme mit.
 
 ## E.5 Der Fehler, den nur der Abgleich finden konnte

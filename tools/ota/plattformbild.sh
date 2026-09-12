@@ -7,7 +7,7 @@
 # Datei macht das, was man nicht vergleichen, aber ansehen kann: ein
 # Bildschirmfoto DERSELBEN Maschine, waehrend `ota suchen` laeuft.
 #
-# Der Weg ist der aus Runde K15 (und `tools/speicher/run.sh`): QEMU hat
+# Der Weg ist der aus Runde K15 (und `tools/storage/run.sh`): QEMU hat
 # auch bei `-display none` eine Bildflaeche, wenn man `-vga std` gibt,
 # und ueber den Monitor an einem Unix-Socket schreibt `screendump` sie
 # als PPM; `tools/gfx/ppm2png.py` macht ein PNG daraus.

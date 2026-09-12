@@ -136,7 +136,7 @@ Alle Läufe auf demselben Wirt, mit `-accel kvm`, bei `load average`
 | `tools/k14/run.sh` — VFS und fremde Dateisysteme | **152 / 0** | **151 / 1** |
 | `tools/ofs3/run.sh` — OFS Fassung 3 | **75 / 0** | — |
 | `tools/userland/run.sh` — die Werkzeuge | **91 / 0** | — |
-| `tools/tresor/run.sh` — Diebstahl, Sicherung, Schlüssel | **220 / 0** | — |
+| `tools/vault/run.sh` — Diebstahl, Sicherung, Schlüssel | **220 / 0** | — |
 | `tools/multiuser/run.sh` — diese Runde | **91 / 0** | — |
 
 **K14 war auf dem Basiszweig rot** („und die Wurzelplatte danach, Oktett

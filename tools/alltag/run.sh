@@ -340,8 +340,8 @@ hat "$OUT/sp3/serial.txt" "sperre: Leerlauf abgelaufen, sperre" \
 echo
 echo "== 8. der Laden: sechs Pakete, signiert, eingespielt =="
 if [ -x /root/orientos-install/pkg/opk.py ] || [ -f /root/orientos-install/pkg/opk.py ]; then
-    bash tools/laden/build.sh "$OUT/laden" > "$OUT/laden-bau.log" 2>&1
-    bash tools/laden/pakete.sh "$OUT/laden" > "$OUT/laden-pak.log" 2>&1
+    bash tools/loader/build.sh "$OUT/laden" > "$OUT/laden-bau.log" 2>&1
+    bash tools/loader/pakete.sh "$OUT/laden" > "$OUT/laden-pak.log" 2>&1
     export OSUM_SIGN_PASS=alltag OSUM_ERSATZ_PASS=alltag
     python3 tools/ota/schluesselbund.py "$OUT/bund.json" anlegen \
         > "$OUT/bund.log" 2>&1

@@ -67,10 +67,10 @@ dieselbe wie bei einem offenen Kanal.
 | `kernel/tip.fi` | die eingespeiste Eingabe, Aufruf 1843 |
 | `kernel/tip-off.fi` | dieselbe Schnittstelle, die „es gibt sie nicht" sagt |
 | `kernel/user/settings.fi` | der elfte Reiter: Zustand sehen, Brücke abschalten |
-| `tools/bruecke/echt.sh` | 18 Zusagen gegen store.fleitec.com |
-| `tools/bruecke/kette.sh` | Osum in QEMU → Anschluss → Dienst → Bild |
-| `tools/bruecke/abriss.sh` | Wiederverbindung, mit Zeitabständen |
-| `tools/bruecke/reiter.sh` | der Reiter, fotografiert — **noch nicht fertig** |
+| `tools/bridge2/echt.sh` | 18 Zusagen gegen store.fleitec.com |
+| `tools/bridge2/kette.sh` | Osum in QEMU → Anschluss → Dienst → Bild |
+| `tools/bridge2/abriss.sh` | Wiederverbindung, mit Zeitabständen |
+| `tools/bridge2/reiter.sh` | der Reiter, fotografiert — **noch nicht fertig** |
 
 Der größte Teil der Brücke stand schon: `kernel/app/jarvisd.fi` (TLS
 1.3 hinaus, Ed25519, Rechteliste), `kernel/shot.fi` (Bildschirmfoto),
@@ -154,7 +154,7 @@ nicht. Mit der Prüfung antwortete jede Einspeisung `-ENODEV`.
 
 ## Die Belege
 
-### Der Weg von außen — `tools/bruecke/echt.sh`, 18/0
+### Der Weg von außen — `tools/bridge2/echt.sh`, 18/0
 
 Gegen `https://store.fleitec.com`, durch das echte Zertifikat:
 Verwalterschutz, Kopplungscode, falscher Code abgelehnt,
@@ -162,7 +162,7 @@ Zufallsforderung, falsche Unterschrift abgelehnt, richtige angenommen,
 fremder Schlüssel abgelehnt, Auftrag → Bild → abgeholt (Oktett für
 Oktett dasselbe), langes Polling 25 079 ms, Sperre wirkt.
 
-### Die ganze Kette — `tools/bruecke/kette.sh`, 9/0
+### Die ganze Kette — `tools/bridge2/kette.sh`, 9/0
 
 ```
 Osum (QEMU) --TLS 1.3--> anschluss.py --HTTP--> bruecke_server.py
@@ -186,7 +186,7 @@ Serverzeilen:
 
 Das Bild liegt unter `/srv/store/belege/bruecke/osum-schuss-1280x800.png`.
 
-### Die Wiederverbindung — `tools/bruecke/abriss.sh`, 7/0
+### Die Wiederverbindung — `tools/bridge2/abriss.sh`, 7/0
 
 **9 Versuche in 70 Sekunden** — bei festen 250 ms wären es rund 280.
 Das ist der Beweis für den wachsenden Abstand (250, 500, 1000, …,

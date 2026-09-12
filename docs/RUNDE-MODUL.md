@@ -38,10 +38,10 @@ herunterladen."*
 | `kernel/ps2m-aus.fi` | 346 | **der Stummel.** Dieselben 31 Ausfuhren wie `ps2m.fi`, kein Treiber darin |
 | `module/ps2maus.fi` | 219 | **das Modul.** Enthält eine Zeile Treiber: `import ps2m` |
 | `module/ps2maus-fremd.fi` | 187 | die Gegenprobe mit einem Namen, den der Kern nicht anbietet |
-| `tools/modul/mkomod.py` | 257 | `.omod` bauen und signieren, samt allen kaputten Fassungen |
-| `tools/modul/build.sh` | 95 | den Modulbaum zusammenstellen und übersetzen |
-| `tools/modul/run.sh` | 381 | die Abnahme, zehn Abschnitte |
-| `tools/modul/paket.sh` | 117 | `.omod` → `.opk` → Speicher → Platte |
+| `tools/module/mkomod.py` | 257 | `.omod` bauen und signieren, samt allen kaputten Fassungen |
+| `tools/module/build.sh` | 95 | den Modulbaum zusammenstellen und übersetzen |
+| `tools/module/run.sh` | 381 | die Abnahme, zehn Abschnitte |
+| `tools/module/paket.sh` | 117 | `.omod` → `.opk` → Speicher → Platte |
 | `docs/MODUL-BEFUND.md` | 740 | Befund und Entwurf, mit 51 Quellen |
 
 Dazu geändert: `kernel/kstate.fi` (`MODUL_OFF`, drei Seiten auf
@@ -169,7 +169,7 @@ gebundenen Abbild. **13 von 13 gleich, 0 Abweichungen.**
 
 ### Was der Läufer misst
 
-`bash tools/modul/run.sh`, zehn Abschnitte, **74 bestanden, 0
+`bash tools/module/run.sh`, zehn Abschnitte, **74 bestanden, 0
 gefallen**. Protokolle: `/root/m3logs/MODUL-lauf1.log` (erster Lauf, drei
 Messfehler im Läufer selbst — siehe unten), `MODUL-lauf2.log` (60/0, ohne
 Abschnitt 10) und `MODUL-lauf3.log` (74/0, vollständig).
@@ -275,7 +275,7 @@ Ausfuhrtafel ohne `--defsym` aus.
 
 ```
 module/ps2maus.fi
-     │  tools/modul/build.sh            firnc, strip, Kopf, Ed25519
+     │  tools/module/build.sh            firnc, strip, Kopf, Ed25519
      ▼
 ps2maus.omod            58 656 Oktett     ← das prueft DER KERN
      │  pkg/opk.py bauen
@@ -292,7 +292,7 @@ opk installieren  →  /apps/ps2maus.prog/lib/ps2maus.omod
 der Kern findet es und laedt es
 ```
 
-Gemessen (`bash tools/modul/paket.sh`, Läuferabschnitt 10):
+Gemessen (`bash tools/module/paket.sh`, Läuferabschnitt 10):
 
 * `store verify --tief`: **„Signatur gueltig (beide Umsetzungen einig) …
   Ergebnis in Ordnung"**
@@ -333,7 +333,7 @@ Absender er selbst und nicht NVIDIA.
 
 ### Der Modulläufer selbst
 
-`bash tools/modul/run.sh`, zehn Abschnitte:
+`bash tools/module/run.sh`, zehn Abschnitte:
 **74 bestanden, 0 gefallen** (`/root/m3logs/MODUL-lauf3.log`).
 Zwei frühere Läufe stehen daneben (`MODUL-lauf1.log`, `MODUL-lauf2.log`);
 was zwischen ihnen passiert ist, steht im nächsten Abschnitt.
@@ -431,7 +431,7 @@ Dieselbe Sorte Unfall steht in der Commit-Botschaft von `12d292f`
 arbeitet, in dem gleichzeitig die Abnahme läuft, prüft `git status` VOR
 dem `add`.
 
-### `tools/modul/run.sh` steht NICHT in `test.sh`
+### `tools/module/run.sh` steht NICHT in `test.sh`
 
 Eine bewusste Entscheidung: die Abnahme dieser Runde soll dieselben
 Abschnitte fahren wie die Vergleichsgrundlage, sonst ist die Zahl
@@ -497,7 +497,7 @@ gefallen` (Lauf 2, ohne Abschnitt 10) bzw. der volle Lauf 3.
   einmal signiertes Modul bleibt für immer gültig. Windows hat dafür die
   „vulnerable driver blocklist"; Osum hat nichts.
 * **Der Schlüssel dieser Runde ist ein PRÜFSCHLÜSSEL** und liegt
-  absichtlich im Repo (`tools/modul/pruef.seed`). Für eine Auslieferung
+  absichtlich im Repo (`tools/module/pruef.seed`). Für eine Auslieferung
   braucht es einen anderen, der nirgends eingecheckt ist.
 
 **An der Messung:**
@@ -513,7 +513,7 @@ gefallen` (Lauf 2, ohne Abschnitt 10) bzw. der volle Lauf 3.
   `.skip 65536`). Es hat in jedem Lauf gehalten; die tatsächliche Tiefe
   ist unbekannt. `kernel/elf.fi` hat für seinen Pfad einmal 16 208 von
   16 384 gemessen — an dieser Sorte Zahl hängt mehr, als man denkt.
-* **`tools/modul/run.sh` steht nicht in `test.sh`.** Begründet oben.
+* **`tools/module/run.sh` steht nicht in `test.sh`.** Begründet oben.
 * **`/bin/opk` auf Osum selbst hat das Paket NICHT installiert.** Die
   Auslieferung ist bis zum Wurzelbaum gemessen (`opk.py` auf dem Wirt),
   und der Kern lädt aus genau diesem Baum. Dass Osums eigenes `/bin/opk`

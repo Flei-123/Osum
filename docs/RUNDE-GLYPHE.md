@@ -89,7 +89,7 @@ entschieden, nicht das Gefühl.
   (`+ cpu.here(state) * STAGE_MAX`), so wie `C_KSTACK` über die
   GS-Basis. Keine Sperre im Zeichenweg.
 
-`tools/glyphe/run.sh`, Abschnitt 6, gleicher Wirt, gleiche Platte,
+`tools/glyph/run.sh`, Abschnitt 6, gleicher Wirt, gleiche Platte,
 1000 Runden je Kern, je fünf Läufe, **Median**:
 
 | | Bauform B, je Kern | Bauform A, eine Sperre | Faktor |
@@ -162,7 +162,7 @@ Sperre stirbt nicht das Bild, sondern **der Kern**.
 
 ## 4. Die Zwischenablage — derselbe Fehler, vom Werkzeug gefunden
 
-Der erweiterte `tools/vielkern/onecore.py` (Abschnitt 6) hat in
+Der erweiterte `tools/multicore/onecore.py` (Abschnitt 6) hat in
 derselben Datei einen zweiten geteilten Puffer gemeldet:
 `wig.clip_set`/`clip_get` über `base(state) + CLIP_OFF`.
 
@@ -253,7 +253,7 @@ Werkzeugs und nicht als stille Ausnahme. Die dritte Liste `MITWISSEN`
 nennt die eine Stelle, die den geteilten Puffer mit Absicht anfasst
 (`stage_of` selbst, für die Gegenproben).
 
-Der Vertrag in `tools/vielkern/run.sh` steht damit auf **66**, mit
+Der Vertrag in `tools/multicore/run.sh` steht damit auf **66**, mit
 Begründung an Ort und Stelle.
 
 ---
@@ -478,7 +478,7 @@ Merge.
 
 ---
 
-## 10. `tools/laden/run.sh` — die zweite offene Auflage
+## 10. `tools/loader/run.sh` — die zweite offene Auflage
 
 ```
 LADEN: 31 passed, 0 failed
@@ -496,7 +496,7 @@ Wörtlich der Bruch aus MERGE-6 4.1, an einer dritten Stelle:
 `assets/apps/taskmgr.osp` ist ein Bündel, ein Bündel ist ein Verweis auf
 eine Datei unter `/bin`, und `/bin` dieses Läufers hat kein `taskmgr`.
 MERGE-6 hat den Riegel (`bundle.py nur=…`) in `tools/design/capture.sh`
-und `tools/vielkern/run.sh` eingebaut — hier nicht, weil dieser Läufer
+und `tools/multicore/run.sh` eingebaut — hier nicht, weil dieser Läufer
 in jener Runde nie lief. Dazu fehlte `$OUT/schluessel.pub`; er liegt in
 `/srv/store/osum/aktuell/` und wird jetzt von dort geholt.
 

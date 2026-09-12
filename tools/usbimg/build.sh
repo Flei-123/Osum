@@ -679,7 +679,7 @@ fi
 #
 # Certus, busybox, lua und sqlite liegen NICHT in diesem Baum -- sie
 # werden anderswo gebaut (Certus im eigenen Repo, die drei Fremdlinge
-# nach tools/fremd/README.md). Wer sie hat, gibt ihren Pfad an; wer
+# nach tools/foreign/README.md). Wer sie hat, gibt ihren Pfad an; wer
 # nicht, bekommt einen Stick ohne sie und keinen Abbruch. Genau so
 # haelt es die Stelle oben mit `firnc`.
 #
@@ -1210,7 +1210,7 @@ verbose: yes
 # Anwendungskern eine FALSCHE GS-Basis. Der Riegel MUSS das sehen und
 # Ring 3 auf Kern 0 halten -- auf der Tafel steht dann `R3W` groesser
 # null und `R3K 1`, UND DIE MASCHINE LAEUFT WEITER. Das ist derselbe
-# Nachweis, den tools/vielkern/run.sh in QEMU fuehrt, nur auf Blech.
+# Nachweis, den tools/multicore/run.sh in QEMU fuehrt, nur auf Blech.
 # (`r3blind` gibt es auf dem Stick absichtlich NICHT: das ist der
 # Eintrag, der die Maschine mit Absicht umbringt, und der gehoert in
 # den Pruefstand und nicht in die Hand eines Menschen vor einem

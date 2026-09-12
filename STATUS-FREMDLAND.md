@@ -20,7 +20,7 @@ Prozessen und der Grund, aus dem jede Röhre im zweiten Glied starb.
 LAUFZEIT schrieb „keine Zeile geändert", nannte aber weder Bezugsquelle
 noch Prüfsumme. Das wird hier nachgeholt, für **alle vier** Projekte.
 Die Archive liegen dauerhaft unter `/root/fremdquellen/`, das Skript, das
-den Nachweis führt, ist `tools/fremd/herkunft.sh`.
+den Nachweis führt, ist `tools/foreign/herkunft.sh`.
 
 | Projekt | Offizielle Bezugsquelle | SHA-256 des Archivs |
 |---|---|---|
@@ -48,7 +48,7 @@ keine Zeile Quelltext. Zwei unabhängige Wege zu denselben Oktetten.
 
 ### Der Nachweis, dass nichts geändert wurde
 
-`tools/fremd/herkunft.sh` packt jedes Archiv ein **zweites Mal** an einen
+`tools/foreign/herkunft.sh` packt jedes Archiv ein **zweites Mal** an einen
 frischen Ort und vergleicht es mit dem Baum, aus dem wirklich gebaut wurde:
 
 ```
@@ -87,10 +87,10 @@ stimmen, sie zählen Verschiedenes; hier steht ab jetzt die weitere.
 ## 1. busybox läuft — die Tabelle
 
 Gebaut mit `musl-gcc -static` gegen das Linkerskript aus LAUFZEIT
-(`tools/fremd/osum.ld`, ab `0x40100000`, drei seitenausgerichtete
-`PT_LOAD`), eigenes `_start` (`tools/fremd/start.s`) und der
-`auxv`-Aufbau aus `tools/fremd/osum_main.c`. Konfiguration:
-`tools/fremd/busybox-config.sh` (61 Optionen, aus `allnoconfig`
+(`tools/foreign/osum.ld`, ab `0x40100000`, drei seitenausgerichtete
+`PT_LOAD`), eigenes `_start` (`tools/foreign/start.s`) und der
+`auxv`-Aufbau aus `tools/foreign/osum_main.c`. Konfiguration:
+`tools/foreign/busybox-config.sh` (61 Optionen, aus `allnoconfig`
 hochgezogen). Ergebnis: **342 256 Oktette, 35 Applets, 71 Seiten im
 Speicher**.
 
@@ -230,7 +230,7 @@ Programm, kein Raten:
 
 | Versuch | Ergebnis |
 |---|---|
-| `fork`, Kind fasst die Halde an (`tools/fremd/forktest.c`) | **läuft** — Kind sieht `vater`, Ende 7 kommt an |
+| `fork`, Kind fasst die Halde an (`tools/foreign/forktest.c`) | **läuft** — Kind sieht `vater`, Ende 7 kommt an |
 | `fork` + 200 `malloc` im Kind | **läuft** |
 | `fork` + `execve` | **stirbt** |
 | `execve` **allein**, ohne `fork` | **stirbt** — damit ist `fork` entlastet |
@@ -240,7 +240,7 @@ Also: nicht die Röhre, nicht `fork` — **`execve`**. Und die Frage war
 damit nicht mehr „warum stürzt malloc ab", sondern „was findet das neue
 Abbild vor, das ein frisches nicht findet".
 
-**Die Messung** (`tools/fremd/brkzero2.c`, ruft `brk` direkt, an musls
+**Die Messung** (`tools/foreign/brkzero2.c`, ruft `brk` direkt, an musls
 malloc vorbei, und zählt zwei frische Seiten aus):
 
 ```
@@ -286,7 +286,7 @@ TLS kostet nichts" genau einmal falsch ist.
 
 ## 4. Fäden
 
-`tools/fremd/threads.c`: vier Fäden, je 25 000 Runden, jeder zählt seinen
+`tools/foreign/threads.c`: vier Fäden, je 25 000 Runden, jeder zählt seinen
 eigenen Zähler hoch **und** einen gemeinsamen unter `pthread_mutex`.
 
 ```
@@ -346,7 +346,7 @@ Halter-tgid)`; 64 davon zu 48 Oktetten in einer Seite
 Deskriptor — zwei Prozesse mit derselben Datei haben zwei Deskriptoren
 und **eine** Datei, und POSIX entscheidet nach der Datei.
 
-`tools/fremd/locktest.c`, zwei Prozesse, sechs Fälle:
+`tools/foreign/locktest.c`, zwei Prozesse, sechs Fälle:
 
 ```
 lk: A setzt WRLCK 0..9                 -> 0
@@ -361,7 +361,7 @@ lk: D WRLCK 200..209 gegen die RDLCK   -> -1  ABGELEHNT-RICHTIG
 
 ### Und die Abnahme, die der Auftrag verlangt: SQLite aus zwei Prozessen
 
-`tools/fremd/sqlock.c` — der Vater lässt eine Schreibtransaktion offen,
+`tools/foreign/sqlock.c` — der Vater lässt eine Schreibtransaktion offen,
 das Kind versucht zu schreiben:
 
 ```
@@ -405,7 +405,7 @@ LAUFZEIT meldete „Osums Shell entfernt Anführungszeichen,
 `lua -e print("A")` ergibt `nil`". Die Ursache ist **nicht**, dass die
 Shell Anführungszeichen frisst — einfache Anführungszeichen waren immer
 richtig. Es sind **zwei Löcher beim Rückstrich**, beide mit einem
-Programm gemessen, das nur sein `argv` druckt (`tools/fremd/argvdump.c`):
+Programm gemessen, das nur sein `argv` druckt (`tools/foreign/argvdump.c`):
 
 ```
 vorher   av "print(\"A\")"   ->  argv[1] = [print(\A\)]
@@ -541,14 +541,14 @@ jetzt: **106 Bereiche, 0 Kollisionen**.
 
 ```
 # Herkunft prüfen (Prüfsummen + diff -r gegen die Originalarchive)
-bash tools/fremd/herkunft.sh
+bash tools/foreign/herkunft.sh
 
 # busybox
-bash tools/fremd/busybox-config.sh          # 61 Optionen aus allnoconfig
+bash tools/foreign/busybox-config.sh          # 61 Optionen aus allnoconfig
 make -C busybox -j8 CC=musl-gcc SKIP_STRIP=y
-musl-gcc -static -O2 -nostartfiles -T tools/fremd/osum.ld \
+musl-gcc -static -O2 -nostartfiles -T tools/foreign/osum.ld \
     -Wl,--build-id=none -Wl,--start-group \
-    -o busybox-osum tools/fremd/start.s tools/fremd/osum_main.c \
+    -o busybox-osum tools/foreign/start.s tools/foreign/osum_main.c \
     busybox/applets/built-in.o $(find busybox -name lib.a) -Wl,--end-group
 
 # aufs Abbild: EIN Exemplar, 35 Namen

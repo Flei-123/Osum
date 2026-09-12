@@ -40,7 +40,7 @@ Das ist der bemerkenswerte Teil der Bestandsaufnahme. `git diff merge9
 schleuse2` zeigt zwar 824 Dateien Unterschied — aber das ist fast
 ausschließlich **Rückstand**, nicht Beifang: Dateien, die `merge9`
 inzwischen hat und `schleuse2` noch nicht kennt (`pruef/`,
-`tools/explorer2/`, `tools/fremd/` …). Gegen die **gemeinsame Basis**
+`tools/explorer2/`, `tools/foreign/` …). Gegen die **gemeinsame Basis**
 gemessen fasst `schleuse2` genau die 41 oben an. Es war nichts
 auszusortieren.
 
