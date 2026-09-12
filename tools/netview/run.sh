@@ -122,11 +122,13 @@ for s in 0 1; do
     if [ "$s" = 0 ]; then cc=$FIRNC; else cc=$FC1; fi
     rc=0
     for p in $PROGS; do
-        "$cc" "kernel/user/$p.fi" -o "$TMPD/$p$s.o" > "$TMPD/e$p$s" 2>&1 || {
+        UPROF=""; UCRT="$TMPD/crt.o"
+        grep -qa '^profile app' "kernel/user/$p.fi" && { UPROF=--profile=app; UCRT=""; }
+        "$cc" $UPROF -c "kernel/user/$p.fi" -o "$TMPD/$p$s.o" > "$TMPD/e$p$s" 2>&1 || {
             bad "firnc$s does not compile $p.fi"
             sed 's/^/        /' "$TMPD/e$p$s" | head -8; rc=1; continue; }
         ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F$s.u_start" \
-            -o "$TMPD/$p$s.elf" "$TMPD/crt.o" "$TMPD/$p$s.o" \
+            -o "$TMPD/$p$s.elf" $UCRT "$TMPD/$p$s.o" \
             2>"$TMPD/ld$s.err" || { bad "firnc$s: ld fails on $p"; rc=1; continue; }
         strip --strip-all "$TMPD/$p$s.elf"
     done
@@ -438,9 +440,11 @@ GBASE="gfx wm wig desk wmhold wiglong nokbd nosched noproc nofs"
 grc=0
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null
 for pgm in $GPROGS; do
-    "$FIRNC" "kernel/user/$pgm.fi" -o "$TMPD/g$pgm.o" > "$TMPD/ge$pgm" 2>&1 \
+    UPROF=""; UCRT="$TMPD/crt.o"
+    grep -qa '^profile app' "kernel/user/$pgm.fi" && { UPROF=--profile=app; UCRT=""; }
+    "$FIRNC" $UPROF -c "kernel/user/$pgm.fi" -o "$TMPD/g$pgm.o" > "$TMPD/ge$pgm" 2>&1 \
         && ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" \
-            -o "$TMPD/g$pgm.elf" "$TMPD/crt.o" "$TMPD/g$pgm.o" 2>/dev/null \
+            -o "$TMPD/g$pgm.elf" $UCRT "$TMPD/g$pgm.o" 2>/dev/null \
         && strip --strip-all "$TMPD/g$pgm.elf" \
         || { bad "the graphical userland does not build: $pgm"; sed 's/^/        /' "$TMPD/ge$pgm" | head -6; grc=1; }
 done

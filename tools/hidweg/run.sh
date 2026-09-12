@@ -113,10 +113,12 @@ PROGS="desktop taskbar settings launcher dhcp explorer widgetdemo locate sh echo
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || bad "crt.s assembliert nicht"
 rc=0
 for p in $PROGS; do
-    vendor/firn/bin/firnc "kernel/user/$p.fi" -o "$TMPD/$p.o" > "$TMPD/e$p" 2>&1 || {
+    UPROF=""; UCRT="$TMPD/crt.o"
+    grep -qa '^profile app' "kernel/user/$p.fi" && { UPROF=--profile=app; UCRT=""; }
+    vendor/firn/bin/firnc $UPROF -c "kernel/user/$p.fi" -o "$TMPD/$p.o" > "$TMPD/e$p" 2>&1 || {
         bad "firnc uebersetzt $p.fi nicht"; sed 's/^/        /' "$TMPD/e$p" | head -5; rc=1; continue; }
     ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" \
-        -o "$TMPD/$p.elf" "$TMPD/crt.o" "$TMPD/$p.o" 2>/dev/null || { bad "ld faellt bei $p"; rc=1; continue; }
+        -o "$TMPD/$p.elf" $UCRT "$TMPD/$p.o" 2>/dev/null || { bad "ld faellt bei $p"; rc=1; continue; }
     strip --strip-all "$TMPD/$p.elf"
 done
 [ $rc -eq 0 ] && ok "$(echo $PROGS | wc -w) Programme fuer Ring 3 gebaut"
