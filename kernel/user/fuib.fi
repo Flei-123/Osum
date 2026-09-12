@@ -1,0 +1,474 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/fuib.fi -- DIE BRUECKE: wlibs BEDIENELEMENTE KOMMEN AB
+// JETZT AUS fUi.
+//
+// ====================================================== WARUM SIE EXISTIERT
+//
+// Justin, 11.09.2026, woertlich: "wenn fui alles kann bitte bau es
+// ueberall ein. ich will nicht dass jemand es selber hardcodiert oder
+// eine eigene library verwendet, das ergibt nur chaos, wenns ein bug
+// gibt brauchen wir nur einmal die lib aendern."
+//
+// Genau dieses Chaos stand im Baum: fUi (7963 Zeilen, lib/fui, ueber
+// den festgenagelten Commit in JEDEM Baum derselbe) malt einen Knopf,
+// und wlib.fi malt DENSELBEN Knopf ein zweites Mal, 1168 Zeilen weiter
+// unten -- paint_button, paint_slider, paint_check, paint_entry,
+// paint_list, paint_table, paint_tabs, paint_tile, mal_tafel,
+// mal_balken. Zwei Umsetzungen einer Optik heisst: zwei Orte fuer
+// jeden Fehler, und der zweite wird vergessen.
+//
+// ============================================ WARUM ES EINE BRUECKE IST
+//                                              UND NICHT EIN NEUBAU
+//
+// Gemessen in diesem Baum, nicht angenommen: von wlibs 7246 Zeilen sind
+// nur 1168 Bedienelemente und Malschicht. Die anderen 6078 sind etwas
+// ANDERES als eine Widget-Bibliothek:
+//
+//   on_down 272 Zeilen, taste_verarbeiten 199, on_move 163, step 132
+//        -- die Ereignisschleife und die Tastatur,
+//   begin/window/window_app/new_win/place/dirty/paint_all
+//        -- der Fensterserver und die Schmutzrechtecke,
+//   box_v/box_h/box_grid/box_at  -- das Kastenlayout,
+//   dlg_new 99/dlg_wahl 84       -- die Dialoge,
+//   anim_*, theme_watch, sel_*, K_LEINWAND (fuer Certus).
+//
+// Dahinter haengen 23 Programme mit ueber 1300 Aufrufstellen --
+// settings.fi allein 363. fUi ist IMMEDIATE MODE (malt ein Widget je
+// Bild), wlib ist RETAINED MODE (haelt eine Widgetliste). Das sind
+// zwei Architekturen; wer sie in einem Schritt tauscht, fasst 23
+// Programme gleichzeitig an und kann am Ende nichts davon messen.
+//
+// Also die Naht dort, wo die beiden sich WIRKLICH ueberschneiden:
+// `wlib.paint_one` -- die EINE Stelle, an der wlib entscheidet, welches
+// Element gemalt wird. Sie ruft ab jetzt hierher, und hier malt fUi.
+// Die Programme merken nichts, die Fensterverwaltung bleibt, und es
+// gibt trotzdem nur noch EINE Umsetzung jedes Bedienelements.
+//
+// ============================================== WIE fUi AUF DIE FLAECHE KOMMT
+//
+// Ohne zweiten Puffer und ohne Kopie. `wlibc.surface()` gibt die
+// Fensterflaeche des Servers her: w * h * 4 Oktette, ein 32-Bit-Punkt
+// je Stelle, zeilenweise -- `wlibc.px` schreibt an (r * w + x) * 4.
+// `paint.canvas.Canvas` ist dasselbe: `px: *mut u8`, w * h * 4, RGBA.
+// Also zeigt die Leinwand DIREKT auf die Flaeche des Servers
+// (`canvas_on_surface`), und fUi malt dort, wo wlibc malen wuerde.
+//
+// Das ist gemessen und nicht gehofft: /tmp/mix2/wrap.fi hat genau das
+// getan und liess sich zu einer Ring-3-ELF binden.
+//
+// ================================================== DAS FARBSCHEMA GEWINNT
+//
+// fUi bringt eigene Farben mit (theme.colors_light/colors_dark). Die
+// werden hier NICHT benutzt. Das System hat ein Schema -- /etc/theme.conf,
+// fuenf Schemata, hell/dunkel/automatisch, Akzentfarbe -- und es liegt
+// in `wlibc.theme(T_*)`. `theme_from_osum` schreibt genau diese Werte
+// in fUis Farbtafel. Damit schlaegt ein Wechsel des Schemas durch, ohne
+// dass hier eine Farbe steht, und ein dunkles System hat kein weisses
+// Fenster.
+profile app
+
+import wlibc
+import paint.canvas
+import font.metrics
+import fui.theme
+import fui.style
+import fui.widget
+import fui.painter
+import fui.render
+import fui.wave2
+
+export {
+    bereit, mal, mal_flaeche_an, thema_neu,
+    // RUNDE 31: DIE ZAEHLER. Ohne sie ist "fUi malt jetzt" eine
+    // Behauptung: `mal` hat einen Rueckfall auf wlibs alten Weg, und
+    // ein Bild sieht in beiden Faellen aehnlich aus. Diese zwei Zahlen
+    // sagen, WELCHER Weg gelaufen ist -- gemalt und abgelehnt.
+    fui_gemalt, fui_abgelehnt,
+    // RUNDE 31: die MALSCHICHT. wlibs `mal_tafel`/`mal_flaeche`/
+    // `mal_balken` geben ihre Farbe SELBST vor (das Kontrollzentrum
+    // waehlt sie sorgfaeltig) -- fUi soll sie malen, nicht ersetzen.
+    tafel, flaeche, ring,
+    // Fuer wlib: die Zustaende, die ein Element haben kann.
+    Z_NORMAL, Z_HOVER, Z_PRESSED, Z_OFF, Z_FOCUS,
+    // Die Sorten, die diese Bruecke malen kann.
+    S_BUTTON, S_LABEL, S_CHECK, S_ENTRY, S_SLIDER, S_TILE,
+    S_CARD, S_SEP, S_TABS, S_MENUBAR, S_CHOICE, S_SCROLL,
+    S_PROGRESS,
+}
+
+const Z_NORMAL: u64 = 0
+const Z_HOVER: u64 = 1
+const Z_PRESSED: u64 = 2
+const Z_OFF: u64 = 3
+const Z_FOCUS: u64 = 4
+
+const S_BUTTON: u64 = 0
+const S_LABEL: u64 = 1
+const S_CHECK: u64 = 2
+const S_ENTRY: u64 = 3
+const S_SLIDER: u64 = 4
+const S_TILE: u64 = 5
+const S_CARD: u64 = 6
+const S_SEP: u64 = 7
+const S_TABS: u64 = 8
+const S_MENUBAR: u64 = 9
+const S_CHOICE: u64 = 10
+const S_SCROLL: u64 = 11
+const S_PROGRESS: u64 = 12
+
+// Der Zustand dieser Bruecke. Er wird EINMAL aufgebaut und dann bei
+// jedem Anstrich benutzt -- eine Leinwand je Bild waere eine
+// Speicheranforderung je Bild.
+// ANMERKUNG ZU DEN `static`s: Firn schreibt den Anfangswert eines
+// `static` in die Objektdatei, also MUSS er ein Literal sein -- es
+// laeuft kein Code vor `main`, der ihn ausrechnen koennte (SPEC
+// 14.1.statics). `canvas_new()` und `theme_new()` sind Aufrufe, also
+// hier nicht erlaubt.
+//
+// Die Strukturen liegen deshalb als WORTFELDER da und werden in
+// `bereit()` einmal richtig gefuellt. Das ist dieselbe Bauweise, die
+// wlib fuer seine Fenstertafel benutzt: ein Feld Woerter, ein Zeiger
+// darauf, und die Struktur liegt darin. Reichlich bemessen, damit ein
+// Zuwachs in der Bibliothek hier nicht still daneben schreibt --
+// geprueft wird das trotzdem, siehe `bereit`.
+// Firn will bei der Laenge eines Feldes eine ZAHL sehen, keinen
+// benannten Wert -- deshalb stehen die 128/64/128 hier ausgeschrieben
+// und die Namen daneben nur als Erklaerung.
+//   s_cvm  128 Woerter = 1024 Oktette  fuer paint.canvas.Canvas
+//   s_pzm   64 Woerter =  512 Oktette  fuer fui.painter.Painter
+//   s_thm  128 Woerter = 1024 Oktette  fuer fui.theme.Theme
+// Ob das reicht, wird in `bereit()` GEMESSEN und nicht geglaubt.
+const CV_BYTES: usize = 1024
+const PZ_BYTES: usize = 512
+const TH_BYTES: usize = 1024
+
+static mut s_auf: u64 = 0
+static mut s_cvm: [u64; 128] = [0; 128]
+static mut s_pzm: [u64; 64] = [0; 64]
+static mut s_thm: [u64; 128] = [0; 128]
+static mut s_ctx: render.Ctx = render.Ctx { m: 0, z: 0 }
+static mut s_fm: u64 = 0
+static mut s_n_ok: u64 = 0
+static mut s_n_no: u64 = 0
+
+fn fui_gemalt() -> u64 {
+    return s_n_ok
+}
+
+fn fui_abgelehnt() -> u64 {
+    return s_n_no
+}
+
+fn cv() -> *mut canvas.Canvas {
+    return ((&s_cvm[0 as usize]) as u64) as *mut canvas.Canvas
+}
+
+fn pz() -> *mut painter.Painter {
+    return ((&s_pzm[0 as usize]) as u64) as *mut painter.Painter
+}
+
+fn th() -> *mut theme.Theme {
+    return ((&s_thm[0 as usize]) as u64) as *mut theme.Theme
+}
+
+// ------------------------------------------------------------------
+// DIE LEINWAND ZEIGT AUF DIE FENSTERFLAECHE.
+//
+// `canvas_init` wuerde einen eigenen Puffer anfordern; das ist hier
+// genau falsch -- die Bildpunkte gehoeren dem Fensterserver. Die
+// Felder werden deshalb direkt gesetzt. Es gibt in `paint.canvas`
+// kein `canvas_wrap`, und eines dort einzubauen waere eine Aenderung
+// an der gemeinsamen Bibliothek fuer einen Fall, den nur Osum hat.
+// ------------------------------------------------------------------
+fn canvas_on_surface(c: *mut canvas.Canvas, px: u64, w: usize, h: usize) {
+    (*c).px = px as *mut u8
+    (*c).w = w
+    (*c).h = h
+    (*c).cap = w * h * 4
+    (*c).depth = 0
+    (*c).mode = canvas.BLEND_NORMAL
+    (*c).cx0[0] = 0.0
+    (*c).cy0[0] = 0.0
+    (*c).cx1[0] = w as f64
+    (*c).cy1[0] = h as f64
+    (*c).cmask[0] = 0
+    (*c).ok = 1
+}
+
+// ------------------------------------------------------------------
+// DAS SCHEMA DES SYSTEMS IN fUis FARBTAFEL.
+//
+// Jede Rolle, die fUi kennt, bekommt den Wert, den das System dafuer
+// fuehrt. Wo Osum keine eigene Rolle hat, wird die naechstliegende
+// genommen und das steht daneben -- geraten wird nichts.
+// ------------------------------------------------------------------
+fn thema_neu() {
+    let dunkel: bool = wlibc.theme_dark()
+    theme.theme_set_dark(th(), dunkel)
+    let f: *mut theme.Colors = theme.theme_colors(th())
+    (*f).base = wlibc.theme(wlibc.T_BG) as u32
+    (*f).surface = wlibc.theme(wlibc.T_PANEL) as u32
+    // Eine Karte und ein Menue stehen naeher am Auge als die Flaeche.
+    (*f).surface_raised = wlibc.theme(wlibc.T_MENU) as u32
+    (*f).button = wlibc.theme(wlibc.T_BTN) as u32
+    (*f).button_hover = wlibc.theme(wlibc.T_BTNHI) as u32
+    (*f).button_active = wlibc.theme(wlibc.T_BTNDN) as u32
+    (*f).field = wlibc.theme(wlibc.T_ENTRY) as u32
+    // Osum kennt kein eigenes "Feld hat den Fokus": der Fokusring
+    // macht das sichtbar, die Flaeche bleibt.
+    (*f).field_focus = wlibc.theme(wlibc.T_ENTRY) as u32
+    (*f).border_col = wlibc.theme(wlibc.T_LINE) as u32
+    (*f).separator = wlibc.theme(wlibc.T_LINE) as u32
+    (*f).text = wlibc.theme(wlibc.T_FG) as u32
+    (*f).text_muted = wlibc.theme(wlibc.T_DIM) as u32
+    (*f).text_disabled = wlibc.theme(wlibc.T_DIM) as u32
+    (*f).accent = wlibc.theme(wlibc.T_ACCENT) as u32
+    (*f).selection = wlibc.theme(wlibc.T_SEL) as u32
+    (*f).selection_text = wlibc.theme(wlibc.T_SELFG) as u32
+    (*f).text_on_accent = wlibc.theme(wlibc.T_SELFG) as u32
+    (*f).dark = dunkel
+    // Die Form: Osum fuehrt die Radien in seinen Metriken, und
+    // `classic` heisst Radius 0. Dieselbe Zahl, nicht eine zweite.
+    let fo: *mut theme.Shape = theme.theme_shape(th())
+    (*fo).r_button = wlibc.metric(wlibc.M_RADIUS_BUTTON) as usize
+    (*fo).r_panel = wlibc.metric(wlibc.M_RADIUS_PANEL) as usize
+    (*fo).r_window = wlibc.metric(wlibc.M_RADIUS_WINDOW) as usize
+    (*fo).r_field = wlibc.metric(wlibc.M_RADIUS_INPUT) as usize
+    (*fo).border_w = wlibc.metric(wlibc.M_BORDER) as usize
+}
+
+// ------------------------------------------------------------------
+// EINMAL AUFBAUEN. Danach ist `bereit` wahr und `mal` kann malen.
+//
+// Die Schrift ist die des Systems, nicht die der Bibliothek: Osum
+// rastert seine Glyphen selbst (wlibc), und fUis Maler braucht eine
+// eigene Schrift nur fuer den Text, den er selbst setzt. Findet er
+// keine, malt er die Flaechen und ueberlaesst den Text der
+// aufrufenden Seite -- genau so, wie wlib den Text heute schon selbst
+// setzt (`put_text`, damit Umlaute und Kuerzung gleich bleiben).
+// ------------------------------------------------------------------
+fn bereit() -> bool {
+    if s_auf != 0 {
+        return true
+    }
+    let sp: u64 = wlibc.surface()
+    if sp == 0 {
+        return false
+    }
+    let w: usize = wlibc.surf_w() as usize
+    let h: usize = wlibc.surf_rows() as usize
+    if w == 0 || h == 0 {
+        return false
+    }
+    // DIE WORTFELDER MUESSEN GROSS GENUG SEIN. Wuechse eine der
+    // Strukturen in der Bibliothek ueber ihr Feld hinaus, schriebe
+    // `painter_init` daneben -- in `s_thm` oder ins Nichts. Das waere
+    // ein Fehler, der irgendwo ANDERS auftaucht. Also einmal messen,
+    // und zwar an der Struktur selbst und nicht an einer getippten
+    // Zahl: der Abstand zweier Felder eines Feldes IST ihre Groesse.
+    var mcv: [canvas.Canvas; 2] = [canvas.canvas_new(); 2]
+    let ncv: usize = ((&mcv[1]) as u64 - (&mcv[0]) as u64) as usize
+    var mpz: [painter.Painter; 2] = [painter.painter_new(); 2]
+    let npz: usize = ((&mpz[1]) as u64 - (&mpz[0]) as u64) as usize
+    var mth: [theme.Theme; 2] = [theme.theme_new(false); 2]
+    let nth: usize = ((&mth[1]) as u64 - (&mth[0]) as u64) as usize
+    if ncv > CV_BYTES || npz > PZ_BYTES || nth > TH_BYTES {
+        return false
+    }
+    canvas_on_surface(cv(), sp, w, h)
+    if !painter.painter_init(pz(), cv(), w, 64) {
+        return false
+    }
+    painter.painter_set_font(pz(), s_fm)
+    *th() = theme.theme_new(wlibc.theme_dark())
+    thema_neu()
+    s_ctx = render.ctx_new(th(), pz())
+    s_auf = 1
+    return true
+}
+
+// Die Flaeche kann sich aendern (Fenstergroesse, Aufloesung, Band).
+// Dann zeigt die Leinwand auf den falschen Speicher, und das waere ein
+// Schreiben daneben -- also bei jedem Anstrich nachziehen.
+fn mal_flaeche_an() {
+    let sp: u64 = wlibc.surface()
+    if sp == 0 {
+        return
+    }
+    let w: usize = wlibc.surf_w() as usize
+    let h: usize = wlibc.surf_rows() as usize
+    if ((*cv()).px as u64) != sp || (*cv()).w != w || (*cv()).h != h {
+        canvas_on_surface(cv(), sp, w, h)
+    }
+}
+
+// ------------------------------------------------------------------
+// EINE TAFEL MIT VORGEGEBENER FARBE -- fUis Maler, wlibs Farbe.
+//
+// `mal_tafel` bekommt Fuellung und Rand vom Aufrufer; das Kontroll-
+// zentrum rechnet seine Kachelfarben aus dem Schema und dem Zustand
+// selbst. fUi soll hier also nicht die Farbe BESTIMMEN, sondern die
+// FLAECHE malen -- dieselbe Kurve, derselbe Radius, ein Rasterer.
+// Genau das ist `painter.round_rect`/`round_ring`.
+fn tafel(x: u64, y: u64, w: u64, h: u64, r: u64, fuellung: u64,
+    rand: u64, randbreite: u64) -> bool {
+    if !bereit() {
+        s_n_no = s_n_no + 1
+        return false
+    }
+    if w == 0 || h == 0 {
+        s_n_no = s_n_no + 1
+        return false
+    }
+    mal_flaeche_an()
+    let b: u64 = wlibc.band_y()
+    if y < b {
+        s_n_no = s_n_no + 1
+        return false
+    }
+    let fy: f64 = (y - b) as f64
+    // `rrect` deckelt den Radius auf die halbe kuerzere Seite, und
+    // MR_GRIFF schickt absichtlich 0xFFFF ("so rund wie moeglich").
+    // Dieselbe Deckelung hier, sonst malt fUi eine Ecke, wo wlib eine
+    // Kapsel gemalt haette.
+    var rr: u64 = r
+    var kurz: u64 = w
+    if h < kurz {
+        kurz = h
+    }
+    if rr > kurz / 2 {
+        rr = kurz / 2
+    }
+    painter.round_rect(pz(), x as f64, fy, w as f64, h as f64,
+        rr as f64, fuellung as u32)
+    if rand != 0 && randbreite != 0 {
+        painter.round_ring(pz(), x as f64, fy, w as f64, h as f64,
+            rr as f64, randbreite as f64, rand as u32)
+    }
+    s_n_ok = s_n_ok + 1
+    return true
+}
+
+// Eine Flaeche ohne Radius und ohne Rand -- `mal_flaeche`.
+fn flaeche(x: u64, y: u64, w: u64, h: u64, farbe: u64) -> bool {
+    return tafel(x, y, w, h, 0, farbe, 0, 0)
+}
+
+// Nur der Rand -- der Fokusring.
+fn ring(x: u64, y: u64, w: u64, h: u64, r: u64, breite: u64,
+    farbe: u64) -> bool {
+    if !bereit() {
+        s_n_no = s_n_no + 1
+        return false
+    }
+    if w == 0 || h == 0 || breite == 0 {
+        s_n_no = s_n_no + 1
+        return false
+    }
+    mal_flaeche_an()
+    let b: u64 = wlibc.band_y()
+    if y < b {
+        s_n_no = s_n_no + 1
+        return false
+    }
+    painter.round_ring(pz(), x as f64, (y - b) as f64, w as f64,
+        h as f64, r as f64, breite as f64, farbe as u32)
+    s_n_ok = s_n_ok + 1
+    return true
+}
+
+fn zustand_setzen(e: *mut widget.Widget, z: u64) {
+    if z == Z_HOVER {
+        widget.w_set_hover(e, true)
+    } else if z == Z_PRESSED {
+        widget.w_set_active(e, true)
+    } else if z == Z_OFF {
+        widget.w_set_disabled(e, true)
+    } else if z == Z_FOCUS {
+        widget.w_set_focus(e, true)
+    }
+}
+
+fn art_von(sorte: u64) -> u32 {
+    if sorte == S_BUTTON {
+        return widget.KIND_BUTTON
+    }
+    if sorte == S_LABEL {
+        return widget.KIND_LABEL
+    }
+    if sorte == S_CHECK {
+        return widget.KIND_CHECKBOX
+    }
+    if sorte == S_ENTRY {
+        return widget.KIND_TEXTBOX
+    }
+    if sorte == S_SLIDER {
+        return widget.KIND_SLIDER
+    }
+    if sorte == S_TILE {
+        return widget.KIND_TOGGLE
+    }
+    if sorte == S_CARD {
+        return widget.KIND_CARD
+    }
+    if sorte == S_SEP {
+        return widget.KIND_SEPARATOR
+    }
+    if sorte == S_TABS {
+        return widget.KIND_TAB
+    }
+    if sorte == S_MENUBAR {
+        return widget.KIND_MENU
+    }
+    if sorte == S_CHOICE {
+        return widget.KIND_DROPDOWN
+    }
+    if sorte == S_SCROLL {
+        return widget.KIND_SCROLLBAR
+    }
+    if sorte == S_PROGRESS {
+        return widget.KIND_PROGRESS
+    }
+    return widget.KIND_NONE
+}
+
+// ------------------------------------------------------------------
+// EIN ELEMENT MALEN. Das ist alles, was wlib von hier braucht.
+//
+// `wert` ist der Wert von Regler, Fortschritt und Umschalter; bei den
+// uebrigen Sorten wird er nicht gelesen. Der TEXT wird hier NICHT
+// gemalt: Osum setzt seinen Text selbst (Umlaute, Kuerzung, die
+// Symbolschrift, `say_painted` fuer die Pruefstaende), und zwei
+// Schriftsetzer auf einer Flaeche waeren zwei Ergebnisse.
+// ------------------------------------------------------------------
+fn mal(sorte: u64, x: u64, y: u64, w: u64, h: u64, z: u64,
+    wert: u64) -> bool {
+    if !bereit() {
+        s_n_no = s_n_no + 1
+        return false
+    }
+    if w == 0 || h == 0 {
+        s_n_no = s_n_no + 1
+        return false
+    }
+    mal_flaeche_an()
+    let art: u32 = art_von(sorte)
+    if art == widget.KIND_NONE {
+        s_n_no = s_n_no + 1
+        return false
+    }
+    var e: widget.Widget = widget.widget_new(art)
+    // Das Band: wlibc malt in Fensterkoordinaten, die Flaeche des
+    // Servers beginnt bei `band_y`. Dieselbe Rechnung wie wlibc.px.
+    let b: u64 = wlibc.band_y()
+    if y < b {
+        s_n_no = s_n_no + 1
+        return false
+    }
+    widget.w_place(&e, x as f64, (y - b) as f64, w as f64, h as f64)
+    zustand_setzen(&e, z)
+    widget.w_set_value(&e, wert as i64)
+    wave2.draw_any(&s_ctx, &e)
+    s_n_ok = s_n_ok + 1
+    return true
+}

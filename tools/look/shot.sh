@@ -171,11 +171,26 @@ for p in $progs; do
        && [ -n "$USERNEW" ] && [ "$BUILDD/$p.elf" -nt "$USERNEW" ]; then
         continue
     fi
-    vendor/firn/bin/firnc "kernel/user/$p.fi" -o "$BUILDD/$p.o" \
+    vendor/firn/bin/firnc -c "kernel/user/$p.fi" -o "$BUILDD/$p.o" \
         > "$BUILDD/e-$p" 2>&1 \
         || { echo "FAILED to compile $p"; head -20 "$BUILDD/e-$p"; exit 1; }
+    # RUNDE 31: EIN PROGRAMM IM PROFIL `app` BRINGT SEINEN `_start` MIT.
+    #
+    # Wessen Bedienelemente aus fUi kommen, dessen Wurzeldatei ist
+    # `profile app` (fUi rechnet in f64 und benutzt std.rt, beides ist
+    # unter `kernel` gesperrt). Unter `app` legt firnc dieselben vier
+    # Befehle hinein, die auch in crt.s stehen -- crt.o dazuzubinden
+    # waere dann "multiple definition of `_start`".
+    #
+    # Also: crt.o nur fuer die Programme, die es noch brauchen. Die
+    # Unterscheidung wird nicht getippt, sondern GELESEN -- sonst
+    # stimmt sie nach der naechsten Umstellung nicht mehr.
+    CRT="$BUILDD/crt.o"
+    if grep -qa '^profile app' "kernel/user/$p.fi"; then
+        CRT=""
+    fi
     ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" \
-        -o "$BUILDD/$p.elf" "$BUILDD/crt.o" "$BUILDD/$p.o" 2>"$BUILDD/ld.err" \
+        -o "$BUILDD/$p.elf" $CRT "$BUILDD/$p.o" 2>"$BUILDD/ld.err" \
         || { echo "FAILED to link $p"; cat "$BUILDD/ld.err"; exit 1; }
     strip --strip-all "$BUILDD/$p.elf"
 done
