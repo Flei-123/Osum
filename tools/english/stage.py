@@ -31,7 +31,14 @@ def group(files):
 def modname(f): return f.split('/')[-1][:-3]
 
 def build(stage):
-    rows=[r for r in csv.DictReader(open(TSV),delimiter='\t') if group(r['decl_files'])==stage]
+    all_rows=list(csv.DictReader(open(TSV),delimiter='\t'))
+    if stage.startswith('FILE:'):
+        # one single declaring file at a time -- used for the four reserved
+        # files (wlib, wlibc, taskbar, fuib), which come last and separately.
+        want=stage[5:]
+        rows=[r for r in all_rows if want in r['decl_files'].split(';')]
+    else:
+        rows=[r for r in all_rows if group(r['decl_files'])==stage]
     glob={}; own=collections.defaultdict(dict); qual=collections.defaultdict(dict)
     for r in rows:
         o,n=r['old'],r['new']
