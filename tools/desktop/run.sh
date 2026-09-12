@@ -168,6 +168,11 @@ mk_image() { # image conf-file
     for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/${p}0.elf"); done
     ARGS+=("/bin/files@/bin/explorer")
     ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme" "/etc/taskbar.conf=$cf")
+    # The bar's `taskbar: text ...` lines are a MEASUREMENT OUTPUT and are
+    # off unless this file exists -- same switch `wlib` uses. This runner
+    # reads those lines, so it turns them on.
+    printf 'on\n' > "$TMPD/uitrace"
+    ARGS+=("/etc/uitrace=$TMPD/uitrace")
     while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel" nur="$PROGS")
     while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
     python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1

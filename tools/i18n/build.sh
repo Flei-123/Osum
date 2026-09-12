@@ -110,6 +110,11 @@ ARGS=(build "$OUT/disk.img" 16384 /lib/
       /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$OUT/$p.elf"); done
 ARGS+=(/etc/ "/etc/theme=$OUT/theme" "/etc/passwd=$OUT/passwd")
+# Die `taskbar: text ...`-Zeilen sind ein MESSAUSGANG und stehen im
+# Normalbetrieb aus; `/etc/uitrace` schaltet sie ein -- derselbe
+# Schalter wie bei `wlib`. Abschnitt 299 dieses Laufs liest sie.
+printf 'on\n' > "$OUT/uitrace"
+ARGS+=("/etc/uitrace=$OUT/uitrace")
 # DIE SPRACHDATEIEN. /usr/share/locale/<code>/messages -- englische
 # Pfade, ISO-639-Codes als Verzeichnisnamen.
 ARGS+=(/usr/ /usr/share/ /usr/share/locale/
