@@ -199,9 +199,11 @@ PROGS="desktop taskbar settings launcher dhcp explorer widgetdemo locate sh echo
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || bad "crt.s laesst sich nicht assemblieren"
 bauen_ok=1
 for p in $PROGS; do
-    vendor/firn/bin/firnc "kernel/user/$p.fi" -o "$TMPD/$p.o" > "$TMPD/e$p" 2>&1 || { bauen_ok=0; break; }
+    UPROF=""; UCRT="$TMPD/crt.o"
+    grep -qa '^profile app' "kernel/user/$p.fi" && { UPROF=--profile=app; UCRT=""; }
+    vendor/firn/bin/firnc $UPROF -c "kernel/user/$p.fi" -o "$TMPD/$p.o" > "$TMPD/e$p" 2>&1 || { bauen_ok=0; break; }
     ld -T kernel/user/user.ld --defsym=USER_ENTRY=_F0.u_start \
-        -o "$TMPD/$p.elf" "$TMPD/crt.o" "$TMPD/$p.o" 2>/dev/null || { bauen_ok=0; break; }
+        -o "$TMPD/$p.elf" $UCRT "$TMPD/$p.o" 2>/dev/null || { bauen_ok=0; break; }
     strip --strip-all "$TMPD/$p.elf"
 done
 if [ "$bauen_ok" = 1 ]; then

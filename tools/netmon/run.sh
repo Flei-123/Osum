@@ -129,10 +129,12 @@ build_stage() { # 0 = firnc0, 1 = firnc1
         || { bad "firnc$s: ld failed"; return 1; }
     objcopy -O elf32-i386 "$TMPD/k$s.elf" "$TMPD/k$s.mb" 2>/dev/null
     for p in $PROGS; do
-        "$cc" "kernel/user/$p.fi" -o "$TMPD/$p$s.o" >"$TMPD/e$p$s" 2>&1 \
+        UPROF=""; UCRT="$TMPD/crt.o"
+        grep -qa '^profile app' "kernel/user/$p.fi" && { UPROF=--profile=app; UCRT=""; }
+        "$cc" $UPROF -c "kernel/user/$p.fi" -o "$TMPD/$p$s.o" >"$TMPD/e$p$s" 2>&1 \
             || { bad "firnc$s does not compile $p.fi"; sed 's/^/        /' "$TMPD/e$p$s" | head -6; return 1; }
         ld -T "$ULD" --defsym=USER_ENTRY="_F$s.u_start" \
-            -o "$TMPD/$p$s.elf" "$TMPD/crt.o" "$TMPD/$p$s.o" 2>/dev/null \
+            -o "$TMPD/$p$s.elf" $UCRT "$TMPD/$p$s.o" 2>/dev/null \
             || { bad "firnc$s: ld failed on $p"; return 1; }
         strip --strip-all "$TMPD/$p$s.elf"
     done

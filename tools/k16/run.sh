@@ -128,10 +128,27 @@ for f in kernel/user/*.fi; do
     grep -q "fn u_start" "$f" || continue
     PROGS="$PROGS $n"
 done
+# RUNDE GRUNDLINIE (A-015): `--crt` NUR, WENN DAS PROGRAMM KEIN EIGENES
+# `_start` MITBRINGT.  `fas --crt NAME` HAENGT einen Anlauf an: ".globl
+# _start / _start: ... call NAME".  Im Profil `kernel` ist das richtig --
+# dort steht kein `_start` im Text, sonst kaeme "fas: die Marke _start
+# fehlt".  Im Profil `app` bringt Firns eigener Anlauf `_start` schon in
+# Zeile 3 der .s mit, und dann sagt fas voellig zu Recht
+#
+#     fas: Zeile 290844: diese Marke gibt es zwei '_start'
+#
+# fuer genau die sieben Programme mit Oberflaeche (desktop, taskbar,
+# settings, launcher, explorer, widgetdemo, taskmgr).  Das war KEIN
+# Fehler von fas und keiner der Programme, sondern der Aufruf hier.
+# Gefragt wird die .s selbst, nicht die Liste der sieben Namen -- die
+# naechste Umstellung soll das hier nicht wieder umwerfen.
 gebaut=0; nichtgebaut=""
 for p in $PROGS; do
     if "$FC1" "kernel/user/$p.fi" > "$TMPD/s/$p.s" 2>"$TMPD/s/$p.err"; then
-        if "$FAS" "$TMPD/s/$p.s" -o "$TMPD/s/$p.bin" --crt _F1.u_start \
+        FCRT=(--crt _F1.u_start)
+        grep -qE '^[[:space:]]*(\.globl[[:space:]]+_start|_start:)' \
+            "$TMPD/s/$p.s" && FCRT=()
+        if "$FAS" "$TMPD/s/$p.s" -o "$TMPD/s/$p.bin" "${FCRT[@]}" \
                 > "$TMPD/s/$p.fas" 2>&1; then
             gebaut=$((gebaut+1))
         else

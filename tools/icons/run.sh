@@ -191,10 +191,12 @@ as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null
 PROGS="icont explorer launcher locate widgetdemo sh ls cat edit"
 rc=0
 for p in $PROGS; do
-    "$CC" "kernel/user/$p.fi" -o "$TMPD/$p.o" > "$TMPD/$p.err" 2>&1 || {
+    UPROF=""; UCRT="$TMPD/crt.o"
+    grep -qa '^profile app' "kernel/user/$p.fi" && { UPROF=--profile=app; UCRT=""; }
+    "$CC" $UPROF -c "kernel/user/$p.fi" -o "$TMPD/$p.o" > "$TMPD/$p.err" 2>&1 || {
         bad "$p does not compile"; head -12 "$TMPD/$p.err"; rc=1; continue; }
     ld -T "$ULD" --defsym=USER_ENTRY=_F0.u_start -o "$TMPD/$p.elf" \
-        "$TMPD/crt.o" "$TMPD/$p.o" 2>/dev/null || {
+        $UCRT "$TMPD/$p.o" 2>/dev/null || {
         bad "$p does not link"; rc=1; continue; }
     strip --strip-all "$TMPD/$p.elf"
 done

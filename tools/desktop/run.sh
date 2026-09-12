@@ -111,12 +111,14 @@ build_progs() { # stage
     local s=$1 cc p rc=0
     if [ "$s" = 0 ]; then cc=vendor/firn/bin/firnc; else cc=vendor/firn/bin/firnc1; fi
     for p in $PROGS; do
-        "$cc" "kernel/user/$p.fi" -o "$TMPD/$p$s.o" > "$TMPD/e$p$s" 2>&1 || {
+        UPROF=""; UCRT="$TMPD/crt.o"
+        grep -qa '^profile app' "kernel/user/$p.fi" && { UPROF=--profile=app; UCRT=""; }
+        "$cc" $UPROF -c "kernel/user/$p.fi" -o "$TMPD/$p$s.o" > "$TMPD/e$p$s" 2>&1 || {
             bad "firnc$s does not compile $p.fi"
             sed 's/^/        /' "$TMPD/e$p$s" | head -6
             rc=1; continue; }
         ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F$s.u_start" \
-            -o "$TMPD/$p$s.elf" "$TMPD/crt.o" "$TMPD/$p$s.o" \
+            -o "$TMPD/$p$s.elf" $UCRT "$TMPD/$p$s.o" \
             2>"$TMPD/ld$s.err" || { bad "firnc$s: ld fails on $p"; rc=1; continue; }
         strip --strip-all "$TMPD/$p$s.elf"
     done
