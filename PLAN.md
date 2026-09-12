@@ -17,7 +17,7 @@ Committet in `af27ce3` (Unterbau, NICHT neu bauen):
   `loesche`, `groesse_rekursiv`, `zaehle_rekursiv`, `gibt_es`,
   `ist_verzeichnis`, `fortschritt_an/aus`, `getan_dateien/oktette`,
   `abbrechen`, `letzter_fehler`.
-* `kernel/user/korb.fi` — `hinein`, `zurueck`, `loesche_rekursiv`,
+* `kernel/user/trash.fi` — `hinein`, `zurueck`, `loesche_rekursiv`,
   `korb_von`. `lib/libc/io.fi` — `rename`, `stat_mtime/ctime/atime`,
   `set_times`, `stat_mode_of`.
 

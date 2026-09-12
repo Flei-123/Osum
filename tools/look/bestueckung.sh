@@ -178,7 +178,7 @@ fi
 # Startknopf ein anderes Zeichen als assets/marke sagt.
 echo
 echo "== DIE MARKE: IST DAS ERZEUGTE BILD AKTUELL? =="
-GEN=kernel/user/marke_start.fi
+GEN=kernel/user/brand_start.fi
 if [ ! -f "$GEN" ]; then
     echo "  $GEN fehlt"
     fehler=$((fehler + 1))

@@ -66,7 +66,7 @@ verstehen.**
 | 2 | `kernel/kgui.fi` — Zeile im Terminalfenster, Kopf des Prüfbilds |
 | 1 | `kernel/hwdiag.fi` — Überschrift der Diagnose |
 | 1 | `kernel/procfs.fi` — `/proc/version` |
-| 1 | `kernel/fassung.fi` — `<KURZ> <hash>` |
+| 1 | `kernel/version.fi` — `<KURZ> <hash>` |
 | 16 | bildpunktgenaue Zusagen in `wm`, `gfx`, `customres`, `display` |
 
 Die Zusagen lesen jetzt **dieselbe Datei**. Eine Zusage auf einen fest

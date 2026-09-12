@@ -32,7 +32,7 @@
 # WAS HIER LAEUFT
 # ==================================================================
 #
-#   1. `tools/wlan/orakel.fi` wird gebaut. Es bindet DIESELBEN
+#   1. `tools/wlan/oracle.fi` wird gebaut. Es bindet DIESELBEN
 #      Dateien unter `lib/crypto/` und `lib/wlan/`, die der Kern
 #      binden wird -- keine zweite Fassung, kein Nachbau. Das ist
 #      dasselbe Werkzeug, das die Runden TUNNEL und UPDATE fuer
@@ -79,9 +79,9 @@ else
     ok "kein QEMU vorhanden -- fuer diesen Abschnitt ohne Belang"
 fi
 
-$FIRNC tools/wlan/orakel.fi -o .probe/worakel 2> "$OUT/orakel.err" \
-    && ok "tools/wlan/orakel.fi baut gegen lib/crypto/ und lib/wlan/ (dieselben Dateien wie der Kern)" \
-    || { bad "tools/wlan/orakel.fi laesst sich nicht bauen"; head -20 "$OUT/orakel.err"; }
+$FIRNC tools/wlan/oracle.fi -o .probe/worakel 2> "$OUT/orakel.err" \
+    && ok "tools/wlan/oracle.fi baut gegen lib/crypto/ und lib/wlan/ (dieselben Dateien wie der Kern)" \
+    || { bad "tools/wlan/oracle.fi laesst sich nicht bauen"; head -20 "$OUT/orakel.err"; }
 
 if [ ! -x .probe/worakel ]; then
     echo "WLAN: ohne Orakel geht nichts weiter."
@@ -140,7 +140,7 @@ echo "== 10. was diese Runde NICHT kann, gemessen =="
 # Gesucht wird nach einem TREIBER, nicht nach dem Wort: eine
 # PCI-Nummer einer WLAN-Karte im Quelltext waere der Anfang eines
 # Treibers. In Kommentaren darf ueber AX200 geredet werden -- in
-# lib/wlan/kanal.fi steht ein ganzer Absatz darueber, warum die
+# lib/wlan/channel.fi steht ein ganzer Absatz darueber, warum die
 # Firmware ihre eigene Regulatorik mitbringt.
 # RUNDE WLAN-2, AUF merge6 BERICHTIGT. Diese Wache war auf mergeline2
 # gruen und wurde auf merge6 beim ersten Lauf ROT -- zu Recht gemeldet,

@@ -25,7 +25,7 @@
 # DREI SIGNATUREN, DREI VERSCHIEDENE FRAGEN, und das ist kein Zufall:
 #
 #   1. Ed25519 ueber die `.omod`     -- "darf dieser Programmtext in
-#      (kernel/modul.fi, Schluessel     Ring 0?" Prueft DER KERN,
+#      (kernel/module.fi, Schluessel     Ring 0?" Prueft DER KERN,
 #      im Kernabbild)                  jedes Mal beim Laden.
 #   2. Ed25519 ueber die `.opk`      -- "kommt dieses Paket von mir?"
 #      (kernel/user/opk.fi,             Prueft OPK, einmal beim
@@ -68,7 +68,7 @@ cat > "$OUT/ps2maus.rezept" <<REZEPT
 #
 # Die Nutzlast ist genau eine Datei: das signierte \`.omod\`. Sie landet
 # auf dem Geraet unter /lib/ps2maus.omod, und dort sucht sie
-# \`kernel/modul.fi\`.
+# \`kernel/module.fi\`.
 name=ps2maus
 fassung=$FASSUNG
 titel=Zeigegeraet (PS/2, 8042)

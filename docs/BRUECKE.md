@@ -64,8 +64,8 @@ dieselbe wie bei einem offenen Kanal.
 | `/root/bruecke/bruecke_server.py` | der Dienst: Anmeldung, Schlange, Ablage, Kopplung, Sperre |
 | `/root/bruecke/anschluss.py` | spricht Osums Zeilenprotokoll und reicht an den Dienst weiter |
 | `/etc/systemd/system/bruecke.service` | Dienst, `enabled`, nur 127.0.0.1 |
-| `kernel/tipp.fi` | die eingespeiste Eingabe, Aufruf 1843 |
-| `kernel/tipp-aus.fi` | dieselbe Schnittstelle, die „es gibt sie nicht" sagt |
+| `kernel/tip.fi` | die eingespeiste Eingabe, Aufruf 1843 |
+| `kernel/tip-off.fi` | dieselbe Schnittstelle, die „es gibt sie nicht" sagt |
 | `kernel/user/settings.fi` | der elfte Reiter: Zustand sehen, Brücke abschalten |
 | `tools/bruecke/echt.sh` | 18 Zusagen gegen store.fleitec.com |
 | `tools/bruecke/kette.sh` | Osum in QEMU → Anschluss → Dienst → Bild |

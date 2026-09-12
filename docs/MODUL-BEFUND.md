@@ -268,7 +268,7 @@ Auf x86-64 behandelt `apply_relocate_add` genau diese Arten:¹⁹
 `R_X86_64_PLT32` (beide PC-relativ; PLT32 wird wie PC32 behandelt, weil
 es im Kern keine PLT gibt), `R_X86_64_PC64`.
 
-**Das ist Zeile für Zeile das, was `kernel/modul.fi` dieser Runde tut** —
+**Das ist Zeile für Zeile das, was `kernel/module.fi` dieser Runde tut** —
 mit derselben Liste von Relokationsarten und derselben Reihenfolge. Der
 Unterschied steht in Abschnitt 5.
 

@@ -230,7 +230,7 @@ behoben, beide waren im Quelltext unsichtbar.**
 
 2. **`umlaut` fand acht sichtbare Umschriften — alle aus dieser Runde.**
    `tools/i18n/quellen.py --alle` zählte `SICHTBAR=8`, davon sieben in
-   `kernel/app/konto.fi`, eine in `kernel/app/anb_eigen.fi`, dazu eine
+   `kernel/app/account.fi`, eine in `kernel/app/anb_eigen.fi`, dazu eine
    getippte Marke ohne Umlautform. Behoben, jede einzeln:
    * Protokoll- und Feldnamen umbenannt, statt Umlaute in ein
      maschinenlesbares Feld zu schreiben: `pruef` → `nachweis`

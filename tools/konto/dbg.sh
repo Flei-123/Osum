@@ -35,7 +35,7 @@ trap aufraeumen EXIT
 if [ "${BAUEN:-1}" = "1" ]; then
     echo "-- baue Programm"
     FIRNLIB="$ROOT/vendor/firn/lib" "$FIRNC" -c --profile=app \
-        -o "$TMPD/konto.o" kernel/app/konto.fi > "$TMPD/cc.log" 2>&1 \
+        -o "$TMPD/konto.o" kernel/app/account.fi > "$TMPD/cc.log" 2>&1 \
         || { echo "FIRNC:"; tail -20 "$TMPD/cc.log"; exit 1; }
     ld -m elf_x86_64 -T kernel/user/user.ld -o "$TMPD/konto.elf" "$TMPD/konto.o" \
         > "$TMPD/ld.log" 2>&1 || { echo "LD:"; cat "$TMPD/ld.log"; exit 1; }

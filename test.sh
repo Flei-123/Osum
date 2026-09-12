@@ -1569,7 +1569,7 @@ lauf "49. der Puffer, der bei knappem Speicher schweigt -- und der Aufrufer, der
 # damit keinen Weg, in QEMU einen einzigen WLAN-Rahmen zu erzeugen.
 #
 # Gemessen wird deshalb auf dem WIRT, gegen dieselben Firn-Dateien, die
-# der Kern binden wird (`tools/wlan/orakel.fi` bindet `lib/crypto/` und
+# der Kern binden wird (`tools/wlan/oracle.fi` bindet `lib/crypto/` und
 # `lib/wlan/`) -- dasselbe Werkzeug, das die Runden TUNNEL und UPDATE
 # fuer Ed25519 gebaut haben.
 #
@@ -1615,7 +1615,7 @@ lauf "47. WLAN ohne eine einzige Karte: 802.11, WPA2/WPA3 und CCMP gegen die Nor
 # verdrahtet und ruehrt die WPA-PSK-Maschine nicht an, und
 # mac80211_hwsim gibt es auf diesem Kern nicht.
 #
-# Dazu die Naht zum Blech (lib/wlan/geraet.fi) und -- nach Justins
+# Dazu die Naht zum Blech (lib/wlan/device.fi) und -- nach Justins
 # Zwischenruf, dass in seinem Rechner ein USB-STICK und keine
 # PCIe-Karte steckt -- die Tabelle, die einen Stick an seiner
 # USB-Nummer BENENNT, damit die Zeile am echten Blech fotografierbar

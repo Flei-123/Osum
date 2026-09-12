@@ -22,7 +22,7 @@
 # Programm in den Binaerbaum und haengen an nichts. Je Bildpunkt EIN
 # Wort 0xAARRGGBB.
 #
-#   python3 tools/marke/startbild.py assets/marke kernel/user/marke_start.fi
+#   python3 tools/marke/startbild.py assets/marke kernel/user/brand_start.fi
 
 import sys
 from PIL import Image
@@ -72,12 +72,12 @@ def worte(im):
 
 def main():
     quelle = sys.argv[1] if len(sys.argv) > 1 else "assets/marke"
-    ziel = sys.argv[2] if len(sys.argv) > 2 else "kernel/user/marke_start.fi"
+    ziel = sys.argv[2] if len(sys.argv) > 2 else "kernel/user/brand_start.fi"
     t = []
     t.append("// SPDX-License-Identifier: GPL-2.0-only\n")
-    t.append("// kernel/user/marke_start.fi -- ERZEUGT, NICHT VON HAND\n")
+    t.append("// kernel/user/brand_start.fi -- ERZEUGT, NICHT VON HAND\n")
     t.append("//   tools/marke/startbild.py assets/marke "
-             "kernel/user/marke_start.fi\n")
+             "kernel/user/brand_start.fi\n")
     t.append("//\n")
     t.append("// Das Startzeichen von OrientOS als Bildpunkte, in\n")
     t.append("// mehreren Groessen, je Bildpunkt ein Wort 0xAARRGGBB.\n")

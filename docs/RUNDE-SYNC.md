@@ -20,7 +20,7 @@ Mass, der Server ist der Sonderfall.
 |---|---:|---|
 | `lib/crypto/scrypt.fi` | 417 | PBKDF2-HMAC-SHA256, Salsa20/8, BlockMix, ROMix, scrypt (RFC 7914) |
 | `lib/crypto/hkdf.fi` | 134 | HKDF-SHA256, Extract und Expand (RFC 5869) |
-| `lib/sync/kette.fi` | 535 | die Schluesselkette, der versiegelte Block, der Name, der Wiederherstellungscode, die Huelle |
+| `lib/sync/chain.fi` | 535 | die Schluesselkette, der versiegelte Block, der Name, der Wiederherstellungscode, die Huelle |
 | `kernel/user/kbund.fi` | 595 | der Schluesselbund als Programmteil: Konto anlegen, oeffnen, KOPF schreiben/lesen |
 | `kernel/user/sync.fi` | 1947 | `sync` — Speicher, Verzeichnis, Dreiwegabgleich, Konflikte, Einstellungen, Wurzel |
 | `kernel/user/tresor.fi` | 509 | `tresor` — Geheimnisse, Sitzung mit Frist, Freigabe ueber Handles |

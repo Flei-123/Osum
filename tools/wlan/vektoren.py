@@ -8,7 +8,7 @@ Befund). Es gibt in dieser Runde nichts, was sich in QEMU messen liesse
 Abschnitt 5 belegt. Alles, was hier gebaut wurde, ist deshalb so
 gebaut, dass es sich AUF DEM WIRT messen laesst, gegen dieselben
 Firn-Quelltexte, die der Kern spaeter bindet (`.probe/worakel`,
-gebaut aus `tools/wlan/orakel.fi`).
+gebaut aus `tools/wlan/oracle.fi`).
 
 VIER ARTEN VON VERGLEICH, absteigend nach Beweiskraft:
 
@@ -752,7 +752,7 @@ def teil_kanal():
     gleich("Kanal 2 im 2,4-GHz-Band ist 2417 MHz", eins("freq 2 1"), "2417")
 
     # Die Regeln. Jede Zeile ist eine Aussage ueber europaeisches Recht,
-    # und jede steht so in `lib/wlan/kanal.fi` mit ihrer Norm daneben.
+    # und jede steht so in `lib/wlan/channel.fi` mit ihrer Norm daneben.
     faelle = [
         (1, 1, "erlaubt=1 dbm=20 dfs=0 innen=0 passiv=0 senden=1 aktiv=1",
          "Kanal 1, 2,4 GHz: 20 dBm, kein Radar, innen und aussen"),

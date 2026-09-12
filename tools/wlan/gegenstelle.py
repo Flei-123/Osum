@@ -348,7 +348,7 @@ def gtk_kde(gtk, idx=1):
 # ---------------------------------------------------------------------
 
 def kopf_laenge(hdr):
-    """Dieselbe Rechnung wie `kopf_laenge` in lib/wlan/rahmen.fi.
+    """Dieselbe Rechnung wie `kopf_laenge` in lib/wlan/frame.fi.
 
     Sie steht hier nachgebaut und nicht geraten, weil der erste Anlauf
     dieser Datei genau daran gescheitert ist: beim Vektor M.6.4 ist
