@@ -172,7 +172,7 @@ widgetdemo taskmgr locate edit sh echo ls cat ps uname date df mkdir rm cp mv \
 grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
 dhcp host ota jsig jarvisctl pollbr reboot shutdown power fas \
-glogin lock login passwd su chown"}
+glogin lock login passwd su chown sperrwache"}
 
 # RUNDE STICK: DIE SIEBEN, DIE GEFEHLT HABEN -- UND WARUM AUSGERECHNET
 # DIESE.
@@ -448,8 +448,8 @@ printf '# /etc/login.conf -- die Anmeldung.\n# verzoegerung_ms: die erste Wartez
 
 # /etc/sperre.conf -- der Leerlauf, nach dem von selbst gesperrt wird.
 # 300 Sekunden sind fuenf Minuten; 0 hiesse "nie von selbst".
-printf '# /etc/sperre.conf -- der Sperrbildschirm.\n# leerlauf: Sekunden ohne Eingabe, nach denen von selbst gesperrt\n#   wird. 0 schaltet den Waechter ab.\nleerlauf=300\n' \
-    > "$OUT/sperre.conf"
+printf '# /etc/sperre.conf -- der Sperrbildschirm.\n# leerlauf: Sekunden ohne Eingabe, nach denen von selbst gesperrt\n#   wird. 0 schaltet den Waechter ab.\nleerlauf=%s\n' \
+    "${SPERRE_LEERLAUF:-300}" > "$OUT/sperre.conf"
 
 sagen "konten      2 (root, justin), PBKDF2 $PW_RUNDEN Runden, Salz je Konto zufaellig"
 sagen "            Anfangskennwort justin='$PW_JUSTIN' root='$PW_ROOT' -- mit passwd aendern"
