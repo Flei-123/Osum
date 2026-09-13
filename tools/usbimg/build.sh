@@ -171,7 +171,8 @@ PROGS=${PROGS:-"desktop taskbar settings launcher explorer netview \
 widgetdemo taskmgr locate edit sh echo ls cat ps uname date df mkdir rm cp mv \
 grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
-dhcp host ota jsig jarvisctl pollbr reboot shutdown power fas"}
+dhcp host ota jsig jarvisctl pollbr reboot shutdown power fas \
+glogin lock login passwd su chown"}
 
 # RUNDE STICK: DIE SIEBEN, DIE GEFEHLT HABEN -- UND WARUM AUSGERECHNET
 # DIESE.
@@ -382,6 +383,76 @@ cat > "$OUT/passwd" <<'EOF'
 root:x:0:0:root:/:/bin/sh
 justin:x:1000:1000:Justin:/users/justin:/bin/sh
 EOF
+
+# ============================================== RUNDE ANMELDUNG
+# /etc/shadow, /etc/group, /etc/login.conf, /etc/sperre.conf
+#
+# BIS HIERHER GAB ES KEIN /etc/shadow IM ABBILD. `/etc/passwd` lag
+# darin (zwei Konten, `root` und `justin`), aber kein einziger
+# Kennworteintrag -- gemessen am Abbild vom 13.09.:
+#
+#     python3 tools/osum/mkfs.py list root.img | grep shadow   ->  nichts
+#
+# Damit konnte sich niemand anmelden, auch wenn `login` im Abbild
+# gelegen haette (tat es auch nicht). Der Schreibtisch startete direkt
+# aus dem Kern als root, und das ist der Befund P-002.
+#
+# DAS KENNWORT STEHT NICHT IM KLARTEXT AUF DER PLATTE, und das ist
+# keine Behauptung, sondern das Format: `$osum1$<runden>$<salz>$<dk>`
+# mit PBKDF2-HMAC-SHA256, genau das, was `kernel/user/pw.fi`
+# (`make_hash`, `check_hash`) liest und schreibt. Die Rundenzahl ist
+# `pw.KOSTEN` = 8192; sie wird HIER AUS DER QUELLE GELESEN und nicht
+# getippt, sonst laufen die beiden Zahlen nach der naechsten Aenderung
+# auseinander.
+#
+# DAS SALZ IST ZUFAELLIG, je Konto ein eigenes, aus os.urandom. Ein
+# festes Salz waere in jedem Abbild dasselbe -- dann hilft eine
+# Regenbogentabelle wieder, und genau dagegen ist ein Salz da.
+#
+# DAS ANFANGSKENNWORT steht in der Datei FASSUNG des Bauverzeichnisses
+# und wird auf der Bauausgabe GENANNT. Es ist kein Geheimnis dieses
+# Systems, sondern eines, das der Mensch beim ersten Anmelden aendert
+# (`passwd`); ein Abbild ohne bekanntes Anfangskennwort waere eines,
+# an dem sich niemand anmelden kann.
+PW_RUNDEN=$(sed -n 's/^const KOSTEN: u64 = \([0-9]*\).*/\1/p' kernel/user/pw.fi | head -1)
+[ -n "$PW_RUNDEN" ] || fehler "die Rundenzahl steht nicht in kernel/user/pw.fi"
+PW_ROOT=${PW_ROOT:-osumroot}
+PW_JUSTIN=${PW_JUSTIN:-startkennwort}
+python3 - "$OUT" "$PW_RUNDEN" "$PW_ROOT" "$PW_JUSTIN" <<'PYEOF'
+import binascii, hashlib, os, sys
+d, it, pr, pj = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+
+def rec(pw):
+    # DAS SALZ IST ZUFAELLIG UND ACHT OKTETTE LANG -- so lang, wie
+    # pw.fi es schreibt (`make_hash`: acht Oktette aus dem Kern).
+    salt = os.urandom(8)
+    dk = hashlib.pbkdf2_hmac('sha256', pw.encode(), salt, it, 32)
+    return "$osum1$%d$%s$%s" % (it, binascii.hexlify(salt).decode(),
+                                binascii.hexlify(dk).decode())
+
+with open(d + "/shadow", "w") as f:
+    f.write("root:%s:0:0:99999:7:::\n" % rec(pr))
+    f.write("justin:%s:0:0:99999:7:::\n" % rec(pj))
+
+with open(d + "/group", "w") as f:
+    f.write("root:x:0:\n")
+    f.write("justin:x:1000:\n")
+PYEOF
+chmod 600 "$OUT/shadow"
+
+# /etc/login.conf -- was die Anmeldung an Verzoegerung nimmt.
+# `verzoegerung_ms` ist die ERSTE Wartezeit; sie verdoppelt sich mit
+# jedem Fehlversuch (login.fi, glogin.fi).
+printf '# /etc/login.conf -- die Anmeldung.\n# verzoegerung_ms: die erste Wartezeit nach einem Fehlversuch.\n#   Sie VERDOPPELT sich mit jedem weiteren und ist bei einer Minute\n#   gedeckelt. max_versuche gilt nur fuer die Anmeldung am Terminal.\nverzoegerung_ms=1000\nmax_versuche=3\n# runden: der Kostenfaktor fuer NEUE Kennwoerter (passwd).\nrunden=%s\n' \
+    "$PW_RUNDEN" > "$OUT/login.conf"
+
+# /etc/sperre.conf -- der Leerlauf, nach dem von selbst gesperrt wird.
+# 300 Sekunden sind fuenf Minuten; 0 hiesse "nie von selbst".
+printf '# /etc/sperre.conf -- der Sperrbildschirm.\n# leerlauf: Sekunden ohne Eingabe, nach denen von selbst gesperrt\n#   wird. 0 schaltet den Waechter ab.\nleerlauf=300\n' \
+    > "$OUT/sperre.conf"
+
+sagen "konten      2 (root, justin), PBKDF2 $PW_RUNDEN Runden, Salz je Konto zufaellig"
+sagen "            Anfangskennwort justin='$PW_JUSTIN' root='$PW_ROOT' -- mit passwd aendern"
 # ============================================== RUNDE STARTKNOPF
 # Die Vorgaben der Leiste, nach Justins Vorlage (Windows 11):
 #   labels=never    Programmknoepfe nur als Symbol -- ein Symbol wird
@@ -697,6 +768,10 @@ ARGS+=("/bin/files@/bin/explorer")
 printf '# /etc/locale.conf -- the system default language.\n# A user who has chosen one overrides this in\n# /users/<name>/config/locale; the settings program writes only there.\nlang=en\n' \
     > "$OUT/locale.conf"
 ARGS+=(/etc/ "/etc/passwd=$OUT/passwd"
+       "/etc/shadow=$OUT/shadow"
+       "/etc/group=$OUT/group"
+       "/etc/login.conf=$OUT/login.conf"
+       "/etc/sperre.conf=$OUT/sperre.conf"
        "/etc/taskbar.conf=$OUT/taskbar.conf"
        "/etc/theme.conf=$OUT/theme.conf"
        "/etc/locale.conf=$OUT/locale.conf"
