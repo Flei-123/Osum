@@ -277,11 +277,22 @@ bekanntes Anfangskennwort wäre eines, an dem sich niemand anmelden kann.
 ## 7. Bestehende Zusagen
 
     MULTIUSER: 91 passed, 0 failed     (tools/multiuser/run.sh)
+    K13:       99 passed, 0 failed     (tools/k13/run.sh)
     CHECK-UI PASSED                    (tools/check-ui.sh)
       166 Dateien geprueft
       0 Programme malen sich ein Bedienelement selbst
       0 Programme greifen an der Bibliothek vorbei auf fUi zu
       0 Funktionen in wlib.fi malen an fUi vorbei
+
+**Und der alte Weg ist unveraendert.** Gemessen am selben Abbild, ohne
+das Wort `anmeldung`:
+
+    desk: OHNE anmeldung -- uid bleibt
+    desk: start /bin/desktop  pid=2
+
+und mit `anmeldung noanmeldung` (die Gegenprobe ueberstimmt, wie
+angekuendigt) genau dasselbe. Kein Pruefstand, der `desk` schreibt,
+sieht von dieser Runde etwas.
 
 Der Anmeldeschirm malt kein einziges Bedienelement selbst — er benutzt
 `wlib.label`, `wlib.list`, `wlib.entry`, `wlib.button`, und die
