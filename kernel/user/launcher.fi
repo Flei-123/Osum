@@ -699,6 +699,232 @@ fn an_arbeitsflaeche(w: u64, bw: u64, bh: u64) {
     let _m: u64 = wlibc.win_move(hh, anker_x(bw), y)
 }
 
+// ==================================================== RUNDE ENERGIE
+//
+// AUSSCHALTEN, NEUSTART UND ABMELDEN AUS DER OBERFLAECHE.
+//
+// Punkt P-003 der Offenliste: bis zu dieser Runde ging das Ausschalten
+// dieses Systems NUR ueber `/bin/shutdown` auf der Befehlszeile. Ein
+// Rechner, den man nur mit einem getippten Befehl ausmachen kann, ist
+// kein Alltagssystem -- und das Startmenue ist die Stelle, an der jedes
+// andere System diesen Knopf hat.
+//
+// WAS HIER NEU IST UND WAS NICHT. Neu ist AUSSCHLIESSLICH die
+// Oberflaeche: ein Knopf, ein Menue, eine Rueckfrage. Das SAUBERE
+// HERUNTERFAHREN gab es schon vollstaendig und es wird hier nicht
+// nachgebaut -- eine zweite Abschaltroutine neben `init.shutdown` waere
+// genau die zweite Wahrheit, gegen die der Kopf von check-ui.sh
+// argumentiert. Der Weg ist derselbe, den `/bin/shutdown` seit Runde
+// INIT geht:
+//
+//     eine Zeile nach /run/svc.cmd  ->  init (Prozess 1) liest sie
+//       -> SIGTERM an jeden Dienst, zwei Sekunden Frist
+//       -> SIGKILL an die Reste
+//       -> sync
+//       -> umount_all
+//       -> ACPI S5 (kernel/power.fi: acpi_off / acpi_reset)
+//
+// DIESE REIHENFOLGE IST DER GANZE PUNKT. Ein Ausschalten, das die
+// Platte im Flug abschneidet, ist schlimmer als keines; `sync` und
+// `umount` stehen deshalb VOR dem S5 und nicht daneben. Belegt wird
+// das nicht durch diese Erklaerung, sondern durch die serielle
+// Ausgabe eines echten Laufs (docs/RUNDE-ENERGIE.md).
+//
+// WARUM NICHT `SYS_EXEC /bin/shutdown`? Das waere ein Prozess mehr fuer
+// eine Zeile Text, und er koennte fehlschlagen (kein /bin, kein
+// Speicher), ohne dass dieses Programm erfaehrt, warum. Die Zeile
+// selbst zu schreiben ist ein `open`/`write`/`close` -- und der
+// Rueckgabewert sagt sofort, ob es gegriffen hat.
+//
+// ABMELDEN, EHRLICH GESAGT: dieses System hat noch keine Anmeldung (der
+// Schreibtisch laeuft als `root`, P-002). Ein Punkt "Abmelden", der eine
+// Sitzung beendet, die es nicht gibt, waere eine Behauptung. Was er
+// WIRKLICH tut, steht deshalb in seiner eigenen Funktion und in
+// docs/RUNDE-ENERGIE.md: er startet den SCHREIBTISCH neu. Sobald es
+// eine Anmeldung gibt, ist hier eine Zeile zu aendern.
+
+// Die Zeilen, die init versteht. `/bin/shutdown` schreibt exakt diese
+// (kernel/user/shutdown.fi) -- dieselben Woerter, damit es genau einen
+// Satz Befehle gibt und nicht zwei.
+static mut pw_cmd: [u8; 13] = "/run/svc.cmd\0"
+static mut pw_down: [u8; 10] = "shutdown\n\0"
+static mut pw_boot: [u8; 8] = "reboot\n\0"
+
+// Die Schluessel des Katalogs. Der Menuetext ist EINE ZEILE JE EINTRAG
+// (`\n` im Katalog); `wlib.menu_open` schneidet daran.
+static mut k_pmenu: [u8; 11] = "power.menu\0"
+static mut k_ptitel: [u8; 12] = "power.title\0"
+static mut k_pitem: [u8; 11] = "power.item\0"
+static mut k_offt: [u8; 21] = "power.ask.off.title\0\0"
+static mut k_offq: [u8; 15] = "power.ask.off\0\0"
+static mut k_rebt: [u8; 24] = "power.ask.reboot.title\0\0"
+static mut k_rebq: [u8; 18] = "power.ask.reboot\0\0"
+static mut k_boff: [u8; 15] = "power.btn.off\0\0"
+static mut k_breb: [u8; 18] = "power.btn.reboot\0\0"
+static mut k_bcan: [u8; 18] = "power.btn.cancel\0\0"
+
+// WIE VIELE EINTRAEGE DAS MENUE HAT. Diese Zahl und der Katalog muessen
+// zusammenpassen: `menu_open` bekommt sie von aussen, und wer hier eine
+// Zeile ergaenzt, ohne die Zahl zu erhoehen, bekommt ein Menue, das
+// seinen letzten Eintrag verschweigt (genau der Fehler, der in Runde
+// LOOK an 11-menue-gehezu.png gemessen wurde: drei von sechs).
+const POWER_N: u64 = 3
+const PW_AUS: u64 = 0
+const PW_NEU: u64 = 1
+const PW_AB: u64 = 2
+
+// Was die Rueckfrage gerade fragt: 0 keine, 1 ausschalten, 2 neustart.
+static mut pw_block: [u8; 64] = [0 as u8; 64]
+static mut pw_frage: u64 = 0
+// Ist das Energiemenue offen? (Das Menue gehoert `wlib`, aber nur
+// dieses Programm weiss, dass ES das aufgemacht hat -- das Startmenue
+// hat auch ein Kontextmenue-freies Leben.)
+static mut pw_menue: u64 = 0
+
+static mut s_pmauf: [u8; 24] = "launcher: energie auf\0\0\0"
+static mut s_pmwahl: [u8; 25] = "launcher: energie wahl=\0\0"
+static mut s_pmfrage: [u8; 26] = "launcher: energie frage=\0\0"
+static mut s_pmtat: [u8; 24] = "launcher: energie tat \0\0"
+static mut s_pmab: [u8; 26] = "launcher: energie abbruch\0"
+static mut s_pmerr: [u8; 30] = "launcher: energie FEHLER cmd\0\0"
+
+// DIE ZEILE AN init. `577` ist O_WRONLY|O_CREAT|O_TRUNC -- dieselben
+// Zahlen wie in shutdown.fi; was vorher in der Datei stand, ist
+// erledigt oder verworfen.
+//
+// Kehrt `false` zurueck, wenn die Datei nicht schreibbar ist. Das ist
+// KEIN theoretischer Fall: laeuft kein init (der Notweg `initsh`
+// startet die Shell unmittelbar), gibt es /run/svc.cmd gar nicht.
+// Dann sagt es der Aufrufer dem Menschen, statt stumm nichts zu tun --
+// Pflichtpunkt 8.
+fn pw_sag(was: u64) -> bool {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&pw_cmd[0 as usize]) as u64,
+        577, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    ulib.sys(ulib.SYS_WRITE, fd, was, ulib.length(was))
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return true
+}
+
+// ABMELDEN, SOLANGE ES KEINE ANMELDUNG GIBT.
+//
+// Der Schreibtisch wird neu gestartet: alles, was der Mensch offen
+// hatte, ist danach zu, und er steht wieder vor einem frischen
+// Schreibtisch. Das ist das, was von "abmelden" ohne Sitzungsverwaltung
+// uebrig bleibt, und es wird hier auch so GENANNT statt als
+// Sitzungsende ausgegeben.
+//
+// Zweig `anmeldung` (Lauf 2 dieser Umsteige-Runde) baut die echte
+// Anmeldung. Sobald sie da ist, gehoert hier der Weg ueber sie hinein
+// und nicht dieser Neustart -- eine Zeile, und die Stelle ist diese.
+static mut pw_desk: [u8; 13] = "/bin/desktop\0"
+
+fn pw_abmelden() -> bool {
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&pw_desk[0 as usize]) as u64,
+        0, 0)
+    return !ulib.bad(pid)
+}
+
+
+// DAS MENUE AUFKLAPPEN. Es geht am Energieknopf auf und klappt nach
+// OBEN -- unter dem Knopf ist die Leiste, und dort ist nie Platz;
+// `wlib.menu_open` dreht von selbst um, sobald es unten nicht passt.
+//
+// Der TITEL kommt aus dem Katalog: `wlib` traegt seinen eigenen
+// englischen Ersatztext ("Menu"), weil die Bibliothek in dreizehn
+// Programmen steckt und keinen Katalog laden darf (siehe den Kopf von
+// `menu_open`). Ein Programm, das einen hat, reicht ihn mit
+// `set_menu_title` hinunter -- genau dafuer gibt es die Funktion.
+fn pw_menue_auf(mx: u64, my: u64) {
+    if pw_menue != 0 {
+        return
+    }
+    wlib.set_menu_title(msg.get((&k_ptitel[0 as usize]) as u64))
+    let mw: u64 = wlib.menu_open(0, mx, my,
+        msg.get((&k_pmenu[0 as usize]) as u64), POWER_N)
+    if mw >= wlib.MAXWN {
+        return
+    }
+    pw_menue = 1
+    say((&s_pmauf[0 as usize]) as u64)
+    nl()
+}
+
+// DIE RUECKFRAGE. Ausschalten und Neustart sind nicht umkehrbar -- wer
+// sie aus Versehen trifft, verliert, was offen war. Also fragt das
+// System nach, und zwar mit dem GEFAEHRLICHEN Wort auf dem Knopf
+// ("Ausschalten") statt mit "OK": ein Knopf soll sagen, was er tut.
+//
+// TASTATUR: `wlib` fuehrt in einem Dialog Tabulator, Eingabe und
+// Flucht (wlib.fi, `on_key` -> `dlg_*`). Eingabe loest den Knopf aus,
+// auf dem der Fokus steht, Flucht bricht ab (EV_CLOSE -> dl_state 3).
+// Diese Runde musste dafuer nichts bauen; sie musste es nur BENUTZEN
+// und danach messen, dass es wirklich so ist.
+fn pw_frage_auf(was: u64) {
+    if pw_frage != 0 {
+        return
+    }
+    var titel: u64 = msg.get((&k_offt[0 as usize]) as u64)
+    var text: u64 = msg.get((&k_offq[0 as usize]) as u64)
+    var ja: u64 = msg.get((&k_boff[0 as usize]) as u64)
+    if was == 2 {
+        titel = msg.get((&k_rebt[0 as usize]) as u64)
+        text = msg.get((&k_rebq[0 as usize]) as u64)
+        ja = msg.get((&k_breb[0 as usize]) as u64)
+    }
+    // Die beiden Beschriftungen als EIN Block mit Zeilenenden --
+    // `wlib.dlg_wahl` liest ihn mit `row_at`, genau wie das Menue.
+    // Der ABBRUCH steht LINKS und die Tat rechts; `dlg_wahl` legt den
+    // Fokus auf den ersten Knopf, und der erste soll der harmlose sein.
+    let cancel: u64 = msg.get((&k_bcan[0 as usize]) as u64)
+    let bp: u64 = (&pw_block[0 as usize]) as u64
+    var p: u64 = 0
+    p = p + ulib.strncpy(bp + p, cancel, 30)
+    __mmio_write8((bp + p) as *mut u8, 10 as u8)
+    p = p + 1
+    p = p + ulib.strncpy(bp + p, ja, 30)
+    __mmio_write8((bp + p) as *mut u8, 0 as u8)
+    // Der Block muss den Aufruf UEBERLEBEN: `dlg_wahl` kopiert die
+    // Beschriftungen zwar in seinen eigenen Puffer (dw_buf), aber der
+    // Titel und die Frage bleiben Zeiger -- und die zeigen in den
+    // Katalog, der fest liegt. Der Block hier liegt deshalb ebenfalls
+    // statisch und nicht im Rahmen dieser Funktion.
+    let dw: u64 = wlib.dlg_wahl(titel, text,
+        (&pw_block[0 as usize]) as u64, 2)
+    if dw >= wlib.MAXWN {
+        return
+    }
+    pw_frage = was
+    say((&s_pmfrage[0 as usize]) as u64)
+    sayn(was)
+    nl()
+}
+
+// DIE TAT. Erst hier verlaesst etwas dieses Programm.
+fn pw_tun(was: u64) {
+    var ok: bool = false
+    if was == 1 {
+        ok = pw_sag((&pw_down[0 as usize]) as u64)
+    } else if was == 2 {
+        ok = pw_sag((&pw_boot[0 as usize]) as u64)
+    }
+    say((&s_pmtat[0 as usize]) as u64)
+    sayn(was)
+    nl()
+    if !ok {
+        // LAEUFT KEIN init, GIBT ES /run/svc.cmd NICHT -- und dann
+        // darf das nicht stumm bleiben. Der Mensch hat einen Knopf
+        // gedrueckt; er muss erfahren, dass nichts geschah.
+        say((&s_pmerr[0 as usize]) as u64)
+        nl()
+        let _d: u64 = wlib.dlg_hinweis(
+            msg.get((&k_ptitel[0 as usize]) as u64),
+            msg.get((&k_offt[0 as usize]) as u64))
+    }
+}
+
 fn u_start(args: u64) -> u64 {
     dbg_setup(args)
     var s_no: [u8; 8] = "nohit\0\0\0"
@@ -1022,6 +1248,28 @@ fn u_start(args: u64) -> u64 {
     let bt: u64 = wlib.button(ktxt)
     wlib.box_end()
 
+    // ================================================ RUNDE ENERGIE
+    // DER ENERGIEKNOPF, UNTEN LINKS.
+    //
+    // Er steht in DERSELBEN Zeile wie "Ausfuehren" und am anderen Ende
+    // -- links unten, wo ihn Windows, Zorin und GNOME haben. Die
+    // Rechnung ist dieselbe wie beim Knopf rechts und aus demselben
+    // Grund (Runde ECHTHARDWARE-1): der Knopf MISST SICH SELBST aus
+    // Text plus Polsterung. Eine feste Breite waere in der naechsten
+    // Sprache wieder abgeschnitten -- "Ausschalten" ist laenger als
+    // "Power", und bei `uiscale=2` ist alles doppelt so breit.
+    //
+    // Warum ein KNOPF und kein Symbol: dieses System hat eine
+    // Symbolschrift (`wlib.draw_icon`), aber ein Symbol ohne Text ist
+    // genau die Sorte Raterei, die Justin am Kontrollzentrum kritisiert
+    // hat. Der Text sagt, was geschieht.
+    let ptxt: u64 = msg.get((&k_pitem[0 as usize]) as u64)
+    let pbr: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), ptxt,
+        ulib.length(ptxt)) + 2 * wlibc.metric(wlibc.M_PAD_X)
+    wlib.box_h(w, 12 * sk, ky, pbr, kh, 0, 0)
+    let pb: u64 = wlib.button(ptxt)
+    wlib.box_end()
+
     wlib.set_focus(fe)
     new_find(ls)
     wlib.draw_all()
@@ -1075,6 +1323,75 @@ fn u_start(args: u64) -> u64 {
                 starten(idx)
             } else if kind == wlib.K_BUTTON && id == bt {
                 starten(wlib.value(ls))
+            } else if kind == wlib.K_BUTTON && id == pb {
+                // ============================ RUNDE ENERGIE
+                // Der Knopf klappt das Menue auf -- ueber sich
+                // selbst, nicht am Mauszeiger. Ein Menue, das am
+                // Zeiger aufgeht, steht bei Tastaturbedienung
+                // irgendwo; der Knopf steht immer da, wo er steht.
+                //
+                // `menu_open` rechnet die Bildschirmlage selbst um,
+                // wenn unten kein Platz ist -- und unter diesem
+                // Knopf ist die Leiste, also klappt es nach oben.
+                pw_menue_auf(anker + 12 * sk, ay + ky)
+            } else if kind == wlib.K_MENUBAR && pw_menue != 0 {
+                // DIE WAHL AUS DEM ENERGIEMENUE. `wlib.step` legt
+                // das Ergebnis eines Menues als K_MENUBAR-Ereignis
+                // auf den Besitzer (wlib.fi, am Ende von `step`) --
+                // `idx` ist der Eintrag, `0xFFFF` waere Abbruch,
+                // aber den filtert wlib schon vorher heraus.
+                pw_menue = 0
+                say((&s_pmwahl[0 as usize]) as u64)
+                sayn(idx)
+                nl()
+                if idx == PW_AUS {
+                    pw_frage_auf(1)
+                } else if idx == PW_NEU {
+                    pw_frage_auf(2)
+                } else if idx == PW_AB {
+                    // ABMELDEN FRAGT NICHT NACH. Es ist der einzige
+                    // der drei Punkte, der nichts Unwiederbringliches
+                    // tut -- der Schreibtisch kommt sofort zurueck.
+                    let _ab: bool = pw_abmelden()
+                    zumachen()
+                }
+            }
+        }
+        // ==================================================== RUNDE ENERGIE
+        // DIE ANTWORT DER RUECKFRAGE, EINMAL JE UMLAUF ABGEHOLT.
+        //
+        // `dlg_state` ist 1, solange sie offen ist, 2 nach einem
+        // Knopf und 3 nach Flucht/Kreuz. Welcher Knopf es war, sagt
+        // `dlg_wahl_at` -- 0 ist der erste, und der erste ist hier
+        // ABBRECHEN (siehe `pw_frage_auf`).
+        //
+        // WARUM DAS HIER STEHT UND NICHT IM `if id < MAXWD` DARUEBER:
+        // die Knoepfe eines Dialogs feuern zwar, aber `wlib.step`
+        // FAENGT ihr Feuern ab und verwandelt es in `dl_state`
+        // (wlib.fi, "Der Dialog: die beiden Knoepfe sind seine
+        // Antwort") -- beim Aufrufer kommt kein Ereignis an. Wer hier
+        // auf ein Ereignis wartet, wartet fuer immer.
+        if pw_frage != 0 {
+            let ds: u64 = wlib.dlg_state()
+            if ds == 2 {
+                let welcher: u64 = wlib.dlg_wahl_at()
+                let was: u64 = pw_frage
+                pw_frage = 0
+                wlib.dlg_close()
+                if welcher == 1 {
+                    pw_tun(was)
+                } else {
+                    say((&s_pmab[0 as usize]) as u64)
+                    nl()
+                }
+            } else if ds == 3 {
+                // FLUCHT ODER KREUZ: nichts geschieht, und das wird
+                // gesagt. Ein Abbruch, der stumm ist, sieht aus wie
+                // ein Knopf, der nicht reagiert hat.
+                pw_frage = 0
+                wlib.dlg_close()
+                say((&s_pmab[0 as usize]) as u64)
+                nl()
             }
         }
         // ============================================ RUNDE STARTKNOPF
@@ -1109,8 +1426,19 @@ fn u_start(args: u64) -> u64 {
         // wahr. wlib fuehrt fuer genau diesen Fall einen Zaehler
         // (`key_seq`, siehe die Anmerkung dort: "zweimal Entf ist
         // zweimal dieselbe Zahl").
+        // ==================================================== RUNDE ENERGIE
+        // SOLANGE MENUE ODER RUECKFRAGE OFFEN SIND, GEHOERT DIE
+        // FLUCHTTASTE IHNEN UND NICHT DEM STARTMENUE.
+        //
+        // Sonst waere die Reihenfolge falsch herum: Escape im
+        // Ausschalt-Dialog haette das GANZE Startmenue zugemacht und
+        // den Dialog als verwaistes Fenster stehen lassen. `wlib`
+        // fuehrt die Flucht im Dialog selbst (dl_state 3), und das
+        // Ergebnis holt der Block oben ab -- hier muss sie nur
+        // durchgelassen werden.
         let ks: u64 = wlib.key_seq()
-        if ks != g_kseq && wlib.key_last() == wlib.KEY_ESC {
+        if ks != g_kseq && wlib.key_last() == wlib.KEY_ESC
+            && pw_frage == 0 && pw_menue == 0 {
             g_kseq = ks
             zumachen()
             // Das Suchfeld wird geleert: wer das Menue neu aufmacht,
@@ -1154,7 +1482,18 @@ fn u_start(args: u64) -> u64 {
             sayn(g_gnade)
             nl()
         }
-        if g_offen && nun >= g_gnade && !wlib.win_fokus(w) {
+        // ==================================================== RUNDE ENERGIE
+        // EIN EIGENES FENSTER DES PROGRAMMS IST KEIN "KLICK DANEBEN".
+        //
+        // Das Energiemenue und die Rueckfrage sind eigene Fenster und
+        // ziehen den Fokus zwangslaeufig vom Startmenue ab. Ohne diese
+        // Bedingung haette die Regel "Fokus weg heisst zu" das
+        // Startmenue in dem Augenblick zugeklappt, in dem die
+        // Rueckfrage aufging -- und die Frage stuende allein auf dem
+        // Schreibtisch. Gemessen genau so, bevor diese zwei Worte
+        // dazukamen.
+        if g_offen && nun >= g_gnade && !wlib.win_fokus(w)
+            && pw_frage == 0 && pw_menue == 0 {
             zumachen()
         }
         // Umgekehrt: die Leiste holt das Fenster mit WA_TOGGLE zurueck,
