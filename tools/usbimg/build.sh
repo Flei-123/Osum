@@ -777,9 +777,28 @@ ARGS+=(/boot/ "/boot/osum.mb=$OUT/osum.mb"
 # ueber einen Betrieb, den niemand gemessen hat.
 cat > "$OUT/inittab" <<'EOFTAB'
 # /etc/inittab -- name:ziele:art:befehl:optionen
-# Die Oberflaeche startet der Kern selbst (kgui.desk_start), nicht init.
-# Was hier steht, ist der Dienst, der beim Herunterfahren ein Signal
-# bekommen MUSS -- und die Konsole fuer den Fall ohne Bildschirm.
+#
+# DIE OBERFLAECHE STEHT HIER NICHT DRIN, und das ist kein Versaeumnis:
+# `kgui.desk_start` startet Schreibtisch, Leiste, Starter und den Rest
+# selbst, direkt aus dem Kern. Was init auf einem Abbild mit Bildschirm
+# tut, ist deshalb genau zweierlei -- Waisen einsammeln und beim
+# Abschalten aufraeumen (SIGTERM, Frist, SIGKILL, sync, umount) --,
+# und dafuer braucht es keinen eigenen Dienst.
+#
+# DIE KONSOLE LAEUFT NUR IM ZIEL `konsole`, und `ctrl` heisst dort
+# "wenn diese Shell endet, endet das System" (init.fi: A_CTRL ->
+# going = 0). Fuer einen Serverlauf ist das richtig: das Skript von
+# `script=` laeuft, die Shell endet, die Maschine faehrt sauber herunter.
+#
+# WARUM NICHT AUCH IM ZIEL `grafik`, gemessen und wieder verworfen:
+#   * mit `ctrl` wuerde ein `exit` im Terminalfenster den ganzen
+#     Rechner ausschalten.
+#   * mit `respawn` startet sie endlos neu -- gemessen 71 Mal in
+#     zwanzig Sekunden ("sh: ready" / "sh: bye" im Wechsel), weil auf
+#     einem Schreibtisch niemand an dieser Konsole sitzt und sie sofort
+#     wieder auf EOF laeuft.
+# Also gar nicht. Ein Dienst, der nichts zu tun hat, gehoert nicht in
+# die Tafel.
 sh:konsole:ctrl:/bin/sh
 EOFTAB
 printf 'grafik
