@@ -165,7 +165,19 @@ rm -f "$SER" "$SOCK"
 # Der Fehler sah aus wie "der Installer tut nichts": das Fenster
 # stand, die Platte war gefunden, und dann kam einfach nichts mehr.
 # `wighalt=<sekunden>` sticht beide Vorgaben (Runde OBERFLAECHE).
-APPEND="modfs osum vfs gfx wm wig wmdauer wighalt=1200 nokbd nosched noproc nofs"
+# UND `wmhold` DAZU -- OHNE DAS WIRKT `wighalt` NICHT.
+#
+# GEMESSEN, zum zweiten Mal an derselben Stelle: die Halteschleife
+# in kernel/kgui.fi steht HINTER `if !mode_on(M_WMHOLD) { ... }`.
+# Ohne `wmhold` wird sie nie betreten, `wighalt` liest niemand, und
+# auf der Leitung fehlt die Zeile "wm: halt sek=" -- der Kern faehrt
+# herunter, sobald der Fensterserver seine Messreihe fertig hat.
+# Mit `wmhold` UND `wighalt=1200` laeuft er zwanzig Minuten weiter,
+# und genau so lange kann eine Installation dauern.
+#
+# `wmdauer` bleibt daneben: es sorgt dafuer, dass die Schleife auch
+# ohne Shell im Fenster laeuft (Runde TAFEL).
+APPEND="modfs osum vfs gfx wm wig wmhold wmdauer wighalt=1200 nokbd nosched noproc nofs"
 APPEND="$APPEND lang=de uiscale=1 wigapp=/bin/installer,sofort"
 
 timeout 900 $QEMU_X86 -m 512 \

@@ -141,6 +141,12 @@ static mut gewaehlt: u64 = 0xFFFFFFFFFFFFFFFF
 static mut laeuft: u64 = 0
 static mut fertig: u64 = 0
 static mut frage: u64 = 0 // 1 = erste Frage offen, 2 = zweite
+// WELCHER SCHRITT GERADE ANGESAGT IST. NICHT `instkern.schritt_nr()`:
+// das steht erst dann auf einer Nummer, wenn die Maschine den
+// Abschnitt schon BEGONNEN hat -- fuer eine Anzeige ist das zu spaet,
+// und auf der Leitung fehlten deshalb die Schritte 2, 4 und 5,
+// obwohl alle fuenf gelaufen sind.
+static mut st_zeige: u64 = 0
 
 // Die Geraete, die ueberhaupt in Frage kommen. `ram0` steht bewusst
 // NICHT darin: es ist die Quelle, aus der kopiert wird.
@@ -193,6 +199,7 @@ static mut m_ok: [u8; 18] = "installer: fertig\0"
 static mut m_fail: [u8; 18] = "installer: FEHLER\0"
 static mut m_self: [u8; 10] = "installer\0"
 static mut m_args: [u8; 18] = "installer: argc=\0\0"
+static mut m_wo: [u8; 16] = "installer: bei=\0"
 
 // Die Schalter dieses Programms.
 static mut m_luft: [u8; 2] = " \0"
@@ -459,7 +466,7 @@ fn status_bauen() {
 // Kopieren zusaetzlich, wie weit.
 fn schritt_bauen() {
     b_start((&schrittzeile[0 as usize]) as u64, 200)
-    let s: u64 = instkern.schritt_nr()
+    let s: u64 = st_zeige
     if s == 0 {
         b_ende()
         return
@@ -532,34 +539,38 @@ fn installieren(dev: u64, wstat: u64, wschritt: u64) -> bool {
     }
 
     // ---- 1. die Partitionstafel
-    melde_schritt(wschritt)
+    melde_schritt(wschritt, instkern.S_GPT)
     if !instkern.gpt_schreiben(zfd, sekt, espsek) {
+        wo(1)
         ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
         ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
         return false
     }
-    melde_schritt(wschritt)
 
     // ---- 2. die EFI-Partition
+    melde_schritt(wschritt, instkern.S_ESP)
     if !instkern.fat32_create(zfd, instkern.plan_esp_start(), espsek) {
+        wo(2)
         ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
         ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
         return false
     }
-    melde_schritt(wschritt)
 
     // ---- 3. das System kopieren. Der lange Teil.
+    melde_schritt(wschritt, instkern.S_KOPIE)
     if !instkern.wurzel_kopieren(zfd, qfd, espsek, qsekt) {
+        wo(3)
         ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
         ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
         return false
     }
-    melde_schritt(wschritt)
 
     // ---- 4. das Dateisystem auf die Partition vergroessern
+    melde_schritt(wschritt, instkern.S_WACHSEN)
     let ofs_start: u64 = instkern.plan_ofs_start(espsek)
     let ofs_bloecke: u64 = instkern.plan_ofs_ende(sekt) - ofs_start + 1
     if instkern.wachsen(zfd, ofs_start, ofs_bloecke) == 0 {
+        wo(4)
         ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
         ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
         return false
@@ -567,18 +578,34 @@ fn installieren(dev: u64, wstat: u64, wschritt: u64) -> bool {
     ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
     ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
     ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
-    melde_schritt(wschritt)
 
     // ---- 5. der Bootlader auf die EFI-Partition
-    return bootlader()
+    melde_schritt(wschritt, instkern.S_BOOT)
+    if !bootlader() {
+        wo(5)
+        return false
+    }
+    return true
 }
 
-fn melde_schritt(wschritt: u64) {
+// AN WELCHER STELLE ES ABGEBROCHEN IST. `fehler_bei()` sagt, WAS
+// schiefging (lesen, schreiben, kein OFS); diese Zahl sagt, WO. Ohne
+// sie ist "installer: FEHLER 2" eine Auskunft, mit der niemand etwas
+// anfangen kann -- gemessen in dieser Runde, wo die Installation
+// vollstaendig auf der Platte stand und trotzdem als Fehler endete.
+fn wo(n: u64) {
+    say(ptr((&m_wo[0 as usize]) as u64))
+    ulib.sayu(n)
+    ulib.nl()
+}
+
+fn melde_schritt(wschritt: u64, nr: u64) {
+    st_zeige = nr
     schritt_bauen()
     wlib.set_text(wschritt, (&schrittzeile[0 as usize]) as u64)
     wlib.draw_all()
     say(ptr((&m_step[0 as usize]) as u64))
-    ulib.sayu(instkern.schritt_nr())
+    ulib.sayu(nr)
     luft()
     ulib.sayu(instkern.fortschritt())
     ulib.nl()
