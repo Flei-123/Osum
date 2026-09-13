@@ -2848,11 +2848,20 @@ fn k14_setup(state: u64) {
     // entsteht, faende ihn nicht. Liegt er schon da, gibt `v_create`
     // null zurueck, und das ist kein Fehler: dann ist er eben da.
     wechsel.init(state)
+    var s_med: [u8; 15] = "k14: medien m=\0"
+    var s_mk: [u8; 7] = "  mk=\0\0"
     let med_m: u64 = vfs.mount_for(state, wechsel.medien_pfad())
+    var mk: u64 = 0
     if med_m < vfs.MAX_MNT {
-        let _mk: u64 = vfs.v_create(state, med_m, wechsel.medien_pfad(),
+        // Liegt der Ordner schon, gibt `v_create` null -- kein Fehler.
+        mk = vfs.v_create(state, med_m, wechsel.medien_pfad(),
             vfsops.N_DIR)
     }
+    serial.puts((&s_med[0]) as u64)
+    serial.dec(med_m)
+    serial.puts((&s_mk[0]) as u64)
+    serial.dec(mk)
+    serial.nl()
     if kstate.mode_on(state, kstate.M_NOFAT) {
         return
     }
@@ -3194,6 +3203,10 @@ fn osum(state: u64) {
     // Generation, disp_restore ueber den Bildmodus.
     gfx.disp_restore(state)
     usb_mount(state)
+    // RUNDE HOTPLUG: JETZT halten -- die Wurzel steht, `/medien` ist
+    // angelegt, `wechsel` ist bereit. Wer hier einen Stick steckt,
+    // bekommt ihn eingehaengt; wer es eine Zeile frueher tat, nicht.
+    usb_hold(state)
     list_dir(state, (&p_bin[0]) as u64, (&s_bin[0]) as u64)
 
     // ================================================== RUNDE K13
@@ -5095,10 +5108,18 @@ fn usb_stage(state: u64) {
         }
         gfx.mouse_adopt(state, aw, ah)
     }
-    usb_hold(state)
-    // DIE GEGENPROBE ZUM ABZIEHEN. Sie steht hier und nicht in der
-    // Bibliothek, weil sie eine Anforderung der Kommandozeile ist und
-    // kein Zustand des Geraets.
+    // ================================== RUNDE HOTPLUG
+    // DER HALTEPUNKT IST HIER WEGGEZOGEN, UND DAS IST EIN BEFUND.
+    //
+    // `usb_hold` stand bis hierher IN DIESER FUNKTION -- also VOR
+    // `osum`, und damit vor `k14_setup`, das die Wurzel einhaengt und
+    // `/medien` anlegt. Ein Stick, der waehrend des Haltens gesteckt
+    // wurde, konnte deshalb gar nicht eingehaengt werden: `vfs.ready`
+    // war noch falsch. GEMESSEN: `hotplugs=1 devices=1` (das Geraet war
+    // da, mit 98304 Bloecken), aber keine einzige `wechsel:`-Zeile.
+    //
+    // Das Aufzaehlen bleibt hier (die Shell braucht die Tastatur), das
+    // WARTEN wandert hinter das Dateisystem -- siehe `osum`.
     if kstate.mode_on(state, kstate.M_UNPLUG) {
         usb_unplug(state)
     }
@@ -5113,6 +5134,32 @@ fn usb_stage(state: u64) {
 //
 // Mit `usbpoll` wird waehrenddessen SELBST nachgesehen statt auf die
 // Meldung zu warten -- die Gegenprobe zu `usbnoirq`.
+// ====================================== RUNDE HOTPLUG
+// DERSELBE SCHRITT WIE IN `kgui.fi`, FUER DEN LAUF OHNE OBERFLAECHE.
+//
+// Zwei Merker, zwei Vergleiche: bewegt sich einer der beiden Zaehler
+// aus `usb.fi`, ist eine Flanke da. Warum die Zahlen und kein
+// Rueckruf, steht im Kopf von `kernel/wechsel.fi`.
+static mut hp_gen_k: u64 = 0
+static mut hp_weg_k: u64 = 0
+
+fn wechsel_schritt(state: u64) {
+    let gen: u64 = usb.msc_gen(state)
+    let weg: u64 = usb.msc_weg(state)
+    // Erst das Gehen -- sonst nimmt ein neuer Stick den Platz, den der
+    // alte noch nicht geraeumt hat.
+    if weg != hp_weg_k {
+        hp_weg_k = weg
+        let _n: u64 = wechsel.geht(state, blk.DEV_USB)
+    }
+    if gen != hp_gen_k {
+        hp_gen_k = gen
+        if usb.msc_ready(state) {
+            let _i: u64 = wechsel.kommt(state, blk.DEV_USB)
+        }
+    }
+}
+
 fn usb_hold(state: u64) {
     var s_h: [u8; 10] = "k17: hold\0"
     var s_r: [u8; 10] = "k17: free\0"
@@ -5131,6 +5178,20 @@ fn usb_hold(state: u64) {
         // eigenen Meldevektor (siehe der Kopf von `ehci.fi`), also ist
         // Abfragen fuer ihn nicht die Gegenprobe, sondern der Weg.
         ehci.poll(state)
+        // ================================== RUNDE HOTPLUG
+        // DIESE SCHLEIFE IST DER SCHREIBTISCH DES KERNLAUFS.
+        //
+        // `port_watch` (im Zeitgeber) merkt einen Anschlusswechsel nur
+        // VOR; gearbeitet wird ausserhalb der Unterbrechung. Im
+        // grafischen Betrieb tut das `kgui`s Schleife -- in einem Lauf
+        // ohne Oberflaeche gab es bis hierher NIEMANDEN, der es tat,
+        // und ein im Betrieb gesteckter Stick blieb deshalb liegen:
+        // `events=1`, `hotplugs=0`, gemessen.
+        //
+        // Also stehen hier dieselben zwei Zeilen wie dort, in
+        // derselben Reihenfolge: erst aufzaehlen, dann einhaengen.
+        usb.hotplug_work(state)
+        wechsel_schritt(state)
         sched.sleep_ticks(state, 1)
         i = i + 1
     }
