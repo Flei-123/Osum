@@ -73,6 +73,45 @@ CMD="modfs osum gfx ${FBMODE:-} wm wig desk wmshell wmdauer $TAFEL herz absturzh
 #
 # `qemu-xhci` ist dasselbe Geraet, mit dem tools/hid/run.sh seit Runde
 # HID misst -- dort kommen Tastatur und Maus vollstaendig an.
+# ===================================================== RUNDE HOVERSTIL
+#
+# KERN UND WURZEL SIND WAEHLBAR -- fuer die dunkle Messung.
+#
+# Das Farbschema steht in /etc/theme.conf IM ABBILD und nicht auf der
+# Kommandozeile; hell und dunkel sind deshalb zwei BAUTEN und nicht
+# zwei Schalter. `tools/usbimg/build.sh` nimmt dafuer THEMA (die Pakete
+# unter assets/themes/: `tageslicht` = hell, `mitternacht` = dunkel).
+#
+#   KERN=osum-dunkel.mb WURZEL=root-dunkel.img bash start.sh ...
+#
+# `usb-tablet` IST ABSOLUT -- UND DIESER KERN LIEST NUR RELATIV.
+#
+# Gemessen in dieser Runde (Lauf hp1, 1280x800): die Maus meldete
+# fleissig Pakete, aber KEINE Bewegung --
+#
+#     bew=0 pk=178          (pk steigt, bew bleibt null)
+#     xy=639,399 -> xy=1279,799 -> xy=0,0
+#
+# -- und der Zeiger sprang nur zwischen den Ecken. Der Grund steht in
+# `kernel/hidin.fi::mouse_report_boot`:
+#
+#     let dx: u64 = sbits(p + 1, 0, 8)
+#     let dy: u64 = sbits(p + 2, 0, 8)
+#
+# Das ist das BOOT-PROTOKOLL der USB-Maus: ein Oktett je Achse, mit
+# VORZEICHEN, also ein SCHRITT. Ein Tablet schickt an derselben Stelle
+# eine ABSOLUTE Lage in 16 Bit. Die zwei Oktette werden damit als
+# Schrittweite gelesen, die Rechnung in `ps2m.apply` laeuft gegen den
+# Anschlag, und heraus kommt genau das gemessene Ecken-Gehuepfe.
+#
+# `usb-mouse` ist dasselbe Geraet in RELATIV und passt damit zu dem,
+# was dieser Kern liest. Fuer Hover ist das der entscheidende
+# Unterschied: ein Klick braucht nur einen Ort, eine UEBERFAHRUNG
+# braucht eine BEWEGUNG -- und Bewegungen gab es mit dem Tablet keine.
+#
+#   MAUS="-device usb-mouse"     relativ, fuer Hover und Ziehen
+#   (ohne)                        usb-tablet wie bisher
+#
 KVM=()
 [ -w /dev/kvm ] && KVM=(-accel kvm -cpu host)
 
@@ -80,9 +119,9 @@ echo "$CMD" > "$D/cmdline.txt"
 date +%s.%N > "$D/start.zeit"
 
 timeout "${FRIST:-2400}" qemu-system-x86_64 "${KVM[@]}" -m 2048 -smp 4 \
-    -kernel osum.mb -initrd root.img -append "$CMD" \
+    -kernel "${KERN:-osum.mb}" -initrd "${WURZEL:-root.img}" -append "$CMD" \
     -vga std \
-    -device qemu-xhci,id=xhci -device usb-tablet -device usb-kbd \
+    -device qemu-xhci,id=xhci ${MAUS:--device usb-tablet} -device usb-kbd \
     -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
     -serial "file:$D/serial.txt" \
     -monitor "unix:$D/mon.sock,server,nowait" \
