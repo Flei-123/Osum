@@ -192,6 +192,7 @@ static mut m_step: [u8; 18] = "installer: step=\0\0"
 static mut m_ok: [u8; 18] = "installer: fertig\0"
 static mut m_fail: [u8; 18] = "installer: FEHLER\0"
 static mut m_self: [u8; 10] = "installer\0"
+static mut m_args: [u8; 18] = "installer: argc=\0\0"
 
 // Die Schalter dieses Programms.
 static mut m_luft: [u8; 2] = " \0"
@@ -310,6 +311,35 @@ fn platte_dazu(dev: u64) {
     }
     let n: u64 = ulib.size_of(dev)
     if ulib.bad(n) || n == 0 {
+        return
+    }
+    // ============================ EINE GROESSE IST NOCH KEINE PLATTE
+    //
+    // GEMESSEN, nicht vermutet: auf einer Maschine ohne NVMe-Regler
+    // sagt die serielle Leitung "nvme: skipped" -- und `/dev/nvme0`
+    // meldet TROTZDEM eine Groesse (65536 Sektoren). Der Grund steht
+    // in `kernel/devfs.fi`: A_SIZE gibt `blk.blocks_on(...) * BS`
+    // zurueck, und das ist die Zahl, die der Blockschicht
+    // eingetragen ist -- nicht die Antwort eines Geraets.
+    //
+    // Eine Platte, die es nicht gibt, in der Liste anzubieten, ist bei
+    // diesem Programm kein Schoenheitsfehler: sie waere anklickbar,
+    // und was dann passiert, ist eine Installation ins Leere. In der
+    // Abnahme dieser Runde hat genau dieser Geistereintrag ausserdem
+    // die Zahl der gefundenen Platten von 1 auf 2 gehoben und damit
+    // die Vorauswahl verhindert.
+    //
+    // Also wird GELESEN. Ein Geraet, dessen erster Sektor sich nicht
+    // lesen laesst, steht nicht in der Liste -- das ist dieselbe
+    // Auskunft, die auch `install.fi` bekommt, wenn es anfaengt zu
+    // arbeiten, nur eben vorher.
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, dev, 0, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    let geht: bool = instkern.lese(fd, 0, (&tblob[0 as usize]) as u64, 512)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if !geht {
         return
     }
     ulib.strcpy(nptr(p_anz), dev)
@@ -615,6 +645,20 @@ fn arg_hat(args: u64, was: u64) -> bool {
 // --------------------------------------------------------------- das Ganze
 
 fn u_start(args: u64) -> u64 {
+    // WAS AN ARGUMENTEN ANGEKOMMEN IST -- ALS ERSTES, vor allem
+    // anderen. Ein Schalter, der nicht wirkt, hat zwei moegliche
+    // Gruende: er kam nicht an, oder er wurde nicht gelesen. Diese
+    // Zeilen trennen die beiden, und sie stehen VOR `wlib.begin()`,
+    // damit sie auch dann etwas sagen, wenn es gar keine Flaeche gibt.
+    say(ptr((&m_args[0 as usize]) as u64))
+    ulib.sayu(ulib.arg_count(args))
+    var ai: u64 = 0
+    while ai < ulib.arg_count(args) {
+        luft()
+        say(ulib.arg_at(args, ai))
+        ai = ai + 1
+    }
+    ulib.nl()
     let nohit: bool = arg_hat(args, ptr((&a_nohit[0 as usize]) as u64))
     // `zeig` malt das Fenster und geht wieder -- fuer den Bildbeweis.
     let nurzeig: bool = arg_hat(args, ptr((&a_zeig[0 as usize]) as u64))
@@ -723,8 +767,21 @@ fn u_start(args: u64) -> u64 {
     }
 
     // Der Testlaeufer darf ohne Fragen durch -- ein Mensch nie.
-    if sofort && gewaehlt < p_anz {
-        frage = 2
+    //
+    // UND ER NIMMT DIE ERSTE PLATTE, nicht "die einzige". Die
+    // Vorauswahl oben greift nur bei genau einer gefundenen Platte --
+    // das ist fuer einen Menschen richtig (bei zweien soll er
+    // waehlen), fuer den Laeufer aber eine Bedingung, die er nicht in
+    // der Hand hat: taucht ein zweites Geraet auf, tut der Lauf
+    // stillschweigend nichts und die Abnahme meldet "keine Schritte".
+    // Genau das ist in dieser Runde passiert.
+    if sofort {
+        if gewaehlt >= p_anz && p_anz > 0 {
+            gewaehlt = 0
+        }
+        if gewaehlt < p_anz {
+            frage = 2
+        }
     }
 
     var runden: u64 = 0
@@ -858,9 +915,56 @@ fn u_start(args: u64) -> u64 {
     return 0
 }
 
-// RUNDE GRUNDLINIE: das `main`, das nie laeuft -- `user.ld` springt nach
-// `u_start`. Das Profil `app` verlangt es trotzdem. Es ruft `u_start`,
-// damit es nicht luegt. Dieselben drei Zeilen wie in desktop.fi.
+// ==================================================================
+// DAS `main`, DAS SEHR WOHL LAEUFT -- UND DER SCHALTER, DER DESHALB NIE
+// ANKAM
+// ==================================================================
+//
+// In jedem Programm dieses Baums mit `profile app` steht an dieser
+// Stelle derselbe Dreizeiler, und darueber derselbe Satz: "das `main`,
+// das nie laeuft -- `user.ld` springt nach `u_start`".
+//
+// DER SATZ STIMMT FUER `profile kernel` UND NICHT FUER `profile app`.
+// Nachgemessen an der fertigen Datei:
+//
+//     401000e8: xor  %rbp,%rbp
+//     401000eb: mov  %rsp,%rdi      <- der Argumentblock
+//     401000ee: and  $-16,%rsp
+//     401000f2: call 0x40102d4a     <- und das ist `main`, nicht u_start
+//
+// Unter `app` bindet der Uebersetzer sein EIGENES `_start` ein (es gibt
+// kein crt.o daneben, siehe tools/usbimg/build.sh), und dieses `_start`
+// ruft `main`. `--defsym=USER_ENTRY=...u_start` steht zwar in der
+// Binderzeile, aber es wird von diesem Weg gar nicht benutzt.
+//
+// Damit reicht `u_start(0)` den Block NICHT weiter, sondern eine Null --
+// und `ulib.arg_count(0)` ist 0. Jeder Schalter, den ein
+// app-Programm auf der Kommandozeile bekommt, ist an dieser Zeile
+// verlorengegangen. GEMESSEN in dieser Runde: mit
+// `wigapp=/bin/installer,zeig` stand auf der Leitung
+//
+//     installer: argc=0
+//
+// obwohl der Kern den Block gebaut und `elf.spawn` ihn uebergeben hat
+// (kernel/kgui.fi zaehlt `wg_argc` korrekt hoch, kernel/elf.fi
+// `write_args` schreibt ihn nach ARGS_BASE).
+//
+// DIE STELLE IST HIER UND NICHT IM KERN. Der Kern tut das Richtige;
+// falsch ist die Null in dieser Zeile. `rdi` ist in Firn nicht zu
+// lesen, aber der Block liegt an einer FESTEN Adresse --
+// `proc.ARGS_BASE` in kernel/proc.fi, und die Startmeldung jedes
+// Prozesses nennt sie mit (`ustack=0x4007f000`). Also wird sie hier
+// benannt und nicht erraten.
+//
+// DAS BETRIFFT NICHT NUR DIESES PROGRAMM. Dieselben drei Zeilen stehen
+// in desktop, taskbar, settings, launcher, explorer, widgetdemo,
+// taskmgr, calc, certus und speicher -- ihre Schalter (`nohit`,
+// `noclip`, `nokeys`, `noidx`) kommen genauso wenig an. Das hier ist
+// die Reparatur fuer DIESE Datei; der Rest gehoert in eine eigene
+// Runde, weil an den Gegenproben Testlaeufer haengen, die heute gruen
+// sind, ohne dass der Schalter je gewirkt haette.
+const ARGS_BASE: u64 = 0x4007F000
+
 fn main() -> i32 {
-    return u_start(0) as i32
+    return u_start(ARGS_BASE) as i32
 }

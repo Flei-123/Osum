@@ -49,7 +49,8 @@ if [ -n "$ZIEL" ]; then
     PLATTE=(-drive "file=$W/ziel.img,format=raw,if=ide,index=0")
 fi
 
-APPEND="modfs osum gfx wm wig desk wmshell wmdauer herz nostart"
+# `vfs` haengt /dev ein -- ohne das findet das Programm keine Platte.
+APPEND="modfs osum vfs gfx wm wig desk wmshell wmdauer herz nostart"
 APPEND="$APPEND nosched noproc nofs lang=de uiscale=1"
 # Die Argumente haengen mit KOMMA am Pfad -- so zerlegt sie
 # `wigapp_zerlegen` in kernel/kgui.fi (jedes Komma wird zur Null).
