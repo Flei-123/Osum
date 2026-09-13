@@ -255,7 +255,7 @@ python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
 # Runde INSTALL darf auch sie eine mehrblockige Karte haben, und
 # `fs.mount` liest die Zahl aus dem Superblock -- an den Dateien des
 # Abbilds aendert sich nichts, nur der Platz dahinter.
-# RUNDE BAUFEHLER (13.09.2026): 8192 -> 16384 Bloecke (32 -> 64 MiB).
+# RUNDE BAUFEHLER (13.09.2026): 8192 -> 16384 Bloecke (4 -> 8 MiB).
 # DIESE RUNDE HAT DIE ZAHL NICHT GERATEN, SONDERN GEMESSEN. Der Grund ist
 # derselbe wie bei jeder Erhoehung davor, nur die Ursache ist eine neue:
 # Runde GRUNDLINIE (1d16d34) hat diesen Laeufer -- zu Recht -- auf
@@ -270,19 +270,24 @@ python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
 #     die neun zusammen                      4347680 Oktette
 #
 # Die Bloeckezahl ist dabei stehengeblieben, und 4347680 Oktette passen
-# nicht in 8192 Bloecke (32 MiB) -- zusammen mit Schriften, Sprachdateien,
+# nicht in 8192 Bloecke (4 MiB) -- zusammen mit Schriften, Sprachdateien,
 # Buendeln, Baum, Bitmap, Inode-Tafel und Journal. Gemessen mit genau den
 # Dateien dieses Laeufers:
 #
-#     8192 Bloecke   mkfs: the disk is full
-#    10240 Bloecke   geht, 1298 Bloecke frei
-#    16384 Bloecke   geht, 7441 Bloecke frei
+#     8192 Bloecke  (4 MiB)   mkfs: the disk is full
+#    10240 Bloecke  (5 MiB)   geht, 1298 Bloecke frei
+#    16384 Bloecke  (8 MiB)   geht, 7441 Bloecke frei
+#
+# EIN BLOCK IST HIER 512 OKTETTE (mkfs.py, `BS = 512`) und nicht 4096 --
+# die aelteren Kommentare in dieser Datei rechnen an dieser Stelle falsch
+# ("4096 Bloecke sind 16 MiB"; es sind 2 MiB). Die Bloeckezahlen selbst
+# waren trotzdem richtig, weil sie gemessen und nicht gerechnet wurden.
 #
 # 16384 und nicht 10240, damit die naechste Erweiterung von wlib nicht
 # sofort wieder hier landet -- die Historie dieser Datei ist eine Kette
 # von vier Erhoehungen aus genau diesem Grund (4096 -> 6144 -> 8192).
-# Das Abbild ist eine TEMPORAERE Datei in $TMPD; die 64 MiB kosten
-# Plattenplatz nur waehrend des Laufs, und mkfs legt sie duenn an.
+# Das Abbild ist eine TEMPORAERE Datei in $TMPD; die 8 MiB kosten
+# Plattenplatz nur waehrend des Laufs.
 # Die FASSUNG bleibt 2: die Blockkarte darf seit Runde INSTALL mehrere
 # Bloecke haben (bmblocks=4), und `fs.mount` liest die Zahl aus dem
 # Superblock.
