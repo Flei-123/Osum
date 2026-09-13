@@ -288,13 +288,33 @@ platte_lauf() { # <name> <skript> <limit>
     # Also wird die limine.conf dann geaendert, so wie ein Mensch es
     # mit einem Editor taete.
     if [ -z "$skript" ]; then
+        # MIT MONITOR UND MIT SCHIRM: von diesem Lauf soll ein BILD
+        # entstehen. Es ist der Beleg, auf den es in dieser Runde
+        # ankommt -- ein Schreibtisch, der von der PLATTE kommt, ohne
+        # dass ein Stick im Rechner steckt.
+        local msock="$OUT/mon-platte.sock"
+        rm -f "$msock"
         local args0=(-machine pc -cpu max -m 512 -display none -no-reboot
             -drive "if=pflash,format=raw,unit=0,readonly=on,file=$OVMF"
             -serial "file:$ser"
+            -device VGA,edid=on,xres=1280,yres=800,vgamem_mb=32
+            -monitor "unix:$msock,server,nowait"
             -drive "file=$ZIEL,format=raw,if=ide,index=0"
             -device isa-debug-exit,iobase=0xf4,iosize=0x04)
         [ -f "$vars" ] && args0+=(-drive "if=pflash,format=raw,unit=1,file=$vars")
-        timeout "$limit" $QEMU_X86 "${args0[@]}" > /dev/null 2>&1
+        timeout "$limit" $QEMU_X86 "${args0[@]}" > /dev/null 2>&1 &
+        local qp=$!
+        # Warten, bis der Schreibtisch wirklich steht.
+        local w=0
+        while [ $w -lt 240 ]; do
+            grep -qa 'desk: start /bin/taskbar' "$ser" 2>/dev/null && break
+            kill -0 "$qp" 2>/dev/null || break
+            sleep 1; w=$((w+1))
+        done
+        sleep 12
+        schuss "$msock" "$SHOTS/40-von-der-platte.png" || true
+        kill "$qp" 2>/dev/null
+        wait "$qp" 2>/dev/null
         return $?
     fi
     {
@@ -322,15 +342,65 @@ platte_lauf() { # <name> <skript> <limit>
     return $?
 }
 
-platte_lauf start "" 300
+platte_lauf start "" 400
 rc=$?
-[ "$rc" = 21 ] && ok "die Platte startet (Beendigungscode 21)" \
-    || bad "die Platte startet nicht (Code $rc)"
-grep -qa 'osum: rootpart=' "$OUT/start.txt" \
-    && ok "der Kern findet seine Wurzel auf der Platte: $(grep -aoE 'rootpart=[0-9]+ +first=[0-9]+ +blocks=[0-9]+' "$OUT/start.txt" | head -1)" \
-    || bad "der Kern findet keine Wurzelpartition"
-grep -qa 'osum: mount=1' "$OUT/start.txt" \
-    && ok "die Wurzel ist eingehaengt" || bad "die Wurzel ist nicht eingehaengt"
+# DER BEENDIGUNGSCODE IST HIER 124 UND NICHT 21 -- UND DAS IST DAS
+# RICHTIGE ERGEBNIS.
+#
+# 21 ist der vereinbarte Erfolgscode eines Laufs, der etwas ABARBEITET
+# und danach aufhoert (`isa-debug-exit`). Die limine.conf, die der
+# Installer schreibt, startet aber den SCHREIBTISCH -- und ein
+# Schreibtisch hoert nicht von selbst auf. Er laeuft, bis jemand ihn
+# beendet; hier bis `timeout` zuschlaegt, und das ist 124.
+#
+# Ein Lauf, der hier mit 21 zurueckkaeme, waere der verdaechtige:
+# dann haette das System nach dem Start etwas abgearbeitet und sich
+# beendet, statt eine Oberflaeche hinzustellen.
+#
+# Gemessen wird deshalb nicht der Code, sondern WAS AUF DER LEITUNG
+# STEHT -- die Wurzel, die Einhaengung und der Schreibtisch. Die drei
+# Zusagen darunter tun genau das.
+# Der Lauf wird von aussen beendet, sobald das Foto steht -- der Code
+# sagt hier also nichts. Was zaehlt, steht auf der Leitung und im Bild.
+if [ -s "$OUT/start.txt" ]; then
+    ok "die Platte startet und laeuft (ein Schreibtisch endet nicht von selbst)"
+else
+    bad "von der Platte kam keine einzige Zeile (Code $rc)"
+fi
+if [ -s "$SHOTS/40-von-der-platte.png" ]; then
+    t=$(tinte "$SHOTS/40-von-der-platte.png")
+    if [ "$t" -ge 5 ]; then
+        ok "BILD: der Schreibtisch von der Platte (${t} % Tinte)"
+    else
+        bad "der Schirm von der Platte ist fast leer (${t} % Tinte)"
+    fi
+else
+    bad "kein Bild vom Schreibtisch auf der Platte"
+fi
+# DIE WURZEL -- auf BEIDEN Wegen. Die limine.conf, die der Installer
+# schreibt, startet den SCHREIBTISCH; der geht ueber kgui.surface und
+# meldet `wm: rootpart=`. Der Textweg (kmain.osum) meldet
+# `osum: rootpart=`. Gesucht wird, was davon dasteht -- entscheidend
+# ist, DASS die Wurzel von der Partition kommt.
+if grep -qaE '(osum|wm): rootpart=' "$OUT/start.txt"; then
+    ok "der Kern findet seine Wurzel auf der Platte: $(grep -aoE 'rootpart=[0-9]+ +first=[0-9]+ +blocks=[0-9]+' "$OUT/start.txt" | head -1)"
+else
+    bad "der Kern findet keine Wurzelpartition"
+fi
+if grep -qaE '(osum|wm): mount=1' "$OUT/start.txt"; then
+    ok "die Wurzel ist eingehaengt"
+else
+    bad "die Wurzel ist nicht eingehaengt"
+fi
+# UND DER SCHREIBTISCH KOMMT HOCH. Das ist der Punkt, an dem sich
+# "die Platte bootet" von "man kann damit arbeiten" unterscheidet:
+# ein Fenster, das der Fensterserver meldet, gibt es nur, wenn ein
+# Ring-3-Programm von DIESER Platte gestartet ist.
+if grep -qa 'desk: start /bin/desktop' "$OUT/start.txt"; then
+    ok "der Schreibtisch startet von der Platte"
+else
+    bad "kein Schreibtisch -- die Oberflaeche kommt nicht hoch"
+fi
 # DER ENTSCHEIDENDE SATZ: es war KEIN Modul im Spiel.
 grep -qa 'from module' "$OUT/start.txt" \
     && bad "es lief doch ueber ein Boot-Modul -- dann ist nichts bewiesen" \
@@ -387,7 +457,7 @@ PYEOF
     ZIEL_ALT="$ZIEL"; ZIEL="$OUT/kaputt.img"
     platte_lauf kaputt "" 240
     ZIEL="$ZIEL_ALT"
-    if grep -qa 'osum: mount=1' "$OUT/kaputt.txt"; then
+    if grep -qaE '(osum|wm): mount=1' "$OUT/kaputt.txt"; then
         bad "die kaputte Wurzel wurde trotzdem eingehaengt -- die Pruefung greift nicht"
     else
         ok "GEGENPROBE: die kaputte Wurzel wird NICHT eingehaengt"
