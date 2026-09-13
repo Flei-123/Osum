@@ -156,6 +156,7 @@ export {
     KEY_CTRL_A, KEY_CTRL_C, KEY_CTRL_F, KEY_CTRL_L, KEY_CTRL_T,
     KEY_CTRL_V, KEY_CTRL_X, KEY_CTRL_Z,
     resize_seq,
+    entry_geheim,
     MAXWD, MAXWN,
     // ================================================ RUNDE SYSTEMBUS
     //
@@ -485,6 +486,26 @@ const F_HIDE: u64 = 16
 //
 // Die Regel gehoert also an die Liste und nicht in die Bibliothek.
 const F_EINKLICK: u64 = 32
+
+// ============================================== RUNDE ANMELDUNG
+// EIN FELD, DAS SEINEN INHALT NICHT HERGIBT.
+//
+// Ein Kennwortfeld ist kein anderes Bedienelement -- es ist dasselbe
+// Eingabefeld mit einer einzigen Zusage: was darin steht, steht NICHT
+// auf dem Schirm. Deshalb ein FLAG und kein zweites `K_`-Element:
+// Tasten, Einfuegemarke, Auswahl, Fokusring und die Trefferflaeche
+// sollen sich Zeichen fuer Zeichen gleich verhalten, und jede zweite
+// Umsetzung waere genau die Stelle, an der das auseinanderlaeuft.
+//
+// WO ES WIRKT, und nur dort: in `paint_entry` (was gemalt wird) und in
+// `entry_x` (wo ein Zeichen anfaengt). Beide fragen dieselbe Funktion
+// `zeig_text`, und deshalb stehen Marke und Auswahl auch im verdeckten
+// Feld ueber dem richtigen Zeichen.
+//
+// WAS ES NICHT IST: eine Verschluesselung. Der Klartext steht weiter im
+// Puffer des Programms -- er muss, sonst koennte niemand ihn pruefen.
+// Die Zusage ist genau so gross wie ihr Name: er wird nicht ANGEZEIGT.
+const F_GEHEIM: u64 = 64
 
 // Ein Fenster
 const N_H: u64 = 0
@@ -3532,9 +3553,73 @@ fn paint_check(i: u64) {
 // WHERE CHARACTER `at` OF A TEXT FIELD BEGINS. It has to agree with
 // `paint_entry` to the pixel -- the caret is drawn from here and the
 // selection is measured from here -- so it asks the same function.
+// RUNDE ANMELDUNG: DER TEXT, DER GEMALT WIRD -- und das ist bei einem
+// Kennwortfeld nicht der, der im Puffer steht.
+//
+// Die Punkte stehen in einem EIGENEN Puffer dieser Bibliothek und
+// werden bei jedem Aufruf neu gefuellt. Zwei Gruende, warum nicht im
+// Puffer des Programms: der gehoert dem Programm (es will den Klartext
+// pruefen), und ein Feld, das seinen eigenen Inhalt ueberschreibt,
+// haette ihn beim ersten Malen verloren.
+//
+// Der Punkt ist U+2022 (BULLET), in UTF-8 drei Oktette: E2 80 A2.
+// Dasselbe Zeichen, das jedes andere System hier setzt.
+static mut geheim_puf: [u8; 385] = [0 as u8; 385] // 128 Punkte a 3 Oktette + Abschluss
+
+fn zeig_text(i: u64) -> u64 {
+    let p: u64 = g(i, D_TEXT)
+    if (g(i, D_FLAGS) & F_GEHEIM) == 0 {
+        return p
+    }
+    var n: u64 = tlen(p)
+    if n > 128 {
+        n = 128
+    }
+    var k: u64 = 0
+    while k < n {
+        geheim_puf[(k * 3 + 0) as usize] = 0xE2 as u8
+        geheim_puf[(k * 3 + 1) as usize] = 0x80 as u8
+        geheim_puf[(k * 3 + 2) as usize] = 0xA2 as u8
+        k = k + 1
+    }
+    geheim_puf[(n * 3) as usize] = 0 as u8
+    return (&geheim_puf[(0) as usize]) as u64
+}
+
+// WIE VIELE OKTETTE `at` ZEICHEN IM ANGEZEIGTEN TEXT SIND. Im
+// Klartextfeld ist das `at` selbst (so war es immer); im verdeckten
+// Feld sind es drei je Punkt, weil der Punkt drei Oktette breit ist.
+// `text_w` zaehlt OKTETTE und nicht Zeichen -- stuende hier `at`, saesse
+// die Einfuegemarke im Kennwortfeld bei einem Drittel des Weges.
+fn zeig_at(i: u64, at: u64) -> u64 {
+    if (g(i, D_FLAGS) & F_GEHEIM) == 0 {
+        return at
+    }
+    var a: u64 = at
+    if a > 128 {
+        a = 128
+    }
+    return a * 3
+}
+
 fn entry_x(i: u64, at: u64) -> u64 {
     return g(i, D_X) + inset_text() + wlibc.text_w(wlibc.F_UI,
-        wlibc.px_ui(), g(i, D_TEXT), at)
+        wlibc.px_ui(), zeig_text(i), zeig_at(i, at))
+}
+
+// RUNDE ANMELDUNG: DIESES FELD VERDECKT SEINE EINGABE.
+//
+// Nach `entry(...)` zu rufen und nicht davor -- es braucht die Nummer,
+// die `entry` zurueckgibt.
+fn entry_geheim(i: u64, an: bool) {
+    if i >= MAXWD {
+        return
+    }
+    if an {
+        s(i, D_FLAGS, g(i, D_FLAGS) | F_GEHEIM)
+    } else {
+        s(i, D_FLAGS, g(i, D_FLAGS) & ~F_GEHEIM)
+    }
 }
 
 fn paint_entry(i: u64) {
@@ -3550,11 +3635,16 @@ fn paint_entry(i: u64) {
     let _fb9: bool = fuib.tafel(x, y, bw, bh, wlibc.metric(wlibc.M_RADIUS_INPUT),
         wlibc.theme(wlibc.T_ENTRY), wlibc.theme(wlibc.T_LINE),
         wlibc.metric(wlibc.M_BORDER))
-    let p: u64 = g(i, D_TEXT)
+    // RUNDE ANMELDUNG: GEMALT WIRD, WAS `zeig_text` SAGT. Im normalen
+    // Feld ist das der Puffer des Programms; im Kennwortfeld sind es
+    // Punkte. Alles darunter -- Auswahl, Marke, die drei Textlaeufe --
+    // rechnet ab hier in OKTETTEN DES ANGEZEIGTEN Textes, sonst faellt
+    // das eine gegen das andere auseinander.
+    let p: u64 = zeig_text(i)
     let n: u64 = tlen(p)
     let grund: u64 = y + (bh + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())) / 2
-    var a: u64 = g(i, D_B)
-    var b: u64 = g(i, D_C)
+    var a: u64 = zeig_at(i, g(i, D_B))
+    var b: u64 = zeig_at(i, g(i, D_C))
     if a > b {
         let t: u64 = a
         a = b
@@ -3566,10 +3656,16 @@ fn paint_entry(i: u64) {
     if a > n {
         a = n
     }
+    // `a` und `b` sind bereits OKTETTE des ANGEZEIGTEN Textes. Sie
+    // duerfen deshalb NICHT noch einmal durch `entry_x` -- das wuerde
+    // `zeig_at` ein zweites Mal anwenden und im Kennwortfeld auf das
+    // Neunfache laufen. Gemessen wird direkt an `p`.
+    let x_a: u64 = x + inset_text()
+        + wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), p, a)
+    let x_b: u64 = x + inset_text()
+        + wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), p, b)
     if b > a {
-        let x0: u64 = entry_x(i, a)
-        let x1: u64 = entry_x(i, b)
-        wlibc.rect(x0, y + 3, sub(x1, x0), sub(bh, 6),
+        wlibc.rect(x_a, y + 3, sub(x_b, x_a), sub(bh, 6),
             wlibc.theme(wlibc.T_SEL))
     }
     // vor der Auswahl, die Auswahl, danach -- drei Laeufe, damit die
@@ -3577,11 +3673,11 @@ fn paint_entry(i: u64) {
     var cx: u64 = wlibc.text_at(wlibc.F_UI, wlibc.px_ui(), x + inset_text(),
         grund, p, a, wlibc.theme(wlibc.T_FG))
     if b > a {
-        cx = wlibc.text_at(wlibc.F_UI, wlibc.px_ui(), entry_x(i, a), grund,
+        cx = wlibc.text_at(wlibc.F_UI, wlibc.px_ui(), x_a, grund,
             p + a, b - a, wlibc.theme_selfg())
     }
     if n > b {
-        wlibc.text_at(wlibc.F_UI, wlibc.px_ui(), entry_x(i, b), grund, p + b,
+        wlibc.text_at(wlibc.F_UI, wlibc.px_ui(), x_b, grund, p + b,
             n - b, wlibc.theme(wlibc.T_FG))
     }
     // Die Einfuegemarke -- nur, wenn das Feld den Fokus hat. Ein Feld,
