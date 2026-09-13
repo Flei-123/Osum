@@ -1,0 +1,160 @@
+# vendor/firn/patches/0005-rt-rt-heisst-std-rt.patch
+#
+# RUNDE BAUFEHLER (Osum, 13.09.2026) -- ZWEI NAMEN FUER EINE DATEI, UND
+# DESHALB BINDET fas DIE SIEBZEHN OBERFLAECHEN-PROGRAMME NICHT.
+#
+# WARUM DIESE DATEI EXISTIERT. vendor/firn/lib/ ist NICHT eingecheckt
+# (.gitignore); fetch-firnc.sh loescht das Verzeichnis und legt es aus
+# dem festgenagelten Firn-Commit neu an. Eine Aenderung, die nur dort
+# liegt, ist beim naechsten `--force` weg. Also liegt sie hier.
+#
+# ------------------------------------------------------------ DER BEFUND
+#
+# Gemessen am 13.09.2026 auf main (ae381a3), mit einem eigenen
+# Arbeitsbaum und dem festgenagelten Uebersetzer (c4e3dfce, Flicken
+# 51f45e0fcb840170):
+#
+#     Programme dieses Userlands (mit `fn u_start`):   135
+#     davon von fas gebunden:                          117
+#     nicht gebunden:                                   18
+#
+# Die achtzehn sind GENAU die Programme mit `profile app`:
+#
+#     calc certus desktop explorer freunde launcher lock netmon
+#     papierkorb powermon settings snip storage taskbar taskmgr
+#     themetest viewer widgetdemo
+#
+# und alle achtzehn scheitern an derselben Meldung:
+#
+#     fas: Zeile 292370: diese Marke gibt es zwei '_F1.rt__ld8'
+#
+# ------------------------------------------- DAS IST KEIN FEHLER VON fas
+#
+# GEGENPROBE, UND SIE IST DER GRUND, WARUM HIER UND NICHT AN fas
+# GEFLICKT WIRD: GNU as sagt zu DERSELBEN Datei DASSELBE.
+#
+#     $ firnc1 --profile=app kernel/user/widgetdemo.fi > w.s
+#     $ as --64 -o w.o w.s
+#     w.s:292370: Error: symbol `_F1.rt__ld8' is already defined
+#     w.s:292376: Error: symbol `.L_F1.rt__ld8__bb0' is already defined
+#     w.s:292427: Error: symbol `_F1.rt__st8' is already defined
+#     ... (43 Symbole, jedes genau zweimal)
+#
+# fas hat recht. Die .s-Datei, die der Uebersetzer ausgibt, enthaelt das
+# Modul `rt` ZWEIMAL -- einmal ab Zeile 261512, einmal ab Zeile 292369.
+# Die beiden Rumpfe sind bis auf die Namen der Panikmeldungen
+# (.Lpanicmsg3292 gegen .Lpanicmsg3724) Zeile fuer Zeile gleich.
+#
+# --------------------------------------------------------- DIE URSACHE
+#
+# lib/std/rt.fi IST EIN VERWEIS AUF lib/rt/rt.fi -- eine Datei, zwei
+# Pfade:
+#
+#     $ ls -la vendor/firn/lib/std/rt.fi
+#     lrwxrwxrwx ... vendor/firn/lib/std/rt.fi -> ../rt/rt.fi
+#     $ readlink -f vendor/firn/lib/std/rt.fi
+#     .../vendor/firn/lib/rt/rt.fi
+#
+# Der Uebersetzer fuehrt ein Modul nach dem PFAD, unter dem es importiert
+# wurde, und nicht nach der Datei dahinter. `import std.rt` und
+# `import rt.rt` sind fuer ihn deshalb ZWEI Module -- die beide ihre
+# Symbole unter demselben Modulnamen `rt` anmelden (rt__ld8, rt__Buf,
+# ...). Nachgewiesen mit zwei Zeilen, nicht angenommen:
+#
+#     profile app
+#     import std.rt
+#     import rt.rt          ->  43 doppelte `.globl`-Namen in der .s
+#
+# und mit jedem Zweig einzeln (jeweils 0 doppelte, also kein Fehler des
+# Moduls selbst):
+#
+#     import std.rt         ->  0
+#     import rt.rt          ->  0
+#
+# WER ZIEHT BEIDE. Von den 58 Dateien des Vendor-Baums, die `rt`
+# importieren, tun es 56 als `std.rt`. ZWEI tun es als `rt.rt`:
+#
+#     vendor/firn/lib/paint/png.fi:23
+#     vendor/firn/lib/str/ucd.fi:19
+#
+# Die Kette zu den achtzehn Programmen ist gemessen und laeuft ueber
+# png.fi -- jeder Schritt einzeln nachgestellt (doppelte Symbole in
+# Klammern):
+#
+#     fui.render (43) -> fui.uisvg (43) -> svg.svgimage (43)
+#                     -> paint.png (43) -> import rt.rt
+#
+# waehrend die Nachbarn derselben Ebene sauber sind:
+#     paint.canvas (0) fui.style (0) fui.theme (0) fui.widget (0)
+#     fui.painter (0) fui.uiimage (0) fui.core (0)
+#
+# Die Oberflaechen-Programme ziehen `fui.render` ueber wlib -> fuib, die
+# uebrigen 117 nicht. Genau deshalb trifft es genau diese achtzehn.
+#
+# ------------------------------------- WARUM DER VERWEIS NICHT REICHT
+#
+# fetch-firnc.sh stellt die Verweise seit Runde 31 BEWUSST wieder her
+# (Zeile 140ff, "Aus EINER Datei werden dadurch ZWEI"), und der Kopf
+# dort beschreibt genau diesen Fehler -- fuer den Fall
+# `struct 'rt__Buf' is already declared`, den firnc0 beim Uebersetzen
+# wirft. Das ist wirksam gegen den Uebersetzer-Abbruch und WIRKUNGSLOS
+# gegen den doppelten Ausgabe-Text: der Verweis macht die beiden Pfade
+# inhaltsgleich, aber nicht zu EINEM Modul. GEMESSEN: die Verweise
+# stehen (8 Stueck, std/rt.fi darunter), und die .s hat trotzdem 43
+# doppelte Namen. Der Verweis allein ist also nicht die Loesung; die
+# zweite Schreibweise muss verschwinden.
+#
+# ---------------------------------------------------------- WAS ER TUT
+#
+# Zwei Zeilen, in beiden Dateien dieselbe:
+#
+#     paint/png.fi:23   import rt.rt  ->  import std.rt
+#     str/ucd.fi:19     import rt.rt  ->  import std.rt
+#
+# Sonst nichts. `std.rt` ist die Schreibweise der anderen 56 Dateien,
+# und sie zeigt ueber den Verweis auf dieselbe Datei -- der Inhalt
+# aendert sich durch diesen Flicken an keiner Stelle.
+#
+# ---------------------------------------------------- GEMESSEN, NACHHER
+#
+#     paint.png                doppelte Symbole  43 -> 0
+#     widgetdemo (ganze Kette) doppelte Symbole  43 -> 0
+#     as --64 auf widgetdemo.s  43 Fehler -> 0, w.o 2944408 Oktette
+#     fas: gebundene Programme  117 -> 135 von 135
+#
+# GEHOERT DAS NACH FIRN? Ja. Es ist dort dieselbe Klasse Fehler wie der,
+# den `uiimage` schon vermeidet (Modulname aus dem letzten Pfadstueck),
+# nur eine Ebene hoeher: zwei Pfade auf eine Datei. Solange Firn beide
+# Schreibweisen nebeneinander stehen laesst, steht dieser Flicken hier.
+# Siehe REMOVE-FROM-FIRN.md.
+#
+# ------------------------------------------- WARUM lib/.roh/ LEER BLEIBT
+#
+# fetch-firnc.sh legt vor dem Flicken jede Datei, die eine `+++`-Zeile
+# nennt, unveraendert nach lib/.roh/ -- damit Abschnitt 1 von ./test.sh
+# die Blob-Hashes aus vendor/net/BLOBS gegen den UNGEFLICKTEN Stand
+# messen kann. Dieser Flicken fasst weder net/ noch eine der drei dort
+# genannten Dateien an (net/wire.fi, net/tcp.fi, net/stack.fi); er
+# braucht diese Sicherung nicht.
+--- a/paint/png.fi
++++ b/paint/png.fi
+@@ -20,7 +20,7 @@
+ // here picks per row, by the standard heuristic of the specification
+ // (minimum sum of absolute differences), and the decoder implements all
+ // five.
+-import rt.rt
++import std.rt
+ import html.mem
+ import std.deflate
+ import paint.canvas
+--- a/str/ucd.fi
++++ b/str/ucd.fi
+@@ -16,7 +16,7 @@
+ // address, and nothing in this file assumes anything about the memory image
+ // of the process.
+ import generated.unicode_tables
+-import rt.rt
++import std.rt
+ 
+ export {
+     ucd_map, ucd_free, ucd_bytes,
