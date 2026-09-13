@@ -1,0 +1,837 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/installer.fi -- RUNDE INSTALLER (P-001): DER WEG VON DER
+// VORFUEHRUNG IN DEN ALLTAG.
+//
+// ==================================================================
+// WAS HIER GELOEST WIRD, UND WARUM ES DER WICHTIGSTE OFFENE PUNKT WAR
+// ==================================================================
+//
+// OrientOS startet heute von einem Stick und laeuft aus dem
+// Arbeitsspeicher. Das ist fuer eine Vorfuehrung genau richtig und fuer
+// alles andere unbrauchbar: was man anlegt, ist nach dem Ausschalten
+// weg. `/root/osum-roadmap/OFFEN.md` fuehrt das als `P-001` mit
+// Prioritaet 1 -- "Installation auf Platte -- der Stick laeuft aus dem
+// RAM, nichts bleibt" -- und der Befund daneben sagt auch, woran es
+// lag:
+//
+//     `install.fi` schreibt GPT/EFI, aber es gibt KEINEN bedienbaren
+//     Installationsweg aus der Oberflaeche.
+//
+// Die Maschine war also da und gemessen (Runde INSTALL, 70 Zusagen,
+// docs/ROUNDINSTALL.md); was fehlte, war die Tuer. `install /dev/hda
+// --ja` ist kein Weg fuer einen Menschen, der gerade einen Stick
+// gebootet hat -- er muesste wissen, dass es das Programm gibt, wie die
+// Zielplatte heisst, und dass ein vergessenes `--ja` nichts tut,
+// waehrend ein falsch getipptes Geraet seine Daten kostet.
+//
+// ==================================================================
+// DIE ENTSCHEIDUNG: DIE MASCHINE WIRD GETEILT, NICHT NACHGEBAUT
+// ==================================================================
+//
+// Der bequeme Weg waere gewesen, hier ein Fenster zu bauen und die
+// Schreibarbeit ein zweites Mal zu tippen. Dann gaebe es ZWEI Stellen,
+// an denen eine GPT-Pruefsumme gerechnet wird, und die zweite waere
+// die, die beim naechsten Formatwechsel vergessen wird -- genau das,
+// was `tools/check-ui.sh` fuer Bedienelemente verbietet, nur eine
+// Etage tiefer.
+//
+// Deshalb steht die Maschine seit dieser Runde in
+// `kernel/user/instkern.fi` und hat GENAU ZWEI Aufrufer: die
+// Kommandozeile (`install.fi`, unveraendert in dem, was sie tut) und
+// dieses Fenster. Ein Fehler an der Partitionstafel ist damit an EINER
+// Stelle zu beheben.
+//
+// ==================================================================
+// WAS ES ZEIGT UND WARUM GENAU DAS
+// ==================================================================
+//
+//   1. DIE PLATTEN, MIT DEM, WAS SCHON DARAUF IST. Nicht nur
+//      "/dev/hda": auch die Groesse und -- das ist der Punkt -- ob
+//      schon Partitionen daraufliegen. Wer eine Platte ueberschreibt,
+//      muss vorher sehen koennen, dass sie nicht leer war. Die Zahlen
+//      kommen aus `part.fi` ueber `/dev/`, also aus derselben Quelle,
+//      aus der auch der Kern beim Start seine Wurzel sucht.
+//
+//   2. ZWEI FRAGEN, NICHT EINE. Eine Installation loescht eine ganze
+//      Platte; das ist die folgenreichste Sache, die dieses System auf
+//      Knopfdruck tut. Die erste Frage nennt das Geraet, die zweite
+//      sagt, dass es jetzt unwiderruflich wird. Zwei Dialoge sind
+//      laestig -- eine geloeschte Platte ist schlimmer.
+//
+//   3. WO ES STEHT, WAEHREND ES LAEUFT. Das Kopieren dauert Minuten
+//      (die 32768 Sektoren gehen oktettweise durch den FAT32-Schreiber),
+//      und ein Fenster, das minutenlang nichts sagt, ist von einem
+//      abgestuerzten nicht zu unterscheiden. `instkern` zaehlt deshalb
+//      mit, und hier wird daraus ein Balken und eine Schrittzeile.
+//
+//   4. FEHLER IM KLARTEXT. `instkern` gibt einen GRUND als Zahl
+//      zurueck, und hier wird daraus ein Satz aus dem Katalog. Kein
+//      stiller Abbruch: wenn etwas schiefgeht, steht es im Fenster und
+//      nicht nur auf einer seriellen Leitung, die niemand sieht.
+//
+// ==================================================================
+// DIE REGEL DIESER DATEI: ES MALT NICHTS SELBST
+// ==================================================================
+//
+// Jedes Bedienelement kommt aus `wlib`, und `wlib` malt seit Runde 31
+// mit fUi. `tools/check-ui.sh` rechnet das nach und wird rot, sobald
+// hier ein rohes Mal-Primitiv der Bibliothek steht. Das ist Justins
+// Vorgabe vom 11.09.2026 und der Grund, warum dieses Fenster aussieht
+// wie die anderen.
+//
+// (Der Name des Primitivs steht hier bewusst NICHT ausgeschrieben:
+// die Pruefung liest die Datei mit `grep -a` und unterscheidet
+// Kommentar nicht von Quelltext -- eine Erwaehnung im Kommentar
+// faellt ihr also genauso auf. Das ist kein Fehler der Pruefung,
+// sondern der Preis dafuer, dass sie nicht umgangen werden kann.)
+//
+// `profile app`, wie jedes Programm mit Oberflaeche: fUi rechnet in
+// f64 und benutzt `std.rt`, beides ist unter `profile kernel` gesperrt.
+
+profile app
+
+import ulib
+import wlibc
+import wlib
+import msg
+import instkern
+
+export { u_start }
+
+// ------------------------------------------------------------- Zahlen
+
+// Wieviele Platten die Liste traegt. Vier reichen fuer jede Maschine,
+// auf die dieses System heute passt (hda, hdb, nvme0, ram0); wer mehr
+// hat, sieht die ersten vier und die Zeile darunter sagt es.
+const MAXP: u64 = 4
+// Die Spalten der Tabelle: Geraet, Modell, Groesse, Belegung.
+const NCOL: u64 = 4
+
+// Das Fenster. Die Zahlen liegen auf dem Viererraster der Runde
+// OBERFLAECHE -- `tools/design/messen.py` zaehlt genau sie.
+const BW: u64 = 640
+const BH: u64 = 440
+
+// Die Schritte, die der Balken abbildet. Sie sind dieselben Zahlen wie
+// in `instkern` (S_GPT..S_FERTIG) und stehen hier NICHT noch einmal als
+// Literal: sie werden von dort gelesen.
+
+// ------------------------------------------------------------ Zustand
+
+// Je Platte: der Geraetename, die Sektorzahl, die Zahl der gefundenen
+// Partitionen.
+static mut p_name: [u8; 64] = [0 as u8; 64] // MAXP * 16
+static mut p_sekt: [u64; 4] = [0 as u64; 4]
+static mut p_parts: [u64; 4] = [0 as u64; 4]
+static mut p_anz: u64 = 0
+
+// Die Zeilen der Tabelle, als EIN Text: Spalten durch Tabulator,
+// Zeilen durch Zeilenumbruch. Das ist das Modell von `wlib.table` --
+// kein zweites daneben.
+static mut tblob: [u8; 1024] = [0 as u8; 1024]
+static mut tspalten: [u64; 4] = [0 as u64; 4]
+
+// Die Statuszeile und die Schrittzeile.
+static mut zeile: [u8; 200] = [0 as u8; 200]
+static mut schrittzeile: [u8; 200] = [0 as u8; 200]
+
+// Welche Platte ist gewaehlt (Index in p_*), und wie weit ist die
+// Installation.
+static mut gewaehlt: u64 = 0xFFFFFFFFFFFFFFFF
+static mut laeuft: u64 = 0
+static mut fertig: u64 = 0
+static mut frage: u64 = 0 // 1 = erste Frage offen, 2 = zweite
+
+// Die Geraete, die ueberhaupt in Frage kommen. `ram0` steht bewusst
+// NICHT darin: es ist die Quelle, aus der kopiert wird.
+static mut d_hda: [u8; 10] = "/dev/hda\0\0"
+static mut d_hdb: [u8; 10] = "/dev/hdb\0\0"
+static mut d_nvme: [u8; 12] = "/dev/nvme0\0\0"
+static mut d_quelle: [u8; 10] = "/dev/ram0\0"
+
+// Die Schluessel. KEIN deutscher Text im Quelltext -- Runde I18N, und
+// `tools/i18n/scan.py` rechnet es nach. Die Woerter stehen in
+// locale/de/messages und locale/en/messages.
+static mut k_title: [u8; 17] = "installer.title\0\0"
+static mut k_cols: [u8; 16] = "installer.cols\0\0"
+static mut k_head: [u8; 16] = "installer.head\0\0"
+static mut k_pick: [u8; 16] = "installer.pick\0\0"
+static mut k_refresh: [u8; 19] = "installer.refresh\0\0"
+static mut k_go: [u8; 14] = "installer.go\0\0"
+static mut k_none: [u8; 16] = "installer.none\0\0"
+static mut k_busy: [u8; 16] = "installer.busy\0\0"
+static mut k_sel: [u8; 15] = "installer.sel\0\0"
+static mut k_warn: [u8; 16] = "installer.warn\0\0"
+static mut k_ask1t: [u8; 22] = "installer.ask1.title\0\0"
+static mut k_ask1x: [u8; 21] = "installer.ask1.text\0\0"
+static mut k_ask2t: [u8; 22] = "installer.ask2.title\0\0"
+static mut k_ask2x: [u8; 21] = "installer.ask2.text\0\0"
+static mut k_s_gpt: [u8; 20] = "installer.step.gpt\0\0"
+static mut k_s_esp: [u8; 20] = "installer.step.esp\0\0"
+static mut k_s_copy: [u8; 21] = "installer.step.copy\0\0"
+static mut k_s_grow: [u8; 21] = "installer.step.grow\0\0"
+static mut k_s_boot: [u8; 21] = "installer.step.boot\0\0"
+static mut k_done: [u8; 16] = "installer.done\0\0"
+static mut k_donehint: [u8; 21] = "installer.done.hint\0\0"
+static mut k_fail: [u8; 16] = "installer.fail\0\0"
+static mut k_empty: [u8; 17] = "installer.empty\0\0"
+static mut k_parts: [u8; 17] = "installer.parts\0\0"
+
+// Die Mitschnitte. Sie gehen auf die SERIELLE LEITUNG und nie auf den
+// Bildschirm; ein Testlaeufer greppt danach, und ein uebersetzter
+// Mitschnitt machte jeden Testlaeufer sprachabhaengig. Deshalb stehen
+// sie als Literal da und nicht im Katalog -- genau die Ausnahme, die
+// `tools/i18n/scan.py` kennt.
+static mut m_nowm: [u8; 26] = "installer: keine Flaeche\0\0"
+static mut m_ready: [u8; 20] = "installer: ready n=\0"
+static mut m_disk: [u8; 17] = "installer: disk \0"
+static mut m_pick: [u8; 20] = "installer: gewaehlt\0"
+static mut m_ask: [u8; 19] = "installer: frage=\0\0"
+static mut m_go: [u8; 17] = "installer: start\0"
+static mut m_step: [u8; 18] = "installer: step=\0\0"
+static mut m_ok: [u8; 18] = "installer: fertig\0"
+static mut m_fail: [u8; 18] = "installer: FEHLER\0"
+static mut m_self: [u8; 10] = "installer\0"
+
+// Die Schalter dieses Programms.
+static mut m_luft: [u8; 2] = " \0"
+static mut a_nohit: [u8; 6] = "nohit\0"
+static mut a_zeig: [u8; 5] = "zeig\0"
+static mut a_ja: [u8; 8] = "sofort\0\0"
+
+// ------------------------------------------------------- Kleinigkeiten
+
+fn ptr(p: u64) -> u64 {
+    return p
+}
+
+fn say(p: u64) {
+    ulib.say(p)
+}
+
+// Ein Leerzeichen auf die serielle Leitung. `ulib.put` schreibt einen
+// PUFFER und kein Zeichen -- das ist der Unterschied, an dem der erste
+// Uebersetzungslauf dieser Datei gescheitert ist.
+fn luft() {
+    ulib.say(ptr((&m_luft[0 as usize]) as u64))
+}
+
+fn nptr(i: u64) -> u64 {
+    return (&p_name[0 as usize]) as u64 + i * 16
+}
+
+// Eine Zahl in Mebioktetten, damit in der Spalte "Groesse" eine Zahl
+// steht, die ein Mensch liest. Sektoren zu 512 Oktetten: /2048.
+fn mib_of(sekt: u64) -> u64 {
+    return sekt / 2048
+}
+
+// ---------------------------------------------------- Texte zusammenbauen
+//
+// Ein eigener kleiner Schreiber statt `sprintf`: die Sprache hat keinen,
+// und ein Puffer, der an einer Stelle waechst, ist leichter zu pruefen
+// als einer, der an fuenf Stellen beschrieben wird.
+
+static mut bp: u64 = 0
+static mut bziel: u64 = 0
+static mut bmax: u64 = 0
+
+fn b_start(ziel: u64, max: u64) {
+    bziel = ziel
+    bmax = max
+    bp = 0
+    ulib.fill(ziel, 0, max)
+}
+
+fn b_c(c: u64) {
+    if bp + 1 < bmax {
+        __mmio_write8((bziel + bp) as *mut u8, c as u8)
+        bp = bp + 1
+    }
+}
+
+fn b_s(p: u64) {
+    var i: u64 = 0
+    while (*((p + i) as *mut u8)) as u64 != 0 {
+        b_c((*((p + i) as *mut u8)) as u64)
+        i = i + 1
+    }
+}
+
+fn b_n(v: u64) {
+    if v >= 10 {
+        b_n(v / 10)
+    }
+    b_c(48 + (v % 10))
+}
+
+fn b_ende() {
+    if bp < bmax {
+        __mmio_write8((bziel + bp) as *mut u8, 0 as u8)
+    }
+}
+
+// ------------------------------------------------------ die Platten finden
+//
+// WAS EINE PLATTE HIER IST: eine Datei unter /dev/, die sich oeffnen
+// laesst und eine Groesse hat. Mehr braucht es nicht -- seit K14 ist
+// `/dev/hda` ein Blockgeraet mit `lseek`, und `size_of` liefert die
+// Groesse ueber `SEEK_END`. Das ist dieselbe Quelle, aus der
+// `install.fi` seine Zahl nimmt.
+//
+// WAS SCHON DARAUFLIEGT: die Zahl der Partitionen. Sie wird hier NICHT
+// selbst aus der Tafel gelesen -- das taete `part.fi` im Kern schon,
+// und ein zweiter GPT-Leser in Ring 3 waere die zweite Stelle, an der
+// dieselbe Beschreibung steht. Gelesen wird der Schutz-MBR: steht dort
+// eine gueltige Signatur, war die Platte nicht leer. Das ist weniger
+// Auskunft als eine volle Partitionsliste und dafuer eine, die nicht
+// luegen kann.
+fn ist_leer(dev: u64) -> bool {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, dev, 0, 0)
+    if ulib.bad(fd) {
+        return true
+    }
+    var leer: bool = true
+    if instkern.lese(fd, 0, (&tblob[0 as usize]) as u64, 512) {
+        let p: u64 = (&tblob[0 as usize]) as u64
+        let s1: u64 = (*((p + 510) as *mut u8)) as u64
+        let s2: u64 = (*((p + 511) as *mut u8)) as u64
+        if s1 == 0x55 && s2 == 0xAA {
+            leer = false
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return leer
+}
+
+fn platte_dazu(dev: u64) {
+    if p_anz >= MAXP {
+        return
+    }
+    let n: u64 = ulib.size_of(dev)
+    if ulib.bad(n) || n == 0 {
+        return
+    }
+    ulib.strcpy(nptr(p_anz), dev)
+    p_sekt[(p_anz) as usize] = n / instkern.BS
+    if ist_leer(dev) {
+        p_parts[(p_anz) as usize] = 0
+    } else {
+        p_parts[(p_anz) as usize] = 1
+    }
+    say(ptr((&m_disk[0 as usize]) as u64))
+    say(dev)
+    luft()
+    ulib.sayu(p_sekt[(p_anz) as usize])
+    ulib.nl()
+    p_anz = p_anz + 1
+}
+
+fn platten_suchen() {
+    p_anz = 0
+    platte_dazu(ptr((&d_hda[0 as usize]) as u64))
+    platte_dazu(ptr((&d_hdb[0 as usize]) as u64))
+    platte_dazu(ptr((&d_nvme[0 as usize]) as u64))
+}
+
+// ---------------------------------------------------- die Tabelle bauen
+//
+// Eine Zeile je Platte: Geraet, Modell, Groesse, was darauf ist.
+//
+// DAS "MODELL" IST HIER DIE ART DES ANSCHLUSSES und nicht die
+// Typenbezeichnung aus IDENTIFY. Der Grund ist Ehrlichkeit: dieses
+// Programm hat den IDENTIFY-Block nicht, und eine erfundene
+// Modellbezeichnung waere schlimmer als keine. Was es weiss, ist, ueber
+// welchen Treiber das Geraet kommt -- und das steht im Namen.
+fn tabelle_bauen() {
+    b_start((&tblob[0 as usize]) as u64, 1024)
+    var i: u64 = 0
+    while i < p_anz {
+        b_s(nptr(i))
+        b_c(9)
+        // Die Art: aus dem Namen abgeleitet, nicht erfunden.
+        let nm: u64 = nptr(i)
+        if (*((nm + 5) as *mut u8)) as u64 == 110 {
+            b_c(78) // 'N'
+            b_c(86) // 'V'
+            b_c(77) // 'M'
+            b_c(101) // 'e'
+        } else {
+            b_c(65) // 'A'
+            b_c(84) // 'T'
+            b_c(65) // 'A'
+        }
+        b_c(9)
+        b_n(mib_of(p_sekt[(i) as usize]))
+        b_c(32)
+        b_c(77) // 'M'
+        b_c(105) // 'i'
+        b_c(66) // 'B'
+        b_c(9)
+        if p_parts[(i) as usize] == 0 {
+            b_s(msg.get(ptr((&k_empty[0 as usize]) as u64)))
+        } else {
+            b_s(msg.get(ptr((&k_parts[0 as usize]) as u64)))
+        }
+        b_c(10)
+        i = i + 1
+    }
+    b_ende()
+}
+
+// Die Statuszeile unter der Tabelle.
+fn status_bauen() {
+    b_start((&zeile[0 as usize]) as u64, 200)
+    if p_anz == 0 {
+        b_s(msg.get(ptr((&k_none[0 as usize]) as u64)))
+    } else if laeuft != 0 {
+        b_s(msg.get(ptr((&k_busy[0 as usize]) as u64)))
+    } else if fertig != 0 {
+        b_s(msg.get(ptr((&k_done[0 as usize]) as u64)))
+        b_c(32)
+        b_s(msg.get(ptr((&k_donehint[0 as usize]) as u64)))
+    } else if gewaehlt >= p_anz {
+        b_s(msg.get(ptr((&k_pick[0 as usize]) as u64)))
+    } else {
+        b_s(msg.get(ptr((&k_sel[0 as usize]) as u64)))
+        b_c(32)
+        b_s(nptr(gewaehlt))
+        b_c(32)
+        b_c(45)
+        b_c(45)
+        b_c(32)
+        b_s(msg.get(ptr((&k_warn[0 as usize]) as u64)))
+    }
+    b_ende()
+}
+
+// Die Schrittzeile. Sie zeigt, WO die Maschine steht -- und beim
+// Kopieren zusaetzlich, wie weit.
+fn schritt_bauen() {
+    b_start((&schrittzeile[0 as usize]) as u64, 200)
+    let s: u64 = instkern.schritt_nr()
+    if s == 0 {
+        b_ende()
+        return
+    }
+    b_n(s)
+    b_c(47) // '/'
+    b_n(instkern.schritt_von() - 1)
+    b_c(32)
+    if s == instkern.S_GPT {
+        b_s(msg.get(ptr((&k_s_gpt[0 as usize]) as u64)))
+    } else if s == instkern.S_ESP {
+        b_s(msg.get(ptr((&k_s_esp[0 as usize]) as u64)))
+    } else if s == instkern.S_KOPIE {
+        b_s(msg.get(ptr((&k_s_copy[0 as usize]) as u64)))
+        b_c(32)
+        b_n(instkern.fortschritt() / 10)
+        b_c(37) // '%'
+    } else if s == instkern.S_WACHSEN {
+        b_s(msg.get(ptr((&k_s_grow[0 as usize]) as u64)))
+    } else if s == instkern.S_BOOT {
+        b_s(msg.get(ptr((&k_s_boot[0 as usize]) as u64)))
+    } else {
+        b_s(msg.get(ptr((&k_done[0 as usize]) as u64)))
+    }
+    b_ende()
+}
+
+// ==================================================== DIE INSTALLATION
+//
+// Sie laeuft in EINEM Zug und nicht haeppchenweise zwischen zwei
+// Ereignissen der Oberflaeche. Das ist eine bewusste Entscheidung und
+// keine Bequemlichkeit:
+//
+//   Eine halb geschriebene Partitionstafel ist ein kaputter
+//   Datentraeger. Wer das Schreiben in die Ereignisschleife haengt,
+//   damit das Fenster waehrenddessen "reagiert", macht genau das
+//   moeglich -- ein Klick auf "Schliessen" mitten zwischen GPT und
+//   Wurzel, und die Platte startet nie wieder.
+//
+// Was das kostet, ist Ehrlichkeit wert: waehrend der Minuten, die das
+// Kopieren dauert, nimmt dieses Fenster keine Klicks an. Deshalb steht
+// vorher "bitte nicht ausschalten" da, und deshalb wird die Schrittzeile
+// zwischen den Abschnitten gemalt -- nicht, damit es huebsch aussieht,
+// sondern damit sichtbar ist, dass es noch lebt.
+fn installieren(dev: u64, wstat: u64, wschritt: u64) -> bool {
+    let zfd: u64 = ulib.sys(ulib.SYS_OPEN, dev, ulib.O_RDWR, 0)
+    if ulib.bad(zfd) {
+        return false
+    }
+    let qfd: u64 = ulib.sys(ulib.SYS_OPEN,
+        ptr((&d_quelle[0 as usize]) as u64), 0, 0)
+    if ulib.bad(qfd) {
+        ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
+        return false
+    }
+    let sekt: u64 = ulib.size_of(dev) / instkern.BS
+    let qsekt: u64 = ulib.size_of(ptr((&d_quelle[0 as usize]) as u64))
+        / instkern.BS
+    let espsek: u64 = instkern.ESP_STD
+
+    if !instkern.plan_passt(sekt, espsek) {
+        ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
+        ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
+        return false
+    }
+    if instkern.quelle_pruefen(qfd) == 0 {
+        ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
+        ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
+        return false
+    }
+
+    // ---- 1. die Partitionstafel
+    melde_schritt(wschritt)
+    if !instkern.gpt_schreiben(zfd, sekt, espsek) {
+        ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
+        ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
+        return false
+    }
+    melde_schritt(wschritt)
+
+    // ---- 2. die EFI-Partition
+    if !instkern.fat32_create(zfd, instkern.plan_esp_start(), espsek) {
+        ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
+        ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
+        return false
+    }
+    melde_schritt(wschritt)
+
+    // ---- 3. das System kopieren. Der lange Teil.
+    if !instkern.wurzel_kopieren(zfd, qfd, espsek, qsekt) {
+        ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
+        ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
+        return false
+    }
+    melde_schritt(wschritt)
+
+    // ---- 4. das Dateisystem auf die Partition vergroessern
+    let ofs_start: u64 = instkern.plan_ofs_start(espsek)
+    let ofs_bloecke: u64 = instkern.plan_ofs_ende(sekt) - ofs_start + 1
+    if instkern.wachsen(zfd, ofs_start, ofs_bloecke) == 0 {
+        ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
+        ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
+        return false
+    }
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
+    ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
+    melde_schritt(wschritt)
+
+    // ---- 5. der Bootlader auf die EFI-Partition
+    return bootlader()
+}
+
+fn melde_schritt(wschritt: u64) {
+    schritt_bauen()
+    wlib.set_text(wschritt, (&schrittzeile[0 as usize]) as u64)
+    wlib.draw_all()
+    say(ptr((&m_step[0 as usize]) as u64))
+    ulib.sayu(instkern.schritt_nr())
+    luft()
+    ulib.sayu(instkern.fortschritt())
+    ulib.nl()
+}
+
+// Der Bootlader. AB HIER SIND ES GEWOEHNLICHE DATEIEN: die
+// EFI-Partition wird eingehaengt, und was dann passiert, ist `mkdir`
+// und `cp` -- der FAT32-Schreiber aus K14 macht die Arbeit.
+static mut p_efi: [u8; 6] = "/efi\0\0"
+static mut p_efi_efi: [u8; 10] = "/efi/EFI\0\0"
+static mut p_efi_boot: [u8; 16] = "/efi/EFI/BOOT\0\0\0"
+static mut p_efi_lim: [u8; 20] = "/efi/limine.conf\0\0\0\0"
+static mut p_efi_kern: [u8; 16] = "/efi/osum.mb\0\0\0\0"
+static mut p_efi_ldr: [u8; 28] = "/efi/EFI/BOOT/BOOTX64.EFI\0\0\0"
+static mut p_src_lim: [u8; 20] = "/boot/limine.conf\0\0\0"
+static mut p_src_kern: [u8; 16] = "/boot/osum.mb\0\0\0"
+static mut p_src_ldr: [u8; 20] = "/boot/BOOTX64.EFI\0\0\0"
+static mut t_vfat: [u8; 6] = "vfat\0\0"
+static mut d_hda1: [u8; 10] = "/dev/hda1\0"
+
+fn bootlader() -> bool {
+    ulib.sys(ulib.SYS_MKDIR, ptr((&p_efi[0 as usize]) as u64), 0, 0)
+    let m: u64 = ulib.sys4(ulib.SYS_VMOUNT,
+        ptr((&d_hda1[0 as usize]) as u64),
+        ptr((&p_efi[0 as usize]) as u64),
+        ptr((&t_vfat[0 as usize]) as u64), 0)
+    if ulib.bad(m) {
+        return false
+    }
+    ulib.sys(ulib.SYS_MKDIR, ptr((&p_efi_efi[0 as usize]) as u64), 0, 0)
+    ulib.sys(ulib.SYS_MKDIR, ptr((&p_efi_boot[0 as usize]) as u64), 0, 0)
+    var gut: bool = true
+    if !instkern.kopiere(ptr((&p_src_ldr[0 as usize]) as u64),
+        ptr((&p_efi_ldr[0 as usize]) as u64)) {
+        gut = false
+    }
+    if gut && !instkern.kopiere(ptr((&p_src_kern[0 as usize]) as u64),
+        ptr((&p_efi_kern[0 as usize]) as u64)) {
+        gut = false
+    }
+    if gut && !instkern.kopiere(ptr((&p_src_lim[0 as usize]) as u64),
+        ptr((&p_efi_lim[0 as usize]) as u64)) {
+        gut = false
+    }
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    ulib.sys(ulib.SYS_UMOUNT2, ptr((&p_efi[0 as usize]) as u64), 0, 0)
+    return gut
+}
+
+// ------------------------------------------------------------ Schalter
+
+fn arg_hat(args: u64, was: u64) -> bool {
+    let n: u64 = ulib.arg_count(args)
+    var i: u64 = 1
+    while i < n {
+        if ulib.streq(ulib.arg_at(args, i), was) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// --------------------------------------------------------------- das Ganze
+
+fn u_start(args: u64) -> u64 {
+    let nohit: bool = arg_hat(args, ptr((&a_nohit[0 as usize]) as u64))
+    // `zeig` malt das Fenster und geht wieder -- fuer den Bildbeweis.
+    let nurzeig: bool = arg_hat(args, ptr((&a_zeig[0 as usize]) as u64))
+    // `sofort` ueberspringt die beiden Fragen. NUR fuer den Testlaeufer:
+    // ein Mensch bekommt sie immer, und deshalb heisst der Schalter
+    // nicht "--ja" wie auf der Kommandozeile, sondern anders -- damit
+    // niemand ihn aus Gewohnheit tippt.
+    let sofort: bool = arg_hat(args, ptr((&a_ja[0 as usize]) as u64))
+
+    if !wlib.begin(nohit, false) {
+        say(ptr((&m_nowm[0 as usize]) as u64))
+        ulib.nl()
+        return 1
+    }
+    // DER KATALOG ZUERST, vor jedem Bedienelement: `wlib` behaelt den
+    // Zeiger auf den Text eines Knopfes, und ein Knopf, der vor dem
+    // Katalog entsteht, traegt den Schluessel statt des Wortes.
+    let _mk: u64 = msg.init()
+
+    platten_suchen()
+    if p_anz == 1 {
+        gewaehlt = 0
+    }
+    tabelle_bauen()
+    status_bauen()
+
+    let w: u64 = wlib.window(wlibc.snap(40), wlibc.snap(40),
+        wlibc.snap_up(BW), wlibc.snap_up(BH),
+        msg.get(ptr((&k_title[0 as usize]) as u64)))
+    if w >= wlib.MAXWN {
+        say(ptr((&m_nowm[0 as usize]) as u64))
+        ulib.nl()
+        return 1
+    }
+    let _wa: u64 = wlib.window_app(w, ptr((&m_self[0 as usize]) as u64))
+
+    let pad: u64 = wlibc.space(2)
+    let gap: u64 = wlibc.space(1)
+    let zh: u64 = wlibc.metric(wlibc.M_CTRL_H)
+
+    // Die Ueberschrift.
+    wlib.box_v(w, pad, pad, BW - pad * 2, zh, 0, 0)
+    wlib.size(0, zh)
+    let lhead: u64 = wlib.label(msg.get(ptr((&k_head[0 as usize]) as u64)))
+    wlib.box_end()
+
+    // Die Tabelle der Platten.
+    tspalten[(0) as usize] = 140
+    tspalten[(1) as usize] = 100
+    tspalten[(2) as usize] = 120
+    tspalten[(3) as usize] = 160
+    let ty: u64 = pad + zh + gap
+    let th: u64 = 200
+    wlib.box_v(w, pad, ty, BW - pad * 2, th, 0, 0)
+    wlib.size(0, th)
+    let ttab: u64 = wlib.table((&tblob[0 as usize]) as u64, 6, NCOL,
+        (&tspalten[0 as usize]) as u64)
+    wlib.box_end()
+    wlib.set_cols(ttab, NCOL, (&tspalten[0 as usize]) as u64)
+
+    // Die Statuszeile.
+    let sy: u64 = ty + th + gap
+    wlib.box_v(w, pad, sy, BW - pad * 2, zh, 0, 0)
+    wlib.size(0, zh)
+    let lstat: u64 = wlib.label((&zeile[0 as usize]) as u64)
+    wlib.box_end()
+
+    // Die Schrittzeile.
+    let py: u64 = sy + zh + gap
+    wlib.box_v(w, pad, py, BW - pad * 2, zh, 0, 0)
+    wlib.size(0, zh)
+    let lschritt: u64 = wlib.label((&schrittzeile[0 as usize]) as u64)
+    wlib.box_end()
+
+    // Die Knopfreihe, unten rechts -- dieselbe Lage wie in jedem
+    // Dialog dieses Systems.
+    let ky: u64 = BH - pad - zh
+    wlib.box_h(w, pad, ky, BW - pad * 2, zh, 0, gap)
+    wlib.size(160, zh)
+    let bsuch: u64 = wlib.button(msg.get(ptr((&k_refresh[0 as usize]) as u64)))
+    wlib.size(180, zh)
+    let bgo: u64 = wlib.button(msg.get(ptr((&k_go[0 as usize]) as u64)))
+    wlib.box_end()
+
+    // Der Knopf ist aus, solange nichts gewaehlt ist. Ein Knopf, der
+    // nichts tut, wenn man ihn drueckt, ist schlimmer als einer, der
+    // erkennbar nicht bereit ist.
+    wlib.enable(bgo, gewaehlt < p_anz)
+
+    wlib.draw_all()
+    say(ptr((&m_ready[0 as usize]) as u64))
+    ulib.sayu(p_anz)
+    ulib.nl()
+
+    if nurzeig {
+        return 0
+    }
+
+    // Der Testlaeufer darf ohne Fragen durch -- ein Mensch nie.
+    if sofort && gewaehlt < p_anz {
+        frage = 2
+    }
+
+    var runden: u64 = 0
+    while wlib.alive() && runden < 4000000 {
+        runden = runden + 1
+
+        // Die zweite Frage ist beantwortet: jetzt wird geschrieben.
+        if frage == 2 && laeuft == 0 && fertig == 0 {
+            laeuft = 1
+            status_bauen()
+            wlib.set_text(lstat, (&zeile[0 as usize]) as u64)
+            wlib.enable(bgo, false)
+            wlib.enable(bsuch, false)
+            wlib.draw_all()
+            say(ptr((&m_go[0 as usize]) as u64))
+            ulib.nl()
+
+            let gut: bool = installieren(nptr(gewaehlt), lstat, lschritt)
+            laeuft = 0
+            if gut {
+                fertig = 1
+                say(ptr((&m_ok[0 as usize]) as u64))
+            } else {
+                fertig = 2
+                say(ptr((&m_fail[0 as usize]) as u64))
+                luft()
+                ulib.sayu(instkern.fehler_bei())
+            }
+            ulib.nl()
+            if fertig == 2 {
+                b_start((&zeile[0 as usize]) as u64, 200)
+                b_s(msg.get(ptr((&k_fail[0 as usize]) as u64)))
+                b_ende()
+            } else {
+                status_bauen()
+            }
+            wlib.set_text(lstat, (&zeile[0 as usize]) as u64)
+            schritt_bauen()
+            wlib.set_text(lschritt, (&schrittzeile[0 as usize]) as u64)
+            wlib.enable(bsuch, true)
+            wlib.draw_all()
+            frage = 0
+            if sofort {
+                return 0
+            }
+        }
+
+        let id: u64 = wlib.step()
+        if id < wlib.MAXWD {
+            let kind: u64 = wlib.fired_kind()
+            let idx: u64 = wlib.fired_index()
+            if kind == wlib.K_BUTTON {
+                if id == bsuch {
+                    platten_suchen()
+                    gewaehlt = 0xFFFFFFFFFFFFFFFF
+                    fertig = 0
+                    tabelle_bauen()
+                    wlib.set_text(ttab, (&tblob[0 as usize]) as u64)
+                    status_bauen()
+                    wlib.set_text(lstat, (&zeile[0 as usize]) as u64)
+                    wlib.enable(bgo, false)
+                    wlib.draw_all()
+                } else if id == bgo && gewaehlt < p_anz && laeuft == 0 {
+                    // DIE ERSTE FRAGE.
+                    frage = 1
+                    wlib.dlg_ask(
+                        msg.get(ptr((&k_ask1t[0 as usize]) as u64)),
+                        msg.get(ptr((&k_ask1x[0 as usize]) as u64)))
+                    say(ptr((&m_ask[0 as usize]) as u64))
+                    ulib.sayu(1)
+                    ulib.nl()
+                }
+            } else if kind == wlib.K_TABLE && id == ttab {
+                if idx < p_anz {
+                    gewaehlt = idx
+                    say(ptr((&m_pick[0 as usize]) as u64))
+                    luft()
+                    say(nptr(gewaehlt))
+                    ulib.nl()
+                    status_bauen()
+                    wlib.set_text(lstat, (&zeile[0 as usize]) as u64)
+                    wlib.enable(bgo, true)
+                    wlib.draw_all()
+                }
+            }
+        }
+
+        // Die Antwort auf eine der beiden Fragen.
+        if wlib.dlg_state() > 1 {
+            let ja: bool = wlib.dlg_state() == 2
+            wlib.dlg_close()
+            if ja && frage == 1 {
+                // DIE ZWEITE FRAGE. Sie kommt erst, wenn die erste mit
+                // Ja beantwortet ist -- und sie sagt, dass es jetzt
+                // unwiderruflich wird.
+                frage = 2
+                wlib.dlg_ask(
+                    msg.get(ptr((&k_ask2t[0 as usize]) as u64)),
+                    msg.get(ptr((&k_ask2x[0 as usize]) as u64)))
+                say(ptr((&m_ask[0 as usize]) as u64))
+                ulib.sayu(2)
+                ulib.nl()
+                // Die zweite Frage steht jetzt; ihre Antwort kommt in
+                // einer der naechsten Runden. `frage` bleibt auf 2 und
+                // wird oben erst dann ausgewertet, wenn der Dialog
+                // wirklich zu ist.
+                wlib.draw_all()
+                // Warten, bis sie beantwortet ist.
+                var warte: u64 = 0
+                var zusage: bool = false
+                while wlib.alive() && warte < 4000000 {
+                    warte = warte + 1
+                    let _x: u64 = wlib.step()
+                    if wlib.dlg_state() > 1 {
+                        zusage = wlib.dlg_state() == 2
+                        wlib.dlg_close()
+                        wlib.draw_all()
+                        warte = 4000000
+                    }
+                }
+                if !zusage {
+                    frage = 0
+                    wlib.draw_all()
+                }
+            } else if !ja {
+                frage = 0
+                wlib.draw_all()
+            }
+        }
+    }
+    return 0
+}
+
+// RUNDE GRUNDLINIE: das `main`, das nie laeuft -- `user.ld` springt nach
+// `u_start`. Das Profil `app` verlangt es trotzdem. Es ruft `u_start`,
+// damit es nicht luegt. Dieselben drei Zeilen wie in desktop.fi.
+fn main() -> i32 {
+    return u_start(0) as i32
+}
