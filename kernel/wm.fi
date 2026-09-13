@@ -78,6 +78,10 @@ import tile
 import cursor
 import vektor
 import audio
+// RUNDE KERN-FUI: die freistehende Haelfte von fUi. `profile kernel`
+// in Zeile 1, keine Speicheranforderung, kein Syscall, kein Fliesskomma
+// -- sie darf hier stehen, und genau dafuer wurde sie geschrieben.
+import fui.core
 
 export {
     sperre_an, sperrer, lock_space, darf, input_seen,
@@ -838,12 +842,25 @@ const S_FRUEBERW: u64 = 0x1378
 // Je Zeichen die Deckung als ein Oktett pro Bildpunkt, hoechstens
 // 40x40 (10 * Vervielfachung 4).
 const CG_N: u64 = 4
-const CG_MAX: u64 = 1600      // 40 * 40
+// RUNDE KERN-FUI: EIN FACH HAELT JETZT VIER OKTETTE JE BILDPUNKT.
+//
+// `fui.core` schreibt BGRX (`core.put`), also vier Oktette -- es in ein
+// Oktett je Punkt malen zu lassen ginge nur, indem man `core.fi` eine
+// zweite Ablage beibringt, und das waere wieder die zweite Umsetzung,
+// die diese Runde gerade abschafft. Also bekommt fUi, was es erwartet,
+// und der Puffer waechst von 6400 auf 25 600 Oktette.
+//
+// Nach dem Rastern wird das Fach an Ort und Stelle auf ein Oktett je
+// Punkt eingedampft (`cg_dampf`) -- das Uebertragen laeuft je BILD und
+// liest dann ein Viertel.
+const CG_KANTE: u64 = 40      // 10 * Vervielfachung 4
+const CG_FACH: u64 = 6400     // 40 * 40 * 4 Oktette je Zeichen
+const CG_MAX: u64 = 1600      // 40 * 40 Punkte
 
 // RUNDE VEKTOR: die vier gerasterten Zeichen. `cg_gr` ist die
 // Kantenlaenge, mit der sie gerastert wurden -- wechselt die
 // Vervielfachung, gilt der Speicher nicht mehr.
-static mut cg_deck: [u8; 6400] = [0 as u8; 6400]
+static mut cg_deck: [u8; 25600] = [0 as u8; 25600]
 static mut cg_gut: [u64; 4] = [0 as u64; 4]
 static mut cg_gr: u64 = 0
 static mut cg_w: [u64; 4] = [0 as u64; 4]
@@ -5657,79 +5674,213 @@ fn cap_glyph(state: u64, n: u64, x: i64, y: i64, farbe: u64, i: u64,
     ax0: i64, ay0: i64, ax1: i64, ay1: i64) {
     let sk: i64 = uisc(state) as i64
     let d: i64 = 10 * sk
-    // Die Strichstaerke: ein Bildpunkt je Skalenstufe. Bei uisc=1 ist
-    // das der Haarstrich der alten Fassung, bei uisc=2 zwei
-    // Bildpunkte -- kraeftig genug fuer einen dichten Schirm, ohne
-    // dass daraus ein Balken wird.
     let sb: i64 = sk
-    if n == CAP_MIN {
-        var t: i64 = 0
-        while t < sb {
-            cap_h(state, x, y + d / 2 + t, d, farbe, ax0, ay0, ax1, ay1)
-            t = t + 1
+    if d <= 0 || sb <= 0 {
+        return
+    }
+    // ================================================== RUNDE KERN-FUI
+    //
+    // DIESE FUNKTION MALT DIE ZEICHEN NICHT MEHR SELBST.
+    //
+    // Justin, 10.09.2026: "kann man die fUi-Lib nicht ohne Imports
+    // machen, also dass sie im Kernel auch laufen kann?" -- sie ist es
+    // bereits: `vendor/firn/lib/fui/core.fi` traegt `profile kernel` in
+    // Zeile 1 und wurde genau dafuer geschrieben. Angeschlossen war sie
+    // nie; `grep -rln fui kernel/*.fi` fand bis zu dieser Runde nichts.
+    //
+    // WARUM DAS NICHT KOSMETIK IST, SONDERN EIN GEMESSENER FEHLER.
+    // Die alte Fassung hier rechnete EINE Verschiebung fuer beide
+    // Achsen:
+    //
+    //     let off: i64 = (d - (kn + sb - 1)) / 2
+    //
+    // Das Kreuz belegt aber nicht gleich viel in beiden Richtungen --
+    // die Breite ist `kn + sb - 1` (die Laeufe UND die Verbreiterung
+    // addieren sich), die Hoehe nur `kn` (die Verbreiterung geht
+    // waagerecht). `core.fi` rechnet deshalb ZWEI Verschiebungen und
+    // sagt das in seinem Kopf auch woertlich ("A THIRD MISTAKE, FOUND
+    // AND MEASURED IN THIS ROUND").
+    //
+    // GEMESSEN (tools/fui/kernvergleich.py), abweichende Bildpunkte
+    // zwischen der alten wm-Fassung und fui.core:
+    //
+    //     d=10 sb=1     0      d=20 sb=2     0
+    //     d=30 sb=3   112      d=40 sb=4   152
+    //
+    // Bei Vervielfachung 1 und 2 stimmten beide ueberein -- deshalb ist
+    // es nie aufgefallen. Ab Vervielfachung 3 klebt das Kreuz oben und
+    // laesst unten eine Zeile frei, waehrend das Quadrat daneben mittig
+    // sitzt. Das ist genau die Sorte Abweichung, die entsteht, wenn
+    // dieselbe Form an zwei Orten steht -- und der dritte Anlauf
+    // desselben Fehlers, nach dem ausgefransten Kreuz und dem mit nur
+    // einer Diagonale.
+    //
+    // ============================================ WIE fUi AUF DEN SCHIRM KOMMT
+    //
+    // NICHT direkt, und das hat zwei nachgepruefte Gruende:
+    //
+    //  G1 `core.fi` KENNT KEINEN BESCHNITT. Es malt in ein `Target` von
+    //     (0,0) bis (w,h); der Server malt in ein SCHMUTZRECHTECK
+    //     (ax0..ax1, ay0..ay1) mitten auf dem Schirm. Ein Zeichen ohne
+    //     Beschnitt malte ueber fremde Fenster.
+    //  G2 DAS PIXELFORMAT IST NICHT FEST. `core.put` legt BGRX ab, fest
+    //     verdrahtet. `fb.fi` nimmt die Verschiebungen aus S_RSHIFT/
+    //     S_GSHIFT/S_BSHIFT, die der Grafikmodus liefert -- auf einer
+    //     Tafel mit anderer Reihenfolge waeren die Farben vertauscht.
+    //     Dazu haelt `fb.pixel` das reservierte Band der Messtafel frei
+    //     (`band_lo`), was ein roher Schreiber ueberschriebe.
+    //
+    // ALSO: fUi rastert in `cg_deck` -- den Zwischenpuffer, den Runde
+    // VEKTOR angelegt und nie benutzt hat. Dort ist das Format egal,
+    // weil nur die DECKUNG zaehlt. Danach traegt diese Funktion den
+    // Puffer durch `cap_px` auf den Schirm -- mit Beschnitt, mit dem
+    // Band und ueber den Farbwaehler des Servers. Die FORM kommt aus
+    // fUi, der WEG auf den Schirm bleibt der des Servers.
+    //
+    // Damit malt der Fensterserver dieselben Bildpunkte wie jede
+    // Anwendung, weil es derselbe Quelltext ist -- und
+    // `tools/fui/kernvergleich.py` rechnet es nach.
+    let dd: u64 = d as u64
+    if dd > CG_KANTE {
+        // Mehr als 40x40 passt nicht in ein Fach. Das kann bei
+        // uisc <= 4 nicht vorkommen (10 * 4 = 40); steht hier trotzdem,
+        // weil ein stiller Ueberlauf in einen statischen Puffer im Kern
+        // das Schlimmste ist, was diese Datei tun kann.
+        return
+    }
+    let slot: u64 = cg_slot(state, n, i)
+    if !cg_bau(state, slot, n, i, dd, sb as u64) {
+        return
+    }
+    // Der Puffer haelt DECKUNGEN, nicht Farben: != 0 heisst gesetzt.
+    // `core.fi` setzt jeden Punkt genau einmal und ohne Mischung (das
+    // ist der ganze Unterschied zum Rasterer, an dem das Kreuz zweimal
+    // zerbrochen ist) -- ein Vergleich gegen null reicht deshalb.
+    var ry: u64 = 0
+    while ry < dd {
+        var rx: u64 = 0
+        while rx < dd {
+            if cg_deck[(slot *% CG_FACH +% ry *% dd +% rx) as usize]
+                != 0 as u8 {
+                cap_px(state, x + rx as i64, y + ry as i64, farbe,
+                    ax0, ay0, ax1, ay1)
+            }
+            rx = rx + 1
         }
+        ry = ry + 1
+    }
+}
+
+// Welches Fach des Zeichenspeichers gehoert zu dieser Schaltflaeche?
+// Maximieren hat ZWEI Bilder -- ein Quadrat und zwei versetzte --, also
+// braucht es zwei Faecher. Das vierte ist genau dafuer da.
+fn cg_slot(state: u64, n: u64, i: u64) -> u64 {
+    if n == CAP_MAX && (wg(state, i, W_FLAGS) & F_MAXIMIZED) != 0 {
+        return 3
+    }
+    if n >= CG_N {
+        return 0
+    }
+    return n
+}
+
+// DAS ZEICHEN IN DEN ZWISCHENPUFFER, EINMAL JE GROESSE.
+//
+// Liegt es schon in der richtigen Kantenlaenge da, wird nichts gemalt
+// -- das ist der Speicher, den Runde VEKTOR angelegt und nie benutzt
+// hat. `cg_treffer` und `cg_bauten` zaehlen beides; die zweite Zahl
+// muss klein bleiben, sonst wirkt der Speicher nicht.
+fn cg_bau(state: u64, slot: u64, n: u64, i: u64, dd: u64, sb: u64) -> bool {
+    if slot >= CG_N || dd == 0 || dd > CG_KANTE {
+        return false
+    }
+    if cg_gr == dd && cg_gut[slot as usize] != 0 {
+        cg_treffer = cg_treffer + 1
+        return true
+    }
+    // Die Groesse hat gewechselt: ALLE Faecher sind ungueltig, nicht
+    // nur dieses. Sonst stuenden Zeichen zweier Vervielfachungen
+    // nebeneinander in der Leiste.
+    if cg_gr != dd {
+        var k: u64 = 0
+        while k < CG_N {
+            cg_gut[k as usize] = 0
+            k = k + 1
+        }
+        cg_gr = dd
+    }
+    // DIE FLAECHE, DIE fUi BESCHREIBT.
+    //
+    // `core.fi` rechnet mit VIER Oktetten je Bildpunkt (`put` schreibt
+    // B, G, R, X). Ein Fach ist deshalb `CG_KANTE * CG_KANTE * 4` gross
+    // und nicht `CG_KANTE * CG_KANTE` -- 6400 Oktette, viermal, macht
+    // 25 600 Oktette fuer den ganzen Speicher. Das ist der ehrliche
+    // Preis dafuer, dass hier dieselbe Routine laeuft wie in Ring 3;
+    // ihn zu druecken hiesse, `core.fi` eine zweite Ablage
+    // beizubringen, und das waere wieder die zweite Umsetzung.
+    //
+    // Danach wird das Fach AN ORT UND STELLE auf ein Oktett je Punkt
+    // eingedampft (`cg_dampf`): Punkt k liegt bei k*4 und soll nach k,
+    // und weil k <= k*4 gilt, ueberschreibt der Lauf nie etwas, das er
+    // noch braucht. Das spart beim Uebertragen drei Viertel der
+    // Leserei, und das Uebertragen laeuft je BILD -- das Rastern nur
+    // je Groesse.
+    let basis: u64 = ((&cg_deck[0]) as u64) +% slot *% CG_FACH
+    var z: core.Target = core.target_new(basis, dd as usize, dd as usize,
+        (dd *% 4) as usize)
+    core.fill_rect(&z, 0 as usize, 0 as usize, dd as usize, dd as usize,
+        0 as u32)
+    cg_mal(state, &z, n, i, dd, sb)
+    cg_dampf(state, slot, dd)
+    cg_gut[slot as usize] = 1
+    cg_bauten = cg_bauten + 1
+    return true
+}
+
+// Vier Oktette je Punkt auf eines eindampfen, im selben Fach.
+fn cg_dampf(state: u64, slot: u64, dd: u64) {
+    let b: u64 = slot *% CG_FACH
+    var k: u64 = 0
+    while k < dd *% dd {
+        var v: u8 = 0 as u8
+        if cg_deck[(b +% k *% 4) as usize] != 0 as u8 {
+            v = 255 as u8
+        }
+        cg_deck[(b +% k) as usize] = v
+        k = k + 1
+    }
+}
+
+// ============================================================ DIE FORM
+//
+// HIER UND NUR HIER entscheidet sich, WIE ein Fensterzeichen aussieht
+// -- und es steht keine einzige Zeile Zeichenkunst darin. Jede Form
+// kommt aus `fui.core`, derselben Datei, aus der die Anwendungen ueber
+// `fuib.fi` ihre Knoepfe holen.
+//
+// Die Farbe ist 0xFFFFFF und nicht die echte: der Puffer haelt
+// DECKUNGEN. Welche Farbe daraus wird, entscheidet `cap_glyph` beim
+// Uebertragen -- und damit der Farbwaehler des Servers, nicht fUi.
+fn cg_mal(state: u64, z: *mut core.Target, n: u64, i: u64, dd: u64,
+    sb: u64) {
+    let weiss: u32 = 0xFFFFFF as u32
+    if n == CAP_MIN {
+        core.cap_minimize(z, 0 as usize, 0 as usize, dd as usize,
+            sb as usize, weiss)
         return
     }
     if n == CAP_MAX {
         if (wg(state, i, W_FLAGS) & F_MAXIMIZED) != 0 {
-            let e: i64 = 2 * sk
-            cap_box_thick(state, x + e, y, d - e, d - e, sb, farbe,
-                ax0, ay0, ax1, ay1)
-            cap_box_thick(state, x, y + e, d - e, d - e, sb, farbe,
-                ax0, ay0, ax1, ay1)
+            core.cap_restore(z, 0 as usize, 0 as usize, dd as usize,
+                sb as usize, weiss)
             return
         }
-        cap_box_thick(state, x, y, d, d, sb, farbe, ax0, ay0, ax1, ay1)
+        core.cap_maximize(z, 0 as usize, 0 as usize, dd as usize,
+            sb as usize, weiss)
         return
     }
-    // DAS KREUZ. Zwei Diagonalen, Punkt fuer Punkt. `sb` verbreitert
-    // sie WAAGERECHT -- dadurch wird kein Bildpunkt zweimal
-    // beschrieben, denn `cap_px` setzt ihn schlicht auf die Farbe.
-    // Selbst in der Mitte, wo sich die Diagonalen treffen, ist das
-    // Ergebnis derselbe Farbwert. Das ist der ganze Unterschied zum
-    // Rasterer: dort addieren sich Deckungen, hier nicht.
-    // NACHTRAG MERGE-11: DIE VIER ENDEN WAREN NICHT GLEICH.
-    //
-    // Der Boss hat die Bilder nachgemessen und in der ERSTEN und der
-    // LETZTEN Zeile rechts einen Bildpunkt vermisst: n=3 statt 4.
-    // GEMESSEN, alte Fassung, d=20 sb=2:
-    //
-    //   Zeilen: [3,4,4,4,4,4,4,4,4,3,3,4,4,4,4,4,4,4,4,3]
-    //   ausserhalb geklippt: 2
-    //
-    // URSACHE: beide Diagonalen wurden nach RECHTS verbreitert
-    // (`x + k + t`). Bei k = d-1 und t = 1 liegt das auf `x + d` --
-    // einen Bildpunkt neben dem Kasten, also weg. Die Verbreiterung
-    // frisst `sb - 1` Spalten, die niemand eingeplant hatte.
-    //
-    // JETZT: das Kreuz lebt in einem Kasten der Kantenlaenge
-    // kn = d - (sb - 1) und wird mittig gesetzt; die ZWEITE Diagonale
-    // waechst nach LINKS statt nach rechts. Damit ist das Bild
-    // links/rechts UND oben/unten spiegelgleich, und nichts faellt
-    // heraus. GEMESSEN, d=20:
-    //
-    //   sb=1: Zeilen 0..19, erste 2 letzte 2, LR/UD gleich, 0 geklippt
-    //   sb=2: Zeilen 0..18, erste 4 letzte 4, LR/UD gleich, 0 geklippt
-    //   sb=3: Zeilen 0..17, erste 6 letzte 6, LR/UD gleich, 0 geklippt
-    //
-    // Dass das Kreuz bei sb=2 nur 19 der 20 Zeilen belegt, ist keine
-    // Schlamperei, sondern Geometrie: eine zwei Bildpunkte breite
-    // Diagonale ueber 20 Zeilen braucht 21 Spalten. Lieber ein
-    // mittiges, symmetrisches Kreuz als eines, das am Rand abbricht.
-    let kn: i64 = d - (sb - 1)
-    let off: i64 = (d - (kn + sb - 1)) / 2
-    var k: i64 = 0
-    while k < kn {
-        var t: i64 = 0
-        while t < sb {
-            cap_px(state, x + off + k + t, y + off + k, farbe,
-                ax0, ay0, ax1, ay1)
-            cap_px(state, x + off + kn - 1 - k + t, y + off + k, farbe,
-                ax0, ay0, ax1, ay1)
-            t = t + 1
-        }
-        k = k + 1
-    }
+    core.cap_close(z, 0 as usize, 0 as usize, dd as usize, sb as usize,
+        weiss)
 }
 
 // Ein Kasten mit Strichstaerke -- die alte `cap_box` kann nur einen
