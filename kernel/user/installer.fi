@@ -626,6 +626,28 @@ static mut p_src_ldr: [u8; 20] = "/boot/BOOTX64.EFI\0\0\0"
 static mut t_vfat: [u8; 6] = "vfat\0\0"
 static mut d_hda1: [u8; 10] = "/dev/hda1\0"
 
+// Der Inhalt der Startdatei. `vfs` ist Pflicht (sonst kein /dev),
+// `gfx wm wig desk ...` ist der Schreibtisch, und `modfs` steht
+// ABSICHTLICH nicht darin -- siehe oben.
+static mut lim_text: [u8; 160] = "timeout: 3\n\n/OrientOS\n    protocol: multiboot1\n    path: boot():/osum.mb\n    cmdline: osum vfs gfx wm wig desk wmshell wmdauer herz tz=120 nosched noproc nofs\n\0"
+
+fn startdatei() -> bool {
+    ulib.sys(ulib.SYS_UNLINK, ptr((&p_efi_lim[0 as usize]) as u64), 0, 0)
+    let f: u64 = ulib.sys(ulib.SYS_OPEN,
+        ptr((&p_efi_lim[0 as usize]) as u64), ulib.O_MAKE, 0)
+    if ulib.bad(f) {
+        return false
+    }
+    let n: u64 = ulib.length(ptr((&lim_text[0 as usize]) as u64))
+    let w: u64 = ulib.sys(ulib.SYS_WRITE, f,
+        ptr((&lim_text[0 as usize]) as u64), n)
+    ulib.sys(ulib.SYS_CLOSE, f, 0, 0)
+    if ulib.bad(w) || w != n {
+        return false
+    }
+    return true
+}
+
 fn bootlader() -> bool {
     ulib.sys(ulib.SYS_MKDIR, ptr((&p_efi[0 as usize]) as u64), 0, 0)
     let m: u64 = ulib.sys4(ulib.SYS_VMOUNT,
@@ -633,6 +655,7 @@ fn bootlader() -> bool {
         ptr((&p_efi[0 as usize]) as u64),
         ptr((&t_vfat[0 as usize]) as u64), 0)
     if ulib.bad(m) {
+        wo(50)
         return false
     }
     ulib.sys(ulib.SYS_MKDIR, ptr((&p_efi_efi[0 as usize]) as u64), 0, 0)
@@ -640,14 +663,44 @@ fn bootlader() -> bool {
     var gut: bool = true
     if !instkern.kopiere(ptr((&p_src_ldr[0 as usize]) as u64),
         ptr((&p_efi_ldr[0 as usize]) as u64)) {
+        wo(51)
         gut = false
     }
     if gut && !instkern.kopiere(ptr((&p_src_kern[0 as usize]) as u64),
         ptr((&p_efi_kern[0 as usize]) as u64)) {
+        wo(52)
         gut = false
     }
-    if gut && !instkern.kopiere(ptr((&p_src_lim[0 as usize]) as u64),
-        ptr((&p_efi_lim[0 as usize]) as u64)) {
+    // ============================== DIE STARTDATEI WIRD GESCHRIEBEN
+    //
+    // UND NICHT KOPIERT, und das ist der Fehler, an dem diese Runde
+    // zuletzt gehangen hat.
+    //
+    // Die Vorlage (`install.fi`) kopiert `/boot/limine.conf` von der
+    // Quelle auf die EFI-Partition. Auf dem USB-Abbild GIBT ES DIESE
+    // DATEI NICHT: `tools/usbimg/build.sh` legt unter /boot/ nur
+    // `osum.mb` und `BOOTX64.EFI` ab (Zeile 767), die limine.conf
+    // entsteht erst spaeter und geht direkt in die EFI-Partition des
+    // STICKS. Der Kopierversuch schlug deshalb still fehl -- die
+    // Installation lag vollstaendig auf der Platte und meldete
+    // trotzdem "FEHLER 2".
+    //
+    // UND SELBST WENN SIE DA WAERE, WAERE SIE DIE FALSCHE. Die
+    // Startdatei des Sticks traegt `module_path: boot():/root.img` --
+    // die Wurzel kommt dort als Boot-Modul in den Arbeitsspeicher.
+    // Genau das soll nach der Installation NICHT mehr passieren: die
+    // Wurzel liegt jetzt auf der Partition, und `modfs` in der
+    // Kommandozeile wuerde den Kern anweisen, sie weiter aus dem
+    // Speicher zu nehmen. Eine kopierte Startdatei haette also eine
+    // Platte ergeben, die bootet und trotzdem nichts behaelt -- der
+    // schlimmste denkbare Ausgang dieser Runde, weil er wie ein
+    // Erfolg aussieht.
+    //
+    // Also schreibt der Installer sie selbst, mit genau der
+    // Kommandozeile, die zu dem passt, was er gerade angelegt hat:
+    // kein `modfs`, kein `module_path`.
+    if gut && !startdatei() {
+        wo(53)
         gut = false
     }
     ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
