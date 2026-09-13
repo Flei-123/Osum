@@ -1,0 +1,651 @@
+# vendor/firn/patches/0004-svg-image-heisst-svgimage.patch
+#
+# RUNDE FUI-VENDOR-BILD (Osum, 13.09.2026) -- `svg.image` KOLLIDIERT MIT
+# `kernel/user/image.fi`, UND DESHALB BAUT `explorer` NICHT MEHR.
+#
+# WARUM DIESE DATEI EXISTIERT. vendor/firn/lib/ ist nicht eingecheckt;
+# fetch-firnc.sh loescht es und legt es aus dem festgenagelten Commit neu
+# an. Eine Aenderung, die nur dort liegt, ist beim naechsten `--force`
+# weg. Also liegt sie hier.
+#
+# ------------------------------------------------------------ DER BEFUND
+#
+# Mit dem Nachziehen von vendor/firn/COMMIT auf 39dc09c0 (Bild+SVG) kam
+# lib/svg in den Vendor-Baum. Der Bau bricht seitdem ab:
+#
+#     == explorer: der Uebersetzer sagt nein
+#     error: module 'image' has no element 'ist_svg'
+#         --> vendor/firn/lib/fui/uisvg.fi:136:12
+#     error: module 'image' has no element 'svg_zu_bild_farbe'
+#         --> vendor/firn/lib/fui/uisvg.fi:190:9
+#
+# DAS IST KEIN FEHLENDER CODE. `ist_svg` (Zeile 57) und
+# `svg_zu_bild_farbe` (Zeile 124) stehen in svg/image.fi und sind in
+# dessen `export`-Block aufgefuehrt. Es ist eine NAMENSKOLLISION.
+#
+# ------------------------------------------------------------ DIE URSACHE
+#
+# Firn fuehrt ein Modul unter dem LETZTEN Abschnitt seines Pfades.
+# `svg.image` heisst damit `image` -- genauso wie `kernel/user/image.fi`
+# dieses Repos (PNG/BMP lesen und schreiben, Runde ALLTAG).
+#
+# Nachgewiesen mit zwei leeren Modulen gleichen Endnamens, nicht
+# angenommen:
+#
+#     $ firnc --profile=app main.fi      (main.fi: import a.image
+#                                                   import b.image)
+#     error: module 'image' is imported more than once
+#
+# `explorer` zieht BEIDE in denselben Graphen: ueber `expdlg.fi`
+# (`import image`, Zeile 68) und ueber `fuib.fi` -> `fui.uisvg` ->
+# `svg.image`. Der Uebersetzer nimmt dann das eine `image` fuer das
+# andere und sucht `ist_svg` im PNG-Leser von Osum.
+#
+# Gegenprobe, dass es wirklich die Kollision ist und nicht das Modul:
+# `taskbar` und `settings` ziehen `fuib` ebenfalls, aber KEIN `image` --
+# beide uebersetzen mit rc=0.
+#
+# ------------------------------------------------------- WARUM HIER FLICKEN
+#
+# Firn kennt das Problem SELBST und hat es auf seiner Seite schon einmal
+# geloest: lib/fui/uiimage.fi heisst genau deswegen `uiimage` und nicht
+# `image`, und sein Kopf schreibt den Grund aus ("Firn resolves a module
+# by the LAST segment of its path -- so `fui.image` and `svg.image` are
+# both `image`"). Beim Portieren von lib/svg wurde svg/image.fi dabei
+# uebersehen; dieser Flicken zieht denselben Schluss dort nach.
+#
+# Die Gegenrichtung -- `kernel/user/image.fi` umbenennen -- waere der
+# falsche Ort: das Modul hat drei Benutzer in diesem Repo (expdlg.fi,
+# snip.fi, viewer.fi) und gehoert fremden Runden. Der Fehler ist auf der
+# neuen Seite entstanden, also wird er dort behoben.
+#
+# ---------------------------------------------------------- WAS ER TUT
+#
+#   1. svg/image.fi  ->  svg/svgimage.fi   (Inhalt unveraendert)
+#   2. fui/uisvg.fi: `import svg.image` -> `import svg.svgimage`, die
+#      zwei Aufrufstellen mit, und der Grund im Kopf der Datei.
+#
+# Sonst nichts. Kein anderer Teil des Vendor-Baums importiert
+# `svg.image`; gemessen:
+#     $ grep -rn 'import svg\.image' vendor/firn/lib/
+#     vendor/firn/lib/fui/uisvg.fi:99
+#
+# GEMESSEN, vorher/nachher:
+#   vorher   explorer: 2 errors found, der Bau bricht ab
+#   nachher  explorer uebersetzt, /tmp/expl.o 2354984 Oktette
+#
+# GEHOERT DAS NACH FIRN? Ja -- es ist dort derselbe Fehler wie der, den
+# `uiimage` schon vermeidet, und er faellt nur auf, weil OrientOS ein
+# eigenes `image` hat. Solange er dort nicht behoben ist, steht er hier.
+# Siehe REMOVE-FROM-FIRN.md.
+#
+# ---------------------------------------------- WARUM lib/.roh/ HIER LEER BLEIBT
+#
+# fetch-firnc.sh legt vor dem Flicken jede Datei, die eine `+++`-Zeile
+# nennt, unveraendert nach lib/.roh/ -- damit Abschnitt 1 von ./test.sh
+# die Blob-Hashes aus vendor/net/BLOBS gegen den UNGEFLICKTEN Stand
+# messen kann. Dieser Flicken fasst weder net/ noch eine der drei dort
+# genannten Dateien an; er braucht diese Sicherung nicht.
+#
+# ------------------------------- WARUM LOESCHEN+ANLEGEN UND KEIN `rename`
+#
+# Ein git-Flicken kann eine Umbenennung als `rename from`/`rename to`
+# ausdruecken. GNU patch 2.7.6 -- das, was fetch-firnc.sh aufruft --
+# fuehrt sie NICHT aus, wenn keine Aenderungszeilen danebenstehen; es
+# meldet stattdessen "already renamed from svg/svgimage.fi" mit
+# Rueckgabe 0 und laesst die Datei liegen. GEMESSEN: nach `--force` lag
+# svg/image.fi unveraendert da, svg/svgimage.fi fehlte, und der Bau fiel
+# wieder auf denselben Fehler -- nur diesmal still, weil der Flickenlauf
+# "erfolgreich" war. Ein Flicken, der lautlos nichts tut, ist schlimmer
+# als einer, der abbricht.
+#
+# Deshalb steht die Umbenennung hier als das, was sie fuer `patch`
+# wirklich ist: die alte Datei ganz weg, die neue ganz hin. Der Inhalt
+# ist Zeile fuer Zeile derselbe -- nachgeprueft mit `diff` gegen
+# `git show 39dc09c0:lib/svg/image.fi`, null Unterschiede.
+--- a/svg/image.fi
++++ /dev/null
+@@ -1,238 +0,0 @@
+-// SPDX-License-Identifier: GPL-2.0-only
+-// lib/svg/bild.fi -- SVG ALS BILD. Die Naht zum Rest des Browsers.
+-//
+-// Diese Datei ist absichtlich die EINZIGE Stelle, an der der SVG-Maler
+-// mit dem uebrigen Browser spricht, und sie tut genau eines: aus
+-// SVG-Oktetten wird ein `png.Image`. Ab da ist ein Symbol fuer Certus
+-// dasselbe wie ein PNG -- der Bildspeicher legt es ab, der Maler zeichnet
+-// es in einen Kasten, `background-image` benutzt es. Kein anderer Teil
+-// des Browsers muss von SVG etwas wissen.
+-//
+-// Der Grund fuer diesen Schnitt ist der Merge: fuenf Runden arbeiten
+-// gleichzeitig an Certus, und lib/browser gehoert einer anderen. Der
+-// Eingriff dort ist damit SECHS ZEILEN in `img_store_add` -- eine
+-// Abfrage, ein Aufruf. Alles andere steht hier.
+-//
+-// ------------------------------------------------ WIE GROSS WIRD DAS BILD
+-//
+-// Ein SVG hat keine Bildpunkte, sondern eine Groesse in Benutzereinheiten.
+-// `svg_groesse` liefert sie aus `width`/`height`, ersatzweise aus der
+-// `viewBox`, ersatzweise 300x150 (so verlangt es die Spezifikation).
+-// GERASTERT WIRD IN DER EIGENGROESSE, und `SKALA` steht auf 1. Der
+-// erste Versuch dieser Runde hat mit dem Faktor 3 gerastert, damit ein
+-// 24er-Symbol in einem 48er-Kasten nicht sichtbar hochskaliert wird --
+-// und hat sich damit einen echten Fehler eingehandelt: die Groesse des
+-// `png.Image` IST die Eigengroesse, die das Layout einem `<img>` ohne
+-// `width` gibt. Ein 24x24-Symbol war danach 72x72 gross und schob die
+-// halbe Seite beiseite (gemessen: alle drei Symbole 72x72 statt 24, 48
+-// und 24). Die Vergroesserung gehoert an die Stelle, die die BENUTZTE
+-// Groesse kennt -- das ist das Layout, und das ist in dieser Runde
+-// fremdes Gebiet. `svg_zu_bild_gross` kann es schon, sobald jemand von
+-// dort die Zielgroesse hereingibt; siehe docs/ROUNDGRAFIK.md.
+-// `MAX_KANTE` ist die Obergrenze, damit ein SVG mit `width="10000"`
+-// nicht 400 MB belegt.
+-import html.mem
+-import font.metrics
+-import paint.canvas
+-import paint.png
+-import svg.paint
+-import svg.xml
+-
+-export {
+-    ist_svg, svg_zu_bild, svg_zu_bild_gross, svg_zu_bild_farbe,
+-}
+-
+-const SKALA: usize = 1
+-const MAX_KANTE: usize = 2048
+-
+-// Riecht das nach SVG? Die ersten Oktette entscheiden: Leerraum, dann
+-// `<?xml`, `<!--`, `<!DOCTYPE` oder `<svg`.
+-//
+-// Warum nicht am Dateinamen: eine Seite liefert ihre Symbole oft ueber
+-// einen Weg ohne Endung (`data:`-URL, ein Dienst, ein `blob:`), und der
+-// Inhaltstyp kommt nicht ueberall an. Die Oktette sind die einzige
+-// verlaessliche Auskunft, und derselbe Weg entscheidet in
+-// lib/browser/images.fi schon zwischen PNG und JPEG.
+-#[no_gc]
+-fn ist_svg(p: u64, n: usize) -> bool {
+-    var i: usize = 0
+-    var runden: usize = 0
+-    while runden < 8 {
+-        runden = runden + 1
+-        while i < n && (lies(p, i) == 32 || lies(p, i) == 9
+-            || lies(p, i) == 10 || lies(p, i) == 13
+-            || lies(p, i) == 0xEF || lies(p, i) == 0xBB
+-            || lies(p, i) == 0xBF) {
+-            i = i + 1
+-        }
+-        if i + 4 > n {
+-            return false
+-        }
+-        if lies(p, i) != 60 {
+-            return false
+-        }
+-        // `<svg`
+-        if klein(lies(p, i + 1)) == 115 && klein(lies(p, i + 2)) == 118
+-            && klein(lies(p, i + 3)) == 103 {
+-            return true
+-        }
+-        // `<?xml ... ?>` oder `<!-- -->` oder `<!DOCTYPE >` ueberspringen
+-        if lies(p, i + 1) != 63 && lies(p, i + 1) != 33 {
+-            return false
+-        }
+-        var j: usize = i + 1
+-        while j < n && lies(p, j) != 62 {
+-            j = j + 1
+-        }
+-        if j >= n {
+-            return false
+-        }
+-        i = j + 1
+-    }
+-    return false
+-}
+-
+-#[no_gc]
+-fn lies(p: u64, i: usize) -> u32 {
+-    let v: u8 = *((p + i as u64) as *mut u8)
+-    return v as u32
+-}
+-
+-#[no_gc]
+-fn klein(c: u32) -> u32 {
+-    if c >= 65 && c <= 90 {
+-        return c + 32
+-    }
+-    return c
+-}
+-
+-// SVG-Oktette in ein `png.Image`. `fm` ist die Schriftsammlung fuer
+-// `<text>`; 0 heisst: kein Text.
+-//
+-// Das Ergebnis ist GERADES (nicht vormultipliziertes) RGBA -- so haelt
+-// `png.Image` seine Bildpunkte, und so erwartet sie
+-// `painter.paint_image`.
+-#[no_gc]
+-fn svg_zu_bild(p: u64, n: usize, im: *mut png.Image, fm: u64) -> bool {
+-    return svg_zu_bild_gross(p, n, im, fm, 0, 0)
+-}
+-
+-// MIT VORGEGEBENEM `currentColor`. Der Grund steht bei
+-// `paint.male_baum_farbe`: fUi setzt hier die Akzentfarbe des Themas ein,
+-// damit ein Symbol mit `fill="currentColor"` sie annimmt.
+-#[no_gc]
+-fn svg_zu_bild_farbe(p: u64, n: usize, im: *mut png.Image, fm: u64,
+-    bw: usize, bh: usize, aktuell: u32) -> bool {
+-    return zu_bild(p, n, im, fm, bw, bh, aktuell)
+-}
+-
+-// Dasselbe, aber mit vorgegebener Zielgroesse. `bw`/`bh` gleich null
+-// heisst: die eigene Groesse der Datei, mit `SKALA` vervielfacht.
+-#[no_gc]
+-fn svg_zu_bild_gross(p: u64, n: usize, im: *mut png.Image, fm: u64,
+-    bw: usize, bh: usize) -> bool {
+-    return zu_bild(p, n, im, fm, bw, bh, 4278190080 as u32)
+-}
+-
+-#[no_gc]
+-fn zu_bild(p: u64, n: usize, im: *mut png.Image, fm: u64,
+-    bw: usize, bh: usize, aktuell: u32) -> bool {
+-    var baum: xml.Baum = xml.baum_neu()
+-    xml.baum_init(&baum)
+-    if !xml.zerteile_xml(&baum, p, n) {
+-        xml.baum_frei(&baum)
+-        return false
+-    }
+-    var nw: f64 = 300.0
+-    var nh: f64 = 150.0
+-    if !paint.svg_groesse(&baum, &nw, &nh) {
+-        xml.baum_frei(&baum)
+-        return false
+-    }
+-    var w: usize = bw
+-    var h: usize = bh
+-    if w == 0 || h == 0 {
+-        w = ((nw + 0.5) as usize) * SKALA
+-        h = ((nh + 0.5) as usize) * SKALA
+-    }
+-    if w < 1 {
+-        w = 1
+-    }
+-    if h < 1 {
+-        h = 1
+-    }
+-    if w > MAX_KANTE {
+-        w = MAX_KANTE
+-    }
+-    if h > MAX_KANTE {
+-        h = MAX_KANTE
+-    }
+-    var cv: canvas.Canvas = canvas.canvas_new()
+-    if !canvas.canvas_init(&cv, w, h) {
+-        xml.baum_frei(&baum)
+-        return false
+-    }
+-    // DURCHSICHTIG, nicht weiss. Ein Symbol liegt auf der Seite, und ein
+-    // weisser Kasten darunter waere auf jeder farbigen Flaeche sofort zu
+-    // sehen.
+-    canvas.canvas_clear(&cv, 0 as u32)
+-    var m: paint.Maler = paint.maler_neu()
+-    if !paint.maler_init(&m, &cv) {
+-        canvas.canvas_free(&cv)
+-        xml.baum_frei(&baum)
+-        return false
+-    }
+-    paint.maler_setze_schrift(&m, fm)
+-    paint.male_baum_farbe(&m, &baum, 0.0, 0.0, w as f64, h as f64,
+-        aktuell)
+-
+-    // Die Bildpunkte in das `png.Image` legen, zurueckgerechnet auf
+-    // gerades Alpha.
+-    (*im).w = w
+-    (*im).h = h
+-    (*im).cap = w * h * 4
+-    (*im).px = mem.heap_alloc((*im).cap)
+-    if (*im).px as usize == 0 {
+-        paint.maler_frei(&m)
+-        canvas.canvas_free(&cv)
+-        xml.baum_frei(&baum)
+-        return false
+-    }
+-    var y: usize = 0
+-    while y < h {
+-        var x: usize = 0
+-        while x < w {
+-            let v: u32 = canvas.canvas_get(&cv, x, y)
+-            let a: u32 = (v >> 24) & 255 as u32
+-            var r: u32 = 0 as u32
+-            var g: u32 = 0 as u32
+-            var b: u32 = 0 as u32
+-            if a != 0 as u32 {
+-                r = ((v >> 16) & 255 as u32) * 255 / a
+-                g = ((v >> 8) & 255 as u32) * 255 / a
+-                b = (v & 255 as u32) * 255 / a
+-                if r > 255 as u32 {
+-                    r = 255 as u32
+-                }
+-                if g > 255 as u32 {
+-                    g = 255 as u32
+-                }
+-                if b > 255 as u32 {
+-                    b = 255 as u32
+-                }
+-            }
+-            let o: u64 = ((*im).px as u64) + (((y * w + x) * 4) as u64)
+-            *(o as *mut u8) = r as u8
+-            *((o + 1) as *mut u8) = g as u8
+-            *((o + 2) as *mut u8) = b as u8
+-            *((o + 3) as *mut u8) = a as u8
+-            x = x + 1
+-        }
+-        y = y + 1
+-    }
+-    (*im).ok = 1
+-    paint.maler_frei(&m)
+-    canvas.canvas_free(&cv)
+-    xml.baum_frei(&baum)
+-    return true
+-}
+--- /dev/null
++++ b/svg/svgimage.fi
+@@ -0,0 +1,238 @@
++// SPDX-License-Identifier: GPL-2.0-only
++// lib/svg/bild.fi -- SVG ALS BILD. Die Naht zum Rest des Browsers.
++//
++// Diese Datei ist absichtlich die EINZIGE Stelle, an der der SVG-Maler
++// mit dem uebrigen Browser spricht, und sie tut genau eines: aus
++// SVG-Oktetten wird ein `png.Image`. Ab da ist ein Symbol fuer Certus
++// dasselbe wie ein PNG -- der Bildspeicher legt es ab, der Maler zeichnet
++// es in einen Kasten, `background-image` benutzt es. Kein anderer Teil
++// des Browsers muss von SVG etwas wissen.
++//
++// Der Grund fuer diesen Schnitt ist der Merge: fuenf Runden arbeiten
++// gleichzeitig an Certus, und lib/browser gehoert einer anderen. Der
++// Eingriff dort ist damit SECHS ZEILEN in `img_store_add` -- eine
++// Abfrage, ein Aufruf. Alles andere steht hier.
++//
++// ------------------------------------------------ WIE GROSS WIRD DAS BILD
++//
++// Ein SVG hat keine Bildpunkte, sondern eine Groesse in Benutzereinheiten.
++// `svg_groesse` liefert sie aus `width`/`height`, ersatzweise aus der
++// `viewBox`, ersatzweise 300x150 (so verlangt es die Spezifikation).
++// GERASTERT WIRD IN DER EIGENGROESSE, und `SKALA` steht auf 1. Der
++// erste Versuch dieser Runde hat mit dem Faktor 3 gerastert, damit ein
++// 24er-Symbol in einem 48er-Kasten nicht sichtbar hochskaliert wird --
++// und hat sich damit einen echten Fehler eingehandelt: die Groesse des
++// `png.Image` IST die Eigengroesse, die das Layout einem `<img>` ohne
++// `width` gibt. Ein 24x24-Symbol war danach 72x72 gross und schob die
++// halbe Seite beiseite (gemessen: alle drei Symbole 72x72 statt 24, 48
++// und 24). Die Vergroesserung gehoert an die Stelle, die die BENUTZTE
++// Groesse kennt -- das ist das Layout, und das ist in dieser Runde
++// fremdes Gebiet. `svg_zu_bild_gross` kann es schon, sobald jemand von
++// dort die Zielgroesse hereingibt; siehe docs/ROUNDGRAFIK.md.
++// `MAX_KANTE` ist die Obergrenze, damit ein SVG mit `width="10000"`
++// nicht 400 MB belegt.
++import html.mem
++import font.metrics
++import paint.canvas
++import paint.png
++import svg.paint
++import svg.xml
++
++export {
++    ist_svg, svg_zu_bild, svg_zu_bild_gross, svg_zu_bild_farbe,
++}
++
++const SKALA: usize = 1
++const MAX_KANTE: usize = 2048
++
++// Riecht das nach SVG? Die ersten Oktette entscheiden: Leerraum, dann
++// `<?xml`, `<!--`, `<!DOCTYPE` oder `<svg`.
++//
++// Warum nicht am Dateinamen: eine Seite liefert ihre Symbole oft ueber
++// einen Weg ohne Endung (`data:`-URL, ein Dienst, ein `blob:`), und der
++// Inhaltstyp kommt nicht ueberall an. Die Oktette sind die einzige
++// verlaessliche Auskunft, und derselbe Weg entscheidet in
++// lib/browser/images.fi schon zwischen PNG und JPEG.
++#[no_gc]
++fn ist_svg(p: u64, n: usize) -> bool {
++    var i: usize = 0
++    var runden: usize = 0
++    while runden < 8 {
++        runden = runden + 1
++        while i < n && (lies(p, i) == 32 || lies(p, i) == 9
++            || lies(p, i) == 10 || lies(p, i) == 13
++            || lies(p, i) == 0xEF || lies(p, i) == 0xBB
++            || lies(p, i) == 0xBF) {
++            i = i + 1
++        }
++        if i + 4 > n {
++            return false
++        }
++        if lies(p, i) != 60 {
++            return false
++        }
++        // `<svg`
++        if klein(lies(p, i + 1)) == 115 && klein(lies(p, i + 2)) == 118
++            && klein(lies(p, i + 3)) == 103 {
++            return true
++        }
++        // `<?xml ... ?>` oder `<!-- -->` oder `<!DOCTYPE >` ueberspringen
++        if lies(p, i + 1) != 63 && lies(p, i + 1) != 33 {
++            return false
++        }
++        var j: usize = i + 1
++        while j < n && lies(p, j) != 62 {
++            j = j + 1
++        }
++        if j >= n {
++            return false
++        }
++        i = j + 1
++    }
++    return false
++}
++
++#[no_gc]
++fn lies(p: u64, i: usize) -> u32 {
++    let v: u8 = *((p + i as u64) as *mut u8)
++    return v as u32
++}
++
++#[no_gc]
++fn klein(c: u32) -> u32 {
++    if c >= 65 && c <= 90 {
++        return c + 32
++    }
++    return c
++}
++
++// SVG-Oktette in ein `png.Image`. `fm` ist die Schriftsammlung fuer
++// `<text>`; 0 heisst: kein Text.
++//
++// Das Ergebnis ist GERADES (nicht vormultipliziertes) RGBA -- so haelt
++// `png.Image` seine Bildpunkte, und so erwartet sie
++// `painter.paint_image`.
++#[no_gc]
++fn svg_zu_bild(p: u64, n: usize, im: *mut png.Image, fm: u64) -> bool {
++    return svg_zu_bild_gross(p, n, im, fm, 0, 0)
++}
++
++// MIT VORGEGEBENEM `currentColor`. Der Grund steht bei
++// `paint.male_baum_farbe`: fUi setzt hier die Akzentfarbe des Themas ein,
++// damit ein Symbol mit `fill="currentColor"` sie annimmt.
++#[no_gc]
++fn svg_zu_bild_farbe(p: u64, n: usize, im: *mut png.Image, fm: u64,
++    bw: usize, bh: usize, aktuell: u32) -> bool {
++    return zu_bild(p, n, im, fm, bw, bh, aktuell)
++}
++
++// Dasselbe, aber mit vorgegebener Zielgroesse. `bw`/`bh` gleich null
++// heisst: die eigene Groesse der Datei, mit `SKALA` vervielfacht.
++#[no_gc]
++fn svg_zu_bild_gross(p: u64, n: usize, im: *mut png.Image, fm: u64,
++    bw: usize, bh: usize) -> bool {
++    return zu_bild(p, n, im, fm, bw, bh, 4278190080 as u32)
++}
++
++#[no_gc]
++fn zu_bild(p: u64, n: usize, im: *mut png.Image, fm: u64,
++    bw: usize, bh: usize, aktuell: u32) -> bool {
++    var baum: xml.Baum = xml.baum_neu()
++    xml.baum_init(&baum)
++    if !xml.zerteile_xml(&baum, p, n) {
++        xml.baum_frei(&baum)
++        return false
++    }
++    var nw: f64 = 300.0
++    var nh: f64 = 150.0
++    if !paint.svg_groesse(&baum, &nw, &nh) {
++        xml.baum_frei(&baum)
++        return false
++    }
++    var w: usize = bw
++    var h: usize = bh
++    if w == 0 || h == 0 {
++        w = ((nw + 0.5) as usize) * SKALA
++        h = ((nh + 0.5) as usize) * SKALA
++    }
++    if w < 1 {
++        w = 1
++    }
++    if h < 1 {
++        h = 1
++    }
++    if w > MAX_KANTE {
++        w = MAX_KANTE
++    }
++    if h > MAX_KANTE {
++        h = MAX_KANTE
++    }
++    var cv: canvas.Canvas = canvas.canvas_new()
++    if !canvas.canvas_init(&cv, w, h) {
++        xml.baum_frei(&baum)
++        return false
++    }
++    // DURCHSICHTIG, nicht weiss. Ein Symbol liegt auf der Seite, und ein
++    // weisser Kasten darunter waere auf jeder farbigen Flaeche sofort zu
++    // sehen.
++    canvas.canvas_clear(&cv, 0 as u32)
++    var m: paint.Maler = paint.maler_neu()
++    if !paint.maler_init(&m, &cv) {
++        canvas.canvas_free(&cv)
++        xml.baum_frei(&baum)
++        return false
++    }
++    paint.maler_setze_schrift(&m, fm)
++    paint.male_baum_farbe(&m, &baum, 0.0, 0.0, w as f64, h as f64,
++        aktuell)
++
++    // Die Bildpunkte in das `png.Image` legen, zurueckgerechnet auf
++    // gerades Alpha.
++    (*im).w = w
++    (*im).h = h
++    (*im).cap = w * h * 4
++    (*im).px = mem.heap_alloc((*im).cap)
++    if (*im).px as usize == 0 {
++        paint.maler_frei(&m)
++        canvas.canvas_free(&cv)
++        xml.baum_frei(&baum)
++        return false
++    }
++    var y: usize = 0
++    while y < h {
++        var x: usize = 0
++        while x < w {
++            let v: u32 = canvas.canvas_get(&cv, x, y)
++            let a: u32 = (v >> 24) & 255 as u32
++            var r: u32 = 0 as u32
++            var g: u32 = 0 as u32
++            var b: u32 = 0 as u32
++            if a != 0 as u32 {
++                r = ((v >> 16) & 255 as u32) * 255 / a
++                g = ((v >> 8) & 255 as u32) * 255 / a
++                b = (v & 255 as u32) * 255 / a
++                if r > 255 as u32 {
++                    r = 255 as u32
++                }
++                if g > 255 as u32 {
++                    g = 255 as u32
++                }
++                if b > 255 as u32 {
++                    b = 255 as u32
++                }
++            }
++            let o: u64 = ((*im).px as u64) + (((y * w + x) * 4) as u64)
++            *(o as *mut u8) = r as u8
++            *((o + 1) as *mut u8) = g as u8
++            *((o + 2) as *mut u8) = b as u8
++            *((o + 3) as *mut u8) = a as u8
++            x = x + 1
++        }
++        y = y + 1
++    }
++    (*im).ok = 1
++    paint.maler_frei(&m)
++    canvas.canvas_free(&cv)
++    xml.baum_frei(&baum)
++    return true
++}
+diff --git a/fui/uisvg.fi b/fui/uisvg.fi
+--- a/fui/uisvg.fi
++++ b/fui/uisvg.fi
+@@ -1,6 +1,33 @@
+ // SPDX-License-Identifier: MPL-2.0
+ // lib/fui/uisvg.fi -- EIN SVG-SYMBOL AUF EINEM BEDIENELEMENT.
+ //
++// ============================ WARUM `svg.svgimage` UND NICHT `svg.image`
++//
++// OSUM-Flicken 0004, 13.09.2026. Firn fuehrt ein Modul unter dem LETZTEN
++// Abschnitt seines Pfades -- `svg.image` heisst also schlicht `image`.
++// lib/fui/uiimage.fi traegt genau deshalb schon ein Praefix und
++// begruendet es in seinem Kopf. `svg/image.fi` wurde dabei uebersehen.
++//
++// In OrientOS faellt das auf, im Firn-Baum allein nicht: dort gibt es
++// `kernel/user/image.fi` (PNG/BMP lesen und schreiben, Runde ALLTAG),
++// und `explorer` zieht ueber `expdlg.fi` BEIDE in denselben Graphen.
++// Der Uebersetzer nimmt dann das eine `image` fuer das andere:
++//
++//     error: module 'image' has no element 'ist_svg'
++//         --> vendor/firn/lib/fui/uisvg.fi:136:12
++//
++// Kein fehlendes Stueck Code -- `ist_svg` und `svg_zu_bild_farbe` sind
++// in svg/image.fi vorhanden und ausgefuehrt. Es ist eine Namenskollision,
++// nachgewiesen mit zwei leeren Modulen gleichen Endnamens:
++//
++//     error: module 'image' is imported more than once
++//
++// Geflickt wird auf der Seite, die NEU ist (svg/image.fi -> svgimage.fi
++// im Vendor-Baum), nicht in OrientOS: `kernel/user/image.fi` hat drei
++// Benutzer (expdlg, snip, viewer), und ein Umbenennen dort waere ein
++// Eingriff in fremde Runden fuer einen Fehler, der hier entstanden ist.
++// Dieselbe Antwort, die `uiimage` und `uipaint` schon gegeben haben.
++//
+ // ========================================================= WARUM SO
+ //
+ // DIESE DATEI SCHREIBT KEINEN SVG-LESER. Sie ist die Naht zu
+@@ -96,7 +123,7 @@
+ // bei jedem Bildaufbau nur noch geblittet. Wer pro Bild neu rastert,
+ // bezahlt den Zerteiler sechzigmal je Sekunde.
+ import paint.png
+-import svg.image
++import svg.svgimage
+ import fui.uiimage
+ 
+ export {
+@@ -133,7 +160,7 @@
+ // EINER Stelle steht -- ein Aufrufer, der `<?xml` oder einen Kommentar vor
+ // dem `<svg` hat, bekommt dieselbe Antwort wie Certus.
+ fn is_svg(p: u64, n: usize) -> bool {
+-    return image.ist_svg(p, n)
++    return svgimage.ist_svg(p, n)
+ }
+ 
+ // SYMBOL RASTERN, in genau dieser Pixelgroesse.
+@@ -187,7 +214,7 @@
+         // 0 heisst "nichts vorgegeben" -> der SVG-Standard ist Schwarz.
+         col = 4278190080 as u32
+     }
+-    if !image.svg_zu_bild_farbe(src, n, &(*ic).im, fm, w, h, col) {
++    if !svgimage.svg_zu_bild_farbe(src, n, &(*ic).im, fm, w, h, col) {
+         return false
+     }
+     (*ic).at_w = w
