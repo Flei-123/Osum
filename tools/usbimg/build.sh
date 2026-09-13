@@ -457,7 +457,34 @@ T_DSCHEME=$(lies_preset dark_scheme)
   printf 'mode=%s\naccent=%s\nshape=%s\nlight_start=07:00\ndark_start=19:00\n' \
     "$T_MODE" "$T_ACCENT" "$T_SHAPE"
 } > "$OUT/theme.conf"
+# ================================================ RUNDE FUI-WIN11
+# DIE AKZENTFARBE WIRD AUFGELOEST GEMELDET UND NICHT ALS STRICH.
+#
+# Justins Befund am 13.09.: der Bau meldete `accent=-`, und daraus las
+# sich "es gibt keine Akzentfarbe, also ist alles fest blau". Das
+# stimmt NICHT, und die Meldung war schuld.
+#
+# `accent=` LEER ist ein gueltiger Wert mit einer Bedeutung: "diese
+# Vorlage schreibt keine eigene Akzentfarbe vor, es gilt die des
+# SCHEMAS" (assets/themes/*.preset, Kopfzeile: "accent the accent, or
+# empty for the scheme's own"). `vorlage.fi` traegt dafuer ACC_NONE und
+# NICHT 0 -- 0 waere Schwarz und damit eine echte Farbe.
+#
+# Die Farbe, die dann wirklich gilt, steht im Schema
+# (assets/schemes/<scheme>.scheme, Zeile `accent=`) und wird von
+# `wlibc.bind_accent` auf die Rampe gelegt, samt Kontrollrechnung gegen
+# WCAG. Also wird sie hier NACHGESCHLAGEN und mitgemeldet -- wer den
+# Bericht liest, sieht die Farbe, die auf dem Schirm landet, und nicht
+# einen Strich.
+T_ACC_EFF="$T_ACCENT"
+T_ACC_HER="vorlage"
+if [ -z "$T_ACC_EFF" ]; then
+    T_ACC_HER="schema $T_SCHEME"
+    T_ACC_EFF=$(grep -a "^accent=" "assets/schemes/$T_SCHEME.scheme" 2>/dev/null \
+        | head -1 | cut -d= -f2-)
+fi
 sagen "thema       $THEMA (scheme=$T_SCHEME dark_scheme=${T_DSCHEME:--} mode=$T_MODE shape=$T_SHAPE accent=${T_ACCENT:--})"
+sagen "akzent      #${T_ACC_EFF:-??} (aus ${T_ACC_HER}) -- das ist die Farbe, die aktive Kacheln, Auswahl und Fokusring tragen"
 
 # ==================== RUNDE BLECH-HID: DER NOTAUSGANG OHNE TASTATUR
 #
