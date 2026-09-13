@@ -53,6 +53,8 @@ import arch.x86_64.trap
 import ttf
 import tty
 import usb
+// RUNDE HOTPLUG: die Naht zwischen Blockgeraet und Einhaengung.
+import wechsel
 import vmode
 import wig
 import wm
@@ -3646,6 +3648,16 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         // abgeschalteten Unterbrechungen.
         st(33)
         usb.hotplug_work(state)
+        // ================================== RUNDE HOTPLUG
+        // AUFZAEHLEN UND EINHAENGEN SIND ZWEI SCHRITTE, UND SIE STEHEN
+        // ABSICHTLICH HINTEREINANDER.
+        //
+        // `usb.hotplug_work` hat gerade den Stick aufgenommen (oder
+        // fallengelassen); JETZT stimmen `usb.msc_gen`/`usb.msc_weg`.
+        // Erst danach darf jemand Bloecke lesen -- ein Einhaengen
+        // waehrend des Aufzaehlens laese in ein Geraet, das noch keine
+        // Adresse hat.
+        wechsel_schritt(state)
         st(34)
         wm.poll(state)
         // ==================================== RUNDE ALLTAG: DIE SPERRE
@@ -4011,6 +4023,47 @@ fn header_line_say(state: u64, b: u64, n: u64) {
 // Der Schreibtisch sagt der Tafel, ob eine Shell laeuft. Das ist die
 // Zahl, die Justins Foto vom 04.09. gekostet hat: ohne Shell lief die
 // Schleife gar nicht, und niemand konnte es sehen.
+// ====================================== RUNDE HOTPLUG
+// DER SCHRITT, DER AUS EINEM GERAET EINEN ORT MACHT.
+//
+// Er steht HIER und nicht in `usb.fi`, und das ist die ganze Bauform
+// dieser Runde: `usb.fi` darf nichts von Dateisystemen wissen (Zusage
+// der Runde K17, gemessen in `tools/k17/run.sh` Abschnitt 1), und
+// `vfs.fi` nichts von USB. Also liest die Schreibtischschleife ZWEI
+// ZAHLEN und ruft die Naht -- `kernel/wechsel.fi` --, die beide Seiten
+// kennen darf.
+//
+// ZWEI MERKER UND KEIN ZUSTAND: `hp_gen` und `hp_weg` sind der Stand
+// des letzten Blicks. Ein Zaehler, der sich bewegt hat, ist eine
+// Flanke; bewegt er sich nicht, kostet dieser Schritt einen Vergleich.
+// Das ist der Grund, warum er in jeder Runde der Schleife stehen darf,
+// ohne sie zu belasten.
+//
+// WARUM NICHT DER ZEITGEBER: weil Einhaengen Bloecke liest, und Bloecke
+// lesen dauert. Im Zeitgeberbehandler stuenden dabei die
+// Unterbrechungen -- genau der Fehler, den der Kopf von
+// `usb.port_watch` beschreibt und den diese Runde nicht wiederholt.
+static mut hp_gen: u64 = 0
+static mut hp_weg: u64 = 0
+
+fn wechsel_schritt(state: u64) {
+    let gen: u64 = usb.msc_gen(state)
+    let weg: u64 = usb.msc_weg(state)
+    // ZUERST DAS GEHEN. Wer einen Stick abzieht und sofort einen
+    // zweiten steckt, hat in derselben Runde beide Flanken; wird dann
+    // zuerst eingehaengt, ist der Platz des alten noch belegt.
+    if weg != hp_weg {
+        hp_weg = weg
+        let _n: u64 = wechsel.geht(state, blk.DEV_USB)
+    }
+    if gen != hp_gen {
+        hp_gen = gen
+        if usb.msc_ready(state) {
+            let _i: u64 = wechsel.kommt(state, blk.DEV_USB)
+        }
+    }
+}
+
 fn tafel_shell(v: u64) {
     tafel_sh = v
 }

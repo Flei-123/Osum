@@ -85,6 +85,8 @@ export {
     silence_check, wachen, wiedern, kbd_taugt, mouse_works,
     stat,
     have_kbd, have_mouse, msc_errors, msc_ios, selftest,
+    // RUNDE HOTPLUG: die zwei Flanken des Wechseldatentraegers.
+    msc_gen, msc_weg,
     rangtest, rangtest_max,
     // RUNDE HIDPUNKTE: die Punktzahl je Regler und die getroffene Wahl.
     punkte, pkt_get, wahl,
@@ -234,6 +236,27 @@ const S_SVCBUSY: u64 = 0x158
 // RUNDE ECHTHARDWARE-6: wie oft der Wachhund nachgesehen hat.
 const S_WACHN: u64 = 0x168
 const S_WIEDERN: u64 = 0x170 // neu bestueckte stumme Endpunkte
+
+// ====================================== RUNDE HOTPLUG
+// DIE ZAEHLER, AN DENEN EIN ANDERER DIE FLANKE SIEHT.
+//
+// Dieser Baum darf NICHTS von Partitionen, Dateisystemen und Pfaden
+// wissen -- `tools/k17/run.sh`, Abschnitt 1, misst genau das, und der
+// Kopf dieser Datei sagt seit Runde K17, warum. Der Stick ist hier ein
+// BLOCKGERAET und sonst nichts.
+//
+// Damit trotzdem jemand merken kann, DASS einer gekommen oder gegangen
+// ist, zaehlt dieser Baum zwei Flanken mit -- zwei Zahlen, mehr nicht.
+// Wer sie liest (`kernel/kgui.fi`, die Schreibtischschleife), vergleicht
+// sie mit dem, was er beim letzten Blick gesehen hat, und macht die
+// Arbeit selbst. Das ist derselbe Griff, mit dem `port_watch` und
+// `hotplug_work` zusammenarbeiten: der eine merkt, der andere handelt.
+//
+// WARUM NICHT EIN RUECKRUF: ein Funktionszeiger aus `usb.fi` in eine
+// Schicht darueber waere derselbe Kreis im Modulgraphen, nur
+// verschleiert. Eine Zahl kennt niemanden.
+const S_MSCGEN: u64 = 0x178 // +1, sobald ein Massenspeicher bereit ist
+const S_MSCWEG: u64 = 0x180 // +1, sobald einer verschwunden ist
 // Wie oft `alloc_dev` leer war -- ein Geraet, fuer das kein Platz mehr
 // da ist, verschwindet sonst spurlos. Justins Brett meldet FUND 5 bei
 // MAX_DEV 4; ob das je angeschlagen hat, stand nirgends.
@@ -447,6 +470,17 @@ fn msc_errors(state: u64) -> u64 {
 
 fn msc_ios(state: u64) -> u64 {
     return g(state, S_MSCIO)
+}
+
+// RUNDE HOTPLUG: wie oft ein Massenspeicher BEREIT geworden ist, und
+// wie oft einer verschwunden ist. Beide Zahlen laufen nur nach oben;
+// wer sie liest, merkt sich seinen letzten Stand.
+fn msc_gen(state: u64) -> u64 {
+    return g(state, S_MSCGEN)
+}
+
+fn msc_weg(state: u64) -> u64 {
+    return g(state, S_MSCWEG)
 }
 
 fn b8(p: u64, i: u64) -> u64 {
@@ -1734,6 +1768,11 @@ fn bind(state: u64, d: u64) {
     if k == DRV_MSC {
         if msc_start(state, d) {
             s(state, S_MSC, d + 1)
+            // RUNDE HOTPLUG: die STEIGENDE Flanke. Erst hier ist der
+            // Stick wirklich bereit -- INQUIRY beantwortet, TEST UNIT
+            // READY durch, Groesse und Blockgroesse bekannt. Wer frueher
+            // einhaengte, laese in ein Geraet, das noch anlaeuft.
+            s(state, S_MSCGEN, g(state, S_MSCGEN) + 1)
         }
         return
     }
@@ -2398,6 +2437,11 @@ fn gone(state: u64, p: u64) {
             if g(state, S_MSC) == d + 1 {
                 s(state, S_MSC, 0)
                 s(state, S_BLOCKS, 0)
+                // RUNDE HOTPLUG: die FALLENDE Flanke. Sie wird hier
+                // gezaehlt und nicht in `hotplug_work`, weil `gone`
+                // auch aus `unplug_now` (der Gegenprobe) gerufen wird
+                // -- beide Wege muessen dasselbe melden.
+                s(state, S_MSCWEG, g(state, S_MSCWEG) + 1)
             }
             drop_dev(state, d)
             s(state, S_NDEV, g(state, S_NDEV) - 1)
