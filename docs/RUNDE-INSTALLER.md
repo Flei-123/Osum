@@ -76,7 +76,29 @@ Sicherung, bevor ein Betriebssystem ihn sieht — das hat schon Runde
 INSTALL gemessen. Wer dort misst, prüft die Firmware und nicht sich
 selbst.)
 
-Bilder unter `docs/bilder/installer/`.
+**Ergebnis: 27 Zusagen, 0 Fehler.** Das ganze Protokoll liegt unter
+`docs/bilder/installer/abnahme.log`.
+
+| Glied | Gemessen |
+|---|---|
+| Fenster steht | 63,9 % Tinte im Fensterbereich, 6 Bedienelemente gemeldet |
+| Platte erkannt | `/dev/hda`, 655360 Sektoren, als leer erkannt |
+| Installation | alle fünf Schritte auf der Leitung (1 2 3 4 5), `installer: fertig` |
+| Wirt liest nach | GPT: Partition 1 EFI (`EF00`), Partition 2 `OSUM`; ESP trägt `BOOTX64.EFI` (253 952), `osum.mb` (5 060 040), `limine.conf` |
+| **Start von der Platte** | **ohne `-kernel`, ohne `-initrd`, nur OVMF:** `wm: rootpart=1 first=72048 blocks=583279`, `wm: mount=1` |
+| Gegenprobe | `from module` kommt **nicht** vor — es war kein Stick im Spiel |
+| **Schreibtisch** | `desk: start /bin/desktop` — und ein **Bild** davon, 65 % Tinte |
+| Datei anlegen | `/beweis.txt` geschrieben und gelesen |
+| **Neustart** | **die Datei ist noch da, mit Inhalt** |
+| Gegenprobe | gekippter Superblock ⇒ die Wurzel wird **nicht** eingehängt |
+
+Bilder:
+
+| Datei | Was |
+|---|---|
+| `20-fenster.png` | das Installationsfenster, vom Stick gestartet |
+| `30-fertig.png` | nach der Installation |
+| `40-von-der-platte.png` | **der Schreibtisch, von der Platte, ohne Stick** |
 
 ---
 
