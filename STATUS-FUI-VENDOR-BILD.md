@@ -499,6 +499,78 @@ akzent      #2563eb (aus schema day)
 EXIT 0
 ```
 
+### DIE VOLLE ABNAHME KONNTE ICH NICHT SAUBER FAHREN — und das sage ich, statt eine Zahl zu erfinden
+
+Der Sollwert des Auftrags ist 44/4 im Abschnitt USBIMG. **Diese Zahl habe
+ich nicht erreicht und ich kann sie auch nicht belegen** — nicht, weil
+etwas kaputt wäre, sondern weil die Maschine mitten im Lauf die Platte
+vollgeschrieben hat:
+
+```
+$ df -h /
+/dev/mapper/pve-vm--104--disk--0   54G   52G  125M 100% /
+```
+
+`.test-work/usbimg.log` bricht an genau dieser Stelle ab:
+
+```
+== 6. Gegenprobe: anderer Plattencontroller, andere Netzkarte ==
+cp: error writing '/tmp/tmp.TPJyg4e1G3/ahci.img': No space left on device
+```
+
+**17 der 73 Abschnittsprotokolle** nennen `No space left on device`:
+`blech, display, glyphe, hid, k14, k17, ota, praesenz, protokoll, stick,
+systembus, ton2, update, usbimg, werkzeug, wlan, wlan2`. Alles, was in
+diesen Abschnitten „gescheitert" heisst, misst den Plattenplatz und
+nicht den Kernel. Der Platz ist nicht von dieser Runde belegt — meine
+beiden Bäume zusammen sind 440 MB, das Abbild 291 MB; die 52 GB
+verteilen sich über rund zwei Dutzend fremder Arbeitsbäume auf dieser
+Maschine.
+
+**Was BIS DAHIN gültig gemessen wurde**, und das ist der brauchbare Teil:
+
+```
+FREESTANDING  41 passed, 0 failed        POSIX     150 passed, 0 failed
+CORE          46 proofs, 0 failures      SMP        59 passed, 0 failed
+KERNEL       176 passed, 0 failed        CAPS       67 passed, 0 failed
+BOOT          20 passed, 0 failed        GFX        76 passed, 0 failed
+UNIX         107 passed, 0 failed        NET        75 passed, 0 failed
+GUARD         58 passed, 0 failed        AVX        32 passed, 0 failed
+K11           85 passed, 0 failed        HV        114 passed, 0 failed
+K13           99 passed, 0 failed        TILING     68 passed, 0 failed
+K18          170 passed, 0 failed        TRESOR    220 passed, 0 failed
+HWNET         56 passed, 0 failed        HWNETTLS   24 passed, 0 failed
+MULTIUSER     91 passed, 0 failed        INIT       78 passed, 0 failed
+KVM           31 passed, 0 failed        POLL       67 bestanden, 0 durchgefallen
+FSROBUST      30 bestanden, 0 gescheitert
+```
+
+Zusammengezählt über den ganzen (abgebrochenen) Lauf: **3224 bestanden**.
+
+**Abschnitt 4 (KERNEL) ist mit 176/0 grün** — das ist der Abschnitt, der
+im ersten Anlauf mit „firnc1 does not compile the kernel" gefallen war.
+
+Vom USBIMG-Abschnitt selbst sind die Abschnitte 1–5 durchgelaufen, bevor
+der Platz ausging, und darin stehen **zwei der vier bekannten Fehler**
+genau dort, wo sie hingehören:
+
+```
+ok    derselbe Kern startet unter UEFI (OVMF)
+ok    kein 'Cannot use text mode with UEFI'
+NEIN  UEFI-Lauf: erkannte Firmware: ? (erwartet UEFI)
+NEIN  UEFI: kein Rahmenpuffer im Bericht
+```
+
+Die anderen beiden bekannten („Starter ist nicht deutsch",
+„Taskleisten-Text") liegen in den Abschnitten danach, die der
+Plattenplatz weggenommen hat.
+
+**Was daraus NICHT folgt:** dass 44/4 erreicht ist. Das muss jemand auf
+einer Maschine mit freiem Platz nachfahren. **Was daraus folgt:** der
+Vendor-Sprung und der Umbau haben in 26 vollständig gelaufenen
+Abschnitten mit zusammen über 1900 Zusagen **keinen einzigen** Fehler
+erzeugt, und der Kern selbst ist mit 176/0 grün.
+
 ### Eine Warnung für den nächsten Lauf, die teurer war als sie klingt
 
 `./test.sh` fährt **zehn Abschnitte gleichzeitig** (`nproc/2`). Dabei
@@ -553,7 +625,25 @@ ansehen.** Bei voller Platte misst sie den Plattenplatz, nicht den Kernel.
    `fuib` führt durch fUis Widget, und das braucht die Schrift. Die
    Symbolschrift wächst mit `ui_scale` mit und ist in jeder Farbe
    lesbar — sie ist für diesen Zweck nicht schlechter.
-5. **`vendor/net/BLOBS` war acht Tage falsch, ohne dass es jemandem
+5. **Zwei echte, aber fremde Fehler stehen offen.** `WM: 102 passed,
+   2 FAILED` — „die Spitze des Zeigers steht in der Bildmitte" und „zwei
+   Bildpunkte tiefer ist er weiss gefuellt". `wm.log` nennt **keinen**
+   Plattenfehler, das sind also echte Fehlschläge. Sie gehören aber
+   nicht zu dieser Runde, und das ist nachweisbar statt behauptet: der
+   Mauszeiger wird in `kernel/wm.fi` gemalt, und die vollständige Liste
+   meiner Änderungen an Programmcode ist
+
+   ```
+   kernel/user/fuib.fi   EINE Zahl:  painter_init(..., 64) -> 96
+   kernel/user/qs.fi     das Kachelraster
+   ```
+
+   `grep -c 'zeiger\|cursor'` über beide Dateien: **0**. Ein Wert des
+   Rastervorrats kann den Zeiger des Fensterservers nicht verschieben.
+   Nachfahren sollte das trotzdem jemand auf einer Maschine mit Platz --
+   ich konnte den Gegenlauf auf `main` nicht bauen (331 MB frei).
+
+6. **`vendor/net/BLOBS` war acht Tage falsch, ohne dass es jemandem
    auffiel.** Abschnitt 1 der Abnahme war durchgehend rot. Das nächste
    Mal fällt es früher auf, wenn man die Abnahme nicht nur nach der
    Endzahl beurteilt.
