@@ -46,6 +46,10 @@ export FIRNLIB="$(pwd)/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
 ULD=kernel/user/user.ld
 PROGS="sh ls cat echo log absturz krach"
+# Seit ENGLISCH ETAPPE 9 heissen die QUELLEN anders als die Programme:
+# /bin/absturz kommt aus crash.fi, /bin/krach aus noise.fi. Die Zusagen
+# unten pruefen die /bin/-Namen, darum wird hier nur die Quelle abgebildet.
+quelle() { case $1 in absturz) echo crash ;; krach) echo noise ;; *) echo "$1" ;; esac; }
 BLOCKS=4096
 
 TMPD=$(mktemp -d)
@@ -132,8 +136,9 @@ for f in boot isr switch smp hv; do
 done
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || bad "crt.s"
 for p in $PROGS; do
-    "$FIRNC" "kernel/user/$p.fi" -o "$TMPD/$p.o" >"$TMPD/e$p" 2>&1 \
-        || { bad "$p.fi uebersetzt nicht"; sed 's/^/        /' "$TMPD/e$p" | head -6; }
+    q=$(quelle "$p")
+    "$FIRNC" "kernel/user/$q.fi" -o "$TMPD/$p.o" >"$TMPD/e$p" 2>&1 \
+        || { bad "$q.fi uebersetzt nicht"; sed 's/^/        /' "$TMPD/e$p" | head -6; }
     ld -T "$ULD" --defsym=USER_ENTRY="_F0.u_start" \
         -o "$TMPD/$p.elf" "$TMPD/crt.o" "$TMPD/$p.o" 2>/dev/null \
         || bad "$p laesst sich nicht binden"
