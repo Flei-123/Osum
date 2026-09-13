@@ -69,7 +69,7 @@ for p in $PROGS; do
 done
 
 # --------------------------------------------------- der Helfer selbst
-FIRNLIB="$ROOT/vendor/firn/lib" "$CC" -c --profile=app \
+FIRNLIB="$ROOT/lib" "$CC" -c --profile=app \
     -o "$W/jarvisd.o" kernel/app/jarvisd.fi >> "$W/build.log" 2>&1 || {
     echo "jarvisd.fi uebersetzt nicht"; tail -20 "$W/build.log"; exit 1; }
 ld -T "$ULD" -o "$W/jarvisd.elf" "$W/jarvisd.o" 2>"$W/ldj.err" || {

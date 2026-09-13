@@ -90,7 +90,7 @@ bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 # =====================================================================
 echo "== 1. bauen: zwei Profile, ein Abbild =="
 # =====================================================================
-export FIRNLIB="$ROOT/vendor/firn/lib"
+export FIRNLIB="$ROOT/lib"
 if vendor/firn/bin/firnc -c --profile=app -o "$TMPD/jd.o" \
         kernel/app/jarvisd.fi > "$TMPD/cc.log" 2>&1; then
     ok "firnc --profile=app: jarvisd.fi mit std.rt, std.net, std.deflate, tls.tls"
