@@ -467,6 +467,31 @@ set_edge() { # edge
         "$1" > "$TMPD/taskbar.conf"
 }
 
+# RUNDE BAUFEHLER (13.09.2026): 16384 -> 32768 Bloecke (8 -> 16 MiB).
+# Derselbe Grund wie bei jeder Erhoehung davor, neue Ursache: Runde
+# GRUNDLINIE (1d16d34) hat die Laeufer -- zu Recht -- auf `--profile=app`
+# umgestellt, denn die Programme mit Oberflaeche tragen seit Runde 31
+# `profile app` in ihrer ersten Zeile. Das Profil `app` bringt Firns
+# volle Laufzeit mit, und sechs der vierzehn Programme dieses Abbilds
+# sind solche: desktop, taskbar, settings, launcher, explorer,
+# widgetdemo. `/bin/explorer` allein ist damit 1623040 statt 907360
+# Oktette. `mkfs.py` sagte "the disk is full", die sechs Zustandsbilder
+# liessen sich nicht bauen, und das kostete diesen Laeufer 29 Zusagen
+# ("mkfs for st-nocarrier failed", "nocarrier: no screenshot", ...).
+#
+# GEMESSEN mit Dateien in der Groesse der echten Programme:
+#
+#    16384 Bloecke  ( 8 MiB)   mkfs: the disk is full
+#    24576 Bloecke  (12 MiB)   geht, 4476 Bloecke frei
+#    32768 Bloecke  (16 MiB)   geht, 12666 Bloecke frei
+#
+# EIN BLOCK IST 512 OKTETTE (tools/osum/mkfs.py, `BS = 512`). Der
+# Kommentar darunter rechnet mit 4096 und nennt darum zu grosse
+# Megaoktett-Zahlen; die Bloeckezahlen selbst waren richtig, weil sie
+# gemessen wurden. 32768 und nicht 24576, damit die naechste Erweiterung
+# von wlib nicht sofort wieder hier landet. Das Abbild liegt in $TMPD
+# und lebt nur waehrend des Laufs.
+#
 # ROUND MERGE8: 16384 blocks (was 8192, before that 4096). The fourteen programs of this
 # graphical image have grown past the two mebioctets that were an OFS
 # disk's ceiling before round OFS3 -- every one of them links ulib,
@@ -476,7 +501,7 @@ set_edge() { # edge
 # as in tools/userland/run.sh and tests/theme/build.sh.
 mk_gimage() { # image theme-file
     local img=$1 th=$2
-    local ARGS=(build "$img" 16384 /lib/
+    local ARGS=(build "$img" 32768 /lib/
         "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
     local q
     for q in $GPROGS; do ARGS+=("/bin/$q=$TMPD/g$q.elf"); done
