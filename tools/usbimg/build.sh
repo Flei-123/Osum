@@ -171,7 +171,7 @@ PROGS=${PROGS:-"desktop taskbar settings launcher explorer netview \
 widgetdemo taskmgr locate edit sh echo ls cat ps uname date df mkdir rm cp mv \
 grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
-dhcp host ota jsig jarvisctl pollbr reboot shutdown power fas"}
+dhcp host ota jsig jarvisctl pollbr reboot shutdown power fas init svc"}
 
 # RUNDE STICK: DIE SIEBEN, DIE GEFEHLT HABEN -- UND WARUM AUSGERECHNET
 # DIESE.
@@ -754,7 +754,38 @@ ARGS+=(/users/ /users/root/ /users/root/config/
        "/users/root/config/locale=$OUT/locale-de")
 ARGS+=(/boot/ "/boot/osum.mb=$OUT/osum.mb"
        "/boot/BOOTX64.EFI=$LIMINE/BOOTX64.EFI")
-ARGS+=(/dev/ /proc/ /mnt/ /tmp/ /store/ /apps/ /system/)
+# ==================================================== RUNDE ENERGIE
+# /run, /etc/inittab UND /etc/ziel -- OHNE SIE HAT DER AUSSCHALTKNOPF
+# NIEMANDEN, DEM ER ES SAGEN KANN.
+#
+# GEMESSEN AN DIESEM ABBILD, bevor diese Zeilen dazukamen:
+# `mkfs.py list` fand WEDER /bin/init NOCH /etc/inittab NOCH ein
+# Verzeichnis /run. Der Weg, den `/bin/shutdown` seit Runde INIT geht
+# (eine Zeile nach /run/svc.cmd, Prozess 1 raeumt auf), war auf dem
+# Auslieferungsstick also gar nicht vorhanden -- `/bin/shutdown` fiel
+# dort IMMER auf seinen Notweg `self()` zurueck: sync und ACPI, ohne
+# dass ein einziger Dienst ein Signal bekommt.
+#
+# Das ist genau der Unterschied, um den es bei einem Ausschaltknopf
+# geht. Ein Knopf, der die Platte im Flug abschneidet, ist schlimmer
+# als keiner -- deshalb liegt ab dieser Runde das Ziel `grafik` im
+# Abbild, dazu eine inittab, die den Schreibtisch als Dienst fuehrt,
+# und das leere /run, in das die Oberflaeche ihre Zeile schreibt.
+#
+# DIE TAFEL IST ABSICHTLICH KURZ. Sie fuehrt genau das, was dieser
+# Stick wirklich startet; jeder weitere Dienst waere eine Behauptung
+# ueber einen Betrieb, den niemand gemessen hat.
+cat > "$OUT/inittab" <<'EOFTAB'
+# /etc/inittab -- name:ziele:art:befehl:optionen
+# Die Oberflaeche startet der Kern selbst (kgui.desk_start), nicht init.
+# Was hier steht, ist der Dienst, der beim Herunterfahren ein Signal
+# bekommen MUSS -- und die Konsole fuer den Fall ohne Bildschirm.
+sh:konsole:ctrl:/bin/sh
+EOFTAB
+printf 'grafik
+' > "$OUT/ziel"
+ARGS+=("/etc/inittab=$OUT/inittab" "/etc/ziel=$OUT/ziel")
+ARGS+=(/dev/ /proc/ /mnt/ /tmp/ /store/ /apps/ /system/ /run/)
 # RUNDE TUERSCHLOSS: EIN BEISPIEL ZUM UEBERSETZEN.
 #
 # Seit dieser Runde liegen `firnc` und `fas` auf dem Stick. Eine Quelle
@@ -834,7 +865,8 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /apps/explorer.osp/start /apps/editor.osp/start /apps/terminal.osp/start \
 /apps/launcher.osp/start /apps/widgets.osp/start /apps/settings.osp/start \
 /apps/settings.osp/INFO /apps/settings.osp/symbol \
-/bin/shutdown /bin/power /bin/firnc /bin/fas /beispiel/hallo.fi"
+/bin/shutdown /bin/power /bin/firnc /bin/fas /beispiel/hallo.fi \
+/bin/init /etc/inittab /etc/ziel"
 python3 tools/osum/mkfs.py list "$OUT/root.img" > "$OUT/liste.txt" 2>&1 \
     || fehler "das fertige Dateisystem laesst sich nicht lesen"
 fehlt=0

@@ -746,6 +746,14 @@ fn an_arbeitsflaeche(w: u64, bw: u64, bh: u64) {
 // Die Zeilen, die init versteht. `/bin/shutdown` schreibt exakt diese
 // (kernel/user/shutdown.fi) -- dieselben Woerter, damit es genau einen
 // Satz Befehle gibt und nicht zwei.
+// Die Zahlen des Systemaufrufs 169, identisch mit shutdown.fi und mit
+// `kernel/sys.fi` (RB_POWEROFF/RB_RESTART). Der Kern fuehrt ihn nur
+// fuer root aus (`do_reboot` -> `perm.is_root`); der Schreibtisch
+// laeuft als root, solange es keine Anmeldung gibt.
+const SYS_REBOOT: u64 = 169
+const RB_POWEROFF: u64 = 0x4321FEDC
+const RB_RESTART: u64 = 0x01234567
+
 static mut pw_cmd: [u8; 13] = "/run/svc.cmd\0"
 static mut pw_down: [u8; 10] = "shutdown\n\0"
 static mut pw_boot: [u8; 8] = "reboot\n\0"
@@ -821,6 +829,58 @@ fn pw_sag(was: u64) -> bool {
 // und nicht dieser Neustart -- eine Zeile, und die Stelle ist diese.
 static mut pw_desk: [u8; 13] = "/bin/desktop\0"
 
+// ==================================================== RUNDE ENERGIE
+// DER NOTWEG, WENN KEIN init LAEUFT -- UND WARUM ER HIER GEBRAUCHT WIRD.
+//
+// GEMESSEN AN EINEM ECHTEN LAUF DIESES ABBILDS (docs/RUNDE-ENERGIE.md,
+// Abschnitt "Was der Mitschnitt sagt"): im GRAFISCHEN Betrieb startet
+// `kgui.desk_start` den Schreibtisch, die Leiste und den Starter
+// DIREKT -- im Mitschnitt steht `desk: start /bin/desktop pid=2`, aber
+// NIE `osum: pid1 init`. Prozess 1 ist in diesem Lauf nicht init.
+//
+// Damit hat die Zeile nach `/run/svc.cmd` im Desktop-Betrieb KEINEN
+// LESER. Sie wird trotzdem ZUERST geschrieben, und das ist kein
+// Aberglaube: derselbe Starter laeuft auch auf einem System MIT init
+// (Serverbetrieb, `/etc/ziel = konsole`), und dort ist der Weg ueber
+// Prozess 1 der einzig richtige -- nur er kennt die Dienste und ihre
+// Kennungen.
+//
+// WAS DIESER NOTWEG TUT UND WAS NICHT. Er ist ehrlich weniger als
+// init:
+//   * KEIN Dienst bekommt SIGTERM. Dieses Programm ist nicht ihr
+//     Elternteil und hat ihre Kennungen nie gesehen.
+//   * `sync` schreibt, was noch im Speicher steht. DAS ist der Teil,
+//     der Datenverlust verhindert, und er geht auch ohne init.
+//   * danach der Systemaufruf 169, den der Kern fuer root ausfuehrt
+//     (kernel/sys.fi `do_reboot`): `power.acpi_off` bzw.
+//     `power.acpi_reset`.
+//
+// Es ist derselbe Notweg, den `/bin/shutdown -f` seit Runde INIT geht
+// (kernel/user/shutdown.fi, `self()`) -- dieselben zwei Aufrufe in
+// derselben Reihenfolge. Eine dritte Fassung daneben gibt es nicht.
+//
+// WIE LANGE GEWARTET WIRD: eine halbe Sekunde. `/bin/shutdown` wartet
+// drei, und das ist dort richtig -- es ist ein Befehl auf einer
+// Konsole, und niemand sieht ihm zu. Hier steht ein Mensch vor einem
+// Knopf, den er gerade gedrueckt hat; drei Sekunden ohne jede Regung
+// sind die Zeitspanne, nach der er ein zweites Mal drueckt. Laeuft
+// init, ist die Maschine lange vor Ablauf weg.
+const PW_FRIST: u64 = 10 // 10 x 50 ms = 500 ms
+
+static mut s_pwself: [u8; 31] = "launcher: energie selbst aus   "
+
+fn pw_selbst(neu: bool) {
+    say((&s_pwself[0 as usize]) as u64)
+    nl()
+    // ERST DIE PUFFER. Ohne das ist ein Abschalten ein Ausstecken.
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    if neu {
+        ulib.sys(SYS_REBOOT, RB_RESTART, 0, 0)
+    } else {
+        ulib.sys(SYS_REBOOT, RB_POWEROFF, 0, 0)
+    }
+}
+
 fn pw_abmelden() -> bool {
     let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&pw_desk[0 as usize]) as u64,
         0, 0)
@@ -874,17 +934,40 @@ fn pw_frage_auf(was: u64) {
         text = msg.get((&k_rebq[0 as usize]) as u64)
         ja = msg.get((&k_breb[0 as usize]) as u64)
     }
-    // Die beiden Beschriftungen als EIN Block mit Zeilenenden --
-    // `wlib.dlg_wahl` liest ihn mit `row_at`, genau wie das Menue.
-    // Der ABBRUCH steht LINKS und die Tat rechts; `dlg_wahl` legt den
-    // Fokus auf den ersten Knopf, und der erste soll der harmlose sein.
+    // DIE REIHENFOLGE DER KNOEPFE IST HIER EINE SICHERHEITSFRAGE, und
+    // sie ist GEMESSEN und nicht geraten.
+    //
+    // `wlib.on_key` legt die Fluchttaste eines Dialogs auf `dl_no`
+    // (wlib.fi: `if k == KEY_ESC { fire(dl_no, ...) }`), und `dl_no`
+    // ist bei einem Dialog mit mehreren Knoepfen der LETZTE:
+    //
+    //     dl_no = dl_btn[0]
+    //     if nk > 1 { dl_no = dl_btn[nk - 1] }
+    //
+    // Stuende die Tat rechts (also zuletzt), wuerde FLUCHT SIE
+    // AUSLOESEN. Genau das ist in dieser Runde passiert und steht im
+    // Mitschnitt des Laufs `one-nein`: Escape gedrueckt, und der
+    // Mitschnitt sagte `energie tat 1`, `power: acpi pm1a=0x604` --
+    // die Maschine ging aus, obwohl abgebrochen werden sollte. Eine
+    // Rueckfrage, deren Abbruch ausschaltet, ist schlimmer als keine.
+    //
+    // ALSO STEHT DIE TAT LINKS UND DER ABBRUCH RECHTS. Das ist nicht
+    // die Anordnung, die Windows waehlt -- aber es ist die einzige, die
+    // mit dieser Bibliothek BEIDE Tastenwege richtig macht: Flucht
+    // trifft den letzten Knopf (Abbrechen), und der Fokus liegt nach
+    // `dlg_wahl` auf dem ersten. Damit die Eingabetaste nicht
+    // umgekehrt die Tat ausloest, wird der Fokus gleich darauf auf den
+    // ABBRUCH gelegt (siehe unten, `wlib.set_focus`).
+    //
+    // Wer das umdreht, muss `dl_no` in wlib umdrehen -- und das
+    // betrifft dreizehn Programme.
     let cancel: u64 = msg.get((&k_bcan[0 as usize]) as u64)
     let bp: u64 = (&pw_block[0 as usize]) as u64
     var p: u64 = 0
-    p = p + ulib.strncpy(bp + p, cancel, 30)
+    p = p + ulib.strncpy(bp + p, ja, 30)
     __mmio_write8((bp + p) as *mut u8, 10 as u8)
     p = p + 1
-    p = p + ulib.strncpy(bp + p, ja, 30)
+    p = p + ulib.strncpy(bp + p, cancel, 30)
     __mmio_write8((bp + p) as *mut u8, 0 as u8)
     // Der Block muss den Aufruf UEBERLEBEN: `dlg_wahl` kopiert die
     // Beschriftungen zwar in seinen eigenen Puffer (dw_buf), aber der
@@ -896,6 +979,13 @@ fn pw_frage_auf(was: u64) {
     if dw >= wlib.MAXWN {
         return
     }
+    // DER FOKUS GEHOERT DEM ABBRUCH. `dlg_wahl` setzt ihn auf den
+    // ersten Knopf -- und das ist seit der Umstellung oben die TAT.
+    // Ein Dialog, bei dem die Eingabetaste ohne jede weitere Bewegung
+    // ausschaltet, ist dieselbe Falle wie die Flucht von vorhin, nur
+    // andersherum. Also ausdruecklich auf den zweiten Knopf.
+    let _f: u64 = 0
+    wlib.set_focus(wlib.dlg_button(1))
     pw_frage = was
     say((&s_pmfrage[0 as usize]) as u64)
     sayn(was)
@@ -904,25 +994,40 @@ fn pw_frage_auf(was: u64) {
 
 // DIE TAT. Erst hier verlaesst etwas dieses Programm.
 fn pw_tun(was: u64) {
+    let neu: bool = was == 2
+    // 1. DER RICHTIGE WEG ZUERST: init sagen, dass es aufraeumen soll.
+    //    Nur Prozess 1 kennt die Dienste; was er tut, kann dieses
+    //    Programm nicht nachbauen.
     var ok: bool = false
-    if was == 1 {
-        ok = pw_sag((&pw_down[0 as usize]) as u64)
-    } else if was == 2 {
+    if neu {
         ok = pw_sag((&pw_boot[0 as usize]) as u64)
+    } else {
+        ok = pw_sag((&pw_down[0 as usize]) as u64)
     }
     say((&s_pmtat[0 as usize]) as u64)
     sayn(was)
     nl()
     if !ok {
-        // LAEUFT KEIN init, GIBT ES /run/svc.cmd NICHT -- und dann
-        // darf das nicht stumm bleiben. Der Mensch hat einen Knopf
-        // gedrueckt; er muss erfahren, dass nichts geschah.
+        // /run/svc.cmd liess sich nicht einmal anlegen. Das ist keine
+        // Ueberraschung, sondern der gemessene Normalfall im
+        // Desktop-Betrieb dieses Abbilds -- also wird es gesagt und
+        // danach der Notweg genommen, statt einen Fehler zu zeigen.
         say((&s_pmerr[0 as usize]) as u64)
         nl()
-        let _d: u64 = wlib.dlg_hinweis(
-            msg.get((&k_ptitel[0 as usize]) as u64),
-            msg.get((&k_offt[0 as usize]) as u64))
+        pw_selbst(neu)
+        return
     }
+    // 2. UND JETZT WARTEN, ob wirklich jemand gelesen hat. Laeuft init,
+    //    ist die Maschine vor Ablauf dieser Schleife weg und keine
+    //    weitere Zeile dieses Programms wird je ausgefuehrt. Kommt der
+    //    Starter hier heraus, hat niemand gelesen -- dann raeumt er
+    //    selbst auf, so gut es ohne init geht.
+    var k: u64 = 0
+    while k < PW_FRIST {
+        ulib.sleep_ms(50)
+        k = k + 1
+    }
+    pw_selbst(neu)
 }
 
 fn u_start(args: u64) -> u64 {
@@ -1273,7 +1378,7 @@ fn u_start(args: u64) -> u64 {
     wlib.set_focus(fe)
     new_find(ls)
     wlib.draw_all()
-    say_rects(lb, fe, ls, bt)
+    say_rects(lb, fe, ls, bt, pb)
     // ============================================ RUNDE ECHTHARDWARE-4
     // DER SCHREIBTISCH IST LEER, BIS JEMAND SUPER DRUECKT.
     //
@@ -1378,7 +1483,9 @@ fn u_start(args: u64) -> u64 {
                 let was: u64 = pw_frage
                 pw_frage = 0
                 wlib.dlg_close()
-                if welcher == 1 {
+                // Knopf 0 ist die TAT (siehe pw_frage_auf: die
+                // Reihenfolge ist wegen der Fluchttaste umgedreht).
+                if welcher == 0 {
                     pw_tun(was)
                 } else {
                     say((&s_pmab[0 as usize]) as u64)
@@ -1550,11 +1657,17 @@ fn u_start(args: u64) -> u64 {
     return 0
 }
 
-fn say_rects(lb: u64, fe: u64, ls: u64, bt: u64) {
+// RUNDE ENERGIE: der Energieknopf steht MIT in dieser Liste. Ein
+// Bedienelement, dessen Lage nicht gemeldet wird, kann ein Testlaeufer
+// nicht treffen -- und dann misst er "der Knopf geht nicht", waehrend
+// er danebengeklickt hat. Genau dieser Fehler steht im Kopf dieser
+// Datei schon einmal (Runde TUERSCHLOSS, bx/by).
+fn say_rects(lb: u64, fe: u64, ls: u64, bt: u64, pb: u64) {
     say_rect(lb)
     say_rect(fe)
     say_rect(ls)
     say_rect(bt)
+    say_rect(pb)
     var a: [u8; 21] = "launcher: rows \0\0\0\0\0\0"
     var sx: [u8; 4] = "x=\0\0"
     var sb: [u8; 8] = "base=\0\0\0"
