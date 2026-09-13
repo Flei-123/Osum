@@ -255,7 +255,38 @@ python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
 # Runde INSTALL darf auch sie eine mehrblockige Karte haben, und
 # `fs.mount` liest die Zahl aus dem Superblock -- an den Dateien des
 # Abbilds aendert sich nichts, nur der Platz dahinter.
-ARGS=(build "$TMPD/disk.img" 8192 /lib/
+# RUNDE BAUFEHLER (13.09.2026): 8192 -> 16384 Bloecke (32 -> 64 MiB).
+# DIESE RUNDE HAT DIE ZAHL NICHT GERATEN, SONDERN GEMESSEN. Der Grund ist
+# derselbe wie bei jeder Erhoehung davor, nur die Ursache ist eine neue:
+# Runde GRUNDLINIE (1d16d34) hat diesen Laeufer -- zu Recht -- auf
+# `--profile=app` umgestellt, weil die Programme mit Oberflaeche seit
+# Runde 31 `profile app` in ihrer ersten Zeile tragen. Das Profil `app`
+# bringt Firns volle Laufzeit mit, und damit sind die Programme rund
+# doppelt so gross wie vorher:
+#
+#     /bin/explorer     907360 (kernel)  ->  1623040 Oktette (app)
+#     /bin/launcher                          1234704
+#     /bin/widgetdemo                        1083392
+#     die neun zusammen                      4347680 Oktette
+#
+# Die Bloeckezahl ist dabei stehengeblieben, und 4347680 Oktette passen
+# nicht in 8192 Bloecke (32 MiB) -- zusammen mit Schriften, Sprachdateien,
+# Buendeln, Baum, Bitmap, Inode-Tafel und Journal. Gemessen mit genau den
+# Dateien dieses Laeufers:
+#
+#     8192 Bloecke   mkfs: the disk is full
+#    10240 Bloecke   geht, 1298 Bloecke frei
+#    16384 Bloecke   geht, 7441 Bloecke frei
+#
+# 16384 und nicht 10240, damit die naechste Erweiterung von wlib nicht
+# sofort wieder hier landet -- die Historie dieser Datei ist eine Kette
+# von vier Erhoehungen aus genau diesem Grund (4096 -> 6144 -> 8192).
+# Das Abbild ist eine TEMPORAERE Datei in $TMPD; die 64 MiB kosten
+# Plattenplatz nur waehrend des Laufs, und mkfs legt sie duenn an.
+# Die FASSUNG bleibt 2: die Blockkarte darf seit Runde INSTALL mehrere
+# Bloecke haben (bmblocks=4), und `fs.mount` liest die Zahl aus dem
+# Superblock.
+ARGS=(build "$TMPD/disk.img" 16384 /lib/
       "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/${p}0.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
@@ -1015,7 +1046,8 @@ sed 's/^btn=.*/btn=804020/' "$TMPD/baum/theme" > "$TMPD/theme2"
 # Programmpaket, dieselbe Enge.
 # MERGE-8: beide Runden haben aus demselben Grund vergroessert;
 # 8192 (ALLTAG) deckt 6144 (MERGE-7) mit ab.
-ARGS2=(build "$TMPD/disk2.img" 8192 /lib/
+# RUNDE BAUFEHLER: dieselbe Erhoehung wie oben, gleicher Grund.
+ARGS2=(build "$TMPD/disk2.img" 16384 /lib/
       "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
 for p in $PROGS; do ARGS2+=("/bin/$p=$TMPD/${p}0.elf"); done
 ARGS2+=("/bin/files@/bin/explorer")
