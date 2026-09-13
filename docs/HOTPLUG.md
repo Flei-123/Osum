@@ -214,8 +214,8 @@ und berührt drei Schichten.
 * **Der Auswurfknopf ist nicht fotografiert.** Er ist gebaut, übersetzt
   und gelinkt (`check-ui.sh` grün), aber der Dateimanager startet in
   diesem Baum nicht bis zum Fenster (siehe der bestehende Fehler oben).
-  Was gemessen ist, ist der Weg darunter: `auswerfen` aus der Shell,
-  rc=0, und der Wirt liest die Datei vollständig zurück.
+  Fotografiert ist stattdessen derselbe Weg eine Schicht tiefer und auf
+  demselben Schreibtisch — siehe „Die Bilder“.
 * **Kamera, Drucker, Monitorwechsel** (die anderen Nutzer von P-006)
   sind nicht angefasst. Der Gerätemanager trägt jetzt Massenspeicher;
   eine Kamera ist eine eigene Geräteklasse.
@@ -223,6 +223,40 @@ und berührt drei Schichten.
   schickt es (`bus.noti_post`, sichtbar in der Leiste); der Explorer
   baut seine Seitenleiste noch beim Aktualisieren neu auf, statt auf die
   Meldung zu hören.
+
+---
+
+## Die Bilder
+
+`bash tools/hotplug/bild-term.sh` — drei Bildschirmfotos aus **einer**
+laufenden Maschine, `docs/shots/hotplug/`:
+
+| Bild | was darauf steht |
+|---|---|
+| `10-vorher.png` | `auswerfen` → „kein Wechseldatenträger da“ |
+| `20-steckt.png` | nach `device_add`: `ls /medien/usb0` zeigt `host.txt`, `auswerfen` zeigt die Tafel: `0  /medien/usb0  96256  0` |
+| `30-danach.png` | nach `auswerfen 0`: „ausgeworfen: /medien/usb0“, danach wieder „kein Wechseldatenträger da“ |
+
+Fotografiert wird ein **Terminalfenster auf dem Schreibtisch**
+(`wmshell`) und nicht der Dateimanager — der stirbt in diesem Baum aus
+einem Grund, der älter ist als diese Runde. Es ist derselbe Weg:
+dasselbe `/bin/auswerfen`, derselbe Aufruf 1704, dieselbe Tafel des
+Kerns, die auch die Seitenleiste liest.
+
+**Der Unterschied ist die Zusage, nicht das einzelne Bild.** In Zahlen,
+gemessen mit `pruef/bildpruef.py` und einem Punktvergleich über den
+Fensterinhalt (x 27..560, y 63..425):
+
+```
+10-vorher:  10767 helle Punkte (Text)
+20-steckt:   8670
+30-danach:   7422
+Unterschied 10 gegen 20:  Rechteck (27,63)-(555,422)
+Unterschied 20 gegen 30:  Rechteck (26,63)-(425,422)
+```
+
+Ein einzelnes Bild mit einer Zeile darauf könnte immer dagestanden
+haben; drei verschiedene Bilder aus einem Lauf können es nicht.
 
 ---
 
@@ -242,6 +276,7 @@ und berührt drei Schichten.
 | `tools/hotplug/run.sh` | **neu** — die Abnahme, 33/0 |
 | `tools/hotplug/monitor.py` | **neu** — `device_add`/`device_del` |
 | `tools/hotplug/lauf.sh` | **neu** — ein Lauf mit Drehbuch |
-| `tools/hotplug/bilder.sh` | **neu** — die Bilder |
+| `tools/hotplug/bild-term.sh` | **neu** — die drei Bilder |
+| `tools/hotplug/bilder.sh` | **neu** — der Versuch im Dateimanager |
 | `tools/kernel/memmap.py` | `WECHSEL` in der Karte |
 | `locale/{de,en}/messages` | die fünf Texte des Knopfes |
