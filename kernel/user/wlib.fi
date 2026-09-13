@@ -87,6 +87,8 @@ export {
     value, set_value, text_of, set_text, set_rows, set_cols, enable,
     show, shown, new_set,
     list_icons, row_icons, icon_id, ICON_TAG, is_image_pub,
+    // RUNDE FUI-WIN11: zweizeilige Listenzeilen (Name / Beschreibung).
+    list_zwei,
     // RUNDE EXPLORER-2: die Mehrfachauswahl.
     sel_an, sel_hat, sel_setz, sel_leeren, sel_alle, sel_bereich,
     sel_anker, sel_num, sel_anker_von, sel_frame,
@@ -438,7 +440,31 @@ const D_ANKER: u64 = 27
 // einmal teuer bezahlt hat. Also: `D_BICON` ist 0 oder ein
 // Zeichenplatz, und nur dann malt der Knopf ein Symbol statt Text.
 const D_BICON: u64 = 28
-const D_FIELDS: u64 = 29
+// ================================================== RUNDE FUI-WIN11
+// ZWEIZEILIGE ZEILEN -- UND WARUM SIE EIN FELD SIND UND KEIN NEUES
+// BEDIENELEMENT.
+//
+// Justins Kritik am Starter: "Beschreibung steht in DERSELBEN Zeile
+// hinter --". Windows macht es zweizeilig: Name fett oben, Beschreibung
+// gedaempft darunter. Das ist keine andere LISTE, es ist dieselbe Liste
+// mit einer anderen ZEILENHOEHE -- also ein Feld und kein zweites
+// `paint_*`.
+//
+// SIE IST ABWAEHLBAR UND STANDARDMAESSIG AUS. `wlib.list` wird von
+// sechs Programmen benutzt (explorer, settings, freunde, themetest,
+// widgetdemo, launcher); eine Zeilenhoehe, die sich fuer alle aendert,
+// waere genau der stille Folgeschaden, den dieser Baum nicht will.
+// Wer zwei Zeilen will, sagt es (`list_zwei`).
+//
+// DER TRENNER BLEIBT DER ZEILENUMBRUCH. Der Text einer Liste ist EIN
+// Block mit \n je Zeile (`row_at`); die zweite Zeile wird nicht zu
+// einer zweiten Zeile des Blocks -- sonst waere jede Zeile zwei
+// Eintraege und Auswahl, Rollen und `D_VAL` zaehlten doppelt. Sie
+// steht in DERSELBEN Zeile hinter einem TABULATOR (9). Das ist ein
+// Zeichen, das in keinem Programmnamen und in keinem Dateinamen
+// vorkommt, und es trennt genau zwei Haelften.
+const D_ZWEI: u64 = 29
+const D_FIELDS: u64 = 30
 
 const F_FOCUSABLE: u64 = 1
 const F_PRESSED: u64 = 2
@@ -2105,6 +2131,25 @@ fn list(blob: u64, rows: u64) -> u64 {
 // Zeilenpuffer ist das, was ein Dateimanager ohnehin baut.
 // Ein Klick genuegt. Fuer das Startmenue; ueberall sonst bleibt es
 // beim Doppelklick.
+// ================================================== RUNDE FUI-WIN11
+// ZWEI ZEILEN JE EINTRAG AN- ODER ABSCHALTEN.
+//
+// Der Text bleibt EIN Block mit einem Eintrag je Zeilenumbruch; die
+// zweite Haelfte steht hinter einem TABULATOR. Damit aendert sich an
+// Auswahl, Rollversatz und `D_VAL` nichts -- ein Eintrag bleibt ein
+// Eintrag, er ist nur doppelt so hoch.
+fn list_zwei(i: u64, an: bool) {
+    if i >= MAXWD {
+        return
+    }
+    var v: u64 = 0
+    if an {
+        v = 1
+    }
+    s(i, D_ZWEI, v)
+    dirty_wd(i)
+}
+
 fn list_einklick(i: u64, an: bool) {
     if i >= MAXWD {
         return
@@ -3944,7 +3989,9 @@ fn paint_list(i: u64) {
     let y: u64 = g(i, D_Y)
     let bw: u64 = g(i, D_W)
     let bh: u64 = g(i, D_H)
-    let zh: u64 = lines_height()
+    // RUNDE FUI-WIN11: die Zeilenhoehe DIESER Liste (zweizeilig oder
+    // nicht), nicht die des Systems.
+    let zh: u64 = row_h_of(i)
     let sicht: u64 = sub(bh, 4) / zh
     wlibc.rframe(x, y, bw, bh, wlibc.metric(wlibc.M_RADIUS_INPUT),
         wlibc.metric(wlibc.M_BORDER), wlibc.theme(wlibc.T_LINE),
@@ -4091,19 +4138,77 @@ fn paint_list(i: u64) {
             // draw goes through `put_text` for one reason -- it is what
             // sets `s_tx`, so the reported x is the one the text
             // really started at and not a second guess at it.
-            let rgrund: u64 = base_in_row(ry, zh)
+            // ================================ RUNDE FUI-WIN11
+            // EINE ZEILE ODER ZWEI -- UND DER SCHNITT IST DER TABULATOR.
+            //
+            // Einzeilig bleibt alles, wie es war. Zweizeilig wird die
+            // Zeile am TABULATOR (9) geteilt: davor der Name, dahinter
+            // die Beschreibung. Steht kein Tabulator darin, ist die
+            // ganze Zeile der Name und die zweite Zeile bleibt leer --
+            // eine Liste, die einen Eintrag ohne Beschreibung bekommt,
+            // soll ihn zeigen und nicht verschlucken.
+            var n1: u64 = ln
+            var p2: u64 = 0
+            var n2: u64 = 0
+            if g(i, D_ZWEI) != 0 {
+                var t: u64 = 0
+                while t < ln {
+                    if (*((q + t) as *mut u8)) == 9 as u8 {
+                        n1 = t
+                        p2 = q + t + 1
+                        n2 = sub(ln, t + 1)
+                        t = ln
+                    } else {
+                        t = t + 1
+                    }
+                }
+            }
             // Was zwischen dem Textanfang und dem Rollbalken frei ist:
             // die Breite, ab der gekuerzt werden muss.
             let free: u64 = sub(bw, 21 + 6 + ein)
             var qq: u64 = q
-            var qn: u64 = ln
-            let el: u64 = elide(wlibc.F_UI, wlibc.px_ui(), q, ln, free)
+            var qn: u64 = n1
+            let el: u64 = elide(wlibc.F_UI, wlibc.px_ui(), q, n1, free)
             if el != 0 {
                 qq = (&el_buf[0 as usize]) as u64
                 qn = el
             }
+            // DIE GRUNDLINIE DER ERSTEN ZEILE. Einzeilig ist das die
+            // Mitte der Zeile wie bisher; zweizeilig sitzt sie im
+            // OBEREN Halbfeld, damit beide Zeilen zusammen mittig
+            // stehen.
+            var rgrund: u64 = base_in_row(ry, zh)
+            if n2 != 0 || g(i, D_ZWEI) != 0 {
+                rgrund = base_in_row(ry, zh / 2)
+            }
             let _rt: u64 = put_text(wlibc.F_UI, wlibc.px_ui(),
                 x + 6 + ein, rgrund, sub(bw, 16), qq, qn, farbe, 0)
+            // DIE ZWEITE ZEILE, GEDAEMPFT. Sie ist eine Beschreibung
+            // und kein zweiter Name -- auf Windows steht sie grau, und
+            // das ist auch der Grund, warum sie nicht fett ist.
+            //
+            // AUF DEM AUSWAHLBALKEN NICHT GEDAEMPFT: dort ist der
+            // Grund die Akzentfarbe, und die gedaempfte Textfarbe des
+            // Themas ist gegen sie nicht gerechnet. Dann traegt die
+            // zweite Zeile dieselbe Farbe wie die erste -- lesbar ist
+            // wichtiger als leise.
+            if n2 != 0 {
+                var f2: u64 = wlibc.theme(wlibc.T_DIM)
+                if z == g(i, D_VAL) || sel_hat(i, z) {
+                    f2 = farbe
+                }
+                var q2: u64 = p2
+                var n2s: u64 = n2
+                let e2: u64 = elide(wlibc.F_UI, wlibc.px_ui(), p2, n2,
+                    free)
+                if e2 != 0 {
+                    q2 = (&el_buf[0 as usize]) as u64
+                    n2s = e2
+                }
+                let _r2: u64 = put_text(wlibc.F_UI, wlibc.px_ui(),
+                    x + 6 + ein, base_in_row(ry + zh / 2, zh / 2),
+                    sub(bw, 16), q2, n2s, f2, 0)
+            }
             var rhg: u64 = wlibc.theme(wlibc.T_ENTRY)
             // RUNDE EXPLORER-2: markiert ODER die Zeile mit dem Zeiger.
             if z == g(i, D_VAL) || sel_hat(i, z) {
@@ -5375,7 +5480,10 @@ fn fire(i: u64, kind: u64, index: u64, w: u64) {
 // Welche Zeile einer Liste/Tabelle liegt unter dieser Stelle? MAXWD,
 // wenn keine.
 fn row_under(i: u64, y: u64) -> u64 {
-    let zh: u64 = lines_height()
+    // RUNDE FUI-WIN11: die Zeilenhoehe DIESER Liste. Ohne das trifft
+    // in einer zweizeiligen Liste jeder Klick die falsche Zeile --
+    // der Fehler, der im Bild NICHT zu sehen ist.
+    let zh: u64 = row_h_of(i)
     var oben: u64 = g(i, D_Y) + 2
     if g(i, D_KIND) == K_TABLE {
         oben = g(i, D_Y) + zh + 5
@@ -5395,7 +5503,9 @@ fn row_under(i: u64, y: u64) -> u64 {
 }
 
 fn scroll_to(i: u64, z: u64) {
-    let zh: u64 = lines_height()
+    // RUNDE FUI-WIN11: dieselbe Zeilenhoehe wie beim Malen, sonst
+    // rollt die Liste an der sichtbaren Zeile vorbei.
+    let zh: u64 = row_h_of(i)
     var sicht: u64 = sub(g(i, D_H), 4) / zh
     if g(i, D_KIND) == K_TABLE {
         sicht = sub(sub(g(i, D_H), 4), zh + 4) / zh
@@ -5530,7 +5640,10 @@ fn on_down(w: u64, x: u64, y: u64, btn: u64) {
     if k == K_LIST || k == K_TABLE {
         // die Bildlaufleiste?
         if x >= g(i, D_X) + g(i, D_W) - 16 {
-            let zh: u64 = lines_height()
+            // RUNDE FUI-WIN11: dieselbe Zeilenhoehe wie beim Malen --
+            // sonst springt die Rollleiste um andere Betraege, als die
+            // Liste zeigt.
+            let zh: u64 = row_h_of(i)
             var sicht: u64 = sub(g(i, D_H), 4) / zh
             if k == K_TABLE {
                 sicht = sub(sub(g(i, D_H), 4), zh + 4) / zh
@@ -7129,6 +7242,28 @@ fn row_h() -> u64 {
     return lines_height()
 }
 
+// ================================================== RUNDE FUI-WIN11
+// DIE ZEILENHOEHE DIESER EINEN LISTE.
+//
+// `lines_height()` ist die Zeilenhoehe des SYSTEMS (M_ROW) und gilt
+// fuer jede Liste und jede Tabelle. Eine zweizeilige Liste braucht
+// mehr -- aber nur SIE, und deshalb wird hier je Widget gefragt und
+// nicht die Systemzahl veraendert.
+//
+// Zwei Textzeilen plus dieselbe Luft, die eine einzeilige Zeile ueber
+// und unter der Schrift hat: `zh - text_h` ist genau diese Luft.
+fn row_h_of(i: u64) -> u64 {
+    let zh: u64 = lines_height()
+    if i >= MAXWD || g(i, D_ZWEI) == 0 {
+        return zh
+    }
+    let th: u64 = wlibc.text_h(wlibc.px_ui())
+    if zh <= th {
+        return 2 * zh
+    }
+    return 2 * th + (zh - th)
+}
+
 fn text_x(i: u64) -> u64 {
     let k: u64 = g(i, D_KIND)
     if k == K_BUTTON {
@@ -7223,7 +7358,16 @@ fn text_bg(i: u64) -> u64 {
 // muessen dieselbe Zahl bekommen, sonst sitzt der Text in der Liste
 // anders als in der Tabelle daneben.
 fn row_base(i: u64, r: u64) -> u64 {
-    let zh: u64 = lines_height()
+    // RUNDE FUI-WIN11: gemeldet wird die Grundlinie der ERSTEN Zeile
+    // eines Eintrags -- dieselbe Rechnung wie in `paint_list`, damit
+    // Bericht und Bild dieselbe Zahl nennen.
+    let zh: u64 = row_h_of(i)
+    if i < MAXWD && g(i, D_ZWEI) != 0 {
+        let hz: u64 = zh / 2
+        return g(i, D_Y) + 2 + r * zh
+            + sub(hz, wlibc.text_h(wlibc.px_ui())) / 2
+            + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())
+    }
     return g(i, D_Y) + 2 + r * zh
         + sub(zh, wlibc.text_h(wlibc.px_ui())) / 2
         + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())
@@ -7255,7 +7399,9 @@ fn icon_x(i: u64) -> u64 {
 // stattdessen die Mitte der Zeile, wie es der Knopf in der Taskleiste
 // seit dieser Runde auch tut.
 fn icon_y(i: u64, r: u64) -> u64 {
-    let zh: u64 = lines_height()
+    // RUNDE FUI-WIN11: das Symbol sitzt mittig in der GANZEN Zeile,
+    // also auch in der doppelt hohen.
+    let zh: u64 = row_h_of(i)
     let ih: u64 = wlibc.icon_small()
     var oben: u64 = 3
     if zh > ih {
