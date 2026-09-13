@@ -230,6 +230,16 @@ else
     bad "die Installation ist nicht fertig geworden"
     grep -aE 'installer:' "$SER" | tail -5 | sed 's/^/        /'
 fi
+# DIE EFI-PARTITION, DIE SIE EINGEHAENGT HAT. Der Name wird aus dem
+# gewaehlten Geraet gebaut; ein fest verdrahtetes /dev/hda1 haette bei
+# einer Installation auf die zweite Platte die EFI-Partition der
+# ERSTEN beschrieben.
+esp=$(grep -aoE 'installer: esp=/dev/[a-z0-9]+' "$SER" | head -1 | sed 's/.*esp=//')
+if [ "$esp" = "/dev/hda1" ]; then
+    ok "die EFI-Partition wurde aus dem Ziel gebaut: $esp"
+else
+    bad "falsche oder fehlende EFI-Partition: '${esp:-keine}'"
+fi
 # Die Schritte, die sie unterwegs gemeldet hat.
 st=$(grep -aoE 'installer: step=[0-9]+' "$SER" | sed 's/.*=//' | sort -un | tr '\n' ' ')
 echo "        Schritte auf der Leitung: $st"
