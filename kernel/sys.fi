@@ -93,6 +93,8 @@ import blk
 // RUNDE INSTALL: `sync` schreibt auch die FSInfo-Seite von FAT32.
 import fat
 import usb
+// RUNDE HOTPLUG: die Wechseldatentraeger, fuer Ring 3.
+import wechsel
 import audio
 import ac97
 import hda
@@ -120,6 +122,8 @@ export {
     SYS_OSUM_PTY, SYS_OSUM_TTYINFO, SYS_OSUM_SIGINFO,
     SYS_VM_CREATE, SYS_VM_RUN, SYS_VM_STAT, SYS_VM_KILL, SYS_VM_VALUE,
     SYS_OSUM_SETENV, SYS_OSUM_MOUNT,
+    SYS_OSUM_WECHSEL, WX_COUNT, WX_DEV, WX_MNT, WX_BLOCKS, WX_PATHCH,
+    WX_EJECT, WX_EVENTS, WX_KOMMT, WX_GEHT, WX_AUS,
     SYS_MOUNT, SYS_UMOUNT2, SYS_RENAME, SYS_OSUM_MNTSTAT,
     SYS_LINK, SYS_SYNC,
     SYS_OSUM_FTYPE, SYS_OSUM_FOPEN, SYS_OSUM_FLIST, SYS_OSUM_FREG,
@@ -1053,8 +1057,40 @@ const SYS_OSUM_MNTSTAT: u64 = 1700
 // "abgezogen, und der Kern laeuft weiter" von aussen messbar wird.
 const SYS_OSUM_USBSTAT: u64 = 1701 // (was) -> Zahl
 const SYS_OSUM_USBPULL: u64 = 1702 // () -> wie oft abgezogen wurde
+// ================================================= RUNDE HOTPLUG: 1704
+//
+// DER WECHSELDATENTRAEGER, FUER RING 3. Eine Nummer, ein Feld je
+// Aufruf, kein Zeiger in den Kern -- dieselbe Bauart wie SYS_MNTSTAT
+// (1700) sie fuer die Einhaengetafel hat, und aus demselben Grund: wer
+// einen Puffer hineinreicht, muss ihn pruefen, und diese Runde hat
+// keinen Grund, diese Pruefung ein zweites Mal zu schreiben.
+//
+//   wechsel(op, i, k)
+//     WX_COUNT   wie viele Traeger da sind
+//     WX_DEV     das Blockgeraet des i-ten
+//     WX_MNT     sein Platz in der Einhaengetafel
+//     WX_BLOCKS  seine Groesse in Bloecken
+//     WX_PATHCH  das k-te Oktett seines Pfades (k in a2)
+//     WX_EJECT   den i-ten AUSWERFEN -- 0, oder der positive errno
+//     WX_EVENTS  wie viele Geraeteereignisse es gab (fuer die
+//                Oberflaeche: hat sich etwas geaendert, seit ich
+//                zuletzt hingesehen habe?)
+//     WX_KOMMT / WX_GEHT / WX_AUS  die drei Zaehler
+const SYS_OSUM_WECHSEL: u64 = 1704
+const WX_COUNT: u64 = 0
+const WX_DEV: u64 = 1
+const WX_MNT: u64 = 2
+const WX_BLOCKS: u64 = 3
+const WX_PATHCH: u64 = 4
+const WX_EJECT: u64 = 5
+const WX_EVENTS: u64 = 6
+const WX_KOMMT: u64 = 7
+const WX_GEHT: u64 = 8
+const WX_AUS: u64 = 9
 const USB_MINNR: u64 = 1701
-const USB_MAXNR: u64 = 1702
+// RUNDE HOTPLUG: 1704 kommt dazu. 1703 gehoert K18 (SYS_OSUM_KBD)
+// und wird uebersprungen -- `usb_call` faengt es ab.
+const USB_MAXNR: u64 = 1704
 
 // Die Felder von `osum_mntstat`.
 const MS_USED: u64 = 0
@@ -2674,6 +2710,10 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // demselben Grund, aus dem `k13_call` eine ist: der Rahmen von
     // `dispatch` ist ohnehin der groesste dieses Kernels, und diese
     // Runde hat den tiefsten Aufruf um vier Schichten verlaengert.
+    if number == SYS_OSUM_WECHSEL {
+        return wechsel_call(state, a0, fget(frame, F_RSI),
+            fget(frame, F_RDX))
+    }
     if number >= USB_MINNR && number <= USB_MAXNR {
         return usb_call(state, number, a0)
     }
@@ -2689,6 +2729,52 @@ fn usb_call(state: u64, number: u64, a0: u64) -> u64 {
         return usb.unplugs(state)
     }
     return neg(errno.E_NOSYS)
+}
+
+// RUNDE HOTPLUG. Eigene Funktion und kein Zweig in `usb_call`: der
+// Auswurf braucht drei Argumente, `usb_call` reicht eines durch.
+fn wechsel_call(state: u64, a0: u64, a1: u64, a2: u64) -> u64 {
+    if a0 == WX_COUNT {
+        return wechsel.anzahl(state)
+    }
+    if a0 == WX_EVENTS {
+        return wechsel.ereignisse(state)
+    }
+    if a0 == WX_KOMMT {
+        return wechsel.angesteckt(state)
+    }
+    if a0 == WX_GEHT {
+        return wechsel.abgezogen(state)
+    }
+    if a0 == WX_AUS {
+        return wechsel.ausgeworfen(state)
+    }
+    if a1 >= wechsel.MAX_TRAEGER {
+        return neg(errno.E_INVAL)
+    }
+    if a0 == WX_DEV {
+        return wechsel.traeger_dev(state, a1)
+    }
+    if a0 == WX_MNT {
+        return wechsel.traeger_mnt(state, a1)
+    }
+    if a0 == WX_BLOCKS {
+        return wechsel.traeger_bloecke(state, a1)
+    }
+    if a0 == WX_PATHCH {
+        let p: u64 = wechsel.traeger_pfad(state, a1)
+        if p == 0 || a2 >= 16 {
+            return 0
+        }
+        return kstate.get8(p + a2)
+    }
+    if a0 == WX_EJECT {
+        // DER KNOPF. Er gibt den POSITIVEN errno zurueck, nicht den
+        // negativen: die Oberflaeche will E_BUSY unterscheiden koennen
+        // ("noch etwas offen") und nicht nur "ging nicht".
+        return wechsel.auswerfen(state, a1)
+    }
+    return neg(errno.E_INVAL)
 }
 
 fn late_call(state: u64, me: u64, number: u64, frame: u64) -> u64 {
