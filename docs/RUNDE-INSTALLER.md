@@ -212,13 +212,29 @@ zu dem passt, was er angelegt hat.
 Koppeln in der **RAM-Wurzel**, also muss nach jedem Neustart neu
 gekoppelt werden — „hängt an `P-001`".
 
-Das ist mit dieser Runde **strukturell** gelöst und **noch nicht
-gemessen**: Glied 6/7 der Abnahme weist nach, dass eine angelegte Datei
-den Neustart übersteht, weil die Wurzel auf der Partition liegt. Für den
-Schlüssel gilt derselbe Weg — aber „derselbe Weg" ist eine Behauptung,
-solange niemand koppelt, neu startet und nachsieht. Das gehört in die
-Runde, die `jarvisd` auf einer installierten Platte misst, und es steht
-hier, damit niemand `O-009` für erledigt hält.
+**Der Pfad ist jetzt gemessen** (Glied 7b der Abnahme). Auf der
+installierten Platte:
+
+```
+Lauf 1:  mkdir /etc/jarvis
+         echo 3f8a1c7d…468a > /etc/jarvis/geraet.key
+         sync
+Lauf 2 (eigener Start, Maschine war aus):
+         cat /etc/jarvis/geraet.key
+         3f8a1c7d9e2b4056f1a3c5d7e9b0284613f57a9cde02468ace13579bdf02468a
+```
+
+Der Inhalt kommt Zeichen für Zeichen zurück. Damit ist die Ursache von
+`O-009` weg: `/etc/jarvis/` liegt nicht mehr in einer Wurzel, die es nach
+dem Ausschalten nicht mehr gibt.
+
+**Was damit NICHT bewiesen ist, und das gehört dazu:** gemessen wurde der
+**Pfad**, nicht das **Koppeln**. Einen echten Ed25519-Schlüssel legt
+`jarvisctl koppeln` an, und dafür braucht es eine Gegenstelle im Netz —
+das ist eine eigene Runde. Die Datei hier hat dieselbe Form (64
+Hexziffern) und denselben Ort, mehr nicht. Wer `O-009` abhaken will, muss
+einmal wirklich koppeln, neu starten und sehen, dass die Brücke das Gerät
+wiedererkennt.
 
 ---
 

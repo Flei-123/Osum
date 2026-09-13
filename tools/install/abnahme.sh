@@ -432,6 +432,41 @@ else
 fi
 
 # ==================================================================
+titel "7b. O-009: was in /etc/jarvis liegt, bleibt auch dort"
+# ==================================================================
+#
+# `O-009` in OFFEN.md: der Geraeteschluessel entsteht beim Koppeln in
+# der RAM-Wurzel, also muss nach jedem Neustart neu gekoppelt werden --
+# "haengt an P-001".
+#
+# GEMESSEN WIRD DER PFAD, NICHT DAS KOPPELN. Einen echten
+# Ed25519-Schluessel legt `jarvisctl koppeln` an, und dafuer braucht es
+# eine Gegenstelle im Netz -- das ist eine eigene Runde. Was diese
+# Runde beantworten kann und muss, ist die Frage darunter: ueberlebt
+# eine Datei AN GENAU DIESEM ORT den Neustart, oder liegt /etc/jarvis
+# weiterhin in einer Wurzel, die es nach dem Ausschalten nicht mehr
+# gibt?
+#
+# Deshalb wird hier eine Datei mit derselben Form (64 Hexziffern) unter
+# demselben Namen abgelegt und nach einem Neustart wieder gelesen. Was
+# das NICHT beweist, steht im Bericht: dass das Koppeln selbst
+# funktioniert.
+platte_lauf jarvis1 "mkdir /etc/jarvis;echo 3f8a1c7d9e2b4056f1a3c5d7e9b0284613f57a9cde02468ace13579bdf02468a >/etc/jarvis/geraet.key;cat /etc/jarvis/geraet.key;sync;exit" 300
+if grep -qa '3f8a1c7d9e2b4056' "$OUT/jarvis1.txt"; then
+    ok "der Schluessel liegt in /etc/jarvis auf der Platte"
+else
+    bad "/etc/jarvis/geraet.key liess sich nicht anlegen"
+    tail -4 "$OUT/jarvis1.txt" | sed 's/^/        /'
+fi
+platte_lauf jarvis2 "cat /etc/jarvis/geraet.key;exit" 300
+if grep -qa '3f8a1c7d9e2b4056' "$OUT/jarvis2.txt"; then
+    ok "O-009: er ist nach dem Neustart NOCH DA -- kein zweites Koppeln noetig"
+else
+    bad "O-009: der Schluessel ist nach dem Neustart weg"
+    tail -4 "$OUT/jarvis2.txt" | sed 's/^/        /'
+fi
+
+# ==================================================================
 titel "8. GEGENPROBE -- eine kaputte Wurzel darf NICHT starten"
 # ==================================================================
 #
