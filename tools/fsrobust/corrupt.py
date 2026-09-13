@@ -177,9 +177,17 @@ def mach(fall, grund, ziel):
 
 
 def _bild(pfad):
+    # RUNDE GRUNDLINIE: `pruef` heisst seit ENGLISCH ETAPPE 8 (6f1bb7c)
+    # `check`. Die Umbenennung hat diese eine Zeile nicht mitgenommen --
+    # sie steht als einzige INNERHALB einer Funktion und nicht oben bei
+    # den Importen, wo das Werkzeug der Etappe gesucht hat. Der Fehler
+    # war darum erst zur Laufzeit sichtbar:
+    #     ModuleNotFoundError: No module named 'pruef'
+    # und traf nur die Faelle, die ein Bild brauchen -- gebaut wurden 5
+    # von 13 kaputten Abbildern, der Rest fiel mit.
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    import pruef
-    return pruef.Bild(pfad)
+    import check
+    return check.Bild(pfad)
 
 
 def _frei(r):
