@@ -701,6 +701,34 @@ ARGS+=(/etc/ "/etc/passwd=$OUT/passwd"
        "/etc/theme.conf=$OUT/theme.conf"
        "/etc/locale.conf=$OUT/locale.conf"
        "/etc/netlauf.sh=$OUT/netlauf.sh")
+# ===================================================== RUNDE HOVERSTIL
+# /etc/uitrace -- DER SCHALTER, OHNE DEN DIE OBERFLAECHE STUMM IST.
+#
+# `kernel/user/qs.fi::dbg_setup` macht ALLE Meldungen des
+# Kontrollzentrums von dieser Datei abhaengig:
+#
+#     let fdt: u64 = io.open("/etc/uitrace", 0)
+#     if !ulib.bad(fdt) { s_dbg = 1 }
+#
+# und `say`/`sayn`/`nl` kehren ohne sie sofort zurueck. Fehlt sie, dann
+# laeuft das Panel VOLLSTAENDIG richtig -- es geht auf, es geht zu, der
+# Zeiger wirkt --, aber es steht KEINE EINZIGE `qs:`-Zeile auf der
+# Leitung. Genau das hat diese Runde zwei Anlaeufe gekostet: gemessen
+# wurden fuenfmal `hk: super+a` und fuenfmal ein Wechsel von `fl=19`
+# (versteckt) auf `fl=18` (sichtbar) im Fensterbericht -- das Panel
+# gehorchte also --, waehrend `qs: kachel` und selbst eine eigens
+# eingebaute Diagnosezeile NULL Treffer hatten. Wer daraus "die Maus
+# kommt nicht an" schliesst, misst diesen Schalter und nicht das
+# System.
+#
+# Die Datei ist LEER und kostet einen Verzeichniseintrag. Sie kommt nur
+# mit UITRACE=1 ins Abbild, damit ein Auslieferungsstick weiter still
+# ist; jeder Messlauf setzt die Umgebungsvariable.
+if [ "${UITRACE:-0}" = "1" ]; then
+    : > "$OUT/uitrace"
+    ARGS+=("/etc/uitrace=$OUT/uitrace")
+    echo "   uitrace    AN -- die Oberflaeche meldet (qs:, taskbar:)"
+fi
 # RUNDE ECHTHARDWARE-1: die drei Verzeichnisse, ohne die `shape=` und
 # `scheme=` ins Leere zeigen. Derselbe Weg wie in
 # tools/design/capture.sh -- dieselben Dateien, damit der Stick zeigt,
