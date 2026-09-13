@@ -1,0 +1,805 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/instkern.fi -- RUNDE INSTALLER (P-001): DIE MASCHINE, DIE
+// DAS SYSTEM AUF EINE PLATTE SCHREIBT -- EINMAL, FUER BEIDE BEDIENWEGE.
+//
+// WARUM ES DIESE DATEI GIBT, und das ist der ganze Punkt dieser Runde.
+//
+// `install.fi` konnte seit Runde INSTALL alles, was eine Installation
+// ausmacht: Schutz-MBR, GPT mit beiden Pruefsummen, EFI-Partition mit
+// FAT32, das Wurzeldateisystem umziehen und wachsen lassen, den
+// Bootlader eintragen. Gemessen mit 70 Zusagen, und die Platte startet
+// danach ueber OVMF ohne `-kernel` und ohne Modul.
+//
+// Was es NICHT hatte, ist ein Weg dorthin, den ein Mensch findet.
+// `install /dev/hda --ja` auf einer Kommandozeile ist kein
+// Installationsweg fuer jemanden, der gerade einen Stick gebootet hat;
+// OFFEN.md fuehrt das als `P-001` mit Prioritaet 1.
+//
+// DER FALSCHE WEG WAERE GEWESEN, die Oberflaeche danebenzustellen und
+// die Schreibarbeit dort noch einmal zu tippen. Dann gaebe es ZWEI
+// Stellen, an denen eine GPT-Pruefsumme gerechnet wird, und die zweite
+// waere die, die beim naechsten Formatwechsel vergessen wird. Deshalb
+// ist der Maschinenteil hier herausgezogen und hat GENAU ZWEI Aufrufer:
+//
+//   kernel/user/install.fi     die Kommandozeile (unveraendert in dem,
+//                              was sie tut -- sie ruft jetzt hierher)
+//   kernel/user/installer.fi   die Oberflaeche (Runde INSTALLER)
+//
+// WAS HIER ANDERS IST ALS IN DER VORLAGE: die Maschine SAGT, wo sie
+// steht. `schritt_nr()` und `schritt_von()` zaehlen mit, und
+// `fortschritt()` gibt Promille des laengsten Teils (des Kopierens)
+// zurueck. Die Kommandozeile ignoriert das; die Oberflaeche malt einen
+// Balken daraus. Ein Installationsprogramm, das minutenlang nichts
+// sagt, ist von einem abgestuerzten nicht zu unterscheiden -- und das
+// Kopieren dauert hier wirklich Minuten.
+//
+// KEIN EIGENER SYSTEMAUFRUF, wie schon in der Vorlage: `/dev/hda` ist
+// seit K14 eine Datei mit `lseek`/`read`/`write`, und mehr braucht es
+// nicht.
+
+profile kernel
+
+import ulib
+
+export {
+    BS, AUSRICHT, ESP_STD,
+    lese, schreibe, ist_ofs, wachsen, kopiere,
+    gpt_schreiben, fat32_create, wurzel_kopieren,
+    plan_esp_start, plan_esp_ende, plan_ofs_start, plan_ofs_ende,
+    plan_passt, quelle_pruefen,
+    schritt_nr, schritt_von, fortschritt, fehler_bei,
+    F_KEIN, F_OEFFNEN, F_LESEN, F_SCHREIBEN, F_KEINOFS, F_KLEIN, F_KARTE,
+    S_GPT, S_ESP, S_KOPIE, S_WACHSEN, S_BOOT, S_FERTIG
+}
+
+// ====================================================== DER FORTSCHRITT
+//
+// Fuenf Schritte, und sie heissen hier wie in der Oberflaeche. Die
+// Zahlen sind die REIHENFOLGE und nicht die Dauer: Schritt 3 (kopieren)
+// ist laenger als die vier anderen zusammen, und genau deshalb hat er
+// zusaetzlich `fortschritt()` in Promille.
+const S_GPT: u64 = 1
+const S_ESP: u64 = 2
+const S_KOPIE: u64 = 3
+const S_WACHSEN: u64 = 4
+const S_BOOT: u64 = 5
+const S_FERTIG: u64 = 6
+
+// Die Fehlergruende. Sie sind ZAHLEN und keine Texte: den Text sucht
+// der Aufrufer in seiner Sprache heraus (locale/*/messages). Ein
+// Fehlertext, der aus der Maschine kommt, waere auf jedem System
+// dieselbe Sprache.
+const F_KEIN: u64 = 0
+const F_OEFFNEN: u64 = 1
+const F_LESEN: u64 = 2
+const F_SCHREIBEN: u64 = 3
+const F_KEINOFS: u64 = 4
+const F_KLEIN: u64 = 5
+const F_KARTE: u64 = 6
+
+static mut st_schritt: u64 = 0
+static mut st_promille: u64 = 0
+static mut st_fehler: u64 = 0
+
+fn schritt_nr() -> u64 {
+    return st_schritt
+}
+
+fn schritt_von() -> u64 {
+    return S_FERTIG
+}
+
+fn fortschritt() -> u64 {
+    return st_promille
+}
+
+fn fehler_bei() -> u64 {
+    return st_fehler
+}
+
+static mut SEK: [u8; 512] = [0 as u8; 512]
+static mut SEK2: [u8; 512] = [0 as u8; 512]
+static mut KOP: [u8; 8192] = [0 as u8; 8192]
+
+const BS: u64 = 512
+// Wo die erste Partition anfaengt. 2048 Sektoren = 1 MiB, die Zahl, die
+// jedes Werkzeug seit 2009 nimmt: sie geht auf jede Loeschgruppe eines
+// Flashspeichers auf.
+const AUSRICHT: u64 = 2048
+// Die Eintragstafel von GPT: 128 Eintraege zu 128 Oktetten = 16384
+// Oktette = 32 Sektoren. Beides steht so in der Beschreibung, und
+// `part.fi` rechnet mit den Zahlen aus dem Kopf und nicht mit diesen --
+// wer hier etwas anderes hinschreibt, faellt dort auf.
+const ENTRIES: u64 = 128
+const ENTSIZE: u64 = 128
+const ENTSECT: u64 = 32
+const ESP_STD: u64 = 70000 // 34 MiB -- knapp ueber den 65525 Verbaenden, ab denen FAT32 FAT32 ist
+// --------------------------------------------------------- Kleinigkeiten
+
+fn p8(at: u64, v: u64) {
+    __mmio_write8((at) as *mut u8, v as u8)
+}
+
+fn g8(at: u64) -> u64 {
+    return (*((at) as *mut u8)) as u64
+}
+
+fn p16(at: u64, v: u64) {
+    p8(at, v & 255)
+    p8(at + 1, (v >> 8) & 255)
+}
+
+fn p32(at: u64, v: u64) {
+    p8(at, v & 255)
+    p8(at + 1, (v >> 8) & 255)
+    p8(at + 2, (v >> 16) & 255)
+    p8(at + 3, (v >> 24) & 255)
+}
+
+fn p64(at: u64, v: u64) {
+    p32(at, v & 0xFFFFFFFF)
+    p32(at + 4, (v >> 32) & 0xFFFFFFFF)
+}
+
+fn g32(at: u64) -> u64 {
+    return g8(at) | (g8(at + 1) << 8) | (g8(at + 2) << 16) | (g8(at + 3) << 24)
+}
+
+fn g64(at: u64) -> u64 {
+    return g32(at) | (g32(at + 4) << 32)
+}
+
+fn nullen(at: u64, n: u64) {
+    ulib.fill(at, 0, n)
+}
+
+// CRC32, IEEE 802.3, reflektiert -- dieselbe Rechnung wie in
+// `kernel/bootmod.fi` und in `part.fi`, und das ist Absicht: die Summe,
+// die dieses Programm schreibt, wird von genau dieser Rechnung wieder
+// gelesen. Waeren es zwei verschiedene, wuerde die Platte beim naechsten
+// Start abgelehnt -- und das ist auch schon die Gegenprobe.
+fn crc_start() -> u64 {
+    return 0xFFFFFFFF
+}
+
+fn crc_feed(seed: u64, p: u64, len: u64) -> u64 {
+    var crc: u64 = seed
+    var i: u64 = 0
+    while i < len {
+        crc = crc ^ g8(p + i)
+        var k: u64 = 0
+        while k < 8 {
+            let maske: u64 = 0 -% (crc & 1)
+            crc = (crc >> 1) ^ (0xEDB88320 & maske)
+            k = k + 1
+        }
+        i = i + 1
+    }
+    return crc
+}
+
+fn crc_end(seed: u64) -> u64 {
+    return (seed ^ 0xFFFFFFFF) & 0xFFFFFFFF
+}
+
+fn crc_of(p: u64, len: u64) -> u64 {
+    return crc_end(crc_feed(crc_start(), p, len))
+}
+
+// --------------------------------------------------------- die Platte
+
+fn lese(fd: u64, lba: u64, at: u64, n: u64) -> bool {
+    let w: u64 = ulib.sys(ulib.SYS_SEEK, fd, lba * BS, ulib.SEEK_SET)
+    if ulib.bad(w) {
+        st_fehler = F_LESEN
+        return false
+    }
+    var got: u64 = 0
+    while got < n {
+        let r: u64 = ulib.sys(ulib.SYS_READ, fd, at + got, n - got)
+        if ulib.bad(r) || r == 0 {
+            st_fehler = F_LESEN
+            return false
+        }
+        got = got + r
+    }
+    return true
+}
+
+fn schreibe(fd: u64, lba: u64, at: u64, n: u64) -> bool {
+    let w: u64 = ulib.sys(ulib.SYS_SEEK, fd, lba * BS, ulib.SEEK_SET)
+    if ulib.bad(w) {
+        st_fehler = F_SCHREIBEN
+        return false
+    }
+    var done: u64 = 0
+    while done < n {
+        let r: u64 = ulib.sys(ulib.SYS_WRITE, fd, at + done, n - done)
+        if ulib.bad(r) || r == 0 {
+            st_fehler = F_SCHREIBEN
+            return false
+        }
+        done = done + r
+    }
+    return true
+}
+
+
+
+// ------------------------------------------------------------ die GUIDs
+
+// Die Typkennung der EFI-Partition: C12A7328-F81F-11D2-BA4B-00A0C93EC93B,
+// die ersten drei Felder kleinendig. Dieselben sechzehn Oktette stehen in
+// `kernel/part.fi`; sie muessen es, denn die eine Seite schreibt und die
+// andere liest.
+fn guid_esp(at: u64) {
+    p8(at + 0, 0x28)
+    p8(at + 1, 0x73)
+    p8(at + 2, 0x2A)
+    p8(at + 3, 0xC1)
+    p8(at + 4, 0x1F)
+    p8(at + 5, 0xF8)
+    p8(at + 6, 0xD2)
+    p8(at + 7, 0x11)
+    p8(at + 8, 0xBA)
+    p8(at + 9, 0x4B)
+    p8(at + 10, 0x00)
+    p8(at + 11, 0xA0)
+    p8(at + 12, 0xC9)
+    p8(at + 13, 0x3E)
+    p8(at + 14, 0xC9)
+    p8(at + 15, 0x3B)
+}
+
+// 4F53554D-4F46-5301-8E75-6D6F72694F53 -- "OSUM" "OF" 01, unsere eigene.
+fn guid_ofs(at: u64) {
+    p8(at + 0, 0x4D)
+    p8(at + 1, 0x55)
+    p8(at + 2, 0x53)
+    p8(at + 3, 0x4F)
+    p8(at + 4, 0x46)
+    p8(at + 5, 0x4F)
+    p8(at + 6, 0x01)
+    p8(at + 7, 0x53)
+    p8(at + 8, 0x8E)
+    p8(at + 9, 0x75)
+    p8(at + 10, 0x6D)
+    p8(at + 11, 0x6F)
+    p8(at + 12, 0x72)
+    p8(at + 13, 0x69)
+    p8(at + 14, 0x4F)
+    p8(at + 15, 0x53)
+}
+
+// Eine Kennung, die diese eine Partition von jeder anderen unterscheidet.
+// Ein Zufallsgenerator waere hier ein zweiter Weg, an dem etwas
+// schiefgehen kann; genommen wird `/dev/random` des Systems, und wenn es
+// nichts hergibt, eine Kennung aus Zaehlern. Sie muss EINZIG sein, nicht
+// unvorhersagbar.
+fn guid_own(at: u64, nr: u64) {
+    guid_ofs(at)
+    p8(at + 6, 0x40 | (nr & 15)) // Fassung 4 in den oberen Bits
+    p32(at + 12, 0x53464F00 | nr)
+}
+
+// ------------------------------------------------- GPT schreiben
+
+// Die Eintragstafel steht NICHT im Speicher. Sie ist 16 KiB gross, und
+// dieses Programm haelt sie sektorweise: Sektor 0 traegt die beiden
+// Eintraege, die 31 anderen sind Null. Die Pruefsumme laeuft in
+// derselben Reihenfolge darueber, in der sie auf der Platte liegt --
+// fortgeschrieben statt gesammelt, genau wie `part.fi` es beim Lesen
+// tut.
+fn tafel_sektor(nr: u64, esp_start: u64, esp_ende: u64, ofs_start: u64,
+    ofs_ende: u64) {
+    let p: u64 = (&SEK2[0 as usize]) as u64
+    nullen(p, BS)
+    if nr != 0 {
+        return
+    }
+    // Eintrag 0: die EFI-Partition.
+    guid_esp(p + 0)
+    guid_own(p + 16, 1)
+    p64(p + 32, esp_start)
+    p64(p + 40, esp_ende)
+    p64(p + 48, 0)
+    // Der Name steht in UTF-16, kleinendig. "EFI"
+    p16(p + 56, 69)
+    p16(p + 58, 70)
+    p16(p + 60, 73)
+    // Eintrag 1: die Wurzel.
+    guid_ofs(p + 128)
+    guid_own(p + 144, 2)
+    p64(p + 160, ofs_start)
+    p64(p + 168, ofs_ende)
+    p64(p + 176, 0)
+    // "OSUM"
+    p16(p + 184, 79)
+    p16(p + 186, 83)
+    p16(p + 188, 85)
+    p16(p + 190, 77)
+}
+
+fn tafel_crc(esp_start: u64, esp_ende: u64, ofs_start: u64,
+    ofs_ende: u64) -> u64 {
+    var c: u64 = crc_start()
+    var i: u64 = 0
+    while i < ENTSECT {
+        tafel_sektor(i, esp_start, esp_ende, ofs_start, ofs_ende)
+        c = crc_feed(c, (&SEK2[0 as usize]) as u64, BS)
+        i = i + 1
+    }
+    return crc_end(c)
+}
+
+fn header(at: u64, meine: u64, andere: u64, tafel: u64, ersteb: u64,
+    letzteb: u64, tcrc: u64) {
+    nullen(at, BS)
+    p8(at + 0, 69)  // 'E'
+    p8(at + 1, 70)  // 'F'
+    p8(at + 2, 73)  // 'I'
+    p8(at + 3, 32)  // ' '
+    p8(at + 4, 80)  // 'P'
+    p8(at + 5, 65)  // 'A'
+    p8(at + 6, 82)  // 'R'
+    p8(at + 7, 84)  // 'T'
+    p32(at + 8, 0x00010000)
+    p32(at + 12, 92)
+    p32(at + 16, 0) // die eigene Summe, erst 0
+    p32(at + 20, 0)
+    p64(at + 24, meine)
+    p64(at + 32, andere)
+    p64(at + 40, ersteb)
+    p64(at + 48, letzteb)
+    guid_own(at + 56, 3)
+    p64(at + 72, tafel)
+    p32(at + 80, ENTRIES)
+    p32(at + 84, ENTSIZE)
+    p32(at + 88, tcrc)
+    // Und JETZT die Summe ueber die 92 Oktette, mit dem Feld auf Null.
+    // Die Reihenfolge ist nicht Geschmack: rechnet man sie vorher,
+    // rechnet man ueber ein Feld, das man gleich noch aendert.
+    p32(at + 16, crc_of(at, 92))
+}
+
+// ------------------------------------------------------ FAT32 anlegen
+
+// Die Groesse der Zuordnungstafel, nach Microsofts eigener Formel
+// (fatgen103.doc, Abschnitt "Determination of FAT type"). Sie steht hier
+// als Rechnung und nicht als Zahl, weil sie von der Partitionsgroesse
+// abhaengt -- und weil `fat.fi` beim Einhaengen aus GENAU diesen Feldern
+// wieder ausrechnet, wo die Daten anfangen. Eine Zahl, die um eins
+// danebenliegt, faellt dort sofort auf.
+fn fat_size(gesamt: u64, reserviert: u64, spc: u64, nfat: u64) -> u64 {
+    let t1: u64 = gesamt - reserviert
+    let t2: u64 = (256 * spc + nfat) / 2
+    return (t1 + t2 - 1) / t2
+}
+
+fn fat32_create(fd: u64, start: u64, gesamt: u64) -> bool {
+    let spc: u64 = 1
+    let reserviert: u64 = 32
+    let nfat: u64 = 2
+    let fatsz: u64 = fat_size(gesamt, reserviert, spc, nfat)
+    let p: u64 = (&SEK[0 as usize]) as u64
+    nullen(p, BS)
+    p8(p + 0, 0xEB)
+    p8(p + 1, 0x58)
+    p8(p + 2, 0x90)
+    // "MSWIN4.1" -- die Zeichenkette, die jede Beschreibung empfiehlt,
+    // weil manche Firmware auf sie sieht.
+    p8(p + 3, 77)
+    p8(p + 4, 83)
+    p8(p + 5, 87)
+    p8(p + 6, 73)
+    p8(p + 7, 78)
+    p8(p + 8, 52)
+    p8(p + 9, 46)
+    p8(p + 10, 49)
+    p16(p + 11, BS)
+    p8(p + 13, spc)
+    p16(p + 14, reserviert)
+    p8(p + 16, nfat)
+    p16(p + 17, 0) // FAT32: keine feste Wurzeltafel
+    p16(p + 19, 0)
+    p8(p + 21, 0xF8)
+    p16(p + 22, 0) // FAT32: fatsz16 MUSS null sein
+    p16(p + 24, 32)
+    p16(p + 26, 8)
+    p32(p + 28, start)
+    p32(p + 32, gesamt)
+    p32(p + 36, fatsz)
+    p16(p + 40, 0)
+    p16(p + 42, 0)
+    p32(p + 44, 2) // die Wurzel liegt im Verband 2
+    p16(p + 48, 1) // FSInfo im Sektor 1
+    p16(p + 50, 6) // Sicherung des Startsektors im Sektor 6
+    p8(p + 64, 0x80)
+    p8(p + 66, 0x29)
+    p32(p + 67, 0x4F53554D)
+    // Der Datentraegername, elf Zeichen mit Leerzeichen aufgefuellt:
+    // "OSUM EFI   "
+    p8(p + 71, 79)
+    p8(p + 72, 83)
+    p8(p + 73, 85)
+    p8(p + 74, 77)
+    p8(p + 75, 32)
+    p8(p + 76, 69)
+    p8(p + 77, 70)
+    p8(p + 78, 73)
+    p8(p + 79, 32)
+    p8(p + 80, 32)
+    p8(p + 81, 32)
+    // "FAT32   "
+    p8(p + 82, 70)
+    p8(p + 83, 65)
+    p8(p + 84, 84)
+    p8(p + 85, 51)
+    p8(p + 86, 50)
+    p8(p + 87, 32)
+    p8(p + 88, 32)
+    p8(p + 89, 32)
+    p8(p + 510, 0x55)
+    p8(p + 511, 0xAA)
+    if !schreibe(fd, start, p, BS) {
+        return false
+    }
+    if !schreibe(fd, start + 6, p, BS) {
+        return false
+    }
+    // Die FSInfo-Seite. `fat.fi` liest daraus die Zahl der freien
+    // Verbaende beim Einhaengen; steht dort Unsinn, rechnet es selbst
+    // nach -- aber dann liest es die ganze Tafel, und das ist der
+    // langsame Weg, den Runde K14 ausdruecklich abgeschafft hat.
+    let daten: u64 = reserviert + nfat * fatsz
+    let verbaende: u64 = (gesamt - daten) / spc
+    nullen(p, BS)
+    p32(p + 0, 0x41615252)
+    p32(p + 484, 0x61417272)
+    p32(p + 488, verbaende - 1) // der Wurzelverband ist schon weg
+    p32(p + 492, 3)
+    p8(p + 510, 0x55)
+    p8(p + 511, 0xAA)
+    if !schreibe(fd, start + 1, p, BS) {
+        return false
+    }
+    if !schreibe(fd, start + 7, p, BS) {
+        return false
+    }
+    // Die Zuordnungstafeln. Der erste Sektor traegt die drei
+    // Sondereintraege, alle anderen sind Null -- und sie MUESSEN Null
+    // sein: was auf der Platte stand, waeren sonst Verbandsnummern.
+    var f: u64 = 0
+    while f < nfat {
+        let fatlba: u64 = start + reserviert + f * fatsz
+        nullen(p, BS)
+        p32(p + 0, 0x0FFFFFF8)
+        p32(p + 4, 0x0FFFFFFF)
+        p32(p + 8, 0x0FFFFFFF) // Verband 2: die Wurzel, ein Verband lang
+        if !schreibe(fd, fatlba, p, BS) {
+            return false
+        }
+        nullen(p, BS)
+        var k: u64 = 1
+        while k < fatsz {
+            if !schreibe(fd, fatlba + k, p, BS) {
+                return false
+            }
+            k = k + 1
+        }
+        f = f + 1
+    }
+    // Der Wurzelverband. Er ist leer bis auf EINEN Eintrag: den
+    // Datentraegernamen. Der steht bei FAT32 nicht nur im Startsektor,
+    // sondern noch einmal als Verzeichniseintrag mit dem Merkmal
+    // ATTR_VOLUME_ID (0x08) -- so schreibt es `mkfs.vfat`, und `fsck.fat`
+    // beanstandet es, wenn er fehlt ("Label in boot sector [...] but
+    // there is no volume label in root directory"). Ein Dateisystem, an
+    // dem das fremde Pruefwerkzeug etwas auszusetzen hat, ist nicht
+    // fertig.
+    nullen(p, BS)
+    p8(p + 0, 79)
+    p8(p + 1, 83)
+    p8(p + 2, 85)
+    p8(p + 3, 77)
+    p8(p + 4, 32)
+    p8(p + 5, 69)
+    p8(p + 6, 70)
+    p8(p + 7, 73)
+    p8(p + 8, 32)
+    p8(p + 9, 32)
+    p8(p + 10, 32)
+    p8(p + 11, 0x08)
+    if !schreibe(fd, start + daten, p, BS) {
+        return false
+    }
+    nullen(p, BS)
+    var c: u64 = 1
+    while c < spc {
+        if !schreibe(fd, start + daten + c, p, BS) {
+            return false
+        }
+        c = c + 1
+    }
+    return true
+}
+
+// --------------------------------------------- das Dateisystem umziehen
+
+// Die Felder des OFS-Superblocks. Dieselben Zahlen wie in
+// `kernel/fs.fi` und in `tools/osum/mkfs.py`; das ist die DRITTE
+// Umsetzung derselben Beschreibung, und genau deshalb faellt es auf,
+// wenn eine der drei sich irrt.
+const SB_MAGIC: u64 = 0
+const SB_BLOCKS: u64 = 16
+const SB_INODES: u64 = 24
+const SB_BITMAP: u64 = 32
+const SB_ITABLE: u64 = 40
+const SB_DATA: u64 = 48
+const SB_BITBLOCKS: u64 = 72
+const MAGIC_LO: u64 = 0x2D4F4653 // "-OFS"
+const MAGIC_HI: u64 = 0x4F53554D // "OSUM"
+
+fn ist_ofs(at: u64) -> bool {
+    return g32(at + SB_MAGIC) == MAGIC_LO && g32(at + SB_MAGIC + 4) == MAGIC_HI
+}
+
+// Das Wachsen. Es ist genau zwei Dinge, und beide sind umkehrbar, wenn
+// man den alten Superblock noch hat:
+//
+//   1. die neue Blockzahl in den Superblock,
+//   2. die Bits von der alten bis zur neuen Zahl freimachen.
+//
+// Es geht NUR, wenn die Karte schon gross genug ist. Ist sie es nicht,
+// muesste die Inodetabelle nach hinten wandern, und jede Inodenummer im
+// ganzen Baum zeigte danach auf einen anderen Block. Dann sagt dieses
+// Programm nein, statt ein Dateisystem zu bauen, das sich selbst nicht
+// mehr findet.
+fn wachsen(fd: u64, start: u64, neu: u64) -> u64 {
+    let p: u64 = (&SEK[0 as usize]) as u64
+    if !lese(fd, start, p, BS) {
+        return 0
+    }
+    if !ist_ofs(p) {
+        return 0
+    }
+    let alt: u64 = g64(p + SB_BLOCKS)
+    var karten: u64 = g64(p + SB_BITBLOCKS)
+    if karten == 0 {
+        karten = 1
+    }
+    let deckt: u64 = karten * BS * 8
+    var ziel: u64 = neu
+    if ziel > deckt {
+        ziel = deckt
+    }
+    if ziel <= alt {
+        return alt
+    }
+    p64(p + SB_BLOCKS, ziel)
+    if !schreibe(fd, start, p, BS) {
+        return 0
+    }
+    // Die Bits. Sektorweise, damit kein Puffer von 64 KiB noetig ist.
+    var b: u64 = alt
+    while b < ziel {
+        let kb: u64 = 1 + b / (BS * 8)
+        let inb: u64 = b % (BS * 8)
+        let sek: u64 = inb / (BS * 8) // immer 0, steht hier der Klarheit halber
+        if !lese(fd, start + kb + sek, p, BS) {
+            return 0
+        }
+        // Alles, was in DIESEN Kartenblock faellt, in einem Zug.
+        var ende: u64 = (kb - 1 + 1) * BS * 8
+        if ende > ziel {
+            ende = ziel
+        }
+        while b < ende {
+            let bit: u64 = b % (BS * 8)
+            let at: u64 = p + bit / 8
+            p8(at, g8(at) & (255 ^ (1 << (bit % 8))))
+            b = b + 1
+        }
+        if !schreibe(fd, start + kb, p, BS) {
+            return 0
+        }
+    }
+    return ziel
+}
+
+fn kopiere(von: u64, move_to: u64) -> bool {
+    let a: u64 = ulib.sys(ulib.SYS_OPEN, von, 0, 0)
+    if ulib.bad(a) {
+        return false
+    }
+    ulib.sys(ulib.SYS_UNLINK, move_to, 0, 0)
+    let b: u64 = ulib.sys(ulib.SYS_OPEN, move_to, ulib.O_MAKE, 0)
+    if ulib.bad(b) {
+        ulib.sys(ulib.SYS_CLOSE, a, 0, 0)
+        return false
+    }
+    let puffer: u64 = (&KOP[0 as usize]) as u64
+    var gut: bool = true
+    var weiter: bool = true
+    while weiter {
+        let n: u64 = ulib.sys(ulib.SYS_READ, a, puffer, 8192)
+        if ulib.bad(n) || n == 0 {
+            weiter = false
+        } else {
+            let w: u64 = ulib.sys(ulib.SYS_WRITE, b, puffer, n)
+            if ulib.bad(w) || w != n {
+                gut = false
+                weiter = false
+            }
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, a, 0, 0)
+    ulib.sys(ulib.SYS_CLOSE, b, 0, 0)
+    return gut
+}
+
+// ================================================== DER BAUPLAN
+//
+// Wo die beiden Partitionen zu liegen kommen. Es ist dieselbe Rechnung
+// wie in der Vorlage, nur an EINER Stelle statt in zwei Programmen --
+// die Oberflaeche muss sie zeigen koennen, BEVOR etwas geschrieben
+// wird ("das wird ueberschrieben"), und die Kommandozeile druckt sie
+// im Probelauf.
+//
+// Die letzten 33 Sektoren gehoeren der Sicherung von GPT: der
+// Sicherungskopf liegt im ALLERLETZTEN, die Sicherungstafel in den 32
+// davor. Wer sie ueberschreibt, hat eine Platte mit einem Kopf, dem
+// niemand mehr glaubt.
+
+fn plan_esp_start() -> u64 {
+    return AUSRICHT
+}
+
+fn plan_esp_ende(espsek: u64) -> u64 {
+    return AUSRICHT + espsek - 1
+}
+
+fn plan_ofs_start(espsek: u64) -> u64 {
+    return plan_esp_ende(espsek) + 1
+}
+
+fn plan_ofs_ende(sekt: u64) -> u64 {
+    return sekt - 34
+}
+
+// Passt das ueberhaupt auf die Platte? 4096 Sektoren (2 MiB) ist das
+// Mindeste, was hinter der EFI-Partition noch Sinn ergibt -- darunter
+// waere die Wurzel kleiner als der Kern, der daraufsoll.
+fn plan_passt(sekt: u64, espsek: u64) -> bool {
+    if sekt < AUSRICHT + espsek + 4096 {
+        st_fehler = F_KLEIN
+        return false
+    }
+    return true
+}
+
+// ================================================== GPT SCHREIBEN
+//
+// Schutz-MBR, beide Eintragstafeln, beide Koepfe. Herausgezogen aus
+// `u_start` der Vorlage, Wort fuer Wort -- was sich geaendert hat, ist
+// nur, dass der Grund eines Fehlschlags in `st_fehler` landet statt auf
+// der seriellen Leitung.
+fn gpt_schreiben(zfd: u64, sekt: u64, espsek: u64) -> bool {
+    st_schritt = S_GPT
+    let erste_b: u64 = 2 + ENTSECT
+    let letzte_b: u64 = plan_ofs_ende(sekt)
+    let esp_start: u64 = plan_esp_start()
+    let esp_ende: u64 = plan_esp_ende(espsek)
+    let ofs_start: u64 = plan_ofs_start(espsek)
+    let ofs_ende: u64 = letzte_b
+
+    // ---- der Schutz-MBR
+    let p: u64 = (&SEK[0 as usize]) as u64
+    nullen(p, BS)
+    p8(p + 446 + 1, 0x00)
+    p8(p + 446 + 2, 0x02)
+    p8(p + 446 + 3, 0x00)
+    p8(p + 446 + 4, 0xEE)
+    p8(p + 446 + 5, 0xFF)
+    p8(p + 446 + 6, 0xFF)
+    p8(p + 446 + 7, 0xFF)
+    p32(p + 446 + 8, 1)
+    var rest: u64 = sekt - 1
+    if rest > 0xFFFFFFFF {
+        rest = 0xFFFFFFFF
+    }
+    p32(p + 446 + 12, rest)
+    p8(p + 510, 0x55)
+    p8(p + 511, 0xAA)
+    if !schreibe(zfd, 0, p, BS) {
+        return false
+    }
+
+    // ---- die Eintragstafel, zweimal, und die beiden Koepfe
+    let tcrc: u64 = tafel_crc(esp_start, esp_ende, ofs_start, ofs_ende)
+    var k: u64 = 0
+    while k < ENTSECT {
+        tafel_sektor(k, esp_start, esp_ende, ofs_start, ofs_ende)
+        let q: u64 = (&SEK2[0 as usize]) as u64
+        if !schreibe(zfd, 2 + k, q, BS) {
+            return false
+        }
+        if !schreibe(zfd, sekt - 33 + k, q, BS) {
+            return false
+        }
+        k = k + 1
+    }
+    header(p, 1, sekt - 1, 2, erste_b, letzte_b, tcrc)
+    if !schreibe(zfd, 1, p, BS) {
+        return false
+    }
+    header(p, sekt - 1, 1, sekt - 33, erste_b, letzte_b, tcrc)
+    if !schreibe(zfd, sekt - 1, p, BS) {
+        return false
+    }
+    return true
+}
+
+// ================================================== DIE WURZEL UMZIEHEN
+//
+// Block fuer Block aus der Quelle (dem Boot-Modul) in die
+// Wurzelpartition. Das Modul IST ein OFS-Dateisystem; es zu kopieren
+// ist kein Umbau, sondern ein Umzug.
+//
+// DAS IST DER LANGE TEIL. Deshalb wird hier -- und nur hier --
+// `st_promille` mitgefuehrt: die Oberflaeche liest es zwischen zwei
+// Bloecken und malt einen Balken daraus.
+fn wurzel_kopieren(zfd: u64, qfd: u64, espsek: u64, qsekt: u64) -> bool {
+    st_schritt = S_KOPIE
+    st_promille = 0
+    let ofs_start: u64 = plan_ofs_start(espsek)
+    let puffer: u64 = (&KOP[0 as usize]) as u64
+    let schritt: u64 = 8192 / BS
+    var b: u64 = 0
+    while b < qsekt {
+        var n: u64 = schritt
+        if b + n > qsekt {
+            n = qsekt - b
+        }
+        if !lese(qfd, b, puffer, n * BS) {
+            return false
+        }
+        if !schreibe(zfd, ofs_start + b, puffer, n * BS) {
+            return false
+        }
+        b = b + n
+        if qsekt > 0 {
+            st_promille = (b * 1000) / qsekt
+        }
+    }
+    st_promille = 1000
+    return true
+}
+
+// ================================================== DIE QUELLE PRUEFEN
+//
+// Ist das, was kopiert werden soll, ueberhaupt ein OFS -- und wieviel
+// Kartenvorrat bringt es mit? Beide Aufrufer brauchen genau diese zwei
+// Zahlen, BEVOR irgendetwas geschrieben wird: ein
+// Installationsprogramm, das erst die Zielplatte loescht und dann
+// merkt, dass es nichts zu kopieren hat, ist kein
+// Installationsprogramm.
+//
+// Rueckgabe: die Zahl der Kartenbloecke der Quelle (mindestens 1), oder
+// 0, wenn es kein OFS ist. `fehler_bei()` sagt dann, woran es lag.
+fn quelle_pruefen(qfd: u64) -> u64 {
+    let p: u64 = (&SEK[0 as usize]) as u64
+    if !lese(qfd, 0, p, BS) {
+        st_fehler = F_LESEN
+        return 0
+    }
+    if !ist_ofs(p) {
+        st_fehler = F_KEINOFS
+        return 0
+    }
+    var qkarten: u64 = g64(p + SB_BITBLOCKS)
+    if qkarten == 0 {
+        qkarten = 1
+    }
+    return qkarten
+}
