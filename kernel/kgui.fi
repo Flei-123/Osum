@@ -53,6 +53,7 @@ import arch.x86_64.trap
 import ttf
 import tty
 import usb
+import vfs
 // RUNDE HOTPLUG: die Naht zwischen Blockgeraet und Einhaengung.
 import wechsel
 import vmode
@@ -1431,6 +1432,22 @@ fn gfx_hold(state: u64) {
     if hz != 0 {
         let bis: u64 = apic.tsc() + hz * 4
         while apic.tsc() < bis {
+            // ============================ RUNDE HOTPLUG
+            // AUCH DIESES WARTEN IST BETRIEB.
+            //
+            // Hier stand eine leere Schleife, und das war richtig,
+            // solange draussen nur fotografiert wurde. Sobald der
+            // Testlaeufer WAEHRENDDESSEN einen Stick steckt, ist es
+            // falsch: `port_watch` (im Zeitgeber) merkt den
+            // Anschlusswechsel vor, und niemand arbeitet ihn ab.
+            // GEMESSEN: `events=1`, `hotplugs=0` -- das Geraet klopfte
+            // an, und der Kern hielt die Augen zu.
+            //
+            // Dieselben zwei Zeilen wie in der Schreibtischschleife,
+            // in derselben Reihenfolge: erst aufzaehlen, dann
+            // einhaengen.
+            usb.hotplug_work(state)
+            wechsel_schritt(state)
         }
     }
     serial.puts((&s_go[0]) as u64)
@@ -2178,6 +2195,20 @@ fn surface(state: u64) {
                 }
             }
             wm.poll(state)
+            // ================================ RUNDE HOTPLUG
+            // AUCH DAS HALTEN IST BETRIEB -- derselbe Befund wie in
+            // `hold_a_moment` eine Seite weiter oben.
+            //
+            // In dieser Schleife laeuft die Abnahme der Oberflaeche:
+            // von aussen kommen Klicks, Tasten -- und seit dieser
+            // Runde auch ein STICK (`device_add` ueber den Monitor).
+            // Ohne diese zwei Zeilen merkt der Kern den Anschluss
+            // nicht: `port_watch` legt ihn im Zeitgeber ab, und
+            // niemand holt ihn wieder. GEMESSEN: `events=1`,
+            // `hotplugs=0`, und zwei Bildschirmfotos, die sich
+            // Oktett fuer Oktett gleichen.
+            usb.hotplug_work(state)
+            wechsel_schritt(state)
             // MERGE-8: ALLTAG (Sperrer-Wache) und VSYNC (Bildgrenze)
             // haengen beide in dieser Halteschleife, unabhaengig
             // voneinander. Die Wache zuerst: sie kehrt ohne stehende
@@ -4047,8 +4078,20 @@ static mut hp_gen: u64 = 0
 static mut hp_weg: u64 = 0
 
 fn wechsel_schritt(state: u64) {
+    var s_d: [u8; 20] = "kgui: wechsel gen=\0\0"
+    var s_w: [u8; 8] = "  weg=\0\0"
+    var s_v: [u8; 9] = "  vfs=\0\0\0"
     let gen: u64 = usb.msc_gen(state)
     let weg: u64 = usb.msc_weg(state)
+    if gen != hp_gen || weg != hp_weg {
+        serial.puts((&s_d[0]) as u64)
+        serial.dec(gen)
+        serial.puts((&s_w[0]) as u64)
+        serial.dec(weg)
+        serial.puts((&s_v[0]) as u64)
+        serial.dec(kutil.yes(vfs.ready(state)))
+        serial.nl()
+    }
     // ZUERST DAS GEHEN. Wer einen Stick abzieht und sofort einen
     // zweiten steckt, hat in derselben Runde beide Flanken; wird dann
     // zuerst eingehaengt, ist der Platz des alten noch belegt.
