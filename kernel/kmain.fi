@@ -730,6 +730,20 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // 7f. round K1: a system on that disk. Mount what the host built,
     //     load /bin/sh out of it, and let it run until it is done.
     osum(state)
+    // RUNDE HOTPLUG: DER RUECKFALL.
+    //
+    // Der Haltepunkt steht IN `osum`, hinter dem Einhaengen der
+    // Wurzel und vor dem ersten Prozess -- nur dort ist beides
+    // wahr. Aber `osum` kehrt an drei Stellen frueh zurueck, und
+    // eine davon ist das fehlende Wort `osum` selbst: der
+    // Mauslauf von `tools/k17/run.sh` faehrt mit
+    // "usb usbhold nokbd nomouse nosched noproc nofs" und wartet
+    // auf `k17: hold`. Ohne diese Zeile bleibt es aus, und vier
+    // Zusagen fallen, die mit USB nichts zu tun haben.
+    //
+    // `usb_hold` haelt genau einmal (`hold_getan`) -- wer hier
+    // ankommt und drinnen schon gehalten hat, geht durch.
+    usb_hold(state)
     // 7g. ROUND K2: and once more one layer lower, on a controller that
     //     fetches its own commands out of memory (`hw.disk`).
     hw.disk(state)
@@ -3203,9 +3217,28 @@ fn osum(state: u64) {
     // Generation, disp_restore ueber den Bildmodus.
     gfx.disp_restore(state)
     usb_mount(state)
-    // RUNDE HOTPLUG: JETZT halten -- die Wurzel steht, `/medien` ist
-    // angelegt, `wechsel` ist bereit. Wer hier einen Stick steckt,
-    // bekommt ihn eingehaengt; wer es eine Zeile frueher tat, nicht.
+    // ================================== RUNDE HOTPLUG
+    // DER HALTEPUNKT, UND ZWAR GENAU HIER.
+    //
+    // Er stand bis zu dieser Runde in `usb_stage` -- also VOR dem
+    // Einhaengen der Wurzel. Ein Stick, der waehrend des Haltens kam,
+    // konnte deshalb gar nicht eingehaengt werden: `vfs.ready` war noch
+    // falsch. GEMESSEN: `hotplugs=1 devices=1` und keine `wechsel:`-Zeile.
+    //
+    // Zwei Stellen waeren falsch, und beide sind ausprobiert:
+    //
+    //   * VOR `osum` (in `kernel_main`): dann steht die Wurzel noch
+    //     nicht -- der urspruengliche Fehler.
+    //   * NACH `osum` (in `kernel_main`): dann ist die Shell schon
+    //     DURCHGELAUFEN. Ein Skript, das vom Stick lesen soll, findet
+    //     ihn nicht, weil er erst danach kommt. GEMESSEN:
+    //     `sh: ready` in Zeile 126, `sh: bye` in 164, `k17: hold` in
+    //     188 -- die Reihenfolge sagt alles.
+    //
+    // Hier ist beides erfuellt: die Wurzel ist eingehaengt, `/medien`
+    // liegt da, und der erste Prozess laeuft noch nicht. Wer waehrend
+    // des Haltens einen Stick steckt, hat ihn eingehaengt, bevor die
+    // Shell ihr erstes Wort liest.
     usb_hold(state)
     list_dir(state, (&p_bin[0]) as u64, (&s_bin[0]) as u64)
 
@@ -5160,12 +5193,26 @@ fn wechsel_schritt(state: u64) {
     }
 }
 
+// RUNDE HOTPLUG: GEHALTEN WIRD GENAU EINMAL.
+//
+// `usb_hold` wird jetzt von ZWEI Stellen gerufen (siehe dort), und nur
+// eine von beiden kommt in einem gegebenen Lauf wirklich dran. Welche,
+// haengt an der Kommandozeile -- also merkt sich die Funktion, dass sie
+// schon gehalten hat, statt dass der Rufer es ausrechnet. Zweimal
+// vierzig Sekunden zu halten waere kein Fehler, aber eine verdoppelte
+// Abnahmezeit.
+static mut hold_getan: bool = false
+
 fn usb_hold(state: u64) {
     var s_h: [u8; 10] = "k17: hold\0"
     var s_r: [u8; 10] = "k17: free\0"
     if !kstate.mode_on(state, kstate.M_USBHOLD) {
         return
     }
+    if hold_getan {
+        return
+    }
+    hold_getan = true
     let pollen: bool = kstate.mode_on(state, kstate.M_USBPOLL)
     serial.puts((&s_h[0]) as u64)
     serial.nl()
