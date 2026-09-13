@@ -40,6 +40,7 @@ import kbd
 import kstate
 import mem
 import netdev
+import part
 import inet
 import pmon
 import proc
@@ -1546,6 +1547,54 @@ fn power_screen(state: u64) {
     fb.set_echo(state, echo_vorher)
 }
 
+// RUNDE INSTALLER (P-001): DIE WURZEL AUF EINER PARTITION, FUER DEN
+// WEG UEBER DEN FENSTERSERVER.
+//
+// Woertlich dasselbe wie `root_from_part` in kernel/kmain.fi, und das
+// ist hier die ehrlichere Loesung als ein Aufruf hinueber: `kmain`
+// importiert `kgui` und nicht umgekehrt, ein Aufruf in die andere
+// Richtung waere ein Ring in den Abhaengigkeiten. Was beide teilen,
+// sind `part` und `blk` -- die Tafel wird an EINER Stelle gelesen
+// (part.fi), und nur die vier Zeilen, die das Ergebnis einhaengen,
+// stehen zweimal.
+fn gui_root_from_part(state: u64) -> bool {
+    var s_try: [u8; 18] = "wm: rootpart scan\0"
+    var s_at: [u8; 14] = "wm: rootpart=\0"
+    var s_fi: [u8; 9] = "  first=\0"
+    var s_bl: [u8; 10] = "  blocks=\0"
+    var s_none: [u8; 22] = "wm: keine OFS-Part.\0\0\0"
+    serial.puts((&s_try[0]) as u64)
+    serial.nl()
+    let n: u64 = part.scan(state, blk.DEV_ATA)
+    if n == 0 {
+        serial.puts((&s_none[0]) as u64)
+        serial.nl()
+        return false
+    }
+    let i: u64 = part.find_kind(state, blk.DEV_ATA, part.T_OFS)
+    if i >= part.MAX_PARTS {
+        serial.puts((&s_none[0]) as u64)
+        serial.nl()
+        return false
+    }
+    let first: u64 = part.start(state, i)
+    let cnt: u64 = part.blocks(state, i)
+    blk.use_at(state, blk.DEV_ATA, first, cnt)
+    if !fs.mount(state) {
+        blk.use_ata(state, kutil.root_blocks(state))
+        return false
+    }
+    kstate.set(state, kstate.ROOT_PART, i)
+    serial.puts((&s_at[0]) as u64)
+    serial.dec(i)
+    serial.puts((&s_fi[0]) as u64)
+    serial.dec(first)
+    serial.puts((&s_bl[0]) as u64)
+    serial.dec(cnt)
+    serial.nl()
+    return true
+}
+
 fn surface(state: u64) {
     var s_off: [u8; 12] = "wm: skipped\0"
     var s_nofb: [u8; 22] = "wm: kein Bildschirm\0\0\0"
@@ -1672,7 +1721,38 @@ fn surface(state: u64) {
             }
         }
         if quelle {
-            let m: bool = fs.mount(state)
+            var m: bool = fs.mount(state)
+            // ============================ RUNDE INSTALLER (P-001)
+            // UND WENN DIE WURZEL AUF EINER PARTITION LIEGT.
+            //
+            // Hier stand nur `fs.mount`. Das findet ein Dateisystem
+            // ab BLOCK 0 der Platte -- die Lage jedes Testabbilds
+            // dieses Baums -- und ein Boot-Modul im Arbeitsspeicher.
+            // Eine Platte, die das Installationsprogramm beschrieben
+            // hat, hat WEDER: in Block 0 steht ein Schutz-MBR, und
+            // das Dateisystem faengt hinter der EFI-Partition an.
+            //
+            // `kmain.osum` kann das seit Runde INSTALL
+            // (`root_from_part`), und genau deshalb ist die Abnahme
+            // dieser Runde ueber den TEXTWEG gruen geworden. Der Weg
+            // ueber den FENSTERSERVER hatte die Zeilen nicht -- also
+            // startete die frisch installierte Platte, malte den
+            // Schreibtisch und fand ihre eigene Wurzel nicht:
+            //
+            //     wm: mount=0
+            //
+            // Das ist der Unterschied zwischen "die Platte bootet"
+            // und "man kann damit arbeiten", und er faellt nur auf,
+            // wenn jemand nach der Installation wirklich einen
+            // Schreibtisch hochfahren laesst.
+            //
+            // Die Reihenfolge ist dieselbe wie drueben und aus
+            // demselben Grund: erst der alte Weg (damit jede
+            // bestehende Messung genau das sieht, was sie sah), und
+            // ERST WENN DER FEHLSCHLAEGT die Partitionstafel.
+            if !m && !bootmod.ready(state) {
+                m = gui_root_from_part(state)
+            }
             serial.puts((&s_fs[0]) as u64)
             serial.dec(kutil.yes(m))
             serial.nl()

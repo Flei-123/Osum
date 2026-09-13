@@ -273,10 +273,30 @@ platte_lauf() { # <name> <skript> <limit>
     local ser="$OUT/$name.txt" vars="$OUT/$name.vars.fd"
     rm -f "$ser"
     cp -f /usr/share/OVMF/OVMF_VARS.fd "$vars" 2>/dev/null || true
-    # Die Kommandozeile kommt von der PLATTE. Ein `-append` waere
-    # geschummelt -- dann haette der Wirt dem Kern gesagt, was er tun
-    # soll. Also wird die limine.conf AUF der EFI-Partition geaendert,
-    # so wie ein Mensch es mit einem Editor taete.
+    # ============================================================
+    # DIE STARTDATEI DES INSTALLERS BLEIBT, WO SIE IST
+    #
+    # Fuer den Lauf OHNE Skript (Glied 5) wird hier NICHTS
+    # ueberschrieben: was gemessen werden soll, ist die Datei, die der
+    # Installer selbst geschrieben hat. Wer sie vorher ersetzt, misst
+    # seine eigene Kommandozeile und erfaehrt nichts darueber, ob die
+    # Installation eine startfaehige Platte hinterlaesst.
+    #
+    # Fuer die Laeufe MIT Skript (Glieder 6 und 7) muss eine hinein --
+    # ein Skript laesst sich nur ueber die Kommandozeile uebergeben,
+    # und die steht auf der Platte. Ein `-append` waere geschummelt.
+    # Also wird die limine.conf dann geaendert, so wie ein Mensch es
+    # mit einem Editor taete.
+    if [ -z "$skript" ]; then
+        local args0=(-machine pc -cpu max -m 512 -display none -no-reboot
+            -drive "if=pflash,format=raw,unit=0,readonly=on,file=$OVMF"
+            -serial "file:$ser"
+            -drive "file=$ZIEL,format=raw,if=ide,index=0"
+            -device isa-debug-exit,iobase=0xf4,iosize=0x04)
+        [ -f "$vars" ] && args0+=(-drive "if=pflash,format=raw,unit=1,file=$vars")
+        timeout "$limit" $QEMU_X86 "${args0[@]}" > /dev/null 2>&1
+        return $?
+    fi
     {
         echo "timeout: 0"
         echo "verbose: yes"
