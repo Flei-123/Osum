@@ -224,6 +224,30 @@ und berührt drei Schichten.
   baut seine Seitenleiste noch beim Aktualisieren neu auf, statt auf die
   Meldung zu hören.
 
+### Keine Regression
+
+`bash tools/k17/run.sh` — **156 passed, 2 failed**, und das sind
+**dieselben zwei** wie in der Grundlinie vor dieser Runde, Oktett für
+Oktett (eine Zeitmessung am Tastenweg und ihre Gegenprobe; beide hängen
+an der Last der Maschine, nicht an dieser Runde).
+
+Dazwischen lag ein Fehler, den erst der Lauf gezeigt hat: der
+Haltepunkt `usb_hold` ist in dieser Runde **zweimal** an die falsche
+Stelle gewandert.
+
+* **Vor `osum`** (wo er herkam): die Wurzel steht noch nicht, ein im
+  Betrieb gesteckter Stick wird aufgezählt und nie eingehängt.
+* **Nach `osum`**: die Shell ist schon **durchgelaufen**. Im Mitschnitt
+  steht `sh: ready` in Zeile 126, `sh: bye` in 164 und `k17: hold` in
+  188 — Abschnitt 3 der Abnahme fiel, und zwar zu Recht.
+
+Richtig ist **in** `osum`, hinter `usb_mount` und vor dem ersten
+Prozess: dort ist die Wurzel eingehängt, `/medien` liegt da, und es
+läuft noch niemand. Dazu ein Rückfall hinter `osum` in `kernel_main`,
+weil `osum` an drei Stellen früh zurückkehrt — eine davon ist das
+fehlende Wort `osum` selbst, und genau damit fährt der Mauslauf von
+K17. `usb_hold` hält deshalb **genau einmal** (`hold_getan`).
+
 ---
 
 ## Die Bilder
@@ -250,9 +274,9 @@ Fensterinhalt (x 27..560, y 63..425):
 ```
 10-vorher:  10767 helle Punkte (Text)
 20-steckt:   8670
-30-danach:   7422
+30-danach:   7541
 Unterschied 10 gegen 20:  Rechteck (27,63)-(555,422)
-Unterschied 20 gegen 30:  Rechteck (26,63)-(425,422)
+Unterschied 20 gegen 30:  Rechteck (26,63)-(425,419)
 ```
 
 Ein einzelnes Bild mit einer Zeile darauf könnte immer dagestanden
