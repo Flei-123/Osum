@@ -1,0 +1,146 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/sperrwache.fi -- RUNDE ANMELDUNG: DER LEERLAUF-WAECHTER.
+//
+//     sperrwache          warten, und bei Leerlauf sperren
+//
+// ================================================ WARUM ES IHN GIBT
+//
+// `lock -d` tut dasselbe und steht seit Runde ALLTAG in `lock.fi`. Es
+// hat nur nie jemand gestartet -- und es LIESSE sich auch nicht
+// starten, denn:
+//
+//   `lock.fi` ist seit Runde GRUNDLINIE `profile app`, und ein
+//   Programm in diesem Profil BEKOMMT SEINE ARGUMENTE NICHT.
+//
+// Das ist gemessen und nicht vermutet. Eine Zeile in `lock.fi`, die
+// `ulib.arg_count(args)` ausgab, sagte im fertigen Abbild:
+//
+//     lock: argc gesehen 0
+//
+// und zwar AUCH bei dem Sperrer, den der Kern selbst mit `desk_spawn`
+// und `argc = 1` startet. Der Grund steht in `tools/usbimg/build.sh`:
+// ein Programm mit `profile app` wird OHNE `crt.o` gebunden, weil
+// firnc unter `app` sein eigenes `_start` einsetzt -- und dieses
+// `_start` reicht den Argumentblock des Kerns nicht an `u_start`
+// weiter. `login.fi` und `su.fi` sehen ihre Argumente, weil sie
+// `profile kernel` sind; `lock`, `desktop`, `taskbar`, `settings`,
+// `launcher` und `glogin` sehen sie nicht.
+//
+// DARAUS FOLGT: `lock -d`, `lock -s`, `lock -an` und `lock -absturz`
+// sind seit jener Runde tot. Sie sind nicht kaputt -- sie sind
+// unerreichbar. Das gehoert in die Grenzenliste dieser Runde und nicht
+// stillschweigend umgangen.
+//
+// DIESE RUNDE REPARIERT DIE ABI NICHT. Das waere ein Eingriff in den
+// Uebersetzer oder in den Binder und damit ein eigener Auftrag; wer ihn
+// nimmt, findet hier die Messung dazu. Stattdessen bekommt der
+// Waechter ein EIGENES Programm, das keine Argumente braucht -- der
+// kleinste Weg, der die Zusage "sperrt nach Leerlauf" wirklich
+// einloest.
+//
+// WAS ER TUT, und mehr nicht: alle 250 ms nachsehen, wie lange nichts
+// eingegeben wurde (`OP_IDLE`, der Kern zaehlt es an der Stelle, an der
+// Taste und Zeiger ankommen), und bei Ueberschreiten der Grenze aus
+// /etc/sperre.conf die Sperre SETZEN (`OP_AN`). Das Fenster mit der
+// Kennwortfrage startet danach der Kern -- derselbe Weg wie bei Win+L.
+//
+// ER SPERRT NICHT SELBST AUF und zeigt nichts an. Ein Waechter, der
+// aufsperren koennte, waere ein zweiter Weg an der Kennwortpruefung
+// vorbei.
+//
+// `profile kernel`, damit er klein bleibt: er malt nichts, also
+// braucht er weder wlib noch fUi.
+
+profile kernel
+
+import ulib
+import libc.io
+
+export { u_start }
+
+const SYS_SPERRE: u64 = 1870
+const OP_STATE: u64 = 0
+const OP_AN: u64 = 1
+const OP_IDLE: u64 = 3
+
+static mut T_CONF: [u8; 17] = "/etc/sperre.conf\0"
+static mut K_LEER: [u8; 10] = "leerlauf=\0"
+
+fn sy(op: u64, arg: u64) -> u64 {
+    return ulib.sys(SYS_SPERRE, op, arg, 0)
+}
+
+// Sekunden aus /etc/sperre.conf; 0 heisst: nie von selbst. Woertlich
+// die Funktion aus lock.fi -- sie liest dieselbe Datei nach demselben
+// Schluessel, und zwei verschiedene Leser derselben Datei waeren zwei
+// Stellen, an denen sie verschieden verstanden wird.
+fn leerlauf_grenze() -> u64 {
+    var buf: [u8; 512] = [0 as u8; 512]
+    let fd: u64 = io.open((&T_CONF[(0) as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    let b: u64 = (&buf[(0) as usize]) as u64
+    let n: u64 = io.read(fd, b, 500)
+    io.close(fd)
+    if ulib.bad(n) || n == 0 {
+        return 0
+    }
+    __mmio_write8((b + n) as *mut u8, 0 as u8)
+    let at: u64 = ulib.find(b, (&K_LEER[(0) as usize]) as u64)
+    if at == 0xFFFFFFFFFFFFFFFF {
+        return 0
+    }
+    return ulib.to_num(b + at + ulib.length((&K_LEER[(0) as usize]) as u64))
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_start: [u8; 33] = "sperrwache: an, Leerlauf ab \0\0\0\0\0"
+    var s_s: [u8; 3] = " s\0"
+    var s_aus: [u8; 38] = "sperrwache: aus (leerlauf=0)\0\0\0\0\0\0\0\0\0\0"
+    var s_an: [u8; 41] = "sperrwache: Leerlauf abgelaufen, sperre\0\0"
+    var s_idle: [u8; 19] = "sperrwache: idle=\0\0"
+
+    let grenze: u64 = leerlauf_grenze()
+    if grenze == 0 {
+        ulib.say((&s_aus[(0) as usize]) as u64)
+        ulib.nl()
+        return 0
+    }
+    ulib.say((&s_start[(0) as usize]) as u64)
+    ulib.sayn(grenze)
+    ulib.say((&s_s[(0) as usize]) as u64)
+    ulib.nl()
+
+    var runden: u64 = 0
+    var gesagt: u64 = 0
+    while runden < 4000000 {
+        runden = runden + 1
+        let _s: u64 = ulib.sleep_ms(250)
+        // NUR WENN NICHT SCHON GESPERRT IST. Sonst setzte der Waechter
+        // die Sperre waehrend der Sperre immer wieder neu -- der Kern
+        // zaehlt das als Sperrung und der Zaehler liefe davon.
+        if sy(OP_STATE, 0) == 0 {
+            let idle: u64 = sy(OP_IDLE, 0)
+            if !ulib.bad(idle) {
+                // Alle acht Runden (zwei Sekunden) EINMAL sagen, wie
+                // weit der Leerlauf ist. Ohne diese Zeile ist ein
+                // Waechter, der wartet, von einem, der haengt, nicht zu
+                // unterscheiden -- und die Abnahme dieser Runde haengt
+                // genau an dieser Unterscheidung.
+                if (runden & 7) == 0 && gesagt < 40 {
+                    gesagt = gesagt + 1
+                    ulib.say((&s_idle[(0) as usize]) as u64)
+                    ulib.sayn(idle)
+                    ulib.nl()
+                }
+                if idle >= grenze * 1000 {
+                    ulib.say((&s_an[(0) as usize]) as u64)
+                    ulib.nl()
+                    let _a: u64 = sy(OP_AN, 0)
+                }
+            }
+        }
+    }
+    return 0
+}
