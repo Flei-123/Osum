@@ -15,6 +15,14 @@
 # Fensterknopf-Zone -- dieselbe Stelle, zwei Bilder, eine Rechnung
 # (tools/gfx/checkshot.py).
 #
+# NACHBESSERUNG DER ZWEITEN RUNDE: zwei Zusagen sind dazugekommen.
+# Erstens wird der in der Leiste GEMALTE Text gegen den vom Plugin
+# GESCHICKTEN gehalten (`taskbar: text plug t=` gegen `pluguhr: text`,
+# derselbe Lauf) -- damit ist der CPU-Wert im Bild belegt und nicht
+# behauptet. Zweitens wird bei 640x480 der Abstand zwischen Widgetfeld
+# und dem linkesten eigenen Leistenfeld nachgerechnet: mindestens acht
+# Bildpunkte, sonst lesen sich Widget und Uhr als ein Feld.
+#
 # Die Bilder landen in docs/shots/wmplug/.
 #
 # Gebrauch: bash tools/wmplug/widget.sh
@@ -302,6 +310,89 @@ else
     fi
 fi
 
+echo "== 6b. WOHER KOMMT DIE ZAHL IN DER LEISTE? =="
+# DIE FRAGE DER JURY WAR: der CPU-Wert im Bild -- ist der gemessen oder
+# gemalt? Beantwortet wird sie nicht mit einem Satz, sondern mit zwei
+# Leitungszeilen aus DEMSELBEN Lauf:
+#
+#   pluguhr: text cpu 7%                    <- was das Plugin SCHICKT
+#   taskbar: text plug x=.. t=cpu 7%        <- was die Leiste MALT
+#
+# Das Plugin meldet jeden geschickten Text NACH dem Ruf `WM_PLUG_BAR`
+# (kernel/user/pluguhr.fi): wenn diese Zeile auf der Leitung steht, hat
+# der Kern den Text schon, und die Leiste holt ihn erst danach
+# (`WM_PLUG_BARGET`). Also muss JEDE gemalte Zeichenfolge gleich der
+# zuletzt gemeldeten sein. Weicht auch nur eine ab, malt die Leiste
+# etwas, das kein Plugin geschickt hat -- und dann ist die Zahl im Bild
+# nichts wert.
+paare=$(awk '
+    /^pluguhr: text / { letzte = substr($0, 15); sub(/[ \t\r]+$/, "", letzte); next }
+    /^taskbar: text plug / {
+        i = index($0, " t=")
+        if (i == 0) next
+        gemalt = substr($0, i + 3); sub(/[ \t\r]+$/, "", gemalt)
+        if (letzte == "") next          # gemalt, bevor je Text kam
+        n++
+        if (gemalt != letzte) { schlecht++; if (bsp == "") bsp = gemalt " != " letzte }
+    }
+    END { printf "%d %d %s\n", n+0, schlecht+0, bsp }
+' "$TMPD/an.txt.clean")
+set -- $paare
+pn=${1:-0}; pfalsch=${2:-0}; shift 2 || true
+if [ "$pn" -lt 1 ]; then
+    bad "kein Paar aus 'pluguhr: text' und 'taskbar: text plug' im Lauf"
+elif [ "$pfalsch" != 0 ]; then
+    bad "$pfalsch von $pn gemalten Texten stammen NICHT vom Plugin ($*)"
+else
+    ok "alle $pn gemalten Widget-Texte sind genau der zuletzt geschickte (cpu-Wert belegt)"
+fi
+# UND DIE UHRZEIT GEHOERT DER LEISTE. Seit dieser Nachbesserung schickt
+# das Widget nur noch `cpu NN%`: zwei Uhrzeiten nebeneinander, die um
+# eine Minute auseinanderliefen, waren der Befund der Jury.
+if grep -qaE '^pluguhr: text [0-9][0-9]:[0-9][0-9]' "$TMPD/an.txt.clean"; then
+    bad "das Widget schickt wieder eine Uhrzeit -- die hat die Leiste schon"
+else
+    ok "das Widget schickt keine Uhrzeit mehr (nur Last), die Uhr bleibt der Leiste"
+fi
+if grep -qaE '^pluguhr: text cpu [0-9]+%' "$TMPD/an.txt.clean"; then
+    ok "der Text hat die Form 'cpu NN%' ($(grep -a '^pluguhr: text ' "$TMPD/an.txt.clean" | tail -1))"
+else
+    bad "der Widgettext hat nicht die Form 'cpu NN%'"
+fi
+
+echo "== 6c. der Abstand zwischen Widgetfeld und Uhr, bei 640x480 =="
+# Der enge Schirm ist der Fall, in dem es schiefging: `gap()` faellt
+# dort auf vier Bildpunkte, und Widgetfeld und Uhr lasen sich auf dem
+# Foto als EIN Feld. Die Leiste haelt jetzt mindestens acht Bildpunkte
+# frei (kernel/user/taskbar.fi). Gemessen wird das nicht am Bild,
+# sondern an den Zahlen, die die Leiste selbst meldet: linke Kante des
+# linkesten eigenen Feldes minus rechte Kante des Widgetkastens.
+ZEILE="$BASE fbres=640x480" lauf eng "wigapp=/bin/uhrstart,uhrstart,runden=20" \
+    "taskbar: text plug "
+has "$TMPD/eng.txt" "taskbar: plug nr=0" "bei 640x480 hat die Leiste ein Widget-Feld"
+ezeile=$(head -n "$(cat "$TMPD/eng.marke")" "$TMPD/eng.txt" \
+    | grep -a '^taskbar: plug nr=0 ' | tail -1)
+epx=$(zahl "$ezeile" x); epw=$(zahl "$ezeile" w)
+# Die linke Kante des linkesten eigenen Feldes (Uhr, Akku, Ton, Netz,
+# Meldungen) -- je Name der zuletzt gemeldete Wert.
+eminx=$(grep -a '^taskbar: field ' "$TMPD/eng.txt" | awk '
+    { name = $3; i = index($0, " x="); rest = substr($0, i + 3)
+      split(rest, t, " "); x[name] = t[1] + 0 }
+    END { m = -1
+          for (k in x) if (m < 0 || x[k] < m) m = x[k]
+          print m }')
+if [ -z "$epx" ] || [ -z "${eminx:-}" ] || [ "${eminx:--1}" -lt 0 ]; then
+    bad "bei 640x480 fehlen die Zahlen fuer den Abstand (Kasten='$ezeile')"
+else
+    abstand=$((eminx - epx - epw))
+    if [ "$abstand" -ge 8 ]; then
+        ok "Abstand Widgetfeld -> linkestes Leistenfeld: $abstand px (>= 8), 640x480"
+    else
+        bad "Abstand nur $abstand px bei 640x480 (Kasten x=$epx w=$epw, Feld x=$eminx)"
+    fi
+fi
+cp -f "$TMPD/eng.ppm" "$SHOTS/widget-eng-640x480.ppm" 2>/dev/null
+
 echo "== 7. Gegenprobe: derselbe Kernel OHNE Plugintafel =="
 # Eine Leiste, die auf einem Kern ohne Erweiterungen anders aussieht oder
 # gar stehenbleibt, waere der Preis dieser Runde -- also wird er
@@ -322,7 +413,7 @@ has "$TMPD/zu.txt" "tafel= zu" "mit plugaus ist die Plugintafel zu"
 # DIE BILDER FUERS ANSEHEN. Gerechnet wird mit dem PPM (drei Oktette je
 # Punkt, kein Verfahren dazwischen); ins Repo gehoert das PNG -- 1,4
 # Megaoktett je Foto waeren sonst der halbe Zweig.
-for b in widget-an widget-aus widget-aus-laufzeit; do
+for b in widget-an widget-aus widget-aus-laufzeit widget-eng-640x480; do
     if [ -s "$SHOTS/$b.ppm" ]; then
         python3 tools/gfx/ppm2png.py "$SHOTS/$b.ppm" "$SHOTS/$b.png" \
             > /dev/null 2>&1 && rm -f "$SHOTS/$b.ppm"
