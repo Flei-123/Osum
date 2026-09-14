@@ -485,3 +485,106 @@ WMPLUG: 139 bestanden, 0 gescheitert
 ```
 
 Alle Zahlen in diesem Papier stammen aus genau diesem Lauf.
+
+---
+
+## 13. Nachbesserung R2-1: die Uhr, die Spalten und der CPU-Wert
+
+Vier Befunde der Jury betrafen das, was man SIEHT — und sie waren
+berechtigt: eine Messung, die man nicht lesen kann, ist nur halb
+gemessen. Alle Zahlen hier stammen aus einem Lauf von
+`bash tools/wmplug/widget.sh` (KVM, gebooteter Kernel) und aus einem
+QEMU-Lauf mit dem Wort `verwaltung`.
+
+### 13.1 Zwei Uhrzeiten nebeneinander — jetzt eine
+
+Das Widget schickte `HH:MM cpu NN%`, und die Leiste hat rechts daneben
+ihre eigene Uhr. Beide Uhren kommen aus verschiedenen Quellen und
+konnten um eine Minute auseinanderlaufen; bei 640x480 stiessen die
+Kaesten ausserdem aneinander. **Das Widget schickt jetzt nur noch
+`cpu NN%`** (`kernel/user/pluguhr.fi`, `bauen`) — die Uhrzeit gehoert
+der Leiste, die Last zeigt die Leiste nicht.
+
+```
+pluguhr: text cpu 0%
+pluguhr: text cpu 100%
+```
+
+Und die Leiste haelt zwischen Widgetfeld und ihrem linkesten eigenen
+Feld **mindestens acht Bildpunkte** frei (`kernel/user/taskbar.fi`,
+Layoutschleife der Widgets). `gap()` ist `wlibc.space(1)` und faellt bei
+kleinen Schirmen auf vier — genau dort klebte es. Der Abzug geschieht
+nur, wenn ueberhaupt ein Widget Text hat: eine Leiste ohne Erweiterung
+soll ihre Fensterknoepfe nicht verschoben bekommen.
+
+Gemessen bei **640x480** an den Zahlen, die die Leiste selbst meldet
+(`taskbar: plug nr=0 x= w=` gegen `taskbar: field <name> x=`), nicht am
+Augenmass:
+
+```
+6c. der Abstand zwischen Widgetfeld und Uhr, bei 640x480
+  OK  bei 640x480 hat die Leiste ein Widget-Feld
+  OK  Abstand Widgetfeld -> linkestes Leistenfeld: 8 px (>= 8), 640x480
+```
+
+Bild: `docs/shots/wmplug/widget-eng-640x480.png`.
+
+### 13.2 Woher kommt der CPU-Wert im Bild?
+
+Die Frage war richtig gestellt: eine Zahl im Foto belegt nichts, solange
+niemand zeigt, dass sie aus dem Plugin stammt. Das Widget meldet jetzt
+**jeden** geschickten Text auf der Leitung, und zwar **nach** dem Ruf
+`WM_PLUG_BAR` — steht die Zeile da, hat der Kern den Text schon, und die
+Leiste holt ihn erst danach (`WM_PLUG_BARGET`). Also muss jede gemalte
+Zeichenfolge gleich der zuletzt gemeldeten sein, und `widget.sh` rechnet
+das Paar fuer Paar nach:
+
+```
+6b. WOHER KOMMT DIE ZAHL IN DER LEISTE?
+  OK  alle 2 gemalten Widget-Texte sind genau der zuletzt geschickte (cpu-Wert belegt)
+  OK  das Widget schickt keine Uhrzeit mehr (nur Last), die Uhr bleibt der Leiste
+  OK  der Text hat die Form 'cpu NN%' (pluguhr: text cpu 100%)
+```
+
+**Was die 100 % bedeuten, und warum sie stimmen:** `cpu_last()` rechnet
+aus zwei Messungen `CS_TICKS` und `CS_IDLE` (`cpu.C_IDLETICKS`). Der
+Abnahmelauf faehrt mit `nosched noproc` — es gibt keinen Leerlauffaden,
+der Leerlaufzaehler bleibt 0, und die ehrliche Antwort darauf ist 100 %.
+Das ist kein Fehler des Widgets und auch nicht seine eigene Last (es
+schlaeft zwischen zwei Abholungen, `pollms = PL_FRIST/3`), sondern die
+Eigenschaft dieses Aufbaus. Auf einem Lauf mit Scheduler zeigt dasselbe
+Widget die wirkliche Auslastung. **Benannt und nicht schoengerechnet.**
+
+### 13.3 Die Beschriftungen von `wmplug info`
+
+`"  Leistentext\0"` hatte kein Trennzeichen — im Bild stand
+`Leistentext13`, Wort und Wert zusammengelaufen. Alle zehn
+Beschriftungen stehen jetzt auf **einer** Feldbreite (14 Oktette, zwei
+davon Einzug, `LB_W`). Gemessen an der seriellen Leitung eines Laufes
+mit `verwaltung` (`/bin/wmplug info uhr`, Ring 3):
+
+```
+plugstart: info uhr r=10
+  Name        uhr
+  Platz       0
+  Rechte      0x807 (win fokus flaeche +leiste)
+  Maske       0x8E
+  liegt       0
+  verloren    0
+  eingelegt   1
+  abgeholt    1
+  Grund       0 selbst
+  Leistentext  8
+  im Kern gesamt: Verstoesse 0, abgewiesen 0
+```
+
+Foto desselben Laufes: `docs/shots/wmplug/info-uhr-spalten.png` — jede
+Beschriftung endet in derselben Spalte, `Leistentext` und die `8` sind
+getrennt, und die Statuszeile von `list` steht in zwei kurzen Zeilen
+(`wmplug: abi=1  Plugins 0 von 8` / `  Frist 50 Ticks  Flaeche 0`), die
+auch in ein 640x480-Terminal passen.
+
+**Nachtrag zu den aelteren Abschnitten:** die in 5. und 6. zitierten
+Zeilen `pluguhr: text 18:06 cpu 0%` stammen aus dem Lauf VOR dieser
+Nachbesserung; die Form heisst seither `pluguhr: text cpu 0%`. Die
+Aussage der Abschnitte aendert sich dadurch nicht.
