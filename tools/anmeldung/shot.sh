@@ -19,6 +19,12 @@
 #   APPEND_EXTRA   zusaetzliche Woerter auf der Kernelzeile
 #   SEKUNDEN       Gesamtlaufzeit (Vorgabe 45)
 #   VORLAUF        Wartezeit vor der ersten Taste (Vorgabe 12)
+#   ACPITABLE      eine zusaetzliche ACPI-Tabelle (-acpitable file=...).
+#                  RUNDE ACPI-EREIGNISSE: QEMU 7.2 hat weder Deckel noch
+#                  Akku; `tools/acpiev/asl/laptop.aml` baut beide nach,
+#                  und ohne diese Zeile waere auf jedem Bild dieser
+#                  Runde "kein Akku" zu sehen -- richtig gemessen und
+#                  trotzdem nicht das, was gezeigt werden soll.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -44,6 +50,9 @@ cp "$BUILD/root.img" "$W/disk.img"
 KVM=(-accel tcg)
 [ -w /dev/kvm ] && KVM=(-accel kvm -cpu host)
 
+ACPIARG=()
+[ -n "${ACPITABLE:-}" ] && ACPIARG=(-acpitable "file=$ACPITABLE")
+
 APPEND="gfx fbres=1280x800 wm wig desk wmshell wmdauer herz"
 APPEND="$APPEND nosched noproc nofs lang=de uiscale=1 $EXTRA"
 
@@ -52,6 +61,7 @@ timeout $((SEKUNDEN + 40)) qemu-system-x86_64 "${KVM[@]}" -m 512 \
     -serial "file:$W/serial.txt" -display none -no-reboot \
     -device VGA,edid=on,xres=1280,yres=800,vgamem_mb=32 \
     -monitor "unix:$W/mon,server,nowait" \
+    "${ACPIARG[@]}" \
     -drive "file=$W/disk.img,format=raw,if=ide,index=0" &
 QP=$!
 
