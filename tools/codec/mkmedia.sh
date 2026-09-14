@@ -49,6 +49,11 @@ mach p_bewegt 176 144  8 "testsrc2=size=352x288:rate=5" -g 100 -qp 24 \
 # Ein glattes Bild mit Bewegung -- hier entstehen viele P_Skip-Bloecke.
 mach p_skip   128  96  6 "color=c=navy:size=128x96:rate=5" -g 100 -qp 26
 
+# --- CIF, die groesste Masse dieser Runde (MAXW/MAXH in h264.fi).
+#     Dieser Strom traegt die Geschwindigkeitsangabe im Bericht: er ist
+#     das, was man wirklich abspielen wuerde.
+mach cif      352 288 10 "testsrc2=size=352x288:rate=10" -g 100 -qp 26
+
 echo "PRUEFMATERIAL:"
 while read -r name w h n; do
     s264=$(stat -c%s "$ZIEL/$name.264" 2>/dev/null || echo 0)

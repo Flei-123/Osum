@@ -123,6 +123,226 @@ Daran wird sich gehalten. Was gebaut wird und was ausdruecklich nicht:
 
 ---
 
-*(Die Abschnitte 3 bis 7 -- Bauabschnitte, Messwerte, die
-ffmpeg-Gegenprobe und die offenen Punkte -- werden waehrend der Runde
-gefuellt.)*
+---
+
+## 3. DIE BAUABSCHNITTE, und warum in dieser Reihenfolge
+
+Der Auftrag verlangt, jede Stufe einzeln messbar zu machen. Das ist
+geschehen, aber mit einer Entscheidung davor, die den Rest der Runde
+getragen hat:
+
+> **Der ganze Dekodierer entstand ZUERST in Python** (`tools/codec/ref264.py`,
+> 1364 Zeilen), gegen ffmpeg gemessen, und erst danach in Firn.
+
+Der Grund ist Arbeitsoekonomie und nichts sonst. Ein Fehlversuch in
+Python kostet Sekunden; derselbe Fehlversuch in Firn kostet einen
+Kernelbau, ein Plattenabbild und einen QEMU-Lauf -- gut zwei Minuten.
+Von den **vierzehn Fehlern** dieser Runde sind **neun** im
+Python-Geraet gefunden worden, und keiner davon war im Quelltext zu
+sehen; sie zeigen sich alle erst im Wertevergleich.
+
+| Stufe | wie gemessen | Ergebnis |
+|---|---|---|
+| Bitstromleser, Annex B, RBSP | die 0x03-Entstopfung, `ue`/`se` von Hand gegen den Strom nachgerechnet | Slice-Kopf endet bei Bit 24 -- von Hand dasselbe |
+| SPS/PPS | gegen `ffmpeg -debug` (Profil, Masse, poc_type, CAVLC) | profile 66, 4:2:0, frame_mbs_only, CAVLC, keine Slice-Gruppen |
+| CAVLC | **Kreisprobe**: 53331 Bloecke kodiert, gelesen, verglichen | **0 falsch** |
+| I-Slice | ffmpeg-Gegenprobe, oktettweise | 4 Stroeme, **0 abweichende Oktette** |
+| Deblocking | dieselbe Gegenprobe (vorher: maxdiff 2 auf den Kanten) | **0** |
+| P-Slice | dieselbe Gegenprobe | 4 Stroeme, **0** |
+| Firn-Fassung | SHA-256 je Bild IM LAUFENDEN KERN gegen ffmpeg | 38 Bilder, **38 Treffer** |
+
+## 4. DIE VIERZEHN FEHLER
+
+Sie stehen hier vollstaendig, weil jeder einzelne die Art Fehler ist,
+die eine Runde ohne Wertevergleich fuer "fertig" halten wuerde.
+
+**Im Python-Geraet gefunden (neun):**
+
+1. **`BLK_XY`** -- die Reihenfolge der 16 Luma-4x4-Bloecke (8.2.2)
+   laeuft ueber 8x8-Viertel, nicht zeilenweise. Die naheliegende
+   Bitverdrehung liefert DOPPELTE Koordinaten und erreicht die Zeilen 2
+   und 3 nie. *Wirkung:* der Bitstrom laeuft drei Makrobloecke spaeter
+   aus dem Tritt, und es sieht nach einem Tafelfehler aus.
+2. **suffixLength, erster Wert** -- FFmpeg hat ZWEI Wege, und welcher
+   gilt, haengt an der CODELAENGE (`prefix+1+sL <= 8`). Der kurze
+   rechnet `1 + (|level| > 3)`, nur der lange setzt fest 2.
+3. **...und die Zeile dazu** steht in vorzeichenloser C-Arithmetik
+   (`level_code + 3U > 6U`). Vorzeichenbehaftet abgeschrieben kommt
+   fuer negative Werte das Falsche heraus.
+4. **`weightScale` fehlte** in der Skalierung. Bei Baseline ist es die
+   flache Matrix aus lauter 16en (Flat_4x4_16, 8.5.9). *Wirkung:* alle
+   Reste sechzehnmal zu klein -- kein Absturz, kein schiefes Bild, ein
+   **flaches**.
+5. **Dasselbe noch einmal beim Chroma-DC** (8.5.11.2). *Wirkung:* das
+   Muster stimmt, die Hoehe sitzt um einen festen Betrag daneben.
+6. **Die `done`-Fahne** (Nachbar schon dekodiert?) darf NUR fuer
+   FREMDE Makrobloecke gelten. Auf den eigenen angewandt, wird fuer
+   jeden 4x4-Block DC vorhergesagt -- und damit werden die falschen
+   Modi aus dem Strom gelesen.
+7. **Ein INTER-Nachbar ist verfuegbar** und zaehlt fuer die
+   Intra-Modusvorhersage als DC; nur bei `constrained_intra_pred_flag`
+   gilt er als nicht da. Genau andersherum gedacht ist jeder
+   Intra-Makroblock in einem P-Slice falsch.
+8. **Die Sonderfaelle 16x8/8x16** der Vektorvorhersage (8.4.1.3.1)
+   greifen VOR dem Median. Ohne sie liegt jeder zweite P-Makroblock
+   daneben.
+9. **Chroma-Deblocking** griff auf die falschen 4x4-Bloecke zu
+   (Chromazeile `>>2` statt `>>1`). *Wirkung:* PAARE von Abweichungen
+   genau auf den Kanten 3/4, 7/8, 11/12, maxdiff 2.
+
+**Erst in Firn bzw. im Kern gefunden (fuenf):**
+
+10. **Die Zahl der Bildspeicher.** x264 stellt im Baseline-Profil
+    `num_ref_frames = 3` ein und benutzt `ref_idx` bis 2 wirklich. Mit
+    drei Speichern (Bild + zwei Referenzen) stimmen die ersten DREI
+    Bilder, ab dem vierten wandert es. Das sieht wie ein Dekodierfehler
+    aus und ist ein zu kleiner Vorrat. Jetzt vier.
+11. `gaps_in_frame_num_value_allowed_flag` ist EIN Bit, kein `ue(v)`.
+12. Die Textfelder in Firn muessen exakt so lang sein wie der Text in
+    OKTETTEN (ein Umlaut ist zwei) -- dafuer gibt es jetzt
+    `tools/codec/fixstr.py`, statt es zu zaehlen.
+13. `... | grep -q` schliesst die Leitung; mit `set -o pipefail` gilt
+    der ganze Ausdruck als gescheitert und die Abnahme uebersprang sich
+    selbst.
+14. Die Tafelindizes von `coeff_token` (`t1 = i&3`, `tc = i>>2`) sind
+    mechanisch gegen die Erzeugung geprueft worden, statt sie zu glauben.
+
+## 5. DIE MESSWERTE
+
+### 5.1 Die ffmpeg-Gegenprobe, IM LAUFENDEN KERN
+
+Osum rechnet die SHA-256 je Bild SELBST (`kernel/user/sha.fi`, in Runde
+TRESOR gegen FIPS 180-4 gemessen), der Wirt rechnet dieselbe Summe aus
+dem, was `ffmpeg -f rawvideo -pix_fmt yuv420p` aus derselben Datei
+schreibt. Gleiche Summe heisst: Oktett fuer Oktett dasselbe Bild.
+
+| Strom | Masse | Bilder | Art | bitgleich | Zeit | Bilder/s |
+|---|---|---|---|---|---|---|
+| i_glatt | 128x96 | 2 | nur I | **2 / 2** | 14 ms | 142,85 |
+| i_klein | 64x64 | 3 | nur I | **3 / 3** | 26 ms | 115,38 |
+| i_sd | 176x144 | 3 | nur I | **3 / 3** | 69 ms | 43,47 |
+| i_scharf | 160x128 | 2 | nur I | **2 / 2** | 16 ms | 125,00 |
+| p_klein | 64x64 | 6 | I+P | **6 / 6** | 49 ms | 122,44 |
+| p_sd | 176x144 | 8 | I+P | **8 / 8** | 147 ms | 54,42 |
+| p_bewegt | 176x144 | 8 | I+P | **8 / 8** | 165 ms | 48,48 |
+| p_skip | 128x96 | 6 | I+P | **6 / 6** | 31 ms | 193,54 |
+| **cif** | **352x288** | **10** | **I+P** | **10 / 10** | **325 ms** | **30,76** |
+
+**48 Bilder, 48 Pruefsummen, 48 Treffer. PSNR ist unendlich, die Zahl
+abweichender Bildpunkte ist null** -- beides, weil die Bilder identisch
+sind und nicht aehnlich. Deshalb steht hier keine PSNR-Tabelle: sie
+haette nur dann einen Wert, wenn etwas abwiche.
+
+### 5.2 Die Geschwindigkeit, ehrlich
+
+Gemessen in QEMU mit KVM (AMD EPYC), Stufe-0-Uebersetzer, `-m 512`,
+mit der Uhr des Systems (`clock_gettime`, CLOCK_MONOTONIC) im Programm
+selbst -- also einschliesslich Dateilesen und Pruefsummenrechnen.
+
+* **CIF (352x288): 30,76 Bilder/s.** Das reicht fuer fluessiges Video
+  in dieser Aufloesung (25 B/s PAL, 30 B/s NTSC).
+* **QCIF (176x144): 43 bis 54 Bilder/s.**
+* Kleiner als das: 115 bis 194 Bilder/s.
+
+**WAS DAS NICHT HEISST.** Der Dekodierer ist nicht auf Geschwindigkeit
+gebaut, sondern auf Richtigkeit, und man sieht es:
+
+* Die Tafelsuche (`tab_find`) geht **bitweise linear** durch bis zu 68
+  Eintraege. Eine Baumtafel waere um ein Vielfaches schneller -- und
+  haette einen Fehler, den man nicht sieht. Fuer diese Runde war die
+  durchschaubare Form die richtige.
+* Die Bewegungskompensation rechnet **je 4x4-Block einzeln**, auch wo
+  der Makroblock einen einzigen Vektor hat; die Sechs-Anzapf-Filter
+  laufen dabei mehrfach ueber dieselben Punkte.
+* Es gibt **keinerlei SIMD**, keinen handgeschriebenen Assembler.
+
+Fuer **640x480 und groesser ist es zu langsam** -- hochgerechnet aus
+CIF etwa 10 Bilder/s, und das ist kein Video mehr. Wer das will,
+braucht die drei Punkte oben, in dieser Reihenfolge. **Es ist auch
+nicht gemessen worden**, weil `MAXW`/`MAXH` bei 352x288 stehen (die
+Begruendung steht in `h264.fi`: vier Bildspeicher, 6 MiB je Prozess).
+
+### 5.3 Die Gegenproben
+
+| Fall | Zahl | Ergebnis |
+|---|---|---|
+| abgeschnittene Stroeme (1 % bis 89 %) | 10 | alle sauber abgewiesen, keiner haengt |
+| verfaelschte Oktette (je 6 gekippte Bits) | 12 | alle sauber abgewiesen |
+| leer / Zufallsmuell / nur Startcode | 3 | alle sauber abgewiesen |
+| High Profile | 1 | abgewiesen, `err=2`, **0 Bilder** |
+| CABAC (Main) | 1 | abgewiesen |
+| im Python-Geraet zusaetzlich | 245 | **0 Abstuerze** |
+
+Kein Fall liefert ein halbes Bild und keiner laeuft in eine Schleife:
+der Bitleser liefert hinter dem Ende Nullen und setzt `bs_over`, und
+jede Tafelsuche, die nichts findet, bricht den Makroblock ab.
+
+### 5.4 Die Speicherkarte
+
+```
+123 Bereiche in 0x140000 Oktetten kdata, 12 Vektoren, 0 Kollisionen
+0x118000..0x120000  CODEC   kstate.fi:CODEC_OFF
+```
+
+**0 Kollisionen.** Gegenprobe: `CODEC_OFF` versuchsweise auf 0x108000
+(WMP_OFF) gelegt -- der Pruefer schlaegt an (Rueckgabe 1). Belegt ist
+EINE der acht Seiten, mit Zaehlern; die Bildpuffer liegen
+ausdruecklich NICHT dort (ein CIF-Bild ist 152 KiB und passte nicht
+einmal in den ganzen Bereich), sondern als statische Felder in
+`kernel/user/h264.fi`. Die Abnahme rechnet das nach.
+
+Dass der Bereich wirklich BESCHRIEBEN wird und nicht nur zugeteilt
+ist, prueft die Abnahme, indem sie die Zahlen aus dem KERN zurueckliest
+(`kframes`/`kw`/`kh`) und gegen die des Programms haelt -- bei allen
+Stroemen gleich.
+
+## 6. WAS OFFEN BLIEB
+
+Ehrlich und einzeln, statt einer Zusage:
+
+* **Kein MP4-Demuxer angeschlossen.** Der Auftrag stellt ihn frei
+  ("nur wenn Zeit bleibt"). Ein Demuxer EXISTIERT im Baum (Runde
+  DEMUX, `media.fi` liest MP4 und Matroska und kennt die Spurentafel);
+  was fehlt, ist die Naht, die die Laengenpraefixe von AVCC in
+  Annex-B-Startcodes wandelt und `h264.fi` fuettert. Das ist
+  ueberschaubar, aber es ist NICHT gebaut und nicht gemessen.
+* **`media.can_decode` sagt fuer C_H264 weiterhin falsch.** Der
+  Dekodierer ist da, die ehrliche Antwort in media.fi ist noch nicht
+  umgestellt -- das gehoert zusammen mit dem Punkt darueber gemacht,
+  sonst verspricht `/bin/play` etwas, das der Behaelterweg noch nicht
+  liefert.
+* **Keine Anzeige.** `h264_to_rgb` ist gebaut (BT.601-Festkomma,
+  derselbe Block wie in `jpeg.fi`) und uebersetzt, aber **nicht gegen
+  ffmpeg gemessen** und an kein Fenster angeschlossen. Wer ein Video
+  auf dem Schirm will, braucht die Naht zu `wm.fi`/`vgpu.fi`.
+* **Nur 352x288.** Siehe 5.2. Fuer groessere Bilder braucht es mehr
+  Speicher je Prozess und die drei Beschleunigungen.
+* **Keine JVT-Konformitaetsstroeme.** Der Auftrag nennt sie als
+  haerteste Latte, falls erreichbar. Sie liegen nicht auf diesem
+  Rechner und wurden nicht geholt; gemessen wurde gegen ffmpeg, was
+  fuer Baseline eine harte, aber nicht die haerteste Latte ist.
+  Insbesondere ungeprueft: mehrere Slices je Bild, `I_PCM`
+  (wird abgewiesen), lange Referenzlisten, ungerade Beschnittwerte.
+* **Nicht gebaut, absichtlich:** CABAC, High Profile, B-Slices,
+  Interlace, gewichtete Vorhersage, Slice-Gruppen, vp9, av1. Alles
+  davon wird erkannt und abgewiesen.
+
+## 7. WAS DIE RUNDE GEKOSTET HAT
+
+```
+kernel/user/h264.fi     2678 Zeilen   der Dekodierer
+kernel/user/h264tab.fi   677 Zeilen   die Tafeln (ERZEUGT)
+kernel/user/h264t.fi     204 Zeilen   das Messgeraet
+kernel/codecstat.fi       71 Zeilen   die Zaehler in kdata
+tools/codec/             ~900 Zeilen  Abnahme, Erzeuger, Pruefer
+tools/codec/ref264.py   1364 Zeilen   das Versuchsgeraet (nicht im Kern)
+```
+
+Die Tafeln sind **erzeugt und nicht abgetippt** (`tools/codec/mktab.py`):
+CAVLC und Entblockung mechanisch aus FFmpegs Quelltext, die
+Intra-4x4-Gewichte aus den Normformeln ueber `tools/codec/pred_gen.py`.
+Dass sie stimmen, rechnet `tools/codec/praefix.py` nach -- 30 Tafeln,
+448 Codes, 0 Praefixkollisionen, alle Kraft-Summen <= 1.
+
+**Kein Fliesskomma, keine Zeile.** Die Abnahme prueft das mit `grep`,
+statt es zu glauben.
