@@ -216,7 +216,24 @@ EOF
 
 # 8192 blocks (4 MiB) held these programs with 4 per cent to spare
 # after round LOOK. That is not spare room, that is a countdown.
-ARGS=(build "$OUT/disk.img" 16384 /lib/
+#
+# RUNDE BAUFEHLER (14.09.2026): 16384 -> 32768 Bloecke (8 -> 16 MiB).
+# Der Countdown ist abgelaufen. Runde GRUNDLINIE (1d16d34) hat die
+# Laeufer -- zu Recht -- auf `--profile=app` umgestellt, und sechs der
+# dreizehn Programme dieser Liste tragen `profile app` (desktop,
+# taskbar, settings, launcher, explorer, widgetdemo). Das Profil `app`
+# bringt Firns volle Laufzeit mit: /bin/explorer ist 1623040 statt
+# 907360 Oktette. GEMESSEN, unmittelbar:
+#
+#     $ bash tools/look/shot.sh /tmp/shottest
+#     FAILED: mkfs
+#     mkfs: the disk is full
+#
+# Das traf jeden Laeufer, der ueber diese Datei fotografiert -- SOFTUI
+# fiel damit auf "0 bestanden, 2 gefallen" ("classic bootet nicht",
+# "modern bootet nicht"), ohne dass am Aussehen irgendetwas falsch war.
+# EIN BLOCK IST 512 OKTETTE (tools/osum/mkfs.py, `BS = 512`).
+ARGS=(build "$OUT/disk.img" 32768 /lib/
       "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS")
 [ "$icons" = yes ] && ARGS+=("/lib/icons.ttf=$ICONF")
 ARGS+=(/bin/)
