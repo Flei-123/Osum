@@ -1,0 +1,357 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/plugtempo.fi -- DIE TEMPOMESSUNG DER RUNDE WMPLUGIN.
+//
+// Die Frage der Messlatte lautet: KOSTET DAS ERWEITERUNGSSYSTEM TEMPO?
+// Sie ist nur dann beantwortet, wenn beide Zahlen aus EINEM Lauf
+// stammen, unter DERSELBEN Last, mit DERSELBEN Bildzahl -- sonst
+// vergleicht man zwei Maschinen und nennt es Messung.
+//
+// Also macht dieses Programm genau das, und zwar der Reihe nach:
+//
+//   1. Warmlauf. Die ersten Bilder eines Schreibtischs sind teuer, weil
+//      jede Glyphe erst gerastert wird (fUi legt sie danach ab). Wer
+//      die ersten Bilder mitmisst, misst den Schriftcache und nicht das
+//      Plugin. Also wird gewartet, bis die Bildzeiten ruhig sind.
+//   2. Messfenster VOR dem Laden: 60 Bilder, in Scheiben zu je 100 ms.
+//      Je Scheibe faellt eine Bildzeit an (Ticks * 10000 / Bilder), und
+//      aus den Scheiben werden Mittel, Kleinstes und Groesstes -- eine
+//      Zahl ohne Streuung ist keine Messung.
+//   3. /bin/uhrstart starten. Das ist DASSELBE Plugin wie im
+//      Widgetlauf: Rechte gewaehren, /bin/pluguhr starten, Text in die
+//      Leiste schicken.
+//   4. Noch einmal Warmlauf (die Leiste malt jetzt ein Feld mehr, und
+//      dessen Glyphen sind beim ersten Mal auch neu).
+//   5. Messfenster NACH dem Laden: wieder 60 Bilder, gleiche Scheiben.
+//
+// GEMESSEN WIRD MIT DEN ZAEHLERN DES SERVERS SELBST (`PL_FRAMES`, die
+// Bildnummer aus `wm.compose`) UND DER TICKUHR (`I_TICKS`, 100 Hz).
+// Beide gab es vor dieser Runde; ein eigener Zaehler daneben haette ein
+// zweites Ergebnis geliefert, und dann glaubt man keinem von beiden.
+//
+//     plugtempo [bilder=N] [scheibe=MS] [ohne]
+//
+// `ohne` laesst Schritt 3 weg -- die Gegenprobe, dass die zweite Zahl
+// nicht einfach deshalb anders ist, weil sie die zweite ist.
+
+profile kernel
+
+import ulib
+
+export { u_start }
+
+const WM_CREATE: u64 = 2100
+const WM_FILL: u64 = 2101
+const WM_FLUSH: u64 = 2105
+const WM_CLOSE: u64 = 2107
+const WM_PLUG_INFO: u64 = 2121
+const PL_ABI: u64 = 0
+const PL_FRAMES: u64 = 18
+const PL_LATUS: u64 = 19
+const PL_FRSUM: u64 = 26
+const PL_FRN: u64 = 27
+const WMP_ABI: u64 = 1
+const SYS_PLUG_GRANT: u64 = 2126
+// dieselbe Maske wie `uhr rechte=0x807` in /etc/wmplug.conf
+const R_UHR: u64 = 0x807
+
+// DIE LAST. Sie ist der Grund, warum diese Messung ueberhaupt Zahlen
+// hat: im Stillhalten (`wmhold`) setzt der Server nur zusammen, wenn
+// etwas schmutzig ist -- gemessen 41 Bilder in vierzig Sekunden. Eine
+// "Bildrate" daraus waere die Rate der Langeweile. Also malt dieses
+// Programm in seinem EIGENEN Fenster, in beiden Messfenstern im
+// gleichen Takt und mit derselben Flaeche: gleiche Last vorher wie
+// nachher, und der einzige Unterschied bleibt das geladene Plugin.
+static mut fenster: u64 = 0
+static mut farbe: u64 = 0
+
+fn last() {
+    if fenster == 0 {
+        return
+    }
+    farbe = farbe + 1
+    var c: u64 = 0x204060
+    if (farbe & 1) != 0 {
+        c = 0x60A0C0
+    }
+    let _f: u64 = ulib.sys4(WM_FILL, fenster, 0, (200 << 16) | 120, c)
+    let _g: u64 = ulib.sys(WM_FLUSH, fenster, 0, 0)
+}
+
+fn zahl(txt: u64, v: u64) {
+    ulib.say(txt)
+    ulib.sayn(v)
+}
+
+fn bilder() -> u64 {
+    let f: u64 = ulib.sys(WM_PLUG_INFO, 0, PL_FRAMES, 0)
+    if ulib.bad(f) {
+        return 0
+    }
+    return f
+}
+
+fn frsum() -> u64 {
+    let v: u64 = ulib.sys(WM_PLUG_INFO, 0, PL_FRSUM, 0)
+    if ulib.bad(v) {
+        return 0
+    }
+    return v
+}
+
+fn frn() -> u64 {
+    let v: u64 = ulib.sys(WM_PLUG_INFO, 0, PL_FRN, 0)
+    if ulib.bad(v) {
+        return 0
+    }
+    return v
+}
+
+fn ticks() -> u64 {
+    let t: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+    if ulib.bad(t) {
+        return 0
+    }
+    return t
+}
+
+// DER WARMLAUF. Er misst nichts, er wartet -- aber nicht blind: er
+// wartet, BIS der Server wirklich Bilder baut. Auf einem Schirm, der
+// gerade nichts zu tun hat, waere sonst das ganze Messfenster leer.
+fn warmlauf(ms: u64) {
+    var rest: u64 = ms
+    while rest > 0 {
+        var s: u64 = 100
+        if s > rest {
+            s = rest
+        }
+        let _z: u64 = ulib.sleep_ms(s)
+        last()
+        rest = rest - s
+    }
+}
+
+// Ein Messfenster. Rueckgabe ueber diese vier Zellen, weil Firn hier
+// keine Verbunde hat und vier Rueckgabewerte auch nicht.
+static mut m_bilder: u64 = 0
+static mut m_ticks: u64 = 0
+static mut m_proben: u64 = 0
+static mut m_summe: u64 = 0 // Summe der Bildzeiten je Probe, in us
+static mut m_min: u64 = 0
+static mut m_max: u64 = 0
+static mut m_gemessen: u64 = 0 // wie viele Bilder die Bilduhr gezaehlt hat
+
+fn messen(ziel: u64, scheibe: u64) {
+    m_bilder = 0
+    m_ticks = 0
+    m_proben = 0
+    m_summe = 0
+    m_min = 0
+    m_max = 0
+    var fv: u64 = bilder()
+    var tv: u64 = ticks()
+    var sv: u64 = frsum()
+    var nv: u64 = frn()
+    let s0: u64 = sv
+    let n0: u64 = nv
+    var runden: u64 = 0
+    // Die Schranke ist die Zahl der Runden und nicht die Uhr: ein
+    // Server, der gar keine Bilder mehr baut, darf dieses Programm
+    // nicht ewig drehen lassen -- es soll dann eine kleine Zahl melden
+    // und weitergehen.
+    while m_bilder < ziel && runden < 600 {
+        last()
+        let _z: u64 = ulib.sleep_ms(scheibe)
+        runden = runden + 1
+        let f2: u64 = bilder()
+        let t2: u64 = ticks()
+        let s2: u64 = frsum()
+        let n2: u64 = frn()
+        if f2 > fv && t2 > tv {
+            m_bilder = m_bilder + (f2 - fv)
+            m_ticks = m_ticks + (t2 - tv)
+        }
+        // Die Streuung kommt aus der Bilduhr des Servers und nicht aus
+        // der Tickuhr: 10 ms Aufloesung koennen eine Bildzeit von 1 ms
+        // nicht aufloesen.
+        if n2 > nv {
+            let us: u64 = (s2 - sv) / (n2 - nv)
+            m_proben = m_proben + 1
+            if m_min == 0 || us < m_min {
+                m_min = us
+            }
+            if us > m_max {
+                m_max = us
+            }
+        }
+        fv = f2
+        tv = t2
+        sv = s2
+        nv = n2
+    }
+    // Der Mittelwert des FENSTERS, nicht der des Hochlaufs.
+    if nv > n0 {
+        m_summe = (sv - s0) / (nv - n0)
+        m_gemessen = nv - n0
+    } else {
+        m_summe = 0
+        m_gemessen = 0
+    }
+}
+
+// Die Zeile, an der tools/wmplug/run.sh misst. Alles in EINER Zeile
+// und alles als ganze Zahl: `fps10` ist die Bildrate mal zehn (Firn
+// rechnet hier nicht mit Bruechen, und eine gerundete Bildrate von "60"
+// verdeckt den Unterschied zwischen 59,5 und 60,4).
+fn melden(marke: u64) {
+    var s_bi: [u8; 9] = " bilder=\0"
+    var s_ti: [u8; 8] = " ticks=\0"
+    var s_us: [u8; 6] = " us=\0\0"
+    var s_mi: [u8; 6] = " min=\0"
+    var s_ma: [u8; 6] = " max=\0"
+    var s_pr: [u8; 9] = " proben=\0"
+    var s_ge: [u8; 11] = " gezaehlt=\0"
+    var s_fp: [u8; 8] = " fps10=\0"
+    let mittel: u64 = m_summe
+    var fps10: u64 = 0
+    if m_ticks != 0 {
+        fps10 = (m_bilder * 1000) / m_ticks
+    }
+    ulib.say(marke)
+    zahl((&s_bi[0 as usize]) as u64, m_bilder)
+    zahl((&s_ti[0 as usize]) as u64, m_ticks)
+    zahl((&s_us[0 as usize]) as u64, mittel)
+    zahl((&s_mi[0 as usize]) as u64, m_min)
+    zahl((&s_ma[0 as usize]) as u64, m_max)
+    zahl((&s_pr[0 as usize]) as u64, m_proben)
+    zahl((&s_ge[0 as usize]) as u64, m_gemessen)
+    zahl((&s_fp[0 as usize]) as u64, fps10)
+    ulib.nl()
+}
+
+fn praefix(a: u64, b: u64, n: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        if __mmio_read8((a + i) as *mut u8)
+            != __mmio_read8((b + i) as *mut u8) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn wert(a: u64, at: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = at
+    while true {
+        let c: u64 = __mmio_read8((a + i) as *mut u8) as u64
+        if c < 48 || c > 57 {
+            break
+        }
+        v = v * 10 + (c - 48)
+        i = i + 1
+    }
+    return v
+}
+
+fn u_start(args: u64) -> u64 {
+    var w_bild: [u8; 8] = "bilder=\0"
+    var w_sch: [u8; 9] = "scheibe=\0"
+    var w_ohne: [u8; 5] = "ohne\0"
+    var s_abi: [u8; 21] = "tempo: abi falsch k=\0"
+    var s_vor: [u8; 11] = "tempo: vor\0"
+    var s_nach: [u8; 12] = "tempo: nach\0"
+    var s_lat: [u8; 14] = "tempo: latus=\0"
+    var s_st: [u8; 19] = "tempo: start r=\0\0\0\0"
+    var s_en: [u8; 13] = "tempo: ende\0\0"
+    var s_fe: [u8; 18] = "tempo: fenster h=\0"
+    var p_start: [u8; 14] = "/bin/pluguhr\0\0"
+    var a0: [u8; 8] = "pluguhr\0"
+    var a1: [u8; 11] = "runden=60\0\0"
+    var nm: [u8; 16] = "uhr\0\0\0\0\0\0\0\0\0\0\0\0\0"
+    var s_gr: [u8; 19] = "tempo: grant r=\0\0\0\0"
+
+    var ziel: u64 = 60
+    var scheibe: u64 = 50
+    var laden: u64 = 1
+    let argc: u64 = ulib.arg_count(args)
+    var ai: u64 = 1
+    while ai < argc {
+        let a: u64 = ulib.arg_at(args, ai)
+        if ulib.streq(a, (&w_ohne[0 as usize]) as u64) {
+            laden = 0
+        } else if praefix(a, (&w_bild[0 as usize]) as u64, 7) {
+            ziel = wert(a, 7)
+        } else if praefix(a, (&w_sch[0 as usize]) as u64, 8) {
+            scheibe = wert(a, 8)
+        }
+        ai = ai + 1
+    }
+    if ziel == 0 {
+        ziel = 60
+    }
+    if scheibe < 10 {
+        scheibe = 50
+    }
+
+    // Die Fassung zuerst -- auch dieses Programm redet nicht auf gut
+    // Glueck mit einem fremden Kern.
+    let abi: u64 = ulib.sys(WM_PLUG_INFO, 0, PL_ABI, 0)
+    if ulib.bad(abi) || abi != WMP_ABI {
+        zahl((&s_abi[0 as usize]) as u64, abi)
+        ulib.nl()
+        return 1
+    }
+
+    // DAS LASTFENSTER. 200x120 an einer festen Stelle, in beiden
+    // Messfenstern dasselbe -- es ist die Last, gegen die gemessen wird.
+    var titel: [u8; 8] = "tempo\0\0\0"
+    let h: u64 = ulib.sys4(WM_CREATE, (300 << 16) | 200, (200 << 16) | 120,
+        (&titel[0 as usize]) as u64, 0)
+    if !ulib.bad(h) {
+        fenster = h
+    }
+    zahl((&s_fe[0 as usize]) as u64, h)
+    ulib.nl()
+
+    warmlauf(8000)
+    messen(ziel, scheibe)
+    melden((&s_vor[0 as usize]) as u64)
+    zahl((&s_lat[0 as usize]) as u64,
+        ulib.sys(WM_PLUG_INFO, 0, PL_LATUS, 0))
+    ulib.nl()
+
+    if laden != 0 {
+        // ERST DIE RECHTE, DANN DAS PLUGIN -- der Kern legt die Rechte
+        // beim Anmelden auf den Platz, und ein Widget ohne R_ACT_BAR
+        // waere keine Last, sondern nur ein Prozess, der Fehlercodes
+        // einsammelt (und nach DENY_MAX Abweisungen hinausfliegt).
+        let rg: u64 = ulib.sys(SYS_PLUG_GRANT, (&nm[0 as usize]) as u64,
+            R_UHR, 0)
+        zahl((&s_gr[0 as usize]) as u64, rg)
+        ulib.nl()
+        var argv: [u64; 2] = [0 as u64; 2]
+        argv[(0) as usize] = (&a0[0 as usize]) as u64
+        argv[(1) as usize] = (&a1[0 as usize]) as u64
+        let r: u64 = ulib.sys(ulib.SYS_EXEC, (&p_start[0 as usize]) as u64,
+            (&argv[0 as usize]) as u64, 2)
+        zahl((&s_st[0 as usize]) as u64, r)
+        ulib.nl()
+    }
+    // Nach dem Laden noch einmal warm: das Widgetfeld ist neu, seine
+    // Glyphen sind es beim ersten Mal auch, und der Starthelfer braucht
+    // selbst eine Sekunde, bis das Plugin wirklich steht.
+    warmlauf(4000)
+    messen(ziel, scheibe)
+    melden((&s_nach[0 as usize]) as u64)
+    zahl((&s_lat[0 as usize]) as u64,
+        ulib.sys(WM_PLUG_INFO, 0, PL_LATUS, 0))
+    ulib.nl()
+    if fenster != 0 {
+        let _c: u64 = ulib.sys(WM_CLOSE, fenster, 0, 0)
+        fenster = 0
+    }
+    ulib.say((&s_en[0 as usize]) as u64)
+    ulib.nl()
+    return 0
+}
