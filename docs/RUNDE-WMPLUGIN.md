@@ -1274,125 +1274,6 @@ selben Lauf, der auch die Bilder 04/05 macht.
 
 ---
 
-## 16. NACHBESSERUNG FIX-R3-3 — was in den Bildern stand und was nicht
-
-Vier Befunde der Jury, alle an den ABNAHMEBILDERN und nicht am Code, und
-alle vier an einem wirklich gebooteten Kern nachgemessen.
-
-### 16.1 Die Spur gehoert in die zwei Laeufe, die sie brauchen
-
-`/etc/uitrace` schaltet in `wlib` und in der Leiste die Zeile
-`... text ... x= base= fg= bg= t=` frei. Gebraucht wird sie **genau
-dann**, wenn eine Zusage eine KOORDINATE aus der Leiste liest:
-
-* `segv`  — das Leistenfeld des abstuerzenden Plugins vor/nach,
-* `spaet` — der Widget-Kasten vor/nach dem `enable`.
-
-Vorher lag sie in jedem Abbild von `tools/wmplug/run.sh` und
-`tools/wmplug/shots.sh`. Sie kostet nicht nur Zeilen: die Programme
-schreiben ueber denselben Weg in ihr Terminalfenster, und in den
-Regelbildern 04/05 stand darum ein Terminal voller `wlib: text win=...`,
-die mit der Fensterregel nichts zu tun haben.
-
-Jetzt nennt `run.sh` die Laeufe (`SPUR_LAEUFE="segv spaet"`) und
-`abbild` legt die Datei nur diesen bei; `shots.sh` baut **drei** Abbilder
-(`spur`, `rein`, `segv`) und nimmt die Regelbilder aus `rein`.
-
-GEMESSEN im Lauf `regel` von `shots.sh` (Exitcode 21):
-
-```
-grep -c 'wlib: text' regel.txt            -> 0
-plugregel: nachgemessen id=11 x=230 y=70 w=340 h=430 flaeche=2 sichtbar=1
-checkshot punkt regel.ppm 500 300         -> 58 74 94   (Fensterfarbe)
-```
-
-`.gauntlet-shots/04` und `05` sind aus diesem Lauf neu.
-
-### 16.2 Das Bild der Verwaltung zeigt jetzt die Verwaltung
-
-`shots.sh` nahm ein Bild `verwaltung` auf und **benannte es nie** — die
-Nummernfolge sprang von 08 auf nichts, und die 09 im Ordner war alt.
-Jetzt faehrt der Lauf `/bin/plugpaar` (ZWEI Plugins) und wartet auf den
-Tabellenkopf auf der Leitung, nicht auf `wm: hold`; das Bild wird als
-`09-wmplug-verwaltung.png` abgelegt, dazu die zwei Absturzbilder als
-`10` und `11` aus einem eigenen Lauf mit
-`/etc/wmplug.autostart = "boesebar segv"`. Die Schlusszeile heisst
-darum `SHOTS: 11 Bilder abgelegt`.
-
-Nachgerechnet wird das Bild in `tools/wmplug/run.sh` **Abschnitt 13** —
-nicht "die Datei ist da", sondern Glyphe gegen Rasterer. Der
-Rasterursprung wird am Bild gemessen (umschliessendes Rechteck der
-Terminalfarbe), nicht eingetragen. GEMESSEN am neu aufgenommenen Bild:
-
-```
-die erste Zelle des Terminals liegt bei (4,62) -- am Bild gemessen
-Zeile  8 ab Spalte 2: 'Nr Name'      6 Zeichen, 358 Tintenpunkte, 0 falsch
-Zeile  9 ab Spalte 5: 'uhr'          3 Zeichen, 144 Tintenpunkte, 0 falsch
-Zeile 10 ab Spalte 5: 'regel'        5 Zeichen, 256 Tintenpunkte, 0 falsch
-Zeile 20 ab Spalte 2: 'Leistentext' 11 Zeichen, 511 Tintenpunkte, 0 falsch
-```
-
-Tabellenkopf, beide Plugins und eine info-Spalte stehen im Bild.
-
-### 16.3 Der Umlaut, der aus dem Terminalfenster fiel
-
-`kernel/wm.fi`, `term_putc`: `if ch < 32 || ch > 126 { return }`. Damit
-verschwand jedes Oktett ueber 126 lautlos, und aus
-`" KEIN EINZIGES GERÄT!"` (kgui.fi, der USB-Bericht im Terminalfenster)
-wurde auf dem Schirm `GERT`.
-
-Der Zeichensatz konnte es die ganze Zeit: `assets/osum-mono.ttf` deckt
-0xC4/0xE4/0xD6/0xF6/0xDC/0xFC/0xDF ab, und `ttf.glyph` nimmt einen
-CODEPUNKT. Es fehlte die Umrechnung. Eine Zelle ist ein Oktett, also
-genau der Bereich, der hineinpasst: die Startoktette 0xC2/0xC3 ergeben
-mit ihrem Folgeoktett 0x80..0xFF (Latin-1) — alle deutschen Umlaute. Das
-haengende Startoktett steht JE FENSTER (`W_UTF`), weil `tty.emit` die
-Oktette einzeln durchreicht; `term_dump` schreibt die Zelle wieder als
-UTF-8 hinaus, damit Bild und Mitschnitt dieselben Oktette tragen.
-
-GEMESSEN, `gfx wm wmhold nokbd nosched noproc nofs`, Exitcode 21:
-
-```
-checkshot.py tgrid bild.ppm osum-mono.ttf 16 26 62 10 19  3 1 \
-    224 230 236 16 20 26 "KEIN EINZIGES GERÄT!"
--> Zeile 3 ab Spalte 1: 18 Zeichen, 1014 Tintenpunkte, 0 falsch
-wm: selftest 30 / 30  failed=0xc04200        (unveraendert)
-```
-
-**Abkuerzung, ausdruecklich benannt:** drei- und vieroktettige
-UTF-8-Folgen fallen weiter weg. Eine Terminalzelle ist ein Oktett; alles
-darueber braucht ein breiteres Raster, und das ist eine eigene Runde.
-
-### 16.4 Ein Fensterknopf sagt, welches Fenster hinter ihm steht
-
-Die Leiste malte lauter namenlose Quadrate. Beschriften konnte sie es
-laengst (`shorten_title`), die Vorgabe war nur `labels=never`
-(Windows 11). Neu ist `labels=auto` **als Vorgabe**: der Startknopf
-bleibt wortlos — dort stand einmal „St", und das Markenzeichen ist die
-bessere Antwort —, die Fensterknoepfe bekommen den gekuerzten Titel,
-sobald der Knopf ihn fassen kann.
-
-Die Mindestbreite ist gemessen und nicht getippt: `label_min()` rechnet
-Symbolquadrat + Luft + vier Zeichen der Antiqua, mit denselben Zugaben,
-die `button_sym` beim Malen benutzt; `TASK_MIN = 48` ist nur noch der
-Boden darunter.
-
-GEMESSEN (`gfx wm wig desk wmhold`, 800x600, Exitcode 21):
-
-```
-taskbar: btn i=0 id=7 x=42 y=2 w=132 h=26 hidden=0 focus=1 t=Terminal -- sh
-taskbar: text button x=58 base=20 fg=0 bg=3104668 t=Terminal -- sh
-228 Bildpunkte Tinte im Beschriftungsteil (116x26 ab 58,572)
-```
-
-`tools/desktop/run.sh` bekommt dafuer `btn_ink`: Rechteck,
-Beschriftungsstelle und Farbe kommen aus DEMSELBEN Lauf, gezaehlt wird
-die Tinte im Bild. Bewusst kein zweites `tkette` — ein Knopf, dessen
-Beschriftung gemeldet, vom Layout aber weggeschnitten wird, kommt durch
-die Zeichenprobe und faellt hier.
-
----
-
 ## 17. NACHBESSERUNG FIX-R3-2 — eine Zeile pro Schreibruf, ein Feld auch in der senkrechten Leiste, und der fehlende Umlaut
 
 Vier Befunde der Jury. Alle Zahlen hier stammen aus
@@ -1495,3 +1376,126 @@ eingetragen. Bild: `docs/shots/wmplug/umlaut-geraet.png`.
 
 Die dritte Zusage ist die wichtige: sie rechnet die Spalte des `Ä`
 allein nach, haengt also nicht an den siebzehn Buchstaben davor.
+
+## 18. NACHBESSERUNG FIX-R3-3 — was in den Bildern stand und was nicht
+
+Vier Befunde der Jury, alle an den ABNAHMEBILDERN und nicht am Code, und
+alle vier an einem wirklich gebooteten Kern nachgemessen.
+
+### 18.1 Die Spur gehoert in die zwei Laeufe, die sie brauchen
+
+`/etc/uitrace` schaltet in `wlib` und in der Leiste die Zeile
+`... text ... x= base= fg= bg= t=` frei. Gebraucht wird sie **genau
+dann**, wenn eine Zusage eine KOORDINATE aus der Leiste liest:
+
+* `segv`  — das Leistenfeld des abstuerzenden Plugins vor/nach,
+* `spaet` — der Widget-Kasten vor/nach dem `enable`.
+
+Vorher lag sie in jedem Abbild von `tools/wmplug/run.sh` und
+`tools/wmplug/shots.sh`. Sie kostet nicht nur Zeilen: die Programme
+schreiben ueber denselben Weg in ihr Terminalfenster, und in den
+Regelbildern 04/05 stand darum ein Terminal voller `wlib: text win=...`,
+die mit der Fensterregel nichts zu tun haben.
+
+Jetzt nennt `run.sh` die Laeufe (`SPUR_LAEUFE="segv spaet"`) und
+`abbild` legt die Datei nur diesen bei; `shots.sh` baut **drei** Abbilder
+(`spur`, `rein`, `segv`) und nimmt die Regelbilder aus `rein`.
+
+GEMESSEN im Lauf `regel` von `shots.sh` (Exitcode 21):
+
+```
+grep -c 'wlib: text' regel.txt            -> 0
+plugregel: nachgemessen id=11 x=230 y=70 w=340 h=430 flaeche=2 sichtbar=1
+checkshot punkt regel.ppm 500 300         -> 58 74 94   (Fensterfarbe)
+```
+
+`.gauntlet-shots/04` und `05` sind aus diesem Lauf neu.
+
+### 18.2 Das Bild der Verwaltung zeigt jetzt die Verwaltung
+
+`shots.sh` nahm ein Bild `verwaltung` auf und **benannte es nie** — die
+Nummernfolge sprang von 08 auf nichts, und die 09 im Ordner war alt.
+Jetzt faehrt der Lauf `/bin/plugpaar` (ZWEI Plugins) und wartet auf den
+Tabellenkopf auf der Leitung, nicht auf `wm: hold`; das Bild wird als
+`09-wmplug-verwaltung.png` abgelegt, dazu die zwei Absturzbilder als
+`10` und `11` aus einem eigenen Lauf mit
+`/etc/wmplug.autostart = "boesebar segv"`. Die Schlusszeile heisst
+darum `SHOTS: 11 Bilder abgelegt`.
+
+Nachgerechnet wird das Bild in `tools/wmplug/run.sh` **Abschnitt 13** —
+nicht "die Datei ist da", sondern Glyphe gegen Rasterer. Der
+Rasterursprung wird am Bild gemessen (umschliessendes Rechteck der
+Terminalfarbe), nicht eingetragen. GEMESSEN am neu aufgenommenen Bild:
+
+```
+die erste Zelle des Terminals liegt bei (4,62) -- am Bild gemessen
+Zeile  8 ab Spalte 2: 'Nr Name'      6 Zeichen, 358 Tintenpunkte, 0 falsch
+Zeile  9 ab Spalte 5: 'uhr'          3 Zeichen, 144 Tintenpunkte, 0 falsch
+Zeile 10 ab Spalte 5: 'regel'        5 Zeichen, 256 Tintenpunkte, 0 falsch
+Zeile 20 ab Spalte 2: 'Leistentext' 11 Zeichen, 511 Tintenpunkte, 0 falsch
+```
+
+Tabellenkopf, beide Plugins und eine info-Spalte stehen im Bild.
+
+### 18.3 Der Umlaut, der aus dem Terminalfenster fiel
+
+`kernel/wm.fi`, `term_putc`: `if ch < 32 || ch > 126 { return }` -- jedes
+Oktett ueber 126 fiel lautlos weg, und `Ä` ist in UTF-8 genau zwei
+solche. Aus `" KEIN EINZIGES GERÄT!"` (kgui.fi, der USB-Bericht im
+Terminalfenster) wurde auf dem Schirm `GERT`.
+
+Der Zeichensatz konnte es die ganze Zeit: `assets/osum-mono.ttf` deckt
+0xC4/0xE4/0xD6/0xF6/0xDC/0xFC/0xDF ab, und `ttf.glyph` nimmt einen
+CODEPUNKT. Es fehlte die Umrechnung. Eine Zelle ist ein Oktett, also
+genau der Bereich, der hineinpasst: die Startoktette 0xC2/0xC3 ergeben
+mit ihrem Folgeoktett 0x80..0xFF (Latin-1) -- alle deutschen Umlaute.
+Das haengende Startoktett steht JE FENSTER (`W_UTF`), weil `tty.emit`
+die Oktette einzeln durchreicht; `term_dump` schreibt die Zelle wieder
+als UTF-8 hinaus, damit Bild und Mitschnitt dieselben Oktette tragen.
+
+GEMESSEN, `gfx wm wmhold nokbd nosched noproc nofs`, Exitcode 21:
+
+```
+checkshot.py tgrid bild.ppm osum-mono.ttf 16 26 62 10 19  3 1 \
+    224 230 236 16 20 26 "KEIN EINZIGES GERÄT!"
+-> Zeile 3 ab Spalte 1: 18 Zeichen, 1014 Tintenpunkte, 0 falsch
+wm: selftest 30 / 30  failed=0xc04200        (unveraendert)
+```
+
+Dieselbe Reparatur ist in **17.3** ein zweites Mal und aus einem anderen
+Laeufer nachgemessen (`tools/wmplug/fixr32.sh`, drei Zusagen, darunter
+die Spalte des `Ä` allein). Zwei Laeufer, dieselbe Zahl.
+
+**Abkuerzung, ausdruecklich benannt:** drei- und vieroktettige
+UTF-8-Folgen fallen weiter weg. Eine Terminalzelle ist ein Oktett; alles
+darueber braucht ein breiteres Raster, und das ist eine eigene Runde.
+
+### 18.4 Ein Fensterknopf sagt, welches Fenster hinter ihm steht
+
+Die Leiste malte lauter namenlose Quadrate. Beschriften konnte sie es
+laengst (`shorten_title`), die Vorgabe war nur `labels=never`
+(Windows 11). Neu ist `labels=auto` **als Vorgabe**: der Startknopf
+bleibt wortlos — dort stand einmal „St", und das Markenzeichen ist die
+bessere Antwort —, die Fensterknoepfe bekommen den gekuerzten Titel,
+sobald der Knopf ihn fassen kann.
+
+Die Mindestbreite ist gemessen und nicht getippt: `label_min()` rechnet
+Symbolquadrat + Luft + vier Zeichen der Antiqua, mit denselben Zugaben,
+die `button_sym` beim Malen benutzt; `TASK_MIN = 48` ist nur noch der
+Boden darunter.
+
+GEMESSEN (`gfx wm wig desk wmhold`, 800x600, Exitcode 21):
+
+```
+taskbar: btn i=0 id=7 x=42 y=2 w=132 h=26 hidden=0 focus=1 t=Terminal -- sh
+taskbar: text button x=58 base=20 fg=0 bg=3104668 t=Terminal -- sh
+228 Bildpunkte Tinte im Beschriftungsteil (116x26 ab 58,572)
+```
+
+`tools/desktop/run.sh` bekommt dafuer `btn_ink`: Rechteck,
+Beschriftungsstelle und Farbe kommen aus DEMSELBEN Lauf, gezaehlt wird
+die Tinte im Bild. Bewusst kein zweites `tkette` — ein Knopf, dessen
+Beschriftung gemeldet, vom Layout aber weggeschnitten wird, kommt durch
+die Zeichenprobe und faellt hier.
+
+---
