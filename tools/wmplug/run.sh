@@ -1089,8 +1089,11 @@ abbild aus "uhr" \
     && ok "Abbild mit Autostart, MIT /etc/wmplug.aus" \
     || bad "mkfs.py fehlgeschlagen (aus)"
 
-lauf ausan ""
-lauf aus ""
+# AUF `wm: hold` WARTEN. Ohne Marke kehrt `lauf` sofort zurueck, und
+# dann endet der Lauf, bevor der Kern seine Bilanz zieht -- die Zusage
+# ueber den weiterlaufenden Zusammensetzer haette dann nichts zu lesen.
+lauf ausan "" 'wm: hold'
+lauf aus   "" 'wm: hold'
 flach "$TMPD/ausan.txt"
 flach "$TMPD/aus.txt"
 
@@ -1113,11 +1116,14 @@ hasnotre "$TMPD/aus.txt.flat" 'pluguhr: angemeldet' \
 # c) DER SCHREIBTISCH LAEUFT TROTZDEM. Abgeschaltet heisst nicht kaputt.
 hasflat "$TMPD/aus.txt" 'wm: hold' "der Fensterserver steht (wm: hold)"
 hasnotre "$TMPD/aus.txt.flat" 'PANIK' "kein Panik im Kern"
+# DER ZUSAMMENSETZER MUSS WIRKLICH GELAUFEN SEIN. Eine Zusage, die
+# auch dann gruen ist, wenn die Zahl fehlt, prueft nichts -- das ist die
+# Lehre aus Abschnitt 11 der ersten Runde (eine Datei ist kein Beleg).
 c_aus=$(zahl "$TMPD/aus.txt" 'wm: comp=' 'comp')
 if [ -n "${c_aus:-}" ] && [ "$c_aus" -gt 0 ] 2>/dev/null; then
     ok "der Zusammensetzer lief auch ohne Verwaltung ($c_aus Runden)"
 else
-    ok "der Lauf endete vor der Bilanz des Zusammensetzers (kein Ausschluss)"
+    bad "ohne Verwaltung ist keine Zahl des Zusammensetzers zu finden (comp=${c_aus:-fehlt})"
 fi
 
 echo
