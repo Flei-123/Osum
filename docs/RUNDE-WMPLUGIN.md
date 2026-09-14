@@ -1284,7 +1284,14 @@ selben Lauf, der auch die Bilder 04/05 macht.
   sie. Sie stehen weiter im Terminalfenster der Bilder 04/05.
 * Hinter `cpu n/v` steht die Fensterzahl aus `WM_LIST` (Abschnitt 13.2),
   damit sich die zwei Abnahmefotos an einer sinnvollen Groesse
-  unterscheiden.
+  unterscheiden. **Und sie steht nicht still:** im Abnahmelauf schickt
+  dasselbe Widget `cpu n/v fen 3` und, nachdem der Schreibtisch ein
+  weiteres Fenster geoeffnet hat, `cpu n/v fen 4` — zweimal im selben
+  Lauf, zweimal aus `WM_LIST` gezaehlt (verborgene Fenster zaehlen
+  nicht mit, `WL_FLAGS & F_HIDDEN`). `tools/wmplug/run.sh` Abschnitt 8b
+  rechnet genau das nach; ein Feld mit einer Zahl, die sich nie aendert,
+  waere als Unterschied zweier Fotos wertlos. Die Leiste malt es
+  unveraendert: `taskbar: text plug x=613 base=20 t=cpu n/v fen 3`.
 
 ---
 
@@ -1479,6 +1486,28 @@ wm: selftest 30 / 30  failed=0xc04200        (unveraendert)
 Dieselbe Reparatur ist in **17.3** ein zweites Mal und aus einem anderen
 Laeufer nachgemessen (`tools/wmplug/fixr32.sh`, drei Zusagen, darunter
 die Spalte des `Ä` allein). Zwei Laeufer, dieselbe Zahl.
+
+**DIE GEGENPROBE, und sie ist die eigentliche Messung.** Derselbe
+Laufbefehl mit dem Kern des Rundenanfangs (`git worktree` auf
+`d02903f`, eigens gebaut und gebootet, Exitcode 21) liest an derselben
+Stelle:
+
+```
+tgrid ... "KEIN EINZIGES GERÄT!"  -> 18 Zeichen, 1014 Tintenpunkte, 112 falsch -- LEER: !
+tgrid ... "KEIN EINZIGES GERT!"   -> 17 Zeichen,  944 Tintenpunkte,   0 falsch
+```
+
+Auf dem Schirm stand also woertlich `GERT!`, und zwar beweisbar: die
+Zeichenkette OHNE Umlaut passt bildpunktgenau, die MIT faellt. Mit dem
+neuen Kern ist es genau umgekehrt. Zwei Kerne, dieselbe Platte,
+dieselbe Koordinate.
+
+**Ein Fund nebenbei, der NICHT dieser Runde gehoert:** derselbe
+Baselinelauf faellt auch in `tools/wm/run.sh` bei den drei Zusagen ueber
+TITELLEISTEN (`ttext ... "Terminal -- sh"` -> 406 falsch, `LEER: -`) --
+also vor jeder Zeile dieser Runde. `WM: 99 passed, 5 FAILED` ist damit
+der Stand, den die Runde VORGEFUNDEN hat, und keiner, den sie gemacht
+hat; die zwei Zeigerfehler sind seit STATUS-FUI-VENDOR-BILD bekannt.
 
 **Abkuerzung, ausdruecklich benannt:** drei- und vieroktettige
 UTF-8-Folgen fallen weiter weg. Eine Terminalzelle ist ein Oktett; alles
