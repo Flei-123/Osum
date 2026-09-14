@@ -564,8 +564,31 @@ fn surface_commit(c: u64, sid: u64) {
         // keine Groesse, und ein Fenster ohne Groesse ist keines.
         let xy: u64 = (60 << 16) | 60
         let wh: u64 = (w << 16) | h
-        win = ulib.sys(WM_CREATE, xy, wh, 0)
+        // DER FENSTERSERVER STEHT SPAETER ALS DIESES PROGRAMM.
+        //
+        // `script=` laeuft in `ring3()`, und `stage_surface()` -- das
+        // `wm.init` ruft -- kommt in `kmain` ERST DANACH. Ein `wayd`,
+        // das beim ersten Festschreiben ein Fenster will, bekommt
+        // deshalb -E_UNSUPPORTED (-9), und zwar voellig zu Recht: es
+        // gibt noch keinen Server.
+        //
+        // Also wird gewartet, statt aufzugeben. Das ist kein Kunstgriff,
+        // sondern die richtige Reihenfolge fuer einen Dienst: er steht
+        // bereit, bevor die Oberflaeche da ist, und haengt sich ein,
+        // sobald sie steht.
+        var versuch: u64 = 0
+        while versuch < 600 && (win == 0
+            || win > 0xFFFFFFFFFFFF0000) {
+            win = ulib.sys4(WM_CREATE, xy, wh, 0, 0)
+            if win == 0 || win > 0xFFFFFFFFFFFF0000 {
+                ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
+                versuch = versuch + 1
+            }
+        }
         if win == 0 || win > 0xFFFFFFFFFFFF0000 {
+            var s_wc: [u8; 14] = "wayd: kein wm\0"
+            ulib.say((&s_wc[0 as usize]) as u64)
+            ulib.nl()
             return
         }
         obj_set(c, sid, O_A, win)
@@ -588,7 +611,11 @@ fn surface_commit(c: u64, sid: u64) {
                     & 0xFFFFFF) == px {
                 run = run + 1
             }
-            ulib.sys(WM_FILL, win, (x << 16) | y, (run << 16) | 1)
+            // WM_FILL braucht VIER Zahlen (h, xy, wh, farbe). Ein
+            // Aufruf mit dreien liess die Farbe in a3 stehen, wo
+            // zufaellig eine Null lag -- gemalt wurde schwarz auf
+            // schwarz, und der Schirm blieb leer, obwohl alles andere
+            // stimmte.
             fill_colour(win, x, y, run, px)
             x = x + run
         }
@@ -697,7 +724,10 @@ fn on_xdg_wm_base(c: u64, id: u64, op: u64, argp: u64) {
 
 static mut next_serial: u64 = 1
 // Voruebergehende Diagnose: 1 = jeden Empfang melden.
-static mut dbg: u64 = 1
+// Auf 1 gesetzt meldet der Server jeden Empfang, jede Nachricht und
+// jeden Puffer auf der seriellen Leitung. Das hat die Fehler dieser
+// Runde gefunden und bleibt deshalb stehen -- aus.
+static mut dbg: u64 = 0
 
 fn on_xdg_surface(c: u64, id: u64, op: u64, argp: u64) {
     if op == wlproto.RQ_XDG_SURFACE_GET_TOPLEVEL {
@@ -780,15 +810,6 @@ fn dispatch(c: u64, at: u64, len: u64, fd: u64) -> bool {
         return false
     }
     n_msgs = n_msgs + 1
-    if dbg != 0 {
-        var s_m: [u8; 10] = "wayd: if=\0"
-        ulib.say((&s_m[0 as usize]) as u64)
-        ulib.sayu(iface)
-        var s_o: [u8; 5] = " op=\0"
-        ulib.say((&s_o[0 as usize]) as u64)
-        ulib.sayu(op)
-        ulib.nl()
-    }
     if iface == wlproto.IF_WL_DISPLAY {
         on_display(c, id, op, argp)
     } else if iface == wlproto.IF_WL_REGISTRY {
@@ -882,15 +903,6 @@ fn flush_out(c: u64) {
     mh[6 as usize] = 0
     let sr: u64 = ulib.sys(SYS_SENDMSG, c_fd[c as usize],
         (&mh[0 as usize]) as u64, 0)
-    if dbg != 0 {
-        var s_tx: [u8; 10] = "wayd: tx=\0"
-        ulib.say((&s_tx[0 as usize]) as u64)
-        ulib.sayu(n)
-        var s_r: [u8; 4] = " r=\0"
-        ulib.say((&s_r[0 as usize]) as u64)
-        ulib.sayu(sr)
-        ulib.nl()
-    }
     c_outlen[c as usize] = 0
 }
 
@@ -921,8 +933,29 @@ fn drain(c: u64, fd: u64) {
         } else if at + len > c_inlen[c as usize] {
             weiter = false
         } else {
-            live = dispatch(c, at, len, usedfd)
-            usedfd = 0
+            // DER FUENFTE FUND: DER DESKRIPTOR GEHOERT NICHT DEM ERSTEN
+            // PAKET IM STOSS, sondern dem, das ihn VERLANGT.
+            //
+            // libwayland schickt beim Start einen Stoss von elf
+            // Nachrichten, und der memfd haengt an der VIERTEN
+            // (wl_shm.create_pool). Die erste Fassung gab ihn dem
+            // ersten Paket und setzte ihn dann auf null -- create_pool
+            // sah eine Null, wies sich selbst ab, und der Client bekam
+            // nie einen Puffer. Der Deskriptor war da (wayd: fd=5
+            // cl=20), er lag nur am falschen Paket.
+            //
+            // `req_has_fd` kommt aus der XML-Datei, weiss also fuer
+            // JEDE Anfrage, ob sie einen traegt -- und nicht nur fuer
+            // die, an die gerade jemand gedacht hat.
+            let id0: u64 = rd32(base + at)
+            let op0: u64 = rd32(base + at + 4) & 0xFFFF
+            let if0: u64 = obj_iface(c, id0)
+            var mit: u64 = 0
+            if if0 < wlproto.IF_COUNT && wlproto.req_has_fd(if0, op0) {
+                mit = usedfd
+                usedfd = 0
+            }
+            live = dispatch(c, at, len, mit)
             at = at + len
         }
     }
@@ -1077,13 +1110,8 @@ fn u_start(args: u64) -> u64 {
             if c_used[c as usize] != 0 {
                 let got: u64 = recv_into(c)
                 if got > 0 {
-                    if dbg != 0 {
-                        var s_got: [u8; 10] = "wayd: rx=\0"
-                        ulib.say((&s_got[0 as usize]) as u64)
-                        ulib.sayu(got)
-                        ulib.nl()
-                    }
-                    drain(c, taken_fd())
+                    let gfd: u64 = taken_fd()
+                    drain(c, gfd)
                 }
                 if c_used[c as usize] != 0 {
                     flush_out(c)

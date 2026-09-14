@@ -24,6 +24,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/syscall.h>
 #include <sys/mman.h>
 #include <wayland-client.h>
 #include "xdg-shell-client-protocol.h"
@@ -100,9 +101,12 @@ int main(int argc, char **argv)
     int stride = W * 4;
     int size = stride * H;
 
-    char name[] = "/tmp/wlclient-buf";
-    int fd = open(name, O_RDWR | O_CREAT | O_TRUNC, 0600);
-    if (fd < 0) { perror("open"); return 4; }
+    // memfd_create statt einer Datei: das ist der Weg, den auch
+    // weston-simple-shm nimmt (shared/os-compatibility.c,
+    // os_create_anonymous_file), und der einzige, der auf OrientOS
+    // funktioniert -- dieses System hat kein ftruncate auf Dateien.
+    int fd = (int)syscall(319, "wlclient", 0);
+    if (fd < 0) { perror("memfd_create"); return 4; }
     if (ftruncate(fd, size) < 0) { perror("ftruncate"); return 5; }
     unsigned int *px = mmap(NULL, size, PROT_READ | PROT_WRITE,
                             MAP_SHARED, fd, 0);
@@ -137,5 +141,12 @@ int main(int argc, char **argv)
     printf("wlclient: FERTIG -- %dx%d angehaengt und festgeschrieben\n",
            W, H);
     wl_display_flush(dpy);
+    // Stehenbleiben, damit das Fenster beim Bildschirmfoto noch da ist.
+    // Ohne das raeumt der Server es ab, bevor QEMU screendump macht.
+    for (int i = 0; i < 400; i++) {
+        wl_display_dispatch_pending(dpy);
+        wl_display_flush(dpy);
+        usleep(50000);
+    }
     return 0;
 }
