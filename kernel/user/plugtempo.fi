@@ -28,10 +28,22 @@
 // Beide gab es vor dieser Runde; ein eigener Zaehler daneben haette ein
 // zweites Ergebnis geliefert, und dann glaubt man keinem von beiden.
 //
-//     plugtempo [bilder=N] [scheibe=MS] [ohne]
+//     plugtempo [bilder=N] [scheibe=MS] [ohne] [hang]
 //
 // `ohne` laesst Schritt 3 weg -- die Gegenprobe, dass die zweite Zahl
 // nicht einfach deshalb anders ist, weil sie die zweite ist.
+//
+// `hang` ist die MESSUNG ZUR HAENGER-GEGENPROBE (Messlatte 3b). Statt
+// des Widgets wird in Schritt 3 `/bin/plugboese hang` gestartet: ein
+// Plugin, das sich anmeldet, abonniert und danach NICHTS mehr abholt,
+// waehrend es in Ring 3 eine Schleife dreht. Bis zu dieser Runde wurden
+// dafuer die `comp=`-Zahlen ZWEIER Laeufe verglichen -- zwei Maschinen,
+// zwei Lasten, eine Meinung. Mit `hang` liegen beide Messfenster im
+// SELBEN Lauf: 60 Bilder vor dem Haenger, 60 Bilder waehrend des
+// Haengers, dieselbe Last aus demselben Fenster. Und weil "waehrend"
+// nur zaehlt, wenn der Haenger dabei wirklich noch lief, prueft das
+// Programm nach dem zweiten Fenster mit `kill(pid, 0)` nach, ob es den
+// Prozess noch gibt, und schreibt den Befund auf die Leitung.
 
 profile kernel
 
@@ -51,6 +63,11 @@ const PL_FRSUM: u64 = 26
 const PL_FRN: u64 = 27
 const WMP_ABI: u64 = 1
 const SYS_PLUG_GRANT: u64 = 2126
+// `kill(pid, 0)` schickt nichts und sagt nur, ob es den Prozess noch
+// gibt (kernel/signal.fi, `send_pid`): 0 = lebt, Fehler = weg. Das ist
+// der Lebensnachweis fuer den Haenger -- ohne ihn waere "waehrend des
+// Haengers gemessen" wieder nur eine Behauptung.
+const SYS_SIG_KILL: u64 = 62
 // dieselbe Maske wie `uhr rechte=0x807` in /etc/wmplug.conf
 const R_UHR: u64 = 0x807
 
@@ -258,6 +275,7 @@ fn u_start(args: u64) -> u64 {
     var w_bild: [u8; 8] = "bilder=\0"
     var w_sch: [u8; 9] = "scheibe=\0"
     var w_ohne: [u8; 5] = "ohne\0"
+    var w_hang: [u8; 5] = "hang\0"
     var s_abi: [u8; 21] = "tempo: abi falsch k=\0"
     var s_vor: [u8; 11] = "tempo: vor\0"
     var s_nach: [u8; 12] = "tempo: nach\0"
@@ -268,6 +286,11 @@ fn u_start(args: u64) -> u64 {
     var p_start: [u8; 14] = "/bin/pluguhr\0\0"
     var a0: [u8; 8] = "pluguhr\0"
     var a1: [u8; 11] = "runden=60\0\0"
+    var p_boese: [u8; 16] = "/bin/plugboese\0\0"
+    var b0: [u8; 6] = "boese\0"
+    var b1: [u8; 5] = "hang\0"
+    var s_hs: [u8; 20] = "tempo: haenger pid=\0"
+    var s_lb: [u8; 7] = " lebt=\0"
     var nm: [u8; 16] = "uhr\0\0\0\0\0\0\0\0\0\0\0\0\0"
     var s_gr: [u8; 19] = "tempo: grant r=\0\0\0\0"
 
@@ -280,6 +303,8 @@ fn u_start(args: u64) -> u64 {
         let a: u64 = ulib.arg_at(args, ai)
         if ulib.streq(a, (&w_ohne[0 as usize]) as u64) {
             laden = 0
+        } else if ulib.streq(a, (&w_hang[0 as usize]) as u64) {
+            laden = 2
         } else if praefix(a, (&w_bild[0 as usize]) as u64, 7) {
             ziel = wert(a, 7)
         } else if praefix(a, (&w_sch[0 as usize]) as u64, 8) {
@@ -321,7 +346,21 @@ fn u_start(args: u64) -> u64 {
         ulib.sys(WM_PLUG_INFO, 0, PL_LATUS, 0))
     ulib.nl()
 
-    if laden != 0 {
+    var hpid: u64 = 0
+    if laden == 2 {
+        // DER HAENGER. Keine Gewaehrung: `plugboese hang` braucht kein
+        // einziges Handlungsrecht, es soll nur etwas liegen haben und
+        // es nicht abholen (dafuer macht es sich selbst ein Fenster
+        // auf). Der Kern gibt ihm R_DEFAULT, die Frist reisst, und
+        // genau waehrend dieser Zeit laeuft das zweite Messfenster.
+        var hargv: [u64; 2] = [0 as u64; 2]
+        hargv[(0) as usize] = (&b0[0 as usize]) as u64
+        hargv[(1) as usize] = (&b1[0 as usize]) as u64
+        hpid = ulib.sys(ulib.SYS_EXEC, (&p_boese[0 as usize]) as u64,
+            (&hargv[0 as usize]) as u64, 2)
+        zahl((&s_st[0 as usize]) as u64, hpid)
+        ulib.nl()
+    } else if laden != 0 {
         // ERST DIE RECHTE, DANN DAS PLUGIN -- der Kern legt die Rechte
         // beim Anmelden auf den Platz, und ein Widget ohne R_ACT_BAR
         // waere keine Last, sondern nur ein Prozess, der Fehlercodes
@@ -341,12 +380,37 @@ fn u_start(args: u64) -> u64 {
     // Nach dem Laden noch einmal warm: das Widgetfeld ist neu, seine
     // Glyphen sind es beim ersten Mal auch, und der Starthelfer braucht
     // selbst eine Sekunde, bis das Plugin wirklich steht.
-    warmlauf(4000)
+    //
+    // IM HAENGERLAUF IST DER WARMLAUF KURZ. Der Haenger dreht seine
+    // Schleife nur eine begrenzte Zeit; jede Sekunde Warmlauf ist eine
+    // Sekunde weniger Messfenster IM Haenger. Eine Sekunde reicht:
+    // gemessen wird derselbe Schirm mit demselben Lastfenster wie
+    // vorher, neue Glyphen kommen dabei keine dazu.
+    var warm2: u64 = 4000
+    if laden == 2 {
+        warm2 = 1000
+    }
+    warmlauf(warm2)
     messen(ziel, scheibe)
     melden((&s_nach[0 as usize]) as u64)
     zahl((&s_lat[0 as usize]) as u64,
         ulib.sys(WM_PLUG_INFO, 0, PL_LATUS, 0))
     ulib.nl()
+    if laden == 2 {
+        // LEBTE DER HAENGER NOCH, ALS DAS FENSTER ZU WAR? Steht hier
+        // `lebt=0`, dann ist das zweite Fenster teilweise nach dem
+        // Haenger gemessen -- und die Zahl darunter taugt nicht als
+        // Beleg. Also wird sie mitgeschrieben statt weggelassen.
+        var lebt: u64 = 0
+        if hpid != 0 && !ulib.bad(hpid) {
+            if !ulib.bad(ulib.sys(SYS_SIG_KILL, hpid, 0, 0)) {
+                lebt = 1
+            }
+        }
+        zahl((&s_hs[0 as usize]) as u64, hpid)
+        zahl((&s_lb[0 as usize]) as u64, lebt)
+        ulib.nl()
+    }
     if fenster != 0 {
         let _c: u64 = ulib.sys(WM_CLOSE, fenster, 0, 0)
         fenster = 0
