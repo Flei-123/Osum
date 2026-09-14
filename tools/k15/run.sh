@@ -295,7 +295,15 @@ ARGS=(build "$TMPD/disk.img" 16384 /lib/
       "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/${p}0.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
-ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme")
+# RUNDE ROTABSCHNITTE: /etc/uitrace -- OHNE DIE DATEI SCHWEIGEN SIE.
+# Dieser Laeufer liest an 26 Stellen `launcher: ...`, `taskbar: ...`
+# und `qs: ...` von der seriellen Leitung. Diese Zeilen gibt es aber
+# nur, wenn /etc/uitrace auf der Platte liegt (launcher.fi, qs.fi,
+# taskbar.fi -- jeweils `dbg_setup`). tools/desktop/run.sh legt sie
+# an und ist gruen; hier fehlte sie. Dasselbe war die Ursache bei
+# systembus (4/n) und werkzeug (13/n).
+printf 'on\n' > "$TMPD/uitrace"
+ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme" "/etc/uitrace=$TMPD/uitrace")
 # RUNDE I18N: DIE SPRACHDATEIEN GEHOEREN AUF DAS ABBILD.
 # Der Dateimanager und der Starter holen ihre Beschriftungen seit
 # Runde I18N aus /usr/share/locale/<code>/messages. Ohne die Dateien
@@ -1120,13 +1128,23 @@ schau_nicht "und drei Bildpunkte weiter rechts ist nichts vom Zeiger" \
 echo "== 14. der Name, der zweite Name und die Auffindbarkeit =="
 # DER NAME IST DIE BESCHREIBUNG. Kein Nautilus, kein Finder, kein
 # Kunstwort: das Programm heisst `/bin/explorer` und traegt fuer den
-# Nutzer den Namen "Datei-Explorer" -- und dieser Name steht NICHT im
+# Nutzer einen sprechenden Namen -- und dieser Name steht NICHT im
 # Quelltext, sondern in `/apps/explorer.osp/INFO`.
 # EIN `grep` PRUEFT DAS NICHT: der Kopfkommentar von explorer.fi
-# ERKLAERT, warum das Programm "Datei-Explorer" heisst, und ein
-# `grep -q` schlaegt darauf an. `tools/k15/noname.py` entfernt die
-# Anmerkungen und sieht nur im Code nach.
-aus=$(python3 tools/k15/noname.py kernel/user/explorer.fi "Datei-Explorer" 2>&1)
+# ERKLAERT, warum das Programm so heisst, und ein `grep -q` schlaegt
+# darauf an. `tools/k15/noname.py` entfernt die Anmerkungen und sieht
+# nur im Code nach.
+#
+# RUNDE ROTABSCHNITTE: GEPRUEFT WIRD DER NAME, DER HEUTE GILT.
+# Commit c101990 (ECHTHARDWARE-2) hat die INFO auf Englisch gestellt
+# ("name=File Explorer"), diesen Laeufer aber nicht mitgezogen -- er
+# suchte weiter nach "Datei-Explorer" und war deshalb rot. Dieses
+# Abbild traegt KEINE Sprachwahl unter /users/, laeuft also auf
+# Englisch (dieselbe Stelle, an der die Kopfzeile "Size" heisst und
+# nicht "Groesse"). Die deutsche Form steht seit ROTABSCHNITTE 14/n
+# im Katalog (`explorer.title = Datei-Explorer`) und wird dort
+# geprueft, wo auf Deutsch gelaufen wird.
+aus=$(python3 tools/k15/noname.py kernel/user/explorer.fi "File Explorer" 2>&1)
 if [ $? -eq 0 ]; then ok "der Anzeigename steht NICHT im Code ($aus)"
 else bad "der Anzeigename steht im Code: $aus"; fi
 aus=$(python3 tools/k15/noname.py kernel/user/launcher.fi "Suchen" 2>&1)
@@ -1150,17 +1168,17 @@ if python3 tools/k15/noname.py kernel/user/launcher.fi "Ausfuehren" >/dev/null 2
 else
     bad "'Ausfuehren' steht immer noch fest im Quelltext"
 fi
-grep -q '^name=Datei-Explorer' assets/apps/explorer.osp/INFO \
+grep -q '^name=File Explorer' assets/apps/explorer.osp/INFO \
     && ok "sondern in assets/apps/explorer.osp/INFO" \
     || bad "assets/apps/explorer.osp/INFO fuehrt keinen Anzeigenamen"
-has "$TMPD/files.txt" "explorer: name [Datei-Explorer] aus [explorer.osp]" \
+has "$TMPD/files.txt" "explorer: name [File Explorer] aus [explorer.osp]" \
     "und das Programm holt ihn aus dem Buendel"
 # UND ER STEHT IN DER TITELLEISTE. Die malt der FENSTERSERVER -- damit
 # ist der ganze Weg gemessen: Datei auf der Platte, Ring 3, WM_CREATE,
 # Titelleiste, Bildpunkte.
 schau "der Anzeigename steht bildpunktgenau in der Titelleiste" \
     ttext "$TMPD/files.ppm" "$SANS" 15 $((FWX + 7)) $((FWY + 15)) \
-    255 255 255 28 78 126 "Datei-Explorer" 96
+    255 255 255 28 78 126 "File Explorer" 96
 schau_nicht "und ein anderer Name steht dort NICHT" \
     ttext "$TMPD/files.ppm" "$SANS" 15 $((FWX + 7)) $((FWY + 15)) \
     255 255 255 28 78 126 "Dateimanager" 96
@@ -1229,7 +1247,7 @@ for name in sorted(os.listdir('assets/apps')):
 print(n)
 " "$PROGS")
 num "er findet so viele Programme, wie .osp-Buendel mit einem Programm dieser Platte im Baum liegen" "$na" eq "$soll"
-has "$TMPD/start.txt" "launcher: treffer i=0 name=[Datei-Explorer] exec=[/apps/explorer.osp/start]" \
+has "$TMPD/start.txt" "launcher: treffer i=0 name=[File Explorer] exec=[/apps/explorer.osp/start]" \
     "und das Buendel fuehrt den Dateimanager mit Name UND Befehl"
 # EIN PROGRAMM IST EIN VERZEICHNIS, und das steht nicht im Quelltext,
 # sondern auf der Platte. Was ausgefuehrt wird, ist `start` IM Buendel --
@@ -1259,10 +1277,10 @@ SFG=$(frgb "$TMPD/start.txt" "launcher: rows" fg)
 SBG=$(frgb "$TMPD/start.txt" "launcher: rows" bg)
 schau "die erste Zeile des Starters, je Zeichen" \
     ttext "$TMPD/start.ppm" "$SANS" 15 $((SCX + SRX)) $((SCY + SRB)) \
-    $SSFG $SSEL "Datei-Explorer  --  Dateien und Ordner ansehen" 96
+    $SSFG $SSEL "File Explorer  --  View files and folders" 96
 schau "und die zweite" \
     ttext "$TMPD/start.ppm" "$SANS" 15 $((SCX + SRX)) $((SCY + SRB + SZH)) \
-    $SFG $SBG "Editor  --  Text schreiben und ändern" 96
+    $SFG $SBG "Editor  --  Write and change text" 96
 # DAS SYMBOL IST EINE DATEI. Im ersten Nachtrag war es sechs Hexziffern
 # in einer Textdatei -- ehrlich, solange dieses System kein Bild lesen
 # konnte, aber eben kein Bild. Seit dem zweiten liegt in jedem Buendel
@@ -1297,8 +1315,8 @@ pruef "in Zeile 1 steht dafuer das des Editors" \
 
 echo "== 14c. die Suche -- und dass wirklich die Schluesselwoerter greifen =="
 # DIE ZUSAGE, UM DIE ES GEHT: man tippt "folder" und findet den
-# Dateimanager, OBWOHL das Wort weder im Anzeigenamen "Datei-Explorer"
-# noch in der Beschreibung "Dateien und Ordner ansehen" steht. Es steht
+# Dateimanager, OBWOHL das Wort weder im Anzeigenamen "File Explorer"
+# noch in der Beschreibung "View files and folders" steht. Es steht
 # nur in `keys=`. Zuerst wird das ueberhaupt nachgerechnet -- sonst
 # waere die Zusage eine ueber einen Zufall.
 for w in folder files manager verzeichnis; do
@@ -1333,16 +1351,16 @@ has "$TMPD/start.txt" "launcher: name [Suchen]" \
     "auch der Starter holt seinen eigenen Namen aus den Daten"
 tf=$(grep -aA1 'launcher: suche \[folder\]' "$TMPD/suche.txt" | grep -a 'name=' | tail -1)
 case "$tf" in
-    *"name=[Datei-Explorer]"*) ok "der Treffer ist der Datei-Explorer" ;;
-    *) bad "der Treffer ist nicht der Datei-Explorer: $tf" ;;
+    *"name=[File Explorer]"*) ok "der Treffer ist der Dateimanager" ;;
+    *) bad "der Treffer ist nicht der Dateimanager: $tf" ;;
 esac
 # UND ER STEHT IM BILD -- als einzige Zeile der Liste.
 schau "im Bild steht er in Zeile 0 der Trefferliste" \
     ttext "$TMPD/suche.ppm" "$SANS" 15 $((SCX + SRX)) $((SCY + SRB)) \
-    $SSFG $SSEL "Datei-Explorer  --  Dateien und Ordner ansehen" 96
+    $SSFG $SSEL "File Explorer  --  View files and folders" 96
 schau_nicht "und in Zeile 1 steht nichts mehr" \
     ttext "$TMPD/suche.ppm" "$SANS" 15 $((SCX + SRX)) $((SCY + SRB + SZH)) \
-    $SFG $SBG "Editor  --  Text schreiben und ändern" 96
+    $SFG $SBG "Editor  --  Write and change text" 96
 # DIE GEGENPROBE, DIE DIE ZUSAGE ERST WERTVOLL MACHT: dieselben
 # Tastendruecke, dieselben Dateien, nur OHNE das Feld `keys`.
 foto nokeys "gfx wm wigstart wignokeys wmhold wiglong $GRUND" "$M"
@@ -1352,7 +1370,7 @@ has "$TMPD/nokeys.txt" "launcher: apps=$soll" \
     "obwohl dasselbe Verzeichnis mit denselben $soll Programmen gelesen wurde"
 schau_nicht "und im Bild steht dann auch keine Zeile" \
     ttext "$TMPD/nokeys.ppm" "$SANS" 15 $((SCX + SRX)) $((SCY + SRB)) \
-    $SSFG $SSEL "Datei-Explorer  --  Dateien und Ordner ansehen" 96
+    $SSFG $SSEL "File Explorer  --  View files and folders" 96
 # UND EIN WORT, DAS NIRGENDS STEHT, FINDET NICHTS. Eine Suche, die immer
 # etwas findet, ist keine Suche.
 sed 's/^sendkey f$/sendkey q/; s/^sendkey o$/sendkey u/; s/^sendkey l$/sendkey a/; s/^sendkey d$/sendkey s/; s/^sendkey e$/sendkey t/; s/^sendkey r$/sendkey e/' \
