@@ -167,6 +167,16 @@ anderen Module lesen bitte hier, nicht im Quelltext:
   nur dort, weil jede Baumaenderung die Rechtecke neu verteilt.
 * **Selbsttest jetzt 13 Zusagen** (`wmplug: selftest 13 / 13 failed=0x0`).
   Ein Laeufer soll die Zahl aus `fn selftest_max` lesen, nicht festnageln.
+* **`wmplug: bilanz plugs= evin= evout= kicks= deny= plugkeys=`** am Ende
+  des Haltens — eine Zeile aus dem Kern statt einer Summe, die der
+  Laeufer selbst bildet.
+* **Zahlen der Kernseite** (5 s Halten, `gfx wm tile wmhold wmplug
+  wmshell ...`, je ein Lauf; die belastbare Messung macht Modul F ueber
+  PL_FRAMES/PL_LATUS):
+  mit angemeldetem Plugin `n=50 mittel=939 us max=13936 ueber16=0`,
+  ohne `n=43 mittel=981 us max=13204 ueber16=0`. Die Lasten sind nicht
+  dieselben (das Plugin oeffnet ein Fenster), der Unterschied liegt in
+  beiden Richtungen im Rauschen — ein Einbruch ist es nicht.
 
 ### B — `verwaltung` (/bin/wmplug)
 Dateien: `kernel/user/wmplug.fi` (neu), `etc/wmplug.conf` (neu),
