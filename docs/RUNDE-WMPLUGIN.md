@@ -86,7 +86,7 @@ Neu ab 2117; `WM_MAXNR` ist von 2116 auf **2126** mitgewachsen.
 
 | Nr | Name | Argumente → Rueckgabe |
 |---|---|---|
-| 2117 | `WM_PLUG_REG` | (abi, name, maske) → Platz |
+| 2117 | `WM_PLUG_REG` | (abi, name, maske, **frist**) → Platz |
 | 2118 | `WM_PLUG_UNREG` | () → 0 |
 | 2119 | `WM_PLUG_POLL` | (aus) → 1 geholt / 0 keines. **Kehrt immer sofort zurueck.** |
 | 2120 | `WM_PLUG_SUB` | (maske) → 0 |
@@ -95,7 +95,16 @@ Neu ab 2117; `WM_MAXNR` ist von 2116 auf **2126** mitgewachsen.
 | 2123 | `WM_PLUG_KEY` | (taste, mods) → 0 |
 | 2124 | `WM_PLUG_BAR` | (text, laenge) → 0 |
 | 2125 | `WM_PLUG_BARGET` | (platz, aus, max) → Laenge — **nur die Leiste** |
-| 2126 | `WM_PLUG_GRANT` | (name, rechte) → 0 — **nur root** |
+| 2126 | `WM_PLUG_GRANT` | (name, rechte \| **frist**<<32) → 0 — **nur root** |
+
+Das vierte Argument von `WM_PLUG_REG` und die oberen Bits von
+`WM_PLUG_GRANT` sind in der Nachbesserung R2-2 dazugekommen: die
+**Frist je Plugin** in Ticks (Abschnitt 14.3). Wer mit drei Argumenten
+ruft, uebergibt eine Null und bekommt genau das Verhalten von vorher.
+Ebenfalls neu sind die Felder `PL_PFRIST = 20` (Frist eines Platzes),
+`PL_DENYS = 21` (abgewiesene Handlungen dieses Platzes) und
+`PL_WORKX/Y/W/H = 22..25` (die Arbeitsflaeche ohne eigenes Fenster);
+`PL_MAXNR` ist **26**.
 
 **Kein neuer Zeichenweg.** Ein Plugin malt nicht. Ein Leistenwidget
 schickt **Text** (`WM_PLUG_BAR`), und gemalt wird er von der Taskleiste
@@ -289,7 +298,12 @@ plugboese: rechteprobe: abgewiesen UND nichts bewegt
 
 ## 6. An und aus zur Laufzeit, ohne Neustart
 
-Ein Lauf, ein Fensterserver (`wm: hold` steht genau **einmal** da):
+Ein Lauf, ein Fensterserver (`wm: hold` steht genau **einmal** da). Der
+Auszug stammt aus dem Lauf VOR der Nachbesserung R2-2; die Zeilen
+heissen seither `wmprobe: list vorher` statt `plugstart: list vorher`
+(der Starthelfer ist geloescht, die Verwaltung befragt sich selbst mit
+`wmplug probe` — Abschnitt 14.1). Die Zahlen und die Aussage sind
+dieselben:
 
 ```
 wmplug: reg uhr platz=0 rechte=0x807
@@ -519,7 +533,13 @@ weil ein Bericht, der nur die gruenen Zeilen zeigt, nichts wert ist.
 
 ## 10. Ausdruecklich benannte Abkuerzungen
 
-1. **Das geborgte Leserecht.** Titel und Ort fremder Fenster gibt
+> **GESTRICHEN in der Nachbesserung R2-2:** die Nummern 1, 2 und 5 gelten
+> nicht mehr — das Leserecht `R_EV_WIN`, die Autostart-Liste und die
+> Rechte-Gegenprobe mit `0x001` stehen in **Abschnitt 14**, jede mit der
+> Zeile, die sie belegt. Die Eintraege bleiben hier stehen, damit
+> nachlesbar ist, was sie waren.
+
+1. ~~**Das geborgte Leserecht.**~~ (gestrichen, siehe 14.2) Titel und Ort fremder Fenster gibt
    `WM_LIST` nur einer Taskleiste (`is_taskbar`). `plugregel` und
    `plugboese` brauchen diese Zahlen, also legen beide ein **verborgenes**
    Fenster von 32x16 mit einem Schirmrand von **einem** Bildpunkt an.
@@ -528,7 +548,8 @@ weil ein Bericht, der nur die gruenen Zeilen zeigt, nichts wert ist.
    zu sehen. **Richtig waere ein eigenes Leserecht** (`R_EV_WIN` als
    Leseschluessel fuer `WM_LIST`). Betrifft nur das *Messen*, nicht das
    Recht zum *Handeln*.
-2. **`kernel/user/plugstart.fi`.** Der Kern startet auf dem
+2. ~~**`kernel/user/plugstart.fi`.**~~ (gestrichen, siehe 14.1; die Datei
+   ist geloescht) Der Kern startet auf dem
    Schreibtischweg genau **ein** zusaetzliches Programm (`wigapp=`), der
    Abnahmelauf braucht aber zwei Schritte (Rechte gewaehren, dann
    starten). Faellt weg, sobald der Schreibtisch eine **Autostart-Liste**
@@ -542,7 +563,8 @@ weil ein Bericht, der nur die gruenen Zeilen zeigt, nichts wert ist.
    `runden=30`, und der Kern meldete `reg uhr rund`. Siehe
    `BEFUND-WMPLUG-NAMENSPUFFER.md`. Die Laenge gehoerte besser als
    Argument mitgegeben.
-5. **Die Rechte-Gegenprobe misst den weiteren der beiden Faelle.**
+5. ~~**Die Rechte-Gegenprobe misst den weiteren der beiden Faelle.**~~
+   (gestrichen, siehe 14.2 -- gemessen wird jetzt `rechte=0x001`)
    `plugboese` laeuft mit `R_DEFAULT` (0x1F) aus dem Kern, nicht mit den
    0x001 aus `/etc/wmplug.conf` — die wuerden erst durch
    `wmplug enable boese` wirksam. Beide haben **kein** Aktionsbit, die
@@ -555,15 +577,17 @@ weil ein Bericht, der nur die gruenen Zeilen zeigt, nichts wert ist.
 
 ## 11. Offene Punkte
 
-* **Kein eigenes Leserecht fuer `WM_LIST`.** Solange es fehlt, brauchen
-  Plugins den Umweg aus Abkuerzung 1.
-* **Keine Autostart-Liste** des Schreibtischs (Abkuerzung 2).
-* **Die Frist ist eine Zahl fuer alle.** Ein Widget im Sekundentakt und
-  eine Regel-Engine, die nur bei `E_WIN_OPEN` aufwacht, haben dieselbe
-  halbe Sekunde. Eine Frist je Plugin waere richtiger.
-* **`G_RIGHTS` (zu oft ohne Recht angeklopft) ist gebaut, aber in dieser
-  Runde nicht ausgeloest worden.** Gemessen ist nur `PL_DENY`, das
-  einzelne Abweisen. Die Schwelle selbst ist **ungemessen**.
+* ~~**Kein eigenes Leserecht fuer `WM_LIST`.**~~ ERLEDIGT in R2-2:
+  `R_EV_WIN` oeffnet `WM_LIST` (14.2).
+* ~~**Keine Autostart-Liste** des Schreibtischs.~~ ERLEDIGT in R2-2:
+  `/etc/wmplug.autostart` (14.1).
+* ~~**Die Frist ist eine Zahl fuer alle.**~~ ERLEDIGT in R2-2:
+  `P_FRIST` je Platz, `frist=` in /etc/wmplug.conf (14.3).
+* ~~**`G_RIGHTS` ... nicht ausgeloest worden.**~~ ERLEDIGT in R2-2:
+  Schwelle `DENY_MAX = 8`, `grund=3` auf der Leitung (14.4).
+* **Der Autostart wartet zwei Sekunden**, bevor er die erste Zeile
+  ausfuehrt -- ein Plugin bekommt sonst die Ladezeit fremder Programme
+  auf seine Frist angerechnet (14.1).
 * **Kein Plugin ueberlebt einen Neustart des Fensterservers.** Die Tafel
   ist Hauptspeicher; wer nach `wm: hold` wieder da sein will, muss neu
   gestartet werden.
@@ -697,3 +721,198 @@ auch in ein 640x480-Terminal passen.
 Zeilen `pluguhr: text 18:06 cpu 0%` stammen aus dem Lauf VOR dieser
 Nachbesserung; die Form heisst seither `pluguhr: text cpu 0%`. Die
 Aussage der Abschnitte aendert sich dadurch nicht.
+
+---
+
+## 14. Nachbesserung R2-2: der Autostart, das Leserecht, die Frist je Plugin und die Schwelle
+
+Vier Maengel, vier Belege. Alle Zeilen unten stammen aus
+`bash tools/wmplug/run.sh` auf diesem Stand (117 Zusagen der Kernseite,
+0 gescheitert); die Abbilder baut der Laeufer je Lauf neu, weil die
+Autostart-Liste jetzt IM Abbild liegt.
+
+### 14.1 Autostart statt Starthelfer — Abkuerzung 2 ist weg
+
+`kernel/user/plugstart.fi` (`/bin/uhrstart`) ist **geloescht**. An seine
+Stelle treten zwei Dinge:
+
+* **`/etc/wmplug.autostart`**, gelesen vom Schreibtisch
+  (`kernel/user/desktop.fi`, `fn autostart`). Eine Zeile je Erweiterung:
+  der erste Name geht an `wmplug enable`, die restlichen Woerter gehen
+  **durch** an das Plugin. Alles hinter `#` ist Bemerkung; fehlt die
+  Datei, passiert nichts.
+* **`wmplug enable` startet jetzt wirklich**: steht in der Zeile von
+  `/etc/wmplug.conf` ein `prog=`, wird es nach der Gewaehrung mit
+  `SYS_EXEC` gestartet. Die Reihenfolge ist gemessen und nicht beliebig
+  — der Kern legt die Rechte beim **Anmelden** auf den Platz, wer sich
+  vor der Gewaehrung anmeldet, sieht nur zu.
+
+Aus dem Lauf `verw` (eine Zeile `uhr runden=40`):
+
+```
+desktop: autostart [uhr runden=40] pid=9
+wmplug: uhr rechte=0x807
+  Frist 100 Ticks
+wmplug: reg uhr platz=0 rechte=0x807 frist=100
+wmplug: start /bin/pluguhr rc=8
+```
+
+**Zwei Sekunden Vorlauf, und die Zahl ist gemessen.** `desk` startet
+nach dem Schreibtisch noch Leiste und Starter, und ein `SYS_EXEC` laedt
+das ganze Abbild IM Systemaufruf (`elf: start ... pages=432`, 1,4
+Megaoktett). Waehrenddessen kommt kein anderer Prozess dran: ein Plugin,
+das sich vorher angemeldet hat, holt in dieser Zeit **nichts** ab, und
+der Kehrbesen hat recht, wenn er es hinauswirft — gemessen stand dort
+`wmplug: unreg uhr grund=2 holte=1`. Der Autostart wartet deshalb, bis
+die Sitzung steht. Das ist kein Fehler der Frist, sondern der Preis
+eines synchronen Programmstarts, und es steht hier, weil es sonst
+niemand sieht.
+
+Der vierte Aufrufweg der Verwaltung, `wmplug probe <name>`, ersetzt den
+zweiten Zweck des alten Starthelfers (list/info/disable/list an einem
+wirklich angemeldeten Plugin). Mit Woertern hinter dem Namen startet er
+das Plugin vorher selbst — dafuer braucht `wigapp=` kein Hilfsprogramm
+mehr.
+
+Nebenbefund, der eine Stunde gekostet hat: die Leseschranke von
+`maske_aus_datei` lag bei 2000 Oktetten, `/etc/wmplug.conf` ist mit
+`frist=` und `prog=` **3133** Oktette lang — `wmplug enable uhr`
+antwortete "steht nicht in /etc/wmplug.conf", obwohl die Zeile dastand.
+Die Meldung nennt jetzt `gelesen=`, und der Puffer fasst 4000.
+
+### 14.2 `R_EV_WIN` ist der Schluessel zu `WM_LIST` — Abkuerzung 1 ist weg
+
+Bis zu dieser Nachbesserung gab es genau einen Schluessel zur
+Fenstertafel: eine Taskleiste sein (`is_taskbar`). `plugregel` und
+`plugboese` legten dafuer je ein **verborgenes Fenster von 32x16** mit
+einem Schirmrand von einem Punkt an. Beide Fenster sind **geloescht**;
+der zweite Schluessel ist jetzt das Recht selbst
+(`kernel/sysgui.fi`, `fn darf_listen`):
+
+```
+if is_taskbar(state, me) { return true }
+let i = wmplug.slot_of(state, me)
+return (wmplug.rights_at(state, i) & wmplug.R_EV_WIN) != 0
+```
+
+Wer Fensterereignisse sehen darf, darf auch die Fenstertafel lesen — er
+erfaehrt ohnehin von jedem Fenster, das aufgeht. Gemessen im Lauf
+`greif`, und zwar mit dem **engsten** Rechtesatz der Runde (das raeumt
+zugleich Abkuerzung 5 ab):
+
+```
+wmplug: reg boese platz=0 rechte=0x1 frist=100
+plugboese: platz=0 rechte=1
+plugboese: vorher id=7 x=24 y=40
+plugboese: griff nach fremdem id=7 fehler=2 deny=1
+plugboese: nachher id=7 x=24 y=40
+plugboese: rechteprobe: abgewiesen UND nichts bewegt
+```
+
+`rechte=1` ist genau `R_EV_WIN`: **lesen ja, handeln nein**. Der
+Abnahmelauf prueft zusaetzlich, dass der Titel `plugboese-lese` in
+keinem Protokoll mehr vorkommt.
+
+Die vier Zahlen der Arbeitsflaeche, fuer die `plugregel` frueher ein
+Handle brauchte (WM_INFO), beantwortet der Kern jetzt ohne Fenster:
+`PL_WORKX/Y/W/H` (22..25), `PL_MAXNR = 26`.
+
+**Nachzuegler-Suche, gemessen und nicht vorsichtshalber:** in etwa jedem
+vierten Lauf kam das `E_WIN_OPEN` des Rechnerfensters nicht an — die
+Bilanz zaehlte `evin=3` statt `evin=4`, das Fenster war da, das Ereignis
+nicht. Ein Ereignisring ist ein schneller Weg und keine Wahrheit (er
+kann ueberlaufen, und zwischen Anmeldung und erstem Abholen liegt immer
+eine Luecke). `plugregel` liest deshalb alle zwei Sekunden einmal die
+Fenstertafel und behandelt, was es noch nicht gesehen hat; jede Regel
+wirkt je Fenster genau einmal.
+
+### 14.3 Die Frist gehoert dem Plugin (`P_FRIST`)
+
+Neu in `kernel/wmplug.fi`: `P_FRIST` (0xB0) je Platz, gesetzt
+
+* beim Anmelden — **viertes Argument** von `WM_PLUG_REG`, hoechstens
+  `FRIST_MAX_SELBST = 200` Ticks (2 s), damit sich kein Plugin selbst
+  unsterblich macht, **oder**
+* aus der Gewaehrungstafel — `frist=<ticks>` in `/etc/wmplug.conf`,
+  von `WM_PLUG_GRANT` in den **oberen** Bits desselben Wortes
+  uebertragen (Bits 32..47). Diese Zahl schlaegt den Wunsch, in beide
+  Richtungen; sie kommt von root.
+
+`PL_PFRIST` (20) beantwortet die Frist **eines Platzes**, `PL_FRIST`
+(14) bleibt die des Kerns. Der Kehrbesen (`sweep_at`, `reap`) fragt je
+Platz `frist_at`.
+
+Gemessen in EINEM Lauf (`abbild frist 'regel demo laut' 'uhr runden=40'`):
+
+```
+wmplug: reg regel platz=0 rechte=0x301 frist=500
+wmplug: reg uhr   platz=1 rechte=0x807 frist=100
+plugregel: regel 0 id=12 app=rechner
+plugregel: nachgemessen id=12 x=230 y=70 w=340 h=430 flaeche=2 sichtbar=1
+pluguhr: text cpu 0%
+wmplug: bilanz  plugs=2  evin=4  evout=4  kicks=0  deny=0  plugkeys=0
+```
+
+Widget mit **1 s**, Regel-Engine mit **5 s**, `kicks=0` — beide
+ueberleben denselben Lauf. Der Selbsttest des Moduls hat dafuer zwei
+neue Zusagen (jetzt **15**): eine eigene Frist gilt gegen die des Kerns
+(der Platz ohne eigene fliegt, der mit eigener bleibt), und die
+Schwelle unten.
+
+### 14.4 `G_RIGHTS` ist nicht mehr nur gebaut, sondern ausgeloest
+
+`deny()` zaehlt jetzt je Platz (`P_DENYS`, 0xB8) und meldet den Platz ab
+`DENY_MAX = 8` mit `G_RIGHTS` ab. Einmal fragen ist eine Frage — der
+Fehlercode ist die Antwort; achtmal greifen ist eine Absicht.
+`plugboese greif` reizt die Schwelle in einer Schleife:
+
+```
+wmplug: unreg boese grund=3 holte=20 verlor=0
+plugboese: schwelle: griffe=12 letzte=3 deny=8
+wmplug: bilanz  plugs=0  evin=1  evout=0  kicks=1  deny=8  plugkeys=0
+```
+
+`letzte=3` ist `-E_NOTFOUND`: die letzten Griffe treffen keinen Platz
+mehr, weil es ihn nicht mehr gibt — nicht `-E_RIGHTS`, das waere nur
+"gesperrt". `deny=8` ist genau die Schwelle, und der Schreibtisch steht
+danach weiter (`wm: hold`).
+
+### 14.5 Der sichtbare Beleg im Absturzlauf
+
+Der Absturzlauf macht jetzt **zwei** Fotos aus demselben Lauf: eines,
+waehrend das Plugin sein Feld in der Leiste besetzt haelt, und eines,
+nachdem der Kern den Toten abgeholt hat. Dafuer meldet sich
+`plugboese segv` unter dem Namen `boesebar` an — diese Zeile in
+`/etc/wmplug.conf` traegt zusaetzlich `R_ACT_BAR` (0x801) — schickt
+`plugin lebt` in die Leiste und stuerzt erst fuenf Sekunden spaeter ab.
+
+Die Koordinate kommt aus der Leiste selbst (`taskbar: plug nr=0 x= y=
+w= h=` plus `taskbar: geom`), nicht aus dem Skript:
+
+```
+das Plugin-Feld der Leiste steht bei x=624 y=2 w=92 h=26, Mitte (670,585)
+checkshot punkt (670,585): vorher [38 48 60], nach dem Absturz [30 41 59]
+```
+
+Vorher die Farbe des Widgetkastens, nachher die nackte Leiste: das Feld
+ist weg, weil der Platz frei ist. Bilder:
+`docs/shots/wmplug/vor-absturz.png` und `nach-absturz.png`. Dazu
+weiterhin: `wm: comp=172` Bildrunden nach dem Absturz, 479819 von 480000
+Bildpunkten nicht schwarz, `kicks=1`, `wmplug: tot` genau einmal.
+
+### 14.6 Was damit aus den Abkuerzungen und offenen Punkten wird
+
+* **Abkuerzung 1 (geborgtes Leserecht) — gestrichen**, siehe 14.2.
+* **Abkuerzung 2 (`plugstart.fi`) — gestrichen**, siehe 14.1. Die Datei
+  ist geloescht, `/bin/uhrstart` gibt es nicht mehr.
+* **Abkuerzung 5 (Rechte-Gegenprobe misst den weiteren Fall) —
+  gestrichen**: sie misst jetzt `rechte=0x001` aus der Datei.
+* Offener Punkt "**Die Frist ist eine Zahl fuer alle**" — erledigt
+  (14.3).
+* Offener Punkt "**`G_RIGHTS` ungemessen**" — erledigt (14.4).
+
+**Neu benannt, weil es sonst niemand sieht:** der Autostart wartet zwei
+Sekunden, bevor er die erste Zeile ausfuehrt (14.1). Die Zahl ist an
+diesem Abbild gemessen und nicht hergeleitet; richtig waere, dass ein
+Plugin die Zeit eines fremden `SYS_EXEC` nicht auf seine Frist
+angerechnet bekommt.
