@@ -24,7 +24,7 @@ echo "== bauen =="
 bash tools/build-kernel.sh "$TMPD/k.mb" > "$TMPD/k.log" 2>&1 \
     || { tail -12 "$TMPD/k.log"; echo "Kernel baut nicht"; exit 1; }
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s || exit 1
-PROGS="desktop taskbar launcher calc sh pluguhr plugregel plugstart wmplug"
+PROGS="desktop taskbar launcher calc sh pluguhr plugregel wmplug"
 for p in $PROGS; do
     up_build vendor/firn/bin/firnc "$p" "$TMPD/$p.o" "$TMPD/$p.elf" \
         "$TMPD/crt.o" kernel/user/user.ld 0 "$TMPD/$p.err" \
@@ -35,8 +35,7 @@ python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1
 ARGS=(build "$TMPD/disk.img" 32768 /lib/
     "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" /bin/)
 for p in $PROGS; do
-    n=$p; [ "$p" = "plugstart" ] && n=uhrstart
-    ARGS+=("/bin/$n=$TMPD/$p.elf")
+    ARGS+=("/bin/$p=$TMPD/$p.elf")
 done
 printf 'on\n' > "$TMPD/uitrace"
 ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme" "/etc/uitrace=$TMPD/uitrace")
@@ -94,9 +93,9 @@ foto() {
 BASE="gfx wm wig desk wmhold wiglong nokbd nosched noproc nofs"
 echo "== fotografieren =="
 foto start          "$BASE plugaus"                            'wm: hold'
-foto uhr            "$BASE wmplug wigapp=/bin/uhrstart,uhrstart,runden=12" \
+foto uhr            "$BASE wmplug wigapp=/bin/wmplug,enable,uhr,runden=12" \
                     'taskbar: text plug ' 'pluguhr: ende'
-foto verwaltung     "$BASE wmplug wigapp=/bin/uhrstart,uhrstart,verwaltung,runden=30" \
+foto verwaltung     "$BASE wmplug wigapp=/bin/wmplug,probe,uhr,runden=30" \
                     'Plugins '
 # Die zwei Bilder der Fensterregel. Sie sind der sichtbare Teil der
 # Zusage "ein Plugin wirkt mit, ohne im Compositor zu stecken": mit
@@ -109,11 +108,11 @@ VOR='nachgemessen id=' foto regel "$BASE nostart wmplug wigapp=/bin/plugregel,re
                     'rechner: ready'
 VOR='nachgemessen id=' foto regel-ohne "$BASE nostart wmplug wigapp=/bin/plugregel,demo" \
                     'rechner: ready'
-foto breit          "$BASE fbres=1440x900 wmplug wigapp=/bin/uhrstart,uhrstart,runden=25" \
+foto breit          "$BASE fbres=1440x900 wmplug wigapp=/bin/wmplug,enable,uhr,runden=25" \
                     'taskbar: text plug '
-foto eng            "$BASE fbres=800x600 wmplug wigapp=/bin/uhrstart,uhrstart,runden=25" \
+foto eng            "$BASE fbres=800x600 wmplug wigapp=/bin/wmplug,enable,uhr,runden=25" \
                     'taskbar: text plug '
-foto sehr-eng       "$BASE fbres=640x480 wmplug wigapp=/bin/uhrstart,uhrstart,runden=25" \
+foto sehr-eng       "$BASE fbres=640x480 wmplug wigapp=/bin/wmplug,enable,uhr,runden=25" \
                     'taskbar: text plug '
 
 echo "== wandeln =="
