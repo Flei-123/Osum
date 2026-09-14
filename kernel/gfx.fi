@@ -57,12 +57,15 @@ import dispsave
 import vgpu
 import kgui
 import sysgui
+import wmplug
 
 export {
     // Der Bildschirm, so weit ihn Nicht-Grafik-Code braucht.
     ready, width, height, pixel, get_pixel, dirty_all, flush, echo,
     // Der Fensterserver, so weit ihn Nicht-Grafik-Code braucht.
     wm_ready, wm_on_key, wm_key_tty, wm_term_out,
+    // RUNDE WMPLUGIN: die Gnadenfrist nach einem langen `exec`.
+    plug_gnade,
     // Die Kommandozeile.
     parse,
     // Die vier Tueren zu der Datei, der die Oberflaeche gehoert.
@@ -377,6 +380,36 @@ fn mouse_clicks(state: u64) -> u64 {
 fn sys_wm(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
     a3: u64, a4: u64) -> u64 {
     return sysgui.wm_call(state, me, number, a0, a1, a2, a3, a4)
+}
+
+// ================================================== RUNDE WMPLUGIN
+//
+// DIE GNADENFRIST NACH EINEM LANGEN `exec`.
+//
+// GEMESSENER BEFUND (Abnahmelauf 14.09.2026, Abschnitt 8b): das
+// Leistenwidget flog mit `grund=2` (G_FRIST) hinaus, obwohl es korrekt
+// mit seiner eigenen Frist (100 Ticks) angetreten war und alle 250 ms
+// abholte. Direkt davor stand auf der Leitung:
+//
+//     elf: start 11 ... bytes=1139398 pages=303
+//
+// `SYS_EXEC` laedt das ganze Abbild IM SYSTEMAUFRUF -- ein Megaoktett
+// und mehr, und waehrenddessen kommt KEIN anderer Ring-3-Prozess dran.
+// Der Zeitgeber laeuft aber weiter. Also verstreicht die Frist eines
+// Plugins, das gar nicht laufen DARF, und der Kehrbesen wirft es
+// hinaus. `kernel/user/desktop.fi` beschreibt genau diesen Effekt schon
+// seit der Autostart-Runde; die Antwort dort war ein `sleep(2000)` im
+// Schreibtisch -- eine Zahl, die raten muss, wie lange ein fremdes
+// Programm laedt.
+//
+// DIE FRIST IST EINE ZUSAGE AN DAS PLUGIN, ALSO MUSS DER KERN SIE
+// EINLOESEN: wer nicht laufen durfte, hat seine Frist nicht verspielt.
+// Nach einem `exec` setzt der Kern deshalb die Uhr JEDES angemeldeten
+// Plugins auf jetzt. Das ist keine Verlaengerung der Frist -- ein
+// Plugin, das WIRKLICH haengt, holt danach immer noch nichts ab und
+// fliegt eine Frist spaeter. Die Haenger-Gegenprobe bleibt scharf.
+fn plug_gnade(state: u64) {
+    wmplug.gnade(state)
 }
 
 fn sys_wig(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
