@@ -43,6 +43,8 @@ uitrace=no
 scheme=day
 mode=light
 res=1280x800
+zweite=""
+fs=aus
 # RUNDE OBERFLAECHE, GEMESSEN AM 05.09.2026: AUF DIESEM ZWEIG IST TCG
 # DIE VORGABE, UND DAS IST KEIN GESCHMACK.
 #
@@ -117,6 +119,10 @@ for a in "$@"; do
         drehbuch=*) drehbuch=${a#*=} ;;
         halt=*) halt=${a#*=} ;;
         extra=*) extra=${a#*=} ;;
+        # RUNDE FREMDFS: eine ZWEITE Platte anhaengen, damit sich
+        # ein fremdes Dateisystem im Explorer zeigen laesst.
+        zweite=*) zweite=${a#*=} ;;
+        fs=*) fs=${a#*=} ;;
         nurbau=*) nurbau=${a#*=} ;;
         ton=*) ton=${a#*=} ;;
         *) echo "unbekannt: $a" >&2; exit 2 ;;
@@ -293,6 +299,11 @@ ARGS=(build "$OUT/disk.img" 20480 --v3 "--time=$(date +%s)" /lib/
       "/lib/icons.ttf=assets/osum-icons.ttf" /bin/)
 for p in $progs; do ARGS+=("/bin/$p=$BUILDD/$p.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
+# RUNDE FREMDFS: ein leeres /mnt. Ein Einhaengepunkt muss ein
+# Verzeichnis sein, DAS ES GIBT (vfs.mount_at) -- ohne diese Zeile
+# laesst sich auf dieser Platte nichts einhaengen, und der
+# Dateimanager koennte ein fremdes Dateisystem nie zeigen.
+ARGS+=(/mnt/)
 ARGS+=(/etc/
        "/etc/theme.conf=$OUT/theme.conf@0644"
        "/etc/time.conf=$OUT/time.conf@0644"
@@ -479,12 +490,25 @@ ACC=()
 if [ "$accel" = kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
     ACC=(-accel kvm -cpu host)
 fi
+# RUNDE FREMDFS: normalerweise faehrt dieser Laeufer OHNE Dateisystem
+# (`nofs`) -- er malt Oberflaechen und braucht keine Platte. Wer ein
+# fremdes Dateisystem IM Dateimanager zeigen will, braucht beides: die
+# Wurzelplatte und die VFS-Schicht. `fs=an` schaltet darauf um.
+FSFLAG="nofs"
+[ "${fs:-aus}" = an ] && FSFLAG="vfs"
+
+ZWEITE=()
+if [ -n "$zweite" ]; then
+    cp "$zweite" "$OUT/zweite.img"
+    ZWEITE=(-drive "file=$OUT/zweite.img,format=raw,if=ide,index=1")
+fi
 timeout 600 qemu-system-x86_64 "${ACC[@]}" -kernel "$BUILDD/k0.mb" -m 512 \
-    -append "gfx fbres=${XRES}x${YRES} wm desk wmhold wighalt=$halt nokbd nosched noproc nofs lang=$lang $SKAL $extra" \
+    -append "gfx fbres=${XRES}x${YRES} wm desk wmhold wighalt=$halt nokbd nosched noproc $FSFLAG lang=$lang $SKAL $extra" \
     -serial "file:$OUT/serial.txt" -display none -no-reboot \
     -device "VGA,edid=on,xres=$XRES,yres=$YRES,vgamem_mb=32" \
     -monitor "unix:$SOCK,server,nowait" \
     -drive "file=$OUT/disk.img,format=raw,if=ide,index=0" \
+    "${ZWEITE[@]}" \
     "${TONDEV[@]}" \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$OUT/qemu.log" 2>&1 &
 PID=$!
