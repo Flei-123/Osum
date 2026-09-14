@@ -1,0 +1,1384 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/ntfs.fi -- Runde FREMDFS: NTFS, NUR LESEND.
+//
+// DIE ZWEITE HAELFTE DIESER RUNDE. ext4 macht die Linux-Seite lesbar,
+// diese Datei die Windows-Seite -- und das ist der Fall, der beim
+// Dual-Boot auf einem gekauften Rechner fast immer vorliegt.
+//
+// NUR LESEND, und hier noch deutlicher als bei ext4: NTFS schreibend
+// hiesse $MFT fortschreiben, $Bitmap fuehren, $LogFile fuellen und die
+// $I30-Baeume ausgleichen. Wer davon eines falsch macht, macht eine
+// Windows-Installation kaputt. Diese Datei fasst nichts an.
+//
+// ================================================== DAS FORMAT
+//
+// DER BOOTSEKTOR (Sektor 0 der Partition):
+//   0x03 die Kennung "NTFS    " (acht Oktette, mit Leerzeichen)
+//   0x0B Oktette je Sektor (u16)
+//   0x0D Sektoren je Verband (u8) -- ist der Wert > 0x80, ist er
+//        NEGATIV zu lesen: die Verbandgroesse ist dann 1 << (256 - Wert).
+//        Genau daran scheitern Leser, die das Oktett fuer eine Zahl
+//        halten.
+//   0x28 Sektoren des Datentraegers (u64)
+//   0x30 der erste Verband des $MFT (u64)
+//   0x40 Groesse eines MFT-Eintrags: positiv = Verbaende,
+//        negativ (>= 0x80) = 1 << (256 - Wert) Oktette. In der Praxis
+//        steht dort 0xF6, also 1024 Oktette.
+//
+// DIE $MFT ist eine Datei, deren Eintraege je `mft_size` Oktette
+// gross sind. Eintrag 0 ist die $MFT selbst, 5 ist die Wurzel. Jeder
+// Eintrag faengt mit "FILE" an und enthaelt:
+//   0x04 der Versatz der FIXUP-Tafel, 0x06 ihre Laenge
+//   0x14 der Versatz des ersten Attributs
+//   0x16 Merker: Bit 0 = in Benutzung, Bit 1 = Verzeichnis
+//
+// DIE FIXUPS -- und das ist die Stelle, an der jeder erste
+// NTFS-Leser falsch liegt. Das LETZTE Wort JEDES Sektors eines
+// MFT-Eintrags (und eines Indexblocks) ist auf der Platte durch eine
+// Pruefzahl ERSETZT; die richtigen Werte stehen in der Fixup-Tafel.
+// Wer sie nicht zuruecktauscht, liest in jedem Sektor zwei falsche
+// Oktette -- bei 1024er Eintraegen also an Stelle 510 und 1022. Das
+// faellt bei kurzen Namen nie auf und bei langen immer.
+// `fixup_anwenden` macht das.
+//
+// EIN ATTRIBUT:
+//   0x00 Art (0x30 $FILE_NAME, 0x80 $DATA, 0x90 $INDEX_ROOT,
+//        0xA0 $INDEX_ALLOCATION, 0xFFFFFFFF = Ende)
+//   0x04 Laenge des ganzen Attributs
+//   0x08 0 = RESIDENT (die Daten stehen im Eintrag),
+//        1 = NICHT RESIDENT (die Daten stehen in Verbaenden)
+//   0x09 Laenge des Namens, 0x0A Versatz des Namens
+//   0x0C Merker: Bit 0 (0x0001) = KOMPRIMIERT, 0x4000 = verschluesselt,
+//        0x8000 = duenn besetzt
+//   resident:      0x10 Laenge der Daten, 0x14 ihr Versatz
+//   nicht resident: 0x10 erster VCN, 0x18 letzter VCN,
+//                   0x20 Versatz der DATENLAUFTAFEL,
+//                   0x30 zugeteilte Groesse, 0x38 WIRKLICHE Groesse
+//
+// DIE DATENLAEUFE (runlists). Eine Folge von Stuecken; jedes faengt
+// mit einem Oktett an: die untere Haelfte sagt, wie viele Oktette die
+// LAENGE hat, die obere, wie viele der VERSATZ. Der Versatz ist
+// VORZEICHENBEHAFTET und RELATIV zum vorigen Lauf -- ein Lauf kann
+// also rueckwaerts zeigen. Ein Versatz von null Oktetten heisst
+// "duenn besetzt": ein Loch, das als Nullen zu lesen ist.
+//
+// EIN VERZEICHNIS ist ein Baum aus $INDEX_ROOT (im MFT-Eintrag) und,
+// wenn er nicht mehr hineinpasst, $INDEX_ALLOCATION (in Verbaenden,
+// "INDX"-Bloecke, ebenfalls mit Fixups). Die Eintraege heissen
+// $I30 und tragen den Namen als UTF-16.
+//
+// ================================================== WAS NICHT GEHT
+//
+//   - SCHREIBEN. Gar nicht.
+//   - KOMPRIMIERTE Attribute. Sie werden ERKANNT und ehrlich
+//     abgelehnt (ein Lesefehler statt falscher Daten) -- die
+//     LZNT1-Entpackung ist eine eigene Runde.
+//   - VERSCHLUESSELTE Attribute (EFS). Ebenso erkannt, ebenso
+//     abgelehnt.
+//   - REPARSE-PUNKTE (die NTFS-Fassung eines symbolischen Verweises).
+//     Sie erscheinen als gewoehnliche Eintraege; ihr Ziel wird nicht
+//     aufgeloest.
+//   - ALTERNATIVE DATENSTROEME. Gelesen wird der unbenannte $DATA.
+//   - Namen, die laenger sind als `vfsops.NAME_MAX`.
+//   - UTF-16 ausserhalb von Latin-1 wird beim Wandeln zu '_'. Was
+//     gelesen werden kann, wird richtig gelesen; was nicht, wird
+//     kenntlich gemacht statt verstuemmelt.
+//
+// WO DER ZUSTAND LIEGT: `kstate.NTFS_OFF`, drei Seiten.
+
+profile kernel
+
+import kstate
+import serial
+import blk
+import mnt
+import vfsops
+import sched
+import atomic
+import cpu
+
+export { ops, mount_probe, release, node_hold, node_drop, MAX_NODES }
+
+const BS: u64 = 512
+
+// ------------------------------------------------- die Seite, aufgeteilt
+
+const SB_OFF: u64 = 0x000
+const SB_BYTES: u64 = 128
+// DIE KNOTENTAFEL: 0x400..0x780, also 16 Knoten zu 56 Oktetten.
+//
+// HIER LAG EIN FEHLER, DER EINEN HALBEN TAG GEKOSTET HAT. Die
+// Tafel hatte 24 Plaetze zu 48 Oktetten (0x480) und fing bei
+// 0x400 an -- sie endete also bei 0x880, und der erste grosse
+// Puffer steht bei 0x800. Die letzten drei Knoten lagen damit
+// MITTEN IM PUFFER: wer eine Datei oeffnete, die einen davon
+// bekam, verlor ihre Felder beim ersten Lesen, weil derselbe
+// Speicher gleich darauf mit einem Plattenblock ueberschrieben
+// wurde.
+//
+// Von aussen sah das aus wie ein Fehler im Datenlauf: eine
+// Datei war nach genau einem Block zu Ende, und ihre
+// Pruefsumme war die der ersten 4096 Oktette. Gesucht wurde
+// zuerst im Datenlauf, dann in der Knotenverwaltung -- der
+// Fehler lag in DIESEN ZWEI ZAHLEN.
+//
+// `tools/fremdfs/run.sh` rechnet die Aufteilung seit dieser
+// Runde nach (Abschnitt 1), und `tools/kernel/memmap.py` kennt
+// die Stuecke ebenfalls. Ein Puffer, der in die Tafel
+// hineinragt, faellt damit beim Bauen auf und nicht erst an
+// einer falschen Pruefsumme.
+const NODE_OFF: u64 = 0x400
+const NODE_BYTES: u64 = 56
+const MAX_NODES: u64 = 16
+const MFTBUF: u64 = 0x800   // ein MFT-Eintrag (bis 4096)
+const IDXBUF: u64 = 0x1800  // ein INDX-Block (bis 4096)
+const DATBUF: u64 = 0x2800  // ein Sektor
+const NAMBUF: u64 = 0x2A00  // der gesuchte Name
+const CNVBUF: u64 = 0x2B00  // der gewandelte Name
+
+// die Felder je Einhaengung
+const S_VALID: u64 = 0
+const S_SPC: u64 = 8      // Sektoren je Verband
+const S_MFTLCN: u64 = 16  // erster Verband der $MFT
+const S_RECSZ: u64 = 24   // Oktette je MFT-Eintrag
+const S_SECTORS: u64 = 32 // Sektoren des Datentraegers
+const S_IDXSZ: u64 = 40   // Oktette je Indexblock
+
+// die Felder je Knoten
+const N_MNT: u64 = 0
+const N_REF: u64 = 8    // die Nummer des MFT-Eintrags
+const N_SIZE: u64 = 16
+const N_DIR: u64 = 24
+const N_OK: u64 = 32    // 0 = die Daten sind lesbar, sonst der Grund
+// Wie viele Deskriptoren auf diesem Knoten offen sind. Ein Platz mit
+// N_USE > 0 wird nicht wiederverwendet -- sonst zoege man einem
+// lesenden Programm die Datei unter den Fuessen weg.
+const N_USE: u64 = 40
+
+// Warum eine Datei NICHT lesbar ist. Die Zahl steht im Knoten, damit
+// `read` sie melden kann, ohne den MFT-Eintrag noch einmal zu lesen.
+const UN_KOMPRIMIERT: u64 = 1
+const UN_VERSCHLUESSELT: u64 = 2
+
+const A_FILE_NAME: u64 = 0x30
+const A_DATA: u64 = 0x80
+const A_INDEX_ROOT: u64 = 0x90
+const A_INDEX_ALLOC: u64 = 0xA0
+const A_ENDE: u64 = 0xFFFFFFFF
+
+const F_KOMPRIMIERT: u64 = 0x0001
+const F_VERSCHLUESSELT: u64 = 0x4000
+
+const MFT_WURZEL: u64 = 5
+// DIE ERSTEN SECHZEHN MFT-EINTRAEGE SIND NTFS SELBST: $MFT, $MFTMirr,
+// $LogFile, $Volume, $AttrDef, '.', $Bitmap, $Boot, $BadClus, $Secure,
+// $UpCase, $Extend und vier freigehaltene. Sie stehen als echte
+// Eintraege im Index der Wurzel -- Windows zeigt sie nicht, ntfs-3g
+// zeigt sie nicht, und dieser Treiber zeigt sie auch nicht.
+//
+// Warum nach der NUMMER und nicht nach dem Dollarzeichen im Namen: ein
+// Benutzer darf eine Datei "$geld.txt" nennen, und die soll er sehen.
+// Was ihn nichts angeht, steht in den ersten sechzehn Plaetzen der MFT
+// und nirgends sonst.
+const MFT_ERSTE_FREIE: u64 = 16
+
+// ------------------------------------------------------------ die Sperre
+const NESTED: u64 = 0x8000000000000000
+
+fn enter(state: u64) -> u64 {
+    let flags: u64 = sched.irq_save()
+    let me: u64 = cpu.here(state)
+    if atomic.lock_owner(state, atomic.L_FS) == me + 1 {
+        return flags | NESTED
+    }
+    atomic.lock_take(state, atomic.L_FS, me)
+    return flags
+}
+
+fn leave(state: u64, flags: u64) {
+    if (flags & NESTED) == 0 {
+        atomic.lock_give(state, atomic.L_FS)
+    }
+    sched.irq_restore(flags & 0x7FFFFFFFFFFFFFFF)
+}
+
+// ------------------------------------------------------ kleine Handgriffe
+
+fn sb(state: u64, m: u64) -> u64 {
+    return state + kstate.NTFS_OFF + SB_OFF + m * SB_BYTES
+}
+
+fn sget(state: u64, m: u64, f: u64) -> u64 {
+    return __mmio_read64((sb(state, m) + f) as *mut u64)
+}
+
+fn sset(state: u64, m: u64, f: u64, v: u64) {
+    __mmio_write64((sb(state, m) + f) as *mut u64, v)
+}
+
+fn nd(state: u64, i: u64) -> u64 {
+    return state + kstate.NTFS_OFF + NODE_OFF + (i - 1) * NODE_BYTES
+}
+
+fn nget(state: u64, i: u64, f: u64) -> u64 {
+    if i == 0 || i > MAX_NODES {
+        return 0
+    }
+    return __mmio_read64((nd(state, i) + f) as *mut u64)
+}
+
+fn nset(state: u64, i: u64, f: u64, v: u64) {
+    if i == 0 || i > MAX_NODES {
+        return
+    }
+    __mmio_write64((nd(state, i) + f) as *mut u64, v)
+}
+
+fn buf(state: u64, which: u64) -> u64 {
+    return state + kstate.NTFS_OFF + which
+}
+
+fn tick(state: u64) {
+    kstate.add(state, kstate.VFS_INDIRECT, 1)
+}
+
+fn le16(p: u64) -> u64 {
+    return kstate.get8(p) | (kstate.get8(p + 1) << 8)
+}
+
+fn le32(p: u64) -> u64 {
+    return le16(p) | (le16(p + 2) << 16)
+}
+
+fn le64(p: u64) -> u64 {
+    return le32(p) | (le32(p + 4) << 32)
+}
+
+fn zero(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        kstate.set8(p + i, 0 as u8)
+        i = i + 1
+    }
+}
+
+fn rd(state: u64, m: u64, lba: u64, dst: u64) -> bool {
+    return blk.read_on(state, mnt.dev(state, m), lba, dst)
+}
+
+// Mehrere Sektoren am Stueck.
+fn sektoren_lesen(state: u64, m: u64, lba: u64, n: u64, dst: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        if !rd(state, m, lba + i, dst + i * BS) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn clus_lba(state: u64, m: u64, lcn: u64) -> u64 {
+    return mnt.first(state, m) + lcn * sget(state, m, S_SPC)
+}
+
+// ------------------------------------------------------------ die Fixups
+//
+// DIE STELLE, AN DER JEDER ERSTE NTFS-LESER FALSCH LIEGT.
+//
+// Das letzte Wort jedes Sektors eines MFT-Eintrags (und eines
+// INDX-Blocks) ist auf der Platte durch eine laufende Pruefzahl
+// ERSETZT worden; die wirklichen Werte stehen in der Fixup-Tafel am
+// Anfang des Eintrags. Zweck: ein halb geschriebener Eintrag faellt
+// auf, weil die Pruefzahl dann nicht in jedem Sektor dieselbe ist.
+//
+// Wer das nicht zurueckdreht, hat in JEDEM Sektor zwei falsche
+// Oktette -- bei 1024er Eintraegen an Stelle 510 und 1022. Bei kurzen
+// Namen faellt es nie auf, bei langen immer.
+//
+// Rueckgabe: false, wenn die Pruefzahl nicht stimmt -- dann ist der
+// Eintrag halb geschrieben, und darauf etwas zu bauen waere Raten.
+fn fixup_anwenden(p: u64, groesse: u64) -> bool {
+    let usa_off: u64 = le16(p + 0x04)
+    let usa_zahl: u64 = le16(p + 0x06)
+    if usa_zahl == 0 {
+        return false
+    }
+    // (usa_zahl - 1) Sektoren, denn der erste Eintrag der Tafel ist
+    // die Pruefzahl selbst.
+    let sektoren: u64 = usa_zahl - 1
+    if sektoren * BS > groesse {
+        return false
+    }
+    if usa_off + usa_zahl * 2 > groesse {
+        return false
+    }
+    let pruefzahl: u64 = le16(p + usa_off)
+    var i: u64 = 0
+    while i < sektoren {
+        let ende: u64 = p + (i + 1) * BS - 2
+        if le16(ende) != pruefzahl {
+            return false
+        }
+        let echt: u64 = le16(p + usa_off + 2 + i * 2)
+        kstate.set8(ende, (echt & 0xFF) as u8)
+        kstate.set8(ende + 1, ((echt >> 8) & 0xFF) as u8)
+        i = i + 1
+    }
+    return true
+}
+
+// ------------------------------------------------------- die Datenlaeufe
+//
+// DEN VERBAND ZU EINEM LOGISCHEN VERBAND (VCN) SUCHEN.
+//
+// Die Tafel ist eine Folge von Stuecken. Jedes faengt mit einem
+// Oktett an: die untere Haelfte sagt, wie viele Oktette die LAENGE
+// belegt, die obere, wie viele der VERSATZ. Ein Oktett 0 beendet die
+// Tafel.
+//
+// DER VERSATZ IST VORZEICHENBEHAFTET UND RELATIV zum vorigen Lauf --
+// ein Lauf kann rueckwaerts zeigen, und wer das Vorzeichen uebersieht,
+// landet irgendwo. Ein Versatz mit null Oktetten heisst "duenn
+// besetzt": ein Loch, das als Nullen zu lesen ist; dafuer gibt dieser
+// Weg 0 zurueck, und der Aufrufer fuellt mit Nullen.
+//
+// Rueckgabe: der physische Verband (LCN), oder 0 fuer ein Loch, oder
+// 0 wenn der VCN gar nicht vorkommt -- `gefunden` unterscheidet das.
+fn lauf_suchen(rl: u64, ende: u64, vcn: u64, gefunden: u64) -> u64 {
+    __mmio_write64(gefunden as *mut u64, 0)
+    var p: u64 = rl
+    var lcn: u64 = 0        // wird relativ fortgeschrieben
+    var vstart: u64 = 0     // der VCN, bei dem dieser Lauf anfaengt
+    var runde: u64 = 0
+    while p < ende && runde < 4096 {
+        let kopf: u64 = kstate.get8(p)
+        if kopf == 0 {
+            return 0
+        }
+        let llen: u64 = kopf & 0xF
+        let olen: u64 = (kopf >> 4) & 0xF
+        if llen == 0 || llen > 8 || olen > 8 {
+            return 0
+        }
+        if p + 1 + llen + olen > ende {
+            return 0
+        }
+        // Die Laenge, kleinendig, llen Oktette, ohne Vorzeichen.
+        var laenge: u64 = 0
+        var i: u64 = 0
+        while i < llen {
+            laenge = laenge | (kstate.get8(p + 1 + i) << (i * 8))
+            i = i + 1
+        }
+        if laenge == 0 {
+            return 0
+        }
+        var loch: bool = false
+        if olen == 0 {
+            // DUENN BESETZT. Der Lauf hat keinen Versatz, also keine
+            // Verbaende auf der Platte -- er ist ein Loch.
+            loch = true
+        } else {
+            // Der Versatz, VORZEICHENBEHAFTET. Das oberste Bit des
+            // letzten Oktetts ist das Vorzeichen; ist es gesetzt,
+            // werden die oberen Bits mit Einsen aufgefuellt.
+            var versatz: u64 = 0
+            var k: u64 = 0
+            while k < olen {
+                versatz = versatz | (kstate.get8(p + 1 + llen + k) << (k * 8))
+                k = k + 1
+            }
+            let vorzeichen: u64 = kstate.get8(p + 1 + llen + olen - 1)
+            if (vorzeichen & 0x80) != 0 && olen < 8 {
+                // Alle Bits oberhalb von olen*8 auf eins.
+                var maske: u64 = 0
+                var j: u64 = olen
+                while j < 8 {
+                    maske = maske | (0xFF << (j * 8))
+                    j = j + 1
+                }
+                versatz = versatz | maske
+            }
+            // Zweierkomplement-Addition: das Ueberlaufen ist hier
+            // genau richtig, weil ein negativer Versatz als sehr
+            // grosse Zahl dasteht und die Addition modulo 2^64
+            // rueckwaerts geht.
+            lcn = lcn + versatz
+        }
+        if vcn >= vstart && vcn < vstart + laenge {
+            __mmio_write64(gefunden as *mut u64, 1)
+            if loch {
+                return 0
+            }
+            return lcn + (vcn - vstart)
+        }
+        vstart = vstart + laenge
+        p = p + 1 + llen + olen
+        runde = runde + 1
+    }
+    return 0
+}
+
+// -------------------------------------------------------- die Attribute
+//
+// Ein Attribut einer bestimmten Art im MFT-Eintrag suchen. `nur_ohne_namen`
+// heisst: nur das UNBENANNTE nehmen -- $DATA gibt es auch mit Namen
+// (die alternativen Datenstroeme), und gemeint ist immer der
+// unbenannte.
+//
+// Rueckgabe: der Versatz IM Puffer, oder 0.
+fn attr_suchen(p: u64, groesse: u64, art: u64, nur_ohne_namen: bool) -> u64 {
+    var off: u64 = le16(p + 0x14)
+    var runde: u64 = 0
+    while off + 8 <= groesse && runde < 64 {
+        let a: u64 = p + off
+        let typ: u64 = le32(a + 0x00)
+        if typ == A_ENDE {
+            return 0
+        }
+        let laenge: u64 = le32(a + 0x04)
+        if laenge < 16 || off + laenge > groesse {
+            return 0
+        }
+        if typ == art {
+            if !nur_ohne_namen || kstate.get8(a + 0x09) == 0 {
+                return a
+            }
+        }
+        off = off + laenge
+        runde = runde + 1
+    }
+    return 0
+}
+
+fn attr_resident(a: u64) -> bool {
+    return kstate.get8(a + 0x08) == 0
+}
+
+fn attr_flags(a: u64) -> u64 {
+    return le16(a + 0x0C)
+}
+
+// Die WIRKLICHE Groesse der Daten -- nicht die zugeteilte. Der
+// Unterschied ist bei jeder Datei, die nicht genau auf einer
+// Verbandgrenze endet, genau das, was zu viel waere.
+fn attr_groesse(a: u64) -> u64 {
+    if attr_resident(a) {
+        return le32(a + 0x10)
+    }
+    return le64(a + 0x30)
+}
+
+// -------------------------------------------------------- der MFT-Eintrag
+//
+// EINEN MFT-EINTRAG LESEN, mit Fixups. Er geht nach `ziel`.
+//
+// Die $MFT ist selbst eine Datei, also muesste man streng genommen
+// ihre eigene Datenlauftafel befragen. Fuer die ersten Eintraege --
+// und das sind die, um die es geht -- liegt sie zusammenhaengend ab
+// `S_MFTLCN`, und genau so findet auch der Startvorgang von Windows
+// seinen Weg hinein. Fuer eine Platte mit einer stark zerstueckelten
+// $MFT ist das zu wenig; das steht in docs/RUNDE-FREMDFS.md als
+// offener Punkt und wird hier nicht verschwiegen.
+fn mft_lesen(state: u64, m: u64, nr: u64, ziel: u64) -> bool {
+    let recsz: u64 = sget(state, m, S_RECSZ)
+    if recsz == 0 || recsz > 4096 {
+        return false
+    }
+    let byte_off: u64 = nr * recsz
+    let lba: u64 = clus_lba(state, m, sget(state, m, S_MFTLCN)) + byte_off / BS
+    if !sektoren_lesen(state, m, lba, recsz / BS, ziel) {
+        return false
+    }
+    // "FILE" -- und nichts anderes ist ein Eintrag.
+    if kstate.get8(ziel) != 70 || kstate.get8(ziel + 1) != 73
+        || kstate.get8(ziel + 2) != 76 || kstate.get8(ziel + 3) != 69 {
+        return false
+    }
+    if !fixup_anwenden(ziel, recsz) {
+        return false
+    }
+    // Bit 0 der Merker: in Benutzung. Ein geloeschter Eintrag traegt
+    // noch Daten, und sie auszuliefern waere das Ausliefern
+    // geloeschter Dateien.
+    if (le16(ziel + 0x16) & 1) == 0 {
+        return false
+    }
+    return true
+}
+
+fn ist_verzeichnis(p: u64) -> bool {
+    return (le16(p + 0x16) & 2) != 0
+}
+
+// ------------------------------------------------------------- die Namen
+//
+// UTF-16 NACH UTF-8. Und zwar wirklich UTF-8 -- hier stand einmal
+// Latin-1, und das war falsch.
+//
+// DER FEHLER, DEN DAS BEHEBT: die erste Fassung hat jedes Zeichen
+// unter 0x100 als EIN Oktett abgelegt. Fuer ASCII stimmt das; fuer
+// 'ä' (U+00E4) ergibt es das Oktett 0xE4, waehrend derselbe Name aus
+// der Shell, aus `ls` und aus jedem Programm dieses Systems als
+// 0xC3 0xA4 kommt -- denn OrientOS rechnet in UTF-8. Die beiden waren
+// nie gleich, und `umlaut-äöü.txt` war auf einer NTFS-Platte nicht zu
+// oeffnen, obwohl `ls` ihn anzeigte. Genau dafuer steht diese Datei im
+// Pruefbaum.
+//
+// Die Wandlung ist die gewoehnliche:
+//   bis U+007F    ein Oktett
+//   bis U+07FF    zwei
+//   sonst         drei
+// Ersatzzeichen (U+D800..U+DFFF), also Zeichen jenseits der
+// Grundebene, werden zu '_'. Sie richtig zu wandeln hiesse, zwei
+// UTF-16-Einheiten zu einem Zeichen zusammenzuziehen; das kommt in
+// Dateinamen kaum vor, und ein sichtbares '_' ist ehrlicher als ein
+// halb gewandeltes Zeichen.
+//
+// Rueckgabe: die Laenge IN OKTETTEN.
+fn name_wandeln(quelle: u64, zeichen: u64, ziel: u64, max: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < zeichen {
+        let c: u64 = le16(quelle + i * 2)
+        if c == 0 {
+            i = zeichen
+        } else {
+            if c < 0x80 {
+                if n + 1 >= max {
+                    i = zeichen
+                } else {
+                    kstate.set8(ziel + n, c as u8)
+                    n = n + 1
+                    i = i + 1
+                }
+            } else if c < 0x800 {
+                if n + 2 >= max {
+                    i = zeichen
+                } else {
+                    kstate.set8(ziel + n, (0xC0 | (c >> 6)) as u8)
+                    kstate.set8(ziel + n + 1, (0x80 | (c & 0x3F)) as u8)
+                    n = n + 2
+                    i = i + 1
+                }
+            } else if c >= 0xD800 && c < 0xE000 {
+                // Ein Ersatzzeichen: der zweite Teil eines Zeichens
+                // jenseits der Grundebene. Nicht gewandelt, sondern
+                // kenntlich gemacht.
+                if n + 1 >= max {
+                    i = zeichen
+                } else {
+                    kstate.set8(ziel + n, 95 as u8) // '_'
+                    n = n + 1
+                    i = i + 1
+                }
+            } else {
+                if n + 3 >= max {
+                    i = zeichen
+                } else {
+                    kstate.set8(ziel + n, (0xE0 | (c >> 12)) as u8)
+                    kstate.set8(ziel + n + 1, (0x80 | ((c >> 6) & 0x3F)) as u8)
+                    kstate.set8(ziel + n + 2, (0x80 | (c & 0x3F)) as u8)
+                    n = n + 3
+                    i = i + 1
+                }
+            }
+        }
+    }
+    kstate.set8(ziel + n, 0 as u8)
+    return n
+}
+
+fn name_eq(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while kstate.get8(a + i) != 0 && kstate.get8(b + i) != 0 {
+        if kstate.get8(a + i) != kstate.get8(b + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return kstate.get8(a + i) == kstate.get8(b + i)
+}
+
+fn copy_name(dst: u64, src: u64, max: u64) -> u64 {
+    var i: u64 = 0
+    while kstate.get8(src + i) != 0 && i + 1 < max {
+        kstate.set8(dst + i, kstate.get8(src + i) as u8)
+        i = i + 1
+    }
+    kstate.set8(dst + i, 0 as u8)
+    return i
+}
+
+fn segment(path: u64, at: u64, out: u64, max: u64) -> u64 {
+    var i: u64 = at
+    while kstate.get8(path + i) == 47 {
+        i = i + 1
+    }
+    var n: u64 = 0
+    while kstate.get8(path + i) != 0 && kstate.get8(path + i) != 47 {
+        if n + 1 < max {
+            kstate.set8(out + n, kstate.get8(path + i) as u8)
+            n = n + 1
+        }
+        i = i + 1
+    }
+    kstate.set8(out + n, 0 as u8)
+    return i
+}
+
+// -------------------------------------------------------- die Knotentafel
+
+fn node_find(state: u64, m: u64, ref: u64) -> u64 {
+    var i: u64 = 1
+    while i <= MAX_NODES {
+        if nget(state, i, N_MNT) == m + 1 && nget(state, i, N_REF) == ref {
+            return i
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// EINEN KNOTEN HOLEN -- UND WENN KEIN PLATZ FREI IST, EINEN
+// WIEDERVERWENDEN.
+//
+// HIER LAG DER TEUERSTE FEHLER DIESER RUNDE. Die Tafel hat MAX_NODES
+// Plaetze; `node_get` gab frueher 0 zurueck, sobald alle belegt waren,
+// und `f_readdir` machte daraus `return dir` -- also den KNOTEN DES
+// VERZEICHNISSES fuer einen Dateieintrag. Wer danach eine dieser
+// Dateien oeffnete, bekam einen Knoten mit N_DIR=1; `f_read` sagte
+// voellig richtig "das ist ein Verzeichnis" und gab 0 zurueck.
+//
+// Von aussen sah das aus wie ein Lesefehler im Datenlauf: die Datei
+// war nach genau einem Block zu Ende. Gemessen am 14.09.2026 an
+// `mittel.bin` (204800 Oktette), deren Pruefsumme die der ERSTEN 4096
+// Oktette war -- und `/viele` mit seinen 512 Eintraegen hatte die
+// Tafel vorher gefuellt.
+//
+// WARUM WIEDERVERWENDEN UND NICHT EINFACH DIE TAFEL VERGROESSERN: 512
+// Eintraege sind kein Sonderfall, sondern ein gewoehnliches
+// Verzeichnis, und die naechste Platte hat 5000. Eine Tafel, die gross
+// genug fuer "alle" ist, gibt es nicht; eine, die den aeltesten Platz
+// neu belegt, reicht immer.
+//
+// WAS DABEI NICHT PASSIEREN DARF: einen Knoten wegnehmen, den gerade
+// jemand OFFEN hat. Deshalb wird nur ein Platz genommen, dessen Zaehler
+// `N_USE` null ist -- `sys.fi` haelt ihn ueber `open`/`close`, so wie
+// `mnt.opens` die Einhaengung haelt. Ist wirklich jeder Platz in
+// Benutzung, gibt es 0 zurueck, und der Aufrufer meldet einen FEHLER,
+// statt einen fremden Knoten zu liefern.
+fn node_get(state: u64, m: u64, ref: u64, size: u64, dir: u64,
+    ok: u64) -> u64 {
+    let have: u64 = node_find(state, m, ref)
+    if have != 0 {
+        nset(state, have, N_SIZE, size)
+        nset(state, have, N_DIR, dir)
+        nset(state, have, N_OK, ok)
+        return have
+    }
+    var i: u64 = 1
+    while i <= MAX_NODES {
+        if nget(state, i, N_MNT) == 0 {
+            nset(state, i, N_MNT, m + 1)
+            nset(state, i, N_REF, ref)
+            nset(state, i, N_SIZE, size)
+            nset(state, i, N_DIR, dir)
+            nset(state, i, N_OK, ok)
+            nset(state, i, N_USE, 0)
+            return i
+        }
+        i = i + 1
+    }
+    // Kein freier Platz: den ersten nehmen, den niemand offen hat.
+    var k: u64 = 1
+    while k <= MAX_NODES {
+        if nget(state, k, N_USE) == 0 {
+            nset(state, k, N_MNT, m + 1)
+            nset(state, k, N_REF, ref)
+            nset(state, k, N_SIZE, size)
+            nset(state, k, N_DIR, dir)
+            nset(state, k, N_OK, ok)
+            return k
+        }
+        k = k + 1
+    }
+    return 0
+}
+
+// Der Zaehler der offenen Deskriptoren auf diesem Knoten. `sys.fi`
+// zaehlt ihn beim Oeffnen hoch und beim Schliessen herunter -- genau
+// wie `mnt.open_inc` fuer die Einhaengung.
+fn node_hold(state: u64, node: u64) {
+    if node == 0 || node > MAX_NODES {
+        return
+    }
+    nset(state, node, N_USE, nget(state, node, N_USE) + 1)
+}
+
+fn node_drop(state: u64, node: u64) {
+    if node == 0 || node > MAX_NODES {
+        return
+    }
+    let n: u64 = nget(state, node, N_USE)
+    if n != 0 {
+        nset(state, node, N_USE, n - 1)
+    }
+}
+
+fn release(state: u64, m: u64) {
+    var i: u64 = 1
+    while i <= MAX_NODES {
+        if nget(state, i, N_MNT) == m + 1 {
+            zero(nd(state, i), NODE_BYTES)
+        }
+        i = i + 1
+    }
+}
+
+// Aus einem gelesenen MFT-Eintrag den Knoten machen: Groesse und die
+// Frage, ob die Daten ueberhaupt lesbar sind.
+fn knoten_aus_eintrag(state: u64, m: u64, nr: u64, p: u64) -> u64 {
+    let recsz: u64 = sget(state, m, S_RECSZ)
+    if ist_verzeichnis(p) {
+        return node_get(state, m, nr, 0, 1, 0)
+    }
+    let a: u64 = attr_suchen(p, recsz, A_DATA, true)
+    if a == 0 {
+        // KEIN $DATA. Das ist keine kaputte Datei: eine Datei mit null
+        // Oktetten hat unter Umstaenden gar kein Datenattribut.
+        return node_get(state, m, nr, 0, 0, 0)
+    }
+    let f: u64 = attr_flags(a)
+    var ok: u64 = 0
+    if (f & F_KOMPRIMIERT) != 0 {
+        ok = UN_KOMPRIMIERT
+    }
+    if (f & F_VERSCHLUESSELT) != 0 {
+        ok = UN_VERSCHLUESSELT
+    }
+    return node_get(state, m, nr, attr_groesse(a), 0, ok)
+}
+
+// ------------------------------------------------------ die Verzeichnisse
+//
+// EINEN INDEXEINTRAG ANSEHEN. Die Eintraege stehen in $INDEX_ROOT und
+// in den INDX-Bloecken in DERSELBEN Form, also gibt es diese Stelle
+// nur einmal.
+//
+//   0x00 die MFT-Nummer (die oberen 16 Bit sind die Folgenummer und
+//        gehoeren NICHT zur Nummer)
+//   0x08 Laenge des Eintrags, 0x0A Laenge des Namensteils
+//   0x0C Merker: Bit 1 = der letzte Eintrag (ohne Namen)
+//   0x50 die Laenge des Namens in ZEICHEN, 0x51 der Namensraum,
+//   0x52 der Name selbst, UTF-16
+//
+// DER NAMENSRAUM (0x51) ist wichtiger, als er aussieht: 2 heisst
+// "DOS", also der alte 8.3-Name, den NTFS zusaetzlich fuehrt. Wer ihn
+// mitzaehlt, sieht jede Datei ZWEIMAL -- einmal als "LANGER~1.TXT"
+// und einmal richtig. Also wird er uebergangen.
+//
+// Rueckgabe: die MFT-Nummer, oder 0.
+fn eintrag_ansehen(e: u64, want: u64, gesehen: u64, out_name: u64,
+    state: u64) -> u64 {
+    let merker: u64 = le32(e + 0x0C)
+    if (merker & 2) != 0 {
+        return 0 // der letzte Eintrag traegt keinen Namen
+    }
+    let namensraum: u64 = kstate.get8(e + 0x51)
+    if namensraum == 2 {
+        return 0 // der DOS-Name derselben Datei
+    }
+    let zeichen: u64 = kstate.get8(e + 0x50)
+    if zeichen == 0 {
+        return 0
+    }
+    let nr: u64 = le64(e + 0x00) & 0xFFFFFFFFFFFF
+    if nr == 0 {
+        return 0
+    }
+    name_wandeln(e + 0x52, zeichen, buf(state, CNVBUF), vfsops.NAME_MAX)
+    var treffer: bool = false
+    if want == 0 {
+        treffer = name_eq(buf(state, CNVBUF), buf(state, NAMBUF))
+    } else {
+        treffer = gesehen == want
+    }
+    if !treffer {
+        return 0
+    }
+    if out_name != 0 {
+        copy_name(out_name, buf(state, CNVBUF), vfsops.NAME_MAX)
+    }
+    return nr
+}
+
+// Alle Eintraege eines Indexbereichs durchgehen. `zaehler` zeigt auf
+// die laufende Zahl der gesehenen Eintraege -- sie geht ueber
+// $INDEX_ROOT und alle INDX-Bloecke HINWEG, sonst faengt jeder Block
+// wieder bei eins an und `readdir` liefert Namen doppelt.
+fn bereich_durchgehen(state: u64, p: u64, ende: u64, want: u64,
+    zaehler: u64, out_name: u64) -> u64 {
+    var e: u64 = p
+    var runde: u64 = 0
+    while e + 0x52 <= ende && runde < 4096 {
+        let laenge: u64 = le16(e + 0x08)
+        if laenge < 16 || e + laenge > ende {
+            return 0
+        }
+        let merker: u64 = le32(e + 0x0C)
+        let namensraum: u64 = kstate.get8(e + 0x51)
+        let zeichen: u64 = kstate.get8(e + 0x50)
+        // Nur ECHTE Eintraege zaehlen -- der letzte traegt keinen
+        // Namen, und der DOS-Name ist eine Dopplung.
+        // DIE SYSTEMDATEIEN ZAEHLEN NICHT MIT. Sie stehen wirklich im
+        // Index, aber sie gehoeren dem Dateisystem und nicht dem
+        // Benutzer -- siehe MFT_ERSTE_FREIE. Sie werden uebergangen,
+        // BEVOR der Zaehler hochgeht, sonst zeigte `readdir` Luecken.
+        let e_nr: u64 = le64(e + 0x00) & 0xFFFFFFFFFFFF
+        if (merker & 2) == 0 && namensraum != 2 && zeichen != 0
+            && e_nr >= MFT_ERSTE_FREIE {
+            let gesehen: u64 = __mmio_read64(zaehler as *mut u64) + 1
+            __mmio_write64(zaehler as *mut u64, gesehen)
+            let nr: u64 = eintrag_ansehen(e, want, gesehen, out_name, state)
+            if nr != 0 {
+                return nr
+            }
+        }
+        if (merker & 2) != 0 {
+            return 0
+        }
+        e = e + laenge
+        runde = runde + 1
+    }
+    return 0
+}
+
+// EIN VERZEICHNIS DURCHGEHEN: erst $INDEX_ROOT, dann die INDX-Bloecke
+// aus $INDEX_ALLOCATION.
+//
+//   want == 0 -> den Namen in NAMBUF suchen
+//   want > 0  -> den `want`-ten Eintrag
+fn dir_walk(state: u64, m: u64, nr: u64, want: u64, out_name: u64) -> u64 {
+    let recsz: u64 = sget(state, m, S_RECSZ)
+    if !mft_lesen(state, m, nr, buf(state, MFTBUF)) {
+        return 0
+    }
+    if !ist_verzeichnis(buf(state, MFTBUF)) {
+        return 0
+    }
+    var zaehler: u64 = 0
+
+    // 1. $INDEX_ROOT -- er ist immer resident.
+    let wurzel: u64 = attr_suchen(buf(state, MFTBUF), recsz, A_INDEX_ROOT, false)
+    if wurzel == 0 {
+        return 0
+    }
+    if !attr_resident(wurzel) {
+        return 0
+    }
+    let inhalt: u64 = wurzel + le16(wurzel + 0x14)
+    let inhalt_len: u64 = le32(wurzel + 0x10)
+    // Der Kopf des Index steht bei +0x10 des Inhalts; die Eintraege
+    // fangen bei +0x10 + dessen erstem Feld an.
+    let kopf: u64 = inhalt + 0x10
+    let erster: u64 = kopf + le32(kopf + 0x00)
+    let ende: u64 = kopf + le32(kopf + 0x04)
+    var grenze: u64 = inhalt + inhalt_len
+    if ende < grenze {
+        grenze = ende
+    }
+    let treffer: u64 = bereich_durchgehen(state, erster, grenze, want,
+        (&zaehler) as u64, out_name)
+    if treffer != 0 {
+        return treffer
+    }
+
+    // 2. $INDEX_ALLOCATION -- die INDX-Bloecke. Sie sind nicht
+    //    resident, also stehen sie in Verbaenden, und jeder von ihnen
+    //    hat wieder Fixups.
+    let alloc: u64 = attr_suchen(buf(state, MFTBUF), recsz, A_INDEX_ALLOC, false)
+    if alloc == 0 {
+        return 0
+    }
+    if attr_resident(alloc) {
+        return 0
+    }
+    let idxsz: u64 = sget(state, m, S_IDXSZ)
+    if idxsz == 0 || idxsz > 4096 {
+        return 0
+    }
+    let gesamt: u64 = le64(alloc + 0x30) // die zugeteilte Groesse
+    let spc: u64 = sget(state, m, S_SPC)
+    let clus_bytes: u64 = spc * BS
+    if clus_bytes == 0 {
+        return 0
+    }
+    let rl: u64 = alloc + le16(alloc + 0x20)
+    let rl_ende: u64 = alloc + le32(alloc + 0x04)
+
+    // WICHTIG: der MFT-Eintrag liegt in MFTBUF und wird dabei GEBRAUCHT
+    // (die Datenlauftafel steht darin). Die INDX-Bloecke gehen deshalb
+    // nach IDXBUF und nicht nach MFTBUF -- das ist der Grund, warum
+    // diese Datei zwei grosse Puffer hat.
+    var vcn: u64 = 0
+    var gelesen: u64 = 0
+    while gelesen < gesamt {
+        // Ein Indexblock kann mehrere Verbaende gross sein -- oder
+        // kleiner als einer. Beides kommt vor; `idxsz` sagt es.
+        var ok: u64 = 0
+        let lcn: u64 = lauf_suchen(rl, rl_ende, vcn, (&ok) as u64)
+        if ok == 0 {
+            return 0
+        }
+        if lcn != 0 {
+            if !sektoren_lesen(state, m, clus_lba(state, m, lcn),
+                idxsz / BS, buf(state, IDXBUF)) {
+                return 0
+            }
+            // "INDX", und die Fixups auch hier.
+            if kstate.get8(buf(state, IDXBUF)) == 73
+                && kstate.get8(buf(state, IDXBUF) + 1) == 78
+                && kstate.get8(buf(state, IDXBUF) + 2) == 68
+                && kstate.get8(buf(state, IDXBUF) + 3) == 88 {
+                if fixup_anwenden(buf(state, IDXBUF), idxsz) {
+                    let k: u64 = buf(state, IDXBUF) + 0x18
+                    let e1: u64 = k + le32(k + 0x00)
+                    var e2: u64 = k + le32(k + 0x04)
+                    let obergrenze: u64 = buf(state, IDXBUF) + idxsz
+                    if e2 > obergrenze {
+                        e2 = obergrenze
+                    }
+                    let t: u64 = bereich_durchgehen(state, e1, e2, want,
+                        (&zaehler) as u64, out_name)
+                    if t != 0 {
+                        return t
+                    }
+                }
+            }
+        }
+        // Weiter zum naechsten Indexblock.
+        var schritt: u64 = idxsz / clus_bytes
+        if schritt == 0 {
+            schritt = 1
+        }
+        vcn = vcn + schritt
+        gelesen = gelesen + idxsz
+    }
+    return 0
+}
+
+// ==================================================== DIE VERRICHTUNGEN
+
+fn mount_probe(state: u64, m: u64) -> u64 {
+    let __f: u64 = enter(state)
+    let __r: u64 = mount_probe__inner(state, m)
+    leave(state, __f)
+    return __r
+}
+
+fn mount_probe__inner(state: u64, m: u64) -> u64 {
+    var s_nein: [u8; 24] = "ntfs: nicht ntfs (\0\0\0\0\0\0"
+    var s_ja: [u8; 16] = "ntfs: spc=\0\0\0\0\0\0"
+    var s_r: [u8; 10] = " recsz=\0\0\0"
+    sset(state, m, S_VALID, 0)
+    let base: u64 = mnt.first(state, m)
+    if !rd(state, m, base, buf(state, DATBUF)) {
+        return 0
+    }
+    let b: u64 = buf(state, DATBUF)
+    // Die Kennung "NTFS    " bei +3.
+    if kstate.get8(b + 3) != 78 || kstate.get8(b + 4) != 84
+        || kstate.get8(b + 5) != 70 || kstate.get8(b + 6) != 83 {
+        serial.puts((&s_nein[0]) as u64)
+        serial.dec(1)
+        serial.nl()
+        return 0
+    }
+    let bps: u64 = le16(b + 0x0B)
+    if bps != BS {
+        serial.puts((&s_nein[0]) as u64)
+        serial.dec(2)
+        serial.nl()
+        return 0
+    }
+    // Sektoren je Verband. Ein Wert ueber 0x80 ist NEGATIV zu lesen
+    // und meint eine Zweierpotenz -- das ist die Stelle, an der ein
+    // Leser, der das Oktett fuer eine Zahl haelt, eine Platte mit
+    // grossen Verbaenden voellig falsch aufteilt.
+    let roh_spc: u64 = kstate.get8(b + 0x0D)
+    var spc: u64 = roh_spc
+    if roh_spc > 0x80 {
+        spc = 1 << (256 - roh_spc)
+        // Diese Fassung meint Oktette, nicht Sektoren.
+        spc = spc / BS
+        if spc == 0 {
+            spc = 1
+        }
+    }
+    if spc == 0 || spc > 128 {
+        serial.puts((&s_nein[0]) as u64)
+        serial.dec(3)
+        serial.nl()
+        return 0
+    }
+    let sektoren: u64 = le64(b + 0x28)
+    let mftlcn: u64 = le64(b + 0x30)
+    if sektoren == 0 || mftlcn == 0 {
+        serial.puts((&s_nein[0]) as u64)
+        serial.dec(4)
+        serial.nl()
+        return 0
+    }
+    // Die Groesse eines MFT-Eintrags, nach derselben Regel.
+    let roh_rec: u64 = kstate.get8(b + 0x40)
+    var recsz: u64 = 0
+    if roh_rec >= 0x80 {
+        recsz = 1 << (256 - roh_rec)
+    } else {
+        recsz = roh_rec * spc * BS
+    }
+    if recsz < BS || recsz > 4096 {
+        serial.puts((&s_nein[0]) as u64)
+        serial.dec(5)
+        serial.nl()
+        return 0
+    }
+    // Und die eines Indexblocks, ebenso.
+    let roh_idx: u64 = kstate.get8(b + 0x44)
+    var idxsz: u64 = 0
+    if roh_idx >= 0x80 {
+        idxsz = 1 << (256 - roh_idx)
+    } else {
+        idxsz = roh_idx * spc * BS
+    }
+    if idxsz < BS || idxsz > 4096 {
+        serial.puts((&s_nein[0]) as u64)
+        serial.dec(6)
+        serial.nl()
+        return 0
+    }
+
+    // DIE GEGENPROBE GEGEN EIN ABGESCHNITTENES ABBILD, wie bei ext4.
+    let da: u64 = mnt.blocks(state, m)
+    if da != 0 && sektoren > da {
+        serial.puts((&s_nein[0]) as u64)
+        serial.dec(7)
+        serial.nl()
+        return 0
+    }
+
+    sset(state, m, S_SPC, spc)
+    sset(state, m, S_MFTLCN, mftlcn)
+    sset(state, m, S_RECSZ, recsz)
+    sset(state, m, S_SECTORS, sektoren)
+    sset(state, m, S_IDXSZ, idxsz)
+    sset(state, m, S_VALID, 1)
+
+    serial.puts((&s_ja[0]) as u64)
+    serial.dec(spc)
+    serial.puts((&s_r[0]) as u64)
+    serial.dec(recsz)
+    serial.nl()
+
+    // Die Wurzel ist MFT-Eintrag 5.
+    if !mft_lesen(state, m, MFT_WURZEL, buf(state, MFTBUF)) {
+        sset(state, m, S_VALID, 0)
+        serial.puts((&s_nein[0]) as u64)
+        serial.dec(8)
+        serial.nl()
+        return 0
+    }
+    if !ist_verzeichnis(buf(state, MFTBUF)) {
+        sset(state, m, S_VALID, 0)
+        return 0
+    }
+    return node_get(state, m, MFT_WURZEL, 0, 1, 0)
+}
+
+fn f_lookup(state: u64, m: u64, path: u64) -> u64 {
+    let __f: u64 = enter(state)
+    let __r: u64 = f_lookup__inner(state, m, path)
+    leave(state, __f)
+    return __r
+}
+
+fn f_lookup__inner(state: u64, m: u64, path: u64) -> u64 {
+    tick(state)
+    if sget(state, m, S_VALID) == 0 {
+        return 0
+    }
+    var seg: [u8; 256] = [0 as u8; 256]
+    var at: u64 = 0
+    var nr: u64 = MFT_WURZEL
+    var going: bool = true
+    while going {
+        at = segment(path, at, (&seg[0]) as u64, 256)
+        if kstate.get8((&seg[0]) as u64) == 0 {
+            going = false
+        } else {
+            copy_name(buf(state, NAMBUF), (&seg[0]) as u64, vfsops.NAME_MAX)
+            let next: u64 = dir_walk(state, m, nr, 0, 0)
+            if next == 0 {
+                return 0
+            }
+            nr = next
+        }
+    }
+    if !mft_lesen(state, m, nr, buf(state, MFTBUF)) {
+        return 0
+    }
+    return knoten_aus_eintrag(state, m, nr, buf(state, MFTBUF))
+}
+
+fn f_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
+    let __f: u64 = enter(state)
+    let __r: u64 = f_readdir__inner(state, m, dir, index, out)
+    leave(state, __f)
+    return __r
+}
+
+fn f_readdir__inner(state: u64, m: u64, dir: u64, index: u64,
+    out: u64) -> u64 {
+    tick(state)
+    if dir == 0 || sget(state, m, S_VALID) == 0 {
+        return 0
+    }
+    let nr: u64 = nget(state, dir, N_REF)
+    // NTFS FUEHRT `.` UND `..` NICHT ALS INDEXEINTRAEGE. `.` gibt es
+    // als Eintrag im $INDEX_ROOT der Wurzel, `..` nirgends -- also
+    // werden beide hier erzeugt, damit ein Verzeichnis auf dieser
+    // Platte aussieht wie jedes andere. Denselben Weg geht `fat.fi`
+    // fuer die Wurzel eines FAT32.
+    if index == 0 {
+        kstate.set8(out, 46 as u8)
+        kstate.set8(out + 1, 0 as u8)
+        return dir
+    }
+    if index == 1 {
+        kstate.set8(out, 46 as u8)
+        kstate.set8(out + 1, 46 as u8)
+        kstate.set8(out + 2, 0 as u8)
+        return dir
+    }
+    let gefunden: u64 = dir_walk(state, m, nr, index - 1, out)
+    if gefunden == 0 {
+        return 0
+    }
+    if !mft_lesen(state, m, gefunden, buf(state, MFTBUF)) {
+        return 0
+    }
+    let k: u64 = knoten_aus_eintrag(state, m, gefunden, buf(state, MFTBUF))
+    if k == 0 {
+        // KEIN KNOTEN FREI. Frueher stand hier `return dir` -- der
+        // Knoten des VERZEICHNISSES fuer einen Dateieintrag, und damit
+        // war jede so gelieferte Datei fuer `read` ein Verzeichnis.
+        // Lieber gar keinen Eintrag als den falschen: `ls` zeigt ihn
+        // dann nicht, statt ihn falsch zu zeigen.
+        return 0
+    }
+    return k
+}
+
+fn f_attr(state: u64, m: u64, node: u64, what: u64) -> u64 {
+    let __f: u64 = enter(state)
+    let __r: u64 = f_attr__inner(state, m, node, what)
+    leave(state, __f)
+    return __r
+}
+
+fn f_attr__inner(state: u64, m: u64, node: u64, what: u64) -> u64 {
+    tick(state)
+    if node == 0 {
+        return 0
+    }
+    let ist_dir: u64 = nget(state, node, N_DIR)
+    if what == vfsops.A_TYPE {
+        if ist_dir != 0 {
+            return vfsops.N_DIR
+        }
+        return vfsops.N_FILE
+    }
+    if what == vfsops.A_SIZE {
+        return nget(state, node, N_SIZE)
+    }
+    if what == vfsops.A_MODE {
+        // NTFS HAT KEINE UNIX-RECHTE. Es hat Zugriffslisten, und die
+        // auf drei mal drei Bits abzubilden waere eine Erfindung.
+        // Dieselbe Entscheidung wie bei FAT32, aus demselben Grund:
+        // 0o755 bzw. 0o644, und gelesen werden darf, wer einhaengen
+        // darf.
+        if ist_dir != 0 {
+            return 493 // 0o755
+        }
+        return 420 // 0o644
+    }
+    if what == vfsops.A_NLINK {
+        return 1
+    }
+    if what == vfsops.A_BLKSIZE {
+        return sget(state, m, S_SPC) * BS
+    }
+    if what == vfsops.A_UID {
+        return 0
+    }
+    if what == vfsops.A_GID {
+        return 0
+    }
+    return 0
+}
+
+fn f_read(state: u64, m: u64, node: u64, off: u64, dst: u64,
+    len: u64) -> u64 {
+    let __f: u64 = enter(state)
+    let __r: u64 = f_read__inner(state, m, node, off, dst, len)
+    leave(state, __f)
+    return __r
+}
+
+fn f_read__inner(state: u64, m: u64, node: u64, off: u64, dst: u64,
+    len: u64) -> u64 {
+    tick(state)
+    if node == 0 || sget(state, m, S_VALID) == 0 {
+        return 0
+    }
+    if nget(state, node, N_DIR) != 0 {
+        return 0
+    }
+    // KOMPRIMIERT ODER VERSCHLUESSELT: NICHTS LIEFERN.
+    //
+    // Das ist die ehrliche Antwort. Ein Leser, der die Verbaende einer
+    // LZNT1-komprimierten Datei einfach herausgibt, liefert
+    // Pack-Bloecke und nennt sie Dateiinhalt -- und der Benutzer
+    // merkt es erst, wenn das Bild nicht aufgeht.
+    if nget(state, node, N_OK) != 0 {
+        return 0
+    }
+    let groesse: u64 = nget(state, node, N_SIZE)
+    if off >= groesse {
+        return 0
+    }
+    var want: u64 = len
+    if off + want > groesse {
+        want = groesse - off
+    }
+    let nr: u64 = nget(state, node, N_REF)
+    let recsz: u64 = sget(state, m, S_RECSZ)
+    if !mft_lesen(state, m, nr, buf(state, MFTBUF)) {
+        return 0
+    }
+    let a: u64 = attr_suchen(buf(state, MFTBUF), recsz, A_DATA, true)
+    if a == 0 {
+        return 0
+    }
+
+    // RESIDENT: die Datei steht IM MFT-Eintrag. Das ist bei NTFS der
+    // Normalfall fuer kleine Dateien -- ein paar hundert Oktette
+    // bekommen nie einen eigenen Verband. Ein Leser, der nur
+    // Datenlaeufe kennt, findet fuer sie gar nichts.
+    if attr_resident(a) {
+        let inhalt: u64 = a + le16(a + 0x14)
+        var i: u64 = 0
+        while i < want {
+            kstate.set8(dst + i, kstate.get8(inhalt + off + i) as u8)
+            i = i + 1
+        }
+        return want
+    }
+
+    let spc: u64 = sget(state, m, S_SPC)
+    let clus_bytes: u64 = spc * BS
+    if clus_bytes == 0 {
+        return 0
+    }
+    let rl: u64 = a + le16(a + 0x20)
+    let rl_ende: u64 = a + le32(a + 0x04)
+    var fertig: u64 = 0
+    while fertig < want {
+        let pos: u64 = off + fertig
+        let vcn: u64 = pos / clus_bytes
+        let im_verband: u64 = pos % clus_bytes
+        var stueck: u64 = clus_bytes - im_verband
+        if stueck > want - fertig {
+            stueck = want - fertig
+        }
+        var ok: u64 = 0
+        let lcn: u64 = lauf_suchen(rl, rl_ende, vcn, (&ok) as u64)
+        if ok == 0 {
+            return fertig
+        }
+        if lcn == 0 {
+            // Ein Loch (duenn besetzt) -- Nullen.
+            var i: u64 = 0
+            while i < stueck {
+                kstate.set8(dst + fertig + i, 0 as u8)
+                i = i + 1
+            }
+        } else {
+            // Sektorweise, damit der Puffer klein bleiben kann: ein
+            // Verband kann 64 KiB gross sein, und so viel Platz hat
+            // diese Seite nicht.
+            var getan: u64 = 0
+            while getan < stueck {
+                let byte_pos: u64 = im_verband + getan
+                let sektor: u64 = clus_lba(state, m, lcn) + byte_pos / BS
+                let im_sektor: u64 = byte_pos % BS
+                var n: u64 = BS - im_sektor
+                if n > stueck - getan {
+                    n = stueck - getan
+                }
+                if !rd(state, m, sektor, buf(state, DATBUF)) {
+                    return fertig + getan
+                }
+                var i: u64 = 0
+                while i < n {
+                    kstate.set8(dst + fertig + getan + i,
+                        kstate.get8(buf(state, DATBUF) + im_sektor + i) as u8)
+                    i = i + 1
+                }
+                getan = getan + n
+            }
+        }
+        fertig = fertig + stueck
+    }
+    return fertig
+}
+
+// ------------------------------------------- was dieser Treiber NICHT tut
+fn f_write(state: u64, m: u64, node: u64, off: u64, src: u64,
+    len: u64) -> u64 {
+    return 0
+}
+
+fn f_create(state: u64, m: u64, path: u64, art: u64) -> u64 {
+    return 0
+}
+
+fn f_unlink(state: u64, m: u64, path: u64) -> u64 {
+    return 9
+}
+
+fn f_rename(state: u64, m: u64, from: u64, to: u64) -> u64 {
+    return 9
+}
+
+fn f_trunc(state: u64, m: u64, node: u64) -> u64 {
+    return 9
+}
+
+fn ops() -> vfsops.Ops {
+    return vfsops.Ops {
+        lookup: f_lookup,
+        readdir: f_readdir,
+        attr: f_attr,
+        read: f_read,
+        write: f_write,
+        create: f_create,
+        unlink: f_unlink,
+        rename: f_rename,
+        trunc: f_trunc,
+        mask: vfsops.OP_READONLY,
+        tag: 1936020590 // "ntfs"
+    }
+}

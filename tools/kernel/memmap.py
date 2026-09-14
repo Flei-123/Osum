@@ -54,6 +54,8 @@ BEREICHE = [
     ("IDT",        "kstate.fi", "IDT_OFF",        "0x1000"),
     ("BITMAP",     "kstate.fi", "BITMAP_OFF",     "BITMAP_BYTES"),
     ("PT",         "kstate.fi", "PT_OFF",         "0x2000"),
+    ("EXT4",       "kstate.fi", "EXT4_OFF",       "EXT4_MAX"),
+    ("NTFS",       "kstate.fi", "NTFS_OFF",       "NTFS_MAX"),
     ("TASK",       "kstate.fi", "TASK_OFF",       "TASK_BYTES * MAX_TASKS"),
     ("BLOCK",      "kstate.fi", "BLOCK_OFF",      "BLOCK_MAX"),
     ("NAME",       "kstate.fi", "NAME_OFF",       "NAME_MAX"),
@@ -389,6 +391,33 @@ K17_STUECKE = [
     ("usb.fi",  "HUB_OFF",    0x100),
 ]
 
+# RUNDE FREMDFS: dieselbe Buchfuehrung fuer die zwei fremden
+# Dateisysteme.  Beide Treiber teilen ihre drei Seiten in dieselben
+# sechs Stuecke; jedes liegt INNERHALB von EXT4_OFF bzw. NTFS_OFF, und
+# Punkt 5c unten rechnet nach, dass keines herauslaeuft und keines ein
+# anderes ueberschneidet.  Ohne diese Liste haette der Pruefer die
+# Versaetze als "steht in keiner Karte" gemeldet -- und genau das ist
+# beim ersten Bauversuch dieser Runde auch passiert.
+EXT4_STUECKE = [
+    ("ext4.fi", "SB_OFF",   0x400),
+    ("ext4.fi", "NODE_OFF", 0x380),
+    ("ext4.fi", "BLKBUF",   0x1000),
+    ("ext4.fi", "NODEBUF",  0x1000),
+    ("ext4.fi", "INOBUF",   0x200),
+    ("ext4.fi", "SECBUF",   0x200),
+    ("ext4.fi", "NAMBUF",   0x100),
+]
+
+NTFS_STUECKE = [
+    ("ntfs.fi", "SB_OFF",   0x400),
+    ("ntfs.fi", "NODE_OFF", 0x380),
+    ("ntfs.fi", "MFTBUF",   0x1000),
+    ("ntfs.fi", "IDXBUF",   0x1000),
+    ("ntfs.fi", "DATBUF",   0x200),
+    ("ntfs.fi", "NAMBUF",   0x100),
+    ("ntfs.fi", "CNVBUF",   0x100),
+]
+
 # RUNDE BLECH: dieselbe Buchfuehrung fuer den EHCI-Bereich.  Jedes
 # Stueck liegt INNERHALB von ehci.EHCI_OFF; Punkt 5b unten rechnet nach,
 # dass keines herauslaeuft und keines ein anderes ueberschneidet.  Die
@@ -526,6 +555,8 @@ def main():
               # RUNDE K14 -- sonst pruefte die Karte diese Dateien gar
               # nicht, und ein vergessener Bereich fiele nie auf.
               "vfs.fi", "mnt.fi", "fat.fi", "procfs.fi", "devfs.fi",
+              # RUNDE FREMDFS -- ext4 und NTFS, je drei Seiten.
+              "ext4.fi", "ntfs.fi",
               "part.fi", "ofs.fi",
               # RUNDE OFS3 -- die Geometriewoerter stehen hier.
               "fs.fi",
@@ -582,6 +613,11 @@ def main():
     #    dieser Karte oder ausdruecklich als Nicht-kdata erklaert.  Ohne
     #    diesen Punkt schuetzt die Karte nur das, woran jemand gedacht hat.
     benannt = {(d, k) for _, _, _, d, k in stuecke}
+    # RUNDE FREMDFS: die Unterversaetze der zwei Treiber sind KEINE
+    # eigenen kdata-Bereiche, sondern Stuecke IN ihrem Bereich -- sie
+    # sind oben (Punkt 5c) nachgerechnet und gelten damit als benannt.
+    benannt |= {(d, k) for d, k, _ in EXT4_STUECKE}
+    benannt |= {(d, k) for d, k, _ in NTFS_STUECKE}
     benannt |= {(datei, anf) for _, datei, anf, _ in BEREICHE}
     for datei, w in dateien.items():
         for k in w:
@@ -684,6 +720,48 @@ def main():
                 vor17 = max(vor17, e)
             if vor17 < e0:
                 print("       ---- frei 0x%05X..0x%05X" % (vor17, e0))
+
+    # 5c. RUNDE FREMDFS: die Untergliederung der zwei fremden
+    #     Dateisysteme, nach demselben Muster wie K17 und EHCI.
+    for name, liste in (("EXT4", EXT4_STUECKE), ("NTFS", NTFS_STUECKE)):
+        datei0 = liste[0][0]
+        if datei0 not in dateien:
+            continue
+        a0 = wert(dateien["kstate.fi"], name + "_OFF")
+        e0 = a0 + wert(dateien["kstate.fi"], name + "_MAX")
+        teile = []
+        for datei, k, n in liste:
+            if datei not in dateien or k not in dateien[datei]:
+                fehler.append("%s:%s fehlt -- die %s-Karte ist veraltet"
+                              % (datei, k, name))
+                continue
+            a = a0 + wert(dateien[datei], k)
+            if a < a0 or a + n > e0:
+                fehler.append(
+                    "%s:%s 0x%X..0x%X liegt AUSSERHALB von %s 0x%X..0x%X"
+                    % (datei, k, a, a + n, name, a0, e0))
+            teile.append((a, a + n, datei, k))
+        teile.sort()
+        for i in range(len(teile)):
+            a1, e1, d1, k1 = teile[i]
+            for j in range(i + 1, len(teile)):
+                a2, e2, d2, k2 = teile[j]
+                if a2 >= e1:
+                    break
+                fehler.append(
+                    "KOLLISION IN %s: %s:%s 0x%X..0x%X ueberschneidet "
+                    "%s:%s 0x%X..0x%X"
+                    % (name, d1, k1, a1, e1, d2, k2, a2, e2))
+        if laut:
+            print("  ---- die Untergliederung von %s ----" % name)
+            vorx = a0
+            for a, e, dd, kk in teile:
+                if a > vorx:
+                    print("       ---- frei 0x%05X..0x%05X" % (vorx, a))
+                print("  0x%05X..0x%05X  %s:%s" % (a, e, dd, kk))
+                vorx = max(vorx, e)
+            if vorx < e0:
+                print("       ---- frei 0x%05X..0x%05X" % (vorx, e0))
 
     if laut:
         vor = 0

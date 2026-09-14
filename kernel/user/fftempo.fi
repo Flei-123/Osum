@@ -1,0 +1,95 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/fftempo.fi -- Runde FREMDFS: EINE DATEI LESEN UND DIE
+// ZEIT DAFUER MELDEN.
+//
+// `/bin/fremdfs` misst, ob RICHTIG gelesen wird; dieses Programm misst,
+// wie SCHNELL. Es tut genau eine Sache: die Datei ganz lesen, in
+// Stuecken von 4096 Oktetten, und die Dauer in Millisekunden ausgeben.
+//
+//     tempo: ms = <zahl>
+//     tempo: oktette = <zahl>
+//
+// KEIN HASH, KEINE PRUEFUNG, KEINE AUSGABE DAZWISCHEN. Alles davon
+// waere in der Zahl enthalten und wuerde sie verfaelschen -- SHA-256
+// ueber sechs Megaoktett kostet auf dieser Maschine mehr als das Lesen
+// selbst. Was hier gemessen wird, ist der Weg von der Platte durch den
+// Treiber und die VFS-Schicht bis in den Puffer des Programms.
+//
+// Die Uhr ist `SYS_CLOCK_GETTIME` mit CLOCK_MONOTONIC: sie geht
+// gleichmaessig und wird von keiner Zeitumstellung angefasst.
+
+profile kernel
+
+import ulib
+
+export { u_start }
+
+const SYS_READ: u64 = 0
+const SYS_OPEN: u64 = 2
+const SYS_CLOSE: u64 = 3
+const SYS_CLOCK_GETTIME: u64 = 228
+const CLOCK_MONOTONIC: u64 = 1
+const O_RDONLY: u64 = 0
+
+static mut PUFFER: [u8; 4096] = [0 as u8; 4096]
+
+// Die Uhr in Millisekunden. `timespec` sind zwei Woerter: Sekunden und
+// Nanosekunden.
+fn jetzt_ms() -> u64 {
+    var ts: [u8; 16] = [0 as u8; 16]
+    let r: u64 = ulib.sys(SYS_CLOCK_GETTIME, CLOCK_MONOTONIC,
+        (&ts[0 as usize]) as u64, 0)
+    if ulib.bad(r) {
+        return 0
+    }
+    let s: u64 = __mmio_read64(((&ts[0 as usize]) as u64) as *mut u64)
+    let ns: u64 = __mmio_read64((((&ts[0 as usize]) as u64) + 8) as *mut u64)
+    return s * 1000 + ns / 1000000
+}
+
+fn zeile(name: u64, v: u64) {
+    var s_pre: [u8; 8] = "tempo: \0"
+    var s_eq: [u8; 4] = " = \0"
+    ulib.say((&s_pre[0 as usize]) as u64)
+    ulib.say(name)
+    ulib.say((&s_eq[0 as usize]) as u64)
+    ulib.sayn(v)
+    ulib.nl()
+}
+
+fn u_start(args: u64) -> u64 {
+    var n_ms: [u8; 3] = "ms\0"
+    var n_okt: [u8; 8] = "oktette\0"
+    var s_use: [u8; 24] = "usage: fftempo PFAD\0\0\0\0\0"
+
+    if ulib.arg_count(args) < 2 {
+        ulib.esay_line((&s_use[0 as usize]) as u64, 0)
+        return 1
+    }
+    let pfad: u64 = ulib.arg_at(args, 1)
+    let fd: u64 = ulib.sys(SYS_OPEN, pfad, O_RDONLY, 0)
+    if ulib.bad(fd) {
+        zeile((&n_ms[0 as usize]) as u64, 0)
+        zeile((&n_okt[0 as usize]) as u64, 0)
+        return 1
+    }
+
+    let t0: u64 = jetzt_ms()
+    var gesamt: u64 = 0
+    var weiter: bool = true
+    while weiter {
+        let got: u64 = ulib.sys(SYS_READ, fd,
+            (&PUFFER[0 as usize]) as u64, 4096)
+        if ulib.bad(got) || got == 0 {
+            weiter = false
+        } else {
+            gesamt = gesamt + got
+        }
+    }
+    let t1: u64 = jetzt_ms()
+    ulib.sys(SYS_CLOSE, fd, 0, 0)
+
+    zeile((&n_ms[0 as usize]) as u64, t1 - t0)
+    zeile((&n_okt[0 as usize]) as u64, gesamt)
+    return 0
+}
