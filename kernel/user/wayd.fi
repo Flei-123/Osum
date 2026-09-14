@@ -250,22 +250,36 @@ fn wr32(p: u64, v: u64) {
 // naechsten Durchlauf am Stueck geschickt. Einzeln zu senden waere ein
 // Systemaufruf je Ereignis, und die Registrierung allein schickt elf.
 
+// DIE LAENGE WIRD MITGEZAEHLT, NICHT AUS DER ARGUMENTZAHL GERECHNET.
+//
+// Der erste Anlauf dieser Runde rechnete `8 + nargs * 4` -- richtig,
+// solange jedes Argument vier Oktette hat, und FALSCH, sobald eine
+// Zeichenkette dabei ist (wl_registry.global schickt den
+// Schnittstellennamen). Der Client las dann die Laenge aus dem Kopf,
+// sprang um zu wenige Oktette weiter und fand Muell statt des
+// naechsten Pakets. Er haengte im ersten roundtrip, und das sah aus
+// wie ein Server, der nicht antwortet.
+//
+// `ev_pos` ist deshalb die Schreibmarke: jedes Argument schiebt sie
+// weiter, und `ev_end` nimmt, was dabei herauskam.
+static mut ev_pos: u64 = 0
+
 fn ev_begin(c: u64, id: u64, op: u64) -> u64 {
     let p: u64 = c * OUT_CAP + c_outlen[c as usize]
     wr32(p, id)
-    // Die Laenge steht erst am Ende fest; hier bleibt Platz.
     wr32(p + 4, op)
+    ev_pos = 8
     return p
 }
 
 fn ev_arg(c: u64, p: u64, n: u64, v: u64) {
-    wr32(p + 8 + n * 4, v)
+    wr32(p + ev_pos, v)
+    ev_pos = ev_pos + 4
 }
 
 fn ev_end(c: u64, p: u64, nargs: u64) {
-    let len: u64 = 8 + nargs * 4
-    // Opcode bleibt in den unteren 16 Bit, die Laenge kommt darueber.
-    let op: u64 = outbuf[(p + 4) as usize] as u64
+    let len: u64 = ev_pos
+    let op: u64 = (outbuf[(p + 4) as usize] as u64)
         | ((outbuf[(p + 5) as usize] as u64) << 8)
     wr32(p + 4, (op & 0xFFFF) | (len << 16))
     c_outlen[c as usize] = c_outlen[c as usize] + len
@@ -273,23 +287,27 @@ fn ev_end(c: u64, p: u64, nargs: u64) {
 
 // Eine Zeichenkette als Argument: Laenge (mit der Null) und dann die
 // Oktette, auf vier aufgefuellt.
+// Eine Zeichenkette im Drahtformat: die LAENGE MIT der abschliessenden
+// Null, dann die Oktette, dann auf ein Vielfaches von vier aufgefuellt.
 fn ev_str(c: u64, p: u64, n: u64, iface: u64) -> u64 {
     let l: u64 = wlproto.name_len(iface)
-    wr32(p + 8 + n * 4, l + 1)
+    wr32(p + ev_pos, l + 1)
+    ev_pos = ev_pos + 4
     var k: u64 = 0
     while k < l {
-        outbuf[(p + 12 + n * 4 + k) as usize] =
-            wlproto.name_at(iface, k) as u8
+        outbuf[(p + ev_pos + k) as usize] = wlproto.name_at(iface, k) as u8
         k = k + 1
     }
-    // Die Null und die Auffuellung auf vier.
-    var pad: u64 = l + 1
-    while (pad & 3) != 0 {
-        outbuf[(p + 12 + n * 4 + pad - 1) as usize] = 0
-        pad = pad + 1
+    // Die Null und die Auffuellung. `(l + 1 + 3) & ~3` ist die Zahl der
+    // Oktette, die eine Zeichenkette dieser Laenge im Draht belegt.
+    let ganz: u64 = (l + 4) & 0xFFFFFFFFFFFFFFFC
+    var f: u64 = l
+    while f < ganz {
+        outbuf[(p + ev_pos + f) as usize] = 0 as u8
+        f = f + 1
     }
-    outbuf[(p + 12 + n * 4 + l) as usize] = 0
-    return (l + 4) / 4
+    ev_pos = ev_pos + ganz
+    return 0
 }
 
 // wl_display.error -- der ehrliche Weg, einem Client zu sagen, dass er
@@ -348,9 +366,9 @@ fn on_display(c: u64, id: u64, op: u64, argp: u64) {
 fn announce(c: u64, rid: u64, iface: u64) {
     let p: u64 = ev_begin(c, rid, 0)
     ev_arg(c, p, 0, iface) // der Name
-    let w: u64 = ev_str(c, p, 1, iface)
-    ev_arg(c, p, 1 + w, wlproto.version_of(iface))
-    ev_end(c, p, 2 + w)
+    ev_str(c, p, 1, iface) // die Schnittstelle als Zeichenkette
+    ev_arg(c, p, 2, wlproto.version_of(iface))
+    ev_end(c, p, 3)
 }
 
 fn on_registry(c: u64, id: u64, op: u64, argp: u64) {
@@ -404,8 +422,11 @@ fn on_registry(c: u64, id: u64, op: u64, argp: u64) {
         ev_arg(c, pg, 2, 300)
         ev_arg(c, pg, 3, 200)
         ev_arg(c, pg, 4, 0)
-        ev_arg(c, pg, 5, 0) // make (leere Zeichenkette)
-        ev_arg(c, pg, 6, 0) // model
+        // make und model als LEERE Zeichenketten: im Draht ist das je
+        // ein Wort mit der Laenge 0 -- kein Oktett folgt, keine
+        // Auffuellung. ev_arg schreibt genau dieses eine Wort.
+        ev_arg(c, pg, 5, 0)
+        ev_arg(c, pg, 6, 0)
         ev_arg(c, pg, 7, 0) // transform
         ev_end(c, pg, 8)
         let pm: u64 = ev_begin(c, nid, 1)
@@ -675,6 +696,8 @@ fn on_xdg_wm_base(c: u64, id: u64, op: u64, argp: u64) {
 }
 
 static mut next_serial: u64 = 1
+// Voruebergehende Diagnose: 1 = jeden Empfang melden.
+static mut dbg: u64 = 1
 
 fn on_xdg_surface(c: u64, id: u64, op: u64, argp: u64) {
     if op == wlproto.RQ_XDG_SURFACE_GET_TOPLEVEL {
@@ -757,6 +780,15 @@ fn dispatch(c: u64, at: u64, len: u64, fd: u64) -> bool {
         return false
     }
     n_msgs = n_msgs + 1
+    if dbg != 0 {
+        var s_m: [u8; 10] = "wayd: if=\0"
+        ulib.say((&s_m[0 as usize]) as u64)
+        ulib.sayu(iface)
+        var s_o: [u8; 5] = " op=\0"
+        ulib.say((&s_o[0 as usize]) as u64)
+        ulib.sayu(op)
+        ulib.nl()
+    }
     if iface == wlproto.IF_WL_DISPLAY {
         on_display(c, id, op, argp)
     } else if iface == wlproto.IF_WL_REGISTRY {
@@ -848,7 +880,17 @@ fn flush_out(c: u64) {
     mh[4 as usize] = 0
     mh[5 as usize] = 0
     mh[6 as usize] = 0
-    ulib.sys(SYS_SENDMSG, c_fd[c as usize], (&mh[0 as usize]) as u64, 0)
+    let sr: u64 = ulib.sys(SYS_SENDMSG, c_fd[c as usize],
+        (&mh[0 as usize]) as u64, 0)
+    if dbg != 0 {
+        var s_tx: [u8; 10] = "wayd: tx=\0"
+        ulib.say((&s_tx[0 as usize]) as u64)
+        ulib.sayu(n)
+        var s_r: [u8; 4] = " r=\0"
+        ulib.say((&s_r[0 as usize]) as u64)
+        ulib.sayu(sr)
+        ulib.nl()
+    }
     c_outlen[c as usize] = 0
 }
 
@@ -857,17 +899,27 @@ fn drain(c: u64, fd: u64) {
     let base: u64 = c * IN_CAP
     var at: u64 = 0
     var live: bool = true
+    var weiter: bool = true
     var usedfd: u64 = fd
-    while live && c_inlen[c as usize] - at >= 8 {
+    // ZWEI FEHLER STECKTEN IN DIESER SCHLEIFE, und beide kosteten einen
+    // Lauf:
+    //
+    //   1. `c_inlen - at >= 8` ist eine GEPRUEFTE Subtraktion. Sobald
+    //      `at` groesser als der Bestand wird, haelt sie das Programm
+    //      an, statt die Schleife zu beenden. Jetzt wird addiert.
+    //   2. EIN HALB ANGEKOMMENES PAKET IST KEIN FEHLER. Die erste
+    //      Fassung setzte dafuer `live = false` -- und `live = false`
+    //      schliesst unten die Verbindung. Ein Client, dessen Paket in
+    //      zwei Stuecken ankam, wurde also hinausgeworfen. Dafuer gibt
+    //      es jetzt `weiter`: die Schleife endet, die Verbindung bleibt.
+    while live && weiter && at + 8 <= c_inlen[c as usize] {
         let w1: u64 = rd32(base + at + 4)
         let len: u64 = (w1 >> 16) & 0xFFFF
         if len < 8 {
             send_error(c, 0, 0)
             live = false
         } else if at + len > c_inlen[c as usize] {
-            // Halb angekommen -- der Rest kommt beim naechsten Mal.
-            live = false
-            c_inlen[c as usize] = c_inlen[c as usize]
+            weiter = false
         } else {
             live = dispatch(c, at, len, usedfd)
             usedfd = 0
@@ -1025,6 +1077,12 @@ fn u_start(args: u64) -> u64 {
             if c_used[c as usize] != 0 {
                 let got: u64 = recv_into(c)
                 if got > 0 {
+                    if dbg != 0 {
+                        var s_got: [u8; 10] = "wayd: rx=\0"
+                        ulib.say((&s_got[0 as usize]) as u64)
+                        ulib.sayu(got)
+                        ulib.nl()
+                    }
                     drain(c, taken_fd())
                 }
                 if c_used[c as usize] != 0 {

@@ -48,6 +48,7 @@ static long sysc(long n, long a, long b, long c, long d, long e, long f)
 #define SYS_wait4         61
 #define SYS_fcntl         72
 #define SYS_ftruncate     77
+#define SYS_poll          7
 #define SYS_memfd_create  319
 
 #define AF_UNIX       1
@@ -292,6 +293,37 @@ int main(int argc, char **argv, char **envp)
                 okv("und die zweite Zahl auch", (long)np[1], 4242);
             }
         }
+    }
+
+    // ---- 6. poll SIEHT, was der andere geschickt hat ----
+    //
+    // Genau daran haengt libwayland: es ruft poll und dann recvmsg. Ein
+    // poll, das nichts meldet, obwohl Oktette im Ring liegen, laesst
+    // jeden Client haengen -- und das sieht aus wie ein toter Server.
+    outs("\n6. poll auf dem verbundenen Socket\n");
+    if (as >= 0) {
+        char back[4];
+        back[0]='P'; back[1]='O'; back[2]='N'; back[3]='G';
+        struct iovec biov;
+        biov.iov_base = back;
+        biov.iov_len = 4;
+        struct msghdr bmh;
+        bmh.msg_name = 0; bmh.msg_namelen = 0;
+        bmh.msg_iov = &biov; bmh.msg_iovlen = 1;
+        bmh.msg_control = 0; bmh.msg_controllen = 0;
+        bmh.msg_flags = 0;
+        long s2 = sysc(SYS_sendmsg, as, (long)&bmh, 0, 0, 0, 0);
+        okv("der Server sendet 4 Oktette zurueck", s2, 4);
+        // Jetzt MUSS poll auf der Serverseite POLLOUT melden und auf
+        // der Clientseite POLLIN -- die Clientseite ist im Kind, also
+        // wird hier die Richtung geprueft, die hier messbar ist.
+        long pfd[1];
+        // struct pollfd: int fd, short events, short revents
+        *(int *)&pfd[0] = (int)as;
+        *(short *)((char *)&pfd[0] + 4) = 4; // POLLOUT
+        *(short *)((char *)&pfd[0] + 6) = 0;
+        long pr = sysc(SYS_poll, (long)pfd, 1, 0, 0, 0, 0);
+        ok("poll(POLLOUT) meldet den Socket als schreibbar", pr == 1);
     }
 
     long st = 0;
