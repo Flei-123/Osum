@@ -850,6 +850,23 @@ hasnotre "$F" 'unreg uhr.*grund=2' "das Widget ist NICHT an der Frist gestorben"
 hasre "$F" 'plugregel: nachgemessen id=[0-9]+ x=[0-9]+ y=[0-9]+' \
     "die Regel-Engine hat ein Fenster gesetzt und NACHGEMESSEN"
 hasre "$F" '^pluguhr: text ' "und das Widget hat Text in die Leiste geschickt"
+# UND DIE ZAHL IM WIDGETFELD BEWEGT SICH.
+#
+# Das Feld sagt `cpu n/v` (dieser Weg hat keinen Leerlaufzaehler, siehe
+# Abschnitt 16.1 des Berichts) -- eine Zeichenfolge, die sich nie
+# aendert, waere als Unterschied zweier Fotos wertlos. Dahinter steht
+# deshalb die Zahl der sichtbaren Fenster aus `WM_LIST`. Hier wird
+# nachgerechnet, dass sie in EINEM Lauf WIRKLICH zwei verschiedene
+# Werte annimmt: der Schreibtisch oeffnet waehrend des Laufs ein
+# weiteres Fenster, und das Feld zeigt es.
+fenw=$(grep -aoE '^pluguhr: text cpu [^ ]+ fen [0-9]+' "$F" \
+    | grep -oE '[0-9]+$' | sort -un | tr '\n' ' ')
+fenn=$(printf '%s' "$fenw" | wc -w)
+if [ "${fenn:-0}" -ge 2 ]; then
+    ok "die Fensterzahl im Widgetfeld aendert sich im Lauf: $fenw (aus WM_LIST)"
+else
+    bad "die Fensterzahl im Widgetfeld steht still ('$fenw') -- kein sinnvoller Unterschied"
+fi
 
 # ================================================== 9. tools/check-ui.sh
 echo "== 9. der Zeichenweg =="
