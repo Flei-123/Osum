@@ -90,8 +90,18 @@ python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
     || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs.txt" | head -5; }
 
 BASE="gfx wm wig desk wmhold wiglong nokbd nosched noproc nofs wmplug"
-lauf() { # name zusatz
-    local name=$1 extra=$2
+warte() { # datei marke pid [schritte]
+    local f=$1 m=$2 pid=$3 n=${4:-600} i=0
+    while [ $i -lt "$n" ]; do
+        grep -qa "$m" "$f" 2>/dev/null && return 0
+        kill -0 "$pid" 2>/dev/null || return 1
+        sleep 0.2; i=$((i+1))
+    done
+    return 1
+}
+
+lauf() { # name zusatz [marke1] [marke2]
+    local name=$1 extra=$2 m1=${3:-} m2=${4:-}
     local sock="$TMPD/mon-$name.sock" out="$TMPD/$name.txt" ppm="$TMPD/$name.ppm"
     rm -f "$out" "$ppm" "$sock"
     cp -f "$TMPD/disk.img" "$TMPD/live-$name.img"
@@ -100,18 +110,38 @@ lauf() { # name zusatz
         -vga std -global VGA.edid=off -monitor "unix:$sock,server,nowait" \
         -drive "file=$TMPD/live-$name.img,format=raw,if=ide,index=0" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$TMPD/$name.qemu" 2>&1 &
-    local pid=$! i=0
-    while [ $i -lt 1400 ]; do
-        grep -qa '^wm: hold' "$out" 2>/dev/null && break
-        kill -0 "$pid" 2>/dev/null || break
-        sleep 0.15; i=$((i+1))
-    done
-    # Dem Widget zwei Takte lassen: es schickt einmal je Sekunde, die
-    # Leiste holt einmal je Sekunde. Ein Foto nach 0,2 Sekunden wuerde
-    # etwas messen, das noch niemand geschickt hat.
-    sleep 4
+    local pid=$!
+    # AUF DIE MELDUNG WARTEN, DIE DAS BILD BESCHREIBT, und nicht auf
+    # `wm: hold`. Gemessen: `wm: hold` steht in diesem Aufbau erst nach
+    # sechs Sekunden auf der Leitung -- da hatte sich das Widget mit
+    # `runden=6` schon wieder abgemeldet, und beide Fotos zeigten
+    # dieselbe leere Leiste. Ein Foto, das auf das falsche Ereignis
+    # wartet, misst den falschen Augenblick.
+    warte "$out" "${m1:-^wm: hold}" "$pid"
+    sleep 2
     python3 tools/gfx/screenshot.py "$sock" "$ppm" 25 > "$TMPD/$name.shot" 2>&1
+    # WIE WEIT WAR DIE LEITUNG, ALS DAS FOTO ENTSTAND? Die Lage des
+    # Widget-Kastens wird spaeter aus dem Protokoll gelesen, und die
+    # Leiste meldet sie bei JEDEM Neumalen. Ohne diese Marke naehme die
+    # Rechnung den letzten Kasten des ganzen Laufs -- auch den, der erst
+    # nach dem Foto entstanden ist.
+    wc -l < "$out" > "$TMPD/$name.marke"
+    # DAS ZWEITE FOTO AUS DEMSELBEN LAUF. Es ist der eigentliche Beweis
+    # fuer "an und aus ZUR LAUFZEIT": derselbe Fensterserver, dieselbe
+    # Leiste, kein Neustart -- nur das Plugin ist gegangen.
+    if [ -n "$m2" ]; then
+        warte "$out" "$m2" "$pid"
+        sleep 3
+        python3 tools/gfx/screenshot.py "$sock" "$TMPD/$name-2.ppm" 25 \
+            > "$TMPD/$name-2.shot" 2>&1
+    fi
     wait "$pid"; rm -f "$sock"
+    # DIE LEITUNG OHNE NULLEN. Der Kern schreibt Namen mit fester Laenge
+    # (`serial.text(name, 8)`), also stehen mitten in der Zeile
+    # Nulloktette: `wmplug: unreg uhr\0\0\0\0\0 grund=0`. `grep -E` kommt
+    # damit nicht durch, und eine Zusage, die deshalb nie zutrifft, ist
+    # schlimmer als keine -- dieser Lauf hatte sie schon zweimal.
+    tr -d '\000' < "$out" > "$out.clean"
 }
 
 echo "== 3. der Lauf OHNE Widget =="
@@ -121,28 +151,81 @@ hasnot "$TMPD/aus.txt" "taskbar: plug nr=" "ohne Widget meldet die Leiste kein W
 cp -f "$TMPD/aus.ppm" "$SHOTS/widget-aus.ppm" 2>/dev/null
 
 echo "== 4. der Lauf MIT Widget =="
-lauf an "wigapp=/bin/uhrstart"
+# `runden=20` heisst: das Widget schickt zwanzig Sekunden lang Text und
+# meldet sich dann SELBST ab. Fotografiert wird, sobald die Leiste den
+# Text GEMALT hat -- und noch einmal, nachdem das Widget gegangen ist.
+# fotografiert -- an und aus im selben Lauf.
+lauf an "wigapp=/bin/uhrstart,uhrstart,runden=20" "taskbar: text plug " "pluguhr: ende"
 has "$TMPD/an.txt" "wm: hold" "der Schreibtisch steht (an)"
 has "$TMPD/an.txt" "wmplug: reg uhr" "das Widget hat sich angemeldet"
 has "$TMPD/an.txt" "pluguhr: angemeldet" "und sagt es selbst"
 has "$TMPD/an.txt" "pluguhr: text " "es schickt Text"
+has "$TMPD/an.txt" "pluguhr: frist ticks=" "es liest die Frist des Kerns"
 hasnot "$TMPD/an.txt" "pluguhr: KEIN recht" "es hat R_ACT_BAR bekommen"
 has "$TMPD/an.txt" "taskbar: plug nr=0" "die Leiste hat ein Widget-Feld"
 has "$TMPD/an.txt" "taskbar: text plug " "und malt seinen Text"
-hasnot "$TMPD/an.txt" "wmplug: unreg uhr grund=2" "die Frist hat nicht gerissen"
+# ACHTUNG, GEMESSENE FALLE: der Kern schreibt den Namen mit acht
+# Oktetten (`serial.text(name, 8)`), also steht dort
+# `wmplug: unreg uhr      grund=0`. Ein `grep -F` auf
+# "unreg uhr grund=2" findet das NIE und war deshalb gruen, waehrend die
+# Frist in Wahrheit gerissen war. Jetzt wird mit -E und \s+ gesucht.
+if grep -qaE '^wmplug: unreg uhr *grund=2' "$TMPD/an.txt.clean"; then
+    bad "die Frist ist gerissen (grund=2) -- das Widget holt zu selten ab"
+else
+    ok "die Frist hat nicht gerissen (kein grund=2)"
+fi
+has "$TMPD/an.txt" "pluguhr: barget verweigert r=-2" \
+    "das Plugin selbst darf WM_PLUG_BARGET NICHT (E_RIGHTS = -2)"
+if grep -qaE '^wmplug: unreg uhr *grund=0' "$TMPD/an.txt.clean"; then
+    ok "es hat sich zur Laufzeit SELBST abgemeldet (grund=0)"
+else
+    bad "keine Abmeldung mit grund=0 -- das Widget ist nicht sauber gegangen"
+fi
 cp -f "$TMPD/an.ppm" "$SHOTS/widget-an.ppm" 2>/dev/null
+cp -f "$TMPD/an-2.ppm" "$SHOTS/widget-aus-laufzeit.ppm" 2>/dev/null
 
 echo "== 5. die Rechnung an der benannten Koordinate =="
 # Die Koordinate kommt aus der Leiste selbst und nicht aus diesem Skript:
 # `taskbar: plug nr=0 x=.. y=.. w=.. h=..` plus der Fensterlage
 # (`taskbar: geom x= y=`). Gemessen wird die MITTE dieses Kastens.
-zeile=$(grep -a '^taskbar: plug nr=0 ' "$TMPD/an.txt" | tail -1)
+zeile=$(head -n "$(cat "$TMPD/an.marke")" "$TMPD/an.txt" \
+    | grep -a '^taskbar: plug nr=0 ' | tail -1)
 gline=$(grep -a '^taskbar: geom ' "$TMPD/an.txt" | tail -1)
 zahl() { printf '%s' "$1" | grep -oE " $2=[0-9]+" | head -1 | sed 's/.*=//'; }
 # Die Farbe an einer Stelle, als "r g b" -- die Leistenfarbe wird nicht
 # getippt, sondern aus der Ecke des Kastens GELESEN. Ein fest getippter
 # Wert waere nach dem naechsten Farbschema falsch.
 pfarbe() { python3 tools/gfx/checkshot.py punkt "$1" "$2" "$3" 2>/dev/null; }
+
+# Wie viele Bildpunkte eines Rechtecks sind zwischen ZWEI Bildern
+# verschieden? `checkshot.py` vergleicht ein Bild gegen eine FARBE; hier
+# werden zwei Bilder gegeneinander gehalten, und das ist genau die
+# Frage "hat sich an dieser Stelle etwas geaendert".
+punktdiff() { python3 - "$@" <<'PY'
+import sys
+def load(p):
+    d = open(p, 'rb').read()
+    teile = []; i = 2
+    while len(teile) < 3:
+        while i < len(d) and d[i:i+1].isspace(): i += 1
+        if d[i:i+1] == b'#':
+            while d[i:i+1] != b'\n': i += 1
+            continue
+        j = i
+        while j < len(d) and not d[j:j+1].isspace(): j += 1
+        teile.append(int(d[i:j])); i = j
+    i += 1
+    return teile[0], teile[1], d[i:]
+a = load(sys.argv[1]); b = load(sys.argv[2])
+x0, y0, w, h = (int(v) for v in sys.argv[3:7])
+n = 0
+for y in range(y0, min(y0 + h, a[1], b[1])):
+    for x in range(x0, min(x0 + w, a[0], b[0])):
+        o = (y * a[0] + x) * 3
+        if a[2][o:o+3] != b[2][o:o+3]: n += 1
+print(n)
+PY
+}
 px=$(zahl "$zeile" x); py=$(zahl "$zeile" y)
 pw=$(zahl "$zeile" w); ph=$(zahl "$zeile" h)
 gx=$(zahl "$gline" x); gy=$(zahl "$gline" y)
@@ -156,34 +239,8 @@ else
     # Bildpunkte im Kasten sind zwischen den beiden Bildern verschieden?
     # Text auf gleichfarbigem Grund heisst: ein Teil der Punkte, nicht
     # alle -- also ist die Zusage "mehr als 40 verschiedene Punkte".
-    d=$(python3 - "$SHOTS/widget-an.ppm" "$SHOTS/widget-aus.ppm" \
-        "$((gx+px))" "$((gy+py))" "$pw" "$ph" <<'PY'
-import sys
-def load(p):
-    d=open(p,'rb').read()
-    # P6, drei Kopfzahlen, dann die Punkte
-    parts=[];i=2
-    while len(parts)<3:
-        while i<len(d) and d[i:i+1].isspace(): i+=1
-        if d[i:i+1]==b'#':
-            while d[i:i+1]!=b'\n': i+=1
-            continue
-        j=i
-        while j<len(d) and not d[j:j+1].isspace(): j+=1
-        parts.append(int(d[i:j])); i=j
-    i+=1
-    w,h,_=parts
-    return w,h,d[i:]
-a=load(sys.argv[1]); b=load(sys.argv[2])
-x0,y0,w,h=(int(v) for v in sys.argv[3:7])
-n=0
-for y in range(y0,min(y0+h,a[1],b[1])):
-    for x in range(x0,min(x0+w,a[0],b[0])):
-        o=(y*a[0]+x)*3
-        if a[2][o:o+3]!=b[2][o:o+3]: n+=1
-print(n)
-PY
-)
+    d=$(punktdiff "$SHOTS/widget-an.ppm" "$SHOTS/widget-aus.ppm" \
+        "$((gx+px))" "$((gy+py))" "$pw" "$ph")
     if [ "${d:-0}" -gt 40 ]; then
         ok "im Widget-Kasten unterscheiden sich $d Bildpunkte zwischen AN und AUS"
     else
@@ -209,6 +266,48 @@ PY
         bad "im Widget-Kasten steht keine Tinte (${it:-0} Punkte) -- der Text fehlt"
     fi
 fi
+
+echo "== 6. an und aus ZUR LAUFZEIT, im selben Lauf =="
+# Kein zweiter Start des Fensterservers, kein zweiter Kernel: dasselbe
+# `wm`, dieselbe Leiste, dasselbe Fenster. Zwischen den beiden Bildern
+# liegt nur, dass sich das Widget abgemeldet hat.
+if [ ! -s "$SHOTS/widget-aus-laufzeit.ppm" ]; then
+    bad "das zweite Foto des Laufs fehlt"
+elif [ -z "${px:-}" ]; then
+    bad "ohne Widget-Kasten gibt es nichts nachzurechnen"
+else
+    d2=$(punktdiff "$SHOTS/widget-an.ppm" "$SHOTS/widget-aus-laufzeit.ppm" \
+        "$((gx+px))" "$((gy+py))" "$pw" "$ph")
+    if [ "${d2:-0}" -gt 40 ]; then
+        ok "nach dem Abmelden haben sich $d2 Bildpunkte im Kasten geaendert"
+    else
+        bad "nach dem Abmelden ist das Bild unveraendert (${d2:-0} Punkte)"
+    fi
+    # Die Vergleichsfarbe kommt aus DEM BILD, das gemessen wird: nach
+    # dem Abmelden malt die Leiste an dieser Stelle ihren eigenen
+    # Verlauf, und der ist nicht die Farbe, die vorher im Kasten stand.
+    # Mit der alten Farbe gemessen waere hinterher ALLES "Tinte".
+    it2=$(python3 tools/gfx/checkshot.py flaeche "$SHOTS/widget-aus-laufzeit.ppm" \
+        "$((gx+px))" "$((gy+py))" "$pw" "$ph" \
+        $(pfarbe "$SHOTS/widget-aus-laufzeit.ppm" "$((gx+px+1))" "$((gy+py+1))") 2>&1 \
+        | grep -oE '^[0-9]+')
+    ok "im Kasten stehen danach $it2 Punkte, die nicht Leistenflaeche sind (vorher $it)"
+    if [ "${it2:-0}" -lt "${it:-0}" ]; then
+        ok "der Widget-Text ist weg, ohne dass der Fensterserver neu gestartet wurde"
+    else
+        bad "der Widget-Text steht noch da (${it2:-0} statt weniger als ${it:-0})"
+    fi
+fi
+
+# DIE BILDER FUERS ANSEHEN. Gerechnet wird mit dem PPM (drei Oktette je
+# Punkt, kein Verfahren dazwischen); ins Repo gehoert das PNG -- 1,4
+# Megaoktett je Foto waeren sonst der halbe Zweig.
+for b in widget-an widget-aus widget-aus-laufzeit; do
+    if [ -s "$SHOTS/$b.ppm" ]; then
+        python3 tools/gfx/ppm2png.py "$SHOTS/$b.ppm" "$SHOTS/$b.png" \
+            > /dev/null 2>&1 && rm -f "$SHOTS/$b.ppm"
+    fi
+done
 
 echo
 echo "WIDGET: $pass bestanden, $fail gescheitert"
