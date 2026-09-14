@@ -133,12 +133,14 @@ import rand
 import crypto.xts
 import crypto.argon2
 import crypto.sha256
+import fs
 
 export {
     init, ready, on, unlock, lock_down, format, active,
     encrypt_sector, decrypt_sector,
     header_read, header_valid, slots_used, slot_add, slot_kill,
     reads, writes, fails, slot_of, selftest,
+    tree_write, tree_check, TREE_FILES,
     CIPHER_XTS, KDF_ARGON2ID, KDF_PBKDF2,
     HDR_SECTORS, SLOTS, derive_wrap
 }
@@ -579,6 +581,7 @@ fn unlock(state: u64, dev: u64, pw: u64, pwlen: u64) -> bool {
     s(state, kstate.CRY_SECTORS, le64(hdr, H_COUNT))
     s(state, kstate.CRY_CIPHER, le32(hdr, H_CIPHER))
     s(state, kstate.CRY_KDF, kdf)
+    wurzel_setzen(state, dev, le64(hdr, H_FIRST), le64(hdr, H_COUNT))
     return true
 }
 
@@ -708,7 +711,32 @@ fn format(state: u64, dev: u64, pw: u64, pwlen: u64,
     s(state, kstate.CRY_FIRST, HDR_SECTORS)
     s(state, kstate.CRY_SECTORS, total - HDR_SECTORS)
     s(state, kstate.CRY_KDF, KDF_ARGON2ID)
+    wurzel_setzen(state, dev, HDR_SECTORS, total - HDR_SECTORS)
     return true
+}
+
+// ========================================= DIE WURZEL HINTER DEN KOPF
+//
+// DER FEHLER, DEN DIESE FUNKTION BEHEBT, WAR GEMESSEN UND NICHT
+// UEBERLEGT: ohne sie schreibt `fs.format` seinen Superblock auf
+// Sektor 0 -- und Sektor 0 IST der Kopfsatz. Im ersten Lauf ging alles
+// (der Schluessel lag im Speicher, der Baum entstand), beim Neustart
+// stand an Sektor 0 Geheimtext des Superblocks statt "OSUMCRYPT", und
+// `unlock` sagte fehler=1. Die Verschluesselung hatte ihren eigenen
+// Kopf ueberschrieben.
+//
+// `blk.use_at` kann genau das schon, seit Runde INSTALL: es gibt der
+// Wurzel einen VERSATZ auf dem Geraet. Was fuer eine Partition gilt,
+// gilt hier fuer den Kopfsatz -- das Dateisystem faengt bei Sektor 8
+// an, und `blk.read`/`blk.write` rechnen den Versatz dazu. `fs.fi`
+// merkt davon nichts.
+//
+// UND DER TWEAK BLEIBT DER RICHTIGE: `read`/`write` verschluesseln mit
+// der Nummer, die OBEN benutzt wird (der Block des Dateisystems), nicht
+// mit der absoluten auf dem Geraet. Damit ist der Tweak unabhaengig
+// davon, wo der Datenbereich anfaengt.
+fn wurzel_setzen(state: u64, dev: u64, first: u64, count: u64) {
+    blk.use_at(state, dev, first, count)
 }
 
 // ============================================ DIE BEIDEN HEISSEN WEGE
@@ -789,4 +817,143 @@ fn selftest(state: u64) -> bool {
         return false
     }
     return true
+}
+
+// ==================================================================
+// DER ABNAHMELAUF: EIN BEKANNTER BAUM AUF DER VERSCHLUESSELTEN PLATTE
+// ==================================================================
+//
+// Diese zwei Funktionen sind das Messgeraet der Runde, und sie stehen
+// HIER und nicht in einem Ring-3-Programm, weil der Punkt der Messung
+// die Schicht UNTER dem Dateisystem ist: `tree_write` schreibt ganz
+// gewoehnlich ueber `fs.write_at`, und wenn die Verschluesselung
+// stimmt, liegt auf dem Blech Geheimtext, ohne dass eine Zeile von
+// `fs.fi` davon weiss.
+//
+// Der Baum ist mit Absicht BERECHENBAR statt zufaellig: Datei `i`
+// enthaelt `laenge(i)` Oktette nach der Regel `(i * 37 + k * 7 + 3) &
+// 255`. Damit kann der WIRT denselben Baum erzeugen, ohne dass eine
+// Liste von Pruefsummen zwischen zwei Programmen abgeglichen werden
+// muss -- `tools/krypto/run.sh` rechnet dieselbe Regel in Python und
+// haelt die SHA-256 dagegen.
+//
+// WARUM VERSCHIEDENE LAENGEN: 100, 700, 5000 und 40000 Oktette. Die
+// erste passt in einen Block, die zweite ueber zwei, die dritte ueber
+// die direkten Zeiger hinaus, die vierte tief in die indirekten. Eine
+// Verschluesselung, die nur den ersten Block richtig macht, faellt
+// spaetestens bei der dritten auf.
+const TREE_FILES: u64 = 4
+
+fn tree_len(i: u64) -> u64 {
+    if i == 0 {
+        return 100
+    }
+    if i == 1 {
+        return 700
+    }
+    if i == 2 {
+        return 5000
+    }
+    return 40000
+}
+
+// Der Inhalt, Oktett fuer Oktett aus der Regel.
+fn tree_fill(buf: u64, i: u64, n: u64) {
+    var k: u64 = 0
+    while k < n {
+        st8(buf, k, (i * 37 + k * 7 + 3) & 255)
+        k = k + 1
+    }
+}
+
+// Den Pfad `/kN` bauen. Kurze Namen, damit sie in jede Fassung von OFS
+// passen.
+fn tree_path(p: u64, i: u64) {
+    st8(p, 0, 47) // '/'
+    st8(p, 1, 107) // 'k'
+    st8(p, 2, 48 + i) // Ziffer
+    st8(p, 3, 0)
+}
+
+// Schreiben. Gibt die Zahl der Dateien, die wirklich entstanden sind.
+fn tree_write(state: u64) -> u64 {
+    // Der Puffer kommt aus dem eigenen Bereich: 40000 Oktette passen
+    // nicht auf den Kernstapel.
+    let buf: u64 = g(state, kstate.CRY_ARGMEM)
+    if buf == 0 {
+        return 0
+    }
+    var done: u64 = 0
+    var i: u64 = 0
+    while i < TREE_FILES {
+        var path: [u8; 8] = [0 as u8; 8]
+        tree_path((&path[0]) as u64, i)
+        let n: u64 = tree_len(i)
+        tree_fill(buf, i, n)
+        let ino: u64 = fs.create_path(state, (&path[0]) as u64, fs.T_FILE)
+        if ino != 0 {
+            if fs.write_at(state, ino, 0, buf, n) == n {
+                done = done + 1
+            }
+        }
+        i = i + 1
+    }
+    return done
+}
+
+// Nachlesen und die SHA-256 je Datei ausgeben. Das ist die Zusage:
+// nicht "es sieht richtig aus", sondern Oktett fuer Oktett dasselbe.
+fn tree_check(state: u64) -> u64 {
+    let buf: u64 = g(state, kstate.CRY_ARGMEM)
+    if buf == 0 {
+        return 0
+    }
+    var good: u64 = 0
+    var i: u64 = 0
+    while i < TREE_FILES {
+        var path: [u8; 8] = [0 as u8; 8]
+        tree_path((&path[0]) as u64, i)
+        let n: u64 = tree_len(i)
+        let ino: u64 = fs.path(state, (&path[0]) as u64)
+        var ok: bool = false
+        if ino != 0 {
+            if fs.read_at(state, ino, 0, buf, n) == n {
+                ok = true
+            }
+        }
+        var sum: [u8; 32] = [0 as u8; 32]
+        if ok {
+            sha256.hash(buf, n as usize, (&sum[0]) as u64)
+        }
+        var s_k: [u8; 12] = "krypto: sha\0"
+        serial.puts((&s_k[0]) as u64)
+        serial.put(32 as u8)
+        serial.put((48 + i) as u8)
+        serial.put(32 as u8)
+        serial.put(61 as u8)
+        serial.put(32 as u8)
+        if ok {
+            // ZWEI HEXZIFFERN JE OKTETT, ohne `0x`. `serial.hex_width`
+            // setzt ein `0x` davor und macht aus einer Pruefsumme
+            // 32 einzelne Zahlen statt einer Kette -- der Wirt soll
+            // sie mit `sha256sum` vergleichen koennen, ohne vorher
+            // 32 Praefixe wegzuschneiden.
+            let hx: [u8; 16] = [48, 49, 50, 51, 52, 53, 54, 55,
+                56, 57, 97, 98, 99, 100, 101, 102]
+            var j: u64 = 0
+            while j < 32 {
+                let v: u64 = ld8((&sum[0]) as u64, j)
+                serial.put(hx[(v >> 4) as usize])
+                serial.put(hx[(v & 15) as usize])
+                j = j + 1
+            }
+            good = good + 1
+        } else {
+            var s_no: [u8; 5] = "FAIL\0"
+            serial.puts((&s_no[0]) as u64)
+        }
+        serial.nl()
+        i = i + 1
+    }
+    return good
 }
