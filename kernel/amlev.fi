@@ -40,13 +40,17 @@ export {
     budget_set, budget_left, depth_reset, stack_base, stack_high,
     depth_high, stack_clear,
     seen_mark, seen_get, seen_ext, seen_ext_mark, notifies,
+    not_count, not_node, not_code, not_clear,
     FRAME_BYTES, DEPTH_MAX, CALL_MAX
 }
 
 // --------------------------------------------- die Plaetze in `kdata`
 //
-// `amlns.fi` benutzt 0..55, diese Datei 56 aufwaerts. Sie stehen in
-// EINER Seite; wer eine dazunimmt, traegt sie hier ein.
+// `amlns.fi` benutzt 0..55, diese Datei 56..191, `aml.fi` ab 192
+// (Routentafel 512..2560). Sie stehen in EINER Seite; wer eine
+// dazunimmt, traegt sie hier ein. RUNDE ACPI-EREIGNISSE nimmt
+// zusaetzlich 2560..2816 fuer den Notify-Ring -- HINTER der
+// Routentafel, siehe die Begruendung dort.
 
 const A_DEPTH: u64 = 56
 const A_CALLS: u64 = 64
@@ -59,6 +63,38 @@ const A_DEPTHHI: u64 = 112 // tiefste erreichte Verschachtelung // wie tief der 
 
 const A_OPS: u64 = 128 // 4 Woerter: welche der 256 Opcodes vorkamen
 const A_EXT: u64 = 168 // 3 Woerter: dasselbe fuer 0x5B 0x00..0x8F
+
+// RUNDE ACPI-EREIGNISSE: WAS `Notify` GEMELDET HAT, und nicht nur
+// WIE OFT.
+//
+// Bis hierher hat `ev_notify` einen Zaehler hochgesetzt und beide
+// Argumente weggeworfen. Fuer `_PRT` reichte das -- dort kommt gar
+// kein `Notify` vor. Fuer die Ereignisse IST es die Meldung: die
+// GPE-Methode `_L1B` der Firmware tut nichts anderes, als
+// `Notify(\_SB.BAT0, 0x80)` auszufuehren, und genau daran erkennt der
+// Kern, WELCHES Geraet sich gemeldet hat und WAS es sagen will
+// (0x80 = der Zustand hat sich geaendert, 0x81 = die Beschreibung).
+//
+// Ein RING, kein einzelner Platz: eine einzige GPE-Methode darf
+// mehrere `Notify` hintereinander absetzen (`_L1B` oben meldet den
+// Akku zweimal und das Netzteil einmal), und wer nur den letzten
+// behaelt, verliert die anderen zwei.
+// WO DER RING LIEGT, und warum nicht bei 192.
+//
+// Die Seite `kstate.AML_OFF` ist unter drei Dateien aufgeteilt:
+// `amlns.fi` 0..55, `amlev.fi` 56..191, `aml.fi` ab 192 -- und dessen
+// Routentafel steht auf 512 und ist 128 * 16 = 2048 Oktette lang, geht
+// also bis 2560. Ein Ring auf 200 haette MITTEN in die Skalare von
+// `aml.fi` geschrieben (A_PRTOK, A_ROUTEN, A_READY ...). Das ist
+// derselbe Fehler wie die Seitenkollisionen in `kstate.fi`, nur eine
+// Ebene tiefer, und er faellt nicht auf, weil kein Werkzeug die
+// Aufteilung INNERHALB einer Seite nachrechnet.
+//
+// Der Ring liegt deshalb hinter der Routentafel: 2560..2816. Die Seite
+// ist 4096 Oktette gross (kstate.AML_MAX), es bleiben 1280 frei.
+const A_NOTN: u64 = 2560 // wie viele im Ring stehen
+const A_NOTR: u64 = 2568 // NOT_MAX * 16: Knoten, dann Code
+const NOT_MAX: u64 = 16
 
 const DEPTH_MAX: u64 = 32
 const CALL_MAX: u64 = 8
@@ -876,6 +912,38 @@ fn ev_sizeof(state: u64, f: u64, p: u64, dst: u64, c: u64) -> u64 {
     return q
 }
 
+// RUNDE ACPI-EREIGNISSE: der Ring der Meldungen.
+//
+// `not_clear` VOR dem Ausfuehren einer GPE-Methode, danach `not_count`
+// und `not_node`/`not_code` je Eintrag -- so erfaehrt der Kern, was
+// die Firmware gemeldet hat.
+
+fn not_clear(state: u64) {
+    s(state, A_NOTN, 0)
+}
+
+fn not_count(state: u64) -> u64 {
+    var n: u64 = g(state, A_NOTN)
+    if n > NOT_MAX {
+        n = NOT_MAX
+    }
+    return n
+}
+
+fn not_node(state: u64, i: u64) -> u64 {
+    if i >= NOT_MAX {
+        return amlns.NONE
+    }
+    return g(state, A_NOTR + i * 16)
+}
+
+fn not_code(state: u64, i: u64) -> u64 {
+    if i >= NOT_MAX {
+        return 0
+    }
+    return g(state, A_NOTR + i * 16 + 8)
+}
+
 fn ev_notify(state: u64, f: u64, p: u64) -> u64 {
     var a: [u64; 3] = [0 as u64; 3]
     var b: [u64; 3] = [0 as u64; 3]
@@ -888,6 +956,27 @@ fn ev_notify(state: u64, f: u64, p: u64) -> u64 {
         return 0
     }
     s(state, A_NOTIFY, g(state, A_NOTIFY) + 1)
+
+    // WELCHES Geraet und WELCHER Code. Das erste Argument ist ein
+    // Verweis auf einen Knoten (`Notify(\_SB.LID0, 0x80)`); steht dort
+    // etwas anderes, wird der Eintrag mit NONE abgelegt und der Code
+    // trotzdem gemerkt -- eine Meldung, die der Kern nicht zuordnen
+    // kann, ist immer noch eine Meldung.
+    var node: u64 = amlns.NONE
+    if amlobj.otype((&a[0]) as u64) == amlobj.OT_REF_NODE {
+        node = amlobj.ov1((&a[0]) as u64)
+    }
+    deref(state, (&b[0]) as u64)
+    let code: u64 = amlobj.to_int((&b[0]) as u64)
+    let n: u64 = g(state, A_NOTN)
+    if n < NOT_MAX {
+        s(state, A_NOTR + n * 16, node)
+        s(state, A_NOTR + n * 16 + 8, code)
+    }
+    // WEITERZAEHLEN, AUCH WENN DER RING VOLL IST. `not_count` deckelt
+    // beim Lesen; so steht in `A_NOTN` die WAHRE Zahl und ein
+    // Ueberlauf faellt in der Abnahme auf, statt still zu verschwinden.
+    s(state, A_NOTN, n + 1)
     return q
 }
 

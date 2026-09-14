@@ -56,7 +56,10 @@ import amlev
 
 export {
     stage, dump, ready, gsi_for, gsi_or_line, why, route_count,
-    node_count, heap_bytes, parse_us, prt_ok
+    node_count, heap_bytes, parse_us, prt_ok,
+    // RUNDE ACPI-EREIGNISSE: den Namensraum HALTEN statt verwerfen,
+    // und einen einzelnen Knoten auswerten.
+    ns_hold, ns_arena, eval_node, ns_bytes
 }
 
 // ------------------------------------------- die Plaetze in `kdata`
@@ -91,6 +94,11 @@ const A_LINKS: u64 = 304 // 12 * 16 = 192 Oktette, bis 496
 //  aber nur zwoelf Eintraege sind moeglich und QEMU braucht fuenf;
 //  damit sich nichts ueberschneidet, endet er bei 472.)
 const LINK_MAX: u64 = 10
+
+// RUNDE ACPI-EREIGNISSE: der Rahmenlauf, den `ns_hold` BEHAELT.
+// 0 = keiner (dann ist der Namensraum weg, wie vor dieser Runde).
+const A_HOLD: u64 = 496
+const A_HOLDB: u64 = 504 // was er kostet, in Oktetten
 
 const A_ROUTES: u64 = 512
 const ROUTE_BYTES: u64 = 16
@@ -1239,6 +1247,100 @@ fn report_devices(state: u64) {
         }
         i = i + 1
     }
+}
+
+// ==================================================================
+// RUNDE ACPI-EREIGNISSE: DEN NAMENSRAUM HALTEN
+// ==================================================================
+//
+// `stage` baut den Namensraum, wertet `_PRT` aus und WIRFT IHN WEG --
+// 256 KiB fuer eine Routentafel von vier Kilooktetten zu behalten
+// waere ein Leck mit Ansage, und fuer `_PRT` wird er nie wieder
+// gebraucht.
+//
+// Fuer die Ereignisse wird er gebraucht, und zwar dauernd: `_LID` und
+// `_BST` sind METHODEN, die bei jedem Deckelklappen und jedem
+// Akkuereignis neu laufen. Ohne Namensraum kein `_LID`.
+//
+// DIE ENTSCHEIDUNG, und sie ist eine Abwaegung und keine Selbst-
+// verstaendlichkeit: der Namensraum wird NUR GEHALTEN, WENN ES ETWAS
+// ZU HALTEN GIBT. `ns_hold` baut ihn auf, `acpiev.stage` sieht nach,
+// ob es einen Deckel, einen Akku, eine Taste oder eine GPE-Methode
+// gibt -- und wenn nicht, gibt `ns_drop` alles zurueck. Ein Server
+// ohne Deckel und ohne Akku zahlt damit kein Oktett, ein Laptop
+// bekommt volle Ereignisse. Gemessen wird beides
+// (`tools/acpiev/run.sh`, Abschnitt "was der Namensraum kostet").
+//
+// Der zweite Aufbau kostet das, was der erste gekostet hat -- bei
+// QEMU 1358 us. Das ist einmal beim Start und nicht bei jedem
+// Ereignis; ihn stattdessen aus `stage` heraus zu behalten waere
+// schneller, wuerde aber bedeuten, dass `stage` die Entscheidung
+// trifft, bevor irgendwer weiss, ob es Ereignisgeraete gibt.
+
+fn ns_arena(state: u64) -> u64 {
+    return g(state, A_HOLD)
+}
+
+fn ns_bytes(state: u64) -> u64 {
+    return g(state, A_HOLDB)
+}
+
+// Den Namensraum ein zweites Mal aufbauen und BEHALTEN. Gibt den
+// Rahmenlauf zurueck, oder 0.
+fn ns_hold(state: u64) -> u64 {
+    if g(state, A_HOLD) != 0 {
+        return g(state, A_HOLD)
+    }
+    if kstate.mode_on(state, kstate.M_NOAML) {
+        return 0
+    }
+    amlev.stack_base(state)
+    let run: u64 = arena_get(state)
+    if run == 0 {
+        return 0
+    }
+    load_all(state, false)
+    if amlns.err(state) != amlns.ERR_OK {
+        arena_put(state, run)
+        return 0
+    }
+    s(state, A_HOLD, run)
+    s(state, A_HOLDB, amlns.ARENA_FRAMES * 4096)
+    return run
+}
+
+// Ihn doch wieder hergeben. `acpiev.stage` ruft das, wenn es auf
+// dieser Maschine nichts zu behandeln gibt.
+fn ns_drop(state: u64) {
+    let run: u64 = g(state, A_HOLD)
+    if run == 0 {
+        return
+    }
+    arena_put(state, run)
+    s(state, A_HOLD, 0)
+    s(state, A_HOLDB, 0)
+}
+
+// EINEN KNOTEN AUSWERTEN. Fuer `_LID`, `_BST`, `_BIF`, `_PSR` und die
+// GPE-Methoden: ist es eine Methode, wird sie ohne Argumente
+// aufgerufen; ist es ein `Name`, wird sein Wert genommen.
+//
+// Das ist `call0` mit einem oeffentlichen Namen und einem Unterschied:
+// der Schrittvorrat wird VOR JEDEM AUFRUF neu gesetzt. Ohne das waere
+// nach ein paar hundert Deckelklappen der Vorrat aufgebraucht und
+// `_LID` gaebe stillschweigend nichts mehr zurueck.
+fn eval_node(state: u64, node: u64, dst: u64) -> bool {
+    if node == amlns.NONE || node == 0 {
+        return false
+    }
+    if g(state, A_HOLD) == 0 {
+        return false
+    }
+    amlev.budget_set(state, BUDGET)
+    amlev.depth_reset(state)
+    amlev.stack_base(state)
+    amlns.err_set(state, amlns.ERR_OK)
+    return call0(state, node, dst)
 }
 
 fn stage(state: u64) {

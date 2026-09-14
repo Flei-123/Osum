@@ -258,6 +258,9 @@ BEREICHE = [
     # Gebrauch dorthin zurueck. Hier steht nur, was ihn ueberlebt --
     # die Routentafel Steckplatz/Stift -> GSI.
     ("AML",        "kstate.fi", "AML_OFF",        "AML_MAX"),
+    # RUNDE ACPI-EREIGNISSE: eine eigene Seite hinter dem
+    # Interpreter, siehe die Begruendung in kstate.fi.
+    ("ACPIEV",     "kstate.fi", "ACPIEV_OFF",     "ACPIEV_MAX"),
     # RUNDE DISPLAY: der Modustreiber.  Zwei Seiten aus demselben Vorrat
     # (0x5A000 und 0x5B000) -- die Modusliste samt Skalaren und die
     # Nachschlagetabelle fuer Gamma/Helligkeit/Kontrast/Saettigung samt
