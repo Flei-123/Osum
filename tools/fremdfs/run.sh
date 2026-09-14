@@ -150,8 +150,11 @@ fi
 for f in ext4 ntfs; do
     zahl() { grep -aE "^const $1: u64 = " "kernel/$f.fi" | head -1 \
         | sed -E 's/.*= *//; s/ *\/\/.*//'; }
-    no=$(zahl NODE_OFF); nb=$(zahl NODE_BYTES); mn=$(zahl MAX_NODES)
-    if [ "$f" = ext4 ]; then pb=$(zahl BLKBUF); else pb=$(zahl MFTBUF); fi
+    # `$(( ))` versteht 0x-Zahlen, `[ -le ]` NICHT -- deshalb werden
+    # beide Seiten erst durch die Arithmetik geschickt.
+    no=$(( $(zahl NODE_OFF) )); nb=$(( $(zahl NODE_BYTES) ))
+    mn=$(( $(zahl MAX_NODES) ))
+    if [ "$f" = ext4 ]; then pb=$(( $(zahl BLKBUF) )); else pb=$(( $(zahl MFTBUF) )); fi
     ende=$(( no + nb * mn ))
     if [ "$ende" -le "$pb" ]; then
         ok "$f.fi: die Knotentafel endet bei $(printf '0x%X' $ende), der Puffer beginnt bei $(printf '0x%X' $pb)"
@@ -322,13 +325,21 @@ durchgang() { # name abbild art erwartet_verweise(0/1)
     # Wurzel; NTFS hat weder das eine noch das andere.
     local ist_wurzel
     ist_wurzel=$(wert "$D" wurzel)
+    # DIE ZAHL IST FUER BEIDE ANDERS, UND ZWAR AUS EINEM GRUND, DER IM
+    # DATEISYSTEM LIEGT UND NICHT IM TREIBER:
+    #
+    #   ext4: der Baum PLUS `lost+found` (legt `mkfs.ext4` an) PLUS die
+    #         zwei symbolischen Verweise, die es nur hier gibt.
+    #   NTFS: GENAU der Baum. Die Systemdateien ($MFT, $Boot, ...) sind
+    #         echte Indexeintraege, werden aber uebergangen -- so wie
+    #         Windows und ntfs-3g es tun (siehe MFT_ERSTE_FREIE in
+    #         kernel/ntfs.fi). Verweise legt `ntfsbaum.c` keine an.
     if [ "$art" = ext4 ]; then
-        # 7 aus dem Baum + lost+found + verweis.txt + langverweis.txt
         num "[$name] die Wurzel hat alle Eintraege" "${ist_wurzel:-0}" ge \
             $(( soll_wurzel + 1 ))
     else
-        num "[$name] die Wurzel hat alle Eintraege" "${ist_wurzel:-0}" ge \
-            "$soll_wurzel"
+        gleich "[$name] die Wurzel hat GENAU die Eintraege des Baums (ohne die Systemdateien von NTFS)" \
+            "$soll_wurzel" "${ist_wurzel:-0}"
     fi
     sagt "$D" viele "$soll_viele" "[$name] /viele zeigt ALLE $soll_viele Eintraege"
     sagt "$D" tief 1 "[$name] das tiefste Verzeichnis hat einen Eintrag"
