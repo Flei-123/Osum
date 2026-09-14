@@ -256,12 +256,15 @@ wmplug: unreg boese grund=1 holte=0 verlor=0
 Mit `plugfrist` (Frist 3 Ticks = 30 ms statt der Vorgabe 50 Ticks =
 500 ms), damit der Lauf nicht wartet.
 
+Aus dem Abnahmelauf vom 14.09.2026 (KVM, Exitcode 21, dieselben Zeilen
+prueft `tools/wmplug/run.sh` Abschnitt 5 nach):
+
 ```
-tempo: vor bilder=60 ticks=300 us=363 min=345 max=439 proben=60 fps10=200
+tempo: vor bilder=60 ticks=300 us=355 min=345 max=422 proben=60 fps10=200
 plugboese: platz=0 rechte=31
 plugboese: ab jetzt hole ich nichts
 wmplug: unreg boese grund=2 holte=0 verlor=0
-tempo: nach bilder=60 ticks=600 us=366 min=344 max=434 proben=60 fps10=100
+tempo: nach bilder=60 ticks=600 us=387 min=345 max=637 proben=60 fps10=100
 tempo: haenger pid=7 lebt=1
 ```
 
@@ -276,8 +279,10 @@ tempo: haenger pid=7 lebt=1
   Lebensnachweis per `kill(pid, 0)`: der Haenger lief noch, als das
   zweite Fenster zu war. Ohne diese Zeile koennte das zweite Fenster
   nach dem Haenger gemessen sein und belegte nichts.
-* **Die Bildzeit des Servers bleibt: 363 us → 366 us (+0,8 %).** Das
-  ist die Zahl, an der "der Kern verliert keine Bildrate" haengt, und
+* **Die Bildzeit des Servers bleibt: 355 us → 387 us (+9 %).** Zwei
+  weitere Laeufe desselben Abbilds: 363 → 366 us und 373 → 367 us —
+  der Unterschied liegt in beiden Richtungen und damit im Rauschen der
+  Maschine. Das ist die Zahl, an der "der Kern verliert keine Bildrate" haengt, und
   sie wird im Laeufer streng geprueft (hoechstens das Doppelte).
 * **Die Bildrate der Messung halbiert sich: fps10 200 → 100, und das
   liegt nicht am Kern.** Gegenprobe im selben Aufbau mit `ohne` (kein
@@ -530,8 +535,8 @@ Nachbesserung faehrt `/bin/plugtempo` im Haengerlauf mit und misst
 Gegenprobe ohne Haenger stehen in **Abschnitt 5b**:
 
 ```
-tempo: vor  ... us=363 ... fps10=200      <- vor dem Haenger
-tempo: nach ... us=366 ... fps10=100      <- waehrend des Haengers
+tempo: vor  ... us=355 ... fps10=200      <- vor dem Haenger
+tempo: nach ... us=387 ... fps10=100      <- waehrend des Haengers
 tempo: haenger pid=7 lebt=1               <- er lief dabei noch
 ```
 
