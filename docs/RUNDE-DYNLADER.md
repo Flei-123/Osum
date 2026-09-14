@@ -211,10 +211,143 @@ Programmkoepfe nach dem Laden liegen. Die findet man nur, indem man das
 
 ## 5. Messwerte
 
-*(wird im Lauf der Runde gefuellt)*
+Alles in diesem Abschnitt ist aus einem Lauf abgeschrieben, nicht
+gerechnet. QEMU mit `-accel kvm -cpu host`, Kern aus diesem Zweig,
+Abnahme `tools/dynlader/run.sh`.
+
+### 5.1 Der Lauf, der die Runde entscheidet
+
+```
+elf: start 3   entry=0x401000e8  ustack=0x4007f000  bytes=305652  pages=88
+elf: interp    /lib/ld-musl-x86_64.so.1
+elf: start 4   entry=0x40a777ee  ustack=0x4007e000  bytes=696140  pages=175
+hallo dynamisch
+```
+
+Drei Zahlen sagen, dass es wirklich der dynamische Weg war:
+
+* **`entry=0x40a777ee`** ist der Einsprung des INTERPRETERS, nicht des
+  Programms: `ld-musl` hat `e_entry = 0x777ee`, dazu `INTERP_BASE`
+  0x40A00000. Der Kern springt in den Lader; das Programm erfaehrt
+  dieser ueber `AT_ENTRY`.
+* **`ustack=0x4007e000`** ist der neue System-V-Stapel (`SP_PAGE`) und
+  nicht `ARGS_BASE` (0x4007f000), den ein Osum-Programm bekommt.
+* **zwei `elf: start`-Zeilen** fuer EINEN Befehl: erst die Shell, dann
+  das Programm samt Lader, 175 Seiten statt 88.
+
+### 5.2 Wo die beiden Bilder liegen
+
+```
+Hauptbild (hello_dyn, ET_DYN, auf PIE_BASE geschoben)
+  seg 4  v=0x40100000  filesz=1208    memsz=1208    w=0 x=0
+  seg 5  v=0x40101000  filesz=364     memsz=364     w=0 x=1
+  seg 4  v=0x40102000  filesz=132     memsz=132     w=0 x=0
+  seg 6  v=0x40103e00  filesz=536     memsz=544     w=1 x=0
+
+Interpreter (ld-musl-x86_64.so.1, auf INTERP_BASE)
+  seg 4  v=0x40a00000  filesz=83480   memsz=83480   w=0 x=0
+  seg 5  v=0x40a15000  filesz=403460  memsz=403460  w=0 x=1
+  seg 4  v=0x40a78000  filesz=206908  memsz=206908  w=0 x=0
+  seg 6  v=0x40aabb20  filesz=2292    memsz=13376   w=1 x=0
+```
+
+Die beiden letzten Zeilen jeder Gruppe sind die, um die es in
+Abschnitt 2 ging: `0x40103e00` und `0x40aabb20` sind NICHT
+seitenausgerichtet. Vor dieser Runde waere an dieser Stelle `R_ALIGN`
+gestanden und nichts gelaufen.
+
+### 5.3 Die Messlatte
+
+| Stufe | Inhalt | Ergebnis |
+|---|---|---|
+| **1** | eigenes `hello.c`, dynamisch, PT_INTERP | **GEFALLEN** -- `hallo dynamisch`, Ende 0 |
+| **2** | dynamisch gelinktes busybox | **GEFALLEN** -- laeuft, Applets antworten wie auf dem Wirt |
+| **3** | `dlopen`/`dlsym` | **GEFALLEN** -- `dlsym ok` |
+
+Stufe 3 kostete keine einzige zusaetzliche Zeile: `ld-musl-x86_64.so.1`
+IST `libc.so`, also bringt der Interpreter `dlopen`/`dlsym` mit, sobald
+er ueberhaupt laeuft. Das ist der Ertrag der Entscheidung aus
+Abschnitt 0 -- ein eigener Lader haette beides einzeln nachbauen
+muessen.
+
+### 5.4 Die Tabelle "fehlende Syscalls"
+
+**Sie ist leer.** Kein einziger Systemaufruf wurde in dieser Runde
+ergaenzt. Die vollstaendige Liste dessen, was der Lader verlangt, steht
+in Abschnitt 1; der Kern kannte jede Nummer davon schon aus den Runden
+LAUFZEIT und FREMDLAND. Die Arbeit lag im Lader und im Startstapel.
+
+### 5.5 Die Gegenproben
+
+| Fall | Erwartung | Ergebnis |
+|---|---|---|
+| `PT_INTERP` zeigt auf `/lib/gibtesnicht.so` | sauberer Fehler, kein Haenger | Grund 26 `interpreter missing`, Maschine laeuft weiter |
+| Interpreter hat selbst `PT_INTERP` | abgewiesen | Grund 27 `interpreter chained` |
+| die statisch gebundenen Programme | unveraendert | laufen weiter |
+| Textkonstanten in `elf.fi` | so lang wie ihr Feld | 47 geprueft, 0 falsch |
 
 ---
 
-## 6. Offene Punkte
+## 6. Was diese Runde gekostet hat, das nicht im Plan stand
 
-*(wird im Lauf der Runde gefuellt)*
+Vier Fehler, und keiner davon war durch Nachdenken zu finden -- alle
+vier kamen erst beim Messen heraus. Sie stehen hier, weil die naechste
+Runde sie sonst noch einmal macht.
+
+1. **`firnc1` bricht STILL ab, wenn eine Zeichenkette laenger ist als
+   ihr Feld.** Rueckgabewert 1, leeres stderr, keine Ausgabedatei. Hier
+   war es `var t25: [u8; 20] = "bad PT_INTERP path\0"` -- 19 Oktette in
+   einem Feld von 20. Gefunden durch Halbierung ueber den ganzen Kern,
+   weil es keine Meldung gibt, an der man haette anfangen koennen.
+   `tools/dynlader/run.sh` Abschnitt 1 prueft das jetzt als eigene
+   Zusage.
+
+2. **`R_OK` ist 0 -- und "kein PT_INTERP" war es auch.** Zwei Zustaende
+   auf demselben Wort: `read_interp` meldete "das Bild braucht keinen
+   Lader" mit derselben Zahl wie "der Pfad steht bereit". Damit hielt
+   der Aufrufer jedes Bild fuer eines mit Lader. Behoben mit einem
+   eigenen Wert `R_KEINER`.
+
+3. **`say_segment` druckte die DATEI statt des SYSTEMS.** Sie nahm
+   `p_vaddr` roh und fragte die Seitentabelle dort -- bei einem
+   verschobenen Bild also an einer Adresse, an der nichts liegt. Die
+   Meldung sagte `v=0x0 f=0x0` und sah aus wie ein Fehler des Laders,
+   waehrend alles richtig lag.
+
+4. **`as u8` auf einer Rechnung ist unter `profile kernel` ein
+   Panik-Pfad.** Die sechzehn Oktette fuer `AT_RANDOM` entstehen aus
+   Uhr und Aufgabenindex; ohne `& 255` endete der Lauf mit
+   `panic: integer overflow casting 'u64 as u8'` -- und zwar erst,
+   nachdem beide Bilder schon korrekt lagen.
+
+Ein fuenfter Punkt betraf nicht den Kern, sondern die Abnahme selbst
+und ist trotzdem der lehrreichste: die ersten Zusagen fuer `busybox
+echo` und `busybox grep` galten als BESTANDEN, waehrend der Lader in
+Wahrheit noch mit Grund 1 abbrach. Der Kern druckt beim Start seine
+eigene Kommandozeile (`mb: flags=... script=busybox echo hallo-echo`),
+und die enthielt den gesuchten Text woertlich. Eine Zusage, die auch
+ohne das Programm haelt, misst das Programm nicht -- `run.sh` schneidet
+diese Zeile jetzt weg, bevor verglichen wird.
+
+---
+
+## 7. Offene Punkte
+
+* **Eine geteilte Seite bekommt die Rechte des ERSTEN Segments.** Bei
+  musl trifft das genau die Naht zwischen `rodata` und `data`; die
+  Seite bleibt lesbar statt schreibbar zu werden. Ein Programm, das in
+  diese eine Seite schreiben muesste, liefe hier nicht. Der saubere Weg
+  waere, die geteilte Seite mit der VEREINIGUNG beider Rechte zu legen
+  -- das widerspricht aber Regel 3 dieser Datei und gehoert deshalb in
+  eine eigene Runde mit eigener Gegenprobe.
+* **`mprotect` antwortet weiterhin 0, ohne etwas zu tun** (Befund aus
+  FREMDLAND, unveraendert). Fuer musls RELRO heisst das: der Bereich
+  wird nicht wirklich schreibgeschuetzt. Das ist eine Haertungsluecke,
+  keine Funktionsluecke.
+* **`INTERP_BASE` ist fest.** Ein zweiter Interpreter im selben
+  Adressraum ginge nicht; fuer `dlopen` auf eine FREMDE Bibliothek
+  (nicht `dlopen(0)`) braeuchte es eine echte Vergabe von Basen.
+* **Nur `MAP_ANONYMOUS`.** Ein `dlopen` auf eine Datei wuerde
+  `mmap` mit Deskriptor verlangen, und das gibt es hier nur fuer
+  `/dev/fb`. Deshalb misst Stufe 3 `dlopen(0)` und nicht `dlopen("...")`
+  -- was gemessen wurde, ist genau das, was zugesagt wird.
