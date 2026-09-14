@@ -167,8 +167,20 @@ sagen "kern        $(stat -c%s "$OUT/osum.mb") Oktette"
 #
 # `/bin/settings` LAG im Abbild; der Einstellungsknopf hat deshalb eine
 # andere Ursache und wird getrennt behandelt.
+# RUNDE INSTALLER (P-001): `installer` MUSS HIER STEHEN.
+#
+# Dieselbe Falle wie bei `taskmgr` in Runde ECHTHARDWARE-5 und bei
+# `settings` in Runde TUERSCHLOSS: das Programm ist gebaut, das
+# Buendel liegt unter assets/apps/ -- und wenn der Name hier fehlt,
+# ist es trotzdem nicht auf dem Stick. Der Starter zeigt dann einen
+# Eintrag, dessen Programm es nicht gibt, und `SYS_EXEC` schlaegt
+# STILL fehl: es sieht aus, als reagiere der Knopf nicht.
+#
+# Und ausgerechnet dieses Programm darf nicht fehlen -- es ist der
+# einzige Weg vom Stick auf eine Platte, und ein Stick, der sich
+# nicht installieren laesst, bleibt ein Vorfuehrstueck.
 PROGS=${PROGS:-"desktop taskbar settings launcher explorer netview \
-widgetdemo taskmgr locate edit sh echo ls cat ps uname date df mkdir rm cp mv \
+widgetdemo taskmgr installer locate edit sh echo ls cat ps uname date df mkdir rm cp mv \
 grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
 dhcp host ota jsig jarvisctl pollbr reboot shutdown power fas"}
@@ -834,7 +846,9 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /apps/explorer.osp/start /apps/editor.osp/start /apps/terminal.osp/start \
 /apps/launcher.osp/start /apps/widgets.osp/start /apps/settings.osp/start \
 /apps/settings.osp/INFO /apps/settings.osp/symbol \
-/bin/shutdown /bin/power /bin/firnc /bin/fas /beispiel/hallo.fi"
+/bin/shutdown /bin/power /bin/firnc /bin/fas /beispiel/hallo.fi \
+/bin/installer /apps/installer.osp/start /apps/installer.osp/INFO \
+/apps/installer.osp/symbol"
 python3 tools/osum/mkfs.py list "$OUT/root.img" > "$OUT/liste.txt" 2>&1 \
     || fehler "das fertige Dateisystem laesst sich nicht lesen"
 fehlt=0
