@@ -257,15 +257,39 @@ Mit `plugfrist` (Frist 3 Ticks = 30 ms statt der Vorgabe 50 Ticks =
 500 ms), damit der Lauf nicht wartet.
 
 ```
+tempo: vor bilder=60 ticks=300 us=363 min=345 max=439 proben=60 fps10=200
 plugboese: platz=0 rechte=31
 plugboese: ab jetzt hole ich nichts
 wmplug: unreg boese grund=2 holte=0 verlor=0
+tempo: nach bilder=60 ticks=600 us=366 min=344 max=434 proben=60 fps10=100
+tempo: haenger pid=7 lebt=1
 ```
 
 * `grund=2` = `G_FRIST`. Das Plugin ist abgemeldet, **holte=0**.
-* **Keine Bildrate verloren:** Zusammensetzerrunden im Haengerlauf
-  **165** gegen **163** im Absturzlauf — derselbe Kernel, dasselbe
-  Abbild.
+* **Das Tempo wird seit der Nachbesserung IM SELBEN LAUF gemessen.**
+  Vorher standen hier die `comp=`-Zahlen zweier Laeufe (165 gegen 163)
+  — zwei Kaltstarts, zwei verschiedene Programme, zwei Lasten. Jetzt
+  faehrt `/bin/plugtempo` im Haengerlauf mit: 60 Bilder **vor** dem
+  Haenger, dann startet es `/bin/plugboese hang`, dann 60 Bilder
+  **waehrend** des Haengers — eine Maschine, ein Lastfenster, zwei
+  vergleichbare Zahlen. `tempo: haenger pid=7 lebt=1` ist der
+  Lebensnachweis per `kill(pid, 0)`: der Haenger lief noch, als das
+  zweite Fenster zu war. Ohne diese Zeile koennte das zweite Fenster
+  nach dem Haenger gemessen sein und belegte nichts.
+* **Die Bildzeit des Servers bleibt: 363 us → 366 us (+0,8 %).** Das
+  ist die Zahl, an der "der Kern verliert keine Bildrate" haengt, und
+  sie wird im Laeufer streng geprueft (hoechstens das Doppelte).
+* **Die Bildrate der Messung halbiert sich: fps10 200 → 100, und das
+  liegt nicht am Kern.** Gegenprobe im selben Aufbau mit `ohne` (kein
+  Haenger gestartet): **200 → 200** bei 377/373 us. Die Bilder
+  entstehen, weil `plugtempo` alle 50 ms in sein Lastfenster malt;
+  neben einem Ring-3-Prozess, der ununterbrochen rechnet, bekommt es
+  nur noch jede zweite Scheibe. Der Planer teilt, wie er soll. **Das
+  ist der Preis der Ring-3-Trennung und er wird hier benannt statt
+  weggerechnet:** ein haengendes Plugin kostet Rechenzeit wie jeder
+  andere durchdrehende Ring-3-Prozess — es kostet den Fensterserver
+  aber keine Arbeit, weil der Kern auf niemanden wartet und den Platz
+  nach der Frist raeumt.
 * **Die Frist ist keine Wartezeit, sondern ein Kehrbesen.** Der Kern
   blockiert an keiner Stelle auf das Plugin; er schaut einmal je Bild
   und einmal je Tick auf acht Plaetze und wirft den hinaus, der
@@ -574,9 +598,16 @@ weil ein Bericht, der nur die gruenen Zeilen zeigt, nichts wert ist.
    0x001 aus `/etc/wmplug.conf` — die wuerden erst durch
    `wmplug enable boese` wirksam. Beide haben **kein** Aktionsbit, die
    Zusage traegt also; gemessen ist aber der groessere Rechtesatz.
-6. **Acht Plaetze und 32 Ereignisse je Ring** sind gesetzt und nicht
-   hergeleitet. Laeuft ein Ring ueber, faellt das aelteste Ereignis
-   heraus und `P_LOST` steigt — sichtbar, aber eben ein Verlust.
+6. **Acht Plaetze und 64 Ereignisse je Ring** (`kernel/wmplug.fi`,
+   `EV_SLOTS = 64`) sind gesetzt und nicht hergeleitet. Hier stand
+   einmal "32"; das war die Zahl des Ereignisrings von `wm.fi`
+   (`EV_SLOTS=32` in der Fenstertafel) und nicht die dieses Moduls —
+   nachgesehen und berichtigt. Laeuft ein Ring ueber, faellt das
+   aelteste Ereignis heraus und `P_LOST` steigt — sichtbar, aber eben
+   ein Verlust.
+7. **`E_DESK` haengt an keinem Bedienweg.** Siehe Abschnitt 11: das
+   Ereignis entsteht ausschliesslich, wenn ein Plugin selbst
+   `PA_DESKGO` ruft. Ein Mensch kann die Flaeche nicht wechseln.
 
 ---
 
@@ -593,6 +624,24 @@ weil ein Bericht, der nur die gruenen Zeilen zeigt, nichts wert ist.
 * **Der Autostart wartet zwei Sekunden**, bevor er die erste Zeile
   ausfuehrt -- ein Plugin bekommt sonst die Ladezeit fremder Programme
   auf seine Frist angerechnet (14.1).
+* **`E_DESK` haengt an keinem Bedienweg — Flaechen existieren nur,
+  solange ein Plugin sie setzt.** Ausdruecklich als Luecke benannt und
+  nicht als Zusage: der Fensterserver kennt keine Arbeitsflaechen (es
+  gibt kein Feld `W_WS` in `kernel/wm.fi`, nachgesehen). Was es gibt,
+  ist die kleine Flaechentafel in `kernel/wmplug.fi` (32 Fenster-Ids,
+  `desk_set`/`desk_of`/`desk_go`) und `desk_anwenden` in
+  `kernel/sysgui.fi`, das daraus `F_HIDDEN` setzt. Ausgeloest wird ein
+  Wechsel aber an genau EINER Stelle: `PA_DESKGO` aus `WM_PLUG_ACT`
+  (`sysgui.fi:2249`) — also durch ein Plugin. Es gibt **kein Kuerzel
+  und kein Leistenelement**, mit dem ein Mensch die Flaeche wechselt,
+  und deshalb auch kein `E_DESK` ohne Plugin. Wer nachmisst, misst
+  `plugregel`, das eine Flaeche setzt und danach `desk_go` ruft; ein
+  Lauf ohne Plugin hat nie ein `E_DESK` auf der Leitung. **Richtig
+  waere ein Wechsel in `wm.fi` (Alt+1..4 im vorhandenen Kuerzelring
+  oder ein Feld in der Leiste), der `wmplug.desk_go` ruft** — dann
+  waere die Flaeche eine Eigenschaft des Schreibtischs und das Plugin
+  nur ein Zuschauer. Solange das fehlt, ist `E_DESK` gebaut, geprueft
+  (Selbsttest von `kernel/wmplug.fi`) und im Alltag ohne Anlass.
 * **Kein Plugin ueberlebt einen Neustart des Fensterservers.** Die Tafel
   ist Hauptspeicher; wer nach `wm: hold` wieder da sein will, muss neu
   gestartet werden.
