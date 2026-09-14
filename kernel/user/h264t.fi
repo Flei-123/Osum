@@ -1,0 +1,164 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/h264t.fi -- Runde CODEC: das Messgeraet im laufenden Kern.
+//
+// Es liest einen rohen Annex-B-Strom (.264), dekodiert ihn mit
+// `h264.fi` und gibt aus, was sich VERGLEICHEN laesst:
+//
+//   h264: profile = <Zahl>      66 = Baseline
+//   h264: w = <Breite>          aus dem SPS, nach dem Beschnitt
+//   h264: h = <Hoehe>
+//   h264: frames = <Zahl>       wieviele Bilder herauskamen
+//   h264: err = <Zahl>          0 = in Ordnung
+//   h264: sha <i> = <hex>       SHA-256 JE BILD ueber Y, dann U, dann V
+//   h264: ms = <Zahl>           die Zeit fuer den ganzen Strom
+//   h264: fps = <Zahl>          Bilder je Sekunde, hundertfach
+//
+// DIE PRUEFSUMME IST DER KERN. Der Wirt rechnet mit ffmpeg dieselbe
+// Datei nach rohem YUV 4:2:0 und daraus dieselbe SHA-256. Stimmen
+// beide, ist das Bild OKTETT FUER OKTETT dasselbe -- das ist eine
+// Aussage und keine Ansicht. "Sieht aehnlich aus" kommt hier nicht vor.
+//
+// JE BILD und nicht ueber den ganzen Strom: weicht eines ab, sagt die
+// Liste sofort, WELCHES. Bei einer Summe ueber alles wuesste man nur,
+// dass irgendwo etwas nicht stimmt.
+
+profile kernel
+
+import ulib
+import h264
+import sha
+
+export { u_start }
+
+const EINGABE: u64 = 1048576      // 1 MiB rohe .264-Daten
+const SYS_CLOCK_GETTIME: u64 = 228
+const CLOCK_MONOTONIC: u64 = 1
+
+static mut daten: [u8; 1048576] = [0 as u8; 1048576]
+static mut summe: [u8; 32] = [0 as u8; 32]
+static mut hexbuf: [u8; 72] = [0 as u8; 72]
+
+fn jetzt_ms() -> u64 {
+    var ts: [u8; 16] = [0 as u8; 16]
+    let r: u64 = ulib.sys(SYS_CLOCK_GETTIME, CLOCK_MONOTONIC,
+        (&ts[(0) as usize]) as u64, 0)
+    if ulib.bad(r) { return 0 }
+    let s: u64 = __mmio_read64(((&ts[(0) as usize]) as u64) as *mut u64)
+    let ns: u64 = __mmio_read64((((&ts[(0) as usize]) as u64) + 8) as *mut u64)
+    return s * 1000 + ns / 1000000
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_use: [u8; 25] = "h264t: h264t <datei.264>\0"
+    var s_open: [u8; 22] = "h264t: nicht lesbar: \0"
+    var s_prof: [u8; 17] = "h264: profile = \0"
+    var s_w: [u8; 11] = "h264: w = \0"
+    var s_h: [u8; 11] = "h264: h = \0"
+    var s_fr: [u8; 16] = "h264: frames = \0"
+    var s_er: [u8; 13] = "h264: err = \0"
+    var s_txt: [u8; 14] = "h264: text = \0"
+    var s_ms: [u8; 12] = "h264: ms = \0"
+    var s_fps: [u8; 13] = "h264: fps = \0"
+    var s_sha: [u8; 11] = "h264: sha \0"
+    var s_gl: [u8; 4] = " = \0"
+
+    let argc: u64 = ulib.arg_count(args)
+    if argc < 2 {
+        ulib.esay_line((&s_use[(0) as usize]) as u64, 0)
+        return 1
+    }
+    let pfad: u64 = ulib.arg_at(args, 1)
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, pfad, 0, 0)
+    if ulib.bad(fd) {
+        ulib.esay_line((&s_open[(0) as usize]) as u64, pfad)
+        return 1
+    }
+    // Die ganze Datei einlesen. `read` darf WENIGER liefern als
+    // verlangt -- deshalb die Schleife und nicht ein Aufruf.
+    var n: u64 = 0
+    var weiter: bool = true
+    while weiter {
+        var will: u64 = 4096
+        if n + will > EINGABE { will = EINGABE - n }
+        if will == 0 { weiter = false }
+        else {
+            let g: u64 = ulib.sys(ulib.SYS_READ, fd,
+                (&daten[(0) as usize]) as u64 + n, will)
+            if g == 0 || ulib.bad(g) { weiter = false }
+            else { n = n + g }
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+
+    let t0: u64 = jetzt_ms()
+    h264.h264_open((&daten[(0) as usize]) as u64, n)
+    var i: u64 = 0
+    while h264.h264_next() {
+        // Die Pruefsumme des Bildes: erst Y, dann U, dann V -- genau
+        // die Reihenfolge, in der ffmpeg rohes yuv420p schreibt.
+        let w: u64 = h264.h264_stride()
+        let hh: u64 = h264.h264_height()
+        let ww: u64 = h264.h264_width()
+        let cw: u64 = h264.h264_cstride()
+        let slot: u64 = h264.h264_cur_slot()
+        sha.begin()
+        // Zeile fuer Zeile, damit der BESCHNITT stimmt: das Bild im
+        // Speicher ist auf ganze Makrobloecke aufgerundet, die Datei
+        // von ffmpeg nicht.
+        var y: u64 = 0
+        while y < hh {
+            sha.update(h264.h264_plane_y(slot) + y * w, ww)
+            y = y + 1
+        }
+        var cy: u64 = 0
+        while cy < hh / 2 {
+            sha.update(h264.h264_plane_u(slot) + cy * cw, ww / 2)
+            cy = cy + 1
+        }
+        var cy2: u64 = 0
+        while cy2 < hh / 2 {
+            sha.update(h264.h264_plane_v(slot) + cy2 * cw, ww / 2)
+            cy2 = cy2 + 1
+        }
+        sha.finish((&summe[(0) as usize]) as u64)
+        sha.hex_out((&summe[(0) as usize]) as u64, 32,
+                    (&hexbuf[(0) as usize]) as u64)
+        ulib.put((&s_sha[(0) as usize]) as u64, 10)
+        ulib.sayn(i)
+        ulib.put((&s_gl[(0) as usize]) as u64, 3)
+        ulib.say((&hexbuf[(0) as usize]) as u64)
+        ulib.nl()
+        i = i + 1
+    }
+    let t1: u64 = jetzt_ms()
+
+    ulib.put((&s_prof[(0) as usize]) as u64, 16)
+    ulib.sayn(h264.h264_profile())
+    ulib.nl()
+    ulib.put((&s_w[(0) as usize]) as u64, 10)
+    ulib.sayn(h264.h264_width())
+    ulib.nl()
+    ulib.put((&s_h[(0) as usize]) as u64, 10)
+    ulib.sayn(h264.h264_height())
+    ulib.nl()
+    ulib.put((&s_fr[(0) as usize]) as u64, 15)
+    ulib.sayn(h264.h264_frames())
+    ulib.nl()
+    ulib.put((&s_er[(0) as usize]) as u64, 12)
+    ulib.sayn(h264.h264_err())
+    ulib.nl()
+    ulib.put((&s_txt[(0) as usize]) as u64, 13)
+    ulib.say(h264.h264_fehlertext())
+    ulib.nl()
+    ulib.put((&s_ms[(0) as usize]) as u64, 11)
+    ulib.sayn(t1 - t0)
+    ulib.nl()
+    // Bilder je Sekunde, hundertfach -- damit auch 2,5 ablesbar ist.
+    var fps: u64 = 0
+    if t1 > t0 { fps = h264.h264_frames() * 100000 / (t1 - t0) }
+    ulib.put((&s_fps[(0) as usize]) as u64, 12)
+    ulib.sayn(fps)
+    ulib.nl()
+    if h264.h264_err() != 0 { return 2 }
+    return 0
+}
