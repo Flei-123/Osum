@@ -134,12 +134,27 @@ grep -q 'AML_OFF' tools/kernel/memmap.py \
     && ok "der Bereich AML_OFF steht in der Speicherkarte" \
     || bad "AML_OFF fehlt in tools/kernel/memmap.py"
 
-# Die Modusbits dieser Runde liegen in Wort 11 (704..767) und nirgends
-# sonst -- am 30.08.2026 laufen mehrere Runden auf demselben Zweigstand.
-fremd=$(grep -rn --include='*.fi' -E '^const M_[A-Z0-9_]+: u64 = 7(0[4-9]|1[0-9])' kernel/ \
-        | grep -vE 'M_(AML|NOAML)' || true)
-[ -z "$fremd" ] && ok "die Modusbits 704..719 gehoeren nur dieser Runde" \
+# DIE MODUSBITS DIESER RUNDE. Sie lagen auf Wort 11 ab Bit 0 (704..712)
+# -- auf dem Zweigstand vom 30.08.2026 war Wort 11 ganz frei. Beim
+# Hereinholen nach main (14.09.2026) stellte sich heraus, dass dort
+# laengst M_ASYNC..M_ASTRESS (Runde ASYNC) und M_MODUL/M_MODULAUS
+# (Runde MODUL) stehen: EIN Wort, ZWEI Bedeutungen, und `aml` auf der
+# Kommandozeile haette den Asynchronweg mitgeschaltet. Die Bits liegen
+# jetzt auf Wort 12 ab Bit 4 (772..780); Bit 0..3 gehoeren dort EHCI
+# und BLK. Diese Pruefung ist der Grund, warum es aufgefallen ist --
+# sie bleibt, nur der Vorrat wandert mit.
+fremd=$(grep -rn --include='*.fi' -E '^const M_[A-Z0-9_]+: u64 = 7(7[2-9]|80)' kernel/ \
+        | grep -vE 'M_(AML|AMLDUMP|NOAML|AMLBAD|AMLLOOP|AMLDEEP|AMLLEAK|AMLPRT|AMLWRONG)' || true)
+[ -z "$fremd" ] && ok "die Modusbits 772..780 gehoeren nur dieser Runde" \
                 || { bad "fremde Modusbits im Vorrat dieser Runde"; echo "$fremd"; }
+
+# UND DIE GEGENPROBE ZUR GEGENPROBE: die Bits, die der Zweig FRUEHER
+# hatte, muessen jetzt jemand anderem gehoeren. Stuende dort nichts,
+# waere die Verschiebung sinnlos gewesen.
+grep -rq --include='*.fi' -E '^const M_ASYNC: u64 = 704' kernel/ \
+    && ok "Wort 11 Bit 0 gehoert wieder Runde ASYNC (M_ASYNC)" \
+    || bad "M_ASYNC steht nicht mehr auf 704 -- die Verschiebung stimmt nicht"
+
 
 # Der Kernstapel steht in boot.s und die Wache in amlev.fi. Die Wache
 # MUSS deutlich unter dem Stapel liegen, sonst schuetzt sie nicht.
