@@ -111,6 +111,7 @@ import hda
 import mix
 import audio
 import aml
+import acpiev
 
 // Indices in the table out of isr.s.
 const V_DF_STACK: u64 = 52
@@ -619,6 +620,22 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // `batt.scan` den billigen Weg (die Konstanten von Hand) schon
     // gegangen ist -- und VOR allem, was Unterbrechungen verteilt.
     aml.stage(state)
+    // RUNDE ACPI-EREIGNISSE: der Weg vom Knopf zum Kern. HINTER
+    // `aml.stage`, weil sie den Namensraum ein zweites Mal aufbaut
+    // und diesmal BEHAELT -- aber nur, wenn es auf dieser Maschine
+    // etwas zu behandeln gibt. Sie traegt auch die SCI-Leitung in
+    // den I/O-APIC ein und schaltet genau die GPE-Bits scharf, fuer
+    // die es eine `_Lxx`-Methode gibt; `hw.blech_stage` hat vorher
+    // ALLE abgeschaltet, und das bleibt fuer alle uebrigen richtig.
+    acpiev.stage(state)
+    if kstate.mode_on(state, kstate.M_EVSELF) {
+        acpiev.selftest(state)
+    }
+    // RUNDE ACPI-EREIGNISSE: der Messlauf. Siehe acpiev.wait_loop --
+    // ohne ihn ist dieser Kern fertig, bevor die Taste gedrueckt ist.
+    if kstate.mode_on(state, kstate.M_EVWAIT) {
+        acpiev.wait_loop(state, 9000)
+    }
     power_test(state)
 
     // 7c. the file system.
@@ -4760,6 +4777,40 @@ fn mode_of(state: u64, cmd: u64) {
     // genau der Fehler, der in Runde K13 eine Stunde gekostet hat.
     if find(cmd, (&amlw[0]) as u64, 3) != 0 {
         kstate.mode_add(state, kstate.M_AML)
+    }
+    // RUNDE ACPI-EREIGNISSE: die Ereignisse und ihre Gegenproben.
+    // DIESELBE FALLE WIE OBEN, und sie ist hier schaerfer: `acpiev`
+    // steckt in `noacpiev`. Wer zuerst nach dem kurzen sucht, schaltet
+    // mit `noacpiev` die Ereignisse EIN und misst danach die
+    // Gegenprobe, die keine ist.
+    var evnw: [u8; 10] = "noacpiev\0\0"
+    var evdw: [u8; 7] = "evdump\0"
+    var evsw: [u8; 7] = "evself\0"
+    var evfw: [u8; 7] = "evfake\0"
+    var evhw: [u8; 9] = "evnohold\0"
+    var evww: [u8; 7] = "evwait\0"
+    var evw: [u8; 8] = "acpiev\0\0"
+    if find(cmd, (&evnw[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_NOACPIEV)
+    }
+    if find(cmd, (&evdw[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_EVDUMP)
+    }
+    if find(cmd, (&evsw[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_EVSELF)
+    }
+    if find(cmd, (&evfw[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_EVFAKE)
+    }
+    if find(cmd, (&evhw[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_EVNOHOLD)
+    }
+    if find(cmd, (&evww[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_EVWAIT)
+    }
+    // und erst jetzt das kurze.
+    if find(cmd, (&evw[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_ACPIEV)
     }
     var hwdw: [u8; 5] = "hwid\0"
     var hwef: [u8; 8] = "hwidefi\0"

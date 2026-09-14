@@ -36,6 +36,7 @@ import usb
 import audio
 import netdev
 import inet
+import acpiev
 import cpu
 import rand
 import time
@@ -88,6 +89,23 @@ const VEC_KEYBOARD: u64 = 33
 // rechnet die Vektortafel nach; zwei Namen auf einer Zahl waeren genau
 // der Fehler, an dem Runde K10 einen halben Tag haengengeblieben ist.
 const VEC_SERIAL: u64 = 36
+// RUNDE ACPI-EREIGNISSE: der System Control Interrupt meldet auf 37.
+// Auf dieser Leitung kommt ALLES an, was die Firmware zu melden hat:
+// die Einschalttaste, der Deckel, der Akku, die Waermezonen. Sie ist
+// PEGELGESTEUERT und wird geteilt -- anders als die Geraete oben, die
+// jedes eine eigene Flanke haben.
+//
+// 37 ist die naechste freie Zahl (32 Zeitgeber, 33 Tastatur, 36
+// serielle Leitung, 42 Ton, 43 USB, 44 Platte, 45/46 Netz, 46 Zeiger,
+// 47 verirrt) und liegt in den 48 Einsprungpunkten, die `isr.s`
+// bereithaelt -- fuer diese Runde musste kein Assembler geaendert
+// werden. `tools/kernel/memmap.py` rechnet die Vektortafel nach.
+//
+// DIE ZAHL STEHT ZWEIMAL, hier und in `kernel/acpiev.fi`. Sie muss
+// es, weil `acpiev.fi` sie fuer `apic.route` braucht und ein Import
+// von `trap` dort eine Schleife waere; `tools/acpiev/run.sh`
+// vergleicht beide Zeilen.
+const VEC_SCI: u64 = 37
 const VEC_MOUSE: u64 = 46
 // ROUND K2. The disk controller signals its completion on 44 -- over
 // MSI-X, where it writes the vector as data to 0xFEE00000, or over its
@@ -503,6 +521,16 @@ fn entry(frame: u64, state: u64) {
     if vector == VEC_NET + 1 {
         netdev.irq_on(state, 1)
         inet.wake(state)
+        eoi(state, vector)
+        return
+    }
+    // RUNDE ACPI-EREIGNISSE: der SCI. Der Behandler liest die
+    // Statusregister, loescht sie und merkt vor -- er fuehrt KEIN AML
+    // aus. Das geschieht in `acpiev.pump` im normalen Betrieb, weil
+    // eine AML-Methode `Sleep` aufrufen und ueber den Embedded
+    // Controller lesen darf und beides Millisekunden dauert.
+    if vector == VEC_SCI {
+        acpiev.irq(state)
         eoi(state, vector)
         return
     }
