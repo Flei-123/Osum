@@ -59,9 +59,9 @@ export {
     reg, unreg, slot_of, valid, owner, name_at, abi_at, mask_at,
     rights_at, set_rights, grant, grant_lookup, grants,
     subscribe, notify, pop, pending, lost_at, grund_at,
-    touch, sweep, sweep_at, set_frist, frist, last_at,
+    touch, sweep, sweep_at, set_frist, frist, frist_at, denys_at, last_at,
     owner_lebt, reap, farewell_slot, zombie,
-    set_key, key_at, key_owner, bar_set, bar_ptr, bar_len,
+    set_key, key_at, key_owner, bar_set, bar_same, bar_ptr, bar_len,
     plugs, events_in, events_out, kicks, denials, deny,
     desk_set, desk_of, desk_cur, desk_go, desk_dirty, desk_clear,
     selftest, selftest_max, failbits,
@@ -121,6 +121,20 @@ const P_BAR: u64 = 0x80 // BAR_LEN Oktette
 // unterscheiden, und das sind zwei verschiedene Dinge.
 const P_ZEND: u64 = 0xA0
 const P_PID: u64 = 0xA8
+// RUNDE WMPLUGIN, NACHTRAG: DIE FRIST GEHOERT AN DAS EINZELNE PLUGIN.
+//
+// GEMESSENER BEFUND: mit EINER Frist fuer alle war die Zahl entweder
+// fuer das Leistenwidget zu kurz (es holt im Sekundentakt ab und flog
+// bei `plugfrist`) oder fuer die Gegenprobe zu lang (der Haenger fiel
+// erst nach einer halben Sekunde auf). Ein Plugin, das einmal je
+// Sekunde arbeitet, ist nicht traege -- es arbeitet eben so. Also
+// nennt jedes seine eigene Frist: beim Anmelden (WM_PLUG_REG, viertes
+// Argument) oder ueber die Gewaehrungstafel (`frist=` in
+// /etc/wmplug.conf, WM_PLUG_GRANT). 0 heisst "die Vorgabe des Kerns".
+const P_FRIST: u64 = 0xB0
+// Wie oft dieser Platz ohne Recht angeklopft hat. Der Zaehler ist
+// nicht nur Buchhaltung: ab DENY_MAX fliegt der Platz mit G_RIGHTS.
+const P_DENYS: u64 = 0xB8
 
 // Was in P_USED steht. NICHT nur 0/1: ein abgemeldetes Plugin soll sein
 // letztes Ereignis (E_STOP) noch abholen koennen, sonst waere E_STOP ein
@@ -201,6 +215,24 @@ const G_USER: u64 = 4 // /bin/wmplug disable
 // auffliegt. `plugfrist` auf der Kommandozeile setzt sie kuerzer,
 // damit der Abnahmelauf nicht wartet.
 const FRIST_VORGABE: u64 = 50
+
+// WIE OFT EIN PLUGIN OHNE RECHT ANKLOPFEN DARF, BEVOR ES FLIEGT.
+//
+// Eine einzelne abgewiesene Handlung ist kein Angriff: ein Plugin darf
+// fragen, ob es etwas darf, und der Fehlercode ist die Antwort. Wer
+// aber in einer Schleife nach fremden Fenstern greift, hat entweder
+// einen Fehler oder eine Absicht -- beides gehoert von der Tafel. Acht
+// ist grosszuegig genug, dass eine Regel-Engine mit acht Regeln nicht
+// stirbt, und hart genug, dass eine Schleife binnen Sekundenbruchteilen
+// auffliegt (gemessen: `plugboese greif` erreicht die Schwelle im
+// ersten Durchgang).
+const DENY_MAX: u64 = 8
+
+// Was sich ein Plugin OHNE Eintrag in der Gewaehrungstafel selbst an
+// Frist nehmen darf: zwei Sekunden. Laenger gibt nur root ueber
+// `frist=` in /etc/wmplug.conf -- sonst nennte jedes haengende Plugin
+// einfach eine riesige Zahl und waere damit unsterblich.
+const FRIST_MAX_SELBST: u64 = 200
 
 // ---------------------------------------------------- die Zugriffe
 
@@ -354,6 +386,29 @@ fn set_frist(state: u64, t: u64) {
     ss(state, S_FRIST, t)
 }
 
+// DIE FRIST, DIE FUER DIESEN PLATZ GILT: die eigene, wenn er eine
+// genannt hat, sonst die des Kerns. Eine Funktion und nicht zwei
+// Abfragen an jeder Stelle -- der Kehrbesen und der Abschied muessen
+// dieselbe Zahl benutzen, sonst raeumt der eine weg, was der andere
+// noch stehenlaesst.
+fn frist_at(state: u64, i: u64) -> u64 {
+    if i >= MAX_PLUG {
+        return sg(state, S_FRIST)
+    }
+    let f: u64 = pg(state, i, P_FRIST)
+    if f == 0 {
+        return sg(state, S_FRIST)
+    }
+    return f
+}
+
+fn denys_at(state: u64, i: u64) -> u64 {
+    if i >= MAX_PLUG {
+        return 0
+    }
+    return pg(state, i, P_DENYS)
+}
+
 // Der Platz eines Prozesses, MAX_PLUG wenn er keinen hat.
 fn slot_of(state: u64, me: u64) -> u64 {
     var i: u64 = 0
@@ -370,7 +425,8 @@ fn slot_of(state: u64, me: u64) -> u64 {
 // in den Kern kopiert hat -- dieses Modul folgt keinem Ring-3-Zeiger.
 // Rueckgabe: der Platz, oder MAX_PLUG (kein Platz / falsche Fassung /
 // schon angemeldet).
-fn reg(state: u64, me: u64, abi: u64, name: u64, maske: u64) -> u64 {
+fn reg(state: u64, me: u64, abi: u64, name: u64, maske: u64,
+    wunschfrist: u64) -> u64 {
     if !ready(state) {
         return MAX_PLUG
     }
@@ -395,6 +451,17 @@ fn reg(state: u64, me: u64, abi: u64, name: u64, maske: u64) -> u64 {
             ps(state, i, P_BARLEN, 0)
             ps(state, i, P_GEN, pg(state, i, P_GEN) + 1)
             ps(state, i, P_ZEND, 0)
+            ps(state, i, P_DENYS, 0)
+            // Die gewuenschte Frist gilt nur, wenn sie NICHT laenger
+            // ist als das, was die Gewaehrungstafel erlaubt -- sonst
+            // koennte sich jedes Plugin selbst unsterblich machen,
+            // indem es eine riesige Zahl nennt. Ohne Eintrag in der
+            // Tafel ist die Obergrenze FRIST_MAX_SELBST.
+            var wf: u64 = wunschfrist & 0xFFFF
+            if wf > FRIST_MAX_SELBST {
+                wf = FRIST_MAX_SELBST
+            }
+            ps(state, i, P_FRIST, wf)
             ps(state, i, P_LAST, kstate.get(state, kstate.TICKS))
             // DIE PROZESSNUMMER WIRD MITGESCHRIEBEN, nicht nur der
             // Platz in der Aufgabentafel: Plaetze werden wiederbenutzt.
@@ -422,6 +489,14 @@ fn reg(state: u64, me: u64, abi: u64, name: u64, maske: u64) -> u64 {
             if g < MAX_GRANT {
                 ps(state, i, P_RIGHTS,
                     kstate.get(gat(state, g), GR_RIGHTS) & R_ALL)
+                // Und die Frist aus derselben Zeile: was root in
+                // /etc/wmplug.conf gestanden hat, schlaegt den Wunsch
+                // des Plugins -- in beide Richtungen.
+                let gf: u64 = (kstate.get(gat(state, g), GR_RIGHTS) >> 32)
+                    & 0xFFFF
+                if gf != 0 {
+                    ps(state, i, P_FRIST, gf)
+                }
             } else {
                 ps(state, i, P_RIGHTS, R_DEFAULT)
             }
@@ -430,12 +505,18 @@ fn reg(state: u64, me: u64, abi: u64, name: u64, maske: u64) -> u64 {
             var s_r: [u8; 13] = "wmplug: reg \0"
             var s_p: [u8; 8] = " platz=\0"
             var s_c: [u8; 9] = " rechte=\0"
+            var s_fr: [u8; 8] = " frist=\0"
             serial.puts((&s_r[0]) as u64)
             serial.text(pat(state, i, P_NAME), 8)
             serial.puts((&s_p[0]) as u64)
             serial.dec(i)
             serial.puts((&s_c[0]) as u64)
             serial.hex(pg(state, i, P_RIGHTS))
+            // DIE FRIST STEHT AUF DER LEITUNG, weil sie sonst nur in
+            // der Tafel staende: ein Abnahmelauf soll nachlesen
+            // koennen, MIT WELCHER Zahl ein Plugin angetreten ist.
+            serial.puts((&s_fr[0]) as u64)
+            serial.dec(frist_at(state, i))
             serial.nl()
             return i
         }
@@ -500,10 +581,19 @@ fn subscribe(state: u64, i: u64, maske: u64) -> bool {
 
 // Eine abgewiesene Handlung zaehlen -- der Rueckgabewert allein ist kein
 // Beleg, der Zaehler ist einer.
+// EINMAL IST EINE FRAGE, ACHTMAL IST EINE ABSICHT. Der Zaehler steigt
+// mit jeder abgewiesenen Handlung; ab DENY_MAX fliegt der Platz mit
+// G_RIGHTS -- so steht auf der Leitung nicht nur "abgewiesen", sondern
+// auch, dass der Kern daraus eine Folge gezogen hat. Gewartet wird
+// dabei auf niemanden: `unreg` legt E_STOP ab und kehrt zurueck.
 fn deny(state: u64, i: u64) {
     ss(state, S_DENY, sg(state, S_DENY) + 1)
     if valid(state, i) {
         ps(state, i, P_GRUND, G_RIGHTS)
+        ps(state, i, P_DENYS, pg(state, i, P_DENYS) + 1)
+        if pg(state, i, P_DENYS) >= DENY_MAX {
+            unreg(state, i, G_RIGHTS)
+        }
     }
 }
 
@@ -685,10 +775,10 @@ fn reap(state: u64, jetzt: u64) -> u64 {
     if !ready(state) {
         return 0
     }
-    let f: u64 = sg(state, S_FRIST)
     var raus: u64 = 0
     var i: u64 = 0
     while i < MAX_PLUG {
+        let f: u64 = frist_at(state, i)
         let z: u64 = pg(state, i, P_USED)
         if z == U_LEBT && !owner_lebt(state, i) {
             var s_t: [u8; 21] = "wmplug: tot platz=\0\0\0"
@@ -747,13 +837,15 @@ fn sweep_at(state: u64, jetzt: u64) -> u64 {
     if !ready(state) {
         return 0
     }
-    let f: u64 = sg(state, S_FRIST)
     var raus: u64 = 0
     var i: u64 = 0
     while i < MAX_PLUG {
+        // JEDER PLATZ MIT SEINER EIGENEN FRIST -- das Widget darf im
+        // Sekundentakt arbeiten, ohne dass die Gegenprobe des Haengers
+        // dadurch zahm wuerde.
         if pg(state, i, P_USED) == U_LEBT
             && pg(state, i, P_HEAD) != pg(state, i, P_TAIL)
-            && jetzt > pg(state, i, P_LAST) + f {
+            && jetzt > pg(state, i, P_LAST) + frist_at(state, i) {
             unreg(state, i, G_FRIST)
             raus = raus + 1
         }
@@ -829,6 +921,34 @@ fn bar_set(state: u64, i: u64, quelle: u64, n: u64) -> bool {
     return true
 }
 
+// STEHT DA SCHON DASSELBE? Das ist keine Sparsamkeit, sondern eine
+// gemessene Tempofrage: jedes `WM_PLUG_BAR` hat bisher den GANZEN
+// Schirm schmutzig gemeldet (`wm.damage_all`), auch wenn das Widget
+// sekuendlich denselben Text schickt. Ein Widget, das seine Zahl nicht
+// aendert, darf den Zusammensetzer nicht beschaeftigen -- und ein
+// Widget, das sie aendert, soll hoechstens die Leiste kosten.
+fn bar_same(state: u64, i: u64, quelle: u64, n: u64) -> bool {
+    if !valid(state, i) {
+        return false
+    }
+    var len: u64 = n
+    if len > BAR_LEN - 1 {
+        len = BAR_LEN - 1
+    }
+    if pg(state, i, P_BARLEN) != len {
+        return false
+    }
+    var k: u64 = 0
+    while k < len {
+        if kstate.get8(pat(state, i, P_BAR) + k)
+            != kstate.get8(quelle + k) {
+            return false
+        }
+        k = k + 1
+    }
+    return true
+}
+
 fn bar_ptr(state: u64, i: u64) -> u64 {
     return pat(state, i, P_BAR)
 }
@@ -877,6 +997,12 @@ fn grant_lookup(state: u64, name: u64) -> u64 {
 }
 
 // Eintragen oder aendern. `name` zeigt auf NAME_LEN Kernoktette.
+//
+// `rechte` traegt ZWEI Zahlen: unten die Rechtemaske (R_*), oben ab Bit
+// 32 die Frist in Ticks. Zwei Felder in einem Wort und nicht zwei
+// Argumente, weil WM_PLUG_GRANT (2126) nur zwei Argumente hat und eine
+// zweite Aufrufnummer fuer eine Zahl die Schnittstelle breiter machte,
+// ohne sie besser zu machen. Frist 0 heisst "wie bisher".
 fn grant(state: u64, name: u64, rechte: u64) -> bool {
     var k: u64 = grant_lookup(state, name)
     if k >= MAX_GRANT {
@@ -901,7 +1027,14 @@ fn grant(state: u64, name: u64, rechte: u64) -> bool {
         kstate.set(gat(state, k), GR_USED, 1)
         ss(state, S_GRANTS, sg(state, S_GRANTS) + 1)
     }
-    kstate.set(gat(state, k), GR_RIGHTS, rechte & R_ALL)
+    // Die alte Frist bleibt stehen, wenn keine neue genannt wird --
+    // `wmplug disable` schickt Rechte 0 und soll dabei nicht nebenbei
+    // die Frist vergessen.
+    var nf: u64 = (rechte >> 32) & 0xFFFF
+    if nf == 0 {
+        nf = (kstate.get(gat(state, k), GR_RIGHTS) >> 32) & 0xFFFF
+    }
+    kstate.set(gat(state, k), GR_RIGHTS, (rechte & R_ALL) | (nf << 32))
     // WIRKT SOFORT, AUCH AUF SCHON ANGEMELDETE: `wmplug disable` soll
     // ein laufendes Plugin entwaffnen koennen, ohne es zu toeten.
     var i: u64 = 0
@@ -909,6 +1042,9 @@ fn grant(state: u64, name: u64, rechte: u64) -> bool {
         if pg(state, i, P_USED) == U_LEBT
             && grant_lookup(state, pat(state, i, P_NAME)) == k {
             ps(state, i, P_RIGHTS, rechte & R_ALL)
+            if nf != 0 {
+                ps(state, i, P_FRIST, nf)
+            }
         }
         i = i + 1
     }
@@ -989,7 +1125,7 @@ fn desk_clear(state: u64) {
 // Zusagen ueber dieses Modul allein, ohne Bildschirm und ohne Ring 3.
 // Ein Bit je Zusage in S_FAIL: man will wissen, WELCHE gefallen ist.
 
-const SELF_MAX: u64 = 13
+const SELF_MAX: u64 = 15
 
 fn selftest_max() -> u64 {
     return SELF_MAX
@@ -1011,13 +1147,13 @@ fn selftest(state: u64) -> u64 {
     let np: u64 = (&name[0]) as u64
 
     // 1: falsche Fassung wird abgewiesen.
-    if reg(state, 777, WMP_ABI + 1, np, 0xFF) >= MAX_PLUG {
+    if reg(state, 777, WMP_ABI + 1, np, 0xFF, 0) >= MAX_PLUG {
         ok = ok + 1
     } else {
         fail(state, 0)
     }
     // 2: richtige Fassung bekommt einen Platz.
-    let i: u64 = reg(state, 777, WMP_ABI, np, 0xFF)
+    let i: u64 = reg(state, 777, WMP_ABI, np, 0xFF, 0)
     if i < MAX_PLUG {
         ok = ok + 1
     } else {
@@ -1089,7 +1225,7 @@ fn selftest(state: u64) -> u64 {
     //     Modifikatorlage ist ein anderes Kuerzel. Ohne die zweite
     //     Haelfte dieser Zusage schluckte der Fensterserver F12 auch
     //     dann, wenn Strg dabei war.
-    let j: u64 = reg(state, 778, WMP_ABI, np, 1 << E_KEY)
+    let j: u64 = reg(state, 778, WMP_ABI, np, 1 << E_KEY, 0)
     if j < MAX_PLUG && set_key(state, j, 0x8C, 0)
         && key_owner(state, 0x8C, 0) == j
         && key_owner(state, 0x8C, 4) == MAX_PLUG {
@@ -1113,7 +1249,7 @@ fn selftest(state: u64) -> u64 {
     //     Platz ist danach wieder frei. 778/779 stehen in keiner
     //     Aufgabentafel, also ist "weg" hier wahr, ohne dass der
     //     Selbsttest einen Prozess toeten muesste.
-    let k2: u64 = reg(state, 779, WMP_ABI, np, 0xFF)
+    let k2: u64 = reg(state, 779, WMP_ABI, np, 0xFF, 0)
     let vor_k: u64 = kicks(state)
     if k2 < MAX_PLUG && !owner_lebt(state, k2)
         && reap(state, 2000) == 1 && !valid(state, k2) && !zombie(state, k2)
@@ -1121,6 +1257,43 @@ fn selftest(state: u64) -> u64 {
         ok = ok + 1
     } else {
         fail(state, 12)
+    }
+
+    // 14: EINE EIGENE FRIST GILT, UND ZWAR GEGEN DIE DES KERNS. Der
+    //     Kehrbesen laeuft mit einer kurzen Kernfrist ueber zwei
+    //     Plaetze: der eine hat nichts genannt und fliegt, der andere
+    //     hat sich 500 Ticks geben lassen und bleibt. Ohne diese
+    //     Zusage waere `frist=` in /etc/wmplug.conf eine Notiz.
+    ss(state, S_FRIST, 1)
+    let a1: u64 = reg(state, 781, WMP_ABI, np, 0xFF, 0)
+    let b1: u64 = reg(state, 782, WMP_ABI, np, 0xFF, 150)
+    notify(state, E_WIN_OPEN, 1, 0, 0)
+    ps(state, a1, P_LAST, 0)
+    ps(state, b1, P_LAST, 0)
+    if a1 < MAX_PLUG && b1 < MAX_PLUG
+        && frist_at(state, b1) == 150 && frist_at(state, a1) == 1
+        && sweep_at(state, 100) == 1
+        && !valid(state, a1) && valid(state, b1) {
+        ok = ok + 1
+    } else {
+        fail(state, 13)
+    }
+    // 15: WER OHNE RECHT NICHT AUFHOERT, FLIEGT. Einmal fragen ist
+    //     eine Frage und kostet nur den Fehlercode; DENY_MAX Mal
+    //     greifen ist eine Absicht, und der Grund der Abmeldung heisst
+    //     dann G_RIGHTS (3) und nicht Frist und nicht Absturz.
+    let c1: u64 = reg(state, 783, WMP_ABI, np, 0, 0)
+    set_rights(state, c1, 0)
+    var dn: u64 = 0
+    while dn < DENY_MAX {
+        deny(state, c1)
+        dn = dn + 1
+    }
+    if c1 < MAX_PLUG && !valid(state, c1)
+        && grund_at(state, c1) == G_RIGHTS {
+        ok = ok + 1
+    } else {
+        fail(state, 14)
     }
 
     let bits: u64 = sg(state, S_FAIL)

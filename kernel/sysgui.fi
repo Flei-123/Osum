@@ -510,13 +510,71 @@ fn is_taskbar(state: u64, me: u64) -> bool {
     return false
 }
 
+// NUR DIE LEISTE SCHMUTZIG MELDEN, NICHT DEN SCHIRM.
+//
+// Der Text eines Widgets steht in der Leiste und sonst nirgends. Bis
+// hierher hat jeder `WM_PLUG_BAR` `wm.damage_all` gerufen -- also 800 x
+// 600 Bildpunkte fuer ein Feld von etwa 90 x 22. Diese Schleife sucht
+// die Fenster, die einen Schirmrand reserviert haben (dasselbe
+// Merkmal, an dem `is_taskbar` die Leiste erkennt) und meldet genau
+// deren Rechtecke. Hoechstens MAX_WIN Durchlaeufe, keine Rekursion.
+// Findet sie keines, faellt sie auf den ganzen Schirm zurueck: lieber
+// zu viel gemalt als ein Text, den niemand sieht.
+fn damage_bar(state: u64) {
+    var gefunden: bool = false
+    var i: u64 = 0
+    while i < wm.MAX_WIN {
+        if wm.valid(state, i) && wm.win_strut_size(state, i) != 0
+            && !wm.win_hidden(state, i) {
+            wm.damage(state, wm.win_x(state, i), wm.win_y(state, i),
+                wm.win_x(state, i) + (wm.win_w(state, i) as i64),
+                wm.win_y(state, i) + (wm.win_h(state, i) as i64))
+            gefunden = true
+        }
+        i = i + 1
+    }
+    if !gefunden {
+        wm.damage_all(state)
+    }
+}
+
 // EIN SATZ AUS DER FENSTERTAFEL NACH RING 3. In einer eigenen Funktion
 // und nicht als Zweig in `wm_call`: der Rahmen von `dispatch` ist in
 // diesem Kernel schon einmal fast uebergelaufen (siehe die Begruendung
 // bei `k13_call`), und ein Zweig mit zehn Zwischenwerten kostet dort
 // Stapel, auch wenn er nie genommen wird.
+// DAS LESERECHT AUF DIE FENSTERTAFEL, ZWEITER SCHLUESSEL.
+//
+// Bis zu dieser Runde gab es genau einen: eine Taskleiste sein
+// (`is_taskbar`, also einen Schirmrand reserviert haben). Eine
+// Fensterregel-Engine muss Titel und Buendelnamen aber genauso lesen --
+// sonst kann sie "app=rechner" nicht entscheiden. Sie half sich deshalb
+// mit einem VERBORGENEN 32x16-Fenster samt Streifen von einem Punkt,
+// nur um `is_taskbar` zu genuegen. Das war eine benannte Abkuerzung und
+// es war eine schlechte: ein Plugin, das ein Fenster anlegt, um ein
+// Leserecht zu bekommen, laesst sich von aussen nicht von einem Plugin
+// unterscheiden, das ein Fenster anlegt, um darin zu malen.
+//
+// Jetzt ist der zweite Schluessel das, was er sein sollte: das RECHT
+// R_EV_WIN aus der Plugintafel. Wer Fensterereignisse sehen darf, darf
+// auch die Fenstertafel lesen -- er erfaehrt ohnehin von jedem Fenster,
+// das aufgeht. Wer das Recht NICHT hat, bekommt weiter -E_RIGHTS.
+fn darf_listen(state: u64, me: u64) -> bool {
+    if is_taskbar(state, me) {
+        return true
+    }
+    if !wmplug.ready(state) {
+        return false
+    }
+    let i: u64 = wmplug.slot_of(state, me)
+    if i >= wmplug.MAX_PLUG {
+        return false
+    }
+    return (wmplug.rights_at(state, i) & wmplug.R_EV_WIN) != 0
+}
+
 fn wm_list(state: u64, me: u64, platz: u64, aus: u64, max: u64) -> u64 {
-    if !is_taskbar(state, me) {
+    if !darf_listen(state, me) {
         return cap.err(cap.E_RIGHTS)
     }
     if platz >= wm.MAX_WIN || max < sys.WL_BYTES {
@@ -788,7 +846,7 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
     // In EIGENER FUNKTION und nicht als Zweigkette hier: der Rahmen von
     // `wm_call` ist schon jetzt gross, und der Kernstapel hat 16 KiB.
     if number >= sys.WM_PLUG_REG {
-        return plug_call(state, me, number, a0, a1, a2)
+        return plug_call(state, me, number, a0, a1, a2, a3)
     }
     // Alles Weitere braucht ein gueltiges Handle DIESES Prozesses.
     let slot: u64 = cap.find(state, me, a0)
@@ -1807,7 +1865,7 @@ fn tipp_call(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
 // was daliegt, und kehrt zurueck; liegt nichts da, kehrt es mit 0
 // zurueck. Es gibt hier kein `while`, das auf Ring 3 sieht.
 fn plug_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
-    a2: u64) -> u64 {
+    a2: u64, a3: u64) -> u64 {
     // DIE FASSUNG BEANTWORTET DER KERN IMMER, auch ohne Plugintafel und
     // ohne Anmeldung: sonst koennte ein Plugin nicht herausfinden, ob es
     // zu diesem Kern passt, und muesste raten.
@@ -1818,7 +1876,11 @@ fn plug_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
         return cap.err(cap.E_UNSUPPORTED)
     }
     if number == sys.WM_PLUG_REG {
-        return do_plugreg(state, me, a0, a1, a2)
+        // Das VIERTE Argument ist die gewuenschte Frist in Ticks; 0
+        // heisst "die Vorgabe des Kerns". Ein Plugin, das mit drei
+        // Argumenten ruft (so stand es in der ersten Fassung), bekommt
+        // hier eine Null und damit genau das Verhalten von vorher.
+        return do_plugreg(state, me, a0, a1, a2, a3)
     }
     if number == sys.WM_PLUG_GRANT {
         return do_pluggrant(state, me, a0, a1)
@@ -1902,12 +1964,22 @@ fn plug_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
         if n != 0 && !sys.copy_in(state, me, puffer, a0, n) {
             return cap.err(cap.E_INVALID)
         }
+        // ERST FRAGEN, OB SICH ETWAS AENDERT. Gemessen: das Widget
+        // schickt seinen Text im Sekundentakt, und jeder Ruf hat den
+        // GANZEN Schirm schmutzig gemeldet -- 480000 Bildpunkte fuer
+        // eine Zahl, die sich nicht bewegt hat.
+        let gleich: bool = wmplug.bar_same(state, i, puffer, n)
         if !wmplug.bar_set(state, i, puffer, n) {
             return cap.err(cap.E_RIGHTS)
         }
         // Die Leiste malt es beim naechsten Durchlauf -- SCHMUTZIG
         // MELDEN, NICHT ZUSAMMENSETZEN (siehe WM_DECO, derselbe Grund).
-        wm.damage_all(state)
+        // Schmutzig gemeldet wird aber nur die LEISTE und nicht der
+        // Schirm: ein Widget bekommt ein Textfeld in einer Leiste, also
+        // kostet sein Text auch nur diese Leiste.
+        if !gleich {
+            damage_bar(state)
+        }
         return 0
     }
     if number == sys.WM_PLUG_ACT {
@@ -1916,7 +1988,8 @@ fn plug_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
     return cap.err(cap.E_INVALID)
 }
 
-fn do_plugreg(state: u64, me: u64, abi: u64, name: u64, maske: u64) -> u64 {
+fn do_plugreg(state: u64, me: u64, abi: u64, name: u64, maske: u64,
+    frist: u64) -> u64 {
     let puffer: u64 = state + kstate.BLOCK_OFF + 3904
     var k: u64 = 0
     while k < 16 {
@@ -1926,7 +1999,7 @@ fn do_plugreg(state: u64, me: u64, abi: u64, name: u64, maske: u64) -> u64 {
     if name != 0 && !sys.copy_in(state, me, puffer, name, 15) {
         return cap.err(cap.E_INVALID)
     }
-    let i: u64 = wmplug.reg(state, me, abi, puffer, maske)
+    let i: u64 = wmplug.reg(state, me, abi, puffer, maske, frist)
     if i >= wmplug.MAX_PLUG {
         // ZWEI GRUENDE, ZWEI FEHLER. Die falsche Fassung ist kein
         // "kein Platz mehr", und ein Plugin soll den Unterschied
@@ -1957,6 +2030,11 @@ fn do_pluggrant(state: u64, me: u64, name: u64, rechte: u64) -> u64 {
     if !wmplug.grant(state, puffer, rechte) {
         return cap.err(cap.E_EXHAUSTED)
     }
+    // Die Frist steckt ab Bit 32 im selben Wort (siehe wmplug.grant);
+    // fuer die Frage "hat jemand abgeschaltet?" zaehlt nur die
+    // Rechtemaske darunter -- sonst waere `frist=` allein schon ein
+    // Abschalten.
+    let nur_rechte: u64 = rechte & 0xFFFFFFFF
     // ABSCHALTEN HEISST ABSCHALTEN, nicht "beim naechsten Mal dann".
     //
     // GEMESSENER BEFUND: `wmplug disable uhr` schrieb bis hierher nur
@@ -1977,7 +2055,7 @@ fn do_pluggrant(state: u64, me: u64, name: u64, rechte: u64) -> u64 {
     // das naechste Mal abholt -- und wenn es nie wieder abholt, raeumt
     // der Kehrbesen den Abschiedsplatz weg. Hoechstens MAX_PLUG (acht)
     // Durchlaeufe, keine Rekursion.
-    if rechte == 0 {
+    if nur_rechte == 0 {
         var i: u64 = 0
         while i < wmplug.MAX_PLUG {
             if wmplug.valid(state, i) && namen_gleich(wmplug.name_at(state, i), puffer) {
@@ -1985,6 +2063,32 @@ fn do_pluggrant(state: u64, me: u64, name: u64, rechte: u64) -> u64 {
             }
             i = i + 1
         }
+        return 0
+    }
+    // UND EINSCHALTEN HEISST AUCH EINSCHALTEN.
+    //
+    // Derselbe gemessene Befund von der anderen Seite: `wmplug enable
+    // uhr` schrieb die Rechte nur in die Gewaehrungstafel, und die
+    // liest der Kern beim ANMELDEN (`reg`). Ein Widget, das schon lief,
+    // bekam sein R_ACT_BAR also erst beim naechsten Prozessstart --
+    // "zur Laufzeit" war es damit nicht. Also werden die neuen Rechte
+    // hier auf jeden laufenden Platz dieses Namens uebertragen.
+    //
+    // KEINE ERWEITERUNG DER SCHNITTSTELLE: der Rueckgabewert bleibt 0,
+    // kein neuer Fehlercode, kein neues Feld. Das Plugin merkt es
+    // daran, dass seine naechste Handlung durchgeht -- genau so misst
+    // es tools/wmplug/run.sh am Bildpunkt nach.
+    var j: u64 = 0
+    while j < wmplug.MAX_PLUG {
+        if wmplug.valid(state, j) && namen_gleich(wmplug.name_at(state, j), puffer) {
+            // Gemeldet wird das nicht von hier, sondern von dem, der
+            // es merkt: das Plugin sieht seine naechste Handlung
+            // durchgehen und sagt es selbst. Eine Zeile aus `sysgui`
+            // haette dafuer `serial` in dieses Modul geholt, und der
+            // Abhaengigkeitsgraph ist wertvoller als eine Meldung.
+            wmplug.set_rights(state, j, rechte)
+        }
+        j = j + 1
     }
     return 0
 }
@@ -2036,6 +2140,20 @@ fn do_pluginfo(state: u64, me: u64, a0: u64, feld: u64) -> u64 {
     if feld == sys.PL_DESK {
         return wmplug.desk_cur(state)
     }
+    // Die Arbeitsflaeche des Servers, ohne Handle und ohne Fenster:
+    // dieselben vier Zahlen, die WM_INFO einem Fensterbesitzer gibt.
+    if feld == sys.PL_WORKX {
+        return wm.work_x(state)
+    }
+    if feld == sys.PL_WORKY {
+        return wm.work_y(state)
+    }
+    if feld == sys.PL_WORKW {
+        return wm.work_w(state)
+    }
+    if feld == sys.PL_WORKH {
+        return wm.work_h(state)
+    }
     // ZWEI ZAHLEN AUS DEM BILDTAKT, damit "kein Tempoeinbruch" eine
     // MESSUNG ist und keine Meinung. Sie kommen nicht aus diesem Modul,
     // sondern aus der Uhr, die `wm.compose` seit der Runde VEKTOR
@@ -2054,6 +2172,17 @@ fn do_pluginfo(state: u64, me: u64, a0: u64, feld: u64) -> u64 {
             return 0
         }
         return wm.frame_us_sum(state) / n
+    }
+    // Und dieselben zwei Zahlen ROH, fuer ein Messfenster: wer sie vor
+    // und nach einer Last abliest, rechnet (sum2-sum1)/(n2-n1) und hat
+    // die mittlere Bildzeit GENAU DAZWISCHEN. Beide Felder beantwortet
+    // der Kern ohne Anmeldung -- sie sagen nichts ueber ein Plugin,
+    // sondern etwas ueber den Server.
+    if feld == sys.PL_FRSUM {
+        return wm.frame_us_sum(state)
+    }
+    if feld == sys.PL_FRN {
+        return wm.frame_us_n(state)
     }
     if a0 >= wmplug.MAX_PLUG {
         return cap.err(cap.E_INVALID)
@@ -2084,6 +2213,17 @@ fn do_pluginfo(state: u64, me: u64, a0: u64, feld: u64) -> u64 {
     }
     if feld == sys.PL_BARLEN {
         return wmplug.bar_len(state, a0)
+    }
+    // DIE FRIST DIESES EINEN PLATZES. PL_FRIST (14) bleibt die Zahl des
+    // Kerns; wer wissen will, mit WELCHER Frist ein bestimmtes Plugin
+    // angetreten ist, fragt PL_PFRIST -- zwei verschiedene Fragen,
+    // zwei Felder, sonst zeigte `wmplug list` die Frist von Platz 0 als
+    // die des ganzen Systems an.
+    if feld == sys.PL_PFRIST {
+        return wmplug.frist_at(state, a0)
+    }
+    if feld == sys.PL_DENYS {
+        return wmplug.denys_at(state, a0)
     }
     if feld == sys.PL_NAME {
         // Acht Oktette als EINE Zahl -- so braucht `wmplug list` keinen
