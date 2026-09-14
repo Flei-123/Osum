@@ -170,9 +170,20 @@ for n in 2115 2116; do
     grep -qE "= $n( |$)" kernel/sys.fi && ok "Aufrufnummer $n steht in kernel/sys.fi" \
         || bad "Aufrufnummer $n fehlt"
 done
-grep -q 'const WM_MAXNR: u64 = 2116' kernel/sys.fi \
-    && ok "und 2116 ist die hoechste des Fensterservers" \
-    || bad "WM_MAXNR passt nicht zu den Aufrufen"
+# RUNDE WMPLUGIN: die ABGESCHRIEBENE ZAHL IST WEG. Hier stand `= 2116`,
+# und seit die Plugin-Runde 2117..2126 dazugelegt hat, war die Zusage
+# rot -- eine rote Zusage, ueber die alle steigen, ist schlimmer als
+# keine. Also wird die Zahl GELESEN und VERGLICHEN: sie muss mindestens
+# 2126 sein und mit der hoechsten Aufrufnummer uebereinstimmen, die
+# wirklich in der Datei steht.
+maxnr=$(grep -oE 'const WM_MAXNR: u64 = [0-9]+' kernel/sys.fi | grep -oE '[0-9]+$')
+hoch=$(grep -oE '^const WM_[A-Z_]+: u64 = 21[0-9][0-9]' kernel/sys.fi \
+    | grep -v WM_MAXNR | grep -oE '[0-9]+$' | sort -n | tail -1)
+if [ -n "${maxnr:-}" ] && [ "$maxnr" -ge 2126 ] && [ "$maxnr" = "${hoch:-x}" ]; then
+    ok "WM_MAXNR=$maxnr ist die hoechste Aufrufnummer des Fensterservers (>= 2126)"
+else
+    bad "WM_MAXNR='$maxnr' passt nicht zu den Aufrufen (hoechste gefunden: '$hoch', erwartet >= 2126)"
+fi
 for f in kernel/wm.fi kernel/sys.fi kernel/user/wlibc.fi; do
     a=$(grep -cE '(FM|WF)_RADIUS: u64 = 0' "$f")
     b=$(grep -cE '(FM|WF)_SHADOW_C: u64 = 3' "$f")
