@@ -340,9 +340,24 @@ Ehrlich und einzeln, statt einer Zusage:
   sonst verspricht `/bin/play` etwas, das der Behaelterweg noch nicht
   liefert.
 * **Keine Anzeige.** `h264_to_rgb` ist gebaut (BT.601-Festkomma,
-  derselbe Block wie in `jpeg.fi`) und uebersetzt, aber **nicht gegen
-  ffmpeg gemessen** und an kein Fenster angeschlossen. Wer ein Video
-  auf dem Schirm will, braucht die Naht zu `wm.fi`/`vgpu.fi`.
+  derselbe Block wie in `jpeg.fi`) und an kein Fenster angeschlossen.
+  Wer ein Video auf dem Schirm will, braucht die Naht zu
+  `wm.fi`/`vgpu.fi`.
+
+  **Gemessen ist die Umrechnung inzwischen**, und zwar mit einem
+  anderen Ergebnis als der Dekodierer selbst: gegen
+  `ffmpeg -vf scale=in_range=full:out_range=full,format=rgb24` weichen
+  **75400 von 228096 Werten ab, groesster Abstand 2**. Das ist KEIN
+  Fehler und wird auch keiner: YUV->RGB ist -- anders als die
+  Dekodierung -- **nicht bitgenau spezifiziert**. ffmpegs `swscale`
+  rechnet mit anderen Zwischenbreiten und rundet anders; beide
+  Ergebnisse sind zulaessig. Genau deshalb steht die Zusage dieser
+  Runde auf dem **YUV**, nicht auf dem RGB: dort ist "bitgleich" eine
+  pruefbare Aussage, hier waere es eine Geschmacksfrage.
+
+  Die Umrechnung selbst ist auf Plausibilitaet geprueft (Grau bleibt
+  grau, Weiss bleibt weiss, Schwarz bleibt schwarz, ein roter Ton
+  bleibt rot).
 * **Nur 352x288.** Siehe 5.2. Fuer groessere Bilder braucht es mehr
   Speicher je Prozess und die drei Beschleunigungen.
 * **Keine JVT-Konformitaetsstroeme.** Der Auftrag nennt sie als
