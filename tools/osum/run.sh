@@ -504,16 +504,17 @@ for _ in $(seq 1 200); do
     sleep 0.2
 done
 if [ -S "$TMPD/mon.sock" ] && grep -q "sh: ready, osum" "$TMPD/kbd.txt" 2>/dev/null; then
-    python3 - "$TMPD/mon.sock" <<'PY'
-import socket, sys, time
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.connect(sys.argv[1])
-time.sleep(0.4)
-for key in ["l", "s", "ret"]:
-    s.sendall(("sendkey %s\n" % key).encode())
-    time.sleep(0.3)
-s.close()
-PY
+    # RUNDE ROTABSCHNITTE: auf die WIRKUNG warten, nicht auf die Uhr.
+    # Vorher stand hier `time.sleep(0.3)` je Taste. Das ist auf einer
+    # geteilten Maschine zu wenig -- QEMU bekommt seine Zeitscheibe
+    # nicht, und die Zeile darunter zaehlte 2 statt 3. Gemessen wurde
+    # damit die Last des Wirts und nicht der Kern. tools/lib/tasten.py
+    # schickt eine Taste und wartet, bis der Kern ihre `key: `-Zeile
+    # gemeldet hat (genau eine je Taste, kernel/kbd.fi), bevor die
+    # naechste kommt. Die Zusage bleibt dieselbe: es muessen alle drei
+    # ankommen.
+    python3 tools/lib/tasten.py "$TMPD/mon.sock" "$TMPD/kbd.txt" \
+        l s ret | sed 's/^/        /'
     wait $qemu_pid 2>/dev/null
     rc=$(cat "$TMPD/kbd.rc" 2>/dev/null || echo 99)
     K="$TMPD/kbd.txt"

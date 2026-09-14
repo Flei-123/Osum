@@ -337,7 +337,17 @@ PY
 
 cat > "$TMPD/dreh1" <<'DREH'
 warteauf 'wm: hold' || 90
-warte 5
+# RUNDE ROTABSCHNITTE: hier stand `warte 5` -- eine feste Frist, die
+# darauf wettete, dass die Leiste ihr Meldungsfeld innerhalb von fuenf
+# Sekunden gemalt hat. Auf einem Wirt, den sich mehrere QEMU-Prozesse
+# teilen, stimmt diese Wette nicht mehr, und das Foto entstand vor dem
+# Text -- daher "in der Leiste steht keine Meldung". Die Leiste MELDET
+# aber, wenn sie das Feld gemalt hat: `taskbar: text noti ... t=Meldg N`
+# (taskbar.fi, say_text aus paint(true)). Auf dieses Ereignis wird jetzt
+# gewartet statt auf die Uhr. Die Meldungen selbst liegen schon vor dem
+# ersten Nutzerprozess auf dem Bus (kmain.fi, M_NOTIDEMO), es fehlt hier
+# also wirklich nur der Anstrich.
+warteauf 'taskbar: text noti' || 90
 foto 01-leiste-meldung
 DREH
 gui leiste "bus notidemo" "$TMPD/dreh1"
