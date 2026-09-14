@@ -2245,6 +2245,13 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     if number == SYS_FTRUNCATE {
         return do_ftruncate(state, me, a0, a1)
     }
+    if number == SYS_FALLOCATE {
+        // fallocate(fd, mode, offset, len). Ein Modus ausser 0 (also
+        // FALLOC_FL_KEEP_SIZE und die anderen Sonderformen) wird
+        // ehrlich abgewiesen -- was hier gebaut ist, ist "sorge dafuer,
+        // dass die ersten offset+len Oktette da sind", und mehr nicht.
+        return do_fallocate(state, me, a0, a1, a2, a3)
+    }
     if number == SYS_GETSOCKNAME {
         return do_sockname(state, me, a0, a1, a2, false)
     }
@@ -6570,15 +6577,45 @@ fn map_shm(state: u64, me: u64, of: u64, len: u64, prot: u64,
     if unixsock.shm_grow(state, i, pages) != 0 {
         return neg(errno.E_NOMEM)
     }
-    let top: u64 = map_bottom(state, me)
-    if pages * PAGE > top {
-        return neg(errno.E_NOMEM)
-    }
-    let base: u64 = top - pages * PAGE
-    if base < page_up(brk_of(state, me)) + PAGE {
-        return neg(errno.E_NOMEM)
-    }
+    // WOHIN DIE ABBILDUNG KOMMT, und warum das eine eigene Frage ist:
+    //
+    // Der kleine Bildbereich zwischen `brk` und MMAP_TOP ist 851.968
+    // Oktette gross (der Kommentar in `do_map` sagt es). Ein
+    // Wayland-Puffer sprengt ihn muehelos -- weston-simple-shm legt
+    // EINEN Vorrat mit ZWEI Puffern zu 250x250x4 an, also 500.000
+    // Oktette, und der Client bildet ihn zusaetzlich zu seiner Halde
+    // ab. GEMESSEN: der Lauf davor starb mit "mmap failed: Out of
+    // memory" und danach "Both buffers busy at redraw(). Server bug?"
+    // -- die Meldung des Clients, und sie zeigte auf den Server,
+    // waehrend der Fehler hier lag.
+    //
+    // `do_map` kennt dafuer seit Runde K16 den GROSSEN Bereich ab
+    // `proc.BIG_TOP` und faellt dorthin zurueck. `map_shm` tat das
+    // nicht und gab stattdessen -ENOMEM. Jetzt nimmt es denselben Weg:
+    // erst der kleine Bereich, dann der grosse.
     let schreiben: bool = (prot & PROT_WRITE) != 0
+    let top: u64 = map_bottom(state, me)
+    var base: u64 = 0
+    var gross: bool = false
+    if pages * PAGE <= top
+        && top - pages * PAGE >= page_up(brk_of(state, me)) + PAGE {
+        base = top - pages * PAGE
+    } else {
+        // Der grosse Bereich, wie `big_map` ihn benutzt -- nur ohne
+        // eigene Rahmen, denn die kommen aus dem Objekt.
+        if kstate.mode_on(state, kstate.M_NOBIG) {
+            return neg(errno.E_NOMEM)
+        }
+        let btop: u64 = big_bottom(state, me)
+        if pages * PAGE > btop - proc.BIG_FLOOR {
+            return neg(errno.E_NOMEM)
+        }
+        base = btop - pages * PAGE
+        if base < proc.BIG_FLOOR {
+            return neg(errno.E_NOMEM)
+        }
+        gross = true
+    }
     var p: u64 = 0
     while p < pages {
         let frame: u64 = unixsock.shm_frame(state, i, p)
@@ -6597,7 +6634,11 @@ fn map_shm(state: u64, me: u64, of: u64, len: u64, prot: u64,
         p = p + 1
     }
     unixsock.shm_ref(state, i)
-    sched.tset(state, me, sched.T_MMAP, base)
+    if gross {
+        sched.tset(state, me, sched.T_BIG, base)
+    } else {
+        sched.tset(state, me, sched.T_MMAP, base)
+    }
     return base
 }
 
@@ -13148,6 +13189,15 @@ const AF_UNIX: u64 = 1
 
 // memfd_create und die Siegel, mit Linux' Nummern.
 const SYS_FTRUNCATE: u64 = 77
+// RUNDE WAYLAND, Stufe 2: `fallocate`. weston-simple-shm ruft
+// `posix_fallocate`, und musl macht daraus diesen Aufruf. Fehlt er,
+// gibt musl EOPNOTSUPP zurueck, os-compatibility.c gibt auf, und der
+// Client stirbt in `abort()` -- ein `hlt` mitten in musl, das wie ein
+// Haldenfehler aussieht und keiner ist. GEMESSEN: der erste Lauf von
+// simple-shm auf OrientOS starb mit
+//   user fault: pid=5 vector=13 err=0x0 cr2=0x4007ce48 rip=0x4011003d
+// und `objdump` zeigte an dieser Adresse das `hlt` in `abort+0x7d`.
+const SYS_FALLOCATE: u64 = 285
 const SYS_MEMFD_CREATE: u64 = 319
 const MFD_CLOEXEC: u64 = 1
 const MFD_ALLOW_SEALING: u64 = 2
@@ -13178,8 +13228,14 @@ const MSG_MAX: u64 = 2048
 // Ring des Sockets. Er liegt im freien Raum hinter den Tafeln von
 // `unixsock.fi` (0xFA000..0x100000) und wird nur INNERHALB eines
 // Systemaufrufs benutzt -- kein Zustand, der einen Aufruf ueberlebt.
-const WL_SCRATCH: u64 = 0xFA000
-const WL_PATH: u64 = 0xFB000
+// GEWACHSEN, WEIL DIE TAFEL GEWACHSEN IST. Die Adresstafel der
+// Speicherobjekte reicht seit Stufe 2 bis 0xFE000 (16 Objekte zu je
+// 1 MiB); 0xFA000 lag mitten darin. Der Kartenpruefer haette das
+// gefunden -- aber erst nach dem Lauf, und bis dahin haette ein
+// `sendmsg` die Rahmenadressen eines fremden Puffers ueberschrieben.
+// Genau dafuer gibt es tools/kernel/memmap.py.
+const WL_SCRATCH: u64 = 0xFE000
+const WL_PATH: u64 = 0xFF000
 
 // Acht Oktette aus Ring 3, wie `put64` sie schreibt. `get32` und
 // `get16` gab es seit Runde K8, einen 64-Bit-Leser nicht -- und ein
@@ -13656,6 +13712,30 @@ fn do_recvmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
         v = v + 1
     }
     return got
+}
+
+// ---------------------------------------------------------- fallocate()
+//
+// Fuer ein Speicherobjekt ist `fallocate(fd, 0, off, len)` dasselbe wie
+// `ftruncate(fd, off + len)`: die Rahmen werden geholt und genullt.
+// Der Unterschied zu Linux -- dort waechst die GROESSE dabei nur, wenn
+// FALLOC_FL_KEEP_SIZE fehlt -- ist hier keiner, weil ein memfd nichts
+// anderes ist als seine Rahmen.
+fn do_fallocate(state: u64, me: u64, fd: u64, mode: u64, off: u64,
+    len: u64) -> u64 {
+    if mode != 0 {
+        return neg(errno.E_OPNOTSUPP)
+    }
+    if len == 0 {
+        return neg(errno.E_INVAL)
+    }
+    // Die Addition ist unter `profile kernel` geprueft; ein Aufrufer
+    // mit off = 2^64 - 1 haelt sonst die Maschine an statt einen
+    // Fehler zu bekommen.
+    if off > 0xFFFFFFFF || len > 0xFFFFFFFF {
+        return neg(errno.E_FBIG)
+    }
+    return do_ftruncate(state, me, fd, off + len)
 }
 
 // ---------------------------------------------------------- ftruncate()
