@@ -1,7 +1,7 @@
 # Runde FREMDFS — fremde Dateisysteme lesen (ext4 und NTFS)
 
 Zweig `fremdfs`, abgezweigt von `main` (`ce4a232`).
-Gemessen mit `bash tools/fremdfs/run.sh` (110 Zusagen) und
+Gemessen mit `bash tools/fremdfs/run.sh` (**131 Zusagen, 0 gescheitert**) und
 `bash tools/fremdfs/tempo.sh`.
 
 Diese Runde schließt die Lücke, die `docs/RUNDE-DUALBOOT.md` offen
@@ -65,7 +65,7 @@ Angebunden wie FAT32: `kernel/vfsops.fi` (`FS_EXT4`, `FS_NTFS`),
 ## 3. Die Messung
 
 ```
-FREMDFS: 110 bestanden, 0 gescheitert
+FREMDFS: 131 bestanden, 0 gescheitert
 ```
 
 Was darin steckt:
@@ -80,6 +80,7 @@ Was darin steckt:
 | 5b | 26 | **ext4**, 4096er Blöcke — dieselbe Arbeit, andere Geometrie |
 | 6 | 24 | **NTFS** |
 | 7 | 13 | die Gegenproben |
+| 7b | 21 | **die Abschaltbarkeit** (Abschnitt 8) |
 | 8 | 2 | die Zeit |
 
 ### 3.1 Der Prüfbaum
