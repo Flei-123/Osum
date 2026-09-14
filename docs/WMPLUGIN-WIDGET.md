@@ -4,7 +4,8 @@ Runde WMPLUGIN, Zweig `wmplugin`. Dieses Blatt gehoert dem Modul
 `widget`; der Bericht der ganzen Runde steht in `docs/RUNDE-WMPLUGIN.md`
 und darf von hier abschreiben. **Jede Zahl unten stammt aus einem
 wirklich gebooteten Kernel** (`bash tools/wmplug/widget.sh`, QEMU,
-800x600), nicht aus einer Ueberlegung.
+800x600), nicht aus einer Ueberlegung. Der Laeufer endet mit
+**30 bestanden, 0 gescheitert**.
 
 ## Die Dateien
 
@@ -64,9 +65,14 @@ Stelle.
 |-----------|----------|------|
 | `widget-an` gegen `widget-aus` (zwei Laeufe) | verschiedene Punkte im Kasten | **3432 von 3432** |
 | dieselbe Mitte (652,585), `checkshot.py punkt` | aus `30 41 59` / an `38 48 60` | verschieden |
-| Tinte im Kasten (AN), `checkshot.py flaeche` | gegen die Kastenfarbe | **581** |
+| Tinte im Kasten (AN), `checkshot.py flaeche` | gegen die Kastenfarbe | **604** |
 | `widget-an` gegen `widget-aus-laufzeit` (EIN Lauf) | verschiedene Punkte | **3432** |
 | Tinte im Kasten nach dem Abmelden | gegen die Kastenfarbe | **0** |
+
+(Die Tintenzahl schwankt von Lauf zu Lauf um wenige Punkte, weil die
+Uhrzeit im Text steht: `17:10` und `17:46` haben nicht dieselbe Tinte.
+Gemessen wurde 581 und 604 in zwei Laeufen; die Zusage lautet ">20",
+nicht "genau 604".)
 
 Die letzten beiden Zeilen sind die eigentliche Zusage "**an und aus zur
 Laufzeit**": beide Bilder kommen aus **demselben Systemstart**, demselben
@@ -74,6 +80,33 @@ Laufzeit**": beide Bilder kommen aus **demselben Systemstart**, demselben
 `wmplug: unreg uhr grund=0`. Der Fensterserver wurde nicht neu
 gestartet, die Leiste nicht neu gestartet, und auf dem zweiten Bild
 steht die Uhr der Leiste unveraendert da, wo sie vorher stand.
+
+## Die Gegenprobe ohne Plugintafel
+
+Derselbe Kernel, dasselbe Abbild, dazu das Wort `plugaus`: der Kern
+meldet `tafel= zu`, die Leiste fragt `PL_MAXPLUG` genau einmal, bekommt
+einen Fehler und fragt nie wieder. Gemessen: Schreibtisch steht,
+`taskbar: geom` wie immer, **kein** `taskbar: plug nr=`.
+
+Nebenbefund, hier festgehalten, weil eine Zusage dieses Laeufers daran
+zuerst rot war: **ohne `plugaus` ist die Tafel OFFEN, auch ohne das Wort
+`wmplug`** -- in jedem gemessenen Lauf steht
+`wmplug: abi=1  tafel= offen  frist=50` auf der Leitung.
+
+## Offene Punkte
+
+* `bash tools/desktop/run.sh` meldet in diesem Arbeitsbaum
+  **57 passed, 42 failed**. Die sichtbaren roten Zusagen handeln von
+  Aufloesung und Rechtecken (`the bar is at (0, 772, 1280, 28)` --
+  der Laeufer startet QEMU ohne `-global VGA.edid=off` und erwartet
+  800x600). **Nicht gegengeprueft** gegen den Stand vor dieser Runde:
+  an diesem Arbeitsbaum arbeiten gleichzeitig vier Module, ein
+  Vergleichslauf haette also nicht diese Aenderung gemessen. Was sich
+  ueber diese Aenderung sagen laesst: sie faegt der Leiste ein Feld
+  hinzu, wenn ein Plugin Text schickt, und einen Systemaufruf je
+  Sekunde, wenn keines da ist -- an der Aufloesung, an
+  `/etc/taskbar.conf` und an den Schirmrand-Reservierungen fasst sie
+  nichts an.
 
 ## Ausdrueckliche Abkuerzungen dieses Moduls
 
