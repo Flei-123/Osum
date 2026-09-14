@@ -1,0 +1,548 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/amlns.fi -- RUNDE AML, TEIL 1: DER NAMENSRAUM.
+//
+// AML ist die Sprache, in der die Firmware ihre Geraete beschreibt. Sie
+// steht als Oktettstrom in der DSDT und in den SSDTs, und sie hat zwei
+// Haelften, die man auseinanderhalten muss:
+//
+//   * DIE ERKLAERENDE HAELFTE -- Scope, Device, Method, Name,
+//     OperationRegion, Field. Sie baut einen BAUM aus Namen auf, und
+//     jeder Name ist genau vier Zeichen lang. Das ist diese Datei.
+//   * DIE AUSFUEHRENDE HAELFTE -- Store, If, While, Add, Index. Sie
+//     laeuft erst, wenn jemand eine Methode aufruft. Das ist
+//     `kernel/aml.fi`.
+//
+// WARUM DER BAUM NICHT IN `kdata` LIEGT. Eine DSDT von QEMU ist 6476
+// Oktette lang und hat 360 Namen; die eines gewoehnlichen Laptops hat
+// das Zehnfache. Ein fester Bereich in `kdata` waere entweder zu klein
+// oder verschenkt eine Viertelmegabyte an jede Maschine, die ihn nicht
+// braucht. Also kommt der Baum aus dem Rahmenverwalter
+// (`mem.frame_run`) und geht nach Gebrauch dorthin zurueck -- und genau
+// das misst die Abnahme (`tools/aml/run.sh`, Zusage "kein Leck").
+//
+// EIN KNOTEN SIND 32 OKTETTE:
+//
+//   +0   die vier Namensoktette als Wort ('P','R','Q','0')
+//   +4   der Elternknoten (Index, 16 Bit)
+//   +6   die Art (NK_*)
+//   +7   Zusatzbits -- bei einer Methode die Zahl der Argumente
+//   +8   a: Name -> Stelle im AML; Methode -> Anfang des Rumpfes;
+//           Region -> Basisadresse; Feld -> Knoten der Region
+//   +16  b: Methode -> Ende des Rumpfes; Region -> Laenge;
+//           Feld -> Bitversatz; Name -> zwischengespeichertes Objekt
+//   +24  c: Region -> Adressraum; Feld -> Bitbreite | Zugriffsart << 32
+//
+// Der Wurzelknoten ist Index 0 und heisst nichts ("\"). Jeder andere
+// Knoten hat einen Elternknoten, und weil ein Name vier Oktette hat,
+// ist der Vergleich zweier Namen EIN Wortvergleich und keine
+// Zeichenschleife.
+
+import kstate
+import serial
+
+export {
+    NONE, NODE_BYTES, NMAX, ARENA_FRAMES,
+    NK_SCOPE, NK_DEVICE, NK_METHOD, NK_NAME, NK_REGION, NK_FIELD,
+    NK_MUTEX, NK_EVENT, NK_PROC, NK_TZ, NK_POWER, NK_BUFFIELD, NK_ALIAS,
+    arena, arena_end, nodes, node_at, node_name, node_parent, node_kind,
+    node_flags, node_a, node_b, node_c,
+    set_kind, set_flags, set_a, set_b, set_c,
+    root_reset, child, add, walk, walk_create, path_out,
+    heap_alloc, heap_used, heap_reset, heap_high, heap_mark,
+    err, err_set, ERR_OK, ERR_NOMEM, ERR_NODES, ERR_HEAP, ERR_TRUNC,
+    ERR_OPCODE, ERR_DEPTH, ERR_BUDGET, ERR_TYPE, ERR_NOTFOUND,
+    ERR_REGION, ERR_DIV0, ERR_NOPRT, ERR_NODSDT, ERR_ARG,
+    rd8, rd16, rd32, rd64, wr8, wr64,
+    pkglen, seg_of, name_print
+}
+
+// "kein Knoten" -- 0 ist die Wurzel und damit ein gueltiger Index.
+// WIE GROSS DER NAMENSRAUM WERDEN DARF. 2048 Knoten sind 64 KiB; QEMUs
+// DSDT braucht 360. Die Arena ist 64 Rahmen = 256 KiB, also bleiben
+// 192 KiB Halde fuer Puffer, Pakete und Methodenrahmen. Beides steht
+// hier und nirgends sonst, und `tools/aml/run.sh` liest die Zahlen aus
+// dieser Datei, statt sie noch einmal aufzuschreiben.
+const NMAX: u64 = 2048
+const ARENA_FRAMES: u64 = 64
+
+const NONE: u64 = 0xFFFFFFFF
+const NODE_BYTES: u64 = 32
+
+const NK_FREE: u64 = 0
+const NK_SCOPE: u64 = 1
+const NK_DEVICE: u64 = 2
+const NK_METHOD: u64 = 3
+const NK_NAME: u64 = 4
+const NK_REGION: u64 = 5
+const NK_FIELD: u64 = 6
+const NK_MUTEX: u64 = 7
+const NK_EVENT: u64 = 8
+const NK_PROC: u64 = 9
+const NK_TZ: u64 = 10
+const NK_POWER: u64 = 11
+const NK_BUFFIELD: u64 = 12
+const NK_ALIAS: u64 = 13
+
+// Die Fehler. Jeder ist EINE Zahl, und jede Zahl hat genau einen Grund
+// -- ein Interpreter, der "hat nicht geklappt" sagt, ist auf echter
+// Hardware wertlos.
+const ERR_OK: u64 = 0
+const ERR_NOMEM: u64 = 1 // kein Rahmenlauf zu bekommen
+const ERR_NODES: u64 = 2 // die Knotentafel ist voll
+const ERR_HEAP: u64 = 3 // die Halde des Interpreters ist voll
+const ERR_TRUNC: u64 = 4 // das AML hoert mitten in einem Objekt auf
+const ERR_OPCODE: u64 = 5 // ein Opcode, den dieser Interpreter nicht kennt
+const ERR_DEPTH: u64 = 6 // zu tief verschachtelt
+const ERR_BUDGET: u64 = 7 // die Schrittgrenze -- eine Schleife endet nicht
+const ERR_TYPE: u64 = 8 // ein Objekt der falschen Art
+const ERR_NOTFOUND: u64 = 9 // ein Name, den es nicht gibt
+const ERR_REGION: u64 = 10 // eine Adressraumart, die es hier nicht gibt
+const ERR_DIV0: u64 = 11 // Teilung durch null
+const ERR_NOPRT: u64 = 12 // kein _PRT gefunden
+const ERR_NODSDT: u64 = 13 // keine DSDT
+const ERR_ARG: u64 = 14 // Arg/Local ausserhalb des Rahmens
+
+// ---------------------------------------------------- die Skalarplaetze
+//
+// Sie liegen in `kstate.AML_OFF`. Der Namensraum selbst liegt in der
+// Arena, deren Adresse hier steht.
+
+const A_ARENA: u64 = 0 // Anfang des Rahmenlaufs, 0 = keiner
+const A_FRAMES: u64 = 8 // wie viele Rahmen er lang ist
+const A_NODES: u64 = 16 // wie viele Knoten belegt sind
+const A_HEAP: u64 = 24 // naechstes freies Oktett der Halde (absolut)
+const A_HEAPEND: u64 = 32 // hinter der Halde
+const A_ERR: u64 = 40 // der Fehler, siehe ERR_*
+const A_HEAPHI: u64 = 48 // Hoechststand der Halde
+
+fn g(state: u64, off: u64) -> u64 {
+    return kstate.get(state, kstate.AML_OFF + off)
+}
+
+fn s(state: u64, off: u64, v: u64) {
+    kstate.set(state, kstate.AML_OFF + off, v)
+}
+
+fn err(state: u64) -> u64 {
+    return g(state, A_ERR)
+}
+
+// DER ERSTE FEHLER BLEIBT STEHEN. Ein Fehler, der von einem spaeteren
+// ueberschrieben wird, sagt nichts mehr darueber, wo es angefangen hat.
+fn err_set(state: u64, e: u64) {
+    if g(state, A_ERR) == ERR_OK {
+        s(state, A_ERR, e)
+    }
+}
+
+// --------------------------------------------------- Oktette und Woerter
+
+fn rd8(p: u64) -> u64 {
+    return kstate.get8(p)
+}
+
+fn rd16(p: u64) -> u64 {
+    return kstate.get8(p) | (kstate.get8(p + 1) << 8)
+}
+
+fn rd32(p: u64) -> u64 {
+    return kstate.get32(p)
+}
+
+fn rd64(p: u64) -> u64 {
+    return __mmio_read64(p as *mut u64)
+}
+
+fn wr8(p: u64, v: u64) {
+    kstate.set8(p, (v & 0xFF) as u8)
+}
+
+fn wr64(p: u64, v: u64) {
+    __mmio_write64(p as *mut u64, v)
+}
+
+// Eine PkgLength. Die oberen zwei Bits des ersten Oktetts sagen, wie
+// viele Oktette noch folgen; bei null ist der Rest des ersten Oktetts
+// schon die ganze Laenge. Die Laenge ZAEHLT SICH SELBST MIT.
+// Gibt die Laenge zurueck und schreibt die Stelle dahinter nach `out`.
+fn pkglen(p: u64, out: u64) -> u64 {
+    let lead: u64 = rd8(p)
+    let extra: u64 = (lead >> 6) & 3
+    if extra == 0 {
+        wr64(out, p + 1)
+        return lead & 0x3F
+    }
+    var v: u64 = lead & 0x0F
+    var i: u64 = 0
+    while i < extra {
+        v = v | (rd8(p + 1 + i) << (4 + i * 8))
+        i = i + 1
+    }
+    wr64(out, p + 1 + extra)
+    return v
+}
+
+// Vier Namensoktette als ein Wort.
+fn seg_of(p: u64) -> u64 {
+    return rd8(p) | (rd8(p + 1) << 8) | (rd8(p + 2) << 16) | (rd8(p + 3) << 24)
+}
+
+// ------------------------------------------------------------ die Arena
+
+fn arena(state: u64) -> u64 {
+    return g(state, A_ARENA)
+}
+
+fn arena_end(state: u64) -> u64 {
+    return g(state, A_HEAPEND)
+}
+
+fn nodes(state: u64) -> u64 {
+    return g(state, A_NODES)
+}
+
+fn node_at(state: u64, i: u64) -> u64 {
+    return g(state, A_ARENA) + i * NODE_BYTES
+}
+
+fn node_name(state: u64, i: u64) -> u64 {
+    return rd32(node_at(state, i))
+}
+
+fn node_parent(state: u64, i: u64) -> u64 {
+    if i == 0 {
+        return 0
+    }
+    return rd16(node_at(state, i) + 4)
+}
+
+fn node_kind(state: u64, i: u64) -> u64 {
+    return rd8(node_at(state, i) + 6)
+}
+
+fn node_flags(state: u64, i: u64) -> u64 {
+    return rd8(node_at(state, i) + 7)
+}
+
+fn node_a(state: u64, i: u64) -> u64 {
+    return rd64(node_at(state, i) + 8)
+}
+
+fn node_b(state: u64, i: u64) -> u64 {
+    return rd64(node_at(state, i) + 16)
+}
+
+fn node_c(state: u64, i: u64) -> u64 {
+    return rd64(node_at(state, i) + 24)
+}
+
+fn set_kind(state: u64, i: u64, v: u64) {
+    wr8(node_at(state, i) + 6, v)
+}
+
+fn set_flags(state: u64, i: u64, v: u64) {
+    wr8(node_at(state, i) + 7, v)
+}
+
+fn set_a(state: u64, i: u64, v: u64) {
+    wr64(node_at(state, i) + 8, v)
+}
+
+fn set_b(state: u64, i: u64, v: u64) {
+    wr64(node_at(state, i) + 16, v)
+}
+
+fn set_c(state: u64, i: u64, v: u64) {
+    wr64(node_at(state, i) + 24, v)
+}
+
+// Die Arena wird von `aml.fi` besorgt und hier eingetragen. `nmax` ist
+// die Zahl der Knotenplaetze; dahinter faengt die Halde an.
+fn root_reset(state: u64, base: u64, nmax: u64, end: u64) {
+    s(state, A_ARENA, base)
+    s(state, A_NODES, 1)
+    s(state, A_HEAP, base + nmax * NODE_BYTES)
+    s(state, A_HEAPEND, end)
+    s(state, A_HEAPHI, base + nmax * NODE_BYTES)
+    s(state, A_ERR, ERR_OK)
+    // Der Wurzelknoten: kein Name, kein Elternknoten, Art Scope.
+    var i: u64 = 0
+    while i < NODE_BYTES {
+        wr8(base + i, 0)
+        i = i + 1
+    }
+    wr8(base + 6, NK_SCOPE)
+}
+
+// --------------------------------------------------------------- Halde
+//
+// EIN SCHIEBEZEIGER, KEIN FREIGEBEN. Der ganze Lauf wird am Stueck
+// zurueckgegeben; einzelne Objekte einzeln freizugeben waere eine
+// Verwaltung, die dieser Interpreter nicht braucht und deren
+// Lebensdauerfragen genau die Fehlerklasse sind, aus der 2023 die
+// meisten Kernel-Exploits kamen (siehe docs/HANDLE-STATUS.md).
+fn heap_alloc(state: u64, n: u64) -> u64 {
+    let want: u64 = (n + 7) / 8 * 8
+    let p: u64 = g(state, A_HEAP)
+    if p + want > g(state, A_HEAPEND) {
+        err_set(state, ERR_HEAP)
+        return 0
+    }
+    s(state, A_HEAP, p + want)
+    if p + want > g(state, A_HEAPHI) {
+        s(state, A_HEAPHI, p + want)
+    }
+    var i: u64 = 0
+    while i < want {
+        wr8(p + i, 0)
+        i = i + 1
+    }
+    return p
+}
+
+fn heap_mark(state: u64) -> u64 {
+    return g(state, A_HEAP)
+}
+
+fn heap_used(state: u64) -> u64 {
+    return g(state, A_HEAP) -% (g(state, A_ARENA) + nodes(state) * NODE_BYTES)
+}
+
+fn heap_high(state: u64) -> u64 {
+    return g(state, A_HEAPHI) -% g(state, A_ARENA)
+}
+
+// Der Schiebezeiger zurueck auf einen frueheren Stand. Damit gibt ein
+// Methodenaufruf seinen Rahmen wieder her -- ein Stapel, kein Haufen.
+fn heap_reset(state: u64, p: u64) {
+    if p >= g(state, A_ARENA) && p <= g(state, A_HEAP) {
+        s(state, A_HEAP, p)
+    }
+}
+
+// -------------------------------------------------- Kinder und Anlegen
+
+// Das Kind mit diesem Namen, oder NONE.
+fn child(state: u64, parent: u64, name: u64) -> u64 {
+    let n: u64 = nodes(state)
+    var i: u64 = 1
+    while i < n {
+        if node_parent(state, i) == parent {
+            if node_name(state, i) == name {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    return NONE
+}
+
+// Einen Knoten anlegen. Gibt den Index zurueck, oder NONE, wenn die
+// Tafel voll ist -- und dann steht ERR_NODES.
+fn add(state: u64, parent: u64, name: u64, kind: u64, nmax: u64) -> u64 {
+    let n: u64 = nodes(state)
+    if n >= nmax {
+        err_set(state, ERR_NODES)
+        return NONE
+    }
+    let p: u64 = node_at(state, n)
+    var i: u64 = 0
+    while i < NODE_BYTES {
+        wr8(p + i, 0)
+        i = i + 1
+    }
+    wr8(p, name & 0xFF)
+    wr8(p + 1, (name >> 8) & 0xFF)
+    wr8(p + 2, (name >> 16) & 0xFF)
+    wr8(p + 3, (name >> 24) & 0xFF)
+    wr8(p + 4, parent & 0xFF)
+    wr8(p + 5, (parent >> 8) & 0xFF)
+    wr8(p + 6, kind)
+    s(state, A_NODES, n + 1)
+    return n
+}
+
+// ------------------------------------------------------- ein NameString
+//
+// DIE SUCHREGEL DER SPEZIFIKATION (Abschnitt 5.3). Ein einzelnes
+// Namenssegment ohne Praefix wird vom aktuellen Bereich AUFWAERTS bis zur
+// Wurzel gesucht -- deshalb findet `Return(IQCR(PRQ0))` in
+// `\_SB.LNKA._CRS` die Methode `\_SB.IQCR`. Ein Name mit '\' davor ist
+// absolut, ein Name mit '^' geht so viele Ebenen hoch, ein Name mit
+// mehreren Segmenten ist relativ zum aktuellen Bereich.
+//
+// `out` bekommt die Stelle hinter dem Namen. Rueckgabe: der Knoten oder
+// NONE.
+fn walk(state: u64, scope: u64, p: u64, out: u64) -> u64 {
+    var q: u64 = p
+    var base: u64 = scope
+    var rooted: u64 = 0
+    if rd8(q) == 0x5C {
+        base = 0
+        rooted = 1
+        q = q + 1
+    } else {
+        while rd8(q) == 0x5E {
+            base = node_parent(state, base)
+            rooted = 1
+            q = q + 1
+        }
+    }
+    let c: u64 = rd8(q)
+    var cnt: u64 = 1
+    if c == 0x00 {
+        wr64(out, q + 1)
+        return base
+    }
+    if c == 0x2E {
+        cnt = 2
+        q = q + 1
+    }
+    if c == 0x2F {
+        cnt = rd8(q + 1)
+        q = q + 2
+    }
+    wr64(out, q + cnt * 4)
+    if cnt == 0 {
+        return base
+    }
+    // Ein einzelnes Segment ohne Praefix: aufwaerts suchen.
+    if rooted == 0 && cnt == 1 {
+        let want: u64 = seg_of(q)
+        var b: u64 = base
+        while true {
+            let hit: u64 = child(state, b, want)
+            if hit != NONE {
+                return hit
+            }
+            if b == 0 {
+                return NONE
+            }
+            b = node_parent(state, b)
+        }
+    }
+    // Sonst: den Pfad von `base` aus hinuntergehen.
+    var cur: u64 = base
+    var i: u64 = 0
+    var ok: u64 = 1
+    while i < cnt {
+        var hit: u64 = child(state, cur, seg_of(q + i * 4))
+        // Der ERSTE Schritt eines relativen Pfades darf aufwaerts
+        // gesucht werden -- das tun die anderen Interpreter auch, und
+        // ohne das findet `PCI0.S08` nichts, wenn der Bereich tiefer
+        // steht als `\_SB`.
+        if hit == NONE && i == 0 && rooted == 0 {
+            var b: u64 = cur
+            while hit == NONE {
+                if b == 0 {
+                    break
+                }
+                b = node_parent(state, b)
+                hit = child(state, b, seg_of(q))
+            }
+        }
+        if hit == NONE {
+            ok = 0
+            break
+        }
+        cur = hit
+        i = i + 1
+    }
+    if ok == 0 {
+        return NONE
+    }
+    return cur
+}
+
+// Wie `walk`, legt aber an, was fehlt. Der letzte Knoten bekommt `kind`,
+// die Zwischenknoten werden Bereiche.
+fn walk_create(state: u64, scope: u64, p: u64, out: u64, kind: u64,
+    nmax: u64) -> u64 {
+    var q: u64 = p
+    var base: u64 = scope
+    if rd8(q) == 0x5C {
+        base = 0
+        q = q + 1
+    } else {
+        while rd8(q) == 0x5E {
+            base = node_parent(state, base)
+            q = q + 1
+        }
+    }
+    let c: u64 = rd8(q)
+    var cnt: u64 = 1
+    if c == 0x00 {
+        wr64(out, q + 1)
+        return base
+    }
+    if c == 0x2E {
+        cnt = 2
+        q = q + 1
+    }
+    if c == 0x2F {
+        cnt = rd8(q + 1)
+        q = q + 2
+    }
+    wr64(out, q + cnt * 4)
+    var cur: u64 = base
+    var i: u64 = 0
+    while i < cnt {
+        let want: u64 = seg_of(q + i * 4)
+        var hit: u64 = child(state, cur, want)
+        // Das ERSTE Segment eines relativen Pfades darf aufwaerts
+        // gefunden werden -- `Scope(\_SB.PCI0)` steht in QEMUs DSDT
+        // dreimal und meint jedes Mal denselben Knoten.
+        if hit == NONE {
+            var k: u64 = kind
+            if i + 1 < cnt {
+                k = NK_SCOPE
+            }
+            hit = add(state, cur, want, k, nmax)
+            if hit == NONE {
+                return NONE
+            }
+        }
+        cur = hit
+        i = i + 1
+    }
+    return cur
+}
+
+// ------------------------------------------------------- Namen ausgeben
+
+fn seg_print(v: u64) {
+    // Auffuellende Unterstriche am ENDE weglassen -- "PCI0" bleibt
+    // "PCI0", "_SB_" wird "_SB". Ein Unterstrich MITTEN im Namen ist
+    // ein Zeichen wie jedes andere und bleibt stehen.
+    var n: u64 = 4
+    while n > 1 {
+        if ((v >> ((n -% 1) * 8)) & 0xFF) != 95 {
+            break
+        }
+        n = n -% 1
+    }
+    var i: u64 = 0
+    while i < n {
+        serial.put(((v >> (i * 8)) & 0xFF) as u8)
+        i = i + 1
+    }
+}
+
+// Den vollen Pfad eines Knotens auf die Leitung. Rekursiv ueber die
+// Eltern -- die Tiefe eines ACPI-Namensraums ist einstellig.
+fn path_out(state: u64, i: u64) {
+    if i == 0 {
+        serial.put(92 as u8) // '\'
+        return
+    }
+    let par: u64 = node_parent(state, i)
+    path_out(state, par)
+    if par != 0 {
+        serial.put(46 as u8) // '.'
+    }
+    seg_print(node_name(state, i))
+}
+
+fn name_print(v: u64) {
+    seg_print(v)
+}

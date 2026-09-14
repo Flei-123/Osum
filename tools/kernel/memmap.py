@@ -253,6 +253,15 @@ BEREICHE = [
     # Drei Seiten aus dem letzten freien Stueck, 0x7A000..0x80000.
     ("JR",         "kstate.fi", "JR_OFF",         "JR_MAX"),
     ("K18BATT",    "kstate.fi", "BATT_OFF",       "BATT_MAX"),
+    # RUNDE AML: die Skalare des AML-Interpreters (0x85000, eine Seite).
+    # Der NAMENSRAUM liegt NICHT in `kdata`: er kommt aus dem
+    # Rahmenverwalter (`mem.frame_run`, 64 Rahmen) und geht nach
+    # Gebrauch dorthin zurueck. Hier steht nur, was ihn ueberlebt --
+    # die Routentafel Steckplatz/Stift -> GSI.
+    ("AML",        "kstate.fi", "AML_OFF",        "AML_MAX"),
+    # RUNDE ACPI-EREIGNISSE: eine eigene Seite hinter dem
+    # Interpreter, siehe die Begruendung in kstate.fi.
+    ("ACPIEV",     "kstate.fi", "ACPIEV_OFF",     "ACPIEV_MAX"),
     # RUNDE DISPLAY: der Modustreiber.  Zwei Seiten aus demselben Vorrat
     # (0x5A000 und 0x5B000) -- die Modusliste samt Skalaren und die
     # Nachschlagetabelle fuer Gamma/Helligkeit/Kontrast/Saettigung samt

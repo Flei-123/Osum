@@ -78,6 +78,7 @@ import crash
 import power
 import pwr
 import batt
+import acpiev
 
 // RUNDE K14: die VFS-Schicht. `vfs` zieht die Treiber mit herein;
 // `mnt` ist die Einhaengetafel, `devfs` wird an genau einer Stelle
@@ -1588,7 +1589,38 @@ const PG_BATWARN: u64 = 41
 const PG_BATLOW: u64 = 42
 const PG_BATUNIT: u64 = 43
 const PG_LIMIT: u64 = 44
-const PG_COUNT: u64 = 45
+// RUNDE ACPI-EREIGNISSE: was ueber den SCI hereinkommt.
+//
+//   PG_EVREADY   1 = die Ereignisse stehen (SCI eingetragen,
+//                GPE-Bits scharf). 0 = alles wie vor der Runde.
+//   PG_EVWHY     warum nicht, `acpiev.WHY_*`.
+//   PG_LIDOK     1 = dieses Brett hat einen Deckel (`_LID`).
+//   PG_LID       1 = offen, 0 = zu, 2 = noch nie gelesen.
+//   PG_EVENTS    wie viele Ereignisse behandelt wurden. Die Zahl
+//                ist die Abnahme: sie MUSS steigen, wenn man den
+//                Deckel zuklappt.
+//   PG_EVWAKE    wie oft der SCI-Behandler geweckt hat.
+//   PG_EVGPE     wie viele GPE-Bits scharf sind.
+//   PG_EVSCI     auf welcher Leitung der SCI liegt.
+//   PG_EVCHANGE  BITFELD dessen, was sich seit der letzten
+//                Abfrage geaendert hat -- und das LESEN LEERT ES.
+//                Genau deshalb ist es ein eigenes Feld und nicht
+//                aus den anderen ableitbar: die Taskleiste will
+//                wissen, OB sie neu zeichnen muss, ohne alle
+//                Werte einzeln zu vergleichen.
+//   PG_BTN       1 = die Einschalttaste wurde gedrueckt. DAS
+//                LESEN HOLT SIE AB (sie meldet sich einmal).
+const PG_EVREADY: u64 = 45
+const PG_EVWHY: u64 = 46
+const PG_LIDOK: u64 = 47
+const PG_LID: u64 = 48
+const PG_EVENTS: u64 = 49
+const PG_EVWAKE: u64 = 50
+const PG_EVGPE: u64 = 51
+const PG_EVSCI: u64 = 52
+const PG_EVCHANGE: u64 = 53
+const PG_BTN: u64 = 54
+const PG_COUNT: u64 = 55
 
 // Die Felder von `osum_pwrset`.
 const PS_PROFILE: u64 = 0
@@ -8494,8 +8526,61 @@ fn do_pwrget(state: u64, field: u64) -> u64 {
     if field == PG_BLANKS {
         return pwr.value(state, pwr.PW_BLANKS)
     }
+    // ---- RUNDE ACPI-EREIGNISSE
+    //
+    // VOR der Akkusperre unten: ein Brett ohne Akku hat trotzdem einen
+    // Deckel und eine Einschalttaste, und `-ENODEV` waere dort falsch.
+    if field == PG_EVREADY {
+        if acpiev.ready(state) {
+            return 1
+        }
+        return 0
+    }
+    if field == PG_EVWHY {
+        return acpiev.why(state)
+    }
+    if field == PG_LIDOK {
+        if acpiev.lid_present(state) {
+            return 1
+        }
+        return 0
+    }
+    if field == PG_LID {
+        return acpiev.lid_state(state)
+    }
+    if field == PG_EVENTS {
+        return acpiev.events(state)
+    }
+    if field == PG_EVWAKE {
+        return acpiev.wakeups(state)
+    }
+    if field == PG_EVGPE {
+        return acpiev.gpe_armed(state)
+    }
+    if field == PG_EVSCI {
+        return acpiev.sci_gsi(state)
+    }
+    // DIESE ZWEI LEEREN, WAS SIE LESEN. Siehe die Begruendung oben bei
+    // den Feldnummern.
+    if field == PG_EVCHANGE {
+        return acpiev.take_change(state)
+    }
+    if field == PG_BTN {
+        if acpiev.button_take(state) {
+            return 1
+        }
+        return 0
+    }
+
     // ---- der Akku
     if field == PG_BATPRESENT {
+        // RUNDE ACPI-EREIGNISSE: der Interpreter zaehlt mit. `batt.fi`
+        // findet nur einen Akku, dessen `_BST` eine KONSTANTE ist;
+        // `acpiev` fuehrt die Methode aus und findet damit auch den
+        // Akku eines echten Laptops hinter dem Embedded Controller.
+        if acpiev.batt_present(state) {
+            return 1
+        }
         if batt.present(state) {
             return 1
         }
@@ -8514,6 +8599,9 @@ fn do_pwrget(state: u64, field: u64) -> u64 {
         return 0
     }
     if field == PG_AC {
+        if acpiev.ready(state) && acpiev.ac_online(state) {
+            return 1
+        }
         if batt.ac_online(state) {
             return 1
         }
@@ -8521,16 +8609,25 @@ fn do_pwrget(state: u64, field: u64) -> u64 {
     }
     // Ohne Akku gibt es keine Akkuzahlen -- und zwar -ENODEV und nicht
     // eine Null. Eine Null hiesse "leer", und das waere gelogen.
-    if !batt.present(state) {
+    if !batt.present(state) && !acpiev.batt_present(state) {
         return neg(errno.E_NODEV)
     }
     if field == PG_BATPERCENT {
+        // Der gemessene Wert aus `_BST` schlaegt den abgesuchten. Hat
+        // der Interpreter keinen, bleibt es beim alten Weg -- der auf
+        // jeder selbstgebauten SSDT weiter stimmt.
+        if acpiev.batt_present(state) {
+            return acpiev.batt_percent(state)
+        }
         return batt.percent(state)
     }
     if field == PG_BATMINUTES {
         return batt.minutes(state)
     }
     if field == PG_BATSTATE {
+        if acpiev.batt_present(state) {
+            return acpiev.batt_state(state)
+        }
         return batt.value(state, batt.BT_STATE)
     }
     if field == PG_BATRATE {
