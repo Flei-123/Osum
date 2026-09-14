@@ -73,6 +73,31 @@ BEKANNT = {
     # (`usbstop`) oder die Uebernahme pruefen (`usbleg`) will, will
     # USB.  Kein Abschalter, keiner von beiden hebt etwas Fremdes auf.
     ("usb", "usbstop"), ("usb", "usbleg"),
+    # RUNDE ROTABSCHNITTE.  Vier Einschluesse, die durch das
+    # Zusammenfuehren der fuenf Runden entstanden sind.  Jeder einzeln
+    # nachgesehen, keiner ist der gefaehrliche Fall:
+    #
+    #   audio / noaudio   Derselbe Bauplan wie `usb`/`nousb` und
+    #       `share`/`noshare`, und kmain.fi sagt es woertlich:
+    #       "`noaudio` loescht kein Bit, es setzt ein zweites, und
+    #       `audio_stage` sieht beide an -- ein Schalter, den sein
+    #       eigenes Argument aufhebt, ist keiner."  Wer `noaudio`
+    #       schreibt, setzt also BEIDE Bits, und das ist gewollt.
+    #
+    #   flip / noflip     Dasselbe, nachgerechnet in fb.fi:985:
+    #       `if want(state, M_FLIP) && !want(state, M_NOFLIP)`.
+    #       Beide Bits werden angesehen, die Gegenprobe gewinnt.
+    #
+    #   self / blkself, self / nicself   KEIN Einschluss im Betrieb.
+    #       `self` ist gar kein Moduswort, sondern ein PFADSEGMENT in
+    #       procfs.fi:1207, und es wird mit `streq` verglichen --
+    #       exakte Gleichheit auf einem Segment, nicht `find` auf der
+    #       ganzen Befehlszeile.  `/proc/self` kann in `blkself` oder
+    #       `nicself` nicht zuschlagen; die beiden stehen ausserdem in
+    #       anderen Dateien (kmain.fi, hw.fi) und meinen etwas anderes.
+    ("audio", "noaudio"),
+    ("flip", "noflip"),
+    ("self", "blkself"), ("self", "nicself"),
 }
 
 
