@@ -13,7 +13,7 @@ wirklich gebooteten Kernel** (`bash tools/wmplug/widget.sh`, QEMU,
 |-------|-------------|
 | `kernel/user/pluguhr.fi` | `/bin/pluguhr` — das Widget, ein **Ring-3-Prozess** |
 | `kernel/user/taskbar.fi` | die Leiste holt die Texte und malt sie |
-| `kernel/user/plugstart.fi` | **Abkuerzung**, siehe unten |
+| `kernel/user/plugstart.fi` | **Abkuerzung**, siehe unten — **in der Nachbesserung R2-2 geloescht**: der Schreibtisch liest `/etc/wmplug.autostart`, `wmplug enable` startet das Programm aus `prog=` (docs/RUNDE-WMPLUGIN.md, Abschnitt 14.1) |
 | `tools/wmplug/widget.sh` | der Laeufer: 30 Zusagen, drei QEMU-Laeufe |
 | `docs/shots/wmplug/widget-{an,aus,aus-laufzeit}.png` | die drei Fotos |
 

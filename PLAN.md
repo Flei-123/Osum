@@ -81,6 +81,19 @@ Alleingang: vier Module lesen sie.
 | 2125 | `WM_PLUG_BARGET` | (platz, aus, max) | Laenge — **nur die Leiste** (`is_taskbar`) |
 | 2126 | `WM_PLUG_GRANT` | (name*15, rechte) | 0 / `-E_RIGHTS` — **nur root** |
 
+**Nachbesserung R2-2 (Autostart, Leserecht, Frist, Schwelle):**
+`WM_PLUG_REG` hat ein VIERTES Argument (gewuenschte Frist in Ticks, 0 =
+Vorgabe, hoechstens 200 ohne Eintrag in /etc/wmplug.conf).
+`WM_PLUG_GRANT` traegt die Frist in den Bits 32..47 desselben Wortes wie
+die Rechte. Neue Felder: `PL_PFRIST = 20`, `PL_DENYS = 21`,
+`PL_WORKX/Y/W/H = 22..25`, `PL_MAXNR = 26`. `WM_LIST` oeffnet ausser
+`is_taskbar` jetzt auch das Recht `R_EV_WIN` (sysgui.fi `darf_listen`) --
+die verborgenen Hilfsfenster von plugregel/plugboese sind weg.
+`/etc/wmplug.autostart` wird vom Schreibtisch gelesen, `wmplug enable`
+startet `prog=` aus /etc/wmplug.conf, `/bin/uhrstart` ist geloescht.
+Ab acht abgewiesenen Handlungen (`DENY_MAX`) meldet der Kern einen Platz
+mit `G_RIGHTS` ab.
+
 Die Felder von `WM_PLUG_INFO` reichen seit Modul A bis `PL_MAXNR = 20`;
 neu sind `PL_FRAMES = 18` (Bildnummer) und `PL_LATUS = 19` (mittlere
 Bildzeit in us). Beide beantwortet der Kern ohne Anmeldung.
