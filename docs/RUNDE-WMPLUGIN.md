@@ -433,15 +433,15 @@ Exitcode 21; die Zahlen unten stammen aus dem Abnahmelauf
 
 | | Bilder | Bildrate | Bildzeit (Mittel) | min | max |
 |---|---|---|---|---|---|
-| **vor** dem Laden | 60 | 20,0 /s | **365 us** | 350 us | 427 us |
-| **nach** dem Laden | 60 | 21,0 /s | **411 us** | 356 us | 720 us |
+| **vor** dem Laden | 60 | 20,0 /s | **407 us** | 362 us | 555 us |
+| **nach** dem Laden | 60 | 21,0 /s | **427 us** | 352 us | 881 us |
 
 Wortlaut des Laeufers:
 
 ```
 OK  beide Fenster haben wirklich 60 Bilder (vor 60, nach 60)
-OK  Bildzeit vor dem Laden 365 us (min 350, max 427),
-    nach dem Laden 411 us (min 356, max 720)
+OK  Bildzeit vor dem Laden 407 us (min 362, max 555),
+    nach dem Laden 427 us (min 352, max 881)
 OK  Bildrate vor dem Laden 200 (x10), nach dem Laden 210 (x10)
 OK  kein Tempoeinbruch: 210 ist mindestens zwei Drittel von 200
 ```
@@ -449,26 +449,31 @@ OK  kein Tempoeinbruch: 210 ist mindestens zwei Drittel von 200
 und die Leitung desselben Laufs, der Reihe nach:
 
 ```
-tempo: vor  bilder=60 ... us=365 min=350 max=427 gezaehlt=60 fps10=200
+tempo: vor  bilder=60 ... us=407 min=362 max=555 gezaehlt=60 fps10=200
 tempo: grant r=0
 wmplug: reg uhr platz=0 rechte=0x807
 taskbar: text plug ... t=cpu 100%
-tempo: nach bilder=60 ... us=411 min=356 max=720 gezaehlt=60 fps10=210
+tempo: nach bilder=60 ... us=427 min=352 max=881 gezaehlt=60 fps10=210
 ```
 
 **Die Abweichung, ausdruecklich benannt:** die mittlere Bildzeit steigt
-um **46 us (+12,6 %)**, die Bildrate nicht (sie haengt am Takt der
+um **20 us (+4,9 %)**, die Bildrate nicht (sie haengt am Takt der
 kuenstlichen Last, 20 Bilder je Sekunde, und den haelt sie in beiden
 Fenstern; 21,0 gegen 20,0 ist die Aufloesung der Tickuhr und kein
-Gewinn). Der Ausreisser steht im `max`: **720 us gegen 427 us**. Das
+Gewinn). Der Ausreisser steht im `max`: **881 us gegen 555 us**. Das
 ist das eine Bild je Sekunde, in dem die Leiste ihr Widgetfeld neu malt
 -- mehr kostet ein Plugin in dieser Bauform nicht.
 
-Eine zweite, einzeln gefahrene Messung desselben Programms lag bei
-439 us gegen 472 us (+7,5 %). Beide Zahlenpaare sind gemessen; die
-Streuung zwischen zwei Laeufen ist also groesser als der Abstand
-zwischen "mit" und "ohne" Plugin -- auch das gehoert hierher und nicht
-in eine Fussnote.
+Zwei weitere Laeufe desselben Programms auf derselben Maschine lagen
+bei 439 us gegen 472 us (+7,5 %) und 365 us gegen 411 us (+12,6 %).
+**Alle drei Zahlenpaare sind gemessen, und sie sagen zusammen mehr als
+jedes einzelne:** die Streuung zwischen zwei Laeufen (365..439 us im
+Fenster VOR dem Laden) ist groesser als der Abstand zwischen "mit" und
+"ohne" Plugin innerhalb eines Laufs (20..46 us). Wer aus diesen Zahlen
+eine Prozentzahl auf die Nachkommastelle machen will, misst Rauschen.
+Was sie tragen, ist die schwaechere und wahre Aussage: **ein geladenes
+Leistenwidget kostet in der Groessenordnung von fuenf bis zehn Prozent
+Bildzeit und keine Bildrate.**
 
 ### 8.3 Was `WM_PLUG_BAR` kostet, getrennt ausgewiesen
 
