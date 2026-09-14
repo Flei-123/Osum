@@ -1119,7 +1119,12 @@ hasnotre "$TMPD/aus.txt.flat" 'PANIK' "kein Panik im Kern"
 # DER ZUSAMMENSETZER MUSS WIRKLICH GELAUFEN SEIN. Eine Zusage, die
 # auch dann gruen ist, wenn die Zahl fehlt, prueft nichts -- das ist die
 # Lehre aus Abschnitt 11 der ersten Runde (eine Datei ist kein Beleg).
-c_aus=$(zahl "$TMPD/aus.txt" 'wm: comp=' 'comp')
+# DIE ZAHL HEISST `composites=`, NICHT `comp=`. Der Kern schreibt sie in
+# seiner Schlussbilanz (`wm: composites=62 blits=... pixels=...`);
+# `comp=` gibt es nur im Haengerlauf, wo /bin/plugtempo sie selbst
+# ausgibt. Die erste Fassung dieser Zusage suchte eine Zahl, die in
+# DIESEM Lauf nie auf der Leitung steht.
+c_aus=$(zahl "$TMPD/aus.txt" 'wm: composites=' 'composites')
 if [ -n "${c_aus:-}" ] && [ "$c_aus" -gt 0 ] 2>/dev/null; then
     ok "der Zusammensetzer lief auch ohne Verwaltung ($c_aus Runden)"
 else
