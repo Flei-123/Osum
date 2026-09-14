@@ -34,7 +34,18 @@ EOF
 
 # 8192 blocks (4 MiB) held these programs with 4 per cent to spare
 # after round LOOK. That is not spare room, that is a countdown.
-ARGS=(build "$IMG" 16384 /lib/
+#
+# RUNDE KLEINKRAM (14.09.2026): 16384 -> 32768 Bloecke (8 -> 16 MiB).
+# DIESELBE Zeile wie in tests/theme/build.sh, und sie ist bei der
+# Runde BAUFEHLER dort nachgezogen worden und HIER NICHT. Folge: die
+# zehn Programme bauen, das Abbild von build.sh entsteht -- aber jedes
+# der sieben Foto-Abbilder dieses Skripts scheitert mit "mkfs: the
+# disk is full", und Abschnitt 9 meldet siebenmal "das Abbild liess
+# sich nicht bauen" plus sechsmal "<farbe> steht NICHT im Bild".
+# GEMESSEN: die .elf-Dateien dieses Laeufers wiegen zusammen 15108360
+# Oktette, 16384 Bloecke zu 512 Oktetten fassen 8388608.
+# EIN BLOCK IST 512 OKTETTE (tools/osum/mkfs.py, `BS = 512`).
+ARGS=(build "$IMG" 32768 /lib/
       "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
       /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$OUT/$p.elf"); done
