@@ -29,7 +29,30 @@ EIGEN = set(g + ".fi" for g in GRAFIK) | {
     "gfx.fi", "gfx-aus.fi", "kgui.fi", "sysgui.fi",
     # MERGE-2 18 (customres): der gespeicherte Bildmodus. Sie ist selbst
     # eine Grafikdatei und wird bei --gui off mit geloescht.
-    "dispsave.fi"}
+    "dispsave.fi",
+    # RUNDE ROTABSCHNITTE: `zeiger.fi` stand in `build-kernel.sh` schon
+    # in GFX_DATEIEN (Zeile 213) und wird bei `--gui off` mit geloescht
+    # -- nur hier fehlte sie. Eine Datei, die der Bau als Grafikdatei
+    # behandelt, muss auch hier eine sein, sonst zaehlt der Pruefer eine
+    # Stelle, die es im Serverbau gar nicht gibt.
+    "zeiger.fi",
+    # RUNDE ROTABSCHNITTE: `shot.fi` (Runde FEEDBACK) ist das
+    # Bildschirmfoto VON INNEN und liest dafuer den Rahmenpuffer -- 15
+    # Stellen `fb.*`. Sie gehoert damit zur Grafik wie die zwoelf davor.
+    #
+    # GEMESSEN und nicht behauptet: im Serverabbild steht KEIN einziges
+    # ihrer Symbole.
+    #
+    #     nm /tmp/rot-srv.mb.elf | grep -c '_F0\.shot__'   ->  0
+    #     nm /tmp/rot-srv.mb.elf | grep -c '_F0\.fb__'     ->  0
+    #     nm /tmp/rot-srv.mb.elf | grep -c '_F0\.gfx__'    -> 70
+    #
+    # Der Grund: `shot.fi` wird NUR von `kgui.fi` und `sysgui.fi`
+    # eingebunden, und beide loescht `--gui off`. Der Binder nimmt sie
+    # damit gar nicht erst mit. Die Zusage dieses Abschnitts -- "kein
+    # Modul ausser der Naht greift noch auf die Grafik zu" -- gilt also
+    # im ABBILD, und das ist die Ebene, auf der sie etwas heisst.
+    "shot.fi"}
 MUSTER = re.compile(
     r"(?<![A-Za-z0-9_.])(" + "|".join(GRAFIK) + r")\.([A-Za-z_][A-Za-z0-9_]*)")
 
@@ -39,6 +62,25 @@ def ohne_kommentare(text):
     for zeile in text.split("\n"):
         i = zeile.find("//")
         aus.append(zeile[:i] if i >= 0 else zeile)
+    return "\n".join(aus)
+
+
+def ohne_importe(text):
+    """`import font.metrics` ist kein Zugriff auf die Grafik.
+
+    RUNDE ROTABSCHNITTE.  `kernel/user/fuib.fi:72` stand mit genau einer
+    Stelle in der Liste, und diese Stelle war die Zeile `import
+    font.metrics` -- der Name eines MODULS aus `lib/`, nicht der Aufruf
+    von `kernel/font.fi`.  Eine Einbindung sagt nichts darueber, ob
+    jemand den Rahmenpuffer anfasst; sie nennt nur, woher ein Name
+    kommt.  Gezaehlt werden soll der ZUGRIFF.
+    """
+    aus = []
+    for zeile in text.split("\n"):
+        if re.match(r"\s*import\s", zeile):
+            aus.append("")
+        else:
+            aus.append(zeile)
     return "\n".join(aus)
 
 
@@ -52,7 +94,7 @@ def zaehle(wurzel):
             p = os.path.join(pfad, d)
             with open(p, "rb") as f:
                 roh = f.read().decode("utf8", "replace")
-            treffer = MUSTER.findall(ohne_kommentare(roh))
+            treffer = MUSTER.findall(ohne_importe(ohne_kommentare(roh)))
             if treffer:
                 je_datei[os.path.relpath(p, wurzel)] = len(treffer)
                 for a, b in treffer:

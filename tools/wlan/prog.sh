@@ -85,10 +85,10 @@ else
             bad "der Lauf endet mit $RC statt 21"
         fi
         L="$W/lauf.txt"
-        grep -qa 'wlan: kein Geraet -- es gibt keinen Treiber' "$L" \
+        grep -qa 'wlan: kein Gerät -- es gibt keinen Treiber' "$L" \
             && ok "'wlan status' sagt im LAUF, dass es kein Geraet gibt" \
             || bad "'wlan status' sagt im Lauf nichts dergleichen"
-        grep -qa 'wlan: /etc/wlan.conf geschrieben fuer Netz MeinNetz' "$L" \
+        grep -qa 'wlan: /etc/wlan.conf geschrieben für Netz MeinNetz' "$L" \
             && ok "'wlan verbinden' legt /etc/wlan.conf wirklich an" \
             || bad "/etc/wlan.conf wird im Lauf nicht angelegt"
         grep -qa '^ssid MeinNetz' "$L" && grep -qa '^psk geheim12345' "$L" \
@@ -97,7 +97,7 @@ else
         grep -qa 'wlan: das Passwort muss 8 bis 63 Zeichen haben' "$L" \
             && ok "ein zu kurzes Passwort wird abgewiesen, statt es zu nehmen" \
             || bad "ein zu kurzes Passwort kommt durch"
-        grep -qa 'wlan: /etc/wlan.conf geloescht' "$L" \
+        grep -qa 'wlan: /etc/wlan.conf gelöscht' "$L" \
             && ok "'wlan vergessen' loescht die Datei wieder" \
             || bad "'wlan vergessen' loescht nichts"
         # Und die Zusage, die am meisten wert ist: es wird NICHTS

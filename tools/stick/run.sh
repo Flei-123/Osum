@@ -271,7 +271,7 @@ else
 fi
 hat "$B" 'fetch -> 0' "/bin/fetch endet mit 0 -- die Seite ist da"
 hat "$B" 'ota: fassung dort' "ota hat das signierte VERZEICHNIS gelesen"
-hat "$B" 'ota: NEUE FASSUNG verfuegbar' "und meldet, dass es etwas Neues gibt"
+hat "$B" 'ota: NEUE FASSUNG verfügbar' "und meldet, dass es etwas Neues gibt"
 
 # =====================================================================
 echo "== 5. UEFI: dieselbe Datei, derselbe Eintrag =="
@@ -282,7 +282,7 @@ if [ -n "$OVMF_CODE" ] && [ -n "$OVMF_VARS" ]; then
     hat "$U" 'sh: ready' "unter UEFI steht dieselbe Shell"
     hat "$U" 'dhcp: gesetzt ip=' "DHCP unter UEFI"
     hat "$U" 'fetch: verify OK' "und dieselbe gepruefte Kette"
-    hat "$U" 'ota: NEUE FASSUNG verfuegbar' "und dasselbe VERZEICHNIS"
+    hat "$U" 'ota: NEUE FASSUNG verfügbar' "und dasselbe VERZEICHNIS"
 else
     echo "       (kein OVMF -- der UEFI-Lauf entfaellt)"
 fi

@@ -525,8 +525,21 @@ kus=$(uz "$TMPD/kbdusb.txt" keys)
 num "Tasten, die durch den USB-Weg gegangen sind" "${kus:-0}" ge 24
 hat_nicht "$TMPD/kbdps2.txt" "usb: keys=" "im PS/2-Lauf gibt es diesen Weg gar nicht"
 
-grep -a '^key: ' "$TMPD/kbdusb.txt" | tr -d '\000' > "$TMPD/kbdusb.keys"
-grep -a '^key: ' "$TMPD/kbdps2.txt" | tr -d '\000' > "$TMPD/kbdps2.keys"
+# RUNDE ROTABSCHNITTE: `^key: ` VERLIERT DIE ERSTE MELDUNG JE ZEILE.
+# Die Shell schreibt ihre Eingabeaufforderung `osum$ ` ohne
+# Zeilenumbruch; die naechste Tastenmeldung landet deshalb HINTER dem
+# Prompt in derselben Zeile (`osum$ key: e`) und faengt nicht am
+# Zeilenanfang an. Nachgerechnet: getippt werden 31 Zeichen
+# ("echo hallo"+ret, "echo zwei drei"+ret, "exit"+ret), es gibt drei
+# Eingabeaufforderungen, also sieht `^key: ` genau 31-3 = 28 -- und
+# genau 28 gegen 31 stand im Protokoll. Der USB-Zaehler hatte recht,
+# der Vergleich hatte unrecht.
+#
+# `grep -o` zaehlt die MELDUNG statt der Spalte. Das Muster verlangt
+# Zeilenanfang oder ein Zeichen, das kein Kleinbuchstabe ist, damit
+# `monkey: `/`keyboard: ` nicht mitzaehlen.
+grep -aoE '(^|[^a-z])key: .*' "$TMPD/kbdusb.txt" | sed 's/^[^k]*//' | tr -d '\000' > "$TMPD/kbdusb.keys"
+grep -aoE '(^|[^a-z])key: .*' "$TMPD/kbdps2.txt" | sed 's/^[^k]*//' | tr -d '\000' > "$TMPD/kbdps2.keys"
 gleiche_datei "DIESELBEN ZEICHEN: die key-Zeilen beider Laeufe" \
     "$TMPD/kbdusb.keys" "$TMPD/kbdps2.keys" 24
 gleich "so viele key-Zeilen, wie der USB-Treiber Tasten gezaehlt hat" \
@@ -556,7 +569,36 @@ tastenlauf kbdnoirq "$TMPD/k0.mb" "osum usb usbnoirq nosched noproc" "osum: bin 
     -- text:"echo hallo" ret warte:1.5 text:exit ret warte:1.0 \
     -- "${XHCI[@]}" "${KBD[@]}"
 num "GEGENPROBE usbnoirq: der Kern beendet sich trotzdem" "$RC" eq 21
-num "GEGENPROBE usbnoirq: Tasten ueber den USB-Weg" "$(uz "$TMPD/kbdnoirq.txt" keys)" eq 0
+# RUNDE ROTABSCHNITTE: DIESE ERWARTUNG IST VERALTET, NICHT VERLETZT.
+#
+# Sie stammt aus Runde K17, als `usbnoirq` wirklich hiess "kein
+# Ereignis kommt je an". Seither hat Runde ECHTHARDWARE-6 den
+# Wachhund `usb.silence_check` eingebaut (kernel/usb.fi:3376). Der
+# haengt am ZEITGEBER (kernel/arch/x86_64/trap.fi:413) und nicht am
+# USB-Meldevektor, sieht viermal je Sekunde nach, ob sich ein
+# HID-Zaehler bewegt hat, und holt mit `xhci.drain` + `service` eine
+# verlorene Meldung nach. Genau dafuer wurde er gebaut: auf Justins
+# Rechner stand die Tastatur nach EINER verlorenen Meldung fuer den
+# Rest der Sitzung still.
+#
+# Mit maskiertem Vektor kommen deshalb heute ein paar Tasten durch --
+# gemessen 4 -- und das ist das GEWOLLTE Verhalten des Wachhunds und
+# kein Fehler. Die Zusage, um die es dieser Gegenprobe wirklich geht,
+# steht unveraendert zwei Zeilen tiefer und BESTEHT: die Shell
+# bekommt kein Zeichen, `hallo` wird nie getippt. Der Unterschied zum
+# `usbpoll`-Lauf (dort kommen ALLE Tasten an) bleibt damit genau der
+# Beweis, den die Runde HIDWEG fuehren wollte.
+#
+# Gemessen wird deshalb, was jetzt gilt: der maskierte Vektor traegt
+# die Eingabe NICHT -- es kommt allenfalls durch, was der Wachhund
+# nachholt, und das ist weit weniger als die 31 des vollen Laufs.
+kn=$(uz "$TMPD/kbdnoirq.txt" keys)
+kn=${kn:-0}
+kvoll=$(uz "$TMPD/kbdusb.txt" keys)
+kvoll=${kvoll:-31}
+[ "$kn" -lt "$((kvoll / 2))" ] \
+    && ok "GEGENPROBE usbnoirq: der maskierte Vektor traegt die Eingabe nicht -- $kn statt $kvoll Tasten (nur was der Wachhund nachholt)" \
+    || bad "GEGENPROBE usbnoirq: $kn Tasten kamen durch, bei $kvoll im vollen Lauf -- der maskierte Vektor traegt die Eingabe doch"
 grep -qa '^hallo$' "$TMPD/kbdnoirq.txt" \
     && bad "GEGENPROBE usbnoirq: die Shell hat trotzdem etwas getippt bekommen" \
     || ok "GEGENPROBE usbnoirq: die Shell bekommt kein Zeichen"

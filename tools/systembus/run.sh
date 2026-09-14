@@ -283,7 +283,24 @@ ARGS=(build "$TMPD/disk.img" 32768 /lib/
     "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/$p.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
-ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme" "/etc/taskbar.conf=$TMPD/tb.conf")
+# RUNDE ROTABSCHNITTE: /etc/uitrace -- DER SCHALTER, DER HIER FEHLTE.
+# Die Zusage e) wird geprueft mit `grep 'Meldg' leiste.txt`, also auf
+# der SERIELLEN LEITUNG. Die Leiste sagt dort aber nur etwas, wenn sie
+# eingeschaltet ist: `taskbar.fi`, `dbg_setup` -- entweder die Datei
+# /etc/uitrace liegt auf der Platte, oder `debug` steht auf der
+# Programmzeile. Ohne beides schweigt sie vollstaendig (`say`/`sayn`/
+# `nl` kehren sofort zurueck), und dann kann `Meldg` dort nicht stehen,
+# egal wie lange gewartet wird und egal ob der Bus funktioniert.
+# Nachgemessen an einem behaltenen Lauf (SYSBUS_KEEP=1): im ganzen
+# Mitschnitt kam KEINE EINZIGE `taskbar:`-Zeile vor, auch nicht das
+# `taskbar: ready ascent` des Starts -- die Leiste lief, sie sagte nur
+# nichts. tools/desktop/run.sh, das dieselben Zeilen liest, legt die
+# Datei genau dafuer an und ist gruen.
+# Das entschaerft nichts: die Meldung muss weiterhin wirklich in der
+# Leiste stehen, sie wird jetzt nur wieder berichtet.
+printf 'on\n' > "$TMPD/uitrace"
+ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme" "/etc/taskbar.conf=$TMPD/tb.conf"
+    "/etc/uitrace=$TMPD/uitrace")
 while read -r z; do ARGS+=("$z"); done \
     < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel" "nur=$PROGS")
 while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
@@ -300,8 +317,29 @@ gui() { # name extra drehbuch
     local sock="$TMPD/$name.sock"
     rm -f "$sock"
     cp -f "$TMPD/disk.img" "$TMPD/$name.img"
+    # RUNDE ROTABSCHNITTE: `wmshell` FEHLTE, UND DAMIT DIE SHELL.
+    # Zusage d) tippt `edit /etc/taskbar.conf` ins Terminalfenster.
+    # Das Fenster war da (`wm: term win=0`, taskbar btn id=7,
+    # app=terminal) und der Klick traf es auch -- nur lief darin
+    # keine Shell, die den Befehl haette ausfuehren koennen. Genau
+    # dafuer ist `wmshell` da: "gibt dem Programm die Shell IM
+    # Terminalfenster" (tools/tiling/run.sh:383). Ohne das Wort
+    # landeten die Tasten im Suchfeld des Starters -- im
+    # Mitschnitt steht dann `launcher: treffer` statt `edit:
+    # ready`. tools/hidpunkte, tools/hidweg, tools/loader und
+    # tools/tiling setzen es aus demselben Grund.
+    #
+    # NICHT `wmdauer` DAZU -- GEMESSEN UND VERWORFEN. Es nimmt dem
+    # Schreibtisch die Rundengrenze UND startet die Shell neu,
+    # sobald sie endet. Hier endet sie aber sofort wieder (die
+    # Konsole ist leer, es wird ja ueber den Monitor getippt), und
+    # das ergab eine Endlosschleife: `elf: start 2295`,
+    # 2410-mal `sh: ready` in einem Lauf, 830 KB Mitschnitt, und
+    # `wm: hold` kam nie -- der Lauf haing, bis er abgebrochen
+    # wurde. hidpunkte/hidweg/loader setzen `wmdauer` deshalb OHNE
+    # `wmhold`; dieser Laeufer braucht `wmhold` fuer die Fotos.
     timeout 320 $QEMU -kernel "$TMPD/k.mb" -m 512 \
-        -append "gfx fbres=1024x768 wm wig desk wmhold wighalt=300 nokbd nosched noproc nofs $extra" \
+        -append "gfx fbres=1024x768 wm wig desk wmshell wmhold wighalt=300 nokbd nosched noproc nofs $extra" \
         -serial "file:$TMPD/$name.txt" -display none -no-reboot \
         -device "VGA,edid=on,xres=1024,yres=768,vgamem_mb=32" \
         -monitor "unix:$sock,server,nowait" \
@@ -337,7 +375,17 @@ PY
 
 cat > "$TMPD/dreh1" <<'DREH'
 warteauf 'wm: hold' || 90
-warte 5
+# RUNDE ROTABSCHNITTE: hier stand `warte 5` -- eine feste Frist, die
+# darauf wettete, dass die Leiste ihr Meldungsfeld innerhalb von fuenf
+# Sekunden gemalt hat. Auf einem Wirt, den sich mehrere QEMU-Prozesse
+# teilen, stimmt diese Wette nicht mehr, und das Foto entstand vor dem
+# Text -- daher "in der Leiste steht keine Meldung". Die Leiste MELDET
+# aber, wenn sie das Feld gemalt hat: `taskbar: text noti ... t=Meldg N`
+# (taskbar.fi, say_text aus paint(true)). Auf dieses Ereignis wird jetzt
+# gewartet statt auf die Uhr. Die Meldungen selbst liegen schon vor dem
+# ersten Nutzerprozess auf dem Bus (kmain.fi, M_NOTIDEMO), es fehlt hier
+# also wirklich nur der Anstrich.
+warteauf 'taskbar: text noti' || 90
 foto 01-leiste-meldung
 DREH
 gui leiste "bus notidemo" "$TMPD/dreh1"
@@ -361,7 +409,16 @@ echo "== 9. die Oberflaeche: kopieren im Editor, einfuegen im Terminal =="
 tipp() {
     python3 - "$1" <<'PY'
 import sys
-karte = {" ": "spc", "-": "minus", "/": "slash", ".": "dot",
+# RUNDE ROTABSCHNITTE: DIE TASTATUR DIESES LAUFS IST DEUTSCH.
+# Der Mitschnitt sagt es woertlich: `kbd: layout de`. Auf einer
+# deutschen Tastatur liegt der Schraegstrich auf UMSCHALT+7 --
+# `sendkey slash` schickt dagegen den Abtastcode 0x35, und der ist
+# dort das Minuszeichen (kernel/kbd.fi, `de_plain`: code 0x35 -> 45).
+# Getippt wurde deshalb `edit -etc-taskbar.conf`, eine Datei, die es
+# nicht gibt; der Editor startete nie, und `edit: ready` kam nicht.
+# Nachgesehen an einem behaltenen Lauf: alle 39 Tasten KAMEN an, nur
+# eben die falschen Zeichen. Das war kein Tasten- und kein Busproblem.
+karte = {" ": "spc", "-": "slash", "/": "shift-7", ".": "dot",
          "_": "shift-minus", "=": "equal", ",": "comma"}
 for c in sys.argv[1]:
     print("taste " + karte.get(c, c))

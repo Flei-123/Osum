@@ -70,6 +70,7 @@ profile kernel
 
 import ulib
 import libc.io
+import msg
 
 export {
     load, count, name_of, info_of, exec_of, icon_of, keys_of, file_of,
@@ -122,12 +123,108 @@ fn count() -> u64 {
     return nap
 }
 
+// RUNDE ROTABSCHNITTE: DER ANZEIGENAME GEHT DURCH DEN KATALOG.
+//
+// Jede INFO sagt es in ihrem Kopf selbst -- taskmgr.osp/INFO:
+// "Der Anzeigename steht hier und nicht im Quelltext. Uebersetzt wird
+// er ueber den Katalog (locale/*/messages, Schluessel
+// `taskmgr.title`); dieses Feld ist der Name, den der Starter zeigt,
+// solange kein Katalog geladen ist."
+//
+// Uebersetzt wurde er aber nirgends. Gemessen in einem Lauf mit
+// `lang=de` und 416 geladenen Schluesseln meldete der Starter
+//
+//     launcher: treffer i=3 name=[Task Manager]
+//
+// waehrend `locale/de/messages:350` seit langem
+// `taskmgr.title = Aufgabenverwaltung` sagt -- und ebenso
+// `settings.title = Einstellungen` fuer [Settings]. KEIN einziger
+// Buendelname ging durch den Katalog, weil diese Datei `msg` gar
+// nicht kannte. tools/toolbench/run.sh sucht genau danach
+// ("und er steht im Startmenue ... name=[Aufgabenverwaltung]").
+//
+// Der Schluessel wird aus dem Buendelnamen gebaut: `taskmgr.osp` ->
+// `taskmgr.title`. `msg.get` gibt den SCHLUESSEL zurueck, wenn es ihn
+// nicht gibt (msg.fi:244) -- daran ist zu erkennen, dass nichts
+// uebersetzt wurde, und dann bleibt der Name aus der INFO stehen.
+// Ohne Katalog aendert sich also kein Oktett.
+static mut titelkey: [u8; 64] = [0 as u8; 64]
+
 fn name_of(i: u64) -> u64 {
-    return or_empty(g(i, A_NAME))
+    let roh: u64 = or_empty(g(i, A_NAME))
+    let datei: u64 = or_empty(g(i, A_FILE))
+    if datei == 0 {
+        return roh
+    }
+    // `<buendel>.osp` -> `<buendel>.title`, ohne die Endung.
+    var k: u64 = 0
+    while k < 55 {
+        let c: u64 = (*((datei + k) as *mut u8)) as u64
+        if c == 0 || c == 46 {
+            k = k
+            break
+        }
+        titelkey[(k) as usize] = c as u8
+        k = k + 1
+    }
+    if k == 0 {
+        return roh
+    }
+    var suffix: [u8; 7] = ".title\0"
+    var j: u64 = 0
+    while j < 6 {
+        titelkey[((k + j)) as usize] = suffix[(j) as usize]
+        j = j + 1
+    }
+    titelkey[((k + 6)) as usize] = 0 as u8
+    let key: u64 = (&titelkey[0 as usize]) as u64
+    let t: u64 = msg.get(key)
+    if t == key {
+        return roh
+    }
+    return t
 }
 
+// Dieselbe Sache fuer die BESCHREIBUNG: `<buendel>.info`. Sie steht
+// unter dem Namen in der Trefferliste des Starters, und
+// tools/umlaut/run.sh rechnet sie auf Deutsch bildpunktgenau nach
+// ("Editor  --  Text schreiben und ändern"). Seit c101990 steht in der
+// INFO die englische Form; der deutsche Satz kommt jetzt aus dem
+// Katalog, mit demselben Rueckfall wie oben.
+static mut infokey: [u8; 64] = [0 as u8; 64]
+
 fn info_of(i: u64) -> u64 {
-    return or_empty(g(i, A_INFO))
+    let roh: u64 = or_empty(g(i, A_INFO))
+    let datei: u64 = or_empty(g(i, A_FILE))
+    if datei == 0 {
+        return roh
+    }
+    var k: u64 = 0
+    while k < 56 {
+        let c: u64 = (*((datei + k) as *mut u8)) as u64
+        if c == 0 || c == 46 {
+            k = k
+            break
+        }
+        infokey[(k) as usize] = c as u8
+        k = k + 1
+    }
+    if k == 0 {
+        return roh
+    }
+    var suffix: [u8; 6] = ".info\0"
+    var j: u64 = 0
+    while j < 5 {
+        infokey[((k + j)) as usize] = suffix[(j) as usize]
+        j = j + 1
+    }
+    infokey[((k + 5)) as usize] = 0 as u8
+    let key: u64 = (&infokey[0 as usize]) as u64
+    let t: u64 = msg.get(key)
+    if t == key {
+        return roh
+    }
+    return t
 }
 
 fn exec_of(i: u64) -> u64 {
@@ -295,7 +392,7 @@ fn one_file(pfad: u64, i: u64) -> bool {
     // es. Der Zaehler steht daneben, damit ein Testlauf ihn abfragen
     // kann, ohne die Leitung zu lesen.
     if n >= 8191 {
-        var s_lang: [u8; 41] = "appdir: INFO laenger als 8191 Oktette: \0\0"
+        var s_lang: [u8; 41] = "appdir: INFO länger als 8191 Oktette: \0\0"
         ulib.say((&s_lang[0 as usize]) as u64)
         ulib.say(pfad)
         ulib.nl()

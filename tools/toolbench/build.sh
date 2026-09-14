@@ -139,7 +139,17 @@ ARGS=(build "$OUT/disk.img" 32768 /lib/
 ARGS+=(/bin/)
 for p in $progs; do ARGS+=("/bin/$p=$BUILDD/$p.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
+# RUNDE ROTABSCHNITTE: /etc/uitrace -- DER SCHALTER, DER HIER FEHLTE.
+# `qs.fi` und `taskmgr.fi` melden ihre Rechtecke und Zustaende NUR,
+# wenn diese Datei da ist (qs.fi, `dbg_setup`: "die Pruefstaende legen
+# sie ohnehin an" -- dieser hier tat es nicht). Ohne sie schweigen sie
+# vollstaendig, und tools/toolbench/run.sh sucht dann vergeblich nach
+# `qs: symbols n=6`, `qs: open x=`, `qs: tile n=3 to=1` und
+# `taskmgr: frage pid=`. tools/desktop/run.sh legt die Datei aus
+# demselben Grund an und ist gruen.
+printf 'on\n' > "$OUT/uitrace"
 ARGS+=(/etc/
+       "/etc/uitrace=$OUT/uitrace@0644"
        "/etc/theme.conf=$OUT/theme.conf@0644"
        "/etc/time.conf=$OUT/time.conf@0644"
        "/etc/locale.conf=$OUT/locale.conf@0644"

@@ -118,7 +118,7 @@ for M in $MODELLE; do
            | grep -ao 'size=[0-9]*' | head -1 | cut -d= -f2)
     if grep -qa "vector=6" "$L"; then
         ERG="#UD (vector=6) -- /bin/fetch tot"
-    elif grep -qa "ota: NEUE FASSUNG verfuegbar" "$L" \
+    elif grep -qa "ota: NEUE FASSUNG verfügbar" "$L" \
          && grep -qa "fetch: verify OK" "$L"; then
         # 2. EINSPIELEN: das Paket holen, die SHA-256 gegen das
         #    signierte VERZEICHNIS halten und einspielen. DAS ist der
