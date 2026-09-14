@@ -57,7 +57,16 @@ warte() { local f=$1 m=$2 pid=$3 i=0
 # NUR= waehlt einzelne Bilder aus -- sonst werden alle gemacht.
 foto() {
     local name=$1 zeile=$2 m1=$3 m2=${4:-} vor=${VOR:-}
-    case " ${NUR:-} " in " " ) ;; *" $name "*) ;; *) return 0;; esac
+    # LEERES `NUR` HEISST: ALLE BILDER. Hier stand einmal
+    # `case " ${NUR:-} " in " ") ;;` -- und weil " ${NUR:-} " bei leerem
+    # NUR ZWEI Leerzeichen sind und das Muster nur EINES hatte, traf kein
+    # Zweig, jedes Foto nahm den Ausgang und das Skript legte nichts ab.
+    # Aufgefallen ist es erst, als die Bilder im Ordner alt blieben,
+    # obwohl der Lauf gruen aussah. Darum jetzt eine Abfrage, die man
+    # lesen kann, statt eines Musters, das man zaehlen muss.
+    if [ -n "${NUR:-}" ]; then
+        case " $NUR " in *" $name "*) ;; *) return 0;; esac
+    fi
     local sock="$TMPD/mon-$name.sock" out="$TMPD/$name.txt"
     rm -f "$out" "$sock"
     cp -f "$TMPD/disk.img" "$TMPD/live-$name.img"
@@ -147,9 +156,10 @@ print("  %s  %dx%d" % (dst, w, h))
 PY
 }
 i=1
+fehlt=0
 benenne() { # ppm zielname
     local n; n=$(printf '%02d' $i); i=$((i+1))
-    wandel "$1" "$ZIEL/$n-$2.png"
+    wandel "$1" "$ZIEL/$n-$2.png" || fehlt=$((fehlt+1))
 }
 benenne "$TMPD/start.ppm"       "start-ohne-plugin"
 benenne "$TMPD/uhr.ppm"         "uhr-widget-an"
@@ -160,3 +170,11 @@ benenne "$TMPD/breit.ppm"       "breit-1440x900"
 benenne "$TMPD/eng.ppm"         "eng-800x600"
 benenne "$TMPD/sehr-eng.ppm"    "sehr-eng-640x480"
 ls -l "$ZIEL"
+# EIN LAUF, DER NICHTS ABGELEGT HAT, DARF NICHT GRUEN AUSSEHEN. Vorher
+# endete das Skript immer mit 0 -- auch als alle acht Bilder fehlten.
+# Wer es aus einem anderen Laeufer ruft, soll das merken koennen.
+if [ "$fehlt" -gt 0 ]; then
+    echo "SHOTS: $fehlt von 8 Bildern fehlen -- die Fotos im Ordner sind dann ALT"
+    exit 1
+fi
+echo "SHOTS: 8 Bilder abgelegt in $ZIEL"
