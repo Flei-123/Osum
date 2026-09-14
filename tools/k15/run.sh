@@ -812,6 +812,24 @@ TSEL=$(frgb "$TMPD/files.txt" "explorer: rows" sel)
 TSFG=$(frgb "$TMPD/files.txt" "explorer: rows" selfg)
 TDIM=$(frgb "$TMPD/files.txt" "explorer: rows" dim)
 SP=($(grep -a '^explorer: spalten' "$TMPD/files.txt" | tail -1 | sed 's/^explorer: spalten //'))
+# RUNDE BAUFEHLER (14.09.2026): NICHT AN EINEM LEEREN FELD STERBEN.
+# Wenn der Dateimanager sein Fenster nicht gemalt hat ("explorer: ready
+# fehlt"), steht in files.txt auch keine Zeile `explorer: spalten`, und
+# SP bleibt leer. Dieses Skript laeuft unter `set -u`, und der erste
+# Zugriff auf ${SP[1]} hat es dann MITTEN IM ABSCHNITT abgebrochen:
+#
+#     tools/k15/run.sh: line 823: SP[1]: unbound variable
+#
+# Damit gab es keine Schlusszeile, keine Bilanz und keinen Hinweis
+# darauf, wie viele Zusagen noch offen waren -- der Abschnitt verschwand
+# einfach. Ein fehlender Messwert ist ein FEHLER und kein Grund, die
+# Messung abzubrechen: die vier Spalten bekommen einen erkennbar
+# unmoeglichen Wert, die davon abhaengigen Zusagen fallen einzeln und
+# nachvollziehbar durch, und der Laeufer kommt bis zu seiner Bilanz.
+if [ "${#SP[@]}" -lt 4 ]; then
+    bad "explorer nennt seine Spalten nicht (explorer: spalten fehlt) -- die Spaltenzusagen unten koennen nicht messen"
+    SP=(0 0 0 0)
+fi
 schau "die Kopfzeile: die erste Spalte heisst 'Name'" \
     ttext "$TMPD/files.ppm" "$SANS" 15 $((FCX + TX)) $((FCY + TKOPF)) \
     $TFG $(rgb 3293262) "Name"
