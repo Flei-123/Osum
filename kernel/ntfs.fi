@@ -97,7 +97,7 @@ import sched
 import atomic
 import cpu
 
-export { ops, mount_probe, release, MAX_NODES }
+export { ops, mount_probe, release, node_hold, node_drop, MAX_NODES }
 
 const BS: u64 = 512
 
@@ -105,9 +105,31 @@ const BS: u64 = 512
 
 const SB_OFF: u64 = 0x000
 const SB_BYTES: u64 = 128
+// DIE KNOTENTAFEL: 0x400..0x780, also 16 Knoten zu 56 Oktetten.
+//
+// HIER LAG EIN FEHLER, DER EINEN HALBEN TAG GEKOSTET HAT. Die
+// Tafel hatte 24 Plaetze zu 48 Oktetten (0x480) und fing bei
+// 0x400 an -- sie endete also bei 0x880, und der erste grosse
+// Puffer steht bei 0x800. Die letzten drei Knoten lagen damit
+// MITTEN IM PUFFER: wer eine Datei oeffnete, die einen davon
+// bekam, verlor ihre Felder beim ersten Lesen, weil derselbe
+// Speicher gleich darauf mit einem Plattenblock ueberschrieben
+// wurde.
+//
+// Von aussen sah das aus wie ein Fehler im Datenlauf: eine
+// Datei war nach genau einem Block zu Ende, und ihre
+// Pruefsumme war die der ersten 4096 Oktette. Gesucht wurde
+// zuerst im Datenlauf, dann in der Knotenverwaltung -- der
+// Fehler lag in DIESEN ZWEI ZAHLEN.
+//
+// `tools/fremdfs/run.sh` rechnet die Aufteilung seit dieser
+// Runde nach (Abschnitt 1), und `tools/kernel/memmap.py` kennt
+// die Stuecke ebenfalls. Ein Puffer, der in die Tafel
+// hineinragt, faellt damit beim Bauen auf und nicht erst an
+// einer falschen Pruefsumme.
 const NODE_OFF: u64 = 0x400
-const NODE_BYTES: u64 = 48
-const MAX_NODES: u64 = 24
+const NODE_BYTES: u64 = 56
+const MAX_NODES: u64 = 16
 const MFTBUF: u64 = 0x800   // ein MFT-Eintrag (bis 4096)
 const IDXBUF: u64 = 0x1800  // ein INDX-Block (bis 4096)
 const DATBUF: u64 = 0x2800  // ein Sektor
@@ -128,6 +150,10 @@ const N_REF: u64 = 8    // die Nummer des MFT-Eintrags
 const N_SIZE: u64 = 16
 const N_DIR: u64 = 24
 const N_OK: u64 = 32    // 0 = die Daten sind lesbar, sonst der Grund
+// Wie viele Deskriptoren auf diesem Knoten offen sind. Ein Platz mit
+// N_USE > 0 wird nicht wiederverwendet -- sonst zoege man einem
+// lesenden Programm die Datei unter den Fuessen weg.
+const N_USE: u64 = 40
 
 // Warum eine Datei NICHT lesbar ist. Die Zahl steht im Knoten, damit
 // `read` sie melden kann, ohne den MFT-Eintrag noch einmal zu lesen.
@@ -477,34 +503,76 @@ fn ist_verzeichnis(p: u64) -> bool {
 
 // ------------------------------------------------------------- die Namen
 //
-// UTF-16 nach dem, was dieser Kernel als Text fuehrt. Zeichen bis 0xFF
-// werden uebernommen (damit sind Latin-1 und also die Umlaute dabei),
-// alles darueber wird zu '_'.
+// UTF-16 NACH UTF-8. Und zwar wirklich UTF-8 -- hier stand einmal
+// Latin-1, und das war falsch.
 //
-// DAS IST EINE BEWUSSTE GRENZE UND KEIN VERSEHEN: eine vollstaendige
-// UTF-16-nach-UTF-8-Wandlung waere richtig, aber sie macht Namen
-// LAENGER als sie im Eintrag stehen, und dann muesste hier ueber
-// Puffergrenzen entschieden werden, die `vfsops.NAME_MAX` schon
-// entschieden hat. Was nicht darstellbar ist, wird KENNTLICH gemacht
-// statt still verstuemmelt -- ein '_' sieht man, ein abgeschnittener
-// Name nicht.
+// DER FEHLER, DEN DAS BEHEBT: die erste Fassung hat jedes Zeichen
+// unter 0x100 als EIN Oktett abgelegt. Fuer ASCII stimmt das; fuer
+// 'ä' (U+00E4) ergibt es das Oktett 0xE4, waehrend derselbe Name aus
+// der Shell, aus `ls` und aus jedem Programm dieses Systems als
+// 0xC3 0xA4 kommt -- denn OrientOS rechnet in UTF-8. Die beiden waren
+// nie gleich, und `umlaut-äöü.txt` war auf einer NTFS-Platte nicht zu
+// oeffnen, obwohl `ls` ihn anzeigte. Genau dafuer steht diese Datei im
+// Pruefbaum.
 //
-// Rueckgabe: die Laenge.
+// Die Wandlung ist die gewoehnliche:
+//   bis U+007F    ein Oktett
+//   bis U+07FF    zwei
+//   sonst         drei
+// Ersatzzeichen (U+D800..U+DFFF), also Zeichen jenseits der
+// Grundebene, werden zu '_'. Sie richtig zu wandeln hiesse, zwei
+// UTF-16-Einheiten zu einem Zeichen zusammenzuziehen; das kommt in
+// Dateinamen kaum vor, und ein sichtbares '_' ist ehrlicher als ein
+// halb gewandeltes Zeichen.
+//
+// Rueckgabe: die Laenge IN OKTETTEN.
 fn name_wandeln(quelle: u64, zeichen: u64, ziel: u64, max: u64) -> u64 {
     var n: u64 = 0
     var i: u64 = 0
-    while i < zeichen && n + 1 < max {
+    while i < zeichen {
         let c: u64 = le16(quelle + i * 2)
         if c == 0 {
             i = zeichen
         } else {
-            if c < 0x100 {
-                kstate.set8(ziel + n, c as u8)
+            if c < 0x80 {
+                if n + 1 >= max {
+                    i = zeichen
+                } else {
+                    kstate.set8(ziel + n, c as u8)
+                    n = n + 1
+                    i = i + 1
+                }
+            } else if c < 0x800 {
+                if n + 2 >= max {
+                    i = zeichen
+                } else {
+                    kstate.set8(ziel + n, (0xC0 | (c >> 6)) as u8)
+                    kstate.set8(ziel + n + 1, (0x80 | (c & 0x3F)) as u8)
+                    n = n + 2
+                    i = i + 1
+                }
+            } else if c >= 0xD800 && c < 0xE000 {
+                // Ein Ersatzzeichen: der zweite Teil eines Zeichens
+                // jenseits der Grundebene. Nicht gewandelt, sondern
+                // kenntlich gemacht.
+                if n + 1 >= max {
+                    i = zeichen
+                } else {
+                    kstate.set8(ziel + n, 95 as u8) // '_'
+                    n = n + 1
+                    i = i + 1
+                }
             } else {
-                kstate.set8(ziel + n, 95 as u8) // '_'
+                if n + 3 >= max {
+                    i = zeichen
+                } else {
+                    kstate.set8(ziel + n, (0xE0 | (c >> 12)) as u8)
+                    kstate.set8(ziel + n + 1, (0x80 | ((c >> 6) & 0x3F)) as u8)
+                    kstate.set8(ziel + n + 2, (0x80 | (c & 0x3F)) as u8)
+                    n = n + 3
+                    i = i + 1
+                }
             }
-            n = n + 1
-            i = i + 1
         }
     }
     kstate.set8(ziel + n, 0 as u8)
@@ -562,6 +630,34 @@ fn node_find(state: u64, m: u64, ref: u64) -> u64 {
     return 0
 }
 
+// EINEN KNOTEN HOLEN -- UND WENN KEIN PLATZ FREI IST, EINEN
+// WIEDERVERWENDEN.
+//
+// HIER LAG DER TEUERSTE FEHLER DIESER RUNDE. Die Tafel hat MAX_NODES
+// Plaetze; `node_get` gab frueher 0 zurueck, sobald alle belegt waren,
+// und `f_readdir` machte daraus `return dir` -- also den KNOTEN DES
+// VERZEICHNISSES fuer einen Dateieintrag. Wer danach eine dieser
+// Dateien oeffnete, bekam einen Knoten mit N_DIR=1; `f_read` sagte
+// voellig richtig "das ist ein Verzeichnis" und gab 0 zurueck.
+//
+// Von aussen sah das aus wie ein Lesefehler im Datenlauf: die Datei
+// war nach genau einem Block zu Ende. Gemessen am 14.09.2026 an
+// `mittel.bin` (204800 Oktette), deren Pruefsumme die der ERSTEN 4096
+// Oktette war -- und `/viele` mit seinen 512 Eintraegen hatte die
+// Tafel vorher gefuellt.
+//
+// WARUM WIEDERVERWENDEN UND NICHT EINFACH DIE TAFEL VERGROESSERN: 512
+// Eintraege sind kein Sonderfall, sondern ein gewoehnliches
+// Verzeichnis, und die naechste Platte hat 5000. Eine Tafel, die gross
+// genug fuer "alle" ist, gibt es nicht; eine, die den aeltesten Platz
+// neu belegt, reicht immer.
+//
+// WAS DABEI NICHT PASSIEREN DARF: einen Knoten wegnehmen, den gerade
+// jemand OFFEN hat. Deshalb wird nur ein Platz genommen, dessen Zaehler
+// `N_USE` null ist -- `sys.fi` haelt ihn ueber `open`/`close`, so wie
+// `mnt.opens` die Einhaengung haelt. Ist wirklich jeder Platz in
+// Benutzung, gibt es 0 zurueck, und der Aufrufer meldet einen FEHLER,
+// statt einen fremden Knoten zu liefern.
 fn node_get(state: u64, m: u64, ref: u64, size: u64, dir: u64,
     ok: u64) -> u64 {
     let have: u64 = node_find(state, m, ref)
@@ -579,11 +675,45 @@ fn node_get(state: u64, m: u64, ref: u64, size: u64, dir: u64,
             nset(state, i, N_SIZE, size)
             nset(state, i, N_DIR, dir)
             nset(state, i, N_OK, ok)
+            nset(state, i, N_USE, 0)
             return i
         }
         i = i + 1
     }
+    // Kein freier Platz: den ersten nehmen, den niemand offen hat.
+    var k: u64 = 1
+    while k <= MAX_NODES {
+        if nget(state, k, N_USE) == 0 {
+            nset(state, k, N_MNT, m + 1)
+            nset(state, k, N_REF, ref)
+            nset(state, k, N_SIZE, size)
+            nset(state, k, N_DIR, dir)
+            nset(state, k, N_OK, ok)
+            return k
+        }
+        k = k + 1
+    }
     return 0
+}
+
+// Der Zaehler der offenen Deskriptoren auf diesem Knoten. `sys.fi`
+// zaehlt ihn beim Oeffnen hoch und beim Schliessen herunter -- genau
+// wie `mnt.open_inc` fuer die Einhaengung.
+fn node_hold(state: u64, node: u64) {
+    if node == 0 || node > MAX_NODES {
+        return
+    }
+    nset(state, node, N_USE, nget(state, node, N_USE) + 1)
+}
+
+fn node_drop(state: u64, node: u64) {
+    if node == 0 || node > MAX_NODES {
+        return
+    }
+    let n: u64 = nget(state, node, N_USE)
+    if n != 0 {
+        nset(state, node, N_USE, n - 1)
+    }
 }
 
 fn release(state: u64, m: u64) {
@@ -1024,7 +1154,12 @@ fn f_readdir__inner(state: u64, m: u64, dir: u64, index: u64,
     }
     let k: u64 = knoten_aus_eintrag(state, m, gefunden, buf(state, MFTBUF))
     if k == 0 {
-        return dir
+        // KEIN KNOTEN FREI. Frueher stand hier `return dir` -- der
+        // Knoten des VERZEICHNISSES fuer einen Dateieintrag, und damit
+        // war jede so gelieferte Datei fuer `read` ein Verzeichnis.
+        // Lieber gar keinen Eintrag als den falschen: `ls` zeigt ihn
+        // dann nicht, statt ihn falsch zu zeigen.
+        return 0
     }
     return k
 }

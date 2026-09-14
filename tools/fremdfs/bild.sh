@@ -50,6 +50,27 @@ for w in mkfs.ext4 debugfs mkntfs sha256sum gcc; do
     command -v "$w" >/dev/null 2>&1 || { echo "bild.sh: $w fehlt"; exit 2; }
 done
 
+
+# EINE DATEI MIT LOECHERN ANLEGEN, statt sie mit Nullen vollzuschreiben.
+#
+# `dd if=/dev/zero` belegt die ganze Groesse WIRKLICH auf der Platte des
+# Wirts. Die Abbilder dieser Runde sind zusammen mehrere hundert
+# Megaoktett, und auf einer vollen Platte scheitert der Bau genau daran
+# -- gemessen am 14.09.2026: "No space left on device" mitten im Lauf,
+# und danach waren die Gegenproben leere Dateien. Eine Datei mit
+# Loechern belegt nur, was auch beschrieben wird; fuer `mkfs`, `qemu`
+# und jeden Leser ist sie dieselbe Datei.
+leer_anlegen() { # datei mebioktette
+    rm -f "$1"
+    python3 - "$1" "$2" <<'PYEOF'
+import sys
+ziel, mib = sys.argv[1], int(sys.argv[2])
+with open(ziel, 'wb') as f:
+    f.seek(mib * 1048576 - 1)
+    f.write(b'\0')
+PYEOF
+}
+
 BAUM=$(mktemp -d)
 HILF=$(mktemp -d)
 trap 'rm -rf "$BAUM" "$HILF"' EXIT
@@ -141,7 +162,7 @@ ext4_befehle() { # quellverzeichnis
 ext4_bauen() { # datei blockgroesse mibs journal(0/1)
     local img=$1 bs=$2 mib=$3 jrnl=$4
     rm -f "$img"
-    dd if=/dev/zero of="$img" bs=1M count="$mib" status=none
+    leer_anlegen "$img" "$mib"
     local opts='extent,dir_index,^has_journal'
     [ "$jrnl" = 1 ] && opts='extent,dir_index,has_journal'
     mkfs.ext4 -q -F -b "$bs" -O "$opts" -E root_owner=0:0 -I 256 \
@@ -151,13 +172,13 @@ ext4_bauen() { # datei blockgroesse mibs journal(0/1)
     #    zweite loeschen, dann die grosse Datei schreiben: sie bekommt
     #    die Luecken und damit viele Extents. Gemessen wird danach,
     #    dass der Baum wirklich Tiefe > 0 hat.
-    dd if=/dev/urandom of="$HILF/brocken.bin" bs=1K count=64 status=none
+    dd if=/dev/urandom of="$HILF/brocken.bin" bs=1K count=32 status=none
     {
-        for i in $(seq 1 400); do printf 'write %s/brocken.bin g%s\n' "$HILF" "$i"; done
+        for i in $(seq 1 200); do printf 'write %s/brocken.bin g%s\n' "$HILF" "$i"; done
     } > "$HILF/e1.txt"
     debugfs -w -f "$HILF/e1.txt" "$img" >/dev/null 2>&1
     {
-        for i in $(seq 1 2 400); do printf 'rm g%s\n' "$i"; done
+        for i in $(seq 1 2 200); do printf 'rm g%s\n' "$i"; done
     } > "$HILF/e2.txt"
     debugfs -w -f "$HILF/e2.txt" "$img" >/dev/null 2>&1
 
@@ -173,7 +194,7 @@ ext4_bauen() { # datei blockgroesse mibs journal(0/1)
     # 3. Die uebriggebliebenen Brocken weg -- sie sollen den Baum
     #    nicht verfaelschen, nur die Zerstueckelung bewirkt haben.
     {
-        for i in $(seq 2 2 400); do printf 'rm g%s\n' "$i"; done
+        for i in $(seq 2 2 200); do printf 'rm g%s\n' "$i"; done
     } > "$HILF/e5.txt"
     debugfs -w -f "$HILF/e5.txt" "$img" >/dev/null 2>&1
 
@@ -204,10 +225,10 @@ ext4_bauen() { # datei blockgroesse mibs journal(0/1)
 }
 
 echo "bild: ext4 (1024er Bloecke) ..."
-ext4_bauen "$AUS/ext4.img" 1024 96 0 || { echo "bild: mkfs.ext4 fehlgeschlagen"; exit 3; }
+ext4_bauen "$AUS/ext4.img" 1024 48 0 || { echo "bild: mkfs.ext4 fehlgeschlagen"; exit 3; }
 
 echo "bild: ext4 (4096er Bloecke) ..."
-ext4_bauen "$AUS/ext4-4k.img" 4096 96 0 || exit 3
+ext4_bauen "$AUS/ext4-4k.img" 4096 48 0 || exit 3
 
 # DIE TIEFE DES EXTENT-BAUMS WIRD GEMESSEN. Ohne diese Zeilen waere
 # "der Treiber kann Extent-Baeume" eine Hoffnung und keine Zusage.
@@ -224,7 +245,7 @@ echo "bild: gross.bin hat ${extents:-?} Extents; /viele ist htree=${htree:-?}"
 # Absturz. s_state = 0 und das Bit NEEDS_RECOVERY, also genau das, was
 # ein abgestuerztes Linux hinterlaesst.
 echo "bild: ext4 unsauber (Journal, needs_recovery) ..."
-ext4_bauen "$AUS/ext4-schmutzig.img" 1024 96 1 || exit 3
+ext4_bauen "$AUS/ext4-schmutzig.img" 1024 48 1 || exit 3
 python3 - "$AUS/ext4-schmutzig.img" <<'PY'
 import struct, sys
 with open(sys.argv[1], 'r+b') as f:
@@ -245,30 +266,28 @@ PY
 # ---------------------------------------------------------- Gegenproben
 echo "bild: die Gegenproben ..."
 # 1. kaputte Magie: 0xEF53 bei 1024+0x38 zerstoert.
-cp "$AUS/ext4.img" "$AUS/kaputt-ext4.img"
+cp --sparse=always "$AUS/ext4.img" "$AUS/kaputt-ext4.img"
 printf '\x00\x00' | dd of="$AUS/kaputt-ext4.img" bs=1 seek=$((1024 + 0x38)) \
     conv=notrunc status=none
 
 # 2. ein FAT32 -- darf NICHT als ext4 durchgehen.
-rm -f "$AUS/fat-als-ext4.img"
-dd if=/dev/zero of="$AUS/fat-als-ext4.img" bs=1M count=96 status=none
+leer_anlegen "$AUS/fat-als-ext4.img" 48
 if command -v mkfs.vfat >/dev/null 2>&1; then
     mkfs.vfat -F 32 "$AUS/fat-als-ext4.img" >/dev/null 2>&1
 fi
 
 # 3. abgeschnitten: der Superblock sagt eine Groesse, die das Geraet
 #    nicht hat. Ein Treiber, der das nicht prueft, liest ins Leere.
-cp "$AUS/ext4.img" "$AUS/kurz-ext4.img"
-dd if="$AUS/ext4.img" of="$AUS/kurz-ext4.img" bs=1M count=48 status=none conv=notrunc
-python3 - "$AUS/kurz-ext4.img" <<'PY'
+cp --sparse=always "$AUS/ext4.img" "$AUS/kurz-ext4.img"
+python3 - "$AUS/kurz-ext4.img" <<'PYEOF'
 import os, sys
-os.truncate(sys.argv[1], 48 * 1024 * 1024)
-PY
+# 24 von 48 MiB: der Superblock nennt mehr Bloecke, als das Geraet hat.
+os.truncate(sys.argv[1], 24 * 1024 * 1024)
+PYEOF
 
 # ---------------------------------------------------------------- NTFS
 echo "bild: NTFS ..."
-rm -f "$AUS/ntfs.img"
-dd if=/dev/zero of="$AUS/ntfs.img" bs=1M count=128 status=none
+leer_anlegen "$AUS/ntfs.img" 80
 if ! mkntfs -F -Q -c 4096 -L OSUMTEST "$AUS/ntfs.img" >/dev/null 2>&1; then
     echo "bild: mkntfs fehlgeschlagen"
     exit 3
@@ -300,7 +319,7 @@ if command -v ntfscat >/dev/null 2>&1; then
 fi
 
 # NTFS-Gegenprobe: zerstoerte Kennung "NTFS    " bei +3.
-cp "$AUS/ntfs.img" "$AUS/kaputt-ntfs.img"
+cp --sparse=always "$AUS/ntfs.img" "$AUS/kaputt-ntfs.img"
 printf 'XXXX' | dd of="$AUS/kaputt-ntfs.img" bs=1 seek=3 conv=notrunc status=none
 
 echo "bild: fertig in $AUS"

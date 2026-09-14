@@ -131,7 +131,8 @@ import sched
 import atomic
 import cpu
 
-export { ops, mount_probe, release, MAX_NODES, unsauber }
+export { ops, mount_probe, release, node_hold, node_drop,
+    MAX_NODES, unsauber }
 
 const BS: u64 = 512 // ein SEKTOR. Die Bloecke des Dateisystems sind groesser.
 
@@ -139,9 +140,31 @@ const BS: u64 = 512 // ein SEKTOR. Die Bloecke des Dateisystems sind groesser.
 
 const SB_OFF: u64 = 0x000 // 8 Einhaengungen zu 128 Oktetten
 const SB_BYTES: u64 = 128
+// DIE KNOTENTAFEL: 0x400..0x780, also 16 Knoten zu 56 Oktetten.
+//
+// HIER LAG EIN FEHLER, DER EINEN HALBEN TAG GEKOSTET HAT. Die
+// Tafel hatte 24 Plaetze zu 48 Oktetten (0x480) und fing bei
+// 0x400 an -- sie endete also bei 0x880, und der erste grosse
+// Puffer steht bei 0x800. Die letzten drei Knoten lagen damit
+// MITTEN IM PUFFER: wer eine Datei oeffnete, die einen davon
+// bekam, verlor ihre Felder beim ersten Lesen, weil derselbe
+// Speicher gleich darauf mit einem Plattenblock ueberschrieben
+// wurde.
+//
+// Von aussen sah das aus wie ein Fehler im Datenlauf: eine
+// Datei war nach genau einem Block zu Ende, und ihre
+// Pruefsumme war die der ersten 4096 Oktette. Gesucht wurde
+// zuerst im Datenlauf, dann in der Knotenverwaltung -- der
+// Fehler lag in DIESEN ZWEI ZAHLEN.
+//
+// `tools/fremdfs/run.sh` rechnet die Aufteilung seit dieser
+// Runde nach (Abschnitt 1), und `tools/kernel/memmap.py` kennt
+// die Stuecke ebenfalls. Ein Puffer, der in die Tafel
+// hineinragt, faellt damit beim Bauen auf und nicht erst an
+// einer falschen Pruefsumme.
 const NODE_OFF: u64 = 0x400 // 24 Knoten zu 48 Oktetten
-const NODE_BYTES: u64 = 48
-const MAX_NODES: u64 = 24
+const NODE_BYTES: u64 = 56
+const MAX_NODES: u64 = 16
 // Die Arbeitspuffer. Ein Block des Dateisystems kann 4096 Oktette
 // gross sein, und davon werden zwei gleichzeitig gebraucht (ein
 // Verzeichnisblock, waehrend ein Extent-Knoten gelesen wird).
@@ -171,6 +194,9 @@ const N_SIZE: u64 = 16
 const N_MODE: u64 = 24
 const N_FLAGS: u64 = 32
 const N_LINKS: u64 = 40
+// Wie viele Deskriptoren auf diesem Knoten offen sind; ein Platz mit
+// N_USE > 0 wird nicht wiederverwendet.
+const N_USE: u64 = 48
 
 // Die Magie des Superblocks und die des Extent-Knotens.
 const MAGIE: u64 = 0xEF53
@@ -316,6 +342,15 @@ fn node_find(state: u64, m: u64, ino: u64) -> u64 {
 // FAT32: wer dieselbe Datei zweimal oeffnet, soll denselben Knoten
 // bekommen, sonst ist die kleine Tafel nach vierundzwanzig `open` voll
 // und `st_ino` waere jedes Mal eine andere Zahl fuer dieselbe Datei.
+// EINEN KNOTEN HOLEN -- UND WENN KEIN PLATZ FREI IST, EINEN
+// WIEDERVERWENDEN. Die lange Begruendung steht in `kernel/ntfs.fi` bei
+// derselben Funktion; kurz: eine Tafel, die voll laufen kann, MUSS
+// einen Platz neu belegen koennen, sonst liefert der Aufrufer
+// irgendwann den falschen Knoten. Ein Verzeichnis mit 512 Eintraegen
+// fuellt 24 Plaetze sofort.
+//
+// Ein Platz, auf dem ein Deskriptor offen ist (`N_USE` > 0), wird
+// NICHT genommen.
 fn node_get(state: u64, m: u64, ino: u64, size: u64, mode: u64,
     flags: u64, links: u64) -> u64 {
     let have: u64 = node_find(state, m, ino)
@@ -335,11 +370,42 @@ fn node_get(state: u64, m: u64, ino: u64, size: u64, mode: u64,
             nset(state, i, N_MODE, mode)
             nset(state, i, N_FLAGS, flags)
             nset(state, i, N_LINKS, links)
+            nset(state, i, N_USE, 0)
             return i
         }
         i = i + 1
     }
+    var k: u64 = 1
+    while k <= MAX_NODES {
+        if nget(state, k, N_USE) == 0 {
+            nset(state, k, N_MNT, m + 1)
+            nset(state, k, N_INO, ino)
+            nset(state, k, N_SIZE, size)
+            nset(state, k, N_MODE, mode)
+            nset(state, k, N_FLAGS, flags)
+            nset(state, k, N_LINKS, links)
+            return k
+        }
+        k = k + 1
+    }
     return 0
+}
+
+fn node_hold(state: u64, node: u64) {
+    if node == 0 || node > MAX_NODES {
+        return
+    }
+    nset(state, node, N_USE, nget(state, node, N_USE) + 1)
+}
+
+fn node_drop(state: u64, node: u64) {
+    if node == 0 || node > MAX_NODES {
+        return
+    }
+    let n: u64 = nget(state, node, N_USE)
+    if n != 0 {
+        nset(state, node, N_USE, n - 1)
+    }
 }
 
 fn release(state: u64, m: u64) {
@@ -966,10 +1032,11 @@ fn f_readdir__inner(state: u64, m: u64, dir: u64, index: u64,
     let k: u64 = node_get(state, m, gefunden, ino_size(iptr), ino_mode(iptr),
         ino_flags(iptr), ino_links(iptr))
     if k == 0 {
-        // Die Knotentafel ist voll. Lieber den Eintrag mit dem
-        // Verzeichnisknoten melden als gar nichts -- der Name stimmt,
-        // und `ls` braucht vor allem den.
-        return dir
+        // HIER STAND `return dir`, und das war falsch: der Knoten des
+        // VERZEICHNISSES fuer einen Dateieintrag. Wer die Datei danach
+        // oeffnete, bekam ein Verzeichnis und konnte sie nicht lesen.
+        // Lieber gar keinen Eintrag als den falschen.
+        return 0
     }
     return k
 }
