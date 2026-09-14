@@ -210,9 +210,20 @@ for n in 2112 2113 2114 2115 2116; do
     grep -qE "= $n( |$)" kernel/sys.fi && ok "call number $n is in kernel/sys.fi" \
         || bad "call number $n is missing"
 done
-grep -q 'const WM_MAXNR: u64 = 2116' kernel/sys.fi \
-    && ok "and 2116 is the highest of the window server" \
-    || bad "WM_MAXNR does not match the calls"
+# ROUND WMPLUGIN: THE COPIED NUMBER IS GONE. This line held `= 2116`
+# and went red the moment the plugin round added 2117..2126 -- the same
+# mistake the comment above describes, made a second time. So the
+# assertion now READS the number and COMPARES it: it has to be at least
+# as high as the highest call this round knows (2126), and it has to
+# match the highest `= 21xx` that actually stands in the file.
+maxnr=$(grep -oE 'const WM_MAXNR: u64 = [0-9]+' kernel/sys.fi | grep -oE '[0-9]+$')
+hoch=$(grep -oE '^const WM_[A-Z_]+: u64 = 21[0-9][0-9]' kernel/sys.fi \
+    | grep -v WM_MAXNR | grep -oE '[0-9]+$' | sort -n | tail -1)
+if [ -n "${maxnr:-}" ] && [ "$maxnr" -ge 2126 ] && [ "$maxnr" = "${hoch:-x}" ]; then
+    ok "WM_MAXNR=$maxnr is the highest call of the window server (>= 2126)"
+else
+    bad "WM_MAXNR='$maxnr' does not match the calls (highest found: '$hoch', expected >= 2126)"
+fi
 # THE FOUR EDGES ARE THE SAME FOUR NUMBERS IN FOUR PLACES. Not a
 # translation table -- one set of numbers, written down four times, and
 # a runner that would notice if one of them drifted.

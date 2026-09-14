@@ -1,0 +1,437 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/pluguhr.fi -- /bin/pluguhr, das Leistenwidget der Runde
+// WMPLUGIN. RING 3, und das ist der ganze Punkt dieser Runde.
+//
+// Hyprland wuerde dieses Widget als `.so` in den Compositor laden; bei
+// uns laeuft der Fensterserver IM KERN, derselbe Weg waere also
+// Fremdcode in Ring 0. Also ist das Widget ein GEWOEHNLICHER PROZESS,
+// der nichts kann, was nicht in `plug_call` (kernel/sysgui.fi) steht.
+// Es MALT AUCH NICHT: es schickt einmal je Sekunde 31 Oktette Text
+// (`WM_PLUG_BAR`), und die Taskleiste holt sie sich (`WM_PLUG_BARGET`)
+// und malt sie mit wlib/fUi wie jeden anderen Text. Zwei Prozesse, ein
+// Zeichenweg -- kein neuer.
+//
+//     pluguhr [takt=MS] [runden=N] [still]
+//
+// `takt` ist der Sekundentakt in Millisekunden (Vorgabe 1000),
+// `runden=N` beendet das Widget nach N Runden (der Abnahmelauf braucht
+// ein Programm, das von selbst aufhoert), `still` nimmt die Meldungen
+// von der seriellen Leitung.
+//
+// DIE FRIST WIRD BEI JEDEM TAKT ANGEFASST. `WM_PLUG_POLL` ist der
+// Lebensnachweis (kernel/wmplug.fi, `touch`): wer etwas liegen hat und
+// es eine halbe Sekunde nicht abholt, wird abgemeldet. Dieses Widget
+// abonniert die Fensterereignisse, weil es ohne Abonnement gar nicht
+// zeigen koennte, dass es die Frist HALTEN kann -- ein stilles Plugin
+// wird nie geprueft.
+
+profile kernel
+
+import ulib
+
+export { u_start }
+
+// ---------------------------------------------- die Schnittstelle
+// Dieselben Nummern wie in kernel/sys.fi. Sie stehen hier ein zweites
+// Mal, weil ein Ring-3-Programm den Kern nicht einbindet -- und wenn
+// eine davon abweicht, faellt es in `tools/wmplug/run.sh` auf, das
+// beide Listen gegeneinanderhaelt.
+const WM_PLUG_REG: u64 = 2117
+const WM_PLUG_UNREG: u64 = 2118
+const WM_PLUG_POLL: u64 = 2119
+const WM_PLUG_SUB: u64 = 2120
+const WM_PLUG_INFO: u64 = 2121
+const WM_PLUG_BAR: u64 = 2124
+const WM_PLUG_BARGET: u64 = 2125 // nur die Leiste -- hier die Gegenprobe
+
+const PL_ABI: u64 = 0
+const PL_SLOT: u64 = 3
+const PL_RIGHTS: u64 = 5
+const PL_FRIST: u64 = 14 // die Frist des Kerns, in Ticks zu 10 ms
+
+// Die Fassung, gegen die dieses Widget gebaut ist. Passt sie nicht,
+// meldet es sich GAR NICHT AN und sagt warum -- eine Erweiterung, die
+// auf gut Glueck mit einem fremden Kern redet, ist der Fehler, den
+// diese Runde vermeiden will.
+const WMP_ABI: u64 = 1
+
+// die Ereignistypen (kernel/wmplug.fi). Die Maske ist (1 << typ).
+const E_WIN_OPEN: u64 = 1
+const E_WIN_CLOSE: u64 = 2
+const E_FOCUS: u64 = 3
+const E_STOP: u64 = 7
+
+const R_ACT_BAR: u64 = 0x800
+
+// ---------------------------------------------------- die Meldungen
+static mut still: u64 = 0
+
+fn say(p: u64) {
+    if still != 0 {
+        return
+    }
+    let _r: u64 = ulib.say(p)
+}
+
+fn sayn(v: u64) {
+    if still != 0 {
+        return
+    }
+    ulib.sayn(v)
+}
+
+fn nl() {
+    if still != 0 {
+        return
+    }
+    ulib.nl()
+}
+
+// ------------------------------------------------------- der Text
+//
+// 31 Oktette sind die Obergrenze des Kerns (`WM_PLUG_BAR`), und dieser
+// Puffer ist 32 gross: der Kern schneidet ab, dieses Programm nicht.
+static mut txt: [u8; 40] = [0 as u8; 40]
+
+fn zwei(at: u64, v: u64) -> u64 {
+    __mmio_write8(((&txt[0 as usize]) as u64 + at) as *mut u8,
+        (48 + (v / 10) % 10) as u8)
+    __mmio_write8(((&txt[0 as usize]) as u64 + at + 1) as *mut u8,
+        (48 + v % 10) as u8)
+    return at + 2
+}
+
+fn zahl(at: u64, v: u64) -> u64 {
+    if v >= 100 {
+        // EINE Hunderterstelle und dann ZWEI -- `zwei(at, v / 100)`
+        // stand hier und machte aus 100 die Zeichenfolge "0100"
+        // (gemessen: `taskbar: text plug t=17:00 cpu 0100%`). `zwei`
+        // schreibt immer zwei Ziffern, auch fuer eine einstellige Zahl.
+        return zwei(zeichen(at, 48 + (v / 100) % 10), v % 100)
+    }
+    if v >= 10 {
+        return zwei(at, v)
+    }
+    __mmio_write8(((&txt[0 as usize]) as u64 + at) as *mut u8,
+        (48 + v) as u8)
+    return at + 1
+}
+
+fn zeichen(at: u64, c: u64) -> u64 {
+    __mmio_write8(((&txt[0 as usize]) as u64 + at) as *mut u8, c as u8)
+    return at + 1
+}
+
+// Die Auslastung von Kern 0, aus ZWEI Messungen gerechnet. Eine
+// einzelne Zahl aus `CS_IDLE` waere die Auslastung seit dem Hochlauf
+// und wuerde sich nach einer Minute nicht mehr bewegen.
+static mut cs_t: u64 = 0
+static mut cs_i: u64 = 0
+static mut cs_da: u64 = 0
+
+fn cpu_last() -> u64 {
+    let t: u64 = ulib.sys(ulib.SYS_CPUSTAT, 0, ulib.CS_TICKS, 0)
+    let i: u64 = ulib.sys(ulib.SYS_CPUSTAT, 0, ulib.CS_IDLE, 0)
+    if ulib.bad(t) || ulib.bad(i) {
+        return 0
+    }
+    var last: u64 = 0
+    if cs_da != 0 && t > cs_t {
+        let dt: u64 = t - cs_t
+        var di: u64 = 0
+        if i > cs_i {
+            di = i - cs_i
+        }
+        if di > dt {
+            di = dt
+        }
+        last = ((dt - di) * 100) / dt
+    }
+    cs_t = t
+    cs_i = i
+    cs_da = 1
+    return last
+}
+
+// `cpu NN%` -- sieben bis acht Oktette, weit unter der Grenze des Kerns
+// auch dann, wenn die Auslastung dreistellig wird.
+//
+// HIER STAND EINMAL `HH:MM cpu NN%`, UND DAS WAR EIN FEHLER DER RUNDE.
+// Die Leiste hat eine eigene Uhr (Feld F_CLK, rechts aussen), und das
+// Widgetfeld steht unmittelbar links davon: auf dem Foto bei 640x480
+// standen ZWEI Uhrzeiten nebeneinander, die sich um eine Minute
+// unterscheiden konnten. Ein Widget soll etwas zeigen, was die Leiste
+// NICHT schon zeigt -- die Last zeigt sie nicht. Die Trennung im Bild
+// (mindestens acht Bildpunkte zwischen Widgetfeld und Uhr) steht
+// zusaetzlich in kernel/user/taskbar.fi; hier faellt der Anlass weg.
+fn bauen() -> u64 {
+    var at: u64 = 0
+    at = zeichen(at, 99)  // c
+    at = zeichen(at, 112) // p
+    at = zeichen(at, 117) // u
+    at = zeichen(at, 32)
+    at = zahl(at, cpu_last())
+    at = zeichen(at, 37) // %
+    __mmio_write8(((&txt[0 as usize]) as u64 + at) as *mut u8, 0 as u8)
+    return at
+}
+
+// -------------------------------------------------------- die Runde
+static mut geholt: u64 = 0
+static mut gestoppt: u64 = 0
+
+// ALLES ABHOLEN, WAS DALIEGT, UND DANN WEITERGEHEN. `WM_PLUG_POLL`
+// wartet nie (0 = nichts da), also ist diese Schleife endlich: der Ring
+// hat 64 Plaetze, und mehr als 64 koennen nicht liegen.
+fn abholen() {
+    var ev: [u64; 2] = [0 as u64; 2]
+    var n: u64 = 0
+    while n < 96 {
+        let r: u64 = ulib.sys(WM_PLUG_POLL, (&ev[0 as usize]) as u64, 0, 0)
+        if ulib.bad(r) || r == 0 {
+            return
+        }
+        geholt = geholt + 1
+        if ev[(0) as usize] == E_STOP {
+            // Das letzte Ereignis vor einer Abmeldung. Wer es liest,
+            // weiss, dass er gleich keinen Platz mehr hat -- und geht
+            // von selbst, statt in Fehlercodes zu laufen.
+            gestoppt = 1
+        }
+        n = n + 1
+    }
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_still: [u8; 6] = "still\0"
+    var s_takt: [u8; 6] = "takt=\0"
+    var s_rund: [u8; 8] = "runden=\0"
+    // SECHZEHN OKTETTE UND NICHT VIER. Der Kern holt sich aus diesem
+    // Zeiger FUENFZEHN Oktette (`do_plugreg`, `copy_in(..., 15)`) und
+    // nimmt sie ALLE als Namen. Mit `[u8; 4]` stand hinter dem
+    // Abschlusszeichen der naechste Stapelplatz, und der Kern meldete
+    // `wmplug: reg uhr rund` -- der Name war "uhr\0runden=", die
+    // Gewaehrungstafel fand ihn nicht, und das Widget bekam R_DEFAULT
+    // statt R_ACT_BAR. Gemessen, nicht vermutet: `rechte=0x1f`.
+    var s_name: [u8; 16] = "uhr\0\0\0\0\0\0\0\0\0\0\0\0\0"
+    var s_abi: [u8; 21] = "pluguhr: abi falsch \0"
+    var s_kern: [u8; 8] = " kern=\0\0"
+    var s_reg: [u8; 25] = "pluguhr: angemeldet nr=\0\0"
+    var s_re: [u8; 9] = " rechte=\0"
+    var s_nein: [u8; 32] = "pluguhr: anmeldung fehlgeschla\0\0"
+    var s_kbar: [u8; 34] = "pluguhr: KEIN recht R_ACT_BAR r=\0\0"
+    var s_txt: [u8; 15] = "pluguhr: text \0"
+    var s_bg: [u8; 31] = "pluguhr: barget verweigert r=\0\0"
+    var s_fr: [u8; 22] = "pluguhr: frist ticks=\0"
+    var s_po: [u8; 9] = " pollms=\0"
+    var s_ende: [u8; 22] = "pluguhr: ende runden=\0"
+    var s_ev: [u8; 10] = " ereig=\0\0\0"
+
+    var takt: u64 = 1000
+    var runden: u64 = 0 // 0 = ohne Ende
+    let argc: u64 = ulib.arg_count(args)
+    var ai: u64 = 1
+    while ai < argc {
+        let a: u64 = ulib.arg_at(args, ai)
+        if ulib.streq(a, (&s_still[0 as usize]) as u64) {
+            still = 1
+        } else if praefix(a, (&s_takt[0 as usize]) as u64, 5) {
+            takt = wert(a, 5)
+        } else if praefix(a, (&s_rund[0 as usize]) as u64, 7) {
+            runden = wert(a, 7)
+        }
+        ai = ai + 1
+    }
+
+    // ERST DIE FASSUNG, DANN DIE ANMELDUNG. Der Kern beantwortet
+    // `PL_ABI` immer -- auch ohne Plugintafel und ohne Anmeldung --,
+    // damit genau diese Reihenfolge moeglich ist.
+    let abi: u64 = ulib.sys(WM_PLUG_INFO, 0, PL_ABI, 0)
+    if ulib.bad(abi) || abi != WMP_ABI {
+        say((&s_abi[0 as usize]) as u64)
+        sayn(WMP_ABI)
+        say((&s_kern[0 as usize]) as u64)
+        sayn(abi)
+        nl()
+        return 1
+    }
+    let maske: u64 = (1 << E_WIN_OPEN) | (1 << E_WIN_CLOSE)
+        | (1 << E_FOCUS) | (1 << E_STOP)
+    let platz: u64 = ulib.sys(WM_PLUG_REG, WMP_ABI,
+        (&s_name[0 as usize]) as u64, maske)
+    if ulib.bad(platz) {
+        say((&s_nein[0 as usize]) as u64)
+        sayn(platz)
+        nl()
+        return 1
+    }
+    let rechte: u64 = ulib.sys(WM_PLUG_INFO, platz, PL_RIGHTS, 0)
+    say((&s_reg[0 as usize]) as u64)
+    sayn(platz)
+    say((&s_re[0 as usize]) as u64)
+    sayn(rechte)
+    nl()
+    // ================================================ DIE GEGENPROBE
+    // EIN PLUGIN DARF DIE LEISTE NICHT AUSLESEN.
+    //
+    // `WM_PLUG_BARGET` beantwortet der Kern nur der Leiste (is_taskbar,
+    // also: wer einen Schirmrand reserviert hat). Dass dieses Widget
+    // seinen eigenen Text nicht zurueckholen kann, ist keine Schikane,
+    // sondern die Grenze, die ein `.so` im Compositor-Prozess nicht
+    // haette: dort liegt der Text jedes anderen Widgets im selben
+    // Adressraum. Der Fehlercode steht auf der Leitung, damit die
+    // Zusage gemessen und nicht behauptet wird.
+    var frei: [u8; 40] = [0 as u8; 40]
+    let bg: u64 = ulib.sys4(WM_PLUG_BARGET, 0,
+        (&frei[0 as usize]) as u64, 31, 0)
+    say((&s_bg[0 as usize]) as u64)
+    sayn(bg)
+    nl()
+
+    // DAS ABONNEMENT NOCH EINMAL AUSDRUECKLICH. `WM_PLUG_REG` hat die
+    // Maske schon genommen; dieser Ruf ist der Beleg, dass ein Plugin
+    // sie auch spaeter aendern kann, ohne sich neu anzumelden.
+    let _s: u64 = ulib.sys(WM_PLUG_SUB, maske, 0, 0)
+
+    // WIE OFT ABGEHOLT WERDEN MUSS, SAGT DER KERN. `PL_FRIST` ist die
+    // Frist in Ticks (100 Ticks je Sekunde); ein Drittel davon ist der
+    // Abstand zweier Abholungen. Ohne Auskunft bleibt es bei 150 ms --
+    // das haelt auch die kurze Frist des Abnahmelaufs (`plugfrist`, 3
+    // Ticks) nicht, aber dafuer ist sie auch nicht gedacht.
+    var pollms: u64 = 150
+    let ft: u64 = ulib.sys(WM_PLUG_INFO, platz, PL_FRIST, 0)
+    if !ulib.bad(ft) && ft != 0 {
+        pollms = (ft * 10) / 3
+        // DIE UNTERGRENZE IST EINE LASTFRAGE UND KEINE GESCHMACKSFRAGE.
+        // Hier standen 20 ms: bei kurzer Frist wachte dieses Widget
+        // fuenfzigmal je Sekunde auf, fragte den Kern und schlief
+        // wieder -- und meldete danach selbst die Last, die es erzeugt
+        // hatte (gemessen: `cpu 100%` im eigenen Feld). Fuenfzig
+        // Millisekunden reichen fuer jede Frist, die ein Mensch
+        // einstellt, und kosten ein Zwanzigstel davon.
+        if pollms < 50 {
+            pollms = 50
+        }
+        // Und nach oben gedeckelt, damit ein Kern mit sehr langer Frist
+        // das Widget nicht in einen Halbschlaf schickt, in dem es die
+        // eigene Abmeldung (E_STOP) erst Sekunden spaeter bemerkt.
+        if pollms > 250 {
+            pollms = 250
+        }
+    }
+    say((&s_fr[0 as usize]) as u64)
+    sayn(ft)
+    say((&s_po[0 as usize]) as u64)
+    sayn(pollms)
+    nl()
+
+    var r: u64 = 0
+    var gesagt: u64 = 0
+    var n: u64 = 0
+    while runden == 0 || n < runden {
+        abholen()
+        if gestoppt != 0 {
+            n = n + 1
+            r = 0
+            break
+        }
+        let len: u64 = bauen()
+        r = ulib.sys(WM_PLUG_BAR, (&txt[0 as usize]) as u64, len, 0)
+        if ulib.bad(r) {
+            // OHNE RECHT KEIN TEXT -- und das steht einmal auf der
+            // Leitung und nicht bei jedem Takt. Ein Widget, das
+            // sekuendlich denselben Fehler meldet, verdeckt die Zeile,
+            // die man wirklich sucht.
+            if gesagt == 0 {
+                gesagt = 1
+                say((&s_kbar[0 as usize]) as u64)
+                sayn(r)
+                say((&s_re[0 as usize]) as u64)
+                sayn(rechte & R_ACT_BAR)
+                nl()
+            }
+        } else {
+            // JEDER GESCHICKTE TEXT STEHT AUF DER LEITUNG, und zwar
+            // NACH dem Ruf und nicht davor. Vorher wurde nur jede
+            // zehnte Runde gemeldet, und damit war die Zeile
+            // `pluguhr: text ...` mit dem, was die Leiste malte, nicht
+            // mehr vergleichbar -- die Jury fragte zu Recht, woher die
+            // Zahl in der Leiste kommt. Reihenfolge: der Kern hat den
+            // Text schon, wenn diese Zeile erscheint, und die Leiste
+            // holt ihn erst danach (`WM_PLUG_BARGET`). Also gilt fuer
+            // jeden Lauf: der gemalte Text ist der zuletzt gemeldete.
+            // Genau das prueft tools/wmplug/widget.sh nach.
+            gesagt = 2
+            say((&s_txt[0 as usize]) as u64)
+            say((&txt[0 as usize]) as u64)
+            nl()
+        }
+        n = n + 1
+        // ============================================ DIE FRIST
+        // NICHT EINE SEKUNDE AM STUECK SCHLAFEN.
+        //
+        // Hier stand `sleep_ms(takt)`, und der erste gemessene Lauf
+        // endete mit `wmplug: unreg uhr grund=2` -- G_FRIST, nach EINEM
+        // abgeholten Ereignis. Der Grund steht in `sweep`
+        // (kernel/wmplug.fi): bestraft wird, wer etwas liegen hat und
+        // es nicht abholt, und die Vorgabefrist sind 50 Ticks, also
+        // eine halbe Sekunde. Wer im Sekundentakt abholt, reisst sie
+        // beim ersten Fenster, das aufgeht.
+        //
+        // Also wird der Takt in Scheiben geschlafen, deren Laenge aus
+        // der FRIST DES KERNS kommt und nicht aus einer geratenen Zahl
+        // (`PL_FRIST`, in Ticks zu 10 ms). Ein Drittel der Frist laesst
+        // Luft fuer eine Maschine, die gerade etwas anderes tut.
+        var rest: u64 = takt
+        while rest > 0 {
+            var scheibe: u64 = pollms
+            if scheibe > rest {
+                scheibe = rest
+            }
+            let _z: u64 = ulib.sleep_ms(scheibe)
+            rest = rest - scheibe
+            abholen()
+            if gestoppt != 0 {
+                rest = 0
+            }
+        }
+    }
+    say((&s_ende[0 as usize]) as u64)
+    sayn(n)
+    say((&s_ev[0 as usize]) as u64)
+    sayn(geholt)
+    nl()
+    // SELBST ABMELDEN. Der Kern raeumt den Platz auch beim Tod des
+    // Prozesses ab (G_CRASH); dass es hier trotzdem steht, ist der
+    // Unterschied zwischen "gegangen" (G_OK) und "weggefallen" im
+    // Protokoll.
+    let _u: u64 = ulib.sys(WM_PLUG_UNREG, 0, 0, 0)
+    return 0
+}
+
+// `takt=250` -- der Vergleich der ersten `n` Oktette.
+fn praefix(a: u64, b: u64, n: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        if __mmio_read8((a + i) as *mut u8)
+            != __mmio_read8((b + i) as *mut u8) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn wert(a: u64, at: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = at
+    while true {
+        let c: u64 = __mmio_read8((a + i) as *mut u8) as u64
+        if c < 48 || c > 57 {
+            break
+        }
+        v = v * 10 + (c - 48)
+        i = i + 1
+    }
+    return v
+}

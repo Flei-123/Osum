@@ -1,264 +1,252 @@
-# EXPLORER-2 — Bauplan und Schnittstellen
+# RUNDE WMPLUGIN — Bauplan und Schnittstellen
 
-Auftrag: `/root/EXPLORER2-AUFTRAG.md` (zwoelf Pflichtpunkte). Arbeitsbaum:
-`/root/osum-explorer2`. Dieser Plan zerlegt den Auftrag in **sechs Module,
-die parallel gebaut werden** — jedes Modul besitzt seine eigenen Dateien,
-und **zwei Module fassen nie dieselbe Datei an**.
+Zweig `wmplugin`, Arbeitsbaum `/root/os-wmplug`. (Der vorige Inhalt dieser
+Datei gehoerte der Runde EXPLORER-2 und steht unveraendert in der
+Geschichte: `git show main:PLAN.md`.)
 
-## 0. Was schon steht (Stand dieses Plans)
+Ziel: ein **Erweiterungssystem fuer den Fensterserver** nach dem Vorbild
+von Hyprland-Plugins/hyprpm — **ohne deren Grundfehler**. Hyprland laedt
+ein Plugin als `.so` in den Compositor-Prozess und laesst es Funktionen
+umhaengen. Unser Fensterserver laeuft IM KERNEL (`kernel/wm.fi`), derselbe
+Weg waere Fremdcode in Ring 0, und /root/osum-roadmap/FREMDSOFTWARE.md
+Regel 4 sagt: "Kein Fremdcode im Kern."
 
-Committet in `af27ce3` (Unterbau, NICHT neu bauen):
+**Also: Plugins sind gewoehnliche Ring-3-Prozesse.** Der Kern kennt von
+ihnen einen Tafelplatz, einen Ereignisring, eine Rechtemaske und eine
+Frist. Der Kern **wartet nie** auf ein Plugin. Ein abstuerzendes,
+haengendes oder boeswilliges Plugin darf den Schreibtisch nicht
+beschaedigen — und genau das wird gemessen, nicht behauptet.
 
-* `kernel/kbd.fi` — F-Tasten, Alt+Enter, Alt-Pfeile, Strg+H/Strg+N.
-* `kernel/user/wlib.fi` — `KEY_F1..KEY_F10`, `KEY_ALT_*`, `KEY_CTRL_H/N`,
-  Mehrfachauswahl `sel_an/sel_hat/sel_setz/sel_leeren/sel_alle/
-  sel_bereich/sel_anker/sel_zahl`, Strg-/Umschalt-Klick in `on_down`.
-* `kernel/user/dateiop.fi` — `kopiere`, `kopiere_baum`, `verschiebe`,
-  `loesche`, `groesse_rekursiv`, `zaehle_rekursiv`, `gibt_es`,
-  `ist_verzeichnis`, `fortschritt_an/aus`, `getan_dateien/oktette`,
-  `abbrechen`, `letzter_fehler`.
-* `kernel/user/trash.fi` — `hinein`, `zurueck`, `loesche_rekursiv`,
-  `korb_von`. `lib/libc/io.fi` — `rename`, `stat_mtime/ctime/atime`,
-  `set_times`, `stat_mode_of`.
+---
 
-Neu in diesem Grundgeruest (angelegt, uebersetzt, im Kern gebaut):
+## 0. Was schon steht (dieses Grundgeruest, gebaut und GEBOOTET)
 
-* `kernel/user/expmodell.fi` — Liste, Zeiten, Sortierung (MAXENT 4096,
-  NAMEB 256, Namensblob + Offsettafel, Ortszeit aus `/etc/time.conf`).
-* `kernel/user/expakt.fi` — Ablage, Einfuegen, Umbenennen (`io.rename`),
-  Papierkorb, Rueckgaengig (64 Schritte), Fehlernummer -> Katalogschluessel.
-* `kernel/user/exporte.fi` — Seitenleiste (Orte + `SYS_MNTSTAT`) und
-  Brosamenleiste.
-* `kernel/user/expdlg.fi` — Eigenschaften, "Oeffnen mit", Neue Datei,
-  Miniaturen.
-* `kernel/user/explorer.fi` — importiert die vier und meldet beim Start
-  ihre Zahlen auf der seriellen Leitung.
-
-Gegenprobe, gemessen am 09.09.2026:
+Gemessen mit `bash tools/build-kernel.sh /tmp/wmp.img` und einem echten
+QEMU-Lauf (`gfx wm wmhold wmplug plugtest ...`, Exitcode 21):
 
 ```
-export FIRNLIB=$PWD/lib
-vendor/firn/bin/firnc kernel/user/explorer.fi -o /tmp/x.o   # fehlerfrei
-./tools/build-kernel.sh /tmp/k.mb                            # 5.442.424 Oktette
+wm: selftest 30 / 30  failed=0xc04200        <- Grundlinie UNVERAENDERT
+wmplug: reg selbstte platz=0 rechte=0x1f
+wmplug: unreg selbstte grund=2 holte=1 verlor=5
+wmplug: selftest 10 / 10  failed=0x0
+wmplug: abi=1  tafel= offen  frist=50
+wm: hold
 ```
 
-## 1. Gemessene Befunde, an die sich jedes Modul haelt
+Gegenprobe ohne das Wort `wmplug` auf der Kommandozeile: `tafel= zu`,
+Selbsttest 30/30 unveraendert.
 
-* **Speicher:** `kernel/proc.fi` gibt einem Prozess
-  `IMAGE_BASE 0x40100000 .. IMAGE_END 0x40C00000` = 11 MiB fuer Text,
-  Daten und BSS; die anonyme Arena liegt ab `BIG_FLOOR 0x40C00000`.
-  `wlibc` holt seine Malflaeche per `map_surface` (anonymes `mmap`) und
-  bildet `fb.USER_BASE` NICHT ab — die Warnung "Abbild ueber 1 MiB ODER
-  Rahmenpuffer" gilt fuer dieses Programm nicht. Das Modell darf also
-  rund 1 MiB BSS belegen; mehr als 2 MiB fasst niemand ohne neue Messung an.
-* **Pufferstrategie (Pflichtpunkt 11):** 4096 * 256 = 1 MiB Namen als
-  Rechteck ist zu viel und zu leer. Stattdessen: `nblob` 320 KiB, Namen
-  hintereinander, `noff[i]` = Anfang. Gemessener Mittelwert eines Namens
-  in diesem Baum: 17 Oktette. Ueberlauf wird GEZAEHLT (`ueberlauf()`) und
-  in der Statuszeile gesagt, nie stillschweigend verschluckt.
-* **Katalog:** `kernel/user/msg.fi` hat `SLOTS = 288`, die Kataloge haben
-  **schon heute 316 Schluessel** — 28 fallen beim Laden hinten herunter.
-  Ohne Anheben verschwindet jeder neue `explorer.*`-Text. Probe gemacht:
-  `SLOTS 512`, `KEYW 48`, `VALW 192` (`kbuf` 24576, `vbuf` 98304)
-  uebersetzt und baut.
-* **Zeit:** `/etc/time.conf`, `offset=<Minuten>`, gelesen wie
-  `taskbar.fi::offset_read` (Zeile ~1541). NICHT `/etc/zeit.conf`.
-* **Toter Zweig:** `explorer.fi` hat zweimal `if welches == 4`
-  (Menuewahl); der zweite ist unerreichbar und ist der NETVIEW-Punkt.
-* **Werkzeugleiste:** `t_zur`/`t_vor`/`t_auf` sind heute `"<" ">" "^"`.
+* **`kernel/wmplug.fi` (neu, ~800 Zeilen)** — die ganze Buchhaltung:
+  8 Plaetze, je ein Ereignisring (64 x 16 Oktette), Rechtemaske,
+  Gewaehrungstafel (16 Namen), Flaechentafel (32 Fenster-Ids), Frist,
+  Zaehler, 10 Selbsttest-Zusagen. Kein indirekter Sprung, keine
+  Rekursion, kein Warten.
+* **`kernel/kstate.fi`** — `WMP_OFF=0xF3000`, `WMP_MAX=0x4000`
+  (in `tools/kernel/memmap.py` eingetragen: 111 Bereiche, 0 Kollisionen);
+  Modusbits `M_WMPLUG=986`, `M_PLUGAUS=987`, `M_PLUGTEST=988`,
+  `M_PLUGFRIST=989`.
+* **`kernel/sys.fi`** — die zehn Nummern 2117..2126, `WM_MAXNR=2126`,
+  die Felder `PL_*` und die Handlungen `PA_*`, alles ausgefuehrt.
+* **`kernel/sysgui.fi`** — `plug_call` + `do_plugreg`/`do_pluggrant`/
+  `do_pluginfo`/`do_plugact`/`desk_anwenden`, vor der Handle-Suche
+  eingehaengt.
+* **`kernel/wm.fi`** — fuenf Haken: `init` (Tafel auf/zu), `create`
+  (E_WIN_OPEN), `destroy` (E_WIN_CLOSE), `set_focus` (E_FOCUS),
+  `compose` (`wmplug.sweep`, acht Vergleiche je Bild).
+* **`kernel/kgui.fi`** — `wmplug_stage`: Selbsttest bei `plugtest`,
+  kurze Frist bei `plugfrist`, eine Zeile auf die serielle Leitung.
+* **`kernel/kmain.fi`** — die vier Kommandozeilenwoerter.
+* **`tools/build-kernel.sh`** — `wmplug` in `GFX_DATEIEN` (bei
+  `--gui off` faellt die Datei weg wie `tile.fi`).
 
-## 2. Modulliste und Dateibesitz
+---
 
-| Modul | besitzt AUSSCHLIESSLICH | Pflichtpunkte |
-|---|---|---|
-| `modell` | `kernel/user/expmodell.fi` | 5, 11 (Grenzen/Puffer), Sortierung |
-| `taten` | `kernel/user/expakt.fi` | 1, 2, 8 (Fehlerkatalog), 9 |
-| `orte` | `kernel/user/exporte.fi` | 6 |
-| `auskunft` | `kernel/user/expdlg.fi` | 4, 10 |
-| `texte` | `locale/de/messages`, `locale/en/messages`, `kernel/user/msg.fi`, `docs/EXPLORER2-TEXTE.md` | Regel "kein Text im Code" |
-| `rahmen` | `kernel/user/explorer.fi`, `kernel/user/wlib.fi` | 3, 7, 8 (Dialoge), 10 (Ansicht), 11 (toter Zweig), 12, Layout |
+## 1. DIE SCHNITTSTELLE — festgenagelt, hier gilt sie
 
-Keine andere Datei wird angefasst. Wer etwas in einer fremden Datei
-braucht, findet es unten in der Schnittstelle — sie ist gebaut und
-uebersetzt, nicht versprochen.
+Aenderungen an diesen Nummern **nur ueber diesen Plan**, nicht im
+Alleingang: vier Module lesen sie.
 
-## 3. Schnittstellen (bereits vorhanden, Signaturen sind bindend)
+### Syscalls (`kernel/sys.fi`, WM_BASE=2100)
 
-### 3.1 `expmodell` — das Modell
+| Nr | Name | Argumente | Rueckgabe |
+|----|------|-----------|-----------|
+| 2117 | `WM_PLUG_REG` | (abi, name*15, maske) | Platz 0..7 / `-E_UNSUPPORTED` (Fassung) / `-E_EXHAUSTED` |
+| 2118 | `WM_PLUG_UNREG` | () | 0 |
+| 2119 | `WM_PLUG_POLL` | (aus*16) | 1 = geholt, 0 = nichts da. **Nie blockierend** |
+| 2120 | `WM_PLUG_SUB` | (maske) | 0 |
+| 2121 | `WM_PLUG_INFO` | (platz, feld `PL_*`) | Zahl |
+| 2122 | `WM_PLUG_ACT` | (handlung `PA_*`, fenster-id, wert) | 0 / `-E_RIGHTS` / `-E_NOTFOUND` |
+| 2123 | `WM_PLUG_KEY` | (taste, mods) | 0 / `-E_RIGHTS` |
+| 2124 | `WM_PLUG_BAR` | (text, laenge<=31) | 0 / `-E_RIGHTS` |
+| 2125 | `WM_PLUG_BARGET` | (platz, aus, max) | Laenge — **nur die Leiste** (`is_taskbar`) |
+| 2126 | `WM_PLUG_GRANT` | (name*15, rechte) | 0 / `-E_RIGHTS` — **nur root** |
 
-```
-const MAXENT = 4096, NAMEB = 256, BLOB = 327680
-lade(dir) -> u64                  // Eintraege oder Kernfehler (ulib.bad)
-anzahl() / ueberlauf() / blob_benutzt() -> u64
-name_at(e) / groesse_at(e) / art_at(e) / modus_at(e) -> u64  // e = EINTRAG
-mtime_at(e) / ctime_at(e) / atime_at(e) -> u64               // Sekunden UTC
-ord_at(zeile) -> eintrag          // Ansicht -> Eintrag (immer benutzen!)
-ord_finde(eintrag) -> zeile
-setz_sort(spalte, rev) / sort_spalte() / sort_rev() / sortiere()
-setz_versteckt(bool) / versteckt() -> bool          // Strg+H
-setz_filter(ptr) / filter_ptr() -> u64              // Strg+F
-tabelle_bauen(kopfzeile) -> zeilen                  // kopf = msg.get("explorer.columns")
-tabelle_ptr() -> u64        // stabile Adresse fuer wlib.table/set_text
-symbole_ptr() -> u64        // stabile Adresse fuer wlib.row_icons
-symbol_fuer(e) -> icon_id
-zeit_lade() / zeit_offset() -> Minuten
-zeit_text(sekunden, out) -> out   // "JJJJ-MM-TT SS:MM" Ortszeit, 0 -> "--"
-melde()                           // `explorer: modell n= blob= ueberlauf= tzoff=`
-```
+**Nachbesserung R2-2 (Autostart, Leserecht, Frist, Schwelle):**
+`WM_PLUG_REG` hat ein VIERTES Argument (gewuenschte Frist in Ticks, 0 =
+Vorgabe, hoechstens 200 ohne Eintrag in /etc/wmplug.conf).
+`WM_PLUG_GRANT` traegt die Frist in den Bits 32..47 desselben Wortes wie
+die Rechte. Neue Felder: `PL_PFRIST = 20`, `PL_DENYS = 21`,
+`PL_WORKX/Y/W/H = 22..25`, `PL_MAXNR = 26`. `WM_LIST` oeffnet ausser
+`is_taskbar` jetzt auch das Recht `R_EV_WIN` (sysgui.fi `darf_listen`) --
+die verborgenen Hilfsfenster von plugregel/plugboese sind weg.
+`/etc/wmplug.autostart` wird vom Schreibtisch gelesen, `wmplug enable`
+startet `prog=` aus /etc/wmplug.conf, `/bin/uhrstart` ist geloescht.
+Ab acht abgewiesenen Handlungen (`DENY_MAX`) meldet der Kern einen Platz
+mit `G_RIGHTS` ab.
 
-Spalte 0 Name, 1 Groesse, 2 Zeit, 3 Rechte — dieselbe Nummerierung wie
-die Spaltenkoepfe. Verzeichnisse stehen in jeder Sortierung oben.
+Die Felder von `WM_PLUG_INFO` reichen seit Modul A bis `PL_MAXNR = 20`;
+neu sind `PL_FRAMES = 18` (Bildnummer) und `PL_LATUS = 19` (mittlere
+Bildzeit in us). Beide beantwortet der Kern ohne Anmeldung.
 
-### 3.2 `expakt` — die Taten
+`WM_PLUG_INFO(_, PL_ABI)` beantwortet der Kern **immer**, auch ohne
+Plugintafel und ohne Anmeldung: sonst waere die Versionierung ein
+Ratespiel. Aktuelle Fassung: **`WMP_ABI = 1`**.
 
-```
-const MAXLIST = 256, MAXUNDO = 64
-const K_ERSETZEN=0, K_UMBENENNEN=1, K_UEBERSPRINGEN=2, K_ABBRUCH=3
-liste_leeren() / liste_add(pfad) -> bool / liste_zahl() / liste_at(i)
-kopieren_merken(schnitt: bool) -> rc     // Strg+C / Strg+X, CT_FILES(+CT_PATH)
-schnitt_an() -> bool
-ablage_zahl() / ablage_at(i)
-einfuegen(zielordner) -> rc              // rename zuerst, sonst Kopie
-konflikt_da() -> bool / konflikt_pfad() -> u64 / konflikt_antwort(wahl)
-umbenennen(altvollpfad, neuname) -> rc   // io.rename, F2
-in_korb(pfad) -> rc / endgueltig(pfad) -> rc
-rueckgaengig() -> rc / undo_zahl() / undo_art() / undo_name()
-fehler_schluessel(rc) -> ptr auf "explorer.err.*"
-letzter_rc() / getan_dateien() / getan_oktette() / abbrechen() / melde()
-```
-
-Ablauf beim Einfuegen: `einfuegen` bricht bei einem bestehenden Ziel ab,
-setzt `konflikt_da()` und den Pfad; `rahmen` macht den Konfliktdialog auf
-(vier Wahlmoeglichkeiten), meldet die Antwort mit `konflikt_antwort` und
-ruft `einfuegen` erneut. Jeder rc != 0 geht durch `fehler_schluessel` in
-ein Hinweisfenster — **kein stummer Fehlschlag**.
-
-### 3.3 `exporte` — Orte und Weg
+### Ereignis (16 Oktette, so liegt es im Ring)
 
 ```
-const MAXORT = 32, MAXKRUME = 12
-orte_bauen() -> zeilen        // Orte + Datentraeger aus SYS_MNTSTAT
-orte_zahl() / orte_ptr()      // Textblock fuer wlib.list (stabil)
-orte_symbole()                // Feld fuer wlib.row_icons (stabil)
-ort_text(i) / ort_pfad(i) / ort_ist_traeger(i)
-traeger_zahl() / traeger_bloecke(i) / traeger_benutzt(i)
-krume_bauen(pfad) -> glieder  // Brosamen; Glied 0 ist die Wurzel
-krume_zahl() / krume_text(i) / krume_pfad(i)     // stabile Adressen
-melde()                        // `explorer: orte n= traeger=`
++0x00  u64 typ            E_WIN_OPEN=1 E_WIN_CLOSE=2 E_FOCUS=3
+                          E_DESK=4 E_TILE=5 E_KEY=6 E_STOP=7
++0x08  u64 daten          (a & 0xFFFF) << 32 | (b & 0xFFFF) << 16 | (c & 0xFFFF)
 ```
 
-### 3.4 `expdlg` — Auskuenfte
+Abonnement-Maske = `1 << typ`. Belegung von a/b/c:
+`E_WIN_OPEN(id, ebene, 0)`, `E_WIN_CLOSE(id,0,0)`, `E_FOCUS(id,0,0)`,
+`E_DESK(flaeche,0,0)`, `E_TILE(knoten,blaetter,0)`,
+`E_KEY(taste,mods,0)`, `E_STOP(grund,0,0)`.
+
+### Rechte (`wmplug.R_*`, Bitmaske)
 
 ```
-eig_bauen(pfad, name, zeit_fn_oder_0) -> zeilen
-eig_ptr() / eig_zeilen() / eig_groesse() / eig_stuecke()
-oeffnenmit_bauen() -> n / oeffnenmit_zahl() / oeffnenmit_ptr()
-oeffnenmit_name(i) / oeffnenmit_exec(i)
-neue_datei(pfad, inhalt_oder_0) -> rc
-mini_bereit() / mini_laden(pfad) / mini_breite() / mini_hoehe() / mini_daten()
-melde()
+0x001 R_EV_WIN    0x002 R_EV_FOCUS  0x004 R_EV_DESK
+0x008 R_EV_TILE   0x010 R_EV_KEY
+0x100 R_ACT_WIN   0x200 R_ACT_FOCUS 0x400 R_ACT_KEY  0x800 R_ACT_BAR
+R_DEFAULT = 0x01F (nur zusehen)      R_ALL = 0xF1F
 ```
 
-## 4. Der Katalog (verbindliche Schluessel)
+Ohne Eintrag in der Gewaehrungstafel bekommt ein Plugin `R_DEFAULT`.
+Eingetragen wird ueber `WM_PLUG_GRANT` von **/bin/wmplug als root** aus
+`/etc/wmplug.conf`. Der Kern liest keine Datei.
 
-`texte` legt JEDEN dieser Schluessel in **beiden** Dateien an; die anderen
-Module rufen nur `msg.get(...)`. Reihenfolge in Listen ist **Vertrag**:
-`rahmen` schaltet nach Index.
+### Gruende einer Abmeldung (`wmplug.G_*`, Feld `PL_GRUND`)
 
-* Orte: `explorer.place.root|home|docs|pics|downloads|trash|net|volumes`
-* Eigenschaften: `explorer.prop.title|name|type|size|contains|created|
-  changed|read|rights|owner`
-* Arten: `explorer.type.folder|file|program|image|text`
-* Fehler: `explorer.err.title|other|noent|acces|exist|nospc|isdir|rofs|
-  busy|inval|spawn`
-* Konflikt: `explorer.conflict.title`, `explorer.conflict.ask`, und
-  `explorer.conflict.buttons` = 4 Zeilen in DIESER Ordnung:
-  Ersetzen / Umbenennen / Ueberspringen / Abbrechen (= `K_*` 0..3)
-* Kontextmenue `explorer.context` (Ordnung ist Vertrag): Oeffnen,
-  Oeffnen mit, Ausschneiden, Kopieren, Einfuegen, Umbenennen, Loeschen,
-  Endgueltig loeschen, Neuer Ordner, Neue Datei, Packen (ZIP),
-  Entpacken, Netzzugriff, Eigenschaften
-* Menueleiste `explorer.menu` = Datei, Bearbeiten, Ansicht, Gehe zu
-  * `explorer.menu.file`: Neuer Ordner, Neue Datei, Oeffnen mit,
-    Eigenschaften, Aktualisieren, Beenden
-  * `explorer.menu.edit`: Ausschneiden, Kopieren, Einfuegen,
-    Alles auswaehlen, Rueckgaengig
-  * `explorer.menu.view`: Liste, Symbole, Nach Name, Nach Groesse,
-    Nach Zeit, Nach Rechten, Umgekehrt, Versteckte Dateien
-  * `explorer.menu.go`: Zurueck, Vorwaerts, Hinauf, Zuhause, Papierkorb
-* Ansicht/Status: `explorer.view.list|icons`, `explorer.status.filter`,
-  `explorer.status.hidden`, `explorer.status.selected`,
-  `explorer.status.overflow`
-* Fortschritt: `explorer.progress.title`, `explorer.progress.cancel`
-  (dazu die schon vorhandenen `explorer.progress.files|bytes|new`)
-* Rueckgaengig: `explorer.undo.done`, `explorer.undo.none`
-* Sonstiges: `explorer.newfile`, `explorer.newfile.name`,
-  `explorer.openwith.title`, `explorer.confirm_delete_perm`,
-  `explorer.filter`, `explorer.tab.new`, `explorer.path`
+`0 G_OK` (selbst) · `1 G_CRASH` (Prozess weg) · `2 G_FRIST` ·
+`3 G_RIGHTS` · `4 G_USER` (`wmplug disable`). Jede Abmeldung schreibt
+eine Zeile `wmplug: unreg <name> grund=<n> holte=<n> verlor=<n>`.
 
-Bestehende Schluessel behalten ihre Bedeutung; `explorer.context`,
-`explorer.menu` und `explorer.menu.*` werden ERWEITERT — wer sie
-aendert, aendert sie in beiden Sprachen und sagt `rahmen` die Anzahl.
+### Kommandozeilenwoerter
 
-## 5. Belege auf der seriellen Leitung
+`wmplug` (Tafel auf) · `plugaus` (Gegenprobe: alles gebaut, abgeschaltet)
+· `plugtest` (Selbsttest des Moduls) · `plugfrist` (Frist 3 statt 50
+Ticks — **ausdrueckliche Abkuerzung fuer den Abnahmelauf**).
 
-Jede neue Faehigkeit bekommt **eine eigene Zeile mit Zahlen**, damit die
-Abnahme misst statt zu raten. Vergeben (Modul in Klammern):
+---
 
-```
-explorer: modell n=<> blob=<> ueberlauf=<> tzoff=<>     (modell)
-explorer: clip n=<> rc=<>                                (taten)
-explorer: paste n=<> rc=<>                               (taten)
-explorer: rename rc=<>                                   (taten)
-explorer: trash rc=<>                                    (taten)
-explorer: undo art=<> rc=<>                              (taten)
-explorer: orte n=<> traeger=<>                           (orte)
-explorer: krume n=<>                                     (orte)
-explorer: props zeilen=<> bytes=<> stueck=<>             (auskunft)
-explorer: openwith n=<>                                  (auskunft)
-explorer: mini w=<>                                      (auskunft)
-explorer: sel n=<> anker=<>                              (rahmen)
-explorer: key <code>                                     (rahmen)
-explorer: view <0|1>                                     (rahmen)
-explorer: sort spalte=<> rev=<>                          (rahmen)
-explorer: fehler rc=<> key=<>                            (rahmen)
-explorer: konflikt wahl=<>                               (rahmen)
-```
+## 2. DIE MODULE — wer welche Datei besitzt
 
-Dazu bleiben `say_rect/say_rects/say_menurect/say_dlgrect` erhalten und
-bekommen die neuen Bedienelemente (Seitenleiste, Brosamenknoepfe,
-Filterfeld, Werkzeugknoepfe) dazu.
+**Zwei Module fassen nie dieselbe Datei an.** Wer eine fremde Datei
+braucht, schreibt es in den Bericht statt sie zu aendern.
 
-## 6. Layout (im Bild geprueft)
+### A — `kern` (Kernseite vervollstaendigen)
+Dateien: `kernel/wmplug.fi`, `kernel/wm.fi`, `kernel/sysgui.fi`,
+`kernel/kgui.fi`, `kernel/kbd.fi` (falls fuer den Kuerzelweg noetig).
+**FERTIG UND GEBOOTET.** Was dabei an der Schnittstelle dazukam — die
+anderen Module lesen bitte hier, nicht im Quelltext:
 
-```
-+----------------------------------------------------------+
-| Menueleiste                                              |
-+----------+-----------------------------------------------+
-| Seiten-  | Werkzeugleiste (Symbole) + Brosamen/Pfadfeld  |
-| leiste   +-----------------------------------------------+
-| Orte     | Inhalt (Tabelle oder Symbolansicht)           |
-| Traeger  |                                               |
-+----------+-----------------------------------------------+
-| Statuszeile                                              |
-+----------------------------------------------------------+
-```
+* **`PL_FRAMES = 18`, `PL_LATUS = 19`, `PL_MAXNR = 20`** (`kernel/sys.fi`).
+  `WM_PLUG_INFO(_, PL_FRAMES)` ist die Bildnummer, `PL_LATUS` die
+  mittlere Bildzeit in Mikrosekunden. Beide kommen aus der Bilduhr, die
+  `wm.compose` seit der Runde VEKTOR ohnehin fuehrt — ein zweiter
+  Zaehler daneben laege immer etwas anders. **Bildrate = PL_FRAMES
+  zweimal mit bekannter Pause ablesen** (Modul F).
+* **Der Abschied.** Eine Abmeldung legt E_STOP(grund) als letztes
+  Ereignis in den Ring, und der Platz geht nicht sofort frei, sondern
+  in einen Abschiedszustand: **`WM_PLUG_POLL` beantwortet der Kern noch,
+  jeder andere Ruf gibt `-E_NOTFOUND`.** Der Platz verfaellt, sobald der
+  Ring leer ist oder die Frist um ist; gewartet wird auf niemanden.
+  `PL_USED` ist fuer einen Abschiedsplatz **0** — er zaehlt nicht mehr
+  mit. Ausnahme: ein ABGESTUERZTES Plugin bekommt keinen Abschied, sein
+  Platz geht sofort frei (es koennte ihn sonst ein spaeterer Prozess auf
+  demselben Tafelplatz leerlesen).
+* **Der Kehrbesen haengt an der UHR, nicht am Bild** (`wm.poll`, einmal
+  je Tick). Gemessener Grund: auf einem ruhigen Schreibtisch wird gar
+  nicht zusammengesetzt, und ein Haenger blieb deshalb stehen.
+* **Tastenkuerzel.** Beide Wege fragen `key_owner` VOR der Zustellung:
+  `on_key` (Zeichentasten, mods aus KB_SHIFT=2/KB_CTRL=4) und `hotkeys`
+  (der Alt-Ring, mods wie `kbd.old_key`: Alt=1). Bei einem Treffer gibt
+  es nur `notify(E_KEY, taste, mods, 0)`; das Fenster **und** das
+  Terminal darin bekommen nichts. Zaehler: `wm.plugkeys`.
+* **`E_TILE(knoten, blaetter)`** entsteht in `wm.tile_apply` — dort und
+  nur dort, weil jede Baumaenderung die Rechtecke neu verteilt.
+* **Selbsttest jetzt 13 Zusagen** (`wmplug: selftest 13 / 13 failed=0x0`).
+  Ein Laeufer soll die Zahl aus `fn selftest_max` lesen, nicht festnageln.
+* **`wmplug: bilanz plugs= evin= evout= kicks= deny= plugkeys=`** am Ende
+  des Haltens — eine Zeile aus dem Kern statt einer Summe, die der
+  Laeufer selbst bildet.
+* **Zahlen der Kernseite** (5 s Halten, `gfx wm tile wmhold wmplug
+  wmshell ...`, je ein Lauf; die belastbare Messung macht Modul F ueber
+  PL_FRAMES/PL_LATUS):
+  mit angemeldetem Plugin `n=50 mittel=939 us max=13936 ueber16=0`,
+  ohne `n=43 mittel=981 us max=13204 ueber16=0`. Die Lasten sind nicht
+  dieselben (das Plugin oeffnet ein Fenster), der Unterschied liegt in
+  beiden Richtungen im Rauschen — ein Einbruch ist es nicht.
 
-Alle Hoehen kommen wie heute aus `wlibc.metric/type_lh/space/snap` —
-keine getippte Bildpunktzahl. Nichts wird ausserhalb von `wlib`/`wlibc`
-gemalt.
+### B — `verwaltung` (/bin/wmplug)
+Dateien: `kernel/user/wmplug.fi` (neu), `etc/wmplug.conf` (neu),
+Paketbeschreibungen unter `pakete/wmplug-*/` (opk, Vorlage
+`kernel/user/opk.fi`). Vorlage fuer Aufbau und Ton: `kernel/user/tiling.fi`.
+`list | enable <name> | disable <name> | info <name>`; enable/disable
+setzen die Rechtemaske ueber `WM_PLUG_GRANT` (disable = Maske 0, wirkt
+sofort auch auf ein laufendes Plugin), `list` liest `PL_*`.
 
-## 7. Regeln fuer jedes Modul
+### C — `regel` (Plugin 1: Fensterregel-Engine)
+Dateien: `kernel/user/plugregel.fi` (neu), `etc/wmregeln.conf` (neu).
+Abonniert `E_WIN_OPEN`, liest die Regeln ("app=rechner → flaeche 2,
+schwebend, zentriert"), setzt sie mit `PA_DESK`/`PA_FLOAT`/`PA_MOVE`.
+Fenstername/Buendel ueber die vorhandenen `WM_LIST`-Felder.
 
-1. Nach **jeder** Aenderung muss beides fehlerfrei laufen:
-   `export FIRNLIB=$PWD/lib && vendor/firn/bin/firnc kernel/user/explorer.fi -o /tmp/x.o`
-   und `./tools/build-kernel.sh /tmp/k.mb`. Ein Stand, der nicht baut,
-   ist kein Stand.
-2. Kein sichtbarer Text im Quelltext — nur `msg.get(<schluessel>)`.
-3. Kein Zeichenaufruf ausserhalb von `wlib`/`wlibc`.
-4. Keine Faehigkeit nur behaupten: jede muss verdrahtet sein und sich
-   mit einer eigenen `explorer: ...`-Zeile melden.
-5. Kommentare deutsch, ohne Umlaute in Bezeichnern, und sie erklaeren
-   das WARUM mit dem gemessenen Befund.
-6. Zeiger, die an `wlib.set_text`/`row_icons` gehen, muessen statisch
-   sein — die Bibliothek liest sie beim naechsten Malen erneut.
+### D — `widget` (Plugin 2: Leistenwidget)
+Dateien: `kernel/user/pluguhr.fi` (neu), `kernel/user/taskbar.fi`
+(**nur dieses Modul aendert die Leiste**). Das Plugin schickt TEXT
+(`WM_PLUG_BAR`), die Leiste holt ihn (`WM_PLUG_BARGET`) und malt ihn mit
+`wlib`/`fUi` wie jeden anderen Text — **kein neuer Zeichenweg**, damit
+`tools/check-ui.sh` PASSED bleibt.
+
+### E — `gegenprobe` (die drei harten Belege + Laeufer)
+Dateien: `kernel/user/plugboese.fi` (neu: `segv`, `hang`, `greif` in
+einem Programm, per Argument), `tools/wmplug/run.sh` (neu),
+`docs/shots/wmplug/` (neu). Vorlage: `tools/tiling/run.sh` und
+`tools/wm/run.sh` (`lauf`/`foto`). Druckt am Ende
+`N bestanden, M gescheitert`. Muss belegen: (a) SIGSEGV → Schreibtisch
+laeuft weiter (Foto + weitere compose-Runden), (b) Endlosschleife →
+Frist greift, keine Bildrate verloren, (c) Handlung ohne Recht →
+Fehlercode UND `PL_DENY` steigt UND das Fenster steht unveraendert,
+(d) an/aus zur Laufzeit → zwei Fotos, mit `tools/gfx/checkshot.py`
+maschinell auseinandergehalten.
+
+### F — `bericht` (Messung und Text)
+Dateien: `docs/RUNDE-WMPLUGIN.md` (neu), `tools/wmplug/mess.sh` (neu).
+Bildrate/Latenz **vor und nach** dem Laden, beide Zahlen im Bericht,
+Abweichung benannt. Dazu: Entwurf der Schnittstelle mit Versionierung,
+warum Ring 3 statt Hyprlands `.so`-im-Prozess, offene Punkte, und
+**jede Abkuerzung ausdruecklich** (bekannt schon jetzt: `plugfrist`,
+die 8er-Grenze der Tafel, die Flaechentafel als Ersatz fuer fehlende
+Arbeitsflaechen in `wm.fi`).
+
+---
+
+## 3. Regeln fuer jedes Modul
+
+1. Nach jeder Aenderung muss `bash tools/build-kernel.sh /tmp/<eigen>.img`
+   fehlerfrei durchlaufen und `python3 tools/kernel/memmap.py kernel`
+   0 Kollisionen melden. Ein Stand, der nicht baut, ist kein Stand.
+2. **Nichts behaupten ohne Messung.** Jede Zusage braucht eine Zeile aus
+   einem wirklich gebooteten Kernel oder ein nachgerechnetes Foto.
+3. Eigene QEMU-Socket- und Dateinamen (`/tmp/<modul>-*`): auf dieser
+   Maschine laufen andere Laeufe parallel.
+4. Kein Zeichnen ausserhalb `fUi`/`wlib`; `tools/check-ui.sh` muss
+   PASSED bleiben.
+5. Keine Rekursion im Kernel (16 KiB Kernstapel), Schleifen statt dessen.
+6. Kommentare deutsch, ohne Umlaute in Bezeichnern, sie erklaeren das
+   WARUM mit dem gemessenen Befund.
+7. Kleine Commits auf `wmplugin`. **Nicht auf main, nicht mergen.**

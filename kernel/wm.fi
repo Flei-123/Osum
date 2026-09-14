@@ -75,6 +75,7 @@ import ps2m
 import time // RUNDE ALLTAG: der Leerlaufzaehler der Sperre
 import arch.arch
 import tile
+import wmplug
 import cursor
 import vektor
 import audio
@@ -117,7 +118,7 @@ export {
     pxsum,
     anim_start, anim_tick, anim_laeuft, anims, anim_frames, anim_ticks,
     set_noanim, close_anim, minimize_anim, open_anim,
-    set_sig, sig_on, frame_no, sig_colour,
+    set_sig, sig_on, frame_no, sig_colour, plugkeys,
     set_leser, leser_tick, liest, risse, tear_top, tear_bottom, without_sig,
     riss_y0, riss_y1, riss_frame, verworfen,
     before_t0, set_before_t0, before_step, set_before_step, before_win, set_before_win,
@@ -822,6 +823,15 @@ const S_FRH: u64 = 0x1330      // acht Worte, 0x1330..0x1368
 // Die laengste Bildzeit NACH den ersten zehn Bildern. Die ersten zehn
 // sind der Start: erstes Bild ueberhaupt, erster Moduswechsel, erste
 // Schrift. Was danach kommt, ist der Betrieb.
+// RUNDE WMPLUGIN: DIE VON EINEM PLUGIN GESCHLUCKTE TASTE.
+// S_KSWAL ist ein EINSCHUSS-Merker: `on_key` setzt ihn, wenn ein
+// Kuerzel einem Plugin gehoert, und `key_tty` liest und loescht ihn
+// gleich darauf. Ohne ihn ginge die Taste zwar an kein Fenster mehr,
+// aber immer noch an das Terminal des Fokusfensters -- und damit an
+// die Shell darin. Halb geschluckt ist nicht geschluckt.
+const S_KSWAL: u64 = 0x1380
+const S_KPLUG: u64 = 0x1388 // wie viele Tasten ein Plugin bekam
+const S_SWTICK: u64 = 0x1390 // Tick des letzten Kehrbesens
 const S_FRMAXW: u64 = 0x1370
 const S_FRUEBERW: u64 = 0x1378
 
@@ -2474,6 +2484,15 @@ fn init(state: u64, w: u64, h: u64, nodirty: bool, nofocus: bool) -> bool {
     // Er ist erst einmal LEER und schaltet nichts um -- ohne das Wort
     // `tile` verhaelt sich der Fensterserver wie vorher.
     tile.init(state, 0, 0, w, h)
+    // RUNDE WMPLUGIN: die Plugintafel. Ohne das Wort `wmplug` (und mit
+    // `plugaus` erst recht) bleibt sie ZU -- dann weist `plug_call`
+    // jede Anmeldung mit E_UNSUPPORTED ab und dieser Fensterserver
+    // verhaelt sich Zeile fuer Zeile wie vor der Runde.
+    wmplug.init(state)
+    if !kstate.mode_on(state, kstate.M_WMPLUG)
+        || kstate.mode_on(state, kstate.M_PLUGAUS) {
+        wmplug.set_ready(state, false)
+    }
     damage_all(state)
     return true
 }
@@ -2681,6 +2700,11 @@ fn create(state: u64, owner: u64, x: i64, y: i64, w: u64, h: u64,
             if gs(state, S_TILE) != 0 {
                 tile_take(state, i)
             }
+            // RUNDE WMPLUGIN: ABLEGEN UND WEITERGEHEN. `notify` schreibt
+            // in hoechstens acht Ringe und kehrt zurueck -- hier wird
+            // auf kein Ring-3-Programm gewartet, auch nicht kurz.
+            wmplug.notify(state, wmplug.E_WIN_OPEN, wg(state, i, W_ID),
+                wg(state, i, W_LAYER), 0)
             return i
         }
         i = i + 1
@@ -2742,6 +2766,11 @@ fn destroy(state: u64, i: u64) -> bool {
     }
     tile_release(state, i)
     damage_win(state, i)
+    wmplug.notify(state, wmplug.E_WIN_CLOSE, wg(state, i, W_ID), 0, 0)
+    // Stirbt der Prozess EINES PLUGINS, faellt sein Fenster hier durch.
+    // Der Platz in der Plugintafel haengt aber am Prozess und nicht am
+    // Fenster -- aufgeraeumt wird er von `wmplug.sweep` und vom
+    // Prozessende in `sysgui.fi`.
     let z: u64 = wg(state, i, W_Z)
     // ADDENDUM TASKBAR: a window that reserved a screen edge gives the
     // edge back when it dies. Without this the work area would stay
@@ -3726,6 +3755,7 @@ fn set_focus(state: u64, i: u64) {
         ss(state, S_FOCUS_PREV, alt + 1)
     }
     ss(state, S_FOCUS, i + 1)
+    wmplug.notify(state, wmplug.E_FOCUS, wg(state, i, W_ID), 0, 0)
     // ================================================ RUNDE TUERSCHLOSS
     //
     // DER FOKUSWECHSEL WIRD GESAGT, und ohne diese Zeile war Punkt 4.3
@@ -4887,6 +4917,11 @@ fn compose(state: u64) -> u64 {
     // Uebertragen. Alles, was in diesem Lauf gemalt wird, gehoert zu
     // EINEM Bild und traegt dieselbe Signatur.
     ss(state, S_FRAME, gs(state, S_FRAME) + 1)
+    // RUNDE WMPLUGIN: DER KEHRBESEN, EINMAL JE BILD. Acht Vergleiche,
+    // kein Warten, keine Zuteilung -- er wirft hinaus, wer gerufen wurde
+    // und nicht kommt. DAS IST DIE EINZIGE STELLE IM ZUSAMMENSETZPFAD,
+    // die ueberhaupt etwas von Plugins weiss.
+    wmplug.sweep(state)
     // RUNDE VEKTOR: die Uhr fuer dieses Bild.
     let t_anfang: u64 = time.tsc()
     // 1. der Hintergrund
@@ -7303,6 +7338,38 @@ fn on_key(state: u64, c: u64) {
     input_seen(state)
     // RUNDE MESSTAFEL, Stufe 3 fuer die Tastatur.
     ss(state, S_KEYIN, gs(state, S_KEYIN) + 1)
+    // ================================================ RUNDE WMPLUGIN
+    // ERST DAS PLUGIN, DANN DAS FENSTER -- und zwar in dieser Reihe.
+    //
+    // Ein Kuerzel, das ein Plugin belegt hat, darf das Fenster NICHT
+    // mehr sehen: sonst tippt der Zoom-Effekt sein `z` zusaetzlich in
+    // den Texteditor darunter. Der Kern fragt dafuer eine Tafel ab
+    // (acht Vergleiche), legt bei einem Treffer ein Ereignis ab und
+    // kehrt zurueck. ER RUFT DABEI KEIN PLUGIN UND WARTET AUF KEINES;
+    // ob das Plugin sein Ereignis je abholt, aendert an diesem Pfad
+    // nichts -- holt es nicht ab, wirft es die Frist hinaus.
+    var mods: u64 = 0
+    if kstate.get(state, kstate.K11_OFF + kstate.KB_SHIFT) == 1 {
+        mods = mods | 2
+    }
+    if kstate.get(state, kstate.K11_OFF + kstate.KB_CTRL) == 1 {
+        mods = mods | 4
+    }
+    if wmplug.key_owner(state, c, mods) < wmplug.MAX_PLUG {
+        wmplug.notify(state, wmplug.E_KEY, c, mods, 0)
+        ss(state, S_KPLUG, gs(state, S_KPLUG) + 1)
+        // Und AUCH nicht an das Terminal des Fokusfensters: `key_tty`
+        // liest diesen Merker unmittelbar nach uns.
+        ss(state, S_KSWAL, 1)
+        var s_pk: [u8; 16] = "wm: plugkey c=\0\0"
+        var s_pm: [u8; 6] = " mod=\0"
+        serial.puts((&s_pk[0]) as u64)
+        serial.dec(c)
+        serial.puts((&s_pm[0]) as u64)
+        serial.dec(mods)
+        serial.nl()
+        return
+    }
     if gs(state, S_NOFOCUS) != 0 {
         var i: u64 = 0
         while i < MAX_WIN {
@@ -7343,6 +7410,24 @@ fn on_key(state: u64, c: u64) {
 fn poll(state: u64) -> bool {
     if !ready(state) {
         return false
+    }
+    // ================================================ RUNDE WMPLUGIN
+    // DER KEHRBESEN HAENGT NICHT AM BILD, SONDERN AN DER UHR.
+    //
+    // Gemessen: ein Plugin, das nach dem Anmelden in eine Endlosschleife
+    // lief, blieb auf seinem Platz stehen -- weil auf einem RUHIGEN
+    // Schreibtisch gar nicht zusammengesetzt wird und `compose` seinen
+    // Kehrbesen deshalb nie erreichte. Eine Frist, die nur greift,
+    // solange sich etwas bewegt, ist keine.
+    //
+    // Also einmal je TICK, aus dem Abfragepfad heraus. Der Preis ist
+    // EIN Vergleich je Durchlauf (der Tick hat sich fast nie geaendert)
+    // und acht Vergleiche je Hundertstelsekunde. Gewartet wird auch
+    // hier auf niemanden.
+    let jetzt: u64 = kstate.get(state, kstate.TICKS)
+    if jetzt != gs(state, S_SWTICK) {
+        ss(state, S_SWTICK, jetzt)
+        wmplug.sweep(state)
     }
     // RUNDE TILING: erst die Tastenkuerzel. Sie liegen im Ring, den
     // `kbd.irq` fuellt, wenn Alt gehalten wird -- der Fensterserver
@@ -7814,6 +7899,13 @@ fn key_tty(state: u64) -> u64 {
     if !ready(state) {
         return NO_TTY
     }
+    // RUNDE WMPLUGIN: hat gerade ein Plugin diese Taste bekommen, geht
+    // sie an KEIN Terminal. Der Merker gilt fuer genau eine Taste und
+    // wird hier geloescht -- er darf nicht die naechste mitnehmen.
+    if gs(state, S_KSWAL) != 0 {
+        ss(state, S_KSWAL, 0)
+        return NO_TTY
+    }
     let f: u64 = focus(state)
     if f >= MAX_WIN || wg(state, f, W_KIND) != K_TERM {
         return NO_TTY
@@ -8267,6 +8359,14 @@ fn hotkeys_seen(state: u64) -> u64 {
     return gs(state, S_HOTS)
 }
 
+// RUNDE WMPLUGIN: WIE VIELE TASTEN EIN PLUGIN BEKOMMEN HAT -- und
+// damit, wie viele KEIN Fenster bekommen hat. Ohne diese Zahl liesse
+// sich "das Kuerzel wurde geschluckt" nicht von "die Taste kam nie an"
+// unterscheiden, und das sind zwei verschiedene Fehler.
+fn plugkeys(state: u64) -> u64 {
+    return gs(state, S_KPLUG)
+}
+
 // Der Bereich, den die letzte Baumoperation angefasst hat -- und NUR
 // der. Das ist die Zahl, die `notiledirty` kaputt macht.
 fn damage_tile(state: u64) {
@@ -8470,6 +8570,18 @@ fn tile_apply(state: u64) {
         }
         n = tile.dfs_next(state, n, r)
     }
+    // ================================================ RUNDE WMPLUGIN
+    // DER KACHELBAUM HAT SICH BEWEGT. Diese eine Stelle meldet es, und
+    // sie ist die richtige: JEDE Aenderung am Baum -- einfuegen,
+    // herausnehmen, teilen, ziehen, Reiter wechseln -- laeuft durch
+    // `tile_apply`, weil jede davon die Rechtecke neu verteilt.
+    //
+    // Zwei Zahlen gehen mit: Knoten und Blaetter. Sie genuegen, um "es
+    // ist ein Fenster dazugekommen" von "die Kante wurde gezogen" zu
+    // unterscheiden, und sie kosten den Kern zwei Ablesungen.
+    // NICHT aus `compose` gerufen -- der Bildpfad bleibt frei davon.
+    wmplug.notify(state, wmplug.E_TILE, tile.nodes(state),
+        tile.leaves(state), 0)
 }
 
 // ==================================================== RUNDE ECHTHARDWARE-3
@@ -9034,41 +9146,61 @@ fn hotkeys(state: u64) -> u64 {
         } else {
             n = n + 1
             ss(state, S_HOTS, gs(state, S_HOTS) + 1)
-            let act: u64 = tile.bind_lookup(state, v & 0xFF, (v >> 8) & 0xFF)
-            // RUNDE TUERSCHLOSS: WAS DER RING HERGAB UND WAS DARAUS
-            // WURDE. Drei Zahlen, und sie trennen die drei Faelle, die
-            // sonst gleich aussehen: Taste kam nicht an (keine Zeile),
-            // Taste kam an, aber keine Bindung (act=0), Bindung da, aber
-            // die Handlung tat nichts (getan=0).
-            var s_hk: [u8; 12] = "wm: hot c=\0\0"
-            var s_hm: [u8; 6] = " mod=\0"
-            var s_ha: [u8; 6] = " act=\0"
-            serial.puts((&s_hk[0]) as u64)
-            serial.dec(v & 0xFF)
-            serial.puts((&s_hm[0]) as u64)
-            serial.dec((v >> 8) & 0xFF)
-            serial.puts((&s_ha[0]) as u64)
-            serial.dec(act)
-            // DIE ZEILE WIRD ZUERST FERTIG. `tile_action` ruft
-            // `set_focus`, und das schreibt seit dieser Runde selbst auf
-            // die Leitung -- mitten in diese Zeile hinein. Gemessen:
-            //     wm: hot c=9 mod=1 act=30wm: fokus id=7 vor=15
-            // Beide Angaben stimmen, aber `act=30` und die Fokuszeile
-            // kleben aneinander, und ein Muster, das auf das Zeilenende
-            // wartet, findet keines von beiden. Also: Zeilenumbruch vor
-            // der Handlung, das Ergebnis kommt in eine eigene Zeile.
-            serial.nl()
-            let getan: bool = tile_action(state, act)
-            var s_hr: [u8; 15] = "wm: hot getan=\0"
-            serial.puts((&s_hr[0]) as u64)
-            if getan {
-                serial.dec(1)
+            // RUNDE WMPLUGIN: DAS PLUGIN KOMMT VOR DER BINDUNG DES
+            // KACHELBAUMS. Wer ein Kuerzel belegt hat, bekommt es --
+            // und `tile_action` laeuft dafuer gar nicht erst an. Sonst
+            // taete Alt+2 zweierlei auf einmal, je nachdem, was gerade
+            // geladen ist, und das ist genau die Art Ueberraschung, die
+            // ein Erweiterungssystem nicht haben darf.
+            if wmplug.key_owner(state, v & 0xFF, (v >> 8) & 0xFF)
+                < wmplug.MAX_PLUG {
+                wmplug.notify(state, wmplug.E_KEY, v & 0xFF,
+                    (v >> 8) & 0xFF, 0)
+                ss(state, S_KPLUG, gs(state, S_KPLUG) + 1)
+                var s_ph: [u8; 17] = "wm: plughot c=\0\0\0"
+                var s_pj: [u8; 6] = " mod=\0"
+                serial.puts((&s_ph[0]) as u64)
+                serial.dec(v & 0xFF)
+                serial.puts((&s_pj[0]) as u64)
+                serial.dec((v >> 8) & 0xFF)
+                serial.nl()
             } else {
-                serial.dec(0)
-            }
-            serial.nl()
-            if getan {
-                ss(state, S_ACTS, gs(state, S_ACTS) + 1)
+                let act: u64 = tile.bind_lookup(state, v & 0xFF, (v >> 8) & 0xFF)
+                // RUNDE TUERSCHLOSS: WAS DER RING HERGAB UND WAS DARAUS
+                // WURDE. Drei Zahlen, und sie trennen die drei Faelle, die
+                // sonst gleich aussehen: Taste kam nicht an (keine Zeile),
+                // Taste kam an, aber keine Bindung (act=0), Bindung da, aber
+                // die Handlung tat nichts (getan=0).
+                var s_hk: [u8; 12] = "wm: hot c=\0\0"
+                var s_hm: [u8; 6] = " mod=\0"
+                var s_ha: [u8; 6] = " act=\0"
+                serial.puts((&s_hk[0]) as u64)
+                serial.dec(v & 0xFF)
+                serial.puts((&s_hm[0]) as u64)
+                serial.dec((v >> 8) & 0xFF)
+                serial.puts((&s_ha[0]) as u64)
+                serial.dec(act)
+                // DIE ZEILE WIRD ZUERST FERTIG. `tile_action` ruft
+                // `set_focus`, und das schreibt seit dieser Runde selbst auf
+                // die Leitung -- mitten in diese Zeile hinein. Gemessen:
+                //     wm: hot c=9 mod=1 act=30wm: fokus id=7 vor=15
+                // Beide Angaben stimmen, aber `act=30` und die Fokuszeile
+                // kleben aneinander, und ein Muster, das auf das Zeilenende
+                // wartet, findet keines von beiden. Also: Zeilenumbruch vor
+                // der Handlung, das Ergebnis kommt in eine eigene Zeile.
+                serial.nl()
+                let getan: bool = tile_action(state, act)
+                var s_hr: [u8; 15] = "wm: hot getan=\0"
+                serial.puts((&s_hr[0]) as u64)
+                if getan {
+                    serial.dec(1)
+                } else {
+                    serial.dec(0)
+                }
+                serial.nl()
+                if getan {
+                    ss(state, S_ACTS, gs(state, S_ACTS) + 1)
+                }
             }
         }
     }

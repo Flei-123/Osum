@@ -1,0 +1,993 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/wmplug.fi -- /bin/wmplug, die Verwaltung der Fenster-
+// erweiterungen. RING 3, und das ist diesmal nicht nur die Bedienung:
+// die PLUGINS SELBST sind Ring-3-Prozesse (siehe kernel/wmplug.fi im
+// Kopf). Hyprland laedt sie als `.so` in den Compositor; bei uns waere
+// das Fremdcode in Ring 0, denn unser Fensterserver liegt im Kernel.
+//
+//     wmplug                 dasselbe wie `wmplug list`
+//     wmplug list            wer angemeldet ist, mit Rechten und Zaehlern
+//     wmplug info <name>     alles, was der Kern ueber ein Plugin weiss
+//     wmplug enable <name>   die Rechte aus /etc/wmplug.conf gewaehren
+//     wmplug disable <name>  die Rechte auf 0 setzen (wirkt SOFORT,
+//                            auch auf ein schon laufendes Plugin)
+//     wmplug probe <name>    list, info, disable, list an einem
+//                            WIRKLICH angemeldeten Plugin -- der Beleg
+//                            fuer "an und aus zur Laufzeit"
+//
+// `enable` gewaehrt nicht nur, es STARTET auch: steht in der Zeile von
+// /etc/wmplug.conf ein `prog=`, wird es ausgefuehrt. Damit braucht der
+// Autostart (/etc/wmplug.autostart, gelesen von /bin/desktop) genau
+// eine Zeile je Erweiterung und kein Hilfsprogramm mehr.
+//
+// KEINE ZAHL IN DIESEM PROGRAMM IST VON DIESEM PROGRAMM. Jede einzelne
+// kommt ueber WM_PLUG_INFO aus dem Kern; was der Kern nicht beantwortet,
+// steht hier als Strich und nicht als Null. Das ist kein Schoenheits-
+// punkt: eine Verwaltung, die Zustand nachhaelt, erzaehlt frueher oder
+// spaeter etwas anderes als der Kern -- und beim Rechteentzug waere das
+// genau die Luege, auf die es ankommt.
+//
+// DIE RECHTE STEHEN IN EINER DATEI UND NICHT IM KERN. Der Kern liest
+// keine Dateien (er kennt beim Hochlauf noch kein /etc), und er soll
+// auch keine Namenspolitik machen. `enable` liest /etc/wmplug.conf und
+// schickt Name + Maske mit WM_PLUG_GRANT hinunter -- das geht nur als
+// root, der Kern prueft die EUID selbst (sysgui.fi, do_pluggrant).
+
+profile kernel
+
+import ulib
+
+export { u_start }
+
+// Die Aufrufe dieser Runde (kernel/sys.fi, WM_BASE=2100, Vorrat ab 2117).
+const SYS_PLUG_INFO: u64 = 2121
+const SYS_PLUG_GRANT: u64 = 2126
+
+// Die Felder von WM_PLUG_INFO. Dieselben Nummern wie in `kernel/sys.fi`
+// -- diese Datei ist der Spiegel nach Ring 3, zwei verschiedene Nummern
+// waeren ein Fehler, den niemand sieht, bis `wmplug list` Unsinn zeigt.
+const PL_ABI: u64 = 0
+const PL_MAXPLUG: u64 = 1
+const PL_PLUGS: u64 = 2
+const PL_SLOT: u64 = 3
+const PL_USED: u64 = 4
+const PL_RIGHTS: u64 = 5
+const PL_MASK: u64 = 6
+const PL_PENDING: u64 = 7
+const PL_LOST: u64 = 8
+const PL_GRUND: u64 = 9
+const PL_EVIN: u64 = 10
+const PL_EVOUT: u64 = 11
+const PL_KICKS: u64 = 12
+const PL_DENY: u64 = 13
+const PL_FRIST: u64 = 14
+const PL_DESK: u64 = 15
+const PL_NAME: u64 = 16
+const PL_BARLEN: u64 = 17
+
+// Die Fassung der Schnittstelle, GEGEN DIE DIESES PROGRAMM GEBAUT IST.
+// Ein Kern mit einer anderen Zahl wird nicht bedient, sondern gemeldet:
+// die Felder koennten dann anders liegen, und eine Rechtemaske an die
+// falsche Stelle zu schreiben ist schlimmer als gar nichts zu tun.
+const MEIN_ABI: u64 = 1
+
+// Die Rechte (kernel/wmplug.fi, R_*). Nur zum Anzeigen -- gesetzt wird,
+// was in der Datei steht.
+const R_EV_WIN: u64 = 0x01
+const R_EV_FOCUS: u64 = 0x02
+const R_EV_DESK: u64 = 0x04
+const R_EV_TILE: u64 = 0x08
+const R_EV_KEY: u64 = 0x10
+const R_ACT_WIN: u64 = 0x100
+const R_ACT_FOCUS: u64 = 0x200
+const R_ACT_KEY: u64 = 0x400
+const R_ACT_BAR: u64 = 0x800
+
+// So lang ist ein Name im Kern (kernel/wmplug.fi, NAME_LEN). WM_PLUG_INFO
+// gibt allerdings nur die ERSTEN ACHT Oktette als eine Zahl zurueck --
+// deshalb vergleicht dieses Programm auf acht Oktette. Wer zwei Plugins
+// baut, deren Namen sich erst im neunten Zeichen unterscheiden, bekommt
+// hier dasselbe angezeigt; das ist eine benannte Abkuerzung und steht so
+// auch in docs/RUNDE-WMPLUGIN.md.
+const NAME_LEN: u64 = 15
+
+// DIE SPALTEN DER TABELLE VON `list`, EINMAL AUFGESCHRIEBEN.
+//
+// Der Kopf stand vorher als fertige Leerzeichenkette in der Quelle, und
+// weil die Datenzeile aus `pad`/`breit`/`sayhexw` entsteht, hat niemand
+// gemerkt, dass beide auseinandergelaufen sind: auf Bild 09 der Runde
+// standen `Rechte`, `Maske`, `liegt` und `verloren` um zwei bis vier
+// Stellen NEBEN ihren Werten. Jetzt liest der Kopf dieselben fuenf
+// Zahlen wie die Zeile darunter -- wer eine aendert, verschiebt beide.
+const SP_NR: u64 = 4
+const SP_NAME: u64 = 9
+const SP_HEX: u64 = 5
+const SP_LIEGT: u64 = 6
+const SP_VERL: u64 = 9
+
+// Die Feldbreite der Beschriftungen von `info`. VIERZEHN, weil das
+// laengste Wort (`  Leistentext `) so lang ist: eine gemeinsame Breite
+// heisst, dass Beschriftung und Wert nie zusammenlaufen -- vorher klebte
+// `Leistentext14` aneinander, und genau das hat die Jury gesehen.
+const LB_W: u64 = 14
+
+fn is_err(v: u64) -> bool {
+    return v > 0xFFFFFFFFFFFFF000
+}
+
+fn info(platz: u64, feld: u64) -> u64 {
+    return ulib.sys(SYS_PLUG_INFO, platz, feld, 0)
+}
+
+// Eine Zahl, die auch ein Fehler sein kann: ein Strich heisst „der Kern
+// weiss es nicht", und das ist etwas anderes als eine Null.
+fn num_or_stroke(v: u64) {
+    var s_strich: [u8; 2] = "-\0"
+    if is_err(v) {
+        ulib.say((&s_strich[0 as usize]) as u64)
+        return
+    }
+    ulib.sayu(v)
+}
+
+fn sayhex(v: u64) {
+    var s0x: [u8; 3] = "0x\0"
+    var buf: [u8; 20] = [0 as u8; 20]
+    let p: u64 = (&buf[0 as usize]) as u64
+    ulib.say((&s0x[0 as usize]) as u64)
+    var i: u64 = 0
+    var n: u64 = 0
+    var begonnen: bool = false
+    while i < 16 {
+        let d: u64 = (v >> ((15 - i) * 4)) & 0xF
+        if d != 0 {
+            begonnen = true
+        }
+        if begonnen || i == 15 {
+            var c: u64 = 48 + d
+            if d > 9 {
+                c = 55 + d
+            }
+            __mmio_write8((p + n) as *mut u8, c as u8)
+            n = n + 1
+        }
+        i = i + 1
+    }
+    __mmio_write8((p + n) as *mut u8, 0 as u8)
+    ulib.say(p)
+}
+
+// Dasselbe auf feste Breite. In einer Tafel sollen die Spalten stehen,
+// und `0x1F` neben `0x807` verschoebe sie bei jedem Rechtewechsel.
+fn sayhexw(v: u64, ziffern: u64) {
+    var s0x: [u8; 3] = "0x\0"
+    var buf: [u8; 20] = [0 as u8; 20]
+    let p: u64 = (&buf[0 as usize]) as u64
+    ulib.say((&s0x[0 as usize]) as u64)
+    var i: u64 = 0
+    var n: u64 = 0
+    while i < ziffern && i < 16 {
+        let d: u64 = (v >> ((ziffern - 1 - i) * 4)) & 0xF
+        var c: u64 = 48 + d
+        if d > 9 {
+            c = 55 + d
+        }
+        __mmio_write8((p + n) as *mut u8, c as u8)
+        n = n + 1
+        i = i + 1
+    }
+    __mmio_write8((p + n) as *mut u8, 0 as u8)
+    ulib.say(p)
+}
+
+fn hex_of(p: u64) -> u64 {
+    var i: u64 = 0
+    let c0: u64 = (__mmio_read8((p) as *mut u8)) as u64
+    let c1: u64 = (__mmio_read8((p + 1) as *mut u8)) as u64
+    if c0 == 48 && (c1 == 120 || c1 == 88) {
+        i = 2
+    }
+    var v: u64 = 0
+    var weiter: bool = true
+    while weiter {
+        let c: u64 = (__mmio_read8((p + i) as *mut u8)) as u64
+        var d: u64 = 16
+        if c >= 48 && c <= 57 {
+            d = c - 48
+        }
+        if c >= 97 && c <= 102 {
+            d = c - 87
+        }
+        if c >= 65 && c <= 70 {
+            d = c - 55
+        }
+        if d == 16 {
+            weiter = false
+        } else {
+            v = v * 16 + d
+            i = i + 1
+        }
+    }
+    return v
+}
+
+// Der Name eines Platzes, wie ihn der Kern kennt: acht Oktette in EINER
+// Zahl. `out` braucht neun Oktette.
+fn name_of(platz: u64, out: u64) {
+    let v: u64 = info(platz, PL_NAME)
+    var k: u64 = 0
+    if is_err(v) {
+        __mmio_write8((out) as *mut u8, 0 as u8)
+        return
+    }
+    while k < 8 {
+        __mmio_write8((out + k) as *mut u8, ((v >> (k * 8)) & 0xFF) as u8)
+        k = k + 1
+    }
+    __mmio_write8((out + 8) as *mut u8, 0 as u8)
+}
+
+// Die ersten acht Oktette eines Namens als dieselbe Zahl, die PL_NAME
+// liefert -- so braucht die Suche keinen zweiten Aufruf und keinen
+// Puffer im Kern.
+fn packed(name: u64) -> u64 {
+    var v: u64 = 0
+    var k: u64 = 0
+    var ende: bool = false
+    while k < 8 {
+        if !ende {
+            let c: u64 = (__mmio_read8((name + k) as *mut u8)) as u64
+            if c == 0 {
+                ende = true
+            } else {
+                v = v | (c << (k * 8))
+            }
+        }
+        k = k + 1
+    }
+    return v
+}
+
+// DER VERGLEICH ENDET AM ERSTEN NULL-OKTETT, UND DAS IST GEMESSEN UND
+// NICHT VORSICHTSHALBER: WM_PLUG_REG holt sich IMMER fuenfzehn Oktette
+// aus dem Ring-3-Speicher (sysgui.fi, copy_in mit fester Laenge). Ein
+// Plugin, das nur "uhr\0" hinlegt, schickt damit das mit, was zufaellig
+// dahinter auf seinem Stapel stand -- im ersten Lauf dieser Runde stand
+// dort "runden=30", und der Kern meldete `reg uhr rund`. Ein
+// Namensvergleich ueber acht rohe Oktette findet so ein Plugin nie
+// wieder. Also wird verglichen, was ein NAME ist: bis zur Null.
+fn namen_gleich(platz: u64, name: u64) -> bool {
+    let v: u64 = info(platz, PL_NAME)
+    if is_err(v) {
+        return false
+    }
+    var k: u64 = 0
+    var ende: bool = false
+    while k < 8 {
+        let a: u64 = (v >> (k * 8)) & 0xFF
+        var b: u64 = 0
+        if !ende {
+            b = (__mmio_read8((name + k) as *mut u8)) as u64
+            if b == 0 {
+                ende = true
+            }
+        }
+        if a == 0 && b == 0 {
+            return true
+        }
+        if a != b {
+            return false
+        }
+        k = k + 1
+    }
+    return true
+}
+
+fn slot_of(name: u64) -> u64 {
+    let max: u64 = info(0, PL_MAXPLUG)
+    if is_err(max) {
+        return 0xFFFF
+    }
+    var i: u64 = 0
+    while i < max {
+        if info(i, PL_USED) == 1 && namen_gleich(i, name) {
+            return i
+        }
+        i = i + 1
+    }
+    return 0xFFFF
+}
+
+// Der Kern muss da sein UND dieselbe Fassung sprechen. PL_ABI beantwortet
+// er sogar ohne Plugintafel -- genau dafuer ist das Feld gemacht.
+fn kern_da() -> bool {
+    var s_kein: [u8; 46] = "wmplug: dieser Kern kennt keine Erweiterungen\0"
+    var s_fass: [u8; 33] = "wmplug: fremde Fassung: Kern hat\0"
+    var s_ich: [u8; 13] = ", ich kann \0\0"
+    let abi: u64 = info(0, PL_ABI)
+    if is_err(abi) {
+        ulib.esay_line((&s_kein[0 as usize]) as u64, 0)
+        return false
+    }
+    if abi != MEIN_ABI {
+        ulib.eput((&s_fass[0 as usize]) as u64)
+        ulib.sayu(abi)
+        ulib.eput((&s_ich[0 as usize]) as u64)
+        ulib.sayu(MEIN_ABI)
+        ulib.nl()
+        return false
+    }
+    return true
+}
+
+// Die Tafel gibt es erst, wenn der Kern mit `wmplug` gestartet wurde.
+// Ohne sie beantwortet er ausser PL_ABI nichts -- das ist kein Fehler
+// dieses Programms, und es soll auch nicht so aussehen.
+fn tafel_da() -> bool {
+    var s_zu: [u8; 55] = "wmplug: die Plugintafel ist zu (Kern ohne wmplug)\0\0\0\0\0\0"
+    if is_err(info(0, PL_MAXPLUG)) {
+        ulib.esay_line((&s_zu[0 as usize]) as u64, 0)
+        return false
+    }
+    return true
+}
+
+fn u_start(args: u64) -> u64 {
+    var w_list: [u8; 5] = "list\0"
+    var w_en: [u8; 7] = "enable\0"
+    var w_dis: [u8; 8] = "disable\0"
+    var w_info: [u8; 5] = "info\0"
+    var w_pro: [u8; 6] = "probe\0"
+
+    if !kern_da() {
+        return 1
+    }
+    let n: u64 = ulib.arg_count(args)
+    if n < 2 {
+        return liste()
+    }
+    let a1: u64 = ulib.arg_at(args, 1)
+    if ulib.streq(a1, (&w_list[0 as usize]) as u64) {
+        return liste()
+    }
+    if ulib.streq(a1, (&w_info[0 as usize]) as u64) {
+        if n < 3 {
+            return hilfe()
+        }
+        return zeig_info(ulib.arg_at(args, 2))
+    }
+    if ulib.streq(a1, (&w_en[0 as usize]) as u64) {
+        if n < 3 {
+            return hilfe()
+        }
+        // Alles ab Wort 3 gehoert dem Plugin und nicht der Verwaltung.
+        return enable(ulib.arg_at(args, 2), args, 3)
+    }
+    if ulib.streq(a1, (&w_pro[0 as usize]) as u64) {
+        if n < 3 {
+            return hilfe()
+        }
+        return probe(ulib.arg_at(args, 2), args, 3)
+    }
+    if ulib.streq(a1, (&w_dis[0 as usize]) as u64) {
+        if n < 3 {
+            return hilfe()
+        }
+        return disable(ulib.arg_at(args, 2))
+    }
+    return hilfe()
+}
+
+// ------------------------------------------------------------ probe
+//
+// DIE VERWALTUNG AN EINEM WIRKLICH ANGEMELDETEN PLUGIN, IN EINEM STUECK:
+// `list`, `info <name>`, `disable <name>`, `list`. Zwischen dem ersten
+// und dem letzten `list` liegt ein Zustandswechsel, den der KERN selbst
+// meldet (`wmplug: unreg <name> grund=4`) -- das ist der Beleg fuer
+// "an und aus zur Laufzeit", und er braucht beide Zaehlerstaende aus
+// demselben Lauf.
+//
+// WARUM DAS HIER STEHT UND NICHT IN EINEM HILFSPROGRAMM: bis zu dieser
+// Runde tat das /bin/uhrstart, ein Programm, das vier Mal /bin/wmplug
+// aufrief. Es ist weg; die Verwaltung kann sich selbst befragen, ohne
+// sich selbst vier Mal zu starten.
+//
+// GEWARTET WIRD IN RING 3. Das Plugin meldet sich erst an, wenn sein
+// Prozess wirklich laeuft; ein `list` auf eine leere Tafel belegt
+// nichts. Der Kern wartet dabei auf niemanden -- er weiss von diesem
+// Programm nichts.
+fn probe(name: u64, args: u64, ab: u64) -> u64 {
+    var s_v: [u8; 23] = "wmprobe: list vorher\0\0\0"
+    var s_i: [u8; 15] = "wmprobe: info\0\0"
+    var s_d: [u8; 18] = "wmprobe: disable\0\0"
+    var s_n: [u8; 23] = "wmprobe: list nachher\0\0"
+    // STEHEN WOERTER HINTER DEM NAMEN, GEHOERT DER START DAZU. Ohne sie
+    // befragt `probe` ein Plugin, das jemand anders gestartet hat (der
+    // Autostart zum Beispiel) -- mit ihnen startet es selbst und
+    // reicht sie durch. Ein Ruf statt zweier: `wigapp=` gibt genau ein
+    // Programm mit, und ein Pruefstand soll dafuer kein Hilfsprogramm
+    // brauchen.
+    if ulib.arg_count(args) > ab {
+        enable(name, args, ab)
+    }
+    let _w1: u64 = ulib.sleep_ms(5000)
+    ulib.say((&s_v[0 as usize]) as u64)
+    ulib.nl()
+    liste()
+    ulib.say((&s_i[0 as usize]) as u64)
+    ulib.nl()
+    zeig_info(name)
+    ulib.say((&s_d[0 as usize]) as u64)
+    ulib.nl()
+    disable(name)
+    // Dem Kern die Abmeldung lassen, BEVOR noch einmal gezaehlt wird:
+    // `disable` schickt die Null hinunter, und der Platz geht in den
+    // Abschied -- eine Zaehlung im selben Augenblick misst den Zustand
+    // dazwischen und nicht den danach.
+    let _w2: u64 = ulib.sleep_ms(1500)
+    ulib.say((&s_n[0 as usize]) as u64)
+    ulib.nl()
+    liste()
+    return 0
+}
+
+fn hilfe() -> u64 {
+    var s1: [u8; 35] = "wmplug list             wer laeuft\0"
+    var s2: [u8; 35] = "wmplug info <name>      Einzelheit\0"
+    var s3: [u8; 40] = "wmplug enable <name>    Rechte aus /etc\0"
+    var s4: [u8; 40] = "wmplug disable <name>   Rechte auf null\0"
+    var s5: [u8; 42] = "wmplug probe <name>     list/info/disable\0"
+    ulib.esay_line((&s1[0 as usize]) as u64, 0)
+    ulib.esay_line((&s2[0 as usize]) as u64, 0)
+    ulib.esay_line((&s3[0 as usize]) as u64, 0)
+    ulib.esay_line((&s4[0 as usize]) as u64, 0)
+    ulib.esay_line((&s5[0 as usize]) as u64, 0)
+    return 1
+}
+
+// ------------------------------------------------------------- list
+
+fn liste() -> u64 {
+    var s_abi: [u8; 13] = "wmplug: abi=\0"
+    var s_pl: [u8; 11] = "  Plugins \0"
+    var s_von: [u8; 6] = " von \0"
+    var s_fr: [u8; 10] = "  Frist \0\0"
+    var s_tk: [u8; 8] = " Ticks\0\0"
+    var s_fl: [u8; 12] = "  Flaeche \0\0"
+    var s_leer: [u8; 36] = "  (keine Erweiterung angemeldet)\0\0\0\0"
+    var s_sp: [u8; 2] = " \0"
+    var name: [u8; 16] = [0 as u8; 16]
+
+    ulib.say((&s_abi[0 as usize]) as u64)
+    ulib.sayu(info(0, PL_ABI))
+    if !tafel_da() {
+        ulib.nl()
+        return 1
+    }
+    ulib.say((&s_pl[0 as usize]) as u64)
+    num_or_stroke(info(0, PL_PLUGS))
+    ulib.say((&s_von[0 as usize]) as u64)
+    num_or_stroke(info(0, PL_MAXPLUG))
+    // ZWEI ZEILEN, KEINE LANGE. Das Terminal des Schreibtisches ist bei
+    // 640x480 keine achtzig Spalten breit, und der Fensterserver bricht
+    // am RAND statt am Wort -- auf Bild 09 riss die Statuszeile mitten
+    // in `Flaeche  0`. Vierzig Zeichen je Zeile passen ueberall.
+    ulib.nl()
+    ulib.say((&s_fr[0 as usize]) as u64)
+    num_or_stroke(info(0, PL_FRIST))
+    ulib.say((&s_tk[0 as usize]) as u64)
+    ulib.say((&s_fl[0 as usize]) as u64)
+    num_or_stroke(info(0, PL_DESK))
+    ulib.nl()
+
+    let max: u64 = info(0, PL_MAXPLUG)
+    var i: u64 = 0
+    var gezeigt: u64 = 0
+    while i < max {
+        if info(i, PL_USED) == 1 {
+            if gezeigt == 0 {
+                kopf_zeile()
+            }
+            gezeigt = gezeigt + 1
+            ulib.pad(i, SP_NR)
+            ulib.say((&s_sp[0 as usize]) as u64)
+            name_of(i, (&name[0 as usize]) as u64)
+            breit((&name[0 as usize]) as u64, SP_NAME)
+            sayhexw(info(i, PL_RIGHTS), SP_HEX - 2)
+            ulib.say((&s_sp[0 as usize]) as u64)
+            sayhexw(info(i, PL_MASK), SP_HEX - 2)
+            ulib.pad(info(i, PL_PENDING), SP_LIEGT)
+            ulib.pad(info(i, PL_LOST), SP_VERL)
+            ulib.nl()
+        }
+        i = i + 1
+    }
+    if gezeigt == 0 {
+        ulib.say((&s_leer[0 as usize]) as u64)
+        ulib.nl()
+    }
+    return 0
+}
+
+// DER TABELLENKOPF ENTSTEHT AUS DEN BREITEN DER DATENZEILE.
+//
+// Die Zeile darunter setzt sich aus `pad(SP_NR)`, einem Leerzeichen,
+// `breit(SP_NAME)`, zwei Hexfeldern von je `SP_HEX` mit einem
+// Leerzeichen dazwischen und `pad(SP_LIEGT)`/`pad(SP_VERL)` zusammen --
+// also 40 Stellen. Hier werden genau diese Kanten gerechnet und die
+// Ueberschriften RECHTSBUENDIG an ihre Kante gelegt (`Name` linksbuendig,
+// weil der Name selbst linksbuendig steht). Eine Ueberschrift, die
+// breiter ist als ihre Spalte (`Rechte` ist sechs Stellen breit, das
+// Feld fuenf), ragt dabei in die Leerstellen der Namensspalte hinein
+// und nicht in die naechste Zahl -- dort ist Platz, und die letzte
+// Stelle steht, worauf es ankommt.
+fn kopf_zeile() {
+    var b: [u8; 48] = [0 as u8; 48]
+    var h_nr: [u8; 3] = "Nr\0"
+    var h_na: [u8; 5] = "Name\0"
+    var h_re: [u8; 7] = "Rechte\0"
+    var h_ma: [u8; 6] = "Maske\0"
+    var h_li: [u8; 6] = "liegt\0"
+    var h_ve: [u8; 9] = "verloren\0"
+    let p: u64 = (&b[0 as usize]) as u64
+    // Die Kanten: jede Zahl ist die Stelle HINTER der Spalte.
+    let k_nr: u64 = SP_NR
+    let a_na: u64 = k_nr + 1
+    let k_re: u64 = a_na + SP_NAME + SP_HEX
+    let k_ma: u64 = k_re + 1 + SP_HEX
+    let k_li: u64 = k_ma + SP_LIEGT
+    let k_ve: u64 = k_li + SP_VERL
+    ulib.fill(p, 32, k_ve)
+    __mmio_write8((p + k_ve) as *mut u8, 0 as u8)
+    setz(p, k_nr - ulib.length((&h_nr[0 as usize]) as u64), (&h_nr[0 as usize]) as u64)
+    setz(p, a_na, (&h_na[0 as usize]) as u64)
+    setz(p, k_re - ulib.length((&h_re[0 as usize]) as u64), (&h_re[0 as usize]) as u64)
+    setz(p, k_ma - ulib.length((&h_ma[0 as usize]) as u64), (&h_ma[0 as usize]) as u64)
+    setz(p, k_li - ulib.length((&h_li[0 as usize]) as u64), (&h_li[0 as usize]) as u64)
+    setz(p, k_ve - ulib.length((&h_ve[0 as usize]) as u64), (&h_ve[0 as usize]) as u64)
+    ulib.say(p)
+    ulib.nl()
+}
+
+// Ein Wort in eine Zeile legen, ohne ihr Ende zu verschieben: die
+// Nullterminierung der Zeile bleibt, wo sie war.
+fn setz(zeile: u64, at: u64, wort: u64) {
+    ulib.copy(zeile + at, wort, ulib.length(wort))
+}
+
+// Ein Wort auf feste Breite, damit die Spalten stehen. `ulib.pad` kann
+// das nur fuer Zahlen.
+fn breit(p: u64, w: u64) {
+    var s_sp: [u8; 2] = " \0"
+    ulib.say(p)
+    var k: u64 = ulib.length(p)
+    while k < w {
+        ulib.say((&s_sp[0 as usize]) as u64)
+        k = k + 1
+    }
+}
+
+// ------------------------------------------------------------- info
+
+fn zeig_info(name: u64) -> u64 {
+    var s_no: [u8; 27] = "wmplug: nicht angemeldet: \0"
+    // EINE EINZIGE SPALTENBREITE FUER ALLE BESCHRIFTUNGEN (14 Oktette,
+    // zwei davon Einzug). Vorher war jede Beschriftung so breit, wie
+    // sie zufaellig geraten war, und bei `Leistentext` fehlte sogar das
+    // Trennzeichen: auf dem Foto der Runde stand dort `Leistentext13`
+    // -- Wert und Wort zusammengelaufen. Eine Tafel, deren Werte nicht
+    // untereinander stehen, ist eine Liste.
+    var s_nm: [u8; 15] = "  Name        \0"
+    var s_pz: [u8; 15] = "  Platz       \0"
+    var s_re: [u8; 15] = "  Rechte      \0"
+    var s_ma: [u8; 15] = "  Maske       \0"
+    var s_li: [u8; 15] = "  liegt       \0"
+    var s_ve: [u8; 15] = "  verloren    \0"
+    var s_ei: [u8; 15] = "  eingelegt   \0"
+    var s_ab: [u8; 15] = "  abgeholt    \0"
+    var s_gr: [u8; 15] = "  Grund       \0"
+    var s_bl: [u8; 15] = "  Leistentext \0"
+    var s_ge: [u8; 30] = "  im Kern gesamt: Verstoesse \0"
+    var s_dy: [u8; 14] = ", abgewiesen \0"
+    var nb: [u8; 16] = [0 as u8; 16]
+
+    if !tafel_da() {
+        return 1
+    }
+    let i: u64 = slot_of(name)
+    if i == 0xFFFF {
+        // NICHT ANGEMELDET IST KEIN FEHLER DES BENUTZERS: der Grund der
+        // letzten Abmeldung steht trotzdem im Kern, und genau den will
+        // man nach einem Absturz sehen.
+        ulib.eput((&s_no[0 as usize]) as u64)
+        ulib.eput(name)
+        ulib.nl()
+        return 1
+    }
+    name_of(i, (&nb[0 as usize]) as u64)
+    ulib.say((&s_nm[0 as usize]) as u64)
+    ulib.say((&nb[0 as usize]) as u64)
+    ulib.nl()
+    ulib.say((&s_pz[0 as usize]) as u64)
+    ulib.sayu(i)
+    ulib.nl()
+    ulib.say((&s_re[0 as usize]) as u64)
+    sayhex(info(i, PL_RIGHTS))
+    rechte_worte(info(i, PL_RIGHTS))
+    ulib.nl()
+    ulib.say((&s_ma[0 as usize]) as u64)
+    sayhex(info(i, PL_MASK))
+    ulib.nl()
+    ulib.say((&s_li[0 as usize]) as u64)
+    num_or_stroke(info(i, PL_PENDING))
+    ulib.nl()
+    ulib.say((&s_ve[0 as usize]) as u64)
+    num_or_stroke(info(i, PL_LOST))
+    ulib.nl()
+    ulib.say((&s_ei[0 as usize]) as u64)
+    num_or_stroke(info(0, PL_EVIN))
+    ulib.nl()
+    ulib.say((&s_ab[0 as usize]) as u64)
+    num_or_stroke(info(0, PL_EVOUT))
+    ulib.nl()
+    ulib.say((&s_gr[0 as usize]) as u64)
+    grund_wort(info(i, PL_GRUND))
+    ulib.nl()
+    ulib.say((&s_bl[0 as usize]) as u64)
+    // OHNE EIGENE BREITE. Die Beschriftungen stehen schon auf einer
+    // Spalte (LB_W); ein zweites `pad` davor haette den Wert als
+    // einzigen um eine Stelle verschoben -- gemessen am Foto, dort stand
+    // `Leistentext  8` einen Punkt weiter rechts als alles darunter.
+    num_or_stroke(info(i, PL_BARLEN))
+    ulib.nl()
+    ulib.say((&s_ge[0 as usize]) as u64)
+    num_or_stroke(info(0, PL_KICKS))
+    ulib.say((&s_dy[0 as usize]) as u64)
+    num_or_stroke(info(0, PL_DENY))
+    ulib.nl()
+    return 0
+}
+
+fn rechte_worte(r: u64) {
+    var s_auf: [u8; 3] = " (\0"
+    var s_zu: [u8; 2] = ")\0"
+    var s_win: [u8; 5] = "win \0"
+    var s_fok: [u8; 7] = "fokus \0"
+    var s_des: [u8; 9] = "flaeche \0"
+    var s_til: [u8; 8] = "kachel \0"
+    var s_key: [u8; 7] = "taste \0"
+    var s_awi: [u8; 9] = "+fenster\0"
+    var s_afo: [u8; 8] = "+fokus \0"
+    var s_ake: [u8; 8] = "+taste \0"
+    var s_aba: [u8; 8] = "+leiste\0"
+    var s_nix: [u8; 9] = " (nichts\0"
+    if r == 0 {
+        ulib.say((&s_nix[0 as usize]) as u64)
+        ulib.say((&s_zu[0 as usize]) as u64)
+        return
+    }
+    ulib.say((&s_auf[0 as usize]) as u64)
+    if (r & R_EV_WIN) != 0 {
+        ulib.say((&s_win[0 as usize]) as u64)
+    }
+    if (r & R_EV_FOCUS) != 0 {
+        ulib.say((&s_fok[0 as usize]) as u64)
+    }
+    if (r & R_EV_DESK) != 0 {
+        ulib.say((&s_des[0 as usize]) as u64)
+    }
+    if (r & R_EV_TILE) != 0 {
+        ulib.say((&s_til[0 as usize]) as u64)
+    }
+    if (r & R_EV_KEY) != 0 {
+        ulib.say((&s_key[0 as usize]) as u64)
+    }
+    if (r & R_ACT_WIN) != 0 {
+        ulib.say((&s_awi[0 as usize]) as u64)
+    }
+    if (r & R_ACT_FOCUS) != 0 {
+        ulib.say((&s_afo[0 as usize]) as u64)
+    }
+    if (r & R_ACT_KEY) != 0 {
+        ulib.say((&s_ake[0 as usize]) as u64)
+    }
+    if (r & R_ACT_BAR) != 0 {
+        ulib.say((&s_aba[0 as usize]) as u64)
+    }
+    ulib.say((&s_zu[0 as usize]) as u64)
+}
+
+fn grund_wort(g: u64) {
+    var s0: [u8; 13] = "0 selbst\0\0\0\0\0"
+    var s1: [u8; 12] = "1 Absturz\0\0\0"
+    var s2: [u8; 10] = "2 Frist\0\0\0"
+    var s3: [u8; 10] = "3 Rechte\0\0"
+    var s4: [u8; 16] = "4 abgeschaltet\0\0"
+    if is_err(g) {
+        num_or_stroke(g)
+        return
+    }
+    if g == 0 {
+        ulib.say((&s0[0 as usize]) as u64)
+        return
+    }
+    if g == 1 {
+        ulib.say((&s1[0 as usize]) as u64)
+        return
+    }
+    if g == 2 {
+        ulib.say((&s2[0 as usize]) as u64)
+        return
+    }
+    if g == 3 {
+        ulib.say((&s3[0 as usize]) as u64)
+        return
+    }
+    if g == 4 {
+        ulib.say((&s4[0 as usize]) as u64)
+        return
+    }
+    ulib.sayu(g)
+}
+
+// -------------------------------------------------- enable / disable
+
+// Die Maske aus /etc/wmplug.conf. Rueckgabe: die Maske, oder 0xFFFF
+// wenn der Name nicht in der Datei steht. Das Format ist eine Zeile je
+// Plugin:
+//
+//     name rechte=0x11F        # alles hinter # ist Bemerkung
+//
+// KEINE ZWEITE SPRACHE dafuer: dieselbe Wortform wie in tiling.conf,
+// und geparst wird sie hier und nicht im Kern.
+// WAS `enable` AUS DER ZEILE MITNIMMT, ausser der Rechtemaske: die
+// Frist in Ticks und das Programm, das gestartet werden soll. Zwei
+// statische Puffer und keine Rueckgabe mit drei Werten -- Firn kennt
+// kein Tupel, und ein Zeiger auf einen Stapelpuffer des Aufrufers waere
+// hier der unuebersichtlichere Weg.
+static mut g_frist: u64 = 0
+static mut g_gelesen: u64 = 0
+static mut g_prog: [u8; 64] = [0 as u8; 64]
+
+fn maske_aus_datei(name: u64) -> u64 {
+    var pfad: [u8; 20] = "/etc/wmplug.conf\0\0\0\0"
+    // VIER KILOOKTETT, NICHT ZWEI. Gemessener Befund: mit `frist=` und
+    // `prog=` ist /etc/wmplug.conf ueber 3000 Oktette lang, die
+    // Leseschranke lag bei 2000 -- und `wmplug enable uhr` antwortete
+    // "steht nicht in /etc/wmplug.conf", obwohl die Zeile dastand. Die
+    // Zahl in der Meldung (`gelesen=2000`) hat es verraten.
+    var puffer: [u8; 4096] = [0 as u8; 4096]
+    var zeile: [u8; 160] = [0 as u8; 160]
+    var wort: [u8; 64] = [0 as u8; 64]
+    var w_re: [u8; 8] = "rechte=\0"
+    var w_fr: [u8; 7] = "frist=\0"
+    var w_pr: [u8; 6] = "prog=\0"
+    var s_no: [u8; 40] = "wmplug: /etc/wmplug.conf fehlt\0\0\0\0\0\0\0\0\0\0"
+
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&pfad[0 as usize]) as u64, 0, 0)
+    if is_err(fd) {
+        ulib.esay_line((&s_no[0 as usize]) as u64, 0)
+        return 0xFFFF
+    }
+    let buf: u64 = (&puffer[0 as usize]) as u64
+    var len: u64 = 0
+    var weiter: bool = true
+    while weiter && len < 4000 {
+        let got: u64 = ulib.sys(ulib.SYS_READ, fd, buf + len, 4000 - len)
+        if is_err(got) || got == 0 {
+            weiter = false
+        } else {
+            len = len + got
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    // WIE VIEL WIRKLICH ANKAM. Ohne diese Zahl ist "steht nicht in
+    // /etc/wmplug.conf" zweideutig: es kann heissen, dass der Name
+    // fehlt, und es kann heissen, dass die Datei gar nicht gelesen
+    // wurde. Gemessen: genau diese Zweideutigkeit hat eine Stunde
+    // gekostet.
+    g_gelesen = len
+
+    let zp: u64 = (&zeile[0 as usize]) as u64
+    let wp: u64 = (&wort[0 as usize]) as u64
+    let ziel: u64 = packed(name)
+    var i: u64 = 0
+    var gefunden: u64 = 0xFFFF
+    while i < len {
+        // Eine Zeile herausschneiden. Bemerkungen fallen dabei weg --
+        // sonst wuerde `# rechte=0xF1F` in einer Erklaerung plötzlich
+        // Rechte vergeben.
+        var n: u64 = 0
+        var kommentar: bool = false
+        while i < len && (__mmio_read8((buf + i) as *mut u8)) as u64 != 10 {
+            let c: u64 = (__mmio_read8((buf + i) as *mut u8)) as u64
+            if c == 35 {
+                kommentar = true
+            }
+            if !kommentar && n + 1 < 160 && c != 13 && c != 9 {
+                __mmio_write8((zp + n) as *mut u8, c as u8)
+                n = n + 1
+            }
+            if !kommentar && c == 9 && n + 1 < 160 {
+                __mmio_write8((zp + n) as *mut u8, 32 as u8)
+                n = n + 1
+            }
+            i = i + 1
+        }
+        i = i + 1
+        __mmio_write8((zp + n) as *mut u8, 0 as u8)
+        if n != 0 && gefunden == 0xFFFF {
+            let ende: u64 = ulib.word(zp, 0, wp, 64)
+            if packed(wp) == ziel && ziel != 0 {
+                // ALLE WOERTER DER ZEILE, nicht nur das zweite: seit
+                // dieser Runde stehen `frist=` und `prog=` daneben, und
+                // ihre Reihenfolge soll dem Menschen gehoeren und nicht
+                // dem Parser.
+                var at: u64 = ende
+                var weiter2: bool = true
+                while weiter2 {
+                    let na: u64 = ulib.word(zp, at, wp, 64)
+                    if na == at {
+                        weiter2 = false
+                    } else {
+                        at = na
+                        if ulib.strneq(wp, (&w_re[0 as usize]) as u64, 7) {
+                            gefunden = hex_of(wp + 7)
+                        }
+                        if ulib.strneq(wp, (&w_fr[0 as usize]) as u64, 6) {
+                            g_frist = ulib.to_num(wp + 6)
+                        }
+                        if ulib.strneq(wp, (&w_pr[0 as usize]) as u64, 5) {
+                            ulib.fill((&g_prog[0 as usize]) as u64, 0, 64)
+                            ulib.strncpy((&g_prog[0 as usize]) as u64,
+                                wp + 5, 60)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return gefunden
+}
+
+fn grant(name: u64, maske: u64) -> u64 {
+    var puffer: [u8; 16] = [0 as u8; 16]
+    // DER KERN LIEST GENAU NAME_LEN OKTETTE (copy_in, feste Laenge). Ein
+    // kuerzerer Name muss also mit Nullen dastehen, sonst haengt hinten
+    // dran, was zufaellig auf dem Stapel lag -- und die Gewaehrung
+    // traefe einen Namen, den niemand tippen kann.
+    let p: u64 = (&puffer[0 as usize]) as u64
+    ulib.fill(p, 0, 16)
+    ulib.strncpy(p, name, NAME_LEN)
+    return ulib.sys(SYS_PLUG_GRANT, p, maske, 0)
+}
+
+fn sag_ergebnis(name: u64, maske: u64, rc: u64) -> u64 {
+    var s_root: [u8; 44] = "wmplug: das darf nur root (WM_PLUG_GRANT)  \0"
+    var s_voll: [u8; 46] = "wmplug: die Gewaehrungstafel ist voll        \0"
+    var s_and: [u8; 32] = "wmplug: der Kern sagt nein: rc=\0"
+    var s_ok: [u8; 9] = "wmplug: \0"
+    var s_re: [u8; 9] = " rechte=\0"
+    if is_err(rc) {
+        // Die Fehlerzahlen sind die von `cap.err` (Zweierkomplement):
+        // -2 ist E_RIGHTS, -5 ist E_EXHAUSTED. E_RIGHTS ist der haeufige
+        // Fall und hat einen eigenen Satz: "geht nicht" waere hier die
+        // unfreundlichste aller Antworten.
+        if rc == (0 -% 2) {
+            ulib.esay_line((&s_root[0 as usize]) as u64, 0)
+        } else {
+            if rc == (0 -% 5) {
+                ulib.esay_line((&s_voll[0 as usize]) as u64, 0)
+            } else {
+                ulib.eput((&s_and[0 as usize]) as u64)
+                ulib.sayn(rc)
+                ulib.nl()
+            }
+        }
+        return 1
+    }
+    ulib.say((&s_ok[0 as usize]) as u64)
+    ulib.say(name)
+    ulib.say((&s_re[0 as usize]) as u64)
+    sayhex(maske)
+    ulib.nl()
+    return 0
+}
+
+// EINSCHALTEN HEISST AB JETZT AUCH STARTEN.
+//
+// Bis zu dieser Runde gewaehrte `enable` nur Rechte; wer das Plugin
+// wirklich haben wollte, musste es selbst starten -- dafuer gab es
+// /bin/uhrstart, ein Programm, das nichts anderes tat als zwei
+// SYS_EXEC hintereinander. Das war eine benannte Abkuerzung, und sie
+// ist damit weg: steht in der Zeile ein `prog=`, startet `enable` es.
+//
+// DIE REIHENFOLGE IST GEMESSEN UND NICHT BELIEBIG: erst gewaehren, dann
+// starten. Der Kern legt die Rechte beim ANMELDEN auf den Platz
+// (kernel/wmplug.fi, `reg`), und wer sich vor der Gewaehrung anmeldet,
+// sieht nur zu -- das stand einmal als `rechte=31` auf der Leitung, wo
+// `rechte=0x807` stehen sollte.
+//
+// WEITERE WOERTER GEHEN AN DAS PLUGIN DURCH (`wmplug enable uhr
+// runden=30`): die Verwaltung deutet sie nicht, sie reicht sie weiter.
+fn enable(name: u64, args: u64, ab: u64) -> u64 {
+    var s_fehlt: [u8; 43] = "wmplug: steht nicht in /etc/wmplug.conf: \0\0"
+    if !tafel_da() {
+        return 1
+    }
+    g_frist = 0
+    ulib.fill((&g_prog[0 as usize]) as u64, 0, 64)
+    let m: u64 = maske_aus_datei(name)
+    if m == 0xFFFF {
+        var s_gl: [u8; 12] = " gelesen=\0\0\0"
+        ulib.eput((&s_fehlt[0 as usize]) as u64)
+        ulib.eput(name)
+        ulib.eput((&s_gl[0 as usize]) as u64)
+        ulib.sayu(g_gelesen)
+        ulib.nl()
+        return 1
+    }
+    // Die Frist reist im OBEREN Wort mit (kernel/wmplug.fi, `grant`) --
+    // WM_PLUG_GRANT hat zwei Argumente, und eine eigene Aufrufnummer
+    // fuer eine Zahl machte die Schnittstelle breiter, nicht besser.
+    let rc: u64 = sag_ergebnis(name, m, grant(name, m | (g_frist << 32)))
+    if rc != 0 {
+        return rc
+    }
+    if g_frist != 0 {
+        var s_fr: [u8; 9] = "  Frist \0"
+        var s_tk: [u8; 7] = " Ticks\0"
+        ulib.say((&s_fr[0 as usize]) as u64)
+        ulib.sayu(g_frist)
+        ulib.say((&s_tk[0 as usize]) as u64)
+        ulib.nl()
+    }
+    return starten(args, ab)
+}
+
+// DAS PROGRAMM AUS `prog=` STARTEN, mit allem, was auf der Zeile von
+// /bin/wmplug hinter dem Namen stand. Rueckgabe 0 heisst: gewaehrt und
+// (falls eines dasteht) gestartet.
+fn starten(args: u64, ab: u64) -> u64 {
+    var s_st: [u8; 19] = "wmplug: start \0\0\0\0\0"
+    var s_rc: [u8; 5] = " rc=\0"
+    var s_kp: [u8; 38] = "wmplug: kein prog= -- nur gewaehrt\0\0\0\0"
+    var argv: [u64; 6] = [0 as u64; 6]
+    let pp: u64 = (&g_prog[0 as usize]) as u64
+    if (__mmio_read8((pp) as *mut u8)) as u64 == 0 {
+        ulib.say((&s_kp[0 as usize]) as u64)
+        ulib.nl()
+        return 0
+    }
+    argv[(0) as usize] = pp
+    var argc: u64 = 1
+    let n: u64 = ulib.arg_count(args)
+    var i: u64 = ab
+    while i < n && argc < 6 {
+        argv[(argc) as usize] = ulib.arg_at(args, i)
+        argc = argc + 1
+        i = i + 1
+    }
+    let rc: u64 = ulib.sys(ulib.SYS_EXEC, pp, (&argv[0 as usize]) as u64, argc)
+    ulib.say((&s_st[0 as usize]) as u64)
+    ulib.say(pp)
+    ulib.say((&s_rc[0 as usize]) as u64)
+    ulib.sayn(rc)
+    ulib.nl()
+    if is_err(rc) {
+        return 1
+    }
+    return 0
+}
+
+// AUSSCHALTEN HEISST ENTWAFFNEN UND NICHT TOETEN. Der Kern setzt die
+// Rechte auch eines schon angemeldeten Plugins sofort um (wmplug.grant);
+// das Plugin laeuft weiter, bekommt aber keine Ereignisse mehr und keine
+// Handlung mehr durch. Genau das ist der „an/aus zur Laufzeit"-Beleg
+// dieser Runde -- ohne den Fensterserver neu zu starten.
+fn disable(name: u64) -> u64 {
+    if !tafel_da() {
+        return 1
+    }
+    return sag_ergebnis(name, 0, grant(name, 0))
+}

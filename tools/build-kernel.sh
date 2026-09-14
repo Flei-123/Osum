@@ -238,7 +238,7 @@ rm -f "$TMP/kernel/ntfs-aus.fi"
 # gemeldet: 37 Stellen ausserhalb der Naht. Der Weg dorthin fuer den
 # uebrigen Kern sind die zwei Tueren `gfx.disp_poll` und
 # `gfx.disp_restore`.
-GFX_DATEIEN="fb wm wig font ttf tile vmode ansi ps2m kgui sysgui dispsave zeiger"
+GFX_DATEIEN="fb wm wig font ttf tile wmplug vmode ansi ps2m kgui sysgui dispsave zeiger"
 if [[ $GUI == off ]]; then
     for f in $GFX_DATEIEN; do
         rm -f "$TMP/kernel/$f.fi" || exit 1

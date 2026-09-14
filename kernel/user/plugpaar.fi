@@ -1,0 +1,128 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/plugpaar.fi -- ZWEI PLUGINS GLEICHZEITIG, DAMIT DIE TAFEL
+// MEHR ALS EINE ZEILE HAT.
+//
+// Der Kern startet auf dem Schreibtischweg genau EIN zusaetzliches
+// Programm (`wigapp=`, kernel/pmon.fi). Die Spalten von `wmplug list`
+// stehen aber erst dann zur Debatte, wenn unter dem Kopf MEHRERE Zeilen
+// stehen -- eine einzige Zeile laesst sich mit jeder falschen Breite
+// hinbiegen. Also startet dieses Programm beide echten Plugins der
+// Runde (`/bin/pluguhr` und `/bin/plugregel`), wartet, bis sie wirklich
+// angemeldet sind, und ruft dann `/bin/wmplug list` und
+// `/bin/wmplug info uhr`.
+//
+// GEWARTET WIRD HIER, IN RING 3, MIT SCHLAF. Der Kern kennt dieses
+// Programm nicht und wartet auf keines -- das ist die Zusage der Runde
+// und gilt auch fuer einen Messhelfer.
+//
+// ES IST EIN MESSHELFER UND KEIN PLUGIN: es meldet sich nirgends an, es
+// bekommt keine Rechte, und ausser `exec` und `sleep` tut es nichts.
+// Gebraucht wird es von tools/wmplug/spalten.sh; sobald der Schreibtisch
+// eine Autostart-Liste hat, gehoeren die vier Zeilen dorthin und diese
+// Datei faellt weg (so benannt in docs/RUNDE-WMPLUGIN.md).
+
+profile kernel
+
+import ulib
+
+export { u_start }
+
+// Die Gewaehrung geht hier DIREKT ueber den Aufruf und nicht ueber
+// `/bin/wmplug enable`: `enable` liest /etc/wmplug.conf, und was dort
+// steht, aendert sich mit der Konfiguration (es startet inzwischen auch
+// Programme). Ein Messhelfer, der davon abhaengt, misst morgen etwas
+// anderes als heute. Die zwei Masken sind dieselben wie in der Datei --
+// uhr 0x807, regel 0x301 -- und wenn sie auseinanderlaufen, faellt es im
+// Bild auf, weil dort die Zahl aus dem KERN steht.
+const SYS_PLUG_GRANT: u64 = 2126
+const R_UHR: u64 = 0x807
+const R_REGEL: u64 = 0x301
+
+// Ein Programm starten und ihm Zeit zum Reden lassen, damit die Zeilen
+// der Rufe auf der seriellen Leitung nicht durcheinanderfallen: sonst
+// ist hinterher nicht zu sagen, welche Tafel zu welchem Ruf gehoert.
+fn ruf(pfad: u64, argv: u64, argc: u64, marke: u64, ms: u64) {
+    var s_r: [u8; 12] = "plugpaar: \0\0"
+    var s_e: [u8; 5] = " r=\0\0"
+    let r: u64 = ulib.sys(ulib.SYS_EXEC, pfad, argv, argc)
+    ulib.say((&s_r[0 as usize]) as u64)
+    ulib.say(marke)
+    ulib.say((&s_e[0 as usize]) as u64)
+    ulib.sayn(r)
+    ulib.nl()
+    let _s: u64 = ulib.sleep_ms(ms)
+}
+
+// Rechte gewaehren. Der Kern nimmt 15 Oktette als Namen, also ist der
+// Puffer 16 lang und ausgenullt -- mit einem kuerzeren gewaehrt man
+// Rechte an "uhr" plus dem, was zufaellig daneben auf dem Stapel lag.
+fn gewaehre(name: u64, maske: u64, marke: u64) {
+    var s_r: [u8; 20] = "plugpaar: grant \0\0\0\0"
+    var s_e: [u8; 5] = " r=\0\0"
+    let r: u64 = ulib.sys(SYS_PLUG_GRANT, name, maske, 0)
+    ulib.say((&s_r[0 as usize]) as u64)
+    ulib.say(marke)
+    ulib.say((&s_e[0 as usize]) as u64)
+    ulib.sayn(r)
+    ulib.nl()
+}
+
+fn u_start(args: u64) -> u64 {
+    var p_wmplug: [u8; 13] = "/bin/wmplug\0\0"
+    var p_uhr: [u8; 14] = "/bin/pluguhr\0\0"
+    var p_regel: [u8; 15] = "/bin/plugregel\0"
+    var a_wm: [u8; 7] = "wmplug\0"
+    var a_li: [u8; 5] = "list\0"
+    var a_in: [u8; 5] = "info\0"
+    var a_uhr: [u8; 4] = "uhr\0"
+    var a_puhr: [u8; 8] = "pluguhr\0"
+    var a_preg: [u8; 10] = "plugregel\0"
+    var n_uhr: [u8; 16] = "uhr\0\0\0\0\0\0\0\0\0\0\0\0\0"
+    var n_reg: [u8; 16] = "regel\0\0\0\0\0\0\0\0\0\0\0"
+    // WIE LANGE DIE BEIDEN LEBEN, UND WARUM DIE ZAHLEN SO WEIT
+    // AUSEINANDERLIEGEN: eine Runde der Uhr ist eine Sekunde (pluguhr,
+    // `takt=1000`), eine Runde der Regel-Engine zehn Millisekunden
+    // (plugregel, `sleep_ms(10)`). Beim ersten gemessenen Lauf standen
+    // hier zweimal `runden=40` -- die Regel-Engine war nach vier
+    // Zehntelsekunden wieder weg, und die Tafel zeigte EIN Plugin statt
+    // zweier. Die Zahlen sind also keine Zierde, sondern der Grund,
+    // warum unter dem Kopf zwei Zeilen stehen.
+    var a_r40: [u8; 11] = "runden=40\0\0"
+    var a_r2k: [u8; 13] = "runden=2000\0\0"
+    var m_pu: [u8; 8] = "pluguhr\0"
+    var m_pr: [u8; 10] = "plugregel\0"
+    var m_li: [u8; 5] = "list\0"
+    var m_if: [u8; 9] = "info uhr\0"
+    var argv: [u64; 3] = [0 as u64; 3]
+
+    let wm: u64 = (&a_wm[0 as usize]) as u64
+
+    // ERST DIE RECHTE, DANN DIE PLUGINS. Die Rechte werden beim Anmelden
+    // aus der Gewaehrungstafel genommen (kernel/wmplug.fi, `reg`), also
+    // ist die Reihenfolge nicht beliebig.
+    gewaehre((&n_uhr[0 as usize]) as u64, R_UHR, (&a_uhr[0 as usize]) as u64)
+    gewaehre((&n_reg[0 as usize]) as u64, R_REGEL, (&n_reg[0 as usize]) as u64)
+
+    argv[(0) as usize] = (&a_puhr[0 as usize]) as u64
+    argv[(1) as usize] = (&a_r40[0 as usize]) as u64
+    ruf((&p_uhr[0 as usize]) as u64, (&argv[0 as usize]) as u64, 2,
+        (&m_pu[0 as usize]) as u64, 1200)
+
+    argv[(0) as usize] = (&a_preg[0 as usize]) as u64
+    argv[(1) as usize] = (&a_r2k[0 as usize]) as u64
+    ruf((&p_regel[0 as usize]) as u64, (&argv[0 as usize]) as u64, 2,
+        (&m_pr[0 as usize]) as u64, 3000)
+
+    // Jetzt stehen beide in der Tafel -- und JETZT erst hat der
+    // Tabellenkopf etwas zu ueberschreiben.
+    argv[(0) as usize] = wm
+    argv[(1) as usize] = (&a_li[0 as usize]) as u64
+    ruf((&p_wmplug[0 as usize]) as u64, (&argv[0 as usize]) as u64, 2,
+        (&m_li[0 as usize]) as u64, 1500)
+
+    argv[(1) as usize] = (&a_in[0 as usize]) as u64
+    argv[(2) as usize] = (&a_uhr[0 as usize]) as u64
+    ruf((&p_wmplug[0 as usize]) as u64, (&argv[0 as usize]) as u64, 3,
+        (&m_if[0 as usize]) as u64, 1500)
+    return 0
+}
