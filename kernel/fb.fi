@@ -109,7 +109,11 @@ export {
     // Abbildungsart aus der Seitentafel selbst ablesen.
     flush_rect, pat_roh, pde_roh, stripe_slots,
     // RUNDE BLECHDREI: das reservierte Band am oberen Rand.
-    set_band, band, band_lo, band_open
+    set_band, band, band_lo, band_open,
+    // RUNDE VIRTIOGPU: die Uebertragungswaage und das Schmutzrechteck.
+    tx_octets, tx_rects, frames, tx_add, frame_done, tx_reset,
+    dirty_rect, rect_valid, rect_x0, rect_y0, rect_x1, rect_y1,
+    rect_take, S_TXOCT, S_TXRECT, S_FRAMES
 }
 
 // ------------------------------------------------- der Datenbereich
@@ -314,6 +318,45 @@ const S_SEQ: u64 = 0x7F8 // Folgenummer: ungerade = Seitenwechsel laeuft
 // Messung, die den Weg gar nicht nimmt, genauso aussieht wie eine, die
 // ihn nimmt und nichts bringt.
 const S_SIMDPX: u64 = 0x800
+
+// ================================================ RUNDE VIRTIOGPU
+// DIE UEBERTRAGUNGSWAAGE. Drei Zaehler, die messen, was wirklich ueber
+// den Bus geht -- und zwar auf BEIDEN Wegen, dem alten (Kopie in den
+// Rahmenpuffer der Firmware) und dem neuen (virtio-gpu).
+//
+// WARUM DIE ZAEHLER IN fb.fi STEHEN UND NICHT IM TREIBER: die Zahl
+// "Oktette je Bild" ist nur dann ein Vergleich, wenn VORHER und
+// NACHHER DASSELBE gezaehlt wird. Stuende der Zaehler im Treiber,
+// gaebe es fuer den alten Weg gar keinen -- und ein Vergleich gegen
+// eine Zahl, die nicht erhoben wurde, ist eine Schaetzung.
+//
+// S_TXOCT   Oktette, die aus dem Zweitpuffer hinausgetragen wurden.
+// S_TXRECT  wie viele Rechtecke/Streifen es dafuer brauchte.
+// S_FRAMES  wie viele BILDER daraus wurden (eine Bildgrenze, nicht
+//           eine Uebertragung -- `flush` kann mehrmals je Bild laufen).
+const S_TXOCT: u64 = 0x808
+const S_TXRECT: u64 = 0x810
+const S_FRAMES: u64 = 0x818
+
+// DAS SCHMUTZRECHTECK. Bis hierher merkt sich `fb.fi` nur ZEILEN
+// (S_DIRTY_LO/HI) -- fuer eine Kopie in einen linearen Puffer reicht
+// das, weil ganze Zeilen ohnehin am Stueck liegen. virtio-gpu kann
+// aber ein echtes Rechteck uebertragen, und dann ist die Spalte die
+// Haelfte der Ersparnis: die Uhr in der Leiste ist 60 Bildpunkte
+// breit und 1280 hoch zu uebertragen waere albern.
+//
+// Es ist EIN umschliessendes Rechteck und keine Liste. Eine Liste
+// waere genauer und braeuchte eine Zusammenlegung (zwei Rechtecke, die
+// sich ueberlappen, duerfen nicht zweimal gehen) -- das ist eine
+// eigene Runde wert. Das umschliessende Rechteck ist die einfache
+// Fassung, die schon den groessten Teil des Gewinns bringt, und sie
+// ist nachweisbar richtig: was ausserhalb liegt, hat sich nicht
+// geaendert.
+const S_RX0: u64 = 0x820 // links, einschliesslich
+const S_RY0: u64 = 0x828 // oben
+const S_RX1: u64 = 0x830 // rechts, ausschliesslich
+const S_RY1: u64 = 0x838 // unten
+const S_RVALID: u64 = 0x840 // 0 = nichts angemeldet
 
 // Die drei Arten, ein Bild auf eine Tafel anderer Groesse zu bringen.
 // Dieselben drei, die ein Monitor in seiner eigenen Elektronik hat und
@@ -2324,12 +2367,121 @@ fn clear(state: u64, color: u64) {
 
 // Der ganze Bildschirm gilt als geaendert. Wer eine Teilflaeche malt und
 // das nicht meldet, sieht sie nach dem naechsten `flush` nicht.
+// ================================================ RUNDE VIRTIOGPU
+// DIE WAAGE UND DAS SCHMUTZRECHTECK.
+
+fn tx_octets(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_TXOCT)
+}
+
+fn tx_rects(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_TXRECT)
+}
+
+fn frames(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_FRAMES)
+}
+
+// Ein Rechteck ist hinausgegangen. Beide Wege rufen das -- der alte aus
+// `flush`/`flush_stripe`/`flush_rect`, der neue aus `vgpu.fi`.
+fn tx_add(state: u64, oktette: u64) {
+    kstate.add(state, FB_OFF + S_TXOCT, oktette)
+    kstate.add(state, FB_OFF + S_TXRECT, 1)
+}
+
+// EINE BILDGRENZE. Nicht jede Uebertragung ist ein Bild: der
+// Fensterserver malt ein Bild aus vielen Zeichenschritten, und erst
+// `present`/`flip` sagt "fertig". Wer Oktette JE BILD ausrechnen will,
+// braucht beide Zahlen aus derselben Quelle.
+fn frame_done(state: u64) {
+    kstate.add(state, FB_OFF + S_FRAMES, 1)
+}
+
+fn tx_reset(state: u64) {
+    kstate.set(state, FB_OFF + S_TXOCT, 0)
+    kstate.set(state, FB_OFF + S_TXRECT, 0)
+    kstate.set(state, FB_OFF + S_FRAMES, 0)
+}
+
+// DAS SCHMUTZRECHTECK ANMELDEN. Wird ZUSAETZLICH zu `dirty` gerufen --
+// die Zeilenmarke bleibt, weil der alte Weg sie braucht und weil ein
+// Weg, der bei jedem Rueckfall neu erfunden wird, keiner ist.
+fn dirty_rect(state: u64, x: u64, y: u64, w: u64, h: u64) {
+    if w == 0 || h == 0 {
+        return
+    }
+    let x1: u64 = x + w
+    let y1: u64 = y + h
+    if kstate.get(state, FB_OFF + S_RVALID) == 0 {
+        kstate.set(state, FB_OFF + S_RX0, x)
+        kstate.set(state, FB_OFF + S_RY0, y)
+        kstate.set(state, FB_OFF + S_RX1, x1)
+        kstate.set(state, FB_OFF + S_RY1, y1)
+        kstate.set(state, FB_OFF + S_RVALID, 1)
+        return
+    }
+    if x < kstate.get(state, FB_OFF + S_RX0) {
+        kstate.set(state, FB_OFF + S_RX0, x)
+    }
+    if y < kstate.get(state, FB_OFF + S_RY0) {
+        kstate.set(state, FB_OFF + S_RY0, y)
+    }
+    if x1 > kstate.get(state, FB_OFF + S_RX1) {
+        kstate.set(state, FB_OFF + S_RX1, x1)
+    }
+    if y1 > kstate.get(state, FB_OFF + S_RY1) {
+        kstate.set(state, FB_OFF + S_RY1, y1)
+    }
+}
+
+fn rect_valid(state: u64) -> bool {
+    return kstate.get(state, FB_OFF + S_RVALID) != 0
+}
+
+fn rect_x0(state: u64) -> u64 { return kstate.get(state, FB_OFF + S_RX0) }
+fn rect_y0(state: u64) -> u64 { return kstate.get(state, FB_OFF + S_RY0) }
+fn rect_x1(state: u64) -> u64 { return kstate.get(state, FB_OFF + S_RX1) }
+fn rect_y1(state: u64) -> u64 { return kstate.get(state, FB_OFF + S_RY1) }
+
+// LESEN UND WEGNEHMEN IN EINEM ZUG, mit abgeschalteten Unterbrechungen
+// -- genau die Regel, die Runde ECHTHARDWARE-6 fuer die Zeilenmarke
+// aufgestellt hat und aus demselben Grund: was zwischen dem Lesen und
+// dem Loeschen angemeldet wird, gehoert dem naechsten Bild und darf
+// nicht mitgeloescht werden.
+fn rect_take(state: u64, x0: *mut u64, y0: *mut u64, x1: *mut u64,
+    y1: *mut u64) -> bool {
+    let fl: u64 = arch.irq_save()
+    let gueltig: bool = kstate.get(state, FB_OFF + S_RVALID) != 0
+    if gueltig {
+        __mmio_write64(x0, kstate.get(state, FB_OFF + S_RX0))
+        __mmio_write64(y0, kstate.get(state, FB_OFF + S_RY0))
+        __mmio_write64(x1, kstate.get(state, FB_OFF + S_RX1))
+        __mmio_write64(y1, kstate.get(state, FB_OFF + S_RY1))
+        kstate.set(state, FB_OFF + S_RVALID, 0)
+    }
+    arch.irq_restore(fl)
+    return gueltig
+}
+
 fn dirty_all(state: u64) {
     kstate.set(state, FB_OFF + S_DIRTY_LO, 0)
     kstate.set(state, FB_OFF + S_DIRTY_HI, kstate.get(state, FB_OFF + S_HEIGHT))
+    // RUNDE VIRTIOGPU: wer den ganzen Schirm anmeldet, meldet auch das
+    // ganze Rechteck an -- sonst uebertruege der neue Weg beim
+    // Moduswechsel oder beim ersten Bild zu wenig.
+    dirty_rect(state, 0, 0, kstate.get(state, FB_OFF + S_WIDTH),
+        kstate.get(state, FB_OFF + S_HEIGHT))
 }
 
 fn dirty(state: u64, y0: u64, y1: u64) {
+    // RUNDE VIRTIOGPU: wer nur ZEILEN anmeldet, meldet sie in voller
+    // Breite als Rechteck an. Das ist die ehrliche Umrechnung -- mehr
+    // weiss dieser Aufrufer nicht. Wer es genauer kann, ruft
+    // `dirty_rect` zusaetzlich (`fill`, `blit`, `flush_rect` tun es).
+    if y1 > y0 {
+        dirty_rect(state, 0, y0, kstate.get(state, FB_OFF + S_WIDTH),
+            y1 - y0)
+    }
     if kstate.get(state, FB_OFF + S_DIRTY_HI) == 0 {
         kstate.set(state, FB_OFF + S_DIRTY_LO, y0)
         kstate.set(state, FB_OFF + S_DIRTY_HI, y1)
@@ -2402,6 +2554,8 @@ fn flush_stripe(state: u64, lo: u64, hi: u64) {
         }
         arch.barrier_write()
         arch.irq_restore(fl)
+        // RUNDE VIRTIOGPU: der Streifenweg wiegt jeden Block.
+        tx_add(state, n)
         off = off +% n
     }
     // RUNDE ZWISCHENSPEICHER: WC-Schreibzugriffe sind schwach geordnet
@@ -2515,6 +2669,10 @@ fn flush(state: u64) {
             __mmio_read32((src +% i) as *mut u32))
         i = i + 4
     }
+    // RUNDE VIRTIOGPU: DER ALTE WEG WIEGT SICH SELBST. `n` ist, was
+    // wirklich kopiert wurde -- ganze Bildzeilen, weil dieser Weg
+    // keine Spalten kann.
+    tx_add(state, n)
     // ============ RUNDE BLECHZWEI: HIER FEHLTE DAS `sfence`.
     //
     // Die Vorrunde hat es an `flush_stripe` gehaengt und diesen Pfad
@@ -3989,6 +4147,11 @@ fn present(state: u64) {
         kstate.set(state, FB_OFF + S_DIRTY_HI, 0)
         kstate.add(state, FB_OFF + S_FLUSHES, 1)
         kstate.add(state, FB_OFF + S_PRESENTS, 1)
+        // RUNDE VIRTIOGPU: DER LANGE WEG WIEGT DIE GANZE TAFEL. Er
+        // kann keine Teilflaeche -- das steht im Kopf dieser Funktion
+        // und ist genau der Grund, warum diese Zahl so gross ist.
+        tx_add(state, kstate.get(state, FB_OFF + S_PPITCH)
+            *% kstate.get(state, FB_OFF + S_PHEIGHT))
         return
     }
 
@@ -4103,6 +4266,8 @@ fn present(state: u64) {
     kstate.set(state, FB_OFF + S_DIRTY_HI, 0)
     kstate.add(state, FB_OFF + S_FLUSHES, 1)
     kstate.add(state, FB_OFF + S_PRESENTS, 1)
+    tx_add(state, kstate.get(state, FB_OFF + S_PPITCH)
+        *% kstate.get(state, FB_OFF + S_PHEIGHT))
 }
 
 // --------------------------------------------------- die Zusagen dazu
@@ -4558,6 +4723,7 @@ fn flush_rows(state: u64, lo: u64, hi: u64) {
     let src: u64 = b +% von
     copy_words(dst, src, n / 8)
     arch.barrier_write()
+    tx_add(state, n)
     nachspuelen(state)
 }
 
@@ -4704,6 +4870,7 @@ fn flush_rect(state: u64, x: u64, y: u64, w: u64, h: u64) {
                         k = k + 4
                     }
                     arch.barrier_write()
+                    tx_add(state, n)
                 }
                 arch.irq_restore(fl)
             }
@@ -4730,6 +4897,9 @@ fn flush_rect(state: u64, x: u64, y: u64, w: u64, h: u64) {
         r2 = r2 + 1
     }
     arch.barrier_write()
+    // RUNDE VIRTIOGPU: hh Zeilen zu je n Oktetten -- das ist der
+    // einzige Weg im alten Betrieb, der SPALTEN kann.
+    tx_add(state, n *% hh)
     nachspuelen(state)
 }
 
