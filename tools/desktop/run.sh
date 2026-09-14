@@ -350,7 +350,7 @@ check_text() { # log ppm mark
 # text.
 btn_ink() { # log ppm edge
     local log=$1 ppm=$2 e=$3
-    local gline gx gy bline bx bw bh by tline tx fgv lab
+    local gline gx gy bline bx bw bh by
     gline=$(grep -a "^taskbar: geom " "$log" | tail -1)
     gx=$(printf '%s' "$gline" | grep -oE ' x=[0-9]+' | head -1 | sed 's/.*=//')
     gy=$(printf '%s' "$gline" | grep -oE ' y=[0-9]+' | head -1 | sed 's/.*=//')
@@ -359,25 +359,34 @@ btn_ink() { # log ppm edge
     # line carries the launcher's numbers (the lesson of tools/look).
     bline=$(grep -a '^taskbar: btn i=0 ' "$log" \
         | grep -oE ' x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+ hidden=' | tail -1)
-    tline=$(grep -a '^taskbar: text button ' "$log" | tail -1)
-    if [ -z "$bline" ] || [ -z "$tline" ]; then
-        bad "[$e] the bar reports no complete window button (rect '$bline')"
+    if [ -z "$bline" ]; then
+        bad "[$e] the bar reports no complete window button"
         return
     fi
     bx=$(printf '%s' "$bline" | grep -oE ' x=[0-9]+' | sed 's/.*=//')
     by=$(printf '%s' "$bline" | grep -oE ' y=[0-9]+' | sed 's/.*=//')
     bw=$(printf '%s' "$bline" | grep -oE ' w=[0-9]+' | sed 's/.*=//')
     bh=$(printf '%s' "$bline" | grep -oE ' h=[0-9]+' | sed 's/.*=//')
-    tx=$(printf '%s' "$tline" | grep -oE ' x=[0-9]+' | head -1 | sed 's/.*=//')
-    fgv=$(printf '%s' "$tline" | grep -oE ' fg=[0-9]+' | sed 's/.*=//')
-    lab=$(printf '%s' "$tline" | sed 's/^.* t=//')
-    if [ -z "$lab" ]; then
-        bad "[$e] the window button carries no label (labels=auto should give it one)"
-        return
-    fi
-    ok "[$e] the window button is ${bw}x${bh} and carries the label '$lab'"
-    local x0=$((tx + gx)) y0=$((by + gy)) w0=$((bx + bw - tx)) n
-    n=$(python3 - "$ppm" "$x0" "$y0" "$w0" "$bh" $(rgb "$fgv") <<'PYINK'
+    # THE LABEL BELONGS TO THIS BUTTON AND NOT TO THE NEXT ONE. The last
+    # reported label is the last one DRAWN, and on a bar with two
+    # windows that is button 1 -- taking it blindly measured a rectangle
+    # that lies outside button 0 and found, quite correctly, no ink at
+    # all. So only the states whose x falls INSIDE this rectangle count,
+    # and because the bar repaints while the screenshot is taken (focus
+    # comes and goes, and with it the two colours), every one of them is
+    # tried: the claim is that ONE of the reported states stands in the
+    # picture, which is the same rule `check_text` follows.
+    local best=0 bestlab="" bestx=0 line tx fgv lab n
+    while IFS= read -r line; do
+        tx=$(printf '%s' "$line" | grep -oE ' x=[0-9]+' | head -1 | sed 's/.*=//')
+        fgv=$(printf '%s' "$line" | grep -oE ' fg=[0-9]+' | sed 's/.*=//')
+        lab=$(printf '%s' "$line" | sed 's/^.* t=//')
+        [ -z "${tx:-}" ] && continue
+        [ -z "$lab" ] && continue
+        [ "$tx" -lt "$bx" ] && continue
+        [ "$tx" -ge $((bx + bw)) ] && continue
+        n=$(python3 - "$ppm" "$((tx + gx))" "$((by + gy))" \
+            "$((bx + bw - tx))" "$bh" $(rgb "$fgv") <<'PYINK'
 import sys
 d = open(sys.argv[1], 'rb').read()
 i, t = 2, []
@@ -402,10 +411,19 @@ for y in range(max(y0, 0), min(y0 + bh, h)):
 print(n)
 PYINK
 )
-    if [ "${n:-0}" -gt 40 ]; then
-        ok "[$e] and there are $n pixels of ink in it, from ($x0,$y0), ${w0}x${bh}"
+        if [ "${n:-0}" -gt "$best" ]; then
+            best=$n; bestlab=$lab; bestx=$tx
+        fi
+    done < <(grep -a "^taskbar: text button " "$log" | tail -12 | tac)
+    if [ -z "$bestlab" ]; then
+        bad "[$e] no reported label falls into the window button ${bx}+${bw} (labels=auto should give it one)"
+        return
+    fi
+    ok "[$e] the window button is ${bw}x${bh} and carries the label '$bestlab'"
+    if [ "$best" -gt 40 ]; then
+        ok "[$e] and there are $best pixels of ink in it, from ($((bestx + gx)),$((by + gy)))"
     else
-        bad "[$e] only ${n:-0} pixels of ink in the label area of the button"
+        bad "[$e] only $best pixels of ink in the label area of the button"
     fi
 }
 
