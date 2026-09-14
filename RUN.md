@@ -183,7 +183,7 @@ getippt werden:
 
 ```
 bash tools/wmplug/spalten.sh   -> SPALTEN: 25 bestanden, 0 gescheitert
-bash tools/wmplug/shots.sh     -> SHOTS: 8 Bilder abgelegt in .gauntlet-shots
+bash tools/wmplug/shots.sh     -> SHOTS: 11 Bilder abgelegt in .gauntlet-shots
 ```
 
 Dazu:
