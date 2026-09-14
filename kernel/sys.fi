@@ -10337,6 +10337,34 @@ fn sock_close_all(state: u64, me: u64) {
                 inet.sock_close(state, file.open_ino(state, of))
             }
         }
+        // RUNDE WAYLAND, DER ZWOELFTE FUND, und er ist der Grund, warum
+        // der Bedarfsstart zuerst nicht wieder abschaltete:
+        //
+        // `file.close_all` raeumt beim Ende eines Prozesses die
+        // DESKRIPTOREN ab -- aber es ruft `file.open_unref` unmittelbar
+        // und geht damit an `unref_of` in dieser Datei VORBEI. Genau
+        // dort steht jedoch, was einen Unix-Socket wirklich schliesst.
+        // Ein Client, der sich beendete, liess seinen Socket deshalb
+        // verbunden zurueck: der Server sah nie ein Dateiende, zaehlte
+        // ihn ewig als offen und beendete sich nie.
+        //
+        // Diese Funktion ist die Stelle, an der das schon fuer K_SOCK
+        // geloest war. Die beiden neuen Arten stehen jetzt daneben --
+        // und damit gilt die Zusage aus Justins Abnahme auch fuer einen
+        // Client, der ABSTUERZT statt sich zu verabschieden: ein
+        // geschlossener Socket ist ein geschlossener Socket.
+        if of < file.MAX_OPEN
+            && file.open_kind(state, of) == file.K_USOCK {
+            if file.open_refs(state, of) <= 1 {
+                unixsock.sock_free(state, file.open_ino(state, of))
+                sched.poll_kick(state)
+            }
+        }
+        if of < file.MAX_OPEN && file.open_kind(state, of) == file.K_SHM {
+            if file.open_refs(state, of) <= 1 {
+                unixsock.shm_unref(state, file.open_ino(state, of))
+            }
+        }
         fd = fd + 1
     }
 }

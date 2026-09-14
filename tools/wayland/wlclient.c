@@ -143,10 +143,15 @@ int main(int argc, char **argv)
     wl_display_flush(dpy);
     // Stehenbleiben, damit das Fenster beim Bildschirmfoto noch da ist.
     // Ohne das raeumt der Server es ab, bevor QEMU screendump macht.
-    for (int i = 0; i < 400; i++) {
+    // Wie lange das Fenster stehenbleibt, bevor sich der Client
+    // beendet. Fuer das Bildschirmfoto lang, fuer die Abnahme des
+    // Bedarfsstarts kurz -- deshalb ein Argument und keine feste Zahl.
+    int halten = (argc > 2) ? atoi(argv[2]) : 400;
+    for (int i = 0; i < halten; i++) {
         wl_display_dispatch_pending(dpy);
         wl_display_flush(dpy);
         usleep(50000);
     }
+    printf("wlclient: beende mich\n");
     return 0;
 }

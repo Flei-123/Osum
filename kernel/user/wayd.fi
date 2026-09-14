@@ -107,6 +107,15 @@ const WM_CLOSE: u64 = 2107
 
 // ------------------------------------------------------------- Grenzen
 
+// Wieviele Leerlauf-Umlaeufe, bevor der Bedarfsserver sich beendet.
+// 20.000 Umlaeufe sind auf der Messmaschine rund zehn Sekunden -- lang
+// genug, dass ein neu startendes Programm denselben Server wiederfindet,
+// kurz genug, dass niemand Speicher fuer nichts haelt.
+// Fuer die Abnahme zur Laufzeit einstellbar: `wayd <pfad> <fd> <leer>`.
+// Die Vorgabe bleibt gross genug, dass ein neu startendes Programm
+// denselben Server wiederfindet.
+const LEER_MAX: u64 = 20000
+
 const MAX_CLIENTS: u64 = 4
 const MAX_OBJ: u64 = 64 // Objekte je Client
 const IN_CAP: u64 = 8192 // Eingangspuffer je Client
@@ -865,7 +874,31 @@ fn recv_into(c: u64) -> u64 {
     mh[6 as usize] = 0
     let n: u64 = ulib.sys(SYS_RECVMSG, c_fd[c as usize],
         (&mh[0 as usize]) as u64, MSG_DONTWAIT)
+    // DREI ANTWORTEN, UND SIE BEDEUTEN VERSCHIEDENES:
+    //
+    //   n < 0   (-EAGAIN)  nichts da, der Client lebt. Weitermachen.
+    //   n == 0             DATEIENDE -- das Gegenende ist WEG. Der
+    //                      Client hat sich beendet oder ist
+    //                      abgestuerzt; fuer diesen Server ist das
+    //                      dasselbe, und das ist genau richtig: ein
+    //                      geschlossener Socket ist ein geschlossener
+    //                      Socket, ob mit Absicht oder nicht. Damit
+    //                      stimmt der Zaehler auch bei einem Absturz.
+    //   n > 0              Oktette.
+    //
+    // Die erste Fassung gab fuer alle drei dieselbe Null zurueck. Der
+    // Zaehler haette damit nie bemerkt, dass ein Client gegangen ist,
+    // und der Bedarfsserver waere nie von selbst beendet worden.
     if n > 0xFFFFFFFFFFFF0000 {
+        return 0
+    }
+    if n == 0 {
+        // Aufraeumen: der Platz wird frei, der Deskriptor geschlossen.
+        c_used[c as usize] = 0
+        ulib.sys(SYS_CLOSE, c_fd[c as usize], 0, 0)
+        var s_bye: [u8; 22] = "wayd: Client gegangen\0"
+        ulib.say((&s_bye[0 as usize]) as u64)
+        ulib.nl()
         return 0
     }
     c_inlen[c as usize] = have + n
@@ -1038,27 +1071,86 @@ fn u_start(args: u64) -> u64 {
     // Wieviele Umlaeufe, bevor das Programm von selbst endet. Ohne
     // Grenze liefe die Abnahme in das Zeitlimit von QEMU statt eine
     // Zahl zu drucken.
+    // Wieviele Umlaeufe im Dauerbetrieb, bevor das Programm von selbst
+    // endet. Im Bedarfsbetrieb zaehlt statt dessen die Leerlaufzeit
+    // unten.
+    var leer: u64 = 0
+    // Die Leerlaufzeit laesst sich als VIERTES Argument setzen
+    // (`wayd <pfad> <fd> <umlaeufe>`) -- die Abnahme braucht eine
+    // kurze, der Alltag die lange Vorgabe.
+    var leer_max: u64 = LEER_MAX
+    if ulib.arg_count(args) > 3 {
+        let l3: u64 = zahl_von(ulib.arg_at(args, 3))
+        if l3 != 0 {
+            leer_max = l3
+        }
+    }
+    // Im DAUERBETRIEB ist das zweite Argument die Zahl der Umlaeufe,
+    // im BEDARFSBETRIEB der geerbte Deskriptor. Auseinandergehalten
+    // werden sie unten an der Groesse: ein Deskriptor dieses Systems
+    // ist kleiner als 16 (file.MAX_FD), eine Rundenzahl ist gross.
     var runden: u64 = 2000
     if ulib.arg_count(args) > 2 {
-        runden = zahl_von(ulib.arg_at(args, 2))
+        let zwei: u64 = zahl_von(ulib.arg_at(args, 2))
+        if zwei >= 16 {
+            runden = zwei
+        }
     }
 
-    ulib.sys(SYS_UNLINK, path, 0, 0)
-    let alen: u64 = set_sockpath(path)
-
-    let ls: u64 = ulib.sys(SYS_SOCKET, AF_UNIX, SOCK_STREAM, 0)
-    if ls > 0xFFFFFFFFFFFF0000 {
-        ulib.say((&s_fail[0 as usize]) as u64)
-        ulib.nl()
-        return 1
+    // ================================================ BEDARFSSTART
+    //
+    // ZWEI BETRIEBSARTEN, und die zweite ist die, die Justin am
+    // 14.09.2026 verlangt hat:
+    //
+    //   wayd <pfad>            der Server bindet SELBST. Das ist der
+    //                          Dauerbetrieb -- gut zum Messen, schlecht
+    //                          als Vorgabe (204 KiB fuer nichts).
+    //   wayd <pfad> <fd>       der Socket ist SCHON GEBUNDEN und kommt
+    //                          von `/bin/waydctl`. Der Waechter hat ihn
+    //                          angelegt, hoert darauf und hat uns mit
+    //                          `fork` gestartet -- deshalb ist der
+    //                          Deskriptor noch da (kernel/file.fi,
+    //                          inherit_task gibt ALLE weiter, waehrend
+    //                          `elf.spawn` nur 0/1/2 gibt).
+    //
+    // Im zweiten Fall wird NICHT gebunden: der Pfad gehoert dem
+    // Waechter, und ein zweites `bind` darauf gaebe -EADDRINUSE.
+    var ls: u64 = 0
+    var geerbt: bool = false
+    // DAS ZWEITE ARGUMENT, und die Zaehlung faengt bei null an:
+    // argv[0] ist der Programmname, argv[1] der Pfad, argv[2] der
+    // geerbte Deskriptor. Die erste Fassung sah bei 3 nach und fand
+    // deshalb nie etwas -- `wayd` band selbst, der Pfad gehoerte aber
+    // dem Waechter, und das Ergebnis war "bind geht nicht", dreimal je
+    // Sekunde. Der Waechter tat dabei alles richtig.
+    //
+    // Eine 0 gilt NICHT: Deskriptor 0 ist die Standardeingabe, und wer
+    // die als Lauschsocket uebergibt, hat sich vertan.
+    if ulib.arg_count(args) > 2 {
+        let fdarg: u64 = zahl_von(ulib.arg_at(args, 2))
+        if fdarg > 2 && fdarg < 16 {
+            ls = fdarg
+            geerbt = true
+        }
     }
-    let br: u64 = ulib.sys4(SYS_BIND, ls, (&sa[0 as usize]) as u64, alen, 0)
-    if br > 0xFFFFFFFFFFFF0000 {
-        ulib.say((&s_bindf[0 as usize]) as u64)
-        ulib.nl()
-        return 1
+    if !geerbt {
+        ulib.sys(SYS_UNLINK, path, 0, 0)
+        let alen: u64 = set_sockpath(path)
+        ls = ulib.sys(SYS_SOCKET, AF_UNIX, SOCK_STREAM, 0)
+        if ls > 0xFFFFFFFFFFFF0000 {
+            ulib.say((&s_fail[0 as usize]) as u64)
+            ulib.nl()
+            return 1
+        }
+        let br: u64 = ulib.sys4(SYS_BIND, ls,
+            (&sa[0 as usize]) as u64, alen, 0)
+        if br > 0xFFFFFFFFFFFF0000 {
+            ulib.say((&s_bindf[0 as usize]) as u64)
+            ulib.nl()
+            return 1
+        }
+        ulib.sys(SYS_LISTEN, ls, 4, 0)
     }
-    ulib.sys(SYS_LISTEN, ls, 4, 0)
     ulib.say((&s_start[0 as usize]) as u64)
     ulib.say(path)
     ulib.nl()
@@ -1118,6 +1210,45 @@ fn u_start(args: u64) -> u64 {
                 }
             }
             c = c + 1
+        }
+        // ============================ DIE LEERLAUFUHR DES BEDARFSSTARTS
+        //
+        // Der Server zaehlt seine Clients. Faellt die Zahl auf null,
+        // laeuft eine Uhr; laeuft sie ab, beendet er sich. Der Waechter
+        // haelt den Socket weiter, also startet der naechste Client ihn
+        // von selbst wieder.
+        //
+        // WARUM NICHT SOFORT, wenn der letzte geht: ein Programm, das
+        // neu startet (oder ein Nutzer, der ein Fenster schliesst und
+        // gleich das naechste oeffnet), wuerfe sonst bei jedem Mal einen
+        // Prozess weg und legte einen neuen an. Die Wartezeit ist der
+        // Preis dafuer, dass das nicht passiert, und sie ist der
+        // einzige Zeitraum, in dem dieser Server ohne Grund lebt.
+        //
+        // Gezaehlt wird in UMLAEUFEN, nicht in Sekunden: ein Umlauf ist
+        // ein YIELD, und wie lange der dauert, haengt an der Maschine.
+        // `leer` wird deshalb aus der Zahl der Umlaeufe abgeleitet, die
+        // der Aufrufer mitgibt.
+        if geerbt {
+            var offen: u64 = 0
+            var q: u64 = 0
+            while q < MAX_CLIENTS {
+                if c_used[q as usize] != 0 {
+                    offen = offen + 1
+                }
+                q = q + 1
+            }
+            if offen == 0 && n_conn != 0 {
+                leer = leer + 1
+                if leer >= leer_max {
+                    var s_idle: [u8; 31] = "wayd: kein Client mehr -- Ende\0"
+                    ulib.say((&s_idle[0 as usize]) as u64)
+                    ulib.nl()
+                    n = runden
+                }
+            } else {
+                leer = 0
+            }
         }
         ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
         n = n + 1
