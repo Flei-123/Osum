@@ -683,12 +683,12 @@ bootet sechs Laeufe, ruft die beiden Modullaeufer, legt die Bilder nach
 Mitschnitten.
 
 Stand dieses Papiers — **ein** voller Lauf, KVM, **Exitcode 0**,
-**14.09.2026, 21:08 UTC**, Arbeitsstand `a19e2ab` auf `wmplugin`:
+**14.09.2026, 21:31 UTC**, Arbeitsstand `1027ca2` auf `wmplugin`:
 
 ```
 REGEL:  41 bestanden, 0 gescheitert     (tools/wmplug/regel.sh)
 WIDGET: 36 bestanden, 0 gescheitert     (tools/wmplug/widget.sh)
-WMPLUG: 207 bestanden, 0 gescheitert    (die Summe, die beiden inbegriffen)
+WMPLUG: 208 bestanden, 0 gescheitert    (die Summe, die beiden inbegriffen)
 ```
 
 Die drei Zahlen stammen aus **demselben** Aufruf von

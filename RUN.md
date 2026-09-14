@@ -168,13 +168,13 @@ vergeblich.
 **EIN Lauf, drei Zahlen.** Sie stammen nicht aus drei Sitzungen, sondern
 aus demselben `bash tools/wmplug/run.sh`: die beiden Modullaeufer werden
 darin gerufen, ihre Summen gehen in die Gesamtzahl ein. Herkunft:
-**14.09.2026, 21:08 UTC**, diese Maschine mit KVM, **Exitcode 0**,
-Arbeitsstand `a19e2ab` auf dem Zweig `wmplugin`.
+**14.09.2026, 21:31 UTC**, diese Maschine mit KVM, **Exitcode 0**,
+Arbeitsstand `1027ca2` auf dem Zweig `wmplugin`.
 
 ```
 REGEL:  41 bestanden, 0 gescheitert     (tools/wmplug/regel.sh)
 WIDGET: 36 bestanden, 0 gescheitert     (tools/wmplug/widget.sh)
-WMPLUG: 207 bestanden, 0 gescheitert    (die Summe, inklusive der beiden)
+WMPLUG: 208 bestanden, 0 gescheitert    (die Summe, inklusive der beiden)
 ```
 
 Dasselbe Zahlentripel steht in `docs/RUNDE-WMPLUGIN.md` Abschnitt 12 —
