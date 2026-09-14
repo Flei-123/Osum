@@ -213,9 +213,34 @@ und `instkern`, und `dualcli` ruft sie in derselben Reihenfolge wie das
 Fenster. Eine Zusage, die nur über die Oberfläche prüfbar ist, fällt
 genau dann aus, wenn man sie am dringendsten braucht.
 
-Was daraus folgt, ehrlich gesagt: **die neue Oberfläche ist übersetzt,
-`check-ui.sh` ist grün, aber sie ist nicht im Bild gemessen.** Die
-Maschine dahinter ist es.
+**Nachtrag, und er korrigiert den Absatz darüber teilweise:** die
+Ursache ist gefunden. Der Fensterserver läuft auf diesem Wirt **nur mit
+`desk wmshell`** in der Kommandozeile; `wmhold`+`wighalt` allein — die
+Kombination, die `tools/install/abnahme.sh` benutzt — genügt hier nicht.
+Mit `desk wmshell` steht das Fenster, und es ist fotografiert
+(`40-fenster-zwei-reiter.png`, `tools/dual/fensterprobe.sh`):
+
+```
+installer: argc=2 installer zeig
+installer: ready n=0
+installer: rect id=0 kind=1 ...   <- die Ueberschrift
+installer: rect id=1 kind=6 ...   <- die Plattenliste (Tabelle)
+installer: rect id=2 kind=7 ...   <- DIE REITER
+installer: rect id=6,7 kind=1     <- die beiden Zeilen darunter
+installer: rect id=8,9 kind=2     <- die beiden Knoepfe
+```
+
+Im Bild stehen „OrientOS installieren", „Auf welche Platte soll
+OrientOS?", **„Ganze Platte" und „Daneben installieren"** nebeneinander,
+und unten „Neu suchen" / „Installieren".
+
+**Was weiterhin NICHT gemessen ist**, und das gehört dazu: `ready n=0` —
+in diesem Aufbau findet das Fenster **keine Platte** (`ata: skipped`),
+also ist die **Partitionsansicht mit echten Daten nie im Bild
+gewesen**. Sie ist übersetzt, ihre Daten kommen nachweislich richtig aus
+`dualkern` (Abschnitt 5.2 zeigt dieselben Zahlen auf der Leitung), aber
+das Bild dazu fehlt. Außerdem legt `wmshell` den Starter über das
+Fenster; der Klick, der ihn wegräumen soll, trifft nicht zuverlässig.
 
 ### 4.4 `script=` kommt nur an, wenn init nicht ins Ziel `grafik` startet
 
@@ -295,6 +320,7 @@ Der zweite Eintrag, mit der Pfeiltaste gewählt wie von einem Menschen:
 | `20-orientos-von-der-platte.png` | der Schreibtisch, aus der neuen Partition |
 | `25-zweiter-eintrag-gewaehlt.png` | der zweite Eintrag ist gewählt |
 | `30-kettenstart.png` | der fremde Bootmanager läuft |
+| `40-fenster-zwei-reiter.png` | das Installationsfenster mit **beiden Reitern** |
 
 ---
 
@@ -304,9 +330,11 @@ Der zweite Eintrag, mit der Pfeiltaste gewählt wie von einem Menschen:
   80 MiB nicht messbar, und ein Schreibversuch dahinter schlägt **still**
   fehl. Das ist der nächste sinnvolle Schritt, und er ist wichtiger als
   alles andere auf dieser Liste.
-* **Die neue Oberfläche ist nicht im Bild gemessen** (4.3). Sie
-  übersetzt, `check-ui.sh` ist grün, die Maschine dahinter ist gemessen
-  — das Fenster selbst nicht.
+* **Die Partitionsansicht ist nicht im Bild gemessen** (4.3). Das
+  Fenster steht und die beiden Reiter sind fotografiert, aber in diesem
+  Aufbau findet es keine Platte (`ready n=0`), also war die Liste der
+  fremden Partitionen nie auf dem Schirm. Ihre Zahlen sind auf der
+  seriellen Leitung gemessen, das Bild fehlt.
 * **Kein NTFS.** Die Datenpartition der Testplatte ist FAT; ein echtes
   Windows hat NTFS. Für diese Runde ist das gleichgültig — die
   Partition wird nie angefasst, nur ihre Prüfsumme verglichen —, aber
