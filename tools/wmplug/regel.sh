@@ -100,13 +100,13 @@ python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
 
 BASE="gfx wm wig desk wmhold wiglong nokbd nosched noproc nofs nostart wmplug"
 RC=0
-lauf() { # name wigapp-argumente
-    local name=$1 wa=$2
+lauf() { # name wigapp-argumente [zusatzwoerter]
+    local name=$1 wa=$2 extra=${3:-}
     local sock="$TMPD/mon-$name.sock" out="$TMPD/$name.txt" ppm="$TMPD/$name.ppm"
     rm -f "$out" "$ppm" "$sock"
     cp -f "$TMPD/disk.img" "$TMPD/live-$name.img"
     timeout 240 $QEMU_X86 -kernel "$TMPD/k.mb" -m 256 \
-        -append "$BASE wigapp=/bin/plugregel,$wa" \
+        -append "$BASE $extra wigapp=/bin/plugregel,$wa" \
         -serial "file:$out" -display none -no-reboot \
         -vga std -global VGA.edid=off -monitor "unix:$sock,server,nowait" \
         -drive "file=$TMPD/live-$name.img,format=raw,if=ide,index=0" \
@@ -173,7 +173,18 @@ else
     grep -a 'wm: win .*Rechner' "$TMPD/ohne.klar" | sed 's/^/        /'
 fi
 
-echo "== 5. die zwei Fotos, maschinell auseinandergehalten =="
+echo "== 5. die kurze Frist: schlaeft das Plugin zu lange? =="
+# `plugfrist` setzt die Frist des Kerns von 50 auf 3 Ticks -- 30
+# Millisekunden. Die Hauptschleife holt alle 10 ms ab; sie muss das also
+# auch dann ueberstehen, wenn der Kehrbesen dreimal so scharf gestellt
+# ist wie im Betrieb. Faellt diese Zusage, schlaeft die Schleife zu lang.
+lauf kurz "recht,demo" "plugfrist"
+[ "$RC" = 21 ] && ok "der Kern beendet sich sauber (21)" || bad "Exitcode $RC statt 21"
+has "$TMPD/kurz.klar" "frist=3" "die Frist steht auf 3 Ticks (30 ms)"
+hasnot "$TMPD/kurz.klar" "wmplug: unreg regel"     "und das Plugin wird trotzdem nicht wegen Frist hinausgeworfen"
+has "$TMPD/kurz.klar" "x=230 y=70 w=340 h=430 flaeche=2 sichtbar=1"     "die Regel greift auch unter der kurzen Frist"
+
+echo "== 6. die zwei Fotos, maschinell auseinandergehalten =="
 for f in mit ohne; do
     [ -s "$TMPD/$f.ppm" ] && ok "Foto $f.ppm ($(python3 tools/gfx/checkshot.py groesse "$TMPD/$f.ppm"))" \
         || bad "kein Foto fuer den Lauf $f"
