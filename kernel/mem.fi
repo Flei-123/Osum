@@ -103,6 +103,7 @@ import arch.arch
 
 export {
     scan, frame_alloc, frame_free, frame_run, frame_free_run, frames_free,
+    frame_alloc_user, reserve_init,
     // ---- round MEM ----
     bitmap_octets, mapped_gib, frames_total, stress, probe_high,
     heap_init, kalloc, kfree, heap_blocks,
@@ -595,6 +596,70 @@ fn frame_alloc(state: u64) -> u64 {
     let r: u64 = frame_alloc_inner(state)
     unlock(state, flags)
     return r
+}
+
+// ==================================================== RUNDE SPEICHERDRUCK
+//
+// DIE RESERVE (K-002). `frame_alloc` oben bleibt, wie es war, und ist
+// ab hier der Weg DES KERNS: er darf bis auf den letzten Rahmen
+// zuteilen, denn er ist derjenige, der den Notfall behandeln muss.
+//
+// `frame_alloc_user` ist der Weg fuer alles, was einem Nutzerprozess
+// gehoert. Er hoert RESERVE_FRAMES Rahmen frueher auf. Der Unterschied
+// zwischen den beiden Funktionen ist die ganze Reserve -- es braucht
+// keinen zweiten Vorrat und keine eigene Liste, nur eine Grenze, die
+// der eine sieht und der andere nicht.
+//
+// WARUM DAS DIE REIHENFOLGE RETTET. Ohne die Grenze nimmt der Fresser
+// auch den letzten Rahmen; der Kern merkt das erst, wenn er selbst
+// einen braucht -- beim Melden, beim Synchronisieren, beim Abraeumen --
+// und steht dann ohne da. Mit ihr sind, wenn der Fresser die Absage
+// bekommt, noch RESERVE_FRAMES Rahmen uebrig, die nur der Kern sieht.
+//
+// Die Zahl wird in `reserve_init` gesetzt und ist ein Anteil des
+// Speichers mit Ober- und Untergrenze: auf kleinen Rechnern darf die
+// Reserve nicht den halben Speicher fressen, auf grossen muss sie
+// trotzdem fuer eine Handvoll Seitentabellen reichen.
+fn frame_alloc_user(state: u64) -> u64 {
+    let flags: u64 = lock(state)
+    let res: u64 = kstate.get(state, kstate.RESERVE_FRAMES)
+    if frames_free(state) <= res {
+        // ABGEWIESEN, UND ZWAR GEZAEHLT. Diese Zahl ist der Beleg
+        // dafuer, dass die Reserve wirklich gegriffen hat.
+        kstate.set(state, kstate.RESERVE_HITS,
+            kstate.get(state, kstate.RESERVE_HITS) + 1)
+        unlock(state, flags)
+        return 0
+    }
+    let r: u64 = frame_alloc_inner(state)
+    unlock(state, flags)
+    return r
+}
+
+// Wie viele Rahmen der Kern fuer sich behaelt. Ein Zweiundfuenfzigstel
+// des Speichers, mindestens 64 Rahmen (256 KiB) und hoechstens 512
+// (2 MiB).
+//
+// DIE UNTERGRENZE IST GEMESSEN, NICHT GERATEN: eine Seitentabelle ist
+// ein Rahmen, und ein Prozess abzuraeumen kostet im schlimmsten Fall
+// eine Handvoll davon, dazu der Puffer fuers Melden und was das
+// Dateisystem beim Synchronisieren anfasst. 64 Rahmen sind dafuer
+// reichlich; weniger waere geraten.
+fn reserve_init(state: u64) {
+    var n: u64 = kstate.get(state, kstate.BITMAP_FRAMES) / 52
+    if n < 64 {
+        n = 64
+    }
+    if n > 512 {
+        n = 512
+    }
+    // Die Gegenprobe: mit `noreserve` bleibt der Vorrat leer, und der
+    // Kern verhaelt sich wie vor dieser Runde.
+    if kstate.mode_on(state, kstate.M_NORESERVE) {
+        n = 0
+    }
+    kstate.set(state, kstate.RESERVE_FRAMES, n)
+    kstate.set(state, kstate.RESERVE_HITS, 0)
 }
 
 // ROUND MEM: WHERE THE SEARCH STARTS.
