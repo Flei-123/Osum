@@ -1,0 +1,118 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/zeile.fi -- EIN SCHREIBRUF JE VOLLSTAENDIGER ZEILE.
+//
+// GEMESSENER BEFUND (Runde WMPLUGIN, Bild 07 und der Mitschnitt dazu):
+// die Leiste und die Plugins schrieben ihre Meldungen STUECKWEISE --
+// `say(marke)`, `sayn(x)`, `say(" y=")`, ... jedes Stueck ein eigener
+// `write`-Ruf. Zwischen zwei Stuecken darf jeder andere Prozess und der
+// Kern selbst schreiben, und dann steht auf der Leitung wirklich:
+//
+//     taskbar: field clock x=6wmplug: unreg uhr grund=4 ...
+//     44 y=4 w=60 h=24
+//
+// Eine Zusage, die `taskbar: field clock x=644` sucht, ist dann rot,
+// obwohl das Programm genau das gesagt hat. Die Ursache ist nicht die
+// Leitung, sondern die STUECKELUNG: wer eine Zeile in zwoelf Rufen
+// hinausgibt, gibt zwoelf Gelegenheiten zum Dazwischenfunken.
+//
+// Also sammelt dieses Modul eine Zeile im Speicher und gibt sie mit
+// EINEM `write` hinaus, Zeilenumbruch inbegriffen. Mehr ist es nicht --
+// und mehr braucht es nicht: ein einzelner Schreibruf traegt in
+// `io.write_all` genau einen Weg durch den Kern, und was danach kommt,
+// faengt hinter dem Umbruch an.
+//
+// GEBRAUCH (dieselbe Reihenfolge wie vorher, nur durch dieses Modul):
+//
+//     zeile.t(marke)      Text anhaengen
+//     zeile.n(v)          Zahl anhaengen (Vorzeichen wie ulib.sayn)
+//     zeile.u(v)          Zahl ohne Vorzeichen
+//     zeile.c(42)         ein Oktett
+//     zeile.nl()          Zeile abschliessen UND hinausgeben
+//
+// Wer mitten in einer Zeile aufhoert (ein Programm, das abstuerzen
+// soll), verliert sie -- darum steht `zeile.spuel()` fuer den Fall,
+// dass eine unfertige Zeile trotzdem heraus muss.
+//
+// KEIN ZWEITER AUSGABEWEG: die Oktette gehen durch `ulib.put`, also
+// durch dasselbe `write(1, ...)` wie vorher.
+
+profile kernel
+
+import ulib
+import libc.text
+
+export { t, n, u, c, nl, spuel, laenge, MAX }
+
+// 240 Oktette. Die laengste gemessene Zeile der Leiste
+// (`taskbar: field noti x=... y=... w=... h=... lines=...`) ist 62
+// Oktette lang; 240 laesst Luft fuer das Vierfache und bleibt eine
+// Seite weit unter dem Stapel eines Ring-3-Programms.
+const MAX: u64 = 240
+
+static mut buf: [u8; 248] = [0 as u8; 248]
+static mut n_at: u64 = 0
+
+fn put1(ch: u64) {
+    // IST DIE ZEILE VOLL, GEHT SIE RAUS -- aber als GANZER Ruf. Lieber
+    // eine zu lange Zeile in zwei Stuecken als ein stiller Verlust:
+    // wer eine Meldung baut, die nicht in den Puffer passt, soll sie
+    // im Mitschnitt finden und dann kuerzen.
+    if n_at >= MAX {
+        spuel()
+    }
+    __mmio_write8(((&buf[0 as usize]) as u64 + n_at) as *mut u8, ch as u8)
+    n_at = n_at + 1
+}
+
+fn t(p: u64) {
+    var i: u64 = 0
+    while *((p + i) as *mut u8) != 0 as u8 {
+        put1((*((p + i) as *mut u8)) as u64)
+        i = i + 1
+    }
+}
+
+fn zahl(v: u64, signed: bool) {
+    var z: [u8; 26] = [0 as u8; 26]
+    let m: u64 = text.digits(v, (&z[0]) as u64, signed)
+    var i: u64 = 0
+    while i < m {
+        put1((*(((&z[0]) as u64 + i) as *mut u8)) as u64)
+        i = i + 1
+    }
+}
+
+fn n(v: u64) {
+    zahl(v, true)
+}
+
+fn u(v: u64) {
+    zahl(v, false)
+}
+
+fn c(ch: u64) {
+    put1(ch)
+}
+
+fn laenge() -> u64 {
+    return n_at
+}
+
+// Was schon im Puffer steht, in EINEM Ruf hinaus -- ohne Umbruch.
+fn spuel() {
+    if n_at == 0 {
+        return
+    }
+    let m: u64 = n_at
+    n_at = 0
+    let _w: u64 = ulib.put((&buf[0]) as u64, m)
+}
+
+// Die Zeile abschliessen: der Umbruch gehoert IN denselben Ruf, sonst
+// waere genau er die Stelle, an der eine fremde Zeile einhaekelt.
+fn nl() {
+    put1(10)
+    let m: u64 = n_at
+    n_at = 0
+    let _w: u64 = ulib.put((&buf[0]) as u64, m)
+}
