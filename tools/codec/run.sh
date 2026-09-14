@@ -370,9 +370,12 @@ fi
 # 7c. ABGESCHNITTENE Stroeme. Keiner darf haengen, keiner darf
 #     abstuerzen -- und wer ein Bild liefert, muss es richtig liefern.
 echo "== 7c. abgeschnittene Stroeme =="
-SRC="$MED/i_sd.264"
-G=$(stat -c%s "$SRC")
+# ZWEI Quellen: ein Strom mit EINEM Slice je Bild und einer mit VIER.
+# Der zweite kann mitten in einem halb dekodierten Bild abbrechen --
+# ein Zustand, den der erste gar nicht erreichen kann.
 kurz_ok=0; kurz_bad=0
+for SRC in "$MED/i_sd.264" "$MED/slices.264"; do
+G=$(stat -c%s "$SRC")
 for teil in 1 2 3 5 8 13 21 34 55 89; do
     n=$((G * teil / 100))
     head -c "$n" "$SRC" > "$TMPD/kurz.264"
@@ -391,10 +394,12 @@ for teil in 1 2 3 5 8 13 21 34 55 89; do
     r=$?
     if [ "$r" = 21 ]; then kurz_ok=$((kurz_ok+1)); else
         kurz_bad=$((kurz_bad+1))
-        printf '        %d%% (%d Oktette): rc=%s\n' "$teil" "$n" "$r"
+        printf '        %s %d%% (%d Oktette): rc=%s\n' \
+            "$(basename "$SRC")" "$teil" "$n" "$r"
     fi
 done
-num "abgeschnittene Stroeme, die sauber enden (von 10)" "$kurz_ok" eq 10
+done
+num "abgeschnittene Stroeme, die sauber enden (von 20)" "$kurz_ok" eq 20
 num "abgeschnittene Stroeme, die haengen oder abstuerzen" "$kurz_bad" eq 0
 
 # 7d. VERFAELSCHTE Oktette. Dasselbe in Grausam: einzelne Bits kippen.
