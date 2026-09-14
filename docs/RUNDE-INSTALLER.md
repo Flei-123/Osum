@@ -240,11 +240,14 @@ wiedererkennt.
 
 ## 5. Was offen bleibt
 
-* **Der Zielpfad der EFI-Partition ist `/dev/hda1` fest verdrahtet** —
-  in der Vorlage wie hier. Eine Installation auf `/dev/hdb` schreibt GPT
-  und Wurzel richtig und hängt danach die falsche EFI-Partition ein. Die
-  Liste zeigt heute nur Platten, die lesbar sind; sie zeigt sie aber
-  alle, und zwei davon sind auswählbar.
+* **Auf ein zweites Laufwerk ist nicht gemessen.** Der Name der
+  EFI-Partition wird seit dieser Runde aus dem gewählten Gerät *gebaut*
+  (`/dev/hdb` → `/dev/hdb1`) statt fest zu stehen — der Weg dafür ist im
+  Kern da (`source_dev` in `kernel/sys.fi` nimmt die Ziffer hinter dem
+  Namen als Partitionsnummer). Gemessen ist aber nur die Installation
+  auf `/dev/hda`; ein Lauf mit zwei Platten, bei dem die zweite das Ziel
+  ist, fehlt. Bis dahin ist das eine begründete Erwartung und kein
+  Beleg.
 * **Die Fortschrittsanzeige steht still, während kopiert wird.** Die
   Installation läuft in einem Zug und nicht häppchenweise zwischen zwei
   Ereignissen — Absicht (eine halb geschriebene Partitionstafel ist ein
