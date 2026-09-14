@@ -189,6 +189,17 @@ BEREICHE = [
     # RUNDE HOTPLUG -- die Tafel der Wechseldatentraeger (wechsel.fi).
     ("WECHSEL",    "kstate.fi", "WECHSEL_OFF",    "WECHSEL_MAX"),
     ("VGPU",       "kstate.fi", "VGPU_OFF",       "VGPU_MAX"),
+    # ---- Runde WAYLAND: der lokale Socket und der geteilte Speicher ----
+    ("USOCK",      "unixsock.fi", "USOCK_OFF",   "USOCK_MAX * USOCK_BYTES"),
+    ("UNAME",      "unixsock.fi", "UNAME_OFF",   "UNAME_MAX * UNAME_BYTES"),
+    ("UCNT",       "unixsock.fi", "UCNT_OFF",    "0x40"),
+    ("USHM",       "unixsock.fi", "USHM_OFF",    "USHM_MAX * USHM_BYTES"),
+    ("USHMPG",     "unixsock.fi", "USHMPG_OFF",  "USHM_MAX * SHM_PAGES_MAX * 8"),
+    # Die zwei Arbeitsplaetze von `sys.fi` fuer den Weg zwischen Ring 3
+    # und dem Ring des Sockets. Sie halten keinen Zustand ueber einen
+    # Systemaufruf hinaus -- aber sie belegen kdata, also stehen sie hier.
+    ("WLSCRATCH",  "sys.fi",      "WL_SCRATCH",  "0x1000"),
+    ("WLPATH",     "sys.fi",      "WL_PATH",     "0x1000"),
     # RUNDE OFS3: die Pfadpuffer des Dateisystems.  Sie sind hier ein
     # EIGENER Bereich und kein Versatz -- die zwei Seiten gehoeren
     # dieser Runde allein, und genau das soll die Karte nachrechnen.
@@ -566,7 +577,11 @@ def main():
               # RUNDE HID -- der Zerleger, der Eingabeweg und I2C-HID.
               "hidrep.fi", "hidin.fi", "i2chid.fi",
               # RUNDE GRAFIK-1 -- der Software-Rasterer.
-              "r3dsoft.fi"):
+              "r3dsoft.fi",
+              # RUNDE WAYLAND -- der lokale Socket und der geteilte
+              # Speicher. Fuenf Bereiche ab 0xF3000; ohne diese Zeile
+              # pruefte die Karte sie gar nicht.
+              "unixsock.fi", "sys.fi"):
         # RUNDE ARM: die Maschine hat seit dem Trennschnitt ein eigenes
         # Verzeichnis (`kernel/arch/x86_64/`).  `hv.fi` liegt dort, und
         # diese Schleife hat es vorher schlicht nicht mehr gefunden --
