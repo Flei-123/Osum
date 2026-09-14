@@ -42,6 +42,12 @@ profile kernel
 
 import kstate
 import serial
+// WARUM DIESES MODUL DEN PLANER KENNT: ein Plugin, das abstuerzt, sagt
+// es nicht ab. Der Kern muss selber nachsehen, ob der Prozess hinter
+// einem Platz noch lebt -- sonst bleibt der Platz ewig belegt und die
+// Kuerzel darin fuer immer vergeben. `sched.fi` bindet dieses Modul
+// NICHT ein, der Abhaengigkeitsgraph bleibt also ein Baum.
+import sched
 
 export {
     WMP_ABI, MAX_PLUG, EV_SLOTS, EV_BYTES,
@@ -54,6 +60,7 @@ export {
     rights_at, set_rights, grant, grant_lookup, grants,
     subscribe, notify, pop, pending, lost_at, grund_at,
     touch, sweep, sweep_at, set_frist, frist, last_at,
+    owner_lebt, reap, farewell_slot, zombie,
     set_key, key_at, key_owner, bar_set, bar_ptr, bar_len,
     plugs, events_in, events_out, kicks, denials, deny,
     desk_set, desk_of, desk_cur, desk_go, desk_dirty, desk_clear,
@@ -107,6 +114,23 @@ const P_GEN: u64 = 0x60 // steigt bei jeder Neubelegung des Platzes
 const P_BARLEN: u64 = 0x68
 const P_NAME: u64 = 0x70 // NAME_LEN Oktette
 const P_BAR: u64 = 0x80 // BAR_LEN Oktette
+// Zwei Felder fuer den Abschied. P_ZEND ist der Tick, an dem der Platz
+// in den Abschiedszustand ging (P_USED == U_ZOMBIE); P_PID die
+// Prozessnummer beim Anmelden -- nur mit ihr laesst sich "der Prozess
+// ist weg" von "der Platz der Aufgabentafel wurde neu vergeben"
+// unterscheiden, und das sind zwei verschiedene Dinge.
+const P_ZEND: u64 = 0xA0
+const P_PID: u64 = 0xA8
+
+// Was in P_USED steht. NICHT nur 0/1: ein abgemeldetes Plugin soll sein
+// letztes Ereignis (E_STOP) noch abholen koennen, sonst waere E_STOP ein
+// Eintrag im Ring, den niemand je liest -- also eine Luege. U_ZOMBIE ist
+// ein Platz OHNE Rechte, OHNE Abonnement und OHNE Kuerzel, aus dem nur
+// noch gelesen werden darf. Der Kehrbesen raeumt ihn weg, sobald der
+// Ring leer ist oder die Frist abgelaufen -- gewartet wird auf niemanden.
+const U_FREI: u64 = 0
+const U_LEBT: u64 = 1
+const U_ZOMBIE: u64 = 2
 
 // die Skalare
 const S_READY: u64 = 0x00
@@ -241,11 +265,23 @@ fn set_ready(state: u64, an: bool) {
     }
 }
 
+// LEBT DIESER PLATZ? Ein Abschiedsplatz (U_ZOMBIE) zaehlt hier
+// ausdruecklich NICHT: er hat keine Rechte mehr, er kann nichts mehr
+// ausloesen, er darf nur noch ausgelesen werden.
 fn valid(state: u64, i: u64) -> bool {
     if i >= MAX_PLUG {
         return false
     }
-    return pg(state, i, P_USED) != 0
+    return pg(state, i, P_USED) == U_LEBT
+}
+
+// Der Platz im Abschied -- der Zustand zwischen "abgemeldet" und
+// "frei".
+fn zombie(state: u64, i: u64) -> bool {
+    if i >= MAX_PLUG {
+        return false
+    }
+    return pg(state, i, P_USED) == U_ZOMBIE
 }
 
 fn owner(state: u64, i: u64) -> u64 {
@@ -319,7 +355,7 @@ fn set_frist(state: u64, t: u64) {
 fn slot_of(state: u64, me: u64) -> u64 {
     var i: u64 = 0
     while i < MAX_PLUG {
-        if pg(state, i, P_USED) != 0 && pg(state, i, P_OWNER) == me {
+        if pg(state, i, P_USED) == U_LEBT && pg(state, i, P_OWNER) == me {
             return i
         }
         i = i + 1
@@ -343,8 +379,8 @@ fn reg(state: u64, me: u64, abi: u64, name: u64, maske: u64) -> u64 {
     }
     var i: u64 = 0
     while i < MAX_PLUG {
-        if pg(state, i, P_USED) == 0 {
-            ps(state, i, P_USED, 1)
+        if pg(state, i, P_USED) == U_FREI {
+            ps(state, i, P_USED, U_LEBT)
             ps(state, i, P_OWNER, me)
             ps(state, i, P_ABI, abi)
             ps(state, i, P_HEAD, 0)
@@ -355,7 +391,17 @@ fn reg(state: u64, me: u64, abi: u64, name: u64, maske: u64) -> u64 {
             ps(state, i, P_KEY, 0)
             ps(state, i, P_BARLEN, 0)
             ps(state, i, P_GEN, pg(state, i, P_GEN) + 1)
+            ps(state, i, P_ZEND, 0)
             ps(state, i, P_LAST, kstate.get(state, kstate.TICKS))
+            // DIE PROZESSNUMMER WIRD MITGESCHRIEBEN, nicht nur der
+            // Platz in der Aufgabentafel: Plaetze werden wiederbenutzt.
+            // Ohne diese Zahl haelt `owner_lebt` den NACHFOLGER eines
+            // abgestuerzten Plugins fuer das Plugin selbst.
+            var pid: u64 = 0
+            if me < kstate.MAX_TASKS {
+                pid = sched.tget(state, me, sched.T_PID)
+            }
+            ps(state, i, P_PID, pid)
             var k: u64 = 0
             while k < NAME_LEN {
                 var c: u64 = 0
@@ -398,10 +444,20 @@ fn reg(state: u64, me: u64, abi: u64, name: u64, maske: u64) -> u64 {
 // ABMELDEN, mit Grund. Der Grund steht auf der Leitung, weil eine
 // Abmeldung ohne Grund im Protokoll nicht von einem Absturz des
 // Fensterservers zu unterscheiden waere.
+//
+// E_STOP IST DAS LETZTE EREIGNIS, und es wird ZUERST eingelegt: danach
+// hat der Platz keine Rechte mehr, und `push_one` traegt nichts mehr
+// ein, was ein Plugin noch missdeuten koennte. Damit es nicht in einen
+// Ring faellt, den niemand mehr oeffnen darf, geht der Platz nicht
+// sofort frei, sondern in den Abschied (U_ZOMBIE): lesen ja, alles
+// andere nein. Der Kehrbesen raeumt ihn weg, sobald der Ring leer ist
+// oder die Frist um ist -- GEWARTET WIRD DABEI AUF NIEMANDEN, der
+// Aufrufer dieser Funktion kehrt sofort zurueck.
 fn unreg(state: u64, i: u64, grund: u64) -> bool {
     if !valid(state, i) {
         return false
     }
+    push_one(state, i, E_STOP, grund, 0, 0)
     var s_u: [u8; 15] = "wmplug: unreg \0"
     var s_g: [u8; 8] = " grund=\0"
     var s_h: [u8; 8] = " holte=\0"
@@ -415,8 +471,8 @@ fn unreg(state: u64, i: u64, grund: u64) -> bool {
     serial.puts((&s_v[0]) as u64)
     serial.dec(pg(state, i, P_LOST))
     serial.nl()
-    ps(state, i, P_USED, 0)
-    ps(state, i, P_OWNER, 0)
+    ps(state, i, P_USED, U_ZOMBIE)
+    ps(state, i, P_ZEND, kstate.get(state, kstate.TICKS))
     ps(state, i, P_MASK, 0)
     ps(state, i, P_RIGHTS, 0)
     ps(state, i, P_KEY, 0)
@@ -483,7 +539,7 @@ fn notify(state: u64, typ: u64, a: u64, b: u64, c: u64) {
     let recht: u64 = ev_right(typ)
     var i: u64 = 0
     while i < MAX_PLUG {
-        if pg(state, i, P_USED) != 0
+        if pg(state, i, P_USED) == U_LEBT
             && (pg(state, i, P_MASK) & (1 << typ)) != 0
             && (recht == 0 || (pg(state, i, P_RIGHTS) & recht) != 0) {
             push_one(state, i, typ, a, b, c)
@@ -511,8 +567,10 @@ fn push_one(state: u64, i: u64, typ: u64, a: u64, b: u64, c: u64) {
     ss(state, S_IN, sg(state, S_IN) + 1)
 }
 
+// Was noch daliegt -- auch fuer einen Platz im Abschied, sonst waere
+// E_STOP fuer den Rufenden unsichtbar.
 fn pending(state: u64, i: u64) -> u64 {
-    if !valid(state, i) {
+    if i >= MAX_PLUG || pg(state, i, P_USED) == U_FREI {
         return 0
     }
     return pg(state, i, P_HEAD) - pg(state, i, P_TAIL)
@@ -522,7 +580,7 @@ fn pending(state: u64, i: u64) -> u64 {
 // Ring 3). Rueckgabe 1 = eines geholt, 0 = keines da. NIE blockierend --
 // hier steht kein `while`, das auf etwas wartet.
 fn pop(state: u64, i: u64, aus: u64) -> u64 {
-    if !valid(state, i) {
+    if i >= MAX_PLUG || pg(state, i, P_USED) == U_FREI {
         return 0
     }
     touch(state, i)
@@ -555,7 +613,102 @@ fn touch(state: u64, i: u64) {
 // und nichts zu tun hat, ist nicht traege, sondern still. Bestraft wird,
 // wer GERUFEN WURDE und nicht kommt.
 fn sweep(state: u64) -> u64 {
-    return sweep_at(state, kstate.get(state, kstate.TICKS))
+    let jetzt: u64 = kstate.get(state, kstate.TICKS)
+    // ERST DIE TOTEN, DANN DIE TRAEGEN. Ein abgestuerztes Plugin hat
+    // meist auch etwas liegen; wer zuerst die Frist prueft, schreibt
+    // "grund=2" (Frist) ueber einen Absturz und verliert damit genau
+    // die Auskunft, wegen der die Zeile da ist.
+    let tot: u64 = reap(state, jetzt)
+    return tot + sweep_at(state, jetzt)
+}
+
+// LEBT DER PROZESS HINTER DIESEM PLATZ NOCH?
+//
+// Drei Fragen, und jede einzelne ist noetig: liegt der Platz ueberhaupt
+// in der Aufgabentafel (ein Selbsttest meldet sich mit einer Nummer an,
+// die es nicht gibt), ist der Eintrag noch belegt und nicht schon
+// Leiche -- und traegt er noch DIESELBE Prozessnummer. Das Letzte ist
+// der Fall, der ohne P_PID unbemerkt bliebe: der Platz wird neu
+// vergeben, und der neue Prozess erbt stillschweigend die Rechte und
+// das Tastenkuerzel des abgestuerzten Plugins.
+fn owner_lebt(state: u64, i: u64) -> bool {
+    let me: u64 = pg(state, i, P_OWNER)
+    if me >= kstate.MAX_TASKS {
+        return false
+    }
+    let z: u64 = sched.tget(state, me, sched.T_STATE)
+    if z == sched.S_FREE || z == sched.S_ZOMBIE {
+        return false
+    }
+    return sched.tget(state, me, sched.T_PID) == pg(state, i, P_PID)
+}
+
+// DIE TOTEN ABHOLEN. Acht Blicke in die Aufgabentafel, kein Warten,
+// keine Rekursion. Ein Plugin, das mit SIGSEGV endet, meldet sich nicht
+// ab -- ohne diese Schleife blieben sein Platz, sein Kuerzel und sein
+// Leistentext fuer immer stehen, und der Schreibtisch truege die Spur
+// eines Programms, das es nicht mehr gibt.
+//
+// Ausserdem raeumt sie die Abschiedsplaetze weg: leerer Ring oder
+// Frist um. Auch das ist kein Warten -- niemand muss den Abschied
+// abholen, er verfaellt.
+fn reap(state: u64, jetzt: u64) -> u64 {
+    if !ready(state) {
+        return 0
+    }
+    let f: u64 = sg(state, S_FRIST)
+    var raus: u64 = 0
+    var i: u64 = 0
+    while i < MAX_PLUG {
+        let z: u64 = pg(state, i, P_USED)
+        if z == U_LEBT && !owner_lebt(state, i) {
+            var s_t: [u8; 21] = "wmplug: tot platz=\0\0\0"
+            var s_p: [u8; 6] = " pid=\0"
+            serial.puts((&s_t[0]) as u64)
+            serial.dec(i)
+            serial.puts((&s_p[0]) as u64)
+            serial.dec(pg(state, i, P_PID))
+            serial.nl()
+            unreg(state, i, G_CRASH)
+            // KEIN ABSCHIED FUER EINEN TOTEN. Der Platz geht sofort
+            // frei, statt auf ein E_STOP zu warten, das niemand mehr
+            // abholt -- und, wichtiger: sonst koennte ein SPAETERER
+            // Prozess auf demselben Platz der Aufgabentafel den Ring
+            // des Abgestuerzten leerlesen.
+            ps(state, i, P_USED, U_FREI)
+            ps(state, i, P_OWNER, 0)
+            ps(state, i, P_PID, 0)
+            ps(state, i, P_HEAD, 0)
+            ps(state, i, P_TAIL, 0)
+            raus = raus + 1
+        } else {
+            if z == U_ZOMBIE
+                && (pg(state, i, P_HEAD) == pg(state, i, P_TAIL)
+                    || jetzt > pg(state, i, P_ZEND) + f) {
+                ps(state, i, P_USED, U_FREI)
+                ps(state, i, P_OWNER, 0)
+                ps(state, i, P_PID, 0)
+                ps(state, i, P_HEAD, 0)
+                ps(state, i, P_TAIL, 0)
+            }
+        }
+        i = i + 1
+    }
+    return raus
+}
+
+// Der Abschiedsplatz eines Prozesses, MAX_PLUG wenn er keinen hat.
+// `sysgui.fi` fragt danach, wenn `slot_of` nichts mehr findet: genau
+// dann will das Plugin sein E_STOP abholen.
+fn farewell_slot(state: u64, me: u64) -> u64 {
+    var i: u64 = 0
+    while i < MAX_PLUG {
+        if pg(state, i, P_USED) == U_ZOMBIE && pg(state, i, P_OWNER) == me {
+            return i
+        }
+        i = i + 1
+    }
+    return MAX_PLUG
 }
 
 // Dieselbe Pruefung mit einer GENANNTEN Uhrzeit. Der Selbsttest braucht
@@ -569,7 +722,7 @@ fn sweep_at(state: u64, jetzt: u64) -> u64 {
     var raus: u64 = 0
     var i: u64 = 0
     while i < MAX_PLUG {
-        if pg(state, i, P_USED) != 0
+        if pg(state, i, P_USED) == U_LEBT
             && pg(state, i, P_HEAD) != pg(state, i, P_TAIL)
             && jetzt > pg(state, i, P_LAST) + f {
             unreg(state, i, G_FRIST)
@@ -594,7 +747,8 @@ fn set_key(state: u64, i: u64, taste: u64, mods: u64) -> bool {
     let w: u64 = (mods << 32) | (taste & 0xFFFFFFFF)
     var k: u64 = 0
     while k < MAX_PLUG {
-        if k != i && pg(state, k, P_USED) != 0 && pg(state, k, P_KEY) == w {
+        if k != i && pg(state, k, P_USED) == U_LEBT
+            && pg(state, k, P_KEY) == w {
             return false
         }
         k = k + 1
@@ -612,7 +766,7 @@ fn key_owner(state: u64, taste: u64, mods: u64) -> u64 {
     let w: u64 = (mods << 32) | (taste & 0xFFFFFFFF)
     var i: u64 = 0
     while i < MAX_PLUG {
-        if pg(state, i, P_USED) != 0 && pg(state, i, P_KEY) == w {
+        if pg(state, i, P_USED) == U_LEBT && pg(state, i, P_KEY) == w {
             return i
         }
         i = i + 1
@@ -723,7 +877,7 @@ fn grant(state: u64, name: u64, rechte: u64) -> bool {
     // ein laufendes Plugin entwaffnen koennen, ohne es zu toeten.
     var i: u64 = 0
     while i < MAX_PLUG {
-        if pg(state, i, P_USED) != 0
+        if pg(state, i, P_USED) == U_LEBT
             && grant_lookup(state, pat(state, i, P_NAME)) == k {
             ps(state, i, P_RIGHTS, rechte & R_ALL)
         }
@@ -806,7 +960,7 @@ fn desk_clear(state: u64) {
 // Zusagen ueber dieses Modul allein, ohne Bildschirm und ohne Ring 3.
 // Ein Bit je Zusage in S_FAIL: man will wissen, WELCHE gefallen ist.
 
-const SELF_MAX: u64 = 10
+const SELF_MAX: u64 = 13
 
 fn selftest_max() -> u64 {
     return SELF_MAX
@@ -901,6 +1055,43 @@ fn selftest(state: u64) -> u64 {
         ok = ok + 1
     } else {
         fail(state, 9)
+    }
+    // 11: ein Kuerzel hat GENAU EINEN Besitzer -- und eine andere
+    //     Modifikatorlage ist ein anderes Kuerzel. Ohne die zweite
+    //     Haelfte dieser Zusage schluckte der Fensterserver F12 auch
+    //     dann, wenn Strg dabei war.
+    let j: u64 = reg(state, 778, WMP_ABI, np, 1 << E_KEY)
+    if j < MAX_PLUG && set_key(state, j, 0x8C, 0)
+        && key_owner(state, 0x8C, 0) == j
+        && key_owner(state, 0x8C, 4) == MAX_PLUG {
+        ok = ok + 1
+    } else {
+        fail(state, 10)
+    }
+    // 12: E_STOP ist das LETZTE Ereignis vor einer Abmeldung, und es
+    //     laesst sich noch abholen. Ein Abschied, den niemand lesen
+    //     kann, waere ein Eintrag im Protokoll und sonst nichts.
+    unreg(state, j, G_USER)
+    var aus2: [u64; 2] = [0; 2]
+    if zombie(state, j) && !valid(state, j)
+        && pop(state, j, (&aus2[0]) as u64) == 1
+        && aus2[0] == E_STOP && ((aus2[1] >> 32) & 0xFFFF) == G_USER {
+        ok = ok + 1
+    } else {
+        fail(state, 11)
+    }
+    // 13: ein Platz, dessen Prozess weg ist, wird ABGEHOLT -- und der
+    //     Platz ist danach wieder frei. 778/779 stehen in keiner
+    //     Aufgabentafel, also ist "weg" hier wahr, ohne dass der
+    //     Selbsttest einen Prozess toeten muesste.
+    let k2: u64 = reg(state, 779, WMP_ABI, np, 0xFF)
+    let vor_k: u64 = kicks(state)
+    if k2 < MAX_PLUG && !owner_lebt(state, k2)
+        && reap(state, 2000) == 1 && !valid(state, k2) && !zombie(state, k2)
+        && kicks(state) == vor_k + 1 {
+        ok = ok + 1
+    } else {
+        fail(state, 12)
     }
 
     let bits: u64 = sg(state, S_FAIL)
