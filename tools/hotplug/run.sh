@@ -1,0 +1,358 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
+# tools/hotplug/run.sh -- DER STICK, DER IM BETRIEB KOMMT UND GEHT.
+#
+#   bash tools/hotplug/run.sh
+#
+# ==================================================================
+# WAS HIER GEMESSEN WIRD, UND WORIN ES SICH VON K17 UNTERSCHEIDET
+# ==================================================================
+#
+# `tools/k17/run.sh` misst einen Stick, DER BEIM START SCHON STECKT.
+# Das misst das Aufzaehlen: Deskriptoren lesen, Endpunkte einrichten,
+# Bloecke lesen. Es misst NICHT den Weg, um den es dieser Runde geht --
+# denn beim Start ist das Dateisystem noch nicht eingehaengt, und ein
+# Mensch steckt einen Stick nicht in einen ausgeschalteten Rechner.
+#
+# Hier kommt der Stick ueber den QEMU-Monitor, WAEHREND DIE MASCHINE
+# LAEUFT:
+#
+#     drive_add 0 id=stk1,if=none,file=...,format=raw
+#     device_add usb-storage,id=devstk1,drive=stk1
+#
+# und geht mit `device_del`. Das ist dieselbe Hardwareaenderung, die
+# eine Hand am Stecker macht.
+#
+# DIE ZUSAGEN:
+#
+#   1. ANSTECKEN IM BETRIEB. Der Stick erscheint, wird erkannt (FAT32
+#      am INHALT, nicht am Typoktett der Partitionstafel) und unter
+#      /medien/usb0 eingehaengt. Gemessen an `wechsel: kommt ... mount=1`
+#      UND daran, dass `ls /medien/usb0` die Datei des Wirts zeigt.
+#   2. SCHREIBEN UND AUSWERFEN. Eine Datei wird auf den Stick
+#      geschrieben, dann `auswerfen`. Danach wird der Stick abgezogen
+#      und DER WIRT liest mit `mtools` nach: die Datei muss da und
+#      VOLLSTAENDIG sein. "Das Schreiben hat keinen Fehler gemeldet"
+#      ist keine Messung -- das ist die Lehre aus K17 Punkt 4.
+#   3. ABZIEHEN OHNE AUSWERFEN. Die Gegenprobe: der Stick verschwindet
+#      mitten im Betrieb. Der Kern darf NICHT stehenbleiben, und die
+#      Einhaengung muss aus der Tafel verschwinden.
+#   4. ZWEI STICKS. Beide gleichzeitig, beide mit eigenem Pfad.
+#   5. EIN UNBEKANNTES DATEISYSTEM wird NICHT eingehaengt und NICHT als
+#      Attrappe in die Tafel gestellt.
+#
+# Gemessen wie in den Runden 59 bis K17: QEMU je Fall, mit Zeitlimit,
+# serielle Ausgabe gegen Erwartungen, Beendigungscode aus
+# `isa-debug-exit` (21 = der Kernel hat sich selbst beendet).
+set -uo pipefail
+cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh
+ROOT=$(pwd)
+export FIRNLIB="$ROOT/lib"
+FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+ULD=kernel/user/user.ld
+BLOCKS=4096
+PROGS="sh cat echo ls cp rm mkdir wc grep head true false ps mount umount auswerfen"
+
+ARB=${HP_ARB:-$(mktemp -d)}
+mkdir -p "$ARB"
+export ARB
+[ -n "${HP_ARB:-}" ] || trap 'rm -rf "$ARB"' EXIT
+
+pass=0
+fail=0
+ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
+bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
+hat() { grep -qaF "$2" "$1" 2>/dev/null && ok "$3" || bad "$3 -- '$2' fehlt"; }
+hat_nicht() {
+    grep -qaF "$2" "$1" 2>/dev/null && bad "$3 -- '$2' steht da und sollte nicht" \
+        || ok "$3"
+}
+num() {
+    if [ -z "${2:-}" ]; then bad "$1: keine Zahl (erwartet $3 $4)"; return; fi
+    if [ "$2" -"$3" "$4" ] 2>/dev/null; then ok "$1: $2"
+    else bad "$1: $2, erwartet $3 $4"; fi
+}
+
+for w in mkfs.vfat mcopy mdir mtype sfdisk qemu-system-x86_64; do
+    command -v "$w" >/dev/null 2>&1 || { echo "HOTPLUG: uebersprungen, $w fehlt"; exit 0; }
+done
+qemu-system-x86_64 -device help 2>&1 | grep -q 'qemu-xhci' || {
+    echo "HOTPLUG: uebersprungen, dieses QEMU kennt qemu-xhci nicht"; exit 0; }
+
+bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || {
+    [ -x "$FIRNC" ] || { echo "HOTPLUG: kein firnc"; exit 1; }; }
+
+# ============================================== 1. bauen
+
+echo "== 1. bauen: Kern, Programme, Wurzelplatte, zwei Sticks =="
+
+KERN="$ARB/k.mb"
+./tools/build-kernel.sh "$KERN" > "$ARB/build.log" 2>&1 \
+    && ok "der Kern steht ($(stat -c%s "$KERN") Oktette)" \
+    || { bad "der Kern laesst sich nicht bauen"; tail -5 "$ARB/build.log"; exit 1; }
+
+as --64 -o "$ARB/crt.o" kernel/user/crt.s 2>/dev/null
+MK=""
+gebaut=0
+for p in $PROGS; do
+    src=kernel/user/$p.fi
+    [ -f "$src" ] || continue
+    # `--defsym=USER_ENTRY=_F0.u_start` ist NICHT wegzulassen: der
+    # Anfang liegt im Modul und heisst dort so, und ohne die Zeile
+    # bindet `ld` ein Programm ohne Einsprung (tools/k17/run.sh macht
+    # es genauso).
+    if "$FIRNC" "$src" -o "$ARB/$p.o" > "$ARB/$p.log" 2>&1 \
+       && ld -T "$ULD" --defsym=USER_ENTRY="_F0.u_start" \
+              -o "$ARB/$p" "$ARB/crt.o" "$ARB/$p.o" 2>>"$ARB/$p.log"; then
+        MK="$MK /bin/$p=$ARB/$p"
+        gebaut=$((gebaut+1))
+    else
+        bad "$p laesst sich nicht bauen"
+        grep -E '^error' "$ARB/$p.log" | head -3 | sed 's/^/        /'
+    fi
+done
+num "Programme gebaut" "$gebaut" ge 15
+
+# DIE WURZELPLATTE. /medien MUSS darin liegen -- ein Einhaengepunkt ist
+# ein Verzeichnis, das es gibt (kernel/vfs.fi, mount_at). Ohne diesen
+# Ordner findet der Stick keinen Platz, und das ist kein Fehler des
+# Hotplugs, sondern einer des Abbilds.
+python3 tools/osum/mkfs.py build "$ARB/root.img" "$BLOCKS" \
+    /bin/ /proc/ /dev/ /mnt/ /usb/ /medien/ $MK > "$ARB/mkfs.log" 2>&1 \
+    && ok "die Wurzelplatte steht: $(tail -1 "$ARB/mkfs.log")" \
+    || { bad "mkfs.py scheitert"; sed 's/^/        /' "$ARB/mkfs.log" | head -5; }
+
+# ZWEI STICKS, beide FAT32 in einer MBR-Tafel, beide mit einer Datei
+# des WIRTS darin. Die Dateien unterscheiden sich, damit ein Lauf, der
+# den falschen Stick liest, nicht zufaellig recht behaelt.
+stick_bauen() { # <datei> <name> <inhalt>
+    local img=$1 name=$2 text=$3
+    rm -f "$img" "$img.part"
+    dd if=/dev/zero of="$img" bs=1M count=48 status=none
+    sfdisk "$img" >/dev/null 2>&1 <<SF
+label: dos
+start=2048, type=c
+SF
+    dd if=/dev/zero of="$img.part" bs=1M count=46 status=none
+    mkfs.vfat -F32 -n "$name" "$img.part" >/dev/null 2>&1
+    printf '%s\n' "$text" > "$ARB/$name.host"
+    mcopy -i "$img.part" "$ARB/$name.host" ::host.txt
+    dd if="$img.part" of="$img" bs=512 seek=2048 conv=notrunc status=none
+    rm -f "$img.part"
+}
+stick_bauen "$ARB/stick1.img" STICK1 "von linux auf den ersten stick"
+stick_bauen "$ARB/stick2.img" STICK2 "und dies ist der zweite"
+[ -s "$ARB/stick1.img" ] && [ -s "$ARB/stick2.img" ] \
+    && ok "zwei FAT32-Sticks mit MBR-Tafel und je einer Datei des Wirts" \
+    || bad "die Stickabbilder fehlen"
+
+# EIN STICK MIT EINEM DATEISYSTEM, DAS DIESER KERN NICHT KANN. Kein
+# NTFS-Werkzeug noetig: ein FAT16 reicht, und `wechsel.fs_erkennen`
+# lehnt es AUSDRUECKLICH ab, statt es einzuhaengen und beim ersten
+# Verzeichnis zu scheitern.
+rm -f "$ARB/fremd.img" "$ARB/fremd.part"
+dd if=/dev/zero of="$ARB/fremd.img" bs=1M count=32 status=none
+sfdisk "$ARB/fremd.img" >/dev/null 2>&1 <<'SF'
+label: dos
+start=2048, type=6
+SF
+dd if=/dev/zero of="$ARB/fremd.part" bs=1M count=30 status=none
+mkfs.vfat -F16 -n FREMD "$ARB/fremd.part" >/dev/null 2>&1
+dd if="$ARB/fremd.part" of="$ARB/fremd.img" bs=512 seek=2048 conv=notrunc status=none
+rm -f "$ARB/fremd.part"
+ok "dazu ein Stick mit FAT16 -- das Dateisystem, das dieser Kern NICHT kann"
+
+# ============================================== der Laeufer
+
+lauf() { # <name> <kommandozeile> <drehbuch> [qemu-args...]
+    local name=$1 app=$2 dreh=$3
+    shift 3
+    cp "$ARB/root.img" "$ARB/live-$name.img"
+    HP_TIMEOUT=${HP_TIMEOUT:-200} ARB="$ARB" \
+        bash tools/hotplug/lauf.sh "$name" "$KERN" "$app" "$dreh" \
+        -drive "file=$ARB/live-$name.img,format=raw,if=ide,index=0" \
+        -device qemu-xhci,id=xhci "$@" > "$ARB/$name.lauf" 2>&1
+    RC=$(sed -n 's/^RC=//p' "$ARB/$name.lauf" | tail -1)
+}
+
+# ============================================== 2. anstecken im Betrieb
+
+echo
+echo "== 2. der Stick kommt, WAEHREND die Maschine laeuft =="
+
+cat > "$ARB/dreh-an.txt" <<EOF
+aufzeile k17: hold
+warte 1
+stecke stk1 $ARB/stick1.img
+aufzeile wechsel: kommt
+warte 2
+EOF
+lauf anstecken "osum usb usbhold vfs gfx nosched noproc" "$ARB/dreh-an.txt"
+S="$ARB/anstecken.txt"
+num "der Kern beendet sich selbst (21)" "${RC:-99}" eq 21
+hat "$S" "usb: msc blocks=" "der Stick wird im Betrieb aufgezaehlt"
+hat "$S" "wechsel: kommt" "die Naht bemerkt ihn"
+hat "$S" "mount=1" "und haengt ihn ein"
+hat "$S" "fat: spc=" "das FAT32 wurde wirklich angelesen"
+# DIE ZAHL, DIE BEWEIST, DASS ES IM BETRIEB WAR: `hotplugs` zaehlt NUR
+# Anschluesse, die sich nach dem Aufzaehlen geaendert haben.
+hp=$(grep -a 'hotplugs=' "$S" | tail -1 | grep -oE 'hotplugs=[0-9]+' | tail -1 | cut -d= -f2)
+num "Anstecken im Betrieb gezaehlt" "${hp:-0}" ge 1
+
+# ============================================== 3. lesen, schreiben, auswerfen
+
+echo
+echo "== 3. die Datei des Wirts lesen, eine eigene schreiben, auswerfen =="
+
+cat > "$ARB/dreh-rw.txt" <<EOF
+aufzeile k17: hold
+warte 1
+stecke stk1 $ARB/stick1.img
+aufzeile wechsel: kommt
+warte 3
+EOF
+lauf schreiben \
+    "osum usb usbhold vfs gfx nosched noproc script=ls /medien/usb0;cat /medien/usb0/host.txt;echo osum-war-hier > /medien/usb0/osum.txt;auswerfen;auswerfen 0;auswerfen" \
+    "$ARB/dreh-rw.txt"
+S="$ARB/schreiben.txt"
+num "der Lauf beendet sich selbst (21)" "${RC:-99}" eq 21
+hat "$S" "host.txt" "ls sieht die Datei, die der WIRT auf den Stick gelegt hat"
+hat "$S" "von linux auf den ersten stick" "und cat liest ihren Inhalt"
+hat "$S" "/medien/usb0" "auswerfen zeigt den Traeger an"
+hat "$S" "ausgeworfen" "und wirft ihn aus"
+
+# DIE EIGENTLICHE MESSUNG: DER WIRT LIEST NACH. Nicht der Kern sagt,
+# dass die Datei da ist -- `mtools` auf dem Wirt sagt es, und `cmp`
+# vergleicht Oktett fuer Oktett. Das ist Punkt 4 aus K17, hier auf das
+# Auswerfen angewandt: wer nicht synchronisiert, verliert genau hier.
+# NACHGELESEN WIRD DER STICK, NICHT DIE WURZELPLATTE. Der erste
+# Entwurf sah in `live-schreiben.img` nach -- das ist die OFS-Platte,
+# auf der /medien liegt, und dort war die Datei natuerlich nicht. Die
+# Zusage war rot, obwohl das Schreiben stimmte; nachgesehen hat sie an
+# der falschen Stelle. Der Stick ist `stick1.img`, und er wird dem Lauf
+# UNVERAENDERT gereicht (kein `cp`) -- genau deshalb steht hier sein
+# Name und nicht der einer Kopie.
+OFF=$((2048*512))
+STK="$ARB/stick1.img"
+if mdir -i "$STK@@$OFF" ::osum.txt > "$ARB/mdir1.txt" 2>&1; then
+    ok "DER WIRT findet die Datei, die Osum geschrieben hat"
+    mtype -i "$STK@@$OFF" ::osum.txt > "$ARB/osum.txt" 2>/dev/null
+    if grep -qa 'osum-war-hier' "$ARB/osum.txt"; then
+        ok "und ihr Inhalt ist vollstaendig ($(tr -d '\r\n' < "$ARB/osum.txt"))"
+    else
+        bad "die Datei ist da, aber ihr Inhalt stimmt nicht: $(head -c 80 "$ARB/osum.txt")"
+    fi
+else
+    bad "DER WIRT findet die geschriebene Datei NICHT"
+    sed 's/^/        /' "$ARB/mdir1.txt" | head -3
+fi
+# Und das Dateisystem muss heil sein -- ein halb geschriebenes FAT
+# faellt hier auf und nicht erst beim naechsten Menschen.
+if command -v fsck.fat >/dev/null 2>&1; then
+    if fsck.fat -n "$STK@@$OFF" > "$ARB/fsck1.txt" 2>&1 \
+       || ! grep -qai 'dirty\|corrupt\|error' "$ARB/fsck1.txt"; then
+        ok "fsck.fat findet nach dem Auswerfen keinen Schaden"
+    else
+        bad "fsck.fat meldet Schaden"; sed 's/^/        /' "$ARB/fsck1.txt" | head -5
+    fi
+fi
+
+# ============================================== 4. abziehen OHNE auswerfen
+
+echo
+echo "== 4. GEGENPROBE: abziehen, ohne auszuwerfen =="
+
+cat > "$ARB/dreh-weg.txt" <<EOF
+aufzeile k17: hold
+warte 1
+stecke stk1 $ARB/stick1.img
+aufzeile wechsel: kommt
+warte 2
+ziehe stk1
+aufzeile wechsel: geht
+warte 2
+EOF
+lauf abziehen "osum usb usbhold vfs gfx nosched noproc" "$ARB/dreh-weg.txt"
+S="$ARB/abziehen.txt"
+num "der Kern UEBERLEBT das Abziehen und beendet sich selbst (21)" "${RC:-99}" eq 21
+hat "$S" "wechsel: geht" "die Naht bemerkt das Abziehen"
+hat_nicht "$S" "panic" "kein Absturz"
+hat_nicht "$S" "EXCEPTION" "keine Ausnahme"
+up=$(grep -a 'unplugs=' "$S" | tail -1 | grep -oE 'unplugs=[0-9]+' | tail -1 | cut -d= -f2)
+num "Abziehen im Betrieb gezaehlt" "${up:-0}" ge 1
+
+# ============================================== 5. zwei Sticks
+
+echo
+echo "== 5. zwei Sticks gleichzeitig -- DIE GRENZE, EHRLICH GEMESSEN =="
+#
+# DIESER ABSCHNITT MISST EINE GRENZE UND KEINEN ERFOLG, und das ist
+# Absicht.
+#
+# `kernel/wechsel.fi` hat acht Plaetze und koennte acht Traeger
+# fuehren. DARUNTER liegt aber eine Schicht, die genau EINEN Stick
+# kennt: `usb.fi` haelt den Massenspeicher in EINER Zelle (`S_MSC`),
+# und `usb.msc_read`/`msc_write` nehmen KEINE Geraetenummer entgegen --
+# sie lesen immer von dem einen. `blk.fi` hat entsprechend genau ein
+# `DEV_USB`.
+#
+# Zwei Sticks werden deshalb BEIDE aufgezaehlt (`devices=2`,
+# `hotplugs=2` -- der USB-Baum kann es), aber der zweite bekommt keinen
+# eigenen Platz: er waere derselbe `DEV_USB`, und die Naht lehnt das
+# ausdruecklich ab ("dev schon in der Tafel"). Die Alternative waere
+# ein zweiter Eintrag, der auf die Bloecke des ERSTEN Sticks zeigt --
+# eine Attrappe in der Seitenleiste, die beim ersten Klick die falschen
+# Daten zeigt. Lieber ein Traeger weniger als ein falscher.
+#
+# WAS FEHLT, DAMIT ES GEHT: eine Geraetenummer je Massenspeicher in
+# `usb.fi` (S_MSC als Tafel statt als Zelle), `msc_read(state, dev,
+# lba, dst)` und DEV_USB0..DEV_USBn in `blk.fi`. Das ist eine eigene
+# Runde und beruehrt drei Schichten.
+
+cat > "$ARB/dreh-zwei.txt" <<EOF
+aufzeile k17: hold
+warte 1
+stecke stk1 $ARB/stick1.img
+aufzeile wechsel: kommt
+warte 2
+stecke stk2 $ARB/stick2.img
+warte 8
+EOF
+lauf zwei "osum usb usbhold vfs gfx nosched noproc" "$ARB/dreh-zwei.txt"
+S="$ARB/zwei.txt"
+num "der Lauf mit zwei Sticks beendet sich selbst (21)" "${RC:-99}" eq 21
+dv=$(grep -a 'devices=' "$S" | tail -1 | grep -oE 'devices=[0-9]+' | tail -1 | cut -d= -f2)
+num "BEIDE Sticks werden aufgezaehlt (der USB-Baum kann zwei)" "${dv:-0}" ge 2
+hat "$S" "wechsel: dev schon in der Tafel" \
+    "der zweite wird AUSDRUECKLICH abgelehnt statt als Attrappe gefuehrt"
+n_kommt=$(grep -ac 'wechsel: kommt' "$S" 2>/dev/null || echo 0)
+num "und genau EIN Traeger ist eingehaengt (die Grenze von blk.DEV_USB)" \
+    "${n_kommt:-0}" eq 1
+hat_nicht "$S" "panic" "kein Absturz am zweiten Stick"
+
+# ============================================== 6. fremdes Dateisystem
+
+echo
+echo "== 6. GEGENPROBE: ein Dateisystem, das dieser Kern nicht kann =="
+
+cat > "$ARB/dreh-fremd.txt" <<EOF
+aufzeile k17: hold
+warte 1
+stecke fremd $ARB/fremd.img
+warte 5
+EOF
+lauf fremd "osum usb usbhold vfs gfx nosched noproc" "$ARB/dreh-fremd.txt"
+S="$ARB/fremd.txt"
+num "auch dieser Lauf beendet sich sauber (21)" "${RC:-99}" eq 21
+hat "$S" "usb: msc blocks=" "das Geraet wird aufgezaehlt"
+hat "$S" "kein Dateisystem erkannt" "und AUSDRUECKLICH nicht eingehaengt"
+hat_nicht "$S" "panic" "kein Absturz am fremden Dateisystem"
+
+# ============================================== Schluss
+
+echo
+echo "HOTPLUG: $pass passed, $fail failed"
+[ -n "${HP_ARB:-}" ] && echo "  (Arbeitsverzeichnis: $ARB)"
+[ "$fail" -eq 0 ] || exit 1
+exit 0

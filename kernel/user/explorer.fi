@@ -175,6 +175,16 @@ static mut k_gzurueck: [u8; 20] = "explorer.nav.back\0\0\0"
 static mut k_gvor: [u8; 24] = "explorer.nav.forward\0\0\0\0"
 static mut k_gauf: [u8; 20] = "explorer.nav.up\0\0\0\0\0"
 static mut k_gneu: [u8; 24] = "explorer.nav.refresh\0\0\0\0"
+// RUNDE HOTPLUG: der Auswurfknopf und seine vier Antworten.
+static mut k_gaus: [u8; 16] = "explorer.eject\0\0"
+static mut k_ausok: [u8; 19] = "explorer.eject.ok\0\0"
+static mut k_ausbusy: [u8; 21] = "explorer.eject.busy\0\0"
+static mut k_ausfail: [u8; 21] = "explorer.eject.fail\0\0"
+static mut k_ausnone: [u8; 21] = "explorer.eject.none\0\0"
+// Welche Zeile der Ortsliste zuletzt angefasst wurde. Der Auswurf
+// braucht ein Ziel, und ein Knopf, der "irgendeinen" Traeger wirft,
+// waere schlimmer als keiner.
+static mut ort_wahl: u64 = 0xFFFFFFFFFFFFFFFF
 static mut k_cols: [u8; 17] = "explorer.columns\0"
 static mut k_ctx: [u8; 17] = "explorer.context\0"
 static mut k_mfile: [u8; 19] = "explorer.menu.file\0"
@@ -1236,6 +1246,121 @@ fn orte_anzeigen() {
 // Auf einen Ort springen. Kopfzeilen ("Orte", "Datentraeger") sind
 // keine Ziele -- sie haben keinen Pfad, und ein Sprung ins Leere waere
 // schlimmer als ein Klick, der nichts tut.
+// ====================================== RUNDE HOTPLUG
+// AUSWERFEN, UND WARUM DAS NICHT DASSELBE IST WIE AUSHAENGEN.
+//
+// `umount` nimmt eine Einhaengung aus der Tafel. Auswerfen heisst:
+// ERST alles Ausstehende auf das Geraet schreiben, DANN aushaengen,
+// und NEIN sagen, solange jemand eine Datei darauf offen hat. Der
+// Unterschied ist der zwischen einer Datei, die ankommt, und einer,
+// die halb ankommt -- und weil er unsichtbar ist, wenn alles gutgeht,
+// steht er hier ausgeschrieben.
+//
+// Die Arbeit macht der Kern (Aufruf 1704, WX_EJECT ->
+// `wechsel.auswerfen`). Dieses Programm sucht nur das Ziel und sagt,
+// was herauskam -- und zwar IN DER STATUSZEILE und nicht auf der
+// seriellen Leitung: der Mensch vor dem Schirm liest keine Logdatei.
+//
+// DREI ANTWORTEN, und jede hat ihren eigenen Satz:
+//   0   ausgeworfen, der Stick darf jetzt heraus
+//   16  E_BUSY -- es ist noch etwas offen. KEIN Fehler, sondern eine
+//       Bitte: Programm schliessen und noch einmal.
+//   *   sonst: fehlgeschlagen, mit der Zahl.
+fn auswerfen_klick(baum: u64, tab: u64, stat: u64, fpfad: u64) {
+    var s_a: [u8; 22] = "explorer: auswerfen \0\0"
+    var s_rc: [u8; 5] = " rc=\0"
+    // Kein Ziel: nichts tun und es sagen. Ein Knopf, der bei leerer
+    // Auswahl irgendeinen Traeger wirft, ist eine Falle.
+    if ort_wahl >= exporte.places_num()
+        || !exporte.place_is_carrier(ort_wahl) {
+        wlib.set_text(stat, msg.get((&k_ausnone[0 as usize]) as u64))
+        say((&s_a[0 as usize]) as u64)
+        sayn(999)
+        nl()
+        return
+    }
+    let ziel: u64 = exporte.place_path(ort_wahl)
+    if ziel == 0 {
+        return
+    }
+    // WELCHER TRAEGER IST DAS? Die Tafel des Kerns kennt Pfade; die
+    // Seitenleiste kennt denselben Pfad. Also wird verglichen, statt
+    // eine Nummer zu raten.
+    var i: u64 = 0
+    var tr: u64 = ulib.WX_MAX
+    while i < ulib.WX_MAX {
+        var pf: [u8; 24] = [0 as u8; 24]
+        var n: u64 = 0
+        while n < 23 {
+            let c: u64 = ulib.sys(ulib.SYS_WECHSEL, ulib.WX_PATHCH, i, n)
+            pf[n as usize] = c as u8
+            if c == 0 {
+                n = 23
+            } else {
+                n = n + 1
+            }
+        }
+        pf[23] = 0 as u8
+        if ulib.streq((&pf[0 as usize]) as u64, ziel) {
+            tr = i
+            i = ulib.WX_MAX
+        } else {
+            i = i + 1
+        }
+    }
+    if tr >= ulib.WX_MAX {
+        wlib.set_text(stat, msg.get((&k_ausnone[0 as usize]) as u64))
+        return
+    }
+    let rc: u64 = ulib.sys(ulib.SYS_WECHSEL, ulib.WX_EJECT, tr, 0)
+    say((&s_a[0 as usize]) as u64)
+    say(ziel)
+    kv((&s_rc[0 as usize]) as u64, rc)
+    nl()
+    if rc == 0 {
+        wlib.set_text(stat, msg.get((&k_ausok[0 as usize]) as u64))
+        // Der Traeger ist weg: die Seitenleiste MUSS das zeigen, und
+        // zwar jetzt und nicht beim naechsten Klick.
+        ort_wahl = 0xFFFFFFFFFFFFFFFF
+        orte_anzeigen()
+        // Stand der Mensch AUF dem ausgeworfenen Traeger, steht er
+        // jetzt auf einem Pfad, den es nicht mehr gibt. Also zurueck
+        // zur Wurzel -- ein Fenster, das ins Leere zeigt, ist
+        // schlimmer als eines, das umschaltet.
+        if ulib.length((&pfad[0 as usize]) as u64) >= ulib.length(ziel)
+            && vergleich_anfang((&pfad[0 as usize]) as u64, ziel) {
+            pfad[0] = 47 as u8
+            pfad[1] = 0 as u8
+            hist_push((&pfad[0 as usize]) as u64)
+        }
+        new_read(baum, tab, stat, fpfad)
+        return
+    }
+    if rc == 16 {
+        wlib.set_text(stat, msg.get((&k_ausbusy[0 as usize]) as u64))
+        return
+    }
+    wlib.set_text(stat, msg.get((&k_ausfail[0 as usize]) as u64))
+}
+
+// Faengt `a` mit `b` an? Fuer die Frage, ob der aktuelle Ort auf dem
+// Traeger liegt, den es gleich nicht mehr gibt.
+fn vergleich_anfang(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while true {
+        let cb: u64 = (__mmio_read8((b + i) as *mut u8)) as u64
+        if cb == 0 {
+            return true
+        }
+        let ca: u64 = (__mmio_read8((a + i) as *mut u8)) as u64
+        if ca != cb {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
 fn place_walk(zeile: u64, baum: u64, tab: u64, stat: u64, fpfad: u64) {
     var s_g: [u8; 21] = "explorer: ortsprung \0"
     if zeile >= exporte.places_num() {
@@ -1986,6 +2111,16 @@ fn u_start(args: u64) -> u64 {
     wlib.size(wlibc.snap(ch), ch)
     let bneu: u64 = wlib.icon_button(icons.NAV_REFRESH,
         msg.get((&k_gneu[0 as usize]) as u64))
+    // RUNDE HOTPLUG: AUSWERFEN. Er steht neben "Aktualisieren" und
+    // nicht in einem Menue, weil er der einzige Weg ist, einen Stick
+    // ohne Datenverlust loszuwerden -- ein Knopf, den man erst suchen
+    // muss, wird nicht gedrueckt, und dann zieht der Mensch einfach.
+    //
+    // Das Symbol ist der Pfeil nach oben: dasselbe Zeichen, das jedes
+    // andere System dafuer benutzt.
+    wlib.size(wlibc.snap(ch), ch)
+    let baus: u64 = wlib.icon_button(icons.ARROW_UP,
+        msg.get((&k_gaus[0 as usize]) as u64))
     // DIE SCHALTFLAECHE, ueber die der Starter erreichbar ist. Ein
     // Programmverzeichnis, das man nur mit einem Kommandozeilenwort
     // aufmachen kann, ist keines.
@@ -2195,6 +2330,8 @@ fn u_start(args: u64) -> u64 {
                     // Aktualisieren: dasselbe wie F5, und derselbe Weg.
                     orte_anzeigen()
                     new_read(baum, tab, stat, fpfad)
+                } else if id == baus {
+                    auswerfen_klick(baum, tab, stat, fpfad)
                 } else {
                     // Ein Glied der Brosamenleiste? Dann dorthin.
                     let _kk: bool = krume_klick(id, baum, tab, stat, fpfad)
@@ -2206,6 +2343,11 @@ fn u_start(args: u64) -> u64 {
                 // Doppelklick oder Eingabetaste -- und bei der
                 // Ortsliste der einfache Klick (`list_einklick`).
                 if id == a_orte {
+                    // RUNDE HOTPLUG: das Ziel des Auswurfs. Es wird
+                    // beim Anfassen gemerkt und nicht beim Druecken
+                    // gesucht -- beim Druecken ist die Auswahl
+                    // moeglicherweise schon eine andere.
+                    ort_wahl = idx
                     place_walk(idx, baum, tab, stat, fpfad)
                 } else if id == tab {
                     // ============================ RUNDE SYSTEMBUS
