@@ -1,0 +1,2678 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/h264.fi -- Runde CODEC (P-022): H.264 BASELINE, I und P.
+//
+// WAS DIESE DATEI IST. Der erste Videodekodierer dieses Systems.
+// `media.fi` kannte den Namen "H.264 / AVC" seit der Runde DEMUX und
+// sagte ehrlich, dass es ihn nicht dekodieren kann; hier steht, was
+// das Gegenteil davon kostet.
+//
+// DER UMFANG IST EINE ENTSCHEIDUNG UND KEIN VERSEHEN: Baseline
+// Profile (profile_idc 66), I-Slices und P-Slices, CAVLC. Das ist
+// genau das, was `x264 -profile:v baseline` erzeugt und was ein
+// Mobiltelefon aufnimmt.
+//
+// WAS NICHT DRIN IST, und warum es auch nicht halb drin ist:
+//   CABAC        -- gehoert nicht zu Baseline (Main aufwaerts). Ein
+//                   halber arithmetischer Dekodierer ist schlimmer als
+//                   keiner: er liefert Bilder, die fast stimmen.
+//   High Profile -- 8x8-Transformation, eigene Skalierungsmatrizen.
+//   B-Slices     -- zwei Referenzlisten, zeitliche Direktvorhersage.
+//   Interlace    -- Feld- und Makroblockpaarkodierung (PAFF/MBAFF).
+//   gewichtete Vorhersage, Slice-Gruppen (FMO), redundante Slices.
+// Alles davon wird ERKANNT und ABGELEHNT, mit einem Satz, der sagt,
+// was los ist. Ein Abspieler, der ein schwarzes Fenster zeigt, luegt.
+//
+// KEIN FLIESSKOMMA. Nicht eine Zeile. Das ist der Unterschied zu
+// `jpeg.fi`, das seine IDCT in `f64` rechnet und dafuer `#[allow_fp]`
+// traegt: T.81 schreibt die IDCT NICHT bitgenau vor, jeder JPEG-
+// Dekodierer darf anders runden. ITU-T H.264 tut das Gegenteil --
+// Abschnitt 8.5 gibt die Transformation als exakte Ganzzahlfolge vor,
+// und die Abnahme dieser Runde vergleicht OKTETTWEISE gegen ffmpeg.
+// Wer hier Fliesskomma einbaut, verliert die Bitgleichheit und merkt
+// es erst in der Gegenprobe.
+//
+// DER SPEICHER. Bildpuffer gehoeren NICHT in `kdata` -- der Bereich
+// dieser Runde (CODEC_OFF, acht Seiten) traegt Zustandsfelder, mehr
+// nicht. Die Bilder selbst sind statische Felder in diesem Programm,
+// so wie `opk.fi` seine 8 MiB fuehrt: Ring 3 hat keinen Allokator
+// (`ulib.fi`, Zeile 827 sagt es ausdruecklich).
+//
+// DIE FUENF STELLEN, AN DENEN ES SCHIEFGEHT, WENN MAN NICHT AUFPASST.
+// Jede davon hat in der Vorarbeit (dem Python-Versuchsgeraet unter
+// tools/codec/ref264.py) einen halben Tag gekostet, und keine davon
+// sieht im Quelltext falsch aus:
+//
+//   1. Die Reihenfolge der 16 Luma-4x4-Bloecke (8.2.2) laeuft ueber
+//      8x8-Viertel und nicht zeilenweise. Die naheliegende
+//      Bitverdrehung liefert doppelte Koordinaten.
+//   2. suffixLength nach dem ersten Wert hinter den Einsen: es gibt
+//      ZWEI Wege, und welcher gilt, haengt an der CODELAENGE.
+//   3. weightScale (die flache 16) gehoert in JEDE Skalierung, auch
+//      in die des Chroma-DC. Ohne sie ist das Bild flach, nicht falsch.
+//   4. Ein Nachbar zaehlt erst, wenn er dekodiert IST -- aber der
+//      EIGENE Makroblock zaehlt immer.
+//   5. Ein Inter-Nachbar ist fuer die Intra-Modusvorhersage
+//      VERFUEGBAR (als DC); nur bei constrained_intra_pred nicht.
+//
+// GEMESSEN: acht Stroeme, 985536 Oktette, gegen `ffmpeg -f rawvideo`
+// -- null abweichende Oktette. Die Zahlen stehen in
+// docs/RUNDE-CODEC.md und werden von tools/codec/run.sh nachgerechnet.
+
+profile kernel
+
+import ulib
+import h264tab
+
+export {
+    h264_reset, h264_decode, h264_width, h264_height, h264_frames,
+    h264_open, h264_next, h264_cur_slot, h264_stride, h264_cstride,
+    h264_err, h264_fehlertext, h264_plane_y, h264_plane_u, h264_plane_v,
+    h264_to_rgb, h264_profile, h264_mbs, h264_luma_size, h264_chroma_size,
+    E_OK, E_FORM, E_PROFIL, E_ART, E_GROSS, E_DATEN, E_UNGERADE,
+    MAXW, MAXH
+}
+
+// ------------------------------------------------------------ Fehler
+const E_OK: u64 = 0
+const E_FORM: u64 = 1      // kein brauchbarer Strom
+const E_PROFIL: u64 = 2    // nicht Baseline
+const E_ART: u64 = 3       // Spielart, die hier nicht gebaut ist
+const E_GROSS: u64 = 4     // Bild groesser als der Vorrat
+const E_DATEN: u64 = 5     // der Strom bricht ab oder ist verfaelscht
+const E_UNGERADE: u64 = 6  // Syntax passt nicht zur Norm
+
+static mut t_ok: [u8; 11] = "in Ordnung\0"
+static mut t_form: [u8; 32] = "kein brauchbarer H.264-Strom\0\0\0\0"
+static mut t_profil: [u8; 53] =
+    "nur Baseline (profile_idc 66) -- nicht High/Main\0\0\0\0\0"
+static mut t_art: [u8; 58] =
+    "diese H.264-Spielart ist nicht gebaut (CABAC/B/Interlace)\0"
+static mut t_gross: [u8; 41] = "das Bild ist zu groß für den Vorrat\0\0\0\0"
+static mut t_daten: [u8; 34] = "der Datenstrom bricht ab\0\0\0\0\0\0\0\0\0\0"
+static mut t_ungerade: [u8; 34] = "die Syntax passt nicht zur Norm\0\0\0"
+
+static mut h_err: u64 = 0
+
+fn h264_err() -> u64 {
+    return h_err
+}
+
+fn h264_fehlertext() -> u64 {
+    if h_err == E_FORM { return (&t_form[(0) as usize]) as u64 }
+    if h_err == E_PROFIL { return (&t_profil[(0) as usize]) as u64 }
+    if h_err == E_ART { return (&t_art[(0) as usize]) as u64 }
+    if h_err == E_GROSS { return (&t_gross[(0) as usize]) as u64 }
+    if h_err == E_DATEN { return (&t_daten[(0) as usize]) as u64 }
+    if h_err == E_UNGERADE { return (&t_ungerade[(0) as usize]) as u64 }
+    return (&t_ok[(0) as usize]) as u64
+}
+
+// ------------------------------------------------------- die Groessen
+//
+// 352x288 (CIF) ist die Grenze dieser Runde, und sie steht hier und
+// nicht im Gefuehl: drei Bildspeicher (das laufende Bild und zwei
+// Referenzen) zu je 1,5 Oktetten je Bildpunkt sind bei CIF 456 KiB.
+// Ein Prozess dieses Systems hat 6 MiB Abbild. Bei 640x480 waeren es
+// 1,4 MiB, bei 1280x720 schon 4 MiB -- und dann ist fuer den
+// Entrolungspuffer und den Rest nichts mehr da.
+const MAXW: u64 = 352
+const MAXH: u64 = 288
+const MAXMBW: u64 = 22      // MAXW / 16
+const MAXMBH: u64 = 18      // MAXH / 16
+const MAXMB: u64 = 396      // MAXMBW * MAXMBH
+const LUMA: u64 = 101376    // MAXW * MAXH
+const CHROMA: u64 = 25344   // LUMA / 4
+// WIEVIELE BILDSPEICHER, und warum genau so viele: x264 stellt im
+// Baseline-Profil standardmaessig DREI Referenzen ein (`num_ref_frames
+// = 3`, und die Stroeme dieser Runde benutzen ref_idx bis 2 wirklich).
+// Dazu kommt das Bild, das gerade entsteht. Mit nur drei Speichern
+// stimmen die ersten drei Bilder und ab dem VIERTEN faengt es an zu
+// wandern -- der Fehler sieht dann nach einem Dekodierfehler aus und
+// ist in Wahrheit ein zu kleiner Vorrat. Vier Speicher zu 1,5 Oktetten
+// je Bildpunkt sind bei CIF 608 KiB; ein Prozess hat 6 MiB.
+const NSLOT: u64 = 4
+const NREF: u64 = 3          // hoechstens so viele Referenzen
+
+fn h264_luma_size() -> u64 { return LUMA }
+fn h264_chroma_size() -> u64 { return CHROMA }
+
+// Die Bildspeicher. Sie liegen HIER und nicht in kdata: kdata traegt
+// Zustandsfelder, keine Bilder (siehe den Kopf dieser Datei).
+static mut pY: [u8; 405504] = [0 as u8; 405504]   // NSLOT * LUMA
+static mut pU: [u8; 101376] = [0 as u8; 101376]   // NSLOT * CHROMA
+static mut pV: [u8; 101376] = [0 as u8; 101376]
+
+// Welcher Speicher ist das laufende Bild, welche sind Referenzen.
+// ref_slot[0] ist die naechste Referenz (Index 0 der Liste L0).
+static mut cur_slot: u64 = 0
+static mut ref_slot: [u64; 4] = [0; 4]
+static mut ref_n: u64 = 0
+
+fn h264_plane_y(slot: u64) -> u64 {
+    return (&pY[(0) as usize]) as u64 + slot * LUMA
+}
+fn h264_plane_u(slot: u64) -> u64 {
+    return (&pU[(0) as usize]) as u64 + slot * CHROMA
+}
+fn h264_plane_v(slot: u64) -> u64 {
+    return (&pV[(0) as usize]) as u64 + slot * CHROMA
+}
+
+// ------------------------------------------------------- der Bitleser
+//
+// Annex B, und die Stopfregel ist eine ANDERE als bei JPEG: dort ist
+// 0xFF 0x00 eine Einschiebung, hier ist es 0x00 0x00 0x03. Der Leser
+// arbeitet auf dem bereits entstopften Puffer (`rbsp`), damit die
+// Regel genau EINMAL vorkommt und nicht in jedem Bitzugriff.
+static mut bs: u64 = 0        // Zeiger auf die Oktette
+static mut bs_n: u64 = 0      // Zahl der Bits
+static mut bs_p: u64 = 0      // Leseposition in Bits
+static mut bs_over: bool = false
+
+fn bit_init(p: u64, n: u64) {
+    bs = p
+    bs_n = n * 8
+    bs_p = 0
+    bs_over = false
+}
+
+fn ld8(p: u64, at: u64) -> u64 {
+    return (*((p + at) as *mut u8)) as u64
+}
+
+fn st8(p: u64, at: u64, v: u64) {
+    __mmio_write8((p + at) as *mut u8, (v & 255) as u8)
+}
+
+// Ein Bit. Hinter dem Ende kommen Nullen und `bs_over` steht -- so
+// laeuft ein abgeschnittener Strom aus, statt ueber den Puffer hinaus
+// zu lesen.
+fn u1() -> u64 {
+    if bs_p >= bs_n {
+        bs_over = true
+        bs_p = bs_p + 1
+        return 0
+    }
+    let v: u64 = (ld8(bs, bs_p >> 3) >> (7 - (bs_p & 7))) & 1
+    bs_p = bs_p + 1
+    return v
+}
+
+fn un(k: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < k {
+        v = (v << 1) | u1()
+        i = i + 1
+    }
+    return v
+}
+
+// k Bits ansehen, ohne sie zu verbrauchen.
+fn show(k: u64) -> u64 {
+    let save: u64 = bs_p
+    let v: u64 = un(k)
+    bs_p = save
+    return v
+}
+
+// Exp-Golomb, vorzeichenlos (9.1). Mehr als 32 fuehrende Nullen gibt
+// es in einem gesunden Strom nicht; danach wird abgebrochen.
+fn ue() -> u64 {
+    var z: u64 = 0
+    while z < 32 {
+        if u1() == 1 {
+            if z == 0 { return 0 }
+            return (1 << z) - 1 + un(z)
+        }
+        z = z + 1
+    }
+    bs_over = true
+    return 0
+}
+
+// Exp-Golomb, vorzeichenbehaftet (9.1.1).
+fn se() -> i64 {
+    let k: u64 = ue()
+    if (k & 1) == 1 {
+        return ((k + 1) / 2) as i64
+    }
+    return 0 - ((k / 2) as i64)
+}
+
+// te(v): bei Hoechstwert 1 ein einzelnes, invertiertes Bit.
+fn te(maxv: u64) -> u64 {
+    if maxv == 0 { return 0 }
+    if maxv == 1 { return 1 - u1() }
+    return ue()
+}
+
+// more_rbsp_data (7.2): steht hinter der Leseposition noch ein Bit,
+// das nicht das Stopbit samt Fuellnullen ist?
+fn more_rbsp() -> bool {
+    if bs_p >= bs_n { return false }
+    var last: u64 = bs_n - 1
+    while last > bs_p {
+        if ((ld8(bs, last >> 3) >> (7 - (last & 7))) & 1) == 1 {
+            return bs_p < last
+        }
+        last = last - 1
+    }
+    return false
+}
+
+// --------------------------------------------------- die Tafelsuche
+//
+// Ein Code aus einer (Laenge, Wert)-Tafel: Bit fuer Bit lesen und
+// vergleichen. Das ist die langsame, aber durchschaubare Form; eine
+// Baumtafel waere schneller und haette einen Fehler, den man nicht
+// sieht. Rueckgabe: Index in der Tafel, oder NOTAB.
+const NOTAB: u64 = 0xFFFFFFFF
+
+fn tab_find(lens: u64, bits: u64, n: u64) -> u64 {
+    var v: u64 = 0
+    var ln: u64 = 0
+    while ln < 17 {
+        v = (v << 1) | u1()
+        ln = ln + 1
+        var i: u64 = 0
+        while i < n {
+            if (*((lens + i * 8) as *mut u64)) == ln
+                && (*((bits + i * 8) as *mut u64)) == v {
+                return i
+            }
+            i = i + 1
+        }
+        if bs_over { return NOTAB }
+    }
+    return NOTAB
+}
+
+// ================================================== Annex B und RBSP
+//
+// Der Strom ist eine Folge von Einheiten, getrennt durch 00 00 01
+// (oder 00 00 00 01). Innerhalb einer Einheit steht 00 00 03 fuer
+// 00 00 -- das dritte Oktett ist eine Einschiebung und muss WEG,
+// bevor der Bitleser darueber laeuft.
+static mut rb: [u8; 262144] = [0 as u8; 262144]
+static mut rb_n: u64 = 0
+
+// Die naechste Einheit ab `von` suchen. Liefert Anfang und Ende des
+// Inhalts (ohne Startcode) in `nal_a`/`nal_e`, oder falsch.
+static mut nal_a: u64 = 0
+static mut nal_e: u64 = 0
+
+fn nal_next(p: u64, n: u64, von: u64) -> bool {
+    var i: u64 = von
+    // den Startcode finden
+    while i + 2 < n {
+        if ld8(p, i) == 0 && ld8(p, i + 1) == 0 && ld8(p, i + 2) == 1 {
+            let st: u64 = i + 3
+            var j: u64 = st
+            while j + 2 < n {
+                if ld8(p, j) == 0 && ld8(p, j + 1) == 0
+                    && ld8(p, j + 2) == 1 {
+                    // Die Nullen VOR dem naechsten Startcode gehoeren
+                    // zu ihm und nicht zu dieser Einheit.
+                    var e: u64 = j
+                    while e > st && ld8(p, e - 1) == 0 { e = e - 1 }
+                    nal_a = st
+                    nal_e = e
+                    return true
+                }
+                j = j + 1
+            }
+            var e2: u64 = n
+            while e2 > st && ld8(p, e2 - 1) == 0 { e2 = e2 - 1 }
+            nal_a = st
+            nal_e = e2
+            return e2 > st
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// Den Inhalt entstopfen und in `rb` legen.
+fn rbsp_fill(p: u64, a: u64, e: u64) -> bool {
+    var i: u64 = a
+    var o: u64 = 0
+    while i < e {
+        if i + 2 < e && ld8(p, i) == 0 && ld8(p, i + 1) == 0
+            && ld8(p, i + 2) == 3 {
+            if o + 2 > 262144 { return false }
+            st8((&rb[(0) as usize]) as u64, o, 0)
+            st8((&rb[(0) as usize]) as u64, o + 1, 0)
+            o = o + 2
+            i = i + 3
+        } else {
+            if o + 1 > 262144 { return false }
+            st8((&rb[(0) as usize]) as u64, o, ld8(p, i))
+            o = o + 1
+            i = i + 1
+        }
+    }
+    rb_n = o
+    return true
+}
+
+// ------------------------------------------------------ SPS und PPS
+static mut s_da: bool = false
+static mut s_profile: u64 = 0
+static mut s_level: u64 = 0
+static mut s_log2fn: u64 = 4
+static mut s_poctype: u64 = 0
+static mut s_log2poc: u64 = 4
+static mut s_nref: u64 = 1
+static mut s_mbw: u64 = 0
+static mut s_mbh: u64 = 0
+static mut s_w: u64 = 0
+static mut s_h: u64 = 0
+static mut s_cropl: u64 = 0
+static mut s_cropr: u64 = 0
+static mut s_cropt: u64 = 0
+static mut s_cropb: u64 = 0
+
+static mut p_da: bool = false
+static mut p_cabac: u64 = 0
+static mut p_pocpresent: u64 = 0
+static mut p_nref0: u64 = 1
+static mut p_weighted: u64 = 0
+static mut p_qp: i64 = 26
+static mut p_cqpoff: i64 = 0
+static mut p_deblockctl: u64 = 0
+static mut p_constrained: u64 = 0
+
+fn h264_profile() -> u64 { return s_profile }
+fn h264_width() -> u64 {
+    if s_w == 0 { return 0 }
+    return s_w - 2 * (s_cropl + s_cropr)
+}
+fn h264_height() -> u64 {
+    if s_h == 0 { return 0 }
+    return s_h - 2 * (s_cropt + s_cropb)
+}
+fn h264_mbs() -> u64 { return s_mbw * s_mbh }
+
+fn parse_sps() -> bool {
+    s_profile = un(8)
+    un(8)                    // constraint_set-Fahnen + reserviert
+    s_level = un(8)
+    ue()                     // seq_parameter_set_id
+    // High Profile und darueber tragen hier zusaetzliche Felder
+    // (chroma_format_idc, Skalierungslisten). Sie werden nicht
+    // uebersprungen, sondern ABGELEHNT -- der Rest dieser Datei koennte
+    // so einen Strom ohnehin nicht dekodieren, und ein Bild, das fast
+    // stimmt, waere schlimmer als eine klare Absage.
+    if s_profile != 66 {
+        h_err = E_PROFIL
+        return false
+    }
+    s_log2fn = ue() + 4
+    s_poctype = ue()
+    if s_poctype == 0 {
+        s_log2poc = ue() + 4
+    } else if s_poctype == 1 {
+        h_err = E_ART
+        return false
+    }
+    s_nref = ue()
+    u1()                     // gaps_in_frame_num_value_allowed_flag
+    s_mbw = ue() + 1
+    s_mbh = ue() + 1
+    let frame_mbs_only: u64 = u1()
+    if frame_mbs_only == 0 {
+        h_err = E_ART        // Interlace (PAFF/MBAFF) ist nicht gebaut
+        return false
+    }
+    u1()                     // direct_8x8_inference_flag
+    s_cropl = 0
+    s_cropr = 0
+    s_cropt = 0
+    s_cropb = 0
+    if u1() == 1 {
+        // 4:2:0 und frame_mbs_only: CropUnitX = 2, CropUnitY = 2
+        s_cropl = ue()
+        s_cropr = ue()
+        s_cropt = ue()
+        s_cropb = ue()
+    }
+    // vui_parameters_present_flag und alles dahinter wird nicht
+    // gelesen: es steht am Ende und aendert nichts am Bild.
+    s_w = s_mbw * 16
+    s_h = s_mbh * 16
+    if s_w > MAXW || s_h > MAXH || s_w == 0 || s_h == 0 {
+        h_err = E_GROSS
+        return false
+    }
+    if bs_over {
+        h_err = E_DATEN
+        return false
+    }
+    s_da = true
+    return true
+}
+
+fn parse_pps() -> bool {
+    ue()                     // pic_parameter_set_id
+    ue()                     // seq_parameter_set_id
+    p_cabac = u1()
+    if p_cabac == 1 {
+        h_err = E_ART        // CABAC gehoert nicht zu Baseline
+        return false
+    }
+    p_pocpresent = u1()
+    let ngroups: u64 = ue() + 1
+    if ngroups > 1 {
+        h_err = E_ART        // Slice-Gruppen (FMO)
+        return false
+    }
+    p_nref0 = ue() + 1
+    ue()                     // num_ref_idx_l1_default_active_minus1
+    p_weighted = u1()
+    un(2)                    // weighted_bipred_idc
+    p_qp = 26 + se()
+    se()                     // pic_init_qs_minus26
+    p_cqpoff = se()
+    p_deblockctl = u1()
+    p_constrained = u1()
+    u1()                     // redundant_pic_cnt_present_flag
+    if p_weighted == 1 {
+        h_err = E_ART        // gewichtete Vorhersage
+        return false
+    }
+    if p_qp < 0 || p_qp > 51 {
+        h_err = E_UNGERADE
+        return false
+    }
+    if bs_over {
+        h_err = E_DATEN
+        return false
+    }
+    p_da = true
+    return true
+}
+
+// =============================================== der Zustand je Makroblock
+//
+// Alles flach: Firn hat keine zweidimensionalen Felder, und ein
+// Verbund je Makroblock waere hier nur Verpackung. Der Index ist
+// ueberall `mb * 16 + blk` beziehungsweise `mb`.
+static mut mb_type: [u64; 396] = [0; 396]
+static mut mb_intra: [u8; 396] = [0 as u8; 396]
+static mut mb_done: [u8; 396] = [0 as u8; 396]
+static mut mb_cbp: [u64; 396] = [0; 396]
+static mut mb_qp: [i64; 396] = [0; 396]
+static mut mb_i16: [u64; 396] = [0; 396]
+static mut mb_cpred: [u64; 396] = [0; 396]
+// je 4x4-Block: Modus, Vektor, Referenz, Zahl der Koeffizienten
+static mut b_i4: [u64; 6336] = [0; 6336]     // MAXMB * 16
+static mut b_mvx: [i64; 6336] = [0; 6336]
+static mut b_mvy: [i64; 6336] = [0; 6336]
+static mut b_ref: [i64; 6336] = [0; 6336]
+static mut b_nz: [u64; 9504] = [0; 9504]     // MAXMB * 24 (16 Luma + 8 Chroma)
+
+// Der Slice-Zustand.
+static mut sl_type: u64 = 2      // 0 = P, 2 = I
+static mut sl_qp: i64 = 26
+static mut sl_nodeblock: u64 = 0
+static mut sl_alpha: i64 = 0
+static mut sl_beta: i64 = 0
+static mut sl_nref0: u64 = 1
+static mut n_frames: u64 = 0
+
+fn h264_frames() -> u64 { return n_frames }
+
+// 8.2.2: blkIdx -> (x,y) in 4x4-Einheiten. NICHT zeilenweise, sondern
+// ueber 8x8-Viertel -- siehe Punkt 1 im Kopf dieser Datei.
+fn blk_x(i: u64) -> u64 {
+    return ((i >> 2) & 1) * 2 + (i & 1)
+}
+fn blk_y(i: u64) -> u64 {
+    return ((i >> 3) & 1) * 2 + ((i >> 1) & 1)
+}
+
+// ------------------------------------------------- die Restwerte, 9.2
+//
+// `coef` nimmt die 16 Koeffizienten eines Blocks auf (in Scanfolge,
+// noch nicht im Zickzack verteilt), `lev` und `runs` die Zwischenwerte.
+static mut coef: [i64; 16] = [0; 16]
+static mut lev: [i64; 16] = [0; 16]
+static mut runs: [u64; 16] = [0; 16]
+static mut last_tc: u64 = 0
+
+fn coeff_token(nC: i64) -> u64 {
+    if nC < 0 {
+        let i: u64 = tab_find((&h264tab.CDC_LEN[(0) as usize]) as u64,
+                              (&h264tab.CDC_BITS[(0) as usize]) as u64, 20)
+        if i == NOTAB { return NOTAB }
+        // Index i = tc*4 + t1
+        return i
+    }
+    var k: u64 = 0
+    if nC < 2 { k = 0 }
+    else if nC < 4 { k = 1 }
+    else if nC < 8 { k = 2 }
+    else { k = 3 }
+    let i2: u64 = tab_find(
+        (&h264tab.CT_LEN[((k * 68)) as usize]) as u64,
+        (&h264tab.CT_BITS[((k * 68)) as usize]) as u64, 68)
+    return i2
+}
+
+fn total_zeros(tzidx: u64, maxc: u64) -> u64 {
+    if maxc == 4 {
+        return tab_find(
+            (&h264tab.TZC_LEN[(((tzidx - 1) * 4)) as usize]) as u64,
+            (&h264tab.TZC_BITS[(((tzidx - 1) * 4)) as usize]) as u64, 4)
+    }
+    return tab_find(
+        (&h264tab.TZ_LEN[(((tzidx - 1) * 16)) as usize]) as u64,
+        (&h264tab.TZ_BITS[(((tzidx - 1) * 16)) as usize]) as u64, 16)
+}
+
+fn run_before(zl: u64) -> u64 {
+    var k: u64 = zl
+    if k > 7 { k = 7 }
+    return tab_find(
+        (&h264tab.RUN_LEN[(((k - 1) * 16)) as usize]) as u64,
+        (&h264tab.RUN_BITS[(((k - 1) * 16)) as usize]) as u64, 16)
+}
+
+// Der Wert aus der Tafel zurueck ins Vorzeichenbehaftete.
+fn lev_of(v: u64) -> i64 {
+    if v >= 0x8000000000000000 {
+        return (v as i64)
+    }
+    return v as i64
+}
+
+// Ein Restwertblock. Liefert totalCoeff, oder NOTAB bei kaputtem Strom.
+// Die Koeffizienten stehen danach in `coef[0..maxc-1]`.
+fn residual_block(nC: i64, maxc: u64) -> u64 {
+    var i: u64 = 0
+    while i < 16 {
+        coef[(i) as usize] = 0
+        lev[(i) as usize] = 0
+        runs[(i) as usize] = 0
+        i = i + 1
+    }
+    let ci: u64 = coeff_token(nC)
+    if ci == NOTAB { return NOTAB }
+    var t1: u64 = 0
+    var tc: u64 = 0
+    if nC < 0 {
+        t1 = ci & 3
+        tc = ci >> 2
+    } else {
+        t1 = ci & 3
+        tc = (ci >> 2) % 17
+    }
+    if tc == 0 { return 0 }
+    if tc > maxc { return NOTAB }
+    var j: u64 = 0
+    while j < t1 {
+        if u1() == 1 { lev[(j) as usize] = -1 } else { lev[(j) as usize] = 1 }
+        j = j + 1
+    }
+    if t1 < tc {
+        var sl: u64 = 0
+        if tc > 10 && t1 < 3 { sl = 1 }
+        // ---- der erste Wert hinter den Einsen
+        var bitsi: u64 = show(8)
+        var lc: i64 = lev_of(h264tab.LEVTAB_V[((sl * 256 + bitsi)) as usize])
+        bs_p = bs_p + h264tab.LEVTAB_N[((sl * 256 + bitsi)) as usize]
+        if lc >= 100 {
+            var prefix: u64 = (lc as u64) - 100
+            if prefix == 8 {
+                var z: u64 = 0
+                while z < 32 && u1() == 0 { z = z + 1 }
+                prefix = prefix + z
+            }
+            if prefix > 28 { return NOTAB }
+            var lcode: u64 = 0
+            if prefix < 14 {
+                if sl > 0 { lcode = (prefix << 1) + u1() } else { lcode = prefix }
+            } else if prefix == 14 {
+                if sl > 0 { lcode = (prefix << 1) + u1() }
+                else { lcode = prefix + un(4) }
+            } else {
+                lcode = 30
+                if prefix >= 16 {
+                    lcode = lcode + (1 << (prefix - 3)) - 4096
+                }
+                lcode = lcode + un(prefix - 3)
+            }
+            if t1 < 3 { lcode = lcode + 2 }
+            if (lcode & 1) == 0 {
+                lev[(t1) as usize] = ((lcode + 2) >> 1) as i64
+            } else {
+                lev[(t1) as usize] = 0 - (((lcode + 1) >> 1) as i64)
+            }
+            sl = 2
+        } else {
+            // KURZER WEG: der Tafelwert IST der Wert.
+            if t1 < 3 {
+                if lc >= 0 { lc = lc + 1 } else { lc = lc - 1 }
+            }
+            lev[(t1) as usize] = lc
+            var ab: i64 = lc
+            if ab < 0 { ab = 0 - ab }
+            if ab > 3 { sl = 2 } else { sl = 1 }
+        }
+        // ---- die uebrigen
+        var k2: u64 = t1 + 1
+        while k2 < tc {
+            bitsi = show(8)
+            lc = lev_of(h264tab.LEVTAB_V[((sl * 256 + bitsi)) as usize])
+            bs_p = bs_p + h264tab.LEVTAB_N[((sl * 256 + bitsi)) as usize]
+            if lc >= 100 {
+                var pre2: u64 = (lc as u64) - 100
+                if pre2 == 8 {
+                    var z2: u64 = 0
+                    while z2 < 32 && u1() == 0 { z2 = z2 + 1 }
+                    pre2 = pre2 + z2
+                }
+                if pre2 > 28 { return NOTAB }
+                var lc2: u64 = 0
+                if pre2 < 15 {
+                    lc2 = (pre2 << sl) + un(sl)
+                } else {
+                    lc2 = 15 << sl
+                    if pre2 >= 16 {
+                        lc2 = lc2 + (1 << (pre2 - 3)) - 4096
+                    }
+                    lc2 = lc2 + un(pre2 - 3)
+                }
+                if (lc2 & 1) == 0 {
+                    lev[(k2) as usize] = ((lc2 + 2) >> 1) as i64
+                } else {
+                    lev[(k2) as usize] = 0 - (((lc2 + 1) >> 1) as i64)
+                }
+            } else {
+                lev[(k2) as usize] = lc
+            }
+            var ab2: i64 = lev[(k2) as usize]
+            if ab2 < 0 { ab2 = 0 - ab2 }
+            if sl < 6 {
+                let lim: u64 = suffix_limit(sl)
+                if (ab2 as u64) > lim { sl = sl + 1 }
+            }
+            k2 = k2 + 1
+        }
+        if bs_over { return NOTAB }
+    }
+    // ---- die Laeufe
+    var zerosLeft: u64 = 0
+    if tc < maxc {
+        let tz: u64 = total_zeros(tc, maxc)
+        if tz == NOTAB { return NOTAB }
+        zerosLeft = tz
+    }
+    var m: u64 = 0
+    while m + 1 < tc {
+        if zerosLeft > 0 {
+            let r: u64 = run_before(zerosLeft)
+            if r == NOTAB { return NOTAB }
+            if r > zerosLeft { return NOTAB }
+            runs[(m) as usize] = r
+            zerosLeft = zerosLeft - r
+        } else {
+            runs[(m) as usize] = 0
+        }
+        m = m + 1
+    }
+    if tc > 0 { runs[((tc - 1)) as usize] = zerosLeft }
+    // ---- verteilen: der HOECHSTE Koeffizient steht in lev[0]
+    var cn: i64 = -1
+    var q: u64 = tc
+    while q > 0 {
+        q = q - 1
+        cn = cn + (runs[(q) as usize] as i64) + 1
+        if cn >= 0 && (cn as u64) < maxc {
+            coef[(cn) as usize] = lev[(q) as usize]
+        }
+    }
+    if bs_over { return NOTAB }
+    return tc
+}
+
+fn suffix_limit(sl: u64) -> u64 {
+    if sl == 0 { return 0 }
+    if sl == 1 { return 3 }
+    if sl == 2 { return 6 }
+    if sl == 3 { return 12 }
+    if sl == 4 { return 24 }
+    if sl == 5 { return 48 }
+    return 0xFFFFFFFF
+}
+
+// ======================================= Skalierung und Transformation
+//
+// 8.5. Alles in Ganzzahlen, und zwar EXAKT so, wie die Norm es
+// hinschreibt -- das ist der Unterschied zu einer JPEG-IDCT (siehe den
+// Kopf dieser Datei).
+static mut blk16: [i64; 16] = [0; 16]
+static mut tmp16: [i64; 16] = [0; 16]
+
+// normAdjust(m, i) -- die Positionsklasse eines Koeffizienten.
+fn norm_adjust(m: u64, i: u64) -> i64 {
+    let r: u64 = i >> 2
+    let c: u64 = i & 3
+    var k: u64 = 2
+    if (r & 1) == 0 && (c & 1) == 0 { k = 0 }
+    else if (r & 1) == 1 && (c & 1) == 1 { k = 1 }
+    return h264tab.VMAT[((m * 3 + k)) as usize] as i64
+}
+
+// 8.5.12.1: die Entquantisierung. weightScale ist bei Baseline die
+// FLACHE Matrix aus lauter 16en (Flat_4x4_16, 8.5.9) -- ohne diese 16
+// sind alle Reste sechzehnmal zu klein, und das Bild wird nicht
+// falsch, sondern FLACH.
+fn scale_into(src: u64, qp: i64) {
+    let m: u64 = (qp % 6) as u64
+    let sh: u64 = (qp / 6) as u64
+    var i: u64 = 0
+    while i < 16 {
+        let w: i64 = norm_adjust(m, i) * 16
+        let d: i64 = (*((src + i * 8) as *mut i64))
+        if qp >= 24 {
+            blk16[(i) as usize] = (d * w) << (sh - 4)
+        } else {
+            blk16[(i) as usize] = (d * w + (1 << (3 - sh))) >> (4 - sh)
+        }
+        i = i + 1
+    }
+}
+
+// 8.5.12.2: die Rueckwaertstransformation, zeilenweise dann spaltenweise.
+fn idct4() {
+    var i: u64 = 0
+    while i < 4 {
+        let d0: i64 = blk16[((i * 4)) as usize]
+        let d1: i64 = blk16[((i * 4 + 1)) as usize]
+        let d2: i64 = blk16[((i * 4 + 2)) as usize]
+        let d3: i64 = blk16[((i * 4 + 3)) as usize]
+        let e0: i64 = d0 + d2
+        let e1: i64 = d0 - d2
+        let e2: i64 = (d1 >> 1) - d3
+        let e3: i64 = d1 + (d3 >> 1)
+        tmp16[((i * 4)) as usize] = e0 + e3
+        tmp16[((i * 4 + 1)) as usize] = e1 + e2
+        tmp16[((i * 4 + 2)) as usize] = e1 - e2
+        tmp16[((i * 4 + 3)) as usize] = e0 - e3
+        i = i + 1
+    }
+    var j: u64 = 0
+    while j < 4 {
+        let d0: i64 = tmp16[(j) as usize]
+        let d1: i64 = tmp16[((4 + j)) as usize]
+        let d2: i64 = tmp16[((8 + j)) as usize]
+        let d3: i64 = tmp16[((12 + j)) as usize]
+        let e0: i64 = d0 + d2
+        let e1: i64 = d0 - d2
+        let e2: i64 = (d1 >> 1) - d3
+        let e3: i64 = d1 + (d3 >> 1)
+        blk16[(j) as usize] = e0 + e3
+        blk16[((4 + j)) as usize] = e1 + e2
+        blk16[((8 + j)) as usize] = e1 - e2
+        blk16[((12 + j)) as usize] = e0 - e3
+        j = j + 1
+    }
+}
+
+// 8.5.10: die Hadamard-Rueckwandlung des Luma-DC.
+static mut dc16: [i64; 16] = [0; 16]
+
+fn hadamard4() {
+    var i: u64 = 0
+    while i < 4 {
+        let a: i64 = dc16[((i * 4)) as usize]
+        let b: i64 = dc16[((i * 4 + 1)) as usize]
+        let c: i64 = dc16[((i * 4 + 2)) as usize]
+        let d: i64 = dc16[((i * 4 + 3)) as usize]
+        let e0: i64 = a + c
+        let e1: i64 = a - c
+        let e2: i64 = b - d
+        let e3: i64 = b + d
+        tmp16[((i * 4)) as usize] = e0 + e3
+        tmp16[((i * 4 + 1)) as usize] = e1 + e2
+        tmp16[((i * 4 + 2)) as usize] = e1 - e2
+        tmp16[((i * 4 + 3)) as usize] = e0 - e3
+        i = i + 1
+    }
+    var j: u64 = 0
+    while j < 4 {
+        let a: i64 = tmp16[(j) as usize]
+        let b: i64 = tmp16[((4 + j)) as usize]
+        let c: i64 = tmp16[((8 + j)) as usize]
+        let d: i64 = tmp16[((12 + j)) as usize]
+        let e0: i64 = a + c
+        let e1: i64 = a - c
+        let e2: i64 = b - d
+        let e3: i64 = b + d
+        dc16[(j) as usize] = e0 + e3
+        dc16[((4 + j)) as usize] = e1 + e2
+        dc16[((8 + j)) as usize] = e1 - e2
+        dc16[((12 + j)) as usize] = e0 - e3
+        j = j + 1
+    }
+}
+
+fn qpc_of(q: i64) -> i64 {
+    var v: i64 = q
+    if v < 0 { v = 0 }
+    if v > 51 { v = 51 }
+    if v < 30 { return v }
+    return h264tab.QPC[((v - 30) as usize)] as i64
+}
+
+fn klemm(v: i64) -> u64 {
+    if v < 0 { return 0 }
+    if v > 255 { return 255 }
+    return v as u64
+}
+
+fn clip3(lo: i64, hi: i64, v: i64) -> i64 {
+    if v < lo { return lo }
+    if v > hi { return hi }
+    return v
+}
+
+// ==================================================== Intra-Vorhersage
+//
+// Die acht gerichteten 4x4-Modi kommen als GEWICHTSTAFEL aus
+// h264tab.fi (erzeugt aus den Formeln 8.3.1.2.1-9). Modus 2 (DC)
+// rechnet der Code selbst -- er haengt davon ab, WELCHE Nachbarn es
+// gibt, und das laesst sich nicht in Gewichte fassen.
+static mut nb13: [i64; 13] = [0; 13]   // 0..3 links, 4 Ecke, 5..8 oben, 9..12 rechts oben
+static mut pred16buf: [u64; 256] = [0; 256]
+static mut pred4buf: [u64; 16] = [0; 16]
+
+fn pred4x4(mode: u64, aL: bool, aU: bool) {
+    if mode == 2 {
+        var v: u64 = 128
+        if aL && aU {
+            var s: i64 = 0
+            var i: u64 = 0
+            while i < 4 {
+                s = s + nb13[(i) as usize] + nb13[((5 + i)) as usize]
+                i = i + 1
+            }
+            v = ((s + 4) >> 3) as u64
+        } else if aL {
+            var s2: i64 = 0
+            var i2: u64 = 0
+            while i2 < 4 { s2 = s2 + nb13[(i2) as usize]; i2 = i2 + 1 }
+            v = ((s2 + 2) >> 2) as u64
+        } else if aU {
+            var s3: i64 = 0
+            var i3: u64 = 0
+            while i3 < 4 { s3 = s3 + nb13[((5 + i3)) as usize]; i3 = i3 + 1 }
+            v = ((s3 + 2) >> 2) as u64
+        }
+        var k: u64 = 0
+        while k < 16 { pred4buf[(k) as usize] = v; k = k + 1 }
+        return
+    }
+    var i4: u64 = 0
+    while i4 < 16 {
+        let w: u64 = h264tab.PRED4W[((mode * 16 + i4)) as usize]
+        var s: i64 = 0
+        var t: u64 = 0
+        while t < 4 {
+            let g: u64 = h264tab.PRED4G[(((mode * 16 + i4) * 4 + t)) as usize]
+            if g > 0 {
+                let ix: u64 = h264tab.PRED4I[(((mode * 16 + i4) * 4 + t)) as usize]
+                s = s + (g as i64) * nb13[(ix) as usize]
+            }
+            t = t + 1
+        }
+        if w == 1 {
+            pred4buf[(i4) as usize] = s as u64
+        } else if w == 2 {
+            pred4buf[(i4) as usize] = ((s + 1) >> 1) as u64
+        } else {
+            pred4buf[(i4) as usize] = ((s + 2) >> 2) as u64
+        }
+        i4 = i4 + 1
+    }
+}
+
+// Intra 16x16 (8.3.3) und Chroma 8x8 (8.3.4) teilen sich die Form;
+// die Randwerte stehen in `l16`/`u16`/`lu16`.
+static mut l16: [i64; 16] = [0; 16]
+static mut u16a: [i64; 16] = [0; 16]
+static mut lu16: i64 = 0
+
+fn pred_full(mode: u64, size: u64, aL: bool, aU: bool) {
+    // mode: 0 vertikal, 1 horizontal, 2 DC, 3 Ebene  (Luma 16x16)
+    // Chroma zaehlt anders (0 DC, 1 horizontal, 2 vertikal, 3 Ebene);
+    // der Aufrufer rechnet das um.
+    var sh: u64 = 4
+    if size == 8 { sh = 3 }
+    if mode == 0 {
+        var y: u64 = 0
+        while y < size {
+            var x: u64 = 0
+            while x < size {
+                pred16buf[((y * size + x)) as usize] = u16a[(x) as usize] as u64
+                x = x + 1
+            }
+            y = y + 1
+        }
+    } else if mode == 1 {
+        var y2: u64 = 0
+        while y2 < size {
+            var x2: u64 = 0
+            while x2 < size {
+                pred16buf[((y2 * size + x2)) as usize] = l16[(y2) as usize] as u64
+                x2 = x2 + 1
+            }
+            y2 = y2 + 1
+        }
+    } else if mode == 2 {
+        var v: u64 = 128
+        var sL: i64 = 0
+        var sU: i64 = 0
+        var i: u64 = 0
+        while i < size {
+            sL = sL + l16[(i) as usize]
+            sU = sU + u16a[(i) as usize]
+            i = i + 1
+        }
+        if aL && aU {
+            v = ((sL + sU + (size as i64)) >> (sh + 1)) as u64
+        } else if aU {
+            v = ((sU + ((size as i64) >> 1)) >> sh) as u64
+        } else if aL {
+            v = ((sL + ((size as i64) >> 1)) >> sh) as u64
+        }
+        var k: u64 = 0
+        while k < size * size { pred16buf[(k) as usize] = v; k = k + 1 }
+    } else {
+        // Ebene, 8.3.3.4 / 8.3.4.4
+        let n: u64 = size >> 1
+        var H: i64 = 0
+        var V: i64 = 0
+        var i2: u64 = 0
+        while i2 < n {
+            var ua: i64 = lu16
+            if n >= 2 + i2 { ua = u16a[((n - 2 - i2)) as usize] }
+            var la: i64 = lu16
+            if n >= 2 + i2 { la = l16[((n - 2 - i2)) as usize] }
+            H = H + ((i2 + 1) as i64) * (u16a[((n + i2)) as usize] - ua)
+            V = V + ((i2 + 1) as i64) * (l16[((n + i2)) as usize] - la)
+            i2 = i2 + 1
+        }
+        let a: i64 = 16 * (l16[((size - 1)) as usize] + u16a[((size - 1)) as usize])
+        var b: i64 = 0
+        var c: i64 = 0
+        if size == 16 {
+            b = (5 * H + 32) >> 6
+            c = (5 * V + 32) >> 6
+        } else {
+            b = (17 * H + 16) >> 5
+            c = (17 * V + 16) >> 5
+        }
+        let mid: i64 = ((size >> 1) - 1) as i64
+        var y3: u64 = 0
+        while y3 < size {
+            var x3: u64 = 0
+            while x3 < size {
+                let val: i64 = (a + b * ((x3 as i64) - mid)
+                                + c * ((y3 as i64) - mid) + 16) >> 5
+                pred16buf[((y3 * size + x3)) as usize] = klemm(val)
+                x3 = x3 + 1
+            }
+            y3 = y3 + 1
+        }
+    }
+}
+
+// Chroma-DC, 8.3.4.1: jedes 4x4-Viertel hat seinen eigenen Mittelwert.
+fn pred_chroma_dc(aL: bool, aU: bool) {
+    var by: u64 = 0
+    while by < 2 {
+        var bx: u64 = 0
+        while bx < 2 {
+            var sU: i64 = 0
+            var sL: i64 = 0
+            var i: u64 = 0
+            while i < 4 {
+                sU = sU + u16a[((bx * 4 + i)) as usize]
+                sL = sL + l16[((by * 4 + i)) as usize]
+                i = i + 1
+            }
+            var v: u64 = 128
+            // Die Regel unterscheidet die vier Viertel: die Diagonalen
+            // nehmen beides, die anderen bevorzugen eine Richtung.
+            if (bx == 0 && by == 0) || (bx == 1 && by == 1) {
+                if aL && aU { v = ((sU + sL + 4) >> 3) as u64 }
+                else if aU { v = ((sU + 2) >> 2) as u64 }
+                else if aL { v = ((sL + 2) >> 2) as u64 }
+            } else if bx == 1 && by == 0 {
+                if aU { v = ((sU + 2) >> 2) as u64 }
+                else if aL { v = ((sL + 2) >> 2) as u64 }
+            } else {
+                if aL { v = ((sL + 2) >> 2) as u64 }
+                else if aU { v = ((sU + 2) >> 2) as u64 }
+            }
+            var y: u64 = 0
+            while y < 4 {
+                var x: u64 = 0
+                while x < 4 {
+                    pred16buf[(((by * 4 + y) * 8 + bx * 4 + x)) as usize] = v
+                    x = x + 1
+                }
+                y = y + 1
+            }
+            bx = bx + 1
+        }
+        by = by + 1
+    }
+}
+
+// ============================================ Bewegungskompensation
+//
+// 8.4.2.2.1. Die sechzehn Viertelpelstellen heissen in der Norm
+// G,a,b,c,d,e,f,g,h,i,j,k,n,p,q,r; jede ist entweder ein ganzer Punkt,
+// ein Sechs-Anzapf-Filter (1,-5,20,20,-5,1) oder das Mittel aus zwei
+// davon. `j` ist der einzige, der das Filter ZWEIMAL braucht und
+// deshalb mit >>10 statt >>5 rundet.
+//
+// Die Raender werden GEKLEMMT (ein Vektor darf aus dem Bild zeigen).
+static mut mc_ref: u64 = 0
+static mut mc_rw: u64 = 0
+static mut mc_rh: u64 = 0
+
+fn rpix(px: i64, py: i64) -> i64 {
+    var x: i64 = px
+    var y: i64 = py
+    if x < 0 { x = 0 }
+    if x >= (mc_rw as i64) { x = (mc_rw as i64) - 1 }
+    if y < 0 { y = 0 }
+    if y >= (mc_rh as i64) { y = (mc_rh as i64) - 1 }
+    return ld8(mc_ref, (y as u64) * mc_rw + (x as u64)) as i64
+}
+
+// b1: das Filter waagerecht, ohne Rundung.
+fn braw(x: i64, y: i64) -> i64 {
+    return rpix(x - 2, y) - 5 * rpix(x - 1, y) + 20 * rpix(x, y)
+         + 20 * rpix(x + 1, y) - 5 * rpix(x + 2, y) + rpix(x + 3, y)
+}
+// h1: dasselbe senkrecht.
+fn hraw(x: i64, y: i64) -> i64 {
+    return rpix(x, y - 2) - 5 * rpix(x, y - 1) + 20 * rpix(x, y)
+         + 20 * rpix(x, y + 1) - 5 * rpix(x, y + 2) + rpix(x, y + 3)
+}
+fn bhalf(x: i64, y: i64) -> i64 {
+    return klemm((braw(x, y) + 16) >> 5) as i64
+}
+fn hhalf(x: i64, y: i64) -> i64 {
+    return klemm((hraw(x, y) + 16) >> 5) as i64
+}
+// j: aus den UNGERUNDETEN senkrechten Zwischenwerten.
+fn jhalf(x: i64, y: i64) -> i64 {
+    let s: i64 = hraw(x - 2, y) - 5 * hraw(x - 1, y) + 20 * hraw(x, y)
+               + 20 * hraw(x + 1, y) - 5 * hraw(x + 2, y) + hraw(x + 3, y)
+    return klemm((s + 512) >> 10) as i64
+}
+
+fn qpel_one(x: i64, y: i64, fx: u64, fy: u64) -> u64 {
+    if fx == 0 && fy == 0 { return rpix(x, y) as u64 }
+    if fx == 1 && fy == 0 { return ((rpix(x, y) + bhalf(x, y) + 1) >> 1) as u64 }
+    if fx == 2 && fy == 0 { return bhalf(x, y) as u64 }
+    if fx == 3 && fy == 0 { return ((bhalf(x, y) + rpix(x + 1, y) + 1) >> 1) as u64 }
+    if fx == 0 && fy == 1 { return ((rpix(x, y) + hhalf(x, y) + 1) >> 1) as u64 }
+    if fx == 0 && fy == 2 { return hhalf(x, y) as u64 }
+    if fx == 0 && fy == 3 { return ((hhalf(x, y) + rpix(x, y + 1) + 1) >> 1) as u64 }
+    if fx == 2 && fy == 2 { return jhalf(x, y) as u64 }
+    if fx == 1 && fy == 1 { return ((bhalf(x, y) + hhalf(x, y) + 1) >> 1) as u64 }
+    if fx == 3 && fy == 1 { return ((bhalf(x, y) + hhalf(x + 1, y) + 1) >> 1) as u64 }
+    if fx == 1 && fy == 3 { return ((bhalf(x, y + 1) + hhalf(x, y) + 1) >> 1) as u64 }
+    if fx == 3 && fy == 3 { return ((bhalf(x, y + 1) + hhalf(x + 1, y) + 1) >> 1) as u64 }
+    if fx == 2 && fy == 1 { return ((jhalf(x, y) + bhalf(x, y) + 1) >> 1) as u64 }
+    if fx == 2 && fy == 3 { return ((jhalf(x, y) + bhalf(x, y + 1) + 1) >> 1) as u64 }
+    if fx == 1 && fy == 2 { return ((jhalf(x, y) + hhalf(x, y) + 1) >> 1) as u64 }
+    return ((jhalf(x, y) + hhalf(x + 1, y) + 1) >> 1) as u64
+}
+
+// Ein Luma-Block bw x bh an (dx,dy) im Zielbild.
+fn mc_luma(dst: u64, dstride: u64, dx: u64, dy: u64,
+           mvx: i64, mvy: i64, bw: u64, bh: u64) {
+    let fx: u64 = (mvx & 3) as u64
+    let fy: u64 = (mvy & 3) as u64
+    let ix: i64 = (dx as i64) + (mvx >> 2)
+    let iy: i64 = (dy as i64) + (mvy >> 2)
+    var r: u64 = 0
+    while r < bh {
+        var c: u64 = 0
+        while c < bw {
+            let v: u64 = qpel_one(ix + (c as i64), iy + (r as i64), fx, fy)
+            st8(dst, (dy + r) * dstride + dx + c, v)
+            c = c + 1
+        }
+        r = r + 1
+    }
+}
+
+// 8.4.2.2.2: Chroma, bilinear auf Achtelpel.
+fn mc_chroma(dst: u64, dstride: u64, dx: u64, dy: u64,
+             mvx: i64, mvy: i64, bw: u64, bh: u64) {
+    let xf: i64 = mvx & 7
+    let yf: i64 = mvy & 7
+    let ix: i64 = (dx as i64) + (mvx >> 3)
+    let iy: i64 = (dy as i64) + (mvy >> 3)
+    var r: u64 = 0
+    while r < bh {
+        var c: u64 = 0
+        while c < bw {
+            let x: i64 = ix + (c as i64)
+            let y: i64 = iy + (r as i64)
+            let v: i64 = ((8 - xf) * (8 - yf) * rpix(x, y)
+                        + xf * (8 - yf) * rpix(x + 1, y)
+                        + (8 - xf) * yf * rpix(x, y + 1)
+                        + xf * yf * rpix(x + 1, y + 1) + 32) >> 6
+            st8(dst, (dy + r) * dstride + dx + c, v as u64)
+            c = c + 1
+        }
+        r = r + 1
+    }
+}
+
+// ================================================= Nachbarn und nC
+//
+// PUNKT 4 aus dem Kopf: ein FREMDER Makroblock zaehlt erst, wenn er
+// dekodiert ist (`mb_done`); der EIGENE zaehlt immer -- seine Werte
+// sind ja gerade gelesen worden. Wer die Fahne auch auf den eigenen
+// anwendet, bekommt fuer jeden Block DC vorhergesagt und liest damit
+// die falschen Modi aus dem Strom.
+static mut cur_mbx: u64 = 0
+static mut cur_mby: u64 = 0
+
+fn mb_at(mbx: u64, mby: u64) -> u64 {
+    return mby * s_mbw + mbx
+}
+
+fn nb_ok(mbx: u64, mby: u64) -> bool {
+    if mbx >= s_mbw || mby >= s_mbh { return false }
+    if mbx == cur_mbx && mby == cur_mby { return true }
+    return mb_done[(mb_at(mbx, mby)) as usize] == (1 as u8)
+}
+
+// Die Zahl der Koeffizienten im Nachbarn links (bx-1) eines 4x4-Blocks.
+// -1 heisst "nicht vorhanden".
+fn nz_left(bx: u64, by: u64) -> i64 {
+    if bx > 0 {
+        return b_nz[((mb_at(cur_mbx, cur_mby) * 24 + by * 4 + bx - 1)) as usize] as i64
+    }
+    if cur_mbx == 0 { return -1 }
+    if !nb_ok(cur_mbx - 1, cur_mby) { return -1 }
+    return b_nz[((mb_at(cur_mbx - 1, cur_mby) * 24 + by * 4 + 3)) as usize] as i64
+}
+
+fn nz_up(bx: u64, by: u64) -> i64 {
+    if by > 0 {
+        return b_nz[((mb_at(cur_mbx, cur_mby) * 24 + (by - 1) * 4 + bx)) as usize] as i64
+    }
+    if cur_mby == 0 { return -1 }
+    if !nb_ok(cur_mbx, cur_mby - 1) { return -1 }
+    return b_nz[((mb_at(cur_mbx, cur_mby - 1) * 24 + 12 + bx)) as usize] as i64
+}
+
+// 9.2.1: beide da -> (nA+nB+1)>>1 ; nur einer -> der ; keiner -> 0.
+fn calc_nc(bx: u64, by: u64) -> i64 {
+    let nA: i64 = nz_left(bx, by)
+    let nB: i64 = nz_up(bx, by)
+    if nA >= 0 && nB >= 0 { return (nA + nB + 1) >> 1 }
+    if nA >= 0 { return nA }
+    if nB >= 0 { return nB }
+    return 0
+}
+
+fn nzc_left(c: u64, bx: u64, by: u64) -> i64 {
+    let base: u64 = 16 + c * 4
+    if bx > 0 {
+        return b_nz[((mb_at(cur_mbx, cur_mby) * 24 + base + by * 2 + bx - 1)) as usize] as i64
+    }
+    if cur_mbx == 0 { return -1 }
+    if !nb_ok(cur_mbx - 1, cur_mby) { return -1 }
+    return b_nz[((mb_at(cur_mbx - 1, cur_mby) * 24 + base + by * 2 + 1)) as usize] as i64
+}
+
+fn nzc_up(c: u64, bx: u64, by: u64) -> i64 {
+    let base: u64 = 16 + c * 4
+    if by > 0 {
+        return b_nz[((mb_at(cur_mbx, cur_mby) * 24 + base + (by - 1) * 2 + bx)) as usize] as i64
+    }
+    if cur_mby == 0 { return -1 }
+    if !nb_ok(cur_mbx, cur_mby - 1) { return -1 }
+    return b_nz[((mb_at(cur_mbx, cur_mby - 1) * 24 + base + 2 + bx)) as usize] as i64
+}
+
+fn calc_nc_c(c: u64, bx: u64, by: u64) -> i64 {
+    let nA: i64 = nzc_left(c, bx, by)
+    let nB: i64 = nzc_up(c, bx, by)
+    if nA >= 0 && nB >= 0 { return (nA + nB + 1) >> 1 }
+    if nA >= 0 { return nA }
+    if nB >= 0 { return nB }
+    return 0
+}
+
+// 8.3.1.1: der vorhergesagte Intra-4x4-Modus aus A (links) und B (oben).
+// PUNKT 5 aus dem Kopf: ein INTER-Nachbar ist VERFUEGBAR und zaehlt als
+// DC (2); nur bei constrained_intra_pred_flag gilt er als nicht da.
+const KEINMODUS: u64 = 0xFFFF
+
+fn mode_of(nx: i64, ny: i64) -> u64 {
+    let gx: i64 = (cur_mbx as i64) * 4 + nx
+    let gy: i64 = (cur_mby as i64) * 4 + ny
+    if gx < 0 || gy < 0 { return KEINMODUS }
+    let nmbx: u64 = (gx as u64) >> 2
+    let nmby: u64 = (gy as u64) >> 2
+    if !nb_ok(nmbx, nmby) { return KEINMODUS }
+    let m: u64 = mb_at(nmbx, nmby)
+    if mb_intra[(m) as usize] == (0 as u8) {
+        if p_constrained == 1 { return KEINMODUS }
+        return 2
+    }
+    if mb_type[(m) as usize] != 0 { return 2 }   // I16x16 -> DC
+    return b_i4[((m * 16 + ((gy as u64) & 3) * 4 + ((gx as u64) & 3))) as usize]
+}
+
+fn pred_mode(bx: u64, by: u64) -> u64 {
+    let A: u64 = mode_of((bx as i64) - 1, by as i64)
+    let B: u64 = mode_of(bx as i64, (by as i64) - 1)
+    if A == KEINMODUS || B == KEINMODUS { return 2 }
+    if A < B { return A }
+    return B
+}
+
+// ----------------------------------------- die Vektoren der Nachbarn
+//
+// Rueckgabe ueber diese drei Felder, weil Firn keine Verbunde
+// zurueckgibt: `mv_ok` sagt, ob es den Nachbarn gibt.
+static mut mv_ok: bool = false
+static mut mv_x: i64 = 0
+static mut mv_y: i64 = 0
+static mut mv_r: i64 = 0
+
+fn mv_of(nx: i64, ny: i64) {
+    mv_ok = false
+    mv_x = 0
+    mv_y = 0
+    mv_r = -1
+    let gx: i64 = (cur_mbx as i64) * 4 + nx
+    let gy: i64 = (cur_mby as i64) * 4 + ny
+    if gx < 0 || gy < 0 { return }
+    let nmbx: u64 = (gx as u64) >> 2
+    let nmby: u64 = (gy as u64) >> 2
+    if nmbx >= s_mbw || nmby >= s_mbh { return }
+    if !nb_ok(nmbx, nmby) { return }
+    let m: u64 = mb_at(nmbx, nmby)
+    mv_ok = true
+    if mb_intra[(m) as usize] == (1 as u8) {
+        // Ein Intra-Nachbar ist DA, hat aber keinen Vektor: er zaehlt
+        // als (0,0) mit Referenz -1 und passt damit nie zur gesuchten.
+        return
+    }
+    let i: u64 = m * 16 + ((gy as u64) & 3) * 4 + ((gx as u64) & 3)
+    mv_x = b_mvx[(i) as usize]
+    mv_y = b_mvy[(i) as usize]
+    mv_r = b_ref[(i) as usize]
+}
+
+fn median3(a: i64, b: i64, c: i64) -> i64 {
+    var lo: i64 = a
+    var hi: i64 = a
+    if b < lo { lo = b }
+    if c < lo { lo = c }
+    if b > hi { hi = b }
+    if c > hi { hi = c }
+    return a + b + c - lo - hi
+}
+
+// 8.4.1.3 -- der vorhergesagte Vektor. `n` und `ph` beschreiben die
+// Aufteilung, weil 16x8 und 8x16 Sonderfaelle haben, die VOR dem
+// Median greifen.
+static mut pmv_x: i64 = 0
+static mut pmv_y: i64 = 0
+
+fn pred_mv(bx: u64, by: u64, bw: u64, refidx: i64, n: u64, ph: u64) {
+    mv_of((bx as i64) - 1, by as i64)
+    let aok: bool = mv_ok
+    let ax: i64 = mv_x
+    let ay: i64 = mv_y
+    let ar: i64 = mv_r
+    mv_of(bx as i64, (by as i64) - 1)
+    let bok: bool = mv_ok
+    let bx2: i64 = mv_x
+    let by2: i64 = mv_y
+    let br: i64 = mv_r
+    mv_of((bx + bw) as i64, (by as i64) - 1)
+    var cok: bool = mv_ok
+    var cx: i64 = mv_x
+    var cy: i64 = mv_y
+    var cr: i64 = mv_r
+    if !cok {
+        // D tritt an die Stelle von C.
+        mv_of((bx as i64) - 1, (by as i64) - 1)
+        cok = mv_ok
+        cx = mv_x
+        cy = mv_y
+        cr = mv_r
+    }
+    // 1. die Sonderfaelle
+    if n == 2 && ph == 2 {          // 16x8
+        if by == 0 && br == refidx { pmv_x = bx2; pmv_y = by2; return }
+        if by == 2 && ar == refidx { pmv_x = ax; pmv_y = ay; return }
+    }
+    if n == 2 && ph == 4 {          // 8x16
+        if bx == 0 && ar == refidx { pmv_x = ax; pmv_y = ay; return }
+        if bx == 2 && cr == refidx { pmv_x = cx; pmv_y = cy; return }
+    }
+    // 2. hat GENAU einer die gesuchte Referenz, gewinnt er
+    var cnt: u64 = 0
+    if ar == refidx { cnt = cnt + 1 }
+    if br == refidx { cnt = cnt + 1 }
+    if cr == refidx { cnt = cnt + 1 }
+    if cnt == 1 {
+        if ar == refidx { pmv_x = ax; pmv_y = ay; return }
+        if br == refidx { pmv_x = bx2; pmv_y = by2; return }
+        pmv_x = cx
+        pmv_y = cy
+        return
+    }
+    // 3. fehlen B und C ganz, gilt A
+    if !bok && !cok && aok {
+        pmv_x = ax
+        pmv_y = ay
+        return
+    }
+    pmv_x = median3(ax, bx2, cx)
+    pmv_y = median3(ay, by2, cy)
+}
+
+// =========================================== die Umsetzung von CBP
+//
+// Tafel 9-4: `coded_block_pattern` steht als me(v) im Strom und wird
+// ueber eine Tafel in das Bitmuster umgesetzt -- fuer Intra und Inter
+// verschieden.
+static mut G2I4: [u64; 48] = [
+    47, 31, 15, 0, 23, 27, 29, 30, 7, 11, 13, 14, 39, 43, 45, 46,
+    16, 3, 5, 10, 12, 19, 21, 26, 28, 35, 37, 42, 44, 1, 2, 4,
+    8, 17, 18, 20, 24, 6, 9, 22, 25, 32, 33, 34, 36, 40, 38, 41]
+static mut G2P: [u64; 48] = [
+    0, 16, 1, 2, 4, 8, 32, 3, 5, 10, 12, 15, 47, 7, 11, 13,
+    14, 6, 9, 31, 35, 37, 42, 44, 33, 34, 36, 40, 39, 43, 45, 46,
+    17, 18, 20, 24, 19, 21, 26, 28, 23, 27, 29, 30, 22, 25, 38, 41]
+
+// Die Koeffizienten eines Makroblocks: 16 Luma-Bloecke zu 16, der
+// Luma-DC, und je Farbe vier Chroma-Bloecke und vier DC-Werte.
+static mut mcoef: [i64; 256] = [0; 256]
+static mut mdcL: [i64; 16] = [0; 16]
+static mut mcdc: [i64; 8] = [0; 8]
+static mut mcac: [i64; 128] = [0; 128]
+
+// Die Aufteilung eines P-Makroblocks in 4x4-Einheiten.
+static mut pp_n: u64 = 1
+static mut pp_w: u64 = 4
+static mut pp_h: u64 = 4
+
+fn p_part(t: u64) -> bool {
+    if t == 0 { pp_n = 1; pp_w = 4; pp_h = 4; return true }
+    if t == 1 { pp_n = 2; pp_w = 4; pp_h = 2; return true }
+    if t == 2 { pp_n = 2; pp_w = 2; pp_h = 4; return true }
+    if t == 3 { pp_n = 4; pp_w = 2; pp_h = 2; return true }
+    if t == 4 { pp_n = 4; pp_w = 2; pp_h = 2; return true }
+    return false
+}
+
+static mut px0: u64 = 0
+static mut py0: u64 = 0
+
+fn part_xy(n: u64, pw: u64, ph: u64, p: u64) {
+    if n == 1 { px0 = 0; py0 = 0; return }
+    if pw == 4 { px0 = 0; py0 = p * 2; return }      // 16x8
+    if ph == 4 { px0 = p * 2; py0 = 0; return }      // 8x16
+    px0 = (p % 2) * 2
+    py0 = (p / 2) * 2
+}
+
+// sub_mb_type in einem P-Slice: 0 = 8x8, 1 = 8x4, 2 = 4x8, 3 = 4x4.
+static mut sp_n: u64 = 1
+static mut sp_w: u64 = 2
+static mut sp_h: u64 = 2
+
+fn sub_part(st: u64) -> bool {
+    if st == 0 { sp_n = 1; sp_w = 2; sp_h = 2; return true }
+    if st == 1 { sp_n = 2; sp_w = 2; sp_h = 1; return true }
+    if st == 2 { sp_n = 2; sp_w = 1; sp_h = 2; return true }
+    if st == 3 { sp_n = 4; sp_w = 1; sp_h = 1; return true }
+    return false
+}
+
+fn sub_xy(sn: u64, sw: u64, sh: u64, q: u64) {
+    if sn == 1 { px0 = 0; py0 = 0; return }
+    if sw == 2 { px0 = 0; py0 = q; return }
+    if sh == 2 { px0 = q; py0 = 0; return }
+    px0 = q % 2
+    py0 = q / 2
+}
+
+// ===================================== die Bewegungskompensation eines MB
+fn mc_mb(mbx: u64, mby: u64) {
+    let m: u64 = mb_at(mbx, mby)
+    let dy: u64 = h264_plane_y(cur_slot)
+    let du: u64 = h264_plane_u(cur_slot)
+    let dv: u64 = h264_plane_v(cur_slot)
+    var by: u64 = 0
+    while by < 4 {
+        var bx: u64 = 0
+        while bx < 4 {
+            let i: u64 = m * 16 + by * 4 + bx
+            var ri: i64 = b_ref[(i) as usize]
+            if ri < 0 { ri = 0 }
+            if (ri as u64) >= ref_n {
+                if ref_n == 0 { return }
+                ri = 0
+            }
+            let rs: u64 = ref_slot[(ri) as usize]
+            // Luma
+            mc_ref = h264_plane_y(rs)
+            mc_rw = s_w
+            mc_rh = s_h
+            mc_luma(dy, s_w, mbx * 16 + bx * 4, mby * 16 + by * 4,
+                    b_mvx[(i) as usize], b_mvy[(i) as usize], 4, 4)
+            // Chroma: derselbe Vektor, halbe Aufloesung, Achtelpel
+            mc_ref = h264_plane_u(rs)
+            mc_rw = s_w >> 1
+            mc_rh = s_h >> 1
+            mc_chroma(du, s_w >> 1, mbx * 8 + bx * 2, mby * 8 + by * 2,
+                      b_mvx[(i) as usize], b_mvy[(i) as usize], 2, 2)
+            mc_ref = h264_plane_v(rs)
+            mc_chroma(dv, s_w >> 1, mbx * 8 + bx * 2, mby * 8 + by * 2,
+                      b_mvx[(i) as usize], b_mvy[(i) as usize], 2, 2)
+            bx = bx + 1
+        }
+        by = by + 1
+    }
+}
+
+// 8.4.1.1: P_Skip -- Referenz 0, kein Rest, und der Vektor ist der
+// vorhergesagte AUSSER wenn A oder B fehlen oder selbst null mit
+// Referenz 0 sind; dann ist er null.
+fn do_skip(mbx: u64, mby: u64, qp: i64) {
+    let m: u64 = mb_at(mbx, mby)
+    cur_mbx = mbx
+    cur_mby = mby
+    mb_type[(m) as usize] = 0
+    mb_intra[(m) as usize] = 0 as u8
+    mb_cbp[(m) as usize] = 0
+    mb_qp[(m) as usize] = qp
+    var i: u64 = 0
+    while i < 24 { b_nz[((m * 24 + i)) as usize] = 0; i = i + 1 }
+    mv_of(-1, 0)
+    let aok: bool = mv_ok
+    let anull: bool = mv_ok && mv_r == 0 && mv_x == 0 && mv_y == 0
+    mv_of(0, -1)
+    let bok: bool = mv_ok
+    let bnull: bool = mv_ok && mv_r == 0 && mv_x == 0 && mv_y == 0
+    var vx: i64 = 0
+    var vy: i64 = 0
+    if aok && bok && !anull && !bnull {
+        pred_mv(0, 0, 4, 0, 1, 4)
+        vx = pmv_x
+        vy = pmv_y
+    }
+    var k: u64 = 0
+    while k < 16 {
+        b_mvx[((m * 16 + k)) as usize] = vx
+        b_mvy[((m * 16 + k)) as usize] = vy
+        b_ref[((m * 16 + k)) as usize] = 0
+        b_i4[((m * 16 + k)) as usize] = 2
+        k = k + 1
+    }
+    mb_done[(m) as usize] = 1 as u8
+    mc_mb(mbx, mby)
+}
+
+// ===================================================== der Wiederaufbau
+//
+// Ist der Block RECHTS OBEN eines 4x4 schon dekodiert? Innerhalb des
+// Makroblocks haengt das an der Reihenfolge 8.2.2; am oberen Rand am
+// Nachbarn.
+fn ur_avail(bx: u64, by: u64, availB: bool, availC: bool) -> bool {
+    if by == 0 {
+        if bx == 3 { return availC }
+        return availB
+    }
+    if bx == 3 { return false }
+    // in der Dekodierreihenfolge VOR diesem?
+    var hier: u64 = 0
+    var dort: u64 = 0
+    var i: u64 = 0
+    while i < 16 {
+        if blk_x(i) == bx && blk_y(i) == by { hier = i }
+        if blk_x(i) == bx + 1 && blk_y(i) == by - 1 { dort = i }
+        i = i + 1
+    }
+    return dort < hier
+}
+
+// Die 13 Nachbarn eines 4x4-Blocks aus dem Bild holen.
+fn load_nb4(plane: u64, stride: u64, px: u64, py: u64,
+            aL: bool, aU: bool, aUR: bool) {
+    var i: u64 = 0
+    while i < 13 { nb13[(i) as usize] = 0; i = i + 1 }
+    if aL {
+        var k: u64 = 0
+        while k < 4 {
+            nb13[(k) as usize] = ld8(plane, (py + k) * stride + px - 1) as i64
+            k = k + 1
+        }
+    }
+    if aU {
+        var k2: u64 = 0
+        while k2 < 4 {
+            nb13[((5 + k2)) as usize] = ld8(plane, (py - 1) * stride + px + k2) as i64
+            k2 = k2 + 1
+        }
+    }
+    if aL && aU {
+        nb13[(4) as usize] = ld8(plane, (py - 1) * stride + px - 1) as i64
+    }
+    if aUR {
+        var k3: u64 = 0
+        while k3 < 4 {
+            nb13[((9 + k3)) as usize] =
+                ld8(plane, (py - 1) * stride + px + 4 + k3) as i64
+            k3 = k3 + 1
+        }
+    } else {
+        // Fehlt der Block rechts oben, wird der letzte obere Punkt
+        // fortgesetzt (8.3.1.2: p[x,-1] mit x=4..7 = p[3,-1]).
+        var k4: u64 = 0
+        while k4 < 4 {
+            nb13[((9 + k4)) as usize] = nb13[(8) as usize]
+            k4 = k4 + 1
+        }
+    }
+}
+
+fn recon_mb(mbx: u64, mby: u64, i16: bool, cbp: u64, qp: i64) {
+    let m: u64 = mb_at(mbx, mby)
+    let py: u64 = h264_plane_y(cur_slot)
+    let availA: bool = mbx > 0 && nb_ok(mbx - 1, mby)
+    let availB: bool = mby > 0 && nb_ok(mbx, mby - 1)
+    let availC: bool = mby > 0 && mbx + 1 < s_mbw && nb_ok(mbx + 1, mby - 1)
+    let availD: bool = mbx > 0 && mby > 0 && nb_ok(mbx - 1, mby - 1)
+    if mb_intra[(m) as usize] == (1 as u8) {
+        if i16 {
+            // Der DC durch Hadamard und Skalierung (8.5.10).
+            var i: u64 = 0
+            while i < 16 { dc16[(i) as usize] = mdcL[(i) as usize]; i = i + 1 }
+            hadamard4()
+            let mm: u64 = (qp % 6) as u64
+            let sh: u64 = (qp / 6) as u64
+            let w: i64 = (h264tab.VMAT[((mm * 3)) as usize] as i64) * 16
+            var k: u64 = 0
+            while k < 16 {
+                if qp >= 36 {
+                    dc16[(k) as usize] = (dc16[(k) as usize] * w) << (sh - 6)
+                } else {
+                    dc16[(k) as usize] =
+                        (dc16[(k) as usize] * w + (1 << (5 - sh))) >> (6 - sh)
+                }
+                k = k + 1
+            }
+            // Die Vorhersage fuer den ganzen Makroblock.
+            var t: u64 = 0
+            while t < 16 {
+                l16[(t) as usize] = 0
+                u16a[(t) as usize] = 0
+                t = t + 1
+            }
+            if availA {
+                var a: u64 = 0
+                while a < 16 {
+                    l16[(a) as usize] = ld8(py, (mby * 16 + a) * s_w + mbx * 16 - 1) as i64
+                    a = a + 1
+                }
+            }
+            if availB {
+                var b: u64 = 0
+                while b < 16 {
+                    u16a[(b) as usize] = ld8(py, (mby * 16 - 1) * s_w + mbx * 16 + b) as i64
+                    b = b + 1
+                }
+            }
+            lu16 = 0
+            if availD { lu16 = ld8(py, (mby * 16 - 1) * s_w + mbx * 16 - 1) as i64 }
+            pred_full(mb_i16[(m) as usize], 16, availA, availB)
+            var by2: u64 = 0
+            while by2 < 4 {
+                var bx2: u64 = 0
+                while bx2 < 4 {
+                    scale_into((&mcoef[(((by2 * 4 + bx2) * 16)) as usize]) as u64, qp)
+                    blk16[(0) as usize] = dc16[((by2 * 4 + bx2)) as usize]
+                    idct4()
+                    var y: u64 = 0
+                    while y < 4 {
+                        var x: u64 = 0
+                        while x < 4 {
+                            let p: i64 =
+                                pred16buf[(((by2 * 4 + y) * 16 + bx2 * 4 + x)) as usize] as i64
+                            let r: i64 = (blk16[((y * 4 + x)) as usize] + 32) >> 6
+                            st8(py, (mby * 16 + by2 * 4 + y) * s_w
+                                    + mbx * 16 + bx2 * 4 + x, klemm(p + r))
+                            x = x + 1
+                        }
+                        y = y + 1
+                    }
+                    bx2 = bx2 + 1
+                }
+                by2 = by2 + 1
+            }
+        } else {
+            var i: u64 = 0
+            while i < 16 {
+                let bx: u64 = blk_x(i)
+                let by: u64 = blk_y(i)
+                let ppx: u64 = mbx * 16 + bx * 4
+                let ppy: u64 = mby * 16 + by * 4
+                var aL: bool = true
+                var aU: bool = true
+                if bx == 0 { aL = availA }
+                if by == 0 { aU = availB }
+                let aUR: bool = ur_avail(bx, by, availB, availC)
+                load_nb4(py, s_w, ppx, ppy, aL, aU, aUR)
+                pred4x4(b_i4[((m * 16 + by * 4 + bx)) as usize], aL, aU)
+                scale_into((&mcoef[(((by * 4 + bx) * 16)) as usize]) as u64, qp)
+                idct4()
+                var y: u64 = 0
+                while y < 4 {
+                    var x: u64 = 0
+                    while x < 4 {
+                        let p: i64 = pred4buf[((y * 4 + x)) as usize] as i64
+                        let r: i64 = (blk16[((y * 4 + x)) as usize] + 32) >> 6
+                        st8(py, (ppy + y) * s_w + ppx + x, klemm(p + r))
+                        x = x + 1
+                    }
+                    y = y + 1
+                }
+                i = i + 1
+            }
+        }
+    } else {
+        // Inter: die Vorhersage steht schon (mc_mb), der Rest kommt dazu.
+        var by3: u64 = 0
+        while by3 < 4 {
+            var bx3: u64 = 0
+            while bx3 < 4 {
+                var leer: bool = true
+                var t2: u64 = 0
+                while t2 < 16 {
+                    if mcoef[((((by3 * 4 + bx3) * 16) + t2)) as usize] != 0 {
+                        leer = false
+                    }
+                    t2 = t2 + 1
+                }
+                if !leer {
+                    scale_into((&mcoef[(((by3 * 4 + bx3) * 16)) as usize]) as u64, qp)
+                    idct4()
+                    var y: u64 = 0
+                    while y < 4 {
+                        var x: u64 = 0
+                        while x < 4 {
+                            let at: u64 = (mby * 16 + by3 * 4 + y) * s_w
+                                        + mbx * 16 + bx3 * 4 + x
+                            let alt: i64 = ld8(py, at) as i64
+                            let r: i64 = (blk16[((y * 4 + x)) as usize] + 32) >> 6
+                            st8(py, at, klemm(alt + r))
+                            x = x + 1
+                        }
+                        y = y + 1
+                    }
+                }
+                bx3 = bx3 + 1
+            }
+            by3 = by3 + 1
+        }
+    }
+    recon_chroma(mbx, mby, cbp, qp, availA, availB, availD)
+}
+
+fn recon_chroma(mbx: u64, mby: u64, cbp: u64, qp: i64,
+                availA: bool, availB: bool, availD: bool) {
+    let m: u64 = mb_at(mbx, mby)
+    let cw: u64 = s_w >> 1
+    let qpc: i64 = qpc_of(qp + p_cqpoff)
+    var c: u64 = 0
+    while c < 2 {
+        var plane: u64 = h264_plane_u(cur_slot)
+        if c == 1 { plane = h264_plane_v(cur_slot) }
+        let intra: bool = mb_intra[(m) as usize] == (1 as u8)
+        if intra {
+            var t: u64 = 0
+            while t < 16 {
+                l16[(t) as usize] = 0
+                u16a[(t) as usize] = 0
+                t = t + 1
+            }
+            if availA {
+                var a: u64 = 0
+                while a < 8 {
+                    l16[(a) as usize] = ld8(plane, (mby * 8 + a) * cw + mbx * 8 - 1) as i64
+                    a = a + 1
+                }
+            }
+            if availB {
+                var b: u64 = 0
+                while b < 8 {
+                    u16a[(b) as usize] = ld8(plane, (mby * 8 - 1) * cw + mbx * 8 + b) as i64
+                    b = b + 1
+                }
+            }
+            lu16 = 0
+            if availD { lu16 = ld8(plane, (mby * 8 - 1) * cw + mbx * 8 - 1) as i64 }
+            // Chroma zaehlt die Modi anders: 0 DC, 1 horizontal,
+            // 2 vertikal, 3 Ebene.
+            let cm: u64 = mb_cpred[(m) as usize]
+            if cm == 0 {
+                pred_chroma_dc(availA, availB)
+            } else if cm == 1 {
+                pred_full(1, 8, availA, availB)
+            } else if cm == 2 {
+                pred_full(0, 8, availA, availB)
+            } else {
+                pred_full(3, 8, availA, availB)
+            }
+        }
+        // Der DC: 2x2-Hadamard und Skalierung (8.5.11).
+        var dq: [i64; 4] = [0; 4]
+        if (cbp >> 4) > 0 {
+            let a0: i64 = mcdc[((c * 4)) as usize]
+            let a1: i64 = mcdc[((c * 4 + 1)) as usize]
+            let a2: i64 = mcdc[((c * 4 + 2)) as usize]
+            let a3: i64 = mcdc[((c * 4 + 3)) as usize]
+            let e0: i64 = a0 + a1
+            let e1: i64 = a0 - a1
+            let e2: i64 = a2 + a3
+            let e3: i64 = a2 - a3
+            let mm: u64 = (qpc % 6) as u64
+            let sh: u64 = (qpc / 6) as u64
+            let w: i64 = (h264tab.VMAT[((mm * 3)) as usize] as i64) * 16
+            dq[(0) as usize] = (((e0 + e2) * w) << sh) >> 5
+            dq[(1) as usize] = (((e1 + e3) * w) << sh) >> 5
+            dq[(2) as usize] = (((e0 - e2) * w) << sh) >> 5
+            dq[(3) as usize] = (((e1 - e3) * w) << sh) >> 5
+        }
+        var i: u64 = 0
+        while i < 4 {
+            let bx: u64 = i & 1
+            let by: u64 = i >> 1
+            var k: u64 = 0
+            while k < 16 {
+                if (cbp >> 4) == 2 {
+                    mcoef[(k) as usize] = mcac[((c * 64 + i * 16 + k)) as usize]
+                } else {
+                    mcoef[(k) as usize] = 0
+                }
+                k = k + 1
+            }
+            scale_into((&mcoef[(0) as usize]) as u64, qpc)
+            blk16[(0) as usize] = dq[(i) as usize]
+            idct4()
+            var y: u64 = 0
+            while y < 4 {
+                var x: u64 = 0
+                while x < 4 {
+                    let at: u64 = (mby * 8 + by * 4 + y) * cw + mbx * 8 + bx * 4 + x
+                    var base: i64 = 0
+                    if intra {
+                        base = pred16buf[(((by * 4 + y) * 8 + bx * 4 + x)) as usize] as i64
+                    } else {
+                        base = ld8(plane, at) as i64
+                    }
+                    let r: i64 = (blk16[((y * 4 + x)) as usize] + 32) >> 6
+                    st8(plane, at, klemm(base + r))
+                    x = x + 1
+                }
+                y = y + 1
+            }
+            i = i + 1
+        }
+        c = c + 1
+    }
+}
+
+// ============================================ ein Makroblock, 7.3.5
+//
+// Rueckgabe: das neue qp, oder QPFEHLER wenn der Strom kaputt ist.
+const QPFEHLER: i64 = -999
+
+fn decode_mb(mbx: u64, mby: u64, qp_in: i64) -> i64 {
+    let m: u64 = mb_at(mbx, mby)
+    cur_mbx = mbx
+    cur_mby = mby
+    var qp: i64 = qp_in
+    var i: u64 = 0
+    while i < 24 { b_nz[((m * 24 + i)) as usize] = 0; i = i + 1 }
+    var mt: u64 = ue()
+    var intra: bool = true
+    if sl_type == 0 {
+        if mt < 5 {
+            intra = false
+        } else {
+            mt = mt - 5
+        }
+    }
+    mb_type[(m) as usize] = mt
+    if intra { mb_intra[(m) as usize] = 1 as u8 }
+    else { mb_intra[(m) as usize] = 0 as u8 }
+    var cbp: u64 = 0
+    var i16: bool = false
+    if intra {
+        if mt == 0 {
+            // I_NxN: sechzehn Modi, jeder entweder "wie vorhergesagt"
+            // oder drei Bits mit Ueberspringen des vorhergesagten.
+            var k: u64 = 0
+            while k < 16 {
+                let bx: u64 = blk_x(k)
+                let by: u64 = blk_y(k)
+                let pm: u64 = pred_mode(bx, by)
+                var mode: u64 = pm
+                if u1() == 0 {
+                    let r: u64 = un(3)
+                    if r < pm { mode = r } else { mode = r + 1 }
+                }
+                if mode > 8 { h_err = E_UNGERADE; return QPFEHLER }
+                b_i4[((m * 16 + by * 4 + bx)) as usize] = mode
+                k = k + 1
+            }
+            let cp: u64 = ue()
+            if cp > 3 { h_err = E_UNGERADE; return QPFEHLER }
+            mb_cpred[(m) as usize] = cp
+            let g: u64 = ue()
+            if g >= 48 { h_err = E_UNGERADE; return QPFEHLER }
+            cbp = G2I4[(g) as usize]
+        } else if mt == 25 {
+            h_err = E_ART        // I_PCM ist nicht gebaut
+            return QPFEHLER
+        } else {
+            // I_16x16: mb_type 1..24 traegt Modus, Chroma-CBP und
+            // Luma-CBP in EINER Zahl.
+            i16 = true
+            let t: u64 = mt - 1
+            if t >= 24 { h_err = E_UNGERADE; return QPFEHLER }
+            mb_i16[(m) as usize] = t & 3
+            let cbpc: u64 = (t >> 2) % 3
+            var cbpl: u64 = 0
+            if t >= 12 { cbpl = 15 }
+            cbp = cbpl | (cbpc << 4)
+            let cp2: u64 = ue()
+            if cp2 > 3 { h_err = E_UNGERADE; return QPFEHLER }
+            mb_cpred[(m) as usize] = cp2
+            var z: u64 = 0
+            while z < 16 { b_i4[((m * 16 + z)) as usize] = 2; z = z + 1 }
+        }
+    } else {
+        if !p_part(mt) { h_err = E_ART; return QPFEHLER }
+        let n: u64 = pp_n
+        let pw: u64 = pp_w
+        let ph: u64 = pp_h
+        let acht: bool = mt >= 3
+        var sub: [u64; 4] = [0; 4]
+        if acht {
+            var p: u64 = 0
+            while p < 4 {
+                let st: u64 = ue()
+                if st > 3 { h_err = E_ART; return QPFEHLER }
+                sub[(p) as usize] = st
+                p = p + 1
+            }
+        }
+        var refs: [i64; 4] = [0; 4]
+        if sl_nref0 > 1 && mt != 4 {
+            var p2: u64 = 0
+            while p2 < n {
+                let r: u64 = te(sl_nref0 - 1)
+                if r >= sl_nref0 { h_err = E_UNGERADE; return QPFEHLER }
+                refs[(p2) as usize] = r as i64
+                p2 = p2 + 1
+            }
+        }
+        if acht {
+            var p3: u64 = 0
+            while p3 < 4 {
+                if !sub_part(sub[(p3) as usize]) { h_err = E_ART; return QPFEHLER }
+                let sn: u64 = sp_n
+                let sw: u64 = sp_w
+                let sh: u64 = sp_h
+                let bx0: u64 = (p3 % 2) * 2
+                let by0: u64 = (p3 / 2) * 2
+                var q: u64 = 0
+                while q < sn {
+                    sub_xy(sn, sw, sh, q)
+                    let bx: u64 = bx0 + px0
+                    let by: u64 = by0 + py0
+                    pred_mv(bx, by, sw, refs[(p3) as usize], 4, 2)
+                    let vx: i64 = pmv_x + se()
+                    let vy: i64 = pmv_y + se()
+                    var yy: u64 = 0
+                    while yy < sh {
+                        var xx: u64 = 0
+                        while xx < sw {
+                            let ii: u64 = m * 16 + (by + yy) * 4 + bx + xx
+                            b_mvx[(ii) as usize] = vx
+                            b_mvy[(ii) as usize] = vy
+                            b_ref[(ii) as usize] = refs[(p3) as usize]
+                            xx = xx + 1
+                        }
+                        yy = yy + 1
+                    }
+                    q = q + 1
+                }
+                p3 = p3 + 1
+            }
+        } else {
+            var p4: u64 = 0
+            while p4 < n {
+                part_xy(n, pw, ph, p4)
+                let bx: u64 = px0
+                let by: u64 = py0
+                pred_mv(bx, by, pw, refs[(p4) as usize], n, ph)
+                let vx: i64 = pmv_x + se()
+                let vy: i64 = pmv_y + se()
+                var yy2: u64 = 0
+                while yy2 < ph {
+                    var xx2: u64 = 0
+                    while xx2 < pw {
+                        let ii: u64 = m * 16 + (by + yy2) * 4 + bx + xx2
+                        b_mvx[(ii) as usize] = vx
+                        b_mvy[(ii) as usize] = vy
+                        b_ref[(ii) as usize] = refs[(p4) as usize]
+                        xx2 = xx2 + 1
+                    }
+                    yy2 = yy2 + 1
+                }
+                p4 = p4 + 1
+            }
+        }
+        mb_done[(m) as usize] = 1 as u8
+        mc_mb(mbx, mby)
+        let g2: u64 = ue()
+        if g2 >= 48 { h_err = E_UNGERADE; return QPFEHLER }
+        cbp = G2P[(g2) as usize]
+    }
+    mb_cbp[(m) as usize] = cbp
+    if bs_over { h_err = E_DATEN; return QPFEHLER }
+    // ---------------------------------------------- die Restwerte
+    var k2: u64 = 0
+    while k2 < 256 { mcoef[(k2) as usize] = 0; k2 = k2 + 1 }
+    var k3: u64 = 0
+    while k3 < 16 { mdcL[(k3) as usize] = 0; k3 = k3 + 1 }
+    var k4: u64 = 0
+    while k4 < 8 { mcdc[(k4) as usize] = 0; k4 = k4 + 1 }
+    var k5: u64 = 0
+    while k5 < 128 { mcac[(k5) as usize] = 0; k5 = k5 + 1 }
+    if cbp > 0 || i16 {
+        qp = qp + se()
+        while qp < 0 { qp = qp + 52 }
+        while qp > 51 { qp = qp - 52 }
+    }
+    if i16 {
+        let nc: i64 = calc_nc(0, 0)
+        let tc: u64 = residual_block(nc, 16)
+        if tc == NOTAB { h_err = E_DATEN; return QPFEHLER }
+        var z: u64 = 0
+        while z < 16 {
+            mdcL[(h264tab.ZIGZAG[(z) as usize]) as usize] = coef[(z) as usize]
+            z = z + 1
+        }
+    }
+    var i8: u64 = 0
+    while i8 < 4 {
+        if (cbp & (1 << i8)) != 0 {
+            var k: u64 = 0
+            while k < 4 {
+                let bi: u64 = i8 * 4 + k
+                let bx: u64 = blk_x(bi)
+                let by: u64 = blk_y(bi)
+                let nc: i64 = calc_nc(bx, by)
+                var tc: u64 = 0
+                if i16 {
+                    tc = residual_block(nc, 15)
+                    if tc == NOTAB { h_err = E_DATEN; return QPFEHLER }
+                    var z: u64 = 0
+                    while z < 15 {
+                        mcoef[(((by * 4 + bx) * 16
+                            + h264tab.ZIGZAG[((z + 1)) as usize])) as usize] =
+                            coef[(z) as usize]
+                        z = z + 1
+                    }
+                } else {
+                    tc = residual_block(nc, 16)
+                    if tc == NOTAB { h_err = E_DATEN; return QPFEHLER }
+                    var z2: u64 = 0
+                    while z2 < 16 {
+                        mcoef[(((by * 4 + bx) * 16
+                            + h264tab.ZIGZAG[(z2) as usize])) as usize] =
+                            coef[(z2) as usize]
+                        z2 = z2 + 1
+                    }
+                }
+                b_nz[((m * 24 + by * 4 + bx)) as usize] = tc
+                k = k + 1
+            }
+        }
+        i8 = i8 + 1
+    }
+    if (cbp >> 4) > 0 {
+        var c: u64 = 0
+        while c < 2 {
+            let tc: u64 = residual_block(-1, 4)
+            if tc == NOTAB { h_err = E_DATEN; return QPFEHLER }
+            var z: u64 = 0
+            while z < 4 {
+                mcdc[((c * 4 + z)) as usize] = coef[(z) as usize]
+                z = z + 1
+            }
+            c = c + 1
+        }
+    }
+    if (cbp >> 4) == 2 {
+        var c2: u64 = 0
+        while c2 < 2 {
+            var i2: u64 = 0
+            while i2 < 4 {
+                let bx: u64 = i2 & 1
+                let by: u64 = i2 >> 1
+                let nc: i64 = calc_nc_c(c2, bx, by)
+                let tc: u64 = residual_block(nc, 15)
+                if tc == NOTAB { h_err = E_DATEN; return QPFEHLER }
+                var z: u64 = 0
+                while z < 15 {
+                    mcac[((c2 * 64 + i2 * 16
+                        + h264tab.ZIGZAG[((z + 1)) as usize])) as usize] =
+                        coef[(z) as usize]
+                    z = z + 1
+                }
+                b_nz[((m * 24 + 16 + c2 * 4 + by * 2 + bx)) as usize] = tc
+                i2 = i2 + 1
+            }
+            c2 = c2 + 1
+        }
+    }
+    if bs_over { h_err = E_DATEN; return QPFEHLER }
+    mb_qp[(m) as usize] = qp
+    mb_done[(m) as usize] = 1 as u8
+    recon_mb(mbx, mby, i16, cbp, qp)
+    return qp
+}
+
+// ================================================ Entblockung, 8.7
+//
+// Makroblock fuer Makroblock in Rasterfolge: je Makroblock ZUERST alle
+// senkrechten Kanten von links nach rechts, DANN alle waagerechten von
+// oben nach unten. Die Reihenfolge ist nicht beliebig -- der Filter
+// arbeitet auf dem Bild, das er gerade veraendert.
+fn bs_of(mP: u64, iP: u64, mQ: u64, iQ: u64, mb_edge: bool) -> u64 {
+    if mb_intra[(mP) as usize] == (1 as u8)
+        || mb_intra[(mQ) as usize] == (1 as u8) {
+        if mb_edge { return 4 }
+        return 3
+    }
+    if b_nz[((mP * 24 + iP)) as usize] > 0
+        || b_nz[((mQ * 24 + iQ)) as usize] > 0 { return 2 }
+    if b_ref[((mP * 16 + iP)) as usize] != b_ref[((mQ * 16 + iQ)) as usize] {
+        return 1
+    }
+    var dx: i64 = b_mvx[((mP * 16 + iP)) as usize] - b_mvx[((mQ * 16 + iQ)) as usize]
+    var dy: i64 = b_mvy[((mP * 16 + iP)) as usize] - b_mvy[((mQ * 16 + iQ)) as usize]
+    if dx < 0 { dx = 0 - dx }
+    if dy < 0 { dy = 0 - dy }
+    if dx >= 4 || dy >= 4 { return 1 }
+    return 0
+}
+
+// Eine Linie ueber eine Kante. `st` ist der Schritt SENKRECHT zur
+// Kante, `base` zeigt auf q0 -- den ersten Punkt HINTER der Kante.
+fn filter_line(plane: u64, base: u64, st: u64, bs: u64,
+               alpha: i64, beta: i64, tc0: i64, chroma: bool) {
+    let p0: i64 = ld8(plane, base - st) as i64
+    let q0: i64 = ld8(plane, base) as i64
+    let p1: i64 = ld8(plane, base - 2 * st) as i64
+    let q1: i64 = ld8(plane, base + st) as i64
+    var d0: i64 = p0 - q0
+    if d0 < 0 { d0 = 0 - d0 }
+    var d1: i64 = p1 - p0
+    if d1 < 0 { d1 = 0 - d1 }
+    var d2: i64 = q1 - q0
+    if d2 < 0 { d2 = 0 - d2 }
+    if !(d0 < alpha && d1 < beta && d2 < beta) { return }
+    if bs < 4 {
+        if chroma {
+            let tc: i64 = tc0 + 1
+            let delta: i64 = clip3(0 - tc, tc, (((q0 - p0) << 2) + (p1 - q1) + 4) >> 3)
+            st8(plane, base - st, klemm(p0 + delta))
+            st8(plane, base, klemm(q0 - delta))
+        } else {
+            let p2: i64 = ld8(plane, base - 3 * st) as i64
+            let q2: i64 = ld8(plane, base + 2 * st) as i64
+            var ap: i64 = p2 - p0
+            if ap < 0 { ap = 0 - ap }
+            var aq: i64 = q2 - q0
+            if aq < 0 { aq = 0 - aq }
+            var tc: i64 = tc0
+            if ap < beta { tc = tc + 1 }
+            if aq < beta { tc = tc + 1 }
+            let delta: i64 = clip3(0 - tc, tc, (((q0 - p0) << 2) + (p1 - q1) + 4) >> 3)
+            if ap < beta {
+                st8(plane, base - 2 * st,
+                    (p1 + clip3(0 - tc0, tc0, (p2 + ((p0 + q0 + 1) >> 1) - 2 * p1) >> 1)) as u64)
+            }
+            if aq < beta {
+                st8(plane, base + st,
+                    (q1 + clip3(0 - tc0, tc0, (q2 + ((p0 + q0 + 1) >> 1) - 2 * q1) >> 1)) as u64)
+            }
+            st8(plane, base - st, klemm(p0 + delta))
+            st8(plane, base, klemm(q0 - delta))
+        }
+    } else {
+        if chroma {
+            st8(plane, base - st, ((2 * p1 + p0 + q1 + 2) >> 2) as u64)
+            st8(plane, base, ((2 * q1 + q0 + p1 + 2) >> 2) as u64)
+        } else {
+            let p2: i64 = ld8(plane, base - 3 * st) as i64
+            let q2: i64 = ld8(plane, base + 2 * st) as i64
+            let p3: i64 = ld8(plane, base - 4 * st) as i64
+            let q3: i64 = ld8(plane, base + 3 * st) as i64
+            var ap: i64 = p2 - p0
+            if ap < 0 { ap = 0 - ap }
+            var aq: i64 = q2 - q0
+            if aq < 0 { aq = 0 - aq }
+            let klein: bool = d0 < ((alpha >> 2) + 2)
+            if ap < beta && klein {
+                st8(plane, base - st, ((p2 + 2 * p1 + 2 * p0 + 2 * q0 + q1 + 4) >> 3) as u64)
+                st8(plane, base - 2 * st, ((p2 + p1 + p0 + q0 + 2) >> 2) as u64)
+                st8(plane, base - 3 * st, ((2 * p3 + 3 * p2 + p1 + p0 + q0 + 4) >> 3) as u64)
+            } else {
+                st8(plane, base - st, ((2 * p1 + p0 + q1 + 2) >> 2) as u64)
+            }
+            if aq < beta && klein {
+                st8(plane, base, ((q2 + 2 * q1 + 2 * q0 + 2 * p0 + p1 + 4) >> 3) as u64)
+                st8(plane, base + st, ((q2 + q1 + q0 + p0 + 2) >> 2) as u64)
+                st8(plane, base + 2 * st, ((2 * q3 + 3 * q2 + q1 + q0 + p0 + 4) >> 3) as u64)
+            } else {
+                st8(plane, base, ((2 * q1 + q0 + p1 + 2) >> 2) as u64)
+            }
+        }
+    }
+}
+
+fn deblock() {
+    if sl_nodeblock == 1 { return }
+    let py: u64 = h264_plane_y(cur_slot)
+    let pu: u64 = h264_plane_u(cur_slot)
+    let pv: u64 = h264_plane_v(cur_slot)
+    let cw: u64 = s_w >> 1
+    var mby: u64 = 0
+    while mby < s_mbh {
+        var mbx: u64 = 0
+        while mbx < s_mbw {
+            let mQ: u64 = mb_at(mbx, mby)
+            // ---- senkrechte Kanten
+            var e: u64 = 0
+            while e < 4 {
+                var mP: u64 = mQ
+                var weiter: bool = true
+                if e == 0 {
+                    if mbx == 0 { weiter = false }
+                    else { mP = mb_at(mbx - 1, mby) }
+                }
+                if weiter {
+                    var y: u64 = 0
+                    while y < 16 {
+                        let by: u64 = y >> 2
+                        let iQ: u64 = by * 4 + e
+                        var iP: u64 = by * 4 + 3
+                        if e > 0 { iP = by * 4 + e - 1 }
+                        let s: u64 = bs_of(mP, iP, mQ, iQ, e == 0)
+                        if s > 0 {
+                            let qav: i64 = (mb_qp[(mP) as usize] + mb_qp[(mQ) as usize] + 1) >> 1
+                            let ia: u64 = (clip3(0, 51, qav + sl_alpha) + 52) as u64
+                            let ib: u64 = (clip3(0, 51, qav + sl_beta) + 52) as u64
+                            let alpha: i64 = h264tab.ALPHA[(ia) as usize] as i64
+                            let beta: i64 = h264tab.BETA[(ib) as usize] as i64
+                            if alpha > 0 && beta > 0 {
+                                var tc0: i64 = 0
+                                if s < 4 { tc0 = h264tab.TC0[((ia * 4 + s)) as usize] as i64 }
+                                filter_line(py, (mby * 16 + y) * s_w + mbx * 16 + e * 4,
+                                            1, s, alpha, beta, tc0, false)
+                            }
+                        }
+                        y = y + 1
+                    }
+                    if (e & 1) == 0 {
+                        var y2: u64 = 0
+                        while y2 < 8 {
+                            let by: u64 = y2 >> 1
+                            let iQ: u64 = by * 4 + e
+                            var iP: u64 = by * 4 + 3
+                            if e > 0 { iP = by * 4 + e - 1 }
+                            let s: u64 = bs_of(mP, iP, mQ, iQ, e == 0)
+                            if s > 0 {
+                                let qav: i64 = (qpc_of(mb_qp[(mP) as usize] + p_cqpoff)
+                                              + qpc_of(mb_qp[(mQ) as usize] + p_cqpoff) + 1) >> 1
+                                let ia: u64 = (clip3(0, 51, qav + sl_alpha) + 52) as u64
+                                let ib: u64 = (clip3(0, 51, qav + sl_beta) + 52) as u64
+                                let alpha: i64 = h264tab.ALPHA[(ia) as usize] as i64
+                                let beta: i64 = h264tab.BETA[(ib) as usize] as i64
+                                if alpha > 0 && beta > 0 {
+                                    var tc0: i64 = 0
+                                    if s < 4 { tc0 = h264tab.TC0[((ia * 4 + s)) as usize] as i64 }
+                                    let base: u64 = (mby * 8 + y2) * cw + mbx * 8 + e * 2
+                                    filter_line(pu, base, 1, s, alpha, beta, tc0, true)
+                                    filter_line(pv, base, 1, s, alpha, beta, tc0, true)
+                                }
+                            }
+                            y2 = y2 + 1
+                        }
+                    }
+                }
+                e = e + 1
+            }
+            // ---- waagerechte Kanten
+            var e2: u64 = 0
+            while e2 < 4 {
+                var mP2: u64 = mQ
+                var weiter2: bool = true
+                if e2 == 0 {
+                    if mby == 0 { weiter2 = false }
+                    else { mP2 = mb_at(mbx, mby - 1) }
+                }
+                if weiter2 {
+                    var x: u64 = 0
+                    while x < 16 {
+                        let bx: u64 = x >> 2
+                        let iQ: u64 = e2 * 4 + bx
+                        var iP: u64 = 12 + bx
+                        if e2 > 0 { iP = (e2 - 1) * 4 + bx }
+                        let s: u64 = bs_of(mP2, iP, mQ, iQ, e2 == 0)
+                        if s > 0 {
+                            let qav: i64 = (mb_qp[(mP2) as usize] + mb_qp[(mQ) as usize] + 1) >> 1
+                            let ia: u64 = (clip3(0, 51, qav + sl_alpha) + 52) as u64
+                            let ib: u64 = (clip3(0, 51, qav + sl_beta) + 52) as u64
+                            let alpha: i64 = h264tab.ALPHA[(ia) as usize] as i64
+                            let beta: i64 = h264tab.BETA[(ib) as usize] as i64
+                            if alpha > 0 && beta > 0 {
+                                var tc0: i64 = 0
+                                if s < 4 { tc0 = h264tab.TC0[((ia * 4 + s)) as usize] as i64 }
+                                filter_line(py, (mby * 16 + e2 * 4) * s_w + mbx * 16 + x,
+                                            s_w, s, alpha, beta, tc0, false)
+                            }
+                        }
+                        x = x + 1
+                    }
+                    if (e2 & 1) == 0 {
+                        var x2: u64 = 0
+                        while x2 < 8 {
+                            let bx: u64 = x2 >> 1
+                            let iQ: u64 = e2 * 4 + bx
+                            var iP: u64 = 12 + bx
+                            if e2 > 0 { iP = (e2 - 1) * 4 + bx }
+                            let s: u64 = bs_of(mP2, iP, mQ, iQ, e2 == 0)
+                            if s > 0 {
+                                let qav: i64 = (qpc_of(mb_qp[(mP2) as usize] + p_cqpoff)
+                                              + qpc_of(mb_qp[(mQ) as usize] + p_cqpoff) + 1) >> 1
+                                let ia: u64 = (clip3(0, 51, qav + sl_alpha) + 52) as u64
+                                let ib: u64 = (clip3(0, 51, qav + sl_beta) + 52) as u64
+                                let alpha: i64 = h264tab.ALPHA[(ia) as usize] as i64
+                                let beta: i64 = h264tab.BETA[(ib) as usize] as i64
+                                if alpha > 0 && beta > 0 {
+                                    var tc0: i64 = 0
+                                    if s < 4 { tc0 = h264tab.TC0[((ia * 4 + s)) as usize] as i64 }
+                                    let base: u64 = (mby * 8 + e2 * 2) * cw + mbx * 8 + x2
+                                    filter_line(pu, base, cw, s, alpha, beta, tc0, true)
+                                    filter_line(pv, base, cw, s, alpha, beta, tc0, true)
+                                }
+                            }
+                            x2 = x2 + 1
+                        }
+                    }
+                }
+                e2 = e2 + 1
+            }
+            mbx = mbx + 1
+        }
+        mby = mby + 1
+    }
+}
+
+// =============================================== der Slice-Kopf, 7.3.3
+static mut first_mb: u64 = 0
+
+fn parse_slice_header(nal_type: u64, nal_ref_idc: u64) -> bool {
+    first_mb = ue()
+    let st: u64 = ue()
+    if st > 9 { h_err = E_UNGERADE; return false }
+    sl_type = st % 5
+    if sl_type != 0 && sl_type != 2 {
+        h_err = E_ART        // B, SP, SI sind nicht gebaut
+        return false
+    }
+    ue()                     // pic_parameter_set_id
+    if !p_da || !s_da { h_err = E_FORM; return false }
+    un(s_log2fn)             // frame_num
+    let idr: bool = nal_type == 5
+    if idr { ue() }          // idr_pic_id
+    if s_poctype == 0 {
+        un(s_log2poc)
+        if p_pocpresent == 1 { se() }
+    }
+    sl_nref0 = p_nref0
+    if sl_type == 0 {
+        if u1() == 1 {
+            sl_nref0 = ue() + 1
+            if sl_nref0 > 16 { h_err = E_UNGERADE; return false }
+        }
+    }
+    // ref_pic_list_modification
+    if sl_type != 2 {
+        if u1() == 1 {
+            var n: u64 = 0
+            while n < 64 {
+                let op: u64 = ue()
+                if op == 3 { break }
+                ue()
+                n = n + 1
+            }
+        }
+    }
+    // dec_ref_pic_marking
+    if nal_ref_idc > 0 {
+        if idr {
+            u1()             // no_output_of_prior_pics_flag
+            u1()             // long_term_reference_flag
+        } else {
+            if u1() == 1 {   // adaptive_ref_pic_marking_mode_flag
+                var n2: u64 = 0
+                while n2 < 64 {
+                    let op: u64 = ue()
+                    if op == 0 { break }
+                    if op == 1 || op == 3 { ue() }
+                    if op == 2 { ue() }
+                    if op == 3 || op == 6 { ue() }
+                    if op == 4 { ue() }
+                    n2 = n2 + 1
+                }
+            }
+        }
+    }
+    sl_qp = p_qp + se()
+    if sl_qp < 0 || sl_qp > 51 { h_err = E_UNGERADE; return false }
+    sl_nodeblock = 0
+    sl_alpha = 0
+    sl_beta = 0
+    if p_deblockctl == 1 {
+        let d: u64 = ue()
+        if d > 2 { h_err = E_UNGERADE; return false }
+        sl_nodeblock = d
+        if d != 1 {
+            sl_alpha = se() * 2
+            sl_beta = se() * 2
+        }
+    }
+    if bs_over { h_err = E_DATEN; return false }
+    return true
+}
+
+// Die Makroblockschleife. In einem P-Slice steht VOR jedem kodierten
+// Makroblock ein mb_skip_run -- die Zahl der uebersprungenen.
+fn decode_slice_data() -> bool {
+    let total: u64 = s_mbw * s_mbh
+    var idx: u64 = first_mb
+    var qp: i64 = sl_qp
+    while idx < total {
+        if sl_type == 0 {
+            if !more_rbsp() { return true }
+            let run: u64 = ue()
+            if run > total { h_err = E_UNGERADE; return false }
+            var r: u64 = 0
+            while r < run && idx < total {
+                do_skip(idx % s_mbw, idx / s_mbw, qp)
+                idx = idx + 1
+                r = r + 1
+            }
+            if idx >= total { return true }
+            if !more_rbsp() { return true }
+        }
+        qp = decode_mb(idx % s_mbw, idx / s_mbw, qp)
+        if qp == QPFEHLER { return false }
+        idx = idx + 1
+        if bs_over { h_err = E_DATEN; return false }
+    }
+    return true
+}
+
+// ================================================== die Aussenseite
+fn h264_reset() {
+    h_err = E_OK
+    s_da = false
+    p_da = false
+    n_frames = 0
+    ref_n = 0
+    cur_slot = 0
+    ref_slot[(0) as usize] = 0
+    ref_slot[(1) as usize] = 1
+    ref_slot[(2) as usize] = 2
+    ref_slot[(3) as usize] = 3
+    s_w = 0
+    s_h = 0
+    s_mbw = 0
+    s_mbh = 0
+}
+
+fn mbs_clear() {
+    var i: u64 = 0
+    while i < MAXMB {
+        mb_done[(i) as usize] = 0 as u8
+        mb_intra[(i) as usize] = 0 as u8
+        mb_type[(i) as usize] = 0
+        mb_cbp[(i) as usize] = 0
+        mb_qp[(i) as usize] = 0
+        mb_i16[(i) as usize] = 0
+        mb_cpred[(i) as usize] = 0
+        i = i + 1
+    }
+    var k: u64 = 0
+    while k < MAXMB * 16 {
+        b_i4[(k) as usize] = 2
+        b_mvx[(k) as usize] = 0
+        b_mvy[(k) as usize] = 0
+        b_ref[(k) as usize] = -1
+        k = k + 1
+    }
+    var z: u64 = 0
+    while z < MAXMB * 24 { b_nz[(z) as usize] = 0; z = z + 1 }
+}
+
+// Einen freien Speicher fuer das naechste Bild waehlen: den, der
+// nicht als Referenz gebraucht wird.
+fn pick_slot() -> u64 {
+    var s: u64 = 0
+    while s < NSLOT {
+        var belegt: bool = false
+        var i: u64 = 0
+        while i < ref_n {
+            if ref_slot[(i) as usize] == s { belegt = true }
+            i = i + 1
+        }
+        if !belegt { return s }
+        s = s + 1
+    }
+    return NSLOT - 1
+}
+
+// Den ganzen Strom dekodieren. Jedes fertige Bild geht durch `cb`
+// -- aber Firn hat hier keine Rueckrufe, also liegt das jeweils
+// letzte Bild danach in `cur_slot` und `h264_frames()` sagt, wieviele
+// es waren. Wer jedes Bild braucht, ruft `h264_decode_step`.
+fn h264_decode(p: u64, n: u64) -> bool {
+    h_err = E_OK
+    n_frames = 0
+    ref_n = 0
+    var von: u64 = 0
+    var irgendwas: bool = false
+    while nal_next(p, n, von) {
+        von = nal_e
+        if nal_e <= nal_a { break }
+        let hdr: u64 = ld8(p, nal_a)
+        let nal_ref_idc: u64 = (hdr >> 5) & 3
+        let nal_type: u64 = hdr & 31
+        if (hdr & 128) != 0 {
+            // forbidden_zero_bit -- der Strom ist verfaelscht
+            h_err = E_DATEN
+            return false
+        }
+        if nal_type == 7 || nal_type == 8 || nal_type == 1 || nal_type == 5 {
+            if !rbsp_fill(p, nal_a + 1, nal_e) {
+                h_err = E_GROSS
+                return false
+            }
+            bit_init((&rb[(0) as usize]) as u64, rb_n)
+            if nal_type == 7 {
+                if !parse_sps() { return false }
+            } else if nal_type == 8 {
+                if !parse_pps() { return false }
+            } else {
+                if !s_da || !p_da { h_err = E_FORM; return false }
+                if !parse_slice_header(nal_type, nal_ref_idc) { return false }
+                if nal_type == 5 { ref_n = 0 }
+                cur_slot = pick_slot()
+                mbs_clear()
+                if !decode_slice_data() { return false }
+                deblock()
+                n_frames = n_frames + 1
+                irgendwas = true
+                // Das fertige Bild wird Referenz 0.
+                if nal_ref_idc > 0 {
+                    var i: u64 = NREF - 1
+                    while i > 0 {
+                        ref_slot[(i) as usize] = ref_slot[((i - 1)) as usize]
+                        i = i - 1
+                    }
+                    ref_slot[(0) as usize] = cur_slot
+                    if ref_n < NREF { ref_n = ref_n + 1 }
+                }
+            }
+        }
+    }
+    if !irgendwas {
+        if h_err == E_OK { h_err = E_FORM }
+        return false
+    }
+    return true
+}
+
+// YUV 4:2:0 nach RGB (BT.601), Festkomma. Die vier Konstanten und die
+// Klemmung sind DIESELBEN wie in `jpeg.fi` -- der einzige Block, der
+// aus dem JPEG-Dekodierer woertlich weiterlebt.
+fn h264_to_rgb(slot: u64, out: u64, outcap: u64) -> bool {
+    let w: u64 = h264_width()
+    let h: u64 = h264_height()
+    if w == 0 || h == 0 { return false }
+    if w * h * 4 > outcap { h_err = E_GROSS; return false }
+    let py: u64 = h264_plane_y(slot)
+    let pu: u64 = h264_plane_u(slot)
+    let pv: u64 = h264_plane_v(slot)
+    let cw: u64 = s_w >> 1
+    let ox: u64 = s_cropl * 2
+    let oy: u64 = s_cropt * 2
+    var y: u64 = 0
+    while y < h {
+        var x: u64 = 0
+        while x < w {
+            let Y: i64 = ld8(py, (oy + y) * s_w + ox + x) as i64
+            let cb: i64 = (ld8(pu, ((oy + y) >> 1) * cw + ((ox + x) >> 1)) as i64) - 128
+            let cr: i64 = (ld8(pv, ((oy + y) >> 1) * cw + ((ox + x) >> 1)) as i64) - 128
+            let r: u64 = klemm(Y + (91881 * cr) / 65536)
+            let g: u64 = klemm(Y - (22554 * cb + 46802 * cr) / 65536)
+            let b: u64 = klemm(Y + (116130 * cb) / 65536)
+            __mmio_write32((out + (y * w + x) * 4) as *mut u32,
+                ((255 << 24) | (r << 16) | (g << 8) | b) as u32)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    return true
+}
+
+// =========================================== schrittweise dekodieren
+//
+// `h264_decode` laeuft den ganzen Strom durch und laesst am Ende das
+// letzte Bild stehen. Wer JEDES Bild braucht (die Abnahme rechnet je
+// Bild eine Pruefsumme), nimmt diesen Weg:
+//
+//     h264_open(p, n)
+//     while h264_next() { ... h264_cur_slot() ... }
+//
+// `h264_next` liefert falsch, wenn der Strom zu Ende ist ODER ein
+// Fehler auftrat -- `h264_err()` unterscheidet die beiden.
+static mut st_p: u64 = 0
+static mut st_n: u64 = 0
+static mut st_von: u64 = 0
+
+fn h264_stride() -> u64 { return s_w }
+fn h264_cstride() -> u64 { return s_w >> 1 }
+fn h264_cur_slot() -> u64 { return cur_slot }
+
+fn h264_open(p: u64, n: u64) {
+    h264_reset()
+    st_p = p
+    st_n = n
+    st_von = 0
+}
+
+fn h264_next() -> bool {
+    while nal_next(st_p, st_n, st_von) {
+        st_von = nal_e
+        if nal_e <= nal_a { return false }
+        let hdr: u64 = ld8(st_p, nal_a)
+        let nal_ref_idc: u64 = (hdr >> 5) & 3
+        let nal_type: u64 = hdr & 31
+        if (hdr & 128) != 0 { h_err = E_DATEN; return false }
+        if nal_type == 7 || nal_type == 8 || nal_type == 1 || nal_type == 5 {
+            if !rbsp_fill(st_p, nal_a + 1, nal_e) { h_err = E_GROSS; return false }
+            bit_init((&rb[(0) as usize]) as u64, rb_n)
+            if nal_type == 7 {
+                if !parse_sps() { return false }
+            } else if nal_type == 8 {
+                if !parse_pps() { return false }
+            } else {
+                if !s_da || !p_da { h_err = E_FORM; return false }
+                if !parse_slice_header(nal_type, nal_ref_idc) { return false }
+                if nal_type == 5 { ref_n = 0 }
+                cur_slot = pick_slot()
+                mbs_clear()
+                if !decode_slice_data() { return false }
+                deblock()
+                n_frames = n_frames + 1
+                if nal_ref_idc > 0 {
+                    var i: u64 = NREF - 1
+                    while i > 0 {
+                        ref_slot[(i) as usize] = ref_slot[((i - 1)) as usize]
+                        i = i - 1
+                    }
+                    ref_slot[(0) as usize] = cur_slot
+                    if ref_n < NREF { ref_n = ref_n + 1 }
+                }
+                return true
+            }
+        }
+    }
+    return false
+}
