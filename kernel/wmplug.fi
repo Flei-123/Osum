@@ -144,6 +144,9 @@ const S_GRANTS: u64 = 0x38
 const S_DESK: u64 = 0x40 // die sichtbare Arbeitsflaeche
 const S_DDIRTY: u64 = 0x48 // 1 = die Flaechenzuordnung hat sich geaendert
 const S_FAIL: u64 = 0x50
+// 1 = der Kehrbesen kehrt gerade. Siehe `sweep` -- er darf nicht in
+// sich selbst hineinlaufen.
+const S_BUSY: u64 = 0x58
 
 // ein Eintrag der Gewaehrungstafel: Name (16), Maske (8), Rechte (8)
 const MAX_GRANT: u64 = 16
@@ -613,13 +616,39 @@ fn touch(state: u64, i: u64) {
 // und nichts zu tun hat, ist nicht traege, sondern still. Bestraft wird,
 // wer GERUFEN WURDE und nicht kommt.
 fn sweep(state: u64) -> u64 {
+    // DER KEHRBESEN DARF NICHT IN SICH SELBST HINEINLAUFEN.
+    //
+    // GEMESSENER BEFUND (Absturzlauf des Abnahmelaufs): auf der Leitung
+    // stand `wmplug: tot platz=0 pid=6` ZWEIMAL, die zweite Zeile
+    // mitten in die erste hineingeschrieben, und die Bilanz meldete
+    // `kicks=2` fuer EINEN abgestuerzten Prozess.
+    //
+    // Der Grund: `reap` redet, bevor es raeumt, und `serial.puts` ist
+    // langsam. Faellt waehrenddessen der Zeitgeber herein, laeuft
+    // `wm.poll` -> `sweep` -> `reap` ein zweites Mal -- und sieht den
+    // Platz noch als U_LEBT, weil der erste Durchlauf noch in seiner
+    // Ausgabe steckt. Beide melden denselben Toten, beide zaehlen ihn.
+    //
+    // Das Ergebnis war nie falsch (der Platz ging frei, der Schreibtisch
+    // lief weiter), aber die ZAHL war falsch, und eine Runde, die ihre
+    // Zusagen an Zahlen haengt, kann damit nicht leben.
+    //
+    // Zwei Zeilen, kein Sperren, kein Warten: wer den Besen schon in der
+    // Hand hat, kehrt zu Ende; der zweite geht weiter und kommt beim
+    // naechsten Tick wieder.
+    if sg(state, S_BUSY) != 0 {
+        return 0
+    }
+    ss(state, S_BUSY, 1)
     let jetzt: u64 = kstate.get(state, kstate.TICKS)
     // ERST DIE TOTEN, DANN DIE TRAEGEN. Ein abgestuerztes Plugin hat
     // meist auch etwas liegen; wer zuerst die Frist prueft, schreibt
     // "grund=2" (Frist) ueber einen Absturz und verliert damit genau
     // die Auskunft, wegen der die Zeile da ist.
     let tot: u64 = reap(state, jetzt)
-    return tot + sweep_at(state, jetzt)
+    let traege: u64 = sweep_at(state, jetzt)
+    ss(state, S_BUSY, 0)
+    return tot + traege
 }
 
 // LEBT DER PROZESS HINTER DIESEM PLATZ NOCH?
