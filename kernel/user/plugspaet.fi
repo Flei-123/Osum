@@ -1,0 +1,172 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/plugspaet.fi -- /bin/uhrspaet, DIE GEGENPROBE ZUM SCHALTER.
+//
+// Die Zusage der Runde lautet: ein Plugin laesst sich ZUR LAUFZEIT
+// ein- und ausschalten, ohne dass der Fensterserver neu startet. Das
+// Abschalten war schon gemessen (`wmplug disable uhr` -> der Kern
+// meldet `unreg uhr grund=4`). Das EINSCHALTEN war es nicht: die
+// Rechte wurden zwar in die Gewaehrungstafel geschrieben, aber die
+// liest der Kern beim ANMELDEN -- ein Widget, das schon lief, blieb
+// also ohne Recht. Jetzt uebertraegt `do_pluggrant` neue Rechte auch
+// auf laufende Plaetze (kernel/sysgui.fi), und dieses Programm ist der
+// Ablauf, an dem man das SIEHT:
+//
+//   1. /bin/pluguhr starten -- OHNE jede Gewaehrung. Der Kern gibt ihm
+//      R_DEFAULT (0x1F), also kein R_ACT_BAR; das Widget meldet
+//      `pluguhr: KEIN recht R_ACT_BAR` und schickt vergeblich weiter.
+//   2. eine Weile warten (das erste Foto entsteht hier: leere Leiste).
+//   3. die Rechte gewaehren: WM_PLUG_GRANT (2126) mit der Maske aus
+//      /etc/wmplug.conf -- genau der Aufruf, den auch
+//      `/bin/wmplug enable uhr` hinunterschickt. Er steht hier direkt
+//      und nicht als zweiter Prozess, weil diese Gegenprobe EINE Sache
+//      messen soll: dass eine Gewaehrung auf einen SCHON LAUFENDEN
+//      Platz wirkt. Mit `viawmplug` nimmt dieses Programm stattdessen
+//      das Verwaltungsprogramm -- derselbe Weg, den ein Mensch ginge.
+//   4. das Widget schickt seinen naechsten Takt, und die Leiste malt
+//      ihn (das zweite Foto). Kein Neustart, kein zweiter Prozess:
+//      dieselbe Prozessnummer, dieselbe Anmeldung, neue Rechte.
+//
+//     uhrspaet [wartems=MS] [runden=N]
+//
+// Gewartet wird in Ring 3 und mit Schlaf; der Kern wartet auf dieses
+// Programm so wenig wie auf jedes andere.
+
+profile kernel
+
+import ulib
+
+export { u_start }
+
+const SYS_PLUG_GRANT: u64 = 2126
+// Dieselbe Maske wie die Zeile `uhr rechte=0x807` in /etc/wmplug.conf:
+// R_EV_WIN | R_EV_FOCUS | R_ACT_BAR. Sie steht hier ein zweites Mal,
+// weil dieses Programm keine Dateien liest; weicht sie ab, faellt es in
+// tools/wmplug/run.sh auf (dort wird die Zeile der Datei geprueft).
+const R_UHR: u64 = 0x807
+
+fn praefix(a: u64, b: u64, n: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        if __mmio_read8((a + i) as *mut u8)
+            != __mmio_read8((b + i) as *mut u8) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn wert(a: u64, at: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = at
+    while true {
+        let c: u64 = __mmio_read8((a + i) as *mut u8) as u64
+        if c < 48 || c > 57 {
+            break
+        }
+        v = v * 10 + (c - 48)
+        i = i + 1
+    }
+    return v
+}
+
+fn u_start(args: u64) -> u64 {
+    var p_uhr: [u8; 14] = "/bin/pluguhr\0\0"
+    var p_wmplug: [u8; 13] = "/bin/wmplug\0\0"
+    var a_uhr: [u8; 8] = "pluguhr\0"
+    var a_run: [u8; 11] = "runden=40\0\0"
+    var b0: [u8; 7] = "wmplug\0"
+    var b1: [u8; 7] = "enable\0"
+    var b2: [u8; 4] = "uhr\0"
+    var w_wart: [u8; 9] = "wartems=\0"
+    var w_rund: [u8; 8] = "runden=\0"
+    var s_u: [u8; 26] = "uhrspaet: pluguhr ohne r=\0"
+    var s_w: [u8; 25] = "uhrspaet: vor dem enable\0"
+    var s_e: [u8; 22] = "uhrspaet: enable r=\0\0\0"
+    var s_f: [u8; 21] = "uhrspaet: fertig\0\0\0\0\0"
+
+    var w_via: [u8; 10] = "viawmplug\0"
+    var s_g: [u8; 23] = "uhrspaet: grant r=\0\0\0\0\0"
+    var via: u64 = 0
+    var wartems: u64 = 5000
+    let argc: u64 = ulib.arg_count(args)
+    var ai: u64 = 1
+    while ai < argc {
+        let a: u64 = ulib.arg_at(args, ai)
+        if ulib.streq(a, (&w_via[0 as usize]) as u64) {
+            via = 1
+        } else if praefix(a, (&w_wart[0 as usize]) as u64, 8) {
+            wartems = wert(a, 8)
+        } else if praefix(a, (&w_rund[0 as usize]) as u64, 7) {
+            // Die Rundenzahl geht an das Widget weiter -- es soll den
+            // Lauf ueberdauern und nicht laenger.
+            var k: u64 = 0
+            while k < 10 {
+                __mmio_write8(((&a_run[0 as usize]) as u64 + k) as *mut u8,
+                    __mmio_read8((a + k) as *mut u8))
+                k = k + 1
+            }
+        }
+        ai = ai + 1
+    }
+    if wartems < 1000 {
+        wartems = 1000
+    }
+
+    var argv: [u64; 2] = [0 as u64; 2]
+    argv[(0) as usize] = (&a_uhr[0 as usize]) as u64
+    argv[(1) as usize] = (&a_run[0 as usize]) as u64
+    let r1: u64 = ulib.sys(ulib.SYS_EXEC, (&p_uhr[0 as usize]) as u64,
+        (&argv[0 as usize]) as u64, 2)
+    ulib.say((&s_u[0 as usize]) as u64)
+    ulib.sayn(r1)
+    ulib.nl()
+
+    // DIE MARKE STEHT AM ANFANG DES WARTENS UND NICHT AN SEINEM ENDE.
+    //
+    // GEMESSEN: stand sie am Ende, machte der Laeufer sein erstes Foto
+    // zwei Sekunden SPAETER -- und da war die Gewaehrung laengst
+    // durch und der Text stand schon in der Leiste. Beide Bilder waren
+    // gleich (null verschiedene Bildpunkte), und die Zusage, die sie
+    // belegen sollten, war damit keine. Jetzt nennt diese Zeile den
+    // Beginn eines Fensters von `wartems` Millisekunden, in dem das
+    // Widget laeuft, angemeldet ist und KEIN Recht hat.
+    ulib.say((&s_w[0 as usize]) as u64)
+    ulib.nl()
+    var rest: u64 = wartems
+    while rest > 0 {
+        var s: u64 = 500
+        if s > rest {
+            s = rest
+        }
+        let _z: u64 = ulib.sleep_ms(s)
+        rest = rest - s
+    }
+
+    if via != 0 {
+        var argv2: [u64; 3] = [0 as u64; 3]
+        argv2[(0) as usize] = (&b0[0 as usize]) as u64
+        argv2[(1) as usize] = (&b1[0 as usize]) as u64
+        argv2[(2) as usize] = (&b2[0 as usize]) as u64
+        let r2: u64 = ulib.sys(ulib.SYS_EXEC, (&p_wmplug[0 as usize]) as u64,
+            (&argv2[0 as usize]) as u64, 3)
+        ulib.say((&s_e[0 as usize]) as u64)
+        ulib.sayn(r2)
+        ulib.nl()
+    } else {
+        // SECHZEHN OKTETTE: der Kern holt sich fuenfzehn und nimmt sie
+        // alle als Namen. Mit einem kurzen Puffer gewaehrt man Rechte
+        // an "uhr" plus dem, was daneben auf dem Stapel lag -- der
+        // Fehler ist in dieser Runde schon einmal gemessen worden.
+        var nm: [u8; 16] = "uhr\0\0\0\0\0\0\0\0\0\0\0\0\0"
+        let r2: u64 = ulib.sys(SYS_PLUG_GRANT, (&nm[0 as usize]) as u64,
+            R_UHR, 0)
+        ulib.say((&s_g[0 as usize]) as u64)
+        ulib.sayn(r2)
+        ulib.nl()
+    }
+    let _s: u64 = ulib.sleep_ms(4000)
+    ulib.say((&s_f[0 as usize]) as u64)
+    ulib.nl()
+    return 0
+}

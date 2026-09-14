@@ -50,6 +50,7 @@ import pwr
 import sched
 import serial
 import tile
+import wmplug
 import vgpu
 import gfx
 import time
@@ -1967,6 +1968,11 @@ fn surface(state: u64) {
     // eigenen Baeume und raeumen sie wieder ab. Danach steht der Baum
     // leer und der Fensterserver kann ihn benutzen.
     tile_stage(state, w, h)
+    // RUNDE WMPLUGIN. Genau wie oben: der Selbsttest der Plugintafel
+    // raeumt hinter sich auf (`wmplug.selftest` setzt am Ende `init`),
+    // also darf er VOR dem ersten Fenster laufen. Ohne `plugtest`
+    // passiert hier nichts.
+    wmplug_stage(state)
     let willtile: bool = kstate.mode_on(state, kstate.M_TILE)
     let tileshot: bool =
         kstate.mode_on(state, kstate.M_TILESHOT)
@@ -7042,6 +7048,45 @@ fn say_wm_input(state: u64) {
     serial.puts((&s_s[0]) as u64)
     serial.hex(ps2m.status())
     serial.nl()
+    wmplug_bilanz(state)
+}
+
+// RUNDE WMPLUGIN: DIE BILANZ AM ENDE DES HALTENS.
+//
+// Sie steht hier und nicht beim Hochlauf, weil sie ueber den LAUF
+// Auskunft gibt und nicht ueber den Aufbau: wie viele Plugins noch
+// angemeldet sind, wie viele Ereignisse eingelegt und abgeholt wurden,
+// wie viele Plaetze geraeumt werden mussten (Absturz oder Frist), wie
+// viele Handlungen an den Rechten scheiterten und wie viele Tasten ein
+// Plugin bekommen hat -- und damit kein Fenster. Ohne diese Zeile
+// muesste ein Laeufer aus einzelnen Meldungen zusammenzaehlen, und eine
+// Summe, die der Laeufer selbst bildet, belegt weniger als eine, die der
+// Kern nennt.
+fn wmplug_bilanz(state: u64) {
+    if !wmplug.ready(state) {
+        return
+    }
+    var s_b: [u8; 16] = "wmplug: bilanz  "
+    var s_p: [u8; 9] = "  plugs= "
+    var s_i: [u8; 8] = "  evin= "
+    var s_o: [u8; 9] = "  evout= "
+    var s_k: [u8; 10] = "  kicks=  "
+    var s_d: [u8; 9] = "  deny=  "
+    var s_t: [u8; 12] = "  plugkeys= "
+    serial.puts((&s_b[0]) as u64)
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(wmplug.plugs(state))
+    serial.puts((&s_i[0]) as u64)
+    serial.dec(wmplug.events_in(state))
+    serial.puts((&s_o[0]) as u64)
+    serial.dec(wmplug.events_out(state))
+    serial.puts((&s_k[0]) as u64)
+    serial.dec(wmplug.kicks(state))
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(wmplug.denials(state))
+    serial.puts((&s_t[0]) as u64)
+    serial.dec(wm.plugkeys(state))
+    serial.nl()
 }
 
 fn say_font(state: u64, f: u64, px: u64, name: u64, s_font: u64, s_g: u64,
@@ -7554,6 +7599,49 @@ fn tile_time(state: u64, n: u64, w: u64, h: u64, pruefen: bool) -> u64 {
         i = i + 1
     }
     return us_of(state, apic.tsc() - t)
+}
+
+// RUNDE WMPLUGIN: DER SELBSTTEST DER PLUGINTAFEL UND DIE KURZE FRIST.
+//
+// Der Selbsttest laeuft OHNE Bildschirm und OHNE Ring 3 -- er prueft
+// dreizehn Zusagen des Moduls gegen sich selbst (falsche Fassung wird
+// abgewiesen, Ring laeuft ueber ohne Schaden, Frist greift, Handlung
+// ohne Recht wird gezaehlt). Er raeumt die Tafel am Ende ab.
+fn wmplug_stage(state: u64) {
+    if kstate.mode_on(state, kstate.M_PLUGTEST) {
+        wmplug.selftest(state)
+        // Der Selbsttest hat die Tafel neu aufgesetzt; ob sie offen ist,
+        // entscheidet nach wie vor die Kommandozeile.
+        if !kstate.mode_on(state, kstate.M_WMPLUG)
+            || kstate.mode_on(state, kstate.M_PLUGAUS) {
+            wmplug.set_ready(state, false)
+        }
+    }
+    // `plugfrist`: DREI TICKS statt fuenfzig. Das ist eine ABKUERZUNG
+    // FUER DEN ABNAHMELAUF und keine Vorgabe fuer den Alltag -- sie
+    // steht hier, damit die Haenger-Gegenprobe in 30 ms faellt und
+    // nicht in einer halben Sekunde.
+    if kstate.mode_on(state, kstate.M_PLUGFRIST) {
+        wmplug.set_frist(state, 3)
+    }
+    var s_p: [u8; 9] = "wmplug: \0"
+    var s_a: [u8; 5] = "abi=\0"
+    var s_s: [u8; 9] = "  tafel=\0"
+    var s_f: [u8; 9] = "  frist=\0"
+    var s_z: [u8; 4] = " zu\0"
+    var s_o: [u8; 7] = " offen\0"
+    serial.puts((&s_p[0]) as u64)
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(wmplug.WMP_ABI)
+    serial.puts((&s_s[0]) as u64)
+    if wmplug.ready(state) {
+        serial.puts((&s_o[0]) as u64)
+    } else {
+        serial.puts((&s_z[0]) as u64)
+    }
+    serial.puts((&s_f[0]) as u64)
+    serial.dec(wmplug.frist(state))
+    serial.nl()
 }
 
 fn tile_stage(state: u64, w: u64, h: u64) {

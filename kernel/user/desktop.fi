@@ -283,6 +283,141 @@ fn all_paint() {
     }
 }
 
+// ====================================== RUNDE WMPLUGIN: DER AUTOSTART
+//
+// WAS HIER GELOEST WIRD. Fenstererweiterungen sind in diesem System
+// Ring-3-Prozesse (kernel/wmplug.fi). Zwei Schritte gehoeren zu jedem:
+// die Rechte gewaehren (`wmplug enable <name>`, das ist WM_PLUG_GRANT
+// und geht nur als root) und das Programm starten. Bis zu dieser Runde
+// erledigte das ein eigenes Hilfsprogramm (/bin/uhrstart), das nichts
+// anderes tat -- eine benannte Abkuerzung, die hier ihr Ende findet:
+// jetzt steht die Liste in einer DATEI, und der Schreibtisch liest sie.
+//
+// DAS FORMAT IST EINE ZEILE JE ERWEITERUNG:
+//
+//     uhr runden=30          # Name, dahinter Woerter FUER DAS PLUGIN
+//     regel demo
+//
+// Der Name geht an `wmplug enable`, das die Rechte und die Frist aus
+// /etc/wmplug.conf holt und das Programm aus `prog=` startet; die
+// restlichen Woerter reicht es an das Plugin durch. Alles hinter `#`
+// ist Bemerkung.
+//
+// WARUM DER SCHREIBTISCH UND NICHT DER KERN: der Kern liest keine
+// Dateien und macht keine Namenspolitik (dieselbe Regel wie bei der
+// Gewaehrungstafel). Und warum nicht die Leiste: der Schreibtisch ist
+// das erste Programm der Sitzung, das sicher als Wurzel laeuft.
+//
+// FEHLT DIE DATEI, PASSIERT NICHTS -- ein Schreibtisch ohne
+// Erweiterungen ist der Normalfall und keine Stoerung.
+fn autostart() {
+    var pfad: [u8; 24] = "/etc/wmplug.autostart\0\0\0"
+    var p_wm: [u8; 13] = "/bin/wmplug\0\0"
+    var a_wm: [u8; 7] = "wmplug\0"
+    var a_en: [u8; 7] = "enable\0"
+    var s_kl: [u8; 34] = "desktop: autostart keine Liste\0\0\0\0"
+    var s_st: [u8; 21] = "desktop: autostart [\0"
+    var s_rc: [u8; 8] = "] pid=\0\0"
+    var puffer: [u8; 1024] = [0 as u8; 1024]
+    var zeile: [u8; 128] = [0 as u8; 128]
+    var wort: [u8; 4096] = [0 as u8; 4096]
+    var argv: [u64; 8] = [0 as u64; 8]
+
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&pfad[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        ulib.say((&s_kl[0 as usize]) as u64)
+        ulib.nl()
+        return
+    }
+    // ERST DIE SITZUNG, DANN DIE ERWEITERUNGEN. Zwei Sekunden, und die
+    // Zahl ist gemessen: `desk` startet nach dem Schreibtisch noch
+    // Leiste und Starter, und ein SYS_EXEC laedt das ganze Abbild IM
+    // Systemaufruf (1,4 Megaoktett, `elf: start ... pages=432`).
+    // Waehrenddessen kommt kein anderer Prozess dran -- ein Plugin, das
+    // sich vorher angemeldet hat, holt in dieser Zeit NICHTS ab, und
+    // der Kehrbesen des Kerns hat recht, wenn er es hinauswirft
+    // (gemessen: `wmplug: unreg uhr grund=2 holte=1`). Das ist keine
+    // Schwaeche der Frist, sondern der Preis eines synchronen
+    // Programmstarts; die Erweiterung wartet, bis er vorbei ist.
+    ulib.sleep_ms(2000)
+    let buf: u64 = (&puffer[0 as usize]) as u64
+    var len: u64 = 0
+    var weiter: bool = true
+    while weiter && len < 1000 {
+        let got: u64 = ulib.sys(ulib.SYS_READ, fd, buf + len, 1000 - len)
+        if ulib.bad(got) || got == 0 {
+            weiter = false
+        } else {
+            len = len + got
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+
+    let zp: u64 = (&zeile[0 as usize]) as u64
+    let wp: u64 = (&wort[0 as usize]) as u64
+    var i: u64 = 0
+    while i < len {
+        // Eine Zeile herausschneiden, Bemerkungen fallen dabei weg.
+        var n: u64 = 0
+        var kommentar: bool = false
+        while i < len && (__mmio_read8((buf + i) as *mut u8)) as u64 != 10 {
+            let c: u64 = (__mmio_read8((buf + i) as *mut u8)) as u64
+            if c == 35 {
+                kommentar = true
+            }
+            if !kommentar && n + 1 < 128 && c != 13 && c != 9 {
+                __mmio_write8((zp + n) as *mut u8, c as u8)
+                n = n + 1
+            }
+            i = i + 1
+        }
+        i = i + 1
+        __mmio_write8((zp + n) as *mut u8, 0 as u8)
+        if n != 0 {
+            // DIE WOERTER LIEGEN EINZELN UND HINTEREINANDER im Puffer:
+            // `SYS_EXEC` bekommt Zeiger, und ein Zeiger auf einen
+            // Puffer, den das naechste Wort gleich wieder ueberschreibt,
+            // zeigt beim Aufruf auf das falsche Wort. Ein Fehler, den
+            // man erst am Plugin sieht.
+            var argc: u64 = 2
+            argv[(0) as usize] = (&a_wm[0 as usize]) as u64
+            argv[(1) as usize] = (&a_en[0 as usize]) as u64
+            var at: u64 = 0
+            var noch: bool = true
+            var off: u64 = 0
+            while noch && argc < 8 {
+                let na: u64 = ulib.word(zp, at, wp + off, 64)
+                if na == at {
+                    noch = false
+                } else {
+                    at = na
+                    if (__mmio_read8((wp + off) as *mut u8)) as u64 != 0 {
+                        argv[(argc) as usize] = wp + off
+                        argc = argc + 1
+                        off = off + 64
+                    }
+                }
+            }
+            if argc > 2 {
+                let rc: u64 = ulib.sys(ulib.SYS_EXEC,
+                    (&p_wm[0 as usize]) as u64,
+                    (&argv[0 as usize]) as u64, argc)
+                ulib.say((&s_st[0 as usize]) as u64)
+                ulib.say(zp)
+                ulib.say((&s_rc[0 as usize]) as u64)
+                ulib.sayn(rc)
+                ulib.nl()
+                // DEM AUFGERUFENEN ZEIT LASSEN. `wmplug enable` gewaehrt
+                // die Rechte und startet danach das Plugin; zwei Zeilen
+                // der Liste gleichzeitig zu starten hiesse, zwei
+                // SYS_EXEC ineinanderzuschieben. Gewartet wird in
+                // RING 3 -- der Kern kennt diese Liste nicht.
+                ulib.sleep_ms(400)
+            }
+        }
+    }
+}
+
 fn u_start(args: u64) -> u64 {
     dbg_setup(args)
     var s_nb: [u8; 7] = "nobild\0"
@@ -397,6 +532,8 @@ fn u_start(args: u64) -> u64 {
         sayn(c_unten)
         nl()
     }
+    autostart()
+
     // FUENF STUETZSTELLEN, und der Laeufer haelt sie gegen das Bild.
     // Sie stehen bewusst NICHT alle in einer Zeile: eine Stuetzstelle,
     // die zufaellig stimmt, faellt neben vier anderen auf.
