@@ -677,15 +677,24 @@ bootet sechs Laeufe, ruft die beiden Modullaeufer, legt die Bilder nach
 `WMPLUG_KEEP=1` behaelt das Arbeitsverzeichnis mit allen seriellen
 Mitschnitten.
 
-Stand dieses Papiers — voller Lauf, KVM, Exitcode 0:
+Stand dieses Papiers — **ein** voller Lauf, KVM, **Exitcode 0**,
+**14.09.2026, 21:08 UTC**, Arbeitsstand `a19e2ab` auf `wmplugin`:
 
 ```
-REGEL:  38 bestanden, 0 gescheitert
-WIDGET: 30 bestanden, 0 gescheitert
-WMPLUG: 139 bestanden, 0 gescheitert
+REGEL:  41 bestanden, 0 gescheitert     (tools/wmplug/regel.sh)
+WIDGET: 36 bestanden, 0 gescheitert     (tools/wmplug/widget.sh)
+WMPLUG: 207 bestanden, 0 gescheitert    (die Summe, die beiden inbegriffen)
 ```
 
-Alle Zahlen in diesem Papier stammen aus genau diesem Lauf.
+Die drei Zahlen stammen aus **demselben** Aufruf von
+`bash tools/wmplug/run.sh` — die beiden Modullaeufer werden darin
+gerufen, ihre Summen gehen in die Gesamtzahl ein. Dasselbe Tripel steht
+in `RUN.md` Abschnitt 4; weichen die beiden Stellen voneinander ab, ist
+eine davon aelter als der letzte Lauf, und dann gilt keine.
+
+Die Zahlen der Nachbesserung FIX-R3-2 kommen aus einem eigenen Laeufer
+(`bash tools/wmplug/fixr32.sh` → **32 bestanden, 0 gescheitert**,
+Abschnitt 17); er steckt nicht in der Summe oben.
 
 ---
 
