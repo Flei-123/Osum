@@ -388,7 +388,16 @@ echo "== 9. die Oberflaeche: kopieren im Editor, einfuegen im Terminal =="
 tipp() {
     python3 - "$1" <<'PY'
 import sys
-karte = {" ": "spc", "-": "minus", "/": "slash", ".": "dot",
+# RUNDE ROTABSCHNITTE: DIE TASTATUR DIESES LAUFS IST DEUTSCH.
+# Der Mitschnitt sagt es woertlich: `kbd: layout de`. Auf einer
+# deutschen Tastatur liegt der Schraegstrich auf UMSCHALT+7 --
+# `sendkey slash` schickt dagegen den Abtastcode 0x35, und der ist
+# dort das Minuszeichen (kernel/kbd.fi, `de_plain`: code 0x35 -> 45).
+# Getippt wurde deshalb `edit -etc-taskbar.conf`, eine Datei, die es
+# nicht gibt; der Editor startete nie, und `edit: ready` kam nicht.
+# Nachgesehen an einem behaltenen Lauf: alle 39 Tasten KAMEN an, nur
+# eben die falschen Zeichen. Das war kein Tasten- und kein Busproblem.
+karte = {" ": "spc", "-": "slash", "/": "shift-7", ".": "dot",
          "_": "shift-minus", "=": "equal", ",": "comma"}
 for c in sys.argv[1]:
     print("taste " + karte.get(c, c))
