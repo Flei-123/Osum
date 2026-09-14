@@ -1542,3 +1542,62 @@ Beschriftung gemeldet, vom Layout aber weggeschnitten wird, kommt durch
 die Zeichenprobe und faellt hier.
 
 ---
+
+## 19. ZUSAMMENFUEHRUNG — der Riss, der nur manchmal sichtbar war
+
+Beim Zusammenfuehren der Module fiel der Abnahmelauf ein Mal auf
+**207 bestanden, 1 gescheitert**, obwohl kein Modul etwas Falsches
+gebaut hatte. Rot war:
+
+```
+FAIL  und wmplug enable hat das Plugin WIRKLICH gestartet (SYS_EXEC)
+      -- /wmplug: start \/bin\/pluguhr rc=[0-9]+/ trifft nicht
+```
+
+Die Zusage daneben (`wmplug: reg uhr`) war gruen — das Plugin **war**
+gestartet. Es fehlte nicht die Tat, sondern die Meldung darueber.
+
+### Ursache
+
+`kernel/user/zeile.fi` (Modul FIX-R3-2, Abschnitt 17) loest genau
+dieses Problem: wer eine Zeile in fuenf `write`-Rufen hinausgibt, gibt
+fuenf Gelegenheiten, dass der Kern dazwischenschreibt. Umgestellt
+wurden damals aber nur `taskbar`, `pluguhr`, `plugregel` und
+`plugboese`. **`kernel/user/wmplug.fi` — die Verwaltung, um die es in
+der gescheiterten Zusage geht — blieb bei `ulib.say`**, und ebenso
+`plugpaar`, `plugprobe`, `plugspaet`, `plugtempo`.
+
+Der Riss lag also nicht in einem Modul, sondern zwischen zweien: das
+eine baute das Mittel, das andere kannte es nicht. Er zeigte sich nur,
+wenn der Kern im falschen Augenblick schrieb — im naechsten Lauf stand
+`wmplug: start /bin/pluguhr rc=8` unversehrt da und die Zusage war
+gruen. Genau darum ist er teuer: eine Zusage, die in vier von fuenf
+Laeufen haelt, sieht aus wie eine, die haelt.
+
+### Behebung
+
+Alle fuenf Programme geben ihre Meldungen jetzt durch `zeile.*` aus —
+eine Zeile, ein Schreibruf, Umbruch inbegriffen. Kein neuer
+Ausgabeweg: `zeile.nl()` schreibt durch dasselbe `ulib.put`.
+`wmplug.u_start` spuelt zum Schluss einmal, damit eine halbe
+Schlusszeile auf keinem der zwanzig Rueckwege verloren geht.
+
+### Beleg
+
+| Lauf | Stand | Ergebnis |
+|---|---|---|
+| 1 | wie die Builder ihn ablieferten | `WMPLUG: 207 bestanden, 1 gescheitert`, Exitcode 1 |
+| 2 | derselbe Stand, `WMPLUG_SCHNELL=1` | `WMPLUG: 128 bestanden, 0 gescheitert` — der Riss blieb zu |
+| 3 | `wmplug.fi` umgestellt | `WMPLUG: 208 bestanden, 0 gescheitert`, Exitcode 0 |
+| 4 | alle fuenf umgestellt | `WMPLUG: 208 bestanden, 0 gescheitert`, Exitcode 0 |
+
+Lauf 2 ist der wichtigere der beiden ersten: er zeigt, dass ein gruener
+Lauf hier **nichts** beweist. Erst die Umstellung nimmt der Zusage die
+Abhaengigkeit vom Zufall.
+
+### Abkuerzung, ausdruecklich benannt
+
+Dass der Riss ein Zufallsfehler war, ist aus zwei Laeufen geschlossen
+(einer rot, einer gruen) und aus der Bauart des Fehlers — **nicht** aus
+einer Laufreihe, die die Haeufigkeit misst. Wer die Rate wissen will,
+muss denselben Abschnitt zwanzig Mal fahren; das steht aus.
