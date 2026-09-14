@@ -45,11 +45,7 @@ export { u_start }
 // Dieselben Nummern wie in kernel/sys.fi. Sie stehen hier ein zweites
 // Mal, weil Ring 3 den Kern nicht importieren kann -- dieselbe
 // Doppelung wie in kernel/user/wlibc.fi, aus demselben Grund.
-const WM_INFO: u64 = 2104
-const WM_STATE: u64 = 2109
 const WM_LIST: u64 = 2110
-const WM_STRUT: u64 = 2112
-const WM_CREATE: u64 = 2100
 
 const WM_PLUG_REG: u64 = 2117
 const WM_PLUG_UNREG: u64 = 2118
@@ -64,6 +60,10 @@ const PL_RIGHTS: u64 = 5
 const PL_LOST: u64 = 8
 const PL_FRIST: u64 = 14
 const PL_DESK: u64 = 15
+// Die Frist DIESES Platzes (kernel/sys.fi, PL_PFRIST). PL_FRIST ist die
+// des Kerns; eine Regel-Engine, die fuenf Sekunden bekommen hat, will
+// FUENF melden und nicht die Vorgabe.
+const PL_PFRIST: u64 = 20
 
 const PA_MOVE: u64 = 1
 const PA_SIZE: u64 = 2
@@ -96,13 +96,12 @@ const WL_BYTES: u64 = 128
 const F_HIDDEN: u64 = 1
 const MAX_WIN: u64 = 16
 
-// WM_INFO-Felder und WM_STATE
-const WI_WORKX: u64 = 11
-const WI_WORKY: u64 = 12
-const WI_WORKW: u64 = 13
-const WI_WORKH: u64 = 14
-const WS_HIDDEN: u64 = 1
-const WE_RIGHT: u64 = 3
+// Die Arbeitsflaeche des Servers, aus WM_PLUG_INFO und OHNE eigenes
+// Fenster (kernel/sys.fi, PL_WORK*).
+const PL_WORKX: u64 = 22
+const PL_WORKY: u64 = 23
+const PL_WORKW: u64 = 24
+const PL_WORKH: u64 = 25
 
 // die Fehler (cap.E_*), als Betrag -- der Kern gibt sie negativ zurueck
 const E_RIGHTS: u64 = 2
@@ -129,8 +128,6 @@ static mut r_feld: [u64; 48] = [0 as u64; 48]
 static mut r_n: u64 = 0
 
 // Zustand des laufenden Plugins
-static mut hilfsfenster: u64 = 0 // Handle des Lesefensters, 0 = keines
-static mut eigen_id: u64 = 0 // seine Fenster-Id -- auf die keine Regel passt
 static mut n_ereignis: u64 = 0
 static mut n_treffer: u64 = 0
 static mut n_abgewiesen: u64 = 0
@@ -351,52 +348,24 @@ fn conf_lesen(pfad: u64) -> u64 {
     return r_n
 }
 
-// -------------------------------------------------- das Lesefenster
+// --------------------------------------------- KEIN LESEFENSTER MEHR
 //
-// WARUM DIESES PLUGIN EIN FENSTER ANLEGT, OBWOHL ES KEINES MALT:
-// Titel und Buendelname fremder Fenster gibt `WM_LIST` nur einer
+// HIER STAND EINE ABKUERZUNG, UND SIE IST WEG. Titel und Buendelname
+// fremder Fenster gab `WM_LIST` bis zu dieser Runde nur einer
 // Taskleiste (sysgui.fi `is_taskbar`: wer einen Schirmrand reserviert
-// hat). Eine Regel-Engine muss aber genau diese zwei Zeichenketten
-// lesen -- sonst kann sie "app=rechner" nicht entscheiden.
+// hat). Diese Regel-Engine half sich deshalb mit einem VERBORGENEN
+// Fenster von 32x16 Bildpunkten und einem Streifen von einem Punkt --
+// ein Fenster, das nie etwas malte und nur dazu da war, eine
+// Rechtepruefung zu taeuschen.
 //
-// ALSO BORGT SIE SICH DAS LESERECHT AUF DEM VORHANDENEN WEG: ein
-// Fenster, VERBORGEN gesetzt, mit einem Streifen von EINEM Bildpunkt.
-// `wm.recalc_work` ueberspringt verborgene Fenster (nachgesehen,
-// wm.fi:3376) -- die Arbeitsflaeche aendert sich dadurch um keinen
-// Punkt, und auf dem Schirm ist nichts zu sehen. `is_taskbar` fragt
-// nur nach der Streifengroesse und findet sie.
+// JETZT IST DER SCHLUESSEL DAS RECHT SELBST: `R_EV_WIN` (0x001) aus
+// der Plugintafel oeffnet WM_LIST (sysgui.fi, `darf_listen`). Wer
+// Fensterereignisse sehen darf, darf auch die Fenstertafel lesen -- er
+// erfaehrt ohnehin von jedem Fenster, das aufgeht. Ohne das Recht gibt
+// es weiter -E_RIGHTS, nachzurechnen an `listfehler=` unten.
 //
-// DAS IST EINE ABKUERZUNG UND SIE STEHT SO IM BERICHT. Richtig waere
-// ein eigenes Leserecht (R_EV_WIN als Leseschluessel fuer WM_LIST) im
-// Kern; die Datei dafuer (kernel/sysgui.fi) gehoert in dieser Runde
-// einem anderen Modul, und zwei Module fassen nie dieselbe Datei an.
-fn lesefenster() -> u64 {
-    var titel: [u8; 16] = "plugregel-lese\0\0"
-    // ZWEIUNDDREISSIG MAL SECHZEHN, nicht eins mal eins: `wm.create`
-    // weist alles darunter ab (wm.fi:2626, `w < 32 || h < 16`). Mit
-    // 1x1 kam ein Handle von 0 zurueck, das Plugin hatte kein
-    // Leserecht und meldete zu jedem Fenster "kein Satz" -- gemessen.
-    let h: u64 = ulib.sys4(WM_CREATE, 0, (32 << 16) | 16,
-        (&titel[0 as usize]) as u64, 0)
-    if is_err(h) {
-        return 0
-    }
-    // ERST VERBERGEN, DANN DEN STREIFEN SETZEN: `set_strut` rechnet die
-    // Arbeitsflaeche sofort neu, und ein sichtbares Fenster mit Streifen
-    // haette sie -- fuer einen Augenblick -- wirklich verkleinert.
-    let _v: u64 = ulib.sys(WM_STATE, h, WS_HIDDEN, 1)
-    let rc: u64 = ulib.sys(WM_STRUT, h, WE_RIGHT, 1)
-    if is_err(rc) {
-        var s_ns: [u8; 47] = "kein Leserecht (WM_STRUT verweigert), fehler=\0\0"
-        kopf()
-        s((&s_ns[0 as usize]) as u64)
-        ulib.sayu(fehlernr(rc))
-        ulib.nl()
-        return h
-    }
-    eigen_id = ulib.sys(WM_INFO, h, 4, 0) // WI_ID
-    return h
-}
+// Und die vier Zahlen der Arbeitsflaeche, fuer die frueher ein Handle
+// noetig war (WM_INFO), kommen jetzt aus WM_PLUG_INFO (PL_WORK*).
 
 // Den Satz zu dieser Fenster-Id in `liste` holen. Rueckgabe 1 = da.
 fn satz_holen(id: u64) -> u64 {
@@ -506,19 +475,16 @@ fn anwenden(i: u64, id: u64) {
 // Zahlen kommen vom Server (WM_INFO), nicht aus diesem Programm --
 // dieselbe Regel wie in /bin/tiling: keine Zahl ist von hier.
 fn zentrieren(id: u64) {
-    if hilfsfenster == 0 {
-        return
-    }
     if satz_holen(id) != 1 {
         return
     }
     let lp: u64 = (&liste[0 as usize]) as u64
     let w: u64 = __mmio_read64((lp + WL_W) as *mut u64)
     let h: u64 = __mmio_read64((lp + WL_H) as *mut u64)
-    let wx: u64 = ulib.sys(WM_INFO, hilfsfenster, WI_WORKX, 0)
-    let wy: u64 = ulib.sys(WM_INFO, hilfsfenster, WI_WORKY, 0)
-    let ww: u64 = ulib.sys(WM_INFO, hilfsfenster, WI_WORKW, 0)
-    let wh: u64 = ulib.sys(WM_INFO, hilfsfenster, WI_WORKH, 0)
+    let wx: u64 = ulib.sys(WM_PLUG_INFO, 0, PL_WORKX, 0)
+    let wy: u64 = ulib.sys(WM_PLUG_INFO, 0, PL_WORKY, 0)
+    let ww: u64 = ulib.sys(WM_PLUG_INFO, 0, PL_WORKW, 0)
+    let wh: u64 = ulib.sys(WM_PLUG_INFO, 0, PL_WORKH, 0)
     if is_err(wx) || is_err(ww) || ww < w || wh < h {
         return
     }
@@ -565,17 +531,115 @@ fn nachmessen(id: u64) {
     ulib.nl()
 }
 
+// DER NAME KOMMT NACH DEM FENSTER, UND DAS IST GEMESSEN.
+//
+// `E_WIN_OPEN` entsteht in `wm.create` -- zu diesem Zeitpunkt hat das
+// Programm seinen Buendelnamen (`WM_APP`) und oft auch seinen Titel noch
+// nicht gesetzt; das sind zwei weitere Systemaufrufe, die es erst danach
+// tut. Wer die Fenstertafel SOFORT liest, findet ein Fenster ohne Namen,
+// und `app=rechner` passt auf nichts.
+//
+// GENAU DARAN HING EINE ZUSAGE DES ABNAHMELAUFS: mit `laut` traf die
+// Regel, ohne `laut` nicht -- die zusaetzlichen Zeilen auf der
+// seriellen Leitung hatten dem Rechner die Millisekunden verschafft,
+// die er brauchte. Eine Regel-Engine, die von der Breite einer
+// Protokollzeile abhaengt, misst sich selbst.
+//
+// ALSO WIRD GEWARTET, BIS DER NAME DA IST -- hoechstens eine Sekunde,
+// in Scheiben zu 100 ms, und NUR in Ring 3. Der Kern wartet nicht; die
+// eigene Frist (5 s, /etc/wmplug.conf) deckt diese Sekunde ab.
+fn satz_mit_namen(id: u64) -> u64 {
+    let lp: u64 = (&liste[0 as usize]) as u64
+    var versuch: u64 = 0
+    while versuch < 10 {
+        if satz_holen(id) == 1 {
+            if ulib.length(lp + WL_APP) != 0
+                || ulib.length(lp + WL_TITLE) != 0 {
+                return 1
+            }
+        }
+        let _w: u64 = ulib.sleep_ms(100)
+        versuch = versuch + 1
+    }
+    return satz_holen(id)
+}
+
+// WELCHE FENSTER SCHON BEHANDELT SIND. Eine Regel wird auf ein Fenster
+// GENAU EINMAL angewandt -- wer sie bei jedem Durchgang noch einmal
+// anwendet, schiebt ein Fenster zurueck, das der Benutzer gerade
+// verschoben hat. Zweiunddreissig Plaetze reichen fuer einen
+// Schreibtisch; laeuft die Tafel voll, werden neue Fenster einfach
+// wieder behandelt, und das ist der harmlosere der beiden Fehler.
+static mut gesehen: [u64; 32] = [0 as u64; 32]
+static mut gesehen_n: u64 = 0
+
+fn schon_gesehen(id: u64) -> bool {
+    var k: u64 = 0
+    while k < gesehen_n {
+        if gesehen[(k) as usize] == id {
+            return true
+        }
+        k = k + 1
+    }
+    return false
+}
+
+fn merken(id: u64) {
+    if gesehen_n < 32 {
+        gesehen[(gesehen_n) as usize] = id
+        gesehen_n = gesehen_n + 1
+    }
+}
+
+// DIE NACHZUEGLERSUCHE, und sie ist gemessen und nicht vorsichtshalber.
+//
+// GEMESSENER BEFUND: in etwa jedem vierten Lauf kam das `E_WIN_OPEN`
+// des Rechnerfensters nicht an -- die Bilanz des Kerns zaehlte `evin=3`
+// statt `evin=4`, das Fenster war da, das Ereignis nicht. Ein
+// Ereignisring ist ein SCHNELLER Weg und keine Wahrheit: er kann
+// ueberlaufen (`P_LOST`), und zwischen Anmeldung und erstem Abholen
+// liegt immer eine Luecke.
+//
+// ALSO IST DIE FENSTERTAFEL DIE WAHRHEIT. Alle paar Sekunden geht diese
+// Schleife einmal ueber WM_LIST und behandelt, was sie noch nicht
+// gesehen hat. Das kostet MAX_WIN Aufrufe, kein Warten und keinen
+// Kernpfad ausser dem, den die Taskleiste ohnehin geht.
+fn nachzuegler() {
+    let lp: u64 = (&liste[0 as usize]) as u64
+    var p: u64 = 0
+    while p < MAX_WIN {
+        let r: u64 = ulib.sys(WM_LIST, p, lp, WL_BYTES)
+        if is_err(r) {
+            n_listfehler = n_listfehler + 1
+            return
+        }
+        if r == 1 {
+            let id: u64 = __mmio_read64((lp + WL_ID) as *mut u64)
+            if id != 0 && !schon_gesehen(id) {
+                fenster_auf(id)
+            }
+        }
+        p = p + 1
+    }
+}
+
 fn fenster_auf(id: u64) {
-    if id == 0 || id == eigen_id {
+    if id == 0 {
         return
     }
-    if satz_holen(id) != 1 {
-        var s_nf: [u8; 28] = "kein Satz zu diesem Fenster\0"
-        if laut != 0 {
-            kopf()
-            s((&s_nf[0 as usize]) as u64)
-            ulib.nl()
-        }
+    if schon_gesehen(id) {
+        return
+    }
+    merken(id)
+    if satz_mit_namen(id) != 1 {
+        // AUCH DAS IMMER: ein Fenster, zu dem die Fenstertafel nichts
+        // hergibt, ist entweder schon wieder zu oder das Leserecht
+        // fehlt -- beides will man im Protokoll sehen.
+        var s_nf: [u8; 32] = "kein Satz zu diesem Fenster id=\0"
+        kopf()
+        s((&s_nf[0 as usize]) as u64)
+        ulib.sayu(id)
+        ulib.nl()
         return
     }
     var i: u64 = 0
@@ -587,6 +651,21 @@ fn fenster_auf(id: u64) {
         }
         i = i + 1
     }
+    // KEIN TREFFER IST AUCH EIN ERGEBNIS, und es gehoert auf die
+    // Leitung. Ohne diese Zeile sah ein Lauf, in dem die Regel nicht
+    // passte, genauso aus wie einer, in dem gar kein Ereignis ankam --
+    // und der Unterschied war in dieser Runde einmal eine Stunde wert.
+    var s_kt: [u8; 17] = "kein treffer id=\0"
+    var s_ka: [u8; 7] = " app=[\0"
+    var s_kz: [u8; 3] = "]\0\0"
+    let lp2: u64 = (&liste[0 as usize]) as u64
+    kopf()
+    s((&s_kt[0 as usize]) as u64)
+    ulib.sayu(id)
+    s((&s_ka[0 as usize]) as u64)
+    s(lp2 + WL_APP)
+    s((&s_kz[0 as usize]) as u64)
+    ulib.nl()
 }
 
 // ----------------------------------------------------- die Hauptschleife
@@ -623,6 +702,12 @@ fn schleife(max: u64) -> u64 {
         }
         let _sl: u64 = ulib.sleep_ms(10)
         runde = runde + 1
+        // ALLE ZWEI SEKUNDEN EINMAL DIE TAFEL LESEN -- fuer die
+        // Fenster, deren Ereignis nicht angekommen ist (siehe
+        // `nachzuegler`).
+        if runde % 200 == 0 {
+            nachzuegler()
+        }
         // EIN PULS AUF DER LEITUNG. Ohne ihn ist ein Plugin, das gar
         // nichts meldet, nicht von einem unterscheidbar, das tot ist --
         // und genau dieser Unterschied war in dieser Runde einmal die
@@ -677,7 +762,13 @@ fn selbstrecht() {
     var s_gr: [u8; 21] = "selbstrecht rechte=\0\0"
     var s_ng: [u8; 35] = "selbstrecht verweigert, fehler=\0\0\0\0"
     let r: u64 = R_EV_WIN | R_EV_FOCUS | R_ACT_WIN
-    let rc: u64 = ulib.sys(WM_PLUG_GRANT, (&p_name[0 as usize]) as u64, r, 0)
+    // OBEN IM SELBEN WORT STEHT DIE FRIST (kernel/wmplug.fi, `grant`):
+    // fuenfhundert Ticks sind fuenf Sekunden. Eine Regel-Engine, die
+    // ein fremdes Programm startet und auf dessen Fenster wartet,
+    // steht laenger in einem fremden Aufruf als ein Widget -- und
+    // genau dafuer gibt es die Frist je Plugin.
+    let rc: u64 = ulib.sys(WM_PLUG_GRANT, (&p_name[0 as usize]) as u64,
+        r | (500 << 32), 0)
     kopf()
     if is_err(rc) {
         s((&s_ng[0 as usize]) as u64)
@@ -836,34 +927,25 @@ fn u_start(args: u64) -> u64 {
         selbstrecht()
     }
 
-    // ERST DAS LESEFENSTER UND DAS DEMO-PROGRAMM, DANN DIE ANMELDUNG --
-    // und das ist eine GEMESSENE Reihenfolge, keine Geschmacksfrage. Der
-    // Kehrbesen des Kerns wirft einen Platz hinaus, der ein Ereignis
-    // liegen hat und es laenger als die Frist nicht abholt. Meldete sich
-    // dieses Programm ZUERST an, lag das E_WIN_OPEN seines eigenen
-    // Lesefensters sofort im Ring, waehrend `SYS_EXEC` noch /bin/calc von
-    // der Platte las -- das dauert laenger als eine halbe Sekunde, und
-    // der Kern hatte recht: `wmplug: unreg regel grund=2 holte=0`.
-    // So herum ist das Plugin von der ersten Sekunde an ansprechbar.
-    hilfsfenster = lesefenster()
-    var s_lf: [u8; 17] = "lesefenster id=\0\0"
-    var s_ke: [u8; 30] = "KEIN Lesefenster -- ohne es\0\0\0"
-    var s_k2: [u8; 34] = "  bleiben app= und titel= blind\0\0\0"
-    kopf()
-    if hilfsfenster == 0 {
-        s((&s_ke[0 as usize]) as u64)
-        ulib.nl()
-        kopf()
-        s((&s_k2[0 as usize]) as u64)
-    } else {
-        s((&s_lf[0 as usize]) as u64)
-        ulib.sayu(eigen_id)
-    }
-    ulib.nl()
+    // ERST DAS DEMO-PROGRAMM, DANN DIE ANMELDUNG -- und das ist eine
+    // GEMESSENE Reihenfolge, keine Geschmacksfrage. Der Kehrbesen des
+    // Kerns wirft einen Platz hinaus, der ein Ereignis liegen hat und
+    // es laenger als seine Frist nicht abholt. Meldete sich dieses
+    // Programm ZUERST an, lag ein E_WIN_OPEN sofort im Ring, waehrend
+    // `SYS_EXEC` noch /bin/calc von der Platte las -- das dauerte
+    // laenger als eine halbe Sekunde, und der Kern hatte recht:
+    // `wmplug: unreg regel grund=2 holte=0`. Die eigene Frist (unten,
+    // viertes Argument von WM_PLUG_REG) deckt heute genau diesen Fall
+    // ab; die Reihenfolge bleibt trotzdem so herum.
 
     let maske: u64 = (1 << E_WIN_OPEN) | (1 << E_FOCUS)
-    let platz: u64 = ulib.sys(WM_PLUG_REG, 1,
-        (&p_name[0 as usize]) as u64, maske)
+    // Das vierte Argument ist die gewuenschte Frist in Ticks. Zwei
+    // Sekunden sind das Meiste, was sich ein Plugin OHNE Eintrag in
+    // /etc/wmplug.conf selbst nehmen darf (kernel/wmplug.fi,
+    // FRIST_MAX_SELBST) -- steht dort `frist=500`, gilt die Zahl aus
+    // der Datei.
+    let platz: u64 = ulib.sys4(WM_PLUG_REG, 1,
+        (&p_name[0 as usize]) as u64, maske, 200)
     if is_err(platz) {
         var s_nr: [u8; 29] = "anmeldung abgelehnt, fehler=\0"
         kopf()
@@ -880,7 +962,7 @@ fn u_start(args: u64) -> u64 {
     s((&s_re[0 as usize]) as u64)
     ulib.sayu(rechte)
     s((&s_fr[0 as usize]) as u64)
-    ulib.sayu(ulib.sys(WM_PLUG_INFO, 0, PL_FRIST, 0))
+    ulib.sayu(ulib.sys(WM_PLUG_INFO, platz, PL_PFRIST, 0))
     ulib.nl()
     if is_err(rechte) || (rechte & R_ACT_WIN) == 0 {
         kopf()

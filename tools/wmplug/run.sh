@@ -312,16 +312,19 @@ k_segv=$(zahl "$S" '^wmplug: bilanz' 'kicks')
 [ "${k_segv:-0}" = 1 ] \
     && ok "und genau einmal gezaehlt (kicks=1 fuer einen Absturz)" \
     || bad "die Bilanz zaehlt kicks=${k_segv} fuer EINEN Absturz"
-if [ -s "$TMPD/segv.ppm" ]; then
-    cp -f "$TMPD/segv.ppm" "$SHOTS/nach-absturz.ppm"
-    masse=$(python3 tools/gfx/checkshot.py groesse "$TMPD/segv.ppm" 2>/dev/null)
+# ZWEI FOTOS, ZWEI AUGENBLICKE. `segv.ppm` entstand, waehrend das
+# Plugin lebte, `segv-2.ppm` nach dem Absturz -- das zweite ist das,
+# was hier geprueft wird: laeuft der Schreibtisch WEITER?
+if [ -s "$TMPD/segv-2.ppm" ]; then
+    cp -f "$TMPD/segv-2.ppm" "$SHOTS/nach-absturz.ppm"
+    masse=$(python3 tools/gfx/checkshot.py groesse "$TMPD/segv-2.ppm" 2>/dev/null)
     [ "$masse" = "800 600" ] \
         && ok "Foto nach dem Absturz: 800x600, der Bildmodus steht noch" \
         || bad "das Foto nach dem Absturz misst '$masse' statt '800 600'"
     # NICHT NUR "ein Bild kam an": auf dem Schirm muss auch etwas zu
     # sehen sein. Ein schwarzes Bild waere genau der Fall, den diese
     # Runde ausschliessen will -- Plugin tot, Schreibtisch tot.
-    nl=$(python3 tools/gfx/checkshot.py nichtleer "$TMPD/segv.ppm" 0 0 800 600 2>/dev/null \
+    nl=$(python3 tools/gfx/checkshot.py nichtleer "$TMPD/segv-2.ppm" 0 0 800 600 2>/dev/null \
          | grep -oE '[0-9]+' | head -1)
     if [ -n "${nl:-}" ] && [ "$nl" -gt 100000 ] 2>/dev/null; then
         ok "und $nl von 480000 Bildpunkten sind nicht schwarz -- der Schreibtisch malt"
@@ -337,6 +340,42 @@ if [ -s "$TMPD/segv.ppm" ]; then
         || bad "nach-absturz.png wurde nicht abgelegt"
 else
     bad "kein Foto nach dem Absturz"
+fi
+
+# ----------------------- der SICHTBARE Beleg: das Leistenfeld vor/nach
+#
+# DIE ZEILE AUF DER LEITUNG SAGT, DASS DER KERN DEN TOTEN ABGEHOLT HAT.
+# Das Bild sagt, dass man es SIEHT: vor dem Absturz steht der Text des
+# Plugins in seinem Feld der Leiste, danach ist das Feld weg. Die
+# Koordinate kommt aus der Leiste selbst (`taskbar: plug nr=0 x= y= w=
+# h=` plus `taskbar: geom x= y=`) und nicht aus diesem Skript -- ein
+# fest getippter Punkt waere nach der naechsten Leistenhoehe falsch.
+pzeile=$(grep -a '^taskbar: plug nr=0 ' "$S" | tail -1)
+pgeom=$(grep -a '^taskbar: geom ' "$S" | tail -1)
+pfeld() { printf '%s' "$1" | grep -oE " $2=[0-9]+" | head -1 | sed 's/.*=//'; }
+bx=$(pfeld "$pzeile" x); by=$(pfeld "$pzeile" y)
+bw=$(pfeld "$pzeile" w); bh=$(pfeld "$pzeile" h)
+tgx=$(pfeld "$pgeom" x); tgy=$(pfeld "$pgeom" y)
+tgx=${tgx:-0}; tgy=${tgy:-0}
+if [ -n "${bx:-}" ] && [ -n "${bw:-}" ] && [ -s "$TMPD/segv.ppm" ] \
+    && [ -s "$TMPD/segv-2.ppm" ]; then
+    cx=$((tgx + bx + bw / 2)); cy=$((tgy + by + bh / 2))
+    ok "das Plugin-Feld der Leiste steht bei x=$bx y=$by w=$bw h=$bh, Mitte ($cx,$cy)"
+    cp -f "$TMPD/segv.ppm" "$SHOTS/vor-absturz.ppm"
+    f1=$(python3 tools/gfx/checkshot.py punkt "$TMPD/segv.ppm" "$cx" "$cy" 2>&1)
+    f2=$(python3 tools/gfx/checkshot.py punkt "$TMPD/segv-2.ppm" "$cx" "$cy" 2>&1)
+    if [ "$f1" != "$f2" ]; then
+        ok "checkshot punkt ($cx,$cy): vorher [$f1], nach dem Absturz [$f2] -- verschieden"
+    else
+        bad "checkshot punkt ($cx,$cy): vorher und nachher beide [$f1]"
+    fi
+    python3 -c "from PIL import Image; Image.open('$SHOTS/vor-absturz.ppm').save('$SHOTS/vor-absturz.png')" \
+        2>/dev/null && rm -f "$SHOTS/vor-absturz.ppm"
+    [ -s "$SHOTS/vor-absturz.png" ] \
+        && ok "das Foto VOR dem Absturz liegt als docs/shots/wmplug/vor-absturz.png" \
+        || bad "vor-absturz.png wurde nicht abgelegt"
+else
+    bad "keine zwei Fotos oder keine Leistenkoordinate -- der sichtbare Beleg fehlt"
 fi
 
 # ============================================ 5. die Haenger-Gegenprobe
@@ -418,6 +457,30 @@ if [ "${nx:-x}" = 7 ] && [ "${ny:-y}" = 7 ]; then
 else
     ok "das Fenster steht NICHT auf (7,7), dem Ziel des Griffs"
 fi
+# ------------------------------------------- und die Schwelle der Geduld
+#
+# EINMAL FRAGEN IST EINE FRAGE, ACHTMAL GREIFEN IST EINE ABSICHT. Nach
+# dem einen gemessenen Griff greift das Plugin in einer SCHLEIFE weiter;
+# ab wmplug.DENY_MAX (acht) meldet der Kern den Platz ab, und der Grund
+# heisst dann G_RIGHTS -- nicht Absturz, nicht Frist.
+hasre "$G" 'plugboese: schwelle: griffe=[0-9]+ letzte=[0-9]+ deny=[0-9]+' \
+    "das Plugin hat in einer Schleife weitergegriffen"
+hasflat "$G" 'unreg boese *grund=3' \
+    "der Kern meldet es mit grund=3 (G_RIGHTS) ab -- die Schwelle hat gegriffen"
+d_ges=$(zahl "$G" '^wmplug: bilanz' 'deny')
+if [ "${d_ges:-0}" = 8 ]; then
+    ok "die Bilanz zaehlt deny=8 -- genau die Schwelle, nicht mehr"
+else
+    bad "die Bilanz zaehlt deny='${d_ges}' statt 8 (wmplug.DENY_MAX)"
+fi
+l_rc=$(grep -aoE 'schwelle: griffe=[0-9]+ letzte=[0-9]+' "$G" | tail -1 \
+    | grep -oE 'letzte=[0-9]+' | sed 's/.*=//')
+if [ "${l_rc:-0}" = 3 ]; then
+    ok "die letzten Griffe bekommen -E_NOTFOUND (3): der Platz ist weg, nicht nur gesperrt"
+else
+    bad "der letzte Griff meldet '${l_rc}' statt 3 (E_NOTFOUND)"
+fi
+has "$G" "wm: hold" "und der Schreibtisch steht auch nach der Abmeldung noch"
 
 # ================================= 7. die Schnittstelle und das Tempo
 echo "== 7. die Schnittstelle einmal ganz durch, und das Tempo =="
@@ -620,21 +683,30 @@ fi
 
 # ===================================================== 8. die Verwaltung
 echo "== 8. /bin/wmplug: list, info, disable, list =="
-lauf verw "wigapp=/bin/uhrstart,uhrstart,verwaltung,runden=30" '^wm: hold'
+# DER AUTOSTART STARTET DAS WIDGET, `wmplug probe` befragt es. Kein
+# Hilfsprogramm mehr dazwischen: /bin/uhrstart ist weg, die Liste in
+# /etc/wmplug.autostart und der Unterbefehl `probe` von /bin/wmplug
+# ersetzen es vollstaendig.
+abbild verw 'uhr runden=40' || bad "verw: das Abbild ist nicht gebaut"
+lauf verw "wigapp=/bin/wmplug,probe,uhr" '^wm: hold'
 V=$TMPD/verw.clean
 sauber verw
 has "$V" "wmplug: reg uhr" "das Widget ist angemeldet -- es gibt etwas zu verwalten"
 has "$V" "wmplug: abi=" "wmplug list nennt die Fassung der Schnittstelle"
 hasre "$V" 'Plugins [0-9]+ von [0-9]+' "und sagt, wie viele Plaetze belegt sind"
 # KEIN `^` IN DIESEN MUSTERN. Die serielle Leitung traegt Kernzeilen
-# und Ring-3-Zeilen durcheinander; gemessen steht dort
-# `plugstart: wmplug: unreg uhr grund=4`, weil der Kern mitten in die
-# Zeile des Starthelfers geschrieben hat. Ein Anker am Zeilenanfang
-# macht daraus eine Zusage, die nie zutrifft.
-has "$V" "plugstart: list vorher" "list lief vor dem Abschalten"
-has "$V" "plugstart: info uhr" "info lief"
-has "$V" "disable uhr" "disable lief"
-has "$V" "plugstart: list nachher" "und list noch einmal danach"
+# und Ring-3-Zeilen durcheinander; gemessen stand dort schon
+# `wmprobe: wmplug: unreg uhr grund=4`, weil der Kern mitten in die
+# Zeile geschrieben hat. Ein Anker am Zeilenanfang macht daraus eine
+# Zusage, die nie zutrifft.
+has "$V" "desktop: autostart [uhr" \
+    "der Schreibtisch hat die Autostart-Liste gelesen und die Zeile ausgefuehrt"
+hasre "$V" 'wmplug: start /bin/pluguhr rc=[0-9]+' \
+    "und wmplug enable hat das Plugin WIRKLICH gestartet (SYS_EXEC)"
+has "$V" "wmprobe: list vorher" "list lief vor dem Abschalten"
+has "$V" "wmprobe: info" "info lief"
+has "$V" "wmprobe: disable" "disable lief"
+has "$V" "wmprobe: list nachher" "und list noch einmal danach"
 # DER ZUSTANDSWECHSEL, vom Kern selbst gemeldet: grund=4 ist G_USER,
 # also "jemand hat `wmplug disable` gesagt" -- und nicht Absturz (1),
 # nicht Frist (2), nicht Rechte (3).
@@ -657,6 +729,45 @@ n_hold=$(grep -ca '^wm: hold' "$V")
 [ "${n_hold:-0}" = 1 ] \
     && ok "der Fensterserver wurde dabei NICHT neu gestartet (genau ein 'wm: hold')" \
     || bad "'wm: hold' steht ${n_hold}x da -- da ist etwas neu gestartet"
+
+# ============================ 8b. die Frist je Plugin, in EINEM Lauf
+echo "== 8b. zwei Plugins, zwei Fristen, ein Lauf =="
+# WARUM ES DIESE MESSUNG GIBT. Bis zu dieser Runde hatte der KERN eine
+# Frist und alle Plugins teilten sie sich. Das war fuer beide Seiten
+# falsch: ein Leistenwidget, das im Sekundentakt arbeitet, flog bei
+# einer halben Sekunde -- und wer die Zahl deshalb hochsetzte, machte
+# die Haenger-Gegenprobe zahm. Seit dieser Runde nennt jedes Plugin
+# seine eigene Frist (`frist=` in /etc/wmplug.conf, WM_PLUG_GRANT, oder
+# viertes Argument von WM_PLUG_REG), und HIER laufen beide gleichzeitig:
+# das Widget mit 100 Ticks (1 s), die Regel-Engine mit 500 (5 s).
+abbild frist 'regel demo laut' 'uhr runden=40' || bad "frist: das Abbild ist nicht gebaut"
+lauf frist "" '^wm: hold'
+F=$TMPD/frist.clean
+sauber frist
+hasflat "$F" 'reg uhr *platz=[0-9]+ rechte=0x807 frist=100' \
+    "das Widget ist mit SEINER Frist angetreten: 100 Ticks (1 s)"
+hasflat "$F" 'reg regel *platz=[0-9]+ rechte=0x301 frist=500' \
+    "die Regel-Engine mit IHRER: 500 Ticks (5 s)"
+# UND BEIDE UEBERLEBEN DENSELBEN LAUF. Gemessen an der Bilanz des Kerns
+# und nicht an der Abwesenheit einer Zeile: `kicks=0` heisst, dass
+# niemand wegen Frist, Rechten oder Absturz geflogen ist.
+k_frist=$(zahl "$F" '^wmplug: bilanz' 'kicks')
+p_frist=$(zahl "$F" '^wmplug: bilanz' 'plugs')
+if [ "${k_frist:-x}" = 0 ]; then
+    ok "kein einziger Rauswurf in diesem Lauf (kicks=0) -- beide Fristen halten"
+else
+    bad "die Bilanz zaehlt kicks=${k_frist} -- eines der beiden ist geflogen"
+fi
+if [ "${p_frist:-0}" -ge 2 ] 2>/dev/null; then
+    ok "am Ende sind $p_frist Plugins gleichzeitig auf der Tafel"
+else
+    bad "am Ende stehen '${p_frist}' Plugins auf der Tafel (erwartet 2)"
+fi
+hasnotre "$F" 'unreg uhr.*grund=2' "das Widget ist NICHT an der Frist gestorben"
+# Und die Regel-Engine hat in demselben Lauf wirklich gearbeitet.
+hasre "$F" 'plugregel: nachgemessen id=[0-9]+ x=[0-9]+ y=[0-9]+' \
+    "die Regel-Engine hat ein Fenster gesetzt und NACHGEMESSEN"
+hasre "$F" '^pluguhr: text ' "und das Widget hat Text in die Leiste geschickt"
 
 # ================================================== 9. tools/check-ui.sh
 echo "== 9. der Zeichenweg =="

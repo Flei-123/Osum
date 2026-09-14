@@ -22,15 +22,20 @@
 //   plugboese hang    anmelden, abonnieren und NICHTS mehr abholen. Die
 //                     Frist muss greifen und das Plugin abmelden.
 //
-// WARUM DIESES PLUGIN EIN EIGENES FENSTER ANLEGT, OBWOHL ES NICHTS
-// MALT: Titel und Ort fremder Fenster gibt `WM_LIST` nur einer
-// Taskleiste (sysgui.fi `is_taskbar`). Zum NACHMESSEN braucht die
-// Gegenprobe aber genau diese Zahlen. Also borgt sie sich das
-// Leserecht auf demselben vorhandenen Weg wie /bin/plugregel: ein
-// verborgenes Fenster mit einem Streifen von einem Bildpunkt.
-// DAS IST DIESELBE ABKUERZUNG WIE DORT und sie steht so im Bericht --
-// sie betrifft nur das MESSEN, nicht das Recht zum HANDELN, und genau
-// das Handeln ist hier die Gegenprobe.
+// KEIN VERBORGENES FENSTER MEHR. Bis zu dieser Runde legte auch dieses
+// Programm ein Fenster von 32x16 Bildpunkten mit einem Streifen an, nur
+// damit `is_taskbar` es fuer eine Taskleiste hielt und WM_LIST ihm
+// antwortete. Der Schluessel ist jetzt das Recht `R_EV_WIN` selbst
+// (sysgui.fi, `darf_listen`) -- und das hat dieses Plugin, es steht in
+// /etc/wmplug.conf. LESEN DARF ES ALSO, HANDELN NICHT, und genau
+// dieser Unterschied ist die Gegenprobe.
+//
+// `plugboese segv` meldet sich unter dem Namen `boesebar` an: diese
+// Zeile in /etc/wmplug.conf traegt zusaetzlich R_ACT_BAR, damit das
+// Plugin VOR dem Absturz ein Feld in der Leiste besetzt. Nach dem
+// Absturz ist das Feld leer -- das ist der SICHTBARE Beleg dafuer,
+// dass der Kern den Toten abgeholt hat, und er wird im Foto
+// nachgerechnet und nicht behauptet.
 
 profile kernel
 
@@ -40,16 +45,14 @@ export { u_start }
 
 // ---------------------------------------------------- die Schnittstelle
 const WM_CREATE: u64 = 2100
-const WM_INFO: u64 = 2104
-const WM_STATE: u64 = 2109
 const WM_LIST: u64 = 2110
-const WM_STRUT: u64 = 2112
 
 const WM_PLUG_REG: u64 = 2117
 const WM_PLUG_UNREG: u64 = 2118
 const WM_PLUG_POLL: u64 = 2119
 const WM_PLUG_INFO: u64 = 2121
 const WM_PLUG_ACT: u64 = 2122
+const WM_PLUG_BAR: u64 = 2124
 
 const PL_ABI: u64 = 0
 const PL_RIGHTS: u64 = 5
@@ -78,12 +81,8 @@ const WL_FLAGS: u64 = 48
 const WL_BYTES: u64 = 128
 const MAX_WIN: u64 = 16
 
-const WS_HIDDEN: u64 = 1
-const WE_RIGHT: u64 = 3
-
 static mut liste: [u8; 128] = [0 as u8; 128]
 static mut eigen_id: u64 = 0
-static mut hilfsfenster: u64 = 0
 
 fn is_err(v: u64) -> bool {
     return v > 0xFFFFFFFFFFFFF000
@@ -113,28 +112,15 @@ fn feld(name: u64, v: u64) {
 // WM_PLUG_REG holt sich fuenfzehn, egal wie kurz der Name ist. Wer hier
 // ein `[u8; 6]` hinlegt, schickt seinen halben Stapel als Namen mit
 // (gemessener Befund, BEFUND-WMPLUG-NAMENSPUFFER.md).
-fn name_in(p: u64) {
+fn name_in(p: u64, modus: u64) {
     var s_nm: [u8; 6] = "boese\0"
+    var s_nb: [u8; 9] = "boesebar\0"
     ulib.fill(p, 0, 16)
-    let _c: u64 = ulib.strncpy(p, (&s_nm[0 as usize]) as u64, 15)
-}
-
-// Das verborgene Leserechtsfenster. Siehe Kopf dieser Datei.
-fn lesefenster() -> u64 {
-    var titel: [u8; 16] = "plugboese-lese\0\0"
-    // 32x16 ist das Kleinste, was `wm.create` durchlaesst (wm.fi:2626).
-    let h: u64 = ulib.sys4(WM_CREATE, 0, (32 << 16) | 16,
-        (&titel[0 as usize]) as u64, 0)
-    if is_err(h) {
-        return 0
+    if modus == 1 {
+        let _b: u64 = ulib.strncpy(p, (&s_nb[0 as usize]) as u64, 15)
+        return
     }
-    // ERST VERBERGEN, DANN DEN STREIFEN: `set_strut` rechnet die
-    // Arbeitsflaeche sofort neu, ein sichtbares Fenster mit Streifen
-    // haette sie fuer einen Augenblick wirklich verkleinert.
-    let _v: u64 = ulib.sys(WM_STATE, h, WS_HIDDEN, 1)
-    let _r: u64 = ulib.sys(WM_STRUT, h, WE_RIGHT, 1)
-    eigen_id = ulib.sys(WM_INFO, h, 4, 0) // WI_ID
-    return h
+    let _c: u64 = ulib.strncpy(p, (&s_nm[0 as usize]) as u64, 15)
 }
 
 // Den Satz zu dieser Fenster-Id holen. Rueckgabe 1 = da.
@@ -262,6 +248,36 @@ fn greifen() -> u64 {
     return 1
 }
 
+// ------------------------------------------- die Schwelle der Geduld
+//
+// EINMAL FRAGEN IST EINE FRAGE, ACHTMAL GREIFEN IST EINE ABSICHT. Der
+// Kern zaehlt die abgewiesenen Handlungen je Platz und meldet den Platz
+// ab DENY_MAX (acht) mit G_RIGHTS ab -- auf der Leitung steht dann
+// `wmplug: unreg boese grund=3`. Diese Schleife greift so lange nach
+// demselben fremden Fenster, bis der Kern das tut, und zaehlt mit, beim
+// wievielten Griff er aufgehoert hat, zu antworten (-E_NOTFOUND = -4
+// statt -E_RIGHTS = -2: der Platz ist dann schon weg).
+fn schwelle_reizen(ziel: u64) {
+    var s_sw: [u8; 20] = "schwelle: griffe=\0\0\0"
+    var s_le: [u8; 9] = " letzte=\0"
+    var s_dy: [u8; 7] = " deny=\0"
+    var i: u64 = 0
+    var letzte: u64 = 0
+    while i < 12 {
+        let rc: u64 = ulib.sys(WM_PLUG_ACT, PA_MOVE, ziel, (9 << 16) | 9)
+        letzte = fehlernr(rc)
+        i = i + 1
+    }
+    kopf()
+    s((&s_sw[0 as usize]) as u64)
+    ulib.sayu(i)
+    s((&s_le[0 as usize]) as u64)
+    ulib.sayu(letzte)
+    s((&s_dy[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(WM_PLUG_INFO, 0, PL_DENY, 0))
+    ulib.nl()
+}
+
 // -------------------------------------------------------------- Hauptweg
 fn u_start(args: u64) -> u64 {
     var name: [u8; 16] = [0 as u8; 16]
@@ -275,8 +291,33 @@ fn u_start(args: u64) -> u64 {
     var s_sg: [u8; 22] = "gleich stuerze ich ab\0"
     var s_hg: [u8; 25] = "ab jetzt hole ich nichts\0"
     var s_en: [u8; 10] = "ende, rc=\0"
+    var w_leis: [u8; 7] = "leiste\0"
     let p: u64 = (&name[0 as usize]) as u64
-    name_in(p)
+
+    // ALLE ARGUMENTE DURCHSEHEN, nicht nur das erste nach dem Namen.
+    // GEMESSENER BEFUND: `/bin/plugboese boese segv` kommt als drei
+    // Woerter an (Pfad, "boese", "segv"), nicht als zwei. Wer nur auf
+    // Platz 1 schaut, findet dort "boese", faellt auf den Vorgabemodus
+    // zurueck und misst still die falsche Gegenprobe -- genau das ist
+    // zweimal passiert.
+    //
+    // DER MODUS STEHT VOR DER ANMELDUNG FEST, weil er den NAMEN
+    // bestimmt: `segv` meldet sich als `boesebar` an und bekommt damit
+    // die Zeile aus /etc/wmplug.conf, die R_ACT_BAR traegt.
+    var modus: u64 = 0
+    let n_arg: u64 = ulib.arg_count(args)
+    var ai: u64 = 0
+    while ai < n_arg {
+        let a: u64 = ulib.arg_at(args, ai)
+        if ulib.streq(a, (&w_segv[0 as usize]) as u64) {
+            modus = 1
+        }
+        if ulib.streq(a, (&w_hang[0 as usize]) as u64) {
+            modus = 2
+        }
+        ai = ai + 1
+    }
+    name_in(p, modus)
 
     // DIE FASSUNG ZUERST. Ein Plugin, das gegen eine andere Fassung
     // gebaut wurde, meldet sich gar nicht erst an.
@@ -291,7 +332,17 @@ fn u_start(args: u64) -> u64 {
         return 1
     }
 
-    let platz: u64 = ulib.sys(WM_PLUG_REG, WMP_ABI, p, EV_ALLE)
+    // Viertes Argument: die gewuenschte Frist in Ticks. Zwei Sekunden
+    // sind das Meiste, was ein Plugin sich ohne Eintrag in
+    // /etc/wmplug.conf selbst nehmen darf; der Haengerlauf laeuft
+    // ohnehin mit `plugfrist`, das die Frist des KERNS kuerzt -- und
+    // eine eigene Zahl soll die Gegenprobe nicht zahm machen, deshalb
+    // steht hier im Haengermodus eine Null.
+    var wunsch: u64 = 100
+    if modus == 2 {
+        wunsch = 0
+    }
+    let platz: u64 = ulib.sys4(WM_PLUG_REG, WMP_ABI, p, EV_ALLE, wunsch)
     if is_err(platz) {
         kopf()
         s((&s_no[0 as usize]) as u64)
@@ -305,27 +356,44 @@ fn u_start(args: u64) -> u64 {
     feld((&s_re[0 as usize]) as u64, rechte)
     ulib.nl()
 
-    // ALLE ARGUMENTE DURCHSEHEN, nicht nur das erste nach dem Namen.
-    // GEMESSENER BEFUND: `wigapp=/bin/plugboese,boese,segv` kommt als
-    // drei Woerter an (Pfad, "boese", "segv"), nicht als zwei. Wer nur
-    // auf Platz 1 schaut, findet dort "boese", faellt auf den
-    // Vorgabemodus zurueck und misst still die falsche Gegenprobe --
-    // genau das ist zweimal passiert.
-    var modus: u64 = 0
-    let n_arg: u64 = ulib.arg_count(args)
-    var ai: u64 = 0
-    while ai < n_arg {
-        let a: u64 = ulib.arg_at(args, ai)
-        if ulib.streq(a, (&w_segv[0 as usize]) as u64) {
-            modus = 1
-        }
-        if ulib.streq(a, (&w_hang[0 as usize]) as u64) {
-            modus = 2
-        }
-        ai = ai + 1
-    }
-
     if modus == 1 {
+        // ERST DAS FELD IN DER LEISTE BESETZEN, DANN ABSTUERZEN. Der
+        // Beleg der Runde ist nicht die Zeile auf der Leitung, sondern
+        // das Bild: vor dem Absturz steht der Text im Leistenfeld,
+        // danach ist das Feld weg, weil der Kern den Toten abgeholt
+        // und seinen Platz geraeumt hat. Beides wird fotografiert und
+        // mit `checkshot.py punkt` nachgerechnet.
+        var s_bt: [u8; 13] = "plugin lebt\0\0"
+        var s_ls: [u8; 22] = "leiste gesetzt, rc=\0\0\0"
+        var s_wt: [u8; 19] = "warte runden=\0\0\0\0\0\0"
+        let brc: u64 = ulib.sys(WM_PLUG_BAR, (&s_bt[0 as usize]) as u64, 11, 0)
+        kopf()
+        s((&s_ls[0 as usize]) as u64)
+        ulib.sayn(brc)
+        ulib.nl()
+        // UND JETZT BRAV ABHOLEN, damit die Frist NICHT greift: was
+        // hier gemessen werden soll, ist der Absturz und nicht der
+        // Kehrbesen. FUENFZIG Runden zu 100 ms sind fuenf Sekunden --
+        // genug, dass die Leiste den Text wirklich gemalt hat und das
+        // erste Foto ihn zeigt:
+        // der Abnahmelauf schiesst sein erstes Foto zwei Sekunden nach
+        // der Zeile `leiste gesetzt`, und es soll SICHER vor dem
+        // Absturz entstehen.
+        var evs: [u64; 2] = [0; 2]
+        let esp: u64 = (&evs[0 as usize]) as u64
+        var r1: u64 = 0
+        while r1 < 50 {
+            var w1: u64 = 0
+            while w1 < 8 && ulib.sys(WM_PLUG_POLL, esp, 0, 0) == 1 {
+                w1 = w1 + 1
+            }
+            let _s1: u64 = ulib.sleep_ms(100)
+            r1 = r1 + 1
+        }
+        kopf()
+        s((&s_wt[0 as usize]) as u64)
+        ulib.sayu(r1)
+        ulib.nl()
         kopf()
         s((&s_sg[0 as usize]) as u64)
         ulib.nl()
@@ -360,8 +428,9 @@ fn u_start(args: u64) -> u64 {
         return 0
     }
 
-    // MODUS `greif` -- die Rechte-Gegenprobe.
-    hilfsfenster = lesefenster()
+    // MODUS `greif` -- die Rechte-Gegenprobe. KEIN eigenes Fenster
+    // mehr: WM_LIST oeffnet jetzt das Recht R_EV_WIN, das dieses
+    // Plugin aus /etc/wmplug.conf hat.
     // Dem Schreibtisch Zeit lassen, seine Fenster aufzumachen, und
     // dabei brav die eigenen Ereignisse abholen: dieses Plugin ist
     // boesartig in der HANDLUNG, nicht in der Hoeflichkeit -- sonst
@@ -379,6 +448,13 @@ fn u_start(args: u64) -> u64 {
         runde = runde + 1
     }
     let rc: u64 = greifen()
+    // UND DANN NICHT AUFHOEREN. Die Zusage dahinter: ein Plugin, das in
+    // einer Schleife nach fremden Fenstern greift, fliegt von der Tafel
+    // -- mit dem Grund G_RIGHTS (3) und nicht mit Frist oder Absturz.
+    let ziel2: u64 = fremdes_fenster()
+    if ziel2 != 0 {
+        schwelle_reizen(ziel2)
+    }
     let _u: u64 = ulib.sys(WM_PLUG_UNREG, 0, 0, 0)
     kopf()
     feld((&s_en[0 as usize]) as u64, rc)

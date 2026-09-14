@@ -6,7 +6,7 @@
 # desselben Abbilds, ein einziger Unterschied auf der Kommandozeile:
 #
 #   AUS: gfx wm wig desk wmplug ...                (kein Widget)
-#   AN : ... wigapp=/bin/uhrstart                  (Rechte + /bin/pluguhr)
+#   AN : ... wigapp=/bin/wmplug,enable,uhr          (Rechte + /bin/pluguhr)
 #
 # Danach wird NICHT verglichen, was "anders aussieht", sondern eine
 # BENANNTE Koordinate nachgerechnet: die Mitte des Kastens, den die
@@ -56,7 +56,7 @@ bash tools/build-kernel.sh "$TMPD/k.mb" > "$TMPD/k.log" 2>&1 \
 [ -f "$TMPD/k.mb" ] || { echo "WIDGET: $pass bestanden, $((fail+1)) gescheitert"; exit 1; }
 
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || bad "crt.s assembliert nicht"
-PROGS="desktop taskbar launcher pluguhr plugstart sh echo ls cat"
+PROGS="desktop taskbar launcher pluguhr sh echo ls cat"
 # /bin/wmplug gehoert dem Modul `verwaltung`. Ist es schon da, nimmt der
 # Starthelfer es (`wmplug enable uhr`); fehlt es, faellt er auf den
 # nackten WM_PLUG_GRANT zurueck. Dieses Modul wartet auf niemanden.
@@ -86,8 +86,7 @@ echo "== 2. das Abbild =="
 ARGS=(build "$TMPD/disk.img" 32768 /lib/
     "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" /bin/)
 for p in $PROGS; do
-    n=$p; [ "$p" = "plugstart" ] && n=uhrstart
-    ARGS+=("/bin/$n=$TMPD/$p.elf")
+    ARGS+=("/bin/$p=$TMPD/$p.elf")
 done
 printf 'on\n' > "$TMPD/uitrace"
 ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme" "/etc/uitrace=$TMPD/uitrace")
@@ -166,7 +165,7 @@ echo "== 4. der Lauf MIT Widget =="
 # meldet sich dann SELBST ab. Fotografiert wird, sobald die Leiste den
 # Text GEMALT hat -- und noch einmal, nachdem das Widget gegangen ist.
 # fotografiert -- an und aus im selben Lauf.
-lauf an "wigapp=/bin/uhrstart,uhrstart,runden=20" "taskbar: text plug " "pluguhr: ende"
+lauf an "wigapp=/bin/wmplug,enable,uhr,runden=20" "taskbar: text plug " "pluguhr: ende"
 has "$TMPD/an.txt" "wm: hold" "der Schreibtisch steht (an)"
 has "$TMPD/an.txt" "wmplug: reg uhr" "das Widget hat sich angemeldet"
 has "$TMPD/an.txt" "pluguhr: angemeldet" "und sagt es selbst"
@@ -367,7 +366,7 @@ echo "== 6c. der Abstand zwischen Widgetfeld und Uhr, bei 640x480 =="
 # frei (kernel/user/taskbar.fi). Gemessen wird das nicht am Bild,
 # sondern an den Zahlen, die die Leiste selbst meldet: linke Kante des
 # linkesten eigenen Feldes minus rechte Kante des Widgetkastens.
-ZEILE="$BASE fbres=640x480" lauf eng "wigapp=/bin/uhrstart,uhrstart,runden=20" \
+ZEILE="$BASE fbres=640x480" lauf eng "wigapp=/bin/wmplug,enable,uhr,runden=20" \
     "taskbar: text plug "
 has "$TMPD/eng.txt" "taskbar: plug nr=0" "bei 640x480 hat die Leiste ein Widget-Feld"
 ezeile=$(head -n "$(cat "$TMPD/eng.marke")" "$TMPD/eng.txt" \
