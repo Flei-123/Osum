@@ -282,7 +282,10 @@ tempo: haenger pid=7 lebt=1
 * **Die Bildzeit des Servers bleibt: 355 us → 387 us (+9 %).** Zwei
   weitere Laeufe desselben Abbilds: 363 → 366 us und 373 → 367 us —
   der Unterschied liegt in beiden Richtungen und damit im Rauschen der
-  Maschine. Das ist die Zahl, an der "der Kern verliert keine Bildrate" haengt, und
+  Maschine. Ein vierter Lauf nach der Nachbesserung vom 14.09.2026
+  abends: **404 us → 407 us** bei 379 Runden des Zusammensetzers — also
+  +0,7 %, und der Server hat unter dem Haenger nicht weniger Arbeit
+  getan, sondern dieselbe. Das ist die Zahl, an der "der Kern verliert keine Bildrate" haengt, und
   sie wird im Laeufer streng geprueft (hoechstens das Doppelte).
 * **Die Bildrate der Messung halbiert sich: fps10 200 → 100, und das
   liegt nicht am Kern.** Gegenprobe im selben Aufbau mit `ohne` (kein
@@ -1678,3 +1681,56 @@ Damit kostet das System im Auslieferungszustand: eine Abfrage je
 `sweep`-Aufruf (20.2) und eine `ready`-Abfrage je Ereignis. Das
 Verhalten des Schreibtisches ist Zeile fuer Zeile das von vor dieser
 Runde.
+
+---
+
+## 21. Nachbesserung: das Widget fragte die falsche Frist
+
+**Gefunden im Abnahmelauf vom 14.09.2026 abends, Abschnitt 8b** — und
+zwar als *sprunghafter* Fehler: derselbe Abschnitt war im Lauf davor
+gruen und fiel im naechsten mit vier Zusagen auf einmal.
+
+Auf der Leitung stand beides nebeneinander:
+
+```
+wmplug: reg uhr      platz=1 rechte=0x807 frist=100
+pluguhr: frist ticks=50 pollms=166
+...
+wmplug: unreg uhr      grund=2 holte=14 verlor=0
+```
+
+Der Kern hatte dem Widget **100 Ticks** gegeben (so steht es in
+`/etc/wmplug.conf`), das Widget rechnete aber mit **50** und holte
+daraufhin alle 166 ms ab. Das geht gut, solange nichts dazwischenkommt;
+kommt Last dazu, reisst es die Frist und der Kehrbesen wirft es hinaus —
+`grund=2` (`G_FRIST`), **holte=14**, also ein Plugin, das gearbeitet
+hat und trotzdem flog.
+
+### Die Ursache: zwei Fragen, ein Feld
+
+`PL_FRIST` (14) ist die **Vorgabe des Kerns**. Womit ein bestimmter
+Platz angetreten ist, sagt `PL_PFRIST` (20) — dieses Feld wurde in
+Nachbesserung R2-2 (Abschnitt 14.3) genau dafuer eingefuehrt, und
+`kernel/sys.fi` sagt bei beiden dazu, dass sie sich unterscheiden.
+`plugregel` fragt seit damals richtig; `pluguhr` blieb bei `PL_FRIST`
+und bekam damit die Zahl des Systems statt seiner eigenen.
+
+Der Fehler war nicht zu sehen, solange beide Zahlen zufaellig
+zusammenpassten — die Vorgabe ist 50, die Gewaehrung 100, und ein
+Widget, das zu OFT abholt, faellt nicht auf. Es faellt erst auf, wenn
+die Last steigt.
+
+### Behebung
+
+`pluguhr` fragt `PL_PFRIST` und faellt nur dann auf `PL_FRIST`
+zurueck, wenn der Kern das Feld nicht kennt — ein Rueckfall, der eine
+Zahl liefert, statt ohne dazustehen.
+
+### Was daraus zu lernen ist
+
+Ein Feld, das „die Frist" heisst, und ein zweites, das „die Frist
+dieses Platzes" heisst, sind eine Einladung. Beide Namen stehen jetzt
+in `pluguhr.fi` mit dem Unterschied im Klartext daneben. Die
+eigentliche Absicherung ist aber Abschnitt 8b des Laeufers: er startet
+**zwei** Plugins mit **verschiedenen** Fristen und verlangt, dass am
+Ende **beide** stehen. Genau das hat den Fehler gefunden.
