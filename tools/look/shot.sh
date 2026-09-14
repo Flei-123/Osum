@@ -239,6 +239,15 @@ ARGS=(build "$OUT/disk.img" 32768 /lib/
 ARGS+=(/bin/)
 for p in $progs; do ARGS+=("/bin/$p=$BUILDD/$p.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
+# RUNDE ROTABSCHNITTE: `/bin/speicher` ist der Name, unter dem der
+# KERN die Speicherplatzanalyse startet (kgui.fi: p_spei), und der
+# hat sich nie geaendert. Die QUELLDATEI heisst seit ENGLISCH
+# ETAPPE 7 (9dd8fe4) storage.fi -- gebaut wird also `storage`, und
+# der alte Pfad ist ein zweiter Name auf dieselbe Datei. Ohne das
+# suchte tools/umlaut/run.sh ein kernel/user/speicher.fi, das es
+# nicht mehr gibt ("FAILED to compile speicher"), und drei
+# Abschnitte bekamen gar kein Bild.
+case " $progs " in *" storage "*) ARGS+=("/bin/speicher@/bin/storage");; esac
 ARGS+=(/etc/
        "/etc/theme.conf=$OUT/theme.conf@0644"
        "/etc/time.conf=$OUT/time.conf@0644"
