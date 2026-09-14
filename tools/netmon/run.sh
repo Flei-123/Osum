@@ -39,7 +39,18 @@ LDSCRIPT=kernel/kernel.ld
 ULD=kernel/user/user.ld
 PROGS="sh ls cat echo ping wget netstat sleep dhcp netmon widgetdemo"
 # `/var/net/` has to exist on the image: the history file lives there.
-BLOCKS=4096
+#
+# RUNDE BAUFEHLER (14.09.2026): 4096 -> 16384 Bloecke (2 -> 8 MiB).
+# Runde GRUNDLINIE (1d16d34) hat die Laeufer -- zu Recht -- auf
+# `--profile=app` umgestellt, und zwei der elf Programme dieses Abbilds
+# tragen `profile app`: netmon und widgetdemo. Das Profil `app` bringt
+# Firns volle Laufzeit mit; allein diese beiden sind damit rund
+# 2,2 Megaoktette gross, und das Abbild fasste 2 MiB. `mkfs.py` sagte
+# "the disk is full", und weil ohne Abbild kein QEMU startet, fielen
+# EINUNDVIERZIG Zusagen dieses Laeufers an EINEM Satz -- darunter der
+# ganze Netzteil ("wget fetched the file" fehlt, "no number found").
+# EIN BLOCK IST 512 OKTETTE (tools/osum/mkfs.py, `BS = 512`).
+BLOCKS=16384
 
 NS=nmon-$$
 V0=nm0-$$
