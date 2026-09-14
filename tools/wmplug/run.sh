@@ -90,7 +90,8 @@ bash tools/build-kernel.sh "$TMPD/k.mb" > "$TMPD/k.log" 2>&1 \
 
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || bad "crt.s assembliert nicht"
 PROGS="desktop taskbar launcher calc sh
-       plugboese plugprobe plugregel pluguhr plugstart wmplug"
+       plugboese plugprobe plugregel pluguhr wmplug
+       plugtempo plugspaet"
 gebaut=1
 for p in $PROGS; do
     up_build vendor/firn/bin/firnc "$p" "$TMPD/$p.o" "$TMPD/$p.elf" \
@@ -115,7 +116,7 @@ echo "== 2. Ring 3, am Kernabbild nachgesehen =="
 nm -a "$TMPD/k.mb.elf" > "$TMPD/sym.txt" 2>/dev/null \
     && ok "die Symboltafel des Kerns ist lesbar ($(wc -l < "$TMPD/sym.txt") Symbole)" \
     || bad "nm kommt an $TMPD/k.mb.elf nicht heran -- ohne sie misst Abschnitt 2 nichts"
-for sym in plugregel__ pluguhr__ plugboese__ plugprobe__; do
+for sym in plugregel__ pluguhr__ plugboese__ plugprobe__ plugtempo__ plugspaet__; do
     if grep -qF "$sym" "$TMPD/sym.txt"; then
         bad "der Kernel traegt Symbole von $sym -- Fremdcode in Ring 0"
     else
@@ -137,22 +138,65 @@ for f in etc/wmplug.conf etc/wmregeln.conf; do
 done
 # Die Zeile, an der die Rechte-Gegenprobe haengt. Wer sie aufbohrt,
 # macht sie kaputt -- also wird sie geprueft und nicht vorausgesetzt.
-grep -qE '^boese[[:space:]]+rechte=0x0*1$' etc/wmplug.conf \
+grep -qE '^boese[[:space:]]+rechte=0x0*1([[:space:]]|$)' etc/wmplug.conf \
     && ok "/etc/wmplug.conf gibt 'boese' genau R_EV_WIN (0x001)" \
     || bad "'boese rechte=0x001' steht nicht mehr in /etc/wmplug.conf"
+# DIE ZWEI FRISTEN DIESER RUNDE STEHEN IN DER DATEI UND NICHT IM SKRIPT.
+# Wer sie dort aendert, aendert die Messung -- also wird hier gelesen,
+# was gemessen wird, und nicht daneben eine zweite Wahrheit gepflegt.
+grep -qE '^uhr[[:space:]].*frist=100([[:space:]]|$)' etc/wmplug.conf \
+    && ok "/etc/wmplug.conf gibt dem Widget frist=100 Ticks (1 s)" \
+    || bad "'uhr ... frist=100' steht nicht in /etc/wmplug.conf"
+grep -qE '^regel[[:space:]].*frist=500([[:space:]]|$)' etc/wmplug.conf \
+    && ok "/etc/wmplug.conf gibt der Regel-Engine frist=500 Ticks (5 s)" \
+    || bad "'regel ... frist=500' steht nicht in /etc/wmplug.conf"
+[ -f etc/wmplug.autostart ] \
+    && ok "etc/wmplug.autostart liegt im Baum (die Autostart-Liste)" \
+    || bad "etc/wmplug.autostart fehlt"
 
-ARGS=(build "$TMPD/disk.img" 32768 /lib/
-    "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" /bin/)
-for p in $PROGS; do
-    n=$p; [ "$p" = plugstart ] && n=uhrstart
-    ARGS+=("/bin/$n=$TMPD/$p.elf")
-done
-ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme"
-    "/etc/wmplug.conf=etc/wmplug.conf" "/etc/wmregeln.conf=etc/wmregeln.conf")
-while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
-python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
+# DAS ABBILD, UND ZWAR EINES JE AUTOSTART-LISTE.
+#
+# Seit dieser Runde startet nicht mehr ein Hilfsprogramm die
+# Erweiterungen (/bin/uhrstart ist weg), sondern der SCHREIBTISCH liest
+# /etc/wmplug.autostart und ruft fuer jede Zeile `wmplug enable <name>`.
+# Die Liste liegt also IM ABBILD -- und weil jeder Lauf dieser Abnahme
+# eine andere Liste braucht, baut diese Funktion je Lauf ein eigenes.
+# Das kostet ein paar Sekunden mkfs und ist der ehrliche Weg: gemessen
+# wird derselbe Weg, den ein Benutzer geht.
+printf 'on\n' > "$TMPD/uitrace"
+abbild() { # name  [autostart-zeile ...]
+    local nm=$1; shift
+    : > "$TMPD/auto-$nm.txt"
+    local z
+    for z in "$@"; do printf '%s\n' "$z" >> "$TMPD/auto-$nm.txt"; done
+    local A=(build "$TMPD/disk-$nm.img" 32768 /lib/
+        "/lib/mono.ttf=assets/osum-mono.ttf"
+        "/lib/sans.ttf=assets/osum-sans.ttf" /bin/)
+    local p n
+    for p in $PROGS; do
+        n=$p; [ "$p" = plugspaet ] && n=uhrspaet
+        A+=("/bin/$n=$TMPD/$p.elf")
+    done
+    # DIE LEISTE SOLL SAGEN, WAS SIE MALT. Ohne /etc/uitrace schweigt
+    # sie, und dann gibt es keine Zeile `taskbar: plug nr=0 x= y= w= h=`
+    # -- also auch keine Koordinate, an der sich ein Foto nachrechnen
+    # liesse. Die Spur kostet ein paar Zeilen auf der seriellen Leitung
+    # und aendert am Bild nichts; gemessen wird trotzdem am Bild.
+    A+=(/etc/ "/etc/theme=$TMPD/baum/theme" "/etc/uitrace=$TMPD/uitrace"
+        "/etc/wmplug.conf=etc/wmplug.conf"
+        "/etc/wmregeln.conf=etc/wmregeln.conf"
+        "/etc/wmplug.autostart=$TMPD/auto-$nm.txt")
+    while read -r z; do A+=("$z"); done < "$TMPD/baum/liste"
+    python3 tools/osum/mkfs.py "${A[@]}" > "$TMPD/mkfs-$nm.txt" 2>&1
+}
+
+# Das Grundabbild OHNE Autostart -- fuer die Laeufe, die ihr Programm
+# selbst mitbringen (`wigapp=`), und als Gegenprobe, dass eine leere
+# Liste wirklich nichts startet.
+abbild basis \
     && ok "das Abbild ist gebaut" \
-    || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs.txt" | head -5; }
+    || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs-basis.txt" | head -5; }
+cp -f "$TMPD/disk-basis.img" "$TMPD/disk.img" 2>/dev/null
 
 # ====================================================== der Laufhelfer
 BASE="gfx wm wig desk wmhold wiglong nokbd nosched noproc nofs wmplug"
@@ -171,10 +215,14 @@ warte() { # datei marke pid schritte
 # Legt $TMPD/<name>.clean (Leitung ohne Nulloktette), $TMPD/<name>.rc
 # (Exitcode von QEMU) und, wenn eine Marke da ist, $TMPD/<name>.ppm an.
 lauf() {
-    local name=$1 extra=$2 marke=${3:-}
+    local name=$1 extra=$2 marke=${3:-} marke2=${4:-}
     local sock="$TMPD/mon-$name.sock" out="$TMPD/$name.txt"
     rm -f "$out" "$sock" "$TMPD/$name.ppm"
-    cp -f "$TMPD/disk.img" "$TMPD/live-$name.img"
+    # WELCHES ABBILD? Das mit der Autostart-Liste dieses Laufs, wenn es
+    # eines gibt -- sonst das Grundabbild.
+    local img="$TMPD/disk.img"
+    [ -s "$TMPD/disk-$name.img" ] && img="$TMPD/disk-$name.img"
+    cp -f "$img" "$TMPD/live-$name.img"
     timeout 240 $QEMU_X86 -kernel "$TMPD/k.mb" -m 256 \
         -append "$BASE $extra" -serial "file:$out" -display none \
         -no-reboot -vga std -global VGA.edid=off \
@@ -188,6 +236,20 @@ lauf() {
         sleep 2
         python3 tools/gfx/screenshot.py "$sock" "$TMPD/$name.ppm" 25 \
             > "$TMPD/$name.shot" 2>&1
+        # WIE WEIT WAR DIE LEITUNG, ALS DAS FOTO ENTSTAND? Wer spaeter
+        # eine Koordinate aus dem Protokoll liest, muss die Zeile
+        # nehmen, die VOR dem Foto stand -- nicht die letzte des Laufs.
+        wc -l < "$out" > "$TMPD/$name.marke"
+    fi
+    # EIN ZWEITES FOTO AUS DEMSELBEN LAUF, an einer zweiten Marke.
+    # Nur so laesst sich "zur Laufzeit" belegen: derselbe Server,
+    # dieselbe Leiste, kein Neustart -- nur der Zustand des Plugins hat
+    # sich zwischen den beiden Augenblicken geaendert.
+    if [ -n "$marke2" ]; then
+        warte "$out" "$marke2" "$pid"
+        sleep 2
+        python3 tools/gfx/screenshot.py "$sock" "$TMPD/$name-2.ppm" 25 \
+            > "$TMPD/$name-2.shot" 2>&1
     fi
     wait "$pid"; echo "$?" > "$TMPD/$name.rc"
     rm -f "$sock"
@@ -203,16 +265,26 @@ sauber() { # name
 
 # ========================================== 4. die Absturz-Gegenprobe
 echo "== 4. Absturz: ein Plugin stuerzt ab (SIGSEGV) =="
-lauf segv "wigapp=/bin/plugboese,boese,segv" '^wm: hold'
+# DER AUTOSTART FAEHRT DIE GEGENPROBE. Eine Zeile in
+# /etc/wmplug.autostart, mehr braucht es nicht: der Schreibtisch ruft
+# `wmplug enable boesebar segv`, das gewaehrt die Rechte aus
+# /etc/wmplug.conf (dort traegt `boesebar` zusaetzlich R_ACT_BAR) und
+# startet /bin/plugboese. ZWEI FOTOS aus DEMSELBEN Lauf: eines, waehrend
+# das Plugin sein Feld in der Leiste besetzt haelt, und eines, nachdem
+# der Kern den Toten abgeholt hat.
+abbild segv 'boesebar segv' || bad "segv: das Abbild ist nicht gebaut"
+lauf segv "" '^plugboese: leiste gesetzt' 'wmplug: tot platz='
 S=$TMPD/segv.clean
 sauber segv
 has "$S" "plugboese: abi=1" "das Plugin hat die Fassung erfragt"
-hasre "$S" '^plugboese: platz=[0-9]+ rechte=31$' \
-    "es ist angemeldet und hat R_DEFAULT (0x1F): alle Ereignisbits, KEIN Aktionsbit"
+hasre "$S" '^plugboese: platz=[0-9]+ rechte=2049$' \
+    "es hat genau die Rechte aus /etc/wmplug.conf (0x801 = 2049: sehen + Leiste)"
+has "$S" "plugboese: leiste gesetzt, rc=0" \
+    "es hat VOR dem Absturz ein Feld in der Leiste besetzt (WM_PLUG_BAR)"
 has "$S" "plugboese: gleich stuerze ich ab" "es sagt an, dass es gleich abstuerzt"
 hasre "$S" 'wmplug: tot platz=[0-9]+ pid=[0-9]+' \
     "der Kern hat den Toten selbst abgeholt (reap)"
-hasflat "$S" 'unreg boese *grund=1' \
+hasflat "$S" 'unreg boesebar *grund=1' \
     "und abgemeldet mit grund=1 (G_CRASH) -- der Grund steht auf der Leitung"
 # DER EIGENTLICHE PUNKT: der Schreibtisch lebt danach WEITER.
 has "$S" "wm: hold" "der Fensterserver steht noch"
@@ -272,7 +344,8 @@ echo "== 5. Frist: ein Plugin haengt in der Endlosschleife =="
 # `plugfrist` kuerzt die Frist des Kerns auf wenige Ticks, damit sie
 # innerhalb eines Laufs wirklich reisst. Die Frist SELBST steht in
 # kernel/wmplug.fi; dieses Wort setzt nur den Zeiger kuerzer.
-lauf hang "plugfrist wigapp=/bin/plugboese,boese,hang" '^wm: hold'
+abbild hang 'boese hang' || bad "hang: das Abbild ist nicht gebaut"
+lauf hang "plugfrist" '^wm: hold'
 H=$TMPD/hang.clean
 sauber hang
 has "$H" "plugboese: ab jetzt hole ich nichts" "das Plugin hoert auf abzuholen"
@@ -301,7 +374,8 @@ fi
 
 # ============================================= 6. die Rechte-Gegenprobe
 echo "== 6. Rechte: ein Plugin greift nach einem fremden Fenster =="
-lauf greif "wigapp=/bin/plugboese,boese,greif" '^wm: hold'
+abbild greif 'boese greif' || bad "greif: das Abbild ist nicht gebaut"
+lauf greif "" '^wm: hold'
 G=$TMPD/greif.clean
 sauber greif
 # R_DEFAULT (0x1F) ist das, was der KERN einem unbekannten Plugin gibt:
@@ -309,8 +383,15 @@ sauber greif
 # /etc/wmplug.conf ist noch enger und wuerde erst durch
 # `wmplug enable boese` wirksam -- hier wird also der WEITERE der beiden
 # Faelle gemessen, und selbst der hat kein einziges Aktionsbit.
-hasre "$G" '^plugboese: platz=[0-9]+ rechte=31$' \
-    "das Plugin hat R_DEFAULT (0x1F) und ausdruecklich KEIN R_ACT_WIN (0x100)"
+hasre "$G" '^plugboese: platz=[0-9]+ rechte=1$' \
+    "das Plugin hat GENAU R_EV_WIN (0x001) und ausdruecklich KEIN R_ACT_WIN (0x100)"
+# UND DAMIT LIEST ES TROTZDEM DIE FENSTERTAFEL. Das ist die Zusage des
+# neuen Leserechts: bis zu dieser Runde ging WM_LIST nur an eine
+# Taskleiste, und dieses Plugin legte dafuer ein verborgenes Fenster von
+# 32x16 Bildpunkten an. Das Fenster ist weg; der Schluessel ist das
+# Recht. Ginge es nicht, staende unten kein `vorher id=`.
+hasnotre "$G" 'plugboese-lese' \
+    "es legt KEIN verborgenes Hilfsfenster mehr an (der Titel kommt nicht vor)"
 hasre "$G" 'plugboese: vorher id=[0-9]+ x=[0-9]+ y=[0-9]+' \
     "es hat den Ort des fremden Fensters VORHER gelesen"
 hasre "$G" 'plugboese: griff nach fremdem id=[0-9]+ fehler=2' \
@@ -370,6 +451,172 @@ else
     bad "keine zwei Latenzzahlen ($l1 / $l2)"
 fi
 hasre "$P" '^probe: ende, ?rc=|^probe: ende' "der Prueflauf meldet sich sauber ab"
+
+# ============================== 7b. das Tempo, sauber und in EINEM Lauf
+echo "== 7b. Bildrate und Latenz: 60 Bilder vor, 60 Bilder nach dem Laden =="
+# WARUM NOCH EINE MESSUNG, wo Abschnitt 7 schon zwei Zahlen hat: die
+# dortigen kommen aus `PL_LATUS`, und das ist der MITTELWERT SEIT DEM
+# HOCHLAUF. Ein Mittelwert ueber alles bewegt sich nach zwei Minuten
+# kaum noch -- er kann einen Einbruch nach dem Laden gar nicht zeigen.
+# /bin/plugtempo misst stattdessen zwei FENSTER von je 60 Bildern im
+# selben Lauf, jeweils nach einem Warmlauf (die erste Glyphe ist teuer,
+# danach liegt sie im Cache von fUi), und meldet Mittel, Kleinstes und
+# Groesstes -- eine Zahl ohne Streuung ist keine Messung.
+# `wighalt=50` verlaengert das Stillhalten des Servers von zwanzig auf
+# fuenfzig Sekunden (kernel/kgui.fi, `pmon.wighalt`). Ohne das Wort
+# endet der Lauf mitten im zweiten Messfenster -- gemessen: bei 8 Bildern
+# je Sekunde dauern zweimal 60 Bilder plus zwei Warmlaeufe rund 25
+# Sekunden, und zwanzig sind zwanzig.
+lauf tempo "wighalt=50 wigapp=/bin/plugtempo,plugtempo,bilder=60" 'tempo: ende'
+T=$TMPD/tempo.clean
+sauber tempo
+hasre "$T" '^tempo: vor bilder=[0-9]+' "das Messfenster VOR dem Laden steht auf der Leitung"
+hasre "$T" '^tempo: nach bilder=[0-9]+' "und das Messfenster NACH dem Laden auch"
+has "$T" "wmplug: reg uhr" "zwischen den beiden Fenstern wurde wirklich ein Plugin geladen"
+tv_b=$(zahl "$T" '^tempo: vor '  'bilder'); tn_b=$(zahl "$T" '^tempo: nach ' 'bilder')
+tv_u=$(zahl "$T" '^tempo: vor '  'us');     tn_u=$(zahl "$T" '^tempo: nach ' 'us')
+tv_f=$(zahl "$T" '^tempo: vor '  'fps10');  tn_f=$(zahl "$T" '^tempo: nach ' 'fps10')
+tv_mi=$(zahl "$T" '^tempo: vor ' 'min');    tn_mi=$(zahl "$T" '^tempo: nach ' 'min')
+tv_ma=$(zahl "$T" '^tempo: vor ' 'max');    tn_ma=$(zahl "$T" '^tempo: nach ' 'max')
+if [ "${tv_b:-0}" -ge 60 ] 2>/dev/null && [ "${tn_b:-0}" -ge 60 ] 2>/dev/null; then
+    ok "beide Fenster haben wirklich 60 Bilder (vor $tv_b, nach $tn_b)"
+else
+    bad "die Messfenster sind zu klein: vor '$tv_b', nach '$tn_b' Bilder"
+fi
+if [ -n "${tv_u:-}" ] && [ -n "${tn_u:-}" ]; then
+    ok "Bildzeit vor dem Laden ${tv_u} us (min ${tv_mi}, max ${tv_ma}), nach dem Laden ${tn_u} us (min ${tn_mi}, max ${tn_ma})"
+    ok "Bildrate vor dem Laden ${tv_f} (x10), nach dem Laden ${tn_f} (x10) -- beide Zahlen gehen in den Bericht"
+else
+    bad "keine zwei Bildzeiten aus demselben Lauf ('$tv_u' / '$tn_u')"
+fi
+# DIE SCHRANKE. Sie ist grosszuegig und sie sagt warum: das zweite
+# Fenster traegt einen zusaetzlichen Ring-3-Prozess UND ein Feld mehr in
+# der Leiste. Bricht die Bildrate dabei um mehr als ein Drittel ein, ist
+# das Erweiterungssystem zu teuer -- und dann steht es hier rot.
+# UND DIE LATENZ, mit derselben Frage: die mittlere Bildzeit kommt aus
+# der Bilduhr des Servers (PL_FRSUM/PL_FRN, ueber das Messfenster
+# gerechnet). Doppelt so teuer waere zu teuer.
+if [ -n "${tv_u:-}" ] && [ -n "${tn_u:-}" ] && [ "${tv_u:-0}" -gt 0 ] 2>/dev/null; then
+    if [ "$tn_u" -le $(( tv_u * 2 )) ]; then
+        ok "die Bildzeit bleibt in der Groessenordnung: ${tv_u} us -> ${tn_u} us"
+    else
+        bad "die Bildzeit verdoppelt sich mehr als: ${tv_u} us -> ${tn_u} us"
+    fi
+fi
+if [ -n "${tv_f:-}" ] && [ -n "${tn_f:-}" ] && [ "${tv_f:-0}" -gt 0 ] 2>/dev/null; then
+    if [ "$tn_f" -ge $(( tv_f * 2 / 3 )) ]; then
+        ok "kein Tempoeinbruch: ${tn_f} ist mindestens zwei Drittel von ${tv_f} (Bildrate x10)"
+    else
+        bad "Tempoeinbruch nach dem Laden: ${tv_f} -> ${tn_f} (Bildrate x10)"
+    fi
+fi
+
+# ======================= 7c. einschalten ZUR LAUFZEIT, am Bildpunkt
+echo "== 7c. wmplug enable an einem LAUFENDEN Plugin =="
+# DIE GEGENPROBE ZUM ABSCHALTEN. /bin/uhrspaet startet das Widget OHNE
+# jede Gewaehrung (der Kern gibt R_DEFAULT, also kein R_ACT_BAR), macht
+# das erste Foto moeglich, ruft dann `/bin/wmplug enable uhr` und laesst
+# das zweite Foto entstehen. Zwischen den Bildern liegt KEIN Neustart:
+# derselbe Prozess, derselbe Tafelplatz, neue Rechte.
+lauf spaet "wigapp=/bin/uhrspaet,uhrspaet,wartems=3000,runden=40" \
+    'uhrspaet: vor dem enable' 'taskbar: text plug '
+SP=$TMPD/spaet.clean
+sauber spaet
+has "$SP" "pluguhr: KEIN recht R_ACT_BAR" \
+    "das Widget startet OHNE R_ACT_BAR -- der Text wird abgewiesen"
+hasre "$SP" 'uhrspaet: (grant|enable) r=' \
+    "danach wird gewaehrt (WM_PLUG_GRANT -- derselbe Ruf wie 'wmplug enable uhr')"
+has "$SP" "taskbar: text plug " "und die Leiste malt den Widget-Text"
+# EIN EINZIGER PROZESS: das Widget ist nicht neu gestartet worden, es
+# gibt genau eine Anmeldung auf der Leitung.
+n_reg=$(grep -ca 'wmplug: reg uhr' "$SP")
+[ "${n_reg:-0}" = 1 ] \
+    && ok "genau EINE Anmeldung (wmplug: reg uhr) -- kein Prozessneustart" \
+    || bad "'wmplug: reg uhr' steht ${n_reg}x da -- da hat sich etwas neu angemeldet"
+n_hold_sp=$(grep -ca '^wm: hold' "$SP")
+[ "${n_hold_sp:-0}" = 1 ] \
+    && ok "und der Fensterserver lief durch (genau ein 'wm: hold')" \
+    || bad "'wm: hold' steht ${n_hold_sp}x da"
+# UND JETZT DER BILDPUNKT. Die Lage des Widget-Kastens kommt aus der
+# Leiste selbst (`taskbar: plug nr=0 x= y= w= h=` plus `taskbar: geom`),
+# nicht aus diesem Skript.
+zl=$(grep -a '^taskbar: plug nr=0 ' "$TMPD/spaet.clean" | tail -1)
+gl=$(grep -a '^taskbar: geom ' "$TMPD/spaet.clean" | tail -1)
+feld() { printf '%s' "$1" | grep -oE " $2=[0-9]+" | head -1 | sed 's/.*=//'; }
+px=$(feld "$zl" x); py=$(feld "$zl" y); pw=$(feld "$zl" w); ph=$(feld "$zl" h)
+gx=$(feld "$gl" x); gy=$(feld "$gl" y); gx=${gx:-0}; gy=${gy:-0}
+if [ -z "${px:-}" ] || [ ! -s "$TMPD/spaet.ppm" ] || [ ! -s "$TMPD/spaet-2.ppm" ]; then
+    bad "ohne Widget-Kasten oder ohne zwei Fotos gibt es nichts nachzurechnen (Kasten '$zl')"
+else
+    # DIE KOORDINATE WIRD NICHT GERATEN, SONDERN GEFUNDEN. Die Mitte
+    # des Kastens liegt bei kurzem Text zwischen zwei Buchstaben und
+    # zeigt dann in beiden Bildern dieselbe Leistenfarbe -- gemessen,
+    # und deshalb steht hier keine getippte Zahl mehr. Dieses Stueck
+    # zaehlt die verschiedenen Bildpunkte im Kasten UND nennt den
+    # ersten; an dem rechnet danach checkshot.py nach.
+    read -r dz dx dy <<<"$(python3 - "$TMPD/spaet.ppm" "$TMPD/spaet-2.ppm" \
+        "$((gx+px))" "$((gy+py))" "$pw" "$ph" <<'PYD'
+import sys
+def load(p):
+    d = open(p, 'rb').read(); t = []; i = 2
+    while len(t) < 3:
+        while i < len(d) and d[i:i+1].isspace(): i += 1
+        if d[i:i+1] == b'#':
+            while d[i:i+1] != b'\n': i += 1
+            continue
+        j = i
+        while j < len(d) and not d[j:j+1].isspace(): j += 1
+        t.append(int(d[i:j])); i = j
+    return t[0], t[1], d[i+1:]
+a = load(sys.argv[1]); b = load(sys.argv[2])
+x0, y0, w, h = (int(v) for v in sys.argv[3:7])
+n = 0; erst = (-1, -1)
+for y in range(y0, min(y0 + h, a[1], b[1])):
+    for x in range(x0, min(x0 + w, a[0], b[0])):
+        o = (y * a[0] + x) * 3
+        if a[2][o:o+3] != b[2][o:o+3]:
+            n += 1
+            if erst == (-1, -1): erst = (x, y)
+print(n, erst[0], erst[1])
+PYD
+)"
+    if [ "${dz:-0}" -gt 40 ]; then
+        ok "im Widget-Kasten unterscheiden sich $dz Bildpunkte zwischen vorher und nachher"
+    else
+        bad "vorher und nachher unterscheiden sich im Kasten nur in ${dz:-0} Bildpunkten"
+    fi
+    if [ "${dx:-0}" -ge 0 ] && [ "${dx:--1}" != "-1" ]; then
+        v1=$(python3 tools/gfx/checkshot.py punkt "$TMPD/spaet.ppm" "$dx" "$dy" 2>&1)
+        v2=$(python3 tools/gfx/checkshot.py punkt "$TMPD/spaet-2.ppm" "$dx" "$dy" 2>&1)
+        if [ "$v1" != "$v2" ]; then
+            ok "checkshot punkt ($dx,$dy): vor dem Gewaehren [$v1], danach [$v2] -- verschieden"
+        else
+            bad "checkshot punkt ($dx,$dy): beide [$v1]"
+        fi
+    else
+        bad "kein einziger verschiedener Bildpunkt im Kasten -- das Einschalten hat nichts bewirkt"
+    fi
+    # Und die Tinte im Kasten: NACH dem Einschalten stehen dort
+    # Buchstaben, vorher nicht. Die Vergleichsfarbe wird aus dem Bild
+    # GELESEN (eine Ecke des Kastens), nicht getippt.
+    ecke2=$(python3 tools/gfx/checkshot.py punkt "$TMPD/spaet-2.ppm" \
+        "$((gx+px+1))" "$((gy+py+1))" 2>/dev/null)
+    tinte=$(python3 tools/gfx/checkshot.py flaeche "$TMPD/spaet-2.ppm" \
+        "$((gx+px))" "$((gy+py))" "$pw" "$ph" $ecke2 2>&1 | grep -oE '^[0-9]+')
+    if [ "${tinte:-0}" -gt 20 ]; then
+        ok "im Widget-Kasten stehen nach dem Einschalten $tinte Bildpunkte Tinte"
+    else
+        bad "nach dem Einschalten steht kein Text im Kasten (${tinte:-0} Punkte)"
+    fi
+    cp -f "$TMPD/spaet.ppm" "$TMPD/enable-vorher.ppm"
+    cp -f "$TMPD/spaet-2.ppm" "$TMPD/enable-nachher.ppm"
+    for b in enable-vorher enable-nachher; do
+        python3 tools/gfx/ppm2png.py "$TMPD/$b.ppm" "$SHOTS/$b.png" >/dev/null 2>&1
+    done
+    [ -s "$SHOTS/enable-nachher.png" ] \
+        && ok "die zwei Fotos liegen als docs/shots/wmplug/enable-vorher.png und -nachher.png" \
+        || bad "die zwei Fotos des Einschaltens wurden nicht abgelegt"
+fi
 
 # ===================================================== 8. die Verwaltung
 echo "== 8. /bin/wmplug: list, info, disable, list =="
@@ -446,7 +693,8 @@ fi
 
 # ================================================= 11. die Fotos liegen da
 echo "== 11. die Fotos =="
-for b in regel-mit-recht regel-ohne-recht widget-an widget-aus-laufzeit nach-absturz; do
+for b in regel-mit-recht regel-ohne-recht widget-an widget-aus-laufzeit nach-absturz \
+         enable-vorher enable-nachher; do
     if [ -s "$SHOTS/$b.png" ] || [ -s "$SHOTS/$b.ppm" ]; then
         ok "docs/shots/wmplug/$b liegt da"
     else
@@ -457,6 +705,53 @@ for b in regel-mit-recht regel-ohne-recht widget-an widget-aus-laufzeit nach-abs
         fi
     fi
 done
+
+# ============ 12. die Fensterregel, an der Koordinate nachgerechnet
+echo "== 12. die zwei Bilder der Fensterregel, Punkt fuer Punkt =="
+# DIE BILDUNTERSCHRIFT WIRD NACHGERECHNET. In den Bildern der
+# Fensterregel steht das Fenster von /bin/calc einmal dort, wo die Regel
+# es hinschickt (zentriert, 230,70) und einmal dort, wo der
+# Fensterserver es von selbst hinlegt (80,60). Bisher stand das nur in
+# regel.sh; hier wird es ein zweites Mal und aus einem anderen Skript
+# gerechnet, denn genau diese zwei Bilder gehen als 04 und 05 an die
+# Jury. checkshot.py liest nur PPM, die abgelegten Bilder sind PNG --
+# also werden sie zurueckgewandelt und dann gemessen.
+regel_ppm() { # png ppm
+    python3 - "$1" "$2" <<'PYX'
+import sys
+try:
+    from PIL import Image
+except Exception:
+    sys.exit(2)
+try:
+    Image.open(sys.argv[1]).convert('RGB').save(sys.argv[2])
+except Exception:
+    sys.exit(3)
+PYX
+}
+if [ "${WMPLUG_SCHNELL:-0}" = 1 ]; then
+    printf '  ....  die Regelbilder -- nicht geprueft (WMPLUG_SCHNELL=1)\n'
+elif [ -s "$SHOTS/regel-mit-recht.png" ] && [ -s "$SHOTS/regel-ohne-recht.png" ] \
+     && regel_ppm "$SHOTS/regel-mit-recht.png" "$TMPD/rmit.ppm" \
+     && regel_ppm "$SHOTS/regel-ohne-recht.png" "$TMPD/rohne.ppm"; then
+    # (500,300) liegt im zentrierten Fenster (230..570) und ausserhalb
+    # des unveraenderten (80..420); (120,300) genau andersherum.
+    a=$(python3 tools/gfx/checkshot.py punkt "$TMPD/rmit.ppm" 500 300 2>&1)
+    b=$(python3 tools/gfx/checkshot.py punkt "$TMPD/rohne.ppm" 500 300 2>&1)
+    c=$(python3 tools/gfx/checkshot.py punkt "$TMPD/rohne.ppm" 120 300 2>&1)
+    d=$(python3 tools/gfx/checkshot.py punkt "$TMPD/rmit.ppm" 120 300 2>&1)
+    [ "$a" != "$b" ] \
+        && ok "checkshot punkt (500,300): mit Recht [$a], ohne Recht [$b] -- verschieden" \
+        || bad "checkshot punkt (500,300): beide [$a] -- die Regel ist im Bild nicht zu sehen"
+    [ "$a" = "$c" ] \
+        && ok "und dieselbe Fensterfarbe steht ohne Recht bei (120,300): [$c] -- das Fenster ist gewandert" \
+        || bad "die Fensterfarbe wanderte nicht mit: [$a] gegen [$c]"
+    [ "$d" != "$c" ] \
+        && ok "checkshot punkt (120,300): mit Recht [$d], ohne Recht [$c] -- verschieden" \
+        || bad "checkshot punkt (120,300): beide [$c]"
+else
+    bad "die zwei Regelbilder liegen nicht als PNG in $SHOTS (oder PIL fehlt)"
+fi
 
 echo
 echo "WMPLUG: $pass bestanden, $fail gescheitert"
