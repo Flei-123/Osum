@@ -28,6 +28,7 @@
 profile kernel
 
 import ulib
+import zeile
 
 export { u_start }
 
@@ -43,6 +44,15 @@ const WM_PLUG_SUB: u64 = 2120
 const WM_PLUG_INFO: u64 = 2121
 const WM_PLUG_BAR: u64 = 2124
 const WM_PLUG_BARGET: u64 = 2125 // nur die Leiste -- hier die Gegenprobe
+// WM_LIST gibt es seit der Runde LEISTE; seit R2-2 oeffnet es ausser
+// `is_taskbar` auch das Recht R_EV_WIN, und das hat dieses Widget in
+// jeder Fassung (schon in R_DEFAULT). Gezaehlt wird nur, angefasst
+// nichts.
+const WM_LIST: u64 = 2110
+const WL_FLAGS: u64 = 48
+const WL_BYTES: u64 = 128
+const F_HIDDEN: u64 = 1
+const MAX_WIN: u64 = 64
 
 const PL_ABI: u64 = 0
 const PL_SLOT: u64 = 3
@@ -66,25 +76,29 @@ const R_ACT_BAR: u64 = 0x800
 // ---------------------------------------------------- die Meldungen
 static mut still: u64 = 0
 
+// RUNDE FIX-R3-2: derselbe Zeilenpuffer wie in der Leiste
+// (kernel/user/zeile.fi). Ein Widget, das einmal je Sekunde schreibt,
+// und eine Leiste, die bei jedem Bild schreibt, trafen sich sonst
+// mitten im Wort.
 fn say(p: u64) {
     if still != 0 {
         return
     }
-    let _r: u64 = ulib.say(p)
+    zeile.t(p)
 }
 
 fn sayn(v: u64) {
     if still != 0 {
         return
     }
-    ulib.sayn(v)
+    zeile.n(v)
 }
 
 fn nl() {
     if still != 0 {
         return
     }
-    ulib.nl()
+    zeile.nl()
 }
 
 // ------------------------------------------------------- der Text
@@ -128,14 +142,33 @@ fn zeichen(at: u64, c: u64) -> u64 {
 static mut cs_t: u64 = 0
 static mut cs_i: u64 = 0
 static mut cs_da: u64 = 0
+// Die zwei Rohdifferenzen des letzten Takts. Sie stehen auf der
+// seriellen Leitung, weil die Zahl im Feld sonst nicht nachrechenbar
+// ist: `cpu 100%` kann heissen "der Rechner hat zu tun" oder "der
+// Leerlaufzaehler bewegt sich nicht", und das sind zwei sehr
+// verschiedene Befunde.
+static mut cs_dt: u64 = 0
+static mut cs_di: u64 = 0
+// 1 = seit dem Start hat sich `CS_IDLE` KEIN EINZIGES MAL bewegt,
+// obwohl `CS_TICKS` lief. Dann gibt es auf dieser Maschine keinen
+// Leerlaufzaehler (gemessen: `nosched`, der Schreibtischlauf der
+// Abnahme hat keine Leerlaufaufgabe, `K_IDLE` kommt nie dran und
+// `cpu.C_IDLETICKS` bleibt 0). Eine Auslastung von 100 % zu melden
+// waere in diesem Fall keine Messung, sondern ein Rechenfehler.
+static mut cs_nv: u64 = 1
 
+// Rueckgabe: 0..100, gueltig nur wenn `cs_nv == 0`.
 fn cpu_last() -> u64 {
     let t: u64 = ulib.sys(ulib.SYS_CPUSTAT, 0, ulib.CS_TICKS, 0)
     let i: u64 = ulib.sys(ulib.SYS_CPUSTAT, 0, ulib.CS_IDLE, 0)
     if ulib.bad(t) || ulib.bad(i) {
+        cs_dt = 0
+        cs_di = 0
         return 0
     }
     var last: u64 = 0
+    cs_dt = 0
+    cs_di = 0
     if cs_da != 0 && t > cs_t {
         let dt: u64 = t - cs_t
         var di: u64 = 0
@@ -144,6 +177,11 @@ fn cpu_last() -> u64 {
         }
         if di > dt {
             di = dt
+        }
+        cs_dt = dt
+        cs_di = di
+        if di != 0 {
+            cs_nv = 0
         }
         last = ((dt - di) * 100) / dt
     }
@@ -164,14 +202,76 @@ fn cpu_last() -> u64 {
 // NICHT schon zeigt -- die Last zeigt sie nicht. Die Trennung im Bild
 // (mindestens acht Bildpunkte zwischen Widgetfeld und Uhr) steht
 // zusaetzlich in kernel/user/taskbar.fi; hier faellt der Anlass weg.
+//
+// UND SEIT DER NACHMESSUNG GIBT ES EINEN ZWEITEN FALL. Gemessen im
+// Abnahmelauf (`nosched`, Schreibtisch im Leerlauf): `CS_TICKS` lief
+// hoch, `CS_IDLE` blieb 0 -- es gibt auf diesem Weg keine
+// Leerlaufaufgabe, also auch keinen Leerlaufzaehler. Die alte Fassung
+// rechnete daraus brav `(dt - 0) * 100 / dt` und meldete `cpu 100%`
+// auf einem Rechner, der nichts tat. Das ist keine Auslastung, das ist
+// ein fehlender Zaehler, und ein Widget, das den Unterschied nicht
+// sagt, luegt in die Leiste. Also: `cpu n/v`.
+//
+// UND DANN STAND IN DER LEISTE EINE GROESSE, DIE SICH NIE AENDERT.
+// Die zwei Abnahmefotos (Plugin an / Plugin aus) sollen sich an etwas
+// SINNVOLLEM unterscheiden und nicht daran, dass irgendwo ein Feld
+// leer ist. Also steht hinter der Last die Zahl der sichtbaren Fenster
+// (`fen N`, aus `WM_LIST`): sie aendert sich im Abnahmelauf
+// nachweislich, sobald der Schreibtisch ein Fenster oeffnet oder
+// schliesst, und sie ist das, was ein Leistenwidget zeigen darf --
+// gelesen, nicht angefasst.
+//
+// WM_LIST(platz, satz, WL_BYTES) -> 1 = Platz belegt. Erlaubt ist der
+// Ruf durch das Recht R_EV_WIN aus der Plugintafel (sysgui.fi,
+// `darf_listen`); ohne Anmeldung gibt es -E_RIGHTS, und dann steht
+// hier eine 0 statt einer erfundenen Zahl.
+fn fenster_zahl() -> u64 {
+    var satz: [u8; 128] = [0 as u8; 128]
+    let sp: u64 = (&satz[0 as usize]) as u64
+    var p: u64 = 0
+    var n: u64 = 0
+    while p < MAX_WIN {
+        let r: u64 = ulib.sys(WM_LIST, p, sp, WL_BYTES)
+        if ulib.bad(r) {
+            return n
+        }
+        if r == 1 {
+            // Verborgene Fenster zaehlen nicht mit: was auf einer
+            // anderen Arbeitsflaeche liegt, sieht der Mensch vor dem
+            // Schirm nicht, und die Zahl soll das Bild beschreiben.
+            if (__mmio_read64((sp + WL_FLAGS) as *mut u64) & F_HIDDEN) == 0 {
+                n = n + 1
+            }
+        }
+        p = p + 1
+    }
+    return n
+}
+
 fn bauen() -> u64 {
     var at: u64 = 0
+    var s_nv: [u8; 4] = "n/v\0"
     at = zeichen(at, 99)  // c
     at = zeichen(at, 112) // p
     at = zeichen(at, 117) // u
     at = zeichen(at, 32)
-    at = zahl(at, cpu_last())
-    at = zeichen(at, 37) // %
+    let last: u64 = cpu_last()
+    if cs_nv != 0 {
+        var k: u64 = 0
+        while k < 3 {
+            at = zeichen(at, __mmio_read8(((&s_nv[0 as usize]) as u64 + k) as *mut u8) as u64)
+            k = k + 1
+        }
+    } else {
+        at = zahl(at, last)
+        at = zeichen(at, 37) // %
+    }
+    at = zeichen(at, 32)
+    at = zeichen(at, 102) // f
+    at = zeichen(at, 101) // e
+    at = zeichen(at, 110) // n
+    at = zeichen(at, 32)
+    at = zahl(at, fenster_zahl())
     __mmio_write8(((&txt[0 as usize]) as u64 + at) as *mut u8, 0 as u8)
     return at
 }
@@ -221,6 +321,8 @@ fn u_start(args: u64) -> u64 {
     var s_nein: [u8; 32] = "pluguhr: anmeldung fehlgeschla\0\0"
     var s_kbar: [u8; 34] = "pluguhr: KEIN recht R_ACT_BAR r=\0\0"
     var s_txt: [u8; 15] = "pluguhr: text \0"
+    var s_roh: [u8; 19] = "pluguhr: cpu dt=\0\0\0"
+    var s_di: [u8; 6] = " di=\0\0"
     var s_bg: [u8; 31] = "pluguhr: barget verweigert r=\0\0"
     var s_fr: [u8; 22] = "pluguhr: frist ticks=\0"
     var s_po: [u8; 9] = " pollms=\0"
@@ -364,6 +466,17 @@ fn u_start(args: u64) -> u64 {
             gesagt = 2
             say((&s_txt[0 as usize]) as u64)
             say((&txt[0 as usize]) as u64)
+            nl()
+            // DIE ROHZAHLEN DAZU, damit die Zahl im Feld nachrechenbar
+            // ist und nicht geglaubt werden muss: `dt` sind die
+            // Zeitgeberschlaege dieses Takts (CS_TICKS), `di` der Teil
+            // davon im Leerlauf (CS_IDLE). Steht dort dauerhaft `di=0`,
+            // hat diese Maschine keinen Leerlaufzaehler -- und das Feld
+            // sagt `n/v` statt einer erfundenen Auslastung.
+            say((&s_roh[0 as usize]) as u64)
+            sayn(cs_dt)
+            say((&s_di[0 as usize]) as u64)
+            sayn(cs_di)
             nl()
         }
         n = n + 1
