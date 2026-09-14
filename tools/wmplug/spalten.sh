@@ -164,8 +164,34 @@ echo "== 4. der Spaltenstand, am Foto nachgerechnet =="
 # ist das Terminal des nackten Fensterservers. Der Schreibtisch nimmt
 # sein Thema aus /etc/theme und malt 248,250,252 auf 18,24,32 -- mit den
 # geborgten Zahlen war jede Glyphe "falsch", obwohl sie richtig stand.
-GRID=(assets/osum-mono.ttf 16 26 62 10 19)
+#
+# DER URSPRUNG DES RASTERS WIRD GEMESSEN UND NICHT EINGETRAGEN. Er stand
+# hier als (26,62) -- und das galt genau so lange, bis die Regel-Engine
+# mit ihrem neuen Leserecht anfing, das Terminalfenster nach (0,0) zu
+# setzen: dann liegt die erste Zelle bei (2,22), jede Zusage war rot, und
+# im Bild stand alles richtig. Also wird das umschliessende Rechteck der
+# TERMINALFARBE gesucht; seine linke obere Ecke IST die erste Zelle.
 VG=(248 250 252); HG=(18 24 32)
+ursprung=$(python3 - "$TMPD/paar.ppm" <<'PY'
+import sys
+d = open(sys.argv[1], 'rb').read()
+kopf = d.split(b'\n', 3)
+w, h = map(int, kopf[1].split())
+px, c = kopf[3], bytes((18, 24, 32))
+x0, y0 = w, h
+for y in range(h):
+    zeile = px[y * w * 3:(y + 1) * w * 3]
+    if zeile.count(c) < 50:      # Streupunkte sind kein Terminal
+        continue
+    x0 = min(x0, zeile.find(c) // 3)
+    y0 = min(y0, y)
+print("%d %d" % (x0, y0) if x0 < w else "26 62")
+PY
+)
+GX=$(echo "$ursprung" | awk '{print $1}')
+GY=$(echo "$ursprung" | awk '{print $2}')
+ok "die erste Zelle des Terminals liegt bei ($GX,$GY) -- am Bild gemessen"
+GRID=(assets/osum-mono.ttf 16 "$GX" "$GY" 10 19)
 tgrid() { # ppm zeile spalte text
     python3 tools/gfx/checkshot.py tgrid "$1" "${GRID[@]}" "$2" "$3" \
         "${VG[@]}" "${HG[@]}" "$4" 2>&1
