@@ -117,10 +117,14 @@ for r in EXT4_OFF NTFS_OFF; do
     v=$(grep -aE "^const $r: u64 = 0x[0-9A-Fa-f]+" kernel/kstate.fi \
         | head -1 | grep -oE '0x[0-9A-Fa-f]+')
     d=$((v))
-    if [ "$d" -ge $((0xF3000)) ] && [ "$d" -lt $((0xF9000)) ]; then
-        ok "$r = $v liegt im zugeteilten Bereich 0xF3000..0xF9000"
+    # MERGE 14.09.2026: die beiden Bereiche sind hinter die alte
+    # kdata-Grenze gezogen (0x100000/0x103000), weil vier parallele
+    # Runden sich denselben freien Raum ab 0xF2000 genommen hatten.
+    # Siehe den Merge-Vermerk in kernel/kstate.fi.
+    if [ "$d" -ge $((0x100000)) ] && [ "$d" -lt $((0x106000)) ]; then
+        ok "$r = $v liegt im zugeteilten Bereich 0x100000..0x106000"
     else
-        bad "$r = ${v:-fehlt} liegt AUSSERHALB von 0xF3000..0xF9000"
+        bad "$r = ${v:-fehlt} liegt AUSSERHALB von 0x100000..0x106000"
     fi
 done
 
@@ -130,7 +134,7 @@ done
 mkdir -p "$TMPD/kollision/arch/x86_64"
 cp kernel/*.fi "$TMPD/kollision/"
 cp kernel/arch/x86_64/*.fi "$TMPD/kollision/arch/x86_64/"
-sed -i 's/^const EXT4_OFF: u64 = 0xF3000$/const EXT4_OFF: u64 = 0xF2000/' \
+sed -i 's/^const EXT4_OFF: u64 = 0x100000$/const EXT4_OFF: u64 = 0xF2000/' \
     "$TMPD/kollision/kstate.fi"
 if python3 tools/kernel/memmap.py "$TMPD/kollision" > "$TMPD/karte2.txt" 2>&1; then
     bad "GEGENPROBE: EXT4_OFF auf 0xF2000 (= VGPU_OFF) und der Pruefer schweigt"
