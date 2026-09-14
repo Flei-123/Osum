@@ -56,6 +56,26 @@ hasnotre() { grep -qaE "$2" "$1" && bad "$3 -- /$2/ sollte nicht zutreffen" || o
 # Eine Zahl aus einer Zeile der Leitung: zahl <datei> <muster> <feld>
 zahl() { grep -aE "$2" "$1" | tail -1 | grep -oE "$3=-?[0-9]+" | head -1 | sed 's/.*=//'; }
 
+# DIE LEITUNG REISST, UND ZWAR MITTEN IM WORT.
+#
+# GEMESSENER BEFUND: der Kern schreibt seine Zeilen stueckweise
+# (`serial.puts` je Wortteil), und faellt dazwischen ein Zeitgeber oder
+# ein anderer Kernpfad herein, steht dessen Zeile MITTEN in der ersten:
+#
+#     wmplug: tot platz=0 pid=6
+#     wmplwm: fokus id=7 vor=0
+#     ug: unreg boese grund=1 holte=0 verlor=0
+#
+# Eine Zusage, die `unreg boese ... grund=1` zeilenweise sucht, ist dann
+# rot -- obwohl der Kern genau das gesagt hat. Also wird fuer solche
+# Zusagen der Zeilenumbruch WEGGENOMMEN und im durchgehenden Strom
+# gesucht. Das ist keine Nachsicht, sondern die richtige Frage: es geht
+# darum, OB der Kern den Grund genannt hat, nicht darum, ob die Zeile
+# heil geblieben ist.
+flach() { tr -d '\n' < "$1" > "$1.flat"; }
+hasflat() { grep -qaE "$2" "$1.flat" && ok "$3" \
+    || bad "$3 -- /$2/ trifft auch im durchgehenden Strom nicht"; }
+
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "WMPLUG: uebersprungen, qemu-system-x86_64 ist nicht da"; exit 0
 fi
@@ -172,6 +192,7 @@ lauf() {
     wait "$pid"; echo "$?" > "$TMPD/$name.rc"
     rm -f "$sock"
     tr -d '\000' < "$out" > "$TMPD/$name.clean"
+    flach "$TMPD/$name.clean"
 }
 
 sauber() { # name
@@ -191,7 +212,7 @@ hasre "$S" '^plugboese: platz=[0-9]+ rechte=31$' \
 has "$S" "plugboese: gleich stuerze ich ab" "es sagt an, dass es gleich abstuerzt"
 hasre "$S" 'wmplug: tot platz=[0-9]+ pid=[0-9]+' \
     "der Kern hat den Toten selbst abgeholt (reap)"
-hasre "$S" 'wmplug: unreg boese *grund=1' \
+hasflat "$S" 'unreg boese *grund=1' \
     "und abgemeldet mit grund=1 (G_CRASH) -- der Grund steht auf der Leitung"
 # DER EIGENTLICHE PUNKT: der Schreibtisch lebt danach WEITER.
 has "$S" "wm: hold" "der Fensterserver steht noch"
@@ -235,6 +256,13 @@ if [ -s "$TMPD/segv.ppm" ]; then
     else
         bad "nur '$nl' nichtschwarze Bildpunkte -- der Schirm ist nach dem Absturz leer"
     fi
+    # Als PNG ablegen wie die Bilder der beiden Modullaeufer -- ein
+    # PPM von anderthalb Megaoktett gehoert nicht in den Baum.
+    python3 -c "from PIL import Image; Image.open('$SHOTS/nach-absturz.ppm').save('$SHOTS/nach-absturz.png')" \
+        2>/dev/null && rm -f "$SHOTS/nach-absturz.ppm"
+    [ -s "$SHOTS/nach-absturz.png" ] \
+        && ok "das Foto liegt als docs/shots/wmplug/nach-absturz.png" \
+        || bad "nach-absturz.png wurde nicht abgelegt"
 else
     bad "kein Foto nach dem Absturz"
 fi
@@ -248,7 +276,7 @@ lauf hang "plugfrist wigapp=/bin/plugboese,boese,hang" '^wm: hold'
 H=$TMPD/hang.clean
 sauber hang
 has "$H" "plugboese: ab jetzt hole ich nichts" "das Plugin hoert auf abzuholen"
-hasre "$H" 'wmplug: unreg boese *grund=2' \
+hasflat "$H" 'unreg boese *grund=2' \
     "die Frist hat gegriffen: abgemeldet mit grund=2 (G_FRIST)"
 has "$H" "wm: hold" "der Schreibtisch steht auch danach"
 hasnotre "$H" '^(panic|PANIC|kernel panic)' "kein Panik im Kern"
@@ -363,7 +391,7 @@ has "$V" "plugstart: list nachher" "und list noch einmal danach"
 # DER ZUSTANDSWECHSEL, vom Kern selbst gemeldet: grund=4 ist G_USER,
 # also "jemand hat `wmplug disable` gesagt" -- und nicht Absturz (1),
 # nicht Frist (2), nicht Rechte (3).
-hasre "$V" 'wmplug: unreg uhr *grund=4' \
+hasflat "$V" 'unreg uhr *grund=4' \
     "der Kern meldet die Abmeldung mit grund=4 (G_USER) -- nicht Absturz, nicht Frist"
 # UND DER ZUSTAND, nicht nur die Meldung: die Tafel zaehlt vor dem
 # Abschalten ein Plugin und danach keines. DAS ist "an und aus zur
@@ -418,7 +446,7 @@ fi
 
 # ================================================= 11. die Fotos liegen da
 echo "== 11. die Fotos =="
-for b in regel-mit-recht regel-ohne-recht widget-an widget-aus-laufzeit; do
+for b in regel-mit-recht regel-ohne-recht widget-an widget-aus-laufzeit nach-absturz; do
     if [ -s "$SHOTS/$b.png" ] || [ -s "$SHOTS/$b.ppm" ]; then
         ok "docs/shots/wmplug/$b liegt da"
     else
