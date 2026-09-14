@@ -325,21 +325,34 @@ behalte "$TMPD/eigen.ppm" eigen-1400x1050
 # ============================================== 4. die drei Schranken
 
 echo "== 4. abgelehnt -- aber MIT Schranke und MIT Zahl =="
-foto schranken "gfx disp dispeigenbad nocursor fbtest fbhold $GRUND"
+# RUNDE KLEINKRAM (14.09.2026), A-018: `vgamem_mb=64` fuer DIESEN Lauf.
+# Die erste Schranke unten ist die der FENSTERPLAETZE, und sie ist erst
+# messbar, wenn die Karte davor NICHT schon abgelehnt hat. Mit den 16
+# MiB der Vorgabe stuende die Bildspeicherschranke (Grund 2) im Weg:
+# 3840x2160x4 = 33177600 > 16777216. Abschnitt 9 unten geht denselben
+# Weg und begruendet ihn dort ausfuehrlich.
+VGA_STD="-device VGA,edid=off,vgamem_mb=64" \
+    foto schranken "gfx disp dispeigenbad nocursor fbtest fbhold $GRUND"
 num "der Lauf endet sauber -- eine abgelehnte Zahl haelt den Kernel NICHT an" "$RC" eq 21
 S="$TMPD/schranken.txt"
 gleich "drei Anfragen, drei Antworten" "3" "$(grep -ac '^disp: eigen ' "$S")"
 
-# (a) DIE KACHELGRENZE DIESES KERNELS. 2560x1440x4 sind 14 745 600
-#     Oktette; die Karte hat 16 777 216 und nimmt sie an -- was NICHT
-#     traegt, sind die Fensterplaetze.
+# (a) DIE KACHELGRENZE DIESES KERNELS. 3840x2160x4 sind 33 177 600
+#     Oktette; die Karte hat hier 67 108 864 und nimmt sie an -- was
+#     NICHT traegt, sind die Fensterplaetze (29 360 128).
+#
+#     RUNDE KLEINKRAM (14.09.2026), A-018: hier stand 2560x1440 /
+#     14745600. Das war richtig gegen WIN_SLOTS=8 (maplimit 14680064).
+#     Commit 758c3c6 hat WIN_SLOTS auf 16 gesetzt -- mit Grund, siehe
+#     kernel/kgui.fi an der geaenderten Stelle -- und seither PASST
+#     2560x1440. Der Kern nahm es zu Recht an; falsch war die Erwartung.
 gleich "1. Schranke: dieser Kernel kann es nicht einblenden (Grund 3)" "3" "$(ew "$S" 1 why)"
 gleich "   und die genannte Zahl ist GENAU das, was das Bild braucht" \
-    "14745600" "$(ew "$S" 1 num)"
+    "33177600" "$(ew "$S" 1 num)"
 num "   sie ist groesser als das, was der Kernel einblenden kann" \
-    "14745600" gt "$(ew "$S" 1 maplimit)"
+    "33177600" gt "$(ew "$S" 1 maplimit)"
 num "   und KLEINER als der Bildspeicher der Karte -- die Karte war es also nicht" \
-    "14745600" lt "$(ew "$S" 1 vram)"
+    "33177600" lt "$(ew "$S" 1 vram)"
 gleich "   der Fehlerwert nach aussen ist E_LIMIT (8) und nicht E_NOMODE" "8" "$(ew "$S" 1 rc)"
 
 # (b) DIE KARTE SELBST. 1366 ist kein Vielfaches von acht; QEMU macht
@@ -384,7 +397,12 @@ num "der Lauf endet sauber" "$rc" eq 21
 K="$TMPD/klein.txt"
 gleich "die kleinere Karte meldet 8 MiB" "8388608" "$(ew "$K" 1 vram)"
 gleich "und JETZT ist der Bildspeicher der Grund (2 statt 3)" "2" "$(ew "$K" 1 why)"
-gleich "die Zahl ist unveraendert das, was das Bild braucht" "14745600" "$(ew "$K" 1 num)"
+# RUNDE KLEINKRAM (14.09.2026), A-018: 14745600 -> 33177600, weil die
+# erste Anfrage des Abschnitts `dispeigenbad` jetzt 3840x2160 ist und
+# nicht mehr 2560x1440 (Begruendung in kernel/kgui.fi). Die Zusage ist
+# unveraendert: dieselbe Anfrage an eine KLEINERE Karte muss denselben
+# Zahlenwert nennen und nur den GRUND wechseln (3 -> 2).
+gleich "die Zahl ist unveraendert das, was das Bild braucht" "33177600" "$(ew "$K" 1 num)"
 gleich "der Fehlerwert nach aussen ist E_VRAM (7)" "7" "$(ew "$K" 1 rc)"
 ok "eine Begruendung, die sich mit der Maschine aendert, ist eine Messung"
 
@@ -498,14 +516,20 @@ R="$TMPD/ring3.txt"
 gleich "zehn Zusagen ueber die Aufrufschwelle" "10" \
     "$(grep -ao 'dispctl: testc [0-9]*' "$R" | head -1 | grep -o '[0-9]*$')"
 cp -f "$TMPD/root.img" "$TMPD/r4.img"
-rc=$(lauf_platte satz \
-    "osum gfx disp nokbd nosched noproc script=dispctl eigen 2560 1440;dispctl eigen 1366 768" \
+# RUNDE KLEINKRAM (14.09.2026), A-018: 2560x1440 -> 3840x2160 und
+# `vgamem_mb=64`, aus demselben Grund wie in Abschnitt 4 oben --
+# WIN_SLOTS ist seit 758c3c6 16, 2560x1440 passt und wird angenommen.
+# Dieser Abschnitt will aber den SATZ pruefen, den ein abgelehnter
+# Wunsch hinterlaesst, und braucht dafuer einen, der wirklich abgelehnt
+# wird.
+rc=$(VGA_STD="-device VGA,edid=off,vgamem_mb=64" lauf_platte satz \
+    "osum gfx disp nokbd nosched noproc script=dispctl eigen 3840 2160;dispctl eigen 1366 768" \
     "$TMPD/r4.img")
 num "der Lauf endet sauber" "$rc" eq 21
 A="$TMPD/satz.txt"
 hat "$A" "dieser Kernel kann es nicht einblenden" "der Satz nennt die Schranke"
-hat "$A" "14745600" "und die Zahl, die es zerreisst"
-hat "$A" "12582912" "und die Zahl, die ginge"
+hat "$A" "33177600" "und die Zahl, die es zerreisst"
+hat "$A" "29360128" "und die Zahl, die ginge"
 hat "$A" "2-MiB-Fensterplaetze" "und wovon die Schranke kommt"
 hat "$A" "die Karte nimmt diese Zahl nicht an" "die zweite Schranke nennt sich anders"
 hat "$A" "Vielfaches von" "und gibt den Hinweis, der wirklich weiterhilft"
@@ -562,11 +586,19 @@ gleich "mit 16 MiB war es noch die Karte, die ablehnte" "1" \
     "$(grep -a '^disp: out   3840x2160' "$K16" | grep -ao 'reason=[0-9]*' | sed 's/reason=//')"
 ok "derselbe Kern, dieselbe Zeile, zwei Gruende -- die Schranken sind unabhaengig gemessen"
 ka=$(grep -a -m1 '^disp: kacheln' "$K16")
-[ -n "$ka" ] && ok "die Belegung der acht Fensterplaetze: $ka" || bad "keine Belegung gemeldet"
-gleich "acht Plaetze zu 2 MiB sind 16 MiB Fenster" "8" \
+[ -n "$ka" ] && ok "die Belegung der Fensterplaetze: $ka" || bad "keine Belegung gemeldet"
+# RUNDE KLEINKRAM (14.09.2026), A-018: 8 -> 16. Das ist keine
+# aufgeweichte Zusage, sondern der nachgezogene Wert: WIN_SLOTS steht
+# seit Commit 758c3c6 auf 16 (kernel/fb.fi:574), damit 3440x1440 an
+# einem Stueck haengt und trotzdem GERAETE_FREI Plaetze fuer Netz,
+# Platte, USB und Ton bleiben. Die Zusage selbst ist unveraendert: es
+# wird geprueft, dass der laengste zusammenhaengende Bereich KLEINER
+# ist als die Gesamtzahl -- also dass belegte Plaetze wirklich Loecher
+# reissen und nicht wegdefiniert werden.
+gleich "sechzehn Plaetze zu 2 MiB sind 32 MiB Fenster" "16" \
     "$(echo "$ka" | grep -ao 'alle=[0-9]*' | sed 's/.*=//')"
 num "und davon traegt der laengste zusammenhaengende Bereich weniger" \
-    "$(echo "$ka" | grep -ao 'laufmax=[0-9]*' | sed 's/.*=//')" lt 8
+    "$(echo "$ka" | grep -ao 'laufmax=[0-9]*' | sed 's/.*=//')" lt 16
 ok "die Differenz sind der lokale APIC und der I/O-APIC -- zwei Plaetze fuer je 4 KiB Register"
 
 echo
