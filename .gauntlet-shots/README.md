@@ -1,24 +1,32 @@
-# .gauntlet-shots -- echte Aufnahmen der Oberflaeche
+# Bilder der Runde WMPLUGIN
 
-Erzeugt am 09.09.2026 aus dem Stand 220633e ("Ausgangsstand vor Runde 1")
-mit `tools/design/capture.sh` (QEMU/TCG, `nostart wigapp=/bin/explorer`),
-gesteuert ueber Drehbuecher fuer `tools/design/drive.py`.
-Alle Bilder sind echte QEMU-screendumps (PPM -> PNG), nichts nachgemalt.
+Alle Bilder stammen aus WIRKLICH gebooteten Kernen (QEMU, `-vga std`,
+Foto ueber den QEMU-Monitor mit `tools/gfx/screenshot.py`, PPM nach PNG
+mit `tools/gfx/ppm2png.py`). Erzeugt von `tools/wmplug/shots.sh`; die
+Bilder 09/10 kommen aus dem Abnahmelauf `tools/wmplug/run.sh`
+(139 bestanden, 0 gescheitert).
 
-| Datei | Aufloesung | Was zu sehen ist |
-|---|---|---|
-| 01-start.png | 1280x800 | Startzustand /data: Menuezeile, Werkzeugleiste, Baum links, Tabelle rechts, Statuszeile "8 Stueck, 2 Ordner, 354 Oktette" |
-| 10-start.png | 1280x800 | derselbe Startzustand aus dem zweiten Lauf (Uhr 14:44) |
-| 11-menue-gehezu.png | 1280x800 | Klick auf "Gehe zu": das aufgeklappte Menue zeigt Liste/Symbole/Nach Name und traegt eine eigene Titelleiste "Me - [] X" |
-| 12-menue-ansicht.png | 1280x800 | "Ansicht" hervorgehoben, kein Menue offen |
-| 14-kontextmenue.png | 1280x800 | Datei-Menue offen: Neuer Ordner / Neue Datei / Oeffnen mit; Popup verdeckt Werkzeugleiste und Baum |
-| 15-unterordner.png | 1280x800 | nach Doppelklick auf "bilder": Pfad bleibt /data |
-| 16-sortiert-groesse.png | 1280x800 | Klick auf Spaltenkopf "Groesse" |
-| 17-sortiert-zeit.png | 1280x800 | Klick auf Spaltenkopf "Zeit"; Zeit-Spalte weiterhin "--" |
-| 18-maximiert.png | 1280x800 | Fenster maximiert -- Inhaltsflaeche bleibt vollstaendig leer |
-| 20-klein-800x600.png | 800x600 | kleiner Bildschirm: Fenster reicht bis an die Taskleiste |
-| 30-dialog-neuer-ordner.png | 1280x800 | Dialog "Neuer Ordner" mit Namensfeld; OK/Abbrechen stossen an den unteren Dialograhmen |
-| 31-kontextmenue.png | 1280x800 | Rechtsklick auf die Tabelle bei offenem Dialog -- kein Kontextmenue |
-| 32-baum-navigation.png | 1280x800 | Klick auf "bilder" im Baum: Baumzeile ausgewaehlt, Tabelle unveraendert |
-| 33-oeffnen-mit.png | 1280x800 | Datei-Menue ueber ausgewaehlter Datei alpha.txt |
-| 34-menue-bearbeiten.png | 1280x800 | Zustand mit Inhalt und Auswahl: "bilder" im Baum und "alpha.txt" in der Tabelle markiert |
+| Bild | Was es zeigt |
+|---|---|
+| 01-start-ohne-plugin.png | Schreibtisch mit Leiste, Kommandozeile `... plugaus` -- die Plugintafel ist ZU. Rechts in der Leiste steht NUR die Uhr des Systems. |
+| 02-uhr-widget-an.png | Dasselbe Bild mit angemeldetem Ring-3-Plugin `/bin/pluguhr`: rechts in der Leiste steht sein Text `18:33 cpu 100%`. Im Terminal die Anmeldung, die Frist (`frist ticks=50`) und die VERWEIGERUNG `barget verweigert r=-2`. |
+| 03-uhr-widget-aus-zur-laufzeit.png | Derselbe Lauf, spaeter: das Plugin hat sich abgemeldet (`ende runden=12`), der Widget-Text in der Leiste ist WEG -- ohne Neustart des Fensterservers. Bildpaar 02/03 ist der Sichtbeweis fuer "an und aus zur Laufzeit". |
+| 04-fensterregel-mit-recht.png | Regel-Plugin `/bin/plugregel` MIT Recht: liest `/etc/wmregeln.conf` (2 Regeln), meldet sich an (`rechte=259`), greift auf ein fremdes Fenster zu (`lesefenster id=11`). |
+| 05-fensterregel-ohne-recht.png | Derselbe Lauf OHNE Recht -- zum Vergleich daneben legen. |
+| 06-breit-1440x900.png | Breiter Schirm (`fbres=1440x900`): Leiste ueber die volle Breite, Widget-Text rechts, Fenster oben links. |
+| 07-eng-800x600.png | Vorgabe-Schirm 800x600 mit Widget. |
+| 08-sehr-eng-640x480.png | Enger Schirm 640x480 -- hier zeigt sich, ob Leiste und Fenster einander ins Gehege kommen. |
+| 09-wmplug-verwaltung.png | `/bin/wmplug list` + `info` + `disable` im Terminal: Fassung `abi=1`, Rechtemaske, Zaehler, danach `(keine Erweiterung angemeldet)`. |
+| 10-nach-plugin-absturz.png | Nach einem absichtlichen SIGSEGV eines Plugins: der Schreibtisch malt weiter (479819 von 480000 Bildpunkten nicht schwarz, gemessen im Abnahmelauf). |
+
+## Was auf den Bildern AUFFAELLT (nicht behauptet, sondern sichtbar)
+
+- In allen Bildern steht im Terminal `KEIN EINZIGES GERT!` -- das `AE`
+  faellt beim Malen weg (Umlaut im Text der USB-Meldung).
+- Bild 09: `wmplug list` bricht die Zeilen am Fensterrand statt am Wort
+  (`... Frist 50 Ticks  Flaeche` / `0` auf der naechsten Zeile), und
+  `Leistentext14` klebt Beschriftung und Zahl zusammen.
+- Bild 03: zwei Schreiber teilen sich eine Zeile
+  (`uhrstart: wmplug enable=wmplug: uhr rechte=0x807`).
+- Bild 08 (640x480): das Fenster reicht bis an den rechten Schirmrand;
+  eng wird es, aber es ueberlappt die Leiste nicht.
