@@ -81,6 +81,10 @@ Alleingang: vier Module lesen sie.
 | 2125 | `WM_PLUG_BARGET` | (platz, aus, max) | Laenge — **nur die Leiste** (`is_taskbar`) |
 | 2126 | `WM_PLUG_GRANT` | (name*15, rechte) | 0 / `-E_RIGHTS` — **nur root** |
 
+Die Felder von `WM_PLUG_INFO` reichen seit Modul A bis `PL_MAXNR = 20`;
+neu sind `PL_FRAMES = 18` (Bildnummer) und `PL_LATUS = 19` (mittlere
+Bildzeit in us). Beide beantwortet der Kern ohne Anmeldung.
+
 `WM_PLUG_INFO(_, PL_ABI)` beantwortet der Kern **immer**, auch ohne
 Plugintafel und ohne Anmeldung: sonst waere die Versionierung ein
 Ratespiel. Aktuelle Fassung: **`WMP_ABI = 1`**.
@@ -133,10 +137,36 @@ braucht, schreibt es in den Bericht statt sie zu aendern.
 ### A — `kern` (Kernseite vervollstaendigen)
 Dateien: `kernel/wmplug.fi`, `kernel/wm.fi`, `kernel/sysgui.fi`,
 `kernel/kgui.fi`, `kernel/kbd.fi` (falls fuer den Kuerzelweg noetig).
-Offen: Abholung des Todes eines Plugin-Prozesses (`sched.find_pid` →
-`unreg(G_CRASH)`), Tastenkuerzel vom Tastaturweg nach `key_owner` →
-`notify(E_KEY)` **statt** an das Fenster, `E_TILE` aus dem Kachelbaum,
-`E_STOP` vor jeder Abmeldung, Zaehler fuer Bildrate/Latenz.
+**FERTIG UND GEBOOTET.** Was dabei an der Schnittstelle dazukam — die
+anderen Module lesen bitte hier, nicht im Quelltext:
+
+* **`PL_FRAMES = 18`, `PL_LATUS = 19`, `PL_MAXNR = 20`** (`kernel/sys.fi`).
+  `WM_PLUG_INFO(_, PL_FRAMES)` ist die Bildnummer, `PL_LATUS` die
+  mittlere Bildzeit in Mikrosekunden. Beide kommen aus der Bilduhr, die
+  `wm.compose` seit der Runde VEKTOR ohnehin fuehrt — ein zweiter
+  Zaehler daneben laege immer etwas anders. **Bildrate = PL_FRAMES
+  zweimal mit bekannter Pause ablesen** (Modul F).
+* **Der Abschied.** Eine Abmeldung legt E_STOP(grund) als letztes
+  Ereignis in den Ring, und der Platz geht nicht sofort frei, sondern
+  in einen Abschiedszustand: **`WM_PLUG_POLL` beantwortet der Kern noch,
+  jeder andere Ruf gibt `-E_NOTFOUND`.** Der Platz verfaellt, sobald der
+  Ring leer ist oder die Frist um ist; gewartet wird auf niemanden.
+  `PL_USED` ist fuer einen Abschiedsplatz **0** — er zaehlt nicht mehr
+  mit. Ausnahme: ein ABGESTUERZTES Plugin bekommt keinen Abschied, sein
+  Platz geht sofort frei (es koennte ihn sonst ein spaeterer Prozess auf
+  demselben Tafelplatz leerlesen).
+* **Der Kehrbesen haengt an der UHR, nicht am Bild** (`wm.poll`, einmal
+  je Tick). Gemessener Grund: auf einem ruhigen Schreibtisch wird gar
+  nicht zusammengesetzt, und ein Haenger blieb deshalb stehen.
+* **Tastenkuerzel.** Beide Wege fragen `key_owner` VOR der Zustellung:
+  `on_key` (Zeichentasten, mods aus KB_SHIFT=2/KB_CTRL=4) und `hotkeys`
+  (der Alt-Ring, mods wie `kbd.old_key`: Alt=1). Bei einem Treffer gibt
+  es nur `notify(E_KEY, taste, mods, 0)`; das Fenster **und** das
+  Terminal darin bekommen nichts. Zaehler: `wm.plugkeys`.
+* **`E_TILE(knoten, blaetter)`** entsteht in `wm.tile_apply` — dort und
+  nur dort, weil jede Baumaenderung die Rechtecke neu verteilt.
+* **Selbsttest jetzt 13 Zusagen** (`wmplug: selftest 13 / 13 failed=0x0`).
+  Ein Laeufer soll die Zahl aus `fn selftest_max` lesen, nicht festnageln.
 
 ### B — `verwaltung` (/bin/wmplug)
 Dateien: `kernel/user/wmplug.fi` (neu), `etc/wmplug.conf` (neu),
