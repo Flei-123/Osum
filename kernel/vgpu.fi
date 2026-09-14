@@ -178,7 +178,14 @@ const AVAIL_OFF: u64 = 0x1000 // 4 + 16*2 + 2 = 38
 const USED_OFF: u64 = 0x2000 // 4 + 16*8 + 2 = 134
 const CMD_OFF: u64 = 0x3000 // der Befehlspuffer
 const RSP_OFF: u64 = 0x4000 // der Antwortpuffer
-const RING_BYTES: u64 = 0x5000
+// RUNDE VIRTIOGPU, NACHTRAG: EIN ZWEITES PAAR FUER DEN ZUG ZU ZWEIT.
+// `present` schickt zwei Befehle je Bild. Wartet es nach jedem, sind
+// das ZWEI Umlaeufe zum Wirt; mit zwei Puffern gehen beide zusammen
+// heraus und es wird EINMAL gewartet. Warum das noetig ist, steht bei
+// `present_paar` -- mit einer gemessenen Zahl dahinter.
+const CMD2_OFF: u64 = 0x5000
+const RSP2_OFF: u64 = 0x6000
+const RING_BYTES: u64 = 0x7000
 
 const CMD_MAX: u64 = 512 // groesster Befehl: ATTACH_BACKING mit Eintraegen
 const RSP_MAX: u64 = 512
@@ -592,6 +599,105 @@ fn befehl(state: u64, laenge: u64, erwartet: u64) -> bool {
     return true
 }
 
+// ===================================================================
+// ZWEI BEFEHLE, EIN UMLAUF
+// ===================================================================
+//
+// WARUM ES DIESE FUNKTION GEBEN MUSS, UND DIE ZAHL DAZU.
+//
+// `present` schickt je Bild ZWEI Befehle: `TRANSFER_TO_HOST_2D` und
+// danach `RESOURCE_FLUSH`. Die erste Fassung wartete nach jedem auf
+// seine Antwort -- also zwei volle Umlaeufe zum Wirt und zurueck.
+//
+// GEMESSEN, schlimmster Fall (`wmruhe`, der ganze Schirm in jedem
+// Takt, 4 s):
+//     alt (Kopie)       5458 Bilder
+//     neu (zwei Wartungen) 2890 Bilder   -- 47 % WENIGER
+//
+// Der Treiber war dort LANGSAMER als die Kopie, die er ersetzen soll.
+// Bei vollem Schmutz gibt es keine Oktette zu sparen, also blieb nur
+// der Preis des Wartens stehen -- und der war hoeher als der Gewinn.
+//
+// DIE ABHILFE IST NICHT, WENIGER ZU PRUEFEN, sondern beide Befehle
+// ZUSAMMEN einzureihen: vier Deskriptoren statt zwei, ein Klopfen,
+// eine Wartung auf ZWEI Antworten. Der Wirt arbeitet sie in der
+// Reihenfolge des Rings ab, und die ist genau die, die das Protokoll
+// verlangt -- erst uebertragen, dann zeigen.
+//
+// `laenge1`/`laenge2` sind die Laengen der beiden Befehle. Beide
+// muessen `RESP_OK_NODATA` antworten; alles andere ist ein Fehler.
+fn befehl_paar(state: u64, laenge1: u64, laenge2: u64) -> bool {
+    let r: u64 = kstate.get(state, s(S_RING))
+    let desc: u64 = r + DESC_OFF
+    let avail: u64 = r + AVAIL_OFF
+    let used: u64 = r + USED_OFF
+
+    var z: u64 = 0
+    while z < 32 {
+        __mmio_write64((r + RSP_OFF + z) as *mut u64, 0)
+        __mmio_write64((r + RSP2_OFF + z) as *mut u64, 0)
+        z = z + 8
+    }
+
+    // Kette 1: Deskriptor 0 (Befehl) -> 1 (Antwort).
+    desc_set(desc, 0, r + CMD_OFF, laenge1, D_NEXT, 1)
+    desc_set(desc, 1, r + RSP_OFF, RSP_MAX, D_WRITE, 0)
+    // Kette 2: Deskriptor 2 (Befehl) -> 3 (Antwort).
+    desc_set(desc, 2, r + CMD2_OFF, laenge2, D_NEXT, 3)
+    desc_set(desc, 3, r + RSP2_OFF, RSP_MAX, D_WRITE, 0)
+
+    let vor: u64 = used_idx(used)
+    var ai: u64 = kstate.get(state, s(S_AVAIL))
+    // BEIDE Ketten in den Verfuegbarkeitsring, DANN erst den Index
+    // bewegen. Bewegte man ihn dazwischen, koennte das Geraet die
+    // erste holen, bevor die zweite steht -- richtig waere es auch
+    // dann, aber es waeren wieder zwei Umlaeufe.
+    avail_put(avail, ai % QSIZE, 0)
+    avail_put(avail, (ai + 1) % QSIZE, 2)
+    arch.barrier_write()
+    ai = ai + 2
+    avail_publish(avail, ai)
+    kstate.set(state, s(S_AVAIL), ai)
+    arch.barrier_write()
+    kick(state)
+
+    // Auf ZWEI Rueckgaben warten. `used.idx` zaehlt sie einzeln hoch,
+    // also ist die Bedingung "mindestens zwei weiter als vorher" --
+    // und sie muss den Ueberlauf bei 2^16 vertragen, sonst haengt der
+    // Treiber genau einmal je 65536 Befehlen fuer immer.
+    var spin: u64 = 0
+    var fertig: bool = false
+    while spin < SPIN_LIMIT {
+        let jetzt: u64 = used_idx(used)
+        if ((jetzt -% vor) & 0xFFFF) >= 2 {
+            fertig = true
+            spin = SPIN_LIMIT
+        } else {
+            arch.pause()
+            spin = spin + 1
+        }
+    }
+    if !fertig {
+        kstate.add(state, s(S_FEHLER), 1)
+        return false
+    }
+    arch.barrier_read()
+    kstate.set(state, s(S_USED), used_idx(used))
+
+    let t1: u64 = rd32(r + RSP_OFF, 0)
+    let t2: u64 = rd32(r + RSP2_OFF, 0)
+    if t1 != RESP_OK_NODATA || t2 != RESP_OK_NODATA {
+        kstate.add(state, s(S_FEHLER), 1)
+        var schlecht: u64 = t1
+        if t1 == RESP_OK_NODATA {
+            schlecht = t2
+        }
+        kstate.set(state, s(S_LASTERR), schlecht)
+        return false
+    }
+    return true
+}
+
 // Der Kopf jedes Befehls: 24 Oktette (VIRTIO 1.2, 5.7.6.6).
 //   0 type, 4 flags, 8 fence_id (8 Oktette), 16 ctx_id, 20 padding
 fn kopf(cmd: u64, typ: u64) {
@@ -760,21 +866,43 @@ fn present(state: u64) -> bool {
     let pitch: u64 = sw *% 4
     let offset: u64 = y0 *% pitch +% x0 *% 4
 
-    if !transfer(state, x0, y0, w, h, offset) {
+    // ============ BEIDE BEFEHLE ZUSAMMEN, EIN UMLAUF.
+    // Der erste Puffer bekommt `TRANSFER_TO_HOST_2D`, der zweite
+    // `RESOURCE_FLUSH`. Warum nicht nacheinander: siehe `befehl_paar`
+    // -- zwei Wartungen je Bild haben den Treiber im schlimmsten Fall
+    // langsamer gemacht als die Kopie, die er ersetzt.
+    let r: u64 = kstate.get(state, s(S_RING))
+    let c1: u64 = r + CMD_OFF
+    let c2: u64 = r + CMD2_OFF
+
+    kopf(c1, CMD_TRANSFER_TO_HOST_2D)
+    wr32(c1, 24, x0)
+    wr32(c1, 28, y0)
+    wr32(c1, 32, w)
+    wr32(c1, 36, h)
+    wr64(c1, 40, offset)
+    wr32(c1, 48, RES_ID)
+    wr32(c1, 52, 0)
+
+    kopf(c2, CMD_RESOURCE_FLUSH)
+    wr32(c2, 24, x0)
+    wr32(c2, 28, y0)
+    wr32(c2, 32, w)
+    wr32(c2, 36, h)
+    wr32(c2, 40, RES_ID)
+    wr32(c2, 44, 0)
+
+    if !befehl_paar(state, 56, 48) {
         return false
     }
     kstate.add(state, s(S_TRANSFERS), 1)
+    kstate.add(state, s(S_FLUSHES), 1)
     // DIE ZAHL, DIE GEZAEHLT WIRD, IST DIE EHRLICHE: Breite mal Hoehe
     // mal vier. Das ist, was das Geraet aus der Unterlage liest. Die
     // Befehlskoepfe selbst (56 + 48 Oktette) sind nicht mitgezaehlt --
     // sie sind bei jedem Bild gleich und stehen in `rect=` als Anzahl.
     kstate.add(state, s(S_OKT), w *% h *% 4)
     fb.tx_add(state, w *% h *% 4)
-
-    if !resource_flush(state, x0, y0, w, h) {
-        return false
-    }
-    kstate.add(state, s(S_FLUSHES), 1)
     return true
 }
 
