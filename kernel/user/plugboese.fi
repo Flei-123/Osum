@@ -60,8 +60,15 @@ const WMP_ABI: u64 = 1
 // die Handlungen (wmplug.PA_*)
 const PA_MOVE: u64 = 1
 
-// die Ereignisbits
-const R_EV_WIN: u64 = 0x01
+// DAS ABONNEMENT IST EINE MASKE UEBER EREIGNISARTEN, NICHT UEBER RECHTE.
+// GEMESSENER BEFUND: hier stand erst `R_EV_WIN` (0x01, ein RECHTEbit).
+// Bit 0 ist gar keine Ereignisart -- E_WIN_OPEN ist 1, also Bit 1. Das
+// Plugin war damit auf NICHTS abonniert, es lag ihm nie etwas, und die
+// Frist konnte gar nicht reissen (`sweep` greift nur bei
+// P_HEAD != P_TAIL). Der Haengerlauf endete deshalb still mit G_CRASH
+// statt mit G_FRIST und sah aus wie eine Messung.
+// Bits 1..6: E_WIN_OPEN, E_WIN_CLOSE, E_FOCUS, E_DESK, E_TILE, E_KEY.
+const EV_ALLE: u64 = 0x7E
 
 // die Felder eines WM_LIST-Satzes (sys.WL_*)
 const WL_ID: u64 = 0
@@ -173,18 +180,18 @@ fn fremdes_fenster() -> u64 {
 // Also wird der Ort VORHER gelesen, der Griff getan, und der Ort
 // NACHHER noch einmal gelesen. Gleich geblieben heisst: nicht passiert.
 fn greifen() -> u64 {
-    var s_su: [u8; 28] = "suche ein fremdes Fenster  \0"
-    var s_kf: [u8; 32] = "kein fremdes Fenster gefunden  \0"
-    var s_vo: [u8; 10] = "vorher  \0\0"
-    var s_na: [u8; 10] = "nachher \0\0"
-    var s_gr: [u8; 26] = "griff nach fremdem id=  \0\0"
-    var s_rc: [u8; 10] = " fehler=\0\0"
-    var s_id: [u8; 5] = "id=\0\0"
+    var s_su: [u8; 26] = "suche ein fremdes Fenster\0"
+    var s_kf: [u8; 30] = "kein fremdes Fenster gefunden\0"
+    var s_vo: [u8; 8] = "vorher \0"
+    var s_na: [u8; 9] = "nachher \0"
+    var s_gr: [u8; 23] = "griff nach fremdem id=\0"
+    var s_rc: [u8; 9] = " fehler=\0"
+    var s_id: [u8; 4] = "id=\0"
     var s_x: [u8; 4] = " x=\0"
     var s_y: [u8; 4] = " y=\0"
-    var s_dy: [u8; 8] = " deny=\0\0"
-    var s_ok: [u8; 44] = "rechteprobe: abgewiesen UND nichts bewegt  \0"
-    var s_nk: [u8; 44] = "rechteprobe: GESCHEITERT, es hat gewirkt  \0\0"
+    var s_dy: [u8; 7] = " deny=\0"
+    var s_ok: [u8; 42] = "rechteprobe: abgewiesen UND nichts bewegt\0"
+    var s_nk: [u8; 41] = "rechteprobe: GESCHEITERT, es hat gewirkt\0"
 
     kopf()
     s((&s_su[0 as usize]) as u64)
@@ -262,12 +269,12 @@ fn u_start(args: u64) -> u64 {
     var w_hang: [u8; 5] = "hang\0"
     var s_abi: [u8; 5] = "abi=\0"
     var s_bad: [u8; 40] = "falsche Fassung der Schnittstelle, ende\0"
-    var s_pl: [u8; 8] = "platz=\0\0"
+    var s_pl: [u8; 7] = "platz=\0"
     var s_re: [u8; 9] = " rechte=\0"
-    var s_no: [u8; 26] = "keine Anmeldung, fehler=\0\0"
-    var s_sg: [u8; 24] = "gleich stuerze ich ab  \0"
-    var s_hg: [u8; 26] = "ab jetzt hole ich nichts\0\0"
-    var s_en: [u8; 14] = "ende, rc=\0\0\0\0\0"
+    var s_no: [u8; 25] = "keine Anmeldung, fehler=\0"
+    var s_sg: [u8; 22] = "gleich stuerze ich ab\0"
+    var s_hg: [u8; 25] = "ab jetzt hole ich nichts\0"
+    var s_en: [u8; 10] = "ende, rc=\0"
     let p: u64 = (&name[0 as usize]) as u64
     name_in(p)
 
@@ -284,7 +291,7 @@ fn u_start(args: u64) -> u64 {
         return 1
     }
 
-    let platz: u64 = ulib.sys(WM_PLUG_REG, WMP_ABI, p, R_EV_WIN)
+    let platz: u64 = ulib.sys(WM_PLUG_REG, WMP_ABI, p, EV_ALLE)
     if is_err(platz) {
         kopf()
         s((&s_no[0 as usize]) as u64)
@@ -298,15 +305,24 @@ fn u_start(args: u64) -> u64 {
     feld((&s_re[0 as usize]) as u64, rechte)
     ulib.nl()
 
+    // ALLE ARGUMENTE DURCHSEHEN, nicht nur das erste nach dem Namen.
+    // GEMESSENER BEFUND: `wigapp=/bin/plugboese,boese,segv` kommt als
+    // drei Woerter an (Pfad, "boese", "segv"), nicht als zwei. Wer nur
+    // auf Platz 1 schaut, findet dort "boese", faellt auf den
+    // Vorgabemodus zurueck und misst still die falsche Gegenprobe --
+    // genau das ist zweimal passiert.
     var modus: u64 = 0
-    if ulib.arg_count(args) >= 2 {
-        let a1: u64 = ulib.arg_at(args, 1)
-        if ulib.streq(a1, (&w_segv[0 as usize]) as u64) {
+    let n_arg: u64 = ulib.arg_count(args)
+    var ai: u64 = 0
+    while ai < n_arg {
+        let a: u64 = ulib.arg_at(args, ai)
+        if ulib.streq(a, (&w_segv[0 as usize]) as u64) {
             modus = 1
         }
-        if ulib.streq(a1, (&w_hang[0 as usize]) as u64) {
+        if ulib.streq(a, (&w_hang[0 as usize]) as u64) {
             modus = 2
         }
+        ai = ai + 1
     }
 
     if modus == 1 {
