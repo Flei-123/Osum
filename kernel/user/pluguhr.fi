@@ -42,10 +42,12 @@ const WM_PLUG_POLL: u64 = 2119
 const WM_PLUG_SUB: u64 = 2120
 const WM_PLUG_INFO: u64 = 2121
 const WM_PLUG_BAR: u64 = 2124
+const WM_PLUG_BARGET: u64 = 2125 // nur die Leiste -- hier die Gegenprobe
 
 const PL_ABI: u64 = 0
 const PL_SLOT: u64 = 3
 const PL_RIGHTS: u64 = 5
+const PL_FRIST: u64 = 14 // die Frist des Kerns, in Ticks zu 10 ms
 
 // Die Fassung, gegen die dieses Widget gebaut ist. Passt sie nicht,
 // meldet es sich GAR NICHT AN und sagt warum -- eine Erweiterung, die
@@ -222,6 +224,9 @@ fn u_start(args: u64) -> u64 {
     var s_nein: [u8; 32] = "pluguhr: anmeldung fehlgeschla\0\0"
     var s_kbar: [u8; 34] = "pluguhr: KEIN recht R_ACT_BAR r=\0\0"
     var s_txt: [u8; 15] = "pluguhr: text \0"
+    var s_bg: [u8; 31] = "pluguhr: barget verweigert r=\0\0"
+    var s_fr: [u8; 22] = "pluguhr: frist ticks=\0"
+    var s_po: [u8; 9] = " pollms=\0"
     var s_ende: [u8; 22] = "pluguhr: ende runden=\0"
     var s_ev: [u8; 10] = " ereig=\0\0\0"
 
@@ -269,10 +274,46 @@ fn u_start(args: u64) -> u64 {
     say((&s_re[0 as usize]) as u64)
     sayn(rechte)
     nl()
+    // ================================================ DIE GEGENPROBE
+    // EIN PLUGIN DARF DIE LEISTE NICHT AUSLESEN.
+    //
+    // `WM_PLUG_BARGET` beantwortet der Kern nur der Leiste (is_taskbar,
+    // also: wer einen Schirmrand reserviert hat). Dass dieses Widget
+    // seinen eigenen Text nicht zurueckholen kann, ist keine Schikane,
+    // sondern die Grenze, die ein `.so` im Compositor-Prozess nicht
+    // haette: dort liegt der Text jedes anderen Widgets im selben
+    // Adressraum. Der Fehlercode steht auf der Leitung, damit die
+    // Zusage gemessen und nicht behauptet wird.
+    var frei: [u8; 40] = [0 as u8; 40]
+    let bg: u64 = ulib.sys4(WM_PLUG_BARGET, 0,
+        (&frei[0 as usize]) as u64, 31, 0)
+    say((&s_bg[0 as usize]) as u64)
+    sayn(bg)
+    nl()
+
     // DAS ABONNEMENT NOCH EINMAL AUSDRUECKLICH. `WM_PLUG_REG` hat die
     // Maske schon genommen; dieser Ruf ist der Beleg, dass ein Plugin
     // sie auch spaeter aendern kann, ohne sich neu anzumelden.
     let _s: u64 = ulib.sys(WM_PLUG_SUB, maske, 0, 0)
+
+    // WIE OFT ABGEHOLT WERDEN MUSS, SAGT DER KERN. `PL_FRIST` ist die
+    // Frist in Ticks (100 Ticks je Sekunde); ein Drittel davon ist der
+    // Abstand zweier Abholungen. Ohne Auskunft bleibt es bei 150 ms --
+    // das haelt auch die kurze Frist des Abnahmelaufs (`plugfrist`, 3
+    // Ticks) nicht, aber dafuer ist sie auch nicht gedacht.
+    var pollms: u64 = 150
+    let ft: u64 = ulib.sys(WM_PLUG_INFO, platz, PL_FRIST, 0)
+    if !ulib.bad(ft) && ft != 0 {
+        pollms = (ft * 10) / 3
+        if pollms < 20 {
+            pollms = 20
+        }
+    }
+    say((&s_fr[0 as usize]) as u64)
+    sayn(ft)
+    say((&s_po[0 as usize]) as u64)
+    sayn(pollms)
+    nl()
 
     var r: u64 = 0
     var gesagt: u64 = 0
@@ -306,7 +347,34 @@ fn u_start(args: u64) -> u64 {
             nl()
         }
         n = n + 1
-        let _z: u64 = ulib.sleep_ms(takt)
+        // ============================================ DIE FRIST
+        // NICHT EINE SEKUNDE AM STUECK SCHLAFEN.
+        //
+        // Hier stand `sleep_ms(takt)`, und der erste gemessene Lauf
+        // endete mit `wmplug: unreg uhr grund=2` -- G_FRIST, nach EINEM
+        // abgeholten Ereignis. Der Grund steht in `sweep`
+        // (kernel/wmplug.fi): bestraft wird, wer etwas liegen hat und
+        // es nicht abholt, und die Vorgabefrist sind 50 Ticks, also
+        // eine halbe Sekunde. Wer im Sekundentakt abholt, reisst sie
+        // beim ersten Fenster, das aufgeht.
+        //
+        // Also wird der Takt in Scheiben geschlafen, deren Laenge aus
+        // der FRIST DES KERNS kommt und nicht aus einer geratenen Zahl
+        // (`PL_FRIST`, in Ticks zu 10 ms). Ein Drittel der Frist laesst
+        // Luft fuer eine Maschine, die gerade etwas anderes tut.
+        var rest: u64 = takt
+        while rest > 0 {
+            var scheibe: u64 = pollms
+            if scheibe > rest {
+                scheibe = rest
+            }
+            let _z: u64 = ulib.sleep_ms(scheibe)
+            rest = rest - scheibe
+            abholen()
+            if gestoppt != 0 {
+                rest = 0
+            }
+        }
     }
     say((&s_ende[0 as usize]) as u64)
     sayn(n)
