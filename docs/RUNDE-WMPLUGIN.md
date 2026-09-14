@@ -1601,3 +1601,80 @@ Dass der Riss ein Zufallsfehler war, ist aus zwei Laeufen geschlossen
 (einer rot, einer gruen) und aus der Bauart des Fehlers — **nicht** aus
 einer Laufreihe, die die Haeufigkeit misst. Wer die Rate wissen will,
 muss denselben Abschnitt zwanzig Mal fahren; das steht aus.
+
+---
+
+## 20. Zusatz-Vorgabe (Justin, 14.09.2026): Modularitaet
+
+Die Vorgabe hat vier Punkte. Sie stehen hier einzeln, mit dem, was
+dafuer gebaut wurde, und mit der Stelle, an der es gemessen wird.
+
+### 20.1 Die Verwaltung ist selbst abschaltbar
+
+**Vorgabe:** Der Ring-3-Teil laeuft als eigener Dienst und ist ganz
+abschaltbar; ist er aus, laeuft der Schreibtisch **unveraendert**.
+
+**Gebaut:** `/etc/wmplug.aus`. Liegt die Datei, ruehrt `/bin/desktop`
+die Autostart-Liste nicht an — kein `wmplug enable`, also keine
+Gewaehrung (`WM_PLUG_GRANT`) und kein gestartetes Plugin. Der Kern hat
+dann keinen angemeldeten Platz.
+
+**Warum eine Datei und kein Bootwort:** Eine Kommandozeile gehoert dem,
+der bootet; `/etc` gehoert dem, der das System einrichtet — dieselbe
+Stelle, an der schon `wmplug.conf` und `wmplug.autostart` liegen. Die
+Datei laesst sich zur Laufzeit anlegen und wegnehmen, ohne dass jemand
+neu startet.
+
+**Warum nicht einfach eine leere Autostart-Liste:** Das sind zwei
+verschiedene Saetze. Eine leere Liste heisst *keine Erweiterung
+gewuenscht*; `/etc/wmplug.aus` heisst *die Verwaltung soll gar nicht
+erst laufen*. Die Gegenprobe misst den zweiten.
+
+### 20.2 Der Anteil im Kern kostet ohne Plugin nichts
+
+**Vorgabe:** So klein wie moeglich, und ohne angemeldetes Plugin
+**nichts** — als Zahl, nicht als „spuert man nicht".
+
+**Befund vor der Nachbesserung:** `wmplug.sweep` lief auch auf einem
+Schreibtisch ohne jede Erweiterung durch **beide** Schleifen (`reap`
+und `sweep_at`, je acht Plaetze) — einmal je Bild in `compose` und
+einmal je Tick in `poll`. Das ist wenig, aber es ist nicht nichts, und
+es ist genau der Betrag, den ein ausgeschaltetes System nicht kosten
+darf.
+
+**Gebaut:** `sweep` kehrt bei `S_PLUGS == 0` nach **einem** Vergleich
+um, vor dem Setzen von `S_BUSY` und vor beiden Schleifen. Aus sechzehn
+Platzpruefungen je Aufruf wird eine Abfrage.
+
+Das ist **kein Schalter, den jemand vergessen kann**: `S_PLUGS` ist die
+Zahl der belegten Plaetze, sie steigt beim Anmelden und faellt beim
+Abmelden. Der Kern misst seinen eigenen Zustand, statt einer
+Einstellung zu glauben.
+
+`notify` hatte diese Eigenschaft schon vorher (`if !ready(state) {
+return }` als erste Zeile) und behaelt sie.
+
+### 20.3 Plugins kommen als Paket, nicht ins Grundabbild
+
+Das war schon so und bleibt so: `pakete/wmplug-uhr`, `pakete/wmplug-regel`
+und `pakete/wmplug-werkzeug` sind PLAN/opk-Rezepte, gebaut mit
+`bash pakete/bauen.sh`. Im Git liegen die **Rezepte**, nicht die `.opk`
+— ein Paket ist ein Ergebnis, kein Quelltext.
+
+### 20.4 Der Standardzustand, begruendet
+
+**Ausgeliefert wird:** Das Plugin-System ist **vorhanden**, aber es ist
+**kein Plugin installiert und keines vorgemerkt**.
+`/etc/wmplug.autostart` enthaelt im Auslieferungszustand nur
+Bemerkungen; `/etc/wmplug.aus` liegt **nicht**.
+
+**Warum so und nicht anders:** Ein Schreibtisch ohne Erweiterung ist
+der Normalfall. Wer eine will, installiert ein Paket und traegt eine
+Zeile ein — beides bewusste Handlungen. Die Umkehrung (etwas laeuft,
+weil es mitgeliefert wurde) ist genau die Bauart, aus der
+Plugin-Systeme ihren schlechten Ruf haben.
+
+Damit kostet das System im Auslieferungszustand: eine Abfrage je
+`sweep`-Aufruf (20.2) und eine `ready`-Abfrage je Ereignis. Das
+Verhalten des Schreibtisches ist Zeile fuer Zeile das von vor dieser
+Runde.
