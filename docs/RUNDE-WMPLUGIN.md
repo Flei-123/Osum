@@ -1781,6 +1781,41 @@ Eine Gnadenfrist, die niemand sieht, waere eine stille Aufweichung der
 Frist — und das ist das Gegenteil dessen, wofuer dieser Abschnitt da
 ist.
 
+### Der Fehler in der Nachbesserung selbst
+
+Die erste Fassung hing nur an `do_execve` (`SYS_EXECVE`, 59) — und
+blieb wirkungslos. Die Bilanz sagte es sofort: **`gnaden=0`**, und das
+Widget flog weiter.
+
+`SYS_OSUM_EXEC` (1001) ist der `posix_spawn` dieses Systems und der
+Weg, den Schreibtisch, Leiste und Plugins wirklich gehen; `execve` ist
+der teure und seltenere. `plugregel` startet `/bin/calc` mit `SYS_EXEC`,
+und dort — nach `elf.spawn`, vor der Rueckgabe der PID — gehoerte der
+Aufruf hin.
+
+**Dass die Zahl in der Bilanz steht, hat diesen Fehler gefunden.** Eine
+Nachbesserung, die nichts zaehlt, sieht genauso aus wie eine, die wirkt.
+
+### Beleg
+
+Derselbe Abschnitt 8b, derselbe Lauf, nach beiden Korrekturen:
+
+```
+  OK    das Widget ist mit SEINER Frist angetreten: 100 Ticks (1 s)
+  OK    die Regel-Engine mit IHRER: 500 Ticks (5 s)
+  OK    kein einziger Rauswurf in diesem Lauf (kicks=0)
+  OK    am Ende sind 2 Plugins gleichzeitig auf der Tafel
+  OK    das Widget ist NICHT an der Frist gestorben
+  OK    die Fensterzahl im Widgetfeld aendert sich im Lauf: 3 4
+```
+
+Und Abschnitt 5 im selben Lauf, unveraendert scharf:
+
+```
+  OK    die Frist hat gegriffen: abgemeldet mit grund=2 (G_FRIST)
+  OK    der Schreibtisch malt unter dem Haenger weiter
+```
+
 ### Offen (ausdruecklich benannt)
 
 Die eigentliche Ursache bleibt: **`exec` laedt synchron im
