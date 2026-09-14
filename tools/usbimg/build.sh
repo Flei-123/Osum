@@ -184,7 +184,7 @@ widgetdemo taskmgr installer locate edit sh echo ls cat ps uname date df mkdir r
 grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
 dhcp host ota jsig jarvisctl pollbr reboot shutdown power fas \
-glogin lock login passwd su chown sperrwache"}
+glogin lock login passwd su chown sperrwache init svc"}
 
 # RUNDE STICK: DIE SIEBEN, DIE GEFEHLT HABEN -- UND WARUM AUSGERECHNET
 # DIESE.
@@ -841,7 +841,57 @@ ARGS+=(/users/ /users/root/ /users/root/config/
        "/users/root/config/locale=$OUT/locale-de")
 ARGS+=(/boot/ "/boot/osum.mb=$OUT/osum.mb"
        "/boot/BOOTX64.EFI=$LIMINE/BOOTX64.EFI")
-ARGS+=(/dev/ /proc/ /mnt/ /tmp/ /store/ /apps/ /system/)
+# ==================================================== RUNDE ENERGIE
+# /run, /etc/inittab UND /etc/ziel -- OHNE SIE HAT DER AUSSCHALTKNOPF
+# NIEMANDEN, DEM ER ES SAGEN KANN.
+#
+# GEMESSEN AN DIESEM ABBILD, bevor diese Zeilen dazukamen:
+# `mkfs.py list` fand WEDER /bin/init NOCH /etc/inittab NOCH ein
+# Verzeichnis /run. Der Weg, den `/bin/shutdown` seit Runde INIT geht
+# (eine Zeile nach /run/svc.cmd, Prozess 1 raeumt auf), war auf dem
+# Auslieferungsstick also gar nicht vorhanden -- `/bin/shutdown` fiel
+# dort IMMER auf seinen Notweg `self()` zurueck: sync und ACPI, ohne
+# dass ein einziger Dienst ein Signal bekommt.
+#
+# Das ist genau der Unterschied, um den es bei einem Ausschaltknopf
+# geht. Ein Knopf, der die Platte im Flug abschneidet, ist schlimmer
+# als keiner -- deshalb liegt ab dieser Runde das Ziel `grafik` im
+# Abbild, dazu eine inittab, die den Schreibtisch als Dienst fuehrt,
+# und das leere /run, in das die Oberflaeche ihre Zeile schreibt.
+#
+# DIE TAFEL IST ABSICHTLICH KURZ. Sie fuehrt genau das, was dieser
+# Stick wirklich startet; jeder weitere Dienst waere eine Behauptung
+# ueber einen Betrieb, den niemand gemessen hat.
+cat > "$OUT/inittab" <<'EOFTAB'
+# /etc/inittab -- name:ziele:art:befehl:optionen
+#
+# DIE OBERFLAECHE STEHT HIER NICHT DRIN, und das ist kein Versaeumnis:
+# `kgui.desk_start` startet Schreibtisch, Leiste, Starter und den Rest
+# selbst, direkt aus dem Kern. Was init auf einem Abbild mit Bildschirm
+# tut, ist deshalb genau zweierlei -- Waisen einsammeln und beim
+# Abschalten aufraeumen (SIGTERM, Frist, SIGKILL, sync, umount) --,
+# und dafuer braucht es keinen eigenen Dienst.
+#
+# DIE KONSOLE LAEUFT NUR IM ZIEL `konsole`, und `ctrl` heisst dort
+# "wenn diese Shell endet, endet das System" (init.fi: A_CTRL ->
+# going = 0). Fuer einen Serverlauf ist das richtig: das Skript von
+# `script=` laeuft, die Shell endet, die Maschine faehrt sauber herunter.
+#
+# WARUM NICHT AUCH IM ZIEL `grafik`, gemessen und wieder verworfen:
+#   * mit `ctrl` wuerde ein `exit` im Terminalfenster den ganzen
+#     Rechner ausschalten.
+#   * mit `respawn` startet sie endlos neu -- gemessen 71 Mal in
+#     zwanzig Sekunden ("sh: ready" / "sh: bye" im Wechsel), weil auf
+#     einem Schreibtisch niemand an dieser Konsole sitzt und sie sofort
+#     wieder auf EOF laeuft.
+# Also gar nicht. Ein Dienst, der nichts zu tun hat, gehoert nicht in
+# die Tafel.
+sh:konsole:ctrl:/bin/sh
+EOFTAB
+printf 'grafik
+' > "$OUT/ziel"
+ARGS+=("/etc/inittab=$OUT/inittab" "/etc/ziel=$OUT/ziel")
+ARGS+=(/dev/ /proc/ /mnt/ /tmp/ /store/ /apps/ /system/ /run/)
 # RUNDE TUERSCHLOSS: EIN BEISPIEL ZUM UEBERSETZEN.
 #
 # Seit dieser Runde liegen `firnc` und `fas` auf dem Stick. Eine Quelle
@@ -923,7 +973,8 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /apps/settings.osp/INFO /apps/settings.osp/symbol \
 /bin/shutdown /bin/power /bin/firnc /bin/fas /beispiel/hallo.fi \
 /bin/installer /apps/installer.osp/start /apps/installer.osp/INFO \
-/apps/installer.osp/symbol"
+/apps/installer.osp/symbol \
+/bin/init /etc/inittab /etc/ziel"
 python3 tools/osum/mkfs.py list "$OUT/root.img" > "$OUT/liste.txt" 2>&1 \
     || fehler "das fertige Dateisystem laesst sich nicht lesen"
 fehlt=0
