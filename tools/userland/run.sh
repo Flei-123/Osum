@@ -709,16 +709,13 @@ for _ in $(seq 1 200); do
     sleep 0.2
 done
 if [ -S "$TMPD/mon.sock" ] && grep -q "sh: ready, osum" "$TMPD/kbd.txt" 2>/dev/null; then
-    python3 - "$TMPD/mon.sock" <<'PY'
-import socket, sys, time
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.connect(sys.argv[1])
-time.sleep(0.4)
-for key in ["l", "s", "ret", "up", "ret"]:
-    s.sendall(("sendkey %s\n" % key).encode())
-    time.sleep(0.3)
-s.close()
-PY
+    # RUNDE ROTABSCHNITTE: siehe tools/osum/run.sh -- auf die `key: `
+    # Zeile je Taste warten statt auf 0,3 s. Hier sind es fuenf Tasten,
+    # und die vierte ist der Pfeil nach oben (`E0 48`), der die Zeile
+    # zurueckholt; gerade der ging unter Last verloren, und dann fehlte
+    # auch die zweite Auflistung.
+    python3 tools/lib/tasten.py "$TMPD/mon.sock" "$TMPD/kbd.txt" \
+        l s ret up ret | sed 's/^/        /'
     wait $qemu_pid 2>/dev/null
     rc=$(cat "$TMPD/kbd.rc" 2>/dev/null || echo 99)
     K="$TMPD/kbd.txt"

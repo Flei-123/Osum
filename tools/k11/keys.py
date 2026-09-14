@@ -61,6 +61,30 @@ def tasten_fuer(text):
     return aus
 
 
+def key_zeilen(pfad):
+    """Wie viele `key: `-Zeilen der Kern schon gemeldet hat.
+
+    RUNDE ROTABSCHNITTE. `kernel/kbd.fi` meldet GENAU EINE Zeile
+    `key: ` je Taste, die ueber IRQ1 angekommen ist (die Zusage steht
+    dort woertlich in Zeile 602). Das ist ein EREIGNIS -- und auf ein
+    Ereignis laesst sich warten, statt auf die Uhr zu sehen.
+    """
+    try:
+        with open(pfad, 'rb') as f:
+            return f.read().count(b'key: ')
+    except OSError:
+        return 0
+
+
+# So lange wird auf die Wirkung EINER Taste gewartet, bevor es
+# weitergeht. Grosszuegig, weil der Wirt geteilt wird: das Zeitlimit ist
+# die Notbremse und nicht die Messung. Wer hier ankommt, hat entweder
+# eine Taste geschickt, die keine Zeile erzeugt (Umschalttaste allein,
+# eine Taste, die der Editor schluckt), oder der Kern ist stehen
+# geblieben -- und dann faellt der Abschnitt sowieso durch.
+ZEIT_JE_TASTE = 8.0
+
+
 def main():
     if len(sys.argv) < 4:
         print(__doc__)
@@ -164,8 +188,29 @@ def main():
                     break
                 letzte = jetzt
             continue
+        # RUNDE ROTABSCHNITTE: AUF DIE WIRKUNG WARTEN, NICHT AUF DIE UHR.
+        #
+        # Hier stand `time.sleep(0.12)`. Auf einem Wirt, den sich bis zu
+        # sechs fremde QEMU-Prozesse teilen, bekommt die virtuelle
+        # Maschine ihre Zeitscheibe nicht in 120 ms -- die Taste liegt
+        # dann noch in der Tastatur, und die naechste kommt schon
+        # hinterher. Gezaehlt wurden so 2 Tasten statt 3, und der
+        # Abschnitt war rot, ohne dass am Kern etwas falsch war.
+        #
+        # Gewartet wird jetzt, bis der Kern die Taste GEMELDET hat.
+        # Kommt keine Meldung (eine Taste, die keine Zeile erzeugt --
+        # eine reine Umschalttaste, oder eine, die ein Programm
+        # schluckt), geht es nach ZEIT_JE_TASTE trotzdem weiter: diese
+        # Datei tippt auch dort, wo gar kein `key: ` zu erwarten ist.
+        # Entschaerft wird damit nichts -- wer die Zeilen zaehlt, zaehlt
+        # sie weiterhin selbst.
+        vorher = key_zeilen(warte)
         s.sendall(("sendkey %s\n" % k).encode())
-        time.sleep(0.12)
+        bis3 = time.time() + ZEIT_JE_TASTE
+        while time.time() < bis3:
+            if key_zeilen(warte) > vorher:
+                break
+            time.sleep(0.02)
         try:
             s.recv(65536)
         except OSError:
