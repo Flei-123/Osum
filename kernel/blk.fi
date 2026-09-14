@@ -36,9 +36,12 @@ import nvme
 import ahci
 import arch.arch
 import usb
+import krypto
 
 export {
     ram_init, use_ata, use_nvme, read, write, blocks, present,
+    // ---- RUNDE KRYPTO: der rohe Weg, fuer den Kopfsatz und die Abnahme
+    read_raw, write_raw,
     BLOCK_SIZE, DEV_RAM, DEV_ATA, DEV_NVME, DEV_ATA1, DEV_USB,
     removable,
     // ---- Runde K14 ----
@@ -1038,7 +1041,44 @@ fn write_on(state: u64, dev: u64, lba: u64, src: u64) -> bool {
 
 // ------------------------------------------------------- the interface
 
+// ================================================ RUNDE KRYPTO (K-019)
+//
+// DIE EINE STELLE, an der die Plattenverschluesselung im Lesepfad
+// haengt. Sie steht hier und nicht in `fs.fi`, weil hier der EINE
+// Durchgang zur Wurzelplatte ist -- alles darueber (OFS, sein Journal,
+// FAT, ext4, NTFS) liest weiter Bloecke und merkt nichts.
+//
+// Ist der Traeger nicht verschluesselt oder der Schluessel nicht da,
+// tut `krypto.active` false und dieser Weg ist Oktett fuer Oktett der
+// von vorher.
+fn read_crypt(state: u64, lba: u64, dst: u64) -> bool {
+    // Der Geheimtext wird in den Puffer der Runde geholt, entschluesselt
+    // und erst dann dem Aufrufer gegeben. Der Aufrufer sieht nie
+    // Geheimtext -- auch dann nicht, wenn die Entschluesselung
+    // scheitert.
+    let buf: u64 = state + kstate.CRY_BUF
+    if !read_raw(state, lba, buf) {
+        return false
+    }
+    return krypto.decrypt_sector(state, lba, buf, dst)
+}
+
+fn write_crypt(state: u64, lba: u64, src: u64) -> bool {
+    let buf: u64 = state + kstate.CRY_BUF
+    if !krypto.encrypt_sector(state, lba, src, buf) {
+        return false
+    }
+    return write_raw(state, lba, buf)
+}
+
 fn read(state: u64, lba: u64, dst: u64) -> bool {
+    if krypto.active(state) {
+        return read_crypt(state, lba, dst)
+    }
+    return read_raw(state, lba, dst)
+}
+
+fn read_raw(state: u64, lba: u64, dst: u64) -> bool {
     if lba >= blocks(state) {
         return false
     }
@@ -1085,6 +1125,13 @@ fn read(state: u64, lba: u64, dst: u64) -> bool {
 }
 
 fn write(state: u64, lba: u64, src: u64) -> bool {
+    if krypto.active(state) {
+        return write_crypt(state, lba, src)
+    }
+    return write_raw(state, lba, src)
+}
+
+fn write_raw(state: u64, lba: u64, src: u64) -> bool {
     if lba >= blocks(state) {
         return false
     }
