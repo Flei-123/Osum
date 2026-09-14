@@ -13,7 +13,7 @@ wirklich gebooteten Kernel** (`bash tools/wmplug/widget.sh`, QEMU,
 |-------|-------------|
 | `kernel/user/pluguhr.fi` | `/bin/pluguhr` — das Widget, ein **Ring-3-Prozess** |
 | `kernel/user/taskbar.fi` | die Leiste holt die Texte und malt sie |
-| `kernel/user/_dev_uhrstart.fi` | **Abkuerzung**, siehe unten |
+| `kernel/user/plugstart.fi` | **Abkuerzung**, siehe unten |
 | `tools/wmplug/widget.sh` | der Laeufer: 30 Zusagen, drei QEMU-Laeufe |
 | `docs/shots/wmplug/widget-{an,aus,aus-laufzeit}.png` | die drei Fotos |
 
@@ -110,12 +110,14 @@ zuerst rot war: **ohne `plugaus` ist die Tafel OFFEN, auch ohne das Wort
 
 ## Ausdrueckliche Abkuerzungen dieses Moduls
 
-1. **`kernel/user/_dev_uhrstart.fi`.** Der Kern startet auf dem
+1. **`kernel/user/plugstart.fi`.** Der Kern startet auf dem
    Schreibtischweg genau ein zusaetzliches Programm (`wigapp=`), der
    Abnahmelauf braucht aber zwei Schritte (Rechte gewaehren, dann
    starten). Dieser Helfer macht beides und faellt weg, sobald der
-   Schreibtisch eine Autostart-Liste hat. Er heisst `_dev_*`, damit
-   niemand ihn fuer einen Bestandteil des Systems haelt.
+   Schreibtisch eine Autostart-Liste hat. Er hiess waehrend der Runde
+   `_dev_uhrstart.fi`; weil der Abnahmelauf ihn wirklich braucht, ist er
+   jetzt ein benanntes Stueck und keine Bauruine mehr -- die Abkuerzung
+   bleibt aber eine.
 2. **Die senkrechte Leiste bekommt kein Widget-Feld.** Eine Spalte ist
    hier 80 Bildpunkte breit; `17:10 cpu 100%` passt nicht hinein, ohne
    die Uhr darunter zu verdraengen. Steht so im Code, gemessen nicht.

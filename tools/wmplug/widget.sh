@@ -48,7 +48,7 @@ bash tools/build-kernel.sh "$TMPD/k.mb" > "$TMPD/k.log" 2>&1 \
 [ -f "$TMPD/k.mb" ] || { echo "WIDGET: $pass bestanden, $((fail+1)) gescheitert"; exit 1; }
 
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || bad "crt.s assembliert nicht"
-PROGS="desktop taskbar launcher pluguhr _dev_uhrstart sh echo ls cat"
+PROGS="desktop taskbar launcher pluguhr plugstart sh echo ls cat"
 # /bin/wmplug gehoert dem Modul `verwaltung`. Ist es schon da, nimmt der
 # Starthelfer es (`wmplug enable uhr`); fehlt es, faellt er auf den
 # nackten WM_PLUG_GRANT zurueck. Dieses Modul wartet auf niemanden.
@@ -78,7 +78,7 @@ echo "== 2. das Abbild =="
 ARGS=(build "$TMPD/disk.img" 32768 /lib/
     "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" /bin/)
 for p in $PROGS; do
-    n=$p; [ "$p" = "_dev_uhrstart" ] && n=uhrstart
+    n=$p; [ "$p" = "plugstart" ] && n=uhrstart
     ARGS+=("/bin/$n=$TMPD/$p.elf")
 done
 printf 'on\n' > "$TMPD/uitrace"
