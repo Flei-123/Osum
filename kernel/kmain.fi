@@ -66,6 +66,7 @@ import arch.x86_64.hv
 
 import time
 import rand
+import krypto
 import tty
 import signal
 import arch.x86_64.guard
@@ -2277,6 +2278,144 @@ fn users(state: u64) {
 // ------------------------------------------------------ the file system
 
 // Point 4: a RAM disk as a block device, and a real file system on it.
+// ==================================================== RUNDE KRYPTO (K-019)
+//
+// DIE PLATTENVERSCHLUESSELUNG BEIM HOCHLAUF.
+//
+// Vier Modusworte, und jedes hat einen Zweck in der Abnahme:
+//
+//   kryptoneu     den Traeger ANLEGEN -- Kopfsatz schreiben,
+//                 Hauptschluessel ziehen, Platz 0 auf die Passphrase
+//                 setzen. Danach ist die Platte verschluesselt und der
+//                 Schluessel da; was `fs.format` darueber schreibt,
+//                 geht als Geheimtext auf das Blech.
+//   kryptoauf     eine bestehende verschluesselte Platte AUFMACHEN.
+//   kryptofalsch  GEGENPROBE: dasselbe mit der FALSCHEN Passphrase.
+//                 Muss scheitern, und zwar ohne einen Hinweis darauf,
+//                 wie nah man dran war.
+//   kryptoroh     GEGENPROBE: gar nicht entsperren. Danach liest das
+//                 Dateisystem den rohen Geheimtext und MUSS scheitern
+//                 -- das ist der Beleg, dass wirklich verschluesselt
+//                 auf der Platte steht und nicht bloss ein Schalter
+//                 umgelegt wurde.
+//
+// DIE PASSPHRASE. Sie kommt in dieser Runde aus der Kommandozeile
+// (`kryptopw=...`) und NICHT von der Tastatur, und das ist eine
+// bewusste Einschraenkung des Messlaufs, keine des Entwurfs: ein
+// Abnahmelauf in QEMU hat keinen Menschen, der tippt. Die Eingabe ueber
+// den Sperrbildschirm ist die naechste Runde und steht so in den
+// offenen Punkten von `docs/RUNDE-KRYPTO.md`. EINE PASSPHRASE AUF DER
+// KOMMANDOZEILE IST IM BETRIEB NICHTS WERT -- sie steht im
+// Startprotokoll und in `/proc`.
+// RUNDE KRYPTO: der bekannte Baum auf der verschluesselten Platte.
+//
+// `kryptobaum` legt ihn an (nach `kryptoneu`), `kryptopruef` liest ihn
+// nach einem Neustart wieder (nach `kryptoauf`). Dazwischen liegt ein
+// ECHTER Neustart des Rechners -- das ist der Unterschied zwischen
+// "der Puffer stimmt noch" und "es steht auf der Platte".
+fn krypto_baum(state: u64, mounted: bool) {
+    var s_ein: [u8; 17] = "krypto: mount=\0\0\0"
+    var s_b: [u8; 16] = "krypto: baum=\0\0\0"
+    var s_p: [u8; 17] = "krypto: pruef=\0\0\0"
+    let bau: bool = kstate.mode_on(state, kstate.M_KRYPTOBAUM)
+    let pru: bool = kstate.mode_on(state, kstate.M_KRYPTOPRUEF)
+    if !bau && !pru {
+        return
+    }
+    serial.puts((&s_ein[0]) as u64)
+    serial.dec(kutil.yes(mounted))
+    serial.nl()
+    if !mounted {
+        return
+    }
+    if bau {
+        serial.puts((&s_b[0]) as u64)
+        serial.dec(krypto.tree_write(state))
+        serial.nl()
+    }
+    if pru {
+        serial.puts((&s_p[0]) as u64)
+        serial.dec(krypto.tree_check(state))
+        serial.nl()
+    }
+}
+
+fn krypto_stufe(state: u64, kein_ata: bool) {
+    var s_kry: [u8; 8] = "krypto:\0"
+    var s_kroh: [u8; 7] = " roh=\0\0"
+    var s_kneu: [u8; 7] = " neu=\0\0"
+    var s_kauf: [u8; 7] = " auf=\0\0"
+    var s_kfail: [u8; 9] = " fehler=\0"
+    var s_kslot: [u8; 8] = " platz=\0"
+    var s_ksel: [u8; 16] = "krypto: selbst=\0"
+    krypto.init(state)
+    if kein_ata {
+        return
+    }
+    let neu: bool = kstate.mode_on(state, kstate.M_KRYPTONEU)
+    let auf: bool = kstate.mode_on(state, kstate.M_KRYPTOAUF)
+    let falsch: bool = kstate.mode_on(state, kstate.M_KRYPTOFALSCH)
+    let roh: bool = kstate.mode_on(state, kstate.M_KRYPTOROH)
+    if !neu && !auf && !falsch && !roh {
+        return
+    }
+    // DIE PASSPHRASE UND DIE PARAMETER STEHEN SCHON DA. `mode_of` hat
+    // sie beim Start aus der Befehlszeile geholt und in den eigenen
+    // Bereich dieser Runde gelegt (CRY_WORK). Der Grund ist der
+    // Kommentar bei `hw.parse` weiter oben: die Befehlszeile des
+    // Startladers liegt UEBER `kernel_end`, und der Rahmenzuteiler gibt
+    // genau diese Rahmen aus. Wer sie spaeter noch einmal liest, liest
+    // vielleicht den ersten Haufen dieses Laufs.
+    let pwp: u64 = state + kstate.CRY_WORK
+    let pwl: u64 = kstate.get(state, kstate.CRY_WORK + 0x100)
+    let t: u64 = kstate.get(state, kstate.CRY_WORK + 0x108)
+    let m: u64 = kstate.get(state, kstate.CRY_WORK + 0x110)
+    let par: u64 = kstate.get(state, kstate.CRY_WORK + 0x118)
+    let dev: u64 = kstate.get(state, kstate.DISK_DEV)
+    serial.puts((&s_kry[0]) as u64)
+    if roh {
+        // NICHT entsperren. Der Kopf wird trotzdem gelesen, damit im
+        // Protokoll steht, dass dort einer liegt.
+        let da: bool = krypto.header_read(state, dev)
+        serial.puts((&s_kroh[0]) as u64)
+        serial.dec(kutil.yes(da))
+        serial.nl()
+        return
+    }
+    if neu {
+        let ok: bool = krypto.format(state, dev, pwp, pwl, t, m, par)
+        serial.puts((&s_kneu[0]) as u64)
+        serial.dec(kutil.yes(ok))
+        serial.nl()
+        if ok && kstate.mode_on(state, kstate.M_KRYPTOTEST) {
+            serial.puts((&s_ksel[0]) as u64)
+            serial.dec(kutil.yes(krypto.selftest(state)))
+            serial.nl()
+        }
+        return
+    }
+    // Aufmachen -- richtig oder mit der falschen Passphrase.
+    if falsch {
+        // Ein Oktett kippen. Das ist die Gegenprobe, und sie muss
+        // GENAU DIESELBE Antwort bekommen wie jede andere falsche
+        // Passphrase.
+        kstate.set8(pwp, ((kstate.get8(pwp) as u64) ^ 1) as u8)
+    }
+    let ok: bool = krypto.unlock(state, dev, pwp, pwl)
+    serial.puts((&s_kauf[0]) as u64)
+    serial.dec(kutil.yes(ok))
+    serial.puts((&s_kfail[0]) as u64)
+    serial.dec(krypto.fails(state))
+    serial.puts((&s_kslot[0]) as u64)
+    serial.dec(krypto.slot_of(state))
+    serial.nl()
+    if ok && kstate.mode_on(state, kstate.M_KRYPTOTEST) {
+        serial.puts((&s_ksel[0]) as u64)
+        serial.dec(kutil.yes(krypto.selftest(state)))
+        serial.nl()
+    }
+}
+
 fn filesystem(state: u64) {
     var s_skip: [u8; 13] = "fs: skipped\0\0"
     var s_disk: [u8; 11] = "fs: disk=\0\0"
@@ -3184,13 +3323,89 @@ fn osum(state: u64) {
             blk.use_ata(state, kutil.root_blocks(state))
         }
     }
+    // ============================================ RUNDE KRYPTO (K-019)
+    //
+    // DIE ENTSPERRUNG STEHT HIER, und die Stelle ist die ganze
+    // Begruendung: HINTER `blk.use_ata` (es muss ein Geraet geben, von
+    // dem der Kopfsatz gelesen werden kann) und VOR `fs.mount` (das
+    // Dateisystem liest seinen Superblock ueber `blk.read`, und ab
+    // dieser Zeile kommt dort Klartext heraus).
+    //
+    // Zwischen diesen beiden Zeilen liegt die ganze Einbindung. `fs.fi`
+    // hat keine geaenderte Zeile, und es kann auch keine brauchen: was
+    // es liest, ist entschluesselt, bevor es ankommt.
+    krypto_stufe(state, kein_ata)
     var mounted: bool = false
     if !kein_ata {
         mounted = fs.mount(state)
-        if !mounted && !bootmod.ready(state) {
+        // RUNDE KRYPTO: DIE SUCHE NACH EINER OFS-PARTITION DARF HIER
+        // NICHT LAUFEN, WENN DIE PLATTE VERSCHLUESSELT IST.
+        //
+        // GEMESSEN, und der Fehler war lehrreich: nach `kryptoneu` ist
+        // das Dateisystem noch nicht angelegt, `fs.mount` sagt also
+        // nein -- und `root_from_part` griff daraufhin zur
+        // Partitionstafel, fand keine und stellte mit `blk.use_ata`
+        // den Versatz der Wurzel auf NULL zurueck. Das folgende
+        // `fs.format` schrieb seinen Superblock damit auf Sektor 0,
+        // also GENAU AUF DEN KOPFSATZ. Im ersten Lauf fiel das nicht
+        // auf (der Schluessel lag im Speicher); beim Neustart stand
+        // dort Geheimtext statt "OSUMCRYPT" und `unlock` sagte
+        // fehler=1 -- die Verschluesselung hatte ihren eigenen Kopf
+        // ueberschrieben.
+        //
+        // Auf einem verschluesselten Traeger gibt es keine
+        // Partitionstafel zu suchen: der Kopfsatz sagt, wo die Daten
+        // anfangen, und `krypto.unlock` hat den Versatz schon gesetzt.
+        if !mounted && !bootmod.ready(state) && !krypto.active(state) {
             mounted = root_from_part(state)
         }
     }
+    // RUNDE KRYPTO: der bekannte Baum. `kryptobaum` schreibt ihn,
+    // `kryptopruef` liest ihn nach und druckt je Datei die SHA-256.
+    // Beide setzen ein eingehaengtes Dateisystem voraus -- ist die
+    // Platte verschluesselt und NICHT entsperrt, kommt `mounted` als
+    // false zurueck, und genau das ist die Gegenprobe `kryptoroh`.
+    // RUNDE KRYPTO: NACH DEM ANLEGEN MUSS DAS DATEISYSTEM NEU.
+    //
+    // Der Grund ist der Kern der Sache und keine Bequemlichkeit: was
+    // vor `kryptoneu` auf der Platte lag, war KLARTEXT. Ab jetzt geht
+    // jeder Zugriff durch die Entschluesselung, und der alte
+    // Superblock liest sich als Rauschen -- `fs.mount` sagt deshalb
+    // richtigerweise nein. Ein verschluesselter Traeger bekommt sein
+    // Dateisystem, nachdem er verschluesselt ist; eine Umwandlung im
+    // Betrieb (wie `cryptsetup reencrypt`) ist nicht Teil dieser Runde
+    // und steht so in den offenen Punkten.
+    if kstate.mode_on(state, kstate.M_KRYPTONEU) && krypto.active(state) {
+        var s_kfmt: [u8; 18] = "krypto: fsformat=\0"
+        serial.puts((&s_kfmt[0]) as u64)
+        // FASSUNG 3, und das ist keine Geschmacksfrage: nur ab OFS_V3
+        // RECHNET `format_as` die Zahl der Kartenbloecke aus der
+        // Plattengroesse aus (`bmb = (total + BITS-1)/BITS`); Fassung 2
+        // schreibt dort eine 0, was "eine Karte" heisst und fuer 4096
+        // Bloecke reicht. Der verschluesselte Bereich ist um den
+        // Kopfsatz KLEINER als die Platte (8184 statt 8192), liegt aber
+        // ueber 4096 -- GEMESSEN: mit Fassung 2 sagte `mount`
+        // richtigerweise nein, weil die Karte die Platte nicht
+        // abdeckte, und der Fehler sah aus wie ein Fehler der
+        // Verschluesselung.
+        kstate.mode_add(state, kstate.O_OFS3FMT)
+        let fok: bool = fs.format(state)
+        serial.dec(kutil.yes(fok))
+        serial.nl()
+        // DIAGNOSE: steht der Kopfsatz nach dem Formatieren noch da?
+        // Sie steht VOR dem Einhaengen, weil `header_read` ueber
+        // `blk.read_on` geht und den Vorauslesepuffer umruehrt.
+        var s_dg: [u8; 17] = "krypto: kopfda=\0\0"
+        serial.puts((&s_dg[0]) as u64)
+        serial.dec(kutil.yes(krypto.header_read(state,
+            kstate.get(state, kstate.DISK_DEV))))
+        serial.nl()
+        blk.cache_invalidate(state)
+        if fok {
+            mounted = fs.mount(state)
+        }
+    }
+    krypto_baum(state, mounted)
     // RUNDE BLECH: DIE AUTOMATISCHE WURZELWAHL, und sie steht HIER --
     // hinter dem alten Weg und nicht davor.
     //
@@ -4283,6 +4498,54 @@ fn mode_of(state: u64, cmd: u64) {
         }
         kstate.set(state, kstate.FUZZ_K, v)
     }
+    // ============================================ RUNDE KRYPTO (K-019)
+    //
+    // Fuenf Schalter und drei Werte. Die Namen stecken mit Absicht
+    // nicht ineinander (`find_word` statt `find`, wo es darauf
+    // ankommt): ein `kryptoneu` darf kein `kryptoauf` mitschalten.
+    var kauf: [u8; 10] = "kryptoauf\0"
+    var kneu: [u8; 10] = "kryptoneu\0"
+    var ktst: [u8; 11] = "kryptotest\0"
+    var kroh: [u8; 10] = "kryptoroh\0"
+    var kfal: [u8; 13] = "kryptofalsch\0"
+    if find_word(cmd, (&kauf[0]) as u64, 9) != 0 {
+        kstate.mode_add(state, kstate.M_KRYPTOAUF)
+    }
+    if find_word(cmd, (&kneu[0]) as u64, 9) != 0 {
+        kstate.mode_add(state, kstate.M_KRYPTONEU)
+    }
+    if find_word(cmd, (&ktst[0]) as u64, 10) != 0 {
+        kstate.mode_add(state, kstate.M_KRYPTOTEST)
+    }
+    if find_word(cmd, (&kroh[0]) as u64, 9) != 0 {
+        kstate.mode_add(state, kstate.M_KRYPTOROH)
+    }
+    if find_word(cmd, (&kfal[0]) as u64, 12) != 0 {
+        kstate.mode_add(state, kstate.M_KRYPTOFALSCH)
+    }
+    var kbau: [u8; 11] = "kryptobaum\0"
+    var kpru: [u8; 12] = "kryptopruef\0"
+    if find_word(cmd, (&kbau[0]) as u64, 10) != 0 {
+        kstate.mode_add(state, kstate.M_KRYPTOBAUM)
+    }
+    if find_word(cmd, (&kpru[0]) as u64, 11) != 0 {
+        kstate.mode_add(state, kstate.M_KRYPTOPRUEF)
+    }
+    // Die Passphrase und die Parameter JETZT holen und in den eigenen
+    // Bereich legen -- siehe die Begruendung in `krypto_stufe`.
+    var w_pw: [u8; 9] = "kryptopw\0"
+    var w_kt: [u8; 8] = "kryptot\0"
+    var w_km: [u8; 8] = "kryptom\0"
+    var w_kp: [u8; 8] = "kryptop\0"
+    let pwl: u64 = k_wort(cmd, (&w_pw[0]) as u64, 8,
+        state + kstate.CRY_WORK, 128)
+    kstate.set(state, kstate.CRY_WORK + 0x100, pwl)
+    kstate.set(state, kstate.CRY_WORK + 0x108,
+        k_zahl(cmd, (&w_kt[0]) as u64, 7, 3))
+    kstate.set(state, kstate.CRY_WORK + 0x110,
+        k_zahl(cmd, (&w_km[0]) as u64, 7, 65536))
+    kstate.set(state, kstate.CRY_WORK + 0x118,
+        k_zahl(cmd, (&w_kp[0]) as u64, 7, 4))
     if find(cmd, (&hndw[0]) as u64, 6) != 0 {
         kstate.mode_add(state, kstate.M_HANDLE)
     }
@@ -5155,6 +5418,91 @@ fn aud_words(state: u64, cmd: u64) {
 // und alle zwoelf Zusagen danach waren rot. Diese Fassung nimmt einen
 // Treffer nur an, wenn LINKS Zeilenanfang oder Leerzeichen steht und
 // RECHTS Leerzeichen, Gleichheitszeichen oder das Ende.
+// ==================================================== RUNDE KRYPTO (K-019)
+//
+// Zwei Leser fuer `name=wert` auf der Kernel-Befehlszeile. Sie stehen
+// hier und nicht in `kutil.fi`, weil sie `find` brauchen, und `find`
+// steht hier.
+//
+// `k_zahl` liest Ziffern, `k_wort` liest bis zum naechsten Leerzeichen
+// und gibt die Laenge. Beide geben die Vorgabe zurueck, wenn das Wort
+// gar nicht vorkommt -- ein fehlender Schalter ist kein Fehler.
+// DIE FALLE, DIE DIESE RUNDE EINMAL GEKOSTET HAT: `find` sucht ein
+// TEILWORT. Auf einer Zeile mit `kryptotest ... kryptot=1` trifft
+// `find(cmd, "kryptot", 7)` zuerst auf `kryptotest`, findet dahinter
+// ein `e` statt einer Ziffer und nimmt die Vorgabe -- lautlos. GEMESSEN:
+// t=1 auf der Befehlszeile, t=3 im Kopfsatz.
+//
+// Deshalb sucht `k_stelle` wie `find_word`: links Zeilenanfang oder
+// Leerzeichen, rechts ZWINGEND ein Gleichheitszeichen. Ein Wort ohne
+// `=` ist kein Wertwort.
+fn k_stelle(cmd: u64, name: u64, n: u64) -> u64 {
+    var at: u64 = cmd
+    while true {
+        let t: u64 = find(at, name, n)
+        if t == 0 {
+            return 0
+        }
+        var links: bool = true
+        if t > cmd {
+            if kstate.get8(t - 1) != 32 {
+                links = false
+            }
+        }
+        if links && kstate.get8(t + n) == 61 {
+            return t
+        }
+        at = t + 1
+    }
+    return 0
+}
+
+fn k_zahl(cmd: u64, name: u64, n: u64, vorgabe: u64) -> u64 {
+    let f: u64 = k_stelle(cmd, name, n)
+    if f == 0 {
+        return vorgabe
+    }
+    var at: u64 = f + n + 1
+    var v: u64 = 0
+    var hat: bool = false
+    var lese: bool = true
+    while lese {
+        let c: u64 = kstate.get8(at) as u64
+        if c >= 48 && c <= 57 {
+            v = v * 10 + (c - 48)
+            at = at + 1
+            hat = true
+        } else {
+            lese = false
+        }
+    }
+    if !hat {
+        return vorgabe
+    }
+    return v
+}
+
+fn k_wort(cmd: u64, name: u64, n: u64, dst: u64, cap: u64) -> u64 {
+    let f: u64 = k_stelle(cmd, name, n)
+    if f == 0 {
+        return 0
+    }
+    var at: u64 = f + n + 1
+    var i: u64 = 0
+    var lese: bool = true
+    while lese && i < cap {
+        let c: u64 = kstate.get8(at) as u64
+        if c == 0 || c == 32 {
+            lese = false
+        } else {
+            kstate.set8(dst + i, (c & 255) as u8)
+            i = i + 1
+            at = at + 1
+        }
+    }
+    return i
+}
+
 fn find_word(hay: u64, needle: u64, n: u64) -> u64 {
     var at: u64 = hay
     while true {
