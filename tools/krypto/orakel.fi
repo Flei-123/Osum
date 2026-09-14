@@ -1,0 +1,318 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/krypto/orakel.fi -- die Rechnung der Runde KRYPTO, auf dem WIRT.
+//
+// ==================================================================
+// WARUM ES DIESES PROGRAMM GIBT
+// ==================================================================
+//
+// Eine Kryptoumsetzung, die nur gegen sich selbst geprueft ist, ist
+// wertlos. Der Auftrag dieser Runde sagt das, und er sagt auch, wie es
+// stattdessen geht: gegen eine UNABHAENGIGE Umsetzung, in BEIDE
+// Richtungen, und gegen die veroeffentlichten Vektoren der Normen.
+//
+// Dieses Programm ist die Haelfte auf der Osum-Seite. Es bindet
+// DIESELBEN `lib/crypto/`-Dateien, die der Kern bindet -- nicht eine
+// Nachbildung davon --, laeuft auf Linux, liest eine Zeile und
+// antwortet mit einer Zeile. `tools/krypto/vektoren.py` schickt
+// dieselben Eingaben durch Pythons `hashlib`, `cryptography` (OpenSSL
+// darunter) und `argon2-cffi` (die Referenzumsetzung der Argon2-Norm)
+// und vergleicht Oktett fuer Oktett.
+//
+// Das Muster ist `tools/wlan/oracle.fi` aus der Runde WLAN, und es ist
+// aus demselben Grund gewaehlt: was hier gemessen wird, ist genau der
+// Quelltext, der spaeter die Platte verschluesselt.
+//
+//   b2b      <msghex|-> <outlen>                 outlen Oktette
+//   b2bkey   <keyhex|-> <msghex|-> <outlen>      outlen Oktette
+//   argon2id <pwhex|-> <salthex> <t> <m> <p> <n> n Oktette
+//   argon2i  <pwhex|-> <salthex> <t> <m> <p> <n> n Oktette
+//   xtsenc   <key64hex> <tweak16hex> <plainhex>  n Oktette
+//   xtsdec   <key64hex> <tweak16hex> <cipherhex> n Oktette
+//   xtssec   <key64hex> <sektor> <plainhex>      n Oktette
+//   xtssecd  <key64hex> <sektor> <cipherhex>     n Oktette
+//
+// `-` steht fuer die leere Zeichenkette. `FAIL` heisst: die Eingabe
+// wurde abgelehnt -- und ein Orakel, das nie FAIL sagt, misst nichts.
+import std.rt
+import std.io
+import crypto.blake2b
+import crypto.argon2
+import crypto.xts
+
+const CAP: usize = 8192
+
+static mut a0: [u8; 8192] = [0; 8192]
+static mut a1: [u8; 8192] = [0; 8192]
+static mut a2: [u8; 8192] = [0; 8192]
+static mut outb: [u8; 8192] = [0; 8192]
+static mut hexb: [u8; 16400] = [0; 16400]
+// Argon2 braucht seinen Speicher vom Aufrufer. Vier MiB reichen fuer
+// jeden Vektor dieser Runde; der Kern gibt ihm spaeter seine eigenen
+// Seiten.
+static mut argmem: [u8; 4194304] = [0; 4194304]
+
+fn hexval(c: u64) -> i64 {
+    if c >= 48 && c <= 57 { return (c - 48) as i64 }
+    if c >= 97 && c <= 102 { return (c - 87) as i64 }
+    if c >= 65 && c <= 70 { return (c - 55) as i64 }
+    return -1
+}
+
+fn field_hex(line: u64, len: usize, at: *mut usize, dst: u64) -> i64 {
+    var i: usize = *at
+    while i < len && rt.ld8(line, i) == 32 as u8 { i = i + 1 }
+    var start: usize = i
+    while i < len && rt.ld8(line, i) != 32 as u8 { i = i + 1 }
+    *at = i
+    let n: usize = i - start
+    if n == 0 { return -1 }
+    if n == 1 && rt.ld8(line, start) == 45 as u8 { return 0 }
+    if n % 2 != 0 { return -1 }
+    if n / 2 > CAP { return -1 }
+    var o: usize = 0
+    while o < n / 2 {
+        let hi: i64 = hexval(rt.ld8(line, start + o * 2) as u64)
+        let lo: i64 = hexval(rt.ld8(line, start + o * 2 + 1) as u64)
+        if hi < 0 || lo < 0 { return -1 }
+        rt.st8(dst, o, ((hi * 16 + lo) & 255) as u8)
+        o = o + 1
+    }
+    return (n / 2) as i64
+}
+
+fn field_num(line: u64, len: usize, at: *mut usize) -> i64 {
+    var i: usize = *at
+    while i < len && rt.ld8(line, i) == 32 as u8 { i = i + 1 }
+    let start: usize = i
+    var v: i64 = 0
+    while i < len && rt.ld8(line, i) >= 48 as u8
+        && rt.ld8(line, i) <= 57 as u8 {
+        v = v * 10 + ((rt.ld8(line, i) as i64) - 48)
+        i = i + 1
+    }
+    if i == start { return -1 }
+    *at = i
+    return v
+}
+
+fn word_is(line: u64, len: usize, at: *mut usize, w: u64) -> bool {
+    var i: usize = *at
+    while i < len && rt.ld8(line, i) == 32 as u8 { i = i + 1 }
+    let start: usize = i
+    var j: usize = i
+    while j < len && rt.ld8(line, j) != 32 as u8 { j = j + 1 }
+    let n: usize = j - start
+    if rt.c_length(w) != n { return false }
+    var o: usize = 0
+    while o < n {
+        if rt.ld8(line, start + o) != rt.ld8(w, o) { return false }
+        o = o + 1
+    }
+    *at = j
+    return true
+}
+
+fn emit(p: u64, n: usize) {
+    let h: u64 = (&hexb[0]) as u64
+    let d: [u8; 16] = [48, 49, 50, 51, 52, 53, 54, 55,
+        56, 57, 97, 98, 99, 100, 101, 102]
+    var i: usize = 0
+    while i < n {
+        let v: u64 = rt.ld8(p, i) as u64
+        rt.st8(h, i * 2, d[(v >> 4) as usize])
+        rt.st8(h, i * 2 + 1, d[(v & 15) as usize])
+        i = i + 1
+    }
+    if n == 0 {
+        rt.st8(h, 0, 45 as u8)
+        io.print_line_bytes(h, 1)
+        return
+    }
+    io.print_line_bytes(h, n * 2)
+}
+
+fn fail() {
+    var m: [u8; 4] = [70, 65, 73, 76]
+    io.print_line_bytes((&m[0]) as u64, 4)
+}
+
+fn do_argon(line: u64, len: usize, at: *mut usize, atype: u64) {
+    let p0: u64 = (&a0[0]) as u64
+    let p1: u64 = (&a1[0]) as u64
+    let po: u64 = (&outb[0]) as u64
+    let pl: i64 = field_hex(line, len, at, p0)
+    let sl: i64 = field_hex(line, len, at, p1)
+    let t: i64 = field_num(line, len, at)
+    let m: i64 = field_num(line, len, at)
+    let par: i64 = field_num(line, len, at)
+    let ol: i64 = field_num(line, len, at)
+    if pl < 0 || sl < 8 || t < 1 || m < 8 || par < 1 || ol < 4 {
+        fail()
+        return
+    }
+    if ol > CAP as i64 {
+            fail()
+            return
+        }
+    if (m as u64) * 1024 > 4194304 {
+            fail()
+            return
+        }
+    if !argon2.argon2_any(p0, pl as usize, p1, sl as usize,
+        t as u64, m as u64, par as u64,
+        (&argmem[0]) as u64, po, ol as usize, atype) {
+        fail()
+        return
+    }
+    emit(po, ol as usize)
+}
+
+fn run_line(line: u64, len: usize) {
+    var at: usize = 0
+    let p0: u64 = (&a0[0]) as u64
+    let p1: u64 = (&a1[0]) as u64
+    let p2: u64 = (&a2[0]) as u64
+    let po: u64 = (&outb[0]) as u64
+
+    var w_b2b: [u8; 4] = "b2b\0"
+    if word_is(line, len, &at, (&w_b2b[0]) as u64) {
+        let ml: i64 = field_hex(line, len, &at, p0)
+        let ol: i64 = field_num(line, len, &at)
+        if ml < 0 || ol < 1 || ol > 64 {
+            fail()
+            return
+        }
+        if !blake2b.blake2b(p0, ml as usize, po, ol as usize) {
+            fail()
+            return
+        }
+        emit(po, ol as usize)
+        return
+    }
+
+    var w_b2bk: [u8; 7] = "b2bkey\0"
+    if word_is(line, len, &at, (&w_b2bk[0]) as u64) {
+        let kl: i64 = field_hex(line, len, &at, p1)
+        let ml: i64 = field_hex(line, len, &at, p0)
+        let ol: i64 = field_num(line, len, &at)
+        if kl < 0 || ml < 0 || ol < 1 || ol > 64 {
+            fail()
+            return
+        }
+        if !blake2b.blake2b_keyed(p1, kl as usize, p0, ml as usize,
+            po, ol as usize) {
+            fail()
+            return
+        }
+        emit(po, ol as usize)
+        return
+    }
+
+    var w_arg: [u8; 9] = "argon2id\0"
+    if word_is(line, len, &at, (&w_arg[0]) as u64) {
+        do_argon(line, len, &at, argon2.TYPE_ID)
+        return
+    }
+
+    var w_argi: [u8; 8] = "argon2i\0"
+    if word_is(line, len, &at, (&w_argi[0]) as u64) {
+        do_argon(line, len, &at, argon2.TYPE_I)
+        return
+    }
+
+    var w_argd: [u8; 8] = "argon2d\0"
+    if word_is(line, len, &at, (&w_argd[0]) as u64) {
+        do_argon(line, len, &at, argon2.TYPE_D)
+        return
+    }
+
+    var w_xe: [u8; 7] = "xtsenc\0"
+    if word_is(line, len, &at, (&w_xe[0]) as u64) {
+        let kl: i64 = field_hex(line, len, &at, p1)
+        let tl: i64 = field_hex(line, len, &at, p2)
+        let dl: i64 = field_hex(line, len, &at, p0)
+        if kl != 64 || tl != 16 || dl < 16 {
+            fail()
+            return
+        }
+        if !xts.encrypt(p1, p2, p0, po, dl as usize) {
+            fail()
+            return
+        }
+        emit(po, dl as usize)
+        return
+    }
+
+    var w_xd: [u8; 7] = "xtsdec\0"
+    if word_is(line, len, &at, (&w_xd[0]) as u64) {
+        let kl: i64 = field_hex(line, len, &at, p1)
+        let tl: i64 = field_hex(line, len, &at, p2)
+        let dl: i64 = field_hex(line, len, &at, p0)
+        if kl != 64 || tl != 16 || dl < 16 {
+            fail()
+            return
+        }
+        if !xts.decrypt(p1, p2, p0, po, dl as usize) {
+            fail()
+            return
+        }
+        emit(po, dl as usize)
+        return
+    }
+
+    var w_xse: [u8; 7] = "xtssec\0"
+    if word_is(line, len, &at, (&w_xse[0]) as u64) {
+        let kl: i64 = field_hex(line, len, &at, p1)
+        let sek: i64 = field_num(line, len, &at)
+        let dl: i64 = field_hex(line, len, &at, p0)
+        if kl != 64 || sek < 0 || dl < 16 {
+            fail()
+            return
+        }
+        if !xts.sector_encrypt(p1, sek as u64, p0, po, dl as usize) {
+            fail()
+            return
+        }
+        emit(po, dl as usize)
+        return
+    }
+
+    var w_xsd: [u8; 8] = "xtssecd\0"
+    if word_is(line, len, &at, (&w_xsd[0]) as u64) {
+        let kl: i64 = field_hex(line, len, &at, p1)
+        let sek: i64 = field_num(line, len, &at)
+        let dl: i64 = field_hex(line, len, &at, p0)
+        if kl != 64 || sek < 0 || dl < 16 {
+            fail()
+            return
+        }
+        if !xts.sector_decrypt(p1, sek as u64, p0, po, dl as usize) {
+            fail()
+            return
+        }
+        emit(po, dl as usize)
+        return
+    }
+
+    fail()
+}
+
+fn main() -> i32 {
+    var inp: rt.Buf = rt.buf_new()
+    if !rt.read_stdin(&inp) { return 1 }
+    let p: u64 = rt.buf_ptr(&inp)
+    let n: usize = rt.buf_len(&inp)
+    var at: usize = 0
+    while at < n {
+        var e: usize = at
+        while e < n && rt.ld8(p, e) != 10 as u8 { e = e + 1 }
+        var len: usize = e - at
+        while len > 0 && rt.ld8(p, at + len - 1) == 13 as u8 {
+            len = len - 1
+        }
+        if len > 0 { run_line(p + at as u64, len) }
+        at = e + 1
+    }
+    rt.buf_free(&inp)
+    return 0
+}

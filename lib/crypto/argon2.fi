@@ -1,0 +1,567 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/crypto/argon2.fi -- Argon2id nach RFC 9106, Runde KRYPTO.
+//
+// ====================== WARUM ARGON2ID UND NICHT DAS SCRYPT VON NEBENAN
+//
+// `lib/crypto/scrypt.fi` (Runde SYNC) hat in seinem Kopf begruendet,
+// warum es damals NICHT Argon2id wurde, und die Begruendung hatte drei
+// Punkte. Diese Runde hat sie nachgemessen, und ZWEI davon gelten nicht
+// mehr:
+//
+//   1. "Argon2 braucht BLAKE2b, das der Baum nicht hat." -- Stimmte.
+//      Diese Runde hat `lib/crypto/blake2b.fi` gebaut und gegen Pythons
+//      `hashlib.blake2b` gemessen, unverschluesselt, mit Schluessel und
+//      ueber jede Ausgabelaenge. Der Punkt ist erledigt.
+//   2. "Es gibt keine fremde Umsetzung zum Gegenrechnen; `argon2-cffi`
+//      ist auf diesem Wirt nicht vorhanden." -- Galt fuer den Wirt von
+//      damals. GEMESSEN am 14.09.2026: `argon2` (die
+//      REFERENZumsetzung der Norm, Paket der Distribution) und
+//      `argon2-cffi` sind beide verfuegbar; libsodium kann Argon2id
+//      ebenfalls, allerdings nur mit p=1 und taugt deshalb nicht fuer
+//      den RFC-Vektor mit p=4. Die Gegenprobe steht also zur Verfuegung,
+//      und sie ist die Referenzumsetzung selbst.
+//   3. "Zwei neue Kryptobausteine in einer Runde, deren Aufgabe etwas
+//      anderes ist." -- Das war das eigentliche Argument, und es war
+//      richtig. DIESE Runde hat Plattenverschluesselung als Aufgabe,
+//      und die Schluesselableitung IST hier die Aufgabe und kein
+//      Nebenher.
+//
+// Was Argon2id besser kann als scrypt, ist kein Geschmack: es ist der
+// Gewinner des Password Hashing Competition (2015), es ist die
+// Empfehlung von RFC 9106 und von LUKS2 als Vorgabe, und seine
+// id-Spielart verbindet den Widerstand gegen Seitenkanaele (die erste
+// Haelfte laeuft datenUNabhaengig, wie Argon2i) mit dem gegen
+// Zeit-Speicher-Handel (die zweite datenABhaengig, wie Argon2d).
+//
+// ====================================================== DIE RECHNUNG
+//
+// Argon2 fuellt einen Speicher von m KiB mit Bloecken zu 1024 Oktetten
+// und ueberschreibt ihn t-mal. Jeder neue Block entsteht aus seinem
+// Vorgaenger und einem ZWEITEN Block, dessen Adresse:
+//
+//   * in der ersten Haelfte des ersten Durchgangs aus einem Zaehler
+//     kommt (datenunabhaengig -- das ist der i-Anteil von id),
+//   * sonst aus dem Inhalt des Vorgaengerblocks (datenabhaengig -- der
+//     d-Anteil).
+//
+// Die Mischung G ist BLAKE2b's Rundenfunktion, zweimal ueber den Block
+// gelegt: einmal zeilenweise ueber die 8x16-Matrix aus 64-Bit-Woertern,
+// einmal spaltenweise. Sie ist NICHT BLAKE2b selbst -- es ist dessen
+// Permutation P ohne Anfangsvektor und ohne Zaehler.
+//
+// ===================================== WAS HIER NICHT GEBAUT IST, EHRLICH
+//
+// PARALLELISMUS p > 1 WIRD GERECHNET, ABER NICHT PARALLEL. Die Norm
+// teilt den Speicher in p Spuren, die NEBENEINANDER laufen duerfen;
+// diese Datei rechnet sie NACHEINANDER in der von der Norm
+// vorgeschriebenen Reihenfolge (Scheibe fuer Scheibe, in jeder Scheibe
+// Spur fuer Spur). Das Ergebnis ist Oktett fuer Oktett dasselbe -- die
+// Synchronisation der Norm liegt an den Scheibengrenzen, und wer die
+// Reihenfolge einhaelt, rechnet dasselbe. Belegt wird das dadurch, dass
+// der RFC-9106-Vektor mit p=4 stimmt. Was fehlt, ist der
+// GESCHWINDIGKEITSgewinn, und im Kern gibt es beim Entsperren nichts,
+// womit man ihn teilen koennte.
+//
+// DER SPEICHER KOMMT VOM AUFRUFER. Diese Datei belegt nichts; sie
+// bekommt einen Zeiger auf m*1024 Oktette. Im Kern sind das Seiten aus
+// `kstate`, auf dem Wirt ein `static mut`. Das ist dieselbe Regel wie
+// bei `scrypt.fi` und der Grund, warum sich diese Datei ueberhaupt in
+// einen Kern binden laesst.
+
+import crypto.blake2b
+
+export { argon2id, argon2_any, ARGON2_BLOCK, TYPE_ID, TYPE_I, TYPE_D }
+
+const ARGON2_BLOCK: usize = 1024
+const QWORDS: usize = 128 // 1024 / 8
+const SYNC_POINTS: u64 = 4
+const VERSION: u64 = 0x13
+
+const TYPE_D: u64 = 0
+const TYPE_I: u64 = 1
+const TYPE_ID: u64 = 2
+
+fn ld8(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn st8(p: u64, i: u64, v: u64) {
+    *((p + i) as *mut u8) = (v & 255) as u8
+}
+
+// Ein 64-Bit-Wort aus einem Block, LITTLE ENDIAN.
+fn qget(blk: u64, i: u64) -> u64 {
+    let b: u64 = blk + i * 8
+    return ld8(b, 0) | (ld8(b, 1) << 8) | (ld8(b, 2) << 16)
+        | (ld8(b, 3) << 24) | (ld8(b, 4) << 32) | (ld8(b, 5) << 40)
+        | (ld8(b, 6) << 48) | (ld8(b, 7) << 56)
+}
+
+fn qput(blk: u64, i: u64, v: u64) {
+    let b: u64 = blk + i * 8
+    var j: u64 = 0
+    while j < 8 {
+        st8(b, j, (v >> (j * 8)) & 255)
+        j = j + 1
+    }
+}
+
+// Eine 32-Bit-Zahl little endian -- die Form, in der ALLE Laengenfelder
+// des Anfangshashes stehen.
+fn put_le32(p: u64, off: u64, v: u64) {
+    st8(p, off, v & 255)
+    st8(p, off + 1, (v >> 8) & 255)
+    st8(p, off + 2, (v >> 16) & 255)
+    st8(p, off + 3, (v >> 24) & 255)
+}
+
+fn rotr64(x: u64, n: u64) -> u64 {
+    if n == 0 { return x }
+    return (x >> n) | (x << (64 - n))
+}
+
+// Die Mischung GB, RFC 9106 3.5. Das ist BLAKE2b's G mit einer
+// Besonderheit, die man leicht uebersieht und die das Ergebnis voellig
+// aendert: die zusaetzliche Multiplikation der unteren 32 Bit.
+//
+//   a = a + b + 2 * (a_lo * b_lo)
+//
+// Sie ist der Grund, warum Argon2 auf einer Grafikkarte nicht viel
+// schneller laeuft als auf einem Prozessor -- 64-Bit-Multiplikation ist
+// dort teuer.
+fn gb(v: *mut [u64; 16], a: usize, b: usize, c: usize, d: usize) {
+    let m1: u64 = ((*v)[a] & 0xFFFFFFFF) *% ((*v)[b] & 0xFFFFFFFF)
+    (*v)[a] = (*v)[a] +% (*v)[b] +% (m1 +% m1)
+    (*v)[d] = rotr64((*v)[d] ^ (*v)[a], 32)
+    let m2: u64 = ((*v)[c] & 0xFFFFFFFF) *% ((*v)[d] & 0xFFFFFFFF)
+    (*v)[c] = (*v)[c] +% (*v)[d] +% (m2 +% m2)
+    (*v)[b] = rotr64((*v)[b] ^ (*v)[c], 24)
+    let m3: u64 = ((*v)[a] & 0xFFFFFFFF) *% ((*v)[b] & 0xFFFFFFFF)
+    (*v)[a] = (*v)[a] +% (*v)[b] +% (m3 +% m3)
+    (*v)[d] = rotr64((*v)[d] ^ (*v)[a], 16)
+    let m4: u64 = ((*v)[c] & 0xFFFFFFFF) *% ((*v)[d] & 0xFFFFFFFF)
+    (*v)[c] = (*v)[c] +% (*v)[d] +% (m4 +% m4)
+    (*v)[b] = rotr64((*v)[b] ^ (*v)[c], 63)
+}
+
+// Die Permutation P ueber 16 Woerter, RFC 9106 3.6.
+fn perm(v: *mut [u64; 16]) {
+    gb(v, 0, 4, 8, 12)
+    gb(v, 1, 5, 9, 13)
+    gb(v, 2, 6, 10, 14)
+    gb(v, 3, 7, 11, 15)
+    gb(v, 0, 5, 10, 15)
+    gb(v, 1, 6, 11, 12)
+    gb(v, 2, 7, 8, 13)
+    gb(v, 3, 4, 9, 14)
+}
+
+// Die Kompression G(X, Y), RFC 9106 3.4.
+//
+//   R = X xor Y
+//   Q = P zeilenweise ueber R   (acht Zeilen zu 16 Woertern)
+//   Z = P spaltenweise ueber Q  (acht Spalten zu 16 Woertern)
+//   ergebnis = Z xor R
+//
+// `xor_in` = false schreibt das Ergebnis, `true` XORt es auf das Ziel --
+// das braucht der zweite und jeder weitere Durchgang.
+fn compress_g(dst: u64, x: u64, y: u64, xor_in: bool) {
+    var r: [u64; 128] = [0; 128]
+    var i: usize = 0
+    while i < QWORDS {
+        r[i] = qget(x, i as u64) ^ qget(y, i as u64)
+        i = i + 1
+    }
+    var z: [u64; 128] = [0; 128]
+    i = 0
+    while i < QWORDS {
+        z[i] = r[i]
+        i = i + 1
+    }
+    // Zeilen: Wort z[16*row + k].
+    var row: usize = 0
+    while row < 8 {
+        var v: [u64; 16] = [0; 16]
+        var k: usize = 0
+        while k < 16 {
+            v[k] = z[row * 16 + k]
+            k = k + 1
+        }
+        perm(&v)
+        k = 0
+        while k < 16 {
+            z[row * 16 + k] = v[k]
+            k = k + 1
+        }
+        row = row + 1
+    }
+    // Spalten: die Woerter 2*col und 2*col+1 jeder der acht Zeilen.
+    var col: usize = 0
+    while col < 8 {
+        var v: [u64; 16] = [0; 16]
+        var k: usize = 0
+        while k < 8 {
+            v[k * 2] = z[k * 16 + col * 2]
+            v[k * 2 + 1] = z[k * 16 + col * 2 + 1]
+            k = k + 1
+        }
+        perm(&v)
+        k = 0
+        while k < 8 {
+            z[k * 16 + col * 2] = v[k * 2]
+            z[k * 16 + col * 2 + 1] = v[k * 2 + 1]
+            k = k + 1
+        }
+        col = col + 1
+    }
+    i = 0
+    while i < QWORDS {
+        let out: u64 = z[i] ^ r[i]
+        if xor_in {
+            qput(dst, i as u64, qget(dst, i as u64) ^ out)
+        } else {
+            qput(dst, i as u64, out)
+        }
+        i = i + 1
+    }
+}
+
+// ================================================== H', die lange Ableitung
+//
+// RFC 9106 3.3. BLAKE2b gibt hoechstens 64 Oktette; Argon2 braucht 1024
+// fuer einen Block. H' haengt deshalb Haelften aneinander: die ersten 32
+// Oktette jedes 64er-Hashes, und der letzte Rest ganz.
+//
+// Die Laenge geht als 32-Bit-Zahl VOR die Eingabe -- ein haeufiger
+// Fehler ist, sie wegzulassen.
+fn h_prime(inp: u64, ilen: usize, out: u64, olen: usize) -> bool {
+    var pre: [u8; 4] = [0 as u8; 4]
+    put_le32((&pre[0]) as u64, 0, olen as u64)
+    if olen <= 64 {
+        var s: blake2b.Blake2b = blake2b.blake2b_new_keyed(0, 0, olen)
+        blake2b.blake2b_update(&s, (&pre[0]) as u64, 4)
+        blake2b.blake2b_update(&s, inp, ilen)
+        return blake2b.blake2b_final(&s, out)
+    }
+    var buf: [u8; 64] = [0 as u8; 64]
+    var s: blake2b.Blake2b = blake2b.blake2b_new_keyed(0, 0, 64)
+    blake2b.blake2b_update(&s, (&pre[0]) as u64, 4)
+    blake2b.blake2b_update(&s, inp, ilen)
+    if !blake2b.blake2b_final(&s, (&buf[0]) as u64) { return false }
+    var pos: usize = 0
+    var i: usize = 0
+    while i < 32 {
+        st8(out, pos as u64, buf[i] as u64)
+        pos = pos + 1
+        i = i + 1
+    }
+    var rest: usize = olen - 32
+    while rest > 64 {
+        var s2: blake2b.Blake2b = blake2b.blake2b_new_keyed(0, 0, 64)
+        blake2b.blake2b_update(&s2, (&buf[0]) as u64, 64)
+        if !blake2b.blake2b_final(&s2, (&buf[0]) as u64) { return false }
+        i = 0
+        while i < 32 {
+            st8(out, pos as u64, buf[i] as u64)
+            pos = pos + 1
+            i = i + 1
+        }
+        rest = rest - 32
+    }
+    var s3: blake2b.Blake2b = blake2b.blake2b_new_keyed(0, 0, rest)
+    blake2b.blake2b_update(&s3, (&buf[0]) as u64, 64)
+    var last: [u8; 64] = [0 as u8; 64]
+    if !blake2b.blake2b_final(&s3, (&last[0]) as u64) { return false }
+    i = 0
+    while i < rest {
+        st8(out, pos as u64, last[i] as u64)
+        pos = pos + 1
+        i = i + 1
+    }
+    return true
+}
+
+// ================================================ die Adresse des zweiten Blocks
+//
+// RFC 9106 3.4.1.2. Aus `j1` (32 Bit) und der Lage im Speicher wird ein
+// Index. Die Rechnung mit dem Quadrat ist genau die der Norm und darf
+// NICHT vereinfacht werden -- sie verteilt die Bezuege bewusst
+// ungleichmaessig zum Anfang hin.
+fn index_alpha(j1: u64, lane_len: u64, seg_len: u64, pass: u64,
+    slice: u64, index: u64, same_lane: bool) -> u64 {
+    // `area` ist die Zahl der Bloecke, auf die sich dieser Block
+    // beziehen DARF. Die Fallunterscheidung ist die der
+    // Referenzumsetzung (core.c, index_alpha), und sie hat genau vier
+    // Faelle plus eine Korrektur.
+    var area: u64 = 0
+    if pass == 0 {
+        // Erster Durchgang: alles, was in DIESEM Durchgang schon
+        // fertig ist.
+        if slice == 0 {
+            // Nur die eigene Spur, und nur bis vor den eigenen Block.
+            area = index - 1
+        } else {
+            if same_lane {
+                area = slice * seg_len + index - 1
+            } else {
+                // Fremde Spur: die abgeschlossenen Scheiben. Steht der
+                // eigene Block am Anfang einer Scheibe, faellt noch
+                // einer weg.
+                area = slice * seg_len
+                if index == 0 {
+                    area = area - 1
+                }
+            }
+        }
+    } else {
+        // Spaetere Durchgaenge: das ganze Feld ausser der laufenden
+        // Scheibe.
+        if same_lane {
+            area = lane_len - seg_len + index - 1
+        } else {
+            area = lane_len - seg_len
+            if index == 0 {
+                area = area - 1
+            }
+        }
+    }
+    // Die Abbildung von j1 auf einen Index in `area`, RFC 9106 3.4.1.2.
+    // Die Rechnung mit dem Quadrat ist genau die der Norm und darf
+    // NICHT vereinfacht werden -- sie verteilt die Bezuege bewusst
+    // zum Anfang hin.
+    let x: u64 = (j1 *% j1) >> 32
+    let y: u64 = (area *% x) >> 32
+    let zz: u64 = area - 1 - y
+    var start: u64 = 0
+    if pass != 0 && slice != SYNC_POINTS - 1 {
+        start = (slice + 1) * seg_len
+    }
+    return (start + zz) % lane_len
+}
+
+// ================================================== Argon2id
+//
+// `mem` zeigt auf m_cost * 1024 Oktette. `m_cost` wird auf ein
+// Vielfaches von 4*p abgerundet, genau wie es die Norm vorschreibt.
+fn argon2id(pwd: u64, pwdlen: usize, salt: u64, saltlen: usize,
+    t_cost: u64, m_cost: u64, lanes: u64,
+    mem: u64, out: u64, outlen: usize) -> bool {
+    return argon2_any(pwd, pwdlen, salt, saltlen, t_cost, m_cost,
+        lanes, mem, out, outlen, TYPE_ID)
+}
+
+fn argon2_any(pwd: u64, pwdlen: usize, salt: u64, saltlen: usize,
+    t_cost: u64, m_cost: u64, lanes: u64,
+    mem: u64, out: u64, outlen: usize, atype: u64) -> bool {
+    if t_cost < 1 || lanes < 1 { return false }
+    if saltlen < 8 { return false }
+    if outlen < 4 { return false }
+    // Die Norm: m muss mindestens 8*p sein.
+    if m_cost < 8 * lanes { return false }
+
+    // Auf ein Vielfaches von 4*p abrunden.
+    let seg_len: u64 = m_cost / (SYNC_POINTS * lanes)
+    if seg_len < 2 { return false }
+    let lane_len: u64 = seg_len * SYNC_POINTS
+    let blocks: u64 = lane_len * lanes
+
+    // ---------------------------------------------- H0, RFC 9106 3.2
+    //
+    // Der Anfangshash ueber ALLE Parameter. Jedes Feld ist eine
+    // 32-Bit-Zahl little endian, jede Zeichenkette bekommt ihre Laenge
+    // davor. Wer hier ein Feld vergisst, bekommt einen Hash, der in
+    // sich stimmig ist und mit der Norm nichts zu tun hat.
+    var h0: [u8; 72] = [0 as u8; 72]
+    var num: [u8; 4] = [0 as u8; 4]
+    var s: blake2b.Blake2b = blake2b.blake2b_new_keyed(0, 0, 64)
+    let np: u64 = (&num[0]) as u64
+    put_le32(np, 0, lanes)
+    blake2b.blake2b_update(&s, np, 4)
+    put_le32(np, 0, outlen as u64)
+    blake2b.blake2b_update(&s, np, 4)
+    put_le32(np, 0, m_cost)
+    blake2b.blake2b_update(&s, np, 4)
+    put_le32(np, 0, t_cost)
+    blake2b.blake2b_update(&s, np, 4)
+    put_le32(np, 0, VERSION)
+    blake2b.blake2b_update(&s, np, 4)
+    put_le32(np, 0, atype)
+    blake2b.blake2b_update(&s, np, 4)
+    put_le32(np, 0, pwdlen as u64)
+    blake2b.blake2b_update(&s, np, 4)
+    if pwdlen > 0 { blake2b.blake2b_update(&s, pwd, pwdlen) }
+    put_le32(np, 0, saltlen as u64)
+    blake2b.blake2b_update(&s, np, 4)
+    blake2b.blake2b_update(&s, salt, saltlen)
+    // Geheimnis und Zusatzdaten: diese Runde benutzt beide nicht, die
+    // Laengenfelder muessen aber trotzdem in den Hash.
+    put_le32(np, 0, 0)
+    blake2b.blake2b_update(&s, np, 4)
+    put_le32(np, 0, 0)
+    blake2b.blake2b_update(&s, np, 4)
+    if !blake2b.blake2b_final(&s, (&h0[0]) as u64) { return false }
+
+    // ------------------------------------- die ersten zwei Bloecke je Spur
+    var l: u64 = 0
+    while l < lanes {
+        // H'(H0 || 0 || lane) und H'(H0 || 1 || lane), je 1024 Oktette.
+        put_le32((&h0[0]) as u64, 64, 0)
+        put_le32((&h0[0]) as u64, 68, l)
+        if !h_prime((&h0[0]) as u64, 72,
+            mem + (l * lane_len) * (ARGON2_BLOCK as u64),
+            ARGON2_BLOCK) {
+            return false
+        }
+        put_le32((&h0[0]) as u64, 64, 1)
+        if !h_prime((&h0[0]) as u64, 72,
+            mem + (l * lane_len + 1) * (ARGON2_BLOCK as u64),
+            ARGON2_BLOCK) {
+            return false
+        }
+        l = l + 1
+    }
+
+    // ------------------------------------------------ die Durchgaenge
+    var zb: [u8; 1024] = [0 as u8; 1024]
+    var ib: [u8; 1024] = [0 as u8; 1024]
+    let zp: u64 = (&zb[0]) as u64
+    let ip: u64 = (&ib[0]) as u64
+
+    var pass: u64 = 0
+    while pass < t_cost {
+        var slice: u64 = 0
+        while slice < SYNC_POINTS {
+            var lane: u64 = 0
+            while lane < lanes {
+                // Bei Argon2i und in der ERSTEN HAELFTE des ersten
+                // Durchgangs von Argon2id kommen die Adressen aus einem
+                // Zaehler statt aus den Daten. Das ist der ganze
+                // Unterschied zwischen i, d und id.
+                var data_indep: bool = false
+                if atype == TYPE_I { data_indep = true }
+                if atype == TYPE_ID && pass == 0 && slice < 2 {
+                    data_indep = true
+                }
+                var start: u64 = 0
+                if pass == 0 && slice == 0 { start = 2 }
+                var index: u64 = start
+                while index < seg_len {
+                    let cur: u64 = lane * lane_len + slice * seg_len + index
+                    // Der Vorgaenger ist cur-1, ausser am ANFANG DER
+                    // SPUR -- dort ist es der letzte Block derselben
+                    // Spur (die Spur ist ein Ring).
+                    // ACHTUNG: `cur - 1` ist bei lane 0, slice 0,
+                    // index 0 ein Unterlauf (cur ist dann 0), und Firn
+                    // panickt bei `-` mit Unterlauf. Der Sonderfall
+                    // muss deshalb VOR der Subtraktion stehen und nicht
+                    // hinterher korrigiert werden.
+                    var prev: u64 = 0
+                    if index == 0 && slice == 0 {
+                        prev = lane * lane_len + lane_len - 1
+                    } else {
+                        prev = cur - 1
+                    }
+                    var j1: u64 = 0
+                    var j2: u64 = 0
+                    if data_indep {
+                        // DER ADRESSBLOCK, RFC 9106 3.4.1.1.
+                        //
+                        // Er haelt 128 Adresspaare. Gebraucht wird das
+                        // Paar mit der Nummer `index % 128`, und ein
+                        // NEUER Block muss immer dann entstehen, wenn
+                        // dieses Paar das erste eines neuen Hunderter-
+                        // blocks ist -- ODER wenn wir gerade erst in das
+                        // Segment eingetreten sind und noch gar keinen
+                        // haben.
+                        //
+                        // ZWEI FALLEN STECKEN HIER, und beide sind
+                        // gemessen worden, nicht ueberlegt:
+                        //
+                        //  1. Im ersten Segment des ersten Durchgangs
+                        //     faengt `index` bei 2 an. Eine Bedingung
+                        //     `index % 128 == 0` trifft dann NIE zu --
+                        //     der Adressblock bliebe leer, und jeder
+                        //     Wert ab m=32 waere falsch.
+                        //  2. Der Zaehler IM Eingabeblock zaehlt die
+                        //     Adressbloecke ab EINS, nicht die Bloecke.
+                        //
+                        // Mit seg_len < 4 faellt beides nicht auf, weil
+                        // das Segment vor dem ersten Wortwechsel endet.
+                        if index == start || index % 128 == 0 {
+                            var k: usize = 0
+                            while k < QWORDS {
+                                qput(ip, k as u64, 0)
+                                k = k + 1
+                            }
+                            qput(ip, 0, pass)
+                            qput(ip, 1, lane)
+                            qput(ip, 2, slice)
+                            qput(ip, 3, blocks)
+                            qput(ip, 4, t_cost)
+                            qput(ip, 5, atype)
+                            qput(ip, 6, index / 128 + 1)
+                            var zero: [u8; 1024] = [0 as u8; 1024]
+                            compress_g(zp, (&zero[0]) as u64, ip, false)
+                            var tmp: [u8; 1024] = [0 as u8; 1024]
+                            var q: usize = 0
+                            while q < QWORDS {
+                                qput((&tmp[0]) as u64, q as u64,
+                                    qget(zp, q as u64))
+                                q = q + 1
+                            }
+                            compress_g(zp, (&zero[0]) as u64,
+                                (&tmp[0]) as u64, false)
+                        }
+                        let w: u64 = qget(zp, (index % 128) as u64)
+                        j1 = w & 0xFFFFFFFF
+                        j2 = (w >> 32) & 0xFFFFFFFF
+                    } else {
+                        let w: u64 = qget(
+                            mem + prev * (ARGON2_BLOCK as u64), 0)
+                        j1 = w & 0xFFFFFFFF
+                        j2 = (w >> 32) & 0xFFFFFFFF
+                    }
+                    var ref_lane: u64 = j2 % lanes
+                    if pass == 0 && slice == 0 { ref_lane = lane }
+                    let same: bool = ref_lane == lane
+                    let ref_index: u64 = index_alpha(j1, lane_len,
+                        seg_len, pass, slice, index, same)
+                    let ridx: u64 = ref_lane * lane_len + ref_index
+                    let refb: u64 = mem + ridx * (ARGON2_BLOCK as u64)
+                    let curb: u64 = mem + cur * (ARGON2_BLOCK as u64)
+                    let prevb: u64 = mem + prev * (ARGON2_BLOCK as u64)
+                    // Ab dem zweiten Durchgang wird das Ergebnis auf den
+                    // alten Inhalt GEXORT, nicht darueber geschrieben.
+                    compress_g(curb, prevb, refb, pass != 0)
+                    index = index + 1
+                }
+                lane = lane + 1
+            }
+            slice = slice + 1
+        }
+        pass = pass + 1
+    }
+
+    // --------------------------------- das Ergebnis: alle letzten Bloecke
+    // der Spuren gexort, dann H' darueber.
+    var fin: [u8; 1024] = [0 as u8; 1024]
+    let fp: u64 = (&fin[0]) as u64
+    var k: usize = 0
+    while k < QWORDS {
+        qput(fp, k as u64, qget(mem + (lane_len - 1) * (ARGON2_BLOCK as u64),
+            k as u64))
+        k = k + 1
+    }
+    var l2: u64 = 1
+    while l2 < lanes {
+        let lidx: u64 = l2 * lane_len + lane_len - 1
+        let lb: u64 = mem + lidx * (ARGON2_BLOCK as u64)
+        k = 0
+        while k < QWORDS {
+            qput(fp, k as u64, qget(fp, k as u64) ^ qget(lb, k as u64))
+            k = k + 1
+        }
+        l2 = l2 + 1
+    }
+    return h_prime(fp, ARGON2_BLOCK, out, outlen)
+}
