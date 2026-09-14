@@ -754,7 +754,17 @@ const SYS_REBOOT: u64 = 169
 const RB_POWEROFF: u64 = 0x4321FEDC
 const RB_RESTART: u64 = 0x01234567
 
+// ==================================================== RUNDE ACPI-EREIGNISSE
+//
+// Die Einschalttaste. `osum_pwrget` ist derselbe Systemaufruf, aus dem
+// die Leiste ihren Akkustand holt; die Feldnummern stehen genauso in
+// `kernel/sys.fi`. `PG_BTN` gibt 1, WENN die Taste gedrueckt wurde --
+// und HOLT SIE DABEI AB, damit sie sich genau einmal meldet.
+const SYS_PWRGET: u64 = 1750
+const PG_BTN: u64 = 54
+
 static mut pw_cmd: [u8; 13] = "/run/svc.cmd\0"
+static mut s_pwbtn: [u8; 30] = "launcher: einschalttaste\0\0\0\0\0\0"
 static mut pw_down: [u8; 10] = "shutdown\n\0"
 static mut pw_boot: [u8; 8] = "reboot\n\0"
 
@@ -1418,6 +1428,40 @@ fn u_start(args: u64) -> u64 {
     var runden: u64 = 0
     while wlib.alive() && runden < 4000000 {
         runden = runden + 1
+        // ==================================== RUNDE ACPI-EREIGNISSE
+        //
+        // DIE EINSCHALTTASTE OEFFNET DAS ENERGIEMENUE.
+        //
+        // Justins Vorgabe war "das Energiemenue oeffnen oder sauber
+        // herunterfahren, nicht hart ausschalten" -- und das Menue ist
+        // das Richtige: wer die Taste aus Versehen streift, hat sonst
+        // seine offenen Fenster verloren. Der Weg danach ist derselbe
+        // wie beim Knopf in der Leiste (Rueckfrage, dann
+        // `/run/svc.cmd` an init) -- KEINE zweite Abschaltroutine.
+        //
+        // `PG_BTN` HOLT DIE TASTE AB: das Lesen setzt sie zurueck.
+        // Ohne das ginge das Menue in jedem Schleifendurchlauf erneut
+        // auf, also vierzigmal je Sekunde.
+        //
+        // Steht das Menue schon offen, tut ein zweiter Druck nichts --
+        // `pw_menue_auf` steigt oben selbst aus. Das ist gewollt: die
+        // Taste ist kein Umschalter, sie ist eine Bitte.
+        let btn: u64 = ulib.sys(SYS_PWRGET, PG_BTN, 0, 0)
+        if !ulib.bad(btn) && btn != 0 {
+            say((&s_pwbtn[0 as usize]) as u64)
+            nl()
+            if !versteckt || g_offen {
+                pw_menue_auf(anker + 12 * sk, ay + ky)
+            } else {
+                // Der Starter steht minimiert (der Normalfall beim
+                // Systemstart). Erst herholen, dann aufklappen --
+                // sonst haengt das Menue an einem Fenster, das
+                // niemand sieht.
+                let _vs: u64 = wlib.win_hide(w, false)
+                g_offen = true
+                pw_menue_auf(anker + 12 * sk, ay + ky)
+            }
+        }
         let id: u64 = wlib.step()
         if id < wlib.MAXWD {
             let kind: u64 = wlib.fired_kind()
