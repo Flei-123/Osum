@@ -721,7 +721,31 @@ if [ -S "$TMPD/mon.sock" ] && grep -q "sh: ready, osum" "$TMPD/kbd.txt" 2>/dev/n
     K="$TMPD/kbd.txt"
     [ "$rc" -eq 21 ] && ok "the interactive run ends by itself (exit 21) -- a quiet console is the end of the input" \
                      || { bad "keyboard run: exit code $rc"; tail -6 "$K" | sed 's/^/        /'; }
-    n=$(grep -c '^key: ' "$K")
+    # RUNDE ROTABSCHNITTE: `grep -c '^key: '` GEMESSEN UND FALSCH.
+    # Der Kern schreibt je Taste die Meldung `key: <zeichen>` auf die
+    # Leitung. Die Shell schreibt ihre Eingabeaufforderung `osum$ ` OHNE
+    # abschliessenden Zeilenumbruch davor -- im Mitschnitt steht deshalb
+    #
+    #     osum$ key: l
+    #     key: s
+    #     key: [enter]
+    #
+    # Die ERSTE Meldung steht nicht am Zeilenanfang, und `^key: ` sieht
+    # sie nie. Gezaehlt wurden 2, geschickt waren 3. Das hat NICHTS mit
+    # Last zu tun -- es ist bei jedem Lauf so, auch auf einer leeren
+    # Maschine, und keine noch so lange Wartezeit haette es geheilt.
+    # Nachgemessen an einem behaltenen Mitschnitt: `key: ` kommt 3-mal
+    # vor, `^key: ` 2-mal, und die drei Tasten sind alle angekommen
+    # (die Shell fuehrt `ls` ja auch wirklich aus, zwei Zusagen weiter).
+    #
+    # Gezaehlt wird jetzt die MELDUNG und nicht die Spalte, in der sie
+    # zufaellig beginnt. `apic: keyboard gsi 1` und aehnliche Zeilen
+    # enthalten `key: ` nicht und koennen nicht mitzaehlen (geprueft).
+    # Das Muster laesst `key: ` am Zeilenanfang ODER hinter einem
+    # Zeichen zu, das kein Kleinbuchstabe ist (hier das Leerzeichen von
+    # `osum$ `). Gegengeprueft: `monkey: `, `donkey: `, `keyboard: ` und
+    # `apic: keyboard gsi 1` zaehlen NICHT mit, die drei echten schon.
+    n=$(grep -aoE '(^|[^a-z])key: ' "$K" | wc -l)
     num "keys that arrived over IRQ1 (l, s, return, up, return)" "$n" eq 5
     n=$(grep -c '^\./ \.\./ bin/ d/ t/ $' "$K")
     if [ "$n" -eq 2 ]; then
