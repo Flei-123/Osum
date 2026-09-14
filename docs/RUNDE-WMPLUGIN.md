@@ -689,7 +689,11 @@ aus zwei Messungen `CS_TICKS` und `CS_IDLE` (`cpu.C_IDLETICKS`). Der
 Abnahmelauf faehrt mit `nosched noproc` — es gibt keinen Leerlauffaden,
 der Leerlaufzaehler bleibt 0, und die ehrliche Antwort darauf ist 100 %.
 Das ist kein Fehler des Widgets und auch nicht seine eigene Last (es
-schlaeft zwischen zwei Abholungen, `pollms = PL_FRIST/3`), sondern die
+schlaeft zwischen zwei Abholungen, `pollms = PL_FRIST/3`, **mindestens
+50 und hoechstens 250 Millisekunden** -- die Untergrenze stand vorher
+bei 20, und bei kurzer Frist wachte das Widget damit fuenfzigmal je
+Sekunde auf, um danach die Last zu melden, die es selbst erzeugt
+hatte), sondern die
 Eigenschaft dieses Aufbaus. Auf einem Lauf mit Scheduler zeigt dasselbe
 Widget die wirkliche Auslastung. **Benannt und nicht schoengerechnet.**
 
