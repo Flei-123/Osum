@@ -201,14 +201,21 @@ fi
 
 # KEIN FLIESSKOMMA. Die Zusage dieser Runde steht im Kopf von h264.fi;
 # hier wird sie nachgerechnet und nicht geglaubt.
-if grep -qaE '\b(f32|f64)\b|allow_fp|std\.math' kernel/user/h264.fi \
-        kernel/user/h264tab.fi; then
-    bad "h264.fi enthaelt Fliesskomma -- damit ist Bitgleichheit nicht zu haben"
-    grep -naE '\b(f32|f64)\b|allow_fp|std\.math' kernel/user/h264.fi | head -5 \
-        | sed 's/^/        /'
-else
-    ok "kein Fliesskomma im Dekodierer (keine f32/f64, kein allow_fp, kein std.math)"
-fi
+#
+# GEPRUEFT WIRD DER CODE, NICHT DER TEXT: der Dateikopf ERKLAERT, warum
+# hier kein f64 vorkommt (und nennt dabei jpeg.fi, das eines benutzt).
+# Wer stumpf grept, faellt darauf herein -- deshalb fliegen Kommentare
+# vorher heraus.
+for f in kernel/user/h264.fi kernel/user/h264tab.fi; do
+    sed 's://.*::' "$f" > "$TMPD/ohnekomm.fi"
+    if grep -qaE '\b(f32|f64)\b|allow_fp|std\.math' "$TMPD/ohnekomm.fi"; then
+        bad "$f enthaelt Fliesskomma -- damit ist Bitgleichheit nicht zu haben"
+        grep -naE '\b(f32|f64)\b|allow_fp|std\.math' "$TMPD/ohnekomm.fi" \
+            | head -5 | sed 's/^/        /'
+    else
+        ok "kein Fliesskomma im Code von $(basename "$f") (keine f32/f64, kein allow_fp, kein std.math)"
+    fi
+done
 
 # ------------------------------------------------- 4. das Pruefmaterial
 
