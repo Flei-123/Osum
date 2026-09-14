@@ -144,6 +144,14 @@ has "$TMPD/mit.klar" "rechte=0x103" "mit R_ACT_WIN (0x103 = EV_WIN|EV_FOCUS|ACT_
 has "$TMPD/mit.klar" "app=rechner" "die Regel hat auf den Buendelnamen getroffen"
 has "$TMPD/mit.klar" "x=230 y=70 w=340 h=430 flaeche=2 sichtbar=1" \
     "nachgemessen: zentriert (230,70) auf Flaeche 2 und sichtbar"
+# DIE ZWEITE REGEL, UND ZWAR DIE, DIE MAN AUF DEM BILD SIEHT.
+# `titel=Terminal kacheln ort=2,40`: `kacheln` allein legte das Fenster
+# auf (0,0), und der Server malt die Titelleiste OBERHALB dieser Zeile --
+# auf den Abnahmebildern 04/05 war sie abgeschnitten. 40 ist mehr als die
+# Rahmenhoehe, also steht sie ganz im Bild.
+has "$TMPD/mit.klar" "app=terminal" "die zweite Regel trifft das Terminal"
+has "$TMPD/mit.klar" "x=2 y=40" \
+    "das Terminal steht auf (2,40) -- seine Titelleiste passt ueber das Fenster"
 hasnot "$TMPD/mit.klar" "plugregel: abgewiesen" "keine Handlung wurde abgewiesen"
 hasnot "$TMPD/mit.klar" "wmplug: unreg regel" "das Plugin wurde nicht hinausgeworfen"
 has "$TMPD/mit.klar" "plugregel: puls" "und es lebte nach der Regel weiter"
@@ -202,6 +210,15 @@ if [ -s "$TMPD/mit.ppm" ] && [ -s "$TMPD/ohne.ppm" ]; then
         || bad "die Fensterfarbe wanderte nicht mit: '$a' gegen '$c'"
     [ "$d" != "$c" ] && ok "(120,300) hat das Fenster verlassen: '$d' gegen '$c'" \
         || bad "(120,300) zeigt in beiden Bildern dasselbe"
+    # DIE TITELLEISTE, AM BILD NACHGERECHNET. (300,12) liegt ueber dem
+    # Terminalfenster (y=40 minus Rahmen), (300,50) mitten in seiner
+    # Titelzeile. Sind beide gleich, klebt das Fenster wieder am oberen
+    # Rand und die Leiste ist abgeschnitten.
+    o=$(punkt "$TMPD/mit.ppm" 300 12)
+    t=$(punkt "$TMPD/mit.ppm" 300 50)
+    [ "$o" != "$t" ] \
+        && ok "die Titelleiste des Terminals steht im Bild: (300,12)='$o' gegen (300,50)='$t'" \
+        || bad "oberer Rand und Titelzeile sind gleich ('$o') -- die Leiste ist abgeschnitten"
 fi
 cp -f "$TMPD/mit.ppm" "$SHOTS/regel-mit-recht.ppm" 2>/dev/null
 cp -f "$TMPD/ohne.ppm" "$SHOTS/regel-ohne-recht.ppm" 2>/dev/null
