@@ -95,6 +95,7 @@ import wlibc
 import wlib
 import msg
 import instkern
+import dualkern
 
 export { u_start }
 
@@ -106,11 +107,14 @@ export { u_start }
 const MAXP: u64 = 4
 // Die Spalten der Tabelle: Geraet, Modell, Groesse, Belegung.
 const NCOL: u64 = 4
+// RUNDE DUALBOOT: die Spalten der Partitionsansicht -- Nr, Anfang,
+// Groesse, Art, Name.
+const PCOL: u64 = 5
 
 // Das Fenster. Die Zahlen liegen auf dem Viererraster der Runde
 // OBERFLAECHE -- `tools/design/messen.py` zaehlt genau sie.
-const BW: u64 = 640
-const BH: u64 = 440
+const BW: u64 = 720
+const BH: u64 = 560
 
 // Die Schritte, die der Balken abbildet. Sie sind dieselben Zahlen wie
 // in `instkern` (S_GPT..S_FERTIG) und stehen hier NICHT noch einmal als
@@ -130,10 +134,47 @@ static mut p_anz: u64 = 0
 // kein zweites daneben.
 static mut tblob: [u8; 1024] = [0 as u8; 1024]
 static mut tspalten: [u64; 4] = [0 as u64; 4]
+// Die Beschriftung der beiden Reiter, durch Tabulator getrennt -- das
+// Modell von `wlib.tabs`.
+static mut tabtext: [u8; 80] = [0 as u8; 80]
 
 // Die Statuszeile und die Schrittzeile.
 static mut zeile: [u8; 200] = [0 as u8; 200]
 static mut schrittzeile: [u8; 200] = [0 as u8; 200]
+
+// ================================================== RUNDE DUALBOOT
+//
+// DER ZWEITE WEG. Bis hierher konnte dieses Fenster genau eines: eine
+// Platte LEEREN und neu beschreiben. Wer OrientOS neben Windows wollte,
+// brauchte eine zweite Platte.
+//
+// Jetzt gibt es zwei Reiter, und sie stehen fuer zwei verschiedene
+// Berufe:
+//
+//   Reiter 0  GANZE PLATTE -- der alte Weg, unveraendert. Die Tafel
+//             wird neu geschrieben, alles darauf ist danach weg.
+//   Reiter 1  DANEBEN -- die vorhandene Tafel wird ERGAENZT. Die
+//             fremden Partitionen bleiben, die fremde EFI-Partition
+//             wird MITBENUTZT, und am Ende bietet das Bootmenue beide
+//             Systeme an.
+//
+// WAS DIE ANSICHT ZEIGT, und warum sie zuerst kommt: ohne zu sehen,
+// was auf der Platte liegt, ist jede Entscheidung darueber, wohin
+// OrientOS soll, geraten. Die Tafel wird mit `dualkern.tafel_lesen`
+// gelesen -- mit beiden Pruefsummen, wie `part.fi` es im Kern tut.
+static mut welcher_weg: u64 = 0 // 0 = ganze Platte, 1 = daneben
+// Die Zeilen der Partitionstabelle, wieder als EIN Text.
+static mut pblob: [u8; 1024] = [0 as u8; 1024]
+static mut pspalten: [u64; 5] = [0 as u64; 5]
+static mut freizeile: [u8; 200] = [0 as u8; 200]
+static mut espzeile: [u8; 200] = [0 as u8; 200]
+// Was die Tafel hergegeben hat. 0 = noch nicht gelesen.
+static mut d_gelesen: u64 = 0
+static mut d_frei_von: u64 = 0
+static mut d_frei_bis: u64 = 0
+static mut d_esp_idx: u64 = 0xFFFFFFFFFFFFFFFF
+static mut d_moeglich: u64 = 0 // 1 = "daneben" geht auf dieser Platte
+static mut d_neue_nr: u64 = 0  // die Nummer der angelegten Partition
 
 // Welche Platte ist gewaehlt (Index in p_*), und wie weit ist die
 // Installation.
@@ -182,6 +223,38 @@ static mut k_donehint: [u8; 21] = "installer.done.hint\0\0"
 static mut k_fail: [u8; 16] = "installer.fail\0\0"
 static mut k_empty: [u8; 17] = "installer.empty\0\0"
 static mut k_parts: [u8; 17] = "installer.parts\0\0"
+// RUNDE DUALBOOT: die Texte des zweiten Weges.
+static mut k_d_head: [u8; 11] = "dual.head\0\0"
+static mut k_d_cols: [u8; 11] = "dual.cols\0\0"
+static mut k_d_tganz: [u8; 15] = "dual.tab.ganz\0\0"
+static mut k_d_tneben: [u8; 16] = "dual.tab.neben\0\0"
+static mut k_d_nhead: [u8; 17] = "dual.neben.head\0\0"
+static mut k_d_nkeep: [u8; 17] = "dual.neben.keep\0\0"
+static mut k_d_frei: [u8; 11] = "dual.frei\0\0"
+static mut k_d_fkein: [u8; 16] = "dual.frei.kein\0\0"
+static mut k_d_fmehr: [u8; 16] = "dual.frei.mehr\0\0"
+static mut k_d_espg: [u8; 20] = "dual.esp.gefunden\0\0\0"
+static mut k_d_espk: [u8; 16] = "dual.esp.keine\0\0"
+static mut k_d_espkl: [u8; 16] = "dual.esp.klein\0\0"
+static mut k_d_espweg: [u8; 14] = "dual.esp.weg\0\0"
+static mut k_d_gkeine: [u8; 16] = "dual.gpt.keine\0\0"
+static mut k_d_gkaputt: [u8; 17] = "dual.gpt.kaputt\0\0"
+static mut k_d_gvoll: [u8; 15] = "dual.gpt.voll\0\0"
+static mut k_d_go: [u8; 9] = "dual.go\0\0"
+static mut k_d_askt: [u8; 17] = "dual.ask.title\0\0\0"
+static mut k_d_askx: [u8; 16] = "dual.ask.text\0\0\0"
+static mut k_d_s_ein: [u8; 20] = "dual.step.eintrag\0\0\0"
+static mut k_d_s_esp: [u8; 16] = "dual.step.esp\0\0\0"
+static mut k_d_s_men: [u8; 18] = "dual.step.menue\0\0\0"
+static mut k_d_done: [u8; 11] = "dual.done\0\0"
+static mut k_d_dhint: [u8; 16] = "dual.done.hint\0\0"
+static mut k_d_fremd: [u8; 12] = "dual.fremd\0\0"
+static mut k_a_esp: [u8; 14] = "dual.art.esp\0\0"
+static mut k_a_daten: [u8; 16] = "dual.art.daten\0\0"
+static mut k_a_linux: [u8; 16] = "dual.art.linux\0\0"
+static mut k_a_osum: [u8; 15] = "dual.art.osum\0\0"
+static mut k_a_frei: [u8; 15] = "dual.art.frei\0\0"
+static mut k_a_unb: [u8; 20] = "dual.art.unbekannt\0\0"
 
 // Die Mitschnitte. Sie gehen auf die SERIELLE LEITUNG und nie auf den
 // Bildschirm; ein Testlaeufer greppt danach, und ein uebersetzter
@@ -201,6 +274,17 @@ static mut m_self: [u8; 10] = "installer\0"
 static mut m_args: [u8; 18] = "installer: argc=\0\0"
 static mut m_wo: [u8; 16] = "installer: bei=\0"
 static mut m_esp: [u8; 16] = "installer: esp=\0"
+// RUNDE DUALBOOT. Wie alle Mitschnitte: auf der seriellen Leitung, nie
+// auf dem Schirm, und deshalb als Literal und nicht im Katalog.
+static mut m_d_weg: [u8; 16] = "installer: weg=\0"
+static mut m_d_tafel: [u8; 18] = "installer: tafel=\0"
+static mut m_d_part: [u8; 17] = "installer: part \0"
+static mut m_d_frei: [u8; 17] = "installer: frei \0"
+static mut m_d_espi: [u8; 21] = "installer: fremdesp=\0"
+static mut m_d_neu: [u8; 20] = "installer: neuepart\0"
+static mut m_d_nein: [u8; 21] = "installer: NEBENNEIN\0"
+static mut m_d_dir: [u8; 17] = "installer: dir=\0\0"
+static mut m_d_menue: [u8; 19] = "installer: menue=\0\0"
 
 // Die Schalter dieses Programms.
 static mut m_luft: [u8; 2] = " \0"
@@ -213,6 +297,10 @@ static mut a_ja: [u8; 8] = "sofort\0\0"
 // Lauf, der prueft, dass eine Installation auf die zweite Platte die
 // erste nicht anfasst.
 static mut a_zwei: [u8; 8] = "zweite\0\0"
+// NUR FUER DEN LAEUFER: den Reiter "daneben" waehlen. Ein Mensch klickt
+// den Reiter an -- das ist derselbe Weg durch denselben Code, nur ohne
+// Maus. Gebraucht wird er fuer tools/dual/abnahme.sh.
+static mut a_neben: [u8; 8] = "daneben\0"
 
 // ------------------------------------------------------- Kleinigkeiten
 
@@ -443,6 +531,263 @@ fn tabelle_bauen() {
     b_ende()
 }
 
+// ================================================== RUNDE DUALBOOT
+//
+// DIE TAFEL DER GEWAEHLTEN PLATTE LESEN UND ZEIGEN.
+//
+// Das ist Stueck 1 des Auftrags: SEHEN, was da ist. Gelesen wird mit
+// `dualkern.tafel_lesen`, und das prueft BEIDE Pruefsummen, bevor es
+// einen Eintrag glaubt -- genau wie `part.fi` im Kern. Eine Tafel,
+// deren CRC nicht stimmt, wird hier nicht angezeigt und erst recht
+// nicht ergaenzt.
+//
+// Danach steht fest, ob der Weg "daneben" auf dieser Platte ueberhaupt
+// offen ist. Drei Dinge muessen zusammenkommen:
+//
+//   1. eine gueltige GPT,
+//   2. ein freier Bereich, der gross genug ist,
+//   3. eine vorhandene EFI-Systempartition, die gross genug ist.
+//
+// Fehlt eines davon, sagt das Fenster WELCHES -- und bietet den Weg
+// "ganze Platte" an, statt zu tricksen.
+fn tafel_holen(dev: u64) {
+    d_gelesen = 0
+    d_moeglich = 0
+    d_frei_von = 0
+    d_frei_bis = 0
+    d_esp_idx = 0xFFFFFFFFFFFFFFFF
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, dev, 0, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    let sekt: u64 = ulib.size_of(dev) / instkern.BS
+    let n: u64 = dualkern.tafel_lesen(fd, sekt)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    say(ptr((&m_d_tafel[0 as usize]) as u64))
+    ulib.sayu(n)
+    luft()
+    ulib.sayu(dualkern.grund())
+    ulib.nl()
+    d_gelesen = 1
+    if !dualkern.gpt_pruefen() {
+        return
+    }
+    // Jede gefundene Partition auf die Leitung -- damit eine Messung
+    // sieht, WAS gelesen wurde, und nicht nur, dass gelesen wurde.
+    var i: u64 = 0
+    while i < n {
+        say(ptr((&m_d_part[0 as usize]) as u64))
+        ulib.sayu(i + 1)
+        luft()
+        ulib.sayu(dualkern.p_start(i))
+        luft()
+        ulib.sayu(dualkern.p_ende(i))
+        luft()
+        ulib.sayu(dualkern.p_typ(i))
+        ulib.nl()
+        i = i + 1
+    }
+    // Der freie Platz.
+    if dualkern.luecke_suchen(65536) {
+        d_frei_von = dualkern.luecke_start()
+        d_frei_bis = dualkern.luecke_ende()
+        say(ptr((&m_d_frei[0 as usize]) as u64))
+        ulib.sayu(d_frei_von)
+        luft()
+        ulib.sayu(d_frei_bis)
+        ulib.nl()
+    } else {
+        return
+    }
+    // Die fremde EFI-Partition.
+    let e: u64 = dualkern.esp_finden()
+    if e >= dualkern.anz() {
+        return
+    }
+    if !dualkern.esp_gross_genug(e) {
+        return
+    }
+    d_esp_idx = e
+    say(ptr((&m_d_espi[0 as usize]) as u64))
+    ulib.sayu(e + 1)
+    ulib.nl()
+    d_moeglich = 1
+}
+
+// Der Name einer Art, aus dem Katalog.
+fn art_text(t: u64) -> u64 {
+    if t == dualkern.T_ESP {
+        return msg.get(ptr((&k_a_esp[0 as usize]) as u64))
+    }
+    if t == dualkern.T_DATEN {
+        return msg.get(ptr((&k_a_daten[0 as usize]) as u64))
+    }
+    if t == dualkern.T_LINUX {
+        return msg.get(ptr((&k_a_linux[0 as usize]) as u64))
+    }
+    if t == dualkern.T_OSUM {
+        return msg.get(ptr((&k_a_osum[0 as usize]) as u64))
+    }
+    return msg.get(ptr((&k_a_unb[0 as usize]) as u64))
+}
+
+// DIE PARTITIONSANSICHT. Eine Zeile je vorhandener Partition, und
+// dahinter EINE Zeile fuer den freien Platz -- der ist das, worum es
+// auf diesem Reiter geht, und er muss zu sehen sein.
+fn ptabelle_bauen() {
+    b_start((&pblob[0 as usize]) as u64, 1024)
+    b_s(msg.get(ptr((&k_d_cols[0 as usize]) as u64)))
+    b_c(10)
+    if d_gelesen == 0 || !dualkern.gpt_pruefen() {
+        b_ende()
+        return
+    }
+    let n: u64 = dualkern.anz()
+    var i: u64 = 0
+    while i < n {
+        b_n(i + 1)
+        b_c(9)
+        b_n(dualkern.p_start(i))
+        b_c(9)
+        b_n((dualkern.p_ende(i) - dualkern.p_start(i) + 1) / 2048)
+        b_c(32)
+        b_c(77) // 'M'
+        b_c(105) // 'i'
+        b_c(66) // 'B'
+        b_c(9)
+        b_s(art_text(dualkern.p_typ(i)))
+        b_c(9)
+        // Der Name aus der Tafel, Zeichen fuer Zeichen.
+        var k: u64 = 0
+        var weiter: bool = true
+        while k < 35 && weiter {
+            let ch: u64 = dualkern.p_name_ch(i, k)
+            if ch == 0 {
+                weiter = false
+            } else {
+                b_c(ch)
+                k = k + 1
+            }
+        }
+        b_c(10)
+        i = i + 1
+    }
+    // DER FREIE PLATZ als eigene Zeile. Ohne ihn zeigt die Ansicht,
+    // was belegt ist, und verschweigt ausgerechnet das, wonach der
+    // Mensch auf diesem Reiter sucht.
+    if d_frei_bis > d_frei_von {
+        b_c(45) // '-'
+        b_c(9)
+        b_n(d_frei_von)
+        b_c(9)
+        b_n((d_frei_bis - d_frei_von + 1) / 2048)
+        b_c(32)
+        b_c(77)
+        b_c(105)
+        b_c(66)
+        b_c(9)
+        b_s(msg.get(ptr((&k_a_frei[0 as usize]) as u64)))
+        b_c(9)
+        b_c(10)
+    }
+    b_ende()
+}
+
+// Die beiden Zeilen unter der Partitionsansicht: was mit dem freien
+// Platz passiert, und welche EFI-Partition mitbenutzt wird.
+fn dzeilen_bauen() {
+    b_start((&freizeile[0 as usize]) as u64, 200)
+    if d_gelesen == 0 {
+        b_ende()
+    } else if !dualkern.gpt_pruefen() {
+        let g: u64 = dualkern.grund()
+        if g == dualkern.D_KEINEGPT {
+            b_s(msg.get(ptr((&k_d_gkeine[0 as usize]) as u64)))
+        } else {
+            b_s(msg.get(ptr((&k_d_gkaputt[0 as usize]) as u64)))
+        }
+        b_c(32)
+        b_s(msg.get(ptr((&k_d_espweg[0 as usize]) as u64)))
+        b_ende()
+    } else if d_frei_bis <= d_frei_von {
+        b_s(msg.get(ptr((&k_d_fkein[0 as usize]) as u64)))
+        b_c(32)
+        b_s(msg.get(ptr((&k_d_fmehr[0 as usize]) as u64)))
+        b_ende()
+    } else {
+        b_s(msg.get(ptr((&k_d_frei[0 as usize]) as u64)))
+        b_c(32)
+        b_n((d_frei_bis - d_frei_von + 1) / 2048)
+        b_c(32)
+        b_c(77)
+        b_c(105)
+        b_c(66)
+        b_ende()
+    }
+
+    b_start((&espzeile[0 as usize]) as u64, 200)
+    if d_gelesen == 0 || !dualkern.gpt_pruefen() {
+        b_ende()
+    } else if d_esp_idx >= dualkern.anz() {
+        let g: u64 = dualkern.grund()
+        if g == dualkern.D_ESPKLEIN {
+            b_s(msg.get(ptr((&k_d_espkl[0 as usize]) as u64)))
+        } else {
+            b_s(msg.get(ptr((&k_d_espk[0 as usize]) as u64)))
+        }
+        b_c(32)
+        b_s(msg.get(ptr((&k_d_espweg[0 as usize]) as u64)))
+        b_ende()
+    } else {
+        b_s(msg.get(ptr((&k_d_espg[0 as usize]) as u64)))
+        b_c(32)
+        b_n(d_esp_idx + 1)
+        b_c(32)
+        b_c(45)
+        b_c(45)
+        b_c(32)
+        b_s(msg.get(ptr((&k_d_nkeep[0 as usize]) as u64)))
+        b_ende()
+    }
+}
+
+// DARF DER KNOPF UEBERHAUPT AN SEIN?
+//
+// Auf dem Reiter "ganze Platte" reicht eine gewaehlte Platte. Auf dem
+// Reiter "daneben" muessen ausserdem die drei Bedingungen erfuellt
+// sein, die `tafel_holen` geprueft hat -- sonst ist der Knopf aus, und
+// die Zeile darueber sagt, woran es liegt. Ein Knopf, der eine
+// Fehlermeldung ausloest, die man vorher haette anzeigen koennen, ist
+// eine Falle.
+fn weg_moeglich() -> bool {
+    if gewaehlt >= p_anz {
+        return false
+    }
+    if welcher_weg == 1 {
+        return d_moeglich == 1
+    }
+    return true
+}
+
+// Die Aufschrift des Knopfes. Sie sagt, was gleich passiert -- und auf
+// den beiden Reitern passiert etwas Verschiedenes.
+fn weg_knopftext() -> u64 {
+    if welcher_weg == 1 {
+        return msg.get(ptr((&k_d_go[0 as usize]) as u64))
+    }
+    return msg.get(ptr((&k_go[0 as usize]) as u64))
+}
+
+// Die Beschriftung der beiden Reiter. Zwei Woerter, durch einen
+// Tabulator getrennt -- so liest `wlib.tabs` sie.
+fn reiter_bauen() {
+    b_start((&tabtext[0 as usize]) as u64, 80)
+    b_s(msg.get(ptr((&k_d_tganz[0 as usize]) as u64)))
+    b_c(9)
+    b_s(msg.get(ptr((&k_d_tneben[0 as usize]) as u64)))
+    b_ende()
+}
+
 // Die Statuszeile unter der Tabelle.
 fn status_bauen() {
     b_start((&zeile[0 as usize]) as u64, 200)
@@ -464,7 +809,15 @@ fn status_bauen() {
         b_c(45)
         b_c(45)
         b_c(32)
-        b_s(msg.get(ptr((&k_warn[0 as usize]) as u64)))
+        // DER WARNSATZ HAENGT AM WEG. "Alle Daten werden geloescht" ist
+        // auf dem Reiter "daneben" schlicht FALSCH -- und eine falsche
+        // Warnung ist schlimmer als keine: wer sie einmal als Unsinn
+        // erkannt hat, liest die naechste nicht mehr.
+        if welcher_weg == 1 {
+            b_s(msg.get(ptr((&k_d_nhead[0 as usize]) as u64)))
+        } else {
+            b_s(msg.get(ptr((&k_warn[0 as usize]) as u64)))
+        }
     }
     b_ende()
 }
@@ -602,6 +955,149 @@ fn installieren(dev: u64, wstat: u64, wschritt: u64) -> bool {
     return true
 }
 
+// ================================================== RUNDE DUALBOOT
+//
+// DIE INSTALLATION NEBEN EIN VORHANDENES SYSTEM.
+//
+// Sie unterscheidet sich vom Weg "ganze Platte" in genau drei Punkten,
+// und jeder davon ist der Grund, warum es diese Runde gibt:
+//
+//   1. STATT `gpt_schreiben` wird `neben_schreiben` gerufen. Die
+//      vorhandene Tafel wird ERGAENZT, nicht ersetzt.
+//   2. ES WIRD KEINE EFI-PARTITION ANGELEGT. Die vorhandene wird
+//      mitbenutzt.
+//   3. DAS BOOTMENUE bekommt einen zweiten Eintrag.
+//
+// Was GLEICH bleibt, bleibt mit Absicht gleich: das Kopieren der
+// Wurzel und das Wachsenlassen sind dieselben Aufrufe in `instkern`.
+// Eine zweite Umsetzung davon waere die zweite Stelle, an der
+// dasselbe steht.
+fn installieren_daneben(dev: u64, wstat: u64, wschritt: u64) -> bool {
+    // ---- die Quelle zuerst. Ein Installationsprogramm, das erst eine
+    // Tafel aendert und dann merkt, dass es nichts zu kopieren hat,
+    // hat eine fremde Platte fuer nichts angefasst.
+    let qfd: u64 = ulib.sys(ulib.SYS_OPEN,
+        ptr((&d_quelle[0 as usize]) as u64), 0, 0)
+    if ulib.bad(qfd) {
+        wo(70)
+        return false
+    }
+    if instkern.quelle_pruefen(qfd) == 0 {
+        wo(71)
+        ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
+        return false
+    }
+    let qsekt: u64 = ulib.size_of(ptr((&d_quelle[0 as usize]) as u64))
+        / instkern.BS
+
+    let zfd: u64 = ulib.sys(ulib.SYS_OPEN, dev, ulib.O_RDWR, 0)
+    if ulib.bad(zfd) {
+        ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
+        wo(72)
+        return false
+    }
+    let sekt: u64 = ulib.size_of(dev) / instkern.BS
+
+    // ---- DIE TAFEL NOCH EINMAL LESEN, unmittelbar vor dem Schreiben.
+    //
+    // Sie wurde beim Anklicken der Platte schon gelesen; das war aber
+    // ein anderer Augenblick. Zwischen Ansicht und Knopfdruck kann ein
+    // Wechseldatentraeger getauscht worden sein. Wer auf eine Tafel
+    // schreibt, die er vor einer Minute gesehen hat, schreibt auf gut
+    // Glueck.
+    let n: u64 = dualkern.tafel_lesen(zfd, sekt)
+    if n == 0 || !dualkern.gpt_pruefen() {
+        wo(73)
+        ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
+        ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
+        return false
+    }
+    if !dualkern.luecke_suchen(65536) {
+        wo(74)
+        ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
+        ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
+        return false
+    }
+    let von: u64 = dualkern.luecke_start()
+    let bis: u64 = dualkern.luecke_ende()
+    let espi: u64 = dualkern.esp_finden()
+    if espi >= dualkern.anz() {
+        wo(75)
+        ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
+        ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
+        return false
+    }
+    if !dualkern.esp_gross_genug(espi) {
+        wo(76)
+        ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
+        ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
+        return false
+    }
+    // PASST DIE WURZEL UEBERHAUPT? Der freie Bereich muss das
+    // aufnehmen, was kopiert werden soll. Sonst bricht es HIER ab --
+    // vor dem ersten Schreibzugriff auf die fremde Tafel.
+    if bis - von + 1 < qsekt {
+        wo(77)
+        ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
+        ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
+        return false
+    }
+
+    // ---- 1. den Eintrag in die fremde Tafel. AB HIER WIRD GESCHRIEBEN.
+    melde_schritt(wschritt, instkern.S_GPT)
+    let nr: u64 = dualkern.neben_schreiben(zfd, von, bis)
+    if nr == 0 {
+        wo(78)
+        ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
+        ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
+        return false
+    }
+    d_neue_nr = nr
+    say(ptr((&m_d_neu[0 as usize]) as u64))
+    luft()
+    ulib.sayu(nr)
+    luft()
+    ulib.sayu(von)
+    luft()
+    ulib.sayu(bis)
+    ulib.nl()
+
+    // ---- 2. das System kopieren. Der lange Teil.
+    melde_schritt(wschritt, instkern.S_KOPIE)
+    if !instkern.wurzel_kopieren_ab(zfd, qfd, von, qsekt) {
+        wo(79)
+        ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
+        ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
+        return false
+    }
+
+    // ---- 3. das Dateisystem auf den ganzen Bereich vergroessern.
+    melde_schritt(wschritt, instkern.S_WACHSEN)
+    if instkern.wachsen(zfd, von, bis - von + 1) == 0 {
+        wo(80)
+        ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
+        ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
+        return false
+    }
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
+    ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
+
+    // ---- 4. die Dateien in die FREMDE EFI-Partition, und das Menue.
+    melde_schritt(wschritt, instkern.S_BOOT)
+    // Der Name der fremden EFI-Partition: das Geraet plus ihre Nummer
+    // aus der Tafel. NICHT "1" -- auf einer Platte mit Windows ist die
+    // ESP zwar meist die erste, aber "meist" ist keine Zusage.
+    esp_name_nr(dev, espi + 1)
+    say(ptr((&m_esp[0 as usize]) as u64))
+    say(ptr((&d_esp[0 as usize]) as u64))
+    ulib.nl()
+    if !bootlader_dual() {
+        return false
+    }
+    return true
+}
+
 // AN WELCHER STELLE ES ABGEBROCHEN IST. `fehler_bei()` sagt, WAS
 // schiefging (lesen, schreiben, kein OFS); diese Zahl sagt, WO. Ohne
 // sie ist "installer: FEHLER 2" eine Auskunft, mit der niemand etwas
@@ -674,6 +1170,28 @@ fn startdatei() -> bool {
     return true
 }
 
+// DER NAME EINER BELIEBIGEN PARTITION DES GERAETS (Runde DUALBOOT).
+//
+// `esp_name` haengt immer eine 1 an -- richtig fuer den Weg "ganze
+// Platte", wo dieses Programm die EFI-Partition selbst als erste
+// angelegt hat. Auf einer fremden Platte ist die ESP aber die
+// Partition, die in der TAFEL steht, und das kann die dritte sein.
+//
+// Mehr als neun Partitionen kann dieser Weg nicht benennen: `source_dev`
+// in kernel/sys.fi liest GENAU EINE Ziffer hinter dem Geraetenamen.
+// Wer eine Platte mit zehn Partitionen hat, bekommt hier die falsche --
+// deshalb wird oben abgebrochen, statt zu raten.
+fn esp_name_nr(dev: u64, nr: u64) {
+    ulib.strcpy(ptr((&d_esp[0 as usize]) as u64), dev)
+    let n: u64 = ulib.length(ptr((&d_esp[0 as usize]) as u64))
+    if n + 2 < 24 && nr >= 1 && nr <= 9 {
+        __mmio_write8((ptr((&d_esp[0 as usize]) as u64) + n) as *mut u8,
+            (48 + nr) as u8)
+        __mmio_write8((ptr((&d_esp[0 as usize]) as u64) + n + 1) as *mut u8,
+            0 as u8)
+    }
+}
+
 fn esp_name(dev: u64) {
     ulib.strcpy(ptr((&d_esp[0 as usize]) as u64), dev)
     let n: u64 = ulib.length(ptr((&d_esp[0 as usize]) as u64))
@@ -681,6 +1199,158 @@ fn esp_name(dev: u64) {
         __mmio_write8((ptr((&d_esp[0 as usize]) as u64) + n) as *mut u8, 49 as u8)
         __mmio_write8((ptr((&d_esp[0 as usize]) as u64) + n + 1) as *mut u8, 0 as u8)
     }
+}
+
+// ================================================== RUNDE DUALBOOT
+//
+// DIE DATEIEN IN DIE FREMDE EFI-PARTITION LEGEN -- UND ZWAR SO, DASS
+// NICHTS VERLORENGEHT.
+//
+// DAS IST DIE STELLE, AN DER EIN SCHLECHTES INSTALLATIONSPROGRAMM
+// FREMDE BOOTLADER LOESCHT. Der bequeme Weg waere, die ESP neu zu
+// formatieren -- danach startet OrientOS, und Windows ist weg, ohne
+// dass eine einzige Fehlermeldung gefallen waere.
+//
+// Also: die vorhandene EFI-Partition wird EINGEHAENGT und benutzt.
+// OrientOS legt seine Dateien in ein EIGENES Unterverzeichnis:
+//
+//     /EFI/orientos/osum.mb        der Kern
+//     /EFI/orientos/BOOTX64.EFI    der Bootlader
+//
+// Angefasst wird ausserdem GENAU EINE Datei ausserhalb davon: die
+// Startdatei des Bootladers (/limine.conf). Sie MUSS geaendert werden,
+// denn sie ist es, die das Menue beschreibt -- und ein Bootmenue, das
+// nur OrientOS anbietet, waere fuer einen Dual-Boot-Rechner genauso
+// falsch wie eine geloeschte ESP.
+//
+// \EFI\Microsoft\Boot\bootmgfw.efi wird GELESEN und nie
+// geschrieben.
+static mut p_efi_os: [u8; 20] = "/efi/EFI/orientos\0\0\0"
+static mut p_efi_oskern: [u8; 28] = "/efi/EFI/orientos/osum.mb\0\0\0"
+static mut p_efi_osldr: [u8; 32] = "/efi/EFI/orientos/BOOTX64.EFI\0\0\0"
+// Wo der fremde Bootmanager liegt. Die Schreibweise ist die von
+// Windows, und sie wird nur GEPRUEFT, nie beschrieben.
+static mut p_fremd_bm: [u8; 40] = "/efi/EFI/Microsoft/Boot/bootmgfw.efi\0\0\0\0"
+
+// DIE STARTDATEI FUER ZWEI SYSTEME.
+//
+// Sie steht hier in zwei Stuecken, weil der zweite Eintrag nur dann
+// geschrieben wird, wenn der fremde Bootmanager wirklich da ist. Ein
+// Menueeintrag, der auf eine Datei zeigt, die es nicht gibt, ist
+// schlimmer als kein Eintrag: er sieht aus wie ein Weg zurueck ins
+// alte System und endet in einer Fehlermeldung des Bootladers.
+//
+// `efi_chainload` ist das Protokoll, mit dem Limine die Steuerung an
+// eine fremde EFI-Anwendung uebergibt. GEMESSEN (Runde DUALBOOT, mit
+// einer eigens gebauten UEFI-Anwendung an der Stelle von bootmgfw.efi):
+// der fremde Bootmanager meldet sich danach auf der seriellen Leitung
+// und auf dem Schirm. Der Weg ueber die UEFI-Bootreihenfolge (NVRAM)
+// waere die Alternative gewesen -- er braucht aber einen Dienst, den
+// dieses System nicht hat, und er haengt an einem Speicher, den
+// Hauptplatinen beim Zuruecksetzen leeren. Der Kettenstart steht in
+// einer Datei auf der Platte und ueberlebt das.
+static mut lim_dual1: [u8; 174] = "timeout: 10\n\n/OrientOS\n    protocol: multiboot1\n    path: boot():/EFI/orientos/osum.mb\n    cmdline: osum vfs gfx wm wig desk wmshell wmdauer herz tz=120 nosched noproc nofs\n\0"
+static mut lim_dual2: [u8; 102] = "\n/Windows Boot Manager\n    protocol: efi_chainload\n    path: boot():/EFI/Microsoft/Boot/bootmgfw.efi\n\0"
+
+// Gibt es die Datei? Geoeffnet und sofort wieder zu -- mehr will diese
+// Frage nicht wissen.
+fn datei_da(pfad: u64) -> bool {
+    let f: u64 = ulib.sys(ulib.SYS_OPEN, pfad, 0, 0)
+    if ulib.bad(f) {
+        return false
+    }
+    ulib.sys(ulib.SYS_CLOSE, f, 0, 0)
+    return true
+}
+
+// Die Startdatei fuer den Doppelstart schreiben. Rueckgabe: 2, wenn
+// beide Eintraege darin stehen, 1 bei nur OrientOS, 0 bei Fehler.
+fn startdatei_dual() -> u64 {
+    let fremd: bool = datei_da(ptr((&p_fremd_bm[0 as usize]) as u64))
+    ulib.sys(ulib.SYS_UNLINK, ptr((&p_efi_lim[0 as usize]) as u64), 0, 0)
+    let f: u64 = ulib.sys(ulib.SYS_OPEN,
+        ptr((&p_efi_lim[0 as usize]) as u64), ulib.O_MAKE, 0)
+    if ulib.bad(f) {
+        return 0
+    }
+    let n1: u64 = ulib.length(ptr((&lim_dual1[0 as usize]) as u64))
+    let w1: u64 = ulib.sys(ulib.SYS_WRITE, f,
+        ptr((&lim_dual1[0 as usize]) as u64), n1)
+    if ulib.bad(w1) || w1 != n1 {
+        ulib.sys(ulib.SYS_CLOSE, f, 0, 0)
+        return 0
+    }
+    var wieviele: u64 = 1
+    if fremd {
+        let n2: u64 = ulib.length(ptr((&lim_dual2[0 as usize]) as u64))
+        let w2: u64 = ulib.sys(ulib.SYS_WRITE, f,
+            ptr((&lim_dual2[0 as usize]) as u64), n2)
+        if ulib.bad(w2) || w2 != n2 {
+            ulib.sys(ulib.SYS_CLOSE, f, 0, 0)
+            return 0
+        }
+        wieviele = 2
+    }
+    ulib.sys(ulib.SYS_CLOSE, f, 0, 0)
+    return wieviele
+}
+
+// Der Bootlader fuer den Weg "daneben". Er haengt die FREMDE
+// EFI-Partition ein und legt darin ein eigenes Verzeichnis an.
+fn bootlader_dual() -> bool {
+    ulib.sys(ulib.SYS_MKDIR, ptr((&p_efi[0 as usize]) as u64), 0, 0)
+    let m: u64 = ulib.sys4(ulib.SYS_VMOUNT,
+        ptr((&d_esp[0 as usize]) as u64),
+        ptr((&p_efi[0 as usize]) as u64),
+        ptr((&t_vfat[0 as usize]) as u64), 0)
+    if ulib.bad(m) {
+        wo(60)
+        return false
+    }
+    // DAS EIGENE VERZEICHNIS. /EFI gibt es auf einer fremden ESP schon;
+    // `mkdir` darauf schlaegt fehl, und das ist richtig so -- es wird
+    // nicht geprueft, weil ein vorhandenes Verzeichnis kein Fehler ist.
+    ulib.sys(ulib.SYS_MKDIR, ptr((&p_efi_efi[0 as usize]) as u64), 0, 0)
+    ulib.sys(ulib.SYS_MKDIR, ptr((&p_efi_os[0 as usize]) as u64), 0, 0)
+    // Und /EFI/BOOT: dort erwartet die Firmware den Bootlader, wenn sie
+    // keinen Eintrag in ihrer Reihenfolge hat.
+    ulib.sys(ulib.SYS_MKDIR, ptr((&p_efi_boot[0 as usize]) as u64), 0, 0)
+    var gut: bool = true
+    if !instkern.kopiere(ptr((&p_src_kern[0 as usize]) as u64),
+        ptr((&p_efi_oskern[0 as usize]) as u64)) {
+        wo(61)
+        gut = false
+    }
+    if gut && !instkern.kopiere(ptr((&p_src_ldr[0 as usize]) as u64),
+        ptr((&p_efi_osldr[0 as usize]) as u64)) {
+        wo(62)
+        gut = false
+    }
+    // Der Bootlader an die Stelle, an der die Firmware ihn findet.
+    // DAS UEBERSCHREIBT /EFI/BOOT/BOOTX64.EFI -- und das ist der eine
+    // Schreibzugriff ausserhalb des eigenen Verzeichnisses, der sich
+    // nicht vermeiden laesst, wenn OrientOS ohne Eintrag in der
+    // UEFI-Reihenfolge starten soll. Windows startet NICHT von dort
+    // (es haengt an \EFI\Microsoft\Boot\bootmgfw.efi), also kostet
+    // es dort nichts; und der neue Lader bietet Windows im Menue an.
+    if gut && !instkern.kopiere(ptr((&p_src_ldr[0 as usize]) as u64),
+        ptr((&p_efi_ldr[0 as usize]) as u64)) {
+        wo(63)
+        gut = false
+    }
+    if gut {
+        let wieviele: u64 = startdatei_dual()
+        say(ptr((&m_d_menue[0 as usize]) as u64))
+        ulib.sayu(wieviele)
+        ulib.nl()
+        if wieviele == 0 {
+            wo(64)
+            gut = false
+        }
+    }
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    ulib.sys(ulib.SYS_UMOUNT2, ptr((&p_efi[0 as usize]) as u64), 0, 0)
+    return gut
 }
 
 fn bootlader() -> bool {
@@ -783,6 +1453,7 @@ fn u_start(args: u64) -> u64 {
     // niemand ihn aus Gewohnheit tippt.
     let sofort: bool = arg_hat(args, ptr((&a_ja[0 as usize]) as u64))
     let zweite: bool = arg_hat(args, ptr((&a_zwei[0 as usize]) as u64))
+    let daneben: bool = arg_hat(args, ptr((&a_neben[0 as usize]) as u64))
 
     if !wlib.begin(nohit, false) {
         say(ptr((&m_nowm[0 as usize]) as u64))
@@ -794,11 +1465,18 @@ fn u_start(args: u64) -> u64 {
     // Katalog entsteht, traegt den Schluessel statt des Wortes.
     let _mk: u64 = msg.init()
 
+    if daneben {
+        welcher_weg = 1
+    }
     platten_suchen()
     if p_anz == 1 {
         gewaehlt = 0
+        tafel_holen(nptr(0))
     }
     tabelle_bauen()
+    reiter_bauen()
+    ptabelle_bauen()
+    dzeilen_bauen()
     status_bauen()
 
     let w: u64 = wlib.window(wlibc.snap(40), wlibc.snap(40),
@@ -830,15 +1508,35 @@ fn u_start(args: u64) -> u64 {
     // Deshalb hier derselbe Aufbau wie im Aufgabenverwalter: EIN
     // `box_v` mit Rand und Abstand, die Widgets der Reihe nach hinein,
     // `size` nur dort, wo eine Hoehe nicht die Vorgabe ist.
-    let tbh: u64 = wlibc.snap_up(200)
+    let tbh: u64 = wlibc.snap_up(160)
+    let pbh: u64 = wlibc.snap_up(140)
     wlib.box_v(w, 0, 0, bw, bh, pad, gap)
     let lhead: u64 = wlib.label(msg.get(ptr((&k_head[0 as usize]) as u64)))
     wlib.size(0, tbh)
-    let ttab: u64 = wlib.table((&tblob[0 as usize]) as u64, 6, NCOL,
+    let ttab: u64 = wlib.table((&tblob[0 as usize]) as u64, 5, NCOL,
         (&tspalten[0 as usize]) as u64)
+    // ============================== DIE ZWEI WEGE ALS REITER
+    //
+    // Sie stehen UNTER der Plattenliste und nicht darueber: erst wird
+    // eine Platte gewaehlt, dann entschieden, was mit ihr geschehen
+    // soll. Umgekehrt muesste der Mensch ueber etwas entscheiden, das
+    // er noch nicht benannt hat.
+    let treiter: u64 = wlib.tabs((&tabtext[0 as usize]) as u64)
+    // Die Partitionsansicht des zweiten Weges.
+    wlib.size(0, pbh)
+    let ptab: u64 = wlib.table((&pblob[0 as usize]) as u64, 5, PCOL,
+        (&pspalten[0 as usize]) as u64)
+    let lfrei: u64 = wlib.label((&freizeile[0 as usize]) as u64)
+    let lesp: u64 = wlib.label((&espzeile[0 as usize]) as u64)
     let lstat: u64 = wlib.label((&zeile[0 as usize]) as u64)
     let lschritt: u64 = wlib.label((&schrittzeile[0 as usize]) as u64)
     wlib.box_end()
+
+    // Die Partitionsansicht gehoert dem zweiten Reiter -- am Anfang
+    // steht der erste, also ist sie zu.
+    wlib.show(ptab, false)
+    wlib.show(lfrei, false)
+    wlib.show(lesp, false)
 
     // EIN KLICK GENUEGT. Eine Platte waehlt man einmal aus; ein
     // Doppelklick waere hier die Regel eines Dateimanagers am falschen
@@ -866,7 +1564,15 @@ fn u_start(args: u64) -> u64 {
     // Der Knopf ist aus, solange nichts gewaehlt ist. Ein Knopf, der
     // nichts tut, wenn man ihn drueckt, ist schlimmer als einer, der
     // erkennbar nicht bereit ist.
-    wlib.enable(bgo, gewaehlt < p_anz)
+    wlib.enable(bgo, weg_moeglich())
+    wlib.set_text(bgo, weg_knopftext())
+    if welcher_weg == 1 {
+        wlib.set_value(treiter, 1)
+        wlib.show(ptab, true)
+        wlib.show(lfrei, true)
+        wlib.show(lesp, true)
+        wlib.show(ttab, true)
+    }
 
     wlib.draw_all()
     say(ptr((&m_ready[0 as usize]) as u64))
@@ -901,6 +1607,25 @@ fn u_start(args: u64) -> u64 {
             gewaehlt = 1
         }
         if gewaehlt < p_anz {
+            // Die Tafel gehoert zu DIESER Platte -- die Vorauswahl oben
+            // hat sie nur dann gelesen, wenn es genau eine Platte gab.
+            tafel_holen(nptr(gewaehlt))
+            ptabelle_bauen()
+            dzeilen_bauen()
+            wlib.set_text(ptab, (&pblob[0 as usize]) as u64)
+            wlib.set_text(lfrei, (&freizeile[0 as usize]) as u64)
+            wlib.set_text(lesp, (&espzeile[0 as usize]) as u64)
+            wlib.draw_all()
+            // AUF DEM WEG "DANEBEN" WIRD NUR LOSGELEGT, WENN ES GEHT.
+            // Sonst bliebe der Lauf haengen und die Abnahme meldete
+            // "keine Schritte", statt den Abbruchgrund zu zeigen.
+            if welcher_weg == 1 && d_moeglich == 0 {
+                say(ptr((&m_d_nein[0 as usize]) as u64))
+                luft()
+                ulib.sayu(dualkern.grund())
+                ulib.nl()
+                return 0
+            }
             frage = 2
         }
     }
@@ -920,7 +1645,15 @@ fn u_start(args: u64) -> u64 {
             say(ptr((&m_go[0 as usize]) as u64))
             ulib.nl()
 
-            let gut: bool = installieren(nptr(gewaehlt), lstat, lschritt)
+            // WELCHER WEG. Das ist die eine Verzweigung, um die es
+            // in dieser Runde geht -- alles davor ist Anzeige, alles
+            // dahinter ist dieselbe Meldung.
+            var gut: bool = false
+            if welcher_weg == 1 {
+                gut = installieren_daneben(nptr(gewaehlt), lstat, lschritt)
+            } else {
+                gut = installieren(nptr(gewaehlt), lstat, lschritt)
+            }
             laeuft = 0
             if gut {
                 fertig = 1
@@ -965,15 +1698,38 @@ fn u_start(args: u64) -> u64 {
                     wlib.set_text(lstat, (&zeile[0 as usize]) as u64)
                     wlib.enable(bgo, false)
                     wlib.draw_all()
-                } else if id == bgo && gewaehlt < p_anz && laeuft == 0 {
-                    // DIE ERSTE FRAGE.
-                    frage = 1
-                    wlib.dlg_ask(
-                        msg.get(ptr((&k_ask1t[0 as usize]) as u64)),
-                        msg.get(ptr((&k_ask1x[0 as usize]) as u64)))
-                    say(ptr((&m_ask[0 as usize]) as u64))
-                    ulib.sayu(1)
-                    ulib.nl()
+                } else if id == bgo && weg_moeglich() && laeuft == 0 {
+                    if welcher_weg == 1 {
+                        // AUF DEM WEG "DANEBEN" GENUEGT EINE FRAGE.
+                        //
+                        // Die zweite Frage des anderen Weges gibt es,
+                        // weil dort eine ganze Platte geloescht wird --
+                        // die folgenreichste Sache, die dieses System
+                        // auf Knopfdruck tut. Hier wird NICHTS
+                        // geloescht; die vorhandenen Partitionen
+                        // bleiben, und das steht auch in der Frage.
+                        // Zwei Warnungen vor einem harmlosen Schritt
+                        // sind keine Vorsicht, sondern Gewoehnung --
+                        // und Gewoehnung ist genau das, was die zweite
+                        // Frage auf dem anderen Reiter wertlos machen
+                        // wuerde.
+                        frage = 2
+                        wlib.dlg_ask(
+                            msg.get(ptr((&k_d_askt[0 as usize]) as u64)),
+                            msg.get(ptr((&k_d_askx[0 as usize]) as u64)))
+                        say(ptr((&m_ask[0 as usize]) as u64))
+                        ulib.sayu(9)
+                        ulib.nl()
+                    } else {
+                        // DIE ERSTE FRAGE.
+                        frage = 1
+                        wlib.dlg_ask(
+                            msg.get(ptr((&k_ask1t[0 as usize]) as u64)),
+                            msg.get(ptr((&k_ask1x[0 as usize]) as u64)))
+                        say(ptr((&m_ask[0 as usize]) as u64))
+                        ulib.sayu(1)
+                        ulib.nl()
+                    }
                 }
             } else if kind == wlib.K_TABLE && id == ttab {
                 if idx < p_anz {
@@ -982,11 +1738,35 @@ fn u_start(args: u64) -> u64 {
                     luft()
                     say(nptr(gewaehlt))
                     ulib.nl()
+                    // DIE TAFEL DIESER PLATTE LESEN. Erst jetzt -- vorher
+                    // ist nicht klar, um welche Platte es geht, und ein
+                    // Programm, das beim Start jede Platte durchliest,
+                    // haelt den Menschen auf.
+                    tafel_holen(nptr(gewaehlt))
+                    ptabelle_bauen()
+                    dzeilen_bauen()
+                    wlib.set_text(ptab, (&pblob[0 as usize]) as u64)
+                    wlib.set_text(lfrei, (&freizeile[0 as usize]) as u64)
+                    wlib.set_text(lesp, (&espzeile[0 as usize]) as u64)
                     status_bauen()
                     wlib.set_text(lstat, (&zeile[0 as usize]) as u64)
-                    wlib.enable(bgo, true)
+                    wlib.enable(bgo, weg_moeglich())
                     wlib.draw_all()
                 }
+            } else if kind == wlib.K_TABS && id == treiter {
+                // DER WEG WIRD GEWECHSELT.
+                welcher_weg = idx
+                say(ptr((&m_d_weg[0 as usize]) as u64))
+                ulib.sayu(welcher_weg)
+                ulib.nl()
+                wlib.show(ptab, welcher_weg == 1)
+                wlib.show(lfrei, welcher_weg == 1)
+                wlib.show(lesp, welcher_weg == 1)
+                wlib.set_text(bgo, weg_knopftext())
+                status_bauen()
+                wlib.set_text(lstat, (&zeile[0 as usize]) as u64)
+                wlib.enable(bgo, weg_moeglich())
+                wlib.draw_all()
             }
         }
 

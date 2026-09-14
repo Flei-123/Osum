@@ -60,7 +60,13 @@ DATEN_ENDE=$((DATEN_START + DATEN_SEK - 1))
 echo "== eine Platte, auf der schon jemand wohnt: $IMG ($MIB MiB)"
 
 rm -f "$IMG"
-dd if=/dev/zero of="$IMG" bs=1M count="$MIB" status=none
+# SPARSAM ANLEGEN. `dd seek=` ohne `count` schreibt kein einziges Oktett
+# und legt nur die Groesse fest -- die Datei hat Loecher und belegt am
+# Anfang nichts. Fuer QEMU ist das eine ganz gewoehnliche Platte; auf
+# dem Wirt kostet ein Lauf dadurch Megabytes statt eines halben
+# Gigabytes. Bei fuenf Auftraegen auf derselben Platte ist das der
+# Unterschied zwischen "laeuft" und "kein Platz mehr".
+dd if=/dev/zero of="$IMG" bs=1M count=0 seek="$MIB" status=none
 
 # ---------------------------------------------------------- die Tafel
 #
