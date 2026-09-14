@@ -14,7 +14,7 @@ wirklich gebooteten Kernel** (`bash tools/wmplug/widget.sh`, QEMU,
 | `kernel/user/pluguhr.fi` | `/bin/pluguhr` — das Widget, ein **Ring-3-Prozess** |
 | `kernel/user/taskbar.fi` | die Leiste holt die Texte und malt sie |
 | `kernel/user/_dev_uhrstart.fi` | **Abkuerzung**, siehe unten |
-| `tools/wmplug/widget.sh` | der Laeufer: 26 Zusagen, alle aus einem Lauf |
+| `tools/wmplug/widget.sh` | der Laeufer: 30 Zusagen, drei QEMU-Laeufe |
 | `docs/shots/wmplug/widget-{an,aus,aus-laufzeit}.png` | die drei Fotos |
 
 ## Der Weg eines Zeichens
@@ -102,7 +102,7 @@ zuerst rot war: **ohne `plugaus` ist die Tafel OFFEN, auch ohne das Wort
   800x600). **Nicht gegengeprueft** gegen den Stand vor dieser Runde:
   an diesem Arbeitsbaum arbeiten gleichzeitig vier Module, ein
   Vergleichslauf haette also nicht diese Aenderung gemessen. Was sich
-  ueber diese Aenderung sagen laesst: sie faegt der Leiste ein Feld
+  ueber diese Aenderung sagen laesst: sie fuegt der Leiste ein Feld
   hinzu, wenn ein Plugin Text schickt, und einen Systemaufruf je
   Sekunde, wenn keines da ist -- an der Aufloesung, an
   `/etc/taskbar.conf` und an den Schirmrand-Reservierungen fasst sie
