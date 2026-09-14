@@ -49,6 +49,8 @@ import pwr
 import sched
 import serial
 import tile
+import vgpu
+import gfx
 import time
 import arch.x86_64.trap
 import ttf
@@ -363,6 +365,29 @@ fn graphics(state: u64, mbi: u64) {
     // nicht `kmain.fi` (wo FEEDBACK sie hatte), weil `kgui.fi` bei
     // `gui=off` gar nicht erst uebersetzt wird: ein Kern ohne
     // Oberflaeche soll den Schein auch nicht anlegen.
+    // ======================================== RUNDE VIRTIOGPU
+    // DEN GRAFIKTREIBER AUFSETZEN -- HIER UND NICHT FRUEHER.
+    //
+    // `vgpu.init` haengt den ZWEITPUFFER von `fb.fi` als Unterlage an
+    // eine Ressource des Geraets. Den Puffer gibt es erst, seit
+    // `fb.init` zurueckgekommen ist -- also steht der Aufruf genau
+    // hier und keine Zeile hoeher.
+    //
+    // FINDET ER KEIN GERAET, PASSIERT NICHTS. `init` gibt `false`
+    // zurueck, `vgpu.bereit` bleibt falsch, und `fb.flush` nimmt seinen
+    // alten Weg. Justins Brett hat kein virtio-gpu; fuer das Brett
+    // aendert diese Runde deshalb kein einziges Oktett.
+    //
+    // `novgpu` ist die GEGENPROBE: derselbe Kern, dasselbe QEMU, nur
+    // ohne den neuen Weg. Ohne sie waere jede Messung unten eine
+    // Behauptung -- man haette nichts, wogegen man sie haelt.
+    if !kstate.mode_on(state, kstate.M_NOVGPU) {
+        if vgpu.init(state) {
+            fb.set_vgpu(state, true)
+        }
+    }
+    vgpu.say(state)
+
     shot.init(state)
 
     // RUNDE BRUECKE: der Schein fuer die eingespeiste Eingabe, aus
@@ -2324,6 +2349,38 @@ fn surface(state: u64) {
             if kstate.mode_on(state, kstate.M_WMRUHE) {
                 wm.damage_all(state)
             }
+            // RUNDE VIRTIOGPU: DIE TICKENDE UHR.
+            //
+            // Ein Rechteck von der Groesse einer Uhr in der Leiste,
+            // unten rechts, in jedem Takt neu. Gemalt wird wirklich
+            // (sonst waere der Schmutz gelogen), und zwar mit einer
+            // Farbe, die sich je Takt aendert -- so steht im Bild
+            // etwas anderes und nicht nur eine Schmutzmarke.
+            if kstate.mode_on(state, kstate.M_VGPUUHR) {
+                let uw: u64 = 96
+                let uh: u64 = 20
+                let ux: u64 = fb.width(state) - uw - 8
+                let uy: u64 = fb.height(state) - uh - 4
+                let t: u64 = kstate.get(state, kstate.TICKS)
+                let c: u64 = fb.rgb(state, (t * 7) & 0xFF,
+                    (t * 13) & 0xFF, 0x80)
+                fb.fill(state, ux, uy, uw, uh, c)
+                wm.damage(state, ux as i64, uy as i64,
+                    (ux + uw) as i64, (uy + uh) as i64)
+            }
+            // RUNDE VIRTIOGPU: DER ZEIGERSTROM AUCH IN DIESER SCHLEIFE.
+            //
+            // `mausflut=<hz>` gab es seit Runde BLECH2, aber nur in der
+            // Schreibtischschleife mit Ring 3 -- in der Halteschleife
+            // (`wmhold`, die jede Messung dieser Runde benutzt) stand
+            // der Zeiger still. Eine Messung der Uebertragung an einem
+            // STEHENDEN Bild misst aber das Falsche: dort ist jede Zahl
+            // klein, weil sich nichts aendert.
+            //
+            // Mit dieser Zeile bewegt sich der Zeiger auch beim Halten,
+            // und `tools/vgpu/messen.sh` misst einen Schreibtisch, auf
+            // dem wirklich etwas passiert.
+            mausflut_schritt(state)
             let _offen: u64 = wm.anim_tick(state)
             // RUNDE VSYNC: DER ABLESER LIEST VOR UND NACH DEM MALEN.
             // Vorher steht das fertige Bild der letzten Runde auf der
@@ -2335,6 +2392,18 @@ fn surface(state: u64) {
             wm.compose(state)
             wm.leser_tick(state)
             let _gz: u64 = wm.present(state)
+            // RUNDE VIRTIOGPU: DIE UEBERTRAGUNG AN DER BILDGRENZE.
+            //
+            // `wm.present` hat das Schmutzrechteck des ganzen Bildes
+            // angemeldet; HIER geht es hinaus, in EINEM
+            // `TRANSFER_TO_HOST_2D` und EINEM `RESOURCE_FLUSH`. Ohne
+            // Grafiktreiber ist die Zeile ein Nichts -- dann hat
+            // `wm.present` die Bildpunkte schon selbst kopiert.
+            //
+            // Die Stelle ist mit Bedacht NACH `wm.present` und nicht
+            // darin: `wm.fi` ist der Fensterserver und soll von
+            // Geraeten nichts wissen. Die Naht ist `gfx.fi`.
+            gfx.bild_fertig(state)
             wm.leser_tick(state)
             sched.sleep_ticks(state, 1)
         }
