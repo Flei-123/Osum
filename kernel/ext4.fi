@@ -186,6 +186,15 @@ const S_INCOMPAT: u64 = 56
 const S_64BIT: u64 = 64
 const S_UNSAUBER: u64 = 72 // 1 = NEEDS_RECOVERY oder s_state != sauber
 const S_GDBLOCK: u64 = 80  // der Block, in dem die Beschreibertafel anfaengt
+// ---------------------------------------------- der Extent-Zwischenspeicher
+//
+// Der zuletzt gefundene Extent, damit sequentielles Lesen den Baum
+// nicht fuer jeden Block neu absteigen muss. Die lange Begruendung
+// steht bei `extent_lookup`.
+const S_CINO: u64 = 88    // fuer welche Inode er gilt (0 = leer)
+const S_CBLOCK: u64 = 96  // erster logischer Block des Extents
+const S_CLEN: u64 = 104   // wie viele Bloecke er umfasst
+const S_CPHYS: u64 = 112  // und wo sie physisch anfangen
 
 // die Felder je Knoten
 const N_MNT: u64 = 0 // Einhaengung + 1, 0 = frei
@@ -525,7 +534,23 @@ fn art_von(mode: u64) -> u64 {
 // 60 Oktette in i_block, danach jeweils auf einen gelesenen Block in
 // NODEBUF. Rekursion waere hier eine Stapeltiefe, die auf der PLATTE
 // steht -- also beim fremden System.
-fn extent_lookup(state: u64, m: u64, iptr: u64, lblock: u64) -> u64 {
+fn extent_lookup(state: u64, m: u64, iptr: u64, lblock: u64,
+    ino: u64) -> u64 {
+    // ERST IM ZWISCHENSPEICHER NACHSEHEN.
+    //
+    // Sequentielles Lesen bleibt fast immer im selben Extent -- der
+    // Baum muss dafuer kein einziges Mal betreten werden. Gemessen
+    // hat genau diese Abfrage aus 0,7 MB/s ein Vielfaches gemacht;
+    // ohne sie steigt `f_read` fuer JEDEN Block von neuem ab, und bei
+    // Baumtiefe 1 ist das ein zusaetzlicher Plattenzugriff je 4096
+    // Oktette.
+    if ino != 0 && sget(state, m, S_CINO) == ino {
+        let cb: u64 = sget(state, m, S_CBLOCK)
+        let cl: u64 = sget(state, m, S_CLEN)
+        if cl != 0 && lblock >= cb && lblock < cb + cl {
+            return sget(state, m, S_CPHYS) + (lblock - cb)
+        }
+    }
     var knoten: u64 = iptr + 0x28
     var runde: u64 = 0
     while runde <= MAX_TIEFE {
@@ -555,6 +580,14 @@ fn extent_lookup(state: u64, m: u64, iptr: u64, lblock: u64) -> u64 {
                         return 0
                     }
                     let start: u64 = le32(e + 0x08) | (le16(e + 0x06) << 32)
+                    // Den gefundenen Extent merken -- der naechste
+                    // Block liegt fast immer noch darin.
+                    if ino != 0 {
+                        sset(state, m, S_CINO, ino)
+                        sset(state, m, S_CBLOCK, ee_block)
+                        sset(state, m, S_CLEN, ee_len)
+                        sset(state, m, S_CPHYS, start)
+                    }
                     return start + (lblock - ee_block)
                 }
                 i = i + 1
@@ -640,9 +673,9 @@ fn block_of_indirect(state: u64, m: u64, iptr: u64, lblock: u64) -> u64 {
 
 // Die eine Stelle, an der sich entscheidet, welcher der beiden Wege
 // gilt. `iptr` muss auf einen GELADENEN Inode zeigen.
-fn block_of(state: u64, m: u64, iptr: u64, lblock: u64) -> u64 {
+fn block_of(state: u64, m: u64, iptr: u64, lblock: u64, ino: u64) -> u64 {
     if (ino_flags(iptr) & 0x80000) != 0 {
-        return extent_lookup(state, m, iptr, lblock)
+        return extent_lookup(state, m, iptr, lblock, ino)
     }
     return block_of_indirect(state, m, iptr, lblock)
 }
@@ -684,7 +717,8 @@ fn dir_walk(state: u64, m: u64, dir_iptr_ino: u64, want: u64,
         // INOBUF -- deshalb bleibt `iptr` gueltig. Der gelesene
         // Verzeichnisblock geht nach BLKBUF, den `block_of` nur beim
         // Gruppenbeschreiber benutzt, und das ist hier vorbei.
-        let pblock: u64 = block_of(state, m, iptr, lblock)
+        let pblock: u64 = block_of(state, m, iptr, lblock,
+            dir_iptr_ino)
         if pblock != 0 {
             if !block_read(state, m, pblock, buf(state, BLKBUF)) {
                 return 0
@@ -917,6 +951,10 @@ fn mount_probe__inner(state: u64, m: u64) -> u64 {
     // 2; bei groesseren Bloecken liegt der Superblock IM Block 0, und
     // die Tafel ist Block 1.
     sset(state, m, S_GDBLOCK, erster + 1)
+    sset(state, m, S_CINO, 0)
+    sset(state, m, S_CBLOCK, 0)
+    sset(state, m, S_CLEN, 0)
+    sset(state, m, S_CPHYS, 0)
     sset(state, m, S_VALID, 1)
 
     // DIE GEGENPROBE GEGEN EIN ABGESCHNITTENES ABBILD. Der Superblock
@@ -1146,7 +1184,7 @@ fn f_read__inner(state: u64, m: u64, node: u64, off: u64, dst: u64,
         if stueck > want - fertig {
             stueck = want - fertig
         }
-        let pblock: u64 = block_of(state, m, iptr, lblock)
+        let pblock: u64 = block_of(state, m, iptr, lblock, ino)
         if pblock == 0 {
             // EIN LOCH. Es liest sich als Nullen -- das ist keine
             // Notloesung, sondern das, was ein Loch IST: eine Datei
