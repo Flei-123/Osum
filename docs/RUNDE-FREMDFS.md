@@ -50,6 +50,9 @@ Abschnitt 6.
 | `tools/fremdfs/run.sh` | ~550 | die Abnahme: 110 Zusagen |
 | `tools/fremdfs/tempo.sh` | ~130 | die Zeitmessung gegen OFS |
 | `tools/fremdfs/einzeln.sh` | ~85 | ein einzelner Lauf zum Nachsehen |
+| `kernel/ext4-aus.fi` | ~115 | die Leerfassung für `--ohne-ext4` |
+| `kernel/ntfs-aus.fi` | ~110 | die Leerfassung für `--ohne-ntfs` |
+| `tools/fremdfs/bild-explorer.sh` | ~120 | die Bilder vom Dateimanager |
 
 Angebunden wie FAT32: `kernel/vfsops.fi` (`FS_EXT4`, `FS_NTFS`),
 `kernel/vfs.fi` (`ops_of`, `mount_at`, `umount_index`), `kernel/sys.fi`
@@ -291,7 +294,111 @@ auch `readlink` zuerst die Einhängetafel.
 
 ---
 
-## 8. Offene Punkte
+## 8. Abschaltbar, einzeln — und was jedes kostet
+
+Justins Zusatzvorgabe vom 14.09.2026: die zwei Dateisysteme sollen sich
+**einzeln** aus dem Abbild nehmen lassen, das System muss ohne sie
+unverändert laufen, ein Einhängeversuch muss einen klaren Fehler geben
+statt zu hängen — und der Standardzustand ist zu **begründen**, mit
+Zahlen statt Gefühl.
+
+### 8.1 Wie
+
+Kein Schalter zur Laufzeit, kein `#ifdef`, kein ladbares Modul,
+sondern der Griff, den dieser Baum für so etwas schon hat: eine
+**Leerfassung** tritt an die Stelle des Treibers, und danach steht im
+Baum, aus dem der Übersetzer liest, keine Zeile des Dateisystems mehr.
+Genau so arbeiten `wg-aus.fi` (Tunnel), `gfx-aus.fi` (die GUI-lose
+Fassung) und `ps2m-aus.fi` (Zeigegerät).
+
+```sh
+./tools/build-kernel.sh abbild.mb --ohne-ext4      # nur NTFS
+./tools/build-kernel.sh abbild.mb --ohne-ntfs      # nur ext4
+./tools/build-kernel.sh abbild.mb --ohne-fremdfs   # keins von beiden
+```
+
+Auch über die Umgebung (`OSUM_EXT4=off`, `OSUM_NTFS=off`). Die
+Schlusszeile des Baus sagt, was drin ist:
+
+```
+abbild.mb (5253636 Oktette, Stufe 0, gui=on, …, ext4=an, ntfs=an)
+```
+
+**Warum kein ladbares Modul.** Dieser Kernel hat einen Modullader
+(`kernel/module.fi`), aber ein Dateisystemtreiber ist der falsche
+erste Kunde dafür: er wird **beim Einhängen** gebraucht, und das kann
+der Fall sein, bevor eine Platte da ist, von der man nachladen könnte —
+beim Installieren aus dem Netz oder bei einer Wurzel, die selbst auf dem
+fremden Dateisystem liegt. Eine Bauoption hat diese Reihenfolgefrage
+nicht. Sie nimmt den Treiber **vollständig** heraus, statt ihn zur
+Laufzeit schlafen zu legen, und das ist genau das, was die Vorgabe
+verlangt („aus dem Abbild nehmen").
+
+`kernel/ext4-aus.fi` und `kernel/ntfs-aus.fi` exportieren **dieselben**
+Namen und dieselbe `ops`-Tafel mit leeren Rümpfen; `mask` ist **0**, und
+`mount_probe` gibt **0** zurück. `vfs.mount_at` nimmt die Einhängung
+daraufhin zurück, und `mount` antwortet **-ENODEV** — „Dateisystem nicht
+unterstützt", sofort, ohne einen einzigen Lesezugriff auf die Platte.
+
+### 8.2 Was es kostet — gemessen
+
+Vier Abbilder, derselbe Übersetzer, dieselben Optionen:
+
+| Abbild | Oktette | Unterschied |
+|---|---:|---:|
+| voll (Standard) | 5 253 636 | — |
+| `--ohne-ext4` | 5 203 236 | **−50 400** (49,2 KiB) |
+| `--ohne-ntfs` | 5 189 928 | **−63 708** (62,2 KiB) |
+| `--ohne-fremdfs` | 5 143 620 | **−110 016** (107,4 KiB) |
+
+Ohne die Symboltafel (`--ohne-symbole`), also das reine Programm:
+
+| Abbild | Oktette | Unterschied |
+|---|---:|---:|
+| voll | 4 504 068 | — |
+| `--ohne-fremdfs` | 4 406 340 | **−97 728** (95,4 KiB) |
+
+**Beide zusammen sind 2,1 % des Abbilds.** NTFS kostet mehr als ext4,
+obwohl beide etwa gleich lang sind — die Fixup-Rechnung, die
+Datenlauf-Entzifferung und die UTF-16-Wandlung erzeugen mehr Code als
+die Extent-Suche.
+
+**Was es beim START kostet: nichts Messbares.** Die zwei Treiber haben
+keine `init`-Funktion und stehen in keiner Startreihenfolge; sie werden
+zum ersten Mal angefasst, wenn jemand `mount` mit ihrer Art aufruft.
+Ihre `kdata`-Seiten (je drei) sind Adressen in einem Bereich, der
+ohnehin reserviert ist — sie werden nicht angelegt, sondern liegen da.
+Was die Abnahme davon prüft: das Abbild ohne beide kommt hoch und
+arbeitet auf der eigenen Platte unverändert weiter (Abschnitt 7b).
+
+### 8.3 Der Standard: **an**
+
+Justins Vorgabe war „an, wenn der Platzkostenpunkt vertretbar ist; die
+gemessene Größe entscheidet". Die gemessene Größe ist **107,4 KiB von
+5,25 MB**, also **2,1 %** — und dafür gibt es die eine Sache, wegen der
+diese Runde überhaupt stattfand: wer nach einer Dual-Boot-Installation
+seine alten Dateien sucht, findet sie. Ein Zweitsystem, das dafür erst
+neu gebaut werden müsste, wäre genau dann nutzlos, wenn man es braucht.
+
+**Also: beide im Standardabbild AN.**
+
+Wo das anders ist, und wo die Schalter deshalb hingehören:
+
+- **Ein Server** (`--gui off`) hat weder Windows noch ein Linux neben
+  sich; `--ohne-fremdfs` spart dort 107 KiB, die niemand vermisst.
+- **Ein Abbild für einen Rechner mit nur einem System** — dasselbe.
+- **Ein eingebettetes Ziel**, auf dem jedes KiB zählt.
+
+Die Abnahme misst beide Richtungen: dass die Schalter wirklich etwas
+ausbauen (das Abbild **muss** kleiner werden), dass sie **einzeln**
+wirken (ohne ext4 geht NTFS weiter und umgekehrt), dass der
+abgeschaltete Treiber sich mit **keiner Zeile** meldet, und dass ein
+Einhängeversuch sauber scheitert statt zu hängen (Beendigungscode 21,
+nicht das Zeitlimit).
+
+---
+
+## 9. Offene Punkte
 
 - **Schreiben.** Beide nur lesend. Siehe Abschnitt 6.
 - **Die Geschwindigkeit.** `f_read` lädt für jeden Block den Inode bzw.
@@ -311,11 +418,29 @@ auch `readlink` zuerst die Einhängetafel.
 
 ---
 
-## 9. Nachfahren
+## 10. Das Bild
+
+`docs/bilder/fremdfs-ext4-2-fremd.png` zeigt den Dateimanager mit der
+**ext4-Partition** unter `/mnt`: `gross.bin`, `leer.bin`, `mittel.bin`,
+`hallo.txt`, `umlaut-äöü.txt` mit den Umlauten an der richtigen Stelle,
+die Verzeichnisse `a/` und `viele/`, dazu die beiden Verweise. In der
+Seitenleiste steht die fremde Platte als eigener Träger, und der
+Kernel hat sie als `ro=1` gemeldet — nur lesend, so wie eingehängt.
+
+Daneben: `-3-viele.png` (das Verzeichnis mit 512 Einträgen, htree) und
+`-4-tief.png` (`/mnt/a/b/c/d`, vier Ebenen tief). Erzeugt mit
+
+```sh
+bash tools/fremdfs/bild-explorer.sh ext4 /tmp/bild
+```
+
+---
+
+## 11. Nachfahren
 
 ```sh
 git checkout fremdfs
-bash tools/fremdfs/run.sh        # 110 Zusagen, baut alles selbst
+bash tools/fremdfs/run.sh        # alle Zusagen, baut alles selbst
 bash tools/fremdfs/tempo.sh      # die Zeit gegen OFS
 bash tools/check-ui.sh           # bleibt grün
 ```
@@ -327,6 +452,14 @@ dass hinterher aufgeräumt wird:
 bash tools/fremdfs/bild.sh /tmp/bild
 bash tools/fremdfs/einzeln.sh ext4 /tmp/bild/ext4.img
 bash tools/fremdfs/einzeln.sh ntfs /tmp/bild/ntfs.img 'mount /dev/hdb1 /mnt ntfs -r;ls /mnt'
+```
+
+Die Abschaltbarkeit einzeln nachbauen:
+
+```sh
+./tools/build-kernel.sh /tmp/voll.mb  --stufe 0
+./tools/build-kernel.sh /tmp/ohne.mb  --stufe 0 --ohne-fremdfs
+stat -c%s /tmp/voll.mb /tmp/ohne.mb
 ```
 
 **Ein Hinweis zum Wirt:** `bild.sh` schreibt mit `debugfs` und

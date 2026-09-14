@@ -259,8 +259,17 @@ partitionieren() { # quelle ziel typ
     local quelle=$1 ziel=$2 typ=$3
     local groesse
     groesse=$(stat -c %s "$quelle")
-    dd if=/dev/zero of="$ziel" bs=1M count=$(( groesse / 1048576 + 2 )) \
-        status=none
+    # MIT LOECHERN. `dd if=/dev/zero` belegt die volle Groesse wirklich;
+    # bei einem Dutzend Abbildern ist das knapp ein Gigaoktett, und
+    # genau daran ist dieser Lauf schon einmal gescheitert.
+    rm -f "$ziel"
+    python3 - "$ziel" $(( groesse / 1048576 + 2 )) <<'PYEOF'
+import sys
+ziel, mib = sys.argv[1], int(sys.argv[2])
+with open(ziel, 'wb') as f:
+    f.seek(mib * 1048576 - 1)
+    f.write(b'\0')
+PYEOF
     printf 'label: dos\nstart=2048, type=%s\n' "$typ" \
         | sfdisk "$ziel" >/dev/null 2>&1 || return 1
     dd if="$quelle" of="$ziel" bs=512 seek=2048 conv=notrunc status=none
@@ -271,10 +280,10 @@ partitionieren() { # quelle ziel typ
 
 lauf() { # name wurzel zweite kommandozeile [zeitlimit]
     local name=$1 root=$2 second=$3 app=$4 t=${5:-300}
-    cp "$root" "$TMPD/live-$name.img"
+    cp --sparse=always "$root" "$TMPD/live-$name.img"
     local drives=(-drive "file=$TMPD/live-$name.img,format=raw,if=ide,index=0")
     if [ -n "$second" ]; then
-        cp "$second" "$TMPD/live2-$name.img"
+        cp --sparse=always "$second" "$TMPD/live2-$name.img"
         drives+=(-drive "file=$TMPD/live2-$name.img,format=raw,if=ide,index=1")
     fi
     timeout "$t" $QEMU_X86 -cpu host -kernel "$TMPD/k0.mb" -m 512 \
@@ -288,10 +297,10 @@ lauf() { # name wurzel zweite kommandozeile [zeitlimit]
 if [ "$OSUM_QEMU_ACCEL" != kvm ]; then
     lauf() {
         local name=$1 root=$2 second=$3 app=$4 t=${5:-300}
-        cp "$root" "$TMPD/live-$name.img"
+        cp --sparse=always "$root" "$TMPD/live-$name.img"
         local drives=(-drive "file=$TMPD/live-$name.img,format=raw,if=ide,index=0")
         if [ -n "$second" ]; then
-            cp "$second" "$TMPD/live2-$name.img"
+            cp --sparse=always "$second" "$TMPD/live2-$name.img"
             drives+=(-drive "file=$TMPD/live2-$name.img,format=raw,if=ide,index=1")
         fi
         timeout "$t" $QEMU_X86 -kernel "$TMPD/k0.mb" -m 512 -append "$app" \
@@ -580,10 +589,10 @@ grep -qa 'ext4=an, ntfs=an' "$TMPD/v-voll.log" \
 # ein Einhaengeversuch muss SOFORT scheitern -- nicht haengen.
 lauf_mit() { # name kernel zweite kommandozeile
     local name=$1 kern=$2 second=$3 app=$4
-    cp "$TMPD/root.img" "$TMPD/live-$name.img"
+    cp --sparse=always "$TMPD/root.img" "$TMPD/live-$name.img"
     local drives=(-drive "file=$TMPD/live-$name.img,format=raw,if=ide,index=0")
     if [ -n "$second" ]; then
-        cp "$second" "$TMPD/live2-$name.img"
+        cp --sparse=always "$second" "$TMPD/live2-$name.img"
         drives+=(-drive "file=$TMPD/live2-$name.img,format=raw,if=ide,index=1")
     fi
     local acc=""
@@ -642,6 +651,12 @@ if [ "${gr_ob:-0}" -gt 1000000 ]; then
     sagt "$TMPD/nur-ext4.txt" mount 1 \
         "[ohne-ntfs] ext4 geht weiterhin"
 fi
+
+# Die Abbilder dieses Abschnitts sind gemessen und gelaufen; sie
+# belegen zusammen gut 20 MB und werden nicht mehr gebraucht.
+rm -f "$TMPD"/v-*.mb "$TMPD"/v-*.mb.elf "$TMPD"/live-ohne-*.img \
+      "$TMPD"/live2-ohne-*.img "$TMPD"/live-nur-*.img \
+      "$TMPD"/live2-nur-*.img 2>/dev/null
 
 # ------------------------------------------------- 8. die Lesegeschwindigkeit
 
