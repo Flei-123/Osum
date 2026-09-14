@@ -328,6 +328,16 @@ gui() { # name extra drehbuch
     # Mitschnitt steht dann `launcher: treffer` statt `edit:
     # ready`. tools/hidpunkte, tools/hidweg, tools/loader und
     # tools/tiling setzen es aus demselben Grund.
+    #
+    # NICHT `wmdauer` DAZU -- GEMESSEN UND VERWORFEN. Es nimmt dem
+    # Schreibtisch die Rundengrenze UND startet die Shell neu,
+    # sobald sie endet. Hier endet sie aber sofort wieder (die
+    # Konsole ist leer, es wird ja ueber den Monitor getippt), und
+    # das ergab eine Endlosschleife: `elf: start 2295`,
+    # 2410-mal `sh: ready` in einem Lauf, 830 KB Mitschnitt, und
+    # `wm: hold` kam nie -- der Lauf haing, bis er abgebrochen
+    # wurde. hidpunkte/hidweg/loader setzen `wmdauer` deshalb OHNE
+    # `wmhold`; dieser Laeufer braucht `wmhold` fuer die Fotos.
     timeout 320 $QEMU -kernel "$TMPD/k.mb" -m 512 \
         -append "gfx fbres=1024x768 wm wig desk wmshell wmhold wighalt=300 nokbd nosched noproc nofs $extra" \
         -serial "file:$TMPD/$name.txt" -display none -no-reboot \
