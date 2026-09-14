@@ -466,7 +466,7 @@ sagt "$TMPD/kaputt.txt" mount 0 \
 hat "$TMPD/kaputt.txt" "ext4: nicht ext4 (1" \
     "[kaputt] und der Treiber sagt WARUM (Grund 1: keine Magie)"
 
-# 7b. Ein FAT32 darf NICHT als ext4 durchgehen. Das ist die Probe
+# 7c. Ein FAT32 darf NICHT als ext4 durchgehen. Das ist die Probe
 #     darauf, dass die Erkennung wirklich prueft und nicht nur hofft.
 partitionieren "$BILD/fat-als-ext4.img" "$TMPD/fat-part.img" 83 >/dev/null
 rc=$(lauf fatext "$TMPD/root.img" "$TMPD/fat-part.img" \
@@ -513,6 +513,135 @@ sagt "$TMPD/schmutz.txt" mount 1 \
     "[unsauber] ein unsauber ausgehaengtes ext4 wird NUR LESEND eingehaengt"
 hat "$TMPD/schmutz.txt" "ext4: WARNUNG unsauber ausgehaengt" \
     "[unsauber] und der Treiber WARNT im Klartext"
+
+# ------------------------------------------------- 7b. DIE ABSCHALTBARKEIT
+#
+# Justins Zusatzvorgabe vom 14.09.2026: die zwei Dateisysteme muessen
+# sich EINZELN aus dem Abbild nehmen lassen, das System muss ohne sie
+# unveraendert laufen, und ein Einhaengeversuch muss einen klaren
+# Fehler geben statt zu haengen.
+#
+# Gemessen wird das hier an vier Abbildern -- voll, ohne ext4, ohne
+# NTFS, ohne beide -- und an einem LAUF mit dem Abbild ohne beide.
+
+echo "== 7b. die Abschaltbarkeit (--ohne-ext4 / --ohne-ntfs) =="
+
+baue_variante() { # name optionen...
+    local name=$1; shift
+    if bash tools/build-kernel.sh "$TMPD/v-$name.mb" --stufe 0 "$@" \
+        > "$TMPD/v-$name.log" 2>&1; then
+        stat -c%s "$TMPD/v-$name.mb"
+    else
+        echo 0
+    fi
+}
+
+gr_voll=$(baue_variante voll)
+gr_oe=$(baue_variante ohne-ext4 --ohne-ext4)
+gr_on=$(baue_variante ohne-ntfs --ohne-ntfs)
+gr_ob=$(baue_variante ohne-beide --ohne-fremdfs)
+
+num "das volle Abbild ist gebaut" "${gr_voll:-0}" gt 1000000
+num "das Abbild ohne ext4 ist gebaut" "${gr_oe:-0}" gt 1000000
+num "das Abbild ohne NTFS ist gebaut" "${gr_on:-0}" gt 1000000
+num "das Abbild ohne beide ist gebaut" "${gr_ob:-0}" gt 1000000
+
+# JEDES ABSCHALTEN MUSS DAS ABBILD WIRKLICH KLEINER MACHEN. Eine
+# Bauoption, die nichts spart, hat nichts ausgebaut -- dann stuende der
+# Treiber noch drin und die Zusage waere eine Behauptung.
+if [ "${gr_oe:-0}" -lt "${gr_voll:-0}" ] 2>/dev/null; then
+    ok "--ohne-ext4 spart $(( gr_voll - gr_oe )) Oktette ($(( (gr_voll - gr_oe) / 1024 )) KiB)"
+else
+    bad "--ohne-ext4 macht das Abbild NICHT kleiner"
+fi
+if [ "${gr_on:-0}" -lt "${gr_voll:-0}" ] 2>/dev/null; then
+    ok "--ohne-ntfs spart $(( gr_voll - gr_on )) Oktette ($(( (gr_voll - gr_on) / 1024 )) KiB)"
+else
+    bad "--ohne-ntfs macht das Abbild NICHT kleiner"
+fi
+if [ "${gr_ob:-0}" -lt "${gr_oe:-0}" ] && [ "${gr_ob:-0}" -lt "${gr_on:-0}" ] 2>/dev/null; then
+    ok "--ohne-fremdfs spart $(( gr_voll - gr_ob )) Oktette ($(( (gr_voll - gr_ob) / 1024 )) KiB), mehr als jedes einzeln"
+else
+    bad "--ohne-fremdfs spart nicht mehr als die Einzelschalter"
+fi
+printf 'voll %s\nohne-ext4 %s\nohne-ntfs %s\nohne-beide %s\n' \
+    "$gr_voll" "$gr_oe" "$gr_on" "$gr_ob" > "$TMPD/groessen.txt"
+
+# DIE ZEILE, DIE ES SAGT. Wer ein Abbild in der Hand hat, muss ihm
+# ansehen koennen, was darin ist.
+grep -qa 'ext4=aus, ntfs=aus' "$TMPD/v-ohne-beide.log" \
+    && ok "der Bau meldet 'ext4=aus, ntfs=aus'" \
+    || bad "der Bau sagt nicht, dass die zwei fehlen"
+grep -qa 'ext4=an, ntfs=an' "$TMPD/v-voll.log" \
+    && ok "und beim vollen Bau 'ext4=an, ntfs=an'" \
+    || bad "der volle Bau sagt es nicht"
+
+# DER LAUF OHNE BEIDE. Das System muss unveraendert hochkommen, und
+# ein Einhaengeversuch muss SOFORT scheitern -- nicht haengen.
+lauf_mit() { # name kernel zweite kommandozeile
+    local name=$1 kern=$2 second=$3 app=$4
+    cp "$TMPD/root.img" "$TMPD/live-$name.img"
+    local drives=(-drive "file=$TMPD/live-$name.img,format=raw,if=ide,index=0")
+    if [ -n "$second" ]; then
+        cp "$second" "$TMPD/live2-$name.img"
+        drives+=(-drive "file=$TMPD/live2-$name.img,format=raw,if=ide,index=1")
+    fi
+    local acc=""
+    [ "$OSUM_QEMU_ACCEL" = kvm ] && acc="-cpu host"
+    timeout 300 $QEMU_X86 $acc -kernel "$kern" -m 512 -append "$app" \
+        -serial "file:$TMPD/$name.txt" -display none -no-reboot \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+        "${drives[@]}" > /dev/null 2>&1
+    echo $?
+}
+
+if [ "${gr_ob:-0}" -gt 1000000 ]; then
+    rc=$(lauf_mit ohne-e4 "$TMPD/v-ohne-beide.mb" "$TMPD/ext4-part.img" \
+        "osum nokbd vfs script=fremdfs ext4 /dev/hdb1 /mnt")
+    num "[ohne-beide] der Kernel beendet sich selbst statt zu haengen" "$rc" eq 21
+    sagt "$TMPD/ohne-e4.txt" mount 0 \
+        "[ohne-beide] ein ext4 wird ABGELEHNT (Dateisystem nicht unterstuetzt)"
+    # UND ZWAR OHNE EINEN EINZIGEN VERSUCH, DIE PLATTE ZU LESEN: die
+    # Leerfassung meldet gar nichts. Steht hier trotzdem eine Zeile des
+    # Treibers, ist er doch mit im Abbild.
+    if grep -qa '^ext4: ' "$TMPD/ohne-e4.txt"; then
+        bad "[ohne-beide] der ext4-Treiber meldet sich -- er ist noch im Abbild"
+    else
+        ok "[ohne-beide] der ext4-Treiber meldet sich mit keiner Zeile"
+    fi
+
+    rc=$(lauf_mit ohne-nt "$TMPD/v-ohne-beide.mb" "$TMPD/ntfs-part.img" \
+        "osum nokbd vfs script=fremdfs ntfs /dev/hdb1 /mnt")
+    num "[ohne-beide] derselbe Lauf mit NTFS beendet sich selbst" "$rc" eq 21
+    sagt "$TMPD/ohne-nt.txt" mount 0 \
+        "[ohne-beide] ein NTFS wird ABGELEHNT"
+    if grep -qa '^ntfs: ' "$TMPD/ohne-nt.txt"; then
+        bad "[ohne-beide] der NTFS-Treiber meldet sich -- er ist noch im Abbild"
+    else
+        ok "[ohne-beide] der NTFS-Treiber meldet sich mit keiner Zeile"
+    fi
+
+    # DAS SYSTEM LAEUFT UNVERAENDERT. Dieselbe Arbeit auf der eigenen
+    # Wurzelplatte, mit dem Abbild ohne die zwei Treiber -- sie muss
+    # genauso durchgehen wie mit ihnen.
+    rc=$(lauf_mit ohne-ofs "$TMPD/v-ohne-beide.mb" "" \
+        "osum nokbd vfs script=ls /bin;echo fertig-ohne")
+    num "[ohne-beide] das System kommt ohne die zwei Treiber hoch" "$rc" eq 21
+    hat "$TMPD/ohne-ofs.txt" "fertig-ohne" \
+        "[ohne-beide] und arbeitet auf der eigenen Platte unveraendert weiter"
+
+    # EINZELN: mit --ohne-ext4 muss NTFS noch gehen.
+    rc=$(lauf_mit nur-ntfs "$TMPD/v-ohne-ext4.mb" "$TMPD/ntfs-part.img" \
+        "osum nokbd vfs script=fremdfs ntfs /dev/hdb1 /mnt")
+    num "[ohne-ext4] der Lauf beendet sich selbst" "$rc" eq 21
+    sagt "$TMPD/nur-ntfs.txt" mount 1 \
+        "[ohne-ext4] NTFS geht weiterhin -- die Schalter wirken EINZELN"
+    rc=$(lauf_mit nur-ext4 "$TMPD/v-ohne-ntfs.mb" "$TMPD/ext4-part.img" \
+        "osum nokbd vfs script=fremdfs ext4 /dev/hdb1 /mnt")
+    num "[ohne-ntfs] der Lauf beendet sich selbst" "$rc" eq 21
+    sagt "$TMPD/nur-ext4.txt" mount 1 \
+        "[ohne-ntfs] ext4 geht weiterhin"
+fi
 
 # ------------------------------------------------- 8. die Lesegeschwindigkeit
 
