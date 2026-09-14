@@ -245,8 +245,15 @@ schreibt. Gleiche Summe heisst: Oktett fuer Oktett dasselbe Bild.
 | p_sd | 176x144 | 8 | I+P | **8 / 8** | 147 ms | 54,42 |
 | p_bewegt | 176x144 | 8 | I+P | **8 / 8** | 165 ms | 48,48 |
 | p_skip | 128x96 | 6 | I+P | **6 / 6** | 31 ms | 193,54 |
-| **cif** | **352x288** | **10** | **I+P** | **10 / 10** | **313 ms** | **31,94** |
-| **slices** | **176x144** | **3** | **I, 4 Slices je Bild** | **3 / 3** | 34 ms | 88,23 |
+| **cif** | **352x288** | **10** | **I+P** | **10 / 10** | **179 ms** | **55,86** |
+| **slices** | **176x144** | **3** | **I, 4 Slices je Bild** | **3 / 3** | 27 ms | 111,11 |
+
+Die Zeiten schwanken mit der Last des Wirts (dieselbe Maschine baut
+mehrere Runden gleichzeitig); die Pruefsummen tun es nicht. Die
+CIF-Zahl lag ueber mehrere Laeufe zwischen **31,9 und 55,9 Bildern/s**
+-- unter Last das eine, frei das andere. Fuer die Aussage "reicht fuer
+fluessiges Video bei CIF" zaehlt der SCHLECHTESTE Wert, und auch der
+liegt ueber 25.
 
 **51 Bilder, 51 Pruefsummen, 51 Treffer. PSNR ist unendlich, die Zahl
 abweichender Bildpunkte ist null** -- beides, weil die Bilder identisch
@@ -259,10 +266,11 @@ Gemessen in QEMU mit KVM (AMD EPYC), Stufe-0-Uebersetzer, `-m 512`,
 mit der Uhr des Systems (`clock_gettime`, CLOCK_MONOTONIC) im Programm
 selbst -- also einschliesslich Dateilesen und Pruefsummenrechnen.
 
-* **CIF (352x288): 30,76 Bilder/s.** Das reicht fuer fluessiges Video
-  in dieser Aufloesung (25 B/s PAL, 30 B/s NTSC).
-* **QCIF (176x144): 43 bis 54 Bilder/s.**
-* Kleiner als das: 115 bis 194 Bilder/s.
+* **CIF (352x288): 31,9 bis 55,9 Bilder/s** (je nach Last des Wirts).
+  Auch der schlechteste Wert reicht fuer fluessiges Video in dieser
+  Aufloesung (25 B/s PAL, 30 B/s NTSC).
+* **QCIF (176x144): 57 bis 154 Bilder/s.**
+* Kleiner als das: bis 300 Bilder/s.
 
 **WAS DAS NICHT HEISST.** Der Dekodierer ist nicht auf Geschwindigkeit
 gebaut, sondern auf Richtigkeit, und man sieht es:
@@ -285,16 +293,17 @@ Begruendung steht in `h264.fi`: vier Bildspeicher, 6 MiB je Prozess).
 ### 5.2b Die Abnahme als Ganzes
 
     bash tools/codec/run.sh
-    == CODEC: 65 bestanden, 0 gescheitert ==
+    == CODEC: 71 bestanden, 0 gescheitert ==
 
-(Die Zahl gilt fuer den Lauf ohne den Strom `slices`; mit ihm kommen
-vier Punkte dazu.)
+Darin enthalten: 51 bitgleiche Bilder aus 10 Stroemen, 35 abgewiesene
+kaputte Stroeme, beide Uebersetzerstufen, die Speicherkarte samt
+Gegenprobe, die Tafelproben und check-ui.
 
 ### 5.3 Die Gegenproben
 
 | Fall | Zahl | Ergebnis |
 |---|---|---|
-| abgeschnittene Stroeme (1 % bis 89 %) | 10 | alle sauber abgewiesen, keiner haengt |
+| abgeschnittene Stroeme (1 % bis 89 %), aus ZWEI Quellen | 20 | alle sauber abgewiesen, keiner haengt |
 | verfaelschte Oktette (je 6 gekippte Bits) | 12 | alle sauber abgewiesen |
 | leer / Zufallsmuell / nur Startcode | 3 | alle sauber abgewiesen |
 | High Profile | 1 | abgewiesen, `err=2`, **0 Bilder** |
