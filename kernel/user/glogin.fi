@@ -1,0 +1,665 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/glogin.fi -- RUNDE ANMELDUNG: DER GRAFISCHE ANMELDESCHIRM.
+//
+//     glogin              den Schirm zeigen und den Schreibtisch starten
+//     glogin -s           sagen, was er vorfindet (fuer die Abnahme)
+//
+// ================================================ WAS ER IST
+//
+// Das Gegenstueck zu `login.fi` fuer den Schirm. `login.fi` ist die
+// Anmeldung des TERMINALS: es fragt auf Kanal 0, legt die Rechte ab und
+// WIRD die Shell. Dieses Programm ist die Anmeldung der OBERFLAECHE: es
+// fragt in einem Fenster, und was danach kommt, ist kein `execve` auf
+// eine Shell, sondern der Schreibtisch -- ein anderes Programm, das
+// weiterlebt, wenn dieses hier endet.
+//
+// WAS ER MIT `login.fi` TEILT, und das ist Absicht: die PRUEFUNG. Beide
+// rufen `pw.shadow_of` und `pw.check_hash` -- dieselbe Datei, dasselbe
+// PBKDF2, dieselbe Rundenzahl. Ein zweiter Vergleich waere ein zweiter
+// Ort, an dem er falsch sein kann. Was hier steht, ist das FENSTER und
+// die Reihenfolge, in der die Rechte abgelegt werden.
+//
+// ================================================ DIE VERZOEGERUNG
+//
+// Sie ist dieselbe wie in `login.fi` und aus demselben Grund: sie
+// VERDOPPELT sich, sie zaehlt ueber die ganze Lebensdauer des
+// Programms (nicht je Name -- wer nach zwei Fehlversuchen einen
+// anderen Namen probiert, faengt nicht von vorn an), und sie kommt VOR
+// der Meldung. Was zuerst kommt, ist an der Zeit zu sehen.
+//
+// WAS HIER ANDERS IST ALS AUF DEM TERMINAL: das Fenster darf waehrend
+// der Wartezeit nicht einfrieren, sonst ist es von einem Absturz nicht
+// zu unterscheiden. Also wird in Scheiben geschlafen und dazwischen
+// gemalt -- die Zahl, die der Mensch sieht, zaehlt herunter.
+//
+// ================================================ DER UNBEKANNTE NAME
+//
+// Er wird TROTZDEM geprueft, gegen einen Scheineintrag mit derselben
+// Rundenzahl (`pw.KOSTEN`). Sonst waere an der Antwortzeit zu sehen,
+// welche Namen es gibt: ein unbekannter Name kaeme sofort zurueck, ein
+// bekannter erst nach der vollen Rundenzahl. Dieselbe Vorsichts-
+// massnahme wie in `login.fi`, mit derselben Begruendung.
+//
+// ================================================ WAS DANACH GESCHIEHT
+//
+// 1. `grp.initgroups` -- die Zusatzgruppen, VOR setgid/setuid, weil
+//    `setgroups` root vorbehalten ist.
+// 2. `setgid`, dann `setuid`. In dieser Reihenfolge: nach `setuid` ist
+//    dieser Prozess kein root mehr und duerfte sein eigenes `setgid`
+//    nicht mehr.
+// 3. `SYS_EXEC` auf /bin/desktop. Das Kind erbt die Kennung dieses
+//    Prozesses -- das ist die ganze Sache: der Schreibtisch laeuft
+//    unter dem Menschen, der sich angemeldet hat, und nicht als root.
+//
+// WARUM `SYS_EXEC` UND NICHT `execve`: der Schreibtisch soll WEITER-
+// leben, wenn dieser Schirm verschwindet, und dieses Programm will
+// danach seinen eigenen Rahmen abraeumen. `SYS_EXEC` (1001) ist der
+// Aufruf, mit dem auch die Taskleiste ihre Programme startet.
+
+profile app
+
+import ulib
+import libc.io
+import wlibc
+import wlib
+import pw
+import grp
+
+export { u_start }
+
+const SYS_SETUID: u64 = 105
+const SYS_SETGID: u64 = 106
+const SYS_GETUID: u64 = 102
+const CLOCK_MONOTONIC: u64 = 1
+const SYS_CLOCK_GETTIME: u64 = 228
+
+// Die Sperre des Kerns -- derselbe Aufruf, den `lock.fi` nimmt.
+// Der Anmeldeschirm benutzt sie aus genau EINEM Grund: solange er
+// steht, darf kein anderes Fenster eine Taste bekommen. Ohne das waere
+// er ein Vorhang, hinter dem die Tastatur weiter an den Schreibtisch
+// geht (falls einer laeuft).
+const SYS_SPERRE: u64 = 1870
+const OP_AN: u64 = 1
+const OP_OPEN: u64 = 2
+const OP_ICH: u64 = 4
+const OP_FAIL: u64 = 5
+// RUNDE ANMELDUNG: "diese Sitzung gehoert dem hier". Nur root darf es,
+// und dieser Prozess ist es genau bis zum `setuid` eine Zeile weiter.
+const OP_SITZUNG: u64 = 7
+
+static mut kenn: [u8; 128] = [0 as u8; 128]
+static mut nam: [u8; 64] = [0 as u8; 64]
+static mut haben: [u8; 192] = [0 as u8; 192]
+static mut kopf: [u8; 192] = [0 as u8; 192]
+static mut liste: [u8; 1024] = [0 as u8; 1024]
+
+static mut w_nam: u64 = 0
+static mut w_kenn: u64 = 0
+static mut w_kopf: u64 = 0
+static mut w_an: u64 = 0
+static mut w_ls: u64 = 0
+static mut w_win: u64 = 0
+static mut n_user: u64 = 0
+
+static mut fehler: u64 = 0
+static mut basis: u64 = 1000
+
+static mut T_TITEL: [u8; 10] = "Anmeldung\0"
+static mut T_APP: [u8; 7] = "glogin\0"
+static mut T_FRAGE: [u8; 39] = "Benutzer waehlen und Kennwort eingeben\0"
+static mut T_FALSCH: [u8; 32] = "Name oder Kennwort stimmt nicht\0"
+static mut T_WARTE: [u8; 31] = "Zu viele Fehlversuche -- warte\0"
+static mut T_AN: [u8; 9] = "Anmelden\0"
+static mut T_NAME: [u8; 9] = "Benutzer\0"
+static mut T_KENN: [u8; 9] = "Kennwort\0"
+static mut P_DESK: [u8; 13] = "/bin/desktop\0"
+
+// Der Messausgang steht im Normalbetrieb AUS -- dieselbe Regel wie in
+// desktop.fi und taskbar.fi. Fuer die Abnahme schaltet ihn
+// /etc/uitrace oder das Wort `debug` ein.
+static mut s_dbg: u64 = 0
+
+fn say(p: u64) {
+    if s_dbg != 0 {
+        ulib.say(p)
+    }
+}
+
+fn sayn(n: u64) {
+    if s_dbg != 0 {
+        ulib.sayn(n)
+    }
+}
+
+fn nl() {
+    if s_dbg != 0 {
+        ulib.nl()
+    }
+}
+
+// ------------------------------------------------- immer, auch ohne Schalter
+// Was die Abnahme braucht, steht IMMER auf der Leitung: unter welcher
+// Kennung der Schreibtisch startet, und ob eine Anmeldung gelungen ist.
+// Das sind vier Zeilen im ganzen Lauf und keine Messschleife.
+fn sag(p: u64) {
+    ulib.say(p)
+}
+
+fn sagn(n: u64) {
+    ulib.sayn(n)
+}
+
+fn sagnl() {
+    ulib.nl()
+}
+
+fn sy(op: u64, arg: u64) -> u64 {
+    return ulib.sys(SYS_SPERRE, op, arg, 0)
+}
+
+fn now_ms() -> u64 {
+    var ts: [u64; 2] = [0 as u64; 2]
+    if ulib.bad(ulib.sys(SYS_CLOCK_GETTIME, CLOCK_MONOTONIC,
+        (&ts[(0) as usize]) as u64, 0)) {
+        return 0
+    }
+    return ts[(0) as usize] * 1000 + ts[(1) as usize] / 1000000
+}
+
+// Die Wartezeit nach dem `n`-ten Fehlversuch, verdoppelnd, gedeckelt
+// bei einer Minute. Woertlich die Rechnung aus `login.fi` -- eine
+// zweite waere eine zweite Zahl.
+fn wartezeit(n: u64) -> u64 {
+    var ms: u64 = basis
+    var k: u64 = 1
+    while k < n {
+        ms = ms * 2
+        if ms > 60000 {
+            return 60000
+        }
+        k = k + 1
+    }
+    if ms > 60000 {
+        return 60000
+    }
+    return ms
+}
+
+// ============================================ DIE BENUTZERLISTE
+//
+// Sie kommt aus /etc/passwd und zeigt NICHT jeden Eintrag: Konten mit
+// einer Kennung unter 1000 sind Dienste und keine Menschen, und `root`
+// gehoert nicht auf einen Anmeldeschirm, den jeder sieht. Wer sich als
+// root anmelden will, tippt den Namen -- das Feld nimmt jeden an.
+//
+// WARUM root NICHT IN DER LISTE STEHT: eine Liste ist eine Einladung.
+// Der Name des Verwalters ist auf jedem Unix derselbe; ihn auch noch
+// anzubieten, spart einem Angreifer die Haelfte der Arbeit und dem
+// Menschen nichts.
+fn namen_laden() {
+    var zeile: [u8; 256] = [0 as u8; 256]
+    var f: [u8; 128] = [0 as u8; 128]
+    var nlc: [u8; 2] = "\n\0"
+    let b: u64 = (&liste[(0) as usize]) as u64
+    __mmio_write8(b as *mut u8, 0 as u8)
+    n_user = 0
+    let buf: u64 = pw.load_passwd()
+    if buf == ulib.EOF {
+        return
+    }
+    let cnt: u64 = pw.lines_of(pw.pwbuf_ptr())
+    var i: u64 = 0
+    var at: u64 = 0
+    while i < cnt {
+        if pw.line_at(pw.pwbuf_ptr(), i, (&zeile[(0) as usize]) as u64, 256)
+            != ulib.EOF {
+            if pw.field((&zeile[(0) as usize]) as u64, 0,
+                (&f[(0) as usize]) as u64, 128) {
+                var uid: u64 = 0
+                var g: [u8; 32] = [0 as u8; 32]
+                if pw.field((&zeile[(0) as usize]) as u64, 2,
+                    (&g[(0) as usize]) as u64, 32) {
+                    uid = ulib.to_num((&g[(0) as usize]) as u64)
+                }
+                if uid >= 1000 && at + 80 < 1000 {
+                    if n_user > 0 {
+                        at = at + ulib.strcpy((&liste[(at) as usize]) as u64,
+                            (&nlc[(0) as usize]) as u64)
+                    }
+                    at = at + ulib.strcpy((&liste[(at) as usize]) as u64,
+                        (&f[(0) as usize]) as u64)
+                    n_user = n_user + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Den Namen aus der Liste in das Namensfeld holen.
+fn aus_liste(z: u64) {
+    var zeile: [u8; 96] = [0 as u8; 96]
+    let b: u64 = (&liste[(0) as usize]) as u64
+    var i: u64 = 0
+    var at: u64 = 0
+    var start: u64 = 0
+    var gefunden: bool = false
+    while i <= z {
+        start = at
+        var k: u64 = 0
+        while __mmio_read8((b + at) as *mut u8) as u64 != 0 && __mmio_read8((b + at) as *mut u8) as u64 != 10 {
+            if k < 90 {
+                zeile[(k) as usize] = __mmio_read8((b + at) as *mut u8) as u64 as u8
+                k = k + 1
+            }
+            at = at + 1
+        }
+        zeile[(k) as usize] = 0 as u8
+        if i == z && k > 0 {
+            gefunden = true
+        }
+        if __mmio_read8((b + at) as *mut u8) as u64 == 10 {
+            at = at + 1
+        } else {
+            i = z + 1
+        }
+        i = i + 1
+    }
+    if gefunden {
+        ulib.strncpy((&nam[(0) as usize]) as u64,
+            (&zeile[(0) as usize]) as u64, 60)
+        wlib.set_text(w_nam, (&nam[(0) as usize]) as u64)
+    }
+}
+
+fn leeren() {
+    var i: u64 = 0
+    while i < 128 {
+        kenn[(i) as usize] = 0 as u8
+        i = i + 1
+    }
+    wlib.set_text(w_kenn, (&kenn[(0) as usize]) as u64)
+}
+
+// ============================================ DIE PRUEFUNG
+//
+// Sie steht in `pw.check_hash`. Was hier steht, ist nur die Frage, WEN
+// wir pruefen -- und die Vorsichtsmassnahme fuer den unbekannten Namen.
+fn stimmt() -> bool {
+    let n: u64 = (&nam[(0) as usize]) as u64
+    let uid: u64 = pw.uid_of_name(n)
+    if uid == ulib.EOF {
+        // DER UNBEKANNTE NAME WIRD TROTZDEM GEPRUEFT. Die Rundenzahl im
+        // Scheineintrag ist dieselbe, die `pw.KOSTEN` sagt -- stuende
+        // dort eine kleinere, waere ein unbekannter Name schneller
+        // abgewiesen als ein bekannter, und die Massnahme waere ihr
+        // eigenes Leck.
+        var dummy: [u8; 94] = "$osum1$8192$0000000000000000$0000000000000000000000000000000000000000000000000000000000000000\0"
+        let _x: bool = pw.check_hash((&dummy[(0) as usize]) as u64,
+            (&kenn[(0) as usize]) as u64)
+        return false
+    }
+    if !pw.shadow_of(n, (&haben[(0) as usize]) as u64, 180) {
+        // KEIN EINTRAG IN /etc/shadow HEISST: KEINE ANMELDUNG.
+        //
+        // Das ist die Stelle, an der ein bequemes System sich selbst
+        // aufmacht ("kein Kennwort gesetzt, dann eben ohne"). Genau das
+        // tut dieser Schirm NICHT: ein Konto ohne Kennwort ist ein
+        // Konto, an dem sich jeder anmeldet. Wer hereinkommen will,
+        // setzt vorher `passwd`.
+        return false
+    }
+    return pw.check_hash((&haben[(0) as usize]) as u64,
+        (&kenn[(0) as usize]) as u64)
+}
+
+// Die Wartezeit, waehrend das Fenster weiterlebt. In Scheiben von
+// 250 ms, und dazwischen wird gemalt -- ein Fenster, das drei Sekunden
+// nichts tut, sieht aus wie ein abgestuerztes.
+fn warten_sichtbar(ms: u64) {
+    var rest: u64 = ms
+    var num: [u8; 24] = [0 as u8; 24]
+    var s_s: [u8; 4] = " s\0\0"
+    let vorher: u64 = now_ms()
+    while rest > 0 {
+        ulib.strcpy((&kopf[(0) as usize]) as u64,
+            (&T_WARTE[(0) as usize]) as u64)
+        var at: u64 = ulib.length((&kopf[(0) as usize]) as u64)
+        kopf[(at) as usize] = 32 as u8
+        at = at + 1
+        ulib.digits((rest + 999) / 1000, (&num[(0) as usize]) as u64)
+        at = at + ulib.strcpy((&kopf[(at) as usize]) as u64,
+            (&num[(0) as usize]) as u64)
+        ulib.strcpy((&kopf[(at) as usize]) as u64, (&s_s[(0) as usize]) as u64)
+        wlib.set_text(w_kopf, (&kopf[(0) as usize]) as u64)
+        wlib.draw_all()
+        let _s: u64 = ulib.sleep_ms(250)
+        let _e: u64 = wlib.step()
+        if rest > 250 {
+            rest = rest - 250
+        } else {
+            rest = 0
+        }
+    }
+    let nachher: u64 = now_ms()
+    var echt: u64 = 0
+    if nachher > vorher {
+        echt = nachher - vorher
+    }
+    var s_g: [u8; 20] = "glogin: gewartet \0\0\0"
+    var s_ms: [u8; 4] = " ms\0"
+    sag((&s_g[(0) as usize]) as u64)
+    sagn(echt)
+    sag((&s_ms[(0) as usize]) as u64)
+    sagnl()
+}
+
+// ============================================ DIE RECHTE ABLEGEN
+//
+// Die Reihenfolge ist nicht beliebig, und sie ist dieselbe wie in
+// `login.fi`: Zusatzgruppen, Gruppe, Benutzer. `setgroups` und
+// `setgid` sind root vorbehalten; nach `setuid` ist dieser Prozess
+// keiner mehr und duerfte beides nicht mehr.
+fn rechte_ablegen() -> bool {
+    let n: u64 = (&nam[(0) as usize]) as u64
+    grp.initgroups(n)
+    let gid: u64 = pw.gid_of_name(n)
+    let uid: u64 = pw.uid_of_name(n)
+    if uid == ulib.EOF {
+        return false
+    }
+    // WEM DIE SITZUNG GEHOERT -- EINGETRAGEN, SOLANGE WIR NOCH ROOT
+    // SIND. Danach darf es dieser Prozess nicht mehr (op 7 ist der
+    // Wurzel vorbehalten), und das ist der Sinn der Reihenfolge: die
+    // Kennung wird EINMAL gesetzt, von dem Programm, das sie gerade
+    // geprueft hat, und ist danach nicht mehr umschreibbar.
+    //
+    // Daran haengt der Sperrbildschirm: er fragt `op 8` und prueft das
+    // Kennwort DIESES Menschen, nicht das von root.
+    let _sz: u64 = sy(OP_SITZUNG, uid)
+    let _g: u64 = ulib.sys(SYS_SETGID, gid, 0, 0)
+    if ulib.bad(ulib.sys(SYS_SETUID, uid, 0, 0)) {
+        var e: [u8; 30] = "glogin: setuid schlug fehl\0\0\0\0"
+        sag((&e[(0) as usize]) as u64)
+        sagnl()
+        return false
+    }
+    return true
+}
+
+// Den Schreibtisch starten -- UNTER DER KENNUNG, DIE GERADE ABGELEGT
+// WURDE. Das Kind erbt sie; das ist der ganze Zweck dieses Programms.
+fn desktop_starten() -> u64 {
+    var a_desk: [u8; 8] = "desktop\0"
+    var argv: [u64; 2] = [0 as u64; 2]
+    argv[(0) as usize] = (&a_desk[(0) as usize]) as u64
+    argv[(1) as usize] = 0
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC,
+        (&P_DESK[(0) as usize]) as u64, (&argv[(0) as usize]) as u64, 1)
+    var s_st: [u8; 24] = "glogin: desktop pid=\0\0\0\0"
+    sag((&s_st[(0) as usize]) as u64)
+    sagn(pid)
+    sagnl()
+    return pid
+}
+
+// Den Leerlauf-Waechter starten. Er liest /etc/sperre.conf selbst;
+// steht dort `leerlauf=0`, beendet er sich sofort und sagt das.
+fn wache_starten() -> u64 {
+    // EIN EIGENES PROGRAMM UND NICHT `lock -d`, und der Grund ist
+    // gemessen: `lock.fi` ist `profile app`, und ein Programm in
+    // diesem Profil bekommt seine Argumente NICHT (firnc setzt dort
+    // sein eigenes `_start` ein, das den Argumentblock des Kerns nicht
+    // weiterreicht). Eine Zeile in lock.fi sagte im Abbild
+    // `lock: argc gesehen 0` -- auch bei dem Sperrer, den der Kern mit
+    // argc=1 startet. `lock -d` ist damit seit Runde GRUNDLINIE
+    // unerreichbar; die Einzelheiten stehen in sperrwache.fi.
+    var p_w: [u8; 16] = "/bin/sperrwache\0"
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC,
+        (&p_w[(0) as usize]) as u64, 0, 0)
+    var s_w: [u8; 22] = "glogin: waechter pid=\0"
+    sag((&s_w[(0) as usize]) as u64)
+    sagn(pid)
+    sagnl()
+    return pid
+}
+
+fn versuchen() -> bool {
+    var s_ok: [u8; 26] = "glogin: angemeldet als \0\0\0"
+    var s_no: [u8; 28] = "glogin: abgewiesen, name=\0\0\0"
+    var s_uid: [u8; 14] = "glogin: uid=\0\0"
+    if !stimmt() {
+        fehler = fehler + 1
+        let _f: u64 = sy(OP_FAIL, 0)
+        leeren()
+        sag((&s_no[(0) as usize]) as u64)
+        sag((&nam[(0) as usize]) as u64)
+        sagnl()
+        // DIE VERZOEGERUNG KOMMT VOR DER MELDUNG -- was zuerst kommt,
+        // ist an der Zeit zu sehen.
+        let ms: u64 = wartezeit(fehler)
+        if ms > 0 {
+            warten_sichtbar(ms)
+        }
+        ulib.strcpy((&kopf[(0) as usize]) as u64,
+            (&T_FALSCH[(0) as usize]) as u64)
+        wlib.set_text(w_kopf, (&kopf[(0) as usize]) as u64)
+        wlib.draw_all()
+        return false
+    }
+    // ERST DIE SPERRE ABGEBEN, DANN DIE RECHTE ABLEGEN. Andersherum
+    // waere dieser Prozess nicht mehr root, wenn er sie abgeben will --
+    // und der Kern gibt sie nur dem, der sie genommen hat.
+    let _o: u64 = sy(OP_OPEN, 0)
+    sag((&s_ok[(0) as usize]) as u64)
+    sag((&nam[(0) as usize]) as u64)
+    sagnl()
+    if !rechte_ablegen() {
+        return false
+    }
+    let jetzt: u64 = ulib.sys(SYS_GETUID, 0, 0, 0)
+    sag((&s_uid[(0) as usize]) as u64)
+    sagn(jetzt)
+    sagnl()
+    let _p: u64 = desktop_starten()
+    // ============================================== DER LEERLAUF-WAECHTER
+    //
+    // `lock -d` sperrt nach der Zeit aus /etc/sperre.conf. Das Programm
+    // gibt es seit Runde ALLTAG, und es hat bis heute NIEMAND gestartet
+    // -- gemessen: kein `lock -d` im Kern, keines im Abbild, keines in
+    // einer inittab. Die Leerlaufsperre war damit gebaut und tot.
+    //
+    // HIER ist die richtige Stelle: der Waechter gehoert zu einer
+    // SITZUNG. Vor der Anmeldung gibt es nichts zu sperren, und nach
+    // dem Abmelden waere er ein Dienst ohne Sitzung.
+    //
+    // ER LAEUFT ALS ROOT, und das ist Absicht: er wird gestartet,
+    // BEVOR dieser Prozess seine Rechte ablegt. `lock` selbst muss
+    // ohnehin root sein (nur so darf der Kern es neu starten), und
+    // welchen Menschen er sperrt, sagt ihm SP_UID -- nicht seine
+    // eigene Kennung.
+    let _w: u64 = wache_starten()
+    // ============================================== DAS FENSTER GEHT ZU
+    //
+    // Ohne diese zwei Zeilen bleibt der Anmeldeschirm stehen, NACHDEM
+    // der Schreibtisch gestartet ist -- gemessen am Abnahmelauf vom
+    // 13.09.: `wm: fen i=4 id=11 ... lay=4` lag weiter auf der
+    // obersten Ebene ueber allem, und das Foto nach der richtigen
+    // Anmeldung zeigte immer noch die Kennwortfrage.
+    //
+    // `close` nimmt dem Fensterserver das Fenster ab, `quit` beendet
+    // die Ereignisschleife dieses Programms. Danach endet der Prozess,
+    // und der Kern raeumt ihn ab -- der Schreibtisch lebt weiter, weil
+    // er ein EIGENER Prozess ist (SYS_EXEC) und kein Kind, das am
+    // Leben dieses hier haengt.
+    wlib.close(w_win)
+    wlib.draw_all()
+    wlib.quit()
+    return true
+}
+
+fn dbg_setup(args: u64) {
+    var t: [u8; 13] = "/etc/uitrace\0"
+    var d: [u8; 6] = "debug\0"
+    let fd: u64 = io.open((&t[(0) as usize]) as u64, 0)
+    if !ulib.bad(fd) {
+        s_dbg = 1
+        io.close(fd)
+    }
+    var i: u64 = 1
+    while i < ulib.arg_count(args) {
+        if ulib.streq(ulib.arg_at(args, i), (&d[(0) as usize]) as u64) {
+            s_dbg = 1
+        }
+        i = i + 1
+    }
+}
+
+fn u_gui() -> u64 {
+    var s_bad: [u8; 22] = "glogin: keine Flaeche\0"
+    var s_go: [u8; 18] = "glogin: bereit n=\0"
+    if !wlib.begin(false, true) {
+        sag((&s_bad[(0) as usize]) as u64)
+        sagnl()
+        return 1
+    }
+    // ERST SPERREN, DANN MALEN -- dieselbe Reihenfolge wie im
+    // Sperrbildschirm. Andersherum gaebe es einen Augenblick, in dem
+    // die Kennwortfrage dasteht und die Tastatur noch woanders
+    // hingeht.
+    let _a: u64 = sy(OP_AN, 0)
+    let _i: u64 = sy(OP_ICH, 0)
+    namen_laden()
+
+    let bw: u64 = wlibc.screen_w()
+    let bh: u64 = wlibc.screen_h()
+    let w: u64 = wlib.window_plain(0, 0, bw, bh,
+        (&T_TITEL[(0) as usize]) as u64, wlibc.L_TOP)
+    if w >= wlib.MAXWN {
+        sag((&s_bad[(0) as usize]) as u64)
+        sagnl()
+        return 1
+    }
+    w_win = w
+    let _ap: u64 = wlib.window_app(w, (&T_APP[(0) as usize]) as u64)
+    let rand: u64 = wlib.inset()
+    let luft: u64 = wlib.inset() / 2
+    let breite: u64 = 460
+    let links: u64 = (bw - breite) / 2
+    var hoehe: u64 = 260
+    if n_user > 0 {
+        hoehe = hoehe + 110
+    }
+    let oben: u64 = (bh - hoehe) / 3
+
+    wlib.box_v(w, links, oben, breite, hoehe, rand, luft)
+    ulib.strcpy((&kopf[(0) as usize]) as u64, (&T_FRAGE[(0) as usize]) as u64)
+    w_kopf = wlib.label((&kopf[(0) as usize]) as u64)
+    if n_user > 0 {
+        wlib.size(breite - rand * 2, 0)
+        w_ls = wlib.list((&liste[(0) as usize]) as u64, 3)
+        wlib.list_einklick(w_ls, true)
+    }
+    let _l1: u64 = wlib.label((&T_NAME[(0) as usize]) as u64)
+    wlib.size(breite - rand * 2, 0)
+    w_nam = wlib.entry((&nam[(0) as usize]) as u64, 60)
+    let _l2: u64 = wlib.label((&T_KENN[(0) as usize]) as u64)
+    wlib.size(breite - rand * 2, 0)
+    w_kenn = wlib.entry((&kenn[(0) as usize]) as u64, 120)
+    // DAS KENNWORT STEHT NICHT AUF DEM SCHIRM.
+    wlib.entry_geheim(w_kenn, true)
+    wlib.size(160, 0)
+    w_an = wlib.button((&T_AN[(0) as usize]) as u64)
+    wlib.box_end()
+
+    // Steht genau ein Mensch in der Liste, ist sein Name schon da --
+    // dann fehlt nur noch das Kennwort, und der Fokus gehoert dorthin.
+    if n_user == 1 {
+        aus_liste(0)
+        wlib.set_focus(w_kenn)
+    } else {
+        wlib.set_focus(w_nam)
+    }
+
+    sag((&s_go[(0) as usize]) as u64)
+    sagn(n_user)
+    sagnl()
+    var s_nm: [u8; 7] = "glogin\0"
+    wlib.say_rects((&s_nm[(0) as usize]) as u64)
+    wlib.draw_all()
+
+    var fertig: bool = false
+    var runden: u64 = 0
+    while wlib.alive() && !fertig && runden < 40000000 {
+        runden = runden + 1
+        let id: u64 = wlib.step()
+        if id < wlib.MAXWD {
+            let kind: u64 = wlib.fired_kind()
+            if kind == wlib.K_LIST && id == w_ls {
+                aus_liste(wlib.value(w_ls))
+                wlib.set_focus(w_kenn)
+                wlib.draw_all()
+            } else if (kind == wlib.K_ENTRY && id == w_kenn)
+                || (kind == wlib.K_BUTTON && id == w_an) {
+                fertig = versuchen()
+            } else if kind == wlib.K_ENTRY && id == w_nam {
+                wlib.set_focus(w_kenn)
+                wlib.draw_all()
+            }
+        }
+    }
+    return 0
+}
+
+// Was er vorfindet -- fuer die Abnahme, ohne Fenster.
+fn u_say() -> u64 {
+    var s_n: [u8; 18] = "glogin: benutzer=\0"
+    var s_p: [u8; 10] = " passwd=\0\0"
+    var s_s: [u8; 10] = " shadow=\0\0"
+    var s_u: [u8; 7] = " uid=\0\0"
+    namen_laden()
+    ulib.say((&s_n[(0) as usize]) as u64)
+    ulib.sayn(n_user)
+    ulib.say((&s_p[(0) as usize]) as u64)
+    var pp: [u8; 12] = "/etc/passwd\0"
+    var ps: [u8; 12] = "/etc/shadow\0"
+    let f1: u64 = io.open((&pp[(0) as usize]) as u64, 0)
+    if ulib.bad(f1) {
+        ulib.sayn(0)
+    } else {
+        ulib.sayn(1)
+        io.close(f1)
+    }
+    ulib.say((&s_s[(0) as usize]) as u64)
+    let f2: u64 = io.open((&ps[(0) as usize]) as u64, 0)
+    if ulib.bad(f2) {
+        ulib.sayn(0)
+    } else {
+        ulib.sayn(1)
+        io.close(f2)
+    }
+    ulib.say((&s_u[(0) as usize]) as u64)
+    ulib.sayn(ulib.sys(SYS_GETUID, 0, 0, 0))
+    ulib.nl()
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_s: [u8; 3] = "-s\0"
+    dbg_setup(args)
+    var k_del: [u8; 17] = "verzoegerung_ms\0\0"
+    basis = pw.conf_num((&k_del[(0) as usize]) as u64, pw.VERZOEGERUNG_MS)
+    if ulib.arg_count(args) >= 2 {
+        if ulib.streq(ulib.arg_at(args, 1), (&s_s[(0) as usize]) as u64) {
+            return u_say()
+        }
+    }
+    return u_gui()
+}
+
+// Das `main`, das nie laeuft -- `user.ld` springt nach `u_start`. Das
+// Profil `app` verlangt es trotzdem; es ruft `u_start`, damit es nicht
+// luegt. Dieselben drei Zeilen wie in desktop.fi und lock.fi.
+fn main() -> i32 {
+    return u_start(0) as i32
+}

@@ -3178,8 +3178,50 @@ fn desk_start(state: u64) -> u64 {
     var a_dhcp: [u8; 11] = "dhcp\0dauer\0"
     // RUNDE MERGE-11: EIN Argument, der Helfer laeuft dauerhaft.
     var a_jv: [u8; 8] = "jarvisd\0"
-    var pid: u64 = desk_spawn(state, (&p_desk[0]) as u64,
-        (&a_desk[0]) as u64, 8)
+    // ================================================ RUNDE ANMELDUNG
+    //
+    // WER DEN SCHREIBTISCH STARTET, ENTSCHEIDET, UNTER WELCHER KENNUNG
+    // ER LAEUFT -- und das ist der ganze Befund P-002.
+    //
+    // Bis hierher stand hier EIN Aufruf: `/bin/desktop`, gestartet aus
+    // der Startaufgabe des Kerns. Ein Kind erbt uid und gid seines
+    // Erzeugers (`sched.fi`, T_UID/T_GID in `proc.create`), und die
+    // Startaufgabe ist uid 0. Also lief der Schreibtisch als root, und
+    // mit ihm die Taskleiste, der Starter und alles, was von dort
+    // gestartet wird. Wer den Deckel aufklappte, war Verwalter.
+    //
+    // MIT `anmeldung` STARTET HIER `/bin/glogin` STATTDESSEN. Der
+    // Anmeldeschirm fragt Namen und Kennwort, prueft gegen
+    // /etc/shadow (PBKDF2, `pw.check_hash` -- dieselbe Funktion, die
+    // `login` am Terminal nimmt), legt Zusatzgruppen, Gruppe und
+    // Kennung ab und startet DANN `/bin/desktop`. Der Schreibtisch ist
+    // von da an ein Kind des angemeldeten Menschen.
+    //
+    // DIE TASKLEISTE STARTET DER KERN WEITER SELBST, und das ist eine
+    // ehrliche Grenze dieser Runde: sie laeuft damit weiter als root.
+    // Warum sie nicht auch aus `glogin` kommt, steht in
+    // docs/RUNDE-ANMELDUNG.md Abschnitt 6 -- kurz: sie legt
+    // /etc/taskbar.conf an und liest /proc, und beides gehoert vor dem
+    // Umzug geprueft. Der Schreibtisch ist der Prozess, an dem der
+    // Mensch arbeitet; er ist der, der zuerst herunter musste.
+    var p_glog: [u8; 13] = "/bin/glogin\0\0"
+    var a_glog: [u8; 8] = "glogin\0\0"
+    var s_anm: [u8; 33] = "desk: anmeldung vor schreibtisch\0"
+    var s_root: [u8; 35] = "desk: OHNE anmeldung -- uid bleibt\0"
+    var anmelden: bool = kstate.mode_on(state, kstate.M_ANMELDUNG)
+        && !kstate.mode_on(state, kstate.M_NOANMELDUNG)
+    var pid: u64 = 0
+    if anmelden {
+        serial.puts((&s_anm[0]) as u64)
+        serial.nl()
+        pid = desk_spawn(state, (&p_glog[0]) as u64,
+            (&a_glog[0]) as u64, 8)
+    } else {
+        serial.puts((&s_root[0]) as u64)
+        serial.nl()
+        pid = desk_spawn(state, (&p_desk[0]) as u64,
+            (&a_desk[0]) as u64, 8)
+    }
     // Dem Schreibtisch Zeit geben, sein Fenster anzulegen und seine
     // Ebene zu setzen, BEVOR die Leiste kommt. Ohne das ist die
     // Reihenfolge in der Tafel eine Frage des Zufalls, und eine
@@ -3528,8 +3570,41 @@ fn k15_start(state: u64) -> u64 {
 // Fensterserver laesst nichts durch, wm.darf).
 static mut sp_takt: u64 = 0
 
+// RUNDE ANMELDUNG: DIE WACHE DARF SICH NICHT SELBST BETRETEN.
+//
+// GEMESSEN am Abnahmelauf vom 13.09.: nach EINEM Druck auf Super+L
+// standen ZWEI Sperrer im Bericht --
+//
+//     desk: start /bin/lock  pid=7 ... sperre: Sperrer neu, pid=7
+//     desk: start /bin/lock  pid=8 ... sperre: Sperrer neu, pid=8
+//
+// URSACHE, und sie ist keine Frage der Zeit, sondern der Verschachtelung:
+// `sperre_wache` ruft `desk_spawn`, und `desk_spawn` dreht 250 Runden
+// `wm.poll` + `wm.compose` + `sleep_ticks`, damit das neue Fenster
+// entstehen kann. Die Halteschleife (Zeile ~2188) und die Hauptschleife
+// (~3701) rufen die Wache aber BEIDE -- und waehrend der 250 Runden
+// kommt die andere Schleife dran, sieht `SP_PID` noch unveraendert
+// (es wird erst NACH `desk_spawn` gesetzt) und startet einen zweiten.
+//
+// EIN ZWEITER SPERRER IST NICHT HARMLOS: nur EINER steht in `SP_PID`,
+// also darf nur einer aufsperren. Der andere liegt mit seinem Fenster
+// darueber, nimmt die Tastatur an und weist jedes richtige Kennwort mit
+// `-EPERM` ab -- genau das stand im Lauf als
+// "sperre: falsches Kennwort, bleibt zu", obwohl das Kennwort stimmte.
+//
+// DIE ABHILFE IST EIN RIEGEL UND KEINE WARTEZEIT. Eine Wartezeit waere
+// geraten; dieser Riegel ist eine Zusage: solange ein Start laeuft,
+// startet niemand einen zweiten.
+static mut sp_startet: u64 = 0
+
 fn sperre_wache(state: u64) {
     if !wm.sperre_an(state) {
+        return
+    }
+    // DER RIEGEL. Er steht VOR dem Takt: waere er dahinter, kaeme die
+    // zweite Schleife in einer Runde durch, in der der Takt gerade
+    // passt, und der Riegel haette nur die Haelfte der Faelle erwischt.
+    if sp_startet != 0 {
         return
     }
     sp_takt = sp_takt + 1
@@ -3556,16 +3631,49 @@ fn sperre_wache(state: u64) {
     }
     var p_lock: [u8; 10] = "/bin/lock\0"
     var a_lock: [u8; 5] = "lock\0"
-    let neu: u64 = desk_spawn(state, (&p_lock[0]) as u64,
+    sp_startet = 1
+    // ============================================ RUNDE ANMELDUNG
+    // `elf.spawn` GIBT EINEN PLATZ ZURUECK, KEINE PROZESSNUMMER --
+    // und die Vorrunde hat ihn als eine behandelt.
+    //
+    // GEMESSEN am Lauf vom 13.09. (`wm: darf`, eigens dafuer eingebaut):
+    //
+    //     sperre: Sperrer neu, pid=6  slot=5
+    //     wm: darf i=4 owner=6 slot=5
+    //
+    // Das Fenster des Sperrers gehoerte Platz 6, als Sperrer eingetragen
+    // war Platz 5 -- also stimmte `wm.darf` fuer SEIN EIGENES Fenster
+    // nicht, und `compose` hat waehrend der Sperre GAR NICHTS gemalt:
+    // der Sperrbildschirm blieb unsichtbar (`malen=0 px=0`), obwohl das
+    // Programm lief, seine Bedienelemente angelegt hatte und
+    // "sperre: bereit" meldete.
+    //
+    // WIE ES DAZU KAM: `elf.spawn` reicht durch, was `elf.build`
+    // zurueckgibt, und das ist der PLATZ IN DER AUFGABENTAFEL (`t`).
+    // Hier stand `sched.find_pid(state, neu)` -- eine Suche nach der
+    // PROZESSNUMMER `neu`. Die beiden Zahlen sind nur so lange gleich,
+    // wie nie ein Prozess geendet hat; nach der Anmeldung (glogin
+    // endet, der Schreibtisch kommt dazu) laufen sie auseinander, und
+    // genau dann war die Sperre blind.
+    //
+    // RICHTIG IST: `neu` IST der Platz. Die Prozessnummer dazu steht in
+    // der Tafel und wird von dort geholt -- nicht umgekehrt.
+    let platz: u64 = desk_spawn(state, (&p_lock[0]) as u64,
         (&a_lock[0]) as u64, 5)
+    kstate.set(state, kstate.K11_OFF + kstate.SP_SLOT, platz)
+    var neu: u64 = 0
+    if platz < kstate.MAX_TASKS {
+        neu = sched.tget(state, platz, sched.T_PID)
+    }
     kstate.set(state, kstate.K11_OFF + kstate.SP_PID, neu)
-    kstate.set(state, kstate.K11_OFF + kstate.SP_SLOT,
-        sched.find_pid(state, neu))
     kstate.add(state, kstate.K11_OFF + kstate.SP_SPAWNS, 1)
     var s_w: [u8; 26] = "sperre: Sperrer neu, pid=\0"
     serial.puts((&s_w[0]) as u64)
     serial.dec(neu)
     serial.nl()
+    // ERST JETZT AUF. `SP_PID` steht, also sieht die andere Schleife
+    // beim naechsten Durchgang einen lebenden Sperrer und kehrt um.
+    sp_startet = 0
 }
 
 fn say_wig(state: u64) {
