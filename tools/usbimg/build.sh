@@ -1153,7 +1153,7 @@ verbose: yes
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs
+    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs anmeldung
 
 # ================== RUNDE MESSTAFEL: DERSELBE EINTRAG AUF ENGLISCH
 #
@@ -1252,7 +1252,7 @@ verbose: yes
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs lang=en
+    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs lang=en anmeldung
 
 /@MARKE_PRODUKT@ -- Kommandozeile mit Netz
     protocol: multiboot1
