@@ -1734,3 +1734,58 @@ in `pluguhr.fi` mit dem Unterschied im Klartext daneben. Die
 eigentliche Absicherung ist aber Abschnitt 8b des Laeufers: er startet
 **zwei** Plugins mit **verschiedenen** Fristen und verlangt, dass am
 Ende **beide** stehen. Genau das hat den Fehler gefunden.
+
+---
+
+## 22. Nachbesserung: wer nicht laufen durfte, hat seine Frist nicht verspielt
+
+Abschnitt 21 hat dem Widget die richtige Frist gegeben (100 Ticks statt
+50). Der naechste Lauf zeigte, dass das noetig, aber nicht hinreichend
+war — es flog weiter, und diesmal stand der Grund direkt daneben:
+
+```
+pluguhr: frist ticks=100 pollms=250      <- richtig, holt alle 250 ms
+elf: start 11 ... bytes=1139398 pages=303
+plugregel: starter kind=8 /bin/calc=11
+wmplug: unreg uhr      grund=2 holte=9
+```
+
+Zwischen der vorletzten und der letzten Zeile liegt **ein `SYS_EXEC`
+ueber 1,1 Megaoktett**. Der Kern laedt das Abbild **im Systemaufruf**;
+waehrenddessen kommt **kein anderer Ring-3-Prozess dran**. Der
+Zeitgeber laeuft weiter. Also verstreicht die Frist eines Plugins, das
+gar nicht laufen *durfte*, und der Kehrbesen wirft es hinaus.
+
+Das ist kein Fehler des Widgets und keiner der Frist. Es ist die
+**Rueckseite der Ring-3-Trennung**, die diese Runde gewaehlt hat, und
+sie war im Baum schon einmal beschrieben: `kernel/user/desktop.fi`
+antwortete darauf mit `sleep_ms(2000)` vor dem Autostart — einer Zahl,
+die raten muss, wie lange ein fremdes Programm laedt.
+
+### Die Antwort: der Kern loest seine eigene Zusage ein
+
+Die Frist sagt: *wer gerufen wird und nicht kommt, fliegt.* Sie sagt
+**nicht**: *wer keine Rechenzeit bekam, fliegt.* Also stellt der Kern
+am Ende von `do_execve` die Uhr jedes angemeldeten Platzes auf jetzt
+(`wmplug.gnade`, ueber die Naht `gfx.plug_gnade`, damit der Serverbau
+ohne Fensterserver weiter uebersetzt).
+
+**Warum das die Haenger-Gegenprobe nicht zahm macht:** Es wird nur die
+*Uhr gestellt* — die Frist wird nicht verlaengert und es wird nichts
+abgeholt. Ein Plugin, das wirklich haengt, holt auch danach nichts ab
+und fliegt **eine Frist spaeter** mit demselben `grund=2`. Bezahlt wird
+genau die Zeit, die der `exec` gekostet hat, und keine Sekunde mehr.
+
+**Und sie wird gezaehlt.** `wmplug: bilanz` traegt jetzt `gnaden=N`.
+Eine Gnadenfrist, die niemand sieht, waere eine stille Aufweichung der
+Frist — und das ist das Gegenteil dessen, wofuer dieser Abschnitt da
+ist.
+
+### Offen (ausdruecklich benannt)
+
+Die eigentliche Ursache bleibt: **`exec` laedt synchron im
+Systemaufruf.** Solange das so ist, steht Ring 3 bei jedem Programmstart
+fuer die Dauer des Ladens still — Plugins sind davon nur der
+sichtbarste Fall. Ein Lader, der seitenweise nachlaedt (Demand Paging),
+waere die Antwort; das ist eine eigene Runde und steht hier als offener
+Punkt, nicht als erledigt.

@@ -65,6 +65,8 @@ export {
     plugs, events_in, events_out, kicks, denials, deny,
     desk_set, desk_of, desk_cur, desk_go, desk_dirty, desk_clear,
     selftest, selftest_max, failbits,
+    // RUNDE WMPLUGIN: die Gnadenfrist nach einem langen `exec`.
+    gnade, gnaden
 }
 
 // ------------------------------------------------------- die Fassung
@@ -161,6 +163,11 @@ const S_FAIL: u64 = 0x50
 // 1 = der Kehrbesen kehrt gerade. Siehe `sweep` -- er darf nicht in
 // sich selbst hineinlaufen.
 const S_BUSY: u64 = 0x58
+// Wie oft die Uhr aller Plaetze gestellt wurde, weil kein Ring-3-Prozess
+// laufen durfte (siehe `gnade`). Die Zahl gehoert in die Bilanz: eine
+// Gnadenfrist, die niemand zaehlt, ist eine stille Aufweichung der
+// Frist -- und genau das soll sie nicht sein.
+const S_GNADEN: u64 = 0x60
 
 // ein Eintrag der Gewaehrungstafel: Name (16), Maske (8), Rechte (8)
 const MAX_GRANT: u64 = 16
@@ -365,6 +372,13 @@ fn events_in(state: u64) -> u64 {
 
 fn events_out(state: u64) -> u64 {
     return sg(state, S_OUT)
+}
+
+// Wie oft die Uhr gestellt wurde, weil kein Ring-3-Prozess laufen
+// durfte. Gehoert in die Bilanz: eine Gnadenfrist, die niemand zaehlt,
+// waere eine stille Aufweichung der Frist.
+fn gnaden(state: u64) -> u64 {
+    return sg(state, S_GNADEN)
 }
 
 fn kicks(state: u64) -> u64 {
@@ -705,6 +719,46 @@ fn touch(state: u64, i: u64) {
 // WARUM NUR MIT LIEGENDEM EREIGNIS: ein Plugin, das nichts abonniert hat
 // und nichts zu tun hat, ist nicht traege, sondern still. Bestraft wird,
 // wer GERUFEN WURDE und nicht kommt.
+// DIE UHR JEDES PLATZES AUF JETZT -- nach einem Vorgang, waehrend dem
+// KEIN Ring-3-Prozess laufen durfte.
+//
+// GEMESSENER BEFUND (Abnahmelauf 14.09.2026, Abschnitt 8b): das
+// Leistenwidget flog mit G_FRIST, obwohl es mit seiner eigenen Frist
+// (100 Ticks) angetreten war und alle 250 ms abholte. Direkt davor lud
+// `SYS_EXEC` ein Abbild von 1,1 Megaoktett (`elf: start 11 ...
+// pages=303`) -- und das geschieht IM SYSTEMAUFRUF, waehrenddessen
+// kommt kein anderer Prozess dran. Der Zeitgeber laeuft weiter, die
+// Frist verstreicht, und der Kehrbesen bestraft ein Plugin dafuer, dass
+// es nicht laufen DURFTE.
+//
+// DIE FRIST IST EINE ZUSAGE, ALSO LOEST DER KERN SIE EIN. Sie sagt:
+// "wer gerufen wird und nicht kommt, fliegt" -- nicht: "wer keine
+// Rechenzeit bekam, fliegt".
+//
+// WARUM DAS DIE HAENGER-GEGENPROBE NICHT ZAHM MACHT: hier wird nur die
+// Uhr gestellt, nicht die Frist verlaengert und nichts abgeholt. Ein
+// Plugin, das WIRKLICH haengt, holt auch nach dem Stellen nichts ab und
+// fliegt eine Frist spaeter -- gemessen bleibt `grund=2` in Abschnitt 5.
+// Bezahlt wird also genau die Zeit, die der `exec` gekostet hat, und
+// keine Sekunde mehr.
+fn gnade(state: u64) {
+    if !ready(state) {
+        return
+    }
+    if sg(state, S_PLUGS) == 0 {
+        return
+    }
+    let jetzt: u64 = kstate.get(state, kstate.TICKS)
+    var i: u64 = 0
+    while i < MAX_PLUG {
+        if pg(state, i, P_USED) == U_LEBT {
+            ps(state, i, P_LAST, jetzt)
+        }
+        i = i + 1
+    }
+    ss(state, S_GNADEN, sg(state, S_GNADEN) + 1)
+}
+
 fn sweep(state: u64) -> u64 {
     // DER KEHRBESEN DARF NICHT IN SICH SELBST HINEINLAUFEN.
     //
