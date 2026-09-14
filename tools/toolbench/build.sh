@@ -120,7 +120,20 @@ printf '# /etc/locale.conf\nlang=de\n' > "$OUT/locale.conf"
 printf 'root:x:0:0:root:/users/osum:/bin/sh\n' > "$OUT/passwd"
 printf '%s\n' de > "$OUT/userlocale"
 
-ARGS=(build "$OUT/disk.img" 16384 /lib/
+# RUNDE BAUFEHLER (14.09.2026): 16384 -> 32768 Bloecke (8 -> 16 MiB).
+# Dieselbe Ursache wie in K15, NETVIEW, GLYPHE, NETMON, look/shot.sh und
+# tests/theme: Runde GRUNDLINIE (1d16d34) hat die Laeufer -- zu Recht --
+# auf `--profile=app` umgestellt, und sechs der fuenfzehn Programme
+# dieses Abbilds tragen `profile app` (desktop, taskbar, settings,
+# launcher, explorer, taskmgr). /bin/explorer ist damit 1623040 statt
+# 907360 Oktette. Im Protokoll dieses Laeufers steht:
+#
+#     programme 15
+#     FEHLGESCHLAGEN: mkfs
+#     mkfs: the disk is full
+#
+# EIN BLOCK IST 512 OKTETTE (tools/osum/mkfs.py, `BS = 512`).
+ARGS=(build "$OUT/disk.img" 32768 /lib/
       "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
       "/lib/icons.ttf=assets/osum-icons.ttf")
 ARGS+=(/bin/)
