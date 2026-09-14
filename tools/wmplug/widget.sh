@@ -90,6 +90,9 @@ python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
     || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs.txt" | head -5; }
 
 BASE="gfx wm wig desk wmhold wiglong nokbd nosched noproc nofs wmplug"
+# Die Gegenprobe faehrt denselben Kernel OHNE das Wort `wmplug`: dann ist
+# die Plugintafel ZU, und die Leiste darf davon nichts merken.
+OHNE="gfx wm wig desk wmhold wiglong nokbd nosched noproc nofs plugaus"
 warte() { # datei marke pid [schritte]
     local f=$1 m=$2 pid=$3 n=${4:-600} i=0
     while [ $i -lt "$n" ]; do
@@ -106,7 +109,7 @@ lauf() { # name zusatz [marke1] [marke2]
     rm -f "$out" "$ppm" "$sock"
     cp -f "$TMPD/disk.img" "$TMPD/live-$name.img"
     timeout 240 $QEMU_X86 -kernel "$TMPD/k.mb" -m 256 \
-        -append "$BASE $extra" -serial "file:$out" -display none -no-reboot \
+        -append "${ZEILE:-$BASE} $extra" -serial "file:$out" -display none -no-reboot \
         -vga std -global VGA.edid=off -monitor "unix:$sock,server,nowait" \
         -drive "file=$TMPD/live-$name.img,format=raw,if=ide,index=0" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$TMPD/$name.qemu" 2>&1 &
@@ -298,6 +301,23 @@ else
         bad "der Widget-Text steht noch da (${it2:-0} statt weniger als ${it:-0})"
     fi
 fi
+
+echo "== 7. Gegenprobe: derselbe Kernel OHNE Plugintafel =="
+# Eine Leiste, die auf einem Kern ohne Erweiterungen anders aussieht oder
+# gar stehenbleibt, waere der Preis dieser Runde -- also wird er
+# gemessen und nicht angenommen. `plugaus` schaltet die Plugintafel ab
+# (das Wort gehoert dem Modul `kern`); dann beantwortet der Kern
+# `PL_MAXPLUG` nicht, und die Leiste fragt danach nie wieder.
+#
+# GEMESSEN UND HIER FESTGEHALTEN: OHNE `plugaus` ist die Tafel OFFEN,
+# auch ohne das Wort `wmplug` -- `wmplug: abi=1 tafel= offen` steht in
+# jedem dieser Laeufe. Die erste Fassung dieser Zusage behauptete das
+# Gegenteil und war deshalb rot.
+ZEILE="$OHNE" lauf zu ""
+has "$TMPD/zu.txt" "wm: hold" "der Schreibtisch steht auch ohne Plugintafel"
+has "$TMPD/zu.txt" "taskbar: geom " "die Leiste meldet ihre Lage wie immer"
+hasnot "$TMPD/zu.txt" "taskbar: plug nr=" "und hat kein Widget-Feld"
+has "$TMPD/zu.txt" "tafel= zu" "mit plugaus ist die Plugintafel zu"
 
 # DIE BILDER FUERS ANSEHEN. Gerechnet wird mit dem PPM (drei Oktette je
 # Punkt, kein Verfahren dazwischen); ins Repo gehoert das PNG -- 1,4
