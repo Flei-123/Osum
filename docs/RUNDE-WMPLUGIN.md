@@ -317,6 +317,38 @@ w= h=` plus `taskbar: geom`), nicht aus dem Skript; gerechnet wird die
 Mitte dieses Kastens. Ebenso `regel-mit-recht.png` gegen
 `regel-ohne-recht.png`.
 
+### 6.1 Und EINSCHALTEN zur Laufzeit
+
+Das Abschalten war gemessen, das Einschalten nicht -- und es ging auch
+nicht: `WM_PLUG_GRANT` schrieb die Rechte nur in die Gewaehrungstafel,
+und die liest der Kern **beim Anmelden** (`reg`). Ein Widget, das schon
+lief, blieb ohne Recht. Seit dieser Nachbesserung uebertraegt
+`do_pluggrant` eine von null verschiedene Maske auch auf **laufende**
+Plaetze (`wmplug.set_rights`); null bleibt, was es war: Abmeldung mit
+`G_USER`.
+
+Gemessen in `tools/wmplug/run.sh`, Abschnitt 7c (`/bin/uhrspaet`:
+Widget starten **ohne** Gewaehrung, Foto, gewaehren, Foto):
+
+```
+OK  das Widget startet OHNE R_ACT_BAR -- der Text wird abgewiesen
+OK  danach wird gewaehrt (WM_PLUG_GRANT -- derselbe Ruf wie 'wmplug enable uhr')
+OK  und die Leiste malt den Widget-Text
+OK  genau EINE Anmeldung (wmplug: reg uhr) -- kein Prozessneustart
+OK  und der Fensterserver lief durch (genau ein 'wm: hold')
+OK  im Widget-Kasten unterscheiden sich 2184 Bildpunkte zwischen vorher und nachher
+OK  checkshot punkt (632,572): vor dem Gewaehren [30 41 59], danach [38 48 60]
+OK  im Widget-Kasten stehen nach dem Einschalten 391 Bildpunkte Tinte
+```
+
+Die Koordinate ist **nicht getippt**: der Kasten kommt aus der Leiste
+(`taskbar: plug nr=0 x=632 y=2 w=84 h=26` plus `taskbar: geom`), und
+gerechnet wird am **ersten Bildpunkt, der sich unterscheidet** -- die
+Mitte des Kastens liegt bei kurzem Text zwischen zwei Buchstaben und
+zeigt in beiden Bildern dieselbe Farbe (auch das ist gemessen, es hat
+diese Zusage einmal falsch gruen gemacht). Die Bilder liegen als
+`docs/shots/wmplug/enable-vorher.png` und `enable-nachher.png`.
+
 ---
 
 ## 7. Verwaltung
@@ -345,33 +377,110 @@ Pakete im vorhandenen PLAN/opk-Format: `pakete/wmplug-werkzeug/rezept`,
 
 ## 8. Tempo: vor und nach dem Laden
 
-`PL_FRAMES` und `PL_LATUS` kommen **nicht** aus einem Zaehler, der fuer
-diese Runde erfunden wurde, sondern aus der Bilduhr, die `wm.compose`
-seit der Runde VEKTOR ohnehin fuehrt. Ein zweiter Zaehler daneben
-lieferte ein zweites Ergebnis, und dann glaubt man keinem von beiden.
+### 8.1 Warum die erste Messung dieser Runde keine war
 
-Gelesen **im selben Lauf**, vor und nach der Plugin-Last — also derselbe
-Kernel, dieselbe Maschine, dieselbe Minute:
+Sie stand hier als Tabelle und sie sah ordentlich aus: `PL_FRAMES` und
+`PL_LATUS`, vor und nach der Last gelesen, 1530 us gegen 859 us. Die
+Zahlen waren echt und die Messung war trotzdem falsch, aus zwei
+Gruenden, die beide benannt gehoeren:
 
-| | Bilder (`PL_FRAMES`) | Latenz je Bild (`PL_LATUS`) |
-|---|---|---|
-| vor der Last | 18 | 1530 us |
-| nach der Last | 64 | 859 us |
+1. **`PL_LATUS` ist der Mittelwert SEIT DEM HOCHLAUF.** Nach einer
+   Minute bewegt er sich kaum noch; ein Einbruch, der drei Sekunden
+   dauert, ist darin nicht zu sehen. Was die Tabelle zeigte, war das
+   Warmwerden der Glyphen (`wmbench: glyph cold=6138 us warm=216 us`)
+   und nicht die Wirkung eines Plugins.
+2. **Die "Last" war in beiden Fenstern verschieden.** Im Stillhalten
+   (`wmhold`) setzt der Server nur zusammen, wenn etwas schmutzig ist --
+   gemessen **41 Bilder in vierzig Sekunden**. Eine Bildrate daraus ist
+   die Rate der Langeweile.
 
-Die Latenz **faellt**, statt zu steigen. Das ist kein Verdienst der
-Plugins: die ersten Bilder eines Hochlaufs sind die teuersten
-(kalte Glyphen — `wmbench: glyph cold=6138 us warm=216 us`), und der
-Mittelwert sinkt, sobald die Zwischenspeicher warm sind. **Die ehrliche
-Aussage ist deshalb nicht "Plugins machen es schneller", sondern: in
-diesen Zahlen ist von den Plugins nichts zu sehen.**
+### 8.2 Die saubere Messung: /bin/plugtempo
 
-Der zweite, saubere Vergleich sind die Zusammensetzerrunden zweier
-Laeufe desselben Abbilds, bei denen einmal ein Plugin abstuerzt und
-einmal eines haengt: **163 gegen 165**. Kein Einbruch.
+Also ein Ring-3-Programm, das beides behebt (`kernel/user/plugtempo.fi`,
+gefahren in `tools/wmplug/run.sh`, Abschnitt 7b):
 
-Woher die Ruhe kommt, ist kein Zufall, sondern die Bauform: der Kern
-macht je Bild **acht Vergleiche** (der Kehrbesen) und legt Ereignisse in
-Ringe. Er ruft **nie** in ein Plugin hinein und wartet **nie** auf eines.
+* Es macht **seine eigene Last**: ein Fenster 200x120, in jedem
+  Zeitschnitt (50 ms) neu gefuellt -- in **beiden** Messfenstern
+  derselbe Takt, dieselbe Flaeche.
+* Es misst erst nach einem **Warmlauf** (8 s vor dem ersten Fenster,
+  4 s nach dem Laden -- das Widgetfeld bringt neue Glyphen mit).
+* Es rechnet die Bildzeit ueber ein **Fenster** und nicht ueber den
+  Hochlauf: `PL_FRSUM`/`PL_FRN` sind Summe und Anzahl der Bildzeiten,
+  `(sum2-sum1)/(n2-n1)` ist der Mittelwert genau dazwischen. Beide
+  Zahlen fuehrt `wm.compose` ohnehin (S_FRUS, S_FRN); es kommt kein
+  Zaehler hinzu.
+* Es laedt **dasselbe** Plugin, das auch der Widgetlauf nimmt:
+  `WM_PLUG_GRANT("uhr", 0x807)`, dann `/bin/pluguhr`.
+
+**Ein Lauf, EIN Kernel, dieselbe Maschine** (`gfx wm wig desk wmhold
+wiglong ... wmplug wighalt=50 wigapp=/bin/plugtempo,...,bilder=60`,
+Exitcode 21; die Zahlen unten stammen aus dem Abnahmelauf
+`tools/wmplug/run.sh`, Abschnitt 7b):
+
+| | Bilder | Bildrate | Bildzeit (Mittel) | min | max |
+|---|---|---|---|---|---|
+| **vor** dem Laden | 60 | 20,0 /s | **365 us** | 350 us | 427 us |
+| **nach** dem Laden | 60 | 21,0 /s | **411 us** | 356 us | 720 us |
+
+Wortlaut des Laeufers:
+
+```
+OK  beide Fenster haben wirklich 60 Bilder (vor 60, nach 60)
+OK  Bildzeit vor dem Laden 365 us (min 350, max 427),
+    nach dem Laden 411 us (min 356, max 720)
+OK  Bildrate vor dem Laden 200 (x10), nach dem Laden 210 (x10)
+OK  kein Tempoeinbruch: 210 ist mindestens zwei Drittel von 200
+```
+
+und die Leitung desselben Laufs, der Reihe nach:
+
+```
+tempo: vor  bilder=60 ... us=365 min=350 max=427 gezaehlt=60 fps10=200
+tempo: grant r=0
+wmplug: reg uhr platz=0 rechte=0x807
+taskbar: text plug ... t=cpu 100%
+tempo: nach bilder=60 ... us=411 min=356 max=720 gezaehlt=60 fps10=210
+```
+
+**Die Abweichung, ausdruecklich benannt:** die mittlere Bildzeit steigt
+um **46 us (+12,6 %)**, die Bildrate nicht (sie haengt am Takt der
+kuenstlichen Last, 20 Bilder je Sekunde, und den haelt sie in beiden
+Fenstern; 21,0 gegen 20,0 ist die Aufloesung der Tickuhr und kein
+Gewinn). Der Ausreisser steht im `max`: **720 us gegen 427 us**. Das
+ist das eine Bild je Sekunde, in dem die Leiste ihr Widgetfeld neu malt
+-- mehr kostet ein Plugin in dieser Bauform nicht.
+
+Eine zweite, einzeln gefahrene Messung desselben Programms lag bei
+439 us gegen 472 us (+7,5 %). Beide Zahlenpaare sind gemessen; die
+Streuung zwischen zwei Laeufen ist also groesser als der Abstand
+zwischen "mit" und "ohne" Plugin -- auch das gehoert hierher und nicht
+in eine Fussnote.
+
+### 8.3 Was `WM_PLUG_BAR` kostet, getrennt ausgewiesen
+
+Bis zu dieser Nachbesserung rief jeder `WM_PLUG_BAR` **`wm.damage_all`**
+-- 800x600 = **480000 Bildpunkte fuer 31 Oktette Text**, sekuendlich,
+auch wenn das Widget dieselbe Zahl noch einmal schickte. Zwei
+Aenderungen in `kernel/sysgui.fi`:
+
+* **Teilschaden statt Vollschaden:** gemeldet wird das Rechteck der
+  Leiste (`damage_bar`, gefunden am selben Merkmal wie `is_taskbar`:
+  reservierter Schirmrand) -- bei 800x600 sind das **24000** statt
+  480000 Bildpunkte, ein Zwanzigstel.
+* **Gar nichts, wenn sich nichts aendert:** `wmplug.bar_same` vergleicht
+  den neuen Text mit dem alten; ist er gleich, wird nichts schmutzig
+  gemeldet. Ein Widget im Sekundentakt kostet damit einen Systemaufruf
+  und **kein Bild**.
+
+Der Rest der Ruhe ist die Bauform und kein Zufall: der Kern macht je
+Bild **acht Vergleiche** (der Kehrbesen) und legt Ereignisse in Ringe.
+Er ruft **nie** in ein Plugin hinein und wartet **nie** auf eines.
+
+### 8.4 Der zweite Vergleich: zwei Laeufe, ein Abbild
+
+Zusammensetzerrunden zweier Laeufe desselben Abbilds, bei denen einmal
+ein Plugin abstuerzt und einmal eines haengt: **163 gegen 165**. Kein
+Einbruch.
 
 ---
 
