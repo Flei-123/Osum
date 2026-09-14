@@ -66,7 +66,13 @@ BLOCKS=4096
 PROGS="sh echo cat ls power powermon burn"
 
 TMPD=$(mktemp -d)
-trap 'rm -rf "$TMPD"' EXIT
+# PMON_KEEP=1 leaves the work directory in place so the serial logs
+# can be read after a failure. Without the variable nothing changes.
+if [ -n "${PMON_KEEP:-}" ]; then
+    trap 'echo "WORK DIR KEPT: $TMPD" >&2' EXIT
+else
+    trap 'rm -rf "$TMPD"' EXIT
+fi
 
 pass=0
 fail=0
