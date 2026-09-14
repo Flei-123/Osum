@@ -159,22 +159,13 @@ ankert, sucht vergeblich.
 
 ## 4. Was gerade herauskommt
 
-Letzter voller Lauf auf diesem Rechner (KVM):
+Letzter voller Lauf auf diesem Rechner (KVM), Exitcode 0:
 
 ```
-WMPLUG: 136 bestanden, 1 gescheitert
+WMPLUG: 139 bestanden, 0 gescheitert
 ```
 
-Die eine rote Zeile ist **`greif: Exitcode 137 statt 21`** und **kein
-Fehler dieser Runde**: dieser QEMU wurde von aussen mit SIGKILL
-abgeraeumt (`tools/wmplug/run.sh: line 153: ... Killed`), waehrend auf
-der Maschine weitere Laeufe parallel liefen. Alle inhaltlichen Zusagen
-desselben Laufs sind gruen — die serielle Leitung war vollstaendig, der
-Griff wurde abgewiesen, das Fenster stand still. Im Lauf nur der
-Kernseite (`WMPLUG_SCHNELL=1`) steht dieselbe Stelle auf
-**Exitcode 21** und der Lauf endet mit **0 gescheitert**.
-
-Die zwei Modullaeufer einzeln:
+Die zwei Modullaeufer, die darin mitlaufen:
 
 ```
 REGEL:  38 bestanden, 0 gescheitert

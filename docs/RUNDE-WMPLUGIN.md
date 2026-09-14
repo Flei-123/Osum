@@ -237,8 +237,10 @@ wmplug: unreg boese grund=1 holte=0 verlor=0
 * **Der Grund steht auf der Leitung**: `grund=1` = `G_CRASH`.
 * **Der Schreibtisch laeuft nachweislich weiter:** der Zusammensetzer
   lief in diesem Lauf **163 Runden** (`wm: comp=163`), und das Foto
-  danach (`docs/shots/wmplug/nach-absturz.ppm`) ist 800x600 mit
+  danach (`docs/shots/wmplug/nach-absturz.png`) ist 800x600 mit
   **479819 von 480000** nicht-schwarzen Bildpunkten. Kein Panik.
+* **Und genau einmal**: eine Zeile `wmplug: tot`, `kicks=1`. Das ist
+  nicht selbstverstaendlich, siehe Abschnitt 9, Punkt 2.
 
 ### 5b. Haenger — das Plugin holt nichts mehr ab
 
@@ -253,7 +255,7 @@ wmplug: unreg boese grund=2 holte=0 verlor=0
 
 * `grund=2` = `G_FRIST`. Das Plugin ist abgemeldet, **holte=0**.
 * **Keine Bildrate verloren:** Zusammensetzerrunden im Haengerlauf
-  **164** gegen **163** im Absturzlauf — derselbe Kernel, dasselbe
+  **165** gegen **163** im Absturzlauf — derselbe Kernel, dasselbe
   Abbild.
 * **Die Frist ist keine Wartezeit, sondern ein Kehrbesen.** Der Kern
   blockiert an keiner Stelle auf das Plugin; er schaut einmal je Bild
@@ -353,8 +355,8 @@ Kernel, dieselbe Maschine, dieselbe Minute:
 
 | | Bilder (`PL_FRAMES`) | Latenz je Bild (`PL_LATUS`) |
 |---|---|---|
-| vor der Last | 17 | 3923 us |
-| nach der Last | 63 | 1434 us |
+| vor der Last | 18 | 1530 us |
+| nach der Last | 64 | 859 us |
 
 Die Latenz **faellt**, statt zu steigen. Das ist kein Verdienst der
 Plugins: die ersten Bilder eines Hochlaufs sind die teuersten
@@ -365,7 +367,7 @@ diesen Zahlen ist von den Plugins nichts zu sehen.**
 
 Der zweite, saubere Vergleich sind die Zusammensetzerrunden zweier
 Laeufe desselben Abbilds, bei denen einmal ein Plugin abstuerzt und
-einmal eines haengt: **163 gegen 164**. Kein Einbruch.
+einmal eines haengt: **163 gegen 165**. Kein Einbruch.
 
 Woher die Ruhe kommt, ist kein Zufall, sondern die Bauform: der Kern
 macht je Bild **acht Vergleiche** (der Kehrbesen) und legt Ereignisse in
@@ -473,3 +475,13 @@ bootet sechs Laeufe, ruft die beiden Modullaeufer, legt die Bilder nach
 `WMPLUG_SCHNELL=1` laesst die zwei Modullaeufer aus (nur die Kernseite).
 `WMPLUG_KEEP=1` behaelt das Arbeitsverzeichnis mit allen seriellen
 Mitschnitten.
+
+Stand dieses Papiers — voller Lauf, KVM, Exitcode 0:
+
+```
+REGEL:  38 bestanden, 0 gescheitert
+WIDGET: 30 bestanden, 0 gescheitert
+WMPLUG: 139 bestanden, 0 gescheitert
+```
+
+Alle Zahlen in diesem Papier stammen aus genau diesem Lauf.
