@@ -32,7 +32,7 @@ python3 tools/osum/mkfs.py build "$TMPD/disk.img" 4096 /lib/ \
     /lib/mono.ttf=assets/osum-mono.ttf /lib/sans.ttf=assets/osum-sans.ttf \
     > "$TMPD/mkfs.txt" 2>&1 || { echo "mkfs fehlgeschlagen"; cat "$TMPD/mkfs.txt"; exit 1; }
 
-GRUND="nokbd nosched noproc nofs"
+GRUND="nokbd noproc nofs"
 # mausflut=60 -- ein Zeigerstrom mit echter Rate. wighalt haelt den
 # Schreibtisch die Messdauer offen, damit die Uhr wirklich tickt.
 APP="gfx wm wig desk wmhold wiglong vsync mausflut=60 wighalt=$SEK $GRUND"

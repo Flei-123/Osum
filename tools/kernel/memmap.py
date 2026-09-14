@@ -186,6 +186,7 @@ BEREICHE = [
     ("FLOCK",      "kstate.fi", "FLOCK_OFF",      "FLOCK_MAX"),
     # RUNDE HOTPLUG -- die Tafel der Wechseldatentraeger (wechsel.fi).
     ("WECHSEL",    "kstate.fi", "WECHSEL_OFF",    "WECHSEL_MAX"),
+    ("VGPU",       "kstate.fi", "VGPU_OFF",       "VGPU_MAX"),
     # RUNDE OFS3: die Pfadpuffer des Dateisystems.  Sie sind hier ein
     # EIGENER Bereich und kein Versatz -- die zwei Seiten gehoeren
     # dieser Runde allein, und genau das soll die Karte nachrechnen.
