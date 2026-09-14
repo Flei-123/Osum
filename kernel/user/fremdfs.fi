@@ -1,0 +1,422 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/fremdfs.fi -- Runde FREMDFS: die fremden Dateisysteme,
+// von AUSSEN gemessen.
+//
+// Wie `/bin/k14` und `/bin/posix`: das Programm laeuft in Ring 3, macht
+// jeden Aufruf wirklich, und schreibt jede Antwort als
+//
+//     ff: <name> = <zahl>
+//
+// auf die Konsole. Fuer Pruefsummen zusaetzlich
+//
+//     ff: sha <pfad> = <64 Hexziffern>
+//
+// `tools/fremdfs/run.sh` haelt jede dieser Zeilen gegen das, was der
+// WIRT beim Bau des Abbilds gemessen hat -- SHA-256 gegen SHA-256,
+// Zahl gegen Zahl. Was hier nicht als Zahl oder Hexkette herauskommt,
+// ist keine Zusage, sondern eine Behauptung.
+//
+// AUFRUF:
+//     fremdfs <art> <quelle> <ziel>
+//
+// z. B. `fremdfs ext4 /dev/hdb1 /mnt`. Die Art wird unveraendert an
+// `mount` weitergereicht, damit dieses Programm nichts ueber die
+// Treiber wissen muss.
+//
+// WAS GEMESSEN WIRD, und warum genau das:
+//
+//   1. EINHAENGEN. Geht es ueberhaupt? Und bei den Gegenproben: geht
+//      es RICHTIGERWEISE nicht?
+//   2. DIE PRUEFSUMMEN. Jede Datei des bekannten Baums wird GANZ
+//      gelesen -- in Stuecken von 4096 Oktetten, also ueber viele
+//      Aufrufe hinweg -- und durch SHA-256 geschickt. Das ist die
+//      eigentliche Zusage dieser Runde: nicht "es sieht richtig aus",
+//      sondern "es ist Oktett fuer Oktett dasselbe".
+//   3. DIE VERZEICHNISSE. Die Zahl der Eintraege, gezaehlt mit
+//      `getdents64`. Ein Verzeichnis, das die Haelfte zeigt, faellt
+//      hier auf und nicht erst beim Benutzer.
+//   4. DIE GROESSEN. `stat` auf jede Datei -- eine Datei mit null
+//      Oktetten muss null sagen, die grosse ihre wirkliche Groesse.
+//   5. DER SYMBOLISCHE VERWEIS. Sein ZIEL, gelesen mit `readlink`.
+//      Beide Faelle: das kurze Ziel (steht im Inode) und das lange
+//      (steht in einem Datenblock).
+//   6. DAS LESEN AB EINER STELLE. `lseek` mitten in die grosse Datei
+//      und von dort lesen -- der Weg, den `chain_at` bzw. der
+//      Extent-Baum nehmen muss, wenn nicht bei null angefangen wird.
+//   7. WAS NICHT GEHEN DARF: schreiben. Beide Dateisysteme sind nur
+//      lesend, und ein `open` zum Schreiben MUSS scheitern.
+
+profile kernel
+
+import ulib
+import sha
+
+export { u_start }
+
+const SYS_READ: u64 = 0
+const SYS_WRITE: u64 = 1
+const SYS_OPEN: u64 = 2
+const SYS_CLOSE: u64 = 3
+const SYS_STAT: u64 = 4
+const SYS_LSEEK: u64 = 8
+const SYS_READLINK: u64 = 89
+const SYS_MOUNT: u64 = 165
+const SYS_UMOUNT2: u64 = 166
+const SYS_GETDENTS64: u64 = 217
+
+const O_RDONLY: u64 = 0
+const O_WRONLY: u64 = 1
+const O_CREAT: u64 = 64
+const SEEK_SET: u64 = 0
+
+const ST_SIZE: u64 = 48
+const ST_MODE: u64 = 24
+const S_IFMT: u64 = 61440
+const S_IFDIR: u64 = 16384
+const S_IFREG: u64 = 32768
+const S_IFLNK: u64 = 40960
+
+const MNT_RDONLY: u64 = 1
+
+// Der Lesepuffer. 4096 Oktette -- gross genug, dass die grosse Datei
+// nicht tausendmal gelesen wird, klein genug fuer den Stapel eines
+// Ring-3-Programms.
+static mut LESE: [u8; 4096] = [0 as u8; 4096]
+static mut DIRBUF: [u8; 4096] = [0 as u8; 4096]
+static mut PFAD: [u8; 256] = [0 as u8; 256]
+
+fn line(name: u64, v: u64) {
+    var s_pre: [u8; 5] = "ff: \0"
+    var s_eq: [u8; 4] = " = \0"
+    ulib.say((&s_pre[0 as usize]) as u64)
+    ulib.say(name)
+    ulib.say((&s_eq[0 as usize]) as u64)
+    ulib.sayn(v)
+    ulib.nl()
+}
+
+fn byte_at(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn set_byte(p: u64, i: u64, v: u64) {
+    __mmio_write8((p + i) as *mut u8, v as u8)
+}
+
+fn slen(p: u64) -> u64 {
+    var n: u64 = 0
+    while byte_at(p, n) != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+// Zwei Stuecke zu einem Pfad: "<a>/<b>", nach PFAD.
+fn pfad_bauen(a: u64, b: u64) -> u64 {
+    let ziel: u64 = (&PFAD[0 as usize]) as u64
+    var n: u64 = 0
+    while byte_at(a, n) != 0 && n < 200 {
+        set_byte(ziel, n, byte_at(a, n))
+        n = n + 1
+    }
+    if byte_at(b, 0) != 0 {
+        set_byte(ziel, n, 47)
+        n = n + 1
+        var k: u64 = 0
+        while byte_at(b, k) != 0 && n < 250 {
+            set_byte(ziel, n, byte_at(b, k))
+            n = n + 1
+            k = k + 1
+        }
+    }
+    set_byte(ziel, n, 0)
+    return ziel
+}
+
+// ---------------------------------------------------- die Pruefsumme
+//
+// EINE DATEI GANZ LESEN UND DURCH SHA-256 SCHICKEN.
+//
+// In Stuecken von 4096 Oktetten, also ueber viele `read`-Aufrufe --
+// und genau das ist gewollt: eine Datei von sechs Megaoktett geht so
+// ueber anderthalbtausend Aufrufe, und jeder einzelne muss an der
+// richtigen Stelle weiterlesen. Ein Treiber, der den Versatz falsch
+// rechnet, liefert eine falsche Summe, und keine, die "fast stimmt".
+//
+// Ausgabe: "ff: sha <pfad> = <hex>", oder "ff: sha <pfad> = FEHLER".
+fn summe(pfad: u64) {
+    var s_pre: [u8; 9] = "ff: sha \0"
+    var s_eq: [u8; 4] = " = \0"
+    var s_err: [u8; 7] = "FEHLER\0"
+    var hex: [u8; 65] = [0 as u8; 65]
+    var dig: [u8; 32] = [0 as u8; 32]
+    ulib.say((&s_pre[0 as usize]) as u64)
+    ulib.say(pfad)
+    ulib.say((&s_eq[0 as usize]) as u64)
+    let fd: u64 = ulib.sys(SYS_OPEN, pfad, O_RDONLY, 0)
+    if ulib.bad(fd) {
+        ulib.say((&s_err[0 as usize]) as u64)
+        ulib.nl()
+        return
+    }
+    sha.begin()
+    var going: bool = true
+    while going {
+        let got: u64 = ulib.sys(SYS_READ, fd,
+            (&LESE[0 as usize]) as u64, 4096)
+        if ulib.bad(got) || got == 0 {
+            going = false
+        } else {
+            sha.update((&LESE[0 as usize]) as u64, got)
+        }
+    }
+    sha.finish((&dig[0 as usize]) as u64)
+    ulib.sys(SYS_CLOSE, fd, 0, 0)
+    sha.hex_out((&dig[0 as usize]) as u64, sha.DIGEST,
+        (&hex[0 as usize]) as u64)
+    ulib.say((&hex[0 as usize]) as u64)
+    ulib.nl()
+}
+
+// Wie viele Eintraege hat dieses Verzeichnis (OHNE `.` und `..`)?
+fn dir_count(pfad: u64) -> u64 {
+    let fd: u64 = ulib.sys(SYS_OPEN, pfad, O_RDONLY, 0)
+    if ulib.bad(fd) {
+        return 0xFFFFFFFF
+    }
+    var n: u64 = 0
+    var going: bool = true
+    while going {
+        let got: u64 = ulib.sys(SYS_GETDENTS64, fd,
+            (&DIRBUF[0 as usize]) as u64, 4096)
+        if ulib.bad(got) || got == 0 {
+            going = false
+        } else {
+            var at: u64 = 0
+            while at < got {
+                let basis: u64 = (&DIRBUF[0 as usize]) as u64
+                let reclen: u64 = __mmio_read16(
+                    (basis + at + 16) as *mut u16) as u64
+                if reclen == 0 {
+                    at = got
+                } else {
+                    let name: u64 = basis + at + 19
+                    var punkt: bool = false
+                    if byte_at(name, 0) == 46 {
+                        if byte_at(name, 1) == 0 {
+                            punkt = true
+                        }
+                        if byte_at(name, 1) == 46 && byte_at(name, 2) == 0 {
+                            punkt = true
+                        }
+                    }
+                    if !punkt {
+                        n = n + 1
+                    }
+                    at = at + reclen
+                }
+            }
+        }
+    }
+    ulib.sys(SYS_CLOSE, fd, 0, 0)
+    return n
+}
+
+fn groesse(pfad: u64) -> u64 {
+    var st: [u8; 144] = [0 as u8; 144]
+    let r: u64 = ulib.sys(SYS_STAT, pfad, (&st[0 as usize]) as u64, 0)
+    if ulib.bad(r) {
+        return 0xFFFFFFFF
+    }
+    return __mmio_read64((((&st[0 as usize]) as u64) + ST_SIZE) as *mut u64)
+}
+
+fn art(pfad: u64) -> u64 {
+    var st: [u8; 144] = [0 as u8; 144]
+    let r: u64 = ulib.sys(SYS_STAT, pfad, (&st[0 as usize]) as u64, 0)
+    if ulib.bad(r) {
+        return 0xFFFFFFFF
+    }
+    let mode: u64 = __mmio_read64(
+        (((&st[0 as usize]) as u64) + ST_MODE) as *mut u64)
+    return mode & S_IFMT
+}
+
+// DAS ZIEL EINES SYMBOLISCHEN VERWEISES. Ausgabe als Text, damit der
+// Pruefstand ihn Zeichen fuer Zeichen vergleichen kann.
+fn verweis(pfad: u64) {
+    var s_pre: [u8; 12] = "ff: ziel \0\0\0"
+    var s_eq: [u8; 4] = " = \0"
+    var s_err: [u8; 7] = "FEHLER\0"
+    var ziel: [u8; 256] = [0 as u8; 256]
+    ulib.say((&s_pre[0 as usize]) as u64)
+    ulib.say(pfad)
+    ulib.say((&s_eq[0 as usize]) as u64)
+    let n: u64 = ulib.sys(SYS_READLINK, pfad,
+        (&ziel[0 as usize]) as u64, 255)
+    if ulib.bad(n) {
+        ulib.say((&s_err[0 as usize]) as u64)
+        ulib.nl()
+        return
+    }
+    set_byte((&ziel[0 as usize]) as u64, n, 0)
+    ulib.say((&ziel[0 as usize]) as u64)
+    ulib.nl()
+}
+
+// DAS LESEN AB EINER STELLE. `lseek` mitten hinein, dann lesen -- und
+// die Summe der gelesenen Oktette melden, damit ein Treiber, der ab
+// der falschen Stelle liest, an einer anderen Zahl auffaellt.
+fn ab_stelle(pfad: u64, wo: u64, wieviel: u64) -> u64 {
+    let fd: u64 = ulib.sys(SYS_OPEN, pfad, O_RDONLY, 0)
+    if ulib.bad(fd) {
+        return 0xFFFFFFFF
+    }
+    let p: u64 = ulib.sys(SYS_LSEEK, fd, wo, SEEK_SET)
+    if ulib.bad(p) {
+        ulib.sys(SYS_CLOSE, fd, 0, 0)
+        return 0xFFFFFFFE
+    }
+    var summe_o: u64 = 0
+    var gelesen: u64 = 0
+    var going: bool = true
+    while going && gelesen < wieviel {
+        var will: u64 = wieviel - gelesen
+        if will > 4096 {
+            will = 4096
+        }
+        let got: u64 = ulib.sys(SYS_READ, fd,
+            (&LESE[0 as usize]) as u64, will)
+        if ulib.bad(got) || got == 0 {
+            going = false
+        } else {
+            var i: u64 = 0
+            while i < got {
+                summe_o = summe_o + byte_at((&LESE[0 as usize]) as u64, i)
+                i = i + 1
+            }
+            gelesen = gelesen + got
+        }
+    }
+    ulib.sys(SYS_CLOSE, fd, 0, 0)
+    return summe_o
+}
+
+fn u_start(args: u64) -> u64 {
+    var n_mount: [u8; 6] = "mount\0"
+    var n_umount: [u8; 7] = "umount\0"
+    var n_wurzel: [u8; 7] = "wurzel\0"
+    var n_viele: [u8; 6] = "viele\0"
+    var n_tief: [u8; 5] = "tief\0"
+    var n_gr_gross: [u8; 11] = "gr-gross\0\0\0"
+    var n_gr_leer: [u8; 10] = "gr-leer\0\0\0"
+    var n_gr_mittel: [u8; 12] = "gr-mittel\0\0\0"
+    var n_art_lnk: [u8; 9] = "art-lnk\0\0"
+    var n_art_dir: [u8; 9] = "art-dir\0\0"
+    var n_mitte: [u8; 6] = "mitte\0"
+    var n_schreib: [u8; 9] = "schreib\0\0"
+    var n_a: [u8; 2] = "a\0"
+
+    var p_hallo: [u8; 10] = "hallo.txt\0"
+    var p_leer: [u8; 9] = "leer.bin\0"
+    var p_mittel: [u8; 11] = "mittel.bin\0"
+    var p_gross: [u8; 10] = "gross.bin\0"
+    var p_umlaut: [u8; 18] = "umlaut-äöü.txt\0"
+    var p_tief: [u8; 17] = "a/b/c/d/tief.txt\0"
+    var p_zwischen: [u8; 17] = "a/b/zwischen.txt\0"
+    var p_viele: [u8; 6] = "viele\0"
+    var p_verweis: [u8; 12] = "verweis.txt\0"
+    var p_langverweis: [u8; 16] = "langverweis.txt\0"
+    var p_leer_name: [u8; 1] = "\0"
+    var p_viele0: [u8; 16] = "viele/datei-000\0"
+    var p_viele511: [u8; 16] = "viele/datei-511\0"
+
+    let argc: u64 = ulib.arg_count(args)
+    if argc < 4 {
+        var s_use: [u8; 40] = "usage: fremdfs ART QUELLE ZIEL\0\0\0\0\0\0\0\0\0\0"
+        ulib.esay_line((&s_use[0 as usize]) as u64, 0)
+        return 1
+    }
+    let art_s: u64 = ulib.arg_at(args, 1)
+    let quelle: u64 = ulib.arg_at(args, 2)
+    let ziel: u64 = ulib.arg_at(args, 3)
+
+    // 1. EINHAENGEN, ausdruecklich nur lesend.
+    let r: u64 = ulib.sys4(SYS_MOUNT, quelle, ziel, art_s, MNT_RDONLY)
+    if ulib.bad(r) {
+        line((&n_mount[0 as usize]) as u64, 0)
+        // OHNE EINHAENGUNG IST ALLES ANDERE SINNLOS -- und genau das
+        // ist bei den Gegenproben der Sinn der Sache: das Abbild MUSS
+        // hier scheitern, und der Pruefstand sieht die Null.
+        return 0
+    }
+    line((&n_mount[0 as usize]) as u64, 1)
+
+    // 2. DIE VERZEICHNISSE.
+    line((&n_wurzel[0 as usize]) as u64,
+        dir_count(pfad_bauen(ziel, (&p_leer_name[0 as usize]) as u64)))
+    line((&n_viele[0 as usize]) as u64,
+        dir_count(pfad_bauen(ziel, (&p_viele[0 as usize]) as u64)))
+    var p_abcd: [u8; 8] = "a/b/c/d\0"
+    line((&n_tief[0 as usize]) as u64,
+        dir_count(pfad_bauen(ziel, (&p_abcd[0 as usize]) as u64)))
+    line((&n_a[0 as usize]) as u64,
+        dir_count(pfad_bauen(ziel, (&n_a[0 as usize]) as u64)))
+
+    // 3. DIE GROESSEN.
+    line((&n_gr_gross[0 as usize]) as u64,
+        groesse(pfad_bauen(ziel, (&p_gross[0 as usize]) as u64)))
+    line((&n_gr_leer[0 as usize]) as u64,
+        groesse(pfad_bauen(ziel, (&p_leer[0 as usize]) as u64)))
+    line((&n_gr_mittel[0 as usize]) as u64,
+        groesse(pfad_bauen(ziel, (&p_mittel[0 as usize]) as u64)))
+
+    // 4. DIE ARTEN.
+    line((&n_art_dir[0 as usize]) as u64,
+        art(pfad_bauen(ziel, (&p_viele[0 as usize]) as u64)))
+
+    // 5. DIE PRUEFSUMMEN. Das ist die eigentliche Zusage.
+    summe(pfad_bauen(ziel, (&p_hallo[0 as usize]) as u64))
+    summe(pfad_bauen(ziel, (&p_leer[0 as usize]) as u64))
+    summe(pfad_bauen(ziel, (&p_mittel[0 as usize]) as u64))
+    summe(pfad_bauen(ziel, (&p_gross[0 as usize]) as u64))
+    summe(pfad_bauen(ziel, (&p_umlaut[0 as usize]) as u64))
+    summe(pfad_bauen(ziel, (&p_tief[0 as usize]) as u64))
+    summe(pfad_bauen(ziel, (&p_zwischen[0 as usize]) as u64))
+    summe(pfad_bauen(ziel, (&p_viele0[0 as usize]) as u64))
+    summe(pfad_bauen(ziel, (&p_viele511[0 as usize]) as u64))
+
+    // 6. DAS LESEN AB EINER STELLE -- mitten in die grosse Datei.
+    line((&n_mitte[0 as usize]) as u64,
+        ab_stelle(pfad_bauen(ziel, (&p_gross[0 as usize]) as u64),
+            3000000, 4096))
+
+    // 7. DIE SYMBOLISCHEN VERWEISE. Sie gibt es nur auf ext4; auf
+    //    NTFS liefert `readlink` FEHLER, und das ist richtig so.
+    line((&n_art_lnk[0 as usize]) as u64,
+        art(pfad_bauen(ziel, (&p_verweis[0 as usize]) as u64)))
+    verweis(pfad_bauen(ziel, (&p_verweis[0 as usize]) as u64))
+    verweis(pfad_bauen(ziel, (&p_langverweis[0 as usize]) as u64))
+
+    // 8. WAS NICHT GEHEN DARF. Diese Dateisysteme sind nur lesend --
+    //    ein `open` zum Schreiben MUSS scheitern. Eine Schicht, die
+    //    alles erlaubt, trennt nichts.
+    var p_neu: [u8; 8] = "neu.txt\0"
+    let wfd: u64 = ulib.sys(SYS_OPEN,
+        pfad_bauen(ziel, (&p_neu[0 as usize]) as u64), O_WRONLY | O_CREAT, 438)
+    if ulib.bad(wfd) {
+        line((&n_schreib[0 as usize]) as u64, 0)
+    } else {
+        ulib.sys(SYS_CLOSE, wfd, 0, 0)
+        line((&n_schreib[0 as usize]) as u64, 1)
+    }
+
+    // 9. AUSHAENGEN. Es muss gehen -- und danach ist der Punkt leer.
+    let u: u64 = ulib.sys(SYS_UMOUNT2, ziel, 0, 0)
+    if ulib.bad(u) {
+        line((&n_umount[0 as usize]) as u64, 0)
+    } else {
+        line((&n_umount[0 as usize]) as u64, 1)
+    }
+    return 0
+}

@@ -81,10 +81,21 @@ if [[ -f tools/config ]]; then
 fi
 [[ -n ${OSUM_GUI:-} ]] && GUI=$OSUM_GUI
 [[ -n ${OSUM_TUNNEL:-} ]] && TUNNEL=$OSUM_TUNNEL
+# RUNDE FREMDFS: STANDARD IST AN -- die Begruendung steht in
+# docs/RUNDE-FREMDFS.md, Abschnitt 10, und sie stuetzt sich auf die
+# GEMESSENE Groesse und nicht auf ein Gefuehl.
+OHNE_EXT4=${OHNE_EXT4:-0}
+OHNE_NTFS=${OHNE_NTFS:-0}
+[[ -n ${OSUM_EXT4:-} ]] && [[ $OSUM_EXT4 == off ]] && OHNE_EXT4=1
+[[ -n ${OSUM_NTFS:-} ]] && [[ $OSUM_NTFS == off ]] && OHNE_NTFS=1
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --ohne-tunnel) TUNNEL=off; shift ;;
+        # RUNDE FREMDFS: die zwei fremden Dateisysteme, einzeln.
+        --ohne-ext4) OHNE_EXT4=1; shift ;;
+        --ohne-ntfs) OHNE_NTFS=1; shift ;;
+        --ohne-fremdfs) OHNE_EXT4=1; OHNE_NTFS=1; shift ;;
         --ohne-ps2m) OHNE_PS2M=1; shift ;;
         --ohne-bruecke) OHNE_BRUECKE=1; shift ;;
         --ohne-symbole) SYMBOLE=off; shift ;;
@@ -197,6 +208,23 @@ if [[ $OHNE_TUNNEL == 1 ]]; then
 fi
 rm -f "$TMP/kernel/wg-aus.fi"
 
+# RUNDE FREMDFS: DERSELBE GRIFF FUER DIE ZWEI FREMDEN DATEISYSTEME.
+#
+# `--ohne-ext4` bzw. `--ohne-ntfs` legt die Leerfassung an die Stelle
+# des Treibers. Danach steht im Baum, aus dem firnc liest, keine Zeile
+# des jeweiligen Dateisystems mehr -- und weil die Leerfassung
+# DIESELBEN Namen exportiert, uebersetzt `vfs.fi` unveraendert.
+#
+# Was das spart, ist gemessen und steht in docs/RUNDE-FREMDFS.md.
+if [[ $OHNE_EXT4 == 1 ]]; then
+    cp -f kernel/ext4-aus.fi "$TMP/kernel/ext4.fi" || exit 1
+fi
+rm -f "$TMP/kernel/ext4-aus.fi"
+if [[ $OHNE_NTFS == 1 ]]; then
+    cp -f kernel/ntfs-aus.fi "$TMP/kernel/ntfs.fi" || exit 1
+fi
+rm -f "$TMP/kernel/ntfs-aus.fi"
+
 # RUNDE SERVERBUILD: DERSELBE GRIFF, EINE ETAGE GROESSER. Nicht eine
 # Datei wird ersetzt, sondern elf werden GELOESCHT und die zwoelfte
 # (`gfx.fi`, die Naht) durch ihre Leerfassung ersetzt. Danach steht im
@@ -306,4 +334,4 @@ fi
 mkdir -p "$(dirname "$AUS")"
 cp -f "$TMP/osum.elf" "$AUS.elf"
 objcopy -O elf32-i386 "$TMP/osum.elf" "$AUS" || exit 1
-echo "$AUS ($(stat -c%s "$AUS") Oktette, Stufe $STUFE, gui=$GUI, tunnel=$TUNNEL, ps2m=$([[ $OHNE_PS2M == 1 ]] && echo modul || echo fest), symbole=$SYMBOLE)"
+echo "$AUS ($(stat -c%s "$AUS") Oktette, Stufe $STUFE, gui=$GUI, tunnel=$TUNNEL, ps2m=$([[ $OHNE_PS2M == 1 ]] && echo modul || echo fest), symbole=$SYMBOLE, ext4=$([[ $OHNE_EXT4 == 1 ]] && echo aus || echo an), ntfs=$([[ $OHNE_NTFS == 1 ]] && echo aus || echo an))"
