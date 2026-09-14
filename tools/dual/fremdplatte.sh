@@ -44,10 +44,34 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 
 IMG=${1:?ausgabe.img fehlt}
-MIB=${2:-512}
+MIB=${2:-80}
 
-ESP_MIB=64
-DATEN_MIB=128
+# ==================================================================
+# WARUM DIESE PLATTE SO KLEIN IST -- UND WAS DAS UEBER DEN KERN SAGT
+# ==================================================================
+#
+# GEMESSEN in dieser Runde, und es hat einen halben Tag gekostet: der
+# Kern kennt die Groesse der ZWEITEN Platte nicht. In
+# `kernel/kmain.fi` steht
+#
+#     const DISK2_BLOCKS: u64 = 163840
+#
+# und genau diese Zahl bekommt `blk.probe_ata1`. ATA PIO sagt die
+# Groesse des Sklaven nicht von selbst, ein IDENTIFY dafuer gibt es
+# nicht, also ist sie FEST VERDRAHTET auf 80 MiB.
+#
+# Die Folge ist heimtueckisch: `blk.write_on` weist jeden Schreibzugriff
+# hinter `blocks_on` ab -- STILL. Auf einer groesseren zweiten Platte
+# landet die primaere GPT-Tafel (Sektor 2) also richtig, die
+# SICHERUNGSTAFEL am Plattenende aber nirgends. Das Ergebnis sieht wie
+# ein Erfolg aus, und erst `sgdisk -v` sagt "Main and backup partition
+# tables differ".
+#
+# Deshalb ist die Vorgabe hier 80 MiB. Wer eine groessere fremde Platte
+# messen will, muss zuerst DISK2_BLOCKS im Kern beheben -- das ist eine
+# eigene Runde, und sie gehoert nicht in diese.
+ESP_MIB=${ESP_MIB:-34}
+DATEN_MIB=${DATEN_MIB:-10}
 
 # Sektoren (512 Oktette)
 ESP_START=2048
@@ -115,7 +139,14 @@ rm -f "$ESPTMP"
 # --------------------------------------------------- die Datenpartition
 DATTMP=$(mktemp /tmp/fremd-dat-XXXXXX.img)
 dd if=/dev/zero of="$DATTMP" bs=1M count="$DATEN_MIB" status=none
-mkfs.vfat -F 32 -n "DATEN" "$DATTMP" > /dev/null 2>&1 \
+# FAT16 UND NICHT FAT32: unter 65525 Verbaenden ist FAT32 nicht
+# zulaessig, und `mkfs.vfat -F 32` legt auf einer so kleinen Partition
+# ein Dateisystem an, das kein Werkzeug mehr oeffnet. Was hier zaehlt,
+# ist ohnehin nur, dass FREMDE Oktette darin liegen, die sich Stueck
+# fuer Stueck wiederfinden lassen -- welches FAT es ist, ist dafuer
+# gleichgueltig. Auf einem echten Rechner steht hier NTFS, und auch das
+# faesst dieses Programm nie an.
+mkfs.vfat -F 16 -n "DATEN" "$DATTMP" > /dev/null 2>&1 \
     || { echo "mkfs.vfat Daten fehlgeschlagen" >&2; exit 1; }
 printf 'Die Daten des fremden Systems. Kein Oktett darf sich aendern.\n' > /tmp/fremd-daten.txt
 mcopy -o -i "$DATTMP" /tmp/fremd-daten.txt ::/WICHTIG.TXT
