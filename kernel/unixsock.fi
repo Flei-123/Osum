@@ -408,8 +408,15 @@ fn sock_free(state: u64, i: u64) {
     kstate.set(state, sk_at(i) + SK_PEER, USOCK_MAX)
     kstate.set(state, sk_at(i) + SK_RING, 0)
     kstate.set(state, sk_at(i) + SK_NAME, UNAME_MAX)
-    if kstate.get(state, UCNT_OFF + C_SOCKS) != 0 {
-        kstate.add(state, UCNT_OFF + C_SOCKS, 0 - 1)
+    // RUNDE WAYLAND, der erste Fund dieser Runde: `0 - 1` auf einem u64
+    // ist unter `profile kernel` eine GEPRUEFTE Subtraktion und haelt
+    // die Maschine an (`panic: integer overflow in u64 - u64`), statt
+    // still zu -1 zu werden. Gemessen beim ersten Lauf von wltest, in
+    // `listen_on` ueber `bind` -> `sock_free`. Also lesen, pruefen,
+    // zurueckschreiben -- wie jeder andere Zaehler dieses Kerns.
+    let n_s: u64 = kstate.get(state, UCNT_OFF + C_SOCKS)
+    if n_s != 0 {
+        kstate.set(state, UCNT_OFF + C_SOCKS, n_s - 1)
     }
 }
 
@@ -507,6 +514,16 @@ fn listen_on(state: u64, i: u64) -> u64 {
         // auffindbar, und ein `listen` darauf waere ein stilles Nichts.
         return errno.E_INVAL
     }
+    // DER ZWEITE FUND DIESER RUNDE, und er kostete einen Lauf:
+    // SK_HEAD ist bei einem frischen Socket 0 -- als RINGPOSITION
+    // richtig, als Schlangenzeiger falsch, denn 0 ist eine gueltige
+    // Socketnummer. Ein lauschender Socket meldete damit sofort
+    // "Socket 0 wartet", `accept` nahm eine Verbindung an, die es nicht
+    // gab, und der echte Client bekam danach -ECONNREFUSED.
+    //
+    // Ein lauschender Socket hat keinen Ring, also ist das Feld hier
+    // frei -- aber es muss AUSDRUECKLICH auf "leer" gesetzt werden.
+    kstate.set(state, sk_at(i) + SK_HEAD, USOCK_MAX)
     kstate.set(state, sk_at(i) + SK_STATE, S_LISTEN)
     return 0
 }
@@ -615,7 +632,18 @@ fn room(state: u64, i: u64) -> u64 {
     }
     // Ein Oktett bleibt frei, sonst sind voll und leer nicht zu
     // unterscheiden.
-    return RING_USABLE - waiting(state, i) - 1
+    //
+    // UND DIE SUBTRAKTION WIRD ABGEFANGEN. Unter `profile kernel` ist
+    // sie geprueft: waere `waiting` je RING_USABLE oder mehr, hielte
+    // `RING_USABLE - waiting - 1` die MASCHINE an statt eine null
+    // zurueckzugeben. Der Ring laesst das nicht zu -- aber ein Kern,
+    // der sich darauf verlaesst, steht auf einer Annahme, und genau so
+    // eine hat diese Runde schon einmal angehalten.
+    let w: u64 = waiting(state, i)
+    if w + 1 >= RING_USABLE {
+        return 0
+    }
+    return RING_USABLE - w - 1
 }
 
 fn peer_gone(state: u64, i: u64) -> bool {
@@ -945,8 +973,9 @@ fn shm_free(state: u64, i: u64) {
     kstate.set(state, sm_at(i) + SM_PAGES, 0)
     kstate.set(state, sm_at(i) + SM_SIZE, 0)
     kstate.set(state, sm_at(i) + SM_SEALS, 0)
-    if kstate.get(state, UCNT_OFF + C_SHMS) != 0 {
-        kstate.add(state, UCNT_OFF + C_SHMS, 0 - 1)
+    let n_h: u64 = kstate.get(state, UCNT_OFF + C_SHMS)
+    if n_h != 0 {
+        kstate.set(state, UCNT_OFF + C_SHMS, n_h - 1)
     }
 }
 
