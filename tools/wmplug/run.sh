@@ -383,8 +383,20 @@ echo "== 5. Frist: ein Plugin haengt in der Endlosschleife =="
 # `plugfrist` kuerzt die Frist des Kerns auf wenige Ticks, damit sie
 # innerhalb eines Laufs wirklich reisst. Die Frist SELBST steht in
 # kernel/wmplug.fi; dieses Wort setzt nur den Zeiger kuerzer.
-abbild hang 'boese hang' || bad "hang: das Abbild ist nicht gebaut"
-lauf hang "plugfrist" '^wm: hold'
+#
+# UND DAS TEMPO WIRD IM SELBEN LAUF GEMESSEN, NICHT ZWISCHEN ZWEIEN.
+# Hier standen die `comp=`-Zahlen des Absturzlaufs gegen die des
+# Haengerlaufs: zwei Kaltstarts, zwei verschiedene Programme, zwei
+# verschiedene Lasten -- und eine Schranke von "der Haelfte", die
+# deshalb so weich sein musste. Jetzt faehrt /bin/plugtempo im
+# Haengerlauf MIT: 60 Bilder VOR dem Haenger, dann startet es
+# `/bin/plugboese hang`, dann 60 Bilder WAEHREND des Haengers -- eine
+# Maschine, ein Lastfenster, zwei Zahlen, die man vergleichen darf.
+# `wighalt=50` verlaengert das Stillhalten wie in Abschnitt 7b, sonst
+# endet der Lauf mitten im zweiten Messfenster.
+abbild hang || bad "hang: das Abbild ist nicht gebaut"
+lauf hang "plugfrist wighalt=50 wigapp=/bin/plugtempo,plugtempo,bilder=60,hang" \
+    'tempo: ende'
 H=$TMPD/hang.clean
 sauber hang
 has "$H" "plugboese: ab jetzt hole ich nichts" "das Plugin hoert auf abzuholen"
@@ -400,15 +412,60 @@ if [ -n "${fr_hang:-}" ] && [ "$fr_hang" -gt 0 ] 2>/dev/null; then
 else
     bad "keine Zahl 'comp=' im Haengerlauf"
 fi
-if [ -n "${fr_hang:-}" ] && [ -n "${fr_tot:-}" ]; then
-    # Die zwei Zahlen stehen nebeneinander im Bericht. Verglichen wird
-    # grosszuegig (Haelfte), weil beide Laeufe verschiedene Programme
-    # starten -- eine schaerfere Schranke waere eine Scheingenauigkeit.
-    if [ "$fr_hang" -ge $((fr_tot / 2)) ]; then
-        ok "Bildrunden Absturzlauf $fr_tot gegen Haengerlauf $fr_hang -- kein Einbruch"
+# DIE BEIDEN MESSFENSTER DES HAENGERLAUFS.
+hv_b=$(zahl "$H" '^tempo: vor '  'bilder'); hn_b=$(zahl "$H" '^tempo: nach ' 'bilder')
+hv_u=$(zahl "$H" '^tempo: vor '  'us');     hn_u=$(zahl "$H" '^tempo: nach ' 'us')
+hv_f=$(zahl "$H" '^tempo: vor '  'fps10');  hn_f=$(zahl "$H" '^tempo: nach ' 'fps10')
+h_lebt=$(zahl "$H" '^tempo: haenger ' 'lebt')
+if [ "${hv_b:-0}" -ge 60 ] 2>/dev/null && [ "${hn_b:-0}" -ge 60 ] 2>/dev/null; then
+    ok "60 Bilder vor dem Haenger ($hv_b) und 60 waehrend des Haengers ($hn_b), EIN Lauf"
+else
+    bad "die zwei Messfenster des Haengerlaufs sind zu klein: '$hv_b' / '$hn_b'"
+fi
+# WAR DER HAENGER WAEHREND DES ZWEITEN FENSTERS UEBERHAUPT NOCH DA?
+# `kill(pid,0)` nach dem Fenster sagt es (plugtempo). Ohne diese Zeile
+# koennte das zweite Fenster nach dem Ende des Haengers gemessen sein --
+# und wuerde dann gar nichts belegen.
+[ "${h_lebt:-0}" = 1 ] \
+    && ok "der Haengerprozess lief noch, als das zweite Messfenster zu war (kill pid,0)" \
+    || bad "der Haenger war beim Ende des zweiten Fensters schon weg (lebt=$h_lebt)"
+if [ -n "${hv_u:-}" ] && [ -n "${hn_u:-}" ] && [ "${hv_u:-0}" -gt 0 ] 2>/dev/null; then
+    ok "Bildzeit vor dem Haenger ${hv_u} us, waehrend des Haengers ${hn_u} us"
+    # DIE SCHRANKE: das Doppelte, dieselbe wie in Abschnitt 7b. Ein
+    # Plugin, das haengt, darf die Bildzeit des Servers nicht
+    # verdoppeln -- der Kern wartet auf niemanden, er kehrt nur einmal
+    # je Tick durch (`wmplug.sweep`).
+    if [ "$hn_u" -le $(( hv_u * 2 )) ]; then
+        ok "der Haenger verdoppelt die Bildzeit nicht: ${hv_u} us -> ${hn_u} us"
     else
-        bad "Bildrunden brechen ein: $fr_tot gegen $fr_hang"
+        bad "die Bildzeit bricht unter dem Haenger ein: ${hv_u} us -> ${hn_u} us"
     fi
+else
+    bad "keine zwei Bildzeiten aus dem Haengerlauf ('$hv_u' / '$hn_u')"
+fi
+if [ -n "${hv_f:-}" ] && [ -n "${hn_f:-}" ] && [ "${hv_f:-0}" -gt 0 ] 2>/dev/null; then
+    ok "Bildrate vor dem Haenger ${hv_f} (x10), waehrend des Haengers ${hn_f} (x10)"
+    # DIE SCHRANKE IST HIER WEITER, UND SIE SAGT WARUM.
+    #
+    # GEMESSEN (14.09.2026, KVM, Exitcode 21): ohne Haenger stehen beide
+    # Fenster bei fps10=200, die Bildzeit bei 377/373 us. MIT Haenger:
+    # 363 us -> 366 us (die Arbeit des Servers bleibt gleich), aber
+    # fps10 200 -> 100. Der Grund ist NICHT der Fensterserver, sondern
+    # der TAKTGEBER der Messung: die Bilder entstehen, weil
+    # /bin/plugtempo alle 50 ms in sein Lastfenster malt. Neben einem
+    # Ring-3-Prozess, der ununterbrochen rechnet, bekommt es nur noch
+    # jede zweite Scheibe -- der Planer teilt, wie er soll. Das ist der
+    # Preis der Ring-3-Trennung und kein Einbruch im Kern: der Kern
+    # wartet auf niemanden, seine Bildzeit steht eine Zeile weiter oben.
+    # Geprueft wird deshalb streng auf die BILDZEIT (oben) und weit auf
+    # die Rate: ein Drittel waere ein Stillstand, und den gibt es nicht.
+    if [ "$hn_f" -ge $(( hv_f / 3 )) ]; then
+        ok "der Schreibtisch malt unter dem Haenger weiter: ${hn_f} ist mehr als ein Drittel von ${hv_f}"
+    else
+        bad "die Bildrate bricht unter dem Haenger zusammen: ${hv_f} -> ${hn_f} (x10)"
+    fi
+else
+    bad "keine zwei Bildraten aus dem Haengerlauf ('$hv_f' / '$hn_f')"
 fi
 
 # ============================================= 6. die Rechte-Gegenprobe
