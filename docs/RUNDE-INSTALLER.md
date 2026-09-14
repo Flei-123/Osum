@@ -194,7 +194,51 @@ schwerer:
 Der Installer schreibt die Datei jetzt selbst, mit der Kommandozeile, die
 zu dem passt, was er angelegt hat.
 
-### 3.6 Zwei Fallen im Messaufbau
+### 3.6 Der fest verdrahtete Zielpfad — und der Lauf, der ihn fand
+
+In der Vorlage und bis in diese Runde hinein stand der Name der
+EFI-Partition fest:
+
+```firn
+static mut D_HDA1 = "/dev/hda1"
+```
+
+Das geht genau so lange gut, wie **eine** Platte im Rechner steckt. Wer
+auf die zweite installiert, bekommt GPT und Wurzeldateisystem richtig auf
+`/dev/hdb` — und danach hängt das Programm `/dev/hda1` ein und schreibt
+den Bootlader auf die EFI-Partition der **ersten**. Das ist kein
+Schönheitsfehler: es ist ein Schreibzugriff auf einen Datenträger, den
+der Benutzer gar nicht genannt hat.
+
+Der Name wird jetzt aus dem gewählten Gerät **gebaut**. Der Kern löst das
+ohnehin auf: `source_dev` in `kernel/sys.fi` nimmt die Ziffer hinter dem
+Namen als Partitionsnummer, `/dev/hdb1` ist die erste Partition von
+`/dev/hdb`.
+
+### 3.7 Der Lauf mit zwei Platten
+
+`tools/install/zweiplatten.sh` stellt die Falle auf: **`hda` ist
+absichtlich schon beschrieben** — es ist die fertige Installation aus der
+Abnahme —, **`hdb` ist leer und das Ziel**. Ergebnis, **7 Zusagen, 0
+Fehler** (`docs/bilder/installer/zweiplatten.log`):
+
+```
+installer: disk /dev/hda 655360
+installer: disk /dev/hdb 163840
+installer: ready n=2
+installer: esp=/dev/hdb1          <- das ZIEL, nicht die erste Platte
+installer: fertig
+
+[ ok ] es hat die EFI-Partition des ZIELS eingehaengt: /dev/hdb1
+[ ok ] DIE ERSTE PLATTE IST OKTETT FUER OKTETT UNVERAENDERT
+[ ok ] der Bootlader liegt auf der EFI-Partition der ZWEITEN Platte
+```
+
+Die Prüfsumme der ersten Platte ist vorher und nachher dieselbe
+(`e94f44573ed917af…`). Die anderen Zusagen könnten stimmen, während
+nebenbei etwas kaputtgeht — deshalb wird sie genommen.
+
+### 3.8 Zwei Fallen im Messaufbau
 
 * **`wighalt` wirkt nur zusammen mit `wmhold`.** Die Halteschleife in
   `kernel/kgui.fi` steht hinter `if !mode_on(M_WMHOLD)`. Ohne `wmhold`
@@ -240,14 +284,8 @@ wiedererkennt.
 
 ## 5. Was offen bleibt
 
-* **Auf ein zweites Laufwerk ist nicht gemessen.** Der Name der
-  EFI-Partition wird seit dieser Runde aus dem gewählten Gerät *gebaut*
-  (`/dev/hdb` → `/dev/hdb1`) statt fest zu stehen — der Weg dafür ist im
-  Kern da (`source_dev` in `kernel/sys.fi` nimmt die Ziffer hinter dem
-  Namen als Partitionsnummer). Gemessen ist aber nur die Installation
-  auf `/dev/hda`; ein Lauf mit zwei Platten, bei dem die zweite das Ziel
-  ist, fehlt. Bis dahin ist das eine begründete Erwartung und kein
-  Beleg.
+* ~~Auf ein zweites Laufwerk ist nicht gemessen.~~ **Gemessen**, siehe
+  Abschnitt 3.7.
 * **Die Fortschrittsanzeige steht still, während kopiert wird.** Die
   Installation läuft in einem Zug und nicht häppchenweise zwischen zwei
   Ereignissen — Absicht (eine halb geschriebene Partitionstafel ist ein
