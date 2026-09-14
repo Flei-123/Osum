@@ -121,6 +121,9 @@ const R_INOFILE: u64 = 26 // den Interpreter gibt es nicht
 const R_ICHAIN: u64 = 27 // der Interpreter hat selbst einen PT_INTERP
 const R_IFORM: u64 = 28 // der Interpreter ist kein brauchbares ET_DYN
 const R_STACK: u64 = 29 // der Startstapel passt nicht auf die Seite
+// KEIN Grund, sondern die Auskunft "dieses Bild braucht gar keinen
+// Lader". Muss sich von R_OK (= 0) unterscheiden, siehe `read_interp`.
+const R_KEINER: u64 = 30
 
 // ---------------------------------------------------------- the format
 
@@ -588,7 +591,7 @@ fn load_at(state: u64, t: u64, ino: u64, bias: u64) -> u64 {
                 if e > top {
                     top = e
                 }
-                say_segment(state, t, ph)
+                say_segment(state, t, ph, bias)
             }
         }
         seg = seg + 1
@@ -619,7 +622,17 @@ fn load_at(state: u64, t: u64, ino: u64, bias: u64) -> u64 {
 // loader just wrote, not out of the file it read. `w=` and `x=` are what
 // `proc.page_free`/`proc.page_exec` see, `f=` is the frame the first page
 // landed on.
-fn say_segment(state: u64, t: u64, ph: u64) {
+// RUNDE DYNLADER: DIE ZEILE MUSS DIE BASIS KENNEN.
+//
+// Bis zu dieser Runde druckte sie `p_vaddr` aus der Datei und fragte die
+// Seitentabelle an genau dieser Adresse. Fuer ein verschobenes Bild ist
+// beides falsch: die Datei sagt 0x0, im Adressraum liegt das Segment auf
+// 0x40A00000, und `translate(0x0)` antwortet 0 -- also stand in der
+// Zeile `v=0x0 f=0x0`, und das sah aus, als sei nichts abgebildet
+// worden, waehrend in Wahrheit alles richtig lag. Eine Meldung, die beim
+// Verschieben nicht mitverschiebt, misst nicht das System, sondern die
+// Datei.
+fn say_segment(state: u64, t: u64, ph: u64, bias: u64) {
     var s_seg: [u8; 10] = "elf: seg \0"
     var s_v: [u8; 4] = " v=\0"
     var s_f: [u8; 4] = " f=\0"
@@ -627,7 +640,7 @@ fn say_segment(state: u64, t: u64, ph: u64) {
     var s_mem: [u8; 8] = " memsz=\0"
     var s_w: [u8; 4] = " w=\0"
     var s_x: [u8; 4] = " x=\0"
-    let vaddr: u64 = get64(ph + P_VADDR)
+    let vaddr: u64 = get64(ph + P_VADDR) + bias
     let flags: u64 = kstate.get32(ph + P_FLAGS)
     serial.puts((&s_seg[0]) as u64)
     serial.dec(flags)
@@ -939,10 +952,18 @@ fn build_stack(state: u64, t: u64, args: u64, argc: u64,
     // nicht dieselben sechzehn Oktette sehen, und es ist NICHT genug fuer
     // etwas, das Zufall braucht. Wer Zufall will, ruft `getrandom` (318,
     // der Kern hat es) -- musl tut das fuer `arc4random` auch.
+    // DIE MASKE IST PFLICHT, NICHT STIL. Unter `profile kernel` ist die
+    // Arithmetik GEPRUEFT (SPEC 13/L9), und `as u8` auf einem Wert ueber
+    // 255 ist kein stilles Abschneiden, sondern `osum_panic` -- der Kern
+    // ist dann tot. Gemessen, bevor `& 255` hier stand:
+    //   panic: integer overflow casting 'u64 as u8' at elf.fi:958
+    // und zwar NACHDEM beide Bilder schon richtig lagen. Jede Stelle
+    // dieser Datei, die ein Oktett aus einer Rechnung nimmt, maskiert
+    // deshalb ausdruecklich.
     let seed: u64 = kstate.get(state, kstate.TICKS) + t * 2654435761
     while b < 16 {
-        kstate.set8(frame + rnd + b,
-            ((seed >> ((b & 7) * 8)) + b * 31 + t) as u8)
+        let wert: u64 = (seed >> ((b & 7) * 8)) + b * 31 + t
+        kstate.set8(frame + rnd + b, (wert & 255) as u8)
         b = b + 1
     }
     sp_str = sp_str + 16
@@ -1293,8 +1314,17 @@ const PIE_BASE: u64 = 0x40100000
 // gelesen), aber sein INHALT nicht -- `p_offset`/`p_filesz` zeigen auf
 // eine Zeichenkette in der Datei. Die wird hier geholt.
 //
-// Rueckgabe: 0 = kein PT_INTERP (das Bild braucht keinen Lader),
+// Rueckgabe: R_KEINER = kein PT_INTERP (das Bild braucht keinen Lader),
 // R_OK = Pfad steht in `dst`, sonst ein Grund.
+//
+// WARUM R_KEINER UND NICHT 0, und das war ein echter Fehler dieser
+// Runde: `R_OK` IST 0. Ein `return 0` fuer "kein PT_INTERP gefunden"
+// ist damit buchstaeblich dasselbe Wort wie "Pfad steht bereit", und
+// der Aufrufer, der auf `ir == R_OK` prueft, haelt JEDES Bild fuer
+// eines mit Lader -- auch die 135 statischen. Gemessen sah das so aus:
+// `elf: interp` druckte eine LEERE Zeile und der Lader suchte einen
+// Interpreter namens "", den es nicht gibt (Grund 26). Zwei Zustaende,
+// die sich unterscheiden muessen, brauchen zwei Zahlen.
 //
 // DREI DINGE WERDEN GEPRUEFT, und jedes davon ist ein Weg, auf dem eine
 // feindliche Datei sonst in den Kernel kaeme:
@@ -1338,7 +1368,7 @@ fn read_interp(state: u64, ino: u64, dst: u64) -> u64 {
         }
         seg = seg + 1
     }
-    return 0
+    return R_KEINER
 }
 
 fn aufloesen(state: u64, path: u64, args: u64, argc: u64) -> u64 {
@@ -1475,7 +1505,7 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
     let ipath: u64 = state + kstate.K16_OFF + kstate.FT_IPATH
         + 3 * IPATH_MAX
     let ir: u64 = read_interp(state, ino, ipath)
-    if ir != 0 {
+    if ir != R_KEINER {
         if ir != R_OK {
             proc.discard(state, t)
             sched.irq_restore(flags)
@@ -1484,6 +1514,15 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
         }
     }
     let braucht_lader: bool = ir == R_OK
+    // RUNDE DYNLADER: WAS FUER EIN LADER VERLANGT WIRD, WIRD GESAGT.
+    // Ein Programm, das mit "interpreter missing" abgelehnt wird, ohne
+    // dass irgendwo steht, WELCHER Pfad gesucht wurde, ist so schwer zu
+    // finden wie ein Rechner, der stehenbleibt (derselbe Satz wie ueber
+    // `say_badentry`). Die Zeile kostet nichts bei Programmen ohne
+    // PT_INTERP -- die kommen hier gar nicht vorbei.
+    if braucht_lader {
+        say_interp(ipath)
+    }
     // Ein ET_DYN wird auf PIE_BASE geschoben, ein ET_EXEC bleibt, wo es
     // sich selbst hingelegt hat. Das ist die EINZIGE Stelle, an der sich
     // die beiden unterscheiden.
@@ -1543,7 +1582,7 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
         // genau diesen Fall.
         let kette: u64 = state + kstate.K16_OFF + kstate.FT_IPATH
             + 4 * IPATH_MAX
-        if read_interp(state, iino, kette) != 0 {
+        if read_interp(state, iino, kette) != R_KEINER {
             proc.discard(state, t)
             sched.irq_restore(flags)
             fail(state, R_ICHAIN)
@@ -1952,4 +1991,12 @@ fn say_text_f(r: u64) {
         return
     }
     serial.puts((&tz[0]) as u64)
+}
+
+// RUNDE DYNLADER: der Pfad, den ein Bild als Lader verlangt.
+fn say_interp(p: u64) {
+    var s_i: [u8; 14] = "elf: interp \0\0"
+    serial.puts((&s_i[0]) as u64)
+    serial.puts(p)
+    serial.nl()
 }
