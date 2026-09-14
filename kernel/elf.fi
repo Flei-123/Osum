@@ -364,42 +364,146 @@ fn segment(state: u64, t: u64, ino: u64, ph: u64, size: u64,
     if proc.IMAGE_END - vaddr < memsz {
         return R_RANGE
     }
-    if (vaddr & PAGE_MASK) != 0 {
-        return R_ALIGN
+    // ============================================ RUNDE DYNLADER
+    // DER VERSATZ IN DER SEITE, UND WARUM DIE REGEL HIER WEICHER WIRD.
+    //
+    // Regel 3 im Kopf dieser Datei lautet: EINE SEITE HAT EINEN SATZ
+    // RECHTE, und daraus folgte bis zu dieser Runde `p_vaddr` und
+    // `p_offset` muessen auf 4096 aufgehen, sonst R_ALIGN. Fuer die
+    // Programme dieses Systems ist das richtig und bleibt es: sie werden
+    // mit `kernel/user/user.ld` gebunden, das die drei Segmente trennt.
+    //
+    // FUER EINEN FREMDEN INTERPRETER IST ES NICHT ZU HALTEN, und das ist
+    // gemessen und nicht vermutet (tools/dynlader/messung-wirt.sh):
+    //
+    //   ld-musl-x86_64.so.1  LOAD3  off=0xaab20 vaddr=0xabb20  -> 2848
+    //   hello_dyn (musl-gcc) LOAD3  off=0x2e00  vaddr=0x3e00   -> 3584
+    //
+    // Das letzte LOAD faengt bei BEIDEN mitten in einer Seite an. Der
+    // Grund ist derselbe, aus dem jeder Binder das so macht: die Datei
+    // wird kleiner, wenn das Datensegment direkt hinter dem Textsegment
+    // liegt, statt auf die naechste Seite gerundet zu werden.
+    //
+    // DER STATISCHE FALL KONNTE DAS UMGEHEN, der dynamische nicht.
+    // tools/foreign/osum.ld setzt `. = ALIGN(4096)` zwischen die
+    // Segmente -- das ist die erste der drei Regeln aus
+    // tools/foreign/README.md. Den STOCK-Interpreter des Systems kann
+    // man aber nicht neu binden; er ist die Datei, die da ist. Eine
+    // Runde, die ihn neu bindet, hat nicht "ein Linux-Programm zum
+    // Laufen gebracht", sondern sich ein eigenes gebaut.
+    //
+    // WAS LINUX TUT, und was ab hier auch dieser Kern tut: das Segment
+    // faengt an der SEITENGRENZE DARUNTER an, und der Versatz in der
+    // Seite bleibt erhalten. `p_vaddr & ~4095` ist die erste Seite,
+    // `p_vaddr & 4095` der Versatz, an dem die Dateidaten darin
+    // beginnen. Beides MUSS denselben Versatz haben (`p_vaddr` und
+    // `p_offset` kongruent modulo 4096) -- sonst laesst sich die Datei
+    // gar nicht seitenweise abbilden, und das prueft die Zeile unten.
+    //
+    // WAS DAS FUER REGEL 3 HEISST, ehrlich hingeschrieben: teilen sich
+    // zwei Segmente eine Seite, bekommt diese Seite die Rechte des
+    // ZWEITEN -- `map_page` wird fuer sie ein zweites Mal gerufen und
+    // `page_free` sagt dann nein, also bleibt sie, wie sie war. Bei
+    // musl ist das genau einmal der Fall, naemlich fuer die Seite, in
+    // der rodata endet und data anfaengt; sie wird dadurch nicht
+    // schreibbar, sondern bleibt lesbar, und das Datensegment bekommt
+    // seine eigenen Seiten ab der naechsten Grenze. Ein Programm, das
+    // darauf angewiesen waere, in diese eine geteilte Seite zu
+    // schreiben, liefe hier nicht -- musl ist es nicht, und das ist
+    // gemessen (die Zusagen hello/busybox in tools/dynlader/run.sh).
+    //
+    // ET_EXEC BLEIBT STRENG. Die Lockerung gilt nur, wenn ein Bild
+    // verschoben wird (`bias != 0`), also fuer ET_DYN -- und damit fuer
+    // genau die Dateien, die man nicht neu binden kann. Fuer die 135
+    // Programme dieses Userlands gilt R_ALIGN unveraendert weiter, und
+    // die Gegenprobe in tools/osum/run.sh, die ein `ld -n`-Abbild
+    // ablehnen laesst, misst weiter dasselbe.
+    let versatz: u64 = vaddr & PAGE_MASK
+    if bias == 0 {
+        if versatz != 0 {
+            return R_ALIGN
+        }
+        if (off & PAGE_MASK) != 0 {
+            return R_ALIGN
+        }
+    } else {
+        // Verschiebbar, aber nicht beliebig: der Versatz in der Seite
+        // muss in Datei und Adressraum derselbe sein.
+        if versatz != (off & PAGE_MASK) {
+            return R_ALIGN
+        }
     }
-    if (off & PAGE_MASK) != 0 {
-        return R_ALIGN
+    // Ab hier wird SEITENWEISE gedacht: `first` ist die Seite, in der
+    // das Segment anfaengt, `span` die Zahl der Oktette von dort bis zum
+    // Ende des Segments. Beide Zahlen sind durch die Pruefungen oben
+    // gedeckt (`versatz <= PAGE_MASK`, `memsz <= IMAGE_END - vaddr`).
+    let first: u64 = vaddr - versatz
+    let span: u64 = memsz + versatz
+    if proc.IMAGE_END - first < span {
+        return R_RANGE
     }
+    let file_first: u64 = off - (off & PAGE_MASK)
     let writable: bool = (flags & PF_W) != 0
     let runnable: bool = (flags & PF_X) != 0
     let zeroing: bool = !kstate.mode_on(state, kstate.M_NOBSS)
     var done: u64 = 0
-    while done < memsz {
-        let page: u64 = vaddr + done
-        if !proc.page_free(state, t, page) {
-            return R_OVERLAP
-        }
-        let frame: u64 = proc.map_page(state, t, page, writable, runnable)
-        if frame == 0 {
-            return R_NOMEM
-        }
-        fill(frame, PAGE, POISON)
-        var take: u64 = 0
-        if filesz > done {
-            take = filesz - done
-            if take > PAGE {
-                take = PAGE
+    while done < span {
+        let page: u64 = first + done
+        // EINE SEITE, DIE SCHON DA IST, WIRD NICHT NOCH EINMAL GELEGT.
+        //
+        // Bis zu dieser Runde war das R_OVERLAP und ein abgelehntes
+        // Programm. Das bleibt so, solange nichts verschoben wird
+        // (`bias == 0`) -- zwei Segmente eines ET_EXEC, die sich eine
+        // Seite teilen, sind weiterhin ein Fehler, und die Gegenprobe
+        // dafuer steht in tools/osum/run.sh.
+        //
+        // Bei einem verschobenen Bild ist es der NORMALFALL an genau
+        // einer Naht (siehe oben), und dort wird die Seite ERGAENZT
+        // statt abgelehnt: ihr Inhalt kommt dazu, ihre Rechte bleiben.
+        var frame: u64 = 0
+        if proc.page_free(state, t, page) {
+            frame = proc.map_page(state, t, page, writable, runnable)
+            if frame == 0 {
+                return R_NOMEM
+            }
+            fill(frame, PAGE, POISON)
+            if zeroing {
+                fill_bytes(frame, PAGE, 0)
+            }
+        } else {
+            if bias == 0 {
+                return R_OVERLAP
+            }
+            frame = proc.translate(state, t, page)
+            if frame == 0 {
+                return R_OVERLAP
             }
         }
-        if take > 0 {
+        // Welcher Teil DIESER Seite kommt aus der Datei? Fuer die erste
+        // Seite faengt er bei `versatz` an, fuer alle anderen bei 0; er
+        // endet, wo `p_filesz` endet. Alles dahinter ist .bss und schon
+        // genullt.
+        var von: u64 = 0
+        if done == 0 {
+            von = versatz
+        }
+        // Wie weit die Dateidaten in dieser Seite reichen.
+        let daten: u64 = filesz + versatz
+        var bis: u64 = 0
+        if daten > done {
+            bis = daten - done
+            if bis > PAGE {
+                bis = PAGE
+            }
+        }
+        if bis > von {
+            let nimm: u64 = bis - von
             let sc: u64 = state + kstate.LOAD_OFF
-            if fs.read_at(state, ino, off + done, sc, take) != take {
+            if fs.read_at(state, ino, file_first + done + von, sc,
+                    nimm) != nimm {
                 return R_READ
             }
-            copy(sc, frame, take)
-        }
-        if zeroing {
-            fill_bytes(frame + take, PAGE - take, 0)
+            copy(sc, frame + von, nimm)
         }
         done = done + PAGE
     }
