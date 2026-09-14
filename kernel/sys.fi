@@ -10258,6 +10258,10 @@ fn unref_of(state: u64, of: u64) {
     if of < file.MAX_OPEN && file.open_kind(state, of) == file.K_USOCK {
         if file.open_refs(state, of) <= 1 {
             unixsock.sock_free(state, file.open_ino(state, of))
+            // Wer auf der anderen Seite in `poll` wartet, muss
+            // erfahren, dass niemand mehr da ist -- sonst wartet er
+            // auf eine Antwort, die nie kommt.
+            sched.poll_kick(state)
         }
     }
     if of < file.MAX_OPEN && file.open_kind(state, of) == file.K_SHM {
@@ -13346,6 +13350,9 @@ fn do_uconnect(state: u64, me: u64, fd: u64, addr: u64, len: u64) -> u64 {
     if c != 0 {
         return neg(c)
     }
+    // Ein Server, der auf dem lauschenden Socket in `poll` schlaeft,
+    // erfaehrt sonst nie, dass jemand angeklopft hat.
+    sched.poll_kick(state)
     // Der Server nimmt die Verbindung in seinem eigenen `accept` an.
     // Bis dahin wartet dieser Aufruf -- ein `connect` auf einen
     // Unix-Socket ist bei Linux fertig, sobald er in der Schlange
@@ -13518,6 +13525,18 @@ fn do_sendmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
                 }
                 sent = sent + w
                 off = off + w
+                // DER VIERTE FUND DIESER RUNDE, und der, an dem die
+                // ganze Runde haengengeblieben ist: `poll` LEGT SICH
+                // SCHLAFEN (Zustand S_POLL) und wird NUR von
+                // `sched.poll_kick` geweckt -- nicht davon, dass
+                // Oktette im Ring liegen. Ohne diese Zeile schickte
+                // der Server seine 180 Oktette, der Kern bestaetigte
+                // sie, und der Client schlief trotzdem weiter in
+                // seinem ersten `poll`. Das sah aus wie ein Server,
+                // der nicht antwortet, und war ein Wecker, der nicht
+                // klingelte. Jedes Rohr in diesem Kern tut das seit
+                // Runde K4 an derselben Stelle (`pipe_write`).
+                sched.poll_kick(state)
             }
         }
         v = v + 1
