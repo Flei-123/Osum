@@ -1,0 +1,304 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/crypto/blake2b.fi -- BLAKE2b (RFC 7693), Runde KRYPTO.
+//
+// ================================================== WARUM DIESE DATEI
+//
+// Der Baum hat seit Runde TUNNEL `blake2s.fi`, weil WireGuard BLAKE2s
+// vorschreibt. Argon2 schreibt BLAKE2b vor -- und das ist NICHT
+// dieselbe Funktion mit anderer Ausgabelaenge:
+//
+//               BLAKE2s              BLAKE2b
+//   Wort        32 Bit               64 Bit
+//   Block       64 Oktette           128 Oktette
+//   Runden      10                   12
+//   Rotationen  16, 12, 8, 7         32, 24, 16, 63
+//   sigma       10 Zeilen            12 Zeilen (Zeile 10, 11 = 0, 1)
+//   Ausgabe     bis 32 Oktette       bis 64 Oktette
+//
+// Genau deshalb stand in `scrypt.fi` (Runde SYNC) der Satz, Argon2id
+// falle aus, weil BLAKE2b fehle. Diese Datei loest das ein, und sie ist
+// die Voraussetzung fuer `argon2.fi` daneben.
+//
+// ====================================== WAS IN FIRN HIER EINFACHER IST
+//
+// `blake2s.fi` haengt hinter JEDE Rechnung ein `& M32`, weil Firns `u64`
+// breiter ist als BLAKE2s' Wort. Bei BLAKE2b ist das Wort 64 Bit BREIT
+// -- genau so breit wie `u64`. Die Maske entfaellt vollstaendig, und die
+// Ueberlaufaddition `+%` IST die Definition: BLAKE2b rechnet modulo
+// 2^64, und `+%` rechnet modulo 2^64.
+//
+// DIE FALLE STEHT AN EINER ANDEREN STELLE, und sie ist die haeufigste
+// ueberhaupt bei BLAKE2: LITTLE ENDIAN, durchgehend, bei der Eingabe
+// wie bei der Ausgabe. Das ist die Umkehrung von SHA-2. Ein einziges
+// vertauschtes Oktett erzeugt einen Hash, der stabil aussieht und mit
+// nichts auf der Welt uebereinstimmt.
+//
+// DESHALB WIRD DIESE DATEI NICHT GEGLAUBT, SONDERN GEMESSEN:
+// `tools/krypto/vektoren.py` schickt dieselben Eingaben durch Pythons
+// `hashlib.blake2b` (das ist die Referenzumsetzung ueber OpenSSL) und
+// vergleicht Oktett fuer Oktett -- unverschluesselt, mit Schluessel und
+// mit jeder Ausgabelaenge von 1 bis 64.
+//
+// Wie `sha256.fi`, `blake2s.fi` und `aes.fi`: KEINE `profile`-Zeile,
+// KEIN `import`, kein Allokator, kein Systemaufruf, aller Zustand beim
+// Aufrufer. Damit laesst sie sich in den Kern, in ein Ring-3-Programm
+// und in einen Testlaeufer auf dem Wirt binden, ohne dass eine Zeile
+// sich aendert.
+
+export {
+    Blake2b, blake2b_new, blake2b_new_keyed, blake2b_update,
+    blake2b_final, blake2b, blake2b_keyed,
+    BLAKE2B_OUT, BLAKE2B_BLOCK
+}
+
+const BLAKE2B_OUT: usize = 64
+const BLAKE2B_BLOCK: usize = 128
+
+// Der Zustand. `buf` haelt Oktette, die angekommen, aber noch nicht
+// verdichtet sind -- genau deshalb, weil der LETZTE Block die
+// Endemarkierung braucht und man ihm nicht ansieht, dass er der letzte
+// ist, solange noch etwas kommen kann.
+struct Blake2b {
+    h: [u64; 8],
+    buf: [u8; 128],
+    used: usize,
+    // Der Zaehler t ist in RFC 7693 128 Bit breit. Eine Platte, die
+    // 2^64 Oktette durch einen Hash schiebt, gibt es nicht; das obere
+    // Wort bleibt deshalb 0 und steht trotzdem hier, damit die
+    // Verdichtung die Form des RFC hat und nicht eine Abkuerzung.
+    t_lo: u64,
+    t_hi: u64,
+    outlen: usize,
+}
+
+fn ld8(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn st8(p: u64, i: u64, v: u64) {
+    *((p + i) as *mut u8) = (v & 255) as u8
+}
+
+fn rotr64(x: u64, n: u64) -> u64 {
+    if n == 0 {
+        return x
+    }
+    return (x >> n) | (x << (64 - n))
+}
+
+// Der Anfangsvektor: die ersten 64 Bit der Nachkommateile der Wurzeln
+// der ersten acht Primzahlen (RFC 7693 2.6). Dieselben acht Woerter,
+// mit denen SHA-512 anfaengt.
+fn iv(i: usize) -> u64 {
+    let t: [u64; 8] = [
+        0x6A09E667F3BCC908, 0xBB67AE8584CAA73B,
+        0x3C6EF372FE94F82B, 0xA54FF53A5F1D36F1,
+        0x510E527FADE682D1, 0x9B05688C2B3E6C1F,
+        0x1F83D9ABFB41BD6B, 0x5BE0CD19137E2179]
+    return t[i]
+}
+
+// Der Nachrichtenplan, RFC 7693 2.7. ZWOELF Zeilen -- die Zeilen 10 und
+// 11 wiederholen 0 und 1. `blake2s.fi` hat nur zehn, und wer die Tabelle
+// von dort abschreibt, rechnet die letzten zwei Runden falsch.
+fn sigma(r: usize, i: usize) -> u64 {
+    let s: [u8; 192] = [
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+        14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3,
+        11, 8, 12, 0, 5, 2, 15, 13, 10, 14, 3, 6, 7, 1, 9, 4,
+        7, 9, 3, 1, 13, 12, 11, 14, 2, 6, 5, 10, 4, 0, 15, 8,
+        9, 0, 5, 7, 2, 4, 10, 15, 14, 1, 11, 12, 6, 8, 3, 13,
+        2, 12, 6, 10, 0, 11, 8, 3, 4, 13, 7, 5, 15, 14, 1, 9,
+        12, 5, 1, 15, 14, 13, 4, 10, 0, 7, 6, 3, 9, 2, 8, 11,
+        13, 11, 7, 14, 12, 1, 3, 9, 5, 0, 15, 4, 8, 6, 2, 10,
+        6, 15, 14, 9, 11, 3, 0, 8, 12, 2, 13, 7, 1, 4, 10, 5,
+        10, 2, 8, 4, 7, 6, 1, 5, 15, 11, 9, 14, 3, 12, 13, 0,
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+        14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3]
+    return s[r * 16 + i] as u64
+}
+
+// Die Mischfunktion G, RFC 7693 3.1. Die Rotationen sind 32, 24, 16, 63
+// -- BLAKE2s hat an denselben vier Stellen 16, 12, 8, 7.
+fn g(v: *mut [u64; 16], a: usize, b: usize, c: usize, d: usize,
+    x: u64, y: u64) {
+    (*v)[a] = (*v)[a] +% (*v)[b] +% x
+    (*v)[d] = rotr64((*v)[d] ^ (*v)[a], 32)
+    (*v)[c] = (*v)[c] +% (*v)[d]
+    (*v)[b] = rotr64((*v)[b] ^ (*v)[c], 24)
+    (*v)[a] = (*v)[a] +% (*v)[b] +% y
+    (*v)[d] = rotr64((*v)[d] ^ (*v)[a], 16)
+    (*v)[c] = (*v)[c] +% (*v)[d]
+    (*v)[b] = rotr64((*v)[b] ^ (*v)[c], 63)
+}
+
+// Die Verdichtung F, RFC 7693 3.2. `p` zeigt auf 128 Oktette, `t` ist
+// der Oktettzaehler NACH diesem Block, `last` setzt f0 auf lauter Einsen.
+fn compress(s: *mut Blake2b, p: u64, last: bool) {
+    var m: [u64; 16] = [0; 16]
+    var i: usize = 0
+    while i < 16 {
+        // LITTLE ENDIAN, acht Oktette je Wort. Das niedrigstwertige
+        // Oktett steht VORNE.
+        let b: u64 = i as u64 * 8
+        m[i] = ld8(p, b)
+            | (ld8(p, b + 1) << 8)
+            | (ld8(p, b + 2) << 16)
+            | (ld8(p, b + 3) << 24)
+            | (ld8(p, b + 4) << 32)
+            | (ld8(p, b + 5) << 40)
+            | (ld8(p, b + 6) << 48)
+            | (ld8(p, b + 7) << 56)
+        i = i + 1
+    }
+    var v: [u64; 16] = [0; 16]
+    i = 0
+    while i < 8 {
+        v[i] = (*s).h[i]
+        v[i + 8] = iv(i)
+        i = i + 1
+    }
+    v[12] = v[12] ^ (*s).t_lo
+    v[13] = v[13] ^ (*s).t_hi
+    if last {
+        v[14] = v[14] ^ 0xFFFFFFFFFFFFFFFF
+    }
+    var r: usize = 0
+    while r < 12 {
+        g(&v, 0, 4, 8, 12, m[sigma(r, 0) as usize], m[sigma(r, 1) as usize])
+        g(&v, 1, 5, 9, 13, m[sigma(r, 2) as usize], m[sigma(r, 3) as usize])
+        g(&v, 2, 6, 10, 14, m[sigma(r, 4) as usize], m[sigma(r, 5) as usize])
+        g(&v, 3, 7, 11, 15, m[sigma(r, 6) as usize], m[sigma(r, 7) as usize])
+        g(&v, 0, 5, 10, 15, m[sigma(r, 8) as usize], m[sigma(r, 9) as usize])
+        g(&v, 1, 6, 11, 12, m[sigma(r, 10) as usize], m[sigma(r, 11) as usize])
+        g(&v, 2, 7, 8, 13, m[sigma(r, 12) as usize], m[sigma(r, 13) as usize])
+        g(&v, 3, 4, 9, 14, m[sigma(r, 14) as usize], m[sigma(r, 15) as usize])
+        r = r + 1
+    }
+    i = 0
+    while i < 8 {
+        (*s).h[i] = (*s).h[i] ^ v[i] ^ v[i + 8]
+        i = i + 1
+    }
+}
+
+// ------------------------------------------------------------- der Zustand
+
+fn blake2b_new() -> Blake2b {
+    return blake2b_new_keyed(0, 0, BLAKE2B_OUT)
+}
+
+// Der allgemeine Einstieg. `keylen` 0 heisst ohne Schluessel; `outlen`
+// ist die gewuenschte Ausgabelaenge in Oktetten und geht IN den Zustand
+// (Parameterblock), sie ist KEINE Kuerzung am Ende. BLAKE2b-256 und die
+// ersten 32 Oktette von BLAKE2b-512 sind verschiedene Werte.
+fn blake2b_new_keyed(key: u64, keylen: usize, outlen: usize) -> Blake2b {
+    var s: Blake2b = Blake2b {
+        h: [0; 8], buf: [0 as u8; 128], used: 0,
+        t_lo: 0, t_hi: 0, outlen: 0,
+    }
+    if outlen == 0 || outlen > BLAKE2B_OUT || keylen > BLAKE2B_OUT {
+        // outlen 0 ist die Markierung "unbrauchbar"; jede Verrichtung
+        // darauf tut nichts und `final` meldet false.
+        return s
+    }
+    s.outlen = outlen
+    var i: usize = 0
+    while i < 8 {
+        s.h[i] = iv(i)
+        i = i + 1
+    }
+    // Der Parameterblock, RFC 7693 2.8: Oktett 0 die Ausgabelaenge,
+    // Oktett 1 die Schluessellaenge, Oktett 2 fanout = 1, Oktett 3
+    // Tiefe = 1. Alles andere bleibt 0 (sequentielle Betriebsart).
+    s.h[0] = s.h[0] ^ (outlen as u64) ^ ((keylen as u64) << 8)
+        ^ (1 << 16) ^ (1 << 24)
+    if keylen > 0 {
+        // Der Schluessel ist der ERSTE Block, auf 128 Oktette mit Nullen
+        // aufgefuellt -- auch dann, wenn keine Nachricht folgt.
+        var j: usize = 0
+        while j < keylen {
+            s.buf[j] = ld8(key, j as u64) as u8
+            j = j + 1
+        }
+        while j < 128 {
+            s.buf[j] = 0
+            j = j + 1
+        }
+        s.used = 128
+    }
+    return s
+}
+
+fn blake2b_update(s: *mut Blake2b, p: u64, n: usize) {
+    if (*s).outlen == 0 {
+        return
+    }
+    var at: usize = 0
+    while at < n {
+        if (*s).used == 128 {
+            // Der Puffer ist voll und es kommt MEHR -- also ist dieser
+            // Block nicht der letzte und darf jetzt verdichtet werden.
+            (*s).t_lo = (*s).t_lo +% 128
+            if (*s).t_lo < 128 {
+                (*s).t_hi = (*s).t_hi +% 1
+            }
+            compress(s, (&(*s).buf[0]) as u64, false)
+            (*s).used = 0
+        }
+        let room: usize = 128 - (*s).used
+        var take: usize = n - at
+        if take > room {
+            take = room
+        }
+        var i: usize = 0
+        while i < take {
+            (*s).buf[(*s).used + i] = ld8(p, (at + i) as u64) as u8
+            i = i + 1
+        }
+        (*s).used = (*s).used + take
+        at = at + take
+    }
+}
+
+fn blake2b_final(s: *mut Blake2b, out: u64) -> bool {
+    if (*s).outlen == 0 {
+        return false
+    }
+    // Was im Puffer steht, ist der letzte Block: mit Nullen aufgefuellt,
+    // der Zaehler um die ECHTE Zahl der Oktette weitergestellt (nicht um
+    // 128), die Endemarkierung gesetzt.
+    let rest: u64 = (*s).used as u64
+    var i: usize = (*s).used
+    while i < 128 {
+        (*s).buf[i] = 0
+        i = i + 1
+    }
+    (*s).t_lo = (*s).t_lo +% rest
+    if (*s).t_lo < rest {
+        (*s).t_hi = (*s).t_hi +% 1
+    }
+    compress(s, (&(*s).buf[0]) as u64, true)
+    // Ausgabe wieder LITTLE ENDIAN.
+    i = 0
+    while i < (*s).outlen {
+        st8(out, i as u64, ((*s).h[i / 8] >> ((i % 8) as u64 * 8)) & 255)
+        i = i + 1
+    }
+    return true
+}
+
+// ------------------------------------------------------------ die Einzeiler
+
+fn blake2b(p: u64, n: usize, out: u64, outlen: usize) -> bool {
+    var s: Blake2b = blake2b_new_keyed(0, 0, outlen)
+    blake2b_update(&s, p, n)
+    return blake2b_final(&s, out)
+}
+
+fn blake2b_keyed(key: u64, keylen: usize, p: u64, n: usize,
+    out: u64, outlen: usize) -> bool {
+    var s: Blake2b = blake2b_new_keyed(key, keylen, outlen)
+    blake2b_update(&s, p, n)
+    return blake2b_final(&s, out)
+}
