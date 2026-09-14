@@ -137,7 +137,7 @@ getragen hat:
 Der Grund ist Arbeitsoekonomie und nichts sonst. Ein Fehlversuch in
 Python kostet Sekunden; derselbe Fehlversuch in Firn kostet einen
 Kernelbau, ein Plattenabbild und einen QEMU-Lauf -- gut zwei Minuten.
-Von den **vierzehn Fehlern** dieser Runde sind **neun** im
+Von den **siebzehn Fehlern** dieser Runde sind **neun** im
 Python-Geraet gefunden worden, und keiner davon war im Quelltext zu
 sehen; sie zeigen sich alle erst im Wertevergleich.
 
@@ -151,7 +151,7 @@ sehen; sie zeigen sich alle erst im Wertevergleich.
 | P-Slice | dieselbe Gegenprobe | 4 Stroeme, **0** |
 | Firn-Fassung | SHA-256 je Bild IM LAUFENDEN KERN gegen ffmpeg | 38 Bilder, **38 Treffer** |
 
-## 4. DIE VIERZEHN FEHLER
+## 4. DIE SIEBZEHN FEHLER
 
 Sie stehen hier vollstaendig, weil jeder einzelne die Art Fehler ist,
 die eine Runde ohne Wertevergleich fuer "fertig" halten wuerde.
@@ -190,7 +190,7 @@ die eine Runde ohne Wertevergleich fuer "fertig" halten wuerde.
    (Chromazeile `>>2` statt `>>1`). *Wirkung:* PAARE von Abweichungen
    genau auf den Kanten 3/4, 7/8, 11/12, maxdiff 2.
 
-**Erst in Firn bzw. im Kern gefunden (fuenf):**
+**Erst in Firn bzw. im Kern gefunden (acht):**
 
 10. **Die Zahl der Bildspeicher.** x264 stellt im Baseline-Profil
     `num_ref_frames = 3` ein und benutzt `ref_idx` bis 2 wirklich. Mit
@@ -206,6 +206,25 @@ die eine Runde ohne Wertevergleich fuer "fertig" halten wuerde.
     selbst.
 14. Die Tafelindizes von `coeff_token` (`t1 = i&3`, `tc = i>>2`) sind
     mechanisch gegen die Erzeugung geprueft worden, statt sie zu glauben.
+
+**Und die drei, die erst ein Strom mit mehreren Slices je Bild zeigte
+(`-x264-params slices=4`):**
+
+15. **Ein Bild ist nicht ein Slice.** Ein neues Bild faengt nur bei
+    `first_mb_in_slice == 0` an (7.4.3); jeder andere Slice setzt
+    dasselbe Bild fort. Vorher wurden aus vier Slices vier
+    Viertelbilder. Gefiltert wird erst, wenn ALLE Makrobloecke stehen --
+    der Entblockungsfilter laeuft ueber Slicegrenzen hinweg.
+16. **Ein Slice endet, wenn seine BITS zu Ende sind**, nicht wenn das
+    BILD voll ist (`more_rbsp`, 7.3.4). Das galt bisher nur fuer
+    P-Slices; ein I-Slice las weiter und dekodierte die Fuellnullen als
+    Makroblock. *Wirkung:* "der Datenstrom bricht ab".
+17. **Ueber eine Slicegrenze hinweg gibt es KEINE Nachbarn** (7.4.4 --
+    ein Slice ist unabhaengig dekodierbar), und zwar weder fuer die
+    Syntax (nC, Intra-Modi, Vektoren) noch fuer die BILDPUNKTE der
+    Intra-Vorhersage. *Wirkung:* der erste Streifen stimmt, alles
+    darunter nicht -- und weil der erste stimmt, sieht es nach einem
+    Folgefehler aus und man sucht an der falschen Stelle.
 
 ## 5. DIE MESSWERTE
 
@@ -226,9 +245,10 @@ schreibt. Gleiche Summe heisst: Oktett fuer Oktett dasselbe Bild.
 | p_sd | 176x144 | 8 | I+P | **8 / 8** | 147 ms | 54,42 |
 | p_bewegt | 176x144 | 8 | I+P | **8 / 8** | 165 ms | 48,48 |
 | p_skip | 128x96 | 6 | I+P | **6 / 6** | 31 ms | 193,54 |
-| **cif** | **352x288** | **10** | **I+P** | **10 / 10** | **325 ms** | **30,76** |
+| **cif** | **352x288** | **10** | **I+P** | **10 / 10** | **313 ms** | **31,94** |
+| **slices** | **176x144** | **3** | **I, 4 Slices je Bild** | **3 / 3** | 34 ms | 88,23 |
 
-**48 Bilder, 48 Pruefsummen, 48 Treffer. PSNR ist unendlich, die Zahl
+**51 Bilder, 51 Pruefsummen, 51 Treffer. PSNR ist unendlich, die Zahl
 abweichender Bildpunkte ist null** -- beides, weil die Bilder identisch
 sind und nicht aehnlich. Deshalb steht hier keine PSNR-Tabelle: sie
 haette nur dann einen Wert, wenn etwas abwiche.
@@ -261,6 +281,14 @@ CIF etwa 10 Bilder/s, und das ist kein Video mehr. Wer das will,
 braucht die drei Punkte oben, in dieser Reihenfolge. **Es ist auch
 nicht gemessen worden**, weil `MAXW`/`MAXH` bei 352x288 stehen (die
 Begruendung steht in `h264.fi`: vier Bildspeicher, 6 MiB je Prozess).
+
+### 5.2b Die Abnahme als Ganzes
+
+    bash tools/codec/run.sh
+    == CODEC: 65 bestanden, 0 gescheitert ==
+
+(Die Zahl gilt fuer den Lauf ohne den Strom `slices`; mit ihm kommen
+vier Punkte dazu.)
 
 ### 5.3 Die Gegenproben
 
@@ -321,8 +349,11 @@ Ehrlich und einzeln, statt einer Zusage:
   haerteste Latte, falls erreichbar. Sie liegen nicht auf diesem
   Rechner und wurden nicht geholt; gemessen wurde gegen ffmpeg, was
   fuer Baseline eine harte, aber nicht die haerteste Latte ist.
-  Insbesondere ungeprueft: mehrere Slices je Bild, `I_PCM`
-  (wird abgewiesen), lange Referenzlisten, ungerade Beschnittwerte.
+  Insbesondere ungeprueft: `I_PCM` (wird abgewiesen), lange
+  Referenzlisten, ungerade Beschnittwerte. **Mehrere Slices je Bild
+  sind inzwischen geprueft** -- siehe den Strom `slices` oben; dass er
+  wirklich vier Slices je Bild hat, rechnet `tools/codec/nalzahl.py`
+  nach (12 Einheiten, `first_mb` 0/22/55/77).
 * **Nicht gebaut, absichtlich:** CABAC, High Profile, B-Slices,
   Interlace, gewichtete Vorhersage, Slice-Gruppen, vp9, av1. Alles
   davon wird erkannt und abgewiesen.
