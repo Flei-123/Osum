@@ -727,9 +727,11 @@ Aussage der Abschnitte aendert sich dadurch nicht.
 ## 14. Nachbesserung R2-2: der Autostart, das Leserecht, die Frist je Plugin und die Schwelle
 
 Vier Maengel, vier Belege. Alle Zeilen unten stammen aus
-`bash tools/wmplug/run.sh` auf diesem Stand (117 Zusagen der Kernseite,
-0 gescheitert); die Abbilder baut der Laeufer je Lauf neu, weil die
-Autostart-Liste jetzt IM Abbild liegt.
+`bash tools/wmplug/run.sh` auf diesem Stand -- **193 bestanden, 0
+gescheitert** im ganzen Lauf (117 davon auf der Kernseite, der Rest aus
+den beiden Modullaeufern `regel.sh` und `widget.sh`). Die Abbilder baut
+der Laeufer je Lauf neu, weil die Autostart-Liste jetzt IM Abbild
+liegt.
 
 ### 14.1 Autostart statt Starthelfer — Abkuerzung 2 ist weg
 
