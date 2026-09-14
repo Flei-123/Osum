@@ -412,7 +412,7 @@ dienst "$OUT/aus" || bad "Gegenstelle"
 frisch
 rc=$(lauf gp2 "ota einstellen quelle https://$NAME:$PORT/v/5;ota einspielen;exit")
 gpruef "ein mit dem ERSATZSCHLUESSEL signiertes Update wird angenommen" \
-    "ota: mit dem ERSATZSCHLUESSEL geprueft" "$OUT/gp2.txt"
+    "ota: mit dem ERSATZSCHLUESSEL geprüft" "$OUT/gp2.txt"
 hat "$OUT/gp2.txt" "opk: installiert hallo" "        und es wurde wirklich installiert"
 
 # (3) gesperrte Fassung -- das Geraet merkt sich die Sperre und lehnt

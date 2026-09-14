@@ -1715,7 +1715,7 @@ def start_erzeugen(m, name):
     o.append('    mem_seiten = %d' % m.mem_min)
     o.append('    mem_p = rt.heap_alloc((mem_max * 65536) as usize)')
     o.append('    if mem_p == 0 {')
-    o.append('        io.print("wasm: kein Speicher fuer den linearen Speicher\\n")')
+    o.append('        io.print("wasm: kein Speicher für den linearen Speicher\\n")')
     o.append('        return 1')
     o.append('    }')
     o.append('    rt.mem_set(mem_p, 0, (mem_max * 65536) as usize)')

@@ -317,8 +317,19 @@ gui() { # name extra drehbuch
     local sock="$TMPD/$name.sock"
     rm -f "$sock"
     cp -f "$TMPD/disk.img" "$TMPD/$name.img"
+    # RUNDE ROTABSCHNITTE: `wmshell` FEHLTE, UND DAMIT DIE SHELL.
+    # Zusage d) tippt `edit /etc/taskbar.conf` ins Terminalfenster.
+    # Das Fenster war da (`wm: term win=0`, taskbar btn id=7,
+    # app=terminal) und der Klick traf es auch -- nur lief darin
+    # keine Shell, die den Befehl haette ausfuehren koennen. Genau
+    # dafuer ist `wmshell` da: "gibt dem Programm die Shell IM
+    # Terminalfenster" (tools/tiling/run.sh:383). Ohne das Wort
+    # landeten die Tasten im Suchfeld des Starters -- im
+    # Mitschnitt steht dann `launcher: treffer` statt `edit:
+    # ready`. tools/hidpunkte, tools/hidweg, tools/loader und
+    # tools/tiling setzen es aus demselben Grund.
     timeout 320 $QEMU -kernel "$TMPD/k.mb" -m 512 \
-        -append "gfx fbres=1024x768 wm wig desk wmhold wighalt=300 nokbd nosched noproc nofs $extra" \
+        -append "gfx fbres=1024x768 wm wig desk wmshell wmhold wighalt=300 nokbd nosched noproc nofs $extra" \
         -serial "file:$TMPD/$name.txt" -display none -no-reboot \
         -device "VGA,edid=on,xres=1024,yres=768,vgamem_mb=32" \
         -monitor "unix:$sock,server,nowait" \

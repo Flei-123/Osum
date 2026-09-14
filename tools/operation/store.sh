@@ -301,7 +301,7 @@ else
     bad "nur $CERTS Zertifikate -- das ist keine echte Kette"
 fi
 hat "$OUT/s1.txt" "ota: fassung dort 2" "das signierte VERZEICHNIS ist gelesen"
-hat "$OUT/s1.txt" "ota: NEUE FASSUNG verfuegbar" "und es gibt etwas Neues"
+hat "$OUT/s1.txt" "ota: NEUE FASSUNG verfügbar" "und es gibt etwas Neues"
 hatnicht "$OUT/s1.txt" "ota: einspielen" "SUCHEN INSTALLIERT NICHTS"
 
 # =====================================================================
