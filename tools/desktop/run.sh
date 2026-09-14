@@ -326,6 +326,89 @@ check_text() { # log ppm mark
     bad "none of the $tried reported states of '$mark' is in the picture; last was $lasttext -- $lastaus"
 }
 
+# ============================================== RUNDE FIX-R3-3
+# INK IN THE WINDOW BUTTON -- NOT JUST A REPORTED LABEL.
+#
+# The jury found nameless squares in the taskbar of the acceptance
+# shots: nothing said which window sat behind which button. The bar can
+# label them (`shorten_title`), it was simply never asked to -- the
+# default was `labels=never`. It is `auto` now, and this is the
+# measurement that keeps it that way.
+#
+# It is deliberately NOT a second `tkette`: `check_text` above already
+# compares every inked pixel of every glyph. What was missing is the
+# cruder and more stubborn question -- IS THERE INK IN THAT RECTANGLE AT
+# ALL? A button whose label is reported but clipped away by a layout
+# that gave it 38 pixels passes the per-character check (it compares the
+# states it finds) and fails this one.
+#
+# Everything comes out of the same run: the button's rectangle from
+# `taskbar: btn i=0 ...`, the position and the colour of its label from
+# `taskbar: text button ...`, the bar's own offset from `taskbar: geom`.
+# Counted is the area from the start of the label to the right edge of
+# the button -- so the program icon on the left does not get counted as
+# text.
+btn_ink() { # log ppm edge
+    local log=$1 ppm=$2 e=$3
+    local gline gx gy bline bx bw bh by tline tx fgv lab
+    gline=$(grep -a "^taskbar: geom " "$log" | tail -1)
+    gx=$(printf '%s' "$gline" | grep -oE ' x=[0-9]+' | head -1 | sed 's/.*=//')
+    gy=$(printf '%s' "$gline" | grep -oE ' y=[0-9]+' | head -1 | sed 's/.*=//')
+    gx=${gx:-0}; gy=${gy:-0}
+    # ONLY COMPLETE LINES -- the serial line is shared, and half a button
+    # line carries the launcher's numbers (the lesson of tools/look).
+    bline=$(grep -a '^taskbar: btn i=0 ' "$log" \
+        | grep -oE ' x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+ hidden=' | tail -1)
+    tline=$(grep -a '^taskbar: text button ' "$log" | tail -1)
+    if [ -z "$bline" ] || [ -z "$tline" ]; then
+        bad "[$e] the bar reports no complete window button (rect '$bline')"
+        return
+    fi
+    bx=$(printf '%s' "$bline" | grep -oE ' x=[0-9]+' | sed 's/.*=//')
+    by=$(printf '%s' "$bline" | grep -oE ' y=[0-9]+' | sed 's/.*=//')
+    bw=$(printf '%s' "$bline" | grep -oE ' w=[0-9]+' | sed 's/.*=//')
+    bh=$(printf '%s' "$bline" | grep -oE ' h=[0-9]+' | sed 's/.*=//')
+    tx=$(printf '%s' "$tline" | grep -oE ' x=[0-9]+' | head -1 | sed 's/.*=//')
+    fgv=$(printf '%s' "$tline" | grep -oE ' fg=[0-9]+' | sed 's/.*=//')
+    lab=$(printf '%s' "$tline" | sed 's/^.* t=//')
+    if [ -z "$lab" ]; then
+        bad "[$e] the window button carries no label (labels=auto should give it one)"
+        return
+    fi
+    ok "[$e] the window button is ${bw}x${bh} and carries the label '$lab'"
+    local x0=$((tx + gx)) y0=$((by + gy)) w0=$((bx + bw - tx)) n
+    n=$(python3 - "$ppm" "$x0" "$y0" "$w0" "$bh" $(rgb "$fgv") <<'PYINK'
+import sys
+d = open(sys.argv[1], 'rb').read()
+i, t = 2, []
+while len(t) < 3:
+    while d[i:i+1].isspace():
+        i += 1
+    j = i
+    while not d[j:j+1].isspace():
+        j += 1
+    t.append(int(d[i:j])); i = j
+i += 1
+w, h, px = t[0], t[1], d[i:]
+x0, y0, bw, bh = (int(v) for v in sys.argv[2:6])
+fr, fg, fb = (int(v) for v in sys.argv[6:9])
+n = 0
+for y in range(max(y0, 0), min(y0 + bh, h)):
+    for x in range(max(x0, 0), min(x0 + bw, w)):
+        o = (y * w + x) * 3
+        if (abs(px[o] - fr) < 40 and abs(px[o+1] - fg) < 40
+                and abs(px[o+2] - fb) < 40):
+            n += 1
+print(n)
+PYINK
+)
+    if [ "${n:-0}" -gt 40 ]; then
+        ok "[$e] and there are $n pixels of ink in it, from ($x0,$y0), ${w0}x${bh}"
+    else
+        bad "[$e] only ${n:-0} pixels of ink in the label area of the button"
+    fi
+}
+
 png() { # ppm name
     python3 - "$1" "$SHOTS/$2.png" <<'PYEOF' 2>/dev/null
 import sys
@@ -358,6 +441,7 @@ for e in bottom top left right; do
     check_text "$L" "$P" "battery"
     check_text "$L" "$P" "net"
     check_text "$L" "$P" "button"
+    btn_ink "$L" "$P" "$e"
     # a vertical bar has to wrap or shrink -- never clip. Whatever it
     # decided, the reported text is the drawn text, and the check above
     # is the proof; here we only record what it decided.
