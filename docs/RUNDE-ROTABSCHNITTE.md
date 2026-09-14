@@ -181,6 +181,34 @@ jetzt benannt statt vermutet: `wait_wm` läuft vollständig durch, **bevor**
 
 ---
 
+## Welche Zahlen belastbar sind — und welche nicht
+
+Die Platte und die Rechenzeit dieses Wirts werden mit anderen Aufträgen
+geteilt (während dieser Runde liefen `/root/os-oom` und
+`tools/dual/probe.sh` mit). Das erzeugt eine eigene Art roter Zusage, und
+sie ist **kein Befund**:
+
+| Abschnitt | Zusage | ruhiger Lauf | Parallellauf |
+|---|---|---|---|
+| `powermon` | *the run with the window ends cleanly* | 21 → grün | 0 → rot |
+| `hid` | *usb-tablet: Lauf endet sauber* | 21 → grün | 0 → rot |
+| `werkzeug` | Klick- und Bildprüfungen | 28 / 6 | 27 / 7, 27 / 7 |
+
+Beendigungscode **0 statt 21** heißt: QEMU ist in sein Zeitlimit
+gelaufen, nicht dass etwas kaputt ist. Bei `werkzeug` war die
+abweichende Zusage in drei Läufen mit **demselben Stand** jedesmal eine
+andere — einmal `taskmgr: wahl pid=`, einmal `Beschriftungen im Bild: 0`.
+
+Dasselbe gilt für `pci` (*„DMA gegen PIO, in Tausendsteln: 919, erwartet
+≥ 1200"*): ein Leistungsverhältnis misst auf einem geteilten Wirt den
+Wirt.
+
+**Regel daraus:** eine einzelne rote Zusage mit Beendigungscode 0 statt
+21 nicht als Befund werten, ohne sie auf einer ruhigen Maschine
+nachzumessen. Die Zahlen in der Tabelle oben sind je zweimal bestätigt.
+
+---
+
 ## Eine Regel, zweimal teuer gelernt
 
 Eine **laufende** `run.sh` darf nicht bearbeitet werden. Bash liest das
