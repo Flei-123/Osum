@@ -187,7 +187,14 @@ getippt werden:
 ```
 bash tools/wmplug/spalten.sh   -> SPALTEN: 25 bestanden, 0 gescheitert
 bash tools/wmplug/shots.sh     -> SHOTS: 11 Bilder abgelegt in .gauntlet-shots
+bash tools/wmplug/fixr32.sh    -> FIXR32: 32 bestanden, 0 gescheitert
 ```
+
+`fixr32.sh` ist der Laeufer der Nachbesserung FIX-R3-2: die Zeilen (ein
+Schreibruf je Zeile, mit Gegenprobe gegen den Stand `d02903f`), das
+Widgetfeld in der **senkrechten** Leiste und der Umlaut in
+`KEIN EINZIGES GERÄT!`. Er baut sich seine alten Binaerdateien selbst
+aus der Geschichte und bootet dreimal.
 
 Dazu:
 
