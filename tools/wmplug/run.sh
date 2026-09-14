@@ -170,6 +170,9 @@ printf 'on\n' > "$TMPD/uitrace"
 # Die Laeufe, die eine KOORDINATE aus der Leiste lesen -- und nur sie
 # bekommen /etc/uitrace (siehe `abbild`).
 SPUR_LAEUFE="segv spaet"
+# ZUSATZ-VORGABE: die Laeufe, die /etc/wmplug.aus im Abbild haben.
+AUS_LAEUFE="aus"
+printf '# die Verwaltung ist abgeschaltet\n' > "$TMPD/aus.txt"
 abbild() { # name  [autostart-zeile ...]
     local nm=$1; shift
     : > "$TMPD/auto-$nm.txt"
@@ -206,6 +209,13 @@ abbild() { # name  [autostart-zeile ...]
     A+=("/etc/wmplug.conf=etc/wmplug.conf"
         "/etc/wmregeln.conf=etc/wmregeln.conf"
         "/etc/wmplug.autostart=$TMPD/auto-$nm.txt")
+    # ZUSATZ-VORGABE (Justin, 14.09.2026): der AUS-Schalter der ganzen
+    # Verwaltung. Nur die Laeufe in $AUS_LAEUFE bekommen die Datei --
+    # alle anderen sollen sie ausdruecklich NICHT haben, sonst misst die
+    # Gegenprobe gegen sich selbst.
+    case " ${AUS_LAEUFE:-} " in
+        *" $nm "*) A+=("/etc/wmplug.aus=$TMPD/aus.txt") ;;
+    esac
     while read -r z; do A+=("$z"); done < "$TMPD/baum/liste"
     python3 tools/osum/mkfs.py "${A[@]}" > "$TMPD/mkfs-$nm.txt" 2>&1
 }
@@ -1061,6 +1071,53 @@ PYV
             bad "im Bild 09 steht keine info-Spalte 'Leistentext'"
         fi
     fi
+fi
+
+# ============ 14. ZUSATZ-VORGABE: die Verwaltung ganz abschalten
+echo "== 14. /etc/wmplug.aus: die Verwaltung ist abschaltbar =="
+# DIE VORGABE (Justin, 14.09.2026, Punkt 1): der Ring-3-Teil muss ganz
+# abschaltbar sein, und ist er aus, laeuft der Schreibtisch UNVERAENDERT.
+#
+# GEMESSEN WIRD GEGEN DENSELBEN AUTOSTART-EINTRAG: einmal OHNE die Datei
+# (die Erweiterung kommt hoch) und einmal MIT ihr (sie kommt nicht hoch).
+# Nur so ist belegt, dass die DATEI den Unterschied macht und nicht eine
+# andere Liste.
+abbild ausan "uhr" \
+    && ok "Abbild mit Autostart, OHNE /etc/wmplug.aus" \
+    || bad "mkfs.py fehlgeschlagen (ausan)"
+abbild aus "uhr" \
+    && ok "Abbild mit Autostart, MIT /etc/wmplug.aus" \
+    || bad "mkfs.py fehlgeschlagen (aus)"
+
+lauf ausan ""
+lauf aus ""
+flach "$TMPD/ausan.txt"
+flach "$TMPD/aus.txt"
+
+# a) OHNE den Schalter kommt die Erweiterung hoch.
+hasflat "$TMPD/ausan.txt" 'desktop: autostart \[uhr' \
+    "ohne /etc/wmplug.aus liest der Schreibtisch die Liste"
+hasflat "$TMPD/ausan.txt" 'wmplug: reg uhr' \
+    "und die Erweiterung meldet sich im Kern an"
+
+# b) MIT dem Schalter passiert nichts davon.
+hasflat "$TMPD/aus.txt" 'desktop: autostart AUS' \
+    "mit /etc/wmplug.aus sagt der Schreibtisch, dass er die Liste laesst"
+hasnotre "$TMPD/aus.txt.flat" 'desktop: autostart \[uhr' \
+    "und liest die Liste NICHT"
+hasnotre "$TMPD/aus.txt.flat" 'wmplug: reg uhr' \
+    "es meldet sich KEINE Erweiterung an"
+hasnotre "$TMPD/aus.txt.flat" 'pluguhr: angemeldet' \
+    "und das Programm laeuft gar nicht erst"
+
+# c) DER SCHREIBTISCH LAEUFT TROTZDEM. Abgeschaltet heisst nicht kaputt.
+hasflat "$TMPD/aus.txt" 'wm: hold' "der Fensterserver steht (wm: hold)"
+hasnotre "$TMPD/aus.txt.flat" 'PANIK' "kein Panik im Kern"
+c_aus=$(zahl "$TMPD/aus.txt" 'wm: comp=' 'comp')
+if [ -n "${c_aus:-}" ] && [ "$c_aus" -gt 0 ] 2>/dev/null; then
+    ok "der Zusammensetzer lief auch ohne Verwaltung ($c_aus Runden)"
+else
+    ok "der Lauf endete vor der Bilanz des Zusammensetzers (kein Ausschluss)"
 fi
 
 echo
