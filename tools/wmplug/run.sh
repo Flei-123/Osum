@@ -207,6 +207,18 @@ else
     bad "keine Zahl 'comp=' -- ohne sie ist 'laeuft weiter' nur Meinung"
 fi
 has "$S" "wmplug: bilanz" "und der Kern zieht am Ende seine Bilanz"
+# EIN TOTER WIRD EINMAL ABGEHOLT, NICHT ZWEIMAL. Der Kehrbesen laeuft
+# aus zwei Pfaden (compose je Bild, poll je Tick); ohne Sperre hat ihn
+# der Zeitgeber mitten in seiner eigenen Ausgabe noch einmal angestossen
+# und derselbe Absturz wurde doppelt gezaehlt (gemessen: kicks=2).
+n_tot=$(grep -ca 'wmplug: tot platz=' "$S")
+[ "${n_tot:-0}" = 1 ] \
+    && ok "der Tote wurde GENAU EINMAL abgeholt (eine Zeile 'wmplug: tot')" \
+    || bad "'wmplug: tot' steht ${n_tot}x da -- der Kehrbesen laeuft in sich selbst"
+k_segv=$(zahl "$S" '^wmplug: bilanz' 'kicks')
+[ "${k_segv:-0}" = 1 ] \
+    && ok "und genau einmal gezaehlt (kicks=1 fuer einen Absturz)" \
+    || bad "die Bilanz zaehlt kicks=${k_segv} fuer EINEN Absturz"
 if [ -s "$TMPD/segv.ppm" ]; then
     cp -f "$TMPD/segv.ppm" "$SHOTS/nach-absturz.ppm"
     masse=$(python3 tools/gfx/checkshot.py groesse "$TMPD/segv.ppm" 2>/dev/null)
