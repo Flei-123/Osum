@@ -1120,6 +1120,13 @@ const W_ANP: u64 = 0x158 // zuletzt gezeichneter Fortschritt, 0..1000
 // Sicherungen.
 const W_FSXY: u64 = 0x160
 const W_FSWH: u64 = 0x168
+
+// Das haengengebliebene ERSTE Oktett einer UTF-8-Folge, 0 = keines.
+// Es steht JE FENSTER und nicht als Modulmerker, weil zwei Terminals
+// gleichzeitig schreiben duerfen: `tty.emit` reicht die Oktette einzeln
+// durch, und ein gemeinsamer Merker haengte das Folgeoktett des einen
+// Fensters an das Startoktett des anderen. Siehe `term_putc`.
+const W_UTF: u64 = 0x170
 const APP_LEN: u64 = 24
 
 // "kein Terminal". Absichtlich eine Zahl und kein Ruf nach `tty.fi`:
@@ -2677,6 +2684,9 @@ fn create(state: u64, owner: u64, x: i64, y: i64, w: u64, h: u64,
             wsv(state, i, W_FLAGS, 0)
             wsv(state, i, W_STRUT, 0)
             wsv(state, i, W_SAVE, 0)
+            // Ein wiederverwendeter Platz erbt sonst das haengende
+            // Startoktett des VORIGEN Fensters (siehe `term_putc`).
+            wsv(state, i, W_UTF, 0)
             // RUNDE PAINT: ein wiederverwendeter Platz erbt sonst den
             // Buendelnamen des VORIGEN Fensters -- und damit sein
             // Symbol. Genau die Sorte Fehler, die man erst sieht, wenn
@@ -7704,6 +7714,14 @@ fn term_dump(state: u64, i: u64) {
                 let z: u64 = cell_get(state, i, c, r)
                 if z >= 32 && z < 127 {
                     serial.put(z as u8)
+                } else if z >= 0xA0 {
+                    // Die Zelle haelt einen Latin-1-Codepunkt (siehe
+                    // `term_putc`). Auf die Leitung geht er wieder als
+                    // UTF-8 -- so tragen Bild und Mitschnitt DIESELBEN
+                    // Oktette wie der Quelltext, und ein Protokoll
+                    // laesst sich Zeichen fuer Zeichen vergleichen.
+                    serial.put((0xC0 | (z >> 6)) as u8)
+                    serial.put((0x80 | (z & 0x3F)) as u8)
                 } else {
                     serial.put(32 as u8)
                 }
@@ -7798,10 +7816,41 @@ fn term_scroll(state: u64, i: u64) {
     fill(state, i, 0, (rows - 1) * ch, ww, ch, wg(state, i, W_BG))
 }
 
-fn term_putc(state: u64, i: u64, ch: u64) {
+// EIN ZEICHEN IN EIN TERMINALFENSTER.
+//
+// RUNDE WMPLUGIN (Nachbesserung): hier stand `if ch < 32 || ch > 126 {
+// return }`, und damit fiel jedes Oktett ueber 126 lautlos weg. Unsere
+// Quelltexte sind UTF-8; aus " KEIN EINZIGES GERÄT!" wurden auf dem
+// Schirm die zwei Oktette von `Ä` verschluckt und es stand `GERT` da --
+// ein abgeschnittenes Wort in einem Abnahmebild, und niemand sah, warum.
+//
+// Der Zeichensatz kann es laengst: `assets/osum-mono.ttf` deckt
+// 0xC4/0xE4/0xD6/0xF6/0xDC/0xFC/0xDF ab, und `ttf.glyph` nimmt einen
+// CODEPUNKT und kein Oktett. Es fehlte nur die Umrechnung. Eine Zelle
+// ist EIN Oktett (`cell_set`), also reicht genau der Bereich, der in
+// eines passt: die zwei Startoktette 0xC2/0xC3 ergeben mit ihrem
+// Folgeoktett die Codepunkte 0x80..0xFF -- Latin-1, und darin liegen
+// alle deutschen Umlaute. Alles darueber (drei- und vieroktettige
+// Folgen) faellt weg wie bisher; das ist die benannte Abkuerzung.
+fn term_putc(state: u64, i: u64, ch0: u64) {
     let cols: u64 = wg(state, i, W_COLS)
     let rows: u64 = wg(state, i, W_ROWS)
     if cols == 0 || rows == 0 {
+        return
+    }
+    // Das Startoktett der vorigen Runde einloesen -- oder wegwerfen,
+    // wenn kein Folgeoktett kam. Eine abgerissene Folge darf die
+    // naechste nicht vergiften.
+    var ch: u64 = ch0
+    let vor: u64 = wg(state, i, W_UTF)
+    if vor != 0 {
+        wsv(state, i, W_UTF, 0)
+        if ch >= 0x80 && ch <= 0xBF {
+            ch = ((vor & 0x1F) << 6) | (ch & 0x3F)
+        }
+    }
+    if ch == 0xC2 || ch == 0xC3 {
+        wsv(state, i, W_UTF, ch)
         return
     }
     var cx: u64 = wg(state, i, W_CX)
@@ -7838,7 +7887,10 @@ fn term_putc(state: u64, i: u64, ch: u64) {
         }
         return
     }
-    if ch < 32 || ch > 126 {
+    // 0x7F..0x9F sind Steuerzeichen und haben keine Glyphe; ab 0xA0
+    // steht Latin-1, und das ist der Bereich, den `term_putc` oben aus
+    // UTF-8 zusammengesetzt hat.
+    if ch < 32 || (ch > 126 && ch < 0xA0) || ch > 0xFF {
         return
     }
     cell_set(state, i, cx, cy, ch)
