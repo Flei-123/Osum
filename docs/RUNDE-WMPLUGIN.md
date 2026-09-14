@@ -593,9 +593,13 @@ weil ein Bericht, der nur die gruenen Zeilen zeigt, nichts wert ist.
    Abnahmelauf braucht aber zwei Schritte (Rechte gewaehren, dann
    starten). Faellt weg, sobald der Schreibtisch eine **Autostart-Liste**
    hat. Deshalb liegt das Widget im Abbild unter `/bin/uhrstart`.
-3. **Die senkrechte Leiste bekommt kein Widget-Feld.** Eine Spalte ist
-   80 Punkte breit, `17:10 cpu 100%` passt nicht hinein, ohne die Uhr zu
-   verdraengen. Steht so im Code, **nicht gemessen**.
+3. ~~**Die senkrechte Leiste bekommt kein Widget-Feld.**~~ (gestrichen in
+   FIX-R3-2, siehe **17.2** — sie bekommt eines, der Text wird gekuerzt;
+   gemessen sind Kasten, Tinte und zwei Fotos an der Koordinate, die die
+   Leiste selbst meldet.) Der alte Wortlaut: eine Spalte ist 80 Punkte
+   breit, `17:10 cpu 100%` passt nicht hinein, ohne die Uhr zu
+   verdraengen. Stand so im Code, **nicht gemessen** — und genau das war
+   der Fehler.
 4. **Der Namenspuffer.** `WM_PLUG_REG` kopiert **immer** 15 Oktette, egal
    wie kurz der Name ist. Wer ein `[u8; 4]` hinlegt, schickt seinen
    halben Stapel als Namen mit — im ersten Lauf dieser Runde stand dort
