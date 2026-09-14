@@ -54,6 +54,14 @@ mach p_skip   128  96  6 "color=c=navy:size=128x96:rate=5" -g 100 -qp 26
 #     das, was man wirklich abspielen wuerde.
 mach cif      352 288 10 "testsrc2=size=352x288:rate=10" -g 100 -qp 26
 
+# --- MEHRERE SLICES JE BILD. Der Regelfall in jedem Rundfunkstrom (ein
+#     verlorenes Paket kostet dann nur einen Streifen) und der Fall, an
+#     dem ein Dekodierer auffliegt, der ein Bild fuer einen Slice haelt:
+#     ueber eine Slicegrenze hinweg gibt es KEINE Nachbarn, weder fuer
+#     die Syntax noch fuer die Bildpunkte der Intra-Vorhersage.
+mach slices   176 144  3 "testsrc2=size=176x144:rate=5" -g 1 -qp 26 \
+     -x264-params slices=4
+
 echo "PRUEFMATERIAL:"
 while read -r name w h n; do
     s264=$(stat -c%s "$ZIEL/$name.264" 2>/dev/null || echo 0)

@@ -501,6 +501,13 @@ fn parse_pps() -> bool {
 static mut mb_type: [u64; 396] = [0; 396]
 static mut mb_intra: [u8; 396] = [0 as u8; 396]
 static mut mb_done: [u8; 396] = [0 as u8; 396]
+// Zu welchem Slice ein Makroblock gehoert. Ein Slice ist per Norm
+// UNABHAENGIG dekodierbar (7.4.4): ueber seine Grenze hinweg gibt es
+// keine Nachbarn -- weder fuer die Syntax (nC, Modi, Vektoren) noch
+// fuer die Bildpunkte der Intra-Vorhersage. Wer das uebersieht,
+// bekommt bei einem Bild aus EINEM Slice das richtige Ergebnis und bei
+// einem aus vieren ab dem zweiten Streifen Unsinn. 0xFFFF = keiner.
+static mut mb_slice: [u64; 396] = [0; 396]
 static mut mb_cbp: [u64; 396] = [0; 396]
 static mut mb_qp: [i64; 396] = [0; 396]
 static mut mb_i16: [u64; 396] = [0; 396]
@@ -520,6 +527,8 @@ static mut sl_alpha: i64 = 0
 static mut sl_beta: i64 = 0
 static mut sl_nref0: u64 = 1
 static mut n_frames: u64 = 0
+// Laeuft gerade ein Bild, das noch nicht vollstaendig ist?
+static mut bild_offen: bool = false
 
 fn h264_frames() -> u64 { return n_frames }
 
@@ -1198,7 +1207,10 @@ fn mb_at(mbx: u64, mby: u64) -> u64 {
 fn nb_ok(mbx: u64, mby: u64) -> bool {
     if mbx >= s_mbw || mby >= s_mbh { return false }
     if mbx == cur_mbx && mby == cur_mby { return true }
-    return mb_done[(mb_at(mbx, mby)) as usize] == (1 as u8)
+    let m: u64 = mb_at(mbx, mby)
+    if mb_done[(m) as usize] != (1 as u8) { return false }
+    // ...und aus DEMSELBEN Slice. Siehe die Begruendung bei mb_slice.
+    return mb_slice[(m) as usize] == slice_nr
 }
 
 // Die Zahl der Koeffizienten im Nachbarn links (bx-1) eines 4x4-Blocks.
@@ -1535,6 +1547,7 @@ fn do_skip(mbx: u64, mby: u64, qp: i64) {
         k = k + 1
     }
     mb_done[(m) as usize] = 1 as u8
+    mb_slice[(m) as usize] = slice_nr
     mc_mb(mbx, mby)
 }
 
@@ -1604,6 +1617,10 @@ fn load_nb4(plane: u64, stride: u64, px: u64, py: u64,
 fn recon_mb(mbx: u64, mby: u64, i16: bool, cbp: u64, qp: i64) {
     let m: u64 = mb_at(mbx, mby)
     let py: u64 = h264_plane_y(cur_slot)
+    // VERFUEGBAR heisst: im Bild UND schon dekodiert UND im selben
+    // Slice. `nb_ok` prueft alle drei -- aber es gibt fuer den EIGENEN
+    // Makroblock wahr zurueck, und hier geht es nur um FREMDE, also
+    // wird die Lage vorher abgefragt.
     let availA: bool = mbx > 0 && nb_ok(mbx - 1, mby)
     let availB: bool = mby > 0 && nb_ok(mbx, mby - 1)
     let availC: bool = mby > 0 && mbx + 1 < s_mbw && nb_ok(mbx + 1, mby - 1)
@@ -2002,6 +2019,7 @@ fn decode_mb(mbx: u64, mby: u64, qp_in: i64) -> i64 {
             }
         }
         mb_done[(m) as usize] = 1 as u8
+        mb_slice[(m) as usize] = slice_nr
         mc_mb(mbx, mby)
         let g2: u64 = ue()
         if g2 >= 48 { h_err = E_UNGERADE; return QPFEHLER }
@@ -2109,6 +2127,7 @@ fn decode_mb(mbx: u64, mby: u64, qp_in: i64) -> i64 {
     if bs_over { h_err = E_DATEN; return QPFEHLER }
     mb_qp[(m) as usize] = qp
     mb_done[(m) as usize] = 1 as u8
+    mb_slice[(m) as usize] = slice_nr
     recon_mb(mbx, mby, i16, cbp, qp)
     return qp
 }
@@ -2354,6 +2373,8 @@ fn deblock() {
 
 // =============================================== der Slice-Kopf, 7.3.3
 static mut first_mb: u64 = 0
+// Die Nummer des laufenden Slice. first_mb ist dafuer eindeutig.
+static mut slice_nr: u64 = 0
 
 fn parse_slice_header(nal_type: u64, nal_ref_idc: u64) -> bool {
     first_mb = ue()
@@ -2427,6 +2448,7 @@ fn parse_slice_header(nal_type: u64, nal_ref_idc: u64) -> bool {
         }
     }
     if bs_over { h_err = E_DATEN; return false }
+    slice_nr = first_mb + 1   // + 1, damit 0 nicht wie "keiner" aussieht
     return true
 }
 
@@ -2436,9 +2458,16 @@ fn decode_slice_data() -> bool {
     let total: u64 = s_mbw * s_mbh
     var idx: u64 = first_mb
     var qp: i64 = sl_qp
-    while idx < total {
+    // EIN SLICE ENDET, WENN SEINE BITS ZU ENDE SIND -- nicht, wenn das
+    // BILD voll ist. Bei einem Bild aus vier Slices hoert der erste
+    // nach einem Viertel auf, und dahinter stehen nur noch das Stopbit
+    // und Fuellnullen. Wer hier weiterliest, dekodiert Fuellung als
+    // Makroblock und meldet einen abgebrochenen Strom (E_DATEN) --
+    // genau das war hier drin, bis ein Strom mit vier Slices es zeigte.
+    // `more_rbsp()` ist die Bedingung aus 7.3.4, und sie gilt fuer I
+    // genauso wie fuer P.
+    while idx < total && more_rbsp() {
         if sl_type == 0 {
-            if !more_rbsp() { return true }
             let run: u64 = ue()
             if run > total { h_err = E_UNGERADE; return false }
             var r: u64 = 0
@@ -2458,12 +2487,75 @@ fn decode_slice_data() -> bool {
     return true
 }
 
+
+// ============================== EIN SLICE, UND WANN EIN BILD FERTIG IST
+//
+// EIN BILD IST NICHT EIN SLICE. Ein Bild darf in mehrere Slices
+// zerfallen (x264 tut das mit `slices=N`, und jeder Rundfunkstrom tut
+// es, weil ein verlorenes Paket dann nur einen Streifen kostet).
+// Woran man den Anfang eines neuen Bildes erkennt, steht in 7.4.3:
+// `first_mb_in_slice == 0`. Jeder Slice mit einem groesseren Wert
+// setzt DASSELBE Bild fort und faengt bei diesem Makroblock an.
+//
+// Wer je Slice ein neues Bild anfaengt, bekommt bei einem Strom mit
+// vier Slices vier Viertelbilder statt eines ganzen -- und die
+// Nachbarn stimmen auch nicht, weil `mbs_clear` die schon dekodierten
+// Makrobloecke wegwirft. Genau dieser Fehler war hier drin, bis ein
+// Strom mit `-x264-params slices=4` ihn gezeigt hat.
+//
+// Rueckgabe: 1 = ein Bild ist FERTIG geworden, 0 = Slice verarbeitet,
+// Bild laeuft weiter, 2 = Fehler.
+fn slice_verarbeiten(nal_type: u64, nal_ref_idc: u64) -> u64 {
+    if !s_da || !p_da { h_err = E_FORM; return 2 }
+    if !parse_slice_header(nal_type, nal_ref_idc) { return 2 }
+    if first_mb >= s_mbw * s_mbh { h_err = E_UNGERADE; return 2 }
+    if first_mb == 0 {
+        // Ein neues Bild faengt an. Das vorige ist damit fertig --
+        // aber es ist schon abgeschlossen worden (siehe unten), also
+        // hier nur aufraeumen.
+        if nal_type == 5 { ref_n = 0 }
+        cur_slot = pick_slot()
+        mbs_clear()
+        bild_offen = true
+    } else {
+        // Fortsetzung. Ohne ein offenes Bild ist der Strom kaputt
+        // (oder es fehlt der Anfang) -- dann NICHT raten.
+        if !bild_offen { h_err = E_DATEN; return 2 }
+    }
+    if !decode_slice_data() { return 2 }
+    // Ist das Bild damit voll? Der letzte Makroblock, den dieser Slice
+    // gesetzt hat, sagt es.
+    var alle: bool = true
+    var i: u64 = 0
+    while i < s_mbw * s_mbh {
+        if mb_done[(i) as usize] == (0 as u8) { alle = false }
+        i = i + 1
+    }
+    if !alle { return 0 }
+    // FERTIG: erst jetzt wird gefiltert. Der Entblockungsfilter laeuft
+    // ueber Slicegrenzen hinweg und braucht deshalb das ganze Bild.
+    deblock()
+    bild_offen = false
+    n_frames = n_frames + 1
+    if nal_ref_idc > 0 {
+        var k: u64 = NREF - 1
+        while k > 0 {
+            ref_slot[(k) as usize] = ref_slot[((k - 1)) as usize]
+            k = k - 1
+        }
+        ref_slot[(0) as usize] = cur_slot
+        if ref_n < NREF { ref_n = ref_n + 1 }
+    }
+    return 1
+}
+
 // ================================================== die Aussenseite
 fn h264_reset() {
     h_err = E_OK
     s_da = false
     p_da = false
     n_frames = 0
+    bild_offen = false
     ref_n = 0
     cur_slot = 0
     ref_slot[(0) as usize] = 0
@@ -2486,6 +2578,7 @@ fn mbs_clear() {
         mb_qp[(i) as usize] = 0
         mb_i16[(i) as usize] = 0
         mb_cpred[(i) as usize] = 0
+        mb_slice[(i) as usize] = 0xFFFF
         i = i + 1
     }
     var k: u64 = 0
@@ -2549,25 +2642,9 @@ fn h264_decode(p: u64, n: u64) -> bool {
             } else if nal_type == 8 {
                 if !parse_pps() { return false }
             } else {
-                if !s_da || !p_da { h_err = E_FORM; return false }
-                if !parse_slice_header(nal_type, nal_ref_idc) { return false }
-                if nal_type == 5 { ref_n = 0 }
-                cur_slot = pick_slot()
-                mbs_clear()
-                if !decode_slice_data() { return false }
-                deblock()
-                n_frames = n_frames + 1
-                irgendwas = true
-                // Das fertige Bild wird Referenz 0.
-                if nal_ref_idc > 0 {
-                    var i: u64 = NREF - 1
-                    while i > 0 {
-                        ref_slot[(i) as usize] = ref_slot[((i - 1)) as usize]
-                        i = i - 1
-                    }
-                    ref_slot[(0) as usize] = cur_slot
-                    if ref_n < NREF { ref_n = ref_n + 1 }
-                }
+                let r: u64 = slice_verarbeiten(nal_type, nal_ref_idc)
+                if r == 2 { return false }
+                if r == 1 { irgendwas = true }
             }
         }
     }
@@ -2653,24 +2730,11 @@ fn h264_next() -> bool {
             } else if nal_type == 8 {
                 if !parse_pps() { return false }
             } else {
-                if !s_da || !p_da { h_err = E_FORM; return false }
-                if !parse_slice_header(nal_type, nal_ref_idc) { return false }
-                if nal_type == 5 { ref_n = 0 }
-                cur_slot = pick_slot()
-                mbs_clear()
-                if !decode_slice_data() { return false }
-                deblock()
-                n_frames = n_frames + 1
-                if nal_ref_idc > 0 {
-                    var i: u64 = NREF - 1
-                    while i > 0 {
-                        ref_slot[(i) as usize] = ref_slot[((i - 1)) as usize]
-                        i = i - 1
-                    }
-                    ref_slot[(0) as usize] = cur_slot
-                    if ref_n < NREF { ref_n = ref_n + 1 }
-                }
-                return true
+                let r: u64 = slice_verarbeiten(nal_type, nal_ref_idc)
+                if r == 2 { return false }
+                // Nur ein FERTIGES Bild beendet den Schritt; ein Slice,
+                // der das Bild nur fortsetzt, laeuft weiter.
+                if r == 1 { return true }
             }
         }
     }
