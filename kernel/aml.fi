@@ -1,0 +1,1373 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/aml.fi -- RUNDE AML, TEIL 4: LADEN, `_PRT` UND DER RUECKFALL.
+//
+// ============================================================
+// WARUM ES DIESE RUNDE GIBT
+// ============================================================
+//
+// Bis hierher hat Osum die Unterbrechungsleitung eines PCI-Geraets aus
+// dem Register 0x3C seiner Konfiguration gelesen -- "Interrupt Line".
+// Das ist kein Register des Geraets, sondern ein NOTIZZETTEL: die
+// Firmware traegt dort ein, welche Leitung sie eingerichtet hat, und
+// niemand zwingt sie dazu. Auf den meisten Brettern steht die richtige
+// Zahl darin. Auf manchen steht 0, auf manchen 0xFF, und auf Brettern
+// mit mehreren PCI-Bruecken steht dort die Leitung VOR der Bruecke.
+//
+// Die Wahrheit steht woanders: im AML-Objekt `_PRT` der Wurzelbruecke.
+// Es sagt fuer jeden Steckplatz und jeden der vier Stifte, an welcher
+// Leitung des I/O-APIC er haengt -- entweder als Zahl oder ueber ein
+// LINK-GERAET, dessen `_CRS` die eingestellte Leitung nennt. Um es zu
+// lesen, braucht man einen Interpreter fuer AML. Den gab es nicht.
+// Jetzt gibt es ihn.
+//
+// ============================================================
+// WAS DIESE RUNDE NICHT BAUT -- damit es niemand sucht
+// ============================================================
+//
+// Kein Nachbau von ACPICA. Keine Thermalregelung. Kein S4. Kein S3
+// (nur entworfen, siehe docs/ROUNDAML.md). Keine GPE-Behandlung im
+// laufenden Betrieb. Was hier steht, ist die Teilmenge, mit der sich
+// `_PRT`, `_CRS`, `_PRS`, `_SRS` und `_STA` wirklich auswerten lassen --
+// und jede Zahl, die dabei herauskommt, wird gemessen und nicht
+// behauptet.
+//
+// ============================================================
+// DER RUECKFALLWEG IST DER WICHTIGE TEIL
+// ============================================================
+//
+// Ein Interpreter fuer FREMDEN Code, der beim Hochfahren laeuft, ist
+// eine neue Art, eine Maschine nicht starten zu lassen. Deshalb gilt in
+// dieser Datei: JEDER Fehler ist definiert, JEDER Fehler ist eine Zahl,
+// und nach JEDEM Fehler geht es mit dem alten Weg weiter -- dem
+// Interrupt-Line-Register. `aml.gsi_or_line` ist die einzige Stelle, an
+// der die Treiber ihre Leitung holen, und sie faellt still zurueck.
+// Die Abnahme faehrt absichtlich dagegen (`amlbad`, `amlloop`,
+// `amldeep`), und die Maschine muss jedes Mal fertig hochfahren.
+
+import serial
+import kstate
+import mem
+import pci
+import acpi
+import arch.x86_64.apic
+import amlns
+import amlobj
+import amlev
+
+export {
+    stage, dump, ready, gsi_for, gsi_or_line, why, route_count,
+    node_count, heap_bytes, parse_us, prt_ok
+}
+
+// ------------------------------------------- die Plaetze in `kdata`
+//
+// `amlns.fi` nimmt 0..55, `amlev.fi` 56..191. Ab 192 diese Datei; die
+// Routentafel liegt ab 512.
+
+const A_TABLES: u64 = 192 // wie viele Tabellen wirklich geladen wurden
+const A_MS: u64 = 200 // wie lange das Laden gedauert hat, in Mikrosekunden
+const A_PRTOK: u64 = 208 // 1 = `_PRT` wurde ausgewertet
+const A_ROUTEN: u64 = 216 // Eintraege in der Routentafel
+const A_READY: u64 = 224 // 1 = der Namensraum stand, auch wenn er weg ist
+const A_DEVS: u64 = 232 // gezaehlte Geraete
+const A_METH: u64 = 240 // gezaehlte Methoden
+const A_REGS: u64 = 248 // gezaehlte Regionen
+const A_FLDS: u64 = 256 // gezaehlte Felder
+const A_NODESUSED: u64 = 264 // Knoten, die der Namensraum wirklich hatte
+const A_HEAPUSED: u64 = 272 // Halde, die er wirklich brauchte
+const A_FRAMES0: u64 = 280 // freie Rahmen vor dem Parsen
+const A_FRAMES1: u64 = 288 // freie Rahmen nach dem Verwerfen
+const A_USPRT: u64 = 480
+const A_SPLOAD: u64 = 488 // Kernstapel, den ALLEIN das Laden gekostet hat // wie lange `_PRT` gebraucht hat, in Mikrosekunden
+
+// Ein Zwischenspeicher fuer die Link-Geraete. Es gibt auf jedem Brett
+// eine Handvoll davon (QEMU: fuenf), aber `_PRT` nennt sie 128 Mal.
+// Ohne diesen Speicher laufen `_STA`, `_PRS`, `_SRS` und `_CRS`
+// vierhundertmal statt zwanzigmal -- gemessen 1496 us statt 249 us und
+// eine Halde, die ausgeht.
+const A_LINKN: u64 = 296
+const A_LINKS: u64 = 304 // 12 * 16 = 192 Oktette, bis 496
+// (A_USPRT liegt auf 480 -- der Zwischenspeicher endet bei 496,
+//  aber nur zwoelf Eintraege sind moeglich und QEMU braucht fuenf;
+//  damit sich nichts ueberschneidet, endet er bei 472.)
+const LINK_MAX: u64 = 10
+
+const A_ROUTES: u64 = 512
+const ROUTE_BYTES: u64 = 16
+const ROUTE_MAX: u64 = 128
+
+// Wie viele Schritte eine Auswertung hoechstens kosten darf. QEMUs
+// `_PRT` braucht rund 6000 (128 Durchlaeufe mit je gut vierzig Termen);
+// 400000 ist reichlich Luft und trotzdem eine Grenze, die eine nicht
+// endende Schleife in Sekundenbruchteilen erreicht.
+const BUDGET: u64 = 400000
+
+fn g(state: u64, off: u64) -> u64 {
+    return kstate.get(state, kstate.AML_OFF + off)
+}
+
+fn s(state: u64, off: u64, v: u64) {
+    kstate.set(state, kstate.AML_OFF + off, v)
+}
+
+fn ready(state: u64) -> bool {
+    return g(state, A_READY) != 0
+}
+
+fn why(state: u64) -> u64 {
+    return amlns.err(state)
+}
+
+fn route_count(state: u64) -> u64 {
+    return g(state, A_ROUTEN)
+}
+
+fn node_count(state: u64) -> u64 {
+    return g(state, A_NODESUSED)
+}
+
+fn heap_bytes(state: u64) -> u64 {
+    return g(state, A_HEAPUSED)
+}
+
+fn parse_us(state: u64) -> u64 {
+    return g(state, A_MS)
+}
+
+fn prt_ok(state: u64) -> bool {
+    return g(state, A_PRTOK) != 0
+}
+
+// ------------------------------------------------------ die Routentafel
+//
+// Sie ueberlebt den Namensraum. Das ist der ganze Sinn: parsen, das
+// Ergebnis in vier Kilooktette schreiben, den Speicher zurueckgeben.
+
+fn route_key(bus: u64, dev: u64, pin: u64) -> u64 {
+    return (bus << 16) | (dev << 8) | pin
+}
+
+fn route_add(state: u64, bus: u64, dev: u64, pin: u64, gsi: u64) {
+    let n: u64 = g(state, A_ROUTEN)
+    if n >= ROUTE_MAX {
+        return
+    }
+    let at: u64 = kstate.AML_OFF + A_ROUTES + n * ROUTE_BYTES
+    kstate.set(state, at, route_key(bus, dev, pin))
+    kstate.set(state, at + 8, gsi)
+    s(state, A_ROUTEN, n + 1)
+}
+
+// Die Leitung fuer Steckplatz und Stift, oder 0xFFFFFFFF.
+fn gsi_for(state: u64, bus: u64, dev: u64, pin: u64) -> u64 {
+    if g(state, A_PRTOK) == 0 {
+        return 0xFFFFFFFF
+    }
+    let want: u64 = route_key(bus, dev, pin)
+    let n: u64 = g(state, A_ROUTEN)
+    var i: u64 = 0
+    while i < n {
+        let at: u64 = kstate.AML_OFF + A_ROUTES + i * ROUTE_BYTES
+        if kstate.get(state, at) == want {
+            return kstate.get(state, at + 8)
+        }
+        i = i + 1
+    }
+    return 0xFFFFFFFF
+}
+
+// ============================================================
+// DIE EINE STELLE, AN DER EIN TREIBER SEINE LEITUNG HOLT
+// ============================================================
+//
+// `idx` ist der Platz des Geraets in `pci.fi`. Zuerst `_PRT`, dann das
+// Interrupt-Line-Register. Wer hier steht, sieht beide Zahlen -- und
+// wenn sie auseinandergehen, sagt es die serielle Leitung.
+fn gsi_or_line(state: u64, idx: u64) -> u64 {
+    let line: u64 = pci.get(state, idx, pci.E_IRQLINE)
+    let bdf: u64 = pci.get(state, idx, pci.E_BDF)
+    let pin: u64 = pci.get(state, idx, pci.E_IRQPIN)
+    if pin == 0 || pin > 4 {
+        return line // das Geraet benutzt keinen Stift (MSI/MSI-X)
+    }
+    let from_aml: u64 = gsi_for(state, pci.bdf_bus(bdf), pci.bdf_dev(bdf),
+        pin -% 1)
+    if from_aml == 0xFFFFFFFF {
+        return line
+    }
+    // DIE GEGENPROBE ZU DIESER GANZEN RUNDE. Mit `amlwrong` wird die
+    // Leitung um eins verschoben eingetragen. Kommt der Vektor dann
+    // immer noch an, hat die Messung nichts gemessen -- dann liegt es
+    // an irgendetwas anderem, nur nicht an `_PRT`.
+    if kstate.mode_on(state, kstate.M_AMLWRONG) {
+        return (from_aml + 1) % 24
+    }
+    return from_aml
+}
+
+// ============================================================
+// TEIL 1: DIE ERKLAERUNGEN EINER TABELLE IN DEN BAUM
+// ============================================================
+//
+// Auf dieser Ebene stehen NUR erklaerende Opcodes -- Scope, Device,
+// Method, Name, OperationRegion, Field und ihre Verwandten. Ein
+// Methodenrumpf wird NICHT gelesen, sondern uebersprungen: er ist erst
+// interessant, wenn ihn jemand aufruft, und ein Rumpf, den niemand
+// aufruft, darf ruhig Opcodes enthalten, die dieser Interpreter nicht
+// kennt.
+
+fn seg4(w: u64) -> u64 {
+    return w
+}
+
+// Der Kopf einer Feldliste: Zugriffsart in Bit 3:0 der Flaggen.
+fn load_fields(state: u64, scope: u64, region: u64, flags: u64, p: u64,
+    end: u64) {
+    var i: u64 = p
+    var bit: u64 = 0
+    let acc: u64 = flags & 0xF
+    while i < end {
+        let c: u64 = amlns.rd8(i)
+        if c == 0x00 { // ReservedField -- nur Platz
+            var out: [u64; 1] = [0 as u64; 1]
+            let ln: u64 = amlns.pkglen(i + 1, (&out[0]) as u64)
+            bit = bit + ln
+            i = out[0]
+        } else {
+            if c == 0x01 { // AccessField
+                i = i + 3
+            } else {
+                if c == 0x02 { // ConnectField -- hier nicht unterstuetzt
+                    amlns.err_set(state, amlns.ERR_OPCODE)
+                    return
+                }
+                if c == 0x03 { // ExtendedAccessField
+                    i = i + 4
+                } else {
+                    var out: [u64; 1] = [0 as u64; 1]
+                    let node: u64 = amlns.walk_create(state, scope, i,
+                        (&out[0]) as u64, amlns.NK_FIELD, amlns.NMAX)
+                    if node == amlns.NONE {
+                        return
+                    }
+                    let ln: u64 = amlns.pkglen(out[0], (&out[0]) as u64)
+                    amlns.set_kind(state, node, amlns.NK_FIELD)
+                    amlns.set_a(state, node, region)
+                    amlns.set_b(state, node, bit)
+                    amlns.set_c(state, node, ln | (acc << 32))
+                    s(state, A_FLDS, g(state, A_FLDS) + 1)
+                    bit = bit + ln
+                    i = out[0]
+                }
+            }
+        }
+    }
+}
+
+// Gibt die Stelle hinter der Erklaerung zurueck, oder 0 bei einem Fehler.
+//
+// DIESE FUNKTION IST ABSICHTLICH KLEIN. Sie ist die einzige, die sich
+// selbst wieder erreicht (ueber `load_list`), also liegt ihr Rahmen bei
+// jeder Verschachtelungsstufe der DSDT noch einmal auf dem Kernstapel.
+// Alles, was Zwischenplaetze braucht, steht in `load_leaf` -- und das
+// ist keine Kosmetik: mit allen Zweigen in EINER Funktion kostete das
+// Laden von QEMUs DSDT gemessen 26592 Oktette Kernstapel, mit der
+// Aufteilung nur noch einen Bruchteil davon (siehe docs/ROUNDAML.md).
+fn load_term(state: u64, scope: u64, p: u64, end: u64) -> u64 {
+    let c: u64 = amlns.rd8(p)
+    if c == 0x10 {
+        return load_scope(state, scope, p, end)
+    }
+    if c == 0x5B {
+        let e2: u64 = amlns.rd8(p + 1)
+        if e2 == 0x82 || e2 == 0x83 || e2 == 0x84 || e2 == 0x85 {
+            return load_container(state, scope, p, end, e2)
+        }
+    }
+    return load_leaf(state, scope, p, end)
+}
+
+fn load_scope(state: u64, scope: u64, p: u64, end: u64) -> u64 {
+    amlev.seen_mark(state, 0x10)
+    var out: [u64; 1] = [0 as u64; 1]
+    let ln: u64 = amlns.pkglen(p + 1, (&out[0]) as u64)
+    let e: u64 = p + 1 + ln
+    if e > end {
+        amlns.err_set(state, amlns.ERR_TRUNC)
+        return 0
+    }
+    let node: u64 = amlns.walk_create(state, scope, out[0],
+        (&out[0]) as u64, amlns.NK_SCOPE, amlns.NMAX)
+    if node == amlns.NONE {
+        return 0
+    }
+    load_list(state, node, out[0], e)
+    return e
+}
+
+fn load_container(state: u64, scope: u64, p: u64, end: u64, e2: u64) -> u64 {
+    amlev.seen_ext_mark(state, e2)
+    var out: [u64; 1] = [0 as u64; 1]
+    let ln: u64 = amlns.pkglen(p + 2, (&out[0]) as u64)
+    let e: u64 = p + 2 + ln
+    if e > end {
+        amlns.err_set(state, amlns.ERR_TRUNC)
+        return 0
+    }
+    var kind: u64 = amlns.NK_DEVICE
+    if e2 == 0x83 {
+        kind = amlns.NK_PROC
+    }
+    if e2 == 0x84 {
+        kind = amlns.NK_POWER
+    }
+    if e2 == 0x85 {
+        kind = amlns.NK_TZ
+    }
+    let node: u64 = amlns.walk_create(state, scope, out[0],
+        (&out[0]) as u64, kind, amlns.NMAX)
+    if node == amlns.NONE {
+        return 0
+    }
+    amlns.set_kind(state, node, kind)
+    if e2 == 0x82 {
+        s(state, A_DEVS, g(state, A_DEVS) + 1)
+    }
+    var body: u64 = out[0]
+    if e2 == 0x83 {
+        body = body + 6 // ProcID, PblkAddr, PblkLen
+    }
+    if e2 == 0x84 {
+        body = body + 3 // SystemLevel, ResourceOrder
+    }
+    load_list(state, node, body, e)
+    return e
+}
+
+// Alles, was KEINEN eigenen Rumpf mit weiteren Erklaerungen hat.
+fn load_leaf(state: u64, scope: u64, p: u64, end: u64) -> u64 {
+    let c: u64 = amlns.rd8(p)
+    var out: [u64; 1] = [0 as u64; 1]
+
+    if c == 0x14 { // Method -- der Rumpf wird nur vermerkt
+        amlev.seen_mark(state, c)
+        let ln: u64 = amlns.pkglen(p + 1, (&out[0]) as u64)
+        let e: u64 = p + 1 + ln
+        if e > end {
+            amlns.err_set(state, amlns.ERR_TRUNC)
+            return 0
+        }
+        let node: u64 = amlns.walk_create(state, scope, out[0],
+            (&out[0]) as u64, amlns.NK_METHOD, amlns.NMAX)
+        if node == amlns.NONE {
+            return 0
+        }
+        let flags: u64 = amlns.rd8(out[0])
+        amlns.set_kind(state, node, amlns.NK_METHOD)
+        amlns.set_flags(state, node, flags & 7)
+        amlns.set_a(state, node, out[0] + 1)
+        amlns.set_b(state, node, e)
+        s(state, A_METH, g(state, A_METH) + 1)
+        return e
+    }
+    if c == 0x08 { // Name -- der Wert wird erst beim Lesen gerechnet
+        amlev.seen_mark(state, c)
+        let node: u64 = amlns.walk_create(state, scope, p + 1,
+            (&out[0]) as u64, amlns.NK_NAME, amlns.NMAX)
+        if node == amlns.NONE {
+            return 0
+        }
+        amlns.set_kind(state, node, amlns.NK_NAME)
+        amlns.set_a(state, node, out[0])
+        amlns.set_b(state, node, 0)
+        return skip_data(state, out[0], end)
+    }
+    if c == 0x06 { // Alias
+        amlev.seen_mark(state, c)
+        let src: u64 = amlns.walk(state, scope, p + 1, (&out[0]) as u64)
+        let node: u64 = amlns.walk_create(state, scope, out[0],
+            (&out[0]) as u64, amlns.NK_ALIAS, amlns.NMAX)
+        if node != amlns.NONE {
+            amlns.set_a(state, node, src)
+        }
+        return out[0]
+    }
+    if c == 0x15 { // External -- eine Ankuendigung, kein Objekt
+        let node: u64 = amlns.walk(state, scope, p + 1, (&out[0]) as u64)
+        return out[0] + 2
+    }
+    if c == 0x5B {
+        let e2: u64 = amlns.rd8(p + 1)
+        amlev.seen_ext_mark(state, e2)
+        if e2 == 0x80 { // OperationRegion
+            let node: u64 = amlns.walk_create(state, scope, p + 2,
+                (&out[0]) as u64, amlns.NK_REGION, amlns.NMAX)
+            if node == amlns.NONE {
+                return 0
+            }
+            let space: u64 = amlns.rd8(out[0])
+            var q: u64 = out[0] + 1
+            let f: u64 = amlev.frame_new(state)
+            if f == 0 {
+                return 0
+            }
+            amlev.frame_scope_set(f, scope)
+            var a: [u64; 3] = [0 as u64; 3]
+            var b: [u64; 3] = [0 as u64; 3]
+            q = amlev.ev(state, f, q, (&a[0]) as u64)
+            if q == 0 {
+                return 0
+            }
+            amlev.deref(state, (&a[0]) as u64)
+            q = amlev.ev(state, f, q, (&b[0]) as u64)
+            if q == 0 {
+                return 0
+            }
+            amlev.deref(state, (&b[0]) as u64)
+            amlns.set_kind(state, node, amlns.NK_REGION)
+            amlns.set_a(state, node, amlobj.to_int((&a[0]) as u64))
+            amlns.set_b(state, node, amlobj.to_int((&b[0]) as u64))
+            amlns.set_c(state, node, space)
+            s(state, A_REGS, g(state, A_REGS) + 1)
+            return q
+        }
+        if e2 == 0x81 { // Field
+            let ln: u64 = amlns.pkglen(p + 2, (&out[0]) as u64)
+            let e: u64 = p + 2 + ln
+            if e > end {
+                amlns.err_set(state, amlns.ERR_TRUNC)
+                return 0
+            }
+            let region: u64 = amlns.walk(state, scope, out[0],
+                (&out[0]) as u64)
+            if region == amlns.NONE {
+                amlns.err_set(state, amlns.ERR_NOTFOUND)
+                return e
+            }
+            let flags: u64 = amlns.rd8(out[0])
+            load_fields(state, scope, region, flags, out[0] + 1, e)
+            return e
+        }
+        if e2 == 0x86 || e2 == 0x87 { // IndexField, BankField
+            // Angelegt wird nichts: ein Feld, das ueber ein anderes Feld
+            // geht, kann dieser Interpreter nicht lesen, und ein Knoten,
+            // der beim Lesen falsche Zahlen liefert, ist schlimmer als
+            // keiner. Der Bereich wird uebersprungen.
+            let ln: u64 = amlns.pkglen(p + 2, (&out[0]) as u64)
+            return p + 2 + ln
+        }
+        if e2 == 0x01 || e2 == 0x02 { // Mutex, Event
+            var kind: u64 = amlns.NK_MUTEX
+            if e2 == 0x02 {
+                kind = amlns.NK_EVENT
+            }
+            let node: u64 = amlns.walk_create(state, scope, p + 2,
+                (&out[0]) as u64, kind, amlns.NMAX)
+            if node != amlns.NONE {
+                amlns.set_kind(state, node, kind)
+            }
+            var q: u64 = out[0]
+            if e2 == 0x01 {
+                q = q + 1
+            }
+            return q
+        }
+        amlns.err_set(state, amlns.ERR_OPCODE)
+        return 0
+    }
+    amlns.err_set(state, amlns.ERR_OPCODE)
+    return 0
+}
+
+// Ein Datenobjekt hinter einem `Name` ueberspringen, ohne es
+// auszuwerten. Nur die Formen, die als Name-Wert vorkommen duerfen.
+fn skip_data(state: u64, p: u64, end: u64) -> u64 {
+    let c: u64 = amlns.rd8(p)
+    if c == 0x00 || c == 0x01 || c == 0xFF {
+        return p + 1
+    }
+    if c == 0x0A {
+        return p + 2
+    }
+    if c == 0x0B {
+        return p + 3
+    }
+    if c == 0x0C {
+        return p + 5
+    }
+    if c == 0x0E {
+        return p + 9
+    }
+    if c == 0x0D {
+        var n: u64 = 0
+        while p + 1 + n < end && amlns.rd8(p + 1 + n) != 0 {
+            n = n + 1
+        }
+        return p + 2 + n
+    }
+    if c == 0x11 || c == 0x12 || c == 0x13 {
+        var out: [u64; 1] = [0 as u64; 1]
+        let ln: u64 = amlns.pkglen(p + 1, (&out[0]) as u64)
+        return p + 1 + ln
+    }
+    if c == 0x5B && amlns.rd8(p + 1) == 0x30 { // Revision
+        return p + 2
+    }
+    amlns.err_set(state, amlns.ERR_OPCODE)
+    return 0
+}
+
+fn load_list(state: u64, scope: u64, p: u64, end: u64) {
+    var i: u64 = p
+    while i < end {
+        if amlns.err(state) != amlns.ERR_OK {
+            return
+        }
+        let q: u64 = load_term(state, scope, i, end)
+        if q == 0 || q <= i {
+            if q <= i && amlns.err(state) == amlns.ERR_OK {
+                amlns.err_set(state, amlns.ERR_TRUNC)
+            }
+            return
+        }
+        i = q
+    }
+}
+
+// ============================================================
+// TEIL 2: `_PRT` AUSWERTEN
+// ============================================================
+
+// Die Busnummer eines Wurzelknotens: `_BBN`, sonst 0.
+fn bbn_of(state: u64, node: u64) -> u64 {
+    var w: [u8; 5] = "_BBN\0"
+    let seg: u64 = amlns.seg_of((&w[0]) as u64)
+    let n: u64 = amlns.child(state, node, seg)
+    if n == amlns.NONE {
+        return 0
+    }
+    var v: [u64; 1] = [0 as u64; 1]
+    if amlobj.const_int(amlns.node_a(state, n), (&v[0]) as u64) == 0 {
+        return 0
+    }
+    return v[0]
+}
+
+// Eine Methode ohne Argumente aufrufen (oder einen Namen lesen).
+fn call0(state: u64, node: u64, dst: u64) -> bool {
+    if node == amlns.NONE {
+        return false
+    }
+    if amlns.node_kind(state, node) == amlns.NK_METHOD {
+        var none: [u64; 3] = [0 as u64; 3]
+        amlev.call_method(state, node, 0, (&none[0]) as u64, dst)
+        return amlns.err(state) == amlns.ERR_OK
+    }
+    let f: u64 = amlev.frame_new(state)
+    if f == 0 {
+        return false
+    }
+    amlev.frame_scope_set(f, amlns.node_parent(state, node))
+    var o: [u64; 3] = [0 as u64; 3]
+    amlobj.oset(dst, amlobj.OT_REF_NODE, node, 0)
+    amlev.deref(state, dst)
+    return amlns.err(state) == amlns.ERR_OK
+}
+
+fn link_cached(state: u64, link: u64) -> u64 {
+    let n: u64 = g(state, A_LINKN)
+    var i: u64 = 0
+    while i < n {
+        if kstate.get(state, kstate.AML_OFF + A_LINKS + i * 16) == link + 1 {
+            return kstate.get(state, kstate.AML_OFF + A_LINKS + i * 16 + 8)
+        }
+        i = i + 1
+    }
+    return 0xFFFFFFFE
+}
+
+fn link_cache(state: u64, link: u64, gsi: u64) {
+    let n: u64 = g(state, A_LINKN)
+    if n >= LINK_MAX {
+        return
+    }
+    kstate.set(state, kstate.AML_OFF + A_LINKS + n * 16, link + 1)
+    kstate.set(state, kstate.AML_OFF + A_LINKS + n * 16 + 8, gsi)
+    s(state, A_LINKN, n + 1)
+}
+
+// Die Leitung, die ein Link-Geraet gerade eingestellt hat.
+// 0xFFFFFFFF, wenn sie sich nicht ermitteln laesst.
+fn link_gsi(state: u64, link: u64) -> u64 {
+    let seen: u64 = link_cached(state, link)
+    if seen != 0xFFFFFFFE {
+        return seen
+    }
+    let r: u64 = link_gsi_slow(state, link)
+    link_cache(state, link, r)
+    return r
+}
+
+fn link_gsi_slow(state: u64, link: u64) -> u64 {
+    var w_sta: [u8; 5] = "_STA\0"
+    var w_crs: [u8; 5] = "_CRS\0"
+    var w_prs: [u8; 5] = "_PRS\0"
+    var w_srs: [u8; 5] = "_SRS\0"
+    var res: [u64; 3] = [0 as u64; 3]
+
+    // 1. Steht das Geraet ueberhaupt zur Verfuegung, und ist es
+    //    eingeschaltet? Bit 0 = vorhanden, Bit 1 = aktiviert.
+    let sta: u64 = amlns.child(state, link, amlns.seg_of((&w_sta[0]) as u64))
+    var enabled: u64 = 1
+    if sta != amlns.NONE {
+        if call0(state, sta, (&res[0]) as u64) {
+            let v: u64 = amlobj.to_int((&res[0]) as u64)
+            if (v & 1) == 0 {
+                return 0xFFFFFFFF // gar nicht vorhanden
+            }
+            if (v & 2) == 0 {
+                enabled = 0
+            }
+        }
+    }
+
+    // 2. Ist es nicht eingeschaltet, wird es eingeschaltet: die erste
+    //    Moeglichkeit aus `_PRS` ueber `_SRS` setzen. DAS ist der Fall,
+    //    fuer den es die Link-Geraete ueberhaupt gibt, und ohne ihn
+    //    bleibt eine Leitung auf einem echten Brett tot.
+    if enabled == 0 {
+        let prs: u64 = amlns.child(state, link,
+            amlns.seg_of((&w_prs[0]) as u64))
+        let srs: u64 = amlns.child(state, link,
+            amlns.seg_of((&w_srs[0]) as u64))
+        if prs != amlns.NONE && srs != amlns.NONE {
+            if call0(state, prs, (&res[0]) as u64) {
+                if amlobj.otype((&res[0]) as u64) == amlobj.OT_BUF {
+                    let at: u64 = amlobj.ov1((&res[0]) as u64)
+                    let ln: u64 = amlobj.ov2((&res[0]) as u64)
+                    let want: u64 = amlobj.res_first_irq(state, at, ln)
+                    if want != 0xFFFFFFFF {
+                        // `_SRS` bekommt einen Puffer in der Form von
+                        // `_PRS`, in dem genau EINE Leitung steht. Der
+                        // einfachste richtige Weg: den `_PRS`-Puffer
+                        // nehmen und die Auswahl darin auf die erste
+                        // Moeglichkeit einschraenken.
+                        srs_set(state, srs, (&res[0]) as u64, want)
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Was steht jetzt in `_CRS`?
+    let crs: u64 = amlns.child(state, link, amlns.seg_of((&w_crs[0]) as u64))
+    if crs == amlns.NONE {
+        return 0xFFFFFFFF
+    }
+    if !call0(state, crs, (&res[0]) as u64) {
+        return 0xFFFFFFFF
+    }
+    if amlobj.otype((&res[0]) as u64) != amlobj.OT_BUF {
+        return 0xFFFFFFFF
+    }
+    let gsi: u64 = amlobj.res_first_irq(state,
+        amlobj.ov1((&res[0]) as u64), amlobj.ov2((&res[0]) as u64))
+    return gsi
+}
+
+// `_SRS` mit einem Puffer aufrufen, der genau eine Leitung nennt.
+fn srs_set(state: u64, srs: u64, prsbuf: u64, want: u64) {
+    let at: u64 = amlobj.ov1(prsbuf)
+    let ln: u64 = amlobj.ov2(prsbuf)
+    let o: u64 = amlobj.obj_buf(state, ln)
+    if o == 0 {
+        return
+    }
+    let dst: u64 = amlobj.ov1(o)
+    var i: u64 = 0
+    while i < ln {
+        amlns.wr8(dst + i, amlns.rd8(at + i))
+        i = i + 1
+    }
+    // Die Auswahl einschraenken: bei der kurzen Form die Bitmaske auf
+    // die eine Leitung, bei der langen die Zahl der Eintraege auf eins
+    // und die erste Zahl auf `want`.
+    var j: u64 = 0
+    while j < ln {
+        let tag: u64 = amlns.rd8(dst + j)
+        if tag == 0x79 {
+            break
+        }
+        if (tag & 0x80) == 0 {
+            let l: u64 = tag & 7
+            if ((tag >> 3) & 0xF) == 4 && want < 16 {
+                amlns.wr8(dst + j + 1, (1 << want) & 0xFF)
+                amlns.wr8(dst + j + 2, ((1 << want) >> 8) & 0xFF)
+            }
+            j = j + 1 + l
+        } else {
+            let l: u64 = amlns.rd16(dst + j + 1)
+            if (tag & 0x7F) == 0x09 {
+                amlns.wr8(dst + j + 4, 1)
+                amlns.wr8(dst + j + 5, want & 0xFF)
+                amlns.wr8(dst + j + 6, (want >> 8) & 0xFF)
+                amlns.wr8(dst + j + 7, (want >> 16) & 0xFF)
+                amlns.wr8(dst + j + 8, (want >> 24) & 0xFF)
+            }
+            j = j + 3 + l
+        }
+    }
+    var arg: [u64; 3] = [0 as u64; 3]
+    amlobj.ocopy((&arg[0]) as u64, o)
+    var res: [u64; 3] = [0 as u64; 3]
+    amlev.call_method(state, srs, 1, (&arg[0]) as u64, (&res[0]) as u64)
+}
+
+// Alle `_PRT` im Baum durchgehen und die Routentafel fuellen.
+fn eval_prt(state: u64, loud: bool) {
+    var w_prt: [u8; 5] = "_PRT\0"
+    let seg: u64 = amlns.seg_of((&w_prt[0]) as u64)
+    let n: u64 = amlns.nodes(state)
+    var i: u64 = 1
+    var found: u64 = 0
+    while i < n {
+        if amlns.node_name(state, i) == seg {
+            found = found + 1
+            eval_one_prt(state, i, loud)
+        }
+        i = i + 1
+    }
+    if found == 0 {
+        amlns.err_set(state, amlns.ERR_NOPRT)
+        return
+    }
+    if g(state, A_ROUTEN) != 0 {
+        s(state, A_PRTOK, 1)
+    }
+}
+
+fn eval_one_prt(state: u64, node: u64, loud: bool) {
+    var s_l: [u8; 12] = "aml: prt b=\0"
+    var s_d: [u8; 4] = " d=\0"
+    var s_p: [u8; 4] = " p=\0"
+    var s_g: [u8; 6] = " gsi=\0"
+    var s_s: [u8; 6] = " src=\0"
+    let bus: u64 = bbn_of(state, amlns.node_parent(state, node))
+    var res: [u64; 3] = [0 as u64; 3]
+    if !call0(state, node, (&res[0]) as u64) {
+        return
+    }
+    if amlobj.otype((&res[0]) as u64) != amlobj.OT_PKG {
+        amlns.err_set(state, amlns.ERR_TYPE)
+        return
+    }
+    let cnt: u64 = amlobj.ov2((&res[0]) as u64)
+    var k: u64 = 0
+    while k < cnt {
+        let e: u64 = amlobj.pkg_at((&res[0]) as u64, k)
+        if amlobj.otype(e) == amlobj.OT_PKG && amlobj.ov2(e) >= 4 {
+            var a0: [u64; 3] = [0 as u64; 3]
+            var a1: [u64; 3] = [0 as u64; 3]
+            var a3: [u64; 3] = [0 as u64; 3]
+            amlobj.ocopy((&a0[0]) as u64, amlobj.pkg_at(e, 0))
+            amlev.deref(state, (&a0[0]) as u64)
+            amlobj.ocopy((&a1[0]) as u64, amlobj.pkg_at(e, 1))
+            amlev.deref(state, (&a1[0]) as u64)
+            amlobj.ocopy((&a3[0]) as u64, amlobj.pkg_at(e, 3))
+            amlev.deref(state, (&a3[0]) as u64)
+            let adr: u64 = amlobj.to_int((&a0[0]) as u64)
+            let dev: u64 = (adr >> 16) & 0x1F
+            let pin: u64 = amlobj.to_int((&a1[0]) as u64)
+            let src: u64 = amlobj.pkg_at(e, 2)
+            var gsi: u64 = 0xFFFFFFFF
+            var linknode: u64 = amlns.NONE
+            if amlobj.otype(src) == amlobj.OT_REF_NODE {
+                linknode = amlobj.ov1(src)
+                gsi = link_gsi(state, linknode)
+            } else {
+                // Kein Link-Geraet: die Leitung steht direkt im vierten
+                // Element. So sieht es auf jedem Brett aus, dessen
+                // Firmware den APIC-Fall fest verdrahtet hat.
+                gsi = amlobj.to_int((&a3[0]) as u64)
+            }
+            if gsi != 0xFFFFFFFF && pin < 4 {
+                route_add(state, bus, dev, pin, gsi)
+                if loud {
+                    serial.puts((&s_l[0]) as u64)
+                    serial.dec(bus)
+                    serial.puts((&s_d[0]) as u64)
+                    serial.dec(dev)
+                    serial.puts((&s_p[0]) as u64)
+                    serial.dec(pin)
+                    serial.puts((&s_g[0]) as u64)
+                    serial.dec(gsi)
+                    if linknode != amlns.NONE {
+                        serial.puts((&s_s[0]) as u64)
+                        amlns.name_print(amlns.node_name(state, linknode))
+                    }
+                    serial.nl()
+                }
+            }
+        }
+        k = k + 1
+    }
+}
+
+// ============================================================
+// TEIL 3: DIE STUFE
+// ============================================================
+
+fn arena_get(state: u64) -> u64 {
+    let run: u64 = mem.frame_run(state, amlns.ARENA_FRAMES)
+    if run == 0 {
+        amlns.err_set(state, amlns.ERR_NOMEM)
+        return 0
+    }
+    amlns.root_reset(state, run, amlns.NMAX,
+        run + amlns.ARENA_FRAMES * 4096)
+    amlev.budget_set(state, BUDGET)
+    return run
+}
+
+fn arena_put(state: u64, run: u64) {
+    if run != 0 {
+        mem.frame_free_run(state, run, amlns.ARENA_FRAMES)
+    }
+}
+
+// Eine kaputte Kopie der DSDT: die Gegenprobe `amlbad`. Sie liegt auf
+// der Halde, damit die ECHTE Tabelle unangetastet bleibt -- `batt.fi`
+// und `power.fi` lesen sie danach noch.
+fn broken_copy(state: u64, t: u64) -> u64 {
+    let len: u64 = amlns.rd32(t + 4)
+    var half: u64 = len / 2
+    if half < 40 {
+        half = len
+    }
+    let o: u64 = amlobj.obj_buf(state, half)
+    if o == 0 {
+        return 0
+    }
+    let at: u64 = amlobj.ov1(o)
+    var i: u64 = 0
+    while i < half {
+        amlns.wr8(at + i, amlns.rd8(t + i))
+        i = i + 1
+    }
+    // Die Laenge im Kopf luegt weiter -- genau das tut eine
+    // abgeschnittene Tabelle auf einem kaputten Brett auch.
+    return at
+}
+
+fn load_all(state: u64, loud: bool) {
+    var w_dsdt: [u8; 5] = "DSDT\0"
+    var w_ssdt: [u8; 5] = "SSDT\0"
+    let n: u64 = acpi.table_count(state)
+    var i: u64 = 0
+    var done: u64 = 0
+    while i < n {
+        let t: u64 = acpi.table_at(state, i)
+        if t != 0 {
+            let sig: u64 = amlns.seg_of(t)
+            if sig == amlns.seg_of((&w_dsdt[0]) as u64)
+                || sig == amlns.seg_of((&w_ssdt[0]) as u64) {
+                var start: u64 = t
+                var len: u64 = amlns.rd32(t + 4)
+                if kstate.mode_on(state, kstate.M_AMLBAD)
+                    && sig == amlns.seg_of((&w_dsdt[0]) as u64) {
+                    let cp: u64 = broken_copy(state, t)
+                    if cp != 0 {
+                        start = cp
+                        // die Laenge bleibt die ALTE -- der Parser
+                        // laeuft in nicht mehr vorhandene Oktette
+                    }
+                }
+                if len > 36 {
+                    load_list(state, 0, start + 36, start + len)
+                }
+                done = done + 1
+                if amlns.err(state) != amlns.ERR_OK {
+                    // Eine kaputte Tabelle haelt die naechste nicht auf.
+                    // Der erste Fehler bleibt trotzdem stehen.
+                    i = n
+                }
+            }
+        }
+        i = i + 1
+    }
+    s(state, A_TABLES, done)
+    if done == 0 {
+        amlns.err_set(state, amlns.ERR_NODSDT)
+    }
+}
+
+// Die zwei Gegenproben, fuer die es in keiner echten DSDT etwas gibt:
+// eine Methode mit einer Schleife, die nicht endet, und eine, die sich
+// selbst aufruft. Beide werden hier als AML-Oktette HINGESCHRIEBEN --
+// das ist ehrlicher als eine SSDT von aussen, weil dann in der Abnahme
+// steht, welche Oktette gemeint sind.
+fn selftest_loop(state: u64) {
+    var s_t: [u8; 16] = "aml: loop err=\0\0"
+    // Method(TSTL, 0) { While(One) { } }
+    var code: [u8; 9] = [0 as u8; 9]
+    code[0] = 0x14 as u8
+    code[1] = 0x09 as u8
+    code[2] = 84 as u8 // 'T'
+    code[3] = 83 as u8 // 'S'
+    code[4] = 84 as u8 // 'T'
+    code[5] = 76 as u8 // 'L'
+    code[6] = 0x00 as u8
+    code[7] = 0xA2 as u8
+    code[8] = 0x00 as u8
+    // Die PkgLength der Schleife und ihre Bedingung stehen dahinter --
+    // 0xA2 0x02 0x01 waeren drei Oktette; in ein Feld von neun passen
+    // sie nicht mehr, also wird der Rumpf gleich daneben gebaut.
+    var body: [u8; 3] = [0 as u8; 3]
+    body[0] = 0xA2 as u8
+    body[1] = 0x02 as u8
+    body[2] = 0x01 as u8
+    let p: u64 = (&code[0]) as u64
+    let node: u64 = amlns.add(state, 0,
+        amlns.seg_of((&code[2]) as u64), amlns.NK_METHOD, amlns.NMAX)
+    if node == amlns.NONE {
+        return
+    }
+    amlns.set_flags(state, node, 0)
+    amlns.set_a(state, node, (&body[0]) as u64)
+    amlns.set_b(state, node, (&body[0]) as u64 + 3)
+    amlev.budget_set(state, 20000)
+    var res: [u64; 3] = [0 as u64; 3]
+    var none: [u64; 3] = [0 as u64; 3]
+    amlev.call_method(state, node, 0, (&none[0]) as u64, (&res[0]) as u64)
+    serial.puts((&s_t[0]) as u64)
+    serial.dec(amlns.err(state))
+    serial.nl()
+}
+
+fn selftest_deep(state: u64) {
+    var s_t: [u8; 16] = "aml: deep err=\0\0"
+    // Method(TSTR, 0) { TSTR() } -- der Rumpf ist der eigene Name.
+    var nm: [u8; 5] = "TSTR\0"
+    let node: u64 = amlns.add(state, 0, amlns.seg_of((&nm[0]) as u64),
+        amlns.NK_METHOD, amlns.NMAX)
+    if node == amlns.NONE {
+        return
+    }
+    amlns.set_flags(state, node, 0)
+    amlns.set_a(state, node, (&nm[0]) as u64)
+    amlns.set_b(state, node, (&nm[0]) as u64 + 4)
+    amlev.budget_set(state, 200000)
+    var res: [u64; 3] = [0 as u64; 3]
+    var none: [u64; 3] = [0 as u64; 3]
+    amlev.call_method(state, node, 0, (&none[0]) as u64, (&res[0]) as u64)
+    serial.puts((&s_t[0]) as u64)
+    serial.dec(amlns.err(state))
+    serial.nl()
+}
+
+fn report(state: u64) {
+    var s1: [u8; 14] = "aml: tables=\0\0"
+    var s2: [u8; 8] = " nodes=\0"
+    var s3: [u8; 7] = " heap=\0"
+    var s4: [u8; 5] = " us=\0"
+    var s5: [u8; 6] = " err=\0"
+    var s6: [u8; 12] = "aml: devs=\0\0"
+    var s7: [u8; 10] = " methods=\0"
+    var s8: [u8; 10] = " regions=\0"
+    var s9: [u8; 9] = " fields=\0"
+    var sa: [u8; 14] = "aml: routes=\0\0"
+    var sb: [u8; 8] = " prtok=\0"
+    var sc: [u8; 9] = " prtus=\0\0"
+    var sd: [u8; 9] = " stack=\0\0"
+    var se: [u8; 8] = " tiefe=\0"
+    var sf: [u8; 10] = " ladest=\0\0"
+    serial.puts((&s1[0]) as u64)
+    serial.dec(g(state, A_TABLES))
+    serial.puts((&s2[0]) as u64)
+    serial.dec(g(state, A_NODESUSED))
+    serial.puts((&s3[0]) as u64)
+    serial.dec(g(state, A_HEAPUSED))
+    serial.puts((&s4[0]) as u64)
+    serial.dec(g(state, A_MS))
+    serial.puts((&s5[0]) as u64)
+    serial.dec(amlns.err(state))
+    serial.nl()
+    serial.puts((&s6[0]) as u64)
+    serial.dec(g(state, A_DEVS))
+    serial.puts((&s7[0]) as u64)
+    serial.dec(g(state, A_METH))
+    serial.puts((&s8[0]) as u64)
+    serial.dec(g(state, A_REGS))
+    serial.puts((&s9[0]) as u64)
+    serial.dec(g(state, A_FLDS))
+    serial.nl()
+    serial.puts((&sa[0]) as u64)
+    serial.dec(g(state, A_ROUTEN))
+    serial.puts((&sb[0]) as u64)
+    serial.dec(g(state, A_PRTOK))
+    serial.puts((&sc[0]) as u64)
+    serial.dec(g(state, A_USPRT))
+    serial.puts((&sd[0]) as u64)
+    serial.dec(amlev.stack_high(state))
+    serial.puts((&se[0]) as u64)
+    serial.dec(amlev.depth_high(state))
+    serial.puts((&sf[0]) as u64)
+    serial.dec(g(state, A_SPLOAD))
+    serial.nl()
+}
+
+// Welche Opcodes der Interpreter beim Lesen dieser Maschine wirklich
+// angefasst hat. `tools/aml/run.sh` haelt das gegen das Histogramm von
+// `tools/aml/disasm.py` -- das ist die Abdeckung, und sie ist gemessen
+// und nicht geschaetzt.
+fn report_ops(state: u64) {
+    var s_o: [u8; 9] = "aml: op \0"
+    var s_e: [u8; 12] = "aml: extop \0"
+    var i: u64 = 0
+    while i < 256 {
+        if amlev.seen_get(state, i) {
+            serial.puts((&s_o[0]) as u64)
+            serial.hex_width(i, 2)
+            serial.nl()
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < 144 {
+        if amlev.seen_ext(state, i) {
+            serial.puts((&s_e[0]) as u64)
+            serial.hex_width(i, 2)
+            serial.nl()
+        }
+        i = i + 1
+    }
+}
+
+// ============================================================
+// WAS DIESER INTERPRETER KANN -- die Liste, gegen die gemessen wird
+// ============================================================
+//
+// `tools/aml/run.sh` haelt sie gegen das Opcode-Histogramm, das
+// `tools/aml/disasm.py` UNABHAENGIG aus derselben DSDT zieht. Daraus
+// wird die Abdeckung: wie viele der Opcodes, die auf dieser Maschine
+// wirklich vorkommen, dieser Interpreter versteht.
+//
+// Der Testlaeufer prueft AUSSERDEM, dass jeder Opcode, den der
+// Interpreter im Lauf WIRKLICH ANGEFASST hat (die `aml: op`-Zeilen),
+// auch in dieser Liste steht. Eine Liste, die von der Wirklichkeit
+// abweicht, faellt damit auf, statt die Abdeckung schoenzurechnen.
+fn report_can(state: u64) {
+    var s_c: [u8; 10] = "aml: can \0"
+    var s_e: [u8; 13] = "aml: canext \0"
+    var s_p: [u8; 14] = "aml: canpair \0"
+    // Die einfachen Opcodes. 0x60..0x67 sind Local0..7, 0x68..0x6E Arg0..6.
+    var ops: [u8; 69] = [0 as u8; 69]
+    ops[0] = 0x00 as u8
+    ops[1] = 0x01 as u8
+    ops[2] = 0x06 as u8
+    ops[3] = 0x08 as u8
+    ops[4] = 0x0A as u8
+    ops[5] = 0x0B as u8
+    ops[6] = 0x0C as u8
+    ops[7] = 0x0D as u8
+    ops[8] = 0x0E as u8
+    ops[9] = 0x10 as u8
+    ops[10] = 0x11 as u8
+    ops[11] = 0x12 as u8
+    ops[12] = 0x13 as u8
+    ops[13] = 0x14 as u8
+    ops[14] = 0x15 as u8
+    ops[15] = 0x70 as u8
+    ops[16] = 0x71 as u8
+    ops[17] = 0x72 as u8
+    ops[18] = 0x74 as u8
+    ops[19] = 0x75 as u8
+    ops[20] = 0x76 as u8
+    ops[21] = 0x77 as u8
+    ops[22] = 0x78 as u8
+    ops[23] = 0x79 as u8
+    ops[24] = 0x7A as u8
+    ops[25] = 0x7B as u8
+    ops[26] = 0x7C as u8
+    ops[27] = 0x7D as u8
+    ops[28] = 0x7E as u8
+    ops[29] = 0x7F as u8
+    ops[30] = 0x80 as u8
+    ops[31] = 0x81 as u8
+    ops[32] = 0x82 as u8
+    ops[33] = 0x83 as u8
+    ops[34] = 0x85 as u8
+    ops[35] = 0x86 as u8
+    ops[36] = 0x87 as u8
+    ops[37] = 0x88 as u8
+    ops[38] = 0x8A as u8
+    ops[39] = 0x8B as u8
+    ops[40] = 0x8C as u8
+    ops[41] = 0x8D as u8
+    ops[42] = 0x8E as u8
+    ops[43] = 0x8F as u8
+    ops[44] = 0x90 as u8
+    ops[45] = 0x91 as u8
+    ops[46] = 0x92 as u8
+    ops[47] = 0x93 as u8
+    ops[48] = 0x94 as u8
+    ops[49] = 0x95 as u8
+    ops[50] = 0x96 as u8
+    ops[51] = 0x97 as u8
+    ops[52] = 0x98 as u8
+    ops[53] = 0x99 as u8
+    ops[54] = 0x9D as u8
+    ops[55] = 0x9F as u8
+    ops[56] = 0xA0 as u8
+    ops[57] = 0xA1 as u8
+    ops[58] = 0xA2 as u8
+    ops[59] = 0xA3 as u8
+    ops[60] = 0xA4 as u8
+    ops[61] = 0xA5 as u8
+    ops[62] = 0xCC as u8
+    ops[63] = 0xFF as u8
+    var i: u64 = 0
+    while i < 64 {
+        serial.puts((&s_c[0]) as u64)
+        serial.hex_width(ops[i as usize] as u64, 2)
+        serial.nl()
+        i = i + 1
+    }
+    // Local0..7 und Arg0..6 einzeln, damit die Liste vollstaendig ist.
+    i = 0x60
+    while i <= 0x6E {
+        serial.puts((&s_c[0]) as u64)
+        serial.hex_width(i, 2)
+        serial.nl()
+        i = i + 1
+    }
+    var ext: [u8; 20] = [0 as u8; 20]
+    ext[0] = 0x01 as u8
+    ext[1] = 0x02 as u8
+    ext[2] = 0x12 as u8
+    ext[3] = 0x13 as u8
+    ext[4] = 0x21 as u8
+    ext[5] = 0x22 as u8
+    ext[6] = 0x23 as u8
+    ext[7] = 0x24 as u8
+    ext[8] = 0x26 as u8
+    ext[9] = 0x27 as u8
+    ext[10] = 0x30 as u8
+    ext[11] = 0x31 as u8
+    ext[12] = 0x33 as u8
+    ext[13] = 0x80 as u8
+    ext[14] = 0x81 as u8
+    ext[15] = 0x82 as u8
+    ext[16] = 0x83 as u8
+    ext[17] = 0x84 as u8
+    ext[18] = 0x85 as u8
+    i = 0
+    while i < 19 {
+        serial.puts((&s_e[0]) as u64)
+        serial.hex_width(ext[i as usize] as u64, 2)
+        serial.nl()
+        i = i + 1
+    }
+    // Die drei zusammengesetzten Vergleiche. In AML stehen sie als ZWEI
+    // Opcodes hintereinander (0x92 gefolgt von 0x93, 0x94 oder 0x95) --
+    // `LNotEqual`, `LLessEqual`, `LGreaterEqual`. Sie sind eigene
+    // Sprachformen und werden deshalb eigens gemeldet.
+    i = 0x93
+    while i <= 0x95 {
+        serial.puts((&s_p[0]) as u64)
+        serial.hex_width(i, 2)
+        serial.nl()
+        i = i + 1
+    }
+}
+
+// Der ganze Namensraum, ein Name je Zeile. Nur mit `amlprt`, weil das
+// bei QEMU 346 Zeilen sind -- und weil genau diese Liste es ist, die
+// `tools/aml/run.sh` gegen die unabhaengige Fassung in Python haelt.
+fn report_ns(state: u64) {
+    var s_n: [u8; 9] = "aml: ns \0"
+    var s_k: [u8; 3] = " \0\0"
+    let n: u64 = amlns.nodes(state)
+    // AB NULL: die Wurzel `\` ist ein Knoten wie jeder andere, und die
+    // unabhaengige Fassung in Python fuehrt sie auch auf. Wer sie hier
+    // auslaesst, muss den Unterschied spaeter von Hand wegrechnen --
+    // und genau solche Korrekturen sind es, hinter denen sich ein
+    // echter Unterschied verstecken kann.
+    var i: u64 = 0
+    while i < n {
+        serial.puts((&s_n[0]) as u64)
+        amlns.path_out(state, i)
+        serial.puts((&s_k[0]) as u64)
+        serial.dec(amlns.node_kind(state, i))
+        serial.nl()
+        i = i + 1
+    }
+}
+
+// Die Gegenueberstellung, um die es in dieser Runde geht: was sagt
+// `_PRT`, und was sagt das Register, das bis heute geglaubt wurde?
+fn report_devices(state: u64) {
+    var s_d: [u8; 11] = "aml: gsi \0\0"
+    var s_a: [u8; 6] = " aml=\0"
+    var s_l: [u8; 7] = " line=\0"
+    var s_p: [u8; 6] = " pin=\0"
+    let n: u64 = pci.count(state)
+    var i: u64 = 0
+    while i < n {
+        let bdf: u64 = pci.get(state, i, pci.E_BDF)
+        let pin: u64 = pci.get(state, i, pci.E_IRQPIN)
+        if pin != 0 && pin <= 4 {
+            serial.puts((&s_d[0]) as u64)
+            pci.hexn(pci.bdf_bus(bdf), 2)
+            serial.put(58 as u8)
+            pci.hexn(pci.bdf_dev(bdf), 2)
+            serial.put(46 as u8)
+            pci.hexn(pci.bdf_fn(bdf), 1)
+            serial.puts((&s_p[0]) as u64)
+            serial.dec(pin)
+            serial.puts((&s_a[0]) as u64)
+            let a: u64 = gsi_for(state, pci.bdf_bus(bdf), pci.bdf_dev(bdf),
+                pin -% 1)
+            if a == 0xFFFFFFFF {
+                serial.dec(999)
+            } else {
+                serial.dec(a)
+            }
+            serial.puts((&s_l[0]) as u64)
+            serial.dec(pci.get(state, i, pci.E_IRQLINE))
+            serial.nl()
+        }
+        i = i + 1
+    }
+}
+
+fn stage(state: u64) {
+    var s_off: [u8; 16] = "aml: abgestellt\0"
+    var s_leak: [u8; 20] = "aml: frames vorher=\0"
+    var s_leak2: [u8; 10] = " nachher=\0"
+    if kstate.mode_on(state, kstate.M_AMLDUMP) {
+        dump(state)
+    }
+    if kstate.mode_on(state, kstate.M_NOAML) {
+        serial.puts((&s_off[0]) as u64)
+        serial.nl()
+        return
+    }
+    amlev.stack_base(state)
+    let free0: u64 = mem.frames_free(state)
+    s(state, A_FRAMES0, free0)
+    let run: u64 = arena_get(state)
+    if run == 0 {
+        report(state)
+        return
+    }
+    let t0: u64 = apic.tsc()
+    load_all(state, false)
+    let t1: u64 = apic.tsc()
+    s(state, A_SPLOAD, amlev.stack_high(state))
+    amlev.stack_clear(state)
+    s(state, A_NODESUSED, amlns.nodes(state))
+    if amlns.err(state) == amlns.ERR_OK {
+        if kstate.mode_on(state, kstate.M_AMLPRT) {
+            report_ns(state)
+        }
+        eval_prt(state, kstate.mode_on(state, kstate.M_AMLPRT))
+    }
+    let t2: u64 = apic.tsc()
+    let hz: u64 = apic.tsc_hz(state)
+    if hz > 1000000 {
+        s(state, A_MS, (t1 -% t0) / (hz / 1000000))
+        s(state, A_USPRT, (t2 -% t1) / (hz / 1000000))
+    }
+    s(state, A_HEAPUSED, amlns.heap_high(state))
+    s(state, A_READY, 1)
+    report(state)
+    if kstate.mode_on(state, kstate.M_AML) {
+        report_devices(state)
+        report_ops(state)
+        report_can(state)
+    }
+    if kstate.mode_on(state, kstate.M_AMLLOOP) {
+        selftest_loop(state)
+    }
+    if kstate.mode_on(state, kstate.M_AMLDEEP) {
+        selftest_deep(state)
+    }
+    // DER NAMENSRAUM WIRD VERWORFEN. Alles, was danach noch gebraucht
+    // wird, steht in der Routentafel in `kdata` -- vier Kilooktette
+    // statt einer Viertelmegabyte, und zwar fuer immer.
+    arena_put(state, run)
+    let free1: u64 = mem.frames_free(state)
+    s(state, A_FRAMES1, free1)
+    if kstate.mode_on(state, kstate.M_AMLLEAK) {
+        serial.puts((&s_leak[0]) as u64)
+        serial.dec(free0)
+        serial.puts((&s_leak2[0]) as u64)
+        serial.dec(free1)
+        serial.nl()
+    }
+}
+
+// ============================================================
+// DIE TABELLEN AUF DIE LEITUNG (fuer `tools/aml/disasm.py`)
+// ============================================================
+
+fn nibble(v: u64) -> u8 {
+    if v < 10 {
+        return (48 + v) as u8
+    }
+    return (87 + v) as u8
+}
+
+fn hex8(v: u64) {
+    serial.put(nibble((v >> 4) & 0xF))
+    serial.put(nibble(v & 0xF))
+}
+
+fn dump_one(p: u64, len: u64) {
+    var s_hex: [u8; 9] = "amlhex \0\0"
+    var i: u64 = 0
+    while i < len {
+        serial.puts((&s_hex[0]) as u64)
+        var j: u64 = 0
+        while j < 32 && i + j < len {
+            hex8(amlns.rd8(p + i + j))
+            j = j + 1
+        }
+        serial.nl()
+        i = i + 32
+    }
+}
+
+fn dump(state: u64) {
+    var s_n: [u8; 13] = "amldump: n=\0\0"
+    var s_t: [u8; 9] = "amltab \0\0"
+    var s_sig: [u8; 7] = " sig=\0\0"
+    var s_len: [u8; 7] = " len=\0\0"
+    var s_end: [u8; 13] = "amldump: end\0"
+    let n: u64 = acpi.table_count(state)
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(n)
+    serial.nl()
+    var i: u64 = 0
+    while i < n {
+        let t: u64 = acpi.table_at(state, i)
+        if t != 0 {
+            let len: u64 = amlns.rd32(t + 4)
+            serial.puts((&s_t[0]) as u64)
+            serial.dec(i)
+            serial.puts((&s_sig[0]) as u64)
+            serial.put(amlns.rd8(t) as u8)
+            serial.put(amlns.rd8(t + 1) as u8)
+            serial.put(amlns.rd8(t + 2) as u8)
+            serial.put(amlns.rd8(t + 3) as u8)
+            serial.puts((&s_len[0]) as u64)
+            serial.dec(len)
+            serial.nl()
+            dump_one(t, len)
+        }
+        i = i + 1
+    }
+    serial.puts((&s_end[0]) as u64)
+    serial.nl()
+}
