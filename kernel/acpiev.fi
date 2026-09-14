@@ -104,7 +104,7 @@ export {
     ac_online, button_pending, button_take, take_change, changed,
     EV_NONE, EV_BUTTON, EV_LID, EV_BATT, EV_AC,
     LID_OPEN, LID_CLOSED, LID_UNKNOWN,
-    report, selftest, wait_loop
+    report, selftest, wait_loop, ev_fake, fake_all
 }
 
 // ---------------------------------------------- die Plaetze in `kdata`
@@ -817,7 +817,11 @@ fn handle_notify(state: u64, node: u64, code: u64) {
         return
     }
     if node == g(state, E_BATN) && node != amlns.NONE {
-        if code == 0x81 {
+        // 0x81 heisst "die Beschreibung hat sich geaendert" -- dann
+        // MUSS `_BIF` neu gelesen werden (ein getauschter Akku hat
+        // eine andere volle Ladung). Und wenn sie noch gar nicht
+        // bekannt ist, ebenfalls: siehe `refresh_all`.
+        if code == 0x81 || g(state, E_FULL) == 0 {
             read_bif(state)
         }
         read_bst(state)
@@ -840,6 +844,28 @@ fn handle_notify(state: u64, node: u64, code: u64) {
 
 fn refresh_all(state: u64) {
     read_lid(state)
+    // `_BIF` ZUERST, UND ZWAR IMMER DANN, WENN DIE VOLLE LADUNG NOCH
+    // FEHLT.
+    //
+    // GEMESSEN UND KORRIGIERT. Die erste Fassung las `_BIF` nur bei
+    // `Notify(..., 0x81)` -- so steht es in der Spezifikation, und so
+    // ist es auch richtig: 0x80 heisst "der Zustand hat sich
+    // geaendert", 0x81 "die Beschreibung". Nur schickt kein Brett
+    // beim Start ein 0x81, und ohne `_BIF` gibt es keine letzte volle
+    // Ladung -- und ohne die keine Prozentzahl.
+    //
+    // In der Ausgabe sah das so aus, und es ist genau die Sorte
+    // Zahl, die eine Behauptung von einer Messung trennt:
+    //
+    //     acpiev: bst node=366 typ=4 n=4 rem=3850 full=0
+    //
+    // `_BST` lief also, das Paket stimmte, die Restkapazitaet war auf
+    // das Oktett genau die, die die AML-Methode ausgerechnet hatte
+    // (77 * 50 = 3850) -- und die Prozentzahl blieb trotzdem 0, weil
+    // der Nenner fehlte.
+    if g(state, E_FULL) == 0 {
+        read_bif(state)
+    }
     read_bst(state)
     read_ac(state)
 }
@@ -913,7 +939,18 @@ fn read_bif(state: u64) {
 
 fn read_bst(state: u64) {
     let m: u64 = g(state, E_BSTN)
+    var s_x: [u8; 12] = "acpiev: bst\0"
+    var s_t: [u8; 8] = " typ=\0\0\0"
+    var s_l: [u8; 6] = " n=\0\0\0"
+    var s_r: [u8; 8] = " rem=\0\0\0"
+    var s_f: [u8; 9] = " full=\0\0\0"
+    if kstate.mode_on(state, kstate.M_EVDUMP) {
+        serial.puts((&s_x[0]) as u64)
+    }
     if m == amlns.NONE || m == 0 {
+        if kstate.mode_on(state, kstate.M_EVDUMP) {
+            serial.nl()
+        }
         return
     }
     var r: [u64; 3] = [0 as u64; 3]
@@ -921,12 +958,28 @@ fn read_bst(state: u64) {
         amlns.err_set(state, amlns.ERR_OK)
         return
     }
+    if kstate.mode_on(state, kstate.M_EVDUMP) {
+        serial.puts((&s_t[0]) as u64)
+        serial.dec(amlobj.otype((&r[0]) as u64))
+        serial.puts((&s_l[0]) as u64)
+        serial.dec(amlobj.ov2((&r[0]) as u64))
+    }
     if amlobj.otype((&r[0]) as u64) != amlobj.OT_PKG {
+        if kstate.mode_on(state, kstate.M_EVDUMP) {
+            serial.nl()
+        }
         return
     }
     // `_BST` Package(4): Zustand, Strom, Restkapazitaet, Spannung.
     let zust: u64 = pkg_int(state, (&r[0]) as u64, 0)
     let rem: u64 = pkg_int(state, (&r[0]) as u64, 2)
+    if kstate.mode_on(state, kstate.M_EVDUMP) {
+        serial.puts((&s_r[0]) as u64)
+        serial.dec(rem)
+        serial.puts((&s_f[0]) as u64)
+        serial.dec(g(state, E_FULL))
+        serial.nl()
+    }
     let full: u64 = g(state, E_FULL)
     var pct: u64 = g(state, E_PCT)
     if full != 0 && rem != 0xFFFFFFFF {
@@ -1177,6 +1230,108 @@ fn stage(state: u64) {
 const VEC_SCI: u64 = 37
 
 // ==================================================================
+// DEN NACHGEBAUTEN LAPTOP BEDIENEN
+// ==================================================================
+//
+// `tools/acpiev/asl/laptop.asl` legt seine Werte in eine
+// Operationsregion auf 0x9F00 (Deckel, Prozent, Zustand, Netzteil).
+// Auf einem echten Brett schreibt dort der eingebettete Controller;
+// an dieser Maschine gibt es keinen, und der QEMU-Monitor kann in den
+// Gastspeicher nicht SCHREIBEN (`xp` liest, `pmemsave` schreibt in
+// eine Datei, nicht umgekehrt).
+//
+// Also setzt der Messlauf die Werte SELBST -- und das ist keine
+// Selbstbestaetigung, sondern genau die Trennung, auf die es
+// ankommt: HIER wird eine Zahl in einen SPEICHERPLATZ gelegt, und
+// gemessen wird, ob die AML-METHODE der Firmware sie findet, damit
+// RECHNET und das Ergebnis im richtigen Feld des richtigen Pakets
+// zurueckgibt. Zwischen der Zahl hier und der Zahl in
+// `acpiev.batt_percent` liegen `_BST`, ein `Multiply`, ein `Index`,
+// ein `Store`, das Auspacken des Pakets und die Prozentrechnung
+// gegen `_BIF`. Steht hier 77 und kommt hinten 77 heraus, hat der
+// Interpreter den ganzen Weg zurueckgelegt; schreibt jemand hier 40,
+// MUSS hinten 40 stehen. Das ist dasselbe Verhaeltnis wie zwischen
+// `tools/k18/ssdt.py` und `/bin/power`.
+const LPST: u64 = 0x9F00
+
+fn fake_set(state: u64, lid: u64, pct: u64, zust: u64, ac: u64) {
+    var s_s: [u8; 20] = "acpiev: setze lid=\0\0"
+    var s_p: [u8; 7] = " pct=\0\0"
+    var s_z: [u8; 8] = " zust=\0\0"
+    var s_a: [u8; 6] = " ac=\0\0"
+    kstate.set8(LPST + 0, lid as u8)
+    kstate.set8(LPST + 1, pct as u8)
+    kstate.set8(LPST + 2, zust as u8)
+    kstate.set8(LPST + 3, ac as u8)
+    serial.puts((&s_s[0]) as u64)
+    serial.dec(lid)
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(pct)
+    serial.puts((&s_z[0]) as u64)
+    serial.dec(zust)
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(ac)
+    serial.nl()
+}
+
+// ==================================================================
+// EIN EREIGNIS VON HAND -- OHNE HARDWARE
+// ==================================================================
+//
+// WARUM ES DAS GIBT, und es ist eine Messung und keine Abkuerzung.
+//
+// QEMU 7.2 hat weder Deckel noch Akku (`-device battery` kam erst mit
+// 8.2, ein Deckelgeraet gibt es bis heute nicht). Es gibt also an
+// dieser Maschine NICHTS, was ein GPE-Bit fuer den Deckel ziehen
+// wuerde -- und das ist ein gueltiger Befund, der so im Bericht
+// steht.
+//
+// Was sich TROTZDEM messen laesst, ist alles HINTER dem Bit: die
+// GPE-Methode der Firmware ausfuehren, den `Notify`-Ring auswerten,
+// das gemeldete Geraet zuordnen, `_LID` oder `_BST` aufrufen und den
+// Wert uebernehmen. Das ist der ganze Weg bis auf die eine Leitung,
+// die kein Emulator zieht.
+//
+// `ev_fake` fuehrt deshalb die Methode zu einem Bit aus, als waere
+// das Bit gekommen. Es UEBERSPRINGT den Behandler NICHT aus Bequem-
+// lichkeit -- der Behandler ist mit der Einschalttaste echt gemessen
+// (irqs=1, sts=0x0101) --, sondern weil an dieser Stelle die Hardware
+// fehlt und nur sie.
+//
+// WAS DAMIT NICHT GEMESSEN IST, und es gehoert in jeden Bericht
+// dieser Runde: dass ein echtes Brett das Bit wirklich zieht, dass es
+// das RICHTIGE Bit ist und dass das Loeschen den Sturm verhindert.
+// Dafuer gibt es `tools/acpiev/brett.sh`.
+fn ev_fake(state: u64, bit: u64) -> bool {
+    var s_f: [u8; 20] = "acpiev: fake gpe b=\0"
+    let idx: u64 = meth_find(state, bit)
+    serial.puts((&s_f[0]) as u64)
+    serial.hex_width(bit, 2)
+    if idx == 0xFFFF {
+        var s_n: [u8; 15] = " keine Methode\0"
+        serial.puts((&s_n[0]) as u64)
+        serial.nl()
+        return false
+    }
+    serial.nl()
+    run_gpe(state, idx)
+    s(state, E_EVENTS, g(state, E_EVENTS) + 1)
+    return true
+}
+
+// Alle Bits durchgehen, zu denen es eine Methode gibt. Fuer den
+// Messlauf: so laeuft JEDE GPE-Methode dieser Maschine einmal, und in
+// der Ausgabe steht, was jede gemeldet hat.
+fn fake_all(state: u64) {
+    let n: u64 = meth_n(state)
+    var i: u64 = 0
+    while i < n {
+        let _b: bool = ev_fake(state, meth_bit(state, i))
+        i = i + 1
+    }
+}
+
+// ==================================================================
 // DER MESSLAUF -- WARTEN, BIS ETWAS PASSIERT
 // ==================================================================
 //
@@ -1202,6 +1357,41 @@ fn wait_loop(state: u64, ms: u64) {
     // Unterbrechungen AN. Ohne diese Zeile wartet die Schleife auf
     // etwas, das nie zugestellt wird.
     asm("sti")
+    // MIT `evfake` DEN NACHGEBAUTEN LAPTOP DURCHSPIELEN. Vier
+    // Schritte, und nach jedem steht in der Ausgabe, was der Kern
+    // daraus gemacht hat -- die REIHENFOLGE ist die Messung.
+    if kstate.mode_on(state, kstate.M_EVFAKE) {
+        var s_1: [u8; 33] = "acpiev: --- 1 deckel auf, 77 %\0\0\0"
+        var s_2: [u8; 27] = "acpiev: --- 2 deckel ZU\0\0\0\0"
+        var s_3: [u8; 31] = "acpiev: --- 3 deckel auf, 40 %\0"
+        var s_4: [u8; 31] = "acpiev: --- 4 am netz, laedt\0\0\0"
+        // 1. Deckel offen, 77 Prozent, entlaedt, kein Netz.
+        serial.puts((&s_1[0]) as u64)
+        serial.nl()
+        fake_set(state, 1, 77, 1, 0)
+        fake_all(state)
+        report(state)
+        // 2. DECKEL ZU. Nur das Deckelbit ziehen -- so, wie es ein
+        //    echtes Brett taete.
+        serial.puts((&s_2[0]) as u64)
+        serial.nl()
+        fake_set(state, 0, 77, 1, 0)
+        let _a: bool = ev_fake(state, 3)
+        report(state)
+        // 3. Deckel wieder auf, und der Akku ist gefallen.
+        serial.puts((&s_3[0]) as u64)
+        serial.nl()
+        fake_set(state, 1, 40, 1, 0)
+        let _b: bool = ev_fake(state, 3)
+        let _c: bool = ev_fake(state, 4)
+        report(state)
+        // 4. Netzteil eingesteckt: EINE Methode, ZWEI `Notify`.
+        serial.puts((&s_4[0]) as u64)
+        serial.nl()
+        fake_set(state, 1, 41, 2, 1)
+        let _d: bool = ev_fake(state, 5)
+        report(state)
+    }
     let t0: u64 = time.mono_ns(state) / 1000000
     var letzte: u64 = 0
     while ((time.mono_ns(state) / 1000000) -% t0) < ms {
@@ -1255,11 +1445,11 @@ fn report(state: u64) {
     serial.puts((&s_c[0]) as u64)
     serial.dec(g(state, E_ACV))
     var s_iq: [u8; 8] = " irqs=\0\0"
-    var s_st: [u8; 8] = " sts=0x\0"
-    var s_pp: [u8; 9] = " pm1a=0x\0"
-    var s_en: [u8; 10] = " pm1en=0x\0"
+    var s_st: [u8; 6] = " sts=\0"
+    var s_pp: [u8; 7] = " pm1a=\0"
+    var s_en: [u8; 8] = " pm1en=\0"
     var s_le: [u8; 9] = " evlen=\0\0"
-    var s_io: [u8; 11] = " ioapic=0x\0"
+    var s_io: [u8; 9] = " ioapic=\0"
     var s_md: [u8; 8] = " mode=\0\0"
     var s_ev: [u8; 6] = " ev=\0\0"
     serial.puts((&s_iq[0]) as u64)
