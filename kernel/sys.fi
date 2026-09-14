@@ -92,6 +92,8 @@ import part
 import blk
 // RUNDE INSTALL: `sync` schreibt auch die FSInfo-Seite von FAT32.
 import fat
+import ext4
+import ntfs
 import usb
 // RUNDE HOTPLUG: die Wechseldatentraeger, fuer Ring 3.
 import wechsel
@@ -4654,6 +4656,21 @@ fn open_vfs(state: u64, me: u64, m: u64, path: u64, flags: u64) -> u64 {
     // hoch und in `unref_of` wieder herunter, und zwar an genau diesen
     // zwei Stellen.
     mnt.open_inc(state, m)
+    // RUNDE FREMDFS: UND DER KNOTEN WIRD FESTGEHALTEN.
+    //
+    // ext4 und NTFS fuehren eine kleine Knotentafel, die sie
+    // wiederverwenden, sobald sie voll ist. Ein Platz, auf dem ein
+    // Deskriptor offen ist, darf dabei nicht genommen werden --
+    // sonst zeigt ein `read` mitten im Lauf ploetzlich auf eine
+    // andere Datei. Der Zaehler geht hier hoch und in
+    // `file.open_teardown` wieder herunter.
+    let ot: u64 = vfs.type_of(state, m)
+    if ot == vfsops.FS_EXT4 {
+        ext4.node_hold(state, node)
+    }
+    if ot == vfsops.FS_NTFS {
+        ntfs.node_hold(state, node)
+    }
     return fd
 }
 
@@ -5447,6 +5464,55 @@ fn do_readlink(state: u64, me: u64, name: u64, out: u64,
     // stehen in `kernel/perm.fi`.
     if !perm.walk(state, me, buf) {
         return neg(errno.E_ACCES)
+    }
+    // ================= RUNDE FREMDFS: DIE K14-WEICHE
+    //
+    // HIER FEHLTE SIE. `do_stat`, `do_open` und die uebrigen
+    // Pfadaufrufe fragen seit K14 zuerst die Einhaengetafel und
+    // erst danach die Wurzelplatte -- `do_readlink` nicht: es
+    // ging geradewegs an `fs.path_nofollow`, also an OFS.
+    //
+    // Folge: ein symbolischer Verweis auf einer EINGEHAENGTEN
+    // Platte war ueber `stat` als Verweis zu sehen (die Art kam
+    // aus `vfs.v_attr`), aber sein ZIEL war nicht zu lesen --
+    // `readlink` suchte den Namen auf der Wurzelplatte, fand ihn
+    // dort nicht und antwortete -ENOENT. Gemessen in dieser
+    // Runde an einem ext4 mit zwei Verweisen; siehe
+    // tools/fremdfs/run.sh, Abschnitt 5.
+    //
+    // Das Ziel eines Verweises IST der Inhalt der Datei -- bei
+    // OFS wie bei ext4. Also wird er hier mit `vfs.v_read`
+    // gelesen, und zwar genau `A_SIZE` Oktette.
+    if vfs.ready(state) {
+        let m: u64 = vfs.mount_for(state, buf)
+        if m < vfs.MAX_MNT {
+            if m != 0 || vfs.all_mode(state) {
+                let vnode: u64 = vfs.node_for(state, m, buf)
+                if vnode == 0 {
+                    return neg(errno.E_NOENT)
+                }
+                if vfs.v_attr(state, m, vnode, vfsops.A_TYPE)
+                    != vfsops.N_LNK {
+                    return neg(errno.E_INVAL)
+                }
+                var vn: u64 = vfs.v_attr(state, m, vnode, vfsops.A_SIZE)
+                if vn > MAX_NAME {
+                    vn = MAX_NAME
+                }
+                if vn > size {
+                    vn = size
+                }
+                let vziel: u64 = nameb(state) + 1024
+                let got: u64 = vfs.v_read(state, m, vnode, 0, vziel, vn)
+                if !copy_out(state, me, out, vziel, got) {
+                    return neg(errno.E_FAULT)
+                }
+                return got
+            }
+        }
+    }
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return neg(errno.E_NOSYS)
     }
     let ino: u64 = fs.path_nofollow(state, buf)
     if ino == 0 {
@@ -7773,7 +7839,21 @@ fn do_vfs_mount(state: u64, me: u64, src: u64, target: u64, kind: u64,
     var dev: u64 = 0
     var first: u64 = 0
     var count: u64 = 0
-    if ft == vfsops.FS_FAT || ft == vfsops.FS_OFS {
+    // RUNDE FREMDFS: ext4 und NTFS GEHOEREN HIER DAZU.
+    //
+    // Hier stand `FS_FAT || FS_OFS`, und die zwei neuen Treiber
+    // fielen stillschweigend durch: sie bekamen Geraet 0 und
+    // ersten Sektor 0, also die RAM-Platte statt der Partition,
+    // und `mount_probe` sah dort keinen Superblock. Der Fehler
+    // sah von aussen aus wie "der Treiber erkennt sein eigenes
+    // Dateisystem nicht" -- er lag aber eine Schicht darueber,
+    // und zwar in genau dieser Zeile.
+    //
+    // DIE REGEL DAHINTER: jedes Dateisystem, das auf einem
+    // BLOCKGERAET liegt, braucht diese Aufloesung; nur /proc und
+    // /dev brauchen sie nicht, weil sie kein Geraet haben.
+    if ft == vfsops.FS_FAT || ft == vfsops.FS_OFS
+        || ft == vfsops.FS_EXT4 || ft == vfsops.FS_NTFS {
         var pnum: u64 = 0
         dev = source_dev(state, sbuf, (&pnum) as u64)
         if dev == 99 {

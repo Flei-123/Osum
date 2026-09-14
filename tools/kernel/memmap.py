@@ -391,7 +391,7 @@ K17_STUECKE = [
 # beim ersten Bauversuch dieser Runde auch passiert.
 EXT4_STUECKE = [
     ("ext4.fi", "SB_OFF",   0x400),
-    ("ext4.fi", "NODE_OFF", 0x400),
+    ("ext4.fi", "NODE_OFF", 0x380),
     ("ext4.fi", "BLKBUF",   0x1000),
     ("ext4.fi", "NODEBUF",  0x1000),
     ("ext4.fi", "INOBUF",   0x200),
@@ -401,7 +401,7 @@ EXT4_STUECKE = [
 
 NTFS_STUECKE = [
     ("ntfs.fi", "SB_OFF",   0x400),
-    ("ntfs.fi", "NODE_OFF", 0x400),
+    ("ntfs.fi", "NODE_OFF", 0x380),
     ("ntfs.fi", "MFTBUF",   0x1000),
     ("ntfs.fi", "IDXBUF",   0x1000),
     ("ntfs.fi", "DATBUF",   0x200),
