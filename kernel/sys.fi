@@ -68,6 +68,7 @@ import tty
 
 import inet
 import netview
+import unixsock
 import netmon
 import share
 import wg
@@ -2264,6 +2265,27 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     if number == SYS_SHUTDOWN {
         return do_shutdown(state, me, a0, a1)
     }
+    // RUNDE WAYLAND: die drei Nummern, ohne die kein Wayland-Client
+    // startet. 46 und 47 sind Linux' sendmsg/recvmsg, 319 memfd_create.
+    if number == SYS_SENDMSG {
+        return do_sendmsg(state, me, a0, a1, a2)
+    }
+    if number == SYS_RECVMSG {
+        return do_recvmsg(state, me, a0, a1, a2)
+    }
+    if number == SYS_MEMFD_CREATE {
+        return do_memfd(state, me, a0, a1)
+    }
+    if number == SYS_FTRUNCATE {
+        return do_ftruncate(state, me, a0, a1)
+    }
+    if number == SYS_FALLOCATE {
+        // fallocate(fd, mode, offset, len). Ein Modus ausser 0 (also
+        // FALLOC_FL_KEEP_SIZE und die anderen Sonderformen) wird
+        // ehrlich abgewiesen -- was hier gebaut ist, ist "sorge dafuer,
+        // dass die ersten offset+len Oktette da sind", und mehr nicht.
+        return do_fallocate(state, me, a0, a1, a2, a3)
+    }
     if number == SYS_GETSOCKNAME {
         return do_sockname(state, me, a0, a1, a2, false)
     }
@@ -4160,6 +4182,28 @@ fn poll_ready(state: u64, me: u64, fd: u64) -> u64 {
     }
     if kind == file.K_SOCK {
         return poll_sock(state, of)
+    }
+    // RUNDE WAYLAND: der lokale Socket. libwayland ruft `poll` 323 mal
+    // je Lauf -- ohne diese sechs Zeilen sieht es nie, dass eine
+    // Antwort da ist, und wartet ewig.
+    if kind == file.K_USOCK {
+        let us: u64 = file.open_ino(state, of)
+        if unixsock.waiting(state, us) != 0 {
+            r = r | POLLIN
+        }
+        // Ein lauschender Socket ist LESBAR, sobald jemand wartet --
+        // so fragt ein Server, ob er `accept` rufen soll.
+        if unixsock.sock_state(state, us) == unixsock.S_LISTEN {
+            if unixsock.pending(state, us) {
+                r = r | POLLIN
+            }
+        } else if unixsock.peer_gone(state, us) {
+            r = r | POLLHUP
+        } else if unixsock.room(state,
+            unixsock.sock_peer(state, us)) != 0 {
+            r = r | POLLOUT
+        }
+        return r
     }
     // TERMINAL UND KONSOLE. Lesbar, sobald die Zeilendisziplin ein
     // fertiges Oktett hat; auf der Steuerseite eines Pseudoterminals
@@ -6108,6 +6152,31 @@ fn do_fcntl(state: u64, me: u64, fd: u64, cmd: u64, arg: u64) -> u64 {
     if cmd == F_SETLK || cmd == F_SETLKW || cmd == F_GETLK {
         return do_lock(state, me, of, cmd, arg)
     }
+    // RUNDE WAYLAND: DIE SIEGEL EINES SPEICHEROBJEKTS. libwayland setzt
+    // F_SEAL_SHRINK, bevor es den Deskriptor hinueberreicht -- damit
+    // der Empfaenger sich darauf verlassen kann, dass ihm der Puffer
+    // nicht unter den Fuessen kleiner wird. Hier werden sie GEMERKT und
+    // beim Verkleinern BEACHTET (`do_ftruncate`); mehr verlangt der
+    // Client nicht.
+    if cmd == F_ADD_SEALS {
+        if file.open_kind(state, of) != file.K_SHM {
+            return neg(errno.E_INVAL)
+        }
+        let i: u64 = file.open_ino(state, of)
+        if (unixsock.shm_seals(state, i) & F_SEAL_SEAL) != 0 {
+            return neg(errno.E_PERM)
+        }
+        if unixsock.shm_add_seals(state, i, arg) != 0 {
+            return neg(errno.E_INVAL)
+        }
+        return 0
+    }
+    if cmd == F_GET_SEALS {
+        if file.open_kind(state, of) != file.K_SHM {
+            return neg(errno.E_INVAL)
+        }
+        return unixsock.shm_seals(state, file.open_ino(state, of))
+    }
     return neg(errno.E_INVAL)
 }
 
@@ -6567,6 +6636,110 @@ fn do_map(state: u64, me: u64, len: u64, prot: u64, flags: u64,
 // Ein `fork` erbt die Abbildung NICHT: `proc.copy_space` laeuft die
 // Seitentabelle ab, und eine 2-MiB-Seite steht nicht darin. Das Kind
 // muss `mmap` selbst rufen. Gewollt und nachgemessen.
+// RUNDE WAYLAND: EIN SPEICHEROBJEKT IN DEN ADRESSRAUM LEGEN.
+//
+// DAS IST DIE STELLE, AN DER MAP_SHARED WIRKLICH GETEILT WIRD, und der
+// Unterschied zu allem, was dieser Kern bis hierher konnte, ist EINE
+// Zeile: die Rahmen kommen NICHT aus `mem.frame_alloc`, sondern aus dem
+// Objekt (`unixsock.shm_frame`). Zwei Prozesse, die dasselbe Objekt
+// abbilden, bekommen DIESELBEN Rahmen in ihre Seitentabellen -- und was
+// der eine schreibt, sieht der andere, ohne dass ein Oktett kopiert
+// wird.
+//
+// Genau davon lebt Wayland: der Client malt sein Bild in den Puffer,
+// und der Server liest es an derselben Stelle. Eine Kopie je Bild waere
+// bei 250.000 Oktetten das Ende jeder Bildrate -- und sie waere falsch,
+// weil der Client nach dem `mmap` weitermalt.
+//
+// Die Abbildung zaehlt als eigene Bezugnahme auf das Objekt
+// (`shm_ref`). Ohne das fielen die Rahmen zurueck, sobald der letzte
+// DESKRIPTOR geschlossen wird -- und der Client schliesst ihn
+// gewohnheitsmaessig direkt nach `wl_shm_create_pool`, waehrend seine
+// Abbildung noch steht.
+fn map_shm(state: u64, me: u64, of: u64, len: u64, prot: u64,
+    off: u64) -> u64 {
+    if off != 0 {
+        return neg(errno.E_INVAL)
+    }
+    let i: u64 = file.open_ino(state, of)
+    if unixsock.shm_used(state, i) == 0 {
+        return neg(errno.E_NODEV)
+    }
+    let pages: u64 = page_up(len) / PAGE
+    if pages == 0 || pages > unixsock.SHM_PAGES_MAX {
+        return neg(errno.E_INVAL)
+    }
+    // Das Objekt muss so gross sein, wie abgebildet werden soll. Linux
+    // liefert sonst SIGBUS beim Zugriff; hier ist ein ehrliches -EINVAL
+    // besser als eine Seite, die es nicht gibt.
+    if unixsock.shm_grow(state, i, pages) != 0 {
+        return neg(errno.E_NOMEM)
+    }
+    // WOHIN DIE ABBILDUNG KOMMT, und warum das eine eigene Frage ist:
+    //
+    // Der kleine Bildbereich zwischen `brk` und MMAP_TOP ist 851.968
+    // Oktette gross (der Kommentar in `do_map` sagt es). Ein
+    // Wayland-Puffer sprengt ihn muehelos -- weston-simple-shm legt
+    // EINEN Vorrat mit ZWEI Puffern zu 250x250x4 an, also 500.000
+    // Oktette, und der Client bildet ihn zusaetzlich zu seiner Halde
+    // ab. GEMESSEN: der Lauf davor starb mit "mmap failed: Out of
+    // memory" und danach "Both buffers busy at redraw(). Server bug?"
+    // -- die Meldung des Clients, und sie zeigte auf den Server,
+    // waehrend der Fehler hier lag.
+    //
+    // `do_map` kennt dafuer seit Runde K16 den GROSSEN Bereich ab
+    // `proc.BIG_TOP` und faellt dorthin zurueck. `map_shm` tat das
+    // nicht und gab stattdessen -ENOMEM. Jetzt nimmt es denselben Weg:
+    // erst der kleine Bereich, dann der grosse.
+    let schreiben: bool = (prot & PROT_WRITE) != 0
+    let top: u64 = map_bottom(state, me)
+    var base: u64 = 0
+    var gross: bool = false
+    if pages * PAGE <= top
+        && top - pages * PAGE >= page_up(brk_of(state, me)) + PAGE {
+        base = top - pages * PAGE
+    } else {
+        // Der grosse Bereich, wie `big_map` ihn benutzt -- nur ohne
+        // eigene Rahmen, denn die kommen aus dem Objekt.
+        if kstate.mode_on(state, kstate.M_NOBIG) {
+            return neg(errno.E_NOMEM)
+        }
+        let btop: u64 = big_bottom(state, me)
+        if pages * PAGE > btop - proc.BIG_FLOOR {
+            return neg(errno.E_NOMEM)
+        }
+        base = btop - pages * PAGE
+        if base < proc.BIG_FLOOR {
+            return neg(errno.E_NOMEM)
+        }
+        gross = true
+    }
+    var p: u64 = 0
+    while p < pages {
+        let frame: u64 = unixsock.shm_frame(state, i, p)
+        if frame == 0 {
+            return neg(errno.E_NOMEM)
+        }
+        // `proc.map_frame` gibt es seit der Runde mit den geteilten
+        // Bussegmenten, und es ist genau das Richtige: es traegt
+        // PAGE_SHARED ein, damit `page_drop` den Rahmen beim Abraeumen
+        // des Adressraums NICHT freigibt. Er gehoert dem Objekt.
+        if !proc.map_frame(state, me, base + p * PAGE, frame,
+            schreiben) {
+            return neg(errno.E_NOMEM)
+        }
+        kstate.add(state, kstate.MAPS, 1)
+        p = p + 1
+    }
+    unixsock.shm_ref(state, i)
+    if gross {
+        sched.tset(state, me, sched.T_BIG, base)
+    } else {
+        sched.tset(state, me, sched.T_MMAP, base)
+    }
+    return base
+}
+
 fn map_fd(state: u64, me: u64, fd: u64, len: u64, prot: u64,
     off: u64) -> u64 {
     // EIN UNGUELTIGER DESKRIPTOR IST HIER -ENODEV UND NICHT -EBADF, und
@@ -6581,6 +6754,11 @@ fn map_fd(state: u64, me: u64, fd: u64, len: u64, prot: u64,
     let of: u64 = of_of(state, me, fd)
     if of >= file.MAX_OPEN {
         return neg(errno.E_NODEV)
+    }
+    // RUNDE WAYLAND: DAS SPEICHEROBJEKT -- die zweite Ausnahme, und die
+    // einzige, die ZWEI Prozesse betrifft.
+    if file.open_kind(state, of) == file.K_SHM {
+        return map_shm(state, me, of, len, prot, off)
     }
     if file.open_kind(state, of) != file.K_FB {
         return neg(errno.E_NODEV)
@@ -10305,6 +10483,26 @@ fn sock_of(state: u64, me: u64, fd: u64) -> u64 {
 // down when that was the last one. Everything in this file that drops a
 // descriptor goes through here.
 fn unref_of(state: u64, of: u64) {
+    // RUNDE WAYLAND: der lokale Socket und das Speicherobjekt. Beide
+    // haengen an der Referenzzaehlung der offenen Datei wie ein Rohr:
+    // erst beim LETZTEN Deskriptor faellt das Objekt. Ein `dup`, ein
+    // `fork` oder ein ueber SCM_RIGHTS gereichter Deskriptor halten es
+    // am Leben -- und genau das muss er, denn der Empfaenger bildet den
+    // Speicher ab, nachdem der Sender seinen fd geschlossen hat.
+    if of < file.MAX_OPEN && file.open_kind(state, of) == file.K_USOCK {
+        if file.open_refs(state, of) <= 1 {
+            unixsock.sock_free(state, file.open_ino(state, of))
+            // Wer auf der anderen Seite in `poll` wartet, muss
+            // erfahren, dass niemand mehr da ist -- sonst wartet er
+            // auf eine Antwort, die nie kommt.
+            sched.poll_kick(state)
+        }
+    }
+    if of < file.MAX_OPEN && file.open_kind(state, of) == file.K_SHM {
+        if file.open_refs(state, of) <= 1 {
+            unixsock.shm_unref(state, file.open_ino(state, of))
+        }
+    }
     if of < file.MAX_OPEN && file.open_kind(state, of) == file.K_SOCK {
         if file.open_refs(state, of) <= 1 {
             netview.release(state, file.open_ino(state, of))
@@ -10330,6 +10528,34 @@ fn sock_close_all(state: u64, me: u64) {
             if file.open_refs(state, of) <= 1 {
                 netview.release(state, file.open_ino(state, of))
                 inet.sock_close(state, file.open_ino(state, of))
+            }
+        }
+        // RUNDE WAYLAND, DER ZWOELFTE FUND, und er ist der Grund, warum
+        // der Bedarfsstart zuerst nicht wieder abschaltete:
+        //
+        // `file.close_all` raeumt beim Ende eines Prozesses die
+        // DESKRIPTOREN ab -- aber es ruft `file.open_unref` unmittelbar
+        // und geht damit an `unref_of` in dieser Datei VORBEI. Genau
+        // dort steht jedoch, was einen Unix-Socket wirklich schliesst.
+        // Ein Client, der sich beendete, liess seinen Socket deshalb
+        // verbunden zurueck: der Server sah nie ein Dateiende, zaehlte
+        // ihn ewig als offen und beendete sich nie.
+        //
+        // Diese Funktion ist die Stelle, an der das schon fuer K_SOCK
+        // geloest war. Die beiden neuen Arten stehen jetzt daneben --
+        // und damit gilt die Zusage aus Justins Abnahme auch fuer einen
+        // Client, der ABSTUERZT statt sich zu verabschieden: ein
+        // geschlossener Socket ist ein geschlossener Socket.
+        if of < file.MAX_OPEN
+            && file.open_kind(state, of) == file.K_USOCK {
+            if file.open_refs(state, of) <= 1 {
+                unixsock.sock_free(state, file.open_ino(state, of))
+                sched.poll_kick(state)
+            }
+        }
+        if of < file.MAX_OPEN && file.open_kind(state, of) == file.K_SHM {
+            if file.open_refs(state, of) <= 1 {
+                unixsock.shm_unref(state, file.open_ino(state, of))
             }
         }
         fd = fd + 1
@@ -10435,6 +10661,13 @@ fn do_socket(state: u64, me: u64, domain: u64, kind: u64,
     // einen Prozess, der ohnehin keine Karte sehen soll. Ein
     // vorgetaeuschtes Netz muss gerade auf der Maschine funktionieren,
     // die WIRKLICH keines hat; das ist der Fall, um den es geht.
+    // RUNDE WAYLAND: AF_UNIX ZUERST -- die Kartenfrage darunter gilt
+    // nur fuer das Netz. Ohne diese Zeile scheiterte jeder lokale
+    // Socket auf einer Maschine ohne virtio-net mit -ENODEV, und das
+    // ist genau die Maschine, auf der die Abnahme dieser Runde laeuft.
+    if domain == AF_UNIX {
+        return do_usocket(state, me, kind, protocol)
+    }
     if !inet.ready(state) && netview.view_of(state, me) == netview.V_REAL {
         return neg(errno.E_NODEV)
     }
@@ -10495,6 +10728,11 @@ fn do_socket(state: u64, me: u64, domain: u64, kind: u64,
 }
 
 fn do_bind(state: u64, me: u64, fd: u64, addr: u64, len: u64) -> u64 {
+    // RUNDE WAYLAND: die Art des Deskriptors entscheidet, nicht die
+    // Familie in der Adresse -- ein Deskriptor weiss, was er ist.
+    if usock_of(state, me, fd) < unixsock.USOCK_MAX {
+        return do_ubind(state, me, fd, addr, len)
+    }
     let si: u64 = sock_of(state, me, fd)
     if si >= inet.SOCK_MAX {
         return neg(errno.E_BADF)
@@ -10522,6 +10760,9 @@ fn do_bind(state: u64, me: u64, fd: u64, addr: u64, len: u64) -> u64 {
 }
 
 fn do_listen(state: u64, me: u64, fd: u64, backlog: u64) -> u64 {
+    if usock_of(state, me, fd) < unixsock.USOCK_MAX {
+        return do_ulisten(state, me, fd)
+    }
     let si: u64 = sock_of(state, me, fd)
     if si >= inet.SOCK_MAX {
         return neg(errno.E_BADF)
@@ -10537,6 +10778,12 @@ fn do_listen(state: u64, me: u64, fd: u64, backlog: u64) -> u64 {
 // the whole time -- that is the whole reason it is a task.
 fn do_accept(state: u64, me: u64, fd: u64, addr: u64, lenp: u64,
     flags: u64) -> u64 {
+    if usock_of(state, me, fd) < unixsock.USOCK_MAX {
+        // Die Gegenadresse bleibt leer: ein Unix-Socket, der sich
+        // verbindet, hat keinen Namen (libwayland fragt auch nicht
+        // danach). `addr` und `lenp` werden nicht angefasst.
+        return do_uaccept(state, me, fd, flags)
+    }
     let si: u64 = sock_of(state, me, fd)
     if si >= inet.SOCK_MAX {
         return neg(errno.E_BADF)
@@ -10593,6 +10840,9 @@ fn do_accept(state: u64, me: u64, fd: u64, addr: u64, lenp: u64,
 // when it was refused, and -ETIMEDOUT when nobody ever answered. State 4
 // is ESTABLISHED and 0 is CLOSED in the numbering of `net.tcp`.
 fn do_connect(state: u64, me: u64, fd: u64, addr: u64, len: u64) -> u64 {
+    if usock_of(state, me, fd) < unixsock.USOCK_MAX {
+        return do_uconnect(state, me, fd, addr, len)
+    }
     let si: u64 = sock_of(state, me, fd)
     if si >= inet.SOCK_MAX {
         return neg(errno.E_BADF)
@@ -13135,4 +13385,648 @@ fn audsend_locked(state: u64, me: u64, id: u64, src: u64, frames: u64) -> u64 {
         return neg(errno.E_FAULT)
     }
     return audio.write_stream(state, id, bounce, n)
+}
+
+// ======================================================= RUNDE WAYLAND
+//
+// DER LOKALE SOCKET, DIE DESKRIPTORUEBERGABE UND DER GETEILTE SPEICHER.
+//
+// Alles, was hier steht, existiert, weil ein Wayland-Client OHNE es
+// nicht startet -- und das ist gemessen und nicht vermutet
+// (`kernel/unixsock.fi`, Kopf: sendmsg 323, recvmsg 322, poll 323,
+// mmap 120, memfd_create 1, socket 1, connect 1, und KEIN read/write
+// auf dem Socket).
+//
+// WARUM DIE FUNKTIONEN HIER STEHEN UND NICHT IN `inet.fi`: ein
+// Unix-Socket hat mit dem TCP/IP-Stapel NICHTS gemeinsam ausser dem
+// Wort "Socket". Keine Adresse, kein Anschluss, kein Rahmen, keine
+// Karte. Ihn in `inet.fi` zu legen hiesse, jede Pruefung dort um einen
+// Sonderfall zu erweitern, der nie ein Paket erzeugt. Die Deskriptorart
+// ist deshalb eine eigene (`file.K_USOCK`), und die Weichen unten
+// stehen VOR den bestehenden Pruefungen -- was nicht AF_UNIX ist, geht
+// Zeile fuer Zeile den Weg, den es seit Runde K8 geht.
+
+const AF_UNIX: u64 = 1
+
+// memfd_create und die Siegel, mit Linux' Nummern.
+const SYS_FTRUNCATE: u64 = 77
+// RUNDE WAYLAND, Stufe 2: `fallocate`. weston-simple-shm ruft
+// `posix_fallocate`, und musl macht daraus diesen Aufruf. Fehlt er,
+// gibt musl EOPNOTSUPP zurueck, os-compatibility.c gibt auf, und der
+// Client stirbt in `abort()` -- ein `hlt` mitten in musl, das wie ein
+// Haldenfehler aussieht und keiner ist. GEMESSEN: der erste Lauf von
+// simple-shm auf OrientOS starb mit
+//   user fault: pid=5 vector=13 err=0x0 cr2=0x4007ce48 rip=0x4011003d
+// und `objdump` zeigte an dieser Adresse das `hlt` in `abort+0x7d`.
+const SYS_FALLOCATE: u64 = 285
+const SYS_MEMFD_CREATE: u64 = 319
+const MFD_CLOEXEC: u64 = 1
+const MFD_ALLOW_SEALING: u64 = 2
+const F_ADD_SEALS: u64 = 1033
+const F_GET_SEALS: u64 = 1034
+const F_SEAL_SEAL: u64 = 1
+const F_SEAL_SHRINK: u64 = 2
+const F_SEAL_GROW: u64 = 4
+const F_SEAL_WRITE: u64 = 8
+
+// sendmsg/recvmsg und die Steuernachricht.
+const SYS_SENDMSG: u64 = 46
+const SYS_RECVMSG: u64 = 47
+const SOL_SOCKET: u64 = 1
+const SCM_RIGHTS: u64 = 1
+const MSG_DONTWAIT: u64 = 64
+const MSG_NOSIGNAL: u64 = 16384
+const MSG_CMSG_CLOEXEC: u64 = 1073741824
+
+// MAP_SHARED -- die Zahl, die in `sys.fi` bis zu dieser Runde fehlte.
+const MAP_SHARED: u64 = 1
+
+// Wieviel eine einzelne Nachricht hoechstens traegt. Das groesste
+// Wayland-Paket im Mitschnitt war 132 Oktette; 4096 ist der Ring.
+const MSG_MAX: u64 = 2048
+
+// Ein Arbeitsplatz in `kdata` fuer den Weg zwischen Ring 3 und dem
+// Ring des Sockets. Er liegt im freien Raum hinter den Tafeln von
+// `unixsock.fi` (0xFA000..0x100000) und wird nur INNERHALB eines
+// Systemaufrufs benutzt -- kein Zustand, der einen Aufruf ueberlebt.
+// GEWACHSEN, WEIL DIE TAFEL GEWACHSEN IST. Die Adresstafel der
+// Speicherobjekte reicht seit Stufe 2 bis 0xFE000 (16 Objekte zu je
+// 1 MiB); 0xFA000 lag mitten darin. Der Kartenpruefer haette das
+// gefunden -- aber erst nach dem Lauf, und bis dahin haette ein
+// `sendmsg` die Rahmenadressen eines fremden Puffers ueberschrieben.
+// Genau dafuer gibt es tools/kernel/memmap.py.
+const WL_SCRATCH: u64 = 0xFE000
+const WL_PATH: u64 = 0xFF000
+
+// Acht Oktette aus Ring 3, wie `put64` sie schreibt. `get32` und
+// `get16` gab es seit Runde K8, einen 64-Bit-Leser nicht -- und ein
+// `struct msghdr` besteht fast nur aus Zeigern und Laengen zu acht
+// Oktetten.
+fn get64u(state: u64, me: u64, addr: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < 8 {
+        v = v | (peek(state, me, addr + i) << (i * 8))
+        i = i + 1
+    }
+    return v
+}
+
+// ---------------------------------------------------------- die Weichen
+
+// Den Unix-Socket hinter einem Deskriptor holen.
+fn usock_of(state: u64, me: u64, fd: u64) -> u64 {
+    let of: u64 = of_of(state, me, fd)
+    if of >= file.MAX_OPEN {
+        return unixsock.USOCK_MAX
+    }
+    if file.open_kind(state, of) != file.K_USOCK {
+        return unixsock.USOCK_MAX
+    }
+    return file.open_ino(state, of)
+}
+
+// Das Speicherobjekt hinter einem Deskriptor.
+fn shm_of(state: u64, me: u64, fd: u64) -> u64 {
+    let of: u64 = of_of(state, me, fd)
+    if of >= file.MAX_OPEN {
+        return unixsock.USHM_MAX
+    }
+    if file.open_kind(state, of) != file.K_SHM {
+        return unixsock.USHM_MAX
+    }
+    return file.open_ino(state, of)
+}
+
+// Den Pfad aus einem `struct sockaddr_un` holen.
+//
+//   struct sockaddr_un { u16 family; char sun_path[108]; }
+//
+// Die Laenge, die der Aufrufer nennt, schliesst die zwei Oktette der
+// Familie ein. Der Pfad ist mit Null abgeschlossen; Linux nimmt auch
+// eine Laenge ohne die Null, also wird hier BIS zur Null gezaehlt und
+// nicht auf `len` vertraut.
+fn sa_un(state: u64, me: u64, addr: u64, len: u64, lenp: *mut u64) -> u64 {
+    *lenp = 0
+    if addr == 0 || len < 3 || len > 2 + unixsock.USUN_MAX {
+        return neg(errno.E_INVAL)
+    }
+    if !copy_in(state, me, state + WL_PATH, addr, len) {
+        return neg(errno.E_FAULT)
+    }
+    let family: u64 = kstate.get8(state + WL_PATH)
+        | (kstate.get8(state + WL_PATH + 1) << 8)
+    if family != AF_UNIX {
+        return neg(errno.E_AFNOSUPPORT)
+    }
+    // Der abstrakte Namensraum (fuehrende Null) ist Linux-eigen und
+    // wird hier NICHT unterstuetzt -- libwayland benutzt ihn nicht.
+    if kstate.get8(state + WL_PATH + 2) == 0 {
+        return neg(errno.E_INVAL)
+    }
+    // Bis zur Null zaehlen, hoechstens aber so weit, wie der Aufrufer
+    // Oktette mitgebracht hat. `len` schliesst die zwei Oktette der
+    // Familie ein, also bleiben `len - 2` fuer den Pfad -- und `len`
+    // ist oben schon auf mindestens 3 geprueft, die Subtraktion also
+    // sicher.
+    let raum: u64 = len - 2
+    var n: u64 = 0
+    while n < raum && n < unixsock.USUN_MAX
+        && kstate.get8(state + WL_PATH + 2 + n) != 0 {
+        n = n + 1
+    }
+    if n == 0 {
+        return neg(errno.E_INVAL)
+    }
+    *lenp = n
+    return 0
+}
+
+// ------------------------------------------------------------- socket()
+
+fn do_usocket(state: u64, me: u64, kind: u64, protocol: u64) -> u64 {
+    let base: u64 = kind & 0xFF
+    if base != SOCK_STREAM {
+        // SOCK_DGRAM auf AF_UNIX gibt es hier nicht, und es wird
+        // ehrlich abgewiesen statt stillschweigend zu einem Strom zu
+        // werden.
+        return neg(errno.E_PROTONOSUPPORT)
+    }
+    if protocol != 0 {
+        return neg(errno.E_PROTONOSUPPORT)
+    }
+    let si: u64 = unixsock.sock_new(state, unixsock.UK_STREAM)
+    if si >= unixsock.USOCK_MAX {
+        return neg(errno.E_NFILE)
+    }
+    let of: u64 = file.open_alloc(state, file.K_USOCK, si, O_RDWR)
+    if of >= file.MAX_OPEN {
+        unixsock.sock_free(state, si)
+        return neg(errno.E_NFILE)
+    }
+    let fd: u64 = file.fd_alloc(state, me, 0)
+    if fd >= file.MAX_FD {
+        file.open_unref(state, of)
+        unixsock.sock_free(state, si)
+        return neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fd, of)
+    return fd
+}
+
+// --------------------------------------------------- bind/listen/connect
+
+fn do_ubind(state: u64, me: u64, fd: u64, addr: u64, len: u64) -> u64 {
+    let si: u64 = usock_of(state, me, fd)
+    if si >= unixsock.USOCK_MAX {
+        return neg(errno.E_BADF)
+    }
+    var plen: u64 = 0
+    let r: u64 = sa_un(state, me, addr, len, &plen)
+    if errno.is_error(r) {
+        return r
+    }
+    let b: u64 = unixsock.bind_path(state, si, WL_PATH + 2, plen)
+    if b != 0 {
+        return neg(b)
+    }
+    return 0
+}
+
+fn do_ulisten(state: u64, me: u64, fd: u64) -> u64 {
+    let si: u64 = usock_of(state, me, fd)
+    if si >= unixsock.USOCK_MAX {
+        return neg(errno.E_BADF)
+    }
+    let r: u64 = unixsock.listen_on(state, si)
+    if r != 0 {
+        return neg(r)
+    }
+    return 0
+}
+
+fn do_uconnect(state: u64, me: u64, fd: u64, addr: u64, len: u64) -> u64 {
+    let si: u64 = usock_of(state, me, fd)
+    if si >= unixsock.USOCK_MAX {
+        return neg(errno.E_BADF)
+    }
+    var plen: u64 = 0
+    let r: u64 = sa_un(state, me, addr, len, &plen)
+    if errno.is_error(r) {
+        return r
+    }
+    let lst: u64 = unixsock.find_listener(state, WL_PATH + 2, plen)
+    if lst >= unixsock.USOCK_MAX {
+        // Kein Lauscher unter diesem Pfad. Das ist der Fall, in dem ein
+        // Wayland-Client OHNE Server startet, und er MUSS hier eine
+        // klare Antwort bekommen statt zu haengen -- die Gegenprobe der
+        // Runde haengt genau daran.
+        return neg(errno.E_CONNREFUSED)
+    }
+    let c: u64 = unixsock.connect_to(state, si, lst)
+    if c != 0 {
+        return neg(c)
+    }
+    // Ein Server, der auf dem lauschenden Socket in `poll` schlaeft,
+    // erfaehrt sonst nie, dass jemand angeklopft hat.
+    sched.poll_kick(state)
+    // Der Server nimmt die Verbindung in seinem eigenen `accept` an.
+    // Bis dahin wartet dieser Aufruf -- ein `connect` auf einen
+    // Unix-Socket ist bei Linux fertig, sobald er in der Schlange
+    // steht, aber ein Client, der sofort sendet, braucht den Ring, und
+    // den legt erst `accept` an.
+    var waited: u64 = 0
+    while waited < NET_ROUNDS {
+        if unixsock.sock_state(state, si) == unixsock.S_CONNECTED {
+            return 0
+        }
+        waited = waited + 1
+        sched.sleep_ticks(state, 1)
+    }
+    return neg(errno.E_AGAIN)
+}
+
+fn do_uaccept(state: u64, me: u64, fd: u64, flags: u64) -> u64 {
+    let si: u64 = usock_of(state, me, fd)
+    if si >= unixsock.USOCK_MAX {
+        return neg(errno.E_BADF)
+    }
+    // SOCK_NONBLOCK aus `accept4`. Ein O_NONBLOCK am Deskriptor
+    // selbst kennt dieser Kern nicht (`do_fcntl`, F_SETFL antwortet 0
+    // ohne etwas zu setzen) -- also ist das hier die einzige Quelle.
+    let nb: bool = (flags & SOCK_NONBLOCK) != 0
+    var waited: u64 = 0
+    var got: u64 = unixsock.USOCK_MAX
+    while got >= unixsock.USOCK_MAX {
+        got = unixsock.accept_from(state, si)
+        if got >= unixsock.USOCK_MAX {
+            if nb {
+                return neg(errno.E_AGAIN)
+            }
+            if waited >= NET_ROUNDS {
+                return neg(errno.E_AGAIN)
+            }
+            waited = waited + 1
+            sched.sleep_ticks(state, 1)
+        }
+    }
+    let of: u64 = file.open_alloc(state, file.K_USOCK, got, O_RDWR)
+    if of >= file.MAX_OPEN {
+        unixsock.sock_free(state, got)
+        return neg(errno.E_NFILE)
+    }
+    let nfd: u64 = file.fd_alloc(state, me, 0)
+    if nfd >= file.MAX_FD {
+        file.open_unref(state, of)
+        unixsock.sock_free(state, got)
+        return neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, nfd, of)
+    return nfd
+}
+
+// --------------------------------------------------- sendmsg / recvmsg
+//
+// DIE FORM, die libwayland benutzt (gemessen, siehe oben):
+//
+//   struct msghdr {
+//     void *msg_name; socklen_t msg_namelen;      +0  +8
+//     struct iovec *msg_iov; size_t msg_iovlen;   +16 +24
+//     void *msg_control; size_t msg_controllen;   +32 +40
+//     int msg_flags;                              +48
+//   }
+//   struct iovec { void *iov_base; size_t iov_len; }
+//   struct cmsghdr { size_t cmsg_len; int cmsg_level; int cmsg_type; }
+//
+// Die Steuernachricht ist bei libwayland IMMER SOL_SOCKET/SCM_RIGHTS
+// mit einem oder mehreren `int`. Alles andere wird uebergangen und
+// nicht als Fehler gemeldet -- ein Programm, das eine Steuernachricht
+// schickt, die dieses System nicht kennt, soll trotzdem senden koennen.
+
+const MH_IOV: u64 = 16
+const MH_IOVLEN: u64 = 24
+const MH_CONTROL: u64 = 32
+const MH_CONTROLLEN: u64 = 40
+const MH_FLAGS: u64 = 48
+const MH_BYTES: u64 = 56
+
+fn do_sendmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
+    let si: u64 = usock_of(state, me, fd)
+    if si >= unixsock.USOCK_MAX {
+        return neg(errno.E_BADF)
+    }
+    if !proc.user_ok(state, me, mh, MH_BYTES) {
+        return neg(errno.E_FAULT)
+    }
+    if unixsock.peer_gone(state, si) {
+        // Kein Gegenende mehr: -EPIPE, wie ein Rohr ohne Leser. Ein
+        // SIGPIPE gibt es hier nicht, und MSG_NOSIGNAL steht in jedem
+        // Aufruf von libwayland ohnehin.
+        return neg(errno.E_PIPE)
+    }
+    let iov: u64 = get64u(state, me, mh + MH_IOV)
+    let iovlen: u64 = get64u(state, me, mh + MH_IOVLEN)
+    // ZUERST die Deskriptoren, DANN die Oktette. Andersherum saehe der
+    // Empfaenger Oktette, die von einem Puffer reden, den er noch nicht
+    // hat -- und genau dieses Paket ist bei Wayland das einzige mit
+    // einem Deskriptor.
+    let ctl: u64 = get64u(state, me, mh + MH_CONTROL)
+    let ctllen: u64 = get64u(state, me, mh + MH_CONTROLLEN)
+    var passed: u64 = 0
+    if ctl != 0 && ctllen >= 16 {
+        if !proc.user_ok(state, me, ctl, ctllen) {
+            return neg(errno.E_FAULT)
+        }
+        let clen: u64 = get64u(state, me, ctl)
+        let level: u64 = get32(state, me, ctl + 8)
+        let ctype: u64 = get32(state, me, ctl + 12)
+        if level == SOL_SOCKET && ctype == SCM_RIGHTS && clen >= 16
+            && clen <= ctllen {
+            let nfds: u64 = (clen - 16) / 4
+            var k: u64 = 0
+            while k < nfds {
+                let sfd: u64 = get32(state, me, ctl + 16 + k * 4)
+                let sof: u64 = of_of(state, me, sfd)
+                if sof >= file.MAX_OPEN {
+                    return neg(errno.E_BADF)
+                }
+                let pr: u64 = unixsock.push_fd(state, si, sof)
+                if pr != 0 {
+                    return neg(pr)
+                }
+                passed = passed + 1
+                k = k + 1
+            }
+        }
+    }
+    var sent: u64 = 0
+    var v: u64 = 0
+    while v < iovlen {
+        if !proc.user_ok(state, me, iov + v * 16, 16) {
+            return neg(errno.E_FAULT)
+        }
+        let base: u64 = get64u(state, me, iov + v * 16)
+        let blen: u64 = get64u(state, me, iov + v * 16 + 8)
+        var off: u64 = 0
+        while off < blen {
+            var chunk: u64 = blen - off
+            if chunk > MSG_MAX {
+                chunk = MSG_MAX
+            }
+            let free: u64 = unixsock.room(state,
+                unixsock.sock_peer(state, si))
+            if free == 0 {
+                // Der Ring ist voll. Bei MSG_DONTWAIT sofort zurueck --
+                // mit dem, was schon drin ist, oder -EAGAIN, wenn noch
+                // nichts drin ist. Das ist die Regel, nach der
+                // libwayland seinen Puffer verwaltet.
+                if (flags & MSG_DONTWAIT) != 0 {
+                    if sent != 0 {
+                        return sent
+                    }
+                    return neg(errno.E_AGAIN)
+                }
+                sched.sleep_ticks(state, 1)
+            } else {
+                if chunk > free {
+                    chunk = free
+                }
+                if !copy_in(state, me, state + WL_SCRATCH, base + off,
+                    chunk) {
+                    return neg(errno.E_FAULT)
+                }
+                let w: u64 = unixsock.send_bytes(state, si, WL_SCRATCH,
+                    chunk)
+                if errno.is_error(w) {
+                    return neg(w)
+                }
+                sent = sent + w
+                off = off + w
+                // DER VIERTE FUND DIESER RUNDE, und der, an dem die
+                // ganze Runde haengengeblieben ist: `poll` LEGT SICH
+                // SCHLAFEN (Zustand S_POLL) und wird NUR von
+                // `sched.poll_kick` geweckt -- nicht davon, dass
+                // Oktette im Ring liegen. Ohne diese Zeile schickte
+                // der Server seine 180 Oktette, der Kern bestaetigte
+                // sie, und der Client schlief trotzdem weiter in
+                // seinem ersten `poll`. Das sah aus wie ein Server,
+                // der nicht antwortet, und war ein Wecker, der nicht
+                // klingelte. Jedes Rohr in diesem Kern tut das seit
+                // Runde K4 an derselben Stelle (`pipe_write`).
+                sched.poll_kick(state)
+            }
+        }
+        v = v + 1
+    }
+    return sent
+}
+
+fn do_recvmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
+    let si: u64 = usock_of(state, me, fd)
+    if si >= unixsock.USOCK_MAX {
+        return neg(errno.E_BADF)
+    }
+    if !proc.user_ok(state, me, mh, MH_BYTES) {
+        return neg(errno.E_FAULT)
+    }
+    let iov: u64 = get64u(state, me, mh + MH_IOV)
+    let iovlen: u64 = get64u(state, me, mh + MH_IOVLEN)
+    // Warten, bis etwas da ist -- oder sofort zurueck bei
+    // MSG_DONTWAIT. Ein geschlossenes Gegenende liefert 0 (Dateiende)
+    // und NICHT -EPIPE: so unterscheidet libwayland "nichts da" von
+    // "Server weg", und das ist der Unterschied zwischen einem Client,
+    // der sauber endet, und einem, der haengt.
+    var waited: u64 = 0
+    while unixsock.waiting(state, si) == 0 {
+        if unixsock.peer_gone(state, si) {
+            return 0
+        }
+        if (flags & MSG_DONTWAIT) != 0 {
+            return neg(errno.E_AGAIN)
+        }
+        if waited >= NET_ROUNDS {
+            return neg(errno.E_AGAIN)
+        }
+        waited = waited + 1
+        sched.sleep_ticks(state, 1)
+    }
+    // Die Deskriptoren zuerst: sie gehoeren zu den Oktetten, die JETZT
+    // geholt werden.
+    var ctlout: u64 = 0
+    let ctl: u64 = get64u(state, me, mh + MH_CONTROL)
+    let ctllen: u64 = get64u(state, me, mh + MH_CONTROLLEN)
+    if ctl != 0 && ctllen >= 20 && unixsock.fd_waiting(state, si) != 0 {
+        if !proc.user_ok(state, me, ctl, ctllen) {
+            return neg(errno.E_FAULT)
+        }
+        var room: u64 = (ctllen - 16) / 4
+        if room > unixsock.FDQ_MAX {
+            room = unixsock.FDQ_MAX
+        }
+        var n: u64 = 0
+        while n < room && unixsock.fd_waiting(state, si) != 0 {
+            let sof: u64 = unixsock.pop_fd(state, si)
+            if sof >= file.MAX_OPEN {
+                n = room
+            } else {
+                let nfd: u64 = file.fd_alloc(state, me, 0)
+                if nfd >= file.MAX_FD {
+                    file.open_unref(state, sof)
+                    n = room
+                } else {
+                    file.fd_set(state, me, nfd, sof)
+                    if !put32(state, me, ctl + 16 + n * 4, nfd) {
+                        return neg(errno.E_FAULT)
+                    }
+                    n = n + 1
+                }
+            }
+        }
+        if n != 0 {
+            ctlout = 16 + n * 4
+            if !put64(state, me, ctl, ctlout) {
+                return neg(errno.E_FAULT)
+            }
+            if !put32(state, me, ctl + 8, SOL_SOCKET) {
+                return neg(errno.E_FAULT)
+            }
+            if !put32(state, me, ctl + 12, SCM_RIGHTS) {
+                return neg(errno.E_FAULT)
+            }
+        }
+    }
+    if !put64(state, me, mh + MH_CONTROLLEN, ctlout) {
+        return neg(errno.E_FAULT)
+    }
+    if !put32(state, me, mh + MH_FLAGS, 0) {
+        return neg(errno.E_FAULT)
+    }
+    var got: u64 = 0
+    var v: u64 = 0
+    while v < iovlen && unixsock.waiting(state, si) != 0 {
+        if !proc.user_ok(state, me, iov + v * 16, 16) {
+            return neg(errno.E_FAULT)
+        }
+        let base: u64 = get64u(state, me, iov + v * 16)
+        let blen: u64 = get64u(state, me, iov + v * 16 + 8)
+        var off: u64 = 0
+        while off < blen && unixsock.waiting(state, si) != 0 {
+            var chunk: u64 = blen - off
+            if chunk > MSG_MAX {
+                chunk = MSG_MAX
+            }
+            let r: u64 = unixsock.recv_bytes(state, si, WL_SCRATCH, chunk)
+            if errno.is_error(r) {
+                return neg(r)
+            }
+            if r == 0 {
+                off = blen
+            } else {
+                if !copy_out(state, me, base + off, state + WL_SCRATCH,
+                    r) {
+                    return neg(errno.E_FAULT)
+                }
+                got = got + r
+                off = off + r
+            }
+        }
+        v = v + 1
+    }
+    return got
+}
+
+// ---------------------------------------------------------- fallocate()
+//
+// Fuer ein Speicherobjekt ist `fallocate(fd, 0, off, len)` dasselbe wie
+// `ftruncate(fd, off + len)`: die Rahmen werden geholt und genullt.
+// Der Unterschied zu Linux -- dort waechst die GROESSE dabei nur, wenn
+// FALLOC_FL_KEEP_SIZE fehlt -- ist hier keiner, weil ein memfd nichts
+// anderes ist als seine Rahmen.
+fn do_fallocate(state: u64, me: u64, fd: u64, mode: u64, off: u64,
+    len: u64) -> u64 {
+    if mode != 0 {
+        return neg(errno.E_OPNOTSUPP)
+    }
+    if len == 0 {
+        return neg(errno.E_INVAL)
+    }
+    // Die Addition ist unter `profile kernel` geprueft; ein Aufrufer
+    // mit off = 2^64 - 1 haelt sonst die Maschine an statt einen
+    // Fehler zu bekommen.
+    if off > 0xFFFFFFFF || len > 0xFFFFFFFF {
+        return neg(errno.E_FBIG)
+    }
+    return do_ftruncate(state, me, fd, off + len)
+}
+
+// ---------------------------------------------------------- ftruncate()
+//
+// Ein frisches Speicherobjekt ist LEER. `os-compatibility.c` von weston
+// ruft `ftruncate` (bzw. `posix_fallocate`), um ihm seine Groesse zu
+// geben, und ERST DANN `mmap`. Ohne diesen Aufruf gaebe es nichts
+// abzubilden.
+//
+// Die Rahmen werden hier schon geholt und genullt, nicht erst beim
+// `mmap`: so scheitert ein Objekt, fuer das der Speicher nicht reicht,
+// an der Stelle, an der das Programm einen Fehler erwartet.
+fn do_ftruncate(state: u64, me: u64, fd: u64, size: u64) -> u64 {
+    let of: u64 = of_of(state, me, fd)
+    if of >= file.MAX_OPEN {
+        return neg(errno.E_BADF)
+    }
+    if file.open_kind(state, of) != file.K_SHM {
+        // Dateien lassen sich in diesem System nicht abschneiden. Das
+        // war vor dieser Runde so und bleibt so -- hier kommt nur die
+        // eine neue Art dazu.
+        return neg(errno.E_INVAL)
+    }
+    let i: u64 = file.open_ino(state, of)
+    if unixsock.shm_used(state, i) == 0 {
+        return neg(errno.E_BADF)
+    }
+    let alt: u64 = unixsock.shm_size(state, i)
+    let seals: u64 = unixsock.shm_seals(state, i)
+    if size < alt && (seals & F_SEAL_SHRINK) != 0 {
+        return neg(errno.E_PERM)
+    }
+    if size > alt && (seals & F_SEAL_GROW) != 0 {
+        return neg(errno.E_PERM)
+    }
+    let pages: u64 = page_up(size) / PAGE
+    if pages > unixsock.SHM_PAGES_MAX {
+        return neg(errno.E_FBIG)
+    }
+    if unixsock.shm_grow(state, i, pages) != 0 {
+        return neg(errno.E_NOMEM)
+    }
+    unixsock.shm_set_size(state, i, size)
+    return 0
+}
+
+// ------------------------------------------------------- memfd_create()
+
+fn do_memfd(state: u64, me: u64, name: u64, flags: u64) -> u64 {
+    // Der Name ist reine Zierde -- Linux benutzt ihn fuer /proc, das es
+    // hier nicht gibt. Er wird trotzdem geprueft, damit ein kaputter
+    // Zeiger auffaellt und nicht stillschweigend gelingt.
+    if name != 0 && !proc.user_ok(state, me, name, 1) {
+        return neg(errno.E_FAULT)
+    }
+    let i: u64 = unixsock.shm_new(state)
+    if i >= unixsock.USHM_MAX {
+        return neg(errno.E_NFILE)
+    }
+    let of: u64 = file.open_alloc(state, file.K_SHM, i, O_RDWR)
+    if of >= file.MAX_OPEN {
+        unixsock.shm_free(state, i)
+        return neg(errno.E_NFILE)
+    }
+    let fd: u64 = file.fd_alloc(state, me, 0)
+    if fd >= file.MAX_FD {
+        file.open_unref(state, of)
+        unixsock.shm_free(state, i)
+        return neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fd, of)
+    return fd
 }
