@@ -283,7 +283,24 @@ ARGS=(build "$TMPD/disk.img" 32768 /lib/
     "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/$p.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
-ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme" "/etc/taskbar.conf=$TMPD/tb.conf")
+# RUNDE ROTABSCHNITTE: /etc/uitrace -- DER SCHALTER, DER HIER FEHLTE.
+# Die Zusage e) wird geprueft mit `grep 'Meldg' leiste.txt`, also auf
+# der SERIELLEN LEITUNG. Die Leiste sagt dort aber nur etwas, wenn sie
+# eingeschaltet ist: `taskbar.fi`, `dbg_setup` -- entweder die Datei
+# /etc/uitrace liegt auf der Platte, oder `debug` steht auf der
+# Programmzeile. Ohne beides schweigt sie vollstaendig (`say`/`sayn`/
+# `nl` kehren sofort zurueck), und dann kann `Meldg` dort nicht stehen,
+# egal wie lange gewartet wird und egal ob der Bus funktioniert.
+# Nachgemessen an einem behaltenen Lauf (SYSBUS_KEEP=1): im ganzen
+# Mitschnitt kam KEINE EINZIGE `taskbar:`-Zeile vor, auch nicht das
+# `taskbar: ready ascent` des Starts -- die Leiste lief, sie sagte nur
+# nichts. tools/desktop/run.sh, das dieselben Zeilen liest, legt die
+# Datei genau dafuer an und ist gruen.
+# Das entschaerft nichts: die Meldung muss weiterhin wirklich in der
+# Leiste stehen, sie wird jetzt nur wieder berichtet.
+printf 'on\n' > "$TMPD/uitrace"
+ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme" "/etc/taskbar.conf=$TMPD/tb.conf"
+    "/etc/uitrace=$TMPD/uitrace")
 while read -r z; do ARGS+=("$z"); done \
     < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel" "nur=$PROGS")
 while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"

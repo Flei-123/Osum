@@ -302,7 +302,12 @@ else
 ACCEL=tcg
 [ -w /dev/kvm ] && ACCEL=kvm
 echo "     Beschleuniger: $ACCEL"
-PROGS="desktop taskbar settings launcher speicher explorer locate widgetdemo dhcp sh echo ls cat edit"
+# RUNDE ROTABSCHNITTE: `speicher` -> `storage`. Die Quelldatei heisst
+# seit ENGLISCH ETAPPE 7 kernel/user/storage.fi; der Uebersetzer fand
+# kernel/user/speicher.fi nicht mehr und brach ab. Der PFAD auf der
+# Platte bleibt /bin/speicher (so startet der Kern es), dafuer legt
+# tools/look/shot.sh den zweiten Namen an.
+PROGS="desktop taskbar settings launcher storage explorer locate widgetdemo dhcp sh echo ls cat edit"
 
 # foto <name> <extra-oder-append>   (append= erkennt man am Praefix)
 foto() {
