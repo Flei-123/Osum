@@ -163,6 +163,11 @@ const E_ARENA: u64 = 240 // 0 = keiner (dann ist alles hier tot)
 const E_BTNSAID: u64 = 248 // schon gemeldet? (damit es EINMAL kommt)
 const E_EVLEN: u64 = 1104 // PM1_EVT_LEN aus der FADT
 const E_MODE: u64 = 320 // was acpi_mode_on gemeldet hat
+const E_BTNN: u64 = 1144 // wie oft die Taste gedrueckt wurde (unabholbar)
+const E_STSOR: u64 = 1136 // ODER ueber alle je gelesenen sts
+const E_PUMPN: u64 = 1128 // wie oft `pump` gelaufen ist
+const E_IFSAID: u64 = 1120 // schon gemeldet, ob IF steht?
+const E_LIDTICK: u64 = 1112 // Durchlaeufe bis zum Deckel (`evlid`)
 const E_TICK: u64 = 312 // Durchlaeufe von `pump`, nur fuer evdump
 const E_IRQN: u64 = 288 // wie oft der SCI-Behandler ueberhaupt lief
 const E_LASTSTS: u64 = 296 // was zuletzt in PM1x_STS stand
@@ -661,7 +666,11 @@ fn irq(state: u64) {
     if pb != 0 {
         sts = sts | in16(pb)
     }
+    // JEDEN EINTRITT FESTHALTEN, auch den mit sts=0: ein Behandler,
+    // der lief und nichts fand, ist ein anderer Befund als einer, der
+    // nicht lief.
     s(state, E_LASTSTS, sts)
+    s(state, E_STSOR, g(state, E_STSOR) | sts)
     if (sts & PM1_PWRBTN) != 0 {
         // LOESCHEN, BEVOR gehandelt wird. Das Bit ist RW1C.
         if pa != 0 {
@@ -671,6 +680,7 @@ fn irq(state: u64) {
             out16(pb, PM1_PWRBTN)
         }
         s(state, E_BTN, 1)
+        s(state, E_BTNN, g(state, E_BTNN) + 1)
         mark(state, EV_BUTTON)
         etwas = true
     }
@@ -728,21 +738,37 @@ fn irq(state: u64) {
 // und fragt danach das Geraet ab, das sich gemeldet hat.
 
 fn pump(state: u64) {
+    // GANZ OBEN, VOR JEDER BEDINGUNG. Ein Zaehler hinter der ersten
+    // Wache misst nicht, ob die Funktion gerufen wird, sondern ob sie
+    // durchkommt -- und genau das war beim Suchen der Unterschied
+    // zwischen "pumpn=0" und "die Zeilen stehen doch da".
+    s(state, E_PUMPN, g(state, E_PUMPN) + 1)
     if g(state, E_READY) != 1 {
         return
     }
     // DIE TASTE. Sie ist ein FESTES Ereignis und haengt an keinem
     // GPE-Bit; der Behandler hat sie nur vorgemerkt.
-    if g(state, E_BTN) == 1 && g(state, E_BTNSAID) == 0 {
-        s(state, E_BTNSAID, 1)
+    // GEMESSEN UND KORRIGIERT: hier stand `E_BTN == 1`, also das Wort,
+    // das `button_take` beim Abholen LOESCHT. Sobald ein Programm in
+    // Ring 3 die Taste abfragt -- die Leiste tut das jede Runde, der
+    // Starter auch --, war sie weg, bevor diese Zeile sie sehen
+    // konnte. In der Ausgabe stand dann `irqs=1 stsor=0x0101` (der
+    // Behandler HAT das Tastenbit gelesen) und trotzdem kein
+    // `ev taste`: die Meldung hing an einem Wort, das jemand anderes
+    // gerade abgeholt hatte.
+    //
+    // Gezaehlt wird deshalb mit `E_BTNN`, und das loescht niemand.
+    if g(state, E_BTNN) != g(state, E_BTNSAID) {
+        s(state, E_BTNSAID, g(state, E_BTNN))
         s(state, E_EVENTS, g(state, E_EVENTS) + 1)
         var s_b: [u8; 20] = "acpiev: ev taste\0\0\0\0"
         serial.puts((&s_b[0]) as u64)
         serial.nl()
+        // IMMER, nicht nur mit `evdump`: das ist DAS Ereignis dieser
+        // Runde, und diese Zeile ist die Abnahme.
+        report(state)
     }
-    if g(state, E_BTN) == 0 && g(state, E_BTNSAID) == 1 {
-        s(state, E_BTNSAID, 0)
-    }
+
     // MIT `evdump` ALLE HUNDERT DURCHLAEUFE EINE ZEILE. Ohne das ist
     // "es kommt nichts an" nicht von "der Behandler laeuft gar nicht"
     // zu unterscheiden -- und genau diese zwei Faelle waren beim
@@ -750,7 +776,80 @@ fn pump(state: u64) {
     if kstate.mode_on(state, kstate.M_EVDUMP) {
         s(state, E_TICK, g(state, E_TICK) + 1)
         if (g(state, E_TICK) % 200) == 0 {
-            report(state)
+            // ROHES PM1a_STS, direkt vom Anschluss. Wenn hier Bit 8
+            // auftaucht, HAT QEMU die Taste gemeldet und es liegt am
+            // Interrupt; taucht es nie auf, hat QEMU sie gar nicht
+            // gemeldet. Das trennt die zwei Faelle.
+            var s_rs: [u8; 16] = "acpiev: pm1sts=\0"
+            var s_pk: [u8; 8] = " pumpn=\0"
+            var s_ik: [u8; 7] = " irqs=\0"
+            serial.puts((&s_rs[0]) as u64)
+            if g(state, E_PM1A) != 0 {
+                serial.hex_width(in16(g(state, E_PM1A)), 4)
+            }
+            serial.puts((&s_pk[0]) as u64)
+            serial.dec(g(state, E_PUMPN))
+            serial.puts((&s_ik[0]) as u64)
+            serial.dec(g(state, E_IRQN))
+            var s_or: [u8; 8] = " stsor=\0"
+            serial.puts((&s_or[0]) as u64)
+            serial.hex_width(g(state, E_STSOR), 4)
+            serial.nl()
+        }
+    }
+    // EINMAL melden, ob Unterbrechungen ueberhaupt AN sind. Ohne das
+    // ist "der SCI kommt nicht an" nicht von "dieser Kern nimmt gar
+    // keine Unterbrechungen an" zu unterscheiden -- und genau diese
+    // zwei Faelle waren im Schreibtischbetrieb zu trennen.
+    if g(state, E_IFSAID) == 0 {
+        s(state, E_IFSAID, 1)
+        // NUR LESEN, NICHT sperren: die Fassungen in klog.fi und
+        // audio.fi haengen ein `cli` an, weil sie eine Sperre
+        // aufmachen. Hier soll nichts gesperrt werden.
+        let fl: u64 = asm("pushfq\npop rax", out("rax"))
+        var s_if: [u8; 16] = "acpiev: rflags=\0"
+        serial.puts((&s_if[0]) as u64)
+        serial.hex_width(fl, 4)
+        // Und gleich der Eintrag im I/O-APIC UND das Freigaberegister,
+        // beide JETZT und nicht beim Aufsetzen. Wer beides zum
+        // richtigen Zeitpunkt liest, sieht, ob eine spaetere Runde sie
+        // wieder zugemacht hat.
+        var s_i2: [u8; 9] = " ioapic=\0"
+        var s_p2: [u8; 8] = " pm1en=\0"
+        var s_s2: [u8; 6] = " sts=\0"
+        serial.puts((&s_i2[0]) as u64)
+        serial.hex_width(apic.gsi_entry(state, g(state, E_SCI)), 8)
+        serial.puts((&s_p2[0]) as u64)
+        if g(state, E_PM1A) != 0 && g(state, E_EVLEN) != 0 {
+            serial.hex_width(in16(g(state, E_PM1A) + g(state, E_EVLEN) / 2), 4)
+        }
+        serial.puts((&s_s2[0]) as u64)
+        if g(state, E_PM1A) != 0 {
+            serial.hex_width(in16(g(state, E_PM1A)), 4)
+        }
+        serial.nl()
+    }
+    // ============================== RUNDE ACPI-EREIGNISSE: `evlid`
+    //
+    // DEN DECKEL VON HAND ZUKLAPPEN, EINMAL, NACH EINER WEILE.
+    //
+    // QEMU hat kein Deckelgeraet -- es gibt an dieser Maschine nichts,
+    // was das GPE-Bit ziehen wuerde. Fuer das BILD der Abnahme (der
+    // Sperrbildschirm muss kommen) braucht es aber einen Deckel, der
+    // sich schliesst, waehrend der Schreibtisch schon steht. Also
+    // zaehlt der Kern die Durchlaeufe und klappt ihn beim
+    // zweitausendsten zu -- das ist rund eine halbe Minute nach dem
+    // Start, lange nachdem alles gemalt ist.
+    //
+    // WAS DAMIT NICHT GEMESSEN IST, steht wie ueberall in dieser Runde
+    // dabei: dass ein echtes Brett das Bit zieht. Gemessen ist alles
+    // dahinter -- die Methode, das `Notify`, `_LID`, und dass der
+    // Sperrbildschirm wirklich kommt.
+    if kstate.mode_on(state, kstate.M_EVLID) {
+        s(state, E_LIDTICK, g(state, E_LIDTICK) + 1)
+        if g(state, E_LIDTICK) == 2000 {
+            fake_set(state, 0, g(state, E_PCT), 1, 0)
+            let _l: bool = ev_fake(state, 3)
         }
     }
     let n: u64 = meth_n(state)
@@ -904,8 +1003,41 @@ fn read_lid(state: u64) {
         v = LID_OPEN
     }
     if v != g(state, E_LIDV) {
+        let alt: u64 = g(state, E_LIDV)
         s(state, E_LIDV, v)
         mark(state, EV_LID)
+        // ================================ DECKEL ZU HEISST SPERREN
+        //
+        // Der Sperrbildschirm steht seit Runde ANMELDUNG; was fehlte,
+        // war jemand, der ihn beim Zuklappen anschaltet. Gesetzt wird
+        // GENAU DASSELBE Wort, das `sperrwache` ueber den Systemaufruf
+        // 1870 (op 1) setzt -- kein zweiter Weg an der
+        // Kennwortpruefung vorbei, und kein zweiter Ort, an dem
+        // stuende, was "gesperrt" heisst.
+        //
+        // NUR BEIM UEBERGANG AUF/ZU, und nur wenn vorher wirklich
+        // "auf" stand. `LID_UNKNOWN` ist der Zustand vor der ersten
+        // Abfrage; ein Brett, dessen Deckel beim Start zu ist (weil
+        // es an einem Bildschirm haengt und zugeklappt laeuft), darf
+        // davon nicht sofort gesperrt werden.
+        if v == LID_CLOSED && alt == LID_OPEN {
+            let sp: u64 = kstate.K11_OFF
+            if kstate.get(state, sp + kstate.SP_ON) == 0 {
+                kstate.set(state, sp + kstate.SP_ON, 1)
+                kstate.add(state, sp + kstate.SP_LOCKS, 1)
+                var s_l: [u8; 32] = "acpiev: deckel zu -- gesperrt\0\0\0"
+                serial.puts((&s_l[0]) as u64)
+                serial.nl()
+            }
+        }
+        // AUFGEKLAPPT WIRD NICHT ENTSPERRT. Ein Deckel, der aufsperrt,
+        // waere genau der zweite Weg an der Kennwortpruefung vorbei,
+        // den `sperrwache.fi` in ihrem Kopf ausschliesst.
+        if v == LID_OPEN && alt == LID_CLOSED {
+            var s_a: [u8; 24] = "acpiev: deckel auf\0\0\0\0\0\0"
+            serial.puts((&s_a[0]) as u64)
+            serial.nl()
+        }
     }
 }
 
@@ -1218,6 +1350,17 @@ fn stage(state: u64) {
     s(state, E_READY, 1)
     s(state, E_WHY, WHY_OK)
 
+    // MIT `evfake` DEN NACHGEBAUTEN LAPTOP AUF EINEN SICHTBAREN
+    // STAND SETZEN. Ohne das steht in der Operationsregion des
+    // nachgebauten Laptops ueberall null -- also Deckel zu, null
+    // Prozent --, und jedes Bild dieser Runde zeigte einen leeren
+    // Akku. Die Zahl ist mit Bedacht krumm: 77 kann kein Vorgabewert
+    // und kein Zufall sein, sie steht so in `fake_set` und muss so in
+    // der Leiste stehen.
+    if kstate.mode_on(state, kstate.M_EVFAKE) {
+        fake_set(state, 1, 77, 1, 0)
+    }
+
     // Einmal alles lesen, damit die Taskleiste von Anfang an etwas
     // anzuzeigen hat und nicht erst beim ersten Ereignis.
     refresh_all(state)
@@ -1451,6 +1594,7 @@ fn report(state: u64) {
     var s_le: [u8; 9] = " evlen=\0\0"
     var s_io: [u8; 9] = " ioapic=\0"
     var s_md: [u8; 8] = " mode=\0\0"
+    var s_pn: [u8; 8] = " pumpn=\0"
     var s_ev: [u8; 6] = " ev=\0\0"
     serial.puts((&s_iq[0]) as u64)
     serial.dec(g(state, E_IRQN))
@@ -1470,6 +1614,8 @@ fn report(state: u64) {
     serial.hex_width(apic.gsi_entry(state, g(state, E_SCI)), 8)
     serial.puts((&s_md[0]) as u64)
     serial.dec(g(state, E_MODE))
+    serial.puts((&s_pn[0]) as u64)
+    serial.dec(g(state, E_PUMPN))
     serial.puts((&s_ev[0]) as u64)
     serial.dec(g(state, E_EVENTS))
     serial.puts((&s_bt[0]) as u64)

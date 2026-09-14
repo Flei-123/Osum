@@ -214,6 +214,35 @@ const PG_BATPERCENT: u64 = 25
 // kernel/sys.fi and kernel/user/power.fi -- the numbers are the
 // interface to ring 3 and this bar does not invent a second one.
 const PG_BATSTATE: u64 = 27
+// ============================== RUNDE ACPI-EREIGNISSE
+//
+// DIE LEISTE FRAGT NICHT MEHR NUR AB, SIE ERFAEHRT ES.
+//
+// `PG_EVCHANGE` ist ein Bitfeld dessen, was sich seit der letzten
+// Abfrage geaendert hat, und DAS LESEN LEERT ES. Damit kostet ein
+// Durchlauf ohne Ereignis einen einzigen Systemaufruf statt vier --
+// und, was wichtiger ist: ein Ereignis geht nicht mehr verloren, das
+// zwischen zwei Abfragen liegt und bis zur naechsten wieder
+// verschwunden waere (Deckel zu und gleich wieder auf, Netzteil kurz
+// raus).
+//
+// Die Zahlen stehen genauso in `kernel/sys.fi`.
+const PG_EVREADY: u64 = 45
+const PG_LID: u64 = 48
+const PG_EVCHANGE: u64 = 53
+const EV_BUTTON: u64 = 1
+const EV_LID: u64 = 2
+const EV_BATT: u64 = 4
+const EV_AC: u64 = 8
+
+// AB WANN GEWARNT WIRD. Zwei Schwellen, wie sie jedes System hat:
+// eine Warnung und eine ernste. Die Zahlen sind die, die ACPI selbst
+// in `_BIF` vorsieht (Warnung und Untergrenze) -- nur nimmt sie hier
+// niemand aus der Tabelle, weil eine Firmware dort auch 0 stehen
+// lassen darf. Wer sie aendern will, aendert sie hier und an keiner
+// zweiten Stelle.
+const BAT_WARN: u64 = 20
+const BAT_CRIT: u64 = 10
 const SYS_NETGET: u64 = 1300
 const NG_READY: u64 = 0
 const NG_IP: u64 = 1
@@ -651,6 +680,15 @@ static mut net_state: u64 = 0
 static mut bat_have: u64 = 0
 static mut bat_pct: u64 = 0
 static mut bat_chg: u64 = 0
+// RUNDE ACPI-EREIGNISSE: was schon gewarnt wurde. OHNE DAS WAERE DIE
+// WARNUNG EIN DAUERFEUER -- `status_build` laeuft viermal je Sekunde,
+// und eine Meldung je Durchlauf waere nach einer Minute
+// zweihundertvierzig Mal dieselbe Zeile. Gewarnt wird EINMAL je
+// Unterschreitung; steigt der Stand wieder ueber die Schwelle (am
+// Netz), wird der Merker geloescht und beim naechsten Mal wieder
+// gewarnt.
+static mut bat_warned: u64 = 0 // 0 = nichts, 1 = Warnung, 2 = ernst
+static mut ev_seen: u64 = 0 // wie viele Ereignisse angekommen sind
 static mut nv_fall: u64 = 0 // 0 off, 1 when-offline, 2 always
 static mut nv_faking: u64 = 0 // is it faking RIGHT NOW
 // WAS ZULETZT GEMELDET WURDE. Der Zustand der Maschine aendert sich
@@ -2076,6 +2114,66 @@ static mut snd_vol: u64 = 0
 static mut snd_mute: u64 = 0
 static mut snd_gen: u64 = 0
 
+// ==================================================== RUNDE ACPI-EREIGNISSE
+// WARNEN, WENN DER AKKU LEER WIRD.
+//
+// EINMAL JE UNTERSCHREITUNG und nicht je Durchlauf: `status_build`
+// laeuft viermal je Sekunde, und eine Meldung je Durchlauf waere nach
+// einer Minute zweihundertvierzig Mal dieselbe Zeile. `bat_warned`
+// merkt sich die Stufe; faellt der Stand von 21 auf 19, kommt die
+// Warnung, faellt er weiter auf 9, kommt die ernste, und steigt er
+// wieder ueber die Schwelle (Netzteil eingesteckt), wird der Merker
+// geloescht -- dann warnt es beim naechsten Mal wieder.
+//
+// AM NETZ WIRD NICHT GEWARNT. Ein Akku, der bei 8 % laedt, ist kein
+// Problem, sondern ein Akku, der laedt.
+fn bat_warn_check() {
+    var m_warn: [u8; 40] = "Akku schwach -- noch \0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+    var m_crit: [u8; 44] = "Akku fast leer -- bitte anstecken, noch \0\0\0\0"
+    if bat_have == 0 {
+        bat_warned = 0
+        return
+    }
+    if bat_chg != 0 {
+        // Er laedt. Merker zuruecksetzen, damit beim naechsten
+        // Abstecken wieder gewarnt wird.
+        bat_warned = 0
+        return
+    }
+    var stufe: u64 = 0
+    if bat_pct <= BAT_CRIT {
+        stufe = 2
+    } else {
+        if bat_pct <= BAT_WARN {
+            stufe = 1
+        }
+    }
+    if stufe == 0 {
+        bat_warned = 0
+        return
+    }
+    if stufe <= bat_warned {
+        return // schon gewarnt, und nicht schlimmer geworden
+    }
+    bat_warned = stufe
+    var p: u64 = (&m_warn[0 as usize]) as u64
+    if stufe == 2 {
+        p = (&m_crit[0 as usize]) as u64
+    }
+    // Die Prozentzahl anhaengen.
+    var at: u64 = 0
+    while at < 60 && __mmio_read8((p + at) as *mut u8) != 0 as u8 {
+        at = at + 1
+    }
+    at = num_at(p, at, bat_pct)
+    __mmio_write8((p + at) as *mut u8, 37 as u8) // '%'
+    __mmio_write8((p + at + 1) as *mut u8, 0 as u8)
+    // Dringlichkeit 2 = ernst, 1 = Hinweis. Die Meldung geht ueber die
+    // Bibliothek an den Systembus -- kein eigener Malweg, damit
+    // `tools/check-ui.sh` gruen bleibt.
+    let _r: u64 = wlib.noti_post(stufe, p, at + 1)
+}
+
 fn status_build() -> bool {
     let s_kA: u64 = txt((&k_nobatt[0 as usize]) as u64,
         (&s_nobat[0 as usize]) as u64)
@@ -2118,6 +2216,7 @@ fn status_build() -> bool {
             let _q: u64 = text_at_p(a, 0, s_kA)
         } else {
             bat_pct = pc
+            bat_warn_check()
             // ==================================== RUNDE LEISTE-RECHTS
             // NUR DIE ZAHL, WENN ES EIN SYMBOL GIBT.
             //
@@ -5974,6 +6073,27 @@ fn u_start(args: u64) -> u64 {
         if (round % 5) == 0 {
             if list_read() {
                 fresh = true
+            }
+        }
+        // ==================================== RUNDE ACPI-EREIGNISSE
+        //
+        // JEDE RUNDE EIN SYSTEMAUFRUF, und der ist billig: `PG_EVCHANGE`
+        // gibt ein Bitfeld dessen, was die Firmware seit der letzten
+        // Frage gemeldet hat, und LEERT ES DABEI. Ohne Ereignis kostet
+        // das einen Vergleich gegen null.
+        //
+        // WARUM NICHT EINFACH `status_build` OEFTER RUFEN: weil das
+        // vier Systemaufrufe sind (Vorhanden, Zustand, Prozent, Netz)
+        // und weil ein Ereignis, das ZWISCHEN zwei Abfragen liegt,
+        // dabei verlorenginge -- Deckel zu und gleich wieder auf,
+        // Netzteil kurz heraus. Das Bitfeld verliert nichts.
+        let evc: u64 = ulib.sys(SYS_PWRGET, PG_EVCHANGE, 0, 0)
+        if !ulib.bad(evc) && evc != 0 {
+            ev_seen = ev_seen + 1
+            if (evc & (EV_BATT | EV_AC)) != 0 {
+                if status_build() {
+                    fresh = true
+                }
             }
         }
         if (round % 10) == 0 {
