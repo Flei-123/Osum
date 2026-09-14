@@ -927,3 +927,155 @@ Sekunden, bevor er die erste Zeile ausfuehrt (14.1). Die Zahl ist an
 diesem Abbild gemessen und nicht hergeleitet; richtig waere, dass ein
 Plugin die Zeit eines fremden `SYS_EXEC` nicht auf seine Frist
 angerechnet bekommt.
+
+---
+
+## 15. Nachbesserung R2-3: die zwei fremden Laeufer, der Tabellenkopf und die Statuszeile
+
+Vier kleine Maengel, und drei davon sind derselbe: **eine Zahl, die
+zweimal aufgeschrieben wurde und nur an einer Stelle mitgewachsen ist.**
+
+### 15.1 `tools/desktop` und `tools/paint` suchten eine Zahl von gestern
+
+Beide Laeufer suchten woertlich `const WM_MAXNR: u64 = 2116` in
+`kernel/sys.fi`. Seit dieser Runde steht dort **2126** (die Nummern
+2117..2126 sind neu), also war die Zusage in beiden Laeufern **rot** —
+und zwar genau die Zusage, die aufpassen soll, dass niemand die
+Aufrufnummern verschiebt. Der Kommentar in `kernel/sys.fi` (Zeile 3536)
+machte denselben Fehler ein drittes Mal und nannte `2113`.
+
+Statt die Zahl ein zweites Mal abzuschreiben, **lesen und vergleichen**
+beide Laeufer sie jetzt: `WM_MAXNR` muss mindestens 2126 sein **und**
+mit der hoechsten `= 21xx`-Aufrufnummer uebereinstimmen, die wirklich in
+der Datei steht. Ein `grep -v WM_MAXNR` sorgt dafuer, dass die Zusage
+sich nicht selbst bestaetigt. Der Kommentar nennt den wahren Wert und
+sagt dazu, warum dort keine abgeschriebene Zahl mehr steht.
+
+**Beide Laeufe sind einmal komplett gefahren, vorher und nachher, auf
+derselben Maschine (KVM, echte QEMU-Starts).** „Vorher" ist der Stand
+zu Beginn dieser Nachbesserung (`32289d8`), „nachher" derselbe Baum mit
+der neuen Pruefung:
+
+```
+                          vorher (32289d8)          nachher
+tools/desktop/run.sh   TASKBAR: 57 passed, 42 failed   TASKBAR: 58 passed, 41 failed
+tools/paint/run.sh     PAINT: 27 bestanden, 5 fehlg.   PAINT:   28 bestanden, 4 fehlg.
+```
+
+Genau **ein** Pass mehr und **ein** Fehlschlag weniger, in beiden
+Laeufern — die Zeile
+
+```
+  FAIL  WM_MAXNR does not match the calls
+  FAIL  WM_MAXNR passt nicht zu den Aufrufen
+```
+
+ist jetzt
+
+```
+  OK    WM_MAXNR=2126 is the highest call of the window server (>= 2126)
+  OK    WM_MAXNR=2126 ist die hoechste Aufrufnummer des Fensterservers (>= 2126)
+```
+
+**Was NICHT behoben ist, und es steht hier, weil es sonst so aussaehe,
+als sei es behoben:** die uebrigen 41 bzw. 4 Fehlschlaege sind in beiden
+Laeufen **Zeichen fuer Zeichen dieselben** und aelter als diese Runde —
+`kernel/r3dsoft.fi: Skalare ueberschneiden sich` (fuenf Meldungen, eine
+Bilanz), `kein Bild und kein gemeldetes Fenster`, `die Taskleiste meldet
+kein einziges Programmsymbol`, `form_push hat nicht alle vier Werte
+durchgebracht` bei `paint`; bei `desktop` das Ziehen der Leiste an einen
+anderen Rand und die Einstellungen. Diese Runde hat sie weder gebaut
+noch behoben; sie gehoeren `tools/taskbar` und `tools/paint`.
+
+### 15.2 Der Tabellenkopf kommt aus denselben Breiten wie die Zeile
+
+Der Kopf von `wmplug list` stand als **fertige Leerzeichenkette** in der
+Quelle (`"  Nr Name      Rechte Maske  liegt verloren"`), die Datenzeile
+darunter entstand aus `pad`/`breit`/`sayhexw`. Zwei Wege zum selben
+Bild, und sie sind auseinandergelaufen: auf Bild 09 der ersten Runde
+standen `Rechte`, `Maske`, `liegt` und `verloren` neben ihren Werten.
+
+Jetzt rechnet `kopf_zeile()` die Spaltenkanten aus **denselben fuenf
+Konstanten**, aus denen die Datenzeile entsteht — `SP_NR=4`,
+`SP_NAME=9`, `SP_HEX=5`, `SP_LIEGT=6`, `SP_VERL=9` — und legt jede
+Ueberschrift **rechtsbuendig** an ihre Kante (`Name` linksbuendig, weil
+der Name selbst linksbuendig steht). `Rechte` ist sechs Stellen breit
+und das Feld fuenf; die Ueberschrift ragt deshalb in die Leerstellen der
+Namensspalte und nicht in die naechste Zahl.
+
+### 15.3 Die Statuszeile sind zwei Zeilen
+
+Sie war eine von 55 Zeichen. Der Fensterserver bricht am **Rand** und
+nicht am Wort, also riss sie mitten in `Flaeche  0`. Jetzt:
+
+```
+wmplug: abi=1  Plugins 2 von 8          30 Zeichen
+  Frist 50 Ticks  Flaeche 0             27 Zeichen
+```
+
+Beide unter 40 — das passt auch in ein 640x480-Terminal. Dazu faellt das
+eigene `pad(…, 2)` hinter `Leistentext` weg: es war der einzige Wert in
+`info`, der eine Stelle weiter rechts stand als alle anderen (im Bild
+der Nachbesserung R2-1 noch als `Leistentext  8` zu sehen, jetzt
+`Leistentext 8` auf Spalte 14 wie alles darunter).
+
+### 15.4 Gemessen wird am BILD, nicht am Quelltext
+
+`tools/wmplug/spalten.sh` bootet einen echten Kern, laesst
+`/bin/plugpaar` (Ring 3, neu) die Rechte gewaehren und **beide** echten
+Plugins starten, wartet, bis die Tabelle auf der Leitung steht,
+fotografiert und rechnet das Foto mit `checkshot.py tgrid` nach — jede
+Glyphe gegen den Rasterer, nicht „da ist irgendwas hell":
+
+```
+  OK  der Tabellenkopf steht bildpunktgenau in Rasterzeile 2 (0 falsch)
+  OK  Platz 0 traegt 'uhr' mit Rechten 0x807 und Maske 0x08E
+  OK  Rechte:   Kopf ab Spalte 13, Wert '0x807' ab Spalte 14  -> Ende 18
+  OK  Maske:    Kopf ab Spalte 20, Wert '0x08E' ab Spalte 20  -> Ende 24
+  OK  Name:     Kopf ab Spalte  5, Wert 'uhr'   ab Spalte  5
+  OK  liegt:    Kopf ab Spalte 26, Wert '0'     ab Spalte 30  -> Ende 30
+  OK  verloren: Kopf ab Spalte 32, Wert '0'     ab Spalte 39  -> Ende 39
+  OK  Name (Platz 1):   Wert 'regel' ab Spalte 5
+  OK  Rechte (Platz 1): Wert '0x301' ab Spalte 14
+
+SPALTEN: 24 bestanden, 0 gescheitert
+```
+
+**Zwei Plugins gleichzeitig, und das ist kein Schmuck:** unter einer
+einzigen Datenzeile laesst sich jede falsche Breite hinbiegen. Der Kern
+zaehlt sie selbst (`Plugins 2 von 8`), und welcher Name mit welchen
+Rechten auf welchem Platz steht, liest der Laeufer aus der Leitung
+desselben Laufs und sucht es dann im Bild.
+
+Bilder: `docs/shots/wmplug/spalten-zwei-plugins.png`, und
+`.gauntlet-shots/09-wmplug-verwaltung.png` ist aus diesem Lauf **neu
+aufgenommen** (das alte zeigte die drei Fehler von oben).
+
+**Zwei gemessene Fehlgriffe dieses Laeufers, benannt statt weggeputzt:**
+
+1. Die Farben des Terminals waren von `tools/wm/run.sh` abgeschrieben
+   (224,230,236 auf 16,20,26). Das ist das Terminal des **nackten**
+   Fensterservers; der Schreibtisch nimmt sein Thema aus `/etc/theme`
+   und malt **248,250,252 auf 18,24,32**. Mit den geborgten Zahlen war
+   jede Glyphe „falsch", obwohl sie richtig stand — nachgemessen am PPM
+   und nicht geraten.
+2. `plugpaar` gab beiden Plugins zuerst `runden=40`. Eine Runde der Uhr
+   ist eine Sekunde, eine Runde der Regel-Engine zehn Millisekunden: die
+   Regel-Engine war nach vier Zehntelsekunden wieder weg, und die Tafel
+   zeigte **ein** Plugin statt zweier. Die Zahlen (40 / 2000) sind
+   deshalb der Grund, warum unter dem Kopf zwei Zeilen stehen.
+
+**Neu benannte Abkuerzung:** `kernel/user/plugpaar.fi` ist ein
+Messhelfer und kein Plugin — er meldet sich nirgends an und tut ausser
+`WM_PLUG_GRANT`, `SYS_EXEC` und `sleep_ms` nichts. Sobald der Autostart
+(14.1) mehrere Zeilen mit Wartepunkten kann, gehoeren seine vier Zeilen
+dorthin und die Datei faellt weg.
+
+### 15.5 Nachfahren
+
+```
+bash tools/wmplug/spalten.sh      # SPALTEN: 24 bestanden, 0 gescheitert
+bash tools/desktop/run.sh         # TASKBAR: 58 passed, 41 failed
+bash tools/paint/run.sh           # PAINT:   28 bestanden, 4 fehlgeschlagen
+bash tools/check-ui.sh            # CHECK-UI PASSED.
+```
