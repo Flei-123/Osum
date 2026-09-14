@@ -242,6 +242,19 @@ for f in "$MED"/*.264; do
 done
 ok "alle Stroeme tragen das Baseline-Profil (ffprobe)"
 
+# DASS DER SLICE-STROM WIRKLICH MEHRERE SLICES JE BILD HAT. Ohne diese
+# Zahl waere "mehrere Slices gehen" eine Hoffnung: kodiert x264 doch
+# nur einen, laeuft der Test durch, ohne den Fall je zu beruehren.
+sl=$(python3 tools/codec/nalzahl.py "$MED/slices.264" 2>/dev/null)
+sl_n=$(echo "$sl" | cut -d' ' -f1)
+sl_fm=$(echo "$sl" | cut -d' ' -f3)
+num "der Strom 'slices' hat so viele Slice-Einheiten (3 Bilder x 4)" \
+    "${sl_n:-0}" eq 12
+case "$sl_fm" in
+    0,*) ok "und sie fangen bei verschiedenen Makrobloecken an ($sl_fm)" ;;
+    *) bad "die first_mb_in_slice-Werte sehen falsch aus: $sl_fm" ;;
+esac
+
 # Die Stroeme mit HIGH und MAIN fuer die Gegenproben.
 ffmpeg -y -v error -f lavfi -i testsrc2=size=128x96:rate=5 -frames:v 2 \
     -c:v libx264 -profile:v high -pix_fmt yuv420p -f h264 \
