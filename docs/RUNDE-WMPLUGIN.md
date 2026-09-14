@@ -210,7 +210,7 @@ Alle vier sind Ring-3-Prozesse, keiner steht im Kernabbild.
 
 | Programm | was es tut |
 |---|---|
-| `/bin/plugregel` | **Fensterregel-Engine.** Liest `/etc/wmregeln.conf`, abonniert `E_WIN_OPEN`/`E_FOCUS` und setzt Fenster an ihren Platz: `app=rechner flaeche=2 schwebend zentriert zeigen`, `titel=Terminal kacheln`. |
+| `/bin/plugregel` | **Fensterregel-Engine.** Liest `/etc/wmregeln.conf`, abonniert `E_WIN_OPEN`/`E_FOCUS` und setzt Fenster an ihren Platz: `app=rechner flaeche=2 schwebend zentriert zeigen`, `titel=Terminal kacheln ort=2,40`. |
 | `/bin/pluguhr` | **Leistenwidget.** Uhr und CPU, je Sekunde ≤31 Oktette mit `WM_PLUG_BAR`. Die Taktlaenge kommt aus der **vom Kern erfragten Frist** (`PL_FRIST`), nicht aus einer getippten Zahl. |
 | `/bin/plugboese` | **Die Gegenprobe.** Absichtlich boesartig: `segv`, `hang`, `greif`. Traegt die drei harten Grenzen in Abschnitt 5. |
 | `/bin/plugprobe` | **Der Prueflauf der Schnittstelle.** Geht sie einmal ganz durch: Fassung, Kuerzel ohne und mit Gewaehrung, Ereignisse, Tempo vor und nach. |
@@ -519,11 +519,21 @@ Der Rest der Ruhe ist die Bauform und kein Zufall: der Kern macht je
 Bild **acht Vergleiche** (der Kehrbesen) und legt Ereignisse in Ringe.
 Er ruft **nie** in ein Plugin hinein und wartet **nie** auf eines.
 
-### 8.4 Der zweite Vergleich: zwei Laeufe, ein Abbild
+### 8.4 Der zweite Vergleich: der Haenger, im SELBEN Lauf
 
-Zusammensetzerrunden zweier Laeufe desselben Abbilds, bei denen einmal
-ein Plugin abstuerzt und einmal eines haengt: **163 gegen 165**. Kein
-Einbruch.
+Hier stand einmal: "Zusammensetzerrunden zweier Laeufe desselben
+Abbilds, bei denen einmal ein Plugin abstuerzt und einmal eines haengt:
+163 gegen 165." Das war ein Vergleich zweier Kaltstarts mit zwei
+verschiedenen Programmen — bequem, aber keine Messung. Seit der
+Nachbesserung faehrt `/bin/plugtempo` im Haengerlauf mit und misst
+**vor** und **waehrend** des Haengers in EINEM Lauf; die Zahlen und die
+Gegenprobe ohne Haenger stehen in **Abschnitt 5b**:
+
+```
+tempo: vor  ... us=363 ... fps10=200      <- vor dem Haenger
+tempo: nach ... us=366 ... fps10=100      <- waehrend des Haengers
+tempo: haenger pid=7 lebt=1               <- er lief dabei noch
+```
 
 ---
 
@@ -1137,3 +1147,123 @@ bash tools/desktop/run.sh         # TASKBAR: 58 passed, 41 failed
 bash tools/paint/run.sh           # PAINT:   28 bestanden, 4 fehlgeschlagen
 bash tools/check-ui.sh            # CHECK-UI PASSED.
 ```
+
+---
+
+## 16. Nachbesserung R3-1: der Leerlaufzaehler, die Sicht der Verwaltung und die Titelleiste
+
+Drei Maengel der Jury, alle drei an einem wirklich gebooteten Kernel
+nachgemessen (QEMU/KVM, `-device isa-debug-exit`, jeder Lauf mit
+Exitcode 21).
+
+### 16.1 `cpu 100%` war kein Tempoproblem, sondern ein fehlender Zaehler
+
+Die Jury fragte, ob `cpu_last()` (kernel/user/pluguhr.fi) falsch rechnet
+oder ob der Poll-Takt des Widgets wirklich einen Kern auslastet.
+Gemessen wurde es, nicht ueberlegt: das Widget schreibt seitdem in jedem
+Takt die zwei ROHZAHLEN auf die Leitung, aus denen es rechnet.
+
+```
+wigapp=/bin/wmplug,enable,uhr,runden=12   (gfx wm wig desk ... nosched)
+
+pluguhr: text cpu n/v
+pluguhr: cpu dt=103 di=0
+pluguhr: cpu dt=103 di=0      ... zwoelf Takte, immer di=0
+```
+
+`dt` ist die Differenz von `CS_TICKS` zwischen zwei Takten (103 Schlaege
+je Sekunde, TICK_HZ=100 — die drei sind der Schlaf, der etwas laenger
+dauert als bestellt), `di` die Differenz von `CS_IDLE`. **`di` bewegt
+sich kein einziges Mal.** Der Grund steht in `kernel/sched.fi`:
+`cpu.C_IDLETICKS` wird nur hochgezaehlt, wenn beim Zeitgeberschlag die
+LEERLAUFAUFGABE (`K_IDLE`) dran war — und der Abnahmelauf faehrt mit
+`nosched`, es gibt in ihm keine.
+
+Die alte Rechnung `(dt - di) * 100 / dt` machte daraus brav `100 %` und
+meldete Vollast auf einem Schreibtisch, der nichts tat. Das ist keine
+Messung, das ist ein fehlender Zaehler. Das Feld sagt jetzt **`cpu n/v`**
+(und dahinter die Fensterzahl, siehe 16.4), die Rohzahlen stehen in
+jedem Takt auf der Leitung.
+
+**Der Poll-Takt ist damit entlastet — und das ist kein Freispruch aus
+Bequemlichkeit:** mit `di=0` in jedem einzelnen Takt gibt es im
+gemessenen Lauf ueberhaupt keine Zahl, aus der sich eine Auslastung
+ableiten liesse. Wer sie will, braucht einen Lauf MIT Scheduler; das
+steht als offener Punkt in Abschnitt 11 und nicht als Behauptung hier.
+
+### 16.2 Warum `wmplug list` auf keinem Bild stand
+
+`wigapp=/bin/wmplug,...` startet der SCHREIBTISCH, und der gibt seinen
+Kindern fuer fd 1 ein Protokoll-Terminal, dessen Ausgang nur die
+serielle Leitung ist (`kernel/kgui.fi`, `protokoll_binden`,
+SINK_SERIAL — damit die Messzeilen der Leiste nicht im Terminalfenster
+des Menschen landen). Fuer eine Leiste ist das richtig, fuer eine
+VERWALTUNG falsch: die Tabelle stand an einer Stelle, die kein
+Bildschirmfoto zeigt.
+
+`/bin/wmplug` kennt darum das Wort **`sicht`**. Es haengt fd 1 und fd 2
+an `/dev/console` (dasselbe Terminal, in das ein `wmplug list` aus einer
+Shell schreibt). Gemessen: im Abnahmelauf gibt es **kein** `/dev` —
+`k14_setup` haengt devfs nur bei eingeschaltetem `vfs` ein, und die
+Fensterlaeufe fahren ohne:
+
+```
+wmplug: sicht /dev/console geht n-2        (-2 = E_NOENT)
+```
+
+Dann nimmt die Verwaltung den zweiten Weg: sie zeigt ihre Tabellen als
+**Kind ihrer selbst** (`/bin/wmplug list`, `/bin/wmplug info <name>`,
+gewartet wird auf den Ausgang). Ein Kind erbt laut `kernel/file.fi`
+(`inherit_std`) die Konsole zurueck — dieselbe Regel, von der die Zeile
+`pluguhr: text ...` im Terminalfenster lebt. Gemessen mit
+`wigapp=/bin/wmplug,probe,uhr,sicht,runden=30`, im FENSTER lesbar:
+
+```
+wmplug: abi=1  Plugins 1 von 8
+  Frist 50 Ticks  Flaeche 0
+  Nr Name    Rechte Maske liegt verloren
+   0 uhr      0x807 0x08E     0        0
+  Name        uhr
+  Rechte      0x807 (win fokus flaeche +leiste)
+  ...
+wmplug: abi=1  Plugins 0 von 8
+  (keine Erweiterung angemeldet)
+```
+
+**ABKUERZUNG, ausdruecklich benannt:** der gerade Weg waere ein Kern,
+der `wigapp=`-Programmen die Konsole laesst (oder ein Lauf mit `vfs` und
+einem `/dev`). Statt dessen startet die Verwaltung fuer die Anzeige
+einen Prozess mehr. Er kostet einen `SYS_EXEC` je Tabelle und aendert an
+den Zahlen nichts — sie kommen in beiden Faellen aus `WM_PLUG_INFO`.
+
+### 16.3 Die Titelleiste des Terminals war abgeschnitten
+
+Auf den Regelbildern klebte das Terminalfenster am oberen Schirmrand.
+Das war kein Zufall, sondern die zweite Regel aus `/etc/wmregeln.conf`:
+`kacheln` legt das Fenster auf den Kachelplatz `(0,0)`, und der
+Fensterserver malt die Titelleiste OBERHALB dieser Koordinate.
+
+```
+vorher:  plugregel: nachgemessen id=7 x=0 y=0 w=796 h=546
+nachher: plugregel: nachgemessen id=7 x=2 y=40 w=796 h=546
+```
+
+Die Regel heisst jetzt `titel=Terminal kacheln ort=2,40` — 40 ist mehr
+als die Rahmenhoehe, die Leiste steht vollstaendig im Bild. Gemessen im
+selben Lauf, der auch die Bilder 04/05 macht.
+
+### 16.4 Was in diesem Zug noch nachgezogen wurde
+
+* Die Regelbilder 04/05 entstehen aus einem Abbild **ohne**
+  `/etc/uitrace` (`tools/wmplug/shots.sh`, `disk-rein.img`) — die
+  Zeilen `wlib: text win=... kind=... fg=... bg=...` sind damit aus den
+  Bildern verschwunden. Der Schalter selbst war schon da
+  (`kernel/user/wlib.fi`, `s_trace`, Vorgabe AUS); was fehlte, war ein
+  Abbild, das ihn nicht setzt.
+* **Was NICHT verschwunden ist und hier stehen soll:** die Zeilen
+  `rechner: rect id=.. kind=..` kommen aus `wlib.say_rects` und haengen
+  nicht am selben Schalter — `tools/design` und `tools/alltag` lesen
+  sie. Sie stehen weiter im Terminalfenster der Bilder 04/05.
+* Hinter `cpu n/v` steht die Fensterzahl aus `WM_LIST` (Abschnitt 13.2),
+  damit sich die zwei Abnahmefotos an einer sinnvollen Groesse
+  unterscheiden.
