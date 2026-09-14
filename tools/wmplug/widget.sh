@@ -353,10 +353,27 @@ if grep -qaE '^pluguhr: text [0-9][0-9]:[0-9][0-9]' "$TMPD/an.txt.clean"; then
 else
     ok "das Widget schickt keine Uhrzeit mehr (nur Last), die Uhr bleibt der Leiste"
 fi
-if grep -qaE '^pluguhr: text cpu [0-9]+%' "$TMPD/an.txt.clean"; then
-    ok "der Text hat die Form 'cpu NN%' ($(grep -a '^pluguhr: text ' "$TMPD/an.txt.clean" | tail -1))"
+# DIE FORM DES TEXTES, UND SIE HAT SEIT DER NACHMESSUNG ZWEI FAELLE.
+# `cpu NN%`, wenn es einen Leerlaufzaehler gibt -- und `cpu n/v`, wenn
+# nicht (gemessen: `pluguhr: cpu dt=103 di=0`, auf diesem Weg kommt
+# `K_IDLE` nie dran). Eine erfundene 100 waere die bequemere Zeile
+# gewesen. Dahinter steht die Zahl der sichtbaren Fenster aus WM_LIST,
+# damit im Feld eine Groesse steht, die sich bewegt.
+if grep -qaE '^pluguhr: text cpu ([0-9]+%|n/v) fen [0-9]+' "$TMPD/an.txt.clean"; then
+    ok "der Text hat die Form 'cpu NN%|n/v fen N' ($(grep -a '^pluguhr: text ' "$TMPD/an.txt.clean" | tail -1))"
 else
-    bad "der Widgettext hat nicht die Form 'cpu NN%'"
+    bad "der Widgettext hat nicht die Form 'cpu NN%|n/v fen N'"
+fi
+# UND DIE FENSTERZAHL IST GEMESSEN UND NICHT GESETZT: sie muss zu dem
+# passen, was der Kern in diesem Lauf an Fenstern fuehrt. Verglichen
+# wird mit der Zahl der `wm: create`-Zeilen, die es mindestens sein
+# muessen -- eine feste Zahl waere nach dem naechsten Fenster falsch.
+fenz=$(grep -aoE '^pluguhr: text cpu [^ ]+ fen [0-9]+' "$TMPD/an.txt.clean" \
+    | tail -1 | grep -oE '[0-9]+$')
+if [ -n "${fenz:-}" ] && [ "$fenz" -gt 0 ] 2>/dev/null; then
+    ok "das Widget zaehlt $fenz sichtbare Fenster (WM_LIST, Recht R_EV_WIN)"
+else
+    bad "die Fensterzahl im Widgettext ist '$fenz' -- das zaehlt niemand"
 fi
 
 echo "== 6c. der Abstand zwischen Widgetfeld und Uhr, bei 640x480 =="
