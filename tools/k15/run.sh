@@ -1247,8 +1247,20 @@ for name in sorted(os.listdir('assets/apps')):
 print(n)
 " "$PROGS")
 num "er findet so viele Programme, wie .osp-Buendel mit einem Programm dieser Platte im Baum liegen" "$na" eq "$soll"
-has "$TMPD/start.txt" "launcher: treffer i=0 name=[File Explorer] exec=[/apps/explorer.osp/start]" \
-    "und das Buendel fuehrt den Dateimanager mit Name UND Befehl"
+# RUNDE ROTABSCHNITTE: OHNE DIE PLATZNUMMER.
+# Hier stand `i=0`. Diese Null war keine Zusage dieses Abschnitts,
+# sondern eine Folge der alphabetischen Reihenfolge: solange der
+# Dateimanager "Datei-Explorer" hiess, stand er vor "Editor". Seit
+# c101990 heisst er "File Explorer" und steht damit HINTER "Editor" --
+# gemessen `i=1`. Geprueft wird, was die Zusage sagt: dass das Buendel
+# den Dateimanager mit NAME UND BEFEHL fuehrt. Auf welchem Platz er in
+# einer alphabetischen Liste landet, ist Sache des Alphabets.
+if grep -qa "launcher: treffer i=[0-9]* name=\[File Explorer\] exec=\[/apps/explorer.osp/start\]" "$TMPD/start.txt"; then
+    ok "und das Buendel fuehrt den Dateimanager mit Name UND Befehl ($(grep -ao 'launcher: treffer i=[0-9]* name=\[File Explorer\][^ ]* exec=\[[^]]*\]' "$TMPD/start.txt" | head -1))"
+else
+    bad "das Buendel fuehrt den Dateimanager nicht mit Name UND Befehl"
+    grep -a 'launcher: treffer' "$TMPD/start.txt" | sed 's/^/        /' | head -6
+fi
 # EIN PROGRAMM IST EIN VERZEICHNIS, und das steht nicht im Quelltext,
 # sondern auf der Platte. Was ausgefuehrt wird, ist `start` IM Buendel --
 # und `start` ist derselbe Inode wie die Datei unter `/bin`, kein zweites
