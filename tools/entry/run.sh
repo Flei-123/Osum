@@ -122,7 +122,18 @@ python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
     && ok "Verzeichnisbaum gebaut" || bad "tools/k15/tree.py fehlgeschlagen"
 
 printf '# taskbar.conf\nedge=bottom\nheight=40\nwidth=100\nautohide=0\nontop=1\n' > "$TMPD/tb.conf"
-ARGS=(build "$TMPD/disk.img" 16384 /lib/
+# RUNDE BAUFEHLER (14.09.2026): 16384 -> 32768 Bloecke (8 -> 16 MiB).
+# Gleiche Ursache wie in K15, NETVIEW und GLYPHE: Runde GRUNDLINIE hat
+# die Laeufer -- zu Recht -- auf `--profile=app` umgestellt, weil die
+# Programme mit Oberflaeche seit Runde 31 `profile app` in ihrer ersten
+# Zeile tragen. Das Profil `app` bringt Firns volle Laufzeit mit, und
+# sechs der dreizehn Programme dieses Abbilds sind solche. /bin/explorer
+# allein ist damit 1623040 statt 907360 Oktette; die dreizehn zusammen
+# brauchen rund 16285 Bloecke, und 16384 sind es mit Schriften,
+# Buendeln, Baum, Bitmap und Inode-Tafel nicht mehr. `mkfs.py` sagte
+# "the disk is full", und ohne Abbild startet kein QEMU.
+# EIN BLOCK IST 512 OKTETTE (tools/osum/mkfs.py, `BS = 512`).
+ARGS=(build "$TMPD/disk.img" 32768 /lib/
     "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/$p.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
