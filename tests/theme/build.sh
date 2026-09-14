@@ -100,7 +100,16 @@ EOF
 
 # 8192 blocks (4 MiB) held these programs with 4 per cent to spare
 # after round LOOK. That is not spare room, that is a countdown.
-ARGS=(build "$OUT/disk.img" 16384 /lib/
+#
+# RUNDE BAUFEHLER (14.09.2026): 16384 -> 32768 Bloecke (8 -> 16 MiB).
+# Derselbe abgelaufene Countdown wie in tools/look/shot.sh. Sechs der
+# dreizehn Programme tragen `profile app`, und seit Runde GRUNDLINIE
+# werden sie auch so gebaut -- /bin/explorer ist damit 1623040 statt
+# 907360 Oktette. Im Protokoll dieses Laeufers steht "mkfs: the disk is
+# full", und der Abschnitt meldet nur noch
+# "tests/theme/build.sh fehlgeschlagen".
+# EIN BLOCK IST 512 OKTETTE (tools/osum/mkfs.py, `BS = 512`).
+ARGS=(build "$OUT/disk.img" 32768 /lib/
       "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
       /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$OUT/$p.elf"); done
