@@ -332,6 +332,113 @@ fn tafel_da() -> bool {
     return true
 }
 
+// ================================================= RUNDE FIX-R3-1
+// WOHIN DIE AUSGABE GEHT, WENN NIEMAND IN EINEM TERMINAL SITZT.
+//
+// GEMESSENER BEFUND: `wigapp=/bin/wmplug,probe,uhr` wird vom
+// SCHREIBTISCH gestartet, und der gibt seinen Kindern fuer fd 1 ein
+// Protokoll-Terminal, dessen Ausgabe NUR auf die serielle Leitung geht
+// (kernel/kgui.fi, `protokoll_binden`, SINK_SERIAL -- damit die
+// Messzeilen der Leiste nicht im Terminalfenster des Menschen landen).
+// Fuer die Leiste ist das richtig; fuer eine VERWALTUNG ist es falsch:
+// `wmplug list` schrieb seine Tabelle damit an eine Stelle, die auf
+// keinem Bildschirmfoto steht, und das Abnahmebild zeigte irgendeine
+// Zeile eines anderen Programms.
+//
+// Das Wort `sicht` haengt fd 1 und fd 2 an /dev/console -- dasselbe
+// Terminal, in das ein `wmplug list` aus der Shell schreiben wuerde.
+// Von dort geht jedes Oktett IN DAS FENSTER UND WEITER AUF DIE LEITUNG
+// (tty SINK_WINDOW), die Zeilen bleiben also auch fuer die Skripte
+// lesbar. Ohne das Wort aendert sich gar nichts -- wer `wmplug` in
+// seiner Shell aufruft, hat sein Terminal ohnehin schon.
+// 0 = niemand hat `sicht` verlangt, 1 = fd 1 haengt an /dev/console,
+// 2 = verlangt, aber es gibt kein /dev/console -- dann geht die Anzeige
+// ueber KINDPROZESSE (siehe `kind_zeigen`).
+static mut g_sicht: u64 = 0
+
+fn sicht_binden(args: u64) {
+    var w_si: [u8; 6] = "sicht\0"
+    var pfad: [u8; 14] = "/dev/console\0\0"
+    var s_ok: [u8; 31] = "wmplug: sicht /dev/console fd=\0"
+    var s_no: [u8; 34] = "wmplug: sicht /dev/console geht n\0"
+    let n: u64 = ulib.arg_count(args)
+    var i: u64 = 1
+    var will: u64 = 0
+    while i < n {
+        if ulib.streq(ulib.arg_at(args, i), (&w_si[0 as usize]) as u64) {
+            will = 1
+        }
+        i = i + 1
+    }
+    if will == 0 {
+        return
+    }
+    // 1 = O_WRONLY (kernel/sys.fi). Der Knoten ist ein Zeichengeraet,
+    // es wird nichts angelegt und nichts abgeschnitten.
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&pfad[0 as usize]) as u64, 1, 0)
+    if is_err(fd) {
+        // KEIN ABBRUCH. Eine Maschine ohne /dev/console ist kein
+        // Grund, die Verwaltung nicht zu machen -- dann steht die
+        // Ausgabe eben nur auf der Leitung, wie vorher. Der Fehlercode
+        // steht dabei, sonst sucht man ihn im Fenster.
+        ulib.say((&s_no[0 as usize]) as u64)
+        ulib.sayn(fd)
+        ulib.nl()
+        g_sicht = 2
+        return
+    }
+    let d1: u64 = ulib.sys(ulib.SYS_DUP2, fd, 1, 0)
+    ulib.sys(ulib.SYS_DUP2, fd, 2, 0)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    // Diese Zeile geht schon durch den neuen Weg -- sie ist damit
+    // selbst die Probe: steht sie im Fenster, ist fd 1 umgehaengt.
+    ulib.say((&s_ok[0 as usize]) as u64)
+    ulib.sayn(fd)
+    ulib.sayn(d1)
+    ulib.nl()
+    g_sicht = 1
+}
+
+// ================================================= RUNDE FIX-R3-1
+// DER ZWEITE WEG INS FENSTER: EIN KIND.
+//
+// GEMESSEN: der Schreibtischlauf der Abnahme faehrt ohne `vfs`, es gibt
+// also KEIN /dev (kernel/kmain.fi, `k14_setup` haengt devfs nur bei
+// eingeschaltetem VFS ein) -- `open("/dev/console")` gibt -2. Der
+// Kern hat aber eine zweite, aeltere Regel: WAS EIN
+// SCHREIBTISCHPROGRAMM STARTET, BEKOMMT DIE KONSOLE ZURUECK
+// (kernel/file.fi, `inherit_std`: ist fd 1 des Vaters das
+// Protokoll-Terminal, erbt das Kind CON_OUT/CON_ERR). Genau davon lebt
+// die Zeile `pluguhr: text ...` im Terminalfenster.
+//
+// Also zeigt die Verwaltung ihre Tabelle als KIND ihrer selbst:
+// `/bin/wmplug list` bzw. `/bin/wmplug info <name>`, gewartet wird auf
+// den Ausgang. Kein neuer Zeichenweg, kein neuer Systemaufruf -- nur
+// ein Prozess mehr, und zwar genau dann, wenn `sicht` verlangt war und
+// /dev/console fehlt. DAS IST EINE ABKUERZUNG und steht so in
+// docs/RUNDE-WMPLUGIN.md: der gerade Weg waere ein Kernel, der
+// `wigapp=`-Programmen die Konsole laesst.
+fn kind_zeigen(w1: u64, w2: u64) {
+    var p_wm: [u8; 13] = "/bin/wmplug\0\0"
+    var a_wm: [u8; 7] = "wmplug\0"
+    var argv: [u64; 4] = [0 as u64; 4]
+    argv[(0) as usize] = (&a_wm[0 as usize]) as u64
+    argv[(1) as usize] = w1
+    var argc: u64 = 2
+    if w2 != 0 {
+        argv[(2) as usize] = w2
+        argc = 3
+    }
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&p_wm[0 as usize]) as u64,
+        (&argv[0 as usize]) as u64, argc)
+    if is_err(pid) {
+        return
+    }
+    // GEWARTET WIRD IN RING 3 UND AUF EIN KIND -- nicht auf den Kern.
+    // Ohne das Warten stuenden die zwei Tabellen ineinander.
+    ulib.wait_code(pid)
+}
+
 fn u_start(args: u64) -> u64 {
     var w_list: [u8; 5] = "list\0"
     var w_en: [u8; 7] = "enable\0"
@@ -339,6 +446,7 @@ fn u_start(args: u64) -> u64 {
     var w_info: [u8; 5] = "info\0"
     var w_pro: [u8; 6] = "probe\0"
 
+    sicht_binden(args)
     if !kern_da() {
         return 1
     }
@@ -413,10 +521,10 @@ fn probe(name: u64, args: u64, ab: u64) -> u64 {
     let _w1: u64 = ulib.sleep_ms(5000)
     ulib.say((&s_v[0 as usize]) as u64)
     ulib.nl()
-    liste()
+    zeigen_list()
     ulib.say((&s_i[0 as usize]) as u64)
     ulib.nl()
-    zeig_info(name)
+    zeigen_info(name)
     ulib.say((&s_d[0 as usize]) as u64)
     ulib.nl()
     disable(name)
@@ -427,8 +535,29 @@ fn probe(name: u64, args: u64, ab: u64) -> u64 {
     let _w2: u64 = ulib.sleep_ms(1500)
     ulib.say((&s_n[0 as usize]) as u64)
     ulib.nl()
-    liste()
+    zeigen_list()
     return 0
+}
+
+// Die zwei Anzeigen der Probe, je nachdem, wohin die Ausgabe darf:
+// selbst schreiben (Vorgabe, und was eine Shell sieht) oder ein Kind
+// schreiben lassen (`sicht` ohne /dev/console, siehe `kind_zeigen`).
+fn zeigen_list() {
+    var w_li: [u8; 5] = "list\0"
+    if g_sicht == 2 {
+        kind_zeigen((&w_li[0 as usize]) as u64, 0)
+        return
+    }
+    liste()
+}
+
+fn zeigen_info(name: u64) {
+    var w_in: [u8; 5] = "info\0"
+    if g_sicht == 2 {
+        kind_zeigen((&w_in[0 as usize]) as u64, name)
+        return
+    }
+    zeig_info(name)
 }
 
 fn hilfe() -> u64 {
