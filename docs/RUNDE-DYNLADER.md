@@ -331,7 +331,212 @@ diese Zeile jetzt weg, bevor verglichen wird.
 
 ---
 
-## 7. Offene Punkte
+## 7. Was das im Kern kostet -- und was es normalen Programmen kostet
+
+Justins Zusatzvorgabe vom 14.09.2026, Punkt 2. Alle Zahlen gemessen,
+keine geschaetzt.
+
+### 7.1 Quelltext
+
+```
+kernel/elf.fi     +826  -37 Zeilen      (die EINZIGE Kerndatei der Runde)
+davon Kommentar    347
+davon leer          21
+echter CODE        458 Zeilen
+```
+
+`kernel/sys.fi` ist **unberuehrt** -- `git diff` darauf ist 0 Zeilen
+lang. Das ist die praezise Form der Aussage aus Abschnitt 5.4: diese
+Runde hat **keinen einzigen Systemaufruf** hinzugefuegt, geaendert oder
+umgehaengt.
+
+### 7.2 Abbildgroesse
+
+Zwei Kernabbilder aus demselben Baum, `--stufe 1`, einziger Unterschied
+ist `kernel/elf.fi`:
+
+| | Oktette | MiB |
+|---|---|---|
+| vorher (elf.fi vom Abzweigpunkt) | 12 688 320 | 12,10 |
+| nachher (dieser Zweig) | 12 737 684 | 12,15 |
+| **Differenz** | **+49 364** | **+48,2 KiB, +0,389 %** |
+
+Zum Vergleich, und das ist der eigentliche Punkt der Vorgabe: die beiden
+Pakete, die dadurch NICHT im Grundabbild liegen muessen, sind zusammen
+**856 338 Oktette (836 KiB)** -- **17,3-mal so viel wie der Kernanteil**.
+
+### 7.3 Was ein normales Osum-Programm davon merkt
+
+Ein Programm ohne `PT_INTERP` (also jedes der 135 dieses Userlands) geht
+ab `build()` denselben Weg wie vorher. Was dazukommt, ist genau
+zweierlei:
+
+1. **`read_header` laeuft zweimal statt einmal.** `build()` muss den
+   Kopf lesen, BEVOR es entscheidet, auf welche Basis das Bild kommt;
+   `load_at` liest ihn danach noch einmal. Fuer ein Osum-Programm mit
+   drei Segmenten sind das `64 + 3*56 = 232` Oktette, die ein zweites
+   Mal von der Platte kommen -- gegen die 100-200 KiB, die dasselbe
+   Programm unmittelbar danach laedt, ist das der Faktor 1/650. Das ist
+   der einzige echte Mehraufwand, und er ist hier genannt, statt ihn
+   unter "vernachlaessigbar" zu verstecken. Er liesse sich wegbekommen,
+   indem `load_at` den schon gelesenen Kopf weiterbenutzt; das waere
+   eine Aenderung an der Schnittstelle von `load`, die drei andere
+   Aufrufer hat, und gehoert deshalb nicht in diese Runde.
+
+2. **`read_interp` laeuft einmal.** Es liest NICHTS von der Platte, wenn
+   kein `PT_INTERP` da ist: es geht die schon im Puffer stehenden
+   Programmkoepfe durch (bei Osum-Programmen drei Stueck) und gibt
+   `R_KEINER` zurueck. Das sind drei Vergleiche.
+
+**Kein Nachteil entsteht durch neue Systemaufrufe, weil es keine gibt.**
+Die Zusage "die statisch gebundenen Programme laufen unveraendert
+weiter" ist in `tools/dynlader/run.sh` Abschnitt 8 als eigene Messung
+gefahren, und Abschnitt 9(e) misst zusaetzlich, dass ein System OHNE das
+Paket `linux-abi` nicht kaputt ist, sondern nur keine dynamischen
+Programme starten kann.
+
+---
+
+## 8. Modularitaet: was ist Paket, was ist Kern
+
+Justins Zusatzvorgabe, Punkt 1. Hausregel 3 aus
+`/root/osum-roadmap/FREMDSOFTWARE.md`: *"Kein Ballast im Standardabbild.
+Alles Optionale kommt aus dem Store, nicht ins Grundabbild."*
+
+### 8.1 Die Trennung
+
+| Teil | wo | abschaltbar? |
+|---|---|---|
+| `PT_INTERP`-Behandlung, ET_DYN, auxv-Startstapel | Kern (`kernel/elf.fi`) | nein -- aber kostet ohne dynamisches Bild nichts (7.3) |
+| `ld-musl-x86_64.so.1` (= `libc.so`) | **Paket `linux-abi`** | **ja** |
+| busybox, Lua, SQLite, QuickJS ... | **Paket je Programm** | **ja** |
+
+Die Kernseite laesst sich nicht paketieren -- ein Lader ist kein
+Ring-3-Programm. Sie ist aber **inert**: ohne ein Bild mit `PT_INTERP`
+wird kein einziger der neuen Pfade betreten.
+
+### 8.2 Die Pakete, wirklich gebaut
+
+`tools/dynlader/paket/*.rezept`, gebaut mit dem vorhandenen
+`pkg/opk.py` -- kein neues Format, kein neues Werkzeug:
+
+```
+linux-abi    1.2.3      703302 Oktette  250ac59ee5f6d555705ad588...
+busybox      1.36.1     153036 Oktette  a855dd4e8f3c0cea095e4d88...
+```
+
+`busybox` traegt `braucht=linux-abi`. Nach der Installation beider:
+
+```
+Generation 2, 2 Paket(e)
+  busybox      1.36.1   a855dd4e8f3c  BusyBox
+               braucht linux-abi
+  linux-abi    1.2.3    250ac59ee5f6  Linux-ABI (musl)
+
+opk pruefen: 2 Eintraege, 0 kaputt, 0 verwaist, 0 fehlend
+```
+
+Damit haengen sie an allem, was die Runden INSTALL und UPDATE gebaut
+haben: Ed25519-Signatur beim Installieren, Generationen, `opk zurueck`,
+Store, Deduplizierung ueber harte Verweise.
+
+### 8.3 Der Punkt, an dem es haette scheitern koennen
+
+`PT_INTERP` nennt einen **absoluten** Pfad (`/lib/ld-musl-x86_64.so.1`),
+ein Paket legt seine Dateien aber unter `/apps/<name>.prog/` ab. Ob der
+Kern den Interpreter ueber einen symbolischen Verweis dorthin findet,
+ist keine Geschmacksfrage, sondern entscheidet, ob "kommt aus dem Store"
+ueberhaupt moeglich ist.
+
+Gemessen (`run.sh` Abschnitt 9c), OFS v3, Datei unter `/apps`,
+`/lib/ld-musl-x86_64.so.1` als 44-Oktett-Verweis darauf:
+
+```
+/lib/ld-musl-x86_64.so.1 44
+/apps/linux-abi.prog/lib/ld-musl-x86_64.so.1 702960
+
+elf: interp /lib/ld-musl-x86_64.so.1
+hallo dynamisch
+```
+
+Und `busybox sha256sum` liefert in dieser Form dieselbe Summe wie der
+Wirt. Der Weg ueber das Paket ist damit nicht geplant, sondern gefahren.
+
+### 8.4 Ohne das Paket
+
+| Fall | Ergebnis |
+|---|---|
+| dynamisches Programm, Paket fehlt | `elf: refused, reason 26 interpreter missing`, Maschine laeuft weiter |
+| Osum-Programm, Paket fehlt | laeuft normal |
+
+Ein System ohne `linux-abi` ist also kein beschaedigtes System -- es
+kann nur keine Linux-Binaries starten. Genau das ist der Sinn eines
+optionalen Pakets.
+
+---
+
+## 9. Welcher Fremdcode landet auf dem System
+
+Justins Zusatzvorgabe, Punkt 3, und seine Frage woertlich: ist das
+"originaler Fremdcode" oder nur Uebersetzung? `tools/dynlader/herkunft.sh`
+rechnet jede Zahl dieses Abschnitts nach.
+
+**Die ehrliche Antwort ist: beides, und es laesst sich sauber trennen.**
+
+### 9.1 Was von uns ist
+
+`kernel/elf.fi`, 458 Zeilen echter Code (7.1). Eigener Firn-Code, keine
+Zeile uebernommen. Insbesondere ist **nichts nachgebaut**, was es fertig
+gibt: kein abgeschriebener Relokationscode, keine nachgebaute
+Symbolsuche, kein eigenes `ld.so`. Der fremde Lader wird **benutzt**.
+Regel 4 der Hausregeln ("Kein Fremdcode im Kern") gilt unveraendert.
+
+### 9.2 Was fremd ist
+
+| | musl | BusyBox |
+|---|---|---|
+| **Paket** | `linux-abi` | `busybox` |
+| **Ziel** | `/lib/ld-musl-x86_64.so.1` | `/bin/busybox` |
+| **Ring** | **3** | **3** |
+| **Fassung** | 1.2.3-1 (Debian `musl:amd64`) | 1.36.1 |
+| **Lizenz** | **MIT**, (c) 2005-2020 Rich Felker u. a. | **GPL-2.0-only** |
+| **Herkunft** | https://musl.libc.org/ | https://busybox.net/ |
+| **Form** | **fertige Binaerdatei, unveraendert** | **Quelltext unveraendert, hier gebaut** |
+| **Groesse** | 702 960 Oktette | 152 752 Oktette |
+| **SHA-256** | `99261882506dab04...` | `169541fc3205f1bd...` |
+
+Der Unterschied zwischen den beiden Zeilen "Form" ist der Kern von
+Justins Frage:
+
+* **musl ist eine FERTIGE FREMDE BINAERDATEI.** Dieselben 702 960
+  Oktette, die auf dem Wirt liegen -- nicht uebersetzt, nicht neu
+  gebaut, nicht angepasst. Das ist Absicht und der ganze Sinn der
+  Runde: ein selbst gebauter Interpreter waere kein Nachweis, dass
+  Linux-Programme laufen, sondern nur einer, dass unser Bau laeuft.
+* **BusyBox ist fremder QUELLTEXT, hier uebersetzt.** Das Archiv ist
+  unveraendert (SHA-256 gegen `/root/fremdquellen/SHA256SUMS.txt`
+  geprueft: `b8cc24c9574d809e...`), gebaut mit `musl-gcc` und
+  `CONFIG_STATIC` aus. Das Binaergebilde ist unseres, der Quelltext ist
+  fremd.
+
+Beides laeuft in **Ring 3**. Im Kern laeuft nichts Fremdes.
+
+### 9.3 Lizenzfolgen
+
+* musl ist **MIT** -- vertraeglich mit beidem, was dieses Repo fuehrt
+  (GPL-2.0-only fuer den Kern, MIT fuer die Ring-3-Bibliotheken,
+  `LICENSE-UEBERSICHT.md`). Es wird weder eingebunden noch veraendert,
+  sondern als eigene Datei ausgeliefert.
+* BusyBox ist **GPL-2.0-only** -- dieselbe Lizenz wie der Kern. Als
+  eigenstaendiges Programm in einem eigenen Paket entsteht kein
+  abgeleitetes Werk am Kern.
+* Beide Pakete nennen Herkunft, Fassung und Lizenz in ihrer
+  `INFO`/`info=`-Zeile, also dort, wo sie im System sichtbar sind.
+
+---
+
+## 10. Offene Punkte
+
 
 * **Eine geteilte Seite bekommt die Rechte des ERSTEN Segments.** Bei
   musl trifft das genau die Naht zwischen `rodata` und `data`; die

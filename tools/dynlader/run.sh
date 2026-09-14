@@ -447,6 +447,120 @@ else
     weg "kein /bin/echo im Abbild -- der statische Fall wurde hier nicht gemessen"
 fi
 
+# ============================================================ 9.
+# DIE MODULARITAET. Justins Zusatzvorgabe vom 14.09.2026: der
+# Interpreter und die Fremdbibliotheken gehoeren NICHT ins Grundabbild,
+# sondern als eigenes Paket. Hier wird beides gemessen -- dass das
+# Grundabbild sie nicht enthaelt, UND dass es ohne sie sauber scheitert
+# statt zu haengen.
+echo "== 9. Modularitaet: abschaltbar und separat ausgeliefert =="
+
+# a) Das Standardabbild nennt den Interpreter NICHT.
+if grep -q 'ld-musl' tools/usbimg/build.sh 2>/dev/null; then
+    bad "tools/usbimg/build.sh nennt ld-musl -- der Interpreter waere im Grundabbild"
+else
+    ok "das Standardabbild (tools/usbimg/build.sh) nennt weder ld-musl noch busybox"
+fi
+
+# b) Die Pakete lassen sich WIRKLICH bauen -- nicht nur beschreiben.
+OPKPY=${OPKPY:-/root/orientos-install/pkg/opk.py}
+if [ -r "$OPKPY" ]; then
+    mkdir -p "$TMPD/opk"
+    LDR=$(readlink -f "$LDSO")
+    sed "s|@LDSO@|$LDR|" tools/dynlader/paket/linux-abi.rezept \
+        > "$TMPD/opk/linux-abi.rezept" 2>/dev/null \
+        || cp tools/dynlader/paket/linux-abi.rezept "$TMPD/opk/linux-abi.rezept"
+    if python3 "$OPKPY" bauen "$TMPD/opk/linux-abi.rezept" \
+            -o "$TMPD/opk/linux-abi.opk" > "$TMPD/opk/bau1.txt" 2>&1; then
+        ok "das Paket linux-abi baut ($(stat -c%s "$TMPD/opk/linux-abi.opk") Oktette)"
+    else
+        bad "das Paket linux-abi baut nicht"
+        sed 's/^/        /' "$TMPD/opk/bau1.txt" | head -4
+    fi
+    # Und es laesst sich installieren, mit Generation und Pruefsumme.
+    rm -rf "$TMPD/wurzel"; mkdir -p "$TMPD/wurzel"
+    if python3 "$OPKPY" installieren --wurzel "$TMPD/wurzel" \
+            "$TMPD/opk/linux-abi.opk" > "$TMPD/opk/inst.txt" 2>&1; then
+        ok "linux-abi laesst sich installieren (Generation, Store, Pruefsumme)"
+        python3 "$OPKPY" pruefen --wurzel "$TMPD/wurzel" 2>&1 \
+            | grep -q '0 kaputt' \
+            && ok "und opk pruefen findet nichts Kaputtes" \
+            || bad "opk pruefen beanstandet den Baum"
+    else
+        bad "linux-abi laesst sich nicht installieren"
+        sed 's/^/        /' "$TMPD/opk/inst.txt" | head -4
+    fi
+else
+    weg "kein opk.py ($OPKPY) -- der Paketbau wurde nicht gemessen"
+fi
+
+# c) DER ENTSCHEIDENDE LAUF: das Abbild in der Form, die eine
+#    OPK-INSTALLATION hinterlaesst -- die Datei unter /apps, und
+#    /lib/ld-musl-x86_64.so.1 nur ein symbolischer VERWEIS darauf.
+#    Ohne diese Zusage waere "es kommt aus dem Store" eine Behauptung:
+#    das PT_INTERP nennt einen ABSOLUTEN Pfad, und ob der ueber einen
+#    Verweis in ein Paketverzeichnis fuehren darf, entscheidet der Kern.
+APPLIB="/apps/linux-abi.prog/lib/ld-musl-x86_64.so.1"
+SPEC3="--v3 /lib/ /bin/ /etc/ /apps/ /apps/linux-abi.prog/ /apps/linux-abi.prog/lib/"
+SPEC3="$SPEC3 $APPLIB=$LDREAL /lib/ld-musl-x86_64.so.1->$APPLIB"
+for p in $PROGS; do SPEC3="$SPEC3 /bin/$p=$TMPD/$p.elf"; done
+SPEC3="$SPEC3 /bin/hello_dyn=$TMPD/hello_dyn /etc/pruef.txt=$TMPD/pruef.txt"
+[ "$BB_DA" = 1 ] && SPEC3="$SPEC3 /bin/busybox=$BBDYN"
+if python3 tools/osum/mkfs.py build "$TMPD/paket.img" $BLOCKS $SPEC3 \
+        > "$TMPD/mkfs3.txt" 2>&1; then
+    ok "Abbild in Paketform gebaut (Datei unter /apps, /lib/... als Verweis)"
+    cp -f "$TMPD/paket.img" "$TMPD/live.img"
+    timeout "${TMO:-240}" $QEMU_X86 "${KVM[@]}" -kernel "$TMPD/k.mb" -m 512 \
+        -append "osum $QUIET script=hello_dyn;exit" \
+        -serial "file:$TMPD/p1.txt" -display none -no-reboot \
+        -drive "file=$TMPD/live.img,format=raw,if=ide,index=0" \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
+    sed '/^mb: flags=/d' "$TMPD/p1.txt" > "$TMPD/p1.rein"
+    grep -q 'hallo dynamisch' "$TMPD/p1.rein" \
+        && ok "ein dynamisches Programm laeuft, wenn der Lader AUS DEM PAKET kommt" \
+        || bad "ueber den Paketverweis laeuft es nicht"
+else
+    bad "das Abbild in Paketform laesst sich nicht bauen"
+    sed 's/^/        /' "$TMPD/mkfs3.txt" | head -5
+fi
+
+# d) UND OHNE DAS PAKET: sauberer Fehler, kein Haenger. Das ist die
+#    Gegenprobe zu (c) -- ein System ohne `linux-abi` ist kein kaputtes
+#    System, es kann nur keine dynamischen Programme starten.
+SPEC4="/bin/ /etc/"
+for p in $PROGS; do SPEC4="$SPEC4 /bin/$p=$TMPD/$p.elf"; done
+SPEC4="$SPEC4 /bin/hello_dyn=$TMPD/hello_dyn /etc/pruef.txt=$TMPD/pruef.txt"
+python3 tools/osum/mkfs.py build "$TMPD/ohne.img" $BLOCKS $SPEC4 \
+    > "$TMPD/mkfs4.txt" 2>&1
+cp -f "$TMPD/ohne.img" "$TMPD/live.img"
+timeout "${TMO:-240}" $QEMU_X86 "${KVM[@]}" -kernel "$TMPD/k.mb" -m 512 \
+    -append "osum $QUIET script=hello_dyn;exit" \
+    -serial "file:$TMPD/p2.txt" -display none -no-reboot \
+    -drive "file=$TMPD/live.img,format=raw,if=ide,index=0" \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
+prc=$?
+sed '/^mb: flags=/d' "$TMPD/p2.txt" > "$TMPD/p2.rein"
+if [ $prc -eq 124 ]; then
+    bad "ohne das Paket HAENGT die Maschine"
+elif grep -qiE 'interpreter missing|reason 26' "$TMPD/p2.rein"; then
+    ok "ohne das Paket: Grund 26, sauber abgelehnt, die Maschine laeuft"
+else
+    bad "ohne das Paket gibt es keine erkennbare Ablehnung"
+fi
+
+# e) DIE STATISCHEN PROGRAMME BRAUCHEN DAS PAKET NICHT. Dasselbe Abbild
+#    OHNE linux-abi, und ein gewoehnliches Osum-Programm laeuft darin.
+cp -f "$TMPD/ohne.img" "$TMPD/live.img"
+timeout "${TMO:-240}" $QEMU_X86 "${KVM[@]}" -kernel "$TMPD/k.mb" -m 512 \
+    -append "osum $QUIET script=echo ohne-paket-lebt;exit" \
+    -serial "file:$TMPD/p3.txt" -display none -no-reboot \
+    -drive "file=$TMPD/live.img,format=raw,if=ide,index=0" \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
+sed '/^mb: flags=/d' "$TMPD/p3.txt" > "$TMPD/p3.rein"
+grep -q 'ohne-paket-lebt' "$TMPD/p3.rein" \
+    && ok "ein System OHNE das Paket ist nicht kaputt -- Osum-Programme laufen" \
+    || bad "ohne das Paket laufen auch die eigenen Programme nicht"
+
 echo
 echo "DYNLADER: $pass bestanden, $fail gescheitert, $skip uebersprungen"
 echo "  Arbeitsverzeichnis: $TMPD"
