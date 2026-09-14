@@ -33,6 +33,18 @@ export { u_start }
 const EINGABE: u64 = 1048576      // 1 MiB rohe .264-Daten
 const SYS_CLOCK_GETTIME: u64 = 228
 const CLOCK_MONOTONIC: u64 = 1
+// Die Zaehler des Kerns (kernel/codecstat.fi, Bereich CODEC_OFF).
+const SYS_OSUM_CODEC: u64 = 1970
+const CDC_FRAME: u64 = 0
+const CDC_REJECT: u64 = 1
+const CDC_SEEN: u64 = 2
+const CDC_GET: u64 = 3
+const CDC_RESET: u64 = 4
+const CDG_FRAMES: u64 = 0
+const CDG_REJECTS: u64 = 1
+const CDG_LASTERR: u64 = 2
+const CDG_W: u64 = 3
+const CDG_H: u64 = 4
 
 static mut daten: [u8; 1048576] = [0 as u8; 1048576]
 static mut summe: [u8; 32] = [0 as u8; 32]
@@ -90,6 +102,7 @@ fn u_start(args: u64) -> u64 {
     }
     ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
 
+    ulib.sys(SYS_OSUM_CODEC, CDC_RESET, 0, 0)
     let t0: u64 = jetzt_ms()
     h264.h264_open((&daten[(0) as usize]) as u64, n)
     var i: u64 = 0
@@ -128,9 +141,17 @@ fn u_start(args: u64) -> u64 {
         ulib.put((&s_gl[(0) as usize]) as u64, 3)
         ulib.say((&hexbuf[(0) as usize]) as u64)
         ulib.nl()
+        ulib.sys(SYS_OSUM_CODEC, CDC_FRAME, 0, 0)
         i = i + 1
     }
     let t1: u64 = jetzt_ms()
+    // Dem Kern sagen, was hier lief -- das ist der EINZIGE Zustand,
+    // den dieser Lauf ueberdauert (kdata, Bereich CODEC_OFF).
+    ulib.sys4(SYS_OSUM_CODEC, CDC_SEEN, h264.h264_width(),
+              h264.h264_height(), h264.h264_profile())
+    if h264.h264_err() != 0 {
+        ulib.sys(SYS_OSUM_CODEC, CDC_REJECT, h264.h264_err(), 0)
+    }
 
     ulib.put((&s_prof[(0) as usize]) as u64, 16)
     ulib.sayn(h264.h264_profile())
@@ -158,6 +179,25 @@ fn u_start(args: u64) -> u64 {
     if t1 > t0 { fps = h264.h264_frames() * 100000 / (t1 - t0) }
     ulib.put((&s_fps[(0) as usize]) as u64, 12)
     ulib.sayn(fps)
+    ulib.nl()
+    // Die Gegenprobe: dieselben Zahlen aus dem KERN zurueckgelesen.
+    // Stimmen sie mit denen hier ueberein, ist der kdata-Bereich
+    // wirklich beschrieben worden und nicht nur zugeteilt.
+    var s_kf: [u8; 17] = "h264: kframes = \0"
+    var s_kw: [u8; 12] = "h264: kw = \0"
+    var s_kh: [u8; 12] = "h264: kh = \0"
+    var s_kr: [u8; 18] = "h264: krejects = \0"
+    ulib.put((&s_kf[(0) as usize]) as u64, 16)
+    ulib.sayn(ulib.sys(SYS_OSUM_CODEC, CDC_GET, CDG_FRAMES, 0))
+    ulib.nl()
+    ulib.put((&s_kw[(0) as usize]) as u64, 11)
+    ulib.sayn(ulib.sys(SYS_OSUM_CODEC, CDC_GET, CDG_W, 0))
+    ulib.nl()
+    ulib.put((&s_kh[(0) as usize]) as u64, 11)
+    ulib.sayn(ulib.sys(SYS_OSUM_CODEC, CDC_GET, CDG_H, 0))
+    ulib.nl()
+    ulib.put((&s_kr[(0) as usize]) as u64, 17)
+    ulib.sayn(ulib.sys(SYS_OSUM_CODEC, CDC_GET, CDG_REJECTS, 0))
     ulib.nl()
     if h264.h264_err() != 0 { return 2 }
     return 0

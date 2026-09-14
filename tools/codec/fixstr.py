@@ -7,7 +7,7 @@ eine Fehlerquelle ohne Erkenntniswert, also rechnet es hier jemand aus.
     python3 tools/codec/fixstr.py DATEI...
 """
 import re, sys
-pat=re.compile(r'(static mut (\w+): \[u8; )(\d+)(\] =\s*\n?\s*)"((?:[^"\\]|\\.)*)"')
+pat=re.compile(r'((?:static mut|var) (\w+): \[u8; )(\d+)(\] =\s*\n?\s*)"((?:[^"\\]|\\.)*)"')
 for p in sys.argv[1:]:
     s=open(p,encoding='utf-8').read()
     def fix(m):
