@@ -278,6 +278,7 @@ BEREICHE = [
     # oben entstanden sind.  Die Runde DESKTOP bekommt 0x54000; dazwischen
     # bleibt eine Seitengruppe frei.
     ("TILE",       "kstate.fi", "TILE_OFF",       "TILE_MAX"),
+    ("WMPLUG",     "kstate.fi", "WMP_OFF",        "WMP_MAX"),
     # RUNDE NETMON: die Zaehlung je Prozess und der Weiterleiter mit
     # NAT und DHCP-Server. Beide Bereiche sind beim Zusammenfuehren
     # gewandert (0x5A000/0x5D000 waren von OFS3, DISPLAY und SPEICHER

@@ -75,6 +75,7 @@ import ps2m
 import time // RUNDE ALLTAG: der Leerlaufzaehler der Sperre
 import arch.arch
 import tile
+import wmplug
 import cursor
 import vektor
 import audio
@@ -2474,6 +2475,15 @@ fn init(state: u64, w: u64, h: u64, nodirty: bool, nofocus: bool) -> bool {
     // Er ist erst einmal LEER und schaltet nichts um -- ohne das Wort
     // `tile` verhaelt sich der Fensterserver wie vorher.
     tile.init(state, 0, 0, w, h)
+    // RUNDE WMPLUGIN: die Plugintafel. Ohne das Wort `wmplug` (und mit
+    // `plugaus` erst recht) bleibt sie ZU -- dann weist `plug_call`
+    // jede Anmeldung mit E_UNSUPPORTED ab und dieser Fensterserver
+    // verhaelt sich Zeile fuer Zeile wie vor der Runde.
+    wmplug.init(state)
+    if !kstate.mode_on(state, kstate.M_WMPLUG)
+        || kstate.mode_on(state, kstate.M_PLUGAUS) {
+        wmplug.set_ready(state, false)
+    }
     damage_all(state)
     return true
 }
@@ -2681,6 +2691,11 @@ fn create(state: u64, owner: u64, x: i64, y: i64, w: u64, h: u64,
             if gs(state, S_TILE) != 0 {
                 tile_take(state, i)
             }
+            // RUNDE WMPLUGIN: ABLEGEN UND WEITERGEHEN. `notify` schreibt
+            // in hoechstens acht Ringe und kehrt zurueck -- hier wird
+            // auf kein Ring-3-Programm gewartet, auch nicht kurz.
+            wmplug.notify(state, wmplug.E_WIN_OPEN, wg(state, i, W_ID),
+                wg(state, i, W_LAYER), 0)
             return i
         }
         i = i + 1
@@ -2742,6 +2757,11 @@ fn destroy(state: u64, i: u64) -> bool {
     }
     tile_release(state, i)
     damage_win(state, i)
+    wmplug.notify(state, wmplug.E_WIN_CLOSE, wg(state, i, W_ID), 0, 0)
+    // Stirbt der Prozess EINES PLUGINS, faellt sein Fenster hier durch.
+    // Der Platz in der Plugintafel haengt aber am Prozess und nicht am
+    // Fenster -- aufgeraeumt wird er von `wmplug.sweep` und vom
+    // Prozessende in `sysgui.fi`.
     let z: u64 = wg(state, i, W_Z)
     // ADDENDUM TASKBAR: a window that reserved a screen edge gives the
     // edge back when it dies. Without this the work area would stay
@@ -3726,6 +3746,7 @@ fn set_focus(state: u64, i: u64) {
         ss(state, S_FOCUS_PREV, alt + 1)
     }
     ss(state, S_FOCUS, i + 1)
+    wmplug.notify(state, wmplug.E_FOCUS, wg(state, i, W_ID), 0, 0)
     // ================================================ RUNDE TUERSCHLOSS
     //
     // DER FOKUSWECHSEL WIRD GESAGT, und ohne diese Zeile war Punkt 4.3
@@ -4887,6 +4908,11 @@ fn compose(state: u64) -> u64 {
     // Uebertragen. Alles, was in diesem Lauf gemalt wird, gehoert zu
     // EINEM Bild und traegt dieselbe Signatur.
     ss(state, S_FRAME, gs(state, S_FRAME) + 1)
+    // RUNDE WMPLUGIN: DER KEHRBESEN, EINMAL JE BILD. Acht Vergleiche,
+    // kein Warten, keine Zuteilung -- er wirft hinaus, wer gerufen wurde
+    // und nicht kommt. DAS IST DIE EINZIGE STELLE IM ZUSAMMENSETZPFAD,
+    // die ueberhaupt etwas von Plugins weiss.
+    wmplug.sweep(state)
     // RUNDE VEKTOR: die Uhr fuer dieses Bild.
     let t_anfang: u64 = time.tsc()
     // 1. der Hintergrund
