@@ -78,6 +78,65 @@ def zeichencode(wurzel):
     return aus
 
 
+def ohne_kommentare(text):
+    """Kommentare weg, Zeilennummern bleiben stehen.
+
+    ROUND ROTABSCHNITTE.  The check counted its OWN documentation.
+    `kernel/user/taskbar.fi:3817` is the comment that explains why the
+    constant exists -- "`icons.START` ist in lib/icons.fi auf 0xE0A2
+    gebunden" -- and the checker read it as drawing code.  That is the
+    one hit this section was red for; there was no violation in any
+    line of code.
+
+    A rule that cannot be written down without breaking itself is not
+    a rule that can be kept.  Comments are where a number gets its
+    meaning explained, and `tools/server/count.py` has stripped them
+    since the day it was written, for the same reason.
+
+    Every removed character becomes a blank, every newline stays --
+    so a hit still reports the line it really stands in.
+    """
+    aus = []
+    i = 0
+    n = len(text)
+    in_text = False
+    zeichen = ''
+    while i < n:
+        c = text[i]
+        if in_text:
+            if c == '\\' and i + 1 < n:
+                aus.append(c)
+                aus.append(text[i + 1])
+                i += 2
+                continue
+            if c == zeichen:
+                in_text = False
+            aus.append(c)
+            i += 1
+            continue
+        if c in '"\'':
+            in_text = True
+            zeichen = c
+            aus.append(c)
+            i += 1
+            continue
+        if c == '/' and i + 1 < n and text[i + 1] == '/':
+            while i < n and text[i] != '\n':
+                aus.append(' ')
+                i += 1
+            continue
+        if c == '/' and i + 1 < n and text[i + 1] == '*':
+            ende = text.find('*/', i + 2)
+            ende = n if ende < 0 else ende + 2
+            for k in range(i, ende):
+                aus.append('\n' if text[k] == '\n' else ' ')
+            i = ende
+            continue
+        aus.append(c)
+        i += 1
+    return ''.join(aus)
+
+
 def treffer(text, erlaubt_werte):
     aus = []
     for art, muster, basis in (("hex", HEX, 16), ("escape", ESC, 16),
@@ -111,7 +170,8 @@ def main(argv):
     n = 0
     for voll in dateien:
         rel = os.path.relpath(voll, wurzel)
-        text = open(voll, encoding="utf-8", errors="replace").read()
+        text = ohne_kommentare(
+            open(voll, encoding="utf-8", errors="replace").read())
         for zeile, art, wert in treffer(text, karte):
             n += 1
             print("rawcp: %s:%d: raw code point (%s) U+%04X -- write %s"

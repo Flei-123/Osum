@@ -126,8 +126,17 @@ is "Umschrift in locale/de und den Buendeln" "${U:-?}" "0"
 mind "geprueft wurden genug Werte, um etwas zu heissen" "${G:-0}" 200
 mind "und es stehen echte Umlautzeichen darin" "${UML:-0}" 90
 
-gegen "der Satz aus dem Buendel" "assets/apps/editor.osp/INFO" \
-    "info=Text schreiben und ändern" "info=Text schreiben und aendern" \
+# RUNDE ROTABSCHNITTE: DER SATZ STEHT JETZT IM KATALOG.
+# Hier stand `assets/apps/editor.osp/INFO`. Seit c101990 traegt die
+# INFO die englische Fassung ("Write and change text"); der deutsche
+# Satz kommt seit ROTABSCHNITTE 17/n aus locale/de/messages
+# (`editor.info`), und `appdir.info_of` holt ihn dort. Die Gegenprobe
+# pflanzt die Umschrift deshalb dort ein, wo der Satz heute steht --
+# sie misst weiter dasselbe: dass der Pruefer eine Umschrift in einem
+# SICHTBAREN Text findet.
+gegen "der Satz aus dem Buendel" "locale/de/messages" \
+    "editor.info = Text schreiben und ändern" \
+    "editor.info = Text schreiben und aendern" \
     python3 tools/i18n/translit.py
 gegen "eine Zeile im Katalog" "locale/de/messages" \
     "launcher.run = Ausführen" "launcher.run = Ausfuehren" \
@@ -302,7 +311,12 @@ else
 ACCEL=tcg
 [ -w /dev/kvm ] && ACCEL=kvm
 echo "     Beschleuniger: $ACCEL"
-PROGS="desktop taskbar settings launcher speicher explorer locate widgetdemo dhcp sh echo ls cat edit"
+# RUNDE ROTABSCHNITTE: `speicher` -> `storage`. Die Quelldatei heisst
+# seit ENGLISCH ETAPPE 7 kernel/user/storage.fi; der Uebersetzer fand
+# kernel/user/speicher.fi nicht mehr und brach ab. Der PFAD auf der
+# Platte bleibt /bin/speicher (so startet der Kern es), dafuer legt
+# tools/look/shot.sh den zweiten Namen an.
+PROGS="desktop taskbar settings launcher storage explorer locate widgetdemo dhcp sh echo ls cat edit"
 
 # foto <name> <extra-oder-append>   (append= erkennt man am Praefix)
 foto() {
