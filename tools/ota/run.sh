@@ -325,7 +325,7 @@ gleich "die Maschine kommt hoch" "$rc" "21"
 hat "$OUT/gut1.txt" "ota: fassung hier 0" "vorher steht hier Fassung 0 (frisch installiert)"
 hat "$OUT/gut1.txt" "fetch: verify OK" "die Kette des Servers wurde GEPRUEFT und nicht geglaubt"
 hat "$OUT/gut1.txt" "ota: fassung dort 2" "die Quelle bietet Fassung 2"
-hat "$OUT/gut1.txt" "ota: NEUE FASSUNG verfuegbar" "und das wird gemeldet"
+hat "$OUT/gut1.txt" "ota: NEUE FASSUNG verfügbar" "und das wird gemeldet"
 hat "$OUT/gut1.txt" "ota: paket hallo 2.0.0" "mit Namen und Fassung des Pakets"
 hatnicht "$OUT/gut1.txt" "opk: installiert" "SUCHEN INSTALLIERT NICHTS"
 grep -qa "GET /VERZEICHNIS" "$OUT/srv.log" 2>/dev/null || true
@@ -418,7 +418,7 @@ dienst_aus
 dienst "$OUT/netz1" || bad "Gegenstelle"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf b2 "ota suchen;exit")
-hat "$OUT/b2.txt" "ota: NEUE FASSUNG verfuegbar" "(b) GEGENPROBE: dieselbe Quelle wird angenommen, wenn hier 0 steht"
+hat "$OUT/b2.txt" "ota: NEUE FASSUNG verfügbar" "(b) GEGENPROBE: dieselbe Quelle wird angenommen, wenn hier 0 steht"
 hatnicht "$OUT/b2.txt" "RUECKSCHRITT ABGELEHNT" "(b) der Schutz schlaegt also nicht immer zu"
 dienst_aus
 
