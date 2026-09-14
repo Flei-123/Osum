@@ -24,7 +24,7 @@ echo "== bauen =="
 bash tools/build-kernel.sh "$TMPD/k.mb" > "$TMPD/k.log" 2>&1 \
     || { tail -12 "$TMPD/k.log"; echo "Kernel baut nicht"; exit 1; }
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s || exit 1
-PROGS="desktop taskbar launcher calc sh pluguhr plugregel wmplug"
+PROGS="desktop taskbar launcher calc sh pluguhr plugregel plugpaar plugboese wmplug"
 for p in $PROGS; do
     up_build vendor/firn/bin/firnc "$p" "$TMPD/$p.o" "$TMPD/$p.elf" \
         "$TMPD/crt.o" kernel/user/user.ld 0 "$TMPD/$p.err" \
@@ -32,19 +32,43 @@ for p in $PROGS; do
 done
 python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1
 
-ARGS=(build "$TMPD/disk.img" 32768 /lib/
-    "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" /bin/)
-for p in $PROGS; do
-    ARGS+=("/bin/$p=$TMPD/$p.elf")
-done
+# ==================================================== RUNDE FIX-R3-3
+# DREI ABBILDER, UND /etc/uitrace NUR DORT, WO ES GEBRAUCHT WIRD.
+#
+# Hier stand EIN Abbild, und in ihm lag immer `/etc/uitrace`. Der
+# Schalter macht aus jeder gemalten Textstelle eine Zeile auf der
+# seriellen Leitung -- gebraucht wird das genau dann, wenn eine Zusage
+# eine KOORDINATE aus der Leiste lesen will (`taskbar: plug nr=0 x= ...`).
+# Fuer die Regelbilder braucht es sie nicht, und dort schadet sie: die
+# Spur laeuft ueber denselben Weg wie die Ausgabe der Programme, und in
+# den Bildern 04/05 stand das Terminalfenster darum voller Zeilen, die
+# mit der Fensterregel nichts zu tun haben.
+#
+#   disk.img       mit uitrace      -- die Leistenbilder (Koordinate)
+#   disk-rein.img  OHNE uitrace     -- die Regelbilder 04/05
+#   disk-segv.img  mit uitrace und /etc/wmplug.autostart -- der Absturz
 printf 'on\n' > "$TMPD/uitrace"
-ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme" "/etc/uitrace=$TMPD/uitrace")
-[ -f etc/wmplug.conf ] && ARGS+=("/etc/wmplug.conf=etc/wmplug.conf")
-[ -f etc/wmregeln.conf ] && ARGS+=("/etc/wmregeln.conf=etc/wmregeln.conf")
-while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
-python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
-    || { head -5 "$TMPD/mkfs.txt"; exit 1; }
-echo "  Abbild steht"
+printf 'boesebar segv\n' > "$TMPD/autostart-segv"
+mkimg() { # name  spur(0/1)  [autostart-datei]
+    local nm=$1 spur=$2 auto=${3:-} p z
+    local A=(build "$TMPD/disk-$nm.img" 32768 /lib/
+        "/lib/mono.ttf=assets/osum-mono.ttf"
+        "/lib/sans.ttf=assets/osum-sans.ttf" /bin/)
+    for p in $PROGS; do A+=("/bin/$p=$TMPD/$p.elf"); done
+    A+=(/etc/ "/etc/theme=$TMPD/baum/theme")
+    [ "$spur" = 1 ] && A+=("/etc/uitrace=$TMPD/uitrace")
+    [ -n "$auto" ] && A+=("/etc/wmplug.autostart=$auto")
+    [ -f etc/wmplug.conf ] && A+=("/etc/wmplug.conf=etc/wmplug.conf")
+    [ -f etc/wmregeln.conf ] && A+=("/etc/wmregeln.conf=etc/wmregeln.conf")
+    while read -r z; do A+=("$z"); done < "$TMPD/baum/liste"
+    python3 tools/osum/mkfs.py "${A[@]}" > "$TMPD/mkfs-$nm.txt" 2>&1 \
+        || { head -5 "$TMPD/mkfs-$nm.txt"; echo "Abbild $nm faellt aus"; exit 1; }
+}
+mkimg spur 1
+mkimg rein 0
+mkimg segv 1 "$TMPD/autostart-segv"
+cp -f "$TMPD/disk-spur.img" "$TMPD/disk.img"
+echo "  drei Abbilder stehen (spur, rein, segv)"
 
 warte() { local f=$1 m=$2 pid=$3 i=0
     while [ $i -lt 700 ]; do
@@ -69,7 +93,10 @@ foto() {
     fi
     local sock="$TMPD/mon-$name.sock" out="$TMPD/$name.txt"
     rm -f "$out" "$sock"
-    cp -f "$TMPD/disk.img" "$TMPD/live-$name.img"
+    # WELCHES ABBILD? `IMG=` nennt es; ohne Angabe das mit der Spur.
+    # Siehe den Kopf von `mkimg`: die Spur gehoert nur in die Laeufe,
+    # die eine Koordinate aus der Leiste lesen.
+    cp -f "$TMPD/disk-${IMG:-spur}.img" "$TMPD/live-$name.img"
     timeout 240 $QEMU_X86 -kernel "$TMPD/k.mb" -m 256 -append "$zeile" \
         -serial "file:$out" -display none -no-reboot \
         -vga std -global VGA.edid=off -monitor "unix:$sock,server,nowait" \
@@ -104,8 +131,15 @@ echo "== fotografieren =="
 foto start          "$BASE plugaus"                            'wm: hold'
 foto uhr            "$BASE wmplug wigapp=/bin/wmplug,enable,uhr,runden=12" \
                     'taskbar: text plug ' 'pluguhr: ende'
-foto verwaltung     "$BASE wmplug wigapp=/bin/wmplug,probe,uhr,runden=30" \
-                    'Plugins '
+# DAS BILD DER VERWALTUNG. Es zeigt ZWEI angemeldete Plugins (das
+# Widget und die Regel-Engine, beide von /bin/plugpaar gestartet),
+# darunter den Tabellenkopf von `wmplug list` und die Spalten von
+# `wmplug info`. Fotografiert wird, wenn der Kopf auf der Leitung steht
+# -- nicht bei `wm: hold`, das steht dort, lange bevor ein Plugin lebt.
+# Dieselbe Stelle rechnet tools/wmplug/spalten.sh Glyphe fuer Glyphe
+# nach; hier entsteht nur das Bild.
+foto verwaltung     "$BASE wmplug wigapp=/bin/plugpaar" \
+                    'Nr Name'
 # Die zwei Bilder der Fensterregel. Sie sind der sichtbare Teil der
 # Zusage "ein Plugin wirkt mit, ohne im Compositor zu stecken": mit
 # Recht steht das Fenster von /bin/calc dort, wo /etc/wmregeln.conf es
@@ -113,9 +147,9 @@ foto verwaltung     "$BASE wmplug wigapp=/bin/wmplug,probe,uhr,runden=30" \
 # selbst hinlegt (230,70). Fotografiert wird darum ERST, wenn der
 # Rechner sein Fenster wirklich hat (`rechner: ready`) UND die Regel
 # nachgemessen ist.
-VOR='nachgemessen id=' foto regel "$BASE nostart wmplug wigapp=/bin/plugregel,recht,demo" \
+IMG=rein VOR='nachgemessen id=' foto regel "$BASE nostart wmplug wigapp=/bin/plugregel,recht,demo" \
                     'rechner: ready'
-VOR='nachgemessen id=' foto regel-ohne "$BASE nostart wmplug wigapp=/bin/plugregel,demo" \
+IMG=rein VOR='nachgemessen id=' foto regel-ohne "$BASE nostart wmplug wigapp=/bin/plugregel,demo" \
                     'rechner: ready'
 foto breit          "$BASE fbres=1440x900 wmplug wigapp=/bin/wmplug,enable,uhr,runden=25" \
                     'taskbar: text plug '
@@ -123,6 +157,14 @@ foto eng            "$BASE fbres=800x600 wmplug wigapp=/bin/wmplug,enable,uhr,ru
                     'taskbar: text plug '
 foto sehr-eng       "$BASE fbres=640x480 wmplug wigapp=/bin/wmplug,enable,uhr,runden=25" \
                     'taskbar: text plug '
+# DIE ZWEI BILDER DES ABSTURZES, AUS EINEM LAUF. /etc/wmplug.autostart
+# dieses Abbilds traegt `boesebar segv`: der Schreibtisch schaltet das
+# Plugin ein, es besetzt sein Feld in der Leiste (erstes Bild) und
+# stuerzt dann mit Absicht ab; der Kern holt es ab, und der Schreibtisch
+# malt weiter (zweites Bild). Nachgerechnet wird beides in
+# tools/wmplug/run.sh Abschnitt 4 -- hier entstehen nur die Bilder.
+IMG=segv foto absturz "$BASE wmplug" \
+                    '^plugboese: leiste gesetzt' 'wmplug: tot platz='
 
 echo "== wandeln =="
 wandel() { # ppm ziel
@@ -169,12 +211,20 @@ benenne "$TMPD/regel-ohne.ppm"  "fensterregel-ohne-recht"
 benenne "$TMPD/breit.ppm"       "breit-1440x900"
 benenne "$TMPD/eng.ppm"         "eng-800x600"
 benenne "$TMPD/sehr-eng.ppm"    "sehr-eng-640x480"
+# RUNDE FIX-R3-3: die drei Bilder, die es zwar gab, die aber nie in die
+# Nummernfolge kamen -- das Foto der Verwaltung wurde in diesem Skript
+# aufgenommen und danach vergessen, die zwei Absturzbilder lagen nur in
+# docs/shots/wmplug. Ein Bild, das keine Nummer hat, sieht die Jury nicht.
+benenne "$TMPD/verwaltung.ppm"  "wmplug-verwaltung"
+benenne "$TMPD/absturz.ppm"     "vor-absturz"
+benenne "$TMPD/absturz-2.ppm"   "nach-absturz"
+GANZ=11
 ls -l "$ZIEL"
 # EIN LAUF, DER NICHTS ABGELEGT HAT, DARF NICHT GRUEN AUSSEHEN. Vorher
 # endete das Skript immer mit 0 -- auch als alle acht Bilder fehlten.
 # Wer es aus einem anderen Laeufer ruft, soll das merken koennen.
 if [ "$fehlt" -gt 0 ]; then
-    echo "SHOTS: $fehlt von 8 Bildern fehlen -- die Fotos im Ordner sind dann ALT"
+    echo "SHOTS: $fehlt von $GANZ Bildern fehlen -- die Fotos im Ordner sind dann ALT"
     exit 1
 fi
-echo "SHOTS: 8 Bilder abgelegt in $ZIEL"
+echo "SHOTS: $GANZ Bilder abgelegt in $ZIEL"

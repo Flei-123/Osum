@@ -42,6 +42,9 @@ export FIRNLIB="$ROOT/lib"
 TMPD=$(mktemp -d /tmp/wmplug-run-XXXXXX)
 [ "${WMPLUG_KEEP:-0}" = 1 ] || trap 'rm -rf "$TMPD"' EXIT
 SHOTS="docs/shots/wmplug"
+# Der Ordner, aus dem die Jury ihre Bilder nimmt. Abschnitt 13 rechnet
+# eines davon nach -- angelegt werden sie in tools/wmplug/shots.sh.
+GAUNTLET=".gauntlet-shots"
 mkdir -p "$SHOTS"
 
 pass=0; fail=0
@@ -164,6 +167,9 @@ grep -qE '^regel[[:space:]].*frist=500([[:space:]]|$)' etc/wmplug.conf \
 # Das kostet ein paar Sekunden mkfs und ist der ehrliche Weg: gemessen
 # wird derselbe Weg, den ein Benutzer geht.
 printf 'on\n' > "$TMPD/uitrace"
+# Die Laeufe, die eine KOORDINATE aus der Leiste lesen -- und nur sie
+# bekommen /etc/uitrace (siehe `abbild`).
+SPUR_LAEUFE="segv spaet"
 abbild() { # name  [autostart-zeile ...]
     local nm=$1; shift
     : > "$TMPD/auto-$nm.txt"
@@ -177,13 +183,27 @@ abbild() { # name  [autostart-zeile ...]
         n=$p; [ "$p" = plugspaet ] && n=uhrspaet
         A+=("/bin/$n=$TMPD/$p.elf")
     done
-    # DIE LEISTE SOLL SAGEN, WAS SIE MALT. Ohne /etc/uitrace schweigt
-    # sie, und dann gibt es keine Zeile `taskbar: plug nr=0 x= y= w= h=`
-    # -- also auch keine Koordinate, an der sich ein Foto nachrechnen
-    # liesse. Die Spur kostet ein paar Zeilen auf der seriellen Leitung
-    # und aendert am Bild nichts; gemessen wird trotzdem am Bild.
-    A+=(/etc/ "/etc/theme=$TMPD/baum/theme" "/etc/uitrace=$TMPD/uitrace"
-        "/etc/wmplug.conf=etc/wmplug.conf"
+    # DIE LEISTE SOLL SAGEN, WAS SIE MALT -- ABER NUR DORT, WO ES
+    # GEBRAUCHT WIRD.
+    #
+    # Ohne /etc/uitrace schweigt sie, und dann gibt es keine Zeile
+    # `taskbar: plug nr=0 x= y= w= h=`, also auch keine Koordinate, an
+    # der sich ein Foto nachrechnen liesse. Genau ZWEI Laeufe dieser
+    # Abnahme brauchen das: `segv` (das Leistenfeld vor und nach dem
+    # Absturz) und `spaet` (der Widget-Kasten vor und nach dem
+    # Einschalten).
+    #
+    # RUNDE FIX-R3-3: vorher lag die Spur in JEDEM Abbild. Sie kostet
+    # nicht nur Zeilen auf der Leitung -- die Programme schreiben ueber
+    # denselben Weg, und in den Regelbildern stand das Terminalfenster
+    # darum voller `wlib: text win=...`, die mit der Fensterregel nichts
+    # zu tun haben. Ein Abnahmebild soll zeigen, was es behauptet.
+    case " $SPUR_LAEUFE " in
+        *" $nm "*) A+=(/etc/ "/etc/theme=$TMPD/baum/theme"
+            "/etc/uitrace=$TMPD/uitrace") ;;
+        *) A+=(/etc/ "/etc/theme=$TMPD/baum/theme") ;;
+    esac
+    A+=("/etc/wmplug.conf=etc/wmplug.conf"
         "/etc/wmregeln.conf=etc/wmregeln.conf"
         "/etc/wmplug.autostart=$TMPD/auto-$nm.txt")
     while read -r z; do A+=("$z"); done < "$TMPD/baum/liste"
@@ -638,6 +658,11 @@ echo "== 7c. wmplug enable an einem LAUFENDEN Plugin =="
 # das erste Foto moeglich, ruft dann `/bin/wmplug enable uhr` und laesst
 # das zweite Foto entstehen. Zwischen den Bildern liegt KEIN Neustart:
 # derselbe Prozess, derselbe Tafelplatz, neue Rechte.
+# EIN EIGENES ABBILD -- mit LEERER Autostart-Liste (das Programm bringt
+# der Lauf selbst mit) und MIT /etc/uitrace, denn gleich unten wird der
+# Widget-Kasten aus `taskbar: plug nr=0 ...` gelesen. Siehe
+# $SPUR_LAEUFE oben: `spaet` steht darin, `basis` nicht.
+abbild spaet || bad "spaet: das Abbild ist nicht gebaut"
 lauf spaet "wigapp=/bin/uhrspaet,uhrspaet,wartems=3000,runden=40" \
     'uhrspaet: vor dem enable' 'taskbar: text plug '
 SP=$TMPD/spaet.clean
@@ -919,6 +944,106 @@ elif [ -s "$SHOTS/regel-mit-recht.png" ] && [ -s "$SHOTS/regel-ohne-recht.png" ]
         || bad "checkshot punkt (120,300): beide [$c]"
 else
     bad "die zwei Regelbilder liegen nicht als PNG in $SHOTS (oder PIL fehlt)"
+fi
+
+# ========== 13. das Bild der Verwaltung, Glyphe fuer Glyphe nachgerechnet
+echo "== 13. .gauntlet-shots/09-wmplug-verwaltung.png, Buchstabe fuer Buchstabe =="
+# DAS BILD, DAS AN DIE JURY GEHT, WIRD HIER NACHGERECHNET UND NICHT NUR
+# GEZAEHLT.
+#
+# Das alte 09 zeigte einen Schreibtisch, auf dem von `wmplug list` nichts
+# zu sehen war -- Abschnitt 11 hakte es trotzdem ab, weil eine Datei da
+# war. Eine Datei ist kein Beleg. Aufgenommen wird es in
+# tools/wmplug/shots.sh (Lauf `verwaltung`, /bin/plugpaar: ZWEI Plugins),
+# nachgerechnet wird es hier: `checkshot.py tgrid` haelt jede Glyphe
+# gegen den zweiten Rasterer, also steht am Ende nicht "da ist Text",
+# sondern "in Rasterzeile Z ab Spalte S steht genau dieses Wort".
+#
+# Der Rasterursprung wird GEMESSEN und nicht eingetragen (dieselbe Lehre
+# wie in tools/wmplug/spalten.sh: sobald ein Plugin das Terminalfenster
+# verschiebt, ist jede getippte Zahl falsch): gesucht wird das
+# umschliessende Rechteck der Terminal-Hintergrundfarbe des Schemas,
+# seine linke obere Ecke IST die erste Zelle.
+VW_PNG="$GAUNTLET/09-wmplug-verwaltung.png"
+VW_VG=(248 250 252); VW_HG=(18 24 32)
+if [ ! -s "$VW_PNG" ]; then
+    bad "$VW_PNG fehlt -- bash tools/wmplug/shots.sh legt es an"
+elif ! regel_ppm "$VW_PNG" "$TMPD/verwaltung.ppm"; then
+    bad "$VW_PNG laesst sich nicht nach PPM wandeln (PIL fehlt?)"
+else
+    vwu=$(python3 - "$TMPD/verwaltung.ppm" <<'PYV'
+import sys
+d = open(sys.argv[1], 'rb').read()
+kopf = d.split(b'\n', 3)
+w, h = map(int, kopf[1].split())
+px, c = kopf[3], bytes((18, 24, 32))
+x0, y0 = w, h
+for y in range(h):
+    zeile = px[y * w * 3:(y + 1) * w * 3]
+    if zeile.count(c) < 50:
+        continue
+    x0 = min(x0, zeile.find(c) // 3)
+    y0 = min(y0, y)
+print("%d %d" % (x0, y0) if x0 < w else "")
+PYV
+)
+    vgx=$(printf '%s' "$vwu" | awk '{print $1}')
+    vgy=$(printf '%s' "$vwu" | awk '{print $2}')
+    if [ -z "${vgx:-}" ]; then
+        bad "in 09-wmplug-verwaltung.png ist kein Terminalfenster zu finden"
+    else
+        ok "die erste Zelle des Terminals liegt bei ($vgx,$vgy) -- am Bild gemessen"
+        vtg() { # zeile spalte text
+            python3 tools/gfx/checkshot.py tgrid "$TMPD/verwaltung.ppm" \
+                assets/osum-mono.ttf 16 "$vgx" "$vgy" 10 19 "$1" "$2" \
+                "${VW_VG[@]}" "${VW_HG[@]}" "$3" 2>&1
+        }
+        # a) DER TABELLENKOPF. Welche Rasterzeile ihn traegt, haengt
+        #    daran, wie viel vorher geschrieben wurde -- also wird sie
+        #    gesucht und nicht geraten.
+        vkopf=""
+        for z in $(seq 0 25); do
+            if vtg "$z" 2 "Nr Name" > "$TMPD/vw.txt" 2>&1; then vkopf=$z; break; fi
+        done
+        if [ -n "$vkopf" ]; then
+            ok "der Tabellenkopf 'Nr Name' steht in Rasterzeile $vkopf ($(cat "$TMPD/vw.txt"))"
+        else
+            bad "im Bild 09 steht kein Tabellenkopf 'Nr Name'"
+        fi
+        # b) BEIDE PLUGINS. Ihre Namen kommen aus /etc/wmplug.conf --
+        #    dieselbe Datei, aus der der Kern die Rechte nimmt -- und
+        #    stehen in den zwei Zeilen unter dem Kopf, in der Spalte, die
+        #    SP_NR vorgibt (5). Die Reihenfolge der Plaetze ist nicht
+        #    zugesagt, also wird jede der beiden Zeilen gegen beide
+        #    Namen gehalten.
+        if [ -n "$vkopf" ]; then
+            for nm in uhr regel; do
+                gefunden=""
+                for z in $((vkopf + 1)) $((vkopf + 2)); do
+                    if vtg "$z" 5 "$nm" > "$TMPD/vw.txt" 2>&1; then
+                        gefunden=$z; break
+                    fi
+                done
+                if [ -n "$gefunden" ]; then
+                    ok "das Plugin '$nm' steht in Rasterzeile $gefunden ab Spalte 5 ($(cat "$TMPD/vw.txt"))"
+                else
+                    bad "das Plugin '$nm' steht in keiner der zwei Datenzeilen des Bildes"
+                fi
+            done
+        fi
+        # c) DIE SPALTEN VON `info`. `Leistentext` ist die laengste
+        #    Beschriftung und damit die, an der ein zu schmaler
+        #    Spaltensatz zuerst auffaellt.
+        vinfo=""
+        for z in $(seq 0 25); do
+            if vtg "$z" 2 "Leistentext" > "$TMPD/vw.txt" 2>&1; then vinfo=$z; break; fi
+        done
+        if [ -n "$vinfo" ]; then
+            ok "die info-Spalte 'Leistentext' steht in Rasterzeile $vinfo ($(cat "$TMPD/vw.txt"))"
+        else
+            bad "im Bild 09 steht keine info-Spalte 'Leistentext'"
+        fi
+    fi
 fi
 
 echo
