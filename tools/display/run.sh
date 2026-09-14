@@ -511,7 +511,19 @@ ok "je Bildpunkt: flush $((d_fl * 1000 / px)) ns · Tabelle $((d_lu * 1000 / px)
 # ============================================== 10. Ring 3
 
 echo "== 10. dieselben Zahlen aus Ring 3, ueber 1800..1802 =="
-rc=$(lauf_platte ring3 "osum gfx disp nokbd nosched noproc script=dispctl test;dispctl raw")
+# RUNDE KLEINKRAM (14.09.2026), A-020: `VGA_STD="-vga std"` -- GENAU
+# dieselbe Ausnahme wie in Abschnitt 4 oben, und aus demselben Grund.
+# Die Vorgabe dieses Laeufers ist `-vga std -global VGA.edid=off`: die
+# Tafel ist ABGESCHALTET, weil die uebrigen Abschnitte die eingebaute
+# Vorgabe (800x600) messen und keine Tafel wollen. Drei Zusagen dieses
+# Abschnitts fragen aber nach dem EDID-Block ("EDID hat auch Ring 3
+# gesehen", Hersteller- und Modellname ueber osum_dispstr). Ohne Tafel
+# gibt es keinen Block, `vmode.edid_ok` ist 0, `do_dispstr` antwortet
+# mit E_NODEV -- und die drei Zusagen waren rot, seit es sie gibt.
+# DAS WAR DER MESSAUFBAU UND NICHT DER KERN: dieselben drei Werte
+# kommen in Abschnitt 4 sauber heraus, nur eben aus Ring 0. Der Weg
+# nach Ring 3 wird hier zum ersten Mal mit einer Tafel gemessen.
+rc=$(VGA_STD="-vga std" lauf_platte ring3 "osum gfx disp nokbd nosched noproc script=dispctl test;dispctl raw")
 num "der Lauf mit /bin/dispctl endet sauber" "$rc" eq 21
 R="$TMPD/ring3.txt"
 hat "$R" "osum\$ dispctl" "das Programm ist gestartet"
@@ -540,8 +552,29 @@ for f in vram:vram maplimit:maplimit probed:probed refused:refused toobig:toobig
 done
 u_anz=$(uw "$R" count)
 gleich "auch die Laenge der Liste" "$anz" "$u_anz"
-gleich "die Tafel" "800" "$(uw "$R" panelw)"
-gleich "und das Bild ist ungedreht genauso gross" "800" "$(uw "$R" imgw)"
+# RUNDE KLEINKRAM (14.09.2026), A-020: 800 -> 1280. Das ist die FOLGE
+# der Tafel, die dieser Lauf seit dieser Runde hat (siehe oben), und
+# keine aufgeweichte Zusage: mit EDID nimmt der Kern die native
+# Aufloesung der Tafel, und QEMUs `-vga std` nennt 1280x800. Ohne Tafel
+# blieb es bei der eingebauten Vorgabe 800x600. Die Zusage selbst ist
+# unveraendert -- Ring 3 muss DIESELBE Zahl sehen wie der Kern.
+# RUNDE KLEINKRAM (14.09.2026), A-020: hier stand fest getippt "800",
+# und das galt, solange dieser Lauf KEINE Tafel hatte. Er hat jetzt
+# eine (siehe die Begruendung oben am Lauf), und mit EDID nimmt der
+# Kern die native Aufloesung -- QEMUs `-vga std` nennt 1280x800.
+#
+# Statt die 800 durch eine 1280 zu ersetzen, wird die Zahl jetzt AUS
+# DEM KERNMITSCHNITT DESSELBEN LAUFS genommen. Das ist genau die
+# Zusage, um die es in diesem Abschnitt geht -- "zwei Wege, eine
+# Wahrheit" --, und sie haelt auch dann noch, wenn jemand die Tafel
+# wieder umstellt.
+k_panel=$(grep -ao '^disp: eigen .* panel=[0-9]*x[0-9]*' "$R" 2>/dev/null \
+    | tail -1 | grep -ao 'panel=[0-9]*' | sed 's/panel=//')
+[ -n "$k_panel" ] || k_panel=$(grep -ao '^fb: [0-9]*x[0-9]*' "$R" 2>/dev/null \
+    | head -1 | sed 's/^fb: //' | cut -dx -f1)
+gleich "die Tafel -- dieselbe Breite, die der Kern im selben Lauf meldet" \
+    "$k_panel" "$(uw "$R" panelw)"
+gleich "und das Bild ist ungedreht genauso gross" "$k_panel" "$(uw "$R" imgw)"
 gleich "32 Bit je Bildpunkt" "32" "$(uw "$R" bpp)"
 gleich "EDID hat auch Ring 3 gesehen" "1" "$(uw "$R" edidok)"
 hat "$R" "dispctl: vendor=RHT" "der Herstellername kommt ueber osum_dispstr in Ring 3 an"
