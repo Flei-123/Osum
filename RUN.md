@@ -18,7 +18,7 @@ bash tools/wmplug/run.sh
 Das ist der Abnahmelauf. Er macht alles selbst:
 
 1. baut den Kernel (`tools/build-kernel.sh`, ~30 s),
-2. baut die elf Ring-3-Programme,
+2. baut die zwoelf Ring-3-Programme,
 3. sieht in der **Symboltafel des Kerns** nach, dass kein Plugin darin
    steht,
 4. baut das Plattenabbild (mit Schriften — ohne sie meldet der Kern
@@ -138,8 +138,13 @@ Woerter). Beispiele:
 wigapp=/bin/plugboese,boese,segv        # Absturz-Gegenprobe
 wigapp=/bin/plugboese,boese,hang        # Haenger-Gegenprobe (mit plugfrist)
 wigapp=/bin/plugboese,boese,greif       # Rechte-Gegenprobe
-wigapp=/bin/uhrstart,uhrstart,verwaltung,runden=30
+wigapp=/bin/wmplug,enable,uhr,runden=12 # Widget an
+wigapp=/bin/wmplug,probe,uhr,runden=30  # list/info/disable/list
 ```
+
+`/bin/uhrstart` gibt es nicht mehr. Wer ein Plugin beim Hochlauf haben
+will, schreibt seinen Namen nach `etc/wmplug.autostart` — der
+Schreibtisch liest die Liste und ruft `wmplug enable <name>` selbst.
 
 ### Die serielle Leitung lesen
 
@@ -152,8 +157,9 @@ grep -aE 'wmplug:|plugboese:|pluguhr:|plugregel:' /tmp/ser.clean
 ```
 
 Und: Kernzeilen und Ring-3-Zeilen laufen **ineinander**. Auf der Leitung
-steht wirklich `plugstart: wmplug: unreg uhr grund=4`. Wer mit `^`
-ankert, sucht vergeblich.
+steht wirklich `wmplug: wmplug: unreg uhr grund=4` — die Kernzeile faengt
+mitten in der Zeile des Programms an. Wer mit `^` ankert, sucht
+vergeblich.
 
 ---
 
@@ -162,14 +168,22 @@ ankert, sucht vergeblich.
 Letzter voller Lauf auf diesem Rechner (KVM), Exitcode 0:
 
 ```
-WMPLUG: 139 bestanden, 0 gescheitert
+WMPLUG: 193 bestanden, 0 gescheitert
 ```
 
 Die zwei Modullaeufer, die darin mitlaufen:
 
 ```
 REGEL:  38 bestanden, 0 gescheitert
-WIDGET: 30 bestanden, 0 gescheitert
+WIDGET: 35 bestanden, 0 gescheitert
+```
+
+Dazu die zwei Laeufer, die **nicht** in der Summe stecken und einzeln
+getippt werden:
+
+```
+bash tools/wmplug/spalten.sh   -> SPALTEN: 25 bestanden, 0 gescheitert
+bash tools/wmplug/shots.sh     -> SHOTS: 8 Bilder abgelegt in .gauntlet-shots
 ```
 
 Dazu:
@@ -207,9 +221,12 @@ python3 tools/kernel/memmap.py    # 111 Bereiche, 0 Kollisionen
 | `kernel/user/pluguhr.fi` | **Plugin 2** — Leistenwidget (Uhr/CPU) |
 | `kernel/user/plugboese.fi` | die Gegenprobe: `segv`, `hang`, `greif` |
 | `kernel/user/plugprobe.fi` | der Prueflauf der Schnittstelle |
-| `kernel/user/plugstart.fi` | Starthelfer (**Abkuerzung**, siehe Bericht) |
-| `kernel/user/wmplug.fi` | `/bin/wmplug` — list/info/enable/disable |
+| `kernel/user/plugtempo.fi` | die Tempomessung: 60 Bilder vor, 60 nach dem Laden |
+| `kernel/user/plugspaet.fi` | `/bin/uhrspaet` — Recht erst zur Laufzeit gewaehrt |
+| `kernel/user/plugpaar.fi` | Messhelfer: startet beide echten Plugins (fuer `spalten.sh`) |
+| `kernel/user/wmplug.fi` | `/bin/wmplug` — list/info/enable/disable/probe |
 | `etc/wmplug.conf` | wer was darf |
+| `etc/wmplug.autostart` | welche Erweiterung der Schreibtisch selbst startet |
 | `etc/wmregeln.conf` | die Fensterregeln |
 | `pakete/wmplug-*/rezept` | die drei opk-Pakete |
 | `tools/wmplug/run.sh` | der Abnahmelauf |
