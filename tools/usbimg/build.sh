@@ -180,7 +180,7 @@ sagen "kern        $(stat -c%s "$OUT/osum.mb") Oktette"
 # einzige Weg vom Stick auf eine Platte, und ein Stick, der sich
 # nicht installieren laesst, bleibt ein Vorfuehrstueck.
 PROGS=${PROGS:-"desktop taskbar settings launcher explorer netview \
-widgetdemo taskmgr installer locate edit sh echo ls cat ps uname date df mkdir rm cp mv \
+widgetdemo taskmgr installer dualcli locate edit sh echo ls cat ps uname date df mkdir rm cp mv \
 grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
 dhcp host ota jsig jarvisctl pollbr reboot shutdown power fas \

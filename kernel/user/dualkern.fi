@@ -1,0 +1,862 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/dualkern.fi -- RUNDE DUALBOOT: NEBEN EIN FREMDES SYSTEM,
+// OHNE ES ANZUFASSEN.
+//
+// ==================================================================
+// WAS DIESE DATEI TUT, UND WARUM SIE NICHT IN `instkern.fi` STEHT
+// ==================================================================
+//
+// `instkern.fi` kann eine Platte LEEREN und neu beschreiben. Das ist
+// der einfache Fall: die Tafel wird von Grund auf gebaut, und was
+// vorher daraufstand, ist danach weg. Es ist auch der Fall, der einen
+// Rechner mit Windows unbrauchbar macht.
+//
+// Hier steht der andere Weg, und er ist in EINEM Punkt grundsaetzlich
+// anders:
+//
+//     `gpt_schreiben` SCHREIBT eine Tafel.
+//     `neben_schreiben` AENDERT eine vorhandene.
+//
+// Eine vorhandene Tafel zu aendern heisst, Oktette anzufassen, die
+// jemand anderes geschrieben hat. Jeder Fehler dabei kostet nicht
+// "die Installation", sondern die DATEN DES BENUTZERS. Deshalb liegt
+// das hier getrennt, und deshalb steht in jeder Schreibfunktion dieser
+// Datei eine Vorpruefung, die eher abbricht als schreibt.
+//
+// DIE REGEL DIESER DATEI, und sie gilt ohne Ausnahme:
+//
+//     ES WIRD NUR GESCHRIEBEN, WAS NEU IST.
+//
+// Konkret: genau EIN bisher leerer Eintrag in der Eintragstafel, die
+// beiden CRC32 daneben, und die beiden Koepfe. Kein vorhandener
+// Eintrag wird verschoben, verkleinert, umsortiert oder geloescht. Die
+// EFI-Systempartition des fremden Systems wird MITBENUTZT und nicht
+// neu angelegt -- OrientOS legt seine Dateien in ein eigenes
+// Unterverzeichnis, alles andere dort bleibt, wie es ist.
+//
+// WAS DIESE DATEI AUSDRUECKLICH NICHT TUT: eine vorhandene Partition
+// VERKLEINERN. Ein NTFS zu schrumpfen heisst, ein fremdes Dateisystem
+// umzubauen, dessen Beschreibung nicht offen ist, waehrend die Daten
+// darin liegen bleiben muessen. Das ist eine eigene Runde und ein
+// eigenes Risiko. Findet sich zu wenig freier Platz, sagt dieses
+// Programm das -- und verlangt, dass der Mensch vorher in seinem
+// System Platz freimacht. Lieber ehrlich verlangen als riskant
+// schrumpfen.
+//
+// ==================================================================
+// WIE GPT AUSSIEHT, SOWEIT ES HIER GEBRAUCHT WIRD
+// ==================================================================
+//
+//   Sektor 0        Schutz-MBR (ein Eintrag, Typ 0xEE)
+//   Sektor 1        der primaere Kopf: "EFI PART", 92 Oktette,
+//                   darin die eigene CRC32 (Offset 16) und die CRC32
+//                   der EINTRAGSTAFEL (Offset 88)
+//   Sektor 2..33    die Eintragstafel, 128 Eintraege zu 128 Oktetten
+//   ...             die Partitionen
+//   letzte-33..-2   die Sicherungstafel
+//   letzter Sektor  der Sicherungskopf
+//
+// Ein Eintrag (128 Oktette):
+//   +0    Typkennung (16 Oktette). ALLES NULL heisst: unbenutzt.
+//   +16   die eigene Kennung (16 Oktette)
+//   +32   erster Sektor (64 Bit)
+//   +40   letzter Sektor (64 Bit, EINSCHLIESSLICH)
+//   +48   Merkmale (64 Bit)
+//   +56   der Name, UTF-16 kleinendig
+//
+// BEIDE CRC32 MUESSEN NEU GERECHNET WERDEN, und in dieser Reihenfolge:
+// erst die ueber die ganze Eintragstafel, dann die ueber den Kopf (in
+// dem die erste steht). Wer sie vertauscht, schreibt eine Tafel, der
+// kein Werkzeug mehr glaubt -- auch `sgdisk` nicht, und genau daran
+// misst die Abnahme.
+
+profile kernel
+
+import ulib
+import instkern
+
+export {
+    tafel_lesen, anz, p_start, p_ende, p_typ, p_name_ch,
+    T_UNBEKANNT, T_ESP, T_DATEN, T_LINUX, T_OSUM,
+    luecke_suchen, luecke_start, luecke_ende,
+    esp_finden, esp_gross_genug, ESP_MIND,
+    neben_schreiben, frei_index,
+    gpt_pruefen, sekt_gesamt,
+    D_KEIN, D_KEINEGPT, D_KAPUTT, D_VOLL, D_ENG, D_KEINEESP, D_ESPKLEIN,
+    D_SCHREIBEN, D_LESEN,
+    grund
+}
+
+// ------------------------------------------------------------ Fehler
+//
+// Zahlen und keine Saetze -- wie in `instkern.fi` und aus demselben
+// Grund: den Text sucht der Aufrufer in SEINER Sprache heraus.
+const D_KEIN: u64 = 0
+const D_KEINEGPT: u64 = 1    // keine GPT auf der Platte
+const D_KAPUTT: u64 = 2      // GPT da, aber die Pruefsumme stimmt nicht
+const D_VOLL: u64 = 3        // kein freier Eintrag in der Tafel
+const D_ENG: u64 = 4         // zu wenig freier Platz
+const D_KEINEESP: u64 = 5    // keine EFI-Systempartition gefunden
+const D_ESPKLEIN: u64 = 6    // die ESP ist zu klein fuer noch ein System
+const D_SCHREIBEN: u64 = 7
+const D_LESEN: u64 = 8
+
+static mut st_grund: u64 = 0
+
+fn grund() -> u64 {
+    return st_grund
+}
+
+// ------------------------------------------------------------ die Arten
+//
+// Dieselbe kurze Liste wie in `kernel/part.fi`, und sie muss dieselbe
+// sein: die eine Seite liest die Platte im Kern, die andere zeigt sie
+// dem Menschen.
+const T_UNBEKANNT: u64 = 0
+const T_ESP: u64 = 1
+const T_DATEN: u64 = 2
+const T_LINUX: u64 = 3
+const T_OSUM: u64 = 4
+
+// Wieviele Eintraege diese Datei haelt. Die Tafel hat 128; ein Mensch
+// sieht auf einem Rechner nie so viele, und sechzehn ist die Zahl, mit
+// der auch `part.fi` rechnet.
+const MAXE: u64 = 16
+const BS: u64 = 512
+const ENTSECT: u64 = 32
+const ENTRIES: u64 = 128
+const ENTSIZE: u64 = 128
+
+// Wie gross eine ESP mindestens sein muss, damit noch ein zweites
+// System hineinpasst. 34 MiB ist die Zahl, ab der FAT32 ueberhaupt
+// FAT32 ist (ESP_STD in instkern.fi); OrientOS legt dort seinen Kern
+// (rund 5 MB) und den Bootlader (rund 250 KB) ab. Unter 16 MiB freiem
+// Platz wird es eng, und dann sagt dieses Programm es lieber.
+const ESP_MIND: u64 = 32768 // 16 MiB in Sektoren
+
+// Der kleinste freie Bereich, in dem eine Wurzel Sinn ergibt. Dieselbe
+// Zahl wie `plan_passt` in instkern.fi fuer den Wurzelteil: 4096
+// Sektoren waeren 2 MiB, und darunter ist die Wurzel kleiner als der
+// Kern, der daraufsoll. Hier wird mehr verlangt, weil die Wurzel das
+// ganze System traegt.
+const MIND_WURZEL: u64 = 65536 // 32 MiB in Sektoren
+
+// ------------------------------------------------------------ Zustand
+
+static mut e_start: [u64; 16] = [0 as u64; 16]
+static mut e_ende: [u64; 16] = [0 as u64; 16]
+static mut e_typ: [u64; 16] = [0 as u64; 16]
+static mut e_slot: [u64; 16] = [0 as u64; 16]  // die Nummer in der Tafel
+static mut e_name: [u8; 576] = [0 as u8; 576]  // 16 * 36 Zeichen
+static mut e_anz: u64 = 0
+
+// Der freie Bereich, den `luecke_suchen` gefunden hat.
+static mut l_start: u64 = 0
+static mut l_ende: u64 = 0
+
+// Die Eckdaten der Tafel, aus dem Kopf gelesen.
+static mut g_erste: u64 = 0     // erster benutzbarer Sektor
+static mut g_letzte: u64 = 0    // letzter benutzbarer Sektor
+static mut g_tafel: u64 = 0     // wo die Eintragstafel liegt
+static mut g_anzahl: u64 = 0    // wieviele Eintraege
+static mut g_esize: u64 = 0     // wie gross ein Eintrag ist
+static mut g_sekt: u64 = 0      // die Platte in Sektoren
+
+static mut SE: [u8; 512] = [0 as u8; 512]
+
+fn sekt_gesamt() -> u64 {
+    return g_sekt
+}
+
+fn anz() -> u64 {
+    return e_anz
+}
+
+fn p_start(i: u64) -> u64 {
+    if i >= e_anz {
+        return 0
+    }
+    return e_start[(i) as usize]
+}
+
+fn p_ende(i: u64) -> u64 {
+    if i >= e_anz {
+        return 0
+    }
+    return e_ende[(i) as usize]
+}
+
+fn p_typ(i: u64) -> u64 {
+    if i >= e_anz {
+        return T_UNBEKANNT
+    }
+    return e_typ[(i) as usize]
+}
+
+// Ein Zeichen des Namens. Der Name steht auf der Platte in UTF-16;
+// hier wird er als einfacher Text gehalten, ein Oktett je Zeichen --
+// was darueber liegt, wird zu einem Punkt. Das ist keine Uebersetzung
+// von Unicode und will keine sein: es reicht, um "Basic data
+// partition" von "EFI System Partition" zu unterscheiden.
+fn p_name_ch(i: u64, k: u64) -> u64 {
+    if i >= e_anz || k >= 36 {
+        return 0
+    }
+    return (*(((&e_name[0 as usize]) as u64 + i * 36 + k) as *mut u8)) as u64
+}
+
+fn luecke_start() -> u64 {
+    return l_start
+}
+
+fn luecke_ende() -> u64 {
+    return l_ende
+}
+
+// ------------------------------------------------------ Kleinigkeiten
+
+fn g8(at: u64) -> u64 {
+    return (*((at) as *mut u8)) as u64
+}
+
+fn p8(at: u64, v: u64) {
+    __mmio_write8((at) as *mut u8, v as u8)
+}
+
+fn g32(at: u64) -> u64 {
+    return g8(at) | (g8(at + 1) << 8) | (g8(at + 2) << 16) | (g8(at + 3) << 24)
+}
+
+fn g64(at: u64) -> u64 {
+    return g32(at) | (g32(at + 4) << 32)
+}
+
+fn p32(at: u64, v: u64) {
+    p8(at, v & 255)
+    p8(at + 1, (v >> 8) & 255)
+    p8(at + 2, (v >> 16) & 255)
+    p8(at + 3, (v >> 24) & 255)
+}
+
+fn p64(at: u64, v: u64) {
+    p32(at, v & 0xFFFFFFFF)
+    p32(at + 4, (v >> 32) & 0xFFFFFFFF)
+}
+
+fn p16(at: u64, v: u64) {
+    p8(at, v & 255)
+    p8(at + 1, (v >> 8) & 255)
+}
+
+// CRC32, IEEE 802.3, reflektiert. DIESELBE Rechnung wie in
+// `instkern.fi`, `kernel/part.fi` und `kernel/bootmod.fi`. Sie steht
+// hier ein viertes Mal, und das ist der einzige Punkt dieser Datei, an
+// dem eine Wiederholung in Kauf genommen wird: `instkern.fi` gibt sie
+// nicht heraus, und sie zu exportieren hiesse, die Tafelrechnung dort
+// aufzubrechen. Wer eine der vier aendert, faellt sofort auf -- die
+// Abnahme laesst `sgdisk` gegenlesen.
+fn crc_feed(seed: u64, p: u64, len: u64) -> u64 {
+    var crc: u64 = seed
+    var i: u64 = 0
+    while i < len {
+        crc = crc ^ g8(p + i)
+        var k: u64 = 0
+        while k < 8 {
+            let maske: u64 = 0 -% (crc & 1)
+            crc = (crc >> 1) ^ (0xEDB88320 & maske)
+            k = k + 1
+        }
+        i = i + 1
+    }
+    return crc
+}
+
+fn crc_of(p: u64, len: u64) -> u64 {
+    return (crc_feed(0xFFFFFFFF, p, len) ^ 0xFFFFFFFF) & 0xFFFFFFFF
+}
+
+fn null_16(p: u64) -> bool {
+    var i: u64 = 0
+    while i < 16 {
+        if g8(p + i) != 0 {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn sig_ok(p: u64) -> bool {
+    // "EFI PART"
+    if g8(p + 0) != 69 { return false }
+    if g8(p + 1) != 70 { return false }
+    if g8(p + 2) != 73 { return false }
+    if g8(p + 3) != 32 { return false }
+    if g8(p + 4) != 80 { return false }
+    if g8(p + 5) != 65 { return false }
+    if g8(p + 6) != 82 { return false }
+    if g8(p + 7) != 84 { return false }
+    return true
+}
+
+// Die Pruefsumme des Kopfes, mit dem eigenen Feld auf Null -- das ist
+// die Vorschrift, und wer sie ueberspringt, prueft nichts.
+fn kopf_crc(p: u64, size: u64) -> u64 {
+    let save: u64 = g32(p + 16)
+    p32(p + 16, 0)
+    let got: u64 = crc_of(p, size)
+    p32(p + 16, save)
+    return got
+}
+
+// Die 16 Oktette bei `p` mit denen bei `q` vergleichen.
+fn guid_gleich(p: u64, q: u64) -> bool {
+    var i: u64 = 0
+    while i < 16 {
+        if g8(p + i) != g8(q + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// Die Typkennung uebersetzen. Dieselben vier, die `part.fi` kennt.
+fn typ_von(p: u64) -> u64 {
+    // ESP: C12A7328-F81F-11D2-BA4B-00A0C93EC93B
+    var esp: [u8; 16] = [0 as u8; 16]
+    esp[0 as usize] = 0x28 as u8
+    esp[1 as usize] = 0x73 as u8
+    esp[2 as usize] = 0x2A as u8
+    esp[3 as usize] = 0xC1 as u8
+    esp[4 as usize] = 0x1F as u8
+    esp[5 as usize] = 0xF8 as u8
+    esp[6 as usize] = 0xD2 as u8
+    esp[7 as usize] = 0x11 as u8
+    esp[8 as usize] = 0xBA as u8
+    esp[9 as usize] = 0x4B as u8
+    esp[10 as usize] = 0x00 as u8
+    esp[11 as usize] = 0xA0 as u8
+    esp[12 as usize] = 0xC9 as u8
+    esp[13 as usize] = 0x3E as u8
+    esp[14 as usize] = 0xC9 as u8
+    esp[15 as usize] = 0x3B as u8
+    if guid_gleich(p, (&esp[0]) as u64) {
+        return T_ESP
+    }
+    // Microsoft basic data: EBD0A0A2-B9E5-4433-87C0-68B6B72699C7
+    var bas: [u8; 16] = [0 as u8; 16]
+    bas[0 as usize] = 0xA2 as u8
+    bas[1 as usize] = 0xA0 as u8
+    bas[2 as usize] = 0xD0 as u8
+    bas[3 as usize] = 0xEB as u8
+    bas[4 as usize] = 0xE5 as u8
+    bas[5 as usize] = 0xB9 as u8
+    bas[6 as usize] = 0x33 as u8
+    bas[7 as usize] = 0x44 as u8
+    bas[8 as usize] = 0x87 as u8
+    bas[9 as usize] = 0xC0 as u8
+    bas[10 as usize] = 0x68 as u8
+    bas[11 as usize] = 0xB6 as u8
+    bas[12 as usize] = 0xB7 as u8
+    bas[13 as usize] = 0x26 as u8
+    bas[14 as usize] = 0x99 as u8
+    bas[15 as usize] = 0xC7 as u8
+    if guid_gleich(p, (&bas[0]) as u64) {
+        return T_DATEN
+    }
+    // Linux: 0FC63DAF-8483-4772-8E79-3D69D8477DE4
+    var lin: [u8; 16] = [0 as u8; 16]
+    lin[0 as usize] = 0xAF as u8
+    lin[1 as usize] = 0x3D as u8
+    lin[2 as usize] = 0xC6 as u8
+    lin[3 as usize] = 0x0F as u8
+    lin[4 as usize] = 0x83 as u8
+    lin[5 as usize] = 0x84 as u8
+    lin[6 as usize] = 0x72 as u8
+    lin[7 as usize] = 0x47 as u8
+    lin[8 as usize] = 0x8E as u8
+    lin[9 as usize] = 0x79 as u8
+    lin[10 as usize] = 0x3D as u8
+    lin[11 as usize] = 0x69 as u8
+    lin[12 as usize] = 0xD8 as u8
+    lin[13 as usize] = 0x47 as u8
+    lin[14 as usize] = 0x7D as u8
+    lin[15 as usize] = 0xE4 as u8
+    if guid_gleich(p, (&lin[0]) as u64) {
+        return T_LINUX
+    }
+    // OSUM: 4F53554D-4F46-5301-8E75-6D6F72694F53
+    var ofs: [u8; 16] = [0 as u8; 16]
+    ofs[0 as usize] = 0x4D as u8
+    ofs[1 as usize] = 0x55 as u8
+    ofs[2 as usize] = 0x53 as u8
+    ofs[3 as usize] = 0x4F as u8
+    ofs[4 as usize] = 0x46 as u8
+    ofs[5 as usize] = 0x4F as u8
+    ofs[6 as usize] = 0x01 as u8
+    ofs[7 as usize] = 0x53 as u8
+    ofs[8 as usize] = 0x8E as u8
+    ofs[9 as usize] = 0x75 as u8
+    ofs[10 as usize] = 0x6D as u8
+    ofs[11 as usize] = 0x6F as u8
+    ofs[12 as usize] = 0x72 as u8
+    ofs[13 as usize] = 0x69 as u8
+    ofs[14 as usize] = 0x4F as u8
+    ofs[15 as usize] = 0x53 as u8
+    if guid_gleich(p, (&ofs[0]) as u64) {
+        return T_OSUM
+    }
+    return T_UNBEKANNT
+}
+
+// ================================================== DIE TAFEL LESEN
+//
+// WAS DA IST, BEVOR IRGENDETWAS GESCHRIEBEN WIRD. Ohne diese Ansicht
+// ist jede Entscheidung darueber, wohin OrientOS soll, geraten.
+//
+// GEPRUEFT WIRD BEIDES: die Signatur UND die beiden Pruefsummen. Eine
+// Tafel, deren CRC nicht stimmt, wird NICHT ergaenzt -- wer in eine
+// kaputte Tafel schreibt, macht aus einem Problem zwei. Dann sagt
+// dieses Programm `D_KAPUTT`, und der Mensch bekommt den Weg "ganze
+// Platte" angeboten.
+//
+// Rueckgabe: die Zahl der gefundenen Partitionen, oder 0 mit einem
+// Grund in `grund()`.
+fn tafel_lesen(fd: u64, sekt: u64) -> u64 {
+    st_grund = D_KEIN
+    e_anz = 0
+    l_start = 0
+    l_ende = 0
+    g_sekt = sekt
+    let p: u64 = (&SE[0 as usize]) as u64
+
+    // ---- der primaere Kopf steht in Sektor 1.
+    if !instkern.lese(fd, 1, p, BS) {
+        st_grund = D_LESEN
+        return 0
+    }
+    if !sig_ok(p) {
+        st_grund = D_KEINEGPT
+        return 0
+    }
+    let hsize: u64 = g32(p + 12)
+    if hsize < 92 || hsize > BS {
+        st_grund = D_KAPUTT
+        return 0
+    }
+    if kopf_crc(p, hsize) != g32(p + 16) {
+        st_grund = D_KAPUTT
+        return 0
+    }
+    g_erste = g64(p + 40)
+    g_letzte = g64(p + 48)
+    g_tafel = g64(p + 72)
+    g_anzahl = g32(p + 80)
+    g_esize = g32(p + 84)
+    let tcrc: u64 = g32(p + 88)
+    if g_esize < 128 || g_esize > BS {
+        st_grund = D_KAPUTT
+        return 0
+    }
+    if g_anzahl == 0 || g_anzahl > 128 {
+        st_grund = D_KAPUTT
+        return 0
+    }
+
+    // ---- die Pruefsumme der ganzen Eintragstafel, Sektor fuer Sektor.
+    //
+    // FORTGESCHRIEBEN statt gesammelt: die Tafel ist 16 KiB gross, und
+    // dieses Programm haelt genau einen Sektor davon im Speicher.
+    let gesamt: u64 = g_anzahl * g_esize
+    var c: u64 = 0xFFFFFFFF
+    var done: u64 = 0
+    var lba: u64 = g_tafel
+    while done < gesamt {
+        if !instkern.lese(fd, lba, p, BS) {
+            st_grund = D_LESEN
+            return 0
+        }
+        var chunk: u64 = BS
+        if gesamt - done < BS {
+            chunk = gesamt - done
+        }
+        c = crc_feed(c, p, chunk)
+        done = done + chunk
+        lba = lba + 1
+    }
+    if ((c ^ 0xFFFFFFFF) & 0xFFFFFFFF) != tcrc {
+        st_grund = D_KAPUTT
+        return 0
+    }
+
+    // ---- ERST JETZT werden die Eintraege geglaubt.
+    let pro: u64 = BS / g_esize
+    var idx: u64 = 0
+    while idx < g_anzahl && e_anz < MAXE {
+        let insek: u64 = idx % pro
+        if insek == 0 {
+            if !instkern.lese(fd, g_tafel + idx / pro, p, BS) {
+                st_grund = D_LESEN
+                return 0
+            }
+        }
+        let e: u64 = p + insek * g_esize
+        if !null_16(e) {
+            let von: u64 = g64(e + 32)
+            let bis: u64 = g64(e + 40)
+            if bis >= von {
+                e_start[(e_anz) as usize] = von
+                e_ende[(e_anz) as usize] = bis
+                e_typ[(e_anz) as usize] = typ_von(e)
+                e_slot[(e_anz) as usize] = idx
+                // Der Name, UTF-16 -> ein Oktett je Zeichen.
+                var k: u64 = 0
+                while k < 35 {
+                    let ch: u64 = g8(e + 56 + k * 2) | (g8(e + 57 + k * 2) << 8)
+                    var out: u64 = ch
+                    if ch > 126 {
+                        out = 46 // '.'
+                    }
+                    if ch == 0 {
+                        out = 0
+                    }
+                    p8((&e_name[0 as usize]) as u64 + e_anz * 36 + k, out)
+                    if ch == 0 {
+                        k = 35
+                    } else {
+                        k = k + 1
+                    }
+                }
+                p8((&e_name[0 as usize]) as u64 + e_anz * 36 + 35, 0)
+                e_anz = e_anz + 1
+            }
+        }
+        idx = idx + 1
+    }
+    return e_anz
+}
+
+// Ist die Tafel in Ordnung? Nach `tafel_lesen` beantwortet.
+fn gpt_pruefen() -> bool {
+    return st_grund == D_KEIN
+}
+
+// ================================================== DER FREIE PLATZ
+//
+// DER GROESSTE zusammenhaengende freie Bereich zwischen dem ersten und
+// dem letzten benutzbaren Sektor. "Zwischen und hinter" den vorhandenen
+// Partitionen, wie der Auftrag es verlangt -- eine Luecke in der Mitte
+// zaehlt genauso wie der Platz am Ende.
+//
+// DIE EINTRAEGE STEHEN IN DER TAFEL NICHT UNBEDINGT DER REIHE NACH.
+// Sie werden hier also nicht sortiert, sondern es wird fuer jeden
+// Kandidatenanfang geprueft, wie weit er reicht: der Anfang ist
+// entweder der erste benutzbare Sektor oder das Ende irgendeiner
+// Partition +1, und das Ende ist der naechste Partitionsanfang davor.
+// Das ist MAXE*MAXE Vergleiche und damit auf sechzehn Eintraegen
+// nichts.
+//
+// Rueckgabe: true, wenn ein brauchbarer Bereich gefunden wurde.
+// `luecke_start()`/`luecke_ende()` nennen ihn dann.
+fn luecke_suchen(mind: u64) -> bool {
+    l_start = 0
+    l_ende = 0
+    var beste: u64 = 0
+    // Die moeglichen Anfaenge durchgehen.
+    var k: u64 = 0
+    while k <= e_anz {
+        var von: u64 = g_erste
+        if k > 0 {
+            von = e_ende[(k - 1) as usize] + 1
+        }
+        // Auf 1 MiB ausrichten -- dieselbe Zahl, die jedes Werkzeug
+        // seit 2009 nimmt (instkern.AUSRICHT).
+        let rest: u64 = von % instkern.AUSRICHT
+        if rest != 0 {
+            von = von + (instkern.AUSRICHT - rest)
+        }
+        if von < g_erste {
+            von = g_erste
+        }
+        // Wie weit reicht es? Bis zum naechsten Partitionsanfang, der
+        // dahinter liegt -- oder bis zum letzten benutzbaren Sektor.
+        var bis: u64 = g_letzte
+        var i: u64 = 0
+        while i < e_anz {
+            let s: u64 = e_start[(i) as usize]
+            let en: u64 = e_ende[(i) as usize]
+            // Liegt diese Partition VOR dem Anfang, stoert sie nicht.
+            if en >= von {
+                if s <= von {
+                    // Der Anfang liegt MITTEN in einer Partition --
+                    // dieser Kandidat faellt aus.
+                    bis = 0
+                    i = e_anz
+                } else {
+                    if s - 1 < bis {
+                        bis = s - 1
+                    }
+                    i = i + 1
+                }
+            } else {
+                i = i + 1
+            }
+        }
+        if bis > von {
+            let gross: u64 = bis - von + 1
+            if gross >= mind && gross > beste {
+                beste = gross
+                l_start = von
+                l_ende = bis
+            }
+        }
+        k = k + 1
+    }
+    if beste == 0 {
+        st_grund = D_ENG
+        return false
+    }
+    return true
+}
+
+// ================================================== DIE FREMDE ESP
+//
+// Sie wird MITBENUTZT und nicht ersetzt. Das ist der Punkt, an dem ein
+// schlechtes Installationsprogramm fremde Bootlader loescht: es legt
+// eine neue EFI-Partition an, und alles, was vorher dort lag, ist weg.
+//
+// Rueckgabe: der Index in der eigenen Liste, oder MAXE, wenn es keine
+// gibt.
+fn esp_finden() -> u64 {
+    var i: u64 = 0
+    while i < e_anz {
+        if e_typ[(i) as usize] == T_ESP {
+            return i
+        }
+        i = i + 1
+    }
+    st_grund = D_KEINEESP
+    return MAXE
+}
+
+// Ist sie gross genug, dass noch ein System hineinpasst? Gemessen wird
+// die GROESSE der Partition; wieviel darin frei ist, weiss erst das
+// Dateisystem -- das prueft der Aufrufer, wenn er sie eingehaengt hat.
+// Hier geht es um den offensichtlichen Fall: eine ESP von 2 MiB, in die
+// ein 5-MB-Kern nicht passt, egal wie leer sie ist.
+fn esp_gross_genug(i: u64) -> bool {
+    if i >= e_anz {
+        return false
+    }
+    let gross: u64 = e_ende[(i) as usize] - e_start[(i) as usize] + 1
+    if gross < ESP_MIND {
+        st_grund = D_ESPKLEIN
+        return false
+    }
+    return true
+}
+
+// Der erste UNBENUTZTE Platz in der Eintragstafel. Er wird aus den
+// belegten Nummern abgeleitet: was nicht belegt ist, ist frei.
+fn frei_index(fd: u64) -> u64 {
+    var slot: u64 = 0
+    while slot < g_anzahl {
+        var belegt: bool = false
+        var i: u64 = 0
+        while i < e_anz {
+            if e_slot[(i) as usize] == slot {
+                belegt = true
+            }
+            i = i + 1
+        }
+        if !belegt {
+            return slot
+        }
+        slot = slot + 1
+    }
+    st_grund = D_VOLL
+    return ENTRIES
+}
+
+// ================================================== DEN EINTRAG ANLEGEN
+//
+// HIER WIRD AUF EINE FREMDE TAFEL GESCHRIEBEN. Das ist die gefaehrliche
+// Stelle dieser ganzen Runde, und sie ist deshalb so gebaut, dass sie
+// im Zweifel nichts tut.
+//
+// WAS GESCHRIEBEN WIRD, und mehr wird nicht angefasst:
+//
+//   1. GENAU EIN Eintrag in der Eintragstafel -- einer, der vorher
+//      ganz aus Nullen bestand. Die anderen 127 werden gelesen (fuer
+//      die Pruefsumme) und unveraendert zurueckgeschrieben.
+//   2. die CRC32 ueber die ganze Eintragstafel,
+//   3. die CRC32 ueber jeden der beiden Koepfe,
+//   4. die SICHERUNGSTAFEL am Plattenende, mit demselben Inhalt.
+//
+// WAS NICHT ANGEFASST WIRD: der Schutz-MBR (er beschreibt die ganze
+// Platte und aendert sich nicht), die Daten irgendeiner Partition, und
+// jeder vorhandene Eintrag.
+//
+// DIE REIHENFOLGE IST NICHT GESCHMACK. Zuerst die Sicherung am Ende,
+// dann die primaere Tafel, dann die Koepfe. Faellt der Strom mitten
+// hinein, ist die Platte danach in einem Zustand, aus dem ein Werkzeug
+// sie noch versteht -- eine halb geschriebene primaere Tafel mit
+// gueltiger Sicherung ist reparierbar, umgekehrt ist es das auch.
+//
+// Rueckgabe: die Partitionsnummer (1-basiert, wie /dev/hda3), oder 0.
+fn neben_schreiben(fd: u64, von: u64, bis: u64) -> u64 {
+    st_grund = D_KEIN
+    let p: u64 = (&SE[0 as usize]) as u64
+
+    // ---- die Vorpruefungen. JEDE EINZELNE verhindert einen Schaden.
+    if von < g_erste || bis > g_letzte || bis <= von {
+        st_grund = D_ENG
+        return 0
+    }
+    // UEBERSCHNEIDET SICH DER BEREICH MIT IRGENDEINER VORHANDENEN
+    // PARTITION? Das ist die wichtigste Frage dieser Datei. Ein
+    // Eintrag, der ueber eine fremde Partition liegt, zerstoert deren
+    // Daten in dem Augenblick, in dem OrientOS dorthin schreibt --
+    // und die Tafel saehe dabei vollkommen gesund aus.
+    var i: u64 = 0
+    while i < e_anz {
+        let s: u64 = e_start[(i) as usize]
+        let en: u64 = e_ende[(i) as usize]
+        if von <= en && bis >= s {
+            st_grund = D_ENG
+            return 0
+        }
+        i = i + 1
+    }
+    let slot: u64 = frei_index(fd)
+    if slot >= g_anzahl {
+        st_grund = D_VOLL
+        return 0
+    }
+
+    // ---- den Eintrag in SEINEN Sektor schreiben.
+    let pro: u64 = BS / g_esize
+    let sek_nr: u64 = slot / pro
+    let insek: u64 = slot % pro
+    if !instkern.lese(fd, g_tafel + sek_nr, p, BS) {
+        st_grund = D_LESEN
+        return 0
+    }
+    let e: u64 = p + insek * g_esize
+    // NOCH EINE VORPRUEFUNG, und sie steht hier mit Absicht ein
+    // zweites Mal: dieser Eintrag MUSS leer sein. Waere er es nicht,
+    // wuerde eine fremde Partition aus der Tafel verschwinden --
+    // ihre Daten laegen noch da, aber kein System faende sie wieder.
+    if !null_16(e) {
+        st_grund = D_VOLL
+        return 0
+    }
+    // Die Typkennung: unsere eigene, 4F53554D-4F46-5301-8E75-6D6F72694F53.
+    p8(e + 0, 0x4D)
+    p8(e + 1, 0x55)
+    p8(e + 2, 0x53)
+    p8(e + 3, 0x4F)
+    p8(e + 4, 0x46)
+    p8(e + 5, 0x4F)
+    p8(e + 6, 0x01)
+    p8(e + 7, 0x53)
+    p8(e + 8, 0x8E)
+    p8(e + 9, 0x75)
+    p8(e + 10, 0x6D)
+    p8(e + 11, 0x6F)
+    p8(e + 12, 0x72)
+    p8(e + 13, 0x69)
+    p8(e + 14, 0x4F)
+    p8(e + 15, 0x53)
+    // Die eigene Kennung. Sie muss EINZIG sein, nicht unvorhersagbar --
+    // abgeleitet aus dem Anfangssektor, der auf dieser Platte genau
+    // einmal vorkommt.
+    p8(e + 16, 0x4D)
+    p8(e + 17, 0x55)
+    p8(e + 18, 0x53)
+    p8(e + 19, 0x4F)
+    p8(e + 20, 0x46)
+    p8(e + 21, 0x4F)
+    p8(e + 22, 0x40 | (slot & 15))
+    p8(e + 23, 0x53)
+    p32(e + 24, 0x53464F00 | (slot & 255))
+    p32(e + 28, von & 0xFFFFFFFF)
+    p64(e + 32, von)
+    p64(e + 40, bis)
+    p64(e + 48, 0)
+    // Der Name, UTF-16 kleinendig: "OSUM"
+    var nk: u64 = 0
+    while nk < 36 {
+        p16(e + 56 + nk * 2, 0)
+        nk = nk + 1
+    }
+    p16(e + 56, 79) // 'O'
+    p16(e + 58, 83) // 'S'
+    p16(e + 60, 85) // 'U'
+    p16(e + 62, 77) // 'M'
+
+    // Der geaenderte Sektor geht in BEIDE Tafeln. Die Sicherung
+    // ZUERST -- siehe oben.
+    let sich_tafel: u64 = g_sekt - 1 - ENTSECT
+    if !instkern.schreibe(fd, sich_tafel + sek_nr, p, BS) {
+        st_grund = D_SCHREIBEN
+        return 0
+    }
+    if !instkern.schreibe(fd, g_tafel + sek_nr, p, BS) {
+        st_grund = D_SCHREIBEN
+        return 0
+    }
+
+    // ---- die Pruefsumme ueber die GANZE Tafel, neu.
+    let gesamt: u64 = g_anzahl * g_esize
+    var c: u64 = 0xFFFFFFFF
+    var done: u64 = 0
+    var lba: u64 = g_tafel
+    while done < gesamt {
+        if !instkern.lese(fd, lba, p, BS) {
+            st_grund = D_LESEN
+            return 0
+        }
+        var chunk: u64 = BS
+        if gesamt - done < BS {
+            chunk = gesamt - done
+        }
+        c = crc_feed(c, p, chunk)
+        done = done + chunk
+        lba = lba + 1
+    }
+    let tcrc: u64 = (c ^ 0xFFFFFFFF) & 0xFFFFFFFF
+
+    // ---- die beiden Koepfe. Jeder traegt die neue Tafelsumme und
+    // danach seine eigene, in dieser Reihenfolge.
+    //
+    // Der Kopf wird GELESEN und nur an zwei Feldern geaendert. Alles
+    // andere -- die Plattenkennung, die Fassungsnummer, die Grenzen --
+    // bleibt so, wie das fremde Werkzeug es geschrieben hat.
+    if !instkern.lese(fd, 1, p, BS) {
+        st_grund = D_LESEN
+        return 0
+    }
+    let hsize: u64 = g32(p + 12)
+    p32(p + 88, tcrc)
+    p32(p + 16, 0)
+    p32(p + 16, crc_of(p, hsize))
+    if !instkern.schreibe(fd, 1, p, BS) {
+        st_grund = D_SCHREIBEN
+        return 0
+    }
+    if !instkern.lese(fd, g_sekt - 1, p, BS) {
+        st_grund = D_LESEN
+        return 0
+    }
+    let hsize2: u64 = g32(p + 12)
+    p32(p + 88, tcrc)
+    p32(p + 16, 0)
+    p32(p + 16, crc_of(p, hsize2))
+    if !instkern.schreibe(fd, g_sekt - 1, p, BS) {
+        st_grund = D_SCHREIBEN
+        return 0
+    }
+    return slot + 1
+}
