@@ -1,0 +1,1053 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/wayd.fi -- RUNDE WAYLAND: DER WAYLAND-SERVER. Ring 3.
+//
+// WAS DIESES PROGRAMM IST, in einem Satz: es macht einen Unix-Socket
+// auf, spricht das Wayland-Wire-Protokoll und legt die Oberflaechen, die
+// dabei entstehen, mit WM_CREATE/WM_FILL/WM_FLUSH auf den Fensterserver
+// im Kern.
+//
+// WARUM ES UEBERHAUPT GEHT, und das ist der eigentliche Befund dieser
+// Runde: OrientOS hat den schweren Teil schon. `kernel/wm.fi` ist
+// architektonisch bereits ein Wayland-Compositor -- die Anwendung malt
+// in einen EIGENEN Puffer, der Server setzt zusammen, die Anwendung
+// sieht den Bildschirm nie. Nur der TRANSPORT war ein anderer:
+// Systemaufrufe (WM_CREATE = 2100) statt Socket und Protokoll. Dieses
+// Programm ist die Uebersetzung zwischen beiden, und mehr ist es nicht.
+//
+// ------------------------------------------------- DAS DRAHTFORMAT
+//
+// Eine Nachricht ist:
+//
+//   +0  u32  die Objektnummer, an die sie geht
+//   +4  u16  der Opcode      +6  u16  die LAENGE in Oktetten, mit Kopf
+//   +8       die Argumente, jedes auf 4 Oktette aufgerundet
+//
+// Argumentarten: int/uint = 4 Oktette. string = Laenge (mit
+// Nullabschluss) + Oktette, auf 4 aufgefuellt. object/new_id = 4
+// Oktette. array = wie string ohne Null. fd = GAR NICHT im Strom --
+// der geht als SCM_RIGHTS daneben, und das ist der Grund, warum diese
+// Runde ueberhaupt am Kern arbeiten musste.
+//
+// Alles ist little-endian, und das ist hier dasselbe wie die Maschine.
+//
+// ------------------------------------------------ WAS GEBAUT IST
+//
+// Die elf Schnittstellen, ohne die kein Client startet -- nicht mehr.
+// `tools/wayland/gen.py` erzeugt die Nummern dazu aus den OFFIZIELLEN
+// XML-Dateien (`kernel/user/wlproto.fi`), damit sie nicht abgetippt
+// sind und bei einer neuen Protokollfassung nachgezogen werden koennen.
+//
+//   wl_display    sync, get_registry, und die zwei Ereignisse error
+//                 und delete_id
+//   wl_registry   global, bind
+//   wl_callback   done -- das ist die halbe Miete: ein Client, der auf
+//                 `roundtrip` wartet und nie ein `done` bekommt, haengt
+//                 fuer immer, und das sieht aus wie ein toter Server.
+//   wl_compositor create_surface
+//   wl_shm        format (ARGB8888 und XRGB8888), create_pool
+//   wl_shm_pool   create_buffer
+//   wl_buffer     release
+//   wl_surface    attach, damage, commit, frame
+//   wl_seat       capabilities  (Tastatur und Zeiger werden ANGEBOTEN;
+//                 die Ereignisse dazu stehen in Abschnitt 9)
+//   xdg_wm_base   get_xdg_surface, pong
+//   xdg_surface   get_toplevel, ack_configure, und das configure, ohne
+//                 das ein Client nie seinen ersten Puffer schickt
+//   xdg_toplevel  set_title, configure, close
+//
+// WAS NICHT GEBAUT IST, und es steht hier und nicht in einer Fussnote:
+// wl_data_device (Ziehen und Ablegen zwischen Programmen), wl_touch,
+// wl_subsurface, wl_shell (veraltet), xdg_popup, Unterflaechen,
+// Skalierung, Transformationen, und JEDES Pufferformat ausser den zwei
+// oben. Ein Client, der etwas davon bindet, bekommt einen ehrlichen
+// Protokollfehler -- keine stille Falschantwort.
+
+profile kernel
+
+import ulib
+import libc.io
+import libc.kcall
+import wlproto
+import utf8
+
+export { u_start }
+
+// ===================================================== DIE SYSTEMAUFRUFE
+//
+// Rohe Nummern, weil dieses Programm unter den Bibliotheken sitzt: es
+// IST der Dienst, den andere benutzen.
+
+const SYS_READ: u64 = 0
+const SYS_WRITE: u64 = 1
+const SYS_CLOSE: u64 = 3
+const SYS_POLL: u64 = 7
+const SYS_MMAP: u64 = 9
+const SYS_SOCKET: u64 = 41
+const SYS_ACCEPT: u64 = 43
+const SYS_SENDMSG: u64 = 46
+const SYS_RECVMSG: u64 = 47
+const SYS_BIND: u64 = 49
+const SYS_LISTEN: u64 = 50
+const SYS_UNLINK: u64 = 87
+const SYS_NANOSLEEP: u64 = 35
+
+const AF_UNIX: u64 = 1
+const SOCK_STREAM: u64 = 1
+const PROT_READ: u64 = 1
+const PROT_WRITE: u64 = 2
+const MAP_SHARED: u64 = 1
+const MSG_DONTWAIT: u64 = 64
+
+const WM_CREATE: u64 = 2100
+const WM_FILL: u64 = 2101
+const WM_EVENT: u64 = 2103
+const WM_INFO: u64 = 2104
+const WM_FLUSH: u64 = 2105
+const WM_CLOSE: u64 = 2107
+
+// ------------------------------------------------------------- Grenzen
+
+const MAX_CLIENTS: u64 = 4
+const MAX_OBJ: u64 = 64 // Objekte je Client
+const IN_CAP: u64 = 8192 // Eingangspuffer je Client
+const OUT_CAP: u64 = 4096
+
+// Die Objektnummern des Clients liegen unter 0xFF000000; darueber
+// vergibt der SERVER. wl_display ist immer 1.
+const ID_DISPLAY: u64 = 1
+
+// ===================================================== DIE OBJEKTTAFEL
+//
+// Ein Objekt ist ein Paar (Nummer, Schnittstelle) und je nach
+// Schnittstelle ein paar Zahlen dazu. Statt einer Tafel je Art gibt es
+// EINE mit den Feldern, die die groesste braucht -- bei 64 Objekten je
+// Client kostet das nichts und erspart vier Suchen.
+
+const O_ID: u64 = 0 // die Nummer im Protokoll, 0 = frei
+const O_IFACE: u64 = 1 // welche Schnittstelle
+const O_A: u64 = 2 // Zweck je nach Art
+const O_B: u64 = 3
+const O_C: u64 = 4
+const O_D: u64 = 5
+const O_FIELDS: u64 = 6
+
+// Fuer wl_surface:  A = Fensterhandle des Kerns (0 = noch keines)
+//                   B = angehaengter wl_buffer
+//                   C = xdg_surface, das dazugehoert
+//                   D = 1, sobald ein Puffer festgeschrieben wurde
+// Fuer wl_shm_pool: A = Adresse der Abbildung, B = Groesse, C = fd
+// Fuer wl_buffer:   A = Adresse, B = Breite, C = Hoehe, D = Zeilenlaenge
+// Fuer xdg_surface: A = die wl_surface darunter
+// Fuer xdg_toplevel:A = das xdg_surface darunter
+
+static mut objs: [u64; 1536] = [0 as u64; 1536] // MAX_CLIENTS * MAX_OBJ * O_FIELD]
+
+// Je Client
+static mut c_used: [u64; 4] = [0 as u64; 4]
+static mut c_fd: [u64; 4] = [0 as u64; 4]
+static mut c_inlen: [u64; 4] = [0 as u64; 4]
+static mut c_nextid: [u64; 4] = [0 as u64; 4]
+static mut inbuf: [u8; 32768] = [0 as u8; 32768] // MAX_CLIENTS * IN_CA]
+static mut outbuf: [u8; 16384] = [0 as u8; 16384]
+static mut c_outlen: [u64; 4] = [0 as u64; 4]
+
+// Der Zaehler fuer die Abnahme -- jede Zahl hier wird am Ende gedruckt
+// und von `tools/wayland/run.sh` gelesen.
+static mut n_conn: u64 = 0
+static mut n_msgs: u64 = 0
+static mut n_bad: u64 = 0
+static mut n_wins: u64 = 0
+static mut n_commits: u64 = 0
+static mut n_fds: u64 = 0
+
+fn obj_base(c: u64, i: u64) -> u64 {
+    return (c * MAX_OBJ + i) * O_FIELDS
+}
+
+fn obj_find(c: u64, id: u64) -> u64 {
+    var i: u64 = 0
+    while i < MAX_OBJ {
+        if objs[(obj_base(c, i) + O_ID) as usize] == id {
+            return i
+        }
+        i = i + 1
+    }
+    return MAX_OBJ
+}
+
+fn obj_new(c: u64, id: u64, iface: u64) -> u64 {
+    // Eine Nummer, die es schon gibt, ist ein Protokollfehler -- der
+    // Client fuehrt selbst Buch darueber, welche er vergeben hat.
+    if obj_find(c, id) < MAX_OBJ {
+        return MAX_OBJ
+    }
+    var i: u64 = 0
+    while i < MAX_OBJ {
+        let b: u64 = obj_base(c, i)
+        if objs[(b + O_ID) as usize] == 0 {
+            objs[(b + O_ID) as usize] = id
+            objs[(b + O_IFACE) as usize] = iface
+            objs[(b + O_A) as usize] = 0
+            objs[(b + O_B) as usize] = 0
+            objs[(b + O_C) as usize] = 0
+            objs[(b + O_D) as usize] = 0
+            return i
+        }
+        i = i + 1
+    }
+    return MAX_OBJ
+}
+
+fn obj_iface(c: u64, id: u64) -> u64 {
+    let i: u64 = obj_find(c, id)
+    if i >= MAX_OBJ {
+        return wlproto.IF_NONE
+    }
+    return objs[(obj_base(c, i) + O_IFACE) as usize]
+}
+
+fn obj_get(c: u64, id: u64, f: u64) -> u64 {
+    let i: u64 = obj_find(c, id)
+    if i >= MAX_OBJ {
+        return 0
+    }
+    return objs[(obj_base(c, i) + f) as usize]
+}
+
+fn obj_set(c: u64, id: u64, f: u64, v: u64) {
+    let i: u64 = obj_find(c, id)
+    if i < MAX_OBJ {
+        objs[(obj_base(c, i) + f) as usize] = v
+    }
+}
+
+fn obj_drop(c: u64, id: u64) {
+    let i: u64 = obj_find(c, id)
+    if i < MAX_OBJ {
+        objs[(obj_base(c, i) + O_ID) as usize] = 0
+    }
+}
+
+// ================================================= OKTETTE UND WOERTER
+
+fn rd32(p: u64) -> u64 {
+    return (inbuf[p as usize] as u64)
+        | ((inbuf[(p + 1) as usize] as u64) << 8)
+        | ((inbuf[(p + 2) as usize] as u64) << 16)
+        | ((inbuf[(p + 3) as usize] as u64) << 24)
+}
+
+fn wr32(p: u64, v: u64) {
+    outbuf[p as usize] = (v & 255) as u8
+    outbuf[(p + 1) as usize] = ((v >> 8) & 255) as u8
+    outbuf[(p + 2) as usize] = ((v >> 16) & 255) as u8
+    outbuf[(p + 3) as usize] = ((v >> 24) & 255) as u8
+}
+
+// ------------------------------------------------- Ereignisse schreiben
+//
+// Ein Ereignis wird in den Ausgangspuffer des Clients gelegt und beim
+// naechsten Durchlauf am Stueck geschickt. Einzeln zu senden waere ein
+// Systemaufruf je Ereignis, und die Registrierung allein schickt elf.
+
+fn ev_begin(c: u64, id: u64, op: u64) -> u64 {
+    let p: u64 = c * OUT_CAP + c_outlen[c as usize]
+    wr32(p, id)
+    // Die Laenge steht erst am Ende fest; hier bleibt Platz.
+    wr32(p + 4, op)
+    return p
+}
+
+fn ev_arg(c: u64, p: u64, n: u64, v: u64) {
+    wr32(p + 8 + n * 4, v)
+}
+
+fn ev_end(c: u64, p: u64, nargs: u64) {
+    let len: u64 = 8 + nargs * 4
+    // Opcode bleibt in den unteren 16 Bit, die Laenge kommt darueber.
+    let op: u64 = outbuf[(p + 4) as usize] as u64
+        | ((outbuf[(p + 5) as usize] as u64) << 8)
+    wr32(p + 4, (op & 0xFFFF) | (len << 16))
+    c_outlen[c as usize] = c_outlen[c as usize] + len
+}
+
+// Eine Zeichenkette als Argument: Laenge (mit der Null) und dann die
+// Oktette, auf vier aufgefuellt.
+fn ev_str(c: u64, p: u64, n: u64, iface: u64) -> u64 {
+    let l: u64 = wlproto.name_len(iface)
+    wr32(p + 8 + n * 4, l + 1)
+    var k: u64 = 0
+    while k < l {
+        outbuf[(p + 12 + n * 4 + k) as usize] =
+            wlproto.name_at(iface, k) as u8
+        k = k + 1
+    }
+    // Die Null und die Auffuellung auf vier.
+    var pad: u64 = l + 1
+    while (pad & 3) != 0 {
+        outbuf[(p + 12 + n * 4 + pad - 1) as usize] = 0
+        pad = pad + 1
+    }
+    outbuf[(p + 12 + n * 4 + l) as usize] = 0
+    return (l + 4) / 4
+}
+
+// wl_display.error -- der ehrliche Weg, einem Client zu sagen, dass er
+// etwas verlangt hat, das es hier nicht gibt.
+fn send_error(c: u64, id: u64, code: u64) {
+    let p: u64 = ev_begin(c, ID_DISPLAY, 0)
+    ev_arg(c, p, 0, id)
+    ev_arg(c, p, 1, code)
+    ev_arg(c, p, 2, 0) // die Meldung bleibt leer
+    ev_end(c, p, 3)
+    n_bad = n_bad + 1
+}
+
+fn send_delete_id(c: u64, id: u64) {
+    let p: u64 = ev_begin(c, ID_DISPLAY, 1)
+    ev_arg(c, p, 0, id)
+    ev_end(c, p, 1)
+}
+
+// ==================================================== DIE ANFRAGEN
+//
+// Ein Paket, das schon geprueft ist: `at` zeigt auf den Kopf, `len` ist
+// die Gesamtlaenge, `argp` auf das erste Argument.
+
+fn on_display(c: u64, id: u64, op: u64, argp: u64) {
+    if op == wlproto.RQ_WL_DISPLAY_SYNC {
+        // sync legt ein wl_callback an, schickt sofort `done` und
+        // loescht es wieder. Ohne das haengt jeder `wl_display_roundtrip`
+        // fuer immer -- und den macht jeder Client beim Start zweimal.
+        let cb: u64 = rd32(argp)
+        let p: u64 = ev_begin(c, cb, 0)
+        ev_arg(c, p, 0, 0)
+        ev_end(c, p, 1)
+        send_delete_id(c, cb)
+        return
+    }
+    if op == wlproto.RQ_WL_DISPLAY_GET_REGISTRY {
+        let rid: u64 = rd32(argp)
+        if obj_new(c, rid, wlproto.IF_WL_REGISTRY) >= MAX_OBJ {
+            send_error(c, id, 0)
+            return
+        }
+        // Alles anbieten, was dieser Server WIRKLICH kann. Der Name
+        // eines Globals ist hier seine Schnittstellennummer -- das ist
+        // erlaubt (der Name ist frei waehlbar) und spart eine Tafel.
+        announce(c, rid, wlproto.IF_WL_COMPOSITOR)
+        announce(c, rid, wlproto.IF_WL_SHM)
+        announce(c, rid, wlproto.IF_WL_SEAT)
+        announce(c, rid, wlproto.IF_WL_OUTPUT)
+        announce(c, rid, wlproto.IF_XDG_WM_BASE)
+        return
+    }
+    send_error(c, id, 1)
+}
+
+fn announce(c: u64, rid: u64, iface: u64) {
+    let p: u64 = ev_begin(c, rid, 0)
+    ev_arg(c, p, 0, iface) // der Name
+    let w: u64 = ev_str(c, p, 1, iface)
+    ev_arg(c, p, 1 + w, wlproto.version_of(iface))
+    ev_end(c, p, 2 + w)
+}
+
+fn on_registry(c: u64, id: u64, op: u64, argp: u64) {
+    if op != wlproto.RQ_WL_REGISTRY_BIND {
+        send_error(c, id, 1)
+        return
+    }
+    // bind: name, Schnittstellenname als Zeichenkette, Fassung, new_id.
+    let name: u64 = rd32(argp)
+    let slen: u64 = rd32(argp + 4)
+    // Die Zeichenkette ueberspringen, auf vier aufgerundet.
+    let skip: u64 = (slen + 3) & 0xFFFFFFFC
+    let nid: u64 = rd32(argp + 4 + 4 + skip + 4)
+    if name >= wlproto.IF_COUNT {
+        send_error(c, id, 0)
+        return
+    }
+    if obj_new(c, nid, name) >= MAX_OBJ {
+        send_error(c, id, 0)
+        return
+    }
+    // wl_shm sagt sofort, welche Formate es kann. Ein Client, der
+    // keines bekommt, malt nichts.
+    if name == wlproto.IF_WL_SHM {
+        let p0: u64 = ev_begin(c, nid, 0)
+        ev_arg(c, p0, 0, 0) // ARGB8888
+        ev_end(c, p0, 1)
+        let p1: u64 = ev_begin(c, nid, 0)
+        ev_arg(c, p1, 0, 1) // XRGB8888
+        ev_end(c, p1, 1)
+    }
+    // wl_seat sagt, was es hat. Ohne capabilities ruft ein Client nie
+    // get_keyboard, und ein Programm ohne Tastatur ist ein Bild.
+    if name == wlproto.IF_WL_SEAT {
+        let p: u64 = ev_begin(c, nid, 0)
+        ev_arg(c, p, 0, 3) // Zeiger | Tastatur
+        ev_end(c, p, 1)
+    }
+    if name == wlproto.IF_WL_OUTPUT {
+        // geometry, dann mode, dann done -- in dieser Reihenfolge.
+        let sw: u64 = ulib.sys(WM_INFO, 0, 0, 0)
+        var w: u64 = sw & 0xFFFF
+        var h: u64 = (sw >> 16) & 0xFFFF
+        if w == 0 {
+            w = 1024
+            h = 768
+        }
+        let pg: u64 = ev_begin(c, nid, 0)
+        ev_arg(c, pg, 0, 0)
+        ev_arg(c, pg, 1, 0)
+        ev_arg(c, pg, 2, 300)
+        ev_arg(c, pg, 3, 200)
+        ev_arg(c, pg, 4, 0)
+        ev_arg(c, pg, 5, 0) // make (leere Zeichenkette)
+        ev_arg(c, pg, 6, 0) // model
+        ev_arg(c, pg, 7, 0) // transform
+        ev_end(c, pg, 8)
+        let pm: u64 = ev_begin(c, nid, 1)
+        ev_arg(c, pm, 0, 3) // current | preferred
+        ev_arg(c, pm, 1, w)
+        ev_arg(c, pm, 2, h)
+        ev_arg(c, pm, 3, 60000)
+        ev_end(c, pm, 4)
+    }
+}
+
+fn on_compositor(c: u64, id: u64, op: u64, argp: u64) {
+    if op == wlproto.RQ_WL_COMPOSITOR_CREATE_SURFACE {
+        let sid: u64 = rd32(argp)
+        if obj_new(c, sid, wlproto.IF_WL_SURFACE) >= MAX_OBJ {
+            send_error(c, id, 0)
+        }
+        return
+    }
+    if op == wlproto.RQ_WL_COMPOSITOR_CREATE_REGION {
+        let rid: u64 = rd32(argp)
+        obj_new(c, rid, wlproto.IF_WL_REGION)
+        return
+    }
+    send_error(c, id, 1)
+}
+
+// wl_shm.create_pool -- HIER kommt der Deskriptor an, und hier wird aus
+// fremdem Speicher unser Speicher. Ohne SCM_RIGHTS und MAP_SHARED aus
+// dem Kern gaebe es diese Funktion nicht.
+fn on_shm(c: u64, id: u64, op: u64, argp: u64, fd: u64) {
+    if op != wlproto.RQ_WL_SHM_CREATE_POOL {
+        send_error(c, id, 1)
+        return
+    }
+    let pid: u64 = rd32(argp)
+    // Das Argument `fd` steht NICHT im Strom -- nach der Objektnummer
+    // kommt gleich die Groesse.
+    let size: u64 = rd32(argp + 4)
+    if fd == 0 || size == 0 {
+        send_error(c, id, 0)
+        return
+    }
+    let addr: u64 = kcall.map_fd(size, PROT_READ | PROT_WRITE,
+        MAP_SHARED, fd, 0)
+    if addr == 0 || addr > 0xFFFFFFFFFFFF0000 {
+        send_error(c, id, 0)
+        return
+    }
+    if obj_new(c, pid, wlproto.IF_WL_SHM_POOL) >= MAX_OBJ {
+        send_error(c, id, 0)
+        return
+    }
+    obj_set(c, pid, O_A, addr)
+    obj_set(c, pid, O_B, size)
+    obj_set(c, pid, O_C, fd)
+    n_fds = n_fds + 1
+}
+
+fn on_shm_pool(c: u64, id: u64, op: u64, argp: u64) {
+    if op == wlproto.RQ_WL_SHM_POOL_CREATE_BUFFER {
+        let bid: u64 = rd32(argp)
+        let off: u64 = rd32(argp + 4)
+        let w: u64 = rd32(argp + 8)
+        let h: u64 = rd32(argp + 12)
+        let stride: u64 = rd32(argp + 16)
+        let base: u64 = obj_get(c, id, O_A)
+        let size: u64 = obj_get(c, id, O_B)
+        // Ein Puffer, der ueber das Ende des Vorrats hinausragt, waere
+        // ein Leseloch in fremden Speicher. Das ist die Pruefung, die
+        // ein Server nie weglassen darf.
+        if base == 0 || h == 0 || stride == 0 {
+            send_error(c, id, 0)
+            return
+        }
+        if h > 4096 || stride > 65536 {
+            send_error(c, id, 0)
+            return
+        }
+        if off > size || (h * stride) > (size - off) {
+            send_error(c, id, 0)
+            return
+        }
+        if obj_new(c, bid, wlproto.IF_WL_BUFFER) >= MAX_OBJ {
+            send_error(c, id, 0)
+            return
+        }
+        obj_set(c, bid, O_A, base + off)
+        obj_set(c, bid, O_B, w)
+        obj_set(c, bid, O_C, h)
+        obj_set(c, bid, O_D, stride)
+        return
+    }
+    if op == wlproto.RQ_WL_SHM_POOL_DESTROY {
+        obj_drop(c, id)
+        return
+    }
+    if op == wlproto.RQ_WL_SHM_POOL_RESIZE {
+        return
+    }
+    send_error(c, id, 1)
+}
+
+// ============================================ DIE OBERFLAECHE UND DAS BILD
+//
+// DAS IST DIE STELLE, AN DER WAYLAND AUF OrientOS TRIFFT.
+//
+// Ein `wl_surface.commit` heisst: "was ich angehaengt habe, gilt jetzt".
+// Auf dieser Seite heisst das: den Puffer des Clients Bildpunkt fuer
+// Bildpunkt in den Fensterpuffer des Kerns schreiben und WM_FLUSH
+// rufen. Der Kern setzt danach zusammen, wie er es fuer jedes andere
+// Fenster tut -- er erfaehrt nie, dass dieses Fenster einem
+// Wayland-Client gehoert.
+//
+// DIE FARBEN. Wayland ARGB8888/XRGB8888 ist auf little-endian genau
+// dasselbe Wort wie 0xAARRGGBB, und der Fensterserver nimmt 0xRRGGBB.
+// Die oberen acht Bit fallen weg -- dieser Server mischt nicht, er
+// schreibt undurchsichtig. Das ist der ehrliche Umfang dieser Runde.
+
+fn surface_commit(c: u64, sid: u64) {
+    let bid: u64 = obj_get(c, sid, O_B)
+    if bid == 0 {
+        return
+    }
+    let src: u64 = obj_get(c, bid, O_A)
+    let w: u64 = obj_get(c, bid, O_B)
+    let h: u64 = obj_get(c, bid, O_C)
+    let stride: u64 = obj_get(c, bid, O_D)
+    if src == 0 || w == 0 || h == 0 {
+        return
+    }
+    var win: u64 = obj_get(c, sid, O_A)
+    if win == 0 {
+        // Das erste Festschreiben macht das Fenster. Vorher gibt es
+        // keine Groesse, und ein Fenster ohne Groesse ist keines.
+        let xy: u64 = (60 << 16) | 60
+        let wh: u64 = (w << 16) | h
+        win = ulib.sys(WM_CREATE, xy, wh, 0)
+        if win == 0 || win > 0xFFFFFFFFFFFF0000 {
+            return
+        }
+        obj_set(c, sid, O_A, win)
+        n_wins = n_wins + 1
+    }
+    // Zeile fuer Zeile in den Fensterpuffer. WM_FILL malt ein Rechteck
+    // in EINER Farbe -- fuer ein Bild ist das ein Aufruf je Bildpunkt,
+    // und das sind bei 250x250 mehr als sechzigtausend. Deshalb wird
+    // hier in LAUFENDE GLEICHE STUECKE zerlegt: eine Flaeche wie die
+    // von weston-simple-shm besteht aus wenigen Farben je Zeile, und
+    // ein Lauf kostet einen Aufruf statt hundert.
+    var y: u64 = 0
+    while y < h {
+        var x: u64 = 0
+        while x < w {
+            let px: u64 = rd32_at(src + y * stride + x * 4) & 0xFFFFFF
+            var run: u64 = 1
+            while x + run < w
+                && (rd32_at(src + y * stride + (x + run) * 4)
+                    & 0xFFFFFF) == px {
+                run = run + 1
+            }
+            ulib.sys(WM_FILL, win, (x << 16) | y, (run << 16) | 1)
+            fill_colour(win, x, y, run, px)
+            x = x + run
+        }
+        y = y + 1
+    }
+    ulib.sys(WM_FLUSH, win, 0, 0)
+    n_commits = n_commits + 1
+    // Der Puffer ist wieder frei -- der Client darf ihn neu beschreiben.
+    let p: u64 = ev_begin(c, bid, 0)
+    ev_end(c, p, 0)
+    obj_set(c, sid, O_B, 0)
+    obj_set(c, sid, O_D, 1)
+}
+
+// WM_FILL nimmt vier Zahlen und hat keinen Platz mehr fuer die Farbe --
+// sie kommt im vierten Register. `ulib.sys` reicht nur drei durch, also
+// steht hier der Aufruf mit vieren.
+fn fill_colour(win: u64, x: u64, y: u64, run: u64, colour: u64) {
+    ulib.sys4(WM_FILL, win, (x << 16) | y, (run << 16) | 1, colour)
+}
+
+// Vier Oktette aus dem GETEILTEN Puffer des Clients. Der liegt in
+// unserem Adressraum (die Abbildung aus `on_shm`), also ist das ein
+// gewoehnlicher Lesezugriff -- und genau das ist der Gewinn von
+// MAP_SHARED: keine Kopie, kein Systemaufruf je Bildpunkt.
+fn rd32_at(p: u64) -> u64 {
+    return (__mmio_read32(p as *mut u32)) as u64
+}
+
+fn on_surface(c: u64, id: u64, op: u64, argp: u64) {
+    if op == wlproto.RQ_WL_SURFACE_ATTACH {
+        obj_set(c, id, O_B, rd32(argp))
+        return
+    }
+    if op == wlproto.RQ_WL_SURFACE_DAMAGE {
+        return
+    }
+    if op == wlproto.RQ_WL_SURFACE_COMMIT {
+        surface_commit(c, id)
+        return
+    }
+    if op == wlproto.RQ_WL_SURFACE_FRAME {
+        // Ein Bildrahmen-Rueckruf: sofort beantworten. Ein Client, der
+        // auf `frame` wartet, malt sonst genau ein Bild und schlaeft
+        // fuer immer -- und das sieht aus wie ein haengender Server.
+        let cb: u64 = rd32(argp)
+        let p: u64 = ev_begin(c, cb, 0)
+        ev_arg(c, p, 0, n_commits)
+        ev_end(c, p, 1)
+        send_delete_id(c, cb)
+        return
+    }
+    if op == wlproto.RQ_WL_SURFACE_DESTROY {
+        let win: u64 = obj_get(c, id, O_A)
+        if win != 0 {
+            ulib.sys(WM_CLOSE, win, 0, 0)
+        }
+        obj_drop(c, id)
+        return
+    }
+    // set_opaque_region, set_input_region, set_buffer_transform,
+    // set_buffer_scale, damage_buffer, offset -- alle erlaubt und alle
+    // ohne Wirkung. Sie ABZUWEISEN waere falsch: ein Client, der
+    // set_buffer_scale(1) ruft, hat nichts falsch gemacht.
+}
+
+// ------------------------------------------------------- xdg-shell
+//
+// OHNE DIESEN ABSCHNITT MALT KEIN CLIENT. Die Reihenfolge ist
+// vorgeschrieben und unerbittlich:
+//
+//   get_xdg_surface -> get_toplevel -> commit (ohne Puffer!)
+//   -> SERVER schickt configure -> Client ack_configure
+//   -> JETZT erst attach + commit mit Puffer
+//
+// Ein Server, der das configure nicht schickt, bekommt nie einen
+// Puffer, und der Client haengt im ersten roundtrip.
+
+fn on_xdg_wm_base(c: u64, id: u64, op: u64, argp: u64) {
+    if op == wlproto.RQ_XDG_WM_BASE_GET_XDG_SURFACE {
+        let xid: u64 = rd32(argp)
+        let sid: u64 = rd32(argp + 4)
+        if obj_new(c, xid, wlproto.IF_XDG_SURFACE) >= MAX_OBJ {
+            send_error(c, id, 0)
+            return
+        }
+        obj_set(c, xid, O_A, sid)
+        obj_set(c, sid, O_C, xid)
+        return
+    }
+    if op == wlproto.RQ_XDG_WM_BASE_PONG {
+        return
+    }
+    if op == wlproto.RQ_XDG_WM_BASE_DESTROY {
+        obj_drop(c, id)
+        return
+    }
+    if op == wlproto.RQ_XDG_WM_BASE_CREATE_POSITIONER {
+        // Angelegt, damit die Nummer nicht ins Leere zeigt; benutzt
+        // wird sie nicht (keine Popups in dieser Runde).
+        obj_new(c, rd32(argp), wlproto.IF_NONE)
+        return
+    }
+    send_error(c, id, 1)
+}
+
+static mut next_serial: u64 = 1
+
+fn on_xdg_surface(c: u64, id: u64, op: u64, argp: u64) {
+    if op == wlproto.RQ_XDG_SURFACE_GET_TOPLEVEL {
+        let tid: u64 = rd32(argp)
+        if obj_new(c, tid, wlproto.IF_XDG_TOPLEVEL) >= MAX_OBJ {
+            send_error(c, id, 0)
+            return
+        }
+        obj_set(c, tid, O_A, id)
+        // Sofort ein configure schicken: erst eines mit 0x0 (der
+        // Client darf seine Groesse selbst waehlen), dann das
+        // xdg_surface.configure mit der Folgenummer.
+        let pt: u64 = ev_begin(c, tid, 0)
+        ev_arg(c, pt, 0, 0)
+        ev_arg(c, pt, 1, 0)
+        ev_arg(c, pt, 2, 0) // leeres Zustandsfeld
+        ev_end(c, pt, 3)
+        let ps: u64 = ev_begin(c, id, 0)
+        ev_arg(c, ps, 0, next_serial)
+        ev_end(c, ps, 1)
+        next_serial = next_serial + 1
+        return
+    }
+    if op == wlproto.RQ_XDG_SURFACE_ACK_CONFIGURE {
+        return
+    }
+    if op == wlproto.RQ_XDG_SURFACE_SET_WINDOW_GEOMETRY {
+        return
+    }
+    if op == wlproto.RQ_XDG_SURFACE_DESTROY {
+        obj_drop(c, id)
+        return
+    }
+    send_error(c, id, 1)
+}
+
+fn on_xdg_toplevel(c: u64, id: u64, op: u64, argp: u64) {
+    if op == wlproto.RQ_XDG_TOPLEVEL_DESTROY {
+        obj_drop(c, id)
+        return
+    }
+    // set_title, set_app_id, set_min_size, move, resize und der ganze
+    // Rest: angenommen, ohne Wirkung. Ein Fenstertitel waere WM_TITLE
+    // und ist eine eigene Runde wert.
+}
+
+// ====================================================== DER ZERLEGER
+//
+// Hier faellt die Entscheidung, ob ein Paket ueberhaupt eines ist. DREI
+// Pruefungen, und jede hat einen Grund, den ein Angreifer kennt:
+//
+//   1. Die Laenge muss mindestens 8 sein (der Kopf) und darf nicht
+//      ueber das hinausgehen, was wirklich da ist.
+//   2. Die Objektnummer muss es geben. Ein Paket an ein Objekt, das
+//      nie angelegt wurde, ist ein Protokollfehler -- und der haeufigste
+//      Weg, einen Server in eine Tafel schreiben zu lassen, die ihm
+//      nicht gehoert.
+//   3. Der Opcode muss zu der Schnittstelle passen. `req_count` kommt
+//      aus der XML-Datei, also stimmt die Zahl mit dem Protokoll
+//      ueberein und nicht mit dem, was jemand gerade dachte.
+//
+// Faellt eine davon, geht ein wl_display.error hinaus und die
+// Verbindung wird geschlossen -- der Server bleibt stehen. Das ist die
+// Gegenprobe 'ein falsches Opcode-Paket muss abgewiesen werden statt
+// den Server zu toeten'.
+
+fn dispatch(c: u64, at: u64, len: u64, fd: u64) -> bool {
+    let base: u64 = c * IN_CAP
+    let id: u64 = rd32(base + at)
+    let w1: u64 = rd32(base + at + 4)
+    let op: u64 = w1 & 0xFFFF
+    let argp: u64 = base + at + 8
+    let iface: u64 = obj_iface(c, id)
+    if iface >= wlproto.IF_COUNT {
+        send_error(c, id, 0)
+        return false
+    }
+    if op >= wlproto.req_count(iface) {
+        send_error(c, id, 1)
+        return false
+    }
+    n_msgs = n_msgs + 1
+    if iface == wlproto.IF_WL_DISPLAY {
+        on_display(c, id, op, argp)
+    } else if iface == wlproto.IF_WL_REGISTRY {
+        on_registry(c, id, op, argp)
+    } else if iface == wlproto.IF_WL_COMPOSITOR {
+        on_compositor(c, id, op, argp)
+    } else if iface == wlproto.IF_WL_SHM {
+        on_shm(c, id, op, argp, fd)
+    } else if iface == wlproto.IF_WL_SHM_POOL {
+        on_shm_pool(c, id, op, argp)
+    } else if iface == wlproto.IF_WL_SURFACE {
+        on_surface(c, id, op, argp)
+    } else if iface == wlproto.IF_XDG_WM_BASE {
+        on_xdg_wm_base(c, id, op, argp)
+    } else if iface == wlproto.IF_XDG_SURFACE {
+        on_xdg_surface(c, id, op, argp)
+    } else if iface == wlproto.IF_XDG_TOPLEVEL {
+        on_xdg_toplevel(c, id, op, argp)
+    } else if iface == wlproto.IF_WL_BUFFER {
+        if op == 0 {
+            obj_drop(c, id)
+        }
+    }
+    return true
+}
+
+// ================================================== EIN- UND AUSGANG
+
+// Die Form von `struct msghdr` und `struct iovec`, wie der Kern sie
+// liest (kernel/sys.fi, Abschnitt RUNDE WAYLAND).
+static mut mh: [u64; 8] = [0 as u64; 8]
+static mut iov: [u64; 2] = [0 as u64; 2]
+static mut cmsg: [u64; 8] = [0 as u64; 8]
+
+fn recv_into(c: u64) -> u64 {
+    let base: u64 = c * IN_CAP
+    let have: u64 = c_inlen[c as usize]
+    if have >= IN_CAP - 256 {
+        return 0
+    }
+    iov[0 as usize] = (&inbuf[(base + have) as usize]) as u64
+    iov[1 as usize] = IN_CAP - have
+    cmsg[0 as usize] = 0
+    cmsg[1 as usize] = 0
+    cmsg[2 as usize] = 0
+    cmsg[3 as usize] = 0
+    mh[0 as usize] = 0
+    mh[1 as usize] = 0
+    mh[2 as usize] = (&iov[0 as usize]) as u64
+    mh[3 as usize] = 1
+    mh[4 as usize] = (&cmsg[0 as usize]) as u64
+    mh[5 as usize] = 64
+    mh[6 as usize] = 0
+    let n: u64 = ulib.sys(SYS_RECVMSG, c_fd[c as usize],
+        (&mh[0 as usize]) as u64, MSG_DONTWAIT)
+    if n > 0xFFFFFFFFFFFF0000 {
+        return 0
+    }
+    c_inlen[c as usize] = have + n
+    return n
+}
+
+// Kam ein Deskriptor mit? Der Kern legt ihn als SCM_RIGHTS in den
+// Steuerteil; das erste `int` dahinter ist die Nummer im EIGENEN
+// Adressraum.
+fn taken_fd() -> u64 {
+    if mh[5 as usize] < 20 {
+        return 0
+    }
+    let lvl: u64 = cmsg[1 as usize] & 0xFFFFFFFF
+    let typ: u64 = (cmsg[1 as usize] >> 32) & 0xFFFFFFFF
+    if lvl != 1 || typ != 1 {
+        return 0
+    }
+    return cmsg[2 as usize] & 0xFFFFFFFF
+}
+
+fn flush_out(c: u64) {
+    let n: u64 = c_outlen[c as usize]
+    if n == 0 {
+        return
+    }
+    iov[0 as usize] = (&outbuf[(c * OUT_CAP) as usize]) as u64
+    iov[1 as usize] = n
+    mh[0 as usize] = 0
+    mh[1 as usize] = 0
+    mh[2 as usize] = (&iov[0 as usize]) as u64
+    mh[3 as usize] = 1
+    mh[4 as usize] = 0
+    mh[5 as usize] = 0
+    mh[6 as usize] = 0
+    ulib.sys(SYS_SENDMSG, c_fd[c as usize], (&mh[0 as usize]) as u64, 0)
+    c_outlen[c as usize] = 0
+}
+
+// Alles verarbeiten, was vollstaendig im Puffer liegt.
+fn drain(c: u64, fd: u64) {
+    let base: u64 = c * IN_CAP
+    var at: u64 = 0
+    var live: bool = true
+    var usedfd: u64 = fd
+    while live && c_inlen[c as usize] - at >= 8 {
+        let w1: u64 = rd32(base + at + 4)
+        let len: u64 = (w1 >> 16) & 0xFFFF
+        if len < 8 {
+            send_error(c, 0, 0)
+            live = false
+        } else if at + len > c_inlen[c as usize] {
+            // Halb angekommen -- der Rest kommt beim naechsten Mal.
+            live = false
+            c_inlen[c as usize] = c_inlen[c as usize]
+        } else {
+            live = dispatch(c, at, len, usedfd)
+            usedfd = 0
+            at = at + len
+        }
+    }
+    // Was uebrig ist, nach vorne schieben.
+    if at > 0 {
+        var k: u64 = 0
+        let rest: u64 = c_inlen[c as usize] - at
+        while k < rest {
+            inbuf[(base + k) as usize] = inbuf[(base + at + k) as usize]
+            k = k + 1
+        }
+        c_inlen[c as usize] = rest
+    }
+    if !live {
+        c_used[c as usize] = 0
+        ulib.sys(SYS_CLOSE, c_fd[c as usize], 0, 0)
+    }
+}
+
+// ========================================================= DAS PROGRAMM
+
+static mut sa: [u8; 112] = [0 as u8; 112]
+
+fn set_sockpath(p: u64) -> u64 {
+    // sockaddr_un: u16 Familie, dann der Pfad.
+    sa[0 as usize] = 1 // AF_UNIX
+    sa[1 as usize] = 0
+    var n: u64 = 0
+    while n < 100 {
+        let ch: u64 = (__mmio_read8((p + n) as *mut u8)) as u64
+        if ch == 0 {
+            n = 100
+        } else {
+            sa[(2 + n) as usize] = ch as u8
+            n = n + 1
+        }
+    }
+    var l: u64 = 0
+    while l < 100 && sa[(2 + l) as usize] != 0 {
+        l = l + 1
+    }
+    return 2 + l + 1
+}
+
+static mut deflt: [u8; 15] = "/tmp/wayland-0\0"
+
+// Eine Dezimalzahl aus einer Zeichenkette. `ulib.digits` geht in die
+// andere Richtung (Zahl -> Text), also steht die hier.
+fn zahl_von(p: u64) -> u64 {
+    var v: u64 = 0
+    var n: u64 = 0
+    while n < 10 {
+        let ch: u64 = (__mmio_read8((p + n) as *mut u8)) as u64
+        if ch < 48 || ch > 57 {
+            n = 10
+        } else {
+            v = v * 10 + (ch - 48)
+            n = n + 1
+        }
+    }
+    return v
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_start: [u8; 18] = "wayd: bereit auf \0"
+    var s_fail: [u8; 24] = "wayd: socket geht nicht\0"
+    var s_bindf: [u8; 22] = "wayd: bind geht nicht\0"
+    var s_conn: [u8; 16] = "wayd: verbunden\0"
+    var s_sum: [u8; 12] = "wayd: msgs=\0"
+    var s_win: [u8; 7] = " wins=\0"
+    var s_com: [u8; 10] = " commits=\0"
+    var s_fd: [u8; 6] = " fds=\0"
+    var s_bad: [u8; 6] = " bad=\0"
+
+    // Der Pfad: erstes Argument, sonst /tmp/wayland-0.
+    var path: u64 = (&deflt[0 as usize]) as u64
+    if ulib.arg_count(args) > 1 {
+        path = ulib.arg_at(args, 1)
+    }
+    // Wieviele Umlaeufe, bevor das Programm von selbst endet. Ohne
+    // Grenze liefe die Abnahme in das Zeitlimit von QEMU statt eine
+    // Zahl zu drucken.
+    var runden: u64 = 2000
+    if ulib.arg_count(args) > 2 {
+        runden = zahl_von(ulib.arg_at(args, 2))
+    }
+
+    ulib.sys(SYS_UNLINK, path, 0, 0)
+    let alen: u64 = set_sockpath(path)
+
+    let ls: u64 = ulib.sys(SYS_SOCKET, AF_UNIX, SOCK_STREAM, 0)
+    if ls > 0xFFFFFFFFFFFF0000 {
+        ulib.say((&s_fail[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    let br: u64 = ulib.sys4(SYS_BIND, ls, (&sa[0 as usize]) as u64, alen, 0)
+    if br > 0xFFFFFFFFFFFF0000 {
+        ulib.say((&s_bindf[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    ulib.sys(SYS_LISTEN, ls, 4, 0)
+    ulib.say((&s_start[0 as usize]) as u64)
+    ulib.say(path)
+    ulib.nl()
+
+    var i: u64 = 0
+    while i < MAX_CLIENTS {
+        c_used[i as usize] = 0
+        i = i + 1
+    }
+
+    var n: u64 = 0
+    while n < runden {
+        // Neue Verbindungen -- nicht blockierend (SOCK_NONBLOCK = 2048
+        // als accept4-Flag), damit der Umlauf weiterlaeuft.
+        let nf: u64 = ulib.sys4(SYS_ACCEPT, ls, 0, 0, 2048)
+        if nf < 0xFFFFFFFFFFFF0000 {
+            var slot: u64 = MAX_CLIENTS
+            var k: u64 = 0
+            while k < MAX_CLIENTS {
+                if c_used[k as usize] == 0 && slot >= MAX_CLIENTS {
+                    slot = k
+                }
+                k = k + 1
+            }
+            if slot < MAX_CLIENTS {
+                c_used[slot as usize] = 1
+                c_fd[slot as usize] = nf
+                c_inlen[slot as usize] = 0
+                c_outlen[slot as usize] = 0
+                c_nextid[slot as usize] = 0xFF000000
+                var o: u64 = 0
+                while o < MAX_OBJ {
+                    objs[(obj_base(slot, o) + O_ID) as usize] = 0
+                    o = o + 1
+                }
+                // wl_display gibt es immer und ohne dass jemand es
+                // anlegt -- Objekt 1 ist im Protokoll vereinbart.
+                obj_new(slot, ID_DISPLAY, wlproto.IF_WL_DISPLAY)
+                n_conn = n_conn + 1
+                ulib.say((&s_conn[0 as usize]) as u64)
+                ulib.nl()
+            } else {
+                ulib.sys(SYS_CLOSE, nf, 0, 0)
+            }
+        }
+
+        var c: u64 = 0
+        while c < MAX_CLIENTS {
+            if c_used[c as usize] != 0 {
+                let got: u64 = recv_into(c)
+                if got > 0 {
+                    drain(c, taken_fd())
+                }
+                if c_used[c as usize] != 0 {
+                    flush_out(c)
+                }
+            }
+            c = c + 1
+        }
+        ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
+        n = n + 1
+    }
+
+    // Die Zahlen, die `tools/wayland/run.sh` liest.
+    ulib.say((&s_sum[0 as usize]) as u64)
+    ulib.sayu(n_msgs)
+    ulib.say((&s_win[0 as usize]) as u64)
+    ulib.sayu(n_wins)
+    ulib.say((&s_com[0 as usize]) as u64)
+    ulib.sayu(n_commits)
+    ulib.say((&s_fd[0 as usize]) as u64)
+    ulib.sayu(n_fds)
+    ulib.say((&s_bad[0 as usize]) as u64)
+    ulib.sayu(n_bad)
+    ulib.nl()
+    return 0
+}
