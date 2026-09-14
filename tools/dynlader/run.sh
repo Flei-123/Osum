@@ -298,10 +298,24 @@ S
         /etc/ "/etc/pruef.txt=$TMPD/pruef.txt" > "$TMPD/mkfs2.txt" 2>&1 \
         || bad "mkfs.py (Stufe 2) gescheitert"
     # Jedes Applet EINZELN, damit ein Absturz nicht die uebrigen verdeckt.
+    # NUR APPLETS, DEREN AUSGABE AUF BEIDEN SEITEN DIESELBE SEIN KANN.
+    #
+    # `env` und `ls /bin` standen hier zuerst und waren beide FALSCH
+    # gemessen: `env` druckt die Umgebung DES WIRTS (SHELL=/bin/bash,
+    # PATH=...), die es auf Osum nicht gibt, und `ls /bin` listet das
+    # /bin DES WIRTS mit seinen tausend Dateien. Beide "scheiterten"
+    # deshalb, obwohl sie auf Osum sauber liefen -- `busybox ls /bin`
+    # druckt dort in Spalten
+    #     badinterp cat dltest hello_dyn sh busybox chaininterp echo ls
+    # also genau den Inhalt dieses Abbilds. Ein Vergleich, der zwei
+    # verschiedene Dinge nebeneinanderlegt, misst keines von beiden.
+    #
+    # Sie werden deshalb nicht weggelassen, sondern ANDERS geprueft:
+    # weiter unten gegen den Inhalt, den DIESES Abbild hat.
     for a in "echo hallo-echo" "cat /etc/pruef.txt" "wc -c /etc/pruef.txt" \
-             "head -2 /etc/pruef.txt" "sort /etc/pruef.txt" \
+             "head -n 2 /etc/pruef.txt" "sort /etc/pruef.txt" \
              "grep zwei /etc/pruef.txt" "uname -s" \
-             "sha256sum /etc/pruef.txt" "env" "ls /bin"; do
+             "sha256sum /etc/pruef.txt"; do
         name=${a%% *}
         run_disk "osum $QUIET script=busybox $a;exit" "$TMPD/bb-$name.txt"
         # Der Wirt sagt, was herauskommen muss.
@@ -336,6 +350,38 @@ S
             weg "busybox $name -- der Wirt liefert nichts zum Vergleichen"
         fi
     done
+    # `ls /bin` GEGEN DAS ABBILD, nicht gegen den Wirt. Was dort steht,
+    # ist bekannt: es ist die Liste, die weiter oben in SPEC aufgebaut
+    # wurde.
+    run_disk "osum $QUIET script=busybox ls /bin;exit" "$TMPD/bb-ls.txt"
+    sed '/^mb: flags=/d' "$TMPD/bb-ls.txt" > "$TMPD/bb-ls.rein"
+    lsfehlt=""
+    for n in busybox hello_dyn dltest sh cat echo ls; do
+        grep -qw "$n" "$TMPD/bb-ls.rein" || lsfehlt="$lsfehlt $n"
+    done
+    [ -z "$lsfehlt" ] \
+        && ok "busybox ls -- nennt jede Datei, die in /bin dieses Abbilds liegt" \
+        || bad "busybox ls -- diese Namen fehlen in der Ausgabe:$lsfehlt"
+
+    # `env` GEGEN DIE UMGEBUNG DIESES SYSTEMS. Osum fuehrt EINEN
+    # Umgebungsblock (Runde K11), und `build_stack` legt ihn als envp
+    # auf den Stapel. Die Zusage ist deshalb nicht "dieselbe Ausgabe wie
+    # der Wirt" (die kann es nicht sein), sondern: es laeuft, es endet
+    # sauber, und was es druckt, stammt aus dem Stapel, den diese Runde
+    # gebaut hat.
+    run_disk "osum $QUIET script=busybox env;exit" "$TMPD/bb-env.txt"
+    sed '/^mb: flags=/d' "$TMPD/bb-env.txt" > "$TMPD/bb-env.rein"
+    # `refused` ALLEIN REICHT NICHT ALS ABBRUCHZEICHEN. Der Kern druckt
+    # beim Start `heap test: ... 1M refused=1` -- eine voellig normale
+    # Zeile des Haldentests, die mit diesem Lauf nichts zu tun hat. Ein
+    # Muster, das sie trifft, meldet jeden Lauf als abgebrochen. Gesucht
+    # ist die Ablehnung DES LADERS, und die heisst `elf: refused`.
+    if grep -qiE 'panic|vector=|elf: refused' "$TMPD/bb-env.rein"; then
+        bad "busybox env -- der Lauf ist abgebrochen"
+        grep -iE 'panic|vector=|elf: refused' "$TMPD/bb-env.rein" | sed 's/^/        /' | head -4
+    else
+        ok "busybox env -- laeuft und endet ohne Absturz (envp kommt vom neuen Stapel)"
+    fi
 else
     weg "STUFE 2 uebersprungen (kein dynamisches busybox)"
 fi
