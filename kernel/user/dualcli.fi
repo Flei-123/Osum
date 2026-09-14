@@ -1,0 +1,384 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/dualcli.fi -- RUNDE DUALBOOT: DERSELBE WEG OHNE FENSTER.
+//
+//   dualcli ZIEL [--ja]
+//
+// ==================================================================
+// WOFUER ES DIESES PROGRAMM GIBT
+// ==================================================================
+//
+// Das Fenster (`installer.fi`) kann seit dieser Runde neben ein
+// vorhandenes System installieren. Ein Fenster laesst sich aber nur
+// messen, wenn der Fensterserver laeuft -- und eine Zusage, die an der
+// Oberflaeche haengt, ist genau dann nicht mehr pruefbar, wenn man sie
+// am dringendsten braucht.
+//
+// Deshalb dieselbe Maschine hier noch einmal als Kommandozeile. Es ist
+// KEINE zweite Umsetzung: jede Zeile, die etwas auf die Platte
+// schreibt, steht in `dualkern.fi` und `instkern.fi`, und dieses
+// Programm ruft genau dieselben Funktionen in genau derselben
+// Reihenfolge wie `installieren_daneben` im Fenster. Was hier anders
+// ist, ist die AUSGABE -- sie geht auf die serielle Leitung, wo ein
+// Testlaeufer sie liest.
+//
+// OHNE `--ja` WIRD NICHTS GESCHRIEBEN. Der Probelauf liest die Tafel,
+// sucht die Luecke, nennt die EFI-Partition und hoert dann auf. Das
+// ist der Zustand, in dem sich pruefen laesst, ob das Programm die
+// Platte RICHTIG VERSTANDEN hat, bevor es sie anfasst.
+
+profile kernel
+
+import ulib
+import instkern
+import dualkern
+
+export { u_start }
+
+const BS: u64 = 512
+// Dieselbe Mindestgroesse wie im Fenster: 32 MiB. Darunter ist die
+// Wurzel kleiner als das, was daraufsoll.
+const MIND: u64 = 65536
+
+static mut S_USE: [u8; 32] = "dualcli ZIEL [--ja]\0\0\0\0\0\0\0\0\0\0\0\0\0"
+static mut O_JA: [u8; 6] = "--ja\0\0"
+static mut O_QUELLE: [u8; 10] = "--quelle\0\0"
+static mut D_QUELLE: [u8; 10] = "/dev/ram0\0"
+
+static mut S_NOOPEN: [u8; 20] = "dual: kein zugriff \0"
+static mut S_TAFEL: [u8; 14] = "dual: tafel=\0\0"
+static mut S_PART: [u8; 13] = "dual: part \0\0"
+static mut S_FREI: [u8; 13] = "dual: frei \0\0"
+static mut S_ESP: [u8; 12] = "dual: esp=\0\0"
+static mut S_KEINGPT: [u8; 18] = "dual: keine gpt\0\0\0"
+static mut S_KAPUTT: [u8; 20] = "dual: gpt kaputt\0\0\0\0"
+static mut S_ENG: [u8; 18] = "dual: zu wenig\0\0\0\0"
+static mut S_KEINESP: [u8; 18] = "dual: keine esp\0\0\0"
+static mut S_ESPKLEIN: [u8; 20] = "dual: esp zu klein\0\0"
+static mut S_TROCKEN: [u8; 22] = "dual: probelauf, ende\0"
+static mut S_NEU: [u8; 13] = "dual: neu p\0\0"
+static mut S_KOP: [u8; 14] = "dual: kopiert\0"
+static mut S_GROW: [u8; 16] = "dual: gewachsen\0"
+static mut S_FERTIG: [u8; 14] = "dual: fertig\0\0"
+static mut S_FEHLER: [u8; 14] = "dual: FEHLER \0"
+static mut S_LUFT: [u8; 2] = " \0"
+
+fn luft() {
+    ulib.say((&S_LUFT[0 as usize]) as u64)
+}
+
+fn fehler(n: u64) -> u64 {
+    ulib.say((&S_FEHLER[0 as usize]) as u64)
+    ulib.sayu(n)
+    ulib.nl()
+    return 1
+}
+
+// Warum es nicht geht -- als Satz, damit der Laeufer es lesen kann.
+fn grund_sagen() {
+    let g: u64 = dualkern.grund()
+    if g == dualkern.D_KEINEGPT {
+        ulib.say((&S_KEINGPT[0 as usize]) as u64)
+    } else if g == dualkern.D_KAPUTT {
+        ulib.say((&S_KAPUTT[0 as usize]) as u64)
+    } else if g == dualkern.D_ENG {
+        ulib.say((&S_ENG[0 as usize]) as u64)
+    } else if g == dualkern.D_KEINEESP {
+        ulib.say((&S_KEINESP[0 as usize]) as u64)
+    } else if g == dualkern.D_ESPKLEIN {
+        ulib.say((&S_ESPKLEIN[0 as usize]) as u64)
+    } else {
+        ulib.say((&S_FEHLER[0 as usize]) as u64)
+        ulib.sayu(g)
+    }
+    ulib.nl()
+}
+
+// Den Namen der Partition bauen: Geraet + Ziffer. `source_dev` in
+// kernel/sys.fi liest GENAU EINE Ziffer, also geht das bis 9.
+static mut ESPNAME: [u8; 24] = [0 as u8; 24]
+
+fn esp_name(dev: u64, nr: u64) -> u64 {
+    let p: u64 = (&ESPNAME[0 as usize]) as u64
+    ulib.strcpy(p, dev)
+    let n: u64 = ulib.length(p)
+    if n + 2 < 24 && nr >= 1 && nr <= 9 {
+        __mmio_write8((p + n) as *mut u8, (48 + nr) as u8)
+        __mmio_write8((p + n + 1) as *mut u8, 0 as u8)
+    }
+    return p
+}
+
+// Die Dateien in die FREMDE EFI-Partition -- eigenes Verzeichnis, und
+// die Startdatei mit beiden Eintraegen.
+static mut P_EFI: [u8; 6] = "/efi\0\0"
+static mut P_EFI_EFI: [u8; 10] = "/efi/EFI\0\0"
+static mut P_EFI_BOOT: [u8; 16] = "/efi/EFI/BOOT\0\0\0"
+static mut P_EFI_OS: [u8; 18] = "/efi/EFI/orientos\0"
+static mut P_EFI_OSKERN: [u8; 26] = "/efi/EFI/orientos/osum.mb\0"
+static mut P_EFI_OSLDR: [u8; 30] = "/efi/EFI/orientos/BOOTX64.EFI\0"
+static mut P_EFI_LDR: [u8; 26] = "/efi/EFI/BOOT/BOOTX64.EFI\0"
+static mut P_EFI_LIM: [u8; 17] = "/efi/limine.conf\0"
+static mut P_FREMD: [u8; 37] = "/efi/EFI/Microsoft/Boot/bootmgfw.efi\0"
+static mut P_SRC_KERN: [u8; 14] = "/boot/osum.mb\0"
+static mut P_SRC_LDR: [u8; 18] = "/boot/BOOTX64.EFI\0"
+static mut T_VFAT: [u8; 5] = "vfat\0"
+
+static mut LIM1: [u8; 174] = "timeout: 10\n\n/OrientOS\n    protocol: multiboot1\n    path: boot():/EFI/orientos/osum.mb\n    cmdline: osum vfs gfx wm wig desk wmshell wmdauer herz tz=120 nosched noproc nofs\n\0"
+static mut LIM2: [u8; 102] = "\n/Windows Boot Manager\n    protocol: efi_chainload\n    path: boot():/EFI/Microsoft/Boot/bootmgfw.efi\n\0"
+
+static mut S_MENUE: [u8; 14] = "dual: menue=\0\0"
+static mut S_QUELLE: [u8; 15] = "dual: quelle=\0\0"
+static mut S_QGRUND: [u8; 16] = "dual: qgrund=\0\0\0"
+static mut S_QSEK: [u8; 13] = "dual: qsek=\0\0"
+
+fn datei_da(pfad: u64) -> bool {
+    let f: u64 = ulib.sys(ulib.SYS_OPEN, pfad, 0, 0)
+    if ulib.bad(f) {
+        return false
+    }
+    ulib.sys(ulib.SYS_CLOSE, f, 0, 0)
+    return true
+}
+
+fn startdatei() -> u64 {
+    let fremd: bool = datei_da((&P_FREMD[0 as usize]) as u64)
+    ulib.sys(ulib.SYS_UNLINK, (&P_EFI_LIM[0 as usize]) as u64, 0, 0)
+    let f: u64 = ulib.sys(ulib.SYS_OPEN, (&P_EFI_LIM[0 as usize]) as u64,
+        ulib.O_MAKE, 0)
+    if ulib.bad(f) {
+        return 0
+    }
+    let n1: u64 = ulib.length((&LIM1[0 as usize]) as u64)
+    let w1: u64 = ulib.sys(ulib.SYS_WRITE, f, (&LIM1[0 as usize]) as u64, n1)
+    if ulib.bad(w1) || w1 != n1 {
+        ulib.sys(ulib.SYS_CLOSE, f, 0, 0)
+        return 0
+    }
+    var wieviele: u64 = 1
+    if fremd {
+        let n2: u64 = ulib.length((&LIM2[0 as usize]) as u64)
+        let w2: u64 = ulib.sys(ulib.SYS_WRITE, f, (&LIM2[0 as usize]) as u64, n2)
+        if ulib.bad(w2) || w2 != n2 {
+            ulib.sys(ulib.SYS_CLOSE, f, 0, 0)
+            return 0
+        }
+        wieviele = 2
+    }
+    ulib.sys(ulib.SYS_CLOSE, f, 0, 0)
+    return wieviele
+}
+
+fn bootlader(espdev: u64) -> bool {
+    ulib.sys(ulib.SYS_MKDIR, (&P_EFI[0 as usize]) as u64, 0, 0)
+    let m: u64 = ulib.sys4(ulib.SYS_VMOUNT, espdev,
+        (&P_EFI[0 as usize]) as u64, (&T_VFAT[0 as usize]) as u64, 0)
+    if ulib.bad(m) {
+        return false
+    }
+    // /EFI gibt es auf einer fremden ESP schon -- ein Fehlschlag hier
+    // ist keiner.
+    ulib.sys(ulib.SYS_MKDIR, (&P_EFI_EFI[0 as usize]) as u64, 0, 0)
+    ulib.sys(ulib.SYS_MKDIR, (&P_EFI_OS[0 as usize]) as u64, 0, 0)
+    ulib.sys(ulib.SYS_MKDIR, (&P_EFI_BOOT[0 as usize]) as u64, 0, 0)
+    var gut: bool = true
+    if !instkern.kopiere((&P_SRC_KERN[0 as usize]) as u64,
+        (&P_EFI_OSKERN[0 as usize]) as u64) {
+        gut = false
+    }
+    if gut && !instkern.kopiere((&P_SRC_LDR[0 as usize]) as u64,
+        (&P_EFI_OSLDR[0 as usize]) as u64) {
+        gut = false
+    }
+    if gut && !instkern.kopiere((&P_SRC_LDR[0 as usize]) as u64,
+        (&P_EFI_LDR[0 as usize]) as u64) {
+        gut = false
+    }
+    if gut {
+        let w: u64 = startdatei()
+        ulib.say((&S_MENUE[0 as usize]) as u64)
+        ulib.sayu(w)
+        ulib.nl()
+        if w == 0 {
+            gut = false
+        }
+    }
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    ulib.sys(ulib.SYS_UMOUNT2, (&P_EFI[0 as usize]) as u64, 0, 0)
+    return gut
+}
+
+// ------------------------------------------------------------ das Ganze
+
+fn u_start(args: u64) -> u64 {
+    let argc: u64 = ulib.arg_count(args)
+    if argc < 2 {
+        ulib.say((&S_USE[0 as usize]) as u64)
+        ulib.nl()
+        return 0
+    }
+    let ziel: u64 = ulib.arg_at(args, 1)
+    var yes: bool = false
+    // WOHER DAS SYSTEM KOMMT, DAS KOPIERT WIRD.
+    //
+    // Auf dem Stick ist es `/dev/ram0` -- die Wurzel liegt dort als
+    // Boot-Modul im Speicher. In einem Messaufbau OHNE `modfs` gibt es
+    // dieses Geraet nicht, und dann ist die Quelle die Platte, von der
+    // gerade gestartet wurde. Der Schalter macht den Unterschied
+    // sichtbar, statt ihn zu raten.
+    var quelle: u64 = (&D_QUELLE[0 as usize]) as u64
+    var i: u64 = 2
+    while i < argc {
+        let a: u64 = ulib.arg_at(args, i)
+        if ulib.streq(a, (&O_JA[0 as usize]) as u64) {
+            yes = true
+        } else if ulib.streq(a, (&O_QUELLE[0 as usize]) as u64) && i + 1 < argc {
+            i = i + 1
+            quelle = ulib.arg_at(args, i)
+        }
+        i = i + 1
+    }
+
+    let zfd: u64 = ulib.sys(ulib.SYS_OPEN, ziel, ulib.O_RDWR, 0)
+    if ulib.bad(zfd) {
+        ulib.say((&S_NOOPEN[0 as usize]) as u64)
+        ulib.say(ziel)
+        ulib.nl()
+        return 1
+    }
+    let sekt: u64 = ulib.size_of(ziel) / BS
+
+    // ---- 1. DIE TAFEL LESEN. Beide Pruefsummen, wie im Kern.
+    let n: u64 = dualkern.tafel_lesen(zfd, sekt)
+    ulib.say((&S_TAFEL[0 as usize]) as u64)
+    ulib.sayu(n)
+    ulib.nl()
+    if !dualkern.gpt_pruefen() {
+        grund_sagen()
+        return 1
+    }
+    var k: u64 = 0
+    while k < n {
+        ulib.say((&S_PART[0 as usize]) as u64)
+        ulib.sayu(k + 1)
+        luft()
+        ulib.sayu(dualkern.p_start(k))
+        luft()
+        ulib.sayu(dualkern.p_ende(k))
+        luft()
+        ulib.sayu(dualkern.p_typ(k))
+        ulib.nl()
+        k = k + 1
+    }
+
+    // ---- 2. der freie Platz
+    if !dualkern.luecke_suchen(MIND) {
+        grund_sagen()
+        return 1
+    }
+    let von: u64 = dualkern.luecke_start()
+    let bis: u64 = dualkern.luecke_ende()
+    ulib.say((&S_FREI[0 as usize]) as u64)
+    ulib.sayu(von)
+    luft()
+    ulib.sayu(bis)
+    ulib.nl()
+
+    // ---- 3. die fremde EFI-Partition
+    let espi: u64 = dualkern.esp_finden()
+    if espi >= dualkern.anz() {
+        grund_sagen()
+        return 1
+    }
+    if !dualkern.esp_gross_genug(espi) {
+        grund_sagen()
+        return 1
+    }
+    ulib.say((&S_ESP[0 as usize]) as u64)
+    ulib.sayu(espi + 1)
+    ulib.nl()
+
+    // ---- 4. die Quelle
+    ulib.say((&S_QUELLE[0 as usize]) as u64)
+    ulib.say(quelle)
+    ulib.nl()
+    let qfd: u64 = ulib.sys(ulib.SYS_OPEN, quelle, 0, 0)
+    if ulib.bad(qfd) {
+        return fehler(70)
+    }
+    let qk: u64 = instkern.quelle_pruefen(qfd)
+    if qk == 0 {
+        // WAS GENAU NICHT STIMMTE -- lesen oder kein OFS. Ohne diese
+        // Unterscheidung ist "FEHLER 71" eine Auskunft, mit der
+        // niemand etwas anfangen kann.
+        ulib.say((&S_QGRUND[0 as usize]) as u64)
+        ulib.sayu(instkern.fehler_bei())
+        ulib.nl()
+        return fehler(71)
+    }
+    let qsekt: u64 = ulib.size_of(quelle) / BS
+    ulib.say((&S_QSEK[0 as usize]) as u64)
+    ulib.sayu(qsekt)
+    ulib.nl()
+    if bis - von + 1 < qsekt {
+        ulib.say((&S_ENG[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+
+    // OHNE `--ja` HOERT ES HIER AUF -- und zwar BEVOR das erste Oktett
+    // auf die fremde Platte geht.
+    if !yes {
+        ulib.say((&S_TROCKEN[0 as usize]) as u64)
+        ulib.nl()
+        return 0
+    }
+
+    // ---- 5. den Eintrag ergaenzen. AB HIER WIRD GESCHRIEBEN.
+    let nr: u64 = dualkern.neben_schreiben(zfd, von, bis)
+    if nr == 0 {
+        grund_sagen()
+        return fehler(78)
+    }
+    ulib.say((&S_NEU[0 as usize]) as u64)
+    ulib.sayu(nr)
+    luft()
+    ulib.sayu(von)
+    luft()
+    ulib.sayu(bis)
+    ulib.nl()
+
+    // ---- 6. die Wurzel kopieren
+    if !instkern.wurzel_kopieren_ab(zfd, qfd, von, qsekt) {
+        return fehler(79)
+    }
+    ulib.say((&S_KOP[0 as usize]) as u64)
+    luft()
+    ulib.sayu(qsekt)
+    ulib.nl()
+
+    // ---- 7. wachsen lassen
+    let neu: u64 = instkern.wachsen(zfd, von, bis - von + 1)
+    if neu == 0 {
+        return fehler(80)
+    }
+    ulib.say((&S_GROW[0 as usize]) as u64)
+    luft()
+    ulib.sayu(neu)
+    ulib.nl()
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    ulib.sys(ulib.SYS_CLOSE, zfd, 0, 0)
+    ulib.sys(ulib.SYS_CLOSE, qfd, 0, 0)
+
+    // ---- 8. die Dateien in die fremde ESP und das Bootmenue
+    let espdev: u64 = esp_name(ziel, espi + 1)
+    ulib.say((&S_ESP[0 as usize]) as u64)
+    ulib.say(espdev)
+    ulib.nl()
+    if !bootlader(espdev) {
+        return fehler(81)
+    }
+
+    ulib.say((&S_FERTIG[0 as usize]) as u64)
+    ulib.nl()
+    return 0
+}
