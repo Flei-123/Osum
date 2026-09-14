@@ -16,7 +16,7 @@ Bilder 09/10 kommen aus dem Abnahmelauf `tools/wmplug/run.sh`
 | 06-breit-1440x900.png | Breiter Schirm (`fbres=1440x900`): Leiste ueber die volle Breite, Widget-Text rechts, Fenster oben links. |
 | 07-eng-800x600.png | Vorgabe-Schirm 800x600 mit Widget. |
 | 08-sehr-eng-640x480.png | Enger Schirm 640x480 -- hier zeigt sich, ob Leiste und Fenster einander ins Gehege kommen. |
-| 09-wmplug-verwaltung.png | `/bin/wmplug list` + `info uhr` im Terminal, mit ZWEI gleichzeitig angemeldeten Plugins (`uhr` 0x807, `regel` 0x301): Fassung `abi=1`, Statuszeile auf zwei Zeilen umgebrochen, Tabellenkopf ueber seinen Werten. Neu aufgenommen von `tools/wmplug/spalten.sh` (24 bestanden, 0 gescheitert); dasselbe Bild liegt als `docs/shots/wmplug/spalten-zwei-plugins.png`. |
+| 09-wmplug-verwaltung.png | `/bin/wmplug list` + `info uhr` im Terminal, mit ZWEI gleichzeitig angemeldeten Plugins (`uhr` 0x807, `regel` 0x301): Fassung `abi=1`, Statuszeile auf zwei Zeilen umgebrochen, Tabellenkopf ueber seinen Werten. Neu aufgenommen von `tools/wmplug/spalten.sh` (25 bestanden, 0 gescheitert); dasselbe Bild liegt als `docs/shots/wmplug/spalten-zwei-plugins.png`. |
 | 10-nach-plugin-absturz.png | Nach einem absichtlichen SIGSEGV eines Plugins: der Schreibtisch malt weiter (479819 von 480000 Bildpunkten nicht schwarz, gemessen im Abnahmelauf). |
 
 ## Was auf den Bildern AUFFAELLT (nicht behauptet, sondern sichtbar)

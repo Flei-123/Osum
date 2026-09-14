@@ -1038,7 +1038,7 @@ Glyphe gegen den Rasterer, nicht „da ist irgendwas hell":
   OK  Name (Platz 1):   Wert 'regel' ab Spalte 5
   OK  Rechte (Platz 1): Wert '0x301' ab Spalte 14
 
-SPALTEN: 24 bestanden, 0 gescheitert
+SPALTEN: 25 bestanden, 0 gescheitert
 ```
 
 **Zwei Plugins gleichzeitig, und das ist kein Schmuck:** unter einer
@@ -1051,7 +1051,7 @@ Bilder: `docs/shots/wmplug/spalten-zwei-plugins.png`, und
 `.gauntlet-shots/09-wmplug-verwaltung.png` ist aus diesem Lauf **neu
 aufgenommen** (das alte zeigte die drei Fehler von oben).
 
-**Zwei gemessene Fehlgriffe dieses Laeufers, benannt statt weggeputzt:**
+**Drei gemessene Fehlgriffe dieses Laeufers, benannt statt weggeputzt:**
 
 1. Die Farben des Terminals waren von `tools/wm/run.sh` abgeschrieben
    (224,230,236 auf 16,20,26). Das ist das Terminal des **nackten**
@@ -1059,7 +1059,16 @@ aufgenommen** (das alte zeigte die drei Fehler von oben).
    und malt **248,250,252 auf 18,24,32**. Mit den geborgten Zahlen war
    jede Glyphe „falsch", obwohl sie richtig stand — nachgemessen am PPM
    und nicht geraten.
-2. `plugpaar` gab beiden Plugins zuerst `runden=40`. Eine Runde der Uhr
+2. Der **Ursprung des Rasters** stand als `(26,62)` im Laeufer. Das galt
+   genau so lange, bis die Regel-Engine mit ihrem neuen Leserecht (14.2)
+   anfing, das Terminalfenster nach `(0,0)` zu setzen: dann liegt die
+   erste Zelle bei `(2,22)`, jede Zusage war rot — und im Bild stand
+   alles richtig. Jetzt wird das umschliessende Rechteck der
+   Terminalfarbe gesucht; seine linke obere Ecke **ist** die erste
+   Zelle, und der Laeufer sagt sie an (`die erste Zelle des Terminals
+   liegt bei (2,22) -- am Bild gemessen`). Dieselbe Lehre wie oben: eine
+   abgeschriebene Zahl haelt genau bis zur naechsten Runde.
+3. `plugpaar` gab beiden Plugins zuerst `runden=40`. Eine Runde der Uhr
    ist eine Sekunde, eine Runde der Regel-Engine zehn Millisekunden: die
    Regel-Engine war nach vier Zehntelsekunden wieder weg, und die Tafel
    zeigte **ein** Plugin statt zweier. Die Zahlen (40 / 2000) sind
@@ -1074,7 +1083,7 @@ dorthin und die Datei faellt weg.
 ### 15.5 Nachfahren
 
 ```
-bash tools/wmplug/spalten.sh      # SPALTEN: 24 bestanden, 0 gescheitert
+bash tools/wmplug/spalten.sh      # SPALTEN: 25 bestanden, 0 gescheitert
 bash tools/desktop/run.sh         # TASKBAR: 58 passed, 41 failed
 bash tools/paint/run.sh           # PAINT:   28 bestanden, 4 fehlgeschlagen
 bash tools/check-ui.sh            # CHECK-UI PASSED.
