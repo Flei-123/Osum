@@ -377,6 +377,283 @@ else
     tail -8 "$TMPD/usb.txt" | sed 's/^/        /'
 fi
 
+# ==================================================================
+# ABSCHNITT 7 BIS 11 -- DIE RUNDE SCHLAF (K-018, zweite Haelfte)
+# ==================================================================
+#
+# WAS HIER NEU GEMESSEN WIRD, UND WORIN ES SICH VON ABSCHNITT 4
+# UNTERSCHEIDET:
+#
+# Abschnitt 4 (die Vorrunde) laeuft in EINEM Kernlauf. Er schreibt
+# das Abbild, verwirft den Zustand im Speicher und holt ihn zurueck.
+# Das misst den TRAEGER -- aber nichts zwingt den Kern, den Zustand
+# wirklich verloren zu haben: Bitkarte, Seitentabellen und
+# Arbeitsspeicher stehen die ganze Zeit unveraendert da.
+#
+# Diese Abschnitte messen ueber den HOCHLAUF. Je Zyklus zwei
+# QEMU-Laeufe mit DERSELBEN Plattendatei, und zwischen ihnen wird
+# QEMU BEENDET. Was den zweiten Lauf erreicht, ist ausschliesslich
+# das, was auf der Platte steht -- ein echter Verlust des
+# Arbeitsspeichers liegt dazwischen.
+#
+#   Lauf A ("schlafarm")   Prozesse anlegen, rechnen lassen,
+#                          sichern, Gast BEENDEN.
+#   Lauf B ("schlafpruef") der Hochlauf findet das Abbild von selbst,
+#                          spielt es ein, vergleicht.
+
+# Ein VOLLER ZYKLUS: zwei Laeufe, eine Platte, QEMU dazwischen aus.
+# $1 = Name, $2 = zusaetzliche Woerter fuer Lauf A
+zyklus() {
+    local name=$1 extra=${2:-} t=${3:-400}
+    rm -f "$TMPD/$name.img"
+    qemu-img create -f raw "$TMPD/$name.img" 64M >/dev/null 2>&1
+    # LAUF A -- sichern und beenden.
+    timeout "$t" $QEMU_X86 -kernel "$TMPD/k.elf" -m 512 \
+        -append "osum schlafarm $extra acpiev" \
+        -serial "file:$TMPD/$name-a.txt" -display none -no-reboot \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+        -drive "file=$TMPD/$name.img,format=raw,if=ide,index=0" \
+        > /dev/null 2>&1
+    # LAUF B -- DERSELBE Datentraeger, NEUER QEMU.
+    timeout "$t" $QEMU_X86 -kernel "$TMPD/k.elf" -m 512 \
+        -append "osum schlafpruef acpiev" \
+        -serial "file:$TMPD/$name-b.txt" -display none -no-reboot \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+        -drive "file=$TMPD/$name.img,format=raw,if=ide,index=0" \
+        > /dev/null 2>&1
+    return 0
+}
+
 echo
-echo "== SUSPEND: $pass bestanden, $fail gescheitert =="
+echo "== 7. der zugeteilte Raum der Runde SCHLAF =="
+# DIESELBE PRUEFUNG WIE IN ABSCHNITT 1, fuer den zweiten Bereich.
+# Welle 1 hat gezeigt, dass zugeteilte SEITEN allein nicht reichen --
+# `suspend` und `krypto` nahmen denselben MODUSINDEX. Diese Runde hat
+# beide Raeume zugeteilt bekommen, und beide werden geprueft.
+sv=$(grep -aE "^const SCHLAF_OFF: u64 = 0x[0-9A-Fa-f]+" kernel/kstate.fi \
+    | head -1 | grep -oE '0x[0-9A-Fa-f]+')
+sm=$(grep -aE "^const SCHLAF_MAX: u64 = 0x[0-9A-Fa-f]+" kernel/kstate.fi \
+    | head -1 | grep -oE '0x[0-9A-Fa-f]+')
+if [ -n "$sv" ] && [ "$((sv))" -eq $((0x121000)) ]; then
+    ok "SCHLAF_OFF = $sv -- genau der zugeteilte Anfang"
+else
+    bad "SCHLAF_OFF = ${sv:-fehlt}, zugeteilt war 0x121000"
+fi
+if [ -n "$sv" ] && [ -n "$sm" ] && [ "$((sv + sm))" -le $((0x126000)) ]; then
+    ok "SCHLAF_OFF+SCHLAF_MAX = $(printf '0x%X' $((sv + sm))) bleibt in 0x126000"
+else
+    bad "der Bereich geht ueber 0x126000 hinaus -- das ist fremdes Land"
+fi
+# DIE MODUSINDIZES. Zugeteilt war 1020..1029; jeder Name der Runde
+# muss darin liegen.
+ausser=$(grep -aE "^const M_(SCHLAF|SCHLAFARM|SCHLAFPRUEF|SCHLAFHW|SCHLAFKAPUTT|NOSCHLAF|SCHLAFMESS): u64 = [0-9]+" \
+    kernel/kstate.fi | grep -oE '= [0-9]+' | grep -oE '[0-9]+' \
+    | awk '$1 < 1020 || $1 > 1029' | wc -l)
+anz=$(grep -acE "^const M_(SCHLAF|SCHLAFARM|SCHLAFPRUEF|SCHLAFHW|SCHLAFKAPUTT|NOSCHLAF|SCHLAFMESS): u64 = [0-9]+" \
+    kernel/kstate.fi)
+if [ "$ausser" -eq 0 ] && [ "$anz" -ge 7 ]; then
+    ok "alle $anz Modusindizes der Runde liegen in 1020..1029"
+else
+    bad "$ausser Modusindex/indizes liegen ausserhalb 1020..1029 (von $anz)"
+fi
+
+echo
+echo "== 8. DER ECHTE ZYKLUS UEBER DEN HOCHLAUF (QEMU dazwischen aus) =="
+zyklus z1 "" 400
+A="$TMPD/z1-a.txt"; B="$TMPD/z1-b.txt"
+hat_nicht "$A" 'panic' "kein Ausnahmefehler im Sicherungslauf"
+hat_nicht "$B" 'panic' "kein Ausnahmefehler im Wiederanlauf"
+hat "$A" 'schlaf: abbild steht' "Lauf A schreibt das Abbild"
+hat "$A" 'schlaf: gast wird beendet' "Lauf A BEENDET den Gast -- der Speicher ist wirklich weg"
+
+# DIE STARTERKENNUNG: der neue Kern findet das Abbild VON SELBST.
+# Das ist Punkt 1 des Auftrags und der Unterschied zur Vorrunde, die
+# `S_RESTORED` setzte und niemand fragte.
+if grep -a 'schlaf: start' "$B" | grep -aq 'abbild=1'; then
+    ok "der Hochlauf erkennt das Abbild VON SELBST (Starterkennung)"
+else
+    bad "der Hochlauf hat das Abbild nicht erkannt"
+    grep -a 'schlaf: start' "$B" | sed 's/^/        /' | head -2
+fi
+if grep -a 'schlaf: start' "$B" | grep -aq 'why=ok'; then
+    ok "und es gilt: why=ok"
+else
+    bad "das Abbild wurde verworfen"
+fi
+
+# DER ZUSTAND, byteweise. `gleich` steht nur, wenn Zaehler, Muster,
+# Registersatz UND die Rahmenzahl stimmen (kernel/schlaf.fi:pruef).
+hat "$B" 'schlaf: gleich' "der Zustand ist nach dem Hochlauf IDENTISCH"
+hat_nicht "$B" 'schlaf: UNGLEICH' "kein veraenderter Zustand"
+
+# DIE HARDWARE-KENNUNG muss ueber den Neustart GLEICH sein -- sonst
+# waere sie als Merkmal wertlos (auf QEMU ist hwsig 0, deshalb ein
+# zweiter Weg: Plattengroesse + CPU-Merkmale + Rahmenzahl).
+HWA=$(grep -a 'schlaf: gesichert' -m1 "$A" >/dev/null 2>&1; \
+      grep -a 'schlaf: start' "$B" | sed -n '1s/.* hw=\(0x[0-9a-f]*\).*/\1/p')
+HWI=$(grep -a 'schlaf: start' "$B" | sed -n '1s/.* hwimg=\(0x[0-9a-f]*\).*/\1/p')
+if [ -n "$HWA" ] && [ "$HWA" = "$HWI" ] && [ "$HWA" != "0x0" ]; then
+    ok "die Hardware-Kennung ist ueber den Neustart stabil ($HWA)"
+else
+    bad "Hardware-Kennung: jetzt '${HWA:-?}', im Abbild '${HWI:-?}'"
+fi
+
+# PUNKT 2/3/5: Register, FPU-Bereich, Geraete -- sie muessen IM
+# ABBILD liegen und beim Wiederanlauf dastehen.
+if grep -a 'schlaf: gesichert' "$A" | grep -aq 'regs=1'; then
+    ok "PUNKT 2: der Registersatz (rsp/rbp/rbx/r12-15/rip/cr3) geht ins Abbild"
+else
+    bad "PUNKT 2: kein Registersatz im Abbild"
+fi
+if grep -a 'schlaf: gesichert' "$A" | grep -aq 'fpu=1'; then
+    FSZ=$(grep -a 'schlaf: gesichert' "$A" | sed -n '1s/.*fpugroe=\([0-9]*\).*/\1/p')
+    ok "PUNKT 3: der FPU/XSAVE-Bereich geht ins Abbild ($FSZ Oktette)"
+else
+    bad "PUNKT 3: kein FPU-Bereich im Abbild"
+    grep -a 'fpuwhy' "$A" | sed 's/^/        /' | head -2
+fi
+if grep -a 'schlaf: gesichert' "$A" | grep -aq 'geraete=1'; then
+    ok "PUNKT 5: Zeitgeber/Tastatur/Grafik gehen ins Abbild"
+else
+    bad "PUNKT 5: kein Geraetezustand im Abbild"
+fi
+if grep -a 'schlaf: gleich' "$B" | grep -aq 'regs=1 fpu=1 geraete=1'; then
+    ok "und alle drei stehen nach dem Hochlauf wieder da"
+else
+    bad "nach dem Hochlauf fehlt einer der drei"
+    grep -a 'schlaf: gleich' "$B" | sed 's/^/        /' | head -2
+fi
+
+# PUNKT 4: DIE RAHMEN. Das ist die eigentliche Messgroesse der
+# Runde -- die Vorrunde trug 63 Bloecke Pruefstandsmuster.
+FR=$(grep -a 'schlaf: gesichert' "$A" | sed -n '1s/.*rahmen=\([0-9]*\).*/\1/p')
+FB=$(grep -a 'schlaf: start' "$B" | sed -n '1s/.* zurueck=\([0-9]*\).*/\1/p')
+if [ -n "$FR" ] && [ "$FR" -gt 0 ]; then
+    ok "PUNKT 4: $FR Rahmen Arbeitsspeicher gehen ins Abbild (nicht nur ein Muster)"
+else
+    bad "PUNKT 4: es gingen 0 Rahmen ins Abbild"
+fi
+# DIE ZAHL DER GESICHERTEN RAHMEN MUSS ZUR BITKARTE PASSEN: was
+# geschrieben wurde, muss auch zurueckkommen.
+if [ -n "$FR" ] && [ "$FR" = "$FB" ]; then
+    ok "gesicherte == eingespielte Rahmen ($FR == $FB)"
+else
+    bad "gesichert $FR, eingespielt ${FB:-?} -- ein Rahmen ist unterwegs verloren"
+fi
+
+# FREIE RAHMEN: kein verlorener Rahmen ueber den Wiederanlauf.
+hat "$B" 'schlaf: rahmen gleich' "frei vorher == frei nachher (kein verlorener Rahmen)"
+hat_nicht "$B" 'schlaf: RAHMEN VERLOREN' "keine Meldung ueber verlorene Rahmen"
+
+echo
+echo "== 9. DIE ZUSAGE, DIE REGISTER UND SEITENTABELLEN PRUEFT: WEITERRECHNEN =="
+# Ein Prozess, der nach dem Schlafen nur EXISTIERT, beweist nichts --
+# er koennte neu angelegt worden sein. Dieser hier fuehrt eine
+# laufende Rechnung in seiner privaten Seite, und der Kern rechnet
+# sie UNABHAENGIG nach: summe muss n*(n+1)/2 sein.
+if grep -aq 'schlaf: weitergerechnet=1' "$B"; then
+    R=$(grep -a 'schlaf: rechnung' "$B" | sed -n '1s/.*s=\([0-9]*\) schritt=\([0-9]*\) soll=\([0-9]*\).*/summe=\1 schritt=\2 soll=\3/p')
+    ok "der Prozess rechnet nach dem Hochlauf RICHTIG weiter ($R)"
+else
+    bad "die Rechnung des Prozesses hat den Schlaf NICHT ueberlebt"
+    grep -a 'schlaf: rechnung\|weitergerechnet' "$B" | sed 's/^/        /' | head -3
+fi
+# Die Zahl darf nicht null sein -- "0 == 0" waere eine grüne Zeile
+# ohne Inhalt.
+RS=$(grep -a 'schlaf: rechnung' "$B" | sed -n '1s/.*s=\([0-9]*\) .*/\1/p')
+if [ -n "$RS" ] && [ "$RS" -gt 0 ]; then
+    ok "und die Rechnung ist nicht leer (summe=$RS)"
+else
+    bad "die Rechnung ist leer (summe=${RS:-?}) -- das prueft nichts"
+fi
+
+echo
+echo "== 10. ZWEI ZYKLEN HINTEREINANDER, mit VERSCHIEDENEN Abbildern =="
+zyklus z2 "schlaf" 400
+A2="$TMPD/z2-a.txt"; B2="$TMPD/z2-b.txt"
+hat "$A2" 'schlaf: == arm zyklus2' "der zweite Zyklus fuehrt einen ANDEREN Zustand"
+hat "$B2" 'schlaf: gleich' "auch der zweite Zyklus kommt identisch zurueck"
+hat "$B2" 'schlaf: weitergerechnet=1' "auch im zweiten Zyklus rechnet der Prozess weiter"
+hat "$B2" 'schlaf: rahmen gleich' "auch im zweiten Zyklus kein verlorener Rahmen"
+# DIE ABBILDER MUESSEN VERSCHIEDEN SEIN. Sonst misst der zweite
+# Zyklus ein stehengebliebenes Abbild des ersten.
+S1=$(grep -a 'schlaf: gesichert' "$A" | sed -n '1s/.*sum=\(0x[0-9a-f]*\).*/\1/p')
+S2=$(grep -a 'schlaf: gesichert' "$A2" | sed -n '1s/.*sum=\(0x[0-9a-f]*\).*/\1/p')
+if [ -n "$S1" ] && [ -n "$S2" ] && [ "$S1" != "$S2" ]; then
+    ok "die zwei Zyklen schreiben VERSCHIEDENE Abbilder ($S1 / $S2)"
+else
+    bad "beide Zyklen haben dieselbe Summe (${S1:-?} / ${S2:-?}) -- der zweite misst den ersten"
+fi
+# Und die Zustaende selbst muessen sich unterscheiden.
+C1=$(grep -a 'schlaf: gleich' "$B" | sed -n '1s/.*cnt=\([0-9]*\).*/\1/p')
+C2=$(grep -a 'schlaf: gleich' "$B2" | sed -n '1s/.*cnt=\([0-9]*\).*/\1/p')
+if [ -n "$C1" ] && [ -n "$C2" ] && [ "$C1" != "$C2" ]; then
+    ok "und die zurueckgeholten Zustaende sind verschieden (cnt $C1 / $C2)"
+else
+    bad "beide Zyklen holen denselben Zustand zurueck (${C1:-?} / ${C2:-?})"
+fi
+
+echo
+echo "== 11. DIE GEGENPROBEN, DIE FEHLSCHLAGEN MUESSEN =="
+# 11a. BESCHAEDIGTES ABBILD -> Kaltstart, UND ZWAR WEGEN DER
+# PRUEFSUMME. Das ist die Gegenprobe der Vorrunde, jetzt ueber den
+# Hochlauf statt im selben Lauf.
+zyklus gk "schlafkaputt" 400
+GK="$TMPD/gk-b.txt"
+if grep -a 'schlaf: start' "$GK" | grep -aq 'abbild=0'; then
+    ok "das beschaedigte Abbild wird beim Hochlauf ABGEWIESEN"
+else
+    bad "das beschaedigte Abbild wurde eingespielt -- Muell im Speicher"
+fi
+if grep -a 'schlaf: KALTSTART' "$GK" | grep -aq 'why=Pruefsumme falsch'; then
+    ok "und zwar aus dem RICHTIGEN Grund: die Pruefsumme"
+else
+    bad "abgewiesen, aber nicht wegen der Pruefsumme"
+    grep -a 'schlaf: KALTSTART\|schlaf: start' "$GK" | sed 's/^/        /' | head -2
+fi
+hat_nicht "$GK" 'panic' "kein Ausnahmefehler beim Kaltstart nach dem Schaden"
+
+# 11b. FALSCHE HARDWARE-KENNUNG -> ebenfalls Kaltstart. NEU in
+# dieser Runde: ein Abbild, das zu einer ANDEREN Maschine gehoert,
+# ist auch dann falsch, wenn es in sich stimmig ist -- und dieser
+# Fall ist der gefaehrlichere, weil er gesund aussieht.
+zyklus gh "schlafhw" 400
+GH="$TMPD/gh-b.txt"
+if grep -a 'schlaf: start' "$GH" | grep -aq 'abbild=0'; then
+    ok "ein Abbild mit FREMDER Hardware-Kennung wird abgewiesen"
+else
+    bad "das fremde Abbild wurde eingespielt"
+fi
+if grep -a 'schlaf: KALTSTART' "$GH" | grep -aq 'why=Hardware anders'; then
+    ok "und zwar aus dem RICHTIGEN Grund: die Hardware-Kennung"
+else
+    bad "abgewiesen, aber nicht wegen der Hardware-Kennung"
+    grep -a 'schlaf: KALTSTART\|schlaf: start' "$GH" | sed 's/^/        /' | head -2
+fi
+hat_nicht "$GH" 'panic' "kein Ausnahmefehler beim Kaltstart nach fremder Kennung"
+
+# 11c. DIE STARTERKENNUNG LAESST SICH ABSCHALTEN (`noschlaf`). Ein
+# gueltiges Abbild darf dann NICHT eingespielt werden -- sonst gibt
+# es keinen Weg, eine Maschine bewusst kalt zu starten.
+rm -f "$TMPD/gn.img"
+qemu-img create -f raw "$TMPD/gn.img" 64M >/dev/null 2>&1
+timeout 400 $QEMU_X86 -kernel "$TMPD/k.elf" -m 512 \
+    -append "osum schlafarm acpiev" -serial "file:$TMPD/gn-a.txt" \
+    -display none -no-reboot \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+    -drive "file=$TMPD/gn.img,format=raw,if=ide,index=0" > /dev/null 2>&1
+timeout 400 $QEMU_X86 -kernel "$TMPD/k.elf" -m 512 \
+    -append "osum schlafpruef noschlaf acpiev" \
+    -serial "file:$TMPD/gn-b.txt" -display none -no-reboot \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+    -drive "file=$TMPD/gn.img,format=raw,if=ide,index=0" > /dev/null 2>&1
+if grep -a 'schlaf: KALTSTART' "$TMPD/gn-b.txt" | grep -aq 'why=abgeschaltet'; then
+    ok "mit 'noschlaf' bleibt ein gueltiges Abbild liegen (bewusster Kaltstart)"
+else
+    bad "'noschlaf' hat die Starterkennung nicht abgeschaltet"
+    grep -a 'schlaf: start\|KALTSTART' "$TMPD/gn-b.txt" | sed 's/^/        /' | head -2
+fi
+
+echo
+echo "== SUSPEND+SCHLAF: $pass bestanden, $fail gescheitert =="
 [ "$fail" -eq 0 ]
