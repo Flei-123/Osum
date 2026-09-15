@@ -1,0 +1,101 @@
+// tools/aesni: DIE KREISPROBE. Tabelle gegen Befehle, Oktett fuer Oktett.
+import std.io
+import std.rt
+import crypto.aes
+import crypto.aesni
+
+// Ein einfacher, wiederholbarer Zufall (xorshift64) -- kein Krypto,
+// nur Daten. Wiederholbar, damit ein Fehler nachstellbar ist.
+static mut z: u64 = 0
+
+fn nextr() -> u64 {
+    var x: u64 = z
+    x = x ^ (x << 13)
+    x = x ^ (x >> 7)
+    x = x ^ (x << 17)
+    z = x
+    return x
+}
+
+fn main() -> i32 {
+    if !aesni.usable() {
+        io.print_line("kreis: aesni=0 (diese Maschine kann es nicht)")
+        return 0
+    }
+    z = 0x243F6A8885A308D3
+    var key: [u8; 32] = [0 as u8; 32]
+    var pt: [u8; 16] = [0 as u8; 16]
+    var a: [u8; 16] = [0 as u8; 16]
+    var b: [u8; 16] = [0 as u8; 16]
+    var back: [u8; 16] = [0 as u8; 16]
+    var gut: u64 = 0
+    var schlecht: u64 = 0
+    var rueck: u64 = 0
+
+    var klen: usize = 16
+    while klen <= 32 {
+        var runde: usize = 0
+        while runde < 2000 {
+            var i: usize = 0
+            while i < klen {
+                key[i] = (nextr() & 255) as u8
+                i = i + 1
+            }
+            i = 0
+            while i < 16 {
+                pt[i] = (nextr() & 255) as u8
+                i = i + 1
+            }
+            var k: aes.Key = aes.key_new()
+            if !aes.key_set(&k, (&key[0]) as u64, klen) {
+                schlecht = schlecht + 1
+                runde = runde + 1
+                continue
+            }
+            aes.encrypt_block(&k, (&pt[0]) as u64, (&a[0]) as u64)
+            var e: aesni.Enc = aesni.enc_from((&k.rk[0]) as u64, k.nr)
+            aesni.encrypt_block(&e, (&pt[0]) as u64, (&b[0]) as u64)
+            var diff: u64 = 0
+            i = 0
+            while i < 16 {
+                diff = diff | ((a[i] as u64) ^ (b[i] as u64))
+                i = i + 1
+            }
+            if diff == 0 {
+                gut = gut + 1
+            } else {
+                schlecht = schlecht + 1
+            }
+            // und zurueck
+            var d: aesni.Dec = aesni.dec_from((&k.rk[0]) as u64, k.nr)
+            aesni.decrypt_block(&d, (&b[0]) as u64, (&back[0]) as u64)
+            diff = 0
+            i = 0
+            while i < 16 {
+                diff = diff | ((back[i] as u64) ^ (pt[i] as u64))
+                i = i + 1
+            }
+            if diff == 0 {
+                rueck = rueck + 1
+            } else {
+                schlecht = schlecht + 1
+            }
+            runde = runde + 1
+        }
+        klen = klen + 8
+    }
+    var bf: rt.Buf = rt.buf_new()
+    io.print("kreis: gleich=")
+    rt.buf_push_dec_u64(&bf, gut)
+    io.print_bytes(rt.buf_ptr(&bf), rt.buf_len(&bf))
+    rt.buf_clear(&bf)
+    io.print(" rueck=")
+    rt.buf_push_dec_u64(&bf, rueck)
+    io.print_bytes(rt.buf_ptr(&bf), rt.buf_len(&bf))
+    rt.buf_clear(&bf)
+    io.print(" ungleich=")
+    rt.buf_push_dec_u64(&bf, schlecht)
+    io.print_line_bytes(rt.buf_ptr(&bf), rt.buf_len(&bf))
+    rt.buf_free(&bf)
+    return 0
+}

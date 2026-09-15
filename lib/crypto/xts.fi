@@ -72,11 +72,33 @@
 // Wie `aes.fi` und `sha256.fi`: KEINE `profile`-Zeile, KEIN `import`
 // ausser der Chiffre, kein Allokator, kein Systemaufruf, aller Zustand
 // beim Aufrufer.
+//
+// ======================================== RUNDE AESNI (K-020): DAS TEMPO
+//
+// Diese Datei rechnete mit 0,544 MiB/s -- ein Sektor 898 us, ein
+// Megaoktett zwei Sekunden. Davon waren 812 us die Chiffre
+// (32 Bloecke * 25,4 us), gemessen mit `aesbench`, und nicht die
+// Tweak-Rechnung hier.
+//
+// `sector_encrypt`/`sector_decrypt` nehmen deshalb jetzt den Weg ueber
+// `lib/crypto/aesni.fi`, WENN die Maschine AES-NI hat (`cpuid` Blatt 1,
+// ECX Bit 25). Hat sie es nicht, rechnet Zeile fuer Zeile weiter, was
+// vorher hier stand. BEIDE WEGE MUESSEN OKTETT FUER OKTETT DASSELBE
+// LIEFERN -- `tools/aesni/run.sh` haelt sie gegeneinander, ueber die
+// Vektoren des IEEE-1619-Ausschusses und ueber Zufallsdaten.
+//
+// `encrypt`/`decrypt` (die allgemeine Form mit Ciphertext Stealing)
+// bleiben ABSICHTLICH auf dem Tabellenweg: sie tragen die krummen
+// Laengen, sie laufen nicht je Sektor, und der schnelle Weg brauchte
+// dort einen zweiten CTS-Zweig, den niemand benutzt. Wer sie mit
+// glatter Laenge ruft, bekommt dasselbe Ergebnis wie vorher.
 
 import crypto.aes
+import crypto.aesni
 
 export {
     encrypt, decrypt, sector_encrypt, sector_decrypt,
+    forget, use_aesni, aesni_on,
     KEY_BYTES, BLOCK
 }
 
@@ -153,6 +175,129 @@ fn block_op(k1: *mut aes.Key, t: *mut [u8; 16], inp: u64, out: u64,
 // Der Tweak aus 16 Oktetten: T = AES-k2(tweak).
 fn make_tweak(k2: *mut aes.Key, tweak: u64, t: *mut [u8; 16]) {
     aes.encrypt_block(k2, tweak, (t as u64))
+}
+
+
+// ==================================== RUNDE AESNI: DER SCHLUESSELSPEICHER
+//
+// GEMESSEN, und es war die Ueberraschung dieser Runde: nachdem die
+// Chiffre schnell war, kostete ein Sektor immer noch 16 us -- und davon
+// waren 1,9 us die Rechnung und 12,4 us der SCHLUESSELPLAN. `key_set`
+// ist die Tabellenfassung (6218 ns), und `sector_encrypt` rief sie
+// ZWEIMAL je Sektor, fuer k1 und k2. Bei einer Platte, die Sektor um
+// Sektor mit DEMSELBEN Schluessel liest, ist das reine Arbeit fuer den
+// Papierkorb.
+//
+// Deshalb dieser Speicher: er haelt die fertigen Plaene fuer den
+// zuletzt benutzten Schluessel. Die Platte benutzt genau einen; der
+// Treffer ist also der Normalfall und nicht der Glueckfall.
+//
+// WARUM DER VERGLEICH UEBER ALLE 64 OKTETTE LAEUFT und nicht beim
+// ersten Unterschied abbricht: ein frueher Abbruch waere ein Zeitkanal
+// ueber den Schluessel. Dieselbe Regel wie in `halves_equal`.
+//
+// EIN SCHLUESSEL IM SPEICHER IST EIN SCHLUESSEL IM SPEICHER. Das ist
+// kein neues Leck -- der Kern haelt den Hauptschluessel ohnehin in
+// `kstate`, solange die Platte offen ist (docs/RUNDE-KRYPTO.md
+// Abschnitt 5). `forget` loescht ihn trotzdem, und `krypto.lock` ruft
+// es: wer die Platte zusperrt, soll nicht hier eine Kopie zuruecklassen.
+static mut c_key: [u8; 64] = [0; 64]
+static mut c_enc: aesni.Enc = aesni.Enc { rk: [0; 240], nr: 0, ok: false }
+static mut c_dec: aesni.Dec = aesni.Dec { rk: [0; 240], nr: 0, ok: false }
+static mut c_tk2: aesni.Enc = aesni.Enc { rk: [0; 240], nr: 0, ok: false }
+static mut c_voll: bool = false
+
+// Alles vergessen. Ruft `krypto.lock`.
+fn forget() {
+    var i: usize = 0
+    while i < 64 {
+        c_key[i] = 0
+        i = i + 1
+    }
+    i = 0
+    while i < 240 {
+        c_enc.rk[i] = 0
+        c_dec.rk[i] = 0
+        c_tk2.rk[i] = 0
+        i = i + 1
+    }
+    c_enc.ok = false
+    c_dec.ok = false
+    c_tk2.ok = false
+    c_voll = false
+}
+
+fn cache_hit(key: u64) -> bool {
+    if !c_voll {
+        return false
+    }
+    var diff: u64 = 0
+    var i: usize = 0
+    while i < 64 {
+        diff = diff | ((c_key[i] as u64) ^ (ld8(key, i) as u64))
+        i = i + 1
+    }
+    return diff == 0
+}
+
+// Die Plaene fuer diesen Schluessel bereitlegen. `false` heisst: der
+// Schluessel taugt nicht (falsche Haelften), und der Aufrufer muss
+// abbrechen -- nicht etwa auf den langsamen Weg gehen.
+fn cache_fill(key: u64) -> bool {
+    var k1: aes.Key = aes.key_new()
+    var k2: aes.Key = aes.key_new()
+    if !aes.key_set(&k1, key, 32) {
+        return false
+    }
+    if !aes.key_set(&k2, key + 32, 32) {
+        return false
+    }
+    c_enc = aesni.enc_from((&k1.rk[0]) as u64, k1.nr)
+    c_dec = aesni.dec_from((&k1.rk[0]) as u64, k1.nr)
+    c_tk2 = aesni.enc_from((&k2.rk[0]) as u64, k2.nr)
+    var i: usize = 0
+    while i < 64 {
+        c_key[i] = ld8(key, i)
+        i = i + 1
+    }
+    c_voll = true
+    return true
+}
+
+
+// ==================================== RUNDE AESNI: DER SCHALTER VON AUSSEN
+//
+// `xts.fi` kennt `kstate` NICHT und darf es nicht kennen -- dieselbe
+// Datei laeuft im Kern, in einem Ring-3-Programm und im Orakel auf dem
+// Wirt. Der Kern muss den schnellen Weg aber abschalten koennen
+// (Kernwort `noaesni`, die Gegenprobe), und das Orakel auch
+// (`OSUM_NOAESNI` im Abnahmelauf).
+//
+// Deshalb ein schlichter Schalter, den der Aufrufer setzt:
+//   0 = noch nicht gefragt (dann entscheidet `cpuid`)
+//   1 = AES-NI benutzen, wenn die Maschine es hat
+//   2 = NICHT benutzen, auch wenn die Maschine es hat
+//
+// Voreingestellt ist 0, also: es bleibt bei dem, was `cpuid` sagt. Wer
+// nichts tut, bekommt den schnellen Weg.
+static mut ni_wahl: u64 = 0
+
+fn use_aesni(on: bool) {
+    if on {
+        ni_wahl = 1
+    } else {
+        ni_wahl = 2
+    }
+    // Die Plaene gehoeren zum Weg, nicht zum Schluessel: wer umschaltet,
+    // faengt von vorne an.
+    forget()
+}
+
+fn aesni_on() -> bool {
+    if ni_wahl == 2 {
+        return false
+    }
+    return aesni.usable()
 }
 
 // ------------------------------------------------------- die Schnittstelle
@@ -292,6 +437,22 @@ fn sector_encrypt(key: u64, sector: u64, inp: u64, out: u64,
     n: usize) -> bool {
     var tw: [u8; 16] = [0 as u8; 16]
     sector_tweak(sector, &tw)
+    // DER SCHNELLE WEG, wenn die Maschine ihn hat und die Laenge glatt
+    // ist. Sonst faellt es auf die Zeile darunter zurueck, und die ist
+    // dieselbe wie vor dieser Runde.
+    if n % BLOCK == 0 && aesni_on() {
+        if halves_equal(key) { return false }
+        if !cache_hit(key) {
+            if !cache_fill(key) { return false }
+        }
+        // Der Tweak T = AES-k2(Sektornummer) kommt ueber DENSELBEN
+        // schnellen Weg -- ein Block, einmal je Sektor.
+        var t: [u8; 16] = [0 as u8; 16]
+        if !aesni.encrypt_block(&c_tk2, (&tw[0]) as u64, (&t[0]) as u64) {
+            return false
+        }
+        return aesni.xts_sector_encrypt(&c_enc, &t, inp, out, n)
+    }
     return encrypt(key, (&tw[0]) as u64, inp, out, n)
 }
 
@@ -299,5 +460,19 @@ fn sector_decrypt(key: u64, sector: u64, inp: u64, out: u64,
     n: usize) -> bool {
     var tw: [u8; 16] = [0 as u8; 16]
     sector_tweak(sector, &tw)
+    if n % BLOCK == 0 && aesni_on() {
+        if halves_equal(key) { return false }
+        if !cache_hit(key) {
+            if !cache_fill(key) { return false }
+        }
+        // DER TWEAK WIRD VERSCHLUESSELT, auch beim Entschluesseln --
+        // T = AES-k2(Sektornummer) ist in beide Richtungen dasselbe.
+        // Wer hier `dec_from` nimmt, bekommt stabilen Unsinn.
+        var t: [u8; 16] = [0 as u8; 16]
+        if !aesni.encrypt_block(&c_tk2, (&tw[0]) as u64, (&t[0]) as u64) {
+            return false
+        }
+        return aesni.xts_sector_decrypt(&c_dec, &t, inp, out, n)
+    }
     return decrypt(key, (&tw[0]) as u64, inp, out, n)
 }
