@@ -303,6 +303,10 @@ BEREICHE = [
     ("WMPLUG",     "kstate.fi", "WMP_OFF",        "WMP_MAX"),
     ("SUSP",       "kstate.fi", "SUSP_OFF",       "SUSP_MAX"),
     ("SCHLAF",     "kstate.fi", "SCHLAF_OFF",     "SCHLAF_MAX"),
+    # RUNDE WACH (K-018, Abschluss): der Wiederanlauf.  Fuenf Seiten,
+    # 0x127000..0x12C000, VORHER zugeteilt -- diese Runde hat sich keine
+    # Seite gesucht.
+    ("WACH",       "kstate.fi", "WACH_OFF",       "WACH_MAX"),
     # RUNDE KRYPTO (K-019): die Plattenverschluesselung.  Fuenf Seiten,
     # VORHER zugeteilt in der Welle vom 15.09.2026 -- diese Runde hat
     # sich keine Seite gesucht, sie hat die bekommen, die in kstate.fi

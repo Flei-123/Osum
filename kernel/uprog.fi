@@ -230,6 +230,12 @@ const P_BUSS: u64 = 63
 // geht nur, wenn seine Datenseite auf demselben Rahmen wieder liegt
 // UND seine Seitentabelle dorthin zeigt.
 const P_SCHLAF: u64 = 64
+// ============ RUNDE WACH (K-018, Abschluss): DER WIEDERANLAUF
+// Der Prozess, an dem gemessen wird, ob ein Prozess nach dem
+// Ruhezustand WIRKLICH WEITERLAEUFT -- nicht nur, ob sein Speicher
+// zurueckgekommen ist. Der Unterschied steht in `u_wach`.
+const P_WACH: u64 = 65
+const WACH_TAG: u64 = 0x5741434855534552 // "WACHUSER"
 // Die Kennung in der privaten Seite. Als Konstante und nicht als
 // Literal im Vergleich: firnc liest ein nacktes Literal dieser Groesse
 // als i32 und weist es ab (gemessen: "integer literal ... does not fit
@@ -593,6 +599,9 @@ fn u_enter(packed: u64) {
     if prog == P_SCHLAF {
         u_schlaf(arg)
     }
+    if prog == P_WACH {
+        u_wach(arg)
+    }
     if prog == P_FAULT {
         u_fault(arg)
     }
@@ -770,6 +779,78 @@ fn u_schlaf(arg: u64) {
     }
     u_say_line((&s_su[0]) as u64, summe)
     u_sys(SYS_EXIT, 1, 0, 0)
+}
+
+// ==================================================================
+// RUNDE WACH (K-018, Abschluss): DER PROZESS, DER WEITERLAUFEN MUSS
+// ==================================================================
+//
+// DER UNTERSCHIED ZU `u_schlaf`, UND ER IST DIE GANZE RUNDE.
+//
+// `u_schlaf` (Vorrunde) rechnet, legt sich EINMAL hin und rechnet
+// nach dem Aufwachen weiter. Damit laesst sich messen, dass sein
+// SPEICHER zurueckgekommen ist -- der Pruefstand liest die Zahlen aus
+// dem eingespielten Rahmen und rechnet sie nach.
+//
+// Was sich damit NICHT messen laesst: ob er wieder auf dem Prozessor
+// war. Die Zahlen im Rahmen stehen dort auch dann, wenn nie wieder
+// eine Anweisung dieses Prozesses ausgefuehrt wurde -- sie sind ja
+// von VOR dem Schlafen.
+//
+// Deshalb laeuft dieser hier in einer SCHLEIFE OHNE ENDE. Er zaehlt
+// bei jedem Durchgang `runden` hoch und legt sich kurz hin, damit
+// der Kern ihn im Schlaf erwischt. Der Pruefstand liest `runden`
+// ZWEIMAL -- einmal aus dem Abbild (der Stand vor dem Schlafen) und
+// einmal aus dem laufenden System nach dem Wiederanlauf. STEIGT die
+// Zahl, dann hat dieser Prozess nach dem Wiederanlauf Anweisungen
+// ausgefuehrt. Eine andere Erklaerung gibt es nicht: niemand sonst
+// schreibt in diese Seite.
+//
+// DIE GEGENRECHNUNG BLEIBT. `summe` ist weiterhin 1+2+...+n, und der
+// Pruefstand rechnet es nach (`n*(n+1)/2`). Eine Zahl, die nur
+// steigt, koennte ein Zaehler sein, den irgendwer hochzaehlt; eine
+// Summe, die zu ihrem Schritt passt, kann nur aus dieser Schleife
+// kommen.
+fn u_wach(arg: u64) {
+    var s_st: [u8; 18] = "user: wach start \0"
+    var s_ru: [u8; 19] = "user: wach runden \0"
+    let pm: u64 = USER_DATA
+    // Liegt schon eine Rechnung in der Seite? Dann ist dieser Lauf
+    // die FORTSETZUNG nach dem Schlaf und faengt nicht neu an.
+    var summe: u64 = 0
+    var schritt: u64 = 1
+    var runden: u64 = 0
+    if __mmio_read64(pm as *mut u64) == WACH_TAG {
+        summe = __mmio_read64((pm + 8) as *mut u64)
+        schritt = __mmio_read64((pm + 16) as *mut u64)
+        runden = __mmio_read64((pm + 24) as *mut u64)
+    }
+    __mmio_write64(pm as *mut u64, WACH_TAG)
+    u_say_line((&s_st[0]) as u64, runden)
+    // OHNE ENDE. Der Ruhezustand soll ihn MITTEN in seiner Arbeit
+    // erwischen, und nach dem Wiederanlauf soll er weiterzaehlen,
+    // ohne dass ihn jemand anstoesst.
+    var i: u64 = 0
+    while i < arg {
+        summe = summe + schritt
+        schritt = schritt + 1
+        runden = runden + 1
+        // In DIESER Reihenfolge: erst die Werte, dann die
+        // Rundenzahl. Wer die Rundenzahl zuerst schriebe, haette bei
+        // einem Ruhezustand genau zwischen den beiden Schreibvor-
+        // gaengen eine Runde, die gezaehlt, aber nicht gerechnet ist
+        // -- und die Gegenrechnung schlueg fehl, ohne dass etwas
+        // kaputt waere.
+        __mmio_write64((pm + 8) as *mut u64, summe)
+        __mmio_write64((pm + 16) as *mut u64, schritt)
+        __mmio_write64((pm + 24) as *mut u64, runden)
+        // Kurz hinlegen, damit der Planer wechselt und der
+        // Ruhezustand ihn ueberhaupt erwischen kann.
+        u_sleep(0, 20)
+        i = i + 1
+    }
+    u_say_line((&s_ru[0]) as u64, runden)
+    u_sys(SYS_EXIT, 0, 0, 0)
 }
 
 // THE COUNTER-CHECK to it: whatever is not mine gives a #PF. The address
