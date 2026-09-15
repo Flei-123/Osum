@@ -380,7 +380,22 @@ Einzeln benannt, nicht versteckt.
    ließe; `noargonpar` und `-smp 1` sind die Gegenproben, und beide liefern
    byteweise dasselbe. Ein echtes Einkern-Blech ist **nicht** getestet.
 
-8. **Die Aufgaben leben genau ein Segment.** Bei t=2, p=4 sind das 32
+8. **Bei kleinen Parametern verteilt sich nichts — und das ist richtig
+   so.** Mit den Abnahmeparametern (t=1, m=64 KiB) ist ein Segment VIER
+   Blöcke groß. Der Startkern hat alle vier Spuren fertig, bevor der
+   Ablaufplaner eine Aufgabe auf einen anderen Kern legt; gemessen, vier
+   Läufe hintereinander, alle `kerne=1` bei rund 5,9 Mio Takten. Das ist
+   kein Fehler, sondern die richtige Antwort auf eine Rechnung, die zu
+   klein zum Verteilen ist — aber es heißt, dass der Gewinn dieser Runde
+   **erst ab einer gewissen Größe** eintritt. Wo genau die Schwelle liegt,
+   ist **nicht** vermessen; bei m=32 MiB sind es verlässlich vier Kerne
+   (sechs Läufe hintereinander `kerne=4`).
+
+   *Der erste Entwurf der Abnahme prüfte die Kernzahl am falschen Lauf
+   (dem mit den kleinen Parametern) und schlug deshalb sporadisch fehl.
+   Die Prüfung sitzt jetzt an den Vorgabeparametern.*
+
+9. **Die Aufgaben leben genau ein Segment.** Bei t=2, p=4 sind das 32
    Aufgaben je Entsperrung (`seg=32` im Bericht). Ein Bestand langlebiger
    Aufgaben mit eigener Barriere wäre billiger; gemessen, ob es sich lohnt,
    ist das **nicht**.
