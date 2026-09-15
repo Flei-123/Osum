@@ -314,6 +314,14 @@ BEREICHE = [
     # kernel/user/h264.fi -- ein CIF-Bild ist 152 KiB, vier davon
     # waeren der halbe kdata-Bereich.
     ("CODEC",      "kstate.fi", "CODEC_OFF",      "CODEC_MAX"),
+    # RUNDE AESNI (K-020): AES auf den Befehlen der Maschine.  EINE
+    # Seite, 0x120000..0x121000, in der Welle vom 15.09.2026 vorher
+    # zugeteilt -- zusammen mit den Modusindizes 1010..1019, weil beim
+    # letzten Mal nur die Seiten vergeben waren und sich zwei Runden
+    # denselben Modusindex genommen haben.  Die Schluesselplaene liegen
+    # NICHT hier (sie gehoeren lib/crypto/xts.fi, das auch auf dem Wirt
+    # laeuft); hier stehen nur Zaehler und die cpuid-Befunde.
+    ("AESNI",      "kstate.fi", "AESNI_OFF",      "AESNI_MAX"),
     # RUNDE NETMON: die Zaehlung je Prozess und der Weiterleiter mit
     # NAT und DHCP-Server. Beide Bereiche sind beim Zusammenfuehren
     # gewandert (0x5A000/0x5D000 waren von OFS3, DISPLAY und SPEICHER
