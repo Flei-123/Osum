@@ -177,6 +177,35 @@ rm -f "$SER" "$SOCK"
 #
 # `wmdauer` bleibt daneben: es sorgt dafuer, dass die Schleife auch
 # ohne Shell im Fenster laeuft (Runde TAFEL).
+# HIER STEHT ABSICHTLICH KEIN `wmshell` -- DIE ZEILE IST GEMESSEN.
+#
+# RUNDE INSTALLER2 (P-001). Der Fehler dieser Runde sah so aus:
+#
+#     osum: pid1 init
+#     init: ziel=grafik
+#     init: dienste=1
+#     init: herunterfahren      <- und `k15: start` kam nie
+#
+# URSACHE: `osum(state)` in kernel/kmain.fi startet den ERSTEN PROZESS
+# `/bin/init`, und zwar VOR `gfx.stage_surface`, das den Fensterserver
+# und damit `wigapp=` ueberhaupt erst hochzieht. `osum` kehrt erst
+# zurueck, wenn init fertig ist; init findet im Ziel `grafik` keinen
+# Dienst (die inittab des Sticks fuehrt nur `sh:konsole:ctrl`), laeuft
+# in seine Leerlaufschranke (4000 * 25 ms) und schaltet ab.
+#
+# BEHOBEN IM KERN und nicht hier: `wm_owns_shell` fragt jetzt nach
+# ALLEN Woertern, mit denen der Fensterserver sein Programm selbst
+# startet (`wig`, `wigfiles`, `wigstart`, `desk`, `tileshot`), nicht
+# mehr nur nach `wmshell`. Bei `wig` startet `osum` deshalb kein init
+# mehr -- haengt die Wurzel aber weiter ein, denn die frueher
+# Rueckkehr steht jetzt VOR dem ersten Prozess und nicht vor dem
+# Einhaengen (sonst faende der Installer keine Platte: "ready n=0").
+#
+# UND WARUM NICHT EINFACH `wmshell` DAZU: das Wort startet zusaetzlich
+# `/bin/sh` im Terminalfenster. Unter `nokbd` endet sie sofort auf EOF
+# und `wait_wm` startet sie im Sekundentakt neu. GEMESSEN: 361 Starts,
+# und das Kopieren der Wurzel fiel von 940 auf 43 Bloecke je Minute --
+# der Installer verhungerte neben seinem eigenen Terminal.
 APPEND="modfs osum vfs gfx wm wig wmhold wmdauer wighalt=1200 nokbd nosched noproc nofs"
 APPEND="$APPEND lang=de uiscale=1 wigapp=/bin/installer,sofort"
 
