@@ -261,6 +261,10 @@ export {
     // ---- RUNDE WMPLUGIN ----
     WMP_OFF, WMP_MAX, M_WMPLUG, M_PLUGAUS, M_PLUGTEST, M_PLUGFRIST,
     SUSP_OFF, SUSP_MAX, M_SUSPMESS, M_SUSPEND,
+    // ---- RUNDE SCHLAF (K-018, zweite Haelfte) ----
+    SCHLAF_OFF, SCHLAF_MAX,
+    M_SCHLAF, M_SCHLAFARM, M_SCHLAFPRUEF, M_SCHLAFHW, M_SCHLAFKAPUTT,
+    M_NOSCHLAF, M_SCHLAFMESS,
     // ---- RUNDE KRYPTO (K-019) ----
     CRYPT_OFF, CRYPT_MAX,
     CRY_READY, CRY_ON, CRY_FIRST, CRY_SECTORS, CRY_CIPHER, CRY_KDF,
@@ -351,7 +355,24 @@ const FRAMES_FREE: u64 = 80 // free frames right now
 // untersten drei davon. Der Skalar 88 ist seit dieser Runde FREI.
 const MODE_OFF: u64 = 0x4C000 // die Seite des Modusvektors in kdata
 const MODE_MAX: u64 = 0x1000
-const MODE_WORDS: u64 = 16 // 16 * 64 = 1024 Bits, Platz bis 512 Woerter
+const MODE_WORDS: u64 = 17 // 17 * 64 = 1088 Bits, Platz bis 512 Woerter
+// RUNDE SCHLAF (K-018, zweite Haelfte): VON 16 AUF 17 GEWACHSEN, und
+// das ist KEINE selbst genommene Zuteilung, sondern die Folge einer
+// gemessenen Enge. Der Runde sind die Modusindizes 1020..1029
+// zugeteilt; der Vektor endete bei 16 * 64 = 1024, also lagen
+// 1024..1029 HINTER seinem Ende. `tools/kernel/memmap.py` hat genau
+// das gemeldet ("Modusindex 1024 liegt hinter dem Vektor") -- der
+// Kartenpruefer hat die Enge gefunden, nicht ein Gefuehl.
+//
+// Das Wachstum kostet KEINE neue Seite: MODE_OFF ist mit MODE_MAX
+// 0x1000 eine ganze Seite, und die Tafel oben sagt seit Runde K17
+// woertlich "wird auch das knapp, waechst MODE_WORDS; die Seite fasst
+// 512 Woerter". 17 Woerter sind 136 Oktette in einer Seite zu 4096.
+// Der zugeteilte Indexraum der Runde bleibt damit unangetastet --
+// die Runde nimmt KEINEN Index ausserhalb 1020..1029.
+//
+//   Wort 16 1024..1087  RUHEZUSTAND UND SCHLAF -- Runde SCHLAF
+//                       (1024..1029 belegt). Frei ab Bit 6.
 const MODE: u64 = MODE_OFF // Wort 0 -- der Kern
 const MODE_FREE: u64 = 88 // frei seit Runde K17 (war MODE)
 const VECTORS: u64 = 96 // address of the table out of isr.s
@@ -1484,6 +1505,48 @@ const WMP_MAX: u64 = 0x4000
 // in `kernel/susp.fi` und NICHT hier -- sie ist die Karte EINER Datei.
 const SUSP_OFF: u64 = 0x110000
 const SUSP_MAX: u64 = 0x3000
+
+// ============================== RUNDE SCHLAF (K-018, zweite Haelfte)
+//
+// DER ECHTE RUHEZUSTAND. Die Vorrunde `suspend` hat den TRAEGER
+// gebaut -- Abbild, Pruefsumme, Wiedererkennung, Gegenprobe -- und
+// in docs/RUNDE-SUSPEND.md Abschnitt 7 ehrlich hingeschrieben, was
+// sie NICHT kann: keine Starterkennung, keine Register, kein
+// FPU-Bereich, kein Arbeitsspeicher der Prozesse, kein
+// Geraetezustand. Diese Runde baut genau diese fuenf Punkte.
+//
+// ZUGETEILT UND NICHT VERHANDELBAR: 0x121000 bis ausschliesslich
+// 0x126000, fuenf Seiten, UND die Modusindizes 1020..1029. Beide
+// Nummernraeume standen VOR der Runde fest, und der Grund steht bei
+// KDATA_SIZE: in Welle 1 nahmen `suspend` und `krypto` denselben
+// Modusindex 990/991, weil nur die SEITEN vergeben waren.
+//
+// WAS IN DEN FUENF SEITEN LIEGT -- und vor allem, was NICHT:
+//
+//   +0x0000  DIE SKALARE (SL_* unten). Der Befund der Starterkennung,
+//            die Hardware-Kennung, die Zaehler der gesicherten
+//            Rahmen, die Geraetezustaende. Alles einzelne Woerter.
+//   +0x1000  DER REGISTERSATZ (SL_REGS, 512 Oktette reichen weit):
+//            rsp, rbp, rbx, r12..r15, die Ruecksprungadresse, cr3
+//            und die Flaggen. Er liegt in kdata und NICHT auf dem
+//            Stapel, denn der Stapel ist genau das, was hier
+//            gewechselt wird.
+//   +0x2000  DER FPU/XSAVE-BEREICH, eine Seite. `fpu.area_size` ist
+//            auf dieser Maschine hoechstens AREA_MAX = 4096, also
+//            passt er genau; ist er groesser, sichert diese Runde
+//            ihn NICHT und sagt das (SL_FPUWHY).
+//   +0x3000  EIN SEKTORPUFFER, 4096 Oktette, fuer den Kopfsatz und
+//            die Rahmentafel beim Lesen.
+//   +0x4000  DIE GERAETEZUSTAENDE, eine Seite.
+//
+// WAS AUSDRUECKLICH NICHT HIER LIEGT: der ABBILDPUFFER fuer den
+// Arbeitsspeicher der Prozesse. Er ist ein Vielfaches von 4 KiB mal
+// der Zahl der Rahmen und hat in fuenf Seiten kdata nichts zu
+// suchen; er kommt aus `mem.frame_alloc` und wird wieder
+// zurueckgegeben. Der Auftrag sagt es woertlich: grosse
+// Abbildpuffer gehoeren NICHT in kdata.
+const SCHLAF_OFF: u64 = 0x121000
+const SCHLAF_MAX: u64 = 0x5000
 // ===================================== RUNDE CODEC (P-022): DER VIDEOCODEC
 //
 // Der Bereich ist dieser Runde VORHER zugeteilt worden (siehe den
@@ -3564,6 +3627,18 @@ const M_PLUGFRIST: u64 = 989 // Wort 15, Bit 29
 // naechste Welle: beides vorher zuteilen.
 const M_SUSPMESS: u64 = 1000 // Wort 15, Bit 40 -- nur die Vorabmessung
 const M_SUSPEND: u64 = 1001 // Wort 15, Bit 41 -- der Ruhezustand selbst
+
+// RUNDE SCHLAF (K-018, zweite Haelfte). ZUGETEILT: 1020..1029.
+// Diese Runde nimmt KEINEN Index ausserhalb -- das ist die Lehre aus
+// Welle 1, wo sich zwei Runden denselben Index nahmen, weil nur die
+// kdata-Seiten vorher vergeben waren.
+const M_SCHLAF: u64 = 1020 // der volle Zyklus ueber den Hochlauf
+const M_SCHLAFARM: u64 = 1021 // Zustand aufbauen, sichern, Gast beenden
+const M_SCHLAFPRUEF: u64 = 1022 // nach dem Neustart: was kam zurueck
+const M_SCHLAFHW: u64 = 1023 // die Hardware-Kennung faelschen (Gegenprobe)
+const M_SCHLAFKAPUTT: u64 = 1024 // das Abbild beschaedigen (Gegenprobe)
+const M_NOSCHLAF: u64 = 1025 // die Starterkennung ausschalten
+const M_SCHLAFMESS: u64 = 1026 // nur messen, was diese Runde sichert
 // ================================================= RUNDE KRYPTO (K-019)
 //
 // DIE PLATTENVERSCHLUESSELUNG. Fuenf Seiten, 0x113000..0x118000, und

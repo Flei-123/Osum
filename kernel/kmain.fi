@@ -115,6 +115,7 @@ import audio
 import aml
 import acpiev
 import susp
+import schlaf
 
 // Indices in the table out of isr.s.
 const V_DF_STACK: u64 = 52
@@ -768,6 +769,28 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // 7f. round K1: a system on that disk. Mount what the host built,
     //     load /bin/sh out of it, and let it run until it is done.
     osum(state)
+    // ============================ RUNDE SCHLAF (K-018, zweite Haelfte)
+    //
+    // DIE ZWEI PHASEN DES ZYKLUS. Sie stehen HIER und nicht bei
+    // `schlaf.boot_check` weiter oben, und der Grund ist derselbe,
+    // aus dem `osum` hier steht: ab dieser Zeile laeuft der Planer
+    // mit einem Adressraum, in dem `proc.create` wirklich Prozesse
+    // anlegen kann. Die Starterkennung braucht das nicht (sie liest
+    // nur die Platte); der Pruefstand braucht es.
+    //
+    //   `schlafarm`   -- Zustand aufbauen, sichern, Gast BEENDEN.
+    //   `schlafpruef` -- vergleichen, was der Hochlauf eingespielt hat.
+    //
+    // Die zwei Woerter sind absichtlich getrennt: der Laeufer ruft
+    // ZWEI QEMU-Laeufe mit DERSELBEN Plattendatei auf, und zwischen
+    // ihnen ist der Arbeitsspeicher wirklich weg. Genau das konnte
+    // die Vorrunde nicht messen.
+    if kstate.mode_on(state, kstate.M_SCHLAFPRUEF) {
+        schlaf.pruef(state, schlaf.frei_beim_start(state))
+    }
+    if kstate.mode_on(state, kstate.M_SCHLAFARM) {
+        schlaf.arm_and_exit(state)
+    }
     // RUNDE HOTPLUG: DER RUECKFALL.
     //
     // Der Haltepunkt steht IN `osum`, hinter dem Einhaengen der
@@ -3417,6 +3440,32 @@ fn osum(state: u64) {
     // nicht gelaufen -- die Vorabmessung meldete "keine Platte",
     // waehrend dieselbe Maschine `ata0 sectors=131072` druckte.
     susp.late(state)
+    // ============================ RUNDE SCHLAF (K-018, zweite Haelfte)
+    //
+    // DIE STARTERKENNUNG. Sie steht GENAU HIER, und die Stelle ist
+    // die halbe Runde:
+    //
+    //   HINTER `susp.late` -- die Platte ist gemessen (`blk.use_ata`
+    //   ist gelaufen), und ohne eine Platte gibt es kein Abbild zu
+    //   suchen. Die Vorrunde hat diesen Punkt gefunden und
+    //   begruendet; diese Runde erbt ihn.
+    //
+    //   VOR allem, was Rahmen anfordert. Das Abbild legt die Rahmen
+    //   der Prozesse an GENAU DIE physischen Adressen zurueck, an
+    //   denen sie beim Einschlafen lagen. Haette der Kern sie
+    //   inzwischen an jemand anderen ausgegeben, schriebe das
+    //   Einspielen ueber fremden Besitz -- deshalb so frueh wie
+    //   moeglich, und deshalb `mem.reserve_frame` beim Einspielen.
+    //
+    // WAS SIE TUT, wenn sie ein gueltiges Abbild findet: sie spielt
+    // es ein und setzt `SL_RESUMED`. Was sie tut, wenn nicht: gar
+    // nichts, und der Start laeuft als normaler Kaltstart weiter.
+    // Das ist der Unterschied zur Vorrunde, die `S_RESTORED` setzte
+    // und niemand fragte.
+    schlaf.boot_check(state)
+    if kstate.mode_on(state, kstate.M_SCHLAFMESS) {
+        schlaf.mess(state)
+    }
     // RUNDE KRYPTO: der bekannte Baum. `kryptobaum` schreibt ihn,
     // `kryptopruef` liest ihn nach und druckt je Datei die SHA-256.
     // Beide setzen ein eingehaengtes Dateisystem voraus -- ist die
@@ -5203,6 +5252,59 @@ fn mode_of(state: u64, cmd: u64) {
     }
     if find(cmd, (&spw[0]) as u64, 7) != 0 {
         kstate.mode_add(state, kstate.M_SUSPEND)
+    }
+    // RUNDE SCHLAF (K-018, zweite Haelfte). DIESELBE FALLE, EIN
+    // DRITTES MAL: "schlaf" steckt in JEDEM der langen Woerter. Also
+    // werden die LANGEN zuerst gesucht, und das kurze nur, wenn
+    // keines davon steht -- sonst waere `schlafpruef` immer auch
+    // `schlaf` und der Pruefer wuerde zugleich sichern wollen.
+    var slarm: [u8; 10] = "schlafarm\0"
+    var slpr: [u8; 12] = "schlafpruef\0"
+    var slhw: [u8; 9] = "schlafhw\0"
+    var slkp: [u8; 13] = "schlafkaputt\0"
+    var slno: [u8; 10] = "noschlaf\0\0"
+    var slme: [u8; 11] = "schlafmess\0"
+    var slw: [u8; 7] = "schlaf\0"
+    if find(cmd, (&slarm[0]) as u64, 9) != 0 {
+        kstate.mode_add(state, kstate.M_SCHLAFARM)
+    }
+    if find(cmd, (&slpr[0]) as u64, 11) != 0 {
+        kstate.mode_add(state, kstate.M_SCHLAFPRUEF)
+    }
+    if find(cmd, (&slhw[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_SCHLAFHW)
+    }
+    if find(cmd, (&slkp[0]) as u64, 12) != 0 {
+        kstate.mode_add(state, kstate.M_SCHLAFKAPUTT)
+    }
+    if find(cmd, (&slno[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_NOSCHLAF)
+    }
+    if find(cmd, (&slme[0]) as u64, 10) != 0 {
+        kstate.mode_add(state, kstate.M_SCHLAFMESS)
+    }
+    // DAS KURZE WORT `schlaf` heisst "ZWEITER ZYKLUS" und darf
+    // ZUSAMMEN mit `schlafarm` stehen -- der zweite Durchgang der
+    // Abnahme ruft genau das auf (`schlafarm schlaf`).
+    //
+    // GEMESSEN UND BERICHTIGT: die erste Fassung schloss `schlaf`
+    // aus, sobald `schlafarm` dastand. Der zweite Zyklus meldete
+    // daraufhin "== arm zyklus1" und schrieb denselben Zustand wie
+    // der erste -- die Abnahme haette zwei gleiche Abbilder
+    // verglichen und das nicht gemerkt, wenn nicht die Pruefsummen
+    // (ueber die Rahmen) ohnehin verschieden gewesen waeren.
+    //
+    // Richtig ist: das kurze Wort zaehlt nur dann NICHT, wenn es
+    // ausschliesslich als Teil eines der langen Woerter vorkommt.
+    // `zaehle` zaehlt die Vorkommen; steht `schlaf` oefter da, als
+    // die langen Woerter es erklaeren, ist es selbst gemeint.
+    // `find_word` verlangt eine WORTGRENZE links und rechts. Damit
+    // trifft es `schlaf` als eigenes Wort und NICHT den Anfang von
+    // `schlafarm` -- genau die Unterscheidung, die hier gebraucht
+    // wird, und sie steht seit Runde K17 im Baum. Ein eigener
+    // Zaehler waere ein zweiter Weg fuer dieselbe Frage gewesen.
+    if find_word(cmd, (&slw[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_SCHLAF)
     }
     if find(cmd, (&evww[0]) as u64, 6) != 0 {
         kstate.mode_add(state, kstate.M_EVWAIT)
