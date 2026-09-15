@@ -323,6 +323,13 @@ BEREICHE = [
     # NICHT hier (sie gehoeren lib/crypto/xts.fi, das auch auf dem Wirt
     # laeuft); hier stehen nur Zaehler und die cpuid-Befunde.
     ("AESNI",      "kstate.fi", "AESNI_OFF",      "AESNI_MAX"),
+    # RUNDE ARGON (K-021): Argon2 ueber die vier Spuren, dazu SHA-NI.
+    # EINE Seite, 0x126000..0x127000, in Welle 3 vom 15.09.2026 vorher
+    # zugeteilt -- zusammen mit den Modusindizes 1040..1049.  Der
+    # Argon2-SPEICHER liegt NICHT hier: das sind bis zu 64 MiB aus
+    # mem.frame_run (siehe krypto.argmem).  Hier stehen Zaehler, die
+    # Messwerte und die acht Spur-Auftraege.
+    ("ARGON",      "kstate.fi", "ARGON_OFF",      "ARGON_MAX"),
     # RUNDE NETMON: die Zaehlung je Prozess und der Weiterleiter mit
     # NAT und DHCP-Server. Beide Bereiche sind beim Zusammenfuehren
     # gewandert (0x5A000/0x5D000 waren von OFS3, DISPLAY und SPEICHER

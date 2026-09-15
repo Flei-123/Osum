@@ -70,7 +70,9 @@
 
 import crypto.blake2b
 
-export { argon2id, argon2_any, ARGON2_BLOCK, TYPE_ID, TYPE_I, TYPE_D }
+export { argon2id, argon2_any, ARGON2_BLOCK, TYPE_ID, TYPE_I, TYPE_D,
+    fill_segment, SYNC_POINTS, passes,
+    prepare, finish, geometrie_seglen, geometrie_ok }
 
 const ARGON2_BLOCK: usize = 1024
 const QWORDS: usize = 128 // 1024 / 8
@@ -349,6 +351,205 @@ fn index_alpha(j1: u64, lane_len: u64, seg_len: u64, pass: u64,
     return (start + zz) % lane_len
 }
 
+// ================================ DER WEG FUER DEN KERN (RUNDE ARGON, K-021)
+//
+// Der Kern muss die Schleife ueber Durchgaenge und Scheiben SELBST
+// fahren, um in jeder Scheibe die p Spuren auf mehrere Kerne zu legen.
+// Firn (Stufe 0) hat im Kernprofil keine Funktionszeiger, diese Datei
+// kann den Kern also nicht zurueckrufen. Statt die Rechnung im Kern
+// nachzubauen -- die Stelle, an der beide Wege auseinanderlaufen
+// wuerden -- wird die STEUERUNG umgedreht:
+//
+//   `prepare` macht H0 und die ersten zwei Bloecke je Spur,
+//   der Kern faehrt die Scheiben (parallel oder seriell),
+//   `finish` macht das Schluss-XOR und H'.
+//
+// `argon2_any` ruft dieselben drei Teile in derselben Reihenfolge. Es
+// gibt keinen zweiten Satz Rechnung, und deshalb kann der parallele Weg
+// nicht etwas anderes rechnen als der serielle.
+//
+// `lane_len`, `seg_len` und `blocks` rechnet `geometrie` aus -- der
+// Kern braucht dieselben drei Zahlen fuer seine Schleife und darf sie
+// NICHT selbst herleiten (eine zweite Herleitung ist eine zweite
+// Gelegenheit, sich zu vertun).
+fn geometrie_seglen(m_cost: u64, lanes: u64) -> u64 {
+    return m_cost / (SYNC_POINTS * lanes)
+}
+
+fn geometrie_ok(t_cost: u64, m_cost: u64, lanes: u64, saltlen: usize,
+    outlen: usize) -> bool {
+    if t_cost < 1 || lanes < 1 { return false }
+    if saltlen < 8 { return false }
+    if outlen < 4 { return false }
+    if m_cost < 8 * lanes { return false }
+    if geometrie_seglen(m_cost, lanes) < 2 { return false }
+    return true
+}
+
+// ============================================ DIE DURCHGAENGE, SERIELL
+//
+// RUNDE ARGON (K-021): herausgezogen aus `argon2_any`, damit der Kern
+// dieselbe Schleife mit parallelen Spuren fahren kann, ohne die
+// Rechnung nachzubauen. Was hier steht, ist Zeile fuer Zeile das,
+// was vorher im Rumpf von `argon2_any` stand.
+fn passes(mem: u64, t_cost: u64, lanes: u64, lane_len: u64,
+    seg_len: u64, blocks: u64, atype: u64) -> bool {
+    var zb: [u8; 1024] = [0 as u8; 1024]
+    var ib: [u8; 1024] = [0 as u8; 1024]
+    let zp: u64 = (&zb[0]) as u64
+    let ip: u64 = (&ib[0]) as u64
+
+    var pass: u64 = 0
+    while pass < t_cost {
+        var slice: u64 = 0
+        while slice < SYNC_POINTS {
+            var lane: u64 = 0
+            while lane < lanes {
+                fill_segment(mem, pass, slice, lane, lanes,
+                    lane_len, seg_len, blocks, t_cost, atype, zp, ip)
+                lane = lane + 1
+            }
+            slice = slice + 1
+        }
+        pass = pass + 1
+    }
+
+    return true
+}
+
+// ================================================== EIN SEGMENT
+//
+// RUNDE ARGON (K-021): DER RUMPF DER SPUR-SCHLEIFE, HERAUSGEZOGEN.
+//
+// Hier steht KEINE neue Rechnung. Das ist Zeile fuer Zeile der
+// Rumpf, der vorher in `argon2_any` in der Schleife ueber `lane`
+// stand -- nur bekommt er seine Lage jetzt als Argumente statt aus
+// den umgebenden Schleifenvariablen.
+//
+// DER GRUND IST DIE PARALLELITAET, und die Aufteilung ist genau
+// die, die RFC 9106 vorsieht: innerhalb EINER Scheibe sind die p
+// Spuren voneinander unabhaengig, und erst an der Scheibengrenze
+// muss synchronisiert werden. `index_alpha` belegt das selbst --
+// fuer eine FREMDE Spur reicht die erlaubte Flaeche nur ueber die
+// ABGESCHLOSSENEN Scheiben, nie in die laufende hinein.
+//
+// Dass der serielle und der parallele Weg DASSELBE rechnen, ist
+// damit keine Zusage, sondern Bauart: beide rufen diese Funktion.
+// Ein zweiter, nachgebauter Rumpf waere die Stelle, an der die
+// beiden Wege auseinanderlaufen koennten.
+//
+// `zp` und `ip` sind die beiden 1024-Oktett-Arbeitsblöcke des
+// Adressweges (Argon2i/id). Sie gehoeren dem AUFRUFER, und das ist
+// wesentlich: zwei Spuren, die gleichzeitig rechnen, brauchen JE
+// EIGENE -- ein geteilter Adressblock waere ein Datenrennen mit
+// falschem Ergebnis.
+fn fill_segment(mem: u64, pass: u64, slice: u64, lane: u64,
+    lanes: u64, lane_len: u64, seg_len: u64, blocks: u64,
+    t_cost: u64, atype: u64, zp: u64, ip: u64) {
+    // Bei Argon2i und in der ERSTEN HAELFTE des ersten
+    // Durchgangs von Argon2id kommen die Adressen aus einem
+    // Zaehler statt aus den Daten. Das ist der ganze
+    // Unterschied zwischen i, d und id.
+    var data_indep: bool = false
+    if atype == TYPE_I { data_indep = true }
+    if atype == TYPE_ID && pass == 0 && slice < 2 {
+        data_indep = true
+    }
+    var start: u64 = 0
+    if pass == 0 && slice == 0 { start = 2 }
+    var index: u64 = start
+    while index < seg_len {
+        let cur: u64 = lane * lane_len + slice * seg_len + index
+        // Der Vorgaenger ist cur-1, ausser am ANFANG DER
+        // SPUR -- dort ist es der letzte Block derselben
+        // Spur (die Spur ist ein Ring).
+        // ACHTUNG: `cur - 1` ist bei lane 0, slice 0,
+        // index 0 ein Unterlauf (cur ist dann 0), und Firn
+        // panickt bei `-` mit Unterlauf. Der Sonderfall
+        // muss deshalb VOR der Subtraktion stehen und nicht
+        // hinterher korrigiert werden.
+        var prev: u64 = 0
+        if index == 0 && slice == 0 {
+            prev = lane * lane_len + lane_len - 1
+        } else {
+            prev = cur - 1
+        }
+        var j1: u64 = 0
+        var j2: u64 = 0
+        if data_indep {
+            // DER ADRESSBLOCK, RFC 9106 3.4.1.1.
+            //
+            // Er haelt 128 Adresspaare. Gebraucht wird das
+            // Paar mit der Nummer `index % 128`, und ein
+            // NEUER Block muss immer dann entstehen, wenn
+            // dieses Paar das erste eines neuen Hunderter-
+            // blocks ist -- ODER wenn wir gerade erst in das
+            // Segment eingetreten sind und noch gar keinen
+            // haben.
+            //
+            // ZWEI FALLEN STECKEN HIER, und beide sind
+            // gemessen worden, nicht ueberlegt:
+            //
+            //  1. Im ersten Segment des ersten Durchgangs
+            //     faengt `index` bei 2 an. Eine Bedingung
+            //     `index % 128 == 0` trifft dann NIE zu --
+            //     der Adressblock bliebe leer, und jeder
+            //     Wert ab m=32 waere falsch.
+            //  2. Der Zaehler IM Eingabeblock zaehlt die
+            //     Adressbloecke ab EINS, nicht die Bloecke.
+            //
+            // Mit seg_len < 4 faellt beides nicht auf, weil
+            // das Segment vor dem ersten Wortwechsel endet.
+            if index == start || index % 128 == 0 {
+                var k: usize = 0
+                while k < QWORDS {
+                    qput(ip, k as u64, 0)
+                    k = k + 1
+                }
+                qput(ip, 0, pass)
+                qput(ip, 1, lane)
+                qput(ip, 2, slice)
+                qput(ip, 3, blocks)
+                qput(ip, 4, t_cost)
+                qput(ip, 5, atype)
+                qput(ip, 6, index / 128 + 1)
+                var zero: [u8; 1024] = [0 as u8; 1024]
+                compress_g(zp, (&zero[0]) as u64, ip, false)
+                var tmp: [u8; 1024] = [0 as u8; 1024]
+                var q: usize = 0
+                while q < QWORDS {
+                    qput((&tmp[0]) as u64, q as u64,
+                        qget(zp, q as u64))
+                    q = q + 1
+                }
+                compress_g(zp, (&zero[0]) as u64,
+                    (&tmp[0]) as u64, false)
+            }
+            let w: u64 = qget(zp, (index % 128) as u64)
+            j1 = w & 0xFFFFFFFF
+            j2 = (w >> 32) & 0xFFFFFFFF
+        } else {
+            let w: u64 = qget(
+                mem + prev * (ARGON2_BLOCK as u64), 0)
+            j1 = w & 0xFFFFFFFF
+            j2 = (w >> 32) & 0xFFFFFFFF
+        }
+        var ref_lane: u64 = j2 % lanes
+        if pass == 0 && slice == 0 { ref_lane = lane }
+        let same: bool = ref_lane == lane
+        let ref_index: u64 = index_alpha(j1, lane_len,
+            seg_len, pass, slice, index, same)
+        let ridx: u64 = ref_lane * lane_len + ref_index
+        let refb: u64 = mem + ridx * (ARGON2_BLOCK as u64)
+        let curb: u64 = mem + cur * (ARGON2_BLOCK as u64)
+        let prevb: u64 = mem + prev * (ARGON2_BLOCK as u64)
+        // Ab dem zweiten Durchgang wird das Ergebnis auf den
+        // alten Inhalt GEXORT, nicht darueber geschrieben.
+        compress_g(curb, prevb, refb, pass != 0)
+        index = index + 1
+    }
+}
+
 // ================================================== Argon2id
 //
 // `mem` zeigt auf m_cost * 1024 Oktette. `m_cost` wird auf ein
@@ -360,9 +561,12 @@ fn argon2id(pwd: u64, pwdlen: usize, salt: u64, saltlen: usize,
         lanes, mem, out, outlen, TYPE_ID)
 }
 
-fn argon2_any(pwd: u64, pwdlen: usize, salt: u64, saltlen: usize,
+// `prepare`: alles VOR den Durchgaengen -- die Pruefungen, die
+// Geometrie, H0 und die ersten zwei Bloecke je Spur. Danach steht
+// der Speicher so, wie ihn die erste Scheibe erwartet.
+fn prepare(pwd: u64, pwdlen: usize, salt: u64, saltlen: usize,
     t_cost: u64, m_cost: u64, lanes: u64,
-    mem: u64, out: u64, outlen: usize, atype: u64) -> bool {
+    mem: u64, outlen: usize, atype: u64) -> bool {
     if t_cost < 1 || lanes < 1 { return false }
     if saltlen < 8 { return false }
     if outlen < 4 { return false }
@@ -431,127 +635,14 @@ fn argon2_any(pwd: u64, pwdlen: usize, salt: u64, saltlen: usize,
         l = l + 1
     }
 
-    // ------------------------------------------------ die Durchgaenge
-    var zb: [u8; 1024] = [0 as u8; 1024]
-    var ib: [u8; 1024] = [0 as u8; 1024]
-    let zp: u64 = (&zb[0]) as u64
-    let ip: u64 = (&ib[0]) as u64
+    return true
+}
 
-    var pass: u64 = 0
-    while pass < t_cost {
-        var slice: u64 = 0
-        while slice < SYNC_POINTS {
-            var lane: u64 = 0
-            while lane < lanes {
-                // Bei Argon2i und in der ERSTEN HAELFTE des ersten
-                // Durchgangs von Argon2id kommen die Adressen aus einem
-                // Zaehler statt aus den Daten. Das ist der ganze
-                // Unterschied zwischen i, d und id.
-                var data_indep: bool = false
-                if atype == TYPE_I { data_indep = true }
-                if atype == TYPE_ID && pass == 0 && slice < 2 {
-                    data_indep = true
-                }
-                var start: u64 = 0
-                if pass == 0 && slice == 0 { start = 2 }
-                var index: u64 = start
-                while index < seg_len {
-                    let cur: u64 = lane * lane_len + slice * seg_len + index
-                    // Der Vorgaenger ist cur-1, ausser am ANFANG DER
-                    // SPUR -- dort ist es der letzte Block derselben
-                    // Spur (die Spur ist ein Ring).
-                    // ACHTUNG: `cur - 1` ist bei lane 0, slice 0,
-                    // index 0 ein Unterlauf (cur ist dann 0), und Firn
-                    // panickt bei `-` mit Unterlauf. Der Sonderfall
-                    // muss deshalb VOR der Subtraktion stehen und nicht
-                    // hinterher korrigiert werden.
-                    var prev: u64 = 0
-                    if index == 0 && slice == 0 {
-                        prev = lane * lane_len + lane_len - 1
-                    } else {
-                        prev = cur - 1
-                    }
-                    var j1: u64 = 0
-                    var j2: u64 = 0
-                    if data_indep {
-                        // DER ADRESSBLOCK, RFC 9106 3.4.1.1.
-                        //
-                        // Er haelt 128 Adresspaare. Gebraucht wird das
-                        // Paar mit der Nummer `index % 128`, und ein
-                        // NEUER Block muss immer dann entstehen, wenn
-                        // dieses Paar das erste eines neuen Hunderter-
-                        // blocks ist -- ODER wenn wir gerade erst in das
-                        // Segment eingetreten sind und noch gar keinen
-                        // haben.
-                        //
-                        // ZWEI FALLEN STECKEN HIER, und beide sind
-                        // gemessen worden, nicht ueberlegt:
-                        //
-                        //  1. Im ersten Segment des ersten Durchgangs
-                        //     faengt `index` bei 2 an. Eine Bedingung
-                        //     `index % 128 == 0` trifft dann NIE zu --
-                        //     der Adressblock bliebe leer, und jeder
-                        //     Wert ab m=32 waere falsch.
-                        //  2. Der Zaehler IM Eingabeblock zaehlt die
-                        //     Adressbloecke ab EINS, nicht die Bloecke.
-                        //
-                        // Mit seg_len < 4 faellt beides nicht auf, weil
-                        // das Segment vor dem ersten Wortwechsel endet.
-                        if index == start || index % 128 == 0 {
-                            var k: usize = 0
-                            while k < QWORDS {
-                                qput(ip, k as u64, 0)
-                                k = k + 1
-                            }
-                            qput(ip, 0, pass)
-                            qput(ip, 1, lane)
-                            qput(ip, 2, slice)
-                            qput(ip, 3, blocks)
-                            qput(ip, 4, t_cost)
-                            qput(ip, 5, atype)
-                            qput(ip, 6, index / 128 + 1)
-                            var zero: [u8; 1024] = [0 as u8; 1024]
-                            compress_g(zp, (&zero[0]) as u64, ip, false)
-                            var tmp: [u8; 1024] = [0 as u8; 1024]
-                            var q: usize = 0
-                            while q < QWORDS {
-                                qput((&tmp[0]) as u64, q as u64,
-                                    qget(zp, q as u64))
-                                q = q + 1
-                            }
-                            compress_g(zp, (&zero[0]) as u64,
-                                (&tmp[0]) as u64, false)
-                        }
-                        let w: u64 = qget(zp, (index % 128) as u64)
-                        j1 = w & 0xFFFFFFFF
-                        j2 = (w >> 32) & 0xFFFFFFFF
-                    } else {
-                        let w: u64 = qget(
-                            mem + prev * (ARGON2_BLOCK as u64), 0)
-                        j1 = w & 0xFFFFFFFF
-                        j2 = (w >> 32) & 0xFFFFFFFF
-                    }
-                    var ref_lane: u64 = j2 % lanes
-                    if pass == 0 && slice == 0 { ref_lane = lane }
-                    let same: bool = ref_lane == lane
-                    let ref_index: u64 = index_alpha(j1, lane_len,
-                        seg_len, pass, slice, index, same)
-                    let ridx: u64 = ref_lane * lane_len + ref_index
-                    let refb: u64 = mem + ridx * (ARGON2_BLOCK as u64)
-                    let curb: u64 = mem + cur * (ARGON2_BLOCK as u64)
-                    let prevb: u64 = mem + prev * (ARGON2_BLOCK as u64)
-                    // Ab dem zweiten Durchgang wird das Ergebnis auf den
-                    // alten Inhalt GEXORT, nicht darueber geschrieben.
-                    compress_g(curb, prevb, refb, pass != 0)
-                    index = index + 1
-                }
-                lane = lane + 1
-            }
-            slice = slice + 1
-        }
-        pass = pass + 1
-    }
-
+// `finish`: alles NACH den Durchgaengen -- die letzten Bloecke aller
+// Spuren gexort, dann H' darueber. Das ist der Teil, der aus dem
+// gefuellten Speicher den Schluessel macht.
+fn finish(mem: u64, lanes: u64, lane_len: u64, out: u64,
+    outlen: usize) -> bool {
     // --------------------------------- das Ergebnis: alle letzten Bloecke
     // der Spuren gexort, dann H' darueber.
     var fin: [u8; 1024] = [0 as u8; 1024]
@@ -574,4 +665,23 @@ fn argon2_any(pwd: u64, pwdlen: usize, salt: u64, saltlen: usize,
         l2 = l2 + 1
     }
     return h_prime(fp, ARGON2_BLOCK, out, outlen)
+}
+
+fn argon2_any(pwd: u64, pwdlen: usize, salt: u64, saltlen: usize,
+    t_cost: u64, m_cost: u64, lanes: u64,
+    mem: u64, out: u64, outlen: usize, atype: u64) -> bool {
+    if !geometrie_ok(t_cost, m_cost, lanes, saltlen, outlen) {
+        return false
+    }
+    let seg_len: u64 = geometrie_seglen(m_cost, lanes)
+    let lane_len: u64 = seg_len * SYNC_POINTS
+    let blocks: u64 = lane_len * lanes
+    if !prepare(pwd, pwdlen, salt, saltlen, t_cost, m_cost, lanes,
+        mem, outlen, atype) {
+        return false
+    }
+    if !passes(mem, t_cost, lanes, lane_len, seg_len, blocks, atype) {
+        return false
+    }
+    return finish(mem, lanes, lane_len, out, outlen)
 }
