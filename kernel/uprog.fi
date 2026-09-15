@@ -215,6 +215,26 @@ const P_BUSA: u64 = 60
 const P_BUSB: u64 = 61
 const P_BUSD: u64 = 62
 const P_BUSS: u64 = 63
+// RUNDE SCHLAF (K-018, zweite Haelfte): DER PROZESS, DER DEN SCHLAF
+// UEBERLEBEN UND DANACH WEITERRECHNEN MUSS.
+//
+// Er ist die Zusage, die Register und Seitentabellen wirklich prueft.
+// Ein Prozess, der nach dem Aufwachen nur noch EXISTIERT, beweist
+// nichts -- er koennte neu angelegt worden sein. Dieser hier fuehrt
+// eine LAUFENDE Rechnung in seiner privaten Seite:
+//
+//     summe = summe + schritt,  schritt = schritt + 1
+//
+// Vor dem Schlafen rechnet er bis zu einem bekannten Stand. Nach dem
+// Aufwachen muss er GENAU DORT weitermachen -- nicht bei null. Das
+// geht nur, wenn seine Datenseite auf demselben Rahmen wieder liegt
+// UND seine Seitentabelle dorthin zeigt.
+const P_SCHLAF: u64 = 64
+// Die Kennung in der privaten Seite. Als Konstante und nicht als
+// Literal im Vergleich: firnc liest ein nacktes Literal dieser Groesse
+// als i32 und weist es ab (gemessen: "integer literal ... does not fit
+// into the type i32").
+const SCHLAF_TAG: u64 = 0x5343484C41465521
 
 const SYS_OSUM_BUS: u64 = 1960
 const SYS_CLOCK_GETTIME: u64 = 228
@@ -570,6 +590,9 @@ fn u_enter(packed: u64) {
     if prog == P_MEMORY {
         u_memory(arg)
     }
+    if prog == P_SCHLAF {
+        u_schlaf(arg)
+    }
     if prog == P_FAULT {
         u_fault(arg)
     }
@@ -688,6 +711,65 @@ fn u_memory(arg: u64) {
         ok = 0
     }
     u_sys(SYS_EXIT, ok, 0, 0)
+}
+
+// ================================================================
+// RUNDE SCHLAF: DIE LAUFENDE RECHNUNG UEBER DEN SCHLAF HINWEG.
+//
+// Der Aufbau der privaten Seite, und er ist bewusst einfach genug,
+// dass der Kern ihn von aussen nachrechnen kann:
+//
+//     +0   MAGIC -- damit eine leere Seite auffaellt
+//     +8   summe
+//     +16  schritt
+//     +24  wie oft dieser Prozess gelaufen ist
+//
+// Der Prozess rechnet, legt sich hin, rechnet weiter. Er beendet
+// sich NICHT von selbst: der Ruhezustand soll ihn MITTEN in seiner
+// Arbeit erwischen, nicht nach ihr. `arg` sagt, wie viele Schritte
+// er vor dem ersten Schlafen rechnet.
+fn u_schlaf(arg: u64) {
+    var s_st: [u8; 20] = "user: schlaf start \0"
+    var s_su: [u8; 20] = "user: schlaf summe \0"
+    let p: *mut u64 = USER_DATA as *mut u64
+    let pm: u64 = USER_DATA
+    // Liegt schon eine Rechnung in der Seite? Dann ist dieser Lauf
+    // die FORTSETZUNG nach dem Schlaf und faengt nicht neu an.
+    var summe: u64 = 0
+    var schritt: u64 = 1
+    var laeufe: u64 = 0
+    if __mmio_read64(pm as *mut u64) == SCHLAF_TAG {
+        summe = __mmio_read64((pm + 8) as *mut u64)
+        schritt = __mmio_read64((pm + 16) as *mut u64)
+        laeufe = __mmio_read64((pm + 24) as *mut u64)
+    }
+    __mmio_write64(pm as *mut u64, SCHLAF_TAG)
+    u_say_line((&s_st[0]) as u64, summe)
+    var n: u64 = 0
+    while n < arg {
+        summe = summe + schritt
+        schritt = schritt + 1
+        __mmio_write64((pm + 8) as *mut u64, summe)
+        __mmio_write64((pm + 16) as *mut u64, schritt)
+        n = n + 1
+    }
+    laeufe = laeufe + 1
+    __mmio_write64((pm + 24) as *mut u64, laeufe)
+    u_say_line((&s_su[0]) as u64, summe)
+    // Er schlaeft lange -- der Kern soll ihn im Schlaf erwischen und
+    // sichern, nicht nach seinem Ende.
+    u_sleep(9, 0)
+    // Nach dem Aufwachen: WEITERRECHNEN, nicht neu anfangen.
+    var m: u64 = 0
+    while m < arg {
+        summe = summe + schritt
+        schritt = schritt + 1
+        __mmio_write64((pm + 8) as *mut u64, summe)
+        __mmio_write64((pm + 16) as *mut u64, schritt)
+        m = m + 1
+    }
+    u_say_line((&s_su[0]) as u64, summe)
+    u_sys(SYS_EXIT, 1, 0, 0)
 }
 
 // THE COUNTER-CHECK to it: whatever is not mine gives a #PF. The address

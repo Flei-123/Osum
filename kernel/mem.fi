@@ -106,6 +106,8 @@ export {
     // ---- round MEM ----
     bitmap_octets, mapped_gib, frames_total, stress, probe_high,
     heap_init, kalloc, kfree, heap_blocks,
+    // ---- RUNDE SCHLAF (K-018, zweite Haelfte) ----
+    reserve_frame,
     frame_selftest, heap_selftest,
     FRAME_SIZE, cmdline, mods, mod_start, mod_end
 }
@@ -670,6 +672,53 @@ fn frame_free_inner(state: u64, addr: u64) {
             kstate.set(state, kstate.FRAME_HINT, f)
         }
     }
+}
+
+// ================================================================
+// RUNDE SCHLAF (K-018, zweite Haelfte): EINEN BESTIMMTEN RAHMEN
+// BELEGEN.
+//
+// Der Wiederanlauf aus dem Ruhezustand legt die Rahmen des Abbilds
+// an GENAU DIE physischen Adressen zurueck, an denen sie beim
+// Einschlafen lagen -- die Seitentabellen der Prozesse zeigen
+// dorthin, und eine Seite, die woanders liegt, ist die falsche
+// Seite.
+//
+// Dafuer braucht der Verwalter eine Auskunft, die er bisher nicht
+// gab: "nimm DIESEN Rahmen". `frame_alloc` sucht sich einen aus;
+// hier ist die Adresse vorgegeben.
+//
+// WARUM DAS NOETIG IST UND NICHT NUR BEQUEM: ohne diesen Schritt
+// haelt die Bitkarte den Rahmen fuer frei. Der naechste
+// `frame_alloc` gaebe ihn ein zweites Mal aus, und zwei Teile des
+// Kerns schrieben von da an in dieselbe Seite -- der Fehler, den
+// `tools/kernel/run.sh` fuer den Sperrfall schon einmal gemessen
+// hat, nur diesmal ohne zweiten Kern.
+//
+// Rueckgabe: true, wenn der Rahmen VORHER frei war und jetzt belegt
+// ist. false heisst, er war schon belegt -- fuer den Wiederanlauf
+// ist das ein Widerspruch (der Rahmen gehoert schon jemandem) und
+// keine Kleinigkeit, deshalb gibt diese Funktion es zurueck, statt
+// es zu verschlucken.
+fn reserve_frame(state: u64, addr: u64) -> bool {
+    let flags: u64 = lock(state)
+    let r: bool = reserve_frame_inner(state, addr)
+    unlock(state, flags)
+    return r
+}
+
+fn reserve_frame_inner(state: u64, addr: u64) -> bool {
+    let bitmap: u64 = kstate.get(state, kstate.BITMAP)
+    let f: u64 = addr / FRAME_SIZE
+    if f >= kstate.get(state, kstate.BITMAP_FRAMES) {
+        return false
+    }
+    if bit_get(bitmap, f) {
+        return false
+    }
+    bit_set(bitmap, f)
+    kstate.set(state, kstate.FRAMES_FREE, frames_free(state) - 1)
+    return true
 }
 
 // `n` frames in a row -- the heap wants a contiguous region.

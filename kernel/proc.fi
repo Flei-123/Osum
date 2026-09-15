@@ -61,7 +61,9 @@ export {
     copy_space, swap_space, use_space, page_drop, ARG_RESUME,
     USER_DATA, USER_STACK, USER_SPAN, USER_TOP,
     IMAGE_BASE, IMAGE_END, ARGS_BASE, MAX_ARGS, STACK_FLOOR, grow_stack,
-    PRIV_SLOTS, BIG_TOP, BIG_FLOOR, pd_slot, pt_for
+    PRIV_SLOTS, BIG_TOP, BIG_FLOOR, pd_slot, pt_for,
+    // ---- RUNDE SCHLAF (K-018, zweite Haelfte) ----
+    frame_count, frame_at
 }
 
 const PAGE_PRESENT: u64 = 1
@@ -534,6 +536,131 @@ fn count_pt(pt: u64) -> u64 {
         k = k + 1
     }
     return n
+}
+
+// ================================================================
+// RUNDE SCHLAF (K-018, zweite Haelfte): DIE RAHMEN EINES PROZESSES
+// AUFZAEHLEN.
+//
+// Der Ruhezustand muss den Arbeitsspeicher der Prozesse ins Abbild
+// legen -- Rahmen fuer Rahmen. Dafuer braucht er zwei Dinge, die es
+// hier noch nicht gab: WIE VIELE es sind und WELCHER der n-te ist.
+//
+// WAS GEZAEHLT WIRD UND WAS NICHT, und das ist die ganze
+// Entscheidung dieser beiden Funktionen:
+//
+//   GEZAEHLT werden die DATENSEITEN des Benutzers -- die Rahmen, in
+//   denen der Prozess seinen Programmtext, seine Daten und seinen
+//   Stapel hat. Sie sind der Zustand, der einen Schlaf ueberleben
+//   muss.
+//
+//   NICHT GEZAEHLT werden die SEITENTABELLEN selbst (PML4, PDPT, PD,
+//   PT). Sie werden beim Wiederanlauf NEU aufgebaut, und ein
+//   eingespielter alter Tabellenrahmen zeigte auf Adressen, die es
+//   nicht mehr gibt. `space_pages` zaehlt sie mit, weil es die
+//   Freigabe abbildet; diese beiden Funktionen zaehlen sie
+//   ausdruecklich NICHT.
+//
+//   NICHT GEZAEHLT werden EINGEBLENDETE Rahmen (PAGE_SHARED, Bit 9):
+//   sie gehoeren dem Adressraum nicht. Ein Ruhezustand, der sie
+//   mitschreibt, legte fremden Besitz doppelt ab -- und spielte ihn
+//   beim Aufwachen ueber den echten Eigentuemer.
+//
+// DIE REIHENFOLGE IST FEST und muss es sein: `frame_count` und
+// `frame_nth` gehen dieselben Tabellen in derselben Richtung ab.
+// Waere sie es nicht, legte der Wiederanlauf den Inhalt von Rahmen 7
+// an die Adresse von Rahmen 9.
+
+fn pt_data_count(pt: u64) -> u64 {
+    var n: u64 = 0
+    var k: u64 = 0
+    while k < 512 {
+        let e: u64 = read_entry(pt, k)
+        if (e & PAGE_PRESENT) != 0 && (e & PAGE_SHARED) == 0 {
+            n = n + 1
+        }
+        k = k + 1
+    }
+    return n
+}
+
+// Der n-te Datenrahmen dieser Seitentabelle, oder 0. `vor` sagt, wie
+// viele schon vor dieser Tabelle lagen.
+fn pt_data_nth(pt: u64, want: u64, vor: u64) -> u64 {
+    var n: u64 = vor
+    var k: u64 = 0
+    while k < 512 {
+        let e: u64 = read_entry(pt, k)
+        if (e & PAGE_PRESENT) != 0 && (e & PAGE_SHARED) == 0 {
+            if n == want {
+                return e & ADDR_MASK
+            }
+            n = n + 1
+        }
+        k = k + 1
+    }
+    return 0
+}
+
+// Wie viele Datenrahmen dieser Prozess hat.
+fn frame_count(state: u64, i: u64) -> u64 {
+    let pml4: u64 = sched.tget(state, i, sched.T_CR3)
+    if pml4 == 0 || pml4 == kstate.get(state, kstate.KPML4) {
+        return 0
+    }
+    var n: u64 = 0
+    // Kachel 0 -- die Tabelle, die seit Runde 59 in `T_PT` haengt.
+    let pt0: u64 = sched.tget(state, i, sched.T_PT)
+    if pt0 != 0 {
+        n = n + pt_data_count(pt0)
+    }
+    // die weiteren Kacheln aus dem Seitenverzeichnis
+    let pd: u64 = sched.tget(state, i, sched.T_PD)
+    if pd != 0 {
+        var k: u64 = 1
+        while k < PRIV_SLOTS {
+            let e: u64 = read_entry(pd, k)
+            if (e & PAGE_PRESENT) != 0 && (e & PAGE_HUGE) == 0 {
+                n = n + pt_data_count(e & ADDR_MASK)
+            }
+            k = k + 1
+        }
+    }
+    return n
+}
+
+// Der n-te Datenrahmen dieses Prozesses, 0 = es gibt ihn nicht.
+fn frame_at(state: u64, i: u64, want: u64) -> u64 {
+    let pml4: u64 = sched.tget(state, i, sched.T_CR3)
+    if pml4 == 0 || pml4 == kstate.get(state, kstate.KPML4) {
+        return 0
+    }
+    var vor: u64 = 0
+    let pt0: u64 = sched.tget(state, i, sched.T_PT)
+    if pt0 != 0 {
+        let c: u64 = pt_data_count(pt0)
+        if want < vor + c {
+            return pt_data_nth(pt0, want, vor)
+        }
+        vor = vor + c
+    }
+    let pd: u64 = sched.tget(state, i, sched.T_PD)
+    if pd != 0 {
+        var k: u64 = 1
+        while k < PRIV_SLOTS {
+            let e: u64 = read_entry(pd, k)
+            if (e & PAGE_PRESENT) != 0 && (e & PAGE_HUGE) == 0 {
+                let t: u64 = e & ADDR_MASK
+                let c: u64 = pt_data_count(t)
+                if want < vor + c {
+                    return pt_data_nth(t, want, vor)
+                }
+                vor = vor + c
+            }
+            k = k + 1
+        }
+    }
+    return 0
 }
 
 // Corpse to memory: first the address space, then the kernel stack.
