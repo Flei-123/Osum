@@ -302,6 +302,11 @@ BEREICHE = [
     ("TILE",       "kstate.fi", "TILE_OFF",       "TILE_MAX"),
     ("WMPLUG",     "kstate.fi", "WMP_OFF",        "WMP_MAX"),
     ("SUSP",       "kstate.fi", "SUSP_OFF",       "SUSP_MAX"),
+    # RUNDE KRYPTO (K-019): die Plattenverschluesselung.  Fuenf Seiten,
+    # VORHER zugeteilt in der Welle vom 15.09.2026 -- diese Runde hat
+    # sich keine Seite gesucht, sie hat die bekommen, die in kstate.fi
+    # oben bei KDATA_SIZE fuer sie steht.
+    ("KRYPTO",     "kstate.fi", "CRYPT_OFF",      "CRYPT_MAX"),
     # RUNDE NETMON: die Zaehlung je Prozess und der Weiterleiter mit
     # NAT und DHCP-Server. Beide Bereiche sind beim Zusammenfuehren
     # gewandert (0x5A000/0x5D000 waren von OFS3, DISPLAY und SPEICHER
