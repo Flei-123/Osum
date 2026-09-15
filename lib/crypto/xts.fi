@@ -98,7 +98,7 @@ import crypto.aesni
 
 export {
     encrypt, decrypt, sector_encrypt, sector_decrypt,
-    forget, use_aesni, aesni_on,
+    forget, use_aesni, aesni_on, fuellungen, tafel_von, tafel_len,
     KEY_BYTES, BLOCK
 }
 
@@ -178,9 +178,9 @@ fn make_tweak(k2: *mut aes.Key, tweak: u64, t: *mut [u8; 16]) {
 }
 
 
-// ==================================== RUNDE AESNI: DER SCHLUESSELSPEICHER
+// ============================ RUNDE KLEINKRAM2 (K-022): DIE SCHLUESSELTAFEL
 //
-// GEMESSEN, und es war die Ueberraschung dieser Runde: nachdem die
+// GEMESSEN IN RUNDE AESNI, und es war deren Ueberraschung: nachdem die
 // Chiffre schnell war, kostete ein Sektor immer noch 16 us -- und davon
 // waren 1,9 us die Rechnung und 12,4 us der SCHLUESSELPLAN. `key_set`
 // ist die Tabellenfassung (6218 ns), und `sector_encrypt` rief sie
@@ -188,56 +188,150 @@ fn make_tweak(k2: *mut aes.Key, tweak: u64, t: *mut [u8; 16]) {
 // Sektor mit DEMSELBEN Schluessel liest, ist das reine Arbeit fuer den
 // Papierkorb.
 //
-// Deshalb dieser Speicher: er haelt die fertigen Plaene fuer den
-// zuletzt benutzten Schluessel. Die Platte benutzt genau einen; der
-// Treffer ist also der Normalfall und nicht der Glueckfall.
+// RUNDE AESNI HIELT DESHALB GENAU EINEN PLATZ. Das trug, solange es
+// genau einen verschluesselten Traeger gab. Bei ZWEIEN nebeneinander
+// -- Wurzelplatte und ein zweiter Datentraeger -- fiel der Speicher bei
+// JEDEM Wechsel um: Sektor von A, Sektor von B, Sektor von A, und jedes
+// Mal 12,4 us Neufuellen. Das ist der Fall, den K-022 aufgemacht hat.
 //
-// WARUM DER VERGLEICH UEBER ALLE 64 OKTETTE LAEUFT und nicht beim
-// ersten Unterschied abbricht: ein frueher Abbruch waere ein Zeitkanal
-// ueber den Schluessel. Dieselbe Regel wie in `halves_equal`.
+// DESHALB EINE TAFEL STATT EINES PLATZES: SLOTS Eintraege, jeder mit
+// seinem eigenen Schluessel und seinen eigenen Plaenen. Zwei Traeger
+// nebeneinander treffen damit beide, und der Wechsel kostet NICHTS
+// mehr. Vier Plaetze, weil vier Traeger mehr sind, als dieses System
+// gleichzeitig offen hat, und weil jeder Platz 784 Oktette kostet
+// (64 Schluessel + 3 * 240 Plan) -- die ganze Tafel 3136 Oktette.
+//
+// WIE VERDRAENGT WIRD: reihum (`naechster`). Kein LRU-Zaehler, denn der
+// waere ein Seitenkanal ueber die Zugriffsfolge und traegt bei vier
+// Plaetzen nichts ein, was der Reihum-Weg nicht auch traegt.
+//
+// ZWEI DINGE, DIE DIESE RUNDE NICHT VERLIEREN DARF, und beide standen
+// so schon in RUNDE AESNI:
+//
+//   1. `forget` LOESCHT ALLE EINTRAEGE, nicht nur einen. `krypto.lock_down`
+//      ruft es; bliebe auch nur ein Plan stehen, laege nach dem
+//      Zusperren noch ein Schluessel im Speicher, waehrend `CRY_KEY`
+//      schon genullt ist -- und `lock_down` waere eine Luege. Die
+//      Schleife unten geht deshalb ueber ALLE Plaetze und nullt
+//      Schluessel UND Plaene.
+//   2. DER VERGLEICH LAEUFT UEBER ALLE 64 OKTETTE und bricht nicht beim
+//      ersten Unterschied ab -- ein frueher Abbruch waere ein Zeitkanal
+//      ueber den Schluessel. Dieselbe Regel wie in `halves_equal`. Auch
+//      die SUCHE ueber die Tafel bricht nicht ab: sie sieht sich JEDEN
+//      Platz an und merkt sich den Treffer, statt beim ersten
+//      `return` herauszuspringen.
 //
 // EIN SCHLUESSEL IM SPEICHER IST EIN SCHLUESSEL IM SPEICHER. Das ist
 // kein neues Leck -- der Kern haelt den Hauptschluessel ohnehin in
 // `kstate`, solange die Platte offen ist (docs/RUNDE-KRYPTO.md
-// Abschnitt 5). `forget` loescht ihn trotzdem, und `krypto.lock` ruft
-// es: wer die Platte zusperrt, soll nicht hier eine Kopie zuruecklassen.
-static mut c_key: [u8; 64] = [0; 64]
-static mut c_enc: aesni.Enc = aesni.Enc { rk: [0; 240], nr: 0, ok: false }
-static mut c_dec: aesni.Dec = aesni.Dec { rk: [0; 240], nr: 0, ok: false }
-static mut c_tk2: aesni.Enc = aesni.Enc { rk: [0; 240], nr: 0, ok: false }
-static mut c_voll: bool = false
+// Abschnitt 5). `forget` loescht ihn trotzdem, und `krypto.lock_down`
+// ruft es: wer die Platte zusperrt, soll nicht hier eine Kopie
+// zuruecklassen.
+const SLOTS: usize = 4
 
-// Alles vergessen. Ruft `krypto.lock`.
-fn forget() {
-    var i: usize = 0
-    while i < 64 {
-        c_key[i] = 0
-        i = i + 1
-    }
-    i = 0
-    while i < 240 {
-        c_enc.rk[i] = 0
-        c_dec.rk[i] = 0
-        c_tk2.rk[i] = 0
-        i = i + 1
-    }
-    c_enc.ok = false
-    c_dec.ok = false
-    c_tk2.ok = false
-    c_voll = false
+struct Platz {
+    key: [u8; 64],
+    enc: aesni.Enc,
+    dec: aesni.Dec,
+    tk2: aesni.Enc,
+    voll: bool
 }
 
+static mut tafel: [Platz; 4] = [Platz {
+    key: [0; 64],
+    enc: aesni.Enc { rk: [0; 240], nr: 0, ok: false },
+    dec: aesni.Dec { rk: [0; 240], nr: 0, ok: false },
+    tk2: aesni.Enc { rk: [0; 240], nr: 0, ok: false },
+    voll: false
+}; 4]
+
+// Wohin der naechste neue Schluessel kommt. Reihum.
+static mut naechster: usize = 0
+
+// Der Platz, auf dem der zuletzt gesuchte Schluessel steht. `sector_*`
+// holt ihn sich nach `cache_hit`/`cache_fill` von hier, statt ihn ein
+// zweites Mal zu suchen.
+static mut treffer: usize = 0
+
+// WIE OFT NEU GEFUELLT WURDE. Das ist die Zahl, an der K-022 gemessen
+// wird: zwei Traeger abwechselnd, und diese Zahl darf nach dem
+// Aufwaermen NICHT mehr steigen.
+static mut z_fuellungen: u64 = 0
+
+fn fuellungen() -> u64 {
+    return z_fuellungen
+}
+
+// WO DIE TAFEL LIEGT. Nur fuer die Abnahme: `tools/xtstafel/loeschen.fi`
+// sieht damit NACH, ob nach `forget()` wirklich nichts mehr dasteht --
+// die Frage, die Runde AESNI ausdruecklich offen gelassen hat. Eine
+// Probe, die die Adresse raet, misst nichts.
+fn tafel_von() -> u64 {
+    return (&tafel[0]) as u64
+}
+
+fn tafel_len() -> u64 {
+    // NICHT GERATEN, sondern aus den echten Adressen: der Abstand
+    // zweier Plaetze ist die Groesse eines Platzes samt jeder
+    // Auffuellung, die der Uebersetzer einzieht. Ein fest
+    // hingeschriebenes 784 waere eine Annahme ueber das Feld-Layout,
+    // und eine falsche Annahme liesse die Abnahme am Plan vorbeisuchen.
+    let schritt: u64 = (&tafel[1]) as u64 - (&tafel[0]) as u64
+    return (SLOTS as u64) * schritt
+}
+
+// Alles vergessen -- JEDEN Platz. Ruft `krypto.lock_down`.
+fn forget() {
+    var s: usize = 0
+    while s < SLOTS {
+        var i: usize = 0
+        while i < 64 {
+            tafel[s].key[i] = 0
+            i = i + 1
+        }
+        i = 0
+        while i < 240 {
+            tafel[s].enc.rk[i] = 0
+            tafel[s].dec.rk[i] = 0
+            tafel[s].tk2.rk[i] = 0
+            i = i + 1
+        }
+        tafel[s].enc.ok = false
+        tafel[s].dec.ok = false
+        tafel[s].tk2.ok = false
+        tafel[s].enc.nr = 0
+        tafel[s].dec.nr = 0
+        tafel[s].tk2.nr = 0
+        tafel[s].voll = false
+        s = s + 1
+    }
+    naechster = 0
+    treffer = 0
+}
+
+// Steht dieser Schluessel schon in der Tafel? Ohne fruehen Abbruch --
+// weder im Vergleich der 64 Oktette noch ueber die Plaetze.
 fn cache_hit(key: u64) -> bool {
-    if !c_voll {
-        return false
+    var gefunden: bool = false
+    var wo: usize = 0
+    var s: usize = 0
+    while s < SLOTS {
+        var diff: u64 = 0
+        var i: usize = 0
+        while i < 64 {
+            diff = diff | ((tafel[s].key[i] as u64) ^ (ld8(key, i) as u64))
+            i = i + 1
+        }
+        if tafel[s].voll && diff == 0 && !gefunden {
+            gefunden = true
+            wo = s
+        }
+        s = s + 1
     }
-    var diff: u64 = 0
-    var i: usize = 0
-    while i < 64 {
-        diff = diff | ((c_key[i] as u64) ^ (ld8(key, i) as u64))
-        i = i + 1
+    if gefunden {
+        treffer = wo
     }
-    return diff == 0
+    return gefunden
 }
 
 // Die Plaene fuer diesen Schluessel bereitlegen. `false` heisst: der
@@ -252,15 +346,19 @@ fn cache_fill(key: u64) -> bool {
     if !aes.key_set(&k2, key + 32, 32) {
         return false
     }
-    c_enc = aesni.enc_from((&k1.rk[0]) as u64, k1.nr)
-    c_dec = aesni.dec_from((&k1.rk[0]) as u64, k1.nr)
-    c_tk2 = aesni.enc_from((&k2.rk[0]) as u64, k2.nr)
+    let s: usize = naechster
+    tafel[s].enc = aesni.enc_from((&k1.rk[0]) as u64, k1.nr)
+    tafel[s].dec = aesni.dec_from((&k1.rk[0]) as u64, k1.nr)
+    tafel[s].tk2 = aesni.enc_from((&k2.rk[0]) as u64, k2.nr)
     var i: usize = 0
     while i < 64 {
-        c_key[i] = ld8(key, i)
+        tafel[s].key[i] = ld8(key, i)
         i = i + 1
     }
-    c_voll = true
+    tafel[s].voll = true
+    treffer = s
+    naechster = (s + 1) % SLOTS
+    z_fuellungen = z_fuellungen + 1
     return true
 }
 
@@ -448,10 +546,10 @@ fn sector_encrypt(key: u64, sector: u64, inp: u64, out: u64,
         // Der Tweak T = AES-k2(Sektornummer) kommt ueber DENSELBEN
         // schnellen Weg -- ein Block, einmal je Sektor.
         var t: [u8; 16] = [0 as u8; 16]
-        if !aesni.encrypt_block(&c_tk2, (&tw[0]) as u64, (&t[0]) as u64) {
+        if !aesni.encrypt_block(&tafel[treffer].tk2, (&tw[0]) as u64, (&t[0]) as u64) {
             return false
         }
-        return aesni.xts_sector_encrypt(&c_enc, &t, inp, out, n)
+        return aesni.xts_sector_encrypt(&tafel[treffer].enc, &t, inp, out, n)
     }
     return encrypt(key, (&tw[0]) as u64, inp, out, n)
 }
@@ -469,10 +567,10 @@ fn sector_decrypt(key: u64, sector: u64, inp: u64, out: u64,
         // T = AES-k2(Sektornummer) ist in beide Richtungen dasselbe.
         // Wer hier `dec_from` nimmt, bekommt stabilen Unsinn.
         var t: [u8; 16] = [0 as u8; 16]
-        if !aesni.encrypt_block(&c_tk2, (&tw[0]) as u64, (&t[0]) as u64) {
+        if !aesni.encrypt_block(&tafel[treffer].tk2, (&tw[0]) as u64, (&t[0]) as u64) {
             return false
         }
-        return aesni.xts_sector_decrypt(&c_dec, &t, inp, out, n)
+        return aesni.xts_sector_decrypt(&tafel[treffer].dec, &t, inp, out, n)
     }
     return decrypt(key, (&tw[0]) as u64, inp, out, n)
 }
