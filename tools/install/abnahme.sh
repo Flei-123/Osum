@@ -442,38 +442,121 @@ else
 fi
 
 # ==================================================================
-titel "7b. O-009: was in /etc/jarvis liegt, bleibt auch dort"
+titel "7b. O-009: DER GERAETESCHLUESSEL UEBERLEBT DEN NEUSTART"
 # ==================================================================
 #
 # `O-009` in OFFEN.md: der Geraeteschluessel entsteht beim Koppeln in
 # der RAM-Wurzel, also muss nach jedem Neustart neu gekoppelt werden --
-# "haengt an P-001".
+# "haengt an P-001". Sobald die Wurzel auf der PLATTE liegt, ist die
+# Bedingung erfuellt, und hier wird sie gemessen.
 #
-# GEMESSEN WIRD DER PFAD, NICHT DAS KOPPELN. Einen echten
-# Ed25519-Schluessel legt `jarvisctl koppeln` an, und dafuer braucht es
-# eine Gegenstelle im Netz -- das ist eine eigene Runde. Was diese
-# Runde beantworten kann und muss, ist die Frage darunter: ueberlebt
-# eine Datei AN GENAU DIESEM ORT den Neustart, oder liegt /etc/jarvis
-# weiterhin in einer Wurzel, die es nach dem Ausschalten nicht mehr
-# gibt?
+# GEMESSEN WIRD DER ECHTE SCHLUESSEL, NICHT EIN PLATZHALTER. Eine
+# fruehere Fassung dieser Probe legte 64 Hexziffern von Hand hin und
+# las sie wieder -- das belegt den PFAD, aber nicht den AUSWEIS: es
+# haette auch dann gehalten, wenn `jsig` den Schluessel bei jedem Start
+# neu wuerfelt, und genau das ist der Fehler, um den es in O-009 geht.
 #
-# Deshalb wird hier eine Datei mit derselben Form (64 Hexziffern) unter
-# demselben Namen abgelegt und nach einem Neustart wieder gelesen. Was
-# das NICHT beweist, steht im Bericht: dass das Koppeln selbst
-# funktioniert.
-platte_lauf jarvis1 "mkdir /etc/jarvis;echo 3f8a1c7d9e2b4056f1a3c5d7e9b0284613f57a9cde02468ace13579bdf02468a >/etc/jarvis/geraet.key;cat /etc/jarvis/geraet.key;sync;exit" 300
-if grep -qa '3f8a1c7d9e2b4056' "$OUT/jarvis1.txt"; then
-    ok "der Schluessel liegt in /etc/jarvis auf der Platte"
+# DIESER ABSCHNITT LAEUFT NUR, WENN GLIED 5 TRAEGT -- also wenn von
+# der Platte gestartet werden kann. Stand 15.09.2026 tut er das auf
+# diesem Wirt NICHT: der Installer bekommt sein Fenster nicht auf
+# (`wigapp=/bin/installer` -> `init: herunterfahren`, gemessen in
+# Glied 1-3), und damit gibt es keine installierte Platte. Das ist
+# P-001 und nicht O-009.
+#
+# DAMIT O-009 TROTZDEM GEMESSEN IST, steht dieselbe Frage noch einmal
+# in `tools/geraetekey/run.sh` -- dort mit einer Wurzel auf einer
+# IDE-Platte, die ueber zwei Starts dieselbe bleibt, ohne Installer
+# und ohne Oberflaeche. Dort ist sie GRUEN (11/0). Sobald P-001 traegt,
+# misst der Abschnitt hier dasselbe noch einmal auf dem echten Weg.
+#
+# Deshalb der volle Lebenslauf, ueber `/bin/jsig`:
+#
+#   Lauf 1:  `jsig aus`                 legt das Ed25519-Paar an
+#            `jsig unterschreibe <hex>` unterschreibt eine Nachricht
+#            -> der oeffentliche Teil UND die Unterschrift werden notiert
+#   NEUSTART (dieselbe Platte, kein Medium)
+#   Lauf 2:  `jsig aus`                 darf KEINEN neuen anlegen
+#            -> derselbe oeffentliche Teil
+#            `jsig pruefe <pub> <msg> <sig>` -> die ALTE Unterschrift
+#               verifiziert weiterhin
+#
+# DIE GEGENPROBE (Zuruecksetzen): `rm /etc/jarvis/geraet.key`, dann
+# `jsig aus` -- jetzt MUSS ein ANDERER oeffentlicher Teil herauskommen.
+# Ohne sie waere Lauf 2 auch dann gruen, wenn `jsig` den Schluessel
+# ueberhaupt nicht aus der Datei liest.
+NACHRICHT=4f2d303039
+platte_lauf jarvis1 "mkdir /etc/jarvis;jsig aus;jsig unterschreibe $NACHRICHT;exit" 300
+PUB1=$(grep -aoE '^pub [0-9a-f]{64}' "$OUT/jarvis1.txt" | head -1 | awk '{print $2}')
+SIG1=$(grep -aoE '^sig [0-9a-f]{128}' "$OUT/jarvis1.txt" | head -1 | awk '{print $2}')
+if [ -n "$PUB1" ] && [ -n "$SIG1" ]; then
+    ok "Lauf 1: Ed25519-Paar angelegt (pub ${PUB1:0:16}...)"
 else
-    bad "/etc/jarvis/geraet.key liess sich nicht anlegen"
-    tail -4 "$OUT/jarvis1.txt" | sed 's/^/        /'
+    bad "Lauf 1: jsig hat keinen Schluessel/keine Unterschrift geliefert"
+    tail -6 "$OUT/jarvis1.txt" | sed 's/^/        /'
 fi
-platte_lauf jarvis2 "cat /etc/jarvis/geraet.key;exit" 300
-if grep -qa '3f8a1c7d9e2b4056' "$OUT/jarvis2.txt"; then
-    ok "O-009: er ist nach dem Neustart NOCH DA -- kein zweites Koppeln noetig"
+
+platte_lauf jarvis2 "jsig aus;jsig pruefe $PUB1 $NACHRICHT $SIG1;exit" 300
+PUB2=$(grep -aoE '^pub [0-9a-f]{64}' "$OUT/jarvis2.txt" | head -1 | awk '{print $2}')
+if [ -n "$PUB1" ] && [ "$PUB2" = "$PUB1" ]; then
+    ok "O-009: NACH DEM NEUSTART DERSELBE oeffentliche Teil -- kein zweites Koppeln"
 else
-    bad "O-009: der Schluessel ist nach dem Neustart weg"
-    tail -4 "$OUT/jarvis2.txt" | sed 's/^/        /'
+    bad "O-009: der Schluessel hat den Neustart nicht ueberlebt (vorher ${PUB1:-?}, nachher ${PUB2:-?})"
+    tail -6 "$OUT/jarvis2.txt" | sed 's/^/        /'
+fi
+if grep -qa '^ja$' "$OUT/jarvis2.txt"; then
+    ok "O-009: eine Unterschrift VON VOR dem Neustart verifiziert weiterhin"
+else
+    bad "O-009: die alte Unterschrift verifiziert nach dem Neustart nicht"
+    tail -6 "$OUT/jarvis2.txt" | sed 's/^/        /'
+fi
+
+# UND MIT FREMDEN AUGEN. Dass OrientOS seine eigene Unterschrift
+# nachrechnet, ist die schwaechere Aussage -- ein Fehler, der in
+# `jsig aus` und in `jsig pruefe` gleich steckt, faellt dabei nicht auf.
+# `python-cryptography` hat diesen Fehler nicht. Steht es nicht zur
+# Verfuegung, wird das GESAGT und nicht stillschweigend uebergangen.
+if [ -n "$PUB1" ] && [ -n "$SIG1" ]; then
+    if python3 -c 'import cryptography' 2>/dev/null; then
+        python3 - "$PUB1" "$SIG1" "$NACHRICHT" > "$OUT/fremd.txt" 2>&1 <<'PYFREMD'
+import sys
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from cryptography.exceptions import InvalidSignature
+pub = bytes.fromhex(sys.argv[1]); sig = bytes.fromhex(sys.argv[2])
+msg = bytes.fromhex(sys.argv[3])
+k = Ed25519PublicKey.from_public_bytes(pub)
+try:
+    k.verify(sig, msg); print("GUT")
+except InvalidSignature:
+    print("FALSCH")
+try:
+    k.verify(sig, msg + b"\x01"); print("GEGENPROBE-FALSCH")
+except InvalidSignature:
+    print("GEGENPROBE-GUT")
+PYFREMD
+        if grep -qa '^GUT$' "$OUT/fremd.txt"; then
+            ok "O-009: fremdes Werkzeug (python-cryptography) rechnet die ueberlebende Unterschrift nach"
+        else
+            bad "O-009: python-cryptography verwirft die Unterschrift"
+            sed 's/^/        /' "$OUT/fremd.txt" | head -4
+        fi
+        if grep -qa '^GEGENPROBE-GUT$' "$OUT/fremd.txt"; then
+            ok "GEGENPROBE: ueber eine andere Nachricht faellt sie durch"
+        else
+            bad "GEGENPROBE: die Unterschrift passt auch auf eine andere Nachricht"
+        fi
+    else
+        echo "  [ -- ] python-cryptography fehlt: die fremde Gegenrechnung entfaellt"
+    fi
+fi
+
+# Die Gegenprobe: zuruecksetzen -- und es MUSS ein anderer werden.
+platte_lauf jarvis3 "rm /etc/jarvis/geraet.key;jsig aus;exit" 300
+PUB3=$(grep -aoE '^pub [0-9a-f]{64}' "$OUT/jarvis3.txt" | head -1 | awk '{print $2}')
+if [ -n "$PUB3" ] && [ -n "$PUB1" ] && [ "$PUB3" != "$PUB1" ]; then
+    ok "GEGENPROBE: nach dem Zuruecksetzen ist er WEG und ein neuer entsteht (pub ${PUB3:0:16}...)"
+else
+    bad "GEGENPROBE: nach dem Loeschen kam derselbe Schluessel wieder (${PUB3:-?}) -- dann liest jsig ihn nicht aus der Datei"
+    tail -6 "$OUT/jarvis3.txt" | sed 's/^/        /'
 fi
 
 # ==================================================================
