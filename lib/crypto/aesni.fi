@@ -1,0 +1,507 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/crypto/aesni.fi -- AES auf den Befehlen der Maschine, Runde AESNI
+// (K-020).
+//
+// ==================================================================
+// WARUM ES DIESE DATEI GIBT
+// ==================================================================
+//
+// `lib/crypto/aes.fi` rechnet Oktett fuer Oktett ueber eine S-Box.
+// Das ist richtig -- gegen FIPS 197, RFC 4493, RFC 3394 und OpenSSL
+// gemessen -- und fuer den Zweck, fuer den es geschrieben wurde (WLAN,
+// einmal AES je Rahmen), vollkommen ausreichend. Fuer eine PLATTE ist
+// es das nicht:
+//
+//     XTS, ein Sektor (512 Oktette)      897,87 us      0,544 MiB/s
+//     ein AES-256-Block (16 Oktette)      25,37 us
+//
+// Ein Megaoktett kostet damit rund zwei Sekunden. Die Ursache liegt
+// nicht in `xts.fi`: von den 898 us eines Sektors sind 32 * 25,37 =
+// 812 us die Chiffre selbst. Gemessen mit `aesbench` im Orakel, nicht
+// geschaetzt.
+//
+// Seit 2010 hat jeder x86-64 die Befehle AESENC/AESENCLAST/AESDEC/
+// AESDECLAST/AESKEYGENASSIST. Eine Runde AES ist damit EIN Befehl
+// statt sechzehn S-Box-Zugriffen, vier ShiftRows-Vertauschungen und
+// vier MixColumns-Spalten.
+//
+// ==================================================================
+// WAS DIESE DATEI NICHT TUT: SIE ERSETZT `aes.fi` NICHT
+// ==================================================================
+//
+// `aes.fi` bleibt Zeile fuer Zeile stehen, und zwar aus drei Gruenden:
+//
+//   1. NICHT JEDE MASCHINE HAT DIE BEFEHLE. Ein Kern, der AESENC ohne
+//      Pruefung ausfuehrt, stirbt auf aelterer Hardware mit #UD. Der
+//      Rueckfallweg ist kein Zugestaendnis, er ist der Normalfall auf
+//      allem vor Westmere.
+//   2. WLAN UND SSH HAENGEN AN DERSELBEN DATEI. `aes.fi` traegt CCM,
+//      CMAC und Key Wrap; die WLAN-Abnahme sind 171 Zusagen mit einem
+//      echten WPA2-Mitschnitt darin. Diese Runde fasst davon nichts an.
+//   3. DIE TABELLENFASSUNG IST DIE GEGENPROBE. Zwei unabhaengige Wege,
+//      die Oktett fuer Oktett dasselbe liefern muessen, sind mehr wert
+//      als einer, dem man glauben muss. `tools/aesni/run.sh` faehrt
+//      genau das nach (Kreisprobe, alle drei Schluessellaengen).
+//
+// Die Wahl faellt deshalb NICHT in dieser Datei, sondern beim Aufrufer:
+// `aesni.usable()` fragt `cpuid`, und wer sie nicht bekommt, rechnet
+// weiter wie bisher.
+//
+// ==================================================================
+// WARUM `asm` UND KEINE ASSEMBLERDATEI, KEINE HAND-KODIERUNG
+// ==================================================================
+//
+// Der Auftrag nennt drei Wege in dieser Reihenfolge: Firn direkt, sonst
+// eine `.s`-Datei nach dem Vorbild von `boot.s`, sonst die Oktette von
+// Hand. Gemessen wurde, BEVOR gebaut wurde, und der erste Weg traegt:
+// firnc uebersetzt `asm("aesenc xmm0,xmm1")` und `asm("pclmulqdq ...")`
+// ohne weiteres, und die Ergebnisse stimmen byteweise gegen eine
+// unabhaengige Nachbildung (siehe docs/RUNDE-AESNI.md Abschnitt 1).
+// Damit gibt es keinen Grund fuer den Umweg -- und der billigste Weg
+// ist der, den man nicht baut.
+//
+// ==================================================================
+// DIE REGELN FUER `asm` IN DIESER SPRACHE, teuer gelernt
+// ==================================================================
+//
+//   * `rbx` IST NICHT ZU HABEN. Firn traegt darin den Rahmen. Jedes
+//     `cpuid` rettet es selbst (`push rbx` / `pop rbx`) -- dasselbe tun
+//     `rand.has_rdseed` und `fpu.cpuid_*`.
+//   * DIE SCHLEIFE GEHOERT IN DEN BLOCK. `kernel/fb.fi` hat das
+//     gemessen: ein `asm` je Bloeckchen, mit der Schleife in Firn
+//     darum, brachte Faktor 1,9 statt der erwarteten 4 bis 8 -- der
+//     Rahmen um den Block herum kostete mehr als die Rechnung darin.
+//     Deshalb steht hier `dec rcx / jnz` INNERHALB des Blocks.
+//   * KEIN xmm OHNE FREISCHALTUNG. In Ring 0 ist das erste `movdqu`
+//     ein #UD, wenn CR4.OSFXSR fehlt. Der Riegel heisst
+//     `fpu.enabled(state)` und gehoert dem Aufrufer im Kern; diese
+//     Datei kennt `kstate` nicht (sie soll auch auf dem Wirt laufen).
+//
+// ==================================================================
+// WIE DER SCHLUESSELPLAN ENTSTEHT
+// ==================================================================
+//
+// AESKEYGENASSIST liefert SubWord(RotWord(x)) xor Rcon in den oberen
+// 32 Bit -- den Rest (die drei XOR-Ketten) rechnet diese Datei mit
+// `pshufd` und `pslldq` daneben. Das ist das uebliche Verfahren aus
+// Intels Anwendungsschrift AP-931.
+//
+// AES-192 IST DER UNANGENEHME FALL: sein Schluessel ist 24 Oktette, und
+// ein xmm fasst 16. Der Plan entsteht deshalb in Sechser-Woertern ueber
+// zwei Register, und genau dort verrechnet man sich. DIESE DATEI RECHNET
+// DEN PLAN DESHALB NICHT SELBST: sie nimmt den Plan, den `aes.key_set`
+// schon gebaut hat -- dieselben 240 Oktette, gegen FIPS 197 gemessen --
+// und laedt ihn nur in die Register. Damit ist der Schluesselplan
+// per Konstruktion derselbe wie in der Tabellenfassung, fuer alle drei
+// Laengen, und die Kreisprobe kann sich auf die RECHNUNG beschraenken.
+//
+// FUER DAS ENTSCHLUESSELN gilt eine Eigenheit der Befehle: AESDEC will
+// die Rundenschluessel in der Form, die AESIMC (InvMixColumns) daraus
+// macht -- alle ausser dem ersten und dem letzten. `dec_prepare`
+// erzeugt diesen zweiten Plan einmal je Schluessel.
+//
+// ==================================================================
+// EHRLICH
+// ==================================================================
+//
+// E1 KONSTANTZEITIG. Anders als die Tabellenfassung ist dieser Weg es:
+//    AESENC ist ein Befehl mit fester Laufzeit, es gibt keinen
+//    Tabellenzugriff, dessen Adresse vom Schluessel abhaengt. Das ist
+//    ein Nebengewinn dieser Runde und behebt den roten Punkt 2 aus
+//    docs/RUNDE-KRYPTO.md -- allerdings nur auf dem AES-NI-Weg; wer
+//    zurueckfaellt, rechnet weiter ueber die Tabelle.
+// E2 KEIN CCM, KEIN CMAC, KEIN KEY WRAP hier. Diese Datei kann
+//    Bloecke, sonst nichts. Die Betriebsarten bleiben in `aes.fi`.
+//    Sie koennten diese Bloecke benutzen; das ist eine eigene Runde
+//    und wird hier nicht behauptet.
+// E3 DIE 8-BLOCK-SCHLEIFE IST NUR VORWAERTS GEBAUT (`ctr`-artig nicht
+//    noetig). XTS braucht das Verketten ueber den Tweak, und der haengt
+//    vom vorigen Block ab -- verschraenkt wird deshalb in `xts_enc8`,
+//    wo die acht Tweaks VORHER feststehen.
+
+export {
+    usable, pclmul_usable,
+    Enc, Dec, enc_from, dec_from,
+    encrypt_block, decrypt_block,
+    xts_sector_encrypt, xts_sector_decrypt,
+    RK_BYTES
+}
+
+// 15 Rundenschluessel zu 16 Oktetten, ausgerichtet gehalten vom
+// Aufrufer (ein Feld in einer Struktur reicht -- `movdqu` verlangt
+// keine Ausrichtung, und die paar Prozent, die `movdqa` braechte,
+// sind den Absturz bei krummer Lage nicht wert).
+const RK_BYTES: usize = 240
+
+struct Enc {
+    rk: [u8; 240],
+    nr: usize,
+    ok: bool,
+}
+
+struct Dec {
+    rk: [u8; 240],
+    nr: usize,
+    ok: bool,
+}
+
+fn ld8(p: u64, i: usize) -> u8 {
+    return *((p + i as u64) as *mut u8)
+}
+
+fn st8(p: u64, i: usize, v: u8) {
+    *((p + i as u64) as *mut u8) = v
+}
+
+// ---------------------------------------------------------- `cpuid`
+//
+// Blatt 1, ECX: Bit 25 ist AES-NI, Bit 1 ist PCLMULQDQ. `rbx` traegt
+// den Rahmen und wird gerettet -- derselbe Griff wie in
+// `kernel/rand.fi` und `kernel/arch/x86_64/fpu.fi`.
+
+fn cpuid_c(leaf: u64, sub: u64) -> u64 {
+    return asm("push rbx\nmov eax, edi\nmov ecx, esi\ncpuid\nmov eax, ecx\npop rbx",
+        in("rdi") leaf, in("rsi") sub, out("rax"),
+        clobber("rcx"), clobber("rdx"))
+}
+
+fn cpuid_max() -> u64 {
+    return asm("push rbx\nxor eax, eax\ncpuid\npop rbx",
+        out("rax"), clobber("rcx"), clobber("rdx"))
+}
+
+// OB DIE MASCHINE DIE BEFEHLE HAT. Das ist die eine Frage, die VOR
+// jedem `aesenc` beantwortet sein muss; ein `aesenc` auf einer Maschine
+// ohne AES-NI ist ein #UD, und in Ring 0 ist das der Tod des Kerns.
+//
+// Die Freischaltung der Vektoreinheit (CR4.OSFXSR) ist DAMIT NICHT
+// GEPRUEFT -- sie gehoert dem Kern und steht in `fpu.enabled`. Diese
+// Datei kann sie nicht sehen, weil sie `kstate` nicht kennt (sie laeuft
+// auch auf dem Wirt, wo CR4 dem Betriebssystem gehoert). WER SIE IM
+// KERN BENUTZT, MUSS BEIDES FRAGEN.
+fn usable() -> bool {
+    if cpuid_max() < 1 {
+        return false
+    }
+    return (cpuid_c(1, 0) & 0x2000000) != 0
+}
+
+fn pclmul_usable() -> bool {
+    if cpuid_max() < 1 {
+        return false
+    }
+    return (cpuid_c(1, 0) & 2) != 0
+}
+
+// ------------------------------------------------- die Schluesselplaene
+//
+// `rk` sind die 240 Oktette aus `aes.key_set`, `nr` die Rundenzahl
+// (10, 12, 14). Kopiert wird, damit der Aufrufer seinen Schluessel
+// wegwerfen darf, ohne dass diese Struktur ins Leere zeigt.
+
+fn enc_from(rk: u64, nr: usize) -> Enc {
+    var e: Enc = Enc { rk: [0 as u8; 240], nr: 0, ok: false }
+    if nr != 10 && nr != 12 && nr != 14 {
+        return e
+    }
+    var i: usize = 0
+    while i < (nr + 1) * 16 {
+        e.rk[i] = ld8(rk, i)
+        i = i + 1
+    }
+    e.nr = nr
+    e.ok = true
+    return e
+}
+
+// AESDEC will die Rundenschluessel in UMGEKEHRTER Reihenfolge und --
+// ausser dem ersten und dem letzten -- durch AESIMC gedreht. Genau das
+// baut diese Funktion, einmal je Schluessel statt einmal je Block.
+//
+// Ohne das AESIMC rechnet AESDEC etwas, das stabil ist, zufaellig
+// aussieht und mit AES nichts zu tun hat -- die Kreisprobe in
+// `tools/aesni/run.sh` faellt genau darauf.
+fn dec_from(rk: u64, nr: usize) -> Dec {
+    var d: Dec = Dec { rk: [0 as u8; 240], nr: 0, ok: false }
+    if nr != 10 && nr != 12 && nr != 14 {
+        return d
+    }
+    // Der letzte Rundenschluessel wird der erste, ungedreht.
+    var i: usize = 0
+    while i < 16 {
+        d.rk[i] = ld8(rk, nr * 16 + i)
+        i = i + 1
+    }
+    // Die mittleren, rueckwaerts, jeder durch AESIMC.
+    var r: usize = 1
+    while r < nr {
+        let src: u64 = rk + ((nr - r) * 16) as u64
+        let dst: u64 = (&d.rk[r * 16]) as u64
+        asm("movdqu xmm0,[rdi]\naesimc xmm0,xmm0\nmovdqu [rsi],xmm0",
+            in("rdi") src, in("rsi") dst, clobber("memory"))
+        r = r + 1
+    }
+    // Der erste wird der letzte, ungedreht.
+    i = 0
+    while i < 16 {
+        d.rk[nr * 16 + i] = ld8(rk, i)
+        i = i + 1
+    }
+    d.nr = nr
+    d.ok = true
+    return d
+}
+
+// ------------------------------------------------------- ein Block
+//
+// Die Rundenzahl steht fest, sobald der Schluessel steht, also gibt es
+// drei Bloecke statt einer Schleife mit veraenderlicher Zahl. Ein
+// `aesenc` mehr oder weniger ist der Unterschied zwischen AES-128 und
+// AES-256, und eine Schleife darum haette je Runde einen Sprung.
+
+fn enc1_10(rk: u64, inp: u64, out: u64) {
+    asm("movdqu xmm0,[rsi]\nmovdqu xmm1,[rdi]\npxor xmm0,xmm1\nmovdqu xmm1,[rdi+16]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+32]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+48]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+64]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+80]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+96]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+112]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+128]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+144]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+160]\naesenclast xmm0,xmm1\nmovdqu [rdx],xmm0",
+        in("rdi") rk, in("rsi") inp, in("rdx") out, clobber("memory"))
+}
+
+fn enc1_12(rk: u64, inp: u64, out: u64) {
+    asm("movdqu xmm0,[rsi]\nmovdqu xmm1,[rdi]\npxor xmm0,xmm1\nmovdqu xmm1,[rdi+16]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+32]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+48]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+64]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+80]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+96]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+112]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+128]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+144]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+160]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+176]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+192]\naesenclast xmm0,xmm1\nmovdqu [rdx],xmm0",
+        in("rdi") rk, in("rsi") inp, in("rdx") out, clobber("memory"))
+}
+
+fn enc1_14(rk: u64, inp: u64, out: u64) {
+    asm("movdqu xmm0,[rsi]\nmovdqu xmm1,[rdi]\npxor xmm0,xmm1\nmovdqu xmm1,[rdi+16]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+32]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+48]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+64]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+80]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+96]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+112]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+128]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+144]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+160]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+176]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+192]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+208]\naesenc xmm0,xmm1\nmovdqu xmm1,[rdi+224]\naesenclast xmm0,xmm1\nmovdqu [rdx],xmm0",
+        in("rdi") rk, in("rsi") inp, in("rdx") out, clobber("memory"))
+}
+
+fn dec1_10(rk: u64, inp: u64, out: u64) {
+    asm("movdqu xmm0,[rsi]\nmovdqu xmm1,[rdi]\npxor xmm0,xmm1\nmovdqu xmm1,[rdi+16]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+32]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+48]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+64]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+80]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+96]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+112]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+128]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+144]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+160]\naesdeclast xmm0,xmm1\nmovdqu [rdx],xmm0",
+        in("rdi") rk, in("rsi") inp, in("rdx") out, clobber("memory"))
+}
+
+fn dec1_12(rk: u64, inp: u64, out: u64) {
+    asm("movdqu xmm0,[rsi]\nmovdqu xmm1,[rdi]\npxor xmm0,xmm1\nmovdqu xmm1,[rdi+16]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+32]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+48]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+64]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+80]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+96]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+112]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+128]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+144]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+160]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+176]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+192]\naesdeclast xmm0,xmm1\nmovdqu [rdx],xmm0",
+        in("rdi") rk, in("rsi") inp, in("rdx") out, clobber("memory"))
+}
+
+fn dec1_14(rk: u64, inp: u64, out: u64) {
+    asm("movdqu xmm0,[rsi]\nmovdqu xmm1,[rdi]\npxor xmm0,xmm1\nmovdqu xmm1,[rdi+16]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+32]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+48]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+64]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+80]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+96]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+112]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+128]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+144]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+160]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+176]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+192]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+208]\naesdec xmm0,xmm1\nmovdqu xmm1,[rdi+224]\naesdeclast xmm0,xmm1\nmovdqu [rdx],xmm0",
+        in("rdi") rk, in("rsi") inp, in("rdx") out, clobber("memory"))
+}
+
+fn encrypt_block(e: *mut Enc, inp: u64, out: u64) -> bool {
+    if !(*e).ok {
+        return false
+    }
+    let rk: u64 = (&(*e).rk[0]) as u64
+    if (*e).nr == 10 {
+        enc1_10(rk, inp, out)
+        return true
+    }
+    if (*e).nr == 12 {
+        enc1_12(rk, inp, out)
+        return true
+    }
+    enc1_14(rk, inp, out)
+    return true
+}
+
+fn decrypt_block(d: *mut Dec, inp: u64, out: u64) -> bool {
+    if !(*d).ok {
+        return false
+    }
+    let rk: u64 = (&(*d).rk[0]) as u64
+    if (*d).nr == 10 {
+        dec1_10(rk, inp, out)
+        return true
+    }
+    if (*d).nr == 12 {
+        dec1_12(rk, inp, out)
+        return true
+    }
+    dec1_14(rk, inp, out)
+    return true
+}
+
+// =============================================================== XTS
+//
+// Der Tweak wandert von Block zu Block (T = T * alpha im Koerper
+// GF(2^128), little endian). Das ist eine Kette -- Block j+1 braucht
+// den Tweak von Block j --, und eine Kette laesst sich nicht
+// verschraenken.
+//
+// DESHALB WERDEN DIE TWEAKS VORHER AUSGERECHNET. `xts_sector_encrypt`
+// legt acht Tweaks in ein Feld, und der asm-Block rechnet dann ACHT
+// AES-Bloecke NEBENEINANDER. Das ist der eigentliche Gewinn: AESENC hat
+// auf heutigen Maschinen eine Latenz von vier Takten, aber einen
+// Durchsatz von einem je Takt. Acht unabhaengige Ketten fuellen die
+// Rechenwerke; eine einzelne laesst sie zu drei Vierteln leer stehen.
+//
+// Die Tweak-Rechnung selbst bleibt skalar. PCLMULQDQ koennte sie auch
+// -- die Multiplikation mit x ist aber eine Verschiebung um EIN Bit,
+// und die kostet skalar so wenig, dass die Messung (Abschnitt 4 des
+// Berichts) keinen Unterschied zeigte. PCLMULQDQ ist deshalb GEPRUEFT
+// (`pclmul_usable`) und NICHT BENUTZT; der Grund steht hier, damit
+// niemand es fuer ein Versehen haelt.
+
+// Die Verschiebung um ein Bit nach links ueber 16 Oktette, little
+// endian, mit 0x87 als Ruecknahme -- Wort fuer Wort dasselbe wie
+// `xts.gf_mul_alpha`, nur ueber zwei u64 statt sechzehn u8.
+fn tweak_next(t: *mut [u8; 16]) {
+    var lo: u64 = 0
+    var hi: u64 = 0
+    var i: usize = 0
+    while i < 8 {
+        lo = lo | (((*t)[i] as u64) << (i as u64 * 8))
+        hi = hi | (((*t)[i + 8] as u64) << (i as u64 * 8))
+        i = i + 1
+    }
+    let carry: u64 = (hi >> 63) & 1
+    hi = ((hi << 1) | ((lo >> 63) & 1)) & 0xFFFFFFFFFFFFFFFF
+    lo = (lo << 1) & 0xFFFFFFFFFFFFFFFF
+    if carry != 0 {
+        lo = lo ^ 0x87
+    }
+    i = 0
+    while i < 8 {
+        (*t)[i] = ((lo >> (i as u64 * 8)) & 255) as u8
+        (*t)[i + 8] = ((hi >> (i as u64 * 8)) & 255) as u8
+        i = i + 1
+    }
+}
+
+fn sector_tweak(sector: u64, t: *mut [u8; 16]) {
+    var i: usize = 0
+    while i < 8 {
+        (*t)[i] = ((sector >> (i as u64 * 8)) & 255) as u8
+        i = i + 1
+    }
+    while i < 16 {
+        (*t)[i] = 0
+        i = i + 1
+    }
+}
+
+// ACHT BLOECKE NEBENEINANDER, verschluesselt.
+//
+// rdi = Rundenschluessel, rsi = Klartext (128 Oktette), rdx = Ziel,
+// rcx = acht Tweaks (128 Oktette), r8 = Zahl der aesenc-Runden.
+//
+// xmm8..xmm15 tragen die acht Tweaks, xmm0..xmm7 die acht Bloecke.
+// Der Ablauf ist derselbe wie bei einem Block, nur achtfach: P xor T,
+// dann die Runden, dann xor T.
+fn xts_enc8(rk: u64, inp: u64, out: u64, tw: u64, nr: usize) {
+    asm("movdqu xmm8,[rcx]\nmovdqu xmm9,[rcx+16]\nmovdqu xmm10,[rcx+32]\nmovdqu xmm11,[rcx+48]\nmovdqu xmm12,[rcx+64]\nmovdqu xmm13,[rcx+80]\nmovdqu xmm14,[rcx+96]\nmovdqu xmm15,[rcx+112]\nmovdqu xmm0,[rsi]\nmovdqu xmm1,[rsi+16]\nmovdqu xmm2,[rsi+32]\nmovdqu xmm3,[rsi+48]\nmovdqu xmm4,[rsi+64]\nmovdqu xmm5,[rsi+80]\nmovdqu xmm6,[rsi+96]\nmovdqu xmm7,[rsi+112]\npxor xmm0,xmm8\npxor xmm1,xmm9\npxor xmm2,xmm10\npxor xmm3,xmm11\npxor xmm4,xmm12\npxor xmm5,xmm13\npxor xmm6,xmm14\npxor xmm7,xmm15\nmovdqu xmm8,[rdi]\npxor xmm0,xmm8\npxor xmm1,xmm8\npxor xmm2,xmm8\npxor xmm3,xmm8\npxor xmm4,xmm8\npxor xmm5,xmm8\npxor xmm6,xmm8\npxor xmm7,xmm8\nmov rax,rdi\nadd rax,16\n1:\nmovdqu xmm8,[rax]\naesenc xmm0,xmm8\naesenc xmm1,xmm8\naesenc xmm2,xmm8\naesenc xmm3,xmm8\naesenc xmm4,xmm8\naesenc xmm5,xmm8\naesenc xmm6,xmm8\naesenc xmm7,xmm8\nadd rax,16\ndec r8\njnz 1b\nmovdqu xmm8,[rax]\naesenclast xmm0,xmm8\naesenclast xmm1,xmm8\naesenclast xmm2,xmm8\naesenclast xmm3,xmm8\naesenclast xmm4,xmm8\naesenclast xmm5,xmm8\naesenclast xmm6,xmm8\naesenclast xmm7,xmm8\nmovdqu xmm8,[rcx]\npxor xmm0,xmm8\nmovdqu xmm8,[rcx+16]\npxor xmm1,xmm8\nmovdqu xmm8,[rcx+32]\npxor xmm2,xmm8\nmovdqu xmm8,[rcx+48]\npxor xmm3,xmm8\nmovdqu xmm8,[rcx+64]\npxor xmm4,xmm8\nmovdqu xmm8,[rcx+80]\npxor xmm5,xmm8\nmovdqu xmm8,[rcx+96]\npxor xmm6,xmm8\nmovdqu xmm8,[rcx+112]\npxor xmm7,xmm8\nmovdqu [rdx],xmm0\nmovdqu [rdx+16],xmm1\nmovdqu [rdx+32],xmm2\nmovdqu [rdx+48],xmm3\nmovdqu [rdx+64],xmm4\nmovdqu [rdx+80],xmm5\nmovdqu [rdx+96],xmm6\nmovdqu [rdx+112],xmm7",
+        in("rdi") rk, in("rsi") inp, in("rdx") out, in("rcx") tw,
+        in("r8") (nr - 1) as u64,
+        clobber("rax"), clobber("r8"), clobber("memory"))
+}
+
+// Dasselbe rueckwaerts. `rk` ist hier der Plan aus `dec_from`.
+fn xts_dec8(rk: u64, inp: u64, out: u64, tw: u64, nr: usize) {
+    asm("movdqu xmm8,[rcx]\nmovdqu xmm9,[rcx+16]\nmovdqu xmm10,[rcx+32]\nmovdqu xmm11,[rcx+48]\nmovdqu xmm12,[rcx+64]\nmovdqu xmm13,[rcx+80]\nmovdqu xmm14,[rcx+96]\nmovdqu xmm15,[rcx+112]\nmovdqu xmm0,[rsi]\nmovdqu xmm1,[rsi+16]\nmovdqu xmm2,[rsi+32]\nmovdqu xmm3,[rsi+48]\nmovdqu xmm4,[rsi+64]\nmovdqu xmm5,[rsi+80]\nmovdqu xmm6,[rsi+96]\nmovdqu xmm7,[rsi+112]\npxor xmm0,xmm8\npxor xmm1,xmm9\npxor xmm2,xmm10\npxor xmm3,xmm11\npxor xmm4,xmm12\npxor xmm5,xmm13\npxor xmm6,xmm14\npxor xmm7,xmm15\nmovdqu xmm8,[rdi]\npxor xmm0,xmm8\npxor xmm1,xmm8\npxor xmm2,xmm8\npxor xmm3,xmm8\npxor xmm4,xmm8\npxor xmm5,xmm8\npxor xmm6,xmm8\npxor xmm7,xmm8\nmov rax,rdi\nadd rax,16\n1:\nmovdqu xmm8,[rax]\naesdec xmm0,xmm8\naesdec xmm1,xmm8\naesdec xmm2,xmm8\naesdec xmm3,xmm8\naesdec xmm4,xmm8\naesdec xmm5,xmm8\naesdec xmm6,xmm8\naesdec xmm7,xmm8\nadd rax,16\ndec r8\njnz 1b\nmovdqu xmm8,[rax]\naesdeclast xmm0,xmm8\naesdeclast xmm1,xmm8\naesdeclast xmm2,xmm8\naesdeclast xmm3,xmm8\naesdeclast xmm4,xmm8\naesdeclast xmm5,xmm8\naesdeclast xmm6,xmm8\naesdeclast xmm7,xmm8\nmovdqu xmm8,[rcx]\npxor xmm0,xmm8\nmovdqu xmm8,[rcx+16]\npxor xmm1,xmm8\nmovdqu xmm8,[rcx+32]\npxor xmm2,xmm8\nmovdqu xmm8,[rcx+48]\npxor xmm3,xmm8\nmovdqu xmm8,[rcx+64]\npxor xmm4,xmm8\nmovdqu xmm8,[rcx+80]\npxor xmm5,xmm8\nmovdqu xmm8,[rcx+96]\npxor xmm6,xmm8\nmovdqu xmm8,[rcx+112]\npxor xmm7,xmm8\nmovdqu [rdx],xmm0\nmovdqu [rdx+16],xmm1\nmovdqu [rdx+32],xmm2\nmovdqu [rdx+48],xmm3\nmovdqu [rdx+64],xmm4\nmovdqu [rdx+80],xmm5\nmovdqu [rdx+96],xmm6\nmovdqu [rdx+112],xmm7",
+        in("rdi") rk, in("rsi") inp, in("rdx") out, in("rcx") tw,
+        in("r8") (nr - 1) as u64,
+        clobber("rax"), clobber("r8"), clobber("memory"))
+}
+
+// EIN SEKTOR, verschluesselt.
+//
+// `e` ist der Plan fuer die Daten (k1), `t0` der schon fertige Tweak
+// (T = AES-k2(Sektornummer), vom Aufrufer gerechnet -- diese Datei
+// weiss nicht, wie der Aufrufer an k2 kommt).
+//
+// `n` MUSS ein Vielfaches von 16 sein. Ciphertext stealing gibt es
+// hier NICHT: ein Sektor ist immer ein Vielfaches von 16, und der
+// krumme Fall bleibt in `xts.fi` bei der Tabellenfassung. Wer mit
+// krummer Laenge kommt, bekommt `false` und nicht etwa stillschweigend
+// etwas Falsches.
+fn xts_run(rk: u64, nr: usize, t0: *mut [u8; 16], inp: u64, out: u64,
+    n: usize, enc: bool) -> bool {
+    if n < 16 || n % 16 != 0 {
+        return false
+    }
+    var tw: [u8; 128] = [0 as u8; 128]
+    var t: [u8; 16] = [0 as u8; 16]
+    var i: usize = 0
+    while i < 16 {
+        t[i] = (*t0)[i]
+        i = i + 1
+    }
+    let bloecke: usize = n / 16
+    var j: usize = 0
+    // Acht auf einmal, solange acht da sind.
+    while j + 8 <= bloecke {
+        var b: usize = 0
+        while b < 8 {
+            i = 0
+            while i < 16 {
+                tw[b * 16 + i] = t[i]
+                i = i + 1
+            }
+            tweak_next(&t)
+            b = b + 1
+        }
+        if enc {
+            xts_enc8(rk, inp + (j * 16) as u64, out + (j * 16) as u64,
+                (&tw[0]) as u64, nr)
+        } else {
+            xts_dec8(rk, inp + (j * 16) as u64, out + (j * 16) as u64,
+                (&tw[0]) as u64, nr)
+        }
+        j = j + 8
+    }
+    // Der Rest einzeln. Ein Sektor von 512 Oktetten hat 32 Bloecke und
+    // geht glatt auf; 4096 auch. Diese Schleife traegt die Laengen, die
+    // es nicht tun.
+    while j < bloecke {
+        var x: [u8; 16] = [0 as u8; 16]
+        var y: [u8; 16] = [0 as u8; 16]
+        i = 0
+        while i < 16 {
+            x[i] = ld8(inp + (j * 16) as u64, i) ^ t[i]
+            i = i + 1
+        }
+        if enc {
+            var e1: Enc = Enc { rk: [0 as u8; 240], nr: nr, ok: true }
+            i = 0
+            while i < (nr + 1) * 16 {
+                e1.rk[i] = ld8(rk, i)
+                i = i + 1
+            }
+            encrypt_block(&e1, (&x[0]) as u64, (&y[0]) as u64)
+        } else {
+            var d1: Dec = Dec { rk: [0 as u8; 240], nr: nr, ok: true }
+            i = 0
+            while i < (nr + 1) * 16 {
+                d1.rk[i] = ld8(rk, i)
+                i = i + 1
+            }
+            decrypt_block(&d1, (&x[0]) as u64, (&y[0]) as u64)
+        }
+        i = 0
+        while i < 16 {
+            st8(out + (j * 16) as u64, i, y[i] ^ t[i])
+            i = i + 1
+        }
+        tweak_next(&t)
+        j = j + 1
+    }
+    return true
+}
+
+fn xts_sector_encrypt(e: *mut Enc, t0: *mut [u8; 16], inp: u64,
+    out: u64, n: usize) -> bool {
+    if !(*e).ok {
+        return false
+    }
+    return xts_run((&(*e).rk[0]) as u64, (*e).nr, t0, inp, out, n, true)
+}
+
+fn xts_sector_decrypt(d: *mut Dec, t0: *mut [u8; 16], inp: u64,
+    out: u64, n: usize) -> bool {
+    if !(*d).ok {
+        return false
+    }
+    return xts_run((&(*d).rk[0]) as u64, (*d).nr, t0, inp, out, n, false)
+}
