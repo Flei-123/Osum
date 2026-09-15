@@ -267,6 +267,15 @@ ffmpeg -y -v error -f lavfi -i testsrc2=size=128x96:rate=5 -frames:v 2 \
     && ok "ein CABAC-Strom (Main) fuer die Gegenprobe steht" \
     || bad "der CABAC-Strom laesst sich nicht bauen"
 
+# UEBER DER GRENZE: 1920x1080. MAXW/MAXH stehen seit P-023 bei 1280x720;
+# was darueber liegt, muss mit E_GROSS abgewiesen werden statt ueber das
+# Ende der Bildspeicher hinauszuschreiben.
+ffmpeg -y -v error -f lavfi -i testsrc2=size=1920x1080:rate=5 -frames:v 1 \
+    -c:v libx264 -profile:v baseline -pix_fmt yuv420p -f h264 \
+    "$MED/x_gross.264" 2>/dev/null \
+    && ok "ein 1920x1080-Strom fuer die Grenzprobe steht" \
+    || bad "der 1920x1080-Strom laesst sich nicht bauen"
+
 # ------------------------------------------------------ 5. die Platte
 
 echo "== 5. die Wurzelplatte =="
@@ -460,6 +469,53 @@ done
 num "Unsinn als Eingabe, sauber abgewiesen (von 3)" "$unsinn_ok" eq 3
 
 # ---------------------------------------------------- 8. check-ui
+
+# ================================= 7f. DIE KREISPROBE DER SCHNELLEN
+#     BEWEGUNGSKOMPENSATION (P-023)
+#
+# Der schnelle Weg (Randpuffer statt Klemmung je Punkt, Zwischenwerte
+# nur einmal, gleiche Vektoren zu einem Rechteck) MUSS Oktett fuer
+# Oktett dasselbe liefern wie der alte, der Punkt fuer Punkt rechnet.
+# `/bin/h264t --langsam` faehrt den alten Weg; verglichen werden die
+# SHA-256 je Bild aus beiden Laeufen.
+#
+# WARUM DAS NICHT SCHON DURCH DIE ffmpeg-GEGENPROBE ABGEDECKT IST: die
+# prueft den schnellen Weg gegen ffmpeg. Diese hier prueft die beiden
+# Wege GEGENEINANDER -- und faellt damit auch dann auf, wenn eines
+# Tages beide zusammen abweichen wuerden.
+echo "== 7f. die Kreisprobe: schneller gegen langsamen Weg der MC =="
+while read -r name w h nf; do
+    if [ "$NUR" = 1 ]; then
+        case "$name" in i_klein|p_klein) ;; *) continue ;; esac
+    fi
+    rc=$(lauf "l_$name" "osum nokbd script=h264t --langsam /v/$name.264")
+    if [ "$rc" != 21 ]; then
+        bad "[$name] der langsame Weg beendet sich nicht selbst (rc=$rc)"
+        continue
+    fi
+    a=$(grep -a '^h264: sha ' "$TMPD/$name.txt" 2>/dev/null | tr -d '\r\000' | sort)
+    b=$(grep -a '^h264: sha ' "$TMPD/l_$name.txt" 2>/dev/null | tr -d '\r\000' | sort)
+    na=$(printf '%s\n' "$a" | grep -c . || true)
+    if [ -n "$a" ] && [ "$a" = "$b" ]; then
+        ok "[$name] schneller Weg == langsamer Weg, $na Bilder oktettweise gleich"
+    else
+        bad "[$name] der schnelle Weg weicht vom langsamen ab"
+        diff <(printf '%s\n' "$a") <(printf '%s\n' "$b") | head -4 | sed 's/^/        /'
+    fi
+done < "$MED/liste.txt"
+
+# ================================= 7g. UEBER DER GRENZE WIRD ABGEWIESEN
+#
+# MAXW/MAXH stehen jetzt bei 1280x720. Ein groesserer Strom muss mit
+# E_GROSS (4) abgewiesen werden und darf NICHT halb dekodiert werden --
+# sonst schriebe er ueber das Ende der Bildspeicher hinaus.
+echo "== 7g. ueber der Grenze (1280x720) wird abgewiesen =="
+rc=$(lauf gross "osum nokbd script=h264t /v/x_gross.264")
+num "[gross] der Kernel beendet sich selbst statt zu haengen" "$rc" eq 21
+er=$(wert "$TMPD/gross.txt" err)
+fr=$(wert "$TMPD/gross.txt" frames)
+gleich "[gross] 1920x1080 wird ABGEWIESEN (err=4, zu gross)" "4" "$er"
+gleich "[gross] und es entsteht KEIN Bild" "0" "$fr"
 
 echo "== 8. die Oberflaechenregel =="
 if bash tools/check-ui.sh > "$TMPD/ui.txt" 2>&1; then

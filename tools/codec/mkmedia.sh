@@ -54,6 +54,15 @@ mach p_skip   128  96  6 "color=c=navy:size=128x96:rate=5" -g 100 -qp 26
 #     das, was man wirklich abspielen wuerde.
 mach cif      352 288 10 "testsrc2=size=352x288:rate=10" -g 100 -qp 26
 
+# --- P-023: DIE GROSSEN MASSE. Sie sind der Grund dieser Runde --
+#     der Dekodierer war fuer sie zu langsam, und MAXW/MAXH standen bei
+#     CIF. Beide werden GENAUSO bitweise gegen ffmpeg geprueft wie die
+#     kleinen; eine schnelle Fassung, die anders rechnet, waere wertlos.
+#     Wenige Bilder, weil die YUV-Dateien gross sind (720p: 1,4 MiB je
+#     Bild) und die Platte des Wirts knapp ist.
+mach vga      640 480  6 "testsrc2=size=640x480:rate=10" -g 100 -qp 26
+mach hd720   1280 720  4 "testsrc2=size=1280x720:rate=10" -g 100 -qp 26
+
 # --- MEHRERE SLICES JE BILD. Der Regelfall in jedem Rundfunkstrom (ein
 #     verlorenes Paket kostet dann nur einen Streifen) und der Fall, an
 #     dem ein Dekodierer auffliegt, der ein Bild fuer einen Slice haelt:

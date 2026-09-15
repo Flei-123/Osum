@@ -69,7 +69,9 @@ export {
     h264_err, h264_fehlertext, h264_plane_y, h264_plane_u, h264_plane_v,
     h264_to_rgb, h264_profile, h264_mbs, h264_luma_size, h264_chroma_size,
     E_OK, E_FORM, E_PROFIL, E_ART, E_GROSS, E_DATEN, E_UNGERADE,
-    MAXW, MAXH
+    MAXW, MAXH,
+    prof_get, prof_reset, PF_CAVLC, PF_MC, PF_RECON, PF_DEBLOCK, PF_REST, PF_N,
+    mc_setz_langsam
 }
 
 // ------------------------------------------------------------ Fehler
@@ -112,16 +114,43 @@ fn h264_fehlertext() -> u64 {
 // 352x288 (CIF) ist die Grenze dieser Runde, und sie steht hier und
 // nicht im Gefuehl: drei Bildspeicher (das laufende Bild und zwei
 // Referenzen) zu je 1,5 Oktetten je Bildpunkt sind bei CIF 456 KiB.
-// Ein Prozess dieses Systems hat 6 MiB Abbild. Bei 640x480 waeren es
-// 1,4 MiB, bei 1280x720 schon 4 MiB -- und dann ist fuer den
-// Entrolungspuffer und den Rest nichts mehr da.
-const MAXW: u64 = 352
-const MAXH: u64 = 288
-const MAXMBW: u64 = 22      // MAXW / 16
-const MAXMBH: u64 = 18      // MAXH / 16
-const MAXMB: u64 = 396      // MAXMBW * MAXMBH
-const LUMA: u64 = 101376    // MAXW * MAXH
-const CHROMA: u64 = 25344   // LUMA / 4
+//
+// ===== P-023: DIE GRENZE STEIGT AUF 1280x720, UND DIE ALTE BEGRUENDUNG
+// ===== WAR SCHLICHT VERALTET.
+//
+// Hier stand "ein Prozess dieses Systems hat 6 MiB Abbild". Das stimmt
+// seit der Runde CERTUS-AUF-OSUM nicht mehr: `proc.IMAGE_END` ist von
+// 0x40400000 auf 0x40C00000 gewachsen, weil der Browser 6,5 MiB gross
+// ist. Das Abbildfenster ist damit
+//
+//     proc.IMAGE_BASE 0x40100000 .. proc.IMAGE_END 0x40C00000 = 11 MiB
+//
+// und nicht 6. NACHGERECHNET statt geschaetzt (readelf -lW auf dem
+// gebundenen /bin/h264t):
+//
+//     bei 352x288  endete h264t bei 2,42 MiB ueber IMAGE_BASE
+//     bei 1280x720 endet es bei    9,42 MiB ueber IMAGE_BASE
+//
+// Das passt, und zwar mit 1,5 MiB Luft. Die Rechnung im Einzelnen:
+//
+//     vier Bildspeicher 1280x720   5.529.600 Oktette = 5,27 MiB
+//     die Felder je Makroblock      2.714.400        = 2,59 MiB
+//     (3600 Makrobloecke: Typ, Modi, Vektoren, nz)
+//
+// WAS DAS KOSTET, WENN DER STROM KLEINER IST: nichts an Rechenzeit --
+// die Schleifen laufen ueber `s_mbw`/`s_mbh` und nicht ueber MAXMB.
+// Es kostet Adressraum, und der ist da. Eine .bss-Seite, die nie
+// beschrieben wird, kostet nicht einmal einen Rahmen.
+//
+// DIE GRENZE BLEIBT EINE GRENZE: ein Strom ueber 1280x720 wird weiter
+// mit E_GROSS abgewiesen (parse_sps) und nicht halb dekodiert.
+const MAXW: u64 = 1280
+const MAXH: u64 = 720
+const MAXMBW: u64 = 80      // MAXW / 16
+const MAXMBH: u64 = 45      // MAXH / 16
+const MAXMB: u64 = 3600     // MAXMBW * MAXMBH
+const LUMA: u64 = 921600    // MAXW * MAXH
+const CHROMA: u64 = 230400  // LUMA / 4
 // WIEVIELE BILDSPEICHER, und warum genau so viele: x264 stellt im
 // Baseline-Profil standardmaessig DREI Referenzen ein (`num_ref_frames
 // = 3`, und die Stroeme dieser Runde benutzen ref_idx bis 2 wirklich).
@@ -138,9 +167,9 @@ fn h264_chroma_size() -> u64 { return CHROMA }
 
 // Die Bildspeicher. Sie liegen HIER und nicht in kdata: kdata traegt
 // Zustandsfelder, keine Bilder (siehe den Kopf dieser Datei).
-static mut pY: [u8; 405504] = [0 as u8; 405504]   // NSLOT * LUMA
-static mut pU: [u8; 101376] = [0 as u8; 101376]   // NSLOT * CHROMA
-static mut pV: [u8; 101376] = [0 as u8; 101376]
+static mut pY: [u8; 3686400] = [0 as u8; 3686400]   // NSLOT * LUMA
+static mut pU: [u8; 921600] = [0 as u8; 921600]     // NSLOT * CHROMA
+static mut pV: [u8; 921600] = [0 as u8; 921600]
 
 // Welcher Speicher ist das laufende Bild, welche sind Referenzen.
 // ref_slot[0] ist die naechste Referenz (Index 0 der Liste L0).
@@ -156,6 +185,58 @@ fn h264_plane_u(slot: u64) -> u64 {
 }
 fn h264_plane_v(slot: u64) -> u64 {
     return (&pV[(0) as usize]) as u64 + slot * CHROMA
+}
+
+// ==================================================== DIE PROFILUHR
+//
+// P-023 will WISSEN, wohin die Zeit geht, statt es zu vermuten. Der
+// Bericht der Vorrunde nennt drei Verdaechtige (tab_find, die
+// Bewegungskompensation je 4x4, kein SIMD) -- aber GEMESSEN war
+// keiner davon. Diese Uhr misst sie einzeln.
+//
+// GEZAEHLT WIRD IN TAKTEN (`rdtsc`), nicht in Nanosekunden: ein Bild
+// bei CIF kostet rund 18 ms, ein einzelner Abschnitt davon liegt weit
+// unter der Aufloesung, die `clock_gettime` ueber einen Syscall
+// hergibt -- und der Syscall selbst kostet mehr als das, was er messen
+// soll. `rdtsc` ist ein Befehl ohne Ringwechsel.
+//
+// DER AUFWAND DER MESSUNG SELBST ist zwei `rdtsc` je Abschnitt. Bei
+// den Abschnitten hier (je Makroblock, nicht je Bildpunkt) faellt das
+// nicht ins Gewicht; `PF_REST` faengt auf, was zwischen den Abschnitten
+// liegt, und die Summe wird gegen die Gesamtzeit geprueft.
+const PF_CAVLC: u64 = 0     // Entropiedekodierung: tab_find und Syntax
+const PF_MC: u64 = 1        // Bewegungskompensation (mc_mb)
+const PF_RECON: u64 = 2     // Transformation + Intra-Vorhersage
+const PF_DEBLOCK: u64 = 3   // Entblockungsfilter
+const PF_REST: u64 = 4      // alles uebrige im Bild
+const PF_N: u64 = 5
+
+static mut prof_takte: [u64; 5] = [0; 5]
+static mut prof_zahl: [u64; 5] = [0; 5]
+
+fn rdtsc() -> u64 {
+    return asm("rdtsc\nshl rdx, 32\nor rax, rdx", out("rax"))
+}
+
+fn prof_reset() {
+    var i: u64 = 0
+    while i < PF_N {
+        prof_takte[(i) as usize] = 0
+        prof_zahl[(i) as usize] = 0
+        i = i + 1
+    }
+}
+
+// was=0: Takte, was=1: Aufrufe
+fn prof_get(k: u64, was: u64) -> u64 {
+    if k >= PF_N { return 0 }
+    if was == 1 { return prof_zahl[(k) as usize] }
+    return prof_takte[(k) as usize]
+}
+
+fn prof_add(k: u64, t0: u64) {
+    prof_takte[(k) as usize] = prof_takte[(k) as usize] + (rdtsc() - t0)
+    prof_zahl[(k) as usize] = prof_zahl[(k) as usize] + 1
 }
 
 // ------------------------------------------------------- der Bitleser
@@ -498,26 +579,26 @@ fn parse_pps() -> bool {
 // Alles flach: Firn hat keine zweidimensionalen Felder, und ein
 // Verbund je Makroblock waere hier nur Verpackung. Der Index ist
 // ueberall `mb * 16 + blk` beziehungsweise `mb`.
-static mut mb_type: [u64; 396] = [0; 396]
-static mut mb_intra: [u8; 396] = [0 as u8; 396]
-static mut mb_done: [u8; 396] = [0 as u8; 396]
+static mut mb_type: [u64; 3600] = [0; 3600]
+static mut mb_intra: [u8; 3600] = [0 as u8; 3600]
+static mut mb_done: [u8; 3600] = [0 as u8; 3600]
 // Zu welchem Slice ein Makroblock gehoert. Ein Slice ist per Norm
 // UNABHAENGIG dekodierbar (7.4.4): ueber seine Grenze hinweg gibt es
 // keine Nachbarn -- weder fuer die Syntax (nC, Modi, Vektoren) noch
 // fuer die Bildpunkte der Intra-Vorhersage. Wer das uebersieht,
 // bekommt bei einem Bild aus EINEM Slice das richtige Ergebnis und bei
 // einem aus vieren ab dem zweiten Streifen Unsinn. 0xFFFF = keiner.
-static mut mb_slice: [u64; 396] = [0; 396]
-static mut mb_cbp: [u64; 396] = [0; 396]
-static mut mb_qp: [i64; 396] = [0; 396]
-static mut mb_i16: [u64; 396] = [0; 396]
-static mut mb_cpred: [u64; 396] = [0; 396]
+static mut mb_slice: [u64; 3600] = [0; 3600]
+static mut mb_cbp: [u64; 3600] = [0; 3600]
+static mut mb_qp: [i64; 3600] = [0; 3600]
+static mut mb_i16: [u64; 3600] = [0; 3600]
+static mut mb_cpred: [u64; 3600] = [0; 3600]
 // je 4x4-Block: Modus, Vektor, Referenz, Zahl der Koeffizienten
-static mut b_i4: [u64; 6336] = [0; 6336]     // MAXMB * 16
-static mut b_mvx: [i64; 6336] = [0; 6336]
-static mut b_mvy: [i64; 6336] = [0; 6336]
-static mut b_ref: [i64; 6336] = [0; 6336]
-static mut b_nz: [u64; 9504] = [0; 9504]     // MAXMB * 24 (16 Luma + 8 Chroma)
+static mut b_i4: [u64; 57600] = [0; 57600]     // MAXMB * 16
+static mut b_mvx: [i64; 57600] = [0; 57600]
+static mut b_mvy: [i64; 57600] = [0; 57600]
+static mut b_ref: [i64; 57600] = [0; 57600]
+static mut b_nz: [u64; 86400] = [0; 86400]     // MAXMB * 24 (16 Luma + 8 Chroma)
 
 // Der Slice-Zustand.
 static mut sl_type: u64 = 2      // 0 = P, 2 = I
@@ -599,6 +680,13 @@ fn lev_of(v: u64) -> i64 {
 // Ein Restwertblock. Liefert totalCoeff, oder NOTAB bei kaputtem Strom.
 // Die Koeffizienten stehen danach in `coef[0..maxc-1]`.
 fn residual_block(nC: i64, maxc: u64) -> u64 {
+    let pt0: u64 = rdtsc()
+    let rv: u64 = residual_block_inner(nC, maxc)
+    prof_add(PF_CAVLC, pt0)
+    return rv
+}
+
+fn residual_block_inner(nC: i64, maxc: u64) -> u64 {
     var i: u64 = 0
     while i < 16 {
         coef[(i) as usize] = 0
@@ -778,19 +866,45 @@ fn norm_adjust(m: u64, i: u64) -> i64 {
 // FLACHE Matrix aus lauter 16en (Flat_4x4_16, 8.5.9) -- ohne diese 16
 // sind alle Reste sechzehnmal zu klein, und das Bild wird nicht
 // falsch, sondern FLACH.
+// DIE DREI GEWICHTE HAENGEN AM QP, NICHT AM KOEFFIZIENTEN.
+//
+// `norm_adjust` holte je Koeffizient einen von DREI Werten aus VMAT und
+// rechnete dafuer jedes Mal Zeile, Spalte und die beiden Paritaeten aus
+// -- sechzehnmal je Block, fuer drei verschiedene Ergebnisse. Sie
+// stehen jetzt vor der Schleife, und die Auswahl ist eine Tafel.
+//
+// Auch die Fallunterscheidung `qp >= 24` haengt nicht am Koeffizienten
+// und ist deshalb aus der Schleife heraus. Gerechnet wird Wert fuer
+// Wert dasselbe wie vorher.
+static mut NAK: [u64; 16] = [0,2,0,2, 2,1,2,1, 0,2,0,2, 2,1,2,1]
+
 fn scale_into(src: u64, qp: i64) {
     let m: u64 = (qp % 6) as u64
     let sh: u64 = (qp / 6) as u64
-    var i: u64 = 0
-    while i < 16 {
-        let w: i64 = norm_adjust(m, i) * 16
-        let d: i64 = (*((src + i * 8) as *mut i64))
-        if qp >= 24 {
-            blk16[(i) as usize] = (d * w) << (sh - 4)
-        } else {
-            blk16[(i) as usize] = (d * w + (1 << (3 - sh))) >> (4 - sh)
+    let w0: i64 = (h264tab.VMAT[((m * 3)) as usize] as i64) * 16
+    let w1: i64 = (h264tab.VMAT[((m * 3 + 1)) as usize] as i64) * 16
+    let w2: i64 = (h264tab.VMAT[((m * 3 + 2)) as usize] as i64) * 16
+    if qp >= 24 {
+        let l: u64 = sh - 4
+        var i: u64 = 0
+        while i < 16 {
+            let k: u64 = NAK[(i) as usize]
+            var w: i64 = w2
+            if k == 0 { w = w0 } else if k == 1 { w = w1 }
+            blk16[(i) as usize] = ((*((src + i * 8) as *mut i64)) * w) << l
+            i = i + 1
         }
-        i = i + 1
+        return
+    }
+    let rnd: i64 = 1 << (3 - sh)
+    let r: u64 = 4 - sh
+    var j: u64 = 0
+    while j < 16 {
+        let k: u64 = NAK[(j) as usize]
+        var w: i64 = w2
+        if k == 0 { w = w0 } else if k == 1 { w = w1 }
+        blk16[(j) as usize] = ((*((src + j * 8) as *mut i64)) * w + rnd) >> r
+        j = j + 1
     }
 }
 
@@ -1091,6 +1205,20 @@ fn pred_chroma_dc(aL: bool, aU: bool) {
 // deshalb mit >>10 statt >>5 rundet.
 //
 // Die Raender werden GEKLEMMT (ein Vektor darf aus dem Bild zeigen).
+// Mit `mc_langsam` laeuft die alte, Punkt-fuer-Punkt rechnende
+// Fassung. Sie ist die GEGENPROBE zum schnellen Weg und bleibt
+// deshalb im Baum -- zwei Wege, die dasselbe liefern muessen, sind
+// mehr wert als einer, dem man glauben muss.
+static mut mc_langsam: bool = false
+
+// DIE GEGENPROBE VON AUSSEN EINSCHALTEN. `/bin/h264t --langsam` faehrt
+// damit den alten Weg; die Abnahme vergleicht die Pruefsummen beider
+// Laeufe. Waere der schnelle Weg auch nur in einem Bildpunkt anders,
+// faellt es hier auf.
+fn mc_setz_langsam(v: bool) {
+    mc_langsam = v
+}
+
 static mut mc_ref: u64 = 0
 static mut mc_rw: u64 = 0
 static mut mc_rh: u64 = 0
@@ -1147,6 +1275,187 @@ fn qpel_one(x: i64, y: i64, fx: u64, fy: u64) -> u64 {
     return ((jhalf(x, y) + hhalf(x + 1, y) + 1) >> 1) as u64
 }
 
+// ================== DER SCHNELLE WEG: ERST HOLEN, DANN FILTERN
+//
+// WARUM DAS UEBERHAUPT NOETIG IST -- die Messung, nicht die Ahnung.
+// Die Profiluhr (docs/RUNDE-H264T.md, Abschnitt 1.2) sagt: die
+// Bewegungskompensation ist 39 bis 45 Prozent der Gesamtzeit, der
+// groesste Posten mit Abstand. `tab_find`, das der Auftrag als Ursache
+// Nr. 1 nannte, sind 9 bis 11 Prozent.
+//
+// WO DIE ZEIT HINGEHT, und es ist NICHT die Blockgroesse:
+//
+//   * `rpix` klemmt bei JEDEM Bildpunkt beide Koordinaten gegen den
+//     Bildrand -- vier Vergleiche, obwohl fast kein Block am Rand liegt.
+//   * Die Zwischenwerte des Sechs-Anzapf-Filters werden fuer jeden
+//     Zielpunkt NEU gerechnet. Bei fx=2,fy=2 ruft `jhalf` sechs `hraw`,
+//     jedes `hraw` sechs `rpix`: 36 geklemmte Zugriffe fuer EINEN Punkt,
+//     und der Nachbarpunkt rechnet fuenf davon noch einmal.
+//
+// DIE ABHILFE, in zwei Schritten:
+//
+//   1. DEN QUELLBEREICH EINMAL HOLEN. Ein Block bw x bh braucht mit dem
+//      Sechs-Anzapf-Filter (bw+5) x (bh+5) Punkte. Die werden EINMAL in
+//      `mcbuf` kopiert, und NUR DABEI wird geklemmt. Liegt der Bereich
+//      ganz im Bild -- der Regelfall --, ist es ein reiner Zeilenkopier
+//      ohne jeden Vergleich.
+//   2. DIE ZWISCHENWERTE EINMAL RECHNEN. `jhalf` braucht die
+//      senkrechten Rohwerte; die stehen danach in `mctmp` und werden
+//      fuer die ganze Zeile wiederverwendet statt je Punkt neu.
+//
+// DASS DABEI DASSELBE HERAUSKOMMT, ist keine Hoffnung: die
+// Rechenvorschrift je Punkt ist Zeichen fuer Zeichen dieselbe wie in
+// `qpel_one` (dieselben Klammern, dieselbe Reihenfolge, dieselbe
+// Rundung), es wird nur nicht mehr mehrfach gerechnet. Der alte Weg
+// bleibt als `qpel_one` stehen und ist die Gegenprobe:
+// `tools/codec/run.sh` faehrt beide gegeneinander (Abschnitt
+// "Kreisprobe MC").
+//
+// Groessen: groesster Block 16x16, plus 5 Rand = 21x21 = 441.
+const MCB: u64 = 21
+static mut mcbuf: [i64; 441] = [0; 441]
+static mut mctmp: [i64; 441] = [0; 441]
+
+// Den Quellbereich (bw+5) x (bh+5) ab (ix-2, iy-2) nach `mcbuf` holen.
+// Die Klemmung passiert HIER und sonst nirgends.
+fn mc_fetch(ix: i64, iy: i64, bw: u64, bh: u64) {
+    let w: u64 = bw + 5
+    let h: u64 = bh + 5
+    let x0: i64 = ix - 2
+    let y0: i64 = iy - 2
+    let rw: i64 = mc_rw as i64
+    let rh: i64 = mc_rh as i64
+    // Der Regelfall: alles im Bild, keine Klemmung noetig.
+    if x0 >= 0 && y0 >= 0 && x0 + (w as i64) <= rw && y0 + (h as i64) <= rh {
+        var r: u64 = 0
+        while r < h {
+            let zeile: u64 = ((y0 + (r as i64)) as u64) * mc_rw + (x0 as u64)
+            var c: u64 = 0
+            while c < w {
+                mcbuf[((r * MCB + c)) as usize] = ld8(mc_ref, zeile + c) as i64
+                c = c + 1
+            }
+            r = r + 1
+        }
+        return
+    }
+    // Am Rand: Zeile fuer Zeile klemmen.
+    var r2: u64 = 0
+    while r2 < h {
+        var yy: i64 = y0 + (r2 as i64)
+        if yy < 0 { yy = 0 }
+        if yy >= rh { yy = rh - 1 }
+        let zeile: u64 = (yy as u64) * mc_rw
+        var c2: u64 = 0
+        while c2 < w {
+            var xx: i64 = x0 + (c2 as i64)
+            if xx < 0 { xx = 0 }
+            if xx >= rw { xx = rw - 1 }
+            mcbuf[((r2 * MCB + c2)) as usize] = ld8(mc_ref, zeile + (xx as u64)) as i64
+            c2 = c2 + 1
+        }
+        r2 = r2 + 1
+    }
+}
+
+// Aus `mcbuf` lesen. (bx,by) sind Bildkoordinaten RELATIV zum Block,
+// also ist (0,0) der linke obere Zielpunkt; `mcbuf` beginnt zwei
+// Punkte darueber und links.
+fn mb_at_buf(bx: i64, by: i64) -> i64 {
+    return mcbuf[((((by + 2) as u64) * MCB + ((bx + 2) as u64))) as usize]
+}
+
+// b1 waagerecht, ohne Rundung -- auf dem geholten Bereich.
+fn braw_b(x: i64, y: i64) -> i64 {
+    return mb_at_buf(x - 2, y) - 5 * mb_at_buf(x - 1, y) + 20 * mb_at_buf(x, y)
+         + 20 * mb_at_buf(x + 1, y) - 5 * mb_at_buf(x + 2, y) + mb_at_buf(x + 3, y)
+}
+// h1 senkrecht, ohne Rundung.
+fn hraw_b(x: i64, y: i64) -> i64 {
+    return mb_at_buf(x, y - 2) - 5 * mb_at_buf(x, y - 1) + 20 * mb_at_buf(x, y)
+         + 20 * mb_at_buf(x, y + 1) - 5 * mb_at_buf(x, y + 2) + mb_at_buf(x, y + 3)
+}
+
+// Der schnelle Luma-Block. Liefert Punkt fuer Punkt DASSELBE wie
+// `qpel_one`, rechnet die Zwischenwerte aber nur einmal.
+fn mc_luma_schnell(dst: u64, dstride: u64, dx: u64, dy: u64,
+                   ix: i64, iy: i64, fx: u64, fy: u64, bw: u64, bh: u64) {
+    // DER HAEUFIGSTE FALL ZUERST: ganzer Bildpunkt, kein Filter. Jeder
+    // P_Skip mit ganzzahligem Vektor landet hier, und das ist in einem
+    // ruhigen Bild die Mehrheit aller Bloecke. Liegt er ganz im Bild,
+    // ist es ein Zeilenkopier -- ohne mcbuf, ohne Klemmung, ohne Filter.
+    if fx == 0 && fy == 0 {
+        let rw: i64 = mc_rw as i64
+        let rh: i64 = mc_rh as i64
+        if ix >= 0 && iy >= 0 && ix + (bw as i64) <= rw && iy + (bh as i64) <= rh {
+            var r0: u64 = 0
+            while r0 < bh {
+                let z: u64 = ((iy + (r0 as i64)) as u64) * mc_rw + (ix as u64)
+                var c0: u64 = 0
+                while c0 < bw {
+                    st8(dst, (dy + r0) * dstride + dx + c0, ld8(mc_ref, z + c0))
+                    c0 = c0 + 1
+                }
+                r0 = r0 + 1
+            }
+            return
+        }
+    }
+    mc_fetch(ix, iy, bw, bh)
+    // Die drei Faelle, die `jhalf` brauchen (fx==2 oder fy==2 zusammen
+    // mit dem anderen ungerade), rechnen die senkrechten Rohwerte
+    // EINMAL fuer die ganze Zeile in `mctmp`.
+    var r: u64 = 0
+    while r < bh {
+        let y: i64 = r as i64
+        if fx == 2 && fy == 2 {
+            // j: die senkrechten Rohwerte an x-2..x+3 vorrechnen.
+            var c0: u64 = 0
+            while c0 < bw + 5 {
+                mctmp[(c0) as usize] = hraw_b((c0 as i64) - 2, y)
+                c0 = c0 + 1
+            }
+        }
+        var c: u64 = 0
+        while c < bw {
+            let x: i64 = c as i64
+            var v: i64 = 0
+            if fx == 0 && fy == 0 { v = mb_at_buf(x, y) }
+            else if fx == 1 && fy == 0 { v = (mb_at_buf(x, y) + klemm((braw_b(x, y) + 16) >> 5) as i64 + 1) >> 1 }
+            else if fx == 2 && fy == 0 { v = klemm((braw_b(x, y) + 16) >> 5) as i64 }
+            else if fx == 3 && fy == 0 { v = (klemm((braw_b(x, y) + 16) >> 5) as i64 + mb_at_buf(x + 1, y) + 1) >> 1 }
+            else if fx == 0 && fy == 1 { v = (mb_at_buf(x, y) + klemm((hraw_b(x, y) + 16) >> 5) as i64 + 1) >> 1 }
+            else if fx == 0 && fy == 2 { v = klemm((hraw_b(x, y) + 16) >> 5) as i64 }
+            else if fx == 0 && fy == 3 { v = (klemm((hraw_b(x, y) + 16) >> 5) as i64 + mb_at_buf(x, y + 1) + 1) >> 1 }
+            else if fx == 2 && fy == 2 {
+                let sj: i64 = mctmp[((c)) as usize] - 5 * mctmp[((c + 1)) as usize]
+                    + 20 * mctmp[((c + 2)) as usize] + 20 * mctmp[((c + 3)) as usize]
+                    - 5 * mctmp[((c + 4)) as usize] + mctmp[((c + 5)) as usize]
+                v = klemm((sj + 512) >> 10) as i64
+            }
+            else if fx == 1 && fy == 1 { v = (klemm((braw_b(x, y) + 16) >> 5) as i64 + klemm((hraw_b(x, y) + 16) >> 5) as i64 + 1) >> 1 }
+            else if fx == 3 && fy == 1 { v = (klemm((braw_b(x, y) + 16) >> 5) as i64 + klemm((hraw_b(x + 1, y) + 16) >> 5) as i64 + 1) >> 1 }
+            else if fx == 1 && fy == 3 { v = (klemm((braw_b(x, y + 1) + 16) >> 5) as i64 + klemm((hraw_b(x, y) + 16) >> 5) as i64 + 1) >> 1 }
+            else if fx == 3 && fy == 3 { v = (klemm((braw_b(x, y + 1) + 16) >> 5) as i64 + klemm((hraw_b(x + 1, y) + 16) >> 5) as i64 + 1) >> 1 }
+            else if fx == 2 && fy == 1 { v = (jhalf_b(x, y) + klemm((braw_b(x, y) + 16) >> 5) as i64 + 1) >> 1 }
+            else if fx == 2 && fy == 3 { v = (jhalf_b(x, y) + klemm((braw_b(x, y + 1) + 16) >> 5) as i64 + 1) >> 1 }
+            else if fx == 1 && fy == 2 { v = (jhalf_b(x, y) + klemm((hraw_b(x, y) + 16) >> 5) as i64 + 1) >> 1 }
+            else { v = (jhalf_b(x, y) + klemm((hraw_b(x + 1, y) + 16) >> 5) as i64 + 1) >> 1 }
+            st8(dst, (dy + r) * dstride + dx + c, v as u64)
+            c = c + 1
+        }
+        r = r + 1
+    }
+}
+
+// j auf dem geholten Bereich -- fuer die Mischfaelle, die es einzeln
+// brauchen (2,1 / 2,3 / 1,2 / 3,2).
+fn jhalf_b(x: i64, y: i64) -> i64 {
+    let s: i64 = hraw_b(x - 2, y) - 5 * hraw_b(x - 1, y) + 20 * hraw_b(x, y)
+               + 20 * hraw_b(x + 1, y) - 5 * hraw_b(x + 2, y) + hraw_b(x + 3, y)
+    return klemm((s + 512) >> 10) as i64
+}
+
 // Ein Luma-Block bw x bh an (dx,dy) im Zielbild.
 fn mc_luma(dst: u64, dstride: u64, dx: u64, dy: u64,
            mvx: i64, mvy: i64, bw: u64, bh: u64) {
@@ -1154,6 +1463,13 @@ fn mc_luma(dst: u64, dstride: u64, dx: u64, dy: u64,
     let fy: u64 = (mvy & 3) as u64
     let ix: i64 = (dx as i64) + (mvx >> 2)
     let iy: i64 = (dy as i64) + (mvy >> 2)
+    // DER SCHNELLE WEG, ausser wenn er abgeschaltet ist. `mc_langsam`
+    // ist die Gegenprobe: derselbe Aufruf muss oktettweise dasselbe
+    // liefern (tools/codec/kreisprobe-mc).
+    if !mc_langsam && bw <= 16 && bh <= 16 {
+        mc_luma_schnell(dst, dstride, dx, dy, ix, iy, fx, fy, bw, bh)
+        return
+    }
     var r: u64 = 0
     while r < bh {
         var c: u64 = 0
@@ -1173,20 +1489,51 @@ fn mc_chroma(dst: u64, dstride: u64, dx: u64, dy: u64,
     let yf: i64 = mvy & 7
     let ix: i64 = (dx as i64) + (mvx >> 3)
     let iy: i64 = (dy as i64) + (mvy >> 3)
-    var r: u64 = 0
-    while r < bh {
-        var c: u64 = 0
-        while c < bw {
-            let x: i64 = ix + (c as i64)
-            let y: i64 = iy + (r as i64)
-            let v: i64 = ((8 - xf) * (8 - yf) * rpix(x, y)
-                        + xf * (8 - yf) * rpix(x + 1, y)
-                        + (8 - xf) * yf * rpix(x, y + 1)
-                        + xf * yf * rpix(x + 1, y + 1) + 32) >> 6
-            st8(dst, (dy + r) * dstride + dx + c, v as u64)
-            c = c + 1
+    // DIE VIER GEWICHTE HAENGEN AM VEKTOR, NICHT AM BILDPUNKT -- sie
+    // gehoeren vor die Schleife. Vorher wurden je Punkt vier
+    // Multiplikationen aus (8-xf) usw. neu gebildet.
+    let w00: i64 = (8 - xf) * (8 - yf)
+    let w10: i64 = xf * (8 - yf)
+    let w01: i64 = (8 - xf) * yf
+    let w11: i64 = xf * yf
+    let rw: i64 = mc_rw as i64
+    let rh: i64 = mc_rh as i64
+    // Der Regelfall: der Block samt rechtem/unterem Nachbarpunkt liegt
+    // ganz im Bild. Dann faellt die Klemmung weg, und die vier Punkte
+    // stehen in zwei benachbarten Zeilen.
+    if !mc_langsam && ix >= 0 && iy >= 0
+        && ix + (bw as i64) + 1 <= rw && iy + (bh as i64) + 1 <= rh {
+        var r: u64 = 0
+        while r < bh {
+            let z0: u64 = ((iy + (r as i64)) as u64) * mc_rw + (ix as u64)
+            let z1: u64 = z0 + mc_rw
+            var c: u64 = 0
+            while c < bw {
+                let v: i64 = (w00 * (ld8(mc_ref, z0 + c) as i64)
+                            + w10 * (ld8(mc_ref, z0 + c + 1) as i64)
+                            + w01 * (ld8(mc_ref, z1 + c) as i64)
+                            + w11 * (ld8(mc_ref, z1 + c + 1) as i64) + 32) >> 6
+                st8(dst, (dy + r) * dstride + dx + c, v as u64)
+                c = c + 1
+            }
+            r = r + 1
         }
-        r = r + 1
+        return
+    }
+    var r2: u64 = 0
+    while r2 < bh {
+        var c2: u64 = 0
+        while c2 < bw {
+            let x: i64 = ix + (c2 as i64)
+            let y: i64 = iy + (r2 as i64)
+            let v: i64 = (w00 * rpix(x, y)
+                        + w10 * rpix(x + 1, y)
+                        + w01 * rpix(x, y + 1)
+                        + w11 * rpix(x + 1, y + 1) + 32) >> 6
+            st8(dst, (dy + r2) * dstride + dx + c2, v as u64)
+            c2 = c2 + 1
+        }
+        r2 = r2 + 1
     }
 }
 
@@ -1475,37 +1822,111 @@ fn sub_xy(sn: u64, sw: u64, sh: u64, q: u64) {
 
 // ===================================== die Bewegungskompensation eines MB
 fn mc_mb(mbx: u64, mby: u64) {
+    let pt0: u64 = rdtsc()
+    mc_mb_inner(mbx, mby)
+    prof_add(PF_MC, pt0)
+}
+
+// ========== GLEICHE VEKTOREN WERDEN ZU EINEM RECHTECK ZUSAMMENGEFASST
+//
+// Der Auftrag vermutet hier die Ursache Nr. 2 ("rechnet je 4x4-Block
+// einzeln, auch wo der Makroblock einen einzigen Vektor hat"). Das ist
+// richtig beobachtet, und die Messung sagt, wieviel es bringt -- aber
+// der groessere Teil des Gewinns steckt in `mc_luma_schnell` (kein
+// Klemmen je Punkt, Zwischenwerte nur einmal). Beide zusammen sind
+// gemessen; die Zahlen stehen in docs/RUNDE-H264T.md.
+//
+// WAS HIER PASSIERT: die 16 Bloecke werden zeilenweise durchgegangen
+// und benachbarte Bloecke mit GLEICHER Referenz und GLEICHEM Vektor zu
+// einem breiten Rechteck verschmolzen; danach wird geprueft, ob die
+// darunterliegende Zeile dasselbe Rechteck traegt, und dann auch noch
+// in der Hoehe verschmolzen. Ein P_L0_16x16 (ein Vektor) wird so zu
+// EINEM Aufruf ueber 16x16 statt sechzehn ueber 4x4.
+//
+// WARUM DAS BITGENAU DASSELBE IST: der Sechs-Anzapf-Filter ist ein
+// reines Fenster um den Zielpunkt. Sein Ergebnis haengt NUR vom
+// Vektor, vom Referenzbild und von der Lage des Punktes ab -- nicht
+// davon, wie gross der Block ist, in dem er gerechnet wird. Zwei
+// benachbarte 4x4-Bloecke mit demselben Vektor liefern deshalb
+// dieselben Punkte wie ein 8x4-Block mit diesem Vektor. (Bei B-Slices
+// mit gewichteter Vorhersage waere das nicht so -- die gibt es hier
+// nicht, siehe die Umfangsentscheidung in docs/RUNDE-CODEC.md.)
+//
+// GEPRUEFT WIRD ES TROTZDEM: `mc_langsam` faehrt den alten Weg Block
+// fuer Block, und die Kreisprobe vergleicht beide oktettweise.
+fn mc_mb_inner(mbx: u64, mby: u64) {
     let m: u64 = mb_at(mbx, mby)
     let dy: u64 = h264_plane_y(cur_slot)
     let du: u64 = h264_plane_u(cur_slot)
     let dv: u64 = h264_plane_v(cur_slot)
+    if ref_n == 0 { return }
+    // Welche Bloecke sind schon erledigt.
+    var fertig: [bool; 16] = [false; 16]
     var by: u64 = 0
     while by < 4 {
         var bx: u64 = 0
         while bx < 4 {
-            let i: u64 = m * 16 + by * 4 + bx
-            var ri: i64 = b_ref[(i) as usize]
-            if ri < 0 { ri = 0 }
-            if (ri as u64) >= ref_n {
-                if ref_n == 0 { return }
-                ri = 0
+            if !fertig[((by * 4 + bx)) as usize] {
+                let i: u64 = m * 16 + by * 4 + bx
+                var ri: i64 = b_ref[(i) as usize]
+                if ri < 0 { ri = 0 }
+                if (ri as u64) >= ref_n { ri = 0 }
+                let vx: i64 = b_mvx[(i) as usize]
+                let vy: i64 = b_mvy[(i) as usize]
+                // So weit nach rechts, wie Referenz und Vektor gleich bleiben.
+                var bw: u64 = 1
+                while bx + bw < 4 {
+                    let j: u64 = m * 16 + by * 4 + bx + bw
+                    var rj: i64 = b_ref[(j) as usize]
+                    if rj < 0 { rj = 0 }
+                    if (rj as u64) >= ref_n { rj = 0 }
+                    if rj != ri || b_mvx[(j) as usize] != vx
+                        || b_mvy[(j) as usize] != vy { break }
+                    bw = bw + 1
+                }
+                // ...und so weit nach unten, wie die GANZE Zeile passt.
+                var bh: u64 = 1
+                while by + bh < 4 {
+                    var zeile_gleich: bool = true
+                    var k: u64 = 0
+                    while k < bw {
+                        let j: u64 = m * 16 + (by + bh) * 4 + bx + k
+                        var rj: i64 = b_ref[(j) as usize]
+                        if rj < 0 { rj = 0 }
+                        if (rj as u64) >= ref_n { rj = 0 }
+                        if rj != ri || b_mvx[(j) as usize] != vx
+                            || b_mvy[(j) as usize] != vy { zeile_gleich = false }
+                        k = k + 1
+                    }
+                    if !zeile_gleich { break }
+                    bh = bh + 1
+                }
+                var r: u64 = 0
+                while r < bh {
+                    var c: u64 = 0
+                    while c < bw {
+                        fertig[(((by + r) * 4 + bx + c)) as usize] = true
+                        c = c + 1
+                    }
+                    r = r + 1
+                }
+                let rs: u64 = ref_slot[(ri) as usize]
+                // Luma
+                mc_ref = h264_plane_y(rs)
+                mc_rw = s_w
+                mc_rh = s_h
+                mc_luma(dy, s_w, mbx * 16 + bx * 4, mby * 16 + by * 4,
+                        vx, vy, bw * 4, bh * 4)
+                // Chroma: derselbe Vektor, halbe Aufloesung, Achtelpel
+                mc_ref = h264_plane_u(rs)
+                mc_rw = s_w >> 1
+                mc_rh = s_h >> 1
+                mc_chroma(du, s_w >> 1, mbx * 8 + bx * 2, mby * 8 + by * 2,
+                          vx, vy, bw * 2, bh * 2)
+                mc_ref = h264_plane_v(rs)
+                mc_chroma(dv, s_w >> 1, mbx * 8 + bx * 2, mby * 8 + by * 2,
+                          vx, vy, bw * 2, bh * 2)
             }
-            let rs: u64 = ref_slot[(ri) as usize]
-            // Luma
-            mc_ref = h264_plane_y(rs)
-            mc_rw = s_w
-            mc_rh = s_h
-            mc_luma(dy, s_w, mbx * 16 + bx * 4, mby * 16 + by * 4,
-                    b_mvx[(i) as usize], b_mvy[(i) as usize], 4, 4)
-            // Chroma: derselbe Vektor, halbe Aufloesung, Achtelpel
-            mc_ref = h264_plane_u(rs)
-            mc_rw = s_w >> 1
-            mc_rh = s_h >> 1
-            mc_chroma(du, s_w >> 1, mbx * 8 + bx * 2, mby * 8 + by * 2,
-                      b_mvx[(i) as usize], b_mvy[(i) as usize], 2, 2)
-            mc_ref = h264_plane_v(rs)
-            mc_chroma(dv, s_w >> 1, mbx * 8 + bx * 2, mby * 8 + by * 2,
-                      b_mvx[(i) as usize], b_mvy[(i) as usize], 2, 2)
             bx = bx + 1
         }
         by = by + 1
@@ -1615,6 +2036,12 @@ fn load_nb4(plane: u64, stride: u64, px: u64, py: u64,
 }
 
 fn recon_mb(mbx: u64, mby: u64, i16: bool, cbp: u64, qp: i64) {
+    let pt0: u64 = rdtsc()
+    recon_mb_inner(mbx, mby, i16, cbp, qp)
+    prof_add(PF_RECON, pt0)
+}
+
+fn recon_mb_inner(mbx: u64, mby: u64, i16: bool, cbp: u64, qp: i64) {
     let m: u64 = mb_at(mbx, mby)
     let py: u64 = h264_plane_y(cur_slot)
     // VERFUEGBAR heisst: im Bild UND schon dekodiert UND im selben
@@ -1724,17 +2151,31 @@ fn recon_mb(mbx: u64, mby: u64, i16: bool, cbp: u64, qp: i64) {
         }
     } else {
         // Inter: die Vorhersage steht schon (mc_mb), der Rest kommt dazu.
+        //
+        // ZWEI ABKUERZUNGEN, die nichts am Ergebnis aendern:
+        //
+        //   * `cbp` sagt je 8x8-Viertel, ob dort ueberhaupt Koeffizienten
+        //     stehen. Ist das Bit nicht gesetzt, sind alle vier 4x4-
+        //     Bloecke des Viertels leer -- dann braucht keiner von ihnen
+        //     angesehen zu werden.
+        //   * Die Leerprobe lief vorher ueber alle sechzehn Werte, auch
+        //     wenn der erste schon von null verschieden war. Sie hoert
+        //     jetzt beim ersten Treffer auf.
         var by3: u64 = 0
         while by3 < 4 {
             var bx3: u64 = 0
             while bx3 < 4 {
+                // Das 8x8-Viertel, in dem dieser Block liegt.
+                let q: u64 = (by3 >> 1) * 2 + (bx3 >> 1)
                 var leer: bool = true
-                var t2: u64 = 0
-                while t2 < 16 {
-                    if mcoef[((((by3 * 4 + bx3) * 16) + t2)) as usize] != 0 {
-                        leer = false
+                if (cbp & (1 << q)) != 0 {
+                    var t2: u64 = 0
+                    while t2 < 16 && leer {
+                        if mcoef[((((by3 * 4 + bx3) * 16) + t2)) as usize] != 0 {
+                            leer = false
+                        }
+                        t2 = t2 + 1
                     }
-                    t2 = t2 + 1
                 }
                 if !leer {
                     scale_into((&mcoef[(((by3 * 4 + bx3) * 16)) as usize]) as u64, qp)
@@ -2233,6 +2674,43 @@ fn filter_line(plane: u64, base: u64, st: u64, bs: u64,
 }
 
 fn deblock() {
+    let pt0: u64 = rdtsc()
+    deblock_inner()
+    prof_add(PF_DEBLOCK, pt0)
+}
+
+// Sind ALLE inneren Kanten dieses Makroblocks bs=0? Das ist genau dann
+// der Fall, wenn er nicht intra ist, keine Koeffizienten traegt und
+// alle sechzehn 4x4-Bloecke dieselbe Referenz und denselben Vektor
+// haben -- dann liefert `bs_of` fuer jedes innere Paar 0 (kein Intra,
+// kein nz, gleiche Referenz, Vektordifferenz 0 < 4).
+//
+// DAS IST KEINE NAEHERUNG, sondern dieselbe Bedingung wie in `bs_of`,
+// nur einmal je Makroblock gepruefT statt vierundzwanzigmal. Die
+// AEUSSEREN Kanten (e==0) bleiben davon unberuehrt -- dort haengt bs
+// am Nachbarn.
+fn mb_innen_glatt(m: u64) -> bool {
+    if mb_intra[(m) as usize] == (1 as u8) { return false }
+    if mb_cbp[(m) as usize] != 0 { return false }
+    var i: u64 = 0
+    while i < 24 {
+        if b_nz[((m * 24 + i)) as usize] > 0 { return false }
+        i = i + 1
+    }
+    let r0: i64 = b_ref[((m * 16)) as usize]
+    let x0: i64 = b_mvx[((m * 16)) as usize]
+    let y0: i64 = b_mvy[((m * 16)) as usize]
+    var k: u64 = 1
+    while k < 16 {
+        if b_ref[((m * 16 + k)) as usize] != r0 { return false }
+        if b_mvx[((m * 16 + k)) as usize] != x0 { return false }
+        if b_mvy[((m * 16 + k)) as usize] != y0 { return false }
+        k = k + 1
+    }
+    return true
+}
+
+fn deblock_inner() {
     if sl_nodeblock == 1 { return }
     let py: u64 = h264_plane_y(cur_slot)
     let pu: u64 = h264_plane_u(cur_slot)
@@ -2244,6 +2722,7 @@ fn deblock() {
         while mbx < s_mbw {
             let mQ: u64 = mb_at(mbx, mby)
             // ---- senkrechte Kanten
+            let glatt: bool = mb_innen_glatt(mQ)
             var e: u64 = 0
             while e < 4 {
                 var mP: u64 = mQ
@@ -2251,37 +2730,49 @@ fn deblock() {
                 if e == 0 {
                     if mbx == 0 { weiter = false }
                     else { mP = mb_at(mbx - 1, mby) }
+                } else {
+                    if glatt { weiter = false }
                 }
                 if weiter {
-                    var y: u64 = 0
-                    while y < 16 {
-                        let by: u64 = y >> 2
-                        let iQ: u64 = by * 4 + e
-                        var iP: u64 = by * 4 + 3
-                        if e > 0 { iP = by * 4 + e - 1 }
-                        let s: u64 = bs_of(mP, iP, mQ, iQ, e == 0)
-                        if s > 0 {
-                            let qav: i64 = (mb_qp[(mP) as usize] + mb_qp[(mQ) as usize] + 1) >> 1
-                            let ia: u64 = (clip3(0, 51, qav + sl_alpha) + 52) as u64
-                            let ib: u64 = (clip3(0, 51, qav + sl_beta) + 52) as u64
-                            let alpha: i64 = h264tab.ALPHA[(ia) as usize] as i64
-                            let beta: i64 = h264tab.BETA[(ib) as usize] as i64
-                            if alpha > 0 && beta > 0 {
-                                var tc0: i64 = 0
-                                if s < 4 { tc0 = h264tab.TC0[((ia * 4 + s)) as usize] as i64 }
-                                filter_line(py, (mby * 16 + y) * s_w + mbx * 16 + e * 4,
-                                            1, s, alpha, beta, tc0, false)
-                            }
-                        }
-                        y = y + 1
-                    }
-                    if (e & 1) == 0 {
-                        var y2: u64 = 0
-                        while y2 < 8 {
-                            let by: u64 = y2 >> 1
+                    // JE 4x4-BLOCK RECHNEN, NICHT JE ZEILE. `bs_of`,
+                    // die Klemmung und die drei Tafelzugriffe haengen
+                    // am BLOCK; vier Zeilen teilen sie sich. Vorher
+                    // liefen sie sechzehnmal je Kante statt viermal.
+                    // qav, alpha und beta haengen an DEN BEIDEN
+                    // MAKROBLOECKEN, nicht am Block -- bei den inneren
+                    // Kanten ist mP == mQ, also ist es dreimal dasselbe.
+                    // Einmal je Kante reicht; nur tc0 haengt noch an bs.
+                    let qav: i64 = (mb_qp[(mP) as usize] + mb_qp[(mQ) as usize] + 1) >> 1
+                    let ia: u64 = (clip3(0, 51, qav + sl_alpha) + 52) as u64
+                    let ib: u64 = (clip3(0, 51, qav + sl_beta) + 52) as u64
+                    let alpha: i64 = h264tab.ALPHA[(ia) as usize] as i64
+                    let beta: i64 = h264tab.BETA[(ib) as usize] as i64
+                    if alpha > 0 && beta > 0 {
+                        var by: u64 = 0
+                        while by < 4 {
                             let iQ: u64 = by * 4 + e
                             var iP: u64 = by * 4 + 3
                             if e > 0 { iP = by * 4 + e - 1 }
+                            let s: u64 = bs_of(mP, iP, mQ, iQ, e == 0)
+                            if s > 0 {
+                                var tc0: i64 = 0
+                                if s < 4 { tc0 = h264tab.TC0[((ia * 4 + s)) as usize] as i64 }
+                                var yy: u64 = 0
+                                while yy < 4 {
+                                    filter_line(py, (mby * 16 + by * 4 + yy) * s_w + mbx * 16 + e * 4,
+                                                1, s, alpha, beta, tc0, false)
+                                    yy = yy + 1
+                                }
+                            }
+                            by = by + 1
+                        }
+                    }
+                    if (e & 1) == 0 {
+                        var by2: u64 = 0
+                        while by2 < 4 {
+                            let iQ: u64 = by2 * 4 + e
+                            var iP: u64 = by2 * 4 + 3
+                            if e > 0 { iP = by2 * 4 + e - 1 }
                             let s: u64 = bs_of(mP, iP, mQ, iQ, e == 0)
                             if s > 0 {
                                 let qav: i64 = (qpc_of(mb_qp[(mP) as usize] + p_cqpoff)
@@ -2293,12 +2784,16 @@ fn deblock() {
                                 if alpha > 0 && beta > 0 {
                                     var tc0: i64 = 0
                                     if s < 4 { tc0 = h264tab.TC0[((ia * 4 + s)) as usize] as i64 }
-                                    let base: u64 = (mby * 8 + y2) * cw + mbx * 8 + e * 2
-                                    filter_line(pu, base, 1, s, alpha, beta, tc0, true)
-                                    filter_line(pv, base, 1, s, alpha, beta, tc0, true)
+                                    var yy2: u64 = 0
+                                    while yy2 < 2 {
+                                        let base: u64 = (mby * 8 + by2 * 2 + yy2) * cw + mbx * 8 + e * 2
+                                        filter_line(pu, base, 1, s, alpha, beta, tc0, true)
+                                        filter_line(pv, base, 1, s, alpha, beta, tc0, true)
+                                        yy2 = yy2 + 1
+                                    }
                                 }
                             }
-                            y2 = y2 + 1
+                            by2 = by2 + 1
                         }
                     }
                 }
@@ -2312,37 +2807,41 @@ fn deblock() {
                 if e2 == 0 {
                     if mby == 0 { weiter2 = false }
                     else { mP2 = mb_at(mbx, mby - 1) }
+                } else {
+                    if glatt { weiter2 = false }
                 }
                 if weiter2 {
-                    var x: u64 = 0
-                    while x < 16 {
-                        let bx: u64 = x >> 2
-                        let iQ: u64 = e2 * 4 + bx
-                        var iP: u64 = 12 + bx
-                        if e2 > 0 { iP = (e2 - 1) * 4 + bx }
-                        let s: u64 = bs_of(mP2, iP, mQ, iQ, e2 == 0)
-                        if s > 0 {
-                            let qav: i64 = (mb_qp[(mP2) as usize] + mb_qp[(mQ) as usize] + 1) >> 1
-                            let ia: u64 = (clip3(0, 51, qav + sl_alpha) + 52) as u64
-                            let ib: u64 = (clip3(0, 51, qav + sl_beta) + 52) as u64
-                            let alpha: i64 = h264tab.ALPHA[(ia) as usize] as i64
-                            let beta: i64 = h264tab.BETA[(ib) as usize] as i64
-                            if alpha > 0 && beta > 0 {
-                                var tc0: i64 = 0
-                                if s < 4 { tc0 = h264tab.TC0[((ia * 4 + s)) as usize] as i64 }
-                                filter_line(py, (mby * 16 + e2 * 4) * s_w + mbx * 16 + x,
-                                            s_w, s, alpha, beta, tc0, false)
-                            }
-                        }
-                        x = x + 1
-                    }
-                    if (e2 & 1) == 0 {
-                        var x2: u64 = 0
-                        while x2 < 8 {
-                            let bx: u64 = x2 >> 1
+                    let qav: i64 = (mb_qp[(mP2) as usize] + mb_qp[(mQ) as usize] + 1) >> 1
+                    let ia: u64 = (clip3(0, 51, qav + sl_alpha) + 52) as u64
+                    let ib: u64 = (clip3(0, 51, qav + sl_beta) + 52) as u64
+                    let alpha: i64 = h264tab.ALPHA[(ia) as usize] as i64
+                    let beta: i64 = h264tab.BETA[(ib) as usize] as i64
+                    if alpha > 0 && beta > 0 {
+                        var bx: u64 = 0
+                        while bx < 4 {
                             let iQ: u64 = e2 * 4 + bx
                             var iP: u64 = 12 + bx
                             if e2 > 0 { iP = (e2 - 1) * 4 + bx }
+                            let s: u64 = bs_of(mP2, iP, mQ, iQ, e2 == 0)
+                            if s > 0 {
+                                var tc0: i64 = 0
+                                if s < 4 { tc0 = h264tab.TC0[((ia * 4 + s)) as usize] as i64 }
+                                var xx: u64 = 0
+                                while xx < 4 {
+                                    filter_line(py, (mby * 16 + e2 * 4) * s_w + mbx * 16 + bx * 4 + xx,
+                                                s_w, s, alpha, beta, tc0, false)
+                                    xx = xx + 1
+                                }
+                            }
+                            bx = bx + 1
+                        }
+                    }
+                    if (e2 & 1) == 0 {
+                        var bx2: u64 = 0
+                        while bx2 < 4 {
+                            let iQ: u64 = e2 * 4 + bx2
+                            var iP: u64 = 12 + bx2
+                            if e2 > 0 { iP = (e2 - 1) * 4 + bx2 }
                             let s: u64 = bs_of(mP2, iP, mQ, iQ, e2 == 0)
                             if s > 0 {
                                 let qav: i64 = (qpc_of(mb_qp[(mP2) as usize] + p_cqpoff)
@@ -2354,12 +2853,16 @@ fn deblock() {
                                 if alpha > 0 && beta > 0 {
                                     var tc0: i64 = 0
                                     if s < 4 { tc0 = h264tab.TC0[((ia * 4 + s)) as usize] as i64 }
-                                    let base: u64 = (mby * 8 + e2 * 2) * cw + mbx * 8 + x2
-                                    filter_line(pu, base, cw, s, alpha, beta, tc0, true)
-                                    filter_line(pv, base, cw, s, alpha, beta, tc0, true)
+                                    var xx2: u64 = 0
+                                    while xx2 < 2 {
+                                        let base: u64 = (mby * 8 + e2 * 2) * cw + mbx * 8 + bx2 * 2 + xx2
+                                        filter_line(pu, base, cw, s, alpha, beta, tc0, true)
+                                        filter_line(pv, base, cw, s, alpha, beta, tc0, true)
+                                        xx2 = xx2 + 1
+                                    }
                                 }
                             }
-                            x2 = x2 + 1
+                            bx2 = bx2 + 1
                         }
                     }
                 }
@@ -2506,6 +3009,13 @@ fn decode_slice_data() -> bool {
 // Rueckgabe: 1 = ein Bild ist FERTIG geworden, 0 = Slice verarbeitet,
 // Bild laeuft weiter, 2 = Fehler.
 fn slice_verarbeiten(nal_type: u64, nal_ref_idc: u64) -> u64 {
+    let pt0: u64 = rdtsc()
+    let rv: u64 = slice_verarbeiten_inner(nal_type, nal_ref_idc)
+    prof_add(PF_REST, pt0)
+    return rv
+}
+
+fn slice_verarbeiten_inner(nal_type: u64, nal_ref_idc: u64) -> u64 {
     if !s_da || !p_da { h_err = E_FORM; return 2 }
     if !parse_slice_header(nal_type, nal_ref_idc) { return 2 }
     if first_mb >= s_mbw * s_mbh { h_err = E_UNGERADE; return 2 }
@@ -2568,9 +3078,17 @@ fn h264_reset() {
     s_mbh = 0
 }
 
+// NUR DAS BILD LOESCHEN, NICHT DEN GANZEN VORRAT.
+//
+// Hier stand `while i < MAXMB`, und solange MAXMB 396 war (CIF), war
+// das dasselbe. Mit MAXMB = 3600 (720p) waere es das nicht mehr: ein
+// QCIF-Bild hat 99 Makrobloecke, und ein Loeschlauf ueber 3600 waere
+// das SECHSUNDDREISSIGFACHE an Arbeit -- je Bild, bei jeder Aufloesung.
+// Die Grenze heisst deshalb `s_mbw * s_mbh` und nicht MAXMB.
 fn mbs_clear() {
+    let nmb: u64 = s_mbw * s_mbh
     var i: u64 = 0
-    while i < MAXMB {
+    while i < nmb {
         mb_done[(i) as usize] = 0 as u8
         mb_intra[(i) as usize] = 0 as u8
         mb_type[(i) as usize] = 0
@@ -2582,7 +3100,7 @@ fn mbs_clear() {
         i = i + 1
     }
     var k: u64 = 0
-    while k < MAXMB * 16 {
+    while k < nmb * 16 {
         b_i4[(k) as usize] = 2
         b_mvx[(k) as usize] = 0
         b_mvy[(k) as usize] = 0
@@ -2590,7 +3108,7 @@ fn mbs_clear() {
         k = k + 1
     }
     var z: u64 = 0
-    while z < MAXMB * 24 { b_nz[(z) as usize] = 0; z = z + 1 }
+    while z < nmb * 24 { b_nz[(z) as usize] = 0; z = z + 1 }
 }
 
 // Einen freien Speicher fuer das naechste Bild waehlen: den, der
