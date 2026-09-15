@@ -63,7 +63,9 @@ export {
     IMAGE_BASE, IMAGE_END, ARGS_BASE, MAX_ARGS, STACK_FLOOR, grow_stack,
     PRIV_SLOTS, BIG_TOP, BIG_FLOOR, pd_slot, pt_for,
     // ---- RUNDE SCHLAF (K-018, zweite Haelfte) ----
-    frame_count, frame_at
+    frame_count, frame_at,
+    // ---- RUNDE WACH (K-018, Abschluss: der Wiederanlauf) ----
+    frame_virt_at, space_build_empty, map_restored
 }
 
 const PAGE_PRESENT: u64 = 1
@@ -661,6 +663,152 @@ fn frame_at(state: u64, i: u64, want: u64) -> u64 {
         }
     }
     return 0
+}
+
+// ==================================================================
+// RUNDE WACH (K-018, Abschluss): WAS DER WIEDERANLAUF ZUSAETZLICH
+// BRAUCHT -- DIE VIRTUELLE ADRESSE.
+//
+// `frame_at` (Vorrunde) gibt die PHYSISCHE Adresse des n-ten
+// Datenrahmens. Zum Sichern reicht das: der Rahmen wird an genau
+// dieselbe physische Adresse zurueckgelegt, und die Kennung in ihm
+// beweist, dass es derselbe ist.
+//
+// Zum WIEDERANLAUFEN reicht es NICHT. Ein Prozess, der weiterlaufen
+// soll, braucht seine Seitentabellen zurueck, und eine Seitentabelle
+// bildet VIRTUELL auf PHYSISCH ab. Die physische Adresse allein sagt
+// nicht, WO im Adressraum der Rahmen hing -- und ein Rahmen, der an
+// der falschen virtuellen Adresse wieder eingehaengt wird, ist
+// derselbe Speicher an der falschen Stelle: der Prozess liest seinen
+// Stapel, wo seine Daten stehen sollten.
+//
+// Deshalb diese Funktion. Sie geht DIESELBEN Tabellen in DERSELBEN
+// Reihenfolge ab wie `frame_count`/`frame_at` -- das ist keine
+// Bequemlichkeit, sondern die Bedingung dafuer, dass Eintrag n hier
+// und Eintrag n dort denselben Rahmen meinen.
+fn pt_data_virt_nth(pt: u64, want: u64, vor: u64, basis: u64) -> u64 {
+    var n: u64 = vor
+    var k: u64 = 0
+    while k < 512 {
+        let e: u64 = read_entry(pt, k)
+        if (e & PAGE_PRESENT) != 0 && (e & PAGE_SHARED) == 0 {
+            if n == want {
+                return basis + k * mem.FRAME_SIZE
+            }
+            n = n + 1
+        }
+        k = k + 1
+    }
+    return 0
+}
+
+// Die VIRTUELLE Adresse des n-ten Datenrahmens. 0 = es gibt ihn nicht.
+// Die Zaehlung ist Wort fuer Wort dieselbe wie in `frame_at`.
+fn frame_virt_at(state: u64, i: u64, want: u64) -> u64 {
+    let pml4: u64 = sched.tget(state, i, sched.T_CR3)
+    if pml4 == 0 || pml4 == kstate.get(state, kstate.KPML4) {
+        return 0
+    }
+    var vor: u64 = 0
+    let pt0: u64 = sched.tget(state, i, sched.T_PT)
+    if pt0 != 0 {
+        let c: u64 = pt_data_count(pt0)
+        if want < vor + c {
+            return pt_data_virt_nth(pt0, want, vor, USER_DATA)
+        }
+        vor = vor + c
+    }
+    let pd: u64 = sched.tget(state, i, sched.T_PD)
+    if pd != 0 {
+        var k: u64 = 1
+        while k < PRIV_SLOTS {
+            let e: u64 = read_entry(pd, k)
+            if (e & PAGE_PRESENT) != 0 && (e & PAGE_HUGE) == 0 {
+                let t: u64 = e & ADDR_MASK
+                let c: u64 = pt_data_count(t)
+                if want < vor + c {
+                    return pt_data_virt_nth(t, want, vor,
+                        USER_DATA + k * USER_SPAN)
+                }
+                vor = vor + c
+            }
+            k = k + 1
+        }
+    }
+    return 0
+}
+
+// ==================================================================
+// EIN ADRESSRAUM OHNE DATENSEITEN.
+//
+// `space_build` legt Tabellen UND neun frische Datenseiten an (die
+// private Seite und acht Stapelseiten). Genau das darf der
+// Wiederanlauf NICHT: seine Datenseiten liegen schon im Speicher --
+// sie kommen aus dem Abbild und stehen an ihren alten physischen
+// Adressen. Wer hier `space_build` nimmt, bekommt neun frische,
+// leere Rahmen ueber die eingespielten gelegt und hat den Zustand
+// verloren, den er gerade zurueckgeholt hat.
+//
+// Diese Funktion baut deshalb NUR das Gerippe: PML4, PDPT, PD, PT
+// und den geteilten Kerneintrag. Die Blaetter haengt `map_restored`
+// ein, und zwar die aus dem Abbild.
+fn space_build_empty(state: u64, i: u64) -> u64 {
+    let pml4: u64 = mem.frame_alloc(state)
+    let pdpt: u64 = mem.frame_alloc(state)
+    let pd: u64 = mem.frame_alloc(state)
+    let pt: u64 = mem.frame_alloc(state)
+    if pml4 == 0 || pdpt == 0 || pd == 0 || pt == 0 {
+        return 0
+    }
+    zero_frame(pml4)
+    zero_frame(pdpt)
+    zero_frame(pd)
+    zero_frame(pt)
+    // Die Kernhaelfte, Wort fuer Wort wie in `space_build`: der
+    // Prozess bekommt GENAU den einen Eintrag des Kernel-PDPT, also
+    // das erste Gibioctet, und teilt ihn mit allen anderen.
+    let kpml4: u64 = kstate.get(state, kstate.KPML4)
+    let kpdpt: u64 = read_entry(kpml4, 0) & ADDR_MASK
+    write_entry(pdpt, 0, read_entry(kpdpt, 0) | PAGE_USER)
+    acpi.only_first_give()
+    write_entry(pml4, 0, pdpt | PAGE_PRESENT | PAGE_WRITE | PAGE_USER)
+    write_entry(pdpt, 1, pd | PAGE_PRESENT | PAGE_WRITE | PAGE_USER)
+    write_entry(pd, 0, pt | PAGE_PRESENT | PAGE_WRITE | PAGE_USER)
+    sched.tset(state, i, sched.T_PDPT, pdpt)
+    sched.tset(state, i, sched.T_PD, pd)
+    sched.tset(state, i, sched.T_PT, pt)
+    return pml4
+}
+
+// EINEN EINGESPIELTEN RAHMEN AN SEINE ALTE VIRTUELLE ADRESSE.
+//
+// Der Unterschied zu `map_frame` ist EIN Bit und er ist die halbe
+// Zusage dieser Runde: `map_frame` setzt `PAGE_SHARED` -- "dieser
+// Rahmen gehoert dem Adressraum nicht, er ist nur eingeblendet".
+// Fuer eine Fensterflaeche ist das richtig. Fuer die private Seite
+// eines wiederangelaufenen Prozesses ist es FALSCH, und zwar
+// doppelt: der Rahmen wuerde beim Ende des Prozesses nicht
+// freigegeben (Leck), und `frame_count` zaehlte ihn beim naechsten
+// Schlafen NICHT mit -- der zweite Ruhezustand verloere genau den
+// Speicher, den der erste gerettet hat.
+//
+// Also ohne `PAGE_SHARED`: der Rahmen gehoert dem Prozess, so wie er
+// ihm vor dem Schlafen gehoert hat.
+fn map_restored(state: u64, i: u64, addr: u64, frame: u64) -> bool {
+    let sl: u64 = pt_slot(addr)
+    if sl >= 512 {
+        return false
+    }
+    let pt: u64 = pt_for(state, i, addr, true)
+    if pt == 0 {
+        return false
+    }
+    if (read_entry(pt, sl) & PAGE_PRESENT) != 0 {
+        return false
+    }
+    write_entry(pt, sl,
+        (frame & ADDR_MASK) | PAGE_PRESENT | PAGE_WRITE | PAGE_USER | nx(state))
+    return true
 }
 
 // Corpse to memory: first the address space, then the kernel stack.
