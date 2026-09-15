@@ -30,6 +30,10 @@
 //   xtsdec   <key64hex> <tweak16hex> <cipherhex> n Oktette
 //   xtssec   <key64hex> <sektor> <plainhex>      n Oktette
 //   xtssecd  <key64hex> <sektor> <cipherhex>     n Oktette
+//   noaesni                                      Tabellenweg erzwingen
+//   aesni                                        schnellen Weg erlauben
+//   xtsbench <key64hex> <nbytes> <runden>        ns je Lauf (Tempo)
+//   aesbench <keyhex> <runden>                   ns je Block (Tempo)
 //
 // `-` steht fuer die leere Zeichenkette. `FAIL` heisst: die Eingabe
 // wurde abgelehnt -- und ein Orakel, das nie FAIL sagt, misst nichts.
@@ -38,6 +42,7 @@ import std.io
 import crypto.blake2b
 import crypto.argon2
 import crypto.xts
+import crypto.aes
 
 const CAP: usize = 8192
 
@@ -110,6 +115,28 @@ fn word_is(line: u64, len: usize, at: *mut usize, w: u64) -> bool {
     }
     *at = j
     return true
+}
+
+
+// ---------------------------------------------------- RUNDE AESNI: die Zeit
+//
+// `clock_gettime(CLOCK_MONOTONIC)` ueber den nackten Systemaufruf --
+// dieselbe Stelle, die `std.hash.hash_seed_from_time` benutzt. Gemessen
+// wird IM Programm und nicht von aussen: die Hexwandlung, das
+// Zeilenlesen und der Prozessstart gehoeren nicht zur Chiffre, und wer
+// sie mitmisst, misst den Laeufer statt AES.
+fn now_ns() -> u64 {
+    var ts: [u64; 2] = [0; 2]
+    syscall(228, 1, (&ts[0]) as u64)
+    return ts[0] *% 1000000000 +% ts[1]
+}
+
+// Eine Dezimalzahl als Antwortzeile.
+fn emit_num(v: u64) {
+    var b: rt.Buf = rt.buf_new()
+    rt.buf_push_dec_u64(&b, v)
+    io.print_line_bytes(rt.buf_ptr(&b), rt.buf_len(&b))
+    rt.buf_free(&b)
 }
 
 fn emit(p: u64, n: usize) {
@@ -291,6 +318,90 @@ fn run_line(line: u64, len: usize) {
             return
         }
         emit(po, dl as usize)
+        return
+    }
+
+
+    // RUNDE AESNI: DAS TEMPO. `xtsbench` verschluesselt `nbytes` Oktette
+    // `runden` mal und gibt die Nanosekunden JE LAUF zurueck.
+    var w_xb: [u8; 9] = "xtsbench\0"
+    if word_is(line, len, &at, (&w_xb[0]) as u64) {
+        let kl: i64 = field_hex(line, len, &at, p1)
+        let nb: i64 = field_num(line, len, &at)
+        let rd: i64 = field_num(line, len, &at)
+        if kl != 64 || nb < 16 || nb > 8192 || rd < 1 {
+            fail()
+            return
+        }
+        var i: usize = 0
+        while i < nb as usize {
+            rt.st8(p0, i, (i & 255) as u8)
+            i = i + 1
+        }
+        let t0: u64 = now_ns()
+        var r: usize = 0
+        while r < rd as usize {
+            if !xts.sector_encrypt(p1, r as u64, p0, po, nb as usize) {
+                fail()
+                return
+            }
+            r = r + 1
+        }
+        let t1: u64 = now_ns()
+        emit_num((t1 -% t0) / (rd as u64))
+        return
+    }
+
+    // Dasselbe fuer die Chiffre allein, ohne XTS darum: `runden` Bloecke
+    // zu 16 Oktetten, damit sichtbar wird, was AES kostet und was die
+    // Tweak-Rechnung kostet.
+    var w_ab: [u8; 9] = "aesbench\0"
+    if word_is(line, len, &at, (&w_ab[0]) as u64) {
+        let kl: i64 = field_hex(line, len, &at, p1)
+        let rd: i64 = field_num(line, len, &at)
+        if (kl != 16 && kl != 24 && kl != 32) || rd < 1 {
+            fail()
+            return
+        }
+        var k: aes.Key = aes.key_new()
+        if !aes.key_set(&k, p1, kl as usize) {
+            fail()
+            return
+        }
+        var i: usize = 0
+        while i < 16 {
+            rt.st8(p0, i, (i & 255) as u8)
+            i = i + 1
+        }
+        let t0: u64 = now_ns()
+        var r: usize = 0
+        while r < rd as usize {
+            aes.encrypt_block(&k, p0, po)
+            r = r + 1
+        }
+        let t1: u64 = now_ns()
+        emit_num((t1 -% t0) / (rd as u64))
+        return
+    }
+
+
+    // RUNDE AESNI: den schnellen Weg von Hand ausschalten. So misst
+    // `tools/aesni/run.sh` BEIDE Wege auf DERSELBEN Maschine und kann
+    // sie Zeile fuer Zeile vergleichen -- ohne diesen Schalter waere
+    // die Gleichheit nur auf altem Blech pruefbar.
+    var w_na: [u8; 8] = "noaesni\0"
+    if word_is(line, len, &at, (&w_na[0]) as u64) {
+        xts.use_aesni(false)
+        var okk: [u8; 3] = "ok\0"
+        io.print_line_bytes((&okk[0]) as u64, 2)
+        return
+    }
+
+    var w_ja: [u8; 6] = "aesni\0"
+    if word_is(line, len, &at, (&w_ja[0]) as u64) {
+        xts.use_aesni(true)
+        var okj: [u8; 3] = "ok\0"
+        io.print_line_bytes((&okj[0]) as u64, 2)
         return
     }
 
