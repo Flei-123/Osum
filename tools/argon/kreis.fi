@@ -1,0 +1,124 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/argon/kreis.fi -- die Kreisprobe der Runde ARGON (K-021),
+// zweiter Teil: SHA-256 von Hand gegen SHA-256 auf den Befehlen.
+//
+// Dieselben Eingaben durch BEIDE Wege, Oktett fuer Oktett verglichen.
+// Es bindet DIESELBE `lib/crypto/sha256.fi`, die der Kern bindet --
+// nicht eine Nachbildung davon.
+//
+// GEMESSEN WIRD UEBER VIELE LAENGEN und nicht ueber viele Schluessel:
+// SHA-256 hat keinen Schluessel, und was schiefgehen kann, ist die
+// BLOCKGRENZE -- der letzte, unvollstaendige Block mit seinem
+// Auffuellen und der Laengenangabe. Laengen 0..600 treffen jede Lage
+// der Grenze mehrfach, 1000..4096 dazu die langen Nachrichten.
+//
+// Ausgabe, maschinenlesbar:
+//   shani=<0|1>  faelle=<n>  ungleich=<n>
+//   <FIPS-180-4-Hash von "abc" ueber den schnellen Weg>
+
+import std.rt
+import std.io
+import crypto.sha256
+
+static mut buf: [u8; 4096] = [0; 4096]
+
+fn hexout(p: u64, n: usize) {
+    var h: [u8; 130] = [0 as u8; 130]
+    var d: [u8; 17] = "0123456789abcdef\0"
+    var i: usize = 0
+    while i < n {
+        let b: u64 = (*((p + i as u64) as *mut u8)) as u64
+        h[i*2] = d[(b >> 4) as usize]
+        h[i*2+1] = d[(b & 15) as usize]
+        i = i + 1
+    }
+    io.print_line_bytes((&h[0]) as u64, n * 2)
+}
+
+fn zahl(z: *mut [u8; 64], pos: usize, v: u64) -> usize {
+    if v == 0 {
+        (*z)[pos] = 48
+        return 1
+    }
+    var stellen: usize = 0
+    var w: u64 = v
+    while w > 0 { stellen = stellen + 1; w = w / 10 }
+    var k: usize = 0
+    w = v
+    while k < stellen {
+        (*z)[pos + stellen - 1 - k] = (48 + (w % 10)) as u8
+        w = w / 10
+        k = k + 1
+    }
+    return stellen
+}
+
+fn main() -> i32 {
+    // Pseudozufall fuellen
+    var x: u64 = 12345
+    var i: usize = 0
+    while i < 4096 {
+        x = (x *% 6364136223846793005 +% 1442695040888963407)
+        buf[i] = ((x >> 33) & 255) as u8
+        i = i + 1
+    }
+    var a: [u8; 32] = [0 as u8; 32]
+    var b: [u8; 32] = [0 as u8; 32]
+    var ungleich: u64 = 0
+    var faelle: u64 = 0
+    var n: usize = 0
+    while n <= 600 {
+        sha256.use_shani(false)
+        sha256.hash((&buf[0]) as u64, n, (&a[0]) as u64)
+        sha256.use_shani(true)
+        sha256.hash((&buf[0]) as u64, n, (&b[0]) as u64)
+        var k: usize = 0
+        while k < 32 {
+            if a[k] != b[k] { ungleich = ungleich + 1 }
+            k = k + 1
+        }
+        faelle = faelle + 1
+        n = n + 1
+    }
+    // grosse Laengen
+    var m: usize = 1000
+    while m <= 4096 {
+        sha256.use_shani(false)
+        sha256.hash((&buf[0]) as u64, m, (&a[0]) as u64)
+        sha256.use_shani(true)
+        sha256.hash((&buf[0]) as u64, m, (&b[0]) as u64)
+        var k2: usize = 0
+        while k2 < 32 {
+            if a[k2] != b[k2] { ungleich = ungleich + 1 }
+            k2 = k2 + 1
+        }
+        faelle = faelle + 1
+        m = m + 1
+    }
+    // Eine Zeile, die ein Laeufer lesen kann.
+    var zl: [u8; 64] = [0 as u8; 64]
+    var pos: usize = 0
+    var w1: [u8; 7] = "shani=\0"
+    var i2: usize = 0
+    while i2 < 6 { zl[pos] = w1[i2]; pos = pos + 1; i2 = i2 + 1 }
+    var an: u64 = 0
+    if sha256.shani_on() { an = 1 }
+    zl[pos] = (48 + an) as u8
+    pos = pos + 1
+    var w2: [u8; 10] = "  faelle=\0"
+    i2 = 0
+    while i2 < 9 { zl[pos] = w2[i2]; pos = pos + 1; i2 = i2 + 1 }
+    pos = pos + zahl(&zl, pos, faelle)
+    var w3: [u8; 12] = "  ungleich=\0"
+    i2 = 0
+    while i2 < 11 { zl[pos] = w3[i2]; pos = pos + 1; i2 = i2 + 1 }
+    pos = pos + zahl(&zl, pos, ungleich)
+    io.print_line_bytes((&zl[0]) as u64, pos)
+
+    // FIPS 180-4 "abc" ueber den schnellen Weg
+    sha256.use_shani(true)
+    var abc: [u8; 3] = "abc"
+    sha256.hash((&abc[0]) as u64, 3, (&b[0]) as u64)
+    hexout((&b[0]) as u64, 32)
+    return 0
+}
