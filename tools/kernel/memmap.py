@@ -307,6 +307,13 @@ BEREICHE = [
     # sich keine Seite gesucht, sie hat die bekommen, die in kstate.fi
     # oben bei KDATA_SIZE fuer sie steht.
     ("KRYPTO",     "kstate.fi", "CRYPT_OFF",      "CRYPT_MAX"),
+    # RUNDE CODEC (P-022): die Zaehler des Videodekodierers.  Acht
+    # Seiten, 0x118000..0x120000, dieser Runde VORHER zugeteilt (siehe
+    # den Wellen-Vermerk in kstate.fi).  Die Bildpuffer liegen
+    # ABSICHTLICH nicht hier, sondern als statische Felder in
+    # kernel/user/h264.fi -- ein CIF-Bild ist 152 KiB, vier davon
+    # waeren der halbe kdata-Bereich.
+    ("CODEC",      "kstate.fi", "CODEC_OFF",      "CODEC_MAX"),
     # RUNDE NETMON: die Zaehlung je Prozess und der Weiterleiter mit
     # NAT und DHCP-Server. Beide Bereiche sind beim Zusammenfuehren
     # gewandert (0x5A000/0x5D000 waren von OFS3, DISPLAY und SPEICHER
