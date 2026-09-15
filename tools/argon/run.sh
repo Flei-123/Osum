@@ -243,14 +243,27 @@ kerne_von() { grep -oE 'argon: par=[0-9]+ +spur=[0-9]+ +kerne=[0-9]+' "$1" \
     | grep -oE 'kerne=[0-9]+' | cut -d= -f2 | tail -1; }
 par_von() { grep -oE 'argon: par=[0-9]+' "$1" | cut -d= -f2 | tail -1; }
 
-k4=$(kerne_von "$TMPD/alt2.txt")
 p4=$(par_von "$TMPD/alt2.txt")
 [[ ${p4:-0} == 1 ]] \
     && ok "der parallele Weg wird wirklich gegangen (par=1)" \
     || bad "par=$p4 -- der parallele Weg greift nicht"
-[[ ${k4:-0} -ge 2 ]] \
-    && ok "die Spuren rechnen auf mehreren Kernen (kerne=$k4)" \
-    || bad "kerne=$k4 -- alles laeuft auf einem Kern"
+
+# WIE VIELE KERNE WIRKLICH GERECHNET HABEN -- und warum das NICHT an
+# `alt2.txt` gemessen wird.
+#
+# `alt.img` traegt die kleinen Abnahmeparameter (t=1, m=64 KiB). Ein
+# Segment ist dort VIER Bloecke gross, und die sind schneller gerechnet,
+# als der Ablaufplaner eine Aufgabe auf einen anderen Kern legt: der
+# Startkern hat alle vier Spuren fertig, bevor ein zweiter sie
+# anfassen kann. GEMESSEN, vier Laeufe hintereinander, alle `kerne=1`
+# bei `takte=5,8..6,0 Mio`.
+#
+# Das ist KEIN Fehler und wird hier deshalb auch nicht als einer
+# gemeldet -- es ist die richtige Antwort auf eine Rechnung, die zu
+# klein ist, um sie zu verteilen. Gemessen wird die Verteilung deshalb
+# an den VORGABEparametern (t=2, m=32 MiB), und das ist genau der Lauf,
+# den Abschnitt 7 ohnehin fuer das Tempo braucht.
+info "an den kleinen Abnahmeparametern (t=1, m=64 KiB) ist kerne=$(kerne_von "$TMPD/alt2.txt") -- ein Segment ist dort 4 Bloecke gross"
 
 # Die Gegenprobe: mit `noargonpar` MUSS par=0 herauskommen.
 ps=$(par_von "$TMPD/par2.txt")
@@ -337,6 +350,11 @@ if [[ -n $ts && -n $tp && $tp -gt 0 ]]; then
     [[ $fak -ge 150 ]] \
         && ok "der parallele Weg ist mindestens Faktor 1,5 schneller (gemessen: $((fak/100)),$(printf '%02d' $((fak%100))))" \
         || bad "der Gewinn ist zu klein: Faktor $((fak/100)),$(printf '%02d' $((fak%100)))"
+    # DIE VERTEILUNG, an den Vorgabeparametern gemessen -- hier ist die
+    # Rechnung gross genug, dass sich das Verteilen lohnt.
+    [[ ${kp:-0} -ge 2 ]] \
+        && ok "und die Spuren rechnen dabei wirklich auf mehreren Kernen (kerne=$kp)" \
+        || bad "kerne=$kp -- bei den Vorgabeparametern laeuft alles auf einem Kern"
 else
     bad "keine Taktzahlen gemessen (ts=$ts tp=$tp)"
 fi
