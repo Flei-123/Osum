@@ -67,7 +67,9 @@ import arch.x86_64.hv
 import time
 import rand
 import krypto
+import kargon
 import kaesni
+import kshani
 import tty
 import signal
 import arch.x86_64.guard
@@ -545,6 +547,15 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // ueberhaupt hergibt, und stellt danach den Schalter in `xts.fi`.
     kaesni.apply(state)
     kaesni.report(state)
+    // RUNDE ARGON (K-021), zweiter Teil: SHA-NI. Hier und nicht
+    // frueher, aus demselben Grund wie AES-NI eine Zeile darueber --
+    // der Schalter haengt an `fpu.enabled`, und das steht erst seit
+    // `fpu.apply`.
+    kshani.apply(state)
+    kshani.report(state)
+    if kstate.mode_on(state, kstate.M_SHATEST) {
+        kshani.selftest(state)
+    }
     if kstate.mode_on(state, kstate.M_AESTEST) {
         kaesni.selftest(state)
     }
@@ -2435,6 +2446,7 @@ fn krypto_stufe(state: u64, kein_ata: bool) {
     var s_kfail: [u8; 9] = " fehler=\0"
     var s_kslot: [u8; 8] = " platz=\0"
     var s_ksel: [u8; 16] = "krypto: selbst=\0"
+    kargon.init(state)
     krypto.init(state)
     if kein_ata {
         return
@@ -2459,6 +2471,34 @@ fn krypto_stufe(state: u64, kein_ata: bool) {
     let m: u64 = kstate.get(state, kstate.CRY_WORK + 0x110)
     let par: u64 = kstate.get(state, kstate.CRY_WORK + 0x118)
     let dev: u64 = kstate.get(state, kstate.DISK_DEV)
+    // ============================================ RUNDE ARGON (K-021)
+    //
+    // DIE ANDEREN KERNE, JETZT -- SONST GIBT ES SIE HIER NICHT.
+    //
+    // Argon2 darf seine p Spuren nebeneinander rechnen (RFC 9106), und
+    // genau das macht `kargon.argon2id_par`. Nur: an DIESER Stelle des
+    // Hochlaufs laeuft der Startkern allein. `smp.stage` kommt erst
+    // hinter `osum(state)`, also hinter dem Entsperren -- gemessen im
+    // Startprotokoll, wo "krypto: auf=1" in Zeile 185 steht und
+    // "smp: online=4 of 4" erst in Zeile 195.
+    //
+    // `smp.frueh_start` holt genau zwei Schritte vor (die Prozessoren
+    // finden und starten) und sonst nichts; die Messungen von Runde K5
+    // bleiben, wo sie sind. Gerufen wird es NUR HIER, also nur wenn
+    // wirklich eine verschluesselte Platte aufzumachen ist -- ein Lauf
+    // ohne `kryptoauf` verhaelt sich Zeile fuer Zeile wie vorher.
+    //
+    // Ohne diesen Aufruf waere die Parallelitaet dieser Runde eine
+    // Zusage ohne Wirkung, und der Bericht muesste "kerne=1" ausweisen.
+    //
+    // NUR wenn wirklich eine Ableitung ansteht: `kryptoroh` liest bloss
+    // den Kopfsatz und rechnet kein Argon2 -- dort waere das Starten
+    // der Kerne bezahlte Arbeit ohne Gegenwert. Und `noargonpar` ist
+    // die Gegenprobe, die ausdruecklich seriell rechnen will.
+    if (neu || auf || falsch) && !kstate.mode_on(state, kstate.M_NOARGONPAR) {
+        smp.frueh_start(state)
+    }
+
     serial.puts((&s_kry[0]) as u64)
     if roh {
         // NICHT entsperren. Der Kopf wird trotzdem gelesen, damit im
@@ -2496,6 +2536,11 @@ fn krypto_stufe(state: u64, kein_ata: bool) {
     serial.puts((&s_kslot[0]) as u64)
     serial.dec(krypto.slot_of(state))
     serial.nl()
+    // RUNDE ARGON (K-021): wie die Ableitung wirklich gerechnet hat --
+    // ueber wie viele Spuren, auf wie vielen Kernen. Steht hier und
+    // nicht frueher, weil es vor dem ersten Argon2-Lauf nichts zu
+    // berichten gibt.
+    kargon.report(state)
     if ok && kstate.mode_on(state, kstate.M_KRYPTOTEST) {
         serial.puts((&s_ksel[0]) as u64)
         serial.dec(kutil.yes(krypto.selftest(state)))
@@ -4649,6 +4694,33 @@ fn mode_of(state: u64, cmd: u64) {
     }
     if find_word(cmd, (&aben[0]) as u64, 8) != 0 {
         kstate.mode_add(state, kstate.M_AESBENCH)
+    }
+    // ============================================= RUNDE ARGON (K-021)
+    //
+    // `noargonpar` ist die GEGENPROBE und aus demselben Grund der
+    // wichtigste: er zwingt Argon2 zurueck auf die serielle Reihenfolge
+    // der Spuren, damit sich auf DERSELBEN Maschine messen laesst, was
+    // die Parallelitaet bringt -- und damit sich zeigen laesst, dass
+    // beide Wege Oktett fuer Oktett dasselbe rechnen.
+    var noap: [u8; 11] = "noargonpar\0"
+    var abe2: [u8; 11] = "argonbench\0"
+    var nosh: [u8; 8] = "noshani\0"
+    var shte: [u8; 8] = "shatest\0"
+    var shbe: [u8; 9] = "shabench\0"
+    if find_word(cmd, (&noap[0]) as u64, 10) != 0 {
+        kstate.mode_add(state, kstate.M_NOARGONPAR)
+    }
+    if find_word(cmd, (&abe2[0]) as u64, 10) != 0 {
+        kstate.mode_add(state, kstate.M_ARGONBENCH)
+    }
+    if find_word(cmd, (&nosh[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_NOSHANI)
+    }
+    if find_word(cmd, (&shte[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_SHATEST)
+    }
+    if find_word(cmd, (&shbe[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_SHABENCH)
     }
 
     var kauf: [u8; 10] = "kryptoauf\0"

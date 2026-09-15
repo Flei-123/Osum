@@ -74,6 +74,8 @@ import time
 
 export {
     stage, ap_main, parse, mode_of, present,
+    // RUNDE ARGON (K-021): die Kerne vor der Entsperrung.
+    frueh_start,
     wache_brueche,
     M_NOSMP, M_NOLOCK, M_SMPLONG, M_NOLOCKALL,
     M_FSRACE, M_FSBLIND
@@ -109,6 +111,14 @@ const S_MODE: u64 = 336
 const S_CLAIM: u64 = 344 // the next unit of work nobody has taken yet
 const S_FSRACE: u64 = 352 // RUNDE MERGE-6: Runden je Kern
 const S_FSBLIND: u64 = 360 // 1 = ohne die Sperre, die Gegenprobe
+// RUNDE ARGON (K-021): 1 = PH_SCHED ist gefahren, die Kerne stehen in
+// ihrer Leerlaufaufgabe. Aus PH_SCHED kommt kein Kern zurueck, also
+// darf die Phase GENAU EINMAL laufen.
+const S_SCHEDPH: u64 = 368
+// RUNDE ARGON (K-021): 1 = `probe` ist gelaufen und die Tafel der
+// Prozessoren steht. `probe` REGISTRIERT, ein zweiter Lauf zaehlt
+// dieselben Kerne noch einmal.
+const S_PROBED: u64 = 376
 const S_FSSOLL: u64 = 2048 // 8 Kerne * 8 Oktett: der Sollwert je Kern
 const S_FSFEHL: u64 = 2112 // 8 Kerne * 8 Oktett: die Abweichungen
 // RUNDE GLYPHE: dasselbe fuer den Zeichenweg.
@@ -747,6 +757,12 @@ fn run_phase(state: u64, index: u64, ph: u64) {
     atomic.store(sp(state, S_DONE), 0)
     atomic.barrier()
     atomic.store(sp(state, S_PHASE), ph)
+    if ph == PH_SCHED {
+        // RUNDE ARGON (K-021): merken, dass die Kerne jetzt in ihrer
+        // Leerlaufaufgabe stehen -- die Phase darf kein zweites Mal
+        // laufen.
+        sset(state, S_SCHEDPH, 1)
+    }
     if ph == PH_BENCH {
         bench_core(state, index)
     }
@@ -780,6 +796,89 @@ fn run_phase(state: u64, index: u64, ph: u64) {
 
 // What `kmain.fi` calls. Everything above happens here, in order, and
 // every number that comes out of it is printed rather than believed.
+// ============================== RUNDE ARGON (K-021): DIE KERNE FRUEHER
+//
+// DAS PROBLEM, UND ES WURDE GEMESSEN UND NICHT VERMUTET.
+//
+// Die Entsperrung der Platte laeuft in `kmain.osum`, und `osum(state)`
+// steht in `kmain` Zeile 785 -- `smp.stage` erst in Zeile 836. Im
+// Startprotokoll eines Laufs mit `-smp 4` sieht man die Folge
+// unmittelbar:
+//
+//     185  krypto: auf=1 fehler=0 platz=0
+//     194  smp: cpus=4  acpi=1  rev=0  apic=0 1 2 3
+//     195  smp: online=4 of 4  failed=0
+//
+// Argon2 rechnet also zu einem Zeitpunkt, an dem es NUR DEN STARTKERN
+// GIBT. Die Spuren auf mehrere Kerne zu legen ist dort nicht langsam --
+// es ist unmoeglich, und die erste Fassung dieser Runde hat
+// folgerichtig `par=0 kerne=0` gemeldet, bei jedem `-smp`.
+//
+// WAS DIESE FUNKTION TUT UND WAS SIE AUSDRUECKLICH NICHT TUT.
+//
+// Sie holt aus `stage` genau die zwei Schritte vor, die gebraucht
+// werden -- die Prozessoren finden (`probe`) und sie starten
+// (`start`) -- und sonst NICHTS. Die Messungen von Runde K5 (bench,
+// stress, frames, sched) bleiben, wo sie sind: sie kosten zweieinhalb
+// Sekunden, sie gehoeren dorthin, und der Kommentar an `stage` sagt aus
+// gutem Grund "deliberately here and not earlier: everything above this
+// line is what rounds 59 to K2 measured, and it measures it on ONE
+// core".
+//
+// Und sie tut es NUR AUF ANFRAGE. `kmain` ruft sie ausschliesslich
+// dann, wenn wirklich eine verschluesselte Platte aufzumachen ist. Ein
+// Lauf ohne `kryptoauf` sieht diese Funktion nie und verhaelt sich
+// Zeile fuer Zeile wie vorher -- das ist der Grund, warum die Abnahmen
+// der Runden 59 bis K2 davon nichts merken.
+//
+// `stage` laeuft danach trotzdem noch und ist darauf vorbereitet:
+// `probe` und `start` sind beide gegen einen zweiten Aufruf gesichert
+// (siehe `schon_gestartet`), und `stage` meldet dann einfach die Zahlen,
+// die schon stehen.
+fn frueh_start(state: u64) -> u64 {
+    if !apic.active(state) {
+        return 1
+    }
+    if on(state, M_NOSMP) {
+        return 1
+    }
+    if sget(state, S_PROBED) != 0 {
+        return cpu.online_count(state)
+    }
+    let n: u64 = probe(state)
+    sset(state, S_PROBED, 1)
+    if n <= 1 {
+        return 1
+    }
+    start(state)
+    // UND JETZT DER ZWEITE SCHRITT, OHNE DEN DER ERSTE NICHTS BRINGT.
+    //
+    // Ein gestarteter Kern steht nach `start` in `phases` und wartet auf
+    // eine Phasennummer. Er nimmt dort KEINE Aufgaben aus der
+    // Laufschlange -- gemessen an der ersten Fassung dieser Runde, die
+    // brav `par=1 spur=4` meldete und trotzdem `kerne=1`: alle vier
+    // Spuren liefen auf dem Startkern, weil die anderen drei in
+    // `phases` standen.
+    //
+    // `PH_SCHED` ist die Phase, aus der ein Kern nicht zurueckkommt: er
+    // nimmt seine Leerlaufaufgabe an, schaltet seinen Zeitgeber ein und
+    // ist ab da ein ganz normaler Kern des Ablaufplaners. Genau das
+    // braucht diese Runde, und `schedule_demo` macht es sonst an
+    // derselben Stelle.
+    run_phase(state, 0, PH_SCHED)
+    // Den Kernen einen Augenblick lassen, ihre Leerlaufaufgabe wirklich
+    // zu erreichen -- dieselbe Begruendung wie in `schedule_demo`.
+    udelay(state, 20000)
+    var s_f: [u8; 19] = "smp: frueh online=\0"
+    var s_of2: [u8; 5] = " of \0"
+    serial.puts((&s_f[0]) as u64)
+    serial.dec(cpu.online_count(state))
+    serial.puts((&s_of2[0]) as u64)
+    serial.dec(n)
+    serial.nl()
+    return cpu.online_count(state)
+}
+
 fn stage(state: u64) {
     var s_none: [u8; 26] = "smp: no local APIC, alone\0"
     var s_cpus: [u8; 11] = "smp: cpus=\0"
@@ -810,7 +909,19 @@ fn stage(state: u64) {
         serial.puts((&s_lockall[0]) as u64)
         serial.nl()
     }
-    let n: u64 = probe(state)
+    // RUNDE ARGON (K-021): NICHT ZWEIMAL SUCHEN. `probe` REGISTRIERT
+    // die gefundenen Prozessoren (`cpu.register`), und ein zweiter Lauf
+    // haengt sie ein zweites Mal an die Tafel -- gemessen an einem Lauf
+    // mit `-smp 2`, der danach "apic=0 1 0 1" meldete und mit vier
+    // Kernen rechnete, von denen es zwei gar nicht gibt. Hat
+    // `frueh_start` schon gesucht, steht die Tafel; dann wird sie nur
+    // noch gelesen.
+    var n: u64 = 0
+    if sget(state, S_PROBED) != 0 {
+        n = cpu.count(state)
+    } else {
+        n = probe(state)
+    }
     serial.puts((&s_cpus[0]) as u64)
     serial.dec(n)
     serial.puts((&s_acpi[0]) as u64)
@@ -830,7 +941,15 @@ fn stage(state: u64) {
         serial.puts((&s_off[0]) as u64)
         serial.nl()
     } else {
-        start(state)
+        // RUNDE ARGON (K-021): NICHT ZWEIMAL STARTEN. Hat
+        // `frueh_start` die Kerne fuer die Entsperrung schon
+        // hochgezogen, laufen sie bereits -- ein zweites INIT+SIPI
+        // wuerde einen laufenden Kern mitten aus seiner Leerlaufaufgabe
+        // reissen. `S_STARTED` zaehlt, wie viele wirklich angelaufen
+        // sind, und ist genau dafuer da.
+        if sget(state, S_STARTED) == 0 {
+            start(state)
+        }
     }
     serial.puts((&s_on[0]) as u64)
     serial.dec(cpu.online_count(state))
@@ -848,6 +967,34 @@ fn stage(state: u64) {
     // over it. So: more than one processor, or the run that deliberately
     // leaves them asleep and is the one-core half of the comparison.
     if cpu.count(state) <= 1 && !on(state, M_NOSMP) {
+        locks(state)
+        return
+    }
+    // ============================================ RUNDE ARGON (K-021)
+    //
+    // DIE MESSUNGEN VON RUNDE K5 BRAUCHEN KERNE, DIE IN `phases`
+    // WARTEN -- UND GENAU DIE GIBT ES NICHT MEHR, WENN DIE ENTSPERRUNG
+    // SIE SCHON GEHOLT HAT.
+    //
+    // `bench`, `stress`, `frames`, `fsrace`, `lograce` und das
+    // Zeichenrennen laufen alle ueber `run_phase`, und `run_phase`
+    // wartet, bis `S_DONE` die Zahl der laufenden Kerne erreicht hat.
+    // Hochgezaehlt wird es von den Kernen in `phases` -- aber aus
+    // `PH_SCHED` kommt kein Kern zurueck, er ist ab da Leerlaufaufgabe
+    // des Ablaufplaners. Hat `frueh_start` diese Phase fuer Argon2
+    // schon gefahren, wartet `run_phase` hier auf ein Merkzeichen, das
+    // niemand mehr setzt: vier Milliarden Umdrehungen, und der Hochlauf
+    // steht still. GEMESSEN -- ein Lauf mit `-smp 2` und `kryptoauf`
+    // blieb nach "smp: online=2 of 2" haengen.
+    //
+    // Die Messungen werden deshalb uebersprungen, wenn die Kerne schon
+    // planen. Das ist kein Verlust: sie sind die Abnahme von Runde K5
+    // und laufen in JEDEM Lauf ohne `kryptoauf` unveraendert weiter --
+    // `tools/smp/run.sh` entsperrt keine Platte.
+    if sget(state, S_SCHEDPH) != 0 {
+        var s_sk2: [u8; 42] = "smp: messungen aus -- kerne planen schon\0\0"
+        serial.puts((&s_sk2[0]) as u64)
+        serial.nl()
         locks(state)
         return
     }
@@ -1399,11 +1546,20 @@ fn schedule_demo(state: u64) {
     var s_c: [u8; 3] = " c\0"
     var s_eq: [u8; 2] = "=\0"
 
-    run_phase(state, 0, PH_SCHED)
-    // Give the started cores a moment to reach their idle task before the
-    // work goes in; a task that is ready before there is a core to take
-    // it simply waits, but the picture is cleaner this way.
-    udelay(state, 20000)
+    // RUNDE ARGON (K-021): nur wenn die Kerne noch nicht in ihrer
+    // Leerlaufaufgabe stehen. Hat `frueh_start` sie fuer die
+    // Entsperrung schon dorthin geschickt, ist `PH_SCHED` laengst
+    // gefahren -- ein zweites Mal wuerde `run_phase` auf ein `S_DONE`
+    // warten, das keiner mehr hochzaehlt, denn aus `PH_SCHED` kommt
+    // kein Kern zurueck.
+    if sget(state, S_SCHEDPH) == 0 {
+        run_phase(state, 0, PH_SCHED)
+        // Give the started cores a moment to reach their idle task
+        // before the work goes in; a task that is ready before there is
+        // a core to take it simply waits, but the picture is cleaner
+        // this way.
+        udelay(state, 20000)
+    }
 
     let hz: u64 = apic.tsc_hz(state)
     let t0: u64 = apic.tsc()
