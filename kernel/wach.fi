@@ -1,0 +1,1250 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/wach.fi -- RUNDE WACH (K-018, Abschluss): DER WIEDERANLAUF.
+//
+// ==================================================================
+// DER SATZ, UM DEN ES GEHT
+// ==================================================================
+//
+// Ein Prozess rechnet. Das System geht auf die Platte, QEMU wird
+// BEENDET, ein neuer Kern startet -- und derselbe Prozess rechnet
+// AUF DEM PROZESSOR WEITER. Nicht "sein Speicher ist wieder da":
+// sein Zaehler steigt nach dem Wiederanlauf weiter, und das Ergebnis
+// stimmt gegen eine unabhaengige Rechnung.
+//
+// Das ist der Unterschied zwischen den beiden roten Punkten der
+// Vorrunde und dieser Runde. Die Vorrunde (`kernel/schlaf.fi`) holt
+// den INHALT der Benutzerrahmen byteweise zurueck und rechnet ihn
+// nach -- vorbildlich gemessen, und ihr Bericht sagt in Abschnitt 8
+// woertlich, was fehlt:
+//
+//   1. "Kein Sprung in den gesicherten Registersatz."
+//   2. "Die Prozesse laufen nach dem Wiederanlauf nicht weiter.
+//      Aufgabentafel, Kernstapel und Seitentabellen werden nicht
+//      wiederhergestellt -- der Prozess wird nicht in die Laufliste
+//      gehaengt."
+//
+// Diese Datei baut genau diese zwei, und sie haengen zusammen: ohne
+// Kernstapel gibt es keinen Ort, an dem ein Sprung landen koennte.
+//
+// ==================================================================
+// DIE HUERDE DER VORRUNDE, UND WARUM SIE FAELLT
+// ==================================================================
+//
+// Die Vorrunde nennt die Bedingung praezise: fuer einen Sprung in
+// den gesicherten Zustand "muesste der KERNSTAPEL AN DERSELBEN
+// VIRTUELLEN ADRESSE wieder liegen". Sie hat es dabei belassen, und
+// das war richtig -- eine Zusage ohne Messung waere schlimmer
+// gewesen.
+//
+// NACHGESEHEN, und hier ist die Antwort. Sie steht in `mem.fi`,
+// Zeile 52, und in `kernel/boot.s`:
+//
+//   DER KERN BILDET DEN PHYSISCHEN SPEICHER IDENTISCH AB.
+//   `boot.s` baut ein Seitenverzeichnis mit 512 Eintraegen zu 2 MiB
+//   -- ein Gibioctet 1:1 -- und `mem.scan` setzt das fuer jedes
+//   weitere Gibioctet fort. Im Kernbereich gilt: VIRTUELL == PHYSISCH.
+//
+// Daraus folgt der ganze Weg dieser Runde, und er braucht keine
+// neue Zusicherung, sondern nur eine, die schon da ist:
+//
+//   Ein Kernstapel liegt bei `T_KSTACK`, und das ist eine PHYSISCHE
+//   Adresse aus `mem.frame_run` -- die wegen der Identitaetsabbildung
+//   zugleich seine virtuelle ist. Wer die Rahmen des Kernstapels an
+//   GENAU DIESELBEN PHYSISCHEN ADRESSEN zurueckholt, bekommt ihn
+//   damit automatisch an DERSELBEN VIRTUELLEN ADRESSE zurueck.
+//
+// Und das Werkzeug dafuer liegt seit der Vorrunde im Baum:
+// `mem.reserve_frame` -- "nimm GENAU DIESEN Rahmen". Die Vorrunde hat
+// es fuer die Datenseiten gebaut; es traegt die Kernstapel mit.
+//
+// ==================================================================
+// WARUM ES KEIN `restore_regs` GIBT, DAS rsp/rip SETZT
+// ==================================================================
+//
+// Der Auftrag laesst beides zu: den Sprung bauen, oder begruenden,
+// warum nicht. Diese Runde baut ihn -- aber NICHT als Gewaltakt, der
+// `rsp` und `rip` mit Assembler ueberschreibt, sondern ueber den Weg,
+// den der Kern fuer genau diesen Zweck schon hat.
+//
+// `kernel/arch/x86_64/switch.s` sagt, wie ein Stapel aussieht, von
+// dem aus eine Aufgabe fortgesetzt wird (ab `rsp` aufwaerts):
+//
+//     +0   rflags
+//     +8   r15  +16 r14  +24 r13  +32 r12  +40 r11  +48 r10
+//     +56  r9   +64 r8   +72 rdi  +80 rsi  +88 rbp  +96 rbx
+//     +104 rdx  +112 rcx +120 rax
+//     +128 die Ruecksprungadresse
+//
+// `context_switch` poppt genau das und macht `ret`. Und `T_RSP` ist
+// das Feld, in dem steht, wo dieser Rahmen liegt.
+//
+// DER SPRUNG IST ALSO SCHON GEBAUT -- er heisst `context_switch`.
+// Was der Wiederanlauf liefern muss, ist nur:
+//
+//   a) der Kernstapel mit genau dem Inhalt, den er beim Einschlafen
+//      hatte, an derselben Adresse,
+//   b) `T_RSP` unveraendert aus dem Abbild,
+//   c) ein Aufgabensatz und ein Adressraum, damit der Planer die
+//      Aufgabe waehlen DARF.
+//
+// Dann waehlt der Planer sie beim naechsten Zug, `switch_to` laedt
+// `cr3`, `context_switch` poppt die Register vom wiederhergestellten
+// Stapel, und `ret` springt an die Adresse, die dort steht -- mitten
+// in `sched.sleep_ticks`, wo der Prozess eingeschlafen ist.
+//
+// EIN EIGENES `restore_regs` WAERE DER SCHLECHTERE WEG, und das ist
+// keine Geschmacksfrage: es muesste dieselbe Registerordnung ein
+// zweites Mal aufschreiben. Zwei Stellen fuer eine Wahrheit
+// veralten -- die Vorrunde sagt denselben Satz ueber den
+// Bildspeicher. Der gesicherte Registersatz aus `schlaf.fi` bleibt,
+// was er ist: eine PRUEFGROESSE (er wird Wort fuer Wort verglichen),
+// nicht der Weg zurueck.
+//
+// ==================================================================
+// DER SPEICHER DIESER DATEI
+//
+// ZUGETEILT UND NICHT VERHANDELBAR: WACH_OFF 0x127000..0x12C000,
+// fuenf Seiten, und die Modusindizes 1050..1059. Diese Datei nimmt
+// KEINE Seite und KEINEN Index ausserhalb.
+//
+// DIE GROSSEN PUFFER LIEGEN NICHT IN KDATA. Ein Kernstapel ist 17
+// Rahmen (68 KiB) -- er geht Rahmen fuer Rahmen durch den EINEN
+// Sektorpuffer der Vorrunde. In kdata liegen nur die Aufgabensaetze
+// und die Seitentafeln, und beides sind Woerter, keine Inhalte.
+//
+// WARUM DER PUFFER UEBERGEBEN WIRD UND NICHT GEHOLT.
+//
+// `schlaf.fi` ruft diese Datei, also darf diese Datei `schlaf.fi`
+// NICHT rufen -- `proc.fi` sagt den Satz woertlich: "der Modulgraph
+// muss ein Baum bleiben". Ein `import schlaf` hier waere ein Ring.
+//
+// Also bekommen `save_tasks` und `restore_tasks` die Adresse des
+// Sektorpuffers als ARGUMENT. Das ist nicht nur die Umgehung eines
+// Uebersetzerfehlers, es ist die ehrlichere Schnittstelle: es steht
+// in der Signatur, dass diese Datei einen FREMDEN Puffer benutzt,
+// statt sich still einen zu greifen.
+// ==================================================================
+
+import kstate
+import serial
+import mem
+import blk
+import bootmod
+import susp
+import sched
+import proc
+import arch.x86_64.fpu
+import arch.arch
+
+
+// ---------------------------------------------------- die Skalare
+// Seite 0 von WACH_OFF. Alles einzelne Woerter.
+
+const W_READY: u64 = 0 // 1 = diese Runde hat gearbeitet
+const W_SAVED: u64 = 8 // wie viele Aufgaben ins Abbild gingen
+const W_BACK: u64 = 16 // wie viele zurueckgeholt wurden
+const W_RESUMED: u64 = 24 // 1 = dieser Start hat Aufgaben eingehaengt
+const W_KFRAMES: u64 = 32 // wie viele Kernstapelrahmen gesichert wurden
+const W_KBACK: u64 = 40 // und wie viele zurueckkamen
+const W_DFRAMES: u64 = 48 // Datenrahmen im Abbild
+const W_DBACK: u64 = 56 // und zurueck
+const W_WHY: u64 = 64 // warum der Wiederanlauf nichts tat
+const W_SUM: u64 = 72 // Pruefsumme ueber den Aufgabenteil
+const W_LBA: u64 = 80 // wo der Aufgabenteil auf der Platte liegt
+const W_BLOCKS: u64 = 88 // wie viele Bloecke er belegt
+const W_TICKS0: u64 = 96 // Zeitgeberstand beim Sichern
+const W_PIDS: u64 = 104 // die pids, die zurueckkamen (bis zu vier)
+const W_PID0: u64 = 112
+const W_PID1: u64 = 120
+const W_PID2: u64 = 128
+const W_PID3: u64 = 136
+const W_SUM0: u64 = 144 // die Summe, die Prozess 0 vor dem Schlaf hatte
+const W_STEP0: u64 = 152
+const W_RUNS: u64 = 160 // wie viele der eingehaengten Aufgaben liefen
+const W_ZYK: u64 = 168 // welcher Zyklus
+const W_FAIL: u64 = 176 // woran der Wiederanlauf scheiterte
+// RUNDE WACH: DIE RAHMEN, DIE DER WIEDERANLAUF SELBST NIMMT.
+//
+// Sie sind der Grund, warum die Rahmenzusage der Vorrunde neu
+// gerechnet werden muss. Die Vorrunde sagte: `frei_nachher +
+// eingespielt == frei_vorher` -- kein verlorener Rahmen. Das stimmt
+// weiterhin, aber diese Runde belegt ZUSAETZLICH welche, und zwar
+// zwei Sorten:
+//
+//   * DIE KERNSTAPEL: je Aufgabe 17 Rahmen, an ihre alten
+//     physischen Adressen zurueckgeholt (W_KBACK).
+//   * DIE SEITENTABELLEN: je Aufgabe vier (PML4, PDPT, PD, PT) und
+//     fuer jede weitere 2-MiB-Kachel eine mehr. Sie werden NEU
+//     angelegt, weil die alten bewusst nicht im Abbild liegen.
+//
+// Beide werden HIER gezaehlt, damit die Abnahme die Zusage exakt
+// nachrechnen kann statt sie zu lockern. Eine Zusage, die man
+// aufweicht, bis sie passt, misst nichts.
+const W_PTFRAMES: u64 = 184 // Tabellen- UND Vektorbereichsrahmen, neu angelegt
+
+// Warum kein Wiederanlauf stattfand.
+const WW_OK: u64 = 0
+const WW_OFF: u64 = 1 // `nowach` -- bewusst abgeschaltet
+const WW_NOIMG: u64 = 2 // kein Aufgabenteil im Abbild
+const WW_MAGIC: u64 = 3 // die Kennung stimmt nicht
+const WW_READ: u64 = 4 // die Platte gab nichts her
+const WW_SLOT: u64 = 5 // kein freier Aufgabenplatz
+const WW_FRAME: u64 = 6 // ein Rahmen liess sich nicht belegen
+const WW_SPACE: u64 = 7 // der Adressraum liess sich nicht bauen
+
+// DIE AUFGABENTAFEL IM ABBILD.
+//
+// Je gesicherter Aufgabe ein Satz fester Groesse. Was drinsteht, ist
+// GENAU das, was der Planer braucht, um sie wieder zu waehlen -- und
+// nichts weiter. Deskriptoren, Signale und Handles gehen NICHT mit;
+// das steht im Bericht als offener Punkt und nicht in einer Fussnote.
+const TS_MAGIC: u64 = 0 // je Satz, damit ein halber Satz auffaellt
+const TS_PID: u64 = 8
+const TS_STATE: u64 = 16
+const TS_PRIO: u64 = 24
+const TS_RSP: u64 = 32 // DER Zeiger auf den switch.s-Rahmen
+const TS_KSTACK: u64 = 40 // physisch == virtuell (Identitaetsabbildung)
+const TS_KTOP: u64 = 48
+const TS_ENTRY: u64 = 56
+const TS_USTACK: u64 = 64
+const TS_KIND: u64 = 72
+const TS_ARG: u64 = 80
+const TS_WORK: u64 = 88
+const TS_WAKE: u64 = 96
+const TS_DATA: u64 = 104 // die private Datenseite, physisch
+const TS_NDATA: u64 = 112 // wie viele Datenseiten dieser Aufgabe folgen
+const TS_DOFF: u64 = 120 // ab welchem Eintrag der Seitentafel
+const TS_UID: u64 = 128
+const TS_GID: u64 = 136
+const TS_PGID: u64 = 144
+const TS_SID: u64 = 152
+const TS_BYTES: u64 = 160 // so gross ist ein Satz im Abbild
+
+// Eine Aufgabenkennung, damit ein Satz aus Zufallsoktetten auffaellt.
+const WACH_MAGIC: u64 = 0x5741434854534B21 // "WACHTSK!"
+// Die Kennung des ganzen Aufgabenteils, im ersten Wort seines
+// ersten Blocks.
+const WACH_HEAD: u64 = 0x5741434848454421 // "WACHHED!"
+// Die Kennung, die `uprog.u_wach` in seine private Seite schreibt.
+// Der Pruefstand erkennt die Seite daran wieder.
+const WACH_USERTAG: u64 = 0x5741434855534552 // "WACHUSER"
+
+// WIE VIELE AUFGABEN HOECHSTENS. Die Zahl ist nicht frei gewaehlt:
+// `kstate.MAX_TASKS` ist 32, und mehr kann der Kern ohnehin nicht
+// halten. Acht ist, was der Pruefstand braucht und was in die
+// zugeteilten Seiten passt -- mehr Aufgaben werden NICHT gesichert,
+// und das meldet `save_tasks` als Zahl statt es zu verschweigen.
+const MAX_SAVE: u64 = 8
+
+// DIE SEITENTAFEL: je Datenseite ein Paar (virtuell, physisch).
+// Sie ist der Grund, warum diese Runde ueberhaupt eine eigene
+// Tafel braucht: `schlaf.fi` schreibt die PHYSISCHEN Adressen der
+// Rahmen mit, und die sagen nicht, wo im Adressraum sie hingehoeren.
+const PG_VIRT: u64 = 0
+const PG_PHYS: u64 = 8
+const PG_BYTES: u64 = 16
+// 448 Seiten -- dieselbe Groessenordnung wie die Rahmentafel der
+// Vorrunde, und aus demselben Grund eine GRENZE und keine Zusage.
+const MAX_PAGES: u64 = 448
+
+// ---- die Lage in kdata (fuenf Seiten ab WACH_OFF)
+// Seite 0: die Skalare (oben).
+// Seite 1..2: die Aufgabensaetze, MAX_SAVE * TS_BYTES = 1280 Oktette.
+// Seite 3..4: die Seitentafel, MAX_PAGES * PG_BYTES = 7168 Oktette.
+const W_TASKS: u64 = 0x1000
+const W_PAGES: u64 = 0x3000
+
+fn g(state: u64, off: u64) -> u64 {
+    return kstate.get(state, kstate.WACH_OFF + off)
+}
+
+fn s(state: u64, off: u64, v: u64) {
+    kstate.set(state, kstate.WACH_OFF + off, v)
+}
+
+fn tsl(state: u64, n: u64) -> u64 {
+    return state + kstate.WACH_OFF + W_TASKS + n * TS_BYTES
+}
+
+fn pgl(state: u64, n: u64) -> u64 {
+    return state + kstate.WACH_OFF + W_PAGES + n * PG_BYTES
+}
+
+fn tsget(state: u64, n: u64, f: u64) -> u64 {
+    return __mmio_read64((tsl(state, n) + f) as *mut u64)
+}
+
+fn tsset(state: u64, n: u64, f: u64, v: u64) {
+    __mmio_write64((tsl(state, n) + f) as *mut u64, v)
+}
+
+fn pgget(state: u64, n: u64, f: u64) -> u64 {
+    return __mmio_read64((pgl(state, n) + f) as *mut u64)
+}
+
+fn pgset(state: u64, n: u64, f: u64, v: u64) {
+    __mmio_write64((pgl(state, n) + f) as *mut u64, v)
+}
+
+fn ready(state: u64) -> u64 {
+    return g(state, W_READY)
+}
+
+fn resumed(state: u64) -> u64 {
+    return g(state, W_RESUMED)
+}
+
+fn count(state: u64) -> u64 {
+    return g(state, W_BACK)
+}
+
+fn tasks_in_image(state: u64) -> u64 {
+    return g(state, W_SAVED)
+}
+
+fn tasks_back(state: u64) -> u64 {
+    return g(state, W_BACK)
+}
+
+// Wie viele Rahmen der Wiederanlauf INSGESAMT belegt hat, zusaetzlich
+// zu den eingespielten Datenseiten: die Kernstapel und die neu
+// gebauten Seitentabellen. Die Abnahme rechnet damit die Zusage
+// "kein verlorener Rahmen" exakt nach.
+fn frames_taken(state: u64) -> u64 {
+    return g(state, W_KBACK) + g(state, W_PTFRAMES)
+}
+
+// ==================================================================
+// WELCHE AUFGABEN UEBERHAUPT GESICHERT WERDEN
+//
+// Nur BENUTZERPROZESSE mit EIGENEM Adressraum. Der Grund ist
+// derselbe, aus dem die Vorrunde nur deren Datenseiten sichert:
+//
+//   * Eine Aufgabe auf dem Kern-PML4 (`K_BOOT`, `K_IDLE`, die
+//     Arbeiter) hat keine eigenen Benutzerseiten. Sie wird beim
+//     Hochlauf ohnehin neu angelegt -- der neue Kern baut seine
+//     Leerlaufaufgabe selbst.
+//   * Ein FADEN (`T_SHARED`) teilt den Adressraum eines anderen.
+//     Ihn getrennt wiederherzustellen hiesse, denselben Adressraum
+//     zweimal aufzubauen. Faeden gehen NICHT mit, und das steht im
+//     Bericht.
+//
+// `T_CR3 != KPML4` ist die Pruefung, die beides zugleich erledigt,
+// und sie ist dieselbe, die `proc.frame_count` benutzt.
+// ==================================================================
+fn saveable(state: u64, i: u64) -> bool {
+    let st: u64 = sched.tget(state, i, sched.T_STATE)
+    if st == sched.S_FREE || st == sched.S_ZOMBIE {
+        return false
+    }
+    if sched.tget(state, i, sched.T_KIND) != sched.K_USER {
+        return false
+    }
+    if sched.tget(state, i, sched.T_SHARED) != 0 {
+        return false
+    }
+    let cr3: u64 = sched.tget(state, i, sched.T_CR3)
+    if cr3 == 0 || cr3 == kstate.get(state, kstate.KPML4) {
+        return false
+    }
+    // Ohne Kernstapel gibt es nichts fortzusetzen.
+    if sched.tget(state, i, sched.T_KSTACK) == 0 {
+        return false
+    }
+    return true
+}
+
+// ==================================================================
+// DAS SICHERN
+//
+// Der Aufgabenteil liegt HINTER dem, was `schlaf.save_image`
+// schreibt, im selben reservierten Bereich am Plattenende. Er
+// besteht aus:
+//
+//   Block 0        der Kopf: Kennung, Zahl der Aufgaben, Zahl der
+//                  Seiten, Pruefsumme
+//   Block 1..      die Aufgabensaetze (MAX_SAVE * TS_BYTES)
+//   ...            die Seitentafel (virtuell + physisch je Seite)
+//   ...            DIE KERNSTAPEL, je Aufgabe 17 Rahmen zu 8 Bloecken
+//
+// Die Datenseiten selbst schreibt `schlaf.fi` -- diese Runde
+// schreibt sie NICHT noch einmal. Zwei Stellen fuer eine Wahrheit
+// veralten; die Seitentafel hier verweist nur darauf, WO sie
+// hingehoeren.
+// ==================================================================
+
+fn kstack_frames() -> u64 {
+    // Ein Rahmen mehr als der Stapel: der unterste ist die Wache
+    // (`sched.free_stack` gibt beide zusammen zurueck), und sie
+    // gehoert zum Stapel, auch wenn nie hineingeschrieben wird.
+    return sched.KSTACK_FRAMES + 1
+}
+
+// Wie viele Bloecke der Aufgabenteil braucht.
+fn part_blocks(tasks: u64, pages: u64) -> u64 {
+    let kopf: u64 = 1
+    let saetze: u64 = (tasks * TS_BYTES + 511) / 512
+    let tafel: u64 = (pages * PG_BYTES + 511) / 512
+    let stapel: u64 = tasks * kstack_frames() * 8
+    return kopf + saetze + tafel + stapel
+}
+
+// Die Aufgabensaetze und die Seitentafel in kdata aufbauen. Zurueck
+// kommt die Zahl der Aufgaben; die Zahl der Seiten steht danach in
+// W_DFRAMES.
+fn collect(state: u64) -> u64 {
+    var n: u64 = 0
+    var seiten: u64 = 0
+    var i: u64 = 0
+    while i < kstate.MAX_TASKS {
+        if saveable(state, i) && n < MAX_SAVE {
+            let c: u64 = proc.frame_count(state, i)
+            // Passt die Seitentafel noch? Wenn nicht, wird diese
+            // Aufgabe NICHT halb gesichert, sondern gar nicht.
+            if seiten + c <= MAX_PAGES {
+                tsset(state, n, TS_MAGIC, WACH_MAGIC)
+                tsset(state, n, TS_PID, sched.tget(state, i, sched.T_PID))
+                tsset(state, n, TS_STATE, sched.tget(state, i, sched.T_STATE))
+                tsset(state, n, TS_PRIO, sched.tget(state, i, sched.T_PRIO))
+                tsset(state, n, TS_RSP, sched.tget(state, i, sched.T_RSP))
+                tsset(state, n, TS_KSTACK, sched.tget(state, i, sched.T_KSTACK))
+                tsset(state, n, TS_KTOP, sched.tget(state, i, sched.T_KTOP))
+                tsset(state, n, TS_ENTRY, sched.tget(state, i, sched.T_ENTRY))
+                tsset(state, n, TS_USTACK, sched.tget(state, i, sched.T_USTACK))
+                tsset(state, n, TS_KIND, sched.tget(state, i, sched.T_KIND))
+                tsset(state, n, TS_ARG, sched.tget(state, i, sched.T_ARG))
+                tsset(state, n, TS_WORK, sched.tget(state, i, sched.T_WORK))
+                tsset(state, n, TS_WAKE, sched.tget(state, i, sched.T_WAKE))
+                tsset(state, n, TS_DATA, sched.tget(state, i, sched.T_DATA))
+                tsset(state, n, TS_NDATA, c)
+                tsset(state, n, TS_DOFF, seiten)
+                tsset(state, n, TS_UID, sched.tget(state, i, sched.T_UID))
+                tsset(state, n, TS_GID, sched.tget(state, i, sched.T_GID))
+                tsset(state, n, TS_PGID, sched.tget(state, i, sched.T_PGID))
+                tsset(state, n, TS_SID, sched.tget(state, i, sched.T_SID))
+                // DIE SEITENTAFEL: virtuell UND physisch. Beide aus
+                // demselben Durchlauf derselben Tabellen, damit
+                // Eintrag k hier und Eintrag k dort denselben Rahmen
+                // meinen.
+                var k: u64 = 0
+                while k < c {
+                    pgset(state, seiten + k, PG_VIRT,
+                        proc.frame_virt_at(state, i, k))
+                    pgset(state, seiten + k, PG_PHYS,
+                        proc.frame_at(state, i, k))
+                    k = k + 1
+                }
+                // WER GESICHERT WIRD, WIRD GENANNT. Eine Runde, die
+                // "fuenf Aufgaben" meldet und nicht sagt, welche,
+                // laesst den naechsten raten.
+                var s_w: [u8; 13] = "wach: sich. \0"
+                var s_pd: [u8; 6] = " pid=\0"
+                var s_st: [u8; 5] = " st=\0"
+                var s_pr: [u8; 7] = " prog=\0"
+                var s_sn: [u8; 9] = " seiten=\0"
+                serial.puts((&s_w[0]) as u64)
+                serial.puts((&s_pd[0]) as u64)
+                serial.dec(sched.tget(state, i, sched.T_PID))
+                serial.puts((&s_st[0]) as u64)
+                serial.dec(sched.tget(state, i, sched.T_STATE))
+                serial.puts((&s_pr[0]) as u64)
+                serial.dec(sched.tget(state, i, sched.T_ARG))
+                serial.puts((&s_sn[0]) as u64)
+                serial.dec(c)
+                serial.nl()
+                seiten = seiten + c
+                n = n + 1
+            }
+        }
+        i = i + 1
+    }
+    s(state, W_DFRAMES, seiten)
+    return n
+}
+
+// Den Aufgabenteil schreiben. `base` ist der erste Block, den
+// `schlaf.fi` NICHT mehr benutzt.
+fn save_tasks(state: u64, dev: u64, base: u64, b: u64) -> bool {
+    s(state, W_READY, 1)
+    s(state, W_SAVED, 0)
+    s(state, W_KFRAMES, 0)
+    let n: u64 = collect(state)
+    let pages: u64 = g(state, W_DFRAMES)
+    if n == 0 {
+        // Nichts zu sichern ist kein Fehler -- aber auch kein
+        // Abbild. Der Kopf wird trotzdem geschrieben, damit der
+        // Wiederanlauf "null Aufgaben" von "kaputt" unterscheiden
+        // kann.
+        s(state, W_SAVED, 0)
+    }
+    var sum: u64 = bootmod.crc32_start()
+    let saetze: u64 = (n * TS_BYTES + 511) / 512
+    let tafel: u64 = (pages * PG_BYTES + 511) / 512
+
+    // ---- die Aufgabensaetze
+    var blkn: u64 = 0
+    while blkn < saetze {
+        var i: u64 = 0
+        while i < 512 {
+            kstate.set8(b + i, 0 as u8)
+            i = i + 1
+        }
+        i = 0
+        while i < 512 {
+            let off: u64 = blkn * 512 + i
+            if off < n * TS_BYTES {
+                kstate.set8(b + i,
+                    kstate.get8(state + kstate.WACH_OFF + W_TASKS + off) as u8)
+            }
+            i = i + 1
+        }
+        sum = bootmod.crc32_feed(sum, b, 512)
+        if !blk.write_on(state, dev, base + 1 + blkn, b) {
+            return false
+        }
+        blkn = blkn + 1
+    }
+
+    // ---- die Seitentafel
+    blkn = 0
+    while blkn < tafel {
+        var i: u64 = 0
+        while i < 512 {
+            kstate.set8(b + i, 0 as u8)
+            i = i + 1
+        }
+        i = 0
+        while i < 512 {
+            let off: u64 = blkn * 512 + i
+            if off < pages * PG_BYTES {
+                kstate.set8(b + i,
+                    kstate.get8(state + kstate.WACH_OFF + W_PAGES + off) as u8)
+            }
+            i = i + 1
+        }
+        sum = bootmod.crc32_feed(sum, b, 512)
+        if !blk.write_on(state, dev, base + 1 + saetze + blkn, b) {
+            return false
+        }
+        blkn = blkn + 1
+    }
+
+    // ---- DIE KERNSTAPEL, je Aufgabe 17 Rahmen zu 8 Bloecken.
+    //
+    // DAS IST DER TEIL, DEN DIE VORRUNDE NICHT HATTE, und er ist der
+    // Grund, warum ein Sprung ueberhaupt moeglich wird: auf diesen
+    // Oktetten steht der `switch.s`-Rahmen mit rflags, den fuenfzehn
+    // Registern und der Ruecksprungadresse, und darunter der ganze
+    // Aufrufkeller, in dem der Prozess eingeschlafen ist.
+    let kf: u64 = kstack_frames()
+    let stapel_lba: u64 = base + 1 + saetze + tafel
+    var kframes: u64 = 0
+    var t: u64 = 0
+    while t < n {
+        // Die Wache liegt EINEN Rahmen unter T_KSTACK -- `free_stack`
+        // gibt beide zusammen zurueck, also gehoeren auch beide ins
+        // Abbild. Sonst faende der Wiederanlauf den Rahmen darunter
+        // frei und gaebe ihn an jemand anderen.
+        let unten: u64 = tsget(state, t, TS_KSTACK) - mem.FRAME_SIZE
+        var f: u64 = 0
+        while f < kf {
+            let pa: u64 = unten + f * mem.FRAME_SIZE
+            var bn: u64 = 0
+            while bn < 8 {
+                var i: u64 = 0
+                while i < 512 {
+                    kstate.set8(b + i, kstate.get8(pa + bn * 512 + i) as u8)
+                    i = i + 1
+                }
+                sum = bootmod.crc32_feed(sum, b, 512)
+                if !blk.write_on(state, dev,
+                    stapel_lba + (t * kf + f) * 8 + bn, b) {
+                    return false
+                }
+                bn = bn + 1
+            }
+            kframes = kframes + 1
+            f = f + 1
+        }
+        t = t + 1
+    }
+    s(state, W_KFRAMES, kframes)
+
+    // ---- DER KOPF, ZULETZT. Dieselbe Regel wie bei der Vorrunde:
+    // solange er nicht steht, gilt der Aufgabenteil nicht.
+    var i: u64 = 0
+    while i < 512 {
+        kstate.set8(b + i, 0 as u8)
+        i = i + 1
+    }
+    __mmio_write64(b as *mut u64, WACH_HEAD)
+    __mmio_write64((b + 8) as *mut u64, n)
+    __mmio_write64((b + 16) as *mut u64, pages)
+    __mmio_write64((b + 24) as *mut u64, bootmod.crc32_end(sum))
+    __mmio_write64((b + 32) as *mut u64, kframes)
+    __mmio_write64((b + 40) as *mut u64, kstate.get(state, kstate.TICKS))
+    // DER STAND DER RECHNUNG VOR DEM SCHLAFEN, MIT INS ABBILD.
+    //
+    // OHNE DIESE ZWEI ZEILEN IST DIE ZUSAGE NICHT DICHT, und das ist
+    // in der ersten Fassung passiert: `W_STEP0` steht in kdata, und
+    // kdata ist beim naechsten Hochlauf leer -- der Pruefer verglich
+    // den Zaehler also gegen NULL und haette jeden beliebigen Wert
+    // als "gestiegen" durchgehen lassen. Die Vergleichszahl MUSS aus
+    // dem Abbild kommen, sonst vergleicht man mit nichts.
+    __mmio_write64((b + 48) as *mut u64, g(state, W_STEP0))
+    __mmio_write64((b + 56) as *mut u64, g(state, W_SUM0))
+    if !blk.write_on(state, dev, base + B_PART, b) {
+        return false
+    }
+    s(state, W_SAVED, n)
+    s(state, W_TICKS0, kstate.get(state, kstate.TICKS))
+    s(state, W_LBA, base)
+    s(state, W_BLOCKS, part_blocks(n, pages))
+    s(state, W_SUM, bootmod.crc32_end(sum))
+    return true
+}
+
+const B_PART: u64 = 0 // der Kopf des Aufgabenteils, relativ zu `base`
+
+// ==================================================================
+// DER WIEDERANLAUF
+//
+// Gerufen aus `schlaf.boot_check`, NACHDEM die Datenrahmen
+// eingespielt und im Rahmenverwalter belegt sind. Die Reihenfolge
+// ist zwingend: erst muessen die Rahmen liegen, dann duerfen die
+// Seitentabellen auf sie zeigen.
+//
+// WAS HIER GESCHIEHT, je Aufgabe:
+//
+//   1. Die Kernstapelrahmen an ihre ALTEN PHYSISCHEN Adressen
+//      zurueckholen und im Verwalter BELEGEN (`mem.reserve_frame`).
+//      Wegen der Identitaetsabbildung liegt der Stapel damit wieder
+//      an derselben VIRTUELLEN Adresse -- das ist die Bedingung, die
+//      die Vorrunde genannt hat.
+//   2. Einen Aufgabenplatz nehmen und den Satz eintragen, `T_RSP`
+//      UNVERAENDERT aus dem Abbild.
+//   3. Einen Adressraum bauen -- Tabellen neu, Blaetter aus dem
+//      Abbild (`proc.map_restored`).
+//   4. `T_STATE` auf `S_READY`. Ab hier darf der Planer sie waehlen.
+// ==================================================================
+
+fn restore_tasks(state: u64, dev: u64, base: u64, b: u64) -> bool {
+    s(state, W_BACK, 0)
+    s(state, W_KBACK, 0)
+    s(state, W_PTFRAMES, 0)
+    s(state, W_RESUMED, 0)
+    s(state, W_WHY, WW_OK)
+    if kstate.mode_on(state, kstate.M_NOWACH) {
+        s(state, W_WHY, WW_OFF)
+        return false
+    }
+    if !blk.read_on(state, dev, base + B_PART, b) {
+        s(state, W_WHY, WW_READ)
+        return false
+    }
+    if __mmio_read64(b as *mut u64) != WACH_HEAD {
+        s(state, W_WHY, WW_MAGIC)
+        return false
+    }
+    // DEN GANZEN KOPF IN EIGENE WERTE, BEVOR IRGENDETWAS ANDERES DEN
+    // PUFFER ANFASST. Das ist die Lehre der Vorrunde aus ihrem
+    // Fehler 7.1 -- dort hat ein Aufruf mitten in der Kopfpruefung
+    // den Sektorpuffer ueberschrieben, und jedes danach gelesene
+    // Feld kam aus fremden Oktetten.
+    let n: u64 = __mmio_read64((b + 8) as *mut u64)
+    let pages: u64 = __mmio_read64((b + 16) as *mut u64)
+    let want: u64 = __mmio_read64((b + 24) as *mut u64)
+    let kfr: u64 = __mmio_read64((b + 32) as *mut u64)
+    let ticks0: u64 = __mmio_read64((b + 40) as *mut u64)
+    // Der Stand VOR dem Schlafen -- die Zahl, gegen die der Pruefer
+    // das Weiterlaufen misst. Sie kommt aus dem ABBILD und nicht aus
+    // kdata; siehe die Begruendung in `save_tasks`.
+    s(state, W_STEP0, __mmio_read64((b + 48) as *mut u64))
+    s(state, W_SUM0, __mmio_read64((b + 56) as *mut u64))
+    s(state, W_TICKS0, ticks0)
+    if n == 0 {
+        s(state, W_WHY, WW_NOIMG)
+        return false
+    }
+    if n > MAX_SAVE || pages > MAX_PAGES {
+        s(state, W_WHY, WW_MAGIC)
+        return false
+    }
+    let saetze: u64 = (n * TS_BYTES + 511) / 512
+    let tafel: u64 = (pages * PG_BYTES + 511) / 512
+    let kf: u64 = kstack_frames()
+    let stapel_lba: u64 = base + 1 + saetze + tafel
+
+    // ---- DIE PRUEFSUMME UEBER DEN GANZEN AUFGABENTEIL, VOR dem
+    // Einspielen. Dieselbe Regel wie bei der Vorrunde: erst wenn sie
+    // stimmt, gilt irgendetwas. Ein halb eingespielter Kernstapel
+    // waere ein Sprung in Zufallsoktetten.
+    var sum: u64 = bootmod.crc32_start()
+    let total: u64 = saetze + tafel + n * kf * 8
+    var i: u64 = 0
+    while i < total {
+        if !blk.read_on(state, dev, base + 1 + i, b) {
+            s(state, W_WHY, WW_READ)
+            return false
+        }
+        sum = bootmod.crc32_feed(sum, b, 512)
+        i = i + 1
+    }
+    if bootmod.crc32_end(sum) != want {
+        s(state, W_WHY, WW_MAGIC)
+        return false
+    }
+
+    // ---- die Aufgabensaetze zurueck in kdata
+    var blkn: u64 = 0
+    while blkn < saetze {
+        if !blk.read_on(state, dev, base + 1 + blkn, b) {
+            s(state, W_WHY, WW_READ)
+            return false
+        }
+        i = 0
+        while i < 512 {
+            let off: u64 = blkn * 512 + i
+            if off < n * TS_BYTES {
+                kstate.set8(state + kstate.WACH_OFF + W_TASKS + off,
+                    kstate.get8(b + i) as u8)
+            }
+            i = i + 1
+        }
+        blkn = blkn + 1
+    }
+    // ---- die Seitentafel zurueck in kdata
+    blkn = 0
+    while blkn < tafel {
+        if !blk.read_on(state, dev, base + 1 + saetze + blkn, b) {
+            s(state, W_WHY, WW_READ)
+            return false
+        }
+        i = 0
+        while i < 512 {
+            let off: u64 = blkn * 512 + i
+            if off < pages * PG_BYTES {
+                kstate.set8(state + kstate.WACH_OFF + W_PAGES + off,
+                    kstate.get8(b + i) as u8)
+            }
+            i = i + 1
+        }
+        blkn = blkn + 1
+    }
+
+    // ---- JE AUFGABE: STAPEL, PLATZ, ADRESSRAUM, LAUFLISTE
+    var zurueck: u64 = 0
+    var kback: u64 = 0
+    var dback: u64 = 0
+    var t: u64 = 0
+    while t < n {
+        if tsget(state, t, TS_MAGIC) != WACH_MAGIC {
+            s(state, W_WHY, WW_MAGIC)
+            return false
+        }
+        // 1. DIE KERNSTAPELRAHMEN AN IHRE ALTEN ADRESSEN.
+        let unten: u64 = tsget(state, t, TS_KSTACK) - mem.FRAME_SIZE
+        var f: u64 = 0
+        var stapel_ok: u64 = 1
+        while f < kf {
+            let pa: u64 = unten + f * mem.FRAME_SIZE
+            // Der Rahmen MUSS frei sein. Ist er es nicht, hat ihn
+            // dieser Hochlauf schon an jemand anderen gegeben -- dann
+            // wird NICHT ueberschrieben, sondern abgebrochen. Ein
+            // Kernstapel ueber fremdem Besitz ist der Fehler, den
+            // niemand mehr zuordnen kann.
+            if !mem.reserve_frame(state, pa) {
+                stapel_ok = 0
+            }
+            f = f + 1
+        }
+        if stapel_ok == 0 {
+            s(state, W_WHY, WW_FRAME)
+            s(state, W_FAIL, tsget(state, t, TS_PID))
+            return false
+        }
+        // die Oktette
+        f = 0
+        while f < kf {
+            let pa: u64 = unten + f * mem.FRAME_SIZE
+            var bn: u64 = 0
+            while bn < 8 {
+                if !blk.read_on(state, dev,
+                    stapel_lba + (t * kf + f) * 8 + bn, b) {
+                    s(state, W_WHY, WW_READ)
+                    return false
+                }
+                i = 0
+                while i < 512 {
+                    kstate.set8(pa + bn * 512 + i, kstate.get8(b + i) as u8)
+                    i = i + 1
+                }
+                bn = bn + 1
+            }
+            kback = kback + 1
+            f = f + 1
+        }
+
+        // 2. EIN AUFGABENPLATZ. Nicht `sched.create` -- das legte
+        // einen NEUEN Stapel an und baute einen Anfangsrahmen. Hier
+        // wird ein Platz von Hand genommen und mit dem gesicherten
+        // Satz gefuellt.
+        var slot: u64 = 0
+        var k: u64 = 1
+        while k < kstate.MAX_TASKS {
+            if slot == 0 && sched.tget(state, k, sched.T_STATE) == sched.S_FREE {
+                slot = k
+            }
+            k = k + 1
+        }
+        if slot == 0 {
+            s(state, W_WHY, WW_SLOT)
+            return false
+        }
+        // Den Satz nullen, damit nichts von einem Vorgaenger
+        // stehenbleibt -- dieselbe Vorsicht wie in `sched.create`.
+        var j: u64 = 0
+        while j < kstate.TASK_BYTES / 8 {
+            __mmio_write64((sched.task_at(state, slot) + j * 8) as *mut u64, 0)
+            j = j + 1
+        }
+        sched.tset(state, slot, sched.T_PID, tsget(state, t, TS_PID))
+        sched.tset(state, slot, sched.T_PRIO, tsget(state, t, TS_PRIO))
+        sched.tset(state, slot, sched.T_BUDGET, tsget(state, t, TS_PRIO))
+        sched.tset(state, slot, sched.T_KIND, tsget(state, t, TS_KIND))
+        sched.tset(state, slot, sched.T_ARG, tsget(state, t, TS_ARG))
+        sched.tset(state, slot, sched.T_WORK, tsget(state, t, TS_WORK))
+        sched.tset(state, slot, sched.T_ENTRY, tsget(state, t, TS_ENTRY))
+        sched.tset(state, slot, sched.T_USTACK, tsget(state, t, TS_USTACK))
+        sched.tset(state, slot, sched.T_KSTACK, tsget(state, t, TS_KSTACK))
+        sched.tset(state, slot, sched.T_KTOP, tsget(state, t, TS_KTOP))
+        // ==================== DAS EINE FELD, UM DAS ES GEHT ========
+        // `T_RSP` UNVERAENDERT. Es zeigt in den gerade eingespielten
+        // Kernstapel, auf den `switch.s`-Rahmen, den
+        // `context_switch` beim naechsten Planerzug poppt. Genau
+        // hier ist der "Sprung in den gesicherten Zustand" -- nicht
+        // in einer Assemblerzeile, sondern in einem Wort.
+        sched.tset(state, slot, sched.T_RSP, tsget(state, t, TS_RSP))
+        sched.tset(state, slot, sched.T_UID, tsget(state, t, TS_UID))
+        sched.tset(state, slot, sched.T_GID, tsget(state, t, TS_GID))
+        sched.tset(state, slot, sched.T_EUID, tsget(state, t, TS_UID))
+        sched.tset(state, slot, sched.T_EGID, tsget(state, t, TS_GID))
+        sched.tset(state, slot, sched.T_PGID, tsget(state, t, TS_PGID))
+        sched.tset(state, slot, sched.T_SID, tsget(state, t, TS_SID))
+        sched.tset(state, slot, sched.T_PARENT, 0)
+
+        // 3. DER ADRESSRAUM. Tabellen NEU -- die alten Tabellenrahmen
+        // sind bewusst nicht im Abbild (die Vorrunde begruendet das:
+        // ein eingespielter alter Tabellenrahmen zeigte auf Adressen,
+        // die es nicht mehr gibt). Die BLAETTER kommen aus dem
+        // Abbild, an ihre alten virtuellen Adressen.
+        // DIE TABELLENRAHMEN ZAEHLEN. `space_build_empty` nimmt
+        // vier, und `map_restored` kann fuer eine weitere Kachel
+        // noch einen nehmen. Gezaehlt wird die DIFFERENZ der freien
+        // Rahmen -- das ist die einzige Zahl, die nicht von einer
+        // Annahme darueber abhaengt, wie viele es sein muessten.
+        let frei_vor_pt: u64 = mem.frames_free(state)
+        let space: u64 = proc.space_build_empty(state, slot)
+        if space == 0 {
+            s(state, W_WHY, WW_SPACE)
+            return false
+        }
+        sched.tset(state, slot, sched.T_CR3, space)
+        sched.tset(state, slot, sched.T_DATA, tsget(state, t, TS_DATA))
+        let doff: u64 = tsget(state, t, TS_DOFF)
+        let nd: u64 = tsget(state, t, TS_NDATA)
+        var d: u64 = 0
+        while d < nd {
+            let va: u64 = pgget(state, doff + d, PG_VIRT)
+            let pa: u64 = pgget(state, doff + d, PG_PHYS)
+            if va != 0 && pa != 0 {
+                if proc.map_restored(state, slot, va, pa) {
+                    dback = dback + 1
+                }
+            }
+            d = d + 1
+        }
+
+        // DER VEKTORBEREICH. Ohne ihn laesst `fpu.switch` die
+        // Aufgabe in Ruhe (`fpu_area` = 0) -- das ist zulaessig, aber
+        // dann faende sie die xmm-Register einer anderen vor. Ein
+        // frischer, sauber gesetzter Bereich ist das Richtige: der
+        // FPU-Zustand des Prozesses liegt in `schlaf.fi` und gehoert
+        // der LAUFENDEN Aufgabe beim Einschlafen, nicht diesem
+        // Prozess. Das steht als offener Punkt im Bericht.
+        let area: u64 = fpu.area_new(state)
+        if area != 0 {
+            sched.fpu_set_area(state, slot, area)
+        }
+        // JETZT ERST MESSEN -- und zwar alles, was diese Aufgabe den
+        // Rahmenverwalter gekostet hat: die Seitentabellen UND den
+        // Vektorbereich.
+        //
+        // GEMESSEN UND BERICHTIGT: die erste Fassung las die Zahl vor
+        // `area_new` und meldete daraufhin eine Luecke von genau
+        // FUENF Rahmen bei fuenf Aufgaben -- ein Rahmen je
+        // Vektorbereich. Die Zusage war nicht falsch, die ZAEHLUNG
+        // war unvollstaendig, und der Unterschied ist genau der, den
+        // eine Abnahme finden soll.
+        let frei_nach_pt: u64 = mem.frames_free(state)
+        if frei_vor_pt > frei_nach_pt {
+            s(state, W_PTFRAMES,
+                g(state, W_PTFRAMES) + (frei_vor_pt - frei_nach_pt))
+        }
+
+        // 4. IN DIE LAUFLISTE.
+        //
+        // WARUM S_READY UND NICHT DER GESICHERTE ZUSTAND: der
+        // Prozess schlief beim Sichern in `sleep_ticks` (S_SLEEP) mit
+        // einer Frist in `T_WAKE`, die gegen den DAMALIGEN
+        // Zeitgeberstand gerechnet war. Der neue Kern faengt bei
+        // TICKS = 0 an (bzw. bei dem, was `schlaf.restore_devs`
+        // gesetzt hat) -- eine alte Frist waere entweder sofort
+        // faellig oder nie. Beides ist falsch geraten.
+        //
+        // Richtig und ehrlich: wer S_SLEEP war, wird WECKBEREIT.
+        // Sein Schlaf ist mit dem Ruhezustand des ganzen Systems
+        // zusammengefallen; er hat lange genug geschlafen. Der
+        // Aufrufkeller unter `T_RSP` steht mitten in `sleep_ticks`,
+        // also kehrt er dort ordentlich zurueck.
+        let st: u64 = tsget(state, t, TS_STATE)
+        if st == sched.S_SLEEP || st == sched.S_READY || st == sched.S_RUN {
+            sched.tset(state, slot, sched.T_STATE, sched.S_READY)
+        } else {
+            // Alles andere (Warten auf ein Kind, poll, angehalten)
+            // wird NICHT geraten. Die Aufgabe kommt als angehalten
+            // zurueck, und das steht im Bericht.
+            sched.tset(state, slot, sched.T_STATE, sched.S_STOP)
+        }
+        if slot + 1 > kstate.get(state, kstate.TASKS) {
+            kstate.set(state, kstate.TASKS, slot + 1)
+        }
+        if zurueck < 4 {
+            s(state, W_PID0 + zurueck * 8, tsget(state, t, TS_PID))
+        }
+        zurueck = zurueck + 1
+        t = t + 1
+    }
+    s(state, W_BACK, zurueck)
+    s(state, W_KBACK, kback)
+    s(state, W_DBACK, dback)
+    s(state, W_RESUMED, 1)
+    // Die naechste pid darf keine vergeben sein. Sonst traegt ein
+    // spaeter angelegter Prozess dieselbe wie ein zurueckgeholter,
+    // und `find_pid` faende den falschen.
+    var maxpid: u64 = kstate.get(state, kstate.NEXT_PID)
+    t = 0
+    while t < n {
+        if tsget(state, t, TS_PID) + 1 > maxpid {
+            maxpid = tsget(state, t, TS_PID) + 1
+        }
+        t = t + 1
+    }
+    kstate.set(state, kstate.NEXT_PID, maxpid)
+    return true
+}
+
+// ==================================================================
+// DIE MESSUNG UND DER BERICHT
+// ==================================================================
+
+fn why_name(w: u64) {
+    var s0: [u8; 3] = "ok\0"
+    var s1: [u8; 13] = "abgeschaltet\0"
+    var s2: [u8; 21] = "kein Aufgabenteil\0\0\0\0"
+    var s3: [u8; 16] = "Kennung falsch\0\0"
+    var s4: [u8; 14] = "Lesefehler\0\0\0\0"
+    var s5: [u8; 20] = "kein Aufgabenplatz\0\0"
+    var s6: [u8; 18] = "Rahmen belegt\0\0\0\0\0"
+    var s7: [u8; 20] = "kein Adressraum\0\0\0\0\0"
+    if w == WW_OK { serial.puts((&s0[0]) as u64) }
+    if w == WW_OFF { serial.puts((&s1[0]) as u64) }
+    if w == WW_NOIMG { serial.puts((&s2[0]) as u64) }
+    if w == WW_MAGIC { serial.puts((&s3[0]) as u64) }
+    if w == WW_READ { serial.puts((&s4[0]) as u64) }
+    if w == WW_SLOT { serial.puts((&s5[0]) as u64) }
+    if w == WW_FRAME { serial.puts((&s6[0]) as u64) }
+    if w == WW_SPACE { serial.puts((&s7[0]) as u64) }
+}
+
+fn bericht(state: u64) {
+    var s_t: [u8; 14] = "wach: zurueck\0"
+    var s_a: [u8; 11] = " aufgaben=\0"
+    var s_k: [u8; 10] = " kstapel=\0"
+    var s_d: [u8; 9] = " seiten=\0"
+    var s_pt: [u8; 9] = " tafeln=\0"
+    var s_w: [u8; 6] = " why=\0"
+    serial.puts((&s_t[0]) as u64)
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(g(state, W_BACK))
+    serial.puts((&s_k[0]) as u64)
+    serial.dec(g(state, W_KBACK))
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(g(state, W_DBACK))
+    serial.puts((&s_pt[0]) as u64)
+    serial.dec(g(state, W_PTFRAMES))
+    serial.puts((&s_w[0]) as u64)
+    why_name(g(state, W_WHY))
+    serial.nl()
+}
+
+// Wie viele der zurueckgeholten Aufgaben WIRKLICH gelaufen sind.
+// Gemessen an `T_RUNS`: das Feld zaehlt `switch_to` hoch, also ist
+// eine Aufgabe mit `T_RUNS > 0` nach dem Wiederanlauf auf dem
+// Prozessor gewesen. Das ist die Zahl, die den Unterschied zur
+// Vorrunde ausmacht.
+fn running(state: u64) -> u64 {
+    var c: u64 = 0
+    var i: u64 = 0
+    while i < kstate.MAX_TASKS {
+        if sched.tget(state, i, sched.T_KIND) == sched.K_USER {
+            if sched.tget(state, i, sched.T_RUNS) > 0 {
+                c = c + 1
+            }
+        }
+        i = i + 1
+    }
+    return c
+}
+
+fn mess(state: u64) {
+    var s_t: [u8; 14] = "wach: messung\0"
+    var s_s: [u8; 10] = " gesich.=\0"
+    var s_b: [u8; 10] = " zurueck=\0"
+    var s_r: [u8; 11] = " gelaufen=\0"
+    var s_m: [u8; 10] = " maxsave=\0"
+    serial.puts((&s_t[0]) as u64)
+    serial.puts((&s_s[0]) as u64)
+    serial.dec(g(state, W_SAVED))
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(g(state, W_BACK))
+    serial.puts((&s_r[0]) as u64)
+    serial.dec(running(state))
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(MAX_SAVE)
+    serial.nl()
+}
+
+// ==================================================================
+// DIE MESSUNG, LAUF 1: PROZESSE ANLEGEN UND SIE RECHNEN LASSEN
+//
+// Der Ruhezustand selbst wird von `schlaf.arm_and_exit` ausgeloest;
+// diese Funktion legt nur die Prozesse an, an denen danach gemessen
+// wird, und schreibt ihren Stand VOR dem Schlafen weg.
+//
+// MEHRERE PROZESSE, UND DAS IST EINE ZUSAGE DES AUFTRAGS: ein
+// EINZELNER Prozess koennte zufaellig funktionieren -- etwa weil
+// sein Kernstapel gerade wieder an dieselbe Stelle faellt. Drei
+// Prozesse mit VERSCHIEDENEN pids muessen alle weiterlaufen, und
+// ihre Kernstapel liegen an drei verschiedenen Adressen.
+// ==================================================================
+fn arm(state: u64, zyk: u64) {
+    var s_t: [u8; 21] = "wach: == arm zyklus \0"
+    var s_p: [u8; 18] = "wach: prozesse n=\0"
+    var s_v: [u8; 15] = "wach: vorher \0\0"
+    var s_r: [u8; 9] = " runden=\0"
+    var s_s: [u8; 8] = " summe=\0"
+    var s_pid: [u8; 7] = " pids=\0"
+
+    s(state, W_ZYK, zyk)
+    serial.puts((&s_t[0]) as u64)
+    serial.dec(zyk)
+    serial.nl()
+
+    // DREI Prozesse. Die Rundenzahl ist gross genug, dass sie beim
+    // Sichern noch NICHT fertig sind -- der Ruhezustand soll sie
+    // mitten in der Arbeit erwischen.
+    let a: u64 = proc.create(state, 65, 4000, 2)
+    let b2: u64 = proc.create(state, 65, 4000, 2)
+    let c: u64 = proc.create(state, 65, 4000, 2)
+    var n: u64 = 0
+    if a != 0 { n = n + 1 }
+    if b2 != 0 { n = n + 1 }
+    if c != 0 { n = n + 1 }
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(n)
+    serial.puts((&s_pid[0]) as u64)
+    if a != 0 { serial.dec(sched.tget(state, a, sched.T_PID)) }
+    var komma: [u8; 2] = ",\0"
+    if b2 != 0 {
+        serial.puts((&komma[0]) as u64)
+        serial.dec(sched.tget(state, b2, sched.T_PID))
+    }
+    if c != 0 {
+        serial.puts((&komma[0]) as u64)
+        serial.dec(sched.tget(state, c, sched.T_PID))
+    }
+    serial.nl()
+
+    // Sie sollen wirklich gelaufen sein, bevor gesichert wird.
+    sched.sleep_ticks(state, 60)
+
+    // DER STAND VOR DEM SCHLAFEN, aus der Seite des ERSTEN Prozesses
+    // -- ueber die Uebersetzung seines Adressraums, nicht ueber eine
+    // Vermutung. Der Pruefstand vergleicht danach gegen diese Zahl.
+    var runden: u64 = 0
+    var summe: u64 = 0
+    if a != 0 {
+        let pa: u64 = proc.translate(state, a, 0x40000000)
+        if pa != 0 {
+            summe = __mmio_read64((pa + 8) as *mut u64)
+            runden = __mmio_read64((pa + 24) as *mut u64)
+        }
+    }
+    s(state, W_SUM0, summe)
+    s(state, W_STEP0, runden)
+    serial.puts((&s_v[0]) as u64)
+    serial.puts((&s_r[0]) as u64)
+    serial.dec(runden)
+    serial.puts((&s_s[0]) as u64)
+    serial.dec(summe)
+    serial.nl()
+}
+
+// ==================================================================
+// DIE MESSUNG, LAUF 2: LAUFEN SIE WIRKLICH WEITER?
+//
+// Das ist die Zusage, um die es in dieser Runde geht, und sie wird
+// in DREI Schritten geprueft, von denen keiner allein genuegt:
+//
+//   1. SIND SIE DA? `wach.restore_tasks` hat Aufgabenplaetze belegt
+//      und die Adressraeume gebaut -- `zurueck=N`.
+//   2. LAUFEN SIE? `T_RUNS` zaehlt, wie oft `switch_to` eine
+//      Aufgabe gewaehlt hat. Steht dort nach dem Wiederanlauf eine
+//      Zahl groesser 0, war die Aufgabe AUF DEM PROZESSOR.
+//   3. RECHNEN SIE WEITER? Der Zaehler in ihrer privaten Seite muss
+//      HOEHER sein als der, der im Abbild steht -- und die Summe
+//      muss zur Schrittzahl passen (`n*(n+1)/2`).
+//
+// Schritt 3 ist der eigentliche Beweis. Schritt 1 allein waere
+// "existiert", Schritt 2 allein koennte ein einziger Zug sein, der
+// sofort in einen Fehler laeuft. Erst ein Zaehler, der STEIGT und
+// dessen Summe stimmt, heisst: dieser Prozess hat nach dem
+// Wiederanlauf gerechnet.
+// ==================================================================
+fn pruef(state: u64) {
+    var s_t: [u8; 17] = "wach: == pruef\0\0\0"
+    var s_w: [u8; 15] = "wach: weiter \0\0"
+    var s_v: [u8; 9] = " vorher=\0"
+    var s_n: [u8; 10] = " nachher=\0"
+    var s_s: [u8; 8] = " summe=\0"
+    var s_so: [u8; 7] = " soll=\0"
+    var s_ok: [u8; 20] = "wach: weiterlauf=\0\0\0"
+    var s_l: [u8; 11] = " gelaufen=\0"
+    var s_p: [u8; 11] = " prozesse=\0"
+    var s_a: [u8; 8] = " alle=\0\0"
+
+    serial.puts((&s_t[0]) as u64)
+    serial.nl()
+    bericht(state)
+    if g(state, W_BACK) == 0 {
+        // Keine Aufgabe zurueckgeholt. `bericht` hat den Grund
+        // gedruckt; hier gibt es nichts weiter zu messen.
+        serial.puts((&s_ok[0]) as u64)
+        serial.dec(0)
+        serial.nl()
+        return
+    }
+
+    // Ihnen Zeit geben, wirklich zu laufen. Ohne das misst diese
+    // Funktion, ob der Planer in derselben Mikrosekunde schon
+    // gewechselt hat -- eine Zahl, die von der Tagesform abhinge.
+    sched.sleep_ticks(state, 80)
+
+    // JE PROZESS: laeuft er, und rechnet er richtig?
+    var gelaufen: u64 = 0
+    var weiter: u64 = 0
+    var prozesse: u64 = 0
+    var erste_vor: u64 = g(state, W_STEP0)
+    var erste_nach: u64 = 0
+    var erste_summe: u64 = 0
+    var i: u64 = 0
+    while i < kstate.MAX_TASKS {
+        if sched.tget(state, i, sched.T_KIND) == sched.K_USER
+            && sched.tget(state, i, sched.T_STATE) != sched.S_FREE
+            && sched.tget(state, i, sched.T_CR3) != 0
+            && sched.tget(state, i, sched.T_CR3)
+                != kstate.get(state, kstate.KPML4) {
+            let pa: u64 = proc.translate(state, i, 0x40000000)
+            if pa != 0 {
+                if __mmio_read64(pa as *mut u64) == WACH_USERTAG {
+                    prozesse = prozesse + 1
+                    if sched.tget(state, i, sched.T_RUNS) > 0 {
+                        gelaufen = gelaufen + 1
+                    }
+                    let su: u64 = __mmio_read64((pa + 8) as *mut u64)
+                    let sc: u64 = __mmio_read64((pa + 16) as *mut u64)
+                    let ru: u64 = __mmio_read64((pa + 24) as *mut u64)
+                    // DIE GEGENRECHNUNG, je Prozess: summe muss
+                    // n*(n+1)/2 sein mit n = schritt - 1.
+                    var soll: u64 = 0
+                    if sc > 0 {
+                        let nn: u64 = sc - 1
+                        soll = nn * (nn + 1) / 2
+                    }
+                    // WEITERGELAUFEN heisst: der Zaehler steht
+                    // HOEHER als der, der ins Abbild ging, UND die
+                    // Summe stimmt zu ihrem Schritt.
+                    if ru > erste_vor && su == soll && su > 0 {
+                        weiter = weiter + 1
+                    }
+                    if erste_nach == 0 {
+                        erste_nach = ru
+                        erste_summe = su
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    var soll0: u64 = 0
+    if erste_nach > 0 {
+        // Der Schritt ist um eins groesser als die Zahl der
+        // Summanden; die Gegenrechnung steht oben je Prozess. Hier
+        // wird der Wert des ERSTEN gedruckt, damit die Abnahme eine
+        // Zahl zum Vergleichen hat.
+        soll0 = erste_summe
+    }
+    serial.puts((&s_w[0]) as u64)
+    serial.puts((&s_v[0]) as u64)
+    serial.dec(erste_vor)
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(erste_nach)
+    serial.puts((&s_s[0]) as u64)
+    serial.dec(erste_summe)
+    serial.puts((&s_so[0]) as u64)
+    serial.dec(soll0)
+    serial.nl()
+
+    // DIE ZUSAGE IN EINER ZEILE. `weiterlauf=N` ist die Zahl der
+    // Prozesse, die nach dem Wiederanlauf nachweislich auf dem
+    // Prozessor weitergerechnet haben. `alle=1` heisst: es sind
+    // ALLE, die zurueckgeholt wurden -- ein einzelner koennte
+    // zufaellig funktionieren.
+    // `alle=1` heisst: JEDER Prozess, der die Kennung dieser Runde
+    // traegt und zurueckgeholt wurde, laeuft auch weiter.
+    //
+    // GEMESSEN UND BERICHTIGT: die erste Fassung verglich gegen
+    // `W_BACK`, die Zahl ALLER zurueckgeholten Aufgaben. Das waren
+    // fuenf statt drei -- der Wiederanlauf holt naemlich auch die
+    // zwei `P_SCHLAF`-Prozesse der Vorrunde zurueck, die im selben
+    // Lauf angelegt werden. Sie laufen ebenfalls weiter, tragen aber
+    // eine andere Kennung und zaehlen hier zu Recht nicht mit.
+    // Gegen `prozesse` verglichen misst die Zahl das, was sie
+    // behauptet: von den Prozessen DIESER Runde laufen alle weiter.
+    var alle: u64 = 0
+    if weiter > 0 && weiter == prozesse {
+        alle = 1
+    }
+    s(state, W_RUNS, weiter)
+    serial.puts((&s_ok[0]) as u64)
+    serial.dec(weiter)
+    serial.puts((&s_l[0]) as u64)
+    serial.dec(gelaufen)
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(prozesse)
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(alle)
+    serial.nl()
+}

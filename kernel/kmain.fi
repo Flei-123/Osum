@@ -119,6 +119,7 @@ import aml
 import acpiev
 import susp
 import schlaf
+import wach
 
 // Indices in the table out of isr.s.
 const V_DF_STACK: u64 = 52
@@ -811,6 +812,34 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // die Vorrunde nicht messen.
     if kstate.mode_on(state, kstate.M_SCHLAFPRUEF) {
         schlaf.pruef(state, schlaf.frei_beim_start(state))
+    }
+    // ============= RUNDE WACH (K-018, Abschluss): DER WIEDERANLAUF
+    //
+    // DIESELBEN ZWEI PHASEN wie bei `schlaf`, und aus demselben
+    // Grund an DIESER Stelle: ab hier laeuft der Planer mit einem
+    // Adressraum, in dem `proc.create` wirklich Prozesse anlegen
+    // kann.
+    //
+    // DIE REIHENFOLGE MIT `schlafpruef` IST WICHTIG: `wach.pruef`
+    // steht VOR `wach.arm`, genau wie unten `schlaf.pruef` vor
+    // `schlaf.arm_and_exit` -- der Pruefer soll messen, was der
+    // HOCHLAUF zurueckgebracht hat, bevor irgendjemand neue
+    // Prozesse anlegt.
+    if kstate.mode_on(state, kstate.M_WACHPRUEF) {
+        wach.pruef(state)
+    }
+    if kstate.mode_on(state, kstate.M_WACHMESS) {
+        wach.mess(state)
+    }
+    if kstate.mode_on(state, kstate.M_WACHARM) {
+        // Die Prozesse anlegen und rechnen lassen -- das Sichern und
+        // das Beenden des Gastes macht `schlaf.arm_and_exit` gleich
+        // darunter, und zwar GENAU EINMAL fuer beide Runden.
+        var wzyk: u64 = 1
+        if kstate.mode_on(state, kstate.M_WACH) {
+            wzyk = 2
+        }
+        wach.arm(state, wzyk)
     }
     if kstate.mode_on(state, kstate.M_SCHLAFARM) {
         schlaf.arm_and_exit(state)
@@ -5411,6 +5440,37 @@ fn mode_of(state: u64, cmd: u64) {
     // Zaehler waere ein zweiter Weg fuer dieselbe Frage gewesen.
     if find_word(cmd, (&slw[0]) as u64, 6) != 0 {
         kstate.mode_add(state, kstate.M_SCHLAF)
+    }
+    // ================= RUNDE WACH (K-018, Abschluss): DER WIEDERANLAUF
+    //
+    // DIESELBE FALLE EIN VIERTES MAL, und sie wird genauso
+    // aufgeloest wie bei `schlaf`: "wach" steckt in jedem der langen
+    // Woerter. Also zuerst die LANGEN, und das kurze nur als eigenes
+    // Wort (`find_word` verlangt eine Wortgrenze links und rechts).
+    // Ohne das waere `wachpruef` immer auch `wach`, und der Pruefer
+    // wollte zugleich sichern.
+    var wcarm: [u8; 8] = "wacharm\0"
+    var wcpr: [u8; 10] = "wachpruef\0"
+    var wcno: [u8; 8] = "nowach\0\0"
+    var wcme: [u8; 9] = "wachmess\0"
+    var wcw: [u8; 5] = "wach\0"
+    if find(cmd, (&wcarm[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_WACHARM)
+    }
+    if find(cmd, (&wcpr[0]) as u64, 9) != 0 {
+        kstate.mode_add(state, kstate.M_WACHPRUEF)
+    }
+    if find(cmd, (&wcno[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_NOWACH)
+    }
+    if find(cmd, (&wcme[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_WACHMESS)
+    }
+    // Das kurze Wort `wach` heisst "ZWEITER ZYKLUS", genau wie
+    // `schlaf` es bei der Vorrunde tut, und darf ZUSAMMEN mit
+    // `wacharm` stehen.
+    if find_word(cmd, (&wcw[0]) as u64, 4) != 0 {
+        kstate.mode_add(state, kstate.M_WACH)
     }
     if find(cmd, (&evww[0]) as u64, 6) != 0 {
         kstate.mode_add(state, kstate.M_EVWAIT)
