@@ -1,0 +1,231 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/xtstafel/tafel.fi -- DIE ABNAHME VON K-022: DIE SCHLUESSELTAFEL.
+//
+// DIE FRAGE: zwei verschluesselte Traeger nebeneinander, abwechselnd
+// gelesen und geschrieben -- fuellt der Schluesselspeicher bei jedem
+// Wechsel neu, oder treffen beide?
+//
+// Vor dieser Runde hielt `xts.fi` GENAU EINEN Platz. Zwei Schluessel
+// abwechselnd hiessen: jeder Sektor ein Neufuellen, rund 12 us. Diese
+// Probe zaehlt die Fuellungen ueber `xts.fuellungen()` und haelt sie
+// gegen die Zahl der Sektoren.
+//
+// GEMESSEN WIRD IN VIER STUECKEN:
+//   1. WECHSEL OHNE NEUFUELLEN -- der Punkt der Runde.
+//   2. OKTETT FUER OKTETT RICHTIG -- beide Traeger, hin und zurueck.
+//   3. `forget()` LOESCHT ALLE PLAETZE, nicht nur einen.
+//   4. MEHR SCHLUESSEL ALS PLAETZE -- die Verdraengung muss greifen,
+//      und danach muss trotzdem alles noch stimmen.
+import std.io
+import std.rt
+import crypto.xts
+
+static mut z: u64 = 0
+
+fn nextr() -> u64 {
+    var x: u64 = z
+    x = x ^ (x << 13)
+    x = x ^ (x >> 7)
+    x = x ^ (x << 17)
+    z = x
+    return x
+}
+
+// Ein Schluessel, dessen Haelften sich sicher unterscheiden.
+fn mach_key(k: u64, samen: u64) {
+    z = samen
+    var i: usize = 0
+    while i < 64 {
+        *((k + i as u64) as *mut u8) = (nextr() & 255) as u8
+        i = i + 1
+    }
+}
+
+// Eine Zahl auf die Ausgabe, wie es `tools/aesni/kreis.fi` tut.
+fn sag_zahl(v: u64) {
+    var bf: rt.Buf = rt.buf_new()
+    rt.buf_push_dec_u64(&bf, v)
+    io.print_bytes(rt.buf_ptr(&bf), rt.buf_len(&bf))
+    rt.buf_free(&bf)
+}
+
+fn main() -> i32 {
+    if !xts.aesni_on() {
+        io.print_line("tafel: aesni=0 (diese Maschine kann es nicht)")
+        return 0
+    }
+    var fehler: u64 = 0
+
+    var ka: [u8; 64] = [0 as u8; 64]
+    var kb: [u8; 64] = [0 as u8; 64]
+    mach_key((&ka[0]) as u64, 0x243F6A8885A308D3)
+    mach_key((&kb[0]) as u64, 0x13198A2E03707344)
+
+    var klar: [u8; 512] = [0 as u8; 512]
+    var geh_a: [u8; 512] = [0 as u8; 512]
+    var geh_b: [u8; 512] = [0 as u8; 512]
+    var rueck: [u8; 512] = [0 as u8; 512]
+    z = 0xA4093822299F31D0
+    var i: usize = 0
+    while i < 512 {
+        klar[i] = (nextr() & 255) as u8
+        i = i + 1
+    }
+
+    // ---------------------------------------------------------------
+    // 1. DER WECHSEL. Erst beide einmal anfassen (das Aufwaermen, zwei
+    //    Fuellungen), dann 200 Sektoren ABWECHSELND -- und ab da darf
+    //    KEINE Fuellung mehr dazukommen.
+    // ---------------------------------------------------------------
+    xts.forget()
+    let f0: u64 = xts.fuellungen()
+    xts.sector_encrypt((&ka[0]) as u64, 0, (&klar[0]) as u64,
+        (&geh_a[0]) as u64, 512)
+    xts.sector_encrypt((&kb[0]) as u64, 0, (&klar[0]) as u64,
+        (&geh_b[0]) as u64, 512)
+    let f_warm: u64 = xts.fuellungen()
+    io.print("tafel: aufwaermen kostet Fuellungen: ")
+    sag_zahl(f_warm - f0)
+    io.new_line()
+
+    var s: u64 = 1
+    while s <= 100 {
+        xts.sector_encrypt((&ka[0]) as u64, s, (&klar[0]) as u64,
+            (&geh_a[0]) as u64, 512)
+        xts.sector_encrypt((&kb[0]) as u64, s, (&klar[0]) as u64,
+            (&geh_b[0]) as u64, 512)
+        s = s + 1
+    }
+    let f_wechsel: u64 = xts.fuellungen() - f_warm
+    io.print("tafel: 200 Sektoren abwechselnd, Fuellungen: ")
+    sag_zahl(f_wechsel)
+    io.new_line()
+    if f_wechsel == 0 {
+        io.print_line("tafel: OK kein Neufuellen beim Wechsel")
+    } else {
+        io.print_line("tafel: FEHLER es wird beim Wechsel neu gefuellt")
+        fehler = fehler + 1
+    }
+
+    // ---------------------------------------------------------------
+    // 2. UND ES MUSS TROTZDEM STIMMEN. Ein schneller Speicher, der
+    //    falsch rechnet, waere schlimmer als ein langsamer.
+    // ---------------------------------------------------------------
+    if !xts.sector_decrypt((&ka[0]) as u64, 7, (&geh_a[0]) as u64,
+            (&rueck[0]) as u64, 512) {
+        io.print_line("tafel: FEHLER entschluesseln A ging nicht")
+        fehler = fehler + 1
+    }
+    xts.sector_encrypt((&ka[0]) as u64, 7, (&klar[0]) as u64,
+        (&geh_a[0]) as u64, 512)
+    xts.sector_decrypt((&ka[0]) as u64, 7, (&geh_a[0]) as u64,
+        (&rueck[0]) as u64, 512)
+    var diff: u64 = 0
+    i = 0
+    while i < 512 {
+        diff = diff | ((klar[i] as u64) ^ (rueck[i] as u64))
+        i = i + 1
+    }
+    if diff == 0 {
+        io.print_line("tafel: OK Traeger A geht hin und zurueck")
+    } else {
+        io.print_line("tafel: FEHLER Traeger A kommt nicht zurueck")
+        fehler = fehler + 1
+    }
+    xts.sector_encrypt((&kb[0]) as u64, 7, (&klar[0]) as u64,
+        (&geh_b[0]) as u64, 512)
+    xts.sector_decrypt((&kb[0]) as u64, 7, (&geh_b[0]) as u64,
+        (&rueck[0]) as u64, 512)
+    diff = 0
+    i = 0
+    while i < 512 {
+        diff = diff | ((klar[i] as u64) ^ (rueck[i] as u64))
+        i = i + 1
+    }
+    if diff == 0 {
+        io.print_line("tafel: OK Traeger B geht hin und zurueck")
+    } else {
+        io.print_line("tafel: FEHLER Traeger B kommt nicht zurueck")
+        fehler = fehler + 1
+    }
+    // Und die beiden Traeger duerfen NICHT dasselbe liefern.
+    diff = 0
+    i = 0
+    while i < 512 {
+        diff = diff | ((geh_a[i] as u64) ^ (geh_b[i] as u64))
+        i = i + 1
+    }
+    if diff != 0 {
+        io.print_line("tafel: OK zwei Schluessel, zwei Geheimtexte")
+    } else {
+        io.print_line("tafel: FEHLER beide Traeger liefern dasselbe")
+        fehler = fehler + 1
+    }
+
+    // ---------------------------------------------------------------
+    // 3. `forget()` MUSS ALLE PLAETZE LOESCHEN. Gemessen daran, dass
+    //    danach BEIDE Schluessel wieder gefuellt werden muessen --
+    //    bliebe einer stehen, kaeme nur EINE Fuellung dazu.
+    // ---------------------------------------------------------------
+    xts.forget()
+    let f1: u64 = xts.fuellungen()
+    xts.sector_encrypt((&ka[0]) as u64, 3, (&klar[0]) as u64,
+        (&geh_a[0]) as u64, 512)
+    xts.sector_encrypt((&kb[0]) as u64, 3, (&klar[0]) as u64,
+        (&geh_b[0]) as u64, 512)
+    let nach: u64 = xts.fuellungen() - f1
+    io.print("tafel: nach forget() neue Fuellungen: ")
+    sag_zahl(nach)
+    io.new_line()
+    if nach == 2 {
+        io.print_line("tafel: OK forget() hat ALLE Plaetze geleert")
+    } else {
+        io.print_line("tafel: FEHLER forget() hat nicht alles geleert")
+        fehler = fehler + 1
+    }
+
+    // ---------------------------------------------------------------
+    // 4. MEHR SCHLUESSEL ALS PLAETZE. Fuenf Schluessel auf vier
+    //    Plaetzen: die Verdraengung MUSS greifen (also mehr
+    //    Fuellungen), und das Ergebnis muss weiter stimmen.
+    // ---------------------------------------------------------------
+    xts.forget()
+    var kx: [u8; 64] = [0 as u8; 64]
+    var runde: u64 = 0
+    var schlecht: u64 = 0
+    while runde < 5 {
+        mach_key((&kx[0]) as u64, 0x1000 + runde)
+        if !xts.sector_encrypt((&kx[0]) as u64, runde, (&klar[0]) as u64,
+                (&geh_a[0]) as u64, 512) {
+            schlecht = schlecht + 1
+        }
+        if !xts.sector_decrypt((&kx[0]) as u64, runde, (&geh_a[0]) as u64,
+                (&rueck[0]) as u64, 512) {
+            schlecht = schlecht + 1
+        }
+        diff = 0
+        i = 0
+        while i < 512 {
+            diff = diff | ((klar[i] as u64) ^ (rueck[i] as u64))
+            i = i + 1
+        }
+        if diff != 0 {
+            schlecht = schlecht + 1
+        }
+        runde = runde + 1
+    }
+    if schlecht == 0 {
+        io.print_line("tafel: OK fuenf Schluessel auf vier Plaetzen stimmen")
+    } else {
+        io.print_line("tafel: FEHLER die Verdraengung rechnet falsch")
+        fehler = fehler + 1
+    }
+
+    io.print("tafel: fehler=")
+    sag_zahl(fehler)
+    io.new_line()
+    if fehler != 0 {
+        return 1
+    }
+    return 0
+}

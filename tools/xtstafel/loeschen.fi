@@ -1,0 +1,169 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/xtstafel/loeschen.fi -- DIE OFFENE FRAGE AUS RUNDE AESNI:
+// steht der Schluesselplan nach `forget()` WIRKLICH nirgends mehr?
+//
+// Der Bericht der Runde AESNI liess das ausdruecklich ungeprueft. Diese
+// Probe beantwortet es MESSEND und nicht behauptend: sie sucht die
+// Oktette des Schluessels und die des fertigen Plans im Speicher der
+// Tafel -- einmal waehrend er drinsteht (da MUSS er zu finden sein,
+// sonst sucht die Probe an der falschen Stelle), und einmal nach
+// `forget()` (da darf er NICHT mehr zu finden sein).
+//
+// WAS DIESE PROBE NICHT BEHAUPTET: dass nirgendwo sonst im Rechner
+// eine Kopie liegt. Der Uebersetzer darf Zwischenwerte auf dem
+// Stapel liegen lassen, und `krypto.fi` haelt den Hauptschluessel
+// ohnehin in `kstate`, solange die Platte offen ist. Geprueft wird
+// die TAFEL -- der Speicher, den diese Runde gebaut hat.
+import std.io
+import std.rt
+import crypto.xts
+
+static mut z: u64 = 0
+
+fn nextr() -> u64 {
+    var x: u64 = z
+    x = x ^ (x << 13)
+    x = x ^ (x >> 7)
+    x = x ^ (x << 17)
+    z = x
+    return x
+}
+
+fn mach_key(k: u64, samen: u64) {
+    z = samen
+    var i: usize = 0
+    while i < 64 {
+        *((k + i as u64) as *mut u8) = (nextr() & 255) as u8
+        i = i + 1
+    }
+}
+
+fn sag_zahl(v: u64) {
+    var bf: rt.Buf = rt.buf_new()
+    rt.buf_push_dec_u64(&bf, v)
+    io.print_bytes(rt.buf_ptr(&bf), rt.buf_len(&bf))
+    rt.buf_free(&bf)
+}
+
+// Wie oft stehen diese `n` Oktette im Bereich `von`..`von+len`?
+fn suche(von: u64, len: u64, muster: u64, n: u64) -> u64 {
+    var treffer: u64 = 0
+    var i: u64 = 0
+    while i + n <= len {
+        var gleich: bool = true
+        var j: u64 = 0
+        while j < n {
+            if *((von + i + j) as *mut u8) != *((muster + j) as *mut u8) {
+                gleich = false
+            }
+            j = j + 1
+        }
+        if gleich {
+            treffer = treffer + 1
+        }
+        i = i + 1
+    }
+    return treffer
+}
+
+fn main() -> i32 {
+    if !xts.aesni_on() {
+        io.print_line("loeschen: aesni=0 (diese Maschine kann es nicht)")
+        return 0
+    }
+    var fehler: u64 = 0
+    var ka: [u8; 64] = [0 as u8; 64]
+    mach_key((&ka[0]) as u64, 0x452821E638D01377)
+    var klar: [u8; 512] = [0 as u8; 512]
+    var geh: [u8; 512] = [0 as u8; 512]
+    z = 0xBE5466CF34E90C6C
+    var i: usize = 0
+    while i < 512 {
+        klar[i] = (nextr() & 255) as u8
+        i = i + 1
+    }
+
+    // Der Bereich, in dem die Tafel liegt. `xts.tafel_von`/`tafel_len`
+    // sagen es -- eine Probe, die die Adresse raet, misst nichts.
+    let von: u64 = xts.tafel_von()
+    let len: u64 = xts.tafel_len()
+    io.print("loeschen: Tafel bei ")
+    sag_zahl(von)
+    io.print(" ueber ")
+    sag_zahl(len)
+    io.print_line(" Oktette")
+
+    // ALLE VIER PLAETZE BELEGEN, nicht nur einen -- und das ist kein
+    // Schmuck: eine erste Fassung dieser Probe benutzte EINEN
+    // Schluessel, damit stand nur Platz 0 voll, und ein `forget()`,
+    // das bloss Platz 0 raeumte, kam damit DURCH. Gemessen: die
+    // Gegenprobe (`while s < 1`) lief hier gruen und wurde erst von
+    // `tafel.fi` erwischt. Wer prueft, ob ALLE Plaetze leer werden,
+    // muss also erst dafuer sorgen, dass alle voll sind.
+    xts.forget()
+    var fuell: [u8; 64] = [0 as u8; 64]
+    var p: u64 = 0
+    while p < 3 {
+        mach_key((&fuell[0]) as u64, 0x7700 + p)
+        xts.sector_encrypt((&fuell[0]) as u64, p, (&klar[0]) as u64,
+            (&geh[0]) as u64, 512)
+        p = p + 1
+    }
+    // `ka` kommt zuletzt, landet also auf dem vierten Platz.
+    xts.sector_encrypt((&ka[0]) as u64, 1, (&klar[0]) as u64,
+        (&geh[0]) as u64, 512)
+
+    // 1. WAEHREND ER DRINSTEHT: die Probe muss ihn finden, sonst sucht
+    //    sie an der falschen Stelle und alles Weitere waere wertlos.
+    let drin: u64 = suche(von, len, (&ka[0]) as u64, 64)
+    io.print("loeschen: Schluessel in der Tafel, waehrend offen: ")
+    sag_zahl(drin)
+    io.new_line()
+    if drin >= 1 {
+        io.print_line("loeschen: OK die Probe sucht an der richtigen Stelle")
+    } else {
+        io.print_line("loeschen: FEHLER der Schluessel ist gar nicht zu finden -- die Probe taugt nicht")
+        fehler = fehler + 1
+    }
+
+    // 2. NACH `forget()`: er darf NICHT mehr da sein.
+    xts.forget()
+    let weg: u64 = suche(von, len, (&ka[0]) as u64, 64)
+    io.print("loeschen: Schluessel in der Tafel nach forget(): ")
+    sag_zahl(weg)
+    io.new_line()
+    if weg == 0 {
+        io.print_line("loeschen: OK nach forget() steht der Schluessel nicht mehr in der Tafel")
+    } else {
+        io.print_line("loeschen: FEHLER der Schluessel steht nach forget() noch da")
+        fehler = fehler + 1
+    }
+
+    // 3. UND DIE TAFEL IST GANZ NULL. Ein einziges Oktett ungleich 0
+    //    waere ein Rest des Plans.
+    var nichtnull: u64 = 0
+    var k: u64 = 0
+    while k < len {
+        if *((von + k) as *mut u8) != 0 as u8 {
+            nichtnull = nichtnull + 1
+        }
+        k = k + 1
+    }
+    io.print("loeschen: Oktette ungleich 0 nach forget(): ")
+    sag_zahl(nichtnull)
+    io.new_line()
+    if nichtnull == 0 {
+        io.print_line("loeschen: OK die ganze Tafel ist genullt")
+    } else {
+        io.print_line("loeschen: FEHLER es steht noch etwas in der Tafel")
+        fehler = fehler + 1
+    }
+
+    io.print("loeschen: fehler=")
+    sag_zahl(fehler)
+    io.new_line()
+    if fehler != 0 {
+        return 1
+    }
+    return 0
+}
