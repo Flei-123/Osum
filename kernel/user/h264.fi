@@ -69,7 +69,8 @@ export {
     h264_err, h264_fehlertext, h264_plane_y, h264_plane_u, h264_plane_v,
     h264_to_rgb, h264_profile, h264_mbs, h264_luma_size, h264_chroma_size,
     E_OK, E_FORM, E_PROFIL, E_ART, E_GROSS, E_DATEN, E_UNGERADE,
-    MAXW, MAXH
+    MAXW, MAXH,
+    prof_get, prof_reset, PF_CAVLC, PF_MC, PF_RECON, PF_DEBLOCK, PF_REST, PF_N
 }
 
 // ------------------------------------------------------------ Fehler
@@ -112,16 +113,43 @@ fn h264_fehlertext() -> u64 {
 // 352x288 (CIF) ist die Grenze dieser Runde, und sie steht hier und
 // nicht im Gefuehl: drei Bildspeicher (das laufende Bild und zwei
 // Referenzen) zu je 1,5 Oktetten je Bildpunkt sind bei CIF 456 KiB.
-// Ein Prozess dieses Systems hat 6 MiB Abbild. Bei 640x480 waeren es
-// 1,4 MiB, bei 1280x720 schon 4 MiB -- und dann ist fuer den
-// Entrolungspuffer und den Rest nichts mehr da.
-const MAXW: u64 = 352
-const MAXH: u64 = 288
-const MAXMBW: u64 = 22      // MAXW / 16
-const MAXMBH: u64 = 18      // MAXH / 16
-const MAXMB: u64 = 396      // MAXMBW * MAXMBH
-const LUMA: u64 = 101376    // MAXW * MAXH
-const CHROMA: u64 = 25344   // LUMA / 4
+//
+// ===== P-023: DIE GRENZE STEIGT AUF 1280x720, UND DIE ALTE BEGRUENDUNG
+// ===== WAR SCHLICHT VERALTET.
+//
+// Hier stand "ein Prozess dieses Systems hat 6 MiB Abbild". Das stimmt
+// seit der Runde CERTUS-AUF-OSUM nicht mehr: `proc.IMAGE_END` ist von
+// 0x40400000 auf 0x40C00000 gewachsen, weil der Browser 6,5 MiB gross
+// ist. Das Abbildfenster ist damit
+//
+//     proc.IMAGE_BASE 0x40100000 .. proc.IMAGE_END 0x40C00000 = 11 MiB
+//
+// und nicht 6. NACHGERECHNET statt geschaetzt (readelf -lW auf dem
+// gebundenen /bin/h264t):
+//
+//     bei 352x288  endete h264t bei 2,42 MiB ueber IMAGE_BASE
+//     bei 1280x720 endet es bei    9,42 MiB ueber IMAGE_BASE
+//
+// Das passt, und zwar mit 1,5 MiB Luft. Die Rechnung im Einzelnen:
+//
+//     vier Bildspeicher 1280x720   5.529.600 Oktette = 5,27 MiB
+//     die Felder je Makroblock      2.714.400        = 2,59 MiB
+//     (3600 Makrobloecke: Typ, Modi, Vektoren, nz)
+//
+// WAS DAS KOSTET, WENN DER STROM KLEINER IST: nichts an Rechenzeit --
+// die Schleifen laufen ueber `s_mbw`/`s_mbh` und nicht ueber MAXMB.
+// Es kostet Adressraum, und der ist da. Eine .bss-Seite, die nie
+// beschrieben wird, kostet nicht einmal einen Rahmen.
+//
+// DIE GRENZE BLEIBT EINE GRENZE: ein Strom ueber 1280x720 wird weiter
+// mit E_GROSS abgewiesen (parse_sps) und nicht halb dekodiert.
+const MAXW: u64 = 1280
+const MAXH: u64 = 720
+const MAXMBW: u64 = 80      // MAXW / 16
+const MAXMBH: u64 = 45      // MAXH / 16
+const MAXMB: u64 = 3600     // MAXMBW * MAXMBH
+const LUMA: u64 = 921600    // MAXW * MAXH
+const CHROMA: u64 = 230400  // LUMA / 4
 // WIEVIELE BILDSPEICHER, und warum genau so viele: x264 stellt im
 // Baseline-Profil standardmaessig DREI Referenzen ein (`num_ref_frames
 // = 3`, und die Stroeme dieser Runde benutzen ref_idx bis 2 wirklich).
@@ -138,9 +166,9 @@ fn h264_chroma_size() -> u64 { return CHROMA }
 
 // Die Bildspeicher. Sie liegen HIER und nicht in kdata: kdata traegt
 // Zustandsfelder, keine Bilder (siehe den Kopf dieser Datei).
-static mut pY: [u8; 405504] = [0 as u8; 405504]   // NSLOT * LUMA
-static mut pU: [u8; 101376] = [0 as u8; 101376]   // NSLOT * CHROMA
-static mut pV: [u8; 101376] = [0 as u8; 101376]
+static mut pY: [u8; 3686400] = [0 as u8; 3686400]   // NSLOT * LUMA
+static mut pU: [u8; 921600] = [0 as u8; 921600]     // NSLOT * CHROMA
+static mut pV: [u8; 921600] = [0 as u8; 921600]
 
 // Welcher Speicher ist das laufende Bild, welche sind Referenzen.
 // ref_slot[0] ist die naechste Referenz (Index 0 der Liste L0).
@@ -156,6 +184,58 @@ fn h264_plane_u(slot: u64) -> u64 {
 }
 fn h264_plane_v(slot: u64) -> u64 {
     return (&pV[(0) as usize]) as u64 + slot * CHROMA
+}
+
+// ==================================================== DIE PROFILUHR
+//
+// P-023 will WISSEN, wohin die Zeit geht, statt es zu vermuten. Der
+// Bericht der Vorrunde nennt drei Verdaechtige (tab_find, die
+// Bewegungskompensation je 4x4, kein SIMD) -- aber GEMESSEN war
+// keiner davon. Diese Uhr misst sie einzeln.
+//
+// GEZAEHLT WIRD IN TAKTEN (`rdtsc`), nicht in Nanosekunden: ein Bild
+// bei CIF kostet rund 18 ms, ein einzelner Abschnitt davon liegt weit
+// unter der Aufloesung, die `clock_gettime` ueber einen Syscall
+// hergibt -- und der Syscall selbst kostet mehr als das, was er messen
+// soll. `rdtsc` ist ein Befehl ohne Ringwechsel.
+//
+// DER AUFWAND DER MESSUNG SELBST ist zwei `rdtsc` je Abschnitt. Bei
+// den Abschnitten hier (je Makroblock, nicht je Bildpunkt) faellt das
+// nicht ins Gewicht; `PF_REST` faengt auf, was zwischen den Abschnitten
+// liegt, und die Summe wird gegen die Gesamtzeit geprueft.
+const PF_CAVLC: u64 = 0     // Entropiedekodierung: tab_find und Syntax
+const PF_MC: u64 = 1        // Bewegungskompensation (mc_mb)
+const PF_RECON: u64 = 2     // Transformation + Intra-Vorhersage
+const PF_DEBLOCK: u64 = 3   // Entblockungsfilter
+const PF_REST: u64 = 4      // alles uebrige im Bild
+const PF_N: u64 = 5
+
+static mut prof_takte: [u64; 5] = [0; 5]
+static mut prof_zahl: [u64; 5] = [0; 5]
+
+fn rdtsc() -> u64 {
+    return asm("rdtsc\nshl rdx, 32\nor rax, rdx", out("rax"))
+}
+
+fn prof_reset() {
+    var i: u64 = 0
+    while i < PF_N {
+        prof_takte[(i) as usize] = 0
+        prof_zahl[(i) as usize] = 0
+        i = i + 1
+    }
+}
+
+// was=0: Takte, was=1: Aufrufe
+fn prof_get(k: u64, was: u64) -> u64 {
+    if k >= PF_N { return 0 }
+    if was == 1 { return prof_zahl[(k) as usize] }
+    return prof_takte[(k) as usize]
+}
+
+fn prof_add(k: u64, t0: u64) {
+    prof_takte[(k) as usize] = prof_takte[(k) as usize] + (rdtsc() - t0)
+    prof_zahl[(k) as usize] = prof_zahl[(k) as usize] + 1
 }
 
 // ------------------------------------------------------- der Bitleser
@@ -498,26 +578,26 @@ fn parse_pps() -> bool {
 // Alles flach: Firn hat keine zweidimensionalen Felder, und ein
 // Verbund je Makroblock waere hier nur Verpackung. Der Index ist
 // ueberall `mb * 16 + blk` beziehungsweise `mb`.
-static mut mb_type: [u64; 396] = [0; 396]
-static mut mb_intra: [u8; 396] = [0 as u8; 396]
-static mut mb_done: [u8; 396] = [0 as u8; 396]
+static mut mb_type: [u64; 3600] = [0; 3600]
+static mut mb_intra: [u8; 3600] = [0 as u8; 3600]
+static mut mb_done: [u8; 3600] = [0 as u8; 3600]
 // Zu welchem Slice ein Makroblock gehoert. Ein Slice ist per Norm
 // UNABHAENGIG dekodierbar (7.4.4): ueber seine Grenze hinweg gibt es
 // keine Nachbarn -- weder fuer die Syntax (nC, Modi, Vektoren) noch
 // fuer die Bildpunkte der Intra-Vorhersage. Wer das uebersieht,
 // bekommt bei einem Bild aus EINEM Slice das richtige Ergebnis und bei
 // einem aus vieren ab dem zweiten Streifen Unsinn. 0xFFFF = keiner.
-static mut mb_slice: [u64; 396] = [0; 396]
-static mut mb_cbp: [u64; 396] = [0; 396]
-static mut mb_qp: [i64; 396] = [0; 396]
-static mut mb_i16: [u64; 396] = [0; 396]
-static mut mb_cpred: [u64; 396] = [0; 396]
+static mut mb_slice: [u64; 3600] = [0; 3600]
+static mut mb_cbp: [u64; 3600] = [0; 3600]
+static mut mb_qp: [i64; 3600] = [0; 3600]
+static mut mb_i16: [u64; 3600] = [0; 3600]
+static mut mb_cpred: [u64; 3600] = [0; 3600]
 // je 4x4-Block: Modus, Vektor, Referenz, Zahl der Koeffizienten
-static mut b_i4: [u64; 6336] = [0; 6336]     // MAXMB * 16
-static mut b_mvx: [i64; 6336] = [0; 6336]
-static mut b_mvy: [i64; 6336] = [0; 6336]
-static mut b_ref: [i64; 6336] = [0; 6336]
-static mut b_nz: [u64; 9504] = [0; 9504]     // MAXMB * 24 (16 Luma + 8 Chroma)
+static mut b_i4: [u64; 57600] = [0; 57600]     // MAXMB * 16
+static mut b_mvx: [i64; 57600] = [0; 57600]
+static mut b_mvy: [i64; 57600] = [0; 57600]
+static mut b_ref: [i64; 57600] = [0; 57600]
+static mut b_nz: [u64; 86400] = [0; 86400]     // MAXMB * 24 (16 Luma + 8 Chroma)
 
 // Der Slice-Zustand.
 static mut sl_type: u64 = 2      // 0 = P, 2 = I
@@ -599,6 +679,13 @@ fn lev_of(v: u64) -> i64 {
 // Ein Restwertblock. Liefert totalCoeff, oder NOTAB bei kaputtem Strom.
 // Die Koeffizienten stehen danach in `coef[0..maxc-1]`.
 fn residual_block(nC: i64, maxc: u64) -> u64 {
+    let pt0: u64 = rdtsc()
+    let rv: u64 = residual_block_inner(nC, maxc)
+    prof_add(PF_CAVLC, pt0)
+    return rv
+}
+
+fn residual_block_inner(nC: i64, maxc: u64) -> u64 {
     var i: u64 = 0
     while i < 16 {
         coef[(i) as usize] = 0
@@ -1475,6 +1562,12 @@ fn sub_xy(sn: u64, sw: u64, sh: u64, q: u64) {
 
 // ===================================== die Bewegungskompensation eines MB
 fn mc_mb(mbx: u64, mby: u64) {
+    let pt0: u64 = rdtsc()
+    mc_mb_inner(mbx, mby)
+    prof_add(PF_MC, pt0)
+}
+
+fn mc_mb_inner(mbx: u64, mby: u64) {
     let m: u64 = mb_at(mbx, mby)
     let dy: u64 = h264_plane_y(cur_slot)
     let du: u64 = h264_plane_u(cur_slot)
@@ -1615,6 +1708,12 @@ fn load_nb4(plane: u64, stride: u64, px: u64, py: u64,
 }
 
 fn recon_mb(mbx: u64, mby: u64, i16: bool, cbp: u64, qp: i64) {
+    let pt0: u64 = rdtsc()
+    recon_mb_inner(mbx, mby, i16, cbp, qp)
+    prof_add(PF_RECON, pt0)
+}
+
+fn recon_mb_inner(mbx: u64, mby: u64, i16: bool, cbp: u64, qp: i64) {
     let m: u64 = mb_at(mbx, mby)
     let py: u64 = h264_plane_y(cur_slot)
     // VERFUEGBAR heisst: im Bild UND schon dekodiert UND im selben
@@ -2233,6 +2332,12 @@ fn filter_line(plane: u64, base: u64, st: u64, bs: u64,
 }
 
 fn deblock() {
+    let pt0: u64 = rdtsc()
+    deblock_inner()
+    prof_add(PF_DEBLOCK, pt0)
+}
+
+fn deblock_inner() {
     if sl_nodeblock == 1 { return }
     let py: u64 = h264_plane_y(cur_slot)
     let pu: u64 = h264_plane_u(cur_slot)
@@ -2506,6 +2611,13 @@ fn decode_slice_data() -> bool {
 // Rueckgabe: 1 = ein Bild ist FERTIG geworden, 0 = Slice verarbeitet,
 // Bild laeuft weiter, 2 = Fehler.
 fn slice_verarbeiten(nal_type: u64, nal_ref_idc: u64) -> u64 {
+    let pt0: u64 = rdtsc()
+    let rv: u64 = slice_verarbeiten_inner(nal_type, nal_ref_idc)
+    prof_add(PF_REST, pt0)
+    return rv
+}
+
+fn slice_verarbeiten_inner(nal_type: u64, nal_ref_idc: u64) -> u64 {
     if !s_da || !p_da { h_err = E_FORM; return 2 }
     if !parse_slice_header(nal_type, nal_ref_idc) { return 2 }
     if first_mb >= s_mbw * s_mbh { h_err = E_UNGERADE; return 2 }
@@ -2568,9 +2680,17 @@ fn h264_reset() {
     s_mbh = 0
 }
 
+// NUR DAS BILD LOESCHEN, NICHT DEN GANZEN VORRAT.
+//
+// Hier stand `while i < MAXMB`, und solange MAXMB 396 war (CIF), war
+// das dasselbe. Mit MAXMB = 3600 (720p) waere es das nicht mehr: ein
+// QCIF-Bild hat 99 Makrobloecke, und ein Loeschlauf ueber 3600 waere
+// das SECHSUNDDREISSIGFACHE an Arbeit -- je Bild, bei jeder Aufloesung.
+// Die Grenze heisst deshalb `s_mbw * s_mbh` und nicht MAXMB.
 fn mbs_clear() {
+    let nmb: u64 = s_mbw * s_mbh
     var i: u64 = 0
-    while i < MAXMB {
+    while i < nmb {
         mb_done[(i) as usize] = 0 as u8
         mb_intra[(i) as usize] = 0 as u8
         mb_type[(i) as usize] = 0
@@ -2582,7 +2702,7 @@ fn mbs_clear() {
         i = i + 1
     }
     var k: u64 = 0
-    while k < MAXMB * 16 {
+    while k < nmb * 16 {
         b_i4[(k) as usize] = 2
         b_mvx[(k) as usize] = 0
         b_mvy[(k) as usize] = 0
@@ -2590,7 +2710,7 @@ fn mbs_clear() {
         k = k + 1
     }
     var z: u64 = 0
-    while z < MAXMB * 24 { b_nz[(z) as usize] = 0; z = z + 1 }
+    while z < nmb * 24 { b_nz[(z) as usize] = 0; z = z + 1 }
 }
 
 // Einen freien Speicher fuer das naechste Bild waehlen: den, der
