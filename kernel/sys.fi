@@ -99,6 +99,7 @@ import ntfs
 import usb
 // RUNDE HOTPLUG: die Wechseldatentraeger, fuer Ring 3.
 import wechsel
+import codecstat
 import audio
 import ac97
 import hda
@@ -2780,10 +2781,76 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
         return wechsel_call(state, a0, fget(frame, F_RSI),
             fget(frame, F_RDX))
     }
+    if number == SYS_OSUM_CODEC {
+        return codec_call(state, a0, fget(frame, F_RSI),
+            fget(frame, F_RDX), fget(frame, F_R10))
+    }
     if number >= USB_MINNR && number <= USB_MAXNR {
         return usb_call(state, number, a0)
     }
     return neg(errno.E_NOSYS)
+}
+
+// ================================================ RUNDE CODEC: 1970
+//
+// Die Zaehler des Videodekodierers. Der Dekodierer selbst laeuft in
+// Ring 3 (`kernel/user/h264.fi`) -- der Kern sieht kein einziges Bild
+// und soll auch keines sehen. Was er fuehrt, ist die Antwort auf die
+// Frage, die ein Werkzeug stellt: laeuft hier Video, wieviel, und wie
+// oft ist etwas schiefgegangen?
+//
+//   sys4(1970, CDC_FRAME, 0, 0, 0)          ein Bild ist fertig
+//   sys4(1970, CDC_REJECT, grund, 0, 0)     ein Strom wurde abgewiesen
+//   sys4(1970, CDC_SEEN, w, h, profil)      die Masse des Bildes
+//   sys4(1970, CDC_GET, feld, 0, 0)         einen Zaehler lesen
+//
+// Die MELDENDEN Formen darf jeder Prozess aufrufen: sie kosten nichts
+// und koennen nichts kaputtmachen -- der schlimmste Missbrauch ist
+// eine falsche Zahl in `top`. Es ist bewusst KEIN Recht daran
+// gebunden, weil sonst jeder Abspieler eines braeuchte.
+const SYS_OSUM_CODEC: u64 = 1970
+const CDC_FRAME: u64 = 0
+const CDC_REJECT: u64 = 1
+const CDC_SEEN: u64 = 2
+const CDC_GET: u64 = 3
+const CDC_RESET: u64 = 4
+// Die Felder fuer CDC_GET.
+const CDG_FRAMES: u64 = 0
+const CDG_REJECTS: u64 = 1
+const CDG_LASTERR: u64 = 2
+const CDG_W: u64 = 3
+const CDG_H: u64 = 4
+const CDG_PROFILE: u64 = 5
+const CDG_MB: u64 = 6
+
+fn codec_call(state: u64, was: u64, a1: u64, a2: u64, a3: u64) -> u64 {
+    if was == CDC_FRAME {
+        codecstat.cd_frame(state)
+        return 0
+    }
+    if was == CDC_REJECT {
+        codecstat.cd_reject(state, a1)
+        return 0
+    }
+    if was == CDC_SEEN {
+        codecstat.cd_seen(state, a1, a2, a3, 0)
+        return 0
+    }
+    if was == CDC_RESET {
+        codecstat.cd_reset(state)
+        return 0
+    }
+    if was == CDC_GET {
+        if a1 == CDG_FRAMES { return codecstat.cd_frames(state) }
+        if a1 == CDG_REJECTS { return codecstat.cd_rejects(state) }
+        if a1 == CDG_LASTERR { return codecstat.cd_lasterr(state) }
+        if a1 == CDG_W { return codecstat.cd_w(state) }
+        if a1 == CDG_H { return codecstat.cd_h(state) }
+        if a1 == CDG_PROFILE { return codecstat.cd_profile(state) }
+        if a1 == CDG_MB { return codecstat.cd_mb(state) }
+        return neg(errno.E_INVAL)
+    }
+    return neg(errno.E_INVAL)
 }
 
 fn usb_call(state: u64, number: u64, a0: u64) -> u64 {
