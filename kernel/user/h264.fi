@@ -1344,6 +1344,27 @@ fn hraw_b(x: i64, y: i64) -> i64 {
 // `qpel_one`, rechnet die Zwischenwerte aber nur einmal.
 fn mc_luma_schnell(dst: u64, dstride: u64, dx: u64, dy: u64,
                    ix: i64, iy: i64, fx: u64, fy: u64, bw: u64, bh: u64) {
+    // DER HAEUFIGSTE FALL ZUERST: ganzer Bildpunkt, kein Filter. Jeder
+    // P_Skip mit ganzzahligem Vektor landet hier, und das ist in einem
+    // ruhigen Bild die Mehrheit aller Bloecke. Liegt er ganz im Bild,
+    // ist es ein Zeilenkopier -- ohne mcbuf, ohne Klemmung, ohne Filter.
+    if fx == 0 && fy == 0 {
+        let rw: i64 = mc_rw as i64
+        let rh: i64 = mc_rh as i64
+        if ix >= 0 && iy >= 0 && ix + (bw as i64) <= rw && iy + (bh as i64) <= rh {
+            var r0: u64 = 0
+            while r0 < bh {
+                let z: u64 = ((iy + (r0 as i64)) as u64) * mc_rw + (ix as u64)
+                var c0: u64 = 0
+                while c0 < bw {
+                    st8(dst, (dy + r0) * dstride + dx + c0, ld8(mc_ref, z + c0))
+                    c0 = c0 + 1
+                }
+                r0 = r0 + 1
+            }
+            return
+        }
+    }
     mc_fetch(ix, iy, bw, bh)
     // Die drei Faelle, die `jhalf` brauchen (fx==2 oder fy==2 zusammen
     // mit dem anderen ungerade), rechnen die senkrechten Rohwerte
@@ -1432,20 +1453,51 @@ fn mc_chroma(dst: u64, dstride: u64, dx: u64, dy: u64,
     let yf: i64 = mvy & 7
     let ix: i64 = (dx as i64) + (mvx >> 3)
     let iy: i64 = (dy as i64) + (mvy >> 3)
-    var r: u64 = 0
-    while r < bh {
-        var c: u64 = 0
-        while c < bw {
-            let x: i64 = ix + (c as i64)
-            let y: i64 = iy + (r as i64)
-            let v: i64 = ((8 - xf) * (8 - yf) * rpix(x, y)
-                        + xf * (8 - yf) * rpix(x + 1, y)
-                        + (8 - xf) * yf * rpix(x, y + 1)
-                        + xf * yf * rpix(x + 1, y + 1) + 32) >> 6
-            st8(dst, (dy + r) * dstride + dx + c, v as u64)
-            c = c + 1
+    // DIE VIER GEWICHTE HAENGEN AM VEKTOR, NICHT AM BILDPUNKT -- sie
+    // gehoeren vor die Schleife. Vorher wurden je Punkt vier
+    // Multiplikationen aus (8-xf) usw. neu gebildet.
+    let w00: i64 = (8 - xf) * (8 - yf)
+    let w10: i64 = xf * (8 - yf)
+    let w01: i64 = (8 - xf) * yf
+    let w11: i64 = xf * yf
+    let rw: i64 = mc_rw as i64
+    let rh: i64 = mc_rh as i64
+    // Der Regelfall: der Block samt rechtem/unterem Nachbarpunkt liegt
+    // ganz im Bild. Dann faellt die Klemmung weg, und die vier Punkte
+    // stehen in zwei benachbarten Zeilen.
+    if !mc_langsam && ix >= 0 && iy >= 0
+        && ix + (bw as i64) + 1 <= rw && iy + (bh as i64) + 1 <= rh {
+        var r: u64 = 0
+        while r < bh {
+            let z0: u64 = ((iy + (r as i64)) as u64) * mc_rw + (ix as u64)
+            let z1: u64 = z0 + mc_rw
+            var c: u64 = 0
+            while c < bw {
+                let v: i64 = (w00 * (ld8(mc_ref, z0 + c) as i64)
+                            + w10 * (ld8(mc_ref, z0 + c + 1) as i64)
+                            + w01 * (ld8(mc_ref, z1 + c) as i64)
+                            + w11 * (ld8(mc_ref, z1 + c + 1) as i64) + 32) >> 6
+                st8(dst, (dy + r) * dstride + dx + c, v as u64)
+                c = c + 1
+            }
+            r = r + 1
         }
-        r = r + 1
+        return
+    }
+    var r2: u64 = 0
+    while r2 < bh {
+        var c2: u64 = 0
+        while c2 < bw {
+            let x: i64 = ix + (c2 as i64)
+            let y: i64 = iy + (r2 as i64)
+            let v: i64 = (w00 * rpix(x, y)
+                        + w10 * rpix(x + 1, y)
+                        + w01 * rpix(x, y + 1)
+                        + w11 * rpix(x + 1, y + 1) + 32) >> 6
+            st8(dst, (dy + r2) * dstride + dx + c2, v as u64)
+            c2 = c2 + 1
+        }
+        r2 = r2 + 1
     }
 }
 
