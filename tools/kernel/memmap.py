@@ -302,6 +302,7 @@ BEREICHE = [
     ("TILE",       "kstate.fi", "TILE_OFF",       "TILE_MAX"),
     ("WMPLUG",     "kstate.fi", "WMP_OFF",        "WMP_MAX"),
     ("SUSP",       "kstate.fi", "SUSP_OFF",       "SUSP_MAX"),
+    ("SCHLAF",     "kstate.fi", "SCHLAF_OFF",     "SCHLAF_MAX"),
     # RUNDE KRYPTO (K-019): die Plattenverschluesselung.  Fuenf Seiten,
     # VORHER zugeteilt in der Welle vom 15.09.2026 -- diese Runde hat
     # sich keine Seite gesucht, sie hat die bekommen, die in kstate.fi
