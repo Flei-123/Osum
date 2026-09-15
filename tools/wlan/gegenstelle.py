@@ -647,6 +647,211 @@ def selbsttest(pfad):
     return gut, fehler
 
 
+# =====================================================================
+# RUNDE WLAN-3: DER ZUGANGSPUNKT, DER WIRKLICH ANTWORTET
+# =====================================================================
+#
+# Bis hierher war diese Datei die Gegenseite des HANDSCHLAGS. Was
+# Runde WLAN-3 braucht, ist die Gegenseite des VERKEHRS: ein Programm,
+# das sich wie ein Zugangspunkt UND wie das Netz dahinter verhaelt --
+# es nimmt einen verschluesselten Rahmen entgegen, oeffnet ihn, sieht
+# nach, was drinsteht, und baut eine verschluesselte Antwort.
+#
+# Warum das hier steht und nicht in Firn: es ist die GEGENSEITE. Eine
+# Gegenseite, die denselben Quelltext benutzt wie die Seite, die sie
+# pruefen soll, misst nichts. Alles hier rechnet mit `struct` und
+# `cryptography` (OpenSSL) und teilt mit `lib/wlan/llc.fi` keine
+# einzige Zeile -- genauso, wie `Authenticator` mit `lib/wlan/wpa.fi`
+# keine teilt.
+
+
+def ip2i(s):
+    """'192.168.0.1' -> 3232235521"""
+    a, b, c, d = (int(x) for x in s.split('.'))
+    return (a << 24) | (b << 16) | (c << 8) | d
+
+
+def sum16(daten, start=0):
+    """Pruefsumme nach RFC 1071. Unabhaengig von llc.fi gerechnet."""
+    s = start
+    i = 0
+    while i + 1 < len(daten):
+        s += (daten[i] << 8) | daten[i + 1]
+        i += 2
+    if i < len(daten):
+        s += daten[i] << 8
+    while s >> 16:
+        s = (s & 0xFFFF) + (s >> 16)
+    return (~s) & 0xFFFF
+
+
+def pseudo(qip, zip_, proto, laenge):
+    return ((qip >> 16) + (qip & 0xFFFF) + (zip_ >> 16) +
+            (zip_ & 0xFFFF) + proto + laenge)
+
+
+def ipv4_bauen(qip, zip_, proto, nutz, kennung=1):
+    kopf = bytearray(20)
+    kopf[0] = 0x45
+    struct.pack_into('>H', kopf, 2, 20 + len(nutz))
+    struct.pack_into('>H', kopf, 4, kennung)
+    struct.pack_into('>H', kopf, 6, 0x4000)
+    kopf[8] = 64
+    kopf[9] = proto
+    struct.pack_into('>I', kopf, 12, qip)
+    struct.pack_into('>I', kopf, 16, zip_)
+    struct.pack_into('>H', kopf, 10, sum16(bytes(kopf)))
+    return bytes(kopf) + nutz
+
+
+def udp_bauen(qip, zip_, qport, zport, nutz):
+    kopf = bytearray(8)
+    struct.pack_into('>H', kopf, 0, qport)
+    struct.pack_into('>H', kopf, 2, zport)
+    struct.pack_into('>H', kopf, 4, 8 + len(nutz))
+    ganz = bytes(kopf) + nutz
+    s = sum16(ganz, pseudo(qip, zip_, 17, len(ganz)))
+    if s == 0:
+        s = 0xFFFF
+    struct.pack_into('>H', kopf, 6, s)
+    return bytes(kopf) + nutz
+
+
+def tcp_bauen(qip, zip_, qport, zport, seq, ack, flags, nutz=b''):
+    kopf = bytearray(20)
+    struct.pack_into('>H', kopf, 0, qport)
+    struct.pack_into('>H', kopf, 2, zport)
+    struct.pack_into('>I', kopf, 4, seq)
+    struct.pack_into('>I', kopf, 8, ack)
+    kopf[12] = 0x50
+    kopf[13] = flags
+    struct.pack_into('>H', kopf, 14, 8192)
+    ganz = bytes(kopf) + nutz
+    struct.pack_into('>H', kopf, 16,
+                     sum16(ganz, pseudo(qip, zip_, 6, len(ganz))))
+    return bytes(kopf) + nutz
+
+
+def dhcp_ack_bauen(xid, mac, angeboten, server, maske, tor, dns,
+                   miete=86400, art=5):
+    """Ein DHCP-Ack (oder Offer, wenn art=2) wie ein echter Server ihn
+    schickt. Die Feldnamen sind die aus RFC 2131."""
+    b = bytearray(240)
+    b[0] = 2           # op: Antwort
+    b[1] = 1           # htype: Ethernet
+    b[2] = 6           # hlen
+    struct.pack_into('>I', b, 4, xid)
+    struct.pack_into('>I', b, 16, angeboten)   # yiaddr
+    struct.pack_into('>I', b, 20, server)      # siaddr
+    b[28:34] = mac
+    b[236:240] = bytes([99, 130, 83, 99])      # die Zauberzahl
+    o = bytearray()
+    o += bytes([53, 1, art])
+    o += bytes([54, 4]) + struct.pack('>I', server)
+    o += bytes([51, 4]) + struct.pack('>I', miete)
+    o += bytes([1, 4]) + struct.pack('>I', maske)
+    o += bytes([3, 4]) + struct.pack('>I', tor)
+    o += bytes([6, 4]) + struct.pack('>I', dns)
+    o += bytes([255])
+    return bytes(b) + bytes(o)
+
+
+def snap(ethertype=0x0800):
+    return bytes([0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00]) + \
+        struct.pack('>H', ethertype)
+
+
+def datenkopf(bssid, ziel, quelle, fromds=True, seq=0,
+              geschuetzt=False):
+    """Ein 802.11-Datenrahmen VOM Zugangspunkt (FromDS=1).
+
+    Adressen nach 802.11-2016 9.2.4.7.2 fuer FromDS=1:
+      A1 = Empfaenger, A2 = BSSID, A3 = urspruenglicher Absender.
+    """
+    # DAS GESCHUETZT-BIT (0x4000) GEHOERT IN DEN KOPF, DER WIRKLICH
+    # GESENDET WIRD.
+    #
+    # [gemessen, 15.09.2026] Der erste Anlauf dieser Funktion liess es
+    # weg, weil `ccmp_aad` es ohnehin setzt -- die AAD und damit der
+    # Pruefwert waren also richtig. Der Rahmen ging trotzdem nicht auf:
+    # `lib/wlan/ccmp.fi` prueft den Kopf, wie er DASTEHT, und ein
+    # Rahmen ohne Geschuetzt-Bit ist fuer ihn Klartext. Osums
+    # `ccmp.fi` macht es in `protect` richtig (es setzt `f | 16384`),
+    # und der Vergleich der beiden Ausgaben unterschied sich in genau
+    # einem Oktett: 0842 gegen 0802.
+    #
+    # Ein echter Zugangspunkt setzt das Bit. Diese Gegenstelle tut es
+    # jetzt auch -- sonst misst sie einen Fall, den es auf der Luft
+    # nicht gibt.
+    fc = 0x0208 if fromds else 0x0108
+    if geschuetzt:
+        fc |= 0x4000
+    return struct.pack('<H', fc) + b'\x00\x00' + ziel + bssid + \
+        quelle + struct.pack('<H', seq << 4)
+
+
+class Zugangspunkt:
+    """Der Zugangspunkt UND das Netz dahinter.
+
+    Er haelt den TK aus dem Handschlag und baut damit genau die
+    Rahmen, die ein Klient sehen wuerde: eine DHCP-Antwort, eine
+    HTTP-Antwort, ein Echo. Die Paketnummer zaehlt er selbst hoch --
+    ein Zugangspunkt, der sie wiederholte, waere selbst kaputt.
+    """
+
+    def __init__(self, tk, bssid, klient, ip_server='192.168.0.1',
+                 ip_klient='192.168.0.50', maske='255.255.255.0'):
+        self.tk = tk
+        self.bssid = bssid
+        self.klient = klient
+        self.server = ip2i(ip_server)
+        self.klient_ip = ip2i(ip_klient)
+        self.maske = ip2i(maske)
+        self.pn = 1
+
+    def _pn(self):
+        p = self.pn
+        self.pn += 1
+        return bytes([0, 0, 0, 0, (p >> 8) & 255, p & 255])
+
+    def _rahmen(self, nutzlast_ip, seq=0):
+        """Ein verschluesselter Datenrahmen an den Klienten."""
+        hdr = datenkopf(self.bssid, self.klient, self.bssid, True, seq,
+                        geschuetzt=True)
+        klar = snap(0x0800) + nutzlast_ip
+        return ccmp_schuetzen(self.tk, hdr, klar, self._pn())
+
+    def dhcp_antwort(self, xid, art=5, seq=1):
+        d = dhcp_ack_bauen(xid, self.klient, self.klient_ip,
+                           self.server, self.maske, self.server,
+                           self.server, art=art)
+        u = udp_bauen(self.server, self.klient_ip, 67, 68, d)
+        return self._rahmen(ipv4_bauen(self.server, self.klient_ip,
+                                       17, u, 2), seq)
+
+    def http_antwort(self, rumpf=b'OsumOK', seq=2, status=b'200 OK'):
+        kopf = b'HTTP/1.0 ' + status + b'\r\n' + \
+            b'Content-Type: text/plain\r\n' + \
+            b'Content-Length: ' + str(len(rumpf)).encode() + b'\r\n' + \
+            b'\r\n'
+        t = tcp_bauen(self.server, self.klient_ip, 80, 40000,
+                      1000, 1, 0x18, kopf + rumpf)
+        return self._rahmen(ipv4_bauen(self.server, self.klient_ip,
+                                       6, t, 3), seq)
+
+    def echo(self, nutz=b'ABCDEFG', seq=0):
+        """Ein UDP-Paket zurueck -- der einfachste Beweis, dass ein
+        Datenpaket in beide Richtungen geht."""
+        u = udp_bauen(self.server, self.klient_ip, 67, 68, nutz)
+        return self._rahmen(ipv4_bauen(self.server, self.klient_ip,
+                                       17, u, 4), seq)
+
+    def oeffnen(self, mpdu):
+        """Einen Rahmen des Klienten oeffnen. Wirft, wenn der
+        Pruefwert nicht stimmt -- und genau das ist erwuenscht."""
+        return ccmp_oeffnen(self.tk, mpdu)
+
+
 def main():
     if '--selbsttest' in sys.argv:
         i = sys.argv.index('--selbsttest')

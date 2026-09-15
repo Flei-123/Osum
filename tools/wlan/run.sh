@@ -189,6 +189,23 @@ fi
 Z=$(cat lib/wlan/*.fi lib/crypto/sha1.fi lib/crypto/aes.fi | wc -l)
 ok "die Runde in Zeilen: $Z in lib/wlan/ und den zwei neuen lib/crypto/-Dateien"
 
+# =====================================================================
+echo
+echo "== 11. RUNDE WLAN-3: der GANZE Weg gegen das simulierte Geraet =="
+# =====================================================================
+#
+# Suchlauf -> Netzwahl -> Auth/Assoz -> 4-Wege -> Schluessel ->
+# verschluesseltes Datenpaket hin UND zurueck -> DHCP -> HTTP.
+# Jeder Schritt eine eigene Zusage mit Zahl, dazu die Gegenproben, die
+# fehlschlagen MUESSEN, und die echten DHCP-Pakete aus der
+# Aufzeichnung. Die Begruendung, warum das der weiteste Punkt ist, den
+# man ohne eine Karte erreichen kann, steht in docs/RUNDE-WLAN3.md.
+python3 tools/wlan/vollweg.py 2>&1 | tee "$OUT/vollweg.txt"
+VWP=$(grep -c '^  OK    ' "$OUT/vollweg.txt" || true)
+VWF=$(grep -c '^  FAIL  ' "$OUT/vollweg.txt" || true)
+pass=$((pass + VWP))
+fail=$((fail + VWF))
+
 echo
 if [ "$fail" -eq 0 ]; then
     echo "WLAN: $pass Zusagen, 0 Fehler"
