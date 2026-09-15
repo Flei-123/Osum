@@ -1098,7 +1098,7 @@ lauf "28. Eigene Aufloesungen: drei Schranken mit ihrer Zahl, eine Frist ohne Zu
      tools/customres/run.sh customres '^CUSTOMRES: |^  OK    (1400x1050 steht in KEINER|das Foto ist 1400x1050|die genannte Zahl ist GENAU|und es steht da, was die Karte|und JETZT ist der Bildspeicher|eine Begruendung, die sich|nach 22 Sekunden Schlaf|der Kernel hat von SELBST|der Kernel findet den Modus|jetzt sind die drei Versuche|die Tafel steht auf dem SICHEREN|3840x2160 scheitert jetzt|mit 16 MiB war es noch|die Belegung der acht|zehn Zusagen ueber die|und die neun eigenen)'
 
 lauf "27. Marken statt Farben: hell, dunkel, automatisch, und der Kontrast nachgerechnet (tests/theme/run.sh, Runde THEME)" \
-     tests/theme/run.sh theme '^THEME: |^  OK    (rohe Farbwerte|derselbe Pruefer|alle 256|groesster Abstand|[a-z]+/(light|dark): (41|23|21|jede)|#[0-9a-f]+ hell|die Farbe bleibt|GEGENPROBE|aufloesen |nachsehen |vollstaendig |erkennen, |neu malen, |das Umschalten|[a-z]+: die (haeufigste|aufgeloeste)|ohne /etc/theme.conf|und die eingebaute|aus der kaputten|und 4 werden|was die Datei)'
+     tests/theme/run.sh theme '^THEME: |^  OK    (rohe Farbwerte|derselbe Pruefer|alle 256|groesster Abstand|[a-z]+/(light|dark): (41|23|21|jede)|#[0-9a-f]+ hell|die Farbe bleibt|GEGENPROBE|aufloesen |nachsehen |vollstaendig |erkennen, |neu malen, |das Umschalten|[a-z]+: die (haeufigste|aufgeloeste)|[a-z]+: surface [(]#[0-9a-f]+[)] traegt|[a-z]+: surface #[0-9a-f]+ und surface-sunken|[a-z]+: surface und surface-sunken sind beide|ohne /etc/theme.conf|und die eingebaute|aus der kaputten|und 4 werden|was die Datei)'
 
 # ABSCHNITT 25 -- RUNDE ICONS. Die Symbolschrift: aus Lucide (ISC)
 # zweiundvierzig Glyphen geschnitten, im privaten Bereich von Unicode,

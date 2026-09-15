@@ -76,14 +76,85 @@ ALLOWED_CONSTS = ("const RGB24", "const RGB_WHITE", "const RGB_BLACK",
                   "const RGB_BAD", "const ACCENT_BLACK",
                   "const STRUT_MAX", "const PROBE_IN", "const PROBE_OUT",
                   "const CURSOR_BODY", "const CURSOR_EDGE")
-# file -> the one function in it that may hold raw values
+# file -> the functions in it that may hold raw values.
+#
+# ROUND FARBE (15.09.2026), A-022: this was one name per file and is
+# now a LIST, because `kernel/wm.fi` has three separate reasons and
+# collapsing them into one entry would have hidden two of them.
+# EVERY entry is still a FUNCTION NAME, never a pattern -- the rule at
+# the top of this file has not moved.
+#
+# WHAT DOES *NOT* BELONG IN HERE, and this is the whole point of the
+# list: a colour that decides what a BUTTON, a WINDOW or the DESKTOP
+# looks like. Those must come from a token, and none of the entries
+# below is one of them. Each is a colour that is NOT styling:
+# a wire format, an opacity mask, or a debug board that must stay
+# readable in every theme precisely BECAUSE it ignores the theme.
 ALLOWED_FN = {
-    "kernel/user/wlibc.fi": "fn primitives_builtin",
-    # The server paints frame and title bar because it composites the
-    # screen. Ring 3 hands it eight numbers (WM_DECO); `deco_fallback`
-    # is what it draws with until somebody does, and a machine whose
-    # taskbar has not started yet may not be black on black.
-    "kernel/wm.fi": "fn deco_fallback",
+    "kernel/user/wlibc.fi": ["fn primitives_builtin"],
+    "kernel/wm.fi": [
+        # The server paints frame and title bar because it composites the
+        # screen. Ring 3 hands it eight numbers (WM_DECO); `deco_fallback`
+        # is what it draws with until somebody does, and a machine whose
+        # taskbar has not started yet may not be black on black.
+        "fn deco_fallback",
+        # ---------------------------------------------- A-022, reason 1
+        # `sig_colour` IS A WIRE FORMAT, NOT A STYLE.
+        #
+        # In signature mode (`wmsig`) the server stains a strip at the
+        # top and bottom of every window with a colour derived from the
+        # FRAME NUMBER. `tools/vsync/zerreiss.py` then reads a PPM back
+        # and counts tearing: two different signature colours inside one
+        # window means the screenshot caught a half-transferred frame.
+        # That reader carries the same eight triples in its own table
+        # (`zerreiss.py:50`), so these values are a CONTRACT BETWEEN TWO
+        # PROGRAMS -- the same kind of shared constant as a packet
+        # header, and the comment above the function already says why
+        # they are eight saturated tones: "ein Foto wird maschinell
+        # gelesen und ein Unterschied von eins waere keiner."
+        #
+        # A theme token here would break tearing detection outright: the
+        # eight would stop being far apart, and in a dark scheme several
+        # would collapse onto near-identical greys. `sig_nr` also maps
+        # the colour BACK to its number, which only works while the
+        # mapping is fixed.
+        "fn sig_colour",
+        # ---------------------------------------------- A-022, reason 2
+        # 0xFFFFFF HERE IS AN OPACITY, NOT A COLOUR.
+        #
+        # `cg_mal` fills the glyph buffer for a window caption button.
+        # The buffer holds COVERAGE; which colour it becomes is decided
+        # later, by `cap_glyph`, from the server's theme. White is the
+        # neutral element of that multiplication -- writing a token in
+        # here would apply the theme TWICE. The comment above the
+        # function states this ("Die Farbe ist 0xFFFFFF und nicht die
+        # echte: der Puffer haelt DECKUNGEN").
+        "fn cg_mal",
+        # ---------------------------------------------- A-022, reason 3
+        # THE MEASUREMENT BOARD DELIBERATELY IGNORES THE THEME.
+        #
+        # The six functions below paint the diagnostic board that Justin
+        # PHOTOGRAPHS off a real screen (`mess_grund`, `messzeile` and
+        # the four ink colours; the ground is painted by
+        # `measure_reason` -- the older name `mess_grund` survives only
+        # in comments). It is not part of the desktop: it is
+        # drawn over everything, before the taskbar exists, and it has
+        # to stay legible on a machine whose theme is broken -- which is
+        # exactly the machine it gets used on. Black ground with green /
+        # red / white / yellow ink is chosen for the CAMERA, not for
+        # taste, and `mess_ampel` uses green-vs-red as a MEANING
+        # ("hier kam etwas an" / "hier nicht").
+        #
+        # Binding this board to the token system would make the one
+        # instrument that has to work when the token system is wrong
+        # depend on the token system being right.
+        "fn measure_reason",
+        "fn messzeile",
+        "fn mess_gruen",
+        "fn mess_rot",
+        "fn mess_weiss",
+        "fn mess_gelb",
+    ],
 }
 
 
@@ -99,9 +170,10 @@ def scan(path, rel):
     inside = False
     hits = []
     uses = 0
+    allowed = ALLOWED_FN.get(rel, [])
     for no, line in enumerate(text.split("\n"), 1):
-        if rel in ALLOWED_FN:
-            if line.startswith(ALLOWED_FN[rel]):
+        if allowed:
+            if any(line.startswith(fn) for fn in allowed):
                 inside = True
             elif line.startswith("}"):
                 inside = False

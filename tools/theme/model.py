@@ -312,7 +312,20 @@ def resolve(scheme, dark, accent_override=None):
             put("surface-hover", neutral[N_700])
             put("surface-pressed", neutral[N_600])
             put("text-primary", neutral[N_50])
-            put("text-secondary", neutral[N_400])
+            # ROUND FARBE (15.09.2026), A-021: text-secondary N_400 ->
+            # N_300 in the dark branch.  WCAG 2.1 (1.4.3) wants 4.5:1
+            # for normal text; N_400 on surface-hover measured 4.038
+            # (day/night), 4.073 (paper), 4.075 (midnight) -- four
+            # promises below the line.  N_300 gives 6.974 / 6.896 /
+            # 7.066 and nothing else gets worse (the tightest other
+            # pairing, on surface-raised, sits at 9.85..10.18).
+            #
+            # This is the SECOND implementation being pulled in the
+            # SAME commit as the first (kernel/user/wlibc.fi), not
+            # afterwards.  Four of the five causes round KLEINKRAM
+            # dug up were exactly this file lagging behind that one.
+            # The number decided the token; see tools/theme/wcag_check.py.
+            put("text-secondary", neutral[N_300])
             put("text-disabled", neutral[N_600])
             put("border", neutral[N_700])
             put("border-strong", neutral[N_500])

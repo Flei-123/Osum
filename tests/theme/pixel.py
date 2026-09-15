@@ -5,6 +5,7 @@
     pixel.py <bild.ppm>                 die haeufigste Farbe
     pixel.py <bild.ppm> --top 5         die fuenf haeufigsten mit Anteil
     pixel.py <bild.ppm> --has RRGGBB    Beendigungscode 0, wenn es sie gibt
+    pixel.py <bild.ppm> --share RRGGBB  ihr Anteil in ZEHNTELPROZENT
     pixel.py <bild.ppm> --at X Y        die Farbe an genau dieser Stelle
 
 Ein PPM (P6) selbst zu lesen ist zwanzig Zeilen und spart eine
@@ -66,6 +67,19 @@ def main():
         n = c.get(col, 0)
         print("%06x %d" % (int(want, 16), n))
         return 0 if n > 0 else 1
+    # RUNDE FARBE (15.09.2026), A-023: der ANTEIL einer Marke, nicht ihr
+    # Rang. Ein Rang sagt nichts ueber die Oberflaeche, solange ein
+    # Verlauf beliebig viele Zwischenstufen zwischen die Marken schiebt
+    # -- siehe die Rechnung in tests/theme/run.sh, Abschnitt 9.
+    #
+    # ZEHNTELPROZENT UND NICHT PROZENT, weil `sh` nur ganze Zahlen
+    # vergleicht und 7,9 % sonst zu "7" wuerde; die Schwelle 3 % laege
+    # dann bei "3" und 3,4 % waere nicht von 3,0 % zu unterscheiden.
+    if args and args[0] == "--share":
+        want = args[1].lower().lstrip("#")
+        col = (int(want[0:2], 16), int(want[2:4], 16), int(want[4:6], 16))
+        print("%d" % (1000 * c.get(col, 0) // total))
+        return 0
     if args and args[0] == "--at":
         x, y = int(args[1]), int(args[2])
         k = (y * w + x) * 3

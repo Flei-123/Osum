@@ -92,8 +92,31 @@ lauf() { # name kommandozeile [zeitlimit]
     return $?
 }
 
-foto() { # name abbild kommandozeile
-    local name=$1 img=$2 zeile=$3
+# `foto` wartet auf eine MARKE in der seriellen Ausgabe und schiesst
+# dann das Bild. Welche Marke, sagt der Aufrufer ueber $4 -- Vorgabe
+# ist `wm: hold`, also "der Fenstermanager steht".
+#
+# ================================== RUNDE FARBE (15.09.2026), A-023
+# WARUM DAS EIN ARGUMENT GEWORDEN IST. `wm: hold` heisst NUR, dass der
+# Manager steht -- die Programme im Schreibtisch startet `kgui` DANACH
+# (kernel/kgui.fi:3478, `desk_spawn_n` fuer /bin/themetest). Wer bei
+# `wm: hold` fotografiert, erwischt den Schreibtisch mit einer gewissen
+# Wahrscheinlichkeit OHNE das Fenster.
+#
+# GEMESSEN, und es ist genau der Fehler, den Abschnitt 9 messen will:
+# im Lauf vom 15.09. trugen `light` und `dark` 0,0 % `surface`, waehrend
+# `green` und `violet` -- DASSELBE SCHEMA, dieselbe Aufloesung, nur
+# spaeter im Lauf -- 7,9 % trugen. Der Unterschied war nicht das Thema,
+# sondern dass das Fenster noch nicht offen war; die beiden ersten
+# Bilder verlieren das Rennen am oefsten, weil die Platte dann noch
+# kalt ist. Ein Bild ohne Fenster misst nichts ueber `surface`.
+#
+# `themetest` meldet `themetest: gui ready`, NACHDEM sein Fenster steht
+# und die Widgets darin gebaut sind (kernel/user/themetest.fi:538).
+# Darauf wird jetzt gewartet. Das ist keine Wartezeit auf Verdacht --
+# es ist die Marke des Programms, das auf dem Bild stehen soll.
+foto() { # name abbild kommandozeile [marke]
+    local name=$1 img=$2 zeile=$3 marke=${4:-"wm: hold"}
     local sock="$TMPD/s-$name.sock"
     rm -f "$sock" "$TMPD/$name.ppm" "$TMPD/$name.txt"
     cp -f "$img" "$TMPD/l-$name.img"
@@ -104,7 +127,7 @@ foto() { # name abbild kommandozeile
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 &
     local pid=$! i=0
     while [ $i -lt 2000 ]; do
-        grep -qa '^wm: hold' "$TMPD/$name.txt" 2>/dev/null && break
+        grep -qaF "$marke" "$TMPD/$name.txt" 2>/dev/null && break
         kill -0 "$pid" 2>/dev/null || break
         sleep 0.15; i=$((i+1))
     done
@@ -387,9 +410,60 @@ echo "== 9. sieben Bildschirme, drei Zeilen Unterschied"
 # welche der drei Flaechenmarken den Schirm anfuehrt, haengt daran, wie
 # gross die Fenster gerade stehen -- bei `dark` waren es in einem Lauf
 # 30 % `surface-sunken` und im naechsten 26 % `surface`, und beides ist
-# richtig. Die tragfaehige Zusage lautet: die Marke `surface` DIESES
-# Schemas in DIESEM Modus gehoert zu den drei haeufigsten Farben des
-# Bildes. Was sie ist, sagt das Modell und nicht dieses Skript.
+# richtig. Was die Marke IST, sagt das Modell und nicht dieses Skript.
+#
+# ================================== RUNDE FARBE (15.09.2026), A-023
+# DIE ZUSAGE LAUTETE "unter den DREI haeufigsten" UND DAS WAR FALSCH
+# GEMESSEN. Sie ist geaendert, und zwar mit Grund, nicht entschaerft.
+#
+# Die Offenliste liess offen, ob die Zusage die falsche Rolle prueft
+# oder die Oberflaeche die falsche nimmt. GEMESSEN WURDE BEIDES, an
+# den Bildern selbst (tools/theme/shots.sh):
+#
+#   Schema     surface        Punkte   Anteil   Rang
+#   light      #f8fafc         80879    7,9 %     4
+#   green      #f8fafc         80879    7,9 %     4
+#   violet     #f8fafc         80879    7,9 %     4
+#   gold       #fafaf9         80879    7,9 %     6
+#   dark       #0f172a         80879    7,9 %     3
+#   midnight   #18181b         80879    7,9 %     3
+#
+# ACHTZIGTAUSENDACHTHUNDERTNEUNUNDSIEBZIG PUNKTE IN ALLEN SECHS, AUF
+# DIE STELLE GENAU DIESELBEN ZEILEN (y=92..451, die Fensterflaeche).
+# Die Oberflaeche malt `surface` also UEBERALL GLEICH -- sie nimmt
+# NICHT die falsche Rolle, und `surface` fehlt auch nicht im Bild.
+#
+# Verschieden ist allein, WIE VIELE VERLAUFSSTUFEN DAVOR LIEGEN. Der
+# Schreibtisch malt einen Verlauf von `surface-sunken` (oben) nach
+# `surface` (unten), linear je Kanal. Wie viele verschiedene Farben
+# dabei entstehen, haengt am ABSTAND der beiden Rampenstufen:
+#
+#   Schema     |sunken - surface|   Verlaufsstufen im Bild
+#   gold                        5                        6
+#   light                       7                       14
+#   midnight                   16                       31
+#   dark                       19                       47
+#
+# Hell liegen die beiden Stufen dicht beieinander: wenige, dafuer
+# BREITE Baender, und zwei davon (#f7f9fb 10,4 %, #ffffff 9,7 %)
+# schieben sich vor die 7,9 % von `surface`. Dunkel sind es 31 bis 47
+# duenne Baender, von denen keines an 7,9 % heranreicht. Es ist reine
+# RAMPENGEOMETRIE, keine Eigenschaft der Oberflaeche -- und ein Rang
+# ist deshalb hier gar keine Aussage ueber die Oberflaeche.
+#
+# DIE TRAGFAEHIGE ZUSAGE misst die Rolle statt ihres Rangs: `surface`
+# muss mit einer NENNENSWERTEN Flaeche im Bild stehen. Die Schwelle
+# ist 3 % -- die Fensterflaeche sind gemessen 7,9 %, also mehr als das
+# Doppelte, und die Zusage bricht, sobald die Flaeche halbiert wird.
+# Zum Vergleich: die Zwischenstufen eines Verlaufs kommen einzeln nie
+# ueber 0,4 %, ein versehentlich mit einer Verlaufsfarbe gemaltes
+# Fenster faellt also durch.
+#
+# DIE GEGENPROBE, DIE DIE ALTE ZUSAGE NICHT HATTE: es wird zusaetzlich
+# geprueft, dass `surface` und `surface-sunken` im Bild VERSCHIEDEN
+# sind. Genau das war der Fehler, den Commit 65d3300 gefunden hat (zwei
+# Rollen auf derselben Rampenstufe) -- eine Zusage ueber Rang haette
+# ihn NICHT bemerkt, eine ueber Verschiedenheit schon.
 marke_von() { # schema modus rolle [akzent]
     python3 tools/theme/model.py semantic "assets/schemes/$1.scheme" "$2" \
         ${4:+"$4"} | awk -v r="$3" '$2 == r {print $3}'
@@ -400,18 +474,48 @@ shot() { # name schema modus akzent
         "$TMPD/img-$name.img" > /dev/null 2>&1 || {
         bad "$name: das Abbild liess sich nicht bauen"; return; }
     foto "shot-$name" "$TMPD/img-$name.img" \
-        "gfx wm wmhold desk einst themeshot nokbd nosched noproc nofs"
-    local got want
-    got=$(python3 tests/theme/pixel.py "$TMPD/shot-$name.ppm" --top 3 2>/dev/null)
+        "gfx wm wmhold desk einst themeshot nokbd nosched noproc nofs" \
+        "themetest: gui ready"
+    local want sunk anteil top3
     want=$(marke_von "$sch" "$mod" surface "$akz")
-    if [ -z "$got" ]; then
+    sunk=$(marke_von "$sch" "$mod" surface-sunken "$akz")
+    top3=$(python3 tests/theme/pixel.py "$TMPD/shot-$name.ppm" --top 3 2>/dev/null)
+    if [ -z "$top3" ]; then
         bad "$name: kein Bildschirmfoto"
         return
     fi
-    if echo "$got" | grep -qi "$want"; then
-        ok "$name: surface (#$want) ist unter den drei haeufigsten ($got)"
+    # Anteil der Marke `surface` am ganzen Bild, in Zehntelprozent.
+    anteil=$(python3 tests/theme/pixel.py "$TMPD/shot-$name.ppm" \
+        --share "$want" 2>/dev/null)
+    if [ -z "$anteil" ]; then
+        bad "$name: der Anteil von #$want liess sich nicht messen"
+    elif [ "$anteil" -ge 30 ]; then
+        ok "$name: surface (#$want) traegt $anteil/10 % des Bildes (top3 $top3)"
     else
-        bad "$name: #$want fehlt unter den drei haeufigsten -- $got"
+        bad "$name: surface (#$want) traegt nur $anteil/10 % -- top3 $top3"
+    fi
+    # UND die beiden Flaechenrollen muessen unterscheidbar bleiben --
+    # AUSSER im Hochkontrastschema, wo sie es mit ABSICHT nicht sind.
+    #
+    # `contrast=high` legt surface, surface-raised und surface-sunken
+    # alle drei auf N_0 (model.py, Zweig `if high`): wer hohen Kontrast
+    # braucht, soll Flaechen NICHT an zarten Helligkeitsstufen
+    # unterscheiden muessen, sondern an Raendern -- dafuer steht dort
+    # `border` ebenfalls auf N_1000. Eine Zusage, die hier
+    # Verschiedenheit fordert, wuerde also genau das Merkmal
+    # einklagen, das dieses Schema bewusst weglaesst.
+    local hoch
+    hoch=$(awk -F= '/^contrast=/ {print $2}' "assets/schemes/$sch.scheme")
+    if [ "$hoch" = "high" ]; then
+        if [ "$want" = "$sunk" ]; then
+            ok "$name: surface und surface-sunken sind beide #$want (contrast=high, so gewollt)"
+        else
+            bad "$name: contrast=high, aber surface #$want != surface-sunken #$sunk"
+        fi
+    elif [ "$want" = "$sunk" ]; then
+        bad "$name: surface und surface-sunken sind beide #$want"
+    else
+        ok "$name: surface #$want und surface-sunken #$sunk sind verschieden"
     fi
 }
 shot light    day      light ""
