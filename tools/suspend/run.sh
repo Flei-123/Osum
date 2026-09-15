@@ -654,6 +654,267 @@ else
     grep -a 'schlaf: start\|KALTSTART' "$TMPD/gn-b.txt" | sed 's/^/        /' | head -2
 fi
 
+# ==================================================================
+# 12. RUNDE WACH (K-018, Abschluss): LAUFEN DIE PROZESSE WEITER?
+#
+# DAS IST DIE ZUSAGE, UM DIE ES GEHT, und sie ist etwas anderes als
+# alles, was bis hierher gemessen wurde. Abschnitt 9 prueft, ob der
+# INHALT eines Benutzerrahmens zurueckgekommen ist -- byteweise, mit
+# Gegenrechnung. Das ist viel, aber es ist nicht "der Prozess laeuft":
+# die Zahlen im Rahmen stehen dort auch dann, wenn nie wieder eine
+# Anweisung dieses Prozesses ausgefuehrt wurde. Sie sind ja von VOR
+# dem Schlafen.
+#
+# Hier wird gemessen, ob der Prozess nach dem Wiederanlauf AUF DEM
+# PROZESSOR war. Der Traeger dafuer ist `P_WACH` (kernel/uprog.fi,
+# Nr. 65): eine Schleife, die einen Zaehler hochzaehlt und sich kurz
+# hinlegt. Geprueft wird in drei Stufen, von denen keine allein
+# genuegt:
+#
+#   1. zurueckgeholt  -- `wach: zurueck aufgaben=N`
+#   2. auf dem Prozessor gewesen -- `gelaufen=N` (aus `T_RUNS`, das
+#      `switch_to` hochzaehlt)
+#   3. WEITERGERECHNET -- der Zaehler steht HOEHER als der, der ins
+#      Abbild ging, UND die Summe passt zu ihrem Schritt
+#      (`n*(n+1)/2`).
+#
+# Stufe 3 ist der Beweis. Die Vergleichszahl (`vorher=`) kommt aus
+# dem ABBILD und nicht aus dem laufenden Kern -- sonst verglichen
+# wir gegen eine Null, und jeder Wert waere "gestiegen". Genau
+# dieser Fehler stand in der ersten Fassung dieser Runde und ist
+# gemessen worden.
 echo
-echo "== SUSPEND+SCHLAF: $pass bestanden, $fail gescheitert =="
+echo "== 12. RUNDE WACH: laufen die Prozesse nach dem Hochlauf weiter? =="
+wzyklus() { # name extra-arm timeout
+    local name=$1 extra=${2:-} t=${3:-400}
+    rm -f "$TMPD/$name.img"
+    qemu-img create -f raw "$TMPD/$name.img" 64M >/dev/null 2>&1
+    timeout "$t" $QEMU_X86 -kernel "$TMPD/k.elf" -m 512 \
+        -append "osum wacharm schlafarm $extra acpiev" \
+        -serial "file:$TMPD/$name-a.txt" -display none -no-reboot \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+        -drive "file=$TMPD/$name.img,format=raw,if=ide,index=0" \
+        > /dev/null 2>&1
+    timeout "$t" $QEMU_X86 -kernel "$TMPD/k.elf" -m 512 \
+        -append "osum wachpruef schlafpruef acpiev" \
+        -serial "file:$TMPD/$name-b.txt" -display none -no-reboot \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+        -drive "file=$TMPD/$name.img,format=raw,if=ide,index=0" \
+        > /dev/null 2>&1
+    return 0
+}
+wzyklus wz1 "" 400
+WA="$TMPD/wz1-a.txt"; WB="$TMPD/wz1-b.txt"
+hat_nicht "$WA" 'panic' "kein Ausnahmefehler im Sicherungslauf (wach)"
+hat_nicht "$WB" 'panic' "kein Ausnahmefehler im Wiederanlauf (wach)"
+
+# MEHRERE PROZESSE MIT VERSCHIEDENEN PIDS. Ein einzelner Prozess
+# koennte zufaellig funktionieren -- etwa weil sein Kernstapel
+# gerade wieder an dieselbe Stelle faellt.
+WN=$(grep -a 'wach: prozesse' "$WA" | sed -n '1s/.*n=\([0-9]*\).*/\1/p')
+WPIDS=$(grep -a 'wach: prozesse' "$WA" | sed -n '1s/.*pids=\([0-9,]*\).*/\1/p')
+if [ -n "$WN" ] && [ "$WN" -ge 3 ]; then
+    ok "Lauf A legt $WN Prozesse an, pids=$WPIDS"
+else
+    bad "Lauf A hat weniger als drei Prozesse angelegt (n=${WN:-?})"
+fi
+WVERSCH=$(printf '%s' "$WPIDS" | tr ',' '\n' | sort -u | grep -c .)
+if [ "${WVERSCH:-0}" -ge 3 ]; then
+    ok "und ihre pids sind VERSCHIEDEN ($WVERSCH verschiedene)"
+else
+    bad "die pids sind nicht verschieden: $WPIDS"
+fi
+
+# DIE AUFGABEN KOMMEN ZURUECK -- mit Kernstapeln und Seitentafeln.
+if grep -a 'wach: zurueck' "$WB" | grep -aq 'why=ok'; then
+    ok "der Wiederanlauf holt die Aufgaben zurueck (why=ok)"
+else
+    bad "der Wiederanlauf hat keine Aufgaben zurueckgeholt"
+    grep -a 'wach: zurueck' "$WB" | sed 's/^/        /' | head -2
+fi
+WBACK=$(grep -a 'wach: zurueck' "$WB" | sed -n '1s/.*aufgaben=\([0-9]*\).*/\1/p')
+WKST=$(grep -a 'wach: zurueck' "$WB" | sed -n '1s/.*kstapel=\([0-9]*\).*/\1/p')
+if [ -n "$WBACK" ] && [ "$WBACK" -ge 3 ]; then
+    ok "PUNKT 1: $WBACK Aufgabeneintraege stehen wieder in der Tafel"
+else
+    bad "PUNKT 1: es kamen ${WBACK:-0} Aufgaben zurueck"
+fi
+# 17 Rahmen je Aufgabe (KSTACK_FRAMES + 1 Wache).
+if [ -n "$WKST" ] && [ -n "$WBACK" ] && [ "$WKST" -eq $((WBACK * 17)) ]; then
+    ok "PUNKT 1: $WKST Kernstapelrahmen == $WBACK Aufgaben * 17"
+else
+    bad "die Kernstapelrahmen passen nicht: kstapel=${WKST:-?}, aufgaben=${WBACK:-?}"
+fi
+
+# PUNKT 2: SIE WAREN AUF DEM PROZESSOR.
+WLAUF=$(grep -a 'wach: weiterlauf' "$WB" | sed -n '1s/.*gelaufen=\([0-9]*\).*/\1/p')
+if [ -n "$WLAUF" ] && [ "$WLAUF" -ge 3 ]; then
+    ok "PUNKT 2: $WLAUF wiederangelaufene Prozesse waren auf dem Prozessor (T_RUNS>0)"
+else
+    bad "PUNKT 2: kein wiederangelaufener Prozess kam auf den Prozessor (gelaufen=${WLAUF:-0})"
+fi
+
+# ---- DIE ZUSAGE: DER ZAEHLER STEIGT, UND DIE SUMME STIMMT ----
+WVOR=$(grep -a 'wach: weiter ' "$WB" | sed -n '1s/.*vorher=\([0-9]*\).*/\1/p')
+WNACH=$(grep -a 'wach: weiter ' "$WB" | sed -n '1s/.*nachher=\([0-9]*\).*/\1/p')
+WSUM=$(grep -a 'wach: weiter ' "$WB" | sed -n '1s/.*summe=\([0-9]*\).*/\1/p')
+WSOLL=$(grep -a 'wach: weiter ' "$WB" | sed -n '1s/.* soll=\([0-9]*\).*/\1/p')
+if [ -n "$WVOR" ] && [ "$WVOR" -gt 0 ]; then
+    ok "die Vergleichszahl kommt aus dem ABBILD (vorher=$WVOR, nicht 0)"
+else
+    bad "vorher=${WVOR:-?} -- gegen 0 verglichen misst diese Zusage nichts"
+fi
+if [ -n "$WVOR" ] && [ -n "$WNACH" ] && [ "$WNACH" -gt "$WVOR" ]; then
+    ok "DIE ZUSAGE: der Zaehler STEIGT ueber den Ruhezustand hinweg ($WVOR -> $WNACH)"
+else
+    bad "der Zaehler ist nicht gestiegen: vorher=${WVOR:-?} nachher=${WNACH:-?}"
+fi
+if [ -n "$WSUM" ] && [ "$WSUM" = "$WSOLL" ] && [ "${WSUM:-0}" -gt 0 ]; then
+    ok "und die Gegenrechnung stimmt: summe=$WSUM == n*(n+1)/2=$WSOLL"
+else
+    bad "die Gegenrechnung stimmt NICHT: summe=${WSUM:-?} soll=${WSOLL:-?}"
+fi
+WWEITER=$(grep -a 'wach: weiterlauf' "$WB" | sed -n '1s/.*weiterlauf=\([0-9]*\).*/\1/p')
+WALLE=$(grep -a 'wach: weiterlauf' "$WB" | sed -n '1s/.*alle=\([0-9]*\).*/\1/p')
+if [ -n "$WWEITER" ] && [ "$WWEITER" -ge 3 ]; then
+    ok "MEHRERE PROZESSE: $WWEITER laufen nachweislich weiter (nicht nur einer)"
+else
+    bad "es laufen ${WWEITER:-0} Prozesse weiter -- verlangt sind mindestens drei"
+fi
+if [ "${WALLE:-0}" = "1" ]; then
+    ok "und es sind ALLE Prozesse dieser Runde, nicht nur einige"
+else
+    bad "nicht alle wiederangelaufenen Prozesse dieser Runde rechnen weiter"
+fi
+
+# ---- KEIN VERLORENER RAHMEN, MIT DEM NEUEN POSTEN ----
+# Die Zusage der Vorrunde lautete `frei + eingespielt == frei_vorher`.
+# Diese Runde belegt ZUSAETZLICH Kernstapel und Seitentabellen, also
+# wird der Posten MITGEZAEHLT statt die Zusage zu lockern.
+if grep -aq 'schlaf: rahmen gleich' "$WB"; then
+    ok "kein verlorener Rahmen -- auch mit Kernstapeln und Seitentafeln"
+else
+    bad "die Rahmenrechnung geht im Wach-Zyklus nicht auf"
+    grep -a 'RAHMEN VERLOREN\|rahmen gleich' "$WB" | sed 's/^/        /' | head -2
+fi
+WWACH=$(grep -a 'rahmen gleich\|RAHMEN VERLOREN' "$WB" | sed -n '1s/.*wach=\([0-9]*\).*/\1/p')
+if [ -n "$WWACH" ] && [ "$WWACH" -gt 0 ]; then
+    ok "und der Wiederanlauf benennt seine eigenen $WWACH Rahmen (statt sie zu verschweigen)"
+else
+    bad "der Wiederanlauf zaehlt seine eigenen Rahmen nicht"
+fi
+
+# DIE ZUSAGEN DER VORRUNDE BLEIBEN GRUEN -- im selben Lauf.
+hat "$WB" 'schlaf: gleich' "die Zusage der Vorrunde haelt: der Zustand ist identisch"
+hat "$WB" 'schlaf: weitergerechnet=1' "und ihre Gegenrechnung haelt ebenfalls"
+
+# ==================================================================
+# 13. ZWEI ZYKLEN HINTEREINANDER, verschiedene Abbilder UND
+#     verschiedene Zustaende -- mit weiterlaufenden Prozessen.
+echo
+echo "== 13. zwei Wach-Zyklen mit verschiedenen Zustaenden =="
+wzyklus wz2 "wach schlaf" 400
+W2B="$TMPD/wz2-b.txt"
+hat_nicht "$W2B" 'panic' "kein Ausnahmefehler im zweiten Zyklus"
+W2VOR=$(grep -a 'wach: weiter ' "$W2B" | sed -n '1s/.*vorher=\([0-9]*\).*/\1/p')
+W2NACH=$(grep -a 'wach: weiter ' "$W2B" | sed -n '1s/.*nachher=\([0-9]*\).*/\1/p')
+W2SUM=$(grep -a 'wach: weiter ' "$W2B" | sed -n '1s/.*summe=\([0-9]*\).*/\1/p')
+W2SOLL=$(grep -a 'wach: weiter ' "$W2B" | sed -n '1s/.* soll=\([0-9]*\).*/\1/p')
+if [ -n "$W2NACH" ] && [ -n "$W2VOR" ] && [ "$W2NACH" -gt "$W2VOR" ]; then
+    ok "auch im zweiten Zyklus steigt der Zaehler ($W2VOR -> $W2NACH)"
+else
+    bad "im zweiten Zyklus steigt der Zaehler nicht"
+fi
+if [ -n "$W2SUM" ] && [ "$W2SUM" = "$W2SOLL" ] && [ "${W2SUM:-0}" -gt 0 ]; then
+    ok "und die Gegenrechnung stimmt auch dort ($W2SUM)"
+else
+    bad "die Gegenrechnung des zweiten Zyklus stimmt nicht"
+fi
+# DIE ZUSTAENDE MUESSEN VERSCHIEDEN SEIN. Ein stehengebliebenes
+# Abbild faellt sonst nicht auf -- dieselbe Lehre wie in Abschnitt 10.
+S1=$(grep -a 'schlaf: start' "$WB"  | sed -n '1s/.*sum=\(0x[0-9a-f]*\).*/\1/p')
+S2=$(grep -a 'schlaf: start' "$W2B" | sed -n '1s/.*sum=\(0x[0-9a-f]*\).*/\1/p')
+if [ -n "$S1" ] && [ -n "$S2" ] && [ "$S1" != "$S2" ]; then
+    ok "die beiden Zyklen haben VERSCHIEDENE Abbilder ($S1 != $S2)"
+else
+    bad "beide Zyklen haben dasselbe Abbild ($S1 / $S2)"
+fi
+
+# ==================================================================
+# 14. DIE GEGENPROBE: `nowach` schaltet den Wiederanlauf ab.
+#
+# Eine Abnahme, die immer gruen ist, misst nichts. Mit `nowach` muss
+# das Abbild weiterhin eingespielt werden (der Speicher kommt
+# zurueck -- das ist der Stand der Vorrunde), aber KEINE Aufgabe darf
+# in die Laufliste kommen. Das trennt die beiden Zusagen sauber
+# voneinander.
+echo
+echo "== 14. Gegenprobe: 'nowach' laesst die Prozesse liegen =="
+rm -f "$TMPD/wn.img"
+qemu-img create -f raw "$TMPD/wn.img" 64M >/dev/null 2>&1
+timeout 400 $QEMU_X86 -kernel "$TMPD/k.elf" -m 512 \
+    -append "osum wacharm schlafarm acpiev" \
+    -serial "file:$TMPD/wn-a.txt" -display none -no-reboot \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+    -drive "file=$TMPD/wn.img,format=raw,if=ide,index=0" > /dev/null 2>&1
+timeout 400 $QEMU_X86 -kernel "$TMPD/k.elf" -m 512 \
+    -append "osum wachpruef schlafpruef nowach acpiev" \
+    -serial "file:$TMPD/wn-b.txt" -display none -no-reboot \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+    -drive "file=$TMPD/wn.img,format=raw,if=ide,index=0" > /dev/null 2>&1
+WNB="$TMPD/wn-b.txt"
+if grep -a 'wach: zurueck' "$WNB" | grep -aq 'why=abgeschaltet'; then
+    ok "'nowach' schaltet den Wiederanlauf der Aufgaben ab"
+else
+    bad "'nowach' hat den Wiederanlauf nicht abgeschaltet"
+    grep -a 'wach: zurueck' "$WNB" | sed 's/^/        /' | head -2
+fi
+if grep -a 'wach: zurueck' "$WNB" | grep -aq 'aufgaben=0'; then
+    ok "und es kommt KEINE Aufgabe in die Laufliste"
+else
+    bad "trotz 'nowach' kamen Aufgaben zurueck"
+fi
+# ABER DER SPEICHER KOMMT TROTZDEM ZURUECK -- der Stand der Vorrunde
+# bleibt davon unberuehrt. Das ist der Beweis, dass die beiden
+# Zusagen wirklich getrennt sind und nicht eine an der anderen haengt.
+if grep -a 'schlaf: start' "$WNB" | grep -aq 'abbild=1'; then
+    ok "der SPEICHER kommt trotzdem zurueck (die Zusage der Vorrunde haengt nicht daran)"
+else
+    bad "'nowach' hat auch das Einspielen des Speichers verhindert"
+fi
+hat_nicht "$WNB" 'panic' "kein Ausnahmefehler mit 'nowach'"
+
+# ==================================================================
+# 15. DER ZUGETEILTE RAUM DER RUNDE WACH.
+#
+# Dieselbe Pruefung wie in Abschnitt 1 und 7, fuer den dritten
+# Bereich. Zugeteilt: kdata 0x127000..0x12C000 und die Modusindizes
+# 1050..1059.
+echo
+echo "== 15. der zugeteilte Raum der Runde WACH =="
+wv=$(grep -aE "^const WACH_OFF: u64 = 0x[0-9A-Fa-f]+" kernel/kstate.fi \
+    | head -1 | grep -oE '0x[0-9A-Fa-f]+')
+wm=$(grep -aE "^const WACH_MAX: u64 = 0x[0-9A-Fa-f]+" kernel/kstate.fi \
+    | head -1 | grep -oE '0x[0-9A-Fa-f]+')
+if [ -n "$wv" ] && [ "$((wv))" -eq $((0x127000)) ]; then
+    ok "WACH_OFF = $wv -- genau der zugeteilte Anfang"
+else
+    bad "WACH_OFF = ${wv:-fehlt}, zugeteilt war 0x127000"
+fi
+if [ -n "$wv" ] && [ -n "$wm" ] && [ "$((wv + wm))" -le $((0x12C000)) ]; then
+    ok "WACH_OFF+WACH_MAX = $(printf '0x%X' $((wv + wm))) bleibt in 0x12C000"
+else
+    bad "der Bereich geht ueber 0x12C000 hinaus -- das ist fremdes Land"
+fi
+wausser=$(grep -aE "^const M_(WACH|WACHARM|WACHPRUEF|NOWACH|WACHMESS): u64 = [0-9]+" \
+    kernel/kstate.fi | grep -oE '= [0-9]+' | grep -oE '[0-9]+' \
+    | awk '$1 < 1050 || $1 > 1059' | wc -l)
+if [ "$wausser" -eq 0 ]; then
+    ok "alle Modusindizes der Runde WACH liegen in 1050..1059"
+else
+    bad "$wausser Modusindex(e) der Runde WACH liegen ausserhalb"
+fi
+
+echo
+echo "== SUSPEND+SCHLAF+WACH: $pass bestanden, $fail gescheitert =="
 [ "$fail" -eq 0 ]

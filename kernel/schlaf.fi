@@ -72,6 +72,7 @@ import kbd
 import fb
 import kutil
 import power
+import wach
 import arch.arch
 
 // ---------------------------------------------------- die Skalare
@@ -111,6 +112,11 @@ const SL_MEMSUM: u64 = 240 // Pruefsumme ueber die Rahmen
 const SL_FREI0: u64 = 248 // freie Rahmen VOR dem Einspielen
 const SL_ZYK: u64 = 256 // welcher Zyklus gefahren wird
 const SL_FBSUM: u64 = 264 // Pruefsumme ueber das Muster im Bildspeicher
+// RUNDE WACH: die freien Rahmen UNMITTELBAR nach dem Wiederanlauf,
+// bevor eine wiederangelaufene Aufgabe zum ersten Mal laeuft. Nur
+// gegen diese Zahl laesst sich "kein verlorener Rahmen" pruefen --
+// alles danach ist der Betrieb und nicht der Wiederanlauf.
+const SL_FREI1: u64 = 272
 // DIE KENNUNG, die der Prozess `P_SCHLAF` in seine private Seite
 // schreibt (`kernel/uprog.fi`). Der Pruefstand erkennt die Seite
 // daran in den eingespielten Rahmen wieder.
@@ -243,6 +249,22 @@ fn s(state: u64, off: u64, v: u64) {
 
 fn buf(state: u64) -> u64 {
     return state + kstate.SCHLAF_OFF + SL_BUF
+}
+
+// RUNDE WACH: DERSELBE SEKTORPUFFER, EIN ZWEITER BENUTZER.
+//
+// `kernel/wach.fi` schreibt seinen Aufgabenteil durch GENAU DIESEN
+// Puffer -- nicht durch einen eigenen. Der Grund steht schon im Kopf
+// dieser Datei: ein zweiter Puffer waere eine zweite Stelle fuer
+// dieselbe Wahrheit, und vier Kilooktette in kdata sind knapp.
+//
+// Die Bedingung dafuer ist eine REIHENFOLGE, und sie wird
+// eingehalten: `wach.save_tasks` laeuft NACH allem, was
+// `save_image` durch den Puffer schiebt, und `wach.restore_tasks`
+// NACH dem letzten Lesezugriff von `boot_check`. Kein Aufruf der
+// einen Seite steht zwischen zwei Zugriffen der anderen.
+fn buf_addr(state: u64) -> u64 {
+    return buf(state)
 }
 
 fn regs(state: u64) -> u64 {
@@ -647,6 +669,18 @@ fn img_blocks(state: u64, frames: u64) -> u64 {
     return 2 + fpu_b + (frames * 8 + 511) / 512 + frames * 8
 }
 
+// RUNDE WACH: WO DER AUFGABENTEIL ANFAENGT.
+//
+// Er liegt HINTER allem, was diese Datei schreibt, im selben
+// reservierten Bereich am Plattenende. Die Rechnung ist dieselbe wie
+// in `img_blocks` -- und sie steht hier und nicht in `wach.fi`,
+// weil die Aufteilung des Bereichs dieser Datei gehoert. Wer sie an
+// zwei Stellen rechnet, bekommt bei der naechsten Aenderung zwei
+// verschiedene Antworten.
+fn wach_base(state: u64, frames: u64) -> u64 {
+    return img_base(state) + img_blocks(state, frames)
+}
+
 fn save_image(state: u64) -> bool {
     if susp.diskok(state) == 0 {
         return false
@@ -664,7 +698,12 @@ fn save_image(state: u64) -> bool {
     save_devs(state)
 
     let frames: u64 = frames_expected(state)
-    if img_blocks(state, frames) > IMG_RESERVE {
+    // RUNDE WACH: DER AUFGABENTEIL BRAUCHT AUCH PLATZ. Er liegt
+    // hinter den Rahmen im selben reservierten Bereich, und seine
+    // Kernstapel sind der groesste Posten: je Aufgabe 17 Rahmen zu
+    // acht Bloecken. Wer ihn hier nicht mitrechnet, schreibt ihn
+    // ueber das Dateisystem -- deshalb steht er MIT in der Pruefung.
+    if img_blocks(state, frames) + wach_reserve() > IMG_RESERVE {
         // Mehr Rahmen, als in den reservierten Bereich passen. Das
         // ist KEIN stiller Fehler: lieber gar kein Abbild als ein
         // halbes, das ueber das Dateisystem laeuft.
@@ -785,10 +824,35 @@ fn save_image(state: u64) -> bool {
     if !blk.write_on(state, dev, base + B_HEAD, b) {
         return false
     }
+    // ================ RUNDE WACH: DER AUFGABENTEIL, NACH DEM KOPF.
+    //
+    // NACH dem Kopf und nicht davor, und das ist dieselbe Regel, mit
+    // der diese Datei ihren eigenen Kopf zuletzt schreibt: was der
+    // Wiederanlauf findet, soll entweder ganz da sein oder gar
+    // nicht. Ein Aufgabenteil ohne gueltiges Abbild darunter wird
+    // nie gelesen -- `boot_check` prueft erst MAGIC, Hardware und
+    // Pruefsumme des Abbilds und ruft `wach.restore_tasks` erst
+    // danach.
+    //
+    // Der Aufgabenteil hat seine EIGENE Pruefsumme. Er gehoert
+    // bewusst nicht in die des Abbilds: so bleiben die 66 Zusagen
+    // der Vorrunde unveraendert gueltig, und ein beschaedigter
+    // Aufgabenteil verwirft nicht den ganzen Ruhezustand, sondern
+    // nur das Weiterlaufen.
+    wach.save_tasks(state, dev, wach_base(state, frames), b)
     blk.flush(state)
     s(state, SL_SUM, g(state, SL_MEMSUM))
     s(state, SL_ARMED, 1)
     return true
+}
+
+// Wie viele Bloecke fuer den Aufgabenteil freigehalten werden.
+// Acht Aufgaben zu 17 Kernstapelrahmen zu acht Bloecken sind 1088,
+// dazu Kopf, Saetze und Seitentafel. Die Zahl ist eine OBERGRENZE
+// und wird nicht ueberschritten, weil `wach.fi` hoechstens
+// `MAX_SAVE` Aufgaben sichert.
+fn wach_reserve() -> u64 {
+    return 8 * 17 * 8 + 32
 }
 
 // ==================================================================
@@ -1014,6 +1078,38 @@ fn boot_check(state: u64) -> bool {
     s(state, SL_RESUMED, 1)
     s(state, SL_WHY, BW_OK)
     restore_devs(state)
+    // ================ RUNDE WACH: DIE AUFGABEN WIEDER IN DIE LISTE.
+    //
+    // GENAU HIER und keine Zeile frueher. Die Reihenfolge ist
+    // zwingend und nicht Geschmack:
+    //
+    //   * NACH dem Einspielen der Datenrahmen -- die Seitentabellen,
+    //     die `wach` baut, zeigen auf genau diese Rahmen. Waeren sie
+    //     noch nicht da, zeigten sie auf fremden oder freien
+    //     Speicher.
+    //   * NACH `mem.reserve_frame` auf jeden davon (eine Schleife
+    //     weiter oben) -- sonst gaebe der naechste `frame_alloc`
+    //     einen Rahmen ein zweites Mal aus, und `wach` baute seinen
+    //     Kernstapel darueber.
+    //   * NACH `restore_devs` -- der Zeitgeberstand steht dann, und
+    //     eine Aufgabe, die gleich laeuft, liest ihn.
+    //
+    // Der Rueckgabewert wird bewusst NICHT geprueft: ein
+    // Aufgabenteil, der fehlt oder nicht passt, ist kein Grund, das
+    // eingespielte Abbild zu verwerfen. Dann kommt der Speicher
+    // zurueck und die Prozesse laufen nicht weiter -- genau der
+    // Stand der Vorrunde, und `wach.bericht` sagt warum.
+    wach.restore_tasks(state, dev, wach_base(state, frames), b)
+    // DIE FREIEN RAHMEN GENAU HIER FESTHALTEN.
+    //
+    // Der Unterschied, den diese eine Zeile misst, ist der zwischen
+    // "der Wiederanlauf verliert Rahmen" und "die wiederangelaufenen
+    // Prozesse fordern welche an". Beides sieht in der Endzahl
+    // gleich aus, und nur das erste waere ein Fehler: ein Prozess,
+    // der laeuft, DARF Speicher anfordern -- sein Stapel waechst
+    // ueber Seitenfehler, und genau das ist der Beweis, dass er
+    // laeuft.
+    s(state, SL_FREI1, mem.frames_free(state))
     return true
 }
 
@@ -1551,14 +1647,46 @@ fn pruef(state: u64, frei_soll: u64) {
     // DIE RAHMEN. `frei_soll` ist die Zahl, die dieser Lauf VOR dem
     // Einspielen hatte; nach dem Einspielen muessen genau die
     // eingespielten Rahmen fehlen und kein einziger mehr.
+    //
+    // ================= RUNDE WACH: DIE RECHNUNG BEKOMMT EINEN POSTEN
+    //
+    // Die Zusage der Vorrunde lautete `frei + eingespielt ==
+    // frei_vorher`, und sie war richtig, SOLANGE der Wiederanlauf
+    // nur Datenseiten zurueckholte. Diese Runde holt zusaetzlich die
+    // KERNSTAPEL zurueck (je Aufgabe 17 Rahmen) und baut die
+    // SEITENTABELLEN neu -- beides belegt Rahmen, die vorher frei
+    // waren.
+    //
+    // DIE ZUSAGE WIRD NICHT GELOCKERT, SONDERN GENAUER: statt
+    // "eingespielt" steht jetzt "eingespielt + was der Wiederanlauf
+    // selbst genommen hat", und die zweite Zahl wird in `wach.fi`
+    // GEZAEHLT (Differenz der freien Rahmen), nicht geschaetzt. Wer
+    // eine Zusage aufweicht, bis sie passt, misst nichts mehr; wer
+    // den fehlenden Posten benennt und mitzaehlt, misst mehr als
+    // vorher.
     let frei: u64 = mem.frames_free(state)
-    if frei + g(state, SL_FRBACK) == frei_soll {
+    // GEPRUEFT WIRD GEGEN DEN STAND UNMITTELBAR NACH DEM
+    // WIEDERANLAUF (`SL_FREI1`), nicht gegen den Stand jetzt: seit
+    // dann laufen die wiederangelaufenen Prozesse, und ein Prozess,
+    // der laeuft, fordert Speicher an. Die Zusage "kein verlorener
+    // Rahmen" gilt dem WIEDERANLAUF und nicht dem Betrieb danach.
+    let frei1: u64 = g(state, SL_FREI1)
+    if frei1 + g(state, SL_FRBACK) + wach.frames_taken(state) == frei_soll {
         serial.puts((&s_rok[0]) as u64)
     } else {
         serial.puts((&s_rbad[0]) as u64)
     }
     serial.puts((&s_fr[0]) as u64)
     serial.dec(frei)
+    var s_wt: [u8; 8] = " wach=\0\0"
+    serial.puts((&s_wt[0]) as u64)
+    serial.dec(wach.frames_taken(state))
+    var s_f1: [u8; 8] = " frei1=\0"
+    serial.puts((&s_f1[0]) as u64)
+    serial.dec(frei1)
+    var s_f0: [u8; 8] = " soll=\0\0"
+    serial.puts((&s_f0[0]) as u64)
+    serial.dec(frei_soll)
     serial.nl()
 }
 
