@@ -261,6 +261,14 @@ export {
     // ---- RUNDE WMPLUGIN ----
     WMP_OFF, WMP_MAX, M_WMPLUG, M_PLUGAUS, M_PLUGTEST, M_PLUGFRIST,
     SUSP_OFF, SUSP_MAX, M_SUSPMESS, M_SUSPEND,
+    // ---- RUNDE KRYPTO (K-019) ----
+    CRYPT_OFF, CRYPT_MAX,
+    CRY_READY, CRY_ON, CRY_FIRST, CRY_SECTORS, CRY_CIPHER, CRY_KDF,
+    CRY_READS, CRY_WRITES, CRY_FAILS, CRY_SLOT, CRY_ARGMEM, CRY_ARGKIB,
+    CRY_DEV, CRY_KEY, CRY_BUF, CRY_HDR, CRY_WORK,
+    M_KRYPTOAUF, M_KRYPTONEU, M_KRYPTOTEST, M_KRYPTOROH, M_KRYPTOFALSCH,
+    M_KRYPTOBAUM, M_KRYPTOPRUEF, M_KRYPTOWECHS, M_KRYPTOKILL,
+    M_KRYPTOFS,
     M_ANMELDUNG, M_NOANMELDUNG,
     M_WMDAUER,
     M_VSYNC, M_NOPRESENT, M_WMANIM, M_NOANIM, M_WMSIG, M_FLIP, M_NOFLIP,
@@ -3495,5 +3503,97 @@ const M_PLUGTEST: u64 = 988 // Wort 15, Bit 28
 const M_PLUGFRIST: u64 = 989 // Wort 15, Bit 29
 
 // RUNDE SUSPEND (K-018).
-const M_SUSPMESS: u64 = 990 // Wort 15, Bit 30 -- nur die Vorabmessung
-const M_SUSPEND: u64 = 991 // Wort 15, Bit 31 -- der Ruhezustand selbst
+// MERGE-WELLE 15.09.2026: 990/991 hat die Runde KRYPTO belegt (sie
+// lief gleichzeitig). Der Kartenpruefer hat es gefangen -- die kdata-
+// Seiten waren vorher vergeben, die MODUSINDIZES nicht. Lehre fuer die
+// naechste Welle: beides vorher zuteilen.
+const M_SUSPMESS: u64 = 1000 // Wort 15, Bit 40 -- nur die Vorabmessung
+const M_SUSPEND: u64 = 1001 // Wort 15, Bit 41 -- der Ruhezustand selbst
+// ================================================= RUNDE KRYPTO (K-019)
+//
+// DIE PLATTENVERSCHLUESSELUNG. Fuenf Seiten, 0x113000..0x118000, und
+// diese Adresse ist NICHT selbst gewaehlt: sie stand vor der Runde in
+// der Zuteilung der Welle vom 15.09.2026 (siehe oben bei KDATA_SIZE),
+// zusammen mit SUSP und CODEC. Fuenf Runden hintereinander hatten sich
+// jeweils "die erste freie Seite" genommen und sich beim Verschmelzen
+// still ueberschrieben -- deshalb wird hier nichts mehr gesucht.
+//
+// WAS IN DEN FUENF SEITEN LIEGT, und warum es ueberhaupt Kernspeicher
+// braucht statt eines Stapels:
+//
+//   +0x0000  DIE SKALARE (unten einzeln). Ob das Geraet entsperrt ist,
+//            welches Verfahren, wie viele Sektoren, die Zaehler.
+//   +0x1000  DER HAUPTSCHLUESSEL, 64 Oktette (XTS-AES-256 braucht zwei
+//            Schluessel zu 32). ER LIEGT HIER UND NIRGENDWO SONST.
+//            Ring 3 kommt an diese Seite nicht heran -- SMEP und SMAP
+//            aus Runde K10 halten es fern --, und genau das ist der
+//            Grund, warum die Entsperrung im Kern sitzt und nicht in
+//            einem Programm: ein Hauptschluessel in einem
+//            Ring-3-Prozess stuende im naechsten Abzug des Speichers.
+//   +0x2000  EIN SEKTORPUFFER, 4096 Oktette. `blk.read` bekommt einen
+//            Zeiger auf den Klartextpuffer des Aufrufers; der
+//            Geheimtext muss dazwischen irgendwo stehen, und dieser
+//            Puffer ist dieses Irgendwo. Er ist bewusst nicht auf dem
+//            Stapel: der Kernstapel ist 16 KiB gross und diese Funktion
+//            laeuft im Unterbrechungspfad.
+//   +0x3000  DER KOPFSATZ beim Lesen und Pruefen, eine Seite.
+//   +0x4000  DER ARBEITSSPEICHER von Argon2 -- NEIN, der passt hier
+//            nicht hinein (64 MiB) und kommt aus `mem.alloc_pages`.
+//            Diese Seite haelt nur den Zeiger darauf und die
+//            abgeleiteten Schluessel der Schluesselplaetze.
+const CRYPT_OFF: u64 = 0x113000
+const CRYPT_MAX: u64 = 0x5000
+
+// Die Skalare in der ersten Seite. Versaetze, keine Adressen.
+const CRY_READY: u64 = CRYPT_OFF + 0x00 // 1 = entsperrt, Schluessel da
+const CRY_ON: u64 = CRYPT_OFF + 0x08 // 1 = die Platte IST verschluesselt
+const CRY_FIRST: u64 = CRYPT_OFF + 0x10 // erster Datensektor (nach dem Kopf)
+const CRY_SECTORS: u64 = CRYPT_OFF + 0x18 // wie viele Sektoren Nutzdaten
+const CRY_CIPHER: u64 = CRYPT_OFF + 0x20 // 1 = XTS-AES-256
+const CRY_KDF: u64 = CRYPT_OFF + 0x28 // 1 = Argon2id, 2 = PBKDF2
+const CRY_READS: u64 = CRYPT_OFF + 0x30 // entschluesselte Sektoren
+const CRY_WRITES: u64 = CRYPT_OFF + 0x38 // verschluesselte Sektoren
+const CRY_FAILS: u64 = CRYPT_OFF + 0x40 // abgewiesene Entsperrversuche
+const CRY_SLOT: u64 = CRYPT_OFF + 0x48 // welcher Platz aufgemacht hat
+const CRY_ARGMEM: u64 = CRYPT_OFF + 0x50 // Zeiger auf Argon2s Speicher
+const CRY_ARGKIB: u64 = CRYPT_OFF + 0x58 // wie viele KiB dort liegen
+const CRY_DEV: u64 = CRYPT_OFF + 0x60 // auf welchem Geraet der Kopf liegt
+
+// Die Unterbereiche.
+const CRY_KEY: u64 = CRYPT_OFF + 0x1000 // 64 Oktette Hauptschluessel
+const CRY_BUF: u64 = CRYPT_OFF + 0x2000 // 4096 Oktette Sektorpuffer
+const CRY_HDR: u64 = CRYPT_OFF + 0x3000 // eine Seite Kopfsatz
+const CRY_WORK: u64 = CRYPT_OFF + 0x4000 // Arbeitsplatz der Ableitung
+
+// ---------------------------------------------------- die Modusworte
+//
+// Wort 15, Bits 30..34. Die Namen sind wieder so gewaehlt, dass keiner
+// im anderen steckt (die Kommandozeile wird nach Teilwoertern
+// durchsucht).
+//
+//   kryptoauf   die verschluesselte Platte beim Start aufmachen
+//   kryptoneu   sie in diesem Lauf ANLEGEN (Kopfsatz schreiben)
+//   kryptotest  der Selbsttest der Rechnung beim Hochlauf
+//   kryptoroh   GEGENPROBE: den Kopf lesen, aber NICHT entschluesseln
+//   kryptofalsch GEGENPROBE: mit der falschen Passphrase aufmachen
+const M_KRYPTOAUF: u64 = 990 // Wort 15, Bit 30
+const M_KRYPTONEU: u64 = 991 // Wort 15, Bit 31
+const M_KRYPTOTEST: u64 = 992 // Wort 15, Bit 32
+const M_KRYPTOROH: u64 = 993 // Wort 15, Bit 33
+const M_KRYPTOFALSCH: u64 = 994 // Wort 15, Bit 34
+// Der bekannte Baum: schreiben und nachlesen. Zwei eigene Worte, damit
+// der Abnahmelauf beides GETRENNT ueber einen Neustart hinweg machen
+// kann -- ein Baum, der im selben Lauf geschrieben und gelesen wird,
+// belegt nur, dass der Puffer noch stimmt.
+const M_KRYPTOBAUM: u64 = 995 // Wort 15, Bit 35
+const M_KRYPTOPRUEF: u64 = 996 // Wort 15, Bit 36
+// Der Schluesselplatz-Wechsel: eine zweite Passphrase dazulegen
+// (`kryptowechs`, Platz 1) und die erste loeschen (`kryptokill`,
+// Platz 0). Das ist die Zusage, fuer die es die Plaetze gibt.
+const M_KRYPTOWECHS: u64 = 997 // Wort 15, Bit 37
+const M_KRYPTOKILL: u64 = 998 // Wort 15, Bit 38
+// `kryptofs` -- das Dateisystem auch auf einer nur AUFGEMACHTEN Platte
+// anlegen. Das braucht die Gegenprobe mit fremden Augen: ein Traeger
+// aus `tools/krypto/gegen.py` hat einen gueltigen Kopfsatz und noch
+// kein Dateisystem.
+const M_KRYPTOFS: u64 = 999 // Wort 15, Bit 39

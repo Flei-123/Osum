@@ -1,0 +1,303 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/crypto/xts.fi -- XTS-AES (IEEE 1619-2007, NIST SP 800-38E),
+// Runde KRYPTO.
+//
+// ================================== WARUM XTS UND NICHT CBC MIT ESSIV
+//
+// Eine Platte ist kein Datenstrom. Sie hat Sektoren, die einzeln und in
+// beliebiger Reihenfolge gelesen und ueberschrieben werden, und sie hat
+// keinen Platz fuer einen Pruefwert je Sektor -- 512 Oktette Klartext
+// muessen in 512 Oktetten Geheimtext liegen. Daraus folgt alles:
+//
+//   * KEINE AUTHENTIFIZIERUNG IST MOEGLICH. Ohne Platz fuer ein Etikett
+//     gibt es keinen. XTS erkennt keine Veraenderung, und diese Datei
+//     behauptet das auch nicht. Was XTS leistet, ist Vertraulichkeit;
+//     wer Manipulation erkennen will, braucht dm-integrity daneben.
+//     DAS STEHT AUCH SO IN docs/RUNDE-KRYPTO.md unter den roten Punkten.
+//   * DER TWEAK MUSS AUS DER SEKTORNUMMER KOMMEN. Zwei Sektoren mit
+//     demselben Klartext duerfen nicht denselben Geheimtext haben --
+//     sonst sieht ein Angreifer, welche Bloecke gleich sind.
+//
+// CBC-ESSIV leistet das auch, hat aber zwei bekannte Schwaechen, die XTS
+// nicht hat: es ist anfaellig fuer das Kippen von Bits im Vorgaenger-
+// block (ein geaendertes Oktett verdirbt den naechsten Block
+// KONTROLLIERT), und es verraet ueber Wasserzeichen-Angriffe mehr, als
+// es soll. XTS ist seit 2007 die Norm fuer genau diesen Zweck und das,
+// was LUKS2, BitLocker und FileVault benutzen. Deshalb XTS.
+//
+// ============================================== WIE XTS RECHNET
+//
+// Der Schluessel ist DOPPELT so lang wie der der Chiffre: XTS-AES-256
+// nimmt 64 Oktette und zerlegt sie in zwei AES-256-Schluessel.
+//
+//   k1 (Oktette 0..31)   verschluesselt die Daten
+//   k2 (Oktette 32..63)  verschluesselt die Sektornummer zum Tweak
+//
+// DASS DIE BEIDEN VERSCHIEDEN SEIN MUESSEN, ist kein Schmuck: waeren sie
+// gleich, liesse sich der Tweak aus dem Geheimtext zurueckrechnen. Diese
+// Datei LEHNT einen Schluessel ab, dessen Haelften gleich sind (FIPS
+// 140-2 IG A.9 verlangt genau diese Pruefung).
+//
+// Dann, je Sektor:
+//
+//   T = AES-k2(Sektornummer als 128-Bit-Zahl, little endian)
+//   fuer jeden 16-Oktett-Block j:
+//       C = AES-k1(P xor T) xor T
+//       T = T * alpha         (Multiplikation im Koerper GF(2^128))
+//
+// `alpha` ist das Element x, und die Multiplikation damit ist eine
+// Verschiebung um ein Bit nach links plus, wenn oben ein Bit
+// herausfaellt, ein XOR mit 0x87 auf das unterste Oktett. Das
+// Modulpolynom ist x^128 + x^7 + x^2 + x + 1.
+//
+// DIE FALLE, UND SIE HAT DIESES PROJEKT SCHON EINMAL GEKOSTET: XTS ist
+// LITTLE ENDIAN -- die Sektornummer, der Tweak und die Verschiebung.
+// AES selbst ist big endian. Wer die Verschiebung als
+// Big-Endian-Schieberei schreibt, bekommt einen Geheimtext, der stabil
+// ist, zufaellig aussieht und den OpenSSL nicht entschluesselt. Genau
+// dafuer gibt es `tools/krypto/vektoren.py`: es haelt DIESE Datei gegen
+// Pythons `cryptography` (OpenSSL darunter) und gegen die Vektoren des
+// IEEE-1619-Ausschusses, in BEIDE Richtungen.
+//
+// ========================================= DER RESTBLOCK (ciphertext stealing)
+//
+// XTS kann Laengen, die kein Vielfaches von 16 sind, ueber
+// "ciphertext stealing" (CTS). Ein Sektor ist IMMER ein Vielfaches von
+// 16 (512, 4096), und diese Datei baut CTS trotzdem ein -- nicht aus
+// Vollstaendigkeit, sondern weil die Vektoren des IEEE-Ausschusses
+// (Vektor 15 bis 19) genau diese Laengen pruefen, und weil eine
+// Umsetzung, die bei 17 Oktetten etwas anderes rechnet als OpenSSL,
+// auch bei 512 nicht geglaubt werden sollte.
+//
+// Wie `aes.fi` und `sha256.fi`: KEINE `profile`-Zeile, KEIN `import`
+// ausser der Chiffre, kein Allokator, kein Systemaufruf, aller Zustand
+// beim Aufrufer.
+
+import crypto.aes
+
+export {
+    encrypt, decrypt, sector_encrypt, sector_decrypt,
+    KEY_BYTES, BLOCK
+}
+
+// XTS-AES-256: zwei Schluessel zu 32 Oktetten.
+const KEY_BYTES: usize = 64
+const BLOCK: usize = 16
+
+fn ld8(p: u64, i: usize) -> u8 {
+    return *((p + i as u64) as *mut u8)
+}
+
+fn st8(p: u64, i: usize, v: u8) {
+    *((p + i as u64) as *mut u8) = v
+}
+
+// Die beiden Haelften duerfen nicht gleich sein (FIPS 140-2 IG A.9).
+// Der Vergleich laeuft ueber ALLE Oktette und bricht nicht beim ersten
+// Unterschied ab -- ein frueher Abbruch waere ein Zeitkanal, auch wenn
+// er hier nur einen Schluessel gegen sich selbst haelt.
+fn halves_equal(key: u64) -> bool {
+    var diff: u64 = 0
+    var i: usize = 0
+    while i < 32 {
+        diff = diff | ((ld8(key, i) as u64) ^ (ld8(key, i + 32) as u64))
+        i = i + 1
+    }
+    return diff == 0
+}
+
+// Multiplikation des Tweaks mit alpha = x im Koerper GF(2^128),
+// LITTLE ENDIAN: Oktett 0 traegt die niedrigsten Bits.
+//
+// Eine Verschiebung um ein Bit nach links ueber 16 Oktette, wobei das
+// oberste Bit jedes Oktetts in das naechsthoehere wandert. Faellt aus
+// Oktett 15 ein Bit heraus, wird 0x87 auf Oktett 0 gerechnet -- das ist
+// die Reduktion modulo x^128 + x^7 + x^2 + x + 1.
+fn gf_mul_alpha(t: *mut [u8; 16]) {
+    var carry: u64 = 0
+    var i: usize = 0
+    while i < 16 {
+        let v: u64 = (*t)[i] as u64
+        (*t)[i] = (((v << 1) | carry) & 255) as u8
+        carry = (v >> 7) & 1
+        i = i + 1
+    }
+    if carry != 0 {
+        (*t)[0] = ((*t)[0] as u64 ^ 0x87) as u8
+    }
+}
+
+// Ein Block: C = AES-k1(P xor T) xor T. `enc` waehlt die Richtung --
+// beim Entschluesseln steht an derselben Stelle die Umkehrung.
+fn block_op(k1: *mut aes.Key, t: *mut [u8; 16], inp: u64, out: u64,
+    enc: bool) {
+    var x: [u8; 16] = [0 as u8; 16]
+    var i: usize = 0
+    while i < 16 {
+        x[i] = ld8(inp, i) ^ (*t)[i]
+        i = i + 1
+    }
+    var y: [u8; 16] = [0 as u8; 16]
+    if enc {
+        aes.encrypt_block(k1, (&x[0]) as u64, (&y[0]) as u64)
+    } else {
+        aes.decrypt_block(k1, (&x[0]) as u64, (&y[0]) as u64)
+    }
+    i = 0
+    while i < 16 {
+        st8(out, i, y[i] ^ (*t)[i])
+        i = i + 1
+    }
+}
+
+// Der Tweak aus 16 Oktetten: T = AES-k2(tweak).
+fn make_tweak(k2: *mut aes.Key, tweak: u64, t: *mut [u8; 16]) {
+    aes.encrypt_block(k2, tweak, (t as u64))
+}
+
+// ------------------------------------------------------- die Schnittstelle
+
+// `key` sind 64 Oktette, `tweak` 16 Oktette (die Sektornummer little
+// endian, aufgefuellt), `n` mindestens 16.
+fn encrypt(key: u64, tweak: u64, inp: u64, out: u64, n: usize) -> bool {
+    if n < BLOCK { return false }
+    if halves_equal(key) { return false }
+    var k1: aes.Key = aes.key_new()
+    var k2: aes.Key = aes.key_new()
+    if !aes.key_set(&k1, key, 32) { return false }
+    if !aes.key_set(&k2, key + 32, 32) { return false }
+    var t: [u8; 16] = [0 as u8; 16]
+    make_tweak(&k2, tweak, &t)
+
+    let voll: usize = n / BLOCK
+    let rest: usize = n % BLOCK
+    // Bei einem Rest bleibt der VORLETZTE volle Block dem Stehlen
+    // vorbehalten und wird unten gesondert behandelt.
+    var ganz: usize = voll
+    if rest != 0 { ganz = voll - 1 }
+
+    var j: usize = 0
+    while j < ganz {
+        block_op(&k1, &t, inp + (j * BLOCK) as u64,
+            out + (j * BLOCK) as u64, true)
+        gf_mul_alpha(&t)
+        j = j + 1
+    }
+    if rest == 0 {
+        return true
+    }
+    // CTS, IEEE 1619 5.3.2: der vorletzte Block wird verschluesselt,
+    // seine ersten `rest` Oktette werden der letzte Geheimtextblock,
+    // und der Rest wird mit dem Schwanz des Klartextes zu einem vollen
+    // Block zusammengesetzt, der an die Stelle des vorletzten kommt.
+    let pp: u64 = inp + (ganz * BLOCK) as u64
+    let po: u64 = out + (ganz * BLOCK) as u64
+    var cc: [u8; 16] = [0 as u8; 16]
+    block_op(&k1, &t, pp, (&cc[0]) as u64, true)
+    gf_mul_alpha(&t)
+    var pm: [u8; 16] = [0 as u8; 16]
+    var i: usize = 0
+    while i < rest {
+        pm[i] = ld8(pp + BLOCK as u64, i)
+        i = i + 1
+    }
+    while i < BLOCK {
+        pm[i] = cc[i]
+        i = i + 1
+    }
+    block_op(&k1, &t, (&pm[0]) as u64, po, true)
+    i = 0
+    while i < rest {
+        st8(po + BLOCK as u64, i, cc[i])
+        i = i + 1
+    }
+    return true
+}
+
+fn decrypt(key: u64, tweak: u64, inp: u64, out: u64, n: usize) -> bool {
+    if n < BLOCK { return false }
+    if halves_equal(key) { return false }
+    var k1: aes.Key = aes.key_new()
+    var k2: aes.Key = aes.key_new()
+    if !aes.key_set(&k1, key, 32) { return false }
+    if !aes.key_set(&k2, key + 32, 32) { return false }
+    var t: [u8; 16] = [0 as u8; 16]
+    make_tweak(&k2, tweak, &t)
+
+    let voll: usize = n / BLOCK
+    let rest: usize = n % BLOCK
+    var ganz: usize = voll
+    if rest != 0 { ganz = voll - 1 }
+
+    var j: usize = 0
+    while j < ganz {
+        block_op(&k1, &t, inp + (j * BLOCK) as u64,
+            out + (j * BLOCK) as u64, false)
+        gf_mul_alpha(&t)
+        j = j + 1
+    }
+    if rest == 0 {
+        return true
+    }
+    // Beim Entschluesseln mit CTS werden die beiden letzten Tweaks
+    // VERTAUSCHT gebraucht: der vorletzte Block ist mit dem SPAETEREN
+    // Tweak verschluesselt worden.
+    var t2: [u8; 16] = [0 as u8; 16]
+    var i: usize = 0
+    while i < 16 {
+        t2[i] = t[i]
+        i = i + 1
+    }
+    gf_mul_alpha(&t2)
+    let pi: u64 = inp + (ganz * BLOCK) as u64
+    let po: u64 = out + (ganz * BLOCK) as u64
+    var pm: [u8; 16] = [0 as u8; 16]
+    block_op(&k1, &t2, pi, (&pm[0]) as u64, false)
+    var cm: [u8; 16] = [0 as u8; 16]
+    i = 0
+    while i < rest {
+        cm[i] = ld8(pi + BLOCK as u64, i)
+        i = i + 1
+    }
+    while i < BLOCK {
+        cm[i] = pm[i]
+        i = i + 1
+    }
+    i = 0
+    while i < rest {
+        st8(po + BLOCK as u64, i, pm[i])
+        i = i + 1
+    }
+    block_op(&k1, &t, (&cm[0]) as u64, po, false)
+    return true
+}
+
+// ------------------------------------------- der Tweak aus der Sektornummer
+//
+// Die uebliche Form: die Nummer als 128-Bit-Zahl LITTLE ENDIAN. Das ist
+// genau das, was `dm-crypt` mit `plain64` tut und was LUKS benutzt.
+fn sector_tweak(sector: u64, t: *mut [u8; 16]) {
+    var i: usize = 0
+    while i < 8 {
+        (*t)[i] = ((sector >> (i as u64 * 8)) & 255) as u8
+        i = i + 1
+    }
+    while i < 16 {
+        (*t)[i] = 0
+        i = i + 1
+    }
+}
+
+fn sector_encrypt(key: u64, sector: u64, inp: u64, out: u64,
+    n: usize) -> bool {
+    var tw: [u8; 16] = [0 as u8; 16]
+    sector_tweak(sector, &tw)
+    return encrypt(key, (&tw[0]) as u64, inp, out, n)
+}
+
+fn sector_decrypt(key: u64, sector: u64, inp: u64, out: u64,
+    n: usize) -> bool {
+    var tw: [u8; 16] = [0 as u8; 16]
+    sector_tweak(sector, &tw)
+    return decrypt(key, (&tw[0]) as u64, inp, out, n)
+}
