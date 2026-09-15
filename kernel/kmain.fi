@@ -2830,7 +2830,50 @@ fn console_load(state: u64, cmd: u64) -> u64 {
 // Oberflaeche. Ohne diese Abfrage hat die Shell im Terminalfenster
 // nichts mehr zu lesen, und im Bild steht eine leere Eingabezeile.
 fn wm_owns_shell(state: u64) -> bool {
-    return kstate.mode_on(state, kstate.M_WMSHELL)
+    // RUNDE INSTALLER2 (P-001): NICHT NUR `wmshell`.
+    //
+    // Diese Frage heisst "besitzt der Fensterserver die Sitzung, also
+    // startet ER das erste Programm?". Bis zu dieser Runde stand hier
+    // allein `wmshell` -- das Wort fuer die Shell IM TERMINALFENSTER.
+    // Der Fensterserver startet sein Programm aber auch ohne sie:
+    // `kgui.surface` waehlt zwischen `desk_start` (Wort `desk`) und
+    // `k15_start` (die Woerter `wig`, `wigfiles`, `wigstart`, und ueber
+    // `wigapp=` JEDES Programm), und `tileshot` ebenso.
+    //
+    // WARUM DAS HIER STEHEN MUSS, gemessen in dieser Runde: sagt diese
+    // Funktion bei `wig` NEIN, dann startet `osum(state)` in
+    // `kernel_main` `/bin/init` -- und zwar VOR `gfx.stage_surface`,
+    // das den Fensterserver ueberhaupt erst hochzieht. `osum` kehrt
+    // erst zurueck, wenn init fertig ist; init findet im Ziel `grafik`
+    // keinen Dienst, laeuft in seine Leerlaufschranke und schaltet ab
+    // ("init: ziel=grafik" / "init: herunterfahren"). `k15_start` wird
+    // nie erreicht, und das Fenster des Installers kommt nie.
+    //
+    // UND WARUM NICHT EINFACH `wmshell` MITGEBEN: das Wort startet
+    // zusaetzlich `/bin/sh` im Terminalfenster. Auf einer Maschine mit
+    // `nokbd` endet die Shell sofort auf EOF und `wait_wm` startet sie
+    // im Sekundentakt neu. GEMESSEN: 361 Starts, und das Kopieren der
+    // Wurzel fiel dabei von 940 auf 43 Bloecke je Minute -- der
+    // Installer verhungerte neben seinem eigenen Terminal.
+    if kstate.mode_on(state, kstate.M_WMSHELL) {
+        return true
+    }
+    if kstate.mode_on(state, kstate.M_DESK) {
+        return true
+    }
+    if kstate.mode_on(state, kstate.M_TILESHOT) {
+        return true
+    }
+    if kstate.mode_on(state, kstate.M_WIG) {
+        return true
+    }
+    if kstate.mode_on(state, kstate.M_WIGFILES) {
+        return true
+    }
+    if kstate.mode_on(state, kstate.M_WIGSTART) {
+        return true
+    }
+    return false
 }
 
 // ============================================================ RUNDE MODUL
@@ -3404,9 +3447,32 @@ fn usb_mount(state: u64) {
 }
 
 fn osum(state: u64) {
-    if wm_owns_shell(state) {
-        return
-    }
+    // RUNDE INSTALLER2 (P-001): DIE FRUEHE RUECKKEHR IST HIER WEG.
+    //
+    // Bis zu dieser Runde stand an dieser Stelle
+    //
+    //     if wm_owns_shell(state) { return }
+    //
+    // und damit tat `osum` unter `wmshell` GAR NICHTS -- auch nicht das,
+    // was mit der Shell nichts zu tun hat: `blk.probe_ata0`,
+    // `blk.use_ata`, `fs.mount`, `k14_setup`, `/dev`. Ein
+    // Installationsprogramm, das der Fensterserver startet, fand
+    // deshalb keine einzige Platte ("installer: ready n=0"), obwohl
+    // eine daran hing.
+    //
+    // GEMESSEN (tools/install/abnahme.sh, Glied 1-3): mit `wmshell`
+    // stand das Fenster und die Liste war leer; ohne `wmshell` lief
+    // stattdessen `/bin/init`, fand im Ziel `grafik` keinen Dienst
+    // (die inittab des Sticks fuehrt nur `sh:konsole:ctrl`), lief in
+    // seine Leerlaufschranke und schaltete die Maschine ab --
+    // "init: ziel=grafik" / "init: herunterfahren", und `k15_start`
+    // wurde nie erreicht, weil `gfx.stage_surface` ERST HINTER
+    // `osum(state)` steht.
+    //
+    // Die Rueckkehr steht jetzt GENAU VOR dem ersten Prozess (weiter
+    // unten, vor dem Block RUNDE K13). Damit gilt beides: die Wurzel
+    // wird eingehaengt und /dev steht -- und wer die Shell besitzt,
+    // startet trotzdem kein zweites init.
     var s_off: [u8; 14] = "osum: skipped\0"
     var s_no: [u8; 15] = "osum: no drive\0"
     var s_mount: [u8; 14] = "osum: mount=\0\0"
@@ -3687,6 +3753,18 @@ fn osum(state: u64) {
     // Shell ihr erstes Wort liest.
     usb_hold(state)
     list_dir(state, (&p_bin[0]) as u64, (&s_bin[0]) as u64)
+
+    // RUNDE INSTALLER2 (P-001): HIER, UND KEINE ZEILE FRUEHER.
+    //
+    // Alles darueber ist Aufbau, den JEDER Lauf braucht -- die Platte,
+    // die Wurzel, /dev, /proc. Alles darunter ist DER ERSTE PROZESS,
+    // und den darf es nur einmal geben. Besitzt der Fensterserver die
+    // Sitzung (`wmshell`), startet er sein Programm selbst
+    // (`kgui.k15_start` ueber `wigapp=`), und ein init daneben waere
+    // ein zweiter Prozess 1, der beim Leerlauf die Maschine abschaltet.
+    if wm_owns_shell(state) {
+        return
+    }
 
     // ================================================== RUNDE K13
     //
