@@ -6,7 +6,9 @@ Ziel: die Plattenverschlüsselung aus Runde KRYPTO (K-019) ist gebaut und
 richtig, aber mit **0,41 MiB/s** unbenutzbar. Das ist der einzige Grund,
 warum K-019 heute nur im Prüfstand taugt.
 
-**Abnahme: `bash tools/aesni/run.sh`.**
+**Abnahme: `bash tools/aesni/run.sh` → 31 bestanden, 0 gescheitert**
+(darin mitgefahren: `tools/krypto/run.sh` → 61/0 und `tools/wlan/run.sh`
+→ 185 Zusagen/0 Fehler, denn beide hängen an derselben `lib/crypto/aes.fi`).
 
 ---
 
@@ -236,8 +238,13 @@ umgeschaltet mit dem Orakelbefehl `noaesni`:
 | 512 Oktette (ein Sektor) | **3,08 µs — 158,79 MiB/s** | 849,00 µs — 0,58 MiB/s | **276×** |
 | 4096 Oktette | **18,86 µs — 207,15 MiB/s** | 6576,45 µs — 0,59 MiB/s | **349×** |
 
-Bester gemessener Einzelwert nach dem Schlüsselspeicher: **2,60 µs je
-Sektor = 187,80 MiB/s**.
+Bester gemessener Einzelwert nach dem Schlüsselspeicher: **2,59 µs je
+Sektor = 188,60 MiB/s**.
+
+Der Abnahmelauf misst dasselbe noch einmal selbst und kam auf
+**291×** (512 Oktette) und **375×** (4096 Oktette) — die Streuung
+zwischen den Läufen liegt daran, dass der Wirt nebenher anderes tut.
+Die Größenordnung ist in jedem Lauf dieselbe.
 
 Im **Kern** (QEMU mit KVM, `rdtsc`-Takte je 512-Oktett-Sektor — in
 Takten, weil `TIME_KHZ` an dieser Stelle des Hochlaufs noch null ist und
@@ -245,11 +252,11 @@ die erste Fassung dieser Messung darum treu `ns512=0` meldete):
 
 | Lauf | Takte je Sektor | |
 |---|---|---|
-| `-cpu max` | **12 514** | `have=1 pclmul=1 used=1 fpu=1` |
-| `-cpu max noaesni` | 1 669 719 | Gegenprobe auf derselben Maschine → **Faktor 133** |
-| `-cpu qemu64,-aes` | 1 713 842 | `have=0 used=0`, Rückfall greift |
+| `-cpu max` | **12 198** | `have=1 pclmul=1 used=1 fpu=1` |
+| `-cpu max noaesni` | 1 672 541 | Gegenprobe auf derselben Maschine → **Faktor 137** |
+| `-cpu qemu64,-aes` | 1 673 434 | `have=0 used=0`, Rückfall greift |
 
-Der Unterschied zwischen 276× (Wirt) und 133× (Kern) ist kein
+Der Unterschied zwischen 291× (Wirt) und 137× (Kern) ist kein
 Widerspruch: im Kern misst `bench` den ganzen Weg durch
 `xts.sector_encrypt` inklusive der Prüfungen, und der Tabellenlauf dort
 läuft mit 20 statt 2000 Runden.

@@ -240,11 +240,16 @@ fi
 
 echo "== 6. im Kern: die Kreisprobe in Ring 0 =="
 
+# `-device isa-debug-exit` ist KEIN Schmuck: ohne ihn bleibt QEMU nach
+# `kernel: done` stehen, und der Lauf endet erst, wenn `timeout`
+# zuschlaegt -- bei drei Laeufen sind das Minuten Wartezeit fuer nichts.
+# Derselbe Griff wie in `tools/krypto/run.sh`.
 kern_lauf() { # name cpu append zeitlimit
     local name=$1 cpu=$2 app=$3 t=${4:-200}
     timeout "$t" $QEMU_X86 -kernel "$TMPD/k0.mb" -m 512 -cpu "$cpu" \
         -append "$app" -serial "file:$TMPD/$name.txt" -display none \
-        -no-reboot >/dev/null 2>&1
+        -no-reboot -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+        >/dev/null 2>&1
     return 0
 }
 
