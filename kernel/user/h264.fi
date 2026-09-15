@@ -866,19 +866,45 @@ fn norm_adjust(m: u64, i: u64) -> i64 {
 // FLACHE Matrix aus lauter 16en (Flat_4x4_16, 8.5.9) -- ohne diese 16
 // sind alle Reste sechzehnmal zu klein, und das Bild wird nicht
 // falsch, sondern FLACH.
+// DIE DREI GEWICHTE HAENGEN AM QP, NICHT AM KOEFFIZIENTEN.
+//
+// `norm_adjust` holte je Koeffizient einen von DREI Werten aus VMAT und
+// rechnete dafuer jedes Mal Zeile, Spalte und die beiden Paritaeten aus
+// -- sechzehnmal je Block, fuer drei verschiedene Ergebnisse. Sie
+// stehen jetzt vor der Schleife, und die Auswahl ist eine Tafel.
+//
+// Auch die Fallunterscheidung `qp >= 24` haengt nicht am Koeffizienten
+// und ist deshalb aus der Schleife heraus. Gerechnet wird Wert fuer
+// Wert dasselbe wie vorher.
+static mut NAK: [u64; 16] = [0,2,0,2, 2,1,2,1, 0,2,0,2, 2,1,2,1]
+
 fn scale_into(src: u64, qp: i64) {
     let m: u64 = (qp % 6) as u64
     let sh: u64 = (qp / 6) as u64
-    var i: u64 = 0
-    while i < 16 {
-        let w: i64 = norm_adjust(m, i) * 16
-        let d: i64 = (*((src + i * 8) as *mut i64))
-        if qp >= 24 {
-            blk16[(i) as usize] = (d * w) << (sh - 4)
-        } else {
-            blk16[(i) as usize] = (d * w + (1 << (3 - sh))) >> (4 - sh)
+    let w0: i64 = (h264tab.VMAT[((m * 3)) as usize] as i64) * 16
+    let w1: i64 = (h264tab.VMAT[((m * 3 + 1)) as usize] as i64) * 16
+    let w2: i64 = (h264tab.VMAT[((m * 3 + 2)) as usize] as i64) * 16
+    if qp >= 24 {
+        let l: u64 = sh - 4
+        var i: u64 = 0
+        while i < 16 {
+            let k: u64 = NAK[(i) as usize]
+            var w: i64 = w2
+            if k == 0 { w = w0 } else if k == 1 { w = w1 }
+            blk16[(i) as usize] = ((*((src + i * 8) as *mut i64)) * w) << l
+            i = i + 1
         }
-        i = i + 1
+        return
+    }
+    let rnd: i64 = 1 << (3 - sh)
+    let r: u64 = 4 - sh
+    var j: u64 = 0
+    while j < 16 {
+        let k: u64 = NAK[(j) as usize]
+        var w: i64 = w2
+        if k == 0 { w = w0 } else if k == 1 { w = w1 }
+        blk16[(j) as usize] = ((*((src + j * 8) as *mut i64)) * w + rnd) >> r
+        j = j + 1
     }
 }
 
@@ -2125,17 +2151,31 @@ fn recon_mb_inner(mbx: u64, mby: u64, i16: bool, cbp: u64, qp: i64) {
         }
     } else {
         // Inter: die Vorhersage steht schon (mc_mb), der Rest kommt dazu.
+        //
+        // ZWEI ABKUERZUNGEN, die nichts am Ergebnis aendern:
+        //
+        //   * `cbp` sagt je 8x8-Viertel, ob dort ueberhaupt Koeffizienten
+        //     stehen. Ist das Bit nicht gesetzt, sind alle vier 4x4-
+        //     Bloecke des Viertels leer -- dann braucht keiner von ihnen
+        //     angesehen zu werden.
+        //   * Die Leerprobe lief vorher ueber alle sechzehn Werte, auch
+        //     wenn der erste schon von null verschieden war. Sie hoert
+        //     jetzt beim ersten Treffer auf.
         var by3: u64 = 0
         while by3 < 4 {
             var bx3: u64 = 0
             while bx3 < 4 {
+                // Das 8x8-Viertel, in dem dieser Block liegt.
+                let q: u64 = (by3 >> 1) * 2 + (bx3 >> 1)
                 var leer: bool = true
-                var t2: u64 = 0
-                while t2 < 16 {
-                    if mcoef[((((by3 * 4 + bx3) * 16) + t2)) as usize] != 0 {
-                        leer = false
+                if (cbp & (1 << q)) != 0 {
+                    var t2: u64 = 0
+                    while t2 < 16 && leer {
+                        if mcoef[((((by3 * 4 + bx3) * 16) + t2)) as usize] != 0 {
+                            leer = false
+                        }
+                        t2 = t2 + 1
                     }
-                    t2 = t2 + 1
                 }
                 if !leer {
                     scale_into((&mcoef[(((by3 * 4 + bx3) * 16)) as usize]) as u64, qp)
