@@ -2407,6 +2407,7 @@ fn surface(state: u64) {
             // und `tools/vgpu/messen.sh` misst einen Schreibtisch, auf
             // dem wirklich etwas passiert.
             mausflut_schritt(state)
+            mauslauf_schritt(state)
             let _offen: u64 = wm.anim_tick(state)
             // RUNDE VSYNC: DER ABLESER LIEST VOR UND NACH DEM MALEN.
             // Vorher steht das fertige Bild der letzten Runde auf der
@@ -2455,6 +2456,7 @@ fn surface(state: u64) {
     serial.puts((&s_go[0]) as u64)
     serial.nl()
     say_wm_input(state)
+    say_mauslauf(state)
     say_wig(state)
     say_wins(state)
     let _unused: u64 = t
@@ -3002,6 +3004,23 @@ fn protokoll_binden(state: u64, task: u64) {
 // herauskommen: kein Klick verloren, gezaehlt.
 static mut vgpu_ereig_getan: u64 = 0
 static mut mausflut_hz: u64 = 0
+// RUNDE GPU (G-012): `mauslauf=<n>` -- EIN GEZAEHLTER ZEIGERLAUF.
+//
+// WARUM ES DEN GEBEN MUSS, UND ES IST EINE GEMESSENE NOT: `mausflut`
+// haengt an der UHR (`marken * hz / 100`). Auf einem Wirt unter Last
+// -- und auf diesem laufen acht Runden gleichzeitig, Lastmittel ueber
+// 10 bei 20 Kernen -- kommt die Uhr unregelmaessig voran. DREI Laeufe
+// mit DEMSELBEN Kern und DERSELBEN Zeile ergaben packets=0, 0 und 1;
+// ein vierter, frueherer, ergab 21. Eine Waage, die bei gleicher Last
+// verschiedene Zahlen zeigt, wiegt nichts.
+//
+// `mauslauf=<n>` schickt GENAU n Zeigerpakete, so schnell die Schleife
+// laeuft, ohne die Uhr zu fragen. Damit ist die Zahl der Bewegungen
+// eine ZUSAGE und keine Beobachtung -- und die Messung vergleichbar.
+static mut mauslauf_soll: u64 = 0
+static mut mauslauf_ist: u64 = 0
+static mut mauslauf_start: u64 = 0
+static mut mauslauf_us: u64 = 0
 static mut mausflut_marke: u64 = 0
 static mut mausflut_links: u64 = 0
 static mut mausflut_n: u64 = 0
@@ -3033,6 +3052,87 @@ fn parse(state: u64, cmd: u64) {
         }
         i = i + 1
     }
+    var w2: [u8; 10] = "mauslauf=\0"
+    var i2: u64 = 0
+    while i2 < 4096 && kstate.get8(cmd + i2) != 0 {
+        var k2: u64 = 0
+        while k2 < 9 && kstate.get8(cmd + i2 + k2) == (w2[k2 as usize] as u64) {
+            k2 = k2 + 1
+        }
+        if k2 == 9 {
+            var v2: u64 = 0
+            var j2: u64 = i2 + 9
+            var n2: u64 = 0
+            while n2 < 7 && kstate.get8(cmd + j2) >= 48
+                && kstate.get8(cmd + j2) <= 57 {
+                v2 = v2 * 10 + (kstate.get8(cmd + j2) - 48)
+                j2 = j2 + 1
+                n2 = n2 + 1
+            }
+            mauslauf_soll = v2
+            return
+        }
+        i2 = i2 + 1
+    }
+}
+
+// DER GEZAEHLTE LAUF. Gibt `true` zurueck, solange er noch nicht fertig
+// ist -- die Halteschleife fragt danach, ob sie weiterlaufen muss.
+fn mauslauf_offen() -> bool {
+    return mauslauf_soll != 0 && mauslauf_ist < mauslauf_soll
+}
+
+fn mauslauf_zahl() -> u64 {
+    return mauslauf_ist
+}
+
+fn mauslauf_dauer() -> u64 {
+    return mauslauf_us
+}
+
+fn mauslauf_schritt(state: u64) {
+    if mauslauf_soll == 0 || !wm.ready(state) {
+        return
+    }
+    if mauslauf_ist >= mauslauf_soll {
+        return
+    }
+    if mauslauf_ist == 0 {
+        ps2m.adopt(state, fb.width(state), fb.height(state))
+        ps2m.set_pos(state, fb.width(state) / 2, fb.height(state) * 2 / 3)
+        mauslauf_start = time.mono_ns(state)
+    }
+    // EIN Paket je Aufruf. Die Halteschleife ruft oft genug; mehrere
+    // je Aufruf wuerden die Bilder zusammenfassen und genau den
+    // Unterschied verwischen, den diese Messung sehen will.
+    var b0: u64 = 8
+    var dx: u64 = 3
+    if mausflut_links != 0 {
+        dx = 253
+        b0 = b0 | 0x10
+    }
+    var dy: u64 = 0
+    if (mauslauf_ist % 14) == 0 {
+        dy = 1
+    }
+    if (mauslauf_ist % 14) == 7 {
+        dy = 255
+        b0 = b0 | 0x20
+    }
+    ps2m.usb_packet(state, b0, dx, dy, 0, false)
+    if ps2m.changed(state) {
+        let _c: bool = ps2m.take_change(state)
+        wm.on_mouse(state)
+    }
+    let x: u64 = ps2m.x(state)
+    if x + 16 >= fb.width(state) {
+        mausflut_links = 1
+    }
+    if x <= 16 {
+        mausflut_links = 0
+    }
+    mauslauf_ist = mauslauf_ist + 1
+    mauslauf_us = (time.mono_ns(state) - mauslauf_start) / 1000
 }
 
 fn mausflut_klickzahl() -> u64 {
@@ -6982,6 +7082,41 @@ fn pulse_num(state: u64, buf: u64, at: u64, v: u64) -> u64 {
 // Was das Zeigegeraet in diesem Lauf WIRKLICH gemeldet hat. Die Zahlen
 // sind der einzige Weg, von aussen nachzuweisen, dass die ueber den
 // QEMU-Monitor eingespeisten Bewegungen angekommen sind.
+// RUNDE GPU (G-012): DIE ZAHLEN DES GEZAEHLTEN LAUFS.
+//
+// Sie stehen in einer eigenen Zeile, weil die Abnahme genau sie
+// vergleicht -- mit Zeiger in der Hardware und ohne (`nohwcur`).
+// `pakete` ist die ZUSAGE (so viele wurden geschickt), alles andere
+// ist gemessen.
+fn say_mauslauf(state: u64) {
+    if mauslauf_soll == 0 {
+        return
+    }
+    var s: [u8; 18] = "mauslauf: pakete=\0"
+    var s_us: [u8; 7] = "  us=\0\0"
+    var s_cd: [u8; 11] = "  curdef=\0\0"
+    var s_cm: [u8; 12] = "  curmove=\0\0"
+    var s_ce: [u8; 11] = "  curerr=\0\0"
+    var s_hw: [u8; 7] = "  hw=\0\0"
+    serial.puts((&s[0]) as u64)
+    serial.dec(mauslauf_ist)
+    serial.puts((&s_us[0]) as u64)
+    serial.dec(mauslauf_us)
+    serial.puts((&s_cd[0]) as u64)
+    serial.dec(vgpu.cursor_defs(state))
+    serial.puts((&s_cm[0]) as u64)
+    serial.dec(vgpu.cursor_moves(state))
+    serial.puts((&s_ce[0]) as u64)
+    serial.dec(vgpu.cursor_fehler(state))
+    serial.puts((&s_hw[0]) as u64)
+    if wm.hwcur_an(state) {
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
+    serial.nl()
+}
+
 fn say_wm_input(state: u64) {
     var s: [u8; 12] = "wminput: x=\0"
     var s_y: [u8; 5] = "  y=\0"

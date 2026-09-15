@@ -77,6 +77,7 @@ import arch.arch
 import tile
 import wmplug
 import cursor
+import vgpu
 import vektor
 import audio
 // RUNDE KERN-FUI: die freistehende Haelfte von fUi. `profile kernel`
@@ -129,6 +130,7 @@ export {
     bind_tty, key_tty, tty_of, NO_TTY, term_outs, term_puts_n,
     term_dump,
     poll, composites, blits, pixels, last_us, cursor_on, set_cursor,
+    hwcur_an, hwcur_moeglich,
     // RUNDE VEKTOR: die Bildzeit, damit die Abnahme sie holen kann.
     frame_us_sum, frame_us_n, frame_us_max, frame_us_last, frame_ueber16,
     frame_fach, frame_us_maxw, frame_ueber16w,
@@ -832,6 +834,10 @@ const S_FRH: u64 = 0x1330      // acht Worte, 0x1330..0x1368
 const S_KSWAL: u64 = 0x1380
 const S_KPLUG: u64 = 0x1388 // wie viele Tasten ein Plugin bekam
 const S_SWTICK: u64 = 0x1390 // Tick des letzten Kehrbesens
+// RUNDE GPU (G-012): welche Zeigerform zuletzt an das Geraet ging.
+// Getrennt von S_SHAPE, weil der Vergleich genau der Punkt ist, an
+// dem entschieden wird, ob das BILD neu hinaus muss oder nur der Ort.
+const S_HWSHAPE: u64 = 0x1398
 const S_FRMAXW: u64 = 0x1370
 const S_FRUEBERW: u64 = 0x1378
 
@@ -4979,7 +4985,14 @@ fn compose(state: u64) -> u64 {
         paint_preview(state, x0, y0, x1, y1)
     }
     // 3. der Zeiger, ganz oben
-    if gs(state, S_CURON) != 0 {
+    //
+    // RUNDE GPU (G-012): NUR NOCH, WENN IHN NIEMAND ANDERES TRAEGT.
+    // Liegt der Zeiger als eigene Flaeche auf dem Geraet, waere dieses
+    // Malen nicht nur ueberfluessig, sondern falsch -- man saehe ihn
+    // DOPPELT, einmal im Bild und einmal darueber. `hwcur_an` ist
+    // deshalb die Bedingung fuer BEIDES: fuer das Malen hier und fuer
+    // den Schaden bei der Bewegung.
+    if gs(state, S_CURON) != 0 && !hwcur_an(state) {
         paint_cursor(state, x0, y0, x1, y1)
     }
     // RUNDE VSYNC: DIE WEICHE. Mit Bildgrenze wird das Rechteck nur
@@ -6555,6 +6568,72 @@ fn messleiste(state: u64, p: u64, n: u64) {
     messzeile(state, 0, p, n, mess_gruen(state))
 }
 
+// ===================================================================
+// RUNDE GPU (G-012): DER ZEIGER, DEN DAS GERAET TRAEGT
+// ===================================================================
+//
+// DREI BEDINGUNGEN, UND ALLE DREI MUESSEN STIMMEN:
+//   1. der Treiber hat die Zeigerwarteschlange und die Flaeche
+//      (`vgpu.cursor_bereit`),
+//   2. die Gegenprobe `nohwcur` ist NICHT gesetzt,
+//   3. der Zeiger soll ueberhaupt sichtbar sein.
+//
+// Faellt eine davon, malt `compose` ihn wieder selbst -- derselbe Weg
+// wie vor dieser Runde, ohne dass irgendwo etwas umgestellt werden
+// muesste. Das ist der saubere Rueckfall, den die Abnahme verlangt.
+fn hwcur_moeglich(state: u64) -> bool {
+    if kstate.mode_on(state, kstate.M_NOHWCUR) {
+        return false
+    }
+    return vgpu.cursor_bereit(state)
+}
+
+// OB DIE HARDWARE DEN ZEIGER TRAEGT -- und zwar AB DEM ERSTEN MAL.
+//
+// HIER LAG EIN FEHLER, UND ER IST LEHRREICH GENUG, UM AUFGESCHRIEBEN
+// ZU WERDEN: zuerst stand hier `&& vgpu.cursor_an(state)`. Damit war
+// die Antwort beim ERSTEN Aufruf falsch -- `cursor_an` wird ja erst
+// wahr, NACHDEM `cursor_zeigen` einmal gelaufen ist. Also nahm die
+// Bewegung den Softwareweg, `cursor_zeigen` kam nie dran, und der
+// Zeiger blieb fuer immer im Bild. Die Messung zeigte es sofort:
+// null `update_cursor` beim Wirt, obwohl die Flaeche angelegt war.
+//
+// Richtig ist: sobald der Treiber es KANN, traegt er ihn. Ob er schon
+// einmal hinausging, entscheidet nur, OB das Bild mitmuss -- und das
+// steht in `hwcur_bewegen`, wo es hingehoert.
+fn hwcur_an(state: u64) -> bool {
+    return hwcur_moeglich(state)
+}
+
+// DEN ZEIGER AN DAS GERAET UEBERGEBEN. Wird gerufen, sobald er sich
+// bewegt oder die Form wechselt. Beim ERSTEN Mal geht das Bild mit
+// hinaus, danach nur noch der Ort.
+fn hwcur_bewegen(state: u64) {
+    if !hwcur_moeglich(state) {
+        return
+    }
+    let g: u64 = cur_w(state)
+    let form: u64 = gs(state, S_SHAPE)
+    let x: u64 = gs(state, S_CURX)
+    let y: u64 = gs(state, S_CURY)
+    if !vgpu.cursor_an(state) {
+        ss(state, S_HWSHAPE, gs(state, S_SHAPE))
+        vgpu.cursor_zeigen(state, form, g, x, y,
+            cur_ox(state), cur_oy(state))
+        return
+    }
+    // Die Form kann sich geaendert haben (Pfeil -> Hand -> Groesse).
+    // `cursor_zeigen` merkt das selbst und traegt das Bild nur dann
+    // neu hinaus; sonst ist es ein reiner Ortswechsel.
+    if gs(state, S_SHAPE) != gs(state, S_HWSHAPE) {
+        ss(state, S_HWSHAPE, gs(state, S_SHAPE))
+        vgpu.cursor_zeigen(state, form, g, x, y,
+            cur_ox(state), cur_oy(state))
+        return
+    }
+    vgpu.cursor_bewegen(state, x, y)
+}
+
 fn paint_cursor(state: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     // ======================================== RUNDE ECHTHARDWARE-4
     // DREI LAGEN MIT DECKUNG STATT ZWEI BITMASKEN.
@@ -6893,12 +6972,25 @@ fn on_mouse(state: u64) {
         let gx: u64 = cur_ox(state)
         let gy: u64 = cur_oy(state)
         let gw: u64 = cur_w(state)
-        damage(state, ox as i64 - gx as i64, oy as i64 - gy as i64,
-            (ox + gw) as i64 - gx as i64, (oy + gw) as i64 - gy as i64)
-        ss(state, S_CURX, nx)
-        ss(state, S_CURY, ny)
-        damage(state, nx as i64 - gx as i64, ny as i64 - gy as i64,
-            (nx + gw) as i64 - gx as i64, (ny + gw) as i64 - gy as i64)
+        // ================================ RUNDE GPU (G-012)
+        // HIER WIRD DIE ARBEIT WIRKLICH GESPART. Traegt die Hardware
+        // den Zeiger, wird KEIN Rechteck schmutzig: weder das alte
+        // noch das neue. `compose` laeuft fuer die Bewegung gar nicht
+        // mehr an, und `present` traegt nichts hinaus -- die Bewegung
+        // kostet einen Befehl von 56 Oktetten statt zweier Rechtecke
+        // Bildpunkte. Das ist die Zahl, die diese Runde misst.
+        if hwcur_an(state) {
+            ss(state, S_CURX, nx)
+            ss(state, S_CURY, ny)
+            hwcur_bewegen(state)
+        } else {
+            damage(state, ox as i64 - gx as i64, oy as i64 - gy as i64,
+                (ox + gw) as i64 - gx as i64, (oy + gw) as i64 - gy as i64)
+            ss(state, S_CURX, nx)
+            ss(state, S_CURY, ny)
+            damage(state, nx as i64 - gx as i64, ny as i64 - gy as i64,
+                (nx + gw) as i64 - gx as i64, (ny + gw) as i64 - gy as i64)
+        }
     }
     let x: i64 = nx as i64
     let y: i64 = ny as i64
