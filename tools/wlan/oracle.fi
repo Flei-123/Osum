@@ -47,6 +47,9 @@
 //   gtk      <kek> <keydata>                     ausgepackter GTK
 //   automat  <folge>                             Endzustand und Grund
 //   pmk      <pwhex> <ssidhex>                   32 Oktette
+//   ipdhcp   <klartext ab LLC/SNAP>       Zeile mit IP/UDP/DHCP\n//   vollweg  <beacon> <pmk> <spa> <aa> <m1> <snonce> <m3>
+//            <datenrahmen> <dhcpantwort> <httpantwort>
+//            -> der GANZE Ablauf, Schritt fuer Schritt mit Zahlen
 //
 // `-` steht fuer die leere Zeichenkette. `FAIL` heisst: die Eingabe
 // wurde abgelehnt. Genau das ist bei der Haelfte der Faelle die
@@ -66,6 +69,7 @@ import wlan.usbchip
 import wlan.device
 import wlan.testdevice
 import wlan.connect
+import wlan.llc
 
 const CAP: usize = 4096
 
@@ -232,6 +236,49 @@ fn thex(p: u64, n: usize) {
 fn temit() {
     io.print_line_bytes((&txtb[0]) as u64, tlen)
     tlen = 0
+}
+
+
+// ==================================================================
+// RUNDE WLAN-3: einen gewoehnlichen Datenrahmen bauen
+// ==================================================================
+//
+// Ein 802.11-Datenrahmen ToDS (an den Zugangspunkt) mit LLC/SNAP und
+// einem IPv4/UDP-Paket darin. Der Inhalt ist absichtlich klein und
+// fest: es geht nicht darum, was drinsteht, sondern darum, dass er
+// verschluesselt hinausgeht und die Gegenstelle ihn oeffnen kann.
+//
+// Die Adressen stehen nach 802.11-2016 9.2.4.7.2 fuer ToDS=1 so:
+//   A1 = BSSID (der Zugangspunkt), A2 = Sender, A3 = Ziel.
+fn datenrahmen_bauen(out: u64, spa: u64, aa: u64, nutz: usize) -> usize {
+    // FC: Typ Daten (2), Untertyp 0, ToDS gesetzt
+    rt.st8(out, 0, 8 as u8)
+    rt.st8(out, 1, 1 as u8)
+    rt.st8(out, 2, 0 as u8)      // Dauer
+    rt.st8(out, 3, 0 as u8)
+    var i: usize = 0
+    while i < 6 {
+        rt.st8(out, 4 + i, rt.ld8(aa, i))     // A1 = BSSID
+        rt.st8(out, 10 + i, rt.ld8(spa, i))   // A2 = wir
+        rt.st8(out, 16 + i, rt.ld8(aa, i))    // A3 = Ziel
+        i = i + 1
+    }
+    rt.st8(out, 22, 0 as u8)     // Folgenummer
+    rt.st8(out, 23, 0 as u8)
+    let koerper: u64 = out + 24
+    llc.snap_build(koerper, llc.ET_IPV4)
+    // Ein UDP-Paket von 0.0.0.0:68 an 255.255.255.255:67 -- also
+    // genau die Form, die ein DHCP-Discover hat.
+    let ipl: usize = llc.ipv4_build(koerper + 8, 0, 0xFFFFFFFF,
+        llc.P_UDP, 8 + nutz, 1)
+    var k: usize = 0
+    while k < nutz {
+        rt.st8(koerper + 8 + (ipl as u64) + 8, k, (65 + k) as u8)
+        k = k + 1
+    }
+    llc.udp_build(koerper + 8 + (ipl as u64), 0, 0xFFFFFFFF, 68, 67,
+        nutz)
+    return 24 + 8 + ipl + 8 + nutz
 }
 
 // ==================================================================
@@ -808,6 +855,409 @@ fn run_line(line: u64, len: usize) {
         tnum(testdevice.schluessel_anzahl(&pr) as u64)
         var lgr: [u8; 8] = " grund=\0"
         tlit((&lgr[0]) as u64)
+        tnum(connect.reason_from(&si))
+        temit()
+        return
+    }
+
+    // ---- RUNDE WLAN-3: ein Klartextpaket durch die Schicht ueber CCMP ----
+    //
+    //   ipdhcp <klartext ab LLC/SNAP>  -> Zeile mit den Feldern
+    //
+    // Das ist der Befehl, mit dem die ECHTEN DHCP-Pakete aus
+    // `tools/wlan/mitschnitt.txt` gemessen werden: sie werden mit dem
+    // echten Schluessel geoeffnet und hier hindurchgeschickt. Ein
+    // Zerleger, der nur gegen selbst gebaute Pakete gemessen ist, ist
+    // gegen den eigenen Denkfehler blind -- diese Pakete hat ein
+    // fremder Zugangspunkt gebaut, vor Jahren, ohne von Osum zu
+    // wissen.
+    var wid: [u8; 7] = "ipdhcp\0"
+    if word_is(line, len, &at, (&wid[0]) as u64) {
+        let nl: i64 = field_hex(line, len, &at, p0)
+        if nl < 8 { fail(); return }
+        let n: usize = nl as usize
+        let et: u64 = llc.snap_parse(p0, n)
+        var ipok: bool = false
+        var sum_ok: bool = false
+        var proto: u64 = 0
+        var quelle: u64 = 0
+        var ziel: u64 = 0
+        var uok: bool = false
+        var usum: bool = false
+        var qport: u64 = 0
+        var zport: u64 = 0
+        var dok: bool = false
+        var dart: u64 = 0
+        var yia: u64 = 0
+        var maske: u64 = 0
+        var tor: u64 = 0
+        var server: u64 = 0
+        var miete: u64 = 0
+        if et == llc.ET_IPV4 {
+            var ip: llc.Ipv4 = llc.ipv4_new()
+            if llc.ipv4_parse(&ip, p0 + 8, n - 8) {
+                ipok = true
+                sum_ok = ip.summe_ok
+                proto = ip.protokoll
+                quelle = ip.quelle
+                ziel = ip.ziel
+                if ip.protokoll == llc.P_UDP {
+                    var ud: llc.Udp = llc.udp_new()
+                    if llc.udp_parse(&ud, ip.nutz, ip.nutz_len,
+                        ip.quelle, ip.ziel) {
+                        uok = true
+                        usum = ud.summe_ok
+                        qport = ud.quelle
+                        zport = ud.ziel
+                        var dh: llc.Dhcp = llc.dhcp_new()
+                        if llc.dhcp_parse(&dh, ud.nutz, ud.nutz_len) {
+                            dok = true
+                            dart = dh.art
+                            yia = dh.yiaddr
+                            maske = dh.maske
+                            tor = dh.tor
+                            server = dh.server
+                            miete = dh.miete
+                        }
+                    }
+                }
+            }
+        }
+        var g1: [u8; 4] = "et=\0"
+        tlit((&g1[0]) as u64)
+        tnum(et)
+        var g2: [u8; 6] = " ip=\0\0"
+        tlit((&g2[0]) as u64)
+        tbit(ipok)
+        var g3: [u8; 8] = " ipsum=\0"
+        tlit((&g3[0]) as u64)
+        tbit(sum_ok)
+        var g4: [u8; 8] = " proto=\0"
+        tlit((&g4[0]) as u64)
+        tnum(proto)
+        var g5: [u8; 8] = " qip=\0\0\0"
+        tlit((&g5[0]) as u64)
+        tnum(quelle)
+        var g6: [u8; 8] = " zip=\0\0\0"
+        tlit((&g6[0]) as u64)
+        tnum(ziel)
+        var g7: [u8; 8] = " udp=\0\0\0"
+        tlit((&g7[0]) as u64)
+        tbit(uok)
+        var g8: [u8; 9] = " udpsum=\0"
+        tlit((&g8[0]) as u64)
+        tbit(usum)
+        var g9: [u8; 8] = " qport=\0"
+        tlit((&g9[0]) as u64)
+        tnum(qport)
+        var ga: [u8; 8] = " zport=\0"
+        tlit((&ga[0]) as u64)
+        tnum(zport)
+        var gb: [u8; 7] = " dhcp=\0"
+        tlit((&gb[0]) as u64)
+        tbit(dok)
+        var gc: [u8; 7] = " dart=\0"
+        tlit((&gc[0]) as u64)
+        tnum(dart)
+        var gd: [u8; 9] = " yiaddr=\0"
+        tlit((&gd[0]) as u64)
+        tnum(yia)
+        var ge: [u8; 8] = " maske=\0"
+        tlit((&ge[0]) as u64)
+        tnum(maske)
+        var gf: [u8; 6] = " tor=\0"
+        tlit((&gf[0]) as u64)
+        tnum(tor)
+        var gg2: [u8; 9] = " server=\0"
+        tlit((&gg2[0]) as u64)
+        tnum(server)
+        var gh: [u8; 8] = " miete=\0"
+        tlit((&gh[0]) as u64)
+        tnum(miete)
+        temit()
+        return
+    }
+
+    // ---- RUNDE WLAN-3: DER VOLLE ABLAUF ALS EIN VORGANG ----
+    //
+    //   vollweg <beacon> <pmk> <spa> <aa> <m1> <snonce> <m3>
+    //           <datenrahmen> <dhcpantwort> <httpantwort>
+    //
+    // Das ist die Zusage, um die es in dieser Runde geht. `weg` hoert
+    // auf, sobald die Schluessel im Geraet liegen -- und genau dort
+    // fangen die Fragen an, die ein Mensch meint, wenn er sagt "der
+    // Rechner ist im WLAN":
+    //
+    //   * Geht ein VERSCHLUESSELTES Datenpaket hinaus, und kommt eines
+    //     zurueck, das sich mit demselben Schluessel oeffnen laesst?
+    //   * Bekommt der Rechner eine ADRESSE (DHCP)?
+    //   * Kommt auf eine HTTP-Anfrage eine ANTWORT?
+    //
+    // Jeder dieser Schritte steht in der Antwortzeile mit einer
+    // eigenen Zahl. Wer eine Zutat faelscht, sieht in derselben Zeile,
+    // wo der Weg abbricht -- und dass danach NICHTS mehr passiert.
+    var wvw: [u8; 8] = "vollweg\0"
+    if word_is(line, len, &at, (&wvw[0]) as u64) {
+        let bl: i64 = field_hex(line, len, &at, p0)
+        let pl: i64 = field_hex(line, len, &at, p1)
+        let sl: i64 = field_hex(line, len, &at, p2)
+        let al: i64 = field_hex(line, len, &at, p3)
+        let ml: i64 = field_hex(line, len, &at, p4)
+        if bl < 0 || pl != 32 || sl != 6 || al != 6 || ml < 0 {
+            fail()
+            return
+        }
+        var sn: [u8; 32] = [0; 32]
+        var m3: [u8; 1024] = [0; 1024]
+        let nl: i64 = field_hex(line, len, &at, (&sn[0]) as u64)
+        let tl: i64 = field_hex(line, len, &at, (&m3[0]) as u64)
+        if nl != 32 || tl < 0 { fail(); return }
+        // Die drei Antworten des Zugangspunktes. Sie sind schon
+        // VERSCHLUESSELT -- gebaut hat sie `tools/wlan/gegenstelle.py`
+        // mit ihrer eigenen Kryptobibliothek. Dass sie sich hier
+        // oeffnen lassen, ist der Punkt.
+        var ein: [u8; 2048] = [0; 2048]
+        var dha: [u8; 2048] = [0; 2048]
+        var hta: [u8; 2048] = [0; 2048]
+        let el: i64 = field_hex(line, len, &at, (&ein[0]) as u64)
+        let dl: i64 = field_hex(line, len, &at, (&dha[0]) as u64)
+        let hl: i64 = field_hex(line, len, &at, (&hta[0]) as u64)
+
+        var pr: testdevice.Check = testdevice.check_new()
+        var gg: device.Geraet = device.geraet_new()
+        // `kann_ccmp` ist FALSCH: das simulierte Geraet rechnet nicht
+        // selbst, also rechnet `lib/wlan/ccmp.fi`. Das ist mit Absicht
+        // der schwerere der beiden Wege -- er misst unsere eigene
+        // Verschluesselung statt die einer Karte, die es nicht gibt.
+        if !testdevice.anhaengen(&gg, &pr, false) { fail(); return }
+        device.addr_set(&gg, p2)
+        var si: connect.Sitzung = connect.sitzung_new()
+        connect.identity_set(&si, p2, p3)
+        connect.pmk_set(&si, p1)
+        connect.akm_set(&si, 2)
+
+        // ---- 1. Suchlauf ----
+        connect.suchlauf_beginnen(&si, &gg)
+        connect.beacon_aufnehmen(&si, p0, bl as usize, 0 - 40)
+        let n_netze: usize = connect.netz_anzahl(&si)
+
+        // ---- 2. Netzwahl ----
+        let gewaehlt: bool = connect.netz_waehlen(&si, &gg, 0)
+        let kanal: u64 = testdevice.kanal_gesetzt(&pr)
+
+        // ---- 3./4. Auth, Assoz, Handschlag ----
+        var m1ok: i64 = 0 - 1
+        var m3ok: bool = false
+        if gewaehlt {
+            connect.auth_angenommen(&si, true)
+            connect.assoz_angenommen(&si, true)
+            m1ok = connect.nachricht1_behandeln(&si, &gg, p4,
+                ml as usize, (&sn[0]) as u64, po, CAP)
+            if m1ok > 0 && tl > 0 {
+                m3ok = connect.nachricht3_behandeln(&si, &gg,
+                    (&m3[0]) as u64, tl as usize)
+            }
+        }
+        let skeys: usize = testdevice.schluessel_anzahl(&pr)
+        let darf: bool = connect.darf_daten_ist(&si)
+
+        // ---- 5. EIN VERSCHLUESSELTES DATENPAKET HINAUS ----
+        //
+        // Ein gewoehnlicher Datenrahmen an den Zugangspunkt, mit
+        // LLC/SNAP und einem IPv4/UDP-Paket darin. Er geht durch
+        // `verbinden.daten_senden`, wird also von `ccmp.fi`
+        // verschluesselt -- und genau der Rahmen, der dabei
+        // herauskommt, wird gleich von der Gegenstelle geoeffnet.
+        var raus: [u8; 2048] = [0; 2048]
+        var tx: [u8; 2048] = [0; 2048]
+        var gesendet: i64 = 0 - 1
+        if darf {
+            testdevice.beide_leeren(&pr)
+            let rl: usize = datenrahmen_bauen((&raus[0]) as u64,
+                p2, p3, 7)
+            gesendet = connect.daten_senden(&si, &gg,
+                (&raus[0]) as u64, rl, (&tx[0]) as u64, 2048)
+        }
+        // Was wirklich im Geraet gelandet ist -- nicht was ein Merker
+        // behauptet.
+        var ges: [u8; 2048] = [0; 2048]
+        var gesl: i64 = 0 - 1
+        if gesendet > 0 {
+            gesl = testdevice.sent_get(&pr, 0, (&ges[0]) as u64, 2048)
+        }
+        // Ist er ueberhaupt verschluesselt? Ein Rahmen, bei dem das
+        // Geschuetzt-Bit fehlt, waere Klartext auf der Luft -- die
+        // Luecke, gegen die `verbinden.fi` gebaut wurde.
+        var geschuetzt: bool = false
+        if gesl > 14 {
+            let fcv: u64 = frame.fc((&ges[0]) as u64, gesl as usize)
+            geschuetzt = frame.geschuetzt(fcv)
+        }
+
+        // ---- 6. EIN VERSCHLUESSELTES DATENPAKET HEREIN ----
+        var herein: [u8; 2048] = [0; 2048]
+        var hn: i64 = 0 - 1
+        var et: u64 = 0
+        if darf && el > 0 {
+            testdevice.einspeisen_leeren(&pr)
+            testdevice.einspeisen(&pr, (&ein[0]) as u64, el as usize)
+            var roh: [u8; 2048] = [0; 2048]
+            hn = connect.daten_empfangen(&si, &gg, (&roh[0]) as u64,
+                2048, (&herein[0]) as u64, 2048)
+            if hn > 0 {
+                let kl: i64 = frame.header_len((&herein[0]) as u64,
+                    hn as usize)
+                if kl > 0 && (hn as usize) > (kl as usize) {
+                    et = llc.snap_parse((&herein[0]) as u64
+                        + (kl as u64), (hn as usize) - (kl as usize))
+                }
+            }
+        }
+
+        // ---- 7. DHCP ----
+        //
+        // Die Antwort des Zugangspunktes kommt verschluesselt herein,
+        // wird geoeffnet, und aus ihr faellt eine Adresse. Das ist der
+        // Schritt, nach dem ein Mensch sagt "ich bin im Netz".
+        var adresse: u64 = 0
+        var maske: u64 = 0
+        var tor: u64 = 0
+        var dart: u64 = 0
+        var dhcp_ok: bool = false
+        if darf && dl > 0 {
+            testdevice.einspeisen_leeren(&pr)
+            testdevice.einspeisen(&pr, (&dha[0]) as u64, dl as usize)
+            var roh2: [u8; 2048] = [0; 2048]
+            var kl2: [u8; 2048] = [0; 2048]
+            let n2: i64 = connect.daten_empfangen(&si, &gg,
+                (&roh2[0]) as u64, 2048, (&kl2[0]) as u64, 2048)
+            if n2 > 0 {
+                let k2: i64 = frame.header_len((&kl2[0]) as u64,
+                    n2 as usize)
+                if k2 > 0 {
+                    let nutz: u64 = (&kl2[0]) as u64 + (k2 as u64)
+                    let nn: usize = (n2 as usize) - (k2 as usize)
+                    if llc.snap_parse(nutz, nn) == llc.ET_IPV4 {
+                        var ip: llc.Ipv4 = llc.ipv4_new()
+                        if llc.ipv4_parse(&ip, nutz + 8, nn - 8) {
+                            if ip.summe_ok && ip.protokoll == llc.P_UDP {
+                                var ud: llc.Udp = llc.udp_new()
+                                if llc.udp_parse(&ud, ip.nutz,
+                                    ip.nutz_len, ip.quelle, ip.ziel) {
+                                    if ud.summe_ok && ud.ziel == 68 {
+                                        var dh: llc.Dhcp = llc.dhcp_new()
+                                        if llc.dhcp_parse(&dh, ud.nutz,
+                                            ud.nutz_len) {
+                                            dart = dh.art
+                                            adresse = dh.yiaddr
+                                            maske = dh.maske
+                                            tor = dh.tor
+                                            dhcp_ok = dh.art == llc.D_ACK
+                                                && dh.yiaddr != 0
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- 8. HTTP ----
+        var status: u64 = 0
+        var rumpf: i64 = 0 - 1
+        if dhcp_ok && hl > 0 {
+            testdevice.einspeisen_leeren(&pr)
+            testdevice.einspeisen(&pr, (&hta[0]) as u64, hl as usize)
+            var roh3: [u8; 2048] = [0; 2048]
+            var kl3: [u8; 2048] = [0; 2048]
+            let n3: i64 = connect.daten_empfangen(&si, &gg,
+                (&roh3[0]) as u64, 2048, (&kl3[0]) as u64, 2048)
+            if n3 > 0 {
+                let k3: i64 = frame.header_len((&kl3[0]) as u64,
+                    n3 as usize)
+                if k3 > 0 {
+                    let nutz3: u64 = (&kl3[0]) as u64 + (k3 as u64)
+                    let nn3: usize = (n3 as usize) - (k3 as usize)
+                    if llc.snap_parse(nutz3, nn3) == llc.ET_IPV4 {
+                        var ip3: llc.Ipv4 = llc.ipv4_new()
+                        if llc.ipv4_parse(&ip3, nutz3 + 8, nn3 - 8) {
+                            if ip3.summe_ok && ip3.protokoll == llc.P_TCP {
+                                var tc: llc.Tcp = llc.tcp_new()
+                                if llc.tcp_parse(&tc, ip3.nutz,
+                                    ip3.nutz_len, ip3.quelle, ip3.ziel) {
+                                    if tc.summe_ok {
+                                        status = llc.http_status_of(
+                                            tc.nutz, tc.nutz_len)
+                                        rumpf = llc.http_body_offset(
+                                            tc.nutz, tc.nutz_len)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- die Antwortzeile: jeder Schritt eine eigene Zahl ----
+        var f1: [u8; 8] = "netze=\0\0"
+        tlit((&f1[0]) as u64)
+        tnum(n_netze as u64)
+        var f2: [u8; 8] = " wahl=\0\0"
+        tlit((&f2[0]) as u64)
+        tbit(gewaehlt)
+        var f3: [u8; 8] = " kanal=\0"
+        tlit((&f3[0]) as u64)
+        tnum(kanal)
+        var f4: [u8; 6] = " m1=\0\0"
+        tlit((&f4[0]) as u64)
+        tbit(m1ok > 0)
+        var f5: [u8; 6] = " m3=\0\0"
+        tlit((&f5[0]) as u64)
+        tbit(m3ok)
+        var f6: [u8; 8] = " skeys=\0"
+        tlit((&f6[0]) as u64)
+        tnum(skeys as u64)
+        var f7: [u8; 8] = " darf=\0\0"
+        tlit((&f7[0]) as u64)
+        tbit(darf)
+        var f8: [u8; 8] = " tx=\0\0\0\0"
+        tlit((&f8[0]) as u64)
+        tsnum(gesendet)
+        var f9: [u8; 8] = " gesch=\0"
+        tlit((&f9[0]) as u64)
+        tbit(geschuetzt)
+        var fa: [u8; 6] = " rx=\0\0"
+        tlit((&fa[0]) as u64)
+        tsnum(hn)
+        var fb: [u8; 6] = " et=\0\0"
+        tlit((&fb[0]) as u64)
+        tnum(et)
+        var fc2: [u8; 8] = " dart=\0\0"
+        tlit((&fc2[0]) as u64)
+        tnum(dart)
+        var fd: [u8; 6] = " ip=\0\0"
+        tlit((&fd[0]) as u64)
+        tnum(adresse)
+        var fe: [u8; 8] = " maske=\0"
+        tlit((&fe[0]) as u64)
+        tnum(maske)
+        var ff: [u8; 6] = " tor=\0"
+        tlit((&ff[0]) as u64)
+        tnum(tor)
+        var fg: [u8; 8] = " dhcp=\0\0"
+        tlit((&fg[0]) as u64)
+        tbit(dhcp_ok)
+        var fh: [u8; 8] = " http=\0\0"
+        tlit((&fh[0]) as u64)
+        tnum(status)
+        var fi: [u8; 8] = " rumpf=\0"
+        tlit((&fi[0]) as u64)
+        tsnum(rumpf)
+        var fj: [u8; 8] = " grund=\0"
+        tlit((&fj[0]) as u64)
         tnum(connect.reason_from(&si))
         temit()
         return
