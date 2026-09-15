@@ -1,0 +1,189 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/crypto/shani.fi -- SHA-256 auf den Befehlen der Maschine,
+// Runde ARGON (K-021), zweiter Teil.
+//
+// ==================================================================
+// WARUM ES DIESE DATEI GIBT
+// ==================================================================
+//
+// `lib/crypto/sha256.fi` rechnet die 64 Runden der Verdichtung einzeln
+// in Firn. Das ist richtig -- gegen FIPS 180-4 und Pythons `hashlib`
+// gemessen -- und fuer die meisten Aufrufer im Baum reicht es. Zwei
+// Aufrufer sind aber im Weg der Entsperrung:
+//
+//   * die KOPFPRUEFSUMME: SHA-256 ueber die ersten 4096 Oktette des
+//     Kopfsatzes, also 64 Bloecke, bei jedem `header_read`.
+//   * der SCHLUESSELPLATZ-MAC: HMAC-SHA256, und HMAC rechnet SHA-256
+//     ZWEIMAL (inneres und aeusseres Auffuellen), je Platz.
+//
+// Seit Goldmont/Zen (2016/2017) hat x86-64 die Befehle SHA256RNDS2,
+// SHA256MSG1 und SHA256MSG2. Zwei Runden der Verdichtung sind damit EIN
+// Befehl statt zweier Runden Handarbeit.
+//
+// EHRLICH GESAGT, UND DER BERICHT SAGT ES AUCH: gemessen an Argon2 ist
+// das wenig. Argon2 kostet Hunderte von Millionen Takten, die
+// Kopfpruefsumme einige Zehntausend. Diese Datei ist der zweite Teil
+// des Auftrags und keine Rettung der Entsperrzeit -- wer das
+// Gegenteil behauptet, hat nicht gemessen.
+//
+// ==================================================================
+// WAS DIESE DATEI NICHT TUT: SIE ERSETZT `sha256.fi` NICHT
+// ==================================================================
+//
+// Dieselben drei Gruende wie bei `aesni.fi` gegenueber `aes.fi`:
+//
+//   1. NICHT JEDE MASCHINE HAT DIE BEFEHLE. SHA-NI ist juenger als
+//      AES-NI -- viele x86-64, die AES-NI haben, haben SHA-NI NICHT
+//      (jede Intel-CPU zwischen Westmere und Ice Lake im Desktop).
+//      Der Rueckfallweg ist hier also nicht der Ausnahmefall, sondern
+//      auf sehr viel Blech der Normalfall.
+//   2. VIELE AUFRUFER HAENGEN AN `sha256.fi` -- TLS, SSH, das
+//      Paketwesen, OFS. Diese Runde fasst davon nichts an.
+//   3. DIE HANDFASSUNG IST DIE GEGENPROBE. Zwei unabhaengige Wege, die
+//      Oktett fuer Oktett dasselbe liefern muessen, sind mehr wert als
+//      einer, dem man glauben muss.
+//
+// Die Wahl faellt nicht hier, sondern beim Aufrufer: `shani.usable()`
+// fragt `cpuid`, und wer die Befehle nicht hat, rechnet wie bisher.
+//
+// ==================================================================
+// DIE ANORDNUNG DER REGISTER -- DIE EIGENTLICHE FALLE
+// ==================================================================
+//
+// `SHA256RNDS2` erwartet den Zustand NICHT in der Reihenfolge a..h,
+// sondern in zwei Registern mit einer eigenwilligen Anordnung:
+//
+//     STATE0 = { C, D, G, H }   (als dwords: [0]=C [1]=D [2]=G [3]=H)
+//     STATE1 = { A, B, E, F }
+//
+// Wer die Zustaende in der naheliegenden Reihenfolge einsetzt, bekommt
+// Werte, die stabil, reproduzierbar und falsch sind. Deshalb steht das
+// Umsortieren hier ausdruecklich als eigener Schritt (`zustand_ein` und
+// `zustand_aus`) und nicht beilaeufig im asm-Block.
+//
+// Die Befehle selbst:
+//   SHA256MSG1 x, y     x = sigma0-Teil der Nachrichtenerweiterung
+//   SHA256MSG2 x, y     x = sigma1-Teil, fertige W-Woerter
+//   SHA256RNDS2 x, y    zwei Runden, Rundenkonstanten + W in xmm0
+//
+// Nachgemessen wurde vor dem Bauen, dass firnc die Befehle wirklich
+// erzeugt und die Maschine das Richtige rechnet: eine Probe hat
+// `SHA256MSG1` einmal ausgefuehrt und gegen eine unabhaengige
+// Nachbildung in Python gehalten (sigma0 von Hand gerechnet) --
+// 61c53abb 1a913b18 d91cbb90 056bf7e2, Ziffer fuer Ziffer gleich.
+
+export { usable, hash_blocks, SHA_BLOCK }
+
+const SHA_BLOCK: usize = 64
+
+// ==================================================================
+// CPUID: BLATT 7, UNTERBLATT 0, EBX BIT 29
+// ==================================================================
+//
+// `rbx` traegt in Firn den Rahmen und muss um jedes `cpuid` herum
+// gerettet werden -- derselbe Griff wie in `rand.has_rdseed` und
+// `fpu.cpuid_b`. Ohne das Sichern ist der naechste Zugriff auf eine
+// lokale Variable ein Griff ins Leere.
+fn cpuid7_ebx() -> u64 {
+    var out: u64 = 0
+    asm("push rbx; mov eax, 7; xor ecx, ecx; cpuid; mov [rdi], ebx; pop rbx",
+        in("rdi") (&out) as u64, clobber("rax"), clobber("rcx"),
+        clobber("rdx"), clobber("memory"))
+    return out
+}
+
+// Blatt 7 gibt es erst, wenn Blatt 0 es anbietet. Eine CPU, die nur
+// Blatt 1 kennt, liefert auf Blatt 7 irgendetwas -- auf manchen
+// Maschinen die Werte des hoechsten Blattes, das sie hat.
+fn cpuid_max() -> u64 {
+    var out: u64 = 0
+    asm("push rbx; xor eax, eax; cpuid; mov [rdi], eax; pop rbx",
+        in("rdi") (&out) as u64, clobber("rax"), clobber("rcx"),
+        clobber("rdx"), clobber("memory"))
+    return out
+}
+
+fn usable() -> bool {
+    if cpuid_max() < 7 {
+        return false
+    }
+    return (cpuid7_ebx() >> 29) & 1 == 1
+}
+
+// Die Rundenkonstanten, in der Reihenfolge, in der SHA256RNDS2 sie
+// braucht: vier je Schritt, little endian im Speicher.
+static mut KTAB: [u32; 64] = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2]
+
+// Die Maske, die BSWAP fuer vier dwords in einem Register macht --
+// SHA-256 liest big endian, x86 legt little endian ab.
+static mut BSWAPM: [u32; 4] = [0x00010203, 0x04050607, 0x08090a0b, 0x0c0d0e0f]
+
+// =================================================== DER ZUSTANDSUMBAU
+//
+// h[0..8] = a,b,c,d,e,f,g,h  ->  STATE0 = {C,D,G,H}, STATE1 = {A,B,E,F}
+fn zustand_ein(h: u64, cdgh: u64, abef: u64) {
+    // cdgh: dword0=H dword1=G dword2=D dword3=C
+    *((cdgh + 0) as *mut u32) = (*((h + 7 * 8) as *mut u64)) as u32
+    *((cdgh + 4) as *mut u32) = (*((h + 6 * 8) as *mut u64)) as u32
+    *((cdgh + 8) as *mut u32) = (*((h + 3 * 8) as *mut u64)) as u32
+    *((cdgh + 12) as *mut u32) = (*((h + 2 * 8) as *mut u64)) as u32
+    // abef: dword0=F dword1=E dword2=B dword3=A
+    *((abef + 0) as *mut u32) = (*((h + 5 * 8) as *mut u64)) as u32
+    *((abef + 4) as *mut u32) = (*((h + 4 * 8) as *mut u64)) as u32
+    *((abef + 8) as *mut u32) = (*((h + 1 * 8) as *mut u64)) as u32
+    *((abef + 12) as *mut u32) = (*((h + 0 * 8) as *mut u64)) as u32
+}
+
+fn zustand_aus(h: u64, cdgh: u64, abef: u64) {
+    *((h + 7 * 8) as *mut u64) = (*((cdgh + 0) as *mut u32)) as u64
+    *((h + 6 * 8) as *mut u64) = (*((cdgh + 4) as *mut u32)) as u64
+    *((h + 3 * 8) as *mut u64) = (*((cdgh + 8) as *mut u32)) as u64
+    *((h + 2 * 8) as *mut u64) = (*((cdgh + 12) as *mut u32)) as u64
+    *((h + 5 * 8) as *mut u64) = (*((abef + 0) as *mut u32)) as u64
+    *((h + 4 * 8) as *mut u64) = (*((abef + 4) as *mut u32)) as u64
+    *((h + 1 * 8) as *mut u64) = (*((abef + 8) as *mut u32)) as u64
+    *((h + 0 * 8) as *mut u64) = (*((abef + 12) as *mut u32)) as u64
+}
+
+// ================================================== DIE VERDICHTUNG
+//
+// `h` zeigt auf acht u64 (die Zustandsworte, je nur 32 Bit belegt --
+// genau das Feld, das `sha256.Sha256` traegt). `p` zeigt auf `blocks`
+// mal 64 Oktette Nachricht.
+//
+// DIE SCHLEIFE STEHT IM ASM-BLOCK. `kernel/fb.fi` hat fuer SSE2
+// gemessen, was ein asm-Block je Kleinigkeit kostet: der Rahmen um den
+// Block war teurer als die Rechnung darin (Faktor 1,9 statt der
+// erwarteten 4 bis 8). `aesni.xts_enc8` traegt sein `dec/jnz` deshalb
+// selbst, und diese Funktion tut es genauso.
+fn hash_blocks(h: u64, p: u64, blocks: u64) {
+    if blocks == 0 {
+        return
+    }
+    var st0: [u32; 4] = [0; 4]
+    var st1: [u32; 4] = [0; 4]
+    let p0: u64 = (&st0[0]) as u64
+    let p1: u64 = (&st1[0]) as u64
+    zustand_ein(h, p0, p1)
+    asm("movdqu xmm8,[rdi]\nmovdqu xmm9,[rsi]\nmovdqu xmm7,[r10]\n1:\nmovdqa xmm12,xmm8\nmovdqa xmm13,xmm9\nmovdqu xmm3,[rdx]\npshufb xmm3,xmm7\nmovdqu xmm4,[rdx+16]\npshufb xmm4,xmm7\nmovdqu xmm5,[rdx+32]\npshufb xmm5,xmm7\nmovdqu xmm6,[rdx+48]\npshufb xmm6,xmm7\nmov r9,r8\nmovdqa xmm0,xmm3\npaddd xmm0,[r9]\nsha256rnds2 xmm8,xmm9\nsha256msg1 xmm3,xmm4\nmovdqa xmm11,xmm6\npalignr xmm11,xmm5,4\npaddd xmm3,xmm11\nsha256msg2 xmm3,xmm6\npshufd xmm0,xmm0,0x0e\nsha256rnds2 xmm9,xmm8\nadd r9,16\nmovdqa xmm0,xmm4\npaddd xmm0,[r9]\nsha256rnds2 xmm8,xmm9\nsha256msg1 xmm4,xmm5\nmovdqa xmm11,xmm3\npalignr xmm11,xmm6,4\npaddd xmm4,xmm11\nsha256msg2 xmm4,xmm3\npshufd xmm0,xmm0,0x0e\nsha256rnds2 xmm9,xmm8\nadd r9,16\nmovdqa xmm0,xmm5\npaddd xmm0,[r9]\nsha256rnds2 xmm8,xmm9\nsha256msg1 xmm5,xmm6\nmovdqa xmm11,xmm4\npalignr xmm11,xmm3,4\npaddd xmm5,xmm11\nsha256msg2 xmm5,xmm4\npshufd xmm0,xmm0,0x0e\nsha256rnds2 xmm9,xmm8\nadd r9,16\nmovdqa xmm0,xmm6\npaddd xmm0,[r9]\nsha256rnds2 xmm8,xmm9\nsha256msg1 xmm6,xmm3\nmovdqa xmm11,xmm5\npalignr xmm11,xmm4,4\npaddd xmm6,xmm11\nsha256msg2 xmm6,xmm5\npshufd xmm0,xmm0,0x0e\nsha256rnds2 xmm9,xmm8\nadd r9,16\nmovdqa xmm0,xmm3\npaddd xmm0,[r9]\nsha256rnds2 xmm8,xmm9\nsha256msg1 xmm3,xmm4\nmovdqa xmm11,xmm6\npalignr xmm11,xmm5,4\npaddd xmm3,xmm11\nsha256msg2 xmm3,xmm6\npshufd xmm0,xmm0,0x0e\nsha256rnds2 xmm9,xmm8\nadd r9,16\nmovdqa xmm0,xmm4\npaddd xmm0,[r9]\nsha256rnds2 xmm8,xmm9\nsha256msg1 xmm4,xmm5\nmovdqa xmm11,xmm3\npalignr xmm11,xmm6,4\npaddd xmm4,xmm11\nsha256msg2 xmm4,xmm3\npshufd xmm0,xmm0,0x0e\nsha256rnds2 xmm9,xmm8\nadd r9,16\nmovdqa xmm0,xmm5\npaddd xmm0,[r9]\nsha256rnds2 xmm8,xmm9\nsha256msg1 xmm5,xmm6\nmovdqa xmm11,xmm4\npalignr xmm11,xmm3,4\npaddd xmm5,xmm11\nsha256msg2 xmm5,xmm4\npshufd xmm0,xmm0,0x0e\nsha256rnds2 xmm9,xmm8\nadd r9,16\nmovdqa xmm0,xmm6\npaddd xmm0,[r9]\nsha256rnds2 xmm8,xmm9\nsha256msg1 xmm6,xmm3\nmovdqa xmm11,xmm5\npalignr xmm11,xmm4,4\npaddd xmm6,xmm11\nsha256msg2 xmm6,xmm5\npshufd xmm0,xmm0,0x0e\nsha256rnds2 xmm9,xmm8\nadd r9,16\nmovdqa xmm0,xmm3\npaddd xmm0,[r9]\nsha256rnds2 xmm8,xmm9\nsha256msg1 xmm3,xmm4\nmovdqa xmm11,xmm6\npalignr xmm11,xmm5,4\npaddd xmm3,xmm11\nsha256msg2 xmm3,xmm6\npshufd xmm0,xmm0,0x0e\nsha256rnds2 xmm9,xmm8\nadd r9,16\nmovdqa xmm0,xmm4\npaddd xmm0,[r9]\nsha256rnds2 xmm8,xmm9\nsha256msg1 xmm4,xmm5\nmovdqa xmm11,xmm3\npalignr xmm11,xmm6,4\npaddd xmm4,xmm11\nsha256msg2 xmm4,xmm3\npshufd xmm0,xmm0,0x0e\nsha256rnds2 xmm9,xmm8\nadd r9,16\nmovdqa xmm0,xmm5\npaddd xmm0,[r9]\nsha256rnds2 xmm8,xmm9\nsha256msg1 xmm5,xmm6\nmovdqa xmm11,xmm4\npalignr xmm11,xmm3,4\npaddd xmm5,xmm11\nsha256msg2 xmm5,xmm4\npshufd xmm0,xmm0,0x0e\nsha256rnds2 xmm9,xmm8\nadd r9,16\nmovdqa xmm0,xmm6\npaddd xmm0,[r9]\nsha256rnds2 xmm8,xmm9\nsha256msg1 xmm6,xmm3\nmovdqa xmm11,xmm5\npalignr xmm11,xmm4,4\npaddd xmm6,xmm11\nsha256msg2 xmm6,xmm5\npshufd xmm0,xmm0,0x0e\nsha256rnds2 xmm9,xmm8\nadd r9,16\nmovdqa xmm0,xmm3\npaddd xmm0,[r9]\nsha256rnds2 xmm8,xmm9\npshufd xmm0,xmm0,0x0e\nsha256rnds2 xmm9,xmm8\nadd r9,16\nmovdqa xmm0,xmm4\npaddd xmm0,[r9]\nsha256rnds2 xmm8,xmm9\npshufd xmm0,xmm0,0x0e\nsha256rnds2 xmm9,xmm8\nadd r9,16\nmovdqa xmm0,xmm5\npaddd xmm0,[r9]\nsha256rnds2 xmm8,xmm9\npshufd xmm0,xmm0,0x0e\nsha256rnds2 xmm9,xmm8\nadd r9,16\nmovdqa xmm0,xmm6\npaddd xmm0,[r9]\nsha256rnds2 xmm8,xmm9\npshufd xmm0,xmm0,0x0e\nsha256rnds2 xmm9,xmm8\nadd r9,16\npaddd xmm8,xmm12\npaddd xmm9,xmm13\nadd rdx,64\ndec rcx\njnz 1b\nmovdqu [rdi],xmm8\nmovdqu [rsi],xmm9",
+        in("rdi") p0, in("rsi") p1, in("rdx") p, in("rcx") blocks,
+        in("r8") (&KTAB[0]) as u64, in("r10") (&BSWAPM[0]) as u64,
+        clobber("r9"), clobber("memory"))
+    zustand_aus(h, p0, p1)
+}
