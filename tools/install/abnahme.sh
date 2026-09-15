@@ -364,7 +364,29 @@ platte_lauf() { # <name> <skript> <limit>
         echo "    protocol: multiboot1"
         echo "    path: boot():/osum.mb"
         if [ -n "$skript" ]; then
-            echo "    cmdline: osum vfs nokbd nosched noproc nofs noring3 script=$skript"
+            # `initsh` GEHOERT DAZU, UND OHNE ES LAEUFT DAS SKRIPT NICHT.
+            #
+            # GEMESSEN (Runde INSTALLER2). Seit der Installer eine
+            # VOLLSTAENDIGE Wurzel schreibt, liegt auf der Platte auch
+            # `/bin/init` -- und `osum(state)` in kernel/kmain.fi
+            # startet dann init statt `/bin/sh`. Das Skript aus
+            # `script=` liest laut Kommentar bei `wm_owns_shell` "der,
+            # der zuerst danach greift"; init greift gar nicht danach.
+            # Es findet im Ziel `grafik` keinen Dienst, laeuft in seine
+            # Leerlaufschranke und schaltet ab:
+            #
+            #     osum: pid1 init
+            #     init: ziel=grafik
+            #     init: herunterfahren
+            #
+            # Auf der Leitung stand danach KEIN `sh: ready`, und
+            # /beweis.txt wurde nie angelegt. Glied 7 meldete deshalb
+            # "die Datei ist nach dem Neustart weg" -- sie war nie da.
+            #
+            # `initsh` ist der dafuer vorgesehene Notweg (kmain.fi,
+            # M_INITSH): er nimmt den alten Weg und startet `/bin/sh`,
+            # das `script=` dann auch wirklich abarbeitet.
+            echo "    cmdline: osum vfs nokbd nosched noproc nofs noring3 initsh script=$skript"
         else
             echo "    cmdline: osum vfs nokbd nosched noproc nofs noring3"
         fi
@@ -450,20 +472,58 @@ titel "6. eine Datei anlegen -- auf der Platte"
 # ==================================================================
 platte_lauf schreib "echo hallo-von-der-platte >/beweis.txt;cat /beweis.txt;sync;exit" 300
 rc=$?
-[ "$rc" = 21 ] && ok "der Schreiblauf ist durchgelaufen" \
-    || bad "der Schreiblauf endete mit Code $rc"
-grep -qa 'hallo-von-der-platte' "$OUT/schreib.txt" \
-    && ok "die Datei wurde angelegt und gelesen" \
-    || bad "die Datei liess sich nicht anlegen"
+# DER BEENDIGUNGSCODE: 21 ODER 0, UND BEIDES IST RICHTIG.
+#
+# 21 ist `isa-debug-exit` (kernel/power.fi, EXIT_OK): ein Lauf, der
+# etwas abarbeitet und den Pruefstand beendet. 0 ist die ECHTE
+# ACPI-Abschaltung -- derselbe Kommentar in power.fi sagt es woertlich:
+# "eine ACPI-Abschaltung ergibt 0, isa-debug-exit ergibt 21".
+#
+# GEMESSEN (Runde INSTALLER2): seit auf der Platte ein vollstaendiges
+# System liegt, endet der Lauf ueber ACPI ("power: init sagt ab") und
+# damit mit 0. Auf 21 zu bestehen hiesse, den SCHLECHTEREN der beiden
+# Wege zu verlangen. Was zaehlt, ist dass der Lauf ZU ENDE kam und
+# nicht in den Zeitablauf (124) oder einen Absturz lief.
+if [ "$rc" = 21 ] || [ "$rc" = 0 ]; then
+    ok "der Schreiblauf ist durchgelaufen (Code $rc)"
+else
+    bad "der Schreiblauf endete mit Code $rc"
+fi
+# NICHT EINFACH NACH DEM WORT SUCHEN -- ES STEHT SCHON IN DER FRAGE.
+#
+# GEMESSEN (Runde INSTALLER2): `grep hallo-von-der-platte` traf die
+# Zeile `mb: flags=... cmd=... script=echo hallo-von-der-platte >...`,
+# also die KOMMANDOZEILE, die der Kern beim Start ausgibt. Der Test
+# war damit gruen, waehrend das Skript in Wahrheit NIE lief (statt der
+# Shell startete init, siehe `initsh` weiter oben) und /beweis.txt nie
+# entstand. Ein gruener Haken auf die eigene Frage ist keine Messung.
+#
+# Also wird die `mb:`-Zeile ausgenommen und zusaetzlich verlangt, dass
+# die Shell ueberhaupt gelaufen ist.
+if grep -qa 'sh: ready' "$OUT/schreib.txt"; then
+    ok "die Shell auf der Platte ist gelaufen"
+else
+    bad "auf der Platte lief keine Shell -- das Skript wurde nie abgearbeitet"
+fi
+if grep -va '^mb: ' "$OUT/schreib.txt" | grep -qa 'hallo-von-der-platte'; then
+    ok "die Datei wurde angelegt und gelesen"
+else
+    bad "die Datei liess sich nicht anlegen"
+fi
 
 # ==================================================================
 titel "7. NEU STARTEN -- und die Datei muss noch da sein"
 # ==================================================================
 platte_lauf wieder "cat /beweis.txt;exit" 300
 rc=$?
-[ "$rc" = 21 ] && ok "der zweite Start ist durchgelaufen" \
-    || bad "der zweite Start endete mit Code $rc"
-if grep -qa 'hallo-von-der-platte' "$OUT/wieder.txt"; then
+# 21 oder 0 -- die Begruendung steht bei Glied 6.
+if [ "$rc" = 21 ] || [ "$rc" = 0 ]; then
+    ok "der zweite Start ist durchgelaufen (Code $rc)"
+else
+    bad "der zweite Start endete mit Code $rc"
+fi
+# Auch hier OHNE die `mb:`-Zeile -- aus demselben Grund wie oben.
+if grep -va '^mb: ' "$OUT/wieder.txt" | grep -qa 'hallo-von-der-platte'; then
     ok "DIE DATEI HAT DEN NEUSTART UEBERLEBT -- das ist der Punkt der Runde"
 else
     bad "die Datei ist nach dem Neustart weg"
