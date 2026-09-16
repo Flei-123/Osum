@@ -75,7 +75,11 @@ import gfx
 
 export {
     stage, irq, service, poll, say, report, ready, count,
-    msc_ready, msc_blocks, msc_bsize, msc_read, msc_write,
+    msc_ready, msc_blocks, msc_bsize,
+    // RUNDE HOTPLUG-2: dasselbe JE PLATZ. `i` ist der Platz in der
+    // Liste der Massenspeicher und zugleich `blk.DEV_USB0 + i`.
+    msc_ready_at, msc_blocks_at, msc_bsize_at, msc_read_at, msc_write_at,
+    msc_count, MAX_MSC,
     unplug_check, unplug_now, keys, reports, enums, hotplugs, unplugs,
     // RUNDE HIDWEG: die Zahlen von `hidin`, durch diese Tuer. `kgui`
     // darf `hidin` NICHT einbinden -- hidin -> gfx -> kgui waere ein
@@ -126,8 +130,19 @@ const USCAL_OFF: u64 = 0x51800
 // Feld). Ein Geraet hinter einem Hub braucht mehr: den Wegweiser
 // (Route-String), den Steckplatz des Hubs, seinen Anschluss dort, die
 // Zahl der Schnittstellen und ob `SET_CONFIGURATION` quittiert wurde.
-// 256 * 4 = 1 KiB, und der Platz dahinter (0x51D00) war frei.
-const UDEV_OFF: u64 = 0x51980
+// RUNDE HOTPLUG-2: die alte Rechnung "256 * 4 = 1 KiB" stimmt seit
+// Runde BLECHFUENF nicht mehr -- `DEV_BYTES` ist 384. Das Feld reicht
+// von 0x51980 bis 0x51F80 und hat den Vorrat bis 0x52000 fast auf.
+// Die Fundliste, die frueher auf 0x51D80 mittendrin lag, ist deshalb
+// in die Pufferseite gezogen (siehe FUND_OFF).
+// RUNDE HOTPLUG-2: das Geraetefeld ruecke um 0x80 nach hinten, weil der
+// Skalarvorrat zu klein war. Er reichte von 0x51800 bis hierher, also
+// 0x180 Oktette -- und `S_MSCWEG` steht auf 0x180. Der Zaehler der
+// fallenden Flanke und `dev0.D_USED` (Feldanfang, Offset 0) waren
+// DIESELBE ZELLE: jedes Abziehen schrieb die Belegtmarke des ersten
+// Geraets. Jetzt hat der Vorrat 0x200, und die Liste der
+// Massenspeicher (0x188..0x1A8) liegt sicher darin.
+const UDEV_OFF: u64 = 0x51A00
 const DEV_BYTES: u64 = 384 // RUNDE BLECHFUENF: Platz fuer D_REPS/D_LASTCC/D_ARMS
 const MAX_DEV: u64 = 4
 
@@ -148,7 +163,26 @@ const MAX_DEV: u64 = 4
 // Geschwindigkeit, Hersteller/Erzeugnis, Klasse des Geraets UND der
 // gewaehlten Schnittstelle, Zahl der Schnittstellen und einer Fahne je
 // Stufe, die geglueckt ist. Sie wird NIE geleert.
-const FUND_OFF: u64 = 0x51D80
+// RUNDE HOTPLUG-2: DIE FUNDLISTE ZOG UM, WEIL SIE UEBERSCHRIEBEN WURDE.
+//
+// Sie lag auf 0x51D80 -- MITTEN IM GERAETEFELD. Der Kommentar bei
+// UDEV_OFF rechnet noch mit 256 Oktett je Geraet; seit Runde BLECHFUENF
+// sind es 384 (`DEV_BYTES`). Damit reicht das Geraetefeld bis 0x51F80
+// und ueberlappt die Fundliste um 512 Oktette. `alloc_dev` nullt
+// `DEV_BYTES` am Stueck, also loeschte
+//   das DRITTE Geraet (dev2) die Fundeintraege 0..1,
+//   das VIERTE  (dev3) die Fundeintraege 2..7.
+// Gemerkt hat es niemand, weil bis heute selten vier USB-Geraete
+// zugleich steckten -- ZWEI STICKS plus Hub plus Tastatur sind genau
+// vier. Der Fehler ist AELTER als diese Runde; gefunden hat ihn die
+// Bestandsaufnahme, nicht ein Absturz.
+//
+// Sie liegt jetzt hinter dem Hub-Puffer in der Pufferseite: `HUB_OFF`
+// braucht 40 Oktette (Deskriptor + Anschlusszustand bei +32), der Rest
+// der Seite bis 0x57000 war unbenutzt. Der Skalarvorrat
+// 0x51800..0x52000 gehoert damit allein den Skalaren und dem
+// Geraetefeld.
+const FUND_OFF: u64 = 0x56700
 const FUND_BYTES: u64 = 64
 const MAX_FUND: u64 = 10
 
@@ -184,9 +218,14 @@ const S_NDEV: u64 = 0x08
 const S_ENUMS: u64 = 0x10
 const S_KBD: u64 = 0x18 // Platz + 1, 0 = keine
 const S_MOUSE: u64 = 0x20
-const S_MSC: u64 = 0x28
-const S_BLOCKS: u64 = 0x30
-const S_BSIZE: u64 = 0x38
+// 0x28 war `S_MSC`, die EINE Zelle fuer den einen Massenspeicher.
+// Seit HOTPLUG-2 steht die Liste auf 0x188 (siehe `S_MSCTAB`), weil
+// hier zwischen 0x28 und `S_TAG` (0x40) nur drei Plaetze frei waren
+// und ein vierter `S_TAG` ueberschrieben haette -- die Laufnummer des
+// Bulk-Only-Transports, also ausgerechnet die Zahl, an der jede
+// Quittung haengt.
+// 0x30 und 0x38 gehoeren seit HOTPLUG-2 zur Liste oben (Platz 1 und 2).
+// Die Groesse steht je Geraet in `D_MSCBLK`/`D_MSCBS`.
 const S_TAG: u64 = 0x40
 const S_REPORTS: u64 = 0x48
 const S_KEYS: u64 = 0x50
@@ -257,6 +296,24 @@ const S_WIEDERN: u64 = 0x170 // neu bestueckte stumme Endpunkte
 // verschleiert. Eine Zahl kennt niemanden.
 const S_MSCGEN: u64 = 0x178 // +1, sobald ein Massenspeicher bereit ist
 const S_MSCWEG: u64 = 0x180 // +1, sobald einer verschwunden ist
+
+// ===================================== RUNDE HOTPLUG-2
+// DIE LISTE DER MASSENSPEICHER, und warum sie eine Liste ist.
+//
+// Vier Plaetze zu 8 Oktett, 0x188..0x1A8. `S_MSCTAB + n * 8` haelt
+// `Geraetenummer + 1` des n-ten Massenspeichers, 0 = frei. Der Platz n
+// ist die Nummer, die nach aussen geht: `blk.DEV_USB0 + n`.
+//
+// WARUM DER PLATZ UND NICHT DIE GERAETENUMMER nach aussen geht: die
+// Geraetenummer ist ein Platz im USB-Geraetefeld und wird nach dem
+// Abziehen sofort wieder vergeben (`alloc_dev` nimmt den ersten
+// freien). Wer zwei Sticks steckt, einen abzieht und einen neuen
+// steckt, bekaeme sonst fuer den neuen Stick die Nummer des alten --
+// und `wechsel.fi` haelt die Einhaengung an genau dieser Nummer fest.
+// Der Platz in DIESER Liste wird dagegen erst frei, wenn der
+// Massenspeicher geht, und `blk.fi` kennt nur ihn.
+const S_MSCTAB: u64 = 0x188
+const MAX_MSC: u64 = 4
 // Wie oft `alloc_dev` leer war -- ein Geraet, fuer das kein Platz mehr
 // da ist, verschwindet sonst spurlos. Justins Brett meldet FUND 5 bei
 // MAX_DEV 4; ob das je angeschlagen hat, stand nirgends.
@@ -357,6 +414,20 @@ const D_WACH: u64 = 312
 // bestueckt wurde.
 const D_STUMM: u64 = 320
 const D_AGAIN: u64 = 328
+
+// ===================================== RUNDE HOTPLUG-2
+// DIE GROESSE DES STICKS GEHOERT ZUM STICK, NICHT ZUM BAUM.
+//
+// Bis zu dieser Runde standen Bloecke und Blockgroesse in den Skalaren
+// (`S_BLOCKS`, `S_BSIZE`) -- also EINMAL fuer den ganzen Rechner. Beim
+// zweiten Stick ueberschrieb `msc_start` die Zahlen des ersten, und
+// `blk.blocks_on` haette danach fuer BEIDE die Groesse des zuletzt
+// gesteckten gemeldet. Das ist der Grund, warum die Vorrunde den
+// zweiten Stick lieber abgelehnt hat.
+//
+// Hier ist Platz: 384 Oktett je Geraet, benutzt waren 336.
+const D_MSCBLK: u64 = 336 // Bloecke dieses Massenspeichers
+const D_MSCBS: u64 = 344 // Oktette je Block (immer 512, sonst abgelehnt)
 // Vier Blicke je Sekunde -> rund fuenf Sekunden Stille.
 const WACH_GRENZE: u64 = 20
 const AGAIN_MAX: u64 = 3
@@ -528,7 +599,11 @@ fn stage(state: u64) {
         serial.nl()
         return
     }
-    zero(state + USCAL_OFF, 256)
+    // RUNDE HOTPLUG-2: 0x200 statt 256. Geloescht wurden bisher nur
+    // 0x000..0x0FF -- alles ab `S_HUBS` (0x100) ueberlebte eine neue
+    // Aufzaehlung, darunter `S_MSCGEN`/`S_MSCWEG`, an denen die
+    // Schicht darueber ihre Flanken misst.
+    zero(state + USCAL_OFF, 0x200)
     zero(state + UDEV_OFF, MAX_DEV * DEV_BYTES)
     if kstate.mode_on(state, kstate.M_NOHID) {
         s(state, S_NOHID, 1)
@@ -662,7 +737,12 @@ fn versuch(state: u64, einheit: u64, armed: bool) -> u64 {
     s(state, S_NDEV, 0)
     s(state, S_KBD, 0)
     s(state, S_MOUSE, 0)
-    s(state, S_MSC, 0)
+    // RUNDE HOTPLUG-2: die ganze Liste leeren, nicht die eine Zelle.
+    var mi: u64 = 0
+    while mi < MAX_MSC {
+        msc_slot_set(state, mi, 0)
+        mi = mi + 1
+    }
     s(state, S_ATTACHED, 0)
     if !xhci.init_at(state, einheit, armed) {
         serial.puts((&s_fail[0]) as u64)
@@ -1767,7 +1847,19 @@ fn bind(state: u64, d: u64) {
     }
     if k == DRV_MSC {
         if msc_start(state, d) {
-            s(state, S_MSC, d + 1)
+            // RUNDE HOTPLUG-2: einen PLATZ nehmen statt der einen
+            // Zelle. Ist keiner mehr frei, ist das Geraet aufgezaehlt
+            // und traegt seine Groesse -- es bekommt nur keine
+            // Blockgeraetenummer, und das wird gemeldet statt still
+            // uebergangen.
+            let mi: u64 = msc_alloc(state)
+            if mi >= MAX_MSC {
+                var s_voll: [u8; 30] = "usb: msc kein Platz mehr frei\0"
+                serial.puts((&s_voll[0]) as u64)
+                serial.nl()
+                return
+            }
+            msc_slot_set(state, mi, d + 1)
             // RUNDE HOTPLUG: die STEIGENDE Flanke. Erst hier ist der
             // Stick wirklich bereit -- INQUIRY beantwortet, TEST UNIT
             // READY durch, Groesse und Blockgroesse bekannt. Wer frueher
@@ -2125,20 +2217,114 @@ fn mouse_report(state: u64, d: u64) {
 const CBW_SIG: u64 = 0x43425355
 const CSW_SIG: u64 = 0x53425355
 
+// ============================== RUNDE HOTPLUG-2: JE PLATZ, NICHT JE BAUM
+//
+// Jede dieser Fragen gilt einem BESTIMMTEN Massenspeicher. `i` ist der
+// Platz in der Liste (0..MAX_MSC-1) und zugleich die Nummer, die
+// `blk.fi` als `DEV_USB0 + i` fuehrt.
+
+// Der Platz haelt `Geraetenummer + 1`; 0 heisst frei.
+fn msc_slot(state: u64, i: u64) -> u64 {
+    if i >= MAX_MSC {
+        return 0
+    }
+    return g(state, S_MSCTAB + i * 8)
+}
+
+fn msc_slot_set(state: u64, i: u64, v: u64) {
+    if i < MAX_MSC {
+        s(state, S_MSCTAB + i * 8, v)
+    }
+}
+
+fn msc_ready_at(state: u64, i: u64) -> bool {
+    return msc_slot(state, i) != 0
+}
+
+fn msc_dev_at(state: u64, i: u64) -> u64 {
+    return msc_slot(state, i) - 1
+}
+
+fn msc_blocks_at(state: u64, i: u64) -> u64 {
+    if !msc_ready_at(state, i) {
+        return 0
+    }
+    return dg(state, msc_dev_at(state, i), D_MSCBLK)
+}
+
+fn msc_bsize_at(state: u64, i: u64) -> u64 {
+    if !msc_ready_at(state, i) {
+        return 0
+    }
+    return dg(state, msc_dev_at(state, i), D_MSCBS)
+}
+
+// Wie viele Plaetze belegt sind. Fuer Meldungen und die Abnahme.
+fn msc_count(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < MAX_MSC {
+        if msc_slot(state, i) != 0 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// Einen freien Platz nehmen, MAX_MSC wenn keiner mehr da ist.
+fn msc_alloc(state: u64) -> u64 {
+    var i: u64 = 0
+    while i < MAX_MSC {
+        if msc_slot(state, i) == 0 {
+            return i
+        }
+        i = i + 1
+    }
+    return MAX_MSC
+}
+
+// Der Platz, auf dem dieses Geraet liegt -- MAX_MSC, wenn keiner.
+fn msc_slot_of_dev(state: u64, d: u64) -> u64 {
+    var i: u64 = 0
+    while i < MAX_MSC {
+        if msc_slot(state, i) == d + 1 {
+            return i
+        }
+        i = i + 1
+    }
+    return MAX_MSC
+}
+
+// ----------------------------------------------------------------
+// DIE ALTEN NAMEN, damit die Schichten darueber unveraendert laufen.
+// Sie meinen den ERSTEN belegten Platz. `rootsel.fi` sucht so seine
+// Wurzel, und `blkdev.fi` fragt so, ob ueberhaupt ein Stick da ist.
+fn msc_first(state: u64) -> u64 {
+    var i: u64 = 0
+    while i < MAX_MSC {
+        if msc_slot(state, i) != 0 {
+            return i
+        }
+        i = i + 1
+    }
+    return MAX_MSC
+}
+
 fn msc_ready(state: u64) -> bool {
-    return g(state, S_MSC) != 0
+    return msc_first(state) < MAX_MSC
 }
 
 fn msc_blocks(state: u64) -> u64 {
-    return g(state, S_BLOCKS)
+    return msc_blocks_at(state, msc_first(state))
 }
 
 fn msc_bsize(state: u64) -> u64 {
-    return g(state, S_BSIZE)
+    return msc_bsize_at(state, msc_first(state))
 }
 
 fn msc_dev(state: u64) -> u64 {
-    return g(state, S_MSC) - 1
+    return msc_dev_at(state, msc_first(state))
 }
 
 fn set8(p: u64, i: u64, v: u64) {
@@ -2313,8 +2499,9 @@ fn msc_start(state: u64, d: u64) -> bool {
         serial.nl()
         return false
     }
-    s(state, S_BLOCKS, last + 1)
-    s(state, S_BSIZE, bs)
+    // RUNDE HOTPLUG-2: die Groesse gehoert zum GERAET, nicht zum Baum.
+    ds(state, d, D_MSCBLK, last + 1)
+    ds(state, d, D_MSCBS, bs)
     serial.puts((&s_msc[0]) as u64)
     serial.puts((&s_blk[0]) as u64)
     serial.dec(last + 1)
@@ -2347,11 +2534,15 @@ fn sense(state: u64, d: u64) {
 // Die zwei Zeilen, an denen `blk.fi` haengt. Ein Block, 512 Oktett, und
 // die Schicht darueber erfaehrt nicht, dass er ueber vier Endpunkte und
 // drei Uebertragungen gekommen ist.
-fn msc_read(state: u64, lba: u64, dst: u64) -> bool {
-    if g(state, S_MSC) == 0 {
+// RUNDE HOTPLUG-2: MIT PLATZNUMMER. `i` sagt, WELCHER Stick gemeint
+// ist; `bot` nahm die Geraetenummer schon immer entgegen und holt
+// Steckplatz und Endpunkte aus dem Geraetefeld -- der Transport war
+// also nie einzelgeraetig, nur die Zeile darueber.
+fn msc_read_at(state: u64, i: u64, lba: u64, dst: u64) -> bool {
+    if !msc_ready_at(state, i) {
         return false
     }
-    let d: u64 = msc_dev(state)
+    let d: u64 = msc_dev_at(state, i)
     let tmp: u64 = state + BLK_OFF
     zero(cdb(state), 16)
     set8(cdb(state), 0, 0x28) // READ (10)
@@ -2365,11 +2556,11 @@ fn msc_read(state: u64, lba: u64, dst: u64) -> bool {
     return true
 }
 
-fn msc_write(state: u64, lba: u64, src: u64) -> bool {
-    if g(state, S_MSC) == 0 {
+fn msc_write_at(state: u64, i: u64, lba: u64, src: u64) -> bool {
+    if !msc_ready_at(state, i) {
         return false
     }
-    let d: u64 = msc_dev(state)
+    let d: u64 = msc_dev_at(state, i)
     let tmp: u64 = state + BLK_OFF
     copy(src, tmp, 512)
     zero(cdb(state), 16)
@@ -2434,9 +2625,15 @@ fn gone(state: u64, p: u64) {
             if g(state, S_MOUSE) == d + 1 {
                 s(state, S_MOUSE, 0)
             }
-            if g(state, S_MSC) == d + 1 {
-                s(state, S_MSC, 0)
-                s(state, S_BLOCKS, 0)
+            // RUNDE HOTPLUG-2: den Platz DIESES Geraets raeumen, nicht
+            // "den" Massenspeicher. Die anderen Sticks bleiben, wo sie
+            // sind -- ihre Platznummer ist die Blockgeraetenummer, an
+            // der `wechsel.fi` ihre Einhaengung festhaelt.
+            let mi: u64 = msc_slot_of_dev(state, d)
+            if mi < MAX_MSC {
+                msc_slot_set(state, mi, 0)
+                ds(state, d, D_MSCBLK, 0)
+                ds(state, d, D_MSCBS, 0)
                 // RUNDE HOTPLUG: die FALLENDE Flanke. Sie wird hier
                 // gezaehlt und nicht in `hotplug_work`, weil `gone`
                 // auch aus `unplug_now` (der Gegenprobe) gerufen wird
@@ -2615,11 +2812,14 @@ fn stat(state: u64, what: u64) -> u64 {
     if what == 4 {
         return yes(msc_ready(state))
     }
+    // RUNDE HOTPLUG-2: die Groesse des ERSTEN Sticks. Die Zahlen sind
+    // eine Auskunft fuer den Schirm; wer einen bestimmten Stick meint,
+    // fragt `blk.blocks_on(DEV_USB0 + n)`.
     if what == 5 {
-        return g(state, S_BLOCKS)
+        return msc_blocks(state)
     }
     if what == 6 {
-        return g(state, S_BSIZE)
+        return msc_bsize(state)
     }
     if what == 7 {
         return g(state, S_KEYS)
