@@ -285,30 +285,29 @@ num "Abziehen im Betrieb gezaehlt" "${up:-0}" ge 1
 # ============================================== 5. zwei Sticks
 
 echo
-echo "== 5. zwei Sticks gleichzeitig -- DIE GRENZE, EHRLICH GEMESSEN =="
+echo "== 5. ZWEI STICKS GLEICHZEITIG -- beide eingehaengt, beide beschrieben =="
 #
-# DIESER ABSCHNITT MISST EINE GRENZE UND KEINEN ERFOLG, und das ist
-# Absicht.
+# RUNDE HOTPLUG-2: HIER STAND EINE GRENZE, UND SIE IST GEFALLEN.
 #
-# `kernel/wechsel.fi` hat acht Plaetze und koennte acht Traeger
-# fuehren. DARUNTER liegt aber eine Schicht, die genau EINEN Stick
-# kennt: `usb.fi` haelt den Massenspeicher in EINER Zelle (`S_MSC`),
-# und `usb.msc_read`/`msc_write` nehmen KEINE Geraetenummer entgegen --
-# sie lesen immer von dem einen. `blk.fi` hat entsprechend genau ein
-# `DEV_USB`.
+# Bis zur Vorrunde hielt `usb.fi` den Massenspeicher in EINER Zelle
+# (`S_MSC`), `msc_read`/`msc_write` nahmen keine Geraetenummer, und
+# `blk.fi` hatte genau ein `DEV_USB`. Der zweite Stick wurde deshalb
+# ausdruecklich abgelehnt ("dev schon in der Tafel").
 #
-# Zwei Sticks werden deshalb BEIDE aufgezaehlt (`devices=2`,
-# `hotplugs=2` -- der USB-Baum kann es), aber der zweite bekommt keinen
-# eigenen Platz: er waere derselbe `DEV_USB`, und die Naht lehnt das
-# ausdruecklich ab ("dev schon in der Tafel"). Die Alternative waere
-# ein zweiter Eintrag, der auf die Bloecke des ERSTEN Sticks zeigt --
-# eine Attrappe in der Seitenleiste, die beim ersten Klick die falschen
-# Daten zeigt. Lieber ein Traeger weniger als ein falscher.
+# Jetzt ist `S_MSC` eine LISTE (`S_MSCTAB`, vier Plaetze), die Groesse
+# steht je Geraet (`D_MSCBLK`/`D_MSCBS`), und `blk.fi` fuehrt
+# `DEV_USB0..DEV_USB3`. `bot()` nahm die Geraetenummer schon immer --
+# der Transport war nie die Grenze, nur die Zeile darueber.
 #
-# WAS FEHLT, DAMIT ES GEHT: eine Geraetenummer je Massenspeicher in
-# `usb.fi` (S_MSC als Tafel statt als Zelle), `msc_read(state, dev,
-# lba, dst)` und DEV_USB0..DEV_USBn in `blk.fi`. Das ist eine eigene
-# Runde und beruehrt drei Schichten.
+# WAS HIER GEMESSEN WIRD, und warum "kein Fehler gemeldet" nicht reicht:
+# Beide Sticks werden eingehaengt, auf BEIDEN wird die Datei des Wirts
+# GELESEN und eine EIGENE geschrieben, beide werden EINZELN
+# ausgeworfen. Danach liest DER WIRT mit `mtools` auf JEDEM Abbild
+# nach. Die Gefahr bei zwei Sticks ist nicht der Absturz, sondern die
+# VERWECHSLUNG: ein zweiter Traeger, der auf die Bloecke des ersten
+# zeigt, meldet keinen einzigen Fehler -- er schreibt nur die falsche
+# Datei auf den falschen Stick. Genau deshalb tragen die beiden Dateien
+# VERSCHIEDENEN Inhalt, und jeder wird auf SEINEM Abbild gesucht.
 
 cat > "$ARB/dreh-zwei.txt" <<EOF
 aufzeile k17: hold
@@ -319,17 +318,81 @@ warte 2
 stecke stk2 $ARB/stick2.img
 warte 8
 EOF
-lauf zwei "osum usb usbhold vfs gfx nosched noproc" "$ARB/dreh-zwei.txt"
+lauf zwei \
+    "osum usb usbhold vfs gfx nosched noproc script=ls /medien/usb0;ls /medien/usb1;cat /medien/usb0/host.txt;cat /medien/usb1/host.txt;echo eins-auf-usb0 > /medien/usb0/a.txt;echo zwei-auf-usb1 > /medien/usb1/b.txt;auswerfen;auswerfen 0;auswerfen 1;auswerfen" \
+    "$ARB/dreh-zwei.txt"
 S="$ARB/zwei.txt"
 num "der Lauf mit zwei Sticks beendet sich selbst (21)" "${RC:-99}" eq 21
 dv=$(grep -a 'devices=' "$S" | tail -1 | grep -oE 'devices=[0-9]+' | tail -1 | cut -d= -f2)
 num "BEIDE Sticks werden aufgezaehlt (der USB-Baum kann zwei)" "${dv:-0}" ge 2
-hat "$S" "wechsel: dev schon in der Tafel" \
-    "der zweite wird AUSDRUECKLICH abgelehnt statt als Attrappe gefuehrt"
+
+# DIE ZUSAGE DIESER RUNDE: ZWEI Traeger, nicht einer.
 n_kommt=$(grep -ac 'wechsel: kommt' "$S" 2>/dev/null || echo 0)
-num "und genau EIN Traeger ist eingehaengt (die Grenze von blk.DEV_USB)" \
-    "${n_kommt:-0}" eq 1
+num "BEIDE Sticks werden eingehaengt (zwei 'wechsel: kommt')" \
+    "${n_kommt:-0}" eq 2
+hat_nicht "$S" "wechsel: dev schon in der Tafel" \
+    "kein Stick wird mehr als Doppelgaenger abgelehnt"
+hat "$S" "/medien/usb0" "der erste haengt unter /medien/usb0"
+hat "$S" "/medien/usb1" "der zweite unter /medien/usb1 -- EIGENER Pfad"
+
+# BEIDE Dateien des Wirts muessen lesbar sein, und zwar die JEWEILS
+# richtige. Stuenden beide Traeger auf denselben Bloecken, kaeme hier
+# zweimal derselbe Text.
+hat "$S" "von linux auf den ersten stick" "cat liest die Datei des ERSTEN Sticks"
+hat "$S" "und dies ist der zweite" "cat liest die Datei des ZWEITEN Sticks"
+hat "$S" "ausgeworfen" "die Traeger werden ausgeworfen"
 hat_nicht "$S" "panic" "kein Absturz am zweiten Stick"
+hat_nicht "$S" "EXCEPTION" "keine Ausnahme bei zwei Sticks"
+
+# ================= DIE GEGENPROBE AUF DEM WIRT, JE STICK EINZELN
+#
+# Punkt 4 aus K17, auf zwei Sticks angewandt. Jede Datei wird auf IHREM
+# Abbild gesucht -- und ausdruecklich auch geprueft, dass sie NICHT auf
+# dem anderen liegt. Das ist die Zusage, die eine Verwechslung faengt.
+OFF=$((2048*512))
+zwei_pruef() { # <abbild> <datei> <inhalt> <wie>
+    local img=$1 datei=$2 inhalt=$3 wie=$4
+    if mdir -i "$img@@$OFF" "::$datei" > "$ARB/mdir-$wie.txt" 2>&1; then
+        mtype -i "$img@@$OFF" "::$datei" > "$ARB/inh-$wie.txt" 2>/dev/null
+        if grep -qa "$inhalt" "$ARB/inh-$wie.txt"; then
+            ok "DER WIRT findet $datei auf $wie, Inhalt vollstaendig ($inhalt)"
+        else
+            bad "$datei liegt auf $wie, aber der Inhalt stimmt nicht: $(head -c 80 "$ARB/inh-$wie.txt")"
+        fi
+    else
+        bad "DER WIRT findet $datei NICHT auf $wie"
+        sed 's/^/        /' "$ARB/mdir-$wie.txt" | head -3
+    fi
+}
+zwei_pruef "$ARB/stick1.img" a.txt eins-auf-usb0 stick1
+zwei_pruef "$ARB/stick2.img" b.txt zwei-auf-usb1 stick2
+
+# KEINE VERWECHSLUNG: die Datei des einen darf NICHT auf dem anderen
+# liegen. Ohne diese zwei Zeilen wuerde ein Kern, der beide Traeger auf
+# dieselben Bloecke legt, oben gruen durchlaufen.
+if mdir -i "$ARB/stick2.img@@$OFF" ::a.txt >/dev/null 2>&1; then
+    bad "a.txt liegt AUCH auf stick2 -- die Traeger zeigen auf dieselben Bloecke"
+else
+    ok "a.txt liegt NICHT auf stick2 (keine Verwechslung)"
+fi
+if mdir -i "$ARB/stick1.img@@$OFF" ::b.txt >/dev/null 2>&1; then
+    bad "b.txt liegt AUCH auf stick1 -- die Traeger zeigen auf dieselben Bloecke"
+else
+    ok "b.txt liegt NICHT auf stick1 (keine Verwechslung)"
+fi
+
+# Und beide Dateisysteme muessen heil sein.
+if command -v fsck.fat >/dev/null 2>&1; then
+    for nr in 1 2; do
+        if fsck.fat -n "$ARB/stick$nr.img@@$OFF" > "$ARB/fsck-z$nr.txt" 2>&1 \
+           || ! grep -qai 'dirty\|corrupt\|error' "$ARB/fsck-z$nr.txt"; then
+            ok "fsck.fat findet auf stick$nr keinen Schaden"
+        else
+            bad "fsck.fat meldet Schaden auf stick$nr"
+            sed 's/^/        /' "$ARB/fsck-z$nr.txt" | head -5
+        fi
+    done
+fi
 
 # ============================================== 6. fremdes Dateisystem
 
