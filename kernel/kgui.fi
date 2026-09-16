@@ -49,6 +49,7 @@ import ps2m
 import pwr
 import sched
 import serial
+import signal
 import tile
 import wmplug
 import vgpu
@@ -2343,6 +2344,10 @@ fn surface(state: u64) {
             // in der der Sperrer sterben kann -- und die Abnahme
             // dieser Runde laeuft genau in ihr.
             sperre_wache(state)
+            // RUNDE LOGIND: und der Abmeldewunsch, in derselben
+            // Schleife und aus demselben Grund -- der Starter kann ihn
+            // nur aufschreiben, ausfuehren muss ihn der Kern.
+            abmelde_wache(state)
             // RUNDE VSYNC: DIE REIHENFOLGE IM TAKT, und sie ist der
             // ganze Punkt. Erst die Bewegungen weiterstellen (das
             // macht die betroffenen Bereiche schmutzig), dann
@@ -3875,6 +3880,132 @@ static mut sp_takt: u64 = 0
 // startet niemand einen zweiten.
 static mut sp_startet: u64 = 0
 
+// ============================================== RUNDE LOGIND (P-002)
+// ABMELDEN -- DIE SITZUNG BEENDEN UND DEN ANMELDESCHIRM ZURUECKHOLEN.
+//
+// Diese Funktion steht aus DEMSELBEN GRUND im Kern wie `sperre_wache`
+// darunter: sie braucht Rechte, die der Bittsteller nicht hat. Der
+// Starter laeuft als uid 1000; `glogin` muss als root laufen, weil es
+// /etc/shadow (0600 root) liest. Wer abgibt, bekommt nicht zurueck --
+// also tut es der, der die Rechte nie abgegeben hat.
+//
+// WAS SIE TUT, IN DIESER REIHENFOLGE:
+//
+//   1. die Puffer schreiben (`sync`). Ein Abmelden beendet Programme,
+//      und ein Programm, dessen Datei noch im Speicher steht, verliert
+//      sie sonst. Das ist derselbe Gedanke wie beim Ausschalten.
+//   2. JEDE Aufgabe der Sitzung beenden -- alles, dessen T_UID die
+//      Kennung aus SP_UID ist. Das ist der Schreibtisch UND alles, was
+//      der Mensch von dort gestartet hat; ein Abmelden, das die
+//      Programme des Vorgaengers weiterlaufen laesst, ist keines.
+//      SIGKILL und nicht SIGTERM: hier wartet niemand auf eine Frist,
+//      und ein Programm, das den Abschied verweigert, haelt sonst die
+//      Sitzung offen.
+//   3. die Sperre raeumen. Stand sie (der Mensch hat vom
+//      Sperrbildschirm aus abgemeldet), waere sonst der Anmeldeschirm
+//      unter einem Sperrbildschirm begraben, dessen Sperrer gerade
+//      gestorben ist -- und `sperre_wache` wuerde ihn brav neu
+//      starten. Gemessen ist das eine schwarze Flaeche, auf der kein
+//      Kennwort hilft.
+//   4. SP_UID auf 0. Es gibt keine Sitzung mehr, und der
+//      Sperrbildschirm faellt damit auf `getuid` zurueck, bis `glogin`
+//      die naechste eintraegt.
+//   5. `glogin` neu starten, als root, ueber denselben `desk_spawn`,
+//      den `desk_start` beim Systemstart nimmt. Kein zweiter Weg
+//      daneben.
+//
+// WARUM DIE TASKLEISTE STEHEN BLEIBT: sie laeuft als root (siehe
+// `desk_start`, die ehrliche Grenze der Runde ANMELDUNG) und gehoert
+// damit nicht zur Sitzung -- Schritt 2 fasst sie nicht an. Das ist
+// hier sogar richtig: der Anmeldeschirm liegt auf `L_TOP` und deckt
+// sie zu.
+static mut lo_startet: u64 = 0
+
+fn abmelde_wache(state: u64) {
+    let sp: u64 = kstate.K11_OFF
+    if kstate.get(state, sp + kstate.SP_LOGOUT) == 0 {
+        return
+    }
+    // DER RIEGEL, aus demselben Grund wie in `sperre_wache`: diese
+    // Funktion haengt an ZWEI Schleifen (der Halteschleife und
+    // `wait_wm`), und `desk_spawn` dreht 250 Runden `wm.poll`. Ohne
+    // Riegel kaeme die andere Schleife waehrenddessen durch, saehe den
+    // Wunsch noch stehen und startete einen ZWEITEN Anmeldeschirm.
+    if lo_startet != 0 {
+        return
+    }
+    lo_startet = 1
+    // Den Wunsch SOFORT loeschen, nicht am Ende. Stuerbe der Start des
+    // Anmeldeschirms, wuerde er sonst in jeder Runde neu versucht.
+    kstate.set(state, sp + kstate.SP_LOGOUT, 0)
+    let uid: u64 = kstate.get(state, sp + kstate.SP_UID)
+    var s_a: [u8; 26] = "abmelden: Sitzung uid=\0\0\0\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(uid)
+    serial.nl()
+    // 1. DIE PUFFER.
+    //
+    // `blk.flush` und nicht `do_sync` aus sys.fi: das waere ein
+    // Rueckimport (sys.fi importiert kgui), und der Teil, der hier
+    // zaehlt, ist genau dieser -- die Schreibpuffer der Platte auf die
+    // Platte. Es ist derselbe Aufruf, den `do_sync` als letztes macht.
+    let _f: bool = blk.flush(state)
+    // 2. ALLES, WAS DER SITZUNG GEHOERT.
+    //
+    // uid 0 wird NICHT gejagt. Lief das System ohne Anmeldung hoch
+    // (SP_UID == 0), waere "alles mit uid 0" der ganze Rechner --
+    // einschliesslich der Leiste, des Fensterservers und der Aufgabe,
+    // in der diese Zeile gerade laeuft. Ohne Sitzung gibt es nichts
+    // abzumelden, und dann bleibt es beim Neustart des Anmeldeschirms.
+    var getroffen: u64 = 0
+    if uid != 0 {
+        var i: u64 = 0
+        while i < kstate.MAX_TASKS {
+            let z: u64 = sched.tget(state, i, sched.T_STATE)
+            if z != sched.S_FREE && z != sched.S_ZOMBIE
+               && sched.tget(state, i, sched.T_UID) == uid {
+                let pid: u64 = sched.tget(state, i, sched.T_PID)
+                if pid != 0 {
+                    // `send_pid` und nicht `do_kill`: `do_kill` ist der
+                    // SYSTEMAUFRUF-Einstieg und prueft Vorzeichen und
+                    // Prozessgruppen, um am Ende bei positiver Nummer
+                    // genau dies zu tun. Hier ist die Nummer bekannt und
+                    // positiv, also der direkte Weg.
+                    let _k: u64 = signal.send_pid(state, pid,
+                        signal.SIGKILL)
+                    getroffen = getroffen + 1
+                }
+            }
+            i = i + 1
+        }
+    }
+    var s_g: [u8; 23] = "abmelden: beendet n=\0\0\0"
+    serial.puts((&s_g[0]) as u64)
+    serial.dec(getroffen)
+    serial.nl()
+    // 3. DIE SPERRE RAEUMEN.
+    kstate.set(state, sp + kstate.SP_ON, 0)
+    kstate.set(state, sp + kstate.SP_PID, 0)
+    kstate.set(state, sp + kstate.SP_SLOT, 0)
+    // 4. KEINE SITZUNG MEHR.
+    kstate.set(state, sp + kstate.SP_UID, 0)
+    // 5. DER ANMELDESCHIRM, ALS ROOT.
+    var p_glog: [u8; 13] = "/bin/glogin\0\0"
+    var a_glog: [u8; 8] = "glogin\0\0"
+    let platz: u64 = desk_spawn(state, (&p_glog[0]) as u64,
+        (&a_glog[0]) as u64, 8)
+    var neu: u64 = 0
+    if platz < kstate.MAX_TASKS {
+        neu = sched.tget(state, platz, sched.T_PID)
+    }
+    kstate.add(state, sp + kstate.SP_LOGOUTS, 1)
+    var s_n: [u8; 29] = "abmelden: Anmeldung neu pid=\0"
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(neu)
+    serial.nl()
+    lo_startet = 0
+}
+
 fn sperre_wache(state: u64) {
     if !wm.sperre_an(state) {
         return
@@ -4151,6 +4282,8 @@ fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
         // startet ihn neu. Ein Sperrbildschirm, den man durch einen
         // Absturz loswird, ist ein Bildschirmschoner.
         sperre_wache(state)
+        // RUNDE LOGIND: der Abmeldewunsch, siehe `abmelde_wache`.
+        abmelde_wache(state)
         st(35)
         wm.compose(state)
         st(36)

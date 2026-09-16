@@ -837,8 +837,36 @@ for q in $SYMBOLE; do ARGS+=("/etc/netview/$q=$OUT/icons/$q"); done
 ARGS+=(/usr/ /usr/share/ /usr/share/locale/
        /usr/share/locale/en/ "/usr/share/locale/en/messages=locale/en/messages"
        /usr/share/locale/de/ "/usr/share/locale/de/messages=locale/de/messages")
+# ============================================== RUNDE LOGIND
+# DIE HEIMATVERZEICHNISSE -- /etc/passwd VERSPRACH EINES, DAS ES NICHT
+# GAB.
+#
+# `/etc/passwd` traegt seit der Runde ANMELDUNG zwei Konten, und
+# `justin` steht dort mit dem Heimatverzeichnis `/users/justin`. Im
+# Abbild gab es aber NUR `/users/root/` -- gemessen am Abbild vom
+# 15.09.:
+#
+#     python3 tools/osum/mkfs.py list root.img | grep /users/
+#         /users/ /users/root/ /users/root/config/ ...
+#         (kein /users/justin)
+#
+# docs/RUNDE-ANMELDUNG.md hat das unter 5.4 selbst als offen benannt.
+# Es ist kein Schoenheitsfehler: `glogin` legt die Rechte ab und
+# startet den Schreibtisch als uid 1000. Jedes Programm, das danach
+# etwas Eigenes ablegen will (die Einstellungen schreiben
+# `/users/<name>/config/locale`, der Explorer will ein Zuhause zum
+# Anzeigen), schreibt in ein Verzeichnis, das nicht existiert -- und
+# ein Schreibfehler in einem Pfad, den /etc/passwd verspricht, ist ein
+# gebrochenes Versprechen und kein fehlendes Merkmal.
+#
+# RECHTE UND EIGENTUM SIND DER PUNKT. Ohne `@0700:1000:1000` gehoerte
+# das Verzeichnis root mit 0755 (die Vorgabe von mkfs.py) -- dann
+# koennte justin in seinem eigenen Zuhause nichts anlegen, und jeder
+# andere koennte hineinsehen. 0700 heisst: nur er, und niemand sonst.
 ARGS+=(/users/ /users/root/ /users/root/config/
-       "/users/root/config/locale=$OUT/locale-de")
+       "/users/root/config/locale=$OUT/locale-de"
+       "/users/justin/@0700:1000:1000"
+       "/users/justin/config/@0700:1000:1000")
 ARGS+=(/boot/ "/boot/osum.mb=$OUT/osum.mb"
        "/boot/BOOTX64.EFI=$LIMINE/BOOTX64.EFI")
 # ==================================================== RUNDE ENERGIE
@@ -974,7 +1002,8 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /bin/shutdown /bin/power /bin/firnc /bin/fas /beispiel/hallo.fi \
 /bin/installer /apps/installer.osp/start /apps/installer.osp/INFO \
 /apps/installer.osp/symbol \
-/bin/init /etc/inittab /etc/ziel"
+/bin/init /etc/inittab /etc/ziel \
+/users/justin/ /users/justin/config/"
 python3 tools/osum/mkfs.py list "$OUT/root.img" > "$OUT/liste.txt" 2>&1 \
     || fehler "das fertige Dateisystem laesst sich nicht lesen"
 fehlt=0
