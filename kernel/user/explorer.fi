@@ -989,6 +989,35 @@ static mut a_baum: u64 = 0xFFFFFFFFFFFFFFFF
 static mut a_tab: u64 = 0xFFFFFFFFFFFFFFFF
 static mut letzte_w: u64 = 0
 static mut letzte_h: u64 = 0
+// ====================================== RUNDE HOTPLUG-2
+// DIE GLOCKE DES SYSTEMBUSSES, und warum der Dateimanager sie hoert.
+//
+// Der Kern meldet jedes Kommen und Gehen eines Wechseldatentraegers
+// auf den Bus (`wechsel.melden` -> `bus.noti_post`, Text "usb+ /medien/
+// usb0" bzw. "usb- ..."). Bis zu dieser Runde hat das NIEMAND
+// abonniert: die Seitenleiste wurde nur neu gebaut, wenn ein Mensch
+// "Aktualisieren" drueckte. Ein Stick, der im Betrieb kam, war also da
+// -- eingehaengt, lesbar, in `/medien/usb0` -- und stand trotzdem nicht
+// in der Leiste, bis jemand von selbst auf den Gedanken kam.
+//
+// Gemerkt wird nur EINE ZAHL: wie viele Meldungen es zuletzt gab
+// (`noti_new` zaehlt die ungelesenen). Bewegt sie sich, werden die Orte
+// neu gelesen. Das ist derselbe Griff wie bei `usb.msc_gen`/`msc_weg`
+// eine Schicht tiefer -- eine Zahl kennt niemanden, und der
+// Dateimanager muss den Kern nicht kennen, um auf ihn zu hoeren.
+//
+// WARUM NICHT DEN TEXT LESEN: `noti_take` naehme die Meldung WEG, und
+// dann fehlte sie der Leiste unten rechts, die sie anzeigen soll. Die
+// Zahl reicht: was sich geaendert hat, steht ohnehin in der
+// Einhaengetafel, und genau die liest `exporte.carrier_read`.
+static mut noti_stand: u64 = 0xFFFFFFFFFFFFFFFF
+// RUNDE HOTPLUG-2: DIE NUMMER DES AUSWURFKNOPFES, damit ein Laeufer
+// sie nicht aus der Reihenfolge der Knoepfe RATEN muss. Genau das
+// warnt der Kopf von `say_rects` an: "dann prueft er seinen Nachbau".
+// Die Tabulatorzahl eines Knopfes ist kein Vertrag -- seine gemeldete
+// Nummer schon.
+static mut b_aus: u64 = 0xFFFFFFFFFFFFFFFF
+static mut b_orte: u64 = 0xFFFFFFFFFFFFFFFF
 // Die gerechneten Masse. Sie stehen hier und nicht in `u_start`, weil
 // sie an ZWEI Stellen gebraucht werden: beim Aufbau und bei jeder
 // Groessenaenderung. Zwei Rechnungen waeren zwei Wahrheiten.
@@ -1081,12 +1110,48 @@ fn masse(bw: u64, bh: u64) {
         g_bbaum = g_ch * 5
     }
     // Die Orte oben, der Baum darunter: die Orte bekommen die Haelfte
-    // der Hoehe, aber hoechstens acht Zeilen -- es sind acht feste
-    // Orte plus die gefundenen Datentraeger, und eine halbleere Liste
-    // ueber einem abgeschnittenen Baum waere die falsche Verteilung.
+    // der Hoehe, aber hoechstens so viele Zeilen, wie es Orte GIBT --
+    // eine halbleere Liste ueber einem abgeschnittenen Baum waere die
+    // falsche Verteilung.
+    //
+    // RUNDE HOTPLUG-2: DIE SCHRANKE WAR FEST ACHT, und die Datentraeger
+    // fielen unten heraus.
+    //
+    // Der Kommentar hier sagte schon immer "acht feste Orte PLUS die
+    // gefundenen Datentraeger" -- gerechnet wurde aber nur mit acht.
+    // Sichtbar sind bei `h = ch * 8` genau sieben Zeilen
+    // (`paint_list`: `sicht = (h - 4) / zh`), und ohne Stick gibt es
+    // genau sieben Orte. Es passte also auf den Punkt -- bis ein Stick
+    // dazukam. Gemessen: `explorer: orte n=8 traeger=2`, und in der
+    // Leiste stand trotzdem nur `/ 42%`; die Zeile des Sticks lag
+    // hinter dem unteren Rand. Der Eintrag war DA, er war nur nicht zu
+    // sehen -- der schlimmste Fall, weil kein Fehler gemeldet wird.
+    //
+    // Also wird nach der wirklichen Zahl der Orte bemessen (plus eine
+    // Zeile Luft fuer den Rahmen), nach oben begrenzt durch die halbe
+    // Hoehe. Kommt ein Stick, waechst die Liste um seine Zeile; geht
+    // er, schrumpft sie wieder.
+    // GEBRAUCHT wird eine Zeile je Ort plus vier Punkte Rahmen
+    // (`paint_list`: `sicht = (h - 4) / zh`). Weniger heisst: der
+    // letzte Ort ist da, aber nicht zu sehen.
+    let n_orte: u64 = exporte.places_num()
+    let zh: u64 = wlib.row_h()
+    var gebraucht: u64 = wlibc.snap(n_orte * zh + 6)
+    // Die Haelfte der Seitenhoehe ist der Normalfall und bleibt die
+    // Untergrenze -- eine Liste, die bei fuenf Orten die halbe Leiste
+    // einnimmt, sah bisher richtig aus und soll so bleiben.
     g_horte = wlibc.snap(g_hinh / 2)
-    if g_horte > g_ch * 8 {
-        g_horte = wlibc.snap(g_ch * 8)
+    if gebraucht > g_horte {
+        // MEHR ORTE ALS PLATZ: die Liste darf wachsen, aber dem Baum
+        // darunter muessen vier Zeilen bleiben. Sonst tauschte diese
+        // Runde einen unsichtbaren Stick gegen einen unsichtbaren
+        // Verzeichnisbaum -- und das waere kein Fortschritt, sondern
+        // derselbe Fehler eine Zeile tiefer.
+        let rest: u64 = g_ch * 4 + g_luft
+        if g_hinh > rest && gebraucht > g_hinh - rest {
+            gebraucht = wlibc.snap(g_hinh - rest)
+        }
+        g_horte = gebraucht
     }
     g_hbaum = 0
     if g_hinh > g_horte + g_luft {
@@ -1241,6 +1306,31 @@ fn orte_anzeigen() {
     kv((&s_n[0 as usize]) as u64, n)
     kv((&s_t[0 as usize]) as u64, exporte.carrier_num())
     nl()
+    // RUNDE HOTPLUG-2: UND WO DIE TRAEGERZEILEN LIEGEN.
+    //
+    // Hier und nicht in `say_rects`: dort laeuft es EINMAL beim Aufbau,
+    // und da steckt noch kein Stick. Gemeldet werden muss es aber
+    // genau dann, wenn einer DAZUGEKOMMEN ist -- sonst muesste ein
+    // Bildlauf die Zeile abzaehlen, und die Zahl der Orte ueber der
+    // Traegerliste ist kein Vertrag.
+    if dbg_on() && a_orte < wlib.MAXWD {
+        var p2: u64 = 0
+        while p2 < exporte.places_num() {
+            if exporte.place_is_carrier(p2) {
+                var sz: [u8; 22] = "explorer: ortzeile i=\0"
+                var sy2: [u8; 4] = " y=\0"
+                var sh2: [u8; 4] = " h=\0"
+                say((&sz[0 as usize]) as u64)
+                sayn(p2)
+                say((&sy2[0 as usize]) as u64)
+                sayn(p2 * wlib.row_h())
+                say((&sh2[0 as usize]) as u64)
+                sayn(wlib.row_h())
+                nl()
+            }
+            p2 = p2 + 1
+        }
+    }
 }
 
 // Auf einen Ort springen. Kopfzeilen ("Orte", "Datentraeger") sind
@@ -1817,6 +1907,13 @@ fn key_block(taste: u64, baum: u64, tab: u64, stat: u64,
         return props_show(tab, tab) << 8
     }
     if taste == wlib.KEY_F5 {
+        // RUNDE HOTPLUG-2: F5 liest auch die ORTE neu, nicht nur den
+        // Ordner. Der Knopf "Aktualisieren" tut beides (`orte_anzeigen`
+        // + `new_read`); dass dieselbe Taste weniger tat als der Knopf
+        // daneben, war ein Unterschied ohne Grund -- und er hat die
+        // Bildläufe der Vorrunde gekostet, die mit F5 auf einen Stick
+        // in der Leiste warteten.
+        orte_anzeigen()
         new_read(baum, tab, stat, fpfad)
         say((&s_t[0 as usize]) as u64)
         sayn(taste)
@@ -2121,6 +2218,7 @@ fn u_start(args: u64) -> u64 {
     wlib.size(wlibc.snap(ch), ch)
     let baus: u64 = wlib.icon_button(icons.ARROW_UP,
         msg.get((&k_gaus[0 as usize]) as u64))
+    b_aus = baus
     // DIE SCHALTFLAECHE, ueber die der Starter erreichbar ist. Ein
     // Programmverzeichnis, das man nur mit einem Kommandozeilenwort
     // aufmachen kann, ist keines.
@@ -2277,6 +2375,33 @@ fn u_start(args: u64) -> u64 {
         if wlib.sel_frame() != rahmen_zahl {
             rahmen_zahl = wlib.sel_frame()
             sag_auswahl(tab)
+        }
+        // RUNDE HOTPLUG-2: HAT SICH AM BUS ETWAS GETAN?
+        //
+        // Beim ERSTEN Durchlauf wird nur der Stand gemerkt und nichts
+        // getan -- `orte_anzeigen` ist beim Aufbau schon gelaufen, und
+        // ein zweiter Lauf waere eine Bewegung in der Leiste, die
+        // niemand ausgeloest hat.
+        let nn: u64 = wlib.noti_new()
+        if nn != noti_stand {
+            let erster: bool = noti_stand == 0xFFFFFFFFFFFFFFFF
+            noti_stand = nn
+            if !erster {
+                // Die Orte neu lesen -- der angezeigte Ordner bleibt
+                // stehen: wer gerade in /data arbeitet, will nicht,
+                // dass ihm ein Stick die Ansicht wegnimmt.
+                let vorher: u64 = exporte.places_num()
+                orte_anzeigen()
+                // UND DIE LISTE NEU BEMESSEN, wenn ein Ort dazukam
+                // oder wegfiel: ihre Hoehe haengt an der Zahl der Orte
+                // (siehe `masse`). Ohne diese Zeile stuende der Stick
+                // zwar in der Liste, aber hinter dem unteren Rand --
+                // genau der Fall, den diese Runde gemessen hat.
+                if exporte.places_num() != vorher {
+                    anordnen(w)
+                    say_rect(a_orte)
+                }
+            }
         }
         // ENTF UND UMSCHALT+ENTF. Eine Taste, die kein Widget
         // verbraucht hat, meldet wlib ueber `key_last`; der Zaehler
@@ -3678,6 +3803,21 @@ fn say_rects(mb: u64, bzur: u64, bvor: u64, bauf: u64, fpfad: u64,
     // dem Quelltext nachrechnen, und dann prueft er seinen Nachbau.
     say_rect(a_orte)
     say_rect(a_sym)
+    // RUNDE HOTPLUG-2: der Auswurfknopf meldet sich MIT, und seine
+    // Nummer wird ausdruecklich genannt. Ohne diese zwei Zeilen muesste
+    // ein Bildlauf den Knopf an seiner Stelle in der Leiste abzaehlen
+    // -- und die Vorrunde hat ihn genau deshalb nie gedrueckt.
+    say_rect(b_aus)
+    b_orte = a_orte
+    var sp2: [u8; 2] = " \0"
+    var sa: [u8; 24] = "explorer: ausknopf id=\0\0"
+    say((&sa[0 as usize]) as u64)
+    sayn(b_aus)
+    nl()
+    var so: [u8; 26] = "explorer: orteliste id=\0\0\0"
+    say((&so[0 as usize]) as u64)
+    sayn(a_orte)
+    nl()
     var q: u64 = 0
     while q < krume_n {
         say_rect(krumeb[(q) as usize])
