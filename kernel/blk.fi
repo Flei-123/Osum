@@ -52,6 +52,9 @@ export {
     use_at, first, identify, probe_ata0, flush,
     // ---- RUNDE AHCI ----
     use_ahci, DEV_AHCI,
+    // ---- RUNDE HOTPLUG-2: mehr als ein Stick ----
+    DEV_USB0, DEV_USB1, DEV_USB2, DEV_USB3, MAX_USB,
+    is_usb, usb_slot, usb_dev,
     // ---- RUNDE VIELKERN 3 ----
     ata_error, ata_last_lba, ata_letzter_st
     ,
@@ -94,6 +97,60 @@ const DEV_USB: u64 = 4
 // oder `fat.fi`. Derselbe Satz stand bei DEV_NVME (K2), DEV_ATA1 (K14)
 // und DEV_USB (K17); dass er zum vierten Mal stimmt, ist der Punkt.
 const DEV_AHCI: u64 = 5
+
+// ===================================== RUNDE HOTPLUG-2
+// MEHR ALS EIN STICK, und warum die Nummern so liegen.
+//
+// Bis zu dieser Runde gab es GENAU EIN `DEV_USB`. Zwei Sticks waren
+// damit dieselbe Blockgeraetenummer, und `wechsel.fi` haelt seine
+// Einhaengung an genau dieser Nummer fest -- der zweite Stick wurde
+// deshalb ausdruecklich abgelehnt, statt eine Attrappe zu werden, die
+// beim ersten Klick die Daten des ERSTEN zeigt.
+//
+// `DEV_USB0` IST `DEV_USB` (4). Das ist Absicht und kein Zufall: jede
+// Zeile, die bisher `DEV_USB` schrieb -- `rootsel.fi`, `blkdev.fi`,
+// `tools/k17`, der Installer -- meint den ersten Stick und laeuft
+// unveraendert weiter. Die weiteren liegen HINTER `DEV_AHCI`, weil 5
+// vergeben war; die Reihenfolge der Zahlen ist Geschichte, keine
+// Ordnung.
+//
+// Die Nummer ist der PLATZ IN DER LISTE von `usb.fi`, nicht die
+// Geraetenummer im USB-Baum: `usb_slot(dev)` rechnet sie um. Warum der
+// Unterschied wichtig ist, steht bei `S_MSCTAB` in `usb.fi` -- kurz:
+// eine Geraetenummer wird nach dem Abziehen sofort wieder vergeben,
+// ein Platz nicht.
+const DEV_USB0: u64 = 4
+const DEV_USB1: u64 = 6
+const DEV_USB2: u64 = 7
+const DEV_USB3: u64 = 8
+const MAX_USB: u64 = 4
+
+// Ist das eine Stick-Nummer? Und wenn ja, welcher Platz?
+fn is_usb(dev: u64) -> bool {
+    return dev == DEV_USB0 || (dev >= DEV_USB1 && dev <= DEV_USB3)
+}
+
+// Blockgeraetenummer -> Platz in der Liste von `usb.fi` (0..3).
+fn usb_slot(dev: u64) -> u64 {
+    if dev == DEV_USB0 {
+        return 0
+    }
+    if dev >= DEV_USB1 && dev <= DEV_USB3 {
+        return dev - DEV_USB1 + 1
+    }
+    return MAX_USB
+}
+
+// Platz -> Blockgeraetenummer. Die Gegenrichtung, fuer `wechsel.fi`.
+fn usb_dev(slot: u64) -> u64 {
+    if slot == 0 {
+        return DEV_USB0
+    }
+    if slot < MAX_USB {
+        return DEV_USB1 + slot - 1
+    }
+    return DEV_USB0
+}
 
 // ------------------------------------------------------------- the RAM
 
@@ -513,7 +570,7 @@ fn ata1_present(state: u64) -> bool {
 // es Abschnitt 9 von `tools/k14/run.sh`: die Wurzelplatte war nach dem
 // Lauf nicht mehr Oktett fuer Oktett dieselbe.
 fn removable(dev: u64) -> bool {
-    return dev == DEV_USB
+    return is_usb(dev)
 }
 
 fn present_on(state: u64, dev: u64) -> bool {
@@ -526,8 +583,10 @@ fn present_on(state: u64, dev: u64) -> bool {
     // RUNDE K17: ein Stick kann WEG sein, und zwar mitten im Betrieb.
     // Das ist der Unterschied zu jeder Platte, die dieser Kernel bisher
     // kannte -- und deshalb ist diese Zeile die, an der ENODEV entsteht.
-    if dev == DEV_USB {
-        return usb.msc_ready(state)
+    // RUNDE HOTPLUG-2: JE PLATZ. Ein Stick kann weg sein, waehrend ein
+    // anderer weiterlaeuft -- das ist der ganze Unterschied zu vorher.
+    if is_usb(dev) {
+        return usb.msc_ready_at(state, usb_slot(dev))
     }
     if dev == DEV_AHCI {
         return ahci.blocks(state) != 0
@@ -595,8 +654,8 @@ fn blocks_on(state: u64, dev: u64) -> u64 {
             return n
         }
     }
-    if dev == DEV_USB {
-        return usb.msc_blocks(state)
+    if is_usb(dev) {
+        return usb.msc_blocks_at(state, usb_slot(dev))
     }
     if dev == DEV_AHCI {
         return ahci.blocks(state)
@@ -997,8 +1056,8 @@ fn read_on(state: u64, dev: u64, lba: u64, dst: u64) -> bool {
     if dev == DEV_NVME {
         return nvme.read_block(state, lba, dst)
     }
-    if dev == DEV_USB {
-        return usb.msc_read(state, lba, dst)
+    if is_usb(dev) {
+        return usb.msc_read_at(state, usb_slot(dev), lba, dst)
     }
     if dev == DEV_AHCI {
         return ahci.read_block(state, lba, dst)
@@ -1025,8 +1084,8 @@ fn write_on(state: u64, dev: u64, lba: u64, src: u64) -> bool {
     if dev == DEV_NVME {
         return nvme.write_block(state, lba, src)
     }
-    if dev == DEV_USB {
-        return usb.msc_write(state, lba, src)
+    if is_usb(dev) {
+        return usb.msc_write_at(state, usb_slot(dev), lba, src)
     }
     if dev == DEV_AHCI {
         return ahci.write_block(state, lba, src)
