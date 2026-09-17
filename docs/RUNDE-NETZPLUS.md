@@ -140,10 +140,16 @@ Linux → Osum, 1 MiB, `nsvc=1`, QEMU/KVM, Wirt unter Fremdlast (Last 20–28).
 
 | Umlaufzeit | vorher | nachher | Faktor |
 |---|---|---|---|
-| ~0 ms | 5367 KiB/s | **25689 KiB/s** | 4,8× |
-| ~20 ms | 1505 KiB/s | **4275 KiB/s** | 2,8× |
-| ~50 ms | 914 KiB/s | **2224 KiB/s** | 2,4× |
-| ~100 ms | 489 KiB/s | **1220 KiB/s** | 2,5× |
+| ~0 ms | 5367 KiB/s | **16826–25689 KiB/s** | 3,1–4,8× |
+| ~20 ms | 1505 KiB/s | **3785–4275 KiB/s** | 2,5–2,8× |
+| ~50 ms | 914 KiB/s | **2224–2329 KiB/s** | 2,4–2,5× |
+| ~100 ms | 489 KiB/s | **1219–1220 KiB/s** | 2,5× |
+
+Die Spannen sind zwei Laeufe desselben Standes auf einem Wirt unter
+Fremdlast (Last 20–37); die Zahl ohne Verzoegerung schwankt am
+staerksten, weil dort der Wirt und nicht das Fenster die Grenze ist.
+Der Wert, auf den es ankommt, ist der stabilste: bei 100 ms Umlaufzeit
+1219 gegen 1220 KiB/s in zwei Laeufen.
 
 ### Die Gegenprobe, die es zur Messung macht
 
@@ -152,7 +158,7 @@ Derselbe Kernel, dieselbe Strecke, 100 ms Umlaufzeit, nur `nzws=0`:
 | | Durchsatz | ws_ok | angekuendigtes Fenster |
 |---|---|---|---|
 | ohne Skalierung | 539 KiB/s | 0 | 65535 |
-| mit Skalierung | 1220 KiB/s | 1 | 262140 |
+| mit Skalierung | 1219–1220 KiB/s | 1 | 262140 |
 
 Der Deckel aus Fenster/Umlaufzeit ist bei 64 KiB und 100 ms genau
 **640 KiB/s**. Ohne Skalierung bleibt die Messung darunter, mit
@@ -176,17 +182,46 @@ bevor er freigegeben wird: `ws_ok=1 snd_ws=10 rcv_ws=2 ts_ok=1 sack_ok=1`.
 
 | Verlust | Oktette | ausser der Reihe | SACK gesendet | Durchsatz | PAWS |
 |---|---|---|---|---|---|
-| 1 % | alle 262144 | — | — | 2470 KiB/s | 0 |
-| 5 % | alle 262144 | 61 | 13 Bloecke | 1716 KiB/s | 0 |
+| 1 % | alle 262144 | — | — | 2470–2862 KiB/s | 0 |
+| 5 % | alle 262144 | 61 | 13 Bloecke | 1716–2137 KiB/s | 0 |
 
 `paws=0` ist hier eine echte Zusage und keine Nebensache: ein PAWS, das
 im Normalbetrieb zuschlaegt, ist kaputt.
+
+**Und die Gegenrichtung** — Osum oeffnet die Verbindung selbst und
+schickt (`nsvc=4`, gegen `tools/net/echosrv.py` auf dem Wirt):
+
+| | gesendet | zurueck | falsch | SACK empfangen | SACK-Wiederholung |
+|---|---|---|---|---|---|
+| sauber | 262144 | 262144 | 0 | — | — |
+| 10 % Verlust | 65536 | 65536 | 0 | 11 Bloecke | 2 |
+
+Der Wirt bestaetigt es unabhaengig: `echoed 262144` bzw. `echoed 65536`.
 
 ### Testzahlen
 
 ```
 tools/netzplus/run.sh   39 passed, 0 failed
+tools/k17/run.sh       158 passed, 0 failed   (Sollwert 158/0)
+tools/hotplug/run.sh    45 passed, 0 failed   (Sollwert 45/0)
 ```
+
+**Eine Warnung zum Messen auf diesem Wirt.** Beide Regressionen sind im
+ersten Anlauf rot gewesen — `k17` mit 51/98, `net` mit 12/60 — und keine
+einzige dieser Meldungen hatte mit dieser Runde zu tun. Im Protokoll
+stand jeweils
+
+```
+sed: can't read /tmp/tmp.XXXXXXXX/k1.log: No such file or directory
+cp: error copying ... : No space left on device
+```
+
+Das `mktemp -d`-Verzeichnis wurde **waehrend des Laufs** weggeraeumt, und
+die Platte lief auf 100 %. Beides kommt von den anderen Runden, die
+gleichzeitig auf dieser Maschine messen (Last 20–37). Mit
+`TMPDIR=/root/<eigener Pfad>` und wieder freier Platte sind es 158/0
+und 45/0. Wer hier misst und rote Zahlen sieht, prueft **zuerst**
+`df -h` und ob das Arbeitsverzeichnis noch existiert.
 
 ---
 
@@ -204,6 +239,46 @@ richtigen Stelle, nicht als stiller Datenfehler:
   Gefunden beim ersten ankommenden Segment.
 
 Wer eine dieser Zahlen aendert, aendert alle, die dazugehoeren.
+
+## 4b. Der Fehler, den erst der FREMDE Laeufer gefunden hat
+
+Der eigene Laeufer war 39/0 gruen, und die Durchsatzzahlen oben standen
+schon. Dann meldete `tools/net/run.sh` — der Laeufer der Runde K8, den
+diese Runde nicht geschrieben hat — Abschnitt 7:
+
+```
+FAIL  octets Osum sent: 65536, expected eq 262144
+FAIL  octets that came back: 0, expected eq 262144
+FAIL  'echoed 262144' is missing
+```
+
+**Genau ein Sendepuffer, dann Stillstand.** Der eigene Laeufer konnte
+das nicht sehen: er misst `nsvc=1`, also Linux → Osum. Kaputt war die
+**Gegenrichtung**, in der Osum selbst schiebt.
+
+Die Ursache ist eine Addition:
+
+```
+IP 20 + TCP 20 + Zeitstempel 12 + MSS 1460 = 1512 > MTU 1500
+```
+
+Mit Zeitstempeln traegt jedes Segment 12 Oktette Optionen. Die Nutzlast
+blieb trotzdem bei voller MSS, und `seg_build` gibt bei `total > cap`
+eine **0** zurueck — kein Segment, ohne Fehler und ohne Meldung. Der
+Sender wartete danach auf Bestaetigungen fuer Oktette, die nie
+hinausgingen.
+
+Behoben nach **RFC 6691**: die nutzbare Nutzlast ist `mss - 12`, sobald
+Zeitstempel ausgehandelt sind, und Nagle vergleicht gegen dieselbe
+Groesse. Bei derselben Gelegenheit wurde der SACK-Sprung auf die
+Erholung begrenzt (`in_recovery`): ohne diese Bedingung galten die
+Bloecke der Gegenseite auch im Normalbetrieb, und der Sendezeiger waere
+ueber Oktette gesprungen, die nie gesendet wurden — ein Loch, das dieser
+Stack sich selbst gerissen haette.
+
+**Die Lehre:** ein Laeufer, den man selbst fuer die eigene Aenderung
+schreibt, prueft die Richtung, an die man gedacht hat. Die vorhandenen
+Laeufer pruefen die anderen. Beide gehoeren vor den Commit.
 
 ## 5. Ein Fehler, den erst die Gegenprobe gefunden hat
 
