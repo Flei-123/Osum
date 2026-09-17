@@ -238,12 +238,38 @@ rm -f "$TMP/kernel/ntfs-aus.fi"
 # gemeldet: 37 Stellen ausserhalb der Naht. Der Weg dorthin fuer den
 # uebrigen Kern sind die zwei Tueren `gfx.disp_poll` und
 # `gfx.disp_restore`.
+# RUNDE O-STRUKTUR, BEFUND (nicht behoben, siehe docs/STRUKTUR.md 5b):
+# `zeiger` ist ein Name OHNE DATEI -- die Runde ENGLISCH (337c6cbd)
+# hat `kernel/zeiger.fi` nach `kernel/cursor.fi` umbenannt und diese
+# Liste nicht mitgezogen. `rm -f` schweigt dazu. Der Eintrag bleibt
+# hier UNVERAENDERT stehen, weil diese Runde ordnet und nicht
+# repariert; die Pruefung unten MELDET ihn, statt ihn zu verschlucken.
 GFX_DATEIEN="fb wm wig font ttf tile wmplug vmode ansi ps2m kgui sysgui dispsave zeiger"
 if [[ $GUI == off ]]; then
     for f in $GFX_DATEIEN; do
-        rm -f "$TMP/kernel/$f.fi" || exit 1
+        # RUNDE O-STRUKTUR: `rm -f` SCHWEIGT, wenn die Datei woanders
+        # liegt. Zieht jemand `fb.fi` nach `kernel/gfx/fb.fi`, loescht
+        # diese Zeile nichts, meldet nichts -- und der Serverbau baeckt
+        # die Grafik STILL ins Abbild. Gemessen und bestaetigt am
+        # 17.09.2026 (docs/STRUKTUR.md, Abschnitt 5).
+        #
+        # Also: erst suchen, dann loeschen, und ABBRECHEN, wenn die
+        # Datei gar nicht da war. Die Suche findet sie auch in einem
+        # Unterordner -- damit bleibt der GUI-lose Bau richtig, wenn
+        # eine spaetere Runde die Grafik einsortiert.
+        TREFFER=$(find "$TMP/kernel" -name "$f.fi" -type f)
+        if [[ -z $TREFFER ]]; then
+            echo "SERVERBUILD-WARNUNG: '$f.fi' steht in GFX_DATEIEN," \
+                 "liegt aber nicht im Kernbaum -- hier wird NICHTS" \
+                 "geloescht. Entweder ist der Name veraltet, oder die" \
+                 "Datei wurde verschoben." >&2
+        fi
+        rm -f $TREFFER
     done
-    cp -f kernel/gfx-aus.fi "$TMP/kernel/gfx.fi" || exit 1
+    # Dieselbe Vorsicht fuer die Naht selbst.
+    GFXZIEL=$(find "$TMP/kernel" -name "gfx.fi" -type f | head -1)
+    [[ -n $GFXZIEL ]] || { echo "SERVERBUILD: gfx.fi nicht gefunden" >&2; exit 1; }
+    cp -f kernel/gfx-aus.fi "$GFXZIEL" || exit 1
 fi
 rm -f "$TMP/kernel/gfx-aus.fi"
 

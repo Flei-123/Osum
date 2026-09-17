@@ -25,6 +25,7 @@ unter `tools/struktur/` liegen und die jeder nachrechnen kann.
 | Was kostet ein Umzug? | **Eine Zeile je Aufrufer.** Keine einzige Aufrufstelle im Rumpf |
 | Was verhindert den großen Umbau? | **113 der 126** flachen Dateien werden in `tools/` **mit Pfad** genannt |
 | Lässt sich `sys.fi` (14 243 Z.) teilen? | **Heute nicht sauber** — die Begründung steht in Abschnitt 6 |
+| Nebenbefund | `tools/server/run.sh` ist **schon auf `main` rot** (4 passed, 13 failed) — Abschnitt 5b |
 
 ---
 
@@ -290,6 +291,70 @@ ausdrücklich: *hör auf und dokumentiere, warum es klemmt.*
 ausführbarem Code sind: `wechsel`, `wach`, `rand`, `nvme`, `netsvc`,
 `mem`, `kshani`, `kargon`, `kaesni`, `crash`, `codecstat`, `async`,
 `acpiev`. Sechs davon sind umgezogen.
+
+### 5b. Ein Nebenbefund: der Serverbau ist schon auf `main` rot
+
+Beim Absichern von `tools/build-kernel.sh` ist etwas aufgefallen, das
+**nicht** zu dieser Runde gehört, aber gemeldet werden muss.
+
+**Erstens:** in `GFX_DATEIEN` steht `zeiger` — ein Name **ohne Datei**.
+Die Runde ENGLISCH (`337c6cbd`) hat `kernel/zeiger.fi` nach
+`kernel/cursor.fi` umbenannt und diese Liste nicht mitgezogen. Die
+Zeile `rm -f "$TMP/kernel/zeiger.fi"` löscht seither nichts und
+**sagt auch nichts** — `rm -f` schweigt über fehlende Dateien.
+
+**Zweitens, und schwerer:** der GUI-lose Bau bricht ab.
+
+```
+error: cannot read '.../kernel/fb.fi': No such file or directory
+```
+
+Der Grund: `kernel/schlaf.fi`, `kernel/shot.fi` und `kernel/vgpu.fi`
+schreiben `import fb`, stehen aber **nicht** in `GFX_DATEIEN` und
+bleiben darum im Baum, wenn `fb.fi` daraus entfernt wird. Die drei
+kamen aus den Runden SCHLAF/WACH (`c1e9d0b5`, `9217b8f3`), BRIDGE-2
+(`e4af3368`) und VIRTIOGPU (`4302107c`).
+
+**Das ist kein Schaden dieser Runde.** Gegenprobe in einem sauberen
+`git worktree` auf **unverändertem `main` (`7e68da55`)**:
+
+```
+SERVER: 4 passed, 13 failed
+RC=1
+```
+
+`tools/server/run.sh` ist also **schon vor dieser Runde rot**.
+
+**Was diese Runde deshalb getan hat — und was nicht:**
+
+* `GFX_DATEIEN` bleibt **Zeichen für Zeichen unverändert**, `zeiger`
+  eingeschlossen. Eine Aufräumrunde repariert keinen fremden Bau.
+* Die Schleife **meldet** jetzt aber, wenn ein Name in der Liste keine
+  Datei im Baum hat (`SERVERBUILD-WARNUNG`), statt still
+  weiterzulaufen. Sie bricht **nicht** ab — sonst wäre der ohnehin
+  rote Serverbau an einer neuen Stelle rot, und die Ursache wäre wieder
+  verdeckt.
+* Das Suchen statt Buchstabieren (`find … -name "$f.fi"`) hat einen
+  zweiten Nutzen: zieht eine spätere Runde `fb.fi` nach `kernel/gfx/`,
+  findet die Schleife sie weiterhin. Ohne diese Zeile hätte ein Umzug
+  den Serverbau **still** falsch gemacht — genau die Falle aus
+  Abschnitt 5.
+
+Ein Trockenlauf zeigt die Falle in drei Zeilen:
+
+```
+$ T=$(mktemp -d); mkdir -p "$T/kernel/gfx"; touch "$T/kernel/gfx/fb.fi"
+$ f=fb; rm -f "$T/kernel/$f.fi"      # trifft nichts, meldet nichts
+$ test -f "$T/kernel/gfx/fb.fi" && echo "Datei lebt noch"
+Datei lebt noch
+```
+
+**Empfehlung für eine eigene Runde:** entweder `schlaf`, `shot` und
+`vgpu` in `GFX_DATEIEN` aufnehmen (dann fehlen ihre Symbole dem
+übrigen Kern) oder ihren Zugriff auf `fb` über die Naht `gfx.fi`
+führen, wie es Runde SERVERBUILD für die 745 anderen Stellen getan
+hat. Das ist dieselbe Arbeit wie die 8 Kanten `dev` → `gfx` aus
+Abschnitt 4 — und ein weiteres Argument für die Konsolennaht.
 
 ### Bewusst nicht angefasst
 
