@@ -68,6 +68,7 @@ import tty
 
 import inet
 import netview
+import ctr
 import unixsock
 import netmon
 import share
@@ -830,6 +831,60 @@ const SYS_OSUM_NETVFB: u64 = 1313
 // ABI beside it (1321 NETMONROLL, 1322 SHARE, lib/libc/kcall.fi) and
 // this one does not.
 const SYS_OSUM_HOTKEY: u64 = 1314
+
+// ============================ RUNDE O-CONTAINER: DIE CONTAINER-AUFRUFE
+//
+// Vier Nummern ab 1330, und das ist ein eigener Block: 1310..1314
+// gehoeren NETVIEW, 1320..1322 NETMON. Container sind weder das eine
+// noch das andere.
+//
+//   CTRGET(feld, nr)          -> Zahl      fragen (jeder)
+//   CTRSET(nr, feld, wert)    -> 0/Fehler  einstellen (euid 0, WIRT)
+//   CTRNEW(name, len)         -> Nummer    anlegen (euid 0, WIRT)
+//   CTRENTER(nr)              -> 0/Fehler  hineingehen -- EINBAHN
+//
+// WER DARF WAS, und das ist die ganze Sicherheitsaussage der Runde:
+// ANLEGEN, EINSTELLEN und HINEINGEHEN darf NUR ein Prozess, der im
+// WIRT laeuft und euid 0 hat. Ein Prozess IN einem Container kann
+// keinen anlegen, keinen veraendern und in keinen wechseln -- auch
+// nicht in seinen eigenen, denn `enter` ist der Weg hinein und es gibt
+// keinen hinaus. Das ist dieselbe Einbahnstrasse wie
+// `cap.rights_restrict`, nur fuer die Zugehoerigkeit statt fuer Rechte.
+const SYS_OSUM_CTRGET: u64 = 1330
+const SYS_OSUM_CTRSET: u64 = 1331
+const SYS_OSUM_CTRNEW: u64 = 1332
+const SYS_OSUM_CTRENTER: u64 = 1333
+
+// Was CTRGET beantwortet. `nr` 0 heisst dabei "der Container, in dem
+// ICH laufe" -- so fragt ein Programm im Container nach seinen eigenen
+// Grenzen, ohne seine Nummer zu kennen.
+const CG_MINE: u64 = 0 // in welchem Container laeuft der Frager
+const CG_STATE: u64 = 1 // C_FREE/C_SET/C_RUN/C_DEAD
+const CG_MEMLIM: u64 = 2 // Rahmen, 0 = unbegrenzt
+const CG_MEMUSE: u64 = 3
+const CG_MEMPEAK: u64 = 4
+const CG_MEMDENY: u64 = 5
+const CG_CPUSH: u64 = 6
+const CG_CPUTICK: u64 = 7
+const CG_PROCS: u64 = 8
+const CG_PROCLIM: u64 = 9
+const CG_COUNT: u64 = 10 // wie viele es gibt
+const CG_CREATED: u64 = 11
+const CG_DESTROYED: u64 = 12
+const CG_ESCAPES: u64 = 13
+const CG_ROOTLEN: u64 = 14
+const CG_NAMEC: u64 = 15 // (nr, zeichen) -- ein Oktett des Namens
+const CG_ROOTC: u64 = 16 // (nr, zeichen) -- ein Oktett der Wurzel
+const CG_NETV: u64 = 17
+const CG_MAXC: u64 = 18 // wie viele Plaetze es ueberhaupt gibt
+
+// Was CTRSET einstellt.
+const CS_MEMLIM: u64 = 0
+const CS_CPUSH: u64 = 1
+const CS_PROCLIM: u64 = 2
+const CS_NETV: u64 = 3
+const CS_STATE: u64 = 4
+const CS_ROOT: u64 = 5 // (nr, CS_ROOT, zeiger auf den Pfad)
 const HK_SEQ_Q: u64 = 0
 const HK_KEY_Q: u64 = 1
 const HK_NS_Q: u64 = 2
@@ -2548,7 +2603,7 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
         return uio.sysinfo(state, a0)
     }
     if number == SYS_OSUM_PSTAT {
-        return do_pstat(state, a0, a1)
+        return do_pstat(state, me, a0, a1)
     }
     if number == SYS_OSUM_KILL {
         if !kill_allowed(state, me, a0) {
@@ -2689,7 +2744,16 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // endete bei SYS_OSUM_NETVFB, NETMON reicht bis SYS_OSUM_SHARE;
     // haette hier die kleinere gestanden, waeren die Aufrufe der
     // anderen Runde still mit -ENOSYS beantwortet worden.
-    if number >= SYS_OSUM_NETGET && number <= SYS_OSUM_SHARE {
+    // RUNDE O-CONTAINER: DIE OBERGRENZE WANDERT AUF 1333.
+    //
+    // Sie stand auf SYS_OSUM_SHARE (1322), und die Aufrufe dieser Runde
+    // (1330..1333) waeren damit still mit -ENOSYS beantwortet worden --
+    // GENAU der Fehler, den der Vermerk zwei Zeilen darueber fuer die
+    // Verschmelzung von NETVIEW und NETMON beschreibt. Er ist hier beim
+    // ersten Lauf des Testlaeufers aufgefallen und steht deshalb noch
+    // einmal dort: wer einen Block erweitert, muss die Grenze
+    // nachziehen.
+    if number >= SYS_OSUM_NETGET && number <= SYS_OSUM_CTRENTER {
         return net_call(state, me, number, a0, a1, a2)
     }
     // RUNDE TILING: der Fensterbaum, bedient aus Ring 3.
@@ -7471,6 +7535,9 @@ fn do_clone(state: u64, me: u64, frame: u64, flags: u64, stapel: u64,
     sched.tset(state, faden, sched.T_BIG, sched.tget(state, me, sched.T_BIG))
     sched.tset(state, faden, sched.T_USTACK, stapel)
     netview.inherit(state, me, faden)
+    // RUNDE O-CONTAINER: das Kind bleibt im Container seines
+    // Erzeugers. Ohne diese Zeile waere `fork` der Ausgang.
+    ctr.inherit(state, me, faden)
     // DIE FADENGRUPPE. `CLONE_THREAD` heisst: derselbe Prozess nach
     // aussen. `getpid` muss in jedem Faden dieselbe Zahl geben, `gettid`
     // verschiedene -- deshalb bleibt `T_PID` eigen und `T_TGID` wird die
@@ -7679,6 +7746,9 @@ fn do_fork(state: u64, me: u64, frame: u64) -> u64 {
     // dessen Liste erlaubter Ziele. Anders herum waere es ein Loch:
     // `fork` waere dann der Weg aus jeder Sicht heraus.
     netview.inherit(state, me, child)
+    // RUNDE O-CONTAINER: das Kind bleibt im Container seines
+    // Erzeugers. Ohne diese Zeile waere `fork` der Ausgang.
+    ctr.inherit(state, me, child)
     // RUNDE K16: das Kind erbt den Boden seines Stapels. Ohne diese
     // Zeile stuende dort null, und `proc.grow_stack` liesse den Stapel
     // eines `fork`-Kindes nicht wachsen -- ein Fehler, der erst beim
@@ -8002,6 +8072,9 @@ fn do_spawn(state: u64, me: u64, prog: u64, arg: u64) -> u64 {
         return neg(errno.E_NOMEM)
     }
     netview.inherit(state, me, i)
+    // RUNDE O-CONTAINER: das Kind bleibt im Container seines
+    // Erzeugers. Ohne diese Zeile waere `fork` der Ausgang.
+    ctr.inherit(state, me, i)
     return sched.tget(state, i, sched.T_PID)
 }
 
@@ -8058,6 +8131,9 @@ fn do_exec(state: u64, me: u64, path: u64, argv: u64, argc: u64) -> u64 {
     // diese Zeile waere `exec` aus einem vorgetaeuschten Prozess heraus
     // der Weg an der Sicht vorbei.
     netview.inherit(state, me, t)
+    // RUNDE O-CONTAINER: das Kind bleibt im Container seines
+    // Erzeugers. Ohne diese Zeile waere `fork` der Ausgang.
+    ctr.inherit(state, me, t)
     // ROUND NETMON: a new task, a fresh set of counters, and the name
     // of the program they are counted under.
     netmon.task_clear(state, t, sched.tget(state, t, sched.T_PID))
@@ -8494,11 +8570,29 @@ fn do_rename(state: u64, me: u64, from: u64, to: u64) -> u64 {
 // Neue Felder werden ANGEHAENGT (8 und 9), nie eingeschoben: die alten
 // Nummern stehen in `/bin/ps`, in `/bin/top` und in jedem Programm, das
 // seit Runde K6 gegen diese Tafel gebaut wurde.
-fn do_pstat(state: u64, index: u64, field: u64) -> u64 {
+fn do_pstat(state: u64, me: u64, index: u64, field: u64) -> u64 {
     if index >= kstate.MAX_TASKS {
         return neg(errno.E_INVAL)
     }
     if index >= kstate.get(state, kstate.TASKS) {
+        return 0
+    }
+    // RUNDE O-CONTAINER, STUFE 3: DIE EIGENE PROZESSSICHT.
+    //
+    // HIER und nicht in `uio.pstat`: diese Funktion ist die EINE Tuer,
+    // durch die `ps`, `top` und der Aufgabenverwalter die Aufgabentafel
+    // sehen -- `uio.pstat` weiss nicht, WER fragt (es bekommt keinen
+    // Aufrufer, und `proc.fi` importiert `uio.fi`, der Weg zurueck ist
+    // also versperrt).
+    //
+    // EINE UNSICHTBARE AUFGABE SIEHT AUS WIE EIN FREIER PLATZ -- 0 auf
+    // jedes Feld, und `P_STATE` ist dann `S_FREE`. Das ist genau das,
+    // was `ps` fuer einen leeren Platz ohnehin druckt (naemlich
+    // nichts), also braucht kein einziges Programm eine Zeile dafuer.
+    // Der Container sieht eine Maschine, auf der ausser ihm nichts
+    // laeuft; er sieht KEINE Luecke und keinen Fehler, aus dem er auf
+    // die Nachbarn schliessen koennte.
+    if !ctr.visible(state, me, index) {
         return 0
     }
     if field == uio.P_CPU || field == uio.P_PAGES {
@@ -9486,6 +9580,9 @@ fn do_fopen(state: u64, me: u64, path: u64, argv: u64, argc: u64) -> u64 {
     // RUNDE NETVIEW: auch der Weg ueber die Dateiart baut eine NEUE
     // Aufgabe. Dieselbe Zeile wie in `do_exec` und aus demselben Grund.
     netview.inherit(state, me, t)
+    // RUNDE O-CONTAINER: das Kind bleibt im Container seines
+    // Erzeugers. Ohne diese Zeile waere `fork` der Ausgang.
+    ctr.inherit(state, me, t)
     return sched.tget(state, t, sched.T_PID)
 }
 
@@ -11542,6 +11639,250 @@ fn do_netvallow(state: u64, me: u64, pid: u64, addr: u64,
 // dieses Nachtrags: eine Sicht, die sich unter einem Programm wegdreht,
 // tut es mitten in einer Verbindung. Diese Funktion schreibt eine Zahl,
 // die erst der NAECHSTE Programmstart liest.
+// ==================================================================
+// RUNDE O-CONTAINER: die vier Aufrufe
+// ==================================================================
+
+// DIE EINE BEDINGUNG, an der Anlegen, Einstellen und Eintreten haengen.
+// Sie steht in einer Funktion und nicht dreimal abgeschrieben, denn
+// eine Schranke, die an drei Stellen steht, wird an zweien gepflegt.
+//
+// ZWEI TEILE, und der zweite ist der wichtigere: euid 0 ALLEIN reicht
+// nicht. Der Prozess muss im WIRT laufen. Ein Container mit einem
+// eigenen Benutzer 0 -- und den hat jeder Container, der ein eigenes
+// /etc traegt -- koennte sonst seine eigene Speichergrenze hochsetzen,
+// und die Grenze waere eine Bitte.
+fn ctr_admin(state: u64, me: u64) -> bool {
+    if ctr.ctr_of(state, me) != ctr.HOST {
+        return false
+    }
+    return sched.tget(state, me, sched.T_EUID) == 0
+}
+
+fn do_ctrget(state: u64, me: u64, feld: u64, nr: u64, c: u64) -> u64 {
+    if feld == CG_MINE {
+        return ctr.ctr_of(state, me)
+    }
+    if feld == CG_COUNT {
+        return ctr.count(state)
+    }
+    if feld == CG_CREATED {
+        return ctr.created(state)
+    }
+    if feld == CG_DESTROYED {
+        return ctr.destroyed(state)
+    }
+    if feld == CG_ESCAPES {
+        return ctr.escapes(state)
+    }
+    if feld == CG_MAXC {
+        return ctr.MAX_CTR
+    }
+    // Ab hier geht es um EINEN Container. Die 0 heisst "meiner" --
+    // damit fragt ein eingesperrtes Programm nach seinen eigenen
+    // Grenzen, ohne seine Nummer zu wissen.
+    var i: u64 = nr
+    if i == 0 {
+        i = ctr.ctr_of(state, me)
+    }
+    if i == 0 || i >= ctr.MAX_CTR {
+        return neg(errno.E_INVAL)
+    }
+    // WER DARF UEBER WEN LESEN. Der Wirt ueber alle, ein Container nur
+    // ueber sich selbst -- dieselbe Regel wie bei den Prozessen, und
+    // sie kommt aus derselben Funktion.
+    let mein: u64 = ctr.ctr_of(state, me)
+    if mein != ctr.HOST && mein != i {
+        return neg(errno.E_PERM)
+    }
+    if feld == CG_STATE {
+        return ctr.state_of(state, i)
+    }
+    if feld == CG_MEMLIM {
+        return ctr.mem_limit(state, i)
+    }
+    if feld == CG_MEMUSE {
+        return ctr.mem_used(state, i)
+    }
+    if feld == CG_MEMPEAK {
+        return ctr.mem_peak(state, i)
+    }
+    if feld == CG_MEMDENY {
+        return ctr.mem_denials(state, i)
+    }
+    if feld == CG_CPUSH {
+        return ctr.cpu_share(state, i)
+    }
+    if feld == CG_CPUTICK {
+        return ctr.cpu_ticks(state, i)
+    }
+    if feld == CG_PROCS {
+        return ctr.procs_of(state, i)
+    }
+    if feld == CG_PROCLIM {
+        return ctr.procs_limit(state, i)
+    }
+    if feld == CG_ROOTLEN {
+        return ctr.root_len(state, i)
+    }
+    if feld == CG_NETV {
+        return ctr.netview_of(state, i)
+    }
+    if feld == CG_NAMEC {
+        return ctr.name_at(state, i, c)
+    }
+    if feld == CG_ROOTC {
+        return ctr.root_at(state, i, c)
+    }
+    return neg(errno.E_INVAL)
+}
+
+fn do_ctrnew(state: u64, me: u64, name: u64, len: u64) -> u64 {
+    if !ctr_admin(state, me) {
+        return neg(errno.E_PERM)
+    }
+    let i: u64 = ctr.alloc(state)
+    if i == 0 {
+        return neg(errno.E_NOSPC)
+    }
+    if name != 0 {
+        let buf: u64 = nameb(state)
+        let n: u64 = fetch_name(state, me, name, buf, ctr.NAME_MAX)
+        if !errno.is_error(n) {
+            ctr.name_set(state, i, buf)
+        }
+    }
+    return i
+}
+
+fn do_ctrset(state: u64, me: u64, nr: u64, feld: u64, wert: u64) -> u64 {
+    if !ctr_admin(state, me) {
+        return neg(errno.E_PERM)
+    }
+    if nr == 0 || nr >= ctr.MAX_CTR {
+        return neg(errno.E_INVAL)
+    }
+    if !ctr.exists(state, nr) {
+        return neg(errno.E_SRCH)
+    }
+    if feld == CS_MEMLIM {
+        // DIE EINBAHNSTRASSE. Eine gesetzte Grenze wird nur kleiner.
+        // Auch der Wirt darf sie nicht wieder oeffnen -- sonst waere
+        // sie nur so fest wie der naechste Aufruf.
+        if !ctr.may_limit(state, nr, wert) {
+            ctr.note_escape(state)
+            return neg(errno.E_PERM)
+        }
+        ctr.mem_limit_set(state, nr, wert)
+        return 0
+    }
+    if feld == CS_CPUSH {
+        if !ctr.cpu_share_set(state, nr, wert) {
+            return neg(errno.E_INVAL)
+        }
+        return 0
+    }
+    if feld == CS_PROCLIM {
+        ctr.procs_limit_set(state, nr, wert)
+        return 0
+    }
+    if feld == CS_NETV {
+        if wert > netview.V_LAST {
+            return neg(errno.E_INVAL)
+        }
+        ctr.netview_set(state, nr, wert)
+        return 0
+    }
+    if feld == CS_STATE {
+        if wert > ctr.C_DEAD {
+            return neg(errno.E_INVAL)
+        }
+        // ABRAEUMEN GEHT NUR LEER. Ein Platz, auf dem noch ein Prozess
+        // laeuft, wuerde seine Nummer an den naechsten Container
+        // weitergeben -- und dessen Grenzen an einen fremden Prozess.
+        if wert == ctr.C_FREE {
+            if ctr.procs_of(state, nr) != 0 {
+                return neg(errno.E_BUSY)
+            }
+            ctr.free_slot(state, nr)
+            return 0
+        }
+        ctr.set_state(state, nr, wert)
+        return 0
+    }
+    if feld == CS_ROOT {
+        let buf: u64 = nameb(state)
+        let n: u64 = fetch_name(state, me, wert, buf, ctr.ROOT_MAX)
+        if errno.is_error(n) {
+            return n
+        }
+        // NUR TIEFER. `may_reroot` laesst die erste Wurzel zu und
+        // danach nur noch Pfade, die unter der bestehenden liegen.
+        if !ctr.may_reroot(state, nr, buf) {
+            ctr.note_escape(state)
+            return neg(errno.E_PERM)
+        }
+        if !ctr.root_set(state, nr, buf) {
+            return neg(errno.E_INVAL)
+        }
+        return 0
+    }
+    return neg(errno.E_INVAL)
+}
+
+// HINEIN, UND ES GIBT KEIN HINAUS.
+//
+// Dieser Aufruf ist die einzige Stelle im ganzen Kern, die
+// `sched.T_CTR` von aussen setzt, und er setzt sie nur von 0 auf etwas
+// anderes. Es gibt bewusst KEIN `SYS_OSUM_CTRLEAVE`: waere der Weg
+// hinaus vorhanden, waere der Container eine Empfehlung.
+//
+// Was `ctr` (das Programm) damit tut: `fork`, dann `enter`, dann
+// `execve`. Das Kind ist ab dem `enter` drin, das Elternteil bleibt
+// draussen -- genau das Muster, das `netview faked <programm>` seit
+// seiner Runde benutzt.
+fn do_ctrenter(state: u64, me: u64, nr: u64) -> u64 {
+    if !ctr_admin(state, me) {
+        return neg(errno.E_PERM)
+    }
+    if nr == 0 || nr >= ctr.MAX_CTR {
+        return neg(errno.E_INVAL)
+    }
+    if !ctr.alive(state, nr) {
+        return neg(errno.E_SRCH)
+    }
+    // EINE WURZEL MUSS STEHEN. Ein Container ohne Wurzel waere ein
+    // Prozess mit einer Nummer und ohne Schranke -- er saehe das ganze
+    // Dateisystem des Wirts. Lieber -EINVAL als eine Zusage, die nicht
+    // gilt.
+    if ctr.root_len(state, nr) == 0 {
+        return neg(errno.E_INVAL)
+    }
+    let lim: u64 = ctr.procs_limit(state, nr)
+    if lim != 0 {
+        if ctr.procs_of(state, nr) >= lim {
+            return neg(errno.E_AGAIN)
+        }
+    }
+    ctr.set_ctr(state, me, nr)
+    ctr.set_state(state, nr, ctr.C_RUN)
+    // DAS NETZ DES CONTAINERS, und es wird hier gesetzt und nicht in
+    // einer zweiten Tuer: ab jetzt gilt fuer diesen Prozess
+    // ausschliesslich `sched.T_NETV`, so wie fuer jeden anderen auch.
+    // `netview.decide` bleibt die einzige Entscheidungsstelle.
+    let v: u64 = ctr.netview_of(state, nr)
+    if v != 0 {
+        netview.set_view(state, me, v)
+    }
+    // DAS ARBEITSVERZEICHNIS WIRD AUF DIE WURZEL GESETZT. Sonst
+    // zeigte es weiter auf einen Pfad des Wirts, und der erste
+    // relative Zugriff liefe durch `uio.resolve` mit einem
+    // Arbeitsverzeichnis, das ausserhalb liegt -- es wuerde zwar
+    // eingesperrt, aber an einen sinnlosen Ort.
+    uio.reset(state, me)
+    return 0
+}
+
 fn do_netvfb(state: u64, me: u64, want: u64) -> u64 {
     if sched.tget(state, me, sched.T_EUID) != 0 {
         return neg(errno.E_PERM)
@@ -11797,6 +12138,19 @@ fn net_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
             return neg(errno.E_INVAL)
         }
         return netmon.roll(state, a0, a1)
+    }
+    // ================================================= RUNDE O-CONTAINER
+    if number == SYS_OSUM_CTRGET {
+        return do_ctrget(state, me, a0, a1, a2)
+    }
+    if number == SYS_OSUM_CTRSET {
+        return do_ctrset(state, me, a0, a1, a2)
+    }
+    if number == SYS_OSUM_CTRNEW {
+        return do_ctrnew(state, me, a0, a1)
+    }
+    if number == SYS_OSUM_CTRENTER {
+        return do_ctrenter(state, me, a0)
     }
     // ====================================================== RUNDE NETVIEW
     if number == SYS_OSUM_NETVFB {
