@@ -1,0 +1,517 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// tools/netzui/logik.fi -- RUNDE O-NETZUI: DIE RECHNUNG, AUF DEM BAUWIRT
+// NACHGERECHNET.
+//
+// ====================================================== WARUM ES EXISTIERT
+//
+// Die Netzseite der Einstellungen zeigt vier Arten von Zahlen, und drei
+// davon entstehen aus einer Rechnung und nicht aus einem Abruf:
+//
+//   die RATE      aus zwei Zaehlerstaenden und einer Zeitdifferenz
+//   die EINHEIT   aus der Rate (B/s, KiB/s, MiB/s, GiB/s)
+//   die ORDNUNG   der Programmtafel, absteigend nach Verbrauch
+//
+// Diese drei lassen sich pruefen, ohne ein Betriebssystem zu starten --
+// sie haengen an keinem Systemaufruf, an keinem Fenster und an keiner
+// Karte. Genau deshalb stehen sie in `kernel/user/settings.fi` als
+// eigene Funktionen und nicht mitten in der Zeichenroutine, und genau
+// deshalb gibt es diese Datei.
+//
+// SIE IST EINE KOPIE, UND DAS WIRD GEPRUEFT. Die Funktionen unten sind
+// Zeichen fuer Zeichen dieselben wie in `kernel/user/settings.fi`;
+// `tools/netzui/run.sh` vergleicht die Rumpfe der beiden Dateien und
+// faellt um, wenn sie auseinanderlaufen. Ein Pruefstand, der eine
+// veraltete Kopie prueft, prueft nichts -- das ist der Fehler, den
+// dieser Vergleich verhindert.
+//
+// WARUM NICHT DIREKT settings.fi EINBINDEN: das Programm haengt an
+// `wlib`, `wlibc`, `msg` und `ulib`, und die haengen an Systemaufrufen,
+// die es auf dem Bauwirt nicht gibt. Eine Datei, die nur der Rechnung
+// wegen die halbe Oberflaeche mitziehen muesste, waere nicht pruefbar.
+profile app
+import rt.rt
+
+// ---------------------------------------------------------- die Hilfen
+//
+// `text_an`, `num_at` und `zehntel_an` aus settings.fi, mit denselben
+// Rumpfen. Sie schreiben in einen Puffer und geben die neue Schreibstelle
+// zurueck.
+
+fn text_an(p: u64, at: u64, q: u64) -> u64 {
+    var k: u64 = 0
+    while __mmio_read8((q + k) as *mut u8) != 0 as u8 {
+        __mmio_write8((p + at + k) as *mut u8,
+            __mmio_read8((q + k) as *mut u8))
+        k = k + 1
+    }
+    __mmio_write8((p + at + k) as *mut u8, 0 as u8)
+    return at + k
+}
+
+fn num_at(p: u64, at: u64, v: u64) -> u64 {
+    if v == 0 {
+        __mmio_write8((p + at) as *mut u8, 48 as u8)
+        __mmio_write8((p + at + 1) as *mut u8, 0 as u8)
+        return at + 1
+    }
+    var stellen: u64 = 0
+    var t: u64 = v
+    while t > 0 {
+        stellen = stellen + 1
+        t = t / 10
+    }
+    var k: u64 = stellen
+    t = v
+    while k > 0 {
+        k = k - 1
+        __mmio_write8((p + at + k) as *mut u8, (48 + (t % 10)) as u8)
+        t = t / 10
+    }
+    __mmio_write8((p + at + stellen) as *mut u8, 0 as u8)
+    return at + stellen
+}
+
+fn zehntel_an(p: u64, at: u64, ganz: u64, zehntel: u64) -> u64 {
+    var komma: [u8; 2] = ",\0"
+    var a: u64 = num_at(p, at, ganz)
+    a = text_an(p, a, (&komma[0 as usize]) as u64)
+    return num_at(p, a, zehntel)
+}
+
+// ------------------------------------------- DIE DREI ZU PRUEFENDEN
+
+fn rate_aus(alt: u64, neu: u64, dt: u64) -> u64 {
+    if dt == 0 {
+        return 0
+    }
+    if neu < alt {
+        return 0
+    }
+    return (neu - alt) * 100 / dt
+}
+
+fn rate_an(p: u64, at: u64, v: u64) -> u64 {
+    var e_b: [u8; 5] = " B/s\0"
+    var e_k: [u8; 7] = " KiB/s\0"
+    var e_m: [u8; 7] = " MiB/s\0"
+    var e_g: [u8; 7] = " GiB/s\0"
+    if v < 1024 {
+        let a: u64 = num_at(p, at, v)
+        return text_an(p, a, (&e_b[0 as usize]) as u64)
+    }
+    if v < 1024 * 1024 {
+        let a: u64 = zehntel_an(p, at, v / 1024, (v * 10 / 1024) % 10)
+        return text_an(p, a, (&e_k[0 as usize]) as u64)
+    }
+    if v < 1024 * 1024 * 1024 {
+        // DIE ZEHNTELSTELLE IN EINER DIVISION UND NICHT IN ZWEIEN.
+        //
+        // Hier stand `(v / 1024 * 10 / 1024) % 10`, und das ist in
+        // rund vier von tausend Faellen um eins zu klein: die erste
+        // Division schneidet ab, und was sie abschneidet, fehlt der
+        // zweiten. Gemessen an 200 000 Zufallswerten: 780 Abweichungen,
+        // alle um genau eine Zehntelstelle nach unten. Aufgefallen ist
+        // es `tools/netzui/run.sh` an 13002343 Oktetten, die als
+        // "12,3 MiB/s" herauskamen und 12,4 sind.
+        //
+        // `v * 10` laeuft nicht ueber: u64 traegt bis 1,8e18, und das
+        // sind Exaoktette je Sekunde.
+        let g: u64 = v / (1024 * 1024)
+        let z: u64 = (v * 10 / (1024 * 1024)) % 10
+        let a: u64 = zehntel_an(p, at, g, z)
+        return text_an(p, a, (&e_m[0 as usize]) as u64)
+    }
+    // Dieselbe Berichtigung wie eine Stufe darueber.
+    let g2: u64 = v / (1024 * 1024 * 1024)
+    let z2: u64 = (v * 10 / (1024 * 1024 * 1024)) % 10
+    let a2: u64 = zehntel_an(p, at, g2, z2)
+    return text_an(p, a2, (&e_g[0 as usize]) as u64)
+}
+
+fn menge_an(p: u64, at: u64, v: u64) -> u64 {
+    var e_b: [u8; 3] = " B\0"
+    var e_k: [u8; 5] = " KiB\0"
+    var e_m: [u8; 5] = " MiB\0"
+    var e_g: [u8; 5] = " GiB\0"
+    if v < 1024 {
+        let a: u64 = num_at(p, at, v)
+        return text_an(p, a, (&e_b[0 as usize]) as u64)
+    }
+    if v < 1024 * 1024 {
+        let a: u64 = zehntel_an(p, at, v / 1024, (v * 10 / 1024) % 10)
+        return text_an(p, a, (&e_k[0 as usize]) as u64)
+    }
+    if v < 1024 * 1024 * 1024 {
+        let a: u64 = zehntel_an(p, at, v / (1024 * 1024),
+            (v * 10 / (1024 * 1024)) % 10)
+        return text_an(p, a, (&e_m[0 as usize]) as u64)
+    }
+    let a2: u64 = zehntel_an(p, at, v / (1024 * 1024 * 1024),
+        (v * 10 / (1024 * 1024 * 1024)) % 10)
+    return text_an(p, a2, (&e_g[0 as usize]) as u64)
+}
+
+// `mbit_an` ohne den Katalog: statt `msg.get` steht hier das Wort
+// selbst. Das ist der EINZIGE Unterschied zur Fassung in settings.fi,
+// und `run.sh` weiss davon.
+fn mbit_an(p: u64, at: u64, v: u64) -> u64 {
+    var e_m: [u8; 8] = " Mbit/s\0"
+    var e_g: [u8; 8] = " Gbit/s\0"
+    var unbek: [u8; 10] = "unbekannt\0"
+    if v == 0 {
+        return text_an(p, at, (&unbek[0 as usize]) as u64)
+    }
+    if v < 1000 {
+        let a: u64 = num_at(p, at, v)
+        return text_an(p, a, (&e_m[0 as usize]) as u64)
+    }
+    if v % 1000 == 0 {
+        let a: u64 = num_at(p, at, v / 1000)
+        return text_an(p, a, (&e_g[0 as usize]) as u64)
+    }
+    let a2: u64 = zehntel_an(p, at, v / 1000, (v / 100) % 10)
+    return text_an(p, a2, (&e_g[0 as usize]) as u64)
+}
+
+// -------------------------------------------------------- die Glaettung
+const NGLATT: u64 = 4
+static mut n_htx: [u64; 4] = [0 as u64; 4]
+static mut n_hrx: [u64; 4] = [0 as u64; 4]
+static mut n_hn: u64 = 0
+static mut n_hi: u64 = 0
+
+fn glatt_ein(tx: u64, rx: u64) {
+    n_htx[(n_hi) as usize] = tx
+    n_hrx[(n_hi) as usize] = rx
+    n_hi = (n_hi + 1) % NGLATT
+    if n_hn < NGLATT {
+        n_hn = n_hn + 1
+    }
+}
+
+fn glatt_tx() -> u64 {
+    if n_hn == 0 {
+        return 0
+    }
+    var sum: u64 = 0
+    var i: u64 = 0
+    while i < n_hn {
+        sum = sum + n_htx[(i) as usize]
+        i = i + 1
+    }
+    return sum / n_hn
+}
+
+fn glatt_rx() -> u64 {
+    if n_hn == 0 {
+        return 0
+    }
+    var sum: u64 = 0
+    var i: u64 = 0
+    while i < n_hn {
+        sum = sum + n_hrx[(i) as usize]
+        i = i + 1
+    }
+    return sum / n_hn
+}
+
+fn glatt_leeren() {
+    n_hn = 0
+    n_hi = 0
+    var i: u64 = 0
+    while i < NGLATT {
+        n_htx[(i) as usize] = 0
+        n_hrx[(i) as usize] = 0
+        i = i + 1
+    }
+}
+
+// -------------------------------------------------------- die Sortierung
+//
+// Dasselbe Auswahlsortieren wie in `prog_sortiere`, nur ueber ein Feld
+// statt ueber Systemaufrufe -- die Umordnung selbst ist Zeile fuer
+// Zeile dieselbe.
+const NPROGZ: u64 = 24
+static mut np_idx: [u64; 24] = [0 as u64; 24]
+static mut np_sum: [u64; 24] = [0 as u64; 24]
+
+fn sortiere(n: u64) {
+    var a: u64 = 0
+    while a < n {
+        var best: u64 = a
+        var b: u64 = a + 1
+        while b < n {
+            if np_sum[(b) as usize] > np_sum[(best) as usize] {
+                best = b
+            }
+            b = b + 1
+        }
+        if best != a {
+            let ti: u64 = np_idx[(a) as usize]
+            let ts: u64 = np_sum[(a) as usize]
+            np_idx[(a) as usize] = np_idx[(best) as usize]
+            np_sum[(a) as usize] = np_sum[(best) as usize]
+            np_idx[(best) as usize] = ti
+            np_sum[(best) as usize] = ts
+        }
+        a = a + 1
+    }
+}
+
+// ============================================================ DIE PRUEFUNG
+
+static mut buf: [u8; 128] = [0 as u8; 128]
+static mut obuf: [u8; 256] = [0 as u8; 256]
+static mut n_ok: u64 = 0
+static mut n_bad: u64 = 0
+
+fn slen(p: u64) -> u64 {
+    var i: u64 = 0
+    while __mmio_read8((p + i) as *mut u8) != 0 as u8 {
+        i = i + 1
+    }
+    return i
+}
+
+// Eine Zeile auf die Standardausgabe. Gebaut wird sie in `obuf`, weil
+// `write_everything` einen zusammenhaengenden Block will und nicht
+// vier Aufrufe.
+fn sag(p: u64) {
+    rt.write_everything(1, p, slen(p) as usize)
+}
+
+fn streq(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while true {
+        let x: u64 = (__mmio_read8((a + i) as *mut u8)) as u64
+        let y: u64 = (__mmio_read8((b + i) as *mut u8)) as u64
+        if x != y {
+            return false
+        }
+        if x == 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn zeile(marke: u64, was: u64, ist: u64, extra: u64, soll: u64) {
+    let o: u64 = (&obuf[0 as usize]) as u64
+    var a: u64 = text_an(o, 0, marke)
+    a = text_an(o, a, was)
+    var pf: [u8; 5] = " -> \0"
+    a = text_an(o, a, (&pf[0 as usize]) as u64)
+    a = text_an(o, a, ist)
+    if extra != 0 {
+        var er: [u8; 11] = " erwartet \0"
+        a = text_an(o, a, (&er[0 as usize]) as u64)
+        a = text_an(o, a, soll)
+    }
+    var nl: [u8; 2] = "\n\0"
+    let _e: u64 = text_an(o, a, (&nl[0 as usize]) as u64)
+    sag(o)
+}
+
+fn sagt(was: u64, ist: u64, soll: u64) {
+    var mo: [u8; 8] = "  ok   \0"
+    var mf: [u8; 8] = "  FAIL \0"
+    if streq(ist, soll) {
+        n_ok = n_ok + 1
+        zeile((&mo[0 as usize]) as u64, was, ist, 0, soll)
+    } else {
+        n_bad = n_bad + 1
+        zeile((&mf[0 as usize]) as u64, was, ist, 1, soll)
+    }
+}
+
+static mut zb1: [u8; 32] = [0 as u8; 32]
+static mut zb2: [u8; 32] = [0 as u8; 32]
+
+fn zahl(was: u64, ist: u64, soll: u64) {
+    let a: u64 = (&zb1[0 as usize]) as u64
+    let b: u64 = (&zb2[0 as usize]) as u64
+    let _x: u64 = num_at(a, 0, ist)
+    let _y: u64 = num_at(b, 0, soll)
+    var mo: [u8; 8] = "  ok   \0"
+    var mf: [u8; 8] = "  FAIL \0"
+    if ist == soll {
+        n_ok = n_ok + 1
+        zeile((&mo[0 as usize]) as u64, was, a, 0, b)
+    } else {
+        n_bad = n_bad + 1
+        zeile((&mf[0 as usize]) as u64, was, a, 1, b)
+    }
+}
+
+
+// Die Ueberschriften der Abschnitte. Statisch, weil `sag` einen
+// Zeiger bekommt und kein Literal.
+static mut hd0: [u8; 49] = "== 1. die Ratenrechnung (Oktette je Sekunde) ==\n\0"
+static mut hd1: [u8; 33] = "== 2. die Einheiten der Rate ==\n\0"
+static mut hd2: [u8; 46] = "== 3. die Einheiten einer Menge (ohne /s) ==\n\0"
+static mut hd3: [u8; 48] = "== 4. die Verbindungsrate -- 0 ist ein WORT ==\n\0"
+static mut hd4: [u8; 31] = "== 5. das gleitende Mittel ==\n\0"
+static mut hd5: [u8; 40] = "== 6. die Programmtafel, absteigend ==\n\0"
+
+fn main() -> i32 {
+    let b: u64 = (&buf[0 as usize]) as u64
+
+    // ---------------------------------------------- 1. DIE RATENRECHNUNG
+    sag((&hd0[0 as usize]) as u64)
+    var t1: [u8; 13] = "1 MiB in 1 s\0"
+    zahl((&t1[0 as usize]) as u64, rate_aus(0, 1048576, 100), 1048576)
+    var t2: [u8; 13] = "1 MiB in 2 s\0"
+    zahl((&t2[0 as usize]) as u64, rate_aus(0, 1048576, 200), 524288)
+    var t3: [u8; 15] = "1 MiB in 0,5 s\0"
+    zahl((&t3[0 as usize]) as u64, rate_aus(0, 1048576, 50), 2097152)
+    var t4: [u8; 19] = "Ruhe: kein Zuwachs\0"
+    zahl((&t4[0 as usize]) as u64, rate_aus(5000, 5000, 100), 0)
+    // DIE ZWEI FAELLE, DIE OHNE DIESE PRUEFUNG EINE RIESENZAHL WAEREN.
+    var t5: [u8; 30] = "dt=0 (zweimal im selben Tick)\0"
+    zahl((&t5[0 as usize]) as u64, rate_aus(0, 1048576, 0), 0)
+    var t6: [u8; 26] = "Zaehler zurueckgesprungen\0"
+    zahl((&t6[0 as usize]) as u64, rate_aus(9000, 100, 100), 0)
+
+    // ------------------------------------------ 2. DIE EINHEITENSTAFFEL
+    sag((&hd1[0 as usize]) as u64)
+    var e1: [u8; 2] = "0\0"
+    var s1: [u8; 6] = "0 B/s\0"
+    let _r1: u64 = rate_an(b, 0, 0)
+    sagt((&e1[0 as usize]) as u64, b, (&s1[0 as usize]) as u64)
+    var e2: [u8; 4] = "512\0"
+    var s2: [u8; 8] = "512 B/s\0"
+    let _r2: u64 = rate_an(b, 0, 512)
+    sagt((&e2[0 as usize]) as u64, b, (&s2[0 as usize]) as u64)
+    // DIE GRENZE: 1023 ist noch B/s, 1024 ist schon KiB/s.
+    var e3: [u8; 5] = "1023\0"
+    var s3: [u8; 9] = "1023 B/s\0"
+    let _r3: u64 = rate_an(b, 0, 1023)
+    sagt((&e3[0 as usize]) as u64, b, (&s3[0 as usize]) as u64)
+    var e4: [u8; 5] = "1024\0"
+    var s4: [u8; 10] = "1,0 KiB/s\0"
+    let _r4: u64 = rate_an(b, 0, 1024)
+    sagt((&e4[0 as usize]) as u64, b, (&s4[0 as usize]) as u64)
+    var e5: [u8; 6] = "9 KiB\0"
+    var s5: [u8; 10] = "9,0 KiB/s\0"
+    let _r5: u64 = rate_an(b, 0, 9216)
+    sagt((&e5[0 as usize]) as u64, b, (&s5[0 as usize]) as u64)
+    var e6: [u8; 9] = "12,4 MiB\0"
+    var s6: [u8; 11] = "12,4 MiB/s\0"
+    let _r6: u64 = rate_an(b, 0, 13002343)
+    sagt((&e6[0 as usize]) as u64, b, (&s6[0 as usize]) as u64)
+    // DER LAENGSTE TEXT, NACH DEM DIE SPALTEN BEMESSEN SIND.
+    var e7: [u8; 23] = "1023,9 MiB (laengster)\0"
+    var s7: [u8; 13] = "1023,9 MiB/s\0"
+    let _r7: u64 = rate_an(b, 0, 1073636967)
+    sagt((&e7[0 as usize]) as u64, b, (&s7[0 as usize]) as u64)
+    var e8: [u8; 6] = "1 GiB\0"
+    var s8: [u8; 10] = "1,0 GiB/s\0"
+    let _r8: u64 = rate_an(b, 0, 1073741824)
+    sagt((&e8[0 as usize]) as u64, b, (&s8[0 as usize]) as u64)
+
+    sag((&hd2[0 as usize]) as u64)
+    var m1: [u8; 2] = "0\0"
+    var q1: [u8; 4] = "0 B\0"
+    let _m1: u64 = menge_an(b, 0, 0)
+    sagt((&m1[0 as usize]) as u64, b, (&q1[0 as usize]) as u64)
+    var m2: [u8; 5] = "1536\0"
+    var q2: [u8; 8] = "1,5 KiB\0"
+    let _m2: u64 = menge_an(b, 0, 1536)
+    sagt((&m2[0 as usize]) as u64, b, (&q2[0 as usize]) as u64)
+    var m3: [u8; 6] = "5 MiB\0"
+    var q3: [u8; 8] = "5,0 MiB\0"
+    let _m3: u64 = menge_an(b, 0, 5242880)
+    sagt((&m3[0 as usize]) as u64, b, (&q3[0 as usize]) as u64)
+
+    // --------------------------------- 4. DIE VERBINDUNGSRATE, UND DIE NULL
+    sag((&hd3[0 as usize]) as u64)
+    var v0: [u8; 24] = "0 (Karte meldet nichts)\0"
+    var w0: [u8; 10] = "unbekannt\0"
+    let _v0: u64 = mbit_an(b, 0, 0)
+    sagt((&v0[0 as usize]) as u64, b, (&w0[0 as usize]) as u64)
+    var v1: [u8; 3] = "10\0"
+    var w1: [u8; 10] = "10 Mbit/s\0"
+    let _v1: u64 = mbit_an(b, 0, 10)
+    sagt((&v1[0 as usize]) as u64, b, (&w1[0 as usize]) as u64)
+    var v2: [u8; 4] = "100\0"
+    var w2: [u8; 11] = "100 Mbit/s\0"
+    let _v2: u64 = mbit_an(b, 0, 100)
+    sagt((&v2[0 as usize]) as u64, b, (&w2[0 as usize]) as u64)
+    var v3: [u8; 5] = "1000\0"
+    var w3: [u8; 9] = "1 Gbit/s\0"
+    let _v3: u64 = mbit_an(b, 0, 1000)
+    sagt((&v3[0 as usize]) as u64, b, (&w3[0 as usize]) as u64)
+    var v4: [u8; 5] = "2500\0"
+    var w4: [u8; 11] = "2,5 Gbit/s\0"
+    let _v4: u64 = mbit_an(b, 0, 2500)
+    sagt((&v4[0 as usize]) as u64, b, (&w4[0 as usize]) as u64)
+
+    // ------------------------------------------------ 5. DIE GLAETTUNG
+    sag((&hd4[0 as usize]) as u64)
+    glatt_leeren()
+    var g0: [u8; 10] = "leer -> 0\0"
+    zahl((&g0[0 as usize]) as u64, glatt_rx(), 0)
+    // EIN EINZIGER WERT DARF NICHT GEVIERTELT WERDEN. Das ist der Fehler,
+    // den ein festes /NGLATT machen wuerde und den man nicht sieht,
+    // weil die Zahl plausibel bleibt.
+    glatt_ein(0, 1000)
+    var g1: [u8; 33] = "ein Wert 1000 -> 1000, nicht 250\0"
+    zahl((&g1[0 as usize]) as u64, glatt_rx(), 1000)
+    glatt_ein(0, 2000)
+    var g2: [u8; 18] = "1000,2000 -> 1500\0"
+    zahl((&g2[0 as usize]) as u64, glatt_rx(), 1500)
+    glatt_ein(0, 3000)
+    glatt_ein(0, 4000)
+    var g3: [u8; 19] = "1000..4000 -> 2500\0"
+    zahl((&g3[0 as usize]) as u64, glatt_rx(), 2500)
+    // DER RINGPUFFER: der fuenfte Wert verdraengt den ersten.
+    glatt_ein(0, 5000)
+    var g4: [u8; 26] = "2000..5000 -> 3500 (Ring)\0"
+    zahl((&g4[0 as usize]) as u64, glatt_rx(), 3500)
+    // NACH RUHE MUSS ES WIEDER AUF NULL FALLEN -- vier Nullen reichen.
+    glatt_ein(0, 0)
+    glatt_ein(0, 0)
+    glatt_ein(0, 0)
+    glatt_ein(0, 0)
+    var g5: [u8; 19] = "nach Ruhe wieder 0\0"
+    zahl((&g5[0 as usize]) as u64, glatt_rx(), 0)
+
+    // ------------------------------------------------ 6. DIE SORTIERUNG
+    sag((&hd5[0 as usize]) as u64)
+    np_idx[(0) as usize] = 7
+    np_sum[(0) as usize] = 100
+    np_idx[(1) as usize] = 3
+    np_sum[(1) as usize] = 90000
+    np_idx[(2) as usize] = 5
+    np_sum[(2) as usize] = 5000
+    np_idx[(3) as usize] = 9
+    np_sum[(3) as usize] = 90001
+    sortiere(4)
+    var o1: [u8; 17] = "groesster zuerst\0"
+    zahl((&o1[0 as usize]) as u64, np_sum[(0) as usize], 90001)
+    var o2: [u8; 27] = "und sein Index wandert mit\0"
+    zahl((&o2[0 as usize]) as u64, np_idx[(0) as usize], 9)
+    var o3: [u8; 8] = "zweiter\0"
+    zahl((&o3[0 as usize]) as u64, np_sum[(1) as usize], 90000)
+    var o4: [u8; 8] = "dritter\0"
+    zahl((&o4[0 as usize]) as u64, np_sum[(2) as usize], 5000)
+    var o5: [u8; 8] = "letzter\0"
+    zahl((&o5[0 as usize]) as u64, np_sum[(3) as usize], 100)
+
+    // DIE SCHLUSSZEILE, in der Form, die `run.sh` liest.
+    let o: u64 = (&obuf[0 as usize]) as u64
+    var kk: [u8; 15] = "NETZUI-LOGIK: \0"
+    var kp: [u8; 10] = " passed, \0"
+    var kf: [u8; 9] = " failed\n\0"
+    var a2: u64 = text_an(o, 0, (&kk[0 as usize]) as u64)
+    a2 = num_at(o, a2, n_ok)
+    a2 = text_an(o, a2, (&kp[0 as usize]) as u64)
+    a2 = num_at(o, a2, n_bad)
+    let _z: u64 = text_an(o, a2, (&kf[0 as usize]) as u64)
+    sag(o)
+    if n_bad != 0 {
+        return 1
+    }
+    return 0
+}

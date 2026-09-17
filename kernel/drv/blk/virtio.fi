@@ -103,7 +103,7 @@ export {
     // ROUND HWNET: `netdev.fi` dispatches on all of them, not only on
     // the ones round NETMON's second card happened to need.
     irqs_on, features_on, queue_size_on, msix_on, notified_on,
-    shut_down_on
+    shut_down_on, link_speed_on
 }
 
 // ------------------------------------------ the K8 part of the scalars
@@ -139,6 +139,10 @@ const S_RXB: u64 = 0x2C0
 const S_TXB: u64 = 0x2C8
 const S_NOTIFIED: u64 = 0x2D0 // how often the doorbell was rung
 const S_LINK: u64 = 0x2D8
+// RUNDE O-NETZUI: die ausgehandelte Rate in Megabit je Sekunde, 0 =
+// unbekannt. Bei virtio ist "unbekannt" der REGELFALL und nicht der
+// Ausnahmefall -- siehe `read_link`.
+const S_SPEED: u64 = 0x2E0
 
 // Where the second card's copy of all of the above begins. `sc()` adds
 // it; nothing else in this file knows the number.
@@ -218,6 +222,18 @@ const ST_FAILED: u64 = 128
 const F_NET_MAC: u64 = 5 // the device carries an address
 const F_NET_STATUS: u64 = 16 // and a link status
 const F_VERSION_1: u64 = 0 // in the HIGH window: bit 32 of the whole
+// RUNDE O-NETZUI: VIRTIO_NET_F_SPEED_DUPLEX, Bit 63 der Merkmale --
+// also Bit 31 des HOHEN Fensters. Bietet das Geraet es an, stehen in
+// seiner Konfiguration vier Oktette Rate in Megabit je Sekunde und ein
+// Oktett Duplex hinter dem Statuswort.
+//
+// ES WIRD ANGEFORDERT UND NICHT VORAUSGESETZT. QEMUs virtio-net bietet
+// das Merkmal nur an, wenn es mit `speed=`/`duplex=` gestartet wurde;
+// ohne diese Angaben gibt es bei virtio schlicht keine ausgehandelte
+// Rate, weil es keinen Draht gibt, auf dem etwas ausgehandelt werden
+// koennte. Dann bleibt die Antwort 0 = unbekannt, und die Oberflaeche
+// schreibt das Wort hin statt einer erfundenen Zahl.
+const F_NET_SPEED_DUPLEX: u64 = 31 // im HOHEN Fenster == Bit 63
 
 const NO_VECTOR: u64 = 0xFFFF
 
@@ -230,6 +246,12 @@ const D_WRITE: u64 = 2 // the DEVICE writes into this buffer
 const N_MAC: u64 = 0
 const N_STATUS: u64 = 6
 const NS_LINK_UP: u64 = 1
+// RUNDE O-NETZUI: hinter Status und Warteschlangenzahl (je 16 Bit)
+// folgen bei SPEED_DUPLEX vier Oktette Rate. 0xFFFFFFFF heisst laut
+// Spezifikation ausdruecklich "unbekannt" -- genau das Wort, das die
+// Oberflaeche dann anzeigt.
+const N_SPEED: u64 = 10
+const SPEED_UNKNOWN: u64 = 4294967295
 
 // The vector the card reports on. 44 belongs to the disk since round K2,
 // 45 was the next free stub in the table of `isr.s` -- no assembly had to
@@ -334,6 +356,14 @@ fn notified_on(state: u64, c: u64) -> u64 {
 
 fn link_up_on(state: u64, c: u64) -> bool {
     return kstate.get(state, sc(c, S_LINK)) != 0
+}
+
+// RUNDE O-NETZUI: die ausgehandelte Rate, oder 0 fuer unbekannt.
+fn link_speed_on(state: u64, c: u64) -> u64 {
+    if kstate.get(state, sc(c, S_LINK)) == 0 {
+        return 0
+    }
+    return kstate.get(state, sc(c, S_SPEED))
 }
 
 // The six octets of the Ethernet address, one at a time. They travel in
@@ -679,7 +709,15 @@ fn negotiate(state: u64, c: u64) -> bool {
     if (dev_lo & (1 << F_NET_STATUS)) != 0 {
         lo = lo | (1 << F_NET_STATUS)
     }
-    let hi: u64 = 1 << F_VERSION_1
+    // RUNDE O-NETZUI: die ausgehandelte Rate mit anfordern, WENN das
+    // Geraet sie anbietet. Fehlt das Merkmal, wird nichts erzwungen --
+    // ein Treiber, der ein nicht angebotenes Merkmal bestaetigt, wird
+    // vom Geraet mit FEATURES_OK = 0 abgewiesen und faehrt gar nicht
+    // hoch. Die Anzeige sagt dann "unbekannt" statt einer Zahl.
+    var hi: u64 = 1 << F_VERSION_1
+    if (dev_hi & (1 << F_NET_SPEED_DUPLEX)) != 0 {
+        hi = hi | (1 << F_NET_SPEED_DUPLEX)
+    }
 
     wr32(b, C_GFSELECT, 0)
     wr32(b, C_GFEATURE, lo)
@@ -754,6 +792,7 @@ fn read_link(state: u64, c: u64) {
     let cfg: u64 = kstate.get(state, sc(c, S_DEVCFG))
     if cfg == 0 || (kstate.get(state, sc(c, S_FEAT)) & (1 << F_NET_STATUS)) == 0 {
         kstate.set(state, sc(c, S_LINK), 1) // no status bit: assume a wire
+        read_speed(state, c)
         return
     }
     var v: u64 = 0
@@ -761,6 +800,30 @@ fn read_link(state: u64, c: u64) {
         v = 1
     }
     kstate.set(state, sc(c, S_LINK), v)
+    read_speed(state, c)
+}
+
+// RUNDE O-NETZUI: die ausgehandelte Rate, wenn das Geraet sie meldet.
+//
+// BEI VIRTIO IST "UNBEKANNT" DIE REGEL. Ein virtio-net haengt an einem
+// Programm und nicht an einem Draht; es gibt dort nichts auszuhandeln.
+// Nur wenn der Betreiber beim Start ausdruecklich `speed=` angegeben
+// hat, bietet QEMU das Merkmal an und traegt eine Zahl ein. Diese
+// Funktion gibt genau dann diese Zahl zurueck und sonst 0 -- sie raet
+// nicht, und sie rechnet auch nichts aus dem Durchsatz zurueck.
+fn read_speed(state: u64, c: u64) {
+    let cfg: u64 = kstate.get(state, sc(c, S_DEVCFG))
+    if cfg == 0
+        || (kstate.get(state, sc(c, S_FEATHI)) & (1 << F_NET_SPEED_DUPLEX)) == 0 {
+        kstate.set(state, sc(c, S_SPEED), 0)
+        return
+    }
+    let v: u64 = rd32(cfg, N_SPEED)
+    if v == SPEED_UNKNOWN {
+        kstate.set(state, sc(c, S_SPEED), 0)
+        return
+    }
+    kstate.set(state, sc(c, S_SPEED), v)
 }
 
 // ------------------------------------------------------- the receive side

@@ -67,6 +67,10 @@ profile app
 
 import ulib
 import libc.io
+// RUNDE O-NETZUI: der Ping-Socket fuer die Antwortzeit zum Gateway.
+// Derselbe Weg, den `/bin/ping` geht -- und dieselbe Schicht wie
+// `libc.io` daneben, also kein Griff nach oben.
+import libc.net
 import wlibc
 import msg
 import wlib
@@ -86,6 +90,13 @@ const NG_MASK: u64 = 2
 const NG_GW: u64 = 3
 const NG_MAC0: u64 = 4
 const NG_MAC1: u64 = 5
+// RUNDE O-NETZUI: der Live-Zustand. Die Nummern sind die aus
+// `kernel/sys/sys.fi`, wo sie auch erklaert werden.
+const NG_LINK: u64 = 13 // 1 = Traeger steht
+const NG_SPEED: u64 = 14 // ausgehandelte Rate in Mbit/s, 0 = unbekannt
+const NG_CARDTX: u64 = 15 // Oktette hinaus, absolut
+const NG_CARDRX: u64 = 16 // Oktette herein, absolut
+const NG_STATE: u64 = 8
 
 // ==================================================== RUNDE DISPLAY
 //
@@ -295,6 +306,140 @@ static mut l_stat: [u8; 96] = [0 as u8; 96]
 static mut e_ip: [u8; 24] = [0 as u8; 24]
 static mut e_maske: [u8; 24] = [0 as u8; 24]
 static mut e_gw: [u8; 24] = [0 as u8; 24]
+// ================================================== RUNDE O-NETZUI
+// DER LIVE-ZUSTAND DER VERBINDUNG, wie Windows und GNOME ihn zeigen.
+//
+// Bis hierher zeigte diese Seite die ANSCHRIFT dieser Maschine --
+// Adresse, Maske, Gateway, Hardwareadresse -- und kein einziges Zeichen
+// darueber, wie es der Verbindung GERADE geht. Justins Vorgabe zu
+// dieser Runde sagt genau das: "solche sachen wie in windows oder linux
+// wie aktuelle geschwindigkeit zum router und so soll ich in den
+// settings sehen".
+//
+// DREI ZAHLEN, DIE MAN NICHT VERWECHSELN DARF, und die Seite haelt sie
+// deshalb auseinander und beschriftet sie verschieden:
+//
+//   DURCHSATZ         wieviel gerade FLIESST (KiB/s). Gemessen, schwankt.
+//   VERBINDUNGSRATE   wie schnell der ANSCHLUSS ausgehandelt ist
+//                     (10/100/1000 Mbit/s). Fest, kommt aus der Karte,
+//                     und ist UNBEKANNT, wenn die Karte sie nicht meldet.
+//   ANTWORTZEIT       wie lange das Gateway braucht (ms). Gemessen.
+//
+// Windows wirft die ersten beiden in einem Fenster zusammen und nennt
+// beide "Geschwindigkeit"; das ist die haeufigste Verwechslung im
+// ganzen Netzwerkstatus, und sie kostet hier zwei Woerter mehr.
+//
+// DIE PUFFER SIND STATISCH, wie jeder andere Text dieser Datei: `wlib`
+// BEHAELT den Zeiger auf den Text eines Bedienelements und kopiert ihn
+// nicht -- ein Text aus dem Rahmen einer Funktion, die zurueckkehrt,
+// waere ein Zeiger auf nichts, und firnc faengt genau das ab.
+static mut l_nzust: [u8; 96] = [0 as u8; 96] // "Verbunden" / "Getrennt"
+static mut l_nrate: [u8; 96] = [0 as u8; 96] // ausgehandelte Verbindungsrate
+static mut l_nrunter: [u8; 64] = [0 as u8; 64] // Empfang, jetzt
+static mut l_nrauf: [u8; 64] = [0 as u8; 64] // Senden, jetzt
+static mut l_nsumme: [u8; 96] = [0 as u8; 96] // seit dem Start insgesamt
+static mut l_nping: [u8; 96] = [0 as u8; 96] // Antwortzeit zum Gateway
+static mut b_nprog: [u8; 1024] = [0 as u8; 1024] // Verbrauch je Programm
+static mut b_nconn: [u8; 1536] = [0 as u8; 1536] // aktive Verbindungen
+
+// DIE SPALTENBREITEN DER ZWEI TABELLEN. Auch sie sind statisch, und
+// zwar aus demselben Grund: `wlib.table` behaelt den Zeiger.
+//
+// WARUM DIE ZAHLENSPALTEN SO BREIT SIND, und das ist kein
+// Schoenheitsmass: "12,4 MiB/s" ist breiter als "9 KiB/s", und eine
+// Spalte, die nur fuer den Ruhezustand reicht, laesst die Anzeige beim
+// ersten Download springen oder schneidet sie ab. Gerechnet wird mit
+// dem LAENGSTEN Text, den die Formatierung unten erzeugen kann
+// ("1023,9 MiB/s", zwoelf Zeichen), und nicht mit dem, der gerade
+// dasteht.
+// GERECHNET, NICHT GESCHAETZT, und die Summe MUSS 428 sein.
+//
+// Die Tafeln stehen in der rechten Spalte: 760 - 300 = 460 Bildpunkte,
+// minus zweimal 16 Einzug sind 428. Eine Tafel, deren Spalten zusammen
+// breiter sind, schneidet ihre LETZTE Spalte ab -- und das ist hier die
+// interessanteste (der Verbrauch bzw. das Programm).
+//
+// Beim ersten Anlauf standen hier 170+95+95+95 = 455 und
+// 55+125+145+95+105 = 525. Beides zu breit, beides im Quelltext nicht
+// zu sehen; `tools/netzui/run.sh` Abschnitt 7 rechnet es jetzt nach.
+//
+// Die Breiten tragen den laengsten Inhalt, den die Formatierung
+// erzeugen kann (7,66 Bildpunkte je Zeichen, gemessen an `wlib: text
+// ... tw=`):
+//   "1023,9 GiB"            77 Punkte -> 94 reichen
+//   "192.168.100.100:65535" 161 Punkte -> 162 reichen
+//   ein Programmname (23)   176 Punkte -> die Namensspalte ist 146,
+//                           laengere Namen kuerzt die Tafel selbst ab
+static mut c_nprog: [u8; 13] = "146\t94\t94\t94\0"
+// Die Verbindungstafel hat VIER Spalten und nicht fuenf: fuer Art,
+// beide Enden UND Programm UND Verbrauch reichen 428 Punkte nicht, ohne
+// dass die Adressen abgeschnitten werden. Der Verbrauch je Verbindung
+// steht in `/bin/netstat -p`; was diese Seite beantwortet, ist "wer
+// redet gerade mit wem".
+static mut c_nconn: [u8; 14] = "34\t162\t162\t70\0"
+
+// DIE ABTASTUNG DES DURCHSATZES.
+//
+// Die Karte zaehlt OKTETTE, absolut und monoton steigend (NG_CARDTX,
+// NG_CARDRX). Eine RATE entsteht daraus erst, wenn man zweimal liest
+// und die Differenz durch die verstrichene Zeit teilt -- genau so, wie
+// `/proc/net/dev` unter Linux gelesen wird. Diese vier Zahlen sind das
+// Gedaechtnis dafuer.
+static mut n_vor_tx: u64 = 0
+static mut n_vor_rx: u64 = 0
+static mut n_vor_t: u64 = 0 // in Ticks
+static mut n_hat_vor: u64 = 0 // 0 = noch nie gemessen
+
+// DIE GLAETTUNG. Vier Abtastungen im gleitenden Mittel.
+//
+// WARUM UEBERHAUPT GEGLAETTET WIRD: die Rohrate springt zwischen zwei
+// Sekunden um ein Vielfaches, weil TCP in Schueben faehrt. Eine Anzeige,
+// die diesen Schueben folgt, ist nicht praeziser -- sie ist nur
+// unlesbar, und man kann ihr nicht ansehen, ob gerade 2 oder 20 MiB/s
+// fliessen. Windows glaettet ueber rund zwei Sekunden, GNOME ueber
+// etwa vier.
+//
+// WARUM NUR VIER UND NICHT SECHZEHN: ein langes Fenster laesst die
+// Anzeige nach dem Ende eines Downloads noch sekundenlang einen
+// Durchsatz zeigen, den es nicht mehr gibt. Vier Abtastungen zu einer
+// Sekunde sind der Ausgleich -- ruhig genug zum Lesen, und nach vier
+// Sekunden wieder ehrlich bei null.
+const NGLATT: u64 = 4
+static mut n_htx: [u64; 4] = [0 as u64; 4]
+static mut n_hrx: [u64; 4] = [0 as u64; 4]
+static mut n_hn: u64 = 0 // wie viele Plaetze schon gefuellt sind
+static mut n_hi: u64 = 0 // wo der naechste Wert hingeht
+
+// DIE ANTWORTZEIT ZUM GATEWAY, und wie sie wirklich gemessen wird:
+// siehe `ping_gateway` weiter unten. 0xFFFFFFFF heisst "noch nicht
+// gemessen", was etwas anderes ist als "keine Antwort" (0xFFFFFFFE).
+static mut n_ping_ms: u64 = 4294967295
+const PING_NIE: u64 = 4294967295
+const PING_WEG: u64 = 4294967294
+
+// Die Schluessel der neuen Texte. Wie ueberall in dieser Datei steht
+// hier NUR der Schluessel; die Saetze liegen in locale/de/messages und
+// locale/en/messages (docs/I18N.md).
+static mut k_n_h1: [u8; 22] = "settings.net.heading\0\0"
+static mut k_n_h2: [u8; 22] = "settings.net.heading2\0"
+static mut k_n_h3: [u8; 22] = "settings.net.heading3\0"
+static mut k_n_h4: [u8; 22] = "settings.net.heading4\0"
+static mut k_n_auf: [u8; 17] = "settings.net.up\0\0"
+static mut k_n_ab: [u8; 19] = "settings.net.down\0\0"
+static mut k_n_summe: [u8; 20] = "settings.net.total\0\0"
+static mut k_n_rate: [u8; 24] = "settings.net.linkspeed\0\0"
+static mut k_n_unbek: [u8; 22] = "settings.net.unknown\0\0"
+static mut k_n_verb: [u8; 24] = "settings.net.connected\0\0"
+static mut k_n_getr: [u8; 27] = "settings.net.disconnected\0\0"
+static mut k_n_noip: [u8; 21] = "settings.net.noaddr\0\0"
+static mut k_n_noweg: [u8; 22] = "settings.net.noroute\0\0"
+static mut k_n_ping: [u8; 18] = "settings.net.rtt\0\0"
+static mut k_n_pingn: [u8; 22] = "settings.net.rttnone\0\0"
+static mut k_n_pingw: [u8; 22] = "settings.net.rttwait\0\0"
+static mut k_n_kprog: [u8; 24] = "settings.net.cols.prog\0\0"
+static mut k_n_kconn: [u8; 24] = "settings.net.cols.conn\0\0"
+static mut k_n_leer: [u8; 20] = "settings.net.empty\0\0"
+static mut k_n_hin: [u8; 19] = "settings.net.note\0\0"
 // ---------------------------------------------------- RUNDE KONTO
 //
 // Die Seite "Konten" haelt KEIN Geheimnis in einer Datei und kein Token
@@ -1078,6 +1223,583 @@ fn ip_an(p: u64, at: u64, v: u64) -> u64 {
     a = num_at(p, a, (v >> 8) & 255)
     a = text_an(p, a, (&pt[0 as usize]) as u64)
     return num_at(p, a, v & 255)
+}
+
+// ================================================== RUNDE O-NETZUI
+// DIE RECHNUNG HINTER DER ANZEIGE.
+//
+// Alles, was diese Seite an Zahlen zeigt, entsteht in den Funktionen
+// unter diesem Kopf. Sie stehen absichtlich zusammen und nicht verteilt:
+// `tools/netzui/run.sh` prueft genau sie, und ein Pruefstand, der ueber
+// eine Datei verstreute Rechnungen einsammeln muss, prueft am Ende die
+// Rechnung nicht mehr.
+
+// EINE ZAHL MIT EINER NACHKOMMASTELLE, ohne Gleitkomma.
+//
+// Firn hat `f64`, und dieses Programm benutzt es nicht: `v / t` mit
+// ganzen Zahlen ist exakt und `(v * 10 / t) % 10` ist die erste
+// Nachkommastelle davon. Eine Gleitkommadivision fuer eine Anzeige mit
+// einer Stelle waere die teurere Art, dasselbe Ergebnis zu bekommen.
+fn zehntel_an(p: u64, at: u64, ganz: u64, zehntel: u64) -> u64 {
+    var komma: [u8; 2] = ",\0"
+    var a: u64 = num_at(p, at, ganz)
+    a = text_an(p, a, (&komma[0 as usize]) as u64)
+    return num_at(p, a, zehntel)
+}
+
+// OKTETTE JE SEKUNDE, in der Einheit, die ein Mensch liest.
+//
+// DIE EINHEIT WECHSELT MIT DER ZAHL, und die Grenze liegt bei 1024 und
+// nicht bei 1000: was hier gezaehlt wird, sind Oktette, und Oktette
+// zaehlt dieses System binaer -- KiB, MiB, GiB, wie `ls` und `df`
+// desselben Baums. Das ist auch die Einheit, in der Linux' `ip -s link`
+// und GNOMEs Netzwerkanzeige rechnen.
+//
+// UNTER 1024 GIBT ES KEINE NACHKOMMASTELLE: "512 B/s" ist genauer als
+// "512,0 B/s" behauptet, und eine Stelle hinter dem Komma bei einer
+// Zahl, die ohnehin auf das Oktett genau ist, ist Ziffernrauschen.
+//
+// DER LAENGSTE TEXT, DEN DIESE FUNKTION ERZEUGEN KANN, ist
+// "1023,9 GiB/s" -- zwoelf Zeichen. Danach sind die Spalten oben
+// bemessen. Das ist kein Schoenheitsmass: eine Spalte, die nur fuer
+// "9 KiB/s" reicht, schneidet beim ersten Download ab.
+fn rate_an(p: u64, at: u64, v: u64) -> u64 {
+    var e_b: [u8; 5] = " B/s\0"
+    var e_k: [u8; 7] = " KiB/s\0"
+    var e_m: [u8; 7] = " MiB/s\0"
+    var e_g: [u8; 7] = " GiB/s\0"
+    if v < 1024 {
+        let a: u64 = num_at(p, at, v)
+        return text_an(p, a, (&e_b[0 as usize]) as u64)
+    }
+    if v < 1024 * 1024 {
+        let a: u64 = zehntel_an(p, at, v / 1024, (v * 10 / 1024) % 10)
+        return text_an(p, a, (&e_k[0 as usize]) as u64)
+    }
+    if v < 1024 * 1024 * 1024 {
+        // DIE ZEHNTELSTELLE IN EINER DIVISION UND NICHT IN ZWEIEN.
+        //
+        // Hier stand `(v / 1024 * 10 / 1024) % 10`, und das ist in
+        // rund vier von tausend Faellen um eins zu klein: die erste
+        // Division schneidet ab, und was sie abschneidet, fehlt der
+        // zweiten. Gemessen an 200 000 Zufallswerten: 780 Abweichungen,
+        // alle um genau eine Zehntelstelle nach unten. Aufgefallen ist
+        // es `tools/netzui/run.sh` an 13002343 Oktetten, die als
+        // "12,3 MiB/s" herauskamen und 12,4 sind.
+        //
+        // `v * 10` laeuft nicht ueber: u64 traegt bis 1,8e18, und das
+        // sind Exaoktette je Sekunde.
+        let g: u64 = v / (1024 * 1024)
+        let z: u64 = (v * 10 / (1024 * 1024)) % 10
+        let a: u64 = zehntel_an(p, at, g, z)
+        return text_an(p, a, (&e_m[0 as usize]) as u64)
+    }
+    // Dieselbe Berichtigung wie eine Stufe darueber.
+    let g2: u64 = v / (1024 * 1024 * 1024)
+    let z2: u64 = (v * 10 / (1024 * 1024 * 1024)) % 10
+    let a2: u64 = zehntel_an(p, at, g2, z2)
+    return text_an(p, a2, (&e_g[0 as usize]) as u64)
+}
+
+// DIESELBE EINHEITENSTAFFEL FUER EINE SUMME statt einer Rate -- ohne
+// das "/s". Das ist die Spalte "insgesamt" und die Zeile unter den
+// beiden Durchsatzzahlen.
+fn menge_an(p: u64, at: u64, v: u64) -> u64 {
+    var e_b: [u8; 3] = " B\0"
+    var e_k: [u8; 5] = " KiB\0"
+    var e_m: [u8; 5] = " MiB\0"
+    var e_g: [u8; 5] = " GiB\0"
+    if v < 1024 {
+        let a: u64 = num_at(p, at, v)
+        return text_an(p, a, (&e_b[0 as usize]) as u64)
+    }
+    if v < 1024 * 1024 {
+        let a: u64 = zehntel_an(p, at, v / 1024, (v * 10 / 1024) % 10)
+        return text_an(p, a, (&e_k[0 as usize]) as u64)
+    }
+    if v < 1024 * 1024 * 1024 {
+        let a: u64 = zehntel_an(p, at, v / (1024 * 1024),
+            (v * 10 / (1024 * 1024)) % 10)
+        return text_an(p, a, (&e_m[0 as usize]) as u64)
+    }
+    let a2: u64 = zehntel_an(p, at, v / (1024 * 1024 * 1024),
+        (v * 10 / (1024 * 1024 * 1024)) % 10)
+    return text_an(p, a2, (&e_g[0 as usize]) as u64)
+}
+
+// DIE AUSGEHANDELTE VERBINDUNGSRATE ALS TEXT. 0 heisst UNBEKANNT, und
+// dann steht das WORT da und keine Zahl -- das ist die eine Stelle
+// dieser Runde, an der am meisten zu gewinnen waere, wenn man schummelte,
+// und genau deshalb steht es hier so ausdruecklich.
+//
+// UEBER 1000 MBIT WIRD IN GBIT GESCHRIEBEN, weil "2,5 Gbit/s" die
+// Aufschrift ist, die auf der Karte steht, und "2500 Mbit/s" nicht.
+fn mbit_an(p: u64, at: u64, v: u64) -> u64 {
+    var e_m: [u8; 8] = " Mbit/s\0"
+    var e_g: [u8; 8] = " Gbit/s\0"
+    if v == 0 {
+        return text_an(p, at, msg.get((&k_n_unbek[0 as usize]) as u64))
+    }
+    if v < 1000 {
+        let a: u64 = num_at(p, at, v)
+        return text_an(p, a, (&e_m[0 as usize]) as u64)
+    }
+    if v % 1000 == 0 {
+        let a: u64 = num_at(p, at, v / 1000)
+        return text_an(p, a, (&e_g[0 as usize]) as u64)
+    }
+    let a2: u64 = zehntel_an(p, at, v / 1000, (v / 100) % 10)
+    return text_an(p, a2, (&e_g[0 as usize]) as u64)
+}
+
+// EINE ABTASTUNG IN DAS GLEITENDE MITTEL, und das Mittel zurueck.
+//
+// Der Ringpuffer fuellt sich erst; solange er nicht voll ist, wird
+// durch die Zahl der WIRKLICH vorhandenen Werte geteilt und nicht durch
+// NGLATT. Sonst zeigte die Anzeige in den ersten drei Sekunden nach dem
+// Oeffnen ein Viertel des wahren Durchsatzes -- ein Fehler, den man
+// nicht sieht, weil die Zahl plausibel bleibt.
+fn glatt_ein(tx: u64, rx: u64) {
+    n_htx[(n_hi) as usize] = tx
+    n_hrx[(n_hi) as usize] = rx
+    n_hi = (n_hi + 1) % NGLATT
+    if n_hn < NGLATT {
+        n_hn = n_hn + 1
+    }
+}
+
+fn glatt_tx() -> u64 {
+    if n_hn == 0 {
+        return 0
+    }
+    var sum: u64 = 0
+    var i: u64 = 0
+    while i < n_hn {
+        sum = sum + n_htx[(i) as usize]
+        i = i + 1
+    }
+    return sum / n_hn
+}
+
+fn glatt_rx() -> u64 {
+    if n_hn == 0 {
+        return 0
+    }
+    var sum: u64 = 0
+    var i: u64 = 0
+    while i < n_hn {
+        sum = sum + n_hrx[(i) as usize]
+        i = i + 1
+    }
+    return sum / n_hn
+}
+
+// DIE RATE AUS ZWEI ABSOLUTEN ZAEHLERSTAENDEN.
+//
+// `alt` und `neu` sind Oktette, `dt` sind Ticks zu 10 ms (100 Hz,
+// `ulib.I_TICKS`). Die Rate ist Oktette je SEKUNDE, also
+// (neu - alt) * 100 / dt.
+//
+// DREI FAELLE, DIE NULL ERGEBEN MUESSEN und nicht irgendetwas:
+//   dt == 0    zweimal im selben Tick gefragt -- es ist keine Zeit
+//              vergangen, also ist keine Rate messbar.
+//   neu < alt  der Zaehler ist zurueckgesprungen (Karte neu aufgesetzt).
+//              Eine Differenz auf u64 waere hier eine gigantische Zahl.
+//   kein Vorwert  die erste Messung hat nichts, womit sie vergleichen
+//              koennte.
+fn rate_aus(alt: u64, neu: u64, dt: u64) -> u64 {
+    if dt == 0 {
+        return 0
+    }
+    if neu < alt {
+        return 0
+    }
+    return (neu - alt) * 100 / dt
+}
+
+// DIE MESSUNG SELBST: die Kartenzaehler lesen, die Rate bilden, sie in
+// das gleitende Mittel geben. Einmal je Sekunde aus der Hauptschleife.
+fn durchsatz_mess() {
+    let tx: u64 = ulib.sys(SYS_NETGET, NG_CARDTX, 0, 0)
+    let rx: u64 = ulib.sys(SYS_NETGET, NG_CARDRX, 0, 0)
+    let t: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+    if ulib.bad(tx) || ulib.bad(rx) {
+        // Kein Stapel -- keine Zahlen. Das gleitende Mittel bekommt
+        // NULLEN und nicht den letzten Wert: eine Anzeige, die nach dem
+        // Ziehen des Kabels den Durchsatz von vorher stehen laesst,
+        // behauptet etwas ueber eine Leitung, die es nicht gibt.
+        glatt_ein(0, 0)
+        n_hat_vor = 0
+        return
+    }
+    if n_hat_vor != 0 {
+        let dt: u64 = t - n_vor_t
+        glatt_ein(rate_aus(n_vor_tx, tx, dt), rate_aus(n_vor_rx, rx, dt))
+    }
+    n_vor_tx = tx
+    n_vor_rx = rx
+    n_vor_t = t
+    n_hat_vor = 1
+}
+
+// ------------------------------------------------- die vier Zeilen oben
+
+// DIE ZUSTANDSZEILE. Sie sagt in Worten, was `NG_STATE` in einer Zahl
+// sagt, und sie sagt es in derselben Staffelung -- die vier Stufen
+// stehen in `kernel/net/netview.fi` und werden hier nicht nachgerechnet.
+//
+// WARUM VIER WOERTER UND NICHT ZWEI: "verbunden/getrennt" waere die
+// Aufteilung, die Windows in seinem alten Netzwerkstatus hatte, und sie
+// wirft die zwei haeufigsten Faelle zusammen, in denen ein Mensch
+// nachsieht -- Kabel steckt, aber keine Adresse (DHCP laeuft noch) und
+// Adresse da, aber das Gateway antwortet nicht. Beide sehen in einer
+// zweiwertigen Anzeige wie "verbunden" aus, und in beiden geht nichts.
+fn zustand_zeile() {
+    let d: u64 = (&l_nzust[0 as usize]) as u64
+    let st: u64 = ulib.sys(SYS_NETGET, NG_STATE, 0, 0)
+    var a: u64 = text_an(d, 0, msg.get((&k_n_h1[0 as usize]) as u64))
+    if ulib.bad(st) || st == 0 {
+        let _e: u64 = text_an(d, a, msg.get((&k_n_getr[0 as usize]) as u64))
+        return
+    }
+    if st == 1 {
+        let _e: u64 = text_an(d, a, msg.get((&k_n_noip[0 as usize]) as u64))
+        return
+    }
+    if st == 2 {
+        let _e: u64 = text_an(d, a, msg.get((&k_n_noweg[0 as usize]) as u64))
+        return
+    }
+    let _e: u64 = text_an(d, a, msg.get((&k_n_verb[0 as usize]) as u64))
+}
+
+// DIE VERBINDUNGSRATE. Eine Zeile, und der halbe Aufwand dieser Runde
+// steckt darin, dass sie die Wahrheit sagen kann.
+fn rate_zeile() {
+    let d: u64 = (&l_nrate[0 as usize]) as u64
+    let a: u64 = text_an(d, 0, msg.get((&k_n_rate[0 as usize]) as u64))
+    let v: u64 = ulib.sys(SYS_NETGET, NG_SPEED, 0, 0)
+    if ulib.bad(v) {
+        let _e: u64 = text_an(d, a, msg.get((&k_n_unbek[0 as usize]) as u64))
+        return
+    }
+    let _e: u64 = mbit_an(d, a, v)
+}
+
+// DIE ZWEI DURCHSATZZEILEN und die Summe darunter.
+fn durchsatz_zeilen() {
+    let du: u64 = (&l_nrunter[0 as usize]) as u64
+    var a: u64 = text_an(du, 0, msg.get((&k_n_ab[0 as usize]) as u64))
+    let _e1: u64 = rate_an(du, a, glatt_rx())
+    let uu: u64 = (&l_nrauf[0 as usize]) as u64
+    a = text_an(uu, 0, msg.get((&k_n_auf[0 as usize]) as u64))
+    let _e2: u64 = rate_an(uu, a, glatt_tx())
+    // Die Summe seit dem Start der Maschine, aus denselben Zaehlern.
+    let su: u64 = (&l_nsumme[0 as usize]) as u64
+    var t: u64 = ulib.sys(SYS_NETGET, NG_CARDTX, 0, 0)
+    var r: u64 = ulib.sys(SYS_NETGET, NG_CARDRX, 0, 0)
+    if ulib.bad(t) {
+        t = 0
+    }
+    if ulib.bad(r) {
+        r = 0
+    }
+    var trenn: [u8; 4] = " / \0"
+    a = text_an(su, 0, msg.get((&k_n_summe[0 as usize]) as u64))
+    a = menge_an(su, a, r)
+    a = text_an(su, a, (&trenn[0 as usize]) as u64)
+    let _e3: u64 = menge_an(su, a, t)
+}
+
+// DIE ANTWORTZEIT ZUM GATEWAY als Text.
+fn ping_zeile() {
+    let d: u64 = (&l_nping[0 as usize]) as u64
+    var e_ms: [u8; 4] = " ms\0"
+    let a: u64 = text_an(d, 0, msg.get((&k_n_ping[0 as usize]) as u64))
+    if n_ping_ms == PING_NIE {
+        let _e: u64 = text_an(d, a, msg.get((&k_n_pingw[0 as usize]) as u64))
+        return
+    }
+    if n_ping_ms == PING_WEG {
+        let _e: u64 = text_an(d, a, msg.get((&k_n_pingn[0 as usize]) as u64))
+        return
+    }
+    let b: u64 = num_at(d, a, n_ping_ms)
+    let _e: u64 = text_an(d, b, (&e_ms[0 as usize]) as u64)
+}
+
+// ------------------------------------------- die Antwortzeit zum Router
+//
+// GEMESSEN UND NICHT GESCHAETZT, und zwar mit demselben Weg, den
+// `/bin/ping` geht: ein ICMP-Echo an das Gateway ueber einen Ping-Socket
+// (`libc.net.icmp_socket`, der Socket, den Linux seit 3.0 auch ohne
+// Vorrechte hergibt), und die Zeit zwischen dem Absenden und der
+// Antwort, aus `I_TICKS`.
+//
+// DIE AUFLOESUNG IST 10 MS UND DAS STEHT SO IN DER ANZEIGE. Die Uhr
+// dieses Systems in Ring 3 tickt mit 100 Hz; eine Antwort in unter
+// einer Zehntelsekunde kommt also als "0 ms" oder "10 ms" heraus und
+// nicht als "0,4 ms". Das ist grob, und es ist die Wahrheit ueber das,
+// was hier gemessen werden kann -- eine Zahl mit einer Nachkommastelle
+// waere an dieser Stelle eine erfundene Genauigkeit. Dieselbe Grenze
+// steht im Kopf von `kernel/user/ping.fi`.
+//
+// WARUM NICHT BEI JEDEM DURCHLAUF: ein Echo je Sekunde waere Verkehr,
+// den diese Seite selbst erzeugt, und sie wuerde ihn in ihrer eigenen
+// Durchsatzanzeige sehen. Gemessen wird alle fuenf Sekunden, und das
+// sind 98 Oktette in fuenf Sekunden -- unter einem Zehntel dessen, was
+// die Anzeige ueberhaupt aufloest.
+//
+// WARUM NICHT BLOCKIEREND GEWARTET WIRD: dieses Fenster hat eine
+// Ereignisschleife, und eine Sekunde Warten auf ein Paket waere eine
+// Sekunde, in der sich das Fenster nicht bewegen laesst. Gewartet wird
+// hoechstens 40 Ticks (400 ms) in Schritten von 10 ms, und wer bis
+// dahin nicht geantwortet hat, gilt als nicht erreichbar.
+const PING_WARTE: u64 = 40 // Ticks, also 400 ms
+const PING_ID: u64 = 4242
+
+fn ping_gateway() {
+    let gw: u64 = ulib.sys(SYS_NETGET, NG_GW, 0, 0)
+    if ulib.bad(gw) || gw == 0 {
+        n_ping_ms = PING_WEG
+        return
+    }
+    let fd: u64 = net.icmp_socket()
+    if net.failed(fd) {
+        n_ping_ms = PING_WEG
+        return
+    }
+    var m: [u8; 64] = [0 as u8; 64]
+    // Ein Echo-Request: Typ 8, Code 0, Kennung, Folgenummer. Die
+    // Pruefsumme setzt der Stapel, wie bei `/bin/ping` auch.
+    m[(0) as usize] = 8 as u8
+    m[(1) as usize] = 0 as u8
+    m[(4) as usize] = ((PING_ID >> 8) & 255) as u8
+    m[(5) as usize] = (PING_ID & 255) as u8
+    m[(6) as usize] = 0 as u8
+    m[(7) as usize] = 1 as u8
+    let t0: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+    let sent: u64 = net.sendto_ip(fd, (&m[0 as usize]) as u64, 16, gw, 0)
+    if net.failed(sent) {
+        let _c1: u64 = net.close(fd)
+        n_ping_ms = PING_WEG
+        return
+    }
+    var von: u64 = 0
+    var warte: u64 = 0
+    while warte < PING_WARTE {
+        let got: u64 = net.recvfrom_ip(fd, (&m[0 as usize]) as u64, 64,
+            (&von) as *mut u64)
+        if !net.failed(got) && got > 0 {
+            let t1: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+            let _c2: u64 = net.close(fd)
+            // Ticks zu 10 ms -> Millisekunden.
+            n_ping_ms = (t1 - t0) * 10
+            return
+        }
+        ulib.sleep_ms(10)
+        warte = warte + 1
+    }
+    let _c3: u64 = net.close(fd)
+    n_ping_ms = PING_WEG
+}
+
+// ------------------------------------------------- Verbrauch je Programm
+//
+// DAS IST WINDOWS' "DATENNUTZUNG", und die Zahlen dafuer zaehlt
+// `kernel/net/netmon.fi` seit Runde NETMON ohnehin schon. Diese Seite
+// rechnet sie nicht nach -- sie fragt sie ab (`SYS_NETMON`, Art
+// `NK_PROG`) und sortiert sie.
+const NPROGZ: u64 = 24
+const NSOCKZ: u64 = 16
+static mut np_idx: [u64; 24] = [0 as u64; 24]
+static mut np_sum: [u64; 24] = [0 as u64; 24]
+
+fn nmq(kind: u64, index: u64, field: u64) -> u64 {
+    let v: u64 = ulib.sys(ulib.SYS_NETMON, kind, index, field)
+    if ulib.bad(v) {
+        return 0
+    }
+    return v
+}
+
+// Der Name eines Programmplatzes, Oktett fuer Oktett.
+fn np_name(i: u64, out: u64) {
+    var k: u64 = 0
+    var fertig: bool = false
+    while k < 23 && !fertig {
+        let c: u64 = nmq(ulib.NK_PNAME, i, k)
+        __mmio_write8((out + k) as *mut u8, (c & 255) as u8)
+        if c == 0 {
+            fertig = true
+        }
+        k = k + 1
+    }
+    __mmio_write8((out + 23) as *mut u8, 0 as u8)
+}
+
+// ABSTEIGEND SORTIERT, und zwar mit einem Auswahlsortieren ueber
+// hoechstens 24 Eintraege. Das sind im schlimmsten Fall 276 Vergleiche
+// einmal je Sekunde; ein schnelleres Verfahren waere hier mehr Quelltext
+// fuer eine Ersparnis, die man nicht messen kann.
+//
+// SORTIERT WIRD NACH DER SUMME BEIDER RICHTUNGEN, weil die Frage, die
+// diese Tafel beantwortet, "wer verbraucht am meisten" lautet und nicht
+// "wer laedt am meisten herunter".
+fn prog_sortiere() -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < NPROGZ {
+        if nmq(ulib.NK_PROG, i, ulib.NP_USED) != 0 {
+            let sum: u64 = nmq(ulib.NK_PROG, i, ulib.NT_TXWIRE)
+                + nmq(ulib.NK_PROG, i, ulib.NT_RXWIRE)
+            if sum != 0 {
+                np_idx[(n) as usize] = i
+                np_sum[(n) as usize] = sum
+                n = n + 1
+            }
+        }
+        i = i + 1
+    }
+    var a: u64 = 0
+    while a < n {
+        var best: u64 = a
+        var b: u64 = a + 1
+        while b < n {
+            if np_sum[(b) as usize] > np_sum[(best) as usize] {
+                best = b
+            }
+            b = b + 1
+        }
+        if best != a {
+            let ti: u64 = np_idx[(a) as usize]
+            let ts: u64 = np_sum[(a) as usize]
+            np_idx[(a) as usize] = np_idx[(best) as usize]
+            np_sum[(a) as usize] = np_sum[(best) as usize]
+            np_idx[(best) as usize] = ti
+            np_sum[(best) as usize] = ts
+        }
+        a = a + 1
+    }
+    return n
+}
+
+fn prog_tafel() {
+    let d: u64 = (&b_nprog[0 as usize]) as u64
+    var nm: [u8; 24] = [0 as u8; 24]
+    var tab: [u8; 2] = "\t\0"
+    var nl2: [u8; 2] = "\n\0"
+    var a: u64 = text_an(d, 0, msg.get((&k_n_kprog[0 as usize]) as u64))
+    a = text_an(d, a, (&nl2[0 as usize]) as u64)
+    let n: u64 = prog_sortiere()
+    if n == 0 {
+        a = text_an(d, a, msg.get((&k_n_leer[0 as usize]) as u64))
+        let _e: u64 = text_an(d, a, (&nl2[0 as usize]) as u64)
+        return
+    }
+    var i: u64 = 0
+    // ACHT ZEILEN, weil die Tafel acht hoch ist. Mehr zu schreiben
+    // kostet Puffer und zeigt nichts -- und der Puffer ist 1024 Oktette
+    // gross, also wird hier gezaehlt statt gehofft.
+    while i < n && i < 8 {
+        let k: u64 = np_idx[(i) as usize]
+        np_name(k, (&nm[0 as usize]) as u64)
+        a = text_an(d, a, (&nm[0 as usize]) as u64)
+        a = text_an(d, a, (&tab[0 as usize]) as u64)
+        a = menge_an(d, a, nmq(ulib.NK_PROG, k, ulib.NT_RXWIRE))
+        a = text_an(d, a, (&tab[0 as usize]) as u64)
+        a = menge_an(d, a, nmq(ulib.NK_PROG, k, ulib.NT_TXWIRE))
+        a = text_an(d, a, (&tab[0 as usize]) as u64)
+        a = menge_an(d, a, np_sum[(i) as usize])
+        a = text_an(d, a, (&nl2[0 as usize]) as u64)
+        i = i + 1
+    }
+}
+
+// ------------------------------------------------- die aktiven Verbindungen
+//
+// Das ist `netstat`, sichtbar gemacht: dieselbe Socket-Tafel, die
+// `kernel/user/netstat.fi` druckt, nur in einem Fenster.
+fn conn_tafel() {
+    let d: u64 = (&b_nconn[0 as usize]) as u64
+    var nm: [u8; 24] = [0 as u8; 24]
+    var tab: [u8; 2] = "\t\0"
+    var nl2: [u8; 2] = "\n\0"
+    var t_tcp: [u8; 4] = "tcp\0"
+    var t_udp: [u8; 4] = "udp\0"
+    var t_icm: [u8; 5] = "icmp\0"
+    var strich: [u8; 2] = "-\0"
+    var dp: [u8; 2] = ":\0"
+    var a: u64 = text_an(d, 0, msg.get((&k_n_kconn[0 as usize]) as u64))
+    a = text_an(d, a, (&nl2[0 as usize]) as u64)
+    var me: u64 = ulib.sys(SYS_NETGET, NG_IP, 0, 0)
+    if ulib.bad(me) {
+        me = 0
+    }
+    var gezeigt: u64 = 0
+    var i: u64 = 0
+    while i < NSOCKZ && gezeigt < 8 {
+        if nmq(ulib.NK_SOCK, i, ulib.NS_USE) != 0 {
+            let art: u64 = nmq(ulib.NK_SOCK, i, ulib.NS_KIND)
+            if art == 1 {
+                a = text_an(d, a, (&t_tcp[0 as usize]) as u64)
+            } else if art == 2 {
+                a = text_an(d, a, (&t_udp[0 as usize]) as u64)
+            } else {
+                a = text_an(d, a, (&t_icm[0 as usize]) as u64)
+            }
+            a = text_an(d, a, (&tab[0 as usize]) as u64)
+            a = ip_an(d, a, me)
+            a = text_an(d, a, (&dp[0 as usize]) as u64)
+            a = num_at(d, a, nmq(ulib.NK_SOCK, i, ulib.NS_LPORT))
+            a = text_an(d, a, (&tab[0 as usize]) as u64)
+            let ra: u64 = nmq(ulib.NK_SOCK, i, ulib.NS_RADDR)
+            if ra == 0 {
+                a = text_an(d, a, (&strich[0 as usize]) as u64)
+            } else {
+                a = ip_an(d, a, ra)
+                a = text_an(d, a, (&dp[0 as usize]) as u64)
+                a = num_at(d, a, nmq(ulib.NK_SOCK, i, ulib.NS_RPORT))
+            }
+            a = text_an(d, a, (&tab[0 as usize]) as u64)
+            // Der Besitzer: `NS_OWNER` ist der Aufgabenplatz PLUS EINS,
+            // damit 0 "niemand" heissen kann.
+            let ow: u64 = nmq(ulib.NK_SOCK, i, ulib.NS_OWNER)
+            if ow == 0 {
+                a = text_an(d, a, (&strich[0 as usize]) as u64)
+            } else {
+                var k: u64 = 0
+                var fertig: bool = false
+                while k < 23 && !fertig {
+                    let c: u64 = nmq(ulib.NK_NAME, ow - 1, k)
+                    nm[(k) as usize] = (c & 255) as u8
+                    if c == 0 {
+                        fertig = true
+                    }
+                    k = k + 1
+                }
+                nm[(23) as usize] = 0 as u8
+                a = text_an(d, a, (&nm[0 as usize]) as u64)
+            }
+            a = text_an(d, a, (&nl2[0 as usize]) as u64)
+            gezeigt = gezeigt + 1
+        }
+        i = i + 1
+    }
+    if gezeigt == 0 {
+        a = text_an(d, a, msg.get((&k_n_leer[0 as usize]) as u64))
+        let _e: u64 = text_an(d, a, (&nl2[0 as usize]) as u64)
+    }
+}
+
+// ALLES, WAS DIE SEITE EINMAL JE SEKUNDE NEU BRAUCHT, an einer Stelle.
+fn netz_live_bauen() {
+    zustand_zeile()
+    rate_zeile()
+    durchsatz_zeilen()
+    ping_zeile()
+    prog_tafel()
+    conn_tafel()
 }
 
 // "10.0.2.15" -> 0x0A00020F. Gibt 0, wenn es keine Adresse ist -- und
@@ -3533,6 +4255,39 @@ fn u_start(args: u64) -> u64 {
     wlib.size(140, 26)
     let b3: u64 = merke(wlib.button(msg.get((&k_b_uber[0 as usize]) as u64)), R_TIME)
     // ---- Netz
+    //
+    // ================================================== RUNDE O-NETZUI
+    // DIE SEITE IST JETZT SO GEGLIEDERT, WIE WINDOWS UND GNOME ES
+    // MACHEN, und die Reihenfolge ist keine Geschmacksfrage:
+    //
+    //   1. WIE GEHT ES DER VERBINDUNG   Zustand, ausgehandelte Rate,
+    //      Durchsatz rauf/runter, Antwortzeit zum Gateway. Das ist die
+    //      Frage, wegen der jemand die Seite aufmacht.
+    //   2. WIE IST SIE EINGESTELLT      Adresse, Maske, Gateway,
+    //      Hardwareadresse -- und die Felder zum Aendern. Das war bis
+    //      zu dieser Runde die GANZE Seite.
+    //   3. WER VERBRAUCHT WAS           die zwei Tafeln rechts.
+    //
+    // Windows' Netzwerkstatus, GNOMEs Netzwerkeinstellungen und macOS'
+    // Netzwerkbereich ordnen alle drei in genau dieser Folge: Zustand
+    // oben, Einstellung darunter, Verbrauch daneben. Die Begruendung
+    // ist in allen dreien dieselbe -- der Zustand aendert sich staendig
+    // und wird gelesen, die Einstellung aendert sich selten und wird
+    // bearbeitet.
+    //
+    // DIE REITERNUMMERN AENDERN SICH NICHT. Was hier dazukommt, kommt
+    // auf DIESELBE Seite `R_NETZ` und nicht auf eine neue -- die Warnung
+    // 200 Zeilen weiter oben gilt: ein Testlaeufer, der Reiter 3
+    // anklickt, klickt weiter auf das Netz.
+    //
+    // ---- LINKS: der Zustand, dann die Anschrift
+    let _nz1: u64 = merke(wlib.label((&l_nzust[0 as usize]) as u64), R_NETZ)
+    let _nz2: u64 = merke(wlib.label((&l_nrate[0 as usize]) as u64), R_NETZ)
+    let _nz3: u64 = merke(wlib.label((&l_nrunter[0 as usize]) as u64), R_NETZ)
+    let _nz4: u64 = merke(wlib.label((&l_nrauf[0 as usize]) as u64), R_NETZ)
+    let _nz5: u64 = merke(wlib.label((&l_nsumme[0 as usize]) as u64), R_NETZ)
+    let _nz6: u64 = merke(wlib.label((&l_nping[0 as usize]) as u64), R_NETZ)
+    let _nzs: u64 = merke(wlib.sep(), R_NETZ)
     let _n1: u64 = merke(wlib.label((&l_ip[0 as usize]) as u64), R_NETZ)
     let _n2: u64 = merke(wlib.label((&l_maske[0 as usize]) as u64), R_NETZ)
     let _n3: u64 = merke(wlib.label((&l_gw[0 as usize]) as u64), R_NETZ)
@@ -3546,6 +4301,28 @@ fn u_start(args: u64) -> u64 {
     let en3: u64 = merke(wlib.entry((&e_gw[0 as usize]) as u64, 20), R_NETZ)
     wlib.size(140, 26)
     let b4: u64 = merke(wlib.button(msg.get((&k_b_uber[0 as usize]) as u64)), R_NETZ)
+    // ---- RECHTS: wer verbraucht was, und was gerade offen ist.
+    //
+    // Die zwei Tafeln stehen in der RECHTEN Spalte und nicht unter den
+    // Feldern: 460 Bildpunkte Breite (760 minus 300) tragen fuenf
+    // Spalten, 300 tragen sie nicht -- eine Tafel, die schmaler ist als
+    // ihre Spaltenbreiten, schneidet die letzte Spalte ab, und das ist
+    // genau der Fehler, den die Bildkontrolle dieser Runde sucht.
+    wlib.box_use(cright)
+    let _nt1: u64 = merke(wlib.label(msg.get((&k_n_h3[0 as usize]) as u64)),
+        R_NETZ)
+    wlib.size(0, 150)
+    let tnp: u64 = merke(wlib.table((&b_nprog[0 as usize]) as u64, 5, 4,
+        (&c_nprog[0 as usize]) as u64), R_NETZ)
+    let _nt2: u64 = merke(wlib.label(msg.get((&k_n_h4[0 as usize]) as u64)),
+        R_NETZ)
+    wlib.size(0, 150)
+    let tnc: u64 = merke(wlib.table((&b_nconn[0 as usize]) as u64, 5, 4,
+        (&c_nconn[0 as usize]) as u64), R_NETZ)
+    let _nt3: u64 = merke(wlib.label(msg.get((&k_n_hin[0 as usize]) as u64)),
+        R_NETZ)
+    let _unused_netzui: u64 = tnp + tnc
+    wlib.box_use(cleft)
     // ---- Benutzer
     let _u1: u64 = merke(wlib.label((&l_wer[0 as usize]) as u64), R_BENUT)
     let _u2: u64 = merke(wlib.label(msg.get((&k_l_kw1[0 as usize]) as u64)), R_BENUT)
@@ -3744,10 +4521,74 @@ fn u_start(args: u64) -> u64 {
     report_fui()
     melde_stand()
 
+    // RUNDE O-NETZUI: die Live-Anzeige einmal fuellen, BEVOR das Fenster
+    // das erste Mal gemalt wird. Sonst stuenden dort im ersten Bild
+    // leere Zeilen, und ein Bildschirmfoto dieses Augenblicks (die
+    // Bildkontrolle macht genau solche) zeigte eine leere Seite.
+    netz_live_bauen()
+    wlib.set_text(_nz1, (&l_nzust[0 as usize]) as u64)
+    wlib.set_text(_nz2, (&l_nrate[0 as usize]) as u64)
+    wlib.set_text(_nz3, (&l_nrunter[0 as usize]) as u64)
+    wlib.set_text(_nz4, (&l_nrauf[0 as usize]) as u64)
+    wlib.set_text(_nz5, (&l_nsumme[0 as usize]) as u64)
+    wlib.set_text(_nz6, (&l_nping[0 as usize]) as u64)
+    wlib.set_text(tnp, (&b_nprog[0 as usize]) as u64)
+    wlib.set_text(tnc, (&b_nconn[0 as usize]) as u64)
+
     var runden: u64 = 0
     var frist_vor: u64 = 0
+    // RUNDE O-NETZUI: wann zuletzt gemessen wurde. In Ticks zu 10 ms.
+    var netz_vor: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+    var ping_vor: u64 = netz_vor
     while wlib.alive() && runden < 4000000 {
         runden = runden + 1
+        // ============================================ RUNDE O-NETZUI
+        // EINMAL JE SEKUNDE, UND NUR AUF DIESER SEITE.
+        //
+        // DREI DINGE, DIE HIER ABSICHTLICH SO UND NICHT ANDERS SIND:
+        //
+        // 1. GEMESSEN WIRD AN DER UHR UND NICHT AN DER SCHLEIFE. 100
+        //    Ticks sind eine Sekunde, egal wie oft die Schleife lief --
+        //    ein Fenster, das gerade gezogen wird, bekommt viel mehr
+        //    Durchlaeufe, und eine Rate je Durchlauf haette am Ende von
+        //    der Maus abgehangen statt vom Netz. Denselben Fehler
+        //    vermeidet `kernel/user/netmon.fi` mit demselben Satz.
+        //
+        // 2. NUR AUF DER NETZSEITE. Wer auf "Darstellung" steht, misst
+        //    nichts und schreibt keinen Text -- ein `set_text` macht das
+        //    Fenster schmutzig, und ein Fenster, das sich jede Sekunde
+        //    neu malt, obwohl seine sichtbare Seite sich nicht aendert,
+        //    macht den Fensterserver zum Dauerlaeufer.
+        //
+        // 3. KEIN WARTEN, KEIN EIGENER TAKTGEBER. Das hier ist der
+        //    vorhandene Weg dieses Fensters: die Schleife laeuft
+        //    ohnehin, und die einzige Frage ist, ob seit der letzten
+        //    Messung eine Sekunde vergangen ist.
+        if reiter == R_NETZ {
+            let jetzt: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+            if jetzt >= netz_vor + 100 {
+                netz_vor = jetzt
+                durchsatz_mess()
+                // DIE ANTWORTZEIT NUR ALLE FUENF SEKUNDEN -- siehe den
+                // Kopf von `ping_gateway`: ein Echo je Sekunde waere
+                // Verkehr, den diese Seite selbst erzeugt und dann in
+                // ihrer eigenen Durchsatzanzeige sieht.
+                if jetzt >= ping_vor + 500 {
+                    ping_vor = jetzt
+                    ping_gateway()
+                }
+                netz_live_bauen()
+                wlib.set_text(_nz1, (&l_nzust[0 as usize]) as u64)
+                wlib.set_text(_nz2, (&l_nrate[0 as usize]) as u64)
+                wlib.set_text(_nz3, (&l_nrunter[0 as usize]) as u64)
+                wlib.set_text(_nz4, (&l_nrauf[0 as usize]) as u64)
+                wlib.set_text(_nz5, (&l_nsumme[0 as usize]) as u64)
+                wlib.set_text(_nz6, (&l_nping[0 as usize]) as u64)
+                wlib.set_text(tnp, (&b_nprog[0 as usize]) as u64)
+                wlib.set_text(tnc, (&b_nconn[0 as usize]) as u64)
+                wlib.dirty_all(w)
+            }
+        }
         // Die Frist herunterzaehlen -- aber nur, wenn sich die SEKUNDE
         // geaendert hat. Ein Text, der in jedem Schleifendurchlauf neu
         // gesetzt wird, macht das Fenster in jedem Durchlauf schmutzig
