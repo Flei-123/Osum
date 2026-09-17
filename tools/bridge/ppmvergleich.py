@@ -7,7 +7,7 @@
 WIE HIER VERGLICHEN WIRD, UND WARUM NICHT EINFACH ALLES.
 
 Zwei Bilder desselben Schirms, ein paar Sekunden auseinander -- und
-dazwischen hat `serial.put` weitergespiegelt (kernel/fb.fi, `S_ECHO`):
+dazwischen hat `serial.put` weitergespiegelt (kernel/gfx/fb.fi, `S_ECHO`):
 Osum meldet auf der seriellen Leitung, dass es fertig ist, und JEDES
 dieser Oktette landet auch auf dem Schirm. Der Wirt fotografiert danach
 und sieht darum ein paar Textzeilen MEHR.

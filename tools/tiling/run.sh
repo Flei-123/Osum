@@ -244,7 +244,7 @@ st=$(zahl "$TMPD/t.txt" 'tile: selftest [0-9]+')
 # jede Runde einen Fehler, den es nicht gibt. Genau diese Begruendung
 # steht schon in Abschnitt 8 dieses Skripts fuer den Fensterserver --
 # hier fehlte sie nur.
-tsoll=$(grep -aoE 'return [0-9]+' <<< "$(sed -n '/fn selftest_max/,/^}/p' kernel/tile.fi)" \
+tsoll=$(grep -aoE 'return [0-9]+' <<< "$(sed -n '/fn selftest_max/,/^}/p' kernel/ui/tile.fi)" \
     | head -1 | grep -oE '[0-9]+')
 num "die Zusagen des Fensterbaums ueber sich selbst" "$st" eq "${tsoll:-24}"
 fbits=$(grep -aoE 'failed=0x[0-9A-Fa-f]+' "$TMPD/t.txt" | head -1 | sed 's/.*=//')
@@ -344,7 +344,7 @@ schau "der vierte Reiter ist der aktive (helle Leiste rechts oben)" \
 # nimmt er seit dem Zusammenfuehren den Deko-Platz DK_TITLE, und der
 # steht bei 0x2C3848. Geholt wird er hier aus `deco_fallback`, damit
 # ein neues Schema die Zusage nicht wieder umwirft.
-DKT=$(sed -n '/fn deco_fallback/,/^}/p' kernel/wm.fi \
+DKT=$(sed -n '/fn deco_fallback/,/^}/p' kernel/ui/wm.fi \
     | grep -A2 'i == DK_TITLE {' | grep -oE '0x00[0-9A-Fa-f]{6}' | head -1)
 DKT=${DKT:-0x002C3848}
 dkr=$(( (DKT >> 16) & 255 )); dkg=$(( (DKT >> 8) & 255 )); dkb=$(( DKT & 255 ))
@@ -420,7 +420,7 @@ ws=$(zahl "$TMPD/o.txt" 'wm: .*selftest [0-9]+')
 # ab dann jede Runde einen Fehler, den es nicht gibt. Die Frage dieser
 # Zeile ist "aendert `tile` etwas am Fensterserver", also wird gegen das
 # gemessen, was der Fensterserver ueber sich SELBST sagt.
-wsoll=$(grep -aoE 'return [0-9]+' <<< "$(sed -n '/fn selftest_max/,/^}/p' kernel/wm.fi)" \
+wsoll=$(grep -aoE 'return [0-9]+' <<< "$(sed -n '/fn selftest_max/,/^}/p' kernel/ui/wm.fi)" \
     | head -1 | grep -oE '[0-9]+')
 num "die Zusagen des Fensterservers ueber sich selbst, unveraendert" "$ws" eq "${wsoll:-17}"
 has "$TMPD/o.txt" "wm: 800x600" "der Server kennt die Flaeche wie vorher"

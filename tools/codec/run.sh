@@ -108,9 +108,9 @@ hat "$TMPD/karte.txt" "0 Kollisionen" "keine zwei Bereiche ueberschneiden sich"
 
 # Der Bereich dieser Runde liegt da, wo er liegen soll, und nirgends
 # sonst. Diese Stelle hat dem Projekt fuenf Kollisionen beschert.
-v=$(grep -aE "^const CODEC_OFF: u64 = 0x[0-9A-Fa-f]+" kernel/kstate.fi \
+v=$(grep -aE "^const CODEC_OFF: u64 = 0x[0-9A-Fa-f]+" kernel/lib/kstate.fi \
     | head -1 | grep -oE '0x[0-9A-Fa-f]+')
-m=$(grep -aE "^const CODEC_MAX: u64 = 0x[0-9A-Fa-f]+" kernel/kstate.fi \
+m=$(grep -aE "^const CODEC_MAX: u64 = 0x[0-9A-Fa-f]+" kernel/lib/kstate.fi \
     | head -1 | grep -oE '0x[0-9A-Fa-f]+')
 if [ "$((v))" -eq $((0x118000)) ] && [ "$((v + m))" -le $((0x120000)) ]; then
     ok "CODEC_OFF = $v, CODEC_MAX = $m -- genau der zugeteilte Bereich 0x118000..0x120000"

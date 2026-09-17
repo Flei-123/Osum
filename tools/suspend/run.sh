@@ -91,9 +91,9 @@ hat "$TMPD/karte.txt" "0 Kollisionen" "keine zwei Bereiche ueberschneiden sich"
 
 # DER ZUGETEILTE BEREICH. Diese Stelle hat dem Projekt fuenf
 # Kollisionen beschert, jede davon still und erst nach dem Merge.
-v=$(grep -aE "^const SUSP_OFF: u64 = 0x[0-9A-Fa-f]+" kernel/kstate.fi \
+v=$(grep -aE "^const SUSP_OFF: u64 = 0x[0-9A-Fa-f]+" kernel/lib/kstate.fi \
     | head -1 | grep -oE '0x[0-9A-Fa-f]+')
-m=$(grep -aE "^const SUSP_MAX: u64 = 0x[0-9A-Fa-f]+" kernel/kstate.fi \
+m=$(grep -aE "^const SUSP_MAX: u64 = 0x[0-9A-Fa-f]+" kernel/lib/kstate.fi \
     | head -1 | grep -oE '0x[0-9A-Fa-f]+')
 if [ -n "$v" ] && [ "$((v))" -eq $((0x110000)) ]; then
     ok "SUSP_OFF = $v -- genau der zugeteilte Anfang"
@@ -430,9 +430,9 @@ echo "== 7. der zugeteilte Raum der Runde SCHLAF =="
 # Welle 1 hat gezeigt, dass zugeteilte SEITEN allein nicht reichen --
 # `suspend` und `krypto` nahmen denselben MODUSINDEX. Diese Runde hat
 # beide Raeume zugeteilt bekommen, und beide werden geprueft.
-sv=$(grep -aE "^const SCHLAF_OFF: u64 = 0x[0-9A-Fa-f]+" kernel/kstate.fi \
+sv=$(grep -aE "^const SCHLAF_OFF: u64 = 0x[0-9A-Fa-f]+" kernel/lib/kstate.fi \
     | head -1 | grep -oE '0x[0-9A-Fa-f]+')
-sm=$(grep -aE "^const SCHLAF_MAX: u64 = 0x[0-9A-Fa-f]+" kernel/kstate.fi \
+sm=$(grep -aE "^const SCHLAF_MAX: u64 = 0x[0-9A-Fa-f]+" kernel/lib/kstate.fi \
     | head -1 | grep -oE '0x[0-9A-Fa-f]+')
 if [ -n "$sv" ] && [ "$((sv))" -eq $((0x121000)) ]; then
     ok "SCHLAF_OFF = $sv -- genau der zugeteilte Anfang"
@@ -447,10 +447,10 @@ fi
 # DIE MODUSINDIZES. Zugeteilt war 1020..1029; jeder Name der Runde
 # muss darin liegen.
 ausser=$(grep -aE "^const M_(SCHLAF|SCHLAFARM|SCHLAFPRUEF|SCHLAFHW|SCHLAFKAPUTT|NOSCHLAF|SCHLAFMESS): u64 = [0-9]+" \
-    kernel/kstate.fi | grep -oE '= [0-9]+' | grep -oE '[0-9]+' \
+    kernel/lib/kstate.fi | grep -oE '= [0-9]+' | grep -oE '[0-9]+' \
     | awk '$1 < 1020 || $1 > 1029' | wc -l)
 anz=$(grep -acE "^const M_(SCHLAF|SCHLAFARM|SCHLAFPRUEF|SCHLAFHW|SCHLAFKAPUTT|NOSCHLAF|SCHLAFMESS): u64 = [0-9]+" \
-    kernel/kstate.fi)
+    kernel/lib/kstate.fi)
 if [ "$ausser" -eq 0 ] && [ "$anz" -ge 7 ]; then
     ok "alle $anz Modusindizes der Runde liegen in 1020..1029"
 else
@@ -892,9 +892,9 @@ hat_nicht "$WNB" 'panic' "kein Ausnahmefehler mit 'nowach'"
 # 1050..1059.
 echo
 echo "== 15. der zugeteilte Raum der Runde WACH =="
-wv=$(grep -aE "^const WACH_OFF: u64 = 0x[0-9A-Fa-f]+" kernel/kstate.fi \
+wv=$(grep -aE "^const WACH_OFF: u64 = 0x[0-9A-Fa-f]+" kernel/lib/kstate.fi \
     | head -1 | grep -oE '0x[0-9A-Fa-f]+')
-wm=$(grep -aE "^const WACH_MAX: u64 = 0x[0-9A-Fa-f]+" kernel/kstate.fi \
+wm=$(grep -aE "^const WACH_MAX: u64 = 0x[0-9A-Fa-f]+" kernel/lib/kstate.fi \
     | head -1 | grep -oE '0x[0-9A-Fa-f]+')
 if [ -n "$wv" ] && [ "$((wv))" -eq $((0x127000)) ]; then
     ok "WACH_OFF = $wv -- genau der zugeteilte Anfang"
@@ -907,7 +907,7 @@ else
     bad "der Bereich geht ueber 0x12C000 hinaus -- das ist fremdes Land"
 fi
 wausser=$(grep -aE "^const M_(WACH|WACHARM|WACHPRUEF|NOWACH|WACHMESS): u64 = [0-9]+" \
-    kernel/kstate.fi | grep -oE '= [0-9]+' | grep -oE '[0-9]+' \
+    kernel/lib/kstate.fi | grep -oE '= [0-9]+' | grep -oE '[0-9]+' \
     | awk '$1 < 1050 || $1 > 1059' | wc -l)
 if [ "$wausser" -eq 0 ]; then
     ok "alle Modusindizes der Runde WACH liegen in 1050..1059"

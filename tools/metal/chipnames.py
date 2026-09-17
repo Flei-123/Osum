@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/metal/chipnames.py -- HAELT kernel/chipname.fi GEGEN pci.ids.
+"""tools/metal/chipnames.py -- HAELT kernel/lib/chipname.fi GEGEN pci.ids.
 
 WARUM ES DAS GIBT
 =================
 
-`kernel/chipname.fi` behauptet fuer rund 150 PCI-Nummern einen
+`kernel/lib/chipname.fi` behauptet fuer rund 150 PCI-Nummern einen
 Klartextnamen. Eine solche Tabelle ist genau so viel wert wie ihre
 Nachpruefbarkeit: Wer vor einem fremden Brett steht und liest "Intel
 I226-V", GLAUBT das -- und wenn es falsch ist, sucht er stundenlang in

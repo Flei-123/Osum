@@ -1,0 +1,1507 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/hidin.fi -- Runde HID: DER EINE EINGABEWEG.
+//
+// Osum hat drei Quellen fuer Eingabe und darf nur EINEN Weg haben, auf
+// dem sie ankommt:
+//
+//     PS/2        kbd.fi (Tor 0x60, IRQ 1), ps2m.fi (IRQ 12)
+//     USB-HID     xhci.fi + usb.fi
+//     I2C-HID     i2chid.fi
+//
+// DER FENSTERSERVER DARF NICHT WISSEN, WOHER EIN TASTENDRUCK KOMMT.
+// Das war schon vor dieser Runde so gemeint -- `usb.press` uebersetzt
+// einen HID-Gebrauchscode in einen PS/2-Abtastcode und ruft
+// `kbd.on_code`, also dieselbe Funktion wie die Unterbrechung von IRQ 1.
+// Diese Runde aendert daran NICHTS an der Richtung, sondern nur an der
+// Stelle: die Uebersetzung steht jetzt hier, wird von USB UND von
+// I2C-HID benutzt, und darueber liegt ein Stueck, das einen Bericht
+// nicht mehr nach Bauform, sondern nach seiner BERICHTSBESCHREIBUNG
+// liest (`kernel/hidrep.fi`).
+//
+// ------------------------------------------- WAS DABEI NEU DAZUKOMMT
+//
+//   * MEHR ALS SECHS TASTEN GLEICHZEITIG. Im Boot-Protokoll hat ein
+//     Bericht sechs Plaetze; was die siebte Taste angeht, sagt die
+//     Spezifikation "alle Plaetze auf 0x01" -- die Tastatur meldet
+//     einen UEBERLAUF und nicht die Tasten. Eine Tastatur mit
+//     Berichtsbeschreibung meldet stattdessen 120 Bit, EIN Bit je
+//     Taste, und dann sind alle da. Dafuer braucht es hier eine
+//     TASTENKARTE (256 Bit) und einen Vergleich mit der vorigen --
+//     ohne die gaebe es kein Loslassen.
+//   * DAS LOSLASSEN UEBERHAUPT. Der bisherige USB-Weg schickte nur
+//     Druecken-Codes weiter (ausser bei Umschalt und Steuerung), weil
+//     der PS/2-Weg fuer alles andere ohnehin nur die ansieht. Ein
+//     Ereignismodell, das spaeter einmal "Taste haelt" wissen will,
+//     braucht beide -- und ein Tastenwiederholen im Fensterserver auch.
+//   * ALLE ZUSATZTASTEN, nicht nur Umschalt und Steuerung. Der bisherige
+//     Weg kannte 0x22 (Umschalt) und 0x11 (Steuerung) aus dem
+//     Zusatztastenoktett und sonst nichts. ALT UND SUPER KAMEN UEBER USB
+//     NIE AN -- eine USB-Tastatur konnte in Osum bis heute weder ein
+//     Fensterkuerzel (Alt) noch die Schnelleinstellungen (Super)
+//     ausloesen. Hier werden alle acht uebersetzt.
+//   * MEHR KNOEPFE UND EIN RAD, das nicht am vierten Oktett haengt,
+//     sondern da steht, wo die Beschreibung es hinlegt.
+//   * DAS PRAEZISIONS-TOUCHPAD, siehe unten.
+//
+// -------------------------------------- WAS SICH NICHT AENDERN DARF
+//
+// DIE SUPER-TASTE IST EIN LATCH UND KEIN ZEICHEN. In `kbd.fi` steht
+// dazu der Satz, um den es geht: "A hotkey has no window -- that is
+// what makes it global." Super wird dort gemerkt (Zaehler + Zeitstempel)
+// und NICHT ins Fenster geliefert. Dieser Weg hier erzeugt fuer die
+// HID-Gebrauchscodes 0xE3 und 0xE7 GENAU die Abtastcodes 0xE0 0x5B und
+// 0xE0 0x5C, die `kbd.fi` seit Runde NETVIEW als Super erkennt -- und
+// damit laeuft der Latch unveraendert. `tools/hid/run.sh` misst das als
+// Regression gegen den PS/2-Weg.
+
+profile kernel
+
+import lib.kstate
+import serial
+import drv.hid.kbd
+import gfx.gfx
+import drv.hid.hidrep
+import drv.hid.hidtest
+import sched.time
+
+export {
+    stage, report, press, release, scancode, is_ext, bits,
+    set_trace, wiedergabe, latenz,
+    keys, releases, moves, wheels, touches, drops, reports, overruns,
+    kbd_report_boot, mouse_report_boot,
+    pad_x, pad_y, pad_fingers, pad_scrolls, pad_clicks,
+    down_count, is_down, reset_dev, selftest, say
+}
+
+// Eine Seite. Je Geraet 256 Oktett Zustand, danach die Zaehler.
+const IN_OFF: u64 = 0xA6000
+const DEV_BYTES: u64 = 256
+const MAX_DEV: u64 = 4
+const CNT_BASIS: u64 = 0x400 // die Zaehler, relativ zu IN_OFF
+
+// Je Geraet.
+const D_MAP: u64 = 0x00 // Tastenkarte jetzt, 256 Bit
+const D_PREV: u64 = 0x20 // Tastenkarte vorher, 256 Bit
+const D_BTN: u64 = 0x40 // Knoepfe vorher
+const D_LX: u64 = 0x48 // letzte absolute Lage des fuehrenden Fingers
+const D_LY: u64 = 0x50
+const D_VALID: u64 = 0x58 // 1 = D_LX/D_LY sind brauchbar
+const D_CID: u64 = 0x60 // Kontaktnummer des fuehrenden Fingers
+const D_NFING: u64 = 0x68 // Finger im vorigen Bericht
+const D_SCROLL: u64 = 0x70 // Restbetrag des Zwei-Finger-Rollens
+const D_RX: u64 = 0x78 // Restbetrag der Zeigerbewegung, x
+const D_RY: u64 = 0x80
+const D_SX: u64 = 0x88 // Teiler je Achse, aus dem logischen Maximum
+const D_SY: u64 = 0x90
+
+// Die Zaehler.
+const C_KEYS: u64 = 0x00
+const C_REL: u64 = 0x08
+const C_MOVES: u64 = 0x10
+const C_WHEEL: u64 = 0x18
+const C_TOUCH: u64 = 0x20
+const C_DROPS: u64 = 0x28
+const C_REPORTS: u64 = 0x30
+const C_OVER: u64 = 0x38 // Berichte mit Ueberlaufmeldung der Tastatur
+const C_PADX: u64 = 0x40 // letzte gemeldete Zeigerbewegung, zum Nachsehen
+const C_PADY: u64 = 0x48
+const C_FING: u64 = 0x50
+const C_SCROLLS: u64 = 0x58
+const C_CLICKS: u64 = 0x60
+// RUNDE HID: die Mitschrift. 1 = jedes Ereignis, das diese Schicht
+// erzeugt, geht zusaetzlich als eine Zeile auf die serielle Leitung.
+// Nur fuer die Wiedergabe (Modus `hidpad`) -- im Betrieb waere das eine
+// Zeile je Mausbewegung.
+const C_TRACE: u64 = 0x68
+
+// So viele Finger werden auseinandergehalten. Zeiger braucht einen,
+// Zwei-Finger-Rollen zwei; der Rest wird gezaehlt und sonst nicht
+// angesehen. Alles darueber sind Gesten, und die sind eine eigene Runde.
+const MAX_CONTACTS: u64 = 5
+
+// Die Bildflaeche, auf die ein Touchpad abgebildet wird. Dieselben
+// Zahlen wie in `usb_stage` fuer die Maus -- ein Zeiger hat EINEN
+// Anschlag, egal an welchem Bus er haengt.
+const SCREEN_W: u64 = 1024
+const SCREEN_H: u64 = 768
+
+// So viele Touchpad-Einheiten sind eine Radrastung beim Rollen.
+const SCROLL_STEP: u64 = 120
+
+fn base(state: u64, dev: u64) -> u64 {
+    return state + IN_OFF + dev * DEV_BYTES
+}
+
+fn dg(state: u64, dev: u64, off: u64) -> u64 {
+    return kstate.get(base(state, dev), off)
+}
+
+fn ds(state: u64, dev: u64, off: u64, v: u64) {
+    kstate.set(base(state, dev), off, v)
+}
+
+fn cg(state: u64, off: u64) -> u64 {
+    return kstate.get(state + IN_OFF + CNT_BASIS, off)
+}
+
+fn cs(state: u64, off: u64, v: u64) {
+    kstate.set(state + IN_OFF + CNT_BASIS, off, v)
+}
+
+fn cadd(state: u64, off: u64, v: u64) {
+    cs(state, off, cg(state, off) + v)
+}
+
+fn keys(state: u64) -> u64 {
+    return cg(state, C_KEYS)
+}
+
+fn releases(state: u64) -> u64 {
+    return cg(state, C_REL)
+}
+
+fn moves(state: u64) -> u64 {
+    return cg(state, C_MOVES)
+}
+
+fn wheels(state: u64) -> u64 {
+    return cg(state, C_WHEEL)
+}
+
+fn touches(state: u64) -> u64 {
+    return cg(state, C_TOUCH)
+}
+
+fn drops(state: u64) -> u64 {
+    return cg(state, C_DROPS)
+}
+
+fn reports(state: u64) -> u64 {
+    return cg(state, C_REPORTS)
+}
+
+fn overruns(state: u64) -> u64 {
+    return cg(state, C_OVER)
+}
+
+fn pad_x(state: u64) -> u64 {
+    return cg(state, C_PADX)
+}
+
+fn pad_y(state: u64) -> u64 {
+    return cg(state, C_PADY)
+}
+
+fn pad_fingers(state: u64) -> u64 {
+    return cg(state, C_FING)
+}
+
+fn pad_scrolls(state: u64) -> u64 {
+    return cg(state, C_SCROLLS)
+}
+
+fn pad_clicks(state: u64) -> u64 {
+    return cg(state, C_CLICKS)
+}
+
+fn stage(state: u64) {
+    var d: u64 = 0
+    while d < MAX_DEV {
+        reset_dev(state, d)
+        d = d + 1
+    }
+}
+
+fn reset_dev(state: u64, dev: u64) {
+    if dev >= MAX_DEV {
+        return
+    }
+    var i: u64 = 0
+    while i < DEV_BYTES / 8 {
+        ds(state, dev, i * 8, 0)
+        i = i + 1
+    }
+}
+
+// ------------------------------------------------------- die Bitfelder
+//
+// HID PACKT VON DER NIEDRIGSTEN STELLE AUS. Ein Feld von drei Bit ab
+// Bit 5 steht in Bit 5,6,7 des ersten Oktetts; das naechste faengt in
+// Bit 0 des zweiten an. Es gibt keine Ausrichtung und keine Luecke --
+// wer hier ein Oktett aufrundet, liest ab dem zweiten Feld eines
+// Touchpads jedes Bit falsch.
+fn bits(buf: u64, off: u64, n: u64) -> u64 {
+    if n == 0 || n > 32 {
+        return 0
+    }
+    // OKTETTWEISE UND NICHT BITWEISE. Die erste Fassung dieser Runde
+    // holte je BIT ein Oktett; bei einer Tastatur ohne Anschlagsgrenze
+    // sind das 120 Zugriffe fuer ein Feld, und `kstate.get8` ist ein
+    // fluechtiger Zugriff, den der Uebersetzer nicht zusammenfassen
+    // darf. Gemessen hat das den generischen Weg auf 13,3 us gebracht.
+    // Hoechstens fuenf Oktette decken jedes Feld bis 32 Bit ab
+    // (7 Bit Versatz + 32 + 7, aufgerundet), und fuenf Oktette passen
+    // in ein Wort.
+    let erst: u64 = off / 8
+    let vers: u64 = off % 8
+    let noetig: u64 = (vers + n + 7) / 8
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < noetig {
+        v = v | (kstate.get8(buf + erst + i) << (i * 8))
+        i = i + 1
+    }
+    v = v >> vers
+    return v & ((1 << n) - 1)
+}
+
+// Dasselbe, aber mit Vorzeichen -- gebraucht fuer jede RELATIVE Achse.
+fn sbits(buf: u64, off: u64, n: u64) -> u64 {
+    let v: u64 = bits(buf, off, n)
+    if n == 0 || n >= 64 {
+        return v
+    }
+    if (v >> (n - 1)) != 0 {
+        return v | up(n)
+    }
+    return v
+}
+
+// Die oberen Bit als Maske. `0 - x` waere kuerzer, aber dieser Kernel
+// rechnet ohne umlaufende Subtraktion, und eine Maske, die von der
+// Wortbreite abhaengt, ist genau die Stelle, an der so etwas schiefgeht.
+fn up(n: u64) -> u64 {
+    if n >= 64 {
+        return 0
+    }
+    return 0xFFFFFFFFFFFFFFFF - ((1 << n) - 1)
+}
+
+fn ist_neg(v: u64) -> bool {
+    return (v >> 63) != 0
+}
+
+// Betrag einer Zahl im Zweierkomplement.
+fn betrag(v: u64) -> u64 {
+    if ist_neg(v) {
+        return 0 -% v
+    }
+    return v
+}
+
+// ------------------------------------------------------ die Tastenkarte
+
+fn map_get(state: u64, dev: u64, off: u64, u: u64) -> bool {
+    if u >= 256 {
+        return false
+    }
+    let p: u64 = base(state, dev) + off + u / 8
+    return ((kstate.get8(p) >> (u % 8)) & 1) != 0
+}
+
+fn map_set(state: u64, dev: u64, off: u64, u: u64) {
+    if u >= 256 {
+        return
+    }
+    let p: u64 = base(state, dev) + off + u / 8
+    kstate.set8(p, (kstate.get8(p) | (1 << (u % 8))) as u8)
+}
+
+fn map_clear(state: u64, dev: u64, off: u64) {
+    var i: u64 = 0
+    while i < 4 {
+        kstate.set(base(state, dev) + off, i * 8, 0)
+        i = i + 1
+    }
+}
+
+fn is_down(state: u64, dev: u64, u: u64) -> bool {
+    return map_get(state, dev, D_PREV, u)
+}
+
+fn down_count(state: u64, dev: u64) -> u64 {
+    var n: u64 = 0
+    var w: u64 = 0
+    while w < 4 {
+        var v: u64 = kstate.get(base(state, dev) + D_PREV, w * 8)
+        while v != 0 {
+            n = n + (v & 1)
+            v = v >> 1
+        }
+        w = w + 1
+    }
+    return n
+}
+
+// ------------------------------------- Gebrauchscode -> Abtastcode
+//
+// DIESE TABELLE STAND BIS ZU DIESER RUNDE IN `usb.fi` UND GING NUR BIS
+// 100. Sie geht jetzt bis 232, weil die acht ZUSATZTASTEN dort liegen
+// (0xE0..0xE7) -- und die sind der Grund, warum Alt und Super ueber USB
+// nie ankamen: das Boot-Protokoll meldet sie in einem eigenen Oktett,
+// und der bisherige Weg sah davon nur zwei Bit an.
+//
+// Die Reihenfolge der Buchstaben im HID-Feld ist alphabetisch, die auf
+// einer Tastatur ist es nicht. Also eine Tabelle und keine Rechnung.
+fn scancode(u: u64) -> u64 {
+    if u >= 0xE0 && u <= 0xE7 {
+        return mod_code(u)
+    }
+    if u >= 100 {
+        return 0
+    }
+    var t: [u8; 100] = [0 as u8; 100]
+    t[4] = 0x1E as u8
+    t[5] = 0x30 as u8
+    t[6] = 0x2E as u8
+    t[7] = 0x20 as u8
+    t[8] = 0x12 as u8
+    t[9] = 0x21 as u8
+    t[10] = 0x22 as u8
+    t[11] = 0x23 as u8
+    t[12] = 0x17 as u8
+    t[13] = 0x24 as u8
+    t[14] = 0x25 as u8
+    t[15] = 0x26 as u8
+    t[16] = 0x32 as u8
+    t[17] = 0x31 as u8
+    t[18] = 0x18 as u8
+    t[19] = 0x19 as u8
+    t[20] = 0x10 as u8
+    t[21] = 0x13 as u8
+    t[22] = 0x1F as u8
+    t[23] = 0x14 as u8
+    t[24] = 0x16 as u8
+    t[25] = 0x2F as u8
+    t[26] = 0x11 as u8
+    t[27] = 0x2D as u8
+    t[28] = 0x15 as u8
+    t[29] = 0x2C as u8
+    t[30] = 0x02 as u8
+    t[31] = 0x03 as u8
+    t[32] = 0x04 as u8
+    t[33] = 0x05 as u8
+    t[34] = 0x06 as u8
+    t[35] = 0x07 as u8
+    t[36] = 0x08 as u8
+    t[37] = 0x09 as u8
+    t[38] = 0x0A as u8
+    t[39] = 0x0B as u8
+    t[40] = 0x1C as u8 // Eingabe
+    t[41] = 0x01 as u8 // Flucht
+    t[42] = 0x0E as u8 // Rueckschritt
+    t[43] = 0x0F as u8 // Tabulator
+    t[44] = 0x39 as u8 // Leerzeichen
+    t[45] = 0x0C as u8
+    t[46] = 0x0D as u8
+    t[47] = 0x1A as u8
+    t[48] = 0x1B as u8
+    t[49] = 0x2B as u8
+    t[50] = 0x2B as u8
+    t[51] = 0x27 as u8
+    t[52] = 0x28 as u8
+    t[53] = 0x29 as u8
+    t[54] = 0x33 as u8
+    t[55] = 0x34 as u8
+    t[56] = 0x35 as u8
+    t[57] = 0x3A as u8 // Feststell
+    t[58] = 0x3B as u8
+    t[59] = 0x3C as u8
+    t[60] = 0x3D as u8
+    t[61] = 0x3E as u8
+    t[62] = 0x3F as u8
+    t[63] = 0x40 as u8
+    t[64] = 0x41 as u8
+    t[65] = 0x42 as u8
+    t[66] = 0x43 as u8
+    t[67] = 0x44 as u8
+    t[68] = 0x57 as u8
+    t[69] = 0x58 as u8
+    t[71] = 0x46 as u8 // Rollen
+    t[73] = 0x52 as u8 // Einfuegen (erweitert)
+    t[74] = 0x47 as u8 // Anfang
+    t[75] = 0x49 as u8 // Seite hoch
+    t[76] = 0x53 as u8 // Entfernen
+    t[77] = 0x4F as u8 // Ende
+    t[78] = 0x51 as u8 // Seite runter
+    t[79] = 0x4D as u8 // rechts
+    t[80] = 0x4B as u8 // links
+    t[81] = 0x50 as u8 // runter
+    t[82] = 0x48 as u8 // hoch
+    t[83] = 0x45 as u8 // Nummernfeststell
+    t[84] = 0x35 as u8 // Ziffernblock geteilt (erweitert)
+    t[85] = 0x37 as u8
+    t[86] = 0x4A as u8
+    t[87] = 0x4E as u8
+    t[88] = 0x1C as u8 // Ziffernblock Eingabe (erweitert)
+    t[89] = 0x4F as u8
+    t[90] = 0x50 as u8
+    t[91] = 0x51 as u8
+    t[92] = 0x4B as u8
+    t[93] = 0x4C as u8
+    t[94] = 0x4D as u8
+    t[95] = 0x47 as u8
+    t[96] = 0x48 as u8
+    t[97] = 0x49 as u8
+    t[98] = 0x52 as u8
+    t[99] = 0x53 as u8
+    return t[u as usize] as u64
+}
+
+// DIE ACHT ZUSATZTASTEN. Links ohne Vorzeichen, rechts mit 0xE0 --
+// dieselbe Trennung, die `kbd.fi` seit Runde I18N zwischen Alt und
+// AltGr macht und seit Runde NETVIEW fuer Super braucht.
+fn mod_code(u: u64) -> u64 {
+    if u == 0xE0 {
+        return 0x1D // Steuerung links
+    }
+    if u == 0xE1 {
+        return 0x2A // Umschalt links
+    }
+    if u == 0xE2 {
+        return 0x38 // Alt links
+    }
+    if u == 0xE3 {
+        return 0x5B // Super links (erweitert)
+    }
+    if u == 0xE4 {
+        return 0x1D // Steuerung rechts (erweitert)
+    }
+    if u == 0xE5 {
+        return 0x36 // Umschalt rechts
+    }
+    if u == 0xE6 {
+        return 0x38 // AltGr (erweitert)
+    }
+    if u == 0xE7 {
+        return 0x5C // Super rechts (erweitert)
+    }
+    return 0
+}
+
+fn is_ext(u: u64) -> bool {
+    if u >= 0x49 && u <= 0x52 {
+        return true
+    }
+    if u == 0x54 || u == 0x58 {
+        return true
+    }
+    // Steuerung rechts, AltGr, Super links und rechts.
+    return u == 0xE3 || u == 0xE4 || u == 0xE6 || u == 0xE7
+}
+
+// DIE STELLE, AN DER JEDE TASTE IN DEN WEG VON RUNDE 59 MUENDET.
+// PS/2 ruft `kbd.on_code` aus der Unterbrechung, USB und I2C-HID rufen
+// es von hier. Es gibt keinen zweiten Weg in die Zeilendisziplin,
+// keinen zweiten Fokus im Fensterserver und keine zweite Tabelle fuer
+// Umschalt, Steuerung, Alt und Super.
+fn press(state: u64, u: u64) {
+    let code: u64 = scancode(u)
+    if code == 0 {
+        return
+    }
+    if is_ext(u) {
+        kbd.on_code(state, 0xE0)
+    }
+    kbd.on_code(state, code)
+    cadd(state, C_KEYS, 1)
+    trace_key(state, 1, u, code)
+}
+
+// Loslassen ist derselbe Abtastcode mit gesetztem obersten Bit -- so
+// macht es der 8042, und deshalb erkennt `kbd.on_code` es ohne eine
+// Zeile Aenderung.
+fn release(state: u64, u: u64) {
+    let code: u64 = scancode(u)
+    if code == 0 {
+        return
+    }
+    if is_ext(u) {
+        kbd.on_code(state, 0xE0)
+    }
+    kbd.on_code(state, code | 0x80)
+    cadd(state, C_REL, 1)
+    trace_key(state, 0, u, code)
+}
+
+// ======================================================================
+// DER GENERISCHE WEG: EIN BERICHT, GELESEN NACH SEINER BESCHREIBUNG.
+//
+// `dev` ist der Platz, unter dem `hidrep.parse` die Beschreibung dieses
+// Geraets abgelegt hat. `buf`/`len` ist der Bericht, wie er vom Draht
+// kommt -- MIT Nummernoktett, wenn das Geraet Nummern benutzt.
+//
+// Rueckgabe: false, wenn der Bericht nicht zur Beschreibung passt
+// (falsche Nummer, zu kurz). Ein zu kurzer Bericht wird GEZAEHLT und
+// weggeworfen und nicht halb gelesen -- die halb gelesene Fassung
+// liefert einen Zeiger, der beim ersten Uebertragungsfehler in die Ecke
+// faehrt.
+fn report(state: u64, dev: u64, buf: u64, len: u64) -> bool {
+    if dev >= MAX_DEV || !hidrep.ok(state, dev) || len == 0 {
+        cadd(state, C_DROPS, 1)
+        return false
+    }
+    var rid: u64 = 0
+    var p: u64 = buf
+    var n: u64 = len
+    if hidrep.hasid(state, dev) {
+        rid = kstate.get8(buf)
+        p = buf + 1
+        n = len - 1
+    }
+    let noetig: u64 = hidrep.in_bytes_of(state, dev, rid)
+    if noetig == 0 || n < noetig {
+        cadd(state, C_DROPS, 1)
+        return false
+    }
+    cadd(state, C_REPORTS, 1)
+
+    let art: u64 = hidrep.kind(state, dev)
+    if (art & hidrep.K_PAD) != 0 {
+        return pad(state, dev, rid, p)
+    }
+    return keys_and_mouse(state, dev, rid, p, art)
+}
+
+// -------------------------------------------- Tastatur, Maus, Verbraucher
+fn keys_and_mouse(state: u64, dev: u64, rid: u64, p: u64, art: u64) -> bool {
+    map_clear(state, dev, D_MAP)
+    var btn: u64 = 0
+    var dx: u64 = 0
+    var dy: u64 = 0
+    var rad: u64 = 0
+    var hat_taste: bool = false
+    var hat_maus: bool = false
+    var vier: bool = false
+    var over: bool = false
+
+    let nf: u64 = hidrep.fields(state, dev)
+    var i: u64 = 0
+    while i < nf {
+        let kopf: u64 = hidrep.f_head(state, dev, i)
+        let flags: u64 = (kopf >> 16) & 0xFFFF
+        if ((kopf >> 8) & 0xFF) == hidrep.KIND_IN
+            && (kopf & 0xFF) == rid
+            && (flags & hidrep.FL_CONST) == 0 {
+            let page: u64 = hidrep.f_page(state, dev, i)
+            let off: u64 = hidrep.f_bitoff(state, dev, i)
+            let sz: u64 = hidrep.f_bitsz(state, dev, i)
+            let cnt: u64 = hidrep.f_count(state, dev, i)
+            let geb: u64 = hidrep.f_usage(state, dev, i)
+
+            if page == hidrep.UP_KEYBOARD {
+                hat_taste = true
+                if (flags & hidrep.FL_VAR) != 0 {
+                    // EIN BIT JE TASTE -- so meldet eine Tastatur ohne
+                    // Anschlagsgrenze, und so kommen mehr als sechs an.
+                    var c: u64 = 0
+                    while c < cnt {
+                        if bits(p, off + c * sz, sz) != 0 {
+                            map_set(state, dev, D_MAP, (geb + c) & 0xFF)
+                        }
+                        c = c + 1
+                    }
+                } else {
+                    // EINE FELDGRUPPE -- so meldet eine Boot-Tastatur
+                    // ihre sechs Plaetze. 0x01 in einem Platz heisst
+                    // "zu viele Tasten"; dann taugt der ganze Bericht
+                    // nichts und wird gezaehlt statt geraten.
+                    var c2: u64 = 0
+                    while c2 < cnt {
+                        let u: u64 = bits(p, off + c2 * sz, sz)
+                        if u == 1 {
+                            over = true
+                        }
+                        if u > 3 {
+                            map_set(state, dev, D_MAP, u & 0xFF)
+                        }
+                        c2 = c2 + 1
+                    }
+                }
+            }
+            if page == hidrep.UP_BUTTON {
+                hat_maus = true
+                var c3: u64 = 0
+                while c3 < cnt {
+                    if bits(p, off + c3 * sz, sz) != 0 {
+                        // Knopf 1 ist Bit 0. Der Gebrauch ZAEHLT AB 1;
+                        // wer das nicht abzieht, hat einen Rechtsklick,
+                        // wo ein Linksklick war.
+                        let b: u64 = (geb + c3)
+                        if b >= 1 && b <= 8 {
+                            btn = btn | (1 << (b - 1))
+                        }
+                    }
+                    c3 = c3 + 1
+                }
+            }
+            if page == hidrep.UP_DESKTOP {
+                var c4: u64 = 0
+                while c4 < cnt {
+                    let g: u64 = geb + c4
+                    let v: u64 = sbits(p, off + c4 * sz, sz)
+                    if g == hidrep.US_X {
+                        hat_maus = true
+                        dx = v
+                    }
+                    if g == hidrep.US_Y {
+                        hat_maus = true
+                        dy = v
+                    }
+                    if g == hidrep.US_WHEEL {
+                        hat_maus = true
+                        vier = true
+                        rad = v
+                    }
+                    c4 = c4 + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    if over {
+        cadd(state, C_OVER, 1)
+        return false
+    }
+    if hat_taste {
+        keys_report(state, dev)
+    }
+    if hat_maus {
+        mouse_report(state, dev, btn, dx, dy, rad, vier)
+    }
+    return true
+}
+
+// Die neue Karte gegen die alte. Was dazugekommen ist, ist gedrueckt;
+// was fehlt, ist losgelassen. DAS ist der Unterschied zu vorher: bis
+// hierher kannte der USB-Weg gar kein Loslassen ausser bei Umschalt
+// und Steuerung.
+fn keys_report(state: u64, dev: u64) {
+    // WORTWEISE UND NICHT BITWEISE. Die erste Fassung ging ueber alle
+    // 256 Tasten und las dabei 512 Oktette EINZELN -- je Bericht, auch
+    // wenn sich nichts geaendert hat. Gemessen: 6,4 us fuer einen
+    // Bericht, in dem eine einzige Umschalttaste umsprang. Vier Woerter
+    // vergleichen kostet vier Lesezugriffe, und in die Bitschleife geht
+    // nur, was sich WIRKLICH unterscheidet -- das ist in aller Regel
+    // kein einziges Wort.
+    let b: u64 = base(state, dev)
+    var w: u64 = 0
+    while w < 4 {
+        let jetzt: u64 = kstate.get(b + D_MAP, w * 8)
+        let vorher: u64 = kstate.get(b + D_PREV, w * 8)
+        if jetzt != vorher {
+            let anders: u64 = jetzt ^ vorher
+            var k: u64 = 0
+            while k < 64 {
+                if ((anders >> k) & 1) != 0 {
+                    if ((jetzt >> k) & 1) != 0 {
+                        press(state, w * 64 + k)
+                    } else {
+                        release(state, w * 64 + k)
+                    }
+                }
+                k = k + 1
+            }
+            kstate.set(b + D_PREV, w * 8, jetzt)
+        }
+        w = w + 1
+    }
+}
+
+// Aus den gelesenen Feldern ein PS/2-PAKET bauen und in denselben
+// Trichter geben, den die Maus am 8042 benutzt. Ab hier ist es
+// dieselbe Rechnung wie in Runde K10.
+//
+// ZWEI VORZEICHEN DREHEN SICH UM, wie schon in `usb.fi`:
+//   * y. HID zaehlt nach UNTEN (wie der Bildschirm), PS/2 nach OBEN.
+//   * das Rad. HID zaehlt eine Umdrehung nach vorn als +1, PS/2 als 0x0F.
+fn mouse_report(state: u64, dev: u64, btn: u64, dx: u64, dy: u64, rad: u64,
+    vier: bool) {
+    let ax: u64 = klemme8(dx)
+    let ay: u64 = klemme8(dreh(dy))
+    var b0: u64 = 8 | (btn & 7)
+    if (ax & 0x80) != 0 {
+        b0 = b0 | 0x10
+    }
+    if (ay & 0x80) != 0 {
+        b0 = b0 | 0x20
+    }
+    var r: u64 = 0
+    if rad != 0 {
+        if ist_neg(rad) {
+            r = 1
+        } else {
+            r = 15
+        }
+    }
+    gfx.mouse_packet(state, b0, ax, ay, r, vier)
+    // RUNDE BLECH2: der Fensterserver sieht JEDEN Bericht, nicht nur
+    // den Zustand am Ende einer Abholrunde -- sonst ist ein Klick, dessen
+    // Loslassen in derselben Runde liegt, nie passiert (gfx.mouse_now).
+    gfx.mouse_now(state)
+    trace_mouse(state, btn, ax, ay, r)
+    if dx != 0 || dy != 0 {
+        cadd(state, C_MOVES, 1)
+    }
+    if r != 0 {
+        cadd(state, C_WHEEL, 1)
+    }
+    ds(state, dev, D_BTN, btn)
+}
+
+// Vorzeichen umdrehen, im Zweierkomplement.
+fn dreh(v: u64) -> u64 {
+    return 0 -% v
+}
+
+// Auf acht Bit klemmen. Ein PS/2-Paket traegt nicht mehr; eine
+// Bewegung von 400 Einheiten in einem Bericht kommt als 127 an und
+// nicht als 400 modulo 256 -- das waere ein Sprung in die falsche
+// Richtung.
+fn klemme8(v: u64) -> u64 {
+    if ist_neg(v) {
+        let b: u64 = betrag(v)
+        if b > 127 {
+            return 0x81
+        }
+        return (256 - b) & 0xFF
+    }
+    if v > 127 {
+        return 127
+    }
+    return v & 0xFF
+}
+
+// ======================================================================
+// DAS PRAEZISIONS-TOUCHPAD.
+//
+// Ein Touchpad meldet keine Bewegung, sondern LAGEN: je Finger ein
+// Spitzenschalter (liegt der Finger auf?), eine Kontaktnummer und ein
+// Punkt in Geraeteeinheiten. Aus Lagen wird eine Bewegung, indem man
+// zwei aufeinanderfolgende Berichte DESSELBEN Fingers voneinander
+// abzieht -- und genau da liegen die zwei Fallen:
+//
+//   1. DER ERSTE BERICHT NACH DEM AUFSETZEN HAT KEINEN VORGAENGER.
+//      Wer ihn trotzdem abzieht, springt mit dem Zeiger dorthin, wo
+//      der Finger gerade aufgesetzt hat. Deshalb `D_VALID`: der erste
+//      Bericht setzt nur die Lage und bewegt nichts.
+//   2. DER FUEHRENDE FINGER KANN WECHSELN. Hebt man ihn und laesst den
+//      zweiten liegen, ruecken die Kontakte auf. Wer die
+//      Kontaktnummer nicht mitfuehrt, zieht die Lage von Finger A von
+//      der von Finger B ab -- und der Zeiger springt quer ueber den
+//      Schirm. Deshalb `D_CID`.
+//
+// WAS DIESE RUNDE BAUT: Zeiger, Klick, Zwei-Finger-Rollen. WAS SIE
+// NICHT BAUT: alles andere. Drei Finger, Kneifen, Randstreifen und
+// Tippen-statt-Klicken sind GESTEN, sie brauchen Zeit, Schwellen und
+// einen Zustandsautomaten, und das ist eine eigene Runde. Ein
+// halbfertiger Gestenerkenner ist schlimmer als keiner: er loest aus,
+// wenn niemand es wollte.
+fn pad(state: u64, dev: u64, rid: u64, p: u64) -> bool {
+    var tip: [u64; 5] = [0 as u64; 5]
+    var cid: [u64; 5] = [0 as u64; 5]
+    var cx: [u64; 5] = [0 as u64; 5]
+    var cy: [u64; 5] = [0 as u64; 5]
+    var nc: u64 = 0 // wie viele Kontaktplaetze der Bericht hat
+    var gemeldet: u64 = 0 // was das Feld Kontaktzahl sagt
+    var hat_zahl: bool = false
+    var btn: u64 = 0
+    var maxx: u64 = 0
+    var maxy: u64 = 0
+
+    let nf: u64 = hidrep.fields(state, dev)
+    var i: u64 = 0
+    while i < nf {
+        let kopf: u64 = hidrep.f_head(state, dev, i)
+        if ((kopf >> 8) & 0xFF) == hidrep.KIND_IN
+            && (kopf & 0xFF) == rid
+            && (((kopf >> 16) & 0xFFFF) & hidrep.FL_CONST) == 0 {
+            let page: u64 = hidrep.f_page(state, dev, i)
+            let off: u64 = hidrep.f_bitoff(state, dev, i)
+            let sz: u64 = hidrep.f_bitsz(state, dev, i)
+            let cnt: u64 = hidrep.f_count(state, dev, i)
+            let geb: u64 = hidrep.f_usage(state, dev, i)
+            if page == hidrep.UP_DIGITIZER {
+                if geb == hidrep.US_TIPSW {
+                    // EIN SPITZENSCHALTER FAENGT EINEN NEUEN KONTAKT AN.
+                    // Die Beschreibung zaehlt die Finger-Sammlungen
+                    // hintereinander auf; das ist die Klammer, an der
+                    // man sie auseinanderhaelt.
+                    if nc < MAX_CONTACTS {
+                        tip[nc as usize] = bits(p, off, sz)
+                        nc = nc + 1
+                    }
+                }
+                if geb == hidrep.US_CONTACTID {
+                    if nc > 0 && nc <= MAX_CONTACTS {
+                        cid[(nc - 1) as usize] = bits(p, off, sz)
+                    }
+                }
+                if geb == hidrep.US_CONTACTCOUNT {
+                    gemeldet = bits(p, off, sz)
+                    hat_zahl = true
+                }
+            }
+            if page == hidrep.UP_DESKTOP {
+                var c: u64 = 0
+                while c < cnt {
+                    let g: u64 = geb + c
+                    if g == hidrep.US_X && nc > 0 && nc <= MAX_CONTACTS {
+                        cx[(nc - 1) as usize] = bits(p, off + c * sz, sz)
+                        maxx = hidrep.f_lmax(state, dev, i)
+                    }
+                    if g == hidrep.US_Y && nc > 0 && nc <= MAX_CONTACTS {
+                        cy[(nc - 1) as usize] = bits(p, off + c * sz, sz)
+                        maxy = hidrep.f_lmax(state, dev, i)
+                    }
+                    c = c + 1
+                }
+            }
+            if page == hidrep.UP_BUTTON {
+                var c2: u64 = 0
+                while c2 < cnt {
+                    if bits(p, off + c2 * sz, sz) != 0 {
+                        let b: u64 = geb + c2
+                        if b >= 1 && b <= 8 {
+                            btn = btn | (1 << (b - 1))
+                        }
+                    }
+                    c2 = c2 + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    // Wie viele Finger liegen wirklich auf. Das Feld Kontaktzahl sagt,
+    // wie viele der Plaetze in DIESEM Bericht gefuellt sind -- ein
+    // Touchpad mit mehr Fingern als Plaetzen schickt mehrere Berichte
+    // hintereinander. Ohne das Feld werden die Spitzenschalter gezaehlt.
+    var n: u64 = 0
+    var k: u64 = 0
+    var grenze: u64 = nc
+    if hat_zahl && gemeldet < nc {
+        grenze = gemeldet
+    }
+    while k < grenze {
+        if tip[k as usize] != 0 {
+            n = n + 1
+        }
+        k = k + 1
+    }
+    cs(state, C_FING, n)
+    if n > 0 {
+        cadd(state, C_TOUCH, 1)
+    }
+
+    // Die Teiler stehen im logischen Maximum der Achsen, und sie werden
+    // EINMAL ausgerechnet: ein Touchpad von 3616 Einheiten Breite auf
+    // 1024 Bildpunkte ist Faktor 3, nicht 3,53 -- der Rest wird
+    // aufgehoben (D_RX/D_RY), sonst geht jede langsame Bewegung
+    // verloren.
+    if maxx > 0 && dg(state, dev, D_SX) == 0 {
+        var sx: u64 = maxx / SCREEN_W
+        if sx == 0 {
+            sx = 1
+        }
+        ds(state, dev, D_SX, sx)
+    }
+    if maxy > 0 && dg(state, dev, D_SY) == 0 {
+        var sy: u64 = maxy / SCREEN_H
+        if sy == 0 {
+            sy = 1
+        }
+        ds(state, dev, D_SY, sy)
+    }
+
+    if n == 0 {
+        ds(state, dev, D_VALID, 0)
+        ds(state, dev, D_SCROLL, 0)
+        button(state, dev, btn)
+        ds(state, dev, D_NFING, 0)
+        return true
+    }
+
+    // Der fuehrende Finger: der erste Platz, dessen Spitzenschalter
+    // gesetzt ist.
+    var f: u64 = MAX_CONTACTS
+    var j: u64 = 0
+    while j < grenze {
+        if tip[j as usize] != 0 && f == MAX_CONTACTS {
+            f = j
+        }
+        j = j + 1
+    }
+    if f >= MAX_CONTACTS {
+        return true
+    }
+    let x: u64 = cx[f as usize]
+    let y: u64 = cy[f as usize]
+    let id: u64 = cid[f as usize]
+
+    // Wechselt der fuehrende Finger oder ist es der erste Bericht,
+    // wird NUR die Lage gemerkt und nichts bewegt.
+    if dg(state, dev, D_VALID) == 0 || dg(state, dev, D_CID) != id
+        || dg(state, dev, D_NFING) != n {
+        ds(state, dev, D_LX, x)
+        ds(state, dev, D_LY, y)
+        ds(state, dev, D_CID, id)
+        ds(state, dev, D_VALID, 1)
+        ds(state, dev, D_NFING, n)
+        ds(state, dev, D_SCROLL, 0)
+        button(state, dev, btn)
+        return true
+    }
+
+    let ddx: u64 = diff(x, dg(state, dev, D_LX))
+    let ddy: u64 = diff(y, dg(state, dev, D_LY))
+    ds(state, dev, D_LX, x)
+    ds(state, dev, D_LY, y)
+    ds(state, dev, D_NFING, n)
+
+    if n >= 2 {
+        rollen(state, dev, ddy, btn)
+        return true
+    }
+    show(state, dev, ddx, ddy, btn)
+    return true
+}
+
+// Ein Finger: der Zeiger. Geteilt durch den Teiler der Achse, der Rest
+// bleibt liegen und geht beim naechsten Bericht mit.
+fn show(state: u64, dev: u64, ddx: u64, ddy: u64, btn: u64) {
+    let sx: u64 = divisor(dg(state, dev, D_SX))
+    let sy: u64 = divisor(dg(state, dev, D_SY))
+    let rx: u64 = add(dg(state, dev, D_RX), ddx)
+    let ry: u64 = add(dg(state, dev, D_RY), ddy)
+    let mx: u64 = teile(rx, sx)
+    let my: u64 = teile(ry, sy)
+    ds(state, dev, D_RX, sub(rx, mul(mx, sx)))
+    ds(state, dev, D_RY, sub(ry, mul(my, sy)))
+    if mx == 0 && my == 0 && btn == dg(state, dev, D_BTN) {
+        return
+    }
+    cs(state, C_PADX, mx)
+    cs(state, C_PADY, my)
+    mouse_report(state, dev, btn, mx, my, 0, false)
+    button_count(state, dev, btn)
+}
+
+// Zwei Finger: rollen. Erst wenn SCROLL_STEP Einheiten zusammengekommen
+// sind, gibt es eine Rastung -- sonst rollt der Schirm bei jedem
+// Zittern.
+fn rollen(state: u64, dev: u64, ddy: u64, btn: u64) {
+    let acc: u64 = add(dg(state, dev, D_SCROLL), ddy)
+    if betrag(acc) < SCROLL_STEP {
+        ds(state, dev, D_SCROLL, acc)
+        button(state, dev, btn)
+        return
+    }
+    var r: u64 = 0
+    if ist_neg(acc) {
+        r = 15 // Finger nach oben -> Rad nach vorn
+        ds(state, dev, D_SCROLL, add(acc, SCROLL_STEP))
+    } else {
+        r = 1
+        ds(state, dev, D_SCROLL, sub(acc, SCROLL_STEP))
+    }
+    gfx.mouse_packet(state, 8 | (btn & 7), 0, 0, r, true)
+    trace_mouse(state, btn, 0, 0, r)
+    cadd(state, C_WHEEL, 1)
+    cadd(state, C_SCROLLS, 1)
+    ds(state, dev, D_BTN, btn)
+}
+
+// Nur der Knopf hat sich geaendert: ein Paket ohne Bewegung.
+fn button(state: u64, dev: u64, btn: u64) {
+    if btn == dg(state, dev, D_BTN) {
+        return
+    }
+    gfx.mouse_packet(state, 8 | (btn & 7), 0, 0, 0, false)
+    trace_mouse(state, btn, 0, 0, 0)
+    button_count(state, dev, btn)
+    ds(state, dev, D_BTN, btn)
+}
+
+fn button_count(state: u64, dev: u64, btn: u64) {
+    if (btn & 1) != 0 && (dg(state, dev, D_BTN) & 1) == 0 {
+        cadd(state, C_CLICKS, 1)
+    }
+    ds(state, dev, D_BTN, btn)
+}
+
+fn divisor(v: u64) -> u64 {
+    if v == 0 {
+        return 1
+    }
+    return v
+}
+
+// Vorzeichenbehaftete Rechnung auf u64 im Zweierkomplement.
+//
+// DIE ERSTE FASSUNG DIESER RUNDE HAT DEN KERN UMGEWORFEN, und die
+// Latenzmessung hat es gefunden: `add` rechnete `a + b`, sobald `b`
+// nicht negativ war. Ist aber `a` negativ (im Zweierkomplement also
+// eine sehr grosse Zahl) und `b` positiv, laeuft `a + b` ueber, und
+// Firn bricht bei einem Ueberlauf ab -- `panic: integer overflow in
+// 'u64 + u64'`. Auf einem echten Touchpad waere das bei der ersten
+// Bewegung NACH LINKS passiert: der Restbetrag wird negativ, der
+// naechste Bericht addiert etwas Positives dazu, und der Kernel steht.
+//
+// Im Zweierkomplement sind Addition, Subtraktion und Multiplikation
+// vorzeichenblind -- man muss sie nur UMLAUFEN lassen. Firn schreibt
+// das `+%`, `-%` und `*%`. Nur die Division braucht das Vorzeichen
+// wirklich.
+fn add(a: u64, b: u64) -> u64 {
+    return a +% b
+}
+
+fn sub(a: u64, b: u64) -> u64 {
+    return a -% b
+}
+
+fn mul(a: u64, b: u64) -> u64 {
+    return a *% b
+}
+
+fn teile(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        return 0
+    }
+    if ist_neg(a) {
+        return dreh(betrag(a) / b)
+    }
+    return a / b
+}
+
+fn diff(a: u64, b: u64) -> u64 {
+    return a -% b
+}
+
+// ------------------------------------ die Berichte des Boot-Protokolls
+//
+// SIE BLEIBEN, und das ist kein Rest, sondern der Rueckfallweg: ein
+// Geraet, dessen Berichtsbeschreibung sich nicht holen laesst oder die
+// dieser Zerleger ablehnt, laeuft weiter im Boot-Protokoll statt gar
+// nicht. Genau das ist der Grund, warum jedes BIOS eine USB-Tastatur
+// bedienen kann.
+fn kbd_report_boot(state: u64, dev: u64, p: u64) {
+    map_clear(state, dev, D_MAP)
+    let mods: u64 = kstate.get8(p)
+    var b: u64 = 0
+    while b < 8 {
+        if ((mods >> b) & 1) != 0 {
+            map_set(state, dev, D_MAP, 0xE0 + b)
+        }
+        b = b + 1
+    }
+    var i: u64 = 2
+    while i < 8 {
+        let u: u64 = kstate.get8(p + i)
+        if u > 3 {
+            map_set(state, dev, D_MAP, u)
+        }
+        i = i + 1
+    }
+    keys_report(state, dev)
+}
+
+fn mouse_report_boot(state: u64, dev: u64, p: u64, len: u64) {
+    let btn: u64 = kstate.get8(p) & 7
+    let dx: u64 = sbits(p + 1, 0, 8)
+    let dy: u64 = sbits(p + 2, 0, 8)
+    var rad: u64 = 0
+    var vier: bool = false
+    if len >= 4 {
+        vier = true
+        rad = sbits(p + 3, 0, 8)
+    }
+    mouse_report(state, dev, btn, dx, dy, rad, vier)
+}
+
+// --------------------------------------------------------- die Meldung
+fn say(state: u64) {
+    var s_a: [u8; 11] = "hidin: ta=\0"
+    var s_b: [u8; 5] = " lo=\0"
+    var s_c: [u8; 6] = " bew=\0"
+    var s_d: [u8; 6] = " rad=\0"
+    var s_e: [u8; 9] = " tasten=\0"
+    var s_f: [u8; 7] = " weg=\0\0"
+    var s_g: [u8; 6] = " ber=\0"
+    var s_h: [u8; 8] = " ueber=\0"
+    var s_i: [u8; 9] = " finger=\0"
+    var s_j: [u8; 9] = " rollen=\0"
+    var s_k: [u8; 9] = " klick=\0\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(keys(state))
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(releases(state))
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(moves(state))
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(wheels(state))
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(touches(state))
+    serial.puts((&s_f[0]) as u64)
+    serial.dec(drops(state))
+    serial.puts((&s_g[0]) as u64)
+    serial.dec(reports(state))
+    serial.puts((&s_h[0]) as u64)
+    serial.dec(overruns(state))
+    serial.puts((&s_i[0]) as u64)
+    serial.dec(pad_fingers(state))
+    serial.puts((&s_j[0]) as u64)
+    serial.dec(pad_scrolls(state))
+    serial.puts((&s_k[0]) as u64)
+    serial.dec(pad_clicks(state))
+    serial.nl()
+}
+
+// Ein paar Rechnungen, die keinen Bus brauchen -- die Bitzieherei und
+// die vorzeichenbehaftete Rechnung. Beides sind Stellen, an denen ein
+// Fehler erst auf echtem Blech auffiele.
+fn selftest(state: u64) -> u64 {
+    var b: [u8; 4] = [0 as u8; 4]
+    b[0] = 0xA5 as u8
+    b[1] = 0x3C as u8
+    b[2] = 0xFF as u8
+    b[3] = 0x00 as u8
+    let p: u64 = (&b[0]) as u64
+    var n: u64 = 0
+    if bits(p, 0, 8) == 0xA5 {
+        n = n + 1
+    }
+    if bits(p, 0, 1) == 1 {
+        n = n + 1
+    }
+    if bits(p, 1, 1) == 0 {
+        n = n + 1
+    }
+    // Ueber die Oktettgrenze: Bit 4..11 sind 0x3A5 >> 4 = 0xCA.
+    if bits(p, 4, 8) == 0xCA {
+        n = n + 1
+    }
+    if bits(p, 8, 4) == 0x0C {
+        n = n + 1
+    }
+    if sbits(p, 16, 8) == 0xFFFFFFFFFFFFFFFF {
+        n = n + 1
+    }
+    if sbits(p, 0, 8) == 0xA5 {
+        n = n + 1
+    }
+    if betrag(dreh(5)) == 5 {
+        n = n + 1
+    }
+    if sub(3, 5) == dreh(2) {
+        n = n + 1
+    }
+    if add(dreh(2), 5) == 3 {
+        n = n + 1
+    }
+    if teile(dreh(7), 2) == dreh(3) {
+        n = n + 1
+    }
+    if klemme8(dreh(200)) == 0x81 {
+        n = n + 1
+    }
+    if klemme8(dreh(3)) == 0xFD {
+        n = n + 1
+    }
+    if klemme8(300) == 127 {
+        n = n + 1
+    }
+    if scancode(0xE3) == 0x5B && is_ext(0xE3) {
+        n = n + 1
+    }
+    if scancode(0xE1) == 0x2A && !is_ext(0xE1) {
+        n = n + 1
+    }
+    return n
+}
+
+const SELFTEST_MAX: u64 = 16
+
+// ======================================================================
+// DIE MITSCHRIFT UND DIE WIEDERGABE (Modus `hidpad`).
+//
+// EIN ZERLEGER, DER RICHTIG ZERLEGT, IST NOCH KEINE EINGABE. Zwischen
+// der Feldtabelle und einem Tastendruck liegen die Bitzieherei, der
+// Vergleich zweier Tastenkarten, die Vorzeichen und beim Touchpad die
+// Rechnung aus zwei Lagen. Das laesst sich nicht messen, indem man ein
+// Geraet ansteckt -- QEMU hat kein Praezisions-Touchpad, und eine
+// Tastatur mit mehr als sechs gleichzeitigen Tasten hat es auch nicht.
+//
+// Also gehen ECHTE Berichte durch DENSELBEN Weg, den ein echtes Geraet
+// nimmt (`report`), und jedes Ereignis, das dabei herauskommt, wird
+// mitgeschrieben. Was dabei herauskommen MUSS, ist in
+// `tools/hid/descs.py` von Hand ausgerechnet, mit der Bitlage daneben --
+// und `tools/hid/run.sh` haelt beides gegeneinander.
+//
+// EHRLICH GESAGT, UND ES STEHT AUCH IN docs/REALHW.md: das misst den
+// WEG und nicht das GERAET. Dass ein bestimmtes Touchpad wirklich diese
+// Berichte schickt, steht in seiner Beschreibung und ist damit
+// gemessen; dass es sie so schickt, wie die Spezifikation es
+// vorschreibt, ist NICHT gemessen und kann es hier auch nicht werden.
+fn set_trace(state: u64, an: bool) {
+    var v: u64 = 0
+    if an {
+        v = 1
+    }
+    cs(state, C_TRACE, v)
+}
+
+fn spur_an(state: u64) -> bool {
+    return cg(state, C_TRACE) == 1
+}
+
+fn trace_key(state: u64, art: u64, u: u64, code: u64) {
+    var s_p: [u8; 14] = "hidev: druck \0"
+    var s_r: [u8; 12] = "hidev: los \0"
+    var s_c: [u8; 7] = " code=\0"
+    if !spur_an(state) {
+        return
+    }
+    if art == 1 {
+        serial.puts((&s_p[0]) as u64)
+    } else {
+        serial.puts((&s_r[0]) as u64)
+    }
+    serial.hex(u)
+    serial.puts((&s_c[0]) as u64)
+    serial.hex(code)
+    serial.nl()
+}
+
+fn trace_mouse(state: u64, btn: u64, ax: u64, ay: u64, r: u64) {
+    var s_a: [u8; 13] = "hidev: maus \0"
+    var s_x: [u8; 4] = " x=\0"
+    var s_y: [u8; 4] = " y=\0"
+    var s_r: [u8; 4] = " r=\0"
+    if !spur_an(state) {
+        return
+    }
+    serial.puts((&s_a[0]) as u64)
+    serial.hex(btn)
+    serial.puts((&s_x[0]) as u64)
+    serial.hex(ax)
+    serial.puts((&s_y[0]) as u64)
+    serial.hex(ay)
+    serial.puts((&s_r[0]) as u64)
+    serial.hex(r)
+    serial.nl()
+}
+
+// Alle Berichte aus `hidtest.fi` der Reihe nach durch `report`.
+//
+// Die Reihenfolge IST der Test: ein Touchpad wird aus ZWEI
+// aufeinanderfolgenden Berichten gelesen, und eine Tastenkarte auch.
+// Jeder Bericht laeuft mit der Beschreibung, zu der er gehoert; die
+// wird vorher in denselben Platz geladen, in dem auch ein echtes Geraet
+// stuende.
+fn wiedergabe(state: u64) {
+    var s_n: [u8; 12] = "hidb: nr=\0\0\0"
+    var s_d: [u8; 7] = " desc=\0"
+    var s_o: [u8; 5] = " ok=\0"
+    var s_e: [u8; 17] = "hidin: ende n=\0\0\0"
+    let scratch: u64 = state + IN_OFF + 0x800
+    var vorher: u64 = 999
+    var i: u64 = 0
+    let n: u64 = hidtest.bcount()
+    set_trace(state, true)
+    while i < n {
+        let d: u64 = hidtest.bdesc(i)
+        if d != vorher {
+            // Neue Beschreibung: laden, zerlegen, Zustand zuruecksetzen.
+            let dl: u64 = hidtest.load(d, hidrep.raw_of(state, 0))
+            hidrep.parse(state, 0, hidrep.raw_of(state, 0), dl)
+            reset_dev(state, 0)
+            vorher = d
+        }
+        let bl: u64 = hidtest.bload(i, scratch)
+        // ERST auswerten, DANN die Zeile drucken. Andersherum stuenden
+        // die Ereignisse MITTEN in der Zeile, und ein Testlaeufer, der
+        // Zeilen vergleicht, haette nichts zu vergleichen.
+        var ok2: u64 = 0
+        if report(state, 0, scratch, bl) {
+            ok2 = 1
+        }
+        serial.puts((&s_n[0]) as u64)
+        serial.dec(i)
+        serial.puts((&s_d[0]) as u64)
+        serial.dec(d)
+        serial.puts((&s_o[0]) as u64)
+        serial.dec(ok2)
+        serial.nl()
+        i = i + 1
+    }
+    set_trace(state, false)
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(n)
+    serial.nl()
+    say(state)
+}
+
+// ======================================================================
+// DIE LATENZ (Modus `hidlat`).
+//
+// GEMESSEN WIRD DER WEG, NICHT DER BUS. Was ein Tastendruck von der
+// Taste bis zum Zeichen braucht, sind zwei Betraege: die Zeit auf dem
+// Draht (PS/2 rund 1 ms fuer elf Bit bei 12,5 kHz; USB ein
+// Meldeintervall, das die Beschreibung des Endpunkts ansagt, meist 8
+// ms bei voller und 1 ms bei hoher Geschwindigkeit; I2C-HID die
+// Uebertragung von Registerwort plus Bericht bei 400 kHz) und die
+// Zeit im Kern. Die erste ist eine Eigenschaft des Busses und mit
+// einem Emulator gar nicht messbar -- QEMU stellt sie nicht nach. Die
+// zweite ist das, was diese Runde gebaut hat, und die wird hier
+// gemessen: vom fertigen Bericht bis zum Oktett in der
+// Zeilendisziplin.
+//
+// So gemessen: der Zeitstempelzaehler des Prozessors um N Durchlaeufe
+// herum, geteilt durch N, umgerechnet mit der Taktzahl, die `time.fi`
+// beim Hochlauf kalibriert hat. Kein Mittel ueber eine Flaeche, keine
+// Schaetzung.
+const LAT_N: u64 = 2000
+
+fn latenz(state: u64) {
+    var s_h: [u8; 26] = "hidlat: n=\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+    var s_p: [u8; 13] = "hidlat: ps2 \0"
+    var s_b: [u8; 19] = "hidlat: usb-boot \0\0"
+    var s_g: [u8; 18] = "hidlat: usb-gen \0\0"
+    var s_i: [u8; 19] = "hidlat: i2c-soft \0\0"
+    var s_t: [u8; 18] = "hidlat: touchpad \0"
+    var s_ns: [u8; 8] = " ns/Ev \0"
+    var s_us: [u8; 8] = " us=\0\0\0\0"
+    var s_z: [u8; 8] = " zyk=\0\0\0"
+    // Die Taktzahl kommt aus der Kalibrierung von `time.fi`. Steht dort
+    // noch nichts, wird HIER kalibriert -- eine Latenz in Zyklen ohne
+    // die Taktzahl ist keine Zeit, sondern eine Zahl.
+    var hz: u64 = time.khz(state)
+    if hz == 0 {
+        let unused: u64 = time.calibrate(state)
+        hz = time.khz(state)
+    }
+    serial.puts((&s_h[0]) as u64)
+    serial.dec(LAT_N)
+    serial.puts((&s_z[0]) as u64)
+    serial.dec(hz)
+    serial.nl()
+
+    // ---- 1. PS/2: ein Abtastcode direkt in `kbd.on_code`. Genau das,
+    //      was die Unterbrechung von IRQ 1 tut, ohne das Lesen am Tor.
+    // GEMESSEN WIRD MIT EINER UMSCHALTTASTE UND NICHT MIT EINEM
+    // BUCHSTABEN, und das ist keine Schoenerei: fuer einen Buchstaben
+    // druckt `kbd.fi` eine Zeile `key: x` auf die serielle Leitung, und
+    // die kostet bei 115200 Baud rund 230000 Zyklen -- das Tausendfache
+    // des Weges, um den es hier geht. Der erste Anlauf dieser Runde hat
+    // genau das gemessen und fuer alle vier Wege fast dieselbe Zahl
+    // geliefert; die Zahl war die der seriellen Leitung. Eine
+    // Umschalttaste geht denselben Weg bis zum Ende und druckt nichts.
+    var t0: u64 = time.tsc()
+    var i: u64 = 0
+    while i < LAT_N {
+        kbd.on_code(state, 0x2A)
+        kbd.on_code(state, 0xAA)
+        i = i + 1
+    }
+    melde(state, (&s_p[0]) as u64, time.tsc() - t0, hz)
+
+    // ---- 2. USB im Boot-Protokoll: acht Oktett, festes Format.
+    var r: [u8; 8] = [0 as u8; 8]
+    let p: u64 = (&r[0]) as u64
+    reset_dev(state, 0)
+    t0 = time.tsc()
+    i = 0
+    while i < LAT_N {
+        kstate.set8(p, 0x02 as u8)
+        kbd_report_boot(state, 0, p)
+        kstate.set8(p, 0 as u8)
+        kbd_report_boot(state, 0, p)
+        i = i + 1
+    }
+    melde(state, (&s_b[0]) as u64, time.tsc() - t0, hz)
+
+    // ---- 3. USB ueber den Zerleger: derselbe Bericht, aber nach der
+    //      BESCHREIBUNG gelesen. Der Unterschied zwischen 2 und 3 ist
+    //      der Preis dieser Runde.
+    let dl: u64 = hidtest.load(0, hidrep.raw_of(state, 0))
+    hidrep.parse(state, 0, hidrep.raw_of(state, 0), dl)
+    reset_dev(state, 0)
+    t0 = time.tsc()
+    i = 0
+    while i < LAT_N {
+        kstate.set8(p, 0x02 as u8)
+        report(state, 0, p, 8)
+        kstate.set8(p, 0 as u8)
+        report(state, 0, p, 8)
+        i = i + 1
+    }
+    melde(state, (&s_g[0]) as u64, time.tsc() - t0, hz)
+
+    // ---- 4. I2C-HID, der Anteil, der SOFTWARE ist. Ab dem fertigen
+    //      Bericht ist der Weg BUCHSTAEBLICH derselbe wie bei USB --
+    //      dieselbe Funktion. Was dazukommt, ist die Uebertragung, und
+    //      die hat QEMU nicht. Die Zahl steht hier, damit sichtbar ist,
+    //      dass der Kernanteil identisch ist, und NICHT als Latenz
+    //      eines echten I2C-Geraets.
+    var r2: [u8; 20] = [0 as u8; 20]
+    let p2: u64 = (&r2[0]) as u64
+    let dl2: u64 = hidtest.load(5, hidrep.raw_of(state, 1))
+    hidrep.parse(state, 1, hidrep.raw_of(state, 1), dl2)
+    reset_dev(state, 1)
+    kstate.set8(p2, 2 as u8)
+    t0 = time.tsc()
+    i = 0
+    while i < LAT_N {
+        kstate.set8(p2 + 1, 0x02 as u8)
+        report(state, 1, p2, 17)
+        kstate.set8(p2 + 1, 0 as u8)
+        report(state, 1, p2, 17)
+        i = i + 1
+    }
+    melde(state, (&s_i[0]) as u64, time.tsc() - t0, hz)
+
+    // ---- 5. Das Touchpad: 34 Felder, fuenf Finger, der teuerste
+    //      Bericht, den diese Runde kennt.
+    var r3: [u8; 32] = [0 as u8; 32]
+    let p3: u64 = (&r3[0]) as u64
+    let dl3: u64 = hidtest.load(3, hidrep.raw_of(state, 2))
+    hidrep.parse(state, 2, hidrep.raw_of(state, 2), dl3)
+    reset_dev(state, 2)
+    kstate.set8(p3, 1 as u8)
+    kstate.set8(p3 + 1, 0x13 as u8)
+    kstate.set8(p3 + 26, 1 as u8)
+    t0 = time.tsc()
+    i = 0
+    while i < LAT_N {
+        kstate.set8(p3 + 2, (i & 0xFF) as u8)
+        report(state, 2, p3, 29)
+        i = i + 1
+    }
+    melde1(state, (&s_t[0]) as u64, time.tsc() - t0, hz, LAT_N)
+    say(state)
+}
+
+// Zyklen -> Nanosekunden je Ereignis. `khz` ist die kalibrierte
+// Taktzahl in Kilohertz, also sind Zyklen/khz Millisekunden * 1000.
+// Gerechnet wird in dieser Reihenfolge, damit nichts ueberlaeuft.
+fn melde(state: u64, name: u64, zyklen: u64, hz: u64) {
+    melde1(state, name, zyklen, hz, LAT_N * 2)
+}
+
+fn melde1(state: u64, name: u64, zyklen: u64, hz: u64, ev: u64) {
+    var s_z: [u8; 6] = " zyk=\0"
+    var s_n: [u8; 5] = " ns=\0"
+    let jez: u64 = zyklen / ev
+    var ns: u64 = 0
+    if hz > 0 {
+        ns = jez * 1000000 / hz
+    }
+    serial.puts(name)
+    serial.puts((&s_z[0]) as u64)
+    serial.dec(jez)
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(ns)
+    serial.nl()
+}

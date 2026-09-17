@@ -7,7 +7,7 @@ Stellen gemalt, die nichts miteinander zu tun haben:
 
   * die Taskleiste (`kernel/user/taskbar.fi`) -- Ring 3, malt eine
     OSYM-Datei von der Platte,
-  * die Titelleiste (`kernel/wm.fi`) -- der KERN, der keine Datei von der
+  * die Titelleiste (`kernel/ui/wm.fi`) -- der KERN, der keine Datei von der
     Platte liest, waehrend er ein Fenster zeichnet.
 
 Zwei Stellen, ein Zeichen. Der bequeme Weg waere, die zwoelf mal zwoelf
@@ -18,11 +18,11 @@ und dieses Werkzeug macht daraus
 
   1. die OSYM-Dateien fuer die Platte (ueber `tools/k15/icon.py`,
      dasselbe Format wie jedes Buendelsymbol -- kein zweites),
-  2. `kernel/netmark.fi`, den Kern-Teil: dieselben Zeichen als
+  2. `kernel/net/netmark.fi`, den Kern-Teil: dieselben Zeichen als
      Bitreihen, damit `wm.fi` sie ohne Dateisystem malen kann.
 
 UND ES PRUEFT SICH SELBST. `icons.py --pruefe` baut alles noch einmal und
-vergleicht es mit dem, was im Baum liegt. Weicht `kernel/netmark.fi` von
+vergleicht es mit dem, was im Baum liegt. Weicht `kernel/net/netmark.fi` von
 der Zeichnung ab, faellt der Abnahmelauf durch -- eine erzeugte Datei
 ohne diese Pruefung ist eine Verdopplung mit Zusatzschritt.
 
@@ -42,8 +42,8 @@ DIE GESTALTUNGSREGELN, gegen die hier GEMESSEN wird (nicht behauptet):
 
 Verwendung:
     icons.py bauen  <ausgabeverzeichnis>
-    icons.py kern   <kernel/netmark.fi>
-    icons.py pruefe [--kern kernel/netmark.fi]
+    icons.py kern   <kernel/net/netmark.fi>
+    icons.py pruefe [--kern kernel/net/netmark.fi]
 """
 
 import os
@@ -283,7 +283,7 @@ def masse():
 # Datei im Baum von der frisch gebauten ab und dieser Laeufer faellt
 # durch -- genau so ist es passiert.
 KOPF = """// SPDX-License-Identifier: GPL-2.0-only
-// kernel/netmark.fi -- ERZEUGT AUS assets/netview/mark-*.txt.
+// kernel/net/netmark.fi -- ERZEUGT AUS assets/netview/mark-*.txt.
 //
 // NICHT VON HAND AENDERN. `tools/netview/icons.py kern` schreibt diese
 // Datei, und `tools/netview/run.sh` baut sie im Abnahmelauf noch einmal

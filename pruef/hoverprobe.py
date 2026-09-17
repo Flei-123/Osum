@@ -15,7 +15,7 @@ Zeigegeraet haengt, das der Kern abfragt:
 Der Kern zaehlte `kl=1` bei `xy=639,222`, aber `qs` meldete nie
 `qs: druck`. Das ist KEIN Fehler des Kontrollzentrums, sondern der
 Messung: ohne `-device qemu-xhci -device usb-tablet` kommt bei diesem
-Kern kein einziges Mausereignis an, denn `kernel/usb.fi` hat genau
+Kern kein einziges Mausereignis an, denn `kernel/usb/usb.fi` hat genau
 einen Wirtstreiber (xHCI), und das ist der Weg, ueber den `ps2m.fi`
 seine Pakete bekommt (`gfx.fi:232 -> ps2m.usb_packet`).
 

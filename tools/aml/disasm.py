@@ -4,7 +4,7 @@
 
 WARUM ES DIESES PROGRAMM GIBT.
 
-Runde AML baut einen AML-Interpreter in `kernel/aml.fi`.  Eine Zusage
+Runde AML baut einen AML-Interpreter in `kernel/acpi/aml.fi`.  Eine Zusage
 wie "der Namensraum enthaelt die erwarteten Geraete" oder "wir decken
 so und so viele Opcodes ab" ist nichts wert, wenn dieselbe Software sie
 prueft, die sie aufstellt -- dann misst der Test seine eigene Meinung.

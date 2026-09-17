@@ -81,15 +81,15 @@ if [ -r "$BBDYN" ]; then
 fi
 echo
 echo "3. WAS VON UNS IST"
-echo "   kernel/elf.fi -- die einzige Kerndatei, die diese Runde anfasst."
+echo "   kernel/ldr/elf.fi -- die einzige Kerndatei, die diese Runde anfasst."
 BASE=$(git merge-base main dynlader 2>/dev/null || echo "")
 if [ -n "$BASE" ]; then
     git diff --numstat "$BASE"..dynlader -- kernel/ 2>/dev/null \
         | awk '{printf "   %-22s +%s -%s Zeilen\n", $3, $1, $2}'
-    ZU=$(git diff "$BASE"..dynlader -- kernel/elf.fi | grep '^+' | grep -v '^+++' | wc -l)
-    KOM=$(git diff "$BASE"..dynlader -- kernel/elf.fi | grep '^+' | grep -v '^+++' \
+    ZU=$(git diff "$BASE"..dynlader -- kernel/ldr/elf.fi | grep '^+' | grep -v '^+++' | wc -l)
+    KOM=$(git diff "$BASE"..dynlader -- kernel/ldr/elf.fi | grep '^+' | grep -v '^+++' \
           | sed 's/^+//' | grep -cE '^\s*//')
-    LEER=$(git diff "$BASE"..dynlader -- kernel/elf.fi | grep '^+' | grep -v '^+++' \
+    LEER=$(git diff "$BASE"..dynlader -- kernel/ldr/elf.fi | grep '^+' | grep -v '^+++' \
           | sed 's/^+//' | grep -cE '^\s*$')
     echo "   davon Kommentar: $KOM, leer: $LEER, echter CODE: $((ZU - KOM - LEER))"
 fi

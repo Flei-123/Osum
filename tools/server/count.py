@@ -5,7 +5,7 @@ GREIFEN.
 
 Die Aufgabe der Runde SERVERBUILD verlangt diese Zahl ausdruecklich:
 sie sagt, wie sauber der Schnitt ist. Vor der Runde waren es 745
-Stellen in acht Dateien, danach null -- ausser in `kernel/gfx.fi`, und
+Stellen in acht Dateien, danach null -- ausser in `kernel/gfx/gfx.fi`, und
 das ist die Naht selbst.
 
 GEZAEHLT WIRD NUR CODE. Kommentare fliegen raus, bevor gesucht wird;
@@ -71,7 +71,7 @@ def ohne_importe(text):
     RUNDE ROTABSCHNITTE.  `kernel/user/fuib.fi:72` stand mit genau einer
     Stelle in der Liste, und diese Stelle war die Zeile `import
     font.metrics` -- der Name eines MODULS aus `lib/`, nicht der Aufruf
-    von `kernel/font.fi`.  Eine Einbindung sagt nichts darueber, ob
+    von `kernel/gfx/font.fi`.  Eine Einbindung sagt nichts darueber, ob
     jemand den Rahmenpuffer anfasst; sie nennt nur, woher ein Name
     kommt.  Gezaehlt werden soll der ZUGRIFF.
     """

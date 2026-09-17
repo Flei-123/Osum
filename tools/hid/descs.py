@@ -32,7 +32,7 @@ mit Kommentar, damit jede Zeile nachlesbar ist:
                       DAS IST DER FALL, DEN DAS BOOT-PROTOKOLL NICHT KANN.
 
 Aufruf:
-    python3 tools/hid/descs.py firn   > kernel/hidtest.fi
+    python3 tools/hid/descs.py firn   > kernel/drv/hid/hidtest.fi
     python3 tools/hid/descs.py kopf              # Erwartung, Zeile je Geraet
     python3 tools/hid/descs.py felder            # Erwartung, Zeile je Feld
     python3 tools/hid/descs.py fehler            # die kaputten, mit Nummer
@@ -588,7 +588,7 @@ def ausgeben(rid, kd, flags, base, rsize, rcount, page, ul, umin, umax,
 def zerlege(d):
     """(kopf, felder).  Bricht bei einer kaputten Beschreibung mit einer
     Fehlernummer ab -- und laesst stehen, was bis dahin erkannt wurde,
-    genau wie kernel/hidrep.fi."""
+    genau wie kernel/drv/hid/hidrep.fi."""
     kopf = {"ok": 0, "err": 0, "errat": 0, "felder": 0, "rids": 0, "hasid": 0,
             "top": 0, "art": 0, "bits": 0, "posten": 0, "tiefe": 0,
             "len": len(d), "ridtab": []}
@@ -750,7 +750,7 @@ def firn():
     z = []
     a = z.append
     a("// SPDX-License-Identifier: GPL-2.0-only")
-    a("// kernel/hidtest.fi -- ERZEUGT VON tools/hid/descs.py, NICHT VON HAND.")
+    a("// kernel/drv/hid/hidtest.fi -- ERZEUGT VON tools/hid/descs.py, NICHT VON HAND.")
     a("//")
     a("// Sechs ECHTE Berichtsbeschreibungen und vierzehn kaputte, gepackt zu")
     a("// je acht Oktett in ein Wort. Firn kann in einer Zeichenkette keine")

@@ -1,0 +1,350 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/ps2m-aus.fi -- RUNDE MODUL: DAS ZEIGEGERAET IST NICHT IM KERN.
+//
+// Diese Datei tritt an die Stelle von `kernel/ps2m.fi`, wenn
+// `tools/build-kernel.sh --ohne-ps2m` baut. Sie hat GENAU DIESELBEN
+// EINUNDDREISSIG AUSFUHREN und nicht eine Zeile Treiber. Was sie tut,
+// ist nachsehen, ob in der Treibertafel (`kernel/modtab.fi`) unter
+// `modidx.SLOT_MAUS` eine Adresse steht, und dorthin springen -- oder,
+// wenn dort nichts steht, "es gibt kein Zeigegeraet" antworten.
+//
+// DAS IST DER GRIFF, DEN DIESES REPO SCHON ZWEIMAL HAT: `kernel/wg-aus.fi`
+// (der Kern ohne Tunnel) und `kernel/gfx-aus.fi` (der Kern ohne Grafik,
+// Runde SERVERBUILD) sind dasselbe -- eine Datei mit denselben Symbolen
+// und leeren Rumpfen, eingesetzt beim Bau statt eines `#ifdef`. Neu ist
+// nur, dass die Rumpfe hier nicht leer bleiben MUESSEN: sie koennen zur
+// Laufzeit gefuellt werden.
+//
+// UND GENAU DAS IST DIE MESSUNG DER RUNDE. Derselbe Kern, dieselbe
+// Kommandozeile:
+//
+//   ohne Modul:  ps2m.present() = false,  packets = 0
+//   mit Modul:   ps2m.present() = true,   packets steigt mit jeder
+//                Bewegung, die der QEMU-Monitor schickt
+//
+// Kein Aufrufer weiss davon. `wm.fi` ruft `ps2m.x(state)` an fuenfzehn
+// Stellen, `kgui.fi` an neunzehn, `gfx.fi` an neun -- keine davon ist
+// fuer diese Runde angefasst worden, und das ist der Beweis dafuer, dass
+// der Schnitt an der richtigen Stelle liegt.
+//
+// DER PREIS, ehrlich: ein Aufruf ueber diese Datei kostet einen
+// Tafelzugriff (ein Lesen aus `kdata`), einen Vergleich gegen Null und
+// einen indirekten Sprung mehr als der einkompilierte Treiber. Das ist
+// ABGEZAEHLT und NICHT GEMESSEN -- eine Zeitmessung an einer Funktion,
+// die je Bildwiederholung dreissigmal laeuft, braeuchte einen Zaehler,
+// den diese Runde nicht gebaut hat. Steht als offene Kante in
+// docs/RUNDE-MODUL.md.
+
+profile kernel
+
+import lib.kstate
+import serial
+import ldr.modtab
+import ldr.modidx
+
+export {
+    init, present, irq, id, x, y, buttons, wheel, packets, drops, moves,
+    irqs, polls, spurious, clicks, status, reset_counters, poll_one,
+    set_poll, polling,
+    set_bounds, set_pos, changed, take_change, usb_packet, adopt,
+    B_LEFT, B_RIGHT, B_MIDDLE, selftest, selftest_max
+}
+
+// Dieselben Zahlen wie in `kernel/ps2m.fi`. Sie stehen HIER noch einmal
+// und nicht in `modidx.fi`, weil sie zum PROTOKOLL des Geraets gehoeren
+// und nicht zur Schnittstelle des Laders -- `wm.fi` prueft `btn &
+// ps2m.B_LEFT`, und das muss ohne jedes Modul gelten.
+const B_LEFT: u64 = 1
+const B_RIGHT: u64 = 2
+const B_MIDDLE: u64 = 4
+
+// ------------------------------------------------------- der Sprung
+//
+// Wie `kernel/msr.fi` und `kernel/modul.fi`: Firn wandelt eine Zahl
+// nicht in einen Funktionszeiger, aber es kann eine Adresse in ein
+// Register legen und `call` schreiben.
+
+fn ruf0(adr: u64) -> u64 {
+    var rc: u64 = 0
+    asm("call rax", in("rax") adr, out("rax") & rc, clobber("memory"))
+    return rc
+}
+
+fn ruf1(adr: u64, a: u64) -> u64 {
+    var rc: u64 = 0
+    asm("call rax", in("rax") adr, in("rdi") a, out("rax") & rc,
+        clobber("memory"))
+    return rc
+}
+
+fn ruf2(adr: u64, a: u64, b: u64) -> u64 {
+    var rc: u64 = 0
+    asm("call rax", in("rax") adr, in("rdi") a, in("rsi") b,
+        out("rax") & rc, clobber("memory"))
+    return rc
+}
+
+fn ruf3(adr: u64, a: u64, b: u64, c: u64) -> u64 {
+    var rc: u64 = 0
+    asm("call rax", in("rax") adr, in("rdi") a, in("rsi") b, in("rdx") c,
+        out("rax") & rc, clobber("memory"))
+    return rc
+}
+
+fn ruf6(adr: u64, a: u64, b: u64, c: u64, d: u64, e: u64, f: u64) -> u64 {
+    var rc: u64 = 0
+    asm("call rax", in("rax") adr, in("rdi") a, in("rsi") b, in("rdx") c,
+        in("rcx") d, in("r8") e, in("r9") f, out("rax") & rc,
+        clobber("memory"))
+    return rc
+}
+
+fn op(state: u64, i: u64) -> u64 {
+    return modtab.op(state, modidx.SLOT_MOUSE, i)
+}
+
+// Die zwei Ausfuhren OHNE `state`. Sie kommen aus `ps2m.fi` so und
+// koennen deshalb nicht anders aussehen; der Datenbereich wird auf
+// demselben Weg geholt wie in `kernel/fb.fi` seit Runde K7B.
+fn basis() -> u64 {
+    return asm("lea rax, [rip + kdata]", out("rax"))
+}
+
+// ------------------------------------------------------ die Ausfuhren
+
+fn init(state: u64, w: u64, h: u64) -> bool {
+    let a: u64 = op(state, modidx.P_INIT)
+    if a == 0 {
+        return false
+    }
+    return ruf3(a, state, w, h) != 0
+}
+
+fn present(state: u64) -> bool {
+    let a: u64 = op(state, modidx.P_PRESENT)
+    if a == 0 {
+        return false
+    }
+    return ruf1(a, state) != 0
+}
+
+fn irq(state: u64) {
+    let a: u64 = op(state, modidx.P_IRQ)
+    if a == 0 {
+        return
+    }
+    ruf1(a, state)
+}
+
+fn id(state: u64) -> u64 {
+    let a: u64 = op(state, modidx.P_ID)
+    if a == 0 {
+        return 0
+    }
+    return ruf1(a, state)
+}
+
+fn x(state: u64) -> u64 {
+    let a: u64 = op(state, modidx.P_X)
+    if a == 0 {
+        return 0
+    }
+    return ruf1(a, state)
+}
+
+fn y(state: u64) -> u64 {
+    let a: u64 = op(state, modidx.P_Y)
+    if a == 0 {
+        return 0
+    }
+    return ruf1(a, state)
+}
+
+fn buttons(state: u64) -> u64 {
+    let a: u64 = op(state, modidx.P_BUTTONS)
+    if a == 0 {
+        return 0
+    }
+    return ruf1(a, state)
+}
+
+fn wheel(state: u64) -> u64 {
+    let a: u64 = op(state, modidx.P_WHEEL)
+    if a == 0 {
+        return 0
+    }
+    return ruf1(a, state)
+}
+
+fn packets(state: u64) -> u64 {
+    let a: u64 = op(state, modidx.P_PACKETS)
+    if a == 0 {
+        return 0
+    }
+    return ruf1(a, state)
+}
+
+fn drops(state: u64) -> u64 {
+    let a: u64 = op(state, modidx.P_DROPS)
+    if a == 0 {
+        return 0
+    }
+    return ruf1(a, state)
+}
+
+fn moves(state: u64) -> u64 {
+    let a: u64 = op(state, modidx.P_MOVES)
+    if a == 0 {
+        return 0
+    }
+    return ruf1(a, state)
+}
+
+fn irqs(state: u64) -> u64 {
+    let a: u64 = op(state, modidx.P_IRQS)
+    if a == 0 {
+        return 0
+    }
+    return ruf1(a, state)
+}
+
+fn polls(state: u64) -> u64 {
+    let a: u64 = op(state, modidx.P_POLLS)
+    if a == 0 {
+        return 0
+    }
+    return ruf1(a, state)
+}
+
+fn spurious(state: u64) -> u64 {
+    let a: u64 = op(state, modidx.P_SPURIOUS)
+    if a == 0 {
+        return 0
+    }
+    return ruf1(a, state)
+}
+
+fn clicks(state: u64) -> u64 {
+    let a: u64 = op(state, modidx.P_CLICKS)
+    if a == 0 {
+        return 0
+    }
+    return ruf1(a, state)
+}
+
+fn status() -> u64 {
+    let a: u64 = op(basis(), modidx.P_STATUS)
+    if a == 0 {
+        return 0
+    }
+    return ruf0(a)
+}
+
+fn reset_counters(state: u64) {
+    let a: u64 = op(state, modidx.P_RESET)
+    if a == 0 {
+        return
+    }
+    ruf1(a, state)
+}
+
+fn poll_one(state: u64) -> bool {
+    let a: u64 = op(state, modidx.P_POLL_ONE)
+    if a == 0 {
+        return false
+    }
+    return ruf1(a, state) != 0
+}
+
+fn set_poll(state: u64, on: bool) {
+    let a: u64 = op(state, modidx.P_SET_POLL)
+    if a == 0 {
+        return
+    }
+    var b: u64 = 0
+    if on {
+        b = 1
+    }
+    ruf2(a, state, b)
+}
+
+fn polling(state: u64) -> bool {
+    let a: u64 = op(state, modidx.P_POLLING)
+    if a == 0 {
+        return false
+    }
+    return ruf1(a, state) != 0
+}
+
+fn set_bounds(state: u64, w: u64, h: u64) {
+    let a: u64 = op(state, modidx.P_SET_BOUNDS)
+    if a == 0 {
+        return
+    }
+    ruf3(a, state, w, h)
+}
+
+fn set_pos(state: u64, nx: u64, ny: u64) {
+    let a: u64 = op(state, modidx.P_SET_POS)
+    if a == 0 {
+        return
+    }
+    ruf3(a, state, nx, ny)
+}
+
+fn changed(state: u64) -> bool {
+    let a: u64 = op(state, modidx.P_CHANGED)
+    if a == 0 {
+        return false
+    }
+    return ruf1(a, state) != 0
+}
+
+fn take_change(state: u64) -> bool {
+    let a: u64 = op(state, modidx.P_TAKE_CHANGE)
+    if a == 0 {
+        return false
+    }
+    return ruf1(a, state) != 0
+}
+
+fn usb_packet(state: u64, b0: u64, b1: u64, b2: u64, b3: u64, vier: bool) {
+    let a: u64 = op(state, modidx.P_USB_PACKET)
+    if a == 0 {
+        return
+    }
+    var v: u64 = 0
+    if vier {
+        v = 1
+    }
+    ruf6(a, state, b0, b1, b2, b3, v)
+}
+
+fn adopt(state: u64, w: u64, h: u64) {
+    let a: u64 = op(state, modidx.P_ADOPT)
+    if a == 0 {
+        return
+    }
+    ruf3(a, state, w, h)
+}
+
+fn selftest(state: u64) -> u64 {
+    let a: u64 = op(state, modidx.P_SELFTEST)
+    if a == 0 {
+        return 0
+    }
+    return ruf1(a, state)
+}
+
+fn selftest_max() -> u64 {
+    let a: u64 = op(basis(), modidx.P_SELFTEST_MAX)
+    if a == 0 {
+        // OHNE MODUL IST DIE HOECHSTZAHL NICHT NULL, SONDERN DIE
+        // DESSELBEN TREIBERS. `kgui.fi` druckt "selftest x/y", und ein
+        // y von 0 saehe aus wie ein kaputter Test statt wie ein
+        // fehlendes Geraet. Der Selbsttest meldet dann 0 von 10 --
+        // richtig, und lesbar.
+        return 10
+    }
+    return ruf0(a)
+}

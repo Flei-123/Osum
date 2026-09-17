@@ -8,7 +8,7 @@ Terminalschrift einzulesen.
 Es wird `echo <alphabet>` getippt, fotografiert, und der getippte Text
 danebengelegt. `lies3.py --lerne` zieht daraus die Muster.
 
-WARUM NICHT DIE TABELLE AUS kernel/font.fi NACHBAUEN: sie liegt dort
+WARUM NICHT DIE TABELLE AUS kernel/gfx/font.fi NACHBAUEN: sie liegt dort
 als zehn Zeichenkettenstuecke im Datenbereich, und ein Nachbau waere
 eine zweite Quelle fuer dieselbe Wahrheit -- genau das, was dieses
 Projekt sonst ueberall vermeidet. Eingelesen ist sie richtig oder

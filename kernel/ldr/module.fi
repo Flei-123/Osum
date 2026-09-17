@@ -1,0 +1,1079 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/modul.fi -- RUNDE MODUL: EIN TREIBER, DER NICHT IM KERN STEHT.
+//
+// Bis zu dieser Runde war die Antwort auf die Frage "welche Treiber hat
+// Osum" beim UEBERSETZEN entschieden. `kernel/netdev.fi` waehlt aus
+// PCI-Nummern einen Treiber -- aber nur unter denen, die
+// `tools/build-kernel.sh` mit hineingebunden hat. Ein Geraet, fuer das
+// beim Bau kein Treiber dabei war, bleibt fuer immer stumm; ein Treiber,
+// den es fuer dieses Geraet gibt, kommt nur mit einem NEUEN KERN hinein.
+// Genau das ist der Unterschied, nach dem der Eigner gefragt hat: unter
+// Windows steht "Microsoft Basic Display Adapter", und man laedt einen
+// Treiber DAZU, ohne Windows neu zu bauen.
+//
+// Diese Datei ist der Weg dorthin. Sie liest eine Datei von der Platte,
+// prueft sie, legt sie in den Speicher, bindet ihre offenen Namen gegen
+// `kernel/ksym.fi`, loest ihre Relokationen auf und springt hinein.
+// `docs/MODUL-BEFUND.md` sagt, warum es dieser Weg ist und nicht ein
+// anderer, und was er NICHT bringt (naemlich einen Treiber von NVIDIA).
+//
+// ================================================== WAS EINE .omod IST
+//
+// Ein Kopf von 64 Oktetten, danach eine gewoehnliche ELF64-Objektdatei
+// (ET_REL, das, was `firnc -o x.o x.fi` erzeugt), danach 64 Oktette
+// Ed25519-Signatur ueber ALLES DAVOR:
+//
+//   0   8   Kennung "OSUMMOD\n"
+//   8   4   Formatfassung dieses Kopfes (1)
+//  12   4   die Schnittstellenfassung, gegen die gebaut wurde (ksym.ABI)
+//  16   8   Laenge der Nutzlast
+//  24   8   Merker, 0
+//  32  32   Name, nullbeendet
+//  64   n   die Objektdatei
+//  64+n 64  Ed25519 ueber die Oktette 0 .. 64+n
+//
+// DREI RIEGEL, in dieser Reihenfolge, und jeder hat eine Gegenprobe in
+// `tools/module/run.sh`, die ihn ausloest:
+//
+//   1. DIE KENNUNG UND DAS FORMAT. Billig, und faengt die Datei ab, die
+//      gar keine ist.
+//   2. DIE SCHNITTSTELLENFASSUNG. Ein Modul fuer einen anderen Kern wird
+//      ABGEWIESEN, nicht versucht. Das ist die Zeile, an der Windows'
+//      WDDM 1.x/2.x/3.x haengt und die Linux mit `vermagic` loest --
+//      und der Unterschied zwischen "der Treiber laeuft nicht" und "die
+//      Maschine steht".
+//   3. DIE SIGNATUR. Ed25519 (RFC 8032) gegen einen im Kern
+//      EINKOMPILIERTEN oeffentlichen Schluessel. Nicht gegen eine Datei
+//      auf der Platte: wer die Platte schreiben kann, schriebe sonst
+//      beides. Dasselbe tut `werkzeug/store` fuer den Katalog und
+//      `kernel/user/opk.fi` fuer ein Paket -- ein Modul im Ring 0 ist
+//      der Ort, an dem es am meisten zaehlt. Ein unsigniertes Modul im
+//      Ring 0 ist ein zweiter Kern.
+//
+// ============================================== WAS DER LADER WIRKLICH TUT
+//
+//   1. Die Datei in einen Rahmenlauf lesen (`mem.frame_run`).
+//   2. Kopf, Fassung, Signatur.
+//   3. Die Abschnittstafel durchgehen. Jeder Abschnitt mit SHF_ALLOC
+//      bekommt einen Platz im Abbild, ausgerichtet auf sh_addralign.
+//   4. Einen ZWEITEN Rahmenlauf fuer das Abbild, PROGBITS kopieren,
+//      NOBITS nullen.
+//   5. Jede Relokation aus jedem `.rela.<abschnitt>`, dessen Ziel im
+//      Abbild liegt: das Symbol aufloesen (im Modul selbst, oder ueber
+//      `ksym.such` im Kern), die Zahl ausrechnen, hineinschreiben.
+//      Fuenf Arten: 64, PC32, PLT32, 32, 32S. Alles andere wird
+//      abgewiesen -- ein Lader, der eine unbekannte Art ueberspringt,
+//      liefert ein Abbild mit einem Loch darin.
+//   6. `modul_init` und `modul_exit` in der Symboltafel suchen.
+//   7. Den Dateipuffer zurueckgeben, `modul_init` anspringen.
+//
+// DER SPRUNG geht mit `asm("call rax", ...)` und ist genau der, den
+// `kernel/msr.fi` seit Runde KVMFIX macht. Firn kann eine Zahl nicht in
+// einen Funktionszeiger wandeln (`vfs.fi` sagt das ausdruecklich); was
+// es kann, ist eine Adresse in ein Register legen und `call` schreiben.
+//
+// ================================== WAS DIESER PROTOTYP NICHT KANN
+//
+// Steht ausfuehrlich in `docs/RUNDE-MODUL.md`, Abschnitt "was noch
+// fehlt". In einem Satz: keine Abhaengigkeiten zwischen Modulen, kein
+// Verweiszaehler, kein W^X (Osum setzt EFER.NXE gar nicht, jede
+// beschreibbare Seite ist ausfuehrbar), keine Ruecknahme halb
+// angewandter Relokationen, und ein Modul, das in Ring 0 abstuerzt,
+// nimmt den Kern mit -- das ist gemessen und steht als Zahl im Bericht.
+
+profile kernel
+
+import lib.kstate
+import serial
+import mm.mem
+import fs.fs
+import lib.ksym
+import ldr.modtab
+import ldr.modidx
+import crypto.ed25519
+
+export {
+    init, load, entladen, ready, reason, say_reason,
+    tries, rejects, loaded, syms, ext_syms, relocs, image_bytes, file_bytes,
+    sig_ok, secs, unloads, entry_of, base_of, frames_of, abi_of_file,
+    init_rc, ruf1, ruf0, ruf2, ruf3, ruf6,
+    R_OK, R_NOFILE, R_SHORT, R_TOOBIG, R_MAGIC, R_FORMAT, R_ABI, R_LEN,
+    R_SIG, R_ELF, R_ETYPE, R_MACHINE, R_SHDR, R_SECTIONS, R_NOMEM,
+    R_SYMTAB, R_SYM, R_RELTYPE, R_RANGE, R_ENTRY, R_SLOT, R_INIT,
+    R_SECOFF, R_READ, R_ALIGN, MAX_MOD
+}
+
+// ---------------------------------------------------------- die Gruende
+//
+// Wie in `kernel/elf.fi`: jeder Grund hat einen Namen, jeder Name wird
+// gedruckt, und der Kern lebt nach jedem von ihnen weiter. Der Laeufer
+// liest sie von der seriellen Leitung ab.
+const R_OK: u64 = 0
+const R_NOFILE: u64 = 1 // es gibt diesen Pfad nicht
+const R_SHORT: u64 = 2 // kuerzer als Kopf und Signatur
+const R_TOOBIG: u64 = 3 // groesser als der Vorrat dieses Laders
+const R_MAGIC: u64 = 4 // "OSUMMOD\n" fehlt
+const R_FORMAT: u64 = 5 // Formatfassung des Kopfes unbekannt
+const R_ABI: u64 = 6 // gegen einen anderen Kern gebaut
+const R_LEN: u64 = 7 // das Laengenfeld passt nicht zur Datei
+const R_SIG: u64 = 8 // die Ed25519-Signatur gilt nicht
+const R_ELF: u64 = 9 // keine ELF64-Datei
+const R_ETYPE: u64 = 10 // nicht ET_REL
+const R_MACHINE: u64 = 11 // nicht x86-64
+const R_SHDR: u64 = 12 // die Abschnittstafel liegt ausserhalb
+const R_SECTIONS: u64 = 13 // mehr Abschnitte als Plaetze
+const R_NOMEM: u64 = 14 // kein Rahmenlauf frei
+const R_SYMTAB: u64 = 15 // keine Symboltafel
+const R_SYM: u64 = 16 // ein Name, den der Kern nicht anbietet
+const R_RELTYPE: u64 = 17 // eine Relokationsart, die dieser Lader nicht kann
+const R_RANGE: u64 = 18 // eine Relokation passt nicht in 32 Bit
+const R_ENTRY: u64 = 19 // `modul_init` fehlt
+const R_SLOT: u64 = 20 // kein Modulplatz frei
+const R_INIT: u64 = 21 // `modul_init` hat einen Fehler gemeldet
+const R_SECOFF: u64 = 22 // ein Abschnitt liegt ausserhalb der Datei
+const R_READ: u64 = 23 // die Platte gab weniger als verlangt
+const R_ALIGN: u64 = 24 // eine Ausrichtung, die keine Zweierpotenz ist
+
+// --------------------------------------------------------- die Aufteilung
+//
+// `kstate.MODUL_OFF` (0x4D000), drei Seiten. 0x0800..0x0C00 gehoert
+// `modtab.fi`; alles andere hier. Eingetragen in
+// `tools/kernel/memmap.py`.
+const S_READY: u64 = 0x00
+const S_LOADED: u64 = 0x08
+const S_TRIES: u64 = 0x10
+const S_REJECTS: u64 = 0x18
+const S_REASON: u64 = 0x20
+const S_SYMS: u64 = 0x28
+const S_RELOCS: u64 = 0x30
+const S_BYTES: u64 = 0x38
+const S_FILEBYTES: u64 = 0x40
+const S_SIGOK: u64 = 0x48
+const S_SECS: u64 = 0x50
+const S_UNLOADS: u64 = 0x58
+const S_ABIFILE: u64 = 0x60
+const S_INITRC: u64 = 0x68
+const S_EXTSYMS: u64 = 0x70 // wie viele Namen aus dem KERN kamen
+
+// Die Modulsaetze.
+const MOD_OFF: u64 = 0x0100
+const MOD_SPAN: u64 = 0x80
+const MAX_MOD: u64 = 4
+const M_USED: u64 = 0x00
+const M_BASE: u64 = 0x08
+const M_FRAMES: u64 = 0x10
+const M_ENTRY: u64 = 0x18
+const M_EXIT: u64 = 0x20
+const M_SLOT: u64 = 0x28
+const M_NAME: u64 = 0x30 // 32 Oktett
+
+// Wo die Plaetze der Abschnitte im Abbild vermerkt werden.
+const SEC_OFF: u64 = 0x0400
+const MAX_SEC: u64 = 64
+
+// Der Kopf der Datei wird hierhin kopiert, damit die Signaturpruefung
+// und der Parser nicht beide im Rahmenlauf herumzeigen.
+const HDR_OFF: u64 = 0x1000
+
+// Wie gross eine Moduldatei hoechstens sein darf. 512 KiB sind 128
+// Rahmen; das groesste Modul dieser Runde hat 21.
+const MAX_FILE: u64 = 0x80000
+
+const HDR_LEN: u64 = 64
+const SIG_LEN: u64 = 64
+const FORMAT: u64 = 1
+
+// ------------------------------------------------------------ ELF-Zahlen
+const ET_REL: u64 = 1
+const EM_X86_64: u64 = 62
+const SHT_PROGBITS: u64 = 1
+const SHT_SYMTAB: u64 = 2
+const SHT_NOBITS: u64 = 8
+const SHT_RELA: u64 = 4
+const SHF_ALLOC: u64 = 0x2
+const SHN_UNDEF: u64 = 0
+const SHN_ABS: u64 = 0xFFF1
+const SHENT: u64 = 64
+const SYMENT: u64 = 24
+const RELAENT: u64 = 24
+
+const RT_64: u64 = 1
+const RT_PC32: u64 = 2
+const RT_PLT32: u64 = 4
+const RT_32: u64 = 10
+const RT_32S: u64 = 11
+
+// ------------------------------------------------------- kleine Griffe
+
+fn ld64(p: u64) -> u64 {
+    return __mmio_read64(p as *mut u64)
+}
+
+fn ld32(p: u64) -> u64 {
+    return kstate.get32(p)
+}
+
+fn ld16(p: u64) -> u64 {
+    return kstate.get16(p)
+}
+
+fn st64(p: u64, v: u64) {
+    __mmio_write64(p as *mut u64, v)
+}
+
+fn st32(p: u64, v: u64) {
+    __mmio_write32(p as *mut u32, (v & 0xFFFFFFFF) as u32)
+}
+
+// `off + len` liegt in `[0, groesse]`, OHNE zu addieren. Unter `profile
+// kernel` ist `+` geprueft und haelt den Kern bei Ueberlauf an
+// (`osum_panic`) -- das waere aus einer geladenen Datei heraus ein
+// gehaltener Rechner statt einer Abweisung. Also wie in `elf.fi`: auf
+// der Seite subtrahieren, von der bekannt ist, dass sie gross genug ist.
+fn passt(groesse: u64, off: u64, len: u64) -> bool {
+    if off > groesse {
+        return false
+    }
+    return groesse - off >= len
+}
+
+fn sec(state: u64, i: u64) -> u64 {
+    return kstate.get(state, kstate.MODUL_OFF + SEC_OFF + i * 8)
+}
+
+fn sec_set(state: u64, i: u64, v: u64) {
+    kstate.set(state, kstate.MODUL_OFF + SEC_OFF + i * 8, v)
+}
+
+fn m(state: u64, k: u64, off: u64) -> u64 {
+    return kstate.get(state, kstate.MODUL_OFF + MOD_OFF + k * MOD_SPAN + off)
+}
+
+fn m_set(state: u64, k: u64, off: u64, v: u64) {
+    kstate.set(state, kstate.MODUL_OFF + MOD_OFF + k * MOD_SPAN + off, v)
+}
+
+fn zaehl(state: u64, off: u64) {
+    kstate.set(state, kstate.MODUL_OFF + off,
+        kstate.get(state, kstate.MODUL_OFF + off) + 1)
+}
+
+fn setz(state: u64, off: u64, v: u64) {
+    kstate.set(state, kstate.MODUL_OFF + off, v)
+}
+
+fn hol(state: u64, off: u64) -> u64 {
+    return kstate.get(state, kstate.MODUL_OFF + off)
+}
+
+fn fail(state: u64, grund: u64) -> u64 {
+    setz(state, S_REASON, grund)
+    if grund != R_OK {
+        zaehl(state, S_REJECTS)
+    }
+    return grund
+}
+
+// ---------------------------------------------------- der Sprung hinein
+//
+// Fuenf Fassungen, weil Firn eine Zahl nicht in einen Funktionszeiger
+// wandelt und die Argumentzahl im Assemblerstueck stehen muss. Mehr als
+// sechs braucht keine dieser Schnittstellen; die Register sind die der
+// System-V-Konvention (rdi, rsi, rdx, rcx, r8, r9).
+//
+// `clobber("memory")` ist nicht Zierat: die gerufene Funktion schreibt in
+// `kdata`, und ohne den Merker duerfte der Uebersetzer eine Lesung von
+// dort ueber den Aufruf hinweg heben.
+
+fn ruf0(adr: u64) -> u64 {
+    var rc: u64 = 0
+    asm("call rax", in("rax") adr, out("rax") & rc, clobber("memory"))
+    return rc
+}
+
+fn ruf1(adr: u64, a: u64) -> u64 {
+    var rc: u64 = 0
+    asm("call rax", in("rax") adr, in("rdi") a, out("rax") & rc,
+        clobber("memory"))
+    return rc
+}
+
+fn ruf2(adr: u64, a: u64, b: u64) -> u64 {
+    var rc: u64 = 0
+    asm("call rax", in("rax") adr, in("rdi") a, in("rsi") b,
+        out("rax") & rc, clobber("memory"))
+    return rc
+}
+
+fn ruf3(adr: u64, a: u64, b: u64, c: u64) -> u64 {
+    var rc: u64 = 0
+    asm("call rax", in("rax") adr, in("rdi") a, in("rsi") b, in("rdx") c,
+        out("rax") & rc, clobber("memory"))
+    return rc
+}
+
+fn ruf6(adr: u64, a: u64, b: u64, c: u64, d: u64, e: u64, f: u64) -> u64 {
+    var rc: u64 = 0
+    asm("call rax", in("rax") adr, in("rdi") a, in("rsi") b, in("rdx") c,
+        in("rcx") d, in("r8") e, in("r9") f, out("rax") & rc,
+        clobber("memory"))
+    return rc
+}
+
+// ------------------------------------------------------------ der Anfang
+
+fn init(state: u64) {
+    setz(state, S_READY, 1)
+    setz(state, S_LOADED, 0)
+    setz(state, S_TRIES, 0)
+    setz(state, S_REJECTS, 0)
+    setz(state, S_REASON, R_OK)
+    setz(state, S_SYMS, 0)
+    setz(state, S_EXTSYMS, 0)
+    setz(state, S_RELOCS, 0)
+    setz(state, S_BYTES, 0)
+    setz(state, S_FILEBYTES, 0)
+    setz(state, S_SIGOK, 0)
+    setz(state, S_SECS, 0)
+    setz(state, S_UNLOADS, 0)
+    setz(state, S_ABIFILE, 0)
+    setz(state, S_INITRC, 0)
+    var k: u64 = 0
+    while k < MAX_MOD {
+        m_set(state, k, M_USED, 0)
+        m_set(state, k, M_BASE, 0)
+        m_set(state, k, M_FRAMES, 0)
+        m_set(state, k, M_ENTRY, 0)
+        m_set(state, k, M_EXIT, 0)
+        m_set(state, k, M_SLOT, modidx.MAX_SLOT)
+        k = k + 1
+    }
+    modtab.init(state)
+}
+
+fn ready(state: u64) -> bool {
+    return hol(state, S_READY) != 0
+}
+
+fn reason(state: u64) -> u64 {
+    return hol(state, S_REASON)
+}
+
+fn tries(state: u64) -> u64 {
+    return hol(state, S_TRIES)
+}
+
+fn rejects(state: u64) -> u64 {
+    return hol(state, S_REJECTS)
+}
+
+fn loaded(state: u64) -> u64 {
+    return hol(state, S_LOADED)
+}
+
+fn syms(state: u64) -> u64 {
+    return hol(state, S_SYMS)
+}
+
+fn ext_syms(state: u64) -> u64 {
+    return hol(state, S_EXTSYMS)
+}
+
+fn relocs(state: u64) -> u64 {
+    return hol(state, S_RELOCS)
+}
+
+fn image_bytes(state: u64) -> u64 {
+    return hol(state, S_BYTES)
+}
+
+fn file_bytes(state: u64) -> u64 {
+    return hol(state, S_FILEBYTES)
+}
+
+fn sig_ok(state: u64) -> u64 {
+    return hol(state, S_SIGOK)
+}
+
+fn secs(state: u64) -> u64 {
+    return hol(state, S_SECS)
+}
+
+fn unloads(state: u64) -> u64 {
+    return hol(state, S_UNLOADS)
+}
+
+fn abi_of_file(state: u64) -> u64 {
+    return hol(state, S_ABIFILE)
+}
+
+fn init_rc(state: u64) -> u64 {
+    return hol(state, S_INITRC)
+}
+
+fn entry_of(state: u64, k: u64) -> u64 {
+    if k >= MAX_MOD {
+        return 0
+    }
+    return m(state, k, M_ENTRY)
+}
+
+fn base_of(state: u64, k: u64) -> u64 {
+    if k >= MAX_MOD {
+        return 0
+    }
+    return m(state, k, M_BASE)
+}
+
+fn frames_of(state: u64, k: u64) -> u64 {
+    if k >= MAX_MOD {
+        return 0
+    }
+    return m(state, k, M_FRAMES)
+}
+
+// ------------------------------------------------------------ die Namen
+
+fn say_reason(g: u64) {
+    var t0: [u8; 3] = "ok\0"
+    var t1: [u8; 14] = "datei-fehlt\0\0\0"
+    var t2: [u8; 8] = "zu-kurz\0"
+    var t3: [u8; 9] = "zu-gross\0"
+    var t4: [u8; 8] = "kennung\0"
+    var t5: [u8; 7] = "format\0"
+    var t6: [u8; 8] = "fassung\0"
+    var t7: [u8; 7] = "laenge\0"
+    var t8: [u8; 10] = "signatur\0\0"
+    var t9: [u8; 5] = "elf\0\0"
+    var t10: [u8; 8] = "et-rel\0\0"
+    var t11: [u8; 9] = "maschine\0"
+    var t12: [u8; 8] = "shdr\0\0\0\0"
+    var t13: [u8; 12] = "abschnitte\0\0"
+    var t14: [u8; 12] = "kein-rahmen\0"
+    var t15: [u8; 10] = "symtafel\0\0"
+    var t16: [u8; 8] = "symbol\0\0"
+    var t17: [u8; 9] = "rel-art\0\0"
+    var t18: [u8; 9] = "rel-weit\0"
+    var t19: [u8; 10] = "einsprung\0"
+    var t20: [u8; 6] = "platz\0"
+    var t21: [u8; 8] = "init-rc\0"
+    var t22: [u8; 12] = "sec-ausserh\0"
+    var t23: [u8; 7] = "lesen\0\0"
+    var t24: [u8; 12] = "ausrichtung\0"
+    if g == R_OK { serial.puts((&t0[0]) as u64) ; return }
+    if g == R_NOFILE { serial.puts((&t1[0]) as u64) ; return }
+    if g == R_SHORT { serial.puts((&t2[0]) as u64) ; return }
+    if g == R_TOOBIG { serial.puts((&t3[0]) as u64) ; return }
+    if g == R_MAGIC { serial.puts((&t4[0]) as u64) ; return }
+    if g == R_FORMAT { serial.puts((&t5[0]) as u64) ; return }
+    if g == R_ABI { serial.puts((&t6[0]) as u64) ; return }
+    if g == R_LEN { serial.puts((&t7[0]) as u64) ; return }
+    if g == R_SIG { serial.puts((&t8[0]) as u64) ; return }
+    if g == R_ELF { serial.puts((&t9[0]) as u64) ; return }
+    if g == R_ETYPE { serial.puts((&t10[0]) as u64) ; return }
+    if g == R_MACHINE { serial.puts((&t11[0]) as u64) ; return }
+    if g == R_SHDR { serial.puts((&t12[0]) as u64) ; return }
+    if g == R_SECTIONS { serial.puts((&t13[0]) as u64) ; return }
+    if g == R_NOMEM { serial.puts((&t14[0]) as u64) ; return }
+    if g == R_SYMTAB { serial.puts((&t15[0]) as u64) ; return }
+    if g == R_SYM { serial.puts((&t16[0]) as u64) ; return }
+    if g == R_RELTYPE { serial.puts((&t17[0]) as u64) ; return }
+    if g == R_RANGE { serial.puts((&t18[0]) as u64) ; return }
+    if g == R_ENTRY { serial.puts((&t19[0]) as u64) ; return }
+    if g == R_SLOT { serial.puts((&t20[0]) as u64) ; return }
+    if g == R_INIT { serial.puts((&t21[0]) as u64) ; return }
+    if g == R_SECOFF { serial.puts((&t22[0]) as u64) ; return }
+    if g == R_READ { serial.puts((&t23[0]) as u64) ; return }
+    if g == R_ALIGN { serial.puts((&t24[0]) as u64) ; return }
+    serial.dec(g)
+}
+
+// ------------------------------------------------------- die Signatur
+//
+// Der oeffentliche Schluessel steht HIER, im Kernabbild, und nicht in
+// einer Datei daneben. Wer die Platte schreiben kann, schriebe sonst
+// Modul und Schluessel zugleich, und die Pruefung waere ein Ritual.
+// Derselbe Gedanke steht in `orientstore/docs/KATALOG-FORMAT.md`
+// Abschnitt 4 ("Der oeffentliche Schluessel liegt nicht dort, wo er
+// zaehlt") und in `kernel/user/opk.fi`.
+//
+// DIES IST DER PRUEFSCHLUESSEL DIESER RUNDE und liegt absichtlich im
+// Repo (`tools/module/pruef.seed`). Eine Auslieferung braucht einen
+// anderen; das steht in `docs/RUNDE-MODUL.md` unter "was noch fehlt".
+fn schluessel(dst: u64) {
+    var k: [u8; 32] = [
+        0x51, 0xDA, 0xE5, 0x64, 0x2C, 0xBA, 0x5D, 0x80,
+        0x15, 0x1E, 0xED, 0x35, 0xDC, 0x3F, 0x69, 0x54,
+        0x64, 0x26, 0x86, 0x0E, 0xAC, 0x91, 0xF7, 0x70,
+        0x32, 0x6F, 0x57, 0xE5, 0x4A, 0x22, 0xB8, 0x8E
+    ]
+    var i: u64 = 0
+    while i < 32 {
+        kstate.set8(dst + i, k[i as usize])
+        i = i + 1
+    }
+}
+
+fn signatur_gilt(state: u64, msg: u64, len: u64, sig: u64) -> bool {
+    var key: [u8; 32] = [0; 32]
+    schluessel((&key[0]) as u64)
+    var c: ed25519.Ctx = ed25519.ctx_new()
+    if !ed25519.ctx_init(&c) {
+        return false
+    }
+    return ed25519.ed25519_verify(&c, (&key[0]) as u64, msg, len as usize,
+        sig)
+}
+
+// ------------------------------------------------------------- das Laden
+
+fn load(state: u64, pfad: u64, slot: u64) -> u64 {
+    zaehl(state, S_TRIES)
+    setz(state, S_SIGOK, 0)
+    setz(state, S_SYMS, 0)
+    setz(state, S_EXTSYMS, 0)
+    setz(state, S_RELOCS, 0)
+    setz(state, S_SECS, 0)
+    setz(state, S_BYTES, 0)
+    setz(state, S_FILEBYTES, 0)
+    setz(state, S_ABIFILE, 0)
+    setz(state, S_INITRC, 0)
+
+    let k: u64 = free_space(state)
+    if k >= MAX_MOD {
+        return fail(state, R_SLOT)
+    }
+
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return fail(state, R_NOFILE)
+    }
+    let ino: u64 = fs.path(state, pfad)
+    if ino == 0 {
+        return fail(state, R_NOFILE)
+    }
+    let groesse: u64 = fs.inode_size(state, ino)
+    setz(state, S_FILEBYTES, groesse)
+    if groesse < HDR_LEN + SIG_LEN {
+        return fail(state, R_SHORT)
+    }
+    if groesse > MAX_FILE {
+        return fail(state, R_TOOBIG)
+    }
+
+    let rahmen: u64 = (groesse + 4095) / 4096
+    let datei: u64 = mem.frame_run(state, rahmen)
+    if datei == 0 {
+        return fail(state, R_NOMEM)
+    }
+
+    let g: u64 = read(state, ino, datei, groesse)
+    if g != R_OK {
+        mem.frame_free_run(state, datei, rahmen)
+        return fail(state, g)
+    }
+
+    let g2: u64 = check_and_place(state, datei, groesse, k, slot)
+    mem.frame_free_run(state, datei, rahmen)
+    if g2 != R_OK {
+        // Ein Abbild, das schon stand, aber an einer spaeteren Pruefung
+        // gescheitert ist, wird zurueckgegeben. Sonst kostete jede
+        // abgewiesene Datei Rahmen.
+        if m(state, k, M_BASE) != 0 {
+            mem.frame_free_run(state, m(state, k, M_BASE),
+                m(state, k, M_FRAMES))
+            m_set(state, k, M_BASE, 0)
+            m_set(state, k, M_FRAMES, 0)
+        }
+        m_set(state, k, M_USED, 0)
+        return fail(state, g2)
+    }
+
+    // ERST JETZT wird gesprungen. Alles davor ist Pruefen; alles danach
+    // ist fremder Code in Ring 0.
+    let e: u64 = m(state, k, M_ENTRY)
+    let rc: u64 = ruf1(e, state)
+    setz(state, S_INITRC, rc)
+    if rc != 0 {
+        // Das Modul hat sich SELBST abgewiesen (z. B. weil `k_abi()`
+        // etwas anderes sagte, als in seinem Kopf steht). Es wird wieder
+        // abgeraeumt.
+        modtab.clear_slot(state, slot)
+        mem.frame_free_run(state, m(state, k, M_BASE), m(state, k, M_FRAMES))
+        m_set(state, k, M_USED, 0)
+        m_set(state, k, M_BASE, 0)
+        return fail(state, R_INIT)
+    }
+    m_set(state, k, M_SLOT, slot)
+    setz(state, S_LOADED, hol(state, S_LOADED) + 1)
+    return fail(state, R_OK)
+}
+
+fn free_space(state: u64) -> u64 {
+    var k: u64 = 0
+    while k < MAX_MOD {
+        if m(state, k, M_USED) == 0 {
+            return k
+        }
+        k = k + 1
+    }
+    return MAX_MOD
+}
+
+fn read(state: u64, ino: u64, dst: u64, groesse: u64) -> u64 {
+    var done: u64 = 0
+    while done < groesse {
+        var take: u64 = groesse - done
+        if take > 4096 {
+            take = 4096
+        }
+        if fs.read_at(state, ino, done, dst + done, take) != take {
+            return R_READ
+        }
+        done = done + take
+    }
+    return R_OK
+}
+
+// ------------------------------------------- Kopf, Fassung und Signatur
+
+fn check_and_place(state: u64, datei: u64, groesse: u64, k: u64,
+    slot: u64) -> u64 {
+    var mag: [u8; 9] = "OSUMMOD\n\0"
+    var i: u64 = 0
+    while i < 8 {
+        if kstate.get8(datei + i) != mag[i as usize] as u64 {
+            return R_MAGIC
+        }
+        i = i + 1
+    }
+    if ld32(datei + 8) != FORMAT {
+        return R_FORMAT
+    }
+    let abi: u64 = ld32(datei + 12)
+    setz(state, S_ABIFILE, abi)
+    if abi != ksym.ABI {
+        return R_ABI
+    }
+    let n: u64 = ld64(datei + 16)
+    // groesse == HDR_LEN + n + SIG_LEN, ohne zu addieren.
+    if !passt(groesse, HDR_LEN, n) {
+        return R_LEN
+    }
+    if groesse - HDR_LEN - n != SIG_LEN {
+        return R_LEN
+    }
+    if !signatur_gilt(state, datei, HDR_LEN + n, datei + HDR_LEN + n) {
+        return R_SIG
+    }
+    setz(state, S_SIGOK, 1)
+
+    // Den Namen fuer die Anzeige merken.
+    var j: u64 = 0
+    while j < 32 {
+        kstate.set8(state + kstate.MODUL_OFF + MOD_OFF + k * MOD_SPAN
+            + M_NAME + j, (kstate.get8(datei + 32 + j) & 0xFF) as u8)
+        j = j + 1
+    }
+
+    return elf_place(state, datei + HDR_LEN, n, k, slot)
+}
+
+// ------------------------------------------------------------ die ELF
+
+fn elf_place(state: u64, o: u64, n: u64, k: u64, slot: u64) -> u64 {
+    if n < 64 {
+        return R_ELF
+    }
+    if kstate.get8(o) != 0x7F {
+        return R_ELF
+    }
+    if kstate.get8(o + 1) != 69 {
+        return R_ELF
+    }
+    if kstate.get8(o + 2) != 76 {
+        return R_ELF
+    }
+    if kstate.get8(o + 3) != 70 {
+        return R_ELF
+    }
+    if kstate.get8(o + 4) != 2 {
+        return R_ELF
+    }
+    if kstate.get8(o + 5) != 1 {
+        return R_ELF
+    }
+    if ld16(o + 16) != ET_REL {
+        return R_ETYPE
+    }
+    if ld16(o + 18) != EM_X86_64 {
+        return R_MACHINE
+    }
+    if ld16(o + 58) != SHENT {
+        return R_SHDR
+    }
+    let shnum: u64 = ld16(o + 60)
+    let shoff: u64 = ld64(o + 40)
+    if shnum == 0 {
+        return R_SHDR
+    }
+    if shnum > MAX_SEC {
+        return R_SECTIONS
+    }
+    if !passt(n, shoff, shnum * SHENT) {
+        return R_SHDR
+    }
+    setz(state, S_SECS, shnum)
+
+    // ------ Durchgang 1: Plaetze verteilen und die Gesamtgroesse zaehlen
+    var sum: u64 = 0
+    var i: u64 = 1
+    while i < shnum {
+        let sh: u64 = o + shoff + i * SHENT
+        let flags: u64 = ld64(sh + 8)
+        let typ: u64 = ld32(sh + 4)
+        let size: u64 = ld64(sh + 32)
+        let off: u64 = ld64(sh + 24)
+        let al: u64 = ld64(sh + 48)
+        sec_set(state, i, 0)
+        if (flags & SHF_ALLOC) != 0 {
+            if typ != SHT_NOBITS {
+                if !passt(n, off, size) {
+                    return R_SECOFF
+                }
+            }
+            var a: u64 = al
+            if a == 0 {
+                a = 1
+            }
+            if a > 4096 {
+                return R_ALIGN
+            }
+            if (a & (a - 1)) != 0 {
+                return R_ALIGN
+            }
+            let rest: u64 = sum % a
+            if rest != 0 {
+                sum = sum + (a - rest)
+            }
+            // Der Platz wird als VERSATZ vermerkt und spaeter um die
+            // Basis erhoeht. Die Null als "nicht vergeben" waere sonst
+            // fuer den ersten Abschnitt zweideutig -- also +1 und beim
+            // Lesen wieder -1.
+            sec_set(state, i, sum + 1)
+            sum = sum + size
+            if sum > MAX_FILE {
+                return R_TOOBIG
+            }
+        }
+        i = i + 1
+    }
+    if sum == 0 {
+        return R_ELF
+    }
+    setz(state, S_BYTES, sum)
+
+    let rahmen: u64 = (sum + 4095) / 4096
+    let basis: u64 = mem.frame_run(state, rahmen)
+    if basis == 0 {
+        return R_NOMEM
+    }
+    m_set(state, k, M_USED, 1)
+    m_set(state, k, M_BASE, basis)
+    m_set(state, k, M_FRAMES, rahmen)
+
+    // Die Versaetze in echte Adressen wandeln.
+    i = 1
+    while i < shnum {
+        let v: u64 = sec(state, i)
+        if v != 0 {
+            sec_set(state, i, basis + (v - 1))
+        }
+        i = i + 1
+    }
+
+    // ------ Durchgang 2: kopieren und nullen
+    i = 1
+    while i < shnum {
+        let ziel: u64 = sec(state, i)
+        if ziel != 0 {
+            let sh: u64 = o + shoff + i * SHENT
+            let typ: u64 = ld32(sh + 4)
+            let size: u64 = ld64(sh + 32)
+            let off: u64 = ld64(sh + 24)
+            if typ == SHT_NOBITS {
+                nullen(ziel, size)
+            } else {
+                copy(ziel, o + off, size)
+            }
+        }
+        i = i + 1
+    }
+
+    // ------ die Symboltafel finden
+    var symtab: u64 = 0
+    var symn: u64 = 0
+    var strtab: u64 = 0
+    i = 1
+    while i < shnum {
+        let sh: u64 = o + shoff + i * SHENT
+        if ld32(sh + 4) == SHT_SYMTAB {
+            let off: u64 = ld64(sh + 24)
+            let size: u64 = ld64(sh + 32)
+            if !passt(n, off, size) {
+                return R_SECOFF
+            }
+            if ld64(sh + 56) != SYMENT {
+                return R_SYMTAB
+            }
+            symtab = o + off
+            symn = size / SYMENT
+            let link: u64 = ld32(sh + 40)
+            if link == 0 {
+                return R_SYMTAB
+            }
+            if link >= shnum {
+                return R_SYMTAB
+            }
+            let ssh: u64 = o + shoff + link * SHENT
+            let soff: u64 = ld64(ssh + 24)
+            let ssize: u64 = ld64(ssh + 32)
+            if !passt(n, soff, ssize) {
+                return R_SECOFF
+            }
+            strtab = o + soff
+            i = shnum
+        } else {
+            i = i + 1
+        }
+    }
+    if symtab == 0 {
+        return R_SYMTAB
+    }
+    setz(state, S_SYMS, symn)
+
+    // ------ Durchgang 3: die Relokationen
+    i = 1
+    while i < shnum {
+        let sh: u64 = o + shoff + i * SHENT
+        if ld32(sh + 4) == SHT_RELA {
+            let ziel_i: u64 = ld32(sh + 44)
+            if ziel_i < shnum {
+                if sec(state, ziel_i) != 0 {
+                    let off: u64 = ld64(sh + 24)
+                    let size: u64 = ld64(sh + 32)
+                    if !passt(n, off, size) {
+                        return R_SECOFF
+                    }
+                    if ld64(sh + 56) != RELAENT {
+                        return R_RELTYPE
+                    }
+                    let g: u64 = rela_anwenden(state, o + off,
+                        size / RELAENT, sec(state, ziel_i), symtab, symn,
+                        strtab, shnum)
+                    if g != R_OK {
+                        return g
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    // ------ Ein- und Aussprung
+    var ein: [u8; 11] = "modul_init\0"
+    var aus: [u8; 11] = "modul_exit\0"
+    let e: u64 = sym_adresse(state, symtab, symn, strtab, (&ein[0]) as u64,
+        shnum)
+    if e == 0 {
+        return R_ENTRY
+    }
+    m_set(state, k, M_ENTRY, e)
+    m_set(state, k, M_EXIT, sym_adresse(state, symtab, symn, strtab,
+        (&aus[0]) as u64, shnum))
+    return R_OK
+}
+
+fn copy(dst: u64, src: u64, len: u64) {
+    var i: u64 = 0
+    while i + 8 <= len {
+        st64(dst + i, ld64(src + i))
+        i = i + 8
+    }
+    while i < len {
+        kstate.set8(dst + i, (kstate.get8(src + i) & 0xFF) as u8)
+        i = i + 1
+    }
+}
+
+fn nullen(dst: u64, len: u64) {
+    var i: u64 = 0
+    while i + 8 <= len {
+        st64(dst + i, 0)
+        i = i + 8
+    }
+    while i < len {
+        kstate.set8(dst + i, 0)
+        i = i + 1
+    }
+}
+
+// Ein definiertes Symbol im Modul, gesucht ueber seinen Namen. Nur fuer
+// `modul_init` und `modul_exit` -- die beiden sind mit `#[export_c]`
+// gebaut und tragen deshalb ihren blanken Namen, ohne `_F0.`/`_F1.`.
+// Genau darum steht der Name hier und funktioniert mit beiden
+// Uebersetzern.
+fn sym_adresse(state: u64, symtab: u64, symn: u64, strtab: u64, name: u64,
+    shnum: u64) -> u64 {
+    var i: u64 = 0
+    while i < symn {
+        let sy: u64 = symtab + i * SYMENT
+        let nm: u64 = ld32(sy)
+        let shndx: u64 = ld16(sy + 6)
+        if nm != 0 {
+            if shndx != SHN_UNDEF {
+                if shndx < shnum {
+                    if ksym.eq(strtab + nm, name) {
+                        let b: u64 = sec(state, shndx)
+                        if b != 0 {
+                            return b + ld64(sy + 8)
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// DIE STELLE, AN DER EIN MODUL AN DEN KERN GEBUNDEN WIRD.
+fn sym_value(state: u64, symtab: u64, symn: u64, strtab: u64, idx: u64,
+    shnum: u64, ok: u64) -> u64 {
+    if idx >= symn {
+        st64(ok, 0)
+        return 0
+    }
+    let sy: u64 = symtab + idx * SYMENT
+    let shndx: u64 = ld16(sy + 6)
+    let wert: u64 = ld64(sy + 8)
+    if shndx == SHN_ABS {
+        st64(ok, 1)
+        return wert
+    }
+    if shndx == SHN_UNDEF {
+        let nm: u64 = ld32(sy)
+        if nm == 0 {
+            st64(ok, 0)
+            return 0
+        }
+        let a: u64 = ksym.such(strtab + nm)
+        if a == 0 {
+            st64(ok, 0)
+            return 0
+        }
+        zaehl(state, S_EXTSYMS)
+        st64(ok, 1)
+        return a
+    }
+    if shndx >= shnum {
+        st64(ok, 0)
+        return 0
+    }
+    let b: u64 = sec(state, shndx)
+    if b == 0 {
+        st64(ok, 0)
+        return 0
+    }
+    st64(ok, 1)
+    return b + wert
+}
+
+fn rela_anwenden(state: u64, rela: u64, anzahl: u64, ziel: u64, symtab: u64,
+    symn: u64, strtab: u64, shnum: u64) -> u64 {
+    var i: u64 = 0
+    while i < anzahl {
+        let r: u64 = rela + i * RELAENT
+        let roff: u64 = ld64(r)
+        let info: u64 = ld64(r + 8)
+        let add: u64 = ld64(r + 16)
+        let art: u64 = info & 0xFFFFFFFF
+        let sidx: u64 = info >> 32
+        var ok: u64 = 0
+        let s: u64 = sym_value(state, symtab, symn, strtab, sidx, shnum,
+            (&ok) as u64)
+        if ok == 0 {
+            return R_SYM
+        }
+        let p: u64 = ziel + roff
+        if art == RT_64 {
+            st64(p, s +% add)
+        } else {
+            if art == RT_PC32 || art == RT_PLT32 {
+                let v: u64 = (s +% add) -% p
+                let h: u64 = v >> 31
+                if h != 0 && h != 0x1FFFFFFFF {
+                    return R_RANGE
+                }
+                st32(p, v)
+            } else {
+                if art == RT_32 {
+                    let v: u64 = s +% add
+                    if (v >> 32) != 0 {
+                        return R_RANGE
+                    }
+                    st32(p, v)
+                } else {
+                    if art == RT_32S {
+                        let v: u64 = s +% add
+                        let h: u64 = v >> 31
+                        if h != 0 && h != 0x1FFFFFFFF {
+                            return R_RANGE
+                        }
+                        st32(p, v)
+                    } else {
+                        return R_RELTYPE
+                    }
+                }
+            }
+        }
+        zaehl(state, S_RELOCS)
+        i = i + 1
+    }
+    return R_OK
+}
+
+// ---------------------------------------------------------- das Entladen
+//
+// Die Reihenfolge ist nicht beliebig, und der Grund steht in
+// `modtab.fi`: erst wird die Tafel geleert, dann wird `modul_exit`
+// gerufen, dann gehen die Rahmen zurueck. Wer die Rahmen zuerst
+// zurueckgibt, springt danach in fremden Speicher.
+fn entladen(state: u64, k: u64) -> bool {
+    if k >= MAX_MOD {
+        return false
+    }
+    if m(state, k, M_USED) == 0 {
+        return false
+    }
+    let slot: u64 = m(state, k, M_SLOT)
+    if slot < modidx.MAX_SLOT {
+        modtab.clear_slot(state, slot)
+    }
+    let x: u64 = m(state, k, M_EXIT)
+    if x != 0 {
+        ruf1(x, state)
+    }
+    mem.frame_free_run(state, m(state, k, M_BASE), m(state, k, M_FRAMES))
+    m_set(state, k, M_USED, 0)
+    m_set(state, k, M_BASE, 0)
+    m_set(state, k, M_FRAMES, 0)
+    m_set(state, k, M_ENTRY, 0)
+    m_set(state, k, M_EXIT, 0)
+    m_set(state, k, M_SLOT, modidx.MAX_SLOT)
+    let l: u64 = hol(state, S_LOADED)
+    if l > 0 {
+        setz(state, S_LOADED, l - 1)
+    }
+    zaehl(state, S_UNLOADS)
+    return true
+}

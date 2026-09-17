@@ -492,7 +492,7 @@ hasnot "$TMPD/zwei.txt" "Geraet ist belegt" "keiner der beiden wurde abgewiesen"
 
 echo "== 11. die Zahlen der Runde =="
 echo "    Zeilen je Datei:"
-for f in kernel/hda.fi kernel/ac97.fi kernel/audio.fi kernel/mix.fi kernel/user/play.fi; do
+for f in kernel/drv/snd/hda.fi kernel/drv/snd/ac97.fi kernel/drv/snd/audio.fi kernel/drv/snd/mix.fi kernel/user/play.fi; do
     printf '      %-24s %5d\n' "$f" "$(grep -c '' "$f")"
 done
 echo "    Ausgabelatenz:      $(val "$TMPD/hup.txt" latencyus) us (ganzer Ring, 4096 Rahmen)"
@@ -507,7 +507,7 @@ echo "    Aussetzer/Minute:   siehe Abschnitt 4 (10 s mit und ohne Last)"
 # Nummer genommen, die schon vergeben war -- die Lehre aus 1780 gegen
 # 1750 und aus 1320 gegen 1320.
 for n in 1850 1851 1852 1853 1854; do
-    c=$(grep -rlan "u64 = $n\$" kernel --include=*.fi | grep -v '^kernel/user/' | grep -vc 'kernel/sys.fi' || true)
+    c=$(grep -rlan "u64 = $n\$" kernel --include=*.fi | grep -v '^kernel/user/' | grep -vc 'kernel/sys/sys.fi' || true)
     [ "${c:-0}" = "0" ] && ok "die Aufrufnummer $n ist im Kern nur in sys.fi vergeben" \
                         || bad "die Aufrufnummer $n kommt $c mal ausserhalb von sys.fi im Kern vor"
 done

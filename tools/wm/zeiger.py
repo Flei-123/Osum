@@ -7,7 +7,7 @@ und stark vergroessert: ein weisses Dreieck, darunter eine Luecke, und
 darunter zwei getrennte weisse Stummel.  Kein Pfeil.
 
 Der Fehler stand nicht in der Hardware und nicht im Raster, sondern in
-achtzehn von Hand geschriebenen Bitmasken in `kernel/wm.fi`
+achtzehn von Hand geschriebenen Bitmasken in `kernel/ui/wm.fi`
 (`cursor_row_of`, Form 0).  Zeile 11 der Fuellung war `0x0400` -- EIN
 gesetzter Bildpunkt --, und die Zeilen 12 bis 16 hatten je ZWEI
 getrennte Bloecke (`0x0370`, `0x01b0`, `0x00d8`).  Das ist der
@@ -31,7 +31,7 @@ Dinge, die ein Mensch uebersieht:
   (f) die Spitze liegt oben links, auf dem Griffpunkt (0,0)
 
 Aufruf:
-    python3 tools/wm/zeiger.py [kernel/wm.fi]      pruefen und malen
+    python3 tools/wm/zeiger.py [kernel/ui/wm.fi]      pruefen und malen
     python3 tools/wm/zeiger.py --bauen             die Masken erzeugen
 
 Rueckgabe 0, wenn alle Pruefungen halten.
@@ -240,7 +240,7 @@ def main():
         print('umriss = b"%s"' % firn(um))
         print('innen  = b"%s"' % firn(inn))
         return 0
-    pfad = sys.argv[1] if len(sys.argv) > 1 else "kernel/wm.fi"
+    pfad = sys.argv[1] if len(sys.argv) > 1 else "kernel/ui/wm.fi"
     m = lies(pfad)
     if m is None:
         return 1

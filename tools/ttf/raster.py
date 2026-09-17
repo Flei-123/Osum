@@ -2,14 +2,14 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """tools/ttf/raster.py -- TrueType lesen und rastern, ZWEITE Fassung.
 
-`kernel/ttf.fi` ist die erste.  Dieses Programm ist die zweite, in einer
+`kernel/gfx/ttf.fi` ist die erste.  Dieses Programm ist die zweite, in einer
 anderen Sprache, auf der anderen Seite der Platte -- derselbe Gedanke wie
 bei `tools/osum/mkfs.py` und dem Dateisystem.  Es gibt hier nur einen
 Grund fuer eine zweite Fassung, und der ist die MESSUNG:
 
     Ein Bildschirmfoto sagt ueber gerasterten Text nur dann etwas, wenn
     es etwas gibt, WOGEGEN man es haelt.  Runde K7 hielt die Textkonsole
-    gegen die Bitmaske aus `kernel/font.fi` -- Bit fuer Bit.  Bei einer
+    gegen die Bitmaske aus `kernel/gfx/font.fi` -- Bit fuer Bit.  Bei einer
     Kantenglaettung gibt es keine Bitmaske; es gibt einen Algorithmus.
     Also steht der Algorithmus zweimal da, und das Foto wird gegen die
     zweite Fassung gerechnet.
@@ -84,7 +84,7 @@ def tdiv(n, d):
 # --------------------------------------------------------------- lesen
 
 class Ttf:
-    """Der Leser.  Wortgleich zu `kernel/ttf.fi`."""
+    """Der Leser.  Wortgleich zu `kernel/gfx/ttf.fi`."""
 
     def __init__(self, roh):
         self.d = roh

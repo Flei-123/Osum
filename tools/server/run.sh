@@ -132,7 +132,7 @@ fi
 echo "== 2. der Schnitt: wer im Kernel noch auf Grafik zugreift =="
 
 N=$(python3 tools/server/count.py kernel)
-echo "        Stellen ausserhalb von kernel/gfx.fi: $N"
+echo "        Stellen ausserhalb von kernel/gfx/gfx.fi: $N"
 num "kein Modul ausser der Naht greift noch auf die Grafik zu" "$N" eq 0
 python3 tools/server/count.py kernel --je-datei | sed 's/^/        /'
 

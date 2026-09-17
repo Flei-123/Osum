@@ -126,7 +126,7 @@ done
 # Und die Gegenprobe zur Gegenprobe: das Kernmodul der Schnittstelle IST
 # drin. Waere es das nicht, pruefte die Schleife oben nur ein leeres nm.
 grep -qF 'wmplug__reg' "$TMPD/sym.txt" \
-    && ok "kernel/wmplug.fi selbst ist im Abbild (die Probe oben misst wirklich)" \
+    && ok "kernel/ui/wmplug.fi selbst ist im Abbild (die Probe oben misst wirklich)" \
     || bad "wmplug__reg fehlt im Abbild -- dann sagt die Symbolprobe nichts"
 
 # ====================================================== 3. das Abbild

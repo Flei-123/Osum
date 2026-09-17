@@ -106,7 +106,7 @@ echo "== 1. die Zahlen, die auf beiden Seiten gleich sein muessen =="
 for paar in "CPU_SYSRSP:C_SYSRSP" "CPU_KSTACK:C_KSTACK" "CPU_SYSCALLS:C_SYSCALLS"; do
     a=${paar%%:*}; b=${paar##*:}
     va=$(grep -aoE "\.set $a, *[0-9]+" kernel/arch/x86_64/isr.s | grep -oE '[0-9]+' | head -1)
-    vb=$(grep -aoE "const $b: u64 = [0-9]+" kernel/cpu.fi | grep -oE '[0-9]+$' | head -1)
+    vb=$(grep -aoE "const $b: u64 = [0-9]+" kernel/arch/cpu.fi | grep -oE '[0-9]+$' | head -1)
     if [ -n "$va" ] && [ "$va" = "$vb" ]; then ok "isr.s $a = cpu.fi $b = $va"
     else bad "isr.s $a='$va' gegen cpu.fi $b='$vb'"; fi
 done
@@ -116,19 +116,19 @@ grep -qa 'incq %gs:CPU_SYSCALLS' kernel/arch/x86_64/isr.s \
 
 echo
 echo "== 2. der Riegel steht im CODE und nicht im Kommentar =="
-grep -qa '^fn darf_ring3' kernel/sched.fi \
+grep -qa '^fn darf_ring3' kernel/sched/sched.fi \
     && ok "sched.darf_ring3 gibt es" || bad "sched.darf_ring3 fehlt"
-grep -qa 'darf_ring3(state, i, me)' kernel/sched.fi \
+grep -qa 'darf_ring3(state, i, me)' kernel/sched/sched.fi \
     && ok "die Auswahl des Ablaufplaners ruft ihn wirklich" \
     || bad "darf_ring3 wird in der Auswahl NICHT gerufen -- genau der Fehler von BLECHKERN"
-grep -qa 'gs_bereit(state, me)' kernel/sched.fi \
+grep -qa 'gs_bereit(state, me)' kernel/sched/sched.fi \
     && ok "und er fragt die GEPRUEFTE GS-Basis ab" \
     || bad "darf_ring3 fragt die GS-Basis nicht ab"
 # `gs_gut` ist ein festes Feld von acht. Waechst MAX_CPUS, ohne dass es
 # mitwaechst, meldet `gs_bereit` fuer jeden Kern ab dem neunten "nein" --
 # Ring 3 liefe dort nie, und niemand saehe warum.
-mc=$(grep -aoE 'const MAX_CPUS: u64 = [0-9]+' kernel/kstate.fi | grep -oE '[0-9]+$')
-gg=$(grep -aoE 'static mut gs_gut: \[u64; [0-9]+\]' kernel/sched.fi | sed -n 's/.*; \([0-9]*\)\]/\1/p')
+mc=$(grep -aoE 'const MAX_CPUS: u64 = [0-9]+' kernel/lib/kstate.fi | grep -oE '[0-9]+$')
+gg=$(grep -aoE 'static mut gs_gut: \[u64; [0-9]+\]' kernel/sched/sched.fi | sed -n 's/.*; \([0-9]*\)\]/\1/p')
 if [ -n "$mc" ] && [ "$mc" = "$gg" ]; then ok "kstate.MAX_CPUS = sched.gs_gut = $mc"
 else bad "MAX_CPUS=$mc, aber gs_gut fasst $gg -- Kerne darueber bekaemen nie Ring 3"; fi
 
@@ -136,7 +136,7 @@ echo
 echo "== 3. kein geteilter Blockpuffer ohne die Sperre L_FS =="
 py=$(python3 - <<'PYEOF'
 import re
-s=open("kernel/fs.fi","rb").read().decode("utf-8","surrogateescape")
+s=open("kernel/fs/fs.fi","rb").read().decode("utf-8","surrogateescape")
 funcs={}; cur=None; body=[]
 for l in s.split("\n"):
     m=re.match(r"^fn (\w+)\(", l)

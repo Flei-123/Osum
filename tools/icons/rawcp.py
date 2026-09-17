@@ -22,9 +22,9 @@ WHAT COUNTS AS DRAWING CODE.  The files that put pixels on a screen or
 hand glyphs to something that does:
 
     kernel/user/*.fi        Ring 3 -- every interface in this system
-    kernel/wig.fi           the seam that hands out coverage fields
-    kernel/wm.fi            the window server
-    kernel/ttf.fi           the rasteriser
+    kernel/ui/wig.fi           the seam that hands out coverage fields
+    kernel/ui/wm.fi            the window server
+    kernel/gfx/ttf.fi           the rasteriser
     lib/*.fi                shared modules, except the generated one
 
 Not the documentation, which quotes the numbers on purpose, and not

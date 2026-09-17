@@ -69,7 +69,17 @@ import sys
 HIER = os.path.dirname(os.path.abspath(__file__))
 WURZEL = os.path.dirname(os.path.dirname(HIER))
 
-KERN = "kernel/sys.fi"
+# RUNDE O-STRUKTUR: der Kern liegt jetzt in Schichten. Gesucht statt
+# buchstabiert -- dann ueberlebt dieses Werkzeug auch den naechsten Umzug.
+def _finde(name):
+    for stamm, verz, namen in os.walk(os.path.join(WURZEL, "kernel")):
+        verz[:] = [d for d in verz if d not in ("user", "app")]
+        if name in namen:
+            return os.path.relpath(os.path.join(stamm, name), WURZEL)
+    return os.path.join("kernel", name)
+
+
+KERN = _finde("sys.fi")
 LIBC = "lib/libc/kcall.fi"
 
 # Namen, die aussehen wie eine Aufrufnummer und keine sind. Der Grund

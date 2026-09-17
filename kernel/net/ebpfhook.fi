@@ -1,0 +1,308 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/ebpfhook.fi -- Runde O-EBPF, Stufe 4: DIE ZWEI TUEREN.
+//
+// Eine Maschine, die niemand ruft, ist ein Denkmal. Diese Datei ist der
+// Ort, an dem ein geladenes Programm den Netzweg wirklich zu sehen
+// bekommt -- und sie ist bewusst die EINZIGE Stelle, an der das
+// geschieht. Wer wissen will, wo eBPF in diesem Kern eingreift, liest
+// diese Datei und sonst nichts.
+//
+// ================================================================
+// DIE ZWEI HAKEN, UND WARUM GENAU DIESE ZWEI
+// ================================================================
+//
+//   K_XDP     Am EINGANG DES GERAETS, in `inet.pump`, bevor der Stack
+//             den Rahmen sieht. Das ist die Stelle, an der ein
+//             verworfener Rahmen wirklich nichts mehr kostet: kein
+//             Zusammensetzen, keine Pruefsumme, keine Steckdose. Das
+//             Programm bekommt den Rahmen als [r1, r2) und antwortet
+//             mit DURCHLASSEN oder VERWERFEN.
+//
+//   K_SOCK    AM SOCKEL JE PROZESS, in `inet.sock_recv`. Hier steht
+//             schon fest, WELCHER Prozess die Oktette bekommt --
+//             `netview` entscheidet an dieser Tuer, `netmon` zaehlt
+//             dort. Das Programm sieht die Nutzlast und kann sie
+//             verwerfen.
+//
+// Die Reihenfolge am Eingang ist festgelegt und sie ist nicht beliebig:
+// NETMON zaehlt zuerst (was auf dem Draht war, war auf dem Draht --
+// auch wenn es gleich verworfen wird), DANN entscheidet dieser Haken,
+// DANN erst laufen Tunnel und Weiterleitung. Ein verworfener Rahmen
+// taucht also in der Zaehlung auf und im Stack nicht. Die umgekehrte
+// Reihenfolge haette die Zaehlung zu einer Aussage ueber den Filter
+// gemacht statt ueber die Leitung.
+//
+// ================================================================
+// WAS DIESER HAKEN NICHT TUT
+// ================================================================
+//
+// Er VERAENDERT den Rahmen nicht. Ein Programm kann lesen und
+// antworten, aber es kann keinen Rahmen umschreiben, keinen erzeugen
+// und keinen weiterleiten (kein `XDP_TX`, kein `bpf_redirect`). Der
+// Grund ist der Pruefer: ein Schreibzugriff in den Paketpuffer ist
+// zwar erlaubt (der Puffer ist ein gueltiger Bereich), aber was danach
+// mit einem halb umgeschriebenen Rahmen geschieht, haengt an Laengen
+// und Pruefsummen, die dieser Pruefer nicht nachrechnet. Solange er das
+// nicht kann, ist "nur lesen und entscheiden" die ehrliche Grenze.
+//
+// ================================================================
+// WAS ES KOSTET, WENN NICHTS GELADEN IST
+// ================================================================
+//
+// EIN VERGLEICH. Ist kein Programm angehaengt, ist `xdp` eine Ladung
+// aus `kdata` und ein `if`. Das ist der Fall, in dem sich fast jede
+// Maschine befindet, und er ist der einzige, der die Zahl im Bericht
+// bestimmt -- alles andere zahlt nur, wer wirklich filtert.
+// `tools/ebpf/run.sh` misst alle drei Faelle.
+
+profile kernel
+
+import lib.kstate
+import net.ebpf
+import net.ebpfver
+import net.ebpfmap
+
+export {
+    init, load, unload, attach, detach, attached,
+    xdp, sock, on, set_on,
+    PASS, DROP, K_XDP, K_SOCK, K_NONE,
+    seen, drops, passes, aborts, prog_of, loaded
+}
+
+// Die Antworten eines Programms. Die Zahlen sind die von XDP, damit ein
+// anderswo uebersetztes Programm hier dasselbe bedeutet.
+const DROP: u64 = 1
+const PASS: u64 = 2
+
+// Wo ein Programm haengen kann.
+const K_NONE: u64 = 0
+const K_XDP: u64 = 1
+const K_SOCK: u64 = 2
+
+// Die Ablage bei `kstate.EBPFHOOK_OFF`, eine Seite:
+//
+//   0x00  die Skalare
+//   0x40  je Hakenart ein Wort: welcher Platz haengt dort (+1), 0 = keiner
+const HK_ON: u64 = 0x00 // 1 = die Haken sind scharf
+const HK_SEEN: u64 = 0x08 // Rahmen, die einen Haken erreicht haben
+const HK_DROP: u64 = 0x10 // davon verworfen
+const HK_PASS: u64 = 0x18 // davon durchgelassen
+const HK_ABORT: u64 = 0x20 // Laeufe, die abgebrochen sind
+const HK_SOCK: u64 = 0x28 // Aufrufe am Sockel
+const HK_LOADED: u64 = 0x30 // wieviele Programme geladen wurden
+const HK_REJECT: u64 = 0x38 // wieviele der Pruefer abgewiesen hat
+const ATTACH: u64 = 0x40 // drei Worte, nach K_* indiziert
+
+fn hk(off: u64) -> u64 {
+    return kstate.EBPFHOOK_OFF + off
+}
+
+fn init(state: u64) {
+    var i: u64 = 0
+    while i < kstate.EBPFHOOK_MAX / 8 {
+        kstate.set(state, hk(i * 8), 0)
+        i = i + 1
+    }
+    // Die Haken sind von Anfang an scharf; ohne angehaengtes Programm
+    // tun sie nichts. `noebpf` schaltet sie ganz ab.
+    kstate.set(state, hk(HK_ON), 1)
+    ebpf.init(state)
+    ebpfmap.init(state)
+}
+
+fn on(state: u64) -> bool {
+    return kstate.get(state, hk(HK_ON)) != 0
+}
+
+fn set_on(state: u64, v: u64) {
+    kstate.set(state, hk(HK_ON), v)
+}
+
+fn seen(state: u64) -> u64 {
+    return kstate.get(state, hk(HK_SEEN))
+}
+
+fn drops(state: u64) -> u64 {
+    return kstate.get(state, hk(HK_DROP))
+}
+
+fn passes(state: u64) -> u64 {
+    return kstate.get(state, hk(HK_PASS))
+}
+
+fn aborts(state: u64) -> u64 {
+    return kstate.get(state, hk(HK_ABORT))
+}
+
+fn loaded(state: u64) -> u64 {
+    return kstate.get(state, hk(HK_LOADED))
+}
+
+// Welcher Platz haengt an dieser Tuer? PROG_MAX = keiner.
+fn attached(state: u64, kind: u64) -> u64 {
+    if kind != K_XDP && kind != K_SOCK {
+        return ebpf.PROG_MAX
+    }
+    let v: u64 = kstate.get(state, hk(ATTACH + kind * 8))
+    if v == 0 {
+        return ebpf.PROG_MAX
+    }
+    return v - 1
+}
+
+fn prog_of(state: u64, kind: u64) -> u64 {
+    return attached(state, kind)
+}
+
+// ------------------------------------------------------------ das Laden
+//
+// EIN PROGRAMM WIRD GEPRUEFT UND DANN ERST BENUTZBAR. Die Befehle
+// stehen zu diesem Zeitpunkt schon im Platz -- der Aufrufer hat sie
+// dorthin geschrieben (aus Ring 3 ueber den Systemaufruf, in der
+// Kreisprobe von Hand). `load` prueft sie und traegt die Laenge ein;
+// erst danach findet `run` ein benutzbares Programm vor.
+//
+// Gibt den Befund des Pruefers zurueck: 0 = angenommen.
+fn load(state: u64, slot: u64, kind: u64, len: u64) -> u64 {
+    if slot >= ebpf.PROG_MAX {
+        return ebpfver.V_LEN
+    }
+    // Der Platz wird ZUERST ungueltig gemacht. Sonst liefe zwischen dem
+    // Ueberschreiben der Befehle und dem Ende der Pruefung ein
+    // ungeprueftes Programm, wenn in dieser Zeit ein Rahmen ankaeme.
+    kstate.set(state, hdr(slot) + H_USE * 8, 0)
+    let v: u64 = ebpfver.verify(state, ebpf.prog_at(state, slot), len)
+    if v != ebpfver.V_OK {
+        kstate.add(state, hk(HK_REJECT), 1)
+        return v
+    }
+    kstate.set(state, hdr(slot) + H_LEN * 8, len)
+    kstate.set(state, hdr(slot) + H_KIND * 8, kind)
+    kstate.set(state, hdr(slot) + H_USE * 8, 1)
+    kstate.add(state, hk(HK_LOADED), 1)
+    return ebpfver.V_OK
+}
+
+// Die Kopfsaetze liegen in `ebpf.fi`; die Felder stehen hier noch
+// einmal, weil ein `export` dafuer die Maschine fuer jeden schreibbar
+// machen wuerde.
+const HDRS: u64 = 0x0040
+const HBYTES: u64 = 64
+const H_USE: u64 = 0
+const H_LEN: u64 = 1
+const H_KIND: u64 = 2
+
+fn hdr(i: u64) -> u64 {
+    return kstate.EBPF_OFF + HDRS + i * HBYTES
+}
+
+fn unload(state: u64, slot: u64) -> bool {
+    if slot >= ebpf.PROG_MAX {
+        return false
+    }
+    // Erst aushaengen, dann loeschen -- andersherum liefe ein Rahmen
+    // auf einen leeren Platz.
+    var k: u64 = K_XDP
+    while k <= K_SOCK {
+        if attached(state, k) == slot {
+            detach(state, k)
+        }
+        k = k + 1
+    }
+    kstate.set(state, hdr(slot) + H_USE * 8, 0)
+    kstate.set(state, hdr(slot) + H_LEN * 8, 0)
+    kstate.set(state, hdr(slot) + H_KIND * 8, 0)
+    return true
+}
+
+fn attach(state: u64, kind: u64, slot: u64) -> bool {
+    if kind != K_XDP && kind != K_SOCK {
+        return false
+    }
+    if slot >= ebpf.PROG_MAX {
+        return false
+    }
+    if kstate.get(state, hdr(slot) + H_USE * 8) == 0 {
+        return false
+    }
+    kstate.set(state, hk(ATTACH + kind * 8), slot + 1)
+    return true
+}
+
+fn detach(state: u64, kind: u64) -> bool {
+    if kind != K_XDP && kind != K_SOCK {
+        return false
+    }
+    kstate.set(state, hk(ATTACH + kind * 8), 0)
+    return true
+}
+
+// ================================================================
+// DER HAKEN AM EINGANG
+// ================================================================
+//
+// Gibt PASS oder DROP zurueck. Der Aufrufer (`inet.pump`) wirft den
+// Rahmen bei DROP weg und gibt ihn sonst weiter.
+//
+// DIE DREI ZEILEN, DIE DEN NORMALFALL AUSMACHEN: ist der Haken aus oder
+// haengt kein Programm, wird nichts gezaehlt und nichts gerechnet --
+// dann kostet diese Funktion eine Ladung und einen Vergleich. Ein
+// Zaehler, der auch im leeren Fall hochliefe, waere schon die Haelfte
+// der Kosten.
+fn xdp(state: u64, frame: u64, len: u64) -> u64 {
+    if kstate.get(state, hk(HK_ON)) == 0 {
+        return PASS
+    }
+    let a: u64 = kstate.get(state, hk(ATTACH + K_XDP * 8))
+    if a == 0 {
+        return PASS
+    }
+    kstate.add(state, hk(HK_SEEN), 1)
+    let r: u64 = ebpf.run(state, a - 1, frame, frame +% len)
+    if ebpf.err_of(state) != ebpf.E_OK {
+        // EIN ABGEBROCHENES PROGRAMM LAESST DURCH. Das ist eine
+        // Entscheidung und keine Bequemlichkeit: ein Filter, der bei
+        // einem eigenen Fehler alles verwirft, nimmt die Maschine vom
+        // Netz -- und zwar genau dann, wenn niemand mehr hinschauen
+        // kann. Der Zaehler steht daneben, damit es auffaellt.
+        kstate.add(state, hk(HK_ABORT), 1)
+        kstate.add(state, hk(HK_PASS), 1)
+        return PASS
+    }
+    if r == DROP {
+        kstate.add(state, hk(HK_DROP), 1)
+        return DROP
+    }
+    kstate.add(state, hk(HK_PASS), 1)
+    return PASS
+}
+
+// ================================================================
+// DER HAKEN AM SOCKEL
+// ================================================================
+//
+// Dasselbe eine Schicht hoeher: die Nutzlast, die ein Prozess gerade
+// aus `recv` holt. Hier ist der Rahmen weg und die Verbindung bekannt.
+fn sock(state: u64, buf: u64, len: u64) -> u64 {
+    if kstate.get(state, hk(HK_ON)) == 0 {
+        return PASS
+    }
+    let a: u64 = kstate.get(state, hk(ATTACH + K_SOCK * 8))
+    if a == 0 {
+        return PASS
+    }
+    kstate.add(state, hk(HK_SOCK), 1)
+    kstate.add(state, hk(HK_SEEN), 1)
+    let r: u64 = ebpf.run(state, a - 1, buf, buf +% len)
+    if ebpf.err_of(state) != ebpf.E_OK {
+        kstate.add(state, hk(HK_ABORT), 1)
+        kstate.add(state, hk(HK_PASS), 1)
+        return PASS
+    }
+    if r == DROP {
+        kstate.add(state, hk(HK_DROP), 1)
+        return DROP
+    }
+    kstate.add(state, hk(HK_PASS), 1)
+    return PASS
+}

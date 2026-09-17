@@ -103,7 +103,7 @@ echo "        offene Namen im Modul: $UNDEF"
 for n in k_abi k_bind k_dec k_puts kdata osum_panic; do
     case " $UNDEF " in *" $n "*) ;; *) bad "Modul verlangt $n nicht mehr?" ;; esac
 done
-ok "das Modul verlangt genau die sechs Namen, die kernel/ksym.fi anbietet"
+ok "das Modul verlangt genau die sechs Namen, die kernel/lib/ksym.fi anbietet"
 
 # Die absichtlich kaputten Fassungen. Sie entstehen HIER und nicht mit
 # `dd` hinterher -- eine Datei, die ein Skript nachtraeglich verbiegt,

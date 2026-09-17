@@ -1,0 +1,302 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/power.fi -- round 59: stopping, in two flavours.
+//
+// `halt_forever` is what a kernel really does when nothing more can be
+// done: interrupts off, `hlt` in a loop. It never returns.
+//
+// `shutdown` is a concession to the test harness and nothing else. QEMU
+// offers the device `isa-debug-exit`: a write to port 0xF4 ends the
+// virtual machine with the exit code (value << 1) | 1. Without it a test
+// run could only be ended from outside, with a timeout -- and a kernel
+// that is killed after ten seconds tells you nothing about whether it got
+// to the end. On real hardware the port is unused; a write there does
+// nothing at all.
+//
+// RUNDE K13 HAT DAS DRITTE DAZUGELEGT: die ECHTE Abschaltung ueber ACPI.
+// `init` beendet ein System nicht, indem es dem Pruefstand sagt, er moege
+// jetzt aufhoeren -- es schaltet die Maschine ab. Wie das geht, steht bei
+// `acpi_off` weiter unten; dass es WIRKLICH ACPI war und nicht der
+// Ausgang des Pruefstands, ist am Beendigungscode von QEMU zu sehen: eine
+// ACPI-Abschaltung ergibt 0, `isa-debug-exit` ergibt 21. Die Gegenprobe
+// `noacpi` nimmt genau den einen Weg weg, und dann steht dort wieder 21.
+
+import lib.kstate
+import acpi.acpi
+import serial
+
+export { shutdown, halt_forever, acpi_off, acpi_reset, off_reason,
+         reset_reason, EXIT_OK, EXIT_TRAP }
+
+// QEMU makes 21 out of this: (10 << 1) | 1.
+const EXIT_OK: u8 = 10
+// QEMU makes 63 out of this: (31 << 1) | 1.
+const EXIT_TRAP: u8 = 31
+
+const DEBUG_EXIT: u16 = 0xF4
+
+fn shutdown(code: u8) {
+    asm("out dx, al", in("dx") DEBUG_EXIT, in("al") code)
+    halt_forever()
+}
+
+fn halt_forever() {
+    asm("cli")
+    while true {
+        asm("hlt")
+    }
+}
+
+// ------------------------------------------------- RUNDE K13: ACPI aus
+
+// Was `acpi_off` gefunden hat, fuer den Bericht:
+//   0 nichts versucht · 1 FADT+DSDT gelesen, PM1a beschrieben
+//   2 keine FADT · 3 kein \_S5 in der DSDT · 4 kein PM1a-Anschluss
+fn off_reason(state: u64) -> u64 {
+    return kstate.get(state, kstate.K13_OFF + kstate.U_ACPI)
+}
+
+const F_PM1A_CNT: u64 = 64 // Offsets in der FADT (ACPI 1.0, 32 Bit)
+const F_PM1B_CNT: u64 = 68
+const F_DSDT: u64 = 40
+
+const SLP_EN: u64 = 8192 // Bit 13 von PM1x_CNT
+
+fn out16(port: u64, v: u64) {
+    asm("out dx, ax", in("dx") port as u16, in("ax") v as u16)
+}
+
+fn out8(port: u64, v: u64) {
+    asm("out dx, al", in("dx") port as u16, in("al") v as u8)
+}
+
+// DAS SCHLAFOBJEKT \_S5_ AUS DER DSDT.
+//
+// ACPI sagt nicht, welchen Wert man in das Steuerregister schreiben muss,
+// um eine Maschine abzuschalten -- es sagt, dass die Firmware ihn in
+// einem AML-Objekt namens `_S5_` hinterlegt. Vollstaendig richtig waere
+// ein AML-Interpreter; das ist eine eigene Runde und mehr Code als der
+// ganze Rest dieser Datei.
+//
+// Was hier steht, ist der Weg, den jeder kleine Kernel geht und der seit
+// zwanzig Jahren auf jeder Maschine funktioniert, auf der er ueberhaupt
+// gebraucht wird: die DSDT nach den vier Oktetten `_S5_` absuchen und das
+// Paket dahinter von Hand lesen. Die Form ist immer dieselbe --
+//
+//     5F 53 35 5F   '_S5_'
+//     12            PackageOp
+//     <PkgLength>   ein oder zwei Oktette
+//     04            vier Elemente
+//     <SLP_TYPa>    entweder 0A xx (ein Byte-Wert) oder 00/01 (0 oder 1)
+//     <SLP_TYPb>
+//
+// -- und alles, was davon gebraucht wird, sind die ersten beiden Werte.
+// Was diese Abkuerzung NICHT kann, steht ehrlich in docs/ROUNDK13.md:
+// eine Firmware, die `_S5_` in einem `If` versteckt oder es ueber eine
+// Methode berechnet, wird hier nicht gefunden. Dann bleibt die Maschine
+// an, `off_reason` sagt 3, und der Aufrufer nimmt seinen Notweg.
+fn s5_values(dsdt: u64, out: u64) -> bool {
+    if dsdt == 0 {
+        return false
+    }
+    let len: u64 = kstate.get32(dsdt + 4)
+    if len < 36 || len > 0x100000 {
+        return false
+    }
+    var p: u64 = dsdt + 36
+    let end: u64 = dsdt + len - 8
+    while p < end {
+        if kstate.get8(p) == 0x5F && kstate.get8(p + 1) == 0x53 &&
+            kstate.get8(p + 2) == 0x35 && kstate.get8(p + 3) == 0x5F {
+            var q: u64 = p + 4
+            if kstate.get8(q) != 0x12 {
+                return false
+            }
+            q = q + 1
+            // PkgLength: die oberen zwei Bits sagen, wie viele
+            // Folgeoktette es hat.
+            let lead: u64 = kstate.get8(q)
+            q = q + 1 + ((lead >> 6) & 3)
+            q = q + 1 // die Zahl der Elemente
+            var a: u64 = 0
+            var b: u64 = 0
+            if kstate.get8(q) == 0x0A {
+                a = kstate.get8(q + 1)
+                q = q + 2
+            } else {
+                a = kstate.get8(q) & 7 // ZeroOp = 0x00, OneOp = 0x01
+                q = q + 1
+            }
+            if kstate.get8(q) == 0x0A {
+                b = kstate.get8(q + 1)
+            } else {
+                b = kstate.get8(q) & 7
+            }
+            __mmio_write64(out as *mut u64, a)
+            __mmio_write64((out + 8) as *mut u64, b)
+            return true
+        }
+        p = p + 1
+    }
+    return false
+}
+
+// DIE ABSCHALTUNG. Kehrt NUR zurueck, wenn sie nicht gegriffen hat.
+fn acpi_off(state: u64) -> bool {
+    var w_facp: [u8; 5] = "FACP\0"
+    var s_try: [u8; 22] = "power: acpi pm1a=0x\0\0\0"
+    var s_typ: [u8; 8] = " s5typ=\0"
+    var s_no: [u8; 20] = "power: acpi off no \0"
+    kstate.set(state, kstate.K13_OFF + kstate.U_ACPI, 0)
+    let fadt: u64 = acpi.table(state, (&w_facp[0]) as u64)
+    if fadt == 0 {
+        kstate.set(state, kstate.K13_OFF + kstate.U_ACPI, 2)
+        serial.puts((&s_no[0]) as u64)
+        serial.dec(2)
+        serial.nl()
+        return false
+    }
+    let pm1a: u64 = kstate.get32(fadt + F_PM1A_CNT)
+    let pm1b: u64 = kstate.get32(fadt + F_PM1B_CNT)
+    if pm1a == 0 {
+        kstate.set(state, kstate.K13_OFF + kstate.U_ACPI, 4)
+        serial.puts((&s_no[0]) as u64)
+        serial.dec(4)
+        serial.nl()
+        return false
+    }
+    var vals: [u64; 2] = [0 as u64; 2]
+    let dsdt: u64 = kstate.get32(fadt + F_DSDT)
+    if !s5_values(dsdt, (&vals[0]) as u64) {
+        kstate.set(state, kstate.K13_OFF + kstate.U_ACPI, 3)
+        serial.puts((&s_no[0]) as u64)
+        serial.dec(3)
+        serial.nl()
+        return false
+    }
+    kstate.set(state, kstate.K13_OFF + kstate.U_ACPI, 1)
+    serial.puts((&s_try[0]) as u64)
+    serial.hex(pm1a)
+    serial.puts((&s_typ[0]) as u64)
+    serial.dec(vals[0 as usize])
+    serial.nl()
+    out16(pm1a, ((vals[0 as usize] & 7) << 10) | SLP_EN)
+    if pm1b != 0 {
+        out16(pm1b, ((vals[1 as usize] & 7) << 10) | SLP_EN)
+    }
+    // Die Maschine ist an dieser Stelle normalerweise weg. Kommt sie doch
+    // zurueck, hat es nicht gegriffen und der Aufrufer erfaehrt es.
+    var spin: u64 = 0
+    while spin < 100000 {
+        asm("pause")
+        spin = spin + 1
+    }
+    return false
+}
+
+// ------------------------------------------ RUNDE INIT: DER NEUSTART
+//
+// Bis zu dieser Runde konnte dieses System sich AUSSCHALTEN, aber nicht
+// NEU STARTEN: `SYS_REBOOT` mit `RB_RESTART` fiel in `power.shutdown`,
+// also in den Ausgang des Pruefstands -- die Maschine blieb stehen und
+// kam nicht wieder. Fuer einen Rechner mit einem Menschen davor ist das
+// ein Schoenheitsfehler; fuer einen Server in einem Schrank ist es der
+// Unterschied zwischen "startet nach dem Update neu" und "ist weg, bis
+// jemand hinfaehrt".
+//
+// DREI WEGE, IN DIESER REIHENFOLGE, und jeder ist echte Hardware:
+//
+//   1. DAS RESET-REGISTER AUS DER FADT (ACPI 2.0, Abschnitt 4.7.3.6).
+//      Die Firmware sagt selbst, wohin welcher Wert geschrieben werden
+//      muss: `RESET_REG` ist eine generische Adresse (GAS) ab Oktett
+//      116, `RESET_VALUE` ein Oktett bei 128, und Bit 10 der Flags bei
+//      112 sagt, dass es das ueberhaupt gibt. Weil beide Felder erst
+//      mit ACPI 2.0 dazukamen, muss die FADT auch LANG genug sein --
+//      eine FADT der Fassung 1 hoert bei 116 auf, und was dahinter
+//      steht, gehoert einer anderen Tabelle.
+//   2. DER ANSCHLUSS 0xCF9 (Reset Control Register). Kein ACPI, sondern
+//      der Chipsatz; seit Intels ICH in jedem PC und in QEMU. Bit 1
+//      setzen und Bit 2 pulsen ergibt einen harten Neustart.
+//   3. DER TASTATURSCHALTKREIS. Der 8042 hat eine Leitung an den
+//      RESET-Eingang des Prozessors, und `0xFE` an Anschluss 0x64 zieht
+//      sie. Das ist der Weg von 1984 und der einzige, der auf einer
+//      Maschine ohne beides noch bleibt.
+//
+// Was gegriffen hat, steht hinterher in `reset_reason` -- 0 nichts
+// versucht, 1 FADT, 2 0xCF9, 3 der 8042. Eine Maschine, die dabei
+// verschwindet, hinterlaesst die Zahl in kdata, und der Testlaeufer
+// liest sie aus der seriellen Ausgabe VORHER.
+
+const F_LENGTH: u64 = 4 // Laenge der FADT selbst
+const F_FLAGS: u64 = 112 // ACPI-Flags
+const F_RESET_REG: u64 = 116 // GAS, 12 Oktette
+const F_RESET_VAL: u64 = 128 // ein Oktett
+const FL_RESET_SUP: u64 = 1024 // Bit 10: RESET_REG_SUP
+const GAS_MEM: u64 = 0 // AddressSpaceId 0 = Speicher
+const GAS_IO: u64 = 1 // AddressSpaceId 1 = Anschluesse
+const CF9: u64 = 0xCF9
+const KBD_CMD: u64 = 0x64
+const KBD_RESET: u64 = 0xFE
+
+fn reset_reason(state: u64) -> u64 {
+    return kstate.get(state, kstate.K13_OFF + kstate.U_RESET)
+}
+
+fn short_wait() {
+    var spin: u64 = 0
+    while spin < 2000000 {
+        asm("pause")
+        spin = spin + 1
+    }
+}
+
+// Kehrt NUR zurueck, wenn kein Weg gegriffen hat.
+fn acpi_reset(state: u64) -> bool {
+    var w_facp: [u8; 5] = "FACP\0"
+    var s_r1: [u8; 24] = "power: reset fadt reg=\0\0"
+    var s_r2: [u8; 22] = "power: reset 0xCF9\0\0\0\0"
+    var s_r3: [u8; 22] = "power: reset 8042\0\0\0\0\0"
+    var s_v: [u8; 7] = " wert=\0"
+    kstate.set(state, kstate.K13_OFF + kstate.U_RESET, 0)
+    let fadt: u64 = acpi.table(state, (&w_facp[0]) as u64)
+    if fadt != 0 {
+        let len: u64 = kstate.get32(fadt + F_LENGTH)
+        let flags: u64 = kstate.get32(fadt + F_FLAGS)
+        // 129 und nicht 128: das Oktett BEI 128 muss noch drin liegen.
+        if len >= 129 && (flags & FL_RESET_SUP) != 0 {
+            let space: u64 = kstate.get8(fadt + F_RESET_REG)
+            let addr: u64 = __mmio_read64((fadt + F_RESET_REG + 4) as *mut u64)
+            let val: u64 = kstate.get8(fadt + F_RESET_VAL)
+            if addr != 0 {
+                kstate.set(state, kstate.K13_OFF + kstate.U_RESET, 1)
+                serial.puts((&s_r1[0]) as u64)
+                serial.hex(addr)
+                serial.puts((&s_v[0]) as u64)
+                serial.dec(val)
+                serial.nl()
+                if space == GAS_IO {
+                    out8(addr, val)
+                }
+                if space == GAS_MEM {
+                    kstate.set8(addr, val as u8)
+                }
+                short_wait()
+            }
+        }
+    }
+    // Der Chipsatz. Erst Bit 1 (SYS_RST) setzen, dann mit Bit 2
+    // (RST_CPU) ausloesen -- 0x02 und danach 0x06 ist die Folge, die
+    // jeder Chipsatz seit dem ICH versteht, und QEMU auch.
+    kstate.set(state, kstate.K13_OFF + kstate.U_RESET, 2)
+    serial.puts((&s_r2[0]) as u64)
+    serial.nl()
+    out8(CF9, 2)
+    out8(CF9, 6)
+    short_wait()
+    // Und zuletzt der 8042.
+    kstate.set(state, kstate.K13_OFF + kstate.U_RESET, 3)
+    serial.puts((&s_r3[0]) as u64)
+    serial.nl()
+    out8(KBD_CMD, KBD_RESET)
+    short_wait()
+    return false
+}

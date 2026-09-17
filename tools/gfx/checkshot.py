@@ -26,11 +26,11 @@ PPM in P6), und dieses Programm rechnet sie nach:
              Ruecktaste), das Ergebnis mit dem Zeichensatz gemalt und
              Bildpunkt fuer Bildpunkt verglichen.  DAS ist die Zusage
              "beide Ausgaben zeigen dasselbe".
-  font       der Zeichensatz in kernel/font.fi gegen die Rust-Vorlage, aus
+  font       der Zeichensatz in kernel/gfx/font.fi gegen die Rust-Vorlage, aus
              der er portiert wurde.
   ttext      eine Zeile ECHTER Schrift (TrueType, kantengeglaettet) --
              gegen `tools/ttf/raster.py`, die zweite Fassung des
-             Rasterers aus `kernel/ttf.fi`.
+             Rasterers aus `kernel/gfx/ttf.fi`.
   tgrid      dasselbe fuer ein ZEICHENRASTER (ein Terminalfenster).
   glatt      ist es wirklich eine Kantenglaettung? Zaehlt die
              Zwischenstufen -- eine Rasterung ohne Glaettung hat keine.
@@ -49,7 +49,7 @@ Fehler dieser Runde gefunden: auf dem Schirm standen nur noch '7',
 Buchstabe leer blieb.  Aus "410 von 3200 Bildpunkten falsch" liest das
 niemand heraus; aus "soll 'O', ist ' '" liest es jeder.
 
-Der Zeichensatz wird IMMER aus `kernel/font.fi` gelesen, nie aus einer
+Der Zeichensatz wird IMMER aus `kernel/gfx/font.fi` gelesen, nie aus einer
 Kopie: geprueft werden soll der, der im Kernel steht.
 
 Jeder Unterbefehl schreibt EINE Zeile und gibt 0 zurueck, wenn alles
@@ -105,7 +105,7 @@ BREIT = 8
 
 
 def font_aus_firn(pfad):
-    """Die zehn b"..."-Stuecke aus kernel/font.fi, in ihrer Reihenfolge."""
+    """Die zehn b"..."-Stuecke aus kernel/gfx/font.fi, in ihrer Reihenfolge."""
     quelle = open(pfad, "r", encoding="utf-8").read()
     stuecke = re.findall(r'var b: \[u8; \d+\] = b"((?:\\x[0-9a-fA-F]{2})+)"',
                          quelle)
@@ -434,7 +434,7 @@ def cmd_font(a):
     fi = font_aus_firn(a[0])
     soll = (LETZTES - ERSTES + 1) * HOCH
     if len(fi) != soll:
-        print("kernel/font.fi hat %d Oktette, erwartet %d" % (len(fi), soll))
+        print("kernel/gfx/font.fi hat %d Oktette, erwartet %d" % (len(fi), soll))
         return 1
     if len(a) < 2:
         print("%d Oktette, 95 Glyphen (Vorlage nicht vorhanden)" % len(fi))

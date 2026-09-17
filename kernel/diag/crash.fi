@@ -1,0 +1,593 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/absturz.fi -- RUNDE PROTOKOLL: DER BERICHT, DEN EIN ABSTURZ
+// HINTERLAESST.
+//
+// WAS BIS HIERHER PASSIERTE, WENN ES KNALLTE:
+//
+//   * IN RING 0 (Kernel-Panik): `trap.report` schrieb Register und
+//     Adressen auf die serielle Leitung, `gfx.absturz` schrieb acht
+//     Zeilen in das reservierte Band am oberen Bildrand, und danach war
+//     die Maschine weg. Beim naechsten Start wusste NIEMAND MEHR, dass
+//     es ueberhaupt geknallt hatte.
+//   * IN RING 3 (Segfault eines Programms): `trap.report_user` schrieb
+//     eine Zeile auf die serielle Leitung und der Prozess starb. Auf
+//     einem Brett ohne serielle Leitung verschwand ein Programm
+//     kommentarlos.
+//
+// Diese Datei aendert beides an genau einer Stelle: JEDER Absturz --
+// Ring 0 wie Ring 3 -- wird zu einem BERICHT, und der Bericht liegt
+// hinterher als Datei auf der Platte:
+//
+//     /var/crash/<sekunden-seit-1970>.txt
+//     /var/crash/NEU          eine leere Marke: "hier liegt etwas Neues"
+//
+// Die Marke ist der Grund, aus dem der naechste Start davon weiss. Ein
+// Verzeichnis durchzugehen und nach dem juengsten Zeitstempel zu suchen
+// waere derselbe Gedanke mit mehr Arbeit und einer zusaetzlichen
+// Annahme (dass die Uhr beim letzten Start richtig ging).
+//
+// ------------------------------------------------------------------
+// WAS IN EINEM BERICHT STEHT
+//
+//     Kopf       Art (Kern/Programm), Zeit, Fassung, Kernnummer
+//     Register   alle sechzehn, plus rip/cs/rflags/rsp/ss/err/cr2
+//     Spur       die Ruecksprungkette, AUFGELOEST zu Name+Versatz und
+//                Datei:Zeile (`kernel/ksymtab.fi`)
+//     Protokoll  die letzten fuenfzig Zeilen aus `kernel/klog.fi`
+//
+// Also genau das, was auch auf dem Panik-Bildschirm steht -- und aus
+// demselben Grund: wer den Bildschirm fotografieren muss, soll dieselbe
+// Information spaeter noch einmal lesen koennen.
+//
+// ------------------------------------------------------------------
+// DAS SCHREIBEN AUS EINEM STERBENDEN KERN, UND WAS DARAN NICHT GEHT
+//
+// Ein Ring-0-Absturz kann UEBERALL passieren -- auch mitten in
+// `fs.write_at`, mit der Dateisystemsperre in der Hand. Das Schreiben
+// des Berichts nimmt dieselbe Sperre und wartete dann auf sich selbst.
+// Deshalb:
+//
+//   * Bei einem RING-3-Absturz wird SOFORT und normal geschrieben. Der
+//     Kern ist dabei gesund, es gibt keinen Sonderweg, und das ist der
+//     Fall, der im Alltag zaehlt.
+//   * Bei einer KERNEL-PANIK wird es VERSUCHT, mit `fs.frei` als
+//     Riegel: haelt dieser Kern die Dateisystemsperre schon, wird nicht
+//     geschrieben, sondern nur gemeldet, dass nicht geschrieben wurde.
+//     Ein Kern, der beim Berichten haengt, hat den Bericht auch nicht.
+//
+// Das ist weniger, als `kdump` unter Linux kann (ein zweiter Kern, in
+// den hineingesprungen wird), und es ist mehr als nichts. Es steht hier,
+// damit niemand den Bericht fuer eine Garantie haelt.
+
+profile kernel
+
+import lib.kstate
+import serial
+import klog
+import lib.ksymtab
+import sched.time
+import fs.fs
+import gfx.gfx
+import arch.cpu
+import sched.sched
+import lib.version
+
+export {
+    init, open, brand_delete, knall,
+    kern_bericht, prog_bericht, last_file,
+    A_KERN, A_PROG, geschrieben, versucht, gescheitert
+}
+
+const A_KERN: u64 = 0
+const A_PROG: u64 = 1
+
+// Der Puffer, in dem ein Bericht entsteht. Er ist ein `static mut` und
+// keine Seite aus dem Rahmenverwalter: der Rahmenverwalter ist genau das,
+// was bei einer Kernel-Panik kaputt sein kann.
+const BUF_MAX: u64 = 8192
+static mut buf: [u8; 8192] = [0 as u8; 8192]
+static mut buf_n: u64 = 0
+static mut ge: u64 = 0
+static mut ver: u64 = 0
+static mut fehl: u64 = 0
+static mut offen_flag: u64 = 0
+static mut name_buf: [u8; 64] = [0 as u8; 64]
+
+fn init(state: u64) {
+    // Beim Start EINMAL nachsehen, ob die Marke des letzten Laufs noch
+    // liegt. Die Antwort wird gemerkt und nicht bei jeder Frage neu von
+    // der Platte geholt: `KL_CRASH` wird von der Oberflaeche gefragt,
+    // und eine Oberflaeche fragt oft.
+    var m: [u8; 16] = "/var/crash/NEU\0\0"
+    if fs.path(state, (&m[0 as usize]) as u64) != 0 {
+        offen_flag = 1
+    } else {
+        offen_flag = 0
+    }
+}
+
+// NICHT NUR DER GEMERKTE WERT. `init` sieht EINMAL nach; danach kann
+// sich die Lage aendern (ein Absturz in diesem Lauf, ein `absturz -c`
+// eines anderen Prozesses). Ein Nachschlagen im Verzeichnis kostet
+// einen Pfadaufloesung -- fuer eine Frage, die die Oberflaeche einmal je
+// Anmeldung stellt, ist das nichts.
+fn open(state: u64) -> u64 {
+    var m: [u8; 15] = "/var/crash/NEU\0"
+    if !fs.ready(state) {
+        return offen_flag
+    }
+    if fs.path(state, (&m[0 as usize]) as u64) != 0 {
+        offen_flag = 1
+    } else {
+        offen_flag = 0
+    }
+    return offen_flag
+}
+
+fn brand_delete(state: u64) -> u64 {
+    var m: [u8; 16] = "/var/crash/NEU\0\0"
+    offen_flag = 0
+    if fs.unlink_path(state, (&m[0 as usize]) as u64) {
+        return 1
+    }
+    return 0
+}
+
+fn geschrieben() -> u64 {
+    return ge
+}
+
+fn versucht() -> u64 {
+    return ver
+}
+
+fn gescheitert() -> u64 {
+    return fehl
+}
+
+// 0, solange noch kein Bericht abgelegt wurde -- der Panik-Bildschirm
+// schreibt dann "(keiner)" statt einer leeren Zeile. Ein leeres Feld
+// hinter "BERICHT" liesse offen, ob der Pfad fehlt oder der Bericht.
+fn last_file() -> u64 {
+    if name_buf[0 as usize] == 0 as u8 {
+        return 0
+    }
+    return (&name_buf[0 as usize]) as u64
+}
+
+// ------------------------------------------------------- der Puffer
+
+fn p_ch(c: u64) {
+    if buf_n >= BUF_MAX - 1 {
+        return
+    }
+    buf[buf_n as usize] = (c & 0xFF) as u8
+    buf_n = buf_n + 1
+}
+
+fn p_str(s: u64) {
+    if s == 0 {
+        return
+    }
+    var i: u64 = 0
+    while i < 512 {
+        let c: u64 = kstate.get8(s + i)
+        if c == 0 {
+            return
+        }
+        p_ch(c)
+        i = i + 1
+    }
+}
+
+fn p_dec(v: u64) {
+    var t: [u8; 24] = [0 as u8; 24]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        t[0 as usize] = 48 as u8
+        n = 1
+    }
+    while x > 0 {
+        t[n as usize] = (48 + (x % 10)) as u8
+        x = x / 10
+        n = n + 1
+    }
+    while n > 0 {
+        p_ch(t[(n - 1) as usize] as u64)
+        n = n - 1
+    }
+}
+
+fn p_hex(v: u64, w: u64) {
+    p_ch(48)
+    p_ch(120)
+    var i: u64 = w
+    while i > 0 {
+        i = i - 1
+        let d: u64 = (v >> (i * 4)) & 15
+        if d < 10 {
+            p_ch(48 + d)
+        } else {
+            p_ch(87 + d)
+        }
+    }
+}
+
+fn p_nl() {
+    p_ch(10)
+}
+
+// Eine Adresse als `Name+Versatz (Datei:Zeile)` in den Puffer. Dieselbe
+// Auskunft wie `ksymtab.say_addr`, nur nicht auf die Leitung.
+fn p_addr(a: u64) {
+    var s_plus: [u8; 2] = "+\0"
+    var s_ob: [u8; 3] = " (\0"
+    var s_co: [u8; 2] = ":\0"
+    var s_cb: [u8; 2] = ")\0"
+    let i: u64 = ksymtab.resolve(a)
+    if i >= ksymtab.n_sym() {
+        p_hex(a, 16)
+        return
+    }
+    p_str(ksymtab.sym_name(i))
+    p_str((&s_plus[0 as usize]) as u64)
+    p_hex(a - ksymtab.sym_addr(i), 4)
+    let pk: u64 = ksymtab.line_of(a)
+    if pk == 0 {
+        return
+    }
+    let f: u64 = ksymtab.file_name(ksymtab.line_file(pk))
+    if f == 0 {
+        return
+    }
+    p_str((&s_ob[0 as usize]) as u64)
+    p_str(f)
+    p_str((&s_co[0 as usize]) as u64)
+    p_dec(ksymtab.line_nr(pk))
+    p_str((&s_cb[0 as usize]) as u64)
+}
+
+// ---------------------------------------------------- der Bericht selbst
+
+// Kopf und Zeit. `art` ist A_KERN oder A_PROG.
+fn header(state: u64, art: u64, kern: u64, pid: u64, name: u64) {
+    var s_k: [u8; 35] = "=== OSUM ABSTURZBERICHT (KERN) ===\0"
+    var s_p: [u8; 39] = "=== OSUM ABSTURZBERICHT (PROGRAMM) ===\0"
+    var s_f: [u8; 10] = "fassung: \0"
+    var s_z: [u8; 8] = "zeit:  \0"
+    var s_c: [u8; 8] = "kern:  \0"
+    var s_i: [u8; 8] = "pid:   \0"
+    var s_n: [u8; 8] = "prog:  \0"
+    buf_n = 0
+    if art == A_KERN {
+        p_str((&s_k[0 as usize]) as u64)
+    } else {
+        p_str((&s_p[0 as usize]) as u64)
+    }
+    p_nl()
+    p_str((&s_f[0 as usize]) as u64)
+    p_str(version.text())
+    p_nl()
+    p_str((&s_z[0 as usize]) as u64)
+    p_dec(time.now_sec(state))
+    p_nl()
+    p_str((&s_c[0 as usize]) as u64)
+    p_dec(kern)
+    p_nl()
+    p_str((&s_i[0 as usize]) as u64)
+    p_dec(pid)
+    p_nl()
+    if name != 0 {
+        p_str((&s_n[0 as usize]) as u64)
+        p_str(name)
+        p_nl()
+    }
+}
+
+// Die sechzehn Register plus die sechs aus dem Prozessorrahmen. `regs`
+// zeigt auf sechzehn Woerter in der Reihenfolge rax..r15, so wie sie der
+// Rufer bereitgelegt hat -- `trap.fi` kennt die Versaetze im Rahmen,
+// diese Datei nicht, und so bleibt es.
+fn register(regs: u64, rip: u64, cs: u64, flg: u64, rsp: u64, ss: u64,
+        err: u64, cr2: u64, vec: u64) {
+    var namen: [u8; 64] = "rax\0rbx\0rcx\0rdx\0rsi\0rdi\0rbp\0rsp\0r8 \0r9 \0r10\0r11\0r12\0r13\0r14\0r15\0"
+    var s_h: [u8; 13] = "-- register\0\0"
+    var s_v: [u8; 8] = "vektor \0"
+    var s_e: [u8; 7] = "  err \0"
+    var s_r: [u8; 7] = "  cr2 \0"
+    var s_ri: [u8; 6] = "rip \0\0"
+    var s_cs: [u8; 7] = "  cs \0\0"
+    var s_fl: [u8; 11] = "  rflags \0\0"
+    var s_sp: [u8; 8] = "  rsp \0\0"
+    var s_ss: [u8; 7] = "  ss \0\0"
+    p_str((&s_h[0 as usize]) as u64)
+    p_nl()
+    p_str((&s_v[0 as usize]) as u64)
+    p_dec(vec)
+    p_str((&s_e[0 as usize]) as u64)
+    p_hex(err, 8)
+    p_str((&s_r[0 as usize]) as u64)
+    p_hex(cr2, 16)
+    p_nl()
+    p_str((&s_ri[0 as usize]) as u64)
+    p_hex(rip, 16)
+    p_str((&s_cs[0 as usize]) as u64)
+    p_hex(cs, 4)
+    p_str((&s_fl[0 as usize]) as u64)
+    p_hex(flg, 8)
+    p_str((&s_sp[0 as usize]) as u64)
+    p_hex(rsp, 16)
+    p_str((&s_ss[0 as usize]) as u64)
+    p_hex(ss, 4)
+    p_nl()
+    var i: u64 = 0
+    while i < 16 {
+        p_str((&namen[0 as usize]) as u64 + i * 4)
+        p_ch(61)
+        p_hex(__mmio_read64((regs + i * 8) as *mut u64), 16)
+        if i % 4 == 3 {
+            p_nl()
+        } else {
+            p_ch(32)
+        }
+        i = i + 1
+    }
+}
+
+fn spur(spurp: u64, spurn: u64) {
+    var s_h: [u8; 14] = "-- rueckspur\0\0"
+    var s_k: [u8; 10] = "  (keine)\0"
+    var s_e: [u8; 5] = "  #\0\0"
+    var s_s: [u8; 2] = " \0"
+    p_str((&s_h[0 as usize]) as u64)
+    p_nl()
+    if spurn == 0 {
+        p_str((&s_k[0 as usize]) as u64)
+        p_nl()
+        return
+    }
+    var i: u64 = 0
+    while i < spurn {
+        p_str((&s_e[0 as usize]) as u64)
+        p_dec(i)
+        p_str((&s_s[0 as usize]) as u64)
+        p_addr(__mmio_read64((spurp + i * 8) as *mut u64))
+        p_nl()
+        i = i + 1
+    }
+}
+
+// Die letzten `n` Zeilen des Protokolls in den Puffer. Es wird von
+// hinten begrenzt: sind die Zeilen laenger als der Rest des Puffers,
+// hoert es auf. Ein abgeschnittener Bericht ist besser als keiner, und
+// dass er abgeschnitten ist, sagt die letzte Zeile.
+fn protokoll(state: u64, n: u64) {
+    var s_h: [u8; 15] = "-- protokoll\0\0\0"
+    var s_ab: [u8; 22] = "  ... (abgeschnitten)\0"
+    p_str((&s_h[0 as usize]) as u64)
+    p_nl()
+    let last: u64 = klog.seq(state)
+    if last == 0 {
+        return
+    }
+    var from: u64 = 1
+    if last > n {
+        from = last - n + 1
+    }
+    if from < klog.first_seq(state) {
+        from = klog.first_seq(state)
+    }
+    var s: u64 = from
+    while s <= last {
+        if buf_n + 256 >= BUF_MAX {
+            p_str((&s_ab[0 as usize]) as u64)
+            p_nl()
+            return
+        }
+        let n2: u64 = klog.line_at(state, s,
+            (&buf[0 as usize]) as u64 + buf_n, BUF_MAX - 1 - buf_n)
+        buf_n = buf_n + n2
+        s = s + 1
+    }
+}
+
+// ------------------------------------------------------- auf die Platte
+
+// `/var/crash/<sekunden>.txt`. Der Name wird hier gebaut, weil hier die
+// Zeit steht; das Verzeichnis wird angelegt, wenn es fehlt.
+fn filename(state: u64) -> u64 {
+    var pre: [u8; 12] = "/var/crash/\0"
+    var suf: [u8; 5] = ".txt\0"
+    let p: u64 = (&name_buf[0 as usize]) as u64
+    var n: u64 = 0
+    var i: u64 = 0
+    while kstate.get8((&pre[0 as usize]) as u64 + i) != 0 {
+        kstate.set8(p + n, kstate.get8((&pre[0 as usize]) as u64 + i) as u8)
+        n = n + 1
+        i = i + 1
+    }
+    var t: [u8; 24] = [0 as u8; 24]
+    var m: u64 = 0
+    var x: u64 = time.now_sec(state)
+    if x == 0 {
+        t[0 as usize] = 48 as u8
+        m = 1
+    }
+    while x > 0 {
+        t[m as usize] = (48 + (x % 10)) as u8
+        x = x / 10
+        m = m + 1
+    }
+    while m > 0 {
+        kstate.set8(p + n, t[(m - 1) as usize])
+        n = n + 1
+        m = m - 1
+    }
+    i = 0
+    while kstate.get8((&suf[0 as usize]) as u64 + i) != 0 {
+        kstate.set8(p + n, kstate.get8((&suf[0 as usize]) as u64 + i) as u8)
+        n = n + 1
+        i = i + 1
+    }
+    kstate.set8(p + n, 0 as u8)
+    return p
+}
+
+// SAGEN, WAS AUS DEM BERICHT GEWORDEN IST -- auf die serielle Leitung
+// und ins Protokoll. Ohne diese Zeile ist "der Bericht wird
+// geschrieben" eine Behauptung: der erste Anlauf dieser Runde hat
+// stillschweigend nichts geschrieben, und es ist niemandem aufgefallen.
+fn melden(state: u64, ok: bool, n: u64) {
+    var s_j: [u8; 20] = "absturz: bericht  \0\0"
+    var s_ok: [u8; 15] = "  geschrieben \0"
+    var s_no: [u8; 32] = "absturz: bericht NICHT abgelegt\0"
+    var s_ok2: [u8; 10] = "  oktett\0\0"
+    if ok {
+        serial.puts((&s_j[0 as usize]) as u64)
+        serial.puts(last_file())
+        serial.puts((&s_ok[0 as usize]) as u64)
+        serial.dec(n)
+        serial.puts((&s_ok2[0 as usize]) as u64)
+    } else {
+        serial.puts((&s_no[0 as usize]) as u64)
+    }
+    serial.nl()
+}
+
+fn ablegen(state: u64) -> bool {
+    var dir: [u8; 12] = "/var/crash\0\0"
+    var var_: [u8; 5] = "/var\0"
+    var m: [u8; 16] = "/var/crash/NEU\0\0"
+    ver = ver + 1
+    if !fs.ready(state) {
+        fehl = fehl + 1
+        melden(state, false, 0)
+        return false
+    }
+    if fs.path(state, (&var_[0 as usize]) as u64) == 0 {
+        if fs.create_path(state, (&var_[0 as usize]) as u64, fs.T_DIR) == 0 {
+            fehl = fehl + 1
+            return false
+        }
+    }
+    if fs.path(state, (&dir[0 as usize]) as u64) == 0 {
+        if fs.create_path(state, (&dir[0 as usize]) as u64, fs.T_DIR) == 0 {
+            fehl = fehl + 1
+            return false
+        }
+    }
+    let name: u64 = filename(state)
+    var ino: u64 = fs.path(state, name)
+    if ino == 0 {
+        ino = fs.create_path(state, name, fs.T_FILE)
+    }
+    if ino == 0 {
+        fehl = fehl + 1
+        melden(state, false, 0)
+        return false
+    }
+    let n: u64 = fs.write_at(state, ino, 0, (&buf[0 as usize]) as u64, buf_n)
+    if n != buf_n {
+        fehl = fehl + 1
+        melden(state, false, n)
+        return false
+    }
+    // DIE MARKE ZULETZT. Sie sagt "es liegt ein vollstaendiger Bericht
+    // da"; sie vor dem Bericht zu setzen hiesse, beim naechsten Start
+    // einen Bericht anzubieten, den es nicht gibt.
+    if fs.path(state, (&m[0 as usize]) as u64) == 0 {
+        let _mi: u64 = fs.create_path(state, (&m[0 as usize]) as u64,
+            fs.T_FILE)
+    }
+    offen_flag = 1
+    ge = ge + 1
+    melden(state, true, buf_n)
+    return true
+}
+
+// ---------------------------------------------------- die zwei Eingaenge
+
+// EIN PROGRAMM IST GESTORBEN. Der Kern ist gesund; hier wird ganz
+// normal geschrieben.
+fn prog_bericht(state: u64, regs: u64, rip: u64, cs: u64, flg: u64,
+        rsp: u64, ss: u64, err: u64, cr2: u64, vec: u64, pid: u64,
+        name: u64, spurp: u64, spurn: u64) -> bool {
+    var s_src: [u8; 8] = "absturz\0"
+    var s_msg: [u8; 26] = "Programm gestorben, pid \0\0"
+    header(state, A_PROG, cpu.here(state), pid, name)
+    register(regs, rip, cs, flg, rsp, ss, err, cr2, vec)
+    spur(spurp, spurn)
+    protokoll(state, 50)
+    klog.sayn(state, klog.L_ERROR, (&s_src[0 as usize]) as u64,
+        (&s_msg[0 as usize]) as u64, pid)
+    return ablegen(state)
+}
+
+// DER KERN IST GESTORBEN. Siehe den Kopf: es wird VERSUCHT.
+fn kern_bericht(state: u64, regs: u64, rip: u64, cs: u64, flg: u64,
+        rsp: u64, ss: u64, err: u64, cr2: u64, vec: u64,
+        spurp: u64, spurn: u64) -> bool {
+    header(state, A_KERN, cpu.here(state), 0, 0)
+    register(regs, rip, cs, flg, rsp, ss, err, cr2, vec)
+    spur(spurp, spurn)
+    protokoll(state, 50)
+    // DER RIEGEL. Haelt dieser Kern die Dateisystemsperre bereits, ist
+    // der Absturz IN dem Dateisystem passiert -- dann wird nicht
+    // geschrieben, sondern gesagt, dass nicht geschrieben wurde.
+    if !fs.free(state) {
+        var s_no: [u8; 47] = "absturz: Dateisystem gesperrt, kein Bericht\0\0\0\0"
+        serial.puts((&s_no[0 as usize]) as u64)
+        serial.nl()
+        fehl = fehl + 1
+        return false
+    }
+    return ablegen(state)
+}
+
+// ------------------------------------------------------ der Testausloeser
+
+// EIN ABSTURZ AUF BESTELLUNG. Beide Riegel sind in `sys.do_krach`
+// gefallen, bevor diese Funktion gerufen wird.
+//
+//   art 0: ein Nullzeiger IM KERN, drei Aufrufe tief. Die drei Aufrufe
+//          sind der Sinn der Sache -- eine Rueckverfolgung mit genau
+//          einem Rahmen misst nichts. `knall_a`..`knall_c` sind
+//          gewoehnliche Funktionen und stehen damit als Namen in der
+//          Symboltabelle.
+//   art 1: ein ungueltiger Befehl (#UD). Derselbe Weg, anderer Vektor.
+fn knall(state: u64, art: u64) {
+    var s_src: [u8; 8] = "absturz\0"
+    var s_msg: [u8; 41] = "erzwungener Absturz auf Bestellung, art \0"
+    klog.sayn(state, klog.L_ERROR, (&s_src[0 as usize]) as u64,
+        (&s_msg[0 as usize]) as u64, art)
+    knall_a(art)
+}
+
+fn knall_a(art: u64) {
+    knall_b(art)
+}
+
+fn knall_b(art: u64) {
+    knall_c(art)
+}
+
+fn knall_c(art: u64) {
+    if art == 1 {
+        asm("ud2")
+        return
+    }
+    // LESEN VON EINER ADRESSE, DIE ES NICHT GIBT.
+    //
+    // ADRESSE 0 GEHT NICHT, und das ist einen Satz wert: dieser Kern
+    // bildet das erste Gigabyte EINS ZU EINS ab (`mem.fi`,
+    // MAPPED_GIB), Seite 0 eingeschlossen. Ein Nullzeiger im KERN ist
+    // hier also ein voellig gewoehnlicher Lesezugriff -- der erste
+    // Anlauf dieser Runde hat genau daran nichts gemerkt: `krachjetzt`
+    // lief durch und der Kern meldete "kernel: done".
+    //
+    // 0x700000000000 ist kanonisch (Bit 47 und darueber sind 0), liegt
+    // aber weit ueber allem, was dieser Kern je abbildet. Ergebnis:
+    // #PF in Ring 0, Fehlercode 0, und das ist eine Kernel-Panik.
+    let _v: u64 = __mmio_read64(0x700000000000 as *mut u64)
+}

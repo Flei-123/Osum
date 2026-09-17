@@ -1,0 +1,1620 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/ehci.fi -- Runde BLECH: DER USB-2.0-ANSCHLUSS.
+//
+// Runde K17 hat xHCI gebaut, und der Bericht der Runde MERGE-3 zieht
+// daraus den richtigen Schluss und einen falschen Satz: "Jeder Rechner
+// seit ~2012 hat xHCI. Das ist der richtige und einzige noetige
+// Controller." Der erste Teil stimmt. Der zweite nicht, und zwar aus
+// zwei Gruenden, die beide auf einem Tisch nachzuzaehlen sind:
+//
+//   * Ein Rechner VOR 2012 hat gar kein xHCI. Ein ThinkPad der
+//     Sandy-Bridge-Zeit hat EHCI und sonst nichts. Dort ist heute
+//     JEDER USB-Anschluss tot -- keine Tastatur, kein Stick, und wenn
+//     die eingebaute Tastatur an einem 8042 haengt, merkt man es erst,
+//     wenn man etwas einstecken will.
+//   * Auch danach ist EHCI nicht weg. Auf den Chipsaetzen der
+//     7er-Reihe steht neben dem xHCI ein EHCI (`ich9-usb-ehci1/2`,
+//     8086:1E2D u. a.), und welche Buchse an welchem Regler haengt,
+//     entscheidet die Firmware -- auf manchen Brettern ist "USB 3.0
+//     abschalten" im BIOS genau der Schalter, der alles auf EHCI
+//     zurueckwirft.
+//
+// DIESE DATEI IST EIN ZWEITER TREIBER UND KEINE ZWEITE HAELFTE VON
+// `usb.fi`, und das ist eine Entscheidung mit einer Zahl dahinter:
+// `usb.fi` ruft 40 verschiedene Funktionen von `xhci.fi` auf
+// (gezaehlt: `grep -o 'xhci\.[a-z_0-9]*' kernel/usb.fi | sort -u`), und
+// die heissen `slot_enable`, `dcbaa_set`, `in_ep`, `ctx_size`,
+// `set_dequeue`. Das sind keine USB-Begriffe, das sind xHCI-Begriffe.
+// Ein EHCI hat keine Steckplaetze, keine Geraetezusammenhaenge und
+// keine Tuerklingeln; er hat zwei VERKETTETE LISTEN im Hauptspeicher.
+// Ein `ehci.fi`, das diese vierzig Namen nachbaut, muesste Steckplaetze
+// erfinden, die es nicht gibt -- und genau das waere die Art von
+// Abstraktion, die spaeter niemand mehr auseinandernehmen kann. Also
+// derselbe Weg, den Runde RTL gegenueber `e1000.fi` gegangen ist: ein
+// eigener Treiber, der seine eigene Aufzaehlung macht und in DIESELBEN
+// Tueren muendet -- `kbd.on_code` fuer die Tastatur, ein Blockleser
+// fuer den Stick.
+//
+// ---------------------------------------------------- WIE EHCI GEHT
+//
+// Ein xHCI wird ueber RINGE mit Ereignissen bedient. Ein EHCI wird
+// ueber ZWEI LISTEN bedient, die der Controller SELBST abgeht:
+//
+//   DIE ASYNCHRONE LISTE ist ein KREIS aus Warteschlangenkoepfen (QH).
+//   Genau einer traegt das H-Bit ("head of reclamation"), damit der
+//   Controller merkt, wenn er einmal herum ist, ohne etwas gefunden zu
+//   haben. Hier haengen Steuerungs- und Bulk-Uebertragungen.
+//
+//   DIE PERIODISCHE LISTE ist ein Feld von 1024 Rahmenzeigern. Der
+//   Controller liest in Millisekunde n den Eintrag n & 1023 und geht
+//   ab, was daran haengt. Hier haengen Unterbrechungsendpunkte -- und
+//   NUR hier: ein Tastaturendpunkt in der asynchronen Liste wird nie
+//   abgefragt. Das ist der eine Punkt, an dem ein EHCI-Treiber
+//   typischerweise scheitert, und der Grund, warum die periodische
+//   Liste hier vollstaendig aufgebaut wird und nicht "spaeter".
+//
+// An einem QH haengt eine Kette von qTDs. Ein qTD ist EINE Richtung
+// ueber EINEN Endpunkt: PID (SETUP/IN/OUT), Laenge, Umschaltbit,
+// Pufferzeiger. Der Controller nimmt den naechsten qTD in die
+// UEBERLAGERUNG des QH hinein, arbeitet ihn ab und schreibt das
+// Ergebnis dorthin zurueck. Fertig ist er, wenn das Bit "Active" (0x80)
+// im Merkmalswort weg ist.
+//
+// Eine Steuerungsuebertragung sind deshalb IMMER drei qTDs:
+// SETUP (8 Oktett, Umschaltbit 0), dann die Daten (Umschaltbit
+// wechselt ab 1), dann die Quittung in der GEGENRICHTUNG mit Laenge 0
+// und Umschaltbit 1. Wer die Quittung weglaesst, bekommt vom Geraet
+// beim naechsten Mal einen Stillstand.
+//
+// ------------------------------------ WAS DIESER TREIBER NICHT TUT
+//
+// Keine Unterbrechung -- er wird abgefragt (`poll`). Das ist hier
+// keine Bequemlichkeit: ein eigener Vektor braucht einen Stumpf in
+// `isr.s`, und `isr.s` ist eine Datei, die diese Runde bewusst nicht
+// anfasst. Ein Tastenanschlag kostet dadurch eine Abfrage statt einer
+// Meldung; gemessen wird beides in derselben Einheit, und die Zahl
+// steht im Bericht.
+//
+// Keine SPLIT-UEBERTRAGUNGEN. Ein Geraet mit voller oder niedriger
+// Geschwindigkeit (USB 1.1) an einem EHCI muss ueber einen
+// Hochgeschwindigkeits-Hub mit Start-Split und Complete-Split bedient
+// werden. Das ist eine eigene Zustandsmaschine, und ohne einen solchen
+// Hub in der Nachbildung waere sie ungeprueft. STATTDESSEN tut dieser
+// Treiber das, was ein echtes Brett auch tut: er GIBT DEN ANSCHLUSS AB
+// (PORTSC-Bit 13, "Port Owner") und sagt es. Auf einem Chipsatz mit
+// Begleitreglern uebernimmt dann der UHCI/OHCI daneben -- den hat
+// dieser Kern nicht, und dann ist die Meldung die ganze Wahrheit:
+// "voll/niedrige Geschwindigkeit, abgegeben -- kein Begleitregler".
+//
+// Kein Hub in der Tiefe, keine isochronen Uebertragungen, kein
+// Energiesparen, keine Wiederaufnahme, keine Bandbreitenrechnung.
+//
+// -------------------------------------- WAS AUF ECHTEM BLECH ZAEHLT
+//
+// Die UEBERGABE DURCH DIE FIRMWARE (`handoff` unten) ist die einzige
+// Stelle dieses Treibers, die in der Nachbildung NICHTS tut und auf
+// einem echten Brett alles entscheidet: solange das BIOS den Regler
+// besitzt (SMI-Falle auf jeden Registerzugriff, damit eine
+// USB-Tastatur im Setup funktioniert), gehoert er nicht uns. Der Weg
+// darueber steht in der EHCI-Spezifikation Abschnitt 5.1 und wird
+// hier gegangen; QEMU stellt keine erweiterte Faehigkeit hin, also
+// laeuft der Zweig dort ins Leere -- und genau das steht auch in der
+// Meldung (`legacy=0`).
+
+profile kernel
+
+import serial
+import lib.kstate
+import bus.pci
+import arch.x86_64.apic
+import drv.hid.kbd
+
+export {
+    present, init, ready, stage, poll, report, selftest,
+    base_of, bdf, ports, portsc, port_speed, handed_off,
+    devices, dev_class, dev_addr, dev_mps, dev_vendor, dev_product,
+    keys, reports, enums, errors, ctrl_xfers, polls,
+    msc_ready, msc_blocks, msc_bsize, msc_read, msc_ios, msc_errors,
+    have_kbd, legacy_cap, hcs_ports, hcc, caplen,
+    EHCI_OFF, EHCI_MAX, C_NONE, C_KBD, C_MOUSE, C_MSC
+}
+
+// ================================================== der Platz in kdata
+//
+// Drei Seiten, 0x4D000..0x50000. Das ist genau das Stueck, das
+// `tools/kernel/memmap.py` bis zu dieser Runde als "frei
+// 0x4D000..0x50000 (12 KiB)" ausgewiesen hat -- zwischen dem
+// Modusvektor (Runde K17) und dem USB-Baum (ebenfalls K17). Es wird
+// hier VOLLSTAENDIG genommen, und die Karte rechnet es nach.
+//
+// Warum in `kdata` und nicht aus dem Rahmenverwalter: der Controller
+// liest diese Strukturen SELBST ueber den Bus. Sie brauchen eine
+// physische Adresse, die sich nicht bewegt, und Ausrichtungen, die der
+// Haldenallokator nicht zusagt: die periodische Liste auf 4096, jeder
+// QH und jeder qTD auf 32.
+const EHCI_OFF: u64 = 0x4D000
+const EHCI_MAX: u64 = 0x3000
+
+// Seite 1: die periodische Liste. 1024 Eintraege zu vier Oktett, und
+// sie MUSS auf 4096 ausgerichtet liegen -- PERIODICLISTBASE hat unten
+// zwoelf Bits, die es nicht gibt.
+const PF_OFF: u64 = 0x4D000
+const PF_ENTRIES: u64 = 1024
+
+// Seite 2: Skalare, Warteschlangenkoepfe, Uebertragungssaetze.
+const SCAL_OFF: u64 = 0x4E000
+const QH_OFF: u64 = 0x4E200
+const QTD_OFF: u64 = 0x4E400
+const DEV_OFF: u64 = 0x4E800
+
+// Ein QH ist in der 64-Bit-Fassung 68 Oktett lang (48 plus die hohen
+// Haelften der fuenf Pufferzeiger). 96 ist die naechste Zahl, die durch
+// 32 teilbar ist und Luft laesst -- und Luft ist hier billiger als eine
+// Ueberschneidung, die sich als Datenfehler zeigt.
+const QH_BYTES: u64 = 0x60
+const MAX_QH: u64 = 4
+const QH_ASYNC: u64 = 0 // der Kopf des Kreises, H-Bit, ohne Arbeit
+const QH_WORK: u64 = 1 // Steuerung und Bulk
+const QH_INT: u64 = 2 // der Unterbrechungsendpunkt in der period. Liste
+const QH_BULK: u64 = 3 // die zweite Bulk-Richtung
+
+// Ein qTD ist in der 64-Bit-Fassung 52 Oktett. 64 aus demselben Grund.
+const QTD_BYTES: u64 = 0x40
+const MAX_QTD: u64 = 16
+
+// Seite 3: die Puffer. Alle in EINER Seite, damit kein Zugriff eine
+// Seitengrenze ueberschreitet -- ein qTD kann das (er hat fuenf
+// Pufferzeiger), aber ein Treiber, der es nicht muss, hat einen Fehler
+// weniger.
+const BUF_OFF: u64 = 0x4F000
+const B_SETUP: u64 = 0x4F000 // acht Oktett Anforderung
+const B_DESC: u64 = 0x4F100 // Deskriptoren, 512
+const B_CBW: u64 = 0x4F400 // der Befehlsblock des Sticks, 31
+const B_CSW: u64 = 0x4F440 // die Quittung, 13
+const B_DATA: u64 = 0x4F800 // ein Datenblock, 512
+const B_REPORT: u64 = 0x4FA00 // ein HID-Bericht, 64
+
+// ------------------------------------------------------- die Skalare
+
+const S_BASE: u64 = 0x00 // die Kapazitaetsregister, abgebildet
+const S_OP: u64 = 0x08 // die Betriebsregister = BASE + CAPLENGTH
+const S_BDF: u64 = 0x10
+const S_IDX: u64 = 0x18
+const S_READY: u64 = 0x20
+const S_PORTS: u64 = 0x28
+const S_HCC: u64 = 0x30
+const S_CAPLEN: u64 = 0x38
+const S_LEGACY: u64 = 0x40 // die erweiterte Faehigkeit, 0 = keine
+const S_HANDED: u64 = 0x48 // 1 = die Firmware hat abgegeben
+const S_NDEV: u64 = 0x50
+const S_KEYS: u64 = 0x58
+const S_REPORTS: u64 = 0x60
+const S_ENUMS: u64 = 0x68
+const S_ERRORS: u64 = 0x70
+const S_CTRL: u64 = 0x78
+const S_POLLS: u64 = 0x80
+const S_KBD: u64 = 0x88 // Platz + 1 des Tastaturgeraets, 0 = keine
+const S_MSC: u64 = 0x90
+const S_BLOCKS: u64 = 0x98
+const S_BSIZE: u64 = 0xA0
+const S_TAG: u64 = 0xA8 // die laufende Nummer des Befehlsblocks
+const S_IOS: u64 = 0xB0
+const S_MSCERR: u64 = 0xB8
+const S_LASTMOD: u64 = 0xC0 // die zuletzt gemeldeten Umschalttasten
+const S_ADDR: u64 = 0xC8 // die naechste zu vergebende Geraeteadresse
+const S_SPEED: u64 = 0xD0 // Bitmaske: Anschluss n abgegeben
+// WARUM ES NICHT GING. Eine Zahl und keine Zeichenkette: sie wird auf
+// einem fremden Brett abgelesen, und "ehci: init failed" ohne Grund ist
+// genau die Meldung, ueber die diese Runde sich beim Plattentreiber
+// beschwert hat.
+const S_WHY: u64 = 0xD8
+const WHY_NODEV: u64 = 1
+const WHY_NOBAR: u64 = 2
+const WHY_NOMAP: u64 = 3
+const WHY_RESET: u64 = 4
+const WHY_RUN: u64 = 5
+const S_STS: u64 = 0xE0
+const S_CMD: u64 = 0xE8
+// DIE LETZTEN ABTASTCODES, die dieser Treiber an `kbd.on_code` gegeben
+// hat -- sechzehn Stueck, im Kreis. Sie stehen hier, damit die Messung
+// nicht "sechs Tasten sind angekommen" heisst, sondern "es waren DIESE
+// sechs": die Uebersetzung von HID-Gebrauchscode nach Abtastcodesatz 1
+// ist eine Tabelle, und eine Tabelle prueft man gegen die
+// Gegenueberstellung, nicht gegen ein Zaehlwerk.
+const S_RING: u64 = 0x100 // 16 Woerter
+const RING_N: u64 = 16
+const S_RINGN: u64 = 0xF0
+
+// Ein Geraet: 64 Oktett. Vier Plaetze, weil ein EHCI ohne Hub genau so
+// viele Anschluesse bedient, wie er Anschluesse hat, und QEMU sechs
+// hinstellt -- vier ist die Zahl, die `usb.fi` seit K17 fuehrt, und
+// zwei Tabellen mit verschiedenen Grenzen waeren eine Fehlerquelle.
+// 128 UND NICHT 64, und das ist eine Reparatur und keine Reserve.
+//
+// Die erste Fassung dieser Datei hatte 64 -- und schrieb dabei D_VEN
+// (0x40), D_PROD (0x48), D_TOGOUT (0x50) und D_MPSIN (0x58) HINTER das
+// Ende des eigenen Platzes, also in den des naechsten Geraets. Es ist
+// nie aufgefallen, weil in jeder Messung dieser Runde genau EIN Geraet
+// am Regler hing: Platz 1 gab es, aber niemand las ihn. Mit einer
+// Tastatur UND einem Stick an derselben Buchsenleiste haette die
+// Tastatur die Herstellernummer des Sticks getragen und der Stick das
+// Umschaltbit der Tastatur.
+//
+// Gefunden beim Nachlesen, nicht durch einen roten Haken. Die Karte in
+// `tools/kernel/memmap.py` haette es auch nicht gefunden: sie prueft
+// die Bereiche gegeneinander, nicht die Felder INNERHALB eines
+// Bereichs.
+const DEV_BYTES: u64 = 128
+const MAX_DEV: u64 = 4
+
+const D_PORT: u64 = 0x00
+const D_ADDR: u64 = 0x08
+const D_MPS: u64 = 0x10
+const D_CLASS: u64 = 0x18
+const D_EPIN: u64 = 0x20 // Endpunktnummer der IN-Richtung
+const D_EPOUT: u64 = 0x28
+const D_EPINT: u64 = 0x30 // der Unterbrechungsendpunkt (HID)
+const D_TOGIN: u64 = 0x38 // die Umschaltbits, je Richtung eines
+
+// Hersteller und Erzeugnis liegen HINTER den Endpunkten, damit keine
+// zwei Namen auf derselben Zelle stehen. Der Fehler, den Runde NETVIEW
+// einen Tag gekostet hat, steht in `netdev.fi` im Kommentar; er wird
+// hier nicht wiederholt.
+const D_VEN: u64 = 0x40
+const D_PROD: u64 = 0x48
+const D_TOGOUT: u64 = 0x50
+const D_MPSIN: u64 = 0x58
+const D_MPSOUT: u64 = 0x60
+
+const C_NONE: u64 = 0
+const C_KBD: u64 = 1
+const C_MOUSE: u64 = 2
+const C_MSC: u64 = 3
+
+// ------------------------------------------------- die Register
+//
+// Kapazitaetsregister, ab BAR0.
+const C_CAPLENGTH: u64 = 0x00
+const C_HCSPARAMS: u64 = 0x04
+const C_HCCPARAMS: u64 = 0x08
+
+// Betriebsregister, ab BAR0 + CAPLENGTH.
+const O_USBCMD: u64 = 0x00
+const O_USBSTS: u64 = 0x04
+const O_USBINTR: u64 = 0x08
+const O_FRINDEX: u64 = 0x0C
+const O_CTRLDS: u64 = 0x10
+const O_PERIODIC: u64 = 0x14
+const O_ASYNC: u64 = 0x18
+const O_CONFIGFLAG: u64 = 0x40
+const O_PORTSC: u64 = 0x44
+
+const CMD_RS: u64 = 0x0001
+const CMD_HCRESET: u64 = 0x0002
+const CMD_PSE: u64 = 0x0010
+const CMD_ASE: u64 = 0x0020
+const CMD_IAAD: u64 = 0x0040
+
+const STS_HALTED: u64 = 0x1000
+const STS_PSS: u64 = 0x4000
+const STS_ASS: u64 = 0x8000
+
+const PSC_CCS: u64 = 0x0001
+const PSC_CSC: u64 = 0x0002
+const PSC_PED: u64 = 0x0004
+const PSC_PEDC: u64 = 0x0008
+const PSC_OCC: u64 = 0x0020
+const PSC_RESET: u64 = 0x0100
+const PSC_PP: u64 = 0x1000
+const PSC_OWNER: u64 = 0x2000
+// Beim Zurueckschreiben von PORTSC muessen die W1C-Bits ausmaskiert
+// werden, sonst loescht ein unveraenderter Ruecklauf jede Meldung. Das
+// ist derselbe Fehler, vor dem `xhci.fi` bei PSC_KEEP warnt.
+const PSC_W1C: u64 = PSC_CSC | PSC_PEDC | PSC_OCC
+
+// qTD-Merkmale.
+const T_ACTIVE: u64 = 0x80
+const T_HALTED: u64 = 0x40
+const T_DBERR: u64 = 0x20
+const T_BABBLE: u64 = 0x10
+const T_XACT: u64 = 0x08
+const T_ERRMASK: u64 = T_HALTED | T_DBERR | T_BABBLE | T_XACT
+
+const PID_OUT: u64 = 0
+const PID_IN: u64 = 1
+const PID_SETUP: u64 = 2
+
+const LINK_T: u64 = 1
+// DER TYP STEHT IN BIT 1..2, und der Wert fuer einen QH ist 01. Das
+// heisst: die Zahl, die in den Zeiger ODER-t wird, ist 0b010 = 2 --
+// FERTIG GESCHOBEN. Der erste Versuch dieser Runde hatte hier eine 2
+// stehen und schob sie noch einmal (`LINK_QH << 1` = 4 = 0b100), also
+// Typ 10 = "isochroner Teilbaum". Gemessen hat sich das als
+// "port 0 speed=2, aber enum=0 ctrl=1 fehler=1" gezeigt: der Anschluss
+// stand, der Regler ging die Liste ab -- und fand darin etwas, das kein
+// Warteschlangenkopf war.
+const LINK_QH: u64 = 2
+
+const SPIN: u64 = 4000000
+const RESET_SPIN: u64 = 800000
+
+// ------------------------------------------------------- Grundgriffe
+
+fn g(state: u64, off: u64) -> u64 {
+    return kstate.get(state + SCAL_OFF, off)
+}
+
+fn s(state: u64, off: u64, v: u64) {
+    kstate.set(state + SCAL_OFF, off, v)
+}
+
+fn rd32(b: u64, off: u64) -> u64 {
+    return __mmio_read32((b + off) as *mut u32) as u64
+}
+
+fn wr32(b: u64, off: u64, v: u64) {
+    __mmio_write32((b + off) as *mut u32, (v & 0xFFFFFFFF) as u32)
+}
+
+fn m32(at: u64) -> u64 {
+    return __mmio_read32(at as *mut u32) as u64
+}
+
+fn w32(at: u64, v: u64) {
+    __mmio_write32(at as *mut u32, (v & 0xFFFFFFFF) as u32)
+}
+
+fn base_of(state: u64) -> u64 {
+    return g(state, S_BASE)
+}
+
+fn op(state: u64) -> u64 {
+    return g(state, S_OP)
+}
+
+fn bdf(state: u64) -> u64 {
+    return g(state, S_BDF)
+}
+
+fn ready(state: u64) -> bool {
+    return g(state, S_READY) != 0
+}
+
+fn ports(state: u64) -> u64 {
+    return g(state, S_PORTS)
+}
+
+fn hcc(state: u64) -> u64 {
+    return g(state, S_HCC)
+}
+
+fn caplen(state: u64) -> u64 {
+    return g(state, S_CAPLEN)
+}
+
+fn legacy_cap(state: u64) -> u64 {
+    return g(state, S_LEGACY)
+}
+
+fn handed_off(state: u64) -> bool {
+    return g(state, S_HANDED) != 0
+}
+
+fn devices(state: u64) -> u64 {
+    return g(state, S_NDEV)
+}
+
+fn keys(state: u64) -> u64 {
+    return g(state, S_KEYS)
+}
+
+fn reports(state: u64) -> u64 {
+    return g(state, S_REPORTS)
+}
+
+fn enums(state: u64) -> u64 {
+    return g(state, S_ENUMS)
+}
+
+fn errors(state: u64) -> u64 {
+    return g(state, S_ERRORS)
+}
+
+fn ctrl_xfers(state: u64) -> u64 {
+    return g(state, S_CTRL)
+}
+
+fn polls(state: u64) -> u64 {
+    return g(state, S_POLLS)
+}
+
+fn have_kbd(state: u64) -> bool {
+    return g(state, S_KBD) != 0
+}
+
+fn msc_ready(state: u64) -> bool {
+    return g(state, S_MSC) != 0
+}
+
+fn msc_blocks(state: u64) -> u64 {
+    return g(state, S_BLOCKS)
+}
+
+fn msc_bsize(state: u64) -> u64 {
+    return g(state, S_BSIZE)
+}
+
+fn msc_ios(state: u64) -> u64 {
+    return g(state, S_IOS)
+}
+
+fn msc_errors(state: u64) -> u64 {
+    return g(state, S_MSCERR)
+}
+
+fn dv(state: u64, i: u64, f: u64) -> u64 {
+    return kstate.get(state + DEV_OFF, i * DEV_BYTES + f)
+}
+
+fn dvs(state: u64, i: u64, f: u64, v: u64) {
+    kstate.set(state + DEV_OFF, i * DEV_BYTES + f, v)
+}
+
+fn dev_class(state: u64, i: u64) -> u64 {
+    return dv(state, i, D_CLASS)
+}
+
+fn dev_addr(state: u64, i: u64) -> u64 {
+    return dv(state, i, D_ADDR)
+}
+
+fn dev_mps(state: u64, i: u64) -> u64 {
+    return dv(state, i, D_MPS)
+}
+
+fn dev_vendor(state: u64, i: u64) -> u64 {
+    return dv(state, i, D_VEN)
+}
+
+fn dev_product(state: u64, i: u64) -> u64 {
+    return dv(state, i, D_PROD)
+}
+
+fn qh_at(state: u64, i: u64) -> u64 {
+    return state + QH_OFF + i * QH_BYTES
+}
+
+fn qtd_at(state: u64, i: u64) -> u64 {
+    return state + QTD_OFF + i * QTD_BYTES
+}
+
+fn zero(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        w32(p + i, 0)
+        i = i + 4
+    }
+}
+
+fn portsc(state: u64, n: u64) -> u64 {
+    return rd32(op(state), O_PORTSC + n * 4)
+}
+
+// PORTSC schreiben, OHNE die Meldebits zu loeschen. Jede Stelle, die
+// PORTSC anfasst, geht hier durch -- eine zweite Stelle waere die
+// zweite Gelegenheit, den Anschluss versehentlich abzuschalten.
+fn portsc_set(state: u64, n: u64, v: u64) {
+    wr32(op(state), O_PORTSC + n * 4, v & (0xFFFFFFFF - PSC_W1C))
+}
+
+fn portsc_ack(state: u64, n: u64, bits: u64) {
+    let v: u64 = portsc(state, n)
+    wr32(op(state), O_PORTSC + n * 4, (v & (0xFFFFFFFF - PSC_W1C)) | bits)
+}
+
+// Die Geschwindigkeit steht bei EHCI NICHT in PORTSC. Ein Anschluss,
+// der nach der Ruecksetzung freigeschaltet ist (PED), traegt ein
+// Hochgeschwindigkeitsgeraet -- alles andere gibt der Controller ab.
+// Rueckgabe: 2 = hoch, 1 = voll/niedrig (abgegeben), 0 = nichts.
+fn port_speed(state: u64, n: u64) -> u64 {
+    let v: u64 = portsc(state, n)
+    if (v & PSC_CCS) == 0 {
+        return 0
+    }
+    if (v & PSC_OWNER) != 0 {
+        return 1
+    }
+    if (v & PSC_PED) != 0 {
+        return 2
+    }
+    return 1
+}
+
+fn spin(n: u64) {
+    var i: u64 = 0
+    while i < n {
+        i = i + 1
+    }
+}
+
+// ================================================== DIE UEBERGABE
+//
+// EHCI-Spezifikation 5.1: HCCPARAMS Bit 8..15 zeigen auf die erste
+// erweiterte Faehigkeit IM KONFIGURATIONSRAUM. Ist ihre Kennung 1
+// (Legacy Support), dann sagt Bit 16 "das BIOS besitzt ihn" und Bit 24
+// "das Betriebssystem besitzt ihn". Wir setzen 24 und warten, bis 16
+// faellt.
+//
+// SOLANGE DAS BIOS BESITZT, IST JEDER REGISTERZUGRIFF EINE FALLE: das
+// BIOS hat eine SMI auf den Regler gelegt, damit im Setup eine
+// USB-Tastatur funktioniert. Ein Treiber, der ohne Uebergabe anfaengt,
+// bekommt entweder gar nichts oder einen Rechner, der bei jedem
+// Zugriff kurz stehenbleibt. Auf einem echten Brett ist das die
+// haeufigste Ursache dafuer, dass USB "manchmal" geht.
+//
+// In QEMU gibt es diese Faehigkeit nicht. Der Zweig laeuft dort ins
+// Leere, und die Meldung sagt `legacy=0x0` -- also ist auf diesem
+// Rechner NICHT geprueft, ob die Uebergabe wirkt. Das steht so im
+// Bericht der Runde und wird nicht als gemessen ausgegeben.
+fn handoff(state: u64, idx: u64) {
+    let eecp: u64 = (g(state, S_HCC) >> 8) & 0xFF
+    s(state, S_LEGACY, eecp)
+    s(state, S_HANDED, 0)
+    if eecp < 0x40 {
+        return
+    }
+    let dev: u64 = pci.get(state, idx, pci.E_BDF)
+    let cap: u64 = pci.cfg_read32(dev, eecp)
+    if (cap & 0xFF) != 1 {
+        return
+    }
+    if (cap & 0x00010000) == 0 {
+        // Niemand besitzt ihn, oder wir schon.
+        s(state, S_HANDED, 1)
+        return
+    }
+    pci.cfg_write32(dev, eecp, cap | 0x01000000)
+    var i: u64 = 0
+    while i < 200000 {
+        if (pci.cfg_read32(dev, eecp) & 0x00010000) == 0 {
+            s(state, S_HANDED, 1)
+            return
+        }
+        i = i + 1
+    }
+}
+
+// ================================================== INITIALISIERUNG
+
+fn present(state: u64) -> bool {
+    return pci.find_class(state, 0x0C, 0x03, 0x20) < pci.MAX_DEV
+}
+
+fn init(state: u64) -> bool {
+    s(state, S_WHY, 0)
+    let idx: u64 = pci.find_class(state, 0x0C, 0x03, 0x20)
+    if idx >= pci.MAX_DEV {
+        s(state, S_WHY, WHY_NODEV)
+        return false
+    }
+    let phys: u64 = pci.bar(state, idx, 0) & 0xFFFFFFFFFFFFFFF0
+    if phys == 0 {
+        s(state, S_WHY, WHY_NOBAR)
+        return false
+    }
+    pci.enable_master(pci.get(state, idx, pci.E_BDF))
+    let b: u64 = apic.map_device(state, phys)
+    if b == 0 {
+        s(state, S_WHY, WHY_NOMAP)
+        return false
+    }
+    s(state, S_BASE, b)
+    s(state, S_BDF, pci.get(state, idx, pci.E_BDF))
+    s(state, S_IDX, idx)
+    let cl: u64 = rd32(b, C_CAPLENGTH) & 0xFF
+    s(state, S_CAPLEN, cl)
+    s(state, S_OP, b + cl)
+    let hcs: u64 = rd32(b, C_HCSPARAMS)
+    s(state, S_PORTS, hcs & 0xF)
+    s(state, S_HCC, rd32(b, C_HCCPARAMS))
+    s(state, S_ADDR, 1)
+    s(state, S_TAG, 1)
+
+    handoff(state, idx)
+
+    let o: u64 = b + cl
+    // Anhalten, dann zuruecksetzen. In dieser Reihenfolge: HCRESET auf
+    // einem laufenden Regler ist laut Spezifikation undefiniert.
+    wr32(o, O_USBCMD, rd32(o, O_USBCMD) & (0xFFFFFFFF - CMD_RS))
+    var i: u64 = 0
+    while i < RESET_SPIN {
+        if (rd32(o, O_USBSTS) & STS_HALTED) != 0 {
+            i = RESET_SPIN
+        } else {
+            i = i + 1
+        }
+    }
+    wr32(o, O_USBCMD, CMD_HCRESET)
+    i = 0
+    var reset_ok: bool = false
+    while i < RESET_SPIN {
+        if (rd32(o, O_USBCMD) & CMD_HCRESET) == 0 {
+            reset_ok = true
+            i = RESET_SPIN
+        } else {
+            i = i + 1
+        }
+    }
+    if !reset_ok {
+        s(state, S_WHY, WHY_RESET)
+        return false
+    }
+
+    // Die Datenstrukturen aufbauen, BEVOR der Regler laeuft.
+    zero(state + PF_OFF, PF_ENTRIES * 4)
+    zero(state + QH_OFF, MAX_QH * QH_BYTES)
+    zero(state + QTD_OFF, MAX_QTD * QTD_BYTES)
+    zero(state + DEV_OFF, MAX_DEV * DEV_BYTES)
+
+    // Der Kopf des asynchronen Kreises: H-Bit, keine Arbeit, zeigt auf
+    // den Arbeitskopf. Ein eigener Kopf statt "der Arbeitskopf traegt
+    // H selbst" -- die Spezifikation erlaubt beides, aber ein Kopf,
+    // der gleichzeitig arbeitet und den Kreis markiert, ist die
+    // Stelle, an der man beim naechsten Fehler zuerst zweifelt.
+    let a: u64 = qh_at(state, QH_ASYNC)
+    let w: u64 = qh_at(state, QH_WORK)
+    w32(a + 0, w | LINK_QH)
+    w32(a + 4, 0x00008000 | (2 << 12)) // H = 1, EPS = hoch
+    w32(a + 8, 1 << 30) // Mult = 1
+    w32(a + 12, 0)
+    w32(a + 16, LINK_T) // naechster qTD: keiner
+    w32(a + 20, LINK_T)
+    w32(a + 24, 0) // nicht aktiv
+    w32(w + 0, a | LINK_QH)
+    w32(w + 16, LINK_T)
+    w32(w + 20, LINK_T)
+
+    // Die periodische Liste: jeder der 1024 Rahmen zeigt auf denselben
+    // Unterbrechungskopf. Das ist die einfachste gueltige Liste --
+    // jede Millisekunde einmal abfragen, und mehr braucht eine
+    // Tastatur nicht (der Deskriptor eines HID-Geraets verlangt
+    // typischerweise 10 ms).
+    let q: u64 = qh_at(state, QH_INT)
+    w32(q + 0, LINK_T)
+    w32(q + 16, LINK_T)
+    w32(q + 20, LINK_T)
+    i = 0
+    while i < PF_ENTRIES {
+        w32(state + PF_OFF + i * 4, q | LINK_QH)
+        i = i + 1
+    }
+
+    wr32(o, O_CTRLDS, 0)
+    wr32(o, O_USBINTR, 0) // abgefragt, nicht gemeldet -- siehe Kopf
+    wr32(o, O_PERIODIC, state + PF_OFF)
+    wr32(o, O_ASYNC, a)
+    wr32(o, O_FRINDEX, 0)
+    // ERST LAUFEN, DANN DIE LISTEN. Die Spezifikation (4.1) sagt es in
+    // dieser Reihenfolge, und der erste Versuch dieser Runde hat sie
+    // zusammengezogen -- mit dem Ergebnis "warum=5", also HCHalted
+    // blieb stehen. Ein Regler, der gleichzeitig anlaufen und zwei
+    // Listen aufnehmen soll, tut in QEMU 7.2 keines von beidem.
+    wr32(o, O_USBCMD, (8 << 16) | CMD_RS)
+    i = 0
+    var run_ok: bool = false
+    while i < RESET_SPIN {
+        if (rd32(o, O_USBSTS) & STS_HALTED) == 0 {
+            run_ok = true
+            i = RESET_SPIN
+        } else {
+            i = i + 1
+        }
+    }
+    if !run_ok {
+        s(state, S_WHY, WHY_RUN)
+        s(state, S_STS, rd32(o, O_USBSTS))
+        s(state, S_CMD, rd32(o, O_USBCMD))
+        return false
+    }
+    wr32(o, O_USBCMD, rd32(o, O_USBCMD) | CMD_ASE | CMD_PSE)
+    s(state, S_STS, rd32(o, O_USBSTS))
+    s(state, S_CMD, rd32(o, O_USBCMD))
+    // Und JETZT erst die Anschluesse an uns leiten. Vorher waere es
+    // eine Zusage, die der Regler nicht halten kann.
+    wr32(o, O_CONFIGFLAG, 1)
+    s(state, S_READY, 1)
+    return true
+}
+
+// ================================================== DER UEBERTRAGER
+//
+// Ein qTD: naechster Zeiger, Ersatzzeiger, Merkmalswort, fuenf
+// Pufferzeiger. Alles andere an einem EHCI ist Buchhaltung um diese
+// zweiunddreissig Oktett herum.
+//
+// CERR steht auf 3 (Bit 10..11): drei Versuche, bevor der Controller
+// aufgibt. Null hiesse "unendlich oft", und ein Geraet, das nie
+// antwortet, haengt den Kern dann fest -- das ist die Zeile, die man
+// in einem Treiber ohne Hardware zum Ausprobieren am ehesten falsch
+// hat.
+fn qtd(state: u64, i: u64, next: u64, pid: u64, len: u64, toggle: u64,
+    buf: u64) {
+    let at: u64 = qtd_at(state, i)
+    zero(at, QTD_BYTES)
+    w32(at + 0, next)
+    w32(at + 4, LINK_T)
+    w32(at + 8, (toggle << 31) | (len << 16) | (3 << 10) | (pid << 8)
+        | T_ACTIVE)
+    w32(at + 12, buf)
+    // Der zweite Pufferzeiger deckt den Fall ab, dass eine
+    // Uebertragung ueber die Seitengrenze laeuft. Die Puffer dieses
+    // Treibers tun das nicht (alle in EINER Seite, siehe oben), aber
+    // ein Zeiger, der auf die naechste Seite zeigt, kostet nichts und
+    // macht die Struktur unabhaengig von dieser Zusage.
+    w32(at + 16, (buf + 0x1000) & 0xFFFFF000)
+}
+
+// Den Arbeitskopf auf einen Endpunkt einstellen. `eps` ist 2 fuer
+// Hochgeschwindigkeit -- und weil dieser Treiber keine Split-
+// Uebertragungen kann, ist es IMMER 2 (alles andere haben wir am
+// Anschluss abgegeben).
+fn qh_set(state: u64, which: u64, addr: u64, ep: u64, mps: u64,
+    head: u64, link: u64) {
+    let at: u64 = qh_at(state, which)
+    w32(at + 0, link)
+    w32(at + 4, (mps << 16) | (head << 15) | (1 << 14) | (2 << 12)
+        | (ep << 8) | addr)
+    w32(at + 8, 1 << 30)
+    w32(at + 12, 0)
+    w32(at + 16, LINK_T)
+    w32(at + 20, LINK_T)
+    w32(at + 24, 0)
+    w32(at + 28, 0)
+    w32(at + 32, 0)
+    w32(at + 36, 0)
+    w32(at + 40, 0)
+    w32(at + 44, 0)
+}
+
+// Die asynchrone Liste anhalten, bevor am Arbeitskopf geschrieben
+// wird, und danach wieder anwerfen. Teuer und richtig: der Controller
+// darf die Ueberlagerung eines Kopfes nicht gleichzeitig lesen, waehrend
+// wir sie beschreiben. Wer sich das spart, bekommt Fehler, die nur
+// unter Last auftreten -- und ein Treiber, der so etwas hat, ist
+// schlimmer als keiner.
+fn async_off(state: u64) {
+    let o: u64 = op(state)
+    wr32(o, O_USBCMD, rd32(o, O_USBCMD) & (0xFFFFFFFF - CMD_ASE))
+    var i: u64 = 0
+    while i < RESET_SPIN {
+        if (rd32(o, O_USBSTS) & STS_ASS) == 0 {
+            i = RESET_SPIN
+        } else {
+            i = i + 1
+        }
+    }
+}
+
+fn async_on(state: u64) {
+    let o: u64 = op(state)
+    wr32(o, O_USBCMD, rd32(o, O_USBCMD) | CMD_ASE)
+    var i: u64 = 0
+    while i < RESET_SPIN {
+        if (rd32(o, O_USBSTS) & STS_ASS) != 0 {
+            i = RESET_SPIN
+        } else {
+            i = i + 1
+        }
+    }
+}
+
+// Auf das Ende einer Kette warten. Geprueft wird der LETZTE qTD: ist
+// sein Active-Bit weg, sind alle davor durch. Ein Fehler unterwegs
+// setzt Halted im Kopf UND laesst den Rest der Kette stehen -- deshalb
+// wird beides angesehen.
+fn await_qtd(state: u64, last: u64) -> bool {
+    let at: u64 = qtd_at(state, last)
+    let qh: u64 = qh_at(state, QH_WORK)
+    var i: u64 = 0
+    while i < SPIN {
+        let tok: u64 = m32(at + 8)
+        if (tok & T_ACTIVE) == 0 {
+            if (tok & T_ERRMASK) != 0 {
+                s(state, S_ERRORS, g(state, S_ERRORS) + 1)
+                return false
+            }
+            return true
+        }
+        if (m32(qh + 24) & T_HALTED) != 0 {
+            s(state, S_ERRORS, g(state, S_ERRORS) + 1)
+            return false
+        }
+        i = i + 1
+    }
+    s(state, S_ERRORS, g(state, S_ERRORS) + 1)
+    return false
+}
+
+// ------------------------------------------------ Steuerungsuebertragung
+//
+// Drei qTDs, immer. `dir_in` sagt, wohin die Daten gehen; `len` darf 0
+// sein, dann sind es zwei.
+fn control(state: u64, addr: u64, mps: u64, rtype: u64, req: u64,
+    value: u64, index: u64, len: u64, buf: u64, dir_in: bool) -> bool {
+    let sp: u64 = state + B_SETUP
+    kstate.set8(sp + 0, (rtype & 0xFF) as u8)
+    kstate.set8(sp + 1, (req & 0xFF) as u8)
+    kstate.set8(sp + 2, (value & 0xFF) as u8)
+    kstate.set8(sp + 3, ((value >> 8) & 0xFF) as u8)
+    kstate.set8(sp + 4, (index & 0xFF) as u8)
+    kstate.set8(sp + 5, ((index >> 8) & 0xFF) as u8)
+    kstate.set8(sp + 6, (len & 0xFF) as u8)
+    kstate.set8(sp + 7, ((len >> 8) & 0xFF) as u8)
+
+    async_off(state)
+    var last: u64 = 0
+    if len == 0 {
+        // SETUP, dann Quittung IN.
+        qtd(state, 1, qtd_at(state, 2) , PID_SETUP, 8, 0, sp)
+        qtd(state, 2, LINK_T, PID_IN, 0, 1, 0)
+        last = 2
+    } else {
+        var dpid: u64 = PID_OUT
+        var spid: u64 = PID_IN
+        if dir_in {
+            dpid = PID_IN
+            spid = PID_OUT
+        }
+        qtd(state, 1, qtd_at(state, 2), PID_SETUP, 8, 0, sp)
+        qtd(state, 2, qtd_at(state, 3), dpid, len, 1, buf)
+        qtd(state, 3, LINK_T, spid, 0, 1, 0)
+        last = 3
+    }
+    qh_set(state, QH_WORK, addr, 0, mps, 0,
+        qh_at(state, QH_ASYNC) | LINK_QH)
+    w32(qh_at(state, QH_WORK) + 16, qtd_at(state, 1))
+    async_on(state)
+    s(state, S_CTRL, g(state, S_CTRL) + 1)
+    return await_qtd(state, last)
+}
+
+// DAS UMSCHALTBIT HAENGT AN DER ZAHL DER PAKETE UND NICHT AN DER ZAHL
+// DER UEBERTRAGUNGEN. Das ist die Zeile, die in diesem Treiber
+// versehentlich richtig war und es nicht geblieben waere: 512 Oktett
+// bei 512 Oktett je Paket sind EIN Paket, also einmal umschalten -- und
+// genau diese eine Groesse kommt in der Messung vor. Bei einem Geraet
+// mit 64 Oktett je Paket waeren es ACHT, also achtmal umschalten, und
+// das Bit stuende danach falsch. Der Fehler haette sich in der
+// Nachbildung nie gezeigt und auf einem Brett beim zweiten Block.
+//
+// Eine Uebertragung von null Oktett ist trotzdem EIN Paket (das
+// Null-Paket), deshalb die Eins unten.
+fn toggle_after(len: u64, mps: u64, t: u64) -> u64 {
+    if mps == 0 {
+        return t
+    }
+    var pakete: u64 = (len + mps - 1) / mps
+    if pakete == 0 {
+        pakete = 1
+    }
+    return (t + pakete) % 2
+}
+
+// ------------------------------------------------------- Bulk
+//
+// Ein einzelner qTD auf einem eigenen Kopf. Das Umschaltbit gehoert dem
+// ENDPUNKT und nicht der Uebertragung -- es wird deshalb im Geraetesatz
+// gefuehrt und hier hinein- und wieder herausgereicht.
+fn bulk(state: u64, addr: u64, ep: u64, mps: u64, len: u64, buf: u64,
+    dir_in: bool, toggle: u64) -> u64 {
+    var pid: u64 = PID_OUT
+    if dir_in {
+        pid = PID_IN
+    }
+    async_off(state)
+    qtd(state, 5, LINK_T, pid, len, toggle, buf)
+    qh_set(state, QH_WORK, addr, ep, mps, 0,
+        qh_at(state, QH_ASYNC) | LINK_QH)
+    w32(qh_at(state, QH_WORK) + 16, qtd_at(state, 5))
+    async_on(state)
+    if !await_qtd(state, 5) {
+        return 0xFFFFFFFF
+    }
+    // Was UEBRIG blieb, steht im Merkmalswort. Wieviel wirklich kam,
+    // ist die Differenz -- ein Bulk-IN darf kuerzer antworten, und ein
+    // Treiber, der das nicht ausrechnet, verliert die letzten Oktette.
+    let rest: u64 = (m32(qtd_at(state, 5) + 8) >> 16) & 0x7FFF
+    return len - rest
+}
+
+// ------------------------------------------ der Unterbrechungsendpunkt
+//
+// Er haengt in der PERIODISCHEN Liste und nirgendwo sonst. Ein
+// Tastaturendpunkt in der asynchronen Liste wird von einem echten EHCI
+// nicht abgefragt -- QEMU wuerde es vermutlich verzeihen, und genau
+// solche Treiber laufen dann in der Nachbildung und auf dem Brett
+// nicht. Deshalb hier der Weg der Spezifikation: S-Maske 0x01 heisst
+// "in der ersten Mikrorahmenscheibe jedes Rahmens", also einmal je
+// Millisekunde.
+fn periodic_off(state: u64) {
+    let o: u64 = op(state)
+    wr32(o, O_USBCMD, rd32(o, O_USBCMD) & (0xFFFFFFFF - CMD_PSE))
+    var i: u64 = 0
+    while i < RESET_SPIN {
+        if (rd32(o, O_USBSTS) & STS_PSS) == 0 {
+            i = RESET_SPIN
+        } else {
+            i = i + 1
+        }
+    }
+}
+
+fn periodic_on(state: u64) {
+    let o: u64 = op(state)
+    wr32(o, O_USBCMD, rd32(o, O_USBCMD) | CMD_PSE)
+    var i: u64 = 0
+    while i < RESET_SPIN {
+        if (rd32(o, O_USBSTS) & STS_PSS) != 0 {
+            i = RESET_SPIN
+        } else {
+            i = i + 1
+        }
+    }
+}
+
+fn int_arm(state: u64, addr: u64, ep: u64, mps: u64, len: u64,
+    toggle: u64) {
+    periodic_off(state)
+    let at: u64 = qh_at(state, QH_INT)
+    w32(at + 0, LINK_T)
+    w32(at + 4, (mps << 16) | (1 << 14) | (2 << 12) | (ep << 8) | addr)
+    w32(at + 8, (1 << 30) | 0x01) // Mult 1, S-Maske: Mikrorahmen 0
+    w32(at + 12, 0)
+    qtd(state, 8, LINK_T, PID_IN, len, toggle, state + B_REPORT)
+    w32(at + 16, qtd_at(state, 8))
+    w32(at + 20, LINK_T)
+    w32(at + 24, 0)
+    periodic_on(state)
+}
+
+// ============================================== DIE AUFZAEHLUNG
+//
+// Anschluss einschalten, zuruecksetzen, sehen was daran haengt. Die
+// Reihenfolge ist die aus der Spezifikation, und die Wartezeiten sind
+// die Mindestwerte daraus: 20 ms nach dem Einschalten der Versorgung,
+// 50 ms Ruecksetzung, 10 ms danach, bevor das Geraet auf Adresse 0
+// antwortet.
+fn port_reset(state: u64, n: u64) -> bool {
+    var v: u64 = portsc(state, n)
+    if (v & PSC_PP) == 0 {
+        portsc_set(state, n, v | PSC_PP)
+        spin(RESET_SPIN)
+        v = portsc(state, n)
+    }
+    if (v & PSC_CCS) == 0 {
+        return false
+    }
+    portsc_ack(state, n, PSC_CSC)
+    // Ruecksetzung an, warten, aus. Das Loeschen des Bits ist der
+    // Anfang der Ruecksetzung und nicht ihr Ende: der Controller
+    // haelt sie noch, bis er selbst fertig ist.
+    portsc_set(state, n, (portsc(state, n) | PSC_RESET)
+        & (0xFFFFFFFF - PSC_PED))
+    spin(RESET_SPIN * 2)
+    portsc_set(state, n, portsc(state, n) & (0xFFFFFFFF - PSC_RESET))
+    var i: u64 = 0
+    while i < RESET_SPIN * 4 {
+        if (portsc(state, n) & PSC_RESET) == 0 {
+            i = RESET_SPIN * 4
+        } else {
+            i = i + 1
+        }
+    }
+    spin(RESET_SPIN)
+    v = portsc(state, n)
+    if (v & PSC_PED) != 0 {
+        return true
+    }
+    // NICHT freigeschaltet heisst: kein Hochgeschwindigkeitsgeraet.
+    // Abgeben statt raten -- siehe der Kopf dieser Datei.
+    portsc_set(state, n, portsc(state, n) | PSC_OWNER)
+    s(state, S_SPEED, g(state, S_SPEED) | (1 << n))
+    return false
+}
+
+fn d8(p: u64, i: u64) -> u64 {
+    return kstate.get8(p + i)
+}
+
+fn d16(p: u64, i: u64) -> u64 {
+    return d8(p, i) | (d8(p, i + 1) << 8)
+}
+
+// Ein Geraet, vom leeren Anschluss bis zum eingestellten Endpunkt.
+fn enumerate(state: u64, n: u64) -> bool {
+    if !port_reset(state, n) {
+        return false
+    }
+    let slot: u64 = g(state, S_NDEV)
+    if slot >= MAX_DEV {
+        return false
+    }
+    let dp: u64 = state + B_DESC
+    // ERST ACHT OKTETT. In Oktett 7 steht, wie gross ein Paket auf dem
+    // Steuerungsendpunkt sein darf; wer gleich achtzehn holt, hat sich
+    // die Zahl vorher ausgedacht. Dieselbe Stelle steht in `usb.fi`
+    // seit Runde K17 und aus demselben Grund.
+    if !control(state, 0, 64, 0x80, 6, 0x0100, 0, 8, dp, true) {
+        return false
+    }
+    var mps: u64 = d8(dp, 7)
+    if mps == 0 {
+        mps = 64
+    }
+    let addr: u64 = g(state, S_ADDR)
+    if !control(state, 0, mps, 0x00, 5, addr, 0, 0, 0, false) {
+        return false
+    }
+    s(state, S_ADDR, addr + 1)
+    spin(RESET_SPIN)
+    if !control(state, addr, mps, 0x80, 6, 0x0100, 0, 18, dp, true) {
+        return false
+    }
+    dvs(state, slot, D_PORT, n)
+    dvs(state, slot, D_ADDR, addr)
+    dvs(state, slot, D_MPS, mps)
+    dvs(state, slot, D_VEN, d16(dp, 8))
+    dvs(state, slot, D_PROD, d16(dp, 10))
+    dvs(state, slot, D_CLASS, C_NONE)
+    dvs(state, slot, D_TOGIN, 0)
+    dvs(state, slot, D_TOGOUT, 0)
+
+    // Der Konfigurationsdeskriptor, auch in zwei Schritten: die ersten
+    // neun Oktett sagen, wie lang das Ganze ist.
+    if !control(state, addr, mps, 0x80, 6, 0x0200, 0, 9, dp, true) {
+        return false
+    }
+    var total: u64 = d16(dp, 2)
+    if total > 500 {
+        total = 500
+    }
+    if !control(state, addr, mps, 0x80, 6, 0x0200, 0, total, dp, true) {
+        return false
+    }
+    let cfgval: u64 = d8(dp, 5)
+
+    // Durch die Kette der Bloecke. Jeder traegt seine Laenge im ersten
+    // Oktett -- wer sie nicht liest, sondern neun addiert, verliert
+    // sich beim ersten HID-Block (der ist neun lang und steht zwischen
+    // Schnittstelle und Endpunkt).
+    var i: u64 = 0
+    var iclass: u64 = 0
+    var isub: u64 = 0
+    var iproto: u64 = 0
+    var iface: u64 = 0
+    var epin: u64 = 0
+    var epout: u64 = 0
+    var epint: u64 = 0
+    var mpsin: u64 = 64
+    var mpsout: u64 = 64
+    while i + 2 <= total {
+        let blen: u64 = d8(dp, i)
+        if blen < 2 {
+            i = total
+        } else {
+            let btype: u64 = d8(dp, i + 1)
+            if btype == 4 {
+                iface = d8(dp, i + 2)
+                iclass = d8(dp, i + 5)
+                isub = d8(dp, i + 6)
+                iproto = d8(dp, i + 7)
+            } else if btype == 5 {
+                let ea: u64 = d8(dp, i + 2)
+                let attr: u64 = d8(dp, i + 3) & 0x03
+                if attr == 3 {
+                    if (ea & 0x80) != 0 {
+                        epint = ea & 0x0F
+                    }
+                } else if attr == 2 {
+                    if (ea & 0x80) != 0 {
+                        epin = ea & 0x0F
+                        mpsin = d16(dp, i + 4)
+                    } else {
+                        epout = ea & 0x0F
+                        mpsout = d16(dp, i + 4)
+                    }
+                }
+            }
+            i = i + blen
+        }
+    }
+
+    if !control(state, addr, mps, 0x00, 9, cfgval, 0, 0, 0, false) {
+        return false
+    }
+    dvs(state, slot, D_EPIN, epin)
+    dvs(state, slot, D_EPOUT, epout)
+    dvs(state, slot, D_EPINT, epint)
+    dvs(state, slot, D_MPSIN, mpsin)
+    dvs(state, slot, D_MPSOUT, mpsout)
+    s(state, S_NDEV, slot + 1)
+    s(state, S_ENUMS, g(state, S_ENUMS) + 1)
+
+    if iclass == 3 && isub == 1 && epint != 0 {
+        // HID mit Boot-Schnittstelle. SET_PROTOCOL 0 heisst "das
+        // Boot-Format", SET_IDLE 0 heisst "melde nur bei Aenderung".
+        control(state, addr, mps, 0x21, 0x0B, 0, iface, 0, 0, false)
+        control(state, addr, mps, 0x21, 0x0A, 0, iface, 0, 0, false)
+        if iproto == 1 {
+            dvs(state, slot, D_CLASS, C_KBD)
+            s(state, S_KBD, slot + 1)
+            int_arm(state, addr, epint, 8, 8, 0)
+        } else if iproto == 2 {
+            dvs(state, slot, D_CLASS, C_MOUSE)
+        }
+        return true
+    }
+    if iclass == 8 && iproto == 0x50 && epin != 0 && epout != 0 {
+        dvs(state, slot, D_CLASS, C_MSC)
+        s(state, S_MSC, slot + 1)
+        msc_setup(state, slot)
+        return true
+    }
+    return true
+}
+
+// ============================================== DER STICK (BOT/SCSI)
+//
+// Bulk-Only-Transport: ein Befehlsblock von 31 Oktett hinaus, dann die
+// Daten, dann eine Quittung von 13 Oktett herein. Dieselbe Abmachung,
+// die `usb.fi` seit Runde K17 ueber xHCI fuehrt -- die Schicht darueber
+// ist die gleiche, nur der Weg darunter ist ein anderer, und genau das
+// ist der Punkt dieser Runde.
+fn cbw(state: u64, len: u64, dir_in: bool, cblen: u64) -> u64 {
+    let p: u64 = state + B_CBW
+    var i: u64 = 0
+    while i < 31 {
+        kstate.set8(p + i, 0 as u8)
+        i = i + 1
+    }
+    // "USBC", kleinendig.
+    kstate.set8(p + 0, 0x55 as u8)
+    kstate.set8(p + 1, 0x53 as u8)
+    kstate.set8(p + 2, 0x42 as u8)
+    kstate.set8(p + 3, 0x43 as u8)
+    let tag: u64 = g(state, S_TAG)
+    s(state, S_TAG, tag + 1)
+    kstate.set8(p + 4, (tag & 0xFF) as u8)
+    kstate.set8(p + 5, ((tag >> 8) & 0xFF) as u8)
+    kstate.set8(p + 8, (len & 0xFF) as u8)
+    kstate.set8(p + 9, ((len >> 8) & 0xFF) as u8)
+    kstate.set8(p + 10, ((len >> 16) & 0xFF) as u8)
+    if dir_in {
+        kstate.set8(p + 12, 0x80 as u8)
+    }
+    kstate.set8(p + 14, (cblen & 0x1F) as u8)
+    return tag
+}
+
+fn cb(state: u64, i: u64, v: u64) {
+    kstate.set8(state + B_CBW + 15 + i, (v & 0xFF) as u8)
+}
+
+// Einen SCSI-Befehl absetzen und die Quittung holen. Rueckgabe: die
+// Zahl der Datenoktette, oder 0xFFFFFFFF wenn etwas schiefging.
+fn scsi(state: u64, slot: u64, len: u64, dir_in: bool, cblen: u64,
+    buf: u64) -> u64 {
+    let addr: u64 = dv(state, slot, D_ADDR)
+    let epin: u64 = dv(state, slot, D_EPIN)
+    let epout: u64 = dv(state, slot, D_EPOUT)
+    let mpsi: u64 = dv(state, slot, D_MPSIN)
+    s(state, S_IOS, g(state, S_IOS) + 1)
+    var tout: u64 = dv(state, slot, D_TOGOUT)
+    var tin: u64 = dv(state, slot, D_TOGIN)
+    let mpso: u64 = dv(state, slot, D_MPSOUT)
+    if bulk(state, addr, epout, mpso, 31, state + B_CBW, false, tout)
+        != 31 {
+        s(state, S_MSCERR, g(state, S_MSCERR) + 1)
+        return 0xFFFFFFFF
+    }
+    tout = toggle_after(31, mpso, tout)
+    var got: u64 = 0
+    if len > 0 {
+        if dir_in {
+            got = bulk(state, addr, epin, mpsi, len, buf, true, tin)
+            tin = toggle_after(len, mpsi, tin)
+            if got == 0xFFFFFFFF {
+                s(state, S_MSCERR, g(state, S_MSCERR) + 1)
+                dvs(state, slot, D_TOGOUT, tout)
+                dvs(state, slot, D_TOGIN, tin)
+                return 0xFFFFFFFF
+            }
+        } else {
+            got = bulk(state, addr, epout, mpso, len, buf, false, tout)
+            tout = toggle_after(len, mpso, tout)
+        }
+    }
+    let csw: u64 = bulk(state, addr, epin, mpsi, 13, state + B_CSW,
+        true, tin)
+    tin = toggle_after(13, mpsi, tin)
+    dvs(state, slot, D_TOGOUT, tout)
+    dvs(state, slot, D_TOGIN, tin)
+    if csw != 13 {
+        s(state, S_MSCERR, g(state, S_MSCERR) + 1)
+        return 0xFFFFFFFF
+    }
+    if kstate.get8(state + B_CSW + 12) != 0 {
+        s(state, S_MSCERR, g(state, S_MSCERR) + 1)
+        return 0xFFFFFFFF
+    }
+    return got
+}
+
+// READ CAPACITY (10). Die Antwort sind acht Oktett GROSSENDIG -- das
+// ist SCSI und nicht x86, und ein Treiber, der sie kleinendig liest,
+// bekommt eine Platte mit vier Milliarden Bloecken.
+fn msc_setup(state: u64, slot: u64) {
+    // Zwei Anlaeufe fuer TEST UNIT READY: ein Stick meldet beim ersten
+    // Mal gerne "Medium hat gewechselt".
+    var t: u64 = 0
+    while t < 2 {
+        cbw(state, 0, true, 6)
+        cb(state, 0, 0x00)
+        scsi(state, slot, 0, true, 6, 0)
+        t = t + 1
+    }
+    cbw(state, 8, true, 10)
+    cb(state, 0, 0x25)
+    let dp: u64 = state + B_DATA
+    if scsi(state, slot, 8, true, 10, dp) != 8 {
+        return
+    }
+    let last: u64 = (d8(dp, 0) << 24) | (d8(dp, 1) << 16)
+        | (d8(dp, 2) << 8) | d8(dp, 3)
+    let bs: u64 = (d8(dp, 4) << 24) | (d8(dp, 5) << 16)
+        | (d8(dp, 6) << 8) | d8(dp, 7)
+    s(state, S_BLOCKS, last + 1)
+    s(state, S_BSIZE, bs)
+}
+
+// EIN Block, 512 Oktett, nach `dst`. Das ist der Datenweg, den die
+// Runde beweisen muss: was hier ankommt, wird vom WIRT gegen das
+// Abbild gehalten, aus dem QEMU liest.
+fn msc_read(state: u64, lba: u64, dst: u64) -> bool {
+    let slot1: u64 = g(state, S_MSC)
+    if slot1 == 0 {
+        return false
+    }
+    let slot: u64 = slot1 - 1
+    cbw(state, 512, true, 10)
+    cb(state, 0, 0x28)
+    cb(state, 2, (lba >> 24) & 0xFF)
+    cb(state, 3, (lba >> 16) & 0xFF)
+    cb(state, 4, (lba >> 8) & 0xFF)
+    cb(state, 5, lba & 0xFF)
+    cb(state, 7, 0)
+    cb(state, 8, 1)
+    if scsi(state, slot, 512, true, 10, state + B_DATA) != 512 {
+        return false
+    }
+    var i: u64 = 0
+    while i < 512 {
+        kstate.set8(dst + i, kstate.get8(state + B_DATA + i) as u8)
+        i = i + 1
+    }
+    return true
+}
+
+// ============================================== DIE TASTATUR
+//
+// Der Boot-Bericht ist acht Oktett: Umschalttasten, ein leeres Oktett,
+// sechs Gebrauchscodes. Uebersetzt wird in einen PS/2-ABTASTCODE und
+// damit `kbd.on_code` gerufen -- DIESELBE Tuer, durch die IRQ 1 geht
+// und durch die `usb.fi` seit K17 geht. Es gibt keinen zweiten Weg in
+// die Zeilendisziplin, und genau deshalb merkt die Shell nicht, an
+// welchem Regler die Tastatur steckt.
+fn usage_to_scan(u: u64) -> u64 {
+    if u >= 0x04 && u <= 0x1D {
+        // a..z -> die Reihenfolge des Abtastcodesatzes 1
+        var t: [u8; 26] = "\x1e\x30\x2e\x20\x12\x21\x22\x23\x17\x24\x25\x26\x32\x31\x18\x19\x10\x13\x1f\x14\x16\x2f\x11\x2d\x15\x2c"
+        return kstate.get8((&t[0]) as u64 + (u - 0x04))
+    }
+    if u >= 0x1E && u <= 0x27 {
+        // 1..9,0
+        if u == 0x27 {
+            return 0x0B
+        }
+        return 0x02 + (u - 0x1E)
+    }
+    if u == 0x28 {
+        return 0x1C // Eingabe
+    }
+    if u == 0x29 {
+        return 0x01 // Abbruch
+    }
+    if u == 0x2A {
+        return 0x0E // Ruecktaste
+    }
+    if u == 0x2B {
+        return 0x0F // Tabulator
+    }
+    if u == 0x2C {
+        return 0x39 // Leertaste
+    }
+    if u == 0x2D {
+        return 0x0C
+    }
+    if u == 0x2E {
+        return 0x0D
+    }
+    if u == 0x36 {
+        return 0x33 // Komma
+    }
+    if u == 0x37 {
+        return 0x34 // Punkt
+    }
+    if u == 0x38 {
+        return 0x35 // Schraegstrich
+    }
+    return 0
+}
+
+fn kbd_report(state: u64) {
+    let p: u64 = state + B_REPORT
+    let mods: u64 = kstate.get8(p)
+    let last: u64 = g(state, S_LASTMOD)
+    // Umschalt links (0x02) und Steuerung links (0x01) -- an und aus,
+    // damit `kbd.fi` seine eigenen Zustandsbits fuehren kann.
+    if (mods & 0x02) != 0 && (last & 0x02) == 0 {
+        kbd.on_code(state, 0x2A)
+    }
+    if (mods & 0x02) == 0 && (last & 0x02) != 0 {
+        kbd.on_code(state, 0xAA)
+    }
+    if (mods & 0x01) != 0 && (last & 0x01) == 0 {
+        kbd.on_code(state, 0x1D)
+    }
+    if (mods & 0x01) == 0 && (last & 0x01) != 0 {
+        kbd.on_code(state, 0x9D)
+    }
+    s(state, S_LASTMOD, mods)
+    var i: u64 = 2
+    while i < 8 {
+        let u: u64 = kstate.get8(p + i)
+        if u != 0 {
+            let c: u64 = usage_to_scan(u)
+            if c != 0 {
+                // Herunter und gleich wieder herauf. Der Boot-Bericht
+                // sagt, WELCHE Tasten gerade unten sind, nicht was sich
+                // geaendert hat; eine Wiederholungserkennung waere eine
+                // eigene Tabelle, und `usb.fi` macht es seit K17
+                // genauso.
+                kbd.on_code(state, c)
+                kbd.on_code(state, c | 0x80)
+                s(state, S_KEYS, g(state, S_KEYS) + 1)
+                let rn: u64 = g(state, S_RINGN)
+                s(state, S_RING + (rn % RING_N) * 8, c)
+                s(state, S_RINGN, rn + 1)
+            }
+        }
+        i = i + 1
+    }
+    s(state, S_REPORTS, g(state, S_REPORTS) + 1)
+}
+
+// Nachsehen, ob der Unterbrechungsendpunkt etwas geliefert hat. Wird
+// aus derselben Schleife gerufen, aus der `usb.poll` gerufen wird.
+fn poll(state: u64) -> bool {
+    if g(state, S_READY) == 0 {
+        return false
+    }
+    s(state, S_POLLS, g(state, S_POLLS) + 1)
+    let k1: u64 = g(state, S_KBD)
+    if k1 == 0 {
+        return false
+    }
+    let at: u64 = qtd_at(state, 8)
+    if (m32(at + 8) & T_ACTIVE) != 0 {
+        return false
+    }
+    if (m32(at + 8) & T_ERRMASK) != 0 {
+        s(state, S_ERRORS, g(state, S_ERRORS) + 1)
+    } else {
+        kbd_report(state)
+    }
+    let slot: u64 = k1 - 1
+    var t: u64 = dv(state, slot, D_TOGIN)
+    t = 1 - t
+    dvs(state, slot, D_TOGIN, t)
+    int_arm(state, dv(state, slot, D_ADDR), dv(state, slot, D_EPINT),
+        8, 8, t)
+    return true
+}
+
+// ============================================== BERICHT UND STUFE
+
+fn tag_() {
+    var s0: [u8; 7] = "ehci: \0"
+    serial.puts((&s0[0]) as u64)
+}
+
+fn report(state: u64) {
+    var s_no: [u8; 28] = "ehci: kein EHCI auf dem Bus\0"
+    var s_hd: [u8; 6] = "bdf=\0\0"
+    var s_cl: [u8; 10] = "  caplen=\0"
+    var s_hc: [u8; 7] = "  hcc=\0"
+    var s_pt: [u8; 9] = "  ports=\0"
+    var s_lg: [u8; 11] = "  legacy=\0\0"
+    var s_ho: [u8; 12] = "  handoff=\0\0"
+    var s_p: [u8; 7] = "port \0\0"
+    var s_st: [u8; 10] = "  portsc=\0"
+    var s_sp: [u8; 9] = "  speed=\0"
+    var s_dv: [u8; 6] = "dev \0\0"
+    var s_ad: [u8; 8] = "  addr=\0"
+    var s_ka: [u8; 10] = "  klasse=\0"
+    var s_vd: [u8; 4] = "  \0\0"
+    var s_su: [u8; 14] = "enum=\0\0\0\0\0\0\0\0\0"
+    var s_er: [u8; 12] = "  fehler=\0\0\0"
+    var s_ct: [u8; 10] = "  ctrl=\0\0\0"
+    var s_ky: [u8; 10] = "  tasten=\0"
+    var s_rp: [u8; 12] = "  berichte=\0"
+    var s_pl: [u8; 12] = "  abfragen=\0"
+    var s_cd: [u8; 6] = "codes\0"
+    var s_ms: [u8; 12] = "msc blocks=\0"
+    var s_bs: [u8; 10] = "  bsize=\0\0"
+    if g(state, S_READY) == 0 {
+        serial.puts((&s_no[0]) as u64)
+        serial.nl()
+        return
+    }
+    tag_()
+    serial.puts((&s_hd[0]) as u64)
+    serial.hex(g(state, S_BDF))
+    serial.puts((&s_cl[0]) as u64)
+    serial.dec(g(state, S_CAPLEN))
+    serial.puts((&s_hc[0]) as u64)
+    serial.hex(g(state, S_HCC))
+    serial.puts((&s_pt[0]) as u64)
+    serial.dec(g(state, S_PORTS))
+    serial.puts((&s_lg[0]) as u64)
+    serial.hex(g(state, S_LEGACY))
+    serial.puts((&s_ho[0]) as u64)
+    serial.dec(g(state, S_HANDED))
+    serial.nl()
+    var i: u64 = 0
+    while i < g(state, S_PORTS) {
+        tag_()
+        serial.puts((&s_p[0]) as u64)
+        serial.dec(i)
+        serial.puts((&s_st[0]) as u64)
+        serial.hex(portsc(state, i))
+        serial.puts((&s_sp[0]) as u64)
+        serial.dec(port_speed(state, i))
+        serial.nl()
+        i = i + 1
+    }
+    i = 0
+    while i < g(state, S_NDEV) {
+        tag_()
+        serial.puts((&s_dv[0]) as u64)
+        serial.dec(i)
+        serial.puts((&s_ad[0]) as u64)
+        serial.dec(dv(state, i, D_ADDR))
+        serial.puts((&s_ka[0]) as u64)
+        serial.dec(dv(state, i, D_CLASS))
+        serial.puts((&s_vd[0]) as u64)
+        pci.hexn(dv(state, i, D_VEN), 4)
+        serial.put(58 as u8)
+        pci.hexn(dv(state, i, D_PROD), 4)
+        serial.nl()
+        i = i + 1
+    }
+    tag_()
+    serial.puts((&s_su[0]) as u64)
+    serial.dec(g(state, S_ENUMS))
+    serial.puts((&s_ct[0]) as u64)
+    serial.dec(g(state, S_CTRL))
+    serial.puts((&s_er[0]) as u64)
+    serial.dec(g(state, S_ERRORS))
+    serial.puts((&s_ky[0]) as u64)
+    serial.dec(g(state, S_KEYS))
+    serial.puts((&s_rp[0]) as u64)
+    serial.dec(g(state, S_REPORTS))
+    serial.puts((&s_pl[0]) as u64)
+    serial.dec(g(state, S_POLLS))
+    serial.nl()
+    if g(state, S_RINGN) > 0 {
+        tag_()
+        serial.puts((&s_cd[0]) as u64)
+        var r: u64 = 0
+        var rn2: u64 = g(state, S_RINGN)
+        if rn2 > RING_N {
+            rn2 = RING_N
+        }
+        while r < rn2 {
+            serial.put(32 as u8)
+            pci.hexn(g(state, S_RING + r * 8), 2)
+            r = r + 1
+        }
+        serial.nl()
+    }
+    if g(state, S_MSC) != 0 {
+        tag_()
+        serial.puts((&s_ms[0]) as u64)
+        serial.dec(g(state, S_BLOCKS))
+        serial.puts((&s_bs[0]) as u64)
+        serial.dec(g(state, S_BSIZE))
+        serial.nl()
+    }
+}
+
+// Ein Block von der Platte, in Zahlen -- damit der Wirt ihn gegen sein
+// eigenes Abbild halten kann. Nicht "der Treiber meldet Erfolg",
+// sondern OKTETTE.
+fn selftest(state: u64, lba: u64) {
+    var s_rd: [u8; 14] = "selftest lba=\0"
+    var s_ok: [u8; 7] = "  ok=\0\0"
+    var s_sm: [u8; 8] = "  sum=\0\0"
+    var s_b0: [u8; 9] = "  first=\0"
+    if g(state, S_MSC) == 0 {
+        return
+    }
+    let dst: u64 = state + B_REPORT
+    let ok: bool = msc_read(state, lba, dst)
+    var sum: u64 = 0
+    var i: u64 = 0
+    if ok {
+        while i < 512 {
+            sum = sum + kstate.get8(state + B_DATA + i) * (i + 1)
+            i = i + 1
+        }
+    }
+    tag_()
+    serial.puts((&s_rd[0]) as u64)
+    serial.dec(lba)
+    serial.puts((&s_ok[0]) as u64)
+    var y: u64 = 0
+    if ok {
+        y = 1
+    }
+    serial.dec(y)
+    serial.puts((&s_sm[0]) as u64)
+    serial.dec(sum)
+    serial.puts((&s_b0[0]) as u64)
+    serial.dec(kstate.get8(state + B_DATA))
+    serial.nl()
+}
+
+// Die Stufe. Ohne das Wort `ehci` ist das hier eine gedruckte Zeile und
+// sonst nichts -- dieselbe Regel wie bei jeder anderen Stufe dieses
+// Kerns.
+fn stage(state: u64) {
+    var s_off: [u8; 15] = "ehci: skipped\0\0"
+    var s_fail: [u8; 26] = "ehci: init failed  warum=\0"
+    if !kstate.mode_on(state, kstate.M_EHCI) {
+        serial.puts((&s_off[0]) as u64)
+        serial.nl()
+        return
+    }
+    if !present(state) {
+        var s_nd: [u8; 28] = "ehci: kein EHCI auf dem Bus\0"
+        serial.puts((&s_nd[0]) as u64)
+        serial.nl()
+        return
+    }
+    if !init(state) {
+        serial.puts((&s_fail[0]) as u64)
+        serial.dec(g(state, S_WHY))
+        var s_st: [u8; 7] = "  bar=\0"
+        serial.puts((&s_st[0]) as u64)
+        serial.hex(g(state, S_BASE))
+        serial.nl()
+        return
+    }
+    var n: u64 = 0
+    while n < g(state, S_PORTS) {
+        enumerate(state, n)
+        n = n + 1
+    }
+    report(state)
+}

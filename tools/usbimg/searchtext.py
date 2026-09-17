@@ -22,7 +22,7 @@ Frage dieser Runde ist auch eine andere und eine einfachere:
 Also wird es gesucht. Der Ablauf:
 
   1. Die Zeile wird mit `tools/ttf/raster.py` gerastert -- der ZWEITEN
-     Fassung des Rasterers aus `kernel/ttf.fi`, in einer anderen Sprache
+     Fassung des Rasterers aus `kernel/gfx/ttf.fi`, in einer anderen Sprache
      geschrieben. Es wird also nicht gegen sich selbst geprueft.
   2. Aus den Glyphen entsteht eine Liste von TINTENPUNKTEN
      (dx, dy, Deckung). Nur Punkte mit voller oder fast voller Deckung

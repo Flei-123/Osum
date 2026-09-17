@@ -4,7 +4,7 @@
 
 Der Lauf mit dem Startmenue bootet aus einem MODUL (`modfs`): die Wurzel
 liegt im Arbeitsspeicher, `blk.flush` kehrt dort sofort zurueck
-(kernel/blk.fi:720, `DISK_DEV != DEV_ATA`), und ein `sync` ist damit
+(kernel/block/blk.fi:720, `DISK_DEV != DEV_ATA`), und ein `sync` ist damit
 nachweislich ein Nichts. Ein Beleg "sync lief" waere aus so einem Lauf
 eine Behauptung.
 

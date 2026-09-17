@@ -164,7 +164,7 @@ if [ "${exit_now:-0}" = 1 ] || [ "$HAVE_ROOT" != 1 ]; then
 fi
 
 ./tools/build-kernel.sh "$TMPD/osum.mb" >"$TMPD/build" 2>&1 \
-    && ok "the kernel builds with kernel/wg.fi in it" \
+    && ok "the kernel builds with kernel/net/wg.fi in it" \
     || { bad "the kernel does not build"; tail -8 "$TMPD/build" | sed 's/^/        /'; }
 gcc -O2 -o "$TMPD/bruecke" tools/net/bridge.c 2>"$TMPD/gcc.err" \
     && ok "the UDP/AF_PACKET wire is built" \
@@ -247,7 +247,7 @@ if [ "$KPUB" = "$OUR_PUB" ]; then
 else
     bad "the kernel's public key is $KPUB, expected $OUR_PUB"
 fi
-grep -qa 'wg: port=' "$TMPD/a.log" && ok "kernel/wg.fi comes up at boot" \
+grep -qa 'wg: port=' "$TMPD/a.log" && ok "kernel/net/wg.fi comes up at boot" \
     || bad "no 'wg:' line -- the tunnel did not start"
 kill $BRPID 2>/dev/null; BRPID=""
 

@@ -157,8 +157,8 @@ for S in ebpf__run ebpfver__verify ebpfmap__update ebpfhook__xdp; do
     num "$S ist in den Kern gebunden" "$n" ge 1
 done
 # Und der Haken haengt im NETZWEG und nicht nur im Testmodul.
-n=$(grep -c 'ebpfhook.xdp' kernel/inet.fi)
-num "kernel/inet.fi ruft den Haken am Eingang des Geraets" "$n" ge 1
+n=$(grep -c 'ebpfhook.xdp' kernel/net/inet.fi)
+num "kernel/net/inet.fi ruft den Haken am Eingang des Geraets" "$n" ge 1
 
 # =====================================================================
 echo
@@ -193,7 +193,7 @@ for T in alu.add64 alu.sub32 alu.mul alu.arsh alu.umlauf alu.div0 \
          mem.stapel mem.oktett mem.paket mem.daneben ld.imm64; do
     grep -qaE "OK +$T=" "$R" && ok "  $T" || bad "  $T ist nicht gruen"
 done
-note "  alu.umlauf ist die Zeile, wegen der in kernel/ebpf.fi ueberall '+%'"
+note "  alu.umlauf ist die Zeile, wegen der in kernel/net/ebpf.fi ueberall '+%'"
 note "  steht: 0 - 1 muss umlaufen und darf den Kern NICHT anhalten."
 note "  mem.daneben ist die zweite Schranke: ein Zugriff hinter dem Stapel."
 echo
@@ -261,7 +261,7 @@ if [ -n "${BG:-}" ] && [ -n "${BL:-}" ]; then
         "$BG" gt $(( BL * 5 ))
     note "der Filter kostet rund $(( BG - BL )) Takte je Rahmen, den er ansieht."
     note "Das ist der Preis eines DEUTERS; ein JIT waere schneller und nicht"
-    note "mehr pruefbar -- die Begruendung steht im Kopf von kernel/ebpf.fi."
+    note "mehr pruefbar -- die Begruendung steht im Kopf von kernel/net/ebpf.fi."
 fi
 
 # =====================================================================

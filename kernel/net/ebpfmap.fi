@@ -1,0 +1,465 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/ebpfmap.fi -- Runde O-EBPF, Stufe 3: DIE TAFELN.
+//
+// Ein Programm, das nur rechnen und dann verwerfen oder durchlassen
+// kann, ist ein Filter. Ein Programm, das sich etwas MERKEN kann, ist
+// ein Messgeraet -- und das ist der Grund, aus dem eBPF ueberhaupt
+// nuetzlich ist. Diese Datei ist das Gedaechtnis: zwei Arten von Tafel,
+// beide aus dem Programm heraus und aus Ring 3 erreichbar.
+//
+// ================================================================
+// ZWEI ARTEN, UND WARUM GENAU DIESE ZWEI
+// ================================================================
+//
+//   FELD (array)  Der Schluessel ist ein Index, 0..n-1. Nachschlagen ist
+//                 eine Multiplikation. Das ist die Tafel fuer Zaehler:
+//                 "wieviele Rahmen je Protokoll", "wieviel je Port".
+//                 Sie kann nicht volllaufen und sie kann nichts
+//                 verlieren.
+//
+//   STREUTAFEL    Der Schluessel ist ein 64-Bit-Wort (eine Adresse, ein
+//   (hash)        Portpaar). Nachschlagen ist eine Streuung mit linearer
+//                 Sondierung. Das ist die Tafel fuer "welche Absender
+//                 habe ich gesehen" -- eine Frage, deren Schluesselraum
+//                 zu gross fuer ein Feld ist.
+//
+// Beide haben 64-Bit-Schluessel und 64-Bit-Werte, und das ist eine
+// Einschraenkung gegenueber Linux (dort ist beides beliebig lang). Sie
+// steht hier absichtlich: ein Wert veraenderlicher Laenge braucht eine
+// Speicherverwaltung im Kern, und der Zeiger, den `map_lookup` einem
+// fremden Programm zurueckgibt, muesste dann eine LAENGE mitfuehren, die
+// der Pruefer versteht. Das ist eine Runde fuer sich. Was hier steht,
+// laesst sich in einem Absatz pruefen.
+//
+// ================================================================
+// DER ZEIGER, DEN `map_lookup` ZURUECKGIBT
+// ================================================================
+//
+// `lookup` gibt die ADRESSE des Wertes zurueck, nicht den Wert -- so
+// will es der Befehlssatz, damit ein Programm den Zaehler an Ort und
+// Stelle erhoehen kann, ohne ihn zurueckzuschreiben. Das ist die
+// gefaehrlichste Stelle dieser Runde, denn damit haelt ein fremdes
+// Programm eine Kernadresse in einem Register.
+//
+// Was sie entschaerft, ist die ZWEITE SCHRANKE in `ebpf.fi`: ein
+// Speicherzugriff ist nur im Paketpuffer oder im eigenen Stapel
+// erlaubt. Der Zeiger aus `lookup` liegt in KEINEM von beiden -- also
+// weist die Maschine jeden Zugriff darauf ab. Ein Programm kann den
+// Wert damit NICHT an Ort und Stelle erhoehen; es muss `update` rufen.
+//
+// Das ist eine bewusste Abweichung vom Vorbild und sie kostet
+// Bequemlichkeit. Der Gegenwert: es gibt in dieser Runde keinen Weg,
+// aus einem geladenen Programm heraus in `kdata` zu schreiben. Die
+// Alternative waere ein Pruefer, der Zeigerarten unterscheidet
+// (`PTR_TO_MAP_VALUE` mit bekannter Laenge) -- genau das, was Linux
+// tut, und genau das, was diese Runde NICHT gebaut hat. Es steht als
+// offene Luecke im Bericht.
+//
+// `lookup` gibt 0 zurueck, wenn der Schluessel nicht da ist. Ein
+// Programm, das die Null nicht abfragt und trotzdem zugreift, faellt
+// ebenfalls in die zweite Schranke -- Adresse 0 ist in keinem Gebiet.
+
+profile kernel
+
+import lib.kstate
+
+export {
+    NMAPS, M_ARRAY, M_HASH, MAX_ENTRIES,
+    init, create, destroy, kind_of, used, entries_of,
+    lookup, lookup_value, update, delete, value_at, key_at, slot_used,
+    hits, misses, updates, count_of
+}
+
+// Wieviele Tafeln es gleichzeitig geben kann.
+const NMAPS: u64 = 4
+
+// Wieviele Eintraege je Tafel. Feste Groesse, kein Wachsen: eine Tafel,
+// die waechst, braucht eine Speicherverwaltung, und eine
+// Speicherverwaltung im Netzpfad braucht eine Sperre.
+const MAX_ENTRIES: u64 = 64
+
+const M_ARRAY: u64 = 1
+const M_HASH: u64 = 2
+
+// Die Ablage liegt bei `kstate.EBPFMAP_OFF`:
+//
+//   0x0000..0x003F  die Skalare
+//   0x0040..0x013F  je Tafel ein Kopfsatz von 64 Oktetten (VIER Stueck,
+//                   also bis 0x140 und nicht bis 0x100)
+//   0x0200..        je Tafel MAX_ENTRIES Eintraege zu 24 Oktetten
+//                   (Belegtflag, Schluessel, Wert)
+//
+// DIE ERSTE FASSUNG LIESS DIE EINTRAEGE BEI 0x100 ANFANGEN, und das war
+// um 64 Oktette zu frueh: vier Kopfsaetze zu 64 Oktetten ab 0x40 enden
+// bei 0x140, nicht bei 0x100. Der Kopfsatz der VIERTEN Tafel lag damit
+// genau unter den ersten Eintraegen der ERSTEN -- und weil `create`
+// seine Eintraege loescht, bevor es den Kopfsatz schreibt, loeschte das
+// Anlegen der Tafel 0 den Kopfsatz der Tafel 3. Sichtbar wurde das
+// erst als `create(HASH, 2)` gibt 4 zurueck, obwohl nur drei Tafeln
+// vergeben waren; die Kreisprobe hat es gefunden, weil sie die
+// Platznummer NACHRECHNET statt sie zu glauben. Die Eintraege beginnen
+// jetzt bei 0x200, mit einer Seitenluecke dazwischen.
+const SCAL: u64 = 0x0000
+const HDRS: u64 = 0x0040
+const HBYTES: u64 = 64
+const ENTS: u64 = 0x0200
+const EBYTES: u64 = 24
+const TBYTES: u64 = MAX_ENTRIES * EBYTES // 1536 je Tafel
+
+// Die Skalare.
+const MP_HITS: u64 = 0x00
+const MP_MISS: u64 = 0x08
+const MP_UPD: u64 = 0x10
+
+// Der Kopfsatz einer Tafel, in Worten.
+const H_KIND: u64 = 0 // 0 = frei, sonst M_ARRAY / M_HASH
+const H_N: u64 = 1 // wieviele Eintraege sie fasst
+const H_COUNT: u64 = 2 // wieviele belegt sind (nur Streutafel)
+
+// Ein Eintrag: Flag, Schluessel, Wert.
+const E_USE: u64 = 0
+const E_KEY: u64 = 8
+const E_VAL: u64 = 16
+
+fn mp(off: u64) -> u64 {
+    return kstate.EBPFMAP_OFF + off
+}
+
+fn hat(i: u64) -> u64 {
+    return mp(HDRS + i * HBYTES)
+}
+
+// Die absolute Adresse eines Eintrags.
+fn eat(state: u64, i: u64, k: u64) -> u64 {
+    return state + mp(ENTS + i * TBYTES + k * EBYTES)
+}
+
+fn init(state: u64) {
+    var i: u64 = 0
+    while i < kstate.EBPFMAP_MAX / 8 {
+        kstate.set(state, mp(i * 8), 0)
+        i = i + 1
+    }
+}
+
+fn hits(state: u64) -> u64 {
+    return kstate.get(state, mp(MP_HITS))
+}
+
+fn misses(state: u64) -> u64 {
+    return kstate.get(state, mp(MP_MISS))
+}
+
+fn updates(state: u64) -> u64 {
+    return kstate.get(state, mp(MP_UPD))
+}
+
+fn kind_of(state: u64, i: u64) -> u64 {
+    if i >= NMAPS {
+        return 0
+    }
+    return kstate.get(state, hat(i) + H_KIND * 8)
+}
+
+fn used(state: u64, i: u64) -> bool {
+    return kind_of(state, i) != 0
+}
+
+fn entries_of(state: u64, i: u64) -> u64 {
+    if i >= NMAPS {
+        return 0
+    }
+    return kstate.get(state, hat(i) + H_N * 8)
+}
+
+fn count_of(state: u64, i: u64) -> u64 {
+    if i >= NMAPS {
+        return 0
+    }
+    return kstate.get(state, hat(i) + H_COUNT * 8)
+}
+
+// Eine Tafel anlegen. Gibt ihre Nummer zurueck, oder NMAPS, wenn keine
+// frei ist oder die Angaben nicht stimmen.
+fn create(state: u64, kind: u64, n: u64) -> u64 {
+    if kind != M_ARRAY && kind != M_HASH {
+        return NMAPS
+    }
+    if n == 0 || n > MAX_ENTRIES {
+        return NMAPS
+    }
+    var i: u64 = 0
+    while i < NMAPS {
+        if kstate.get(state, hat(i) + H_KIND * 8) == 0 {
+            // Alle Eintraege loeschen, bevor die Tafel benutzbar wird --
+            // sonst sieht die neue, was die vorige dort liegen liess.
+            var k: u64 = 0
+            while k < MAX_ENTRIES {
+                __mmio_write64((eat(state, i, k) + E_USE) as *mut u64, 0)
+                __mmio_write64((eat(state, i, k) + E_KEY) as *mut u64, 0)
+                __mmio_write64((eat(state, i, k) + E_VAL) as *mut u64, 0)
+                k = k + 1
+            }
+            kstate.set(state, hat(i) + H_KIND * 8, kind)
+            kstate.set(state, hat(i) + H_N * 8, n)
+            kstate.set(state, hat(i) + H_COUNT * 8, 0)
+            // Ein Feld ist von Anfang an vollstaendig da: alle n
+            // Eintraege belegt, Wert null. Das ist der Unterschied zur
+            // Streutafel und der Grund, aus dem ein Feld nichts
+            // verlieren kann.
+            if kind == M_ARRAY {
+                var j: u64 = 0
+                while j < n {
+                    __mmio_write64((eat(state, i, j) + E_USE) as *mut u64, 1)
+                    __mmio_write64((eat(state, i, j) + E_KEY) as *mut u64, j)
+                    j = j + 1
+                }
+                kstate.set(state, hat(i) + H_COUNT * 8, n)
+            }
+            return i
+        }
+        i = i + 1
+    }
+    return NMAPS
+}
+
+fn destroy(state: u64, i: u64) -> bool {
+    if i >= NMAPS || kstate.get(state, hat(i) + H_KIND * 8) == 0 {
+        return false
+    }
+    kstate.set(state, hat(i) + H_KIND * 8, 0)
+    kstate.set(state, hat(i) + H_N * 8, 0)
+    kstate.set(state, hat(i) + H_COUNT * 8, 0)
+    var k: u64 = 0
+    while k < MAX_ENTRIES {
+        __mmio_write64((eat(state, i, k) + E_USE) as *mut u64, 0)
+        __mmio_write64((eat(state, i, k) + E_KEY) as *mut u64, 0)
+        __mmio_write64((eat(state, i, k) + E_VAL) as *mut u64, 0)
+        k = k + 1
+    }
+    return true
+}
+
+// Die Streuung. Eine Multiplikation mit einer ungeraden Konstante und
+// ein Rechtsschieben -- billig, und fuer Schluessel, die sich in den
+// unteren Bit unterscheiden (Portnummern, Adressen), gut genug. Die
+// Multiplikation laeuft UMLAUFEND: der Schluessel kommt aus einem
+// fremden Programm, und eine gepruefte Multiplikation waere hier ein
+// Weg, den Kern anzuhalten.
+fn hash(k: u64, n: u64) -> u64 {
+    let h: u64 = (k *% 0x9E3779B97F4A7C15) >> 40
+    return h % n
+}
+
+// Den Platz eines Schluessels finden. `want_free` 1 heisst: auch ein
+// freier Platz zaehlt als Fund (fuer `update`). Gibt MAX_ENTRIES
+// zurueck, wenn nichts passt.
+//
+// Lineare Sondierung ueber die ganze Tafel, also endet die Schleife
+// immer -- das ist der Grund, aus dem hier gezaehlt und nicht auf ein
+// Abbruchkriterium vertraut wird.
+fn find(state: u64, i: u64, key: u64, want_free: u64) -> u64 {
+    let n: u64 = kstate.get(state, hat(i) + H_N * 8)
+    if n == 0 {
+        return MAX_ENTRIES
+    }
+    var h: u64 = hash(key, n)
+    var step: u64 = 0
+    while step < n {
+        let at: u64 = eat(state, i, h)
+        let u: u64 = __mmio_read64((at + E_USE) as *mut u64)
+        if u == 0 {
+            if want_free != 0 {
+                return h
+            }
+            return MAX_ENTRIES
+        }
+        if __mmio_read64((at + E_KEY) as *mut u64) == key {
+            return h
+        }
+        h = h + 1
+        if h >= n {
+            h = 0
+        }
+        step = step + 1
+    }
+    return MAX_ENTRIES
+}
+
+// Der Platz eines Schluessels, ohne ihn anzulegen. MAX_ENTRIES = nicht da.
+fn slot_of(state: u64, i: u64, key: u64) -> u64 {
+    let kind: u64 = kstate.get(state, hat(i) + H_KIND * 8)
+    if kind == 0 {
+        return MAX_ENTRIES
+    }
+    if kind == M_ARRAY {
+        // Beim Feld IST der Schluessel der Index.
+        if key >= kstate.get(state, hat(i) + H_N * 8) {
+            return MAX_ENTRIES
+        }
+        return key
+    }
+    return find(state, i, key, 0)
+}
+
+// ------------------------------------------- was das Programm ruft
+//
+// `lookup` gibt die ADRESSE des Wertes zurueck oder 0. Warum ein
+// Programm damit nicht viel anfangen kann und das Absicht ist, steht im
+// Kopf dieser Datei.
+fn lookup(state: u64, map: u64, key: u64) -> u64 {
+    if map >= NMAPS {
+        kstate.add(state, mp(MP_MISS), 1)
+        return 0
+    }
+    let s: u64 = slot_of(state, map, key)
+    if s >= MAX_ENTRIES {
+        kstate.add(state, mp(MP_MISS), 1)
+        return 0
+    }
+    kstate.add(state, mp(MP_HITS), 1)
+    return eat(state, map, s) + E_VAL
+}
+
+// Dasselbe, aber als WERT -- das ist, was der Systemaufruf und die
+// Haken benutzen. `okp` ist hier nicht noetig, weil der Kern selbst
+// ruft und kein fremdes Programm.
+fn lookup_value(state: u64, map: u64, key: u64, found: *mut u64) -> u64 {
+    *found = 0
+    if map >= NMAPS {
+        return 0
+    }
+    let s: u64 = slot_of(state, map, key)
+    if s >= MAX_ENTRIES {
+        return 0
+    }
+    *found = 1
+    return __mmio_read64((eat(state, map, s) + E_VAL) as *mut u64)
+}
+
+// Setzen oder anlegen. Gibt 0 bei Erfolg, sonst ungleich null -- die
+// Richtung des Befehlssatzes (0 = gut).
+fn update(state: u64, map: u64, key: u64, val: u64) -> u64 {
+    if map >= NMAPS {
+        return 1
+    }
+    let kind: u64 = kstate.get(state, hat(map) + H_KIND * 8)
+    if kind == 0 {
+        return 1
+    }
+    kstate.add(state, mp(MP_UPD), 1)
+    if kind == M_ARRAY {
+        if key >= kstate.get(state, hat(map) + H_N * 8) {
+            return 1
+        }
+        __mmio_write64((eat(state, map, key) + E_VAL) as *mut u64, val)
+        return 0
+    }
+    let s: u64 = find(state, map, key, 1)
+    if s >= MAX_ENTRIES {
+        // Die Tafel ist voll. Das ist ein ehrliches Scheitern und kein
+        // stilles Verdraengen: wer verdraengt, verliert genau die Zahl,
+        // die jemand messen wollte.
+        return 1
+    }
+    let at: u64 = eat(state, map, s)
+    let u0: u64 = __mmio_read64((at + E_USE) as *mut u64)
+    if u0 == 0 {
+        __mmio_write64((at + E_USE) as *mut u64, 1)
+        __mmio_write64((at + E_KEY) as *mut u64, key)
+        kstate.add(state, hat(map) + H_COUNT * 8, 1)
+    }
+    __mmio_write64((at + E_VAL) as *mut u64, val)
+    return 0
+}
+
+// Loeschen. 0 = war da und ist weg.
+//
+// EIN EINTRAG WIRD NICHT EINFACH FREIGEGEBEN. Bei linearer Sondierung
+// wuerde ein Loch die Kette zerreissen: ein Schluessel, der beim
+// Einfuegen ueber diesen Platz hinweggelaufen ist, waere danach nicht
+// mehr zu finden. Also wird der Rest der Kette neu eingehaengt.
+fn delete(state: u64, map: u64, key: u64) -> u64 {
+    if map >= NMAPS {
+        return 1
+    }
+    let kind: u64 = kstate.get(state, hat(map) + H_KIND * 8)
+    if kind == 0 {
+        return 1
+    }
+    if kind == M_ARRAY {
+        // Ein Feld hat keine loeschbaren Eintraege; der Wert wird null.
+        if key >= kstate.get(state, hat(map) + H_N * 8) {
+            return 1
+        }
+        __mmio_write64((eat(state, map, key) + E_VAL) as *mut u64, 0)
+        return 0
+    }
+    let s: u64 = find(state, map, key, 0)
+    if s >= MAX_ENTRIES {
+        return 1
+    }
+    let n: u64 = kstate.get(state, hat(map) + H_N * 8)
+    __mmio_write64((eat(state, map, s) + E_USE) as *mut u64, 0)
+    __mmio_write64((eat(state, map, s) + E_KEY) as *mut u64, 0)
+    __mmio_write64((eat(state, map, s) + E_VAL) as *mut u64, 0)
+    if kstate.get(state, hat(map) + H_COUNT * 8) > 0 {
+        kstate.set(state, hat(map) + H_COUNT * 8,
+            kstate.get(state, hat(map) + H_COUNT * 8) - 1)
+    }
+    // Die Kette hinter dem Loch neu einhaengen.
+    var h: u64 = s + 1
+    if h >= n {
+        h = 0
+    }
+    var step: u64 = 0
+    while step < n {
+        let at: u64 = eat(state, map, h)
+        let u1: u64 = __mmio_read64((at + E_USE) as *mut u64)
+        if u1 == 0 {
+            step = n
+        } else {
+            let k2: u64 = __mmio_read64((at + E_KEY) as *mut u64)
+            let v2: u64 = __mmio_read64((at + E_VAL) as *mut u64)
+            __mmio_write64((at + E_USE) as *mut u64, 0)
+            __mmio_write64((at + E_KEY) as *mut u64, 0)
+            __mmio_write64((at + E_VAL) as *mut u64, 0)
+            if kstate.get(state, hat(map) + H_COUNT * 8) > 0 {
+                kstate.set(state, hat(map) + H_COUNT * 8,
+                    kstate.get(state, hat(map) + H_COUNT * 8) - 1)
+            }
+            update(state, map, k2, v2)
+            h = h + 1
+            if h >= n {
+                h = 0
+            }
+            step = step + 1
+        }
+    }
+    return 0
+}
+
+// ------------------------------------------- was Ring 3 liest
+//
+// Der Wert an einem PLATZ (nicht an einem Schluessel), damit ein
+// Programm die Tafel durchgehen kann, ohne die Schluessel zu kennen.
+fn value_at(state: u64, map: u64, slot: u64) -> u64 {
+    if map >= NMAPS || slot >= MAX_ENTRIES {
+        return 0
+    }
+    return __mmio_read64((eat(state, map, slot) + E_VAL) as *mut u64)
+}
+
+fn key_at(state: u64, map: u64, slot: u64) -> u64 {
+    if map >= NMAPS || slot >= MAX_ENTRIES {
+        return 0
+    }
+    return __mmio_read64((eat(state, map, slot) + E_KEY) as *mut u64)
+}
+
+fn slot_used(state: u64, map: u64, slot: u64) -> u64 {
+    if map >= NMAPS || slot >= MAX_ENTRIES {
+        return 0
+    }
+    return __mmio_read64((eat(state, map, slot) + E_USE) as *mut u64)
+}

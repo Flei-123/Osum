@@ -114,7 +114,7 @@ hat "$TMPD/karte.txt" "0 Kollisionen" "keine zwei Bereiche ueberschneiden sich"
 # Die zwei neuen Seiten liegen da, wo sie liegen sollen, und nirgends
 # sonst. Diese Stelle hat dem Projekt schon vier Kollisionen beschert.
 for r in EXT4_OFF NTFS_OFF; do
-    v=$(grep -aE "^const $r: u64 = 0x[0-9A-Fa-f]+" kernel/kstate.fi \
+    v=$(grep -aE "^const $r: u64 = 0x[0-9A-Fa-f]+" kernel/lib/kstate.fi \
         | head -1 | grep -oE '0x[0-9A-Fa-f]+')
     d=$((v))
     # MERGE 14.09.2026: die beiden Bereiche sind hinter die alte

@@ -114,18 +114,18 @@ echo "== 1. die Quellen: zwei Dateien, eine Wahrheit =="
 for r in VBE_INDEX VBE_DATA VBE_ID VBE_XRES VBE_YRES VBE_BPP VBE_ENABLE \
          VBE_BANK VBE_VWIDTH VBE_VHEIGHT VBE_XOFF VBE_YOFF \
          VBE_DISABLED VBE_ENABLED VBE_LFB VBE_ID_LO VBE_ID_HI; do
-    a=$(grep -aE "^const $r: (u16|u64) = " kernel/fb.fi | sed 's/.*= //; s/ *\/\/.*//')
-    b=$(grep -aE "^const $r: (u16|u64) = " kernel/vmode.fi | sed 's/.*= //; s/ *\/\/.*//')
+    a=$(grep -aE "^const $r: (u16|u64) = " kernel/gfx/fb.fi | sed 's/.*= //; s/ *\/\/.*//')
+    b=$(grep -aE "^const $r: (u16|u64) = " kernel/gfx/vmode.fi | sed 's/.*= //; s/ *\/\/.*//')
     if [ -n "$a" ] && [ "$a" = "$b" ]; then ok "$r steht in fb.fi und vmode.fi gleich ($a)"
     else bad "$r: fb.fi='$a', vmode.fi='$b'"; fi
 done
 # Und der Index, den Runde K7 nicht kannte.
-v64=$(grep -aE '^const VBE_VRAM64K' kernel/vmode.fi | sed 's/.*= //; s/ *\/\/.*//')
+v64=$(grep -aE '^const VBE_VRAM64K' kernel/gfx/vmode.fi | sed 's/.*= //; s/ *\/\/.*//')
 gleich "VBE_VIDEO_MEMORY_64K ist Index 10 (0x0A)" "10" "$v64"
 
 # Die Seiten dieser Runde und die Karte.
-d1=$(grep -aE '^const DISP_OFF' kernel/kstate.fi | sed 's/.*= //')
-d2=$(grep -aE '^const DLUT_OFF' kernel/kstate.fi | sed 's/.*= //')
+d1=$(grep -aE '^const DISP_OFF' kernel/lib/kstate.fi | sed 's/.*= //')
+d2=$(grep -aE '^const DLUT_OFF' kernel/lib/kstate.fi | sed 's/.*= //')
 # RUNDE MERGE: DIE ADRESSEN STEHEN NICHT MEHR IM LAEUFER. Diese Runde
 # nahm 0x5A000 und 0x5B000; auf dem zusammengefuehrten Baum liegt dort
 # OFS3, und der Modustreiber ist auf 0x5C000/0x5D000 gerueckt. Die Frage
@@ -134,9 +134,9 @@ d2=$(grep -aE '^const DLUT_OFF' kernel/kstate.fi | sed 's/.*= //')
 # Zahl darf sich aendern, der Kartenpruefer drei Zeilen weiter unten ist
 # der, der ueber Kollisionen entscheidet.
 [ -n "$d1" ] && ok "die kdata-Seite des Modustreibers steht in kstate.fi: $d1" \
-             || bad "DISP_OFF fehlt in kernel/kstate.fi"
+             || bad "DISP_OFF fehlt in kernel/lib/kstate.fi"
 [ -n "$d2" ] && ok "die kdata-Seite der Nachschlagetabelle steht daneben: $d2" \
-             || bad "DLUT_OFF fehlt in kernel/kstate.fi"
+             || bad "DLUT_OFF fehlt in kernel/lib/kstate.fi"
 gleich "und sie folgt unmittelbar auf den Modustreiber" \
     "$(printf '0x%X' $(( $d1 + 0x1000 )))" "$(printf '0x%X' $(( $d2 )))"
 # AUFRUFNUMMERN: 1810..1819 gehoeren dieser Runde, und niemandem sonst.
@@ -147,7 +147,7 @@ gleich "und sie folgt unmittelbar auf den Modustreiber" \
 # Zehner genauso. Ein Laeufer, der den halben Hunderter fuer sich
 # beansprucht, meldet die Nachbarn als Eindringlinge.
 fremd=$(grep -ran --include='*.fi' -E '^const SYS_[A-Za-z0-9_]+: u64 = 181[0-9]' kernel/ \
-    | grep -v -e '^kernel/sys.fi' -e '^kernel/user/dispctl.fi' \
+    | grep -v -e '^kernel/sys/sys.fi' -e '^kernel/user/dispctl.fi' \
               -e '^kernel/user/settings.fi' -e '^kernel/user/qs.fi' \
               -e '^kernel/user/snip.fi' || true)
 # `kernel/user/qs.fi` (Runde GLYPHE) und `kernel/user/snip.fi` (Runde
@@ -158,8 +158,8 @@ fremd=$(grep -ran --include='*.fi' -E '^const SYS_[A-Za-z0-9_]+: u64 = 181[0-9]'
 # faende diese Suche weiterhin.
 [ -z "$fremd" ] && ok "keine Aufrufnummer aus 1810..1819 steht ausserhalb der Dateien dieser Runde" \
                 || bad "Aufrufnummern aus 1810..1819 stehen auch in: $(echo $fremd | tr '\n' ' ')"
-eigen=$(grep -ahE '^const SYS_[A-Za-z0-9_]+: u64 = 181[0-9]' kernel/sys.fi | wc -l | tr -d ' ')
-gleich "in kernel/sys.fi stehen genau drei Nummern aus dem Vorrat" "3" "$eigen"
+eigen=$(grep -ahE '^const SYS_[A-Za-z0-9_]+: u64 = 181[0-9]' kernel/sys/sys.fi | wc -l | tr -d ' ')
+gleich "in kernel/sys/sys.fi stehen genau drei Nummern aus dem Vorrat" "3" "$eigen"
 
 if python3 tools/kernel/memmap.py kernel > "$TMPD/karte.txt" 2>&1; then
     ok "die Speicherkarte von kdata: $(tail -1 "$TMPD/karte.txt")"
@@ -374,7 +374,7 @@ num "der Lauf endet sauber" "$RC" eq 21
 schau "VORHER: das Foto ist 800x600" groesse "$TMPD/vorher.ppm" 800 600
 schau "VORHER: Feld 1 ist reines Rot" flaeche "$TMPD/vorher.ppm" 0 0 100 100 255 0 0
 schau "VORHER: die Textzeile steht bildpunktgenau" \
-    text "$TMPD/vorher.ppm" kernel/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
+    text "$TMPD/vorher.ppm" kernel/gfx/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
 
 # NACHHER: DERSELBE Kernel, DIESELBE Zeile, ein Wort mehr -- `dispbig`.
 foto nachher "gfx disp dispbig nocursor fbtest fbhold $GRUND"
@@ -396,7 +396,7 @@ schau "NACHHER: das Pruefbild ist neu gezeichnet, Feld 1 ist wieder rot" \
     flaeche "$TMPD/nachher.ppm" 0 0 100 100 255 0 0
 schau "NACHHER: Feld 4 ist weiss" flaeche "$TMPD/nachher.ppm" 300 0 100 100 255 255 255
 schau "NACHHER: die Textzeile steht bildpunktgenau im NEUEN Modus" \
-    text "$TMPD/nachher.ppm" kernel/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
+    text "$TMPD/nachher.ppm" kernel/gfx/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
 schau "NACHHER: die Ecke bei (1023,767) gibt es jetzt und sie ist schwarz" \
     punkt "$TMPD/nachher.ppm" 1023 767 0 0 0
 schau_nicht "VORHER gab es diese Ecke NICHT" punkt "$TMPD/vorher.ppm" 1023 767 0 0 0
@@ -411,7 +411,7 @@ swz=$(grep -a -m1 '^disp: sw=' "$Z" | grep -ao 'sw=[0-9]*' | sed 's/sw=//')
 gleich "zwei Wechsel in einem Lauf" "2" "$swz"
 schau "ZURUECK: das Foto ist wieder 800x600" groesse "$TMPD/zurueck.ppm" 800 600
 schau "ZURUECK: und das Pruefbild steht wieder da" \
-    text "$TMPD/zurueck.ppm" kernel/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
+    text "$TMPD/zurueck.ppm" kernel/gfx/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
 
 # ============================================== 6. der Fehlerfall
 
@@ -433,7 +433,7 @@ schau "das Foto ist 800x600 -- der Bildmodus steht noch" groesse "$TMPD/schlecht
 schau "Feld 1 ist rot -- der Bildschirm ist NICHT schwarz" \
     flaeche "$TMPD/schlecht.ppm" 0 0 100 100 255 0 0
 schau "und die Textzeile steht bildpunktgenau da, als waere nichts gewesen" \
-    text "$TMPD/schlecht.ppm" kernel/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
+    text "$TMPD/schlecht.ppm" kernel/gfx/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
 # Und die Gegenprobe zum Foto selbst: ein SCHWARZES Bild haette diese
 # Stellen nicht.
 schau_nicht "ein schwarzer Schirm haette hier kein Rot" \
@@ -533,8 +533,8 @@ gleich "die Zusagen aus Ring 3" "12" "$t3"
 # 1800..1809 gehoeren seit Runde K15 der Widget-Bibliothek. Dass das
 # auffiel, ist genau dieser Abschnitt gewesen; der Grund steht in
 # kernel/sys.fi.
-wig=$(grep -aE '^const WIG_BASE' kernel/sys.fi | sed 's/.*= //')
-dg=$(grep -aE '^const SYS_OSUM_DISPGET' kernel/sys.fi | sed 's/.*= //')
+wig=$(grep -aE '^const WIG_BASE' kernel/sys/sys.fi | sed 's/.*= //')
+dg=$(grep -aE '^const SYS_OSUM_DISPGET' kernel/sys/sys.fi | sed 's/.*= //')
 if [ "$dg" -gt "$((wig + 9))" ]; then
     ok "die Aufrufnummern dieser Runde ($dg..) liegen hinter dem Block der Widgets ($wig..$((wig+9)))"
 else
