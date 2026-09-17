@@ -53,6 +53,8 @@ import netsvc
 import arch.x86_64.smp
 import netview
 import netmon
+import ebpfhook
+import ebpftest
 import share
 import cap
 import handle
@@ -272,6 +274,15 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // two bits left and four rounds are running beside this one.
     netmon.parse(state, cmd)
     pmon.parse(state, cmd)
+
+    // RUNDE O-EBPF: die Maschine, die Tafeln und die zwei Haken auf
+    // null. Das muss VOR dem ersten Rahmen geschehen -- `inet.pump`
+    // fragt den Haken bei jedem einzelnen, und ein uninitialisierter
+    // Anhaengeplatz waere ein Sprung auf einen Platz ohne Programm.
+    ebpfhook.init(state)
+    if kstate.mode_on(state, kstate.M_NOEBPF) {
+        ebpfhook.set_on(state, 0)
+    }
 
     // ROUND K9. Die Uhr wird gelesen, BEVOR irgendetwas anderes Zeit
     // braucht: TIME_BOOT und TIME_TSC0 muessen aus demselben Augenblick
@@ -562,6 +573,33 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     }
     if kstate.mode_on(state, kstate.M_AESBENCH) {
         kaesni.bench(state)
+    }
+    // RUNDE O-EBPF: die Kreisprobe der Maschine und des Pruefers.
+    // Sie laeuft im Kern und nicht auf dem Wirt, weil der Wirt eine
+    // andere Arithmetik hat -- der Grund steht im Kopf von
+    // `kernel/ebpftest.fi`.
+    if kstate.mode_on(state, kstate.M_EBPFTEST) {
+        ebpftest.selftest(state)
+    }
+    if kstate.mode_on(state, kstate.M_EBPFBENCH) {
+        ebpftest.bench(state)
+    }
+    // RUNDE O-EBPF: das Probeprogramm in den Haken haengen. Es
+    // verwirft ICMP und laesst alles andere durch -- die Zusage, die
+    // `tools/ebpf/run.sh` auf einer echten Leitung nachmisst.
+    // RUNDE O-EBPF: der Zustand der Haken, IMMER und frueh. Die
+    // Berichtszeile am Ende von `osum()` wird nur erreicht, wenn eine
+    // Wurzelplatte da ist -- `tools/ebpf/run.sh` misst aber auch Laeufe
+    // ganz ohne Platte (die Kreisprobe, die Gegenprobe `noebpf`). Also
+    // steht sie hier, wo jeder Start vorbeikommt.
+    ebpfhook_report(state)
+    if kstate.mode_on(state, kstate.M_EBPFDROP) {
+        ebpftest.load_drop_icmp(state)
+        // Und gleich die Gegenprobe am fertigen Filter, mit zwei
+        // Rahmen, die der Kern selbst baut: ICMP muss weg, TCP muss
+        // bleiben. Sie haengt nicht davon ab, was auf der Leitung
+        // gerade vorbeikommt.
+        ebpftest.drop_probe(state)
     }
     proc.map_programs(state)
     // Die beiden Gegenproben. Sie tun nichts, solange die
@@ -3939,6 +3977,7 @@ fn osum(state: u64) {
     usb.report(state)
     netview.report(state)
     netmon.report(state)
+    ebpfhook_report(state)
     share.report(state)
     // ROUND POWERMON: the same numbers ring 3 reads, on the serial line,
     // so the acceptance run can hold the two sides against each other.
@@ -4795,6 +4834,33 @@ fn mode_of(state: u64, cmd: u64) {
     // Rueckfallweg auch auf einem Rechner MIT AES-NI gefahren werden
     // kann. Ohne diesen Schalter waere "die Tabelle rechnet dasselbe"
     // eine Behauptung, die nur auf altem Blech pruefbar waere.
+    // ============================================== RUNDE O-EBPF
+    //
+    // `noebpf` ist die GEGENPROBE: dasselbe Abbild, dieselbe
+    // Uebertragung, die Haken abgeschaltet. Ohne sie waere jede
+    // Kostenzahl im Bericht ein Vergleich zwischen zwei verschiedenen
+    // Abbildern -- und damit keine Messung des Hakens, sondern eine
+    // Messung des Uebersetzers.
+    var nebp: [u8; 7] = "noebpf\0"
+    var etst: [u8; 9] = "ebpftest\0"
+    var eben: [u8; 10] = "ebpfbench\0"
+    var edrp: [u8; 9] = "ebpfdrop\0"
+    var ever: [u8; 9] = "ebpfverb\0"
+    if find_word(cmd, (&nebp[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_NOEBPF)
+    }
+    if find_word(cmd, (&etst[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_EBPFTEST)
+    }
+    if find_word(cmd, (&eben[0]) as u64, 9) != 0 {
+        kstate.mode_add(state, kstate.M_EBPFBENCH)
+    }
+    if find_word(cmd, (&edrp[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_EBPFDROP)
+    }
+    if find_word(cmd, (&ever[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_EBPFVERB)
+    }
     var naes: [u8; 8] = "noaesni\0"
     var atst: [u8; 8] = "aestest\0"
     var aben: [u8; 9] = "aesbench\0"
@@ -7648,4 +7714,35 @@ fn audio_say(state: u64) {
     aud_num((&n_ir[0]) as u64, 0)
     aud_num((&n_ent[0]) as u64, 0)
     aud_num((&n_ef[0]) as u64, 0)
+}
+
+// RUNDE O-EBPF: was die Haken in diesem Lauf getan haben, auf der
+// seriellen Leitung. `tools/ebpf/run.sh` liest genau diese Zeile und
+// haelt die Zahlen gegen das, was es selbst ausgeloest hat.
+fn ebpfhook_report(state: u64) {
+    var s_h: [u8; 7] = "ebpf:\0\0"
+    var s_on: [u8; 5] = " on=\0"
+    var s_ld: [u8; 9] = " laden=\0\0"
+    var s_se: [u8; 8] = " sehen=\0"
+    var s_dr: [u8; 10] = " verwerf=\0"
+    var s_pa: [u8; 9] = " durch=\0\0"
+    var s_ab: [u8; 10] = " abbruch=\0"
+    serial.puts((&s_h[0]) as u64)
+    serial.puts((&s_on[0]) as u64)
+    if ebpfhook.on(state) {
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_ld[0]) as u64)
+    serial.dec(ebpfhook.loaded(state))
+    serial.puts((&s_se[0]) as u64)
+    serial.dec(ebpfhook.seen(state))
+    serial.puts((&s_dr[0]) as u64)
+    serial.dec(ebpfhook.drops(state))
+    serial.puts((&s_pa[0]) as u64)
+    serial.dec(ebpfhook.passes(state))
+    serial.puts((&s_ab[0]) as u64)
+    serial.dec(ebpfhook.aborts(state))
+    serial.nl()
 }
