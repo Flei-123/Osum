@@ -57,6 +57,8 @@ export {
     pic_imr, pic_base, pic_ready, pic_raise, pic_pending, pic_ack,
     // der Zeitgeber
     PIT_CH0, PIT_CTL, pit_count, pit_mode, pit_writes,
+    // die Uhr
+    RTC_IDX, RTC_DATA, rtc_index, rtc_reads, p61_reads,
     // Zaehler
     reads, writes, unknown
 }
@@ -73,7 +75,11 @@ export {
 // auf Platz 5 lauter Nullen zurueckbekam, wo Register stehen sollten
 // -- und die Zusagen darueber wurden rot, statt stillzuschweigen.
 // Acht Maschinen zu 256 Oktetten sind 2048 und passen in die Seite.
-const VD_BYTES: u64 = 256
+// 512 SEIT DIESER RUNDE. Die Uhr (0xE8..0xFF) hatte den Block auf
+// genau 0x100 gefuellt, und der zweite Zeitgeberkanal, ohne den
+// Linux' Messung der Taktrate nicht endet, braucht weitere Felder.
+// Acht Maschinen zu 512 Oktetten sind 4096 und passen in VDEV_MAX.
+const VD_BYTES: u64 = 512
 const VD_MAX: u64 = 8
 
 // --- die serielle Schnittstelle, 0x00..0x2F
@@ -113,8 +119,22 @@ const D_READS: u64 = 0xD0
 const D_WRITES: u64 = 0xD8
 const D_UNKNOWN: u64 = 0xE0
 
+// --- die Uhr mit dem Dauerspeicher (CMOS/RTC), 0xE8..0xFF
+const D_RTC_IDX: u64 = 0xE8 // welches Register 0x70 zuletzt gewaehlt hat
+const D_RTC_B: u64 = 0xF0 // das Steuerregister B (Format, Takt)
+const D_RTC_T: u64 = 0xF8 // ein Takt, der bei jedem Lesen weiterlaeuft
+
+// --- der zweite Kanal des Zeitgebers, 0x100..0x127. Er haengt am
+// Anschluss 0x61 und ist der, mit dem Linux die Taktrate misst.
+const D_PIT_C2: u64 = 0x100 // sein Zaehler
+const D_PIT_L2: u64 = 0x108 // das gehaltene untere Oktett
+const D_PIT_H2: u64 = 0x110 // wartet er auf das obere Oktett?
+const D_PIT_G2: u64 = 0x118 // das Tor: Bit 0 von 0x61
+const D_PIT_O2: u64 = 0x120 // der Ausgang: Bit 5 von 0x61
+const D_P61_R: u64 = 0x128 // wie oft 0x61 gelesen wurde
+
 // VD_BYTES muss alles davon fassen.
-const VD_NEED: u64 = 0xE8
+const VD_NEED: u64 = 0x130
 
 // Wo der Geraetesatz einer Maschine liegt. `base` ist der Anfang des
 // Bereichs dieser Runde in `kdata`; `hv.fi` gibt ihn herein, damit
@@ -146,8 +166,11 @@ const PIC1_DATA: u64 = 0x21
 const PIC2_CMD: u64 = 0xA0
 const PIC2_DATA: u64 = 0xA1
 const PIT_CH0: u64 = 0x40
+const PIT_CH2: u64 = 0x42
 const PIT_CTL: u64 = 0x43
 const PORT_61: u64 = 0x61
+const RTC_IDX: u64 = 0x70
+const RTC_DATA: u64 = 0x71
 
 // Gehoert dieser Anschluss einem Geraet dieser Runde? Alles andere
 // bleibt der offene Bus, wie in der Runde K12 -- ein Wirt, der auf
@@ -167,6 +190,9 @@ fn claims(port: u64) -> bool {
         return true
     }
     if port == PORT_61 {
+        return true
+    }
+    if port == RTC_IDX || port == RTC_DATA {
         return true
     }
     return false
@@ -196,6 +222,10 @@ fn reset(state: u64, base: u64, i: u64) {
     s(state, base, i, D_P2_IMR, 0xFF)
     // Der Zeitgeber laeuft noch nicht.
     s(state, base, i, D_PIT_C0, 0)
+    // Die Uhr: 24-Stunden-Zaehlung, zwei Ziffern je Oktett. Das ist
+    // die Vorgabe echter Ausstattung -- Linux liest sie und richtet
+    // sich danach.
+    s(state, base, i, D_RTC_B, 0x02)
 }
 
 // ==================================================================
@@ -487,6 +517,25 @@ fn pit_write(state: u64, base: u64, i: u64, port: u64, v: u64) {
             s(state, base, i, D_PIT_M0, modus)
             s(state, base, i, D_PIT_HI, 0)
         }
+        if kanal == 2 {
+            // Ein frisch gesetzter Kanal 2 hat den Ausgang UNTEN.
+            // Genau darauf wartet die Messung: sie will ihn steigen
+            // sehen, nachdem der Zaehler durchgelaufen ist.
+            s(state, base, i, D_PIT_H2, 0)
+            s(state, base, i, D_PIT_O2, 0)
+        }
+        return
+    }
+    if port == PIT_CH2 {
+        if g(state, base, i, D_PIT_H2) == 0 {
+            s(state, base, i, D_PIT_L2, v & 0xFF)
+            s(state, base, i, D_PIT_H2, 1)
+        } else {
+            s(state, base, i, D_PIT_C2,
+                g(state, base, i, D_PIT_L2) | ((v & 0xFF) << 8))
+            s(state, base, i, D_PIT_H2, 0)
+            s(state, base, i, D_PIT_O2, 0)
+        }
         return
     }
     if port == PIT_CH0 {
@@ -501,6 +550,37 @@ fn pit_write(state: u64, base: u64, i: u64, port: u64, v: u64) {
             s(state, base, i, D_PIT_HI, 0)
         }
     }
+}
+
+// Der zweite Kanal, einen Schritt weiter. Er zaehlt nur, wenn das
+// Tor offen ist (Bit 0 von 0x61), und setzt beim Durchlauf den
+// Ausgang -- das ist das Bit, auf das Linux wartet.
+//
+// WARUM DAS NOETIG WAR. Vorher gab 0x61 nur ein kippendes Bit 4
+// zurueck und Bit 5 stand nie. Gemessen: 3132 Lesevorgaenge an
+// EINEM Befehlszeiger (0xffffffff81050fa7), also Linux'
+// `pit_calibrate_tsc`, das den Ausgang des Kanals 2 steigen sehen
+// will. Ein Zaehler, der nie durchlaeuft, laesst diese Schleife
+// nie enden.
+fn pit_tick2(state: u64, base: u64, i: u64) -> u64 {
+    if (g(state, base, i, D_PIT_G2) & 1) == 0 {
+        return g(state, base, i, D_PIT_C2)
+    }
+    var c: u64 = g(state, base, i, D_PIT_C2)
+    // Ein grosser Schritt, KEIN einzelner: der Wirt sieht den Gast
+    // nur bei jedem Zugriff, nicht bei jedem Takt. Wer hier um eins
+    // herunterzaehlt, braucht fuer einen Durchlauf so viele Austritte,
+    // wie der Zaehler gross ist -- bei 0xFFFF waeren das 65535.
+    if c > 256 {
+        c = c -% 256
+    } else {
+        c = 0
+    }
+    s(state, base, i, D_PIT_C2, c)
+    if c == 0 {
+        s(state, base, i, D_PIT_O2, 1)
+    }
+    return c
 }
 
 fn pit_read(state: u64, base: u64, i: u64, port: u64) -> u64 {
@@ -519,6 +599,15 @@ fn pit_read(state: u64, base: u64, i: u64, port: u64) -> u64 {
         s(state, base, i, D_PIT_HI, 0)
         return (c >> 8) & 0xFF
     }
+    if port == PIT_CH2 {
+        let c: u64 = pit_tick2(state, base, i)
+        if g(state, base, i, D_PIT_H2) == 0 {
+            s(state, base, i, D_PIT_H2, 1)
+            return c & 0xFF
+        }
+        s(state, base, i, D_PIT_H2, 0)
+        return (c >> 8) & 0xFF
+    }
     return 0
 }
 
@@ -529,6 +618,124 @@ fn pit_read(state: u64, base: u64, i: u64, port: u64) -> u64 {
 // `hv.fi` ruft genau diese zwei Funktionen. Alles davor -- welcher
 // Anschluss, welche Breite -- steht im Austrittsgrund und wird dort
 // ausgewertet.
+
+// ------------------------------------------------------------- die Uhr
+//
+// Der Baustein hinter 0x70/0x71 ist die Uhr mit dem Dauerspeicher.
+// Man waehlt mit 0x70 ein Register und liest oder schreibt es dann
+// ueber 0x71. Das oberste Bit von 0x70 ist NICHT Teil der Nummer --
+// es schaltet die nicht abweisbare Unterbrechung ab.
+//
+// WARUM DIESE RUNDE IHN BRAUCHT. Ohne ihn war 0x70/0x71 offener Bus
+// und lieferte 0xFF. Damit stand in Register A das Bit UIP (0x80)
+// FUER IMMER, und Linux' `mach_get_cmos_time` wartet in einer engen
+// Schleife darauf, dass es faellt. Gemessen: 1527 Lesevorgaenge auf
+// 0x70 und 0x71 hintereinander, immer dieselben zwei Befehlszeiger
+// -- ein Gast, der sonst schon lange gelaufen war, drehte sich hier
+// bis zum Ende der Messung. Die Uhr ist also kein Beiwerk, sondern
+// die Bedingung dafuer, dass ein Linux ueberhaupt weiterkommt.
+fn rtc_index(state: u64, base: u64, i: u64) -> u64 {
+    return g(state, base, i, D_RTC_IDX)
+}
+
+fn rtc_reads(state: u64, base: u64, i: u64) -> u64 {
+    return g(state, base, i, D_RTC_T)
+}
+
+// Aus einer Zahl die Darstellung machen, die das Steuerregister B
+// verlangt: gesetztes Bit 2 heisst zweistellig binaer, sonst sind es
+// zwei Ziffern zu je vier Bit.
+fn rtc_form(state: u64, base: u64, i: u64, wert: u64) -> u64 {
+    if (g(state, base, i, D_RTC_B) & 0x04) != 0 {
+        return wert
+    }
+    let z: u64 = wert % 10
+    let t: u64 = (wert / 10) % 10
+    return (t *% 16) +% z
+}
+
+fn rtc_read(state: u64, base: u64, i: u64) -> u64 {
+    let r: u64 = g(state, base, i, D_RTC_IDX)
+    // Der Takt laeuft bei JEDEM Lesen weiter. Er ist die Zeitquelle
+    // dieser Uhr -- ein Wirt ohne echte Batterie hat keine andere.
+    let t: u64 = g(state, base, i, D_RTC_T) +% 1
+    s(state, base, i, D_RTC_T, t)
+    if r == 0x00 {
+        return rtc_form(state, base, i, (t / 64) % 60) // Sekunde
+    }
+    if r == 0x02 {
+        return rtc_form(state, base, i, (t / 3840) % 60) // Minute
+    }
+    if r == 0x04 {
+        return rtc_form(state, base, i, 0) // Stunde
+    }
+    if r == 0x06 {
+        return rtc_form(state, base, i, 5) // Wochentag
+    }
+    if r == 0x07 {
+        return rtc_form(state, base, i, 1) // Tag
+    }
+    if r == 0x08 {
+        return rtc_form(state, base, i, 1) // Monat
+    }
+    if r == 0x09 {
+        return rtc_form(state, base, i, 26) // Jahr
+    }
+    if r == 0x32 {
+        return rtc_form(state, base, i, 20) // Jahrhundert
+    }
+    if r == 0x0A {
+        // Register A. UIP (0x80) DARF NICHT STEHENBLEIBEN. Es steht
+        // hier nur in einem von sechzehn Lesevorgaengen, damit ein
+        // Gast, der auf den Wechsel wartet, ihn auch SIEHT -- und
+        // faellt danach von selbst. Die unteren Bit sind der uebliche
+        // Teiler: 32768 Hertz, 1024 Hertz Takt.
+        if (t & 0x0F) == 0 {
+            return 0xA6
+        }
+        return 0x26
+    }
+    if r == 0x0B {
+        return g(state, base, i, D_RTC_B)
+    }
+    if r == 0x0C {
+        // Register C meldet, welche Unterbrechung anlag, und LOESCHT
+        // sich durch das Lesen. Ohne das haengt ein Gast, der darauf
+        // wartet, dass es leer wird.
+        return 0
+    }
+    if r == 0x0D {
+        return 0x80 // die Batterie ist in Ordnung
+    }
+    if r == 0x0F {
+        return 0 // kein Grund fuer einen Neustart
+    }
+    if r == 0x10 {
+        return 0 // kein Diskettenlaufwerk
+    }
+    if r == 0x14 {
+        return 0x05 // Ausstattung: Uhr da, kein Laufwerk
+    }
+    // Der Rest des Dauerspeichers ist leer -- und zwar 0 und nicht
+    // 0xFF, damit eine Pruefsumme darueber nicht in ein Muster faellt.
+    return 0
+}
+
+fn rtc_write(state: u64, base: u64, i: u64, port: u64, v: u64) {
+    if port == RTC_IDX {
+        // Bit 7 waehlt kein Register, es schaltet die NMI ab.
+        s(state, base, i, D_RTC_IDX, v & 0x7F)
+        return
+    }
+    let r: u64 = g(state, base, i, D_RTC_IDX)
+    if r == 0x0B {
+        s(state, base, i, D_RTC_B, v & 0xFF)
+        return
+    }
+    // Die Zeitregister nimmt diese Uhr entgegen, ohne sie zu stellen:
+    // sie laeuft nach dem Takt des Wirts weiter.
+    return
+}
 
 fn io_write(state: u64, base: u64, i: u64, port: u64, v: u64, mark: u64) {
     if i >= VD_MAX {
@@ -584,6 +791,19 @@ fn io_write(state: u64, base: u64, i: u64, port: u64, v: u64, mark: u64) {
     }
     if port == PORT_61 {
         s(state, base, i, D_P61, v & 0xFF)
+        // Bit 0 ist das Tor des Kanals 2. Faellt es, steht der
+        // Zaehler; steigt es, laeuft er wieder und der Ausgang
+        // faengt unten an.
+        let alt: u64 = g(state, base, i, D_PIT_G2)
+        let neu: u64 = v & 1
+        s(state, base, i, D_PIT_G2, neu)
+        if neu != 0 && alt == 0 {
+            s(state, base, i, D_PIT_O2, 0)
+        }
+        return
+    }
+    if port == RTC_IDX || port == RTC_DATA {
+        rtc_write(state, base, i, port, v)
         return
     }
     bump(state, base, i, D_UNKNOWN)
@@ -662,15 +882,34 @@ fn io_read(state: u64, base: u64, i: u64, port: u64) -> u64 {
         return pit_read(state, base, i, port)
     }
     if port == PORT_61 {
-        // Bit 4 kippt bei jedem Lesen. Ein Gast, der darauf wartet,
-        // haengt sonst fuer immer -- und genau das tut Linux'
-        // Zeitmessung ueber den Lautsprecheranschluss.
+        // Bit 4 kippt bei jedem Lesen (die Auffrischung des
+        // Speichers). Bit 5 ist der AUSGANG DES KANALS 2 und kommt
+        // aus dem Zeitgeber -- er ist das Bit, auf das Linux'
+        // Messung der Taktrate wartet.
         let v: u64 = g(state, base, i, D_P61)
         s(state, base, i, D_P61, v ^ 0x10)
-        return v
+        bump(state, base, i, D_P61_R)
+        pit_tick2(state, base, i)
+        var r: u64 = v & 0xDF
+        if g(state, base, i, D_PIT_O2) != 0 {
+            r = r | 0x20
+        }
+        return r
+    }
+    if port == RTC_IDX {
+        // Das Auswahlregister liest sich auf echter Ausstattung nicht
+        // sinnvoll zurueck. 0xFF ist hier richtig und kein Versehen.
+        return 0xFF
+    }
+    if port == RTC_DATA {
+        return rtc_read(state, base, i)
     }
     bump(state, base, i, D_UNKNOWN)
     return 0xFF
+}
+
+fn p61_reads(state: u64, base: u64, i: u64) -> u64 {
+    return g(state, base, i, D_P61_R)
 }
 
 fn reads(state: u64, base: u64, i: u64) -> u64 {

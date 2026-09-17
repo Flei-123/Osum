@@ -1,0 +1,435 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/arch/x86_64/gwalk.fi -- Runde HV3, Stufe 5: DER ENTZIFFERER,
+// und der Seitenlauf, ohne den er nichts sieht.
+//
+// ===================== WORUM ES HIER GEHT =====================
+//
+// Dieser Prozessor hat KEINE "decode assists" (gemessen, CPUID
+// 0x8000000A EDX Bit 7 = 0, `tools/hv/run.sh` misst es bei jedem Lauf).
+// Faengt der Wirt einen Befehl ab, sagt ihm der Prozessor NUR, DASS es
+// einer war -- nicht, welches Register beteiligt war. Der Wirt muss den
+// Befehl SELBST aus dem Gastspeicher holen und lesen.
+//
+// Bis zur Runde HV2 ging das genau so weit, wie der Gast kein eigenes
+// Paging hatte. `decode_movcr` in `hv.fi` faengt mit diesen fuenf
+// Zeilen an:
+//
+//     let cr0: u64 = vmcb.rd(b, vmcb.S_CR0)
+//     if (cr0 & 0x80000000) != 0 {
+//         return 0 // der Gast hat sein eigenes Paging an: hier nicht
+//     }
+//
+// Das ist ehrlich und es ist eine Wand. Der Bericht der Runde HV2 nennt
+// sie in Abschnitt 11 "die schaerfste Grenze, weil jedes echte
+// Gastsystem sein Paging sofort einschaltet". Ein Linux schaltet es in
+// den ersten hundert Befehlen ein. Von da an ist RIP eine
+// GASTVIRTUELLE Adresse, und der Wirt hat keine Ahnung, wo die Oktette
+// liegen.
+//
+// ===================== ZWEI UEBERSETZUNGEN =====================
+//
+// Ein Oktett an RIP zu holen heisst ab jetzt ZWEI Uebersetzungen
+// hintereinander laufen, und keine davon macht der Prozessor fuer den
+// Wirt:
+//
+//   1. GASTVIRTUELL -> GASTPHYSISCH. Ueber CR3 DES GASTS, mit den
+//      Tabellen DES GASTS. Das ist der Seitenlauf, den sonst die
+//      Hardware macht -- vierstufig im langen Modus, dreistufig mit
+//      PAE, zweistufig im geschuetzten Modus. Er steht hier in Firn.
+//   2. GASTPHYSISCH -> WIRTSPHYSISCH. Ueber die NPT, die der Wirt
+//      selbst gebaut hat. Das ist die leichtere Haelfte: der Wirt
+//      kennt seine eigene Abbildung und muss sie nicht laufen -- bei
+//      einem Gast mit zusammenhaengendem Speicher ist es eine
+//      Addition.
+//
+// WARUM DIE ERSTE HAELFTE NICHT WEGGELASSEN WERDEN KANN. Man koennte
+// meinen, mit identischer Abbildung sei gastvirtuell gleich
+// gastphysisch. Fuer den fruehen Linux-Startcode stimmt das sogar --
+// und genau deshalb ist es eine Falle: es stimmt, bis der Kern seine
+// eigenen Tabellen aufbaut, und dann stimmt es nicht mehr, und der
+// Fehler sieht aus wie ein kaputter Befehl.
+//
+// ===================== WAS HIER NICHT STEHT =====================
+//
+// Ein vollstaendiger x86-Entzifferer. Den braucht dieser Wirt nicht: er
+// muss GENAU die Befehle lesen koennen, an denen er den Gast ABFAENGT.
+// Das sind die Steuerregister (`mov cr`), die MSRs (`rdmsr`/`wrmsr`),
+// CPUID, die Anschluesse (`in`/`out`) und `hlt`. Alles andere fuehrt
+// der Prozessor selbst aus und tritt nicht aus. Ein Entzifferer, der
+// mehr kann, als der Wirt abfaengt, ist Code ohne Messung.
+//
+// ARITHMETIK. Adressen, Tabelleneintraege und Bitmasken sind
+// BITMUSTER: `+%`, `-%`, `*%`.
+
+import lib.kstate
+
+export {
+    // der Seitenlauf
+    walk, walk_mode, MODE_FLAT, MODE_PAE, MODE_LONG, MODE_PROT,
+    GW_BAD,
+    // der Entzifferer
+    INS_BAD, INS_MOVCR_TO, INS_MOVCR_FROM, INS_WRMSR, INS_RDMSR,
+    INS_CPUID, INS_HLT, INS_IN, INS_OUT, INS_INVLPG,
+    decode, ins_kind, ins_len, ins_reg, ins_cr, ins_rex,
+    DEC_WORDS
+}
+
+// Ein Seitenlauf, der nicht ankommt, gibt das zurueck. Eine gueltige
+// gastphysische Adresse kann das nicht sein: Bit 63 ist in keiner
+// physischen Adresse gesetzt.
+const GW_BAD: u64 = 0xFFFFFFFFFFFFFFFF
+
+// In welcher Betriebsart der Gast uebersetzt.
+const MODE_FLAT: u64 = 0 // kein Paging: virtuell == physisch
+const MODE_PROT: u64 = 1 // 32 Bit, zweistufig, 4-KiB-Seiten
+const MODE_PAE: u64 = 2 // 32 Bit, dreistufig
+const MODE_LONG: u64 = 3 // 64 Bit, vierstufig
+
+const PTE_P: u64 = 1
+const PTE_PS: u64 = 128
+const ADDR_MASK: u64 = 0x000FFFFFFFFFF000
+
+// Aus CR0, CR4 und EFER die Betriebsart ablesen. Das ist die eine
+// Stelle, an der alle drei Register zusammen gelesen werden muessen --
+// PG allein sagt nichts darueber, wie viele Stufen die Tabelle hat.
+fn walk_mode(cr0: u64, cr4: u64, efer: u64) -> u64 {
+    if (cr0 & 0x80000000) == 0 {
+        return MODE_FLAT // CR0.PG aus: der Gast uebersetzt nicht
+    }
+    if (efer & 0x400) != 0 {
+        return MODE_LONG // EFER.LMA: vierstufig
+    }
+    if (cr4 & 0x20) != 0 {
+        return MODE_PAE // CR4.PAE ohne langen Modus: dreistufig
+    }
+    return MODE_PROT
+}
+
+// Einen Tabelleneintrag lesen. Die Tabelle liegt GASTPHYSISCH, also
+// muss der Wirt sie erst bei sich finden -- `gram` ist der
+// wirtsphysische Anfang des Gastspeichers, `gbytes` seine Groesse.
+//
+// DIE PRUEFUNG IST NICHT FORMSACHE. Ein Gast, der einen Tabelleneintrag
+// auf eine Adresse jenseits seines Speichers zeigen laesst, wuerde den
+// Wirt sonst dazu bringen, SEINEN EIGENEN Speicher zu lesen -- und bei
+// einem falschen Eintrag irgendwo in den Wirt hinein. Genau das ist der
+// Weg, auf dem ein Gast aus einem Hypervisor ausbricht.
+fn tab_read(gram: u64, gbytes: u64, gpa: u64) -> u64 {
+    if gpa +% 8 > gbytes {
+        return 0
+    }
+    return __mmio_read64((gram +% gpa) as *mut u64)
+}
+
+// Eine gastvirtuelle Adresse in eine gastphysische uebersetzen -- mit
+// den Tabellen des Gasts, so wie der Prozessor es tun wuerde.
+//
+// `cr3` ist CR3 des Gasts, `mode` das Ergebnis von `walk_mode`. Gibt
+// GW_BAD zurueck, wenn die Adresse nicht abgebildet ist. GROSSE SEITEN
+// WERDEN ERKANNT (Bit PS) -- ein Linux bildet seinen eigenen Kern mit
+// 2-MiB-Seiten ab, und ein Seitenlauf, der PS nicht kennt, liest den
+// Eintrag als Tabellenzeiger und landet im Nichts.
+fn walk(gram: u64, gbytes: u64, cr3: u64, mode: u64, va: u64) -> u64 {
+    if mode == MODE_FLAT {
+        // Ohne Paging ist die lineare Adresse die physische. Die
+        // Segmentbasis hat der Aufrufer schon dazugerechnet.
+        if va >= gbytes {
+            return GW_BAD
+        }
+        return va
+    }
+
+    if mode == MODE_LONG {
+        // Vier Stufen, je neun Bits. Der Gast im langen Modus dieser
+        // Runde baut genau so eine Tabelle (`g_lm_start` in `hv.s`).
+        let pml4: u64 = cr3 & ADDR_MASK
+        let e4: u64 = tab_read(gram, gbytes, pml4
+            +% ((va >> 39) & 0x1FF) *% 8)
+        if (e4 & PTE_P) == 0 {
+            return GW_BAD
+        }
+        let e3: u64 = tab_read(gram, gbytes, (e4 & ADDR_MASK)
+            +% ((va >> 30) & 0x1FF) *% 8)
+        if (e3 & PTE_P) == 0 {
+            return GW_BAD
+        }
+        if (e3 & PTE_PS) != 0 {
+            // Eine Seite von einem Gibioctet.
+            return (e3 & 0x000FFFFFC0000000) +% (va & 0x3FFFFFFF)
+        }
+        let e2: u64 = tab_read(gram, gbytes, (e3 & ADDR_MASK)
+            +% ((va >> 21) & 0x1FF) *% 8)
+        if (e2 & PTE_P) == 0 {
+            return GW_BAD
+        }
+        if (e2 & PTE_PS) != 0 {
+            // ZWEI MEBIOCTETS -- und das ist der Fall, der bei Linux
+            // wirklich vorkommt, nicht der Ausnahmefall.
+            return (e2 & 0x000FFFFFFFE00000) +% (va & 0x1FFFFF)
+        }
+        let e1: u64 = tab_read(gram, gbytes, (e2 & ADDR_MASK)
+            +% ((va >> 12) & 0x1FF) *% 8)
+        if (e1 & PTE_P) == 0 {
+            return GW_BAD
+        }
+        return (e1 & ADDR_MASK) +% (va & 0xFFF)
+    }
+
+    if mode == MODE_PAE {
+        // Drei Stufen. CR3 zeigt auf vier Eintraege zu je 64 Bit, und
+        // die oberen zwei Bits der Adresse waehlen einen davon.
+        let pdpt: u64 = cr3 & 0xFFFFFFE0
+        let e3: u64 = tab_read(gram, gbytes, pdpt
+            +% ((va >> 30) & 3) *% 8)
+        if (e3 & PTE_P) == 0 {
+            return GW_BAD
+        }
+        let e2: u64 = tab_read(gram, gbytes, (e3 & ADDR_MASK)
+            +% ((va >> 21) & 0x1FF) *% 8)
+        if (e2 & PTE_P) == 0 {
+            return GW_BAD
+        }
+        if (e2 & PTE_PS) != 0 {
+            return (e2 & 0x000FFFFFFFE00000) +% (va & 0x1FFFFF)
+        }
+        let e1: u64 = tab_read(gram, gbytes, (e2 & ADDR_MASK)
+            +% ((va >> 12) & 0x1FF) *% 8)
+        if (e1 & PTE_P) == 0 {
+            return GW_BAD
+        }
+        return (e1 & ADDR_MASK) +% (va & 0xFFF)
+    }
+
+    // MODE_PROT: zwei Stufen, Eintraege zu 32 Bit. Der zweite Gast der
+    // Runde K12 laeuft so (`g_pm_start`), und diese Runde darf ihn
+    // nicht kaputtmachen.
+    let pd: u64 = cr3 & 0xFFFFF000
+    let i2: u64 = (va >> 22) & 0x3FF
+    if pd +% i2 *% 4 +% 4 > gbytes {
+        return GW_BAD
+    }
+    let e2: u64 = __mmio_read32((gram +% pd +% i2 *% 4) as *mut u32) as u64
+    if (e2 & PTE_P) == 0 {
+        return GW_BAD
+    }
+    if (e2 & PTE_PS) != 0 {
+        // Eine 4-MiB-Seite. Die Bits 20:13 des Eintrags sind die
+        // oberen Bits der Adresse -- eine Eigenheit von PSE-36, die
+        // man beim Hinschreiben vergisst.
+        return (e2 & 0xFFC00000) +% (va & 0x3FFFFF)
+    }
+    let pt: u64 = e2 & 0xFFFFF000
+    let i1: u64 = (va >> 12) & 0x3FF
+    if pt +% i1 *% 4 +% 4 > gbytes {
+        return GW_BAD
+    }
+    let e1: u64 = __mmio_read32((gram +% pt +% i1 *% 4) as *mut u32) as u64
+    if (e1 & PTE_P) == 0 {
+        return GW_BAD
+    }
+    return (e1 & 0xFFFFF000) +% (va & 0xFFF)
+}
+
+// ====================================================================
+//                        DER ENTZIFFERER
+// ====================================================================
+//
+// Das Ergebnis steht in einem kleinen Feld aus Woertern, weil Firn in
+// Stufe 0 keine Verbundtypen mit Rueckgabe hat. `DEC_WORDS` ist seine
+// Laenge; der Aufrufer stellt es auf den Stapel.
+
+const DEC_WORDS: u64 = 5
+const D_KIND: u64 = 0
+const D_LEN: u64 = 1
+const D_REG: u64 = 2 // das beteiligte Allzweckregister, 0..15
+const D_CR: u64 = 3 // die Nummer des Steuerregisters
+const D_REX: u64 = 4 // das REX-Oktett, oder 0
+
+const INS_BAD: u64 = 0
+const INS_MOVCR_TO: u64 = 1 // mov CRn, reg   (0F 22)
+const INS_MOVCR_FROM: u64 = 2 // mov reg, CRn (0F 20)
+const INS_WRMSR: u64 = 3 // 0F 30
+const INS_RDMSR: u64 = 4 // 0F 32
+const INS_CPUID: u64 = 5 // 0F A2
+const INS_HLT: u64 = 6 // F4
+const INS_IN: u64 = 7 // EC/ED/E4/E5
+const INS_OUT: u64 = 8 // EE/EF/E6/E7
+const INS_INVLPG: u64 = 9 // 0F 01 /7
+
+fn ins_kind(d: u64) -> u64 {
+    return __mmio_read64((d +% D_KIND *% 8) as *mut u64)
+}
+
+fn ins_len(d: u64) -> u64 {
+    return __mmio_read64((d +% D_LEN *% 8) as *mut u64)
+}
+
+fn ins_reg(d: u64) -> u64 {
+    return __mmio_read64((d +% D_REG *% 8) as *mut u64)
+}
+
+fn ins_cr(d: u64) -> u64 {
+    return __mmio_read64((d +% D_CR *% 8) as *mut u64)
+}
+
+fn ins_rex(d: u64) -> u64 {
+    return __mmio_read64((d +% D_REX *% 8) as *mut u64)
+}
+
+fn dset(d: u64, n: u64, v: u64) {
+    __mmio_write64((d +% n *% 8) as *mut u64, v)
+}
+
+// Ein Oktett Gastcode holen -- durch BEIDE Uebersetzungen. Das ist die
+// Funktion, um die es in dieser Stufe geht.
+//
+// `lin` ist die LINEARE Adresse (Segmentbasis schon dazugerechnet).
+// Liegt sie nicht im Speicher des Gasts oder ist sie nicht abgebildet,
+// kommt 0x100 zurueck -- ein Wert, der in kein Oktett passt, damit ein
+// nicht gelesenes Oktett nicht als 0x00 durchgeht.
+fn fetch(gram: u64, gbytes: u64, cr3: u64, mode: u64, lin: u64) -> u64 {
+    let gpa: u64 = walk(gram, gbytes, cr3, mode, lin)
+    if gpa == GW_BAD {
+        return 0x100
+    }
+    if gpa >= gbytes {
+        return 0x100
+    }
+    return kstate.get8(gram +% gpa)
+}
+
+// Den Befehl an `lin` lesen. Schreibt das Ergebnis in `d` (DEC_WORDS
+// Woerter) und gibt die Laenge zurueck, oder 0.
+//
+// DIE VORSATZOKTETTE SIND DER GRUND, WARUM DAS NICHT TRIVIAL IST. Ein
+// `mov cr` aus einem 64-Bit-Kern traegt ein REX-Oktett, wenn er ein
+// hohes Register meint (r8..r15) -- und ohne REX.R gelesen, ist `mov
+// cr0, r8` nicht von `mov cr0, rax` zu unterscheiden. Genau das ist
+// ein Fehler, der lautlos das falsche Register nimmt.
+fn decode(gram: u64, gbytes: u64, cr3: u64, mode: u64, lin: u64,
+        d: u64) -> u64 {
+    var n: u64 = 0
+    while n < DEC_WORDS {
+        dset(d, n, 0)
+        n = n +% 1
+    }
+    var off: u64 = 0
+    var rex: u64 = 0
+    var op: u64 = 0
+
+    // 1. Die Vorsatzoktette. Hoechstens vier plus REX -- mehr nimmt
+    //    auch der Prozessor nicht.
+    var weiter: bool = true
+    while weiter {
+        op = fetch(gram, gbytes, cr3, mode, lin +% off)
+        if op > 0xFF {
+            return 0 // nicht lesbar: der Gast ist nicht da, wo er sagt
+        }
+        if op == 0x66 || op == 0x67 || op == 0xF0 || op == 0xF2
+            || op == 0xF3 || op == 0x2E || op == 0x36 || op == 0x3E
+            || op == 0x26 || op == 0x64 || op == 0x65 {
+            off = off +% 1
+        } else {
+            if op >= 0x40 && op <= 0x4F && mode == MODE_LONG {
+                // REX. Nur im langen Modus ein Vorsatz -- darunter ist
+                // 0x40..0x4F `inc`/`dec`, und das ist ein anderer
+                // Befehl. Diese Unterscheidung fehlt in fast jedem
+                // selbstgeschriebenen Entzifferer.
+                rex = op
+                off = off +% 1
+            } else {
+                weiter = false
+            }
+        }
+        if off > 5 {
+            return 0
+        }
+    }
+    dset(d, D_REX, rex)
+
+    // 2. Die Einoktettbefehle, die dieser Wirt abfaengt.
+    if op == 0xF4 {
+        dset(d, D_KIND, INS_HLT)
+        dset(d, D_LEN, off +% 1)
+        return off +% 1
+    }
+    if op == 0xEC || op == 0xED {
+        dset(d, D_KIND, INS_IN)
+        dset(d, D_LEN, off +% 1)
+        return off +% 1
+    }
+    if op == 0xEE || op == 0xEF {
+        dset(d, D_KIND, INS_OUT)
+        dset(d, D_LEN, off +% 1)
+        return off +% 1
+    }
+    if op == 0xE4 || op == 0xE5 {
+        dset(d, D_KIND, INS_IN)
+        dset(d, D_LEN, off +% 2) // mit unmittelbarem Anschluss
+        return off +% 2
+    }
+    if op == 0xE6 || op == 0xE7 {
+        dset(d, D_KIND, INS_OUT)
+        dset(d, D_LEN, off +% 2)
+        return off +% 2
+    }
+
+    // 3. Alles Weitere faengt mit 0x0F an.
+    if op != 0x0F {
+        return 0
+    }
+    let op2: u64 = fetch(gram, gbytes, cr3, mode, lin +% off +% 1)
+    if op2 > 0xFF {
+        return 0
+    }
+    if op2 == 0x30 {
+        dset(d, D_KIND, INS_WRMSR)
+        dset(d, D_LEN, off +% 2)
+        return off +% 2
+    }
+    if op2 == 0x32 {
+        dset(d, D_KIND, INS_RDMSR)
+        dset(d, D_LEN, off +% 2)
+        return off +% 2
+    }
+    if op2 == 0xA2 {
+        dset(d, D_KIND, INS_CPUID)
+        dset(d, D_LEN, off +% 2)
+        return off +% 2
+    }
+
+    // 4. `mov` auf und von einem Steuerregister. Beide Richtungen --
+    //    die Runde HV2 konnte nur eine, und ein Gast, der CR0 LIEST,
+    //    war damit ein Gast, den der Wirt nicht verstand.
+    if op2 == 0x20 || op2 == 0x22 {
+        let modrm: u64 = fetch(gram, gbytes, cr3, mode, lin +% off +% 2)
+        if modrm > 0xFF {
+            return 0
+        }
+        if (modrm & 0xC0) != 0xC0 {
+            return 0 // bei `mov cr` gibt es nur die Registerform
+        }
+        // REX.R (Bit 2) erweitert das Feld `reg` -- bei `mov cr` ist
+        // das die Nummer des STEUERREGISTERS, also CR8 statt CR0.
+        var cr: u64 = (modrm >> 3) & 7
+        if (rex & 4) != 0 {
+            cr = cr +% 8
+        }
+        // REX.B (Bit 0) erweitert `rm` -- das Allzweckregister.
+        var reg: u64 = modrm & 7
+        if (rex & 1) != 0 {
+            reg = reg +% 8
+        }
+        dset(d, D_CR, cr)
+        dset(d, D_REG, reg)
+        if op2 == 0x22 {
+            dset(d, D_KIND, INS_MOVCR_TO)
+        } else {
+            dset(d, D_KIND, INS_MOVCR_FROM)
+        }
+        dset(d, D_LEN, off +% 3)
+        return off +% 3
+    }
+
+    return 0
+}

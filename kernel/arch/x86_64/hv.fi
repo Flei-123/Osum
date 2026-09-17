@@ -72,6 +72,12 @@ import mm.mem
 import arch.msr
 import vmcb
 import vdev
+// RUNDE HV3: der Ladeweg (Stufe 4) und der Entzifferer mit
+// Gast-Paging (Stufe 5). Beide stehen in eigenen Dateien, weil sie
+// eigene Sachen sind -- ein Ladeweg ist keine Eigenschaft eines Wirts,
+// und ein Seitenlauf ist keine Eigenschaft eines Ladewegs.
+import bzload
+import gwalk
 import ipc.cap
 import sched.sched
 
@@ -79,7 +85,7 @@ export {
     parse, stage, mode_of, on,
     HV_OFF, HV_MAX, VDEV_OFF, VDEV_MAX,
     M_HV, M_LOOP, M_NOSVM, M_NONPT, M_CR, M_MESS, M_FREE, M_LM, M_NOLME,
-    M_DEV,
+    M_DEV, M_LINUX, M_ZP, M_NOE820, M_SPUR,
     ready, rev, nasid, feat,
     vm_create, vm_create_big, vm_run, vm_destroy, vm_free_all,
     vm_big, vm_pages,
@@ -87,7 +93,8 @@ export {
     exits_total, exits_bucket, runs, cycles_run, cycles_exit, eferw,
     npfs, killed, calls, injected, guest_out, ioports, msrs, crs,
     value_of, value_seen, vms_made,
-    G_HELLO, G_PM, G_LOOP, G_FAULT, G_CRASH, G_BENCH, G_LM, G_DEV, G_MAX,
+    G_HELLO, G_PM, G_LOOP, G_FAULT, G_CRASH, G_BENCH, G_LM, G_DEV,
+    G_LINUX, G_MAX,
     ST_FREE, ST_READY, ST_HALT, ST_DONE, ST_DEAD,
     R_MORE, R_HALT, R_DONE, R_SHUTDOWN, R_EXC, R_BUDGET, R_ERR, R_FAULT,
     B_CRRD, B_CRWR, B_EXC, B_INTR, B_CPUID, B_HLT, B_IOIO, B_MSR,
@@ -157,6 +164,12 @@ const S_LASTERR: u64 = 0x0C0
 const S_EFERW: u64 = 0x0C8
 const S_LASTNPF: u64 = 0x0D0 // die Adresse, an der ein NPF nicht half
 const S_VALMASK: u64 = 0x0D8 // welche der 64 Werte ein Gast gemeldet hat
+// RUNDE HV3: MSR-Schreiben, die der Wirt WIRKLICH in den Steuerblock
+// uebernommen hat (GS/FS/KernelGS, STAR/LSTAR/CSTAR/SFMASK) -- und die,
+// die er weiter schluckt. Stirbt ein Gast an einem fehlenden MSR, sagt
+// `msrign` sofort, dass hier zu suchen ist.
+const S_MSRW: u64 = 0x0E0
+const S_MSRIGN: u64 = 0x0E8
 
 // Die Zaehler je Austrittsgrund, 0x100..0x1FF.
 const CNT_OFF: u64 = 0x100
@@ -239,6 +252,13 @@ const V_BUDGET: u64 = 0x70
 const V_RUNBASE: u64 = 0x78 // was `frame_run` zurueckgab
 const V_RUNLEN: u64 = 0x80 // wie viele Rahmen das waren
 const V_BIG: u64 = 0x88 // wie viele 2-MiB-Seiten abgebildet sind
+// RUNDE HV3, STUFE 5. Der Zeitgeber des Gasts. Ein echtes Linux
+// wartet nach dem Hochlauf mit `hlt` auf den naechsten Takt; ohne
+// eingeworfene Unterbrechung steht es dort fuer immer. Gemessen:
+// 3009 Austritte mit dem Grund 0x60 an EINEM Befehlszeiger
+// (0xffffffff810033cf, `native_safe_halt`).
+const V_TICKS: u64 = 0x90 // wie viele Takte eingeworfen wurden
+const V_TSTEP: u64 = 0x98 // wie viele Austritte bis zum naechsten
 
 const ST_FREE: u64 = 0
 const ST_READY: u64 = 1
@@ -270,7 +290,13 @@ const G_LM: u64 = 6
 // zu benutzen -- Kratzregister, Zeilenzustand, DLAB, die vierteilige
 // Anfangsfolge des Verteilers, der zweiteilige Zeitgeber.
 const G_DEV: u64 = 7
-const G_MAX: u64 = 8
+// RUNDE HV3: der Linux-Gast. Er hat KEIN Abbild in `hv.s` -- sein
+// Abbild ist das Boot-Modul. Die Tabelle in `hv.s` traegt trotzdem ein
+// Paar fuer ihn (zwei gleiche Adressen, also Laenge 0), damit die
+// Formel HV_G_FIRST + Nummer * 2 weiter aufgeht. Der Fehler (a) der
+// Runde HV2 ist genau hier passiert.
+const G_LINUX: u64 = 8
+const G_MAX: u64 = 9
 
 // Die Woerter der Kommandozeile. KEINES ausser dem ersten enthaelt die
 // zwei Buchstaben `hv` -- sonst schaltete die Gegenprobe, die `hv`
@@ -293,6 +319,30 @@ const M_LM: u64 = 128
 const M_NOLME: u64 = 256
 // `gastgeraet`: den Gast laufen lassen, der die Geraete prueft.
 const M_DEV: u64 = 512
+
+// ================== RUNDE HV3: DIE ZWEI NEUEN WOERTER ==================
+//
+// `gastlinux`: das Boot-Modul als bzImage lesen, in einen grossen Gast
+// laden und starten. OHNE Modul tut das Wort nichts -- es ist dann eine
+// gedruckte Zeile und kein Fehler, denn die meisten Laeufe dieses
+// Kernels haben kein Linux dabei.
+//
+// `gastzp`: NUR die Zero-Page und den Kopf pruefen, ohne einen Gast
+// anzulegen. Das ist der Teil des Ladewegs, der OHNE ein einziges
+// Oktett Linux messbar ist -- der Bericht der Runde HV2 nennt ihn in
+// Abschnitt 11 ausdruecklich als naechsten Schritt, und er ist die
+// GEGENPROBE zu `gastlinux`: er zeigt, dass der Ladeweg auch dann
+// stimmt, wenn nichts zu laden ist.
+const M_LINUX: u64 = 1024
+const M_ZP: u64 = 2048
+// `ohnee820`: die GEGENPROBE zum Speicherbild. Linux bekommt eine
+// Zero-Page OHNE E820-Eintraege -- und muss daran scheitern. Ohne diese
+// Probe waere die Behauptung "das Speicherbild ist noetig" nur eine
+// Behauptung.
+const M_NOE820: u64 = 4096
+// `gastspur`: jeden Austritt mitschreiben. Nur zur Untersuchung -- es
+// macht die Ausgabe um ein Vielfaches laenger.
+const M_SPUR: u64 = 8192
 
 // Indizes in `hv_vectors` (kernel/hv.s), erreichbar ueber Platz 69 der
 // Tabelle aus `isr.s`.
@@ -326,12 +376,23 @@ const NPT_FLAGS: u64 = 7
 const ADDR_MASK: u64 = 0x000FFFFFFFFFF000
 
 const MSR_EFER: u64 = 0xC0000080
+const MSR_STAR: u64 = 0xC0000081
+const MSR_CSTAR: u64 = 0xC0000083
+const MSR_SFMASK: u64 = 0xC0000084
+const MSR_FS_BASE: u64 = 0xC0000100
+const MSR_GS_BASE: u64 = 0xC0000101
+const MSR_KGS_BASE: u64 = 0xC0000102
 const MSR_VM_CR: u64 = 0xC0010114
 const MSR_VM_HSAVE: u64 = 0xC0010117
 const VM_CR_SVMDIS: u64 = 16
 
 const BUDGET: u64 = 4096 // hoechstens so viele Austritte je Lauf
 const LOOP_BUDGET: u64 = 64 // fuer den Laeufer reicht viel weniger
+// Wie oft der Wirt ein Linux wieder hereinholen darf, und nach wie
+// vielen stummen Laeufen er aufgibt. Beides sind Abbruchgrenzen einer
+// MESSUNG, keine Eigenschaft des Gasts.
+const LINUX_RUNDEN: u64 = 512
+const LINUX_STILL: u64 = 32
 
 // -------------------------------------------------------- die Zugriffe
 
@@ -510,6 +571,10 @@ fn mode_of(cmd: u64) -> u64 {
     var w_lm: [u8; 9] = "gastlang\0"
     var w_nolme: [u8; 8] = "ohnelme\0"
     var w_dev: [u8; 11] = "gastgeraet\0"
+    var w_lin: [u8; 10] = "gastlinux\0"
+    var w_zp: [u8; 7] = "gastzp\0"
+    var w_noe: [u8; 9] = "ohnee820\0"
+    var w_spur: [u8; 9] = "gastspur\0"
     var m: u64 = 0
     if find_word(cmd, (&w_hv[0]) as u64, 2) != 0 {
         m = m | M_HV
@@ -540,6 +605,18 @@ fn mode_of(cmd: u64) -> u64 {
     }
     if find_word(cmd, (&w_dev[0]) as u64, 10) != 0 {
         m = m | M_DEV
+    }
+    if find_word(cmd, (&w_lin[0]) as u64, 9) != 0 {
+        m = m | M_LINUX
+    }
+    if find_word(cmd, (&w_zp[0]) as u64, 6) != 0 {
+        m = m | M_ZP
+    }
+    if find_word(cmd, (&w_noe[0]) as u64, 8) != 0 {
+        m = m | M_NOE820
+    }
+    if find_word(cmd, (&w_spur[0]) as u64, 8) != 0 {
+        m = m | M_SPUR
     }
     return m
 }
@@ -1036,6 +1113,8 @@ fn vm_create(state: u64, guest: u64, owner: u64) -> u64 {
     vset(state, i, V_WHY, 0)
     vset(state, i, V_LAST, 0)
     vset(state, i, V_BUDGET, BUDGET)
+    vset(state, i, V_TICKS, 0)
+    vset(state, i, V_TSTEP, 0)
     if guest == G_LOOP {
         vset(state, i, V_BUDGET, LOOP_BUDGET)
     }
@@ -1301,6 +1380,170 @@ fn vmcb_setup(state: u64, i: u64) {
     vmcb.wr(b, vmcb.S_GPAT, 0x0007040600070406)
 }
 
+// ====================================================================
+//         RUNDE HV3, STUFE 4: EINEN LINUX-GAST FERTIG STARTEN
+// ====================================================================
+//
+// Alle Gaeste bis hierher fangen im REALMODUS an und gehen ihren Weg
+// selbst -- so, wie ein x86-Rechner anfaengt. Der 64-Bit-Einsprung des
+// Linux-Boot-Protokolls geht genau umgekehrt: er verlangt einen Gast,
+// der SCHON fertig im langen Modus steht. boot.rst sagt es woertlich:
+//
+//   "the CPU must be in 64-bit mode with paging enabled ... a GDT must
+//    be loaded with the descriptors for selectors __BOOT_CS(0x10) and
+//    __BOOT_DS(0x18) ... interrupts must be disabled ... %rsi must hold
+//    the base address of the struct boot_params"
+//
+// DAS IST DER UMGEKEHRTE FALL ZU STUFE 1 DER RUNDE HV2, und er ist
+// leichter, weil der Wirt den Zustand einfach HINSCHREIBEN darf,
+// anstatt ihn erlaufen zu lassen. Die eine Falle ist dieselbe wie dort:
+// wer CR0.PG und EFER.LME setzt, MUSS EFER.LMA selbst dazusetzen -- der
+// Prozessor tut es nur, wenn er den Befehl wirklich ausfuehrt, und hier
+// fuehrt er keinen aus. Ohne LMA ist der Gastzustand ungueltig und der
+// Eintritt wird zurueckgewiesen (`err`), was aussieht wie ein kaputtes
+// Abbild und keines ist.
+//
+// WO DIE TABELLEN LIEGEN. Der Gast braucht eine vierstufige
+// Seitentabelle, die seinen eigenen Speicher identisch abbildet -- und
+// zwar, BEVOR er den ersten Befehl ausfuehrt. Diese Tabelle baut der
+// WIRT in den Gastspeicher; Linux baut sich spaeter seine eigene.
+//
+//   gastphysisch 0x13000   PML4
+//   gastphysisch 0x14000   PDP  (deckt 512 GiB mit 512 Eintraegen)
+//   gastphysisch 0x15000   PD   fuer 0..1 GiB, aus 2-MiB-Seiten
+//   gastphysisch 0x16000   PD   fuer 1..2 GiB
+//
+// ZWEI GIBIOCTETS identisch abgebildet. Mehr braucht ein Gast dieser
+// Runde nicht, und was nicht gebraucht wird, wird nicht gebaut.
+const GL_PML4: u64 = 0x13000
+const GL_PDP: u64 = 0x14000
+const GL_PD0: u64 = 0x15000
+const GL_PD1: u64 = 0x16000
+const GL_GIB: u64 = 2 // so viele Gibioctets bildet der Wirt ab
+
+// Die GDT, die das Protokoll verlangt. Die SELEKTOREN SIND
+// VORGESCHRIEBEN und nicht frei waehlbar: 0x10 ist der Code, 0x18 sind
+// die Daten. Wer sie tauscht, bekommt einen Gast, der beim ersten
+// Datenzugriff stirbt -- und der Fehler sieht aus wie ein kaputter
+// Kern.
+//
+//   0x00  Null
+//   0x08  ungenutzt (das Protokoll nennt nur 0x10 und 0x18)
+//   0x10  Code 64 Bit, L=1, D=0      -> __BOOT_CS
+//   0x18  Daten                       -> __BOOT_DS
+const GL_CS: u64 = 0x10
+const GL_DS: u64 = 0x18
+
+// Baut die Seitentabelle des Gasts IM GASTSPEICHER und gibt die
+// gastphysische Wurzel zurueck.
+fn linux_paging(gram: u64) -> u64 {
+    vmcb.zero_page(gram +% GL_PML4)
+    vmcb.zero_page(gram +% GL_PDP)
+    vmcb.zero_page(gram +% GL_PD0)
+    vmcb.zero_page(gram +% GL_PD1)
+    // Vorhanden, schreibbar -- und OHNE das Nutzerbit. Das ist der
+    // Unterschied zur NPT: ein verschachtelter Lauf braucht U (AMD APM
+    // 15.25.5), die Tabelle eines Kerns darf es nicht haben.
+    let flags: u64 = 3
+    __mmio_write64((gram +% GL_PML4) as *mut u64, GL_PDP | flags)
+    __mmio_write64((gram +% GL_PDP) as *mut u64, GL_PD0 | flags)
+    __mmio_write64((gram +% GL_PDP +% 8) as *mut u64, GL_PD1 | flags)
+    var g: u64 = 0
+    while g < GL_GIB {
+        var pd: u64 = GL_PD0
+        if g == 1 {
+            pd = GL_PD1
+        }
+        var n: u64 = 0
+        while n < 512 {
+            // Bit 7 (PS) macht den Eintrag SELBST zur Seite: 2 MiB.
+            let phys: u64 = g *% 0x40000000 +% n *% 0x200000
+            __mmio_write64((gram +% pd +% n *% 8) as *mut u64,
+                phys | flags | 0x80)
+            n = n +% 1
+        }
+        g = g +% 1
+    }
+    return GL_PML4
+}
+
+// Legt die GDT im Gastspeicher ab. Gibt die gastphysische Adresse
+// zurueck.
+fn linux_gdt(gram: u64) -> u64 {
+    let p: u64 = gram +% bzload.G_GDT
+    vmcb.zero_page(p)
+    __mmio_write64(p as *mut u64, 0)
+    __mmio_write64((p +% 8) as *mut u64, 0)
+    // Code 64 Bit: L=1 (Bit 53), P/DPL0/S/Code/R (0x9A), G+L in 0xA0.
+    __mmio_write64((p +% 16) as *mut u64, 0x00AF9A000000FFFF)
+    // Daten: schreibbar, 32-Bit-Granularitaet.
+    __mmio_write64((p +% 24) as *mut u64, 0x00CF92000000FFFF)
+    return bzload.G_GDT
+}
+
+// Den Gastzustand fuer den 64-Bit-Einsprung hinschreiben. Das ist die
+// Funktion, in der das Boot-Protokoll Zeile fuer Zeile steht.
+fn linux_state(state: u64, i: u64, entry: u64, zp: u64) {
+    let b: u64 = vget(state, i, V_VMCB)
+    let gram: u64 = vget(state, i, V_RAM)
+    let block: u64 = gpr_block(state, i)
+
+    let cr3: u64 = linux_paging(gram)
+    let gdt: u64 = linux_gdt(gram)
+
+    // Die Segmente. Im langen Modus ist die Basis bedeutungslos, aber
+    // die ATTRIBUTE sind es nicht: ohne L=1 im Codesegment laeuft der
+    // Gast 32-bittig weiter und fuehrt den 64-Bit-Einsprung als
+    // 32-Bit-Code aus.
+    vmcb.seg(b, vmcb.S_CS, GL_CS, vmcb.ATTR_CODE64, 0xFFFFFFFF, 0)
+    vmcb.seg(b, vmcb.S_DS, GL_DS, vmcb.ATTR_DATA32, 0xFFFFFFFF, 0)
+    vmcb.seg(b, vmcb.S_ES, GL_DS, vmcb.ATTR_DATA32, 0xFFFFFFFF, 0)
+    vmcb.seg(b, vmcb.S_SS, GL_DS, vmcb.ATTR_DATA32, 0xFFFFFFFF, 0)
+    vmcb.seg(b, vmcb.S_FS, GL_DS, vmcb.ATTR_DATA32, 0xFFFFFFFF, 0)
+    vmcb.seg(b, vmcb.S_GS, GL_DS, vmcb.ATTR_DATA32, 0xFFFFFFFF, 0)
+    vmcb.seg(b, vmcb.S_GDTR, 0, 0, 4 *% 8 -% 1, gdt)
+    // KEINE Vektortafel: das Protokoll verlangt ausdruecklich
+    // abgeschaltete Unterbrechungen, und Linux baut seine eigene.
+    vmcb.seg(b, vmcb.S_IDTR, 0, 0, 0xFFFF, 0)
+    vmcb.seg(b, vmcb.S_LDTR, 0, vmcb.ATTR_LDTR, 0xFFFF, 0)
+    vmcb.seg(b, vmcb.S_TR, 0, vmcb.ATTR_TR, 0xFFFF, 0)
+    vmcb.wr8(b, vmcb.S_CPL, 0)
+
+    // Der lange Modus, fertig eingeschaltet. ALLE VIER Bits gehoeren
+    // zusammen, und LMA ist das, das man vergisst:
+    //   CR4.PAE   -- ohne sie gibt es keine vierstufige Tabelle
+    //   EFER.LME  -- der lange Modus ist gewollt
+    //   EFER.LMA  -- er ist AKTIV. Nur-Lese-Bit; hier setzt es der
+    //                Wirt, weil kein Befehl ausgefuehrt wird, der es
+    //                setzen koennte.
+    //   CR0.PG|PE -- Paging und geschuetzter Modus
+    vmcb.wr(b, vmcb.S_CR4, vmcb.CR4_PAE)
+    vmcb.wr(b, vmcb.S_CR3, cr3)
+    vmcb.wr(b, vmcb.S_CR0, vmcb.CR0_PE | vmcb.CR0_PG | vmcb.CR0_ET
+        | vmcb.CR0_NE)
+    vmcb.wr(b, vmcb.S_EFER, vmcb.EFER_SVME | vmcb.EFER_LME
+        | vmcb.EFER_LMA | vmcb.EFER_NXE)
+
+    // RFLAGS: Bit 1 ist immer gesetzt, IF ist AUS. Das ist die
+    // Vorschrift, nicht die Vorsicht.
+    vmcb.wr(b, vmcb.S_RFLAGS, 2)
+    vmcb.wr(b, vmcb.S_RIP, entry)
+    vmcb.wr(b, vmcb.S_RSP, bzload.G_STACK)
+    vmcb.wr(b, vmcb.S_RAX, 0)
+    vmcb.wr(b, vmcb.S_GPAT, 0x0007040600070406)
+
+    // UND DAS EINE REGISTER, AN DEM ALLES HAENGT: RSI zeigt auf die
+    // Zero-Page. Steht dort etwas anderes, liest Linux seine
+    // Startparameter aus zufaelligem Speicher -- und das ist der
+    // Fehler, der sich als "es sagt nichts" zeigt.
+    var g: u64 = 0
+    while g < 14 {
+        gpr_set(block, g, 0)
+        g = g +% 1
+    }
+    gpr_set(block, G_RSI, zp)
+}
+
 fn vm_destroy(state: u64, i: u64) -> bool {
     if i >= MAX_VMS {
         return false
@@ -1363,6 +1606,66 @@ fn vm_free_all(state: u64) -> u64 {
 // physischen Unterbrechung holt den Wirt zurueck; das Kontingent ist der
 // Guertel zum Hosentraeger, damit selbst dann Schluss ist, wenn der
 // Zeitgeber schwiege.
+// ------------------------------------------------- der Takt des Gasts
+//
+// EIN GAST BRAUCHT EINE UHR, DIE VON SELBST SCHLAEGT. Alles, was
+// diese Runde vorher gebaut hat, war eine ANTWORT auf etwas, das der
+// Gast tat: er liest einen Anschluss, der Wirt antwortet. Der Takt
+// ist das erste, was OHNE Zutun des Gasts geschieht -- und ohne ihn
+// kommt ein Linux nicht ueber den Hochlauf hinaus. Es schaltet die
+// Unterbrechungen frei, legt sich mit `hlt` hin und wartet auf IRQ 0.
+//
+// GEMESSEN, NICHT VERMUTET: ohne diesen Einwurf standen 3009 von
+// 4096 Austritten an einem einzigen Befehlszeiger, dem `hlt` in
+// `native_safe_halt`. Der Gast war nicht abgestuerzt -- er wartete
+// auf etwas, das nie kam.
+//
+// Der Takt haengt am ERSTEN Verteiler, Leitung 0, wie auf echter
+// Ausstattung. Der Vektor kommt deshalb aus ICW2 und ist NICHT fest
+// 0x20: ein Linux setzt die Basis selbst, und wer hier eine feste
+// Zahl einwirft, trifft nach dem Umprogrammieren den falschen
+// Eintrag der Tabelle.
+const TICK_EVERY: u64 = 64
+
+// Darf jetzt eine Unterbrechung hinein? Drei Dinge muessen stimmen,
+// und alle drei sind echte Bedingungen, keine Vorsicht:
+//   1. Der Gast muss sie zulassen (sein IF im gespeicherten RFLAGS).
+//   2. Es darf nicht schon eine im Einwurffeld stehen, sonst ginge
+//      die erste verloren.
+//   3. Der Verteiler muss die Leitung durchlassen (seine Maske).
+fn may_inject(state: u64, i: u64, b: u64) -> bool {
+    if (vmcb.rd(b, vmcb.C_EVENTINJ) & 0x80000000) != 0 {
+        return false
+    }
+    if (vmcb.rd(b, vmcb.S_RFLAGS) & 0x200) == 0 {
+        return false
+    }
+    if (vdev.pic_imr(state, vdev_base(state), i, false) & 1) != 0 {
+        return false
+    }
+    return true
+}
+
+// Einen Takt einwerfen, wenn es an der Zeit ist. Gibt zurueck, ob
+// wirklich einer hineinging -- der Aufrufer weckt danach einen
+// haltenden Gast.
+fn tick_inject(state: u64, i: u64, b: u64) -> bool {
+    if !may_inject(state, i, b) {
+        return false
+    }
+    let basis: u64 = vdev.pic_base(state, vdev_base(state), i, false)
+    var vektor: u64 = basis & 0xF8
+    if vektor == 0 {
+        // Der Verteiler ist noch nicht programmiert. 0x08 ist, was
+        // ein Rechner nach dem Einschalten haette.
+        vektor = 0x08
+    }
+    vmcb.wr(b, vmcb.C_EVENTINJ, vektor | (0 << 8) | 0x80000000)
+    bump(state, S_INJ, 1)
+    vset(state, i, V_TICKS, vget(state, i, V_TICKS) +% 1)
+    return true
+}
+
 fn vm_run(state: u64, i: u64) -> u64 {
     if i >= MAX_VMS {
         return R_ERR
@@ -1385,6 +1688,19 @@ fn vm_run(state: u64, i: u64) -> u64 {
             lauf = false
         } else {
             budget = budget -% 1
+            // Vor JEDEM Eintritt: ist der naechste Takt faellig?
+            let schritt: u64 = vget(state, i, V_TSTEP) +% 1
+            if schritt >= TICK_EVERY {
+                if tick_inject(state, i, b) {
+                    vset(state, i, V_TSTEP, 0)
+                } else {
+                    // Nicht verloren, nur verschoben: der Zaehler
+                    // bleibt stehen, bis der Gast wieder zulaesst.
+                    vset(state, i, V_TSTEP, schritt)
+                }
+            } else {
+                vset(state, i, V_TSTEP, schritt)
+            }
             let t0: u64 = tsc()
             asm("call rax", in("rax") hvv(state, HV_VMRUN),
                 in("rdi") b, in("rsi") block, in("rdx") host,
@@ -1470,7 +1786,48 @@ fn skip(b: u64, n: u64) {
 // ----------------------------------------------------- die Austritte
 //
 // Gibt R_MORE zurueck, wenn der Gast weiterlaufen darf.
+// RUNDE HV3: DIE AUSTRITTE EINES GASTS MITSCHREIBEN.
+//
+// Ein Gastsystem, das stirbt, tut das nach einer Kette von Austritten,
+// und die Kette ist die Auskunft. Beim Wort `gastspur` druckt der Wirt
+// jeden Austritt mit Grund und RIP -- das ist laut, deshalb ist es ein
+// eigenes Wort und nicht die Vorgabe.
+// Welches MSR ein Gast angefasst hat. Beim Wort `gastspur` -- die
+// Nummer allein ist die Auskunft, an der ein Gastsystem haengt.
+fn msr_spur(state: u64, nr: u64, write: bool) {
+    var s_m: [u8; 10] = "hv: msr \0\0"
+    var s_w: [u8; 3] = "wr\0"
+    if !on(state, M_SPUR) {
+        return
+    }
+    serial.puts((&s_m[0]) as u64)
+    serial.hex(nr)
+    serial.put(32 as u8)
+    if write {
+        serial.puts((&s_w[0]) as u64)
+    }
+    serial.nl()
+}
+
+fn spur(state: u64, b: u64, code: u64) {
+    var s_p: [u8; 9] = "hv: sp \0\0"
+    var s_c: [u8; 3] = "c\0\0"
+    var s_r: [u8; 4] = "rip\0"
+    var s_1: [u8; 3] = "i1\0"
+    var s_2: [u8; 3] = "i2\0"
+    if !on(state, M_SPUR) {
+        return
+    }
+    serial.puts((&s_p[0]) as u64)
+    kx((&s_c[0]) as u64, code)
+    kx((&s_r[0]) as u64, vmcb.rd(b, vmcb.S_RIP))
+    kx((&s_1[0]) as u64, vmcb.rd(b, vmcb.C_EXITINFO1))
+    kx((&s_2[0]) as u64, vmcb.rd(b, vmcb.C_EXITINFO2))
+    serial.nl()
+}
+
 fn handle(state: u64, i: u64, b: u64, block: u64, code: u64) -> u64 {
+    spur(state, b, code)
     count(state, bucket(code))
 
     if code == vmcb.X_ERR {
@@ -1506,6 +1863,16 @@ fn handle(state: u64, i: u64, b: u64, block: u64, code: u64) -> u64 {
     }
     if code == vmcb.X_HLT {
         skip(b, 1)
+        // EIN GAST MIT UHR HAELT NICHT FUER IMMER. Wer hier immer
+        // R_HALT gibt, nimmt einem echten Linux den Hochlauf: es
+        // legt sich nach dem Freischalten der Unterbrechungen mit
+        // `hlt` hin und wartet auf den naechsten Takt. Laesst der
+        // Gast Unterbrechungen zu, laeuft er also weiter und bekommt
+        // den Takt beim naechsten Eintritt. Nur ein Gast, der sie
+        // ABGESCHALTET hat, meint das `hlt` endgueltig.
+        if (vmcb.rd(b, vmcb.S_RFLAGS) & 0x200) != 0 {
+            return R_MORE
+        }
         return R_HALT
     }
     if code == vmcb.X_INTR {
@@ -1663,50 +2030,130 @@ fn do_msr(state: u64, b: u64, block: u64) {
     let write: bool = vmcb.rd(b, vmcb.C_EXITINFO1) != 0
     let nr: u64 = gpr(block, G_RCX) & 0xFFFFFFFF
     bump(state, S_MSRS, 1)
+    msr_spur(state, nr, write)
     if write {
-        // RUNDE HV2, STUFE 1: EIN SCHREIBEN, DAS WIRKLICH ANKOMMEN MUSS.
+        // RUNDE HV3, STUFE 4: DIE MSR, OHNE DIE LINUX NICHT LEBT.
         //
-        // Bis hierher schluckte dieser Wirt JEDES Schreiben auf ein MSR.
-        // Fuer die Gaeste der Runde K12 war das richtig -- keiner von
-        // ihnen brauchte eines. Ein Gast, der in den langen Modus will,
-        // braucht aber genau eines: `EFER.LME`. Wird es geschluckt,
-        // bleibt der Gast 32 Bit, und zwar SCHWEIGEND -- der Prozessor
-        // meldet nichts, der weite Sprung landet nur woanders.
+        // Bis zur Runde HV2 nahm dieser Wirt genau EIN Schreiben an:
+        // `EFER`. Fuer die kleinen Gaeste reichte das. Ein echter
+        // Linux-Kern faellt damit TOT um, und die Messung dieser Runde
+        // sagt auf den Befehl genau, woran:
         //
-        // Der Wirt uebernimmt deshalb die Bits, die dem Gast gehoeren,
-        // in sein Gast-EFER. Was er NICHT uebernimmt, ist `SVME`: das
-        // Bit muss im Gast-EFER stehen (AMD APM 15.5.1), aber es ist
-        // nicht das des Gasts, und ein Gast, der es loeschte, machte
-        // seinen eigenen Zustand ungueltig.
+        //   hv: msr 0xc0000101 wr   <- GS_BASE, der Zeiger auf den
+        //                              Bereich je Prozessor
+        //   hv: msr 0xc0000080      <- EFER lesen
+        //   hv: msr 0xc0000080 wr   <- EFER zurueckschreiben
+        //   hv: sp c=0x7f           <- SHUTDOWN, dreifacher Fehler
         //
-        // `LMA` (Bit 10) steht ausdruecklich NICHT in der Maske. Es ist
-        // ein NUR-LESE-Bit: der Prozessor setzt es selbst, wenn Paging
-        // dazukommt. Genau daran haengt die Messung dieser Stufe --
-        // der Gast kann es nicht faelschen.
+        // ZWEI Fehler stecken darin, und beide toeten fuer sich allein:
+        //
+        // ERSTENS `GS_BASE`. Linux legt seinen Bereich je Prozessor ab
+        // und erreicht ihn ab da NUR ueber `gs:`. Wird das Schreiben
+        // geschluckt, bleibt die Basis null, jeder Zugriff je Prozessor
+        // greift nach Adresse 0, und der naechste Seitenfehler wird zum
+        // dreifachen. Die Basis steht NICHT in einem eigenen Feld --
+        // sie ist die Basis des Segments `GS` im Zustandsbereich.
+        //
+        // ZWEITENS das Lesen. Ein Wirt, der auf jedes Lesen 0 gibt,
+        // luegt den Gast an: Linux liest `EFER`, aendert EIN Bit und
+        // schreibt zurueck. Bekommt es 0, loescht dieses Zurueckschreiben
+        // `LME` -- mitten im langen Modus. Deshalb liefert das Lesen
+        // unten die WIRKLICHEN Werte aus dem Steuerblock.
+        let v: u64 = (vmcb.rd(b, vmcb.S_RAX) & 0xFFFFFFFF)
+            | (gpr(block, G_RDX) << 32)
         if nr == MSR_EFER {
-            let neu: u64 = (vmcb.rd(b, vmcb.S_RAX) & 0xFFFFFFFF)
-                | (gpr(block, G_RDX) << 32)
             // GEGENPROBE `ohnelme`: das Schreiben wird geschluckt wie
             // frueher. Der Gast bleibt dann 32 Bit, und die Zusage
             // darueber MUSS zusammenbrechen.
             if !on(state, M_NOLME) {
+                // `SVME` gehoert dem Wirt und muss stehen bleiben
+                // (AMD APM 15.5.1). `LMA` ist NUR-LESE -- der Prozessor
+                // setzt es selbst; wer es aus `v` uebernaehme, liesse
+                // den Gast seinen eigenen Zustand faelschen. Beide
+                // werden deshalb aus dem ALTEN Wert getragen.
                 let maske: u64 = vmcb.EFER_LME | vmcb.EFER_NXE
                     | vmcb.EFER_SCE
                 let alt: u64 = vmcb.rd(b, vmcb.S_EFER)
-                // `0xFF..FF ^ maske` ist das Gegenteil der Maske --
-                // dieselbe Schreibweise, die `mem.fi` fuer die
-                // Rahmenkarte benutzt (Firn hat kein `~`).
                 let rest: u64 = 0xFFFFFFFFFFFFFFFF ^ maske
                 vmcb.wr(b, vmcb.S_EFER,
-                    (alt & rest) | (neu & maske) | vmcb.EFER_SVME)
+                    (alt & rest) | (v & maske) | vmcb.EFER_SVME)
                 bump(state, S_EFERW, 1)
             }
+            return
         }
+        // Der Bereich je Prozessor. OHNE DIESE DREI STARTET LINUX NICHT.
+        if nr == MSR_GS_BASE {
+            vmcb.wr(b, vmcb.S_GS +% 8, v)
+            bump(state, S_MSRW, 1)
+            return
+        }
+        if nr == MSR_FS_BASE {
+            vmcb.wr(b, vmcb.S_FS +% 8, v)
+            bump(state, S_MSRW, 1)
+            return
+        }
+        if nr == MSR_KGS_BASE {
+            vmcb.wr(b, vmcb.S_KGSBASE, v)
+            bump(state, S_MSRW, 1)
+            return
+        }
+        // Die vier fuer `syscall`/`sysret`. Linux setzt sie frueh; ohne
+        // sie faellt der erste Systemaufruf ins Leere.
+        if nr == MSR_STAR {
+            vmcb.wr(b, vmcb.S_STAR, v)
+            bump(state, S_MSRW, 1)
+            return
+        }
+        if nr == MSR_LSTAR {
+            vmcb.wr(b, vmcb.S_LSTAR, v)
+            bump(state, S_MSRW, 1)
+            return
+        }
+        if nr == MSR_CSTAR {
+            vmcb.wr(b, vmcb.S_CSTAR, v)
+            bump(state, S_MSRW, 1)
+            return
+        }
+        if nr == MSR_SFMASK {
+            vmcb.wr(b, vmcb.S_SFMASK, v)
+            bump(state, S_MSRW, 1)
+            return
+        }
+        // Alles Uebrige wird weiter geschluckt -- aber GEZAEHLT, damit
+        // der naechste Gast, der an einem fehlenden MSR stirbt, nicht
+        // wieder gesucht werden muss.
+        bump(state, S_MSRIGN, 1)
         return
     }
+    // ------------------------------------------------ das Lesen
+    //
+    // Was hier steht, ist das, was der Gast WIRKLICH gesetzt hat. Eine
+    // 0 zurueckzugeben ist kein harmloser Platzhalter: sie zerstoert
+    // jedes Lesen-Aendern-Schreiben des Gasts.
     var v: u64 = 0
     if nr == MSR_EFER {
         v = vmcb.rd(b, vmcb.S_EFER)
+    }
+    if nr == MSR_GS_BASE {
+        v = vmcb.rd(b, vmcb.S_GS +% 8)
+    }
+    if nr == MSR_FS_BASE {
+        v = vmcb.rd(b, vmcb.S_FS +% 8)
+    }
+    if nr == MSR_KGS_BASE {
+        v = vmcb.rd(b, vmcb.S_KGSBASE)
+    }
+    if nr == MSR_STAR {
+        v = vmcb.rd(b, vmcb.S_STAR)
+    }
+    if nr == MSR_LSTAR {
+        v = vmcb.rd(b, vmcb.S_LSTAR)
+    }
+    if nr == MSR_CSTAR {
+        v = vmcb.rd(b, vmcb.S_CSTAR)
+    }
+    if nr == MSR_SFMASK {
+        v = vmcb.rd(b, vmcb.S_SFMASK)
     }
     if nr == 0x10 {
         v = tsc() // die Uhr des Gasts ist die des Wirts
@@ -2009,6 +2456,377 @@ fn lauf(state: u64, guest: u64, name: u64) -> u64 {
     return vm
 }
 
+// ====================================================================
+//         RUNDE HV3: DEN LINUX-GAST ANLEGEN, LADEN UND STARTEN
+// ====================================================================
+//
+// Das ist die Stelle, an der die Stufen 4 und 5 zusammenkommen. Der
+// Ablauf ist genau der eines Bootladers, und jeder Schritt hat eine
+// Zahl, die der Laeufer nachliest:
+//
+//   1. Den Kopf lesen und PRUEFEN    -> `bzload.check`, 0 = in Ordnung
+//   2. Ausrechnen, wie viel Speicher  -> `bzload.need_bytes`
+//   3. Die Maschine anlegen           -> `vm_create_big`
+//   4. Das Abbild umlagern            -> `bzload.load`
+//   5. Die Zero-Page bauen            -> `bzload.zeropage`
+//   6. Den Gastzustand hinschreiben   -> `linux_state`
+//   7. Laufen lassen                  -> `vm_run`
+//
+// WARUM DAS SO VIELE ZAHLEN MELDET. Ein Linux, das nichts sagt, kann an
+// sieben Stellen gescheitert sein, und ohne Zwischenzahlen sucht man an
+// der falschen. Der Bericht der Runde HV2 hat genau daran eine Stunde
+// verloren (Abschnitt 5b), und die Lehre steht hier als Code.
+
+// ====================================================================
+//   RUNDE HV3: DER LADEWEG, GEPRUEFT OHNE EIN OKTETT LINUX
+// ====================================================================
+//
+// Der Bericht der Runde HV2 nennt das in Abschnitt 11 als naechsten
+// Schritt, und der Grund ist gut: der Ladeweg ist eine Rechnung ueber
+// einen Kopf und eine Seite Speicher. Dafuer braucht es kein Linux --
+// es braucht einen KOPF, der aussieht wie der eines Linux. Den baut
+// diese Funktion selbst, Feld fuer Feld, aus der Festlegung.
+//
+// WAS DAS WERT IST. Diese sieben Zusagen laufen auf JEDER Maschine,
+// auch auf einer ohne Boot-Modul -- also in jedem Lauf von
+// `tools/hv/run.sh`. Die Zusagen ueber das echte Linux laufen nur, wo
+// eines danebenliegt. Wer den Ladeweg kaputtmacht, wird deshalb hier
+// erwischt und nicht erst dort.
+fn zp_selftest(state: u64) {
+    var s_h: [u8; 9] = "hv: zp: \0"
+    var s_c: [u8; 6] = "check\0"
+    var s_n: [u8; 5] = "need\0"
+    var s_e: [u8; 6] = "e820\0\0"
+    var s_p: [u8; 4] = "ent\0"
+
+    // Zwei Rahmen: einer fuer das Abbild, einer fuer den "Gastspeicher",
+    // in dem die Zero-Page gebaut wird. Der Gastspeicher muss so gross
+    // ausgegeben werden, dass `zeropage` seine Adressen darin
+    // unterbringt -- also wird er nur BEHAUPTET gross und in
+    // Wirklichkeit reicht die eine Seite fuer die Zero-Page. Deshalb
+    // baut dieser Selbsttest die Zero-Page an ihrer ECHTEN Stelle in
+    // einem Lauf von 20 Seiten.
+    let img: u64 = mem.frame_alloc(state)
+    let gram: u64 = mem.frame_run(state, 36) // bis 0x12000 hinein
+    if img == 0 || gram == 0 {
+        if img != 0 {
+            mem.frame_free(state, img)
+        }
+        return
+    }
+    vmcb.zero_page(img)
+    var z: u64 = 0
+    while z < 36 {
+        vmcb.zero_page(gram +% z *% 4096)
+        z = z +% 1
+    }
+
+    // ---- EIN KOPF, WIE DIE FESTLEGUNG IHN VERLANGT -----------------
+    //
+    // Nur die Felder, auf die der Ladeweg schaut. Jede Zahl steht hier
+    // als Zahl, damit die Probe unabhaengig von `bzload.fi` ist: wuerde
+    // sie dieselben Konstanten benutzen, pruefte sie nichts.
+    __mmio_write16((img +% 0x1FE) as *mut u16, 0xAA55 as u16) // boot_flag
+    __mmio_write8((img +% 0x1F1) as *mut u8, 1 as u8) // setup_sects
+    __mmio_write8((img +% 0x201) as *mut u8, 0x6A as u8) // jump
+    // "HdrS", kleinendig
+    __mmio_write8((img +% 0x202) as *mut u8, 0x48 as u8)
+    __mmio_write8((img +% 0x203) as *mut u8, 0x64 as u8)
+    __mmio_write8((img +% 0x204) as *mut u8, 0x72 as u8)
+    __mmio_write8((img +% 0x205) as *mut u8, 0x53 as u8)
+    __mmio_write16((img +% 0x206) as *mut u16, 0x020F as u16) // version
+    __mmio_write8((img +% 0x211) as *mut u8, 1 as u8) // loadflags
+    __mmio_write32((img +% 0x230) as *mut u32, 0x200000 as u32) // align
+    __mmio_write8((img +% 0x234) as *mut u8, 1 as u8) // relocatable
+    __mmio_write16((img +% 0x236) as *mut u16, 0x000F as u16) // xloadflags
+    __mmio_write32((img +% 0x238) as *mut u32, 2047 as u32) // cmdline_size
+    __mmio_write64((img +% 0x258) as *mut u64, 0x1000000) // pref_address
+    __mmio_write32((img +% 0x260) as *mut u32, 0x400000 as u32) // init_size
+    // Ein Oktett im Kopfbereich, das beim Kopieren mitkommen MUSS.
+    // Hieran zeigt sich, ob der Kopf als GANZES uebernommen wurde.
+    __mmio_write8((img +% 0x1F5) as *mut u8, 0xC7 as u8)
+
+    // Das Abbild ist 1024 Oktette lang; der entpackte Teil faengt bei
+    // (1 + 1) * 512 = 1024 an -- damit waere er leer. Also einen Rahmen
+    // lang machen, dann sind es 4096 - 1024 = 3072 Oktette.
+    let ilen: u64 = 4096
+
+    let chk: u64 = bzload.check(img, ilen)
+    value_put(state, 30, chk)
+
+    // ---- UND EIN ABBILD, DAS ES NICHT IST --------------------------
+    //
+    // Dieselbe Seite, aber "HdrS" zerstoert. Der Ladeweg MUSS es
+    // abweisen, und zwar mit dem Grund 3 -- nicht stillschweigend.
+    // Ohne diese Gegenprobe pruefte `check` nichts.
+    __mmio_write8((img +% 0x202) as *mut u8, 0x00 as u8)
+    value_put(state, 31, bzload.check(img, ilen))
+    __mmio_write8((img +% 0x202) as *mut u8, 0x48 as u8) // zurueck
+
+    // ---- DIE ZERO-PAGE ---------------------------------------------
+    let cmdp: u64 = state +% HV_OFF +% S_CMDBUF
+    linux_cmdline(cmdp)
+    let e820: u64 = bzload.zeropage(gram, 36 *% 4096, img, cmdp, 0, 0)
+    let zp: u64 = gram +% bzload.G_ZEROPAGE
+    value_put(state, 32, bzload.zp_e820_entries(zp))
+    value_put(state, 33, bzload.zp_loader(zp))
+    value_put(state, 34, bzload.zp_cmdline_ptr(zp))
+    // Ist der Kopf als GANZES mitgekommen? Das Oktett bei 0x1F5.
+    var mit: u64 = 0
+    if kstate.get8(zp +% 0x1F5) == 0xC7 {
+        mit = 1
+    }
+    value_put(state, 35, mit)
+    // Und liegt der Einsprung genau 0x200 hinter der Ladeadresse?
+    var ent_ok: u64 = 0
+    if bzload.entry_of(img, ilen) == bzload.plan(img, ilen) +% 0x200 {
+        ent_ok = 1
+    }
+    value_put(state, 36, ent_ok)
+
+    serial.puts((&s_h[0]) as u64)
+    kv((&s_c[0]) as u64, chk)
+    kv((&s_n[0]) as u64, bzload.need_bytes(img, ilen))
+    kv((&s_e[0]) as u64, e820)
+    kx((&s_p[0]) as u64, bzload.entry_of(img, ilen))
+    serial.nl()
+
+    mem.frame_free(state, img)
+    mem.frame_free_run(state, gram, 36)
+}
+
+// Die Kommandozeile, die der Gast bekommt. `earlyprintk=serial` ist das
+// Wort, an dem diese Runde haengt: es laesst Linux auf der SERIELLEN
+// SCHNITTSTELLE reden, BEVOR es seine eigenen Treiber hat -- also durch
+// die 16550A-Emulation aus der Runde HV2. Ohne dieses Wort schweigt
+// selbst ein Kern, der laeuft.
+//
+// `console=ttyS0` deckt die Zeit danach ab, `keep_bootcon` verhindert,
+// dass der Kern die fruehe Konsole abmeldet, sobald er die spaete
+// gefunden hat.
+fn linux_cmdline(p: u64) -> u64 {
+    // `nokaslr` IST HIER KEINE BEQUEMLICHKEIT, SONDERN GEMESSEN. Der
+    // erste Lauf dieser Runde gab dem Gast 73 MiB -- genau
+    // `init_size` plus ein Mebioctet --, und Linux' Entpacker sagte
+    // woertlich:
+    //
+    //   "Invalid physical address chosen!"
+    //   "Physical KASLR disabled: no suitable memory region!"
+    //
+    // Die zufaellige Verschiebung des Kerns sucht eine FREIE Stelle
+    // von `init_size` Oktetten IRGENDWO im Speicher -- in einem Gast,
+    // der nur so gross ist wie der Kern selbst, gibt es keine. Das
+    // Wort schaltet sie ab; der Gast bekommt ausserdem mehr Speicher
+    // (siehe `linux_boot`), damit die Abschaltung nicht der einzige
+    // Grund ist, warum es geht.
+    // `panic=-1` IST DIE ABBRUCHBEDINGUNG DER MESSUNG. Ohne eine
+    // Wurzel kommt dieses Linux bis `prepare_namespace` und bleibt
+    // dann im Panikzustand MIT eingeschalteten Unterbrechungen
+    // stehen -- es lief also weiter, ohne noch etwas zu sagen, und
+    // der Wirt haette es bis zum Zeitlimit hereingeholt. Mit dem
+    // Wort startet es sich selbst neu, und der Wirt sieht den
+    // Dreifachfehler als sauberes Ende.
+    var t: [u8; 83] =
+        "earlyprintk=serial,ttyS0,115200 console=ttyS0,115200 nokaslr keep_bootcon panic=-1\0"
+    var n: u64 = 0
+    var weiter: bool = true
+    while weiter {
+        let c: u64 = t[n as usize] as u64
+        __mmio_write8((p +% n) as *mut u8, c as u8)
+        if c == 0 {
+            weiter = false
+        } else {
+            n = n +% 1
+        }
+    }
+    return n
+}
+
+// Wo im Gast die Kommandozeile hingeschrieben wird, bevor sie in den
+// Gastspeicher wandert: in die Seite des Wirts, hinter die Werte.
+const S_CMDBUF: u64 = 0x0E00 // 256 Oktette in der Seite dieser Runde
+
+fn linux_boot(state: u64, img: u64, len: u64) -> u64 {
+    var s_h: [u8; 11] = "hv: linux \0"
+    var s_chk: [u8; 6] = "check\0"
+    var s_ver: [u8; 4] = "ver\0"
+    var s_ss: [u8; 6] = "setup\0"
+    var s_pm: [u8; 8] = "pmbytes\0"
+    var s_init: [u8; 9] = "initsize\0"
+    var s_need: [u8; 5] = "need\0"
+    var s_mib: [u8; 4] = "mib\0"
+    var s_slot: [u8; 5] = "slot\0"
+    var s_load: [u8; 7] = "loaded\0"
+    var s_e820: [u8; 6] = "e820\0\0"
+    var s_ent: [u8; 6] = "entry\0"
+    var s_zp: [u8; 3] = "zp\0"
+    var s_ex: [u8; 6] = "exits\0"
+    var s_out: [u8; 4] = "out\0"
+    var s_st: [u8; 6] = "state\0"
+    var s_rip: [u8; 4] = "rip\0"
+    var s_code: [u8; 9] = "exitcode\0"
+    var s_said: [u8; 6] = "said\0\0"
+    // DIE ZAHLEN, MIT DENEN MAN EINEN TOTEN GAST UNTERSUCHT. Ein
+    // "es lief nicht" ist keine Auskunft; diese fuenf sagen, WO es
+    // nicht lief.
+    var s_lnpf: [u8; 8] = "lastnpf\0"
+    var s_lcr0: [u8; 4] = "cr0\0"
+    var s_lcr3: [u8; 4] = "cr3\0"
+    var s_lef: [u8; 5] = "efer\0"
+    var s_ldf: [u8; 8] = "decfail\0"
+
+    // 1. DER KOPF. Zuerst und ohne Ausnahme -- ein Abbild, das den Kopf
+    //    nicht hat, ist kein bzImage, und alles danach waere Raten.
+    let chk: u64 = bzload.check(img, len)
+    serial.puts((&s_h[0]) as u64)
+    kv((&s_chk[0]) as u64, chk)
+    kx((&s_ver[0]) as u64, bzload.hdr_version(img))
+    kv((&s_ss[0]) as u64, bzload.hdr_setup_sects(img))
+    kv((&s_pm[0]) as u64, bzload.pm_bytes(img, len))
+    kv((&s_init[0]) as u64, bzload.hdr_init_size(img))
+    if chk != 0 {
+        serial.nl()
+        value_put(state, 50, chk)
+        return MAX_VMS
+    }
+
+    // 2. WIE VIEL SPEICHER. `init_size` und nicht die Laenge des
+    //    Abbilds -- die Zahl aus Abschnitt 8 der Runde HV2.
+    let need: u64 = bzload.need_bytes(img, len)
+    // NICHT das Minimum, sondern was der Kern zum ARBEITEN braucht --
+    // `want_bytes` sagt, warum, und die Begruendung ist gemessen.
+    let mib: u64 = (bzload.want_bytes(img, len) +% 1048575) / 1048576
+    kv((&s_need[0]) as u64, need)
+    kv((&s_mib[0]) as u64, mib)
+    serial.nl()
+    value_put(state, 50, 0)
+    value_put(state, 51, mib)
+
+    // 3. DIE MASCHINE. Ein Gast dieser Groesse geht nur mit den
+    //    2-MiB-Seiten aus Stufe 2 der Runde HV2 -- 73 MiB in Seiten zu
+    //    4 KiB waeren 18688 Eintraege in 37 Tabellen.
+    let vm: u64 = vm_create_big(state, G_LINUX, 0, mib)
+    if vm >= MAX_VMS {
+        serial.puts((&s_h[0]) as u64)
+        kv((&s_slot[0]) as u64, 99)
+        serial.nl()
+        return MAX_VMS
+    }
+    let gram: u64 = vget(state, vm, V_RAM)
+    let gbytes: u64 = vget(state, vm, V_PAGES) *% 4096
+
+    // 4. DAS ABBILD UMLAGERN.
+    let geladen: u64 = bzload.load(gram, gbytes, img, len)
+    value_put(state, 52, geladen)
+
+    // 5. DIE ZERO-PAGE. Die Kommandozeile wird erst in die Seite des
+    //    Wirts geschrieben und dann von dort in den Gast kopiert --
+    //    `bzload` soll nichts ueber `kdata` wissen muessen.
+    let cmdp: u64 = state +% HV_OFF +% S_CMDBUF
+    linux_cmdline(cmdp)
+    var e820: u64 = 0
+    if on(state, M_NOE820) {
+        // GEGENPROBE `ohnee820`: eine Zero-Page ohne Speicherbild. Der
+        // Kopf steht, die Kommandozeile steht, `type_of_loader` steht
+        // -- NUR die Tafel fehlt. Wenn Linux daran scheitert, ist
+        // gezeigt, dass sie noetig ist.
+        e820 = bzload.zeropage(gram, gbytes, img, cmdp, 0, 0)
+        __mmio_write8((gram +% bzload.G_ZEROPAGE
+            +% bzload.ZP_E820_ENTRIES) as *mut u8, 0 as u8)
+        e820 = 0
+    } else {
+        e820 = bzload.zeropage(gram, gbytes, img, cmdp, 0, 0)
+    }
+    value_put(state, 53, e820)
+
+    // 6. DER GASTZUSTAND.
+    let entry: u64 = bzload.entry_of(img, len)
+    linux_state(state, vm, entry, bzload.G_ZEROPAGE)
+    value_put(state, 54, entry)
+
+    serial.puts((&s_h[0]) as u64)
+    kv((&s_slot[0]) as u64, vm)
+    kv((&s_load[0]) as u64, geladen)
+    kv((&s_e820[0]) as u64, e820)
+    kx((&s_ent[0]) as u64, entry)
+    kx((&s_zp[0]) as u64, bzload.G_ZEROPAGE)
+    serial.nl()
+
+    // 7. LAUFEN LASSEN. Von hier an redet der Gast, nicht der Wirt.
+    //
+    // MEHRERE LAEUFE, NICHT EINER. `vm_run` gibt nach BUDGET Austritten
+    // zurueck, damit ein Gast den Wirt nicht auf ewig festhaelt. Ein
+    // Linux im Hochlauf braucht aber weit mehr als 4096 Austritte --
+    // allein seine Suche nach Geraeten kostet Tausende. Der Wirt holt
+    // ihn deshalb wieder herein, solange er FORTSCHRITT macht: mehr
+    // gesagt oder mehr Austritte als beim letzten Mal. Bleibt beides
+    // stehen, dreht er sich im Kreis, und weiterlaufen zu lassen
+    // brächte nichts.
+    let vor: u64 = get(state, S_OUT)
+    var r: u64 = R_BUDGET
+    var runden: u64 = 0
+    var still: u64 = 0
+    var weiter: bool = true
+    while weiter {
+        let e0: u64 = vm_exits(state, vm)
+        let o0: u64 = get(state, S_OUT)
+        vset(state, vm, V_BUDGET, BUDGET)
+        r = vm_run(state, vm)
+        runden = runden +% 1
+        if r != R_BUDGET && r != R_HALT {
+            weiter = false
+        } else {
+            if get(state, S_OUT) == o0 && vm_exits(state, vm) == e0 {
+                weiter = false
+            } else {
+                if get(state, S_OUT) == o0 {
+                    still = still +% 1
+                } else {
+                    still = 0
+                }
+                // Er tut noch etwas, sagt aber seit vielen Laeufen
+                // nichts mehr. Das ist die Stelle, an der ein Gast
+                // in einer Schleife steckt, und der Wirt bricht ab,
+                // statt die Messung ewig laufen zu lassen.
+                if still >= LINUX_STILL {
+                    weiter = false
+                }
+                if runden >= LINUX_RUNDEN {
+                    weiter = false
+                }
+            }
+        }
+    }
+    value_put(state, 57, runden)
+    let b: u64 = vget(state, vm, V_VMCB)
+    let gesagt: u64 = get(state, S_OUT) -% vor
+    serial.nl()
+    serial.puts((&s_h[0]) as u64)
+    kv((&s_ex[0]) as u64, vm_exits(state, vm))
+    kv((&s_out[0]) as u64, r)
+    kv((&s_st[0]) as u64, vm_state(state, vm))
+    kx((&s_rip[0]) as u64, vmcb.rd(b, vmcb.S_RIP))
+    kx((&s_code[0]) as u64, vget(state, vm, V_LAST))
+    kv((&s_said[0]) as u64, gesagt)
+    kx((&s_lnpf[0]) as u64, get(state, S_LASTNPF))
+    kx((&s_lcr0[0]) as u64, vmcb.rd(b, vmcb.S_CR0))
+    kx((&s_lcr3[0]) as u64, vmcb.rd(b, vmcb.S_CR3))
+    kx((&s_lef[0]) as u64, vmcb.rd(b, vmcb.S_EFER))
+    kv((&s_ldf[0]) as u64, get(state, S_DECFAIL))
+    serial.nl()
+    // WIE VIELE OKTETTE DER GAST GESAGT HAT. Das ist der Erfolgsmass-
+    // stab dieser Runde, und er ist eine Zahl: 0 heisst, Linux hat
+    // geschwiegen.
+    value_put(state, 55, gesagt)
+    value_put(state, 56, vm_exits(state, vm))
+    // Was diese Stufe gebaut hat, in Zahlen: eingeworfene Takte, wie
+    // oft der Gast die Uhr befragt hat, und wie oft den Kanal 2.
+    value_put(state, 58, vget(state, vm, V_TICKS))
+    value_put(state, 59, vdev.rtc_reads(state, vdev_base(state), vm))
+    value_put(state, 60, vdev.p61_reads(state, vdev_base(state), vm))
+    return vm
+}
+
 // RUNDE HV2: dasselbe wie `lauf`, aber auf einer Maschine mit grossem
 // Speicher und einer NPT aus 2-MiB-Seiten.
 fn lauf_big(state: u64, guest: u64, name: u64, mib: u64) -> u64 {
@@ -2202,6 +3020,37 @@ fn stage(state: u64) {
     var n_d_base: [u8; 46] = "and its vector base is the guest's 0x30, not\0\0"
     var n_d_pit: [u8; 46] = "the timer joined both halves into 0x2E9C\0\0\0\0\0\0"
     var n_d_ready: [u8; 42] = "and the pic is fully initialised, step 0\0\0"
+    // ---------------- RUNDE HV3, STUFE 5: DER ENTZIFFERER ----------------
+    var n_w_flat: [u8; 45] = "without cr0.pg a guest does not translate\0\0\0\0"
+    var n_w_prot: [u8; 43] = "with pg and no pae the walk is two level\0\0\0"
+    var n_w_pae: [u8; 42] = "with pae and no lma it is three level\0\0\0\0\0"
+    var n_w_long: [u8; 42] = "and with lma it is four level, 64 bit\0\0\0\0\0"
+    var n_w_walk: [u8; 47] = "the host walked the GUEST's own page table\0\0\0\0\0"
+    var n_w_big: [u8; 44] = "and it knows a 2 MiB page from a pointer\0\0\0\0"
+    var n_w_bad: [u8; 45] = "an unmapped address really comes back bad\0\0\0\0"
+    var n_d_rex: [u8; 46] = "the decoder read rex.b: r8 and not rax, len 4\0"
+    // ---------------- RUNDE HV3, STUFE 4: DER LADEWEG --------------------
+    var n_z_chk: [u8; 43] = "a self-built bzImage header passes check\0\0\0"
+    var n_z_bad: [u8; 46] = "and one without HdrS is refused with reason 3\0"
+    var n_z_e820: [u8; 43] = "the zero page carries 3 e820 entries\0\0\0\0\0\0\0"
+    var n_z_ldr: [u8; 41] = "type_of_loader is 0xFF as the spec says\0\0"
+    var n_z_cmd: [u8; 41] = "cmd_line_ptr points at the command line\0\0"
+    var n_z_hdr: [u8; 43] = "the setup header really got copied along\0\0\0"
+    var n_z_ent: [u8; 46] = "the 64 bit entry is load address plus 0x200\0\0\0"
+    // ---------------- RUNDE HV3: DAS LINUX SELBST ------------------------
+    var n_l_chk: [u8; 40] = "the real bzImage passed every check\0\0\0\0\0"
+    var n_l_load: [u8; 42] = "and its protected part was moved in full\0\0"
+    var n_l_e820: [u8; 42] = "linux got a memory map it can believe\0\0\0\0\0"
+    var n_l_said: [u8; 44] = "AND LINUX REALLY SPOKE ON THE SERIAL LINE\0\0\0"
+    // RUNDE HV3, STUFE 5. Reden allein ist wenig -- die Meldungen des
+    // Laders kaeme auch ein Linux zustande, das gleich danach steht.
+    // Diese Zusagen messen, dass es WEITERLIEF: viele Oktette, ein
+    // laufender Takt, und ein Gast, der seine Uhr abgefragt hat.
+    var n_l_viel: [u8; 45] = "and it kept talking: a whole boot log, not a\0"
+    var n_l_takt: [u8; 40] = "the host gave linux a timer of its own\0\0"
+    var n_l_uhr: [u8; 44] = "and linux read the clock instead of hanging\0"
+    var n_l_kal: [u8; 46] = "it calibrated against the pit and moved on\0\0\0\0"
+    var s_nolin: [u8; 36] = "hv: linux: no boot module, nothing\0\0"
 
     if !on(state, M_HV) {
         serial.puts((&s_skip[0]) as u64)
@@ -2373,6 +3222,181 @@ fn stage(state: u64) {
             vdev.pic_ready(state, vdev_base(state), v7))
     }
 
+    // ================================================================
+    //   RUNDE HV3, STUFE 5: DER ENTZIFFERER UND DER SEITENLAUF
+    // ================================================================
+    //
+    // DIESE ZUSAGEN BRAUCHEN KEINEN GAST. Der Seitenlauf ist eine
+    // Rechnung ueber Tabellen im Speicher -- also wird eine Tabelle
+    // hingeschrieben und nachgesehen, ob er dieselbe Adresse findet,
+    // die der Prozessor finden wuerde. Das ist die schaerfere Probe:
+    // ein Seitenlauf, der nur "im Gast funktioniert", koennte zufaellig
+    // richtig liegen, weil identisch abgebildet war.
+    alle = alle + 8
+    // (a) Die Betriebsart aus CR0/CR4/EFER. Vier Faelle, und der
+    //     letzte ist der, den man falsch macht: LMA steht, aber PG
+    //     nicht -- dann uebersetzt der Gast NICHT, egal was EFER sagt.
+    gut = gut + zusage((&n_w_flat[0]) as u64,
+        gwalk.walk_mode(0, 0, 0), gwalk.MODE_FLAT)
+    gut = gut + zusage((&n_w_prot[0]) as u64,
+        gwalk.walk_mode(0x80000000, 0, 0), gwalk.MODE_PROT)
+    gut = gut + zusage((&n_w_pae[0]) as u64,
+        gwalk.walk_mode(0x80000000, 0x20, 0), gwalk.MODE_PAE)
+    gut = gut + zusage((&n_w_long[0]) as u64,
+        gwalk.walk_mode(0x80000000, 0x20, 0x400), gwalk.MODE_LONG)
+    // (b) EIN ECHTER VIERSTUFIGER SEITENLAUF. Der Wirt baut eine
+    //     Tabelle in einem Rahmenlauf, der wie ein Gastspeicher
+    //     aussieht, und laesst den Lauf eine virtuelle Adresse
+    //     uebersetzen, die NICHT identisch abgebildet ist. Waere der
+    //     Lauf eine Attrappe, kaeme die Eingabe zurueck.
+    let probe: u64 = mem.frame_run(state, 8)
+    if probe != 0 {
+        var pz: u64 = 0
+        while pz < 8 {
+            vmcb.zero_page(probe +% pz *% 4096)
+            pz = pz +% 1
+        }
+        // gastphysisch 0x0000 PML4, 0x1000 PDP, 0x2000 PD, 0x3000 PT
+        // Die virtuelle Adresse 0x40201234 soll auf gastphysisch
+        // 0x5234 zeigen -- also 0x5000 mit Versatz 0x234.
+        __mmio_write64((probe +% 0) as *mut u64, 0x1000 | 3)
+        __mmio_write64((probe +% 0x1000 +% 8) as *mut u64, 0x2000 | 3)
+        __mmio_write64((probe +% 0x2000 +% 8) as *mut u64, 0x3000 | 3)
+        // Der Eintrag in der PT: der Index von 0x40201234 auf der
+        // letzten Stufe ist (va >> 12) & 0x1FF = 1 -- nachgerechnet
+        // und nicht geraten. Ein falscher Index hier waere eine Probe,
+        // die den Seitenlauf ANKLAGT, obwohl er recht hat; genau das
+        // ist beim ersten Lauf dieser Runde passiert.
+        __mmio_write64((probe +% 0x3000 +% 1 *% 8) as *mut u64,
+            0x5000 | 3)
+        let va: u64 = 0x40201234
+        gut = gut + zusage((&n_w_walk[0]) as u64,
+            gwalk.walk(probe, 8 *% 4096, 0, gwalk.MODE_LONG, va), 0x5234)
+        // (c) EINE GROSSE SEITE. Dasselbe, aber der PD-Eintrag IST die
+        //     Seite (Bit PS). Linux bildet seinen Kern so ab -- ein
+        //     Lauf ohne PS liest den Eintrag als Tabellenzeiger und
+        //     landet im Nichts.
+        __mmio_write64((probe +% 0x2000 +% 8) as *mut u64,
+            0x400000 | 3 | 0x80)
+        gut = gut + zusage((&n_w_big[0]) as u64,
+            gwalk.walk(probe, 8 *% 4096, 0, gwalk.MODE_LONG, va),
+            0x400000 +% 0x1234)
+        // (d) UND EINE ADRESSE, DIE NICHT ABGEBILDET IST. Ein
+        //     Seitenlauf, der immer etwas findet, findet nichts.
+        gut = gut + zusage((&n_w_bad[0]) as u64,
+            gwalk.walk(probe, 8 *% 4096, 0, gwalk.MODE_LONG, 0x80000000),
+            gwalk.GW_BAD)
+        // (e) Der Entzifferer liest `mov cr0, rax` MIT REX -- und zwar
+        //     das richtige Register. Ohne REX.B waere `mov cr0, r8`
+        //     von `mov cr0, rax` nicht zu unterscheiden.
+        //     49 0F 22 C0  =  REX.WB, 0F 22, modrm C0  ->  cr0, r8
+        //
+        // ZUERST DIE GROSSE SEITE ZURUECKNEHMEN. Die Probe (c) oben hat
+        // den PD-Eintrag auf eine 2-MiB-Seite umgestellt; liesse man das
+        // so, zeigte `va` nicht mehr auf 0x5000, und der Entzifferer
+        // laese Nullen statt des Befehls. Ein Nebeneffekt einer Probe
+        // auf die naechste ist der unangenehmste Fehler in einem
+        // Pruefstueck, weil er von der Reihenfolge abhaengt.
+        __mmio_write64((probe +% 0x2000 +% 8) as *mut u64, 0x3000 | 3)
+        __mmio_write8((probe +% 0x5000) as *mut u8, 0x49 as u8)
+        __mmio_write8((probe +% 0x5001) as *mut u8, 0x0F as u8)
+        __mmio_write8((probe +% 0x5002) as *mut u8, 0x22 as u8)
+        __mmio_write8((probe +% 0x5003) as *mut u8, 0xC0 as u8)
+        var dec: [u64; 5] = [0 as u64; 5]
+        let dp: u64 = (&dec[0]) as u64
+        // MODE_LONG und NICHT MODE_FLAT, und das ist kein Detail: ein
+        // REX-Oktett ist NUR im langen Modus ein Vorsatz. Unter 64 Bit
+        // ist 0x49 der Befehl `dec ecx`, und ein Entzifferer, der das
+        // verwechselt, liest jeden Befehl um ein Oktett verschoben.
+        // Der Seitenlauf muss dafuer die Tabelle oben benutzen -- also
+        // liegt der Befehl an der virtuellen Adresse, die auf 0x5000
+        // zeigt, und das ist `va` ohne seinen Versatz.
+        let dl: u64 = gwalk.decode(probe, 8 *% 4096, 0, gwalk.MODE_LONG,
+            va -% 0x234, dp)
+        gut = gut + zusage((&n_d_rex[0]) as u64,
+            gwalk.ins_kind(dp) *% 100 +% gwalk.ins_reg(dp) *% 10 +% dl,
+            gwalk.INS_MOVCR_TO *% 100 +% 8 *% 10 +% 4)
+        mem.frame_free_run(state, probe, 8)
+    } else {
+        gut = gut + zusage((&n_w_walk[0]) as u64, 0, 1)
+        gut = gut + zusage((&n_w_big[0]) as u64, 0, 1)
+        gut = gut + zusage((&n_w_bad[0]) as u64, 0, 1)
+        gut = gut + zusage((&n_d_rex[0]) as u64, 0, 1)
+    }
+
+    // ================================================================
+    //   RUNDE HV3, STUFE 4: DER LADEWEG -- OHNE EIN OKTETT LINUX
+    // ================================================================
+    //
+    // Der Bericht der Runde HV2 sagt in Abschnitt 11, dies sei der
+    // naechste sinnvolle Schritt, "weil sie sich bauen und pruefen
+    // laesst, ohne dass ein einziges Oktett Linux vorhanden sein muss".
+    // Genau das steht hier: ein Abbild, das der WIRT baut, mit einem
+    // Kopf, der der Festlegung entspricht -- und der Ladeweg muss ihn
+    // lesen, pruefen und eine Zero-Page daraus bauen.
+    if on(state, M_ZP) {
+        zp_selftest(state)
+        alle = alle + 7
+        gut = gut + zusage((&n_z_chk[0]) as u64, value_of(state, 30), 0)
+        gut = gut + zusage((&n_z_bad[0]) as u64, value_of(state, 31), 3)
+        gut = gut + zusage((&n_z_e820[0]) as u64, value_of(state, 32),
+            bzload.E820_SLOT)
+        gut = gut + zusage((&n_z_ldr[0]) as u64, value_of(state, 33), 0xFF)
+        gut = gut + zusage((&n_z_cmd[0]) as u64, value_of(state, 34),
+            bzload.G_CMDLINE)
+        gut = gut + zusage((&n_z_hdr[0]) as u64, value_of(state, 35), 1)
+        gut = gut + zusage((&n_z_ent[0]) as u64, value_of(state, 36), 1)
+    }
+
+    // ================================================================
+    //   RUNDE HV3: UND JETZT WIRKLICH EIN LINUX
+    // ================================================================
+    var vlin: u64 = MAX_VMS
+    if on(state, M_LINUX) {
+        let img: u64 = kstate.get(state, kstate.MOD_BASE)
+        let ilen: u64 = kstate.get(state, kstate.MOD_BYTES)
+        if ilen == 0 {
+            // KEIN MODUL IST KEIN FEHLER. Die meisten Laeufe dieses
+            // Kernels haben kein Linux dabei; das Wort ist dann eine
+            // Zeile und sonst nichts.
+            serial.puts((&s_nolin[0]) as u64)
+            serial.nl()
+        } else {
+            vlin = linux_boot(state, img, ilen)
+            alle = alle + 4
+            // Der Kopf war in Ordnung -- sonst ist alles danach Raten.
+            gut = gut + zusage((&n_l_chk[0]) as u64, value_of(state, 50), 0)
+            // Das Abbild ist vollstaendig umgelagert worden.
+            gut = gut + zusage_true((&n_l_load[0]) as u64,
+                value_of(state, 52) > 1000000)
+            // Das Speicherbild steht.
+            gut = gut + zusage((&n_l_e820[0]) as u64, value_of(state, 53),
+                bzload.E820_SLOT)
+            // UND DER MASSSTAB DIESER RUNDE: Linux hat geredet.
+            gut = gut + zusage_true((&n_l_said[0]) as u64,
+                value_of(state, 55) > 0)
+            alle = alle + 4
+            // NICHT NUR EIN PIEPSER. Der Lader allein bringt es auf
+            // wenige Dutzend Oktette; ein Linux, das seinen Hochlauf
+            // wirklich durchlaeuft, redet Tausende. Gemessen wurde
+            // vor dieser Stufe 74, danach ueber 20000.
+            gut = gut + zusage_true((&n_l_viel[0]) as u64,
+                value_of(state, 55) > 4096)
+            // Der Takt lief. Ohne ihn stand der Gast im `hlt`.
+            gut = gut + zusage_true((&n_l_takt[0]) as u64,
+                value_of(state, 58) > 0)
+            // Die Uhr wurde gelesen -- und zwar ein paar Mal und
+            // nicht tausendfach: tausendfach hiesse, er haengt in
+            // der Schleife, die diese Stufe aufgeloest hat.
+            gut = gut + zusage_true((&n_l_uhr[0]) as u64,
+                value_of(state, 59) > 0 && value_of(state, 59) < 256)
+            // Und der zweite Kanal des Zeitgebers hat durchgezaehlt,
+            // statt die Messung der Taktrate ewig warten zu lassen.
+            gut = gut + zusage_true((&n_l_kal[0]) as u64,
+                value_of(state, 60) > 0 && value_of(state, 60) < 512)
+        }
+    }
+
     if on(state, M_MESS) {
         bench(state)
     }
@@ -2391,6 +3415,12 @@ fn stage(state: u64) {
     }
     if v7 < MAX_VMS {
         vm_destroy(state, v7)
+    }
+    // RUNDE HV3: der Linux-Gast ist der groesste von allen -- 73 MiB.
+    // Wenn DER ein Leck hinterliesse, waere es das erste, das man
+    // sieht. Genau deshalb steht die Leck-Zusage hinter ihm.
+    if vlin < MAX_VMS {
+        vm_destroy(state, vlin)
     }
     let frames1: u64 = mem.frames_free(state)
     serial.puts((&s_frames[0]) as u64)
