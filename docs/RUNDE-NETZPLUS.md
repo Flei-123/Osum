@@ -205,6 +205,7 @@ tools/netzplus/run.sh   39 passed, 0 failed
 tools/net/run.sh        75 passed, 0 failed   (der Laeufer der Runde K8)
 tools/k17/run.sh       158 passed, 0 failed   (Sollwert 158/0)
 tools/hotplug/run.sh    45 passed, 0 failed   (Sollwert 45/0)
+tools/install/abnahme.sh 35 gruen, 0 rot      (Sollwert 35/0)
 ```
 
 `tools/net/run.sh` ist der wichtigste dieser vier, weil ihn diese Runde
