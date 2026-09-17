@@ -26,6 +26,8 @@ unter `tools/struktur/` liegen und die jeder nachrechnen kann.
 | Was verhindert den großen Umbau? | **113 der 126** flachen Dateien werden in `tools/` **mit Pfad** genannt |
 | Lässt sich `sys.fi` (14 243 Z.) teilen? | **Heute nicht sauber** — die Begründung steht in Abschnitt 6 |
 | Nebenbefund | `tools/server/run.sh` ist **schon auf `main` rot** (4 passed, 13 failed) — Abschnitt 5b |
+| **Liegen die Dateien jetzt wirklich in Schichten?** | **Ja — 138 von 138, 25 Verzeichnisse. Teil 2** |
+| Wie viele Dateien sind umgezogen? | **120**, alle als echte Umbenennung |
 
 ---
 
@@ -507,6 +509,334 @@ Messfehler des Vergleichs, kein Befund.
 | `tools/struktur/verschiebe.sh` | zieht **ein** Modul um, passt nur die import-Zeilen an |
 
 ---
+
+
+---
+
+# TEIL 2 — DER RÄUMLICHE UMBAU
+
+Justin, wörtlich: *„bitte mach es räumlich auch gut strukturiert"*.
+
+Teil 1 war die Erhebung. Das hier ist der Umzug: die Dateien liegen
+jetzt wirklich in Schichtverzeichnissen, nicht nur in einer Tabelle.
+
+## 10. Der Riegel, der zuerst weg musste
+
+Der erste Anlauf schätzte, nur 13 Dateien seien frei verschiebbar,
+weil 113 von ihnen in `tools/` „mit Pfad genannt" werden. Diese Zahl
+war zu pessimistisch, und `tools/struktur/pfadnennungen.py` zeigt
+warum: sie trennt Nennungen in **ausführbarem Code** von denen in
+**Kommentaren**.
+
+| | Module |
+|---|---:|
+| ohne jede ausführbare Nennung — **frei** | **70** |
+| mit ausführbarer Nennung — teuer | 67 |
+
+`kernel/sys.fi` etwa wird 81-mal genannt, aber nur 67-mal in Code; bei
+`kernel/fb.fi` sind es 6 von 18. Der Rest ist Prosa („siehe
+`kernel/fs.fi`") und wird beim Umzug höchstens ungenau, nicht falsch.
+
+Statt in über hundert Läufern je einen Pfad zu ändern — und beim
+nächsten Umzug wieder — gibt es jetzt **eine Auskunft**:
+
+```
+tools/kfind.sh <modul>    # Pfad, egal in welcher Schicht
+tools/kpfad.sh            # dieselbe Auskunft als Shell-Funktion kfi
+```
+
+Genau ein Treffer, sonst Code 1 und eine Meldung. `kernel/user/` und
+`kernel/app/` bleiben außen vor, weil dort Namen doppelt vorkommen.
+
+`tools/build-kernel.sh` und `tools/marke-einsetzen.py` buchstabieren
+keine Pfade mehr: `ersetze()`/`weg()` suchen Stummel und Ziel im
+Kopierbaum, `finde()` sucht `brand.fi` und `version.fi`. Damit
+überlebt der Bau jeden weiteren Umzug.
+
+## 11. Die Ablage
+
+`tools/struktur/ablage.txt` sagt für **jede** der 138 Kerndateien, wo
+sie liegen soll; `ablage.py` vergleicht Soll und Ist.
+
+```
+Ablage: 138 Dateien am richtigen Ort, 0 am falschen, 0 ohne Soll, 0 vermisst
+```
+
+### Die Verzeichnisse
+
+| Verzeichnis | Dateien | was darin liegt |
+|---|---:|---|
+| `fs/` | 15 | Dateisysteme und Namensraum |
+| `gfx/` | 10 | Rahmenpuffer, Schrift, Anzeigemodus |
+| `lib/` | 10 | reine Hilfen: `errno`, `kstate`, `vektor`, `version` |
+| `arch/x86_64/` | 9 | Prozessor; dazu `trap` und `smp` neben ihren `.s` |
+| `sched/` | 8 | Fäden, Prozesse, Zeit, Signale, Schlaf |
+| `ipc/` | 7 | Rechte, Griffe, Aufträge, gemeinsamer Speicher |
+| `acpi/` | 6 | ACPI und der AML-Ausleger |
+| `drv/hid/` | 6 | Tastatur, Maus, HID |
+| `ui/` | 6 | Fenster, Kacheln, Zeiger |
+| `block/` | 5 | Blockschicht über den Plattentreibern |
+| `drv/snd/` | 5 | Ton |
+| `ldr/` | 5 | ELF, Module, Startmodule |
+| `arch/` | 4 | `cpu`, `msr`, `machine`, `arch` |
+| `crypto/` | 4 | Krypto |
+| `diag/` | 4 | Absturz, Geräteübersicht |
+| `pwr/` | 4 | Energie, Akku, Messung |
+| `drv/blk` `drv/con` | je 3 | Platten-, Konsolentreiber |
+| `bus/` `drv/net` `drv/usb` `sys/` | je 2 | Busse, Netzkarten, Hostadapter, Aufruftafel |
+| `drv/gpu/` `mm/` `sync/` `usb/` | je 1 | Anzeige, Speicher, Atomik, USB-Kern |
+| `kernel/` (flach) | 12 | siehe unten |
+
+### Was bewusst flach liegen bleibt
+
+| Datei | Grund |
+|---|---|
+| `kmain.fi`, `uprog.fi` | die **zwei Wurzeln**. Der Übersetzer startet hier; eine Wurzel gehört an den Eingang, nicht in einen Unterordner |
+| `serial.fi`, `klog.fi` | die **zwei Ausgaben vor dem Speicher**. Wer sie sucht, sucht sie zuerst |
+| `tasks.fi` | die Daueraufgabenschleife, greift quer durch den ganzen Kern (`glue`) |
+| `inet.fi`, `netdev.fi`, `netmon.fi`, `netview.fi`, `netsvc.fi`, `netmark.fi`, `wg.fi` | **gehören den Nachbarrunden** `ebpf` und `netzplus`. Nicht umgezogen; nur 31 `import`-Zeilen mussten mitgehen — siehe Abschnitt 14 |
+
+## 12. Drei Fallen, die der Umbau gestellt hat
+
+Jede davon hat einen Bau oder einen Testlauf gekippt. Sie stehen hier,
+weil die nächste Runde sie sonst noch einmal stellt.
+
+### 12.1 `kmain.fi` ist für `grep` eine Binärdatei
+
+`kernel/kmain.fi` enthält eingebettete Oktette. `grep -rl` hält die
+Datei deshalb für binär und **lässt sie aus jeder Trefferliste weg** —
+ohne `-a`. Beim ersten Umzug blieben so **45 import-Zeilen der Wurzel**
+stehen, und der Bau brach ab:
+
+```
+error: cannot read 'kernel/time.fi': No such file or directory
+```
+
+### 12.2 Eine einzige Zeile mit Nachsatz
+
+`kernel/wm.fi:75` hieß `import time // RUNDE ALLTAG: ...`. Ein Muster,
+das am Zeilenende endet, trifft das nicht. Es war die **einzige**
+solche Zeile im ganzen Baum — und genau sie kippte den zweiten Bau.
+
+### 12.3 `libc.errno` ist nicht `lib.errno`
+
+Das Ersetzungsmuster lautete `(irgendwas\.)?<modul>` und traf damit
+auch Pfade, die gar nicht in den Kern zeigen. `kernel/user/` benutzt
+`libc.errno`, `libc.mem` und `libc.proc` aus **`lib/libc/`**. Ein Lauf
+machte daraus `lib.errno`, `mm.mem` und `sched.proc`: **40 Zeilen in
+33 Programmen**, `kernel/user/ls.fi` ließ sich nicht mehr übersetzen,
+**K17 fiel auf 13 von 49**.
+
+Dazu kommt, dass `kernel/user/` Module **gleichen Namens** hat wie der
+Kern: `nidx`, `crash`, `hwid`, `netmon`, `netview`, `power`, `wmplug`.
+Ein `import nidx` dort meint die Datei **nebenan**.
+
+**Die Lehre, in beiden Werkzeugen festgeschrieben:** ersetzt wird nur
+der nackte Name und der Ordner, in dem die Datei **zuletzt lag**; jeder
+Pfad, dessen Präfix kein Verzeichnis unter `kernel/` ist, bleibt
+unberührt; `kernel/user/` und `kernel/app/` werden nie angefasst.
+`kernel/user` und `kernel/app` stehen Zeichen für Zeichen auf dem Stand
+von `main`.
+
+## 13. Das Prüfskript prüft jetzt beides
+
+`tools/struktur/run.sh`:
+
+1. **Die Ablage** — liegt jede Datei in ihrem Verzeichnis? Muss **0**
+   Abweichungen haben.
+2. **Die Aufrufrichtung** — ruft jedes Modul nur gleiche oder tiefere
+   Schichten? Deckel **47**.
+
+Und für **beide** eine Gegenprobe:
+
+```
+== 3. Gegenprobe A: merkt die Ablagepruefung einen falschen Ort? ==
+ahci.fi kuenstlich nach kernel/ zurueckgelegt: vorher 0, nachher 1
+GRUEN: die Ablagepruefung schlaegt an (0 -> 1).
+
+== 4. Gegenprobe B: merkt die Richtungspruefung einen Regelbruch? ==
+kuenstlicher Bruch in drv/blk/ahci.fi: vorher 47, nachher 48
+GRUEN: die Richtungspruefung schlaegt an (47 -> 48).
+```
+
+> **Gegenprobe A hat sich sofort bezahlt gemacht.** Beim ersten Lauf
+> meldete sie `vorher 0, nachher 0` — **rot**. Der Grund war ein echter
+> Fehler in `ablage.py`: eine an den falschen Ort gelegte Datei fällt
+> aus der Erreichbarkeit heraus (ihr `import` zeigt ins Leere) und war
+> damit **unsichtbar**. `ablage.py` liest den Baum jetzt zusätzlich
+> flach und meldet Vermisste. Ohne Gegenprobe wäre diese Lücke
+> unbemerkt geblieben — und das Skript hätte für immer „OK" gesagt.
+
+## 14. Datei alt → neu (alle 120)
+
+Für den Merge mit `container`, `ebpf` und `netzplus`. Alle 120 sind in
+der Historie **echte Umbenennungen** (`git log --follow` findet die
+Vorgeschichte); der Inhalt ist bis auf import-Zeilen unverändert.
+
+### Der Netzweg: was die Nachbarrunden wissen müssen
+
+Die sieben Netzdateien **sind nicht umgezogen** — sie liegen weiterhin
+flach in `kernel/`, genau dort, wo `ebpf` und `netzplus` sie erwarten.
+Ihr Inhalt ist unverändert, **mit einer Ausnahme, die ehrlich benannt
+gehört**: weil die Module, die sie *aufrufen*, umgezogen sind, mussten
+ihre `import`-Zeilen mitgehen.
+
+| Datei | geänderte Zeilen | was sich änderte |
+|---|---:|---|
+| `inet.fi` | 8 | `import kstate` → `import lib.kstate` usw. |
+| `netdev.fi` | 6 | dito |
+| `netsvc.fi` | 6 | dito |
+| `wg.fi` | 5 | dito |
+| `netview.fi` | 4 | dito |
+| `netmon.fi` | 2 | dito |
+| `netmark.fi` | 0 | unberührt |
+| **zusammen** | **31** | **ausschließlich `import`-Zeilen** |
+
+Kein Rumpf, keine Funktion, keine Konstante. Wer diese Runde mit
+`ebpf` oder `netzplus` zusammenführt, nimmt bei einem Konflikt in
+diesen Dateien **die Fassung der Netzrunde** und setzt danach einmal
+
+```
+bash tools/struktur/importe-richten.sh
+```
+
+darüber — das Werkzeug liest, wo jedes Modul wirklich liegt, und
+richtet die `import`-Zeilen ohne Handarbeit.
+
+Für `container` (fasst `sched.fi`, `sys.fi`, `vfs.fi` an) sind diese
+drei Zeilen die wichtigsten:
+
+| alt | neu |
+|---|---|
+| `kernel/sched.fi` | `kernel/sched/sched.fi` |
+| `kernel/sys.fi` | `kernel/sys/sys.fi` |
+| `kernel/vfs.fi` | `kernel/fs/vfs.fi` |
+
+Die vollständige Liste:
+
+| alt | neu |
+|---|---|
+| `kernel/acpi.fi` | `kernel/acpi/acpi.fi` |
+| `kernel/acpiev.fi` | `kernel/acpi/acpiev.fi` |
+| `kernel/aml.fi` | `kernel/acpi/aml.fi` |
+| `kernel/amlev.fi` | `kernel/acpi/amlev.fi` |
+| `kernel/amlns.fi` | `kernel/acpi/amlns.fi` |
+| `kernel/amlobj.fi` | `kernel/acpi/amlobj.fi` |
+| `kernel/cpu.fi` | `kernel/arch/cpu.fi` |
+| `kernel/msr.fi` | `kernel/arch/msr.fi` |
+| `kernel/blk.fi` | `kernel/block/blk.fi` |
+| `kernel/blkdev.fi` | `kernel/block/blkdev.fi` |
+| `kernel/part.fi` | `kernel/block/part.fi` |
+| `kernel/rootsel.fi` | `kernel/block/rootsel.fi` |
+| `kernel/wechsel.fi` | `kernel/block/wechsel.fi` |
+| `kernel/bus.fi` | `kernel/bus/bus.fi` |
+| `kernel/pci.fi` | `kernel/bus/pci.fi` |
+| `kernel/kaesni.fi` | `kernel/crypto/kaesni.fi` |
+| `kernel/kargon.fi` | `kernel/crypto/kargon.fi` |
+| `kernel/krypto.fi` | `kernel/crypto/krypto.fi` |
+| `kernel/kshani.fi` | `kernel/crypto/kshani.fi` |
+| `kernel/crash.fi` | `kernel/diag/crash.fi` |
+| `kernel/hw.fi` | `kernel/diag/hw.fi` |
+| `kernel/hwdiag.fi` | `kernel/diag/hwdiag.fi` |
+| `kernel/hwid.fi` | `kernel/diag/hwid.fi` |
+| `kernel/ahci.fi` | `kernel/drv/blk/ahci.fi` |
+| `kernel/nvme.fi` | `kernel/drv/blk/nvme.fi` |
+| `kernel/virtio.fi` | `kernel/drv/blk/virtio.fi` |
+| `kernel/ansi.fi` | `kernel/drv/con/ansi.fi` |
+| `kernel/sercon.fi` | `kernel/drv/con/sercon.fi` |
+| `kernel/tty.fi` | `kernel/drv/con/tty.fi` |
+| `kernel/vgpu.fi` | `kernel/drv/gpu/vgpu.fi` |
+| `kernel/hidin.fi` | `kernel/drv/hid/hidin.fi` |
+| `kernel/hidrep.fi` | `kernel/drv/hid/hidrep.fi` |
+| `kernel/hidtest.fi` | `kernel/drv/hid/hidtest.fi` |
+| `kernel/i2chid.fi` | `kernel/drv/hid/i2chid.fi` |
+| `kernel/kbd.fi` | `kernel/drv/hid/kbd.fi` |
+| `kernel/ps2m-aus.fi` | `kernel/drv/hid/ps2m-aus.fi` |
+| `kernel/ps2m.fi` | `kernel/drv/hid/ps2m.fi` |
+| `kernel/e1000.fi` | `kernel/drv/net/e1000.fi` |
+| `kernel/r8169.fi` | `kernel/drv/net/r8169.fi` |
+| `kernel/ac97.fi` | `kernel/drv/snd/ac97.fi` |
+| `kernel/audio.fi` | `kernel/drv/snd/audio.fi` |
+| `kernel/codecstat.fi` | `kernel/drv/snd/codecstat.fi` |
+| `kernel/hda.fi` | `kernel/drv/snd/hda.fi` |
+| `kernel/mix.fi` | `kernel/drv/snd/mix.fi` |
+| `kernel/ehci.fi` | `kernel/drv/usb/ehci.fi` |
+| `kernel/xhci.fi` | `kernel/drv/usb/xhci.fi` |
+| `kernel/devfs.fi` | `kernel/fs/devfs.fi` |
+| `kernel/ext4-aus.fi` | `kernel/fs/ext4-aus.fi` |
+| `kernel/ext4.fi` | `kernel/fs/ext4.fi` |
+| `kernel/fat.fi` | `kernel/fs/fat.fi` |
+| `kernel/file.fi` | `kernel/fs/file.fi` |
+| `kernel/fs.fi` | `kernel/fs/fs.fi` |
+| `kernel/ftype.fi` | `kernel/fs/ftype.fi` |
+| `kernel/mnt.fi` | `kernel/fs/mnt.fi` |
+| `kernel/nidx.fi` | `kernel/fs/nidx.fi` |
+| `kernel/ntfs-aus.fi` | `kernel/fs/ntfs-aus.fi` |
+| `kernel/ntfs.fi` | `kernel/fs/ntfs.fi` |
+| `kernel/ofs.fi` | `kernel/fs/ofs.fi` |
+| `kernel/ofsj.fi` | `kernel/fs/ofsj.fi` |
+| `kernel/procfs.fi` | `kernel/fs/procfs.fi` |
+| `kernel/unixsock.fi` | `kernel/fs/unixsock.fi` |
+| `kernel/vfs.fi` | `kernel/fs/vfs.fi` |
+| `kernel/vfsops.fi` | `kernel/fs/vfsops.fi` |
+| `kernel/cursor.fi` | `kernel/gfx/cursor.fi` |
+| `kernel/dispsave.fi` | `kernel/gfx/dispsave.fi` |
+| `kernel/fb.fi` | `kernel/gfx/fb.fi` |
+| `kernel/font.fi` | `kernel/gfx/font.fi` |
+| `kernel/gfx-aus.fi` | `kernel/gfx/gfx-aus.fi` |
+| `kernel/gfx.fi` | `kernel/gfx/gfx.fi` |
+| `kernel/grafik.fi` | `kernel/gfx/grafik.fi` |
+| `kernel/r3dsoft.fi` | `kernel/gfx/r3dsoft.fi` |
+| `kernel/r3dtest.fi` | `kernel/gfx/r3dtest.fi` |
+| `kernel/ttf.fi` | `kernel/gfx/ttf.fi` |
+| `kernel/vmode.fi` | `kernel/gfx/vmode.fi` |
+| `kernel/async.fi` | `kernel/ipc/async.fi` |
+| `kernel/cap.fi` | `kernel/ipc/cap.fi` |
+| `kernel/handle.fi` | `kernel/ipc/handle.fi` |
+| `kernel/perm.fi` | `kernel/ipc/perm.fi` |
+| `kernel/share.fi` | `kernel/ipc/share.fi` |
+| `kernel/tip-off.fi` | `kernel/ipc/tip-off.fi` |
+| `kernel/tip.fi` | `kernel/ipc/tip.fi` |
+| `kernel/uio.fi` | `kernel/ipc/uio.fi` |
+| `kernel/bootmod.fi` | `kernel/ldr/bootmod.fi` |
+| `kernel/elf.fi` | `kernel/ldr/elf.fi` |
+| `kernel/modidx.fi` | `kernel/ldr/modidx.fi` |
+| `kernel/modtab.fi` | `kernel/ldr/modtab.fi` |
+| `kernel/module.fi` | `kernel/ldr/module.fi` |
+| `kernel/ab.fi` | `kernel/lib/ab.fi` |
+| `kernel/brand.fi` | `kernel/lib/brand.fi` |
+| `kernel/chipname.fi` | `kernel/lib/chipname.fi` |
+| `kernel/errno.fi` | `kernel/lib/errno.fi` |
+| `kernel/kstate.fi` | `kernel/lib/kstate.fi` |
+| `kernel/ksym.fi` | `kernel/lib/ksym.fi` |
+| `kernel/ksymtab.fi` | `kernel/lib/ksymtab.fi` |
+| `kernel/kutil.fi` | `kernel/lib/kutil.fi` |
+| `kernel/vektor.fi` | `kernel/lib/vektor.fi` |
+| `kernel/version.fi` | `kernel/lib/version.fi` |
+| `kernel/mem.fi` | `kernel/mm/mem.fi` |
+| `kernel/batt.fi` | `kernel/pwr/batt.fi` |
+| `kernel/pmon.fi` | `kernel/pwr/pmon.fi` |
+| `kernel/power.fi` | `kernel/pwr/power.fi` |
+| `kernel/pwr.fi` | `kernel/pwr/pwr.fi` |
+| `kernel/proc.fi` | `kernel/sched/proc.fi` |
+| `kernel/rand.fi` | `kernel/sched/rand.fi` |
+| `kernel/sched.fi` | `kernel/sched/sched.fi` |
+| `kernel/schlaf.fi` | `kernel/sched/schlaf.fi` |
+| `kernel/signal.fi` | `kernel/sched/signal.fi` |
+| `kernel/susp.fi` | `kernel/sched/susp.fi` |
+| `kernel/time.fi` | `kernel/sched/time.fi` |
+| `kernel/wach.fi` | `kernel/sched/wach.fi` |
+| `kernel/atomic.fi` | `kernel/sync/atomic.fi` |
+| `kernel/sys.fi` | `kernel/sys/sys.fi` |
+| `kernel/sysgui.fi` | `kernel/sys/sysgui.fi` |
+| `kernel/kgui.fi` | `kernel/ui/kgui.fi` |
+| `kernel/shot.fi` | `kernel/ui/shot.fi` |
+| `kernel/tile.fi` | `kernel/ui/tile.fi` |
+| `kernel/wig.fi` | `kernel/ui/wig.fi` |
+| `kernel/wm.fi` | `kernel/ui/wm.fi` |
+| `kernel/wmplug.fi` | `kernel/ui/wmplug.fi` |
+| `kernel/usb.fi` | `kernel/usb/usb.fi` |
+
 
 ## 9. Was als Nächstes sinnvoll ist
 
