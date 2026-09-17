@@ -10,7 +10,7 @@ zwei Rechnungen ueber den Akku (Prozent und Restzeit).
 Ein Test, der die Ausgabe des Kernels gegen eine Konstante haelt, die
 derselbe Mensch aus demselben Kopf abgeschrieben hat, misst nichts.
 Deshalb steht die Rechnung hier NOCH EINMAL -- aus dem Handbuch und
-nicht aus `kernel/pwr.fi`.  Wenn beide dasselbe sagen, ist es
+nicht aus `kernel/pwr/pwr.fi`.  Wenn beide dasselbe sagen, ist es
 wahrscheinlich richtig; wenn nicht, ist eine der beiden falsch, und das
 ist genau die Auskunft, die ein Test geben soll.
 

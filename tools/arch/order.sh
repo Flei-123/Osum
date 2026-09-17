@@ -139,10 +139,10 @@ else
 fi
 
 echo "== 6. and atomic.fi no longer holds one instruction of any machine =="
-n=$(grep -c 'asm(' kernel/atomic.fi)
+n=$(grep -c 'asm(' kernel/sync/atomic.fi)
 [ "$n" -eq 0 ] \
-    && ok "kernel/atomic.fi: 0 inline assembly blocks (it had 4)" \
-    || bad "kernel/atomic.fi still has $n asm blocks"
+    && ok "kernel/sync/atomic.fi: 0 inline assembly blocks (it had 4)" \
+    || bad "kernel/sync/atomic.fi still has $n asm blocks"
 
 echo
 echo "ORDER: $pass passed, $fail failed"

@@ -730,7 +730,7 @@ def main():
     txt = s()
     lay = re.findall(r"kbd: layout (\w+)", txt)
     merke("6.1", "Deutsches Layout vorhanden", "GEHT",
-          "kernel/kbd.fi: L_DE, de_code(), de_shift(), de_altgr()")
+          "kernel/drv/hid/kbd.fi: L_DE, de_code(), de_shift(), de_altgr()")
     merke("6.2", "Deutsches Layout AKTIV (Vorgabe)",
           "GEHT" if lay and lay[-1] == "de" else "GEHT NICHT",
           "serial: 'kbd: layout %s' (DURCHKLICK: L_US=0)"

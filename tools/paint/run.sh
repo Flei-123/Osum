@@ -167,7 +167,7 @@ fi
 echo "== 6. dieselben Nummern an drei Stellen =="
 # WM_FORM und WM_APP
 for n in 2115 2116; do
-    grep -qE "= $n( |$)" kernel/sys.fi && ok "Aufrufnummer $n steht in kernel/sys.fi" \
+    grep -qE "= $n( |$)" kernel/sys/sys.fi && ok "Aufrufnummer $n steht in kernel/sys/sys.fi" \
         || bad "Aufrufnummer $n fehlt"
 done
 # RUNDE WMPLUGIN: die ABGESCHRIEBENE ZAHL IST WEG. Hier stand `= 2116`,
@@ -176,15 +176,15 @@ done
 # keine. Also wird die Zahl GELESEN und VERGLICHEN: sie muss mindestens
 # 2126 sein und mit der hoechsten Aufrufnummer uebereinstimmen, die
 # wirklich in der Datei steht.
-maxnr=$(grep -oE 'const WM_MAXNR: u64 = [0-9]+' kernel/sys.fi | grep -oE '[0-9]+$')
-hoch=$(grep -oE '^const WM_[A-Z_]+: u64 = 21[0-9][0-9]' kernel/sys.fi \
+maxnr=$(grep -oE 'const WM_MAXNR: u64 = [0-9]+' kernel/sys/sys.fi | grep -oE '[0-9]+$')
+hoch=$(grep -oE '^const WM_[A-Z_]+: u64 = 21[0-9][0-9]' kernel/sys/sys.fi \
     | grep -v WM_MAXNR | grep -oE '[0-9]+$' | sort -n | tail -1)
 if [ -n "${maxnr:-}" ] && [ "$maxnr" -ge 2126 ] && [ "$maxnr" = "${hoch:-x}" ]; then
     ok "WM_MAXNR=$maxnr ist die hoechste Aufrufnummer des Fensterservers (>= 2126)"
 else
     bad "WM_MAXNR='$maxnr' passt nicht zu den Aufrufen (hoechste gefunden: '$hoch', erwartet >= 2126)"
 fi
-for f in kernel/wm.fi kernel/sys.fi kernel/user/wlibc.fi; do
+for f in kernel/ui/wm.fi kernel/sys/sys.fi kernel/user/wlibc.fi; do
     a=$(grep -cE '(FM|WF)_RADIUS: u64 = 0' "$f")
     b=$(grep -cE '(FM|WF)_SHADOW_C: u64 = 3' "$f")
     if [ "$a" = 1 ] && [ "$b" = 1 ]; then
@@ -193,14 +193,14 @@ for f in kernel/wm.fi kernel/sys.fi kernel/user/wlibc.fi; do
         bad "$f numeriert die Formsteckplaetze anders"
     fi
 done
-sa=$(grep -c 'const WL_BYTES: u64 = 128' kernel/sys.fi)
+sa=$(grep -c 'const WL_BYTES: u64 = 128' kernel/sys/sys.fi)
 sb=$(grep -c 'const WL_BYTES: u64 = 128' kernel/user/wlibc.fi)
 if [ "$sa" = 1 ] && [ "$sb" = 1 ]; then
     ok "der Satz von WM_LIST ist auf beiden Seiten 128 Oktette lang"
 else
     bad "WL_BYTES laeuft zwischen Kern und Bibliothek auseinander"
 fi
-ka=$(grep -c 'const APP_LEN: u64 = 24' kernel/wm.fi)
+ka=$(grep -c 'const APP_LEN: u64 = 24' kernel/ui/wm.fi)
 kb=$(grep -c 'const APP_LEN: u64 = 24' kernel/user/wlibc.fi)
 if [ "$ka" = 1 ] && [ "$kb" = 1 ]; then
     ok "und der Buendelname ist auf beiden Seiten 24 Oktette lang"

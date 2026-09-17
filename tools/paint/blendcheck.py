@@ -116,8 +116,8 @@ def randbedingungen():
 
 
 QUELLEN = [
-    ("kernel/fb.fi", "return (src *% a +% dst *% ia +% 127) / 255"),
-    ("kernel/wm.fi", "return (src *% a +% dst *% ia +% 127) / 255"),
+    ("kernel/gfx/fb.fi", "return (src *% a +% dst *% ia +% 127) / 255"),
+    ("kernel/ui/wm.fi", "return (src *% a +% dst *% ia +% 127) / 255"),
     ("kernel/user/wlibc.fi",
      "return (src *% a +% dst *% ia +% 127) / 255"),
     ("tools/gfx/checkshot.py", "(alt[k] * ia + neu[k] * a + 127) // 255"),

@@ -72,17 +72,17 @@ grep -q 'AESNI_OFF' tools/kernel/memmap.py \
 
 # DIE ZUGETEILTEN BEREICHE. Sie stehen im Auftrag und in kstate.fi oben
 # bei KDATA_SIZE; wer sie verschiebt, faellt hier auf.
-grep -q 'const AESNI_OFF: u64 = 0x120000' kernel/kstate.fi \
+grep -q 'const AESNI_OFF: u64 = 0x120000' kernel/lib/kstate.fi \
     && ok "der kdata-Bereich liegt auf 0x120000 wie zugeteilt" \
     || bad "AESNI_OFF steht nicht auf 0x120000"
-grep -q 'const AESNI_MAX: u64 = 0x1000' kernel/kstate.fi \
+grep -q 'const AESNI_MAX: u64 = 0x1000' kernel/lib/kstate.fi \
     && ok "und ist EINE Seite gross wie zugeteilt" \
     || bad "AESNI_MAX ist nicht 0x1000"
-grep -q 'const M_NOAESNI: u64 = 1010' kernel/kstate.fi \
+grep -q 'const M_NOAESNI: u64 = 1010' kernel/lib/kstate.fi \
     && ok "die Modusindizes fangen bei 1010 an wie zugeteilt" \
     || bad "M_NOAESNI steht nicht auf 1010"
 # Kein Index oberhalb von 1019.
-hoch=$(grep -oE 'const M_[A-Z]+: u64 = 101[0-9]' kernel/kstate.fi \
+hoch=$(grep -oE 'const M_[A-Z]+: u64 = 101[0-9]' kernel/lib/kstate.fi \
     | grep -oE '101[0-9]' | sort -n | tail -1)
 [[ -n $hoch && $hoch -le 1019 ]] \
     && ok "kein Modusindex dieser Runde oberhalb von 1019 (hoechster: $hoch)" \

@@ -7,7 +7,7 @@ Stellen gemalt, die nichts miteinander zu tun haben:
 
   * die Taskleiste (`kernel/user/taskbar.fi`) -- Ring 3, malt eine
     OSYM-Datei von der Platte,
-  * die Titelleiste (`kernel/wm.fi`) -- der KERN, der keine Datei von der
+  * die Titelleiste (`kernel/ui/wm.fi`) -- der KERN, der keine Datei von der
     Platte liest, waehrend er ein Fenster zeichnet.
 
 Zwei Stellen, ein Zeichen. Der bequeme Weg waere, die zwoelf mal zwoelf

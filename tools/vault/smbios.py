@@ -5,7 +5,7 @@
     smbios.py <speicherabzug.bin>            die Felder, als schluessel=wert
     smbios.py --koeder <speicherabzug.bin>   der Beleg fuer die Pruefsumme
 
-Das ist die zweite Umsetzung des Lesers in `kernel/hwid.fi`, geschrieben
+Das ist die zweite Umsetzung des Lesers in `kernel/diag/hwid.fi`, geschrieben
 aus der Beschreibung und NICHT aus dem Firn-Quelltext. Genau das ist der
 Sinn: zwei Programme, in zwei Sprachen, auf zwei Seiten eines
 Speicherabzugs. Eine Umsetzung allein kann zweimal denselben Fehler

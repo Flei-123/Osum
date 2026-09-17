@@ -129,14 +129,14 @@ hat "$TMPD/karte.txt" "0 Kollisionen" "keine zwei Bereiche ueberschneiden sich"
 # DER BEREICH DIESER RUNDE LIEGT, WO ER ZUGETEILT WURDE. Fuenf Runden
 # hintereinander haben sich dieselbe freie Seite genommen; diese hier
 # hat ihre Adresse VOR der Runde bekommen.
-v=$(grep -aE "^const CRYPT_OFF: u64 = 0x[0-9A-Fa-f]+" kernel/kstate.fi \
+v=$(grep -aE "^const CRYPT_OFF: u64 = 0x[0-9A-Fa-f]+" kernel/lib/kstate.fi \
     | head -1 | grep -oE '0x[0-9A-Fa-f]+')
 if [ "$(( v ))" = "$(( 0x113000 ))" ]; then
     ok "CRYPT_OFF = $v -- genau die zugeteilte Adresse"
 else
     bad "CRYPT_OFF = ${v:-fehlt}, zugeteilt war 0x113000"
 fi
-m=$(grep -aE "^const CRYPT_MAX: u64 = 0x[0-9A-Fa-f]+" kernel/kstate.fi \
+m=$(grep -aE "^const CRYPT_MAX: u64 = 0x[0-9A-Fa-f]+" kernel/lib/kstate.fi \
     | head -1 | grep -oE '0x[0-9A-Fa-f]+')
 if [ "$(( v + m ))" -le "$(( 0x118000 ))" ]; then
     ok "und endet bei $(printf '0x%X' $(( v + m ))), also nicht hinter 0x118000"

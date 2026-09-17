@@ -54,20 +54,20 @@ echo "== 2. die Ein-Kern-Regel, an der Quelle =="
 # Kerne teilen und den niemand sperrt. STATUS-MERGE6.md haelt zwei
 # davon fest (fs.inode_get, wig.glyph_into). In bus.fi darf es keinen
 # geben.
-n_static=$(grep -c '^static mut' kernel/bus.fi || true)
+n_static=$(grep -c '^static mut' kernel/bus/bus.fi || true)
 if [ "$n_static" = 0 ]; then
-    ok "kernel/bus.fi hat keinen 'static mut'"
+    ok "kernel/bus/bus.fi hat keinen 'static mut'"
 else
-    bad "kernel/bus.fi hat $n_static globale Variablen"
+    bad "kernel/bus/bus.fi hat $n_static globale Variablen"
 fi
-if sed -n '/^fn do_bus/,/^}/p' kernel/sys.fi | grep -q 'state + kstate\.'; then
+if sed -n '/^fn do_bus/,/^}/p' kernel/sys/sys.fi | grep -q 'state + kstate\.'; then
     bad "sys.do_bus fasst einen kdata-Puffer an"
 else
     ok "sys.do_bus kopiert in seinen eigenen Stapelrahmen"
 fi
 py=$(python3 - <<'PYEOF'
 import re
-s = open("kernel/bus.fi", encoding="utf-8", errors="surrogateescape").read()
+s = open("kernel/bus/bus.fi", encoding="utf-8", errors="surrogateescape").read()
 funcs = {}
 name = None
 for line in s.split("\n"):

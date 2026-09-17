@@ -124,7 +124,7 @@ fi
 echo "== 1. die Nummern, und die Karte, wer welchen Bereich hat =="
 check() { # name expected
     local got
-    got=$(number_in kernel/sys.fi "SYS_$1")
+    got=$(number_in kernel/sys/sys.fi "SYS_$1")
     if [ "$got" = "$2" ]; then ok "SYS_$1 = $2 (Linux' Nummer)"
     else bad "SYS_$1 = ${got:-fehlt}, Linux sagt $2"; fi
 }
@@ -148,12 +148,12 @@ check GETRANDOM 318
 # 1000..1099 gehoert den Runden K1 und K6, 1200 aufwaerts den Runden K7
 # und K8. Genau daran ist an diesem Repo schon dreimal ein Zusammenstoss
 # entstanden.
-own=$(grep -aoE "^const SYS_OSUM_(PTY|TTYINFO|SIGINFO): u64 = [0-9]+" kernel/sys.fi \
+own=$(grep -aoE "^const SYS_OSUM_(PTY|TTYINFO|SIGINFO): u64 = [0-9]+" kernel/sys/sys.fi \
     | sed -E 's/.*= ([0-9]+).*/\1/' | sort -n)
 lo=$(echo "$own" | head -1); hi=$(echo "$own" | tail -1)
 num "die kleinste Nummer, die Runde K9 selbst erfunden hat" "${lo:-0}" ge 1100
 num "und die groesste" "${hi:-0}" le 1199
-grep -q '1100\.\.1199   RUNDE K9' kernel/sys.fi \
+grep -q '1100\.\.1199   RUNDE K9' kernel/sys/sys.fi \
     && ok "die Bereichskarte steht oben in sys.fi" \
     || bad "die Bereichskarte fehlt in sys.fi"
 # Keine Nummer von K9 liegt im Socket-Block, den Runde K8 braucht.

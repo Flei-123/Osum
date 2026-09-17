@@ -11,10 +11,10 @@ Panik-Bildschirm ist fuer die Maschine gebaut, die keine serielle Leitung
 hat (Justins Brett meldet LSR 0xFF).
 
 Also wird das Bild WIRKLICH GELESEN.  Das geht hier, weil der Schriftsatz
-bekannt ist: `kernel/font.fi` traegt ihn als Oktettfolgen im Quelltext,
+bekannt ist: `kernel/gfx/font.fi` traegt ihn als Oktettfolgen im Quelltext,
 acht mal sechzehn Pixel je Zeichen, ein Bit je Pixel.  Dieses Programm
 
-  1. holt die Glyphen aus `kernel/font.fi`,
+  1. holt die Glyphen aus `kernel/gfx/font.fi`,
   2. legt ueber das PPM ein Raster von 8x16,
   3. macht aus jeder Zelle wieder sechzehn Oktette (Pixel != Hintergrund
      -> Bit gesetzt),
@@ -26,7 +26,7 @@ Schriftsatz, oder sie ist es nicht.  Zellen, die zu keiner Glyphe passen,
 werden zu '?' -- das faellt auf und wird nicht stillschweigend geraten.
 
 Aufruf:
-    python3 tools/protocol/schirmtext.py BILD.ppm [kernel/font.fi]
+    python3 tools/protocol/schirmtext.py BILD.ppm [kernel/gfx/font.fi]
 Ausgabe: der Text des Bildschirms, Zeile fuer Zeile, auf die Standardausgabe.
 """
 import re
@@ -88,7 +88,7 @@ def main():
         sys.stderr.write(__doc__)
         return 1
     bild = sys.argv[1]
-    font = sys.argv[2] if len(sys.argv) > 2 else "kernel/font.fi"
+    font = sys.argv[2] if len(sys.argv) > 2 else "kernel/gfx/font.fi"
     tafel = glyphen(font)
     if not tafel:
         sys.stderr.write("schirmtext: kein Schriftsatz in " + font + "\n")

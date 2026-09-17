@@ -77,7 +77,7 @@ def lies_marke(pfad):
             sys.exit("marke: %s ist leer" % k)
         if len(v) > n - 1:
             sys.exit("marke: %s ist %d Zeichen lang, hoechstens %d sind "
-                     "erlaubt (kernel/brand.fi)" % (k, len(v), n - 1))
+                     "erlaubt (kernel/lib/brand.fi)" % (k, len(v), n - 1))
         # Ein Anzeigetext mit einem Anfuehrungszeichen oder einem
         # Rueckstrich darin wuerde das Firn-Literal zerreissen. Das ist
         # kein Fall, den man rettet -- das ist einer, den man meldet.
@@ -107,10 +107,10 @@ def setz_marke(pfad, werte):
             r'(static mut %s: \[u8; (\d+)\] = )"[^"]*"' % re.escape(name))
         m = muster.search(s)
         if not m:
-            sys.exit("kernel/brand.fi: Feld %s nicht gefunden" % name)
+            sys.exit("kernel/lib/brand.fi: Feld %s nicht gefunden" % name)
         n = int(m.group(2))
         if n != erwartet:
-            sys.exit("kernel/brand.fi: %s hat %d Elemente, erwartet %d -- "
+            sys.exit("kernel/lib/brand.fi: %s hat %d Elemente, erwartet %d -- "
                      "marke-einsetzen.py und marke.fi sind auseinander"
                      % (name, n, erwartet))
         s = muster.sub(lambda mm: mm.group(1) + literal(werte[k], n), s, 1)
@@ -121,7 +121,7 @@ def setz_marke(pfad, werte):
         rest = re.search(r'static mut s_%s: \[u8; \d+\] = "([^"]*)"'
                          % k.lower(), s)
         if rest and "?" in rest.group(1):
-            sys.exit("kernel/brand.fi: %s ist noch ein Platzhalter" % k)
+            sys.exit("kernel/lib/brand.fi: %s ist noch ein Platzhalter" % k)
     with open(pfad, "w", encoding="utf-8") as f:
         f.write(s)
 
@@ -133,11 +133,11 @@ def setz_fassung(pfad, kurz, hash_):
     muster = re.compile(r'(static mut s_fassung: \[u8; (\d+)\] = )"[^"]*"')
     m = muster.search(s)
     if not m:
-        sys.exit("kernel/version.fi: s_fassung nicht gefunden")
+        sys.exit("kernel/lib/version.fi: s_fassung nicht gefunden")
     n = int(m.group(2))
     text = "%s %s" % (kurz, hash_)
     if len(text) > n - 1:
-        sys.exit("kernel/version.fi: '%s' passt nicht in %d Elemente -- "
+        sys.exit("kernel/lib/version.fi: '%s' passt nicht in %d Elemente -- "
                  "KURZ ist zu lang" % (text, n))
     s = muster.sub(lambda mm: mm.group(1) + literal(text, n), s, 1)
     with open(pfad, "w", encoding="utf-8") as f:

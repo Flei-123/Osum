@@ -178,28 +178,28 @@ fi
 
 echo
 echo "== 2. was der Kern dafuer gelernt hat =="
-grep -qE '^const IMAGE_END: u64 = 0x40C00000' kernel/proc.fi \
-    && ok "kernel/proc.fi: IMAGE_END = 0x40C00000 (das Abbildfenster ist 11 MiB)" \
+grep -qE '^const IMAGE_END: u64 = 0x40C00000' kernel/sched/proc.fi \
+    && ok "kernel/sched/proc.fi: IMAGE_END = 0x40C00000 (das Abbildfenster ist 11 MiB)" \
     || bad "IMAGE_END steht nicht auf 0x40C00000"
-grep -qE '^const BIG_FLOOR: u64 = 0x40C00000' kernel/proc.fi \
-    && ok "kernel/proc.fi: BIG_FLOOR = 0x40C00000 (die Arena beginnt darueber)" \
+grep -qE '^const BIG_FLOOR: u64 = 0x40C00000' kernel/sched/proc.fi \
+    && ok "kernel/sched/proc.fi: BIG_FLOOR = 0x40C00000 (die Arena beginnt darueber)" \
     || bad "BIG_FLOOR passt nicht zu IMAGE_END"
-grep -qE '^const PRIV_SLOTS: u64 = 99' kernel/proc.fi \
-    && ok "kernel/proc.fi: PRIV_SLOTS = 99 Kacheln zu 2 MiB" \
+grep -qE '^const PRIV_SLOTS: u64 = 99' kernel/sched/proc.fi \
+    && ok "kernel/sched/proc.fi: PRIV_SLOTS = 99 Kacheln zu 2 MiB" \
     || bad "PRIV_SLOTS steht nicht auf 99"
-grep -qE '^const BIG_TOP: u64 = 0x4C600000' kernel/proc.fi \
-    && ok "kernel/proc.fi: BIG_TOP = 0x4C600000" || bad "BIG_TOP fehlt"
+grep -qE '^const BIG_TOP: u64 = 0x4C600000' kernel/sched/proc.fi \
+    && ok "kernel/sched/proc.fi: BIG_TOP = 0x4C600000" || bad "BIG_TOP fehlt"
 python3 - <<'PY' && ok "die private Gegend endet vor 0x50000000 (tools/osum/run.sh bleibt gueltig)" \
                  || bad "die private Gegend erreicht 0x50000000"
 import re, sys
-s = open("kernel/proc.fi", encoding="utf-8").read()
+s = open("kernel/sched/proc.fi", encoding="utf-8").read()
 slots = int(re.search(r"^const PRIV_SLOTS: u64 = (\d+)$", s, re.M).group(1))
 span = int(re.search(r"^const USER_SPAN: u64 = (0x[0-9A-Fa-f]+)", s, re.M).group(1), 16)
 base = int(re.search(r"^const USER_DATA: u64 = (0x[0-9A-Fa-f]+)", s, re.M).group(1), 16)
 sys.exit(0 if base + span * slots <= 0x50000000 else 1)
 PY
-grep -q 'w_self' kernel/procfs.fi \
-    && ok "kernel/procfs.fi kennt /proc/self (der Sammler fragt danach)" \
+grep -q 'w_self' kernel/fs/procfs.fi \
+    && ok "kernel/fs/procfs.fi kennt /proc/self (der Sammler fragt danach)" \
     || bad "/proc/self fehlt"
 # RICHTIGSTELLUNG (06.09.2026): SSE fuer Ring 3 und die Rettung der
 # Vektorregister beim Wechsel sind NICHT neu von dieser Runde -- Runde
@@ -214,7 +214,7 @@ grep -q 'CR4_OSFXSR' kernel/arch/x86_64/fpu.fi \
 grep -q 'fpu.apply_here' kernel/kmain.fi \
     && ok "und jeder weitere Kern auch (fpu.apply_here in ap_main)" \
     || bad "die APs bekommen kein SSE"
-grep -q 'fpu.switch' kernel/sched.fi \
+grep -q 'fpu.switch' kernel/sched/sched.fi \
     && ok "sched.fi rettet die Vektorregister beim Umschalten (fpu.switch)" \
     || bad "die Vektorregister werden beim Umschalten nicht gerettet"
 

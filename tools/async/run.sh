@@ -129,7 +129,7 @@ echo "== 1. die Nummern und die Speicherkarte, ohne den Kernel zu starten =="
 #     Sie bedeuten also nie gleichzeitig dasselbe wie SYS_WRITE und
 #     SYS_OPEN. Sie stehen namentlich hier, damit diese Ausnahme
 #     benannt ist statt uebersehen.
-for f in kernel/sys.fi lib/libc/kcall.fi; do
+for f in kernel/sys/sys.fi lib/libc/kcall.fi; do
     dup=$(grep -a '^const \(SYS_\|CAP_\|WM_\|HND_\|AIO_\)[A-Z0-9_]*: u64 = [0-9]*' "$f" \
         | sed 's/.*= *\([0-9]*\).*/\1/' | sort -n | uniq -d | tr '\n' ' ')
     echt=""
@@ -147,14 +147,14 @@ done
 for n in AIO_VERSION:1980 AIO_SUBMIT:1981 AIO_WAIT:1982 AIO_CANCEL:1983 \
          AIO_STATE:1984 SYS_FSYNC:74; do
     name=${n%%:*}; want=${n##*:}
-    k=$(sed -n "s/^const $name: u64 = \([0-9]*\).*/\1/p" kernel/sys.fi | head -1)
+    k=$(sed -n "s/^const $name: u64 = \([0-9]*\).*/\1/p" kernel/sys/sys.fi | head -1)
     l=$(sed -n "s/^const $name: u64 = \([0-9]*\).*/\1/p" lib/libc/kcall.fi | head -1)
     if [ "$k" = "$want" ] && [ "$l" = "$want" ]; then ok "$name = $want in Kernel und libc"
     else bad "$name: Kernel='$k' libc='$l', erwartet $want"; fi
 done
 
 # 1c. Die Grenze von `kdata` steht ZWEIMAL im Baum und muss gleich sein.
-kk=$(sed -n 's/^const KDATA_SIZE: u64 = \(0x[0-9A-Fa-f]*\).*/\1/p' kernel/kstate.fi | head -1)
+kk=$(sed -n 's/^const KDATA_SIZE: u64 = \(0x[0-9A-Fa-f]*\).*/\1/p' kernel/lib/kstate.fi | head -1)
 kb=$(sed -n 's/.*\.set KDATA_SIZE, \(0x[0-9A-Fa-f]*\).*/\1/p' kernel/arch/x86_64/boot.s | head -1)
 if [ "$kk" = "$kb" ] && [ -n "$kk" ]; then ok "KDATA_SIZE: kstate.fi und boot.s sagen beide $kk"
 else bad "KDATA_SIZE: kstate.fi='$kk', boot.s='$kb'"; fi

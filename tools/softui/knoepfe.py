@@ -11,7 +11,7 @@ Kreuz.
 Das ist eine Aussage ueber Bildpunkte, also wird sie an Bildpunkten
 geprueft und nicht an einer Zeile im Mitschnitt.  Das Programm rechnet
 die Lage der drei Felder aus der `wm: win`-Zeile des scharfen Fensters
-aus -- dieselbe Rechnung wie `kernel/wm.fi`, `cap_x0` -- und liest dann
+aus -- dieselbe Rechnung wie `kernel/ui/wm.fi`, `cap_x0` -- und liest dann
 das 10 x 10 grosse Zeichenfeld jedes Knopfes aus:
 
   min     genau EINE Zeile des Feldes traegt Tinte, und sie ist voll

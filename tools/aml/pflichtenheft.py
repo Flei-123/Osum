@@ -35,7 +35,7 @@ WAS GEZAEHLT WIRD
      dort ausliest.  `tools/aml/brett.sh` ist der Weg dafuer.
 
   3. Was der Interpreter KANN, wird nicht abgeschrieben, sondern aus
-     `kernel/aml.fi` (Funktion `report_can`) ABGELESEN -- derselben
+     `kernel/acpi/aml.fi` (Funktion `report_can`) ABGELESEN -- derselben
      Liste, die er zur Laufzeit auf die serielle Leitung legt.
 
 Aufruf:
@@ -56,7 +56,7 @@ sys.path.insert(0, HIER)
 
 
 def kannliste(pfad=None):
-    """Die KANN-Liste aus kernel/aml.fi ablesen."""
+    """Die KANN-Liste aus kernel/acpi/aml.fi ablesen."""
     pfad = pfad or os.path.join(WURZEL, "kernel", "aml.fi")
     s = open(pfad, encoding="utf-8", errors="replace").read()
     m = re.search(r"fn report_can\(state: u64\) \{(.*?)\n\}", s, re.S)
@@ -114,7 +114,7 @@ def main(argv):
         return 1
 
     can = kannliste()
-    print("DIE KANN-LISTE DES INTERPRETERS (kernel/aml.fi, report_can)")
+    print("DIE KANN-LISTE DES INTERPRETERS (kernel/acpi/aml.fi, report_can)")
     print("  %d Opcodes: %d einfache, %d erweiterte (0x5b), %d Paare (0x92)"
           % (len(can),
              len([x for x in can if x < 0x5B00]),

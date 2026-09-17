@@ -8,7 +8,7 @@ Monitor): "der Zeiger sieht nicht gut aus" -- ein kleiner, hart
 gepixelter Schwarzweisspfeil ohne Kantenglaettung, der bei hoher
 Aufloesung ausfranst.
 
-DER GRUND STAND IN `kernel/wm.fi`: der Zeiger war eine Bitmaske von
+DER GRUND STAND IN `kernel/ui/wm.fi`: der Zeiger war eine Bitmaske von
 zwoelf mal achtzehn Bildpunkten (`cursor_row_of`), und bei
 Vervielfachung 2 wurde JEDER Bildpunkt zu einem 2x2-Block.  Das ist
 Vergroesserung eines Rasterbildes und nichts anderes; jede Treppe wird

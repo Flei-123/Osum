@@ -14,9 +14,9 @@ document that stops being true in the first week.
 
 WHAT IS SCANNED. The files that decide what the interface LOOKS LIKE,
 listed by name below: the drawing core, the widget library, the six
-programs with a window, and `kernel/wm.fi`, which paints frame and
+programs with a window, and `kernel/ui/wm.fi`, which paints frame and
 title bar because it composites the screen. Not the whole tree --
-`kernel/fb.fi` maps a framebuffer and does not decide what a button
+`kernel/gfx/fb.fi` maps a framebuffer and does not decide what a button
 looks like, and a checker whose output is mostly noise is a checker
 nobody reads.
 
@@ -55,7 +55,7 @@ PAT_RGB = re.compile(r"\brgb\(\s*state\s*,\s*(0x[0-9A-Fa-f]{1,2}|\d{1,3})"
 # The files that paint the interface. wlibc draws the shapes, wlib the
 # widgets, and the six programs are everything with a window in it.
 FILES = [
-    "kernel/wm.fi",
+    "kernel/ui/wm.fi",
     "kernel/user/wlibc.fi",
     "kernel/user/wlib.fi",
     "kernel/user/taskbar.fi",
@@ -92,7 +92,7 @@ ALLOWED_CONSTS = ("const RGB24", "const RGB_WHITE", "const RGB_BLACK",
 # readable in every theme precisely BECAUSE it ignores the theme.
 ALLOWED_FN = {
     "kernel/user/wlibc.fi": ["fn primitives_builtin"],
-    "kernel/wm.fi": [
+    "kernel/ui/wm.fi": [
         # The server paints frame and title bar because it composites the
         # screen. Ring 3 hands it eight numbers (WM_DECO); `deco_fallback`
         # is what it draws with until somebody does, and a machine whose

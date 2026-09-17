@@ -150,12 +150,12 @@ done
 # ruft das Werkzeug etwas anderes an, als der Kern anbietet -- und das
 # faellt zur Laufzeit als -EINVAL auf, an einer Stelle, die nichts damit
 # zu tun hat.
-kn=$(grep -aoE 'const SYS_OSUM_KLOG: u64 = [0-9]+' kernel/sys.fi | grep -oE '[0-9]+$')
+kn=$(grep -aoE 'const SYS_OSUM_KLOG: u64 = [0-9]+' kernel/sys/sys.fi | grep -oE '[0-9]+$')
 un=$(grep -aoE 'const SYS_KLOG: u64 = [0-9]+' kernel/user/ulib.fi | grep -oE '[0-9]+$')
 [ "$kn" = "$un" ] && [ -n "$kn" ] \
     && ok "SYS_KLOG ist im Kern und in ulib dieselbe Nummer ($kn)" \
     || bad "SYS_KLOG: Kern=$kn ulib=$un"
-kn=$(grep -aoE 'const SYS_OSUM_KRACH: u64 = [0-9]+' kernel/sys.fi | grep -oE '[0-9]+$')
+kn=$(grep -aoE 'const SYS_OSUM_KRACH: u64 = [0-9]+' kernel/sys/sys.fi | grep -oE '[0-9]+$')
 un=$(grep -aoE 'const SYS_KRACH: u64 = [0-9]+' kernel/user/ulib.fi | grep -oE '[0-9]+$')
 [ "$kn" = "$un" ] && [ -n "$kn" ] \
     && ok "SYS_KRACH ist im Kern und in ulib dieselbe Nummer ($kn)" \
@@ -174,12 +174,12 @@ has "$TMPD/map.txt" "0 Kollisionen" "die Speicherkarte von kdata bleibt kollisio
 # misst den Abschreibfehler mit. Jetzt wird die geltende Groesse aus
 # kstate.fi gelesen, und geprueft wird, was hier wirklich zaehlt: der
 # Ring liegt drin und die Karte bleibt kollisionsfrei.
-KDS=$(sed -n 's/^const KDATA_SIZE: u64 = \(0x[0-9A-Fa-f]*\).*/\1/p' kernel/kstate.fi | head -1)
+KDS=$(sed -n 's/^const KDATA_SIZE: u64 = \(0x[0-9A-Fa-f]*\).*/\1/p' kernel/lib/kstate.fi | head -1)
 grep -q "$KDS" "$TMPD/map.txt" \
     && ok "kdata ist $KDS gross (der Ring braucht 64 KiB am Stueck)" \
     || bad "kdata hat nicht die erwartete Groesse ($KDS)"
 a=$(grep -aoE 'KDATA_SIZE, 0x[0-9A-F]+' kernel/arch/x86_64/boot.s | head -1 | grep -oE '0x[0-9A-F]+')
-b=$(grep -aoE 'const KDATA_SIZE: u64 = 0x[0-9A-F]+' kernel/kstate.fi | grep -oE '0x[0-9A-F]+')
+b=$(grep -aoE 'const KDATA_SIZE: u64 = 0x[0-9A-F]+' kernel/lib/kstate.fi | grep -oE '0x[0-9A-F]+')
 [ "$a" = "$b" ] && ok "KDATA_SIZE steht in boot.s und kstate.fi gleich ($a)" \
                 || bad "KDATA_SIZE: boot.s=$a kstate.fi=$b"
 
@@ -346,7 +346,7 @@ rm -f "$sock"
 
 if [ -s "$TMPD/panik.ppm" ]; then
     ok "ein Bildschirmfoto der Panik liegt vor ($(stat -c%s "$TMPD/panik.ppm") Oktette)"
-    python3 tools/protocol/schirmtext.py "$TMPD/panik.ppm" kernel/font.fi \
+    python3 tools/protocol/schirmtext.py "$TMPD/panik.ppm" kernel/gfx/font.fi \
         > "$TMPD/schirm.txt" 2>"$TMPD/schirm.err"
     if [ -s "$TMPD/schirm.txt" ]; then
         echo "        --- was auf dem Schirm steht:"
