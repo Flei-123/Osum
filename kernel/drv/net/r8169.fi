@@ -139,7 +139,8 @@ export {
     rx_frames_on, tx_frames_on, rx_octets_on, tx_octets_on,
     tx_drops_on, link_up_on, shut_down_on, irqs_on, queue_size_on,
     msix_on, notified_on, features_on,
-    rx_errors_on, oversize_on, rx_overflow_on, selftest_on, print_regs_on
+    rx_errors_on, oversize_on, rx_overflow_on, selftest_on, print_regs_on,
+    link_speed_on
 }
 
 // ------------------------------------------------------ der Datenbereich
@@ -182,6 +183,11 @@ const S_REV: u64 = 0xA8 // die PCI-Revision, die den C+-Modus verspricht
 const S_BARN: u64 = 0xB0 // welcher BAR der Speicher-BAR war
 const S_LINKCH: u64 = 0xB8 // wie oft die Verbindung gewechselt hat
 const S_RXOVW: u64 = 0xC0 // wie oft der Chip einen Rahmen mangels Platz verwarf
+// RUNDE O-NETZUI: die ausgehandelte Rate in Megabit je Sekunde, aus
+// demselben Lauf, der auch das Traegerbit holt (`read_link`). 0 heisst
+// UNBEKANNT -- auf der 8139er-Spielart gibt es kein Ratenbit, das
+// eine Aussage traegt, und dort bleibt es bei 0.
+const S_SPEED: u64 = 0xC8 // 0 = unbekannt, sonst 10/100/1000
 
 fn sc(u: u64, off: u64) -> u64 {
     return kstate.NETDEV_OFF + UNIT_BASE + u * UNIT_SPAN + off
@@ -295,6 +301,14 @@ const CR9346_LOCK: u64 = 0
 const MSR_LINKB: u64 = 4
 // PHYstatus (0x6C), nur 8169.
 const PHYS_LINKOK: u64 = 2
+// RUNDE O-NETZUI: die drei Ratenbits desselben Registers. Realteks
+// Datenblatt zum RTL8169S (PHYstatus, 0x6C): Bit 3 = 1000MF,
+// Bit 2 = 100M, Bit 1 = 10M. Sie schliessen einander aus, und sie
+// gelten nur zusammen mit LinkOK -- ohne Traeger ist nichts
+// ausgehandelt.
+const PHYS_1000M: u64 = 16
+const PHYS_100M: u64 = 8
+const PHYS_10M: u64 = 4
 
 // PHYAR (0x60), nur 8169.
 const PHYAR_FLAG: u64 = 2147483648 // 1 << 31
@@ -496,6 +510,15 @@ fn notified_on(state: u64, u: u64) -> u64 {
 
 fn link_up_on(state: u64, u: u64) -> bool {
     return kstate.get(state, sc(u, S_LINK)) != 0
+}
+
+// RUNDE O-NETZUI: die ausgehandelte Rate, oder 0 fuer unbekannt.
+// Ohne Traeger gibt es nichts auszuhandeln -- dann ebenfalls 0.
+fn link_speed_on(state: u64, u: u64) -> u64 {
+    if kstate.get(state, sc(u, S_LINK)) == 0 {
+        return 0
+    }
+    return kstate.get(state, sc(u, S_SPEED))
 }
 
 fn mac_at_on(state: u64, u: u64, i: u64) -> u64 {
@@ -754,6 +777,21 @@ fn read_link(state: u64, u: u64) {
         kstate.add(state, sc(u, S_LINKCH), 1)
     }
     kstate.set(state, sc(u, S_LINK), v)
+    // RUNDE O-NETZUI: die Rate daneben. NUR die 8169er-Spielart meldet
+    // sie (PHYstatus); auf der 8139er bleibt es bei 0 = unbekannt, und
+    // das ist die ehrliche Antwort statt einer geratenen 100.
+    var mbit: u64 = 0
+    if v != 0 && var_of(state, u) != VAR_CP {
+        let ph: u64 = r8(state, u, R_PHYSTAT)
+        if (ph & PHYS_1000M) != 0 {
+            mbit = 1000
+        } else if (ph & PHYS_100M) != 0 {
+            mbit = 100
+        } else if (ph & PHYS_10M) != 0 {
+            mbit = 10
+        }
+    }
+    kstate.set(state, sc(u, S_SPEED), mbit)
 }
 
 // ------------------------------------------------------------- das Aufsetzen
