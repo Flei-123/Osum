@@ -145,13 +145,29 @@ def setz_fassung(pfad, kurz, hash_):
     return text
 
 
+def finde(baum, name):
+    """RUNDE O-STRUKTUR: `brand.fi` und `version.fi` lagen bis hierher
+    fest unter `<baum>/kernel/`. Seit die Kerndateien in Schichten
+    liegen, wird gesucht statt buchstabiert -- genau wie in
+    `tools/build-kernel.sh` und `tools/kfind.sh`.
+
+    `kernel/user/` und `kernel/app/` bleiben aussen vor: das sind
+    eigene Programme, und `brand.fi` gibt es dort noch einmal."""
+    wurzel = os.path.join(baum, "kernel")
+    for stamm, verz, namen in os.walk(wurzel):
+        verz[:] = [d for d in verz if d not in ("user", "app")]
+        if name in namen:
+            return os.path.join(stamm, name)
+    sys.exit("marke-einsetzen.py: %s liegt nirgends unter %s" % (name, wurzel))
+
+
 def main():
     if len(sys.argv) != 4:
         sys.exit("Aufruf: marke-einsetzen.py <baum> <marke.conf> <hash>")
     baum, conf, hash_ = sys.argv[1], sys.argv[2], sys.argv[3]
     werte = lies_marke(conf)
-    setz_marke(baum + "/kernel/brand.fi", werte)
-    zeile = setz_fassung(baum + "/kernel/version.fi", werte["KURZ"], hash_)
+    setz_marke(finde(baum, "brand.fi"), werte)
+    zeile = setz_fassung(finde(baum, "version.fi"), werte["KURZ"], hash_)
     print("marke: PRODUKT=%s KERN=%s HERSTELLER=%s KURZ=%s"
           % (werte["PRODUKT"], werte["KERN"], werte["HERSTELLER"],
              werte["KURZ"]))

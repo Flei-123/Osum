@@ -183,30 +183,63 @@ python3 "$(dirname "$0")/marke-einsetzen.py" "$TMP" \
     exit 1; }
 # GEGENPROBE AM ERGEBNIS, nicht am Werkzeug: steht die Fassungszeile
 # wirklich in der Datei, aus der uebersetzt wird?
-grep -q " $FASSUNG_HASH" "$TMP/kernel/version.fi" || {
+# (Gesucht statt buchstabiert -- siehe RUNDE O-STRUKTUR weiter unten.)
+VERSIONDATEI=$(find "$TMP/kernel" -path "$TMP/kernel/user" -prune -o \
+    -path "$TMP/kernel/app" -prune -o -name version.fi -type f -print | head -1)
+[[ -n $VERSIONDATEI ]] || { echo "version.fi nicht gefunden" >&2; exit 1; }
+grep -q " $FASSUNG_HASH" "$VERSIONDATEI" || {
     echo "die Fassungsnummer wurde NICHT eingesetzt -- Bau abgebrochen" >&2
     exit 1; }
 # Und dieselbe Gegenprobe fuer die Marke: kein Feld darf noch ein
 # Fragezeichen tragen. (Das Werkzeug prueft es auch; hier steht es
 # NOCH EINMAL am Ergebnis, weil eine Pruefung im Werkzeug nur das
 # Werkzeug prueft.)
+BRANDDATEI=$(find "$TMP/kernel" -path "$TMP/kernel/user" -prune -o \
+    -path "$TMP/kernel/app" -prune -o -name brand.fi -type f -print | head -1)
+[[ -n $BRANDDATEI ]] || { echo "brand.fi nicht gefunden" >&2; exit 1; }
 if grep -qE 'static mut s_[a-z]+: \[u8; [0-9]+\] = "[^"]*\?' \
-        "$TMP/kernel/brand.fi"; then
-    echo "in kernel/brand.fi steht noch ein Platzhalter -- abgebrochen" >&2
+        "$BRANDDATEI"; then
+    echo "in brand.fi steht noch ein Platzhalter -- abgebrochen" >&2
     exit 1
 fi
-if [[ $OHNE_BRUECKE == 1 ]]; then
-    cp -f kernel/tip-off.fi "$TMP/kernel/tip.fi" || exit 1
-fi
-# Die Gegendatei fliegt IMMER aus dem Baum, aus dem firnc liest --
+# RUNDE O-STRUKTUR: DIE GEGENFASSUNGEN FINDEN IHR ZIEL, WO ES LIEGT.
+#
+# Bis hierher stand hier `cp -f kernel/tip-off.fi "$TMP/kernel/tip.fi"`
+# -- beide Pfade buchstabiert. Seit die Dateien in Schichten liegen
+# (`kernel/ipc/tip.fi`, `kernel/net/wg.fi`, ...) trifft das nicht mehr.
+#
+# `ersetze <stummel> <ziel>` sucht BEIDE im Kopierbaum, legt den
+# Stummel an die Stelle des Ziels und raeumt den Stummel danach weg.
+# Es BRICHT AB, wenn eines von beidem fehlt -- ein stiller Fehlschlag
+# an dieser Stelle ergaebe ein Abbild, das etwas enthaelt, das es
+# nicht enthalten soll.
+ersetze() { # $1 = Stummel ohne .fi, $2 = Ziel ohne .fi
+    local stummel ziel
+    stummel=$(find "$TMP/kernel" -name "$1.fi" -type f | head -1)
+    ziel=$(find "$TMP/kernel" -name "$2.fi" -type f | head -1)
+    [[ -n $stummel ]] || { echo "Bau: $1.fi nicht gefunden" >&2; return 1; }
+    [[ -n $ziel    ]] || { echo "Bau: $2.fi nicht gefunden" >&2; return 1; }
+    cp -f "$stummel" "$ziel" || return 1
+}
+# Und die Gegendatei fliegt IMMER aus dem Baum, aus dem firnc liest --
 # sonst uebersetzt der Kern beide und fuehrt zwei Module desselben
-# Namens. Dasselbe tut die Zeile unter `wg-aus.fi`.
-rm -f "$TMP/kernel/tip-off.fi"
+# Namens.
+weg() { # $1 = Name ohne .fi
+    local p
+    p=$(find "$TMP/kernel" -name "$1.fi" -type f)
+    [[ -n $p ]] && rm -f $p
+    return 0
+}
+
+if [[ $OHNE_BRUECKE == 1 ]]; then
+    ersetze tip-off tip || exit 1
+fi
+weg tip-off
 
 if [[ $OHNE_TUNNEL == 1 ]]; then
-    cp -f kernel/wg-aus.fi "$TMP/kernel/wg.fi" || exit 1
+    ersetze wg-aus wg || exit 1
 fi
-rm -f "$TMP/kernel/wg-aus.fi"
+weg wg-aus
 
 # RUNDE FREMDFS: DERSELBE GRIFF FUER DIE ZWEI FREMDEN DATEISYSTEME.
 #
@@ -217,13 +250,13 @@ rm -f "$TMP/kernel/wg-aus.fi"
 #
 # Was das spart, ist gemessen und steht in docs/RUNDE-FREMDFS.md.
 if [[ $OHNE_EXT4 == 1 ]]; then
-    cp -f kernel/ext4-aus.fi "$TMP/kernel/ext4.fi" || exit 1
+    ersetze ext4-aus ext4 || exit 1
 fi
-rm -f "$TMP/kernel/ext4-aus.fi"
+weg ext4-aus
 if [[ $OHNE_NTFS == 1 ]]; then
-    cp -f kernel/ntfs-aus.fi "$TMP/kernel/ntfs.fi" || exit 1
+    ersetze ntfs-aus ntfs || exit 1
 fi
-rm -f "$TMP/kernel/ntfs-aus.fi"
+weg ntfs-aus
 
 # RUNDE SERVERBUILD: DERSELBE GRIFF, EINE ETAGE GROESSER. Nicht eine
 # Datei wird ersetzt, sondern elf werden GELOESCHT und die zwoelfte
@@ -269,9 +302,9 @@ if [[ $GUI == off ]]; then
     # Dieselbe Vorsicht fuer die Naht selbst.
     GFXZIEL=$(find "$TMP/kernel" -name "gfx.fi" -type f | head -1)
     [[ -n $GFXZIEL ]] || { echo "SERVERBUILD: gfx.fi nicht gefunden" >&2; exit 1; }
-    cp -f kernel/gfx-aus.fi "$GFXZIEL" || exit 1
+    ersetze gfx-aus gfx || exit 1
 fi
-rm -f "$TMP/kernel/gfx-aus.fi"
+weg gfx-aus
 
 # RUNDE MODUL: DERSELBE GRIFF, EINE ETAGE KLEINER.
 #
@@ -294,13 +327,19 @@ if [[ $OHNE_PS2M == 1 ]]; then
         echo "--ohne-ps2m und --gui off zusammen ergeben nichts: ohne GUI ist ps2m.fi ohnehin nicht im Baum" >&2
         exit 1
     fi
-    cp -f kernel/ps2m-aus.fi "$TMP/kernel/ps2m.fi" || exit 1
+    ersetze ps2m-aus ps2m || exit 1
 fi
-rm -f "$TMP/kernel/ps2m-aus.fi"
+weg ps2m-aus
 KDIR="$TMP/kernel"
 
-"$FIRNC" -o "$TMP/k.o" "$KDIR/kmain.fi" || exit 1
-"$FIRNC" -o "$TMP/uprog.o" "$KDIR/uprog.fi" || exit 1
+# Auch die zwei Wurzeln werden gesucht: `kmain.fi` bleibt zwar oben im
+# Kernverzeichnis, aber das steht in keinem Gesetz.
+KMAIN=$(find "$KDIR" -name kmain.fi -type f | head -1)
+UPROG=$(find "$KDIR" -name uprog.fi -type f | head -1)
+[[ -n $KMAIN ]] || { echo "kmain.fi nicht gefunden" >&2; exit 1; }
+[[ -n $UPROG ]] || { echo "uprog.fi nicht gefunden" >&2; exit 1; }
+"$FIRNC" -o "$TMP/k.o" "$KMAIN" || exit 1
+"$FIRNC" -o "$TMP/uprog.o" "$UPROG" || exit 1
 
 # firnc0 stellt jedem Symbol `_F0.` voran, firnc1 `_F1.`
 # (docs/SELF_HOSTING.md im Firn-Repo).
