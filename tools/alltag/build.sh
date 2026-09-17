@@ -73,7 +73,7 @@ bloecke=16384
 mager=no
 inodes=""
 keep=no
-progs="desktop taskbar settings launcher theme explorer rechner zip sh echo ls cat mkdir rm cp diff"
+progs="desktop taskbar settings launcher theme explorer calc zip sh echo ls cat mkdir rm cp diff"
 for a in "$@"; do
     case "$a" in
         preset=*) preset=${a#*=} ;;
