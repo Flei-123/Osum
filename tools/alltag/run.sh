@@ -81,7 +81,7 @@ echo "== 1. bauen =="
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || {
     echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 if bash "$B" "$OUT/b0" script='echo bereit;exit' \
-       progs="rechner zip papierkorb viewer snip lock sh echo ls cat" \
+       progs="calc zip papierkorb viewer snip lock sh echo ls cat" \
        > "$OUT/bauen.log" 2>&1; then
     ok "Kern und Programme gebaut ($(grep -a '^kernel ' "$OUT/bauen.log" | head -1))"
 else
@@ -92,8 +92,8 @@ fi
 echo
 echo "== 2. der Rechner gegen Python =="
 python3 tools/alltag/rechner.py skript "$OUT/pruef.sh" > "$OUT/skript.log"
-bash "$B" "$OUT/rech" script='sh /pruef.sh;rechner -e 2++;exit' \
-    progs="rechner sh echo ls cat" xfile=/pruef.sh="$OUT/pruef.sh" \
+bash "$B" "$OUT/rech" script='sh /pruef.sh;calc -e 2++;exit' \
+    progs="calc sh echo ls cat" xfile=/pruef.sh="$OUT/pruef.sh" \
     > "$OUT/rech.log" 2>&1
 if python3 tools/alltag/rechner.py pruefen "$OUT/rech/serial.txt" \
        > "$OUT/rechner.txt" 2>&1; then
@@ -444,8 +444,8 @@ PY
         | grep -a 'raster/4' | grep -aoE '\([0-9]+%\)' | tr -dc '0-9')
     num "$name: Vierer-Raster (Prozent)" "$r" ge 92
 }
-PROGS="rechner zip papierkorb viewer snip lock theme sh echo ls cat"
-schuss rechner /bin/rechner 80,60
+PROGS="calc zip papierkorb viewer snip lock theme sh echo ls cat"
+schuss calc /bin/calc 80,60
 schuss papierkorb /bin/papierkorb 70,70 \
     xdir=/w xfile=/w/n1.txt="$OUT/n1.txt"
 schuss viewer /bin/viewer,/b/probe.png 60,50 \
@@ -458,7 +458,7 @@ schuss lock /bin/lock 0,0 xfile=/etc/shadow="$OUT/shadow"
 echo
 echo "== 10. die Regeln dieser Runde =="
 Z=0
-for f in rechner papierkorb viewer snip lock korb bild jpeg zip; do
+for f in calc papierkorb viewer snip lock korb bild jpeg zip; do
     n=$(grep -ac 'wlibc\.\(px\|rect\|rrect\|frame\|frame3\|hline\|vline\|text\|glyph\|blit\|rring\|divider\|drop_shadow\)(' \
         "kernel/user/$f.fi" 2>/dev/null || true)
     Z=$((Z + n))

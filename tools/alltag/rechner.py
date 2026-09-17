@@ -89,7 +89,7 @@ def skript(ziel: str) -> int:
     zeilen = ["# von tools/alltag/rechner.py erzeugt"]
     for i, a in enumerate(ausdruecke()):
         zeilen.append("echo AUSDRUCK-%d" % i)
-        zeilen.append("rechner -e %s" % a)
+        zeilen.append("calc -e %s" % a)
     zeilen.append("echo AUSDRUECKE-FERTIG")
     open(ziel, "w", encoding="utf-8").write("\n".join(zeilen) + "\n")
     print("%d Ausdruecke nach %s" % (len(ausdruecke()), ziel))
