@@ -71,20 +71,23 @@ import lib.kstate
 import mm.mem
 import arch.msr
 import vmcb
+import vdev
 import ipc.cap
 import sched.sched
 
 export {
     parse, stage, mode_of, on,
-    HV_OFF, HV_MAX,
-    M_HV, M_LOOP, M_NOSVM, M_NONPT, M_CR, M_MESS, M_FREE,
+    HV_OFF, HV_MAX, VDEV_OFF, VDEV_MAX,
+    M_HV, M_LOOP, M_NOSVM, M_NONPT, M_CR, M_MESS, M_FREE, M_LM, M_NOLME,
+    M_DEV,
     ready, rev, nasid, feat,
-    vm_create, vm_run, vm_destroy, vm_free_all,
+    vm_create, vm_create_big, vm_run, vm_destroy, vm_free_all,
+    vm_big, vm_pages,
     vm_state, vm_result, vm_exits, vm_guest, vm_owner, vm_valid,
-    exits_total, exits_bucket, runs, cycles_run, cycles_exit,
+    exits_total, exits_bucket, runs, cycles_run, cycles_exit, eferw,
     npfs, killed, calls, injected, guest_out, ioports, msrs, crs,
     value_of, value_seen, vms_made,
-    G_HELLO, G_PM, G_LOOP, G_FAULT, G_CRASH, G_BENCH, G_MAX,
+    G_HELLO, G_PM, G_LOOP, G_FAULT, G_CRASH, G_BENCH, G_LM, G_DEV, G_MAX,
     ST_FREE, ST_READY, ST_HALT, ST_DONE, ST_DEAD,
     R_MORE, R_HALT, R_DONE, R_SHUTDOWN, R_EXC, R_BUDGET, R_ERR, R_FAULT,
     B_CRRD, B_CRWR, B_EXC, B_INTR, B_CPUID, B_HLT, B_IOIO, B_MSR,
@@ -103,6 +106,25 @@ export {
 // rechnet nach, dass sich nichts ueberschneidet.
 const HV_OFF: u64 = 0x40000
 const HV_MAX: u64 = 4096
+// RUNDE HV2, STUFE 3: die Geraete brauchen eine eigene Seite. Acht
+// Maschinen zu je 128 Oktetten Geraetezustand sind 1024 Oktette; sie
+// haetten in die Seite oben nicht mehr gepasst (die ist bis 0xD80
+// belegt).
+//
+// UND SIE LIEGT NICHT DA, WO DER BERICHT DER RUNDE K12 ES ERWARTEN
+// LIESS. Dort steht, 0x41000 bis 0x50000 sei frei. Das stimmte im
+// Augenblick jener Runde und stimmt heute nicht mehr: seither haben
+// K13, K14, WIG, K16, MODE, EHCI, K17, K18, OFS3, DISP und JRNL den
+// ganzen Bereich bis 0x60000 belegt. `tools/kernel/memmap.py` hat die
+// Kollision beim ersten Lauf gemeldet, statt sie durchgehen zu lassen
+// -- genau dafuer gibt es den Kartenpruefer, und er hat in dieser
+// Runde dreimal hintereinander angeschlagen (0x41000 K13, 0x84000
+// HNON/HCNT, 0x88000 TASK). Die letzten 16 KiB von `kdata` sind der
+// einzige zusammenhaengende freie Block, der uebrig ist: 0x13C000.
+// `kdata` ist damit bis auf Reste voll -- wer nach dieser Runde eine
+// Seite braucht, muss KDATA_SIZE wachsen lassen.
+const VDEV_OFF: u64 = 0x13C000
+const VDEV_MAX: u64 = 4096
 
 // Die Skalare, 0x000..0x0FF.
 const S_MODE: u64 = 0x000 // die Woerter der Kommandozeile
@@ -130,6 +152,11 @@ const S_MSRS: u64 = 0x0A8
 const S_CRS: u64 = 0x0B0
 const S_DECFAIL: u64 = 0x0B8 // Befehle, die der Wirt nicht lesen konnte
 const S_LASTERR: u64 = 0x0C0
+// RUNDE HV2: wie oft der Wirt ein Schreiben auf EFER wirklich
+// uebernommen hat. Die GEGENPROBE `ohnelme` laesst diese Zahl auf 0.
+const S_EFERW: u64 = 0x0C8
+const S_LASTNPF: u64 = 0x0D0 // die Adresse, an der ein NPF nicht half
+const S_VALMASK: u64 = 0x0D8 // welche der 64 Werte ein Gast gemeldet hat
 
 // Die Zaehler je Austrittsgrund, 0x100..0x1FF.
 const CNT_OFF: u64 = 0x100
@@ -149,18 +176,43 @@ const B_OTHER: u64 = 12
 const B_COUNT: u64 = 13
 
 // Was Gaeste gemeldet haben, 0x200..0x2FF, plus eine Maske bei 0x300.
+// RUNDE HV2: DER BRIEFKASTEN WAR ZU KLEIN, und das hat diese Stufe
+// eine Stunde gekostet. Die Gaeste der Runde K12 melden die Nummern 1
+// bis 9 und 31; der Gast im langen Modus nimmt 10 bis 14, der
+// Geraetegast 40 bis 45. `value_put` warf alles ab 32 STILL weg --
+// die Geraete lieferten die richtigen Werte (im Protokoll nachgesehen:
+// 0x5A, 0x60, 0x0C, 0xFD), und die Zusagen darueber blieben trotzdem
+// rot, weil die Zahlen nie ankamen.
+//
+// 64 Werte statt 32. Die Werte fuellen damit 0x200..0x3FF genau aus,
+// und die Maske kann NICHT mehr hinter ihnen liegen -- sie zieht
+// deshalb zu den Skalaren (S_VALMASK). Ein Wort fasst genau 64 Bits;
+// mehr Werte gingen nicht ohne ein zweites.
 const VAL_OFF: u64 = 0x200
-const VAL_MASK: u64 = 0x300
-const VAL_MAX: u64 = 32
+const VAL_MAX: u64 = 64
 
 // Die Maschinenverzeichnisse, 0x400..0x7FF.
 const VM_OFF: u64 = 0x400
-const VM_BYTES: u64 = 128
+// RUNDE HV2: von 128 auf 192 gewachsen. Die Felder V_RUNBASE, V_RUNLEN
+// und V_BIG kamen dazu, und 0x88 passt nicht mehr in 128 Oktette.
+//
+// ACHT MASCHINEN ZU 192 SIND 1536 OKTETTE, also 0x400..0x9FF -- der
+// Bereich der Registerbloecke lag bei 0x800 und waere damit UEBERSCHRIEBEN
+// worden. Das ist kein Fehler, den man sieht: die Maschine 5 haette
+// dann die Register der Maschine 0 als ihren Zustand gelesen. Deshalb
+// ruecken die Registerbloecke auf 0xA00 (siehe GPR_OFF), und die Karte
+// darunter rechnet nach, dass beides in die Seite passt.
+const VM_BYTES: u64 = 192
 const MAX_VMS: u64 = 8
 
 // Die Registerbloecke, 0x800..0xB7F. Vierzehn Woerter je Maschine --
 // alles, was der Prozessor beim Weltwechsel NICHT selbst rettet.
-const GPR_OFF: u64 = 0x800
+// RUNDE HV2: von 0x800 auf 0xA00 gerueckt, weil die Maschinen laenger
+// wurden (VM_BYTES 128 -> 192, also 0x400..0x9FF statt 0x400..0x7FF).
+// 0xA00 + 8 * 112 = 0xD80, und HV_MAX ist 4096 -- es passt, und die
+// Zusage `der bereich der maschinen und der register ueberschneidet
+// sich nicht` rechnet es bei jedem Lauf nach.
+const GPR_OFF: u64 = 0xA00
 const GPR_BYTES: u64 = 112
 
 const V_STATE: u64 = 0x00
@@ -178,6 +230,15 @@ const V_CYCLES: u64 = 0x58
 const V_LAST: u64 = 0x60 // der letzte Austrittsgrund
 const V_WHY: u64 = 0x68 // warum sie abgeraeumt wurde
 const V_BUDGET: u64 = 0x70
+// RUNDE HV2, STUFE 2. Ein Gast mit grossem Speicher bekommt einen
+// AUSGERICHTETEN Lauf: `frame_run` gibt zusammenhaengende Rahmen, aber
+// nicht auf 2 MiB ausgerichtete. Der Wirt fordert deshalb mehr an, als
+// er braucht, und rueckt den Anfang vor. Damit er den Lauf spaeter
+// vollstaendig zurueckgeben kann, merkt er sich BEIDES: den Anfang des
+// wirklich angeforderten Laufs und seine Laenge.
+const V_RUNBASE: u64 = 0x78 // was `frame_run` zurueckgab
+const V_RUNLEN: u64 = 0x80 // wie viele Rahmen das waren
+const V_BIG: u64 = 0x88 // wie viele 2-MiB-Seiten abgebildet sind
 
 const ST_FREE: u64 = 0
 const ST_READY: u64 = 1
@@ -201,7 +262,15 @@ const G_LOOP: u64 = 2
 const G_FAULT: u64 = 3
 const G_CRASH: u64 = 4
 const G_BENCH: u64 = 5
-const G_MAX: u64 = 6
+// RUNDE HV2, STUFE 1: der Gast, der sich selbst in den langen Modus
+// bringt. Er braucht mehr Speicher als die anderen (vier Tabellenseiten
+// und einen Stapel oberhalb davon), siehe `pages_for`.
+const G_LM: u64 = 6
+// RUNDE HV2, STUFE 3: der Gast, der die Geraete PRUEFT statt sie nur
+// zu benutzen -- Kratzregister, Zeilenzustand, DLAB, die vierteilige
+// Anfangsfolge des Verteilers, der zweiteilige Zeitgeber.
+const G_DEV: u64 = 7
+const G_MAX: u64 = 8
 
 // Die Woerter der Kommandozeile. KEINES ausser dem ersten enthaelt die
 // zwei Buchstaben `hv` -- sonst schaltete die Gegenprobe, die `hv`
@@ -216,6 +285,14 @@ const M_MESS: u64 = 32 // `gastmess`: den Preis eines Austritts messen
 // `gastfrei`: V_INTR_MASKING AUSschalten. Das ist die GEGENPROBE zu der
 // einen Zusage, die einen Wirt zum Wirt macht -- siehe `vmcb_setup`.
 const M_FREE: u64 = 64
+// RUNDE HV2. `gastlang`: den Gast laufen lassen, der in den langen
+// Modus geht. `ohnelme`: die GEGENPROBE dazu -- der Wirt schluckt das
+// Schreiben auf EFER.LME, statt es zu uebernehmen, und der Gast bleibt
+// 32 Bit. Auch hier enthaelt KEIN Wort die zwei Buchstaben `hv`.
+const M_LM: u64 = 128
+const M_NOLME: u64 = 256
+// `gastgeraet`: den Gast laufen lassen, der die Geraete prueft.
+const M_DEV: u64 = 512
 
 // Indizes in `hv_vectors` (kernel/hv.s), erreichbar ueber Platz 69 der
 // Tabelle aus `isr.s`.
@@ -229,6 +306,11 @@ const HV_G_FIRST: u64 = 1 // je Gast ein Paar Anfang/Ende
 // eine Seite auf Zuruf nachlegen kann.
 const GUEST_PAGES: u64 = 8
 const GUEST_MAPPED: u64 = 7
+// RUNDE HV2: der Gast im langen Modus braucht mehr. Seine vierstufige
+// Tabelle liegt bei 0x8000..0xB000, sein Stapel bei 0xB000 -- das sind
+// zwoelf Seiten. Die Seite 0x7000 bleibt auch bei ihm ABSICHTLICH
+// unabgebildet, damit die Probe "Seite auf Zuruf" ihren Sinn behaelt.
+const GUEST_PAGES_LM: u64 = 12
 const GUEST_LOAD: u64 = 0x1000 // wohin das Abbild kommt
 const GUEST_PATTERN: u64 = 0x0800 // was der Gast dort finden soll
 const PATTERN: u64 = 0x5A5A
@@ -263,6 +345,12 @@ fn set(state: u64, off: u64, v: u64) {
 
 fn bump(state: u64, off: u64, v: u64) {
     set(state, off, get(state, off) +% v)
+}
+
+// Wo der Geraetesatz einer Maschine liegt. `vdev.fi` rechnet daraus
+// selbst weiter -- es muss nicht wissen, wo in `kdata` es liegt.
+fn vdev_base(state: u64) -> u64 {
+    return VDEV_OFF
 }
 
 fn vm_at(state: u64, i: u64) -> u64 {
@@ -419,6 +507,9 @@ fn mode_of(cmd: u64) -> u64 {
     var w_cr: [u8; 7] = "gastcr\0"
     var w_mess: [u8; 9] = "gastmess\0"
     var w_frei: [u8; 9] = "gastfrei\0"
+    var w_lm: [u8; 9] = "gastlang\0"
+    var w_nolme: [u8; 8] = "ohnelme\0"
+    var w_dev: [u8; 11] = "gastgeraet\0"
     var m: u64 = 0
     if find_word(cmd, (&w_hv[0]) as u64, 2) != 0 {
         m = m | M_HV
@@ -440,6 +531,15 @@ fn mode_of(cmd: u64) -> u64 {
     }
     if find_word(cmd, (&w_frei[0]) as u64, 8) != 0 {
         m = m | M_FREE
+    }
+    if find_word(cmd, (&w_lm[0]) as u64, 8) != 0 {
+        m = m | M_LM
+    }
+    if find_word(cmd, (&w_nolme[0]) as u64, 7) != 0 {
+        m = m | M_NOLME
+    }
+    if find_word(cmd, (&w_dev[0]) as u64, 10) != 0 {
+        m = m | M_DEV
     }
     return m
 }
@@ -518,6 +618,11 @@ fn crs(state: u64) -> u64 {
     return get(state, S_CRS)
 }
 
+// RUNDE HV2: wie oft ein Schreiben auf EFER wirklich uebernommen wurde.
+fn eferw(state: u64) -> u64 {
+    return get(state, S_EFERW)
+}
+
 fn vms_made(state: u64) -> u64 {
     return get(state, S_VMS)
 }
@@ -544,7 +649,7 @@ fn value_seen(state: u64, n: u64) -> bool {
     if n >= VAL_MAX {
         return false
     }
-    return (get(state, VAL_MASK) & (1 << n)) != 0
+    return (get(state, S_VALMASK) & (1 << n)) != 0
 }
 
 fn value_put(state: u64, n: u64, v: u64) {
@@ -552,7 +657,7 @@ fn value_put(state: u64, n: u64, v: u64) {
         return
     }
     set(state, VAL_OFF +% n *% 8, v)
-    set(state, VAL_MASK, get(state, VAL_MASK) | (1 << n))
+    set(state, S_VALMASK, get(state, S_VALMASK) | (1 << n))
 }
 
 // ------------------------------------------------------- kann der Prozessor?
@@ -694,9 +799,30 @@ fn copy(dst: u64, src: u64, n: u64) {
 // Zustand des WIRTS ableitet -- siehe oben). Vier Rahmen am Stueck: PML4,
 // PDPT, PD, PT. Eine PT deckt 2 MiB, und mehr braucht keiner dieser
 // Gaeste.
+// Wie viele Seiten ein Gast bekommt. Bis zur Runde K12 waren es acht
+// fuer jeden; der Gast im langen Modus braucht zwoelf.
+fn pages_for(guest: u64) -> u64 {
+    if guest == G_LM {
+        return GUEST_PAGES_LM
+    }
+    return GUEST_PAGES
+}
+
+// Wie viele davon der Wirt von vornherein abbildet. Immer EINE weniger
+// als vorhanden, und zwar die Seite 0x7000: sie bleibt absichtlich frei,
+// damit ein Gast dagegenlaufen kann. Beim Gast im langen Modus liegt
+// darueber noch seine Tabelle, die abgebildet sein MUSS -- sonst
+// laeuft nicht ein Zugriff gegen die Wand, sondern der Seitenlauf des
+// Prozessors selbst, und das gaebe eine Endlosschleife statt eines NPF.
+fn hole_page(guest: u64) -> u64 {
+    return 7
+}
+
 fn npt_build(state: u64, i: u64) -> bool {
     let base: u64 = vget(state, i, V_NPML4)
     let ram: u64 = vget(state, i, V_RAM)
+    let pages: u64 = vget(state, i, V_PAGES)
+    let guest: u64 = vget(state, i, V_GUEST)
     if base == 0 || ram == 0 {
         return false
     }
@@ -710,10 +836,13 @@ fn npt_build(state: u64, i: u64) -> bool {
     __mmio_write64(base as *mut u64, pdpt | NPT_FLAGS)
     __mmio_write64(pdpt as *mut u64, pd | NPT_FLAGS)
     __mmio_write64(pd as *mut u64, pt | NPT_FLAGS)
+    let loch: u64 = hole_page(guest)
     var p: u64 = 0
-    while p < GUEST_MAPPED {
-        __mmio_write64((pt +% p *% 8) as *mut u64,
-            (ram +% p *% 4096) | NPT_FLAGS)
+    while p < pages {
+        if p != loch {
+            __mmio_write64((pt +% p *% 8) as *mut u64,
+                (ram +% p *% 4096) | NPT_FLAGS)
+        }
         p = p +% 1
     }
     return true
@@ -738,6 +867,61 @@ fn npt_map(state: u64, i: u64, gpa: u64) -> bool {
     __mmio_write64((pt +% page *% 8) as *mut u64,
         (ram +% page *% 4096) | NPT_FLAGS)
     return true
+}
+
+// ================== RUNDE HV2, STUFE 2: EINE TABELLE, DIE WAECHST ======
+//
+// Die NPT der Runde K12 hat GENAU EINE Seitentabelle und deckt damit
+// zwei Mebioctets. Fuer sechs Gaeste von je acht Seiten reicht das; fuer
+// irgendetwas Echtes nicht -- ein Linux-Kern will heute 55 MiB allein
+// fuer sich (`init_size` im Kopf eines bzImage, nachgemessen).
+//
+// ZWEI-MEBIOCTET-SEITEN STATT VIERTEL-KILOBYTE-SEITEN. Ein Eintrag im
+// Seitenverzeichnis mit dem Bit PS deckt zwei Mebioctets auf einmal.
+// Das spart nicht nur Platz -- es spart vor allem ZEIT: 64 MiB in
+// Seiten zu 4 KiB waeren 16384 Eintraege in 32 Tabellen, in Seiten zu
+// 2 MiB sind es 32 Eintraege in EINER. Und es spart Rahmen: die
+// Tabellen selbst kosten dann nichts mehr.
+//
+// WARUM DAS HIER GEHT UND BEIM GAST NICHT IMMER. Der Wirt darf die
+// Groesse frei waehlen, weil ER den Speicher besitzt: eine grosse Seite
+// verlangt nur, dass der Rahmen 2 MiB AUSGERICHTET ist. `frame_run`
+// gibt zusammenhaengende Rahmen, aber nicht ausgerichtete -- deshalb
+// fordert `vm_create_big` einen Lauf, der gross genug ist, und rueckt
+// den Anfang auf die naechste 2-MiB-Grenze vor.
+//
+// EINE PD DECKT 1 GiB. Mehr braucht diese Runde nicht, und was sie
+// nicht braucht, baut sie nicht.
+const BIG_PAGE: u64 = 2097152 // 2 MiB
+const BIG_SHIFT: u64 = 21
+const NPT_PS: u64 = 128 // Bit 7: dieser Eintrag IST die Seite
+
+// Baut die NPT eines Gasts mit grossen Seiten: PML4 -> PDP -> PD, und
+// im PD steht je Eintrag unmittelbar der Speicher. Gibt zurueck, wie
+// viele grosse Seiten abgebildet wurden.
+fn npt_build_big(state: u64, i: u64) -> u64 {
+    let base: u64 = vget(state, i, V_NPML4)
+    let ram: u64 = vget(state, i, V_RAM)
+    let bytes: u64 = vget(state, i, V_PAGES) *% 4096
+    if base == 0 || ram == 0 {
+        return 0
+    }
+    let pdpt: u64 = base +% 4096
+    let pd: u64 = base +% 8192
+    vmcb.zero_page(base)
+    vmcb.zero_page(pdpt)
+    vmcb.zero_page(pd)
+    __mmio_write64(base as *mut u64, pdpt | NPT_FLAGS)
+    __mmio_write64(pdpt as *mut u64, pd | NPT_FLAGS)
+    var n: u64 = 0
+    var off: u64 = 0
+    while off < bytes {
+        __mmio_write64((pd +% n *% 8) as *mut u64,
+            (ram +% off) | NPT_FLAGS | NPT_PS)
+        n = n +% 1
+        off = off +% BIG_PAGE
+    }
+    return n
 }
 
 // ---------------------------------------------------- eine Maschine anlegen
@@ -768,6 +952,21 @@ fn vm_exits(state: u64, i: u64) -> u64 {
         return 0
     }
     return vget(state, i, V_EXITS)
+}
+
+// RUNDE HV2: wie viele 2-MiB-Seiten diese Maschine hat (0 = kleine).
+fn vm_big(state: u64, i: u64) -> u64 {
+    if i >= MAX_VMS {
+        return 0
+    }
+    return vget(state, i, V_BIG)
+}
+
+fn vm_pages(state: u64, i: u64) -> u64 {
+    if i >= MAX_VMS {
+        return 0
+    }
+    return vget(state, i, V_PAGES)
 }
 
 fn vm_guest(state: u64, i: u64) -> u64 {
@@ -809,9 +1008,15 @@ fn vm_create(state: u64, guest: u64, owner: u64) -> u64 {
     if i >= MAX_VMS {
         return MAX_VMS
     }
+    let pages: u64 = pages_for(guest)
     let blk: u64 = mem.frame_alloc(state)
     let npt: u64 = mem.frame_run(state, 4)
-    let ram: u64 = mem.frame_run(state, GUEST_PAGES)
+    let ram: u64 = mem.frame_run(state, pages)
+    // Bei den kleinen Gaesten ist der Lauf genau der Speicher: nichts
+    // auszurichten, nichts vorzuruecken.
+    vset(state, i, V_RUNBASE, ram)
+    vset(state, i, V_RUNLEN, pages)
+    vset(state, i, V_BIG, 0)
     if blk == 0 || npt == 0 || ram == 0 {
         if blk != 0 {
             mem.frame_free(state, blk)
@@ -821,7 +1026,7 @@ fn vm_create(state: u64, guest: u64, owner: u64) -> u64 {
     vset(state, i, V_VMCB, blk)
     vset(state, i, V_NPML4, npt)
     vset(state, i, V_RAM, ram)
-    vset(state, i, V_PAGES, GUEST_PAGES)
+    vset(state, i, V_PAGES, pages)
     vset(state, i, V_GUEST, guest)
     vset(state, i, V_OWNER, owner)
     vset(state, i, V_EXITS, 0)
@@ -847,7 +1052,7 @@ fn vm_create(state: u64, guest: u64, owner: u64) -> u64 {
 
     // Der Speicher des Gasts: erst leeren, dann das Abbild hinein.
     var p: u64 = 0
-    while p < GUEST_PAGES {
+    while p < pages {
         vmcb.zero_page(ram +% p *% 4096)
         p = p +% 1
     }
@@ -867,6 +1072,113 @@ fn vm_create(state: u64, guest: u64, owner: u64) -> u64 {
         gpr_set(block, g, 0)
         g = g +% 1
     }
+    vdev.reset(state, vdev_base(state), i)
+    vset(state, i, V_STATE, ST_READY)
+    bump(state, S_VMS, 1)
+    return i
+}
+
+// ============ RUNDE HV2, STUFE 2: EINE MASCHINE MIT VIEL SPEICHER ====
+//
+// `vm_create` gibt jedem Gast acht (oder zwoelf) Seiten und eine NPT
+// aus lauter kleinen Eintraegen. Das traegt die Gaeste der Runde K12
+// und sonst nichts. Diese Funktion legt eine Maschine an, deren
+// Speicher in MEBIOCTETS gemessen wird und deren Tabelle aus 2-MiB-
+// Seiten besteht.
+//
+// DIE AUSRICHTUNG IST DER GANZE PUNKT. Ein Eintrag mit dem Bit PS
+// verlangt, dass die Adresse auf 2 MiB ausgerichtet ist -- die unteren
+// 21 Bit muessen Null sein. `frame_run` gibt zusammenhaengende Rahmen,
+// aber es verspricht keine Ausrichtung. Also fordert der Wirt bis zu
+// eine grosse Seite MEHR an, als er braucht, und faengt beim naechsten
+// Vielfachen an. Was davor liegt, bleibt Teil des Laufs und wird beim
+// Abraeumen mit zurueckgegeben -- deshalb merkt sich die Maschine
+// V_RUNBASE und V_RUNLEN und nicht nur V_RAM.
+//
+// `mib` ist die gewuenschte Groesse in Mebioctets, aufgerundet auf ein
+// Vielfaches von zwei.
+fn vm_create_big(state: u64, guest: u64, owner: u64, mib: u64) -> u64 {
+    if !ready(state) || guest >= G_MAX {
+        return MAX_VMS
+    }
+    let i: u64 = vm_slot(state)
+    if i >= MAX_VMS {
+        return MAX_VMS
+    }
+    // Auf ganze grosse Seiten aufrunden, mindestens eine.
+    var big: u64 = (mib +% 1) / 2
+    if big == 0 {
+        big = 1
+    }
+    let want: u64 = big *% (BIG_PAGE / 4096) // Rahmen, die der Gast sieht
+    // Eine grosse Seite mehr, damit das Vorruecken auf jeden Fall passt.
+    let runlen: u64 = want +% (BIG_PAGE / 4096)
+
+    let blk: u64 = mem.frame_alloc(state)
+    let npt: u64 = mem.frame_run(state, 4)
+    let run: u64 = mem.frame_run(state, runlen)
+    if blk == 0 || npt == 0 || run == 0 {
+        if blk != 0 {
+            mem.frame_free(state, blk)
+        }
+        return MAX_VMS
+    }
+    // Vorruecken auf die naechste 2-MiB-Grenze.
+    var ram: u64 = run
+    let rest: u64 = run & (BIG_PAGE -% 1)
+    if rest != 0 {
+        ram = run +% (BIG_PAGE -% rest)
+    }
+
+    vset(state, i, V_VMCB, blk)
+    vset(state, i, V_NPML4, npt)
+    vset(state, i, V_RAM, ram)
+    vset(state, i, V_PAGES, want)
+    vset(state, i, V_RUNBASE, run)
+    vset(state, i, V_RUNLEN, runlen)
+    vset(state, i, V_GUEST, guest)
+    vset(state, i, V_OWNER, owner)
+    vset(state, i, V_EXITS, 0)
+    vset(state, i, V_CYCLES, 0)
+    vset(state, i, V_RESULT, 0)
+    vset(state, i, V_DONE, 0)
+    vset(state, i, V_WHY, 0)
+    vset(state, i, V_LAST, 0)
+    vset(state, i, V_BUDGET, BUDGET)
+
+    var asid: u64 = get(state, S_ASID)
+    if asid == 0 {
+        asid = 1
+    }
+    vset(state, i, V_ASID, asid)
+    set(state, S_ASID, asid +% 1)
+
+    // NUR die erste grosse Seite wird geleert und traegt das Abbild.
+    // Ein Gast mit 64 MiB wuerde sonst 64 MiB Nullen schreiben, bevor
+    // er ueberhaupt anfaengt -- unter QEMUs Emulation sind das Minuten.
+    var p: u64 = 0
+    while p < (BIG_PAGE / 4096) {
+        vmcb.zero_page(ram +% p *% 4096)
+        p = p +% 1
+    }
+    let von: u64 = hvv(state, HV_G_FIRST +% guest *% 2)
+    let bis: u64 = hvv(state, HV_G_FIRST +% guest *% 2 +% 1)
+    copy(ram +% GUEST_LOAD, von, bis -% von)
+    __mmio_write16((ram +% GUEST_PATTERN) as *mut u16, PATTERN as u16)
+
+    let n: u64 = npt_build_big(state, i)
+    if n == 0 {
+        return MAX_VMS
+    }
+    vset(state, i, V_BIG, n)
+    vmcb_setup(state, i)
+    var g: u64 = 0
+    let block: u64 = gpr_block(state, i)
+    while g < 14 {
+        gpr_set(block, g, 0)
+        g = g +% 1
+    }
+    vdev.reset(state, vdev_base(state), i)
     vset(state, i, V_STATE, ST_READY)
     bump(state, S_VMS, 1)
     return i
@@ -998,7 +1310,13 @@ fn vm_destroy(state: u64, i: u64) -> bool {
     }
     let blk: u64 = vget(state, i, V_VMCB)
     let npt: u64 = vget(state, i, V_NPML4)
-    let ram: u64 = vget(state, i, V_RAM)
+    // ZURUECKGEGEBEN WIRD DER LAUF, DEN `frame_run` HERAUSGAB -- nicht
+    // der ausgerichtete Anfang, den der Gast benutzt hat. Wer nur ab
+    // V_RAM freigibt, laesst bei jedem grossen Gast die Rahmen zwischen
+    // Lauf-Anfang und Ausrichtung liegen, und die Zusage ueber das Leck
+    // faende es. Genau dafuer gibt es V_RUNBASE und V_RUNLEN.
+    let rb: u64 = vget(state, i, V_RUNBASE)
+    let rl: u64 = vget(state, i, V_RUNLEN)
     if blk != 0 {
         mem.frame_free(state, blk)
     }
@@ -1008,14 +1326,16 @@ fn vm_destroy(state: u64, i: u64) -> bool {
         k = k +% 1
     }
     k = 0
-    while k < vget(state, i, V_PAGES) {
-        mem.frame_free(state, ram +% k *% 4096)
+    while k < rl {
+        mem.frame_free(state, rb +% k *% 4096)
         k = k +% 1
     }
     vset(state, i, V_STATE, ST_FREE)
     vset(state, i, V_VMCB, 0)
     vset(state, i, V_NPML4, 0)
     vset(state, i, V_RAM, 0)
+    vset(state, i, V_RUNBASE, 0)
+    vset(state, i, V_RUNLEN, 0)
     return true
 }
 
@@ -1171,7 +1491,7 @@ fn handle(state: u64, i: u64, b: u64, block: u64, code: u64) -> u64 {
         return r
     }
     if code == vmcb.X_IOIO {
-        do_io(state, b, block)
+        do_io(state, i, b, block)
         // Bei einem Anschlusszugriff steht der naechste RIP in
         // EXITINFO2. Das ist eine der wenigen Stellen, an denen der
         // Prozessor die Laenge des Befehls verraet, auch ohne "nrip
@@ -1262,33 +1582,60 @@ fn do_cpuid(state: u64, b: u64, block: u64) {
 //   Bit 3     mit REP
 //   Bit 4/5/6 ein, zwei oder vier Oktette
 //   Bit 16..  der Anschluss
-fn do_io(state: u64, b: u64, block: u64) {
+// RUNDE HV2, STUFE 3: HIER STEHEN JETZT GERAETE.
+//
+// Bis zur Runde K12 hatte ein Gast genau EINE Richtung: schreiben auf
+// 0x3F8 wurde weitergereicht, und jedes Lesen lieferte den offenen Bus.
+// Das reicht fuer einen Gast, der nur reden will. Ein Betriebssystem
+// PRUEFT aber erst und benutzt dann -- und ein Geraet, das auf jede
+// Frage 0xFF sagt, gilt ihm als nicht vorhanden. Beim seriellen
+// Anschluss ist 0xFF sogar ausdruecklich toedlich: Linux' Treiber
+// haelt den Anschluss dann fuer defekt und gibt ihn auf.
+//
+// Von hier an beantwortet `vdev.fi` die Anschluesse, die es kennt --
+// serielle Schnittstelle, Unterbrechungsverteiler, Zeitgeber -- und
+// alles Uebrige bleibt der offene Bus wie zuvor.
+fn do_io(state: u64, i: u64, b: u64, block: u64) {
     let info: u64 = vmcb.rd(b, vmcb.C_EXITINFO1)
     let port: u64 = (info >> 16) & 0xFFFF
     let herein: bool = (info & 1) != 0
     bump(state, S_IOPORTS, 1)
+    let vb: u64 = vdev_base(state)
+    var s_pre: [u8; 7] = "gast| \0"
+
     if !herein {
-        // Der Gast hat eine serielle Schnittstelle, die es nicht gibt.
-        // Was er hineinschreibt, schreibt der Wirt weiter -- mit einem
-        // Vorspann, damit im Protokoll zu sehen ist, wer geredet hat.
-        if port == 0x3F8 {
-            let ch: u64 = vmcb.rd(b, vmcb.S_RAX) & 0xFF
-            guest_putc(state, ch)
+        let wert: u64 = vmcb.rd(b, vmcb.S_RAX)
+        if vdev.claims(port) {
+            let vor: u64 = vdev.uart_out_count(state, vb, i)
+            vdev.io_write(state, vb, i, port, wert, (&s_pre[0]) as u64)
+            // Was die serielle Schnittstelle hinausgegeben hat, zaehlt
+            // der Wirt weiter mit -- die Zusagen der Runde K12 haengen
+            // an dieser Zahl.
+            let nach: u64 = vdev.uart_out_count(state, vb, i)
+            if nach > vor {
+                bump(state, S_OUT, nach -% vor)
+            }
+            return
         }
         return
     }
-    // Ein Lesen von einem Anschluss, den der Gast nicht hat: der offene
-    // Bus. Alle Bits gesetzt ist, was ein echter Rechner an einer
-    // unbestueckten Adresse liefert -- und keine Erfindung, die ein
-    // Gast fuer ein Geraet halten koennte.
+
+    // Ein Lesen. Kennt ein Geraet den Anschluss, antwortet es; sonst
+    // bleibt es beim offenen Bus -- alle Bits gesetzt ist, was ein
+    // echter Rechner an einer unbestueckten Adresse liefert.
+    var v: u64 = 0xFFFFFFFF
+    if vdev.claims(port) {
+        v = vdev.io_read(state, vb, i, port)
+    }
     let alt: u64 = vmcb.rd(b, vmcb.S_RAX)
     if (info & 16) != 0 {
-        vmcb.wr(b, vmcb.S_RAX, (alt & 0xFFFFFFFFFFFFFF00) | 0xFF)
+        vmcb.wr(b, vmcb.S_RAX, (alt & 0xFFFFFFFFFFFFFF00) | (v & 0xFF))
     } else {
         if (info & 32) != 0 {
-            vmcb.wr(b, vmcb.S_RAX, (alt & 0xFFFFFFFFFFFF0000) | 0xFFFF)
+            vmcb.wr(b, vmcb.S_RAX,
+                (alt & 0xFFFFFFFFFFFF0000) | (v & 0xFFFF))
         } else {
-            vmcb.wr(b, vmcb.S_RAX, 0xFFFFFFFF)
+            vmcb.wr(b, vmcb.S_RAX, v & 0xFFFFFFFF)
         }
     }
 }
@@ -1317,6 +1664,44 @@ fn do_msr(state: u64, b: u64, block: u64) {
     let nr: u64 = gpr(block, G_RCX) & 0xFFFFFFFF
     bump(state, S_MSRS, 1)
     if write {
+        // RUNDE HV2, STUFE 1: EIN SCHREIBEN, DAS WIRKLICH ANKOMMEN MUSS.
+        //
+        // Bis hierher schluckte dieser Wirt JEDES Schreiben auf ein MSR.
+        // Fuer die Gaeste der Runde K12 war das richtig -- keiner von
+        // ihnen brauchte eines. Ein Gast, der in den langen Modus will,
+        // braucht aber genau eines: `EFER.LME`. Wird es geschluckt,
+        // bleibt der Gast 32 Bit, und zwar SCHWEIGEND -- der Prozessor
+        // meldet nichts, der weite Sprung landet nur woanders.
+        //
+        // Der Wirt uebernimmt deshalb die Bits, die dem Gast gehoeren,
+        // in sein Gast-EFER. Was er NICHT uebernimmt, ist `SVME`: das
+        // Bit muss im Gast-EFER stehen (AMD APM 15.5.1), aber es ist
+        // nicht das des Gasts, und ein Gast, der es loeschte, machte
+        // seinen eigenen Zustand ungueltig.
+        //
+        // `LMA` (Bit 10) steht ausdruecklich NICHT in der Maske. Es ist
+        // ein NUR-LESE-Bit: der Prozessor setzt es selbst, wenn Paging
+        // dazukommt. Genau daran haengt die Messung dieser Stufe --
+        // der Gast kann es nicht faelschen.
+        if nr == MSR_EFER {
+            let neu: u64 = (vmcb.rd(b, vmcb.S_RAX) & 0xFFFFFFFF)
+                | (gpr(block, G_RDX) << 32)
+            // GEGENPROBE `ohnelme`: das Schreiben wird geschluckt wie
+            // frueher. Der Gast bleibt dann 32 Bit, und die Zusage
+            // darueber MUSS zusammenbrechen.
+            if !on(state, M_NOLME) {
+                let maske: u64 = vmcb.EFER_LME | vmcb.EFER_NXE
+                    | vmcb.EFER_SCE
+                let alt: u64 = vmcb.rd(b, vmcb.S_EFER)
+                // `0xFF..FF ^ maske` ist das Gegenteil der Maske --
+                // dieselbe Schreibweise, die `mem.fi` fuer die
+                // Rahmenkarte benutzt (Firn hat kein `~`).
+                let rest: u64 = 0xFFFFFFFFFFFFFFFF ^ maske
+                vmcb.wr(b, vmcb.S_EFER,
+                    (alt & rest) | (neu & maske) | vmcb.EFER_SVME)
+                bump(state, S_EFERW, 1)
+            }
+        }
         return
     }
     var v: u64 = 0
@@ -1345,6 +1730,7 @@ fn do_npf(state: u64, i: u64, b: u64) -> u64 {
         bump(state, S_NPFS, 1)
         return R_MORE
     }
+    set(state, S_LASTNPF, gpa)
     return R_FAULT
 }
 
@@ -1432,6 +1818,32 @@ fn decode_movcr(state: u64, i: u64, b: u64, block: u64, nr: u64) -> u64 {
     }
     v = v & 0xFFFFFFFF
     if nr == 0 {
+        // RUNDE HV2: WER CR0 FUER DEN GAST SCHREIBT, MUSS AUCH LMA
+        // NACHZIEHEN -- und das ist die Falle, die diese Stufe gekostet
+        // hat.
+        //
+        // Fuehrt der GAST selbst `mov reg, cr0` mit PG aus und steht
+        // EFER.LME, dann setzt DER PROZESSOR EFER.LMA dazu: das ist der
+        // Augenblick, in dem der lange Modus aktiv wird. Faengt der
+        // Wirt den Befehl aber ab und schreibt den Wert selbst in das
+        // VMCB-Feld, geschieht das NICHT -- er hat nur ein Feld
+        // beschrieben, und kein Prozessor hat etwas ausgefuehrt.
+        //
+        // Beim naechsten Eintritt steht dann CR0.PG=1, CR4.PAE=1,
+        // EFER.LME=1 und EFER.LMA=0. Das ist ein UNGUELTIGER
+        // GASTZUSTAND (AMD APM Band 2, 15.5.1), und der Gast stirbt --
+        // gemessen als zweiter SHUTDOWN, der aussah wie ein Fehler des
+        // Gasts und keiner war. Genau hier trennt sich ein Wirt, der
+        // Steuerregister abfaengt, von einem, der es nur vorhat.
+        let efer: u64 = vmcb.rd(b, vmcb.S_EFER)
+        if (v & vmcb.CR0_PG) != 0 && (efer & vmcb.EFER_LME) != 0 {
+            vmcb.wr(b, vmcb.S_EFER, efer | vmcb.EFER_LMA)
+        }
+        if (v & vmcb.CR0_PG) == 0 {
+            // Und andersherum: faellt das Paging, faellt auch LMA.
+            let rest: u64 = 0xFFFFFFFFFFFFFFFF ^ vmcb.EFER_LMA
+            vmcb.wr(b, vmcb.S_EFER, efer & rest)
+        }
         vmcb.wr(b, vmcb.S_CR0, v)
     }
     if nr == 3 {
@@ -1597,6 +2009,36 @@ fn lauf(state: u64, guest: u64, name: u64) -> u64 {
     return vm
 }
 
+// RUNDE HV2: dasselbe wie `lauf`, aber auf einer Maschine mit grossem
+// Speicher und einer NPT aus 2-MiB-Seiten.
+fn lauf_big(state: u64, guest: u64, name: u64, mib: u64) -> u64 {
+    var s_run: [u8; 12] = "hv: guest \0\0"
+    var s_slot: [u8; 6] = "slot\0\0"
+    var s_ex: [u8; 6] = "exits\0"
+    var s_out: [u8; 4] = "out\0"
+    var s_res: [u8; 7] = "result\0"
+    var s_st: [u8; 6] = "state\0"
+    var s_big: [u8; 6] = "big2m\0"
+    var s_pg: [u8; 6] = "pages\0"
+    let vm: u64 = vm_create_big(state, guest, 0, mib)
+    if vm >= MAX_VMS {
+        return MAX_VMS
+    }
+    let r: u64 = vm_run(state, vm)
+    serial.puts((&s_run[0]) as u64)
+    serial.puts(name)
+    serial.put(32 as u8)
+    kv((&s_slot[0]) as u64, vm)
+    kv((&s_ex[0]) as u64, vm_exits(state, vm))
+    kv((&s_out[0]) as u64, r)
+    kx((&s_res[0]) as u64, vm_result(state, vm))
+    kv((&s_st[0]) as u64, vm_state(state, vm))
+    kv((&s_big[0]) as u64, vm_big(state, vm))
+    kv((&s_pg[0]) as u64, vm_pages(state, vm))
+    serial.nl()
+    return vm
+}
+
 // Der Kopf: was dieser Prozessor kann. Ohne diese Zeile weiss niemand,
 // unter welchen Voraussetzungen die Zahlen darunter entstanden sind.
 fn report_cpu(state: u64) {
@@ -1707,6 +2149,8 @@ fn stage(state: u64) {
     var s_fault: [u8; 6] = "fault\0"
     var s_crash: [u8; 6] = "crash\0"
     var s_loop: [u8; 5] = "loop\0"
+    var s_lm: [u8; 3] = "lm\0"
+    var s_dev: [u8; 4] = "dev\0"
     var s_frames: [u8; 12] = "hv: frames \0"
     var s_before: [u8; 7] = "before\0"
     var s_after: [u8; 6] = "after\0"
@@ -1739,6 +2183,25 @@ fn stage(state: u64) {
     var n_leak: [u8; 40] = "every frame of every guest came back\0\0\0\0"
     var n_intr: [u8; 46] = "the host took the runaway guest's processor\0\0\0"
     var n_intr2: [u8; 38] = "and the runaway guest counted onwards\0"
+    // ---- Runde HV2, Stufe 1 ----
+    var n_l_res: [u8; 32] = "guest 7 signed off with 0x6464\0\0"
+    var n_l_lma: [u8; 44] = "guest 7 reached LONG MODE: efer.lme and lma\0"
+    var n_l_cr0: [u8; 40] = "guest 7 runs with pe and paging on cr0\0\0"
+    var n_l_cr4: [u8; 39] = "guest 7 turned on pae -- without it no\0"
+    var n_l_64: [u8; 43] = "guest 7 really has 64 bit wide registers\0\0\0"
+    var n_l_big: [u8; 46] = "guest 7 wrote through a 2 MiB page and read\0\0\0"
+    var n_l_efer: [u8; 45] = "and the host really took the efer.lme write\0\0"
+    var n_l_npt: [u8; 46] = "and its npt is built from 2 MiB pages, not 4K\0"
+    // ---- Runde HV2, Stufe 3 ----
+    var n_d_res: [u8; 32] = "guest 8 signed off with 0x7777\0\0"
+    var n_d_scr: [u8; 44] = "the uart scratch register really holds 0x5A\0"
+    var n_d_lsr: [u8; 44] = "the uart says thre and temt: it can send\0\0\0\0"
+    var n_d_ff: [u8; 47] = "and the lsr is NOT 0xFF -- linux would give up\0"
+    var n_d_dlab: [u8; 44] = "behind dlab lies the divisor, not the data\0\0"
+    var n_d_pic: [u8; 44] = "the pic took the full icw1..icw4 sequence\0\0\0"
+    var n_d_base: [u8; 46] = "and its vector base is the guest's 0x30, not\0\0"
+    var n_d_pit: [u8; 46] = "the timer joined both halves into 0x2E9C\0\0\0\0\0\0"
+    var n_d_ready: [u8; 42] = "and the pic is fully initialised, step 0\0\0"
 
     if !on(state, M_HV) {
         serial.puts((&s_skip[0]) as u64)
@@ -1832,6 +2295,84 @@ fn stage(state: u64) {
         vm_destroy(state, v3)
     }
 
+    // 7b. RUNDE HV2, STUFE 1: DER LANGE MODUS.
+    //
+    // Der Gast geht selbst den ganzen Weg -- Realmodus, geschuetzter
+    // Modus, vierstufige Tabelle mit 2-MiB-Seiten, PAE, EFER.LME,
+    // Paging, weiter Sprung in ein Segment mit L=1. Gemessen wird
+    // NICHT, dass er lebt, sondern dass der PROZESSOR `EFER.LMA`
+    // gesetzt hat: dieses Bit kann der Gast nicht selbst schreiben.
+    var v6: u64 = MAX_VMS
+    if on(state, M_LM) {
+        let ew0: u64 = eferw(state)
+        // AUF EINER MASCHINE MIT GROSSEM SPEICHER. Der Gast schreibt
+        // durch die Adresse 2 MiB, und die liegt in der ZWEITEN grossen
+        // Seite -- das kann nur ankommen, wenn die NPT dieser Runde
+        // wirklich mit 2-MiB-Eintraegen uebersetzt.
+        v6 = lauf_big(state, G_LM, (&s_lm[0]) as u64, 8)
+        alle = alle + 6
+        gut = gut + zusage((&n_l_res[0]) as u64, vm_result(state, v6), 0x6464)
+        // LMA (Bit 10) UND LME (Bit 8): der Gast hat LME geschrieben,
+        // der Prozessor hat LMA dazugesetzt. Beides zusammen heisst
+        // "langer Modus AKTIV".
+        gut = gut + zusage((&n_l_lma[0]) as u64,
+            value_of(state, 10) & 0x500, 0x500)
+        // CR0.PG und CR0.PE.
+        gut = gut + zusage((&n_l_cr0[0]) as u64,
+            value_of(state, 11) & 0x80000001, 0x80000001)
+        // CR4.PAE -- ohne das gibt es keinen langen Modus.
+        gut = gut + zusage((&n_l_cr4[0]) as u64,
+            value_of(state, 12) & 0x20, 0x20)
+        // Ein Wert, den ein 32-Bit-Gast gar nicht bilden koennte.
+        gut = gut + zusage((&n_l_64[0]) as u64, value_of(state, 13), 0x12345678)
+        // Durch eine 2-MiB-Seite geschrieben und zurueckgelesen.
+        gut = gut + zusage((&n_l_big[0]) as u64, value_of(state, 14), 0xC0FFEE64)
+        alle = alle + 1
+        gut = gut + zusage_true((&n_l_efer[0]) as u64, eferw(state) > ew0)
+        // Die Maschine hat wirklich grosse Seiten, und zwar mehr als
+        // eine -- sonst waere der Schreibzugriff auf 2 MiB nie
+        // uebersetzt worden.
+        alle = alle + 1
+        gut = gut + zusage_true((&n_l_npt[0]) as u64, vm_big(state, v6) > 1)
+    }
+
+    // 7c. RUNDE HV2, STUFE 3: DIE GERAETE.
+    //
+    // Der Gast PRUEFT sie, wie ein Betriebssystem es tut: schreiben,
+    // zurueklesen, und nur glauben, was zurueckkommt. Jede der fuenf
+    // Zahlen unten ist eine Antwort eines Geraets und keine Behauptung
+    // des Wirts.
+    var v7: u64 = MAX_VMS
+    if on(state, M_DEV) {
+        v7 = lauf(state, G_DEV, (&s_dev[0]) as u64)
+        alle = alle + 7
+        gut = gut + zusage((&n_d_res[0]) as u64, vm_result(state, v7), 0x7777)
+        // Das Kratzregister ist reiner Speicher -- und genau daran
+        // erkennt ein Treiber, dass ueberhaupt ein Baustein da ist.
+        gut = gut + zusage((&n_d_scr[0]) as u64, value_of(state, 40), 0x5A)
+        // THRE und TEMT. Ohne sie waere der Anschluss nie sendebereit.
+        gut = gut + zusage((&n_d_lsr[0]) as u64, value_of(state, 41), 0x60)
+        // UND NICHT 0xFF: darauf gibt Linux den Anschluss auf.
+        gut = gut + zusage_true((&n_d_ff[0]) as u64,
+            value_of(state, 41) != 0xFF)
+        // Hinter DLAB liegt der Teiler und nicht das Datenregister.
+        gut = gut + zusage((&n_d_dlab[0]) as u64, value_of(state, 42), 0x0C)
+        // Die vierteilige Anfangsfolge ist durchgelaufen, und die
+        // Maske danach ist die, die der Gast geschrieben hat.
+        gut = gut + zusage((&n_d_pic[0]) as u64, value_of(state, 44), 0xFD)
+        // Und der Verteiler hat die Vektorbasis des Gasts, nicht die
+        // aus dem Lehrbuch.
+        gut = gut + zusage((&n_d_base[0]) as u64,
+            vdev.pic_base(state, vdev_base(state), v7, false), 0x30)
+        // Der Zeitgeber hat das zweiteilige Schreiben richtig
+        // zusammengesetzt: 0x2E9C und nicht 0x2E oder 0x9C.
+        alle = alle + 2
+        gut = gut + zusage((&n_d_pit[0]) as u64,
+            vdev.pit_count(state, vdev_base(state), v7), 0x2E9C)
+        gut = gut + zusage_true((&n_d_ready[0]) as u64,
+            vdev.pic_ready(state, vdev_base(state), v7))
+    }
+
     if on(state, M_MESS) {
         bench(state)
     }
@@ -1845,6 +2386,12 @@ fn stage(state: u64) {
     vm_destroy(state, v2)
     vm_destroy(state, v4)
     vm_destroy(state, v5)
+    if v6 < MAX_VMS {
+        vm_destroy(state, v6)
+    }
+    if v7 < MAX_VMS {
+        vm_destroy(state, v7)
+    }
     let frames1: u64 = mem.frames_free(state)
     serial.puts((&s_frames[0]) as u64)
     kv((&s_before[0]) as u64, frames0)

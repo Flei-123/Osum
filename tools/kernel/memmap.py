@@ -151,6 +151,12 @@ BEREICHE = [
     # Speicher der Gaeste) kommt aus dem Rahmenverwalter.  Eingetragen
     # ist er hier, damit der Kollisionspruefer ihn trotzdem sieht.
     ("HV",         "hv.fi",     "HV_OFF",         "HV_MAX"),
+    # RUNDE HV2: die virtuellen Geraete je Gastmaschine (serielle
+    # Schnittstelle, Unterbrechungsverteiler, Zeitgeber). EINE Seite,
+    # acht Maschinen zu je 128 Oktetten. Sie liegt NICHT neben `HV`,
+    # weil der Bereich dahinter seit Runde K12 vollstaendig belegt
+    # wurde -- 0x84000 ist die erste wirklich freie Seite.
+    ("VDEV",       "hv.fi",     "VDEV_OFF",       "VDEV_MAX"),
     # RUNDE K13: die Zaehler der Benutzer- und Rechteschicht. Zwei
     # Seiten, 0x41000 und 0x42000 -- die ersten hinter dem Bereich des
     # Hypervisors, so wie kstate.fi es fuer die naechste Runde
