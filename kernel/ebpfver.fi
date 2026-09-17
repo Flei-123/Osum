@@ -1,0 +1,787 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/ebpfver.fi -- Runde O-EBPF, Stufe 2: DER PRUEFER.
+//
+// Ohne diese Datei ist die ganze Runde ein Einfallstor. Die Maschine in
+// `ebpf.fi` fuehrt ein FREMDES Programm mit Kernrechten aus; was sie
+// davon abhaelt, den Kern anzuhalten oder `kdata` zu beschreiben, steht
+// hier -- und zum zweiten Mal, als Schranke zur Laufzeit, dort.
+//
+// ================================================================
+// WAS DIESER PRUEFER ZUSAGT
+// ================================================================
+//
+//  1. DAS PROGRAMM ENDET. Jeder Sprung geht VORWAERTS. Ein
+//     Rueckwaertssprung wird abgewiesen -- damit gibt es keine Schleife,
+//     und der Befehlszaehler ist streng monoton. Ein Programm mit `n`
+//     Befehlen fuehrt hoechstens `n` Befehle aus.
+//     (Die harte Schranke `MAX_TICKS` in der Maschine ist die zweite,
+//     unabhaengige Zusage fuer denselben Punkt -- sie gilt auch dann,
+//     wenn dieser Pruefer sich irrt.)
+//
+//  2. JEDER SPRUNG LANDET AUF EINEM BEFEHL. Das Ziel liegt innerhalb des
+//     Programms UND auf einer Befehlsgrenze -- also nie in der zweiten
+//     Haelfte eines `LD_IMM64`, wo ein Sofortwert steht, den die
+//     Maschine sonst als Befehl lesen wuerde.
+//
+//  3. DAS PROGRAMM ENDET MIT `EXIT`. Der letzte Befehl ist ein `EXIT`,
+//     und kein Weg laeuft ueber das Ende hinaus.
+//
+//  4. KEIN UNINITIALISIERTES REGISTER WIRD GELESEN. Beim Start sind nur
+//     r1 (Paketanfang), r2 (Paketende) und r10 (Stapel) gesetzt. Wer r3
+//     liest, bevor er es beschrieben hat, wird abgewiesen.
+//     Die Verfolgung laeuft ueber alle Wege: an einer Sprungmarke gilt
+//     ein Register nur dann als gesetzt, wenn es auf JEDEM Weg dorthin
+//     gesetzt war (Schnittmenge).
+//
+//  5. r10 IST NUR LESBAR. Kein Befehl darf es als Ziel haben. Ein
+//     beschreibbarer Stapelzeiger wuerde die Bereichspruefung der
+//     Maschine aushebeln.
+//
+//  6. JEDER SPEICHERZUGRIFF LIEGT NACHWEISLICH IM ERLAUBTEN BEREICH.
+//     Der Pruefer verfolgt je Register eine ART:
+//
+//       UNBEKANNT   eine Zahl. Kein Zugriff darueber.
+//       PAKET       zeigt in den Paketpuffer, mit bekanntem Abstand
+//                   zum Anfang.
+//       PAKETENDE   der Wert von r2.
+//       STAPEL      zeigt in den eigenen Stapel, mit bekanntem Abstand.
+//       TAFELWERT   kam aus `map_lookup`. Kein Zugriff darueber --
+//                   siehe die offene Luecke unten.
+//
+//     Ein Zugriff ueber einen STAPEL-Zeiger wird STATISCH nachgerechnet:
+//     Abstand plus Befehlsabstand plus Breite muss im Stapel liegen.
+//     Ein Zugriff ueber einen PAKET-Zeiger verlangt, dass das Programm
+//     vorher gegen r2 geprueft hat -- die Schranke wird an der
+//     Sprungmarke mitgefuehrt.
+//
+//  7. AUFRUFE NUR AUF ANGEMELDETE KERNFUNKTIONEN. Die Nummer muss in
+//     `ebpf.F_*` stehen; alles andere wird abgewiesen.
+//
+//  8. NUR BEKANNTE BEFEHLE. Ein Befehlscode, den die Maschine nicht
+//     deutet, wird nicht geladen -- sonst haengt das Verhalten davon ab,
+//     welchen Zweig der Deuter zufaellig nimmt.
+//
+// ================================================================
+// WAS DIESER PRUEFER *NICHT* PRUEFT -- die ehrliche Liste
+// ================================================================
+//
+// Eine behauptete Sicherheit ist schlimmer als eine eingestandene
+// Luecke, weil sich auf die behauptete jemand verlaesst. Also:
+//
+//  a) KEINE WERTEBEREICHE (kein `tnum`, kein Intervall). Linux verfolgt
+//     zu jedem Register, welche Werte es annehmen kann, und laesst
+//     deshalb `r1 += r3` mit geprueftem r3 zu. Dieser Pruefer kann das
+//     nicht: er kennt nur KONSTANTE Abstaende. Sobald ein Zeiger um
+//     einen unbekannten Wert verschoben wird, wird er UNBEKANNT und
+//     jeder Zugriff darueber abgewiesen. Das ist sicher, aber es weist
+//     auch gueltige Programme ab -- zu streng, nicht zu lasch.
+//
+//  b) DER ZEIGER AUS `map_lookup` IST NICHT BENUTZBAR. Er bekommt die
+//     Art TAFELWERT, und darauf ist kein Zugriff erlaubt, weil der
+//     Pruefer keine Laenge dazu kennt. Ein Programm muss `map_update`
+//     rufen. Das ist der groesste Unterschied zum Vorbild.
+//
+//  c) KEINE RUECKWAERTSSPRUENGE, also KEINE SCHLEIFEN. Linux erlaubt
+//     seit 5.3 begrenzte Schleifen mit einer Wertebereichsanalyse. Wer
+//     hier eine Schleife braucht, muss sie ausrollen.
+//
+//  d) KEINE UNTERPROGRAMME (`BPF_PSEUDO_CALL`). Nur Aufrufe auf
+//     Kernfunktionen.
+//
+//  e) KEIN NEBENLAEUFIGKEITSMODELL. Zwei Prozessoren, die dasselbe
+//     Programm gleichzeitig laufen lassen, teilen sich die Tafeln ohne
+//     Sperre. In dieser Runde ist das folgenlos, WEIL alle Haken aus
+//     `K_NETD` heraus laufen und dort `atomic.L_NET` gehalten wird --
+//     also nie zwei zugleich. Diese Zusage steht in `inet.fi` und nicht
+//     hier; wer den Haken woandershin haengt, muss sie neu pruefen.
+//
+//  f) KEINE PRUEFUNG DER LAUFZEIT AUSSER DER BEFEHLSZAHL. Ein Programm
+//     mit 512 erlaubten Befehlen haelt den Netzpfad genau so lange auf,
+//     wie 512 Befehle dauern. Was das ist, steht gemessen im Bericht.
+//
+//  g) DIE ATOMAREN BEFEHLE (`BPF_ATOMIC`, 0xDB/0xC3) FEHLEN GANZ. Sie
+//     werden als unbekannter Befehl abgewiesen, nicht falsch gedeutet.
+//
+// ================================================================
+// WIE DIE VERFOLGUNG UEBER ALLE WEGE LAEUFT
+// ================================================================
+//
+// Der Pruefer geht das Programm EINMAL von vorn nach hinten durch, und
+// das reicht, weil alle Spruenge vorwaerts gehen: wenn der Befehl an
+// Stelle k betrachtet wird, sind alle Wege, die dorthin fuehren, schon
+// gesehen worden. Zu jeder Stelle wird mitgefuehrt, was auf JEDEM Weg
+// dorthin gilt (Schnittmenge) -- `merge` tut das, und ein Register, das
+// auf zwei Wegen verschiedene Arten hat, wird UNBEKANNT.
+//
+// Der Zustand je Stelle steht in `kdata`, nicht auf dem Kernstapel: es
+// sind bis zu 512 Stellen mal 11 Register, und das ist zuviel fuer den
+// Stapel eines Kernaufrufs.
+
+profile kernel
+
+import kstate
+import ebpf
+import ebpfmap
+
+export {
+    verify, V_OK, V_BACKJUMP, V_TARGET, V_NOEXIT, V_UNINIT, V_R10,
+    V_MEM, V_CALL, V_OP, V_LEN, V_STACKOFF, V_MAPPTR, V_DIVZERO,
+    why_line, checked,
+    T_UNKNOWN, T_PKT, T_PKT_END, T_STACK, T_MAPVAL, T_UNSET
+}
+
+// Die Befunde. 0 = angenommen.
+const V_OK: u64 = 0
+const V_BACKJUMP: u64 = 1 // ein Sprung nach hinten
+const V_TARGET: u64 = 2 // ein Sprungziel ausserhalb / auf halbem Befehl
+const V_NOEXIT: u64 = 3 // endet nicht mit EXIT
+const V_UNINIT: u64 = 4 // ein Register wurde gelesen, bevor es gesetzt war
+const V_R10: u64 = 5 // r10 als Ziel
+const V_MEM: u64 = 6 // ein Zugriff, dessen Bereich nicht nachweisbar ist
+const V_CALL: u64 = 7 // eine unbekannte Kernfunktion
+const V_OP: u64 = 8 // ein unbekannter Befehl
+const V_LEN: u64 = 9 // zu lang, zu kurz, oder ein halber LD_IMM64
+const V_STACKOFF: u64 = 10 // ein Stapelzugriff ausserhalb des Stapels
+const V_MAPPTR: u64 = 11 // Zugriff ueber einen Tafelzeiger
+const V_DIVZERO: u64 = 12 // (nicht benutzt: eBPF erlaubt Teilung durch null)
+
+// Die Arten eines Registers.
+const T_UNSET: u64 = 0 // noch nie beschrieben
+const T_UNKNOWN: u64 = 1 // eine Zahl ohne bekannte Herkunft
+const T_PKT: u64 = 2 // zeigt in den Paketpuffer
+const T_PKT_END: u64 = 3 // ist das Paketende (r2)
+const T_STACK: u64 = 4 // zeigt in den Stapel
+const T_MAPVAL: u64 = 5 // kam aus map_lookup
+
+// Der Arbeitsspeicher des Pruefers, bei `kstate.EBPFVER_OFF`:
+//
+//   0x0000..0x003F  Skalare (Zeile des Befunds, zwei Zaehler)
+//   0x0040..        je Befehlsstelle 48 Oktette Zustand
+//
+// EIN REGISTER IST EIN 32-BIT-WORT, nicht ein 64-Bit-Wort. Oben vier
+// Bit Art, darunter 28 Bit Abstand (vorzeichenbehaftet). Die erste
+// Fassung hielt je Register ein volles Wort; 512 Stellen mal 11
+// Register mal 8 Oktette sind 44 KiB, und mit dem Flagwort passte das
+// nicht mehr in das letzte freie Loch von `kdata`. Ein Abstand
+// innerhalb eines 512-Oktett-Stapels oder eines 1518-Oktett-Rahmens
+// braucht keine 56 Bit; 28 reichen mit sehr viel Luft, und der
+// Pruefer weist ohnehin jeden Abstand ab, der groesser als der
+// Stapel oder ein Rahmen ist.
+//
+//   Oktett  0..43  elf Register zu vier Oktetten
+//   Oktett 44..47  das Flagwort: Bit 0 erreichbar, Bit 1
+//                  Befehlsanfang, Bit 8.. die Paketschranke
+const SCAL: u64 = 0x0000
+const STATES: u64 = 0x0040
+const SBYTES: u64 = 48
+const F_REACH: u64 = 44
+
+const VS_LINE: u64 = 0x00 // an welcher Stelle es scheiterte
+const VS_CHECKED: u64 = 0x08 // wieviele Programme geprueft wurden
+const VS_REJECT: u64 = 0x10 // wieviele abgewiesen
+
+fn vr(off: u64) -> u64 {
+    return kstate.EBPFVER_OFF + off
+}
+
+fn sat(i: u64) -> u64 {
+    return vr(STATES + i * SBYTES)
+}
+
+fn why_line(state: u64) -> u64 {
+    return kstate.get(state, vr(VS_LINE))
+}
+
+fn checked(state: u64) -> u64 {
+    return kstate.get(state, vr(VS_CHECKED))
+}
+
+// Art und Abstand in EINEM 32-Bit-Wort: oben vier Bit Art, darunter
+// 28 Bit Abstand. Der Abstand wird umlaufend abgeschnitten -- wer
+// groesser rechnet, faellt spaeter an der Bereichspruefung durch, und
+// das ist die sichere Richtung.
+fn pack(kind: u64, off: u64) -> u64 {
+    return ((kind & 0x0F) << 28) | (off & 0x0FFFFFFF)
+}
+
+fn kind_of(w: u64) -> u64 {
+    return (w >> 28) & 0x0F
+}
+
+// Der Abstand, vorzeichenbehaftet aus 28 Bit zurueckgeholt.
+fn off_of(w: u64) -> u64 {
+    return ebpf.sext(w & 0x0FFFFFFF, 28)
+}
+
+// Die Register liegen als 32-Bit-Worte hintereinander. `kstate` hat
+// dafuer `get32`, aber kein `set32` auf eine Ablage-Adresse -- also
+// wird hier direkt geschrieben, wie es `ebpfmap.fi` auch tut.
+fn rset(state: u64, at: u64, r: u64, w: u64) {
+    __mmio_write32((state + at + r * 4) as *mut u32, (w & 0xFFFFFFFF) as u32)
+}
+
+fn rget(state: u64, at: u64, r: u64) -> u64 {
+    return __mmio_read32((state + at + r * 4) as *mut u32) as u64
+}
+
+// Das Flagwort, ebenfalls 32 Bit.
+fn fget(state: u64, at: u64) -> u64 {
+    return __mmio_read32((state + at + F_REACH) as *mut u32) as u64
+}
+
+fn fset(state: u64, at: u64, v: u64) {
+    __mmio_write32((state + at + F_REACH) as *mut u32, (v & 0xFFFFFFFF) as u32)
+}
+
+// Zwei Zustaende zusammenfuehren: was gilt, wenn man auf BEIDEN Wegen
+// hierherkommen kann. Ein Register, das sich unterscheidet, wird
+// unbekannt; eines, das auf einem Weg ungesetzt war, bleibt ungesetzt.
+// Das ist die Schnittmenge und damit immer die vorsichtigere Aussage.
+fn merge(state: u64, dst: u64, src: u64) {
+    var r: u64 = 0
+    while r < ebpf.NREGS {
+        let a: u64 = rget(state, dst, r)
+        let b: u64 = rget(state, src, r)
+        if a != b {
+            if kind_of(a) == T_UNSET || kind_of(b) == T_UNSET {
+                rset(state, dst, r, pack(T_UNSET, 0))
+            } else {
+                rset(state, dst, r, pack(T_UNKNOWN, 0))
+            }
+        }
+        r = r + 1
+    }
+    // Die Paketschranke gilt nur, wenn sie auf BEIDEN Wegen galt.
+    let fa: u64 = fget(state, dst)
+    let fb: u64 = fget(state, src)
+    var bound: u64 = fa >> 8
+    if (fb >> 8) < bound {
+        bound = fb >> 8
+    }
+    fset(state, dst, ((fa | fb) & 0xFF) | (bound << 8))
+}
+
+fn reachable(state: u64, at: u64) -> bool {
+    return (fget(state, at) & 1) != 0
+}
+
+fn mark(state: u64, at: u64) {
+    fset(state, at, fget(state, at) | 1)
+}
+
+fn pkt_bound(state: u64, at: u64) -> u64 {
+    return fget(state, at) >> 8
+}
+
+fn set_pkt_bound(state: u64, at: u64, n: u64) {
+    let f: u64 = fget(state, at) & 0xFF
+    fset(state, at, f | (n << 8))
+}
+
+fn fail(state: u64, pc: u64, code: u64) -> u64 {
+    kstate.set(state, vr(VS_LINE), pc)
+    kstate.add(state, vr(VS_REJECT), 1)
+    return code
+}
+
+// Ein ALU-Code, den das Rechenwerk kennt?
+fn alu_known(code: u64) -> bool {
+    if code == 0x00 || code == 0x10 || code == 0x20 || code == 0x30 {
+        return true
+    }
+    if code == 0x40 || code == 0x50 || code == 0x60 || code == 0x70 {
+        return true
+    }
+    if code == 0x80 || code == 0x90 || code == 0xA0 || code == 0xB0 {
+        return true
+    }
+    if code == 0xC0 {
+        return true
+    }
+    return false
+}
+
+// Ein Sprungcode mit Vergleich?
+fn jmp_cmp(code: u64) -> bool {
+    if code == 0x10 || code == 0x20 || code == 0x30 || code == 0x40 {
+        return true
+    }
+    if code == 0x50 || code == 0x60 || code == 0x70 {
+        return true
+    }
+    if code == 0xA0 || code == 0xB0 || code == 0xC0 || code == 0xD0 {
+        return true
+    }
+    return false
+}
+
+// Ist dieses Register gesetzt? Gelesen wird nur, was gesetzt ist.
+fn is_set(state: u64, at: u64, r: u64) -> bool {
+    return kind_of(rget(state, at, r)) != T_UNSET
+}
+
+// ================================================================
+// DIE PRUEFUNG
+// ================================================================
+//
+// `code` ist die Adresse des Befehlsfeldes, `len` seine Laenge in
+// Befehlen. Gibt V_OK zurueck, wenn das Programm geladen werden darf.
+fn verify(state: u64, code: u64, len: u64) -> u64 {
+    kstate.add(state, vr(VS_CHECKED), 1)
+    kstate.set(state, vr(VS_LINE), 0)
+    if len == 0 || len > ebpf.MAX_INSN {
+        return fail(state, 0, V_LEN)
+    }
+
+    // ---------------------------------------------------------------
+    // Durchgang 1: die Befehlsgrenzen. Welche Stellen sind der ANFANG
+    // eines Befehls? Das zweite Wort eines LD_IMM64 ist keiner, und ein
+    // Sprung darf nicht dorthin zeigen. Dieselbe Schleife weist auch
+    // ein Programm ab, dessen letzter Befehl ein halber LD_IMM64 ist.
+    // ---------------------------------------------------------------
+    var i: u64 = 0
+    while i < len {
+        let at: u64 = sat(i)
+        // Der Zustand wird hier gleich mit geloescht.
+        var r: u64 = 0
+        while r < ebpf.NREGS {
+            rset(state, at, r, pack(T_UNSET, 0))
+            r = r + 1
+        }
+        fset(state, at, 0)
+        i = i + 1
+    }
+    // `head[i]` merken wir uns im Flagwort, Bit 1.
+    i = 0
+    while i < len {
+        let w: u64 = ebpf.insn_get(code, i)
+        fset(state, sat(i), fget(state, sat(i)) | 2)
+        if ebpf.op_of(w) == 0x18 {
+            if i + 1 >= len {
+                return fail(state, i, V_LEN)
+            }
+            // Das zweite Wort ist KEIN Befehlsanfang: Bit 1 bleibt aus.
+            i = i + 2
+        } else {
+            i = i + 1
+        }
+    }
+    // Ist der letzte Befehl ein EXIT?
+    let lastw: u64 = ebpf.insn_get(code, len - 1)
+    if ebpf.op_of(lastw) != 0x95 {
+        return fail(state, len - 1, V_NOEXIT)
+    }
+
+    // ---------------------------------------------------------------
+    // Durchgang 2: der Zustand, von vorn nach hinten. Weil jeder Sprung
+    // vorwaerts geht, ist bei Stelle k alles schon zusammengefuehrt, was
+    // dorthin fuehrt.
+    // ---------------------------------------------------------------
+    let s0: u64 = sat(0)
+    rset(state, s0, 1, pack(T_PKT, 0)) // r1 = Paketanfang
+    rset(state, s0, 2, pack(T_PKT_END, 0)) // r2 = Paketende
+    rset(state, s0, 10, pack(T_STACK, ebpf.STACK_SIZE)) // r10 = Stapelende
+    mark(state, s0)
+
+    var pc: u64 = 0
+    while pc < len {
+        let at: u64 = sat(pc)
+        // Eine Stelle, die kein Weg erreicht, wird nicht geprueft --
+        // sie kann auch nicht ausgefuehrt werden. Sie ist kein Fehler
+        // (ein Uebersetzer laesst so etwas stehen), aber sie darf auch
+        // nichts erlauben.
+        if !reachable(state, at) {
+            pc = pc + 1
+        } else {
+            let w: u64 = ebpf.insn_get(code, pc)
+            let op: u64 = ebpf.op_of(w)
+            let cls: u64 = op & 0x07
+            let dst: u64 = ebpf.dst_of(w)
+            let src: u64 = ebpf.src_of(w)
+            let off: u64 = ebpf.off_of(w)
+            let imm: u64 = ebpf.imm_of(w)
+            var step: u64 = 1 // wieviele Zellen dieser Befehl belegt
+            var flow: bool = true // faellt der Weg auf den naechsten Befehl?
+
+            if dst >= ebpf.NREGS || src >= ebpf.NREGS {
+                return fail(state, pc, V_OP)
+            }
+
+            if cls == ebpf.C_ALU || cls == ebpf.C_ALU64 {
+                let acode: u64 = op & 0xF0
+                if !alu_known(acode) {
+                    return fail(state, pc, V_OP)
+                }
+                if dst == 10 {
+                    return fail(state, pc, V_R10)
+                }
+                // NEG hat keinen zweiten Operanden; alles andere schon.
+                let from_reg: bool = (op & 0x08) != 0
+                if from_reg {
+                    if !is_set(state, at, src) {
+                        return fail(state, pc, V_UNINIT)
+                    }
+                }
+                // MOV setzt das Ziel, alles andere LIEST es erst.
+                if acode != 0xB0 {
+                    if !is_set(state, at, dst) {
+                        return fail(state, pc, V_UNINIT)
+                    }
+                }
+                // Die Art des Ergebnisses.
+                var nw: u64 = pack(T_UNKNOWN, 0)
+                if acode == 0xB0 {
+                    // MOV: die Art wandert mit, aber nur bei 64 Bit.
+                    // Ein 32-Bit-MOV schneidet ab und macht aus einem
+                    // Zeiger eine Zahl.
+                    if from_reg && cls == ebpf.C_ALU64 {
+                        nw = rget(state, at, src)
+                    } else {
+                        nw = pack(T_UNKNOWN, 0)
+                    }
+                } else {
+                    if (acode == 0x00 || acode == 0x10)
+                        && cls == ebpf.C_ALU64 && !from_reg {
+                        // Zeiger plus/minus KONSTANTE behaelt die Art.
+                        // Das ist die einzige Zeigerrechnung, die dieser
+                        // Pruefer nachvollziehen kann -- und genau die
+                        // Stelle, an der ein `tnum` mehr koennte.
+                        let ow: u64 = rget(state, at, dst)
+                        let k: u64 = kind_of(ow)
+                        if k == T_STACK || k == T_PKT {
+                            var d: u64 = off_of(ow)
+                            if acode == 0x00 {
+                                d = d +% imm
+                            } else {
+                                d = d -% imm
+                            }
+                            nw = pack(k, d)
+                        }
+                    }
+                }
+                rset(state, at, dst, nw)
+            } else {
+                if cls == ebpf.C_LDX {
+                    // dst = *(size *)(src + off)
+                    if (op & 0xE0) != 0x60 {
+                        return fail(state, pc, V_OP)
+                    }
+                    if dst == 10 {
+                        return fail(state, pc, V_R10)
+                    }
+                    if !is_set(state, at, src) {
+                        return fail(state, pc, V_UNINIT)
+                    }
+                    let n: u64 = 1 << ((op & 0x18) >> 3)
+                    let rc: u64 = check_mem(state, at, src, off,
+                        mem_width(op))
+                    if rc != V_OK {
+                        return fail(state, pc, rc)
+                    }
+                    rset(state, at, dst, pack(T_UNKNOWN, 0))
+                } else {
+                    if cls == ebpf.C_STX || cls == ebpf.C_ST {
+                        // DIE BETRIEBSART, VOR ALLEM ANDEREN. Die oberen
+                        // drei Bit sagen, WIE zugegriffen wird: 0x60 ist
+                        // der gewoehnliche Zugriff (MEM), 0xC0 ist
+                        // ATOMIC -- `lock xadd` und Verwandte. Diese
+                        // Maschine hat sie nicht gebaut, also werden sie
+                        // hier abgewiesen und nicht als gewoehnlicher
+                        // Zugriff missdeutet. Ohne diese Zeile deutet
+                        // der Deuter 0xDB als STX64 und schreibt, wo ein
+                        // atomares Addieren stehen sollte.
+                        if (op & 0xE0) != 0x60 {
+                            return fail(state, pc, V_OP)
+                        }
+                        if !is_set(state, at, dst) {
+                            return fail(state, pc, V_UNINIT)
+                        }
+                        if cls == ebpf.C_STX {
+                            if !is_set(state, at, src) {
+                                return fail(state, pc, V_UNINIT)
+                            }
+                        }
+                        let rc: u64 = check_mem(state, at, dst, off,
+                            mem_width(op))
+                        if rc != V_OK {
+                            return fail(state, pc, rc)
+                        }
+                    } else {
+                        if cls == ebpf.C_LD {
+                            if op != 0x18 {
+                                return fail(state, pc, V_OP)
+                            }
+                            if dst == 10 {
+                                return fail(state, pc, V_R10)
+                            }
+                            if pc + 1 >= len {
+                                return fail(state, pc, V_LEN)
+                            }
+                            rset(state, at, dst, pack(T_UNKNOWN, 0))
+                            step = 2
+                        } else {
+                            if cls == ebpf.C_JMP || cls == ebpf.C_JMP32 {
+                                let jcode: u64 = op & 0xF0
+                                if jcode == 0x90 {
+                                    // EXIT. r0 muss gesetzt sein --
+                                    // sonst gibt das Programm zurueck,
+                                    // was zufaellig dastand.
+                                    if !is_set(state, at, 0) {
+                                        return fail(state, pc, V_UNINIT)
+                                    }
+                                    flow = false
+                                } else {
+                                    if jcode == 0x80 {
+                                        // CALL
+                                        if imm == 0 || imm >= ebpf.F_MAX {
+                                            return fail(state, pc, V_CALL)
+                                        }
+                                        let rc: u64 = check_call(state, at,
+                                            imm)
+                                        if rc != V_OK {
+                                            return fail(state, pc, rc)
+                                        }
+                                        // r0 kommt vom Aufruf, r1..r5
+                                        // sind danach unbestimmt.
+                                        if imm == ebpf.F_MAP_LOOKUP {
+                                            rset(state, at, 0,
+                                                pack(T_MAPVAL, 0))
+                                        } else {
+                                            rset(state, at, 0,
+                                                pack(T_UNKNOWN, 0))
+                                        }
+                                        var r: u64 = 1
+                                        while r <= 5 {
+                                            rset(state, at, r,
+                                                pack(T_UNSET, 0))
+                                            r = r + 1
+                                        }
+                                    } else {
+                                        if jcode == 0x00 {
+                                            // JA
+                                            flow = false
+                                            let rc: u64 = jump_to(state, pc,
+                                                off, len, at, 0, 0, false)
+                                            if rc != V_OK {
+                                                return fail(state, pc, rc)
+                                            }
+                                        } else {
+                                            if !jmp_cmp(jcode) {
+                                                return fail(state, pc, V_OP)
+                                            }
+                                            if !is_set(state, at, dst) {
+                                                return fail(state, pc,
+                                                    V_UNINIT)
+                                            }
+                                            if (op & 0x08) != 0 {
+                                                if !is_set(state, at, src) {
+                                                    return fail(state, pc,
+                                                        V_UNINIT)
+                                                }
+                                            }
+                                            // DIE PAKETSCHRANKE. Das
+                                            // Muster, mit dem jedes
+                                            // XDP-Programm sein Paket
+                                            // absichert:
+                                            //
+                                            //   r3 = r1 + 14
+                                            //   if r3 > r2 goto raus
+                                            //   ... hier sind 14 Oktette
+                                            //       ab r1 sicher lesbar
+                                            //
+                                            // Erkannt wird genau diese
+                                            // Form: ein PAKET-Zeiger mit
+                                            // bekanntem Abstand, gegen
+                                            // das Paketende verglichen.
+                                            // Auf dem Weg, der NICHT
+                                            // springt, gilt die Schranke.
+                                            var newb: u64 = pkt_bound(state,
+                                                at)
+                                            if (op & 0x08) != 0
+                                                && kind_of(rget(state, at,
+                                                    dst)) == T_PKT
+                                                && kind_of(rget(state, at,
+                                                    src)) == T_PKT_END {
+                                                let d: u64 = off_of(
+                                                    rget(state, at, dst))
+                                                // JGT/JGE gegen das Ende:
+                                                // der Fall-through ist der
+                                                // sichere.
+                                                if (jcode == 0x20
+                                                    || jcode == 0x30)
+                                                    && d < 0x1000
+                                                    && d > newb {
+                                                    newb = d
+                                                }
+                                            }
+                                            let rc: u64 = jump_to(state, pc,
+                                                off, len, at,
+                                                pkt_bound(state, at), 0,
+                                                true)
+                                            if rc != V_OK {
+                                                return fail(state, pc, rc)
+                                            }
+                                            // Der Weg, der weiterlaeuft,
+                                            // bekommt die neue Schranke.
+                                            set_pkt_bound(state, at, newb)
+                                        }
+                                    }
+                                }
+                            } else {
+                                return fail(state, pc, V_OP)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Den Zustand an die naechste Stelle weitergeben.
+            if flow {
+                if pc + step >= len {
+                    // Laeuft ueber das Ende hinaus.
+                    return fail(state, pc, V_NOEXIT)
+                }
+                let nx: u64 = sat(pc + step)
+                if reachable(state, nx) {
+                    merge(state, nx, at)
+                } else {
+                    copy_state(state, nx, at)
+                    mark(state, nx)
+                }
+            }
+            pc = pc + step
+        }
+    }
+    return V_OK
+}
+
+fn copy_state(state: u64, dst: u64, src: u64) {
+    var r: u64 = 0
+    while r < ebpf.NREGS {
+        rset(state, dst, r, rget(state, src, r))
+        r = r + 1
+    }
+    let f: u64 = fget(state, src)
+    // Bit 1 (Befehlsanfang) des Ziels bleibt erhalten, der Rest kommt
+    // vom Vorgaenger.
+    let keep: u64 = fget(state, dst) & 2
+    fset(state, dst, (f & 0xFFFFFFFD) | keep)
+}
+
+// Die Breite eines Speicherzugriffs aus dem Befehlscode.
+fn mem_width(op: u64) -> u64 {
+    let s: u64 = op & 0x18
+    if s == 0x10 {
+        return 1
+    }
+    if s == 0x08 {
+        return 2
+    }
+    if s == 0x00 {
+        return 4
+    }
+    return 8
+}
+
+// Darf ueber dieses Register mit diesem Abstand und dieser Breite
+// zugegriffen werden? Das ist Zusage 6.
+fn check_mem(state: u64, at: u64, r: u64, off: u64, n: u64) -> u64 {
+    let w: u64 = rget(state, at, r)
+    let k: u64 = kind_of(w)
+    if k == T_STACK {
+        // Der Stapel: der Abstand ist bekannt, also wird nachgerechnet.
+        // `d` ist der Abstand vom Anfang des Stapels; r10 hat
+        // STACK_SIZE, und ein Zugriff muss in [0, STACK_SIZE) liegen.
+        let d: u64 = off_of(w) +% off
+        // Umlaufend gerechnet: ein negativer Abstand wird sehr gross und
+        // faellt damit aus der Schranke.
+        if d >= ebpf.STACK_SIZE {
+            return V_STACKOFF
+        }
+        if (d +% n) > ebpf.STACK_SIZE {
+            return V_STACKOFF
+        }
+        return V_OK
+    }
+    if k == T_PKT {
+        // Das Paket: es muss eine Schranke geben, die das Programm
+        // vorher gegen r2 geprueft hat, und der Zugriff muss darunter
+        // bleiben.
+        let d: u64 = off_of(w) +% off
+        let b: u64 = pkt_bound(state, at)
+        if b == 0 {
+            return V_MEM
+        }
+        if d >= 0x1000 {
+            return V_MEM
+        }
+        if (d +% n) > b {
+            return V_MEM
+        }
+        return V_OK
+    }
+    if k == T_MAPVAL {
+        // Der Zeiger aus `map_lookup`. Siehe Luecke (b) im Kopf.
+        return V_MAPPTR
+    }
+    return V_MEM
+}
+
+// Die Argumente einer Kernfunktion. Sie muessen gesetzt sein; mehr kann
+// dieser Pruefer ueber sie nicht sagen.
+fn check_call(state: u64, at: u64, nr: u64) -> u64 {
+    var need: u64 = 0
+    if nr == ebpf.F_MAP_LOOKUP {
+        need = 2
+    }
+    if nr == ebpf.F_MAP_UPDATE {
+        need = 3
+    }
+    if nr == ebpf.F_MAP_DELETE {
+        need = 2
+    }
+    var r: u64 = 1
+    while r <= need {
+        if !is_set(state, at, r) {
+            return V_UNINIT
+        }
+        r = r + 1
+    }
+    return V_OK
+}
+
+// Ein Sprung: das Ziel pruefen und den Zustand dorthin uebertragen.
+// `bound` ist die Paketschranke, die auf dem Sprungweg gilt.
+fn jump_to(state: u64, pc: u64, off: u64, len: u64, at: u64,
+    bound: u64, unused: u64, cond: bool) -> u64 {
+    // Das Ziel, umlaufend gerechnet -- ein Abstand ist
+    // vorzeichenbehaftet.
+    let t: u64 = pc +% 1 +% off
+    // ZUSAGE 1: kein Sprung nach hinten. `t <= pc` faengt auch den
+    // Sprung auf sich selbst ab (eine Endlosschleife von einem Befehl).
+    if t <= pc {
+        return V_BACKJUMP
+    }
+    // ZUSAGE 2: innerhalb des Programms und auf einem Befehlsanfang.
+    if t >= len {
+        return V_TARGET
+    }
+    let tat: u64 = sat(t)
+    if (fget(state, tat) & 2) == 0 {
+        return V_TARGET
+    }
+    if reachable(state, tat) {
+        // Die Stelle wurde schon von woanders erreicht: Schnittmenge.
+        // Dafuer wird der eigene Zustand kurz mit der Sprungschranke
+        // versehen, damit `merge` sie sieht.
+        let keep: u64 = pkt_bound(state, at)
+        set_pkt_bound(state, at, bound)
+        merge(state, tat, at)
+        set_pkt_bound(state, at, keep)
+    } else {
+        copy_state(state, tat, at)
+        set_pkt_bound(state, tat, bound)
+        mark(state, tat)
+    }
+    return V_OK
+}

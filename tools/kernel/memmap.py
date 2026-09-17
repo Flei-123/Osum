@@ -340,6 +340,16 @@ BEREICHE = [
     # belegt) und stehen deshalb hier -- der Pruefer ist der Grund,
     # warum das aufgefallen ist.
     ("NETMON",     "kstate.fi", "NETMON_OFF",     "NETMON_MAX"),
+    # RUNDE O-EBPF: die vier Bereiche des eBPF-Kerns, im letzten grossen
+    # Loch unterhalb von KDATA_SIZE (0x12C000..0x140000).  Der Pruefer
+    # (EBPFVER) ist der groesste Posten und war in der ersten Fassung zu
+    # gross fuer das Loch -- der Registerzustand wurde daraufhin von 8
+    # auf 4 Oktette je Register gepackt.  Genau diese Zeile hier hat den
+    # Fehler gemeldet, bevor ein einziges Oktett davon lief.
+    ("EBPF",       "kstate.fi", "EBPF_OFF",       "EBPF_MAX"),
+    ("EBPFMAP",    "kstate.fi", "EBPFMAP_OFF",    "EBPFMAP_MAX"),
+    ("EBPFVER",    "kstate.fi", "EBPFVER_OFF",    "EBPFVER_MAX"),
+    ("EBPFHOOK",   "kstate.fi", "EBPFHOOK_OFF",   "EBPFHOOK_MAX"),
     ("SHARE",      "kstate.fi", "SHARE_OFF",      "SHARE_MAX"),
     # ---- Runde HANDLE ----
     ("HND",        "kstate.fi", "HND_OFF",        "HND_MAX"),
