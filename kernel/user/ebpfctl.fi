@@ -1,0 +1,330 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/ebpfctl.fi -- Runde O-EBPF, Stufe 5: DAS WERKZEUG.
+//
+// Ein Kern, der eBPF kann, und kein Weg, es von aussen zu benutzen, ist
+// eine halbe Runde. Dieses Programm ist der Weg: es laedt ein Programm,
+// haengt es an, liest die Tafeln aus und sagt, was der Pruefer gemeldet
+// hat.
+//
+//   ebpfctl                  der Zustand: Haken, Zaehler, Grenzen
+//   ebpfctl drop-icmp        das eingebaute Filterprogramm laden und
+//                            an den Eingang haengen
+//   ebpfctl count-icmp       zaehlt ICMP in einer Tafel, statt zu
+//                            verwerfen -- das ist der Fall, fuer den
+//                            es die Tafeln gibt
+//   ebpfctl aus              das Programm wieder aushaengen
+//   ebpfctl tafel <n>        eine Tafel Zeile fuer Zeile ausgeben
+//   ebpfctl bad              ein ABSICHTLICH kaputtes Programm laden,
+//                            damit man den Pruefer einmal NEIN sagen
+//                            sieht
+//
+// WARUM DIE PROGRAMME EINGEBAUT SIND UND NICHT AUS EINER DATEI KOMMEN.
+// Ein Uebersetzer von C nach eBPF ist eine Runde fuer sich; es gibt in
+// diesem Baum keinen, und es gibt auch kein ELF-Format fuer
+// eBPF-Abschnitte. Die Befehle hier werden deshalb im Programm selbst
+// gebaut, so wie es `kernel/ebpftest.fi` im Kern tut. Das ist die
+// ehrliche Zwischenstufe: der WEG aus Ring 3 in den Kern ist damit
+// vollstaendig geprueft (Aufruf, Kopie, Pruefer, Haken, Tafel), und was
+// fehlt, ist nur noch die Quelle der Befehle.
+
+profile kernel
+
+import ulib
+import libc.kcall
+
+export { u_start }
+
+// Die Nummern der Runde, aus `lib/libc/kcall.fi`.
+const SYS_LOAD: u64 = 1405
+const SYS_ATTACH: u64 = 1406
+const SYS_MAP: u64 = 1407
+const SYS_STAT: u64 = 1408
+
+// Die Antworten eines Programms, wie in `kernel/ebpfhook.fi`.
+const DROP: u64 = 1
+const PASS: u64 = 2
+const K_XDP: u64 = 1
+
+// Die Arten einer Tafel.
+const M_ARRAY: u64 = 1
+const M_HASH: u64 = 2
+
+// Die Kernfunktionen, wie in `kernel/ebpf.fi`.
+const F_MAP_UPDATE: u64 = 2
+
+fn sys3(nr: u64, a: u64, b: u64, c: u64) -> u64 {
+    return ulib.sys(nr, a, b, c)
+}
+
+// Ein Befehl als 64-Bit-Wort, in der Anordnung des Befehlssatzes.
+fn insn(op: u64, dst: u64, src: u64, off: u64, imm: u64) -> u64 {
+    return (op & 0xFF)
+        | ((dst & 0x0F) << 8)
+        | ((src & 0x0F) << 12)
+        | ((off & 0xFFFF) << 16)
+        | ((imm & 0xFFFFFFFF) << 32)
+}
+
+// ------------------------------------------------------ die Ausgabe
+
+fn zeile(name: u64, v: u64) {
+    ulib.say(name)
+    ulib.sayn(v)
+    ulib.nl()
+}
+
+fn stat(feld: u64) -> u64 {
+    return ulib.sys(SYS_STAT, feld, 0, 0)
+}
+
+fn zustand() {
+    var s_on: [u8; 21] = "ebpfctl: haken an = \0"
+    var s_se: [u8; 21] = "  rahmen gesehen  = \0"
+    var s_dr: [u8; 21] = "  davon verworfen = \0"
+    var s_pa: [u8; 21] = "  durchgelassen   = \0"
+    var s_ab: [u8; 21] = "  abgebrochen     = \0"
+    var s_ld: [u8; 21] = "  geladen         = \0"
+    var s_ru: [u8; 21] = "  laeufe          = \0"
+    var s_ca: [u8; 21] = "  kernaufrufe     = \0"
+    var s_pr: [u8; 21] = "  geprueft        = \0"
+    var s_pl: [u8; 21] = "  plaetze         = \0"
+    var s_mx: [u8; 21] = "  befehle max     = \0"
+    var s_tk: [u8; 21] = "  schranke takte  = \0"
+    zeile((&s_on[0 as usize]) as u64, stat(0))
+    zeile((&s_se[0 as usize]) as u64, stat(1))
+    zeile((&s_dr[0 as usize]) as u64, stat(2))
+    zeile((&s_pa[0 as usize]) as u64, stat(3))
+    zeile((&s_ab[0 as usize]) as u64, stat(4))
+    zeile((&s_ld[0 as usize]) as u64, stat(5))
+    zeile((&s_ru[0 as usize]) as u64, stat(6))
+    zeile((&s_ca[0 as usize]) as u64, stat(7))
+    zeile((&s_pr[0 as usize]) as u64, stat(11))
+    zeile((&s_pl[0 as usize]) as u64, stat(12))
+    zeile((&s_mx[0 as usize]) as u64, stat(14))
+    zeile((&s_tk[0 as usize]) as u64, stat(15))
+}
+
+// Ein Programm laden und melden, was der Pruefer gesagt hat. Gibt den
+// Befund zurueck (0 = angenommen).
+fn laden(prog: u64, n: u64) -> u64 {
+    var s_ok: [u8; 33] = "ebpfctl: der Pruefer nimmt es an\0"
+    var s_no: [u8; 31] = "ebpfctl: ABGEWIESEN, Befund = \0"
+    var s_ze: [u8; 17] = "  an Stelle   = \0"
+    var s_nl: [u8; 2] = "\0\0"
+    let v: u64 = sys3(SYS_LOAD, 0, prog, n)
+    if v == 0 {
+        ulib.say((&s_ok[0 as usize]) as u64)
+        ulib.nl()
+        return 0
+    }
+    ulib.say((&s_no[0 as usize]) as u64)
+    ulib.sayn(v)
+    ulib.nl()
+    // WELCHE ZEILE. Ohne sie ist "abgewiesen" eine Meinung; mit ihr
+    // kann jemand den Befehl ansehen, an dem es scheiterte.
+    ulib.say((&s_ze[0 as usize]) as u64)
+    ulib.sayn(stat(10))
+    ulib.nl()
+    return v
+}
+
+fn anhaengen() -> u64 {
+    var s_a: [u8; 30] = "ebpfctl: haengt am Eingang an\0"
+    var s_f: [u8; 30] = "ebpfctl: anhaengen ging nicht\0"
+    let r: u64 = sys3(SYS_ATTACH, 0, K_XDP, 0)
+    if ulib.bad(r) {
+        ulib.say((&s_f[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    ulib.say((&s_a[0 as usize]) as u64)
+    ulib.nl()
+    return 0
+}
+
+// ============================================ das Programm: ICMP weg
+//
+// Dasselbe, was `kernel/ebpftest.fi` im Kern baut -- hier aber aus
+// Ring 3 ueber den Systemaufruf, und das ist der Unterschied, um den es
+// in Stufe 5 geht.
+fn prog_drop_icmp(buf: u64) -> u64 {
+    var w: [u64; 13] = [0; 13]
+    w[0 as usize] = insn(0xBF, 3, 1, 0, 0) // r3 = r1
+    w[1 as usize] = insn(0x07, 3, 0, 0, 24) // r3 += 24
+    w[2 as usize] = insn(0x2D, 3, 2, 8, 0) // if r3 > r2 goto durch
+    w[3 as usize] = insn(0x71, 4, 1, 12, 0) // r4 = [r1+12]
+    w[4 as usize] = insn(0x55, 4, 0, 6, 0x08) // if r4 != 8 goto durch
+    w[5 as usize] = insn(0x71, 4, 1, 13, 0) // r4 = [r1+13]
+    w[6 as usize] = insn(0x55, 4, 0, 4, 0x00) // if r4 != 0 goto durch
+    w[7 as usize] = insn(0x71, 4, 1, 23, 0) // r4 = [r1+23] Protokoll
+    w[8 as usize] = insn(0x55, 4, 0, 2, 1) // if r4 != 1 goto durch
+    w[9 as usize] = insn(0xB7, 0, 0, 0, DROP)
+    w[10 as usize] = insn(0x95, 0, 0, 0, 0)
+    w[11 as usize] = insn(0xB7, 0, 0, 0, PASS)
+    w[12 as usize] = insn(0x95, 0, 0, 0, 0)
+    var i: u64 = 0
+    while i < 13 {
+        __mmio_write64((buf + i * 8) as *mut u64, w[i as usize])
+        i = i + 1
+    }
+    return 13
+}
+
+// ======================================= das Programm: ICMP ZAEHLEN
+//
+// Nicht verwerfen, sondern in einer Tafel mitzaehlen. Das ist der
+// eigentliche Zweck der Tafeln, und es ist das Programm, an dem man
+// sieht, dass ein Filter auch MESSEN kann.
+//
+// Weil dieser Pruefer keinen Zugriff ueber einen Tafelzeiger erlaubt
+// (die Begruendung steht im Kopf von `kernel/ebpfmap.fi`), wird nicht
+// gelesen-erhoeht-geschrieben, sondern schlicht eine 1 geschrieben:
+// die Tafel sagt danach "ICMP ist vorgekommen". Was fehlt, damit daraus
+// ein echter Zaehler wird, steht in `docs/RUNDE-EBPF.md` als offene
+// Luecke.
+fn prog_count_icmp(buf: u64, tafel: u64) -> u64 {
+    var w: [u64; 16] = [0; 16]
+    w[0 as usize] = insn(0xBF, 3, 1, 0, 0)
+    w[1 as usize] = insn(0x07, 3, 0, 0, 24)
+    w[2 as usize] = insn(0x2D, 3, 2, 11, 0) // zu kurz -> durch
+    w[3 as usize] = insn(0x71, 4, 1, 12, 0)
+    w[4 as usize] = insn(0x55, 4, 0, 9, 0x08)
+    w[5 as usize] = insn(0x71, 4, 1, 13, 0)
+    w[6 as usize] = insn(0x55, 4, 0, 7, 0x00)
+    w[7 as usize] = insn(0x71, 4, 1, 23, 0)
+    w[8 as usize] = insn(0x55, 4, 0, 5, 1) // kein ICMP -> durch
+    w[9 as usize] = insn(0xB7, 1, 0, 0, tafel) // r1 = Tafel
+    w[10 as usize] = insn(0xB7, 2, 0, 0, 0) // r2 = Schluessel 0
+    w[11 as usize] = insn(0xB7, 3, 0, 0, 1) // r3 = 1
+    w[12 as usize] = insn(0x85, 0, 0, 0, F_MAP_UPDATE)
+    w[13 as usize] = insn(0xB7, 0, 0, 0, PASS)
+    w[14 as usize] = insn(0x95, 0, 0, 0, 0)
+    w[15 as usize] = insn(0x95, 0, 0, 0, 0)
+    // Die letzte Zelle ist das Ziel der fuenf Spruenge oben; sie muss
+    // r0 setzen, bevor sie endet -- der Pruefer verlangt das.
+    w[14 as usize] = insn(0xB7, 0, 0, 0, PASS)
+    w[15 as usize] = insn(0x95, 0, 0, 0, 0)
+    var i: u64 = 0
+    while i < 16 {
+        __mmio_write64((buf + i * 8) as *mut u64, w[i as usize])
+        i = i + 1
+    }
+    return 16
+}
+
+// ======================== ein absichtlich kaputtes Programm
+//
+// Damit jemand den Pruefer einmal NEIN sagen sieht, ohne den Quelltext
+// zu lesen: eine Schleife. Sie ist der einfachste Fall, den er abweist.
+fn prog_bad(buf: u64) -> u64 {
+    __mmio_write64((buf + 0) as *mut u64, insn(0xB7, 0, 0, 0, 0))
+    __mmio_write64((buf + 8) as *mut u64, insn(0x05, 0, 0, 0xFFFF, 0))
+    __mmio_write64((buf + 16) as *mut u64, insn(0x95, 0, 0, 0, 0))
+    return 3
+}
+
+fn tafel_zeigen(n: u64) {
+    var s_k: [u8; 12] = "  schluessel"
+    var s_h: [u8; 25] = "ebpfctl: tafel        = \0"
+    var s_a: [u8; 25] = "  art                 = \0"
+    var s_e: [u8; 25] = "  eintraege           = \0"
+    var s_z: [u8; 8] = "    [\0\0\0"
+    var s_g: [u8; 5] = "] = \0"
+    zeile((&s_h[0 as usize]) as u64, n)
+    zeile((&s_a[0 as usize]) as u64, sys3(SYS_MAP, 8, n, 0))
+    let cnt: u64 = sys3(SYS_MAP, 4, n, 0)
+    zeile((&s_e[0 as usize]) as u64, cnt)
+    var i: u64 = 0
+    while i < cnt {
+        if sys3(SYS_MAP, 7, n, i) != 0 {
+            ulib.say((&s_z[0 as usize]) as u64)
+            ulib.sayn(sys3(SYS_MAP, 6, n, i))
+            ulib.say((&s_g[0 as usize]) as u64)
+            ulib.sayn(sys3(SYS_MAP, 5, n, i))
+            ulib.nl()
+        }
+        i = i + 1
+    }
+}
+
+fn u_start(args: u64) -> u64 {
+    var w_drop: [u8; 10] = "drop-icmp\0"
+    var w_count: [u8; 11] = "count-icmp\0"
+    var w_aus: [u8; 4] = "aus\0"
+    var w_tafel: [u8; 6] = "tafel\0"
+    var w_bad: [u8; 4] = "bad\0"
+    var s_perm: [u8; 44] = "ebpfctl: das geht nur als root (EPERM)\0\0\0\0\0\0"
+    var s_use: [u8; 60] =
+        "ebpfctl: drop-icmp | count-icmp | aus | tafel <n> | bad\0\0\0\0\0"
+
+    // Der Puffer fuer die Befehle. 512 Befehle zu acht Oktetten waeren
+    // 4 KiB; so viel braucht hier keines der Programme.
+    var buf: [u64; 32] = [0; 32]
+    let bp: u64 = (&buf[0 as usize]) as u64
+
+    let argc: u64 = ulib.arg_count(args)
+    if argc < 2 {
+        zustand()
+        return 0
+    }
+    let a1: u64 = ulib.arg_at(args, 1)
+
+    if ulib.streq(a1, (&w_drop[0 as usize]) as u64) {
+        let n: u64 = prog_drop_icmp(bp)
+        let v: u64 = laden(bp, n)
+        if v != 0 {
+            return 1
+        }
+        return anhaengen()
+    }
+
+    if ulib.streq(a1, (&w_count[0 as usize]) as u64) {
+        // Erst die Tafel, dann das Programm -- das Programm traegt die
+        // Nummer der Tafel als Sofortwert.
+        let t: u64 = sys3(SYS_MAP, 0, M_ARRAY, 8)
+        if ulib.bad(t) {
+            ulib.say((&s_perm[0 as usize]) as u64)
+            ulib.nl()
+            return 1
+        }
+        let n: u64 = prog_count_icmp(bp, t)
+        let v: u64 = laden(bp, n)
+        if v != 0 {
+            return 1
+        }
+        if anhaengen() != 0 {
+            return 1
+        }
+        tafel_zeigen(t)
+        return 0
+    }
+
+    if ulib.streq(a1, (&w_aus[0 as usize]) as u64) {
+        sys3(SYS_ATTACH, 1, K_XDP, 0)
+        zustand()
+        return 0
+    }
+
+    if ulib.streq(a1, (&w_tafel[0 as usize]) as u64) {
+        var t: u64 = 0
+        if argc > 2 {
+            t = ulib.to_num(ulib.arg_at(args, 2))
+        }
+        tafel_zeigen(t)
+        return 0
+    }
+
+    if ulib.streq(a1, (&w_bad[0 as usize]) as u64) {
+        let n: u64 = prog_bad(bp)
+        let v: u64 = laden(bp, n)
+        // HIER IST EIN BEFUND UNGLEICH NULL DAS GEWUENSCHTE ERGEBNIS.
+        if v != 0 {
+            return 0
+        }
+        return 1
+    }
+
+    ulib.say((&s_use[0 as usize]) as u64)
+    ulib.nl()
+    return 1
+}

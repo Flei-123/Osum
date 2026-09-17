@@ -1,0 +1,909 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/ebpf.fi -- Runde O-EBPF, Stufe 1 und 2: DIE MASCHINE UND IHR PRUEFER.
+//
+// Osum konnte Rahmen senden und empfangen (Runde K8), konnte einem
+// Prozess sein eigenes Netz geben (NETVIEW) und konnte zaehlen, wer
+// wieviel verbraucht (NETMON). Was es nicht konnte: eine Entscheidung
+// aufnehmen, die NICHT schon im Kern steht. Wer einen Rahmen nach einer
+// neuen Regel verwerfen wollte, musste `inet.fi` aendern, neu bauen und
+// neu starten -- also den Kern anfassen, um eine Frage zu beantworten,
+// die mit dem Kern nichts zu tun hat.
+//
+// Diese Datei ist die Antwort darauf: eine kleine Rechenmaschine, die
+// ein FREMDES Programm ausfuehrt, und ein Pruefer, der vorher nachsieht,
+// ob dieses Programm den Kern umbringen kann. Der Befehlssatz ist der
+// klassische eBPF-Satz, weil er dafuer entworfen wurde und weil es fuer
+// ihn fertige Uebersetzer gibt -- nicht, weil Linux ihn hat.
+//
+// ================================================================
+// WARUM EIN DEUTER UND KEIN UEBERSETZER (kein JIT)
+// ================================================================
+//
+// Ein JIT waere schneller und er waere hier falsch. Ein JIT schreibt
+// Maschinencode in eine Seite und springt hinein; jeder Fehler darin ist
+// ein Fehler MIT KERNRECHTEN, und er ist nicht mehr zu pruefen, nachdem
+// er geschrieben wurde. Der Deuter dagegen kann jeden einzelnen Zugriff
+// im Augenblick des Zugriffs noch einmal ansehen -- und er tut es auch,
+// siehe `DIE ZWEITE SCHRANKE` weiter unten. Der Preis steht in
+// `docs/RUNDE-EBPF.md` als gemessene Zahl und nicht als Gefuehl.
+//
+// ================================================================
+// DIE MASCHINE
+// ================================================================
+//
+// Elf Register zu 64 Bit (r0..r10), davon ist r10 der Stapelzeiger und
+// NUR LESBAR. Der Stapel ist 512 Oktette gross und liegt in `kdata`, er
+// waechst nach unten von r10 aus. Ein Programm ist eine Folge von
+// Befehlen zu je acht Oktetten:
+//
+//   Oktett 0     der Befehlscode
+//   Oktett 1     Zielregister in den unteren vier Bit, Quellregister
+//                in den oberen vier
+//   Oktett 2..3  ein vorzeichenbehafteter Abstand (16 Bit), fuer
+//                Spruenge und fuer Speicherzugriffe
+//   Oktett 4..7  ein vorzeichenbehafteter Sofortwert (32 Bit)
+//
+// Der einzige Befehl, der ZWEI Zellen belegt, ist `LD_IMM64` (0x18):
+// sein zweites Wort traegt die oberen 32 Bit. Der Pruefer kennt diese
+// Ausnahme, sonst liesse sich ein Sprung in die zweite Haelfte eines
+// solchen Befehls legen -- und dort steht ein Sofortwert, den die
+// Maschine dann als Befehl lesen wuerde.
+//
+// ================================================================
+// WARUM UMLAUFRECHNUNG UEBERALL STEHT (`+%`, `-%`, `*%`)
+// ================================================================
+//
+// Firn prueft Ueberlaeufe auch im Kernprofil: `a + b` ruft bei Ueberlauf
+// `osum_panic`, und der Kern ist tot. Fuer den Kern selbst ist das
+// richtig -- dort ist ein Ueberlauf ein Fehler. HIER ist er keiner: eBPF
+// rechnet laut Befehlssatz umlaufend, und das Programm, das umlaufen
+// laesst, ist ein FREMDES. Stuende in dieser Datei ein einziges
+// gepruefte `+`, waere das ein Weg, den Kern mit drei Befehlen
+// anzuhalten -- also eine Luecke genau der Art, die der Pruefer
+// verhindern soll. Jede Rechnung, die ein fremder Wert erreichen kann,
+// benutzt deshalb `+%`, `-%`, `*%`.
+//
+// Aus demselben Grund steht hier kein `as i32` und kein `as i64`: auch
+// diese Umwandlungen sind geprueft. Vorzeichen werden mit `sext`
+// arithmetisch erweitert, arithmetisch geschoben wird mit `sar`.
+//
+// ================================================================
+// DIE ZWEITE SCHRANKE, und warum es sie trotz des Pruefers gibt
+// ================================================================
+//
+// Der Pruefer sagt vor dem Laden zu, dass jeder Speicherzugriff im
+// erlaubten Bereich liegt. Die Maschine prueft ihn TROTZDEM noch einmal,
+// bei jedem einzelnen Zugriff, und verwirft das Programm sofort, wenn er
+// danebenliegt. Das ist keine doppelte Arbeit aus Zaghaftigkeit: der
+// Pruefer ist ein Stueck Software, das irren kann, und der Unterschied
+// zwischen "er irrt und ein Programm wird abgewiesen" und "er irrt und
+// ein fremdes Programm schreibt in `kdata`" ist der ganze Unterschied
+// zwischen einem Fehler und einer Luecke. Was die zweite Schranke
+// kostet, steht gemessen im Bericht.
+//
+// Der Kopf von `kernel/ebpfver.fi` sagt, was der Pruefer prueft -- und
+// was er NICHT prueft.
+
+profile kernel
+
+import kstate
+import ebpfmap
+
+export {
+    // Groessen und Grenzen
+    MAX_INSN, STACK_SIZE, NREGS, MAX_TICKS,
+    // Der Befehlsspeicher
+    prog_at, prog_slots, PROG_MAX, insn_get, insn_put,
+    // Die Felder eines Befehls
+    op_of, dst_of, src_of, off_of, imm_of,
+    // Rechenhilfen, die auch der Pruefer benutzt
+    sext, sar,
+    // Die Klassen und Befehlscodes
+    C_LD, C_LDX, C_ST, C_STX, C_ALU, C_JMP, C_JMP32, C_ALU64,
+    S_W, S_H, S_B, S_DW,
+    // Die Maschine
+    run, reg_get, ticks_used, err_of,
+    // Fehlerschluessel
+    E_OK, E_TICKS, E_MEM, E_DIV, E_CALL, E_OP, E_STACK, E_EXIT,
+    // Die Kernfunktionen, die ein Programm rufen darf
+    F_MAP_LOOKUP, F_MAP_UPDATE, F_MAP_DELETE, F_TICKS, F_TRACE, F_MAX,
+    // Zustand
+    init, calls_made, runs_made, last_err, trace_count
+}
+
+// ---------------------------------------------------------- die Groessen
+
+// Wieviele Befehle ein Programm haben darf. Die Zahl ist klein und
+// absichtlich klein: sie ist zugleich die obere Schranke fuer die Zeit,
+// die der Pruefer braucht, und der Speicher steht in `kdata` fest.
+const MAX_INSN: u64 = 512
+
+// Der Stapel eines Programms, wie bei eBPF ueblich 512 Oktette.
+const STACK_SIZE: u64 = 512
+
+// r0..r10.
+const NREGS: u64 = 11
+
+// DIE HARTE SCHRANKE. Auch ein Programm, das der Pruefer fuer
+// terminierend haelt, laeuft hier nie laenger als so viele Befehle.
+// Sie ist die Zusage, die NICHT von der Richtigkeit des Pruefers
+// abhaengt -- siehe `docs/RUNDE-EBPF.md`, Abschnitt "was der Pruefer
+// nicht prueft".
+const MAX_TICKS: u64 = 4096
+
+// Wieviele Programme gleichzeitig geladen sein koennen.
+const PROG_MAX: u64 = 4
+
+// ---------------------------------------------------------- die Ablage
+//
+// Der Bereich liegt bei `kstate.EBPF_OFF`. Aufteilung:
+//
+//   0x0000..0x003F  die Skalare dieser Runde
+//   0x0040..0x0FFF  je Programm ein Kopfsatz (Laenge, Art, Zaehler)
+//   0x1000..0x4FFF  vier Programme zu je 512 Befehlen * 8 Oktette
+//   0x5000..0x57FF  die Stapel, vier zu je 512 Oktetten
+//   0x5800..        der Rahmenpuffer der Messung
+//
+// Die Karte steht zusaetzlich in `tools/kernel/memmap.py`; der Pruefer
+// dort rechnet nach, dass sich nichts ueberschneidet.
+
+const SCAL: u64 = 0x0000
+const HDRS: u64 = 0x0040
+const HBYTES: u64 = 64
+const CODE: u64 = 0x1000
+const CBYTES: u64 = MAX_INSN * 8 // 4096 je Programm
+const STACKS: u64 = 0x5000
+const BENCHBUF: u64 = 0x5800
+
+// Die Skalare.
+const EB_RUNS: u64 = 0x00 // wie oft ein Programm gelaufen ist
+const EB_CALLS: u64 = 0x08 // wie oft eine Kernfunktion gerufen wurde
+const EB_ERR: u64 = 0x10 // der letzte Abbruchgrund
+const EB_TICKS: u64 = 0x18 // Befehle des letzten Laufs
+const EB_TRACE: u64 = 0x20 // wie oft `F_TRACE` gerufen wurde
+const EB_TSUM: u64 = 0x28 // Summe aller Befehle ueber alle Laeufe
+
+// Die Felder eines Kopfsatzes (in Worten).
+const H_USE: u64 = 0 // 0 = frei, 1 = geladen
+const H_LEN: u64 = 1 // Zahl der Befehle
+const H_KIND: u64 = 2 // wo es haengt (siehe ebpfhook.fi)
+const H_RUNS: u64 = 3 // Laeufe dieses Programms
+const H_PASS: u64 = 4 // wie oft es DURCHLASSEN sagte
+const H_DROP: u64 = 5 // wie oft VERWERFEN
+const H_ERRS: u64 = 6 // wie oft es abgebrochen wurde
+
+// ------------------------------------------------------- die Fehlerschluessel
+
+const E_OK: u64 = 0
+const E_TICKS: u64 = 1 // die harte Schranke hat gegriffen
+const E_MEM: u64 = 2 // ein Zugriff lag ausserhalb
+const E_DIV: u64 = 3 // Teilung durch null (eBPF: Ergebnis 0, kein Abbruch)
+const E_CALL: u64 = 4 // eine nicht angemeldete Kernfunktion
+const E_OP: u64 = 5 // ein unbekannter Befehl
+const E_STACK: u64 = 6 // der Stapelzeiger zeigt nicht auf den Stapel
+const E_EXIT: u64 = 7 // das Programm lief ueber sein Ende hinaus
+
+// ----------------------------------------------------- die Befehlsklassen
+//
+// Die unteren drei Bit des Befehlscodes sind die Klasse.
+
+const C_LD: u64 = 0x00
+const C_LDX: u64 = 0x01
+const C_ST: u64 = 0x02
+const C_STX: u64 = 0x03
+const C_ALU: u64 = 0x04 // 32 Bit
+const C_JMP: u64 = 0x05
+const C_JMP32: u64 = 0x06
+const C_ALU64: u64 = 0x07
+
+// Die Groesse eines Speicherzugriffs, Bit 3..4.
+const S_W: u64 = 0x00 // 4 Oktette
+const S_H: u64 = 0x08 // 2
+const S_B: u64 = 0x10 // 1
+const S_DW: u64 = 0x18 // 8
+
+// Die Quelle bei ALU/JMP, Bit 3: 0 = Sofortwert, 1 = Register.
+const SRC_X: u64 = 0x08
+
+// Die Kernfunktionen. Ein Programm darf genau diese rufen, und der
+// Pruefer weist jede andere Nummer ab.
+const F_MAP_LOOKUP: u64 = 1
+const F_MAP_UPDATE: u64 = 2
+const F_MAP_DELETE: u64 = 3
+const F_TICKS: u64 = 4
+const F_TRACE: u64 = 5
+const F_MAX: u64 = 6
+
+fn eb(off: u64) -> u64 {
+    return kstate.EBPF_OFF + off
+}
+
+fn hat(i: u64) -> u64 {
+    return eb(HDRS + i * HBYTES)
+}
+
+// Die Adresse des Befehlsspeichers eines Programms, absolut.
+fn prog_at(state: u64, i: u64) -> u64 {
+    return state + eb(CODE + i * CBYTES)
+}
+
+fn prog_slots() -> u64 {
+    return PROG_MAX
+}
+
+fn stack_at(state: u64, i: u64) -> u64 {
+    return state + eb(STACKS + i * STACK_SIZE)
+}
+
+// ------------------------------------------------------------ der Anfang
+
+fn init(state: u64) {
+    var i: u64 = 0
+    while i < kstate.EBPF_MAX / 8 {
+        kstate.set(state, eb(i * 8), 0)
+        i = i + 1
+    }
+}
+
+fn runs_made(state: u64) -> u64 {
+    return kstate.get(state, eb(EB_RUNS))
+}
+
+fn calls_made(state: u64) -> u64 {
+    return kstate.get(state, eb(EB_CALLS))
+}
+
+fn last_err(state: u64) -> u64 {
+    return kstate.get(state, eb(EB_ERR))
+}
+
+fn ticks_used(state: u64) -> u64 {
+    return kstate.get(state, eb(EB_TICKS))
+}
+
+fn trace_count(state: u64) -> u64 {
+    return kstate.get(state, eb(EB_TRACE))
+}
+
+fn err_of(state: u64) -> u64 {
+    return kstate.get(state, eb(EB_ERR))
+}
+
+// ------------------------------------------------- die Felder eines Befehls
+//
+// Ein Befehl steht als EIN 64-Bit-Wort im Speicher, in der Anordnung,
+// die der klassische Befehlssatz vorschreibt (little endian):
+//
+//   Bit  0.. 7  Befehlscode
+//   Bit  8..11  Zielregister
+//   Bit 12..15  Quellregister
+//   Bit 16..31  Abstand, vorzeichenbehaftet
+//   Bit 32..63  Sofortwert, vorzeichenbehaftet
+
+fn insn_get(at: u64, k: u64) -> u64 {
+    return __mmio_read64((at + k * 8) as *mut u64)
+}
+
+fn insn_put(at: u64, k: u64, w: u64) {
+    __mmio_write64((at + k * 8) as *mut u64, w)
+}
+
+fn op_of(w: u64) -> u64 {
+    return w & 0xFF
+}
+
+fn dst_of(w: u64) -> u64 {
+    return (w >> 8) & 0x0F
+}
+
+fn src_of(w: u64) -> u64 {
+    return (w >> 12) & 0x0F
+}
+
+// Der Abstand, als vorzeichenbehaftete 64-Bit-Zahl.
+fn off_of(w: u64) -> u64 {
+    return sext((w >> 16) & 0xFFFF, 16)
+}
+
+// Der Sofortwert, ebenso.
+fn imm_of(w: u64) -> u64 {
+    return sext((w >> 32) & 0xFFFFFFFF, 32)
+}
+
+// ----------------------------------------------------------- die Rechenhilfen
+//
+// VORZEICHENERWEITERUNG OHNE GEPRUEFTEN CAST. `v as i32` ist in Firn
+// eine GEPRUEFTE Umwandlung: sie ruft bei 0xFFFFFFFF `osum_panic`. Hier
+// kommen die Werte aus einem fremden Programm, also wird arithmetisch
+// erweitert: das Vorzeichenbit wird ausgeklappt und wieder abgezogen,
+// umlaufend. Verifiziert fuer 8, 16 und 32 Bit.
+fn sext(v: u64, bits: u64) -> u64 {
+    if bits >= 64 {
+        return v
+    }
+    let m: u64 = 1 << (bits - 1)
+    return (v & ((1 << bits) - 1) ^ m) -% m
+}
+
+// Arithmetisches Rechtsschieben, ebenfalls ohne `as i64`.
+fn sar(v: u64, sh: u64) -> u64 {
+    let s: u64 = sh & 63
+    if s == 0 {
+        return v
+    }
+    let neg: u64 = v >> 63
+    return (v >> s) | ((0 -% neg) << (64 - s))
+}
+
+// Vorzeichenbehafteter Vergleich, ohne Umwandlung: das Vorzeichenbit
+// wird gekippt, danach stimmt die vorzeichenlose Ordnung.
+fn slt(a: u64, b: u64) -> bool {
+    return (a ^ 0x8000000000000000) < (b ^ 0x8000000000000000)
+}
+
+fn sle(a: u64, b: u64) -> bool {
+    return (a ^ 0x8000000000000000) <= (b ^ 0x8000000000000000)
+}
+
+// ------------------------------------------------------------ die Register
+//
+// Die Register liegen NICHT in `kdata`, sondern als Feld auf dem
+// Kernstapel von `run`. Zwei Programme koennen damit nicht ineinander
+// geraten, und nach dem Ruecksprung ist nichts mehr da. Nur das
+// Ergebnis (r0) wird aufgehoben, damit der Aufrufer es lesen kann.
+const EB_R0: u64 = 0x30
+
+fn reg_get(state: u64) -> u64 {
+    return kstate.get(state, eb(EB_R0))
+}
+
+// --------------------------------------------------- die Speicherzugriffe
+//
+// DIE ZWEITE SCHRANKE. Jeder Zugriff des Programms geht durch diese zwei
+// Funktionen, und jede prueft den Bereich noch einmal -- obwohl der
+// Pruefer das schon zugesagt hat. Erlaubt sind genau zwei Gebiete:
+//
+//   der Paketpuffer   [dstart, dend)
+//   der eigene Stapel [stack, stack + STACK_SIZE)
+//
+// Alles andere ist ein Abbruch. `okp` sagt ueber einen Zeiger, ob ein
+// Zugriff der Breite `n` dort ganz hineinpasst; die Rechnung laeuft
+// umlaufend und faengt damit auch den Fall ab, dass `p + n` ueberlaeuft.
+
+fn okp(p: u64, n: u64, dstart: u64, dend: u64, stk: u64) -> bool {
+    // Ein Zeiger, der beim Addieren der Breite umlaeuft, liegt nie in
+    // einem gueltigen Bereich -- das ist der Fall, mit dem man sonst
+    // eine Schranke von unten unterwandert.
+    if (p +% n) < p {
+        return false
+    }
+    if dend > dstart && p >= dstart && (p +% n) <= dend {
+        return true
+    }
+    if p >= stk && (p +% n) <= (stk +% STACK_SIZE) {
+        return true
+    }
+    return false
+}
+
+fn load_n(p: u64, n: u64) -> u64 {
+    if n == 1 {
+        return __mmio_read8(p as *mut u8) as u64
+    }
+    if n == 2 {
+        return __mmio_read16(p as *mut u16) as u64
+    }
+    if n == 4 {
+        return __mmio_read32(p as *mut u32) as u64
+    }
+    return __mmio_read64(p as *mut u64)
+}
+
+fn store_n(p: u64, n: u64, v: u64) {
+    if n == 1 {
+        __mmio_write8(p as *mut u8, (v & 0xFF) as u8)
+        return
+    }
+    if n == 2 {
+        __mmio_write16(p as *mut u16, (v & 0xFFFF) as u16)
+        return
+    }
+    if n == 4 {
+        __mmio_write32(p as *mut u32, (v & 0xFFFFFFFF) as u32)
+        return
+    }
+    __mmio_write64(p as *mut u64, v)
+}
+
+// Die Breite aus dem Befehlscode.
+fn width(op: u64) -> u64 {
+    let s: u64 = op & 0x18
+    if s == S_B {
+        return 1
+    }
+    if s == S_H {
+        return 2
+    }
+    if s == S_W {
+        return 4
+    }
+    return 8
+}
+
+// ---------------------------------------------------------- die Rechenwerke
+//
+// ALU64 und ALU32 in je einer Funktion, damit der Deuter selbst kurz
+// bleibt. `a` ist der alte Wert des Zielregisters, `b` der zweite
+// Operand (Register oder Sofortwert, schon aufgeloest).
+//
+// Der Code der Rechenart steht in den oberen vier Bit.
+
+fn alu64(code: u64, a: u64, b: u64, errp: *mut u64) -> u64 {
+    if code == 0x00 {
+        return a +% b // ADD
+    }
+    if code == 0x10 {
+        return a -% b // SUB
+    }
+    if code == 0x20 {
+        return a *% b // MUL
+    }
+    if code == 0x30 {
+        // DIV. eBPF sagt: Teilung durch null ergibt null und ist KEIN
+        // Abbruch. Das ist die Regel des Befehlssatzes, und der Pruefer
+        // muss deshalb auch nichts darueber zusagen.
+        if b == 0 {
+            return 0
+        }
+        return a / b
+    }
+    if code == 0x40 {
+        return a | b
+    }
+    if code == 0x50 {
+        return a & b
+    }
+    if code == 0x60 {
+        return a << (b & 63)
+    }
+    if code == 0x70 {
+        return a >> (b & 63)
+    }
+    if code == 0x80 {
+        return 0 -% a // NEG
+    }
+    if code == 0x90 {
+        if b == 0 {
+            return 0 // MOD durch null: der Wert bleibt, siehe unten
+        }
+        return a % b
+    }
+    if code == 0xA0 {
+        return a ^ b
+    }
+    if code == 0xB0 {
+        return b // MOV
+    }
+    if code == 0xC0 {
+        return sar(a, b) // ARSH
+    }
+    *errp = E_OP
+    return a
+}
+
+// Dasselbe auf 32 Bit. Das Ergebnis wird auf 32 Bit abgeschnitten und
+// OHNE Vorzeichen in das 64-Bit-Register geschrieben -- so schreibt es
+// der Befehlssatz vor (ein ALU32-Befehl loescht die oberen 32 Bit).
+fn alu32(code: u64, a0: u64, b0: u64, errp: *mut u64) -> u64 {
+    let a: u64 = a0 & 0xFFFFFFFF
+    let b: u64 = b0 & 0xFFFFFFFF
+    if code == 0x00 {
+        return (a +% b) & 0xFFFFFFFF
+    }
+    if code == 0x10 {
+        return (a -% b) & 0xFFFFFFFF
+    }
+    if code == 0x20 {
+        return (a *% b) & 0xFFFFFFFF
+    }
+    if code == 0x30 {
+        if b == 0 {
+            return 0
+        }
+        return (a / b) & 0xFFFFFFFF
+    }
+    if code == 0x40 {
+        return (a | b) & 0xFFFFFFFF
+    }
+    if code == 0x50 {
+        return (a & b) & 0xFFFFFFFF
+    }
+    if code == 0x60 {
+        return (a << (b & 31)) & 0xFFFFFFFF
+    }
+    if code == 0x70 {
+        return (a >> (b & 31)) & 0xFFFFFFFF
+    }
+    if code == 0x80 {
+        return (0 -% a) & 0xFFFFFFFF
+    }
+    if code == 0x90 {
+        if b == 0 {
+            return a & 0xFFFFFFFF
+        }
+        return (a % b) & 0xFFFFFFFF
+    }
+    if code == 0xA0 {
+        return (a ^ b) & 0xFFFFFFFF
+    }
+    if code == 0xB0 {
+        return b & 0xFFFFFFFF
+    }
+    if code == 0xC0 {
+        // ARSH32: auf 32 Bit vorzeichenerweitern, schieben, abschneiden.
+        let s: u64 = b & 31
+        return (sar(sext(a, 32), s)) & 0xFFFFFFFF
+    }
+    *errp = E_OP
+    return a
+}
+
+// Der Vergleich eines Sprungbefehls. `code` sind die oberen vier Bit.
+// `true` heisst: der Sprung wird genommen.
+fn jmp_take(code: u64, a: u64, b: u64) -> bool {
+    if code == 0x10 {
+        return a == b // JEQ
+    }
+    if code == 0x20 {
+        return a > b // JGT, vorzeichenlos
+    }
+    if code == 0x30 {
+        return a >= b // JGE
+    }
+    if code == 0x40 {
+        return (a & b) != 0 // JSET
+    }
+    if code == 0x50 {
+        return a != b // JNE
+    }
+    if code == 0x60 {
+        return slt(b, a) // JSGT
+    }
+    if code == 0x70 {
+        return sle(b, a) // JSGE
+    }
+    if code == 0xA0 {
+        return a < b // JLT
+    }
+    if code == 0xB0 {
+        return a <= b // JLE
+    }
+    if code == 0xC0 {
+        return slt(a, b) // JSLT
+    }
+    if code == 0xD0 {
+        return sle(a, b) // JSLE
+    }
+    return false
+}
+
+// Ein Sprungcode, den `jmp_take` kennt? Der Pruefer fragt das, damit ein
+// unbekannter Vergleich nicht stillschweigend "nicht springen" heisst.
+fn jmp_known(code: u64) -> bool {
+    if code == 0x10 || code == 0x20 || code == 0x30 || code == 0x40 {
+        return true
+    }
+    if code == 0x50 || code == 0x60 || code == 0x70 {
+        return true
+    }
+    if code == 0xA0 || code == 0xB0 || code == 0xC0 || code == 0xD0 {
+        return true
+    }
+    return false
+}
+
+// -------------------------------------------------------- die Kernfunktionen
+//
+// Was ein Programm ausser Rechnen noch darf. Die Liste ist kurz und sie
+// ist der Ort, an dem sie waechst -- eine neue Funktion braucht eine
+// Nummer HIER und einen Eintrag im Pruefer, sonst ist sie nicht
+// erreichbar. Die Argumente stehen wie im Befehlssatz in r1..r5, das
+// Ergebnis kommt nach r0.
+//
+// `F_MAP_LOOKUP` gibt einen ZEIGER zurueck, und das ist der einzige
+// Weg, auf dem ein Programm eine Adresse bekommt, die es nicht selbst
+// ausgerechnet hat. Was der Pruefer darueber weiss und was nicht, steht
+// in `ebpfver.fi` unter "was NICHT geprueft wird".
+fn do_call(state: u64, nr: u64, r1: u64, r2: u64, r3: u64,
+    errp: *mut u64) -> u64 {
+    kstate.add(state, eb(EB_CALLS), 1)
+    if nr == F_MAP_LOOKUP {
+        return ebpfmap.lookup(state, r1, r2)
+    }
+    if nr == F_MAP_UPDATE {
+        return ebpfmap.update(state, r1, r2, r3)
+    }
+    if nr == F_MAP_DELETE {
+        return ebpfmap.delete(state, r1, r2)
+    }
+    if nr == F_TICKS {
+        return kstate.get(state, kstate.TICKS)
+    }
+    if nr == F_TRACE {
+        kstate.add(state, eb(EB_TRACE), 1)
+        return 0
+    }
+    *errp = E_CALL
+    return 0
+}
+
+// ================================================================
+// DER DEUTER
+// ================================================================
+//
+// `run` fuehrt das Programm in Platz `slot` aus. `dstart`/`dend`
+// umschliessen den Paketpuffer -- das ist das, was r1 beim Start zeigt
+// (bei einem Programm ohne Paket sind beide null, dann gibt es nur den
+// Stapel). Das Ergebnis ist der Wert von r0 bei `EXIT`; brach das
+// Programm ab, ist es 0 und `err_of` sagt warum.
+//
+// WAS `run` NICHT TUT: es nimmt keine Sperre und es schaltet keine
+// Unterbrechungen ab. Es wird aus `inet.pump` gerufen, und dort ist
+// `atomic.L_NET` schon gehalten und die Unterbrechungen sind aus --
+// nachzulesen im Kopf von `inet.fi`. Wer es von woanders ruft, muss
+// dasselbe tun.
+fn run(state: u64, slot: u64, dstart: u64, dend: u64) -> u64 {
+    if slot >= PROG_MAX {
+        kstate.set(state, eb(EB_ERR), E_CALL)
+        return 0
+    }
+    if kstate.get(state, hat(slot) + H_USE * 8) == 0 {
+        kstate.set(state, eb(EB_ERR), E_CALL)
+        return 0
+    }
+    let len: u64 = kstate.get(state, hat(slot) + H_LEN * 8)
+    let code: u64 = prog_at(state, slot)
+    let stk: u64 = stack_at(state, slot)
+
+    // Der Stapel wird bei jedem Lauf geloescht. Sonst sieht ein Programm
+    // das, was das vorige dort liegen liess -- und das waere ein Leck
+    // zwischen zwei fremden Programmen.
+    var z: u64 = 0
+    while z < STACK_SIZE / 8 {
+        __mmio_write64((stk + z * 8) as *mut u64, 0)
+        z = z + 1
+    }
+
+    var regs: [u64; 11] = [0; 11]
+    // r1 zeigt auf den Anfang des Pakets, r2 auf sein Ende -- die
+    // Uebergabe, die jedes XDP-artige Programm erwartet. Ohne Paket sind
+    // beide null.
+    regs[1] = dstart
+    regs[2] = dend
+    // r10 ist der Stapelzeiger und zeigt HINTER den Stapel; er waechst
+    // nach unten. Das ist die Festlegung des Befehlssatzes.
+    regs[10] = stk +% STACK_SIZE
+
+    var pc: u64 = 0
+    var ticks: u64 = 0
+    var err: u64 = E_OK
+    var out: u64 = 0
+    var done: bool = false
+
+    while !done {
+        // DIE HARTE SCHRANKE, und sie steht VOR dem Holen des Befehls.
+        // Sie ist die einzige Zusage dieser Datei, die nicht davon
+        // abhaengt, dass der Pruefer recht hat.
+        if ticks >= MAX_TICKS {
+            err = E_TICKS
+            done = true
+        } else {
+            if pc >= len {
+                // Ueber das Ende hinausgelaufen. Der Pruefer laesst das
+                // nicht zu; wenn es doch geschieht, ist es ein Abbruch
+                // und kein Sprung ins Freie.
+                err = E_EXIT
+                done = true
+            } else {
+                ticks = ticks + 1
+                let w: u64 = insn_get(code, pc)
+                let op: u64 = op_of(w)
+                let cls: u64 = op & 0x07
+                let dst: u64 = dst_of(w)
+                let src: u64 = src_of(w)
+                let imm: u64 = imm_of(w)
+                let off: u64 = off_of(w)
+                var next: u64 = pc + 1
+
+                if cls == C_ALU64 || cls == C_ALU {
+                    // Das Rechenwerk. Der zweite Operand kommt aus einem
+                    // Register oder aus dem Sofortwert.
+                    var b: u64 = imm
+                    if (op & SRC_X) != 0 {
+                        b = regs[src as usize]
+                    }
+                    let acode: u64 = op & 0xF0
+                    // r10 ist nur lesbar. Der Pruefer weist das schon
+                    // ab; hier steht es noch einmal, weil ein
+                    // beschreibbarer Stapelzeiger die Schranke der
+                    // Speicherpruefung aushebeln wuerde.
+                    if dst == 10 {
+                        err = E_STACK
+                        done = true
+                    } else {
+                        if cls == C_ALU64 {
+                            regs[dst as usize] = alu64(acode,
+                                regs[dst as usize], b, &err)
+                        } else {
+                            regs[dst as usize] = alu32(acode,
+                                regs[dst as usize], b, &err)
+                        }
+                        if err != E_OK {
+                            done = true
+                        }
+                    }
+                } else {
+                    if cls == C_LDX {
+                        // Laden aus dem Speicher: dst = *(size *)(src + off)
+                        // Nur die gewoehnliche Betriebsart (0x60). ATOMIC
+                        // (0xC0) ist nicht gebaut und wird nicht als
+                        // gewoehnlicher Zugriff missdeutet.
+                        if (op & 0xE0) != 0x60 {
+                            err = E_OP
+                            done = true
+                        }
+                        let n: u64 = width(op)
+                        let p: u64 = regs[src as usize] +% off
+                        if !okp(p, n, dstart, dend, stk) {
+                            err = E_MEM
+                            done = true
+                        } else {
+                            if dst == 10 {
+                                err = E_STACK
+                                done = true
+                            } else {
+                                regs[dst as usize] = load_n(p, n)
+                            }
+                        }
+                    } else {
+                        if cls == C_STX || cls == C_ST {
+                            // Schreiben: *(size *)(dst + off) = src bzw. imm
+                            if (op & 0xE0) != 0x60 {
+                                err = E_OP
+                                done = true
+                            }
+                            let n: u64 = width(op)
+                            let p: u64 = regs[dst as usize] +% off
+                            if !okp(p, n, dstart, dend, stk) {
+                                err = E_MEM
+                                done = true
+                            } else {
+                                var v: u64 = imm
+                                if cls == C_STX {
+                                    v = regs[src as usize]
+                                }
+                                store_n(p, n, v)
+                            }
+                        } else {
+                            if cls == C_LD {
+                                // Der einzige LD, den diese Maschine
+                                // kennt, ist LD_IMM64 (0x18): ein
+                                // 64-Bit-Sofortwert aus ZWEI Zellen.
+                                if op == 0x18 {
+                                    if pc + 1 >= len {
+                                        err = E_EXIT
+                                        done = true
+                                    } else {
+                                        let w2: u64 = insn_get(code, pc + 1)
+                                        let hi: u64 = (w2 >> 32) & 0xFFFFFFFF
+                                        if dst == 10 {
+                                            err = E_STACK
+                                            done = true
+                                        } else {
+                                            regs[dst as usize] =
+                                                (imm & 0xFFFFFFFF) | (hi << 32)
+                                        }
+                                        next = pc + 2
+                                    }
+                                } else {
+                                    err = E_OP
+                                    done = true
+                                }
+                            } else {
+                                if cls == C_JMP || cls == C_JMP32 {
+                                    let jcode: u64 = op & 0xF0
+                                    if jcode == 0x00 {
+                                        // JA, der unbedingte Sprung.
+                                        next = pc +% 1 +% off
+                                    } else {
+                                        if jcode == 0x80 {
+                                            // CALL
+                                            let r0: u64 = do_call(state, imm,
+                                                regs[1], regs[2], regs[3],
+                                                &err)
+                                            if err != E_OK {
+                                                done = true
+                                            } else {
+                                                regs[0] = r0
+                                                // Der Befehlssatz sagt:
+                                                // r1..r5 sind nach einem
+                                                // Aufruf unbestimmt. Hier
+                                                // werden sie geloescht,
+                                                // damit "unbestimmt" nicht
+                                                // "was vorher drin war"
+                                                // heisst.
+                                                regs[1] = 0
+                                                regs[2] = 0
+                                                regs[3] = 0
+                                                regs[4] = 0
+                                                regs[5] = 0
+                                            }
+                                        } else {
+                                            if jcode == 0x90 {
+                                                // EXIT
+                                                out = regs[0]
+                                                done = true
+                                            } else {
+                                                if !jmp_known(jcode) {
+                                                    err = E_OP
+                                                    done = true
+                                                } else {
+                                                    var b: u64 = imm
+                                                    if (op & SRC_X) != 0 {
+                                                        b = regs[src as usize]
+                                                    }
+                                                    var a: u64 =
+                                                        regs[dst as usize]
+                                                    // JMP32 vergleicht nur
+                                                    // die unteren 32 Bit --
+                                                    // vorzeichenbehaftete
+                                                    // Vergleiche brauchen
+                                                    // dafuer die
+                                                    // Erweiterung.
+                                                    if cls == C_JMP32 {
+                                                        if jcode == 0x60
+                                                            || jcode == 0x70
+                                                            || jcode == 0xC0
+                                                            || jcode == 0xD0 {
+                                                            a = sext(a, 32)
+                                                            b = sext(b, 32)
+                                                        } else {
+                                                            a = a & 0xFFFFFFFF
+                                                            b = b & 0xFFFFFFFF
+                                                        }
+                                                    }
+                                                    if jmp_take(jcode, a, b) {
+                                                        next = pc +% 1 +% off
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    err = E_OP
+                                    done = true
+                                }
+                            }
+                        }
+                    }
+                }
+                if !done {
+                    pc = next
+                }
+            }
+        }
+    }
+
+    kstate.set(state, eb(EB_ERR), err)
+    kstate.set(state, eb(EB_TICKS), ticks)
+    kstate.add(state, eb(EB_TSUM), ticks)
+    kstate.add(state, eb(EB_RUNS), 1)
+    kstate.add(state, hat(slot) + H_RUNS * 8, 1)
+    if err != E_OK {
+        kstate.add(state, hat(slot) + H_ERRS * 8, 1)
+        kstate.set(state, eb(EB_R0), 0)
+        return 0
+    }
+    kstate.set(state, eb(EB_R0), out)
+    return out
+}

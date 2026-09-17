@@ -65,6 +65,7 @@ import net.wire
 import net.tcp
 import net.stack
 import netmon
+import ebpfhook
 import share
 import wg
 
@@ -477,12 +478,57 @@ fn pump(state: u64) -> u64 {
         if len == 0 {
             n = PUMP_BATCH
         } else {
-            learn(state, frame, len)
-            icmp_catch(state, frame, len)
             // ROUND NETMON: the frame is classified BEFORE it goes into
             // the stack, because the stack may consume it and because
             // this is the only place it exists as octets with a length.
             netmon.frame_seen(state, frame, len, false)
+            // ================================= RUNDE O-EBPF
+            //
+            // DER HAKEN AM EINGANG DES GERAETS, und er steht GENAU
+            // HIER: nach der Zaehlung, vor Tunnel, Weiterleitung und
+            // Stack. Die Reihenfolge ist dieselbe Ueberlegung, die der
+            // Absatz darueber fuer die drei alten Haken anstellt.
+            //
+            //   NACH `netmon.frame_seen`, weil die Zaehlung sagt, was
+            //   auf dem DRAHT war. Ein Rahmen, den der Filter wegwirft,
+            //   ist trotzdem ueber die Leitung gekommen und muss in der
+            //   Abrechnung stehen. Stuende der Filter davor, waere
+            //   NETMON eine Aussage ueber den Filter statt ueber die
+            //   Leitung -- und die Zahl, die jemand mit seinem
+            //   Datentarif vergleicht, waere zu klein.
+            //
+            //   VOR `learn`, `icmp_catch`, Tunnel und Stack, weil ein
+            //   verworfener Rahmen dann wirklich nichts mehr kostet:
+            //   kein Entschluesseln, kein Zusammensetzen, keine
+            //   Pruefsumme, keine Steckdose. Das ist der ganze Sinn
+            //   eines Hakens an dieser Stelle.
+            //
+            //   DASS ER VOR `icmp_catch` STEHT, IST GEMESSEN UND NICHT
+            //   GERATEN. Die erste Fassung setzte ihn dahinter -- und
+            //   `tools/ebpf/run.sh` Abschnitt 5b meldete, dass `ping`
+            //   trotz eines geladenen ICMP-Filters weiter Antworten
+            //   bekam. Der Grund: `icmp_catch` FAENGT die Echo-Antwort
+            //   selbst ab und beantwortet sie, bevor der Stack sie
+            //   sieht; ein Haken dahinter kommt fuer ICMP zu spaet.
+            //   Ein Haken am Eingang des Geraets muss der erste sein,
+            //   der den Rahmen sieht -- sonst filtert er nur das, was
+            //   vor ihm niemand haben wollte.
+            //
+            // Steht kein Programm daran, sind das eine Ladung aus
+            // `kdata` und ein Vergleich; `tools/ebpf/run.sh` misst
+            // diesen leeren Fall gesondert, weil er der Normalfall ist.
+            let verdikt: u64 = ebpfhook.xdp(state, frame, len)
+            if verdikt == ebpfhook.DROP {
+                // VERWORFEN. Der Rahmen geht NICHT in den Stack; der
+                // Puffer wird trotzdem zurueckgegeben, sonst versiegt
+                // der Empfangsring nach ein paar hundert Rahmen.
+                netdev.rx_recycle(state, slot)
+                kstate.add(state, sc(S_IN), 1)
+                work = work + 1
+                n = n + 1
+            } else {
+                learn(state, frame, len)
+                icmp_catch(state, frame, len)
             // ROUND TUNNEL. The tunnel gets the frame before the stack
             // does. If it says it was its own -- a WireGuard message on
             // its port -- the stack must not also see it; what came out
@@ -507,6 +553,7 @@ fn pump(state: u64) -> u64 {
             kstate.add(state, sc(S_IN), 1)
             work = work + 1
             n = n + 1
+            }
         }
     }
 

@@ -70,6 +70,10 @@ import inet
 import netview
 import unixsock
 import netmon
+import ebpf
+import ebpfver
+import ebpfmap
+import ebpfhook
 import share
 import wg
 import bus
@@ -894,6 +898,37 @@ const NP_USED: u64 = 6
 // that is not decoration: a program that could roll its own counters
 // could empty them, and the history would then say it used nothing.
 const SYS_OSUM_NETMONROLL: u64 = 1321
+
+// ======================================================= RUNDE O-EBPF
+//
+// FUENF NUMMERN, 1405..1409, und sie sind auf JEDEM Zweig dieses Repos
+// frei -- nachgesehen mit `python3 tools/kernel/syscalls.py --zweige`,
+// bevor sie vergeben wurden. Genau diese Vorsicht fehlte in Runde
+// MERGE, als zwei Zweige unabhaengig die 1320 nahmen und der zweite
+// Aufruf ab da still tot war.
+//
+//   1405 EBPFLOAD    Befehle aus Ring 3 holen, PRUEFEN, laden.
+//                    Gibt den Befund des Pruefers zurueck (0 = geladen),
+//                    damit ein Werkzeug sagen kann, WARUM es abgelehnt
+//                    wurde, statt nur "ging nicht".
+//   1406 EBPFATTACH  ein geladenes Programm an eine Tuer haengen
+//                    (bzw. aushaengen) und entladen.
+//   1407 EBPFMAP     eine Tafel anlegen, lesen, schreiben, loeschen.
+//   1408 EBPFSTAT    die Zaehler der Haken und der Maschine lesen.
+//   1409 EBPFPROG    was ueber ein geladenes Programm bekannt ist.
+//
+// ALLE FUENF SIND ROOT ONLY, und das ist keine Verzierung: wer ein
+// Programm in den Netzweg haengen kann, kann den Netzverkehr dieser
+// Maschine lesen und wegwerfen. Das ist genau die Befugnis, die ein
+// unprivilegierter Prozess nicht haben darf -- Linux hat dieselbe
+// Entscheidung nach einer Reihe von Lucken nachtraeglich getroffen
+// (`kernel.unprivileged_bpf_disabled`), und diese Runde faengt damit
+// an, statt sie nachzuruesten.
+const SYS_OSUM_EBPFLOAD: u64 = 1405
+const SYS_OSUM_EBPFATTACH: u64 = 1406
+const SYS_OSUM_EBPFMAP: u64 = 1407
+const SYS_OSUM_EBPFSTAT: u64 = 1408
+const SYS_OSUM_EBPFPROG: u64 = 1409
 
 // ============================================ ROUND NETMON, PART TWO
 //
@@ -2690,6 +2725,16 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // haette hier die kleinere gestanden, waeren die Aufrufe der
     // anderen Runde still mit -ENOSYS beantwortet worden.
     if number >= SYS_OSUM_NETGET && number <= SYS_OSUM_SHARE {
+        return net_call(state, me, number, a0, a1, a2)
+    }
+    // RUNDE O-EBPF: 1405..1409 liegen AUSSERHALB des Fensters darueber,
+    // und das ist genau die Falle, vor der der Absatz bei MERGE warnt.
+    // Die fuenf Aufrufe standen in `net_call` und waren trotzdem
+    // unerreichbar -- `ebpfctl` bekam -ENOSYS (38) fuer jeden einzelnen,
+    // und `tools/ebpf/run.sh` Abschnitt 6 hat es gemeldet. Ein eigenes
+    // Fenster ist richtiger als das alte zu dehnen: dazwischen liegen
+    // 1323..1404, die anderen Runden gehoeren.
+    if number >= SYS_OSUM_EBPFLOAD && number <= SYS_OSUM_EBPFPROG {
         return net_call(state, me, number, a0, a1, a2)
     }
     // RUNDE TILING: der Fensterbaum, bedient aus Ring 3.
@@ -11780,8 +11825,234 @@ fn do_share(state: u64, me: u64, what: u64, index: u64) -> u64 {
     return neg(errno.E_INVAL)
 }
 
+// ================================================== RUNDE O-EBPF
+//
+// DIE FUENF AUFRUFE DER RUNDE. Alle verlangen root; die Begruendung
+// steht oben bei den Nummern.
+//
+// `do_ebpf_load(slot, uptr, len)` holt `len` Befehle (zu je acht
+// Oktetten) aus Ring 3 in den Befehlsspeicher des Platzes, laesst den
+// PRUEFER darueberlaufen und laedt das Programm nur, wenn er es
+// annimmt. Zurueck kommt der BEFUND: 0 = geladen, sonst der
+// `ebpfver.V_*`-Schluessel. Ein Werkzeug kann damit sagen, WARUM ein
+// Programm abgelehnt wurde, statt nur "ging nicht" -- und die Zeile,
+// an der es scheiterte, holt es mit `EBPFSTAT`.
+fn do_ebpf_load(state: u64, me: u64, slot: u64, uptr: u64,
+    len: u64) -> u64 {
+    if sched.tget(state, me, sched.T_EUID) != 0 {
+        return neg(errno.E_PERM)
+    }
+    if slot >= ebpf.PROG_MAX {
+        return neg(errno.E_INVAL)
+    }
+    if len == 0 || len > ebpf.MAX_INSN {
+        return neg(errno.E_INVAL)
+    }
+    // DIE BEFEHLE KOMMEN ERST IN DEN PLATZ, DANN WIRD GEPRUEFT. Das ist
+    // die richtige Reihenfolge und nicht die bequeme: geprueft werden
+    // muss GENAU das, was spaeter laeuft. Wer aus dem Ring-3-Puffer
+    // pruefen und danach kopieren wuerde, laesst dazwischen eine Lucke,
+    // in der ein zweiter Faden des Prozesses den Puffer aendern kann --
+    // das ist die klassische Zeitlucke zwischen Pruefung und Gebrauch.
+    // `ebpfhook.load` macht den Platz vor dem Pruefen ungueltig, also
+    // laeuft in dieser Zeit auch nichts Halbes.
+    // `copy_in` nimmt eine ABSOLUTE Zieladresse (es schreibt mit
+    // `kstate.set8(dst + ...)`, ohne `state` davorzusetzen), und
+    // `ebpf.prog_at` liefert genau so eine. Die erste Fassung zog hier
+    // `state` ab und uebergab einen Offset -- die Befehle landeten
+    // dann irgendwo unterhalb von `kdata`, der Pruefer sah lauter
+    // Nullen und antwortete auf JEDES Programm mit V_NOEXIT (3), auch
+    // auf ein gueltiges. `tools/ebpf/run.sh` Abschnitt 6 hat das
+    // gemeldet, weil es den Befund fuer ein GUELTIGES Programm
+    // nachrechnet und nicht nur fuer ein kaputtes.
+    if !copy_in(state, me, ebpf.prog_at(state, slot), uptr, len * 8) {
+        return neg(errno.E_FAULT)
+    }
+    return ebpfhook.load(state, slot, ebpfhook.K_XDP, len)
+}
+
+// `do_ebpf_attach(was, kind, slot)`:
+//   was 0 = anhaengen, 1 = aushaengen, 2 = entladen
+fn do_ebpf_attach(state: u64, me: u64, was: u64, kind: u64,
+    slot: u64) -> u64 {
+    if sched.tget(state, me, sched.T_EUID) != 0 {
+        return neg(errno.E_PERM)
+    }
+    if was == 0 {
+        if ebpfhook.attach(state, kind, slot) {
+            return 0
+        }
+        return neg(errno.E_INVAL)
+    }
+    if was == 1 {
+        if ebpfhook.detach(state, kind) {
+            return 0
+        }
+        return neg(errno.E_INVAL)
+    }
+    if was == 2 {
+        if ebpfhook.unload(state, slot) {
+            return 0
+        }
+        return neg(errno.E_INVAL)
+    }
+    return neg(errno.E_INVAL)
+}
+
+// `do_ebpf_map(was, a, b)` -- die Tafeln aus Ring 3.
+//
+//   was 0  anlegen (a = Art, b = Zahl der Eintraege) -> Nummer
+//   was 1  lesen   (a = Tafel, b = Schluessel) -> Wert, 0 wenn nicht da
+//   was 2  schreiben ist zweiteilig: siehe unten
+//   was 3  loeschen (a = Tafel, b = Schluessel)
+//   was 4  wieviele Eintraege hat die Tafel
+//   was 5  der Wert an PLATZ b (zum Durchgehen ohne Schluesselkenntnis)
+//   was 6  der Schluessel an Platz b
+//   was 7  ist Platz b belegt
+//   was 8  die Art der Tafel
+//
+// SCHREIBEN BRAUCHT DREI ZAHLEN (Tafel, Schluessel, Wert) und ein
+// Aufruf traegt nur drei Argumente insgesamt. Statt einen zweiten
+// Aufruf zu vergeben, wird der Wert VORHER abgelegt (was 9) und mit
+// `was 2` verbraucht. Das ist haesslich und es ist ehrlich: die
+// Alternative waere ein Zeiger auf eine Struktur in Ring 3, und der
+// braucht wieder `copy_in` samt Pruefung fuer drei Zahlen.
+fn do_ebpf_map(state: u64, me: u64, was: u64, a: u64, b: u64) -> u64 {
+    if sched.tget(state, me, sched.T_EUID) != 0 {
+        return neg(errno.E_PERM)
+    }
+    if was == 0 {
+        let r: u64 = ebpfmap.create(state, a, b)
+        if r >= ebpfmap.NMAPS {
+            return neg(errno.E_NOSPC)
+        }
+        return r
+    }
+    if was == 1 {
+        var found: u64 = 0
+        return ebpfmap.lookup_value(state, a, b, &found)
+    }
+    if was == 2 {
+        return ebpfmap.update(state, a, b,
+            kstate.get(state, kstate.EBPFHOOK_OFF + 0x0E00))
+    }
+    if was == 3 {
+        return ebpfmap.delete(state, a, b)
+    }
+    if was == 4 {
+        return ebpfmap.entries_of(state, a)
+    }
+    if was == 5 {
+        return ebpfmap.value_at(state, a, b)
+    }
+    if was == 6 {
+        return ebpfmap.key_at(state, a, b)
+    }
+    if was == 7 {
+        return ebpfmap.slot_used(state, a, b)
+    }
+    if was == 8 {
+        return ebpfmap.kind_of(state, a)
+    }
+    if was == 9 {
+        // Den Wert fuer das naechste `was 2` hinterlegen.
+        kstate.set(state, kstate.EBPFHOOK_OFF + 0x0E00, a)
+        return 0
+    }
+    return neg(errno.E_INVAL)
+}
+
+// `do_ebpf_stat(feld)` -- die Zaehler. Lesen darf das JEDER: es sind
+// Summen ueber die eigene Maschine, keine Inhalte.
+fn do_ebpf_stat(state: u64, me: u64, feld: u64) -> u64 {
+    if feld == 0 {
+        if ebpfhook.on(state) {
+            return 1
+        }
+        return 0
+    }
+    if feld == 1 {
+        return ebpfhook.seen(state)
+    }
+    if feld == 2 {
+        return ebpfhook.drops(state)
+    }
+    if feld == 3 {
+        return ebpfhook.passes(state)
+    }
+    if feld == 4 {
+        return ebpfhook.aborts(state)
+    }
+    if feld == 5 {
+        return ebpfhook.loaded(state)
+    }
+    if feld == 6 {
+        return ebpf.runs_made(state)
+    }
+    if feld == 7 {
+        return ebpf.calls_made(state)
+    }
+    if feld == 8 {
+        return ebpf.last_err(state)
+    }
+    if feld == 9 {
+        return ebpf.ticks_used(state)
+    }
+    if feld == 10 {
+        // An welcher Zeile der Pruefer zuletzt abgewiesen hat.
+        return ebpfver.why_line(state)
+    }
+    if feld == 11 {
+        return ebpfver.checked(state)
+    }
+    if feld == 12 {
+        return ebpf.PROG_MAX
+    }
+    if feld == 13 {
+        return ebpfmap.NMAPS
+    }
+    if feld == 14 {
+        return ebpf.MAX_INSN
+    }
+    if feld == 15 {
+        return ebpf.MAX_TICKS
+    }
+    return neg(errno.E_INVAL)
+}
+
+// `do_ebpf_prog(slot, feld)` -- was ueber ein geladenes Programm
+// bekannt ist.
+fn do_ebpf_prog(state: u64, me: u64, slot: u64, feld: u64) -> u64 {
+    if slot >= ebpf.PROG_MAX {
+        return neg(errno.E_INVAL)
+    }
+    if feld == 0 {
+        return ebpfhook.attached(state, ebpfhook.K_XDP)
+    }
+    if feld == 1 {
+        return ebpfhook.attached(state, ebpfhook.K_SOCK)
+    }
+    return neg(errno.E_INVAL)
+}
+
 fn net_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
     a2: u64) -> u64 {
+    // ======================================================= RUNDE O-EBPF
+    if number == SYS_OSUM_EBPFLOAD {
+        return do_ebpf_load(state, me, a0, a1, a2)
+    }
+    if number == SYS_OSUM_EBPFATTACH {
+        return do_ebpf_attach(state, me, a0, a1, a2)
+    }
+    if number == SYS_OSUM_EBPFMAP {
+        return do_ebpf_map(state, me, a0, a1, a2)
+    }
+    if number == SYS_OSUM_EBPFSTAT {
+        return do_ebpf_stat(state, me, a0)
+    }
+    if number == SYS_OSUM_EBPFPROG {
+        return do_ebpf_prog(state, me, a0, a1)
+    }
     // ======================================================= ROUND NETMON
     if number == SYS_OSUM_NETMON {
         return do_netmon(state, me, a0, a1, a2)
