@@ -373,6 +373,37 @@ Ehrlich und vollstaendig:
 | Laeufer | Sollwert | gemessen |
 |---|---|---|
 | `tools/container/run.sh` | neu | **52 passed, 0 failed** |
-| `tools/k17/run.sh` | 158 passed, 0 failed | siehe Schlussmeldung |
-| `tools/hotplug/run.sh` | 45 / 0 | siehe Schlussmeldung |
-| `tools/install/abnahme.sh` | 35 gruen / 0 rot | siehe Schlussmeldung |
+| `tools/k17/run.sh` | 158 passed, 0 failed | **158 passed, 0 failed** |
+| `tools/hotplug/run.sh` | 45 / 0 | **45 passed, 0 failed** |
+| `tools/install/abnahme.sh` | 35 gruen / 0 rot | **35 gruen, 0 rot** |
+
+### Zwei Dinge, die dabei passiert sind, und beide gehoeren in den Bericht
+
+**1. `memmap.py` kannte `CTR_OFF` nicht.** Der erste k17-Lauf war
+**156 / 2**, und die zwei roten Zusagen waren echt: die Speicherkarte
+meldete `kstate.fi:CTR_OFF steht in keiner Karte` und damit
+`1 Kollisionen`. Das ist keine Ueberschneidung gewesen, sondern ein
+Bereich, den die Karte nicht kannte -- `tools/kernel/memmap.py` fuehrt
+eine eigene Liste, und wer eine Seite nimmt, traegt sich dort ein. Eine
+Zeile nachgetragen (`("CONTAINER", "kstate.fi", "CTR_OFF", "CTR_MAX")`),
+danach 130 Bereiche und **0 Kollisionen**.
+
+**2. Die Abnahme war beim ersten Lauf 15 gruen / 18 rot -- und es lag
+NICHT an dieser Runde.** Das musste bewiesen und nicht behauptet werden,
+also wurde ein zweiter Arbeitsbaum auf **demselben Ausgangscommit**
+(`7e68da55`) ausgecheckt und dieselbe Abnahme dort gefahren:
+
+| | Ausgangscommit `7e68da55` | dieser Zweig |
+|---|---|---|
+| `tools/install/abnahme.sh` | 35 gruen, 0 rot | 35 gruen, 0 rot |
+
+Der erste Lauf war an `installer: step=5` stehengeblieben, und von dort
+fielen alle spaeteren Abschnitte um (keine `limine.conf`, kein Start von
+der Platte, kein Geraeteschluessel). Ursache war das **Zeitlimit von
+900 Sekunden** um den QEMU-Lauf: die Maschine trug zu dem Zeitpunkt
+Fremdlast um 30, und das Kopieren der Wurzel plus das Schreiben des
+Bootladers auf die FAT-Partition brauchten laenger als das Limit.
+Nachgewiesen im zweiten Lauf, indem die CPU-Zeit des QEMU-Prozesses
+mitgelesen wurde (484 s -> 509 s in 25 Sekunden Wanduhr): die Maschine
+rechnete, sie hing nicht. Der Lauf kam danach bis `installer: fertig`
+und auf 35 / 0.
