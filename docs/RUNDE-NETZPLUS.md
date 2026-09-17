@@ -202,8 +202,21 @@ Der Wirt bestaetigt es unabhaengig: `echoed 262144` bzw. `echoed 65536`.
 
 ```
 tools/netzplus/run.sh   39 passed, 0 failed
+tools/net/run.sh        75 passed, 0 failed   (der Laeufer der Runde K8)
 tools/k17/run.sh       158 passed, 0 failed   (Sollwert 158/0)
 tools/hotplug/run.sh    45 passed, 0 failed   (Sollwert 45/0)
+```
+
+`tools/net/run.sh` ist der wichtigste dieser vier, weil ihn diese Runde
+nicht geschrieben hat. Er bestaetigt die Messung unabhaengig und in
+BEIDEN Richtungen:
+
+```
+throughput Linux -> Osum: 33230 KiB/s (1 MiB in 30815 us)
+octets back out: 262144 -- what came back is what went in, octet for
+                           octet (md5 d151944b15e5f45654c151612dfe0f01)
+octets Osum sent: 262144   octets that came back: 262144
+throughput through 20 % loss: 3216 KiB/s (clean wire: 33230 KiB/s)
 ```
 
 **Eine Warnung zum Messen auf diesem Wirt.** Beide Regressionen sind im
