@@ -692,6 +692,51 @@ Code. Und 232 Nennungen in `tools/english/*.tsv`: das sind die
 Umbenennungstafeln der Runde ENGLISCH, ein **Protokoll von damals**,
 das die Pfade von damals nennen soll.
 
+## 12.5 Die fünfte Falle: ein Prüfer, der nichts sieht, sagt „grün"
+
+Die gefährlichste von allen, und sie wäre um ein Haar durchgerutscht.
+
+`tools/kernel/memmap.py` baut die Speicherkarte des Kerns und prüft,
+dass sich keine zwei Bereiche überschneiden. Nach dem Umzug brach es
+mit `KeyError: 'kstate.fi'` ab — es zählte **zwei feste Orte** auf
+(`kernel/` und `kernel/arch/x86_64/`), weil schon die Runde ARM
+einmal genau dasselbe Problem hatte und damals einen zweiten Ort
+eintrug.
+
+Der Abbruch war noch das Gute daran. Schlimmer war die Zeile daneben:
+
+```python
+for pfad in sorted(glob.glob(os.path.join(kdir, "*.fi"))
+                   + glob.glob(os.path.join(kdir, "arch", "x86_64", "*.fi"))):
+```
+
+Dieses `glob` sammelt die **Modusnamen** des Kerns ein. Nach dem Umzug
+fand es davon **keinen einzigen mehr** — und meldete brav:
+
+```
+12 Vektoren, 0 Modusnamen in 17 Woertern, 0 Kollisionen
+```
+
+**„0 Kollisionen" — weil es nichts zu vergleichen gab.** Ein Prüfer,
+der die Hälfte des Kerns nicht sieht, wird nicht rot. Er wird grün.
+
+Nach der Umstellung auf eine echte Suche:
+
+```
+129 Bereiche, 12 Vektoren, 245 Modusnamen in 17 Woertern, 0 Kollisionen
+```
+
+Dasselbe bei `tools/hid/worte.py`: **66 statt 127** Moduswörter. Mit
+der Suche sind es **154** — und damit findet es drei Überschneidungen,
+die in `kernel/arch/x86_64/` liegen und **noch nie geprüft wurden**
+(`nofpu`/`nofpuswitch`, `nolock`/`nolockall`, `bench`/`fpubench`). Die
+drei in `kmain.fi` meldet `main` auch.
+
+> **Die Lehre:** ein Werkzeug, das Dateien aufzählt, muss *suchen*,
+> nicht *aufzählen*. Sonst misst es nach jedem Umzug weniger — und
+> sagt dabei „in Ordnung". Genau dafür verlangt dieses Repo zu jeder
+> Prüfung eine Gegenprobe.
+
 ## 13. Das Prüfskript prüft jetzt beides
 
 `tools/struktur/run.sh`:
