@@ -61,6 +61,7 @@ import netdev
 import errno
 import arch.x86_64.apic
 import pci
+import hw
 import net.wire
 import net.tcp
 import net.stack
@@ -73,7 +74,7 @@ export {
     ip, mask, gw, mac_at, stat, pumps, frames_in, frames_out,
     carrier, gw_known,
     bounce, saddr,
-    tcp_stat, task_slot, print_state,
+    tcp_stat, sock_dbg, task_slot, print_state,
     card_octets, hw_for,
     sock_new, sock_free, sock_kind, sock_handle,
     sock_bind, sock_listen, sock_accept, sock_connect,
@@ -292,6 +293,33 @@ fn stat(state: u64, which: u64) -> u64 {
     return stack.net_stat(st(state), (which & 0xFFFFFFFF) as u32)
 }
 
+// RUNDE NETZPLUS: das Fenster in eine EINZELNE Verbindung.
+//
+// `tcp_stat` zaehlt ueber den ganzen Stack; fuer die Frage "ist an
+// DIESER Verbindung Fensterskalierung ausgehandelt worden" ist das zu
+// grob. `sock_dbg` reicht `tcp_dbg` durch, mit der Socketnummer statt
+// des Verbindungsindex -- ein Messdienst kennt nur die.
+// RUNDE NETZPLUS: `nzws=0`, `nzts=0`, `nzsack=0` schalten die jeweilige
+// Option ab. Das ist die Gegenprobe zur Messung: DERSELBE Kernel, einmal
+// mit und einmal ohne -- was dazwischen liegt, ist die Option.
+fn nzp_options(state: u64) {
+    let t: *mut tcp.Tcp = stack.net_tcp(st(state))
+    tcp.tcp_set_wscale(t, (hw.net_ws(state) & 0xFFFFFFFF) as u32)
+    tcp.tcp_set_ts(t, (hw.net_ts(state) & 0xFFFFFFFF) as u32)
+    tcp.tcp_set_sack(t, (hw.net_sack(state) & 0xFFFFFFFF) as u32)
+}
+
+fn sock_dbg(state: u64, i: u64, which: u64) -> u64 {
+    if !ready(state) {
+        return 0
+    }
+    let h: u64 = sock_handle(state, i)
+    if h == NOHANDLE {
+        return 0
+    }
+    return tcp.tcp_dbg(stack.net_tcp(st(state)), h as i32, (which & 0xFFFFFFFF) as u32)
+}
+
 fn tcp_stat(state: u64, which: u64) -> u64 {
     if !ready(state) {
         return 0
@@ -390,6 +418,10 @@ fn init(state: u64, a: u64, b: u64, c: u64, d: u64, prefix: u64,
     }
     stack.net_init(st(state), own, netmask, (gateway & 0xFFFFFFFF) as u32,
         &m[0], seed)
+    // RUNDE NETZPLUS: die drei Optionen so stellen, wie die Befehlszeile
+    // es sagt. `net_init` hat sie gerade auf "an" gesetzt; hier wird
+    // daraus die Gegenprobe.
+    nzp_options(state)
     kstate.set(state, sc(S_IP), own as u64)
     kstate.set(state, sc(S_MASK), netmask as u64)
     kstate.set(state, sc(S_GW), gateway)
@@ -446,6 +478,7 @@ fn readdr(state: u64, a: u64, b: u64, c: u64, d: u64, prefix: u64,
     let flags: u64 = hold(state)
     stack.net_init(st(state), own, netmask, (gateway & 0xFFFFFFFF) as u32,
         &m[0], seed)
+    nzp_options(state)
     kstate.set(state, sc(S_IP), own as u64)
     kstate.set(state, sc(S_MASK), netmask as u64)
     kstate.set(state, sc(S_GW), gateway)

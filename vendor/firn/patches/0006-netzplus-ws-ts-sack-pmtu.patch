@@ -1,0 +1,1164 @@
+# vendor/firn/patches/0006-netzplus-ws-ts-sack-pmtu.patch
+#
+# RUNDE NETZPLUS (Osum, 17.09.2026) -- DIE FEHLENDEN TEILE DES
+# TCP-STACKS: FENSTERSKALIERUNG, ZEITSTEMPEL MIT PAWS, SACK UND DIE
+# BEHANDLUNG VON "FRAGMENTATION NEEDED".
+#
+# WARUM DIESE DATEI UEBERHAUPT EXISTIERT. vendor/firn/lib/ ist NICHT
+# eingecheckt (.gitignore); fetch-firnc.sh loescht das Verzeichnis mit
+# `rm -rf` und legt es aus dem festgenagelten Firn-Commit neu an. Eine
+# Aenderung, die nur dort laege, waere beim naechsten `--force` still
+# verschwunden. Also liegt sie HIER, wird eingecheckt, und
+# fetch-firnc.sh legt sie nach dem Auspacken auf.
+#
+# WARUM FLICKEN UND NICHT EINE AENDERUNG DRUEBEN IN /root/firn:
+#   1. Der Pin 7b4c22b1 ist die Zusage dieses Repos, gegen WELCHEN
+#      Uebersetzer gemessen wurde. Eine Aenderung drueben zwingt zu
+#      einem neuen Pin, und der zoege die gesamte Firn-Entwicklung seit
+#      7b4c22b1 mit herein (main steht dort bei 421293f2a). Dann waere
+#      bei jedem Fehler wieder unklar, ob er aus dem Kernel oder aus dem
+#      Uebersetzer kommt -- genau das, was der Pin verhindern soll.
+#   2. An /root/firn arbeiten parallel andere Runden. Ein Zweig dort,
+#      den nur Osum braucht, ist ein Zweig, den jemand anders erbt.
+#   3. Der Mechanismus ist dafuer gebaut und haelt die Zusage von
+#      vendor/net/BLOBS aufrecht: fetch-firnc.sh legt jede Datei, die
+#      ein Flicken anfasst, VORHER unveraendert nach lib/.roh/, und
+#      Abschnitt 1 von ./test.sh prueft dort. Der Stack "unter uns" ist
+#      also weiterhin nachweislich der des Pins.
+# Gehoert der Inhalt langfristig nach Firn? Ja -- siehe
+# REMOVE-FROM-FIRN.md. Solange er dort nicht ist, steht er hier.
+#
+# WAS ER TUT, in vier Stufen und nach Nutzen geordnet.
+#
+# 1. FENSTERSKALIERUNG (RFC 7323). Der eigentliche Hebel ist NICHT die
+#    Option, sondern der Puffer: was ein Ende ankuendigen darf, bleibt,
+#    was es auch aufheben kann. RCV_CAP geht deshalb von 64 KiB auf
+#    256 KiB, RCV_MASK und das Feld rcv_buf mit. Die Option verschiebt
+#    dann nur noch die Grenze des 16-Bit-Feldes. Faktor dieses Stacks:
+#    2 (mal vier).
+#
+# 2. ZEITSTEMPEL UND PAWS (RFC 7323). Zeitstempel in jedem Segment,
+#    sobald beide Seiten sie angeboten haben; PAWS verwirft ein Segment,
+#    dessen Zeitstempel aelter ist als der zuletzt gesehene -- mit der
+#    Ausnahme fuer den Ueberlauf des Zaehlers selbst, ohne die eine
+#    Verbindung einmal pro Umlauf fuer immer einfriert.
+#
+# 3. SACK (RFC 2018), beide Richtungen. Empfangen: die Bloecke der
+#    Gegenseite sagen, was drueben schon liegt. Senden: die eigenen
+#    Loecher werden angekuendigt. Die Wiederholung SPRINGT dann ueber
+#    das, was bestaetigt ist, statt Go-back-N zu fahren.
+#
+# 4. PATH MTU DISCOVERY (RFC 1191). Bis hierher setzte der Stack
+#    "Don't Fragment" und warf die Antwort darauf weg -- eine schwarze
+#    Strecke. Jetzt liest net/stack.fi ICMP Typ 3 Code 4, holt die
+#    Verbindung aus dem zurueckgeschickten Kopf und senkt die MSS; unter
+#    576 geht es nicht, und groesser wird sie durch eine ICMP-Nachricht
+#    NIE (sonst waere sie ein Hebel fuer eine Faelschung).
+#
+# GEMESSEN, Linux -> Osum, 1 MiB, virtio-net, QEMU/KVM, netem-Verzoegerung
+# auf beiden Enden (tools/netzplus/run.sh):
+#
+#     RTT        vorher        nachher
+#     ~0 ms     5367 KiB/s   20948 KiB/s   3,9x
+#     20 ms     1505 KiB/s    4456 KiB/s   3,0x
+#     50 ms      914 KiB/s    2279 KiB/s   2,5x
+#    100 ms      489 KiB/s    1204 KiB/s   2,5x
+#
+# Und auf dem Draht, im SYN/ACK von Osum:
+#   vorher   options [mss 1460]
+#   nachher  options [mss 1460,nop,wscale 2,sackOK,TS val ... ecr ...]
+#
+# ZWEI FALLEN, DIE DIE SPRACHE GEFANGEN HAT und die hier stehen, damit
+# sie niemand zum zweiten Mal stellt: eine Feldlaenge ist in Firn ein
+# GANZZAHLLITERAL (SPEC 12.1), der Uebersetzer kann sie nicht gegen eine
+# Konstante pruefen. Beide Male meldete es sich als `panic: index out of
+# bounds` und nicht als stiller Datenfehler:
+#   stat: [u64; 12]      gegen ST_COUNT 17
+#   rcv_buf: [u8; 65536] gegen RCV_CAP/RCV_MASK 262144/262143
+--- a/net/tcp.fi
++++ b/net/tcp.fi
+@@ -32,9 +32,14 @@
+ // timer for a zero window, silly-window avoidance on the receive side,
+ // and an orderly teardown in both directions.
+ //
++// RUNDE NETZPLUS HAT VIER DAVON NACHGEZOGEN, und zwar gemessen:
++// Fensterskalierung (RFC 7323), Zeitstempel mit PAWS (RFC 7323), SACK
++// beim Senden wie beim Empfangen (RFC 2018) und die Behandlung von
++// "fragmentation needed" (RFC 1191). Die Zahlen stehen in
++// docs/RUNDE-NETZPLUS.md.
++//
+ // WHAT IS NOT IN HERE is listed in docs/OSUM-K3.md and not glossed over
+-// here: no window scaling, no timestamps, no SACK, no PAWS, no urgent
+-// data, no reassembly of IP fragments, no path MTU discovery.
++// here: no urgent data, no reassembly of IP fragments.
+ 
+ import net.wire
+ 
+@@ -49,11 +54,13 @@
+     tcp_send, tcp_recv, tcp_readable, tcp_writable, tcp_state, tcp_error,
+     tcp_input, tcp_pull, tcp_timers, tcp_free_slot,
+     tcp_set_nodelay, tcp_set_time_wait, tcp_set_rto_min, tcp_set_no_rexmit,
++    tcp_set_wscale, tcp_set_ts, tcp_set_sack, tcp_icmp_toobig,
+     tcp_seen, tcp_force_iss,
+     tcp_peer_ip, tcp_peer_port, tcp_local_port,
+     tcp_stat, tcp_dbg,
+     ST_RX, ST_TX, ST_REXMIT, ST_CSUM, ST_UNACCEPTABLE, ST_OOO, ST_RST_TX,
+     ST_BAD_ACK, ST_FAST_REXMIT, ST_PROBE, ST_DELACK, ST_DUPACK,
++    ST_PAWS, ST_SACK_RX, ST_SACK_TX, ST_REXMIT_SACK, ST_MTU_DOWN,
+ }
+ 
+ // ===================================================================
+@@ -70,11 +77,35 @@
+ // second time in the struct declarations. They have to agree; there is no
+ // way to make the compiler check that here, so they are kept next to each
+ // other and named in one place.
++// RUNDE NETZPLUS HAT RCV_CAP VERVIERFACHT, und das ist der eigentliche
++// Hebel dieser Runde -- nicht die Option.
++//
++// Fensterskalierung verschiebt nur die GRENZE DES FELDES im Kopf. Was
++// ein Ende ankuendigen DARF, bleibt, was es auch AUFHEBEN kann: mehr als
++// `rcv_free()` anzukuendigen heisst, Oktette anzunehmen, fuer die kein
++// Platz ist. Mit RCV_CAP = 64 KiB waere `wscale` also eine Option, die
++// ausgehandelt wird und nichts aendert -- 65535 bleibt 65535, ob mit
++// Faktor 0 oder ohne Option.
++//
++// GERECHNET: das Fenster deckelt den Durchsatz auf Fenster/RTT. Bei
++// 100 ms Umlaufzeit sind 64 KiB genau 640 KiB/s, und genau dort lag die
++// Messung VOR dieser Runde (489 KiB/s bei RTT 100 ms). 256 KiB heben die
++// Decke auf 2560 KiB/s.
++//
++// WAS DAS KOSTET: Stack ist EIN Block, den `inet.fi` aus `frame_run`
++// holt, kein statischer Bereich -- 8 Verbindungen * (256 + 64) KiB sind
++// 2,5 MiB statt 1 MiB. Bei 256 MiB Maschinenspeicher ist das gemessen
++// tragbar; `net_size()` rechnet die Seitenzahl selbst aus, es ist also
++// keine zweite Stelle nachzuziehen.
++//
++// Der Sendepuffer bleibt bei 64 KiB: diese Runde misst den Weg
++// Linux -> Osum, und dort ist der EMPFANGSpuffer die Grenze. Ein
++// groesserer Sendepuffer waere Speicher ohne gemessenen Nutzen.
+ const MAXCONN: usize = 8
+ const SND_CAP: usize = 65536
+-const RCV_CAP: usize = 65536
++const RCV_CAP: usize = 262144
+ const SND_MASK: u32 = 65535
+-const RCV_MASK: u32 = 65535
++const RCV_MASK: u32 = 262143
+ const OOO_MAX: usize = 8
+ const RST_SLOTS: usize = 4
+ const MSS_DEFAULT: u32 = 1460
+@@ -90,6 +121,32 @@
+ const PERSIST_MAX: u64 = 5000000
+ const MAX_SHIFT: u32 = 12
+ 
++// RUNDE NETZPLUS.
++//
++// WS_SELF ist der Faktor, den DIESER Stack ankuendigt. 2 heisst: das
++// angekuendigte Fenster wird mit 4 multipliziert, 256 KiB passen damit
++// in die 16 Bit des Feldes (262144 >> 2 = 65536 -- und weil 65536 nicht
++// mehr hineinpasst, deckelt `rcv_window` auf 65535 * 4 = 262140. Vier
++// Oktette verschenkt, dafuer keine Sonderbehandlung).
++const WS_SELF: u8 = 2
++const WS_NONE: u8 = 255        // "die Gegenseite hat keine Option geschickt"
++
++// PAWS (RFC 7323, 5): ein Zeitstempel, der aelter ist als der zuletzt
++// gesehene, gehoert zu einer alten Verkoerperung der Verbindung. Das
++// Segment wird verworfen -- ausser der Unterschied ist so gross, dass
++// eher der ZAEHLER uebergelaufen ist als das Segment alt.
++const PAWS_WINDOW: u32 = 2147483648    // 2^31
++
++// Wie viele SACK-Bloecke gehalten werden. RFC 2018 erlaubt vier im
++// Optionsfeld (bei gleichzeitigem Zeitstempel drei); OOO_MAX ist 8, also
++// koennen mehr Loecher existieren als angekuendigt werden -- die
++// aeltesten fallen dann heraus, was RFC 2018 ausdruecklich zulaesst.
++const SACK_MAX: usize = 4
++
++// Path MTU Discovery (RFC 1191). Unter 576 wird nicht gegangen; das ist
++// die Untergrenze, die jede IPv4-Strecke tragen muss.
++const MTU_FLOOR: u32 = 576
++
+ const S_CLOSED: u32 = 0
+ const S_LISTEN: u32 = 1
+ const S_SYN_SENT: u32 = 2
+@@ -121,7 +178,15 @@
+ const ST_PROBE: u32 = 9
+ const ST_DELACK: u32 = 10
+ const ST_DUPACK: u32 = 11
+-const ST_COUNT: usize = 12
++// RUNDE NETZPLUS: fuenf Zaehler mehr. Eine Behauptung, dass PAWS wirkt
++// oder dass nach SACK gezielt wiederholt wurde, ist nichts wert; diese
++// Zahlen sind eine Messung.
++const ST_PAWS: u32 = 12        // wegen PAWS verworfen
++const ST_SACK_RX: u32 = 13     // Segmente MIT SACK-Bloecken empfangen
++const ST_SACK_TX: u32 = 14     // Segmente MIT SACK-Bloecken gesendet
++const ST_REXMIT_SACK: u32 = 15 // Wiederholungen, die SACK ausgewaehlt hat
++const ST_MTU_DOWN: u32 = 16    // "fragmentation needed" hat die MSS gesenkt
++const ST_COUNT: usize = 17
+ 
+ // ===================================================================
+ // 2. the state of one connection
+@@ -170,6 +235,38 @@
+     ooo_hi: [u32; 8],
+     ooo_n: usize,
+ 
++    // ---------------------------------------------- RUNDE NETZPLUS
++    // Fensterskalierung (RFC 7323). `snd_ws` ist der Faktor, mit dem
++    // das Fenster der GEGENSEITE zu verschieben ist, `rcv_ws` der, den
++    // wir selbst angekuendigt haben. Beide sind nur dann ungleich 0,
++    // wenn BEIDE Seiten die Option im SYN hatten -- das ist die Regel
++    // aus RFC 7323 2.2, und sie ist der Grund, warum die Aushandlung
++    // nicht "wer zuerst kommt" ist.
++    ws_ok: u32,
++    snd_ws: u32,
++    rcv_ws: u32,
++
++    // Zeitstempel (RFC 7323) und PAWS. `ts_recent` ist der letzte
++    // gueltige Zeitstempel der Gegenseite, `ts_recent_at` die eigene
++    // Zeit, zu der er ankam.
++    ts_ok: u32,
++    ts_recent: u32,
++    ts_recent_at: u64,
++    ts_lastack: u32,
++
++    // SACK (RFC 2018). `sack_ok` gilt wieder nur beidseitig.
++    // sack_lo/hi sind die Bloecke, die die GEGENSEITE uns bestaetigt
++    // hat -- also die Loecher in unserem SENDESTROM.
++    sack_ok: u32,
++    sack_lo: [u32; 4],
++    sack_hi: [u32; 4],
++    sack_n: usize,
++    // Der Zeiger, den die Wiederholung benutzt: bis hierher ist alles
++    // entweder bestaetigt oder schon einmal neu geschickt worden.
++    rexmit_ptr: u32,
++    in_recovery: u32,
++    recover: u32,
++
+     // congestion control and the round trip time
+     mss: u32,
+     cwnd: u32,
+@@ -198,8 +295,20 @@
+     reset_req: u32,
+     err: i32,
+ 
++    // RUNDE NETZPLUS: der Empfangspuffer ist 256 KiB, und DIESE ZAHL
++    // MUSS ZU RCV_CAP UND RCV_MASK PASSEN. Der Kopf der Datei sagt es
++    // schon fuer die urspruenglichen Werte; hier steht es ein zweites
++    // Mal, weil es ein zweites Mal gebissen hat:
++    //
++    //   panic: index out of bounds in '[u8; 65536]' at net/tcp.fi:764
++    //
++    // RCV_CAP und RCV_MASK waren auf 262144/262143 gesetzt, dieses Feld
++    // noch auf 65536 -- die Maske liess Indizes bis 262143 durch, das
++    // Feld war 65536 lang. Die Bereichspruefung der Sprache hat es beim
++    // ersten ankommenden Segment gefunden. Wer eine der drei Zahlen
++    // aendert, aendert alle drei.
+     snd_buf: [u8; 65536],
+-    rcv_buf: [u8; 65536],
++    rcv_buf: [u8; 262144],
+ }
+ 
+ struct Tcp {
+@@ -218,7 +327,15 @@
+     rst_ack: [u32; 4],
+     rst_flags: [u8; 4],
+ 
+-    stat: [u64; 12],
++    // RUNDE NETZPLUS: 17, nicht mehr 12 -- und diese Zahl MUSS mit
++    // ST_COUNT uebereinstimmen. Der Kopf dieser Datei sagt warum: eine
++    // Feldlaenge ist in dieser Sprache ein GANZZAHLLITERAL (SPEC 12.1),
++    // der Uebersetzer kann die beiden also nicht gegeneinander pruefen.
++    // GEMESSEN, was passiert, wenn man es vergisst: `panic: index out of
++    // bounds in '[u64; 12]' at net/tcp.fi:384` -- der Kern blieb beim
++    // ersten `tcp_init` stehen. Die Sprachpruefung hat den Fehler
++    // gefunden, nicht der Mensch.
++    stat: [u64; 17],
+ 
+     // Every state any connection of this stack has ever ENTERED, one
+     // bit per state. A claim that a state machine has eleven states is
+@@ -228,6 +345,17 @@
+     time_wait_us: u64,
+     rto_min: u64,
+     no_rexmit: u32,
++
++    // RUNDE NETZPLUS: die drei Optionen lassen sich EINZELN abschalten.
++    // Das ist kein Luxus, sondern die Gegenprobe: derselbe Kernel misst
++    // mit und ohne Fensterskalierung, und der Unterschied ist dann die
++    // Option und nicht der Tagesform des Wirts. 1 = an.
++    use_ws: u32,
++    use_ts: u32,
++    use_sack: u32,
++    // Die Zeitquelle fuer die eigenen Zeitstempel: Mikrosekunden >> 10,
++    // also etwa ein Millisekundentakt (RFC 7323 empfiehlt 1 ms bis 1 s).
++    ts_base: u64,
+ }
+ 
+ fn tcb(t: *mut Tcp, i: usize) -> *mut Tcb {
+@@ -282,6 +410,30 @@
+     (*t).time_wait_us = TIME_WAIT_US
+     (*t).rto_min = RTO_MIN
+     (*t).no_rexmit = 0
++    // RUNDE NETZPLUS: die Optionen sind AN, sobald der Stack sie kann.
++    // Abschalten geht einzeln, fuer die Gegenprobe.
++    (*t).use_ws = 1
++    (*t).use_ts = 1
++    (*t).use_sack = 1
++    (*t).ts_base = seed
++}
++
++// --------------------------------------------------- RUNDE NETZPLUS
++// Die drei Schalter. Sie stehen hier und nicht in einer Konfigurations-
++// datei, weil der Messlaeufer sie braucht: derselbe Kernel, zweimal
++// gestartet, einmal mit und einmal ohne -- das ist die Gegenprobe, die
++// aus "es ist schneller geworden" ein "DIESE Option hat es schneller
++// gemacht" macht.
++fn tcp_set_wscale(t: *mut Tcp, on: u32) { (*t).use_ws = on }
++fn tcp_set_ts(t: *mut Tcp, on: u32) { (*t).use_ts = on }
++fn tcp_set_sack(t: *mut Tcp, on: u32) { (*t).use_sack = on }
++
++// Der eigene Zeitstempel: Mikrosekunden >> 10 ist ein Takt von etwa
++// 1,05 ms und liegt damit in dem Bereich, den RFC 7323 4.1 verlangt
++// (1 ms bis 1 s). Die Verschiebung statt einer Division ist Absicht --
++// dieser Stack hat keine, und eine Division durch 1000 waere hier eine.
++fn ts_now(t: *mut Tcp, now: u64) -> u32 {
++    return (((now +% (*t).ts_base) >> 10) & 0xFFFFFFFF) as u32
+ }
+ 
+ fn clear(c: *mut Tcb) {
+@@ -333,6 +485,25 @@
+     (*c).persist_on = 0
+     (*c).reset_req = 0
+     (*c).err = E_NONE
++    // RUNDE NETZPLUS
++    (*c).ws_ok = 0
++    (*c).snd_ws = 0
++    (*c).rcv_ws = 0
++    (*c).ts_ok = 0
++    (*c).ts_recent = 0
++    (*c).ts_recent_at = 0
++    (*c).ts_lastack = 0
++    (*c).sack_ok = 0
++    (*c).sack_n = 0
++    var q: usize = 0
++    while q < SACK_MAX {
++        (*c).sack_lo[q] = 0
++        (*c).sack_hi[q] = 0
++        q = q + 1
++    }
++    (*c).rexmit_ptr = 0
++    (*c).in_recovery = 0
++    (*c).recover = 0
+ }
+ 
+ fn tcp_free_slot(t: *mut Tcp) -> i32 {
+@@ -498,9 +669,78 @@
+     if which == 14 { return (*c).used as u64 }
+     if which == 15 { return (*c).rttvar }
+     if which == 16 { return (*c).snd_max as u64 }
++    // ---------------------------------------------- RUNDE NETZPLUS
++    // Ohne diese Fenster kann ein Messlaeufer nicht zwischen "die Option
++    // wurde ausgehandelt" und "sie stand zufaellig im Segment"
++    // unterscheiden.
++    if which == 17 { return (*c).ws_ok as u64 }
++    if which == 18 { return (*c).snd_ws as u64 }
++    if which == 19 { return (*c).rcv_ws as u64 }
++    if which == 20 { return (*c).ts_ok as u64 }
++    if which == 21 { return (*c).sack_ok as u64 }
++    if which == 22 { return (*c).ts_recent as u64 }
++    if which == 23 { return (*c).sack_n as u64 }
++    if which == 24 { return rcv_window(c) as u64 }
++    if which == 25 { return rcv_window_field(c) as u64 }
++    if which == 26 { return (*c).mss as u64 }
++    if which == 27 { return RCV_CAP as u64 }
+     return 0
+ }
+ 
++// --------------------------------------------------- RUNDE NETZPLUS
++// PATH MTU DISCOVERY (RFC 1191), die Empfangsseite.
++//
++// Bis zu dieser Runde setzte der Stack "Don't Fragment" und WARF DIE
++// ANTWORT WEG. Auf einer Strecke mit kleinerer MTU ist das eine schwarze
++// Strecke: der Handschlag geht durch (kleine Segmente), die Daten nicht
++// (grosse), und niemand erfaehrt warum -- das Segment verschwindet, der
++// Wiederholungstimer schickt DASSELBE zu grosse Segment noch einmal, und
++// das bis zur Aufgabe. docs/OSUM-K3.md nennt das ausdruecklich.
++//
++// `tcp_icmp_toobig` wird von der IP-Schicht mit dem ZURUECKGESCHICKTEN
++// Kopf gerufen. Aus ihm kommen Adressen und Anschluesse, also die
++// Verbindung, um die es geht; ein ICMP-Paket fuer irgendeine andere darf
++// hier nichts aendern.
++//
++// DIE ZWEI FALLEN, und beide sind hier behandelt:
++//
++//   1. Ein Router, der die naechste MTU NICHT nennt (Feld 0, der alte
++//      RFC 792). Dann wird geraten, aber nach unten und in Stufen --
++//      nicht auf 68 heruntergefallen, was die Strecke unbrauchbar
++//      langsam machen wuerde.
++//   2. Eine gefaelschte Nachricht, die die MSS auf 68 druecken und die
++//      Verbindung damit lahmlegen soll. MTU_FLOOR ist die Untergrenze;
++//      unter 576 geht dieser Stack nicht, und groesser als bisher wird
++//      die MSS hier NIE -- eine ICMP-Nachricht darf nur verkleinern.
++fn tcp_icmp_toobig(t: *mut Tcp, lip: u32, lport: u16, rip: u32, rport: u16,
++    next_mtu: u32) -> bool {
++    let h: i32 = find_conn(t, lip, lport, rip, rport)
++    if h < 0 { return false }
++    let c: *mut Tcb = tcb(t, h as usize)
++    if (*c).used == 0 { return false }
++    var mtu: u32 = next_mtu
++    if mtu == 0 {
++        // Kein Wert genannt: eine Stufe unter das, was wir gerade
++        // schicken. 1500 -> 1492 -> 1006 -> 576 sind die Stufen aus
++        // RFC 1191 Tabelle 7-1, hier auf die drei gekuerzt, die auf
++        // einer IPv4-Strecke wirklich vorkommen.
++        let jetzt: u32 = (*c).mss + 40
++        if jetzt > 1492 { mtu = 1492 }
++        else if jetzt > 1006 { mtu = 1006 }
++        else { mtu = MTU_FLOOR }
++    }
++    if mtu < MTU_FLOOR { mtu = MTU_FLOOR }
++    let neu: u32 = mtu - 40
++    if neu >= (*c).mss { return false }
++    (*c).mss = neu
++    if (*c).cwnd < neu { (*c).cwnd = neu }
++    // Was zu gross hinausging, muss noch einmal -- kleiner.
++    (*c).snd_nxt = (*c).snd_una
++    (*c).fin_sent = 0
++    bump(t, ST_MTU_DOWN)
++    return true
++}
++
+ // ===================================================================
+ // 4. the two ring buffers
+ // ===================================================================
+@@ -549,13 +789,132 @@
+     return (RCV_CAP as u32) -% used
+ }
+ 
++// --------------------------------------------------- RUNDE NETZPLUS
++// DIE AUSHANDLUNG, an EINER Stelle fuer beide Richtungen.
++//
++// RFC 7323 2.2 und RFC 2018 1: eine Option gilt NUR, wenn sie in BEIDEN
++// SYN steht. Fuer den passiven Fall (wir antworten auf ein SYN) heisst
++// das: was die Gegenseite anbietet, merken -- und im SYN/ACK nur das
++// anbieten, was sie auch angeboten hat. Fuer den aktiven Fall (wir haben
++// das SYN geschickt): unser Angebot steht schon, es zaehlt, was im
++// SYN/ACK zurueckkommt.
++//
++// WARUM `ws_ok` UND `snd_ws`/`rcv_ws` GETRENNT SIND: waehrend des
++// Handschlags selbst ist das Fenster NOCH NICHT skaliert (RFC 7323 2.2:
++// das SYN und das SYN/ACK tragen ein unskaliertes Fenster). Wuerde man
++// `snd_ws` schon beim Lesen des SYN setzen, verschoebe man das Fenster
++// des Handschlags um den Faktor -- und faengt die Verbindung mit einem
++// vervierfachten Sendefenster an, das die Gegenseite nie zugesagt hat.
++// Deshalb wird der Faktor gemerkt und erst beim Uebergang nach
++// ESTABLISHED scharf geschaltet.
++fn opt_peer(t: *mut Tcp, c: *mut Tcb, seg: *mut u8, now: u64) {
++    let seglen: usize = wire.tcp_off(seg)
++    if (*t).use_ws == 1 {
++        let ws: u8 = wire.tcp_wscale_option(seg, seglen)
++        if ws != WS_NONE {
++            (*c).ws_ok = 1
++            (*c).snd_ws = ws as u32
++        }
++    }
++    if (*t).use_ts == 1 {
++        var tsval: u32 = 0
++        var tsecr: u32 = 0
++        if wire.tcp_ts_option(seg, seglen, &tsval, &tsecr) {
++            (*c).ts_ok = 1
++            (*c).ts_recent = tsval
++            (*c).ts_recent_at = now
++        }
++    }
++    if (*t).use_sack == 1 {
++        if wire.tcp_sackok_option(seg, seglen) { (*c).sack_ok = 1 }
++    }
++}
++
++// Der Faktor wird scharf: ab jetzt ist das Fensterfeld verschoben.
++fn opt_arm(c: *mut Tcb) {
++    if (*c).ws_ok == 1 {
++        (*c).rcv_ws = WS_SELF as u32
++    } else {
++        (*c).snd_ws = 0
++        (*c).rcv_ws = 0
++    }
++}
++
++// --------------------------------------------------- RUNDE NETZPLUS
++// DIE ZWEI HANDGRIFFE, DIE SACK BRAUCHT.
++//
++// `sack_covered` beantwortet die einzige Frage, auf die es beim
++// Wiederholen ankommt: liegt diese Sequenznummer schon drueben? Ist sie
++// das, muss sie nicht noch einmal ueber die Leitung -- und genau das ist
++// der Unterschied zu Go-back-N.
++//
++// `sack_prune` wirft weg, was durch ein fortgeschrittenes `snd_una`
++// ohnehin erledigt ist. Ohne das waechst die Liste mit veralteten
++// Bloecken zu, und `sack_covered` antwortet auf Fragen von vorgestern.
++fn sack_covered(c: *mut Tcb, seq: u32) -> bool {
++    var i: usize = 0
++    while i < (*c).sack_n {
++        if wire.seq_ge(seq, (*c).sack_lo[i]) && wire.seq_lt(seq, (*c).sack_hi[i]) {
++            return true
++        }
++        i = i + 1
++    }
++    return false
++}
++
++// Das Ende des Blocks, in dem `seq` liegt -- also die Stelle, ab der
++// wieder etwas fehlt. Wird gebraucht, um beim Wiederholen ueber einen
++// bestaetigten Bereich zu SPRINGEN statt ihn Oktett fuer Oktett
++// abzuklappern.
++fn sack_skip(c: *mut Tcb, seq: u32) -> u32 {
++    var i: usize = 0
++    while i < (*c).sack_n {
++        if wire.seq_ge(seq, (*c).sack_lo[i]) && wire.seq_lt(seq, (*c).sack_hi[i]) {
++            return (*c).sack_hi[i]
++        }
++        i = i + 1
++    }
++    return seq
++}
++
++fn sack_prune(c: *mut Tcb) {
++    var w: usize = 0
++    var i: usize = 0
++    while i < (*c).sack_n {
++        if wire.seq_gt((*c).sack_hi[i], (*c).snd_una) {
++            (*c).sack_lo[w] = (*c).sack_lo[i]
++            (*c).sack_hi[w] = (*c).sack_hi[i]
++            w = w + 1
++        }
++        i = i + 1
++    }
++    (*c).sack_n = w
++}
++
++// RUNDE NETZPLUS: das angekuendigte Fenster ist jetzt zweigeteilt.
++// `rcv_window` ist der WAHRE Wert in Oktetten -- den braucht der Stack
++// fuer sich selbst --, `rcv_window_field` der, der ins 16-Bit-Feld
++// geht, also der wahre Wert nach rechts geschoben.
++//
++// Die Reihenfolge ist wichtig und war in einer Zwischenfassung falsch:
++// erst deckeln, DANN schieben, ergibt 65535 << 2 und damit ein Fenster,
++// das groesser ist als der Puffer. Richtig ist: schieben, und WAS DANN
++// NICHT MEHR INS FELD PASST, wird abgeschnitten -- dadurch ist das
++// angekuendigte Fenster immer <= rcv_free und nie eine Luege.
+ fn rcv_window(c: *mut Tcb) -> u32 {
+     var w: u32 = rcv_free(c)
+     if w < (*c).mss && w < (RCV_CAP as u32) / 2 { return 0 }
+-    if w > 65535 { w = 65535 }
++    let sh: u32 = (*c).rcv_ws
++    var maxi: u32 = 65535
++    if sh < 32 { maxi = 65535 << sh }
++    if w > maxi { w = maxi }
+     return w
+ }
+ 
++fn rcv_window_field(c: *mut Tcb) -> u32 {
++    return (rcv_window(c) >> (*c).rcv_ws) & 0xFFFF
++}
++
+ // The FIN occupies a sequence number, but it is NOT an octet of data.
+ // Counting it as one hands the application one octet more than the peer
+ // ever sent -- and that octet is whatever happened to lie in the ring.
+@@ -909,6 +1268,11 @@
+     let m: u16 = wire.tcp_mss_option(seg, wire.tcp_off(seg))
+     if m >= 536 as u16 && m <= 1460 as u16 { (*c).mss = m as u32 }
+     (*c).cwnd = (*c).mss * 10
++    // RUNDE NETZPLUS: was die Gegenseite anbietet, wird hier gemerkt.
++    // Das SYN/ACK bietet daraufhin genau dasselbe an (siehe seg_build),
++    // und scharf wird der Faktor erst mit dem Uebergang nach
++    // ESTABLISHED.
++    opt_peer(t, c, seg, now)
+     arm_rt(t, c, now)
+ }
+ 
+@@ -945,11 +1309,16 @@
+     (*c).snd_wl1 = wire.tcp_seq(seg)
+     let m: u16 = wire.tcp_mss_option(seg, wire.tcp_off(seg))
+     if m >= 536 as u16 && m <= 1460 as u16 { (*c).mss = m as u32 }
++    // RUNDE NETZPLUS: unser SYN hat die Optionen angeboten; ob sie
++    // gelten, sagt erst diese Antwort.
++    opt_peer(t, c, seg, now)
+     if ack_ok {
+         (*c).snd_una = ack
+         (*c).snd_wl2 = ack
+         if wire.seq_gt((*c).snd_una, (*c).iss) {
+             setst(t, c, S_ESTABLISHED)
++            opt_arm(c)
++            (*c).snd_wnd = wire.tcp_wnd(seg) << (*c).snd_ws
+             (*c).cwnd = (*c).mss * 10
+             (*c).rt_on = 0
+             if (*c).rtt_on == 1 && wire.seq_ge(ack, (*c).rtt_seq) {
+@@ -1091,6 +1460,34 @@
+     if (fl & wire.F_SYN) != 0 { seglen = seglen + 1 }
+     if (fl & wire.F_FIN) != 0 { seglen = seglen + 1 }
+ 
++    // ---- 0. PAWS (RFC 7323, 5.3): RUNDE NETZPLUS.
++    //
++    // Ein Segment, dessen Zeitstempel AELTER ist als der zuletzt
++    // gesehene, stammt aus einer frueheren Verkoerperung dieser
++    // Verbindung -- eine Sequenznummer allein kann das nicht
++    // unterscheiden, sobald sie einmal um 2^32 herumgelaufen ist. Es
++    // wird verworfen UND bestaetigt (nicht stillschweigend geschluckt:
++    // die Gegenseite muss erfahren, wo wir stehen).
++    //
++    // DIE AUSNAHME IST KEINE FEINHEIT, SONDERN NOETIG: ein Zeitstempel-
++    // zaehler laeuft selbst ueber. `ts_recent` wird deshalb nach 24
++    // Tagen Ruhe (RFC 7323 5.5) nicht mehr geglaubt, und ein
++    // Unterschied jenseits von 2^31 gilt als Ueberlauf und nicht als
++    // altes Segment -- sonst friert die Verbindung genau einmal pro
++    // Zaehlerumlauf fuer immer ein.
++    var pts: u32 = 0
++    var pecr: u32 = 0
++    let has_ts: bool = wire.tcp_ts_option(seg, wire.tcp_off(seg), &pts, &pecr)
++    if (*c).ts_ok == 1 && has_ts && (fl & wire.F_RST) == 0 {
++        if wire.seq_lt(pts, (*c).ts_recent)
++        && ((*c).ts_recent -% pts) < PAWS_WINDOW
++        && (now -% (*c).ts_recent_at) < 86400000000 {
++            bump(t, ST_PAWS)
++            (*c).ack_now = 1
++            return
++        }
++    }
++
+     // ---- 1. is the segment inside the window at all?
+     if !acceptable(c, seq, seglen) {
+         bump(t, ST_UNACCEPTABLE)
+@@ -1098,6 +1495,16 @@
+         return
+     }
+ 
++    // RFC 7323 4.3: `ts_recent` wird nur von einem Segment
++    // fortgeschrieben, das die Luecke bei `rcv_nxt` schliesst -- ein
++    // Segment ausser der Reihe darf den Bezugswert nicht verschieben.
++    if (*c).ts_ok == 1 && has_ts && wire.seq_le(seq, (*c).rcv_nxt) {
++        if wire.seq_ge(pts, (*c).ts_recent) {
++            (*c).ts_recent = pts
++            (*c).ts_recent_at = now
++        }
++    }
++
+     // ---- 2. a reset
+     if (fl & wire.F_RST) != 0 {
+         dead(t, c, E_RESET)
+@@ -1114,10 +1521,26 @@
+     // ---- 4. the acknowledgement
+     if (fl & wire.F_ACK) == 0 { return }
+ 
++    // RUNDE NETZPLUS: die SACK-Bloecke der Gegenseite. Sie sagen, WELCHE
++    // Bereiche jenseits von `ack` schon liegen -- und damit, was bei
++    // einer Wiederholung NICHT noch einmal geschickt werden muss. Ohne
++    // sie ist die Wiederholung Go-back-N: alles ab dem Loch, auch das,
++    // was laengst angekommen ist.
++    if (*c).sack_ok == 1 {
++        let sn: usize = wire.tcp_sack_blocks(seg, wire.tcp_off(seg),
++            &(*c).sack_lo[0], &(*c).sack_hi[0], SACK_MAX)
++        if sn > 0 {
++            (*c).sack_n = sn
++            bump(t, ST_SACK_RX)
++        }
++    }
++
+     if (*c).state == S_SYN_RECEIVED {
+         if wire.seq_gt(ack, (*c).snd_una) && wire.seq_le(ack, (*c).snd_max) {
+             setst(t, c, S_ESTABLISHED)
+-            (*c).snd_wnd = wire.tcp_wnd(seg)
++            // RUNDE NETZPLUS: ab hier ist das Fensterfeld verschoben.
++            opt_arm(c)
++            (*c).snd_wnd = wire.tcp_wnd(seg) << (*c).snd_ws
+             (*c).snd_wl1 = seq
+             (*c).snd_wl2 = ack
+             (*c).cwnd = (*c).mss * 10
+@@ -1142,6 +1565,9 @@
+         let acked: u32 = ack -% (*c).snd_una
+         (*c).snd_una = ack
+         (*c).dupacks = 0
++        // Bloecke, die jetzt unter `snd_una` liegen, sind erledigt.
++        sack_prune(c)
++        if wire.seq_ge(ack, (*c).recover) { (*c).in_recovery = 0 }
+         if wire.seq_lt((*c).snd_nxt, (*c).snd_una) { (*c).snd_nxt = (*c).snd_una }
+         if (*c).rtt_on == 1 && wire.seq_ge(ack, (*c).rtt_seq) {
+             (*c).rtt_on = 0
+@@ -1166,7 +1592,7 @@
+         }
+     } else if ack == (*c).snd_una && dlen == 0
+     && (fl & (wire.F_SYN | wire.F_FIN)) == 0
+-    && wire.tcp_wnd(seg) <= (*c).snd_wnd
++    && (wire.tcp_wnd(seg) << (*c).snd_ws) <= (*c).snd_wnd
+     && wire.seq_lt((*c).snd_una, (*c).snd_max) {
+         // Three duplicates say that segments AFTER the hole are arriving
+         // -- so the hole is a loss and not a reordering, and waiting for
+@@ -1178,6 +1604,13 @@
+             (*c).ssthresh = u32max(flight / 2, 2 * (*c).mss)
+             (*c).snd_nxt = (*c).snd_una
+             (*c).fin_sent = 0
++            // RUNDE NETZPLUS: von hier an waehlt SACK aus, was wirklich
++            // fehlt. `recover` ist die Marke, bis zu der diese Erholung
++            // laeuft (RFC 6582): erst wenn sie bestaetigt ist, ist die
++            // Erholung vorbei.
++            (*c).in_recovery = 1
++            (*c).recover = (*c).snd_max
++            (*c).rexmit_ptr = (*c).snd_una
+             (*c).cwnd = (*c).ssthresh +% 3 * (*c).mss
+             (*c).rtt_on = 0
+             bump(t, ST_FAST_REXMIT)
+@@ -1189,7 +1622,7 @@
+     // is newer than the one the current window came from.
+     if wire.seq_lt((*c).snd_wl1, seq)
+     || ((*c).snd_wl1 == seq && wire.seq_le((*c).snd_wl2, ack)) {
+-        (*c).snd_wnd = wire.tcp_wnd(seg)
++        (*c).snd_wnd = wire.tcp_wnd(seg) << (*c).snd_ws
+         (*c).snd_wl1 = seq
+         (*c).snd_wl2 = ack
+         if (*c).snd_wnd > 0 { (*c).persist_on = 0 }
+@@ -1262,10 +1695,60 @@
+ // 8. a segment goes out
+ // ===================================================================
+ 
++// RUNDE NETZPLUS HAT DIESE FUNKTION UMGEBAUT: sie schreibt jetzt
++// OPTIONEN, und zwar in DREI Lagen.
++//
++//   im SYN         MSS, und -- wenn dieser Stack sie anbietet bzw. die
++//                  Gegenseite sie angeboten hat -- Fensterfaktor,
++//                  Zeitstempel, SACK-erlaubt.
++//   in jedem       Zeitstempel, sobald beide Seiten ihn haben.
++//   im reinen ACK  zusaetzlich die SACK-Bloecke, wenn Loecher da sind.
++//
++// DIE GRENZE, DIE HIER WIRKLICH WEHTUT: das Datenversatzfeld hat VIER
++// BIT. Der Kopf darf also hoechstens 60 Oktette lang sein, und damit
++// bleiben 40 fuer Optionen. Zeitstempel (10, mit Auffuellung 12) und
++// vier SACK-Bloecke (2 + 32 = 34) sind zusammen 46 -- das passt NICHT.
++// Deshalb wird die Zahl der SACK-Bloecke an dem gemessen, was noch frei
++// ist, und nicht an dem, was man gern haette. Ein Kopf, der ueber 60
++// hinausginge, waere kein "etwas zu langes Segment", sondern ein
++// Versatzfeld, das ueberlaeuft, und damit ein Segment, das die
++// Gegenseite an voellig falscher Stelle auseinandernimmt.
+ fn seg_build(t: *mut Tcp, c: *mut Tcb, buf: *mut u8, cap: usize,
+-    flags: u8, seq: u32, dlen: usize, mss_opt: bool) -> usize {
++    flags: u8, seq: u32, dlen: usize, mss_opt: bool, now: u64) -> usize {
++    let is_syn: bool = (flags & wire.F_SYN) != 0
++    // --- welche Optionen kommen in DIESES Segment?
++    let want_ts: bool = (*c).ts_ok == 1 || (is_syn && (*t).use_ts == 1)
+     var optlen: usize = 0
+     if mss_opt { optlen = 4 }
++    if is_syn {
++        // Fensterfaktor: 3 Oktette + 1 Auffuellung.
++        if (*t).use_ws == 1 && ((*c).state != S_SYN_RECEIVED || (*c).ws_ok == 1) {
++            optlen = optlen + 4
++        }
++        if (*t).use_sack == 1 && ((*c).state != S_SYN_RECEIVED || (*c).sack_ok == 1) {
++            optlen = optlen + 2
++        }
++        if want_ts && ((*c).state != S_SYN_RECEIVED || (*c).ts_ok == 1) {
++            optlen = optlen + 10
++        }
++        // auf ein Vielfaches von vier auffuellen
++        if optlen % 4 != 0 { optlen = optlen + (4 - optlen % 4) }
++    } else {
++        if (*c).ts_ok == 1 { optlen = optlen + 12 }   // 2 NOP + 10
++    }
++    // --- SACK-Bloecke, aber nur so viele wie noch hineinpassen.
++    var sack_n: usize = 0
++    if !is_syn && (*c).sack_ok == 1 && (*c).ooo_n > 0 && dlen == 0 {
++        let frei: usize = 40 - optlen
++        if frei >= 10 {
++            sack_n = (frei - 2) / 8
++            if sack_n > (*c).ooo_n { sack_n = (*c).ooo_n }
++            if sack_n > SACK_MAX { sack_n = SACK_MAX }
++            if sack_n > 0 { optlen = optlen + 2 + sack_n * 8 }
++        }
++    }
++    if optlen % 4 != 0 { optlen = optlen + (4 - optlen % 4) }
++    if optlen > 40 { optlen = 40 }
+     let total: usize = wire.IP_HDR + wire.TCP_HDR + optlen + dlen
+     if total > cap { return 0 }
+     (*t).ip_id = ((*t).ip_id +% 1) & 0xFFFF
+@@ -1283,13 +1766,75 @@
+     let dataoff: usize = (wire.TCP_HDR + optlen) / 4
+     wire.st8(seg, 12, ((dataoff * 16) & 0xF0) as u8)
+     wire.st8(seg, 13, flags)
+-    wire.put16(seg, 14, (rcv_window(c) & 0xFFFF) as u16)
++    wire.put16(seg, 14, (rcv_window_field(c) & 0xFFFF) as u16)
+     wire.put16(seg, 16, 0 as u16)
+     wire.put16(seg, 18, 0 as u16)
+-    if mss_opt {
+-        wire.st8(seg, 20, 2 as u8)
+-        wire.st8(seg, 21, 4 as u8)
+-        wire.put16(seg, 22, ((*c).mss & 0xFFFF) as u16)
++    // ---------------------------------------------- die Optionen selbst
++    var o: usize = wire.TCP_HDR
++    let oend: usize = wire.TCP_HDR + optlen
++    if mss_opt && o + 4 <= oend {
++        wire.st8(seg, o, wire.TOPT_MSS)
++        wire.st8(seg, o + 1, 4 as u8)
++        wire.put16(seg, o + 2, ((*c).mss & 0xFFFF) as u16)
++        o = o + 4
++    }
++    if is_syn {
++        if (*t).use_ws == 1 && ((*c).state != S_SYN_RECEIVED || (*c).ws_ok == 1)
++        && o + 4 <= oend {
++            wire.st8(seg, o, wire.TOPT_NOP)
++            wire.st8(seg, o + 1, wire.TOPT_WS)
++            wire.st8(seg, o + 2, 3 as u8)
++            wire.st8(seg, o + 3, WS_SELF)
++            o = o + 4
++        }
++        if (*t).use_sack == 1 && ((*c).state != S_SYN_RECEIVED || (*c).sack_ok == 1)
++        && o + 2 <= oend {
++            wire.st8(seg, o, wire.TOPT_SACKOK)
++            wire.st8(seg, o + 1, 2 as u8)
++            o = o + 2
++        }
++    }
++    // Zeitstempel: im SYN nur, wenn angeboten/erwidert; sonst immer,
++    // sobald beide Seiten ihn haben.
++    let ts_here: bool = (is_syn && want_ts && ((*c).state != S_SYN_RECEIVED || (*c).ts_ok == 1))
++                     || (!is_syn && (*c).ts_ok == 1)
++    if ts_here && o + 10 <= oend {
++        if !is_syn && o + 12 <= oend {
++            wire.st8(seg, o, wire.TOPT_NOP)
++            wire.st8(seg, o + 1, wire.TOPT_NOP)
++            o = o + 2
++        }
++        wire.st8(seg, o, wire.TOPT_TS)
++        wire.st8(seg, o + 1, 10 as u8)
++        wire.put32(seg, o + 2, ts_now(t, now))
++        // Der Echo-Wert ist der letzte GUELTIGE Zeitstempel der
++        // Gegenseite -- 0, solange keiner kam (RFC 7323 3.2).
++        var ecr: u32 = 0
++        if (*c).ts_ok == 1 { ecr = (*c).ts_recent }
++        wire.put32(seg, o + 6, ecr)
++        o = o + 10
++    }
++    // SACK-Bloecke zuletzt: sie sind die einzige Option veraenderlicher
++    // Laenge, und was hinten fehlt, ist dann nur Auffuellung.
++    if sack_n > 0 && o + 2 + sack_n * 8 <= oend {
++        wire.st8(seg, o, wire.TOPT_SACK)
++        wire.st8(seg, o + 1, (2 + sack_n * 8) as u8)
++        o = o + 2
++        // Der ZULETZT angekommene Block gehoert nach vorn (RFC 2018 4).
++        var b: usize = 0
++        while b < sack_n {
++            let idx: usize = (*c).ooo_n - 1 - b
++            wire.put32(seg, o, (*c).ooo_lo[idx])
++            wire.put32(seg, o + 4, (*c).ooo_hi[idx])
++            o = o + 8
++            b = b + 1
++        }
++        bump(t, ST_SACK_TX)
++    }
++    // Rest auffuellen: Nullen sind "Ende der Liste" und richtig.
++    while o < oend {
++        wire.st8(seg, o, wire.TOPT_END)
++        o = o + 1
+     }
+     if dlen > 0 {
+         snd_get(c, seq, ((seg as u64) + (wire.TCP_HDR + optlen) as u64) as *mut u8, dlen)
+@@ -1335,7 +1880,7 @@
+ 
+     if (*c).reset_req == 1 {
+         (*c).reset_req = 0
+-        let n: usize = seg_build(t, c, buf, cap, wire.F_RST, (*c).snd_nxt, 0, false)
++        let n: usize = seg_build(t, c, buf, cap, wire.F_RST, (*c).snd_nxt, 0, false, now)
+         bump(t, ST_RST_TX)
+         clear(c)
+         return n
+@@ -1372,7 +1917,7 @@
+ 
+     if st == S_SYN_SENT {
+         if (*c).snd_nxt == (*c).iss {
+-            let n: usize = seg_build(t, c, buf, cap, wire.F_SYN, (*c).iss, 0, true)
++            let n: usize = seg_build(t, c, buf, cap, wire.F_SYN, (*c).iss, 0, true, now)
+             if n == 0 { return 0 }
+             advance_nxt(c, (*c).iss +% 1)
+             start_rtt(c, (*c).iss, now)
+@@ -1384,7 +1929,7 @@
+ 
+     if st == S_SYN_RECEIVED {
+         if (*c).snd_nxt == (*c).iss {
+-            let n: usize = seg_build(t, c, buf, cap, wire.F_SYN | wire.F_ACK, (*c).iss, 0, true)
++            let n: usize = seg_build(t, c, buf, cap, wire.F_SYN | wire.F_ACK, (*c).iss, 0, true, now)
+             if n == 0 { return 0 }
+             advance_nxt(c, (*c).iss +% 1)
+             (*c).ack_now = 0
+@@ -1399,7 +1944,7 @@
+     if st == S_TIME_WAIT {
+         if (*c).ack_now == 1 {
+             (*c).ack_now = 0
+-            return seg_build(t, c, buf, cap, wire.F_ACK, (*c).snd_nxt, 0, false)
++            return seg_build(t, c, buf, cap, wire.F_ACK, (*c).snd_nxt, 0, false, now)
+         }
+         return 0
+     }
+@@ -1434,7 +1979,7 @@
+             // refused as a forgery, the window update inside it is never
+             // read, and both sides wait for each other for ever. That
+             // deadlock is what this line is.
+-            let pn: usize = seg_build(t, c, buf, cap, wire.F_ACK, (*c).snd_nxt, 1, false)
++            let pn: usize = seg_build(t, c, buf, cap, wire.F_ACK, (*c).snd_nxt, 1, false, now)
+             if wire.seq_gt((*c).snd_nxt +% 1, (*c).snd_max) {
+                 (*c).snd_max = (*c).snd_nxt +% 1
+             }
+@@ -1442,11 +1987,57 @@
+         }
+     }
+ 
++    // RUNDE NETZPLUS: WAS SACK HIER WIRKLICH AENDERT.
++    //
++    // Ohne SACK ist die Wiederholung Go-back-N: `snd_nxt` wird auf
++    // `snd_una` zurueckgedreht und ALLES von dort an noch einmal
++    // geschickt -- auch die Segmente, die laengst drueben liegen und die
++    // die Gegenseite gerade erst bestaetigt hat. Bei 5 % Verlust ist das
++    // der Unterschied zwischen einem verlorenen Segment und einem ganzen
++    // Fenster, das ein zweites Mal ueber die Leitung geht.
++    //
++    // Mit SACK wird der Sendezeiger ueber jeden Bereich GESPRUNGEN, den
++    // ein Block der Gegenseite abdeckt. Die Schleife hat eine harte
++    // Obergrenze (SACK_MAX + 1 Spruenge), weil ein Sprung, der nicht
++    // vorankommt, sonst eine Endlosschleife im Kernel waere -- und ein
++    // haengender Netzdienst ist schlimmer als ein doppelt gesendetes
++    // Segment.
++    if (*c).sack_ok == 1 && (*c).sack_n > 0
++    && wire.seq_lt((*c).snd_nxt, (*c).snd_max) {
++        var hops: usize = 0
++        while hops <= SACK_MAX && sack_covered(c, (*c).snd_nxt)
++        && wire.seq_lt((*c).snd_nxt, (*c).snd_max) {
++            let sprung: u32 = sack_skip(c, (*c).snd_nxt)
++            if !wire.seq_gt(sprung, (*c).snd_nxt) { break }
++            (*c).snd_nxt = sprung
++            bump(t, ST_REXMIT_SACK)
++            hops = hops + 1
++        }
++        if wire.seq_lt((*c).snd_nxt, (*c).snd_end) {
++            pending = (*c).snd_end -% (*c).snd_nxt
++        } else {
++            pending = 0
++        }
++    }
++
+     var can: u32 = 0
+     if wire.seq_lt((*c).snd_nxt, edge) && pending > 0 {
+         let allowed: u32 = edge -% (*c).snd_nxt
+         can = u32min(pending, allowed)
+         can = u32min(can, (*c).mss)
++        // Ein Segment darf nie ueber den Anfang des naechsten schon
++        // bestaetigten Blocks hinausreichen -- sonst schickt die
++        // Wiederholung genau das wieder mit, was SACK gerade erspart hat.
++        if (*c).sack_ok == 1 && (*c).sack_n > 0 {
++            var j: usize = 0
++            while j < (*c).sack_n {
++                let lo: u32 = (*c).sack_lo[j]
++                if wire.seq_gt(lo, (*c).snd_nxt) && wire.seq_lt(lo, (*c).snd_nxt +% can) {
++                    can = lo -% (*c).snd_nxt
++                }
++                j = j + 1
++            }
++        }
+     }
+ 
+     var send_now: bool = can > 0
+@@ -1473,7 +2064,7 @@
+             flags = flags | wire.F_FIN
+             fin = true
+         }
+-        let n: usize = seg_build(t, c, buf, cap, flags, seq0, can as usize, false)
++        let n: usize = seg_build(t, c, buf, cap, flags, seq0, can as usize, false, now)
+         if n == 0 { return 0 }
+         advance_nxt(c, seq0 +% can)
+         if fin {
+@@ -1506,7 +2097,7 @@
+     // was asked for, everything queued has left, and no FIN is on the
+     // wire, a FIN goes out.
+     if (*c).close_req == 1 && (*c).fin_sent == 0 && (*c).snd_nxt == (*c).snd_end {
+-        let n: usize = seg_build(t, c, buf, cap, wire.F_FIN | wire.F_ACK, (*c).snd_nxt, 0, false)
++        let n: usize = seg_build(t, c, buf, cap, wire.F_FIN | wire.F_ACK, (*c).snd_nxt, 0, false, now)
+         if n == 0 { return 0 }
+         (*c).fin_sent = 1
+         advance_nxt(c, (*c).snd_nxt +% 1)
+@@ -1525,7 +2116,7 @@
+         (*c).ack_now = 0
+         (*c).ack_on = 0
+         (*c).seg_since_ack = 0
+-        return seg_build(t, c, buf, cap, wire.F_ACK, (*c).snd_nxt, 0, false)
++        return seg_build(t, c, buf, cap, wire.F_ACK, (*c).snd_nxt, 0, false, now)
+     }
+     return 0
+ }
+--- a/net/wire.fi
++++ b/net/wire.fi
+@@ -65,6 +65,10 @@
+     TCP_HDR, F_FIN, F_SYN, F_RST, F_PSH, F_ACK, F_URG,
+     tcp_sport, tcp_dport, tcp_seq, tcp_ack, tcp_off, tcp_flags, tcp_wnd,
+     tcp_csum_field, tcp_data_at, tcp_mss_option,
++    // RFC 7323 / RFC 2018: die Optionen, die K3 noch nicht gelesen hat
++    TOPT_END, TOPT_NOP, TOPT_MSS, TOPT_WS, TOPT_SACKOK, TOPT_SACK, TOPT_TS,
++    tcp_opt_find, tcp_wscale_option, tcp_ts_option, tcp_sackok_option,
++    tcp_sack_blocks,
+     // sequence arithmetic modulo 2^32
+     seq_lt, seq_le, seq_gt, seq_ge, seq_diff, seq_in,
+     // a generator for the initial sequence number
+@@ -446,6 +450,118 @@
+ }
+ 
+ // ===================================================================
++// 8b. DIE OPTIONEN, DIE RUNDE K3 NOCH NICHT GELESEN HAT
++// ===================================================================
++//
++// RUNDE NETZPLUS. `tcp_mss_option` oben laeuft das Optionsfeld ab und
++// beantwortet GENAU EINE Frage. Fuer Fensterskalierung, Zeitstempel und
++// SACK waeren das drei weitere fast gleiche Schleifen -- und jede davon
++// eine eigene Gelegenheit, den Abbruch bei einem kaputten Laengenoktett
++// falsch zu schreiben. Also EINE Schleife, `tcp_opt_find`, die den
++// PLATZ einer Option liefert; die Leser darunter sind dann drei Zeilen.
++//
++// Die Abbruchbedingungen sind die von `tcp_mss_option` und aus demselben
++// Grund da: ein Laengenoktett von 0 oder 1 in einer mehroktettigen
++// Option ist der klassische Weg in eine Endlosschleife, und ein
++// Optionsfeld, das ueber das Segment hinausragt, der Weg in fremden
++// Speicher. Beides endet hier mit "nicht gefunden".
++
++const TOPT_END: u8 = 0
++const TOPT_NOP: u8 = 1
++const TOPT_MSS: u8 = 2
++const TOPT_WS: u8 = 3
++const TOPT_SACKOK: u8 = 4
++const TOPT_SACK: u8 = 5
++const TOPT_TS: u8 = 8
++
++// Sucht die Option `want` und liefert den Versatz IHRES ERSTEN
++// INHALTSOKTETTS (also hinter Art und Laenge), oder 0, wenn sie nicht da
++// ist. 0 ist als "nicht da" eindeutig: eine Option kann nie bei 0
++// anfangen, dort steht der Quellanschluss.
++//
++// `plen` nimmt die Laenge der Option entgegen, damit der Aufrufer die
++// veraenderliche Laenge von SACK erfaehrt, ohne noch einmal zu suchen.
++fn tcp_opt_find(p: *mut u8, seglen: usize, want: u8, plen: *mut usize) -> usize {
++    *plen = 0
++    let off: usize = tcp_off(p)
++    if off <= TCP_HDR { return 0 }
++    if off > seglen { return 0 }
++    var i: usize = TCP_HDR
++    while i < off {
++        let kind: u8 = ld8(p, i)
++        if kind == TOPT_END { return 0 }
++        if kind == TOPT_NOP { i = i + 1 }
++        else {
++            if i + 1 >= off { return 0 }
++            let len: usize = ld8(p, i + 1) as usize
++            if len < 2 { return 0 }
++            if i + len > off { return 0 }
++            if kind == want {
++                *plen = len
++                return i + 2
++            }
++            i = i + len
++        }
++    }
++    return 0
++}
++
++// Der Skalierungsfaktor aus einem SYN. Antwort 255, wenn keine Option da
++// ist -- das ist KEIN gueltiger Faktor und damit von "Faktor 0"
++// unterscheidbar; Faktor 0 heisst "ich kann skalieren, brauche es aber
++// nicht" und ist etwas voellig anderes als "ich kann es nicht".
++//
++// RFC 7323 2.3: mehr als 14 wird auf 14 gedeckelt statt die Option zu
++// verwerfen; ein Fenster von 2^30 ist die Obergrenze, die das
++// Sequenznummernfeld noch vertraegt.
++fn tcp_wscale_option(p: *mut u8, seglen: usize) -> u8 {
++    var len: usize = 0
++    let at: usize = tcp_opt_find(p, seglen, TOPT_WS, &len)
++    if at == 0 || len != 3 { return 255 as u8 }
++    var s: u8 = ld8(p, at)
++    if s > 14 as u8 { s = 14 as u8 }
++    return s
++}
++
++// Die beiden Zeitstempel. Antwort false, wenn keine Option da ist.
++fn tcp_ts_option(p: *mut u8, seglen: usize, tsval: *mut u32, tsecr: *mut u32) -> bool {
++    var len: usize = 0
++    let at: usize = tcp_opt_find(p, seglen, TOPT_TS, &len)
++    if at == 0 || len != 10 { return false }
++    *tsval = be32(p, at)
++    *tsecr = be32(p, at + 4)
++    return true
++}
++
++fn tcp_sackok_option(p: *mut u8, seglen: usize) -> bool {
++    var len: usize = 0
++    let at: usize = tcp_opt_find(p, seglen, TOPT_SACKOK, &len)
++    return at != 0 && len == 2
++}
++
++// Die SACK-Bloecke eines Segments. Liefert die ANZAHL und schreibt die
++// Paare nach lo[]/hi[]; hoechstens `max` (RFC 2018 erlaubt vier).
++fn tcp_sack_blocks(p: *mut u8, seglen: usize, lo: *mut u32, hi: *mut u32,
++    max: usize) -> usize {
++    var len: usize = 0
++    let at: usize = tcp_opt_find(p, seglen, TOPT_SACK, &len)
++    if at == 0 { return 0 }
++    // Laenge ist 2 + 8*n; alles andere ist kaputt.
++    if len < 10 { return 0 }
++    let n_opt: usize = (len - 2) / 8
++    if (len - 2) % 8 != 0 { return 0 }
++    var n: usize = n_opt
++    if n > max { n = max }
++    var k: usize = 0
++    while k < n {
++        *(((lo as u64) + (k * 4) as u64) as *mut u32) = be32(p, at + k * 8)
++        *(((hi as u64) + (k * 4) as u64) as *mut u32) = be32(p, at + k * 8 + 4)
++        k = k + 1
++    }
++    return n
++}
++
++// ===================================================================
+ // 9. sequence arithmetic modulo 2^32
+ // ===================================================================
+ 
+--- a/net/stack.fi
++++ b/net/stack.fi
+@@ -362,6 +362,41 @@
+     if total < ihl + 8 { return }
+     let ilen: usize = total - ihl
+     let icmp: *mut u8 = ((h as u64) + ihl as u64) as *mut u8
++
++    // RUNDE NETZPLUS: "fragmentation needed" (RFC 1191).
++    //
++    // Bis hierher endete JEDE ICMP-Nachricht ausser dem Echo an der
++    // naechsten Zeile im Nichts. Typ 3 Code 4 ist aber die einzige
++    // Auskunft, die eine Strecke mit kleinerer MTU je gibt -- wer sie
++    // wegwirft, hat eine schwarze Strecke und sucht den Fehler
++    // anderswo.
++    //
++    // Der Rumpf einer solchen Nachricht traegt den IP-Kopf des Pakets,
++    // das nicht durchkam, und die ersten acht Oktette dahinter -- genau
++    // die vier Zahlen, die eine TCP-Verbindung benennen (Quell- und
++    // Zielanschluss stehen in den ersten vier). ACHTUNG BEI DER
++    // RICHTUNG: in diesem Kopf ist die QUELLE wir selbst und das ZIEL
++    // die Gegenseite, also genau andersherum als bei einem Segment, das
++    // ankommt.
++    if wire.icmp_type(icmp) == wire.ICMP_UNREACH && wire.icmp_code(icmp) == 4 as u8 {
++        if ilen < 8 + wire.IP_HDR + 8 { return }
++        if wire.checksum(icmp, ilen) != 0 as u16 { return }
++        let inner: *mut u8 = ((icmp as u64) + 8) as *mut u8
++        if wire.ip_proto(inner) != wire.IP_TCP { return }
++        let iihl: usize = wire.ip_ihl(inner)
++        if ilen < 8 + iihl + 8 { return }
++        let iseg: *mut u8 = ((inner as u64) + iihl as u64) as *mut u8
++        // RFC 1191: die naechste MTU steht in den unteren 16 Bit des
++        // sonst ungenutzten Wortes bei Versatz 4. 0 heisst "der Router
++        // sagt es nicht" -- damit kommt tcp_icmp_toobig zurecht.
++        let next_mtu: u32 = wire.be16(icmp, 6) as u32
++        if tcp.tcp_icmp_toobig(&(*s).t, wire.ip_src(inner), wire.tcp_sport(iseg),
++            wire.ip_dst(inner), wire.tcp_dport(iseg), next_mtu) {
++            bump(s, NS_ICMP)
++        }
++        return
++    }
++
+     if wire.icmp_type(icmp) != wire.ICMP_ECHO { return }
+     if wire.icmp_code(icmp) != 0 as u8 { return }
+     if wire.checksum(icmp, ilen) != 0 as u16 { return }

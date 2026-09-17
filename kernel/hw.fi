@@ -47,6 +47,7 @@ export {
     M_NOPCI, M_NOAPIC, M_NVME, M_BENCH, M_AHCI,
     M_NIC, M_NICINTX, M_NICNOIRQ, M_NICNOBM, M_NICTAB, M_NICSELF,
     net_ip, net_prefix, net_gw, net_svc, net_port, net_bytes, net_wait,
+    net_ws, net_ts, net_sack,
     net_fallback,
     on, yes, cmd_copy,
     // RUNDE BLECHVIER: die Blech-Diagnose.
@@ -113,6 +114,39 @@ const S_NWAIT: u64 = 0x3D0
 // line stops existing the moment the heap is put on top of it, and a
 // preference that has to survive that cannot be read later.
 const S_NVFALL: u64 = 0x3D8
+// RUNDE NETZPLUS: die drei Optionsschalter. Vorgabe 1 = an; mit
+// `nzws=0` laeuft DERSELBE Kernel ohne Fensterskalierung, und der
+// Unterschied ist dann die Option und nicht der Wirt.
+//
+// DIE ADRESSEN SIND 0x458 UND NICHT 0x3E0, UND DAS IST DIE LEHRE DIESER
+// RUNDE. Die K2-Skalarseite ist EINE Seite, die sich MEHRERE Module
+// teilen -- hw.fi, inet.fi, netsvc.fi, fb.fi, wg.fi und andere --, und
+// jedes davon rechnet seine Offsets selbst aus `pci.K2_SCALARS + X`.
+// Es gibt keine Stelle, die die Vergabe fuehrt, und der Uebersetzer
+// kann sie nicht pruefen: ein Modul kennt die Konstanten des anderen
+// nicht.
+//
+// Der erste Versuch nahm 0x3E0/0x3E8/0x3F0, weil sie in hw.fi frei
+// aussahen. Sie waren es nicht:
+//
+//     0x3E0  netsvc.fi S_BUF      der Puffer des Netzdienstes
+//     0x3E8  netsvc.fi S_TASK     die Nummer der Netzaufgabe
+//     0x3F0  inet.fi   S_SADDR    die sockaddr_in eines Systemaufrufs
+//
+// Das Schreiben des Schalters loeschte also den Pufferzeiger und die
+// Aufgabennummer. GEMESSEN, und es sah nach allem AUSSER dem aus:
+// `net: ip=10.9.0.2` stand da (der Stapel war oben), `listening=7`
+// stand da -- und daneben `accepted=0`, `rx_f=0`, `pumps=0`. Die
+// Bruecke meldete `to_qemu=9  to_wire=0`: sie schickte Rahmen, und
+// niemand holte sie ab, weil die Netzaufgabe ihre eigene Nummer
+// verloren hatte. Eine Stunde Suche, und der Verdacht fiel zuerst auf
+// den Wirt.
+//
+// 0x458 bis 0x468 sind gegen ALLE Module geprueft, die die Seite
+// benutzen, nicht nur gegen dieses.
+const S_NZWS: u64 = 0x458
+const S_NZTS: u64 = 0x460
+const S_NZSACK: u64 = 0x468
 
 const TIMER_HZ: u64 = 100
 const GSI_MOUSE: u64 = 12
@@ -227,6 +261,9 @@ fn net_parse(state: u64, cmd: u64) {
     kstate.set(state, pci.K2_SCALARS + S_NBYTES, 262144)
     kstate.set(state, pci.K2_SCALARS + S_NWAIT, 0)
     kstate.set(state, pci.K2_SCALARS + S_NVFALL, 0)
+    kstate.set(state, pci.K2_SCALARS + S_NZWS, 1)
+    kstate.set(state, pci.K2_SCALARS + S_NZTS, 1)
+    kstate.set(state, pci.K2_SCALARS + S_NZSACK, 1)
     if cmd == 0 {
         return
     }
@@ -252,7 +289,18 @@ fn net_parse(state: u64, cmd: u64) {
     num_arg(state, cmd, (&w_bytes[0]) as u64, 7, S_NBYTES)
     num_arg(state, cmd, (&w_wait[0]) as u64, 6, S_NWAIT)
     num_arg(state, cmd, (&w_fall[0]) as u64, 7, S_NVFALL)
+    var w_zws: [u8; 6] = "nzws=\0"
+    var w_zts: [u8; 6] = "nzts=\0"
+    var w_zsk: [u8; 8] = "nzsack=\0"
+    num_arg(state, cmd, (&w_zws[0]) as u64, 5, S_NZWS)
+    num_arg(state, cmd, (&w_zts[0]) as u64, 5, S_NZTS)
+    num_arg(state, cmd, (&w_zsk[0]) as u64, 7, S_NZSACK)
 }
+
+// RUNDE NETZPLUS: die drei Schalter, gelesen.
+fn net_ws(state: u64) -> u64 { return kstate.get(state, pci.K2_SCALARS + S_NZWS) }
+fn net_ts(state: u64) -> u64 { return kstate.get(state, pci.K2_SCALARS + S_NZTS) }
+fn net_sack(state: u64) -> u64 { return kstate.get(state, pci.K2_SCALARS + S_NZSACK) }
 
 fn num_arg(state: u64, cmd: u64, word: u64, n: u64, slot: u64) {
     let a: u64 = find(cmd, word, n)
