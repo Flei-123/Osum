@@ -459,6 +459,43 @@ echte Baum in Ordnung wäre**.
 
 ---
 
+## 7b. Die Testzahlen
+
+Alle Läufe auf diesem Zweig, nach den Umzügen. Der Wirt stand während
+der Läufe unter Fremdlast (Load 20–55).
+
+| Läufer | Ergebnis | Sollwert | |
+|---|---|---|---|
+| `tools/k17/run.sh` | **158 passed, 0 failed** | 158/0 | ✅ |
+| `tools/hotplug/run.sh` | **45 passed, 0 failed** | 45/0 | ✅ |
+| `tools/install/abnahme.sh` | **35 grün, 0 rot** | 35/0 | ✅ |
+| `tools/core/run.sh` | 46 proofs, 0 failures | — | ✅ |
+| `tools/caps/run.sh` | 67 passed, 0 failed | — | ✅ |
+| `tools/struktur/run.sh` | STRUKTUR OK, Gegenprobe 47→48 | — | ✅ |
+| Bau `--gui on` | 7044 Symbole, 6 082 728 Oktette | unverändert | ✅ |
+
+### Zwei Läufer, die auch auf `main` rot sind
+
+Beide wurden **im eigenen `git worktree` auf unverändertem `main`
+(`7e68da55`) gegengemessen** — sie sind nicht das Werk dieser Runde:
+
+| Läufer | auf `main` | auf `struktur2` |
+|---|---|---|
+| `tools/server/run.sh` | 4 passed, **13 failed** | (Ursache unverändert, Abschnitt 5b) |
+| `tools/module/run.sh` | 68 bestanden, **6 gefallen** | 71 bestanden, **3 gefallen** |
+
+Die drei Fehlschläge von `tools/module/run.sh` auf diesem Zweig
+(`Adressen, die mit nm uebereinstimmen: 12, erwartet eq 13`; `rc=21:
+der verdorbene Programmtext hat nichts ausgeloest`; `kein
+Ausnahmebericht`) treten **wortgleich auch auf `main`** auf und sind
+dort eine **Teilmenge von sechs**. Die drei zusätzlichen Fehler des
+`main`-Laufs (`Kern mit ps2m`, `ps2m.consume fehlt im gewoehnlichen
+Abbild`, `der Kern ohne den Treiber ist kleiner: -6068872`) stammen
+daraus, dass zu dieser Zeit ein zweiter Bau im selben Repo lief — ein
+Messfehler des Vergleichs, kein Befund.
+
+**Kurz: kein Läufer ist durch diese Runde schlechter geworden.**
+
 ## 8. Die Werkzeuge
 
 | Datei | was sie tut |
