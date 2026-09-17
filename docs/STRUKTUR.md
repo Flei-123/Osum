@@ -766,6 +766,27 @@ GRUEN: die Richtungspruefung schlaegt an (47 -> 48).
 > flach und meldet Vermisste. Ohne Gegenprobe wäre diese Lücke
 > unbemerkt geblieben — und das Skript hätte für immer „OK" gesagt.
 
+## 13b. Die Testzahlen nach dem räumlichen Umbau
+
+| Läufer | vor dem Umzug | nach dem Umzug | Sollwert |
+|---|---|---|---|
+| `tools/k17/run.sh` | 158 / 0 | **158 / 0** | 158/0 ✅ |
+| `tools/hotplug/run.sh` | 45 / 0 | **45 / 0** | 45/0 ✅ |
+| `tools/struktur/run.sh` | — | **STRUKTUR OK**, beide Gegenproben schlagen an | ✅ |
+| Kern, Symbole | 6858 | **6858** | unverändert ✅ |
+| Bau `--gui on` | 7044 Symbole | **7044** | unverändert ✅ |
+
+Der Weg dahin, offen berichtet — K17 war zwischendurch **dreimal** rot,
+und jedes Mal aus einem anderen Grund:
+
+| Stand | K17 | Ursache |
+|---|---|---|
+| nach dem ersten Umzug | 18 / 31 | `libc.errno` → `lib.errno` in 33 Userprogrammen (12.3) |
+| nach der Reparatur | 13 / 36 | dieselbe Ursache, noch nicht vollständig zurückgenommen |
+| nach `pfade-richten.py` | 138 / 20 | tote Pfade in den Läufern selbst (12.4) |
+| nach `kfi` in `k17/run.sh` | 156 / 2 | `memmap.py` fand `kstate.fi` nicht (12.5) |
+| **jetzt** | **158 / 0** | — |
+
 ## 14. Datei alt → neu (alle 120)
 
 Für den Merge mit `container`, `ebpf` und `netzplus`. Alle 120 sind in
