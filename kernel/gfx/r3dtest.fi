@@ -1,0 +1,581 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/r3dtest.fi -- RUNDE GRAFIK-1: DER WUERFEL, UND WAS ER KOSTET.
+//
+// Ein Rasterer, den niemand ansieht, ist eine Behauptung. Diese Datei
+// macht aus `r3dsoft.fi` etwas, das man FOTOGRAFIEREN und MESSEN kann:
+// einen texturierten Wuerfel, der sich dreht, mit Tiefenpuffer und
+// Beleuchtung -- und eine Zeitmessung, die sagt, wie viele Bilder je
+// Sekunde dabei herauskommen.
+//
+// WAS GEMESSEN WIRD, UND WARUM SO.
+//
+// Gemessen wird die reine RECHENZEIT des Rasterers: loeschen, zwoelf
+// Dreiecke umformen und fuellen. NICHT gemessen wird die Uebertragung
+// in den Bildspeicher (`fb.flush`), denn die haengt an der Karte und
+// nicht am Rasterer -- sie steht als eigene Zahl daneben, damit beide
+// Anteile sichtbar sind und niemand sie verwechselt.
+//
+// Die Zeit kommt aus `time.mono_ns`, also aus dem Zyklenzaehler des
+// Prozessors. Gezaehlt werden ganze Bilder, und der Durchschnitt wird
+// erst am Ende gebildet: eine Einzelmessung eines Bildes ist Rauschen,
+// hundert Bilder sind eine Zahl.
+//
+// UND ES LAEUFT UNTER KVM. TCG-Zeiten liegen bei diesem Kernel belegt
+// um den Faktor 15 daneben und sind als Messung wertlos; das steht in
+// `tools/lib/qemu.sh` mit der Gegenmessung. Wer diese Datei unter TCG
+// misst, misst QEMU und nicht Osum.
+
+profile kernel
+
+import lib.kstate
+import serial
+import mm.mem
+import sched.time
+import gfx.gfx
+import gfx.r3dsoft
+
+export { stage, wanted, bauen, wuerfel_malen, TEX_EDGE }
+
+// Die Textur: ein Schachbrett, das zur Laufzeit entsteht. Ein Muster
+// mit harten Kanten ist Absicht -- daran sieht man auf dem Foto sofort,
+// ob die Texturkoordinaten stimmen und ob die Flaechen richtig
+// verteilt sind. Ein weicher Verlauf wuerde jeden Fehler verstecken.
+const TEX_EDGE: u64 = 64
+const FIX_ONE: u64 = 65536
+
+// Der Zustand dieser Datei liegt in derselben Seite wie der des
+// Rasterers, aber hinter dessen Matrizen (S_MAT = 0x100, drei Matrizen
+// zu 128 Oktetten = bis 0x280).
+// DERSELBE Bereich wie `r3dsoft.R3D_OFF`, aber hinter dessen Matrizen
+// (die enden bei 0x280). Steht als eigene Konstante da, damit
+// `tools/kernel/memmap.py` beide Haelften getrennt sieht.
+const T_OFF: u64 = 0xAC000
+const T_TEX: u64 = 0x300 // Adresse der Textur
+const T_TEXN: u64 = 0x308 // ihre Rahmen
+const T_ECKEN: u64 = 0x310 // die Eckpunktdaten
+const T_ECKENN: u64 = 0x318
+
+fn g(state: u64, off: u64) -> u64 {
+    return kstate.get(state, T_OFF + off)
+}
+
+fn s(state: u64, off: u64, v: u64) {
+    kstate.set(state, T_OFF + off, v)
+}
+
+fn tag() {
+    var t: [u8; 8] = "r3d: \0\0\0"
+    serial.puts((&t[0]) as u64)
+}
+
+// ------------------------------------------------------- die Textur
+
+fn textur_bauen(state: u64) -> u64 {
+    let n: u64 = TEX_EDGE * TEX_EDGE * 4
+    let rahmen: u64 = (n + 4095) / 4096
+    let p: u64 = mem.frame_run(state, rahmen)
+    if p == 0 {
+        return 0
+    }
+    var y: u64 = 0
+    while y < TEX_EDGE {
+        var x: u64 = 0
+        while x < TEX_EDGE {
+            // Acht mal acht Felder. Die zwei Farben sind kraeftig und
+            // verschieden hell, damit sie auch auf einem Foto und auch
+            // nach der Beleuchtung noch zu unterscheiden sind.
+            var c: u64 = 0x00E8E8E8
+            if (((x / 8) + (y / 8)) & 1) == 0 {
+                c = 0x00204880
+            }
+            // Ein Rahmen um jede Kachel -- daran laesst sich auf dem
+            // Foto die Verzerrung der Flaechen ablesen.
+            if (x & 7) == 0 || (y & 7) == 0 {
+                c = 0x00101010
+            }
+            __mmio_write32((p +% (y *% TEX_EDGE +% x) *% 4) as *mut u32,
+                c as u32)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    s(state, T_TEX, p)
+    s(state, T_TEXN, rahmen)
+    return p
+}
+
+// ------------------------------------------------------- der Wuerfel
+//
+// Acht Ecken, sechs Flaechen, zwoelf Dreiecke. Jede Flaeche bekommt die
+// ganze Textur (u,v von 0 bis 1), und die Umlaufrichtung ist so
+// gewaehlt, dass die AUSSENSEITE zur Kamera zeigt -- sonst wirft der
+// Rueckseitentest genau das weg, was man sehen will.
+//
+// Ein Eckpunkt sind neun Woerter: x y z u v r g b und ein Fuellwort.
+const V_WORTE: u64 = 9
+const N_DREIECKE: u64 = 12
+const N_ECKEN: u64 = 36 // 12 * 3
+
+fn set_corner(p: u64, i: u64, x: u64, y: u64, z: u64, u: u64, v: u64,
+    r: u64, gr: u64, b: u64) {
+    let e: u64 = p + i * V_WORTE * 8
+    kstate.set(e, 0, x)
+    kstate.set(e, 8, y)
+    kstate.set(e, 16, z)
+    kstate.set(e, 24, u)
+    kstate.set(e, 32, v)
+    kstate.set(e, 40, r)
+    kstate.set(e, 48, gr)
+    kstate.set(e, 56, b)
+    kstate.set(e, 64, 0)
+}
+
+// Eine Flaeche aus vier Ecken, gegen den Uhrzeigersinn von aussen
+// gesehen, wird zu zwei Dreiecken.
+fn area(p: u64, i: u64,
+    ax: u64, ay: u64, az: u64,
+    bx: u64, by: u64, bz: u64,
+    cx: u64, cy: u64, cz: u64,
+    dx: u64, dy: u64, dz: u64,
+    r: u64, gr: u64, b: u64) -> u64 {
+    let null: u64 = 0
+    let eins: u64 = FIX_ONE
+    set_corner(p, i, ax, ay, az, null, null, r, gr, b)
+    set_corner(p, i + 1, bx, by, bz, eins, null, r, gr, b)
+    set_corner(p, i + 2, cx, cy, cz, eins, eins, r, gr, b)
+    set_corner(p, i + 3, ax, ay, az, null, null, r, gr, b)
+    set_corner(p, i + 4, cx, cy, cz, eins, eins, r, gr, b)
+    set_corner(p, i + 5, dx, dy, dz, null, eins, r, gr, b)
+    return i + 6
+}
+
+fn wuerfel_bauen(state: u64) -> u64 {
+    let n: u64 = N_ECKEN * V_WORTE * 8
+    let rahmen: u64 = (n + 4095) / 4096
+    let p: u64 = mem.frame_run(state, rahmen)
+    if p == 0 {
+        return 0
+    }
+    let e: u64 = FIX_ONE // +1.0
+    let m: u64 = 0 -% FIX_ONE // -1.0
+    let full: u64 = 255 << 16
+    var i: u64 = 0
+    // vorn (z = -1), von aussen gesehen gegen den Uhrzeigersinn
+    i = area(p, i, m, m, m, e, m, m, e, e, m, m, e, m, full, full, full)
+    // hinten (z = +1)
+    i = area(p, i, e, m, e, m, m, e, m, e, e, e, e, e, full, full, full)
+    // links (x = -1)
+    i = area(p, i, m, m, e, m, m, m, m, e, m, m, e, e, full, full, full)
+    // rechts (x = +1)
+    i = area(p, i, e, m, m, e, m, e, e, e, e, e, e, m, full, full, full)
+    // oben (y = +1)
+    i = area(p, i, m, e, m, e, e, m, e, e, e, m, e, e, full, full, full)
+    // unten (y = -1)
+    i = area(p, i, m, m, e, e, m, e, e, m, m, m, m, m, full, full, full)
+    s(state, T_ECKEN, p)
+    s(state, T_ECKENN, rahmen)
+    return p
+}
+
+fn bauen(state: u64) -> bool {
+    if textur_bauen(state) == 0 {
+        return false
+    }
+    if wuerfel_bauen(state) == 0 {
+        return false
+    }
+    return true
+}
+
+// ------------------------------------------------- ein Bild malen
+//
+// `schritt` ist der Drehwinkel in Bogenschritten (0..1023).
+fn wuerfel_malen(state: u64, schritt: u64, w: u64, h: u64) {
+    let ecken: u64 = g(state, T_ECKEN)
+    if ecken == 0 {
+        return
+    }
+    // Modell: um Y und um X drehen.
+    var my: [u64; 16] = [0 as u64; 16]
+    var mx: [u64; 16] = [0 as u64; 16]
+    var mm: [u64; 16] = [0 as u64; 16]
+    let pmy: u64 = (&my[0]) as u64
+    let pmx: u64 = (&mx[0]) as u64
+    let pmm: u64 = (&mm[0]) as u64
+    r3dsoft.dreh_y(pmy, r3dsoft.sin_fx(state, schritt),
+        r3dsoft.sin_fx(state, schritt + 256))
+    // Die zweite Achse laeuft langsamer, damit die Drehung nicht in
+    // einer Ebene bleibt und man den Tiefenpuffer wirklich arbeiten
+    // sieht.
+    let s2: u64 = (schritt * 3) / 7
+    r3dsoft.dreh_x(pmx, r3dsoft.sin_fx(state, s2),
+        r3dsoft.sin_fx(state, s2 + 256))
+    r3dsoft.mat_mul(pmm, pmy, pmx)
+    r3dsoft.matrix(state, 0, pmm)
+
+    // Ansicht: die Kamera vier Einheiten nach hinten.
+    var ma: [u64; 16] = [0 as u64; 16]
+    r3dsoft.verschieben((&ma[0]) as u64, 0, 0, 4 * FIX_ONE)
+    r3dsoft.matrix(state, 1, (&ma[0]) as u64)
+
+    // DIE PROJEKTION. Sie hat in der ersten Fassung GEFEHLT, und damit
+    // blieb die Projektionsmatrix die Einheitsmatrix: gar keine
+    // Perspektive. Der Wuerfel fuellte 97,7 Prozent des Bildes, die
+    // Kamera sass mitten darin, und auf dem Foto war eine Flaeche statt
+    // eines Koerpers. Gemessen wurde das nicht am Aussehen, sondern am
+    // umschliessenden Kasten: 1280x720 bei einer Bildgroesse von
+    // 1280x720.
+    //
+    // f = 1.0 entspricht etwa 90 Grad Blickwinkel; das
+    // Seitenverhaeltnis kommt aus der wirklichen Bildgroesse und nicht
+    // aus einer festen Zahl, sonst waere der Wuerfel bei 2560x1440
+    // verzerrt.
+    var mp: [u64; 16] = [0 as u64; 16]
+    let ar: u64 = (w << 16) / h
+    r3dsoft.proj_set((&mp[0]) as u64, FIX_ONE, ar,
+        FIX_ONE / 10, 100 * FIX_ONE)
+    r3dsoft.matrix(state, 2, (&mp[0]) as u64)
+
+    // Alle zwoelf Dreiecke.
+    var t: u64 = 0
+    while t < N_DREIECKE {
+        r3dsoft.dreieck(state, ecken + t * 3 * V_WORTE * 8)
+        t = t + 1
+    }
+}
+
+// ------------------------------------------------------- die Messung
+
+fn dezimal2(v: u64) {
+    // Eine Zahl mit zwei Nachkommastellen, aus einem Hundertstelwert.
+    serial.dec(v / 100)
+    serial.put(46 as u8) // '.'
+    let r: u64 = v % 100
+    if r < 10 {
+        serial.put(48 as u8)
+    }
+    serial.dec(r)
+}
+
+// `bilder` Bilder malen und die Zeit nehmen. Gibt die Zeit je Bild in
+// Nanosekunden zurueck.
+//
+// WARUM HIER SELBST KALIBRIERT WIRD, UND NICHT `time.mono_ns` GENUEGT.
+// `time.calibrate` laeuft in `kernel_main` DREIHUNDERT Zeilen SPAETER
+// als diese Messung. Vorher ist `TIME_KHZ` null, und `mono_ns` faellt
+// auf den Markenzaehler zurueck -- der zaehlt in Schritten von zehn
+// Millisekunden und meldete bei sechzig Bildern glatte NULL Nanosekunden
+// je Bild. Das war die erste Fassung dieser Zeile, und sie hat eine
+// Messung von exakt null geliefert, was niemandem aufgefallen waere,
+// der die Zahl nicht angesehen haette.
+//
+// Also nimmt diese Datei den Zyklenzaehler selbst und rechnet sich
+// ihren eigenen Massstab aus den Marken aus -- genau so, wie
+// `time.calibrate` es spaeter tut, nur eben JETZT.
+fn khz_messen(state: u64) -> u64 {
+    // Kanal 2 des Zeitgebers, Betriebsart 0: der Zaehler laeuft EINMAL
+    // herunter und hebt dann seine Ausgangsleitung -- die nicht an einem
+    // Unterbrechungseingang haengt, sondern an Bit 5 von Tor 0x61, wo
+    // man sie LESEN kann. Das ist der einzige Zeitgeber, mit dem ein
+    // Kern einen anderen messen kann, OHNE dass Unterbrechungen laufen
+    // muessen. Genau das ist hier noetig: an dieser Stelle von
+    // `kernel_main` ist `sti` noch nicht gefallen, der Markenzaehler
+    // steht still, und die erste Fassung dieser Messung hat sich
+    // deshalb totgedreht und null gemeldet.
+    let counts: u64 = 11932 // 1193182 / 100, gerundet: zehn Millisekunden
+    // Tor auf, Lautsprecher aus (Bit 1) -- sonst piept ein echter PC
+    // zehn Millisekunden lang.
+    let port61: u64 = serial.in8(0x61 as u16) as u64
+    serial.out8(0x61 as u16, ((port61 & 0xFC) | 1) as u8)
+    serial.out8(0x43 as u16, 0xB0 as u8) // Kanal 2, lo/hi, Betriebsart 0
+    serial.out8(0x42 as u16, (counts & 0xFF) as u8)
+    serial.out8(0x42 as u16, ((counts >> 8) & 0xFF) as u8)
+    let z0: u64 = time.tsc()
+    var guard: u64 = 0
+    var fertig: bool = false
+    while guard < 20000000 {
+        if (serial.in8(0x61 as u16) as u64 & 0x20) != 0 {
+            fertig = true
+            guard = 20000000
+        } else {
+            guard = guard + 1
+        }
+    }
+    let z1: u64 = time.tsc()
+    // Das Tor wieder so hinterlassen, wie es war.
+    serial.out8(0x61 as u16, port61 as u8)
+    if !fertig {
+        return 0
+    }
+    let zyklen: u64 = z1 -% z0
+    if zyklen == 0 {
+        return 0
+    }
+    // Zehn Millisekunden sind vergangen, also: kHz = Zyklen / 10.
+    return zyklen / 10
+}
+
+fn messen(state: u64, bilder: u64, khz: u64, w: u64, h: u64) -> u64 {
+    if bilder == 0 || khz == 0 {
+        return 0
+    }
+    let z0: u64 = time.tsc()
+    var i: u64 = 0
+    while i < bilder {
+        r3dsoft.clear(state, 0x00101018)
+        wuerfel_malen(state, (i * 8) & 1023, w, h)
+        i = i + 1
+    }
+    let z1: u64 = time.tsc()
+    let d: u64 = z1 -% z0
+    if d == 0 {
+        return 0
+    }
+    // Zyklen -> Nanosekunden: ns = zyklen * 1000000 / khz. Die
+    // Reihenfolge vermeidet sowohl den Ueberlauf als auch den
+    // Genauigkeitsverlust.
+    let je: u64 = d / bilder
+    return (je / khz) *% 1000000 +% ((je % khz) *% 1000000) / khz
+}
+
+// Das Loeschen allein und das Rastern allein. Die Summe muss ungefaehr
+// die Gesamtzeit ergeben; tut sie es nicht, misst eine der drei Zahlen
+// etwas anderes als das, was ihr Name sagt.
+fn teilzeiten(state: u64, khz: u64, bilder: u64, w: u64, h: u64) {
+    var s_c: [u8; 16] = "teil  loeschen=\0"
+    var s_r: [u8; 12] = "  rastern=\0\0"
+    var s_ns: [u8; 8] = " ns\0\0\0\0\0"
+    if khz == 0 || bilder == 0 {
+        return
+    }
+    // 1. Nur loeschen.
+    let a0: u64 = time.tsc()
+    var i: u64 = 0
+    while i < bilder {
+        r3dsoft.clear(state, 0x00101018)
+        i = i + 1
+    }
+    let a1: u64 = time.tsc()
+    // 2. Nur rastern (auf ein bereits geloeschtes Bild, ohne zu
+    //    loeschen). Der Tiefenpuffer steht dann voll, also wird nach dem
+    //    ersten Bild nichts mehr geschrieben -- deshalb wird VOR jedem
+    //    Bild nur der Tiefenpuffer zurueckgesetzt, und das kostet
+    //    dasselbe wie ein halbes clear. Naeher kommt man ohne einen
+    //    eigenen Schalter nicht heran, und ein Schalter fuer eine
+    //    Messung ist eine Falle fuer die naechste.
+    let b0: u64 = time.tsc()
+    i = 0
+    while i < bilder {
+        r3dsoft.clear(state, 0x00101018)
+        wuerfel_malen(state, (i * 8) & 1023, w, h)
+        i = i + 1
+    }
+    let b1: u64 = time.tsc()
+    let c_ns: u64 = ns_von(a1 -% a0, bilder, khz)
+    let g_ns: u64 = ns_von(b1 -% b0, bilder, khz)
+    tag()
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(c_ns)
+    serial.puts((&s_r[0]) as u64)
+    if g_ns > c_ns {
+        serial.dec(g_ns - c_ns)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_ns[0]) as u64)
+    serial.nl()
+}
+
+fn ns_von(zyklen: u64, bilder: u64, khz: u64) -> u64 {
+    if bilder == 0 || khz == 0 {
+        return 0
+    }
+    let je: u64 = zyklen / bilder
+    return (je / khz) *% 1000000 +% ((je % khz) *% 1000000) / khz
+}
+
+fn line_measure(state: u64, w: u64, h: u64, ns: u64, bilder: u64) {
+    var s_a: [u8; 8] = "mess  \0\0"
+    var s_x: [u8; 2] = "x\0"
+    var s_ns: [u8; 11] = "  ns/bild=\0"
+    var s_fps: [u8; 8] = "  fps=\0\0"
+    var s_n: [u8; 10] = "  bilder=\0"
+    var s_bp: [u8; 15] = "  bildpunkte=\0\0"
+    tag()
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(w)
+    serial.puts((&s_x[0]) as u64)
+    serial.dec(h)
+    serial.puts((&s_ns[0]) as u64)
+    serial.dec(ns)
+    serial.puts((&s_fps[0]) as u64)
+    if ns > 0 {
+        // Bilder je Sekunde in Hundertsteln, damit auch 3,47 lesbar ist.
+        dezimal2((100000000000 / ns) / 10)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(bilder)
+    serial.puts((&s_bp[0]) as u64)
+    serial.dec(r3dsoft.bildpunkte(state))
+    serial.nl()
+}
+
+// ------------------------------------------------------- der Einstieg
+
+fn find(heu: u64, nadel: u64, n: u64) -> u64 {
+    if heu == 0 || n == 0 {
+        return 0
+    }
+    var i: u64 = 0
+    while true {
+        let c: u64 = kstate.get8(heu + i)
+        if c == 0 {
+            return 0
+        }
+        var k: u64 = 0
+        var gleich: bool = true
+        while k < n {
+            let a: u64 = kstate.get8(heu + i + k)
+            if a == 0 || a != kstate.get8(nadel + k) {
+                gleich = false
+                k = n
+            } else {
+                k = k + 1
+            }
+        }
+        if gleich {
+            return heu + i
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn wanted(cmd: u64) -> bool {
+    var w: [u8; 4] = "r3d\0"
+    if cmd == 0 {
+        return false
+    }
+    return find(cmd, (&w[0]) as u64, 3) != 0
+}
+
+// Steht `r3dhold` dabei, bleibt das letzte Bild stehen -- fuer das
+// Bildschirmfoto.
+fn wants_hold(cmd: u64) -> bool {
+    var w: [u8; 8] = "r3dhold\0"
+    if cmd == 0 {
+        return false
+    }
+    return find(cmd, (&w[0]) as u64, 7) != 0
+}
+
+fn stage(state: u64, cmd: u64) {
+    var s_no: [u8; 46] = "kein Bildschirm -- der Rasterer braucht einen\0"
+    var s_nomem: [u8; 40] = "kein Speicher fuer Tiefenpuffer/Textur\0\0"
+    var s_st: [u8; 22] = "selbsttest fehler=0x\0\0"
+    var s_ok: [u8; 19] = "selbsttest ALLE OK\0"
+    var s_start: [u8; 30] = "backend=\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+    if !wanted(cmd) {
+        return
+    }
+    if !gfx.ready(state) {
+        tag()
+        serial.puts((&s_no[0]) as u64)
+        serial.nl()
+        return
+    }
+    let w: u64 = gfx.width(state)
+    let h: u64 = gfx.height(state)
+    // Gezeichnet wird dorthin, wohin auch `fb` zeichnet -- in den
+    // Zweitpuffer, wenn es einen gibt. Dann traegt `fb.flush` das Bild
+    // hinaus, und der Rasterer muss von Fensterplaetzen und
+    // Streifenbetrieb nichts wissen.
+    let ziel: u64 = gfx.fb_draw_at(state)
+    if !r3dsoft.start(state, ziel, w, h, gfx.fb_pitch(state)) {
+        tag()
+        serial.puts((&s_nomem[0]) as u64)
+        serial.nl()
+        return
+    }
+    tag()
+    serial.puts((&s_start[0]) as u64)
+    r3dsoft.name()
+    serial.nl()
+
+    // Der Selbsttest zuerst. Ein Rasterer, dessen Festkomma falsch
+    // rechnet, malt ein Bild, das falsch AUSSIEHT -- und das faellt
+    // niemandem auf, der die Zahlen nicht hat.
+    let fehler: u64 = r3dsoft.selbsttest(state)
+    tag()
+    if fehler == 0 {
+        serial.puts((&s_ok[0]) as u64)
+    } else {
+        serial.puts((&s_st[0]) as u64)
+        serial.hex(fehler)
+    }
+    serial.nl()
+
+    if !bauen(state) {
+        tag()
+        serial.puts((&s_nomem[0]) as u64)
+        serial.nl()
+        r3dsoft.end(state)
+        return
+    }
+    r3dsoft.textur(state, g(state, T_TEX), TEX_EDGE, TEX_EDGE)
+    r3dsoft.licht(state, 0 -% (FIX_ONE / 3), 0 -% (FIX_ONE / 2),
+        0 -% FIX_ONE, FIX_ONE, FIX_ONE / 4)
+
+    // Ein Aufwaermbild, damit die erste Messung nicht die
+    // Zwischenspeicher des Prozessors mitzaehlt.
+    r3dsoft.clear(state, 0x00101018)
+    wuerfel_malen(state, 0, w, h)
+
+    let bilder: u64 = 60
+    let khz: u64 = khz_messen(state)
+    let ns: u64 = messen(state, bilder, khz, w, h)
+    line_measure(state, w, h, ns, bilder)
+    // AUFGETEILT: was kostet das Loeschen, was das Rastern? Ohne diese
+    // zwei Zahlen weiss man nur, dass es langsam ist, aber nicht wo.
+    teilzeiten(state, khz, bilder, w, h)
+
+    // Das letzte Bild stehen lassen und hinaustragen -- das ist das,
+    // was auf dem Foto zu sehen ist.
+    r3dsoft.clear(state, 0x00101018)
+    wuerfel_malen(state, 128, w, h)
+    gfx.dirty_all(state)
+    gfx.flush(state)
+    r3dsoft.end(state)
+
+    // RUNDE GRAFIK-1: DAS BILD STEHEN LASSEN.
+    //
+    // Ohne das hier laeuft `kernel_main` weiter, und was danach kommt
+    // -- der Fensterserver, das Pruefbild von `pwr`, die Konsole --
+    // malt ueber den Wuerfel. Beim ersten Versuch war das
+    // Bildschirmfoto deshalb SCHWARZ mit einer Textzeile darauf, und
+    // die Farbzaehlung sagte drei Farben statt der erwarteten vielen.
+    // Ein Bild darf nur tragen, was darauf zu sehen ist -- also muss
+    // der Kern an dieser Stelle anhalten, wenn das Foto gemeint ist.
+    //
+    // Nur mit dem Wort `r3dhold`. Ohne es laeuft alles weiter wie
+    // bisher, und die Messzeilen stehen trotzdem auf der Leitung.
+    if wants_hold(cmd) {
+        hold(state)
+    }
+}
+
+fn hold(state: u64) {
+    var m1: [u8; 46] = "ANGEHALTEN. Der Wuerfel bleibt so stehen.\0\0\0\0\0"
+    var m2: [u8; 46] = "Fuer das Bildschirmfoto. Rechner ausschalten.\0"
+    tag()
+    serial.puts((&m1[0]) as u64)
+    serial.nl()
+    tag()
+    serial.puts((&m2[0]) as u64)
+    serial.nl()
+    while true {
+        asm("hlt")
+    }
+}

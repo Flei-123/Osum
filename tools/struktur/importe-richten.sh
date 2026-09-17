@@ -66,6 +66,16 @@ while IFS= read -r f; do
         eigen=$(dirname "${f#kernel/}")
         [[ $eigen == "." ]] && eigen="" || eigen="${eigen//\//.}."
         [[ $pfad == "$modul" && ${ORT[$modul]} == "$eigen" ]] && continue
+        # FREMDE PAKETE BLEIBEN FREMD. Ein Pfad mit einem Praefix, das
+        # KEIN Verzeichnis unter kernel/ ist, zeigt nach `lib/` --
+        # `libc.errno`, `fui.painter`, `std.core`, `crypto.sha256`
+        # aus `lib/crypto/`. Solche Zeilen gehoeren nicht dieser Runde.
+        # (Ein Lauf ohne diese Pruefung hat `libc.errno` in 32
+        # Programmen zu `lib.errno` gemacht.)
+        if [[ $pfad == *.* ]]; then
+            praefix=${pfad%.*}
+            [[ -d "kernel/${praefix//./\/}" ]] || continue
+        fi
         if [[ $TROCKEN == 1 ]]; then
             echo "  $f: $pfad -> $soll"
         else

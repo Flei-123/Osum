@@ -54,10 +54,32 @@ def ist_ablage():
     return ist
 
 
+def alle_dateien():
+    """Jede .fi im Kernbaum, unabhaengig von der Erreichbarkeit --
+    ohne user/ und app/. Braucht man, um eine Datei zu bemerken, die
+    am falschen Ort liegt UND deshalb gar nicht mehr erreicht wird."""
+    aus = {}
+    for stamm, verz, namen in os.walk(KERN):
+        verz[:] = [d for d in verz if d not in ("user", "app")]
+        for n in namen:
+            if n.endswith(".fi"):
+                rel = os.path.relpath(os.path.join(stamm, n), KERN)
+                d = os.path.dirname(rel)
+                aus[n[:-3]] = d if d else "."
+    return aus
+
+
 def vergleiche():
     soll = lies_soll()
     ist = ist_ablage()
-    passt, falsch, ohne_soll = [], [], []
+    # Eine Datei, die am falschen Ort liegt, faellt aus der Huelle
+    # heraus (ihr import zeigt ins Leere) -- sie waere sonst unsichtbar.
+    # Darum wird der Baum ZUSAETZLICH flach gelesen.
+    flach = alle_dateien()
+    for m, d in flach.items():
+        if m in soll and m not in ist:
+            ist[m] = d
+    passt, falsch, ohne_soll, fehlt = [], [], [], []
     for m, d in sorted(ist.items()):
         s = soll.get(m)
         if s is None:
@@ -66,12 +88,16 @@ def vergleiche():
             passt.append((m, d))
         else:
             falsch.append((m, d, s))
-    return passt, falsch, ohne_soll, soll, ist
+    # Und was im Soll steht, aber nirgends liegt, ist ein Verlust.
+    for m in sorted(soll):
+        if m not in ist and m not in flach:
+            fehlt.append(m)
+    return passt, falsch, ohne_soll, soll, ist, fehlt
 
 
 def main():
     modus = sys.argv[1] if len(sys.argv) > 1 else ""
-    passt, falsch, ohne_soll, soll, ist = vergleiche()
+    passt, falsch, ohne_soll, soll, ist, fehlt = vergleiche()
 
     if modus == "--fehlend":
         for m, d in ohne_soll:
@@ -87,13 +113,16 @@ def main():
         if not soll:
             print("KEINE Soll-Ablage (tools/struktur/ablage.txt) -- nichts geprueft")
             return 1
-        print("Ablage: %d Dateien am richtigen Ort, %d am falschen, %d ohne Soll"
-              % (len(passt), len(falsch), len(ohne_soll)))
+        print("Ablage: %d Dateien am richtigen Ort, %d am falschen, "
+              "%d ohne Soll, %d vermisst"
+              % (len(passt), len(falsch), len(ohne_soll), len(fehlt)))
         for m, d, s in falsch:
             print("  FALSCH  %s liegt in '%s', soll nach '%s'" % (m, d, s))
         for m, d in ohne_soll:
             print("  OHNE SOLL  %s (liegt in '%s')" % (m, d))
-        return 1 if (falsch or ohne_soll) else 0
+        for m in fehlt:
+            print("  VERMISST  %s steht im Soll, liegt aber nirgends" % m)
+        return 1 if (falsch or ohne_soll or fehlt) else 0
 
     print("== ABLAGE ==")
     print("Soll-Eintraege: %d, Kerndateien: %d" % (len(soll), len(ist)))

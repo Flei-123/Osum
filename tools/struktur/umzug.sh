@@ -67,14 +67,39 @@ for MODUL in "$@"; do
 
     # Der neue Importpfad: Verzeichnis mit Punkten statt Schraegstrichen.
     NEU="${ZIEL//\//.}.$MODUL"
+
+    # WELCHE PRAEFIXE DUERFEN ERSETZT WERDEN? NUR die, die auf eine
+    # Datei IM KERNBAUM zeigen -- also der nackte Name und der Ordner,
+    # in dem die Datei zuletzt lag.
+    #
+    # WARUM DIESE EINSCHRAENKUNG: ein Muster wie `(irgendwas\.)?$MODUL`
+    # trifft auch `libc.errno`, `libc.mem` und `libc.proc` -- Module aus
+    # `lib/libc/`, die `kernel/user/` benutzt und die mit dem Kern
+    # nichts zu tun haben. Ein erster Lauf hat genau das getan: 40
+    # Zeilen in 33 Programmen umgebogen (`libc.errno` -> `lib.errno`),
+    # und `kernel/user/ls.fi` liess sich nicht mehr uebersetzen.
+    ALT_DIR=$(dirname "${QUELLE#kernel/}")
+    if [[ $ALT_DIR == "." ]]; then
+        MUSTER="$MODUL"
+    else
+        MUSTER="(${ALT_DIR//\//.}\.)?$MODUL"
+    fi
     N=0
     while IFS= read -r f; do
         # Trifft `import <modul>` UND `import <alterpfad>.<modul>`,
         # jeweils nur als ganze Zeile.
-        sed -i -E "s|^([ \t]*)import[ \t]+([A-Za-z_][A-Za-z0-9_.]*\.)?$MODUL([ \t]*)(//.*)?$|\1import $NEU\3\4|" "$f"
+        sed -i -E "s|^([ \t]*)import[ \t]+$MUSTER([ \t]*)(//.*)?$|\1import $NEU\2\3|" "$f"
         N=$((N + 1))
-    done < <(grep -rlaE "^[ \t]*import[ \t]+([A-Za-z_][A-Za-z0-9_.]*\.)?$MODUL[ \t]*(//.*)?$" \
-             --include='*.fi' kernel/ 2>/dev/null)
+        # NUR der Kernbaum. `kernel/user/` und `kernel/app/` sind
+        # eigene Programme mit eigenen Wurzeln -- und sie haben Module
+        # GLEICHEN NAMENS: `kernel/user/nidx.fi` neben `kernel/fs/nidx.fi`,
+        # dazu crash, hwid, netmon, netview, power, wmplug. Ein `import
+        # nidx` dort meint die Datei NEBENAN (Suchordnung Schritt 1) und
+        # darf nicht auf den Kern umgebogen werden. Ein erster Lauf hat
+        # genau das getan und K17 auf 18/31 gedrueckt.
+    done < <(find kernel -path kernel/user -prune -o -path kernel/app -prune -o \
+             -name '*.fi' -type f -print |
+             xargs -r grep -laE "^[ \t]*import[ \t]+$MUSTER[ \t]*(//.*)?$" 2>/dev/null)
     echo "  $MODUL -> $ZIEL/  ($N import-Zeilen)"
     GESAMT=$((GESAMT + N))
 done
