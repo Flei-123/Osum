@@ -4,7 +4,7 @@
 Der Zweck dieser Runde in einer Zahl. Das Fensterzeichen entsteht an
 zwei Orten:
 
-  KERN        kernel/wm.fi  `cap_glyph`   (der Fensterserver)
+  KERN        kernel/ui/wm.fi  `cap_glyph`   (der Fensterserver)
   ANWENDUNG   lib/fui/core.fi `cap_*`     (ueber wlib -> fuib -> fUi)
 
 Laut core.fi ist genau diese Teilung schon ZWEIMAL auseinandergelaufen
@@ -123,7 +123,7 @@ def main():
     ]
     print("DER KERN MALT JETZT MIT fui.core -- die Form kommt aus EINER Datei.")
     print()
-    print("Nach der Umstellung ruft kernel/wm.fi `cap_glyph` die Routinen aus")
+    print("Nach der Umstellung ruft kernel/ui/wm.fi `cap_glyph` die Routinen aus")
     print("vendor/firn/lib/fui/core.fi auf. Die erste Spalte ist deshalb per")
     print("Bauart null: es IST derselbe Quelltext. Die zweite Spalte zeigt,")
     print("was die alte, selbstgemalte Fassung anders gemacht haette.")

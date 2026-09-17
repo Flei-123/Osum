@@ -20,7 +20,7 @@ WHAT IT DOES, in order:
      points from `icons.map`.  This is the step `tools/ttf/subset.py`
      does not do -- it keeps the code points it finds.  We do not want
      Lucide's numbering as an interface: it moves between releases.
-  4. Write a font with the seven tables `kernel/ttf.fi` reads, and
+  4. Write a font with the seven tables `kernel/gfx/ttf.fi` reads, and
      nothing else.
   5. Generate `lib/icons.fi` -- the constants the kernel and Ring 3 use,
      so that no code point is ever written into drawing code.

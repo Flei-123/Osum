@@ -75,7 +75,7 @@ def main():
             fehler += 1
         if rcs == [-19]:
             print("  HINWEIS: der Kern nimmt ihn NICHT an (-19 = ENODEV).")
-            print("      kernel/sysgui.fi do_dispset verlangt vmode.ready();")
+            print("      kernel/sys/sysgui.fi do_dispset verlangt vmode.ready();")
             print("      QEMUs einfacher Rahmenpuffer hat kein Anzeigegeraet.")
             print("      Das ist die Umgebung und kein Fehler der Oberflaeche.")
     else:

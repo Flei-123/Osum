@@ -162,7 +162,7 @@ VOR=$(git rev-parse --verify \
     2>/dev/null)
 if [ -n "$VOR" ]; then
     rm -rf "$TMPD/vor"; mkdir -p "$TMPD/vor"
-    git archive "$VOR" kernel/user kernel/wm.fi 2>/dev/null \
+    git archive "$VOR" kernel/user kernel/ui/wm.fi 2>/dev/null \
         | tar -x -C "$TMPD/vor" 2>/dev/null
     vorn=$(python3 tests/theme/rawcolour.py "$TMPD/vor" 2>&1 \
         | awk '/^rawcolour:/ {print $7}')

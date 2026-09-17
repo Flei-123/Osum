@@ -4,7 +4,7 @@
 
 Round K1 needs programs that the kernel has never seen. They therefore
 cannot be produced by the kernel, and this is the second implementation
-of the on-disk format of `kernel/fs.fi` -- written from the
+of the on-disk format of `kernel/fs/fs.fi` -- written from the
 constants in that file and from nothing else.
 
 That it IS a second implementation is the point. Two programs, in two
@@ -14,7 +14,7 @@ file the kernel cannot find or a name it reads as rubbish. A single
 implementation could be wrong in the same way twice and nobody would
 know.
 
-The format, from `kernel/fs.fi`:
+The format, from `kernel/fs/fs.fi`:
 
     block 0        superblock: magic, block size, blocks, inodes,
                    bitmap block, inode table, first data block, root inode
@@ -62,7 +62,7 @@ symbolische ist eine eigene Inode, deren INHALT ein Pfad ist.
 
 `--inodes=<n>` setzt die GROESSE DER INODE-TABELLE. Sie stand seit Runde
 62 als 128 in beiden Umsetzungen; sie steht aber auch im Superblock, und
-seit dem zweiten K15-Nachtrag liest `kernel/fs.fi` sie von dort. Ohne die
+seit dem zweiten K15-Nachtrag liest `kernel/fs/fs.fi` sie von dort. Ohne die
 Angabe bleiben es 128 -- Abbild fuer Abbild dieselben Oktette wie vorher.
 Die Tabelle waechst um einen Block je vier Inodes, und der erste
 Datenblock rueckt entsprechend nach hinten. Die Blockkarte bleibt EIN

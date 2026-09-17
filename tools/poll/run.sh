@@ -138,10 +138,10 @@ fi
 # =====================================================================
 echo "== 1. die Nummer: 7, einmal, in beiden Tafeln =="
 # =====================================================================
-kn=$(number_in kernel/sys.fi SYS_POLL)
+kn=$(number_in kernel/sys/sys.fi SYS_POLL)
 ln=$(number_in lib/libc/kcall.fi SYS_POLL)
-[ "$kn" = 7 ] && ok "kernel/sys.fi: SYS_POLL = 7 (Linux' Nummer)" \
-              || bad "kernel/sys.fi: SYS_POLL = ${kn:-fehlt}, Linux sagt 7"
+[ "$kn" = 7 ] && ok "kernel/sys/sys.fi: SYS_POLL = 7 (Linux' Nummer)" \
+              || bad "kernel/sys/sys.fi: SYS_POLL = ${kn:-fehlt}, Linux sagt 7"
 [ "$ln" = 7 ] && ok "lib/libc/kcall.fi: SYS_POLL = 7" \
               || bad "lib/libc/kcall.fi: SYS_POLL = ${ln:-fehlt}"
 
@@ -154,9 +154,9 @@ dup_in() { # datei
         | sort -u \
         | awk '{c[$1]=c[$1]" "$2; n[$1]++} END {for (k in n) if (n[k]>1) print k":"c[k]}'
 }
-kdup=$(dup_in kernel/sys.fi)
-[ -z "$kdup" ] && ok "kernel/sys.fi: keine Systemaufrufnummer ist zweimal vergeben" \
-               || { bad "kernel/sys.fi: doppelt vergebene Nummern"; echo "$kdup" | sed 's/^/        /'; }
+kdup=$(dup_in kernel/sys/sys.fi)
+[ -z "$kdup" ] && ok "kernel/sys/sys.fi: keine Systemaufrufnummer ist zweimal vergeben" \
+               || { bad "kernel/sys/sys.fi: doppelt vergebene Nummern"; echo "$kdup" | sed 's/^/        /'; }
 ldup=$(dup_in lib/libc/kcall.fi)
 [ -z "$ldup" ] && ok "lib/libc/kcall.fi: keine Nummer ist zweimal vergeben" \
                || { bad "lib/libc/kcall.fi: doppelt vergebene Nummern"; echo "$ldup" | sed 's/^/        /'; }
@@ -168,7 +168,7 @@ while read -r name value; do
     other=$(number_in lib/libc/kcall.fi "$name")
     [ -n "$other" ] || continue
     [ "$other" = "$value" ] || { diffs=$((diffs+1)); echo "        $name: kernel $value, libc $other"; }
-done < <(grep -aoE "^const SYS_[A-Z0-9_]+: u64 = [0-9]+" kernel/sys.fi \
+done < <(grep -aoE "^const SYS_[A-Z0-9_]+: u64 = [0-9]+" kernel/sys/sys.fi \
     | sed -E 's/^const ([A-Z0-9_]+): u64 = ([0-9]+).*/\1 \2/' \
     | grep -vE '^SYS_(MARK|LEAVE) ')
 num "Nummern, bei denen Kernel und libc auseinanderlaufen" "$diffs" eq 0
@@ -176,14 +176,14 @@ num "Nummern, bei denen Kernel und libc auseinanderlaufen" "$diffs" eq 0
 # Die Bits von <poll.h> sind die von Linux, und in beiden Dateien gleich.
 for pair in "POLLIN 1" "POLLPRI 2" "POLLOUT 4" "POLLERR 8" "POLLHUP 16" "POLLNVAL 32"; do
     set -- $pair
-    k=$(number_in kernel/sys.fi "$1"); l=$(number_in lib/libc/io.fi "$1")
+    k=$(number_in kernel/sys/sys.fi "$1"); l=$(number_in lib/libc/io.fi "$1")
     if [ "$k" = "$2" ] && [ "$l" = "$2" ]; then ok "$1 = $2 in Kernel und libc"
     else bad "$1: kernel ${k:-fehlt}, libc ${l:-fehlt}, erwartet $2"; fi
 done
 
 # Die Gegenprobe zur Ausgangslage: es gibt weiterhin kein `select` und
 # kein `epoll` -- diese Runde hat `poll` gebaut und nichts vorgetaeuscht.
-if grep -aqE "^const SYS_(SELECT|EPOLL)" kernel/sys.fi; then
+if grep -aqE "^const SYS_(SELECT|EPOLL)" kernel/sys/sys.fi; then
     bad "es steht ploetzlich select/epoll in der Tafel -- diese Runde hat das nicht gebaut"
 else
     ok "kein select und kein epoll vorgetaeuscht (nur poll ist da)"

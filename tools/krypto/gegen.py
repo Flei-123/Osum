@@ -7,7 +7,7 @@ Krypto-Umsetzung, die nur gegen sich selbst getestet ist, ist wertlos."
 
 Dieses Programm ist die UNABHAENGIGE Umsetzung. Es kennt von OrientOS
 nichts als das AUFGESCHRIEBENE FORMAT -- den Aufbau des Kopfsatzes aus
-dem Kopf von `kernel/krypto.fi` -- und rechnet alles andere mit fremdem
+dem Kopf von `kernel/crypto/krypto.fi` -- und rechnet alles andere mit fremdem
 Werkzeug:
 
     Argon2id   argon2-cffi   (die Referenzumsetzung der Norm, RFC 9106)

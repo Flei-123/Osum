@@ -76,22 +76,22 @@ grep -q 'ARGON_OFF' tools/kernel/memmap.py \
     && ok "ARGON steht in tools/kernel/memmap.py" \
     || bad "ARGON fehlt in tools/kernel/memmap.py"
 
-grep -q 'const ARGON_OFF: u64 = 0x126000' kernel/kstate.fi \
+grep -q 'const ARGON_OFF: u64 = 0x126000' kernel/lib/kstate.fi \
     && ok "der kdata-Bereich liegt auf 0x126000 wie zugeteilt" \
     || bad "ARGON_OFF steht nicht auf 0x126000"
-grep -q 'const ARGON_MAX: u64 = 0x1000' kernel/kstate.fi \
+grep -q 'const ARGON_MAX: u64 = 0x1000' kernel/lib/kstate.fi \
     && ok "und ist EINE Seite gross wie zugeteilt" \
     || bad "ARGON_MAX ist nicht 0x1000"
-grep -q 'const M_NOARGONPAR: u64 = 1040' kernel/kstate.fi \
+grep -q 'const M_NOARGONPAR: u64 = 1040' kernel/lib/kstate.fi \
     && ok "die Modusindizes fangen bei 1040 an wie zugeteilt" \
     || bad "M_NOARGONPAR steht nicht auf 1040"
-hoch=$(grep -oE 'const M_[A-Z0-9]+: u64 = 104[0-9]' kernel/kstate.fi \
+hoch=$(grep -oE 'const M_[A-Z0-9]+: u64 = 104[0-9]' kernel/lib/kstate.fi \
     | grep -oE '104[0-9]' | sort -n | tail -1)
 [[ -n $hoch && $hoch -le 1049 ]] \
     && ok "kein Modusindex dieser Runde oberhalb von 1049 (hoechster: $hoch)" \
     || bad "ein Modusindex liegt ausserhalb von 1040..1049"
 # Und der Vektor muss die Indizes TRAGEN -- die Lehre aus Welle 2.
-mw=$(grep -oE 'const MODE_WORDS: u64 = [0-9]+' kernel/kstate.fi | grep -oE '[0-9]+$')
+mw=$(grep -oE 'const MODE_WORDS: u64 = [0-9]+' kernel/lib/kstate.fi | grep -oE '[0-9]+$')
 [[ -n $mw ]] && [[ $((mw * 64)) -gt 1049 ]] \
     && ok "der Modusvektor traegt Index 1049 (MODE_WORDS=$mw -> $((mw*64)) Bits)" \
     || bad "der Modusvektor ist zu kurz fuer 1049"

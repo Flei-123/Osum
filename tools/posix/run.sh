@@ -113,7 +113,7 @@ say() { # file name expected description
 echo "== 1. the numbers are the numbers of Linux x86-64 =="
 check_number() { # name expected
     local got
-    got=$(number_in kernel/sys.fi "SYS_$1")
+    got=$(number_in kernel/sys/sys.fi "SYS_$1")
     if [ "$got" = "$2" ]; then ok "SYS_$1 = $2"
     else bad "SYS_$1 = ${got:-missing}, Linux says $2"; fi
 }
@@ -145,7 +145,7 @@ check_number GETDENTS64 217
 check_number EXIT_GROUP 231
 # What Osum has of its own lives far above the Linux table on purpose: a
 # number that could one day BE a Linux call would be a trap for stage 2.
-own=$(grep -aoE "^const SYS_OSUM_[A-Z]+: u64 = [0-9]+" kernel/sys.fi \
+own=$(grep -aoE "^const SYS_OSUM_[A-Z]+: u64 = [0-9]+" kernel/sys/sys.fi \
     | sed -E 's/.*= ([0-9]+).*/\1/' | sort -n | head -1)
 num "the lowest number Osum invented for itself" "${own:-0}" ge 1000
 
@@ -155,7 +155,7 @@ diffs=0
 while read -r name value; do
     other=$(number_in lib/libc/kcall.fi "$name")
     [ "$other" = "$value" ] || { diffs=$((diffs+1)); echo "        $name: kernel $value, libc ${other:-missing}"; }
-done < <(grep -aoE "^const SYS_[A-Z0-9_]+: u64 = [0-9]+" kernel/sys.fi \
+done < <(grep -aoE "^const SYS_[A-Z0-9_]+: u64 = [0-9]+" kernel/sys/sys.fi \
     | sed -E 's/^const ([A-Z0-9_]+): u64 = ([0-9]+).*/\1 \2/' \
     | grep -vE '^SYS_(MARK|LEAVE) ')
 # SYS_MARK and SYS_LEAVE are not in that comparison: they are the two
@@ -170,14 +170,14 @@ while read -r name value; do
     ecount=$((ecount+1))
     other=$(number_in lib/libc/errno.fi "$name")
     [ "$other" = "$value" ] || { ediffs=$((ediffs+1)); echo "        $name: kernel $value, libc ${other:-missing}"; }
-done < <(grep -aoE "^const E_[A-Z0-9_]+: u64 = [0-9]+" kernel/errno.fi \
+done < <(grep -aoE "^const E_[A-Z0-9_]+: u64 = [0-9]+" kernel/lib/errno.fi \
     | sed -E 's/^const ([A-Z0-9_]+): u64 = ([0-9]+).*/\1 \2/')
 num "error numbers the kernel defines" "$ecount" ge 30
 num "error numbers on which kernel and libc disagree" "$ediffs" eq 0
 for pair in "E_NOENT 2" "E_BADF 9" "E_CHILD 10" "E_FAULT 14" "E_INVAL 22" \
             "E_NOSYS 38" "E_ISDIR 21" "E_NOTDIR 20" "E_SPIPE 29" "E_PIPE 32"; do
     set -- $pair
-    got=$(number_in kernel/errno.fi "$1")
+    got=$(number_in kernel/lib/errno.fi "$1")
     [ "$got" = "$2" ] && ok "$1 = $2 (the number Linux uses)" \
                       || bad "$1 = ${got:-missing}, expected $2"
 done

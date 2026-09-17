@@ -14,7 +14,7 @@ speaks HTTPS has to be able to answer:
   which ones and why.
 
 WHY A SUBSET AND NOT ALL 142. A process on Osum has 448 KiB of heap
-(`kernel/sys.fi`: BRK_BASE 0x40080000, MMAP_TOP 0x400F0000). The full
+(`kernel/sys/sys.fi`: BRK_BASE 0x40080000, MMAP_TOP 0x400F0000). The full
 bundle is 200 KiB of PEM and about 150 KiB of DER after decoding, and
 `x509.Store` holds every root in memory at once -- the store alone would
 be most of the heap before the handshake starts. A store of eight roots

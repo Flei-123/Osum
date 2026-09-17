@@ -127,7 +127,7 @@ fi
 
 echo "== 1. the call number, the page of kdata, the licence and the language =="
 
-v=$(number_in kernel/sys.fi "SYS_OSUM_PMON")
+v=$(number_in kernel/sys/sys.fi "SYS_OSUM_PMON")
 same "SYS_OSUM_PMON" "1830" "${v:-missing}"
 if [ "${v:-0}" -ge 1830 ] && [ "${v:-0}" -le 1839 ]; then
     ok "SYS_OSUM_PMON lies inside this round's store 1830..1839: $v"
@@ -167,8 +167,8 @@ else
     [ -z "$fremd" ] || bad "ein fremder Aufruf liegt in 1830..1839: $(echo $fremd | tr '\n' ' ')"
 fi
 
-pmoff=$(grep -aE '^const PMON_OFF' kernel/kstate.fi | sed 's/.*= //')
-pmmax=$(grep -aE '^const PMON_MAX' kernel/kstate.fi | sed 's/.*= //')
+pmoff=$(grep -aE '^const PMON_OFF' kernel/lib/kstate.fi | sed 's/.*= //')
+pmmax=$(grep -aE '^const PMON_MAX' kernel/lib/kstate.fi | sed 's/.*= //')
 # ROUND MERGE: THE ADDRESS IS NOT WRITTEN INTO THIS RUNNER ANY MORE.
 # This round picked 0x5C000 on its own branch; on the merged tree round
 # DISPLAY is there and the power accounting has moved to 0x74000. The
@@ -177,7 +177,7 @@ pmmax=$(grep -aE '^const PMON_MAX' kernel/kstate.fi | sed 's/.*= //')
 # and it is the only thing that can. A runner that pins its own address
 # reports a failure every time somebody else lands first.
 [ -n "$pmoff" ] && ok "the kdata pages of this round stand in kstate.fi: $pmoff" \
-                || bad "PMON_OFF is missing from kernel/kstate.fi"
+                || bad "PMON_OFF is missing from kernel/lib/kstate.fi"
 same "how many of them" "0x3000" "$pmmax"
 
 # THE MAP CHECKER is the only thing that can see a collision that stands
@@ -200,7 +200,7 @@ else
 fi
 
 # SPDX ON EVERY NEW FILE OF THIS ROUND.
-for f in kernel/pmon.fi kernel/user/powermon.fi kernel/user/burn.fi \
+for f in kernel/pwr/pmon.fi kernel/user/powermon.fi kernel/user/burn.fi \
          tools/powermon/run.sh docs/POWERMON.md; do
     if head -3 "$f" 2>/dev/null | grep -qa 'SPDX-License-Identifier: GPL-2.0-only'; then
         ok "SPDX header in $f"
@@ -210,7 +210,7 @@ for f in kernel/pmon.fi kernel/user/powermon.fi kernel/user/burn.fi \
 done
 
 # ENGLISH, AND PLAIN ASCII. The rule of this round, checked and not promised.
-for f in kernel/pmon.fi kernel/user/powermon.fi kernel/user/burn.fi; do
+for f in kernel/pwr/pmon.fi kernel/user/powermon.fi kernel/user/burn.fi; do
     ger=$(grep -cawi -E 'und|oder|nicht|eine|einen|werden|wird|ueber|fuer|Runde|Zahl|Datei|Aufgabe' "$f" || true)
     if [ "${ger:-0}" -eq 0 ]; then ok "$f is English throughout"
     else bad "$f still holds $ger lines with German words"; fi

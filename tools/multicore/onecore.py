@@ -39,7 +39,7 @@ RUNDE GLYPHE: DIE ZWEITE BAUFORM DESSELBEN FEHLERS.
 
 Der Zeichenweg hat den Fehler noch einmal gehabt, und dieses Werkzeug
 hat ihn NICHT gesehen -- weil er nicht `state + kstate.X_OFF` heisst.
-`kernel/wig.fi` holt seine Seite ueber einen eigenen Zugriff:
+`kernel/ui/wig.fi` holt seine Seite ueber einen eigenen Zugriff:
 
     fn base(state: u64) -> u64 { return state + kstate.WIG_OFF }
     ...
@@ -112,7 +112,7 @@ RUHIG = {
 # `race_core` in tools/multicore/run.sh. Wer eine zweite dazutut, muss
 # sie hier eintragen und begruenden.
 MITWISSEN = {
-    ("kernel/wig.fi", "stage_of"):
+    ("kernel/ui/wig.fi", "stage_of"):
         "gibt die Buehne DIESES Kerns (kstate.WIGST_OFF + cpu.here * "
         "STAGE_MAX). Die GETEILTE Seite kommt darin nur unter "
         "`glyphblind`/`glyphsperre` vor -- das sind die zwei "

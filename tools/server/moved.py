@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """tools/server/moved.py -- DER UMZUG WAR EIN UMZUG.
 
-Die Runde SERVERBUILD behauptet, `kernel/kgui.fi` und
-`kernel/sysgui.fi` seien nicht neu geschriebener Code, sondern
+Die Runde SERVERBUILD behauptet, `kernel/ui/kgui.fi` und
+`kernel/sys/sysgui.fi` seien nicht neu geschriebener Code, sondern
 dieselben Funktionen, die vorher in `kernel/kmain.fi` und
-`kernel/sys.fi` standen -- Zeile fuer Zeile. Das ist die Art
+`kernel/sys/sys.fi` standen -- Zeile fuer Zeile. Das ist die Art
 Behauptung, die man nachrechnen kann, und dann sollte man es auch.
 
 Dieses Werkzeug holt die alten Fassungen aus git, schneidet aus beiden
@@ -29,10 +29,10 @@ import sys
 # Welche Datei wohin gezogen ist, und welche Praefixe der Umzug
 # erzwungen hat.
 UMZUEGE = [
-    ("kernel/kmain.fi", "kernel/kgui.fi", ["kutil", "gfx"],
+    ("kernel/kmain.fi", "kernel/ui/kgui.fi", ["kutil", "gfx"],
      ["stage_graphics", "stage_surface", "stage_hold"]),
-    ("kernel/kmain.fi", "kernel/kutil.fi", [], []),
-    ("kernel/sys.fi", "kernel/sysgui.fi", ["sys"], []),
+    ("kernel/kmain.fi", "kernel/lib/kutil.fi", [], []),
+    ("kernel/sys/sys.fi", "kernel/sys/sysgui.fi", ["sys"], []),
 ]
 
 # ===================================================== RUNDE MERGE-2
@@ -131,9 +131,9 @@ def funktionen(text):
 # DIE COMMITS, IN DENEN DER UMZUG PASSIERT IST. Gegen DIESEN Stand
 # wird gefragt, ob ein Name beim Umzug schon in der Zieldatei stand.
 UMZUG_COMMIT = {
-    "kernel/kgui.fi": "5c3d87d",
-    "kernel/kutil.fi": "5c3d87d",
-    "kernel/sysgui.fi": "1903abb",
+    "kernel/ui/kgui.fi": "5c3d87d",
+    "kernel/lib/kutil.fi": "5c3d87d",
+    "kernel/sys/sysgui.fi": "1903abb",
 }
 
 

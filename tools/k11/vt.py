@@ -4,7 +4,7 @@
 
 Der Editor dieser Runde schreibt Fluchtfolgen. Auf der seriellen Leitung
 kommen sie als Oktette an; was ein Mensch dort saehe, weiss nur ein
-Terminal. Also steht hier eines: dieselben Folgen, die `kernel/ansi.fi`
+Terminal. Also steht hier eines: dieselben Folgen, die `kernel/drv/con/ansi.fi`
 auf dem Bildschirm ausfuehrt, auf einem Feld aus Zeichen.
 
 Damit lassen sich zwei Dinge messen, die sonst niemand messen kann:
@@ -13,7 +13,7 @@ Damit lassen sich zwei Dinge messen, die sonst niemand messen kann:
      geschriebene Erwartung.
   2. DASS BEIDE AUSGABEWEGE DASSELBE ZEIGEN: dieses Bild gegen das, was
      `tools/gfx/checkshot.py lesen` aus einem echten Bildschirmfoto liest.
-     Stimmen sie ueberein, dann tut `kernel/ansi.fi` auf dem Schirm genau
+     Stimmen sie ueberein, dann tut `kernel/drv/con/ansi.fi` auf dem Schirm genau
      das, was ein Terminal an der Leitung taete -- und das ist die
      Zusage "der Editor laeuft auf beiden".
 

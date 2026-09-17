@@ -283,11 +283,11 @@ fi
 # schlimmer als das, was die Regel verhindern soll.
 KERN_ZEICHNER="cg_mal"
 
-if [[ -f kernel/wm.fi ]]; then
+if [[ -f kernel/ui/wm.fi ]]; then
     # 4a: bindet der Fensterserver fUi ueberhaupt?
-    if ! grep -qE '^import fui\.core' kernel/wm.fi; then
+    if ! grep -qE '^import fui\.core' kernel/ui/wm.fi; then
         fehler=$((fehler + 1))
-        treffer+="  kernel/wm.fi: bindet fui.core NICHT (malt seine Fensterzeichen selbst)"$'\n'
+        treffer+="  kernel/ui/wm.fi: bindet fui.core NICHT (malt seine Fensterzeichen selbst)"$'\n'
     fi
 
     # 4b: malt eine der Zeichenfunktionen wieder selbst?
@@ -324,11 +324,11 @@ if [[ -f kernel/wm.fi ]]; then
         # musste. Also die Klammer verlangen.
         /core\.[a-z_]+\(/ { fui++ }
         END { if (name != "" && W[name] && roh > 0) print "  " name " (" roh " rohe Setzer -- eine Form-Funktion setzt keine Bildpunkte)" }
-    ' kernel/wm.fi)
+    ' kernel/ui/wm.fi)
 
     if [[ -n ${kroh//[$'\n' ]/} ]]; then
         fehler=$((fehler + 1))
-        treffer+="  kernel/wm.fi: malt Fensterzeichen selbst statt mit fui.core:"$'\n'
+        treffer+="  kernel/ui/wm.fi: malt Fensterzeichen selbst statt mit fui.core:"$'\n'
         treffer+="$kroh"$'\n'
     fi
 
@@ -341,10 +341,10 @@ if [[ -f kernel/wm.fi ]]; then
     # Pruefung, die ihre eigene Begruendung anschlaegt, ist eine, die
     # man abschaltet. Also nur echter Quelltext: Zeilen, die nach dem
     # Einruecken nicht mit `//` anfangen.
-    if grep -vE '^[[:space:]]*//' kernel/wm.fi \
+    if grep -vE '^[[:space:]]*//' kernel/ui/wm.fi \
         | grep -qE 'let off: i64 = \(d - \(kn \+ sb - 1\)\) / 2'; then
         fehler=$((fehler + 1))
-        treffer+="  kernel/wm.fi: die eigene Kreuzberechnung ist zurueck"$'\n'
+        treffer+="  kernel/ui/wm.fi: die eigene Kreuzberechnung ist zurueck"$'\n'
         treffer+="    (eine Verschiebung fuer beide Achsen -- vertikal falsch,"$'\n'
         treffer+="     siehe tools/fui/kernvergleich.py)"$'\n'
     fi
@@ -366,7 +366,7 @@ if [[ $fehler -gt 0 ]]; then
     echo "  * Die BIBLIOTHEK laesst fUi malen: fuib.mal / fuib.tafel /"
     echo "    fuib.flaeche / fuib.ring, und das rohe Malen nur als"
     echo "    Rueckfall DAHINTER."
-    echo "  * Der KERN (kernel/wm.fi) laesst fUi die FORM malen:"
+    echo "  * Der KERN (kernel/ui/wm.fi) laesst fUi die FORM malen:"
     echo "    core.cap_close / core.cap_maximize / core.cap_minimize /"
     echo "    core.cap_restore in einen Zwischenpuffer, und traegt ihn"
     echo "    danach mit cap_px auf den Schirm (Beschnitt, Band,"
@@ -386,8 +386,8 @@ echo "  $geprueft Dateien geprueft"
 echo "  0 Programme malen sich ein Bedienelement selbst"
 echo "  0 Programme greifen an der Bibliothek vorbei auf fUi zu"
 echo "  0 Funktionen in wlib.fi malen an fUi vorbei"
-if [[ -f kernel/wm.fi ]]; then
-    echo "  kernel/wm.fi bindet fui.core -- der Kern malt dieselben Formen"
+if [[ -f kernel/ui/wm.fi ]]; then
+    echo "  kernel/ui/wm.fi bindet fui.core -- der Kern malt dieselben Formen"
     echo "  0 Zeichenfunktionen im Kern malen an fUi vorbei"
 fi
 echo "  Ausnahmen: $(echo $ERLAUBT_ROH | wc -w) Dateien, $(echo $AUSNAHMEN_LIB | wc -w) Funktionen -- alle begruendet"

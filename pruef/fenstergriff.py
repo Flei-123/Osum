@@ -12,7 +12,7 @@ Abbild (merge8) und das neue -- und die Fensterlage kommt aus der
 seriellen Leitung des Fensterservers, nicht aus einem Bild.
 
 WIE HIER GEZOGEN WIRD, und warum die Koordinaten aus der Meldung kommen.
-Der Fensterserver rechnet in `on_mouse` (kernel/wm.fi):
+Der Fensterserver rechnet in `on_mouse` (kernel/ui/wm.fi):
 
     lokal_x = x - win_x - inx        inx = border      (2 * uisc)
     lokal_y = y - win_y - iny        iny = title_h     (22 * uisc)

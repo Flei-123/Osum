@@ -160,7 +160,7 @@ grep -rq --include='*.fi' -E '^const M_ASYNC: u64 = 704' kernel/ \
 # MUSS deutlich unter dem Stapel liegen, sonst schuetzt sie nicht.
 stack=$(grep -A20 '^kernel_stack_bottom:' kernel/arch/x86_64/boot.s \
         | grep -m1 '\.skip' | sed 's/.*\.skip *//')
-limit=$(grep -m1 '^const STACK_LIMIT' kernel/amlev.fi | sed 's/.*= *//')
+limit=$(grep -m1 '^const STACK_LIMIT' kernel/acpi/amlev.fi | sed 's/.*= *//')
 num "der Kernstapel ist gewachsen" "$stack" ge 131072
 num "die Stapelwache liegt unter dem halben Stapel" \
     "$(( stack / 2 - limit ))" ge 0
@@ -479,16 +479,16 @@ nodes=$(aw "$TMPD/ok.txt" nodes)
 stackh=$(aw "$TMPD/ok.txt" stack)
 tiefe=$(aw "$TMPD/ok.txt" tiefe)
 ladest=$(aw "$TMPD/ok.txt" ladest)
-zeilen=$(cat kernel/aml.fi kernel/amlns.fi kernel/amlobj.fi kernel/amlev.fi | wc -l)
+zeilen=$(cat kernel/acpi/aml.fi kernel/acpi/amlns.fi kernel/acpi/amlobj.fi kernel/acpi/amlev.fi | wc -l)
 printf '    DSDT parsen:            %s us\n' "$us"
 printf '    _PRT auswerten:         %s us\n' "$prtus"
 printf '    Namensraum:             %s Knoten\n' "$nodes"
 printf '    Arena benutzt:          %s Oktett (davon %s Knotentafel)\n' \
-    "$heap" "$(( $(grep -m1 '^const NMAX' kernel/amlns.fi | sed 's/.*= *//') * 32 ))"
+    "$heap" "$(( $(grep -m1 '^const NMAX' kernel/acpi/amlns.fi | sed 's/.*= *//') * 32 ))"
 printf '    Kernstapel, Laden:      %s Oktett\n' "$ladest"
 printf '    Kernstapel, hoechstens: %s Oktett (Wache %s)\n' "$stackh" "$limit"
 printf '    Verschachtelung:        %s (Grenze %s)\n' "$tiefe" \
-    "$(grep -m1 '^const DEPTH_MAX' kernel/amlev.fi | sed 's/.*= *//')"
+    "$(grep -m1 '^const DEPTH_MAX' kernel/acpi/amlev.fi | sed 's/.*= *//')"
 printf '    Zeilen Quelltext:       %s\n' "$zeilen"
 
 num "das Parsen bleibt unter zehn Millisekunden" "${us:-99999}" le 10000

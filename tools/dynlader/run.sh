@@ -63,8 +63,8 @@ ok "musl-gcc, qemu und readelf sind da"
 # ============================================================ 1.
 # DIE TEXTKONSTANTEN. Zuerst, weil ein Fehler hier den Bau ohne jede
 # Meldung umbringt und man ihn sonst durch Halbierung suchen muss.
-echo "== 1. die Textkonstanten in kernel/elf.fi =="
-python3 - "$ROOT/kernel/elf.fi" > "$TMPD/texte.txt" 2>&1 <<'PY'
+echo "== 1. die Textkonstanten in kernel/ldr/elf.fi =="
+python3 - "$ROOT/kernel/ldr/elf.fi" > "$TMPD/texte.txt" 2>&1 <<'PY'
 import re, sys
 s = open(sys.argv[1], encoding='utf-8', errors='surrogateescape').read()
 bad = 0

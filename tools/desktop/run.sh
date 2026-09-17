@@ -207,7 +207,7 @@ else bad "the memory map collides"; echo "$kart" | sed 's/^/        /'; fi
 # red assertion everybody steps over is what this very comment warns
 # about three lines up.
 for n in 2112 2113 2114 2115 2116; do
-    grep -qE "= $n( |$)" kernel/sys.fi && ok "call number $n is in kernel/sys.fi" \
+    grep -qE "= $n( |$)" kernel/sys/sys.fi && ok "call number $n is in kernel/sys/sys.fi" \
         || bad "call number $n is missing"
 done
 # ROUND WMPLUGIN: THE COPIED NUMBER IS GONE. This line held `= 2116`
@@ -216,8 +216,8 @@ done
 # assertion now READS the number and COMPARES it: it has to be at least
 # as high as the highest call this round knows (2126), and it has to
 # match the highest `= 21xx` that actually stands in the file.
-maxnr=$(grep -oE 'const WM_MAXNR: u64 = [0-9]+' kernel/sys.fi | grep -oE '[0-9]+$')
-hoch=$(grep -oE '^const WM_[A-Z_]+: u64 = 21[0-9][0-9]' kernel/sys.fi \
+maxnr=$(grep -oE 'const WM_MAXNR: u64 = [0-9]+' kernel/sys/sys.fi | grep -oE '[0-9]+$')
+hoch=$(grep -oE '^const WM_[A-Z_]+: u64 = 21[0-9][0-9]' kernel/sys/sys.fi \
     | grep -v WM_MAXNR | grep -oE '[0-9]+$' | sort -n | tail -1)
 if [ -n "${maxnr:-}" ] && [ "$maxnr" -ge 2126 ] && [ "$maxnr" = "${hoch:-x}" ]; then
     ok "WM_MAXNR=$maxnr is the highest call of the window server (>= 2126)"
@@ -227,7 +227,7 @@ fi
 # THE FOUR EDGES ARE THE SAME FOUR NUMBERS IN FOUR PLACES. Not a
 # translation table -- one set of numbers, written down four times, and
 # a runner that would notice if one of them drifted.
-for f in kernel/wm.fi kernel/sys.fi kernel/user/wlibc.fi; do
+for f in kernel/ui/wm.fi kernel/sys/sys.fi kernel/user/wlibc.fi; do
     if grep -qE '(EDGE|WE)_BOTTOM: u64 = 0' "$f" \
        && grep -qE '(EDGE|WE)_RIGHT: u64 = 3' "$f"; then
         ok "$f numbers the edges 0..3 the same way"
@@ -457,7 +457,7 @@ has "$L" "taskbar: hide" "the pointer left the bar and the bar slid out"
 ms=$(grep -a 'taskbar: show ' "$L" | tail -1 | grep -oE 'ms=[0-9]+' | sed 's/.*=//')
 if [ -n "$ms" ]; then
     num "the pointer reached the edge and the bar stood there again after" "$ms" le 200
-    echo "        (ticks are 10 ms in this kernel, kernel/time.fi TICK_HZ=100 --"
+    echo "        (ticks are 10 ms in this kernel, kernel/sched/time.fi TICK_HZ=100 --"
     echo "         that is the resolution of this number, not one millisecond)"
 else
     bad "the bar never came back"

@@ -31,7 +31,7 @@ WAS HIER MIT ABSICHT ANDERS IST ALS AUF EINEM ECHTEN LAPTOP.
 Auf einem Laptop ist `_BST` eine METHODE: sie liest ueber den Embedded
 Controller sechs Register und rechnet daraus ein Paket.  Hier steht ein
 KONSTANTES Paket (`Name(_BST, Package(4){...})`).  Beides ist gueltiges
-ACPI, aber nur das zweite kann `kernel/batt.fi` lesen -- und genau das
+ACPI, aber nur das zweite kann `kernel/pwr/batt.fi` lesen -- und genau das
 steht auch dort im Kopf der Datei und in `docs/ROUNDK18.md`, statt dass
 so getan wuerde, als sei damit jeder Laptop erledigt.
 

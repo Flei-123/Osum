@@ -5,7 +5,7 @@
 WARUM ES DAS GIBT
 =================
 
-`kernel/r8169.fi` faehrt drei Spielarten desselben Chips:
+`kernel/drv/net/r8169.fi` faehrt drei Spielarten desselben Chips:
 
     VAR_CP    RTL8139C+   -- in QEMU GEMESSEN, Oktett fuer Oktett.
     VAR_8169  RTL8168/69  -- aus dem Datenblatt, nie an einem Brett.

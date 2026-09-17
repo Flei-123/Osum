@@ -6,7 +6,7 @@ Ein Editor, der nur "startet ohne Absturz" beweist, beweist nichts. Diese
 Datei ist der Mensch vor der Tastatur: sie uebersetzt einen Text in die
 `sendkey`-Befehle des QEMU-Monitors und schickt sie an den laufenden
 Rechner. Was ankommt, sind echte Abtastcodes am Tor 0x60, echte
-IRQ1-Unterbrechungen und der Weg durch `kernel/kbd.fi` und die
+IRQ1-Unterbrechungen und der Weg durch `kernel/drv/hid/kbd.fi` und die
 Zeilendisziplin -- kein eingeschleustes Oktett irgendwo weiter oben.
 
     keys.py <monitor-socket> <warte-auf-datei> <muster> <taste> ...
@@ -64,7 +64,7 @@ def tasten_fuer(text):
 def key_zeilen(pfad):
     """Wie viele `key: `-Zeilen der Kern schon gemeldet hat.
 
-    RUNDE ROTABSCHNITTE. `kernel/kbd.fi` meldet GENAU EINE Zeile
+    RUNDE ROTABSCHNITTE. `kernel/drv/hid/kbd.fi` meldet GENAU EINE Zeile
     `key: ` je Taste, die ueber IRQ1 angekommen ist (die Zusage steht
     dort woertlich in Zeile 602). Das ist ein EREIGNIS -- und auf ein
     Ereignis laesst sich warten, statt auf die Uhr zu sehen.

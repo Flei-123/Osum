@@ -12,7 +12,7 @@ nichts, und im Quelltext sieht alles richtig aus.
 
 Also: JEDES Zeichen ueber ASCII, das irgendwo in sichtbarem Text
 vorkommt, muss in der `cmap` beider Schriften stehen. Gelesen wird die
-Tabelle so, wie `kernel/ttf.fi` sie liest -- Format 4 und Format 12.
+Tabelle so, wie `kernel/gfx/ttf.fi` sie liest -- Format 4 und Format 12.
 
 Quellen des sichtbaren Textes:
 

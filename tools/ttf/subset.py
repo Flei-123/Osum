@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """tools/ttf/subset.py -- eine TrueType-Datei auf das Noetige zusammenschneiden.
 
-Runde K10 liest im Kernel echte TrueType-Umrisse (`kernel/ttf.fi`).  Eine
+Runde K10 liest im Kernel echte TrueType-Umrisse (`kernel/gfx/ttf.fi`).  Eine
 vollstaendige DejaVu-Datei ist 760 KiB gross und traegt 6253 Glyphen,
 zwanzig Tabellen, Hinting-Programme und eine Mathematiktabelle -- davon
 braucht ein Rasterer genau sieben Tabellen und fuenfundneunzig Glyphen.
@@ -32,7 +32,7 @@ Verwendung:
 RUNDE I18N HAT DIE VORGABE GEAENDERT, und das ist die Voraussetzung fuer
 alles andere in dieser Runde.  Bis hierher war der Ausschnitt 0x20..0x7E
 -- derselbe wie beim 8x16-Zeichensatz aus Runde K7
-(`kernel/font.fi`) -- also reines ASCII.  Genau deshalb stand im ganzen
+(`kernel/gfx/font.fi`) -- also reines ASCII.  Genau deshalb stand im ganzen
 Projekt "ue" statt "u" mit zwei Punkten: die Schrift KONNTE das Zeichen
 nicht, und niemand hatte es nachgemessen.
 

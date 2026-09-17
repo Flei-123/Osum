@@ -4,7 +4,7 @@
 
 Es gibt in diesem Baum eine Regel, und sie ist der Grund fuer diese
 Datei: JEDE Aussage ueber das Format auf der Platte hat zwei
-Umsetzungen, eine im Kern und eine hier. `kernel/fs.fi` und
+Umsetzungen, eine im Kern und eine hier. `kernel/fs/fs.fi` und
 `tools/osum/mkfs.py` sind das eine Paar; `kernel/user/fsck.fi` und
 dieses Programm sind das zweite. Eine einzelne Umsetzung kann zweimal
 denselben Fehler machen und niemand merkt es.

@@ -129,7 +129,7 @@ done
 echo "== 1. die Nummern, die Karte von kdata und die Zahlenvorraete =="
 check() { # name soll grund
     local got
-    got=$(number_in kernel/sys.fi "SYS_$1")
+    got=$(number_in kernel/sys/sys.fi "SYS_$1")
     if [ "$got" = "$2" ]; then ok "SYS_$1 = $2 ($3)"
     else bad "SYS_$1 = ${got:-fehlt}, erwartet $2"; fi
 }
@@ -141,14 +141,14 @@ check OSUM_MNTSTAT 1700 "der Block dieser Runde"
 # Die eigene Nummer dieser Runde liegt im ZUGETEILTEN Bereich und
 # nirgends sonst. Drei Runden arbeiten gleichzeitig an diesem Baum; das
 # ist genau die Lage, aus der die vier kdata-Kollisionen entstanden sind.
-mnt_nr=$(number_in kernel/sys.fi "SYS_OSUM_MNTSTAT")
+mnt_nr=$(number_in kernel/sys/sys.fi "SYS_OSUM_MNTSTAT")
 if [ "${mnt_nr:-0}" -ge 1700 ] && [ "${mnt_nr:-0}" -le 1799 ]; then
     ok "die eigene Aufrufnummer liegt im Vorrat 1700..1799: $mnt_nr"
 else
     bad "die eigene Aufrufnummer $mnt_nr liegt AUSSERHALB von 1700..1799"
 fi
-kfile=$(number_in kernel/file.fi "K_VFILE")
-kdir=$(number_in kernel/file.fi "K_VDIR")
+kfile=$(number_in kernel/fs/file.fi "K_VFILE")
+kdir=$(number_in kernel/fs/file.fi "K_VDIR")
 gleich "die Deskriptorarten dieser Runde sind 12 und 13" "12 13" "$kfile $kdir"
 
 # Die kdata-Karte. `memmap.py` rechnet jede Ueberschneidung nach -- diese
@@ -161,7 +161,7 @@ else
 fi
 hat "$TMPD/karte.txt" "0 Kollisionen" "keine zwei Bereiche ueberschneiden sich"
 for r in K14_OFF FAT_OFF PROCFS_OFF; do
-    v=$(grep -aE "^const $r: u64 = 0x[0-9A-Fa-f]+" kernel/kstate.fi | head -1 | grep -oE '0x[0-9A-Fa-f]+')
+    v=$(grep -aE "^const $r: u64 = 0x[0-9A-Fa-f]+" kernel/lib/kstate.fi | head -1 | grep -oE '0x[0-9A-Fa-f]+')
     d=$((v))
     if [ "$d" -ge $((0x43000)) ] && [ "$d" -lt $((0x46000)) ]; then
         ok "$r = $v liegt im zugeteilten Bereich 0x43000..0x46000"
@@ -242,9 +242,9 @@ for f in node_for v_readdir v_attr v_read v_write v_create v_unlink v_rename v_t
 done
 # Und: `vfs.fi` kennt OFS nicht beim Namen. `fs.` kommt dort nicht vor
 # -- das ist der Unterschied zwischen einer Schicht und einer Weiche.
-aussen=$(grep -acE '(^|[^a-z_])fs\.[a-z_]+\(' kernel/vfs.fi)
-num "Aufrufe von fs.* (OFS) in kernel/vfs.fi" "$aussen" eq 0
-neun=$(grep -acE '^    (lookup|readdir|attr|read|write|create|unlink|rename|trunc): fn' kernel/vfsops.fi)
+aussen=$(grep -acE '(^|[^a-z_])fs\.[a-z_]+\(' kernel/fs/vfs.fi)
+num "Aufrufe von fs.* (OFS) in kernel/fs/vfs.fi" "$aussen" eq 0
+neun=$(grep -acE '^    (lookup|readdir|attr|read|write|create|unlink|rename|trunc): fn' kernel/fs/vfsops.fi)
 num "Verrichtungen in der Tafel von vfsops.fi" "$neun" eq 9
 
 # ------------------------------------------- 4. die Abbilder, von aussen
