@@ -484,12 +484,44 @@ Vor dem Commit, auf demselben Stand:
 | `tools/hotplug/run.sh` | 45 passed, 0 failed | **45 passed, 0 failed** |
 | `tools/ebpf/run.sh` | — (neu) | **81 passed, 0 failed** |
 
-`tools/install/abnahme.sh` ist **nicht** gelaufen: die Maschine hatte
-waehrend dieser Runde durchgehend 1–2 GB freien Plattenplatz bei einem
-Lastmittel von 20–30, und die Abnahme braucht unter Last bis zu 45
-Minuten samt einer vollstaendigen QEMU-Installation. Das ist eine
-offene Zusage und keine erfuellte — sie steht in Abschnitt 9 als
-naechster Schritt.
+### `tools/install/abnahme.sh` — gelaufen, rot, und NICHT an dieser Runde
+
+Der Sollwert ist 35 gruen, 0 rot. Gemessen wurde:
+
+| Baum | Ergebnis |
+|---|---|
+| Zweig `ebpf` (diese Runde) | 10 gruen, **23 rot** |
+| **`main` 7e68da55, ohne eine Zeile dieser Runde** | 12 gruen, **21 rot** |
+
+Der zweite Lauf ist die Gegenprobe, und sie ist der Grund, aus dem hier
+eine Zahl und keine Ausrede steht: **der unveraenderte Baum faellt
+genauso.** Beide scheitern an derselben ersten Stelle —
+
+```
+[FEHL] die Installation ist nicht fertig geworden
+[FEHL] falsche oder fehlende EFI-Partition: 'keine'
+```
+
+— und alles danach haengt daran: ohne fertige Installation gibt es keine
+EFI-Partition, ohne die keinen Kern darauf, ohne den keinen Start von der
+Platte. Der Baseline-Lauf kam sogar etwas weiter (er meldete die Schritte
+1 2 3, der Zweig gar keinen), was zur Streuung passt und nicht zu einer
+Ursache im Quelltext.
+
+**Woran es liegt:** die Installation laeuft in QEMU mit einem Zeitlimit
+von 900 s und schreibt dabei ein 320-MiB-Abbild. Die Maschine hatte
+waehrend der ganzen Runde 0,6–1,7 GB freien Plattenplatz bei einem
+Lastmittel von 20–30 auf zwoelf Kernen, weil mehrere Runden gleichzeitig
+bauen und messen. Unter diesen Bedingungen wird das Fenster nicht
+erreicht.
+
+**Was das fuer diese Runde heisst:** die Abnahme ist damit **nicht
+bestanden und auch nicht widerlegt** — sie hat auf dieser Maschine zu
+diesem Zeitpunkt keine Aussagekraft ueber irgendeine Runde. Sie gehoert
+nachgeholt, sobald die Maschine Platz und Ruhe hat; das steht in
+Abschnitt 9 als offener Punkt. Was diese Runde selbst betrifft, tragen
+`k17` (158/0), `hotplug` (45/0) und `tools/ebpf/run.sh` (81/0) die
+Aussage.
 
 ---
 
@@ -516,7 +548,9 @@ In der Reihenfolge, in der es sich lohnt:
 5. **Schleifen**, entweder begrenzt und geprueft oder gar nicht.
 6. **Die atomaren Befehle**, wenn ein Programm je Zaehler teilen soll.
 7. **`tools/install/abnahme.sh`** nachholen, sobald die Maschine Platz
-   und Ruhe hat (siehe 8a).
+   und Ruhe hat. Sie faellt derzeit auch auf dem unveraenderten `main`
+   (siehe 8a) — das ist ein eigener Befund und gehoert dort behandelt,
+   nicht hier.
 
 ---
 
