@@ -1,0 +1,1217 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/blk.fi -- round 62: the block device.
+//
+// A file system does not talk to memory, it talks to BLOCKS. This file is
+// the whole interface between the two: read block n, write block n, 512
+// octets each, and nothing else. That the blocks currently lie in RAM is
+// the business of this file alone -- `fs.fi` never learns it.
+//
+// Three devices:
+//
+//   0  THE RAM DISK. A run of frames out of the frame allocator, one
+//      megabyte by default. Reading and writing is a copy; there is
+//      nothing to wait for.
+//   1  THE REAL DISK, over ATA PIO. The same 512 octets, but through four
+//      ports and a status register that has to be waited on. Whoever can
+//      read a block over PIO can read a disk -- and `fs.fi` does not have
+//      to change a line for it, which is exactly the point of the
+//      interface.
+//   2  ROUND K2: THE SAME 512 OCTETS OVER DMA (`nvme.fi`). The kernel
+//      writes a command into a queue in memory and rings a doorbell; the
+//      controller fetches the command itself, moves the data itself and
+//      says so with an interrupt. `fs.fi` does not learn that either --
+//      the whole file system runs on it without a line changed, and
+//      `tools/pci/run.sh` runs the same file system test on all three
+//      devices to prove exactly that.
+//
+// The counter-check for the interface is in `tools/kernel/run.sh`: the
+// SAME file system test runs once on the RAM disk and once on a real
+// image that QEMU hands in as `-drive`, and afterwards the image on the
+// host has the file in it. A file system that only ever wrote to memory
+// would fail the second run.
+
+import serial
+import lib.kstate
+import drv.blk.nvme
+import drv.blk.ahci
+import arch.arch
+import usb.usb
+import crypto.krypto
+
+export {
+    ram_init, use_ata, use_nvme, read, write, blocks, present,
+    // ---- RUNDE KRYPTO: der rohe Weg, fuer den Kopfsatz und die Abnahme
+    read_raw, write_raw,
+    BLOCK_SIZE, DEV_RAM, DEV_ATA, DEV_NVME, DEV_ATA1, DEV_USB,
+    removable,
+    // ---- Runde K14 ----
+    read_on, write_on, blocks_on, present_on, probe_ata1, dev_name,
+    // ---- Runde OFS3 ----
+    capacity,
+    // ---- RUNDE INSTALL ----
+    use_at, first, identify, probe_ata0, flush,
+    // ---- RUNDE AHCI ----
+    use_ahci, DEV_AHCI,
+    // ---- RUNDE HOTPLUG-2: mehr als ein Stick ----
+    DEV_USB0, DEV_USB1, DEV_USB2, DEV_USB3, MAX_USB,
+    is_usb, usb_slot, usb_dev,
+    // ---- RUNDE VIELKERN 3 ----
+    ata_error, ata_last_lba, ata_letzter_st
+    ,
+    // ---- RUNDE TON: der Vorauslesepuffer ----
+    cache_invalidate, cache_hits, cache_misses, cache_cmds, cache_reset,
+    cache_runs
+}
+
+const BLOCK_SIZE: u64 = 512
+const DEV_RAM: u64 = 0
+const DEV_ATA: u64 = 1
+const DEV_NVME: u64 = 2
+// ROUNDE K14: DIE ZWEITE PLATTE. Derselbe Bus, dasselbe Registerpaar,
+// ein einziges Bit anders -- Bit 4 des Laufwerksregisters waehlt den
+// Sklaven statt des Meisters. Sie ist die Platte, auf der ein FREMDES
+// Dateisystem liegt: Osum haengt seine eigene weiter unter DEV_ATA ein
+// und liest daneben, was Linux geschrieben hat. Ohne ein zweites
+// Geraet waere jede Messung dieser Runde ein Selbstgespraech.
+const DEV_ATA1: u64 = 3
+
+// RUNDE K17: DER VIERTE. Ein USB-Stick, ueber Bulk-Only-Transport und
+// SCSI (`kernel/usb.fi`). Und wieder aendert sich an dieser
+// Schnittstelle nichts -- kein Argument mehr, keine zweite Leseroutine,
+// keine Zeile in `fs.fi` oder `fat.fi`. Das ist zum dritten Mal
+// dieselbe Zusage wie bei DEV_NVME in Runde K2 und DEV_ATA1 in Runde
+// K14, und `tools/k17/run.sh` misst sie zum dritten Mal auf dieselbe
+// Art: der Stick wird eingehaengt, beschrieben, und danach liest der
+// WIRT das Abbild mit `mtools` und vergleicht Oktett fuer Oktett.
+const DEV_USB: u64 = 4
+
+// RUNDE AHCI: DER FUENFTE, und der erste, den ein GEWOEHNLICHER PC hat.
+//
+// DEV_RAM ist Speicher, DEV_ATA/DEV_ATA1 sind die Ports von 1986,
+// DEV_NVME ist die Platte von 2015 und DEV_USB ein Stick. Was in dieser
+// Liste fehlte, ist der haeufigste Fall ueberhaupt: eine SATA-SSD an
+// einem Controller im nativen AHCI-Modus (`kernel/ahci.fi`).
+//
+// Und zum VIERTEN Mal aendert sich an dieser Schnittstelle nichts --
+// kein Argument mehr, keine zweite Leseroutine, keine Zeile in `fs.fi`
+// oder `fat.fi`. Derselbe Satz stand bei DEV_NVME (K2), DEV_ATA1 (K14)
+// und DEV_USB (K17); dass er zum vierten Mal stimmt, ist der Punkt.
+const DEV_AHCI: u64 = 5
+
+// ===================================== RUNDE HOTPLUG-2
+// MEHR ALS EIN STICK, und warum die Nummern so liegen.
+//
+// Bis zu dieser Runde gab es GENAU EIN `DEV_USB`. Zwei Sticks waren
+// damit dieselbe Blockgeraetenummer, und `wechsel.fi` haelt seine
+// Einhaengung an genau dieser Nummer fest -- der zweite Stick wurde
+// deshalb ausdruecklich abgelehnt, statt eine Attrappe zu werden, die
+// beim ersten Klick die Daten des ERSTEN zeigt.
+//
+// `DEV_USB0` IST `DEV_USB` (4). Das ist Absicht und kein Zufall: jede
+// Zeile, die bisher `DEV_USB` schrieb -- `rootsel.fi`, `blkdev.fi`,
+// `tools/k17`, der Installer -- meint den ersten Stick und laeuft
+// unveraendert weiter. Die weiteren liegen HINTER `DEV_AHCI`, weil 5
+// vergeben war; die Reihenfolge der Zahlen ist Geschichte, keine
+// Ordnung.
+//
+// Die Nummer ist der PLATZ IN DER LISTE von `usb.fi`, nicht die
+// Geraetenummer im USB-Baum: `usb_slot(dev)` rechnet sie um. Warum der
+// Unterschied wichtig ist, steht bei `S_MSCTAB` in `usb.fi` -- kurz:
+// eine Geraetenummer wird nach dem Abziehen sofort wieder vergeben,
+// ein Platz nicht.
+const DEV_USB0: u64 = 4
+const DEV_USB1: u64 = 6
+const DEV_USB2: u64 = 7
+const DEV_USB3: u64 = 8
+const MAX_USB: u64 = 4
+
+// Ist das eine Stick-Nummer? Und wenn ja, welcher Platz?
+fn is_usb(dev: u64) -> bool {
+    return dev == DEV_USB0 || (dev >= DEV_USB1 && dev <= DEV_USB3)
+}
+
+// Blockgeraetenummer -> Platz in der Liste von `usb.fi` (0..3).
+fn usb_slot(dev: u64) -> u64 {
+    if dev == DEV_USB0 {
+        return 0
+    }
+    if dev >= DEV_USB1 && dev <= DEV_USB3 {
+        return dev - DEV_USB1 + 1
+    }
+    return MAX_USB
+}
+
+// Platz -> Blockgeraetenummer. Die Gegenrichtung, fuer `wechsel.fi`.
+fn usb_dev(slot: u64) -> u64 {
+    if slot == 0 {
+        return DEV_USB0
+    }
+    if slot < MAX_USB {
+        return DEV_USB1 + slot - 1
+    }
+    return DEV_USB0
+}
+
+// ------------------------------------------------------------- the RAM
+
+fn ram_init(state: u64, base: u64, blocks_n: u64) {
+    kstate.set(state, kstate.DISK, base)
+    kstate.set(state, kstate.DISK_BLOCKS, blocks_n)
+    kstate.set(state, kstate.DISK_DEV, DEV_RAM)
+    kstate.set(state, kstate.DISK_FIRST, 0)
+}
+
+// From here on the same file system writes to a real disk. Nothing else
+// changes -- that is what the interface is for.
+fn use_ata(state: u64, blocks_n: u64) {
+    kstate.set(state, kstate.DISK, 0)
+    kstate.set(state, kstate.DISK_BLOCKS, blocks_n)
+    kstate.set(state, kstate.DISK_DEV, DEV_ATA)
+    kstate.set(state, kstate.DISK_FIRST, 0)
+}
+
+// ================================================== RUNDE INSTALL
+//
+// DIE WURZEL LIEGT AB HIER NICHT MEHR ZWINGEND BEI BLOCK 0.
+//
+// Das ist die EINZIGE Aenderung, die "Wurzeldateisystem auf einer
+// Partition" im Kern kostet -- und sie steht hier und nicht in `fs.fi`,
+// weil sie dorthin gehoert: `fs.fi` redet ueber BLOECKE eines Geraets
+// und darf nicht wissen, wo dieses Geraet anfaengt. Der Kommentar in
+// `ofs.fi` sagt seit Runde K14, dass dieser Tag kommt; er hat drei
+// Zeilen in `fs.fi` erwartet und braucht null.
+//
+// `first` ist der erste Block der Wurzel auf ihrem Geraet, `blocks_n`
+// ihre Laenge. `read`/`write` unten pruefen gegen die LAENGE und
+// addieren den VERSATZ -- ein Dateisystem, das ueber sein Ende hinaus
+// liest, liest damit nicht in die naechste Partition, sondern bekommt
+// ein Nein. Genau dieselbe Zusage, die `mnt.first`/`mnt.blocks` seit
+// K14 fuer FAT32 geben.
+fn use_at(state: u64, dev: u64, first_n: u64, blocks_n: u64) {
+    kstate.set(state, kstate.DISK, 0)
+    kstate.set(state, kstate.DISK_BLOCKS, blocks_n)
+    kstate.set(state, kstate.DISK_DEV, dev)
+    kstate.set(state, kstate.DISK_FIRST, first_n)
+}
+
+fn first(state: u64) -> u64 {
+    return kstate.get(state, kstate.DISK_FIRST)
+}
+
+// Round K2. The third device, and the interface does not widen by a
+// single argument for it.
+fn use_nvme(state: u64, blocks_n: u64) {
+    kstate.set(state, kstate.DISK, 0)
+    kstate.set(state, kstate.DISK_BLOCKS, blocks_n)
+    kstate.set(state, kstate.DISK_DEV, DEV_NVME)
+    kstate.set(state, kstate.DISK_FIRST, 0)
+}
+
+// RUNDE AHCI. Der fuenfte, und die Schnittstelle wird um kein Argument
+// breiter.
+fn use_ahci(state: u64, blocks_n: u64) {
+    kstate.set(state, kstate.DISK, 0)
+    kstate.set(state, kstate.DISK_BLOCKS, blocks_n)
+    kstate.set(state, kstate.DISK_DEV, DEV_AHCI)
+    kstate.set(state, kstate.DISK_FIRST, 0)
+}
+
+fn blocks(state: u64) -> u64 {
+    return kstate.get(state, kstate.DISK_BLOCKS)
+}
+
+fn copy(from: u64, to: u64) {
+    var i: u64 = 0
+    while i < BLOCK_SIZE / 8 {
+        __mmio_write64((to + i * 8) as *mut u64,
+            __mmio_read64((from + i * 8) as *mut u64))
+        i = i + 1
+    }
+}
+
+// --------------------------------------------------------------- ATA
+
+// The primary bus, master drive. The ports are the ones every PC has had
+// since 1986; QEMU speaks them because everything speaks them.
+const ATA_DATA: u16 = 0x1F0
+const ATA_ERROR: u16 = 0x1F1
+const ATA_COUNT: u16 = 0x1F2
+const ATA_LBA0: u16 = 0x1F3
+const ATA_LBA1: u16 = 0x1F4
+const ATA_LBA2: u16 = 0x1F5
+const ATA_DRIVE: u16 = 0x1F6
+const ATA_CMD: u16 = 0x1F7 // write: command, read: status
+const ATA_CTRL: u16 = 0x3F6
+
+const ATA_READ: u8 = 0x20
+const ATA_WRITE: u8 = 0x30
+const ATA_FLUSH: u8 = 0xE7
+// Der Befehl, der die Platte nach ihrer eigenen Groesse fragt. Bis zu
+// den Runden OFS3 und INSTALL hat niemand ihn gestellt; beide haben ihn
+// unabhaengig voneinander eingebaut, OFS3 als `ATA_IDENTIFY`, INSTALL
+// als `ATA_IDENT`. Es ist EIN Befehl, also steht er EINMAL da.
+const ATA_IDENTIFY: u8 = 0xEC
+
+const ST_BSY: u64 = 0x80
+const ST_DRQ: u64 = 0x08
+const ST_ERR: u64 = 0x01
+
+// ROUND OSUM-ARM2: through the boundary. ATA lives in the I/O port space
+// and there is no such space on AArch64 -- `arch.dev_in16` there is a `brk
+// #1`, which is the honest answer. A driver for a disk this machine does not
+// have should stop loudly at the instruction, not write into an address that
+// happens to be 0x1F0.
+fn in16(port: u16) -> u64 {
+    return arch.dev_in16(port) as u64
+}
+
+fn out16(port: u16, value: u64) {
+    arch.dev_out16(port, value as u16)
+}
+
+// ============================ RUNDE TON: EIN BEFEHL STATT 256 EXITS
+//
+// GEMESSEN, und das ist der zweite Faktor dieser Runde. Nachdem der
+// Vorauslesepuffer die Zahl der ATA-BEFEHLE von 4697 auf 215 gedrueckt
+// hatte, blieben immer noch 1721 ms Lesen fuer eine Sekunde Ton -- also
+// rund eine Millisekunde je Sektor. Das ist nicht die Platte, das ist
+// die Schleife: 256 einzelne `in ax, dx`, und JEDER Zugriff auf einen
+// Eingabeport ist unter einem Hypervisor ein Austritt aus dem Gast.
+//
+// `rep insw` ist derselbe Transfer als EINE Anweisung. QEMU sieht einen
+// einzigen Austritt und kopiert den ganzen Sektor am Stueck. Dass das
+// erlaubt ist, steht schon in fb.fi: Firn gibt den Text unveraendert an
+// den Assembler weiter, und `rep movsq` steht dort aus genau demselben
+// Grund.
+//
+// `cld` ist NICHT ueberfluessig: die Richtungsfahne gehoert nicht uns,
+// und ein `rep insw` rueckwaerts schreibt den Sektor hinter den Puffer.
+fn insw(port: u16, dst: u64, words: u64) {
+    if words == 0 {
+        return
+    }
+    asm("cld\nrep insw", in("dx") port, in("rdi") dst, in("rcx") words,
+        clobber("rdi"), clobber("rcx"), clobber("memory"))
+}
+
+// Wait until the drive is no longer busy and has data. Bounded: a device
+// that never answers must not hang the kernel.
+fn ata_wait(want_drq: bool) -> bool {
+    var spin: u64 = 0
+    while spin < 4000000 {
+        let st: u64 = serial.in8(ATA_CMD) as u64
+        if (st & ST_BSY) == 0 {
+            if (st & ST_ERR) != 0 {
+                return false
+            }
+            if !want_drq {
+                return true
+            }
+            if (st & ST_DRQ) != 0 {
+                return true
+            }
+        }
+        spin = spin + 1
+    }
+    return false
+}
+
+// ROUNDE K14: `slave` waehlt Bit 4. Die Zeile hiess bis dahin fest
+// 0xE0 -- Meister, LBA-Modus. 0xF0 ist derselbe Modus auf dem zweiten
+// Geraet desselben Busses.
+fn ata_select_on(lba: u64, slave: bool) {
+    ata_select_n(lba, slave, 1)
+}
+
+// RUNDE TON: DASSELBE, ABER MIT EINER SEKTORZAHL.
+//
+// Das Zaehlregister stand seit 1986 fest auf 1, und niemand hat es je
+// vermisst -- bis diese Runde nachgemessen hat, was ein Sektor je
+// Befehl kostet. READ SECTORS nimmt nach ATA/ATAPI-7 (7.53) bis zu 256
+// Sektoren; 0 im Register HEISST 256. Der Laufer bleibt derselbe: nach
+// jedem Sektor setzt das Laufwerk DRQ erneut, und wir warten erneut.
+fn ata_select_n(lba: u64, slave: bool, n: u64) {
+    var top: u64 = 0xE0
+    if slave {
+        top = 0xF0
+    }
+    serial.out8(ATA_DRIVE, (top | ((lba >> 24) & 0x0F)) as u8)
+    serial.out8(ATA_COUNT, (n & 0xFF) as u8)
+    serial.out8(ATA_LBA0, (lba & 0xFF) as u8)
+    serial.out8(ATA_LBA1, ((lba >> 8) & 0xFF) as u8)
+    serial.out8(ATA_LBA2, ((lba >> 16) & 0xFF) as u8)
+}
+
+
+// Is there a drive at all? A bus without one reads 0xFF as status.
+fn present(state: u64) -> bool {
+    serial.out8(ATA_DRIVE, 0xE0 as u8)
+    serial.io_wait()
+    let st: u64 = serial.in8(ATA_CMD) as u64
+    if st == 0xFF || st == 0 {
+        return false
+    }
+    return true
+}
+
+// ROUNDE K14: WAS NACH EINER ZEITUEBERSCHREITUNG UEBRIGBLEIBT.
+//
+// `ata_wait` gibt auf, wenn das Laufwerk nach vier Millionen
+// Abfragen nicht antwortet -- und liess es bis zu dieser Runde in
+// GENAU DEM ZUSTAND stehen, in dem es gerade war: mitten in einem
+// Befehl, womoeglich mit 256 Woertern im Datenregister, die niemand
+// abholt. Der NAECHSTE Befehl trifft dann auf ein Laufwerk, das noch
+// den vorigen zu Ende bringen will, und schlaegt auch fehl. So wird
+// aus einer einzelnen langsamen Antwort eine Platte, die fuer den
+// Rest des Laufs kaputt ist.
+//
+// Gesehen wurde das in der Vollabnahme dieser Runde: unter Last hat
+// EIN Sektorlesen die Grenze gerissen, und danach fand
+// `part.scan` keine Partitionstafel mehr -- `mount` sagte -ENODEV
+// auf einer Platte, die eine Sekunde vorher noch gelesen worden war.
+//
+// Der Ausweg ist der, den jedes ATA-Laufwerk kennt: das SRST-Bit im
+// Steuerregister setzen, kurz warten, zuruecknehmen. Danach ist das
+// Laufwerk wieder am Anfang. Der Rueckgabewert bleibt `false` -- der
+// Lesevorgang IST fehlgeschlagen, und das soll er auch sagen.
+fn ata_recover(slave: bool) {
+    serial.out8(ATA_CTRL, 0x04 as u8) // SRST
+    var i: u64 = 0
+    while i < 1000 {
+        serial.io_wait()
+        i = i + 1
+    }
+    serial.out8(ATA_CTRL, 0x00 as u8)
+    i = 0
+    while i < 1000000 && (serial.in8(ATA_CMD) as u64 & ST_BSY) != 0 {
+        i = i + 1
+    }
+    var top: u64 = 0xE0
+    if slave {
+        top = 0xF0
+    }
+    serial.out8(ATA_DRIVE, top as u8)
+    serial.io_wait()
+}
+
+// ===================================================== RUNDE VIELKERN 3
+// EIN LESEFEHLER DER PLATTE WIRD GEZAEHLT UND GESAGT.
+//
+// Runde VIELKERN 2 stand vor `desk: start /bin/taskbar pid=0` und hatte
+// nichts weiter in der Hand. Der Grund war `elf: refused, reason 1 --
+// no such file` bzw. `reason 20 -- short disk read`, und BEIDE kommen
+// aus derselben Zeile: `ata_read_on` hat aufgegeben und `false`
+// zurueckgegeben, still. Ein Treiber, der stumm scheitert, macht aus
+// einem Plattenfehler einen Dateisystemfehler und aus dem einen
+// Ladefehler -- drei Stockwerke weiter oben sucht man dann den Fehler.
+//
+// `ata_recover` bleibt, wo es war; dazu kommt nur, dass jeder Fehlschlag
+// gezaehlt wird und die ersten acht ihre Zahlen sagen: welcher Block,
+// welches Statusregister. Das ist die Zeile, an der diese Runde gemerkt
+// hat, dass der Fehler UNTEN sitzt und nicht im Lader.
+static mut ata_fehl: u64 = 0
+static mut ata_gesagt: u64 = 0
+static mut ata_lba: u64 = 0
+static mut ata_st: u64 = 0
+
+fn ata_error() -> u64 {
+    return ata_fehl
+}
+
+fn ata_last_lba() -> u64 {
+    return ata_lba
+}
+
+fn ata_letzter_st() -> u64 {
+    return ata_st
+}
+
+fn ata_melden(lba: u64, schreiben: bool) {
+    let st: u64 = serial.in8(ATA_CMD) as u64
+    ata_fehl = ata_fehl + 1
+    ata_lba = lba
+    ata_st = st
+    if ata_gesagt >= 8 {
+        return
+    }
+    ata_gesagt = ata_gesagt + 1
+    var s_r: [u8; 18] = "ata: read fehl b=\0"
+    var s_w: [u8; 19] = "ata: write fehl b=\0"
+    var s_s: [u8; 7] = "  st=\0\0"
+    var s_n: [u8; 5] = "  n=\0"
+    if schreiben {
+        serial.puts((&s_w[0]) as u64)
+    } else {
+        serial.puts((&s_r[0]) as u64)
+    }
+    serial.dec(lba)
+    serial.puts((&s_s[0]) as u64)
+    serial.hex(st)
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(ata_fehl)
+    serial.nl()
+}
+
+fn ata_read_on(lba: u64, dst: u64, slave: bool) -> bool {
+    ata_select_on(lba, slave)
+    serial.out8(ATA_CMD, ATA_READ)
+    if !ata_wait(true) {
+        ata_melden(lba, false)
+        ata_recover(slave)
+        return false
+    }
+    var i: u64 = 0
+    while i < BLOCK_SIZE / 2 {
+        __mmio_write16((dst + i * 2) as *mut u16, in16(ATA_DATA) as u16)
+        i = i + 1
+    }
+    return true
+}
+
+fn ata_write_on(lba: u64, src: u64, slave: bool) -> bool {
+    ata_select_on(lba, slave)
+    serial.out8(ATA_CMD, ATA_WRITE)
+    if !ata_wait(true) {
+        ata_melden(lba, true)
+        ata_recover(slave)
+        return false
+    }
+    var i: u64 = 0
+    while i < BLOCK_SIZE / 2 {
+        out16(ATA_DATA, __mmio_read16((src + i * 2) as *mut u16) as u64)
+        i = i + 1
+    }
+    // RUNDE INSTALL: ERST WARTEN, DANN SPUELEN -- UND DAS IST EIN
+    // FEHLER, DER AELTER IST ALS DIESE RUNDE.
+    //
+    // Hier stand bis heute `out8(ATA_CMD, ATA_FLUSH)` UNMITTELBAR hinter
+    // dem letzten Datenwort. Nach ATA/ATAPI-7 (Abschnitt 6.20) darf ein
+    // Befehl nur an ein Laufwerk gehen, das NICHT beschaeftigt ist: nach
+    // dem letzten Wort eines WRITE SECTORS setzt das Laufwerk BSY und
+    // schreibt. Ein FLUSH CACHE in diesem Fenster ist ein Befehl an ein
+    // besetztes Laufwerk -- die Beschreibung nennt das Ergebnis
+    // "unbestimmt", und QEMU macht daraus je nach Zeitpunkt einen
+    // abgebrochenen Befehl mit gesetztem ERR.
+    //
+    // AUFGEFALLEN IST ES ERST HIER, weil erst diese Runde tausende
+    // Sektoren HINTEREINANDER schreibt: bei einem Dateisystem auf einer
+    // RAM-Platte kommt der Pfad nie vor, und bei den Dutzend Sektoren
+    // der bisherigen Plattentests trifft man das Fenster nicht. Der
+    // Fehler sah aus wie ein Zufall -- derselbe Lauf brach einmal beim
+    // 1032. Sektor ab und einmal gar nicht.
+    // RUNDE INSTALL: KEIN FLUSH JE SEKTOR MEHR -- UND DAS BEHEBT EINEN
+    // FEHLER, DER AELTER IST ALS DIESE RUNDE.
+    //
+    // Hier stand `out8(ATA_CMD, ATA_FLUSH)` UNMITTELBAR hinter dem
+    // letzten Datenwort. Nach ATA/ATAPI-7 (6.20) darf ein Befehl nur an
+    // ein Laufwerk gehen, das nicht beschaeftigt ist; nach dem letzten
+    // Wort eines WRITE SECTORS setzt das Laufwerk BSY und schreibt. Ein
+    // FLUSH CACHE in diesem Fenster ist ein Befehl an ein besetztes
+    // Laufwerk. QEMU macht daraus je nach Zeitpunkt einen abgebrochenen
+    // Befehl mit gesetztem ERR -- und `blk.write` meldete dann einen
+    // Fehler fuer einen Sektor, der in Wirklichkeit auf der Platte
+    // stand.
+    //
+    // AUFGEFALLEN IST ES ERST HIER, weil erst diese Runde tausende
+    // Sektoren HINTEREINANDER schreibt. Bei einem Dutzend Sektoren
+    // trifft man das Fenster nicht; der Fehler sah aus wie ein Zufall.
+    //
+    // GESPUELT WIRD JETZT DORT, WO ES HINGEHOERT: `blk.flush` schickt
+    // FLUSH CACHE EINMAL, und `sync` (Aufruf 162) ruft es. Das ist die
+    // Trennung, die jedes Unix hat -- schreiben und dauerhaft machen
+    // sind zwei Dinge.
+    return ata_wait(false)
+}
+
+
+
+// ------------------------------------------------- Runde K14: das Geraet
+//
+// Bis zu dieser Runde war die Geraetenummer eine GLOBALE Zahl
+// (`kstate.DISK_DEV`): es gab genau eine Platte, und `read` sah nach,
+// welche es gerade war. Sobald zwei Dateisysteme gleichzeitig
+// eingehaengt sind, ist das falsch -- OFS liegt auf der einen, FAT32
+// auf der anderen, und ein Lesevorgang darf nicht davon abhaengen, wer
+// zuletzt `use_ata` gerufen hat.
+//
+// Also bekommt die Schnittstelle das Geraet als ARGUMENT. `read` und
+// `write` oben bleiben genau, was sie waren -- sie reichen die globale
+// Zahl durch -- und `fs.fi` aendert dafuer keine Zeile. Das ist
+// dieselbe Regel wie bei DEV_NVME in Runde K2: eine Platte mehr, und
+// die Schicht darueber merkt nichts davon.
+
+fn ata1_present(state: u64) -> bool {
+    serial.out8(ATA_DRIVE, 0xF0 as u8)
+    serial.io_wait()
+    serial.io_wait()
+    let st: u64 = serial.in8(ATA_CMD) as u64
+    // Das Laufwerksregister zurueck auf den Meister: alles andere in
+    // diesem Kernel geht von ihm aus, und ein stehengelassenes Bit 4
+    // waere ein Fehler, der erst drei Bloecke spaeter auffaellt.
+    serial.out8(ATA_DRIVE, 0xE0 as u8)
+    serial.io_wait()
+    if st == 0xFF || st == 0 {
+        return false
+    }
+    return true
+}
+
+// RUNDE K17: KANN DIESES GERAET IM BETRIEB VERSCHWINDEN?
+//
+// Fuer alles, was dieser Kernel seit Runde 62 kennt, ist die Antwort
+// nein: eine RAM-Platte, eine ATA-Platte und ein NVMe-Regler sind da
+// oder waren nie da. Fuer einen Stick ist sie ja.
+//
+// DIE FRAGE MUSS BILLIG SEIN, und das ist kein Feilschen um Takte:
+// `present_on` SCHREIBT fuer DEV_ATA in das Laufwerksregister des
+// Busses (0x1F6). Wer das bei JEDEM `read` taete -- und genau das tat
+// der erste Entwurf der ENODEV-Pruefung in `sys.mnt_gone` --, greift
+// mitten in eine laufende Uebertragung derselben Platte. Gefunden hat
+// es Abschnitt 9 von `tools/k14/run.sh`: die Wurzelplatte war nach dem
+// Lauf nicht mehr Oktett fuer Oktett dieselbe.
+fn removable(dev: u64) -> bool {
+    return is_usb(dev)
+}
+
+fn present_on(state: u64, dev: u64) -> bool {
+    if dev == DEV_ATA1 {
+        return ata1_present(state)
+    }
+    if dev == DEV_ATA {
+        return present(state)
+    }
+    // RUNDE K17: ein Stick kann WEG sein, und zwar mitten im Betrieb.
+    // Das ist der Unterschied zu jeder Platte, die dieser Kernel bisher
+    // kannte -- und deshalb ist diese Zeile die, an der ENODEV entsteht.
+    // RUNDE HOTPLUG-2: JE PLATZ. Ein Stick kann weg sein, waehrend ein
+    // anderer weiterlaeuft -- das ist der ganze Unterschied zu vorher.
+    if is_usb(dev) {
+        return usb.msc_ready_at(state, usb_slot(dev))
+    }
+    if dev == DEV_AHCI {
+        return ahci.blocks(state) != 0
+    }
+    return true
+}
+
+// ==================================================================
+// RUNDE OFS3: WIE GROSS DIE PLATTE WIRKLICH IST
+// ==================================================================
+//
+// Der Kommentar bei `probe_ata1` sagt es fuer die ZWEITE Platte so:
+// "ATA PIO sagt sie nicht von selbst, und ein IDENTIFY dafuer waere ein
+// zweites Protokoll fuer eine Zahl, die der Wirt ohnehin vorgibt". Fuer
+// die zweite Platte stimmt das weiter -- ihre Groesse steht auf der
+// Befehlszeile. Fuer die WURZELPLATTE stimmte es nie: dort gab der Wirt
+// die Zahl NICHT vor, `kmain.fi` schrieb sie als Konstante hin
+// (`OSUM_BLOCKS = 4096`), und damit hat der Kernel von JEDER Platte
+// genau zwei Megaoktett benutzt. Eine Platte von 32 MiB lief nach 2 MiB
+// voll und meldete ENOSPC, obwohl 30 MiB unberuehrt dalagen. Das war
+// der ZWEITE Deckel dieser Runde, und er sass hinter dem ersten: die
+// mehrblockige Karte haette allein gar nichts gebracht.
+//
+// IDENTIFY ist der Befehl 0xEC. Er gibt 256 Woerter zurueck; darin
+// stehen die Sektorzahl fuer LBA28 in den Woertern 60 und 61 und die
+// fuer LBA48 in 100 bis 103. Wort 83, Bit 10, sagt, ob das Laufwerk
+// LBA48 ueberhaupt kann.
+//
+// DIE OBERGRENZE IST EHRLICH: dieser Treiber legt die Blocknummer in
+// die vier unteren Bits des Laufwerksregisters -- das ist LBA28, also
+// 268.435.456 Sektoren oder 128 Gibioktett. Was darueber hinausgeht,
+// kann er nicht ansprechen, also behauptet er es auch nicht, sondern
+// schneidet die gemeldete Zahl dort ab. Eine Platte zu melden, die man
+// nicht lesen kann, waere derselbe Fehler wie die Konstante, nur mit
+// einer groesseren Zahl.
+//
+// Meldet die Platte nichts (ein Laufwerk ohne IDENTIFY, ein Wirt, der
+// das Register nicht bedient), kommt 0 zurueck, und der Aufrufer bleibt
+// bei dem, was er vorher hatte. Kein Lauf wird dadurch schlechter.
+fn capacity(state: u64) -> u64 {
+    return identify(state, false)
+}
+
+// Wie viele Bloecke das Geraet hat. Fuer die zweite Platte steht die
+// Zahl in einem eigenen Skalar; sie darf die der ersten nicht anfassen.
+fn blocks_on(state: u64, dev: u64) -> u64 {
+    if dev == DEV_ATA1 {
+        return kstate.get(state, kstate.DISK2_BLOCKS)
+    }
+    // RUNDE INSTALL: DIE ERSTE PLATTE HAT IHRE EIGENE GROESSE, und bis
+    // hierher hat diese Funktion dafuer die Groesse der WURZEL
+    // zurueckgegeben. Solange die Wurzel die ganze Platte war, stimmte
+    // das. Fuer ein `/dev/hda`, auf das ein Installationsprogramm eine
+    // Partitionstafel schreibt, ist es die falsche Zahl -- und zwar in
+    // die gefaehrliche Richtung: `devfs` haette jeden Schreibversuch
+    // hinter dem Ende der Wurzel abgewiesen, und die Sicherungskopie
+    // des GPT-Kopfes liegt im LETZTEN Block der Platte.
+    //
+    // Die Zahl kommt aus IDENTIFY und nicht aus einer Annahme. Ist sie
+    // 0 (kein IDENTIFY gelaufen, keine Platte), bleibt es beim alten
+    // Wert -- jede Messung vor dieser Runde sieht damit, was sie sah.
+    if dev == DEV_ATA {
+        let n: u64 = kstate.get(state, kstate.DISK1_BLOCKS)
+        if n != 0 {
+            return n
+        }
+    }
+    if is_usb(dev) {
+        return usb.msc_blocks_at(state, usb_slot(dev))
+    }
+    if dev == DEV_AHCI {
+        return ahci.blocks(state)
+    }
+    return kstate.get(state, kstate.DISK_BLOCKS)
+}
+
+// ATA IDENTIFY (0xEC) -- WIE VIELE SEKTOREN HAT DIESE PLATTE WIRKLICH.
+//
+// Runde K14 hat die Frage ausdruecklich offengelassen: "ATA PIO sagt von
+// sich aus nicht, wie gross ein Laufwerk ist, und ein IDENTIFY dafuer
+// waere ein zweites Protokoll fuer eine Zahl, die `tools/k14/run.sh`
+// ohnehin kennt". Fuer einen Testlauf stimmt das. Fuer ein Programm,
+// das eine Partitionstafel schreiben soll, nicht: es kann den Wirt
+// nicht fragen.
+//
+// Der Befehl gibt 256 Woerter zurueck, und ALLE 256 muessen gelesen
+// werden -- sonst bleibt das Laufwerk in DRQ stehen und der naechste
+// Lesevorgang bekommt den Rest dieser Antwort. Woerter 60/61 sind die
+// Sektorzahl in LBA28, 100..103 die in LBA48. Dieser Treiber adressiert
+// in LBA28 (`ata_select` legt die oberen vier Bits ins
+// Laufwerksregister), also wird oben gekappt: was er nicht adressieren
+// kann, meldet er auch nicht.
+fn identify(state: u64, slave: bool) -> u64 {
+    // MERGE-ENTSCHEIDUNG: OFS3 (`capacity`) und INSTALL (`identify`)
+    // hatten zwei fast gleiche Fassungen desselben ATA-Befehls. Es
+    // steht jetzt EINE da, und sie traegt die Vorsicht von BEIDEN:
+    // die Laufwerkswahl von INSTALL (Master und Slave), dessen
+    // Wiederherstellung des Laufwerksregisters am Ende, das Bit 10 im
+    // Wort 83 von OFS3 (nur dann sagt LBA48 etwas) und dessen
+    // `ata_recover` nach einer Zeitueberschreitung.
+    if !present(state) {
+        return 0
+    }
+    var sel: u64 = 0xA0
+    if slave {
+        sel = 0xB0
+    }
+    serial.out8(ATA_DRIVE, sel as u8)
+    serial.io_wait()
+    serial.io_wait()
+    serial.out8(ATA_COUNT, 0 as u8)
+    serial.out8(ATA_LBA0, 0 as u8)
+    serial.out8(ATA_LBA1, 0 as u8)
+    serial.out8(ATA_LBA2, 0 as u8)
+    serial.out8(ATA_CMD, ATA_IDENTIFY)
+    serial.io_wait()
+    // Status 0 (oder 0xFF) heisst: an dieser Stelle des Busses ist nichts.
+    let st0: u64 = serial.in8(ATA_CMD) as u64
+    if st0 == 0 || st0 == 0xFF {
+        serial.out8(ATA_DRIVE, 0xE0 as u8)
+        return 0
+    }
+    if !ata_wait(true) {
+        ata_recover(false)
+        serial.out8(ATA_DRIVE, 0xE0 as u8)
+        return 0
+    }
+    var lba28: u64 = 0
+    var lba48: u64 = 0
+    var kann48: bool = false
+    var i: u64 = 0
+    // ALLE 256 Woerter muessen abgeholt werden, auch die, die niemanden
+    // interessieren. Ein Datenregister, in dem noch Woerter stehen,
+    // laesst den naechsten Befehl scheitern -- genau der Zustand, den
+    // `ata_recover` seit K14 aufraeumen muss.
+    while i < 256 {
+        let w: u64 = in16(ATA_DATA)
+        if i == 60 {
+            lba28 = lba28 | w
+        }
+        if i == 61 {
+            lba28 = lba28 | (w << 16)
+        }
+        if i == 83 {
+            if (w & 0x0400) != 0 {
+                kann48 = true
+            }
+        }
+        if i == 100 {
+            lba48 = lba48 | w
+        }
+        if i == 101 {
+            lba48 = lba48 | (w << 16)
+        }
+        if i == 102 {
+            lba48 = lba48 | (w << 32)
+        }
+        if i == 103 {
+            lba48 = lba48 | (w << 48)
+        }
+        i = i + 1
+    }
+    serial.out8(ATA_DRIVE, 0xE0 as u8)
+    var n: u64 = lba28
+    if kann48 && lba48 > n {
+        n = lba48
+    }
+    if n > 268435456 {
+        n = 268435456 // LBA28: so weit reicht dieser Treiber, keinen Sektor weiter
+    }
+    return n
+}
+
+// Die erste Platte anmelden und ihre Groesse merken. Rueckgabe: die
+// Sektorzahl, 0 = keine Platte.
+fn probe_ata0(state: u64) -> u64 {
+    kstate.set(state, kstate.DISK1_BLOCKS, 0)
+    if !present(state) {
+        return 0
+    }
+    let n: u64 = identify(state, false)
+    kstate.set(state, kstate.DISK1_BLOCKS, n)
+    return n
+}
+
+// ALLES, WAS DIE PLATTE NOCH IM KOPF HAT, AUF DEN TRAEGER. Der Befehl
+// heisst FLUSH CACHE (0xE7) und ist bei ATA seit 1996 die einzige
+// Zusage, die es ueberhaupt gibt: er kommt erst zurueck, wenn nichts
+// mehr aussteht. Ohne ihn ist "geschrieben" eine Aussage ueber einen
+// Zwischenspeicher und nicht ueber die Platte -- und ein Stromausfall
+// haette recht.
+fn flush(state: u64) -> bool {
+    if kstate.get(state, kstate.DISK_DEV) != DEV_ATA {
+        return true
+    }
+    serial.out8(ATA_DRIVE, 0xE0 as u8)
+    serial.io_wait()
+    serial.out8(ATA_CMD, ATA_FLUSH)
+    serial.io_wait()
+    return ata_wait(false)
+}
+
+// Die zweite Platte anmelden. `n` ist ihre Groesse in Bloecken, wie sie
+// der Aufrufer kennt -- ATA PIO sagt sie nicht von selbst, und ein
+// IDENTIFY dafuer waere ein zweites Protokoll fuer eine Zahl, die der
+// Wirt ohnehin vorgibt.
+fn probe_ata1(state: u64, n: u64) -> bool {
+    kstate.set(state, kstate.DISK2_DEV, DEV_ATA1)
+    kstate.set(state, kstate.DISK2_BLOCKS, 0)
+    if !ata1_present(state) {
+        return false
+    }
+    // Ein Geraet, das antwortet, muss auch seinen ersten Block
+    // hergeben. Ein Statusregister, das nicht 0xFF liest, ist noch
+    // keine Platte -- QEMU laesst den Sklaven auch dann antworten, wenn
+    // gar kein -drive daran haengt.
+    var probe: [u8; 512] = [0 as u8; 512]
+    if !ata_read_on(0, (&probe[0]) as u64, true) {
+        return false
+    }
+    kstate.set(state, kstate.DISK2_BLOCKS, n)
+    return true
+}
+
+fn dev_name(dev: u64) -> u64 {
+    return dev
+}
+
+// EIN ZWEITER VERSUCH, UND NUR EINER. Nach `ata_recover` steht das
+// Laufwerk wieder am Anfang; eine einzelne langsame Antwort ist dann
+// kein Grund, die Platte fuer kaputt zu erklaeren. Ein DRITTER Versuch
+// waere Aberglaube -- was zweimal nicht antwortet, antwortet nicht.
+// RUNDE INSTALL: DASSELBE FUER DAS SCHREIBEN.
+//
+// `ata_read_twice` gibt es seit Runde K14 mit der Begruendung "eine
+// einzelne langsame Antwort ist kein Grund, die Platte fuer kaputt zu
+// erklaeren". Fuer das SCHREIBEN gab es das Gegenstueck nicht -- und
+// bis zu dieser Runde fiel das nicht auf, weil kein Lauf mehr als ein
+// paar Dutzend Sektoren geschrieben hat. Diese Runde schreibt
+// Zehntausende, und zweimal ist dabei genau EIN Sektor
+// fehlgeschlagen; sichtbar wurde das als "das Umbenennen scheiterte"
+// in der Paketverwaltung, also vier Schichten von seiner Ursache
+// entfernt.
+//
+// EIN zweiter Versuch, und nur einer -- dieselbe Regel wie beim Lesen:
+// was zweimal nicht antwortet, antwortet nicht.
+fn ata_write_twice(lba: u64, src: u64, slave: bool) -> bool {
+    if ata_write_on(lba, src, slave) {
+        return true
+    }
+    ata_recover(slave)
+    return ata_write_on(lba, src, slave)
+}
+
+fn ata_read_twice(lba: u64, dst: u64, slave: bool) -> bool {
+    if ata_read_on(lba, dst, slave) {
+        return true
+    }
+    return ata_read_on(lba, dst, slave)
+}
+
+// ================================ RUNDE TON: 32 SEKTOREN AUF EINMAL
+//
+// GEMESSEN, bevor hier eine Zeile stand: /bin/play auf einer WAV-Datei
+// von der IDE-Platte brauchte 4982 ms LESEN fuer 1000 ms Ton -- 99,1
+// Prozent der Laufzeit -- waehrend der Tonkern selbst 8 ms verbrauchte.
+// Dieselbe Datei aus dem Speicher (modfs): 5 ms Lesen, 2 Aussetzer statt
+// 26. Der Ringpuffer war nie zu klein; er lief leer, weil zwischen zwei
+// Schueben 122 Millisekunden Plattenlesen lagen.
+//
+// EIN Befehl fuer 32 Sektoren statt 32 Befehle fuer je einen. Was das
+// spart, ist nicht die Uebertragung -- die bleibt PIO, Wort fuer Wort --
+// sondern das Aufsetzen: Laufwerkswahl, LBA in vier Register, Befehl,
+// und danach das Warten darauf, dass das Laufwerk ueberhaupt anfaengt.
+fn ata_read_run(lba: u64, dst: u64, n: u64, slave: bool) -> bool {
+    ata_select_n(lba, slave, n)
+    serial.out8(ATA_CMD, ATA_READ)
+    var s: u64 = 0
+    while s < n {
+        // NACH JEDEM SEKTOR NEU WARTEN. Das Laufwerk setzt DRQ je
+        // Sektor; wer nur einmal wartet und dann 32 mal 256 Woerter
+        // liest, liest den ersten Sektor 32 mal.
+        if !ata_wait(true) {
+            ata_melden(lba + s, false)
+            ata_recover(slave)
+            return false
+        }
+        insw(ATA_DATA, dst + s * BLOCK_SIZE, BLOCK_SIZE / 2)
+        // VIERHUNDERT NANOSEKUNDEN, VIERMAL DER ERSATZSTATUS.
+        //
+        // ATA/ATAPI-7 (9.5) verlangt sie zwischen dem letzten Wort
+        // eines Blocks und dem ersten Blick auf das Statusregister:
+        // das Laufwerk braucht diese Zeit, um BSY zu setzen. Wer sofort
+        // hinsieht, liest den ALTEN Status -- BSY 0, DRQ 1 -- und haelt
+        // ihn fuer die Bereitschaft zum naechsten Sektor. Dann liest er
+        // denselben Sektor noch einmal, der letzte bleibt unabgeholt,
+        // und das Laufwerk steht mit gesetztem DRQ da, bis der Zaehler
+        // von `ata_wait` durch ist. GENAU DAS ist beim ersten Anlauf
+        // dieser Runde passiert: der ELF-Lader kam nicht durch
+        // /bin/play, und es sah aus wie eine Verklemmung.
+        //
+        // Der Ersatzstatus (0x3F6) wird gelesen und WEGGEWORFEN -- er
+        // ist derselbe wie 0x1F7, loescht aber die Unterbrechung nicht.
+        serial.in8(ATA_CTRL)
+        serial.in8(ATA_CTRL)
+        serial.in8(ATA_CTRL)
+        serial.in8(ATA_CTRL)
+        s = s + 1
+    }
+    return true
+}
+
+// Die Buchhaltung des Puffers, in kstate.BLKC_OFF: je Weg vier
+// Woerter, danach die Zaehler. Ein Weg ist ein Platz fuer einen Zug
+// von BLKC_SECTORS Sektoren.
+const C_STRIDE: u64 = 0x20 // Woerter je Weg
+const C_VALID: u64 = 0x00 // 1, wenn etwas drinsteht
+const C_LBA: u64 = 0x08 // erste enthaltene LBA (absolut)
+const C_N: u64 = 0x10 // wie viele Sektoren
+const C_DEV: u64 = 0x18 // von welchem Geraet
+// Die Zaehler stehen hinter allen Wegen.
+const C_BASE: u64 = 0x200
+const C_HITS: u64 = 0x200
+const C_MISSES: u64 = 0x208
+const C_CMDS: u64 = 0x210 // wie viele ATA-Befehle daraus wurden
+const C_NEXT: u64 = 0x218 // welcher Weg als naechstes ueberschrieben wird
+const C_LAST: u64 = 0x220 // zuletzt gefragte LBA, fuer die Spurerkennung
+const C_RUNS: u64 = 0x228 // Zuege, die die Spurerkennung erlaubt hat
+
+fn cg(state: u64, off: u64) -> u64 {
+    return __mmio_read64((state + kstate.BLKC_OFF + off) as *mut u64)
+}
+
+fn cs(state: u64, off: u64, v: u64) {
+    __mmio_write64((state + kstate.BLKC_OFF + off) as *mut u64, v)
+}
+
+fn wg(state: u64, weg: u64, off: u64) -> u64 {
+    return cg(state, weg * C_STRIDE + off)
+}
+
+fn ws(state: u64, weg: u64, off: u64, v: u64) {
+    cs(state, weg * C_STRIDE + off, v)
+}
+
+fn gone_data(state: u64, weg: u64) -> u64 {
+    return state + kstate.BLKD_OFF + weg * kstate.BLKC_SECTORS * BLOCK_SIZE
+}
+
+// JEDES SCHREIBEN WIRFT IHN WEG. Ein Vorauslesepuffer, der ein
+// Schreiben nicht bemerkt, ist kein Beschleuniger, sondern ein
+// Datenverlust mit Verzoegerung. Es wird NICHT versucht, klug zu sein
+// und nur den betroffenen Weg zu verwerfen: ein Schreiben geht auch
+// durch Wege, die dieser Puffer nicht sieht (`write_on` auf ein
+// zweites Geraet, `install`, `bootmod`), und ein Puffer, der in
+// EINEM dieser Faelle danebenliegt, ist wertlos.
+fn cache_invalidate(state: u64) {
+    var w: u64 = 0
+    while w < kstate.BLKC_WAYS {
+        ws(state, w, C_VALID, 0)
+        w = w + 1
+    }
+}
+
+fn cache_reset(state: u64) {
+    cache_invalidate(state)
+    cs(state, C_HITS, 0)
+    cs(state, C_MISSES, 0)
+    cs(state, C_CMDS, 0)
+    cs(state, C_NEXT, 0)
+    cs(state, C_LAST, 0)
+    cs(state, C_RUNS, 0)
+}
+
+fn cache_hits(state: u64) -> u64 {
+    return cg(state, C_HITS)
+}
+
+fn cache_misses(state: u64) -> u64 {
+    return cg(state, C_MISSES)
+}
+
+fn cache_cmds(state: u64) -> u64 {
+    return cg(state, C_CMDS)
+}
+
+fn cache_runs(state: u64) -> u64 {
+    return cg(state, C_RUNS)
+}
+
+// Ein Sektor, wenn moeglich aus einem der Wege, sonst BLKC_SECTORS auf
+// einmal von der Platte. `dev` unterscheidet Meister und Sklave:
+// dieselbe LBA heisst auf zwei Laufwerken zweierlei.
+fn ata_read_cached(state: u64, lba: u64, dst: u64, dev: u64, ende: u64) -> bool {
+    let slave: bool = dev == DEV_ATA1
+    var w: u64 = 0
+    while w < kstate.BLKC_WAYS {
+        if wg(state, w, C_VALID) == 1 && wg(state, w, C_DEV) == dev {
+            let c0: u64 = wg(state, w, C_LBA)
+            if lba >= c0 && lba < c0 + wg(state, w, C_N) {
+                cs(state, C_HITS, cg(state, C_HITS) + 1)
+                cs(state, C_LAST, lba)
+                copy(gone_data(state, w) + (lba - c0) * BLOCK_SIZE, dst)
+                return true
+            }
+        }
+        w = w + 1
+    }
+    cs(state, C_MISSES, cg(state, C_MISSES) + 1)
+    // KEINE SPURERKENNUNG -- ACHT PLAETZE STATTDESSEN. GEMESSEN:
+    //
+    //   1 Weg,  immer vorauslesen   /bin/play kam nicht durch den Lader
+    //   2 Wege, immer vorauslesen   dasselbe
+    //   2 Wege, nur bei lba+1       lief, aber 549 Treffer zu 4697 Fehl
+    //                               und nur 17 Zuege: 5049 ms Lesen,
+    //                               also GAR KEINE Verbesserung
+    //
+    // Der Grund steht in diesen Zahlen: dieses Dateisystem liest nie
+    // zwei Datenbloecke hintereinander. Zwischen je zwei Bloecken einer
+    // Datei liegt ein Zeiger- oder Inodeblock ganz woanders, und damit
+    // ist `lba == vorher + 1` fast nie wahr. Eine Spurerkennung misst
+    // hier nicht die Datei, sondern das Dateisystem.
+    //
+    // Acht Plaetze loesen dasselbe Problem ohne Heuristik: der
+    // Zeigerblock bleibt in seinem Weg liegen, waehrend die Daten durch
+    // die anderen sieben wandern. Vorausgelesen wird immer.
+    cs(state, C_RUNS, cg(state, C_RUNS) + 1)
+    // REIHUM. Zwei Wege und ein Zeiger darauf sind genug, um Zeiger-
+    // und Datenbloecke auseinanderzuhalten; eine echte Verdraengung
+    // nach Alter braeuchte eine Uhr, die dieser Weg nicht hat.
+    let ziel: u64 = cg(state, C_NEXT) % kstate.BLKC_WAYS
+    cs(state, C_NEXT, ziel + 1)
+    let daten: u64 = gone_data(state, ziel)
+    var n: u64 = kstate.BLKC_SECTORS
+    // NICHT UEBER DAS ENDE HINAUS. Ein Laufwerk, das ueber die letzte
+    // LBA gefragt wird, meldet ERR -- und dann ist der ganze Zug
+    // verloren, auch der gute Teil davon.
+    if ende > lba && ende - lba < n {
+        n = ende - lba
+    }
+    if n == 0 {
+        n = 1
+    }
+    ws(state, ziel, C_VALID, 0)
+    cs(state, C_CMDS, cg(state, C_CMDS) + 1)
+    if !ata_read_run(lba, daten, n, slave) {
+        // RUECKFALL AUF DEN ALTEN WEG. Ein Laufwerk, das mit einem Zug
+        // nicht zurechtkommt, gibt es -- und dann ist ein langsamer
+        // Lauf besser als gar keiner.
+        return ata_read_twice(lba, dst, slave)
+    }
+    ws(state, ziel, C_LBA, lba)
+    ws(state, ziel, C_N, n)
+    ws(state, ziel, C_DEV, dev)
+    ws(state, ziel, C_VALID, 1)
+    copy(daten, dst)
+    return true
+}
+
+fn read_on(state: u64, dev: u64, lba: u64, dst: u64) -> bool {
+    if lba >= blocks_on(state, dev) {
+        return false
+    }
+    if dev == DEV_ATA || dev == DEV_ATA1 {
+        return ata_read_cached(state, lba, dst, dev, blocks_on(state, dev))
+    }
+    if dev == DEV_NVME {
+        return nvme.read_block(state, lba, dst)
+    }
+    if is_usb(dev) {
+        return usb.msc_read_at(state, usb_slot(dev), lba, dst)
+    }
+    if dev == DEV_AHCI {
+        return ahci.read_block(state, lba, dst)
+    }
+    let base: u64 = kstate.get(state, kstate.DISK)
+    if base == 0 {
+        return false
+    }
+    copy(base + lba * BLOCK_SIZE, dst)
+    return true
+}
+
+fn write_on(state: u64, dev: u64, lba: u64, src: u64) -> bool {
+    if lba >= blocks_on(state, dev) {
+        return false
+    }
+    cache_invalidate(state)
+    if dev == DEV_ATA {
+        return ata_write_twice(lba, src, false)
+    }
+    if dev == DEV_ATA1 {
+        return ata_write_twice(lba, src, true)
+    }
+    if dev == DEV_NVME {
+        return nvme.write_block(state, lba, src)
+    }
+    if is_usb(dev) {
+        return usb.msc_write_at(state, usb_slot(dev), lba, src)
+    }
+    if dev == DEV_AHCI {
+        return ahci.write_block(state, lba, src)
+    }
+    let base: u64 = kstate.get(state, kstate.DISK)
+    if base == 0 {
+        return false
+    }
+    copy(src, base + lba * BLOCK_SIZE)
+    return true
+}
+
+// ------------------------------------------------------- the interface
+
+// ================================================ RUNDE KRYPTO (K-019)
+//
+// DIE EINE STELLE, an der die Plattenverschluesselung im Lesepfad
+// haengt. Sie steht hier und nicht in `fs.fi`, weil hier der EINE
+// Durchgang zur Wurzelplatte ist -- alles darueber (OFS, sein Journal,
+// FAT, ext4, NTFS) liest weiter Bloecke und merkt nichts.
+//
+// Ist der Traeger nicht verschluesselt oder der Schluessel nicht da,
+// tut `krypto.active` false und dieser Weg ist Oktett fuer Oktett der
+// von vorher.
+fn read_crypt(state: u64, lba: u64, dst: u64) -> bool {
+    // Der Geheimtext wird in den Puffer der Runde geholt, entschluesselt
+    // und erst dann dem Aufrufer gegeben. Der Aufrufer sieht nie
+    // Geheimtext -- auch dann nicht, wenn die Entschluesselung
+    // scheitert.
+    let buf: u64 = state + kstate.CRY_BUF
+    if !read_raw(state, lba, buf) {
+        return false
+    }
+    return krypto.decrypt_sector(state, lba, buf, dst)
+}
+
+fn write_crypt(state: u64, lba: u64, src: u64) -> bool {
+    let buf: u64 = state + kstate.CRY_BUF
+    if !krypto.encrypt_sector(state, lba, src, buf) {
+        return false
+    }
+    return write_raw(state, lba, buf)
+}
+
+fn read(state: u64, lba: u64, dst: u64) -> bool {
+    if krypto.active(state) {
+        return read_crypt(state, lba, dst)
+    }
+    return read_raw(state, lba, dst)
+}
+
+fn read_raw(state: u64, lba: u64, dst: u64) -> bool {
+    if lba >= blocks(state) {
+        return false
+    }
+    // RUNDE INSTALL: DIE EINE ZEILE. `lba` ist relativ zur Wurzel,
+    // `abs` absolut auf dem Geraet. Ohne einen Versatz sind beide
+    // gleich, und dann ist dieser Lauf Oktett fuer Oktett der von
+    // vorher.
+    let abs: u64 = lba + kstate.get(state, kstate.DISK_FIRST)
+    // RUNDE INSTALL: LESEN WIRD WIEDERHOLT, GENAU WIE SCHREIBEN.
+    //
+    // Hier stand `ata_read(abs, dst)` -- ein EINZIGER Versuch, ohne
+    // `ata_recover`. Gegenueber stand `write` mit `ata_write_twice`:
+    // zwei Versuche, dazwischen ein Ruecksetzen. Zwei Umsetzungen
+    // desselben Weges, und nur eine davon war repariert worden.
+    //
+    // WAS DAS KOSTETE, IST GEMESSEN: derselbe Platteninhalt -- `cmp`
+    // bestaetigt Oktett fuer Oktett --, einmal unmittelbar nach der
+    // Installation gestartet und einmal ueber eine Kopie. Direkt:
+    // `opk: das Umbenennen scheiterte`, danach `sh: cannot run opk
+    // -> -2`, das Dateisystem war fuer den Rest des Laufes hin. Ueber
+    // die Kopie: `opk: installiert hallo -> 0`, zehnmal von zehn. Der
+    // Unterschied war allein die Zugriffszeit des Wirtes.
+    //
+    // Ein Lesefehler ohne `ata_recover` laesst das Laufwerk in dem
+    // Zustand stehen, in dem es gestolpert ist -- deshalb war nicht
+    // ein Block verloren, sondern alle folgenden.
+    let dv: u64 = kstate.get(state, kstate.DISK_DEV)
+    if dv == DEV_ATA || dv == DEV_ATA1 {
+        return ata_read_cached(state, abs, dst, dv,
+            kstate.get(state, kstate.DISK_FIRST) + blocks(state))
+    }
+    if kstate.get(state, kstate.DISK_DEV) == DEV_NVME {
+        return nvme.read_block(state, abs, dst)
+    }
+    if kstate.get(state, kstate.DISK_DEV) == DEV_AHCI {
+        return ahci.read_block(state, abs, dst)
+    }
+    let base: u64 = kstate.get(state, kstate.DISK)
+    if base == 0 {
+        return false
+    }
+    copy(base + abs * BLOCK_SIZE, dst)
+    return true
+}
+
+fn write(state: u64, lba: u64, src: u64) -> bool {
+    if krypto.active(state) {
+        return write_crypt(state, lba, src)
+    }
+    return write_raw(state, lba, src)
+}
+
+fn write_raw(state: u64, lba: u64, src: u64) -> bool {
+    if lba >= blocks(state) {
+        return false
+    }
+    let abs: u64 = lba + kstate.get(state, kstate.DISK_FIRST)
+    cache_invalidate(state)
+    if kstate.get(state, kstate.DISK_DEV) == DEV_ATA {
+        return ata_write_twice(abs, src, false)
+    }
+    if kstate.get(state, kstate.DISK_DEV) == DEV_ATA1 {
+        return ata_write_twice(abs, src, true)
+    }
+    if kstate.get(state, kstate.DISK_DEV) == DEV_NVME {
+        return nvme.write_block(state, abs, src)
+    }
+    if kstate.get(state, kstate.DISK_DEV) == DEV_AHCI {
+        return ahci.write_block(state, abs, src)
+    }
+    let base: u64 = kstate.get(state, kstate.DISK)
+    if base == 0 {
+        return false
+    }
+    copy(src, base + abs * BLOCK_SIZE)
+    return true
+}

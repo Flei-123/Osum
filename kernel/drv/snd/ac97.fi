@@ -1,0 +1,1024 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/ac97.fi -- der AC97-Treiber.
+//
+// HERKUNFT, und sie gehoert an den Anfang, damit niemand sie
+// rekonstruieren muss: diese Datei ist in Runde MEDIA1 entstanden
+// (Zweig `media1`, Commit dda4b76) und in Runde HDA auf den Zweig
+// `mergeline2` gebracht worden. Der Auftrag der Runde HDA lautete
+// "AC97 zuerst, damit du eine Strecke hast, die du WIRKLICH messen
+// kannst" -- und auf `mergeline2` gab es keine. Sie ein zweites Mal zu
+// schreiben haette eine schlechtere Fassung derselben 841 Zeilen
+// ergeben und beim naechsten Verschmelzen einen Konflikt in jeder
+// davon. Was die Runde HDA hier WIRKLICH geaendert hat, steht am Ende
+// dieses Kopfes und sonst nirgends.
+//
+// RUNDE MEDIA1: der erste hoerbare Ton.
+//
+// Osum hatte bis zu dieser Runde kein Geraet, das Schall macht. Der
+// Fahrplan (Block F der Roadmap) sagt, wo diese Datei steht und warum
+// sie AC97 spricht und nicht Intel HDA -- die Begruendung gehoert
+// hierher und nicht in ein Protokoll, das niemand liest:
+//
+//   AC97 ist auf ECHTER Hardware seit etwa 2006 ausgestorben. Es lebt
+//   in QEMU (`-device AC97`), in VirtualBox und in Bochs. Ein Treiber
+//   dafuer bringt diesem Projekt KEINEN Ton auf einem echten PC.
+//
+//   Er bringt etwas anderes, und deshalb steht er vor HDA: er ist 300
+//   bis 600 Zeilen statt 1000 bis 2000, er hat keine Codec-Topologie
+//   (der Teil, an dem HDA je nach Hersteller scheitert), und er misst
+//   ALLES, was die Schicht darueber koennen muss -- Mischer, Ringpuffer,
+//   Nachziehen des letzten gueltigen Eintrags, und vor allem die
+//   ABSPIELPOSITION, die spaeter die Leituhr fuer Lippensynchronitaet
+//   ist. Wer diese vier Dinge an AC97 richtig gebaut hat, tauscht fuer
+//   HDA genau diese Datei aus und nichts darueber. `kernel/audio.fi`
+//   ist genau diese Trennlinie, und docs/AUDIO.md schreibt sie fest.
+//
+// WIE AC97 GEBAUT IST, in der Reihenfolge, in der es angefasst wird:
+//
+//   ZWEI PORTBEREICHE, beide aus der PCI-Konfiguration:
+//     BAR0 "NAM"  (Native Audio Mixer)      -- 256 Oktette, der Mischer
+//     BAR1 "NABM" (Native Audio Bus Master) -- 64 Oktette, der DMA
+//
+//   DER MISCHER ist eine Reihe von 16-Bit-Registern. Zwei zaehlen hier:
+//     0x02 Master-Lautstaerke, 0x18 PCM-Ausgang. Beide sind nach dem
+//     Ruecksetzen STUMM (Bit 15); ein Treiber, der sie nicht anfasst,
+//     schreibt Oktette in ein Geraet, das schweigt. Genau dafuer gibt
+//     es in dieser Runde die Gegenprobe `audnomix`.
+//
+//   DER DMA laeuft ueber eine BUFFER DESCRIPTOR LIST: bis zu 32
+//     Eintraege zu acht Oktetten -- vier Oktette Adresse, zwei Oktette
+//     ANZAHL DER 16-BIT-WERTE (nicht Oktette, nicht Rahmen!), zwei
+//     Oktette Steuerbits (Bit 31 IOC = Unterbrechung am Ende, Bit 30
+//     BUP = danach Stille statt Halt).
+//
+//   DER FALLSTRICK, den jede Anleitung nennt und der trotzdem jeden
+//     erwischt: der DMA HAELT AN, sobald der laufende Index (CIV) den
+//     letzten gueltigen (LVI) erreicht. Wer LVI nicht nachzieht, hoert
+//     ein Zehntel einer Sekunde und dann nichts mehr. Diese Datei zieht
+//     LVI in `submit` nach, und sie ZAEHLT, wie oft der Puffer
+//     trotzdem leergelaufen ist (`underruns`) -- eine Zahl, die
+//     `tools/media1/run.sh` gegen null haelt, statt zu behaupten, es
+//     laufe schon.
+//
+//   DIE ABSPIELPOSITION kommt aus CIV (welcher Eintrag laeuft) und PICB
+//     (wie viele 16-Bit-Werte im laufenden Eintrag noch fehlen).
+//     Daraus wird ein Rahmenzaehler, der nie rueckwaerts geht:
+//
+//       roh   = CIV * RAHMEN_JE_EINTRAG + (RAHMEN_JE_EINTRAG - PICB/2)
+//       total = umlaeufe * RAHMEN_IM_RING + roh
+//
+//     Das ist die Uhr, an der spaeter das Bild haengt, und sie ist
+//     ABSICHTLICH nicht der Zeitgeber der Maschine: der Quarz des
+//     Tonchips laeuft mit eigenen +-100 ppm, und ein Bild, das am
+//     Prozessortakt haengt, laeuft ueber eine Stunde um eine Drittel
+//     Sekunde davon (siehe /root/osum-research-raw.md, Teilaufgabe 2d).
+//
+// WAS DIESE DATEI NICHT TUT, damit es niemand vermutet: keine Aufnahme
+// (die beiden Eingangskanaele bleiben unberuehrt), keine Unterbrechung
+// im Regelbetrieb (die Position wird abgefragt, nicht gemeldet -- siehe
+// docs/AUDIO.md, Abschnitt "Was fehlt"), kein Umrechnen der Abtastrate
+// (das macht die Schicht darueber), nur 16 Bit, zwei Kanaele.
+//
+// ================================ WAS RUNDE HDA AN DIESER DATEI TAT
+//
+// DREI DINGE, und mehr nicht:
+//
+//   1. DIE ABTASTRATE IST NICHT MEHR FEST. MEDIA1 kannte 48000 Hz und
+//      sonst nichts; der Auftrag der Runde HDA verlangt 44,1 UND 48 kHz.
+//      AC97 kann das seit Fassung 2.1 ueber VRA (Variable Rate Audio):
+//      Bit 0 in EXT_ID sagt, dass der Codec es kann, Bit 0 in EXT_CTL
+//      schaltet es an, und danach steht in Register 0x2C die Rate des
+//      Wandlers. Ein Codec ohne VRA bleibt bei 48000, und `set_rate`
+//      sagt das mit `false`, statt eine Rate zu behaupten, die der
+//      Chip nicht faehrt -- ein halber Ton mit falscher Tonhoehe waere
+//      der schlechtere Fehler.
+//   2. DIE UNTERBRECHUNG WIRD VERDRAHTET, wenn die Schicht darueber es
+//      verlangt: IOCE in CR und ein Vektor ueber den I/O-APIC. MEDIA1
+//      hat die Bits absichtlich ausgelassen, weil kein Vektor auf der
+//      Leitung lag; er liegt jetzt (`arm_irq`).
+//   3. `set_rate` und `rate` sind in die Ausfuhrliste gekommen.
+//
+// Alles andere in dieser Datei ist Zeile fuer Zeile die Fassung aus
+// MEDIA1, samt ihren Messungen und ihren Fallenbeschreibungen.
+
+profile kernel
+
+import lib.kstate
+import serial
+import bus.pci
+import mm.mem
+import arch.arch
+import arch.x86_64.apic
+
+export {
+    init, present, ready, why, bdf, nam, nabm,
+    start, stop, running, submit, ring_base, ring_octets,
+    entries, entry_frames, entry_octets, ring_frames,
+    position_frames, position_raw, civ, picb, status, clear_status,
+    set_volume, volume, muted, set_muted,
+    underruns, submits, starts, stops, irqs, irq, dch_seen,
+    reset_box_pub, submitted_frames, backsteps,
+    codec_ready, vendor, device, master_reg, pcm_reg,
+    CHANNELS, BITS, RATE, RATE_OLD,
+    rate, set_rate, vra, arm_irq, irq_armed,
+    W_OK, W_OFF, W_NODEV, W_NOBAR, W_NORING, W_HIGHRING, W_NOCODEC
+}
+
+// ------------------------------------------------------- die Geometrie
+//
+// ZWEIUNDDREISSIG EINTRAEGE ZU 128 RAHMEN. Beide Zahlen sind gemessen
+// und nicht gewaehlt, und die erste ist eine Falle, in die dieser
+// Treiber schon einmal gelaufen ist -- sie steht hier, damit niemand
+// sie ein zweites Mal stellt:
+//
+//   DER LAUFENDE INDEX ZAEHLT IMMER BIS 32, nicht bis zur Zahl der
+//   Eintraege, die der Treiber benutzt. Die erste Fassung hatte acht
+//   Eintraege zu 512 Rahmen und rechnete `CIV % 8`. Der Regler zaehlte
+//   aber 0,1,...,7,8,9,...,31,0 -- durch 24 Eintraege, die nie
+//   beschrieben worden waren, mit Laenge null, in null Zeit. Die
+//   Position sprang, die Umlaufzaehlung explodierte, der Schreiber
+//   hielt den Ring fuer leer und schrieb eine ganze Sekunde in ein
+//   Viertel davon. GEMESSEN: 48128 Rahmen geschrieben, 12288 in der
+//   Datei. Seitdem ist die Zahl der Eintraege 32 und der Index braucht
+//   keine Umrechnung mehr.
+//
+//   128 RAHMEN je Eintrag sind 2,667 ms bei 48 kHz; 32 davon sind
+//   85,33 ms Ring. Das ist dieselbe Gesamtverzoegerung wie vorher, nur
+//   feiner geteilt: die Stille, mit der ein angefangener Eintrag am
+//   Dateiende aufgefuellt wird, ist damit hoechstens 2,66 ms statt
+//   10,65 ms.
+//
+// WARUM NICHT KLEINER: die Empfehlung aus der Recherche lautet 32 bis
+// 64 ms Ring fuer ein Betriebssystem dieser Groesse. Der Zeitgeber
+// dieses Kernels schlaegt alle 10 ms; ein Ring, der kuerzer ist als
+// zwei Marken, laeuft bei jedem Kontextwechsel leer.
+//
+// WARUM NICHT GROESSER: der Ring IST die Verzoegerung zwischen "das
+// Programm schreibt" und "man hoert es". 85 ms sind fuer Wiedergabe
+// unauffaellig; fuer Tastenklick oder Spiel waeren sie zu viel.
+const CHANNELS: u64 = 2
+const BITS: u64 = 16
+// DIE ZWEI RATEN. 48000 ist die Vorgabe (es ist die Rate, die JEDER
+// AC97-Codec ohne VRA faehrt, und die Rate der Systemklaenge); 44100
+// ist die zweite, weil praktisch jede Musikdatei sie hat -- eine
+// CD-Spur, ein MP3 aus dem Netz, eine WAV-Datei von der Platte.
+// Andere Raten werden NICHT ausgehandelt: die Schicht darueber rechnet
+// sie um, und der Treiber behauptet nichts, was er nicht messen kann.
+const RATE: u64 = 48000
+const RATE_OLD: u64 = 44100
+const FRAME_OCTETS: u64 = 4 // 2 Kanaele * 16 Bit
+const ENTRY_FRAMES: u64 = 128
+const ENTRY_OCTETS: u64 = 512 // ENTRY_FRAMES * FRAME_OCTETS
+const ENTRIES: u64 = 32
+const RING_OCTETS: u64 = 16384 // ENTRIES * ENTRY_OCTETS
+const RING_FRAMES: u64 = 4096 // ENTRIES * ENTRY_FRAMES
+const RING_PAGES: u64 = 4 // RING_OCTETS / 4096
+
+// ------------------------------------------------- der Platz in kdata
+//
+// Eine Seite, 0x7A000. Die Skalare stehen unten, die Deskriptorliste
+// ab 0x800 -- 32 Eintraege zu acht Oktetten sind 256 Oktette, und die
+// Liste muss auf acht Oktette ausgerichtet liegen, was sie hier ist,
+// weil die ganze Seite ausgerichtet ist. Eingetragen in
+// `tools/kernel/memmap.py`, sonst faellt die naechste Runde darauf.
+const BDL_OFF: u64 = 0x800
+const BDL_ENTRIES: u64 = 32 // die Hardware kann nicht mehr, und
+                            // GENAU so viele benutzt dieser Treiber (siehe oben)
+
+const S_READY: u64 = 0x000
+const S_BDF: u64 = 0x008
+const S_NAM: u64 = 0x010
+const S_NABM: u64 = 0x018
+const S_RING: u64 = 0x020
+const S_RUNNING: u64 = 0x028
+const S_HEAD: u64 = 0x030 // naechster zu fuellender Eintrag
+const S_SUBMITTED: u64 = 0x038 // Rahmen, die der Hardware uebergeben sind
+const S_LASTRAW: u64 = 0x040
+const S_WRAPS: u64 = 0x048
+const S_POS: u64 = 0x050 // zuletzt herausgegebene Position
+const S_VOL: u64 = 0x058
+const S_IRQS: u64 = 0x060
+const S_UNDER: u64 = 0x068
+const S_WHY: u64 = 0x070
+const S_VENDOR: u64 = 0x078
+const S_DEVICE: u64 = 0x080
+const S_CODEC: u64 = 0x088
+const S_STARTS: u64 = 0x090
+const S_STOPS: u64 = 0x098
+const S_SUBMITS: u64 = 0x0A0
+const S_DCH: u64 = 0x0A8
+const S_MUTE: u64 = 0x0B0
+const S_MASTER: u64 = 0x0B8 // was zuletzt in den Mischer geschrieben wurde
+const S_PCMREG: u64 = 0x0C0
+const S_BACKW: u64 = 0x0C8 // wie oft die Position klammern musste
+const S_RATE: u64 = 0x0D0 // die eingestellte Abtastrate in Hz
+const S_VRA: u64 = 0x0D8 // kann der Codec die Rate ueberhaupt aendern
+const S_IRQON: u64 = 0x0E0 // liegt ein Vektor auf der Leitung
+const S_GUARD: u64 = 0x0E8 // gegen Wiedereintritt aus dem Zeitgeber (Runde HDA)
+
+// Warum es nicht ging. Eine Zahl statt eines Textes, damit Ring 3 sie
+// unveraendert weiterreichen kann.
+const W_OK: u64 = 0
+const W_OFF: u64 = 1 // `noaudio` auf der Befehlszeile
+const W_NODEV: u64 = 2 // kein Geraet der Klasse 04:01 auf dem Bus
+const W_NOBAR: u64 = 3 // die beiden Portbereiche fehlen
+const W_NORING: u64 = 4 // kein Speicher fuer den Ring
+const W_HIGHRING: u64 = 5 // Ring ueber 4 GiB -- die Liste kann das nicht
+const W_NOCODEC: u64 = 6 // der Codec meldet sich nicht bereit
+
+// -------------------------------------------------------- der Mischer
+const NAM_RESET: u64 = 0x00
+const NAM_MASTER: u64 = 0x02
+const NAM_PCM_OUT: u64 = 0x18
+const NAM_EXT_ID: u64 = 0x28
+const NAM_EXT_CTL: u64 = 0x2A
+const NAM_DAC_RATE: u64 = 0x2C
+const MUTE_BIT: u64 = 0x8000
+
+// ------------------------------------------------------- der Busmaster
+// Die Box des PCM-Ausgangs liegt bei 0x10; Eingang und Mikrofon liegen
+// davor und dahinter und werden hier nicht angefasst.
+const PO_BDBAR: u64 = 0x10 // 32 Bit: Adresse der Liste
+const PO_CIV: u64 = 0x14 // 8 Bit: laufender Eintrag
+const PO_LVI: u64 = 0x15 // 8 Bit: letzter gueltiger Eintrag
+const PO_SR: u64 = 0x16 // 16 Bit: Zustand
+const PO_PICB: u64 = 0x18 // 16 Bit: Rest im laufenden Eintrag
+const PO_PIV: u64 = 0x1A
+const PO_CR: u64 = 0x1B // 8 Bit: Steuerung
+const GLOB_CNT: u64 = 0x2C
+const GLOB_STA: u64 = 0x30
+
+const CR_RPBM: u64 = 0x01 // laufen
+const CR_RR: u64 = 0x02 // Register ruecksetzen
+const CR_LVBIE: u64 = 0x04
+const CR_IOCE: u64 = 0x10
+
+const SR_DCH: u64 = 0x01 // DMA-Halbleiter angehalten
+const SR_CELV: u64 = 0x02
+const SR_LVBCI: u64 = 0x04
+const SR_BCIS: u64 = 0x08
+const SR_FIFOE: u64 = 0x10
+
+const GC_COLD: u64 = 0x02
+const GS_PCR: u64 = 0x100 // primaerer Codec bereit
+
+const SPIN_LIMIT: u64 = 200000
+
+// ------------------------------------------------------ kleine Helfer
+
+fn g(state: u64, off: u64) -> u64 {
+    return kstate.get(state + kstate.AUD_OFF, off)
+}
+
+fn s(state: u64, off: u64, v: u64) {
+    kstate.set(state + kstate.AUD_OFF, off, v)
+}
+
+fn nam(state: u64) -> u64 {
+    return g(state, S_NAM)
+}
+
+fn nabm(state: u64) -> u64 {
+    return g(state, S_NABM)
+}
+
+fn bdf(state: u64) -> u64 {
+    return g(state, S_BDF)
+}
+
+fn present(state: u64) -> bool {
+    return g(state, S_NABM) != 0
+}
+
+fn ready(state: u64) -> bool {
+    return g(state, S_READY) != 0
+}
+
+fn why(state: u64) -> u64 {
+    return g(state, S_WHY)
+}
+
+fn running(state: u64) -> bool {
+    return g(state, S_RUNNING) != 0
+}
+
+fn ring_base(state: u64) -> u64 {
+    return g(state, S_RING)
+}
+
+fn ring_octets(state: u64) -> u64 {
+    return RING_OCTETS
+}
+
+fn ring_frames(state: u64) -> u64 {
+    return RING_FRAMES
+}
+
+fn entries(state: u64) -> u64 {
+    return ENTRIES
+}
+
+fn entry_frames(state: u64) -> u64 {
+    return ENTRY_FRAMES
+}
+
+fn entry_octets(state: u64) -> u64 {
+    return ENTRY_OCTETS
+}
+
+fn underruns(state: u64) -> u64 {
+    return g(state, S_UNDER)
+}
+
+fn submits(state: u64) -> u64 {
+    return g(state, S_SUBMITS)
+}
+
+fn starts(state: u64) -> u64 {
+    return g(state, S_STARTS)
+}
+
+fn stops(state: u64) -> u64 {
+    return g(state, S_STOPS)
+}
+
+fn irqs(state: u64) -> u64 {
+    return g(state, S_IRQS)
+}
+
+fn dch_seen(state: u64) -> u64 {
+    return g(state, S_DCH)
+}
+
+// Wie viele Rahmen der Hardware bereits uebergeben sind. Die Schicht
+// darueber rechnet daraus, welcher Eintrag als naechster faellig ist;
+// sie darf den Skalar nicht selbst lesen, weil der Platz in kdata dem
+// Treiber gehoert.
+// Wie oft die Position geklammert werden musste, weil die rohe
+// Rechnung kleiner war als der zuletzt herausgegebene Wert. Eine Uhr,
+// die ihre eigene Klammer nicht mitzaehlt, behauptet Monotonie statt
+// sie zu belegen -- `kernel/time.fi` zaehlt aus demselben Grund
+// TIME_BACK mit.
+fn backsteps(state: u64) -> u64 {
+    return g(state, S_BACKW)
+}
+
+fn submitted_frames(state: u64) -> u64 {
+    return g(state, S_SUBMITTED)
+}
+
+// Die Box zuruecksetzen, von aussen. `audio.reset` ruft das, damit zwei
+// Wiedergaben hintereinander bei null anfangen -- ohne das truege die
+// zweite die Position der ersten weiter, und `samples_played` waere
+// als Uhr fuer den zweiten Film unbrauchbar.
+fn reset_box_pub(state: u64) {
+    if !present(state) {
+        return
+    }
+    reset_box(state)
+    zero_ring(state)
+    let b: u64 = nabm(state)
+    pout32(b, PO_BDBAR, bdl(state))
+}
+
+fn codec_ready(state: u64) -> bool {
+    return g(state, S_CODEC) != 0
+}
+
+fn vendor(state: u64) -> u64 {
+    return g(state, S_VENDOR)
+}
+
+fn device(state: u64) -> u64 {
+    return g(state, S_DEVICE)
+}
+
+fn master_reg(state: u64) -> u64 {
+    return g(state, S_MASTER)
+}
+
+fn pcm_reg(state: u64) -> u64 {
+    return g(state, S_PCMREG)
+}
+
+fn volume(state: u64) -> u64 {
+    return g(state, S_VOL)
+}
+
+fn muted(state: u64) -> bool {
+    return g(state, S_MUTE) != 0
+}
+
+// ==================================================== RUNDE HDA: DIE RATE
+//
+// AC97 fuhr bis Fassung 2.0 GENAU 48000 Hz -- der Wandler haengt am
+// Bittakt des AC-Link und hat gar keinen eigenen Teiler. Fassung 2.1
+// hat VRA nachgereicht (Variable Rate Audio): der Codec bekommt einen
+// Interpolator, Register 0x2C traegt die Rate des Wandlers, und Bit 0
+// von EXT_CTL schaltet den Weg frei. Bit 0 von EXT_ID sagt vorher, ob
+// der Codec das ueberhaupt hat.
+//
+// WARUM DAS HIER STEHT UND NICHT IN DER SCHICHT: die Schicht darf
+// nicht wissen, WIE ein Chip seine Rate stellt. Sie fragt "kannst du
+// 44100?" und bekommt ja oder nein. Ein Codec ohne VRA antwortet nein,
+// und die Schicht rechnet dann um -- statt dass der Treiber 44100
+// annimmt und in Wahrheit 48000 spielt. Das waere eine um 8,8 Prozent
+// zu hohe Tonhoehe und eine um 8,8 Prozent zu kurze Laufzeit, also
+// GENAU der Fehler, den Zusage (g) dieser Runde ausschliesst.
+//
+// GEGENGEPRUEFT WIRD ZURUECKGELESEN. Manche Codecs klemmen die Rate auf
+// den naechsten Wert, den sie koennen, und melden das nur ueber das
+// Register. Wer nicht zurueckliest, glaubt an eine Rate, die nirgends
+// eingestellt ist.
+fn rate(state: u64) -> u64 {
+    let r: u64 = g(state, S_RATE)
+    if r == 0 {
+        return RATE
+    }
+    return r
+}
+
+fn vra(state: u64) -> bool {
+    return g(state, S_VRA) != 0
+}
+
+fn set_rate(state: u64, hz: u64) -> bool {
+    if !ready(state) {
+        return false
+    }
+    if hz == RATE && g(state, S_VRA) == 0 {
+        s(state, S_RATE, RATE)
+        return true
+    }
+    if g(state, S_VRA) == 0 {
+        return false
+    }
+    if hz < 8000 || hz > 48000 {
+        return false
+    }
+    let b0: u64 = nam(state)
+    pout16(b0, NAM_DAC_RATE, hz)
+    let got: u64 = pin16(b0, NAM_DAC_RATE)
+    if got != hz {
+        // Der Codec hat geklemmt. Was WIRKLICH eingestellt ist, wird
+        // uebernommen und gemeldet; die Schicht entscheidet dann, ob
+        // sie damit leben kann.
+        s(state, S_RATE, got)
+        return false
+    }
+    s(state, S_RATE, hz)
+    return true
+}
+
+// ============================================ RUNDE HDA: DIE UNTERBRECHUNG
+//
+// MEDIA1 hat IOCE und LVBIE ABSICHTLICH ausgelassen und den Grund
+// dazugeschrieben: es lag kein Vektor auf der Leitung dieses Geraets,
+// und eine pegelgesteuerte PCI-Leitung, die niemand quittiert, bleibt
+// gesetzt -- auf einer geteilten Leitung ein Sturm im Nachbargeraet.
+// Die Begruendung war richtig und die Bedingung ist jetzt weg: diese
+// Runde legt Vektor 42 (`trap.VEC_AUDIO`) auf die Leitung, und `irq`
+// unten quittiert wirklich.
+//
+// Der Vektor wird NUR gelegt, wenn `armed` gilt. Die Gegenprobe
+// `noaudirq` laesst ihn maskiert; laeuft der Ton dann trotzdem, ist
+// belegt, dass der abfragende Weg fuer sich allein traegt -- und genau
+// das ist die Zusage, auf die sich die Wiedergabeposition stuetzt.
+const VEC_AUDIO: u64 = 42
+
+fn arm_irq(state: u64, armed: bool) -> bool {
+    if !ready(state) {
+        return false
+    }
+    let d: u64 = bdf(state)
+    // Kein MSI: der 82801-AC97 hat keins, und QEMUs Nachbau auch nicht.
+    // Also die Leitung durch den I/O-APIC, pegelgesteuert und
+    // aktiv-niedrig -- derselbe Weg wie `virtio.intx_arm`.
+    pci.cfg_write16(d, 0x04, pci.cfg_read16(d, 0x04) & 0xFBFF)
+    let idx: u64 = pci.find_bdf(state, d)
+    if idx >= pci.MAX_DEV {
+        return false
+    }
+    let gsi: u64 = pci.get(state, idx, pci.E_IRQLINE)
+    if gsi == 0 || gsi > 23 {
+        return false
+    }
+    apic.route(state, gsi, VEC_AUDIO, apic.id(state), true, true)
+    if !armed {
+        apic.mask_gsi(state, gsi)
+        s(state, S_IRQON, 0)
+        return false
+    }
+    // IOCE meldet das Ende jedes Eintrags, LVBIE das Erreichen des
+    // letzten gueltigen -- also genau den Aussetzer. Beide Bits kommen
+    // erst JETZT dazu, zusammen mit dem Vektor, nicht vorher.
+    let b: u64 = nabm(state)
+    pout8(b, PO_CR, pin8(b, PO_CR) | CR_IOCE | CR_LVBIE)
+    s(state, S_IRQON, 1)
+    return true
+}
+
+fn irq_armed(state: u64) -> bool {
+    return g(state, S_IRQON) != 0
+}
+
+// Portzugriffe. Die Portnummer ist die Summe aus BAR und Versatz und
+// passt immer in 16 Bit, weil ein PCI-Portbereich dort liegt.
+fn pin8(base: u64, off: u64) -> u64 {
+    return arch.dev_in8(((base + off) & 0xFFFF) as u16) as u64
+}
+
+fn pout8(base: u64, off: u64, v: u64) {
+    arch.dev_out8(((base + off) & 0xFFFF) as u16, (v & 0xFF) as u8)
+}
+
+fn pin16(base: u64, off: u64) -> u64 {
+    return arch.dev_in16(((base + off) & 0xFFFF) as u16) as u64
+}
+
+fn pout16(base: u64, off: u64, v: u64) {
+    arch.dev_out16(((base + off) & 0xFFFF) as u16, (v & 0xFFFF) as u16)
+}
+
+fn pin32(base: u64, off: u64) -> u64 {
+    return arch.dev_in32(((base + off) & 0xFFFF) as u16) as u64
+}
+
+fn pout32(base: u64, off: u64, v: u64) {
+    arch.dev_out32(((base + off) & 0xFFFF) as u16, (v & 0xFFFFFFFF) as u32)
+}
+
+// Die Deskriptorliste liegt in kdata und ist damit physisch dort, wo
+// sie virtuell steht -- derselbe Weg, den `nvme.fi` seit Runde K2 geht.
+fn bdl(state: u64) -> u64 {
+    return state + kstate.AUD_OFF + BDL_OFF
+}
+
+// Ein Eintrag: vier Oktette Adresse, zwei Oktette Anzahl 16-Bit-Werte,
+// zwei Oktette Steuerbits. Alles ueber die Intrinsics, weil die
+// Hardware mitliest, waehrend der Kernel schreibt.
+fn bdl_set(state: u64, i: u64, addr: u64, samples: u64, ctl: u64) {
+    let e: u64 = bdl(state) + (i % BDL_ENTRIES) * 8
+    __mmio_write32(e as *mut u32, (addr & 0xFFFFFFFF) as u32)
+    __mmio_write16((e + 4) as *mut u16, (samples & 0xFFFF) as u16)
+    __mmio_write16((e + 6) as *mut u16, (ctl & 0xFFFF) as u16)
+}
+
+// ================================================================ Start
+//
+// Die Reihenfolge unten ist nicht beliebig; jede Vertauschung hat eine
+// eigene Art zu scheitern, und die stehen daneben.
+
+fn init(state: u64) -> bool {
+    var s_head: [u8; 7] = "ac97: \0"
+    var s_no: [u8; 22] = "kein Geraet 04:01 da\0\0"
+    var s_bar: [u8; 24] = "Portbereiche fehlen\0\0\0\0\0"
+    var s_ring: [u8; 22] = "kein Ringpuffer frei\0\0"
+    var s_high: [u8; 26] = "Ring liegt ueber 4 GiB\0\0\0\0"
+    var s_codec: [u8; 26] = "Codec meldet sich nicht\0\0\0"
+    var s_ok: [u8; 7] = "bereit\0"
+    var s_nam: [u8; 6] = " nam=\0"
+    var s_nabm: [u8; 7] = " nabm=\0"
+    var s_ring2: [u8; 7] = " ring=\0"
+    var s_id: [u8; 5] = " id=\0"
+
+    s(state, S_WHY, W_OK)
+    s(state, S_VOL, 100)
+
+    // 1. DAS GERAET. Gesucht wird nach der KLASSE (04 Multimedia, 01
+    //    Audio) und nicht nach 8086:2415 -- ein Treiber, der eine
+    //    Kennung fest verdrahtet, findet dasselbe Geraet unter einem
+    //    anderen Namen nicht.
+    let idx: u64 = pci.find_class(state, 0x04, 0x01, 0x100)
+    if idx >= pci.MAX_DEV {
+        s(state, S_WHY, W_NODEV)
+        serial.puts((&s_head[0]) as u64)
+        serial.puts((&s_no[0]) as u64)
+        serial.nl()
+        return false
+    }
+    let d: u64 = pci.get(state, idx, pci.E_BDF)
+    s(state, S_BDF, d)
+    s(state, S_VENDOR, pci.get(state, idx, pci.E_VENDOR))
+    s(state, S_DEVICE, pci.get(state, idx, pci.E_DEVICE))
+
+    // 2. DIE BEIDEN PORTBEREICHE. Beide MUESSEN Portbereiche sein --
+    //    ein AC97, das seine Register in den Speicher legt, gibt es,
+    //    aber dieser Treiber spricht ihn nicht an und sagt das, statt
+    //    eine Adresse als Portnummer zu benutzen.
+    if !pci.bar_is_io(state, idx, 0) || !pci.bar_is_io(state, idx, 1) {
+        s(state, S_WHY, W_NOBAR)
+        serial.puts((&s_head[0]) as u64)
+        serial.puts((&s_bar[0]) as u64)
+        serial.nl()
+        return false
+    }
+    let b0: u64 = pci.bar(state, idx, 0)
+    let b1: u64 = pci.bar(state, idx, 1)
+    if b0 == 0 || b1 == 0 {
+        s(state, S_WHY, W_NOBAR)
+        return false
+    }
+    s(state, S_NAM, b0)
+    s(state, S_NABM, b1)
+
+    // 3. PORTRAUM UND BUSMASTER. `pci.enable_master` setzt Speicher und
+    //    Busmaster; hier braucht es den PORTRAUM dazu, also wird das
+    //    Kommandowort selbst geschrieben. Ohne das Busmasterbit liest
+    //    der Regler die Liste nicht -- das ist die Gegenprobe `nobm`
+    //    aus Runde K2, hier fuer den Ton.
+    let cmd: u64 = pci.cfg_read16(d, 0x04)
+    pci.cfg_write16(d, 0x04, cmd | 0x0001 | 0x0004)
+
+    // 4. DER RINGPUFFER. Vier Rahmen aus dem Rahmenverwalter und nicht
+    //    aus kdata: kdata ist eine halbe Megabyte-Seitenkarte, in der
+    //    16 KiB Tonpuffer eine Verschwendung waeren, und der
+    //    Rahmenverwalter liefert seitenausgerichtete Adressen, die der
+    //    DMA direkt benutzt.
+    let ring: u64 = mem.frame_run(state, RING_PAGES)
+    if ring == 0 {
+        s(state, S_WHY, W_NORING)
+        serial.puts((&s_head[0]) as u64)
+        serial.puts((&s_ring[0]) as u64)
+        serial.nl()
+        return false
+    }
+    // Die Adresse im Deskriptor ist VIER Oktette. Ein Ring oberhalb von
+    // vier Gibioktetten waere nicht adressierbar, und stillschweigend
+    // die oberen Bits abzuschneiden hiesse, in fremden Speicher zu
+    // spielen.
+    if ring + RING_OCTETS > 0x100000000 {
+        s(state, S_WHY, W_HIGHRING)
+        serial.puts((&s_head[0]) as u64)
+        serial.puts((&s_high[0]) as u64)
+        serial.nl()
+        return false
+    }
+    s(state, S_RING, ring)
+    zero_ring(state)
+
+    // 5. KALTSTART DES CODECS. Bit 1 in GLOB_CNT loest den Kaltstart
+    //    aus; danach meldet GLOB_STA Bit 8, dass der primaere Codec
+    //    antwortet. Die Warterei ist begrenzt: ein Geraet, das nie
+    //    antwortet, darf den Kernel nicht anhalten.
+    pout32(b1, GLOB_CNT, GC_COLD)
+    var n: u64 = 0
+    var codec: bool = false
+    while n < SPIN_LIMIT {
+        if (pin32(b1, GLOB_STA) & GS_PCR) != 0 {
+            codec = true
+            n = SPIN_LIMIT
+        } else {
+            n = n + 1
+        }
+    }
+    if codec {
+        s(state, S_CODEC, 1)
+    } else {
+        s(state, S_CODEC, 0)
+    }
+
+    // 6. DEN MISCHER RUECKSETZEN. Ein Schreibzugriff auf Register 0
+    //    setzt ihn zurueck; danach stehen alle Kanaele auf STUMM.
+    pout16(b0, NAM_RESET, 0)
+    if !codec {
+        // Kein Ruecklauf: manche Regler melden PCR erst nach dem
+        // Mischer-Ruecksetzen. Zweiter Versuch, dann ist Schluss.
+        n = 0
+        while n < SPIN_LIMIT {
+            if (pin32(b1, GLOB_STA) & GS_PCR) != 0 {
+                codec = true
+                n = SPIN_LIMIT
+            } else {
+                n = n + 1
+            }
+        }
+        if codec {
+            s(state, S_CODEC, 1)
+        } else {
+            s(state, S_WHY, W_NOCODEC)
+            serial.puts((&s_head[0]) as u64)
+            serial.puts((&s_codec[0]) as u64)
+            serial.nl()
+            return false
+        }
+    }
+
+    // 6b. RUNDE HDA: KANN DER CODEC SEINE RATE STELLEN. EXT_ID Bit 0
+    //    ist die Antwort; ist sie ja, wird der Weg mit EXT_CTL Bit 0
+    //    freigeschaltet und die Vorgaberate eingetragen. Ist sie nein,
+    //    bleibt es bei 48000 -- und `set_rate` sagt das dann, statt
+    //    eine Rate zu behaupten, die nirgends steht.
+    let ext: u64 = pin16(b0, NAM_EXT_ID)
+    if (ext & 1) != 0 {
+        pout16(b0, NAM_EXT_CTL, pin16(b0, NAM_EXT_CTL) | 1)
+        s(state, S_VRA, 1)
+        pout16(b0, NAM_DAC_RATE, RATE)
+    } else {
+        s(state, S_VRA, 0)
+    }
+    s(state, S_RATE, RATE)
+
+    // 7. DIE LAUTSTAERKE. Ohne diesen Schritt bleibt alles stumm; die
+    //    Gegenprobe `audnomix` ueberspringt ihn absichtlich.
+    apply_volume(state)
+
+    // 8. DIE BOX DES AUSGANGS RUECKSETZEN und die Liste anmelden.
+    reset_box(state)
+    pout32(b1, PO_BDBAR, bdl(state))
+
+    s(state, S_READY, 1)
+    serial.puts((&s_head[0]) as u64)
+    serial.puts((&s_ok[0]) as u64)
+    serial.puts((&s_id[0]) as u64)
+    serial.hex(g(state, S_VENDOR))
+    serial.hex(g(state, S_DEVICE))
+    serial.puts((&s_nam[0]) as u64)
+    serial.hex(b0)
+    serial.puts((&s_nabm[0]) as u64)
+    serial.hex(b1)
+    serial.puts((&s_ring2[0]) as u64)
+    serial.hex(ring)
+    serial.nl()
+    return true
+}
+
+// Den Ring auf Stille setzen. Das ist kein Schoenheitsschritt: laeuft
+// der Puffer doch einmal leer, spielt die Hardware das, was in dem
+// Speicher steht -- und ein zufaelliger Rahmen aus dem Rahmenverwalter
+// klingt wie ein Knall.
+fn zero_ring(state: u64) {
+    let r: u64 = g(state, S_RING)
+    if r == 0 {
+        return
+    }
+    var i: u64 = 0
+    while i < RING_OCTETS / 8 {
+        kstate.set(r, i * 8, 0)
+        i = i + 1
+    }
+}
+
+fn reset_box(state: u64) {
+    let b: u64 = nabm(state)
+    pout8(b, PO_CR, CR_RR)
+    var n: u64 = 0
+    while n < SPIN_LIMIT {
+        if (pin8(b, PO_CR) & CR_RR) == 0 {
+            n = SPIN_LIMIT
+        } else {
+            n = n + 1
+        }
+    }
+    // Die Zustandsbits sind schreib-eins-loeschend.
+    pout16(b, PO_SR, SR_LVBCI | SR_BCIS | SR_FIFOE)
+    s(state, S_HEAD, 0)
+    s(state, S_SUBMITTED, 0)
+    s(state, S_LASTRAW, 0)
+    s(state, S_WRAPS, 0)
+    s(state, S_POS, 0)
+    s(state, S_RUNNING, 0)
+    s(state, S_BACKW, 0)
+}
+
+// ============================================================ Mischer
+//
+// DIE ABBILDUNG VON PROZENT AUF DAS REGISTER, und was daran auf echter
+// Hardware anders ist -- das gehoert dazugesagt, weil es der einzige
+// Punkt ist, an dem dieser Treiber sich an QEMU anlehnt:
+//
+//   Das Master-Register hat je Kanal sechs Bit DAEMPFUNG in Schritten
+//   von 1,5 dB; 0 ist am lautesten. QEMU rechnet daraus einen LINEAREN
+//   Faktor (255 - 255*wert/63)/255, echte Hardware eine logarithmische
+//   Kurve. Bei 100 Prozent steht in beiden Faellen 0 im Register, und
+//   nur dann ist der Weg vom Programm bis zur Datei RECHNUNGSFREI --
+//   genau das misst `tools/media1/run.sh` mit dem Bitvergleich.
+//
+//   Das PCM-Register hat fuenf Bit. Auf echter AC97-Hardware ist 0x08
+//   die Einheitsverstaerkung und 0x00 sind +12 dB; QEMU kennt diese
+//   Verstaerkung nicht und behandelt 0 als Einheit. Dieser Treiber
+//   schreibt 0, weil er in QEMU laeuft und weil eine Rechnung im
+//   Tonweg jede Bitgleichheit unmoeglich macht. Fuer echte Hardware
+//   gehoert hier 0x0808 hin; es steht in docs/AUDIO.md und in der
+//   Restliste von STATUS-MEDIA1.md.
+const PCM_UNITY: u64 = 0x0000
+
+fn set_volume(state: u64, pct: u64) {
+    var v: u64 = pct
+    if v > 100 {
+        v = 100
+    }
+    s(state, S_VOL, v)
+    apply_volume(state)
+}
+
+fn set_muted(state: u64, on: bool) {
+    if on {
+        s(state, S_MUTE, 1)
+    } else {
+        s(state, S_MUTE, 0)
+    }
+    apply_volume(state)
+}
+
+fn apply_volume(state: u64) {
+    let b0: u64 = nam(state)
+    if b0 == 0 {
+        return
+    }
+    let v: u64 = g(state, S_VOL)
+    // 63 Schritte Daempfung; 100 Prozent sind 0 Schritte.
+    var att: u64 = (63 * (100 -% v)) / 100
+    if att > 63 {
+        att = 63
+    }
+    var m: u64 = (att << 8) | att
+    if v == 0 || g(state, S_MUTE) != 0 {
+        m = m | MUTE_BIT
+    }
+    pout16(b0, NAM_MASTER, m)
+    pout16(b0, NAM_PCM_OUT, PCM_UNITY)
+    s(state, S_MASTER, m)
+    s(state, S_PCMREG, PCM_UNITY)
+}
+
+// ============================================== die Liste und der Lauf
+
+// Der laufende Index, wie der Regler ihn meldet. ENTRIES ist 32 und
+// damit genau der Zaehlbereich der Hardware -- das Modulo ist hier
+// Guerteltier und nicht Rechnung.
+fn civ(state: u64) -> u64 {
+    return pin8(nabm(state), PO_CIV) % ENTRIES
+}
+
+fn picb(state: u64) -> u64 {
+    return pin16(nabm(state), PO_PICB)
+}
+
+fn status(state: u64) -> u64 {
+    return pin16(nabm(state), PO_SR)
+}
+
+fn clear_status(state: u64) {
+    pout16(nabm(state), PO_SR, SR_LVBCI | SR_BCIS | SR_FIFOE)
+}
+
+// EINEN VOLLEN EINTRAG uebergeben. Immer voll, nie halb: die Position
+// oben rechnet mit RAHMEN_JE_EINTRAG je Eintrag, und ein kurzer
+// Eintrag wuerde diese Rechnung fuer den Rest des Laufes verschieben.
+// Wer weniger Daten hat, fuellt den Rest mit Stille -- das kostet
+// hoechstens 10,7 ms Nachlauf am Dateiende und ist in der Abnahme
+// ausgewiesen.
+fn submit(state: u64) -> bool {
+    if !ready(state) {
+        return false
+    }
+    let b: u64 = nabm(state)
+    let head: u64 = g(state, S_HEAD)
+    let r: u64 = g(state, S_RING)
+    bdl_set(state, head, r + head * ENTRY_OCTETS,
+        ENTRY_FRAMES * CHANNELS, 0)
+    s(state, S_HEAD, (head + 1) % ENTRIES)
+    s(state, S_SUBMITTED, g(state, S_SUBMITTED) + ENTRY_FRAMES)
+    s(state, S_SUBMITS, g(state, S_SUBMITS) + 1)
+    // LVI NACHZIEHEN. Steht der Halbleiter still (DCH), weil er den
+    // letzten gueltigen Eintrag erreicht hat, dann faehrt er beim
+    // Schreiben von LVI wieder an -- und genau das ist ein Aussetzer,
+    // also wird er gezaehlt statt verschwiegen.
+    if g(state, S_RUNNING) != 0 {
+        if (pin16(b, PO_SR) & SR_DCH) != 0 {
+            s(state, S_UNDER, g(state, S_UNDER) + 1)
+            s(state, S_DCH, g(state, S_DCH) + 1)
+            resync(state)
+        }
+    }
+    pout8(b, PO_LVI, head)
+    return true
+}
+
+// Nach einem Aussetzer springt der laufende Index der Hardware auf den
+// naechsten Eintrag (so steht es in der Beschreibung und so tut es
+// QEMU). Die Buchfuehrung wird darauf neu gesetzt; ohne das waere die
+// Position ab da um einen Umlauf falsch, und eine Uhr, die nach einem
+// Fehler falsch weiterlaeuft, ist schlimmer als eine, die es sagt.
+fn resync(state: u64) {
+    let raw: u64 = position_raw(state)
+    let pos: u64 = g(state, S_POS)
+    var w: u64 = 0
+    if pos > raw {
+        w = (pos -% raw) / RING_FRAMES
+        if w * RING_FRAMES + raw < pos {
+            w = w + 1
+        }
+    }
+    s(state, S_WRAPS, w)
+    s(state, S_LASTRAW, raw)
+}
+
+fn start(state: u64) -> bool {
+    if !ready(state) {
+        return false
+    }
+    if g(state, S_RUNNING) != 0 {
+        return true
+    }
+    let b: u64 = nabm(state)
+    pout32(b, PO_BDBAR, bdl(state))
+    pout16(b, PO_SR, SR_LVBCI | SR_BCIS | SR_FIFOE)
+    // NUR das Laufbit. IOCE und LVBIE bleiben AUS, und das ist eine
+    // Entscheidung mit Begruendung: diese Runde arbeitet abfragend, es
+    // steht kein Vektor auf der Leitung dieses Geraets, und eine
+    // pegelgesteuerte PCI-Leitung, die niemand quittiert, bleibt
+    // gesetzt -- auf einer geteilten Leitung waere das ein Sturm im
+    // Nachbargeraet. Die Bits kommen mit dem Vektor zusammen, in der
+    // Runde, die ihn legt.
+    pout8(b, PO_CR, CR_RPBM)
+    s(state, S_RUNNING, 1)
+    s(state, S_STARTS, g(state, S_STARTS) + 1)
+    return true
+}
+
+fn stop(state: u64) {
+    if !present(state) {
+        return
+    }
+    let b: u64 = nabm(state)
+    pout8(b, PO_CR, 0)
+    s(state, S_RUNNING, 0)
+    s(state, S_STOPS, g(state, S_STOPS) + 1)
+}
+
+// ========================================================== die Uhr
+//
+// Die rohe Position im Ring, in Rahmen, 0..RING_FRAMES. CIV wird
+// zweimal gelesen: springt er zwischen den beiden Lesungen weiter,
+// gehoert das gelesene PICB zum falschen Eintrag, und die Messung wird
+// wiederholt. Ein Zaehler, der einmal in tausend Abfragen einen halben
+// Eintrag danebenliegt, ist als Leituhr fuer Bild unbrauchbar.
+fn position_raw(state: u64) -> u64 {
+    let b: u64 = nabm(state)
+    var c0: u64 = pin8(b, PO_CIV) % ENTRIES
+    var p: u64 = pin16(b, PO_PICB)
+    var c1: u64 = pin8(b, PO_CIV) % ENTRIES
+    if c0 != c1 {
+        c0 = c1
+        p = pin16(b, PO_PICB)
+    }
+    var done: u64 = ENTRY_FRAMES
+    let rest: u64 = p / CHANNELS
+    if rest <= ENTRY_FRAMES {
+        done = ENTRY_FRAMES -% rest
+    }
+    return c0 * ENTRY_FRAMES + done
+}
+
+// Die abgespielten Rahmen seit dem Start, monoton. Wer sie seltener
+// abfragt als einen Ringumlauf (85,3 ms), verliert einen Umlauf --
+// das ist die Bedingung, unter der diese Uhr gilt, und sie steht in
+// docs/AUDIO.md.
+fn position_frames(state: u64) -> u64 {
+    if !ready(state) {
+        return 0
+    }
+    if g(state, S_RUNNING) == 0 {
+        return g(state, S_POS)
+    }
+    // RUNDE HDA: dieselbe Sperre wie in `hda.fi` -- der Zeitgeber ruft
+    // diese Funktion jetzt hundertmal je Sekunde, und sie schreibt.
+    if g(state, S_GUARD) != 0 {
+        return g(state, S_POS)
+    }
+    s(state, S_GUARD, 1)
+    let raw: u64 = position_raw(state)
+    var w: u64 = g(state, S_WRAPS)
+    if raw < g(state, S_LASTRAW) {
+        w = w + 1
+        s(state, S_WRAPS, w)
+    }
+    s(state, S_LASTRAW, raw)
+    var pos: u64 = w * RING_FRAMES + raw
+    // Die Hardware kann nicht mehr gespielt haben, als sie bekommen
+    // hat. Was darueber hinausginge, ist ein Aussetzer und wird als
+    // solcher gezaehlt, nicht als Fortschritt ausgegeben.
+    let sub: u64 = g(state, S_SUBMITTED)
+    if pos > sub {
+        pos = sub
+    }
+    if pos < g(state, S_POS) {
+        pos = g(state, S_POS)
+        s(state, S_BACKW, g(state, S_BACKW) + 1)
+    }
+    s(state, S_POS, pos)
+    s(state, S_GUARD, 0)
+    return pos
+}
+
+// Die Unterbrechung. Sie wird in dieser Runde nicht verdrahtet (kein
+// Vektor zeigt hierher); die Funktion steht hier, weil der Zaehler und
+// das Loeschen der Zustandsbits genau das sind, was die spaetere Runde
+// braucht, und weil eine halbe Funktion spaeter teurer ist als eine
+// ganze jetzt.
+fn irq(state: u64) {
+    s(state, S_IRQS, g(state, S_IRQS) + 1)
+    clear_status(state)
+}
