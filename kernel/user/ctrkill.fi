@@ -1,0 +1,68 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/ctrkill.fi -- RUNDE O-CONTAINER: ueber die Grenze schiessen.
+//
+//     ctrkill <pid>
+//
+// Versucht, den Prozess <pid> zu beenden, und sagt in EINER Zeile, was
+// dabei herauskam:
+//
+//     ctrkill: getroffen <pid>     der Aufruf hat 0 zurueckgegeben
+//     ctrkill: abgewehrt <pid>     der Kern hat ihn abgelehnt
+//
+// WOZU EIN EIGENES PROGRAMM. `kill` gibt es in diesem Baum, aber es
+// sagt bei Erfolg NICHTS -- und "keine Ausgabe" ist genau das, was ein
+// Testlaeufer nicht von "Programm gar nicht gelaufen" unterscheiden
+// kann. Dieses hier sagt in BEIDEN Faellen etwas, und das ist der
+// Unterschied zwischen einer Messung und einer Vermutung.
+//
+// ES ZAEHLT AUSSERDEM, WIE VIELE PROZESSE ES SIEHT (`ctrkill -n`), denn
+// die zweite Haelfte von Stufe 3 ist nicht "kill scheitert", sondern
+// "der Container sieht den Prozess gar nicht erst".
+
+profile kernel
+
+import ulib
+
+export { u_start }
+
+fn u_start(args: u64) -> u64 {
+    var s_hit: [u8; 22] = "ctrkill: getroffen \0\0\0"
+    var s_deny: [u8; 22] = "ctrkill: abgewehrt \0\0\0"
+    var s_seen: [u8; 19] = "ctrkill: sieht \0\0\0\0"
+    var s_use: [u8; 26] = "usage: ctrkill <pid>|-n\0\0\0"
+    var s_n: [u8; 3] = "-n\0"
+
+    let argc: u64 = ulib.arg_count(args)
+    if argc < 2 {
+        ulib.esay_line((&s_use[0]) as u64, 0)
+        return 1
+    }
+    let a1: u64 = ulib.arg_at(args, 1)
+
+    // WIE VIELE PROZESSE SIEHT DIESER PROZESS? Die Tafel wird der
+    // Reihe nach abgefragt; ein Platz, der nicht sichtbar ist, meldet
+    // sich als frei (`do_pstat` gibt 0), und genau das wird gezaehlt.
+    if ulib.streq(a1, (&s_n[0]) as u64) {
+        var n: u64 = 0
+        var i: u64 = 0
+        while i < 32 {
+            let st: u64 = ulib.sys(ulib.SYS_PSTAT, i, 0, 0)
+            // 0 ist S_FREE -- ein Platz, den es fuer mich nicht gibt.
+            if !ulib.bad(st) && st != 0 {
+                n = n + 1
+            }
+            i = i + 1
+        }
+        ulib.say_line((&s_seen[0]) as u64, n)
+        return 0
+    }
+
+    let pid: u64 = ulib.to_num(a1)
+    let r: u64 = ulib.sys(ulib.SYS_KILL, pid, 0, 0)
+    if ulib.bad(r) {
+        ulib.say_line((&s_deny[0]) as u64, pid)
+        return 0
+    }
+    ulib.say_line((&s_hit[0]) as u64, pid)
+    return 0
+}

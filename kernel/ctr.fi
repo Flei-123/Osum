@@ -1,0 +1,808 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/ctr.fi -- RUNDE O-CONTAINER: MEHRERE SYSTEME AUF EINEM KERN.
+//
+// WAS EIN CONTAINER HIER IST, und das ist der eine Satz, der diese
+// Runde von Linux trennt:
+//
+//   EIN CONTAINER IST EINE ZAHL IM AUFGABENSATZ, UND ALLES, WAS DIESE
+//   ZAHL BEDEUTET, STEHT IN EINEM EINZIGEN DATENSATZ.
+//
+// Linux hat dafuer sieben Namensraeume (mnt, pid, net, ipc, uts, user,
+// cgroup), jeder mit eigener Lebensdauer, eigenem Dateisystem unter
+// /proc/*/ns und eigenen Regeln beim Erben; dazu cgroups als zweite,
+// voellig getrennte Hierarchie fuer die Grenzen. Ein Linux-Container
+// ist die BUENDELUNG von zwei Dutzend Mechanismen, die einzeln
+// entstanden sind und einzeln umgangen werden koennen -- deshalb gibt
+// es Werkzeuge, die nichts anderes tun, als aus einem Namensraum
+// auszubrechen, und deshalb hat jede dieser Schichten ihre eigene
+// CVE-Reihe.
+//
+// Hier ist es ein Feld (`sched.T_CTR`) und ein Satz von 256 Oktetten.
+// Wer in einem Container laeuft, traegt dessen Nummer; wer sie nicht
+// traegt (0), ist der Wirt. Es gibt keinen zweiten Ort, an dem die
+// Zugehoerigkeit steht, und darum gibt es auch keinen, an dem sie
+// auseinanderlaufen kann.
+//
+// DIE VERWANDTSCHAFT ZU `cap.fi`. Der Auftrag dieser Runde nennt
+// `kernel/cap.fi` als Ausgangspunkt, und das ist richtig gelesen: die
+// drei Saetze dort (eine frische Tabelle ist LEER, ein Handle ist Slot
+// + Generation, Rechte koennen NUR KLEINER werden) sind genau die
+// Saetze, die ein Container braucht. Diese Runde baut den dritten davon
+// fuer Dinge, die kein Handle sind:
+//
+//   * DIE WURZEL kann nur tiefer werden, nie hoeher (`may_reroot`).
+//   * DIE SPEICHERGRENZE kann nur kleiner werden, nie groesser
+//     (`may_limit`).
+//   * WER DRIN IST, KOMMT NICHT RAUS. Es gibt keinen Systemaufruf, der
+//     einen Prozess aus seinem Container nimmt -- `enter` geht nur vom
+//     Wirt (Container 0) hinein.
+//
+// Das ist dieselbe Einbahnstrasse wie `rights_restrict`, und sie ist
+// aus demselben Grund richtig: eine Schranke, die der Eingesperrte
+// selbst oeffnen kann, ist keine.
+//
+// WAS DIESE RUNDE NICHT IST. Keine Hardware-Virtualisierung. Es gibt
+// keinen zweiten Kern, keine zweite Seitentafel-Wurzel je Container,
+// kein VT-x. Alle Container laufen auf DIESEM Kern, so wie LXC-Container
+// auf dem Kern des Wirts laufen. Wer einen Kernfehler findet, ist
+// draussen -- das gilt hier wie dort und wird in
+// `docs/RUNDE-CONTAINER.md` ausdruecklich als Grenze genannt.
+//
+// WO DER ZUSTAND LIEGT. Stufe 0 von Firn hat keine globalen
+// veraenderlichen Variablen (SPEC 14, Punkt 5). Wie ueberall in diesem
+// Kernel liegt der Zustand in der Datenregion: `kstate.CTR_OFF`.
+
+profile kernel
+
+import kstate
+import sched
+import serial
+
+export {
+    MAX_CTR, HOST, NAME_MAX, ROOT_MAX,
+    C_FREE, C_SET, C_RUN, C_DEAD,
+    ctr_of, set_ctr, inherit,
+    alloc, free_slot, state_of, set_state, exists, alive,
+    name_at, name_set, root_at, root_set, root_len,
+    mem_limit, mem_limit_set, mem_used, mem_charge, mem_uncharge,
+    mem_peak, mem_denials,
+    cpu_share, cpu_share_set, cpu_ticks, cpu_tick_add,
+    procs_of, procs_limit, procs_limit_set,
+    may_reroot, may_limit,
+    netview_of, netview_set,
+    visible, may_signal,
+    jail, jail_needed,
+    count, first_free, report,
+    created, destroyed, escapes, note_escape
+}
+
+// ------------------------------------------------------------ die Zahlen
+//
+// ACHT CONTAINER und nicht achtzig. `kstate.MAX_TASKS` ist 32 -- eine
+// Maschine, die 32 Aufgaben fuehrt, fuehrt keine 64 Container, und ein
+// Feld, das groesser ist als das, was es verwalten kann, ist eine Luege
+// ueber die Groesse des Systems. Acht mal 256 Oktette sind zwei
+// Kilooktette; das passt in eine halbe Seite `kdata`.
+const MAX_CTR: u64 = 8
+
+// DER WIRT IST DIE NULL. Ein Aufgabensatz, den nie jemand angefasst
+// hat, steht auf 0, und das ist genau richtig: jeder Prozess, den es
+// vor dieser Runde gab, ist im Wirt und merkt von der Runde nichts.
+const HOST: u64 = 0
+
+const NAME_MAX: u64 = 32
+const ROOT_MAX: u64 = 96
+
+// Die Zustaende eines Platzes.
+const C_FREE: u64 = 0 // Platz frei
+const C_SET: u64 = 1 // angelegt, laeuft noch nicht
+const C_RUN: u64 = 2 // hat mindestens einen Prozess gehabt
+const C_DEAD: u64 = 3 // angehalten, Satz noch da (fuer `list`)
+
+// ------------------------------------------------ der Satz im Speicher
+//
+// 256 Oktette je Container. Die Felder liegen als Woerter vorn, die
+// beiden Zeichenketten hinten -- ein Wort liest sich mit `kstate.get`,
+// ein Name Oktett fuer Oktett, und die beiden zu mischen waere nur
+// Arbeit beim Lesen.
+
+const CTR_BYTES: u64 = 256
+
+const X_STATE: u64 = 0
+const X_MEMLIM: u64 = 8 // harte Obergrenze in RAHMEN, 0 = keine
+const X_MEMUSE: u64 = 16 // wie viele Rahmen gerade gehalten werden
+const X_MEMPEAK: u64 = 24 // der hoechste Stand, den es je hatte
+const X_MEMDENY: u64 = 32 // Anforderungen, die an der Grenze scheiterten
+const X_CPUSH: u64 = 40 // Anteil 1..100, 0 = keine Bevorzugung
+const X_CPUTICK: u64 = 48 // Zeitscheiben, die dieser Container bekam
+const X_PROCLIM: u64 = 56 // hoechste Prozesszahl, 0 = keine Grenze
+const X_NETV: u64 = 64 // die netview-Sicht, die neue Prozesse erben
+const X_ROOTLEN: u64 = 72 // Laenge der Wurzel ohne die Null
+const X_NAME: u64 = 80 // NAME_MAX Oktette
+const X_ROOT: u64 = 128 // ROOT_MAX Oktette -- bis 224, Rest frei
+
+// Die Zaehler der ganzen Maschine, hinter der Tafel.
+const G_OFF: u64 = MAX_CTR * CTR_BYTES
+const G_CREATED: u64 = G_OFF + 0
+const G_DESTROYED: u64 = G_OFF + 8
+const G_ESCAPES: u64 = G_OFF + 16 // abgewehrte Ausbruchsversuche
+
+fn rec(i: u64) -> u64 {
+    return kstate.CTR_OFF + i * CTR_BYTES
+}
+
+// -------------------------------------------------- die Zugehoerigkeit
+//
+// EIN FELD, an einer Stelle gelesen -- das Vorbild ist `netview.view_of`
+// und der Grund derselbe: eine Zugehoerigkeit, die an zwei Stellen
+// steht, steht irgendwann verschieden.
+
+fn ctr_of(state: u64, t: u64) -> u64 {
+    if t >= kstate.MAX_TASKS {
+        return HOST
+    }
+    let c: u64 = sched.tget(state, t, sched.T_CTR)
+    if c >= MAX_CTR {
+        return HOST
+    }
+    return c
+}
+
+// Setzt sie. WER HIER LANDET, HAT SCHON GEFRAGT -- diese Funktion ist
+// der Schreibvorgang und sonst nichts, damit es von jeder Sache genau
+// eine gibt (dieselbe Trennung wie `netview.may_set`/`set_view`).
+fn set_ctr(state: u64, t: u64, c: u64) {
+    if t >= kstate.MAX_TASKS || c >= MAX_CTR {
+        return
+    }
+    sched.tset(state, t, sched.T_CTR, c)
+}
+
+// Ein Kind erbt den Container seines Erzeugers. Es gibt keinen Weg, bei
+// dem ein Kind in einem ANDEREN Container landet als sein Vater -- das
+// ist der Grund, warum `fork` in einem Container nicht ausbrechen kann,
+// und es ist eine Zeile.
+fn inherit(state: u64, parent: u64, child: u64) {
+    if parent >= kstate.MAX_TASKS || child >= kstate.MAX_TASKS {
+        return
+    }
+    sched.tset(state, child, sched.T_CTR,
+        sched.tget(state, parent, sched.T_CTR))
+}
+
+// ------------------------------------------------------- die Plaetze
+
+fn state_of(state: u64, i: u64) -> u64 {
+    if i == 0 || i >= MAX_CTR {
+        return C_FREE
+    }
+    return kstate.get(state, rec(i) + X_STATE)
+}
+
+fn set_state(state: u64, i: u64, s: u64) {
+    if i == 0 || i >= MAX_CTR {
+        return
+    }
+    kstate.set(state, rec(i) + X_STATE, s)
+}
+
+// Gibt es den Container? Der Wirt (0) ist KEIN Container in diesem
+// Sinne -- er hat keinen Satz, keine Grenze und keine Wurzel, und wer
+// ihn hier als vorhanden meldet, laesst `destroy 0` zu.
+fn exists(state: u64, i: u64) -> bool {
+    return state_of(state, i) != C_FREE
+}
+
+fn alive(state: u64, i: u64) -> bool {
+    let s: u64 = state_of(state, i)
+    return s == C_SET || s == C_RUN
+}
+
+fn first_free(state: u64) -> u64 {
+    var i: u64 = 1 // die 0 ist der Wirt und wird nie vergeben
+    while i < MAX_CTR {
+        if state_of(state, i) == C_FREE {
+            return i
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn count(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 1
+    while i < MAX_CTR {
+        if state_of(state, i) != C_FREE {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// Legt einen Platz an. Alles wird genullt -- ein Platz, den ein
+// abgeraeumter Container hinterlassen hat, darf seinem Nachfolger
+// weder Speicherstand noch Namen vererben. Das ist derselbe Satz wie
+// `cap.clear_task`, und er gilt aus demselben Grund.
+fn alloc(state: u64) -> u64 {
+    let i: u64 = first_free(state)
+    if i == 0 {
+        return 0
+    }
+    let a: u64 = rec(i)
+    var k: u64 = 0
+    while k < CTR_BYTES {
+        kstate.set8(state + a + k, 0 as u8)
+        k = k + 1
+    }
+    kstate.set(state, a + X_STATE, C_SET)
+    kstate.add(state, G_CREATED, 1)
+    return i
+}
+
+fn free_slot(state: u64, i: u64) {
+    if i == 0 || i >= MAX_CTR {
+        return
+    }
+    let a: u64 = rec(i)
+    var k: u64 = 0
+    while k < CTR_BYTES {
+        kstate.set8(state + a + k, 0 as u8)
+        k = k + 1
+    }
+    kstate.add(state, G_DESTROYED, 1)
+}
+
+// ------------------------------------------------------------ der Name
+
+fn name_at(state: u64, i: u64, k: u64) -> u64 {
+    if i == 0 || i >= MAX_CTR || k >= NAME_MAX {
+        return 0
+    }
+    return kstate.get8(state + rec(i) + X_NAME + k)
+}
+
+fn name_set(state: u64, i: u64, src: u64) {
+    if i == 0 || i >= MAX_CTR {
+        return
+    }
+    let a: u64 = state + rec(i) + X_NAME
+    var k: u64 = 0
+    while k < NAME_MAX - 1 && kstate.get8(src + k) != 0 {
+        kstate.set8(a + k, kstate.get8(src + k) as u8)
+        k = k + 1
+    }
+    while k < NAME_MAX {
+        kstate.set8(a + k, 0 as u8)
+        k = k + 1
+    }
+}
+
+// ----------------------------------------------------------- DIE WURZEL
+//
+// Die Zeichenkette, die JEDEM absoluten Pfad dieses Containers
+// vorangestellt wird. Sie steht ohne Schraegstrich am Ende
+// ("/c/eins" und nicht "/c/eins/"), weil der Pfad, der angehaengt
+// wird, mit einem beginnt.
+
+fn root_len(state: u64, i: u64) -> u64 {
+    if i == 0 || i >= MAX_CTR {
+        return 0
+    }
+    return kstate.get(state, rec(i) + X_ROOTLEN)
+}
+
+fn root_at(state: u64, i: u64, k: u64) -> u64 {
+    if i == 0 || i >= MAX_CTR || k >= ROOT_MAX {
+        return 0
+    }
+    return kstate.get8(state + rec(i) + X_ROOT + k)
+}
+
+// Setzt die Wurzel. Der Schraegstrich am Ende wird abgeschnitten, und
+// eine Wurzel, die nur "/" waere, wird zur LEEREN Wurzel -- das ist
+// genau der Wirt, und ein Container mit der Wurzel "/" ist keiner.
+fn root_set(state: u64, i: u64, src: u64) -> bool {
+    if i == 0 || i >= MAX_CTR {
+        return false
+    }
+    if kstate.get8(src) != 47 {
+        return false // eine Wurzel ist absolut oder sie ist keine
+    }
+    let a: u64 = state + rec(i) + X_ROOT
+    var n: u64 = 0
+    while n < ROOT_MAX - 1 && kstate.get8(src + n) != 0 {
+        kstate.set8(a + n, kstate.get8(src + n) as u8)
+        n = n + 1
+    }
+    // Schraegstriche am Ende weg: "/c/eins/" und "/c/eins" sind
+    // derselbe Ort, und nur einer von beiden darf gespeichert werden.
+    while n > 0 && kstate.get8(a + n - 1) == 47 {
+        n = n - 1
+    }
+    var k: u64 = n
+    while k < ROOT_MAX {
+        kstate.set8(a + k, 0 as u8)
+        k = k + 1
+    }
+    kstate.set(state, rec(i) + X_ROOTLEN, n)
+    return n > 0
+}
+
+// DIE EINBAHNSTRASSE, erste Haelfte. Eine Wurzel darf nur TIEFER
+// gelegt werden. Gepruefte Bedingung: die neue Wurzel muss mit der
+// alten beginnen UND an der Nahtstelle einen Schraegstrich haben --
+// sonst waere "/containerX" ein gueltiger Nachfolger von "/container",
+// und das ist ein anderer Ort.
+fn may_reroot(state: u64, i: u64, src: u64) -> bool {
+    if i == 0 || i >= MAX_CTR {
+        return false
+    }
+    let n: u64 = root_len(state, i)
+    if n == 0 {
+        return true // noch keine Wurzel: jede ist enger als "/"
+    }
+    var k: u64 = 0
+    while k < n {
+        if kstate.get8(src + k) != root_at(state, i, k) {
+            return false
+        }
+        k = k + 1
+    }
+    let c: u64 = kstate.get8(src + n)
+    return c == 47 // genau an der Naht, sonst ist es ein Nachbar
+}
+
+// ---------------------------------------------------- DIE SPEICHERGRENZE
+//
+// Gezaehlt wird in RAHMEN (4096 Oktette), weil das die Einheit ist, in
+// der dieser Kern Speicher vergibt (`mem.frame_alloc`). Eine Grenze in
+// Oktetten waere eine Zahl, die an der einzigen Stelle, an der sie
+// geprueft wird, erst geteilt werden muesste.
+
+fn mem_limit(state: u64, i: u64) -> u64 {
+    if i == 0 || i >= MAX_CTR {
+        return 0
+    }
+    return kstate.get(state, rec(i) + X_MEMLIM)
+}
+
+fn mem_used(state: u64, i: u64) -> u64 {
+    if i == 0 || i >= MAX_CTR {
+        return 0
+    }
+    return kstate.get(state, rec(i) + X_MEMUSE)
+}
+
+fn mem_peak(state: u64, i: u64) -> u64 {
+    if i == 0 || i >= MAX_CTR {
+        return 0
+    }
+    return kstate.get(state, rec(i) + X_MEMPEAK)
+}
+
+fn mem_denials(state: u64, i: u64) -> u64 {
+    if i == 0 || i >= MAX_CTR {
+        return 0
+    }
+    return kstate.get(state, rec(i) + X_MEMDENY)
+}
+
+fn mem_limit_set(state: u64, i: u64, frames: u64) {
+    if i == 0 || i >= MAX_CTR {
+        return
+    }
+    kstate.set(state, rec(i) + X_MEMLIM, frames)
+}
+
+// DIE EINBAHNSTRASSE, zweite Haelfte. Eine gesetzte Grenze darf nur
+// kleiner werden. 0 heisst "keine Grenze" und ist damit der groesste
+// Wert -- wer von 0 kommt, darf jede Zahl setzen; wer eine Zahl hat,
+// darf nur darunter, und die 0 (also "unbegrenzt") ist ihm verwehrt.
+fn may_limit(state: u64, i: u64, want: u64) -> bool {
+    if i == 0 || i >= MAX_CTR {
+        return false
+    }
+    let have: u64 = mem_limit(state, i)
+    if have == 0 {
+        return want != 0
+    }
+    if want == 0 {
+        return false
+    }
+    return want <= have
+}
+
+// DIE KASSE. Wird an der EINEN Stelle gerufen, an der dieser Kern einem
+// Prozess einen Rahmen gibt (`proc.map_page`), und gibt `false` zurueck,
+// wenn der Container seine Grenze erreicht hat.
+//
+// SAUBERES SCHEITERN UND KEIN EINFRIEREN, und das ist der Punkt dieser
+// Stufe: die Anforderung scheitert wie eine Anforderung bei vollem
+// Speicher -- der Aufrufer bekommt 0, `do_brk` gibt -ENOMEM zurueck,
+// der Prozess sieht, was er auch auf einer vollen Maschine saehe. Der
+// WIRT merkt davon nichts, weil kein einziger Rahmen des Wirts
+// angefasst wurde.
+fn mem_charge(state: u64, i: u64, frames: u64) -> bool {
+    if i == 0 || i >= MAX_CTR {
+        return true // der Wirt zahlt nicht
+    }
+    let a: u64 = rec(i)
+    let lim: u64 = kstate.get(state, a + X_MEMLIM)
+    let use: u64 = kstate.get(state, a + X_MEMUSE)
+    if lim != 0 {
+        if use + frames > lim {
+            kstate.add(state, a + X_MEMDENY, 1)
+            return false
+        }
+    }
+    let neu: u64 = use + frames
+    kstate.set(state, a + X_MEMUSE, neu)
+    if neu > kstate.get(state, a + X_MEMPEAK) {
+        kstate.set(state, a + X_MEMPEAK, neu)
+    }
+    return true
+}
+
+// Die Gegenbuchung. Sie darf NIE unter null laufen: ein Zaehler, der
+// unterlaeuft, wird mit `-%` zu einer riesigen Zahl und haette die
+// Grenze fuer immer geoeffnet. Seit Runde 72 wuerde `-` hier zu Recht
+// panicken -- also wird vorher geprueft.
+fn mem_uncharge(state: u64, i: u64, frames: u64) {
+    if i == 0 || i >= MAX_CTR {
+        return
+    }
+    let a: u64 = rec(i)
+    let use: u64 = kstate.get(state, a + X_MEMUSE)
+    if frames >= use {
+        kstate.set(state, a + X_MEMUSE, 0)
+    } else {
+        kstate.set(state, a + X_MEMUSE, use - frames)
+    }
+}
+
+// ------------------------------------------------------- DER CPU-ANTEIL
+//
+// Ein Anteil von 1..100. Er wirkt auf die LAENGE DER ZEITSCHEIBE
+// (`sched.T_BUDGET`) und nicht auf die Auswahl des naechsten Prozesses:
+// dieser Kern hat einen Rundlauf, und ein zweiter Auswahlmechanismus
+// daneben waere eine zweite Rangordnung. Wer 50 hat, bekommt die halbe
+// Scheibe und damit im Mittel die halbe Zeit.
+
+fn cpu_share(state: u64, i: u64) -> u64 {
+    if i == 0 || i >= MAX_CTR {
+        return 0
+    }
+    return kstate.get(state, rec(i) + X_CPUSH)
+}
+
+fn cpu_share_set(state: u64, i: u64, sh: u64) -> bool {
+    if i == 0 || i >= MAX_CTR {
+        return false
+    }
+    if sh > 100 {
+        return false
+    }
+    kstate.set(state, rec(i) + X_CPUSH, sh)
+    return true
+}
+
+fn cpu_ticks(state: u64, i: u64) -> u64 {
+    if i == 0 || i >= MAX_CTR {
+        return 0
+    }
+    return kstate.get(state, rec(i) + X_CPUTICK)
+}
+
+fn cpu_tick_add(state: u64, i: u64, n: u64) {
+    if i == 0 || i >= MAX_CTR {
+        return
+    }
+    kstate.add(state, rec(i) + X_CPUTICK, n)
+}
+
+// ------------------------------------------------------ die Prozesszahl
+
+fn procs_of(state: u64, i: u64) -> u64 {
+    if i == 0 || i >= MAX_CTR {
+        return 0
+    }
+    var n: u64 = 0
+    var t: u64 = 0
+    while t < kstate.MAX_TASKS {
+        let st: u64 = sched.tget(state, t, sched.T_STATE)
+        if st != sched.S_FREE && st != sched.S_ZOMBIE {
+            if ctr_of(state, t) == i {
+                n = n + 1
+            }
+        }
+        t = t + 1
+    }
+    return n
+}
+
+fn procs_limit(state: u64, i: u64) -> u64 {
+    if i == 0 || i >= MAX_CTR {
+        return 0
+    }
+    return kstate.get(state, rec(i) + X_PROCLIM)
+}
+
+fn procs_limit_set(state: u64, i: u64, n: u64) {
+    if i == 0 || i >= MAX_CTR {
+        return
+    }
+    kstate.set(state, rec(i) + X_PROCLIM, n)
+}
+
+// ---------------------------------------------------------- das Netz
+//
+// STUFE 4 SETZT AUF `netview` AUF UND NICHT DANEBEN. Was hier steht,
+// ist die Sicht, die ein Prozess beim Eintritt in den Container bekommt
+// -- danach gilt ausschliesslich `sched.T_NETV`, so wie vorher. Es gibt
+// KEINE zweite Entscheidungstuer: `netview.decide` bleibt die einzige,
+// und dieses Feld ist nur der Anfangswert.
+fn netview_of(state: u64, i: u64) -> u64 {
+    if i == 0 || i >= MAX_CTR {
+        return 0
+    }
+    return kstate.get(state, rec(i) + X_NETV)
+}
+
+fn netview_set(state: u64, i: u64, v: u64) {
+    if i == 0 || i >= MAX_CTR {
+        return
+    }
+    kstate.set(state, rec(i) + X_NETV, v)
+}
+
+// ------------------------------------------------- DIE EIGENE SICHT
+//
+// Stufe 3. Wer sieht wen? Die Regel ist kurz und hat genau eine
+// Ausnahme:
+//
+//   * DER WIRT SIEHT ALLE. Das ist keine Nachlaessigkeit, das ist die
+//     Bauart von Proxmox: der Wirt fuehrt die Container, also muss er
+//     ihre Prozesse sehen und beenden koennen. Ein Wirt, der seinen
+//     eigenen Container nicht mehr abraeumen kann, ist unbrauchbar.
+//   * EIN CONTAINER SIEHT NUR SICH SELBST. Nicht den Wirt, nicht die
+//     Geschwister.
+fn visible(state: u64, watcher: u64, target: u64) -> bool {
+    let a: u64 = ctr_of(state, watcher)
+    if a == HOST {
+        return true
+    }
+    return a == ctr_of(state, target)
+}
+
+// `kill` ueber die Grenze. Dieselbe Regel, eigener Name -- denn sie
+// wird an zwei verschiedenen Stellen gebraucht (`uio.kill_pid` und
+// `signal.do_kill`), und zwei Aufrufe derselben Funktion sind besser
+// als zwei Abschriften derselben Bedingung.
+fn may_signal(state: u64, sender: u64, target: u64) -> bool {
+    return visible(state, sender, target)
+}
+
+// ==================================================================
+// DIE WURZEL DURCHSETZEN -- das Herz der ersten Stufe
+// ==================================================================
+//
+// `jail` nimmt einen Pfad, DER SCHON ABSOLUT UND SCHON GEFALTET IST,
+// und stellt ihm die Wurzel des Containers voran. Nach dieser Funktion
+// zeigt der Pfad garantiert in den Container.
+//
+// WARUM DAS FALTEN VORHER PASSIEREN MUSS, und das ist der ganze Trick
+// dieser Stufe: `..` ist kein Zeichen, das man verbieten kann, denn
+// "/a/../b" ist ein voellig gewoehnlicher Pfad. Wer stattdessen nach
+// der Zeichenfolge ".." sucht und den Pfad ablehnt, hat eine Schranke
+// gebaut, die "/a/b/../../.." nicht faengt, sobald irgendwo ein
+// Symlink dazwischenkommt.
+//
+// Die Loesung ist die einzige, die haelt: ZUERST FALTEN, DANN
+// VORANSTELLEN. `fold` laeuft die Glieder ab und wirft bei `..` das
+// letzte weg -- und wenn nichts mehr da ist, bleibt es bei "/". Aus
+// "/../../../etc/passwd" wird so "/etc/passwd", und ERST DANN kommt
+// "/c/eins" davor. Der Ausbruch ist nicht abgelehnt worden, er ist
+// UNMOEGLICH GEWORDEN: ein `..` an der Wurzel des Containers zeigt auf
+// die Wurzel des Containers, genau wie `..` in "/" auf "/" zeigt.
+//
+// DAS IST AUCH DER UNTERSCHIED ZU `chroot(2)`. Linux' chroot faltet
+// nicht, sondern haengt den Prozess an einen anderen Wurzel-Inode und
+// verlaesst sich darauf, dass die Pfadaufloesung an dieser Wurzel
+// haengenbleibt. Das funktioniert -- solange niemand einen offenen
+// Deskriptor auf ein Verzeichnis ausserhalb behaelt (der klassische
+// Ausbruch: `fchdir` dorthin, dann `..` bis zur echten Wurzel). Hier
+// gibt es diesen Weg nicht, weil die Wurzel keine Eigenschaft eines
+// Inodes ist, sondern eine Zeichenkette, die bei JEDEM Pfad vorn
+// steht -- auch bei dem, der aus einem geerbten Deskriptor stammt.
+
+// Faltet `.` und `..` weg, an Ort und Stelle, und liefert die neue
+// Laenge. Der Pfad muss mit "/" beginnen. `..` an der Wurzel ist die
+// Wurzel -- das ist die Zeile, die den Ausbruch schliesst.
+fn fold(buf: u64, len: u64) -> u64 {
+    var at: u64 = 0 // Schreibstand im Ziel
+    var i: u64 = 0
+    // Das Ziel ist derselbe Puffer: `at` bleibt immer <= `i`, weil ein
+    // Glied nie laenger wird. Deshalb darf hier ueberschrieben werden.
+    var going: bool = true
+    while going {
+        while i < len && kstate.get8(buf + i) == 47 {
+            i = i + 1
+        }
+        if i >= len {
+            going = false
+        } else {
+            var n: u64 = 0
+            let start: u64 = i
+            while i < len && kstate.get8(buf + i) != 47 {
+                n = n + 1
+                i = i + 1
+            }
+            var punkt: u64 = 0
+            if n == 1 && kstate.get8(buf + start) == 46 {
+                punkt = 1
+            }
+            if n == 2 && kstate.get8(buf + start) == 46
+            && kstate.get8(buf + start + 1) == 46 {
+                punkt = 2
+            }
+            if punkt == 1 {
+                going = true // "." aendert nichts
+            } else if punkt == 2 {
+                // DAS GLIED ZURUECK -- und an der Wurzel bleibt es
+                // an der Wurzel. Kein Unterlauf, keine Ausnahme.
+                while at > 0 && kstate.get8(buf + at - 1) != 47 {
+                    at = at - 1
+                }
+                if at > 0 {
+                    at = at - 1
+                }
+            } else {
+                kstate.set8(buf + at, 47 as u8)
+                at = at + 1
+                var k: u64 = 0
+                while k < n {
+                    kstate.set8(buf + at, kstate.get8(buf + start + k) as u8)
+                    at = at + 1
+                    k = k + 1
+                }
+            }
+        }
+    }
+    if at == 0 {
+        kstate.set8(buf + at, 47 as u8)
+        at = at + 1
+    }
+    kstate.set8(buf + at, 0 as u8)
+    return at
+}
+
+// Muss fuer diesen Prozess ueberhaupt etwas getan werden? Der Wirt
+// laeuft durch diese Frage und sonst durch nichts -- eine Maschine ohne
+// Container zahlt fuer diese Runde einen Vergleich je Pfad.
+fn jail_needed(state: u64, t: u64) -> bool {
+    let c: u64 = ctr_of(state, t)
+    if c == HOST {
+        return false
+    }
+    return root_len(state, c) != 0
+}
+
+// DER EIGENTLICHE SCHRITT. `buf` traegt einen absoluten Pfad, `len`
+// seine Laenge, `max` die Groesse des Puffers. Zurueck kommt die neue
+// Laenge, oder 0, wenn es nicht passt (der Aufrufer macht daraus
+// -ENAMETOOLONG).
+//
+// Die Reihenfolge ist die Zusage: falten, dann voranstellen. Wer sie
+// vertauscht, faltet die Wurzel mit weg.
+fn jail(state: u64, t: u64, buf: u64, len: u64, max: u64) -> u64 {
+    let c: u64 = ctr_of(state, t)
+    if c == HOST {
+        return len
+    }
+    let rl: u64 = root_len(state, c)
+    if rl == 0 {
+        return len
+    }
+    // 1. FALTEN. Danach steht in `buf` ein Pfad, der mit "/" beginnt
+    // und kein einziges "." oder ".." mehr enthaelt.
+    let n: u64 = fold(buf, len)
+    if rl + n + 1 > max {
+        return 0
+    }
+    // 2. PLATZ SCHAFFEN. Von hinten nach vorn, damit sich der Pfad
+    // nicht selbst ueberschreibt.
+    var k: u64 = n + 1 // die abschliessende Null wandert mit
+    while k > 0 {
+        kstate.set8(buf + rl + k - 1, kstate.get8(buf + k - 1) as u8)
+        k = k - 1
+    }
+    // 3. DIE WURZEL DAVOR.
+    var j: u64 = 0
+    while j < rl {
+        kstate.set8(buf + j, root_at(state, c, j) as u8)
+        j = j + 1
+    }
+    return rl + n
+}
+
+// ---------------------------------------------------------- die Zaehler
+
+fn created(state: u64) -> u64 {
+    return kstate.get(state, G_CREATED)
+}
+
+fn destroyed(state: u64) -> u64 {
+    return kstate.get(state, G_DESTROYED)
+}
+
+// Abgewehrte Ausbruchsversuche: jedes `kill` ueber die Grenze und jede
+// Wurzel, die hoeher gelegt werden sollte. Die Zahl steht im Bericht,
+// weil "kein Ausbruch gelungen" erst dann etwas wert ist, wenn daneben
+// steht, wie viele versucht wurden.
+fn escapes(state: u64) -> u64 {
+    return kstate.get(state, G_ESCAPES)
+}
+
+fn note_escape(state: u64) {
+    kstate.add(state, G_ESCAPES, 1)
+}
+
+// ------------------------------------------------------------ der Bericht
+//
+// Die Form, die jede gemessene Datei dieses Baums benutzt: `schluessel
+// wert`, eine Zeile je Zahl, damit `tools/container/run.sh` sie mit
+// `grep -oE` herausholen kann.
+fn report(state: u64) {
+    var s_n: [u8; 14] = "ctr: count=\0\0\0"
+    var s_c: [u8; 16] = "ctr: created=\0\0\0"
+    var s_d: [u8; 18] = "ctr: destroyed=\0\0\0"
+    var s_e: [u8; 16] = "ctr: escapes=\0\0\0"
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(count(state))
+    serial.nl()
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(created(state))
+    serial.nl()
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(destroyed(state))
+    serial.nl()
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(escapes(state))
+    serial.nl()
+    // JE CONTAINER EINE ZEILE, und sie traegt die Zahlen, an denen die
+    // Grenzen gemessen werden: was er halten darf, was er haelt, was er
+    // hoechstens hielt, und wie oft er abgewiesen wurde.
+    var s_l: [u8; 10] = "ctr[\0\0\0\0\0\0"
+    var s_lim: [u8; 8] = "] lim=\0\0"
+    var s_use: [u8; 7] = " use=\0\0"
+    var s_pk: [u8; 8] = " peak=\0\0"
+    var s_dn: [u8; 8] = " deny=\0\0"
+    var s_cp: [u8; 8] = " cpu=\0\0\0"
+    var s_tk: [u8; 9] = " ticks=\0\0"
+    var s_pr: [u8; 9] = " procs=\0\0"
+    var i: u64 = 1
+    while i < MAX_CTR {
+        if state_of(state, i) != C_FREE {
+            serial.puts((&s_l[0]) as u64)
+            serial.dec(i)
+            serial.puts((&s_lim[0]) as u64)
+            serial.dec(mem_limit(state, i))
+            serial.puts((&s_use[0]) as u64)
+            serial.dec(mem_used(state, i))
+            serial.puts((&s_pk[0]) as u64)
+            serial.dec(mem_peak(state, i))
+            serial.puts((&s_dn[0]) as u64)
+            serial.dec(mem_denials(state, i))
+            serial.puts((&s_cp[0]) as u64)
+            serial.dec(cpu_share(state, i))
+            serial.puts((&s_tk[0]) as u64)
+            serial.dec(cpu_ticks(state, i))
+            serial.puts((&s_pr[0]) as u64)
+            serial.dec(procs_of(state, i))
+            serial.nl()
+        }
+        i = i + 1
+    }
+}

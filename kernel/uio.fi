@@ -44,6 +44,7 @@ import sched
 import fs
 import serial
 import time
+import ctr
 
 export {
     reset, adopt,
@@ -180,7 +181,13 @@ fn resolve(state: u64, t: u64, buf: u64, len: u64) -> u64 {
         if len >= PATH_MAX {
             return err(E_NAMETOOLONG)
         }
-        return len
+        // RUNDE O-CONTAINER, STUFE 1. Auch ein ABSOLUTER Pfad wird
+        // eingesperrt -- gerade er. Wer in einem Container "/etc/passwd"
+        // sagt, meint die Datei SEINES Containers, und wer
+        // "/../../etc/passwd" sagt, bekommt nach dem Falten dasselbe.
+        // Die Zeile steht VOR jedem `return`, damit es keinen Pfad
+        // durch diese Funktion gibt, der an ihr vorbeifuehrt.
+        return jailed(state, t, buf, len)
     }
     let n: u64 = cwd_len(state, t)
     let s: u64 = buf + 2048
@@ -210,7 +217,32 @@ fn resolve(state: u64, t: u64, buf: u64, len: u64) -> u64 {
         kstate.set8(buf + i, kstate.get8(s + i) as u8)
         i = i + 1
     }
-    return at
+    // Auch der mit dem Arbeitsverzeichnis vervollstaendigte Pfad geht
+    // durch die Wurzel des Containers. Das Arbeitsverzeichnis eines
+    // eingesperrten Prozesses ist bereits eingesperrt (es kam selbst
+    // aus dieser Funktion), aber der angehaengte Teil ist es nicht --
+    // "cd /; ls ../.." wuerde sonst den Wirt zeigen.
+    return jailed(state, t, buf, at)
+}
+
+// DIE WURZEL DES CONTAINERS, an genau einer Stelle angewandt.
+//
+// Der Wirt laeuft durch `ctr.jail` hindurch, ohne dass etwas passiert
+// (erste Zeile dort: `c == HOST` -> unveraendert zurueck). Ein Prozess
+// in einem Container bekommt seinen Pfad GEFALTET und mit der Wurzel
+// davor -- und weil das hier geschieht, gilt es fuer `open`, `stat`,
+// `execve`, `unlink`, `mkdir`, `chdir` und jeden anderen Aufruf, der
+// einen Pfad aus Ring 3 nimmt. Es gibt keine Liste von Aufrufen, die
+// gepflegt werden muesste; es gibt diese Funktion.
+fn jailed(state: u64, t: u64, buf: u64, len: u64) -> u64 {
+    if !ctr.jail_needed(state, t) {
+        return len
+    }
+    let n: u64 = ctr.jail(state, t, buf, len, PATH_MAX)
+    if n == 0 {
+        return err(E_NAMETOOLONG)
+    }
+    return n
 }
 
 // `cd`. `buf` holds an absolute path that `resolve` has already made one.
@@ -587,6 +619,16 @@ fn kill_pid(state: u64, pid: u64, code: u64) -> u64 {
     let flags: u64 = sched.irq_save()
     let i: u64 = sched.find_pid(state, pid)
     if i >= kstate.MAX_TASKS {
+        sched.irq_restore(flags)
+        return err(E_SRCH)
+    }
+    // RUNDE O-CONTAINER, STUFE 3. Der ZWEITE Weg, auf dem ein Prozess
+    // in diesem Kern stirbt (der erste ist `signal.do_kill`), und er
+    // braucht dieselbe Schranke. Waere sie nur an einer der beiden
+    // Stellen, waere die Grenze genau so dicht wie die offenere von
+    // beiden. -ESRCH und nicht -EPERM, aus demselben Grund wie dort.
+    if !ctr.may_signal(state, sched.current(state), i) {
+        ctr.note_escape(state)
         sched.irq_restore(flags)
         return err(E_SRCH)
     }
