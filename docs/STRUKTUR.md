@@ -638,6 +638,60 @@ unberührt; `kernel/user/` und `kernel/app/` werden nie angefasst.
 `kernel/user` und `kernel/app` stehen Zeichen für Zeichen auf dem Stand
 von `main`.
 
+## 12.4 Die vierte Falle: der Umzug bricht keinen Bau, er bricht Messungen
+
+Das ist die teuerste Lehre dieser Runde, und sie steht hier als
+eigener Abschnitt, weil sie leicht zu übersehen ist.
+
+Nach dem Umzug **baute alles** — Kern, Userland, jedes Programm. Und
+trotzdem fiel **K17 von 158/0 auf 138/20**.
+
+Der Grund: über neunzig Testläufer lesen Kernquelltext **mit
+`grep`**, um Zahlen zu prüfen, die im Abbild und in der Quelle
+übereinstimmen müssen:
+
+```bash
+k17off=$(grep -aE '^const K17_OFF' kernel/kstate.fi | ...)
+```
+
+Liegt `kstate.fi` jetzt unter `kernel/lib/`, findet dieses `grep`
+**nichts**. Kein Fehler, keine Meldung — eine leere Zeichenkette, und
+der Läufer misst still etwas Falsches oder wird rot.
+
+> **Ein Umzug ist erst fertig, wenn die Werkzeuge mitgezogen sind.**
+> Der Übersetzer sagt es einem, wenn ein `import` ins Leere zeigt.
+> Ein `grep` sagt gar nichts.
+
+`tools/struktur/tote-pfade.sh` sucht solche Stellen und nennt zu jeder
+den neuen Ort:
+
+| | Stellen |
+|---|---:|
+| in ausführbarem Code (**brechen Messungen**) | **542** |
+| in Kommentaren (werden nur ungenau) | 214 |
+
+`tools/struktur/pfade-richten.py` hat davon **312 Zeilen in 90
+Dateien** umgebogen — nur ausführbare Zeilen, und nur dort, wo der
+alte Pfad wirklich tot ist (die Netzdateien liegen noch flach und
+bleiben unberührt).
+
+`tools/k17/run.sh` fragt die fünf Dateien, die es liest, jetzt über
+`tools/kpfad.sh`:
+
+```bash
+. tools/kpfad.sh
+K_SYS=$(kfi sys)  || exit 1
+K_KSTATE=$(kfi kstate) || exit 1
+```
+
+Damit überlebt der Läufer auch den nächsten Umzug.
+
+**Was bewusst stehen bleibt:** 5 Nennungen in **Python-Docstrings**
+(`zeiger2.py`, `tasten.py`, `symtab.py`, `syscalls.py`) — Prosa, kein
+Code. Und 232 Nennungen in `tools/english/*.tsv`: das sind die
+Umbenennungstafeln der Runde ENGLISCH, ein **Protokoll von damals**,
+das die Pfade von damals nennen soll.
+
 ## 13. Das Prüfskript prüft jetzt beides
 
 `tools/struktur/run.sh`:
