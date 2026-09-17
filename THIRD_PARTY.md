@@ -105,11 +105,13 @@ listed here so that nobody mistakes a `vendor/` directory for foreign code.
   checked in ("2,8 MB Binaerdatei pro Version in der Historie",
   `hole-firnc.sh` header).
 * **Pin:** `vendor/firn/COMMIT` =
-  `c66c6bcd5f30d632d74e20facb6a5757c6043379`.
+  `7b4c22b14c036828ac78adc42f7bfc16acfbfb08` (Stand 17.09.2026).
 * **What gets unpacked:** the whole Firn library of that commit into
   `vendor/firn/lib/` -- 171 `.fi` files, 5.2 MB on disk.
-* **Origin and licence:** the Firn repository, MIT, same author.
-  **Not third party.**
+* **Origin and licence:** the Firn repository, **MPL-2.0**, same author.
+  **Not third party.** (Firn moved from MIT to MPL-2.0 on 16 September 2026;
+  its licence notice carries NO Exhibit B, so the code stays compatible with
+  this repository's GPL-2.0-only kernel -- MPL 2.0 section 3.3.)
 * **Stage:** BUILD (the compiler), **RUNTIME** for the library modules the
   kernel imports -- but that is own code.
 
@@ -129,7 +131,7 @@ listed here so that nobody mistakes a `vendor/` directory for foreign code.
   Section 1 of `./test.sh` recomputes the three blob hashes against what
   `hole-firnc.sh` actually unpacked.
 * **Origin and licence:** written in Firn round K3b, merged into Osum's
-  history as `c8ce865`. Same author, MIT. **Not third party.**
+  history as `c8ce865`. Same author, **MPL-2.0** (see 3.1). **Not third party.**
 * **Stage:** **RUNTIME**, and own code. 2,646 lines.
 
 The kernel imports 58 modules by name; the three above are the only ones that
