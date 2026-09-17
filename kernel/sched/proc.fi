@@ -1,0 +1,1734 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/proc.fi -- round 62: processes with an address space.
+//
+// A task out of `sched.fi` is a thread of control: its own stack, its own
+// registers. A PROCESS is more -- it has its own view of memory. Two
+// processes may use the same address and mean something different by it,
+// and neither of them can reach what belongs to the other. That is the
+// second point of this round, and it is the point at which page tables
+// stop being decoration.
+//
+// The layout was chosen so that the difference can be MEASURED:
+//
+//   0x00000000..0x3FFFFFFF   the first gigabyte, identity mapped. This is
+//                            the kernel: its code, its data, the frames.
+//                            Shared by every address space -- and without
+//                            the user bit on the leaves, so ring 3 cannot
+//                            touch it. The switch of round 59 has one
+//                            single 4 KiB page of it open, that is where
+//                            the user programs live.
+//   0x40000000               USER_DATA: one page, private per process.
+//   0x40001000..0x40008FFF   USER_STACK: eight pages, private per process.
+//   everything else          not mapped -- a touch gives #PF.
+//
+// Both private pages lie at the SAME virtual address in every process and
+// on DIFFERENT frames. `tools/kernel/run.sh` has two processes write
+// their pid there and read it back: each one sees its own value, and the
+// kernel prints the two physical frames, which differ.
+//
+// The tables per process (the kernel's own ones are shared, they are the
+// ones out of boot.s):
+//
+//   PML4 (private) [0]   -> PDPT (private)
+//   PDPT (private) [0]   -> the kernel PD out of boot.s   (SHARED)
+//                  [1]   -> PD (private), that is 0x40000000
+//   PD   (private) [0]   -> PT (private)
+//   PT   (private) [0]   -> data frame, [1..8] -> the stack
+//
+// Four frames of tables plus nine of payload per process. `free_space`
+// walks exactly this shape back and gives every one of them back.
+
+import serial
+import lib.kstate
+import mm.mem
+import acpi.acpi
+import sched.sched
+import ipc.uio
+import arch.x86_64.user
+import file
+import ipc.handle
+import ipc.cap
+import bus
+
+export {
+    create, user_start, free_space, space_pages, reap, translate, user_ok,
+    map_programs,
+    badentry_num,
+    inherit, create_bare, create_thread, discard, page_free, page_exec, map_page,
+    map_page_zero, map_huge, nx,
+    map_frame,
+    create_cap,
+    copy_space, swap_space, use_space, page_drop, ARG_RESUME,
+    USER_DATA, USER_STACK, USER_SPAN, USER_TOP,
+    IMAGE_BASE, IMAGE_END, ARGS_BASE, MAX_ARGS, STACK_FLOOR, grow_stack,
+    PRIV_SLOTS, BIG_TOP, BIG_FLOOR, pd_slot, pt_for,
+    // ---- RUNDE SCHLAF (K-018, zweite Haelfte) ----
+    frame_count, frame_at,
+    // ---- RUNDE WACH (K-018, Abschluss: der Wiederanlauf) ----
+    frame_virt_at, space_build_empty, map_restored
+}
+
+const PAGE_PRESENT: u64 = 1
+const PAGE_WRITE: u64 = 2
+const PAGE_USER: u64 = 4
+// RUNDE SYSTEMBUS: Bit 9 ist eines der drei, die die Hardware dem
+// Betriebssystem ueberlaesst. Gesetzt heisst: dieser Rahmen gehoert dem
+// Adressraum NICHT, er ist nur eingeblendet.
+const PAGE_SHARED: u64 = 512
+const ADDR_MASK: u64 = 0x000FFFFFFFFFF000
+
+const USER_DATA: u64 = 0x40000000
+const USER_STACK: u64 = 0x40001000 // STACK_PAGES pages
+const STACK_PAGES: u64 = 8 // 32 KiB -- the shell needs them
+const USER_TOP: u64 = 0x40009000 // the stack grows down from here
+const USER_SPAN: u64 = 0x00200000 // what the private PD covers
+
+// ROUND K1. The private page table covers 512 pages from USER_DATA on;
+// nine of them were spoken for (data page and eight stack pages) and the
+// other 503 lay unused. An image off the disk goes into them:
+//
+//   0x40000000  the data page                       (rw, no execute)
+//   0x40001000  eight stack pages                   (rw, no execute)
+//   0x40008000  the top one of those, the arguments (rw, no execute)
+//   0x40100000  IMAGE_BASE: where a program is linked
+//   0x401FFFFF  IMAGE_END - 1: the end of the private region
+//
+// The gap between the stack and IMAGE_BASE is deliberate: a stack that
+// grew into the image would be a bug that only shows up under load, and
+// 0xF7000 of unmapped pages between them turn it into an immediate #PF.
+const IMAGE_BASE: u64 = 0x40100000
+// RUNDE K16: DAS ABBILDFENSTER IST DREI KACHELN GROSS STATT EINER HALBEN.
+//
+// Bis zu dieser Runde reichte ein Programm von 0x40100000 bis 0x401FFFFF
+// -- eine Million Oktette, und darunter passte alles, was auf dieser
+// Platte lag. Der Uebersetzer passt nicht darunter: `firnc1`, fuer Osum
+// gebunden, sind 1.462.583 Oktette Text und 151.737 Oktette Konstanten.
+// Also endet das Fenster jetzt bei 0x40400000.
+//
+// WAS DAS FUER DEN RAHMENPUFFER HEISST, und es ist eine echte Grenze und
+// keine Formsache: `fb.USER_BASE` ist 0x40200000, also genau die zweite
+// Kachel. Ein Prozess kann von hier an ein Abbild ueber 1 MiB haben ODER
+// den Rahmenpuffer abbilden, nicht beides -- die zweite Kachel traegt
+// dann eine Seitentabelle statt einer 2-MiB-Seite. `map_huge` sagt das
+// klar (es gibt 0 zurueck, `mmap` daraus -ENOMEM); es verwechselt die
+// beiden nicht stillschweigend. Kein Programm dieses Systems will beides,
+// und der Uebersetzer will den Bildschirm am allerwenigsten.
+// ===================== RUNDE CERTUS-AUF-OSUM: DER BROWSER IST 6,5 MiB
+//
+// Das Abbildfenster war drei Kacheln gross (0x40100000..0x40400000),
+// und der Grund dafuer war der Uebersetzer: firnc1 sind 1,6 MiB. Certus
+// mit dem AKTUELLEN Motor -- HTML, CSS, Layout, JavaScript,
+// Schriftrasterer, TLS, Bilder, PDF -- ist GEMESSEN groesser:
+//
+//     .text    5.788.309 Oktette
+//     .rodata    692.652
+//     .data/.bss 107.488
+//     Ende      0x4074a5e0, also 6,5 MiB ueber IMAGE_BASE
+//
+// (`readelf -lW` auf dem gebundenen /bin/certus, 05.09.2026.) Das
+// Fenster waechst deshalb auf sechs Kacheln, 0x40100000..0x40C00000 =
+// 11 MiB, und die grosse Arena beginnt entsprechend hoeher. Was das
+// kostet, ist wieder nichts: eine Kachel entsteht erst, wenn `pt_for`
+// sie anlegt, und ein Programm von 40 KiB beruehrt genau eine.
+//
+// Die Warnung von K16 gilt unveraendert: `fb.USER_BASE` ist 0x40200000.
+// Ein Prozess kann ein Abbild ueber 1 MiB haben ODER den Rahmenpuffer
+// abbilden, nicht beides. Certus will den Rahmenpuffer nicht -- er malt
+// ueber den Fensterserver (WIG_BLIT in kernel/user/wlib.fi).
+const IMAGE_END: u64 = 0x40C00000 // CERTUS: war 0x40400000 (K16)
+
+// Wie viele 2-MiB-Kacheln dem privaten Seitenverzeichnis gehoeren.
+//
+//   0  0x40000000  Datenseite, Stapel, Argumente, `brk`, das alte `mmap`
+//   1  0x40200000  Abbild, zweite Kachel -- ODER der Rahmenpuffer
+//   2  0x40400000  Abbild, dritte Kachel
+//   3  0x40600000  Abbild  \
+//   4  0x40800000  Abbild   > RUNDE CERTUS-AUF-OSUM: das Abbildfenster
+//   5  0x40A00000  Abbild  /  reicht bis 0x40C00000 (der Browser)
+//   6  0x40C00000  \  die GROSSE Arena, 186 MiB, waechst von
+//  ..              /  0x4C600000 nach unten
+//
+// Die Kacheln 3 bis 5 sind der Grund, warum ein Uebersetzer hier laufen
+// kann. Gemessen: `firnc1` braucht auf Linux 3 MiB Adressraum insgesamt
+// (`tools/k16/run.sh`, Abschnitt "Speicherbedarf"), davon rund 1 MiB
+// Halde -- und die alte Halde dieses Systems war 851.968 Oktette
+// zwischen `brk` und `MMAP_TOP`. Es fehlte also nicht viel, aber es
+// fehlte.
+//
+// ================================== RUNDE CERTUS: 6 MiB SIND EIN BROWSER
+// ZU WENIG, UND DIE ZAHL IST GEMESSEN UND NICHT GESCHAETZT.
+//
+// Certus (der Browser aus dem Firn-Baum, lib/browser) wurde am 28.08.2026
+// auf dem Wirt unter `strace -e trace=mmap,munmap` vermessen, waehrend er
+// zwei ECHTE Seiten aus dem Netz lud und malte (`tools/certus/speicher.py`
+// auf dem Zweig `certus`):
+//
+//                        mmap    munmap   gleichzeitig   INSGESAMT
+//     example.com         226      171      37.920.768   47.550.464
+//     en.wikipedia.org    944      679      88.952.832  114.290.688
+//
+// Die LETZTE Spalte ist die, auf die es hier ankommt, und der Grund steht
+// dreissig Zeilen ueber `do_unmap` in kernel/sys.fi: "The pages go back,
+// the bump pointer does not." Die Rahmen kommen zurueck, der Zeiger nicht
+// -- also verbraucht ein Prozess so viel ADRESSRAUM, wie er insgesamt je
+// abgebildet hat, und nicht so viel, wie gleichzeitig offen war. Sechs
+// MiB reichen fuer example.com um den Faktor 7,6 nicht.
+//
+// Also waechst die grosse Arena von 6 MiB auf 192 MiB: die Kacheln 3 bis
+// 98 statt 3 bis 5. Was das KOSTET, ist nichts, solange niemand sie
+// anfasst -- eine Kachel ist erst da, wenn `pt_for` sie anlegt
+// (ein Rahmen von 4 KiB je 2 MiB), und `free_space` gibt genau die
+// wieder her, die angelegt wurden. Ein Programm, das 1 MiB braucht,
+// merkt von dieser Zeile nichts.
+//
+// RUNDE CERTUS-AUF-OSUM (05.09.2026): dieselbe Zahl noch einmal, diesmal
+// auf `merge6` und mit dem AKTUELLEN Motor (JavaScript, Raster,
+// Sicherheit); tools/certus/run.sh misst, was der Browser davon wirklich
+// anfasst.
+//
+// WARUM NICHT MEHR: `tools/osum/run.sh` bindet ein Programm auf 0x50000000
+// und verlangt, dass der Lader es ABLEHNT. Die private Gegend darf diese
+// Adresse also nicht erreichen; 0x4C600000 laesst 58 MiB Luft.
+const PRIV_SLOTS: u64 = 99
+const BIG_TOP: u64 = 0x4C600000
+const BIG_FLOOR: u64 = 0x40C00000 // CERTUS: war 0x40600000 (K16)
+// RUNDE K16: DER ARGUMENTBLOCK IST HOCHGEZOGEN, DAMIT DER STAPEL WACHSEN
+// KANN.
+//
+// Bis zu dieser Runde lag er auf der obersten der acht Stapelseiten
+// (0x40008000), und darunter blieben genau 28 KiB Stapel. Das reicht fuer
+// jedes der 52 Programme dieses Userlands und fuer keines, das einen
+// Uebersetzer enthaelt: `firnc` auf Osum ist an dieser Grenze gestorben,
+// gemessen als #PF bei cr2=0x3fff9348, also 31.928 Oktette UNTER dem
+// Stapelboden -- ein einziger Rahmen von `firnc1` ist so gross.
+//
+// Gemessen auf Linux (`ulimit -s`, tools/k16/run.sh): `firnc1` braucht
+// 128 KiB Stapel fuer eine Quelle ohne Einbindungen und 256 KiB fuer
+// eine mit. Also liegt der Block jetzt bei 0x4007F000, und zwischen
+// 0x40001000 und ihm sind 504 KiB Platz.
+//
+// DIE SEITEN DAZWISCHEN WERDEN NICHT IM VORAUS GENOMMEN. Wuerde
+// `space_build` 126 Rahmen je Prozess reservieren, waere jede
+// Rahmenzaehlung dieses Projekts eine andere. Sie kommen bei Bedarf --
+// `trap.grow_stack`, ausgeloest vom Seitenfehler, so wie es jedes Unix
+// macht. Die acht Seiten von frueher bleiben, wo sie waren.
+const ARGS_BASE: u64 = 0x4007F000 // RUNDE K16: war 0x40008000
+const STACK_FLOOR: u64 = 0x40001000 // so weit darf der Stapel wachsen
+const MAX_ARGS: u64 = 8
+
+// Bit 63 of a page table entry: this page may not be executed. It only
+// means that when EFER.NXE is on, and `user.setup` turns it on only when
+// CPUID says the processor knows it -- otherwise the bit is RESERVED and
+// every access through such an entry would fault. `nx` is therefore the
+// only place the bit comes from.
+const PAGE_NX: u64 = 0x8000000000000000
+
+// ROUNDE K7. Bit 7 eines Eintrags der dritten Ebene: die 2 MiB dahinter
+// sind EINE Seite, es gibt keine vierte Ebene darunter. So haengt
+// `mmap` auf /dev/fb den Rahmenpuffer in einen Prozess -- eine Kachel,
+// ein Eintrag, keine 512 Seitentabelleneintraege fuer einen Bereich, der
+// ohnehin am Stueck im Speicher liegt.
+const PAGE_HUGE: u64 = 0x80
+const HUGE_SIZE: u64 = 0x200000
+
+// Indices in the table out of isr.s.
+const V_ENTER_TASK: u64 = 56
+const V_USER_MAIN: u64 = 58
+const V_USER_START: u64 = 63
+const V_USER_RESUME: u64 = 64
+
+// ROUND K4. What stands in `T_ARG` when a task is not a program of
+// `uprog.fi` but the CHILD OF A FORK: `user_start` then does not enter a
+// program at its first instruction, it puts a saved context back. A number
+// no program index can be -- `uprog.fi` has eleven of them.
+const ARG_RESUME: u64 = 0xF04B
+
+fn vector(state: u64, i: u64) -> u64 {
+    return __mmio_read64((kstate.get(state, kstate.VECTORS) + i * 8) as *mut u64)
+}
+
+fn nx(state: u64) -> u64 {
+    if kstate.get(state, kstate.NX_OK) != 0 {
+        return PAGE_NX
+    }
+    return 0
+}
+
+fn read_entry(table: u64, i: u64) -> u64 {
+    return __mmio_read64((table + i * 8) as *mut u64)
+}
+
+fn write_entry(table: u64, i: u64, v: u64) {
+    __mmio_write64((table + i * 8) as *mut u64, v)
+}
+
+fn zero_frame(p: u64) {
+    var i: u64 = 0
+    while i < mem.FRAME_SIZE / 8 {
+        __mmio_write64((p + i * 8) as *mut u64, 0)
+        i = i + 1
+    }
+}
+
+// Makes the pages of `uprog.fi` reachable for ring 3 -- and only those.
+// The linker script puts them between `__user_begin` and `__user_end`,
+// the two addresses stand in the table of isr.s. Everything else of the
+// kernel keeps its 2 MiB pages without a user bit, and that is what ring
+// 3 runs into.
+fn map_programs(state: u64) -> u64 {
+    let begin: u64 = vector(state, 59)
+    let end: u64 = vector(state, 60)
+    var p: u64 = begin & 0xFFFFFFFFFFFFF000
+    var n: u64 = 0
+    // Die 2-MiB-Kachel, in der die erste Seite liegt. Sie bekommt die
+    // feste geteilte Tabelle aus der Datenregion (Platz 0), so wie seit
+    // Runde 59. JEDE WEITERE KACHEL BEKOMMT EINEN EIGENEN RAHMEN -- mit
+    // nur einer Tabelle wuerde die zweite Teilung die erste
+    // ueberschreiben und der Kernel bliebe stehen. Solange `.utext` in
+    // eine Kachel passt (firnc0), aendert diese Schleife nichts an dem,
+    // was die Runden 59 bis K6 gemessen haben.
+    var kachel: u64 = p & 0xFFFFFFFFFFE00000
+    var tabelle: u64 = state + kstate.PT_OFF
+    while p < end {
+        if (p & 0xFFFFFFFFFFE00000) != kachel {
+            kachel = p & 0xFFFFFFFFFFE00000
+            tabelle = mem.frame_alloc(state)
+            if tabelle == 0 {
+                return 0
+            }
+        }
+        if !user.map_user_pt(state, p, false, tabelle) {
+            return 0
+        }
+        n = n + 1
+        p = p + mem.FRAME_SIZE
+    }
+    return n
+}
+
+// ------------------------------------------------------ the address space
+
+// Builds the four tables and the two pages. Returns the PML4, or 0.
+fn space_build(state: u64, i: u64) -> u64 {
+    let pml4: u64 = mem.frame_alloc(state)
+    let pdpt: u64 = mem.frame_alloc(state)
+    let pd: u64 = mem.frame_alloc(state)
+    let pt: u64 = mem.frame_alloc(state)
+    let data: u64 = mem.frame_alloc(state)
+    if pml4 == 0 || pdpt == 0 || pd == 0 || pt == 0 || data == 0 {
+        return 0
+    }
+    zero_frame(pml4)
+    zero_frame(pdpt)
+    zero_frame(pd)
+    zero_frame(pt)
+    zero_frame(data)
+
+    // The kernel half. Entry 0 of the kernel PML4 points at the kernel
+    // PDPT, and ITS entry 0 at the PD with the 2 MiB pages of the first
+    // gigabyte. That last entry is the one the process takes over: it
+    // then has the identity mapping of the kernel in its own tables,
+    // one level further down, and shares it with everybody else.
+    // Reachable from ring 3 it still is not -- the user bit is missing on
+    // the 2 MiB leaves, and only the page of `uprog.fi` was split out and
+    // opened (`map_programs`).
+    let kpml4: u64 = kstate.get(state, kstate.KPML4)
+    let kpdpt: u64 = read_entry(kpml4, 0) & ADDR_MASK
+    write_entry(pdpt, 0, read_entry(kpdpt, 0) | PAGE_USER)
+    // ==================================================== RUNDE BLECHVIER
+    // HIER WIRD DER KERNEL SCHMALER, UND ETWAS MUSS DAS WISSEN.
+    //
+    // Ein Prozess bekommt GENAU DIESEN EINEN Eintrag des Kernel-PDPT --
+    // das erste Gibioctet. Eintrag 1 ist gleich darunter seine eigene
+    // Flaeche. Alles, was der Kernel oberhalb eines Gibioctets
+    // abgebildet hat, ist ab dem ersten Prozess in Prozesskontext NICHT
+    // erreichbar.
+    //
+    // `acpi.fi` liest ACPI-Tabellen, und unter UEFI liegen die weit
+    // oben. Aus der Schreibtischschleife heraus (`batt.fi`) hat das den
+    // Kern mit einem Seitenfehler angehalten. Also erfaehrt `acpi` hier,
+    // dass ab jetzt nur noch das erste Gibioctet sicher ist.
+    acpi.only_first_give()
+
+    // The private half.
+    write_entry(pml4, 0, pdpt | PAGE_PRESENT | PAGE_WRITE | PAGE_USER)
+    write_entry(pdpt, 1, pd | PAGE_PRESENT | PAGE_WRITE | PAGE_USER)
+    write_entry(pd, 0, pt | PAGE_PRESENT | PAGE_WRITE | PAGE_USER)
+    // ROUND K1: data and stack get the no-execute bit. Nothing ever ran
+    // from them -- the programs of round 62 execute out of `.utext` in
+    // the kernel image -- and a stack a program can jump into is the
+    // oldest hole there is. The counter-check is a program that tries it
+    // (`/bin/jump`): #PF with the instruction-fetch flag set.
+    write_entry(pt, 0, data | PAGE_PRESENT | PAGE_WRITE | PAGE_USER | nx(state))
+    var k: u64 = 0
+    while k < STACK_PAGES {
+        let f: u64 = mem.frame_alloc(state)
+        if f == 0 {
+            return 0
+        }
+        zero_frame(f)
+        write_entry(pt, 1 + k,
+            f | PAGE_PRESENT | PAGE_WRITE | PAGE_USER | nx(state))
+        k = k + 1
+    }
+
+    sched.tset(state, i, sched.T_PDPT, pdpt)
+    sched.tset(state, i, sched.T_PD, pd)
+    sched.tset(state, i, sched.T_PT, pt)
+    sched.tset(state, i, sched.T_DATA, data)
+    return pml4
+}
+
+// Eine Seitentabelle samt ihren Seiten zurueck. Zurueck kommt, wie viele
+// Rahmen freigegeben wurden -- die Tabelle selbst mitgezaehlt.
+fn free_pt(state: u64, pt: u64) -> u64 {
+    var freed: u64 = 0
+    var k: u64 = 0
+    while k < 512 {
+        let e: u64 = read_entry(pt, k)
+        if (e & PAGE_PRESENT) != 0 {
+            // RUNDE SYSTEMBUS: ein EINGEBLENDETER Rahmen gehoert diesem
+            // Adressraum nicht. Ihn hier freizugeben hiesse, den Rahmen
+            // dem anderen Prozess unter den Fuessen wegzuziehen -- und
+            // zwar still, denn seine Tabelle zeigt weiter hin. Der Bus
+            // gibt ihn zurueck (`bus.seg_drop`, `bus.forget_task`), und
+            // nur er.
+            if (e & PAGE_SHARED) == 0 {
+                mem.frame_free(state, e & ADDR_MASK)
+                freed = freed + 1
+            }
+        }
+        k = k + 1
+    }
+    mem.frame_free(state, pt)
+    return freed + 1
+}
+
+// Gives back everything `space_build` took -- and nothing else. The
+// kernel PDPT hangs in entry 0 and is SHARED; freeing it would pull the
+// ground out from under every other process.
+fn free_space(state: u64, i: u64) -> u64 {
+    let pml4: u64 = sched.tget(state, i, sched.T_CR3)
+    if pml4 == 0 || pml4 == kstate.get(state, kstate.KPML4) {
+        return 0
+    }
+    // RUNDE FREMDLAND: EIN FADEN GIBT NICHTS FREI.
+    // `T_SHARED` heisst: diese Tabellen sind geliehen. Wer sie hier
+    // freigaebe, zoege sie dem Erzeuger und allen Geschwistern unter den
+    // Fuessen weg -- und der Rahmenverwalter bekaeme dieselben Rahmen
+    // mehrfach zurueck. Die Zeiger werden trotzdem geloescht, damit die
+    // Aufgabe sauber leer zurueckbleibt.
+    if sched.tget(state, i, sched.T_SHARED) != 0 {
+        sched.tset(state, i, sched.T_CR3, 0)
+        sched.tset(state, i, sched.T_PT, 0)
+        sched.tset(state, i, sched.T_PD, 0)
+        sched.tset(state, i, sched.T_PDPT, 0)
+        sched.tset(state, i, sched.T_DATA, 0)
+        return 0
+    }
+    var freed: u64 = 0
+    let pt: u64 = sched.tget(state, i, sched.T_PT)
+    if pt != 0 {
+        freed = freed + free_pt(state, pt)
+    }
+    let pd: u64 = sched.tget(state, i, sched.T_PD)
+    if pd != 0 {
+        // RUNDE K16: die Kacheln 1 bis PRIV_SLOTS-1. Sie sind erst
+        // angelegt worden, als jemand sie brauchte, also sind die meisten
+        // nicht da -- und eine 2-MiB-Seite (der Rahmenpuffer) wird NICHT
+        // freigegeben, denn sie gehoert der Grafikkarte und nicht dem
+        // Rahmenverwalter. Genau das stand seit Runde K7 in `map_huge`
+        // und musste hier nachgezogen werden, sonst haette der erste
+        // Prozess mit Bildschirm den Rahmenverwalter vergiftet.
+        var k: u64 = 1
+        while k < PRIV_SLOTS {
+            let e: u64 = read_entry(pd, k)
+            if (e & PAGE_PRESENT) != 0 {
+                if (e & PAGE_HUGE) == 0 {
+                    freed = freed + free_pt(state, e & ADDR_MASK)
+                }
+                write_entry(pd, k, 0)
+            }
+            k = k + 1
+        }
+        mem.frame_free(state, pd)
+        freed = freed + 1
+    }
+    let pdpt: u64 = sched.tget(state, i, sched.T_PDPT)
+    if pdpt != 0 {
+        mem.frame_free(state, pdpt)
+        freed = freed + 1
+    }
+    mem.frame_free(state, pml4)
+    freed = freed + 1
+    sched.tset(state, i, sched.T_CR3, 0)
+    sched.tset(state, i, sched.T_PT, 0)
+    sched.tset(state, i, sched.T_PD, 0)
+    sched.tset(state, i, sched.T_PDPT, 0)
+    sched.tset(state, i, sched.T_DATA, 0)
+    return freed
+}
+
+// ================================================== RUNDE WERKZEUGE
+// WIEVIEL SPEICHER EIN PROZESS WIRKLICH HAT.
+//
+// Ein grafischer Aufgabenverwalter zeigt je Zeile einen Speicherwert,
+// und bis zu dieser Runde gab es in diesem Kernel keinen: `SYS_PSTAT`
+// kannte Zustand, Art, Vorrang, Schlaege und Fehler -- kein Byte
+// Speicher. Die Zahl haette man im Programm SCHAETZEN koennen (Bildgroesse
+// plus Stapel), und genau das ist die Art Zahl, die dieses Projekt nicht
+// anzeigt.
+//
+// GEZAEHLT WIRD DERSELBE WEG, DEN `free_space` LAEUFT, und das ist der
+// Grund, warum diese Funktion HIER steht und nicht im Aufrufpfad: sie
+// muss dieselben Seiten sehen wie die Freigabe, sonst zeigt der
+// Aufgabenverwalter eine Zahl, die beim Beenden nicht zurueckkommt. Wer
+// die eine aendert, sieht die andere daneben.
+//
+//   * die vier Tabellenrahmen (PML4, PDPT, PD, PT) zaehlen MIT -- der
+//     Prozess belegt sie, und `free_space` gibt genau sie zurueck;
+//   * die Kacheln 1..PRIV_SLOTS-1 wie dort, und eine 2-MiB-Seite
+//     (der Rahmenpuffer) wird NICHT mitgezaehlt: sie gehoert der
+//     Grafikkarte, nicht diesem Prozess. Dieselbe Ausnahme, dieselbe
+//     Begruendung wie zwanzig Zeilen weiter oben;
+//   * die Eintraege 0 der PML4 und der PDPT sind der GETEILTE Kernteil
+//     und gehoeren keinem Prozess.
+//
+// ES WIRD NICHTS GESCHRIEBEN. Diese Funktion liest Seitentabellen und
+// sonst nichts -- sie darf deshalb aus einem Systemaufruf eines
+// beliebigen Prozesses kommen, so wie `pstat` selbst.
+fn space_pages(state: u64, i: u64) -> u64 {
+    let pml4: u64 = sched.tget(state, i, sched.T_CR3)
+    if pml4 == 0 || pml4 == kstate.get(state, kstate.KPML4) {
+        return 0
+    }
+    var n: u64 = 1 // die PML4 selbst
+    if sched.tget(state, i, sched.T_PDPT) != 0 {
+        n = n + 1
+    }
+    let pd: u64 = sched.tget(state, i, sched.T_PD)
+    if pd != 0 {
+        n = n + 1
+        var k: u64 = 1
+        while k < PRIV_SLOTS {
+            let e: u64 = read_entry(pd, k)
+            if (e & PAGE_PRESENT) != 0 && (e & PAGE_HUGE) == 0 {
+                n = n + count_pt(e & ADDR_MASK)
+            }
+            k = k + 1
+        }
+    }
+    let pt: u64 = sched.tget(state, i, sched.T_PT)
+    if pt != 0 {
+        n = n + count_pt(pt)
+    }
+    return n
+}
+
+// Die Gegenstelle zu `free_pt`: dieselben 512 Eintraege, dieselbe
+// Bedingung, nur ohne die Freigabe. Die Tabelle selbst zaehlt mit,
+// genau wie dort das `freed + 1`.
+fn count_pt(pt: u64) -> u64 {
+    var n: u64 = 1
+    var k: u64 = 0
+    while k < 512 {
+        if (read_entry(pt, k) & PAGE_PRESENT) != 0 {
+            n = n + 1
+        }
+        k = k + 1
+    }
+    return n
+}
+
+// ================================================================
+// RUNDE SCHLAF (K-018, zweite Haelfte): DIE RAHMEN EINES PROZESSES
+// AUFZAEHLEN.
+//
+// Der Ruhezustand muss den Arbeitsspeicher der Prozesse ins Abbild
+// legen -- Rahmen fuer Rahmen. Dafuer braucht er zwei Dinge, die es
+// hier noch nicht gab: WIE VIELE es sind und WELCHER der n-te ist.
+//
+// WAS GEZAEHLT WIRD UND WAS NICHT, und das ist die ganze
+// Entscheidung dieser beiden Funktionen:
+//
+//   GEZAEHLT werden die DATENSEITEN des Benutzers -- die Rahmen, in
+//   denen der Prozess seinen Programmtext, seine Daten und seinen
+//   Stapel hat. Sie sind der Zustand, der einen Schlaf ueberleben
+//   muss.
+//
+//   NICHT GEZAEHLT werden die SEITENTABELLEN selbst (PML4, PDPT, PD,
+//   PT). Sie werden beim Wiederanlauf NEU aufgebaut, und ein
+//   eingespielter alter Tabellenrahmen zeigte auf Adressen, die es
+//   nicht mehr gibt. `space_pages` zaehlt sie mit, weil es die
+//   Freigabe abbildet; diese beiden Funktionen zaehlen sie
+//   ausdruecklich NICHT.
+//
+//   NICHT GEZAEHLT werden EINGEBLENDETE Rahmen (PAGE_SHARED, Bit 9):
+//   sie gehoeren dem Adressraum nicht. Ein Ruhezustand, der sie
+//   mitschreibt, legte fremden Besitz doppelt ab -- und spielte ihn
+//   beim Aufwachen ueber den echten Eigentuemer.
+//
+// DIE REIHENFOLGE IST FEST und muss es sein: `frame_count` und
+// `frame_nth` gehen dieselben Tabellen in derselben Richtung ab.
+// Waere sie es nicht, legte der Wiederanlauf den Inhalt von Rahmen 7
+// an die Adresse von Rahmen 9.
+
+fn pt_data_count(pt: u64) -> u64 {
+    var n: u64 = 0
+    var k: u64 = 0
+    while k < 512 {
+        let e: u64 = read_entry(pt, k)
+        if (e & PAGE_PRESENT) != 0 && (e & PAGE_SHARED) == 0 {
+            n = n + 1
+        }
+        k = k + 1
+    }
+    return n
+}
+
+// Der n-te Datenrahmen dieser Seitentabelle, oder 0. `vor` sagt, wie
+// viele schon vor dieser Tabelle lagen.
+fn pt_data_nth(pt: u64, want: u64, vor: u64) -> u64 {
+    var n: u64 = vor
+    var k: u64 = 0
+    while k < 512 {
+        let e: u64 = read_entry(pt, k)
+        if (e & PAGE_PRESENT) != 0 && (e & PAGE_SHARED) == 0 {
+            if n == want {
+                return e & ADDR_MASK
+            }
+            n = n + 1
+        }
+        k = k + 1
+    }
+    return 0
+}
+
+// Wie viele Datenrahmen dieser Prozess hat.
+fn frame_count(state: u64, i: u64) -> u64 {
+    let pml4: u64 = sched.tget(state, i, sched.T_CR3)
+    if pml4 == 0 || pml4 == kstate.get(state, kstate.KPML4) {
+        return 0
+    }
+    var n: u64 = 0
+    // Kachel 0 -- die Tabelle, die seit Runde 59 in `T_PT` haengt.
+    let pt0: u64 = sched.tget(state, i, sched.T_PT)
+    if pt0 != 0 {
+        n = n + pt_data_count(pt0)
+    }
+    // die weiteren Kacheln aus dem Seitenverzeichnis
+    let pd: u64 = sched.tget(state, i, sched.T_PD)
+    if pd != 0 {
+        var k: u64 = 1
+        while k < PRIV_SLOTS {
+            let e: u64 = read_entry(pd, k)
+            if (e & PAGE_PRESENT) != 0 && (e & PAGE_HUGE) == 0 {
+                n = n + pt_data_count(e & ADDR_MASK)
+            }
+            k = k + 1
+        }
+    }
+    return n
+}
+
+// Der n-te Datenrahmen dieses Prozesses, 0 = es gibt ihn nicht.
+fn frame_at(state: u64, i: u64, want: u64) -> u64 {
+    let pml4: u64 = sched.tget(state, i, sched.T_CR3)
+    if pml4 == 0 || pml4 == kstate.get(state, kstate.KPML4) {
+        return 0
+    }
+    var vor: u64 = 0
+    let pt0: u64 = sched.tget(state, i, sched.T_PT)
+    if pt0 != 0 {
+        let c: u64 = pt_data_count(pt0)
+        if want < vor + c {
+            return pt_data_nth(pt0, want, vor)
+        }
+        vor = vor + c
+    }
+    let pd: u64 = sched.tget(state, i, sched.T_PD)
+    if pd != 0 {
+        var k: u64 = 1
+        while k < PRIV_SLOTS {
+            let e: u64 = read_entry(pd, k)
+            if (e & PAGE_PRESENT) != 0 && (e & PAGE_HUGE) == 0 {
+                let t: u64 = e & ADDR_MASK
+                let c: u64 = pt_data_count(t)
+                if want < vor + c {
+                    return pt_data_nth(t, want, vor)
+                }
+                vor = vor + c
+            }
+            k = k + 1
+        }
+    }
+    return 0
+}
+
+// ==================================================================
+// RUNDE WACH (K-018, Abschluss): WAS DER WIEDERANLAUF ZUSAETZLICH
+// BRAUCHT -- DIE VIRTUELLE ADRESSE.
+//
+// `frame_at` (Vorrunde) gibt die PHYSISCHE Adresse des n-ten
+// Datenrahmens. Zum Sichern reicht das: der Rahmen wird an genau
+// dieselbe physische Adresse zurueckgelegt, und die Kennung in ihm
+// beweist, dass es derselbe ist.
+//
+// Zum WIEDERANLAUFEN reicht es NICHT. Ein Prozess, der weiterlaufen
+// soll, braucht seine Seitentabellen zurueck, und eine Seitentabelle
+// bildet VIRTUELL auf PHYSISCH ab. Die physische Adresse allein sagt
+// nicht, WO im Adressraum der Rahmen hing -- und ein Rahmen, der an
+// der falschen virtuellen Adresse wieder eingehaengt wird, ist
+// derselbe Speicher an der falschen Stelle: der Prozess liest seinen
+// Stapel, wo seine Daten stehen sollten.
+//
+// Deshalb diese Funktion. Sie geht DIESELBEN Tabellen in DERSELBEN
+// Reihenfolge ab wie `frame_count`/`frame_at` -- das ist keine
+// Bequemlichkeit, sondern die Bedingung dafuer, dass Eintrag n hier
+// und Eintrag n dort denselben Rahmen meinen.
+fn pt_data_virt_nth(pt: u64, want: u64, vor: u64, basis: u64) -> u64 {
+    var n: u64 = vor
+    var k: u64 = 0
+    while k < 512 {
+        let e: u64 = read_entry(pt, k)
+        if (e & PAGE_PRESENT) != 0 && (e & PAGE_SHARED) == 0 {
+            if n == want {
+                return basis + k * mem.FRAME_SIZE
+            }
+            n = n + 1
+        }
+        k = k + 1
+    }
+    return 0
+}
+
+// Die VIRTUELLE Adresse des n-ten Datenrahmens. 0 = es gibt ihn nicht.
+// Die Zaehlung ist Wort fuer Wort dieselbe wie in `frame_at`.
+fn frame_virt_at(state: u64, i: u64, want: u64) -> u64 {
+    let pml4: u64 = sched.tget(state, i, sched.T_CR3)
+    if pml4 == 0 || pml4 == kstate.get(state, kstate.KPML4) {
+        return 0
+    }
+    var vor: u64 = 0
+    let pt0: u64 = sched.tget(state, i, sched.T_PT)
+    if pt0 != 0 {
+        let c: u64 = pt_data_count(pt0)
+        if want < vor + c {
+            return pt_data_virt_nth(pt0, want, vor, USER_DATA)
+        }
+        vor = vor + c
+    }
+    let pd: u64 = sched.tget(state, i, sched.T_PD)
+    if pd != 0 {
+        var k: u64 = 1
+        while k < PRIV_SLOTS {
+            let e: u64 = read_entry(pd, k)
+            if (e & PAGE_PRESENT) != 0 && (e & PAGE_HUGE) == 0 {
+                let t: u64 = e & ADDR_MASK
+                let c: u64 = pt_data_count(t)
+                if want < vor + c {
+                    return pt_data_virt_nth(t, want, vor,
+                        USER_DATA + k * USER_SPAN)
+                }
+                vor = vor + c
+            }
+            k = k + 1
+        }
+    }
+    return 0
+}
+
+// ==================================================================
+// EIN ADRESSRAUM OHNE DATENSEITEN.
+//
+// `space_build` legt Tabellen UND neun frische Datenseiten an (die
+// private Seite und acht Stapelseiten). Genau das darf der
+// Wiederanlauf NICHT: seine Datenseiten liegen schon im Speicher --
+// sie kommen aus dem Abbild und stehen an ihren alten physischen
+// Adressen. Wer hier `space_build` nimmt, bekommt neun frische,
+// leere Rahmen ueber die eingespielten gelegt und hat den Zustand
+// verloren, den er gerade zurueckgeholt hat.
+//
+// Diese Funktion baut deshalb NUR das Gerippe: PML4, PDPT, PD, PT
+// und den geteilten Kerneintrag. Die Blaetter haengt `map_restored`
+// ein, und zwar die aus dem Abbild.
+fn space_build_empty(state: u64, i: u64) -> u64 {
+    let pml4: u64 = mem.frame_alloc(state)
+    let pdpt: u64 = mem.frame_alloc(state)
+    let pd: u64 = mem.frame_alloc(state)
+    let pt: u64 = mem.frame_alloc(state)
+    if pml4 == 0 || pdpt == 0 || pd == 0 || pt == 0 {
+        return 0
+    }
+    zero_frame(pml4)
+    zero_frame(pdpt)
+    zero_frame(pd)
+    zero_frame(pt)
+    // Die Kernhaelfte, Wort fuer Wort wie in `space_build`: der
+    // Prozess bekommt GENAU den einen Eintrag des Kernel-PDPT, also
+    // das erste Gibioctet, und teilt ihn mit allen anderen.
+    let kpml4: u64 = kstate.get(state, kstate.KPML4)
+    let kpdpt: u64 = read_entry(kpml4, 0) & ADDR_MASK
+    write_entry(pdpt, 0, read_entry(kpdpt, 0) | PAGE_USER)
+    acpi.only_first_give()
+    write_entry(pml4, 0, pdpt | PAGE_PRESENT | PAGE_WRITE | PAGE_USER)
+    write_entry(pdpt, 1, pd | PAGE_PRESENT | PAGE_WRITE | PAGE_USER)
+    write_entry(pd, 0, pt | PAGE_PRESENT | PAGE_WRITE | PAGE_USER)
+    sched.tset(state, i, sched.T_PDPT, pdpt)
+    sched.tset(state, i, sched.T_PD, pd)
+    sched.tset(state, i, sched.T_PT, pt)
+    return pml4
+}
+
+// EINEN EINGESPIELTEN RAHMEN AN SEINE ALTE VIRTUELLE ADRESSE.
+//
+// Der Unterschied zu `map_frame` ist EIN Bit und er ist die halbe
+// Zusage dieser Runde: `map_frame` setzt `PAGE_SHARED` -- "dieser
+// Rahmen gehoert dem Adressraum nicht, er ist nur eingeblendet".
+// Fuer eine Fensterflaeche ist das richtig. Fuer die private Seite
+// eines wiederangelaufenen Prozesses ist es FALSCH, und zwar
+// doppelt: der Rahmen wuerde beim Ende des Prozesses nicht
+// freigegeben (Leck), und `frame_count` zaehlte ihn beim naechsten
+// Schlafen NICHT mit -- der zweite Ruhezustand verloere genau den
+// Speicher, den der erste gerettet hat.
+//
+// Also ohne `PAGE_SHARED`: der Rahmen gehoert dem Prozess, so wie er
+// ihm vor dem Schlafen gehoert hat.
+fn map_restored(state: u64, i: u64, addr: u64, frame: u64) -> bool {
+    let sl: u64 = pt_slot(addr)
+    if sl >= 512 {
+        return false
+    }
+    let pt: u64 = pt_for(state, i, addr, true)
+    if pt == 0 {
+        return false
+    }
+    if (read_entry(pt, sl) & PAGE_PRESENT) != 0 {
+        return false
+    }
+    write_entry(pt, sl,
+        (frame & ADDR_MASK) | PAGE_PRESENT | PAGE_WRITE | PAGE_USER | nx(state))
+    return true
+}
+
+// Corpse to memory: first the address space, then the kernel stack.
+fn reap(state: u64, i: u64) -> bool {
+    // RUNDE SYSTEMBUS: was diese Aufgabe am Bus hatte, geht mit ihr --
+    // Dienste, Abos, Nachrichten, Segmente. Die pid muss VOR
+    // `sched.reap` gelesen werden; danach ist der Platz frei und traegt
+    // schon die naechste.
+    bus.forget_task(state, i, sched.tget(state, i, sched.T_PID))
+    free_space(state, i)
+    return sched.reap(state, i)
+}
+
+// ====================================== RUNDE SYSTEMBUS: EIN FREMDER RAHMEN
+//
+// `map_page` legt einen NEUEN Rahmen an. Ein geteiltes Segment ist das
+// Gegenteil: der Rahmen ist da, und zwei Adressraeume sollen auf ihn
+// zeigen. Das ist der ganze Unterschied, und es sind acht Zeilen.
+//
+// Der Rahmen wird beim Abraeumen des Adressraums NICHT freigegeben --
+// `free_space` gibt zurueck, was in seinen Tabellen steht, und ein
+// Segment, das zwei Prozesse eingeblendet haben, waere danach beim
+// zweiten ein Zeiger auf fremden Speicher. Deshalb traegt der Eintrag
+// PAGE_SHARED (Bit 9, von der Hardware ignoriert und fuer das
+// Betriebssystem frei), und `page_drop` sieht danach.
+fn map_frame(state: u64, i: u64, addr: u64, frame: u64,
+    writable: bool) -> bool {
+    let s: u64 = pt_slot(addr)
+    if s >= 512 {
+        return false
+    }
+    let pt: u64 = pt_for(state, i, addr, true)
+    if pt == 0 {
+        return false
+    }
+    if (read_entry(pt, s) & PAGE_PRESENT) != 0 {
+        return false
+    }
+    var bits: u64 = PAGE_PRESENT | PAGE_USER | PAGE_SHARED | nx(state)
+    if writable {
+        bits = bits | PAGE_WRITE
+    }
+    write_entry(pt, s, (frame & ADDR_MASK) | bits)
+    return true
+}
+
+// A child gets the CONTENTS of its parent's data page -- that is the
+// `fork`-like half of `spawn`. It is not a fork: the child does not
+// continue in the parent's code, it starts in a program of its own, and
+// there is no copy-on-write. What it does inherit is memory, and on a
+// FRAME OF ITS OWN. The counter-check belongs to it and is in
+// `uprog.u_fork`: the child overwrites the inherited value, and
+// afterwards the parent still reads its own.
+fn inherit(state: u64, parent: u64, child: u64) -> bool {
+    if sched.tget(state, parent, sched.T_KIND) != sched.K_USER {
+        return false
+    }
+    let src: u64 = sched.tget(state, parent, sched.T_DATA)
+    let dst: u64 = sched.tget(state, child, sched.T_DATA)
+    if src == 0 || dst == 0 {
+        return false
+    }
+    var i: u64 = 0
+    while i < mem.FRAME_SIZE / 8 {
+        __mmio_write64((dst + i * 8) as *mut u64,
+            __mmio_read64((src + i * 8) as *mut u64))
+        i = i + 1
+    }
+    return true
+}
+
+// ------------------------------------------------------ the image pages
+
+// ROUND K1. Which entry of the private page table an address belongs to.
+// 512 = it does not belong to this process at all.
+fn pt_slot(addr: u64) -> u64 {
+    if addr < USER_DATA {
+        return 512
+    }
+    // RUNDE K16: die Grenze ist nicht mehr EINE Kachel, sondern
+    // PRIV_SLOTS davon -- und der Platz ist der INNERHALB der Kachel.
+    // Fuer alles, was vor dieser Runde da war (0x40000000..0x401FFFFF),
+    // rechnet das genau dasselbe aus wie vorher.
+    if addr >= USER_DATA + USER_SPAN * PRIV_SLOTS {
+        return 512
+    }
+    return ((addr - USER_DATA) >> 12) & 511
+}
+
+// Welche 2-MiB-Kachel des privaten Seitenverzeichnisses. PRIV_SLOTS =
+// gehoert nicht diesem Prozess.
+fn pd_slot(addr: u64) -> u64 {
+    if addr < USER_DATA {
+        return PRIV_SLOTS
+    }
+    if addr >= USER_DATA + USER_SPAN * PRIV_SLOTS {
+        return PRIV_SLOTS
+    }
+    return (addr - USER_DATA) >> 21
+}
+
+// DIE SEITENTABELLE ZU EINER ADRESSE, und wenn `anlegen` gesetzt ist,
+// wird sie dabei angelegt.
+//
+// Kachel 0 ist die alte: sie haengt seit Runde 59 in `T_PT` und wird beim
+// Bau des Adressraums angelegt. Jede weitere kommt erst, wenn jemand sie
+// braucht -- ein Programm von 900 Oktetten soll keine drei Rahmen fuer
+// leere Tabellen bezahlen.
+//
+// 0 = es gibt keine und es soll auch keine geben. Das ist AUCH die
+// Antwort, wenn in der Kachel eine 2-MiB-Seite haengt (der Rahmenpuffer):
+// eine solche Kachel hat keine vierte Ebene, und wer dort eine
+// 4-KiB-Seite eintragen wollte, wuerde den Rahmenpuffer ueberschreiben.
+fn pt_for(state: u64, i: u64, addr: u64, anlegen: bool) -> u64 {
+    let k: u64 = pd_slot(addr)
+    if k >= PRIV_SLOTS {
+        return 0
+    }
+    if k == 0 {
+        return sched.tget(state, i, sched.T_PT)
+    }
+    let pd: u64 = sched.tget(state, i, sched.T_PD)
+    if pd == 0 {
+        return 0
+    }
+    let e: u64 = read_entry(pd, k)
+    if (e & PAGE_PRESENT) != 0 {
+        if (e & PAGE_HUGE) != 0 {
+            return 0
+        }
+        return e & ADDR_MASK
+    }
+    if !anlegen {
+        return 0
+    }
+    let f: u64 = mem.frame_alloc(state)
+    if f == 0 {
+        return 0
+    }
+    zero_frame(f)
+    write_entry(pd, k, f | PAGE_PRESENT | PAGE_WRITE | PAGE_USER)
+    return f
+}
+
+// May this page still be taken? Outside the region: no. Already there:
+// no -- and that is what makes two segments of one file that want the
+// same page a refusal instead of a silent merge of their rights.
+fn page_free(state: u64, i: u64, addr: u64) -> bool {
+    let s: u64 = pt_slot(addr)
+    if s >= 512 {
+        return false
+    }
+    // OHNE ANLEGEN: die Frage ist "ist da schon etwas", und eine Kachel,
+    // die es noch nicht gibt, ist leer. Anlegen wuerde hier einen Rahmen
+    // kosten fuer eine Frage.
+    let pt: u64 = pt_for(state, i, addr, false)
+    if pt == 0 {
+        return pd_slot(addr) < PRIV_SLOTS
+    }
+    return (read_entry(pt, s) & PAGE_PRESENT) == 0
+}
+
+// One page of an image: a fresh frame with exactly the rights the
+// program header asked for. Returns the PHYSICAL address, so that the
+// loader can fill it through the identity mapping -- the process it
+// belongs to is not running and its tables are not the ones in cr3.
+fn map_page(state: u64, i: u64, addr: u64, writable: bool,
+    runnable: bool) -> u64 {
+    let s: u64 = pt_slot(addr)
+    if s >= 512 {
+        return 0
+    }
+    let pt: u64 = pt_for(state, i, addr, true)
+    if pt == 0 {
+        return 0
+    }
+    if (read_entry(pt, s) & PAGE_PRESENT) != 0 {
+        return 0
+    }
+    let frame: u64 = mem.frame_alloc(state)
+    if frame == 0 {
+        return 0
+    }
+    var bits: u64 = PAGE_PRESENT | PAGE_USER
+    if writable {
+        bits = bits | PAGE_WRITE
+    }
+    if !runnable {
+        bits = bits | nx(state)
+    }
+    write_entry(pt, s, frame | bits)
+    // No `invlpg` and no cr3 reload: these tables are not loaded. The
+    // process gets them at its first context switch, and THAT writes cr3
+    // and flushes everything.
+    return frame
+}
+
+// RUNDE FREMDLAND: EINE SEITE, DIE WIRKLICH LEER IST.
+//
+// `map_page` gibt einen Rahmen aus, wie der Rahmenallokator ihn
+// hergibt -- mit dem Inhalt, den der VORIGE Besitzer daringelassen hat.
+// Fuer den ELF-Lader ist das richtig: er beschreibt jede Seite sofort
+// selbst und nullt den Rest (`elf.fi`, `fill_bytes`), ein Nullen hier
+// waere die zweite Runde ueber dieselben 4096 Oktette.
+//
+// Fuer JEDE ANDERE Seite ist es zweierlei falsch:
+//
+//   1. EIN LECK. Was ein Prozess in einem Rahmen liegen liess, liest der
+//      naechste. GEMESSEN mit `tools/posix` (Abschnitt "brk"): frisch
+//      gestartet fand ein Programm in zwei frischen brk-Seiten 0
+//      Oktette ungleich null, NACH einem `execve` acht -- das erste
+//      0x27 an Offset 0. Das sind die Reste des vorigen Abbilds im
+//      selben Prozess, und zwischen zwei Prozessen waeren es dessen.
+//   2. EIN FEHLER, DEN MAN NICHT SIEHT. musls Halde (mallocng) legt ihre
+//      Verwaltung in genau diese Seiten und prueft sie bei jedem
+//      `malloc`/`free`. Findet sie dort Muell, ruft sie `a_crash()` --
+//      ein `hlt`, in Ring 3 ein #GP. So starb `busybox sh -c 'seq 5 |
+//      sort'` im zweiten Glied der Roehre, und die Meldung
+//      (`vector=13 rip=... in __libc_free`) zeigte auf die Halde, waehrend
+//      der Fehler im Kern lag.
+//
+// POSIX verlangt es ausserdem ausdruecklich: was `mmap(MAP_ANONYMOUS)`
+// liefert, ist mit Nullen gefuellt, und was `brk` dazunimmt ebenso.
+fn map_page_zero(state: u64, i: u64, addr: u64, writable: bool,
+    runnable: bool) -> u64 {
+    let frame: u64 = map_page(state, i, addr, writable, runnable)
+    if frame == 0 {
+        return 0
+    }
+    zero_frame(frame)
+    return frame
+}
+
+// ================================ RUNDE K16: DER STAPEL WAECHST BEI BEDARF
+//
+// Was jedes Unix seit den Siebzigern tut und dieses System bis hierher
+// nicht: faellt ein Prozess unterhalb seines Stapels auf eine Seite, die
+// es nicht gibt, wird sie angelegt und der Befehl noch einmal versucht.
+//
+// DIE BEDINGUNGEN, und sie sind eng, weil eine zu weite Regel jeden
+// Programmierfehler in eine stille Speicherzuteilung verwandeln wuerde:
+//
+//   1. Die Adresse liegt zwischen STACK_FLOOR und ARGS_BASE. Das ist der
+//      Bereich, der fuer den Stapel vorgesehen ist, und sonst nichts --
+//      ein Griff nach 0x40500000 waechst nicht.
+//   2. Die Seite ist NICHT vorhanden. Ein Schreibversuch auf eine
+//      vorhandene, nur lesbare Seite bleibt ein Fehler.
+//   3. Der Prozess ist ein Nutzerprozess.
+//
+//   4. UND DIE ADRESSE LIEGT IN DER NAEHE DES STAPELZEIGERS -- hoechstens
+//      GROW_SLACK darunter. Das ist Linux' Regel (`expand_downwards`),
+//      und sie ist nicht Kosmetik: Runde 62 hat ein Programm, das
+//      absichtlich 0x40010000 anfasst und dafuer einen #PF bekommen MUSS
+//      (`uprog.u_steal`, Abschnitt 13 von tools/kernel/run.sh). Diese
+//      Adresse liegt seit dieser Runde IM Stapelbereich. Ohne die
+//      vierte Bedingung waere aus der Gegenprobe von Runde 62 eine
+//      stille Speicherzuteilung geworden -- und die Runde haette eine
+//      Zusage von damals kaputtgemacht, ohne es zu merken.
+//
+//      64 KiB, und die Zahl ist gemessen: der groesste Stapelrahmen von
+//      `firnc1` ist 31.928 Oktette (der Seitenfehler, an dem der
+//      Uebersetzer vor dieser Runde gestorben ist). Ein Zugriff in
+//      seinem eigenen Rahmen liegt immer UEBER rsp; nur ein `push`
+//      oder ein `sub rsp, N` mit anschliessendem Schreiben landet
+//      darunter, und dafuer sind 64 KiB reichlich.
+//
+// Zurueck kommt true, wenn wirklich eine Seite entstanden ist -- dann
+// darf der Befehl wiederholt werden. false heisst: das war ein echter
+// Fehler und wird auch einer bleiben.
+const GROW_SLACK: u64 = 65536
+
+fn grow_stack(state: u64, i: u64, addr: u64, rsp: u64) -> bool {
+    // DIE OBERGRENZE IST DER STAPEL DIESES PROZESSES UND NICHT DER
+    // BEREICH ALS GANZES. `T_USTACK` ist der Stapelzeiger, mit dem der
+    // Prozess gestartet ist, also der Boden seines Stapels von oben
+    // gesehen: 0x4007F000 fuer ein Programm von der Platte,
+    // USER_TOP - 16 fuer eines aus `uprog.fi`. Ein Programm der zweiten
+    // Art, das nach 0x40010000 greift, greift damit UEBER seinen
+    // eigenen Stapel hinaus -- und bekommt weiterhin den #PF, den Runde
+    // 62 dafuer misst.
+    let boden: u64 = sched.tget(state, i, sched.T_USTACK)
+    if boden == 0 {
+        return false
+    }
+    if addr < STACK_FLOOR || addr >= boden {
+        return false
+    }
+    if rsp > addr + GROW_SLACK {
+        return false
+    }
+    if sched.tget(state, i, sched.T_KIND) != sched.K_USER {
+        return false
+    }
+    let page: u64 = addr & 0xFFFFFFFFFFFFF000
+    if !page_free(state, i, page) {
+        return false
+    }
+    // RUNDE FREMDLAND: GENULLT. Eine frische Stapelseite mit den
+    // Resten eines fremden Prozesses darin waere dasselbe Leck wie bei
+    // brk und mmap -- nur an der Stelle, an der ein Programm am
+    // wenigsten damit rechnet.
+    if map_page_zero(state, i, page, true, false) == 0 {
+        return false
+    }
+    kstate.add(state, kstate.STACKGROW, 1)
+    // Die Tabellen des LAUFENDEN Prozesses stehen in cr3, und der
+    // Prozessor merkt sich, dass dort nichts war.
+    let now: u64 = asm("mov rax, cr3", out("rax"))
+    if sched.tget(state, i, sched.T_CR3) == now {
+        asm("mov rax, cr3\nmov cr3, rax", out("rax"))
+    }
+    return true
+}
+
+// ROUNDE K7: eine ganze 2-MiB-Kachel auf einen Schlag, an eine feste
+// physische Adresse. Das ist der Weg, auf dem ein Prozess den
+// Rahmenpuffer bekommt: er liegt am Stueck auf dem Bus, er ist 1,9 MiB
+// gross, und 469 Seitentabelleneintraege dafuer waeren 469 Gelegenheiten,
+// sich zu vertun.
+//
+// DREI DINGE, DIE HIER ANDERS SIND ALS BEI `map_page`:
+//
+//   1. Der Rahmen wird NICHT vom Rahmenverwalter geholt. Er gehoert der
+//      Grafikkarte; der Kernel hat ihn nie besessen und gibt ihn nie
+//      zurueck. `free_space` geht deshalb an ihm vorbei -- es laeuft die
+//      SEITENTABELLE ab, und eine 2-MiB-Seite hat keine.
+//   2. Es wird in das private SEITENVERZEICHNIS geschrieben, nicht in die
+//      Seitentabelle. Eintrag 0 davon ist die Tabelle mit den Seiten des
+//      Programms; alles ab Eintrag 1 ist frei, und Eintrag 1 ist
+//      0x40200000 -- genau `fb.USER_BASE`.
+//   3. Die Tabellen sind die des LAUFENDEN Prozesses (der Aufruf kommt
+//      aus seinem eigenen `mmap`), also muss cr3 neu geladen werden. Bei
+//      `map_page` ist das nicht so, und dort steht deshalb, dass es
+//      nicht noetig sei.
+//
+// Kein Ausfuehrungsrecht: ein Bild ist kein Programm.
+fn map_huge(state: u64, i: u64, addr: u64, phys: u64, writable: bool) -> bool {
+    if addr < USER_DATA || addr >= USER_DATA + 512 * HUGE_SIZE {
+        return false
+    }
+    if (addr & (HUGE_SIZE - 1)) != 0 || (phys & (HUGE_SIZE - 1)) != 0 {
+        return false
+    }
+    let pd: u64 = sched.tget(state, i, sched.T_PD)
+    if pd == 0 {
+        return false
+    }
+    let s: u64 = (addr >> 21) & 0x1FF
+    if s == 0 {
+        return false // dort haengt die Seitentabelle des Programms
+    }
+    // RUNDE K16: und seit dieser Runde kann AUCH die zweite Kachel eine
+    // Seitentabelle tragen -- naemlich dann, wenn das Abbild groesser als
+    // 1 MiB ist. Dann gibt es hier den Rahmenpuffer NICHT, und das wird
+    // gesagt statt verwechselt: die 2-MiB-Seite wuerde die Tabelle
+    // ueberschreiben, und das Programm liefe auf einem Bildschirm.
+    let vorher: u64 = read_entry(pd, s)
+    if (vorher & PAGE_PRESENT) != 0 {
+        if (vorher & PAGE_HUGE) == 0 {
+            return false
+        }
+    }
+    var bits: u64 = PAGE_PRESENT | PAGE_USER | PAGE_HUGE | nx(state)
+    if writable {
+        bits = bits | PAGE_WRITE
+    }
+    write_entry(pd, s, (phys & (~(HUGE_SIZE - 1))) | bits)
+    // Der Prozess laeuft, seine Tabellen stehen in cr3 -- und der
+    // Prozessor merkt sich Uebersetzungen.
+    let now: u64 = asm("mov rax, cr3", out("rax"))
+    asm("mov cr3, rax", in("rax") now, clobber("memory"))
+    return true
+}
+
+// May ring 3 fetch an instruction from this address? Present, open to the
+// user, and without the no-execute bit. This is the last check of the
+// loader: an `e_entry` that lands anywhere else would be a jump into
+// nothing, reported as a fault at an address nobody can explain.
+fn page_exec(state: u64, i: u64, addr: u64) -> bool {
+    let s: u64 = pt_slot(addr)
+    if s >= 512 {
+        return false
+    }
+    let pt: u64 = pt_for(state, i, addr, false)
+    if pt == 0 {
+        return false
+    }
+    let e: u64 = read_entry(pt, s)
+    if (e & PAGE_PRESENT) == 0 {
+        return false
+    }
+    if (e & PAGE_USER) == 0 {
+        return false
+    }
+    return (e & PAGE_NX) == 0
+}
+
+// ------------------------------------------------- looking into a process
+
+// Virtual address of a process -> physical address, 0 = not mapped. The
+// kernel walks the tables itself instead of switching to the address
+// space: it may be standing in a completely different process.
+fn translate(state: u64, i: u64, addr: u64) -> u64 {
+    let pml4: u64 = sched.tget(state, i, sched.T_CR3)
+    if pml4 == 0 {
+        return 0
+    }
+    let e4: u64 = read_entry(pml4, (addr >> 39) & 0x1FF)
+    if (e4 & PAGE_PRESENT) == 0 {
+        return 0
+    }
+    let e3: u64 = read_entry(e4 & ADDR_MASK, (addr >> 30) & 0x1FF)
+    if (e3 & PAGE_PRESENT) == 0 {
+        return 0
+    }
+    let e2: u64 = read_entry(e3 & ADDR_MASK, (addr >> 21) & 0x1FF)
+    if (e2 & PAGE_PRESENT) == 0 {
+        return 0
+    }
+    if (e2 & 0x80) != 0 {
+        return (e2 & ADDR_MASK) + (addr & 0x1FFFFF)
+    }
+    let e1: u64 = read_entry(e2 & ADDR_MASK, (addr >> 12) & 0x1FF)
+    if (e1 & PAGE_PRESENT) == 0 {
+        return 0
+    }
+    return (e1 & ADDR_MASK) + (addr & 0xFFF)
+}
+
+// May the process really read and write there? The kernel checks the
+// pointer of a system call ITSELF -- a kernel that simply follows a
+// pointer out of ring 3 has handed over its privilege with it. Two
+// conditions: the address lies in the private region, and the page is
+// mapped for the user.
+fn user_ok(state: u64, i: u64, addr: u64, len: u64) -> bool {
+    if len == 0 {
+        return true
+    }
+    if addr < USER_DATA {
+        return false
+    }
+    // RUNDE HAERTUNG-2: `+%` UND NICHT `+`, UND DAS IST DER GANZE PUNKT
+    // DIESER ZEILE.
+    //
+    // Sie ist die Ueberlaufpruefung -- und sie lief seit Runde 72 selbst
+    // in den Ueberlauf, den sie abfangen soll. Dort wurde `+` zur
+    // GEPRUEFTEN Addition; `addr + len` mit len = 0xFFFFFFFFFFFFFFFF ruft
+    // seither `osum_panic`, BEVOR der Vergleich stattfindet. Die Zeile
+    // konnte ihre Arbeit nie tun.
+    //
+    // GEFUNDEN VOM FUZZER (tools/hardening/fuzz.sh, erster Lauf, nach
+    // weniger als tausend Aufrufen):
+    //
+    //     panic: integer overflow in 'u64 + u64' at kernel/proc.fi:812
+    //
+    // Ein Programm in Ring 3 konnte den Kern also mit EINEM Aufruf
+    // anhalten -- `read(fd, irgendwas, 0xFFFFFFFFFFFFFFFF)` genuegte.
+    // Das ist kein Rechenfehler, sondern ein Riegel, der von aussen
+    // umlegbar war.
+    //
+    // `+%` rechnet umlaufend, wie es die Pruefung braucht: laeuft die
+    // Summe um, ist sie kleiner als `addr`, und genau das wird gefragt.
+    // `sys.fi` ist bei derselben Runde 72 auf `+%`/`-%` umgestellt
+    // worden; diese Datei wurde uebersehen.
+    if addr +% len < addr {
+        return false // it wrapped around
+    }
+    // ROUNDE K7: die Obergrenze deckt jetzt ZWEI Kacheln statt einer.
+    // Die zweite (0x40200000..0x403FFFFF) ist die, in die `mmap` auf
+    // /dev/fb den Rahmenpuffer haengt (`fb.USER_BASE`). Die Grenze allein
+    // erlaubt dort GAR NICHTS -- entschieden wird eine Zeile tiefer beim
+    // Durchgehen der Tabellen, und ein Prozess, der das Geraet nicht
+    // abgebildet hat, hat dort keine Seite mit Benutzerbit. Was diese
+    // Zeile aendert, ist also nur, welchen Fehler er bekommt: nicht mehr
+    // "ausserhalb", sondern "nicht abgebildet". Beides ist -EFAULT.
+    // RUNDE K16: PRIV_SLOTS statt 2. Was diese Zeile aendert, ist
+    // weiterhin nur, WELCHEN Fehler ein Prozess bekommt -- entschieden
+    // wird beim Durchgehen der Tabellen darunter, und wer die Kachel
+    // nicht abgebildet hat, hat dort keine Seite mit Benutzerbit.
+    // Auch hier `+%`: nach der Zeile oben KANN `addr + len` nicht mehr
+    // umlaufen, aber die gepruefte Addition weiss das nicht -- sie
+    // rechnet und panikt, bevor der Vergleich kommt. Der Wert ist
+    // derselbe.
+    if addr +% len > USER_DATA + USER_SPAN * PRIV_SLOTS {
+        return false
+    }
+    var p: u64 = addr
+    let last: u64 = addr +% len -% 1
+    while p <= last {
+        let pml4: u64 = sched.tget(state, i, sched.T_CR3)
+        let e4: u64 = read_entry(pml4, (p >> 39) & 0x1FF)
+        if (e4 & PAGE_USER) == 0 {
+            return false
+        }
+        let e3: u64 = read_entry(e4 & ADDR_MASK, (p >> 30) & 0x1FF)
+        if (e3 & PAGE_USER) == 0 {
+            return false
+        }
+        let e2: u64 = read_entry(e3 & ADDR_MASK, (p >> 21) & 0x1FF)
+        if (e2 & PAGE_USER) == 0 {
+            return false
+        }
+        // Eine 2-MiB-Seite hat keine vierte Ebene. `translate` kennt
+        // diesen Fall seit Runde 62 (Bit 7), diese Pruefung nicht -- und
+        // ohne sie waere der abgebildete Rahmenpuffer fuer `write` und
+        // `read` unerreichbar, obwohl der Prozess ihn beschreiben darf.
+        if (e2 & PAGE_HUGE) != 0 {
+            if (e2 & PAGE_PRESENT) == 0 {
+                return false
+            }
+            p = (p & (~(HUGE_SIZE - 1))) + HUGE_SIZE
+        } else {
+            let e1: u64 = read_entry(e2 & ADDR_MASK, (p >> 12) & 0x1FF)
+            if (e1 & PAGE_USER) == 0 || (e1 & PAGE_PRESENT) == 0 {
+                return false
+            }
+            p = (p & 0xFFFFFFFFFFFFF000) + 4096
+        }
+    }
+    return true
+}
+
+// ---------------------------------------------------------- creating
+
+// ROUND K1. A task plus an address space and nothing in it: the thing an
+// image has to be poured into. `create` below is this plus the entry
+// point of `uprog.fi`; `elf.spawn` is this plus a file.
+fn create_bare(state: u64, prio: u64) -> u64 {
+    let i: u64 = sched.create(state, sched.K_USER, prio, 0,
+        vector(state, V_USER_START))
+    if i == 0 {
+        return 0
+    }
+    // ROUND K6: a slot that a dead process left behind must not hand its
+    // open files and its working directory to its successor.
+    uio.reset(state, i)
+    let space: u64 = space_build(state, i)
+    if space == 0 {
+        discard(state, i)
+        return 0
+    }
+    sched.tset(state, i, sched.T_CR3, space)
+    // Round K4: standard input, output and error, before the first
+    // instruction of the process runs. A process without them would have
+    // to open the console itself, and there is no name for it.
+    // RUNDE HANDLE: DIE HANDLE-TAFEL WIRD VOR DEN DESKRIPTOREN GELEERT
+    // und nicht danach. `file.init_task` legt die drei Standard-
+    // deskriptoren an, und die sind seit dieser Runde HANDLES -- wer
+    // erst danach leert, loescht sie wieder weg. Der Wuerfelwert kommt
+    // aus der pid, damit derselbe Platz in zwei Prozessen nie denselben
+    // Handle-Wert ergibt.
+    handle.clear_task(state, i, sched.tget(state, i, sched.T_PID))
+    file.init_task(state, i)
+    // ...und daneben das GEGENTEIL davon: eine LEERE Handle-Tabelle.
+    // `file.init_task` schenkt dem Prozess seine drei Deskriptoren, weil
+    // POSIX das so will; die native ABI (`kernel/cap.fi`) schenkt nichts.
+    // Wer dort etwas darf, hat es explizit uebergeben bekommen. Der
+    // Wuerfelwert kommt aus der pid, damit derselbe Platz in zwei
+    // Prozessen nicht denselben Handle-Wert ergibt.
+    cap.clear_task(state, i, sched.tget(state, i, sched.T_PID))
+    // ROUND K9. PROZESSGRUPPE, SITZUNG UND TERMINAL KOMMEN VOM ELTERN-
+    // TEIL. `sched.create` hat sie eben auf die eigene pid gesetzt, weil
+    // eine Aufgabe ohne Elternteil ihre eigene Gruppe ist; ein PROZESS
+    // hat einen Elternteil, und ein Kind in einer eigenen Gruppe waere
+    // von der Vordergrundgruppe seines Terminals ausgeschlossen -- es
+    // bekaeme SIGTTIN beim ersten `read` und STRG-C nie. Wer eine eigene
+    // Gruppe will, sagt `setpgid`; das ist genau, was eine Shell mit
+    // Auftragssteuerung tut.
+    //
+    // Steht in `proc.fi` und nicht in `signal.fi`, weil `signal.fi`
+    // dieses Modul braucht und der Modulgraph ein Baum bleiben muss.
+    let par: u64 = sched.tget(state, i, sched.T_PARENT)
+    if par < 32 {
+        sched.tset(state, i, sched.T_PGID, sched.tget(state, par, sched.T_PGID))
+        sched.tset(state, i, sched.T_SID, sched.tget(state, par, sched.T_SID))
+        sched.tset(state, i, sched.T_TTY, sched.tget(state, par, sched.T_TTY))
+    }
+    return i
+}
+
+// A process that was never started, back to nothing. The order matters:
+// the address space first (it hangs on the task record), the record last.
+// RUNDE FREMDLAND: EIN FADEN, KEIN PROZESS.
+//
+// Der Unterschied zu `create_bare` ist EINE Zeile und eine Zusage: der
+// Faden bekommt KEINEN eigenen Adressraum, sondern die Tabellen dessen,
+// der ihn erzeugt hat -- dieselbe `T_CR3`, dieselbe `T_PDPT/PD/PT/DATA`.
+// Damit sieht er jede Seite des Erzeugers, und das ist der ganze Sinn:
+// `pthread_create` verspricht gemeinsamen Speicher.
+//
+// Die Zusage heisst `T_SHARED = 1`, und sie ist das Gegenstueck dazu:
+// `free_space` MUSS diesen Adressraum in Ruhe lassen, wenn der Faden
+// endet. Vier Faeden, die beim Enden viermal dieselben Rahmen
+// zurueckgeben, sind vier Wege, den Rahmenverwalter zu vergiften -- und
+// der Fehler faellt erst dem naechsten Prozess auf die Fuesse.
+//
+// Die Deskriptoren teilen sich Faeden nach POSIX ebenfalls; dieser Kern
+// haelt sie je Aufgabe, also werden sie kopiert (`file.inherit_task` im
+// Aufrufer). Das ist ein UNTERSCHIED zu Linux, er steht in
+// STATUS-FREMDLAND.md, und er faellt erst auf, wenn ein Faden eine
+// Datei oeffnet und ein anderer sie lesen will.
+fn create_thread(state: u64, erzeuger: u64, prio: u64) -> u64 {
+    let i: u64 = sched.create(state, sched.K_USER, prio, 0,
+        vector(state, V_USER_START))
+    if i == 0 {
+        return 0
+    }
+    uio.reset(state, i)
+    // DIE TABELLEN DES ERZEUGERS, nicht eigene. `space_build` wird hier
+    // ABSICHTLICH nicht gerufen -- es gaebe dem Faden einen leeren
+    // Adressraum, in dem der Code, den er ausfuehren soll, nicht steht.
+    sched.tset(state, i, sched.T_CR3,
+        sched.tget(state, erzeuger, sched.T_CR3))
+    sched.tset(state, i, sched.T_PDPT,
+        sched.tget(state, erzeuger, sched.T_PDPT))
+    sched.tset(state, i, sched.T_PD,
+        sched.tget(state, erzeuger, sched.T_PD))
+    sched.tset(state, i, sched.T_PT,
+        sched.tget(state, erzeuger, sched.T_PT))
+    sched.tset(state, i, sched.T_DATA,
+        sched.tget(state, erzeuger, sched.T_DATA))
+    // UND DIE ZUSAGE: dieser Adressraum gehoert dem Faden nicht.
+    sched.tset(state, i, sched.T_SHARED, 1)
+    handle.clear_task(state, i, sched.tget(state, i, sched.T_PID))
+    file.init_task(state, i)
+    cap.clear_task(state, i, sched.tget(state, i, sched.T_PID))
+    return i
+}
+
+fn discard(state: u64, i: u64) {
+    sched.tset(state, i, sched.T_STATE, sched.S_ZOMBIE)
+    free_space(state, i)
+    sched.reap(state, i)
+}
+
+// A process: task plus address space. `kind_arg` is what the user program
+// gets in rdi -- which of the programs in `uprog.fi` it is supposed to be.
+fn create(state: u64, prog: u64, arg: u64, prio: u64) -> u64 {
+    // Interrupts stay down until the process is COMPLETE. Everything
+    // below is state the scheduler would read the moment it takes the
+    // task -- and a half-built process is one with rip zero.
+    let flags: u64 = sched.irq_save()
+    let i: u64 = create_bare(state, prio)
+    if i == 0 {
+        sched.irq_restore(flags)
+        return 0
+    }
+    sched.tset(state, i, sched.T_ENTRY, vector(state, V_USER_MAIN))
+    sched.tset(state, i, sched.T_USTACK, USER_TOP - 16)
+    sched.tset(state, i, sched.T_ARG, prog)
+    sched.tset(state, i, sched.T_WORK, arg)
+    inherit(state, sched.tget(state, i, sched.T_PARENT), i)
+    kstate.add(state, kstate.SPAWNS, 1)
+    sched.start(state, i)
+    sched.irq_restore(flags)
+    return i
+}
+
+// EIN PROZESS, DER SEINE AUTORITAET AUSDRUECKLICH BEKOMMT.
+//
+// `create` daneben ist der alte Weg: der Prozess erbt die Deskriptoren 0,
+// 1 und 2, ohne dass jemand sie ihm gibt -- Umgebungsautoritaet. Dieser
+// Weg hier ist der von OrientOS' `ProcessSpawn` (`libs/osum-abi-native`):
+// die Handle-Tabelle ist leer, und was der Prozess darf, steht in genau
+// einer Zeile -- dem `cap.insert` unten.
+//
+// WIE DER PROZESS SEIN HANDLE ERFAEHRT. Er kann es nicht ausrechnen: der
+// Wuerfelwert seiner Tabelle ist ihm unbekannt, und das ist der Sinn der
+// Sache. Also wird es ihm uebergeben, im Argumentregister -- Platz 0 ist
+// vereinbart, uebergeben wird die obere Haelfte (Generation ^ Wuerfel).
+// Ein vollstaendiger Startsatz mehrerer Handles braucht spaeter eine
+// Seite dafuer; fuer EIN Handle ist das Register ehrlicher als eine.
+fn create_cap(state: u64, prog: u64, rights: u64, prio: u64) -> u64 {
+    let flags: u64 = sched.irq_save()
+    let i: u64 = create_bare(state, prio)
+    if i == 0 {
+        sched.irq_restore(flags)
+        return 0
+    }
+    sched.tset(state, i, sched.T_ENTRY, vector(state, V_USER_MAIN))
+    sched.tset(state, i, sched.T_USTACK, USER_TOP - 16)
+    sched.tset(state, i, sched.T_ARG, prog)
+    let h: u64 = cap.insert(state, i, cap.K_STREAM, rights, file.CON_OUT)
+    sched.tset(state, i, sched.T_WORK, cap.handle_gen(h))
+    inherit(state, sched.tget(state, i, sched.T_PARENT), i)
+    kstate.add(state, kstate.SPAWNS, 1)
+    sched.start(state, i)
+    sched.irq_restore(flags)
+    return i
+}
+
+// ---------------------------------------------------- round K4: pages
+
+// A page of a process back to the frame allocator. The counterpart of
+// `map_page`, and the reason `brk` can shrink and `munmap` can give
+// something back at all.
+fn page_drop(state: u64, i: u64, addr: u64) -> bool {
+    let s: u64 = pt_slot(addr)
+    if s >= 512 {
+        return false
+    }
+    let pt: u64 = pt_for(state, i, addr, false)
+    if pt == 0 {
+        return false
+    }
+    let e: u64 = read_entry(pt, s)
+    if (e & PAGE_PRESENT) == 0 {
+        return false
+    }
+    write_entry(pt, s, 0)
+    if (e & PAGE_SHARED) == 0 {
+        mem.frame_free(state, e & ADDR_MASK)
+    }
+    // The tables of the CURRENT process are the ones the processor has
+    // cached. A page that is gone from the table but still in the TLB is a
+    // page a program can go on writing to -- so the cache goes, the way
+    // `user.map_user` does it: writing cr3 with its own value.
+    let now: u64 = asm("mov rax, cr3", out("rax"))
+    if sched.tget(state, i, sched.T_CR3) == now {
+        asm("mov rax, cr3\nmov cr3, rax", out("rax"))
+    }
+    return true
+}
+
+// EVERY MAPPED PAGE OF `from`, COPIED INTO `to`. This is `fork`, and it is
+// deliberately the dumb version: 4096 octets per page, no copy-on-write,
+// no sharing. `to` comes out of `create_bare` and therefore already has
+// its data page and its eight stack pages -- those are filled, the rest is
+// mapped with the SAME rights the parent had, down to the no-execute bit.
+// Returns how many pages it copied, or 0.
+fn copy_space(state: u64, from: u64, to: u64) -> u64 {
+    var n: u64 = 0
+    // RUNDE K16: Kachel fuer Kachel. Vor dieser Runde gab es nur eine,
+    // und dann ist diese Schleife genau die von damals.
+    var kachel: u64 = 0
+    while kachel < PRIV_SLOTS {
+        let a: u64 = USER_DATA + kachel * USER_SPAN
+        let s2: u64 = pt_for(state, from, a, false)
+        if s2 != 0 {
+            let d2: u64 = pt_for(state, to, a, true)
+            if d2 == 0 {
+                return 0
+            }
+            let m: u64 = copy_pt(state, s2, d2)
+            if m == 0 {
+                if pt_used(s2) != 0 {
+                    return 0
+                }
+            }
+            n = n + m
+        }
+        kachel = kachel + 1
+    }
+    return n
+}
+
+fn pt_used(pt: u64) -> u64 {
+    var n: u64 = 0
+    var k: u64 = 0
+    while k < 512 {
+        if (read_entry(pt, k) & PAGE_PRESENT) != 0 {
+            n = n + 1
+        }
+        k = k + 1
+    }
+    return n
+}
+
+fn copy_pt(state: u64, src: u64, dst: u64) -> u64 {
+    var n: u64 = 0
+    var k: u64 = 0
+    while k < 512 {
+        let e: u64 = read_entry(src, k)
+        if (e & PAGE_PRESENT) != 0 {
+            var d: u64 = read_entry(dst, k)
+            if (d & PAGE_PRESENT) == 0 {
+                let f: u64 = mem.frame_alloc(state)
+                if f == 0 {
+                    return 0
+                }
+                write_entry(dst, k, f | (e & 0xFFF) | (e & PAGE_NX))
+                d = read_entry(dst, k)
+            }
+            let a: u64 = e & ADDR_MASK
+            let b: u64 = d & ADDR_MASK
+            var w: u64 = 0
+            while w < mem.FRAME_SIZE / 8 {
+                __mmio_write64((b + w * 8) as *mut u64,
+                    __mmio_read64((a + w * 8) as *mut u64))
+                w = w + 1
+            }
+            n = n + 1
+        }
+        k = k + 1
+    }
+    return n
+}
+
+// The five numbers that ARE an address space, exchanged between two
+// tasks. `execve` is written with it: the loader builds a whole new
+// process for the file, the caller takes its space, and what the caller
+// had is now hanging on a task that gets discarded -- which frees exactly
+// the old image, with no second copy of `free_space` anywhere.
+fn swap_space(state: u64, a: u64, b: u64) {
+    let cr3: u64 = sched.tget(state, a, sched.T_CR3)
+    let pdpt: u64 = sched.tget(state, a, sched.T_PDPT)
+    let pd: u64 = sched.tget(state, a, sched.T_PD)
+    let pt: u64 = sched.tget(state, a, sched.T_PT)
+    let data: u64 = sched.tget(state, a, sched.T_DATA)
+    sched.tset(state, a, sched.T_CR3, sched.tget(state, b, sched.T_CR3))
+    sched.tset(state, a, sched.T_PDPT, sched.tget(state, b, sched.T_PDPT))
+    sched.tset(state, a, sched.T_PD, sched.tget(state, b, sched.T_PD))
+    sched.tset(state, a, sched.T_PT, sched.tget(state, b, sched.T_PT))
+    sched.tset(state, a, sched.T_DATA, sched.tget(state, b, sched.T_DATA))
+    sched.tset(state, b, sched.T_CR3, cr3)
+    sched.tset(state, b, sched.T_PDPT, pdpt)
+    sched.tset(state, b, sched.T_PD, pd)
+    sched.tset(state, b, sched.T_PT, pt)
+    sched.tset(state, b, sched.T_DATA, data)
+}
+
+// Put the tables of this task into cr3. Only `execve` needs it: everywhere
+// else the context switch does it, and there the task that gets the
+// processor is not the one that is running.
+fn use_space(state: u64, i: u64) {
+    let cr3: u64 = sched.tget(state, i, sched.T_CR3)
+    if cr3 != 0 {
+        asm("mov cr3, rax", in("rax") cr3, clobber("memory"))
+    }
+}
+
+// `KERNEL_USER_START` out of isr.s: the first thing a process runs, still
+// in ring 0, on its own kernel stack, in its own address space. It puts
+// the two arguments in place and leaves the ring -- and does not come
+// back. The way out of a process is `exit`, a fault or the timer.
+fn user_start(state: u64, i: u64, kind: u64) {
+    // ROUND K5: see `tasks.main` -- the run queue lock travels with a
+    // task that has never run and is given back here.
+    sched.enter_task(state)
+
+    // ROUND K4: the child of a `fork` does not START, it CONTINUES. Its
+    // context lies in the data area, `rax` in it is zero, and
+    // `user_resume` in isr.s puts all sixteen words back and returns to
+    // ring 3 at the instruction after the parent's `syscall`.
+    if sched.tget(state, i, sched.T_ARG) == ARG_RESUME {
+        sched.tset(state, i, sched.T_ARG, 0)
+        asm("call rax", in("rax") vector(state, V_USER_RESUME),
+            in("rdi") state + kstate.CTX_OFF + i * 128, clobber("memory"))
+        sched.exit_task(state, 0)
+        return
+    }
+    let arg: u64 = sched.tget(state, i, sched.T_WORK)
+    sched.tset(state, i, sched.T_WORK, 0)
+    // ============================================ RUNDE STARTKNOPF
+    // ============ DER LETZTE BLICK VOR DEM `sysretq`.
+    //
+    // JUSTINS ABSTURZ, aufgeloest: die Absturzanzeige meldete
+    //     rip = 0x0010049C   cs = 0x0008   rsp = 0x4007F000
+    // und `objdump` sagt, was an dieser Adresse steht: das `sysretq`
+    // am Ende von `enter_user_task` (switch.s). Der Ring-0-Fehlercode
+    // 0 und ein `sysretq`, das keinen Speicher anfasst, lassen genau
+    // EINE Deutung zu -- #GP(0), und den wirft dieser Befehl aus genau
+    // EINEM Grund: DER RUECKSPRUNGZEIGER IN rcx IST NICHT KANONISCH
+    // (AMD APM Bd. 3, SYSRET: "#GP(0) if the target RIP is
+    // non-canonical"). rcx ist hier `T_ENTRY`.
+    //
+    // (Das `cr2` auf dem Foto, 0x4007EFF8, ist NICHT die Ursache: cr2
+    // wird von einem #GP nicht angefasst und stand noch von dem
+    // Seitenfehler, mit dem der Stapel dieses Prozesses gewachsen ist.
+    // Genau deshalb steht die Zahl ab dieser Runde nur noch bei #PF
+    // auf dem Schirm.)
+    //
+    // WARUM ES DIE MASCHINE UMBRINGT: das `sysretq` steht in RING 0.
+    // `trap.user_fault` verlangt `(cs & 3) == 3`, also faellt der
+    // Fehler durch bis `report` -- und `report` haelt an. Ein einziges
+    // Programm mit kaputtem Einsprung nimmt den ganzen Rechner mit.
+    //
+    // DER GRIFF: es wird VORHER nachgesehen. Ein Einsprung, der nicht
+    // in der unteren Haelfte des Adressraums liegt (also alles
+    // Nichtkanonische UND jede Kernadresse), und ein Stapelzeiger
+    // derselben Art kommen gar nicht erst bis zum `sysretq`. Der
+    // PROZESS stirbt, der Rechner laeuft. Das kostet zwei Vergleiche
+    // ein einziges Mal je Programmstart.
+    let e: u64 = sched.tget(state, i, sched.T_ENTRY)
+    let sp: u64 = sched.tget(state, i, sched.T_USTACK)
+    if e == 0 || (e >> 47) != 0 || sp == 0 || (sp >> 47) != 0 {
+        say_badentry(state, i, e, sp)
+        sched.exit_task(state, 127)
+        return
+    }
+    asm("call rax", in("rax") vector(state, V_ENTER_TASK),
+        in("rdi") e,
+        in("rsi") sp,
+        in("rdx")(sched.tget(state, i, sched.T_ARG) << 32) | arg,
+        clobber("memory"))
+    // Unreachable: `enter_user_task` ends in `sysretq`.
+    sched.exit_task(state, 0)
+}
+
+// Und es wird GESAGT, nicht verschwiegen. Ein Programm, das nicht
+// startet, ohne dass irgendwo eine Zeile steht, ist genauso schwer zu
+// finden wie ein Rechner, der stehenbleibt.
+static mut bad_entries: u64 = 0
+
+fn badentry_num() -> u64 {
+    return bad_entries
+}
+
+fn say_badentry(state: u64, i: u64, e: u64, sp: u64) {
+    var s_a: [u8; 27] = "proc: bad entry -- pid=\0\0\0\0"
+    var s_e: [u8; 9] = "  entry=\0"
+    var s_u: [u8; 10] = "  ustack=\0"
+    var s_t: [u8; 34] = "  (kein sysret, Prozess beendet)\0\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(sched.tget(state, i, sched.T_PID))
+    serial.puts((&s_e[0]) as u64)
+    serial.hex(e)
+    serial.puts((&s_u[0]) as u64)
+    serial.hex(sp)
+    serial.puts((&s_t[0]) as u64)
+    serial.nl()
+    bad_entries = bad_entries + 1
+}
