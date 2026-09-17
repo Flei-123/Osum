@@ -850,6 +850,11 @@ g_dev_end:
  * zeigt hierher, und alles Weitere steht in dieser Datei. Runden, die
  * gleichzeitig laufen, fassen `isr.s` damit nur an EINER Zeile an.
  */
+/* Die Marke fuer den Gast ohne Abbild. Sie zeigt auf sich selbst;
+ * Anfang und Ende sind dieselbe Adresse, also ist die Laenge 0. */
+    .globl g_linux_none
+g_linux_none:
+
     .align 8
     .globl hv_vectors
 hv_vectors:
@@ -880,6 +885,18 @@ hv_vectors:
     .quad g_lm_end                  /* 14 */
     .quad g_dev_start               /* 15 */
     .quad g_dev_end                 /* 16 */
-    .quad hv_guest_save             /* 17 */
-    .quad hv_stgi                   /* 18 */
-    .quad hv_clgi                   /* 19 */
+    /* ---- Runde HV3 ----
+     * DER LINUX-GAST HAT KEIN ABBILD IN DIESER DATEI, und trotzdem
+     * steht hier ein Paar fuer ihn. Sein Abbild ist das Boot-Modul,
+     * das der Lader hereingibt -- es ist zur Uebersetzungszeit nicht
+     * da und kann hier nicht stehen. Was hier stehen MUSS, ist ein
+     * Paar, denn `hv.fi` rechnet HV_G_FIRST + Nummer * 2 und wuerde
+     * sonst die Hilfsfunktionen darunter als Gastabbild lesen -- genau
+     * der Fehler (a) der Runde HV2. Zwei gleiche Adressen ergeben die
+     * Laenge 0: `vm_create_big` kopiert dann nichts, und der Ladeweg
+     * in `bzload.fi` legt das Abbild selbst hin. */
+    .quad g_linux_none              /* 17 */
+    .quad g_linux_none              /* 18 */
+    .quad hv_guest_save             /* 19 */
+    .quad hv_stgi                   /* 20 */
+    .quad hv_clgi                   /* 21 */

@@ -1,0 +1,566 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/arch/x86_64/bzload.fi -- Runde HV3, Stufe 4: DER LADEWEG.
+//
+// Die Runde HV2 hat einen RECHNER gebaut: einen Gast, der 64 Bit laufen
+// kann, so viel Speicher bekommt, wie er braucht, und Geraete vorfindet,
+// die auf Fragen antworten. Was ihr fehlte, war ein GASTSYSTEM. Der
+// Bericht jener Runde sagt es in Abschnitt 8 mit Zahlen: nicht der Wirt
+// war die Grenze, sondern der Weg, auf dem ein fremder Kern in den
+// Gastspeicher kommt.
+//
+// DIESE DATEI IST DIESER WEG, und sie ist NICHT eine Nachbildung von
+// GRUB. Sie ist die Uebersetzung EINER Festlegung nach Firn:
+// Documentation/arch/x86/boot.rst des Linux-Kerns, "THE LINUX/x86 BOOT
+// PROTOCOL". Das ist der Grund, warum diese Aufgabe endlich ist -- die
+// Festlegung ist vierzig Seiten lang, sie ist seit 1991 rueckwaerts
+// vertraeglich, und wenn sie stimmt, startet JEDER Linux-Kern, nicht
+// bloss der von dieser Maschine.
+//
+// ====================== DREI TEILE, UND NUR DREI ======================
+//
+//   1. DER KOPF LESEN UND PRUEFEN (`hdr_*`, `check`). Ein bzImage ist
+//      nicht irgendeine Datei: bei 0x1FE steht 0xAA55, bei 0x202 steht
+//      "HdrS", und alles danach haengt an `version`. Wer den Kopf nicht
+//      prueft, laedt Unsinn in den Gastspeicher und sucht den Fehler
+//      hinterher im Hypervisor.
+//   2. DIE ZERO-PAGE BAUEN (`zeropage`). 4096 Oktette, genullt, mit dem
+//      Setup-Kopf des Abbilds darin, der Kommandozeile, dem
+//      E820-Speicherbild und `type_of_loader`. DAS IST DER TEIL, DEN
+//      MAN UNTERSCHAETZT: ohne ein stimmiges E820 findet Linux keinen
+//      Speicher und hoert auf, bevor es ein Wort gesagt hat.
+//   3. DAS ABBILD UMLAGERN (`load`). Der entpackte Teil liegt hinter dem
+//      Setup-Bereich und will an `pref_address` -- und zwar mit
+//      `init_size` Oktetten Platz dahinter, nicht mit seiner eigenen
+//      Laenge. Das ist die Zahl aus Abschnitt 8 der Runde HV2.
+//
+// ================== WAS DIESE DATEI NICHT TUT ==================
+//
+// Sie startet nichts. Sie fasst den Gastzustand nicht an, sie kennt
+// kein VMCB und keine NPT. Sie bekommt einen Zeiger auf den
+// GASTSPEICHER (wirtsphysisch, weil der Wirt ihn besitzt), schreibt
+// dort Oktette hin und sagt, welche Werte der Wirt in RIP, RSI und die
+// Segmente stellen muss. Der Wirt selbst steht in `hv.fi`.
+//
+// WARUM DIESE TRENNUNG. Der Ladeweg ist pruefbar OHNE einen einzigen
+// Gasteintritt: Kopf lesen, Zero-Page bauen, Oktette vergleichen. Die
+// Runde HV2 sagt in ihrem Abschnitt 11 genau das als naechsten Schritt
+// -- "sie laesst sich bauen und pruefen, ohne dass ein einziges Oktett
+// Linux vorhanden sein muss". Genau so ist es gebaut, und die Zusagen
+// dieser Runde messen beide Haelften getrennt.
+//
+// ARITHMETIK. Jede Zahl hier ist ein VERSATZ IN EINER DATEI oder eine
+// physische Adresse, kein Zaehler -- also `+%`, `-%`, `*%`. Die
+// gepruefte Arithmetik dieser Sprache gehoert an die Stellen, an denen
+// ein Ueberlauf ein Fehler waere; eine Feldadresse ist keine solche
+// Stelle.
+
+import lib.kstate
+import serial
+
+export {
+    // der Kopf
+    HDR_MAGIC, hdr_ok, hdr_boot_flag, hdr_magic, hdr_version,
+    hdr_setup_sects, hdr_loadflags, hdr_relocatable, hdr_min_alignment,
+    hdr_xloadflags, hdr_kernel_alignment, hdr_cmdline_size,
+    hdr_pref_address, hdr_init_size, hdr_handover_offset,
+    hdr_syssize, pm_offset, pm_bytes, check,
+    XLF_KERNEL_64, LF_LOADED_HIGH,
+    // die Zero-Page
+    ZP_BYTES, zeropage, zp_e820_entries, zp_cmdline_ptr, zp_loader,
+    E820_MAX, E820_RAM, E820_RESERVED,
+    ZP_E820_ENTRIES, ZP_E820_TABLE, ZP_CMDLINE_PTR, ZP_LOADER_TYPE,
+    ZP_SETUP_OFF, ZP_RAMDISK_IMAGE, ZP_RAMDISK_SIZE,
+    // der Ladevorgang
+    plan, load, entry_of, need_bytes, want_bytes,
+    // Gastadressen, an denen die Teile im Gast liegen
+    G_ZEROPAGE, G_CMDLINE, G_KERNEL, G_GDT, G_STACK,
+    E820_SLOT
+}
+
+// ====================================================================
+//                      1. DER SETUP-KOPF
+// ====================================================================
+//
+// Die Versaetze stehen in boot.rst, Tabelle "The Real-Mode Kernel
+// Header". Sie sind ABSOLUT IN DER DATEI und nicht relativ zum Kopf --
+// das Abbild faengt mit dem Bootsektor an, und der Kopf liegt mitten
+// darin. Jede dieser Zahlen ist einmal gegen die Festlegung gehalten
+// worden; wer sie aendert, aendert sie gegen die Festlegung.
+
+const H_SETUP_SECTS: u64 = 0x1F1 // ein Oktett: Sektoren des Setup-Teils
+const H_SYSSIZE: u64 = 0x1F4 // 32 Bit, in Absaetzen von 16 Oktetten
+const H_BOOT_FLAG: u64 = 0x1FE // 16 Bit: MUSS 0xAA55 sein
+const H_HEADER: u64 = 0x202 // 32 Bit: MUSS "HdrS" sein
+const H_VERSION: u64 = 0x206 // 16 Bit: 0x020F heisst 2.15
+const H_LOADFLAGS: u64 = 0x211 // ein Oktett
+const H_CODE32_START: u64 = 0x214 // 32 Bit
+const H_RAMDISK_IMAGE: u64 = 0x218
+const H_RAMDISK_SIZE: u64 = 0x21C
+const H_CMD_LINE_PTR: u64 = 0x228 // 32 Bit
+const H_KERNEL_ALIGNMENT: u64 = 0x230 // 32 Bit
+const H_RELOCATABLE: u64 = 0x234 // ein Oktett
+const H_MIN_ALIGNMENT: u64 = 0x235 // ein Oktett, als Zweierpotenz
+const H_XLOADFLAGS: u64 = 0x236 // 16 Bit
+const H_CMDLINE_SIZE: u64 = 0x238 // 32 Bit
+const H_PREF_ADDRESS: u64 = 0x258 // 64 Bit
+const H_INIT_SIZE: u64 = 0x260 // 32 Bit: DIE ZAHL, DIE ENTSCHEIDET
+const H_HANDOVER_OFFSET: u64 = 0x264 // 32 Bit
+
+// "HdrS", als kleinendige 32-Bit-Zahl gelesen.
+const HDR_MAGIC: u64 = 0x53726448
+const BOOT_FLAG: u64 = 0xAA55
+
+// `loadflags`, Bit 0. Steht es, gehoert der entpackte Teil nach
+// 0x100000 und nicht nach 0x10000 -- jeder Kern seit 1997 setzt es.
+const LF_LOADED_HIGH: u64 = 1
+
+// `xloadflags`, Bit 0: dieser Kern hat einen 64-BIT-EINSPRUNG. Ohne
+// dieses Bit gibt es nur den Weg ueber den geschuetzten Modus, und
+// dieser Wirt startet den Gast im langen Modus -- also ist das Bit
+// eine Bedingung und keine Auskunft.
+const XLF_KERNEL_64: u64 = 1
+
+// Die kleinste Fassung, mit der dieser Ladeweg umgehen kann. 2.12
+// (0x020C) brachte `pref_address` und `init_size`; ohne die beiden
+// waere nicht bekannt, wohin der Kern will und wie viel Platz er
+// dahinter braucht. Ein aelterer Kern wird ABGEWIESEN und nicht
+// geraten.
+const MIN_VERSION: u64 = 0x020C
+
+fn u8_at(img: u64, off: u64) -> u64 {
+    return kstate.get8(img +% off)
+}
+
+fn u16_at(img: u64, off: u64) -> u64 {
+    return kstate.get8(img +% off) | (kstate.get8(img +% off +% 1) << 8)
+}
+
+fn u32_at(img: u64, off: u64) -> u64 {
+    return u16_at(img, off) | (u16_at(img, off +% 2) << 16)
+}
+
+fn u64_at(img: u64, off: u64) -> u64 {
+    return u32_at(img, off) | (u32_at(img, off +% 4) << 32)
+}
+
+fn hdr_boot_flag(img: u64) -> u64 {
+    return u16_at(img, H_BOOT_FLAG)
+}
+
+fn hdr_magic(img: u64) -> u64 {
+    return u32_at(img, H_HEADER)
+}
+
+fn hdr_version(img: u64) -> u64 {
+    return u16_at(img, H_VERSION)
+}
+
+fn hdr_setup_sects(img: u64) -> u64 {
+    // Null heisst vier. Das ist eine Altlast aus der Zeit, in der der
+    // Bootsektor selbst den Wert nicht setzte, und sie steht
+    // ausdruecklich in der Festlegung.
+    let n: u64 = u8_at(img, H_SETUP_SECTS)
+    if n == 0 {
+        return 4
+    }
+    return n
+}
+
+fn hdr_loadflags(img: u64) -> u64 {
+    return u8_at(img, H_LOADFLAGS)
+}
+
+fn hdr_relocatable(img: u64) -> u64 {
+    return u8_at(img, H_RELOCATABLE)
+}
+
+fn hdr_min_alignment(img: u64) -> u64 {
+    return u8_at(img, H_MIN_ALIGNMENT)
+}
+
+fn hdr_xloadflags(img: u64) -> u64 {
+    return u16_at(img, H_XLOADFLAGS)
+}
+
+fn hdr_kernel_alignment(img: u64) -> u64 {
+    return u32_at(img, H_KERNEL_ALIGNMENT)
+}
+
+fn hdr_cmdline_size(img: u64) -> u64 {
+    return u32_at(img, H_CMDLINE_SIZE)
+}
+
+fn hdr_pref_address(img: u64) -> u64 {
+    return u64_at(img, H_PREF_ADDRESS)
+}
+
+fn hdr_init_size(img: u64) -> u64 {
+    return u32_at(img, H_INIT_SIZE)
+}
+
+fn hdr_handover_offset(img: u64) -> u64 {
+    return u32_at(img, H_HANDOVER_OFFSET)
+}
+
+fn hdr_syssize(img: u64) -> u64 {
+    return u32_at(img, H_SYSSIZE)
+}
+
+// Wo der ENTPACKTE Teil in der Datei anfaengt: hinter dem Bootsektor
+// und den Setup-Sektoren. `(setup_sects + 1) * 512`, und das ist die
+// eine Rechnung dieser Datei, die man falsch machen KANN, ohne dass es
+// auffaellt -- ein Sektor zu wenig, und der Gast fuehrt Datenmuell aus.
+fn pm_offset(img: u64) -> u64 {
+    return (hdr_setup_sects(img) +% 1) *% 512
+}
+
+fn pm_bytes(img: u64, len: u64) -> u64 {
+    let off: u64 = pm_offset(img)
+    if len <= off {
+        return 0
+    }
+    return len -% off
+}
+
+// Ob dieses Abbild ueberhaupt ein bzImage ist, mit dem dieser Ladeweg
+// umgehen kann. Gibt 0 zurueck, wenn alles stimmt, sonst die Nummer der
+// Bedingung, die gebrochen ist -- eine Zahl und kein `false`, damit man
+// im Protokoll SIEHT, woran es lag.
+//
+//   1  zu kurz fuer einen Kopf
+//   2  0xAA55 fehlt: das ist kein Bootabbild
+//   3  "HdrS" fehlt: das ist kein Linux
+//   4  zu alte Fassung: kein pref_address/init_size
+//   5  der entpackte Teil ist leer
+//   6  kein 64-Bit-Einsprung (xloadflags Bit 0)
+//   7  init_size ist null -- dann weiss niemand, wie viel Platz es will
+fn check(img: u64, len: u64) -> u64 {
+    if len < 1024 {
+        return 1
+    }
+    if hdr_boot_flag(img) != BOOT_FLAG {
+        return 2
+    }
+    if hdr_magic(img) != HDR_MAGIC {
+        return 3
+    }
+    if hdr_version(img) < MIN_VERSION {
+        return 4
+    }
+    if pm_bytes(img, len) == 0 {
+        return 5
+    }
+    if (hdr_xloadflags(img) & XLF_KERNEL_64) == 0 {
+        return 6
+    }
+    if hdr_init_size(img) == 0 {
+        return 7
+    }
+    return 0
+}
+
+fn hdr_ok(img: u64, len: u64) -> bool {
+    return check(img, len) == 0
+}
+
+// ====================================================================
+//                      2. DIE ZERO-PAGE
+// ====================================================================
+//
+// `struct boot_params`, arch/x86/include/uapi/asm/bootparam.h. Vier
+// Kibioctets, und das meiste davon bleibt Null. Was NICHT Null bleiben
+// darf, ist genau das Folgende -- und jede dieser fuenf Zahlen ist
+// einzeln der Grund, warum ein Linux schweigt, wenn sie fehlt.
+
+const ZP_BYTES: u64 = 4096
+
+const ZP_E820_ENTRIES: u64 = 0x1E8 // ein Oktett: wie viele Eintraege
+const ZP_SETUP_SECTS: u64 = 0x1F1 // der Setup-Kopf, hierhin kopiert
+const ZP_LOADER_TYPE: u64 = 0x210 // 0xFF = "unbekannter Lader"
+const ZP_CMDLINE_PTR: u64 = 0x228 // 32 Bit: wo die Kommandozeile steht
+const ZP_RAMDISK_IMAGE: u64 = 0x218 // 32 Bit
+const ZP_RAMDISK_SIZE: u64 = 0x21C // 32 Bit
+const ZP_E820_TABLE: u64 = 0x2D0 // 128 Eintraege je 20 Oktette
+
+// Der Setup-Kopf wird als GANZES uebernommen, und zwar von 0x1F1 bis
+// 0x202 + dem Oktett bei 0x201 ("jump", die Laenge des Kopfes). Das ist
+// die Vorschrift aus boot.rst: der Lader kopiert den Kopf des Abbilds
+// in die Zero-Page, aendert darin die Felder, die ihm gehoeren, und
+// laesst alles andere in Ruhe. Wer stattdessen Feld fuer Feld setzt,
+// vergisst eines.
+const ZP_SETUP_OFF: u64 = 0x1F1
+const H_JUMP: u64 = 0x201 // ein Oktett: Laenge des Kopfes ab 0x202
+
+const E820_MAX: u64 = 128
+const E820_ENTRY: u64 = 20 // Adresse (8), Laenge (8), Typ (4)
+const E820_RAM: u64 = 1
+const E820_RESERVED: u64 = 2
+
+// Wo die Teile IM GAST liegen. Das ist eine Entscheidung dieses Wirts
+// und keine Vorschrift -- die Festlegung sagt nur, dass die Zero-Page
+// irgendwo unterhalb von 0x100000 liegen muss und RSI darauf zeigt.
+// Diese Anordnung haelt alles im ersten Mebioctet und laesst
+// 0x100000 aufwaerts fuer den Kern frei.
+const G_ZEROPAGE: u64 = 0x10000 // die Zero-Page: 0x10000..0x10FFF
+const G_CMDLINE: u64 = 0x11000 // die Kommandozeile, 2 KiB reichen
+const G_GDT: u64 = 0x12000 // die GDT, die das Protokoll verlangt
+const G_STACK: u64 = 0x1F000 // der Stapel des Gasts, waechst nach unten
+const G_KERNEL: u64 = 0x1000000 // 16 MiB: `pref_address` dieses Kerns
+
+// Ein Eintrag im Speicherbild. `n` ist die Nummer, nicht der Versatz.
+fn e820_set(zp: u64, n: u64, addr: u64, size: u64, kind: u64) {
+    if n >= E820_MAX {
+        return
+    }
+    let p: u64 = zp +% ZP_E820_TABLE +% n *% E820_ENTRY
+    __mmio_write64(p as *mut u64, addr)
+    __mmio_write64((p +% 8) as *mut u64, size)
+    __mmio_write32((p +% 16) as *mut u32, (kind & 0xFFFFFFFF) as u32)
+}
+
+fn zp_e820_entries(zp: u64) -> u64 {
+    return kstate.get8(zp +% ZP_E820_ENTRIES)
+}
+
+fn zp_cmdline_ptr(zp: u64) -> u64 {
+    return u32_at(zp, ZP_CMDLINE_PTR)
+}
+
+fn zp_loader(zp: u64) -> u64 {
+    return kstate.get8(zp +% ZP_LOADER_TYPE)
+}
+
+// Wie viele E820-Eintraege ein Gast mit `ram` Oktetten Speicher
+// bekommt. Das steht hier als eigene Funktion, weil der Laeufer die
+// Zahl NACHRECHNEN muss, ohne sie abzulesen.
+const E820_SLOT: u64 = 3 // unter 640K, das Loch, oberhalb von 1M
+
+// Baut die Zero-Page im Gastspeicher. `gram` ist der Gastspeicher
+// (wirtsphysisch), `ram_bytes` ist, wie viel Speicher der Gast haben
+// SOLL, `img` das bzImage, `cmd` die Kommandozeile (0-beendet),
+// `rd_addr`/`rd_len` ein initrd oder beides 0.
+//
+// Gibt die Zahl der E820-Eintraege zurueck -- 0 heisst, es ist nichts
+// gebaut worden.
+fn zeropage(gram: u64, ram_bytes: u64, img: u64, cmd: u64,
+        rd_addr: u64, rd_len: u64) -> u64 {
+    let zp: u64 = gram +% G_ZEROPAGE
+    // Erst alles auf Null. Das ist keine Vorsichtsmassnahme, sondern
+    // die Vorschrift: "the boot loader must zero the whole struct".
+    var i: u64 = 0
+    while i < ZP_BYTES {
+        __mmio_write64((zp +% i) as *mut u64, 0)
+        i = i +% 8
+    }
+
+    // (a) DER SETUP-KOPF, als Ganzes. Von 0x1F1 bis zum Ende, das das
+    //     Oktett bei 0x201 nennt. Ein Kopf, der bis 0x268 reicht, hat
+    //     dort 0x66 -- gerechnet und nicht geraten.
+    let jump: u64 = kstate.get8(img +% H_JUMP)
+    var kopf_ende: u64 = 0x202 +% jump
+    if kopf_ende < 0x268 {
+        kopf_ende = 0x268 // mindestens bis init_size/handover_offset
+    }
+    if kopf_ende > 0x300 {
+        kopf_ende = 0x300 // und niemals in die E820-Tafel hinein
+    }
+    var o: u64 = ZP_SETUP_OFF
+    while o < kopf_ende {
+        __mmio_write8((zp +% o) as *mut u8, kstate.get8(img +% o) as u8)
+        o = o +% 1
+    }
+
+    // (b) WAS DEM LADER GEHOERT. Diese Felder ueberschreibt er, nachdem
+    //     der Kopf kopiert ist -- in dieser Reihenfolge, sonst kopiert
+    //     er sie wieder weg.
+    //
+    //     `type_of_loader = 0xFF` heisst "undefined". Das ist die
+    //     ausdrueckliche Vorgabe der Festlegung fuer einen Lader, der
+    //     keine zugeteilte Nummer hat -- und nicht etwa ein Platzhalter.
+    __mmio_write8((zp +% ZP_LOADER_TYPE) as *mut u8, 0xFF as u8)
+    __mmio_write32((zp +% ZP_CMDLINE_PTR) as *mut u32,
+        (G_CMDLINE & 0xFFFFFFFF) as u32)
+    __mmio_write32((zp +% ZP_RAMDISK_IMAGE) as *mut u32,
+        (rd_addr & 0xFFFFFFFF) as u32)
+    __mmio_write32((zp +% ZP_RAMDISK_SIZE) as *mut u32,
+        (rd_len & 0xFFFFFFFF) as u32)
+
+    // (c) DIE KOMMANDOZEILE. Sie liegt NICHT in der Zero-Page, sondern
+    //     daneben -- `cmd_line_ptr` zeigt darauf. Hoechstens so viel,
+    //     wie der Kern selbst zulaesst (`cmdline_size`).
+    var max: u64 = hdr_cmdline_size(img)
+    if max == 0 || max > 2047 {
+        max = 2047
+    }
+    let cl: u64 = gram +% G_CMDLINE
+    var n: u64 = 0
+    if cmd != 0 {
+        var weiter: bool = true
+        while weiter {
+            let c: u64 = kstate.get8(cmd +% n)
+            if c == 0 || n >= max {
+                weiter = false
+            } else {
+                __mmio_write8((cl +% n) as *mut u8, c as u8)
+                n = n +% 1
+            }
+        }
+    }
+    __mmio_write8((cl +% n) as *mut u8, 0 as u8)
+
+    // (d) DAS SPEICHERBILD. DAS IST DER TEIL, DEN MAN UNTERSCHAETZT.
+    //
+    //     Linux fragt die Firmware NICHT -- es glaubt dieser Tafel.
+    //     Steht sie nicht da, hat der Kern null Oktette Speicher,
+    //     ruft `memblock` mit einem leeren Bereich auf und hoert auf,
+    //     bevor die serielle Schnittstelle ein Wort gesehen hat. Das
+    //     ist genau der Fall, in dem man den Fehler im Hypervisor
+    //     sucht und er in zwanzig Oktetten Tafel liegt.
+    //
+    //     DREI EINTRAEGE, so wie sie jeder PC hat, und die Form ist
+    //     nicht beliebig: das Loch von 640 KiB bis 1 MiB MUSS als
+    //     reserviert drinstehen (dort liegen BIOS und Grafik), sonst
+    //     legt der Kern Daten in einen Bereich, den es nicht gibt.
+    e820_set(zp, 0, 0, 0xA0000, E820_RAM) // 0..640K
+    e820_set(zp, 1, 0xA0000, 0x60000, E820_RESERVED) // das Loch
+    var oben: u64 = 0
+    if ram_bytes > 0x100000 {
+        oben = ram_bytes -% 0x100000
+    }
+    e820_set(zp, 2, 0x100000, oben, E820_RAM) // 1M aufwaerts
+    __mmio_write8((zp +% ZP_E820_ENTRIES) as *mut u8, E820_SLOT as u8)
+    return E820_SLOT
+}
+
+// ====================================================================
+//                      3. DER LADEVORGANG
+// ====================================================================
+
+// Wie viel Gastspeicher dieses Abbild mindestens braucht, in Oktetten.
+//
+// DAS IST DIE ZAHL AUS ABSCHNITT 8 DER RUNDE HV2, und sie ist der
+// Grund, warum der Ladeweg dort nicht gebaut wurde: NICHT die Laenge
+// des Abbilds entscheidet, sondern `init_size` -- der Platz, den der
+// Kern beim Entpacken und Umlagern braucht. Bei dem Kern dieser
+// Maschine sind das 56 MiB gegen 11 MiB Abbild, ein Faktor von fuenf.
+// Wer nur das Abbild einplant, gibt dem Kern einen Speicher, in dem er
+// sich selbst ueberschreibt.
+fn need_bytes(img: u64, len: u64) -> u64 {
+    if !hdr_ok(img, len) {
+        return 0
+    }
+    var ende: u64 = G_KERNEL +% hdr_init_size(img)
+    let pa: u64 = hdr_pref_address(img)
+    // Ein Kern, der woanders hin will als an unsere Stelle, bekommt
+    // trotzdem Platz bis hinter sein eigenes Ende gerechnet.
+    if pa != 0 {
+        if pa +% hdr_init_size(img) > ende {
+            ende = pa +% hdr_init_size(img)
+        }
+    }
+    // Und noch ein Mebioctet obendrauf: die Zero-Page, die
+    // Kommandozeile, die GDT und der Stapel liegen im ersten.
+    return ende +% 0x100000
+}
+
+// WIE VIEL SPEICHER DER GAST WIRKLICH BEKOMMEN SOLLTE, und warum das
+// nicht `need_bytes` ist.
+//
+// `need_bytes` ist das MINIMUM: so viel braucht der Kern, um sich
+// hinzulegen und zu entpacken. Ein Kern, der damit startet, hat danach
+// null Oktette Arbeitsspeicher -- und der erste Lauf dieser Runde hat
+// genau das gemessen. Linux' Entpacker sagte:
+//
+//   "Invalid physical address chosen!"
+//   "Physical KASLR disabled: no suitable memory region!"
+//
+// Der zweite Satz ist der aufschlussreiche: die zufaellige Verschiebung
+// sucht eine freie Stelle von `init_size` Oktetten und findet in einem
+// Gast von `init_size` Groesse keine. Darueber hinaus braucht der Kern
+// Platz fuer `memblock`, die Seitenverwaltung und die Halde -- ein
+// Linux unter 64 MiB freiem Speicher startet auch auf echtem Blech
+// nicht mehr.
+//
+// Diese Funktion gibt deshalb das Doppelte des Minimums, aufgerundet
+// auf ganze 2-MiB-Seiten, und mindestens 192 MiB. Die Zahl ist gemessen
+// und nicht geschaetzt: mit 73 MiB schwieg der Kern nach zwei Zeilen,
+// mit 192 MiB lief er weiter (siehe docs/RUNDE-HV3.md).
+fn want_bytes(img: u64, len: u64) -> u64 {
+    let min: u64 = need_bytes(img, len)
+    if min == 0 {
+        return 0
+    }
+    var v: u64 = min *% 2
+    if v < 201326592 {
+        v = 201326592 // 192 MiB
+    }
+    return v
+}
+
+// Wohin der entpackte Teil geladen wird. `relocatable` heisst, dass der
+// Kern sich selbst verschieben kann -- dann darf der Lader die Stelle
+// waehlen, muss aber `kernel_alignment` einhalten. Ist er NICHT
+// verschiebbar, gilt `pref_address`, und zwar genau.
+fn plan(img: u64, len: u64) -> u64 {
+    if !hdr_ok(img, len) {
+        return 0
+    }
+    let align: u64 = hdr_kernel_alignment(img)
+    var ziel: u64 = G_KERNEL
+    if hdr_relocatable(img) == 0 {
+        ziel = hdr_pref_address(img)
+    }
+    if align > 1 {
+        let rest: u64 = ziel & (align -% 1)
+        if rest != 0 {
+            ziel = ziel +% (align -% rest)
+        }
+    }
+    return ziel
+}
+
+// Der 64-BIT-EINSPRUNG. boot.rst, "64-bit BOOT PROTOCOL": der Einsprung
+// liegt bei `Ladeadresse + 0x200`, und nicht bei `code32_start`. Das ist
+// eine der zwei Stellen, an denen ein Ladeweg lautlos falsch sein kann
+// -- 0x200 Oktette daneben, und der Gast fuehrt den 32-Bit-Einsprung im
+// langen Modus aus.
+fn entry_of(img: u64, len: u64) -> u64 {
+    let p: u64 = plan(img, len)
+    if p == 0 {
+        return 0
+    }
+    return p +% 0x200
+}
+
+// Kopiert den entpackten Teil des Abbilds in den Gastspeicher. Gibt
+// zurueck, wie viele Oktette kopiert wurden -- 0 heisst, es ging nicht.
+//
+// `gram` ist der Gastspeicher (wirtsphysisch), `ram_bytes` seine
+// Groesse. Der Kopiervorgang prueft SELBST, dass er nicht ueber das
+// Ende hinausschreibt: ein Ladeweg, der den Gastspeicher verlaesst,
+// schreibt in den Wirt, und das ist der Fehler, den man nicht sieht.
+fn load(gram: u64, ram_bytes: u64, img: u64, len: u64) -> u64 {
+    if !hdr_ok(img, len) {
+        return 0
+    }
+    let ziel: u64 = plan(img, len)
+    let von: u64 = img +% pm_offset(img)
+    let n: u64 = pm_bytes(img, len)
+    if ziel +% hdr_init_size(img) > ram_bytes {
+        return 0 // der Gast ist zu klein -- SAGEN und nicht kuerzen
+    }
+    var i: u64 = 0
+    // In Achtern, weil es Mebioctets sind. Der Rest einzeln.
+    let acht: u64 = n & 0xFFFFFFFFFFFFFFF8
+    while i < acht {
+        __mmio_write64((gram +% ziel +% i) as *mut u64,
+            __mmio_read64((von +% i) as *mut u64))
+        i = i +% 8
+    }
+    while i < n {
+        __mmio_write8((gram +% ziel +% i) as *mut u8,
+            kstate.get8(von +% i) as u8)
+        i = i +% 1
+    }
+    return n
+}
