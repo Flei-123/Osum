@@ -1,0 +1,251 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/tipp.fi -- RUNDE BRUECKE: EINGABE VON AUSSEN EINSPEISEN.
+//
+// ====================================================================
+// WOFUER, UND WARUM ES OHNE DAS NICHT GEHT
+// ====================================================================
+//
+// Runde BRIDGE-2 hat das Bildschirmfoto gebracht: ich kann SEHEN, was
+// auf Justins echtem Rechner steht. Was fehlt, ist die andere Haelfte
+// -- ETWAS TUN und dann nachsehen, was daraus wurde. Ohne sie ist der
+// Fernblick ein Fenster ohne Klinke: der QEMU-Pruefstand meldet gruen,
+// auf dem Blech ist das Suchfenster kaputt, und der einzige Weg dahin
+// fuehrt ueber Justins Finger und ein Foto mit dem Telefon.
+//
+// Diese Datei speist Tastendruecke und Mausereignisse so ein, als
+// kaemen sie vom Treiber. Danach ist der Weg vollstaendig:
+//
+//     Taste einspeisen -> Bildschirmfoto -> nachsehen, was passierte
+//
+// und das ist der visuelle Durchklick auf ECHTER HARDWARE, den
+// `docs/ECHTHARDWARE.md` verlangt.
+//
+// ====================================================================
+// DIE SICHERHEITSFRAGE, ausdruecklich und zuerst
+// ====================================================================
+//
+// Ein Aufruf, der Tasten erzeugt, ist der maechtigste SCHREIBZUGRIFF,
+// den ein System hat -- maechtiger als das Bildschirmfoto. Wer tippen
+// darf, kann ein Kennwortfeld ausfuellen, eine Sperre aufheben, in
+// einem offenen Terminal `rm` schreiben. "Das Programm fragt ja
+// vorher" ist keine Antwort, wenn dasselbe Programm fragt, das tippen
+// will.
+//
+// DESHALB DIESELBEN DREI SCHLOESSER WIE BEIM BILDSCHIRMFOTO
+// (`kernel/shot.fi`), und zwar absichtlich dieselben und keine
+// eigenen: zwei Rechtesysteme nebeneinander sind eines zu viel, und
+// das schwaechere gewinnt immer.
+//
+//   1. DER SCHEIN (`ARM`). Einspeisen braucht einen BEFRISTETEN
+//      Schein, ausgestellt auf EINE Prozessnummer. Wer keinen hat,
+//      bekommt -E_RIGHTS, und `denied` geht um eins hoch.
+//
+//   2. WER EINEN AUSSTELLEN DARF. Nicht das Programm, das tippen will,
+//      sondern die TASKLEISTE oder die Wurzel -- dieselbe Pruefung wie
+//      in `shot.fi` (`ist_leiste` in sys.fi). Die Bedienoberflaeche ist
+//      die Stelle, die den Menschen fragen KANN.
+//
+//   3. DER SCHEIN IST NICHT STILL. Solange er gilt, steht
+//      `tipp.aktiv()` auf 1, und die Taskleiste zeichnet dafuer ein
+//      sichtbares Zeichen (Runde BRUECKE, `kernel/user/leiste.fi`).
+//      Justin muss auf seinem eigenen Rechner SEHEN koennen, dass
+//      gerade jemand von aussen tippt. Ein Fernzugriff, den man nicht
+//      bemerkt, ist eine Hintertuer, auch wenn er erlaubt ist.
+//
+// EIN UNTERSCHIED ZUM FOTO, UND ER IST ABSICHTLICH: der Fotoschein
+// gilt fuer GENAU EIN Bild und ist danach weg. Ein Tippschein gilt fuer
+// eine ZEITSPANNE, denn ein Ablauf ist eine Folge von Anschlaegen
+// ("Fenster oeffnen, Wort tippen, Eingabe") und ein Schein je Anschlag
+// waere in der Praxis ein Schein fuer alles. Dafuer ist die Frist
+// KURZ (`TIPP_NS`, zwei Minuten) und der Zaehler laeuft mit: wie viele
+// Anschlaege dieser Schein verbraucht hat, steht in `eingespeist`.
+//
+// ====================================================================
+// WAS EINGESPEIST WIRD, UND WO ES LANDET
+// ====================================================================
+//
+// NICHT am Treiber vorbei, sondern GENAU DA, wo der Treiber seine
+// Ereignisse ablegt:
+//
+//   TASTE  -> `kbd.push_hot(state, code, mods)`, derselbe Ereignisring
+//             des Fensterservers, in den `kernel/kbd.fi` seine
+//             Anschlaege legt. Damit sieht der Fensterserver keinen
+//             Unterschied -- und genau das ist der Sinn: eine
+//             eingespeiste Taste soll den Weg nehmen, den eine echte
+//             nimmt, sonst prueft der Durchklick den falschen Weg.
+//
+//   MAUS   -> `ps2m.set_pos(state, x, y)` fuer die Bewegung und
+//             `ps2m.usb_packet(...)` fuer die Knoepfe. Auch hier: der
+//             vorhandene Weg, keine zweite Wahrheit ueber die
+//             Zeigerstelle.
+//
+// WAS DIESE DATEI NICHT TUT: sie erzeugt keine Ereignisse, wenn kein
+// Fensterserver laeuft (`gui=off`). Der Aufruf antwortet dann
+// -E_NODEV, statt in einen Ring zu schreiben, den niemand leert.
+
+profile kernel
+
+import lib.kstate
+import sched.time
+
+export {
+    init, arm, armed, arm_pid, drop, may_inject, note,
+    aktiv, eingespeist, denied, deny, arms, last_pid, gebaut,
+    TIPP_NS, MAX_ANSCHLAEGE
+}
+
+// IST DIE BRUECKE UEBERHAUPT IN DIESEM ABBILD? Diese Frage muss
+// beantwortbar sein, OHNE dass ein Aufruf scheitert -- sonst kann ein
+// Programm einen abgeschalteten Fernzugriff nicht von einem
+// abwesenden unterscheiden, und genau das ist der Unterschied, auf den
+// es hier ankommt (siehe `kernel/tipp-aus.fi`).
+fn gebaut() -> bool {
+    return true
+}
+
+// ------------------------------------------------------------ die Zahlen
+
+// Wie lange ein Tippschein gilt: zwei Minuten.
+//
+// DIE ZAHL IST GEMESSEN UND NICHT GEGRIFFEN. Ein Durchklick, wie ihn
+// `tools/bridge2/durchklick.sh` fuehrt, besteht aus: Suchfenster
+// oeffnen (1 Anschlag), ein Wort tippen (~8), Eingabe (1), Foto (~30 s
+// bei 1280x800, siehe `shot.TICKET_NS`), Fenster schliessen (1). Das
+// sind zwei Fotos und ein Dutzend Anschlaege, gemessen rund 70
+// Sekunden. Zwei Minuten sind knapp das Doppelte -- lang genug fuer
+// einen Ablauf, kurz genug, dass ein vergessener Schein nicht bis zum
+// Abend offen steht.
+const TIPP_NS: u64 = 120000000000
+
+// Hoechstens so viele Anschlaege je Schein. Ohne diese Grenze waere
+// ein Schein von zwei Minuten in der Hand eines fehlerhaften Programms
+// ein Tippautomat: eine Schleife schafft in der Zeit Millionen
+// Anschlaege. Zweihundert ist mehr, als ein Durchklick je braucht, und
+// weit weniger, als Schaden anrichtet.
+const MAX_ANSCHLAEGE: u64 = 200
+
+// ------------------------------------------------------------- die Seite
+//
+// TIPP_OFF ist 0x8A000, und die Zahl ist NACHGERECHNET, nicht geraten:
+// `tools/kernel/memmap.py` weist TASK_OFF bei 0x88000 aus und MU_OFF
+// (Runde MULTIUSER) bei 0x90000. Dazwischen liegen 32 KiB, in denen
+// nichts steht. 0x8A000 ist die zweite Seitengrenze darin und laesst
+// vor und hinter sich Luft -- die Runden K10/K11 haben sich einmal
+// eine Seite geteilt, und NETVIEW hat einen Tag damit verbracht.
+
+const S_ARMED: u64 = 0x00 // 1 = ein Schein ist offen
+const S_APID: u64 = 0x08 // fuer welche Prozessnummer
+const S_DEADLINE: u64 = 0x10 // monotone Zeit, ab der er nichts mehr gilt
+const S_USED: u64 = 0x18 // Anschlaege, die DIESER Schein verbraucht hat
+const S_TOTAL: u64 = 0x20 // Anschlaege seit dem Start, insgesamt
+const S_DENIED: u64 = 0x28 // abgelehnte Versuche
+const S_ARMS: u64 = 0x30 // ausgestellte Scheine
+const S_LASTPID: u64 = 0x38 // wer zuletzt einen Schein hatte
+
+fn gs(state: u64, off: u64) -> u64 {
+    return kstate.get(state, kstate.TIPP_OFF + off)
+}
+
+fn ss(state: u64, off: u64, v: u64) {
+    kstate.set(state, kstate.TIPP_OFF + off, v)
+}
+
+fn init(state: u64) {
+    ss(state, S_ARMED, 0)
+    ss(state, S_APID, 0)
+    ss(state, S_DEADLINE, 0)
+    ss(state, S_USED, 0)
+    ss(state, S_TOTAL, 0)
+    ss(state, S_DENIED, 0)
+    ss(state, S_ARMS, 0)
+    ss(state, S_LASTPID, 0)
+}
+
+// ------------------------------------------------------------ der Schein
+
+// Einen Schein ausstellen. WER das darf, entscheidet `sysgui.fi` --
+// hier steht nur, was dabei passiert. Ein neuer Schein LOESCHT den
+// alten: zwei offene Scheine waeren zwei Wege herein, und der zweite
+// wuerde vergessen.
+fn arm(state: u64, pid: u64) {
+    ss(state, S_ARMED, 1)
+    ss(state, S_APID, pid)
+    ss(state, S_DEADLINE, time.mono_ns(state) +% TIPP_NS)
+    ss(state, S_USED, 0)
+    ss(state, S_LASTPID, pid)
+    kstate.add(state, kstate.TIPP_OFF + S_ARMS, 1)
+}
+
+// Gilt gerade ein Schein? Die Frist wird MITGEPRUEFT und nicht nur das
+// Bit: ein abgelaufener Schein, den niemand abgeraeumt hat, darf nicht
+// gelten, bloss weil gerade keiner nachgesehen hat.
+fn armed(state: u64) -> bool {
+    if gs(state, S_ARMED) == 0 {
+        return false
+    }
+    if time.mono_ns(state) > gs(state, S_DEADLINE) {
+        return false
+    }
+    if gs(state, S_USED) >= MAX_ANSCHLAEGE {
+        return false
+    }
+    return true
+}
+
+fn arm_pid(state: u64) -> u64 {
+    return gs(state, S_APID)
+}
+
+// Was die Taskleiste zeichnet: 1 = es tippt gerade jemand von aussen.
+// Dieselbe Frage wie `armed`, aber unter einem Namen, der sagt, wozu
+// sie gestellt wird -- die Oberflaeche fragt nicht nach einem Schein,
+// sie fragt, ob sie ein Zeichen zeigen muss.
+fn aktiv(state: u64) -> u64 {
+    if armed(state) {
+        return 1
+    }
+    return 0
+}
+
+fn drop(state: u64) {
+    ss(state, S_ARMED, 0)
+    ss(state, S_APID, 0)
+    ss(state, S_DEADLINE, 0)
+    ss(state, S_USED, 0)
+}
+
+// Darf DIESE Prozessnummer gerade einspeisen? Beides muss stimmen: ein
+// gueltiger Schein UND derselbe Prozess, auf den er ausgestellt ist.
+fn may_inject(state: u64, pid: u64) -> bool {
+    if !armed(state) {
+        return false
+    }
+    return gs(state, S_APID) == pid
+}
+
+// Einen verbrauchten Anschlag buchen. Wird NACH dem Einspeisen
+// gerufen, damit ein abgelehnter Versuch den Zaehler nicht bewegt.
+fn note(state: u64) {
+    kstate.add(state, kstate.TIPP_OFF + S_USED, 1)
+    kstate.add(state, kstate.TIPP_OFF + S_TOTAL, 1)
+}
+
+fn deny(state: u64) {
+    kstate.add(state, kstate.TIPP_OFF + S_DENIED, 1)
+}
+
+fn eingespeist(state: u64) -> u64 {
+    return gs(state, S_TOTAL)
+}
+
+fn denied(state: u64) -> u64 {
+    return gs(state, S_DENIED)
+}
+
+fn arms(state: u64) -> u64 {
+    return gs(state, S_ARMS)
+}
+
+fn last_pid(state: u64) -> u64 {
+    return gs(state, S_LASTPID)
+}

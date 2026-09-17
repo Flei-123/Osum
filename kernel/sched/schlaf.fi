@@ -1,0 +1,1806 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/schlaf.fi -- RUNDE SCHLAF (K-018, zweite Haelfte):
+// DER RUHEZUSTAND BEKOMMT SEINE UEBRIGEN TRAEGER.
+//
+// ==================================================================
+// WAS DIE VORRUNDE HINTERLASSEN HAT, UND WARUM ES DIESE DATEI GIBT
+// ==================================================================
+//
+// Die Vorrunde `suspend` hat `kernel/susp.fi` gebaut und in
+// docs/RUNDE-SUSPEND.md Abschnitt 7 VORBILDLICH hingeschrieben, was
+// sie NICHT kann. Ihr eigener Satz: "die Maschine schlaeft noch
+// nicht wirklich". Gebaut war der TRAEGER -- Abbild, Pruefsumme,
+// Wiedererkennung, Gegenprobe. Ungebaut war alles, was einen
+// Zustand ueberhaupt erst ZU einem Zustand macht:
+//
+//   1. KEINE STARTERKENNUNG. `S_RESTORED` wurde gesetzt, aber der
+//      Hochlauf fragte sie nie -- ein echter Kaltstart spielte das
+//      Abbild nicht von selbst ein.
+//   2. KEINE CPU-REGISTER. Kein rsp/rbp/rbx, keine
+//      Ruecksprungadresse, kein cr3.
+//   3. KEIN FPU/XSAVE-BEREICH.
+//   4. KEIN ARBEITSSPEICHER DER PROZESSE. Das Abbild trug 63
+//      Bloecke Pruefstandsmuster, nicht die Rahmen der Bitkarte.
+//   5. KEIN GERAETEZUSTAND.
+//
+// Diese Datei baut genau diese fuenf. Was sie NICHT baut, steht
+// nicht in einer Fussnote, sondern in Abschnitt S3 ganz unten und
+// im Bericht: DER RUECKWEG AUS S3 IST NICHT GEBAUT. Die Vorrunde hat
+// begruendet, warum, und diese Runde hat die Begruendung geprueft
+// und fuer tragfaehig befunden -- siehe `s3_befund`.
+//
+// ==================================================================
+// DER UNTERSCHIED ZUR VORRUNDE, IN EINEM SATZ
+// ==================================================================
+//
+// Die Vorrunde hat den Zustand VERWORFEN und aus dem Abbild
+// zurueckgeholt -- im selben laufenden Kern, ohne Neustart. Das
+// misst den Traeger, aber es misst keinen Ruhezustand: nichts
+// zwingt den Kern, den Zustand wirklich verloren zu haben.
+//
+// Diese Runde misst ueber den HOCHLAUF. QEMU wird BEENDET und NEU
+// GESTARTET, und der neue Kern findet das Abbild von selbst. Was
+// dazwischen liegt, ist ein echter Verlust des Arbeitsspeichers --
+// genau das, was ein Ruhezustand ueberstehen muss.
+//
+// ==================================================================
+// DER SPEICHER DIESER DATEI
+//
+// ZUGETEILT UND NICHT VERHANDELBAR: SCHLAF_OFF 0x121000..0x126000,
+// fuenf Seiten, und die Modusindizes 1020..1029. Diese Datei nimmt
+// KEINE Seite und KEINEN Index ausserhalb. Die Untergliederung
+// steht hier und NUR hier.
+//
+// DER GROSSE PUFFER LIEGT NICHT IN KDATA. Der Arbeitsspeicher der
+// Prozesse ist Rahmen mal 4096 Oktette; er wird Rahmen fuer Rahmen
+// durch den EINEN Sektorpuffer geschoben und nie am Stueck
+// gehalten. Damit braucht diese Runde fuer beliebig viele Rahmen
+// genau vier Kilooktette Puffer.
+// ==================================================================
+
+import lib.kstate
+import serial
+import mm.mem
+import blk
+import ldr.bootmod
+import sched.susp
+import sched.sched
+import sched.proc
+import arch.x86_64.fpu
+import sched.time
+import kbd
+import fb
+import lib.kutil
+import power
+import sched.wach
+import arch.arch
+
+// ---------------------------------------------------- die Skalare
+// Seite 0 von SCHLAF_OFF. Alles einzelne Woerter.
+
+const SL_READY: u64 = 0 // 1 = diese Runde hat gemessen
+const SL_BOOTCHK: u64 = 8 // 1 = die Starterkennung ist gelaufen
+const SL_FOUND: u64 = 16 // 1 = ein gueltiges Abbild lag beim Start
+const SL_WHY: u64 = 24 // warum es verworfen wurde (BW_*)
+const SL_HWSIG: u64 = 32 // die Kennung DIESER Maschine
+const SL_HWIMG: u64 = 40 // die Kennung, die im Abbild stand
+const SL_FRAMES: u64 = 48 // wie viele Rahmen gesichert wurden
+const SL_FRBACK: u64 = 56 // wie viele zurueckgespielt wurden
+const SL_BMFRAMES: u64 = 64 // wie viele Rahmen die Bitkarte als belegt fuehrt
+const SL_FPUOK: u64 = 72 // 1 = der FPU-Bereich ist im Abbild
+const SL_FPUWHY: u64 = 80 // warum nicht (FW_*)
+const SL_FPUSIZE: u64 = 88 // wie gross er ist
+const SL_REGOK: u64 = 96 // 1 = der Registersatz ist gesichert
+const SL_DEVOK: u64 = 104 // 1 = die Geraetezustaende sind gesichert
+const SL_CNT: u64 = 112 // der Pruefstandszaehler
+const SL_PAT: u64 = 120 // das Muster im Bildspeicher
+const SL_SUM: u64 = 128 // die Pruefsumme des Abbilds
+const SL_CYCLE: u64 = 136 // der wievielte Zyklus
+const SL_PIDS: u64 = 144 // wie viele Prozesse gesichert wurden
+const SL_ARMED: u64 = 152 // 1 = dieser Lauf hat gesichert
+const SL_TICKS: u64 = 160 // der Zeitgeberstand beim Einschlafen
+const SL_KLOCKS: u64 = 168 // die Tastaturlampen
+const SL_FBW: u64 = 176 // die Breite des Bildspeichers
+const SL_FBH: u64 = 184 // seine Hoehe
+const SL_COMPUTE: u64 = 192 // das Rechenergebnis des Prozesses
+const SL_CSTEP: u64 = 200 // wie weit er gerechnet hat
+const SL_RESUMED: u64 = 208 // 1 = dieser Start kam aus dem Abbild
+const SL_FPUSUM: u64 = 216 // Pruefsumme ueber den FPU-Bereich
+const SL_REGSUM: u64 = 224 // Pruefsumme ueber den Registersatz
+const SL_DEVSUM: u64 = 232 // Pruefsumme ueber die Geraetezustaende
+const SL_MEMSUM: u64 = 240 // Pruefsumme ueber die Rahmen
+const SL_FREI0: u64 = 248 // freie Rahmen VOR dem Einspielen
+const SL_ZYK: u64 = 256 // welcher Zyklus gefahren wird
+const SL_FBSUM: u64 = 264 // Pruefsumme ueber das Muster im Bildspeicher
+// RUNDE WACH: die freien Rahmen UNMITTELBAR nach dem Wiederanlauf,
+// bevor eine wiederangelaufene Aufgabe zum ersten Mal laeuft. Nur
+// gegen diese Zahl laesst sich "kein verlorener Rahmen" pruefen --
+// alles danach ist der Betrieb und nicht der Wiederanlauf.
+const SL_FREI1: u64 = 272
+// DIE KENNUNG, die der Prozess `P_SCHLAF` in seine private Seite
+// schreibt (`kernel/uprog.fi`). Der Pruefstand erkennt die Seite
+// daran in den eingespielten Rahmen wieder.
+const SCHLAF_TAG: u64 = 0x5343484C41465521
+// DIE TAFEL DER EINGESPIELTEN RAHMEN, in Seite 0 hinter den
+// Skalaren: je Rahmen seine physische Adresse. Sie ist die einzige
+// Stelle, an der nach dem Einspielen noch steht, WOHIN die Rahmen
+// gelegt wurden -- ohne sie muesste der Pruefstand die Platte ein
+// zweites Mal lesen.
+//
+// 320 Oktette Skalare sind vergeben, der Rest der Seite traegt die
+// Tafel: (4096 - 512) / 8 = 448 Eintraege. Mehr Rahmen als das
+// werden NICHT vermerkt (das Einspielen selbst ist davon
+// unberuehrt) -- die Tafel ist eine Messhilfe und keine Zusage.
+const SL_FRTAB: u64 = 512
+const SL_FRTAB_MAX: u64 = 448
+
+// Die weiteren Seiten. Versaetze in SCHLAF_OFF.
+const SL_REGS: u64 = 0x1000 // der Registersatz
+const SL_FPUA: u64 = 0x2000 // der FPU/XSAVE-Bereich
+const SL_BUF: u64 = 0x3000 // der Sektorpuffer
+const SL_DEV: u64 = 0x4000 // die Geraetezustaende
+
+// Der Registersatz, Versaetze in SL_REGS. Was gesichert werden MUSS,
+// sagt der Auftrag: rsp, rbp, rbx, die Ruecksprungadresse und cr3.
+// Dazu kommen r12..r15, weil die AMD64-Aufrufordnung sie als
+// erhaltend fuehrt -- ein Ruecksprung, der sie nicht hat, kommt in
+// eine Funktion zurueck, deren Rechnung zur Haelfte fehlt.
+const R_RSP: u64 = 0
+const R_RBP: u64 = 8
+const R_RBX: u64 = 16
+const R_R12: u64 = 24
+const R_R13: u64 = 32
+const R_R14: u64 = 40
+const R_R15: u64 = 48
+const R_RIP: u64 = 56 // die Ruecksprungadresse
+const R_CR3: u64 = 64
+const R_FLAGS: u64 = 72
+const R_MAGIC: u64 = 80 // damit ein leerer Satz auffaellt
+const R_BYTES: u64 = 88 // so viele Oktette gehen ins Abbild
+
+const REGMAGIC: u64 = 0x5245475342414B21 // "REGSBAK!"
+
+// Die Geraetezustaende, Versaetze in SL_DEV.
+const D_TICKS: u64 = 0 // der Zeitgeber
+const D_KLOCKS: u64 = 8 // die Tastaturlampen
+const D_KLAYOUT: u64 = 16 // die Tastaturbelegung
+const D_FBW: u64 = 24 // Bildspeicher: Breite
+const D_FBH: u64 = 32 // Hoehe
+const D_FBP: u64 = 40 // Schrittweite
+const D_FBRDY: u64 = 48 // war er bereit
+const D_MAGIC: u64 = 56
+const D_BYTES: u64 = 64
+
+const DEVMAGIC: u64 = 0x4445564241434B21 // "DEVBACK!"
+
+// Warum ein Abbild beim Hochlauf verworfen wurde.
+const BW_OK: u64 = 0
+const BW_NOIMG: u64 = 1 // kein Kopf, kein MAGIC
+const BW_VER: u64 = 2 // falsche Fassung
+const BW_SUM: u64 = 3 // die Pruefsumme stimmt nicht
+const BW_HW: u64 = 4 // die Hardware-Kennung passt nicht
+const BW_READ: u64 = 5 // die Platte gab nichts her
+const BW_OFF: u64 = 6 // die Starterkennung ist abgeschaltet
+const BW_NODISK: u64 = 7 // keine Platte
+
+// Warum der FPU-Bereich nicht gesichert wurde.
+const FW_OK: u64 = 0
+const FW_OFF: u64 = 1 // die FPU ist gar nicht eingeschaltet
+const FW_BIG: u64 = 2 // der Bereich passt nicht in eine Seite
+const FW_NOAREA: u64 = 3 // die laufende Aufgabe hat keinen Bereich
+
+// Der Kopf des Abbilds, ZWEITE FASSUNG. Die Vorrunde schrieb VER 1
+// mit acht Feldern; diese Runde haengt an, was sie zusaetzlich
+// traegt, und erhoeht die Fassung. Ein Abbild der Vorrunde wird
+// damit sauber als "falsche Fassung" verworfen statt halb gelesen.
+const H2_MAGIC: u64 = 0
+const H2_VER: u64 = 8
+const H2_FRAMES: u64 = 16 // Bloecke Pruefstandsnutzlast (wie Fassung 1)
+const H2_SUM: u64 = 24 // Pruefsumme ueber ALLES, was folgt
+const H2_CNT: u64 = 32
+const H2_PAT: u64 = 40
+const H2_HWSIG: u64 = 48
+const H2_CYCLE: u64 = 56
+// -- ab hier neu in Fassung 2 --
+const H2_MFRAMES: u64 = 64 // wie viele Speicherrahmen im Abbild liegen
+const H2_REGOK: u64 = 72
+const H2_FPUOK: u64 = 80
+const H2_FPUSIZE: u64 = 88
+const H2_DEVOK: u64 = 96
+const H2_PIDS: u64 = 104
+const H2_COMPUTE: u64 = 112 // das Rechenergebnis vor dem Schlafen
+const H2_CSTEP: u64 = 120
+const H2_MEMSUM: u64 = 128 // Pruefsumme nur ueber die Rahmen
+const H2_REGSUM: u64 = 136
+const H2_FPUSUM: u64 = 144
+const H2_DEVSUM: u64 = 152
+
+const MAGIC2: u64 = 0x004249484D55534F // "OSUMHIB\0", dieselbe Kennung
+const VER2: u64 = 2
+
+// DER AUFBAU DES ABBILDS IN FASSUNG 2. Es liegt weiter in den
+// LETZTEN Bloecken der Platte -- dort, wo die Vorrunde es hingelegt
+// hat, und aus ihrem Grund: am Anfang stehen Partitionstafel und
+// Dateisystem.
+//
+//   LBA n-N       der Kopf (ein Block)
+//   LBA n-N+1     der Registersatz, der FPU-Bereich, die Geraete
+//                 (ein Block: 88 + 64 Oktette Skalare, und der
+//                 FPU-Bereich bekommt eigene Bloecke)
+//   ...           der FPU-Bereich, FPUSIZE/512 Bloecke
+//   ...           DIE RAHMENTAFEL: je Rahmen eine Nummer, 8 Oktette
+//   ...           DIE RAHMEN SELBST, je 8 Bloecke (4096 Oktette)
+//
+// Wie viele Bloecke das Abbild insgesamt braucht, haengt an der Zahl
+// der Rahmen -- deshalb steht sie im Kopf und nicht in einer
+// Konstanten.
+const IMG_RESERVE: u64 = 2048 // Bloecke am Plattenende fuer das Abbild
+const B_HEAD: u64 = 0 // Versatz des Kopfes im Abbild
+const B_SCAL: u64 = 1 // der Block mit Registern und Geraeten
+const B_FPU: u64 = 2 // ab hier der FPU-Bereich
+
+fn g(state: u64, off: u64) -> u64 {
+    return kstate.get(state, kstate.SCHLAF_OFF + off)
+}
+
+fn s(state: u64, off: u64, v: u64) {
+    kstate.set(state, kstate.SCHLAF_OFF + off, v)
+}
+
+fn buf(state: u64) -> u64 {
+    return state + kstate.SCHLAF_OFF + SL_BUF
+}
+
+// RUNDE WACH: DERSELBE SEKTORPUFFER, EIN ZWEITER BENUTZER.
+//
+// `kernel/wach.fi` schreibt seinen Aufgabenteil durch GENAU DIESEN
+// Puffer -- nicht durch einen eigenen. Der Grund steht schon im Kopf
+// dieser Datei: ein zweiter Puffer waere eine zweite Stelle fuer
+// dieselbe Wahrheit, und vier Kilooktette in kdata sind knapp.
+//
+// Die Bedingung dafuer ist eine REIHENFOLGE, und sie wird
+// eingehalten: `wach.save_tasks` laeuft NACH allem, was
+// `save_image` durch den Puffer schiebt, und `wach.restore_tasks`
+// NACH dem letzten Lesezugriff von `boot_check`. Kein Aufruf der
+// einen Seite steht zwischen zwei Zugriffen der anderen.
+fn buf_addr(state: u64) -> u64 {
+    return buf(state)
+}
+
+fn regs(state: u64) -> u64 {
+    return state + kstate.SCHLAF_OFF + SL_REGS
+}
+
+fn fpua(state: u64) -> u64 {
+    return state + kstate.SCHLAF_OFF + SL_FPUA
+}
+
+fn devs(state: u64) -> u64 {
+    return state + kstate.SCHLAF_OFF + SL_DEV
+}
+
+fn buf_clear(state: u64) {
+    let b: u64 = buf(state)
+    var i: u64 = 0
+    while i < 512 {
+        kstate.set8(b + i, 0 as u8)
+        i = i + 1
+    }
+}
+
+// ==================================================================
+// PUNKT 1: DIE HARDWARE-KENNUNG
+//
+// Der Auftrag stellt die Aufgabe genau: auf QEMU ist `hwsig` NULL,
+// weil QEMU keine Hardware Signature fuehrt -- die Vorrunde hat das
+// gemessen (`hwsig=0x0`). Eine Kennung, die auf der Zielmaschine
+// immer 0 ist, unterscheidet nichts: JEDES Abbild haette sie, auch
+// eines von einer anderen Maschine.
+//
+// DESHALB EIN ZWEITER WEG, und hier ist die Begruendung, warum
+// GERADE DIESER:
+//
+// Gebraucht wird eine Zahl, die (a) sich zwischen zwei verschiedenen
+// Maschinen unterscheidet, (b) auf DERSELBEN Maschine ueber einen
+// Neustart hinweg GLEICH bleibt, und (c) ohne Platte und ohne
+// Dateisystem zu haben ist -- die Starterkennung laeuft, bevor
+// irgendetwas eingehaengt ist.
+//
+// Genommen werden drei Groessen und eine Mischung daraus:
+//
+//   1. DIE PLATTENGROESSE in Bloecken. Sie ist das staerkste
+//      Einzelmerkmal, das dieser Kern frueh hat: ein Abbild, das auf
+//      einer 64-MiB-Platte entstand, gehoert nicht auf eine mit 2
+//      GiB. Und sie ist stabil -- dieselbe Platte meldet beim
+//      naechsten Start dieselbe Zahl.
+//   2. DIE CPU-MERKMALE: `cpuid` Blatt 1, EAX (Familie/Modell/
+//      Stepping) und EDX (die Merkmalsbits). Ein Abbild von einer
+//      Maschine ohne SSE2 darf nicht auf einer mit laufen, und
+//      umgekehrt -- der wiederhergestellte FPU-Bereich haette ein
+//      anderes Format. Auch das ist ueber einen Neustart stabil.
+//   3. DIE ZAHL DER RAHMEN, die die Bitkarte fuehrt, also faktisch
+//      die Groesse des Arbeitsspeichers. Ein Abbild mit Rahmen
+//      jenseits des vorhandenen Speichers ist nicht einspielbar,
+//      und diese Zahl faengt genau das.
+//
+// Was diese Kennung NICHT ist: eine Seriennummer. Zwei identisch
+// ausgestattete Maschinen haben dieselbe -- und das ist hinnehmbar,
+// denn sie unterscheidet sich in genau den Groessen, deren
+// Verschiedenheit das Einspielen GEFAEHRLICH machen wuerde. Wer eine
+// echte Seriennummer will, nimmt die SMBIOS-UUID; die liegt in Runde
+// TRESOR und haengt an Tabellen, die hier noch nicht gelesen sind.
+//
+// Die echte `hwsig` aus der FACS geht MIT ein, sobald sie nicht 0
+// ist: auf Blech ist sie der richtige Weg, und dort soll sie
+// fuehren.
+// ==================================================================
+
+fn cpuid_a(leaf: u64) -> u64 {
+    return asm("push rbx\ncpuid\npop rbx",
+        in("rax") leaf, in("rcx") 0, out("rax")) & 0xFFFFFFFF
+}
+
+fn cpuid_d(leaf: u64) -> u64 {
+    return asm("push rbx\ncpuid\nmov rax, rdx\npop rbx",
+        in("rax") leaf, in("rcx") 0, out("rax")) & 0xFFFFFFFF
+}
+
+fn hwsig_now(state: u64) -> u64 {
+    // Die echte Signatur der Firmware, wenn es eine gibt.
+    let facs: u64 = susp.hwsig(state)
+    // Die Platte, wie `susp` sie gemessen hat.
+    let blocks: u64 = susp.blocks(state)
+    let fam: u64 = cpuid_a(1)
+    let feat: u64 = cpuid_d(1)
+    let frames: u64 = mem.frames_total(state)
+    // Eine Mischung, die jede der Groessen wirklich traegt. Kein
+    // Hash mit Ueberlauf -- Firn prueft Ueberlaeufe, und die
+    // Vorrunde ist genau darueber gestolpert (`panic: integer
+    // overflow in 'u64 * u64'`). `crc32` ueber die vier Woerter tut
+    // es, ist fortschreibbar und liegt im Baum.
+    // DIE FUENF WOERTER LIEGEN IN EINEM EIGENEN FELD UND NICHT IM
+    // SEKTORPUFFER, und das ist eine BERICHTIGUNG nach einer Messung.
+    //
+    // Die erste Fassung mischte sie in `buf` -- denselben Puffer, in
+    // dem `boot_check` gerade den KOPF des Abbilds liegen hatte. Der
+    // Aufruf `hwsig_now` mitten in der Kopfpruefung ueberschrieb ihn
+    // also, und alle Felder, die danach gelesen wurden, kamen aus
+    // Muell: `soll=0x78bfbfd` war nicht die gespeicherte Pruefsumme,
+    // sondern das CPUID-Merkmalswort, das vier Zeilen vorher an diese
+    // Stelle geschrieben worden war. Die Folge war ein
+    // "Pruefsumme falsch" bei einem vollstaendig richtigen Abbild --
+    // die Gegenprobe der Vorrunde haette also gruen gemeldet und der
+    // echte Zyklus rot, ohne dass an der Pruefsumme etwas gewesen
+    // waere.
+    //
+    // Ein Feld auf dem Stapel ist hier richtig: fuenf Woerter sind
+    // vierzig Oktette, und diese Funktion laeuft nicht im
+    // Unterbrechungspfad.
+    var w: [u64; 5] = [facs, blocks, fam, feat, frames]
+    return bootmod.crc32((&w[0]) as u64, 40)
+}
+
+// ==================================================================
+// PUNKT 2: DIE CPU-REGISTER UND cr3
+//
+// DER WEG, DEN DIE VORRUNDE NENNT, und er stimmt: `switch.s` sichert
+// fuer den Kontextwechsel JEDES Register auf den Stapel und legt nur
+// `rsp` in die Aufgabe. Diese Runde tut dasselbe -- mit einem
+// Unterschied, der alles ausmacht:
+//
+// DER STAPEL UEBERLEBT DEN SCHLAF NICHT. `context_switch` darf die
+// Register auf dem Stapel lassen, weil der Stapel im Speicher stehen
+// bleibt. Ein Ruhezustand verliert den Speicher. Deshalb gehen die
+// Register HIERHIN, in eine kdata-Seite, die selbst Teil des Abbilds
+// ist -- und nicht auf einen Stapel, der beim naechsten Start
+// woanders liegt.
+//
+// GESICHERT WIRD AUS DEM AUFRUFER HERAUS, nicht mit einer eigenen
+// Assemblerdatei: `asm()` mit `out(...)` liest ein Register genau
+// dort, wo die Funktion gerufen wurde. Die Ruecksprungadresse ist
+// die Stelle, an der `save_regs` zurueckkommt -- also der Punkt, an
+// dem ein Wiederanlauf weitermachen MUESSTE.
+//
+// WAS DAMIT GEMESSEN IST UND WAS NICHT, und das gehoert hierher und
+// nicht in eine Fussnote: gesichert und WIEDER EINGESPIELT wird der
+// Satz vollstaendig, und die Abnahme vergleicht ihn Wort fuer Wort.
+// Ein SPRUNG in den gesicherten Zustand hinein -- also ein
+// `restore_regs`, das rsp und rip wirklich setzt und die Ausfuehrung
+// dort fortsetzt -- ist NICHT gebaut: er braucht einen Stapel, der
+// an derselben virtuellen Adresse wieder liegt, und das sichert
+// diese Runde erst mit Punkt 4 fuer die PROZESSE zu, nicht fuer den
+// Kernstapel selbst. Was die Abnahme statt eines Sprungs misst,
+// steht in Punkt "weiterrechnen": ein Prozess rechnet ueber den
+// Schlaf hinweg weiter, und das prueft Register und Seitentabellen
+// an der Stelle, an der es zaehlt.
+// ==================================================================
+
+fn read_cr3() -> u64 {
+    return asm("mov rax, cr3", out("rax"))
+}
+
+fn read_flags() -> u64 {
+    return asm("pushfq\npop rax", out("rax"))
+}
+
+fn save_regs(state: u64) {
+    let r: u64 = regs(state)
+    // Jedes Register einzeln, dort gelesen, wo diese Funktion laeuft.
+    __mmio_write64((r + R_RSP) as *mut u64, asm("mov rax, rsp", out("rax")))
+    __mmio_write64((r + R_RBP) as *mut u64, asm("mov rax, rbp", out("rax")))
+    __mmio_write64((r + R_RBX) as *mut u64, asm("mov rax, rbx", out("rax")))
+    __mmio_write64((r + R_R12) as *mut u64, asm("mov rax, r12", out("rax")))
+    __mmio_write64((r + R_R13) as *mut u64, asm("mov rax, r13", out("rax")))
+    __mmio_write64((r + R_R14) as *mut u64, asm("mov rax, r14", out("rax")))
+    __mmio_write64((r + R_R15) as *mut u64, asm("mov rax, r15", out("rax")))
+    // DIE RUECKSPRUNGADRESSE. `[rbp+8]` ist sie in einem Rahmen mit
+    // Rahmenzeiger; ohne einen waere sie `[rsp]`. Gelesen wird ueber
+    // rbp, weil firnc einen Rahmenzeiger stellt -- und falls dort
+    // etwas Unsinniges steht, faellt es in der Abnahme auf: die
+    // Adresse muss im Kernbereich liegen.
+    __mmio_write64((r + R_RIP) as *mut u64,
+        asm("mov rax, [rbp+8]", out("rax")))
+    __mmio_write64((r + R_CR3) as *mut u64, read_cr3())
+    __mmio_write64((r + R_FLAGS) as *mut u64, read_flags())
+    __mmio_write64((r + R_MAGIC) as *mut u64, REGMAGIC)
+    s(state, SL_REGOK, 1)
+    s(state, SL_REGSUM, bootmod.crc32(r, R_BYTES))
+}
+
+// Ob der eingespielte Satz der ist, der gesichert wurde. KEIN Sprung
+// -- siehe die Begruendung oben.
+fn regs_valid(state: u64) -> bool {
+    let r: u64 = regs(state)
+    if __mmio_read64((r + R_MAGIC) as *mut u64) != REGMAGIC {
+        return false
+    }
+    // cr3 muss eine Seitenadresse sein, und die Ruecksprungadresse
+    // muss ueberhaupt irgendwohin zeigen. Ein Satz aus Nullen ist
+    // kein gueltiger Satz.
+    let cr3v: u64 = __mmio_read64((r + R_CR3) as *mut u64)
+    let rspv: u64 = __mmio_read64((r + R_RSP) as *mut u64)
+    let ripv: u64 = __mmio_read64((r + R_RIP) as *mut u64)
+    let low: u64 = 0xFFF
+    if (cr3v & low) != 0 {
+        return false
+    }
+    if rspv == 0 {
+        return false
+    }
+    if ripv == 0 {
+        return false
+    }
+    return true
+}
+
+// ==================================================================
+// PUNKT 3: DER FPU/XSAVE-BEREICH
+//
+// `fpu.area_size` sagt, wie gross er auf DIESER Maschine ist --
+// gemessen, nicht geraten: `probe` liest `cpuid` Blatt 13 und faellt
+// auf FXSAVE zurueck, wenn der gemeldete Bedarf nicht in AREA_MAX
+// (4096) passt. Genau eine Seite ist dafuer reserviert.
+//
+// GESICHERT WIRD DER BEREICH DER LAUFENDEN AUFGABE, und zwar mit
+// `fpu.sync_here` davor: im Bereich einer LAUFENDEN Aufgabe steht
+// das, was der letzte Kontextwechsel dort abgelegt hat -- nicht ihr
+// jetziger Zustand. `fpu.fi` hat genau diesen Fehler einmal gehabt
+// und dafuer `sync_here` gebaut; diese Runde macht ihn nicht noch
+// einmal.
+// ==================================================================
+
+fn save_fpu(state: u64) {
+    s(state, SL_FPUOK, 0)
+    s(state, SL_FPUSIZE, 0)
+    if !fpu.enabled(state) {
+        s(state, SL_FPUWHY, FW_OFF)
+        return
+    }
+    let sz: u64 = fpu.area_size(state)
+    if sz == 0 || sz > 4096 {
+        s(state, SL_FPUWHY, FW_BIG)
+        return
+    }
+    let me: u64 = sched.current(state)
+    let area: u64 = sched.fpu_area(state, me)
+    if area == 0 {
+        s(state, SL_FPUWHY, FW_NOAREA)
+        return
+    }
+    // DER LEBENDE ZUSTAND, nicht der von vorletzter Woche.
+    fpu.sync_here(state, area)
+    let dst: u64 = fpua(state)
+    var i: u64 = 0
+    while i < sz / 8 {
+        __mmio_write64((dst + i * 8) as *mut u64,
+            __mmio_read64((area + i * 8) as *mut u64))
+        i = i + 1
+    }
+    s(state, SL_FPUSIZE, sz)
+    s(state, SL_FPUOK, 1)
+    s(state, SL_FPUWHY, FW_OK)
+    s(state, SL_FPUSUM, bootmod.crc32(dst, sz))
+}
+
+// ==================================================================
+// PUNKT 5: DIE GERAETEZUSTAENDE
+//
+// Zeitgeber, Tastatur und Grafik -- die drei, die der Auftrag nennt.
+// Was hier abgelegt wird, ist der ZUSTAND, nicht der Inhalt: der
+// Zeigerstand des Zeitgebers, die Lampen und die Belegung der
+// Tastatur, die Masse des Bildspeichers. Der INHALT des
+// Bildspeichers ist Arbeitsspeicher und geht ueber Punkt 4 mit --
+// ihn hier ein zweites Mal zu sichern waere derselbe Inhalt an zwei
+// Stellen, und zwei Stellen fuer eine Wahrheit veralten.
+// ==================================================================
+
+fn save_devs(state: u64) {
+    let d: u64 = devs(state)
+    __mmio_write64((d + D_TICKS) as *mut u64, kstate.get(state, kstate.TICKS))
+    __mmio_write64((d + D_KLOCKS) as *mut u64, kbd.locks(state))
+    __mmio_write64((d + D_KLAYOUT) as *mut u64, kbd.layout(state))
+    __mmio_write64((d + D_FBW) as *mut u64, fb.width(state))
+    __mmio_write64((d + D_FBH) as *mut u64, fb.height(state))
+    __mmio_write64((d + D_FBP) as *mut u64, fb.pitch(state))
+    var rdy: u64 = 0
+    if fb.ready(state) {
+        rdy = 1
+    }
+    __mmio_write64((d + D_FBRDY) as *mut u64, rdy)
+    __mmio_write64((d + D_MAGIC) as *mut u64, DEVMAGIC)
+    s(state, SL_TICKS, kstate.get(state, kstate.TICKS))
+    s(state, SL_KLOCKS, kbd.locks(state))
+    s(state, SL_FBW, fb.width(state))
+    s(state, SL_FBH, fb.height(state))
+    s(state, SL_DEVOK, 1)
+    s(state, SL_DEVSUM, bootmod.crc32(d, D_BYTES))
+}
+
+// Die Geraete zuruecksetzen. Was sich wirklich zurueckstellen laesst,
+// wird zurueckgestellt; was nicht, wird gemeldet und nicht behauptet.
+fn restore_devs(state: u64) -> bool {
+    let d: u64 = devs(state)
+    if __mmio_read64((d + D_MAGIC) as *mut u64) != DEVMAGIC {
+        return false
+    }
+    // DER ZEITGEBER. Sein Zaehler wird auf den Stand von vor dem
+    // Schlafen gesetzt -- eine Uhr, die nach dem Aufwachen bei null
+    // anfaengt, laesst jede Zeitrechnung im Kern rueckwaerts laufen.
+    kstate.set(state, kstate.TICKS, __mmio_read64((d + D_TICKS) as *mut u64))
+    // DIE TASTATURLAMPEN. `locks_set` setzt zugleich die
+    // Schmutzmarke, damit der naechste Durchlauf sie an die Hardware
+    // schickt -- die Lampen am Geraet sind nach einem Kaltstart aus.
+    kbd.locks_set(__mmio_read64((d + D_KLOCKS) as *mut u64))
+    return true
+}
+
+// ==================================================================
+// PUNKT 4: DER ARBEITSSPEICHER DER PROZESSE
+//
+// DIE EIGENTLICHE MESSGROESSE DIESER RUNDE. Die Vorrunde schrieb 63
+// Bloecke Pruefstandsmuster; hier gehen RAHMEN ins Abbild, und ihre
+// Zahl muss zur Bitkarte passen.
+//
+// WELCHE RAHMEN. Nicht alle: der Kern selbst, die Bitkarte und
+// `kdata` liegen im Abbild ohnehin nicht richtig -- sie werden beim
+// naechsten Start neu aufgebaut, und ein eingespielter alter Kern
+// waere schlimmer als keiner. Gesichert werden die Rahmen der
+// PROZESSE: was `proc.fi` fuer Benutzerseiten angefordert hat.
+//
+// WIE SIE GEFUNDEN WERDEN. Ueber die Prozesstafel, nicht ueber die
+// Bitkarte allein: die Bitkarte sagt "belegt", aber nicht "von
+// wem". Zu jedem Prozess gehoert ein cr3, und darunter haengen seine
+// Seiten. Diese Runde geht die Tafel durch, nimmt je Prozess die
+// Rahmen seiner Benutzerabbildung und schreibt Nummer und Inhalt.
+//
+// DIE ZAHL, DIE DIE ABNAHME PRUEFT: `SL_FRAMES` (gesichert) gegen
+// die Zahl, die dieselbe Tafel beim Zaehlen liefert. Stimmen sie
+// nicht ueberein, ist ein Rahmen unterwegs verloren gegangen, und
+// das ist ein Fehler und keine Rundung.
+//
+// DER PUFFER. Ein Rahmen ist 4096 Oktette, ein Block 512 -- also
+// acht Bloecke je Rahmen, durch DEN EINEN Sektorpuffer geschoben.
+// Kein grosser Puffer in kdata, wie der Auftrag es verlangt.
+// ==================================================================
+
+// Wie viele Rahmen ein Prozess in seiner Benutzerabbildung hat, und
+// die Rahmen selbst -- ueber `proc.frame_at`, das diese Runde in
+// `proc.fi` ergaenzt hat (eine lesende Funktion, die die
+// Seitentabellen eines Prozesses abgeht).
+
+// DER n-TE RAHMEN UEBER ALLE PROZESSE HINWEG.
+//
+// `proc.frame_at` zaehlt INNERHALB eines Prozesses; das Abbild
+// braucht eine durchgehende Nummerierung ueber die ganze
+// Prozesstafel. Diese Funktion legt sie darueber -- und sie geht die
+// Tafel in DERSELBEN Richtung ab wie `frames_expected`, sonst
+// stimmten Zahl und Reihenfolge nicht zusammen.
+//
+// Der Preis ist ein zweiter Durchlauf je Rahmen (die Tafel wird fuer
+// jeden neu abgegangen). Bei den Rahmenzahlen dieses Kerns ist das
+// eine Rechnung im Mikrosekundenbereich gegen acht Blockzugriffe auf
+// eine ATA-Platte -- die Platte bestimmt die Zeit, nicht diese
+// Schleife. Ein Zwischenspeicher dafuer waere ein grosser Puffer in
+// kdata, und genau den soll diese Runde nicht anlegen.
+fn frame_nth(state: u64, want: u64) -> u64 {
+    var vor: u64 = 0
+    var i: u64 = 0
+    while i < kstate.MAX_TASKS {
+        if sched.tget(state, i, sched.T_STATE) != sched.S_FREE {
+            let c: u64 = proc.frame_count(state, i)
+            if want < vor + c {
+                return proc.frame_at(state, i, want - vor)
+            }
+            vor = vor + c
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn frames_expected(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < kstate.MAX_TASKS {
+        if sched.tget(state, i, sched.T_STATE) != sched.S_FREE {
+            n = n + proc.frame_count(state, i)
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// ==================================================================
+// DAS ABBILD SCHREIBEN -- FASSUNG 2
+// ==================================================================
+
+fn img_base(state: u64) -> u64 {
+    let n: u64 = susp.blocks(state)
+    if n <= IMG_RESERVE {
+        return 0
+    }
+    return n - IMG_RESERVE
+}
+
+// Wie viele Bloecke das Abbild bei dieser Rahmenzahl braucht.
+fn img_blocks(state: u64, frames: u64) -> u64 {
+    let fpu_b: u64 = (g(state, SL_FPUSIZE) + 511) / 512
+    // Kopf + Skalare + FPU + Rahmentafel + Rahmen
+    return 2 + fpu_b + (frames * 8 + 511) / 512 + frames * 8
+}
+
+// RUNDE WACH: WO DER AUFGABENTEIL ANFAENGT.
+//
+// Er liegt HINTER allem, was diese Datei schreibt, im selben
+// reservierten Bereich am Plattenende. Die Rechnung ist dieselbe wie
+// in `img_blocks` -- und sie steht hier und nicht in `wach.fi`,
+// weil die Aufteilung des Bereichs dieser Datei gehoert. Wer sie an
+// zwei Stellen rechnet, bekommt bei der naechsten Aenderung zwei
+// verschiedene Antworten.
+fn wach_base(state: u64, frames: u64) -> u64 {
+    return img_base(state) + img_blocks(state, frames)
+}
+
+fn save_image(state: u64) -> bool {
+    if susp.diskok(state) == 0 {
+        return false
+    }
+    let base: u64 = img_base(state)
+    if base == 0 {
+        return false
+    }
+    let dev: u64 = susp.disk(state)
+
+    // Erst den Zustand einsammeln -- in dieser Reihenfolge, weil der
+    // FPU-Bereich die Blockzahl mitbestimmt.
+    save_regs(state)
+    save_fpu(state)
+    save_devs(state)
+
+    let frames: u64 = frames_expected(state)
+    // RUNDE WACH: DER AUFGABENTEIL BRAUCHT AUCH PLATZ. Er liegt
+    // hinter den Rahmen im selben reservierten Bereich, und seine
+    // Kernstapel sind der groesste Posten: je Aufgabe 17 Rahmen zu
+    // acht Bloecken. Wer ihn hier nicht mitrechnet, schreibt ihn
+    // ueber das Dateisystem -- deshalb steht er MIT in der Pruefung.
+    if img_blocks(state, frames) + wach_reserve() > IMG_RESERVE {
+        // Mehr Rahmen, als in den reservierten Bereich passen. Das
+        // ist KEIN stiller Fehler: lieber gar kein Abbild als ein
+        // halbes, das ueber das Dateisystem laeuft.
+        return false
+    }
+
+    var sum: u64 = bootmod.crc32_start()
+
+    // ---- Block 1: die Skalare (Register + Geraete)
+    buf_clear(state)
+    let b: u64 = buf(state)
+    var i: u64 = 0
+    while i < R_BYTES {
+        kstate.set8(b + i, kstate.get8(regs(state) + i) as u8)
+        i = i + 1
+    }
+    i = 0
+    while i < D_BYTES {
+        kstate.set8(b + 256 + i, kstate.get8(devs(state) + i) as u8)
+        i = i + 1
+    }
+    sum = bootmod.crc32_feed(sum, b, 512)
+    if !blk.write_on(state, dev, base + B_SCAL, b) {
+        return false
+    }
+
+    // ---- der FPU-Bereich
+    let fpu_b: u64 = (g(state, SL_FPUSIZE) + 511) / 512
+    var k: u64 = 0
+    while k < fpu_b {
+        i = 0
+        while i < 512 {
+            kstate.set8(b + i, kstate.get8(fpua(state) + k * 512 + i) as u8)
+            i = i + 1
+        }
+        sum = bootmod.crc32_feed(sum, b, 512)
+        if !blk.write_on(state, dev, base + B_FPU + k, b) {
+            return false
+        }
+        k = k + 1
+    }
+
+    // ---- DIE RAHMENTAFEL: je Rahmen seine physische Nummer.
+    // Sie steht VOR den Rahmen, damit der Wiederanlauf weiss, wohin
+    // er sie legen muss, bevor er sie liest.
+    let tab_lba: u64 = base + B_FPU + fpu_b
+    let tab_blocks: u64 = (frames * 8 + 511) / 512
+    var written: u64 = 0
+    var tb: u64 = 0
+    while tb < tab_blocks {
+        buf_clear(state)
+        var e: u64 = 0
+        while e < 64 && tb * 64 + e < frames {
+            let idx: u64 = tb * 64 + e
+            __mmio_write64((b + e * 8) as *mut u64,
+                frame_nth(state, idx))
+            e = e + 1
+        }
+        sum = bootmod.crc32_feed(sum, b, 512)
+        if !blk.write_on(state, dev, tab_lba + tb, b) {
+            return false
+        }
+        tb = tb + 1
+    }
+
+    // ---- DIE RAHMEN SELBST, acht Bloecke je Rahmen.
+    let data_lba: u64 = tab_lba + tab_blocks
+    var f: u64 = 0
+    while f < frames {
+        let pa: u64 = frame_nth(state, f)
+        if pa == 0 {
+            return false
+        }
+        var blkn: u64 = 0
+        while blkn < 8 {
+            i = 0
+            while i < 512 {
+                kstate.set8(b + i, kstate.get8(pa + blkn * 512 + i) as u8)
+                i = i + 1
+            }
+            sum = bootmod.crc32_feed(sum, b, 512)
+            if !blk.write_on(state, dev, data_lba + f * 8 + blkn, b) {
+                return false
+            }
+            blkn = blkn + 1
+        }
+        written = written + 1
+        f = f + 1
+    }
+    s(state, SL_FRAMES, written)
+    s(state, SL_MEMSUM, bootmod.crc32_end(sum))
+
+    // ---- DER KOPF, ZULETZT. Dieselbe Regel wie in der Vorrunde:
+    // solange er nicht steht, ist das Abbild ungueltig, und ein
+    // Stromausfall mitten in den Rahmen hinterlaesst keinen halben
+    // Ruhezustand.
+    buf_clear(state)
+    __mmio_write64((b + H2_MAGIC) as *mut u64, MAGIC2)
+    __mmio_write64((b + H2_VER) as *mut u64, VER2)
+    __mmio_write64((b + H2_FRAMES) as *mut u64, 0)
+    __mmio_write64((b + H2_SUM) as *mut u64, bootmod.crc32_end(sum))
+    __mmio_write64((b + H2_CNT) as *mut u64, g(state, SL_CNT))
+    __mmio_write64((b + H2_PAT) as *mut u64, g(state, SL_PAT))
+    __mmio_write64((b + H2_HWSIG) as *mut u64, g(state, SL_HWSIG))
+    __mmio_write64((b + H2_CYCLE) as *mut u64, g(state, SL_CYCLE))
+    __mmio_write64((b + H2_MFRAMES) as *mut u64, written)
+    __mmio_write64((b + H2_REGOK) as *mut u64, g(state, SL_REGOK))
+    __mmio_write64((b + H2_FPUOK) as *mut u64, g(state, SL_FPUOK))
+    __mmio_write64((b + H2_FPUSIZE) as *mut u64, g(state, SL_FPUSIZE))
+    __mmio_write64((b + H2_DEVOK) as *mut u64, g(state, SL_DEVOK))
+    __mmio_write64((b + H2_PIDS) as *mut u64, g(state, SL_PIDS))
+    __mmio_write64((b + H2_COMPUTE) as *mut u64, g(state, SL_COMPUTE))
+    __mmio_write64((b + H2_CSTEP) as *mut u64, g(state, SL_CSTEP))
+    __mmio_write64((b + H2_MEMSUM) as *mut u64, g(state, SL_MEMSUM))
+    __mmio_write64((b + H2_REGSUM) as *mut u64, g(state, SL_REGSUM))
+    __mmio_write64((b + H2_FPUSUM) as *mut u64, g(state, SL_FPUSUM))
+    __mmio_write64((b + H2_DEVSUM) as *mut u64, g(state, SL_DEVSUM))
+    if !blk.write_on(state, dev, base + B_HEAD, b) {
+        return false
+    }
+    // ================ RUNDE WACH: DER AUFGABENTEIL, NACH DEM KOPF.
+    //
+    // NACH dem Kopf und nicht davor, und das ist dieselbe Regel, mit
+    // der diese Datei ihren eigenen Kopf zuletzt schreibt: was der
+    // Wiederanlauf findet, soll entweder ganz da sein oder gar
+    // nicht. Ein Aufgabenteil ohne gueltiges Abbild darunter wird
+    // nie gelesen -- `boot_check` prueft erst MAGIC, Hardware und
+    // Pruefsumme des Abbilds und ruft `wach.restore_tasks` erst
+    // danach.
+    //
+    // Der Aufgabenteil hat seine EIGENE Pruefsumme. Er gehoert
+    // bewusst nicht in die des Abbilds: so bleiben die 66 Zusagen
+    // der Vorrunde unveraendert gueltig, und ein beschaedigter
+    // Aufgabenteil verwirft nicht den ganzen Ruhezustand, sondern
+    // nur das Weiterlaufen.
+    wach.save_tasks(state, dev, wach_base(state, frames), b)
+    blk.flush(state)
+    s(state, SL_SUM, g(state, SL_MEMSUM))
+    s(state, SL_ARMED, 1)
+    return true
+}
+
+// Wie viele Bloecke fuer den Aufgabenteil freigehalten werden.
+// Acht Aufgaben zu 17 Kernstapelrahmen zu acht Bloecken sind 1088,
+// dazu Kopf, Saetze und Seitentafel. Die Zahl ist eine OBERGRENZE
+// und wird nicht ueberschritten, weil `wach.fi` hoechstens
+// `MAX_SAVE` Aufgaben sichert.
+fn wach_reserve() -> u64 {
+    return 8 * 17 * 8 + 32
+}
+
+// ==================================================================
+// PUNKT 1, DER ZWEITE TEIL: DIE STARTERKENNUNG
+//
+// Sie laeuft beim HOCHLAUF, nicht auf Zuruf. Was sie prueft, in
+// dieser Reihenfolge -- und die Reihenfolge ist die Begruendung:
+//
+//   1. MAGIC und Fassung. Ohne sie ist da kein Abbild, und alles
+//      Weitere waere ein Lesen von Zufall.
+//   2. DIE HARDWARE-KENNUNG. VOR der Pruefsumme, denn ein Abbild
+//      einer anderen Maschine ist auch dann falsch, wenn es in sich
+//      stimmig ist. Ein Abbild mit richtiger Summe und falscher
+//      Maschine ist der gefaehrlichere Fall: es sieht gesund aus.
+//   3. DIE PRUEFSUMME UEBER ALLES. Erst wenn sie stimmt, gilt
+//      irgendetwas -- das ist die Regel, die die Vorrunde aufgestellt
+//      hat, und sie bleibt.
+//
+// Erst danach wird eingespielt.
+// ==================================================================
+
+fn boot_check(state: u64) -> bool {
+    s(state, SL_BOOTCHK, 1)
+    s(state, SL_FOUND, 0)
+    // WIE VIELE RAHMEN FREI WAREN, BEVOR ETWAS EINGESPIELT WURDE.
+    // Die Abnahme rechnet damit: frei_nachher + eingespielte Rahmen
+    // muss genau diese Zahl sein. Ohne sie waere "kein Rahmen
+    // verloren" eine Behauptung.
+    s(state, SL_FREI0, mem.frames_free(state))
+    if kstate.mode_on(state, kstate.M_NOSCHLAF) {
+        s(state, SL_WHY, BW_OFF)
+        return false
+    }
+    // DIE PLATTE MESSEN, WENN ES NOCH NICHT GESCHEHEN IST.
+    //
+    // GEMESSEN UND BERICHTIGT, und der Fehler ist lehrreich genug,
+    // um hier zu stehen: die erste Fassung fragte nur
+    // `susp.diskok` -- und bekam beim Wiederanlauf NULL, obwohl
+    // dieselbe Maschine wenige Zeilen vorher `ata0 sectors=131072`
+    // gedruckt hatte. Der Grund: `susp.late` MISST die Platte nur in
+    // seinen eigenen Betriebsarten (`suspend`/`suspmess`). Ein
+    // normaler Start -- und genau das ist ein Wiederanlauf aus dem
+    // Ruhezustand -- laeuft an dieser Messung vorbei.
+    //
+    // Die Starterkennung darf sich also nicht darauf verlassen, dass
+    // jemand anderes vorher gemessen hat. Sie stoesst es selbst an;
+    // `ensure_disk` misst nur, wenn noch nichts gemessen ist, und
+    // bleibt damit die EINE Wahrheit.
+    susp.ensure_disk(state)
+    if susp.diskok(state) == 0 {
+        s(state, SL_WHY, BW_NODISK)
+        return false
+    }
+    let base: u64 = img_base(state)
+    if base == 0 {
+        s(state, SL_WHY, BW_NODISK)
+        return false
+    }
+    let dev: u64 = susp.disk(state)
+    let b: u64 = buf(state)
+    if !blk.read_on(state, dev, base + B_HEAD, b) {
+        s(state, SL_WHY, BW_READ)
+        return false
+    }
+    if __mmio_read64((b + H2_MAGIC) as *mut u64) != MAGIC2 {
+        s(state, SL_WHY, BW_NOIMG)
+        return false
+    }
+    if __mmio_read64((b + H2_VER) as *mut u64) != VER2 {
+        s(state, SL_WHY, BW_VER)
+        return false
+    }
+
+    // ERST DEN GANZEN KOPF IN EIGENE WERTE HOLEN, DANN ALLES ANDERE.
+    //
+    // Die Reihenfolge ist eine BERICHTIGUNG und keine Vorliebe: jeder
+    // weitere Zugriff auf die Platte und jeder Aufruf, der den
+    // Sektorpuffer benutzt, macht den Kopf darin ungueltig. Wer
+    // Kopffelder erst NACH einem solchen Aufruf liest, liest fremde
+    // Oktette -- genau das ist hier einmal passiert (siehe
+    // `hwsig_now`).
+    let hw_img: u64 = __mmio_read64((b + H2_HWSIG) as *mut u64)
+    let want: u64 = __mmio_read64((b + H2_SUM) as *mut u64)
+    let frames: u64 = __mmio_read64((b + H2_MFRAMES) as *mut u64)
+    let fpusz: u64 = __mmio_read64((b + H2_FPUSIZE) as *mut u64)
+    let cnt: u64 = __mmio_read64((b + H2_CNT) as *mut u64)
+    let pat: u64 = __mmio_read64((b + H2_PAT) as *mut u64)
+    let cyc: u64 = __mmio_read64((b + H2_CYCLE) as *mut u64)
+    let comp: u64 = __mmio_read64((b + H2_COMPUTE) as *mut u64)
+    let cstep: u64 = __mmio_read64((b + H2_CSTEP) as *mut u64)
+    let pids: u64 = __mmio_read64((b + H2_PIDS) as *mut u64)
+    let regok: u64 = __mmio_read64((b + H2_REGOK) as *mut u64)
+    let fpuok: u64 = __mmio_read64((b + H2_FPUOK) as *mut u64)
+    let devok: u64 = __mmio_read64((b + H2_DEVOK) as *mut u64)
+
+    // DIE HARDWARE-KENNUNG, VOR der Pruefsumme -- ein Abbild einer
+    // anderen Maschine ist auch dann falsch, wenn es in sich stimmig
+    // ist, und dieser Fall ist der gefaehrlichere: er sieht gesund
+    // aus.
+    let hw_now: u64 = hwsig_now(state)
+    s(state, SL_HWIMG, hw_img)
+    s(state, SL_HWSIG, hw_now)
+    if hw_img != hw_now {
+        s(state, SL_WHY, BW_HW)
+        return false
+    }
+
+    // DIE GANZE NUTZLAST WIRD GELESEN UND GEPRUEFT, BEVOR SIE GILT.
+    // Dieselbe Regel wie in der Vorrunde, und aus demselben Grund.
+    let fpu_b: u64 = (fpusz + 511) / 512
+    let tab_lba: u64 = base + B_FPU + fpu_b
+    let tab_blocks: u64 = (frames * 8 + 511) / 512
+    let data_lba: u64 = tab_lba + tab_blocks
+    var sum: u64 = bootmod.crc32_start()
+    var lba: u64 = base + B_SCAL
+    let total: u64 = 1 + fpu_b + tab_blocks + frames * 8
+    var i: u64 = 0
+    while i < total {
+        if !blk.read_on(state, dev, lba + i, b) {
+            s(state, SL_WHY, BW_READ)
+            return false
+        }
+        sum = bootmod.crc32_feed(sum, b, 512)
+        i = i + 1
+    }
+    s(state, SL_MEMSUM, bootmod.crc32_end(sum))
+    s(state, SL_SUM, want)
+    if bootmod.crc32_end(sum) != want {
+        s(state, SL_WHY, BW_SUM)
+        return false
+    }
+
+    // ERST JETZT GILT ETWAS. Einspielen, in derselben Reihenfolge,
+    // in der geschrieben wurde.
+    if !blk.read_on(state, dev, base + B_SCAL, b) {
+        s(state, SL_WHY, BW_READ)
+        return false
+    }
+    i = 0
+    while i < R_BYTES {
+        kstate.set8(regs(state) + i, kstate.get8(b + i) as u8)
+        i = i + 1
+    }
+    i = 0
+    while i < D_BYTES {
+        kstate.set8(devs(state) + i, kstate.get8(b + 256 + i) as u8)
+        i = i + 1
+    }
+    var k: u64 = 0
+    while k < fpu_b {
+        if !blk.read_on(state, dev, base + B_FPU + k, b) {
+            s(state, SL_WHY, BW_READ)
+            return false
+        }
+        i = 0
+        while i < 512 {
+            kstate.set8(fpua(state) + k * 512 + i, kstate.get8(b + i) as u8)
+            i = i + 1
+        }
+        k = k + 1
+    }
+
+    // DIE RAHMEN. Je Rahmen erst seine Nummer aus der Tafel, dann
+    // seine acht Bloecke an genau diese Adresse. Der Rahmen wird
+    // dabei im Verwalter BELEGT -- sonst gibt ihn der naechste
+    // `frame_alloc` ein zweites Mal aus, und zwei Teile des Kerns
+    // schreiben in dieselbe Seite.
+    var back: u64 = 0
+    var f: u64 = 0
+    while f < frames {
+        let tb: u64 = f / 64
+        let te: u64 = f % 64
+        if !blk.read_on(state, dev, tab_lba + tb, b) {
+            s(state, SL_WHY, BW_READ)
+            return false
+        }
+        let pa: u64 = __mmio_read64((b + te * 8) as *mut u64)
+        if pa == 0 {
+            s(state, SL_WHY, BW_SUM)
+            return false
+        }
+        mem.reserve_frame(state, pa)
+        if back < SL_FRTAB_MAX {
+            s(state, SL_FRTAB + back * 8, pa)
+        }
+        var blkn: u64 = 0
+        while blkn < 8 {
+            if !blk.read_on(state, dev, data_lba + f * 8 + blkn, b) {
+                s(state, SL_WHY, BW_READ)
+                return false
+            }
+            i = 0
+            while i < 512 {
+                kstate.set8(pa + blkn * 512 + i, kstate.get8(b + i) as u8)
+                i = i + 1
+            }
+            blkn = blkn + 1
+        }
+        back = back + 1
+        f = f + 1
+    }
+
+    // DIE MARKEN AUS DEM KOPF UEBERNEHMEN. Ohne diese Zeilen meldet
+    // der Pruefstand `regs=0 fpu=0 geraete=0`, obwohl alle drei im
+    // Abbild liegen und eingespielt wurden -- die Marken sind
+    // Skalare dieses Laufs, und der Lauf ist ein anderer als der,
+    // der sie gesetzt hat. Gemessen an einem Zyklus, der sonst in
+    // jeder anderen Zahl gruen war.
+    s(state, SL_REGOK, regok)
+    s(state, SL_FPUOK, fpuok)
+    s(state, SL_DEVOK, devok)
+    s(state, SL_FRBACK, back)
+    s(state, SL_FRAMES, frames)
+    s(state, SL_FPUSIZE, fpusz)
+    s(state, SL_CNT, cnt)
+    s(state, SL_PAT, pat)
+    s(state, SL_CYCLE, cyc)
+    s(state, SL_COMPUTE, comp)
+    s(state, SL_CSTEP, cstep)
+    s(state, SL_PIDS, pids)
+    s(state, SL_SUM, want)
+    s(state, SL_FOUND, 1)
+    s(state, SL_RESUMED, 1)
+    s(state, SL_WHY, BW_OK)
+    restore_devs(state)
+    // ================ RUNDE WACH: DIE AUFGABEN WIEDER IN DIE LISTE.
+    //
+    // GENAU HIER und keine Zeile frueher. Die Reihenfolge ist
+    // zwingend und nicht Geschmack:
+    //
+    //   * NACH dem Einspielen der Datenrahmen -- die Seitentabellen,
+    //     die `wach` baut, zeigen auf genau diese Rahmen. Waeren sie
+    //     noch nicht da, zeigten sie auf fremden oder freien
+    //     Speicher.
+    //   * NACH `mem.reserve_frame` auf jeden davon (eine Schleife
+    //     weiter oben) -- sonst gaebe der naechste `frame_alloc`
+    //     einen Rahmen ein zweites Mal aus, und `wach` baute seinen
+    //     Kernstapel darueber.
+    //   * NACH `restore_devs` -- der Zeitgeberstand steht dann, und
+    //     eine Aufgabe, die gleich laeuft, liest ihn.
+    //
+    // Der Rueckgabewert wird bewusst NICHT geprueft: ein
+    // Aufgabenteil, der fehlt oder nicht passt, ist kein Grund, das
+    // eingespielte Abbild zu verwerfen. Dann kommt der Speicher
+    // zurueck und die Prozesse laufen nicht weiter -- genau der
+    // Stand der Vorrunde, und `wach.bericht` sagt warum.
+    wach.restore_tasks(state, dev, wach_base(state, frames), b)
+    // DIE FREIEN RAHMEN GENAU HIER FESTHALTEN.
+    //
+    // Der Unterschied, den diese eine Zeile misst, ist der zwischen
+    // "der Wiederanlauf verliert Rahmen" und "die wiederangelaufenen
+    // Prozesse fordern welche an". Beides sieht in der Endzahl
+    // gleich aus, und nur das erste waere ein Fehler: ein Prozess,
+    // der laeuft, DARF Speicher anfordern -- sein Stapel waechst
+    // ueber Seitenfehler, und genau das ist der Beweis, dass er
+    // laeuft.
+    s(state, SL_FREI1, mem.frames_free(state))
+    return true
+}
+
+// Das Abbild ungueltig machen. Nach dem Einspielen -- ein Abbild,
+// das zweimal eingespielt wird, ist ein Zustand aus der
+// Vergangenheit, der einen neueren ueberschreibt.
+fn invalidate(state: u64) {
+    if susp.diskok(state) == 0 {
+        return
+    }
+    let base: u64 = img_base(state)
+    if base == 0 {
+        return
+    }
+    buf_clear(state)
+    blk.write_on(state, susp.disk(state), base + B_HEAD, buf(state))
+    blk.flush(state)
+}
+
+// DAS ABBILD BESCHAEDIGEN -- nur fuer die Gegenprobe. Ein Oktett der
+// Nutzlast, der Kopf bleibt stehen.
+fn corrupt(state: u64) -> bool {
+    if susp.diskok(state) == 0 {
+        return false
+    }
+    let base: u64 = img_base(state)
+    if base == 0 {
+        return false
+    }
+    let dev: u64 = susp.disk(state)
+    let b: u64 = buf(state)
+    if !blk.read_on(state, dev, base + B_SCAL, b) {
+        return false
+    }
+    kstate.set8(b, (kstate.get8(b) ^ 0xFF) as u8)
+    if !blk.write_on(state, dev, base + B_SCAL, b) {
+        return false
+    }
+    blk.flush(state)
+    return true
+}
+
+// DIE HARDWARE-KENNUNG IM ABBILD FAELSCHEN -- die zweite Gegenprobe,
+// die der Auftrag verlangt. Der Kopf behaelt seine Pruefsumme (sie
+// deckt die Nutzlast, nicht den Kopf), aber die Kennung passt nicht
+// mehr zu dieser Maschine. Das Abbild MUSS abgewiesen werden, und
+// zwar mit `why=Hardware` und nicht mit `why=Pruefsumme`.
+fn fake_hw(state: u64) -> bool {
+    if susp.diskok(state) == 0 {
+        return false
+    }
+    let base: u64 = img_base(state)
+    if base == 0 {
+        return false
+    }
+    let dev: u64 = susp.disk(state)
+    let b: u64 = buf(state)
+    if !blk.read_on(state, dev, base + B_HEAD, b) {
+        return false
+    }
+    let old: u64 = __mmio_read64((b + H2_HWSIG) as *mut u64)
+    __mmio_write64((b + H2_HWSIG) as *mut u64, old ^ 0xA5A5A5A5)
+    if !blk.write_on(state, dev, base + B_HEAD, b) {
+        return false
+    }
+    blk.flush(state)
+    return true
+}
+
+// ------------------------------------------------------- die Namen
+
+fn why_name(w: u64) {
+    var n_ok: [u8; 3] = "ok\0"
+    var n_no: [u8; 12] = "kein Abbild\0"
+    var n_ver: [u8; 8] = "Fassung\0"
+    var n_sum: [u8; 18] = "Pruefsumme falsch\0"
+    var n_hw: [u8; 19] = "Hardware anders\0\0\0\0"
+    var n_rd: [u8; 7] = "Lesen\0\0"
+    var n_off: [u8; 15] = "abgeschaltet\0\0\0"
+    var n_nd: [u8; 13] = "keine Platte\0"
+    if w == BW_OK {
+        serial.puts((&n_ok[0]) as u64)
+        return
+    }
+    if w == BW_NOIMG {
+        serial.puts((&n_no[0]) as u64)
+        return
+    }
+    if w == BW_VER {
+        serial.puts((&n_ver[0]) as u64)
+        return
+    }
+    if w == BW_SUM {
+        serial.puts((&n_sum[0]) as u64)
+        return
+    }
+    if w == BW_HW {
+        serial.puts((&n_hw[0]) as u64)
+        return
+    }
+    if w == BW_READ {
+        serial.puts((&n_rd[0]) as u64)
+        return
+    }
+    if w == BW_OFF {
+        serial.puts((&n_off[0]) as u64)
+        return
+    }
+    serial.puts((&n_nd[0]) as u64)
+}
+
+fn fpuwhy_name(w: u64) {
+    var n_ok: [u8; 3] = "ok\0"
+    var n_off: [u8; 5] = "aus\0\0"
+    var n_big: [u8; 11] = "zu gross\0\0\0"
+    var n_na: [u8; 13] = "kein Bereich\0"
+    if w == FW_OK {
+        serial.puts((&n_ok[0]) as u64)
+        return
+    }
+    if w == FW_OFF {
+        serial.puts((&n_off[0]) as u64)
+        return
+    }
+    if w == FW_BIG {
+        serial.puts((&n_big[0]) as u64)
+        return
+    }
+    serial.puts((&n_na[0]) as u64)
+}
+
+// ==================================================================
+// S3: DER BEFUND, NICHT DER BAU
+//
+// Der Auftrag sagt es woertlich: "Schaffst du S3 nicht, ist das in
+// Ordnung -- dann liefere 1-5 vollstaendig und schreib S3 als offen
+// hin. Ein halb gebautes S3 ist schlimmer als keins."
+//
+// DIESE RUNDE HAT S3 NICHT GEBAUT, und das ist eine Entscheidung mit
+// Grund und keine ausgegangene Zeit:
+//
+// Der Aufwachvektor in der FACS ist EINE Zeile -- er liesse sich in
+// zehn Minuten schreiben, und genau das ist die Falle. Was daran
+// haengt, ist das Trampolin 16 -> 32 -> 64 Bit an einer Adresse
+// unter 1 MiB, und dort liegt das Problem, das die Vorrunde schon
+// benannt hat: DIE FIRMWARE KANN DIESEN SPEICHER ANGEFASST HABEN.
+// `smp` hat ein Trampolin, aber es startet aus einem DEFINIERTEN
+// Zustand -- der Kern hat den Bereich selbst beschrieben und
+// niemand sonst war dazwischen. Aus S3 kommt die Maschine aus einem
+// Zustand zurueck, in dem SeaBIOS zwischen dem Einschlafen und dem
+// Einsprung gelaufen ist.
+//
+// Ein S3, das den Vektor schreibt und dann in einen ueberschriebenen
+// Trampolinbereich springt, haengt die Maschine ohne eine einzige
+// Zeile auf der seriellen Leitung -- ein Fehlerbild, das niemand
+// zuordnen kann. Deshalb: der Schlafwert und die FACS sind GEMESSEN
+// (`\_S3 = {1,1}`, FACS bei 0x1ffe0000, 64 Oktette) und stehen der
+// naechsten Runde zur Verfuegung; geschrieben wird nichts.
+//
+// Was die naechste Runde braucht, steht im Bericht Abschnitt 6.
+// ==================================================================
+
+fn s3_befund(state: u64) {
+    var s_t: [u8; 12] = "schlaf: s3\0\0"
+    var s_w: [u8; 32] = " gemessen=ja gebaut=nein grund=\0"
+    var s_g: [u8; 28] = "Trampolin unter 1 MiB fehlt\0"
+    serial.puts((&s_t[0]) as u64)
+    serial.puts((&s_w[0]) as u64)
+    serial.puts((&s_g[0]) as u64)
+    serial.nl()
+}
+
+// ==================================================================
+// DIE BERICHTE AUF DER SERIELLEN LEITUNG
+// ==================================================================
+
+fn report_boot(state: u64) {
+    var s_t: [u8; 16] = "schlaf: start -\0"
+    var s_f: [u8; 9] = " abbild=\0"
+    var s_w: [u8; 7] = " why=\0\0"
+    var s_hw: [u8; 7] = " hw=\0\0\0"
+    var s_hi: [u8; 9] = " hwimg=\0\0"
+    var s_fr: [u8; 11] = " rahmen=\0\0\0"
+    var s_fb: [u8; 10] = " zurueck=\0"
+    var s_c: [u8; 7] = " cnt=\0\0"
+    var s_p: [u8; 7] = " pat=\0\0"
+    serial.puts((&s_t[0]) as u64)
+    serial.puts((&s_f[0]) as u64)
+    serial.dec(g(state, SL_FOUND))
+    serial.puts((&s_w[0]) as u64)
+    why_name(g(state, SL_WHY))
+    serial.puts((&s_hw[0]) as u64)
+    serial.hex(g(state, SL_HWSIG))
+    serial.puts((&s_hi[0]) as u64)
+    serial.hex(g(state, SL_HWIMG))
+    serial.puts((&s_fr[0]) as u64)
+    serial.dec(g(state, SL_FRAMES))
+    serial.puts((&s_fb[0]) as u64)
+    serial.dec(g(state, SL_FRBACK))
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(g(state, SL_CNT))
+    serial.puts((&s_p[0]) as u64)
+    serial.hex(g(state, SL_PAT))
+    var s_bl: [u8; 10] = " bloecke=\0"
+    var s_ba: [u8; 8] = " basis=\0"
+    var s_su: [u8; 7] = " sum=\0\0"
+    var s_sd: [u8; 8] = " soll=\0\0"
+    serial.puts((&s_bl[0]) as u64)
+    serial.dec(susp.blocks(state))
+    serial.puts((&s_ba[0]) as u64)
+    serial.dec(img_base(state))
+    serial.puts((&s_su[0]) as u64)
+    serial.hex(g(state, SL_MEMSUM))
+    serial.puts((&s_sd[0]) as u64)
+    serial.hex(g(state, SL_SUM))
+    serial.nl()
+}
+
+fn report_save(state: u64) {
+    var s_t: [u8; 18] = "schlaf: gesichert\0"
+    var s_fr: [u8; 10] = " rahmen=\0\0"
+    var s_re: [u8; 8] = " regs=\0\0"
+    var s_fp: [u8; 7] = " fpu=\0\0"
+    var s_fw: [u8; 9] = " fpuwhy=\0"
+    var s_fs: [u8; 11] = " fpugroe=\0\0"
+    var s_de: [u8; 10] = " geraete=\0"
+    var s_su: [u8; 7] = " sum=\0\0"
+    var s_pi: [u8; 8] = " pids=\0\0"
+    serial.puts((&s_t[0]) as u64)
+    serial.puts((&s_fr[0]) as u64)
+    serial.dec(g(state, SL_FRAMES))
+    serial.puts((&s_re[0]) as u64)
+    serial.dec(g(state, SL_REGOK))
+    serial.puts((&s_fp[0]) as u64)
+    serial.dec(g(state, SL_FPUOK))
+    serial.puts((&s_fw[0]) as u64)
+    fpuwhy_name(g(state, SL_FPUWHY))
+    serial.puts((&s_fs[0]) as u64)
+    serial.dec(g(state, SL_FPUSIZE))
+    serial.puts((&s_de[0]) as u64)
+    serial.dec(g(state, SL_DEVOK))
+    serial.puts((&s_su[0]) as u64)
+    serial.hex(g(state, SL_SUM))
+    serial.puts((&s_pi[0]) as u64)
+    serial.dec(g(state, SL_PIDS))
+    serial.nl()
+}
+
+// ==================================================================
+// DER ZYKLUS UEBER DEN HOCHLAUF -- DIE MESSUNG DIESER RUNDE
+// ==================================================================
+//
+// DER UNTERSCHIED ZUR VORRUNDE, und er ist der ganze Punkt: die
+// Vorrunde lief in EINEM Kernlauf. Sie schrieb das Abbild, warf den
+// Zustand weg und holte ihn zurueck -- alles mit demselben
+// Arbeitsspeicher, derselben Bitkarte, denselben Seitentabellen.
+// Nichts zwang sie, den Zustand wirklich verloren zu haben.
+//
+// Diese Runde braucht ZWEI Kernlaeufe, und dazwischen beendet der
+// Laeufer QEMU:
+//
+//   LAUF 1 (`schlafarm`): Prozesse anlegen, rechnen lassen, ein
+//           Muster in den Bildspeicher, den Zaehler setzen -- dann
+//           SICHERN und den Gast BEENDEN. Der Arbeitsspeicher ist
+//           danach wirklich weg.
+//   LAUF 2 (`schlafpruef`): der Hochlauf findet das Abbild von
+//           selbst (`boot_check` in `kmain`), spielt es ein und
+//           vergleicht. Was hier stimmt, hat einen echten
+//           Speicherverlust ueberlebt.
+//
+// Die Abnahme ruft beide Laeufe mit DERSELBEN Plattendatei auf --
+// das Abbild ist das einzige, was hinuebergeht.
+
+// Der Zustand, den der Prüfstand aufbaut. Er haengt an `zyk`, damit
+// zwei Zyklen VERSCHIEDENE Abbilder schreiben -- sonst misst der
+// zweite ein stehengebliebenes Abbild des ersten.
+fn build_state(state: u64, zyk: u64) {
+    s(state, SL_CYCLE, zyk)
+    s(state, SL_CNT, 2000 + zyk * 13)
+    s(state, SL_PAT, 0xD1D1 + zyk * 0x2222)
+}
+
+// DAS MUSTER IM BILDSPEICHER. Der Auftrag verlangt es ausdruecklich:
+// ein bekanntes Muster, das nach dem Aufwachen wieder dastehen muss.
+// Es geht in die ERSTE Zeile, weil dort mit Sicherheit Bildspeicher
+// liegt, auch bei der kleinsten Auflösung.
+fn fb_pattern_write(state: u64, pat: u64) -> u64 {
+    if !fb.ready(state) {
+        return 0
+    }
+    let base: u64 = fb.addr(state)
+    if base == 0 {
+        return 0
+    }
+    var i: u64 = 0
+    while i < 64 {
+        __mmio_write64((base + i * 8) as *mut u64,
+            pat + i * 0x0101010101010101)
+        i = i + 1
+    }
+    return bootmod.crc32(base, 512)
+}
+
+fn fb_pattern_check(state: u64, pat: u64) -> u64 {
+    if !fb.ready(state) {
+        return 0
+    }
+    let base: u64 = fb.addr(state)
+    if base == 0 {
+        return 0
+    }
+    return bootmod.crc32(base, 512)
+}
+
+// ------------------------------------------------------------------
+// LAUF 1: ANLEGEN, RECHNEN, SICHERN, BEENDEN.
+// ------------------------------------------------------------------
+fn arm(state: u64, zyk: u64) {
+    var s_t: [u8; 22] = "schlaf: == arm zyklus\0"
+    var s_p: [u8; 20] = "schlaf: prozesse n=\0"
+    var s_c: [u8; 20] = "schlaf: rechnung s=\0"
+    var s_st: [u8; 10] = " schritt=\0"
+    var s_fb: [u8; 15] = "schlaf: fbsum=\0"
+    var s_fr: [u8; 15] = "schlaf: frei0=\0"
+    var s_sf: [u8; 28] = "schlaf: SICHERN GESCHEITERT\0"
+    var s_ok: [u8; 22] = "schlaf: abbild steht\0\0"
+
+    serial.puts((&s_t[0]) as u64)
+    serial.dec(zyk)
+    serial.nl()
+
+    susp.ensure_disk(state)
+    build_state(state, zyk)
+    s(state, SL_HWSIG, hwsig_now(state))
+
+    let frei0: u64 = mem.frames_free(state)
+    serial.puts((&s_fr[0]) as u64)
+    serial.dec(frei0)
+    serial.nl()
+
+    // DIE PROZESSE. Sie rechnen, legen sich hin -- und werden MITTEN
+    // in ihrer Arbeit gesichert, nicht nach ihr.
+    let a: u64 = proc.create(state, 64, 10, 2)
+    let b: u64 = proc.create(state, 64, 10, 2)
+    var n: u64 = 0
+    if a != 0 { n = n + 1 }
+    if b != 0 { n = n + 1 }
+    s(state, SL_PIDS, n)
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(n)
+    serial.nl()
+
+    // Sie sollen wirklich gelaufen sein, bevor gesichert wird.
+    sched.sleep_ticks(state, 60)
+
+    // Was der erste von ihnen gerechnet hat -- aus SEINER Seite
+    // gelesen, ueber die Uebersetzung seines Adressraums.
+    var summe: u64 = 0
+    var schritt: u64 = 0
+    if a != 0 {
+        let pa: u64 = proc.translate(state, a, 0x40000000)
+        if pa != 0 {
+            summe = __mmio_read64((pa + 8) as *mut u64)
+            schritt = __mmio_read64((pa + 16) as *mut u64)
+        }
+    }
+    s(state, SL_COMPUTE, summe)
+    s(state, SL_CSTEP, schritt)
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(summe)
+    serial.puts((&s_st[0]) as u64)
+    serial.dec(schritt)
+    serial.nl()
+
+    let fbsum: u64 = fb_pattern_write(state, g(state, SL_PAT))
+    serial.puts((&s_fb[0]) as u64)
+    serial.hex(fbsum)
+    serial.nl()
+
+    if !save_image(state) {
+        serial.puts((&s_sf[0]) as u64)
+        serial.nl()
+        return
+    }
+    report_save(state)
+    verify_now(state)
+    serial.puts((&s_ok[0]) as u64)
+    serial.nl()
+}
+
+// ------------------------------------------------------------------
+// LAUF 2: WAS KAM ZURUECK.
+//
+// `boot_check` ist zu diesem Zeitpunkt SCHON gelaufen -- in `kmain`,
+// weit vorher. Diese Funktion vergleicht nur noch und urteilt.
+// ------------------------------------------------------------------
+fn pruef(state: u64, frei_soll: u64) {
+    var s_t: [u8; 18] = "schlaf: == pruef\0\0"
+    var s_ok: [u8; 15] = "schlaf: gleich\0"
+    var s_bad: [u8; 18] = "schlaf: UNGLEICH\0\0"
+    var s_rok: [u8; 22] = "schlaf: rahmen gleich\0"
+    var s_rbad: [u8; 24] = "schlaf: RAHMEN VERLOREN\0"
+    var s_kalt: [u8; 26] = "schlaf: KALTSTART, sauber\0"
+    var s_w: [u8; 7] = " why=\0\0"
+    var s_rg: [u8; 11] = " rahmen=\0\0\0"
+    var s_c: [u8; 7] = " cnt=\0\0"
+    var s_p: [u8; 7] = " pat=\0\0"
+    var s_re: [u8; 8] = " regs=\0\0"
+    var s_fp: [u8; 7] = " fpu=\0\0"
+    var s_de: [u8; 10] = " geraete=\0"
+    var s_fr: [u8; 8] = " frei=\0\0"
+
+    serial.puts((&s_t[0]) as u64)
+    serial.nl()
+    report_boot(state)
+
+    if g(state, SL_FOUND) == 0 {
+        // KEIN Abbild eingespielt. Das ist der richtige Ausgang fuer
+        // die Gegenproben -- und der falsche fuer den echten Zyklus.
+        serial.puts((&s_kalt[0]) as u64)
+        serial.puts((&s_w[0]) as u64)
+        why_name(g(state, SL_WHY))
+        serial.nl()
+        return
+    }
+
+    // DER VERGLEICH, byteweise und nicht per Augenschein.
+    var gut: u64 = 1
+    if g(state, SL_CNT) != 2000 + g(state, SL_CYCLE) * 13 {
+        gut = 0
+    }
+    if g(state, SL_PAT) != 0xD1D1 + g(state, SL_CYCLE) * 0x2222 {
+        gut = 0
+    }
+    if !regs_valid(state) {
+        gut = 0
+    }
+    if g(state, SL_FRAMES) != g(state, SL_FRBACK) {
+        gut = 0
+    }
+    if gut == 1 {
+        serial.puts((&s_ok[0]) as u64)
+    } else {
+        serial.puts((&s_bad[0]) as u64)
+    }
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(g(state, SL_CNT))
+    serial.puts((&s_p[0]) as u64)
+    serial.hex(g(state, SL_PAT))
+    serial.puts((&s_re[0]) as u64)
+    serial.dec(g(state, SL_REGOK))
+    serial.puts((&s_fp[0]) as u64)
+    serial.dec(g(state, SL_FPUOK))
+    serial.puts((&s_de[0]) as u64)
+    serial.dec(g(state, SL_DEVOK))
+    serial.puts((&s_rg[0]) as u64)
+    serial.dec(g(state, SL_FRBACK))
+    serial.nl()
+
+    // ================================================================
+    // DIE ZUSAGE, DIE REGISTER UND SEITENTABELLEN WIRKLICH PRUEFT:
+    // WEITERRECHNEN.
+    //
+    // Der Auftrag sagt es woertlich: ein Prozess, der vor dem
+    // Schlafen lief, muss danach WEITERRECHNEN und ein richtiges
+    // Ergebnis liefern -- nicht nur "existieren". Ein Prozess, der
+    // nur noch dasteht, koennte neu angelegt worden sein und bewiese
+    // nichts.
+    //
+    // WIE ES GEPRUEFT WIRD, und warum das eine echte Pruefung ist:
+    // die eingespielten Rahmen tragen die private Seite des
+    // Prozesses, und in ihr steht seine laufende Rechnung
+    // (summe/schritt/laeufe hinter der Kennung SCHLAF_TAG). Der
+    // Pruefstand sucht diese Seite in den EINGESPIELTEN Rahmen,
+    // liest den Stand und rechnet nach:
+    //
+    //     summe war 1+2+...+n, also n*(n+1)/2, und schritt ist n+1.
+    //
+    // Stimmt das, dann ist der Inhalt eines Benutzerrahmens ueber
+    // einen echten Speicherverlust hinweg byteweise zurueckgekommen
+    // -- und zwar an DIE Adresse, an der er vorher lag, sonst
+    // stuende die Kennung nicht dort.
+    //
+    // WAS DAS NICHT ZEIGT, und es steht hier und nicht in einer
+    // Fussnote: der Prozess wird NICHT wieder in die Laufliste
+    // gehaengt und rechnet nicht weiter AUF DEM PROZESSOR. Dafuer
+    // muesste der Wiederanlauf die Aufgabentafel und die
+    // Kernstapel mitbringen, und das ist Punkt 2 in seiner vollen
+    // Form -- ein Sprung in den gesicherten Zustand. Diese Runde
+    // sichert und vergleicht den Registersatz, sie springt nicht
+    // hinein. Der Unterschied steht im Bericht.
+    var s_ct: [u8; 22] = "schlaf: rechnung s=\0\0\0"
+    var s_cs: [u8; 10] = " schritt=\0"
+    var s_cw: [u8; 7] = " soll=\0"
+    var s_cok: [u8; 26] = "schlaf: weitergerechnet=\0\0"
+    var summe: u64 = 0
+    var schritt: u64 = 0
+    var gefunden: u64 = 0
+    var fi: u64 = 0
+    while fi < g(state, SL_FRBACK) {
+        let pa: u64 = g(state, SL_FRTAB + fi * 8)
+        if pa != 0 && gefunden == 0 {
+            if __mmio_read64(pa as *mut u64) == SCHLAF_TAG {
+                summe = __mmio_read64((pa + 8) as *mut u64)
+                schritt = __mmio_read64((pa + 16) as *mut u64)
+                gefunden = 1
+            }
+        }
+        fi = fi + 1
+    }
+    // Die Gegenrechnung: n = schritt - 1, und summe muss n*(n+1)/2
+    // sein. Sie wird HIER gerechnet und nicht aus dem Abbild
+    // genommen -- eine Zahl, die sich selbst bestaetigt, bestaetigt
+    // nichts.
+    var soll: u64 = 0
+    if schritt > 0 {
+        let n: u64 = schritt - 1
+        soll = n * (n + 1) / 2
+    }
+    serial.puts((&s_ct[0]) as u64)
+    serial.dec(summe)
+    serial.puts((&s_cs[0]) as u64)
+    serial.dec(schritt)
+    serial.puts((&s_cw[0]) as u64)
+    serial.dec(soll)
+    serial.nl()
+    var rok: u64 = 0
+    if gefunden == 1 && summe == soll && summe > 0 {
+        rok = 1
+    }
+    serial.puts((&s_cok[0]) as u64)
+    serial.dec(rok)
+    serial.nl()
+
+    // DIE RAHMEN. `frei_soll` ist die Zahl, die dieser Lauf VOR dem
+    // Einspielen hatte; nach dem Einspielen muessen genau die
+    // eingespielten Rahmen fehlen und kein einziger mehr.
+    //
+    // ================= RUNDE WACH: DIE RECHNUNG BEKOMMT EINEN POSTEN
+    //
+    // Die Zusage der Vorrunde lautete `frei + eingespielt ==
+    // frei_vorher`, und sie war richtig, SOLANGE der Wiederanlauf
+    // nur Datenseiten zurueckholte. Diese Runde holt zusaetzlich die
+    // KERNSTAPEL zurueck (je Aufgabe 17 Rahmen) und baut die
+    // SEITENTABELLEN neu -- beides belegt Rahmen, die vorher frei
+    // waren.
+    //
+    // DIE ZUSAGE WIRD NICHT GELOCKERT, SONDERN GENAUER: statt
+    // "eingespielt" steht jetzt "eingespielt + was der Wiederanlauf
+    // selbst genommen hat", und die zweite Zahl wird in `wach.fi`
+    // GEZAEHLT (Differenz der freien Rahmen), nicht geschaetzt. Wer
+    // eine Zusage aufweicht, bis sie passt, misst nichts mehr; wer
+    // den fehlenden Posten benennt und mitzaehlt, misst mehr als
+    // vorher.
+    let frei: u64 = mem.frames_free(state)
+    // GEPRUEFT WIRD GEGEN DEN STAND UNMITTELBAR NACH DEM
+    // WIEDERANLAUF (`SL_FREI1`), nicht gegen den Stand jetzt: seit
+    // dann laufen die wiederangelaufenen Prozesse, und ein Prozess,
+    // der laeuft, fordert Speicher an. Die Zusage "kein verlorener
+    // Rahmen" gilt dem WIEDERANLAUF und nicht dem Betrieb danach.
+    let frei1: u64 = g(state, SL_FREI1)
+    if frei1 + g(state, SL_FRBACK) + wach.frames_taken(state) == frei_soll {
+        serial.puts((&s_rok[0]) as u64)
+    } else {
+        serial.puts((&s_rbad[0]) as u64)
+    }
+    serial.puts((&s_fr[0]) as u64)
+    serial.dec(frei)
+    var s_wt: [u8; 8] = " wach=\0\0"
+    serial.puts((&s_wt[0]) as u64)
+    serial.dec(wach.frames_taken(state))
+    var s_f1: [u8; 8] = " frei1=\0"
+    serial.puts((&s_f1[0]) as u64)
+    serial.dec(frei1)
+    var s_f0: [u8; 8] = " soll=\0\0"
+    serial.puts((&s_f0[0]) as u64)
+    serial.dec(frei_soll)
+    serial.nl()
+}
+
+// ------------------------------------------------------------------
+// DIE MESSUNG: WAS DIESE RUNDE SICHERT.
+// ------------------------------------------------------------------
+fn mess(state: u64) {
+    var s_t: [u8; 17] = "schlaf: messung\0\0"
+    var s_hw: [u8; 5] = " hw=\0"
+    var s_fs: [u8; 11] = " fpugroe=\0\0"
+    var s_fe: [u8; 8] = " fpuan=\0"
+    var s_fr: [u8; 11] = " rahmen=\0\0\0"
+    var s_bl: [u8; 10] = " bloecke=\0"
+    var s_rs: [u8; 10] = " reserve=\0"
+    var s_pt: [u8; 9] = " prozte=\0"
+    serial.puts((&s_t[0]) as u64)
+    susp.ensure_disk(state)
+    serial.puts((&s_hw[0]) as u64)
+    serial.hex(hwsig_now(state))
+    serial.puts((&s_fe[0]) as u64)
+    serial.dec(kutil.yes(fpu.enabled(state)))
+    serial.puts((&s_fs[0]) as u64)
+    serial.dec(fpu.area_size(state))
+    serial.puts((&s_fr[0]) as u64)
+    serial.dec(frames_expected(state))
+    serial.puts((&s_bl[0]) as u64)
+    serial.dec(susp.blocks(state))
+    serial.puts((&s_rs[0]) as u64)
+    serial.dec(IMG_RESERVE)
+    serial.nl()
+    s3_befund(state)
+}
+
+// SOFORT NACHLESEN, WAS GERADE GESCHRIEBEN WURDE.
+//
+// Eine Messhilfe und keine Zusage: sie liest die Nutzlast des eben
+// geschriebenen Abbilds zurueck und rechnet dieselbe Summe. Stimmt
+// sie hier und nicht nach dem Neustart, liegt der Fehler im LESEN
+// beim Hochlauf; stimmt sie schon hier nicht, liegt er im SCHREIBEN.
+// Ohne diese Trennung raet man.
+fn verify_now(state: u64) -> u64 {
+    let base: u64 = img_base(state)
+    let dev: u64 = susp.disk(state)
+    let b: u64 = buf(state)
+    if !blk.read_on(state, dev, base + B_HEAD, b) {
+        return 0
+    }
+    let want: u64 = __mmio_read64((b + H2_SUM) as *mut u64)
+    let frames: u64 = __mmio_read64((b + H2_MFRAMES) as *mut u64)
+    let fpusz: u64 = __mmio_read64((b + H2_FPUSIZE) as *mut u64)
+    let fpu_b: u64 = (fpusz + 511) / 512
+    let tab_blocks: u64 = (frames * 8 + 511) / 512
+    let total: u64 = 1 + fpu_b + tab_blocks + frames * 8
+    var sum: u64 = bootmod.crc32_start()
+    var i: u64 = 0
+    while i < total {
+        if !blk.read_on(state, dev, base + B_SCAL + i, b) {
+            return 0
+        }
+        sum = bootmod.crc32_feed(sum, b, 512)
+        i = i + 1
+    }
+    var s_v: [u8; 18] = "schlaf: nachlese\0\0"
+    var s_s: [u8; 7] = " sum=\0\0"
+    var s_w: [u8; 8] = " soll=\0\0"
+    serial.puts((&s_v[0]) as u64)
+    serial.puts((&s_s[0]) as u64)
+    serial.hex(bootmod.crc32_end(sum))
+    serial.puts((&s_w[0]) as u64)
+    serial.hex(want)
+    serial.nl()
+    return bootmod.crc32_end(sum)
+}
+
+// Die Zahl, die `boot_check` beim Hochlauf festgehalten hat. `kmain`
+// gibt sie an `pruef` weiter -- gemessen VOR dem Einspielen und nicht
+// danach.
+fn frei_beim_start(state: u64) -> u64 {
+    return g(state, SL_FREI0)
+}
+
+// ------------------------------------------------------------------
+// LAUF 1, DER EINSTIEG: sichern und den Gast BEENDEN.
+//
+// DAS BEENDEN IST DER PUNKT. Ein Ruhezustand, der den Kern
+// weiterlaufen laesst, misst nichts -- der Zustand steht ja noch im
+// Arbeitsspeicher. `power.shutdown` schreibt auf 0xF4
+// (`isa-debug-exit`), und QEMU hoert damit auf. Der naechste Lauf
+// findet nur noch, was auf der Platte steht.
+// ------------------------------------------------------------------
+fn arm_and_exit(state: u64) {
+    var s_x: [u8; 26] = "schlaf: gast wird beendet\0"
+    var zyk: u64 = 1
+    if kstate.mode_on(state, kstate.M_SCHLAF) {
+        zyk = 2
+    }
+    s(state, SL_ZYK, zyk)
+    arm(state, zyk)
+    // DIE GEGENPROBEN, falls sie verlangt sind -- NACH dem Sichern,
+    // damit sie ein vollstaendiges Abbild beschaedigen und nicht ein
+    // halbes.
+    if kstate.mode_on(state, kstate.M_SCHLAFKAPUTT) {
+        var s_k: [u8; 28] = "schlaf: abbild beschaedigt\0\0"
+        corrupt(state)
+        serial.puts((&s_k[0]) as u64)
+        serial.nl()
+    }
+    if kstate.mode_on(state, kstate.M_SCHLAFHW) {
+        var s_h: [u8; 30] = "schlaf: hardware-kennung fals\0"
+        fake_hw(state)
+        serial.puts((&s_h[0]) as u64)
+        serial.nl()
+    }
+    serial.puts((&s_x[0]) as u64)
+    serial.nl()
+    power.shutdown(10 as u8)
+}

@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
+# tools/struktur/ablage.py -- LIEGT JEDE DATEI, WO SIE LIEGEN SOLL?
+#
+# Liest `tools/struktur/ablage.txt` (Soll) und den Baum (Ist) und
+# vergleicht beides. Das ist die zweite Haelfte der Ordnung: die
+# Aufrufrichtung prueft `erhebung.py`, die tatsaechliche Ablage diese
+# Datei.
+#
+# Aufruf:
+#   python3 tools/struktur/ablage.py             # Uebersicht
+#   python3 tools/struktur/ablage.py --pruefen   # Code 1 bei Abweichung
+#   python3 tools/struktur/ablage.py --offen     # was noch umzuziehen ist
+#   python3 tools/struktur/ablage.py --fehlend   # Module ohne Soll-Eintrag
+
+import os
+import sys
+
+WURZEL = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+KERN = os.path.join(WURZEL, "kernel")
+SOLLDATEI = os.path.join(WURZEL, "tools", "struktur", "ablage.txt")
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from erhebung import lies  # noqa: E402
+import huelle  # noqa: E402
+
+
+def lies_soll():
+    """modul -> Sollverzeichnis (relativ zu kernel/, '.' = oben)."""
+    soll = {}
+    if not os.path.exists(SOLLDATEI):
+        return soll
+    for z in lies(SOLLDATEI).splitlines():
+        z = z.strip()
+        if not z or z.startswith("#"):
+            continue
+        t = z.split()
+        if len(t) == 2:
+            soll[t[1]] = t[0]
+    return soll
+
+
+def ist_ablage():
+    """modul -> Istverzeichnis, nur fuer die Dateien des Kernabbilds.
+
+    `kernel/user/` und `kernel/app/` sind eigene Programme und werden
+    nicht betrachtet -- sonst zaehlte man `netmon` doppelt."""
+    kern = huelle.huelle(os.path.join(KERN, "kmain.fi"))
+    kern |= huelle.huelle(os.path.join(KERN, "uprog.fi"))
+    ist = {}
+    for rel in kern:
+        d = os.path.dirname(rel)
+        ist[os.path.basename(rel)[:-3]] = d if d else "."
+    return ist
+
+
+def vergleiche():
+    soll = lies_soll()
+    ist = ist_ablage()
+    passt, falsch, ohne_soll = [], [], []
+    for m, d in sorted(ist.items()):
+        s = soll.get(m)
+        if s is None:
+            ohne_soll.append((m, d))
+        elif s == d:
+            passt.append((m, d))
+        else:
+            falsch.append((m, d, s))
+    return passt, falsch, ohne_soll, soll, ist
+
+
+def main():
+    modus = sys.argv[1] if len(sys.argv) > 1 else ""
+    passt, falsch, ohne_soll, soll, ist = vergleiche()
+
+    if modus == "--fehlend":
+        for m, d in ohne_soll:
+            print("%s (liegt in %s)" % (m, d))
+        return 0
+
+    if modus == "--offen":
+        for m, d, s in falsch:
+            print("%s %s %s" % (m, d, s))
+        return 0
+
+    if modus == "--pruefen":
+        if not soll:
+            print("KEINE Soll-Ablage (tools/struktur/ablage.txt) -- nichts geprueft")
+            return 1
+        print("Ablage: %d Dateien am richtigen Ort, %d am falschen, %d ohne Soll"
+              % (len(passt), len(falsch), len(ohne_soll)))
+        for m, d, s in falsch:
+            print("  FALSCH  %s liegt in '%s', soll nach '%s'" % (m, d, s))
+        for m, d in ohne_soll:
+            print("  OHNE SOLL  %s (liegt in '%s')" % (m, d))
+        return 1 if (falsch or ohne_soll) else 0
+
+    print("== ABLAGE ==")
+    print("Soll-Eintraege: %d, Kerndateien: %d" % (len(soll), len(ist)))
+    print("am richtigen Ort: %d" % len(passt))
+    print("am falschen Ort : %d" % len(falsch))
+    print("ohne Soll       : %d" % len(ohne_soll))
+    print()
+    nach = {}
+    for m, d in ist.items():
+        nach[d] = nach.get(d, 0) + 1
+    print("-- Ist-Verteilung --")
+    for d, c in sorted(nach.items(), key=lambda kv: (-kv[1], kv[0])):
+        print("  %-12s %3d" % (d, c))
+    if falsch:
+        print()
+        print("-- noch umzuziehen --")
+        for m, d, s in falsch:
+            print("  %-12s %s -> %s" % (m, d, s))
+    if ohne_soll:
+        print()
+        print("-- ohne Soll-Eintrag --")
+        for m, d in ohne_soll:
+            print("  %-12s (%s)" % (m, d))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

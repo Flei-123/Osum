@@ -1,0 +1,1733 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/acpiev.fi -- RUNDE ACPI-EREIGNISSE: DER WEG VOM KNOPF ZUM KERN.
+//
+// ==================================================================
+// WAS VORHER DA WAR UND WAS GEFEHLT HAT
+// ==================================================================
+//
+// Osum konnte sich seit Runde K13 ABSCHALTEN: `power.acpi_off` liest
+// die FADT, sucht `_S5_` in der DSDT und schreibt den Schlafwert in
+// PM1a_CNT. Der Weg vom Knopf zum Ausschalten war fertig.
+//
+// Was fehlte, ist der Weg VOM HARDWARE-EREIGNIS ZUM KNOPF. Wer auf
+// einem Laptop die Einschalttaste drueckt, schaltet damit NICHTS ab --
+// er zieht eine Leitung, den SCI (System Control Interrupt). Was
+// danach passiert, ist Sache des Betriebssystems, und wenn es nichts
+// tut, passiert nichts. Deshalb liess sich Osum bisher nur ueber das
+// Startmenue herunterfahren.
+//
+// Schlimmer noch, und es steht seit Runde BLECHVIER in `kernel/hw.fi`:
+// weil dieser Kern die GPE-Methoden nicht ausfuehren KONNTE, hat er
+// beim Start ALLE GPE-Bits abgeschaltet. Das war richtig -- ein
+// Ereignis, dessen Statusbit nie geloescht wird, haelt die Leitung
+// dauerhaft gezogen und die Maschine steht in einem
+// Unterbrechungssturm. Aber es heisst eben auch: kein Deckel, keine
+// Taste, kein Akku.
+//
+// Diese Datei dreht das um. Sie schaltet GENAU DIE GPE-Bits wieder
+// ein, fuer die es eine `_Lxx`/`_Exx`-Methode in der DSDT gibt, und
+// behandelt sie so, wie die Spezifikation es vorschreibt.
+//
+// ==================================================================
+// DER WEG, SCHRITT FUER SCHRITT (ACPI 6.4, Kapitel 4.8 und 5.6.4)
+// ==================================================================
+//
+//  1. Die FADT nennt SCI_INT -- die Unterbrechungsleitung, auf der
+//     alles ankommt. Sie ist PEGELGESTEUERT und LOW-AKTIV, und sie
+//     wird geteilt. Auf den meisten Brettern ist es GSI 9.
+//
+//  2. Ein Ereignis setzt ein Bit. Es gibt zwei Sorten:
+//
+//     DIE FESTEN EREIGNISSE stehen in PM1a_STS/PM1b_STS an fest
+//     vergebenen Stellen. Bit 8 ist PWRBTN_STS -- die Einschalttaste.
+//     Sie braucht KEIN AML: die Spezifikation sagt, welches Bit es
+//     ist. Genau deshalb funktioniert die Taste in dieser Runde auch
+//     auf QEMU, wo es weder Deckel noch Akku gibt.
+//
+//     DIE ALLGEMEINEN EREIGNISSE (GPE) stehen in GPE0_STS/GPE1_STS,
+//     ein Bit je Leitung, und was sie BEDEUTEN, weiss nur die
+//     Firmware. Sie hinterlegt zu Bit n eine Methode `\_GPE._Lnn`
+//     (pegelgesteuert) oder `\_GPE._Enn` (flankengesteuert), und die
+//     auszufuehren ist der ganze Zweck des AML-Interpreters hier.
+//
+//  3. Die Methode meldet mit `Notify(Geraet, Code)`, was los ist.
+//     `Notify(\_SB.LID0, 0x80)` heisst: sieh beim Deckel nach.
+//     `Notify(\_SB.BAT0, 0x80)` heisst: der Akkustand hat sich
+//     geaendert. Erst DANN fragt der Kern `_LID` oder `_BST` ab --
+//     das Ereignis sagt nur, DASS sich etwas geaendert hat.
+//
+//  4. Das Statusbit wird geloescht (RW1C: eine Eins loescht). Bei
+//     einem `_Lxx` MUSS das passieren, sonst zieht die Leitung
+//     sofort wieder -- der Sturm aus Punkt 2 von BLECHVIER.
+//
+// ==================================================================
+// DIE REIHENFOLGE, AN DER MAN SICH SCHNEIDET
+// ==================================================================
+//
+// ERST das Statusbit loeschen, DANN die Methode ausfuehren. Andersherum
+// geht ein Ereignis verloren, das waehrend der Methode eintrifft: die
+// Methode laeuft, das Geraet setzt das Bit erneut, die Methode ist
+// fertig, der Kern loescht -- und damit auch das neue Ereignis. Bei
+// einem Deckel, den man schnell zu- und wieder aufklappt, ist das der
+// Unterschied zwischen "gesperrt" und "gesperrt und bleibt gesperrt".
+//
+// ==================================================================
+// WAS HIER NICHT LAEUFT
+// ==================================================================
+//
+// DIE METHODE LAEUFT NICHT IM UNTERBRECHUNGSBEHANDLER. AML darf
+// `Sleep` aufrufen, einen Mutex nehmen und ueber den Embedded
+// Controller lesen, der mit Wartezeiten von Millisekunden antwortet.
+// Das alles im Behandler zu tun, waere ein Kern, der bei jedem
+// Deckelklappen stehenbleibt. Der Behandler tut deshalb genau drei
+// Dinge -- lesen, loeschen, vormerken -- und weckt die Arbeit; die
+// Methode laeuft danach im normalen Betrieb (`pump`).
+//
+// Das ist derselbe Aufbau wie beim Netz (`netdev.irq` nimmt nur ab,
+// die Aufgabe dreht die Kurbel) und beim Ton.
+
+import serial
+import lib.kstate
+import mm.mem
+import acpi.acpi
+import acpi.amlns
+import acpi.amlobj
+import acpi.amlev
+import acpi.aml
+import sched.time
+import arch.arch
+import arch.x86_64.apic
+
+export {
+    stage, pump, irq, ready, why, sci_gsi, gpe_armed, events, wakeups,
+    lid_state, lid_present, batt_percent, batt_state, batt_present,
+    ac_online, button_pending, button_take, take_change, changed,
+    EV_NONE, EV_BUTTON, EV_LID, EV_BATT, EV_AC,
+    LID_OPEN, LID_CLOSED, LID_UNKNOWN,
+    report, selftest, wait_loop, ev_fake, fake_all
+}
+
+// ---------------------------------------------- die Plaetze in `kdata`
+//
+// Diese Datei hat eine EIGENE Seite (`kstate.ACPIEV_OFF`). Sie teilt
+// sich die Seite des Interpreters NICHT: dort ist es seit dieser Runde
+// schon eng (amlns 0..55, amlev 56..191 und 2560..2816, aml 192..2560),
+// und ein weiterer Mitbenutzer waere der naechste Fehler dieser Art.
+
+const E_READY: u64 = 0 // 1 = aufgesetzt
+const E_WHY: u64 = 8 // warum nicht, siehe WHY_*
+const E_SCI: u64 = 16 // die Leitung aus der FADT
+const E_PM1A: u64 = 24 // PM1a_STS (das Statusregister, nicht CNT)
+const E_PM1B: u64 = 32
+const E_GPE0: u64 = 40 // Anschrift des ersten GPE-Blocks
+const E_GPE0L: u64 = 48 // seine Laenge in Oktetten (Status + Freigabe)
+const E_GPE1: u64 = 56
+const E_GPE1L: u64 = 64
+const E_GPE1B: u64 = 72 // die Bitnummer, bei der Block 1 anfaengt
+const E_ARMED: u64 = 80 // wie viele GPE-Bits scharf geschaltet sind
+const E_EVENTS: u64 = 88 // wie viele Ereignisse behandelt wurden
+const E_WAKE: u64 = 96 // wie oft der Behandler die Arbeit geweckt hat
+const E_PEND: u64 = 104 // Bitfeld: was der Behandler vorgemerkt hat
+const E_BTN: u64 = 112 // die Taste wartet auf Behandlung
+const E_CHANGED: u64 = 120 // Bitfeld: was sich geaendert hat (EV_*)
+
+// Der Deckel.
+const E_LIDN: u64 = 128 // Knoten von `_LID`, NONE = keiner
+const E_LIDDEV: u64 = 136 // sein Geraeteknoten (fuer Notify-Zuordnung)
+const E_LIDV: u64 = 144 // sein letzter Wert
+
+// Der Akku.
+const E_BATN: u64 = 152 // Geraeteknoten des Akkus
+const E_BSTN: u64 = 160 // Knoten von `_BST`
+const E_BIFN: u64 = 168 // Knoten von `_BIF`
+const E_FULL: u64 = 176 // letzte volle Ladung aus `_BIF`
+const E_REM: u64 = 184 // Restkapazitaet aus `_BST`
+const E_BSTATE: u64 = 192 // Zustandswort aus `_BST`
+const E_PCT: u64 = 200 // ausgerechneter Ladestand, 0..100
+const E_BATOK: u64 = 208 // 1 = es gibt einen Akku
+
+// Das Netzteil.
+const E_ACN: u64 = 216 // Knoten von `_PSR`
+const E_ACDEV: u64 = 224
+const E_ACV: u64 = 232 // 1 = am Netz
+
+// Die Einschalttaste als GERAET (PNP0C0C). Sie braucht das nicht --
+// das feste Ereignis reicht --, aber ihr Knoten sagt, ob das Brett
+// ueberhaupt eine hat.
+const E_BTNDEV: u64 = 304
+
+// Der Namensraum, den diese Runde AM LEBEN LAESST.
+const E_ARENA: u64 = 240 // 0 = keiner (dann ist alles hier tot)
+
+// Die scharf geschalteten GPE-Bits, damit `report` sie nennen kann.
+const E_BTNSAID: u64 = 248 // schon gemeldet? (damit es EINMAL kommt)
+const E_EVLEN: u64 = 1104 // PM1_EVT_LEN aus der FADT
+const E_MODE: u64 = 320 // was acpi_mode_on gemeldet hat
+const E_BTNN: u64 = 1144 // wie oft die Taste gedrueckt wurde (unabholbar)
+const E_STSOR: u64 = 1136 // ODER ueber alle je gelesenen sts
+const E_PUMPN: u64 = 1128 // wie oft `pump` gelaufen ist
+const E_IFSAID: u64 = 1120 // schon gemeldet, ob IF steht?
+const E_LIDTICK: u64 = 1112 // Durchlaeufe bis zum Deckel (`evlid`)
+const E_TICK: u64 = 312 // Durchlaeufe von `pump`, nur fuer evdump
+const E_IRQN: u64 = 288 // wie oft der SCI-Behandler ueberhaupt lief
+const E_LASTSTS: u64 = 296 // was zuletzt in PM1x_STS stand
+const E_GBITS: u64 = 256 // 4 Woerter = 256 Bits
+
+// Die Tafel der GPE-Methoden: je Eintrag Bitnummer, Knoten, Art.
+const E_MN: u64 = 328 // wie viele
+const E_MTAB: u64 = 336 // GPE_MAX * 24
+const GPE_MAX: u64 = 32
+
+// Warum es nicht laeuft.
+const WHY_OK: u64 = 0
+const WHY_NOFADT: u64 = 1
+const WHY_NOAML: u64 = 2 // der Interpreter steht nicht bereit
+const WHY_NONS: u64 = 3 // der Namensraum liess sich nicht halten
+const WHY_OFF: u64 = 4 // mit `noacpiev` abgeschaltet
+const WHY_NOSCI: u64 = 5 // die FADT nennt keine Leitung
+
+// Was sich geaendert hat. Ein Bitfeld, damit mehrere Aenderungen
+// zwischen zwei Abfragen nicht verlorengehen.
+const EV_NONE: u64 = 0
+const EV_BUTTON: u64 = 1
+const EV_LID: u64 = 2
+const EV_BATT: u64 = 4
+const EV_AC: u64 = 8
+
+const LID_OPEN: u64 = 1
+const LID_CLOSED: u64 = 0
+const LID_UNKNOWN: u64 = 2
+
+// Die Felder der FADT, die diese Datei braucht (ACPI 6.4, Tabelle 5.9).
+// `hw.fi` liest dieselbe Tabelle fuer andere Felder; die Offsets stehen
+// absichtlich zweimal, weil sie zu VERSCHIEDENEN Zwecken gelesen werden
+// und ein gemeinsamer Satz Konstanten die zwei Runden aneinanderbinden
+// wuerde, ohne dass eine davon etwas davon haette.
+const F_SCI_INT: u64 = 46
+const F_PM1A_EVT: u64 = 56
+const F_PM1B_EVT: u64 = 60
+const F_GPE0: u64 = 80
+const F_GPE1: u64 = 84
+const F_PM1_EVT_LEN: u64 = 88
+const F_GPE0_LEN: u64 = 92
+const F_GPE1_LEN: u64 = 93
+const F_GPE1_BASE: u64 = 94
+const F_SMI_CMD: u64 = 48
+const F_ACPI_ENABLE: u64 = 52
+const F_PM1A_CNT: u64 = 64
+const F_PM1B_CNT: u64 = 68
+
+// Die festen Ereignisse in PM1x_STS (ACPI 6.4, Tabelle 4.17).
+const PM1_PWRBTN: u64 = 256 // Bit 8
+const PM1_SLPBTN: u64 = 512 // Bit 9
+// Dieselben Bits im Freigaberegister PM1x_EN. Es liegt eine halbe
+// Registerlaenge hinter dem Statusregister -- so steht es in der
+// Spezifikation, und deshalb wird PM1_EVT_LEN gelesen und nicht
+// geraten.
+const PM1_RTC: u64 = 1024 // Bit 10
+
+// Bit 0 von PM1x_CNT. 1 = die Ereignisse gehen als SCI an das
+// Betriebssystem, 0 = sie gehen als SMI an die Firmware.
+const SCI_EN: u64 = 1
+
+fn g(state: u64, off: u64) -> u64 {
+    return kstate.get(state, kstate.ACPIEV_OFF + off)
+}
+
+fn s(state: u64, off: u64, v: u64) {
+    kstate.set(state, kstate.ACPIEV_OFF + off, v)
+}
+
+fn ready(state: u64) -> bool {
+    return g(state, E_READY) == 1
+}
+
+fn why(state: u64) -> u64 {
+    return g(state, E_WHY)
+}
+
+fn sci_gsi(state: u64) -> u64 {
+    return g(state, E_SCI)
+}
+
+fn gpe_armed(state: u64) -> u64 {
+    return g(state, E_ARMED)
+}
+
+fn events(state: u64) -> u64 {
+    return g(state, E_EVENTS)
+}
+
+fn wakeups(state: u64) -> u64 {
+    return g(state, E_WAKE)
+}
+
+fn lid_state(state: u64) -> u64 {
+    return g(state, E_LIDV)
+}
+
+fn lid_present(state: u64) -> bool {
+    return g(state, E_LIDN) != amlns.NONE && g(state, E_LIDN) != 0
+}
+
+fn batt_present(state: u64) -> bool {
+    return g(state, E_BATOK) == 1
+}
+
+fn batt_percent(state: u64) -> u64 {
+    return g(state, E_PCT)
+}
+
+fn batt_state(state: u64) -> u64 {
+    return g(state, E_BSTATE)
+}
+
+fn ac_online(state: u64) -> bool {
+    return g(state, E_ACV) == 1
+}
+
+fn button_pending(state: u64) -> bool {
+    return g(state, E_BTN) != 0
+}
+
+// Die Taste ABHOLEN: sie meldet sich EINMAL, und wer sie abholt, hat
+// sie. Ohne das Zuruecksetzen wuerde das Energiemenue in jedem
+// Durchlauf erneut aufgehen.
+fn button_take(state: u64) -> bool {
+    if g(state, E_BTN) == 0 {
+        return false
+    }
+    s(state, E_BTN, 0)
+    return true
+}
+
+fn changed(state: u64) -> u64 {
+    return g(state, E_CHANGED)
+}
+
+// Dasselbe fuer die Aenderungen: lesen UND zuruecksetzen in einem
+// Schritt. Zwei getrennte Aufrufe waeren ein Wettlauf mit dem
+// Unterbrechungsbehandler -- zwischen `changed` und einem `clear`
+// koennte ein Ereignis liegen, das dann verlorenginge.
+fn take_change(state: u64) -> u64 {
+    let v: u64 = g(state, E_CHANGED)
+    if v != 0 {
+        s(state, E_CHANGED, 0)
+    }
+    return v
+}
+
+fn mark(state: u64, bit: u64) {
+    s(state, E_CHANGED, g(state, E_CHANGED) | bit)
+}
+
+// ------------------------------------------------------ die Anschluesse
+
+fn in8(port: u64) -> u64 {
+    return serial.in8((port & 0xFFFF) as u16) as u64
+}
+
+fn out8(port: u64, v: u64) {
+    serial.out8((port & 0xFFFF) as u16, (v & 0xFF) as u8)
+}
+
+fn in16(port: u64) -> u64 {
+    return in16w(port)
+}
+
+// EIN ECHTER 16-BIT-ZUGRIFF. Die erste Fassung dieser Runde hat ein
+// Wort als ZWEI Oktette geschrieben -- und GEMESSEN: an PM1a_EN
+// (Anschluss 0x602 unter QEMU) kam davon nichts an. Zurueckgelesen
+// stand dort weiter 0x0000, und ohne das Freigabebit zieht die
+// Einschalttaste den SCI nicht. Die Register des Energieverwalters
+// sind WORTBREIT, und ein Chipsatz darf zwei Oktettzugriffe
+// verwerfen; die Spezifikation (ACPI 6.4, 4.8.3) beschreibt sie als
+// 16-Bit-Register, nicht als zwei Oktette.
+fn in16w(port: u64) -> u64 {
+    return arch.dev_in16((port & 0xFFFF) as u16) as u64
+}
+
+fn out16w(port: u64, v: u64) {
+    arch.dev_out16((port & 0xFFFF) as u16, (v & 0xFFFF) as u16)
+}
+
+fn out16(port: u64, v: u64) {
+    out16w(port, v)
+}
+
+// ==================================================================
+// DIE GERAETE IM NAMENSRAUM FINDEN
+// ==================================================================
+//
+// Gesucht wird ueber `_HID`, die Kennung, die die Spezifikation
+// vergibt. Sie steht als Zahl in der DSDT (EisaId("PNP0C0D") ist
+// 0x0D0CD041 -- die vier Buchstaben in fuenf Bit je Zeichen), oder
+// als Zeichenkette ("ACPI0003" fuer das Netzteil).
+//
+//   PNP0C0D  der Deckel
+//   PNP0C0C  die Einschalttaste
+//   PNP0C0A  der Akku
+//   ACPI0003 das Netzteil
+//
+// Die Zahlen sind die Kodierung aus ACPI 6.4 Abschnitt 5.6.7 und
+// stehen hier ausgerechnet, weil ein Kern zur Laufzeit nichts
+// auszurechnen hat, was schon feststeht. `tools/acpiev/hid.py`
+// rechnet dieselben Zahlen ein zweites Mal aus und vergleicht --
+// derselbe Griff wie bei `tools/aml/disasm.py`.
+const HID_LID: u64 = 0x0D0CD041
+const HID_PWRB: u64 = 0x0C0CD041
+const HID_BATT: u64 = 0x0A0CD041
+
+// Ein Kindknoten mit diesem Namen, oder NONE.
+fn child(state: u64, parent: u64, seg: u64) -> u64 {
+    let n: u64 = amlns.nodes(state)
+    var i: u64 = 1
+    while i < n {
+        if amlns.node_parent(state, i) == parent
+            && amlns.node_name(state, i) == seg {
+            return i
+        }
+        i = i + 1
+    }
+    return amlns.NONE
+}
+
+// Der Wert eines `Name`-Knotens als Zahl. Fuer `_HID`.
+fn name_int(state: u64, node: u64) -> u64 {
+    if node == amlns.NONE {
+        return 0
+    }
+    var r: [u64; 3] = [0 as u64; 3]
+    if !aml.eval_node(state, node, (&r[0]) as u64) {
+        return 0
+    }
+    return amlobj.to_int((&r[0]) as u64)
+}
+
+// Ein Geraet mit dieser `_HID` suchen. Gibt den GERAETEKNOTEN zurueck.
+fn find_hid(state: u64, want: u64) -> u64 {
+    var w_hid: [u8; 5] = "_HID\0"
+    let seg: u64 = amlns.seg_of((&w_hid[0]) as u64)
+    let n: u64 = amlns.nodes(state)
+    var i: u64 = 1
+    while i < n {
+        if amlns.node_kind(state, i) == amlns.NK_DEVICE {
+            let h: u64 = child(state, i, seg)
+            if h != amlns.NONE {
+                if name_int(state, h) == want {
+                    return i
+                }
+            }
+        }
+        i = i + 1
+    }
+    return amlns.NONE
+}
+
+// Dasselbe ueber eine `_HID` als ZEICHENKETTE ("ACPI0003"). Das
+// Netzteil wird so geschrieben, und eine Zahl waere hier falsch.
+fn find_hid_str(state: u64, txt: u64) -> u64 {
+    var w_hid: [u8; 5] = "_HID\0"
+    let seg: u64 = amlns.seg_of((&w_hid[0]) as u64)
+    let n: u64 = amlns.nodes(state)
+    var i: u64 = 1
+    while i < n {
+        if amlns.node_kind(state, i) == amlns.NK_DEVICE {
+            let h: u64 = child(state, i, seg)
+            if h != amlns.NONE {
+                var r: [u64; 3] = [0 as u64; 3]
+                if aml.eval_node(state, h, (&r[0]) as u64) {
+                    if amlobj.otype((&r[0]) as u64) == amlobj.OT_STR {
+                        if streq(amlobj.ov1((&r[0]) as u64), txt) {
+                            return i
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    return amlns.NONE
+}
+
+fn streq(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while i < 64 {
+        let x: u64 = amlns.rd8(a + i)
+        let y: u64 = amlns.rd8(b + i)
+        if x != y {
+            return false
+        }
+        if x == 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// ==================================================================
+// DIE GPE-METHODEN EINSAMMELN
+// ==================================================================
+//
+// Unter `\_GPE` stehen Methoden, deren NAME die Bitnummer traegt:
+// `_L1B` ist Bit 0x1B, pegelgesteuert; `_E03` ist Bit 0x03,
+// flankengesteuert. Zwei Hexziffern, und genau zwei.
+
+const M_LEVEL: u64 = 0
+const M_EDGE: u64 = 1
+
+fn hexval(c: u64) -> u64 {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    return 0xFF
+}
+
+// Aus einem Namen wie `_L1B` die Bitnummer und die Art. Gibt 0xFFFF
+// zurueck, wenn der Name keine GPE-Methode ist.
+fn gpe_of_name(seg: u64) -> u64 {
+    if (seg & 0xFF) != 0x5F { // '_'
+        return 0xFFFF
+    }
+    let k: u64 = (seg >> 8) & 0xFF
+    var art: u64 = 0xFF
+    if k == 0x4C { // 'L'
+        art = M_LEVEL
+    }
+    if k == 0x45 { // 'E'
+        art = M_EDGE
+    }
+    if art == 0xFF {
+        return 0xFFFF
+    }
+    let h: u64 = hexval((seg >> 16) & 0xFF)
+    let l: u64 = hexval((seg >> 24) & 0xFF)
+    if h == 0xFF || l == 0xFF {
+        return 0xFFFF
+    }
+    return ((h * 16 + l) << 1) | art
+}
+
+fn meth_n(state: u64) -> u64 {
+    return g(state, E_MN)
+}
+
+fn meth_bit(state: u64, i: u64) -> u64 {
+    return g(state, E_MTAB + i * 24)
+}
+
+fn meth_node(state: u64, i: u64) -> u64 {
+    return g(state, E_MTAB + i * 24 + 8)
+}
+
+fn meth_art(state: u64, i: u64) -> u64 {
+    return g(state, E_MTAB + i * 24 + 16)
+}
+
+fn meth_find(state: u64, bit: u64) -> u64 {
+    let n: u64 = meth_n(state)
+    var i: u64 = 0
+    while i < n {
+        if meth_bit(state, i) == bit {
+            return i
+        }
+        i = i + 1
+    }
+    return 0xFFFF
+}
+
+// Alle `_Lxx`/`_Exx` unter `\_GPE` einsammeln.
+fn collect_gpe(state: u64) {
+    var w_gpe: [u8; 5] = "_GPE\0"
+    let gseg: u64 = amlns.seg_of((&w_gpe[0]) as u64)
+    let n: u64 = amlns.nodes(state)
+    var cnt: u64 = 0
+    var i: u64 = 1
+    while i < n {
+        if amlns.node_kind(state, i) == amlns.NK_METHOD && cnt < GPE_MAX {
+            // Der Elternknoten muss `\_GPE` heissen. Eine Methode
+            // `_L18` irgendwo sonst ist KEINE GPE-Methode -- und es
+            // gibt sie: manche Firmware nennt so ihre Hilfsroutinen.
+            let par: u64 = amlns.node_parent(state, i)
+            if par != amlns.NONE && amlns.node_name(state, par) == gseg {
+                let v: u64 = gpe_of_name(amlns.node_name(state, i))
+                if v != 0xFFFF {
+                    s(state, E_MTAB + cnt * 24, v >> 1)
+                    s(state, E_MTAB + cnt * 24 + 8, i)
+                    s(state, E_MTAB + cnt * 24 + 16, v & 1)
+                    cnt = cnt + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    s(state, E_MN, cnt)
+}
+
+// ==================================================================
+// DIE GPE-REGISTER
+// ==================================================================
+//
+// Ein Block ist zweigeteilt: die erste Haelfte Status, die zweite
+// Freigabe, je ein Oktett fuer acht Bits. Block 1 faengt nicht bei
+// Bit 0 an, sondern bei GPE1_BASE aus der FADT.
+
+// In welchem Block liegt das Bit, und wo genau? Gibt die Anschrift des
+// Statusoktetts zurueck, oder 0.
+fn gpe_sts_port(state: u64, bit: u64) -> u64 {
+    let b0: u64 = g(state, E_GPE0)
+    let l0: u64 = g(state, E_GPE0L) / 2
+    if b0 != 0 && bit < l0 * 8 {
+        return b0 + bit / 8
+    }
+    let b1: u64 = g(state, E_GPE1)
+    let l1: u64 = g(state, E_GPE1L) / 2
+    let base: u64 = g(state, E_GPE1B)
+    if b1 != 0 && bit >= base && bit < base + l1 * 8 {
+        return b1 + (bit - base) / 8
+    }
+    return 0
+}
+
+fn gpe_en_port(state: u64, bit: u64) -> u64 {
+    let b0: u64 = g(state, E_GPE0)
+    let l0: u64 = g(state, E_GPE0L) / 2
+    if b0 != 0 && bit < l0 * 8 {
+        return b0 + l0 + bit / 8
+    }
+    let b1: u64 = g(state, E_GPE1)
+    let l1: u64 = g(state, E_GPE1L) / 2
+    let base: u64 = g(state, E_GPE1B)
+    if b1 != 0 && bit >= base && bit < base + l1 * 8 {
+        return b1 + l1 + (bit - base) / 8
+    }
+    return 0
+}
+
+fn gpe_enable(state: u64, bit: u64) {
+    let p: u64 = gpe_en_port(state, bit)
+    if p == 0 {
+        return
+    }
+    out8(p, in8(p) | (1 << (bit & 7)))
+    let w: u64 = E_GBITS + (bit / 64) * 8
+    s(state, w, g(state, w) | (1 << (bit & 63)))
+}
+
+fn gpe_clear(state: u64, bit: u64) {
+    let p: u64 = gpe_sts_port(state, bit)
+    if p == 0 {
+        return
+    }
+    out8(p, 1 << (bit & 7)) // RW1C
+}
+
+fn gpe_is_set(state: u64, bit: u64) -> bool {
+    let p: u64 = gpe_sts_port(state, bit)
+    if p == 0 {
+        return false
+    }
+    return (in8(p) & (1 << (bit & 7))) != 0
+}
+
+fn gpe_armed_bit(state: u64, bit: u64) -> bool {
+    let w: u64 = E_GBITS + (bit / 64) * 8
+    return (g(state, w) & (1 << (bit & 63))) != 0
+}
+
+// ==================================================================
+// DER UNTERBRECHUNGSBEHANDLER
+// ==================================================================
+//
+// Kurz, und er fuehrt KEIN AML aus. Er liest die Statusregister,
+// loescht, was er gefunden hat, merkt es vor und ist fertig. Alles
+// Weitere macht `pump`.
+
+fn irq(state: u64) {
+    s(state, E_IRQN, g(state, E_IRQN) + 1)
+    if g(state, E_READY) != 1 {
+        return
+    }
+    var etwas: bool = false
+
+    // 1. Die festen Ereignisse. PM1a und PM1b werden ODER-verknuepft
+    //    gelesen -- die Spezifikation sagt ausdruecklich, dass ein
+    //    Ereignis in einem der beiden Register stehen darf.
+    let pa: u64 = g(state, E_PM1A)
+    let pb: u64 = g(state, E_PM1B)
+    var sts: u64 = 0
+    if pa != 0 {
+        sts = sts | in16(pa)
+    }
+    if pb != 0 {
+        sts = sts | in16(pb)
+    }
+    // JEDEN EINTRITT FESTHALTEN, auch den mit sts=0: ein Behandler,
+    // der lief und nichts fand, ist ein anderer Befund als einer, der
+    // nicht lief.
+    s(state, E_LASTSTS, sts)
+    s(state, E_STSOR, g(state, E_STSOR) | sts)
+    if (sts & PM1_PWRBTN) != 0 {
+        // LOESCHEN, BEVOR gehandelt wird. Das Bit ist RW1C.
+        if pa != 0 {
+            out16(pa, PM1_PWRBTN)
+        }
+        if pb != 0 {
+            out16(pb, PM1_PWRBTN)
+        }
+        s(state, E_BTN, 1)
+        s(state, E_BTNN, g(state, E_BTNN) + 1)
+        mark(state, EV_BUTTON)
+        etwas = true
+    }
+    if (sts & PM1_SLPBTN) != 0 {
+        if pa != 0 {
+            out16(pa, PM1_SLPBTN)
+        }
+        if pb != 0 {
+            out16(pb, PM1_SLPBTN)
+        }
+        etwas = true
+    }
+    if (sts & PM1_RTC) != 0 {
+        // Nicht unsere Baustelle, aber das Bit MUSS weg -- sonst
+        // zieht die Leitung weiter. Genau der Sturm aus BLECHVIER.
+        if pa != 0 {
+            out16(pa, PM1_RTC)
+        }
+        if pb != 0 {
+            out16(pb, PM1_RTC)
+        }
+        etwas = true
+    }
+
+    // 2. Die GPE-Bits. Nur die, die wir scharf geschaltet haben --
+    //    fuer alles andere gibt es keine Methode, und ein Bit ohne
+    //    Behandlung waere wieder der Sturm.
+    let n: u64 = meth_n(state)
+    var i: u64 = 0
+    while i < n {
+        let bit: u64 = meth_bit(state, i)
+        if gpe_armed_bit(state, bit) && gpe_is_set(state, bit) {
+            // ERST LOESCHEN, DANN VORMERKEN. Die Begruendung steht
+            // oben im Kopf: andersherum geht ein Ereignis verloren,
+            // das waehrend der Behandlung eintrifft.
+            gpe_clear(state, bit)
+            let w: u64 = E_PEND + (i / 64) * 8
+            s(state, w, g(state, w) | (1 << (i & 63)))
+            etwas = true
+        }
+        i = i + 1
+    }
+
+    if etwas {
+        s(state, E_WAKE, g(state, E_WAKE) + 1)
+    }
+}
+
+// ==================================================================
+// DIE ARBEIT -- hier laeuft AML
+// ==================================================================
+//
+// `pump` gehoert in den normalen Betrieb und NICHT in den Behandler.
+// Sie fuehrt die vorgemerkten GPE-Methoden aus, liest den Notify-Ring
+// und fragt danach das Geraet ab, das sich gemeldet hat.
+
+fn pump(state: u64) {
+    // GANZ OBEN, VOR JEDER BEDINGUNG. Ein Zaehler hinter der ersten
+    // Wache misst nicht, ob die Funktion gerufen wird, sondern ob sie
+    // durchkommt -- und genau das war beim Suchen der Unterschied
+    // zwischen "pumpn=0" und "die Zeilen stehen doch da".
+    s(state, E_PUMPN, g(state, E_PUMPN) + 1)
+    if g(state, E_READY) != 1 {
+        return
+    }
+    // DIE TASTE. Sie ist ein FESTES Ereignis und haengt an keinem
+    // GPE-Bit; der Behandler hat sie nur vorgemerkt.
+    // GEMESSEN UND KORRIGIERT: hier stand `E_BTN == 1`, also das Wort,
+    // das `button_take` beim Abholen LOESCHT. Sobald ein Programm in
+    // Ring 3 die Taste abfragt -- die Leiste tut das jede Runde, der
+    // Starter auch --, war sie weg, bevor diese Zeile sie sehen
+    // konnte. In der Ausgabe stand dann `irqs=1 stsor=0x0101` (der
+    // Behandler HAT das Tastenbit gelesen) und trotzdem kein
+    // `ev taste`: die Meldung hing an einem Wort, das jemand anderes
+    // gerade abgeholt hatte.
+    //
+    // Gezaehlt wird deshalb mit `E_BTNN`, und das loescht niemand.
+    if g(state, E_BTNN) != g(state, E_BTNSAID) {
+        s(state, E_BTNSAID, g(state, E_BTNN))
+        s(state, E_EVENTS, g(state, E_EVENTS) + 1)
+        var s_b: [u8; 20] = "acpiev: ev taste\0\0\0\0"
+        serial.puts((&s_b[0]) as u64)
+        serial.nl()
+        // IMMER, nicht nur mit `evdump`: das ist DAS Ereignis dieser
+        // Runde, und diese Zeile ist die Abnahme.
+        report(state)
+    }
+
+    // MIT `evdump` ALLE HUNDERT DURCHLAEUFE EINE ZEILE. Ohne das ist
+    // "es kommt nichts an" nicht von "der Behandler laeuft gar nicht"
+    // zu unterscheiden -- und genau diese zwei Faelle waren beim
+    // ersten Lauf dieser Runde zu trennen.
+    if kstate.mode_on(state, kstate.M_EVDUMP) {
+        s(state, E_TICK, g(state, E_TICK) + 1)
+        if (g(state, E_TICK) % 200) == 0 {
+            // ROHES PM1a_STS, direkt vom Anschluss. Wenn hier Bit 8
+            // auftaucht, HAT QEMU die Taste gemeldet und es liegt am
+            // Interrupt; taucht es nie auf, hat QEMU sie gar nicht
+            // gemeldet. Das trennt die zwei Faelle.
+            var s_rs: [u8; 16] = "acpiev: pm1sts=\0"
+            var s_pk: [u8; 8] = " pumpn=\0"
+            var s_ik: [u8; 7] = " irqs=\0"
+            serial.puts((&s_rs[0]) as u64)
+            if g(state, E_PM1A) != 0 {
+                serial.hex_width(in16(g(state, E_PM1A)), 4)
+            }
+            serial.puts((&s_pk[0]) as u64)
+            serial.dec(g(state, E_PUMPN))
+            serial.puts((&s_ik[0]) as u64)
+            serial.dec(g(state, E_IRQN))
+            var s_or: [u8; 8] = " stsor=\0"
+            serial.puts((&s_or[0]) as u64)
+            serial.hex_width(g(state, E_STSOR), 4)
+            serial.nl()
+        }
+    }
+    // EINMAL melden, ob Unterbrechungen ueberhaupt AN sind. Ohne das
+    // ist "der SCI kommt nicht an" nicht von "dieser Kern nimmt gar
+    // keine Unterbrechungen an" zu unterscheiden -- und genau diese
+    // zwei Faelle waren im Schreibtischbetrieb zu trennen.
+    if g(state, E_IFSAID) == 0 {
+        s(state, E_IFSAID, 1)
+        // NUR LESEN, NICHT sperren: die Fassungen in klog.fi und
+        // audio.fi haengen ein `cli` an, weil sie eine Sperre
+        // aufmachen. Hier soll nichts gesperrt werden.
+        let fl: u64 = asm("pushfq\npop rax", out("rax"))
+        var s_if: [u8; 16] = "acpiev: rflags=\0"
+        serial.puts((&s_if[0]) as u64)
+        serial.hex_width(fl, 4)
+        // Und gleich der Eintrag im I/O-APIC UND das Freigaberegister,
+        // beide JETZT und nicht beim Aufsetzen. Wer beides zum
+        // richtigen Zeitpunkt liest, sieht, ob eine spaetere Runde sie
+        // wieder zugemacht hat.
+        var s_i2: [u8; 9] = " ioapic=\0"
+        var s_p2: [u8; 8] = " pm1en=\0"
+        var s_s2: [u8; 6] = " sts=\0"
+        serial.puts((&s_i2[0]) as u64)
+        serial.hex_width(apic.gsi_entry(state, g(state, E_SCI)), 8)
+        serial.puts((&s_p2[0]) as u64)
+        if g(state, E_PM1A) != 0 && g(state, E_EVLEN) != 0 {
+            serial.hex_width(in16(g(state, E_PM1A) + g(state, E_EVLEN) / 2), 4)
+        }
+        serial.puts((&s_s2[0]) as u64)
+        if g(state, E_PM1A) != 0 {
+            serial.hex_width(in16(g(state, E_PM1A)), 4)
+        }
+        serial.nl()
+    }
+    // ============================== RUNDE ACPI-EREIGNISSE: `evlid`
+    //
+    // DEN DECKEL VON HAND ZUKLAPPEN, EINMAL, NACH EINER WEILE.
+    //
+    // QEMU hat kein Deckelgeraet -- es gibt an dieser Maschine nichts,
+    // was das GPE-Bit ziehen wuerde. Fuer das BILD der Abnahme (der
+    // Sperrbildschirm muss kommen) braucht es aber einen Deckel, der
+    // sich schliesst, waehrend der Schreibtisch schon steht. Also
+    // zaehlt der Kern die Durchlaeufe und klappt ihn beim
+    // zweitausendsten zu -- das ist rund eine halbe Minute nach dem
+    // Start, lange nachdem alles gemalt ist.
+    //
+    // WAS DAMIT NICHT GEMESSEN IST, steht wie ueberall in dieser Runde
+    // dabei: dass ein echtes Brett das Bit zieht. Gemessen ist alles
+    // dahinter -- die Methode, das `Notify`, `_LID`, und dass der
+    // Sperrbildschirm wirklich kommt.
+    if kstate.mode_on(state, kstate.M_EVLID) {
+        s(state, E_LIDTICK, g(state, E_LIDTICK) + 1)
+        if g(state, E_LIDTICK) == 2000 {
+            fake_set(state, 0, g(state, E_PCT), 1, 0)
+            let _l: bool = ev_fake(state, 3)
+        }
+    }
+    let n: u64 = meth_n(state)
+    var i: u64 = 0
+    while i < n {
+        let w: u64 = E_PEND + (i / 64) * 8
+        let m: u64 = 1 << (i & 63)
+        if (g(state, w) & m) != 0 {
+            s(state, w, g(state, w) & (~m))
+            run_gpe(state, i)
+            s(state, E_EVENTS, g(state, E_EVENTS) + 1)
+            if kstate.mode_on(state, kstate.M_EVDUMP) {
+                var s_g: [u8; 18] = "acpiev: ev gpe b=\0"
+                serial.puts((&s_g[0]) as u64)
+                serial.hex_width(meth_bit(state, i), 2)
+                serial.nl()
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn run_gpe(state: u64, idx: u64) {
+    let node: u64 = meth_node(state, idx)
+    if node == amlns.NONE {
+        return
+    }
+    amlev.not_clear(state)
+    amlev.depth_reset(state)
+    var r: [u64; 3] = [0 as u64; 3]
+    if !aml.eval_node(state, node, (&r[0]) as u64) {
+        // Eine Methode, die scheitert, darf den Kern nicht aufhalten.
+        // Der Fehler steht im Protokoll, das Bit ist geloescht, die
+        // Maschine laeuft weiter.
+        var s_e: [u8; 22] = "acpiev: gpe fehler b=\0"
+        serial.puts((&s_e[0]) as u64)
+        serial.hex_width(meth_bit(state, idx), 2)
+        serial.nl()
+        amlns.err_set(state, amlns.ERR_OK)
+        return
+    }
+    // Was hat sie gemeldet?
+    let cnt: u64 = amlev.not_count(state)
+    var j: u64 = 0
+    while j < cnt {
+        handle_notify(state, amlev.not_node(state, j),
+            amlev.not_code(state, j))
+        j = j + 1
+    }
+    // KEIN `Notify`, aber ein Ereignis: manche Firmware verlaesst sich
+    // darauf, dass das Betriebssystem nach einem GPE ohnehin alles
+    // nachliest. Also wird nachgelesen, was zu dem Bit passt.
+    if cnt == 0 {
+        refresh_all(state)
+    }
+}
+
+// Ein `Notify(Geraet, Code)` zuordnen. Der Code 0x80 heisst bei allen
+// dreien "sieh nach", 0x81 beim Akku "die Beschreibung hat sich
+// geaendert".
+fn handle_notify(state: u64, node: u64, code: u64) {
+    if node == g(state, E_LIDDEV) && node != amlns.NONE {
+        read_lid(state)
+        return
+    }
+    if node == g(state, E_BATN) && node != amlns.NONE {
+        // 0x81 heisst "die Beschreibung hat sich geaendert" -- dann
+        // MUSS `_BIF` neu gelesen werden (ein getauschter Akku hat
+        // eine andere volle Ladung). Und wenn sie noch gar nicht
+        // bekannt ist, ebenfalls: siehe `refresh_all`.
+        if code == 0x81 || g(state, E_FULL) == 0 {
+            read_bif(state)
+        }
+        read_bst(state)
+        return
+    }
+    if node == g(state, E_ACDEV) && node != amlns.NONE {
+        read_ac(state)
+        // Am Netz oder nicht aendert den Akkuzustand mit.
+        read_bst(state)
+        return
+    }
+    if node == g(state, E_BTNDEV) && node != amlns.NONE {
+        s(state, E_BTN, 1)
+        mark(state, EV_BUTTON)
+        return
+    }
+    // Ein Geraet, das wir nicht kennen. Kein Fehler -- ein Brett
+    // meldet auch Waermezonen und Steckplaetze.
+}
+
+fn refresh_all(state: u64) {
+    read_lid(state)
+    // `_BIF` ZUERST, UND ZWAR IMMER DANN, WENN DIE VOLLE LADUNG NOCH
+    // FEHLT.
+    //
+    // GEMESSEN UND KORRIGIERT. Die erste Fassung las `_BIF` nur bei
+    // `Notify(..., 0x81)` -- so steht es in der Spezifikation, und so
+    // ist es auch richtig: 0x80 heisst "der Zustand hat sich
+    // geaendert", 0x81 "die Beschreibung". Nur schickt kein Brett
+    // beim Start ein 0x81, und ohne `_BIF` gibt es keine letzte volle
+    // Ladung -- und ohne die keine Prozentzahl.
+    //
+    // In der Ausgabe sah das so aus, und es ist genau die Sorte
+    // Zahl, die eine Behauptung von einer Messung trennt:
+    //
+    //     acpiev: bst node=366 typ=4 n=4 rem=3850 full=0
+    //
+    // `_BST` lief also, das Paket stimmte, die Restkapazitaet war auf
+    // das Oktett genau die, die die AML-Methode ausgerechnet hatte
+    // (77 * 50 = 3850) -- und die Prozentzahl blieb trotzdem 0, weil
+    // der Nenner fehlte.
+    if g(state, E_FULL) == 0 {
+        read_bif(state)
+    }
+    read_bst(state)
+    read_ac(state)
+}
+
+// ------------------------------------------------------ die Abfragen
+
+// Das i-te Element eines Pakets als Zahl. Ein Paket, das kuerzer ist
+// als erwartet, gibt 0 -- eine Firmware, die `_BST` mit drei statt
+// vier Elementen zurueckgibt, darf den Kern nicht ueber das Ende des
+// Pakets hinauslesen lassen.
+fn pkg_int(state: u64, o: u64, i: u64) -> u64 {
+    if amlobj.otype(o) != amlobj.OT_PKG {
+        return 0
+    }
+    if i >= amlobj.ov2(o) {
+        return 0
+    }
+    var e: [u64; 3] = [0 as u64; 3]
+    amlobj.ocopy((&e[0]) as u64, amlobj.pkg_at(o, i))
+    amlev.deref(state, (&e[0]) as u64)
+    return amlobj.to_int((&e[0]) as u64)
+}
+
+fn read_lid(state: u64) {
+    let m: u64 = g(state, E_LIDN)
+    if m == amlns.NONE || m == 0 {
+        return
+    }
+    var r: [u64; 3] = [0 as u64; 3]
+    if !aml.eval_node(state, m, (&r[0]) as u64) {
+        amlns.err_set(state, amlns.ERR_OK)
+        return
+    }
+    var v: u64 = LID_CLOSED
+    if amlobj.to_int((&r[0]) as u64) != 0 {
+        v = LID_OPEN
+    }
+    if v != g(state, E_LIDV) {
+        let alt: u64 = g(state, E_LIDV)
+        s(state, E_LIDV, v)
+        mark(state, EV_LID)
+        // ================================ DECKEL ZU HEISST SPERREN
+        //
+        // Der Sperrbildschirm steht seit Runde ANMELDUNG; was fehlte,
+        // war jemand, der ihn beim Zuklappen anschaltet. Gesetzt wird
+        // GENAU DASSELBE Wort, das `sperrwache` ueber den Systemaufruf
+        // 1870 (op 1) setzt -- kein zweiter Weg an der
+        // Kennwortpruefung vorbei, und kein zweiter Ort, an dem
+        // stuende, was "gesperrt" heisst.
+        //
+        // NUR BEIM UEBERGANG AUF/ZU, und nur wenn vorher wirklich
+        // "auf" stand. `LID_UNKNOWN` ist der Zustand vor der ersten
+        // Abfrage; ein Brett, dessen Deckel beim Start zu ist (weil
+        // es an einem Bildschirm haengt und zugeklappt laeuft), darf
+        // davon nicht sofort gesperrt werden.
+        if v == LID_CLOSED && alt == LID_OPEN {
+            let sp: u64 = kstate.K11_OFF
+            if kstate.get(state, sp + kstate.SP_ON) == 0 {
+                kstate.set(state, sp + kstate.SP_ON, 1)
+                kstate.add(state, sp + kstate.SP_LOCKS, 1)
+                var s_l: [u8; 32] = "acpiev: deckel zu -- gesperrt\0\0\0"
+                serial.puts((&s_l[0]) as u64)
+                serial.nl()
+            }
+        }
+        // AUFGEKLAPPT WIRD NICHT ENTSPERRT. Ein Deckel, der aufsperrt,
+        // waere genau der zweite Weg an der Kennwortpruefung vorbei,
+        // den `sperrwache.fi` in ihrem Kopf ausschliesst.
+        if v == LID_OPEN && alt == LID_CLOSED {
+            var s_a: [u8; 24] = "acpiev: deckel auf\0\0\0\0\0\0"
+            serial.puts((&s_a[0]) as u64)
+            serial.nl()
+        }
+    }
+}
+
+fn read_bif(state: u64) {
+    let m: u64 = g(state, E_BIFN)
+    if m == amlns.NONE || m == 0 {
+        return
+    }
+    var r: [u64; 3] = [0 as u64; 3]
+    if !aml.eval_node(state, m, (&r[0]) as u64) {
+        amlns.err_set(state, amlns.ERR_OK)
+        return
+    }
+    if amlobj.otype((&r[0]) as u64) != amlobj.OT_PKG {
+        return
+    }
+    // `_BIF` Package(13): Index 2 ist die letzte volle Ladung.
+    // `_BIX` Package(20+): dort ist es Index 3, weil vorne eine
+    // Revisionszahl steht. Unterschieden wird an der LAENGE -- das
+    // ist genau das, was die Spezifikation dafuer vorsieht.
+    let len: u64 = amlobj.ov2((&r[0]) as u64)
+    var idx: u64 = 2
+    if len >= 20 {
+        idx = 3
+    }
+    let full: u64 = pkg_int(state, (&r[0]) as u64, idx)
+    if full != 0 && full != 0xFFFFFFFF {
+        s(state, E_FULL, full)
+    }
+}
+
+fn read_bst(state: u64) {
+    let m: u64 = g(state, E_BSTN)
+    var s_x: [u8; 12] = "acpiev: bst\0"
+    var s_t: [u8; 8] = " typ=\0\0\0"
+    var s_l: [u8; 6] = " n=\0\0\0"
+    var s_r: [u8; 8] = " rem=\0\0\0"
+    var s_f: [u8; 9] = " full=\0\0\0"
+    if kstate.mode_on(state, kstate.M_EVDUMP) {
+        serial.puts((&s_x[0]) as u64)
+    }
+    if m == amlns.NONE || m == 0 {
+        if kstate.mode_on(state, kstate.M_EVDUMP) {
+            serial.nl()
+        }
+        return
+    }
+    var r: [u64; 3] = [0 as u64; 3]
+    if !aml.eval_node(state, m, (&r[0]) as u64) {
+        amlns.err_set(state, amlns.ERR_OK)
+        return
+    }
+    if kstate.mode_on(state, kstate.M_EVDUMP) {
+        serial.puts((&s_t[0]) as u64)
+        serial.dec(amlobj.otype((&r[0]) as u64))
+        serial.puts((&s_l[0]) as u64)
+        serial.dec(amlobj.ov2((&r[0]) as u64))
+    }
+    if amlobj.otype((&r[0]) as u64) != amlobj.OT_PKG {
+        if kstate.mode_on(state, kstate.M_EVDUMP) {
+            serial.nl()
+        }
+        return
+    }
+    // `_BST` Package(4): Zustand, Strom, Restkapazitaet, Spannung.
+    let zust: u64 = pkg_int(state, (&r[0]) as u64, 0)
+    let rem: u64 = pkg_int(state, (&r[0]) as u64, 2)
+    if kstate.mode_on(state, kstate.M_EVDUMP) {
+        serial.puts((&s_r[0]) as u64)
+        serial.dec(rem)
+        serial.puts((&s_f[0]) as u64)
+        serial.dec(g(state, E_FULL))
+        serial.nl()
+    }
+    let full: u64 = g(state, E_FULL)
+    var pct: u64 = g(state, E_PCT)
+    if full != 0 && rem != 0xFFFFFFFF {
+        pct = (rem * 100) / full
+        if pct > 100 {
+            pct = 100
+        }
+    }
+    if zust != g(state, E_BSTATE) || pct != g(state, E_PCT) {
+        s(state, E_BSTATE, zust)
+        s(state, E_REM, rem)
+        s(state, E_PCT, pct)
+        mark(state, EV_BATT)
+    }
+}
+
+fn read_ac(state: u64) {
+    let m: u64 = g(state, E_ACN)
+    if m == amlns.NONE || m == 0 {
+        return
+    }
+    var r: [u64; 3] = [0 as u64; 3]
+    if !aml.eval_node(state, m, (&r[0]) as u64) {
+        amlns.err_set(state, amlns.ERR_OK)
+        return
+    }
+    var v: u64 = 0
+    if amlobj.to_int((&r[0]) as u64) != 0 {
+        v = 1
+    }
+    if v != g(state, E_ACV) {
+        s(state, E_ACV, v)
+        mark(state, EV_AC)
+    }
+}
+
+// ==================================================================
+// AUFSETZEN
+// ==================================================================
+
+// ==================================================================
+// ACPI EINSCHALTEN -- DIE ZEILE, OHNE DIE NICHTS ANKOMMT
+// ==================================================================
+//
+// GEMESSEN UND KORRIGIERT. Die erste Fassung dieser Runde trug die
+// SCI-Leitung ein, schaltete die GPE-Bits scharf, gab die
+// Einschalttaste frei -- und zaehlte nach `system_powerdown` am
+// QEMU-Monitor GENAU NULL Unterbrechungen (`irqs=0` in der
+// Berichtszeile, bei richtigem `pm1a=0x600`).
+//
+// Der Grund steht in ACPI 6.4 Abschnitt 16.3.2 und ist kein Fehler
+// im Code, sondern eine fehlende Zeile: EIN RECHNER STARTET IM
+// LEGACY-MODUS. Solange SCI_EN (Bit 0 von PM1a_CNT) nicht gesetzt
+// ist, gehen die Ereignisse NICHT an das Betriebssystem, sondern als
+// SMI an die Firmware -- die sie behandelt, wie sie will, und der
+// Kern bekommt nie etwas zu sehen. Der Weg vom Legacy- in den
+// ACPI-Modus ist EIN Schreibzugriff: der Wert aus dem FADT-Feld
+// ACPI_ENABLE auf den Anschluss aus SMI_CMD.
+//
+// DANACH WIRD GEWARTET, und auch das steht in der Spezifikation:
+// die Umschaltung ist NICHT sofort fertig. Gewartet wird auf SCI_EN
+// selbst und nicht blind eine feste Zeit -- eine Firmware, die
+// langsamer ist als die geratene Frist, waere sonst genau der Fehler,
+// den man auf echtem Blech eine Woche sucht.
+//
+// SMI_CMD == 0 IST KEIN FEHLER. Die Spezifikation erlaubt es
+// ausdruecklich: dann gibt es keinen Legacy-Modus, die Maschine ist
+// schon im ACPI-Modus, und es ist nichts zu tun. QEMU mit `-machine
+// q35` ist so ein Fall, und jede Maschine, die nur ueber UEFI
+// startet, ebenfalls.
+fn acpi_mode_on(state: u64, facp: u64) -> u64 {
+    let cnt: u64 = kstate.get32(facp + F_PM1A_CNT)
+    if cnt == 0 {
+        return 0
+    }
+    if (in16(cnt) & SCI_EN) != 0 {
+        return 1 // schon an
+    }
+    let smi: u64 = kstate.get32(facp + F_SMI_CMD)
+    let val: u64 = kstate.get8(facp + F_ACPI_ENABLE)
+    if smi == 0 {
+        return 2 // kein Legacy-Modus, nichts zu tun
+    }
+    out8(smi, val)
+    // Auf SCI_EN warten. Die Schleife ist grosszuegig (die
+    // Spezifikation nennt 3 Sekunden als Obergrenze fuer die
+    // Umschaltung), und sie bricht ab, sobald das Bit steht.
+    var i: u64 = 0
+    while i < 3000000 {
+        if (in16(cnt) & SCI_EN) != 0 {
+            return 3 // umgeschaltet
+        }
+        i = i + 1
+    }
+    return 4 // geschrieben, aber das Bit kam nicht
+}
+
+fn stage(state: u64) {
+    var w_facp: [u8; 5] = "FACP\0"
+    var w_lid: [u8; 5] = "_LID\0"
+    var w_bst: [u8; 5] = "_BST\0"
+    var w_bif: [u8; 5] = "_BIF\0"
+    var w_bix: [u8; 5] = "_BIX\0"
+    var w_psr: [u8; 5] = "_PSR\0"
+    var w_ac: [u8; 9] = "ACPI0003\0"
+
+    s(state, E_LIDN, amlns.NONE)
+    s(state, E_LIDDEV, amlns.NONE)
+    s(state, E_BATN, amlns.NONE)
+    s(state, E_BSTN, amlns.NONE)
+    s(state, E_BIFN, amlns.NONE)
+    s(state, E_ACN, amlns.NONE)
+    s(state, E_ACDEV, amlns.NONE)
+    s(state, E_BTNDEV, amlns.NONE)
+    s(state, E_LIDV, LID_UNKNOWN)
+
+    if kstate.mode_on(state, kstate.M_NOACPIEV) {
+        s(state, E_WHY, WHY_OFF)
+        report(state)
+        return
+    }
+
+    let facp: u64 = acpi.table(state, (&w_facp[0]) as u64)
+    if facp == 0 {
+        s(state, E_WHY, WHY_NOFADT)
+        report(state)
+        return
+    }
+
+    // Die Register aus der FADT. PM1x_EVT ist zweigeteilt: die erste
+    // Haelfte Status, die zweite Freigabe.
+    let evlen: u64 = kstate.get8(facp + F_PM1_EVT_LEN)
+    s(state, E_EVLEN, evlen)
+    s(state, E_PM1A, kstate.get32(facp + F_PM1A_EVT))
+    s(state, E_PM1B, kstate.get32(facp + F_PM1B_EVT))
+    s(state, E_GPE0, kstate.get32(facp + F_GPE0))
+    s(state, E_GPE0L, kstate.get8(facp + F_GPE0_LEN))
+    s(state, E_GPE1, kstate.get32(facp + F_GPE1))
+    s(state, E_GPE1L, kstate.get8(facp + F_GPE1_LEN))
+    s(state, E_GPE1B, kstate.get8(facp + F_GPE1_BASE))
+    // ZUERST IN DEN ACPI-MODUS. Vor jeder anderen Zeile: solange die
+    // Maschine im Legacy-Modus steht, gehen alle Ereignisse an die
+    // Firmware, und alles Weitere hier waere umsonst.
+    s(state, E_MODE, acpi_mode_on(state, facp))
+
+    let sci: u64 = kstate.get16(facp + F_SCI_INT)
+    s(state, E_SCI, sci)
+    if sci == 0 {
+        s(state, E_WHY, WHY_NOSCI)
+        report(state)
+        return
+    }
+
+    // DER NAMENSRAUM. `aml.stage` hat ihn gebaut und wieder verworfen;
+    // hier wird er ein zweites Mal gebaut und BEHALTEN -- aber nur,
+    // wenn es etwas zu behandeln gibt. Ein Server ohne Deckel und
+    // ohne Akku zahlt so keine 256 KiB fuer nichts.
+    var arena: u64 = 0
+    if !kstate.mode_on(state, kstate.M_EVNOHOLD) {
+        arena = aml.ns_hold(state)
+    }
+    if arena == 0 {
+        s(state, E_WHY, WHY_NONS)
+        report(state)
+        return
+    }
+    s(state, E_ARENA, arena)
+
+    // Die Geraete suchen.
+    let lidd: u64 = find_hid(state, HID_LID)
+    if lidd != amlns.NONE {
+        s(state, E_LIDDEV, lidd)
+        s(state, E_LIDN, child(state, lidd, amlns.seg_of((&w_lid[0]) as u64)))
+    }
+    let btn: u64 = find_hid(state, HID_PWRB)
+    if btn != amlns.NONE {
+        s(state, E_BTNDEV, btn)
+    }
+    let bat: u64 = find_hid(state, HID_BATT)
+    if bat != amlns.NONE {
+        s(state, E_BATN, bat)
+        s(state, E_BSTN, child(state, bat, amlns.seg_of((&w_bst[0]) as u64)))
+        var bif: u64 = child(state, bat, amlns.seg_of((&w_bif[0]) as u64))
+        if bif == amlns.NONE {
+            bif = child(state, bat, amlns.seg_of((&w_bix[0]) as u64))
+        }
+        s(state, E_BIFN, bif)
+        if g(state, E_BSTN) != amlns.NONE {
+            s(state, E_BATOK, 1)
+        }
+    }
+    let acd: u64 = find_hid_str(state, (&w_ac[0]) as u64)
+    if acd != amlns.NONE {
+        s(state, E_ACDEV, acd)
+        s(state, E_ACN, child(state, acd, amlns.seg_of((&w_psr[0]) as u64)))
+    }
+
+    // Die GPE-Methoden einsammeln und GENAU DIE scharf schalten.
+    collect_gpe(state)
+    let n: u64 = meth_n(state)
+    var armed: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let bit: u64 = meth_bit(state, i)
+        if gpe_sts_port(state, bit) != 0 {
+            // Erst loeschen (es kann seit dem Start etwas anliegen),
+            // dann freigeben.
+            gpe_clear(state, bit)
+            gpe_enable(state, bit)
+            armed = armed + 1
+        }
+        i = i + 1
+    }
+    s(state, E_ARMED, armed)
+
+    // Die Einschalttaste freigeben. Sie ist ein FESTES Ereignis und
+    // haengt an keinem GPE-Bit.
+    let pa: u64 = g(state, E_PM1A)
+    let pb: u64 = g(state, E_PM1B)
+    let halb: u64 = evlen / 2
+    if pa != 0 && halb != 0 {
+        out16(pa, PM1_PWRBTN | PM1_SLPBTN) // anliegendes loeschen
+        out16(pa + halb, in16(pa + halb) | PM1_PWRBTN)
+    }
+    if pb != 0 && halb != 0 {
+        out16(pb, PM1_PWRBTN | PM1_SLPBTN)
+        out16(pb + halb, in16(pb + halb) | PM1_PWRBTN)
+    }
+
+    // Die Leitung in den I/O-APIC. Der SCI ist PEGELGESTEUERT und
+    // LOW-AKTIV -- das steht so in ACPI 6.4 Abschnitt 5.2.9 und ist
+    // nicht verhandelbar: als Flanke eingetragen geht das zweite
+    // Ereignis verloren, weil die Leitung noch gezogen ist.
+    apic.route(state, sci, VEC_SCI, apic.id(state), true, true)
+
+    s(state, E_READY, 1)
+    s(state, E_WHY, WHY_OK)
+
+    // MIT `evfake` DEN NACHGEBAUTEN LAPTOP AUF EINEN SICHTBAREN
+    // STAND SETZEN. Ohne das steht in der Operationsregion des
+    // nachgebauten Laptops ueberall null -- also Deckel zu, null
+    // Prozent --, und jedes Bild dieser Runde zeigte einen leeren
+    // Akku. Die Zahl ist mit Bedacht krumm: 77 kann kein Vorgabewert
+    // und kein Zufall sein, sie steht so in `fake_set` und muss so in
+    // der Leiste stehen.
+    if kstate.mode_on(state, kstate.M_EVFAKE) {
+        fake_set(state, 1, 77, 1, 0)
+    }
+
+    // Einmal alles lesen, damit die Taskleiste von Anfang an etwas
+    // anzuzeigen hat und nicht erst beim ersten Ereignis.
+    refresh_all(state)
+    report(state)
+}
+
+// Der Vektor, auf dem der SCI meldet. Er steht in `trap.fi` noch
+// einmal; `tools/kernel/memmap.py` rechnet die Vektortafel nach und
+// faende zwei Namen auf einer Zahl.
+const VEC_SCI: u64 = 37
+
+// ==================================================================
+// DEN NACHGEBAUTEN LAPTOP BEDIENEN
+// ==================================================================
+//
+// `tools/acpiev/asl/laptop.asl` legt seine Werte in eine
+// Operationsregion auf 0x9F00 (Deckel, Prozent, Zustand, Netzteil).
+// Auf einem echten Brett schreibt dort der eingebettete Controller;
+// an dieser Maschine gibt es keinen, und der QEMU-Monitor kann in den
+// Gastspeicher nicht SCHREIBEN (`xp` liest, `pmemsave` schreibt in
+// eine Datei, nicht umgekehrt).
+//
+// Also setzt der Messlauf die Werte SELBST -- und das ist keine
+// Selbstbestaetigung, sondern genau die Trennung, auf die es
+// ankommt: HIER wird eine Zahl in einen SPEICHERPLATZ gelegt, und
+// gemessen wird, ob die AML-METHODE der Firmware sie findet, damit
+// RECHNET und das Ergebnis im richtigen Feld des richtigen Pakets
+// zurueckgibt. Zwischen der Zahl hier und der Zahl in
+// `acpiev.batt_percent` liegen `_BST`, ein `Multiply`, ein `Index`,
+// ein `Store`, das Auspacken des Pakets und die Prozentrechnung
+// gegen `_BIF`. Steht hier 77 und kommt hinten 77 heraus, hat der
+// Interpreter den ganzen Weg zurueckgelegt; schreibt jemand hier 40,
+// MUSS hinten 40 stehen. Das ist dasselbe Verhaeltnis wie zwischen
+// `tools/k18/ssdt.py` und `/bin/power`.
+const LPST: u64 = 0x9F00
+
+fn fake_set(state: u64, lid: u64, pct: u64, zust: u64, ac: u64) {
+    var s_s: [u8; 20] = "acpiev: setze lid=\0\0"
+    var s_p: [u8; 7] = " pct=\0\0"
+    var s_z: [u8; 8] = " zust=\0\0"
+    var s_a: [u8; 6] = " ac=\0\0"
+    kstate.set8(LPST + 0, lid as u8)
+    kstate.set8(LPST + 1, pct as u8)
+    kstate.set8(LPST + 2, zust as u8)
+    kstate.set8(LPST + 3, ac as u8)
+    serial.puts((&s_s[0]) as u64)
+    serial.dec(lid)
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(pct)
+    serial.puts((&s_z[0]) as u64)
+    serial.dec(zust)
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(ac)
+    serial.nl()
+}
+
+// ==================================================================
+// EIN EREIGNIS VON HAND -- OHNE HARDWARE
+// ==================================================================
+//
+// WARUM ES DAS GIBT, und es ist eine Messung und keine Abkuerzung.
+//
+// QEMU 7.2 hat weder Deckel noch Akku (`-device battery` kam erst mit
+// 8.2, ein Deckelgeraet gibt es bis heute nicht). Es gibt also an
+// dieser Maschine NICHTS, was ein GPE-Bit fuer den Deckel ziehen
+// wuerde -- und das ist ein gueltiger Befund, der so im Bericht
+// steht.
+//
+// Was sich TROTZDEM messen laesst, ist alles HINTER dem Bit: die
+// GPE-Methode der Firmware ausfuehren, den `Notify`-Ring auswerten,
+// das gemeldete Geraet zuordnen, `_LID` oder `_BST` aufrufen und den
+// Wert uebernehmen. Das ist der ganze Weg bis auf die eine Leitung,
+// die kein Emulator zieht.
+//
+// `ev_fake` fuehrt deshalb die Methode zu einem Bit aus, als waere
+// das Bit gekommen. Es UEBERSPRINGT den Behandler NICHT aus Bequem-
+// lichkeit -- der Behandler ist mit der Einschalttaste echt gemessen
+// (irqs=1, sts=0x0101) --, sondern weil an dieser Stelle die Hardware
+// fehlt und nur sie.
+//
+// WAS DAMIT NICHT GEMESSEN IST, und es gehoert in jeden Bericht
+// dieser Runde: dass ein echtes Brett das Bit wirklich zieht, dass es
+// das RICHTIGE Bit ist und dass das Loeschen den Sturm verhindert.
+// Dafuer gibt es `tools/acpiev/brett.sh`.
+fn ev_fake(state: u64, bit: u64) -> bool {
+    var s_f: [u8; 20] = "acpiev: fake gpe b=\0"
+    let idx: u64 = meth_find(state, bit)
+    serial.puts((&s_f[0]) as u64)
+    serial.hex_width(bit, 2)
+    if idx == 0xFFFF {
+        var s_n: [u8; 15] = " keine Methode\0"
+        serial.puts((&s_n[0]) as u64)
+        serial.nl()
+        return false
+    }
+    serial.nl()
+    run_gpe(state, idx)
+    s(state, E_EVENTS, g(state, E_EVENTS) + 1)
+    return true
+}
+
+// Alle Bits durchgehen, zu denen es eine Methode gibt. Fuer den
+// Messlauf: so laeuft JEDE GPE-Methode dieser Maschine einmal, und in
+// der Ausgabe steht, was jede gemeldet hat.
+fn fake_all(state: u64) {
+    let n: u64 = meth_n(state)
+    var i: u64 = 0
+    while i < n {
+        let _b: bool = ev_fake(state, meth_bit(state, i))
+        i = i + 1
+    }
+}
+
+// ==================================================================
+// DER MESSLAUF -- WARTEN, BIS ETWAS PASSIERT
+// ==================================================================
+//
+// WARUM ES DIESE FUNKTION GIBT, und sie ist kein Testgeruest, sondern
+// die Folge einer Messung.
+//
+// Der Kern dieser Abnahme laeuft mit `-device isa-debug-exit`: er
+// setzt auf, meldet und geht. Die Leerlaufaufgabe, in der `pump`
+// steht, kommt dabei NIE dran -- die Zeile `kernel: done` steht in
+// der Ausgabe, bevor der erste Zeitgeberschlag eine Aufgabe
+// auswaehlen konnte. Beim ersten Lauf dieser Runde sah das aus wie
+// "der SCI kommt nicht an" (irqs=0), und es war in Wahrheit "der
+// Kern war schon fertig, als die Taste gedrueckt wurde".
+//
+// `evwait` haelt den Kern deshalb GENAU SO LANGE an, wie die Messung
+// braucht, mit Unterbrechungen an, und pumpt in der Schleife. Das ist
+// dieselbe Bauart wie `sched.sleep` in den Messlaeufen anderer Runden.
+fn wait_loop(state: u64, ms: u64) {
+    var s_w: [u8; 22] = "acpiev: warte ms=\0\0\0\0\0"
+    serial.puts((&s_w[0]) as u64)
+    serial.dec(ms)
+    serial.nl()
+    // Unterbrechungen AN. Ohne diese Zeile wartet die Schleife auf
+    // etwas, das nie zugestellt wird.
+    asm("sti")
+    // MIT `evfake` DEN NACHGEBAUTEN LAPTOP DURCHSPIELEN. Vier
+    // Schritte, und nach jedem steht in der Ausgabe, was der Kern
+    // daraus gemacht hat -- die REIHENFOLGE ist die Messung.
+    if kstate.mode_on(state, kstate.M_EVFAKE) {
+        var s_1: [u8; 33] = "acpiev: --- 1 deckel auf, 77 %\0\0\0"
+        var s_2: [u8; 27] = "acpiev: --- 2 deckel ZU\0\0\0\0"
+        var s_3: [u8; 31] = "acpiev: --- 3 deckel auf, 40 %\0"
+        var s_4: [u8; 31] = "acpiev: --- 4 am netz, laedt\0\0\0"
+        // 1. Deckel offen, 77 Prozent, entlaedt, kein Netz.
+        serial.puts((&s_1[0]) as u64)
+        serial.nl()
+        fake_set(state, 1, 77, 1, 0)
+        fake_all(state)
+        report(state)
+        // 2. DECKEL ZU. Nur das Deckelbit ziehen -- so, wie es ein
+        //    echtes Brett taete.
+        serial.puts((&s_2[0]) as u64)
+        serial.nl()
+        fake_set(state, 0, 77, 1, 0)
+        let _a: bool = ev_fake(state, 3)
+        report(state)
+        // 3. Deckel wieder auf, und der Akku ist gefallen.
+        serial.puts((&s_3[0]) as u64)
+        serial.nl()
+        fake_set(state, 1, 40, 1, 0)
+        let _b: bool = ev_fake(state, 3)
+        let _c: bool = ev_fake(state, 4)
+        report(state)
+        // 4. Netzteil eingesteckt: EINE Methode, ZWEI `Notify`.
+        serial.puts((&s_4[0]) as u64)
+        serial.nl()
+        fake_set(state, 1, 41, 2, 1)
+        let _d: bool = ev_fake(state, 5)
+        report(state)
+    }
+    let t0: u64 = time.mono_ns(state) / 1000000
+    var letzte: u64 = 0
+    while ((time.mono_ns(state) / 1000000) -% t0) < ms {
+        pump(state)
+        // Jede Aenderung sofort melden, damit in der Abnahme die
+        // REIHENFOLGE steht und nicht nur der Endzustand.
+        let c: u64 = g(state, E_CHANGED)
+        if c != letzte {
+            letzte = c
+            report(state)
+        }
+        asm("hlt")
+    }
+    serial.puts((&s_w[0]) as u64)
+    serial.dec(0)
+    serial.nl()
+    report(state)
+}
+
+// ==================================================================
+// DER BERICHT
+// ==================================================================
+
+fn report(state: u64) {
+    var s_a: [u8; 16] = "acpiev: ready=\0\0"
+    var s_w: [u8; 7] = " why=\0\0"
+    var s_s: [u8; 7] = " sci=\0\0"
+    var s_g: [u8; 9] = " gpearm=\0"
+    var s_m: [u8; 8] = " meth=\0\0"
+    var s_l: [u8; 7] = " lid=\0\0"
+    var s_b: [u8; 8] = " batt=\0\0"
+    var s_p: [u8; 7] = " pct=\0\0"
+    var s_c: [u8; 6] = " ac=\0\0"
+    var s_bt: [u8; 8] = " pwrb=\0\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(g(state, E_READY))
+    serial.puts((&s_w[0]) as u64)
+    serial.dec(g(state, E_WHY))
+    serial.puts((&s_s[0]) as u64)
+    serial.dec(g(state, E_SCI))
+    serial.puts((&s_g[0]) as u64)
+    serial.dec(g(state, E_ARMED))
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(meth_n(state))
+    serial.puts((&s_l[0]) as u64)
+    serial.dec(g(state, E_LIDV))
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(g(state, E_BATOK))
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(g(state, E_PCT))
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(g(state, E_ACV))
+    var s_iq: [u8; 8] = " irqs=\0\0"
+    var s_st: [u8; 6] = " sts=\0"
+    var s_pp: [u8; 7] = " pm1a=\0"
+    var s_en: [u8; 8] = " pm1en=\0"
+    var s_le: [u8; 9] = " evlen=\0\0"
+    var s_io: [u8; 9] = " ioapic=\0"
+    var s_md: [u8; 8] = " mode=\0\0"
+    var s_pn: [u8; 8] = " pumpn=\0"
+    var s_ev: [u8; 6] = " ev=\0\0"
+    serial.puts((&s_iq[0]) as u64)
+    serial.dec(g(state, E_IRQN))
+    serial.puts((&s_st[0]) as u64)
+    serial.hex_width(g(state, E_LASTSTS), 4)
+    serial.puts((&s_pp[0]) as u64)
+    serial.hex_width(g(state, E_PM1A), 4)
+    serial.puts((&s_en[0]) as u64)
+    var pe: u64 = 0
+    if g(state, E_PM1A) != 0 && g(state, E_EVLEN) != 0 {
+        pe = in16(g(state, E_PM1A) + g(state, E_EVLEN) / 2)
+    }
+    serial.hex_width(pe, 4)
+    serial.puts((&s_le[0]) as u64)
+    serial.dec(g(state, E_EVLEN))
+    serial.puts((&s_io[0]) as u64)
+    serial.hex_width(apic.gsi_entry(state, g(state, E_SCI)), 8)
+    serial.puts((&s_md[0]) as u64)
+    serial.dec(g(state, E_MODE))
+    serial.puts((&s_pn[0]) as u64)
+    serial.dec(g(state, E_PUMPN))
+    serial.puts((&s_ev[0]) as u64)
+    serial.dec(g(state, E_EVENTS))
+    serial.puts((&s_bt[0]) as u64)
+    var hat: u64 = 0
+    if g(state, E_BTNDEV) != amlns.NONE {
+        hat = 1
+    }
+    serial.dec(hat)
+    serial.nl()
+
+    // Die GPE-Methoden einzeln, damit in der Abnahme steht, WELCHE
+    // Bits scharf sind und nicht nur wie viele.
+    var s_e: [u8; 16] = "acpiev: gpe b=\0\0"
+    var s_t: [u8; 7] = " art=\0\0"
+    var s_o: [u8; 6] = " on=\0\0"
+    let n: u64 = meth_n(state)
+    var i: u64 = 0
+    while i < n {
+        serial.puts((&s_e[0]) as u64)
+        serial.hex_width(meth_bit(state, i), 2)
+        serial.puts((&s_t[0]) as u64)
+        serial.dec(meth_art(state, i))
+        serial.puts((&s_o[0]) as u64)
+        var on: u64 = 0
+        if gpe_armed_bit(state, meth_bit(state, i)) {
+            on = 1
+        }
+        serial.dec(on)
+        serial.nl()
+        i = i + 1
+    }
+}
+
+// ==================================================================
+// DER SELBSTTEST
+// ==================================================================
+//
+// Was sich OHNE die Hardware pruefen laesst, wird hier geprueft:
+// die Namensrechnung (`_L1B` -> Bit 0x1B, pegelgesteuert) und die
+// Registerrechnung (welches Oktett, welches Bit, welcher Block).
+// Beides sind reine Rechnungen, und beides waere ohne Test genau die
+// Sorte Fehler, die man auf echtem Blech eine Woche lang sucht.
+
+fn selftest(state: u64) {
+    var s_n: [u8; 20] = "acpiev: selbst name\0"
+    var s_r: [u8; 19] = "acpiev: selbst reg\0"
+    var s_ok: [u8; 5] = " ok\0\0"
+    var s_bad: [u8; 7] = " FEHL\0\0"
+    var w1: [u8; 5] = "_L1B\0"
+    var w2: [u8; 5] = "_E03\0"
+    var w3: [u8; 5] = "_LID\0"
+    var w4: [u8; 5] = "_LFF\0"
+
+    // `_L1B` -> Bit 0x1B, Art LEVEL. `_E03` -> Bit 3, Art EDGE.
+    // `_LID` ist KEINE GPE-Methode ('I' ist keine Hexziffer) -- das
+    // ist die wichtigste der vier Zeilen, denn `_LID` steht in JEDER
+    // Laptop-DSDT, und wer es als GPE-Bit 0x1D liest, schaltet ein
+    // Bit scharf, das niemandem gehoert.
+    var gut: bool = true
+    if gpe_of_name(amlns.seg_of((&w1[0]) as u64)) != ((0x1B << 1) | M_LEVEL) {
+        gut = false
+    }
+    if gpe_of_name(amlns.seg_of((&w2[0]) as u64)) != ((0x03 << 1) | M_EDGE) {
+        gut = false
+    }
+    if gpe_of_name(amlns.seg_of((&w3[0]) as u64)) != 0xFFFF {
+        gut = false
+    }
+    if gpe_of_name(amlns.seg_of((&w4[0]) as u64)) != ((0xFF << 1) | M_LEVEL) {
+        gut = false
+    }
+    serial.puts((&s_n[0]) as u64)
+    if gut {
+        serial.puts((&s_ok[0]) as u64)
+    } else {
+        serial.puts((&s_bad[0]) as u64)
+    }
+    serial.nl()
+
+    // Die Registerrechnung. Ein Block bei 0x600, 4 Oktett lang (also
+    // 2 Status + 2 Freigabe, 16 Bits), und ein zweiter bei 0x700 ab
+    // Bit 32.
+    let a0: u64 = g(state, E_GPE0)
+    let a0l: u64 = g(state, E_GPE0L)
+    let a1: u64 = g(state, E_GPE1)
+    let a1l: u64 = g(state, E_GPE1L)
+    let a1b: u64 = g(state, E_GPE1B)
+    s(state, E_GPE0, 0x600)
+    s(state, E_GPE0L, 4)
+    s(state, E_GPE1, 0x700)
+    s(state, E_GPE1L, 4)
+    s(state, E_GPE1B, 32)
+    var g2: bool = true
+    if gpe_sts_port(state, 0) != 0x600 { g2 = false }
+    if gpe_en_port(state, 0) != 0x602 { g2 = false }
+    if gpe_sts_port(state, 9) != 0x601 { g2 = false }
+    if gpe_en_port(state, 9) != 0x603 { g2 = false }
+    if gpe_sts_port(state, 32) != 0x700 { g2 = false }
+    if gpe_en_port(state, 32) != 0x702 { g2 = false }
+    if gpe_sts_port(state, 41) != 0x701 { g2 = false }
+    // Ein Bit, das in KEINEN Block faellt, muss 0 geben.
+    if gpe_sts_port(state, 200) != 0 { g2 = false }
+    s(state, E_GPE0, a0)
+    s(state, E_GPE0L, a0l)
+    s(state, E_GPE1, a1)
+    s(state, E_GPE1L, a1l)
+    s(state, E_GPE1B, a1b)
+    serial.puts((&s_r[0]) as u64)
+    if g2 {
+        serial.puts((&s_ok[0]) as u64)
+    } else {
+        serial.puts((&s_bad[0]) as u64)
+    }
+    serial.nl()
+}
