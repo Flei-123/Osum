@@ -1,0 +1,686 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/arch/x86_64/vdev.fi -- Runde HV2, Stufe 3: VIRTUELLE GERAETE.
+//
+// DER UNTERSCHIED ZWISCHEN EINEM TREIBER UND EINEM GERAET, und warum
+// diese Datei noetig ist. Osum hat eine serielle Schnittstelle, einen
+// Unterbrechungsverteiler und einen Zeitgeber -- als TREIBER. Ein
+// Treiber redet mit einem Geraet: er schreibt in dessen Register und
+// liest, was dabei herauskommt. Ein GERAET ist die andere Seite: es
+// NIMMT ein Schreiben entgegen und ANTWORTET auf ein Lesen. Der Bericht
+// der Runde K12 sagt das ausdruecklich -- "ein Treiber ist nicht ein
+// Geraet" -- und hier steht die andere Seite.
+//
+// Bis zur Runde K12 hatte ein Gast GENAU EINE Richtung: er durfte in
+// den Anschluss 0x3F8 schreiben, und der Wirt gab es weiter. Lesen
+// lieferte 0xFF, den offenen Bus. Das reicht fuer einen Gast, der nur
+// reden will, und fuer nichts sonst: ein Betriebssystem PRUEFT seine
+// Geraete, bevor es sie benutzt, und ein Geraet, das auf jede Frage
+// 0xFF sagt, gilt ihm als nicht vorhanden.
+//
+// DREI GERAETE STEHEN HIER, und zwar genau die drei, ohne die ein
+// x86-Betriebssystem nicht anfaengt:
+//
+//   1. DIE SERIELLE SCHNITTSTELLE (16550A, Anschluesse 0x3F8..0x3FF).
+//      Mit allen acht Registern und in BEIDEN Richtungen. Das ist die
+//      Konsole -- ohne sie sagt ein Gast nichts, und man sieht nicht,
+//      wie weit er gekommen ist.
+//   2. DER UNTERBRECHUNGSVERTEILER (zwei 8259A, 0x20/0x21 und
+//      0xA0/0xA1). Er nimmt die vierteilige Anfangsfolge entgegen,
+//      fuehrt Maske, Anforderung und Bedienung, und sagt auf Verlangen,
+//      welcher Vektor zu welcher Leitung gehoert.
+//   3. DER ZEITGEBER (8254, 0x40..0x43, dazu 0x61). Er nimmt das
+//      Steuerwort, fuehrt drei Kanaele und zaehlt herunter.
+//
+// WAS HIER NICHT STEHT: `virtio-blk` und `virtio-net`. Sie sind die
+// naechste Stufe und brauchen einen Bus (PCI), auf dem ein Gast sie
+// ueberhaupt finden kann. Der Bericht dieser Runde sagt, wo das steht.
+//
+// WO DER ZUSTAND LIEGT. Wie ueberall: in der uebergebenen Datenregion.
+// Jede Gastmaschine hat ihren eigenen Geraetesatz -- zwei Maschinen
+// teilen sich keinen Zeitgeber, so wenig wie zwei Rechner sich einen
+// teilen. Der Block je Maschine ist VD_BYTES gross und liegt in der
+// Seite dieser Runde.
+//
+// ARITHMETIK. Registerwerte und Bitmasken sind BITMUSTER: `+%`, `-%`,
+// `*%`. Die gepruefte Arithmetik bleibt den Zaehlern.
+
+import lib.kstate
+import serial
+
+export {
+    VD_OFF, VD_BYTES, VD_MAX,
+    reset, io_write, io_read, claims,
+    // die serielle Schnittstelle
+    UART_BASE, uart_lsr, uart_out_count,
+    // der Verteiler
+    PIC1_CMD, PIC1_DATA, PIC2_CMD, PIC2_DATA,
+    pic_imr, pic_base, pic_ready, pic_raise, pic_pending, pic_ack,
+    // der Zeitgeber
+    PIT_CH0, PIT_CTL, pit_count, pit_mode, pit_writes,
+    // Zaehler
+    reads, writes, unknown
+}
+
+// ------------------------------------------------------------ der Block
+//
+// Je Maschine ein Satz Geraete. Die Versaetze sind klein und dicht --
+// ein Geraet ist ein paar Oktette Zustand und nicht mehr.
+
+// 256 UND NICHT 128. Die Felder unten reichen bis 0xE0 (VD_NEED),
+// und ein Block von 128 Oktetten haette sie NICHT gefasst: der
+// Zeitgeber und die Zaehler einer Maschine haetten im Block der
+// naechsten gelegen. Gemerkt hat es diese Runde daran, dass ein Gast
+// auf Platz 5 lauter Nullen zurueckbekam, wo Register stehen sollten
+// -- und die Zusagen darueber wurden rot, statt stillzuschweigen.
+// Acht Maschinen zu 256 Oktetten sind 2048 und passen in die Seite.
+const VD_BYTES: u64 = 256
+const VD_MAX: u64 = 8
+
+// --- die serielle Schnittstelle, 0x00..0x2F
+const D_RBR: u64 = 0x00 // das Oktett, das der Gast lesen wuerde
+const D_IER: u64 = 0x08 // welche Unterbrechungen er will
+const D_FCR: u64 = 0x10 // was er ueber die Warteschlangen gesagt hat
+const D_LCR: u64 = 0x18 // Wortlaenge, Halt, und DAS DLAB-BIT
+const D_MCR: u64 = 0x20 // Steuerleitungen, darunter die Schleife
+const D_DLL: u64 = 0x28 // Teiler, unteres Oktett
+const D_DLM: u64 = 0x30 // Teiler, oberes Oktett
+const D_SCR: u64 = 0x38 // das Kratzregister -- reiner Speicher
+const D_HAVE: u64 = 0x40 // liegt ein Oktett zum Lesen bereit?
+const D_OUT: u64 = 0x48 // wie viele Oktette der Gast ausgegeben hat
+
+// --- der Verteiler, 0x50..0x7F. Zwei Bausteine, je vier Werte.
+const D_P1_IMR: u64 = 0x50
+const D_P1_IRR: u64 = 0x58
+const D_P1_ISR: u64 = 0x60
+const D_P1_BASE: u64 = 0x68 // die Vektorbasis aus ICW2
+const D_P1_STEP: u64 = 0x70 // wie weit die Anfangsfolge ist
+const D_P2_IMR: u64 = 0x78
+const D_P2_BASE: u64 = 0x80
+const D_P2_STEP: u64 = 0x88
+const D_P1_READ: u64 = 0x90 // 0 = Lesen liefert IRR, 1 = ISR
+const D_P1_ICW4: u64 = 0x98 // was ICW4 gesagt hat
+
+// --- der Zeitgeber, 0xA0..0xBF
+const D_PIT_C0: u64 = 0xA0 // der Zaehler des Kanals 0
+const D_PIT_M0: u64 = 0xA8 // sein Modus
+const D_PIT_LAT: u64 = 0xB0 // gehaltener Wert / halbes Schreiben
+const D_PIT_HI: u64 = 0xB8 // wartet der Kanal auf das obere Oktett?
+const D_PIT_W: u64 = 0xC0 // wie oft der Gast geschrieben hat
+const D_P61: u64 = 0xC8 // der Anschluss 0x61
+
+// --- Zaehler, 0xD0..
+const D_READS: u64 = 0xD0
+const D_WRITES: u64 = 0xD8
+const D_UNKNOWN: u64 = 0xE0
+
+// VD_BYTES muss alles davon fassen.
+const VD_NEED: u64 = 0xE8
+
+// Wo der Geraetesatz einer Maschine liegt. `base` ist der Anfang des
+// Bereichs dieser Runde in `kdata`; `hv.fi` gibt ihn herein, damit
+// diese Datei nicht wissen muss, wo sie liegt.
+const VD_OFF: u64 = 0
+
+fn at(base: u64, i: u64, f: u64) -> u64 {
+    return base +% i *% VD_BYTES +% f
+}
+
+fn g(state: u64, base: u64, i: u64, f: u64) -> u64 {
+    return kstate.get(state, at(base, i, f))
+}
+
+fn s(state: u64, base: u64, i: u64, f: u64, v: u64) {
+    kstate.set(state, at(base, i, f), v)
+}
+
+fn bump(state: u64, base: u64, i: u64, f: u64) {
+    s(state, base, i, f, g(state, base, i, f) +% 1)
+}
+
+// ------------------------------------------------------- die Anschluesse
+
+const UART_BASE: u64 = 0x3F8
+const UART_TOP: u64 = 0x3FF
+const PIC1_CMD: u64 = 0x20
+const PIC1_DATA: u64 = 0x21
+const PIC2_CMD: u64 = 0xA0
+const PIC2_DATA: u64 = 0xA1
+const PIT_CH0: u64 = 0x40
+const PIT_CTL: u64 = 0x43
+const PORT_61: u64 = 0x61
+
+// Gehoert dieser Anschluss einem Geraet dieser Runde? Alles andere
+// bleibt der offene Bus, wie in der Runde K12 -- ein Wirt, der auf
+// JEDEN Anschluss etwas erfindet, macht einem Gast Geraete vor, die
+// er nicht bedienen kann.
+fn claims(port: u64) -> bool {
+    if port >= UART_BASE && port <= UART_TOP {
+        return true
+    }
+    if port == PIC1_CMD || port == PIC1_DATA {
+        return true
+    }
+    if port == PIC2_CMD || port == PIC2_DATA {
+        return true
+    }
+    if port >= PIT_CH0 && port <= PIT_CTL {
+        return true
+    }
+    if port == PORT_61 {
+        return true
+    }
+    return false
+}
+
+// Ein Geraetesatz beim Anlegen einer Maschine. DIE VORGABEN SIND NICHT
+// NULL -- ein Gast, der eine frisch genullte serielle Schnittstelle
+// vorfaende, saehe ein Geraet, das nie sendebereit ist, und wartete
+// ewig. Deshalb steht hier, was ein echter Baustein nach dem Einschalten
+// meldet.
+fn reset(state: u64, base: u64, i: u64) {
+    if i >= VD_MAX {
+        return
+    }
+    var f: u64 = 0
+    while f < VD_BYTES {
+        kstate.set(state, at(base, i, f), 0)
+        f = f +% 8
+    }
+    // Die serielle Schnittstelle: Teiler 1 (115200), acht Bit, keine
+    // Halteleitung. Das ist der Zustand, in dem ein Ladeprogramm sie
+    // ueblicherweise hinterlaesst.
+    s(state, base, i, D_DLL, 1)
+    s(state, base, i, D_LCR, 3)
+    // Der Verteiler faengt mit allem maskiert an.
+    s(state, base, i, D_P1_IMR, 0xFF)
+    s(state, base, i, D_P2_IMR, 0xFF)
+    // Der Zeitgeber laeuft noch nicht.
+    s(state, base, i, D_PIT_C0, 0)
+}
+
+// ==================================================================
+//                 1. DIE SERIELLE SCHNITTSTELLE (16550A)
+// ==================================================================
+//
+// ACHT REGISTER, und welches man sieht, haengt an EINEM Bit: DLAB
+// (Bit 7 des Zeilensteuerregisters). Steht es, sind die beiden ersten
+// Register die zwei Haelften des Teilers; steht es nicht, sind sie
+// Daten und Unterbrechungsfreigabe. Ein Treiber, der den Teiler setzt,
+// schaltet DLAB an, schreibt zwei Oktette und schaltet es wieder aus --
+// und eine Emulation, die das nicht mitmacht, bekommt seine Datenoktette
+// in den Teiler und gibt nie etwas aus.
+//
+// DAS WICHTIGSTE REGISTER IST DAS ZEILENZUSTANDSREGISTER (LSR, +5).
+// Linux' Treiber prueft dort zwei Bits, bevor er ein Oktett abschickt:
+//
+//   THRE (0x20)  das Halteregister ist leer -- schreib ruhig
+//   TEMT (0x40)  auch das Schieberegister ist leer -- alles ist raus
+//
+// Dieser Wirt gibt jedes Oktett SOFORT weiter. Also sind beide Bits
+// IMMER gesetzt, und der Ruhewert ist 0x60. Waere er 0, wartete der
+// Treiber ewig auf Sendebereitschaft.
+//
+// UND EIN WERT IST TOEDLICH: 0xFF. Linux' `serial8250_do_startup` hat
+// eine ausdrueckliche Sicherheitspruefung -- liest es dort 0xFF, haelt
+// es den Anschluss fuer nicht vorhanden und gibt ihn auf ("LSR safety
+// check engaged!"). Genau das haette die Runde K12 geliefert, denn dort
+// war jedes Lesen der offene Bus. Ein Gast haette also geredet und
+// Linux haette geschwiegen.
+const LSR_DR: u64 = 0x01 // ein Oktett liegt bereit
+const LSR_THRE: u64 = 0x20
+const LSR_TEMT: u64 = 0x40
+const LCR_DLAB: u64 = 0x80
+const MCR_LOOP: u64 = 0x10 // die Schleife: was hinausgeht, kommt herein
+
+fn uart_lsr(state: u64, base: u64, i: u64) -> u64 {
+    var v: u64 = LSR_THRE | LSR_TEMT
+    if g(state, base, i, D_HAVE) != 0 {
+        v = v | LSR_DR
+    }
+    return v
+}
+
+fn uart_out_count(state: u64, base: u64, i: u64) -> u64 {
+    return g(state, base, i, D_OUT)
+}
+
+fn dlab(state: u64, base: u64, i: u64) -> bool {
+    return (g(state, base, i, D_LCR) & LCR_DLAB) != 0
+}
+
+// Ein Oktett, das der Gast hinausschreibt. Im Schleifenbetrieb kommt es
+// nicht auf die Konsole, sondern in sein eigenes Leseregister zurueck --
+// und das ist kein Spielkram: Linux' Erkennung benutzt die Schleife, um
+// die Tiefe der Warteschlange zu messen.
+fn uart_tx(state: u64, base: u64, i: u64, ch: u64, mark: u64) {
+    if (g(state, base, i, D_MCR) & MCR_LOOP) != 0 {
+        s(state, base, i, D_RBR, ch & 0xFF)
+        s(state, base, i, D_HAVE, 1)
+        return
+    }
+    bump(state, base, i, D_OUT)
+    if mark != 0 && g(state, base, i, D_OUT) == 1 {
+        serial.puts(mark)
+    }
+    if (ch & 0xFF) == 10 {
+        serial.nl()
+        return
+    }
+    serial.put((ch & 0xFF) as u8)
+}
+
+// ==================================================================
+//                 2. DER UNTERBRECHUNGSVERTEILER (8259A)
+// ==================================================================
+//
+// ZWEI BAUSTEINE, und der zweite haengt an der dritten Leitung des
+// ersten. Das ist seit 1982 so und jedes x86-Betriebssystem weiss es.
+//
+// DIE ANFANGSFOLGE IST EINE ZUSTANDSMASCHINE, und das ist der Teil, den
+// eine Emulation richtig machen muss. Ein Schreiben auf den Befehls-
+// anschluss mit Bit 4 gesetzt ist ICW1 und setzt die Maschine JEDERZEIT
+// zurueck. Danach bedeuten die naechsten Schreibzugriffe auf den
+// Datenanschluss der Reihe nach ICW2 (die Vektorbasis), ICW3 (wo der
+// zweite Baustein haengt) und ICW4 (der 8086-Modus). Erst danach ist
+// ein Schreiben auf den Datenanschluss wieder die Maske.
+//
+// DIE VEKTORBASIS DARF NICHT FEST VERDRAHTET WERDEN. Die Lehrbuecher
+// sagen 0x20 und 0x28, und ein heutiger Linux-Kern nimmt 0x30 und 0x38
+// (`ISA_IRQ_VECTOR`). Eine Emulation, die 0x20 annimmt, stellt jede
+// Unterbrechung unter der falschen Nummer zu. Deshalb kommt die Basis
+// IMMER aus dem, was der Gast in ICW2 geschrieben hat.
+const ICW1_MARK: u64 = 0x10
+const OCW3_MARK: u64 = 0x08
+const EOI: u64 = 0x20
+
+fn pic_imr(state: u64, base: u64, i: u64, zweiter: bool) -> u64 {
+    if zweiter {
+        return g(state, base, i, D_P2_IMR)
+    }
+    return g(state, base, i, D_P1_IMR)
+}
+
+fn pic_base(state: u64, base: u64, i: u64, zweiter: bool) -> u64 {
+    if zweiter {
+        return g(state, base, i, D_P2_BASE)
+    }
+    return g(state, base, i, D_P1_BASE)
+}
+
+// Hat der Gast den Verteiler vollstaendig aufgesetzt? Das ist die
+// Zusage, an der man sieht, ob die Zustandsmaschine wirklich gelaufen
+// ist -- eine Basis allein koennte auch ein Zufall sein.
+fn pic_ready(state: u64, base: u64, i: u64) -> bool {
+    return g(state, base, i, D_P1_STEP) == 0
+        && g(state, base, i, D_P1_BASE) != 0
+        && g(state, base, i, D_P1_ICW4) != 0
+}
+
+// Eine Leitung meldet sich. Der Verteiler merkt sie sich in der
+// Anforderung; ob sie zugestellt wird, entscheidet die Maske.
+fn pic_raise(state: u64, base: u64, i: u64, irq: u64) {
+    if irq >= 8 {
+        return
+    }
+    s(state, base, i, D_P1_IRR,
+        g(state, base, i, D_P1_IRR) | (1 << irq))
+}
+
+// Welcher Vektor waere jetzt zuzustellen? 0 heisst: keiner. Die
+// niedrigste Leitung gewinnt -- so herum entscheidet der Baustein.
+fn pic_pending(state: u64, base: u64, i: u64) -> u64 {
+    let irr: u64 = g(state, base, i, D_P1_IRR)
+    let imr: u64 = g(state, base, i, D_P1_IMR)
+    let offen: u64 = irr & (0xFF ^ imr)
+    if offen == 0 {
+        return 0
+    }
+    var n: u64 = 0
+    while n < 8 {
+        if (offen & (1 << n)) != 0 {
+            return g(state, base, i, D_P1_BASE) +% n
+        }
+        n = n +% 1
+    }
+    return 0
+}
+
+// Zugestellt: aus der Anforderung in die Bedienung.
+fn pic_ack(state: u64, base: u64, i: u64, irq: u64) {
+    if irq >= 8 {
+        return
+    }
+    s(state, base, i, D_P1_IRR,
+        g(state, base, i, D_P1_IRR) & (0xFF ^ (1 << irq)))
+    s(state, base, i, D_P1_ISR,
+        g(state, base, i, D_P1_ISR) | (1 << irq))
+}
+
+fn pic_write(state: u64, base: u64, i: u64, port: u64, v: u64) {
+    let zweiter: bool = port == PIC2_CMD || port == PIC2_DATA
+    let cmd: bool = port == PIC1_CMD || port == PIC2_CMD
+    if cmd {
+        if (v & ICW1_MARK) != 0 {
+            // ICW1: die Folge faengt an. Ein echter Baustein loescht
+            // dabei die Maske -- deshalb maskiert Linux VORHER alles
+            // und stellt es HINTERHER wieder her.
+            if zweiter {
+                s(state, base, i, D_P2_STEP, 1)
+                s(state, base, i, D_P2_IMR, 0)
+            } else {
+                s(state, base, i, D_P1_STEP, 1)
+                s(state, base, i, D_P1_IMR, 0)
+                s(state, base, i, D_P1_ISR, 0)
+                s(state, base, i, D_P1_IRR, 0)
+                s(state, base, i, D_P1_READ, 0)
+            }
+            return
+        }
+        if (v & OCW3_MARK) != 0 {
+            // OCW3: ab jetzt liefert ein Lesen IRR oder ISR.
+            if !zweiter {
+                s(state, base, i, D_P1_READ, v & 1)
+            }
+            return
+        }
+        if (v & 0xF8) == EOI || v == EOI {
+            // Ende der Bedienung: das oberste Bit der Bedienung faellt.
+            if !zweiter {
+                s(state, base, i, D_P1_ISR, 0)
+            }
+            return
+        }
+        return
+    }
+    // Der Datenanschluss: entweder ein Schritt der Folge oder die Maske.
+    var step: u64 = g(state, base, i, D_P1_STEP)
+    if zweiter {
+        step = g(state, base, i, D_P2_STEP)
+    }
+    if step == 0 {
+        if zweiter {
+            s(state, base, i, D_P2_IMR, v & 0xFF)
+        } else {
+            s(state, base, i, D_P1_IMR, v & 0xFF)
+        }
+        return
+    }
+    if step == 1 {
+        // ICW2: DIE VEKTORBASIS. Die unteren drei Bit sind Null.
+        if zweiter {
+            s(state, base, i, D_P2_BASE, v & 0xF8)
+            s(state, base, i, D_P2_STEP, 2)
+        } else {
+            s(state, base, i, D_P1_BASE, v & 0xF8)
+            s(state, base, i, D_P1_STEP, 2)
+        }
+        return
+    }
+    if step == 2 {
+        // ICW3: wo der zweite Baustein haengt. Der Wirt merkt es sich
+        // nicht weiter -- er hat nur eine Kaskade, und die ist fest.
+        if zweiter {
+            s(state, base, i, D_P2_STEP, 3)
+        } else {
+            s(state, base, i, D_P1_STEP, 3)
+        }
+        return
+    }
+    // ICW4: der 8086-Modus. Danach ist die Folge zu Ende.
+    if zweiter {
+        s(state, base, i, D_P2_STEP, 0)
+    } else {
+        s(state, base, i, D_P1_ICW4, v & 0xFF)
+        s(state, base, i, D_P1_STEP, 0)
+    }
+}
+
+fn pic_read(state: u64, base: u64, i: u64, port: u64) -> u64 {
+    if port == PIC1_DATA {
+        return g(state, base, i, D_P1_IMR)
+    }
+    if port == PIC2_DATA {
+        return g(state, base, i, D_P2_IMR)
+    }
+    if port == PIC1_CMD {
+        if g(state, base, i, D_P1_READ) != 0 {
+            return g(state, base, i, D_P1_ISR)
+        }
+        return g(state, base, i, D_P1_IRR)
+    }
+    return 0
+}
+
+// ==================================================================
+//                      3. DER ZEITGEBER (8254)
+// ==================================================================
+//
+// DREI KANAELE UND EIN STEUERWORT. Das Steuerwort (Anschluss 0x43) sagt,
+// welcher Kanal gemeint ist, ob ein Oktett oder zwei folgen, und in
+// welchem Modus er laufen soll. Dieser Wirt fuehrt den Kanal 0 wirklich
+// -- das ist der, an dem die Systemuhr haengt -- und nimmt die anderen
+// entgegen, ohne sie zu zaehlen.
+//
+// DAS ZWEITEILIGE SCHREIBEN IST DER PUNKT, an dem eine Emulation
+// stolpert. Bei der ueblichen Zugriffsart schreibt ein Treiber ZWEI
+// Oktette nacheinander in denselben Anschluss: erst das untere, dann
+// das obere. Wer beide als ganzen Wert nimmt, bekommt einen Zaehler,
+// der um den Faktor 256 falsch ist -- und eine Uhr, die um denselben
+// Faktor danebenliegt.
+fn pit_count(state: u64, base: u64, i: u64) -> u64 {
+    return g(state, base, i, D_PIT_C0)
+}
+
+fn pit_mode(state: u64, base: u64, i: u64) -> u64 {
+    return g(state, base, i, D_PIT_M0)
+}
+
+fn pit_writes(state: u64, base: u64, i: u64) -> u64 {
+    return g(state, base, i, D_PIT_W)
+}
+
+fn pit_write(state: u64, base: u64, i: u64, port: u64, v: u64) {
+    if port == PIT_CTL {
+        let kanal: u64 = (v >> 6) & 3
+        let modus: u64 = (v >> 1) & 7
+        if kanal == 0 {
+            s(state, base, i, D_PIT_M0, modus)
+            s(state, base, i, D_PIT_HI, 0)
+        }
+        return
+    }
+    if port == PIT_CH0 {
+        bump(state, base, i, D_PIT_W)
+        if g(state, base, i, D_PIT_HI) == 0 {
+            // Das untere Oktett. Es wird gehalten, bis das obere kommt.
+            s(state, base, i, D_PIT_LAT, v & 0xFF)
+            s(state, base, i, D_PIT_HI, 1)
+        } else {
+            s(state, base, i, D_PIT_C0,
+                g(state, base, i, D_PIT_LAT) | ((v & 0xFF) << 8))
+            s(state, base, i, D_PIT_HI, 0)
+        }
+    }
+}
+
+fn pit_read(state: u64, base: u64, i: u64, port: u64) -> u64 {
+    if port == PIT_CH0 {
+        // Ein Zeitgeber, der stillsteht, ist keiner: jedes Lesen
+        // zaehlt ihn herunter, damit ein Gast, der auf einen
+        // Durchlauf wartet, ihn auch bekommt.
+        let c: u64 = g(state, base, i, D_PIT_C0)
+        if c > 0 {
+            s(state, base, i, D_PIT_C0, c -% 1)
+        }
+        if g(state, base, i, D_PIT_HI) == 0 {
+            s(state, base, i, D_PIT_HI, 1)
+            return c & 0xFF
+        }
+        s(state, base, i, D_PIT_HI, 0)
+        return (c >> 8) & 0xFF
+    }
+    return 0
+}
+
+// ==================================================================
+//                    DER EINE WEG HINEIN UND HINAUS
+// ==================================================================
+//
+// `hv.fi` ruft genau diese zwei Funktionen. Alles davor -- welcher
+// Anschluss, welche Breite -- steht im Austrittsgrund und wird dort
+// ausgewertet.
+
+fn io_write(state: u64, base: u64, i: u64, port: u64, v: u64, mark: u64) {
+    if i >= VD_MAX {
+        return
+    }
+    bump(state, base, i, D_WRITES)
+    if port >= UART_BASE && port <= UART_TOP {
+        let r: u64 = port -% UART_BASE
+        if r == 0 {
+            if dlab(state, base, i) {
+                s(state, base, i, D_DLL, v & 0xFF)
+            } else {
+                uart_tx(state, base, i, v, mark)
+            }
+            return
+        }
+        if r == 1 {
+            if dlab(state, base, i) {
+                s(state, base, i, D_DLM, v & 0xFF)
+            } else {
+                s(state, base, i, D_IER, v & 0xFF)
+            }
+            return
+        }
+        if r == 2 {
+            s(state, base, i, D_FCR, v & 0xFF)
+            return
+        }
+        if r == 3 {
+            s(state, base, i, D_LCR, v & 0xFF)
+            return
+        }
+        if r == 4 {
+            s(state, base, i, D_MCR, v & 0xFF)
+            return
+        }
+        if r == 7 {
+            s(state, base, i, D_SCR, v & 0xFF)
+            return
+        }
+        // LSR und MSR sind nur zu lesen. Ein Schreiben darauf ist
+        // kein Fehler -- es tut nur nichts.
+        return
+    }
+    if port == PIC1_CMD || port == PIC1_DATA
+        || port == PIC2_CMD || port == PIC2_DATA {
+        pic_write(state, base, i, port, v)
+        return
+    }
+    if port >= PIT_CH0 && port <= PIT_CTL {
+        pit_write(state, base, i, port, v)
+        return
+    }
+    if port == PORT_61 {
+        s(state, base, i, D_P61, v & 0xFF)
+        return
+    }
+    bump(state, base, i, D_UNKNOWN)
+}
+
+fn io_read(state: u64, base: u64, i: u64, port: u64) -> u64 {
+    if i >= VD_MAX {
+        return 0xFF
+    }
+    bump(state, base, i, D_READS)
+    if port >= UART_BASE && port <= UART_TOP {
+        let r: u64 = port -% UART_BASE
+        if r == 0 {
+            if dlab(state, base, i) {
+                return g(state, base, i, D_DLL)
+            }
+            s(state, base, i, D_HAVE, 0)
+            return g(state, base, i, D_RBR)
+        }
+        if r == 1 {
+            if dlab(state, base, i) {
+                return g(state, base, i, D_DLM)
+            }
+            return g(state, base, i, D_IER)
+        }
+        if r == 2 {
+            // Das Kennungsregister. Die oberen zwei Bit sagen, dass
+            // die Warteschlangen eingeschaltet sind -- und es darf
+            // NIE 0 liefern, sonst haelt Linux' Erkennung den
+            // Baustein fuer einen aelteren ohne Warteschlange.
+            var v: u64 = 0x01 // Bit 0 = KEINE Unterbrechung offen
+            if (g(state, base, i, D_FCR) & 1) != 0 {
+                v = v | 0xC0
+            }
+            return v
+        }
+        if r == 3 {
+            return g(state, base, i, D_LCR)
+        }
+        if r == 4 {
+            return g(state, base, i, D_MCR)
+        }
+        if r == 5 {
+            return uart_lsr(state, base, i)
+        }
+        if r == 6 {
+            // Die Zustandsleitungen der Gegenstelle. Im Schleifen-
+            // betrieb spiegeln sie, was das Steuerregister sagt;
+            // sonst ist alles da: bereit, verbunden, sendet.
+            if (g(state, base, i, D_MCR) & MCR_LOOP) != 0 {
+                let m: u64 = g(state, base, i, D_MCR)
+                var v: u64 = 0
+                if (m & 1) != 0 {
+                    v = v | 0x20 // DTR -> DSR
+                }
+                if (m & 2) != 0 {
+                    v = v | 0x10 // RTS -> CTS
+                }
+                if (m & 4) != 0 {
+                    v = v | 0x40
+                }
+                if (m & 8) != 0 {
+                    v = v | 0x80
+                }
+                return v
+            }
+            return 0xB0 // DSR, CTS und Traeger stehen
+        }
+        return g(state, base, i, D_SCR)
+    }
+    if port == PIC1_CMD || port == PIC1_DATA
+        || port == PIC2_CMD || port == PIC2_DATA {
+        return pic_read(state, base, i, port)
+    }
+    if port >= PIT_CH0 && port <= PIT_CTL {
+        return pit_read(state, base, i, port)
+    }
+    if port == PORT_61 {
+        // Bit 4 kippt bei jedem Lesen. Ein Gast, der darauf wartet,
+        // haengt sonst fuer immer -- und genau das tut Linux'
+        // Zeitmessung ueber den Lautsprecheranschluss.
+        let v: u64 = g(state, base, i, D_P61)
+        s(state, base, i, D_P61, v ^ 0x10)
+        return v
+    }
+    bump(state, base, i, D_UNKNOWN)
+    return 0xFF
+}
+
+fn reads(state: u64, base: u64, i: u64) -> u64 {
+    return g(state, base, i, D_READS)
+}
+
+fn writes(state: u64, base: u64, i: u64) -> u64 {
+    return g(state, base, i, D_WRITES)
+}
+
+fn unknown(state: u64, base: u64, i: u64) -> u64 {
+    return g(state, base, i, D_UNKNOWN)
+}

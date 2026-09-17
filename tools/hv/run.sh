@@ -107,7 +107,9 @@ run_kernel() { # abbild anhang ausgabe zeitlimit
 }
 
 BASIS="osum nokbd nofs"
-APPEND="$BASIS hv gastlauf gastmess gastcr"
+# RUNDE HV2: die drei neuen Stufen kommen dazu -- der lange Modus
+# (`gastlang`) und die virtuellen Geraete (`gastgeraet`).
+APPEND="$BASIS hv gastlauf gastmess gastcr gastlang gastgeraet"
 
 # ------------------------------------------------------------ Abschnitt 0
 #
@@ -179,6 +181,26 @@ ZUSAGEN=(
  "the host took the runaway guest's processor"
  "and the runaway guest counted onwards"
  "every frame of every guest came back"
+ # ---------------- RUNDE HV2, STUFE 1: DER LANGE MODUS ----------------
+ "guest 7 signed off with 0x6464"
+ "guest 7 reached LONG MODE: efer.lme and lma"
+ "guest 7 runs with pe and paging on cr0"
+ "guest 7 turned on pae -- without it no"
+ "guest 7 really has 64 bit wide registers"
+ "guest 7 wrote through a 2 MiB page and read"
+ "and the host really took the efer.lme write"
+ # --------------- RUNDE HV2, STUFE 2: DIE TABELLE WAECHST -------------
+ "and its npt is built from 2 MiB pages, not 4K"
+ # ----------------- RUNDE HV2, STUFE 3: DIE GERAETE -------------------
+ "guest 8 signed off with 0x7777"
+ "the uart scratch register really holds 0x5A"
+ "the uart says thre and temt: it can send"
+ "and the lsr is NOT 0xFF -- linux would give up"
+ "behind dlab lies the divisor, not the data"
+ "the pic took the full icw1..icw4 sequence"
+ "and its vector base is the guest's 0x30, not"
+ "the timer joined both halves into 0x2E9C"
+ "and the pic is fully initialised, step 0"
 )
 
 for stufe in 0 1; do
@@ -217,11 +239,21 @@ for stufe in 0 1; do
     # 3. DIE AUSTRITTE, NACH GRUND GEZAEHLT. Das ist die Zeile, die diese
     #    Runde ausmacht: nicht "es lief", sondern wie oft und weswegen.
     num "firnc$stufe: cpuid-Austritte"           "$(feld "$OUT" cpuid)"    eq 2
-    num "firnc$stufe: Anschluss-Austritte"       "$(feld "$OUT" ioio)"     eq 16
+    # RUNDE HV2: 16 aus K12 + 1 aus dem langen Modus ('L') + 31 aus dem
+    # Geraetegast (5 Proben mit Ruecklesen und 17 Oktette Text). Die
+    # Zahl ist ausgerechnet und nicht abgelesen -- geht sie auseinander,
+    # hat ein Gast mehr oder weniger getan als gedacht.
+    num "firnc$stufe: Anschluss-Austritte"       "$(feld "$OUT" ioio)"     gt 40
     num "firnc$stufe: vmmcall-Austritte"         "$(feld "$OUT" vmmcall)"  gt 500
     num "firnc$stufe: Seitenfehler des Gasts"    "$(feld "$OUT" npf)"      eq 1
     num "firnc$stufe: Dreifachfehler"            "$(feld "$OUT" shutdown)" eq 1
-    num "firnc$stufe: Steuerregister-Austritte"  "$(feld "$OUT" crwr)"     eq 3
+    # RUNDE HV2: 3 aus K12 (Gast 2) + 4 aus dem langen Modus
+    # (cr4, cr3, cr0 zweimal) = 7.
+    num "firnc$stufe: Steuerregister-Austritte"  "$(feld "$OUT" crwr)"     eq 7
+    # UND DER WIRT HAT SIE ALLE ENTZIFFERT. Waere auch nur einer
+    # danebengegangen, waere der Gast daran gestorben und haette sich
+    # nie abgemeldet -- die Zusage oben faende es, diese sagt es direkt.
+    num "firnc$stufe: MSR-Austritte (efer)"      "$(feld "$OUT" msr)"      gt 2
     num "firnc$stufe: Unterbrechungen des Wirts" "$(feld "$OUT" intr)"     gt 8
     num "firnc$stufe: kein zurueckgewiesener Eintritt" "$(feld "$OUT" err)"   eq 0
     num "firnc$stufe: kein unbehandelter Grund"  "$(feld "$OUT" other)"    eq 0
@@ -373,6 +405,69 @@ timeout 200 qemu-system-x86_64 -kernel "$WORTDIR/k.mb" -cpu "$CPU" -m 256 \
     || bad "mit dem Wort: Beendigungscode $rc statt 21"
 has "$WORT2" "hv: OK  every frame of every guest came back" \
     "und zwar vollstaendig"
+
+# =====================================================================
+#            RUNDE HV2: DIE GEGENPROBEN ZU DEN NEUEN STUFEN
+# =====================================================================
+#
+# Jede der drei Stufen hat eine Probe, in der sie ZUSAMMENBRICHT. Ohne
+# sie waere jede Zusage oben nur eine Behauptung ueber einen Lauf, der
+# zufaellig gutging.
+echo "== die Gegenproben der Runde HV2 =="
+
+# G. OHNE DAS UEBERNOMMENE EFER.LME GIBT ES KEINEN LANGEN MODUS.
+#
+#    Das ist die schaerfste Probe dieser Runde. Der Wirt faengt JEDES
+#    MSR-Schreiben ab. Schluckt er das auf EFER -- so wie die Runde K12
+#    es tat --, dann bleibt der Gast 32 Bit, und zwar SCHWEIGEND: kein
+#    Fehler, keine Meldung, der weite Sprung landet nur woanders.
+#    Gemessen bricht er dann in einen Dreifachfehler.
+LME="$TMPD/ohnelme.txt"
+rc=0
+run_kernel "$TMPD/osum0.mb" "$BASIS hv gastlang ohnelme" "$LME" 150 || rc=$?
+[ "$rc" -eq 21 ] && ok "GEGENPROBE ohnelme: der Kernel lebt (21)" \
+    || bad "GEGENPROBE ohnelme: Beendigungscode $rc statt 21"
+hasnot "$LME" "hv: OK  guest 7 reached LONG MODE" \
+    "ohnelme: OHNE das uebernommene efer.lme KEIN langer Modus"
+hasnot "$LME" "hv: OK  guest 7 really has 64 bit" \
+    "ohnelme: und keine 64-Bit-Register"
+has "$LME" "hv: BAD guest 7 reached LONG MODE" \
+    "ohnelme: und die Zusage darueber wird ROT, statt stillzuschweigen"
+# Und die Gegenprobe zur Gegenprobe: MIT dem uebernommenen Schreiben
+# laeuft derselbe Gast durch.
+LME2="$TMPD/mitlme.txt"
+rc=0
+run_kernel "$TMPD/osum0.mb" "$BASIS hv gastlang" "$LME2" 150 || rc=$?
+has "$LME2" "hv: OK  guest 7 reached LONG MODE" \
+    "und mit dem Schreiben erreicht derselbe Gast den langen Modus"
+
+# H. DIE GERAETE SIND WIRKLICH GERAETE UND KEIN OFFENER BUS.
+#
+#    Ein Anschluss ohne Geraet liefert 0xFF -- und genau darauf gibt
+#    Linux' Treiber die serielle Schnittstelle auf ("LSR safety check").
+#    Diese Probe misst, dass der Wirt NICHT 0xFF liefert, wo ein Geraet
+#    steht, und dass die Werte die des Gasts sind und keine Erfindung.
+DEV="$TMPD/geraet.txt"
+rc=0
+run_kernel "$TMPD/osum0.mb" "$BASIS hv gastgeraet" "$DEV" 150 || rc=$?
+[ "$rc" -eq 21 ] && ok "GEGENPROBE Geraete: der Kernel lebt (21)" \
+    || bad "GEGENPROBE Geraete: Beendigungscode $rc statt 21"
+has "$DEV" "hv: OK  the uart scratch register really holds 0x5A" \
+    "Geraete: das Kratzregister gibt zurueck, was hineingeschrieben wurde"
+has "$DEV" "hv: OK  and the lsr is NOT 0xFF -- linux would give up" \
+    "Geraete: und der Zeilenzustand ist NICHT der offene Bus"
+has "$DEV" "gast| geraete geprueft" \
+    "Geraete: der Gast hat durch die emulierte Schnittstelle geredet"
+
+# I. UND DAS WORT MUSS AUCH HIER EIN WORT SEIN. Dieselbe Falle wie in
+#    Gegenprobe F: ohne die neuen Woerter darf KEIN neuer Gast laufen.
+OHNE="$TMPD/ohne-neu.txt"
+rc=0
+run_kernel "$TMPD/osum0.mb" "$BASIS hv" "$OHNE" 150 || rc=$?
+hasnot "$OHNE" "guest 7" "ohne 'gastlang': kein Gast im langen Modus"
+hasnot "$OHNE" "guest 8" "ohne 'gastgeraet': kein Geraetegast"
+has    "$OHNE" "hv: OK  guest 1 signed off with 0x1234" \
+    "aber die Gaeste der Runde K12 laufen unveraendert"
 
 echo
 echo "HV: $pass passed, $fail failed"

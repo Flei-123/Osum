@@ -494,6 +494,189 @@ g_crash_start:
     .align 4
 g_crash_end:
 
+/* ------------------------------------------------ 7. der lange Modus
+ *
+ * RUNDE HV2, STUFE 1. Die Gaeste der Runde K12 laufen im Real- und im
+ * geschuetzten Modus. `EFER.LME`/`LMA` wurden durchgereicht, aber nie
+ * gemessen -- und ein Gast, der keine 64 Bit kann, ist fuer ein echtes
+ * Gastsystem nutzlos. Dieser Gast geht den ganzen Weg SELBST:
+ *
+ *   Realmodus -> geschuetzter Modus -> vierstufige Seitentabelle ->
+ *   PAE an -> EFER.LME an -> Paging an -> langer Sprung -> 64 Bit.
+ *
+ * Das ist genau der Weg, den jeder x86-Kern beim Start geht, und er
+ * haengt an vier Dingen, die alle stimmen muessen:
+ *
+ *   1. CR4.PAE MUSS vor CR0.PG gesetzt sein. Ohne PAE gibt es keinen
+ *      langen Modus, und der Prozessor nimmt EFER.LME schweigend nicht an.
+ *   2. Die Seitentabelle MUSS vierstufig sein (PML4 -> PDP -> PD -> Seite).
+ *      Dieser Gast benutzt 2-MiB-Seiten, spart also die letzte Stufe:
+ *      im PD steht das Bit PS, und der Eintrag zeigt unmittelbar auf
+ *      zwei Mebioctets.
+ *   3. EFER.LME wird ueber ein MSR-Schreiben gesetzt -- und dieser Wirt
+ *      faengt ALLE MSR-Zugriffe ab. Der Wirt muss das Schreiben also
+ *      wirklich ins Gast-EFER uebernehmen, sonst bleibt der Gast 32 Bit.
+ *      GENAU DAS misst diese Stufe: `EFER.LMA` wird vom PROZESSOR
+ *      gesetzt, nicht vom Gast -- der Gast kann es nur lesen.
+ *   4. Das Codesegment braucht das L-Bit. Mit L=1 und D=1 zugleich
+ *      wiese der Prozessor den Eintritt zurueck.
+ *
+ * SEIN SPEICHER (gastphysisch):
+ *   0x8000  PML4     ->  0x9000
+ *   0x9000  PDP      ->  0xA000
+ *   0xA000  PD       ->  zwei 2-MiB-Seiten, PS-Bit, identisch
+ *   0xB000  Stapel im langen Modus
+ *
+ * Er meldet ueber `vmmcall`: seine EFER (mit LMA), seine CR0, seine CR4,
+ * dass er wirklich 64-Bit-Register hat (ein Wert oberhalb von 32 Bit,
+ * den ein 32-Bit-Gast gar nicht bilden koennte), und einen Wert, den er
+ * durch eine 2-MiB-Seite geschrieben und zurueckgelesen hat.
+ */
+    .code16
+    .globl g_lm_start, g_lm_end
+g_lm_start:
+    cli
+    movw $0x0100, %ax
+    movw %ax, %ds                   /* DS.base = 0x1000: die eigene GDT */
+    xorw %ax, %ax
+    movw %ax, %ss
+    movw $0x0FF0, %sp
+
+    movw $(g_lm_gdtr - g_lm_start), %si
+    lgdtl (%si)
+
+    movl %cr0, %eax
+    orl  $1, %eax
+    movl %eax, %cr0                 /* geschuetzter Modus */
+    ljmpl $0x08, $(g_lm_32 - g_lm_start + 0x1000)
+
+    .code32
+g_lm_32:
+    movw $0x10, %ax
+    movw %ax, %ds
+    movw %ax, %es
+    movw %ax, %ss
+    movl $0xBFF0, %esp
+
+
+    /* Die drei Tabellenseiten 0x8000..0xB000 nullen. */
+    cld
+    movl $0x8000, %edi
+    xorl %eax, %eax
+    movl $3072, %ecx                /* 0x3000 Oktette / 4 */
+    rep stosl
+
+    /* PML4[0] -> PDP, PDP[0] -> PD. Vorhanden, schreibbar. */
+    movl $0x00009003, 0x8000
+    movl $0x0000A003, 0x9000
+
+    /* PD[0] und PD[1]: zwei 2-MiB-Seiten, identisch abgebildet.
+     * 0x83 = vorhanden | schreibbar | GROSSE SEITE. Damit deckt das
+     * Verzeichnis allein schon vier Mebioctets -- ohne letzte Stufe. */
+    movl $0x00000083, 0xA000
+    movl $0x00200083, 0xA008
+
+    /* CR4.PAE. OHNE DAS KEIN LANGER MODUS -- und der Prozessor sagt es
+     * nicht, er bleibt einfach 32 Bit. */
+    movl %cr4, %eax
+    orl  $0x20, %eax
+    movl %eax, %cr4
+
+    movl $0x8000, %eax
+    movl %eax, %cr3
+
+
+    /* EFER.LME. Das ist ein MSR-SCHREIBEN, und der Wirt faengt es ab --
+     * er muss es wirklich uebernehmen, sonst bleibt der Gast 32 Bit. */
+    movl $0xC0000080, %ecx
+    rdmsr
+    orl  $0x100, %eax               /* LME, Bit 8 */
+    wrmsr
+
+
+    /* Und jetzt Paging. In diesem Augenblick setzt DER PROZESSOR
+     * EFER.LMA -- der Gast hat darauf keinen Zugriff. */
+    movl %cr0, %eax
+    orl  $0x80000000, %eax
+    movl %eax, %cr0
+
+
+    /* Der lange Sprung in ein Segment mit L=1. Erst hier ist er
+     * wirklich 64 Bit. */
+    ljmpl $0x18, $(g_lm_64 - g_lm_start + 0x1000)
+
+    .code64
+g_lm_64:
+    movq $0x20, %rax
+    movw %ax, %ds
+    movw %ax, %es
+    movw %ax, %ss
+    movq $0xBFF0, %rsp
+
+    /* 1. EFER zurueckmelden -- mit LMA, das der Prozessor gesetzt hat. */
+    movl $0xC0000080, %ecx
+    rdmsr                           /* eax = die unteren 32 Bit */
+    movl %eax, %ebx
+    movl $10, %ecx
+    movl $1, %eax
+    vmmcall
+
+    /* 2. CR0 und CR4, damit nachlesbar ist, was wirklich an ist. */
+    movq %cr0, %rbx
+    movl $11, %ecx
+    movl $1, %eax
+    vmmcall
+    movq %cr4, %rbx
+    movl $12, %ecx
+    movl $1, %eax
+    vmmcall
+
+    /* 3. DER BEWEIS, DASS ES WIRKLICH 64 BIT SIND. Dieser Wert passt in
+     *    kein 32-Bit-Register; ein Gast im geschuetzten Modus koennte
+     *    ihn gar nicht erst bilden. Der Wirt liest die oberen 32 Bit. */
+    movabsq $0x1234567800000000, %rbx
+    shrq $32, %rbx
+    movl $13, %ecx
+    movl $1, %eax
+    vmmcall
+
+    /* 4. Durch eine 2-MiB-Seite schreiben und zurueckholen. Die Adresse
+     *    liegt jenseits der ersten zwei Mebioctets, also im ZWEITEN
+     *    Verzeichniseintrag -- sie kann nur ankommen, wenn die grosse
+     *    Seite wirklich uebersetzt. Der Wirt hat dort nichts abgebildet,
+     *    also legt er sie auf Zuruf unter (NPF). */
+    movq $0x00200000, %rdi
+    movl $0xC0FFEE64, %eax
+    movl %eax, (%rdi)
+    movl (%rdi), %ebx
+    movl $14, %ecx
+    movl $1, %eax
+    vmmcall
+
+    /* 5. Und ein Anschlusszugriff aus dem langen Modus. */
+    movw $0x03F8, %dx
+    movb $0x4C, %al                 /* 'L' */
+    outb %al, %dx
+
+    movl $0x6464, %ebx              /* "64" */
+    movl $2, %eax
+    vmmcall
+    hlt
+1:  jmp 1b
+
+    .align 8
+g_lm_gdt:
+    .quad 0x0000000000000000
+    .quad 0x00CF9A000000FFFF        /* 0x08  Code  32 Bit */
+    .quad 0x00CF92000000FFFF        /* 0x10  Daten 32 Bit */
+    .quad 0x00AF9A000000FFFF        /* 0x18  Code  64 Bit: L=1, D=0 */
+    .quad 0x00CF92000000FFFF        /* 0x20  Daten */
+g_lm_gdtr:
+    .word 5 * 8 - 1
+    .long g_lm_gdt - g_lm_start + 0x1000
+    .align 4
+g_lm_end:
+
 /* -------------------------------------------------------- 6. der Messgast
  *
  * Er tut NICHTS ausser austreten. Damit ist messbar, was ein Austritt
@@ -516,6 +699,148 @@ g_bench_start:
     jmp 1b
     .align 4
 g_bench_end:
+
+/* --------------------------------------------------- 8. der Geraetegast
+ *
+ * RUNDE HV2, STUFE 3. Die Gaeste bis hierher haben Geraete BENUTZT --
+ * dieser hier PRUEFT sie, und zwar so, wie ein Betriebssystem es tut:
+ * hineinschreiben, zurueklesen, und nur glauben, was zurueckkommt.
+ *
+ * Das ist der Unterschied, um den es in dieser Stufe geht. Ein Gast,
+ * der blind in 0x3F8 schreibt, merkt nicht, ob dort ein Geraet ist.
+ * Ein Betriebssystem schreibt erst ein Muster in ein Register, liest
+ * es zurueck, und haelt den Anschluss fuer leer, wenn es nicht
+ * wiederkommt. Genau diese Proben macht dieser Gast:
+ *
+ *   1. DAS KRATZREGISTER der seriellen Schnittstelle (0x3FF). Es hat
+ *      keine Wirkung -- es ist reiner Speicher, und genau deshalb
+ *      benutzt Linux es, um zu pruefen, ob ueberhaupt ein Baustein da
+ *      ist. Der Gast schreibt 0x5A und liest zurueck.
+ *   2. DAS ZEILENZUSTANDSREGISTER (0x3FD). Dort muessen die Bits
+ *      THRE und TEMT stehen (0x60), sonst waere der Anschluss nie
+ *      sendebereit. Und es darf NICHT 0xFF sein -- dann hielte Linux
+ *      ihn fuer defekt.
+ *   3. DAS TEILERLATCH hinter dem DLAB-Bit. Der Gast schaltet DLAB an,
+ *      schreibt einen Teiler, schaltet DLAB aus und prueft, dass das
+ *      Datenregister wieder Daten ist und nicht der Teiler.
+ *   4. DER UNTERBRECHUNGSVERTEILER. Der Gast faehrt die vollstaendige
+ *      vierteilige Anfangsfolge (ICW1..ICW4) mit der Vektorbasis 0x30
+ *      -- der, die ein heutiger Linux nimmt -- und liest danach die
+ *      Maske zurueck, die er geschrieben hat.
+ *   5. DER ZEITGEBER. Der Gast setzt den Kanal 0 mit einem
+ *      zweiteiligen Schreiben und liest den Zaehler zurueck.
+ *
+ * Jede dieser Zahlen geht per `vmmcall` an den Wirt, und jede einzelne
+ * wird in `tools/hv/run.sh` nachgelesen.
+ */
+    .code16
+    .globl g_dev_start, g_dev_end
+g_dev_start:
+    cli
+    xorw %ax, %ax
+    movw %ax, %ds
+    movw %ax, %es
+    movw %ax, %ss
+    movw $0x0FF0, %sp
+
+    /* --- 1. Das Kratzregister: schreiben und zurueklesen. --- */
+    movw $0x03FF, %dx
+    movb $0x5A, %al
+    outb %al, %dx
+    xorl %ebx, %ebx
+    inb %dx, %al
+    movb %al, %bl
+    movl $40, %ecx
+    movl $1, %eax
+    vmmcall
+
+    /* --- 2. Das Zeilenzustandsregister. --- */
+    movw $0x03FD, %dx
+    inb %dx, %al
+    movzbl %al, %ebx
+    movl $41, %ecx
+    movl $1, %eax
+    vmmcall
+
+    /* --- 3. DLAB: Teiler schreiben, zurueklesen, wieder ausschalten. */
+    movw $0x03FB, %dx
+    movb $0x83, %al                 /* DLAB an, 8N1 */
+    outb %al, %dx
+    movw $0x03F8, %dx
+    movb $0x0C, %al                 /* Teiler unten = 12 (9600 Baud) */
+    outb %al, %dx
+    inb %dx, %al                    /* muss 12 zurueckgeben */
+    movzbl %al, %ebx
+    movl $42, %ecx
+    movl $1, %eax
+    vmmcall
+
+    movw $0x03FB, %dx
+    movb $0x03, %al                 /* DLAB aus */
+    outb %al, %dx
+    inb %dx, %al                    /* das LCR selbst zurueklesen */
+    movzbl %al, %ebx
+    movl $43, %ecx
+    movl $1, %eax
+    vmmcall
+
+    /* --- 4. Der Unterbrechungsverteiler, vollstaendige Anfangsfolge. */
+    movw $0x0021, %dx
+    movb $0xFF, %al                 /* erst alles maskieren */
+    outb %al, %dx
+    movw $0x0020, %dx
+    movb $0x11, %al                 /* ICW1: Kaskade, ICW4 folgt */
+    outb %al, %dx
+    movw $0x0021, %dx
+    movb $0x30, %al                 /* ICW2: Vektorbasis 0x30 */
+    outb %al, %dx
+    movb $0x04, %al                 /* ICW3: Zweiter haengt an IR2 */
+    outb %al, %dx
+    movb $0x01, %al                 /* ICW4: 8086-Modus */
+    outb %al, %dx
+    movb $0xFD, %al                 /* Maske: nur IRQ 1 offen */
+    outb %al, %dx
+    inb %dx, %al                    /* und zurueklesen */
+    movzbl %al, %ebx
+    movl $44, %ecx
+    movl $1, %eax
+    vmmcall
+
+    /* --- 5. Der Zeitgeber: Kanal 0, zweiteiliges Schreiben. --- */
+    movw $0x0043, %dx
+    movb $0x36, %al                 /* Kanal 0, beide Oktette, Modus 3 */
+    outb %al, %dx
+    movw $0x0040, %dx
+    movb $0x9C, %al                 /* unteres Oktett */
+    outb %al, %dx
+    movb $0x2E, %al                 /* oberes Oktett -> 0x2E9C = 11932 */
+    outb %al, %dx
+    movl $45, %ecx
+    movl $1, %eax
+    vmmcall
+
+    /* --- 6. Und ein Wort ueber die Konsole, damit man es sieht. --- */
+    movw $(g_dev_txt - g_dev_start), %si
+    movw $0x0100, %ax
+    movw %ax, %ds                   /* DS.base = 0x1000 fuer den Text */
+    movw $0x03F8, %dx
+1:  movb (%si), %al
+    testb %al, %al
+    jz 2f
+    outb %al, %dx
+    incw %si
+    jmp 1b
+2:
+    movl $0x7777, %ebx
+    movl $2, %eax
+    vmmcall
+    hlt
+3:  jmp 3b
+
+g_dev_txt:
+    .asciz "geraete geprueft\n"
+    .align 4
+g_dev_end:
 
     .code64
 
@@ -541,6 +866,20 @@ hv_vectors:
     .quad g_crash_end               /* 10 */
     .quad g_bench_start             /* 11 */
     .quad g_bench_end               /* 12 */
-    .quad hv_guest_save             /* 13 */
-    .quad hv_stgi                   /* 14 */
-    .quad hv_clgi                   /* 15 */
+    /* ---- Runde HV2 ----
+     * DIE GAESTE MUESSEN LUECKENLOS STEHEN. `hv.fi` findet das Abbild
+     * eines Gasts ueber HV_G_FIRST + Nummer * 2 -- ein neuer Gast
+     * gehoert also HINTER den letzten Gast und NICHT hinter die
+     * Hilfsfunktionen. Genau das hat diese Runde eine Stunde gekostet:
+     * `g_lm` stand zuerst auf Platz 16, die Formel las Platz 13, fand
+     * dort `hv_guest_save` -- und kopierte eine Funktion des WIRTS als
+     * Gastabbild in den Gastspeicher. Der Gast lief dann durch eine
+     * Seite aus Nullen bis ans Seitenende (RIP 0xFFF) und starb an
+     * einem NPF, der wie ein Speicherfehler aussah und keiner war. */
+    .quad g_lm_start                /* 13 */
+    .quad g_lm_end                  /* 14 */
+    .quad g_dev_start               /* 15 */
+    .quad g_dev_end                 /* 16 */
+    .quad hv_guest_save             /* 17 */
+    .quad hv_stgi                   /* 18 */
+    .quad hv_clgi                   /* 19 */
