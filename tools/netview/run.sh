@@ -109,7 +109,7 @@ bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc.sh failed"; ex
 
 for s in 0 1; do
     if bash tools/build-kernel.sh "$TMPD/k$s.mb" --stufe "$s" > "$TMPD/b$s.log" 2>&1; then
-        ok "firnc$s: the kernel with kernel/netview.fi in it builds ($(stat -c%s "$TMPD/k$s.mb") octets)"
+        ok "firnc$s: the kernel with kernel/net/netview.fi in it builds ($(stat -c%s "$TMPD/k$s.mb") octets)"
     else
         bad "firnc$s: the kernel does not build"
         sed 's/^/        /' "$TMPD/b$s.log" | head -15
@@ -407,10 +407,10 @@ num "roles whose contrast was computed against the panel (4.5:1 or better)" "$n"
 n=$(grep -ac 'ZU AEHNLICH\|ZU WENIG' "$TMPD/icons.txt")
 num "rules broken" "$n" eq 0
 python3 tools/netview/icons.py kern "$TMPD/netmark.fi" >/dev/null 2>&1
-if cmp -s "$TMPD/netmark.fi" kernel/netmark.fi; then
-    ok "kernel/netmark.fi is the drawing, octet for octet -- one source, two places"
+if cmp -s "$TMPD/netmark.fi" kernel/net/netmark.fi; then
+    ok "kernel/net/netmark.fi is the drawing, octet for octet -- one source, two places"
 else
-    bad "kernel/netmark.fi does not match assets/netview/mark-*.txt"
+    bad "kernel/net/netmark.fi does not match assets/netview/mark-*.txt"
 fi
 
 # =====================================================================

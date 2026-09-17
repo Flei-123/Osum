@@ -772,7 +772,7 @@ grep -qa '\^O Write' "$TMPD/edA.vt" \
 # gegen den Zeichensatz gerechnet (`tools/gfx/checkshot.py lesen`, Runde K7B).
 if [ -s "$TMPD/edA.ppm" ]; then
     ok "das Bildschirmfoto steht ($(stat -c%s "$TMPD/edA.ppm") Oktette)"
-    python3 tools/gfx/checkshot.py lesen "$TMPD/edA.ppm" kernel/font.fi \
+    python3 tools/gfx/checkshot.py lesen "$TMPD/edA.ppm" kernel/gfx/font.fi \
         > "$TMPD/edA.schirm" 2>&1
     sed -n 's/^ *[0-9]\+ |\(.*\)|$/\1/p' "$TMPD/edA.schirm" | sed 's/ *$//' \
         > "$TMPD/edA.schirm.txt"
@@ -947,15 +947,15 @@ grep -qa 'K11' tools/kernel/memmap.py \
 
 # (g) Die Aufrufnummern dieser Runde stehen in der Karte in sys.fi und
 #     kollidieren mit keiner anderen Runde.
-n=$(grep -aoE '^const SYS_OSUM_(SETENV|MOUNT): u64 = 14[0-9][0-9]' kernel/sys.fi | wc -l)
+n=$(grep -aoE '^const SYS_OSUM_(SETENV|MOUNT): u64 = 14[0-9][0-9]' kernel/sys/sys.fi | wc -l)
 num "eigene Aufrufnummern im Block 1400..1499" "$n" eq 2
-grep -qa '1400..1499   RUNDE K11' kernel/sys.fi \
+grep -qa '1400..1499   RUNDE K11' kernel/sys/sys.fi \
     && ok "der Block ist in der Karte von sys.fi eingetragen" \
     || bad "der Block 1400..1499 fehlt in der Karte von sys.fi"
 # SYS_MARK und SYS_LEAVE sind die zwei Marken aus Runde 59. Sie tragen
 # die Nummern 1 und 2 und gelten NUR, solange `kstate.EXCURSION` steht --
 # der Kopfkommentar von sys.fi erklaert, warum. Sie zaehlen hier nicht mit.
-doppelt=$(grep -aoE '^const SYS_[A-Z0-9_]+: u64 = [0-9]+' kernel/sys.fi \
+doppelt=$(grep -aoE '^const SYS_[A-Z0-9_]+: u64 = [0-9]+' kernel/sys/sys.fi \
     | grep -v 'SYS_MARK\|SYS_LEAVE' \
     | awk '{print $NF}' | sort | uniq -d | tr '\n' ' ')
 [ -z "$doppelt" ] && ok "keine Aufrufnummer ist zweimal vergeben" \

@@ -1,0 +1,1382 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/bus.fi -- RUNDE SYSTEMBUS: EIN BUS, EIN TYPMODELL, DREI NUTZER.
+//
+// WAS HIER STEHT UND WARUM ES EIN EIGENER BEREICH IST.
+//
+// Die Wegkarte (`/root/osum-roadmap/ROADMAP.md`, Zeile A3) nennt den
+// Systembus den "wichtigsten Einzelposten" und begruendet das so:
+// Zwischenablage, Drag-and-Drop, Benachrichtigungen, Energie und der
+// Sperrbildschirm haengen alle daran, und wer ihn nicht baut, baut ihn
+// siebenmal. Diese Datei ist der Versuch, ihn EINMAL zu bauen.
+//
+// EIN BEFUND ZUERST, WEIL DER AUFTRAG IHN ANDERS ANNAHM. Der Auftrag
+// sagte "grosse Daten ueber geteilten Speicher (share.fi)".
+// `kernel/share.fi` ist NICHT geteilter Speicher. Es ist die
+// Internetfreigabe der Runde NETMON -- Weiterleitung, NAT und ein
+// DHCP-Server. Der einzige Speicher, den dieses System teilen kann, sind
+// SEITENRAHMEN, und die kommen aus `mem.frame_run`. Der Bus legt sie
+// deshalb selbst an und blendet sie in zwei Adressraeume ein; das ist
+// der Abschnitt SEGMENTE weiter unten und es ist der Grund, warum ein
+// Megabyte hier nicht kopiert, sondern abgebildet wird.
+//
+// DER ZWEITE BEFUND: eine Zwischenablage gab es schon, und sie war zu
+// wenig. `wig.fi` haelt seit Runde WIG 4096 Oktette bei `CLIP_OFF` und
+// zwei Systemrufe (`WIG_CLIPSET`, `WIG_CLIPGET`). Was fehlte: ein
+// Besitzer, eine Typangabe, ein Verlauf, eine Rechtefrage und alles
+// ueber 4 KiB. Die alte bleibt unangetastet -- was sie misst, misst sie
+// weiter -- und die neue steht daneben.
+//
+// ============================================ DAS MODELL, IN VIER SAETZEN
+//
+// 1. EIN DIENST ist ein NAME (hoechstens 16 Oktette), der einer Aufgabe
+//    gehoert. Wer ihn anmeldet, besitzt ihn; stirbt die Aufgabe, wird er
+//    frei (`forget_task`, gerufen aus `proc.reap`).
+//
+// 2. EINE NACHRICHT traegt IMMER die Absender-pid und die Absender-uid,
+//    und zwar vom KERNEL eingetragen, nicht vom Absender behauptet. Das
+//    ist der ganze Unterschied zwischen einem Bus mit Rechten und einer
+//    Rohrleitung.
+//
+// 3. RECHTE sind eine Frage, die VOR der Zustellung gestellt wird:
+//    `may_call`. Ein Dienst nennt beim Anmelden, wer ihn rufen darf --
+//    jeder, nur derselbe Benutzer, oder nur uid 0. Ein abgelehnter Ruf
+//    wird GEZAEHLT und auf die serielle Leitung geschrieben, weil ein
+//    stilles Nein nicht nachweisbar ist.
+//
+// 4. EIN TYPMODELL, DREI NUTZER. Zwischenablage, Drag-and-Drop und
+//    geteilter Speicher benutzen DENSELBEN Satz: eine Typmaske
+//    (MIME-artig, ein Bit je Art), einen Besitzer, eine Laenge, und
+//    entweder Daten am Ort (klein) oder ein Segment (gross). Die
+//    Wegkarte nennt das Entscheidung 2, und der Grund steht in D2:
+//    "zusammen mit D1 entwerfen, nicht danach".
+//
+// ==================================== DIE EIN-KERN-REGEL DIESER RUNDE
+//
+// `STATUS-MERGE6.md` haelt zwei Fehler fest, die beide dieselbe Form
+// hatten: ein globaler statischer Puffer, den mehrere Kerne gleichzeitig
+// benutzt haben (`fs.inode_get`, `wig.glyph_into`). Diese Datei hat
+// KEINEN. Jeder Zugriff auf die Tafel laeuft unter `take`/`give`, einer
+// eigenen Sperrzelle in der Busseite selbst -- nicht einer der acht
+// Sperren aus `kstate.LOCK_OFF`, weil deren Zaehler in `tools/smp`
+// gemessen werden und eine neunte Nutzerin diese Zahlen verschoben
+// haette. Kopiert wird DIREKT aus dem Nutzerraum in den Zielplatz und
+// zurueck; es gibt keinen Zwischenpuffer, den sich zwei Kerne teilen
+// koennten.
+//
+// Die Sperre wird NICHT ueber `copy_in`/`copy_out` gehalten: die koennen
+// einen Seitenfehler ausloesen. Erst kopieren, dann sperren, dann
+// eintragen -- in dieser Reihenfolge, und `clip_set` zeigt sie.
+//
+// ======================================================== DIE SEITEN
+//
+// 0xAC000..0xB4000 in `kdata`, acht Seiten, aus dem Stueck hinter dem
+// Modullader. `KDATA_SIZE` waechst dafuer von 0xB0000 auf 0xB4000 --
+// dieselbe Bewegung, die Merge 2 (512->640) und Blech-Echt (640->704)
+// schon gemacht haben. `tools/kernel/memmap.py` traegt den Bereich ein
+// und ist das, was sagt, dass er sich mit nichts ueberschneidet.
+//
+//   0x0000..0x0100  die Skalare dieser Runde
+//   0x0100..0x1100  64 Dienste zu 64 Oktetten
+//   0x1100..0x1500  128 Abos zu 8 Oktetten
+//   0x1500..0x5500  128 Nachrichten zu 128 Oktetten
+//   0x5500..0x5900  32 Posteingaenge zu 32 Oktetten (einer je Aufgabe)
+//   0x5900..0x6100  64 Segmente zu 32 Oktetten
+//   0x6100..0x7500  20 Verlaufsplaetze zu 256 Oktetten
+//   0x7500..0x7600  der Angebotsplatz (verzoegerte Uebergabe) + Ziehen
+//   0x7600..0x7A00  16 Benachrichtigungen zu 64 Oktetten
+//   0x7A00..0x8000  frei
+//
+// WAS NICHT HIER IST, damit niemand danach sucht: keine Umleitung ueber
+// einen Dienst pid 1 (der Bus IST der Kernel -- ein Ruf kostet einen
+// Systemruf und keine zwei Kontextwechsel), keine Introspektion nach
+// D-Bus-Art, keine Signaturen, keine Aktivierung beim ersten Ruf.
+
+profile kernel
+
+import lib.kstate
+import serial
+import sync.atomic
+import sched.sched
+import mm.mem
+import sched.proc
+
+export {
+    init, forget_task,
+    reg, find, send, recv, sub, pub,
+    seg_new, seg_map, seg_drop, seg_pages, seg_frame, seg_owner,
+    clip_set, clip_get, clip_types, clip_count, clip_len, clip_owner,
+    offer, fill, offer_types, offer_state,
+    drag_set, drag_get, drag_types, drag_clear, drag_active,
+    noti_post, noti_get, noti_count, noti_len, noti_prio, noti_seen,
+    stat,
+    T_TEXT, T_PATH, T_HTML, T_IMAGE, T_FILES, T_ANY,
+    A_ANY, A_SAMEUID, A_ROOT,
+    E_OK, E_FULL, E_NOENT, E_DENIED, E_INVAL, E_EMPTY, E_AGAIN,
+    S_REGS, S_SENDS, S_RECVS, S_DENIED, S_PUBS, S_DELIVERS, S_DROPS,
+    S_SEGS, S_SEGPAGES, S_CLIPSETS, S_CLIPGETS, S_OFFERS, S_FILLS,
+    S_DRAGS, S_NOTIS, S_LOCKED, S_HISTLEN, S_SEQ,
+    NAME_MAX, SVC_MAX, MSG_MAX, SEG_MAX, HIST_MAX, NOTI_MAX,
+    INLINE_MAX, SEG_PAGES_MAX
+}
+
+// ------------------------------------------------------------- die Karte
+
+const SCAL: u64 = 0x0000
+const SVCS: u64 = 0x0100
+const SVC_BYTES: u64 = 64
+const SVC_MAX: u64 = 64
+const SUBS: u64 = 0x1100
+const SUB_BYTES: u64 = 8
+const SUB_MAX: u64 = 128
+const MSGS: u64 = 0x1500
+const MSG_BYTES: u64 = 128
+const MSG_MAX: u64 = 128
+const BOXES: u64 = 0x5500
+const BOX_BYTES: u64 = 32
+const SEGS: u64 = 0x5900
+const SEG_BYTES: u64 = 32
+const SEG_MAX: u64 = 64
+const HIST: u64 = 0x6100
+const HIST_BYTES: u64 = 256
+const HIST_MAX: u64 = 20
+const OFFER: u64 = 0x7500
+const DRAG: u64 = 0x7560
+const NOTIS: u64 = 0x7600
+const NOTI_BYTES: u64 = 64
+const NOTI_MAX: u64 = 16
+
+// Wieviel am Ort liegt, bevor ein Segment gebraucht wird. 192 Oktette
+// sind nicht gewuerfelt: ein Verlaufsplatz misst 256, der Kopf 64, und
+// was uebrig bleibt ist das. Ein Dateiname passt hinein, ein Absatz
+// Text passt hinein, ein Bild nicht -- und ein Bild soll auch nicht
+// kopiert werden, sondern abgebildet.
+const INLINE_MAX: u64 = 192
+const SEG_PAGES_MAX: u64 = 512 // 2 MiB, und ein Megabyte ist die Abnahme
+const NAME_MAX: u64 = 16
+
+// ---------------------------------------------------------- die Skalare
+
+const S_LOCK: u64 = 0x00 // die Sperrzelle dieser Runde
+const S_REGS: u64 = 0x08
+const S_SENDS: u64 = 0x10
+const S_RECVS: u64 = 0x18
+const S_DENIED: u64 = 0x20
+const S_PUBS: u64 = 0x28
+const S_DELIVERS: u64 = 0x30
+const S_DROPS: u64 = 0x38 // Nachrichten, fuer die kein Platz war
+const S_SEGS: u64 = 0x40
+const S_SEGPAGES: u64 = 0x48
+const S_CLIPSETS: u64 = 0x50
+const S_CLIPGETS: u64 = 0x58
+const S_OFFERS: u64 = 0x60
+const S_FILLS: u64 = 0x68
+const S_DRAGS: u64 = 0x70
+const S_NOTIS: u64 = 0x78
+const S_LOCKED: u64 = 0x80 // wie oft die Sperre genommen wurde
+const S_SPINS: u64 = 0x88 // und wie lange gewartet
+const S_HISTLEN: u64 = 0x90 // wieviele Verlaufsplaetze belegt sind
+const S_HISTNEXT: u64 = 0x98 // wo der naechste hin kommt (Ring)
+const S_SEQ: u64 = 0xA0 // laufende Nummer, nie zurueckgesetzt
+const S_NOTINEXT: u64 = 0xA8
+const S_NOTILEN: u64 = 0xB0
+const S_READY: u64 = 0xB8
+
+// ------------------------------------------------------- ein Dienstplatz
+
+const D_USED: u64 = 0
+const D_NAME: u64 = 8 // 16 Oktette, zwei Woerter
+const D_PID: u64 = 24
+const D_UID: u64 = 32
+const D_TASK: u64 = 40
+const D_ACCESS: u64 = 48
+const D_CALLS: u64 = 56
+
+// ------------------------------------------------------- eine Nachricht
+
+const M_NEXT: u64 = 0 // 0 = Ende der Kette
+const M_USED: u64 = 8
+const M_PID: u64 = 16 // vom KERNEL eingetragen
+const M_UID: u64 = 24 // ebenso
+const M_SVC: u64 = 32
+const M_KIND: u64 = 40 // 1 = Ruf, 2 = Ereignis
+const M_SEG: u64 = 48 // 0 = alles am Ort
+const M_LEN: u64 = 56
+const M_DATA: u64 = 64 // 64 Oktette am Ort
+
+const MSG_INLINE: u64 = 64
+
+// ------------------------------------------------------ ein Posteingang
+
+const B_HEAD: u64 = 0
+const B_TAIL: u64 = 8
+const B_COUNT: u64 = 16
+const B_LOST: u64 = 24
+
+// --------------------------------------------------------- ein Segment
+
+const G_USED: u64 = 0
+const G_FRAME: u64 = 8 // physisch, aus mem.frame_run
+const G_PAGES: u64 = 16
+const G_OWNER: u64 = 24 // pid dessen, der es angelegt hat
+
+// --------------------------------------------------- ein Verlaufsplatz
+//
+// Und DASSELBE Format traegt das Angebot, der Ziehplatz und der
+// Benachrichtigungskopf. Ein Modell, drei Nutzer, und das heisst hier
+// woertlich: dieselben Feldnamen, dieselben Versaetze, dieselben
+// Hilfsfunktionen `put_item`/`get_item`.
+
+const I_SEQ: u64 = 0
+const I_PID: u64 = 8
+const I_UID: u64 = 16
+const I_TYPES: u64 = 24
+const I_LEN: u64 = 32
+const I_SEG: u64 = 40 // 0 = am Ort
+const I_FLAGS: u64 = 48
+const I_PRIO: u64 = 56
+const I_DATA: u64 = 64
+
+const F_LAZY: u64 = 1 // angeboten, noch nicht eingeloest
+const F_SEEN: u64 = 2
+
+// ------------------------------------------------------------ die Typen
+//
+// MIME-artig, ein Bit je Art, und mehrere gleichzeitig: derselbe Inhalt
+// kann Text UND Pfad sein (der Explorer legt einen Dateinamen ab, der
+// Editor liest ihn als Text). Genau dafuer ist es eine Maske und keine
+// Zahl.
+
+const T_TEXT: u64 = 1 // text/plain
+const T_PATH: u64 = 2 // text/uri-list, ein Pfad
+const T_HTML: u64 = 4 // text/html
+const T_IMAGE: u64 = 8 // image/*
+const T_FILES: u64 = 16 // text/uri-list, mehrere
+const T_ANY: u64 = 31
+
+// ----------------------------------------------------------- die Rechte
+
+const A_ANY: u64 = 0 // jeder darf rufen
+const A_SAMEUID: u64 = 1 // nur derselbe Benutzer
+const A_ROOT: u64 = 2 // nur uid 0
+
+// ----------------------------------------------------------- die Fehler
+
+const E_OK: u64 = 0
+const E_FULL: u64 = 1
+const E_NOENT: u64 = 2
+const E_DENIED: u64 = 3
+const E_INVAL: u64 = 4
+const E_EMPTY: u64 = 5
+const E_AGAIN: u64 = 6
+
+// ==================================================== Zugriff auf die Seite
+
+fn b(state: u64, off: u64) -> u64 {
+    return kstate.get(state, kstate.BUS_OFF + off)
+}
+
+fn sb(state: u64, off: u64, v: u64) {
+    kstate.set(state, kstate.BUS_OFF + off, v)
+}
+
+fn bump(state: u64, off: u64) {
+    kstate.add(state, kstate.BUS_OFF + off, 1)
+}
+
+fn svc_at(state: u64, i: u64, f: u64) -> u64 {
+    return b(state, SVCS + i * SVC_BYTES + f)
+}
+
+fn svc_set(state: u64, i: u64, f: u64, v: u64) {
+    sb(state, SVCS + i * SVC_BYTES + f, v)
+}
+
+fn msg_at(state: u64, i: u64, f: u64) -> u64 {
+    return b(state, MSGS + i * MSG_BYTES + f)
+}
+
+fn msg_set(state: u64, i: u64, f: u64, v: u64) {
+    sb(state, MSGS + i * MSG_BYTES + f, v)
+}
+
+fn box_at(state: u64, t: u64, f: u64) -> u64 {
+    return b(state, BOXES + t * BOX_BYTES + f)
+}
+
+fn box_set(state: u64, t: u64, f: u64, v: u64) {
+    sb(state, BOXES + t * BOX_BYTES + f, v)
+}
+
+fn seg_at(state: u64, i: u64, f: u64) -> u64 {
+    return b(state, SEGS + i * SEG_BYTES + f)
+}
+
+fn seg_set(state: u64, i: u64, f: u64, v: u64) {
+    sb(state, SEGS + i * SEG_BYTES + f, v)
+}
+
+// Die Adresse eines Verlaufsplatzes -- als ABSOLUTE Adresse, weil die
+// Oktettschleifen darauf arbeiten.
+fn hist_addr(state: u64, i: u64) -> u64 {
+    return state + kstate.BUS_OFF + HIST + i * HIST_BYTES
+}
+
+fn item_get(a: u64, f: u64) -> u64 {
+    return kstate.get(a, f)
+}
+
+fn item_set(a: u64, f: u64, v: u64) {
+    kstate.set(a, f, v)
+}
+
+// ================================================= DIE SPERRE DER RUNDE
+//
+// Eine Zelle, `cas`, und ein Zaehler. Warum nicht `atomic.lock_take`:
+// dessen acht Plaetze sind in `tools/smp/run.sh` und in
+// `tools/multicore/run.sh` benannt und gezaehlt; eine neunte Nutzerin
+// haette `lock_total_spins` verschoben und damit eine Zusage von zwei
+// Runden gebrochen, ohne dass jemand es haette sehen muessen.
+fn take(state: u64) {
+    let a: u64 = state + kstate.BUS_OFF + S_LOCK
+    var spins: u64 = 0
+    while atomic.cas(a, 0, 1) != 0 {
+        atomic.pause()
+        spins = spins + 1
+        if spins > 200000000 {
+            say_stuck(state)
+            return
+        }
+    }
+    bump(state, S_LOCKED)
+    if spins > 0 {
+        kstate.add(state, kstate.BUS_OFF + S_SPINS, spins)
+    }
+}
+
+fn give(state: u64) {
+    atomic.store(state + kstate.BUS_OFF + S_LOCK, 0)
+}
+
+fn say_stuck(state: u64) {
+    var s: [u8; 20] = "bus: Sperre haengt\n\0"
+    serial.puts((&s[0]) as u64)
+}
+
+// ====================================================== DER ANFANG
+//
+// Genullt wird `kdata` beim Start (es steht in .bss); trotzdem wird hier
+// jedes Feld gesetzt, das nicht null sein darf. Ein Bereich, der sich
+// auf das Nullen verlaesst, ist ein Bereich, der beim ersten Neustart
+// ohne Nullen falsch ist -- und die Runde OTA hat genau so einen Start.
+fn init(state: u64) {
+    var i: u64 = 0
+    while i < SVC_MAX {
+        svc_set(state, i, D_USED, 0)
+        i = i + 1
+    }
+    i = 0
+    while i < MSG_MAX {
+        msg_set(state, i, M_USED, 0)
+        msg_set(state, i, M_NEXT, 0)
+        i = i + 1
+    }
+    i = 0
+    while i < kstate.MAX_TASKS {
+        box_set(state, i, B_HEAD, 0)
+        box_set(state, i, B_TAIL, 0)
+        box_set(state, i, B_COUNT, 0)
+        box_set(state, i, B_LOST, 0)
+        i = i + 1
+    }
+    i = 0
+    while i < SEG_MAX {
+        seg_set(state, i, G_USED, 0)
+        i = i + 1
+    }
+    i = 0
+    while i < SUB_MAX {
+        sb(state, SUBS + i * SUB_BYTES, 0)
+        i = i + 1
+    }
+    i = 0
+    while i < HIST_MAX {
+        item_set(hist_addr(state, i), I_SEQ, 0)
+        i = i + 1
+    }
+    i = 0
+    while i < NOTI_MAX {
+        item_set(state + kstate.BUS_OFF + NOTIS + i * NOTI_BYTES, I_SEQ, 0)
+        i = i + 1
+    }
+    item_set(state + kstate.BUS_OFF + OFFER, I_SEQ, 0)
+    item_set(state + kstate.BUS_OFF + DRAG, I_SEQ, 0)
+    sb(state, S_LOCK, 0)
+    sb(state, S_HISTLEN, 0)
+    sb(state, S_HISTNEXT, 0)
+    sb(state, S_SEQ, 1)
+    sb(state, S_NOTINEXT, 0)
+    sb(state, S_NOTILEN, 0)
+    sb(state, S_READY, 1)
+    var s: [u8; 34] = "bus: 64 Dienste, 128 Nachrichten\n\0"
+    serial.puts((&s[0]) as u64)
+}
+
+fn seq_next(state: u64) -> u64 {
+    return kstate.add(state, kstate.BUS_OFF + S_SEQ, 1)
+}
+
+// ================================================== NAMEN
+//
+// Sechzehn Oktette in zwei Woertern, und der Vergleich ist ein Vergleich
+// von zwei Zahlen. Ein Name, der laenger ist, wird ABGESCHNITTEN und
+// nicht abgelehnt: ein Dienst, der wegen eines siebzehnten Zeichens gar
+// nicht da ist, kostet mehr Suche als einer, der kuerzer heisst.
+
+fn name_word(p: u64, off: u64, n: u64) -> u64 {
+    var w: u64 = 0
+    var k: u64 = 0
+    while k < 8 {
+        var c: u64 = 0
+        if off + k < n {
+            c = kstate.get8(p + off + k)
+        }
+        w = w | (c << (k * 8))
+        k = k + 1
+    }
+    return w
+}
+
+fn name_out(w: u64, p: u64) {
+    var k: u64 = 0
+    while k < 8 {
+        kstate.set8(p + k, ((w >> (k * 8)) & 0xFF) as u8)
+        k = k + 1
+    }
+}
+
+// ============================================ EINEN DIENST ANMELDEN
+//
+// `pid` und `uid` kommen aus der Aufgabentafel und nicht aus dem Aufruf.
+// Das ist der Satz, der diesen Bus von einer Rohrleitung unterscheidet,
+// und er steht deshalb dreimal in dieser Datei.
+fn reg(state: u64, task: u64, w0: u64, w1: u64, access: u64) -> u64 {
+    if access > A_ROOT {
+        return err(E_INVAL)
+    }
+    take(state)
+    // Denselben Namen zweimal gibt es nicht: der zweite Anmelder
+    // bekommt E_FULL und nicht etwa den Platz des ersten.
+    var i: u64 = 0
+    while i < SVC_MAX {
+        if svc_at(state, i, D_USED) != 0
+            && svc_at(state, i, D_NAME) == w0
+            && svc_at(state, i, D_NAME + 8) == w1 {
+            give(state)
+            return err(E_FULL)
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < SVC_MAX {
+        if svc_at(state, i, D_USED) == 0 {
+            svc_set(state, i, D_USED, 1)
+            svc_set(state, i, D_NAME, w0)
+            svc_set(state, i, D_NAME + 8, w1)
+            svc_set(state, i, D_PID, sched.tget(state, task, sched.T_PID))
+            svc_set(state, i, D_UID, sched.tget(state, task, sched.T_UID))
+            svc_set(state, i, D_TASK, task)
+            svc_set(state, i, D_ACCESS, access)
+            svc_set(state, i, D_CALLS, 0)
+            bump(state, S_REGS)
+            give(state)
+            return i
+        }
+        i = i + 1
+    }
+    give(state)
+    return err(E_FULL)
+}
+
+fn find(state: u64, w0: u64, w1: u64) -> u64 {
+    take(state)
+    var i: u64 = 0
+    while i < SVC_MAX {
+        if svc_at(state, i, D_USED) != 0
+            && svc_at(state, i, D_NAME) == w0
+            && svc_at(state, i, D_NAME + 8) == w1 {
+            give(state)
+            return i
+        }
+        i = i + 1
+    }
+    give(state)
+    return err(E_NOENT)
+}
+
+fn err(e: u64) -> u64 {
+    return 0 -% e
+}
+
+// ================================================ DIE RECHTEFRAGE
+//
+// Sie wird VOR der Zustellung gestellt und ihr Nein wird GEZAEHLT und
+// GESAGT. Abschnitt b) der Abnahme dieser Runde ist genau diese
+// Funktion und die zwei Zeilen serieller Ausgabe darunter.
+fn may_call(state: u64, svc: u64, uid: u64) -> bool {
+    let a: u64 = svc_at(state, svc, D_ACCESS)
+    if a == A_ANY {
+        return true
+    }
+    if uid == 0 {
+        return true // Wurzel darf immer -- wie ueberall sonst auch
+    }
+    if a == A_SAMEUID {
+        return uid == svc_at(state, svc, D_UID)
+    }
+    return false // A_ROOT, und uid ist nicht 0
+}
+
+fn say_denied(state: u64, svc: u64, pid: u64, uid: u64) {
+    var s1: [u8; 23] = "bus: ABGELEHNT dienst=\0"
+    var s2: [u8; 6] = " pid=\0"
+    var s3: [u8; 6] = " uid=\0"
+    var s4: [u8; 9] = " regel=\0\0"
+    serial.puts((&s1[0]) as u64)
+    serial.dec(svc)
+    serial.puts((&s2[0]) as u64)
+    serial.dec(pid)
+    serial.puts((&s3[0]) as u64)
+    serial.dec(uid)
+    serial.puts((&s4[0]) as u64)
+    serial.dec(svc_at(state, svc, D_ACCESS))
+    serial.nl()
+}
+
+// ================================================ EINE NACHRICHT ABLEGEN
+//
+// `data` zeigt auf KERNELSPEICHER -- der Aufrufer (`sys.fi`) hat schon
+// aus dem Nutzerraum geholt, und zwar in SEINEN Stapelrahmen, nicht in
+// einen gemeinsamen Puffer. Das ist die Ein-Kern-Regel dieser Runde.
+fn slot_free(state: u64) -> u64 {
+    var i: u64 = 0
+    while i < MSG_MAX {
+        if msg_at(state, i, M_USED) == 0 {
+            return i
+        }
+        i = i + 1
+    }
+    return MSG_MAX
+}
+
+fn queue_put(state: u64, task: u64, m: u64) {
+    let tail: u64 = box_at(state, task, B_TAIL)
+    msg_set(state, m, M_NEXT, 0)
+    if box_at(state, task, B_COUNT) == 0 {
+        box_set(state, task, B_HEAD, m)
+    } else {
+        msg_set(state, tail, M_NEXT, m + 1) // +1, damit 0 "Ende" bleibt
+    }
+    box_set(state, task, B_TAIL, m)
+    box_set(state, task, B_COUNT, box_at(state, task, B_COUNT) + 1)
+    bump(state, S_DELIVERS)
+}
+
+fn deliver(state: u64, task: u64, from_pid: u64, from_uid: u64, svc: u64,
+    kind: u64, seg: u64, len: u64, data: u64) -> u64 {
+    let m: u64 = slot_free(state)
+    if m >= MSG_MAX {
+        box_set(state, task, B_LOST, box_at(state, task, B_LOST) + 1)
+        bump(state, S_DROPS)
+        return err(E_FULL)
+    }
+    msg_set(state, m, M_USED, 1)
+    msg_set(state, m, M_PID, from_pid)
+    msg_set(state, m, M_UID, from_uid)
+    msg_set(state, m, M_SVC, svc)
+    msg_set(state, m, M_KIND, kind)
+    msg_set(state, m, M_SEG, seg)
+    msg_set(state, m, M_LEN, len)
+    var k: u64 = 0
+    let dst: u64 = state + kstate.BUS_OFF + MSGS + m * MSG_BYTES + M_DATA
+    while k < MSG_INLINE {
+        var c: u64 = 0
+        if k < len && data != 0 {
+            c = kstate.get8(data + k)
+        }
+        kstate.set8(dst + k, c as u8)
+        k = k + 1
+    }
+    queue_put(state, task, m)
+    return E_OK
+}
+
+// Ein Ruf an einen benannten Dienst. Rueckgabe 0 oder -Fehler.
+fn send(state: u64, task: u64, svc: u64, seg: u64, len: u64,
+    data: u64) -> u64 {
+    if svc >= SVC_MAX {
+        return err(E_INVAL)
+    }
+    let pid: u64 = sched.tget(state, task, sched.T_PID)
+    let uid: u64 = sched.tget(state, task, sched.T_UID)
+    take(state)
+    if svc_at(state, svc, D_USED) == 0 {
+        give(state)
+        return err(E_NOENT)
+    }
+    if !may_call(state, svc, uid) {
+        bump(state, S_DENIED)
+        say_denied(state, svc, pid, uid)
+        give(state)
+        return err(E_DENIED)
+    }
+    let to: u64 = svc_at(state, svc, D_TASK)
+    // Der Dienst gehoert einer Aufgabe, und die Aufgabe kann inzwischen
+    // eine andere sein. Die pid entscheidet, nicht der Platz.
+    if sched.tget(state, to, sched.T_PID) != svc_at(state, svc, D_PID) {
+        svc_set(state, svc, D_USED, 0)
+        give(state)
+        return err(E_NOENT)
+    }
+    svc_set(state, svc, D_CALLS, svc_at(state, svc, D_CALLS) + 1)
+    let r: u64 = deliver(state, to, pid, uid, svc, 1, seg, len, data)
+    bump(state, S_SENDS)
+    give(state)
+    return r
+}
+
+// Die naechste Nachricht des Aufrufers. `meta` (Kernelspeicher, sechs
+// Woerter) bekommt pid, uid, Dienst, Art, Segment, Laenge.
+fn recv(state: u64, task: u64, out: u64, max: u64, meta: u64) -> u64 {
+    take(state)
+    if box_at(state, task, B_COUNT) == 0 {
+        give(state)
+        return err(E_EMPTY)
+    }
+    let m: u64 = box_at(state, task, B_HEAD)
+    let nx: u64 = msg_at(state, m, M_NEXT)
+    if nx == 0 {
+        box_set(state, task, B_HEAD, 0)
+        box_set(state, task, B_TAIL, 0)
+    } else {
+        box_set(state, task, B_HEAD, nx - 1)
+    }
+    box_set(state, task, B_COUNT, box_at(state, task, B_COUNT) - 1)
+    var len: u64 = msg_at(state, m, M_LEN)
+    if meta != 0 {
+        kstate.set(meta, 0, msg_at(state, m, M_PID))
+        kstate.set(meta, 8, msg_at(state, m, M_UID))
+        kstate.set(meta, 16, msg_at(state, m, M_SVC))
+        kstate.set(meta, 24, msg_at(state, m, M_KIND))
+        kstate.set(meta, 32, msg_at(state, m, M_SEG))
+        kstate.set(meta, 40, len)
+    }
+    var n: u64 = len
+    if n > max {
+        n = max
+    }
+    if n > MSG_INLINE {
+        n = MSG_INLINE
+    }
+    let src: u64 = state + kstate.BUS_OFF + MSGS + m * MSG_BYTES + M_DATA
+    var k: u64 = 0
+    while k < n {
+        kstate.set8(out + k, kstate.get8(src + k) as u8)
+        k = k + 1
+    }
+    msg_set(state, m, M_USED, 0)
+    bump(state, S_RECVS)
+    give(state)
+    return n
+}
+
+// ==================================================== ABO UND EREIGNIS
+//
+// Ein Abo ist ein Wort: Dienst im unteren Halbwort, Aufgabenplatz im
+// oberen, und die pid daneben ist das, was einen wiederverwendeten Platz
+// verraet. Beim Veroeffentlichen bekommt JEDER Abonnent eine Kopie --
+// mit der Rechtefrage einzeln je Abonnent, denn wer nicht rufen darf,
+// darf auch nicht mithoeren.
+fn sub_pack(svc: u64, task: u64, pid: u64) -> u64 {
+    return 1 | (svc << 8) | (task << 16) | (pid << 24)
+}
+
+fn sub(state: u64, task: u64, svc: u64) -> u64 {
+    if svc >= SVC_MAX {
+        return err(E_INVAL)
+    }
+    let pid: u64 = sched.tget(state, task, sched.T_PID)
+    take(state)
+    var i: u64 = 0
+    while i < SUB_MAX {
+        let w: u64 = b(state, SUBS + i * SUB_BYTES)
+        if w == 0 {
+            sb(state, SUBS + i * SUB_BYTES, sub_pack(svc, task, pid))
+            give(state)
+            return E_OK
+        }
+        if ((w >> 8) & 0xFF) == svc && ((w >> 16) & 0xFF) == task {
+            give(state)
+            return E_OK // schon abonniert, und das ist kein Fehler
+        }
+        i = i + 1
+    }
+    give(state)
+    return err(E_FULL)
+}
+
+fn pub(state: u64, task: u64, svc: u64, len: u64, data: u64) -> u64 {
+    if svc >= SVC_MAX {
+        return err(E_INVAL)
+    }
+    let pid: u64 = sched.tget(state, task, sched.T_PID)
+    let uid: u64 = sched.tget(state, task, sched.T_UID)
+    take(state)
+    if svc_at(state, svc, D_USED) == 0 {
+        give(state)
+        return err(E_NOENT)
+    }
+    // Veroeffentlichen darf nur, wem der Dienst gehoert. Sonst koennte
+    // jeder Prozess im Namen des Energiedienstes "Akku leer" rufen.
+    if svc_at(state, svc, D_PID) != pid && uid != 0 {
+        bump(state, S_DENIED)
+        say_denied(state, svc, pid, uid)
+        give(state)
+        return err(E_DENIED)
+    }
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < SUB_MAX {
+        let w: u64 = b(state, SUBS + i * SUB_BYTES)
+        if w != 0 && ((w >> 8) & 0xFF) == svc {
+            let t: u64 = (w >> 16) & 0xFF
+            let p: u64 = (w >> 24) & 0xFFFF
+            if sched.tget(state, t, sched.T_PID) != p {
+                sb(state, SUBS + i * SUB_BYTES, 0) // der Platz ist weiter
+            } else {
+                if may_call(state, svc, sched.tget(state, t, sched.T_UID)) {
+                    if deliver(state, t, pid, uid, svc, 2, 0, len, data)
+                        == E_OK {
+                        n = n + 1
+                    }
+                } else {
+                    bump(state, S_DENIED)
+                }
+            }
+        }
+        i = i + 1
+    }
+    bump(state, S_PUBS)
+    give(state)
+    return n
+}
+
+// ======================================================== DIE SEGMENTE
+//
+// EIN MEGABYTE WIRD NICHT KOPIERT. `mem.frame_run` gibt zusammenhaengende
+// Rahmen; `proc.map_frame` haengt sie in einen Adressraum. Zwei Prozesse,
+// die dasselbe Segment einblenden, sehen DIESELBEN Rahmen -- der Wert,
+// den Abschnitt c) der Abnahme misst, ist deshalb die Zeit fuer 256
+// Seitentabelleneintraege und nicht die fuer 1.048.576 Oktette.
+//
+// WAS DAS NICHT KANN: Kopieren beim Schreiben, Auslagern, Wachsen.
+// Ein Segment hat seine Groesse, wenn es entsteht.
+fn seg_new(state: u64, task: u64, pages: u64) -> u64 {
+    if pages == 0 || pages > SEG_PAGES_MAX {
+        return err(E_INVAL)
+    }
+    let frame: u64 = mem.frame_run(state, pages)
+    if frame == 0 {
+        return err(E_FULL)
+    }
+    take(state)
+    var i: u64 = 0
+    while i < SEG_MAX {
+        if seg_at(state, i, G_USED) == 0 {
+            seg_set(state, i, G_USED, 1)
+            seg_set(state, i, G_FRAME, frame)
+            seg_set(state, i, G_PAGES, pages)
+            seg_set(state, i, G_OWNER, sched.tget(state, task, sched.T_PID))
+            bump(state, S_SEGS)
+            kstate.add(state, kstate.BUS_OFF + S_SEGPAGES, pages)
+            give(state)
+            return i
+        }
+        i = i + 1
+    }
+    give(state)
+    mem.frame_free_run(state, frame, pages)
+    return err(E_FULL)
+}
+
+fn seg_pages(state: u64, id: u64) -> u64 {
+    if id >= SEG_MAX {
+        return 0
+    }
+    if seg_at(state, id, G_USED) == 0 {
+        return 0
+    }
+    return seg_at(state, id, G_PAGES)
+}
+
+// Die Rahmen sind hier zu HOLEN; das Einblenden macht `sys.fi`, weil nur
+// dort der Adressraum des Aufrufers bekannt ist. Diese Funktion sagt,
+// WELCHER Rahmen zu Seite `k` gehoert.
+fn seg_frame(state: u64, id: u64, k: u64) -> u64 {
+    if id >= SEG_MAX || seg_at(state, id, G_USED) == 0 {
+        return 0
+    }
+    if k >= seg_at(state, id, G_PAGES) {
+        return 0
+    }
+    return seg_at(state, id, G_FRAME) + k * 4096
+}
+
+fn seg_owner(state: u64, id: u64) -> u64 {
+    if id >= SEG_MAX || seg_at(state, id, G_USED) == 0 {
+        return 0
+    }
+    return seg_at(state, id, G_OWNER)
+}
+
+fn seg_map(state: u64, task: u64, id: u64) -> u64 {
+    // Nur die Pruefung; die Abbildung selbst steht in `sys.do_bus`.
+    if id >= SEG_MAX {
+        return err(E_INVAL)
+    }
+    take(state)
+    let used: u64 = seg_at(state, id, G_USED)
+    give(state)
+    if used == 0 {
+        return err(E_NOENT)
+    }
+    return E_OK
+}
+
+fn seg_drop(state: u64, task: u64, id: u64) -> u64 {
+    if id >= SEG_MAX {
+        return err(E_INVAL)
+    }
+    let pid: u64 = sched.tget(state, task, sched.T_PID)
+    take(state)
+    if seg_at(state, id, G_USED) == 0 {
+        give(state)
+        return err(E_NOENT)
+    }
+    if seg_at(state, id, G_OWNER) != pid && sched.tget(state, task,
+        sched.T_UID) != 0 {
+        bump(state, S_DENIED)
+        give(state)
+        return err(E_DENIED)
+    }
+    let f: u64 = seg_at(state, id, G_FRAME)
+    let n: u64 = seg_at(state, id, G_PAGES)
+    seg_set(state, id, G_USED, 0)
+    give(state)
+    mem.frame_free_run(state, f, n)
+    return E_OK
+}
+
+// ================================================== DIE ZWISCHENABLAGE
+//
+// Ein Ring von zwanzig Plaetzen. Der neueste ist Nummer 0 von aussen
+// gesehen; drinnen laeuft `S_HISTNEXT` vorwaerts und `idx_of` rechnet
+// das um. Win+V ist genau diese Umrechnung und sonst nichts.
+fn idx_of(state: u64, back: u64) -> u64 {
+    let len: u64 = b(state, S_HISTLEN)
+    if back >= len {
+        return HIST_MAX
+    }
+    let nxt: u64 = b(state, S_HISTNEXT)
+    // nxt zeigt auf den naechsten freien; der neueste liegt davor.
+    return (nxt + HIST_MAX - 1 - back) % HIST_MAX
+}
+
+fn put_item(a: u64, seq: u64, pid: u64, uid: u64, types: u64, len: u64,
+    seg: u64, flags: u64, prio: u64, data: u64) {
+    item_set(a, I_SEQ, seq)
+    item_set(a, I_PID, pid)
+    item_set(a, I_UID, uid)
+    item_set(a, I_TYPES, types)
+    item_set(a, I_LEN, len)
+    item_set(a, I_SEG, seg)
+    item_set(a, I_FLAGS, flags)
+    item_set(a, I_PRIO, prio)
+    var k: u64 = 0
+    while k < INLINE_MAX {
+        var c: u64 = 0
+        if k < len && data != 0 {
+            c = kstate.get8(data + k)
+        }
+        kstate.set8(a + I_DATA + k, c as u8)
+        k = k + 1
+    }
+}
+
+// Die Zwischenablage setzen. `data` ist KERNELSPEICHER (der Aufrufer hat
+// geholt), `seg` ist 0 oder ein Segment fuer das Grosse.
+fn clip_set(state: u64, task: u64, types: u64, len: u64, seg: u64,
+    data: u64) -> u64 {
+    if types == 0 || (types & ~T_ANY) != 0 {
+        return err(E_INVAL)
+    }
+    if seg == 0 && len > INLINE_MAX {
+        return err(E_INVAL)
+    }
+    if seg != 0 && seg >= SEG_MAX {
+        return err(E_INVAL)
+    }
+    let pid: u64 = sched.tget(state, task, sched.T_PID)
+    let uid: u64 = sched.tget(state, task, sched.T_UID)
+    take(state)
+    let nxt: u64 = b(state, S_HISTNEXT)
+    var l: u64 = len
+    if seg == 0 && l > INLINE_MAX {
+        l = INLINE_MAX
+    }
+    put_item(hist_addr(state, nxt), seq_next(state), pid, uid, types, l,
+        seg, 0, 0, data)
+    sb(state, S_HISTNEXT, (nxt + 1) % HIST_MAX)
+    if b(state, S_HISTLEN) < HIST_MAX {
+        sb(state, S_HISTLEN, b(state, S_HISTLEN) + 1)
+    }
+    bump(state, S_CLIPSETS)
+    give(state)
+    return E_OK
+}
+
+// Lesen. `back` = 0 ist der neueste, 1 der davor -- der Verlauf.
+// Rueckgabe: Zahl der Oktette, oder -E_AGAIN wenn der Eintrag nur
+// ANGEBOTEN ist und der Besitzer erst noch liefern muss.
+fn clip_get(state: u64, task: u64, back: u64, out: u64, max: u64,
+    meta: u64) -> u64 {
+    take(state)
+    let i: u64 = idx_of(state, back)
+    if i >= HIST_MAX {
+        give(state)
+        return err(E_EMPTY)
+    }
+    let a: u64 = hist_addr(state, i)
+    if (item_get(a, I_FLAGS) & F_LAZY) != 0 {
+        give(state)
+        return err(E_AGAIN)
+    }
+    let len: u64 = item_get(a, I_LEN)
+    if meta != 0 {
+        kstate.set(meta, 0, item_get(a, I_TYPES))
+        kstate.set(meta, 8, item_get(a, I_PID))
+        kstate.set(meta, 16, item_get(a, I_UID))
+        kstate.set(meta, 24, item_get(a, I_SEG))
+        kstate.set(meta, 32, len)
+        kstate.set(meta, 40, item_get(a, I_SEQ))
+    }
+    var n: u64 = len
+    if n > max {
+        n = max
+    }
+    if n > INLINE_MAX {
+        n = INLINE_MAX
+    }
+    var k: u64 = 0
+    while k < n {
+        kstate.set8(out + k, kstate.get8(a + I_DATA + k) as u8)
+        k = k + 1
+    }
+    bump(state, S_CLIPGETS)
+    give(state)
+    return n
+}
+
+fn clip_count(state: u64) -> u64 {
+    return b(state, S_HISTLEN)
+}
+
+fn clip_types(state: u64, back: u64) -> u64 {
+    take(state)
+    let i: u64 = idx_of(state, back)
+    if i >= HIST_MAX {
+        give(state)
+        return 0
+    }
+    let t: u64 = item_get(hist_addr(state, i), I_TYPES)
+    give(state)
+    return t
+}
+
+fn clip_len(state: u64, back: u64) -> u64 {
+    take(state)
+    let i: u64 = idx_of(state, back)
+    if i >= HIST_MAX {
+        give(state)
+        return 0
+    }
+    let l: u64 = item_get(hist_addr(state, i), I_LEN)
+    give(state)
+    return l
+}
+
+fn clip_owner(state: u64, back: u64) -> u64 {
+    take(state)
+    let i: u64 = idx_of(state, back)
+    if i >= HIST_MAX {
+        give(state)
+        return 0
+    }
+    let p: u64 = item_get(hist_addr(state, i), I_PID)
+    give(state)
+    return p
+}
+
+// ============================================== VERZOEGERTE UEBERGABE
+//
+// Ein Programm, das ein grosses Bild kopiert, will es nicht kopieren,
+// solange niemand einfuegt. Also meldet es nur die TYPEN an (`offer`),
+// und der erste `clip_get` bekommt -E_AGAIN und legt dem Besitzer eine
+// Nachricht in den Eingang. Der antwortet mit `fill`, und der naechste
+// `clip_get` liefert. Das ist X11s ICCCM in drei Funktionen und ohne
+// den Zeitstempel-Tanz.
+fn offer(state: u64, task: u64, types: u64) -> u64 {
+    if types == 0 || (types & ~T_ANY) != 0 {
+        return err(E_INVAL)
+    }
+    let pid: u64 = sched.tget(state, task, sched.T_PID)
+    let uid: u64 = sched.tget(state, task, sched.T_UID)
+    take(state)
+    let nxt: u64 = b(state, S_HISTNEXT)
+    put_item(hist_addr(state, nxt), seq_next(state), pid, uid, types, 0, 0,
+        F_LAZY, 0, 0)
+    sb(state, S_HISTNEXT, (nxt + 1) % HIST_MAX)
+    if b(state, S_HISTLEN) < HIST_MAX {
+        sb(state, S_HISTLEN, b(state, S_HISTLEN) + 1)
+    }
+    bump(state, S_OFFERS)
+    give(state)
+    return E_OK
+}
+
+fn fill(state: u64, task: u64, len: u64, seg: u64, data: u64) -> u64 {
+    let pid: u64 = sched.tget(state, task, sched.T_PID)
+    take(state)
+    let i: u64 = idx_of(state, 0)
+    if i >= HIST_MAX {
+        give(state)
+        return err(E_EMPTY)
+    }
+    let a: u64 = hist_addr(state, i)
+    if (item_get(a, I_FLAGS) & F_LAZY) == 0 {
+        give(state)
+        return err(E_INVAL)
+    }
+    if item_get(a, I_PID) != pid {
+        bump(state, S_DENIED)
+        give(state)
+        return err(E_DENIED)
+    }
+    var l: u64 = len
+    if seg == 0 && l > INLINE_MAX {
+        l = INLINE_MAX
+    }
+    item_set(a, I_LEN, l)
+    item_set(a, I_SEG, seg)
+    item_set(a, I_FLAGS, 0)
+    var k: u64 = 0
+    while k < INLINE_MAX {
+        var c: u64 = 0
+        if k < l && data != 0 {
+            c = kstate.get8(data + k)
+        }
+        kstate.set8(a + I_DATA + k, c as u8)
+        k = k + 1
+    }
+    bump(state, S_FILLS)
+    give(state)
+    return E_OK
+}
+
+fn offer_types(state: u64) -> u64 {
+    return clip_types(state, 0)
+}
+
+fn offer_state(state: u64) -> u64 {
+    take(state)
+    let i: u64 = idx_of(state, 0)
+    if i >= HIST_MAX {
+        give(state)
+        return 0
+    }
+    let f: u64 = item_get(hist_addr(state, i), I_FLAGS)
+    give(state)
+    return f
+}
+
+// ====================================================== DRAG-AND-DROP
+//
+// DASSELBE Format, EIN Platz statt zwanzig, und ein Zustand mehr: eine
+// Ziehbewegung laeuft oder sie laeuft nicht. Der Explorer setzt beim
+// Druecken der Taste `drag_set(T_PATH, "/pfad")`, der Editor fragt beim
+// Loslassen `drag_get` und oeffnet, was drin steht. Dass hier kein
+// zweites Modell steht, ist der ganze Punkt von Entscheidung 2 der
+// Wegkarte.
+fn drag_set(state: u64, task: u64, types: u64, len: u64, seg: u64,
+    data: u64) -> u64 {
+    if types == 0 || (types & ~T_ANY) != 0 {
+        return err(E_INVAL)
+    }
+    if seg == 0 && len > INLINE_MAX {
+        return err(E_INVAL)
+    }
+    let pid: u64 = sched.tget(state, task, sched.T_PID)
+    let uid: u64 = sched.tget(state, task, sched.T_UID)
+    take(state)
+    put_item(state + kstate.BUS_OFF + DRAG, seq_next(state), pid, uid,
+        types, len, seg, 0, 0, data)
+    bump(state, S_DRAGS)
+    give(state)
+    return E_OK
+}
+
+fn drag_get(state: u64, out: u64, max: u64, meta: u64) -> u64 {
+    take(state)
+    let a: u64 = state + kstate.BUS_OFF + DRAG
+    if item_get(a, I_SEQ) == 0 {
+        give(state)
+        return err(E_EMPTY)
+    }
+    let len: u64 = item_get(a, I_LEN)
+    if meta != 0 {
+        kstate.set(meta, 0, item_get(a, I_TYPES))
+        kstate.set(meta, 8, item_get(a, I_PID))
+        kstate.set(meta, 16, item_get(a, I_UID))
+        kstate.set(meta, 24, item_get(a, I_SEG))
+        kstate.set(meta, 32, len)
+        kstate.set(meta, 40, item_get(a, I_SEQ))
+    }
+    var n: u64 = len
+    if n > max {
+        n = max
+    }
+    if n > INLINE_MAX {
+        n = INLINE_MAX
+    }
+    var k: u64 = 0
+    while k < n {
+        kstate.set8(out + k, kstate.get8(a + I_DATA + k) as u8)
+        k = k + 1
+    }
+    give(state)
+    return n
+}
+
+fn drag_types(state: u64) -> u64 {
+    return item_get(state + kstate.BUS_OFF + DRAG, I_TYPES)
+}
+
+fn drag_active(state: u64) -> u64 {
+    if item_get(state + kstate.BUS_OFF + DRAG, I_SEQ) == 0 {
+        return 0
+    }
+    return 1
+}
+
+fn drag_clear(state: u64) -> u64 {
+    take(state)
+    item_set(state + kstate.BUS_OFF + DRAG, I_SEQ, 0)
+    give(state)
+    return E_OK
+}
+
+// =================================================== BENACHRICHTIGUNGEN
+//
+// Sechzehn Plaetze, derselbe Satz Felder, eine Dringlichkeit dazu. Der
+// Dienst ist der Bus selbst und nicht ein eigener Prozess: ein
+// Benachrichtigungsdienst in Ring 3 waere ein zweiter Kontextwechsel je
+// Meldung und wuerde beim Absturz genau dann fehlen, wenn er den
+// Absturz melden soll.
+//
+// Die LEISTE zeichnet das; hier steht nur, was sie zeichnen soll.
+fn noti_addr(state: u64, i: u64) -> u64 {
+    return state + kstate.BUS_OFF + NOTIS + i * NOTI_BYTES
+}
+
+fn noti_post(state: u64, task: u64, prio: u64, len: u64, data: u64) -> u64 {
+    let pid: u64 = sched.tget(state, task, sched.T_PID)
+    let uid: u64 = sched.tget(state, task, sched.T_UID)
+    take(state)
+    let nxt: u64 = b(state, S_NOTINEXT)
+    let a: u64 = noti_addr(state, nxt)
+    var l: u64 = len
+    if l > NOTI_BYTES - I_DATA {
+        l = NOTI_BYTES - I_DATA
+    }
+    item_set(a, I_SEQ, seq_next(state))
+    item_set(a, I_PID, pid)
+    item_set(a, I_UID, uid)
+    item_set(a, I_TYPES, T_TEXT)
+    item_set(a, I_LEN, l)
+    item_set(a, I_SEG, 0)
+    item_set(a, I_FLAGS, 0)
+    item_set(a, I_PRIO, prio)
+    var k: u64 = 0
+    while k < NOTI_BYTES - I_DATA {
+        var c: u64 = 0
+        if k < l && data != 0 {
+            c = kstate.get8(data + k)
+        }
+        kstate.set8(a + I_DATA + k, c as u8)
+        k = k + 1
+    }
+    sb(state, S_NOTINEXT, (nxt + 1) % NOTI_MAX)
+    if b(state, S_NOTILEN) < NOTI_MAX {
+        sb(state, S_NOTILEN, b(state, S_NOTILEN) + 1)
+    }
+    bump(state, S_NOTIS)
+    give(state)
+    return E_OK
+}
+
+fn noti_idx(state: u64, back: u64) -> u64 {
+    let len: u64 = b(state, S_NOTILEN)
+    if back >= len {
+        return NOTI_MAX
+    }
+    return (b(state, S_NOTINEXT) + NOTI_MAX - 1 - back) % NOTI_MAX
+}
+
+fn noti_get(state: u64, back: u64, out: u64, max: u64) -> u64 {
+    take(state)
+    let i: u64 = noti_idx(state, back)
+    if i >= NOTI_MAX {
+        give(state)
+        return err(E_EMPTY)
+    }
+    let a: u64 = noti_addr(state, i)
+    var n: u64 = item_get(a, I_LEN)
+    if n > max {
+        n = max
+    }
+    var k: u64 = 0
+    while k < n {
+        kstate.set8(out + k, kstate.get8(a + I_DATA + k) as u8)
+        k = k + 1
+    }
+    item_set(a, I_FLAGS, item_get(a, I_FLAGS) | F_SEEN)
+    give(state)
+    return n
+}
+
+fn noti_count(state: u64) -> u64 {
+    return b(state, S_NOTILEN)
+}
+
+fn noti_len(state: u64, back: u64) -> u64 {
+    let i: u64 = noti_idx(state, back)
+    if i >= NOTI_MAX {
+        return 0
+    }
+    return item_get(noti_addr(state, i), I_LEN)
+}
+
+fn noti_prio(state: u64, back: u64) -> u64 {
+    let i: u64 = noti_idx(state, back)
+    if i >= NOTI_MAX {
+        return 0
+    }
+    return item_get(noti_addr(state, i), I_PRIO)
+}
+
+// Wieviele NOCH NICHT gelesen wurden -- die Zahl auf der Glocke.
+fn noti_seen(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < NOTI_MAX {
+        let a: u64 = noti_addr(state, i)
+        if item_get(a, I_SEQ) != 0 && (item_get(a, I_FLAGS) & F_SEEN) == 0 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// ================================================== EINE AUFGABE STIRBT
+//
+// Gerufen aus `proc.reap`. Was aufgeraeumt wird: die Dienste dieser
+// Aufgabe, ihre Abos, ihre Nachrichten. Was NICHT aufgeraeumt wird: der
+// Zwischenablage-Eintrag -- Text, den man kopiert hat, verschwindet
+// nicht, weil das Programm zugemacht wurde; das ist der Unterschied
+// zwischen X11 (verschwindet) und Windows (bleibt), und Windows hat
+// hier recht. Ein ANGEBOT (F_LAZY) verschwindet sehr wohl, denn den
+// kann niemand mehr einloesen.
+fn forget_task(state: u64, task: u64, pid: u64) {
+    take(state)
+    var i: u64 = 0
+    while i < SVC_MAX {
+        if svc_at(state, i, D_USED) != 0 && svc_at(state, i, D_PID) == pid {
+            svc_set(state, i, D_USED, 0)
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < SUB_MAX {
+        let w: u64 = b(state, SUBS + i * SUB_BYTES)
+        if w != 0 && ((w >> 24) & 0xFFFF) == pid {
+            sb(state, SUBS + i * SUB_BYTES, 0)
+        }
+        i = i + 1
+    }
+    // Der Eingang wird geleert, und die Nachrichten darin freigegeben.
+    var m: u64 = box_at(state, task, B_HEAD)
+    var n: u64 = box_at(state, task, B_COUNT)
+    while n > 0 {
+        let nx: u64 = msg_at(state, m, M_NEXT)
+        msg_set(state, m, M_USED, 0)
+        if nx == 0 {
+            n = 0
+        } else {
+            m = nx - 1
+            n = n - 1
+        }
+    }
+    box_set(state, task, B_HEAD, 0)
+    box_set(state, task, B_TAIL, 0)
+    box_set(state, task, B_COUNT, 0)
+    // Segmente dieser Aufgabe: die Rahmen zurueck.
+    i = 0
+    while i < SEG_MAX {
+        if seg_at(state, i, G_USED) != 0 && seg_at(state, i, G_OWNER) == pid {
+            let f: u64 = seg_at(state, i, G_FRAME)
+            let p: u64 = seg_at(state, i, G_PAGES)
+            seg_set(state, i, G_USED, 0)
+            give(state)
+            mem.frame_free_run(state, f, p)
+            take(state)
+        }
+        i = i + 1
+    }
+    // Ein unerfuelltes Angebot dieser Aufgabe ist wertlos.
+    i = 0
+    while i < HIST_MAX {
+        let a: u64 = hist_addr(state, i)
+        if item_get(a, I_SEQ) != 0 && item_get(a, I_PID) == pid
+            && (item_get(a, I_FLAGS) & F_LAZY) != 0 {
+            item_set(a, I_SEQ, 0)
+            item_set(a, I_FLAGS, 0)
+            item_set(a, I_LEN, 0)
+        }
+        i = i + 1
+    }
+    if item_get(state + kstate.BUS_OFF + DRAG, I_PID) == pid {
+        item_set(state + kstate.BUS_OFF + DRAG, I_SEQ, 0)
+    }
+    give(state)
+}
+
+// Ein Zaehler nach aussen, fuer den Testlaeufer und fuer `svc`.
+fn stat(state: u64, which: u64) -> u64 {
+    if which == S_HISTLEN {
+        return b(state, S_HISTLEN)
+    }
+    if which > 0xC0 {
+        return 0
+    }
+    return b(state, which)
+}

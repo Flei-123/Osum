@@ -104,7 +104,19 @@ BEKANNT = {
 def main():
     kdir = sys.argv[1] if len(sys.argv) > 1 else "kernel"
     worte = {}
-    for pfad in sorted(glob.glob(os.path.join(kdir, "*.fi"))):
+    # RUNDE O-STRUKTUR: der Kern liegt in Schichten. Ein glob auf
+    # `kernel/*.fi` sah nach dem Umzug nur noch die Haelfte der
+    # Moduswoerter (66 statt 127) -- und ein Pruefer, der die Haelfte
+    # nicht sieht, findet auch die Ueberschneidungen nicht, die dort
+    # liegen. Gesucht wird darum der ganze Baum, ohne user/ und app/.
+    def _alle(d):
+        aus = []
+        for stamm, verz, namen in os.walk(d):
+            verz[:] = [v for v in verz if v not in ("user", "app")]
+            aus += [os.path.join(stamm, n) for n in namen if n.endswith(".fi")]
+        return sorted(aus)
+
+    for pfad in _alle(kdir):
         quelle = open(pfad, "r", encoding="utf-8", errors="replace").read()
         for name, w in re.findall(
                 r'var (w_\w+): \[u8; \d+\] = "([a-z0-9._=/-]+)\\0', quelle):

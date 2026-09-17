@@ -65,6 +65,16 @@ export FIRNLIB="$ROOT/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
 FC1=${FIRNC1:-vendor/firn/bin/firnc1}
 ULD=kernel/user/user.ld
+# RUNDE O-STRUKTUR: die Kerndateien liegen in Schichtverzeichnissen
+# (kernel/sys/sys.fi, kernel/lib/kstate.fi, ...). Statt den Pfad zu
+# buchstabieren, wird er einmal erfragt -- `tools/kfind.sh` findet die
+# Datei, wo immer sie liegt, und bricht ab, wenn es sie nicht gibt.
+. tools/kpfad.sh
+K_SYS=$(kfi sys)       || exit 1
+K_KSTATE=$(kfi kstate) || exit 1
+K_XHCI=$(kfi xhci)     || exit 1
+K_USB=$(kfi usb)       || exit 1
+K_PS2M=$(kfi ps2m)     || exit 1
 BLOCKS=4096
 PROGS="sh cat echo ls cp rm mkdir wc grep head true false ps mount umount k17"
 
@@ -154,11 +164,11 @@ echo "== 1. die Nummern, die Vektoren und die Karte von kdata =="
 # Die zwei Aufrufnummern dieser Runde. 1700 gehoert seit Runde K14 der
 # Einhaengetafel; der Vorrat dieser Runde faengt deshalb bei 1701 an.
 for n in 1701 1702; do
-    grep -qE "= $n( |$)" kernel/sys.fi && ok "die Aufrufnummer $n steht in kernel/sys.fi" \
-        || bad "die Aufrufnummer $n fehlt in kernel/sys.fi"
+    grep -qE "= $n( |$)" "$K_SYS" && ok "die Aufrufnummer $n steht in $K_SYS" \
+        || bad "die Aufrufnummer $n fehlt in $K_SYS"
 done
-stat_nr=$(number_in kernel/sys.fi "SYS_OSUM_USBSTAT")
-pull_nr=$(number_in kernel/sys.fi "SYS_OSUM_USBPULL")
+stat_nr=$(number_in "$K_SYS" "SYS_OSUM_USBSTAT")
+pull_nr=$(number_in "$K_SYS" "SYS_OSUM_USBPULL")
 for v in "$stat_nr" "$pull_nr"; do
     if [ "${v:-0}" -ge 1701 ] && [ "${v:-0}" -le 1749 ]; then
         ok "die Nummer $v liegt im zugeteilten Vorrat 1701..1749"
@@ -182,9 +192,9 @@ num "andere Verwendungen der Nummern 1701/1702 im Baum" "${doppelt:-0}" eq 0
 grep -q 'const VEC_XHCI: u64 = 43' kernel/arch/x86_64/trap.fi \
     && ok "der Meldevektor des Reglers ist 43 (kernel/arch/x86_64/trap.fi)" \
     || bad "VEC_XHCI ist nicht 43 in kernel/arch/x86_64/trap.fi"
-grep -q 'const VEC_XHCI: u64 = 43' kernel/xhci.fi \
+grep -q 'const VEC_XHCI: u64 = 43' "$K_XHCI" \
     && ok "und dieselbe Zahl steht im Treiber" \
-    || bad "VEC_XHCI in kernel/xhci.fi passt nicht"
+    || bad "VEC_XHCI in $K_XHCI passt nicht"
 
 # Die Speicherkarte. `karte.py` rechnet seit dieser Runde AUCH die
 # Untergliederung des USB-Bereichs nach -- sie ist kein eigener
@@ -196,12 +206,12 @@ else
     sed 's/^/        /' "$TMPD/karte.txt" | head -10
 fi
 hat "$TMPD/karte.txt" "0 Kollisionen" "keine zwei Bereiche ueberschneiden sich"
-k17off=$(grep -aE '^const K17_OFF: u64 = 0x[0-9A-Fa-f]+' kernel/kstate.fi | grep -oE '0x[0-9A-Fa-f]+')
-k17max=$(grep -aE '^const K17_MAX: u64 = 0x[0-9A-Fa-f]+' kernel/kstate.fi | grep -oE '0x[0-9A-Fa-f]+')
+k17off=$(grep -aE '^const K17_OFF: u64 = 0x[0-9A-Fa-f]+' "$K_KSTATE" | grep -oE '0x[0-9A-Fa-f]+')
+k17max=$(grep -aE '^const K17_MAX: u64 = 0x[0-9A-Fa-f]+' "$K_KSTATE" | grep -oE '0x[0-9A-Fa-f]+')
 gleich "der Vorrat dieser Runde faengt bei 0x50000 an" "0x50000" "$k17off"
 gleich "und ist acht Seiten gross" "0x8000" "$k17max"
 # kdata musste dafuer wachsen -- und die Zahl steht ZWEIMAL.
-a=$(grep -aE '^const KDATA_SIZE: u64 = 0x[0-9A-Fa-f]+' kernel/kstate.fi | grep -oE '0x[0-9A-Fa-f]+')
+a=$(grep -aE '^const KDATA_SIZE: u64 = 0x[0-9A-Fa-f]+' "$K_KSTATE" | grep -oE '0x[0-9A-Fa-f]+')
 b=$(grep -aE '\.set KDATA_SIZE, 0x[0-9A-Fa-f]+' kernel/arch/x86_64/boot.s | grep -oE '0x[0-9A-Fa-f]+' | head -1)
 gleich "KDATA_SIZE steht in kstate.fi und boot.s gleich" "$a" "$b"
 # Der Vorrat dieser Runde endet bei 0x58000. Als K17 zuerst geschrieben
@@ -226,7 +236,7 @@ fi
 # (Wort * 64 + Bit). Die neun Schalter dieser Runde liegen in Wort 6.
 for n in M_USB M_NOUSB M_USBPOLL M_NOHID M_NOMSC M_UNPLUG M_NOUSBIRQ \
          M_USBSTICK M_USBHOLD; do
-    v=$(number_in kernel/kstate.fi "$n")
+    v=$(number_in "$K_KSTATE" "$n")
     if [ -n "${v:-}" ] && [ "$v" -ge 384 ] && [ "$v" -le 447 ]; then
         ok "$n liegt in Wort 6 des Modusvektors (Index $v)"
     else
@@ -318,7 +328,7 @@ if baue 1; then
 else
     bad "firnc1 baut diese Runde nicht"
 fi
-zeilen=$(cat kernel/xhci.fi kernel/usb.fi | wc -l)
+zeilen=$(cat "$K_XHCI" "$K_USB" | wc -l)
 num "Zeilen Treiber, die diese Runde geschrieben hat" "$zeilen" gt 1200
 
 # Die Wurzelplatte.

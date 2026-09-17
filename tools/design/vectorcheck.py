@@ -40,7 +40,7 @@ def tdiv(a, b):
 def rdiv(a, b):
     """Teilen mit Runden, symmetrisch um die Null.
 
-    Muss Bit fuer Bit dasselbe tun wie `rdiv` in kernel/vektor.fi --
+    Muss Bit fuer Bit dasselbe tun wie `rdiv` in kernel/lib/vektor.fi --
     sonst prueft dieser Test etwas anderes, als der Kernel rechnet."""
     if b == 0:
         return 0
@@ -133,7 +133,7 @@ def ellipse(p, cx, cy, rx, ry):
 
 
 def rastern(p, regel=0):
-    """Dasselbe Verfahren wie kernel/vektor.fi:rastern."""
+    """Dasselbe Verfahren wie kernel/lib/vektor.fi:rastern."""
     if not p.kanten:
         return None
     xs = [k[0] for k in p.kanten] + [k[2] for k in p.kanten]
@@ -418,7 +418,7 @@ def main():
         return x
 
     def strich(p, pts, hb):
-        """Nachbau von kernel/vektor.fi:strichen -- EIN Strich, an den
+        """Nachbau von kernel/lib/vektor.fi:strichen -- EIN Strich, an den
         bestehenden Pfad angehaengt."""
         n = len(pts)
         for seite in range(2):

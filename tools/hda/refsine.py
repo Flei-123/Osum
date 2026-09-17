@@ -3,7 +3,7 @@
 """tools/hda/refsine.py -- DERSELBE SINUS, NOCH EINMAL, AUF DEM WIRT.
 
 Diese Datei rechnet Zeile fuer Zeile das nach, was `audio.sine_q28` und
-`audio.tone_into` in `kernel/audio.fi` rechnen: dieselbe Festkommareihe
+`audio.tone_into` in `kernel/drv/snd/audio.fi` rechnen: dieselbe Festkommareihe
 in Q28, derselbe Phasenschritt, dieselbe Rundung, dieselbe Klammer.
 
 WOZU. Ohne sie hiesse "der Ton stimmt" nur "es sieht nach einem Sinus
@@ -16,7 +16,7 @@ jeder einzelne der 96000 Werte stimmt, dann ist der ganze Weg
 rechnungsfrei. Das ist die Zusage "bitgleich" aus dem Auftrag dieser
 Runde, und sie ist nur so pruefbar.
 
-WENN DIESE DATEI UND kernel/audio.fi AUSEINANDERLAUFEN, faellt der
+WENN DIESE DATEI UND kernel/drv/snd/audio.fi AUSEINANDERLAUFEN, faellt der
 Vergleich -- absichtlich. Wer die Reihe im Kernel aendert, aendert sie
 hier mit, und beim naechsten Lauf steht in der Ausgabe, ob beide
 dasselbe meinen.

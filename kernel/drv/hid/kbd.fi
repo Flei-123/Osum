@@ -1,0 +1,1296 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/kbd.fi -- round 59: the first real device.
+//
+// The PS/2 keyboard is the simplest device a PC has, and it is a real
+// one: it interrupts (IRQ1 -> vector 33), it has a data port (0x60), and
+// it delivers scan codes, not characters. Whoever can read a key can read
+// a device.
+//
+// Scan code set 1, the one every PC still speaks after a reset. Below
+// 0x80 a key was pressed, from 0x80 on it was released -- the same code
+// with the top bit set. The kernel is only interested in the press.
+//
+// No shift, no modifiers, no repeat: the table has one entry per code,
+// and what has none stays silent. A keyboard driver is a round of its
+// own; this is the proof that the interrupt path works.
+//
+// ============================================ RUNDE I18N: ZWEI BELEGUNGEN
+//
+// EIN ABTASTCODE IST KEIN ZEICHEN, und bis heute tat dieser Kernel so,
+// als waere er eines: zwei Zeichenkettenliterale zu achtundfuenfzig
+// Oktetten, indiziert mit dem Abtastcode, EIN Oktett heraus. Das ist die
+// amerikanische Belegung, fest verdrahtet, ohne dass irgendwo das Wort
+// "amerikanisch" stand.
+//
+// Auf einer deutschen Tastatur stimmt davon fast nichts. Y und Z sind
+// vertauscht. Wo `;` steht, liegt `o` mit zwei Punkten. Das
+// Klammeraffenzeichen liegt auf der DRITTEN Ebene von Q und ist ohne
+// AltGr ueberhaupt nicht erreichbar -- und ohne Klammeraffenzeichen
+// laesst sich in diesem System keine Postanschrift eintippen. Ein
+// Umlaut existierte gar nicht: die Tabelle ist ein Oktett breit und der
+// Zeichensatz war ASCII.
+//
+// WAS SICH DESHALB AENDERT, und zwar in dieser Reihenfolge:
+//
+//   1. EINE TASTE LIEFERT EINEN CODEPUNKT, nicht ein Oktett. `code_of`
+//      gibt eine Zahl bis 0x10FFFF zurueck.
+//   2. IN DEN RING GEHT WEITER EIN OKTETT -- aber jetzt die
+//      UTF-8-Kodierung des Codepunkts (`lib/utf8.fi`). Ein Umlaut sind
+//      zwei Oktette, sie kommen nacheinander an, und ein Textfeld setzt
+//      sie beim Zeichnen wieder zusammen. Fuer alles unter 0x80 aendert
+//      sich KEIN Oktett -- deshalb bleiben die Messungen der Runden 59,
+//      K1, K6 und K11 Zeichen fuer Zeichen dieselben.
+//   3. ZWEI BELEGUNGEN, umschaltbar: `us` (0) und `de` (1). Umgeschaltet
+//      wird mit STRG+ALT+L oder aus Ring 3 ueber SYS_OSUM_KBD.
+//   4. DIE RECHTE ALT-TASTE IST ALTGR und ist die dritte Ebene der
+//      deutschen Belegung.
+//
+// WAS DIESE RUNDE NICHT BAUT, und es steht auch in docs/I18N.md:
+// TOTE TASTEN. Auf einer deutschen Tastatur sind `^`, `´` und `` ` ``
+// tot -- sie warten auf den naechsten Buchstaben und setzen den Akzent
+// darauf (`´` dann `e` gibt `e` mit Akzent). Hier geben sie das
+// Akzentzeichen SOFORT aus. Das ist ehrlicher als ein halbes
+// Zustandsautomat: wer die franzoesischen Buchstaben braucht, braucht
+// auch eine franzoesische Belegung, und die ist eine eigene Runde. Die
+// Zeichen selbst sind in der Schrift und lassen sich einfuegen.
+
+import serial
+import lib.kstate
+import drv.con.tty
+import gfx.gfx
+import utf8
+import sched.time
+
+export {
+    irq, on_code, translate, shifted, take, waiting,
+    hot_take, hot_waiting, push_hot, MAX_KEYS, HOT_SLOTS,
+    code_of, layout, set_layout, switches, LAYOUTS, L_US, L_DE,
+    super_down, hotkey_seq, hotkey_key, hotkey_ns,
+    // RUNDE BLECHEINGABE: die drei Feststelltasten und ihre Lampen.
+    locks, locks_dirty, locks_clean, locks_set,
+    LK_NUM, LK_CAPS, LK_SCROLL
+}
+
+// How many octets fit into the buffer in the data area.
+const MAX_KEYS: u64 = 64
+
+const DATA_PORT: u16 = 0x60
+
+// Die Belegungen. Die NAMEN sind englisch und die Codes die von
+// ISO 639 -- dieselbe Regel wie bei den Sprachdateien unter
+// /usr/share/locale/.
+const L_US: u64 = 0
+const L_DE: u64 = 1
+const LAYOUTS: u64 = 2
+
+// Vector 33. Reading the data port acknowledges the key to the keyboard
+// -- without it the controller delivers nothing more.
+// ROUNDE K11: UMSCHALT, STEUERUNG UND DIE UEBRIGEN PFEILTASTEN.
+//
+// Bis hierher war dies "der Beweis, dass der Unterbrechungsweg geht": eine
+// Tabelle, ein Zeichen, keine Zusatztasten. Damit kann man `ls` tippen
+// und sonst nichts -- kein Grossbuchstabe, kein STRG-O, keine Pfeiltaste
+// ausser der nach oben. Ein Editor braucht alle drei.
+//
+// WAS SICH NICHT AENDERT, und zwar mit Absicht:
+//   * Die Pfeiltaste NACH OBEN bleibt das Oktett 14. Daran haengt
+//     Abschnitt 11 von tools/userland/run.sh ("die Zeile von vorhin"),
+//     und die Shell liest genau diese Zahl seit Runde K6.
+//   * Es wird weiterhin GENAU EINE Zeile `key: ` je Taste gemeldet, auch
+//     wenn die Taste drei Oktette schickt. Abschnitt 7 von
+//     tools/kernel/run.sh zaehlt diese Zeilen.
+//   * Die Zusatztasten selbst melden nichts -- ihre Codes standen schon
+//     bisher nicht in der Tabelle und blieben still.
+//
+// Die Zusatztasten kommen mit dem Vorzeichen 0xE0, und das wurde bisher
+// als Loslassen weggeworfen (es ist >= 0x80). Jetzt wird es gemerkt.
+fn irq(state: u64) {
+    on_code(state, serial.in8(DATA_PORT) as u64)
+}
+
+// RUNDE K17: DIE ZEILE DARUEBER IST DER GANZE UNTERSCHIED ZWISCHEN
+// PS/2 UND USB.
+//
+// Bis zu dieser Runde stand hier eine einzige Funktion: Oktett vom Tor
+// 0x60 holen und auswerten. Seit dieser Runde gibt es eine zweite
+// Quelle fuer denselben Abtastcode -- `usb.press` uebersetzt einen
+// HID-Gebrauchscode in Satz 1 und ruft `on_code`. Getrennt ist nur das
+// HOLEN; die Auswertung, die Umschalttabelle, die Steuerungsbehandlung,
+// die Zeilendisziplin und der Eingabefokus des Fensterservers sind
+// EINE Kette, und beide Geraete haengen an derselben.
+//
+// Genau das misst `tools/k17/run.sh`: derselbe Testlauf, einmal mit
+// `-device usb-kbd` und einmal mit PS/2, und die Ausgaben werden
+// Oktett fuer Oktett verglichen. Waeren es zwei Wege, gingen sie
+// irgendwann auseinander -- und der Vergleich saehe es.
+// ================================================ RUNDE BLECHEINGABE
+// ============ DIE DREI FESTSTELLTASTEN UND IHRE LAMPEN, AN EINER STELLE
+//
+// Justin: "die Num-Lock-Taste leuchtet -- und ich kann sie auch nicht
+// togglen." Das ist zwei Aussagen: die Lampe steht so, wie die FIRMWARE
+// sie gelassen hat, und niemand aendert sie. Der Grund stand im
+// Quelltext: `SET_REPORT` gab es in diesem Baum nicht (`grep SET_REPORT
+// kernel/` -- kein Treffer), es gab nur SET_PROTOCOL und SET_IDLE. Eine
+// Tastatur schaltet ihre Lampen NICHT selbst; sie wartet auf einen
+// Ausgabebericht des Wirts.
+//
+// DER ZUSTAND STEHT HIER UND NICHT IM USB-TREIBER, und das ist der
+// Punkt: `kbd.on_code` ist die EINE Stelle, durch die beide
+// Tastaturwege gehen -- PS/2 aus IRQ 1 und USB ueber `usb.press` (siehe
+// den Kommentar zu `on_code` weiter unten). Ein Zustand je Weg waeren
+// zwei Wahrheiten. `usb.fi` liest ihn hier ab und schickt ihn mit
+// `SET_REPORT` an das Geraet; einen Kreis im Modulgraphen gibt es
+// dabei nicht, denn `usb` bindet `kbd` ein und nicht umgekehrt.
+const LK_NUM: u64 = 1
+const LK_CAPS: u64 = 2
+const LK_SCROLL: u64 = 4
+
+static mut lock_bits: u64 = 0
+// 1 = seit der letzten Uebertragung hat sich etwas geaendert. Beim Start
+// eine 1, damit die Lampen EINMAL auf einen bekannten Stand gebracht
+// werden -- was die Firmware hinterlassen hat, weiss niemand.
+static mut lock_neu: u64 = 1
+
+fn locks(state: u64) -> u64 {
+    return lock_bits
+}
+
+fn locks_dirty() -> u64 {
+    return lock_neu
+}
+
+fn locks_clean() {
+    lock_neu = 0
+}
+
+// Von aussen setzen -- der Herzschlag dieser Runde legt darueber die
+// Rollen-Lampe im Sekundentakt um, ohne den Tastenzustand zu verlieren.
+fn locks_set(v: u64) {
+    lock_bits = v & 7
+    lock_neu = 1
+}
+
+fn lock_toggle(bit: u64) {
+    lock_bits = lock_bits ^ bit
+    lock_neu = 1
+}
+
+fn on_code(state: u64, code: u64) {
+    // DIE DREI FESTSTELLTASTEN, VOR ALLEM ANDEREN. Sie erzeugen kein
+    // Zeichen; sie legen einen Zustand um und lassen eine Lampe
+    // nachziehen. Nur das DRUECKEN zaehlt (Loslassen ist Code + 0x80),
+    // sonst schaltete jede Taste zweimal und die Lampe stuende still.
+    if code == 0x45 {
+        lock_toggle(LK_NUM)
+        kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
+        return
+    }
+    if code == 0x3A {
+        lock_toggle(LK_CAPS)
+        kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
+        return
+    }
+    if code == 0x46 {
+        lock_toggle(LK_SCROLL)
+        kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
+        return
+    }
+    if code == 0xC5 || code == 0xBA || code == 0xC6 {
+        kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
+        return
+    }
+    if code == 0xE0 {
+        kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 1)
+        return
+    }
+    let ext: u64 = kstate.get(state, kstate.K11_OFF + kstate.KB_EXT)
+    // Umschalt und Steuerung: beide Seiten, Druecken und Loslassen. Sie
+    // erzeugen kein Zeichen, also auch keine Meldung.
+    // RUNDE ALLTAG: DIE VORGETAEUSCHTE UMSCHALTTASTE.
+    //
+    // Eine PS/2-Tastatur des Satzes 1 schickt, wenn Umschalt gedrueckt
+    // ist und eine ERWEITERTE Taste kommt, davor ein `E0 AA` und danach
+    // ein `E0 2A` -- ein Loslassen und ein Druecken, die niemand getan
+    // hat. Das ist ein Erbe des Ziffernblocks (der Wirt sollte die
+    // umgeschaltete Bedeutung nicht sehen), und es steht in jedem
+    // Handbuch. GEMESSEN: `sendkey shift-delete` kam hier als Entf OHNE
+    // Umschalt an, weil das vorgetaeuschte Loslassen das echte
+    // Druecken geloescht hat.
+    //
+    // Also: mit E0 davor sind diese vier Codes KEINE Umschalttaste.
+    if ext == 1 && (code == 0x2A || code == 0x36 || code == 0xAA
+        || code == 0xB6) {
+        kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
+        return
+    }
+    if code == 0x2A || code == 0x36 {
+        kstate.set(state, kstate.K11_OFF + kstate.KB_SHIFT, 1)
+        return
+    }
+    if code == 0xAA || code == 0xB6 {
+        kstate.set(state, kstate.K11_OFF + kstate.KB_SHIFT, 0)
+        return
+    }
+    if code == 0x1D {
+        kstate.set(state, kstate.K11_OFF + kstate.KB_CTRL, 1)
+        kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
+        return
+    }
+    if code == 0x9D {
+        kstate.set(state, kstate.K11_OFF + kstate.KB_CTRL, 0)
+        kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
+        return
+    }
+    // RUNDE TILING sah in 0x38 die Alt-Taste (links und rechts gleich),
+    // RUNDE I18N musste die beiden TRENNEN: 0x38 ohne Vorzeichen ist die
+    // LINKE (Alt, der Modifikator der Fensterkuerzel), 0xE0 0x38 die
+    // RECHTE (AltGr, die dritte Ebene der deutschen Belegung). Getrennt
+    // ist richtig -- AltGr+Q soll ein @ geben und nicht den Fokus
+    // verschieben.
+    if code == 0x38 {
+        if ext == 1 {
+            kstate.set(state, kstate.K11_OFF + kstate.KB_ALTGR, 1)
+        } else {
+            kstate.set(state, kstate.K11_OFF + kstate.KB_OLD, 1)
+        }
+        kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
+        return
+    }
+    if code == 0xB8 {
+        if ext == 1 {
+            kstate.set(state, kstate.K11_OFF + kstate.KB_ALTGR, 0)
+        } else {
+            kstate.set(state, kstate.K11_OFF + kstate.KB_OLD, 0)
+        }
+        kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
+        return
+    }
+    // ============================ ROUND NETVIEW, THIRD ADDENDUM
+    //
+    // THE SUPER KEY DID NOT ARRIVE HERE, and this is where it did not.
+    // It comes as 0xE0 0x5B (left) or 0xE0 0x5C (right); the prefix set
+    // KB_EXT, and the code after it fell through to `arrow`, which has
+    // no entry for 0x5B and returns 0 -- so the key was DROPPED without
+    // a trace. Measured before anything was written: not one line of
+    // this tree mentions 0x5B, and pressing the key produced nothing on
+    // the serial line.
+    //
+    // It is a MODIFIER and is handled exactly like Shift and Control:
+    // it produces no character, so it produces no `key: ` line, and the
+    // promise of round K11 -- exactly one such line per key -- holds
+    // unchanged. The release codes are 0x80 above the press codes and
+    // are caught HERE, before the `code >= 0x80` return further down,
+    // for the same reason 0x9D is caught here.
+    if code == 0x5B || code == 0x5C {
+        kstate.set(state, kstate.K11_OFF + kstate.KB_SUPER, 1)
+        kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
+        // ==================================== RUNDE STARTKNOPF
+        // SUPER ALLEIN OEFFNET DAS STARTMENUE.
+        //
+        // Die Klinke unten faengt bisher nur SUPER PLUS BUCHSTABE. Die
+        // Taste ALLEIN ist auf jedem System der Welt der Startknopf,
+        // und sie ist die einzige Bedienung, die ohne Maus funktioniert
+        // -- auf einem Brett, auf dem die Maus gerade nicht geht, ist
+        // sie der ganze Unterschied.
+        //
+        // DIE KLASSISCHE FALLE: Super gedrueckt HALTEN und dabei mit
+        // der Maus arbeiten (oder eine andere Taste druecken) darf
+        // NICHT ausloesen. Also wird beim Druecken nur gemerkt, dass
+        // seither nichts anderes kam; jede andere Taste loescht die
+        // Merkung, und erst das LOSLASSEN gibt den Puls.
+        //
+        // Der Code des Pulses ist 0 -- kein Zeichen hat den Wert null,
+        // also kann ihn keine Buchstabenkombination je erzeugen.
+        super_rein = 1
+        return
+    }
+    if code == 0xDB || code == 0xDC {
+        kstate.set(state, kstate.K11_OFF + kstate.KB_SUPER, 0)
+        kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
+        if super_rein != 0 {
+            super_rein = 0
+            kstate.set(state, kstate.K11_OFF + kstate.HK_KEY, 0)
+            kstate.set(state, kstate.K11_OFF + kstate.HK_NS,
+                time.mono_ns(state))
+            kstate.add(state, kstate.K11_OFF + kstate.HK_SEQ, 1)
+            say_hotkey(0)
+        }
+        return
+    }
+    // Irgendetwas anderes ist passiert, waehrend Super unten war --
+    // dann war es eine Kombination und kein Startknopf.
+    if code < 0x80 {
+        super_rein = 0
+    }
+    kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
+    if code >= 0x80 {
+        return
+    }
+    // RUNDE I18N: STRG+ALT+L SCHALTET DIE BELEGUNG UM. Der Abtastcode
+    // 0x26 ist auf BEIDEN Belegungen `l`, die Tastenkombination liegt
+    // also auf derselben Taste, egal welche Belegung gerade gilt -- was
+    // bei einer Umschalttaste zwischen Belegungen die einzige
+    // brauchbare Wahl ist. Es wird KEIN Zeichen geliefert.
+    //
+    // DIESE ABFRAGE STEHT VOR DER DER RUNDE TILING, und die Reihenfolge
+    // ist der ganze Punkt: TILING nimmt JEDE Taste mit gedrueckter
+    // Alt-Taste als Kuerzel. Stuende sie zuerst, ginge Strg+Alt+L in
+    // deren Ring und die Belegung liesse sich nie umschalten.
+    if code == 0x26 && kstate.get(state, kstate.K11_OFF + kstate.KB_CTRL) == 1
+        && kstate.get(state, kstate.K11_OFF + kstate.KB_OLD) == 1 {
+        let l: u64 = kstate.get(state, kstate.K11_OFF + kstate.KB_LAYOUT)
+        set_layout(state, (l + 1) % LAYOUTS)
+        say_layout(kstate.get(state, kstate.K11_OFF + kstate.KB_LAYOUT))
+        return
+    }
+    // RUNDE TILING: MIT ALT IST DIE TASTE EIN KUERZEL UND KEINE EINGABE.
+    // Sie darf deshalb NICHT durch `deliver` gehen -- sonst steht ein `h`
+    // in der Shell, wenn man den Fokus nach links wechselt. Sie landet in
+    // einem eigenen Ring, den `wm.poll` abholt. Diese Richtung ist die
+    // gleiche wie beim Zeigegeraet, und sie ist der Grund, warum `kbd.fi`
+    // den Fensterserver dafuer nicht kennen muss.
+    // ================================================ RUNDE EXPLORER-2
+    //
+    // ALT+EINGABE UND ALT+PFEIL GEHOEREN DEM FENSTER, NICHT DEM RING.
+    //
+    // Die Zeile darunter schickt JEDE Taste mit gehaltenem Alt in den
+    // Kuerzelring des Fensterservers (Runde TILING). Fuer Alt+H, mit
+    // dem man den Fokus verschiebt, ist das richtig. Fuer die drei
+    // Tastenkuerzel, die JEDER Dateimanager hat, ist es falsch:
+    //
+    //     Alt+Eingabe   Eigenschaften des angefassten Stuecks
+    //     Alt+Links     zurueck        Alt+Rechts  vorwaerts
+    //     Alt+Hoch      eine Ebene hinauf
+    //
+    // Sie sind ANWENDUNGSkuerzel und keine Fensterkuerzel -- der Server
+    // hat fuer sie keine Bindung, sie fielen also bis hier lautlos in
+    // den Ring und kamen nirgends an. Gemessen: `sendkey alt-ret` liess
+    // `wm: hot c=28 mod=1 act=0` stehen und im Fenster passierte nichts.
+    //
+    // Geliefert werden sie als das, was xterm liefert -- `ESC [ n ; 3 ~`
+    // mit dem Modifikator 3 fuer Alt --, weil `wlib.decode` diese Form
+    // schon zerlegt und `tilde` den Modifikator schon als Parameter
+    // bekommt. Kein neuer Weg, nur ein weiterer Wert auf dem alten.
+    if kstate.get(state, kstate.K11_OFF + kstate.KB_OLD) == 1 {
+        // 0x1C ist die Eingabetaste, 0x4B/0x4D/0x48 sind die Pfeile
+        // links/rechts/hoch (dieselben Abtastcodes, die `alt_key`
+        // oben auf 0x81..0x84 abbildet).
+        var an: u64 = 0
+        if code == 0x1C {
+            an = 27 // ESC [ 27 ; 3 ~  -- Alt+Eingabe
+        } else if code == 0x4B {
+            an = 20 // Alt+Links
+        } else if code == 0x4D {
+            an = 21 // Alt+Rechts
+        } else if code == 0x48 {
+            an = 22 // Alt+Hoch
+        }
+        if an != 0 {
+            deliver(state, 27)
+            deliver(state, 91)
+            num_send(state, an)
+            deliver(state, 59)
+            deliver(state, 51) // ';3' = Alt
+            deliver(state, 126)
+            kstate.add(state, kstate.K11_OFF + kstate.KB_SEQS, 1)
+            say_seq(an)
+            return
+        }
+        old_key(state, code)
+        return
+    }
+    // ================================================ RUNDE EXPLORER-2
+    //
+    // DIE F-TASTEN. Sie hat dieses System nie gehabt: die Tabelle in
+    // `translate` reicht bis Abtastcode 57, F1 faengt bei 0x3B an, und
+    // was darueber liegt, gab eine Null zurueck -- die Taste wurde
+    // lautlos verschluckt. Gemerkt hat es diese Runde daran, dass F2
+    // (umbenennen) und F5 (neu laden) im Dateimanager nicht gehen
+    // KONNTEN, egal was das Programm tut.
+    //
+    // Geliefert als `ESC [ n ~` mit den Nummern, die xterm seit je
+    // benutzt: F1..F5 = 11,12,13,14,15 und F6..F10 = 17..21. Die
+    // Luecke bei 16 ist keine Schlamperei, sie ist die Ueberlieferung.
+    if code >= 0x3B && code <= 0x44 {
+        var fn_n: u64 = 11 + (code - 0x3B)
+        if code >= 0x40 {
+            fn_n = 17 + (code - 0x40) // F6 an, ueber die Luecke 16
+        }
+        deliver(state, 27)
+        deliver(state, 91)
+        num_send(state, fn_n)
+        deliver(state, 126)
+        kstate.add(state, kstate.K11_OFF + kstate.KB_SEQS, 1)
+        say_seq(fn_n)
+        return
+    }
+    // ================================================== RUNDE VOLLBILD
+    // F11 IST EIN GLOBALES KUERZEL UND KEIN TEXT.
+    //
+    // F11 (0x57) und F12 (0x58) lagen bisher UEBER der F-Tasten-Strecke
+    // (0x3B..0x44) und fielen durch jede Abfrage hindurch -- sie wurden
+    // lautlos verschluckt, genauso wie F1..F10 vor der Runde
+    // EXPLORER-2. Das ist der Grund, warum es kein Vollbild geben
+    // KONNTE, egal was der Fensterserver tut.
+    //
+    // WARUM IN DEN KUERZELRING UND NICHT ALS ZEICHENFOLGE. Vollbild ist
+    // eine Sache des FENSTERSERVERS und nicht der Anwendung: es
+    // aendert Groesse, Ebene und Schmuck des Fensters. Der Ring ist der
+    // Weg, auf dem der Server Tasten bekommt, die keinem Fenster
+    // gehoeren -- derselbe, den Alt+Tab geht.
+    //
+    // OHNE MODIFIKATOR (mod=0). Windows und jeder Browser schalten mit
+    // dem nackten F11 um; ein Kuerzel, das man nur mit Alt erreicht,
+    // waere ein anderes Kuerzel.
+    if code == 0x57 {
+        var s_fk: [u8; 16] = "kbd: f11 -> hot\0"
+        serial.puts((&s_fk[0]) as u64)
+        serial.put(10 as u8)
+        push_hot(state, KEY_F11, 0)
+        return
+    }
+    // RUNDE FENSTER: F12 ist die MESSTASTE. Ohne sie gibt es die
+    // Fenstergeometrie nur im Herzschlag -- und der schweigt unter
+    // `nopuls`, mit dem jeder Aufnahmelauf faehrt. Ein Zustand, den
+    // man nur im Bild sieht, ist keiner, den man nachrechnen kann:
+    // deshalb eine Taste, die die ganze Liste auf die Leitung legt.
+    if code == 0x58 {
+        var s_gk: [u8; 16] = "kbd: f12 -> hot\0"
+        serial.puts((&s_gk[0]) as u64)
+        serial.put(10 as u8)
+        push_hot(state, KEY_F12, 0)
+        return
+    }
+    // Die Pfeiltaste nach oben: ein Oktett, unveraendert seit Runde K6.
+    if code == 72 {
+        deliver(state, 14)
+        say_key(14)
+        return
+    }
+    if ext == 1 {
+        let final: u64 = arrow(code)
+        if final == 0 {
+            return
+        }
+        // `ESC [ x` -- was ein VT100 schickt und was der Editor liest.
+        deliver(state, 27)
+        deliver(state, 91)
+        if final > 255 {
+            deliver(state, final - 256)
+            // RUNDE ALLTAG: MIT UMSCHALT IST ES EINE ANDERE TASTE.
+            // `ESC [ 3 ; 2 ~` statt `ESC [ 3 ~` -- die Form, die xterm
+            // seit dreissig Jahren schickt und die wlib.decode liest.
+            // Der Dateimanager braucht sie: Entf legt in den
+            // Papierkorb, Umschalt+Entf loescht endgueltig, und ohne
+            // diese zwei Oktette waere das dieselbe Taste.
+            if kstate.get(state, kstate.K11_OFF + kstate.KB_SHIFT) == 1 {
+                deliver(state, 59)
+                deliver(state, 50)
+            }
+            deliver(state, 126)
+        } else {
+            deliver(state, final)
+        }
+        kstate.add(state, kstate.K11_OFF + kstate.KB_SEQS, 1)
+        say_seq(final)
+        return
+    }
+    // RUNDE I18N: EIN CODEPUNKT, nicht ein Oktett.
+    var c: u64 = code_of(kstate.get(state, kstate.K11_OFF + kstate.KB_LAYOUT),
+        code,
+        kstate.get(state, kstate.K11_OFF + kstate.KB_SHIFT) == 1,
+        kstate.get(state, kstate.K11_OFF + kstate.KB_ALTGR) == 1)
+    if c == 0 {
+        return
+    }
+    if kstate.get(state, kstate.K11_OFF + kstate.KB_CTRL) == 1 {
+        // ============================================ RUNDE EXPLORER-2
+        //
+        // ZWEI VON SECHSUNDZWANZIG SIND KEINE STEUEROKTETTE MEHR.
+        //
+        // Strg+Buchstabe wird unten auf 1..26 abgebildet, und das ist
+        // fuer vierundzwanzig davon richtig und seit je so. Zwei
+        // kollidieren mit Tasten, die dieses System schon hat:
+        //
+        //     Strg+H  -> 8   und 8 ist der RUECKSCHRITT
+        //     Strg+N  -> 14  und 14 ist die PFEILTASTE HOCH (Zeile 357)
+        //
+        // Ein Programm, das die Oktette liest, kann die beiden Paare
+        // nicht auseinanderhalten -- "versteckte Dateien zeigen" und
+        // "eine Ebene hinauf" waeren dieselbe Taste, und im
+        // Dateimanager ist genau das der Unterschied zwischen zwei
+        // Befehlen, die jeder Mensch getrennt erwartet.
+        //
+        // Also gehen diese ZWEI als `ESC [ n ; 5 ~` (Modifikator 5 =
+        // Steuerung, die Form, die `wlib.tilde` schon zerlegt). Alle
+        // anderen bleiben Steueroktette -- die Shell, der Editor und
+        // jedes bestehende Programm sehen keinen Unterschied.
+        let low0: u64 = c | 32
+        if low0 == 104 || low0 == 110 { // 'h' oder 'n'
+            var cn: u64 = 30 // Strg+H
+            if low0 == 110 {
+                cn = 31 // Strg+N
+            }
+            deliver(state, 27)
+            deliver(state, 91)
+            num_send(state, cn)
+            deliver(state, 59)
+            deliver(state, 53) // ';5' = Steuerung
+            deliver(state, 126)
+            kstate.add(state, kstate.K11_OFF + kstate.KB_SEQS, 1)
+            say_seq(cn)
+            return
+        }
+        // STRG-A ist 1, STRG-Z ist 26 -- die unteren fuenf Bit des
+        // Buchstabens. Was kein Buchstabe ist, bleibt, wie es ist.
+        let low: u64 = c | 32
+        if low >= 97 && low <= 122 {
+            c = low - 96
+        }
+    }
+    // ============================ ROUND NETVIEW, THIRD ADDENDUM
+    //
+    // SUPER PLUS A LETTER IS A HOTKEY AND NOT TEXT. It is LATCHED here
+    // and NOT delivered, and the "not delivered" is the important half:
+    // a Super+A that also typed an `a` into whatever window had the
+    // focus would put a stray letter in the person's document every
+    // time they opened the quick settings.
+    //
+    // WHY A LATCH AND NOT AN EVENT. A hotkey has no window -- that is
+    // what makes it global. The window server hands a key to the
+    // window WITH THE FOCUS (`wm.on_key`), and the taskbar is
+    // deliberately never that window. So the press is written down
+    // here, with a counter and a timestamp, and whoever cares reads it
+    // (SYS_OSUM_HOTKEY). The counter is the protocol: a reader that
+    // sees a number it has not seen acts once, and two readers do not
+    // take the press away from each other.
+    if kstate.get(state, kstate.K11_OFF + kstate.KB_SUPER) == 1 {
+        // RUNDE ALLTAG: WIN+L SPERRT, UND ZWAR IM KERN.
+        //
+        // Nicht in der Taskleiste, nicht im Schreibtisch: die Sperre
+        // muss auch dann gehen, wenn die Oberflaeche haengt -- das ist
+        // der Fall, in dem man sie am dringendsten braucht. Sie wird
+        // hier GESETZT; das Fenster mit der Kennwortfrage startet der
+        // Kern danach (kernel/kgui.fi), und wenn es stirbt, startet er
+        // es wieder.
+        if c == 108 || c == 76 {
+            if kstate.get(state, kstate.K11_OFF + kstate.SP_ON) == 0 {
+                kstate.set(state, kstate.K11_OFF + kstate.SP_ON, 1)
+                kstate.add(state, kstate.K11_OFF + kstate.SP_LOCKS, 1)
+                var sl: [u8; 20] = "sperre: an (Win+L)\0\0"
+                serial.puts((&sl[0]) as u64)
+                serial.put(10 as u8)
+            }
+            return
+        }
+        kstate.set(state, kstate.K11_OFF + kstate.HK_KEY, c)
+        kstate.set(state, kstate.K11_OFF + kstate.HK_NS, time.mono_ns(state))
+        kstate.add(state, kstate.K11_OFF + kstate.HK_SEQ, 1)
+        say_hotkey(c)
+        return
+    }
+    emit(state, c)
+}
+
+// EIN CODEPUNKT IN DEN RING, ALS UTF-8.
+//
+// Bis 0x7F ist das Oktett fuer Oktett, was `deliver(state, c)` vorher
+// tat -- kein bestehender Test sieht einen Unterschied. Darueber sind es
+// zwei bis vier Oktette, die NACHEINANDER in den Ring gehen; ein Leser,
+// der Zeichen will, setzt sie mit `utf8.next` wieder zusammen.
+//
+// Gemeldet wird trotzdem GENAU EINE Zeile `key: ` -- die Zusage von
+// Runde K11, an der Abschnitt 7 von tools/kernel/run.sh haengt.
+fn emit(state: u64, cp: u64) {
+    var b: [u8; 4] = [0 as u8; 4]
+    let n: u64 = utf8.encode(cp, (&b[0]) as u64)
+    var i: u64 = 0
+    while i < n {
+        deliver(state, (b[i as usize]) as u64)
+        i = i + 1
+    }
+    say_cp(cp, (&b[0]) as u64, n)
+}
+
+// Is the key held down right now? Asked by nothing in the kernel and by
+// `/bin/netview` through the system call -- it is here so that a person
+// who wonders whether their keyboard even has a working Super key can
+// find out without guessing.
+// 1, solange Super gedrueckt ist UND seither keine andere Taste kam.
+static mut super_rein: u64 = 0
+
+fn super_down(state: u64) -> u64 {
+    return kstate.get(state, kstate.K11_OFF + kstate.KB_SUPER)
+}
+
+fn hotkey_seq(state: u64) -> u64 {
+    return kstate.get(state, kstate.K11_OFF + kstate.HK_SEQ)
+}
+
+fn hotkey_key(state: u64) -> u64 {
+    return kstate.get(state, kstate.K11_OFF + kstate.HK_KEY)
+}
+
+fn hotkey_ns(state: u64) -> u64 {
+    return kstate.get(state, kstate.K11_OFF + kstate.HK_NS)
+}
+
+// Its own line and not a `key: ` line, because it is not a key that was
+// typed -- and because `tools/kernel/run.sh` counts `key: ` lines.
+fn say_hotkey(c: u64) {
+    var label: [u8; 12] = "hk: super+\0\0"
+    var allein: [u8; 18] = "hk: super allein\0\0"
+    if c == 0 {
+        serial.puts((&allein[0]) as u64)
+        serial.put(10 as u8)
+        return
+    }
+    serial.puts((&label[0]) as u64)
+    serial.put(c as u8)
+    serial.put(10 as u8)
+}
+
+// Ein Oktett in den Ring von Runde K1 UND durch die Zeilendisziplin.
+fn deliver(state: u64, c: u64) {
+    kstate.add(state, kstate.KEYS, 1)
+    let n: u64 = kstate.get(state, kstate.KEYLEN)
+    if n - kstate.get(state, kstate.KEYPOS) < MAX_KEYS {
+        kstate.set8(state + kstate.KEYBUF + n % MAX_KEYS, c as u8)
+        kstate.set(state, kstate.KEYLEN, n + 1)
+    }
+    // ROUND K9. Dieselbe Taste geht AUSSERDEM durch die Zeilendisziplin
+    // der Konsole (`kernel/tty.fi`). Der Ring darueber bleibt, wo er ist:
+    // an ihm haengen der Zaehler und die Ausgabe der Runden 59 und K1,
+    // und die sollen weiter messen, was sie gemessen haben. Was ein
+    // Prozess liest, kommt von hier an aus dem Terminal -- mit Echo,
+    // Zeilenbearbeitung und STRG-C.
+    // ROUNDE K10. Liegt ein Fensterserver darueber, entscheidet ER, wer
+    // die Taste bekommt -- das ist genau das, was ein EINGABEFOKUS ist.
+    // Ein Terminalfenster reicht sie an sein Terminal weiter (und damit
+    // an die Shell, die darin laeuft); jedes andere Fenster bekommt ein
+    // Ereignis in seinen Ring und holt es sich aus Ring 3 ab.
+    if gfx.wm_ready(state) {
+        gfx.wm_on_key(state, c as u64)
+        let ziel: u64 = gfx.wm_key_tty(state)
+        if ziel < tty.MAX_TTY && kstate.get(state, kstate.TTY_READY) != 0 {
+            tty.push(state, ziel, c as u64)
+        }
+    } else {
+        if kstate.get(state, kstate.TTY_READY) != 0 {
+            tty.push(state, tty.console(), c as u64)
+        }
+    }
+}
+
+// Welcher Schlussbuchstabe zu einer Zusatztaste gehoert. Ueber 255 heisst:
+// die Form `ESC [ n ~` statt `ESC [ x`.
+fn arrow(code: u64) -> u64 {
+    if code == 0x50 {
+        return 66 // B, nach unten
+    }
+    if code == 0x4B {
+        return 68 // D, nach links
+    }
+    if code == 0x4D {
+        return 67 // C, nach rechts
+    }
+    if code == 0x47 {
+        return 72 // H, Anfang
+    }
+    if code == 0x4F {
+        return 70 // F, Ende
+    }
+    if code == 0x49 {
+        return 256 + 53 // 5~, Seite hoch
+    }
+    if code == 0x51 {
+        return 256 + 54 // 6~, Seite runter
+    }
+    if code == 0x53 {
+        return 256 + 51 // 3~, Entfernen
+    }
+    if code == 0x1C {
+        return 0 // Eingabetaste des Ziffernblocks -- kommt schon durch
+    }
+    return 0
+}
+
+// ------------------------------------------------------- die Belegung
+
+fn layout(state: u64) -> u64 {
+    return kstate.get(state, kstate.K11_OFF + kstate.KB_LAYOUT)
+}
+
+fn switches(state: u64) -> u64 {
+    return kstate.get(state, kstate.K11_OFF + kstate.KB_SWITCH)
+}
+
+// Gibt zurueck, ob wirklich umgeschaltet wurde. Eine Nummer, die es
+// nicht gibt, wird abgelehnt und nicht stillschweigend auf 0 gerundet
+// -- sonst meldet ein Einstellungsfenster Erfolg und die Tastatur
+// bleibt, wie sie war.
+fn set_layout(state: u64, n: u64) -> bool {
+    if n >= LAYOUTS {
+        return false
+    }
+    kstate.set(state, kstate.K11_OFF + kstate.KB_LAYOUT, n)
+    kstate.add(state, kstate.K11_OFF + kstate.KB_SWITCH, 1)
+    return true
+}
+
+// ABTASTCODE -> CODEPUNKT.
+//
+// Die eine Stelle, an der eine Taste zu einem Zeichen wird. `shift` und
+// `altgr` sind die beiden Ebenen ueber der Grundebene; STRG wird
+// NACHHER angewandt (im Aufrufer), weil STRG-A auf jeder Belegung 1 ist.
+fn code_of(lay: u64, code: u64, shift: bool, altgr: bool) -> u64 {
+    // Die drei Tasten, die auf JEDER Belegung dasselbe tun und die
+    // seit Runde K1 bzw. K15 festliegen.
+    if code == 14 {
+        return 8 // Rueckschritt
+    }
+    if code == 15 {
+        return 9 // Tabulator
+    }
+    if code == 72 {
+        return 14 // die Pfeiltaste nach oben, Runde K6
+    }
+    if lay == L_DE {
+        return de_code(code, shift, altgr)
+    }
+    if shift {
+        return (shifted(code)) as u64
+    }
+    return (translate(code)) as u64
+}
+
+// ROUND K1: how many keys are waiting to be read.
+fn waiting(state: u64) -> u64 {
+    return kstate.get(state, kstate.KEYLEN) - kstate.get(state, kstate.KEYPOS)
+}
+
+// ROUND K1: the next key, or 0 when there is none. This is the consumer
+// side of the ring, and it is called from a system call -- `sys.fi` turns
+// the interrupt flag off around it, because the producer is an interrupt.
+fn take(state: u64) -> u64 {
+    let pos: u64 = kstate.get(state, kstate.KEYPOS)
+    if pos >= kstate.get(state, kstate.KEYLEN) {
+        return 0
+    }
+    kstate.set(state, kstate.KEYPOS, pos + 1)
+    return kstate.get8(state + kstate.KEYBUF + pos % MAX_KEYS)
+}
+
+// Scan code -> character, 0 = nothing printable. The table covers
+// 0x00..0x39; everything above that is a modifier or a function key.
+//
+// ROUND K1: 0x0E is the backspace. Round 59 had no line to correct and
+// left it silent; a shell has one, and 8 is what the correction is
+// called. Nothing else in the table changed -- the four keys of round
+// 59's case still come out as `firn`.
+//
+// RUNDE I18N: DIESE TABELLE BLEIBT, WIE SIE IST, und sie heisst ab jetzt
+// die AMERIKANISCHE Belegung. Sie ist weiterhin exportiert und wird
+// weiterhin von den Testlaeufern der Runden 59 und K11 direkt
+// aufgerufen; wer sie aendert, aendert eine gemessene Zusage.
+// RUNDE EXPLORER-2: eine Dezimalzahl als Oktette auf die Leitung.
+// Zwei Stellen reichen -- jede Nummer, die hier durchgeht, ist
+// kleiner als hundert -- und mehr als das Noetige zu bauen hiesse,
+// Code zu schreiben, den kein Aufrufer je erreicht.
+fn num_send(state: u64, v: u64) {
+    if v >= 10 {
+        deliver(state, 48 + (v / 10))
+    }
+    deliver(state, 48 + (v % 10))
+}
+
+fn translate(code: u64) -> u8 {
+    if code == 14 {
+        return 8 as u8
+    }
+    // ROUND K6: the up arrow. It arrives as `E0 48`, and the E0 is
+    // dropped above like a release code, so 0x48 is left over -- the one
+    // key a line editor needs and the table below has no room for. What
+    // the shell reads is 0x0E, and it means: the line before this one.
+    if code == 72 {
+        return 14 as u8
+    }
+    // RUNDE K15: DIE TABULATORTASTE. Sie hat den Abtastcode 15, und an
+    // Platz 15 der Tabelle unten steht eine Null -- die Taste kam in
+    // diesem System also NIE an. Bis Runde K14 fiel das nicht auf: eine
+    // Zeilendisziplin braucht sie nicht, ein Editor auch nicht. Eine
+    // Oberflaeche braucht sie: die TASTATURWEITERSCHALTUNG von einem
+    // Bedienelement zum naechsten IST diese Taste. Gefunden hat es die
+    // Messung -- der Text landete im vorigen Feld, und der Fokusring
+    // stand still.
+    if code == 15 {
+        return 9 as u8
+    }
+    // ROUND NETVIEW, THIRD ADDENDUM: THE ESCAPE KEY. Scan code 1, and
+    // position 1 of the table below is a NUL -- so it, too, has never
+    // arrived in this system. Found the same way round K15 found the
+    // tab key: by needing it and measuring that nothing happened. The
+    // quick settings close on Escape, and a panel the keyboard cannot
+    // get out of is worse than none.
+    //
+    // WHAT THIS CHANGES FOR EVERYONE ELSE, said plainly rather than
+    // left to be discovered: a program that reads keys now sees a 27
+    // where it saw nothing before. `/bin/edit` reads arrow keys as
+    // `ESC [ x` and will take a lone Escape for the start of one,
+    // swallowing the next character -- which is what a real terminal
+    // does with a lone Escape too, and is why terminals have had a
+    // timeout for it since the seventies. This round is not the one
+    // that builds that timeout.
+    if code == 1 {
+        return 27 as u8
+    }
+    var table: [u8; 58] = "\0\01234567890-=\0\0qwertyuiop[]\n\0asdfghjkl;'`\0\\zxcvbnm,./\0*\0 "
+    if code >= 58 {
+        return 0 as u8
+    }
+    return table[code as usize]
+}
+
+// Dieselbe Tabelle mit gedrueckter Umschalttaste. Zwei Tabellen und keine
+// Rechnung: die obere Reihe einer Tastatur hat mit den Ziffern nichts zu
+// tun, und ein `if c >= 97` wuerde `1` zu `!` nicht finden.
+fn shifted(code: u64) -> u8 {
+    if code == 14 {
+        return 8 as u8
+    }
+    if code == 15 {
+        return 9 as u8
+    }
+    var table: [u8; 58] = "\0\0!@#$%^&*()_+\0\0QWERTYUIOP{}\n\0ASDFGHJKL:\"~\0|ZXCVBNM<>?\0*\0 "
+    if code >= 58 {
+        return 0 as u8
+    }
+    return table[code as usize]
+}
+
+// ------------------------------------------- RUNDE TILING: die Kuerzel
+
+const HOT_SLOTS: u64 = 16
+
+// ================================================== RUNDE VOLLBILD
+// DER CODE, MIT DEM F11 IM KUERZELRING LIEGT.
+//
+// Er muss ausserhalb der Zeichen liegen, sonst waere er ein
+// Buchstabe: der Ring traegt EIN Oktett je Taste, und 0x01..0x7F sind
+// darin belegt. `tile.fi` fuehrt dieselbe Zahl unter demselben Namen
+// -- wie bei den Pfeiltasten (KEY_LEFT = 0x81), und aus demselben
+// Grund: Ring 3 kann den Tastaturtreiber nicht importieren.
+const KEY_F11: u64 = 0x8B
+
+// RUNDE FENSTER: die Messtaste, gleich neben F11 und aus demselben
+// Grund ausserhalb der Zeichen.
+const KEY_F12: u64 = 0x8C
+
+// Die Tasten, die kein Zeichen sind, bekommen Nummern ueber 0x80 --
+// dieselben, die `kernel/tile.fi` als KEY_LEFT..KEY_DOWN fuehrt.
+fn old_key(state: u64, code: u64) {
+    var c: u64 = 0
+    if code == 0x4B {
+        c = 0x81
+    }
+    if code == 0x4D {
+        c = 0x82
+    }
+    if code == 0x48 {
+        c = 0x83
+    }
+    if code == 0x50 {
+        c = 0x84
+    }
+    if c == 0 {
+        c = (translate(code)) as u64
+    }
+    if c == 0 {
+        return
+    }
+    var m: u64 = 1 // MOD_ALT
+    if kstate.get(state, kstate.K11_OFF + kstate.KB_SHIFT) == 1 {
+        m = m | 2
+    }
+    if kstate.get(state, kstate.K11_OFF + kstate.KB_CTRL) == 1 {
+        m = m | 4
+    }
+    // ================================================ RUNDE TUERSCHLOSS
+    // WAS IN DEN KUERZELRING GEHT, WIRD GESAGT.
+    //
+    // Ohne diese Zeile ist der Weg einer Tastenkombination genau
+    // zwischen `kbd` und `wm` unsichtbar: die Taste kommt an (`key:`
+    // steht da), im Fensterserver passiert nichts, und man kann nicht
+    // unterscheiden, ob sie nie in den Ring kam, ob der Ring nicht
+    // geleert wird oder ob die Handlung fehlt. Genau diese drei
+    // Moeglichkeiten standen in dieser Runde bei Alt+Tab offen.
+    var s_ak: [u8; 12] = "kbd: alt c=\0"
+    var s_am: [u8; 6] = " mod=\0"
+    serial.puts((&s_ak[0]) as u64)
+    serial.dec(c)
+    serial.puts((&s_am[0]) as u64)
+    serial.dec(m)
+    serial.put(10 as u8)
+    push_hot(state, c, m)
+}
+
+fn push_hot(state: u64, c: u64, m: u64) {
+    var kopf: u64 = kstate.get(state, kstate.K11_OFF + kstate.KB_HHEAD)
+    let schwanz: u64 = kstate.get(state, kstate.K11_OFF + kstate.KB_HTAIL)
+    if kopf - schwanz >= HOT_SLOTS {
+        // Ein Ring, der ueberlaeuft, verliert das AELTESTE -- wie der
+        // Ereignisring des Fensterservers.
+        kstate.set(state, kstate.K11_OFF + kstate.KB_HTAIL, schwanz + 1)
+    }
+    let p: u64 = state + kstate.K11_OFF + kstate.KB_HOT
+        + (kopf % HOT_SLOTS) * 2
+    kstate.set8(p, c as u8)
+    kstate.set8(p + 1, m as u8)
+    kstate.set(state, kstate.K11_OFF + kstate.KB_HHEAD, kopf + 1)
+    kstate.add(state, kstate.K11_OFF + kstate.KB_HOTS, 1)
+}
+
+fn hot_waiting(state: u64) -> u64 {
+    return kstate.get(state, kstate.K11_OFF + kstate.KB_HHEAD)
+        - kstate.get(state, kstate.K11_OFF + kstate.KB_HTAIL)
+}
+
+// Ein Kuerzel abholen: Modifikatoren im oberen Oktett, Taste im unteren.
+// Null heisst: da war keines.
+fn hot_take(state: u64) -> u64 {
+    if hot_waiting(state) == 0 {
+        return 0
+    }
+    let schwanz: u64 = kstate.get(state, kstate.K11_OFF + kstate.KB_HTAIL)
+    let p: u64 = state + kstate.K11_OFF + kstate.KB_HOT
+        + (schwanz % HOT_SLOTS) * 2
+    let c: u64 = kstate.get8(p)
+    let m: u64 = kstate.get8(p + 1)
+    kstate.set(state, kstate.K11_OFF + kstate.KB_HTAIL, schwanz + 1)
+    return (m << 8) | c
+}
+
+// ------------------------------------------- DIE DEUTSCHE BELEGUNG
+//
+// Sie steht als KETTE VON ABFRAGEN und nicht als Tabelle, und dafuer
+// gibt es einen Grund, der aus der Sprache kommt: eine Tabelle waere
+// `[u8; 58]` und damit ein Oktett je Platz -- ein `u` mit zwei Punkten
+// ist U+00FC und passt hinein, ein Eurozeichen (U+20AC) nicht. Ein Feld
+// aus `u64` liesse sich in Stufe 0 nicht als Literal schreiben. Also
+// Abfragen; der Uebersetzer macht daraus dieselbe Sprungkette wie aus
+// jedem anderen `if`.
+//
+// Was von der amerikanischen Belegung UNVERAENDERT bleibt, steht nicht
+// noch einmal hier: Buchstaben ausser Y und Z, die Ziffern, Leertaste,
+// Eingabe, Rueckschritt, Tabulator. Diese Funktion behandelt genau die
+// Tasten, die anders liegen -- und faellt fuer alles andere auf die
+// amerikanische Tabelle zurueck.
+//
+// AUFTEILUNG DER EBENEN:
+//   Grundebene    y und z vertauscht, die drei Umlaute, ss, die
+//                 Interpunktion der unteren Reihe
+//   Umschalt      die Grossbuchstaben dazu, die Zeichen der oberen Reihe
+//   AltGr         @ (Q), Euro (E), die geschweiften und eckigen
+//                 Klammern (7 8 9 0 ss), der senkrechte Strich und die
+//                 Tilde
+fn de_code(code: u64, shift: bool, altgr: bool) -> u64 {
+    if altgr {
+        return de_altgr(code)
+    }
+    if shift {
+        return de_shift(code)
+    }
+    return de_plain(code)
+}
+
+// Die Grundebene.
+fn de_plain(code: u64) -> u64 {
+    // Y und Z sind vertauscht -- das Z, das QWERTZ seinen Namen gibt.
+    if code == 0x15 {
+        return 122 // z, wo auf der amerikanischen Belegung y liegt
+    }
+    if code == 0x2C {
+        return 121 // y, wo dort z liegt
+    }
+    // Die obere Zahlenreihe endet anders: ss und ein Akzent.
+    if code == 0x0C {
+        return 0x00DF // scharfes s
+    }
+    if code == 0x0D {
+        return 0x00B4 // Akkut, NICHT tot -- siehe Kopf dieser Datei
+    }
+    // Die drei Umlaute -- der ganze Grund, warum es diese Belegung gibt.
+    if code == 0x1A {
+        return 0x00FC // u mit zwei Punkten
+    }
+    if code == 0x27 {
+        return 0x00F6 // o mit zwei Punkten
+    }
+    if code == 0x28 {
+        return 0x00E4 // a mit zwei Punkten
+    }
+    // Der Rest der Interpunktion.
+    if code == 0x1B {
+        return 43 // +
+    }
+    if code == 0x29 {
+        return 94 // ^, ebenfalls nicht tot
+    }
+    if code == 0x2B {
+        return 35 // #
+    }
+    if code == 0x33 {
+        return 44 // ,
+    }
+    if code == 0x34 {
+        return 46 // .
+    }
+    if code == 0x35 {
+        return 45 // -
+    }
+    if code == 0x56 {
+        return 60 // <, die Taste neben der linken Umschalttaste
+    }
+    return (translate(code)) as u64
+}
+
+// Mit Umschalt.
+fn de_shift(code: u64) -> u64 {
+    if code == 0x15 {
+        return 90 // Z
+    }
+    if code == 0x2C {
+        return 89 // Y
+    }
+    // Die obere Reihe. Sie hat mit der amerikanischen nichts gemein.
+    if code == 0x02 {
+        return 33 // !
+    }
+    if code == 0x03 {
+        return 34 // "
+    }
+    if code == 0x04 {
+        return 0x00A7 // Paragraphenzeichen
+    }
+    if code == 0x05 {
+        return 36 // $
+    }
+    if code == 0x06 {
+        return 37 // %
+    }
+    if code == 0x07 {
+        return 38 // &
+    }
+    if code == 0x08 {
+        return 47 // /
+    }
+    if code == 0x09 {
+        return 40 // (
+    }
+    if code == 0x0A {
+        return 41 // )
+    }
+    if code == 0x0B {
+        return 61 // =
+    }
+    if code == 0x0C {
+        return 63 // ?
+    }
+    if code == 0x0D {
+        return 96 // Gravis, nicht tot
+    }
+    if code == 0x1A {
+        return 0x00DC // U mit zwei Punkten
+    }
+    if code == 0x27 {
+        return 0x00D6 // O mit zwei Punkten
+    }
+    if code == 0x28 {
+        return 0x00C4 // A mit zwei Punkten
+    }
+    if code == 0x1B {
+        return 42 // *
+    }
+    if code == 0x29 {
+        return 0x00B0 // Gradzeichen
+    }
+    if code == 0x2B {
+        return 39 // '
+    }
+    if code == 0x33 {
+        return 59 // ;
+    }
+    if code == 0x34 {
+        return 58 // :
+    }
+    if code == 0x35 {
+        return 95 // _
+    }
+    if code == 0x56 {
+        return 62 // >
+    }
+    return (shifted(code)) as u64
+}
+
+// Die dritte Ebene. Ohne sie hat eine deutsche Tastatur kein
+// Klammeraffenzeichen und keine geschweifte Klammer -- also weder eine
+// Postanschrift noch einen Programmtext.
+fn de_altgr(code: u64) -> u64 {
+    if code == 0x10 {
+        return 64 // @ auf Q
+    }
+    if code == 0x12 {
+        return 0x20AC // Eurozeichen auf E
+    }
+    if code == 0x03 {
+        return 0x00B2 // hochgestellte Zwei
+    }
+    if code == 0x04 {
+        return 0x00B3 // hochgestellte Drei
+    }
+    if code == 0x08 {
+        return 123 // {
+    }
+    if code == 0x09 {
+        return 91 // [
+    }
+    if code == 0x0A {
+        return 93 // ]
+    }
+    if code == 0x0B {
+        return 125 // }
+    }
+    if code == 0x0C {
+        return 92 // Rueckstrich
+    }
+    if code == 0x1B {
+        return 126 // Tilde
+    }
+    if code == 0x32 {
+        return 0x00B5 // My auf M
+    }
+    if code == 0x56 {
+        return 124 // senkrechter Strich
+    }
+    return 0
+}
+
+// --------------------------------------------------------- die Meldung
+
+fn say_key(c: u64) {
+    var label: [u8; 6] = "key: \0"
+    serial.puts((&label[0]) as u64)
+    if c == 10 {
+        var word: [u8; 8] = "[enter]\0"
+        serial.puts((&word[0]) as u64)
+    } else if c < 32 {
+        // Ein Steuerzeichen sichtbar: ^O statt eines unsichtbaren
+        // Oktetts. Sonst steht in jedem Mitschnitt "key: " und nichts.
+        serial.put(94 as u8)
+        serial.put((c + 64) as u8)
+    } else {
+        serial.put(c as u8)
+    }
+    serial.nl()
+}
+
+// RUNDE I18N: dieselbe Zeile, aber fuer einen CODEPUNKT.
+//
+// Unter 0x80 ist sie Zeichen fuer Zeichen die von `say_key` -- das ist
+// die Bedingung dafuer, dass die Mitschnitte der Runden 59, K1 und K11
+// unveraendert bleiben. Darueber kommen die UTF-8-Oktette auf die
+// Leitung UND die Nummer des Codepunkts hinterher, in der Form
+// ` U+00FC`. Ein Testlaeufer kann damit auf den NAMEN des Zeichens
+// pruefen, ohne dass die Werkzeugkette des Wirts UTF-8 richtig durch
+// eine Pipe bringen muss -- was sie erfahrungsgemaess nicht immer tut.
+fn say_cp(cp: u64, b: u64, n: u64) {
+    var label: [u8; 6] = "key: \0"
+    serial.puts((&label[0]) as u64)
+    if cp == 10 {
+        var word: [u8; 8] = "[enter]\0"
+        serial.puts((&word[0]) as u64)
+    } else if cp < 32 {
+        serial.put(94 as u8)
+        serial.put((cp + 64) as u8)
+    } else {
+        var i: u64 = 0
+        while i < n {
+            serial.put(__mmio_read8((b +% i) as *mut u8))
+            i = i + 1
+        }
+    }
+    if cp >= 0x80 {
+        var u: [u8; 4] = " U+\0"
+        serial.puts((&u[0]) as u64)
+        hex4(cp)
+    }
+    serial.nl()
+}
+
+// Vier Hexziffern, gross geschrieben -- die Schreibweise, in der
+// Unicode seine Zeichen nennt.
+fn hex4(v: u64) {
+    var i: u64 = 4
+    while i > 0 {
+        i = i - 1
+        let d: u64 = (v >> (i * 4)) & 15
+        if d < 10 {
+            serial.put((48 + d) as u8)
+        } else {
+            serial.put((55 + d) as u8)
+        }
+    }
+}
+
+fn say_layout(n: u64) {
+    var label: [u8; 14] = "kbd: layout=\0\0"
+    serial.puts((&label[0]) as u64)
+    if n == L_DE {
+        var de: [u8; 3] = "de\0"
+        serial.puts((&de[0]) as u64)
+    } else {
+        var us: [u8; 3] = "us\0"
+        serial.puts((&us[0]) as u64)
+    }
+    serial.nl()
+}
+
+// ==================================================== RUNDE MERGE-10
+// DIE MELDUNG ZEIGTE EIN ANDERES ZEICHEN, ALS AUSGELIEFERT WURDE.
+//
+// `zahl_senden` liefert die Zahl als ZIFFERN aus ('3','1' fuer 31 --
+// so schreibt es jede Terminalfolge). `say_seq` hat dieselbe Zahl als
+// ROHES OKTETT auf die Leitung gelegt: aus `ESC [ 31 ; 5 ~` wurde in
+// der Meldung `^[[^_`, denn Oktett 31 ist das Steuerzeichen US.
+//
+// Das ist keine Schoenheitsfrage. Wer den Mitschnitt liest, um zu
+// pruefen, ob Strg+N angekommen ist, sucht nach `31;5~` und findet
+// nichts -- und schliesst daraus, die Taste sei nie angekommen. Genau
+// das ist in dieser Runde passiert und hat eine Stunde gekostet,
+// bevor `zahl_senden` daneben gelesen wurde: AUSGELIEFERT WAR ALLES
+// RICHTIG, nur die Meldung log.
+//
+// Eine Meldung ueber eine Folge muss die Folge zeigen, die wirklich
+// hinausging -- also dieselben Ziffern, die `zahl_senden` schreibt,
+// und den Modifikator dazu.
+fn say_seq(final: u64) {
+    var label: [u8; 6] = "key: \0"
+    serial.puts((&label[0]) as u64)
+    serial.put(27 as u8)
+    serial.put(91 as u8)
+    if final > 255 {
+        serial.put((final - 256) as u8)
+        serial.put(126 as u8)
+    } else {
+        // dieselbe Zerlegung wie in `zahl_senden`, damit Meldung und
+        // Auslieferung nicht auseinanderlaufen koennen
+        if final >= 10 {
+            serial.put((48 + (final / 10)) as u8)
+        }
+        serial.put((48 + (final % 10)) as u8)
+        serial.put(59 as u8)  // ';'
+        serial.put(53 as u8)  // '5' = Steuerung
+        serial.put(126 as u8) // '~'
+    }
+    serial.nl()
+}

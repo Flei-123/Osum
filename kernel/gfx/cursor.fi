@@ -1,0 +1,467 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/zeiger.fi -- Runde ECHTHARDWARE-4: DER MAUSZEIGER, GERASTERT.
+//
+// ERZEUGT VON tools/wm/zeiger2.py -- NICHT VON HAND AENDERN. Die
+// Umrisse stehen dort, dieses Modul ist die Vorlage plus die Tafel.
+//
+// WARUM ES DIESE DATEI GIBT. Der Zeiger war bis hierher eine Bitmaske
+// von zwoelf mal achtzehn Bildpunkten in `kernel/wm.fi`
+// (`cursor_row_of`), und bei Vervielfachung 2 wurde jeder Bildpunkt zu
+// einem 2x2-Block. Das ist die Vergroesserung eines Rasterbildes: jede
+// Treppe wird doppelt so hoch, und genau das hat Justin auf seinen
+// Fotos vom echten Monitor gesehen ("hart gepixelt, franst aus").
+// Ausserdem gab es ZWEI Formen -- Pfeil und Textmarke. Hand,
+// Groessenaenderung, Verschieben und Warten fehlten, also zeigte das
+// System ueber einem Fensterrand denselben Pfeil wie ueber dem
+// Schreibtisch.
+//
+// WAS SICH AENDERT. Eine Form ist jetzt ein UMRISS in einem
+// Entwurfsraster von 24 mal 24 Einheiten, und der Kern rastert ihn in
+// ZIELGROESSE: 24 Bildpunkte bei Vervielfachung 1, 48 bei 2. Nichts
+// wird vergroessert. Mit dreifacher Ueberabtastung (neun Proben je
+// Bildpunkt) hat jede Kante zehn Stufen statt zwei -- das ist die
+// Kantenglaettung, und sie kostet nichts, weil das Ergebnis in einer
+// Tafel liegt und nur dann neu gerechnet wird, wenn Form oder
+// Vervielfachung wechseln.
+//
+// DREI LAGEN, IN DIESER REIHENFOLGE GEMALT:
+//   Schatten  der um `rr` aufgeweitete Umriss, nach rechts unten
+//             versetzt, mit geringer Deckung -- er hebt den Zeiger vom
+//             Untergrund ab, wie bei Windows und GNOME.
+//   Rand      die Aussenlinie: derselbe Umriss, um `rr` aufgeweitet,
+//             abzueglich des Kerns. WEISS.
+//   Kern      die Flaeche selbst. DUNKEL.
+// Weisse Linie aussen und dunkler Kern innen heisst: der Zeiger ist auf
+// hellem UND auf dunklem Grund zu sehen, und zwar ohne dass irgendwer
+// das Schema fragen muss.
+//
+// ALLE DREI LAGEN KOMMEN AUS DEMSELBEN UMRISS. Ein zweites, von Hand
+// gemaltes Randbild koennte mit dem ersten aus der Reihe laufen -- das
+// ist genau der Fehler, den Runde BLECH-HID in den alten Bitmasken
+// gefunden hat.
+
+profile kernel
+
+import lib.kstate
+
+export {
+    FORMEN, RASTER, MAXPX,
+    F_PFEIL, F_TEXT, F_HAND, F_WIDTH, F_HEIGHT, F_DIAG1, F_DIAG2,
+    F_CROSS, F_WARTEN,
+    size, griff_x, griff_y, karte_bauen, deck, kern_a, margin_a,
+    schatten_a, karte_form, karte_gr, bauten
+}
+
+const FORMEN: u64 = 9
+const RASTER: u64 = 24   // das Entwurfsraster, in Einheiten
+const VIERTEL: u64 = 96  // RASTER * 4 -- die Einheit der Tafel
+// RUNDE VEKTOR: VIER STATT DREI PROBEN JE ACHSE.
+//
+// Justins Foto vom 10.09.: "der Mauspfeil ist klein und hart
+// gepixelt". Der Zeiger ist seit ECHTHARDWARE-4 ein Umriss und kein
+// Bitmap mehr -- gerastert wurde er aber mit DREIFACHER Ueberabtastung,
+// also neun Proben je Bildpunkt und damit zehn moeglichen
+// Deckungsstufen. Der Unterbau dieser Runde (kernel/vektor.fi) nimmt
+// 4x4, also sechzehn Proben und siebzehn Stufen. Eine schraege Kante,
+// die im Fenster glatt laeuft, wurde am Zeiger sichtbar getreppt --
+// aus keinem anderen Grund als dieser einen Zahl.
+//
+// MAXS und die beiden Arbeitsflaechen haengen daran: 48 * 4 = 192,
+// und 192 * 192 = 36864 Oktette je Flaeche.
+const S: u64 = 4         // Ueberabtastung je Achse, wie der Unterbau
+// Die groesste Zielgroesse. 24 mal die Vervielfachung, gedeckelt: bei
+// Vervielfachung 1 und 2 (den beiden, die auf echtem Blech vorkommen)
+// wird nicht gedeckelt, bei 3 und 4 schon -- ein Zeiger von 96
+// Bildpunkten waere ohnehin keiner mehr.
+const MAXPX: u64 = 48
+const MAXS: u64 = 192    // MAXPX * S
+
+const F_PFEIL: u64 = 0
+const F_TEXT: u64 = 1
+const F_HAND: u64 = 2
+const F_WIDTH: u64 = 3
+const F_HEIGHT: u64 = 4
+const F_DIAG1: u64 = 5
+const F_DIAG2: u64 = 6
+const F_CROSS: u64 = 7
+const F_WARTEN: u64 = 8
+
+// Die Tafel: je Form vier Oktette (erste Ecke, Eckenzahl, Griff x,
+// Griff y -- die beiden letzten in Vierteleinheiten), dahinter die
+// Ecken als Paare in Vierteleinheiten.
+static mut kopf: [u8; 36] = [0 as u8; 36]
+static mut punkte: [u8; 232] = [0 as u8; 232]
+static mut geladen: u64 = 0
+
+// Die Arbeitsflaeche in Ueberabtastung: 3 = Kern, 2 = Rand,
+// 1 = Schatten, 0 = nichts.
+static mut hoch: [u8; 36864] = [0 as u8; 36864]
+// Die Hilfsflaeche der Aufweitung. Sie wird zweimal gebraucht (Rand,
+// Schatten) und beide Male vollstaendig neu beschrieben, also ist es
+// EINE und nicht zwei.
+static mut nah: [u8; 36864] = [0 as u8; 36864]
+
+// Das Ergebnis: je Bildpunkt drei Deckungen (Kern, Rand, Schatten).
+static mut karte: [u8; 6912] = [0 as u8; 6912]
+static mut k_form: u64 = 9999
+static mut k_gr: u64 = 0
+static mut n_bauten: u64 = 0
+
+fn lade() {
+    if geladen == 1 {
+        return
+    }
+    var tk: [u8; 36] = b"\x00\x07\x08\x08\x07\x0c\x30\x30\x13\x15\x21\x0a\x28\x0a\x30\x30\x32\x0a\x30\x30\x3c\x0a\x30\x30\x46\x0a\x30\x30\x50\x18\x30\x30\x68\x0c\x30\x30"
+    var tp: [u8; 232] = b"\x08\x08\x08\x4c\x19\x3c\x24\x56\x2e\x51\x24\x38\x36\x38\x22\x0e\x3e\x0e\x3e\x14\x34\x14\x34\x4c\x3e\x4c\x3e\x52\x22\x52\x22\x4c\x2c\x4c\x2c\x14\x22\x14\x1c\x0a\x26\x0a\x2a\x0e\x2a\x2e\x2e\x2a\x38\x2a\x3b\x2e\x3e\x2c\x46\x2c\x49\x2f\x4a\x2e\x51\x2e\x54\x31\x54\x46\x4e\x56\x2e\x56\x22\x4a\x12\x3a\x12\x34\x18\x31\x1c\x32\x06\x30\x1c\x1d\x1c\x29\x44\x29\x44\x1d\x5a\x30\x44\x43\x44\x37\x1c\x37\x1c\x43\x30\x06\x43\x1c\x37\x1c\x37\x44\x43\x44\x30\x5a\x1d\x44\x29\x44\x29\x1c\x1d\x1c\x12\x12\x2f\x14\x27\x1d\x43\x39\x4c\x31\x4e\x4e\x31\x4c\x39\x43\x1d\x27\x14\x2f\x12\x4e\x14\x31\x1d\x39\x39\x1d\x31\x14\x4e\x12\x4c\x2f\x43\x27\x27\x43\x2f\x4c\x30\x06\x40\x18\x36\x18\x36\x2a\x48\x2a\x48\x20\x5a\x30\x48\x40\x48\x36\x36\x36\x36\x48\x40\x48\x30\x5a\x20\x48\x2a\x48\x2a\x36\x18\x36\x18\x40\x06\x30\x18\x20\x18\x2a\x2a\x2a\x2a\x18\x20\x18\x1a\x0a\x46\x0a\x46\x14\x35\x2d\x35\x33\x46\x4c\x46\x56\x1a\x56\x1a\x4c\x2b\x33\x2b\x2d\x1a\x14"
+    var i: u64 = 0
+    while i < 36 {
+        kopf[(i) as usize] = tk[(i) as usize]
+        i = i + 1
+    }
+    i = 0
+    while i < 232 {
+        punkte[(i) as usize] = tp[(i) as usize]
+        i = i + 1
+    }
+    geladen = 1
+}
+
+// Die Zielgroesse in Bildpunkten. EINE Stelle, damit `wm.fi`, die
+// Schadensrechnung und die Abnahme dieselbe Zahl benutzen.
+fn size(uisc: u64) -> u64 {
+    var g: u64 = RASTER * uisc
+    if uisc == 0 {
+        g = RASTER
+    }
+    if g > MAXPX {
+        g = MAXPX
+    }
+    return g
+}
+
+fn ecken(form: u64) -> u64 {
+    lade()
+    if form >= FORMEN {
+        return 0
+    }
+    return kopf[((form * 4 + 1)) as usize] as u64
+}
+
+fn first(form: u64) -> u64 {
+    lade()
+    return kopf[((form * 4)) as usize] as u64
+}
+
+fn px(form: u64, i: u64) -> i64 {
+    return punkte[(((first(form) + i) * 2)) as usize] as i64
+}
+
+fn py(form: u64, i: u64) -> i64 {
+    return punkte[(((first(form) + i) * 2 + 1)) as usize] as i64
+}
+
+// Der Griffpunkt in Bildpunkten der Zielgroesse. Beim Pfeil ist das
+// die Spitze (0,0), bei allen anderen die Mitte -- eine Textmarke,
+// deren Griff in der Ecke laege, stuende beim Klicken neben der Stelle,
+// die sie zeigt.
+fn griff_x(form: u64, g: u64) -> u64 {
+    lade()
+    if form >= FORMEN {
+        return 0
+    }
+    return (kopf[((form * 4 + 2)) as usize] as u64) * g / VIERTEL
+}
+
+fn griff_y(form: u64, g: u64) -> u64 {
+    lade()
+    if form >= FORMEN {
+        return 0
+    }
+    return (kopf[((form * 4 + 3)) as usize] as u64) * g / VIERTEL
+}
+
+// Liegt die Probe (X/D, Y/D) im Umriss? Ungerade Zahl der
+// Kantendurchgaenge heisst drinnen -- dasselbe Verfahren wie in
+// tools/wm/zeiger2.py, damit das ASCII-Bild dort und das Bild hier
+// dieselbe Form zeigen.
+fn drin(form: u64, xn: i64, yn: i64, d: i64) -> bool {
+    let n: u64 = ecken(form)
+    if n < 3 {
+        return false
+    }
+    var yes: bool = false
+    var i: u64 = 0
+    var j: u64 = n - 1
+    while i < n {
+        let xi: i64 = px(form, i) * d
+        let yi: i64 = py(form, i) * d
+        let xj: i64 = px(form, j) * d
+        let yj: i64 = py(form, j) * d
+        if (yi > yn) != (yj > yn) {
+            // xn < xi + (xj - xi) * (yn - yi) / (yj - yi)
+            let dy: i64 = yj - yi
+            let links: i64 = (xn - xi) * dy
+            let rechts: i64 = (xj - xi) * (yn - yi)
+            if dy > 0 {
+                if links < rechts {
+                    yes = !yes
+                }
+            } else {
+                if links > rechts {
+                    yes = !yes
+                }
+            }
+        }
+        j = i
+        i = i + 1
+    }
+    return yes
+}
+
+// Aufweitung in zwei Durchgaengen (waagrecht, dann senkrecht). Zwei
+// Durchgaenge ueber ein Quadrat kosten 2*(2r+1) Vergleiche je Punkt
+// statt (2r+1)^2 -- bei r = 8 also 34 statt 289. Die Ecken werden
+// dadurch quadratisch statt rund; bei einer Linienstaerke von 1,3
+// Entwurfseinheiten liegt der Unterschied unter einem Bildpunkt.
+//
+// `vor` und `zurueck` sind getrennt, weil der SCHATTEN nicht rundum
+// waechst, sondern nach rechts unten -- das ist der Unterschied
+// zwischen einer Aussenlinie und einem Schlagschatten.
+fn width(n: u64, ab: u64, close_path: u64) {
+    var r: u64 = 0
+    while r < n {
+        // waagrecht: nah <- max(nah[r][c-ab .. c+zu])
+        var c: u64 = 0
+        while c < n {
+            var v: u64 = 0
+            var k: u64 = 0
+            var a: u64 = 0
+            if c > ab {
+                a = c - ab
+            }
+            k = a
+            var e: u64 = c + close_path
+            if e >= n {
+                e = n - 1
+            }
+            while k <= e {
+                if (nah[((r * n + k)) as usize] as u64) > v {
+                    v = nah[((r * n + k)) as usize] as u64
+                }
+                k = k + 1
+            }
+            // Das Zwischenergebnis geht nach `hoch`. Das darf es,
+            // weil jeder Aufrufer den Umriss danach ohnehin neu
+            // rastert -- eine dritte Flaeche von 20 KiB waere fuer
+            // eine Zwischenzeile ein hoher Preis.
+            hoch[((r * n + c)) as usize] = v as u8
+            c = c + 1
+        }
+        r = r + 1
+    }
+    // senkrecht: nah <- max(hoch[r-ab .. r+zu][c])
+    var c2: u64 = 0
+    while c2 < n {
+        var r2: u64 = 0
+        while r2 < n {
+            var v: u64 = 0
+            var a: u64 = 0
+            if r2 > ab {
+                a = r2 - ab
+            }
+            var e: u64 = r2 + close_path
+            if e >= n {
+                e = n - 1
+            }
+            var k: u64 = a
+            while k <= e {
+                if (hoch[((k * n + c2)) as usize] as u64) > v {
+                    v = hoch[((k * n + c2)) as usize] as u64
+                }
+                k = k + 1
+            }
+            nah[((r2 * n + c2)) as usize] = v as u8
+            r2 = r2 + 1
+        }
+        c2 = c2 + 1
+    }
+}
+
+// Die Tafel fuer EINE Form in EINER Groesse. Sie wird nur gebaut, wenn
+// sich Form oder Groesse geaendert haben -- alles andere waere eine
+// Rechnung je Halbbild fuer ein Bild, das sich nicht aendert.
+fn karte_bauen(form: u64, g: u64) {
+    if form >= FORMEN || g == 0 || g > MAXPX {
+        return
+    }
+    if k_form == form && k_gr == g {
+        return
+    }
+    lade()
+    let n: u64 = g * S
+    let d: i64 = (2 * n) as i64
+    // 1. den Kern rastern. Die Probe liegt in der MITTE ihres
+    //    Unterfeldes: (2*c+1) / (2*n) der Breite.
+    var r: u64 = 0
+    while r < n {
+        let yn: i64 = ((2 * r + 1) * VIERTEL) as i64
+        var c: u64 = 0
+        while c < n {
+            let xn: i64 = ((2 * c + 1) * VIERTEL) as i64
+            var v: u64 = 0
+            if drin(form, xn, yn, d) {
+                v = 1
+            }
+            nah[((r * n + c)) as usize] = v as u8
+            c = c + 1
+        }
+        r = r + 1
+    }
+    // 2. der Rand: derselbe Umriss, rundum um `rr` aufgeweitet.
+    //    rr ist so gewaehlt, dass die Linie bei JEDER Groesse 1,33
+    //    Entwurfseinheiten stark ist (n / 18 = g*3/18 = g/6).
+    var rr: u64 = n / 18
+    if rr < 1 {
+        rr = 1
+    }
+    // MIT ZWEI FLAECHEN STATT VIER. `weite` verbraucht `hoch` als
+    // Zwischenlager und liefert nach `nah`; der Kern ist danach weg.
+    // Also wird von AUSSEN nach INNEN gearbeitet -- erst der Schatten
+    // (die weiteste Lage), dann der Rand, dann der Kern --, und der
+    // Umriss wird vor jeder Lage neu gerastert. Das kostet zweimal
+    // dieselbe Rasterung und spart 40 KiB Kernspeicher.
+    //
+    // 2a. Schatten: um rr aufgeweitet UND nach rechts unten versetzt.
+    width(n, 0, rr * 2)
+    var p: u64 = 0
+    while p < n * n {
+        hoch[(p) as usize] = 0 as u8
+        if (nah[(p) as usize] as u64) != 0 {
+            hoch[(p) as usize] = 1 as u8
+        }
+        p = p + 1
+    }
+    // 2b. Rand: rundum um rr.
+    r = 0
+    while r < n {
+        let yn: i64 = ((2 * r + 1) * VIERTEL) as i64
+        var c: u64 = 0
+        while c < n {
+            let xn: i64 = ((2 * c + 1) * VIERTEL) as i64
+            var v: u64 = 0
+            if drin(form, xn, yn, d) {
+                v = 1
+            }
+            nah[((r * n + c)) as usize] = v as u8
+            c = c + 1
+        }
+        r = r + 1
+    }
+    width(n, rr, rr)
+    p = 0
+    while p < n * n {
+        if (nah[(p) as usize] as u64) != 0 {
+            hoch[(p) as usize] = 2 as u8
+        }
+        p = p + 1
+    }
+    // 2c. der Kern selbst, ohne Aufweitung.
+    r = 0
+    while r < n {
+        let yn: i64 = ((2 * r + 1) * VIERTEL) as i64
+        var c: u64 = 0
+        while c < n {
+            let xn: i64 = ((2 * c + 1) * VIERTEL) as i64
+            if drin(form, xn, yn, d) {
+                hoch[((r * n + c)) as usize] = 3 as u8
+            }
+            c = c + 1
+        }
+        r = r + 1
+    }
+    // 3. mitteln: neun Proben je Bildpunkt, drei Deckungen.
+    var y: u64 = 0
+    while y < g {
+        var x: u64 = 0
+        while x < g {
+            var n3: u64 = 0
+            var n2: u64 = 0
+            var n1: u64 = 0
+            var sy: u64 = 0
+            while sy < S {
+                var sx: u64 = 0
+                while sx < S {
+                    let v: u64 = hoch[(((y * S + sy) * n + x * S + sx))
+                        as usize] as u64
+                    if v == 3 {
+                        n3 = n3 + 1
+                    } else if v == 2 {
+                        n2 = n2 + 1
+                    } else if v == 1 {
+                        n1 = n1 + 1
+                    }
+                    sx = sx + 1
+                }
+                sy = sy + 1
+            }
+            let o: u64 = (y * g + x) * 3
+            karte[(o) as usize] = (n3 * 255 / (S * S)) as u8
+            karte[((o + 1)) as usize] = (n2 * 255 / (S * S)) as u8
+            karte[((o + 2)) as usize] = (n1 * 255 / (S * S)) as u8
+            x = x + 1
+        }
+        y = y + 1
+    }
+    k_form = form
+    k_gr = g
+    n_bauten = n_bauten + 1
+}
+
+// Die drei Deckungen eines Bildpunktes, 0..255.
+fn kern_a(g: u64, x: u64, y: u64) -> u64 {
+    if x >= g || y >= g || g > MAXPX {
+        return 0
+    }
+    return karte[(((y * g + x) * 3)) as usize] as u64
+}
+
+fn margin_a(g: u64, x: u64, y: u64) -> u64 {
+    if x >= g || y >= g || g > MAXPX {
+        return 0
+    }
+    return karte[(((y * g + x) * 3 + 1)) as usize] as u64
+}
+
+fn schatten_a(g: u64, x: u64, y: u64) -> u64 {
+    if x >= g || y >= g || g > MAXPX {
+        return 0
+    }
+    return karte[(((y * g + x) * 3 + 2)) as usize] as u64
+}
+
+// Alle drei auf einmal, gepackt: Kern << 16 | Rand << 8 | Schatten.
+// Ein Aufruf statt drei, weil das Zusammensetzen je Bildpunkt einmal
+// laeuft und die Grenzpruefung dann auch nur einmal.
+fn deck(g: u64, x: u64, y: u64) -> u64 {
+    if x >= g || y >= g || g > MAXPX {
+        return 0
+    }
+    let o: u64 = (y * g + x) * 3
+    return ((karte[(o) as usize] as u64) << 16)
+        | ((karte[((o + 1)) as usize] as u64) << 8)
+        | (karte[((o + 2)) as usize] as u64)
+}
+
+fn karte_form() -> u64 {
+    return k_form
+}
+
+fn karte_gr() -> u64 {
+    return k_gr
+}
+
+// Wie oft eine Tafel gebaut wurde. Die Abnahme prueft damit, dass sie
+// NICHT je Halbbild neu entsteht: Zeiger bewegen, Zahl bleibt.
+fn bauten() -> u64 {
+    return n_bauten
+}

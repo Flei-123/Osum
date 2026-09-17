@@ -146,7 +146,7 @@ else
 fi
 for n in "SYS_GETGROUPS 115" "SYS_SETGROUPS 116" "SYS_OSUM_MUSTAT 1200"; do
     set -- $n
-    a=$(grep -oE "^const $1: u64 = [0-9]+" kernel/sys.fi | grep -oE '[0-9]+$')
+    a=$(grep -oE "^const $1: u64 = [0-9]+" kernel/sys/sys.fi | grep -oE '[0-9]+$')
     b=$(grep -oE "^const $1: u64 = [0-9]+" lib/libc/kcall.fi | grep -oE '[0-9]+$')
     if [ "$a" = "$2" ] && [ "$b" = "$2" ]; then
         ok "$1 = $2 im Kernel UND in der libc"
@@ -156,11 +156,11 @@ for n in "SYS_GETGROUPS 115" "SYS_SETGROUPS 116" "SYS_OSUM_MUSTAT 1200"; do
 done
 # ---- DIE GEGENPROBE: der Fehler von Runde MERGE, nachgebaut.
 mkdir -p "$TMPD/kol/kernel" "$TMPD/kol/lib/libc" "$TMPD/kol/tools/kernel"
-cp kernel/sys.fi "$TMPD/kol/kernel/"
+cp kernel/sys/sys.fi "$TMPD/kol/kernel/"
 cp lib/libc/kcall.fi "$TMPD/kol/lib/libc/"
 cp tools/kernel/syscalls.py "$TMPD/kol/tools/kernel/"
 sed -i 's/^const SYS_OSUM_MUSTAT: u64 = 1200/const SYS_OSUM_MUSTAT: u64 = 1320/' \
-    "$TMPD/kol/kernel/sys.fi"
+    "$TMPD/kol/kernel/sys/sys.fi"
 if python3 "$TMPD/kol/tools/kernel/syscalls.py" > "$TMPD/kol.txt" 2>&1; then
     bad "GEGENPROBE: zweimal 1320 faellt NICHT auf -- der Waechter ist wertlos"
 else

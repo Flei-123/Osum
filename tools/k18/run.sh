@@ -152,7 +152,7 @@ fi
 echo "== 1. der Nummernvorrat, die Karte von kdata und die Register =="
 
 check() { # name soll grund
-    local got; got=$(number_in kernel/sys.fi "SYS_$1")
+    local got; got=$(number_in kernel/sys/sys.fi "SYS_$1")
     if [ "$got" = "$2" ]; then ok "SYS_$1 = $2 ($3)"
     else bad "SYS_$1 = ${got:-fehlt}, erwartet $2"; fi
 }
@@ -162,7 +162,7 @@ check OSUM_PWRSTR 1752 "der Block dieser Runde"
 
 # JEDE eigene Aufrufnummer liegt im zugeteilten Bereich 1750..1799.
 for n in PWRGET PWRSET PWRSTR; do
-    v=$(number_in kernel/sys.fi "SYS_OSUM_$n")
+    v=$(number_in kernel/sys/sys.fi "SYS_OSUM_$n")
     if [ "${v:-0}" -ge 1750 ] && [ "${v:-0}" -le 1799 ]; then
         ok "SYS_OSUM_$n liegt im Vorrat 1750..1799: $v"
     else
@@ -188,7 +188,7 @@ done
 # Fehler gemeldet, wo keiner war, und das ist genauso schlecht wie einer,
 # der keinen meldet, wo einer ist.
 fremd=$(grep -ran --include='*.fi' --include='*.s' -E '^const SYS_[A-Za-z0-9_]+: u64 = 17(5[0-9]|[6-9][0-9])' kernel/ \
-    | grep -v -e '^kernel/sys.fi' -e '^kernel/uprog.fi' -e '^kernel/user/power.fi' \
+    | grep -v -e '^kernel/sys/sys.fi' -e '^kernel/uprog.fi' -e '^kernel/user/power.fi' \
               -e '^kernel/user/powermon.fi' -e '^kernel/user/taskbar.fi' \
               -e '^kernel/user/qs.fi' || true)
 # `kernel/user/qs.fi` steht seit Runde GLYPHE daneben: das Kontrollzentrum
@@ -213,17 +213,17 @@ else
     bad "Aufrufnummern aus 1750..1799 stehen auch in: $(echo $fremd | tr '\n' ' ')"
 fi
 # Und dieselbe Frage andersherum: in kernel/sys.fi sind es GENAU drei.
-eigen=$(grep -ahE '^const SYS_[A-Za-z0-9_]+: u64 = 17(5[0-9]|[6-9][0-9])' kernel/sys.fi | wc -l | tr -d ' ')
-gleich "in kernel/sys.fi stehen genau drei Nummern aus dem Vorrat" "3" "$eigen"
+eigen=$(grep -ahE '^const SYS_[A-Za-z0-9_]+: u64 = 17(5[0-9]|[6-9][0-9])' kernel/sys/sys.fi | wc -l | tr -d ' ')
+gleich "in kernel/sys/sys.fi stehen genau drei Nummern aus dem Vorrat" "3" "$eigen"
 
-k18off=$(grep -aE '^const K18_OFF' kernel/kstate.fi | sed 's/.*= //')
-batoff=$(grep -aE '^const BATT_OFF' kernel/kstate.fi | sed 's/.*= //')
+k18off=$(grep -aE '^const K18_OFF' kernel/lib/kstate.fi | sed 's/.*= //')
+batoff=$(grep -aE '^const BATT_OFF' kernel/lib/kstate.fi | sed 's/.*= //')
 gleich "die kdata-Seite dieser Runde" "0x58000" "$k18off"
 gleich "die kdata-Seite des Akkus" "0x59000" "$batoff"
 
 # kdata musste wachsen, weil der Vorrat dieser Runde hinter der alten
 # Grenze liegt -- und die Zahl steht ZWEIMAL. Beide muessen gleich sein.
-kd_fi=$(grep -aE '^const KDATA_SIZE' kernel/kstate.fi | sed 's/.*= //')
+kd_fi=$(grep -aE '^const KDATA_SIZE' kernel/lib/kstate.fi | sed 's/.*= //')
 # RUNDE MERGE-2: die Zeichenklasse war [0-9a-fx] -- KLEINBUCHSTABEN.
 # Solange KDATA_SIZE 0x80000 war, fiel das nicht auf: darin steht
 # kein Buchstabe. Diese Runde hat den Bereich auf 0xA0000 vergroessert,
@@ -255,12 +255,12 @@ for r in IA32_PERF_CTL:0x199 IA32_MISC_ENABLE:0x1A0 IA32_THERM_STATUS:0x19C \
          IA32_PM_ENABLE:0x770 IA32_HWP_CAPABILITIES:0x771 \
          MSR_PLATFORM_INFO:0xCE IA32_ENERGY_PERF_BIAS:0x1B0; do
     nm=${r%%:*}; want=${r##*:}
-    got=$(grep -aE "^const $nm: u64 = " kernel/pwr.fi | sed 's/.*= //')
+    got=$(grep -aE "^const $nm: u64 = " kernel/pwr/pwr.fi | sed 's/.*= //')
     gleich "$nm" "$want" "${got:-fehlt}"
 done
-mb=$(grep -aE '^const MISC_NOTURBO' kernel/pwr.fi | sed 's/.*= //' | sed 's/ .*//')
+mb=$(grep -aE '^const MISC_NOTURBO' kernel/pwr/pwr.fi | sed 's/.*= //' | sed 's/ .*//')
 gleich "IA32_MISC_ENABLE Bit 38 (Turbo Mode Disable)" "274877906944" "$mb"
-me=$(grep -aE '^const MISC_EIST' kernel/pwr.fi | sed 's/.*= //' | sed 's/ .*//')
+me=$(grep -aE '^const MISC_EIST' kernel/pwr/pwr.fi | sed 's/.*= //' | sed 's/ .*//')
 gleich "IA32_MISC_ENABLE Bit 16 (SpeedStep Enable)" "65536" "$me"
 
 # ==================================================== 2. bauen

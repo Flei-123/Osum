@@ -1,0 +1,178 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/kshani.fi -- die Naht fuer SHA-NI, Runde ARGON (K-021).
+//
+// Dasselbe Muster wie `kernel/kaesni.fi` aus Runde AESNI, und aus
+// demselben Grund dieselbe Aufteilung:
+//
+//   `lib/crypto/shani.fi`  die Rechnung. Kennt `kstate` NICHT und
+//                          laeuft deshalb auch im Orakel auf dem Wirt.
+//   `kernel/kshani.fi`     die Naht: `cpuid` fragen, `fpu` pruefen,
+//                          Schalter stellen, berichten, pruefen.
+//
+// `kshani` und nicht `shani`: Kern und `lib` teilen EINEN Namensraum.
+// Zwei Module gleichen Namens sind dort eines, und der Uebersetzer
+// meldet dann Fehler in `sha256.fi`, das mit dem Kern nichts zu tun
+// hat. Der Vorsatz `k` ist dieselbe Loesung wie bei `kaesni`, `kjson`,
+// `kutil`, `kgui`.
+//
+// ==================================================================
+// WARUM DER SCHALTER AN `fpu.enabled` HAENGT
+// ==================================================================
+//
+// SHA256RNDS2 und seine Geschwister sind SSE-Befehle und rechnen in
+// XMM-Registern. Ohne freigeschaltete Vektoreinheit (CR4.OSFXSR) ist
+// schon das erste `movdqu` ein #UD -- in Ring 0 also eine tote
+// Maschine. Und ohne einen Kontextwechsel, der XMM sichert, wuerde der
+// Kern still die Register laufender Ring-3-Prozesse zerstoeren.
+//
+// Beides hat Runde AVX gebaut und Runde AESNI nachgemessen (`fpu:
+// mode=3 cr4=0x340620 lazy=0`, eager sichern je Aufgabe). Diese Runde
+// benutzt es und baut es nicht neu -- aber sie fragt danach, und wer
+// die Vektoreinheit abschaltet (`nofpu`), schaltet SHA-NI mit ab.
+
+import lib.kstate
+import serial
+import lib.kutil
+import arch.x86_64.fpu
+import crypto.sha256
+import crypto.shani
+
+export { apply, report, selftest, have, used }
+
+fn g(state: u64, off: u64) -> u64 {
+    return kstate.get(state, off)
+}
+
+fn s(state: u64, off: u64, v: u64) {
+    kstate.set(state, off, v)
+}
+
+// Die Befunde einsammeln und den Schalter stellen. Laeuft EINMAL beim
+// Hochlauf, hinter `fpu.apply` -- vorher waere `fpu.enabled` noch nicht
+// entschieden.
+fn apply(state: u64) {
+    let hat: bool = shani.usable()
+    s(state, kstate.SHA_HAVE, kutil.yes(hat))
+
+    var an: bool = hat
+    if !fpu.enabled(state) {
+        // Ohne freigeschaltete Vektoreinheit waere das erste `movdqu`
+        // ein #UD in Ring 0.
+        an = false
+    }
+    if kstate.mode_on(state, kstate.M_NOSHANI) {
+        // Die Gegenprobe von Hand -- damit sich auf DIESER Maschine
+        // messen laesst, ob beide Wege dasselbe rechnen.
+        an = false
+    }
+    sha256.use_shani(an)
+    s(state, kstate.SHA_USED, kutil.yes(an))
+}
+
+fn have(state: u64) -> bool {
+    return g(state, kstate.SHA_HAVE) != 0
+}
+
+fn used(state: u64) -> bool {
+    return g(state, kstate.SHA_USED) != 0
+}
+
+fn report(state: u64) {
+    var s_h: [u8; 8] = "shani: \0"
+    var s_have: [u8; 6] = "have=\0"
+    var s_used: [u8; 8] = "  used=\0"
+    var s_fpu: [u8; 7] = "  fpu=\0"
+    serial.puts((&s_h[0]) as u64)
+    serial.puts((&s_have[0]) as u64)
+    serial.dec(g(state, kstate.SHA_HAVE))
+    serial.puts((&s_used[0]) as u64)
+    serial.dec(g(state, kstate.SHA_USED))
+    serial.puts((&s_fpu[0]) as u64)
+    serial.dec(kutil.yes(fpu.enabled(state)))
+    serial.nl()
+}
+
+// ==================================================== DIE KREISPROBE IN RING 0
+//
+// Dieselben Eingaben durch BEIDE Wege, Oktett fuer Oktett verglichen.
+// Sie laeuft im Kern und nicht nur auf dem Wirt, weil der Kern eine
+// andere Maschine ist: andere Freischaltung, anderer Kontextwechsel,
+// anderer Stapel. Ein Weg, der auf dem Wirt stimmt und in Ring 0 nicht,
+// waere genau die Art Fehler, die man sonst erst auf der Platte findet.
+//
+// Gemessen wird ueber viele LAENGEN und nicht ueber viele Schluessel:
+// SHA-256 hat keinen Schluessel, und was schiefgehen kann, ist die
+// Blockgrenze -- der letzte, unvollstaendige Block mit seinem
+// Auffuellen und der Laengenangabe.
+fn selftest(state: u64) {
+    var s_h: [u8; 16] = "shani: kreis g=\0"
+    var s_u: [u8; 9] = "  ungl=\0\0"
+    var puffer: [u8; 1024] = [0 as u8; 1024]
+    var x: u64 = 88172645463325252
+    var i: usize = 0
+    while i < 1024 {
+        x = x ^ (x << 13)
+        x = x ^ (x >> 7)
+        x = x ^ (x << 17)
+        puffer[i] = ((x >> 24) & 255) as u8
+        i = i + 1
+    }
+    var a: [u8; 32] = [0 as u8; 32]
+    var b: [u8; 32] = [0 as u8; 32]
+    var gleich: u64 = 0
+    var ungleich: u64 = 0
+    // Jede Laenge von 0 bis 300 trifft jede Lage der Blockgrenze
+    // mehrfach, dazu ein paar grosse.
+    var n: usize = 0
+    while n <= 300 {
+        sha256.use_shani(false)
+        sha256.hash((&puffer[0]) as u64, n, (&a[0]) as u64)
+        sha256.use_shani(true)
+        sha256.hash((&puffer[0]) as u64, n, (&b[0]) as u64)
+        var k: usize = 0
+        var schlecht: bool = false
+        while k < 32 {
+            if a[k] != b[k] {
+                schlecht = true
+            }
+            k = k + 1
+        }
+        if schlecht {
+            ungleich = ungleich + 1
+        } else {
+            gleich = gleich + 1
+        }
+        n = n + 1
+    }
+    var m: usize = 512
+    while m <= 1024 {
+        sha256.use_shani(false)
+        sha256.hash((&puffer[0]) as u64, m, (&a[0]) as u64)
+        sha256.use_shani(true)
+        sha256.hash((&puffer[0]) as u64, m, (&b[0]) as u64)
+        var k2: usize = 0
+        var schlecht2: bool = false
+        while k2 < 32 {
+            if a[k2] != b[k2] {
+                schlecht2 = true
+            }
+            k2 = k2 + 1
+        }
+        if schlecht2 {
+            ungleich = ungleich + 1
+        } else {
+            gleich = gleich + 1
+        }
+        m = m + 1
+    }
+    // Den Schalter wieder auf das stellen, was `apply` entschieden hat
+    // -- eine Probe, die den Zustand der Maschine aendert, ist keine.
+    sha256.use_shani(used(state))
+    s(state, kstate.SHA_KREIS, gleich)
+    s(state, kstate.SHA_UNGL, ungleich)
+    serial.puts((&s_h[0]) as u64)
+    serial.dec(gleich)
+    serial.puts((&s_u[0]) as u64)
+    serial.dec(ungleich)
+    serial.nl()
+}

@@ -8,7 +8,7 @@ DREI DINGE, DIE DIE VORLAEUFER FALSCH HATTEN -- und jedes davon hat
 eine Fehlmessung erzeugt, die wie ein Systemfehler aussah:
 
 1. DIE SCHRIFT IST NICHT DIE TTF. Das Terminalfenster des Kerns malt
-   mit `kernel/font.fi`: 8 breit, 16 hoch, ein festes Bitmuster aus
+   mit `kernel/gfx/font.fi`: 8 breit, 16 hoch, ein festes Bitmuster aus
    DejaVu Sans Mono. `assets/osum-mono.ttf` ist die Schrift der
    OBERFLAECHE (Leiste, Starter). Wer die TTF gegen die Zellen haelt,
    vergleicht zwei verschiedene Zeichensaetze und liest Kraut und

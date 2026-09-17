@@ -18,8 +18,8 @@ import re, sys, os
 
 ROOT = sys.argv[1] if len(sys.argv) > 1 else "/root/osum-probe7"
 RULES = {
-    "kernel/proc.fi":       ["head"],
-    "kernel/sys.fi":        ["union", "both", "bothclose"],
+    "kernel/sched/proc.fi":       ["head"],
+    "kernel/sys/sys.fi":        ["union", "both", "bothclose"],
     "lib/libc/kcall.fi":    ["union", "both"],
     "kernel/user/wlib.fi":  ["union", "both", "keysdel", "both", "both", "both"],
     "tools/loader/apps.tab": ["both"],
@@ -77,7 +77,7 @@ def resolve(path, rules):
         raise SystemExit(f"{path}: {k} Konflikte, {len(rules)} Regeln")
     text = "\n".join(out)
     # Umnummerierung
-    if path in ("kernel/sys.fi", "lib/libc/kcall.fi"):
+    if path in ("kernel/sys/sys.fi", "lib/libc/kcall.fi"):
         text = text.replace("const SYS_OSUM_SPERRE: u64 = 1850", "const SYS_OSUM_SPERRE: u64 = 1870")
         text = text.replace("//   1850  osum_sperre", "//   1870  osum_sperre")
         text = text.replace("SYS_OSUM_SPERRE: kernel 1850", "SYS_OSUM_SPERRE: kernel 1870")

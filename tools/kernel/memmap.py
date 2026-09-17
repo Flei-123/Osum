@@ -595,6 +595,32 @@ def wert(werte, ausdruck, tiefe=0):
     return int(eval(ersetzt, {"__builtins__": {}}, {}))  # noqa: S307
 
 
+def alle_fi(kdir):
+    """Jede .fi im Kernbaum, ohne user/ und app/ -- gleich, wie tief.
+
+    RUNDE O-STRUKTUR: vorher standen hier feste glob-Muster fuer
+    `kernel/*.fi` und `kernel/arch/x86_64/*.fi`. Nach dem Umzug in
+    Schichten haetten sie die Haelfte des Kerns nicht mehr gesehen --
+    und eine Karte, die die Haelfte nicht sieht, meldet `0
+    Kollisionen`, weil sie nichts zu vergleichen hat. Das ist
+    schlimmer als ein Fehler."""
+    aus = []
+    for stamm, verz, namen in os.walk(kdir):
+        verz[:] = [v for v in verz if v not in ("user", "app")]
+        for n in namen:
+            if n.endswith(".fi"):
+                aus.append(os.path.join(stamm, n))
+    return sorted(aus)
+
+
+def finde_fi(kdir, name):
+    """Den Ort EINER Kerndatei suchen; None, wenn es sie nicht gibt."""
+    for p in alle_fi(kdir):
+        if os.path.basename(p) == name:
+            return p
+    return None
+
+
 def main():
     kdir = sys.argv[1] if len(sys.argv) > 1 else "kernel"
     laut = "-v" in sys.argv
@@ -626,16 +652,25 @@ def main():
               # Speicher. Fuenf Bereiche ab 0xF3000; ohne diese Zeile
               # pruefte die Karte sie gar nicht.
               "unixsock.fi", "sys.fi"):
-        # RUNDE ARM: die Maschine hat seit dem Trennschnitt ein eigenes
-        # Verzeichnis (`kernel/arch/x86_64/`).  `hv.fi` liegt dort, und
-        # diese Schleife hat es vorher schlicht nicht mehr gefunden --
-        # KeyError 'hv.fi', mitten in der Abnahme.  Gesucht wird jetzt an
-        # beiden Stellen, in dieser Reihenfolge.
+        # RUNDE ARM hat hier zwei feste Orte eingetragen (`kernel/` und
+        # `kernel/arch/x86_64/`), weil `hv.fi` umgezogen war und die
+        # Schleife es nicht mehr fand -- KeyError 'hv.fi', mitten in der
+        # Abnahme.
+        #
+        # RUNDE O-STRUKTUR hat den Kern in Schichten gelegt, und damit
+        # waere dieselbe Liste zum dritten Mal falsch geworden
+        # (KeyError 'kstate.fi'). Statt einen dritten Ort einzutragen
+        # wird jetzt GESUCHT -- dann ueberlebt diese Karte auch den
+        # naechsten Umzug.
+        #
+        # `kernel/user/` und `kernel/app/` bleiben aussen vor: das sind
+        # eigene Programme, und Namen wie `nidx.fi` gibt es dort noch
+        # einmal.
         p = None
-        for kand in (os.path.join(kdir, d),
-                     os.path.join(kdir, "arch", "x86_64", d)):
-            if os.path.exists(kand):
-                p = kand
+        for stamm, verz, namen in os.walk(kdir):
+            verz[:] = [v for v in verz if v not in ("user", "app")]
+            if d in namen:
+                p = os.path.join(stamm, d)
                 break
         if p is not None:
             dateien[d] = konstanten(p)
@@ -897,8 +932,8 @@ def main():
     mode_words = wert(dateien["kstate.fi"], "MODE_WORDS")
     modi = {}
     for datei in ("kstate.fi", "kmain.fi"):
-        pfad = os.path.join(kdir, datei)
-        if not os.path.exists(pfad):
+        pfad = finde_fi(kdir, datei)
+        if pfad is None:
             continue
         for k, roh in konstanten(pfad).items():
             if not k.startswith("M_") or k == "M_MODE":
@@ -938,10 +973,10 @@ def main():
               % (", ".join(str(w) for w in leer) or "keins"))
 
     vektoren = {}
-    # RUNDE ARM: auch hier beide Verzeichnisse -- `trap.fi` fuehrt die
-    # Vektornummern und liegt seit dem Trennschnitt unter arch/x86_64/.
-    for pfad in sorted(glob.glob(os.path.join(kdir, "*.fi"))
-                       + glob.glob(os.path.join(kdir, "arch", "x86_64", "*.fi"))):
+    # RUNDE ARM hat hier zwei Verzeichnisse aufgezaehlt; RUNDE
+    # O-STRUKTUR sucht den ganzen Baum ab (`trap.fi` fuehrt die
+    # Vektornummern und liegt unter arch/x86_64/).
+    for pfad in alle_fi(kdir):
         datei = os.path.basename(pfad)
         for k, roh in konstanten(pfad).items():
             if not k.startswith("VEC_"):

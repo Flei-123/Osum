@@ -227,7 +227,7 @@ wigzeilen=$(cat kernel/user/wlib.fi kernel/user/wlibc.fi | wc -l)
 #
 # Die Schranke 600 bleibt unangetastet. Gezaehlt wird ab jetzt, was sie
 # begrenzen will.
-kernzeilen=$(grep -vc -e '^[[:space:]]*//' -e '^[[:space:]]*$' kernel/wig.fi)
+kernzeilen=$(grep -vc -e '^[[:space:]]*//' -e '^[[:space:]]*$' kernel/ui/wig.fi)
 num "Zeilen der Bibliothek in Ring 3" "$wigzeilen" gt 1500
 num "Zeilen der Naht im Kernel (ohne Kommentar/Leer) -- so wenig Kernel wie moeglich" "$kernzeilen" lt 600
 
@@ -348,14 +348,14 @@ gleich "der Bereich liegt im zugeteilten Vorrat" "0x46000 0x49000 " "$wo"
 # ZEHN AUFRUFE: sieben aus der Runde, drei aus dem zweiten Nachtrag
 # (1807 Tabellenlauf, 1808 Journal, 1809 Auskunft).
 for n in 1800 1806 1807 1808 1809; do
-    grep -qE "= $n( |$)" kernel/sys.fi && ok "die Aufrufnummer $n steht in kernel/sys.fi" \
+    grep -qE "= $n( |$)" kernel/sys/sys.fi && ok "die Aufrufnummer $n steht in kernel/sys/sys.fi" \
         || bad "die Aufrufnummer $n fehlt"
 done
-grep -q 'const WIG_MAXNR: u64 = 1809' kernel/sys.fi \
+grep -q 'const WIG_MAXNR: u64 = 1809' kernel/sys/sys.fi \
     && ok "und 1809 ist die hoechste" \
     || bad "WIG_MAXNR passt nicht zu den Aufrufen"
-if grep -qE 'WIG_(BASE|MAXNR)' kernel/sys.fi && \
-   ! grep -qE 'const WIG_[A-Z]+: u64 = (19[0-9][0-9]|17[0-9][0-9])' kernel/sys.fi; then
+if grep -qE 'WIG_(BASE|MAXNR)' kernel/sys/sys.fi && \
+   ! grep -qE 'const WIG_[A-Z]+: u64 = (19[0-9][0-9]|17[0-9][0-9])' kernel/sys/sys.fi; then
     ok "alle Aufrufe dieser Runde liegen zwischen 1800 und 1899"
 else
     bad "eine Aufrufnummer dieser Runde liegt ausserhalb von 1800..1899"

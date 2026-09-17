@@ -84,22 +84,22 @@ echo "== 1. an der Quelle: wer holt die Buehne, und woher =="
 # Stand 06.09.: vier Fundstellen, davon DREI in Kommentaren (347, 448,
 # 512) und eine im Code (541, in `stage_of` selbst). Wer hier stumpf
 # zaehlt, macht jede Begruendung zu einem Fehler.
-ROH=$(grep 'base(state) + STAGE_OFF' kernel/wig.fi | grep -vc '^[[:space:]]*//')
+ROH=$(grep 'base(state) + STAGE_OFF' kernel/ui/wig.fi | grep -vc '^[[:space:]]*//')
 zahl "Stellen im CODE, die die geteilte Buehne noch direkt nehmen" "$ROH" eq 1
-grep -q 'fn stage_of' kernel/wig.fi \
+grep -q 'fn stage_of' kernel/ui/wig.fi \
     && ok "wig.stage_of gibt es" || bad "wig.stage_of fehlt"
 for f in blit glyph_into; do
-    n=$(awk "/^fn $f\(/,/^}/" kernel/wig.fi | grep -c 'stage_of(state)')
+    n=$(awk "/^fn $f\(/,/^}/" kernel/ui/wig.fi | grep -c 'stage_of(state)')
     if [ "$n" -ge 1 ]; then ok "wig.$f holt die Buehne ueber stage_of"
     else bad "wig.$f holt die Buehne NICHT ueber stage_of"; fi
 done
-grep -q 'kstate.WIGST_OFF + k \* STAGE_MAX' kernel/wig.fi \
+grep -q 'kstate.WIGST_OFF + k \* STAGE_MAX' kernel/ui/wig.fi \
     && ok "stage_of rechnet mit der Kernnummer (WIGST_OFF + k * STAGE_MAX)" \
     || bad "stage_of rechnet nicht je Kern"
-if awk '/^fn glyph\(/,/^}/' kernel/ttf.fi | grep -q 'tafel_an('; then
+if awk '/^fn glyph\(/,/^}/' kernel/gfx/ttf.fi | grep -q 'tafel_an('; then
     ok "ttf.glyph nimmt die Tafelsperre"
 else bad "ttf.glyph nimmt die Tafelsperre nicht"; fi
-if awk '/^fn glyph\(/,/^}/' kernel/ttf.fi | grep -q 'irq_aus()'; then
+if awk '/^fn glyph\(/,/^}/' kernel/gfx/ttf.fi | grep -q 'irq_aus()'; then
     ok "und haelt dabei die Unterbrechungen an (die Kennung ist eine Kernnummer)"
 else bad "ttf.glyph haelt die Unterbrechungen nicht an"; fi
 if awk '/^fn gload\(/,/^}/' kernel/user/wlibc.fi | grep -q 'gw > GMAX'; then

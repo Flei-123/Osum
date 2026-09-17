@@ -194,9 +194,9 @@ K0="$TMPD/k0.mb"
 echo "== 2. der Zeichensatz: 1520 Oktette gegen die Rust-Vorlage =="
 if [ -f "$ORIENTOS/kernel/src/drivers/font.rs" ]; then
     schau "font.fi ist die Vorlage, Oktett fuer Oktett" \
-        font kernel/font.fi "$ORIENTOS/kernel/src/drivers/font.rs"
+        font kernel/gfx/font.fi "$ORIENTOS/kernel/src/drivers/font.rs"
 else
-    schau "font.fi hat 95 Glyphen zu 16 Oktetten" font kernel/font.fi
+    schau "font.fi hat 95 Glyphen zu 16 Oktetten" font kernel/gfx/font.fi
     echo "        (OrientOS liegt nicht unter $ORIENTOS -- Vorlage nicht geprueft)"
 fi
 
@@ -207,7 +207,7 @@ echo "== 3. die Fensterplaetze und die Speicherkarte von kdata =="
 # gegenseitig die Abbildung weg -- und das faellt erst auf, wenn beide
 # gleichzeitig gebraucht werden.
 w_apic=$(grep -E '^const WIN_SLOTS|^const WIN_FIRST|^const WIN_VIRT|^const HUGE_SIZE' kernel/arch/x86_64/apic.fi | sed 's/ *\/\/.*//' | sort)
-w_fb=$(grep -E '^const WIN_SLOTS|^const WIN_FIRST|^const WIN_VIRT|^const HUGE_SIZE' kernel/fb.fi | sed 's/ *\/\/.*//' | sort)
+w_fb=$(grep -E '^const WIN_SLOTS|^const WIN_FIRST|^const WIN_VIRT|^const HUGE_SIZE' kernel/gfx/fb.fi | sed 's/ *\/\/.*//' | sort)
 if [ -n "$w_apic" ] && [ "$w_apic" = "$w_fb" ]; then
     ok "WIN_SLOTS, WIN_FIRST, WIN_VIRT und HUGE_SIZE stehen in beiden gleich"
 else
@@ -216,9 +216,9 @@ else
 fi
 # Und die Belegungsliste: fb.fi rechnet sie sich aus pci.K2_SCALARS und
 # apic.S_WIN selbst zusammen, weil es pci.fi nicht einbinden darf.
-k2=$(grep -E '^const K2_SCALARS' kernel/pci.fi | grep -oE '0x[0-9A-Fa-f]+')
+k2=$(grep -E '^const K2_SCALARS' kernel/bus/pci.fi | grep -oE '0x[0-9A-Fa-f]+')
 sw=$(grep -E '^const S_WIN' kernel/arch/x86_64/apic.fi | grep -oE '0x[0-9A-Fa-f]+')
-fbl=$(grep -E '^const WIN_LIST' kernel/fb.fi | sed 's/.*= *//; s/ *\/\/.*//')
+fbl=$(grep -E '^const WIN_LIST' kernel/gfx/fb.fi | sed 's/.*= *//; s/ *\/\/.*//')
 if [ "$fbl" = "$k2 + $sw" ]; then
     ok "fb.WIN_LIST ist pci.K2_SCALARS + apic.S_WIN ($k2 + $sw)"
 else
@@ -306,9 +306,9 @@ schau "die Linie trifft ihr Ende" punkt "$TMPD/pat.ppm" 399 210 255 255 0
 # geschrieben hat, steht als BILDPUNKTE da -- 3200 Stellen je Zeile,
 # jede einzelne gegen die Bitmaske des Zeichensatzes gerechnet.
 schau "Zeile 14 bildpunktgenau: '$MARKE_PRODUKT K7 FRAMEBUFFER 01234'" \
-    text "$TMPD/pat.ppm" kernel/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
+    text "$TMPD/pat.ppm" kernel/gfx/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
 schau "Zeile 15 bildpunktgenau: 'abcdefghijklm ABCDEFGHIJK'" \
-    text "$TMPD/pat.ppm" kernel/font.fi 15 0 "abcdefghijklm ABCDEFGHIJK"
+    text "$TMPD/pat.ppm" kernel/gfx/font.fi 15 0 "abcdefghijklm ABCDEFGHIJK"
 # Dieselben zwei Zeilen stehen im seriellen Mitschnitt -- eine Ausgabe,
 # zwei Wege.
 has "$TMPD/pat.txt" "$MARKE_PRODUKT K7 FRAMEBUFFER 01234" "dieselbe Zeile steht seriell"
@@ -328,7 +328,7 @@ schau_nicht "Feld 1 ist NICHT rot" \
 schau_nicht "Feld 2 ist NICHT gruen" \
     flaeche "$TMPD/keine.ppm" 100 0 100 100 0 255 0
 schau_nicht "die Textzeile steht NICHT da" \
-    text "$TMPD/keine.ppm" kernel/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
+    text "$TMPD/keine.ppm" kernel/gfx/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
 # Was auf dem Textmodusbild zu sehen ist, ist die Meldung des BIOS -- also
 # durchaus Bildpunkte, nur eben keine, die dieser Kernel gemalt hat.  Die
 # Zusage ist deshalb nicht "alles schwarz", sondern: die Stellen, die
@@ -351,12 +351,12 @@ echo "== 7. beide Ausgaben zeigen dasselbe =="
 foto "$K0" "gfx nocursor fbhold nokbd" "$TMPD/kon.txt" "$TMPD/kon.ppm"
 num "der Kern beendet sich sauber" "$RC" eq 21
 schau "der ganze Bildschirm gegen den seriellen Mitschnitt" \
-    konsole "$TMPD/kon.ppm" kernel/font.fi "$TMPD/kon.txt" \
+    konsole "$TMPD/kon.ppm" kernel/gfx/font.fi "$TMPD/kon.txt" \
     "fb: console mirrored to screen" "fb: hold" 500
 # Und die Gegenprobe dazu: gegen den Mitschnitt eines ANDEREN Laufs kann
 # das nicht aufgehen.
 schau_nicht "gegen den Mitschnitt des Pruefbild-Laufs geht es NICHT auf" \
-    konsole "$TMPD/kon.ppm" kernel/font.fi "$TMPD/pat.txt" \
+    konsole "$TMPD/kon.ppm" kernel/gfx/font.fi "$TMPD/pat.txt" \
     "fb: console mirrored to screen" "fb: hold" 500
 
 echo "== 8. Ring 3 malt: /dev/fb ohne Kernelrechte =="
@@ -416,7 +416,7 @@ schau "das Foto ist 1024x768" groesse "$TMPD/big.ppm" 1024 768
 schau "die vier Farbfelder stehen auch hier" \
     flaeche "$TMPD/big.ppm" 200 0 100 100 0 0 255
 schau "und der Text ebenso, bildpunktgenau" \
-    text "$TMPD/big.ppm" kernel/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
+    text "$TMPD/big.ppm" kernel/gfx/font.fi 14 0 "$MARKE_PRODUKT K7 FRAMEBUFFER 01234"
 
 echo "== 11. die Shell auf dem Bildschirm =="
 # /bin/sh von der Platte, wie in Runde K1 und K6 -- nur dass die Ausgabe
@@ -477,7 +477,7 @@ if [ "$gebaut" = 1 ]; then
     num "der Kern beendet sich sauber" "$RC" eq 21
     has "$TMPD/sh.txt" "OSUM SHELL ON SCREEN" "die Shell hat den Satz seriell gesagt"
     schau "der ganze Bildschirm gegen den Mitschnitt der Shell" \
-        konsole "$TMPD/sh.ppm" kernel/font.fi "$TMPD/sh.txt" \
+        konsole "$TMPD/sh.ppm" kernel/gfx/font.fi "$TMPD/sh.txt" \
         "fb: console mirrored to screen" "fb: hold" 500
     # Und die Zeile der Shell einzeln, damit im Fehlerfall dasteht, WELCHE
     # Zeile nicht stimmt.
@@ -489,10 +489,10 @@ if [ "$gebaut" = 1 ]; then
     # bewiesen, dass Terminalschicht und Bildschirm zusammenpassen -- und
     # zwar ohne dass eine Zeile von `tty.fi` das Wort `fb` kennt.
     schau "die Zeile der Shell steht bildpunktgenau auf dem Schirm" \
-        finde "$TMPD/sh.ppm" kernel/font.fi "$TMPD/sh.txt" \
+        finde "$TMPD/sh.ppm" kernel/gfx/font.fi "$TMPD/sh.txt" \
         "fb: console mirrored to screen" "fb: hold" "OSUM SHELL ON SCREEN"
     schau "und die Zeile davor (DONE) ebenso" \
-        finde "$TMPD/sh.ppm" kernel/font.fi "$TMPD/sh.txt" \
+        finde "$TMPD/sh.ppm" kernel/gfx/font.fi "$TMPD/sh.txt" \
         "fb: console mirrored to screen" "fb: hold" "DONE"
 fi
 

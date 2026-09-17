@@ -1,0 +1,554 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/amlobj.fi -- RUNDE AML, TEIL 2: OBJEKTE UND ADRESSRAEUME.
+//
+// AML kennt fuenf Arten von Werten -- Ganzzahl, Zeichenkette, Puffer,
+// Paket und Verweis -- und die Sprache hat keine Typdeklarationen: was
+// ein Ausdruck liefert, entscheidet sich beim Auswerten. In einer
+// Sprache ohne Summentypen (Firn, Profil `kernel`) ist ein Wert deshalb
+// EIN PLATZ VON 24 OKTETTEN:
+//
+//   +0   die Art (OT_*)
+//   +8   v1 -- Ganzzahl: der Wert; Puffer/Zeichenkette: die Adresse;
+//        Paket: die Adresse der Elemente; Verweis: worauf
+//   +16  v2 -- Laenge beziehungsweise Elementzahl
+//
+// Alle Plaetze liegen in der Arena (`amlns.heap_alloc`). Sie werden
+// NICHT einzeln freigegeben; der ganze Lauf geht am Stueck zurueck.
+//
+// DER ZWEITE TEIL DIESER DATEI IST DER GEFAEHRLICHE. Eine
+// OperationRegion ist ein Fenster in echten Speicher, echte Tore oder
+// den PCI-Konfigurationsraum, und ein Feld darin ist ein Bitausschnitt.
+// Wer sich hier verrechnet, schreibt in ein Register, das er nicht
+// meint. Deshalb:
+//
+//   * SystemMemory wird NUR gelesen und geschrieben, wenn die Adresse in
+//     dem Bereich liegt, den der Kernel identisch abgebildet hat. Die
+//     HPET-Region einer QEMU-DSDT liegt bei 0xFED00000 und faellt damit
+//     heraus -- es gibt einen definierten Fehler und keinen Seitenfehler.
+//   * SystemIO geht oktettweise ueber `serial.in8`/`out8`, bei
+//     DWordAcc ueber dieselben zwei Zeilen Assembler, die `pci.fi` seit
+//     Runde K2 benutzt. WordAcc gibt es nicht -- ein halbes Wort auf
+//     einem Tor ist nicht dasselbe wie zwei Oktette, und was man nicht
+//     messen kann, wird hier nicht behauptet.
+//   * PCI_Config nimmt die Nummer aus dem naechsten `_ADR` oberhalb der
+//     Region und die Busnummer aus dem naechsten `_BBN` (ohne eines:
+//     Bus 0). Genau so findet `\_SB.PRQ0` in QEMUs DSDT das
+//     PIIX3-Register 0x60 in 00:01.0.
+
+import lib.kstate
+import serial
+import mm.mem
+import bus.pci
+import acpi.amlns
+
+export {
+    OT_NONE, OT_INT, OT_STR, OT_BUF, OT_PKG, OT_REF_SLOT, OT_REF_NODE,
+    OT_REF_BYTE, OT_DEBUG, OBJ_BYTES,
+    otype, ov1, ov2, oset, oint, ocopy, obuf, opkg, pkg_at,
+    obj_new, obj_int, obj_buf, obj_pkg,
+    const_int, truth, to_int,
+    field_read, field_write, region_check,
+    RS_MEM, RS_IO, RS_PCI,
+    res_first_irq, res_irq_count, res_irq_at
+}
+
+const OBJ_BYTES: u64 = 24
+
+const OT_NONE: u64 = 0
+const OT_INT: u64 = 1
+const OT_STR: u64 = 2
+const OT_BUF: u64 = 3
+const OT_PKG: u64 = 4
+const OT_REF_SLOT: u64 = 5 // v1 = Adresse eines Objektplatzes
+const OT_REF_NODE: u64 = 6 // v1 = Knotenindex
+const OT_REF_BYTE: u64 = 7 // v1 = Adresse eines Oktetts in einem Puffer
+const OT_DEBUG: u64 = 8
+
+const RS_MEM: u64 = 0
+const RS_IO: u64 = 1
+const RS_PCI: u64 = 2
+
+// ------------------------------------------------------- ein Objektplatz
+
+fn otype(o: u64) -> u64 {
+    return amlns.rd64(o)
+}
+
+fn ov1(o: u64) -> u64 {
+    return amlns.rd64(o + 8)
+}
+
+fn ov2(o: u64) -> u64 {
+    return amlns.rd64(o + 16)
+}
+
+fn oset(o: u64, t: u64, a: u64, b: u64) {
+    amlns.wr64(o, t)
+    amlns.wr64(o + 8, a)
+    amlns.wr64(o + 16, b)
+}
+
+fn oint(o: u64, v: u64) {
+    oset(o, OT_INT, v, 0)
+}
+
+fn obuf(o: u64, at: u64, len: u64) {
+    oset(o, OT_BUF, at, len)
+}
+
+fn opkg(o: u64, at: u64, n: u64) {
+    oset(o, OT_PKG, at, n)
+}
+
+fn ocopy(dst: u64, src: u64) {
+    amlns.wr64(dst, amlns.rd64(src))
+    amlns.wr64(dst + 8, amlns.rd64(src + 8))
+    amlns.wr64(dst + 16, amlns.rd64(src + 16))
+}
+
+// Das i-te Element eines Pakets.
+fn pkg_at(o: u64, i: u64) -> u64 {
+    return ov1(o) + i * OBJ_BYTES
+}
+
+fn obj_new(state: u64) -> u64 {
+    return amlns.heap_alloc(state, OBJ_BYTES)
+}
+
+fn obj_int(state: u64, v: u64) -> u64 {
+    let o: u64 = obj_new(state)
+    if o != 0 {
+        oint(o, v)
+    }
+    return o
+}
+
+fn obj_buf(state: u64, len: u64) -> u64 {
+    let o: u64 = obj_new(state)
+    if o == 0 {
+        return 0
+    }
+    var at: u64 = 0
+    if len != 0 {
+        at = amlns.heap_alloc(state, len)
+        if at == 0 {
+            return 0
+        }
+    }
+    obuf(o, at, len)
+    return o
+}
+
+fn obj_pkg(state: u64, n: u64) -> u64 {
+    let o: u64 = obj_new(state)
+    if o == 0 {
+        return 0
+    }
+    var at: u64 = 0
+    if n != 0 {
+        at = amlns.heap_alloc(state, n * OBJ_BYTES)
+        if at == 0 {
+            return 0
+        }
+    }
+    opkg(o, at, n)
+    return o
+}
+
+// -------------------------------------------------------- Wahr und Zahl
+
+// Was AML als "wahr" ansieht: alles ausser der Null.
+fn truth(o: u64) -> bool {
+    if otype(o) == OT_INT {
+        return ov1(o) != 0
+    }
+    if otype(o) == OT_BUF || otype(o) == OT_STR {
+        return ov2(o) != 0
+    }
+    return false
+}
+
+// Eine Ganzzahl aus einem Objekt. Ein Puffer wird als Zahl gelesen
+// (kleinstwertiges Oktett zuerst, hoechstens acht) -- so will es die
+// Spezifikation fuer `ToInteger`, und so lesen alle Interpreter einen
+// Puffer im Zahlkontext.
+fn to_int(o: u64) -> u64 {
+    let t: u64 = otype(o)
+    if t == OT_INT {
+        return ov1(o)
+    }
+    if t == OT_BUF {
+        var v: u64 = 0
+        var i: u64 = 0
+        let n: u64 = ov2(o)
+        while i < 8 && i < n {
+            v = v | (amlns.rd8(ov1(o) + i) << (i * 8))
+            i = i + 1
+        }
+        return v
+    }
+    return 0
+}
+
+// -------------------------------------------- eine Konstante ohne Kontext
+//
+// `_ADR` und `_BBN` sind auf jeder Maschine konstante Zahlen. Um sie zu
+// lesen, wird der Auswerter nicht gebraucht -- und er DARF hier auch
+// nicht gebraucht werden, sonst haengt der Adressraum am Auswerter und
+// der Auswerter am Adressraum. Gibt 1 zurueck, wenn dort wirklich eine
+// Konstante stand.
+fn const_int(p: u64, out: u64) -> u64 {
+    let op: u64 = amlns.rd8(p)
+    if op == 0x00 {
+        amlns.wr64(out, 0)
+        return 1
+    }
+    if op == 0x01 {
+        amlns.wr64(out, 1)
+        return 1
+    }
+    if op == 0xFF {
+        amlns.wr64(out, 0xFFFFFFFFFFFFFFFF)
+        return 1
+    }
+    if op == 0x0A {
+        amlns.wr64(out, amlns.rd8(p + 1))
+        return 1
+    }
+    if op == 0x0B {
+        amlns.wr64(out, amlns.rd16(p + 1))
+        return 1
+    }
+    if op == 0x0C {
+        amlns.wr64(out, amlns.rd32(p + 1))
+        return 1
+    }
+    if op == 0x0E {
+        amlns.wr64(out, amlns.rd64(p + 1))
+        return 1
+    }
+    amlns.wr64(out, 0)
+    return 0
+}
+
+// ---------------------------------------------------------- Tore, 32 Bit
+//
+// Dieselben zwei Zeilen wie in `pci.fi` seit Runde K2. Ein Tor ist die
+// einzige Stelle, an der eine Sprache nicht weiterhilft.
+
+fn in32(port: u16) -> u64 {
+    return asm("in eax, dx", out("rax"), in("dx") port) & 0xFFFFFFFF
+}
+
+fn out32(port: u16, value: u64) {
+    asm("out dx, eax", in("dx") port, in("eax")(value & 0xFFFFFFFF) as u32)
+}
+
+// ------------------------------------------------------- die Bus-Nummer
+//
+// Die PCI-Nummer einer Region: vom Knoten der Region aufwaerts, bis ein
+// Geraet ein `_ADR` hat. `_ADR` ist Geraet << 16 | Funktion.
+fn adr_of(state: u64, node: u64) -> u64 {
+    var w_adr: [u8; 5] = "_ADR\0"
+    var w_bbn: [u8; 5] = "_BBN\0"
+    let adr: u64 = amlns.seg_of((&w_adr[0]) as u64)
+    let bbn: u64 = amlns.seg_of((&w_bbn[0]) as u64)
+    var dev: u64 = 0xFFFFFFFF
+    var bus: u64 = 0xFFFFFFFF
+    var n: u64 = node
+    var v: u64 = 0
+    while true {
+        let a: u64 = amlns.child(state, n, adr)
+        if a != amlns.NONE && dev == 0xFFFFFFFF {
+            if amlns.node_kind(state, a) == amlns.NK_NAME {
+                if const_int(amlns.node_a(state, a), (&v) as u64) != 0 {
+                    dev = v
+                }
+            }
+        }
+        let b: u64 = amlns.child(state, n, bbn)
+        if b != amlns.NONE && bus == 0xFFFFFFFF {
+            if amlns.node_kind(state, b) == amlns.NK_NAME {
+                if const_int(amlns.node_a(state, b), (&v) as u64) != 0 {
+                    bus = v
+                }
+            }
+        }
+        if n == 0 {
+            break
+        }
+        n = amlns.node_parent(state, n)
+    }
+    if dev == 0xFFFFFFFF {
+        dev = 0
+    }
+    if bus == 0xFFFFFFFF {
+        bus = 0
+    }
+    // bdf, wie `pci.fi` es will: Bus << 8 | Geraet << 3 | Funktion.
+    return ((bus & 0xFF) << 8) | (((dev >> 16) & 0x1F) << 3) | (dev & 0x7)
+}
+
+// ------------------------------------------------ ein Oktett aus/in eine Region
+//
+// Gibt 1 zurueck, wenn es ging. `space` ist die Art, `base` die
+// Basisadresse der Region, `off` der Versatz darin.
+fn region_check(state: u64, space: u64, base: u64, len: u64) -> bool {
+    if space == RS_IO {
+        return base + len <= 0x10000
+    }
+    if space == RS_PCI {
+        return base + len <= 0x1000
+    }
+    if space == RS_MEM {
+        // Nur, was der Kernel identisch abgebildet hat. Alles darueber
+        // waere ein Seitenfehler mit Ansage.
+        let gib: u64 = mem.mapped_gib(state)
+        if gib == 0 {
+            return false
+        }
+        return base + len <= gib * 0x40000000
+    }
+    return false
+}
+
+fn reg_read8(state: u64, space: u64, node: u64, base: u64, off: u64) -> u64 {
+    if space == RS_IO {
+        return serial.in8(((base + off) & 0xFFFF) as u16) as u64
+    }
+    if space == RS_PCI {
+        return pci.cfg_read8(adr_of(state, node), base + off)
+    }
+    return amlns.rd8(base + off)
+}
+
+fn reg_write8(state: u64, space: u64, node: u64, base: u64, off: u64,
+    v: u64) {
+    if space == RS_IO {
+        serial.out8(((base + off) & 0xFFFF) as u16, (v & 0xFF) as u8)
+        return
+    }
+    if space == RS_PCI {
+        pci.cfg_write8(adr_of(state, node), base + off, v)
+        return
+    }
+    amlns.wr8(base + off, v)
+}
+
+fn reg_read32(state: u64, space: u64, node: u64, base: u64, off: u64) -> u64 {
+    if space == RS_IO {
+        return in32(((base + off) & 0xFFFF) as u16)
+    }
+    if space == RS_PCI {
+        return pci.cfg_read32(adr_of(state, node), base + off)
+    }
+    return amlns.rd32(base + off)
+}
+
+fn reg_write32(state: u64, space: u64, node: u64, base: u64, off: u64,
+    v: u64) {
+    if space == RS_IO {
+        out32(((base + off) & 0xFFFF) as u16, v)
+        return
+    }
+    if space == RS_PCI {
+        pci.cfg_write32(adr_of(state, node), base + off, v)
+        return
+    }
+    amlns.wr8(base + off, v & 0xFF)
+    amlns.wr8(base + off + 1, (v >> 8) & 0xFF)
+    amlns.wr8(base + off + 2, (v >> 16) & 0xFF)
+    amlns.wr8(base + off + 3, (v >> 24) & 0xFF)
+}
+
+// ------------------------------------------------------------ ein Feld
+//
+// `fnode` ist ein Knoten der Art NK_FIELD:
+//   a = Knoten der Region, b = Bitversatz, c = Bitbreite | Zugriff << 32.
+//
+// DIESER INTERPRETER KANN FELDER BIS 64 BIT. Das deckt alles, was in
+// QEMUs DSDT vorkommt (8 und 32 Bit) und alles, was fuer `_PRT`,
+// `_STA` und `_CRS` gebraucht wird. Ein breiteres Feld gibt
+// ERR_REGION statt einer halben Zahl.
+fn field_read(state: u64, fnode: u64) -> u64 {
+    let rnode: u64 = amlns.node_a(state, fnode)
+    let bitoff: u64 = amlns.node_b(state, fnode)
+    let c: u64 = amlns.node_c(state, fnode)
+    let bits: u64 = c & 0xFFFFFFFF
+    let acc: u64 = (c >> 32) & 0xF
+    if bits == 0 || bits > 64 {
+        amlns.err_set(state, amlns.ERR_REGION)
+        return 0
+    }
+    let space: u64 = amlns.node_c(state, rnode)
+    let base: u64 = amlns.node_a(state, rnode)
+    let rlen: u64 = amlns.node_b(state, rnode)
+    if !region_check(state, space, base, rlen) {
+        amlns.err_set(state, amlns.ERR_REGION)
+        return 0
+    }
+    // DWordAcc und ein Feld, das genau auf einem Wort sitzt: EIN
+    // 32-Bit-Zugriff. Das ist nicht Bequemlichkeit -- ein Register, das
+    // erst beim vierten Oktett wirkt, wird oktettweise falsch gelesen.
+    if acc == 3 && bits == 32 && (bitoff & 31) == 0 {
+        return reg_read32(state, space, rnode, base, bitoff / 8)
+    }
+    var v: u64 = 0
+    var got: u64 = 0
+    var b: u64 = bitoff
+    while got < bits {
+        let byte: u64 = reg_read8(state, space, rnode, base, b / 8)
+        let lo: u64 = b & 7
+        var take: u64 = 8 -% lo
+        if take > bits -% got {
+            take = bits -% got
+        }
+        let mask: u64 = (1 << take) -% 1
+        v = v | (((byte >> lo) & mask) << got)
+        got = got + take
+        b = b + take
+    }
+    return v
+}
+
+fn field_write(state: u64, fnode: u64, val: u64) {
+    let rnode: u64 = amlns.node_a(state, fnode)
+    let bitoff: u64 = amlns.node_b(state, fnode)
+    let c: u64 = amlns.node_c(state, fnode)
+    let bits: u64 = c & 0xFFFFFFFF
+    let acc: u64 = (c >> 32) & 0xF
+    if bits == 0 || bits > 64 {
+        amlns.err_set(state, amlns.ERR_REGION)
+        return
+    }
+    let space: u64 = amlns.node_c(state, rnode)
+    let base: u64 = amlns.node_a(state, rnode)
+    let rlen: u64 = amlns.node_b(state, rnode)
+    if !region_check(state, space, base, rlen) {
+        amlns.err_set(state, amlns.ERR_REGION)
+        return
+    }
+    if acc == 3 && bits == 32 && (bitoff & 31) == 0 {
+        reg_write32(state, space, rnode, base, bitoff / 8, val)
+        return
+    }
+    var done: u64 = 0
+    var b: u64 = bitoff
+    while done < bits {
+        let lo: u64 = b & 7
+        var take: u64 = 8 -% lo
+        if take > bits -% done {
+            take = bits -% done
+        }
+        let mask: u64 = ((1 << take) -% 1) << lo
+        var byte: u64 = 0
+        // Nur lesen, wenn nicht das ganze Oktett ersetzt wird -- ein
+        // Lesezugriff auf ein Register, das beim Lesen etwas tut, ist
+        // ein Nebeneffekt, den niemand bestellt hat.
+        if mask != 0xFF {
+            byte = reg_read8(state, space, rnode, base, b / 8)
+        }
+        byte = (byte & (0xFF -% mask)) | ((((val >> done) << lo)) & mask)
+        reg_write8(state, space, rnode, base, b / 8, byte)
+        done = done + take
+        b = b + take
+    }
+}
+
+// ------------------------------------------- Ressourcenbeschreibungen
+//
+// Was `_CRS` und `_PRS` zurueckgeben, ist ein Puffer voller
+// Beschreibungen: kurze (Bit 7 = 0, Art in Bit 6:3, Laenge in Bit 2:0)
+// und lange (Bit 7 = 1, Art in Bit 6:0, dann zwei Oktette Laenge). Fuer
+// diese Runde zaehlt genau eine Art davon -- die Unterbrechung:
+//
+//   0x22/0x23  IRQ, kurz: eine 16-Bit-Maske der moeglichen Leitungen
+//   0x89       Extended Interrupt, lang: eine Zahl der Eintraege und
+//              dahinter je vier Oktette GSI
+//
+// QEMUs `_CRS` eines Link-Geraets ist genau ein 0x89 mit einem Eintrag,
+// und die vier Oktette bei Versatz 5 sind die Leitung, die die Firmware
+// in das PIIX3-Register geschrieben hat.
+
+// Wie viele Unterbrechungsnummern der Puffer nennt.
+fn res_irq_count(state: u64, at: u64, len: u64) -> u64 {
+    var i: u64 = 0
+    var n: u64 = 0
+    while i < len {
+        let tag: u64 = amlns.rd8(at + i)
+        if tag == 0x79 {
+            break
+        }
+        if (tag & 0x80) == 0 {
+            let l: u64 = tag & 7
+            let kind: u64 = (tag >> 3) & 0xF
+            if kind == 4 { // IRQ, kurz
+                let mask: u64 = amlns.rd16(at + i + 1)
+                var b: u64 = 0
+                while b < 16 {
+                    if (mask & (1 << b)) != 0 {
+                        n = n + 1
+                    }
+                    b = b + 1
+                }
+            }
+            i = i + 1 + l
+        } else {
+            let l: u64 = amlns.rd16(at + i + 1)
+            if (tag & 0x7F) == 0x09 { // Extended Interrupt
+                n = n + amlns.rd8(at + i + 4)
+            }
+            i = i + 3 + l
+        }
+    }
+    return n
+}
+
+// Die k-te Unterbrechungsnummer, oder 0xFFFFFFFF.
+fn res_irq_at(state: u64, at: u64, len: u64, k: u64) -> u64 {
+    var i: u64 = 0
+    var seen: u64 = 0
+    while i < len {
+        let tag: u64 = amlns.rd8(at + i)
+        if tag == 0x79 {
+            break
+        }
+        if (tag & 0x80) == 0 {
+            let l: u64 = tag & 7
+            let kind: u64 = (tag >> 3) & 0xF
+            if kind == 4 {
+                let mask: u64 = amlns.rd16(at + i + 1)
+                var b: u64 = 0
+                while b < 16 {
+                    if (mask & (1 << b)) != 0 {
+                        if seen == k {
+                            return b
+                        }
+                        seen = seen + 1
+                    }
+                    b = b + 1
+                }
+            }
+            i = i + 1 + l
+        } else {
+            let l: u64 = amlns.rd16(at + i + 1)
+            if (tag & 0x7F) == 0x09 {
+                let cnt: u64 = amlns.rd8(at + i + 4)
+                var j: u64 = 0
+                while j < cnt {
+                    if seen == k {
+                        return amlns.rd32(at + i + 5 + j * 4)
+                    }
+                    seen = seen + 1
+                    j = j + 1
+                }
+            }
+            i = i + 3 + l
+        }
+    }
+    return 0xFFFFFFFF
+}
+
+fn res_first_irq(state: u64, at: u64, len: u64) -> u64 {
+    return res_irq_at(state, at, len, 0)
+}

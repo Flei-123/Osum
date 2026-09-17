@@ -1,0 +1,496 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/kargon.fi -- RUNDE ARGON (K-021): die Spuren von Argon2 auf
+// mehrere Kerne, und die Naht dafuer.
+//
+// ==================================================================
+// WARUM DIESE DATEI UEBERHAUPT EXISTIERT
+// ==================================================================
+//
+// Runde AESNI (K-020) hat das Lesen und Schreiben erledigt: XTS rechnet
+// 188 MiB/s statt 0,58, ein Megaoktett kostet 6 ms statt 2,5 s. Das
+// AUFSPERREN hat sie ausdruecklich NICHT erledigt, und ihr Bericht sagt
+// auch warum: Argon2 ruft kein AES. Es haengt an BLAKE2b, und es
+// rechnet seine p Spuren NACHEINANDER.
+//
+// `RUNDE-KRYPTO.md`, roter Punkt 3, im Wortlaut: *"Argon2 rechnet p > 1
+// nicht wirklich parallel. Die Norm erlaubt p Spuren nebeneinander;
+// diese Umsetzung rechnet sie nacheinander in der vorgeschriebenen
+// Reihenfolge. Das Ergebnis ist Oktett fuer Oktett dasselbe, es fehlt
+// nur der Geschwindigkeitsgewinn."*
+//
+// Diese Datei holt den Gewinn.
+//
+// ==================================================================
+// WAS DIE NORM ERLAUBT -- UND WAS SIE NICHT ERLAUBT
+// ==================================================================
+//
+// RFC 9106 teilt den Speicher in p SPUREN und jede Spur in vier
+// SCHEIBEN. Die Regel, auf der alles steht:
+//
+//   Innerhalb EINER Scheibe sind die p Spuren voneinander unabhaengig.
+//   Erst an der Scheibengrenze muss synchronisiert werden.
+//
+// Das ist keine Auslegung, sondern steht in `index_alpha` (RFC 9106
+// 3.4.1.2) und laesst sich dort ablesen: greift ein Block auf eine
+// FREMDE Spur zu, reicht die erlaubte Flaeche nur ueber die
+// ABGESCHLOSSENEN Scheiben -- nie in die gerade laufende hinein. Ein
+// Block der laufenden Scheibe einer fremden Spur ist also per
+// Konstruktion unerreichbar, und genau deshalb duerfen die Spuren
+// einer Scheibe gleichzeitig rechnen.
+//
+// WAS NICHT GEHT, und es ist die Falle dieser Runde: die Scheiben
+// selbst sind NICHT unabhaengig. Scheibe s+1 liest, was Scheibe s
+// geschrieben hat. Wer die Barriere zwischen zwei Scheiben weglaesst,
+// bekommt ein Ergebnis, das auf derselben Maschine reproduzierbar
+// aussieht und trotzdem falsch ist -- und eine Platte, die damit
+// angelegt wurde, geht mit keiner normgerechten Umsetzung mehr auf.
+//
+// Die Reihenfolge ist deshalb: fuer jeden Durchgang, fuer jede Scheibe,
+// alle Spuren NEBENEINANDER, dann WARTEN, dann die naechste Scheibe.
+//
+// ==================================================================
+// WAS DER KERN AN NEBENLAEUFIGKEIT WIRKLICH ANBIETET -- NACHGESEHEN
+// ==================================================================
+//
+// Der Auftrag verlangt, das VOR dem Bauen festzustellen. Nachgesehen im
+// Quelltext, nicht angenommen:
+//
+//  1. DIE ANDEREN KERNE LAUFEN. `kernel/arch/x86_64/smp.fi` startet sie
+//     ueber INIT+SIPI (`start`), jeder bekommt eigenen Stapel, eigene
+//     GDT, eigenes TSS, und meldet sich mit `C_ONLINE = 1`.
+//
+//  2. ES GIBT SPERREN UND BARRIEREN. `kernel/atomic.fi`: `cas`,
+//     `fetch_add`, `barrier`, `pause` und acht benannte Sperren.
+//
+//  3. DIE REIHENFOLGE IM HOCHLAUF STIMMT. `kmain.fi` ruft `smp.stage`
+//     in Zeile 836 und `krypto_stufe` in Zeile 3424 -- die weiteren
+//     Kerne laufen also lange, bevor entsperrt wird. Das ist der Grund,
+//     warum diese Runde ueberhaupt moeglich ist.
+//
+//  4. ABER die Phasen-Barriere von `smp.fi` (S_PHASE/S_DONE) ist zu
+//     diesem Zeitpunkt TOT. `smp.stage` schickt die Kerne zuletzt in
+//     `PH_SCHED`, und aus dem kommt ein Kern nie zurueck -- er wird
+//     seine Leerlaufaufgabe und nimmt fortan Arbeit aus der
+//     Laufschlange. Eine neue Phase dort einzuhaengen waere wirkungslos.
+//
+// DARAUS FOLGT DER GEWAEHLTE WEG: nicht die Phasen-Barriere, sondern
+// KERNAUFGABEN. `sched.create(K_ARGON, ...)` legt je Spur eine Aufgabe
+// an, `ANY_CPU` laesst den Ablaufplaner sie auf jeden freien Kern
+// legen, und die Kerne sind frei -- sie sind Leerlaufaufgaben. Das ist
+// derselbe Weg, den Runde AVX fuer `K_VEC` genommen hat, und er ist
+// dort als "der Nachweis auf mehreren Prozessoren" gemessen.
+//
+// ==================================================================
+// WARUM DIE RECHNUNG NICHT ZWEIMAL DASTEHT
+// ==================================================================
+//
+// Der Rumpf einer Spur steht GENAU EINMAL im Baum, in
+// `lib/crypto/argon2.fi` als `fill_segment`. Der serielle Weg ruft ihn,
+// und die Spuraufgabe hier ruft ihn. Eine parallele Umsetzung, die den
+// Rumpf nachbaut, ist die Stelle, an der beide Wege auseinanderlaufen
+// -- und das Ergebnis waere eine Platte, die niemand mehr aufbekommt.
+// Deshalb: eine Funktion, zwei Aufrufer.
+//
+// `zp`/`ip` (die beiden Adressbloecke fuer Argon2i/id) sind je Spur
+// EIGENE. Ein geteilter Adressblock waere ein Datenrennen mit falschem
+// Ergebnis -- und zwar eines, das bei p=1 nie auffaellt.
+
+import serial
+import lib.kstate
+import sched.sched
+import arch.cpu
+import sync.atomic
+import mm.mem
+import sched.time
+import crypto.argon2
+
+export { init, want_parallel, parallel_slice, report, spur_body,
+    para_moeglich, kerne_genutzt, argon2id_par, LANES_MAX }
+
+// Die Zahl der Spuren, die diese Datei hoechstens nebeneinander
+// rechnet. Acht, weil `ARG_JOB` acht Auftraege traegt.
+const LANES_MAX: u64 = 8
+
+// Wie oft auf eine Spur gewartet wird, bevor aufgegeben wird. Eine
+// Spur, die nicht fertig wird, ist ein Fehler -- aber ein Kern, der
+// ewig wartet, ist ein haengender Hochlauf, und der ist schlimmer.
+// Gezaehlt werden Zeitscheiben, nicht Takte.
+const WARTE_MAX: u64 = 2000000
+
+fn g(state: u64, off: u64) -> u64 {
+    return kstate.get(state, off)
+}
+
+fn s(state: u64, off: u64, v: u64) {
+    kstate.set(state, off, v)
+}
+
+fn job(state: u64, lane: u64) -> u64 {
+    return state + kstate.ARG_JOB + lane * kstate.ARG_JOBW
+}
+
+fn jget(state: u64, lane: u64, feld: u64) -> u64 {
+    return atomic.load(job(state, lane) + feld)
+}
+
+fn jset(state: u64, lane: u64, feld: u64, v: u64) {
+    atomic.store(job(state, lane) + feld, v)
+}
+
+fn init(state: u64) {
+    s(state, kstate.ARG_PAR, 0)
+    s(state, kstate.ARG_KERNE, 0)
+    s(state, kstate.ARG_SPUREN, 0)
+    s(state, kstate.ARG_NS, 0)
+    s(state, kstate.ARG_TAKTE, 0)
+    s(state, kstate.ARG_LAEUFE, 0)
+    s(state, kstate.ARG_SEGMENTE, 0)
+    var l: u64 = 0
+    while l < LANES_MAX {
+        jset(state, l, kstate.AJ_STATUS, 0)
+        jset(state, l, kstate.AJ_ZP, 0)
+        jset(state, l, kstate.AJ_IP, 0)
+        jset(state, l, kstate.AJ_CPU, 0)
+        l = l + 1
+    }
+}
+
+// ================================================ DARF PARALLEL GERECHNET WERDEN
+//
+// Zwei Bedingungen, und jede ist ein eigener Grund:
+//
+//  1. `noargonpar` auf der Befehlszeile nimmt den Weg von Hand heraus.
+//     Das ist die GEGENPROBE, und ohne sie waere "der parallele Weg
+//     rechnet dasselbe" eine Aussage, die sich auf DIESER Maschine gar
+//     nicht pruefen liesse.
+//  2. Es muss mehr als einen Kern geben. Auf einem Kern kostet die
+//     Verteilung nur Aufgaben und bringt nichts.
+fn para_moeglich(state: u64) -> bool {
+    if kstate.mode_on(state, kstate.M_NOARGONPAR) {
+        return false
+    }
+    if cpu.online_count(state) <= 1 {
+        return false
+    }
+    return true
+}
+
+fn want_parallel(state: u64, lanes: u64) -> bool {
+    if lanes < 2 || lanes > LANES_MAX {
+        return false
+    }
+    return para_moeglich(state)
+}
+
+fn kerne_genutzt(state: u64) -> u64 {
+    return g(state, kstate.ARG_KERNE)
+}
+
+// ==================================================== WAS EINE SPURAUFGABE TUT
+//
+// Sie wird von `tasks.main` gerufen (Gattung `K_ARGON`) und bekommt
+// ihre Spurnummer ueber `T_ARG`. Ihre ganze Lage steht im
+// Auftragsblock, den `parallel_slice` gefuellt hat -- die Aufgabe liest
+// KEINE geteilte Variable ausser diesem Block.
+//
+// SIE RECHNET GENAU EIN SEGMENT und endet dann. Eine Aufgabe, die ueber
+// mehrere Scheiben hinweg lebt, muesste die Scheibengrenze selbst
+// abwarten -- das waere eine zweite Barriere neben der, die
+// `parallel_slice` ohnehin fuehrt, und zwei Barrieren fuer dieselbe
+// Grenze sind eine zu viel.
+fn spur_body(state: u64, index: u64) {
+    let lane: u64 = sched.tget(state, index, sched.T_ARG)
+    if lane >= LANES_MAX {
+        sched.exit_task(state, 251)
+    }
+    // Auf welchem Kern das hier wirklich laeuft -- die Zahl, die der
+    // Bericht spaeter als "genutzte Kerne" ausweist. Sie wird GEMESSEN
+    // und nicht angenommen. Plus eins, damit 0 "gar nicht gelaufen"
+    // heisst und nicht "auf Kern 0".
+    jset(state, lane, kstate.AJ_CPU, cpu.here(state) + 1)
+    argon2.fill_segment(
+        jget(state, lane, kstate.AJ_MEM),
+        jget(state, lane, kstate.AJ_PASS),
+        jget(state, lane, kstate.AJ_SLICE),
+        lane,
+        jget(state, lane, kstate.AJ_LANES),
+        jget(state, lane, kstate.AJ_LANELEN),
+        jget(state, lane, kstate.AJ_SEGLEN),
+        jget(state, lane, kstate.AJ_BLOCKS),
+        jget(state, lane, kstate.AJ_TCOST),
+        jget(state, lane, kstate.AJ_ATYPE),
+        jget(state, lane, kstate.AJ_ZP),
+        jget(state, lane, kstate.AJ_IP))
+    // DIE REIHENFOLGE DIESER ZWEI ZEILEN IST DER GANZE RIEGEL. Erst
+    // muss alles, was `fill_segment` geschrieben hat, wirklich im
+    // Speicher stehen; ERST DANN darf das Merkzeichen auf "fertig"
+    // gehen. Umgekehrt saehe der wartende Kern "fertig", waehrend die
+    // Bloecke noch unterwegs sind.
+    atomic.barrier()
+    jset(state, lane, kstate.AJ_STATUS, 2)
+    sched.exit_task(state, 0)
+}
+
+// ============================================ EINE SCHEIBE, ALLE SPUREN
+//
+// Das Gegenstueck zu `fill_segment`: dieselbe Scheibe, aber die Spuren
+// nebeneinander statt nacheinander. Liefert `true`, wenn wirklich
+// parallel gerechnet wurde, und `false`, wenn der Aufrufer die Scheibe
+// selbst seriell nachholen muss (kein Speicher fuer die Adressbloecke,
+// keine Aufgabe zu bekommen, eine Spur nicht fertig geworden).
+//
+// DER RUECKGABEWERT IST KEINE ZIER. Wer hier `true` meldet, ohne dass
+// jede Spur wirklich gelaufen ist, laesst Loecher im Speicher stehen --
+// und das Ergebnis ist dann still falsch.
+fn parallel_slice(state: u64, mem_base: u64, pass: u64, slice: u64,
+    lanes: u64, lane_len: u64, seg_len: u64, blocks: u64,
+    t_cost: u64, atype: u64, zp0: u64, ip0: u64) -> bool {
+    if lanes < 2 || lanes > LANES_MAX {
+        return false
+    }
+    // JE SPUR EIN EIGENES PAAR ADRESSBLOECKE. Spur 0 darf die des
+    // Aufrufers benutzen -- die anderen bekommen einen Rahmen, in den
+    // beide Bloecke passen (2 * 1024 Oktette in 4096).
+    var frames: [u64; 8] = [0 as u64; 8]
+    var l: u64 = 1
+    while l < lanes {
+        let f: u64 = mem.frame_alloc(state)
+        if f == 0 {
+            // Schon belegte wieder hergeben und seriell weitermachen.
+            var b: u64 = 1
+            while b < l {
+                mem.frame_free(state, frames[b as usize])
+                b = b + 1
+            }
+            return false
+        }
+        frames[l as usize] = f
+        l = l + 1
+    }
+    // Die Auftraege fuellen, BEVOR eine Aufgabe laeuft.
+    l = 0
+    while l < lanes {
+        var zp: u64 = zp0
+        var ip: u64 = ip0
+        if l > 0 {
+            zp = frames[l as usize]
+            ip = frames[l as usize] + 1024
+        }
+        jset(state, l, kstate.AJ_LANE, l)
+        jset(state, l, kstate.AJ_ZP, zp)
+        jset(state, l, kstate.AJ_IP, ip)
+        jset(state, l, kstate.AJ_MEM, mem_base)
+        jset(state, l, kstate.AJ_PASS, pass)
+        jset(state, l, kstate.AJ_SLICE, slice)
+        jset(state, l, kstate.AJ_LANES, lanes)
+        jset(state, l, kstate.AJ_LANELEN, lane_len)
+        jset(state, l, kstate.AJ_SEGLEN, seg_len)
+        jset(state, l, kstate.AJ_BLOCKS, blocks)
+        jset(state, l, kstate.AJ_TCOST, t_cost)
+        jset(state, l, kstate.AJ_ATYPE, atype)
+        jset(state, l, kstate.AJ_CPU, 0)
+        jset(state, l, kstate.AJ_STATUS, 1)
+        l = l + 1
+    }
+    atomic.barrier()
+    // SPUR 0 RECHNET DER AUFRUFER SELBST. Das spart eine Aufgabe und
+    // einen Kontextwechsel, und es gibt diesem Kern etwas zu tun,
+    // waehrend die anderen laufen -- er wartet sonst nur.
+    var tasks: [u64; 8] = [0 as u64; 8]
+    var gestartet: u64 = 0
+    l = 1
+    while l < lanes {
+        let t: u64 = sched.create(state, sched.K_ARGON, 2, l, 0)
+        if t != 0 {
+            tasks[l as usize] = t
+            sched.start(state, t)
+            gestartet = gestartet + 1
+        }
+        l = l + 1
+    }
+    // Konnte nicht EINE Aufgabe angelegt werden, ist der ganze Weg
+    // sinnlos -- dann rechnet der Aufrufer die Scheibe seriell.
+    if gestartet + 1 < lanes {
+        var b: u64 = 1
+        while b < lanes {
+            if frames[b as usize] != 0 {
+                mem.frame_free(state, frames[b as usize])
+            }
+            b = b + 1
+        }
+        return false
+    }
+    // Die eigene Spur.
+    jset(state, 0, kstate.AJ_CPU, cpu.here(state) + 1)
+    argon2.fill_segment(mem_base, pass, slice, 0, lanes, lane_len,
+        seg_len, blocks, t_cost, atype, zp0, ip0)
+    atomic.barrier()
+    jset(state, 0, kstate.AJ_STATUS, 2)
+    // ================================================ DIE SCHEIBENGRENZE
+    //
+    // Hier und nur hier wird gewartet. Alles, was nach dieser Schleife
+    // kommt, darf sich darauf verlassen, dass JEDE Spur dieser Scheibe
+    // fertig im Speicher steht.
+    var warte: u64 = 0
+    var alle: bool = false
+    while !alle && warte < WARTE_MAX {
+        var fertig: u64 = 0
+        var k: u64 = 0
+        while k < lanes {
+            if jget(state, k, kstate.AJ_STATUS) == 2 {
+                fertig = fertig + 1
+            }
+            k = k + 1
+        }
+        if fertig >= lanes {
+            alle = true
+        } else {
+            // Den Prozessor abgeben statt ihn zu verheizen: die Spuren
+            // laufen auf anderen Kernen, aber dieser hier soll nicht
+            // einen davon blockieren, wenn es weniger Kerne als Spuren
+            // gibt.
+            sched.yield_now(state)
+            warte = warte + 1
+        }
+    }
+    atomic.barrier()
+    // Zaehlen, auf wie vielen VERSCHIEDENEN Kernen die Spuren wirklich
+    // gerechnet haben. Das ist die Zahl, die der Bericht ausweist --
+    // gemessen, nicht die Zahl der gestarteten Aufgaben.
+    var maske: u64 = 0
+    var k2: u64 = 0
+    while k2 < lanes {
+        let c: u64 = jget(state, k2, kstate.AJ_CPU)
+        if c > 0 {
+            maske = maske | (1 << ((c - 1) & 63))
+        }
+        k2 = k2 + 1
+    }
+    var kerne: u64 = 0
+    var bit: u64 = 0
+    while bit < 64 {
+        if (maske >> bit) & 1 == 1 {
+            kerne = kerne + 1
+        }
+        bit = bit + 1
+    }
+    if kerne > g(state, kstate.ARG_KERNE) {
+        s(state, kstate.ARG_KERNE, kerne)
+    }
+    // Die Leichen wegraeumen und die Rahmen zurueckgeben.
+    l = 1
+    while l < lanes {
+        if tasks[l as usize] != 0 {
+            sched.reap(state, tasks[l as usize])
+        }
+        if frames[l as usize] != 0 {
+            mem.frame_free(state, frames[l as usize])
+        }
+        l = l + 1
+    }
+    if !alle {
+        // Eine Spur ist nicht fertig geworden. Das ist ein Fehler, und
+        // er wird gemeldet statt verschwiegen -- der Aufrufer rechnet
+        // die Scheibe dann seriell nach, und die Bloecke, die schon
+        // stehen, werden dabei genau gleich noch einmal geschrieben.
+        return false
+    }
+    s(state, kstate.ARG_SEGMENTE, g(state, kstate.ARG_SEGMENTE) + lanes)
+    s(state, kstate.ARG_SPUREN, lanes)
+    s(state, kstate.ARG_PAR, 1)
+    return true
+}
+
+// ======================================= ARGON2ID, DIE SPUREN NEBENEINANDER
+//
+// Das Gegenstueck zu `argon2.argon2id` fuer den Kern. Es rechnet
+// DASSELBE -- es ruft dieselben drei Teile (`prepare`, die Scheiben,
+// `finish`) in derselben Reihenfolge. Der einzige Unterschied ist, dass
+// die Scheiben ueber `parallel_slice` laufen statt ueber
+// `argon2.passes`.
+//
+// FAELLT IRGENDWO ETWAS AUS -- kein Rahmen, keine Aufgabe, eine Spur
+// nicht fertig --, rechnet diese Scheibe SERIELL weiter. Das ist kein
+// Notnagel, sondern der Normalfall auf einem Rechner mit einem Kern:
+// das Ergebnis ist dasselbe, es dauert nur laenger. Was NICHT passieren
+// darf, ist ein halb gerechneter Speicher, und genau davor schuetzt der
+// Rueckgabewert von `parallel_slice`.
+fn argon2id_par(state: u64, pwd: u64, pwdlen: usize, salt: u64,
+    saltlen: usize, t_cost: u64, m_cost: u64, lanes: u64,
+    mem_base: u64, out: u64, outlen: usize) -> bool {
+    if !argon2.geometrie_ok(t_cost, m_cost, lanes, saltlen, outlen) {
+        return false
+    }
+    let seg_len: u64 = argon2.geometrie_seglen(m_cost, lanes)
+    let lane_len: u64 = seg_len * argon2.SYNC_POINTS
+    let blocks: u64 = lane_len * lanes
+    if !argon2.prepare(pwd, pwdlen, salt, saltlen, t_cost, m_cost,
+        lanes, mem_base, outlen, argon2.TYPE_ID) {
+        return false
+    }
+    s(state, kstate.ARG_LAEUFE, g(state, kstate.ARG_LAEUFE) + 1)
+    // DIE ZAHL, UM DIE ES IN DIESER RUNDE GEHT. In TAKTEN, nicht in
+    // Nanosekunden: `TIME_KHZ` ist an dieser Stelle des Hochlaufs noch
+    // null (dieselbe Einschraenkung, die `kaesni.bench` in Punkt 4
+    // seiner roten Punkte nennt). Fuer den Faktor zwischen seriell und
+    // parallel kuerzt sich die Frequenz heraus.
+    let t0: u64 = time.tsc()
+    // Die beiden Adressbloecke DIESES Kerns (Spur 0). Sie liegen auf
+    // dem Stapel der laufenden Aufgabe -- 2 KiB von 64 KiB.
+    var zb: [u8; 1024] = [0 as u8; 1024]
+    var ib: [u8; 1024] = [0 as u8; 1024]
+    let zp: u64 = (&zb[0]) as u64
+    let ip: u64 = (&ib[0]) as u64
+    let par: bool = want_parallel(state, lanes)
+    var pass: u64 = 0
+    while pass < t_cost {
+        var slice: u64 = 0
+        while slice < argon2.SYNC_POINTS {
+            var fertig: bool = false
+            if par {
+                fertig = parallel_slice(state, mem_base, pass, slice,
+                    lanes, lane_len, seg_len, blocks, t_cost,
+                    argon2.TYPE_ID, zp, ip)
+            }
+            if !fertig {
+                // SERIELL, und zwar genau die Reihenfolge der Norm.
+                var lane: u64 = 0
+                while lane < lanes {
+                    argon2.fill_segment(mem_base, pass, slice, lane,
+                        lanes, lane_len, seg_len, blocks, t_cost,
+                        argon2.TYPE_ID, zp, ip)
+                    lane = lane + 1
+                }
+            }
+            slice = slice + 1
+        }
+        pass = pass + 1
+    }
+    let t1: u64 = time.tsc()
+    s(state, kstate.ARG_TAKTE, t1 - t0)
+    return argon2.finish(mem_base, lanes, lane_len, out, outlen)
+}
+
+fn report(state: u64) {
+    var s_h: [u8; 8] = "argon: \0"
+    var s_par: [u8; 5] = "par=\0"
+    var s_sp: [u8; 9] = "  spur=\0\0"
+    var s_k: [u8; 9] = "  kerne=\0"
+    var s_seg: [u8; 8] = "  seg=\0\0"
+    var s_l: [u8; 11] = "  laeufe=\0\0"
+    var s_t: [u8; 10] = "  takte=\0\0"
+    serial.puts((&s_h[0]) as u64)
+    serial.puts((&s_par[0]) as u64)
+    serial.dec(g(state, kstate.ARG_PAR))
+    serial.puts((&s_sp[0]) as u64)
+    serial.dec(g(state, kstate.ARG_SPUREN))
+    serial.puts((&s_k[0]) as u64)
+    serial.dec(g(state, kstate.ARG_KERNE))
+    serial.puts((&s_seg[0]) as u64)
+    serial.dec(g(state, kstate.ARG_SEGMENTE))
+    serial.puts((&s_l[0]) as u64)
+    serial.dec(g(state, kstate.ARG_LAEUFE))
+    serial.puts((&s_t[0]) as u64)
+    serial.dec(g(state, kstate.ARG_TAKTE))
+    serial.nl()
+}

@@ -1,0 +1,658 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/grafik.fi -- RUNDE GRAFIK-1, ETAPPE A: WAS FUER EINE
+// GRAFIKEINHEIT STECKT IN DIESER MASCHINE?
+//
+// WARUM ES DIESE DATEI GIBT. Osum hat heute einen BILDSPEICHER-Treiber
+// (`fb.fi`) und sonst nichts: keinen Grafikkartentreiber, kein OpenGL,
+// keine Schattierungsprogramme. Jeder Bildpunkt wird vom Hauptprozessor
+// geschrieben. Bevor sich daran etwas aendern kann, muss EINE Frage
+// beantwortet sein, und zwar mit Zahlen aus der Maschine und nicht aus
+// einem Datenblatt:
+//
+//     WELCHE Grafikeinheit sitzt auf dem Bus, unter welcher Adresse
+//     spricht man mit ihr, und WOHER kommt der Bildspeicher, in den
+//     `fb.fi` gerade schreibt?
+//
+// Ohne diese Antwort ist jede Treiberplanung Raterei. `hwdiag.fi` sagt
+// heute EINE Zeile ueber den Bildspeicher (Groesse, Farbtiefe,
+// Schrittweite, Herkunft) und listet PCI-Geraete mit Klasse -- aber
+// KEINE Adressbereiche (BARs), keine Hersteller im Klartext und nichts
+// darueber, was zwischen dem gezeichneten Bild und der Tafel liegt.
+// Genau diese drei Luecken schliesst diese Datei.
+//
+// -------------------------------------------------------------------
+// DIE ZWEITE FRAGE, DIE HIER MIT BEANTWORTET WIRD.
+//
+// Justin sieht auf echter Hardware ECKIGE Fenster, waehrend der
+// QEMU-Pruefstand saubere RUNDE Ecken misst. Dafuer gibt es in diesem
+// Kernel einen Verdaechtigen, und er steht in `fb.fi`:
+//
+//   Seit Runde DISPLAY sind "die Tafel" (S_PWIDTH/S_PHEIGHT/S_PPITCH --
+//   was die Karte wirklich ausgibt) und "das Bild" (S_WIDTH/S_HEIGHT/
+//   S_PITCH -- worauf gezeichnet wird) ZWEI DINGE. Sind sie gleich, ist
+//   `flush` ein `rep movsq` und jeder Bildpunkt kommt unveraendert an.
+//   Fallen sie auseinander, laeuft `present` -- und `present` ZIEHT das
+//   Bild mit einer Festkommaschrittweite auf die Tafel, Bildpunkt fuer
+//   Bildpunkt, OHNE zu mitteln (naechster Nachbar).
+//
+// Eine runde Ecke ist bei den ueblichen Radien drei bis acht Bildpunkte
+// gross. Wird ein solches Bild um einen krummen Faktor gezogen, fallen
+// genau die wenigen Punkte weg, die die Rundung ausmachen -- und uebrig
+// bleibt eine Ecke, die eckig AUSSIEHT, obwohl sie rund GEZEICHNET
+// wurde. Der Pruefstand sieht das nie, weil dort Tafel und Bild immer
+// gleich gross sind.
+//
+// Das ist eine HYPOTHESE und keine Feststellung. Diese Datei stellt die
+// Zahlen bereit, mit denen sie sich auf Justins Rechner in einer
+// Sekunde bestaetigen oder verwerfen laesst:
+//
+//     grafik: weg tafel=2560x1440 bild=2560x1440 gezogen=NEIN ...
+//
+// Steht dort `gezogen=JA`, ist die Ursache gefunden. Steht dort `NEIN`,
+// ist dieser Verdaechtige AUSGESCHLOSSEN und die Ursache liegt woanders
+// -- und auch das ist ein Ergebnis, denn es spart die Suche an der
+// falschen Stelle.
+//
+// -------------------------------------------------------------------
+// WAS DIESE DATEI NICHT TUT: SIE FASST NICHTS AN.
+//
+// Kein Register wird geschrieben, kein Modus gesetzt, keine Uebernahme
+// versucht. Sie liest den PCI-Konfigurationsraum (den `pci.scan` ohnehin
+// schon gelesen hat) und die Zahlen, die `fb.fi` ueber sich selbst
+// fuehrt. Ein Bericht, der etwas veraendert, beschreibt nicht mehr den
+// Zustand, den er beschreiben soll -- deshalb ist das hier eine Regel
+// und keine Vorsichtsmassnahme.
+//
+// AUSGABE. Jede Zeile beginnt mit `grafik: `, damit sie sich aus einem
+// seriellen Mitschnitt herausfiltern laesst (`grep '^grafik:'`), und
+// jede Zeile ist so kurz, dass sie auf einem Foto der Diagnosetafel
+// lesbar bleibt. Das ist kein Schoenheitswunsch: auf einem Rechner ohne
+// serielles Kabel IST das Foto der Uebertragungsweg.
+
+profile kernel
+
+import serial
+import lib.kstate
+import bus.pci
+import gfx.gfx
+
+export {
+    bericht, stage, wanted,
+    gpu_index, gpu_count, ist_grafik,
+    HERST_INTEL, HERST_AMD, HERST_NVIDIA, HERST_QEMU, HERST_VMWARE,
+    HERST_VIRTIO, HERST_ANDERE
+}
+
+// ------------------------------------------------------- die Klassen
+//
+// PCI-Klasse 0x03 ist "Display controller". Die drei Unterklassen, die
+// in freier Wildbahn vorkommen:
+//
+//   03:00  VGA-vertraeglich  -- alles, was ein BIOS ansprechen kann
+//   03:01  XGA
+//   03:02  3D-Regler ohne VGA -- typisch eine zweite, dedizierte Karte
+//          in einem Notebook (NVIDIA Optimus, AMD Enduro)
+//   03:80  anderes
+//
+// Die 03:02-Zeile ist der Grund, warum hier ALLE Geraete der Klasse 03
+// gezaehlt werden und nicht nur das erste: ein Notebook mit umschaltbarer
+// Grafik hat ZWEI, und welche davon den Bildspeicher haelt, ist genau
+// die Frage.
+const CLASS_DISPLAY: u64 = 0x03
+const SUB_VGA: u64 = 0x00
+const SUB_XGA: u64 = 0x01
+const SUB_3D: u64 = 0x02
+
+// Die Hersteller-Kennungen, die die PCI-SIG vergeben hat. Sie stehen
+// hier als Zahlen, weil eine Zahl aus dem Konfigurationsraum kommt und
+// ein Name nur eine Bequemlichkeit fuer den ist, der das Foto ansieht.
+const V_INTEL: u64 = 0x8086
+const V_AMD: u64 = 0x1002 // die Grafiksparte, ehemals ATI
+const V_AMD_CPU: u64 = 0x1022 // AMD selbst, fuer Chipsatzteile
+const V_NVIDIA: u64 = 0x10DE
+const V_QEMU: u64 = 0x1234 // der Bochs-VBE-Aufsatz, QEMUs Standardkarte
+const V_VMWARE: u64 = 0x15AD
+const V_VIRTIO: u64 = 0x1AF4 // virtio-gpu
+const V_REDHAT: u64 = 0x1B36 // QXL und die neueren virtio-Geraete
+
+const HERST_ANDERE: u64 = 0
+const HERST_INTEL: u64 = 1
+const HERST_AMD: u64 = 2
+const HERST_NVIDIA: u64 = 3
+const HERST_QEMU: u64 = 4
+const HERST_VMWARE: u64 = 5
+const HERST_VIRTIO: u64 = 6
+
+fn hersteller_von(v: u64) -> u64 {
+    if v == V_INTEL {
+        return HERST_INTEL
+    }
+    if v == V_AMD || v == V_AMD_CPU {
+        return HERST_AMD
+    }
+    if v == V_NVIDIA {
+        return HERST_NVIDIA
+    }
+    if v == V_QEMU {
+        return HERST_QEMU
+    }
+    if v == V_VMWARE {
+        return HERST_VMWARE
+    }
+    if v == V_VIRTIO || v == V_REDHAT {
+        return HERST_VIRTIO
+    }
+    return HERST_ANDERE
+}
+
+fn hersteller_name(h: u64) {
+    var s_i: [u8; 6] = "Intel\0"
+    var s_a: [u8; 4] = "AMD\0"
+    var s_n: [u8; 7] = "NVIDIA\0"
+    var s_q: [u8; 15] = "QEMU/Bochs-VBE\0"
+    var s_v: [u8; 7] = "VMware\0"
+    var s_o: [u8; 7] = "virtio\0"
+    var s_u: [u8; 10] = "unbekannt\0"
+    if h == HERST_INTEL {
+        serial.puts((&s_i[0]) as u64)
+        return
+    }
+    if h == HERST_AMD {
+        serial.puts((&s_a[0]) as u64)
+        return
+    }
+    if h == HERST_NVIDIA {
+        serial.puts((&s_n[0]) as u64)
+        return
+    }
+    if h == HERST_QEMU {
+        serial.puts((&s_q[0]) as u64)
+        return
+    }
+    if h == HERST_VMWARE {
+        serial.puts((&s_v[0]) as u64)
+        return
+    }
+    if h == HERST_VIRTIO {
+        serial.puts((&s_o[0]) as u64)
+        return
+    }
+    serial.puts((&s_u[0]) as u64)
+}
+
+// ------------------------------------------------------- die Ausgabe
+
+fn tag() {
+    var s: [u8; 9] = "grafik: \0"
+    serial.puts((&s[0]) as u64)
+}
+
+fn line(p: u64) {
+    tag()
+    serial.puts(p)
+    serial.nl()
+}
+
+// ------------------------------------------------------- das Finden
+
+// Ist das Geraet mit dem Index `i` eine Grafikeinheit?
+fn ist_grafik(state: u64, i: u64) -> bool {
+    return pci.get(state, i, pci.E_CLASS) == CLASS_DISPLAY
+}
+
+// Wie viele Grafikeinheiten sitzen auf dem Bus? Ein Notebook mit
+// umschaltbarer Grafik hat zwei; genau darum wird gezaehlt.
+fn gpu_count(state: u64) -> u64 {
+    let n: u64 = pci.count(state)
+    var c: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        if ist_grafik(state, i) {
+            c = c + 1
+        }
+        i = i + 1
+    }
+    return c
+}
+
+// Der Index der ersten Grafikeinheit, oder pci.MAX_DEV wenn es keine
+// gibt. VGA-vertraeglich (03:00) hat Vorrang vor einem reinen
+// 3D-Regler (03:02): die Karte, an der der Bildschirm haengt, ist die,
+// die auch das BIOS bedienen konnte.
+fn gpu_index(state: u64) -> u64 {
+    let n: u64 = pci.count(state)
+    var i: u64 = 0
+    while i < n {
+        if ist_grafik(state, i) {
+            if pci.get(state, i, pci.E_SUBCLASS) == SUB_VGA {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    // Keine VGA-vertraegliche: dann die erste ueberhaupt.
+    i = 0
+    while i < n {
+        if ist_grafik(state, i) {
+            return i
+        }
+        i = i + 1
+    }
+    return pci.MAX_DEV
+}
+
+// ------------------------------------------------------- die Zeilen
+
+// Eine Grafikeinheit mit allem, was fuer einen Treiber zaehlt: wer sie
+// gebaut hat, welche Nummer sie traegt, und -- der Teil, den `hwdiag`
+// bisher NICHT druckte -- ihre Adressbereiche.
+//
+// DIE BARs SIND DER EIGENTLICHE PUNKT. Ein Grafiktreiber besteht in
+// seinem Kern daraus, in Register zu schreiben, und die Register liegen
+// an den Adressen, die in den BARs stehen. Bei einer Intel-Einheit ist
+// BAR0 der Registerbereich (typisch 16 MiB) und BAR2 die Blende in den
+// Bildspeicher (256 MiB aufwaerts); bei AMD ist BAR0 der Bildspeicher
+// und BAR5 der Registerbereich; bei NVIDIA ist BAR0 der Registerbereich.
+// Aus DIESEN Zahlen laesst sich ablesen, ob ueberhaupt und wo ein
+// Treiber ansetzen koennte -- aus einer Klassenangabe allein nicht.
+fn gpu_line(state: u64, i: u64) {
+    var s_gpu: [u8; 8] = "gpu bdf\0"
+    var s_eq: [u8; 2] = "=\0"
+    var s_id: [u8; 6] = "  id=\0"
+    var s_her: [u8; 8] = "  herst\0"
+    var s_kl: [u8; 9] = "  klasse\0"
+    var s_rev: [u8; 7] = "  rev=\0"
+    let bdf: u64 = pci.get(state, i, pci.E_BDF)
+    tag()
+    serial.puts((&s_gpu[0]) as u64)
+    serial.puts((&s_eq[0]) as u64)
+    pci.hexn(pci.bdf_bus(bdf), 2)
+    serial.put(58 as u8) // ':'
+    pci.hexn(pci.bdf_dev(bdf), 2)
+    serial.put(46 as u8) // '.'
+    pci.hexn(pci.bdf_fn(bdf), 1)
+    serial.puts((&s_id[0]) as u64)
+    pci.hexn(pci.get(state, i, pci.E_VENDOR), 4)
+    serial.put(58 as u8)
+    pci.hexn(pci.get(state, i, pci.E_DEVICE), 4)
+    serial.puts((&s_her[0]) as u64)
+    serial.puts((&s_eq[0]) as u64)
+    hersteller_name(hersteller_von(pci.get(state, i, pci.E_VENDOR)))
+    serial.puts((&s_kl[0]) as u64)
+    serial.puts((&s_eq[0]) as u64)
+    pci.hexn(pci.get(state, i, pci.E_CLASS), 2)
+    serial.put(58 as u8)
+    pci.hexn(pci.get(state, i, pci.E_SUBCLASS), 2)
+    serial.put(58 as u8)
+    pci.hexn(pci.get(state, i, pci.E_PROGIF), 2)
+    // Die Revision steht im Konfigurationsraum bei 0x08. `pci.fi` legt
+    // sie nicht in der Tabelle ab, also wird sie hier gelesen -- lesend,
+    // ueber dieselben zwei Tore wie alles andere.
+    serial.puts((&s_rev[0]) as u64)
+    pci.hexn(pci.cfg_read8(bdf, 0x08), 2)
+    serial.nl()
+}
+
+// Die Adressbereiche einer Grafikeinheit, einer je Zeile. Eine Zeile je
+// BAR statt alle in einer, weil die Adressen sechzehn Stellen haben und
+// eine Zeile mit sechs davon auf keinem Foto mehr lesbar ist.
+fn bar_lines(state: u64, i: u64) {
+    var s_bar: [u8; 8] = "gpu bar\0"
+    var s_eq: [u8; 2] = "=\0"
+    var s_sz: [u8; 8] = "  gross\0"
+    var s_io: [u8; 8] = "  (tor)\0"
+    var s_mm: [u8; 11] = "  (speich\0\0"
+    var s_64: [u8; 6] = ", 64\0\0"
+    var s_32: [u8; 6] = ", 32\0\0"
+    var s_pf: [u8; 12] = ", vorlad)\0\0\0"
+    var s_np: [u8; 3] = ")\0\0"
+    var s_kib: [u8; 5] = " KiB\0"
+    var s_mib: [u8; 5] = " MiB\0"
+    var s_okt: [u8; 9] = " Oktett\0\0"
+    var b: u64 = 0
+    while b < 6 {
+        let sz: u64 = pci.bar_size(state, i, b)
+        if sz != 0 {
+            let fl: u64 = pci.bar_flags(state, i, b)
+            tag()
+            serial.puts((&s_bar[0]) as u64)
+            serial.dec(b)
+            serial.puts((&s_eq[0]) as u64)
+            serial.hex(pci.bar(state, i, b))
+            serial.puts((&s_sz[0]) as u64)
+            serial.puts((&s_eq[0]) as u64)
+            // Groesse in der Einheit, in der ein Mensch sie liest.
+            // DREI Stufen und nicht zwei: ein Tor-Bereich ist oft 32
+            // oder 64 Oktette gross, und `32 / 1024` ist null -- die
+            // erste Fassung dieser Zeile schrieb `gross=0 KiB` an eine
+            // Karte, die sehr wohl einen Bereich hatte. Gemessen an
+            // `-vga vmware`, BAR0 = 16 Oktette.
+            if sz >= 1048576 {
+                serial.dec(sz / 1048576)
+                serial.puts((&s_mib[0]) as u64)
+            } else if sz >= 1024 {
+                serial.dec(sz / 1024)
+                serial.puts((&s_kib[0]) as u64)
+            } else {
+                serial.dec(sz)
+                serial.puts((&s_okt[0]) as u64)
+            }
+            if pci.bar_is_io(state, i, b) {
+                serial.puts((&s_io[0]) as u64)
+            } else {
+                serial.puts((&s_mm[0]) as u64)
+                // Bit 1-2: 00 = 32 Bit, 10 = 64 Bit. Bit 3: vorladbar.
+                if ((fl >> 1) & 3) == 2 {
+                    serial.puts((&s_64[0]) as u64)
+                } else {
+                    serial.puts((&s_32[0]) as u64)
+                }
+                if (fl & 8) != 0 {
+                    serial.puts((&s_pf[0]) as u64)
+                } else {
+                    serial.puts((&s_np[0]) as u64)
+                }
+            }
+            serial.nl()
+        }
+        b = b + 1
+    }
+}
+
+// Alle Grafikeinheiten, nicht nur die erste. Bei einem Notebook mit
+// umschaltbarer Grafik stehen hier zwei Zeilen, und der Unterschied
+// zwischen ihnen ist die ganze Auskunft.
+fn gpu_lines(state: u64) {
+    var s_no: [u8; 58] = "gpu=KEINE -- kein Gerät der Klasse 03 auf diesem Bus\0\0\0\0\0"
+    var s_n: [u8; 15] = "gpu anzahl=\0\0\0\0"
+    var s_haupt: [u8; 26] = "  (die erste ist die VGA)\0"
+    let n: u64 = pci.count(state)
+    let c: u64 = gpu_count(state)
+    if c == 0 {
+        line((&s_no[0]) as u64)
+        return
+    }
+    tag()
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(c)
+    if c > 1 {
+        serial.puts((&s_haupt[0]) as u64)
+    }
+    serial.nl()
+    var i: u64 = 0
+    while i < n {
+        if ist_grafik(state, i) {
+            gpu_line(state, i)
+            bar_lines(state, i)
+        }
+        i = i + 1
+    }
+}
+
+// ------------------------------------------------- der Anzeigeweg
+//
+// DIE ZEILE, AUF DIE ES BEI DEN ECKEN ANKOMMT.
+//
+// Sie sagt in einem Blick, ob zwischen dem gezeichneten Bild und der
+// Tafel eine Umrechnung liegt. `gezogen=JA` heisst: `present` skaliert
+// mit naechstem Nachbarn, und feine Einzelheiten -- eine drei Bildpunkte
+// grosse Rundung, ein Haarstrich, ein Schriftrand -- ueberleben das
+// nicht. `gezogen=NEIN` heisst: `flush` kopiert Zeilen unveraendert,
+// und was auf dem Schirm anders aussieht als im Pruefstand, hat seine
+// Ursache NICHT hier.
+fn gone_line(state: u64) {
+    var s_w: [u8; 5] = "weg \0"
+    var s_t: [u8; 7] = "tafel=\0"
+    var s_b: [u8; 8] = "  bild=\0"
+    var s_x: [u8; 2] = "x\0"
+    var s_g: [u8; 12] = "  gezogen=\0\0"
+    var s_ja: [u8; 3] = "JA\0"
+    var s_ne: [u8; 5] = "NEIN\0"
+    var s_p: [u8; 10] = "  pitch=\0\0"
+    var s_sl: [u8; 2] = "/\0"
+    if !gfx.ready(state) {
+        return
+    }
+    let bw: u64 = gfx.width(state)
+    let bh: u64 = gfx.height(state)
+    let tw: u64 = gfx.fb_panel_w(state)
+    let th: u64 = gfx.fb_panel_h(state)
+    tag()
+    serial.puts((&s_w[0]) as u64)
+    serial.puts((&s_t[0]) as u64)
+    serial.dec(tw)
+    serial.puts((&s_x[0]) as u64)
+    serial.dec(th)
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(bw)
+    serial.puts((&s_x[0]) as u64)
+    serial.dec(bh)
+    serial.puts((&s_g[0]) as u64)
+    if tw != bw || th != bh {
+        serial.puts((&s_ja[0]) as u64)
+    } else {
+        serial.puts((&s_ne[0]) as u64)
+    }
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(gfx.fb_panel_pitch(state))
+    serial.puts((&s_sl[0]) as u64)
+    serial.dec(gfx.fb_pitch(state))
+    serial.nl()
+}
+
+// Die zweite Zeile ueber den Weg: WIE der Bildspeicher erreicht wird.
+// Zweitpuffer, Streifenbetrieb, Zwischenspeicher, Vervielfachung der
+// Oberflaeche -- vier Zahlen, die zusammen erklaeren, warum ein Bild
+// schnell oder langsam ankommt und ob es unterwegs angefasst wird.
+fn buffer_line(state: u64) {
+    var s_p: [u8; 8] = "puffer \0"
+    var s_zw: [u8; 8] = "zweit=\0\0"
+    var s_ja: [u8; 3] = "ja\0"
+    var s_ne: [u8; 6] = "nein\0\0"
+    var s_st: [u8; 12] = "  streifen=\0"
+    var s_uc: [u8; 12] = "  uncached=\0"
+    var s_ui: [u8; 11] = "  uiskala=\0"
+    var s_pr: [u8; 13] = "  presents=\0\0"
+    if !gfx.ready(state) {
+        return
+    }
+    tag()
+    serial.puts((&s_p[0]) as u64)
+    serial.puts((&s_zw[0]) as u64)
+    if gfx.fb_double_buffered(state) {
+        serial.puts((&s_ja[0]) as u64)
+    } else {
+        serial.puts((&s_ne[0]) as u64)
+    }
+    serial.puts((&s_st[0]) as u64)
+    if gfx.fb_stripe(state) {
+        serial.puts((&s_ja[0]) as u64)
+    } else {
+        serial.puts((&s_ne[0]) as u64)
+    }
+    serial.puts((&s_uc[0]) as u64)
+    if gfx.fb_uncached(state) {
+        serial.puts((&s_ja[0]) as u64)
+    } else {
+        serial.puts((&s_ne[0]) as u64)
+    }
+    serial.puts((&s_ui[0]) as u64)
+    serial.dec(gfx.fb_uiscale(state))
+    serial.puts((&s_pr[0]) as u64)
+    serial.dec(gfx.fb_presents(state))
+    serial.nl()
+}
+
+// Woher der Bildspeicher kommt, im Klartext und mit der Adresse. Die
+// Herkunft entscheidet, was ein Treiber ueberhaupt duerfte: einen
+// Puffer, den die Firmware eingerichtet hat (Multiboot/GOP), darf man
+// benutzen; einen Modus, den der Kern selbst gesetzt hat (VBE), darf
+// man auch wieder aendern.
+fn source_line(state: u64) {
+    var s_q: [u8; 8] = "quelle \0"
+    var s_mb: [u8; 42] = "multiboot (der Lader, UEFI-GOP oder VESA)\0"
+    var s_vbe: [u8; 40] = "vbe (der Kern hat den Modus selbst ge\0\0\0"
+    var s_vbe2: [u8; 7] = "setzt)\0"
+    var s_no: [u8; 30] = "KEINE -- kein Bildspeicher da\0"
+    var s_ph: [u8; 10] = "  phys=\0\0\0"
+    var s_by: [u8; 11] = "  oktette=\0"
+    var s_bp: [u8; 8] = "  bpp=\0\0"
+    if !gfx.ready(state) {
+        line((&s_no[0]) as u64)
+        return
+    }
+    tag()
+    serial.puts((&s_q[0]) as u64)
+    if gfx.fb_from_multiboot(state) {
+        serial.puts((&s_mb[0]) as u64)
+    } else {
+        serial.puts((&s_vbe[0]) as u64)
+        serial.puts((&s_vbe2[0]) as u64)
+    }
+    serial.puts((&s_ph[0]) as u64)
+    serial.hex(gfx.fb_phys(state))
+    serial.puts((&s_by[0]) as u64)
+    serial.dec(gfx.fb_bytes(state))
+    serial.puts((&s_bp[0]) as u64)
+    serial.dec(gfx.fb_bpp(state))
+    serial.nl()
+}
+
+// Liegt der Bildspeicher, in den `fb.fi` schreibt, INNERHALB eines
+// Adressbereichs der gefundenen Grafikeinheit?
+//
+// WARUM DAS DIE WICHTIGSTE EINZELNE ZEILE DIESES BERICHTS IST. Sie
+// verbindet die zwei Haelften: hier die Karte auf dem Bus, dort der
+// Speicher, in den gezeichnet wird. Faellt die Adresse in einen BAR der
+// Karte, dann schreibt Osum wirklich in DEREN Bildspeicher, und ein
+// Treiber fuer genau diese Karte haette einen Anknuepfungspunkt. Faellt
+// sie in KEINEN, dann hat die Firmware den Puffer woanders hingelegt
+// (das ist unter UEFI der Regelfall bei reservierten Bereichen), und
+// jeder Treiberversuch muesste dort ANFANGEN und nicht bei den
+// Registern.
+fn mapping_line(state: u64) {
+    var s_z: [u8; 12] = "zuordnung \0\0"
+    var s_in: [u8; 20] = "bildspeicher in bar\0"
+    var s_der: [u8; 12] = " der gpu\0\0\0\0"
+    var s_kein: [u8; 47] = "bildspeicher in KEINEM bar der gpu (Firmware)\0\0"
+    var s_ohne: [u8; 32] = "keine gpu, keine Zuordnung\0\0\0\0\0\0"
+    if !gfx.ready(state) {
+        return
+    }
+    let g: u64 = gpu_index(state)
+    if g >= pci.MAX_DEV {
+        line((&s_ohne[0]) as u64)
+        return
+    }
+    let p: u64 = gfx.fb_phys(state)
+    var b: u64 = 0
+    while b < 6 {
+        let sz: u64 = pci.bar_size(state, g, b)
+        if sz != 0 {
+            if !pci.bar_is_io(state, g, b) {
+                let a: u64 = pci.bar(state, g, b)
+                if p >= a {
+                    if p - a < sz {
+                        tag()
+                        serial.puts((&s_in[0]) as u64)
+                        serial.dec(b)
+                        serial.puts((&s_der[0]) as u64)
+                        serial.nl()
+                        return
+                    }
+                }
+            }
+        }
+        b = b + 1
+    }
+    line((&s_kein[0]) as u64)
+}
+
+// Was diese Maschine an Beschleunigung HAT -- und das ist heute: nichts.
+// Die Zeile steht hier, damit der Bericht die Frage beantwortet, die
+// ihn ausgeloest hat, statt sie offen zu lassen. Sie ist bewusst
+// unbequem formuliert; ein Bericht, der einen Mangel verschweigt, ist
+// eine Werbung.
+fn state_line() {
+    var s1: [u8; 62] = "stand treiber=KEINER  3d=KEINES  opengl=NEIN  vulkan=NEIN\0\0\0\0\0"
+    // KEIN "fb" mit Punkt dahinter in dieser Zeichenkette. `tools/server/
+    // count.py` zaehlt Zugriffe auf die Grafikmodule mit einem regulaeren
+    // Ausdruck ueber den Quelltext; Kommentare wirft es weg,
+    // ZEICHENKETTEN NICHT. Der Name des Bildspeicher-Treibers in einer
+    // Meldung galt dem Zaehler deshalb als Zugriff an der Naht vorbei,
+    // und `tools/server/run.sh` wurde rot -- zu Recht, denn der Zaehler
+    // kann den Unterschied nicht sehen. Also steht hier der Dateiname
+    // ohne Punkt.
+    var s2: [u8; 63] = "stand alles wird vom hauptprozessor gezeichnet (kernel/fb)\0\0\0\0\0"
+    line((&s1[0]) as u64)
+    line((&s2[0]) as u64)
+}
+
+// ------------------------------------------------------- der Bericht
+
+fn bericht(state: u64) {
+    var s_top: [u8; 65] = "-------------------- OSUM GRAFIK-ERHEBUNG --------------------\0\0\0"
+    var s_end: [u8; 65] = "-------------------- ENDE DER ERHEBUNG -----------------------\0\0\0"
+    line((&s_top[0]) as u64)
+    gpu_lines(state)
+    source_line(state)
+    gone_line(state)
+    buffer_line(state)
+    mapping_line(state)
+    state_line()
+    line((&s_end[0]) as u64)
+}
+
+// Steht `grafik` auf der Kommandozeile? Dieselbe Bauart wie
+// `hwdiag.wanted` -- und aus demselben Grund: ohne das Wort aendert
+// sich am Kern KEINE Zeile, und jede Messung der Runden davor sieht
+// denselben Kernel wie vorher.
+fn wanted(cmd: u64) -> bool {
+    var w: [u8; 7] = "grafik\0"
+    if cmd == 0 {
+        return false
+    }
+    return find(cmd, (&w[0]) as u64, 6) != 0
+}
+
+// Eigene Fassung der Teilzeichenkettensuche, aus demselben Grund wie in
+// `hwdiag.fi` und `fb.fi`: dieses Modul darf `kmain.fi` nicht
+// einbinden, sonst entsteht ein Kreis im Abhaengigkeitsgraphen, und
+// Firn nimmt keinen.
+fn find(heu: u64, nadel: u64, n: u64) -> u64 {
+    if heu == 0 || n == 0 {
+        return 0
+    }
+    var i: u64 = 0
+    while true {
+        let c: u64 = kstate.get8(heu + i)
+        if c == 0 {
+            return 0
+        }
+        var k: u64 = 0
+        var gleich: bool = true
+        while k < n {
+            let a: u64 = kstate.get8(heu + i + k)
+            if a == 0 || a != kstate.get8(nadel + k) {
+                gleich = false
+                k = n
+            } else {
+                k = k + 1
+            }
+        }
+        if gleich {
+            return heu + i
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// Der Einstieg aus `kernel_main`, an derselben Stelle wie
+// `hwdiag.stage`. Ohne das Wort `grafik` passiert hier nichts.
+fn stage(state: u64, cmd: u64) {
+    if !wanted(cmd) {
+        return
+    }
+    bericht(state)
+}

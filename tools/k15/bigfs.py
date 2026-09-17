@@ -12,7 +12,7 @@ WAS DIESES ABBILD ANDERS MACHT ALS DIE UEBRIGEN:
 
   * `--inodes=4096` statt der 128, die seit Runde 62 in beiden
     Umsetzungen als Konstante standen. Die Zahl stand immer schon im
-    Superblock; seit dem zweiten Nachtrag liest `kernel/fs.fi` sie von
+    Superblock; seit dem zweiten Nachtrag liest `kernel/fs/fs.fi` sie von
     dort (`mount`), und `tools/osum/mkfs.py` schreibt sie hin.
   * LEERE Dateien. Ein Name, ein Inode, kein Datenblock. Der Index haelt
     Namen und keine Inhalte -- genau wie sein Vorbild --, und 4000

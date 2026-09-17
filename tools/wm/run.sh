@@ -689,7 +689,7 @@ num "im Regellauf kommen Oktette auf BEIDEN Wegen an (Unterbrechungen)" \
 # Zusagen nach.
 echo
 echo "== 18. der Mauszeiger (Runde BLECH-HID) =="
-if python3 tools/wm/zeiger.py kernel/wm.fi > "$TMPD/zeiger.txt" 2>&1; then
+if python3 tools/wm/zeiger.py kernel/ui/wm.fi > "$TMPD/zeiger.txt" 2>&1; then
     ok "der Zeiger ist ein Pfeil: $(tail -1 "$TMPD/zeiger.txt" | sed 's/^ *//')"
 else
     bad "der Zeiger ist kein Pfeil"

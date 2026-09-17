@@ -1,0 +1,945 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/susp.fi -- RUNDE SUSPEND (K-018): SCHLAFEN UND WIEDERKOMMEN.
+//
+// ==================================================================
+// DIE VORABMESSUNG, DIE DIESE DATEI BEGRUENDET
+// ==================================================================
+//
+// Der Auftrag verlangt: ZUERST MESSEN, DANN BAUEN. Was vor dieser
+// Runde da war, steht hier -- gemessen mit `osum suspmess` auf der
+// Zielmaschine, nicht aus dem Gefuehl:
+//
+//   DA:     Die FADT wird gelesen (`acpi.table` mit "FACP"), und zwar
+//           von ZWEI Stellen: `power.acpi_off` (K13) und
+//           `acpiev.stage` (Runde ACPI-EREIGNISSE).
+//   DA:     PM1a_CNT/PM1b_CNT sind bekannt -- FADT-Versatz 64/68.
+//           `power.acpi_off` schreibt dort bereits SLP_TYP|SLP_EN.
+//   DA:     PM1a_EVT/PM1b_EVT, PM1_EVT_LEN, GPE0/GPE1, SCI_INT,
+//           SMI_CMD/ACPI_ENABLE -- alles in `acpiev.fi` gelesen.
+//   DA:     Ein vollstaendiger AML-Namensraum (`aml.ns_hold`,
+//           `aml.eval_node`) mit Methodenausfuehrung.
+//   DA:     Ein Rahmenverwalter mit `mem.frames_free`/`frames_total`
+//           und ein Blockweg mit `blkdev.write_on`/`flush_on`.
+//
+//   FEHLT:  \_S3 -- im ganzen Baum kein einziger Treffer. Nur `_S5_`
+//           wird gesucht, und zwar von Hand als Oktettmuster in
+//           `power.s5_values`, NICHT ueber den Deuter.
+//   FEHLT:  Die FACS. Kein Treffer im Baum. Damit gibt es keinen
+//           Platz fuer den Aufwachvektor -- den Zeiger, ohne den eine
+//           S3-Maschine nach dem Aufwachen in die Firmware laeuft und
+//           kalt startet.
+//   FEHLT:  Jede Form von Zustandssicherung: kein Sichern der
+//           Register, kein XSAVE-Bereich, keine Geraetezustaende.
+//
+// ==================================================================
+// DIE ENTSCHEIDUNG: S4 (PLATTE) ZUERST, S3 GEMESSEN DANEBEN
+// ==================================================================
+//
+// `docs/` empfiehlt den Ruhezustand auf Platte, weil er ohne das
+// Zusammenspiel mit der Firmware auskommt. Diese Runde hat die
+// Empfehlung NICHT geglaubt, sondern nachgemessen -- `suspmess`
+// druckt, was die Zielmaschine wirklich anbietet. Das Ergebnis steht
+// in docs/RUNDE-SUSPEND.md; die kurze Fassung:
+//
+//   Auf QEMU/SeaBIOS gibt es \_S3 in der DSDT und eine FACS mit Platz
+//   fuer den Aufwachvektor. S3 ist dort also NICHT ausgeschlossen.
+//   ABER: der Rueckweg aus S3 beginnt im REALMODUS an einer Adresse
+//   unter 1 MiB, die die Firmware anspringt. Dieser Kern laeuft im
+//   langen Modus mit einer eigenen Seitentabelle; der Weg zurueck
+//   braucht einen Trampolinpfad 16->32->64 Bit. Das ist derselbe Code,
+//   den `smp` fuer die Nebenkerne schon hat -- aber er startet dort
+//   aus einem DEFINIERTEN Zustand, waehrend S3 aus einem Zustand
+//   zurueckkommt, in dem die Firmware Speicher unter 1 MiB angefasst
+//   haben kann.
+//
+// S4 haengt an keiner dieser Unbekannten: das Abbild liegt auf der
+// Platte, der Rueckweg ist ein normaler Kaltstart, der beim Hochlauf
+// nachsieht, ob ein gueltiges Abbild da ist. Was S4 braucht, hat
+// dieser Kern vollstaendig (Blockweg, Rahmenverwalter, Pruefsumme).
+//
+// Deshalb: S4 ist GEBAUT und wird gemessen. S3 ist GEMESSEN
+// (was die Firmware anbietet) und der Schlafwert wird ueber den
+// DEUTER geholt statt von Hand gesucht -- aber der Rueckweg aus S3
+// ist in dieser Runde NICHT gebaut und steht als roter Punkt im
+// Bericht. Eine Zusage ohne Messung gibt es hier nicht.
+
+import lib.kstate
+import serial
+import acpi.acpi
+import acpi.aml
+import acpi.amlns
+import acpi.amlobj
+import mm.mem
+import block.blk
+import ldr.bootmod
+import arch.arch
+
+// ================================================================
+// DER SPEICHER DIESER DATEI
+//
+// ZUGETEILT UND NICHT VERHANDELBAR: SUSP_OFF 0x110000..0x113000,
+// drei Seiten. Diese Datei nimmt KEINE Seite ausserhalb. Die
+// Untergliederung steht hier und NUR hier; `tools/kernel/memmap.py`
+// liest sie als "Versatz in SUSP_OFF".
+// ================================================================
+
+const S_READY: u64 = 0 // 1 = die Vorabmessung ist gelaufen
+const S_WHY: u64 = 8 // warum es nicht geht (W_*)
+const S_FADT: u64 = 16 // die FADT, oder 0
+const S_FACS: u64 = 24 // die FACS, oder 0
+const S_PM1A: u64 = 32 // PM1a_CNT
+const S_PM1B: u64 = 40 // PM1b_CNT
+const S_S3A: u64 = 48 // SLP_TYPa fuer S3
+const S_S3B: u64 = 56 // SLP_TYPb fuer S3
+const S_S3OK: u64 = 64 // 1 = \_S3 ist da und ausgewertet
+const S_S4A: u64 = 72 // SLP_TYPa fuer S4
+const S_S4B: u64 = 80
+const S_S4OK: u64 = 88
+const S_FACSLEN: u64 = 96 // Laenge der FACS
+const S_HWSIG: u64 = 104 // Hardware Signature aus der FACS
+const S_WAKEV: u64 = 112 // der Aufwachvektor, wie er dasteht
+const S_DISK: u64 = 120 // die Plattennummer fuer das Abbild
+const S_DISKOK: u64 = 128 // 1 = eine beschreibbare Platte ist da
+const S_BLOCKS: u64 = 136 // wie viele Bloecke sie hat
+const S_BSIZE: u64 = 144 // Blockgroesse
+const S_SAVED: u64 = 152 // wie viele Rahmen gesichert wurden
+const S_FREEB: u64 = 160 // freie Rahmen VOR dem Schlafen
+const S_FREEA: u64 = 168 // freie Rahmen NACH dem Aufwachen
+const S_IMGOK: u64 = 176 // 1 = ein gueltiges Abbild liegt auf Platte
+const S_IMGWHY: u64 = 184 // warum das Abbild verworfen wurde
+const S_CYCLE: u64 = 192 // der wievielte Zyklus
+const S_SUM: u64 = 200 // die Pruefsumme, die berechnet wurde
+const S_SUMD: u64 = 208 // die Pruefsumme, die auf der Platte stand
+const S_CNT: u64 = 216 // ein Zaehler, der den Schlaf ueberleben muss
+const S_PAT: u64 = 224 // das Muster im Bildspeicher
+const S_RESTORED: u64 = 232 // 1 = dieser Start kam aus dem Abbild
+
+// Der Kopf des Abbilds auf der Platte. EIN Block, und er sagt alles,
+// was der Wiederanlauf wissen muss.
+const H_MAGIC: u64 = 0 // "OSUMHIB\0"
+const H_VER: u64 = 8
+const H_FRAMES: u64 = 16 // wie viele Rahmen im Abbild liegen
+const H_SUM: u64 = 24 // Pruefsumme ueber die Nutzlast
+const H_CNT: u64 = 32 // der Zaehler des Pruefstands
+const H_PAT: u64 = 40 // das Muster des Pruefstands
+const H_HWSIG: u64 = 48 // die Hardware Signature beim Einschlafen
+const H_CYCLE: u64 = 56
+
+const MAGIC: u64 = 0x004249484D55534F // "OSUMHIB\0" in Little Endian
+const VER: u64 = 1
+
+// Warum es nicht geht.
+const W_OK: u64 = 0
+const W_NOFADT: u64 = 1
+const W_NOFACS: u64 = 2
+const W_NOPM1A: u64 = 3
+const W_NONS: u64 = 4 // kein AML-Namensraum
+const W_NOS3: u64 = 5
+const W_NODISK: u64 = 6
+
+// Die Felder der FADT, die diese Datei braucht (ACPI 6.4, Tab. 5.9).
+const F_FACS: u64 = 36 // FIRMWARE_CTRL, 32 Bit
+const F_PM1A_CNT: u64 = 64
+const F_PM1B_CNT: u64 = 68
+const F_XFACS: u64 = 132 // X_FIRMWARE_CTRL, 64 Bit (ACPI 2.0+)
+
+// Die Felder der FACS (ACPI 6.4, Tabelle 5.11).
+const FACS_LEN: u64 = 4
+const FACS_HWSIG: u64 = 8
+const FACS_WAKE: u64 = 12 // FIRMWARE_WAKING_VECTOR, 32 Bit
+const FACS_XWAKE: u64 = 24 // X_FIRMWARE_WAKING_VECTOR, 64 Bit
+
+const SLP_EN: u64 = 8192 // Bit 13 von PM1x_CNT
+
+fn g(state: u64, off: u64) -> u64 {
+    return kstate.get(state, kstate.SUSP_OFF + off)
+}
+
+fn s(state: u64, off: u64, v: u64) {
+    kstate.set(state, kstate.SUSP_OFF + off, v)
+}
+
+// Ein ECHTER 16-Bit-Zugriff, ueber dieselbe Stelle wie `acpiev.fi`.
+// NICHT als zwei Oktette: die Spezifikation (ACPI 6.4, 4.8.3)
+// beschreibt PM1x_CNT als 16-Bit-Register, und ein Brett, das auf
+// zwei Oktettschreibungen anders reagiert, gibt es wirklich.
+fn out16(port: u64, v: u64) {
+    arch.dev_out16((port & 0xFFFF) as u16, (v & 0xFFFF) as u16)
+}
+
+fn in16(port: u64) -> u64 {
+    return arch.dev_in16((port & 0xFFFF) as u16) as u64
+}
+
+// ================================================================
+// DAS SCHLAFPAKET AUS DEM DEUTER, NICHT AUS DEM OKTETTHAUFEN
+//
+// `power.s5_values` sucht `_S5_` als vier Oktette in der DSDT. Das
+// ist die Abkuerzung, die K13 bewusst genommen hat, und ihre Grenze
+// steht dort ehrlich: eine Firmware, die das Paket in einem `If`
+// versteckt, wird nicht gefunden.
+//
+// Hier wird es richtig gemacht, weil der Deuter inzwischen da ist:
+// der Name wird im NAMENSRAUM nachgeschlagen und das Paket
+// AUSGEWERTET. Damit findet diese Datei auch ein `_S3`, das hinter
+// einer Methode steht -- und sie findet KEINS, wo wirklich keins ist,
+// statt zufaellig auf vier Oktette in einem Puffer zu treffen.
+// ================================================================
+fn sleep_pkg(state: u64, name: u64, outa: u64, outb: u64) -> bool {
+    // DIE WURZEL IST DER INDEX 0, NICHT IHRE ADRESSE. Die erste
+    // Fassung dieser Runde stand hier auf `amlns.node_at(state, 0)`
+    // -- und das ist ein ZEIGER in die Arena, waehrend `child` einen
+    // INDEX erwartet. Ergebnis: `_S3` wurde nie gefunden, die
+    // Vorabmessung meldete "kein _S3", und das haette in den Bericht
+    // geschrieben, die Firmware koenne kein S3. Sie kann es; der
+    // Abzug der DSDT aus derselben Maschine zeigt `Scope (\) { Name
+    // (_S3, Package (0x04) { One, One, Zero, Zero }) }`. Gefunden
+    // wurde der Fehler NUR, weil die Messung gegen `iasl -d`
+    // gegengeprueft wurde statt sich selbst zu glauben.
+    let n: u64 = amlns.child(state, 0, amlns.seg_of(name))
+    if n == amlns.NONE {
+        return false
+    }
+    var o: [u64; 3] = [0 as u64; 3]
+    let dst: u64 = (&o[0]) as u64
+    if !aml.eval_node(state, n, dst) {
+        return false
+    }
+    if amlobj.otype(dst) != amlobj.OT_PKG {
+        return false
+    }
+    if amlobj.ov2(dst) < 2 {
+        return false
+    }
+    let e0: u64 = amlobj.pkg_at(dst, 0)
+    let e1: u64 = amlobj.pkg_at(dst, 1)
+    if e0 == 0 || e1 == 0 {
+        return false
+    }
+    __mmio_write64(outa as *mut u64, amlobj.to_int(e0) & 7)
+    __mmio_write64(outb as *mut u64, amlobj.to_int(e1) & 7)
+    return true
+}
+
+// ================================================================
+// DIE VORABMESSUNG. Sie schreibt NICHTS und schaltet NICHTS -- sie
+// stellt nur fest, was die Maschine anbietet.
+// ================================================================
+fn measure(state: u64) {
+    var w_facp: [u8; 5] = "FACP\0"
+    s(state, S_READY, 0)
+    s(state, S_WHY, W_OK)
+    let fadt: u64 = acpi.table(state, (&w_facp[0]) as u64)
+    s(state, S_FADT, fadt)
+    if fadt == 0 {
+        s(state, S_WHY, W_NOFADT)
+        return
+    }
+    let pm1a: u64 = kstate.get32(fadt + F_PM1A_CNT)
+    s(state, S_PM1A, pm1a)
+    s(state, S_PM1B, kstate.get32(fadt + F_PM1B_CNT))
+    if pm1a == 0 {
+        s(state, S_WHY, W_NOPM1A)
+    }
+
+    // DIE FACS. Sie haengt an der FADT, nicht an der RSDT -- genau wie
+    // die DSDT. ACPI 2.0 hat den 64-Bit-Zeiger nachgereicht; wenn er
+    // da ist und nicht null, gilt er.
+    var facs: u64 = 0
+    let len: u64 = kstate.get32(fadt + 4)
+    if len >= F_XFACS + 8 {
+        facs = __mmio_read64((fadt + F_XFACS) as *mut u64)
+    }
+    if facs == 0 {
+        facs = kstate.get32(fadt + F_FACS)
+    }
+    if facs != 0 {
+        // Die FACS hat KEINE Pruefsumme und KEINE Fassung im Kopf --
+        // nur die Kennung "FACS" und eine Laenge. Beides wird geprueft,
+        // sonst steht hier irgendein Zeiger.
+        if kstate.get8(facs) == 0x46 && kstate.get8(facs + 1) == 0x41 &&
+            kstate.get8(facs + 2) == 0x43 && kstate.get8(facs + 3) == 0x53 {
+            let flen: u64 = kstate.get32(facs + FACS_LEN)
+            if flen >= 64 {
+                s(state, S_FACS, facs)
+                s(state, S_FACSLEN, flen)
+                s(state, S_HWSIG, kstate.get32(facs + FACS_HWSIG))
+                s(state, S_WAKEV, kstate.get32(facs + FACS_WAKE))
+            }
+        }
+    }
+    if g(state, S_FACS) == 0 && g(state, S_WHY) == W_OK {
+        s(state, S_WHY, W_NOFACS)
+    }
+
+    // \_S3 und \_S4 aus dem Namensraum. Ohne gehaltenen Namensraum
+    // geht das nicht -- dann steht hier ehrlich W_NONS und nicht
+    // "kein S3".
+    var w_s3: [u8; 5] = "_S3_\0"
+    var w_s4: [u8; 5] = "_S4_\0"
+    if aml.ns_hold(state) == 0 {
+        if g(state, S_WHY) == W_OK {
+            s(state, S_WHY, W_NONS)
+        }
+    } else {
+        var a: u64 = 0
+        var b: u64 = 0
+        if sleep_pkg(state, (&w_s3[0]) as u64, (&a) as u64, (&b) as u64) {
+            s(state, S_S3A, a)
+            s(state, S_S3B, b)
+            s(state, S_S3OK, 1)
+        }
+        if sleep_pkg(state, (&w_s4[0]) as u64, (&a) as u64, (&b) as u64) {
+            s(state, S_S4A, a)
+            s(state, S_S4B, b)
+            s(state, S_S4OK, 1)
+        }
+        if g(state, S_S3OK) == 0 && g(state, S_WHY) == W_OK {
+            s(state, S_WHY, W_NOS3)
+        }
+    }
+
+    s(state, S_READY, 1)
+}
+
+// DIE PLATTENMESSUNG, GETRENNT VON DER ACPI-MESSUNG.
+//
+// GEMESSEN UND BERICHTIGT: beides stand zuerst in `measure`, und
+// `measure` haengt hinter `acpiev.stage` -- dort ist der AML-
+// Namensraum fertig, aber die PLATTE noch nicht. Der Messlauf meldete
+// "keine Platte", obwohl dieselbe Maschine wenige Zeilen spaeter
+// `osum: ata0 sectors=131072` druckte: `blk.use_ata` laeuft erst in
+// `kmain.osum`, also lange nach der ACPI-Stufe.
+//
+// Die zwei Messungen haben deshalb zwei Zeitpunkte. Wer sie in einen
+// zwingt, misst eine von beiden falsch.
+fn disk_measure(state: u64) {
+    //
+    // GEMESSEN UND BERICHTIGT: die erste Fassung fragte `blkdev.fi`.
+    // Das ist die falsche Etage -- `blkdev.fi` ist die PCI-Aufzaehlung
+    // (welcher Controller steckt wo), und ihre Liste fuellt `probe`,
+    // das in diesem Kern niemand ruft. Der Messlauf meldete deshalb
+    // "keine Platte", obwohl dieselbe Maschine eine Zeile spaeter
+    // `osum: ata0 sectors=131072` druckte.
+    //
+    // Die richtige Etage ist `blk.fi` -- dieselbe Schnittstelle, die
+    // das Dateisystem benutzt: 512 Oktette je Block, `read_on` und
+    // `write_on` mit einer Geraetenummer. Das Abbild gehoert auf
+    // DIESELBE Platte, von der gestartet wurde.
+    var dev: u64 = blk.DEV_ATA
+    if !blk.present_on(state, dev) {
+        dev = blk.DEV_ATA1
+    }
+    if blk.present_on(state, dev) {
+        let nb: u64 = blk.blocks_on(state, dev)
+        if nb > 0 {
+            s(state, S_DISK, dev)
+            s(state, S_BLOCKS, nb)
+            s(state, S_BSIZE, blk.BLOCK_SIZE)
+            s(state, S_DISKOK, 1)
+        }
+    }
+    if g(state, S_DISKOK) == 0 && g(state, S_WHY) == W_OK {
+        s(state, S_WHY, W_NODISK)
+    }
+    if g(state, S_DISKOK) == 0 && g(state, S_WHY) == W_OK {
+        s(state, S_WHY, W_NODISK)
+    }
+}
+
+
+fn why_name(w: u64) {
+    var w0: [u8; 3] = "ok\0"
+    var w1: [u8; 11] = "keine FADT\0"
+    var w2: [u8; 11] = "keine FACS\0"
+    var w3: [u8; 14] = "kein PM1a_CNT\0"
+    var w4: [u8; 16] = "kein Namensraum\0"
+    var w5: [u8; 9] = "kein _S3\0"
+    var w6: [u8; 13] = "keine Platte\0"
+    if w == W_OK { serial.puts((&w0[0]) as u64) }
+    if w == W_NOFADT { serial.puts((&w1[0]) as u64) }
+    if w == W_NOFACS { serial.puts((&w2[0]) as u64) }
+    if w == W_NOPM1A { serial.puts((&w3[0]) as u64) }
+    if w == W_NONS { serial.puts((&w4[0]) as u64) }
+    if w == W_NOS3 { serial.puts((&w5[0]) as u64) }
+    if w == W_NODISK { serial.puts((&w6[0]) as u64) }
+}
+
+// Der Bericht der Vorabmessung. Genau das, was docs/RUNDE-SUSPEND.md
+// als Tabelle "was ist da / was fehlt" braucht.
+fn report(state: u64) {
+    var s_h: [u8; 22] = "susp: vorabmessung --\0"
+    var s_fadt: [u8; 8] = " fadt=\0\0"
+    var s_facs: [u8; 8] = " facs=\0\0"
+    var s_flen: [u8; 8] = " flen=\0\0"
+    var s_sig: [u8; 9] = " hwsig=\0\0"
+    var s_wak: [u8; 8] = " wake=\0\0"
+    var s_pm1a: [u8; 8] = " pm1a=\0\0"
+    var s_pm1b: [u8; 8] = " pm1b=\0\0"
+    var s_s3: [u8; 7] = " s3=\0\0\0"
+    var s_s4: [u8; 7] = " s4=\0\0\0"
+    var s_no: [u8; 5] = "NEIN\0"
+    var s_disk: [u8; 8] = " disk=\0\0"
+    var s_blk: [u8; 10] = " bloecke=\0"
+    var s_why: [u8; 7] = " why=\0\0"
+    var s_kom: [u8; 2] = ",\0"
+    if g(state, S_READY) == 0 {
+        measure(state)
+    }
+    disk_measure(state)
+    serial.puts((&s_h[0]) as u64)
+    serial.puts((&s_fadt[0]) as u64)
+    serial.hex(g(state, S_FADT))
+    serial.puts((&s_facs[0]) as u64)
+    serial.hex(g(state, S_FACS))
+    serial.puts((&s_flen[0]) as u64)
+    serial.dec(g(state, S_FACSLEN))
+    serial.puts((&s_sig[0]) as u64)
+    serial.hex(g(state, S_HWSIG))
+    serial.puts((&s_wak[0]) as u64)
+    serial.hex(g(state, S_WAKEV))
+    serial.nl()
+    serial.puts((&s_h[0]) as u64)
+    serial.puts((&s_pm1a[0]) as u64)
+    serial.hex(g(state, S_PM1A))
+    serial.puts((&s_pm1b[0]) as u64)
+    serial.hex(g(state, S_PM1B))
+    serial.puts((&s_s3[0]) as u64)
+    if g(state, S_S3OK) != 0 {
+        serial.dec(g(state, S_S3A))
+        serial.puts((&s_kom[0]) as u64)
+        serial.dec(g(state, S_S3B))
+    } else {
+        serial.puts((&s_no[0]) as u64)
+    }
+    serial.puts((&s_s4[0]) as u64)
+    if g(state, S_S4OK) != 0 {
+        serial.dec(g(state, S_S4A))
+        serial.puts((&s_kom[0]) as u64)
+        serial.dec(g(state, S_S4B))
+    } else {
+        serial.puts((&s_no[0]) as u64)
+    }
+    serial.nl()
+    serial.puts((&s_h[0]) as u64)
+    serial.puts((&s_disk[0]) as u64)
+    if g(state, S_DISKOK) != 0 {
+        serial.dec(g(state, S_DISK))
+        serial.puts((&s_blk[0]) as u64)
+        serial.dec(g(state, S_BLOCKS))
+    } else {
+        serial.puts((&s_no[0]) as u64)
+    }
+    serial.puts((&s_why[0]) as u64)
+    why_name(g(state, S_WHY))
+    serial.nl()
+}
+
+
+// ================================================================
+// DAS RUHEZUSTANDSABBILD AUF DER PLATTE
+//
+// AUFBAU, und er ist absichtlich so einfach, dass der Wiederanlauf
+// ihn ohne Dateisystem lesen kann:
+//
+//   Block LBA_HEAD      der Kopf (MAGIC, Fassung, Zahl der Seiten,
+//                       Pruefsumme, der Pruefstandszustand)
+//   Block LBA_HEAD+1 .. die Nutzlast, 512 Oktette je Block
+//
+// Das Abbild liegt am ENDE der Platte, nicht am Anfang: dort steht
+// die Partitionstafel und das Dateisystem, und ein Ruhezustand, der
+// die Wurzel ueberschreibt, ist kein Ruhezustand, sondern ein
+// Datenverlust. Wo genau, sagt `img_lba`.
+//
+// WAS DIESE RUNDE SICHERT UND WAS NICHT -- die Liste steht hier und
+// nicht nur im Bericht, weil sie sonst veraltet:
+//
+//   GESICHERT: der Pruefstandszustand (Zaehler, Muster, Zyklus) und
+//              die Zahl der freien Rahmen, jeweils ueber eine
+//              Pruefsumme abgesichert.
+//   NICHT:     die CPU-Register, der FPU/XSAVE-Bereich, die
+//              Seitentabellen, der Geraetezustand von Zeitgeber,
+//              Tastatur und Grafik. Diese Runde baut den TRAEGER
+//              (Abbild, Pruefsumme, Wiedererkennung, Gegenprobe) und
+//              MISST ihn; die Registersicherung ist der naechste
+//              Schritt und steht als roter Punkt im Bericht.
+//
+// Eine Zusage, die diese Runde NICHT macht: dass ein beliebiger
+// laufender Prozess den Schlaf ueberlebt. Was sie misst, ist, dass
+// ein DEFINIERTER Zustand byteweise identisch zurueckkommt und dass
+// ein beschaedigtes Abbild NICHT eingespielt wird.
+// ================================================================
+
+// Wo das Abbild liegt: die letzten Bloecke der Platte.
+const IMG_BLOCKS: u64 = 64 // Kopf + 63 Bloecke Nutzlast
+
+fn img_lba(state: u64) -> u64 {
+    let n: u64 = g(state, S_BLOCKS)
+    if n <= IMG_BLOCKS {
+        return 0
+    }
+    return n - IMG_BLOCKS
+}
+
+// Ein Block Arbeitsspeicher, innerhalb des zugeteilten Bereichs.
+// SUSP_OFF ist drei Seiten gross; die dritte dient als Blockpuffer.
+const BUF: u64 = 0x2000 // Versatz in SUSP_OFF
+
+fn buf(state: u64) -> u64 {
+    return state + kstate.SUSP_OFF + BUF
+}
+
+// DIE PRUEFSUMME.
+//
+// GEMESSEN UND BERICHTIGT: die erste Fassung rechnete FNV-1a von Hand
+// (`h = h * 0x100000001B3`) und fiel im ersten Lauf sofort auf --
+// `panic: integer overflow in 'u64 * u64' at susp.fi:557`. Firn
+// prueft Ueberlaeufe, und eine Hashmultiplikation LAEUFT nun einmal
+// ueber; gewollt waere `*%`. Statt den Ueberlauf zu erlauben, nimmt
+// diese Datei die Summe, die der Baum schon hat: `bootmod.crc32`
+// (IEEE, reflektiert) -- dieselbe, mit der die Startmodule geprueft
+// werden, und sie ist fortschreibbar (`crc32_start`/`_feed`/`_end`).
+//
+// Sie ist KEINE Kryptographie und soll keine sein: sie muss ein
+// umgekipptes Oktett finden, nicht einen Angreifer abwehren. Wer das
+// Abbild gegen Manipulation schuetzen will, braucht eine Signatur,
+// und die gehoert in die Runde Plattenverschluesselung.
+
+fn buf_clear(state: u64) {
+    let b: u64 = buf(state)
+    var i: u64 = 0
+    while i < 512 {
+        kstate.set8(b + i, 0 as u8)
+        i = i + 1
+    }
+}
+
+// ================================================================
+// SCHLAFEN: den Zustand einfrieren und auf die Platte schreiben.
+// ================================================================
+fn save(state: u64) -> bool {
+    if g(state, S_READY) == 0 {
+        measure(state)
+    }
+    disk_measure(state)
+    if g(state, S_DISKOK) == 0 {
+        return false
+    }
+    let lba: u64 = img_lba(state)
+    if lba == 0 {
+        return false
+    }
+    let dev: u64 = g(state, S_DISK)
+    s(state, S_FREEB, mem.frames_free(state))
+
+    // DIE NUTZLAST. Sie traegt in dieser Runde den Pruefstandszustand
+    // und ein wiedererkennbares Muster -- 63 Bloecke, die byteweise
+    // zurueckkommen muessen. Das Muster haengt vom Zaehler ab, damit
+    // der zweite Zyklus NICHT dieselben Oktette schreibt wie der
+    // erste: ein Abbild, das zufaellig stehen bleibt, faellt sonst
+    // nicht auf.
+    let cnt: u64 = g(state, S_CNT)
+    let pat: u64 = g(state, S_PAT)
+    var sum: u64 = bootmod.crc32_start()
+    var blk_i: u64 = 0
+    while blk_i < IMG_BLOCKS - 1 {
+        let b: u64 = buf(state)
+        var i: u64 = 0
+        while i < 512 {
+            let v: u64 = (pat + blk_i * 31 + i * 7 + cnt * 131) & 0xFF
+            kstate.set8(b + i, v as u8)
+            i = i + 1
+        }
+        // Die Summe laeuft ueber die Nutzlast, so wie sie geschrieben
+        // wird -- nicht ueber das, was sie sein sollte.
+        sum = bootmod.crc32_feed(sum, b, 512)
+        if !blk.write_on(state, dev, lba + 1 + blk_i, b) {
+            return false
+        }
+        blk_i = blk_i + 1
+    }
+    s(state, S_SUM, bootmod.crc32_end(sum))
+
+    // DER KOPF. Er wird ZULETZT geschrieben: solange er nicht steht,
+    // ist das Abbild ungueltig, und ein Stromausfall mitten in der
+    // Nutzlast hinterlaesst keinen halben Ruhezustand, der beim
+    // naechsten Start eingespielt wird.
+    buf_clear(state)
+    let h: u64 = buf(state)
+    __mmio_write64((h + H_MAGIC) as *mut u64, MAGIC)
+    __mmio_write64((h + H_VER) as *mut u64, VER)
+    __mmio_write64((h + H_FRAMES) as *mut u64, IMG_BLOCKS - 1)
+    __mmio_write64((h + H_SUM) as *mut u64, g(state, S_SUM))
+    __mmio_write64((h + H_CNT) as *mut u64, cnt)
+    __mmio_write64((h + H_PAT) as *mut u64, pat)
+    __mmio_write64((h + H_HWSIG) as *mut u64, g(state, S_HWSIG))
+    __mmio_write64((h + H_CYCLE) as *mut u64, g(state, S_CYCLE))
+    if !blk.write_on(state, dev, lba, h) {
+        return false
+    }
+    blk.flush(state)
+    s(state, S_SAVED, IMG_BLOCKS - 1)
+    return true
+}
+
+// ================================================================
+// WIEDERANLAUF: liegt ein gueltiges Abbild da?
+//
+// DIE GEGENPROBE, DIE FALLEN MUSS, LEBT HIER. Ein Abbild mit
+// falscher Pruefsumme darf NICHT eingespielt werden -- es muss zu
+// einem sauberen Kaltstart fuehren. Ein Ruhezustand, der Muell
+// einspielt, ist schlimmer als keiner: er sieht aus wie ein
+// gelungener Start und ist keiner.
+// ================================================================
+const IW_OK: u64 = 0
+const IW_NOIMG: u64 = 1 // kein Kopf, kein MAGIC
+const IW_VER: u64 = 2 // falsche Fassung
+const IW_SUM: u64 = 3 // die Pruefsumme stimmt nicht
+const IW_READ: u64 = 4 // die Platte gab nichts her
+
+fn restore(state: u64) -> bool {
+    s(state, S_IMGOK, 0)
+    s(state, S_IMGWHY, IW_NOIMG)
+    if g(state, S_DISKOK) == 0 {
+        return false
+    }
+    let lba: u64 = img_lba(state)
+    if lba == 0 {
+        return false
+    }
+    let dev: u64 = g(state, S_DISK)
+    let h: u64 = buf(state)
+    if !blk.read_on(state, dev, lba, h) {
+        s(state, S_IMGWHY, IW_READ)
+        return false
+    }
+    if __mmio_read64((h + H_MAGIC) as *mut u64) != MAGIC {
+        s(state, S_IMGWHY, IW_NOIMG)
+        return false
+    }
+    if __mmio_read64((h + H_VER) as *mut u64) != VER {
+        s(state, S_IMGWHY, IW_VER)
+        return false
+    }
+    let want: u64 = __mmio_read64((h + H_SUM) as *mut u64)
+    let n: u64 = __mmio_read64((h + H_FRAMES) as *mut u64)
+    let cnt: u64 = __mmio_read64((h + H_CNT) as *mut u64)
+    let pat: u64 = __mmio_read64((h + H_PAT) as *mut u64)
+    let cyc: u64 = __mmio_read64((h + H_CYCLE) as *mut u64)
+    s(state, S_SUMD, want)
+    if n == 0 || n > IMG_BLOCKS - 1 {
+        s(state, S_IMGWHY, IW_NOIMG)
+        return false
+    }
+
+    // DIE NUTZLAST WIRD GELESEN UND GEPRUEFT, BEVOR SIE GILT.
+    // Erst die ganze Summe, dann die Uebernahme -- nicht Block fuer
+    // Block uebernehmen und am Ende merken, dass es nicht stimmt.
+    var sum: u64 = bootmod.crc32_start()
+    var i: u64 = 0
+    while i < n {
+        let b: u64 = buf(state)
+        if !blk.read_on(state, dev, lba + 1 + i, b) {
+            s(state, S_IMGWHY, IW_READ)
+            return false
+        }
+        sum = bootmod.crc32_feed(sum, b, 512)
+        i = i + 1
+    }
+    s(state, S_SUM, bootmod.crc32_end(sum))
+    if g(state, S_SUM) != want {
+        s(state, S_IMGWHY, IW_SUM)
+        return false
+    }
+    // Erst JETZT gilt der Zustand.
+    s(state, S_CNT, cnt)
+    s(state, S_PAT, pat)
+    s(state, S_CYCLE, cyc)
+    s(state, S_IMGOK, 1)
+    s(state, S_IMGWHY, IW_OK)
+    s(state, S_RESTORED, 1)
+    s(state, S_FREEA, mem.frames_free(state))
+    return true
+}
+
+// Das Abbild ungueltig machen -- nach dem Einspielen. Ein Abbild, das
+// zweimal eingespielt wird, ist ein Zustand aus der Vergangenheit,
+// der einen neueren ueberschreibt.
+fn invalidate(state: u64) {
+    if g(state, S_DISKOK) == 0 {
+        return
+    }
+    let lba: u64 = img_lba(state)
+    if lba == 0 {
+        return
+    }
+    buf_clear(state)
+    blk.write_on(state, g(state, S_DISK), lba, buf(state))
+    blk.flush(state)
+}
+
+// DAS ABBILD ABSICHTLICH BESCHAEDIGEN. Nur fuer die Gegenprobe --
+// sie schreibt ein einziges Oktett der Nutzlast um, laesst den Kopf
+// stehen und verlangt, dass der Wiederanlauf das merkt.
+fn corrupt(state: u64) -> bool {
+    if g(state, S_DISKOK) == 0 {
+        return false
+    }
+    let lba: u64 = img_lba(state)
+    if lba == 0 {
+        return false
+    }
+    let dev: u64 = g(state, S_DISK)
+    let b: u64 = buf(state)
+    if !blk.read_on(state, dev, lba + 1, b) {
+        return false
+    }
+    kstate.set8(b, (kstate.get8(b) ^ 0xFF) as u8)
+    if !blk.write_on(state, dev, lba + 1, b) {
+        return false
+    }
+    blk.flush(state)
+    return true
+}
+
+fn imgwhy_name(w: u64) {
+    var w0: [u8; 3] = "ok\0"
+    var w1: [u8; 12] = "kein Abbild\0"
+    var w2: [u8; 16] = "falsche Fassung\0"
+    var w3: [u8; 20] = "Pruefsumme falsch\0\0\0"
+    var w4: [u8; 18] = "Platte las nicht\0\0"
+    if w == IW_OK { serial.puts((&w0[0]) as u64) }
+    if w == IW_NOIMG { serial.puts((&w1[0]) as u64) }
+    if w == IW_VER { serial.puts((&w2[0]) as u64) }
+    if w == IW_SUM { serial.puts((&w3[0]) as u64) }
+    if w == IW_READ { serial.puts((&w4[0]) as u64) }
+}
+
+
+// ================================================================
+// DER PRUEFSTAND. Er faehrt, was die Abnahme verlangt:
+//
+//   suspzyklus   zwei volle Zyklen hintereinander, jeder mit
+//                byteweisem Vergleich und Rahmenzaehlung.
+//   suspkaputt   die GEGENPROBE: ein beschaedigtes Abbild darf
+//                NICHT eingespielt werden.
+//
+// Jeder Schritt druckt eine Zeile, die der Laeufer liest. Die Zahlen
+// stehen IM Kern; das Skript zaehlt sie nur aus.
+// ================================================================
+fn line_state(state: u64, tag: u64) {
+    var s_c: [u8; 7] = " cnt=\0\0"
+    var s_p: [u8; 7] = " pat=\0\0"
+    var s_f: [u8; 8] = " frei=\0\0"
+    var s_z: [u8; 9] = " zyklus=\0"
+    serial.puts(tag)
+    serial.puts((&s_z[0]) as u64)
+    serial.dec(g(state, S_CYCLE))
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(g(state, S_CNT))
+    serial.puts((&s_p[0]) as u64)
+    serial.hex(g(state, S_PAT))
+    serial.puts((&s_f[0]) as u64)
+    serial.dec(mem.frames_free(state))
+    serial.nl()
+}
+
+fn selftest(state: u64) {
+    var s_t: [u8; 7] = "susp: \0"
+    var s_vor: [u8; 8] = "vorher\0\0"
+    var s_nach: [u8; 8] = "nachher\0"
+    var s_ok: [u8; 13] = "susp: gleich\0"
+    var s_bad: [u8; 16] = "susp: UNGLEICH\0\0"
+    var s_fok: [u8; 20] = "susp: rahmen gleich\0"
+    var s_fbad: [u8; 22] = "susp: RAHMEN VERLOREN\0"
+    var s_sv: [u8; 19] = "susp: gesichert n=\0"
+    var s_sf: [u8; 26] = "susp: SICHERN GESCHEITERT\0"
+    var s_rs: [u8; 21] = "susp: eingespielt --\0"
+    var s_rf: [u8; 24] = "susp: nicht eingespielt\0"
+    var s_why: [u8; 7] = " why=\0\0"
+    var s_sum: [u8; 7] = " sum=\0\0"
+    var s_sud: [u8; 8] = " soll=\0\0"
+    var s_kalt: [u8; 24] = "susp: KALTSTART, sauber\0"
+    var s_z1: [u8; 18] = "susp: == zyklus 1\0"
+    var s_z2: [u8; 18] = "susp: == zyklus 2\0"
+    var s_gp: [u8; 27] = "susp: == gegenprobe kaputt\0"
+
+    if g(state, S_READY) == 0 {
+        measure(state)
+    }
+    disk_measure(state)
+    report(state)
+    if g(state, S_DISKOK) == 0 {
+        return
+    }
+
+    // Ein Abbild aus einem frueheren Lauf darf diesen nicht
+    // verfaelschen.
+    invalidate(state)
+
+    var zyk: u64 = 1
+    while zyk <= 2 {
+        if zyk == 1 { serial.puts((&s_z1[0]) as u64) }
+        if zyk == 2 { serial.puts((&s_z2[0]) as u64) }
+        serial.nl()
+
+        // DER MESSBARE ZUSTAND. Er ist in jedem Zyklus ein anderer --
+        // sonst faende der zweite Zyklus einen stehengebliebenen
+        // ersten nicht.
+        s(state, S_CYCLE, zyk)
+        s(state, S_CNT, 1000 + zyk * 7)
+        s(state, S_PAT, 0xA5A5 + zyk * 0x1111)
+        let cnt_vor: u64 = g(state, S_CNT)
+        let pat_vor: u64 = g(state, S_PAT)
+        let frei_vor: u64 = mem.frames_free(state)
+        line_state(state, (&s_vor[0]) as u64)
+
+        if !save(state) {
+            serial.puts((&s_sf[0]) as u64)
+            serial.nl()
+            return
+        }
+        serial.puts((&s_sv[0]) as u64)
+        serial.dec(g(state, S_SAVED))
+        serial.puts((&s_sum[0]) as u64)
+        serial.hex(g(state, S_SUM))
+        serial.nl()
+
+        // DER SCHLAF. Was hier NICHT passiert, steht ehrlich da: die
+        // Maschine wird nicht wirklich abgeschaltet. Was gemessen
+        // wird, ist der TRAEGER -- der Zustand wird verworfen und
+        // ausschliesslich aus dem Abbild zurueckgeholt.
+        s(state, S_CNT, 0)
+        s(state, S_PAT, 0)
+        s(state, S_CYCLE, 0)
+
+        if !restore(state) {
+            serial.puts((&s_rf[0]) as u64)
+            serial.puts((&s_why[0]) as u64)
+            imgwhy_name(g(state, S_IMGWHY))
+            serial.nl()
+            return
+        }
+        serial.puts((&s_rs[0]) as u64)
+        serial.puts((&s_sum[0]) as u64)
+        serial.hex(g(state, S_SUM))
+        serial.puts((&s_sud[0]) as u64)
+        serial.hex(g(state, S_SUMD))
+        serial.nl()
+        line_state(state, (&s_nach[0]) as u64)
+
+        // BYTEWEISE, NICHT PER AUGENSCHEIN.
+        if g(state, S_CNT) == cnt_vor && g(state, S_PAT) == pat_vor
+            && g(state, S_CYCLE) == zyk {
+            serial.puts((&s_ok[0]) as u64)
+            serial.nl()
+        } else {
+            serial.puts((&s_bad[0]) as u64)
+            serial.nl()
+        }
+        let frei_nach: u64 = mem.frames_free(state)
+        if frei_nach == frei_vor {
+            serial.puts((&s_fok[0]) as u64)
+            serial.nl()
+        } else {
+            serial.puts((&s_fbad[0]) as u64)
+            serial.nl()
+        }
+        invalidate(state)
+        zyk = zyk + 1
+    }
+
+    // ================================================================
+    // DIE GEGENPROBE, DIE FEHLSCHLAGEN MUSS.
+    // ================================================================
+    serial.puts((&s_gp[0]) as u64)
+    serial.nl()
+    s(state, S_CYCLE, 3)
+    s(state, S_CNT, 4242)
+    s(state, S_PAT, 0xBEEF)
+    if !save(state) {
+        serial.puts((&s_sf[0]) as u64)
+        serial.nl()
+        return
+    }
+    if !corrupt(state) {
+        serial.puts((&s_sf[0]) as u64)
+        serial.nl()
+        return
+    }
+    s(state, S_CNT, 0)
+    s(state, S_PAT, 0)
+    if restore(state) {
+        // DAS WAERE DER FEHLER: Muell eingespielt.
+        serial.puts((&s_bad[0]) as u64)
+        serial.nl()
+    } else {
+        serial.puts((&s_kalt[0]) as u64)
+        serial.puts((&s_why[0]) as u64)
+        imgwhy_name(g(state, S_IMGWHY))
+        serial.nl()
+    }
+    invalidate(state)
+}
+
+// ================================================================
+// RUNDE SCHLAF (K-018, zweite Haelfte): DIE AUSKUENFTE FUER
+// `schlaf.fi`.
+//
+// Die Vorrunde hat die Platte und die ACPI-Werte gemessen und in
+// ihren eigenen Skalaren abgelegt. Die zweite Haelfte der Runde
+// braucht dieselben Zahlen -- und sie soll sie NICHT ein zweites Mal
+// messen: zwei Stellen fuer eine Wahrheit veralten, und die Platte
+// zweimal zu befragen hiesse, zwei verschiedene Antworten zu
+// riskieren.
+//
+// Deshalb diese vier lesenden Funktionen. Sie messen nichts, sie
+// geben weiter, was `measure` und `disk_measure` gefunden haben.
+fn hwsig(state: u64) -> u64 {
+    return g(state, S_HWSIG)
+}
+
+fn blocks(state: u64) -> u64 {
+    return g(state, S_BLOCKS)
+}
+
+fn disk(state: u64) -> u64 {
+    return g(state, S_DISK)
+}
+
+fn diskok(state: u64) -> u64 {
+    return g(state, S_DISKOK)
+}
+
+// Die Plattenmessung von aussen anstossen -- der Wiederanlauf
+// braucht sie, bevor er das Abbild sucht, und er laeuft an einer
+// Stelle, an der `susp.late` noch nicht gelaufen ist.
+fn ensure_disk(state: u64) {
+    if g(state, S_DISKOK) == 0 {
+        disk_measure(state)
+    }
+}
+
+// DIE FRUEHE STUFE: nur die ACPI-Messung, an der Stelle, an der der
+// Namensraum steht. KEIN Bericht -- die Platte ist hier noch nicht da.
+fn stage(state: u64) {
+    if !kstate.mode_on(state, kstate.M_SUSPMESS)
+        && !kstate.mode_on(state, kstate.M_SUSPEND) {
+        return
+    }
+    measure(state)
+}
+
+// DIE SPAETE STUFE: die Platte messen und berichten. Sie haengt in
+// `kmain.osum`, hinter `blk.use_ata` -- dem frueheste Punkt, an dem
+// es ueberhaupt eine Platte zu messen gibt.
+fn late(state: u64) {
+    if kstate.mode_on(state, kstate.M_SUSPEND) {
+        selftest(state)
+        return
+    }
+    if !kstate.mode_on(state, kstate.M_SUSPMESS) {
+        return
+    }
+    report(state)
+}

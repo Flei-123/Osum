@@ -95,7 +95,7 @@ OBERFLAECHE = [
     "kernel/user/wlib.fi",
     "kernel/user/wlibc.fi",
     "kernel/user/msg.fi",
-    "kernel/wm.fi",
+    "kernel/ui/wm.fi",
 ]
 
 # Wo AUSSERDEM gesucht wird -- zum BERICHTEN, nicht zum Scheitern.
