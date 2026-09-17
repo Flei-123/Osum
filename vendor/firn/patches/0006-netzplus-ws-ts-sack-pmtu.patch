@@ -68,6 +68,33 @@
 #   vorher   options [mss 1460]
 #   nachher  options [mss 1460,nop,wscale 2,sackOK,TS val ... ecr ...]
 #
+# DER FEHLER, DEN ERST DER K8-LAEUFER GEFUNDEN HAT -- RFC 6691.
+#
+# Mit Zeitstempeln traegt JEDES Segment 12 Oktette Optionen. Die erste
+# Fassung liess die Nutzlast trotzdem bei voller MSS, und dann ist
+#
+#     IP 20 + TCP 20 + Zeitstempel 12 + MSS 1460 = 1512 > MTU 1500
+#
+# `seg_build` gibt bei `total > cap` eine 0 zurueck -- also KEIN Segment,
+# ohne Fehler und ohne Meldung. Der Sender schickte danach nichts mehr
+# und wartete auf Bestaetigungen fuer Oktette, die nie hinausgingen.
+# GEMESSEN in tools/net/run.sh Abschnitt 7: `octets Osum sent: 65536`
+# (genau EIN Sendepuffer), `back: 0`, und der Python-Echodienst des
+# Wirts kam nie ueber `recv` hinaus. Die Richtung Linux -> Osum war
+# davon NICHT betroffen, deshalb sahen die Durchsatzmessungen dieser
+# Runde gut aus, waehrend die Gegenrichtung stand.
+#
+# Behoben: die nutzbare Nutzlast ist `mss - 12`, sobald Zeitstempel
+# ausgehandelt sind, und Nagle vergleicht gegen dieselbe Groesse. Genau
+# das meint RFC 6691: die MSS ist die Groesse der DATEN; was an Optionen
+# im Kopf steht, geht davon ab.
+#
+# Der SACK-Sprung wurde bei derselben Gelegenheit auf die Erholung
+# begrenzt (`in_recovery`). Ohne diese Bedingung galten die Bloecke der
+# Gegenseite auch im Normalbetrieb, und der Sendezeiger sprang ueber
+# Oktette, die NIE GESENDET WURDEN -- ein Loch, das dieser Stack selbst
+# hineingerissen haette.
+#
 # ZWEI FALLEN, DIE DIE SPRACHE GEFANGEN HAT und die hier stehen, damit
 # sie niemand zum zweiten Mal stellt: eine Feldlaenge ist in Firn ein
 # GANZZAHLLITERAL (SPEC 12.1), der Uebersetzer kann sie nicht gegen eine
@@ -901,7 +928,7 @@
              if wire.seq_gt((*c).snd_nxt +% 1, (*c).snd_max) {
                  (*c).snd_max = (*c).snd_nxt +% 1
              }
-@@ -1442,11 +1987,57 @@
+@@ -1442,15 +1987,106 @@
          }
      }
  
@@ -920,13 +947,33 @@
 +    // vorankommt, sonst eine Endlosschleife im Kernel waere -- und ein
 +    // haengender Netzdienst ist schlimmer als ein doppelt gesendetes
 +    // Segment.
-+    if (*c).sack_ok == 1 && (*c).sack_n > 0
++    // NUR IN DER ERHOLUNG, und das ist der Unterschied zwischen einem
++    // Sprung und einem Loch.
++    //
++    // GEMESSEN, als die Bedingung fehlte: `tools/net/run.sh` Abschnitt 7
++    // meldete `octets Osum sent: 65536, expected 262144` -- genau EIN
++    // Sendepuffer, dann Stillstand. Der Grund: die Bloecke der
++    // Gegenseite gelten fuer den Strom, der schon UNTERWEGS ist. Steht
++    // `snd_nxt` am ENDE des Gesendeten (Normalbetrieb, nichts fehlt) und
++    // deckt ein alter Block diese Stelle ab, dann springt der Zeiger
++    // ueber Oktette, die NIE GESENDET WURDEN. Sie fehlen der Gegenseite
++    // fuer immer, die Verbindung haengt an einem Loch, das dieser Stack
++    // selbst hineingerissen hat.
++    //
++    // `in_recovery` wird bei drei doppelten Bestaetigungen gesetzt und
++    // faellt, sobald `recover` bestaetigt ist (RFC 6582). Nur dann ist
++    // ein Sprung das, was er sein soll: das Auslassen von etwas, das
++    // drueben schon liegt.
++    if (*c).sack_ok == 1 && (*c).sack_n > 0 && (*c).in_recovery == 1
 +    && wire.seq_lt((*c).snd_nxt, (*c).snd_max) {
 +        var hops: usize = 0
 +        while hops <= SACK_MAX && sack_covered(c, (*c).snd_nxt)
 +        && wire.seq_lt((*c).snd_nxt, (*c).snd_max) {
-+            let sprung: u32 = sack_skip(c, (*c).snd_nxt)
++            var sprung: u32 = sack_skip(c, (*c).snd_nxt)
 +            if !wire.seq_gt(sprung, (*c).snd_nxt) { break }
++            // Und niemals ueber das hinaus, was wirklich gesendet wurde:
++            // jenseits von `snd_max` kann kein Block etwas bestaetigen.
++            if wire.seq_gt(sprung, (*c).snd_max) { sprung = (*c).snd_max }
 +            (*c).snd_nxt = sprung
 +            bump(t, ST_REXMIT_SACK)
 +            hops = hops + 1
@@ -938,11 +985,37 @@
 +        }
 +    }
 +
++    // DIE OPTIONEN GEHEN VON DER NUTZLAST AB, und das ist keine
++    // Feinheit, sondern der Unterschied zwischen einer Verbindung, die
++    // laeuft, und einer, die nach genau einem Sendepuffer steht.
++    //
++    // GEMESSEN, als diese drei Zeilen fehlten: `tools/net/run.sh`
++    // Abschnitt 7 meldete `octets Osum sent: 65536` und `back: 0`, der
++    // Python-Echodienst des Wirts kam nie ueber `recv` hinaus. Der
++    // Grund ist eine Addition:
++    //
++    //     IP 20 + TCP 20 + Zeitstempel 12 + MSS 1460 = 1512 > MTU 1500
++    //
++    // `seg_build` bekommt `cap` und gibt bei `total > cap` eine 0
++    // zurueck -- also KEIN Segment, ohne Fehler und ohne Meldung. Der
++    // Sender schickt dann nichts mehr und wartet auf eine Bestaetigung
++    // fuer Oktette, die nie hinausgingen.
++    //
++    // Mit Zeitstempel traegt JEDES Segment 12 Oktette Optionen. Die
++    // nutzbare Nutzlast ist deshalb mss - 12 und nicht mss. Genau das
++    // meint RFC 6691: die MSS ist die Groesse der DATEN, und was an
++    // Optionen im Kopf steht, geht davon ab.
++    var nutz: u32 = (*c).mss
++    if (*c).ts_ok == 1 {
++        if nutz > 12 { nutz = nutz - 12 } else { nutz = 1 }
++    }
++
      var can: u32 = 0
      if wire.seq_lt((*c).snd_nxt, edge) && pending > 0 {
          let allowed: u32 = edge -% (*c).snd_nxt
          can = u32min(pending, allowed)
-         can = u32min(can, (*c).mss)
+-        can = u32min(can, (*c).mss)
++        can = u32min(can, nutz)
 +        // Ein Segment darf nie ueber den Anfang des naechsten schon
 +        // bestaetigten Blocks hinausreichen -- sonst schickt die
 +        // Wiederholung genau das wieder mit, was SACK gerade erspart hat.
@@ -959,7 +1032,12 @@
      }
  
      var send_now: bool = can > 0
-@@ -1473,7 +2064,7 @@
+-    if can > 0 && can < (*c).mss && (*c).nodelay == 0 {
++    if can > 0 && can < nutz && (*c).nodelay == 0 {
+         // NAGLE. A small segment waits while something is still
+         // unacknowledged -- unless it is the last one and the connection
+         // is being closed, because then nothing will ever come after it
+@@ -1473,7 +2109,7 @@
              flags = flags | wire.F_FIN
              fin = true
          }
@@ -968,7 +1046,7 @@
          if n == 0 { return 0 }
          advance_nxt(c, seq0 +% can)
          if fin {
-@@ -1506,7 +2097,7 @@
+@@ -1506,7 +2142,7 @@
      // was asked for, everything queued has left, and no FIN is on the
      // wire, a FIN goes out.
      if (*c).close_req == 1 && (*c).fin_sent == 0 && (*c).snd_nxt == (*c).snd_end {
@@ -977,7 +1055,7 @@
          if n == 0 { return 0 }
          (*c).fin_sent = 1
          advance_nxt(c, (*c).snd_nxt +% 1)
-@@ -1525,7 +2116,7 @@
+@@ -1525,7 +2161,7 @@
          (*c).ack_now = 0
          (*c).ack_on = 0
          (*c).seg_since_ack = 0
