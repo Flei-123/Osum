@@ -188,7 +188,37 @@ const CT_FILES: u64 = 16
 // suspected: `tools/themestore/run.sh` section 5 counts the reported
 // rectangles per tab, and the number before this change was 86 on
 // every tab. Two limits, one silent overflow each.
-const MAXWD: u64 = 160 // Widgets insgesamt
+// ================================================== RUNDE O-NETZUI
+// 160 WAR SEIT LAENGEREM ZU KLEIN, UND ES HAT NIEMAND GEMERKT.
+//
+// `kernel/user/settings.fi` legt auf `main` HUNDERTDREIUNDSECHZIG
+// Bedienelemente an (`grep -c 'merke(wlib\.'`), und seine eigene
+// Zaehlung meldet es auch: `settings: elemente n=163 max=192`. Die
+// Bibliothek nimmt aber nur 160 -- und `add` gibt bei vollem Feld
+// NULL zurueck, nicht "keines".
+//
+// NULL IST DIE NUMMER DES ERSTEN BEDIENELEMENTS. Jedes ueberzaehlige
+// Element schreibt damit in den Platz der REITERLEISTE. Im Bild sah
+// das so aus: die Reiterleiste stand da, der Reiterwechsel wurde
+// gemeldet (`settings: stand reiter=3`) -- und die Seite darunter
+// blieb die alte. Auf der Leitung meldeten ALLE Bedienelemente
+// dasselbe Rechteck (`x=16 y=16 w=728 h=32`, die Leiste), weil sie
+// alle auf demselben Platz lagen.
+//
+// Aufgefallen ist es erst, als diese Runde acht Elemente dazunahm und
+// die Netzseite im Bildschirmfoto nicht erschien. Der Fehler war da
+// vorher schon; er hat nur die letzten drei Elemente getroffen statt
+// der letzten elf.
+//
+// 224 UND NICHT 176: 192 ist die Grenze, die sich `settings.fi` selbst
+// gesetzt hat (seine `ids`-Tafel), und ein Feld, das genau auf der
+// Grenze des groessten Benutzers sitzt, ist beim naechsten
+// Bedienelement wieder zu klein. 224 laesst zweiunddreissig Plaetze
+// Luft und kostet 64 * 30 * 8 = 15 360 Oktette im Programm.
+//
+// `wd` unten MUSS mitwandern: MAXWD * D_FIELDS. `feld_passt()` rechnet
+// es nach und `begin` sagt es, wenn es jemand vergisst.
+const MAXWD: u64 = 224 // Widgets insgesamt
 // RUNDE ECHTHARDWARE-2: FUENF UND NICHT VIER -- DIE INFOBLASE BRAUCHT
 // EINEN PLATZ.
 //
@@ -628,7 +658,33 @@ const KEY_CTRL_Z: u64 = 26
 //   wn = MAXWN * N_FIELDS =   5 * 14 =   70
 // Aendert jemand eine der vier Konstanten, muessen diese zwei Zeilen
 // mitwandern -- `pruef_felder()` weiter unten sagt es dann sofort.
-static mut wd: [u64; 4640] = [0 as u64; 4640] // MAXWD * D_FIELDS (160 * 29)
+//
+// ================================================== RUNDE O-NETZUI
+// UND GENAU DAS IST WIEDER PASSIERT -- 4640 WAR ZU KLEIN.
+//
+// `D_FIELDS` steht seit einer spaeteren Runde auf DREISSIG (Zeile 469),
+// nicht mehr auf 29. Das Feld daneben ist aber bei 4640 geblieben, und
+// 160 * 30 sind 4800. Die letzten fuenf Bedienelemente (ab Nummer 154,
+// denn 154 * 30 = 4620) schreiben damit HINTER das Feld.
+//
+// WIE ES AUFFIEL: diese Runde bringt acht Bedienelemente auf der
+// Netzseite dazu und kam damit auf 157. Im Bildschirmfoto war das
+// Fenster der Einstellungen VOLLSTAENDIG LEER -- kein Reiter, kein
+// Text --, und auf der seriellen Leitung stand hinter `settings: ready`
+// die Zeile
+//
+//     panic: index out of bounds in '[u64; 4640]' at wlib.fi:827
+//
+// Der Fehler lag NICHT an dieser Runde: er lag seit der Erhoehung von
+// D_FIELDS im Baum und wartete darauf, dass ein Programm das
+// hundertvierundfuenfzigste Bedienelement anlegt. Ohne die Bildkontrolle
+// waere er mit dieser Runde eingebaut worden statt aufgedeckt.
+//
+// Ausgerechnet statt abgeschrieben, und diesmal mit einer Pruefung, die
+// nicht vom Erinnerungsvermoegen des naechsten Bearbeiters abhaengt:
+// `feld_passt()` weiter unten rechnet beides nach und meldet sich.
+//   wd = MAXWD * D_FIELDS = 224 * 30 = 6720
+static mut wd: [u64; 6720] = [0 as u64; 6720] // MAXWD * D_FIELDS (224 * 30)
 static mut wn: [u64; 70] = [0 as u64; 70] // MAXWN * N_FIELDS (5 * 14)
 static mut ct: [u64; 312] = [0 as u64; 312] // MAXCT * C_FIELDS
 static mut nwd: u64 = 0
@@ -813,8 +869,32 @@ static mut ev: [u8; 16] = [0 as u8; 16]
 
 // ------------------------------------------------------- der Zugriff
 
+// ================================================== RUNDE O-NETZUI
+// PASST DAS FELD ZU DEN KONSTANTEN DANEBEN?
+//
+// Die Frage hat sich diese Datei schon einmal gestellt (Runde MERGE-10,
+// der Kasten ueber `wd`) und die Antwort dann in einen Kommentar
+// geschrieben. Ein Kommentar haelt genau so lange, bis jemand eine der
+// Konstanten aendert und den Kommentar nicht liest -- danach schreibt
+// `s()` ueber das Feldende, und man sieht es erst an einem leeren
+// Fenster und einer Panikzeile.
+//
+// `WD_LEN` ist die WIRKLICHE Laenge des Feldes. Stimmt sie nicht mit
+// `MAXWD * D_FIELDS` ueberein, gibt `feld_passt` false, und `begin`
+// sagt es auf der Leitung, bevor irgendetwas gemalt wird.
+const WD_LEN: u64 = 6720
+
+fn feld_passt() -> bool {
+    return MAXWD * D_FIELDS <= WD_LEN
+}
+
 fn g(i: u64, f: u64) -> u64 {
     if i >= MAXWD {
+        return 0
+    }
+    // Und der Riegel fuer den Fall, dass doch jemand die Konstanten
+    // verschiebt: lieber eine 0 als ein Lesezugriff hinter dem Feld.
+    if i * D_FIELDS + f >= WD_LEN {
         return 0
     }
     return wd[(i * D_FIELDS + f) as usize]
@@ -822,6 +902,12 @@ fn g(i: u64, f: u64) -> u64 {
 
 fn s(i: u64, f: u64, v: u64) {
     if i >= MAXWD {
+        return
+    }
+    // DERSELBE RIEGEL WIE IN `g`, und hier ist er der wichtigere: ein
+    // Schreibzugriff hinter dem Feldende hat in Runde O-NETZUI das
+    // ganze Fenster der Einstellungen leer gemacht.
+    if i * D_FIELDS + f >= WD_LEN {
         return
     }
     wd[(i * D_FIELDS + f) as usize] = v
@@ -878,9 +964,19 @@ fn sub(a: u64, b: u64) -> u64 {
 
 // ------------------------------------------------------- das Aufsetzen
 
+static mut s_feldwarn: [u8; 46] = "wlib: FELD ZU KLEIN -- MAXWD*D_FIELDS > wd[]\n\0"
+
 fn begin(nohit: bool, noclip: bool) -> bool {
     if !wlibc.start(noclip) {
         return false
+    }
+    // RUNDE O-NETZUI: passt das Widgetfeld zu den Konstanten daneben?
+    // Wenn nicht, steht es hier auf der Leitung -- BEVOR das erste
+    // Bedienelement angelegt wird. Der Lauf geht weiter (die Riegel in
+    // `g`/`s` fangen den Zugriff ab, es fehlen dann nur die letzten
+    // Bedienelemente), aber niemand muss den Grund mehr raten.
+    if !feld_passt() {
+        let _fw: u64 = ulib.say((&s_feldwarn[0 as usize]) as u64)
     }
     var pfad: [u8; 11] = "/etc/theme\0"
     wlibc.theme_load((&pfad[0 as usize]) as u64)
@@ -1777,8 +1873,23 @@ fn reshape() {
 
 // ------------------------------------------------------- die Widgets
 
+static mut s_vollwarn: [u8; 42] = "wlib: WIDGETTAFEL VOLL -- MAXWD erreicht\n\0"
+
 fn add(kind: u64, txt: u64, pw: u64, ph: u64, fokus: bool) -> u64 {
     if nwd >= MAXWD {
+        // RUNDE O-NETZUI: UND ES WIRD GESAGT.
+        //
+        // Hier stand nur `return 0`, und 0 ist die Nummer des ERSTEN
+        // Bedienelements -- jedes ueberzaehlige Element hat damit still
+        // in dessen Platz geschrieben. In den Einstellungen war das die
+        // Reiterleiste; die Folge war eine Seite, die beim Reiterwechsel
+        // nicht mehr umschaltete, ohne eine einzige Fehlermeldung.
+        //
+        // Die 0 bleibt der Rueckgabewert (ein anderer waere ein
+        // ungueltiger Index, und jeder Aufrufer reicht ihn an `show`
+        // und `set_text` weiter) -- aber sie kommt jetzt mit einer
+        // Zeile auf der Leitung, und `tools/netzui/run.sh` sucht sie.
+        let _vw: u64 = ulib.say((&s_vollwarn[0 as usize]) as u64)
         return 0
     }
     let i: u64 = nwd
