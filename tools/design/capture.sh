@@ -67,6 +67,8 @@ accel=tcg
 halt=300
 extra=""
 nurbau=nein
+# RUNDE CLIP-2: eine Kopie des Abbilds vor dem Start (siehe unten).
+vorherbild=nein
 # RUNDE TON-2: eine Tonkarte an die Maschine, `ton=ja`.
 #
 # WARUM ES DEN SCHALTER BRAUCHT: der Lautstaerkeregler im
@@ -124,6 +126,7 @@ for a in "$@"; do
         zweite=*) zweite=${a#*=} ;;
         fs=*) fs=${a#*=} ;;
         nurbau=*) nurbau=${a#*=} ;;
+        vorherbild=*) vorherbild=${a#*=} ;;
         ton=*) ton=${a#*=} ;;
         *) echo "unbekannt: $a" >&2; exit 2 ;;
     esac
@@ -374,6 +377,22 @@ while read -r z; do ARGS+=("$z"); done < "$OUT/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 \
     || { echo "FEHLGESCHLAGEN: mkfs"; tail -25 "$OUT/mkfs.log"; exit 1; }
 echo "platte $(stat -c%s "$OUT/disk.img") Oktette"
+# ======================================================= RUNDE CLIP-2
+#
+# EINE SICHERUNG DES ABBILDS, WIE ES VOR DEM START AUSSAH.
+#
+# Wer messen will, was ein Lauf an der Platte GEAENDERT hat, braucht
+# den Zustand davor -- und zwar von DIESEM Abbild und nicht von einem
+# zweiten, das ein frueherer Aufruf gebaut hat: `mkfs.py` laeuft je
+# Aufruf neu (`--time=$(date +%s)`) und vergibt dabei andere
+# Inodenummern. Genau daran hat die erste Messung der Runde CLIP-2
+# einen sauberen `rename` als "inode anders" gemeldet.
+#
+# Eine Kopie von zehn Megaoktett, nur wenn jemand sie anfordert.
+if [ "${vorherbild:-nein}" = ja ]; then
+    cp "$OUT/disk.img" "$OUT/disk.img.vorher"
+    echo "vorherbild $(stat -c%s "$OUT/disk.img.vorher") Oktette"
+fi
 [ "$nurbau" = ja ] && exit 0
 
 # ------------------------------------------------------------ 3. starten
