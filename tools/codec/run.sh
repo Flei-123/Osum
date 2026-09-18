@@ -121,11 +121,15 @@ fi
 # GEGENPROBE ZUR KARTE: der Bereich auf eine fremde Adresse gelegt MUSS
 # anschlagen. Ohne diese Zeilen prueft die Karte nur das, woran jemand
 # gedacht hat.
-mkdir -p "$TMPD/kollision/arch/x86_64"
-cp kernel/*.fi "$TMPD/kollision/"
-cp kernel/arch/x86_64/*.fi "$TMPD/kollision/arch/x86_64/"
+# RUNDE GRUNDLINIE-2 (A-021): die Kopie spiegelt den BAUM, nicht eine
+# Handvoll aufgezaehlter Ordner. `kstate.fi` liegt unter kernel/lib/,
+# `fb.fi` unter kernel/gfx/ -- ein flaches `cp kernel/*.fi` liess sie weg,
+# und der Pruefer starb an `KeyError: 'kstate.fi'`, statt die Kollision
+# zu melden, die hier gemessen wird.
+mkdir -p "$TMPD/kollision"
+( cd kernel && find . -name '*.fi' -exec cp --parents {} "$TMPD/kollision/" \; )
 sed -i 's/^const CODEC_OFF: u64 = 0x118000$/const CODEC_OFF: u64 = 0x108000/' \
-    "$TMPD/kollision/kstate.fi"
+    "$TMPD/kollision/lib/kstate.fi"
 if python3 tools/kernel/memmap.py "$TMPD/kollision" > "$TMPD/karte2.txt" 2>&1; then
     bad "GEGENPROBE: CODEC_OFF auf 0x108000 (= WMP_OFF) und der Pruefer schweigt"
 else

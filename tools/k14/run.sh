@@ -175,10 +175,14 @@ done
 # RUNDE ARM: die Kopie braucht `kernel/arch/x86_64/` mit -- `hv.fi` liegt
 # seit dem Trennschnitt dort, und ohne sie stirbt der Kartenpruefer an
 # einem KeyError statt die Kollision zu melden, die hier gemessen wird.
-mkdir -p "$TMPD/kollision/arch/x86_64"
-cp kernel/*.fi "$TMPD/kollision/"
-cp kernel/arch/x86_64/*.fi "$TMPD/kollision/arch/x86_64/"
-sed -i 's/^const PROCFS_OFF: u64 = 0x45000$/const PROCFS_OFF: u64 = 0x3C000/' "$TMPD/kollision/kstate.fi"
+# RUNDE GRUNDLINIE-2 (A-021): die Kopie spiegelt den BAUM, nicht eine
+# Handvoll aufgezaehlter Ordner. `kstate.fi` liegt unter kernel/lib/,
+# `fb.fi` unter kernel/gfx/ -- ein flaches `cp kernel/*.fi` liess sie weg,
+# und der Pruefer starb an `KeyError: 'kstate.fi'`, statt die Kollision
+# zu melden, die hier gemessen wird.
+mkdir -p "$TMPD/kollision"
+( cd kernel && find . -name '*.fi' -exec cp --parents {} "$TMPD/kollision/" \; )
+sed -i 's/^const PROCFS_OFF: u64 = 0x45000$/const PROCFS_OFF: u64 = 0x3C000/' "$TMPD/kollision/lib/kstate.fi"
 if python3 tools/kernel/memmap.py "$TMPD/kollision" > "$TMPD/karte2.txt" 2>&1; then
     bad "GEGENPROBE: PROCFS_OFF auf 0x3C000 (= FB_OFF) und der Pruefer schweigt"
 else

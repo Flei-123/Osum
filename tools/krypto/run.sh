@@ -147,11 +147,15 @@ fi
 # GEGENPROBE ZUR KARTE: den Bereich auf eine fremde Adresse legen MUSS
 # anschlagen. Ohne diese Zeilen prueft die Karte nur das, woran jemand
 # gedacht hat.
-mkdir -p "$TMPD/koll/arch/x86_64"
-cp kernel/*.fi "$TMPD/koll/" 2>/dev/null
-cp kernel/arch/x86_64/*.fi "$TMPD/koll/arch/x86_64/" 2>/dev/null
+# RUNDE GRUNDLINIE-2 (A-021): die Kopie spiegelt den BAUM, nicht eine
+# Handvoll aufgezaehlter Ordner. `kstate.fi` liegt unter kernel/lib/,
+# `fb.fi` unter kernel/gfx/ -- ein flaches `cp kernel/*.fi` liess sie weg,
+# und der Pruefer starb an `KeyError: 'kstate.fi'`, statt die Kollision
+# zu melden, die hier gemessen wird.
+mkdir -p "$TMPD/koll"
+( cd kernel && find . -name '*.fi' -exec cp --parents {} "$TMPD/koll/" \; )
 sed -i 's/^const CRYPT_OFF: u64 = 0x113000$/const CRYPT_OFF: u64 = 0x108000/' \
-    "$TMPD/koll/kstate.fi"
+    "$TMPD/koll/lib/kstate.fi"
 if python3 tools/kernel/memmap.py "$TMPD/koll" > "$TMPD/karte2.txt" 2>&1; then
     bad "GEGENPROBE: CRYPT_OFF auf WMP_OFF gelegt und der Pruefer schweigt"
 else

@@ -249,11 +249,16 @@ else bad "die Speicherkarte von kdata kollidiert"; echo "$kart" | sed 's/^/     
 # bleibt unangetastet -- und der Pruefer MUSS anschlagen.
 # RUNDE ARM: siehe tools/wm/run.sh -- die Kopie braucht arch/x86_64/ mit,
 # sonst findet der Pruefer `hv.fi` nicht und stirbt an einem KeyError.
+# RUNDE GRUNDLINIE-2 (A-021): die Kopie spiegelt den BAUM, nicht eine
+# Handvoll aufgezaehlter Ordner. `kstate.fi` liegt seit dem Trennschnitt
+# unter kernel/lib/, `fb.fi` unter kernel/gfx/ -- ein flaches `cp
+# kernel/*.fi` liess beide weg, und der Pruefer starb an
+# `KeyError: 'kstate.fi'` statt die Kollision zu melden. Wer hier Ordner
+# auftippt, baut denselben Fehler beim naechsten Verschieben wieder ein.
 GG="$TMPD/kernel-gg"
-mkdir -p "$GG/arch/x86_64"
-cp kernel/*.fi "$GG/"
-cp kernel/arch/x86_64/*.fi "$GG/arch/x86_64/"
-sed -i 's/^const FB_OFF: u64 = 0x3C000/const FB_OFF: u64 = 0x2F000/; s/^const FONT_OFF: u64 = 0x3C100/const FONT_OFF: u64 = 0x2F100/' "$GG/fb.fi" "$GG/kstate.fi"
+mkdir -p "$GG"
+( cd kernel && find . -name '*.fi' -exec cp --parents {} "$GG/" \; )
+sed -i 's/^const FB_OFF: u64 = 0x3C000/const FB_OFF: u64 = 0x2F000/; s/^const FONT_OFF: u64 = 0x3C100/const FONT_OFF: u64 = 0x2F100/' "$GG/gfx/fb.fi" "$GG/lib/kstate.fi"
 gg=$(python3 tools/kernel/memmap.py "$GG" 2>&1)
 if [ $? -ne 0 ] && printf '%s' "$gg" | grep -q 'KOLLISION: FB'; then
     ok "mit FB_OFF zurueck auf 0x2F000 findet der Pruefer die Kollision mit SIG"

@@ -385,8 +385,15 @@ has "$TMPD/panik.txt" "die letzten Protokollzeilen" \
 
 echo "== 7. dass die Umstellung der Treiber wirklich stattgefunden hat =="
 n=0
+# RUNDE GRUNDLINIE-2 (A-021): die sechs Treiber liegen laengst in
+# Unterordnern (kernel/drv/blk/nvme.fi, kernel/drv/usb/xhci.fi,
+# kernel/usb/usb.fi, kernel/drv/blk/ahci.fi, kernel/drv/net/e1000.fi,
+# kernel/fs/fs.fi). `kernel/$f.fi` traf keine einzige Datei, `grep` gab 0
+# zurueck -- und die Zusage meldete "0 von 6", obwohl ALLE SECHS die
+# Log-Schnittstelle benutzen. Der Pfad wird jetzt gesucht, nicht getippt.
 for f in nvme xhci usb ahci e1000 fs; do
-    k=$(grep -ac 'klog\.' "kernel/$f.fi")
+    q=$(find kernel -name "$f.fi" -print -quit)
+    k=$(grep -ac 'klog\.' "$q" 2>/dev/null || echo 0)
     [ "$k" -gt 0 ] && n=$((n + 1))
     printf '        %-6s %s Aufrufe der Log-Schnittstelle\n' "$f" "$k"
 done
