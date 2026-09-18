@@ -5,10 +5,36 @@
 //   viewer -i <datei>         Art, Groesse, Pruefsumme und fuenf
 //                             Bildpunkte auf die Konsole -- DAS ist die
 //                             Messung, gegen Pythons Pillow
+//   viewer -s <ziel> <datei>  RUNDE BILD: die Datei aufmachen und als
+//                             <ziel> sichern. Die Endung von <ziel>
+//                             entscheidet: `.png` verlustfrei,
+//                             `.jpg`/`.jpeg` mit dem neuen Kodierer.
+//                             Das ist der Umlaufversuch ohne Maus --
+//                             lesen, schreiben, auf dem Wirt nachsehen.
 //
-// Er kann PNG, BMP und JPEG (Grundform); die Arbeit steht in `bild.fi`
-// und `jpeg.fi`, hier ist die Bedienung. Vergroessern, Drehen, im
-// Ordner Blaettern, Miniaturen.
+// Er kann PNG, BMP, JPEG (Grundform) und seit Runde BILD GIF; die
+// Arbeit steht in `image.fi`, `jpeg.fi` und `gif.fi`, hier ist die
+// Bedienung. Vergroessern, Drehen, im Ordner Blaettern, Miniaturen --
+// und SICHERN, als PNG oder als JPEG.
+//
+// RUNDE BILD, WAS HIER DAZUKAM UND WARUM:
+//
+//   GIF          `gif.fi` liest es (LZW, Farbtafeln, verschachtelt,
+//                Durchsichtigkeit). Von einem animierten GIF wird das
+//                ERSTE Vollbild gezeigt; der Kopf sagt, wie viele
+//                Teilbilder die Datei hat ("1/12"), damit niemand
+//                glaubt, er sehe die ganze Datei.
+//   SICHERN      Zwei Schalter, weil es zwei ehrliche Antworten gibt:
+//                "Als PNG" ist verlustfrei und behaelt die Deckung,
+//                "Als JPEG" ist kleiner und verliert beides. Was der
+//                Betrachter geladen hat, liegt als 0xAARRGGBB im
+//                Puffer -- gesichert wird also das BILD und nicht die
+//                Datei, und ein GIF wird so zu einem PNG, das jeder
+//                lesen kann.
+//
+// WAS DAS SICHERN NICHT TUT: kein Dialog mit Dateiauswahl (es schreibt
+// neben die Quelle, mit getauschter Endung), keine Qualitaetswahl in
+// der Oberflaeche (JPEG_Q steht fest bei 90), kein Ueberschreibschutz.
 //
 // DIE OBERFLAECHE IST wlib UND NUR wlib. Die Bildflaeche mit
 // Vergroesserung und der Schieberegler daneben sind KEINE Malerei in
@@ -47,6 +73,8 @@ import wlibc
 import wlib
 import image
 import jpeg
+import gif
+import jenc
 
 export { u_start }
 
@@ -55,6 +83,12 @@ const DATCAP: u64 = 786432
 const MINIW: u64 = 64
 const MININ: u64 = 12
 const MAXD: u64 = 64 // Dateien im Ordner
+// Die Puffer fuers Sichern. ROHCAP ist eine ZEILE plus Filteroktett
+// (png_file arbeitet streifenweise), KOMPCAP der Packpuffer -- dieselben
+// Zahlen wie in `snip.fi`, aus demselben Grund: ein Prozess hat 6 MiB.
+const ROHCAP: u64 = 65536
+const KOMPCAP: u64 = 98304
+const JPEG_Q: u64 = 90 // die Qualitaet, mit der "Als JPEG" schreibt
 
 static mut pix: u64 = 0
 static mut dat: u64 = 0
@@ -62,7 +96,10 @@ static mut mini: u64 = 0
 static mut datn: u64 = 0
 static mut bw: u64 = 0
 static mut bh: u64 = 0
-static mut art: u64 = 0 // 1 png, 2 bmp, 3 jpeg
+static mut art: u64 = 0 // 1 png, 2 bmp, 3 jpeg, 4 gif
+static mut n_frames: u64 = 0 // Teilbilder, wenn es ein GIF ist
+static mut roh: u64 = 0
+static mut komp: u64 = 0
 
 static mut ordner: [u8; 256] = [0 as u8; 256]
 static mut namen: [u8; 4096] = [0 as u8; 4096]
@@ -81,6 +118,8 @@ static mut w_fit: u64 = 0
 static mut w_eins: u64 = 0
 static mut w_dreh: u64 = 0
 static mut w_mini: u64 = 0
+static mut w_png: u64 = 0
+static mut w_jpg: u64 = 0
 static mut w_mid: [u64; 12] = [0; 12]
 static mut modus: u64 = 0
 static mut c_mini: u64 = 0
@@ -103,6 +142,9 @@ static mut S_PROZ: [u8; 2] = "%\0"
 static mut A_PNG: [u8; 4] = "png\0"
 static mut A_BMP: [u8; 4] = "bmp\0"
 static mut A_JPG: [u8; 5] = "jpeg\0"
+static mut A_GIF: [u8; 4] = "gif\0"
+static mut T_PNG: [u8; 4] = "PNG\0"
+static mut T_JPG: [u8; 5] = "JPEG\0"
 
 fn say(p: u64) {
     ulib.say(p)
@@ -130,6 +172,7 @@ fn ist_bildname(n: u64) -> bool {
     var e_bmp: [u8; 4] = "bmp\0"
     var e_jpg: [u8; 4] = "jpg\0"
     var e_jpeg: [u8; 5] = "jpeg\0"
+    var e_gif: [u8; 4] = "gif\0"
     let len: u64 = ulib.length(n)
     var punkt: u64 = 0
     var i: u64 = 0
@@ -158,6 +201,7 @@ fn ist_bildname(n: u64) -> bool {
         || ulib.streq(p, (&e_bmp[(0) as usize]) as u64)
         || ulib.streq(p, (&e_jpg[(0) as usize]) as u64)
         || ulib.streq(p, (&e_jpeg[(0) as usize]) as u64)
+        || ulib.streq(p, (&e_gif[(0) as usize]) as u64)
 }
 
 // Den Ordner einlesen und die Bilder darin sortieren -- damit "das
@@ -260,6 +304,7 @@ fn load(pfadp: u64) -> bool {
     art = 0
     bw = 0
     bh = 0
+    n_frames = 0
     let n: u64 = file_read(pfadp)
     if n == 0 {
         return false
@@ -295,7 +340,92 @@ fn load(pfadp: u64) -> bool {
         bh = jpeg.height()
         return true
     }
+    // RUNDE BILD: GIF. Von einer Bildfolge kommt das erste Vollbild;
+    // `n_frames` sagt, wie viele es insgesamt sind.
+    if gif.ist_gif(dat, n) {
+        art = 4
+        if !gif.gif_read(dat, n, pix, PIXCAP) {
+            art = 0
+            return false
+        }
+        bw = gif.width()
+        bh = gif.height()
+        n_frames = gif.frames()
+        return true
+    }
     return false
+}
+
+// ============================== RUNDE BILD: SICHERN
+//
+// Gesichert wird, WAS IM PUFFER LIEGT (0xAARRGGBB), nicht die Datei.
+// Ein GIF wird damit zu einem PNG, das jeder Betrachter der Welt
+// aufmacht, und ein PNG zu einem JPEG, das klein ist.
+//
+// ZWEI WEGE, UND SIE SIND VERSCHIEDEN:
+//
+//   PNG   `image.png_file` schreibt STREIFENWEISE in den Dateizeiger
+//         und braucht darum nur eine Zeile Platz -- so schreibt auch
+//         das Ausschnittwerkzeug, und es geht bis 1280x800.
+//   JPEG  `jenc.encode` braucht die ganze Datei IM SPEICHER, weil die
+//         Laenge erst am Ende feststeht. Der Packpuffer ist KOMPCAP
+//         (96 KiB) -- reicht er nicht, wird abgelehnt und NICHT halb
+//         geschrieben. Bei 4:4:4 und Qualitaet 90 sind 96 KiB rund
+//         300x300 Bildpunkte Foto; ein groesseres Bild sagt es.
+
+// Den Pfad der Quelle mit neuer Endung: aus /b/x.gif wird /b/x.png.
+fn ziel_pfad(dst: u64, quelle: u64, endung: u64) {
+    ulib.strncpy(dst, quelle, 400)
+    let len: u64 = ulib.length(dst)
+    var punkt: u64 = len
+    var i: u64 = 0
+    while i < len {
+        if *((dst + i) as *mut u8) == 46 as u8 {
+            punkt = i
+        }
+        i = i + 1
+    }
+    __mmio_write8((dst + punkt) as *mut u8, 0 as u8)
+    ulib.strcat(dst, endung)
+}
+
+fn save_png(pfadp: u64) -> bool {
+    if art == 0 || bw == 0 || bh == 0 {
+        return false
+    }
+    if roh == 0 || komp == 0 {
+        return false
+    }
+    let fd: u64 = tools.openw(pfadp)
+    if ulib.bad(fd) {
+        return false
+    }
+    let ok: bool = image.png_file(fd, pix, bw, bh, roh, ROHCAP, komp,
+        KOMPCAP)
+    io.close(fd)
+    return ok
+}
+
+fn save_jpeg(pfadp: u64) -> bool {
+    if art == 0 || bw == 0 || bh == 0 {
+        return false
+    }
+    if komp == 0 {
+        return false
+    }
+    // Erst rechnen, dann die Datei anlegen -- sonst bleibt bei zu
+    // kleinem Puffer eine leere Datei liegen.
+    let n: u64 = jenc.encode(pix, bw, bh, JPEG_Q, komp, KOMPCAP)
+    if n == 0 {
+        return false
+    }
+    let fd: u64 = tools.openw(pfadp)
+    if ulib.bad(fd) {
+        return false
+    }
+    let g: u64 = io.write_all(fd, komp, n)
+    io.close(fd)
+    return g == n
 }
 
 fn artname() -> u64 {
@@ -308,11 +438,20 @@ fn artname() -> u64 {
     if art == 3 {
         return (&A_JPG[(0) as usize]) as u64
     }
+    if art == 4 {
+        return (&A_GIF[(0) as usize]) as u64
+    }
     return (&T_KEIN[(0) as usize]) as u64
 }
 
 fn reason() -> u64 {
     if art == 0 {
+        // Welches Modul hat sich beschwert? Das mit einem Fehler. GIF
+        // zuerst, weil `image.err` von einem abgelehnten PNG noch
+        // stehen kann.
+        if gif.err() != 0 {
+            return gif.fehlertext()
+        }
         if jpeg.err() != 0 {
             return jpeg.fehlertext()
         }
@@ -345,6 +484,13 @@ fn header_build() {
         ulib.strcat(k, (&S_SP[(0) as usize]) as u64)
         num_at(k, wlib.image_zoom(w_bild))
         ulib.strcat(k, (&S_PROZ[(0) as usize]) as u64)
+        // Ein GIF mit mehreren Teilbildern sagt, dass nur das erste
+        // gezeigt wird -- sonst haelt man die Datei fuer ein Standbild.
+        if art == 4 && n_frames > 1 {
+            var s_bf: [u8; 5] = "  1/\0"
+            ulib.strcat(k, (&s_bf[(0) as usize]) as u64)
+            num_at(k, n_frames)
+        }
     }
     ulib.strcat(k, (&S_SP[(0) as usize]) as u64)
     num_at(k, akt + 1)
@@ -480,6 +626,10 @@ fn u_gui(pfadp: u64) -> u64 {
     pix = karte(PIXCAP)
     dat = karte(DATCAP)
     mini = karte(MININ * MINIW * MINIW * 4)
+    // RUNDE BILD: die beiden Puffer fuers Sichern. Fehlen sie, laeuft
+    // der Betrachter weiter -- nur die beiden Schalter sagen dann nein.
+    roh = karte(ROHCAP)
+    komp = karte(KOMPCAP)
     if pix == 0 || dat == 0 || mini == 0 {
         say((&s_mem[(0) as usize]) as u64)
         ulib.nl()
@@ -524,15 +674,25 @@ fn u_gui(pfadp: u64) -> u64 {
     w_zur = wlib.button((&T_ZUR[(0) as usize]) as u64)
     wlib.size(40, 0)
     w_vor = wlib.button((&T_VOR[(0) as usize]) as u64)
-    wlib.size(100, 0)
+    wlib.size(92, 0)
     w_fit = wlib.button((&T_FIT[(0) as usize]) as u64)
     wlib.size(60, 0)
     w_eins = wlib.button((&T_EINS[(0) as usize]) as u64)
-    wlib.size(88, 0)
+    wlib.size(72, 0)
     w_dreh = wlib.button((&T_DREH[(0) as usize]) as u64)
-    wlib.size(120, 0)
+    wlib.size(104, 0)
     w_mini = wlib.button((&T_MINI[(0) as usize]) as u64)
-    wlib.size(160, 0)
+    // RUNDE BILD: die zwei Sichern-Schalter. Sie heissen nur "PNG" und
+    // "JPEG" und nicht "Als PNG sichern" -- die Leiste ist 704 Punkte
+    // breit, und mit den langen Namen blieben fuer den Schieberegler
+    // 40 Punkte uebrig (gemessen an `viewer: rect id=22 w=40`). Die
+    // Summe unten geht auf: 40+40+92+60+72+104+52+60+152 = 672, plus
+    // acht Luecken von 4 = 704, genau die Innenbreite.
+    wlib.size(52, 0)
+    w_png = wlib.button((&T_PNG[(0) as usize]) as u64)
+    wlib.size(60, 0)
+    w_jpg = wlib.button((&T_JPG[(0) as usize]) as u64)
+    wlib.size(152, 0)
     w_zoom = wlib.slider(10, 800, 100)
     wlib.box_end()
 
@@ -597,6 +757,32 @@ fn u_gui(pfadp: u64) -> u64 {
                     wlib.image_rotate(w_bild, 1)
                     wlib.image_fit(w_bild)
                     wlib.set_value(w_zoom, wlib.image_zoom(w_bild))
+                } else if id == w_png {
+                    var e_p: [u8; 5] = ".png\0"
+                    var s_sv: [u8; 16] = "viewer: sichern\0"
+                    var s_no: [u8; 21] = "viewer: sichern nein\0"
+                    ziel_pfad((&vollp[(0) as usize]) as u64, full(akt),
+                        (&e_p[(0) as usize]) as u64)
+                    if save_png((&vollp[(0) as usize]) as u64) {
+                        say((&s_sv[(0) as usize]) as u64)
+                    } else {
+                        say((&s_no[(0) as usize]) as u64)
+                    }
+                    say((&vollp[(0) as usize]) as u64)
+                    ulib.nl()
+                } else if id == w_jpg {
+                    var e_j: [u8; 5] = ".jpg\0"
+                    var s_sv2: [u8; 16] = "viewer: sichern\0"
+                    var s_no2: [u8; 21] = "viewer: sichern nein\0"
+                    ziel_pfad((&vollp[(0) as usize]) as u64, full(akt),
+                        (&e_j[(0) as usize]) as u64)
+                    if save_jpeg((&vollp[(0) as usize]) as u64) {
+                        say((&s_sv2[(0) as usize]) as u64)
+                    } else {
+                        say((&s_no2[(0) as usize]) as u64)
+                    }
+                    say((&vollp[(0) as usize]) as u64)
+                    ulib.nl()
                 } else if id == w_mini {
                     if modus == 0 {
                         modus = 1
@@ -677,6 +863,14 @@ fn u_info(pfadp: u64) -> u64 {
     ulib.sayn(bw)
     say((&s_h[(0) as usize]) as u64)
     ulib.sayn(bh)
+    // Bei einem GIF steht dahinter, wie viele Teilbilder die Datei hat
+    // -- die Abnahme prueft damit, dass eine Bildfolge ERKANNT wird,
+    // auch wenn nur das erste Bild gezeigt wird.
+    if art == 4 {
+        var s_f: [u8; 9] = " bilder=\0"
+        say((&s_f[(0) as usize]) as u64)
+        ulib.sayn(n_frames)
+    }
     ulib.nl()
     // Die Pruefsumme: die Summe aller drei Farbkanaele, jeder fuer
     // sich. Sie faellt bei EINEM falschen Bildpunkt auf und laesst sich
@@ -709,9 +903,103 @@ fn u_info(pfadp: u64) -> u64 {
     return 0
 }
 
+// RUNDE BILD: SICHERN OHNE MAUS.
+//
+//   viewer -s /b/ziel.png /b/quelle.gif
+//
+// Die Endung von <ziel> entscheidet ueber das Format. Das ist der Weg,
+// auf dem `tools/bild/run.sh` den Umlauf misst: die Datei wird im
+// System gelesen und geschrieben, danach holt der Wirt sie vom Abbild
+// und laesst Pillow nachsehen.
+fn endet_auf(p: u64, e: u64) -> bool {
+    let lp: u64 = ulib.length(p)
+    let le: u64 = ulib.length(e)
+    if le > lp {
+        return false
+    }
+    var i: u64 = 0
+    while i < le {
+        var a: u64 = (*((p + lp - le + i) as *mut u8)) as u64
+        let b: u64 = (*((e + i) as *mut u8)) as u64
+        if a >= 65 && a <= 90 {
+            a = a + 32
+        }
+        if a != b {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn u_save(zielp: u64, quellp: u64) -> u64 {
+    var s_mem: [u8; 22] = "viewer: kein Speicher\0"
+    var s_no: [u8; 21] = "viewer: geht nicht: \0"
+    var s_ok: [u8; 16] = "viewer: sichern\0"
+    var s_bad: [u8; 27] = "viewer: sichern nein, ziel\0"
+    var s_w: [u8; 4] = " w=\0"
+    var s_h: [u8; 4] = " h=\0"
+    var s_n: [u8; 4] = " n=\0"
+    var e_png: [u8; 5] = ".png\0"
+    var e_jpg: [u8; 5] = ".jpg\0"
+    var e_jpeg: [u8; 6] = ".jpeg\0"
+    pix = karte(PIXCAP)
+    dat = karte(DATCAP)
+    roh = karte(ROHCAP)
+    komp = karte(KOMPCAP)
+    if pix == 0 || dat == 0 || roh == 0 || komp == 0 {
+        say((&s_mem[(0) as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    if !load(quellp) {
+        say((&s_no[(0) as usize]) as u64)
+        say(reason())
+        ulib.nl()
+        return 1
+    }
+    var gut: bool = false
+    var wiejpeg: bool = false
+    if endet_auf(zielp, (&e_png[(0) as usize]) as u64) {
+        gut = save_png(zielp)
+    } else if endet_auf(zielp, (&e_jpg[(0) as usize]) as u64)
+        || endet_auf(zielp, (&e_jpeg[(0) as usize]) as u64) {
+        wiejpeg = true
+        gut = save_jpeg(zielp)
+    } else {
+        say((&s_bad[(0) as usize]) as u64)
+        ulib.nl()
+        return 2
+    }
+    if !gut {
+        say((&s_bad[(0) as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    // Die Zeile, auf der die Abnahme steht: Ziel, Maße und die Art,
+    // aus der gelesen wurde.
+    say((&s_ok[(0) as usize]) as u64)
+    var s_sp: [u8; 2] = " \0"
+    say((&s_sp[(0) as usize]) as u64)
+    say(ulib.base_name(zielp))
+    say((&s_sp[(0) as usize]) as u64)
+    say(artname())
+    say((&s_w[(0) as usize]) as u64)
+    ulib.sayn(bw)
+    say((&s_h[(0) as usize]) as u64)
+    ulib.sayn(bh)
+    if wiejpeg {
+        say((&s_n[(0) as usize]) as u64)
+        ulib.sayn(JPEG_Q)
+    }
+    ulib.nl()
+    return 0
+}
+
 fn u_start(args: u64) -> u64 {
-    var s_use: [u8; 28] = "viewer: viewer [-i] <datei>\0"
+    var s_use: [u8; 38] = "viewer: viewer [-i|-s <ziel>] <datei>\0"
     var s_i: [u8; 3] = "-i\0"
+    var s_s: [u8; 3] = "-s\0"
     let argc: u64 = ulib.arg_count(args)
     if argc < 2 {
         ulib.esay_line((&s_use[(0) as usize]) as u64, 0)
@@ -723,6 +1011,13 @@ fn u_start(args: u64) -> u64 {
             return 2
         }
         return u_info(ulib.arg_at(args, 2))
+    }
+    if ulib.streq(ulib.arg_at(args, 1), (&s_s[(0) as usize]) as u64) {
+        if argc < 4 {
+            ulib.esay_line((&s_use[(0) as usize]) as u64, 0)
+            return 2
+        }
+        return u_save(ulib.arg_at(args, 2), ulib.arg_at(args, 3))
     }
     return u_gui(ulib.arg_at(args, 1))
 }

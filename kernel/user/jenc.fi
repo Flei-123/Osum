@@ -1,0 +1,688 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/jenc.fi -- Runde BILD: BASELINE-JPEG SCHREIBEN.
+//
+// Der Betrachter konnte bisher NICHTS sichern -- weder als PNG, obwohl
+// `image.png_schreiben` seit Runde ALLTAG da liegt, noch als JPEG, weil
+// es keinen Kodierer gab. Diese Datei ist die fehlende Haelfte: aus
+// einem Feld von Bildpunkten wird eine JPEG-Datei.
+//
+// ES IST DER DEKODIERER RUECKWAERTS, und deshalb steht es NEBEN
+// `jpeg.fi` und nicht darin: Vorwaerts-DCT statt inverser,
+// Quantisieren statt Entquantisieren, Huffman schreiben statt lesen.
+// Zwei Richtungen in einer Datei waeren 1200 Zeilen, in denen die
+// Hilfsnamen (`bit`, `bits`, `block`) doppelt vorkommen und nur an der
+// Richtung zu unterscheiden sind.
+//
+//   * Die Vorwaerts-DCT ist `jpeg_fdct_islow` aus libjpeg -- dieselbe
+//     Ganzzahlrechnung mit 13 Bit Konstanten wie die inverse in
+//     `jpeg.fi`. Nicht, weil sie schoen ist, sondern weil ein Programm
+//     dieses Systems in Ring 3 ganzzahlig rechnet und der Weg damit
+//     BITGENAU nachrechenbar ist.
+//   * Die Quantisierungstabellen sind die aus Anhang K der Norm T.81,
+//     in der Fassung, die libjpeg fuer Qualitaet 50 nimmt, skaliert mit
+//     derselben Formel. Zwei Tabellen: Helligkeit und Farbe.
+//   * Die Huffman-Tabellen sind ebenfalls die aus Anhang K. KEIN
+//     eigener Huffman-Erzeuger: er waere 150 Zeilen fuer ein paar
+//     Prozent Dateigroesse, und die Norm-Tabellen sind genau das, was
+//     jeder Kodierer ohne `optimize_coding` schreibt.
+//
+// WAS ES SCHREIBT: Baseline, sequentiell, 4:4:4 -- drei Komponenten in
+// voller Aufloesung, ein Block je Komponente und Kachel. Jede
+// Umsetzung der Welt liest das; `file` sagt "JPEG image data, JFIF
+// standard".
+//
+// WAS ES NICHT TUT, und es steht hier, statt verschwiegen zu werden:
+//
+//   * KEINE UNTERABTASTUNG (kein 4:2:0). Ein Foto wird damit rund ein
+//     Viertel groesser als bei 4:2:0 -- dafuer ist die Farbe scharf und
+//     der Weg kurz, und der Umlaufversuch (lesen -> sichern -> lesen)
+//     misst dann die DCT und nicht den Farbfilter. Wer 4:2:0 will,
+//     braucht die Mittelung der Farbkanaele und Kacheln von 16x16; das
+//     ist nicht gebaut.
+//   * KEINE progressive Fassung, KEINE Neustartmarken, KEIN
+//     optimiertes Huffman, KEIN EXIF, KEIN Farbprofil.
+//   * KEIN Alphakanal -- JPEG hat keinen. Wer ein durchsichtiges PNG
+//     als JPEG sichert, bekommt die Farbe ohne die Deckung; das ist
+//     nicht ein Fehler dieses Kodierers, sondern des Formats.
+//
+// DIE BILDPUNKTE LIEGEN ALS 0xAARRGGBB, eine u32-Zahl je Bildpunkt --
+// dasselbe Format, das `image.png_read` und `gif.gif_read` liefern.
+// ACHTUNG, DAS WAR DER FEHLER IM ALTEN ZWEIG: dort las `lade_block` die
+// vier Oktette der Reihe nach als R,G,B. Auf dieser Maschine (kleines
+// Ende zuerst) steht in 0xAARRGGBB aber B im ersten Oktett und R im
+// dritten -- so gelesen werden Rot und Blau getauscht, und das faellt
+// an einem Grauverlauf NICHT auf. Hier wird deshalb die u32 gelesen und
+// geschoben, nicht das Oktett.
+//
+// GEMESSEN WIRD GEGEN PILLOW (libjpeg-turbo), nicht gegen sich selbst:
+// `tools/bild/run.sh` holt die geschriebene Datei vom Abbild, laesst
+// `file` und Pillow sie aufmachen und vergleicht nach dem Umlauf Maße
+// und Farbe. Die Abweichung steht als Zahl in docs/RUNDE-BILD.md.
+
+profile app
+
+import ulib
+
+export { encode, quality_ok, bedarf }
+
+// ------------------------------------------------- die Tabellen aus Anhang K
+
+static mut h_dcl_bits: [u8; 16] = [
+    0 as u8, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0
+]
+
+static mut h_dcc_bits: [u8; 16] = [
+    0 as u8, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0
+]
+
+static mut h_acl_bits: [u8; 16] = [
+    0 as u8, 2, 1, 3, 3, 2, 4, 3, 5, 5, 4, 4, 0, 0, 1, 125
+]
+
+static mut h_acc_bits: [u8; 16] = [
+    0 as u8, 2, 1, 2, 4, 4, 3, 4, 7, 5, 4, 4, 0, 1, 2, 119
+]
+
+static mut h_dc_vals: [u8; 12] = [
+    0 as u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
+]
+
+static mut h_acl_vals: [u8; 162] = [
+    1 as u8, 2, 3, 0, 4, 17, 5, 18, 33, 49, 65, 6, 19, 81, 97, 7,
+    34, 113, 20, 50, 129, 145, 161, 8, 35, 66, 177, 193, 21, 82, 209, 240,
+    36, 51, 98, 114, 130, 9, 10, 22, 23, 24, 25, 26, 37, 38, 39, 40,
+    41, 42, 52, 53, 54, 55, 56, 57, 58, 67, 68, 69, 70, 71, 72, 73,
+    74, 83, 84, 85, 86, 87, 88, 89, 90, 99, 100, 101, 102, 103, 104, 105,
+    106, 115, 116, 117, 118, 119, 120, 121, 122, 131, 132, 133, 134, 135, 136, 137,
+    138, 146, 147, 148, 149, 150, 151, 152, 153, 154, 162, 163, 164, 165, 166, 167,
+    168, 169, 170, 178, 179, 180, 181, 182, 183, 184, 185, 186, 194, 195, 196, 197,
+    198, 199, 200, 201, 202, 210, 211, 212, 213, 214, 215, 216, 217, 218, 225, 226,
+    227, 228, 229, 230, 231, 232, 233, 234, 241, 242, 243, 244, 245, 246, 247, 248,
+    249, 250
+]
+
+static mut h_acc_vals: [u8; 162] = [
+    0 as u8, 1, 2, 3, 17, 4, 5, 33, 49, 6, 18, 65, 81, 7, 97, 113,
+    19, 34, 50, 129, 8, 20, 66, 145, 161, 177, 193, 9, 35, 51, 82, 240,
+    21, 98, 114, 209, 10, 22, 36, 52, 225, 37, 241, 23, 24, 25, 26, 38,
+    39, 40, 41, 42, 53, 54, 55, 56, 57, 58, 67, 68, 69, 70, 71, 72,
+    73, 74, 83, 84, 85, 86, 87, 88, 89, 90, 99, 100, 101, 102, 103, 104,
+    105, 106, 115, 116, 117, 118, 119, 120, 121, 122, 130, 131, 132, 133, 134, 135,
+    136, 137, 138, 146, 147, 148, 149, 150, 151, 152, 153, 154, 162, 163, 164, 165,
+    166, 167, 168, 169, 170, 178, 179, 180, 181, 182, 183, 184, 185, 186, 194, 195,
+    196, 197, 198, 199, 200, 201, 202, 210, 211, 212, 213, 214, 215, 216, 217, 218,
+    226, 227, 228, 229, 230, 231, 232, 233, 234, 242, 243, 244, 245, 246, 247, 248,
+    249, 250
+]
+
+static mut q_lum: [u8; 64] = [
+    16 as u8, 11, 10, 16, 24, 40, 51, 61, 12, 12, 14, 19, 26, 58, 60, 55,
+    14, 13, 16, 24, 40, 57, 69, 56, 14, 17, 22, 29, 51, 87, 80, 62,
+    18, 22, 37, 56, 68, 109, 103, 77, 24, 35, 55, 64, 81, 104, 113, 92,
+    49, 64, 78, 87, 103, 121, 120, 101, 72, 92, 95, 98, 112, 100, 103, 99
+]
+
+static mut q_chr: [u8; 64] = [
+    17 as u8, 18, 24, 47, 99, 99, 99, 99, 18, 21, 26, 66, 99, 99, 99, 99,
+    24, 26, 56, 99, 99, 99, 99, 99, 47, 66, 99, 99, 99, 99, 99, 99,
+    99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+    99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99
+]
+
+// Die Zickzackfolge: von der natuerlichen Reihenfolge in die der Datei.
+static mut zz: [u8; 64] = [
+    0 as u8, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5,
+    12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28,
+    35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51,
+    58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63
+]
+
+// Die skalierten Tabellen dieses Laufs, in NATUERLICHER Reihenfolge.
+static mut qt: [u64; 128] = [0 as u64; 128]
+
+// Die Codes: vier Tabellen, je 256 Laengen und 256 Codes.
+static mut hc_len: [u64; 1024] = [0 as u64; 1024]
+static mut hc_code: [u64; 1024] = [0 as u64; 1024]
+
+static mut out_p: u64 = 0
+static mut out_at: u64 = 0
+static mut out_cap: u64 = 0
+static mut voll: u64 = 0
+
+static mut bitbuf: u64 = 0
+static mut bitcnt: u64 = 0
+
+static mut blk: [i64; 64] = [0 as i64; 64]
+static mut wsp: [i64; 64] = [0 as i64; 64]
+static mut pred: [i64; 4] = [0 as i64; 4]
+
+// Wieviel Platz eine JPEG-Datei dieser Groesse hoechstens braucht. Drei
+// Oktette je Bildpunkt ist bei Qualitaet 100 und feinem Rauschen die
+// obere Schranke -- gepackt wird es immer kleiner; 4 KiB kommen fuer
+// die Koepfe dazu.
+fn bedarf(w: u64, h: u64) -> u64 {
+    return w * h * 3 + 4096
+}
+
+fn quality_ok(q: u64) -> bool {
+    return q >= 1 && q <= 100
+}
+
+fn put8(v: u64) {
+    if out_at >= out_cap {
+        voll = 1
+        return
+    }
+    __mmio_write8((out_p + out_at) as *mut u8, (v & 255) as u8)
+    out_at = out_at + 1
+}
+
+fn put16(v: u64) {
+    put8((v >> 8) & 255)
+    put8(v & 255)
+}
+
+// Ein 0xFF im Datenstrom wird als 0xFF 0x00 geschrieben -- sonst liest
+// jeder Dekodierer einen Marker, wo Bildpunkte stehen. Der klassische
+// Fehler Nummer eins, in beide Richtungen.
+fn put_bits(code: u64, n: u64) {
+    if n == 0 {
+        return
+    }
+    bitbuf = (bitbuf << n) | (code & ((1 << n) - 1))
+    bitcnt = bitcnt + n
+    while bitcnt >= 8 {
+        let b: u64 = (bitbuf >> (bitcnt - 8)) & 255
+        put8(b)
+        if b == 255 {
+            put8(0)
+        }
+        bitcnt = bitcnt - 8
+    }
+}
+
+fn flush_bits() {
+    while bitcnt > 0 {
+        // Mit Einsen auffuellen, so wie die Norm es sagt.
+        let n: u64 = 8 - bitcnt
+        put_bits((1 << n) - 1, n)
+    }
+    bitbuf = 0
+    bitcnt = 0
+}
+
+// Aus Laengenzaehlern und Werten die kanonischen Codes bauen: je
+// Laenge von 1 bis 16 so viele Codes, wie der Zaehler sagt, fortlaufend
+// -- und nach jeder Laenge einmal verdoppeln.
+fn build_codes(t: u64, bits: u64, vals: u64) {
+    var i: u64 = 0
+    while i < 256 {
+        hc_len[((t * 256 + i)) as usize] = 0
+        hc_code[((t * 256 + i)) as usize] = 0
+        i = i + 1
+    }
+    var code: u64 = 0
+    var k: u64 = 0
+    var l: u64 = 1
+    while l <= 16 {
+        let n: u64 = (*((bits + l - 1) as *mut u8)) as u64
+        var q: u64 = 0
+        while q < n {
+            let sym: u64 = (*((vals + k) as *mut u8)) as u64
+            hc_len[((t * 256 + sym)) as usize] = l
+            hc_code[((t * 256 + sym)) as usize] = code
+            code = code + 1
+            k = k + 1
+            q = q + 1
+        }
+        code = code * 2
+        l = l + 1
+    }
+}
+
+// Die Quantisierungstabelle fuer eine Qualitaet, mit libjpegs Formel:
+// unter 50 wird 5000/q genommen, darueber 200-2q, und das Ergebnis auf
+// 1 bis 255 geklemmt.
+fn scale_tables(quality: u64) {
+    var q: u64 = quality
+    if q < 1 {
+        q = 1
+    }
+    if q > 100 {
+        q = 100
+    }
+    var scale: u64 = 0
+    if q < 50 {
+        scale = 5000 / q
+    } else {
+        scale = 200 - q * 2
+    }
+    var i: u64 = 0
+    while i < 64 {
+        var v: u64 = ((q_lum[(i) as usize] as u64) * scale + 50) / 100
+        if v < 1 {
+            v = 1
+        }
+        if v > 255 {
+            v = 255
+        }
+        qt[(i) as usize] = v
+        var w: u64 = ((q_chr[(i) as usize] as u64) * scale + 50) / 100
+        if w < 1 {
+            w = 1
+        }
+        if w > 255 {
+            w = 255
+        }
+        qt[((64 + i)) as usize] = w
+        i = i + 1
+    }
+}
+
+// ------------------------------------------------------ die Vorwaerts-DCT
+//
+// `jpeg_fdct_islow`: erst die Zeilen, dann die Spalten, 13 Bit
+// Konstanten, zwei Bit mehr Genauigkeit im ersten Durchgang. Das
+// Ergebnis ist um den Faktor acht zu gross -- genau deshalb wird beim
+// Quantisieren durch `quantval * 8` geteilt, so wie in libjpegs
+// `jcdctmgr.c`.
+
+const CB: u64 = 13
+const PB: u64 = 2
+const F_0_298: i64 = 2446
+const F_0_390: i64 = 3196
+const F_0_541: i64 = 4433
+const F_0_765: i64 = 6270
+const F_0_899: i64 = 7373
+const F_1_175: i64 = 9633
+const F_1_501: i64 = 12299
+const F_1_847: i64 = 15137
+const F_1_961: i64 = 16069
+const F_2_053: i64 = 16819
+const F_2_562: i64 = 20995
+const F_3_072: i64 = 25172
+
+fn descale(x: i64, n: u64) -> i64 {
+    return (x + ((1 << (n - 1)) as i64)) >> n
+}
+
+fn fdct() {
+    // ---- die Zeilen
+    var r: u64 = 0
+    while r < 8 {
+        let b: u64 = r * 8
+        let d0: i64 = blk[(b) as usize]
+        let d1: i64 = blk[((b + 1)) as usize]
+        let d2: i64 = blk[((b + 2)) as usize]
+        let d3: i64 = blk[((b + 3)) as usize]
+        let d4: i64 = blk[((b + 4)) as usize]
+        let d5: i64 = blk[((b + 5)) as usize]
+        let d6: i64 = blk[((b + 6)) as usize]
+        let d7: i64 = blk[((b + 7)) as usize]
+        let t0: i64 = d0 + d7
+        let t7: i64 = d0 - d7
+        let t1: i64 = d1 + d6
+        let t6: i64 = d1 - d6
+        let t2: i64 = d2 + d5
+        let t5: i64 = d2 - d5
+        let t3: i64 = d3 + d4
+        let t4: i64 = d3 - d4
+        let t10: i64 = t0 + t3
+        let t13: i64 = t0 - t3
+        let t11: i64 = t1 + t2
+        let t12: i64 = t1 - t2
+        wsp[(b) as usize] = (t10 + t11) << PB
+        wsp[((b + 4)) as usize] = (t10 - t11) << PB
+        let z1: i64 = (t12 + t13) * F_0_541
+        wsp[((b + 2)) as usize] = descale(z1 + t13 * F_0_765, CB - PB)
+        wsp[((b + 6)) as usize] = descale(z1 + t12 * (0 - F_1_847), CB - PB)
+        var za: i64 = t4 + t7
+        var zb: i64 = t5 + t6
+        var zc: i64 = t4 + t6
+        var zd: i64 = t5 + t7
+        let ze: i64 = (zc + zd) * F_1_175
+        let m4: i64 = t4 * F_0_298
+        let m5: i64 = t5 * F_2_053
+        let m6: i64 = t6 * F_3_072
+        let m7: i64 = t7 * F_1_501
+        za = za * (0 - F_0_899)
+        zb = zb * (0 - F_2_562)
+        zc = zc * (0 - F_1_961) + ze
+        zd = zd * (0 - F_0_390) + ze
+        wsp[((b + 7)) as usize] = descale(m4 + za + zc, CB - PB)
+        wsp[((b + 5)) as usize] = descale(m5 + zb + zd, CB - PB)
+        wsp[((b + 3)) as usize] = descale(m6 + zb + zc, CB - PB)
+        wsp[((b + 1)) as usize] = descale(m7 + za + zd, CB - PB)
+        r = r + 1
+    }
+    // ---- die Spalten
+    var c: u64 = 0
+    while c < 8 {
+        let d0: i64 = wsp[(c) as usize]
+        let d1: i64 = wsp[((c + 8)) as usize]
+        let d2: i64 = wsp[((c + 16)) as usize]
+        let d3: i64 = wsp[((c + 24)) as usize]
+        let d4: i64 = wsp[((c + 32)) as usize]
+        let d5: i64 = wsp[((c + 40)) as usize]
+        let d6: i64 = wsp[((c + 48)) as usize]
+        let d7: i64 = wsp[((c + 56)) as usize]
+        let t0: i64 = d0 + d7
+        let t7: i64 = d0 - d7
+        let t1: i64 = d1 + d6
+        let t6: i64 = d1 - d6
+        let t2: i64 = d2 + d5
+        let t5: i64 = d2 - d5
+        let t3: i64 = d3 + d4
+        let t4: i64 = d3 - d4
+        let t10: i64 = t0 + t3
+        let t13: i64 = t0 - t3
+        let t11: i64 = t1 + t2
+        let t12: i64 = t1 - t2
+        blk[(c) as usize] = descale(t10 + t11, PB)
+        blk[((c + 32)) as usize] = descale(t10 - t11, PB)
+        let z1: i64 = (t12 + t13) * F_0_541
+        blk[((c + 16)) as usize] = descale(z1 + t13 * F_0_765, CB + PB)
+        blk[((c + 48)) as usize] = descale(z1 + t12 * (0 - F_1_847),
+            CB + PB)
+        var za: i64 = t4 + t7
+        var zb: i64 = t5 + t6
+        var zc: i64 = t4 + t6
+        var zd: i64 = t5 + t7
+        let ze: i64 = (zc + zd) * F_1_175
+        let m4: i64 = t4 * F_0_298
+        let m5: i64 = t5 * F_2_053
+        let m6: i64 = t6 * F_3_072
+        let m7: i64 = t7 * F_1_501
+        za = za * (0 - F_0_899)
+        zb = zb * (0 - F_2_562)
+        zc = zc * (0 - F_1_961) + ze
+        zd = zd * (0 - F_0_390) + ze
+        blk[((c + 56)) as usize] = descale(m4 + za + zc, CB + PB)
+        blk[((c + 40)) as usize] = descale(m5 + zb + zd, CB + PB)
+        blk[((c + 24)) as usize] = descale(m6 + zb + zc, CB + PB)
+        blk[((c + 8)) as usize] = descale(m7 + za + zd, CB + PB)
+        c = c + 1
+    }
+}
+
+// Wie viele Bit braucht der Betrag? Das ist die "Groesse" der Norm.
+fn bitsize(v: i64) -> u64 {
+    var a: u64 = 0
+    if v < 0 {
+        a = (0 - v) as u64
+    } else {
+        a = v as u64
+    }
+    var n: u64 = 0
+    while a > 0 {
+        a = a >> 1
+        n = n + 1
+    }
+    return n
+}
+
+// Einen 8x8-Block einer Komponente holen, mit Pegelverschiebung um 128.
+// Was ueber den Rand ragt, wiederholt den letzten Bildpunkt -- das tut
+// libjpeg auch, und es kostet weniger Bits als Nullen.
+//
+// DIE OKTETTFOLGE: `pix` ist ein Feld aus u32 mit 0xAARRGGBB. Gelesen
+// wird die ZAHL und dann geschoben; wer die Oktette der Reihe nach als
+// R,G,B nimmt, vertauscht auf dieser Maschine Rot und Blau (siehe Kopf).
+fn lade_block(pix: u64, w: u64, h: u64, x0: u64, y0: u64, c: u64) {
+    var y: u64 = 0
+    while y < 8 {
+        var sy: u64 = y0 + y
+        if sy >= h {
+            sy = h - 1
+        }
+        var x: u64 = 0
+        while x < 8 {
+            var sx: u64 = x0 + x
+            if sx >= w {
+                sx = w - 1
+            }
+            let c32: u64 = (__mmio_read32((pix + (sy * w + sx) * 4)
+                as *mut u32)) as u64
+            let r: i64 = ((c32 >> 16) & 255) as i64
+            let g: i64 = ((c32 >> 8) & 255) as i64
+            let b: i64 = (c32 & 255) as i64
+            var v: i64 = 0
+            if c == 0 {
+                // Y  = 0.299 R + 0.587 G + 0.114 B, Festkomma wie libjpeg
+                v = (19595 * r + 38470 * g + 7471 * b + 32768) >> 16
+            } else if c == 1 {
+                // Cb = -0.16874 R - 0.33126 G + 0.5 B + 128
+                v = ((0 - 11059) * r - 21709 * g + 32768 * b + 8388608)
+                    >> 16
+            } else {
+                // Cr = 0.5 R - 0.41869 G - 0.08131 B + 128
+                v = (32768 * r - 27439 * g - 5329 * b + 8388608) >> 16
+            }
+            if v < 0 {
+                v = 0
+            }
+            if v > 255 {
+                v = 255
+            }
+            blk[((y * 8 + x)) as usize] = v - 128
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+// Einen Block schreiben: DC als Unterschied zum Vorgaenger derselben
+// Komponente, AC als (Nullen, Groesse)-Paare in Zickzack.
+fn encode_block(ci: u64, qbase: u64, dct: u64, act: u64) {
+    fdct()
+    // quantisieren, mit Rundung zur naechsten Zahl
+    var i: u64 = 0
+    while i < 64 {
+        let q: i64 = (qt[((qbase + i)) as usize] * 8) as i64
+        var v: i64 = blk[(i) as usize]
+        if v < 0 {
+            v = 0 - v
+            v = (v + (q >> 1)) / q
+            v = 0 - v
+        } else {
+            v = (v + (q >> 1)) / q
+        }
+        wsp[(i) as usize] = v
+        i = i + 1
+    }
+    // ---- DC
+    let dc: i64 = wsp[(0) as usize]
+    let diff: i64 = dc - pred[(ci) as usize]
+    pred[(ci) as usize] = dc
+    let s: u64 = bitsize(diff)
+    put_bits(hc_code[((dct * 256 + s)) as usize],
+        hc_len[((dct * 256 + s)) as usize])
+    if s > 0 {
+        var v: i64 = diff
+        if v < 0 {
+            v = v + (((1 << s) - 1) as i64)
+        }
+        put_bits(v as u64, s)
+    }
+    // ---- AC
+    var run: u64 = 0
+    var k: u64 = 1
+    while k < 64 {
+        let pos: u64 = zz[(k) as usize] as u64
+        let a: i64 = wsp[(pos) as usize]
+        if a == 0 {
+            run = run + 1
+        } else {
+            // Mehr als 15 Nullen: je 16 ein ZRL-Symbol (0xF0).
+            while run > 15 {
+                put_bits(hc_code[((act * 256 + 240)) as usize],
+                    hc_len[((act * 256 + 240)) as usize])
+                run = run - 16
+            }
+            let sz: u64 = bitsize(a)
+            let sym: u64 = run * 16 + sz
+            put_bits(hc_code[((act * 256 + sym)) as usize],
+                hc_len[((act * 256 + sym)) as usize])
+            var v: i64 = a
+            if v < 0 {
+                v = v + (((1 << sz) - 1) as i64)
+            }
+            put_bits(v as u64, sz)
+            run = 0
+        }
+        k = k + 1
+    }
+    // Der Rest ist Null: EOB (Symbol 0).
+    if run > 0 {
+        put_bits(hc_code[((act * 256)) as usize],
+            hc_len[((act * 256)) as usize])
+    }
+}
+
+fn dht(tc: u64, th: u64, bits: u64, vals: u64, n: u64) {
+    put16(0xFFC4)
+    put16(19 + n)
+    put8(tc * 16 + th)
+    var i: u64 = 0
+    while i < 16 {
+        put8((*((bits + i) as *mut u8)) as u64)
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        put8((*((vals + i) as *mut u8)) as u64)
+        i = i + 1
+    }
+}
+
+// ------------------------------------------------------------ encode
+//
+// `pix` sind w*h*4 Oktette 0xAARRGGBB. Geschrieben wird 4:4:4 mit drei
+// Komponenten. Gibt die geschriebene Laenge zurueck, 0 wenn der Puffer
+// nicht reicht oder die Maße unsinnig sind.
+fn encode(pix: u64, w: u64, h: u64, quality: u64, out: u64,
+    cap: u64) -> u64 {
+    if w == 0 || h == 0 || cap < 1024 {
+        return 0
+    }
+    out_p = out
+    out_at = 0
+    out_cap = cap
+    voll = 0
+    bitbuf = 0
+    bitcnt = 0
+    pred[(0) as usize] = 0
+    pred[(1) as usize] = 0
+    pred[(2) as usize] = 0
+    scale_tables(quality)
+    build_codes(0, (&h_dcl_bits[(0) as usize]) as u64,
+        (&h_dc_vals[(0) as usize]) as u64)
+    build_codes(1, (&h_acl_bits[(0) as usize]) as u64,
+        (&h_acl_vals[(0) as usize]) as u64)
+    build_codes(2, (&h_dcc_bits[(0) as usize]) as u64,
+        (&h_dc_vals[(0) as usize]) as u64)
+    build_codes(3, (&h_acc_bits[(0) as usize]) as u64,
+        (&h_acc_vals[(0) as usize]) as u64)
+    // ---- SOI
+    put16(0xFFD8)
+    // ---- APP0 (JFIF), damit `file` es benennen kann
+    put16(0xFFE0)
+    put16(16)
+    put8(74) // J
+    put8(70) // F
+    put8(73) // I
+    put8(70) // F
+    put8(0)
+    put8(1) // Fassung 1.1
+    put8(1)
+    put8(0) // keine Einheit
+    put16(1)
+    put16(1)
+    put8(0) // kein Vorschaubild
+    put8(0)
+    // ---- DQT, beide Tabellen, in ZICKZACK -- so steht es in der Datei
+    var t: u64 = 0
+    while t < 2 {
+        put16(0xFFDB)
+        put16(67)
+        put8(t)
+        var i: u64 = 0
+        while i < 64 {
+            put8(qt[((t * 64 + (zz[(i) as usize] as u64))) as usize])
+            i = i + 1
+        }
+        t = t + 1
+    }
+    // ---- SOF0: Baseline, 8 Bit, drei Komponenten
+    put16(0xFFC0)
+    put16(17)
+    put8(8)
+    put16(h)
+    put16(w)
+    put8(3)
+    var ci: u64 = 0
+    while ci < 3 {
+        put8(ci + 1)
+        put8(0x11) // Abtastung 1x1 -- 4:4:4
+        if ci == 0 {
+            put8(0)
+        } else {
+            put8(1)
+        }
+        ci = ci + 1
+    }
+    // ---- DHT, vier Tabellen
+    dht(0, 0, (&h_dcl_bits[(0) as usize]) as u64,
+        (&h_dc_vals[(0) as usize]) as u64, 12)
+    dht(1, 0, (&h_acl_bits[(0) as usize]) as u64,
+        (&h_acl_vals[(0) as usize]) as u64, 162)
+    dht(0, 1, (&h_dcc_bits[(0) as usize]) as u64,
+        (&h_dc_vals[(0) as usize]) as u64, 12)
+    dht(1, 1, (&h_acc_bits[(0) as usize]) as u64,
+        (&h_acc_vals[(0) as usize]) as u64, 162)
+    // ---- SOS
+    put16(0xFFDA)
+    put16(12)
+    put8(3)
+    put8(1)
+    put8(0x00) // Y: DC-Tabelle 0, AC-Tabelle 0
+    put8(2)
+    put8(0x11) // Cb: DC 1, AC 1
+    put8(3)
+    put8(0x11) // Cr: DC 1, AC 1
+    put8(0)
+    put8(63)
+    put8(0)
+    // ---- die Bloecke, Kachel fuer Kachel, je drei Komponenten
+    let bx: u64 = (w + 7) / 8
+    let by: u64 = (h + 7) / 8
+    var my: u64 = 0
+    while my < by && voll == 0 {
+        var mx: u64 = 0
+        while mx < bx && voll == 0 {
+            var c: u64 = 0
+            while c < 3 {
+                lade_block(pix, w, h, mx * 8, my * 8, c)
+                var qb: u64 = 0
+                var dct: u64 = 0
+                var act: u64 = 1
+                if c > 0 {
+                    qb = 64
+                    dct = 2
+                    act = 3
+                }
+                encode_block(c, qb, dct, act)
+                c = c + 1
+            }
+            mx = mx + 1
+        }
+        my = my + 1
+    }
+    flush_bits()
+    // ---- EOI
+    put16(0xFFD9)
+    if voll != 0 {
+        return 0
+    }
+    return out_at
+}
