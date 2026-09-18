@@ -355,7 +355,9 @@ mkdir -p "$TMPD/kern"
 # -- ein Pruefer, der nie anschlaegt, rechnet nichts nach. (Nicht auf
 # 0x46000: der Bereich von Runde K15 steht noch in ihrem eigenen Zweig
 # und waere hier eine leere Seite.)
-sed -i 's/^const K16_OFF: u64 = 0x49000$/const K16_OFF: u64 = 0x3F000/' "$TMPD/kern/kstate.fi"
+sed -i 's/^const K16_OFF: u64 = 0x49000$/const K16_OFF: u64 = 0x3F000/' "$TMPD/kern/lib/kstate.fi"
+grep -q '^const K16_OFF: u64 = 0x3F000' "$TMPD/kern/lib/kstate.fi" \
+    || bad "die Gegenprobe konnte K16_OFF gar nicht verschieben"
 if python3 tools/kernel/memmap.py "$TMPD/kern" > "$TMPD/karte2.txt" 2>&1; then
     bad "GEGENPROBE: auf 0x3F000 (Runde K10, der Schriftleser) haette der Pruefer anschlagen muessen"
 else
