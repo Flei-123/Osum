@@ -128,10 +128,24 @@ grep -q '"HWID_OFF"' tools/kernel/memmap.py \
     || bad "HWID_OFF fehlt in tools/kernel/memmap.py"
 
 # GEGENPROBE: der Bereich auf die Seite von K18 gelegt MUSS auffallen.
-mkdir -p "$TMPD/kbad" && cp kernel/*.fi "$TMPD/kbad/"
-sed -i 's/^const HWID_OFF: u64 = 0x5A000/const HWID_OFF: u64 = 0x59000/' "$TMPD/kbad/kstate.fi"
+# RUNDE GRUNDLINIE-2 (A-021): die Kopie spiegelt den BAUM, nicht eine
+# Handvoll aufgezaehlter Ordner. `kstate.fi` liegt unter kernel/lib/,
+# `fb.fi` unter kernel/gfx/ -- ein flaches `cp kernel/*.fi` liess sie weg,
+# und der Pruefer starb an `KeyError: 'kstate.fi'`, statt die Kollision
+# zu melden, die hier gemessen wird.
+mkdir -p "$TMPD/kbad"
+( cd kernel && find . -name '*.fi' -exec cp --parents {} "$TMPD/kbad/" \; )
+# RUNDE GRUNDLINIE-2: die Gegenprobe zielte auf 0x5A000/0x59000 -- beide
+# Zahlen stimmen seit Langem nicht mehr. HWID liegt heute bei 0x72000,
+# der Nachbar davor ist SHARE (0x6F000..0x72000). Der `sed` griff ins
+# Leere, die Kopie blieb unveraendert und war -- richtigerweise --
+# kollisionsfrei; die Gegenprobe mass also NICHTS. Jetzt wird HWID um
+# eine Seite nach unten auf SHARE gelegt, und der Pruefer MUSS anschlagen.
+sed -i 's/^const HWID_OFF: u64 = 0x72000/const HWID_OFF: u64 = 0x71000/' "$TMPD/kbad/lib/kstate.fi"
+grep -q '^const HWID_OFF: u64 = 0x71000' "$TMPD/kbad/lib/kstate.fi" \
+    || bad "die Gegenprobe konnte HWID_OFF gar nicht verschieben"
 if python3 tools/kernel/memmap.py "$TMPD/kbad" > "$TMPD/karte-bad.txt" 2>&1; then
-    bad "GEGENPROBE: HWID auf 0x59000 (dem Akku) faellt NICHT auf"
+    bad "GEGENPROBE: HWID auf 0x71000 (auf SHARE) faellt NICHT auf"
 else
     ok "GEGENPROBE: HWID auf 0x59000 kollidiert mit BATT und faellt auf"
 fi

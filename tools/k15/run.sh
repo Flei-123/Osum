@@ -365,10 +365,14 @@ fi
 # RUNDE ARM: die Kopie braucht `kernel/arch/x86_64/` mit -- `hv.fi` liegt
 # seit dem Trennschnitt dort, und ohne sie stirbt der Kartenpruefer an
 # einem KeyError statt die Kollision zu melden, die hier gemessen wird.
-GG="$TMPD/kernel-gg"; mkdir -p "$GG/arch/x86_64"
-cp kernel/*.fi "$GG/"
-cp kernel/arch/x86_64/*.fi "$GG/arch/x86_64/"
-sed -i 's/^const WIG_OFF: u64 = 0x46000/const WIG_OFF: u64 = 0x1E000/' "$GG/kstate.fi"
+# RUNDE GRUNDLINIE-2 (A-021): die Kopie spiegelt den BAUM, nicht eine
+# Handvoll aufgezaehlter Ordner. `kstate.fi` liegt unter kernel/lib/,
+# `fb.fi` unter kernel/gfx/ -- ein flaches `cp kernel/*.fi` liess sie weg,
+# und der Pruefer starb an `KeyError: 'kstate.fi'`, statt die Kollision
+# zu melden, die hier gemessen wird.
+GG="$TMPD/kernel-gg"; mkdir -p "$GG"
+( cd kernel && find . -name '*.fi' -exec cp --parents {} "$GG/" \; )
+sed -i 's/^const WIG_OFF: u64 = 0x46000/const WIG_OFF: u64 = 0x1E000/' "$GG/lib/kstate.fi"
 gg=$(python3 tools/kernel/memmap.py "$GG" 2>&1)
 if [ $? -ne 0 ] && printf '%s' "$gg" | grep -q 'KOLLISION'; then
     ok "mit WIG_OFF auf 0x1E000 findet der Pruefer die Kollision mit WM"

@@ -218,7 +218,14 @@ gleich "KDATA_SIZE steht in kstate.fi und boot.s gleich" "$a" "$b"
 # wurde, WAR das die Grenze; Runde K18 hat kdata inzwischen auf 0x60000
 # gehoben und ihre zwei Seiten dahinter gelegt. Geprueft wird deshalb,
 # was wirklich gilt: der Vorrat dieser Runde liegt VOLLSTAENDIG in kdata.
-GG="$TMPD/kernel-gg"; mkdir -p "$GG"
+# RUNDE GRUNDLINIE-2 (A-021): die Kopie spiegelt den BAUM. `kstate.fi`
+# liegt unter kernel/lib/, `xhci.fi` unter kernel/drv/usb/, `usb.fi`
+# unter kernel/usb/ -- ein flaches `cp kernel/*.fi` liess alle drei weg.
+kopie_kernel() { # ziel
+    mkdir -p "$1"
+    ( cd kernel && find . -name '*.fi' -exec cp --parents {} "$1/" \; )
+}
+GG="$TMPD/kernel-gg"; kopie_kernel "$GG"
 ende17=$(( $(printf '%d' "$k17off") + $(printf '%d' "$k17max") ))
 if [ "$ende17" -le "$(printf '%d' "$a")" ]; then
     ok "der Vorrat dieser Runde endet bei $(printf '0x%X' "$ende17"), KDATA_SIZE ist $a"
@@ -245,21 +252,24 @@ for n in M_USB M_NOUSB M_USBPOLL M_NOHID M_NOMSC M_UNPLUG M_NOUSBIRQ \
 done
 # UND KEINE EINZIGE MASKE MEHR IM KERNEL. Solange irgendwo `mode & M_X`
 # steht, kann eine Runde wieder eine Maske erfinden.
-masken=$(grep -rac 'kstate\.MODE) &\|& kstate\.M_' kernel/*.fi 2>/dev/null \
+# RUNDE GRUNDLINIE-2: `kernel/*.fi` sah nur die oberste Ebene und damit
+# einen Bruchteil des Kernels. Der Zaehler geht jetzt ueber den BAUM.
+masken=$(grep -rac 'kstate\.MODE) &\|& kstate\.M_' \
+        --include='*.fi' kernel/ 2>/dev/null \
         | awk -F: '{s+=$2} END {print s+0}')
 num "Stellen im Kernel, die den Modus noch als MASKE lesen" "${masken:-1}" eq 0
 
 # GEGENPROBE ZUM MODUSPRUEFER, zweimal -- ohne sie prueft er nur das,
 # woran jemand gedacht hat.
-cp kernel/*.fi "$GG/"
-sed -i 's/^const M_USB: u64 = 384/const M_USB: u64 = 321/' "$GG/kstate.fi"
+kopie_kernel "$GG"
+sed -i 's/^const M_USB: u64 = 384/const M_USB: u64 = 321/' "$GG/lib/kstate.fi"
 if python3 tools/kernel/memmap.py "$GG" > "$TMPD/karte-gg3.txt" 2>&1; then
     bad "GEGENPROBE: M_USB auf den Index von M_PWR gelegt und der Pruefer schweigt"
 else
     ok "GEGENPROBE: zwei Modusnamen auf einem Index -- der Pruefer schlaegt an"
 fi
-cp kernel/*.fi "$GG/"
-sed -i 's/^const M_USB: u64 = 384/const M_USB: u64 = 140737488355328/' "$GG/kstate.fi"
+kopie_kernel "$GG"
+sed -i 's/^const M_USB: u64 = 384/const M_USB: u64 = 140737488355328/' "$GG/lib/kstate.fi"
 if python3 tools/kernel/memmap.py "$GG" > "$TMPD/karte-gg4.txt" 2>&1; then
     bad "GEGENPROBE: eine alte Maske als Modusindex und der Pruefer schweigt"
 else
@@ -269,16 +279,21 @@ fi
 # GEGENPROBE ZUM KARTENPRUEFER: ein Stueck des USB-Bereichs aus seinem
 # Bereich herausgelegt MUSS auffallen. Ohne diese Zeile prueft die neue
 # Karte nur das, woran jemand gedacht hat.
-cp kernel/*.fi "$GG/"
-sed -i 's/^const EVT_OFF: u64 = 0x52000/const EVT_OFF: u64 = 0x4C000/' "$GG/xhci.fi"
+kopie_kernel "$GG"
+# RUNDE GRUNDLINIE-2: 0x4C000 liegt heute GANZ AUSSERHALB des
+# K17-Vorrats (0x50000..0x58000) -- der Kartenpruefer sieht dort keinen
+# Bereich und meldet folglich auch keine Kollision. Die Gegenprobe mass
+# damit nichts. Sie legt den Ereignisring jetzt auf die Geraetesaetze
+# INNERHALB des Vorrats, und das MUSS auffallen.
+sed -i 's/^const EVT_OFF: u64 = 0x52000/const EVT_OFF: u64 = 0x56000/' "$GG/drv/usb/xhci.fi"
 if python3 tools/kernel/memmap.py "$GG" > "$TMPD/karte-gg.txt" 2>&1; then
-    bad "GEGENPROBE: EVT_OFF auf 0x4C000 gelegt und der Pruefer schweigt"
+    bad "GEGENPROBE: EVT_OFF auf 0x56000 (die Geraetesaetze) gelegt und der Pruefer schweigt"
 else
     ok "GEGENPROBE: ein Ring ausserhalb des Vorrats -- der Kartenpruefer schlaegt an"
 fi
 # Und eine zweite: zwei Stuecke INNERHALB des Bereichs uebereinander.
-cp kernel/*.fi "$GG/"
-sed -i 's/^const DESC_OFF: u64 = 0x56000/const DESC_OFF: u64 = 0x55000/' "$GG/usb.fi"
+kopie_kernel "$GG"
+sed -i 's/^const DESC_OFF: u64 = 0x56000/const DESC_OFF: u64 = 0x55000/' "$GG/usb/usb.fi"
 if python3 tools/kernel/memmap.py "$GG" > "$TMPD/karte-gg2.txt" 2>&1; then
     bad "GEGENPROBE: DESC_OFF auf die Uebertragungsringe gelegt, Pruefer schweigt"
 else
