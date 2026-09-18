@@ -1,0 +1,420 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/ctr.fi -- RUNDE O-CONTAINER: die Container von der
+// Befehlszeile.
+//
+//     ctr list                      was es gibt
+//     ctr create <name> <wurzel>    anlegen, Wurzel setzen -> Nummer
+//     ctr set <nr> mem <rahmen>     Speichergrenze (NUR KLEINER)
+//     ctr set <nr> cpu <1..100>     Anteil an der Rechenzeit
+//     ctr set <nr> procs <n>        hoechste Prozesszahl
+//     ctr set <nr> net <sicht>      real|filtered|faked|none
+//     ctr start <nr>                auf `run` stellen
+//     ctr stop <nr>                 auf `dead` stellen
+//     ctr exec <nr> <befehl> ...    darin ausfuehren
+//     ctr destroy <nr>              abraeumen (nur wenn leer)
+//     ctr show [nr]                 die Zahlen eines Containers
+//
+// WIE `exec` WIRKLICH FUNKTIONIERT, denn das ist die einzige Stelle,
+// an der dieses Programm mehr tut als einen Aufruf weiterreichen:
+//
+//     SYS_CTRENTER geht in den Container -- und es gibt keinen Weg
+//     zurueck.
+//
+// Wuerde dieses Programm also eintreten und danach den Befehl starten,
+// waere ES selbst fuer immer drin. Das ist bei `netview` kein Problem
+// (eine Sicht ist eine Einstellung), hier schon: `ctr exec 1 /bin/sh`
+// gefolgt von `ctr list` waere nach dem ersten Aufruf unmoeglich.
+//
+// Deshalb macht dieses Programm dasselbe, was `netview faked <prog>`
+// macht, nur herum: `SYS_EXEC` legt ein KIND an (es ersetzt das Abbild
+// NICHT -- es gibt eine pid zurueck), und ein Kind erbt den Container
+// seines Erzeugers. Also wird das Kind zuerst gestartet -- nein, auch
+// das geht nicht, denn dann waere es im Wirt geboren.
+//
+// Der Weg, der bleibt und der gebaut ist: `fork`, im KIND eintreten und
+// das Abbild ersetzen, im ELTERNTEIL warten. Genau die drei Zeilen aus
+// `netview`, mit `enter` an der Stelle, an der dort `view_set` steht.
+// Das Elternteil bleibt im Wirt und kann weiterarbeiten.
+
+profile kernel
+
+import ulib
+import libc.io
+
+export { u_start }
+
+fn u_start(args: u64) -> u64 {
+    var s_use1: [u8; 46] = "usage: ctr list | show [nr]\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+    var s_use2: [u8; 46] = "       ctr create <name> <wurzel>\0\0\0\0\0\0\0\0\0\0\0\0\0"
+    var s_use3: [u8; 54] = "       ctr set <nr> mem|cpu|procs|net <wert>\0\0\0\0\0\0\0\0\0\0"
+    var s_use4: [u8; 50] = "       ctr start|stop|destroy <nr>\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+    var s_use5: [u8; 50] = "       ctr exec <nr> <befehl> [args...]\0\0\0\0\0\0\0\0\0\0\0"
+
+    var s_list: [u8; 5] = "list\0"
+    var s_show: [u8; 5] = "show\0"
+    var s_create: [u8; 7] = "create\0"
+    var s_set: [u8; 4] = "set\0"
+    var s_start: [u8; 6] = "start\0"
+    var s_stop: [u8; 5] = "stop\0"
+    var s_exec: [u8; 5] = "exec\0"
+    var s_destroy: [u8; 8] = "destroy\0"
+
+    let argc: u64 = ulib.arg_count(args)
+    if argc < 2 {
+        ulib.esay_line((&s_use1[0]) as u64, 0)
+        ulib.esay_line((&s_use2[0]) as u64, 0)
+        ulib.esay_line((&s_use3[0]) as u64, 0)
+        ulib.esay_line((&s_use4[0]) as u64, 0)
+        ulib.esay_line((&s_use5[0]) as u64, 0)
+        return 1
+    }
+
+    let a1: u64 = ulib.arg_at(args, 1)
+    if ulib.streq(a1, (&s_list[0]) as u64) {
+        return do_list()
+    }
+    if ulib.streq(a1, (&s_show[0]) as u64) {
+        var nr: u64 = 0
+        if argc > 2 {
+            nr = ulib.to_num(ulib.arg_at(args, 2))
+        }
+        return do_show(nr)
+    }
+    if ulib.streq(a1, (&s_create[0]) as u64) {
+        if argc < 4 {
+            ulib.esay_line((&s_use2[0]) as u64, 0)
+            return 1
+        }
+        return do_create(ulib.arg_at(args, 2), ulib.arg_at(args, 3))
+    }
+    if ulib.streq(a1, (&s_set[0]) as u64) {
+        if argc < 5 {
+            ulib.esay_line((&s_use3[0]) as u64, 0)
+            return 1
+        }
+        return do_set(ulib.to_num(ulib.arg_at(args, 2)),
+            ulib.arg_at(args, 3), ulib.arg_at(args, 4))
+    }
+    if ulib.streq(a1, (&s_start[0]) as u64) {
+        if argc < 3 {
+            ulib.esay_line((&s_use4[0]) as u64, 0)
+            return 1
+        }
+        return do_state(ulib.to_num(ulib.arg_at(args, 2)), ulib.CST_RUN)
+    }
+    if ulib.streq(a1, (&s_stop[0]) as u64) {
+        if argc < 3 {
+            ulib.esay_line((&s_use4[0]) as u64, 0)
+            return 1
+        }
+        return do_state(ulib.to_num(ulib.arg_at(args, 2)), ulib.CST_DEAD)
+    }
+    if ulib.streq(a1, (&s_destroy[0]) as u64) {
+        if argc < 3 {
+            ulib.esay_line((&s_use4[0]) as u64, 0)
+            return 1
+        }
+        return do_state(ulib.to_num(ulib.arg_at(args, 2)), ulib.CST_FREE)
+    }
+    if ulib.streq(a1, (&s_exec[0]) as u64) {
+        if argc < 4 {
+            ulib.esay_line((&s_use5[0]) as u64, 0)
+            return 1
+        }
+        return do_exec(args, argc)
+    }
+    ulib.esay_line((&s_use1[0]) as u64, 0)
+    return 1
+}
+
+// ------------------------------------------------------------- list
+
+fn do_list() -> u64 {
+    var s_head: [u8; 54] = "  NR NAME       ZUST  MEM_USE/LIM  CPU PROCS WURZEL\0\0\0"
+    var s_sp: [u8; 2] = " \0"
+    var s_slash: [u8; 2] = "/\0"
+    var name: [u8; 34] = [0 as u8; 34]
+    var root: [u8; 98] = [0 as u8; 98]
+
+    ulib.say((&s_head[0]) as u64)
+    ulib.nl()
+    let maxc: u64 = ulib.sys(ulib.SYS_CTRGET, ulib.CG_MAXC, 0, 0)
+    var i: u64 = 1
+    while i < maxc {
+        let st: u64 = ulib.sys(ulib.SYS_CTRGET, ulib.CG_STATE, i, 0)
+        if !ulib.bad(st) && st != ulib.CST_FREE {
+            ulib.sayn(i)
+            ulib.say((&s_sp[0]) as u64)
+            fetch_name(i, (&name[0]) as u64)
+            ulib.say((&name[0]) as u64)
+            ulib.say((&s_sp[0]) as u64)
+            say_state(st)
+            ulib.say((&s_sp[0]) as u64)
+            ulib.sayn(ulib.sys(ulib.SYS_CTRGET, ulib.CG_MEMUSE, i, 0))
+            ulib.say((&s_slash[0]) as u64)
+            ulib.sayn(ulib.sys(ulib.SYS_CTRGET, ulib.CG_MEMLIM, i, 0))
+            ulib.say((&s_sp[0]) as u64)
+            ulib.sayn(ulib.sys(ulib.SYS_CTRGET, ulib.CG_CPUSH, i, 0))
+            ulib.say((&s_sp[0]) as u64)
+            ulib.sayn(ulib.sys(ulib.SYS_CTRGET, ulib.CG_PROCS, i, 0))
+            ulib.say((&s_sp[0]) as u64)
+            fetch_root(i, (&root[0]) as u64)
+            ulib.say((&root[0]) as u64)
+            ulib.nl()
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn say_state(st: u64) {
+    var w0: [u8; 5] = "free\0"
+    var w1: [u8; 4] = "set\0"
+    var w2: [u8; 4] = "run\0"
+    var w3: [u8; 5] = "dead\0"
+    if st == ulib.CST_SET {
+        ulib.say((&w1[0]) as u64)
+    } else if st == ulib.CST_RUN {
+        ulib.say((&w2[0]) as u64)
+    } else if st == ulib.CST_DEAD {
+        ulib.say((&w3[0]) as u64)
+    } else {
+        ulib.say((&w0[0]) as u64)
+    }
+}
+
+// Der Name kommt Oktett fuer Oktett, weil ein Systemaufruf hier eine
+// ZAHL liefert und keinen Zeiger -- der Kern schreibt nicht in den
+// Speicher des Aufrufers, wenn er es vermeiden kann. 32 Aufrufe je
+// Name sind nichts fuer ein Programm, das eine Liste druckt.
+fn fetch_name(nr: u64, out: u64) {
+    var k: u64 = 0
+    while k < 32 {
+        let c: u64 = ulib.sys(ulib.SYS_CTRGET, ulib.CG_NAMEC, nr, k)
+        if ulib.bad(c) || c == 0 {
+            k = 32
+        } else {
+            __mmio_write8((out + k) as *mut u8, (c & 0xFF) as u8)
+            k = k + 1
+        }
+    }
+    // Der Rest bleibt null; der Puffer kam genullt herein.
+}
+
+fn fetch_root(nr: u64, out: u64) {
+    let n: u64 = ulib.sys(ulib.SYS_CTRGET, ulib.CG_ROOTLEN, nr, 0)
+    if ulib.bad(n) {
+        return
+    }
+    var k: u64 = 0
+    while k < n && k < 96 {
+        let c: u64 = ulib.sys(ulib.SYS_CTRGET, ulib.CG_ROOTC, nr, k)
+        if ulib.bad(c) {
+            return
+        }
+        __mmio_write8((out + k) as *mut u8, (c & 0xFF) as u8)
+        k = k + 1
+    }
+}
+
+// ------------------------------------------------------------- show
+
+fn do_show(nr_in: u64) -> u64 {
+    var s_nr: [u8; 14] = "ctr: nr \0\0\0\0\0\0"
+    var s_mine: [u8; 18] = "ctr: ich bin in \0\0"
+    var s_lim: [u8; 22] = "ctr: mem_limit \0\0\0\0\0\0\0"
+    var s_use: [u8; 21] = "ctr: mem_used \0\0\0\0\0\0\0"
+    var s_peak: [u8; 21] = "ctr: mem_peak \0\0\0\0\0\0\0"
+    var s_deny: [u8; 22] = "ctr: mem_denied \0\0\0\0\0\0"
+    var s_cpu: [u8; 21] = "ctr: cpu_share \0\0\0\0\0\0"
+    var s_tick: [u8; 21] = "ctr: cpu_ticks \0\0\0\0\0\0"
+    var s_proc: [u8; 18] = "ctr: procs \0\0\0\0\0\0\0"
+    var s_plim: [u8; 22] = "ctr: procs_limit \0\0\0\0\0"
+    var s_cnt: [u8; 18] = "ctr: count \0\0\0\0\0\0\0"
+    var s_esc: [u8; 20] = "ctr: escapes \0\0\0\0\0\0\0"
+    var s_bad: [u8; 30] = "ctr: den gibt es nicht\0\0\0\0\0\0\0\0"
+
+    var nr: u64 = nr_in
+    if nr == 0 {
+        nr = ulib.sys(ulib.SYS_CTRGET, ulib.CG_MINE, 0, 0)
+    }
+    ulib.say_line((&s_mine[0]) as u64,
+        ulib.sys(ulib.SYS_CTRGET, ulib.CG_MINE, 0, 0))
+    ulib.say_line((&s_cnt[0]) as u64,
+        ulib.sys(ulib.SYS_CTRGET, ulib.CG_COUNT, 0, 0))
+    ulib.say_line((&s_esc[0]) as u64,
+        ulib.sys(ulib.SYS_CTRGET, ulib.CG_ESCAPES, 0, 0))
+    if nr == 0 {
+        return 0 // der Wirt hat keine Grenzen -- das IST die Auskunft
+    }
+    let st: u64 = ulib.sys(ulib.SYS_CTRGET, ulib.CG_STATE, nr, 0)
+    if ulib.bad(st) {
+        ulib.esay_line((&s_bad[0]) as u64, 0)
+        return 1
+    }
+    ulib.say_line((&s_nr[0]) as u64, nr)
+    ulib.say_line((&s_lim[0]) as u64,
+        ulib.sys(ulib.SYS_CTRGET, ulib.CG_MEMLIM, nr, 0))
+    ulib.say_line((&s_use[0]) as u64,
+        ulib.sys(ulib.SYS_CTRGET, ulib.CG_MEMUSE, nr, 0))
+    ulib.say_line((&s_peak[0]) as u64,
+        ulib.sys(ulib.SYS_CTRGET, ulib.CG_MEMPEAK, nr, 0))
+    ulib.say_line((&s_deny[0]) as u64,
+        ulib.sys(ulib.SYS_CTRGET, ulib.CG_MEMDENY, nr, 0))
+    ulib.say_line((&s_cpu[0]) as u64,
+        ulib.sys(ulib.SYS_CTRGET, ulib.CG_CPUSH, nr, 0))
+    ulib.say_line((&s_tick[0]) as u64,
+        ulib.sys(ulib.SYS_CTRGET, ulib.CG_CPUTICK, nr, 0))
+    ulib.say_line((&s_proc[0]) as u64,
+        ulib.sys(ulib.SYS_CTRGET, ulib.CG_PROCS, nr, 0))
+    ulib.say_line((&s_plim[0]) as u64,
+        ulib.sys(ulib.SYS_CTRGET, ulib.CG_PROCLIM, nr, 0))
+    return 0
+}
+
+// ----------------------------------------------------------- create
+
+fn do_create(name: u64, root: u64) -> u64 {
+    var s_no: [u8; 42] = "ctr: create: kein Platz oder nicht erlaubt"
+    var s_nor: [u8; 43] = "ctr: create: die Wurzel wird nicht genommen"
+    var s_ok: [u8; 14] = "ctr: angelegt\0"
+    let nr: u64 = ulib.sys(ulib.SYS_CTRNEW, name, 0, 0)
+    if ulib.bad(nr) || nr == 0 {
+        ulib.esay_line((&s_no[0]) as u64, 0)
+        return 1
+    }
+    // DIE WURZEL GEHOERT ZUM ANLEGEN. Ein Container ohne Wurzel kann
+    // nicht betreten werden (`do_ctrenter` gibt -EINVAL), also waere
+    // ein `create`, das sie nicht setzt, ein halber Befehl.
+    if ulib.bad(ulib.sys(ulib.SYS_CTRSET, nr, ulib.CS_ROOT, root)) {
+        ulib.esay_line((&s_nor[0]) as u64, 0)
+        return 1
+    }
+    ulib.say_line((&s_ok[0]) as u64, nr)
+    return 0
+}
+
+// -------------------------------------------------------------- set
+
+fn do_set(nr: u64, feld: u64, wert: u64) -> u64 {
+    var w_mem: [u8; 4] = "mem\0"
+    var w_cpu: [u8; 4] = "cpu\0"
+    var w_proc: [u8; 6] = "procs\0"
+    var w_net: [u8; 4] = "net\0"
+    var w_root: [u8; 6] = "wurzel"
+    var s_bad: [u8; 46] = "ctr: set: mem|cpu|procs|net|wurzel\0\0\0\0\0\0\0\0\0\0\0\0"
+    var s_den: [u8; 63] = "ctr: set: abgelehnt -- Grenzen werden nur kleiner, nie groesser"
+
+    var f: u64 = 99
+    var v: u64 = 0
+    if ulib.streq(feld, (&w_mem[0]) as u64) {
+        f = ulib.CS_MEMLIM
+        v = ulib.to_num(wert)
+    } else if ulib.streq(feld, (&w_cpu[0]) as u64) {
+        f = ulib.CS_CPUSH
+        v = ulib.to_num(wert)
+    } else if ulib.streq(feld, (&w_proc[0]) as u64) {
+        f = ulib.CS_PROCLIM
+        v = ulib.to_num(wert)
+    } else if ulib.streq(feld, (&w_net[0]) as u64) {
+        f = ulib.CS_NETV
+        v = view_num(wert)
+        if v > 3 {
+            ulib.esay_line((&s_bad[0]) as u64, 0)
+            return 1
+        }
+    } else if ulib.streq(feld, (&w_root[0]) as u64) {
+        f = ulib.CS_ROOT
+        v = wert // ein ZEIGER, keine Zahl
+    } else {
+        ulib.esay_line((&s_bad[0]) as u64, 0)
+        return 1
+    }
+    if ulib.bad(ulib.sys(ulib.SYS_CTRSET, nr, f, v)) {
+        ulib.esay_line((&s_den[0]) as u64, 0)
+        return 1
+    }
+    return 0
+}
+
+fn view_num(p: u64) -> u64 {
+    var w0: [u8; 5] = "real\0"
+    var w1: [u8; 9] = "filtered\0"
+    var w2: [u8; 6] = "faked\0"
+    var w3: [u8; 5] = "none\0"
+    if ulib.streq(p, (&w0[0]) as u64) {
+        return 0
+    }
+    if ulib.streq(p, (&w1[0]) as u64) {
+        return 1
+    }
+    if ulib.streq(p, (&w2[0]) as u64) {
+        return 2
+    }
+    if ulib.streq(p, (&w3[0]) as u64) {
+        return 3
+    }
+    return 99
+}
+
+fn do_state(nr: u64, want: u64) -> u64 {
+    var s_busy: [u8; 58] = "ctr: da laeuft noch etwas -- erst die Prozesse beenden\0\0\0\0"
+    if ulib.bad(ulib.sys(ulib.SYS_CTRSET, nr, ulib.CS_STATE, want)) {
+        ulib.esay_line((&s_busy[0]) as u64, 0)
+        return 1
+    }
+    return 0
+}
+
+// ------------------------------------------------------------- exec
+//
+// DIE VIER ZEILEN, um die es geht. `fork`, im Kind eintreten und das
+// Abbild ersetzen, im Elternteil warten.
+//
+// WARUM NICHT `SYS_EXEC` ALLEIN: das legt ein Kind an, das den
+// Container des ERZEUGERS erbt -- und der Erzeuger waere hier der Wirt.
+// Erst eintreten und dann `SYS_EXEC` waere richtig, wuerde dieses
+// Programm aber selbst einsperren, und `ctr` ist das Werkzeug des
+// Wirts. Also `fork` davor: das Kind tritt ein, das Elternteil bleibt.
+fn do_exec(args: u64, argc: u64) -> u64 {
+    var s_nofork: [u8; 26] = "ctr: fork scheitert\0\0\0\0\0\0\0"
+    var s_noent: [u8; 34] = "ctr: eintreten abgelehnt\0\0\0\0\0\0\0\0\0\0"
+    var s_noexec: [u8; 30] = "ctr: exec scheitert: \0\0\0\0\0\0\0\0\0"
+
+    let nr: u64 = ulib.to_num(ulib.arg_at(args, 2))
+    var argv: [u64; 16] = [0 as u64; 16]
+    var n: u64 = 0
+    var i: u64 = 3
+    while i < argc && n < 16 {
+        argv[n as usize] = ulib.arg_at(args, i)
+        n = n + 1
+        i = i + 1
+    }
+    let pid: u64 = ulib.sys(ulib.SYS_FORK, 0, 0, 0)
+    if ulib.bad(pid) {
+        ulib.esay_line((&s_nofork[0]) as u64, 0)
+        return 1
+    }
+    if pid == 0 {
+        // IM KIND. Eintreten -- ab hier gibt es kein Zurueck, und das
+        // ist gewollt: was nach dieser Zeile laeuft, laeuft im
+        // Container.
+        if ulib.bad(ulib.sys(ulib.SYS_CTRENTER, nr, 0, 0)) {
+            ulib.esay_line((&s_noent[0]) as u64, 0)
+            let _e: u64 = ulib.sys(ulib.SYS_EXIT, 1, 0, 0)
+            return 1
+        }
+        // Und das Abbild ersetzen. `SYS_EXECVE` ersetzt WIRKLICH (im
+        // Unterschied zu SYS_EXEC, das ein Kind anlegt) -- der
+        // Container dieses Prozesses bleibt dabei stehen, weil
+        // `execve` denselben Aufgabensatz behaelt.
+        let r: u64 = ulib.sys(ulib.SYS_EXECVE, argv[0 as usize],
+            (&argv[0 as usize]) as u64, 0)
+        // Nur erreichbar, wenn `execve` gescheitert ist.
+        ulib.esay_line((&s_noexec[0]) as u64, argv[0 as usize])
+        let _e2: u64 = ulib.sys(ulib.SYS_EXIT, 1, 0, 0)
+        return r
+    }
+    // IM ELTERNTEIL: warten, den Code weiterreichen.
+    return ulib.wait_code(pid)
+}
