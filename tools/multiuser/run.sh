@@ -155,12 +155,21 @@ for n in "SYS_GETGROUPS 115" "SYS_SETGROUPS 116" "SYS_OSUM_MUSTAT 1200"; do
     fi
 done
 # ---- DIE GEGENPROBE: der Fehler von Runde MERGE, nachgebaut.
-mkdir -p "$TMPD/kol/kernel" "$TMPD/kol/lib/libc" "$TMPD/kol/tools/kernel"
-cp kernel/sys/sys.fi "$TMPD/kol/kernel/"
+# RUNDE GRUNDLINIE-2 (A-021): die Kopie legte `sys.fi` flach nach
+# `kol/kernel/`, der `sed` zielte aber auf `kol/kernel/sys/sys.fi` --
+# einen Pfad, den es in der Kopie nie gab. Der `sed` griff ins Leere, die
+# Kopie blieb unveraendert, `syscalls.py` fand folgerichtig KEINE
+# Doppelvergabe, und die Gegenprobe meldete "der Waechter ist wertlos",
+# obwohl der Waechter in Ordnung war. Die Kopie behaelt jetzt den ECHTEN
+# Baumpfad; `syscalls.py` sucht `sys.fi` ohnehin selbst (_finde).
+mkdir -p "$TMPD/kol/kernel/sys" "$TMPD/kol/lib/libc" "$TMPD/kol/tools/kernel"
+cp kernel/sys/sys.fi "$TMPD/kol/kernel/sys/"
 cp lib/libc/kcall.fi "$TMPD/kol/lib/libc/"
 cp tools/kernel/syscalls.py "$TMPD/kol/tools/kernel/"
 sed -i 's/^const SYS_OSUM_MUSTAT: u64 = 1200/const SYS_OSUM_MUSTAT: u64 = 1320/' \
     "$TMPD/kol/kernel/sys/sys.fi"
+grep -q '^const SYS_OSUM_MUSTAT: u64 = 1320' "$TMPD/kol/kernel/sys/sys.fi" \
+    || bad "die Gegenprobe konnte MUSTAT gar nicht auf 1320 legen"
 if python3 "$TMPD/kol/tools/kernel/syscalls.py" > "$TMPD/kol.txt" 2>&1; then
     bad "GEGENPROBE: zweimal 1320 faellt NICHT auf -- der Waechter ist wertlos"
 else

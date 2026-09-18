@@ -190,7 +190,15 @@ done
 fremd=$(grep -ran --include='*.fi' --include='*.s' -E '^const SYS_[A-Za-z0-9_]+: u64 = 17(5[0-9]|[6-9][0-9])' kernel/ \
     | grep -v -e '^kernel/sys/sys.fi' -e '^kernel/uprog.fi' -e '^kernel/user/power.fi' \
               -e '^kernel/user/powermon.fi' -e '^kernel/user/taskbar.fi' \
-              -e '^kernel/user/qs.fi' || true)
+              -e '^kernel/user/qs.fi' -e '^kernel/user/launcher.fi' || true)
+# `kernel/user/launcher.fi` steht seit Runde GRUNDLINIE-2 daneben, aus
+# GENAU demselben Grund wie qs.fi und taskbar.fi davor: der Starter
+# fragt mit `SYS_PWRGET`/`PG_BTN` ab, ob die Einschalttaste gedrueckt
+# wurde (launcher.fi:1478), um sein Ausschaltmenue zu oeffnen. Ein
+# FUENFTER LESER derselben Nummer, keine zweite Vergabe -- und genau das
+# ist der Zweck einer Aufrufnummer. Eine zweite VERGABE faende diese
+# Suche weiterhin, weil sie auf `const SYS_... = 17xx` zielt und nicht
+# auf die Benutzung.
 # `kernel/user/qs.fi` steht seit Runde GLYPHE daneben: das Kontrollzentrum
 # zeigt den Ladestand und fragt ihn ueber DIESELBE Nummer. Ein vierter
 # Leser, keine zweite Vergabe.

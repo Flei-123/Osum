@@ -343,9 +343,13 @@ grep -q 'K16_OFF' tools/kernel/memmap.py \
 # RUNDE ARM: die Kopie braucht `kernel/arch/x86_64/` mit -- `hv.fi` liegt
 # seit dem Trennschnitt dort, und ohne sie stirbt der Kartenpruefer an
 # einem KeyError statt die Kollision zu melden, die hier gemessen wird.
-mkdir -p "$TMPD/kern/arch/x86_64"
-cp kernel/*.fi "$TMPD/kern/"
-cp kernel/arch/x86_64/*.fi "$TMPD/kern/arch/x86_64/"
+# RUNDE GRUNDLINIE-2 (A-021): die Kopie spiegelt den BAUM, nicht eine
+# Handvoll aufgezaehlter Ordner. `kstate.fi` liegt unter kernel/lib/,
+# `fb.fi` unter kernel/gfx/ -- ein flaches `cp kernel/*.fi` liess sie weg,
+# und der Pruefer starb an `KeyError: 'kstate.fi'`, statt die Kollision
+# zu melden, die hier gemessen wird.
+mkdir -p "$TMPD/kern"
+( cd kernel && find . -name '*.fi' -exec cp --parents {} "$TMPD/kern/" \; )
 # Die Gegenprobe legt K16 auf die Seite des Schriftlesers aus Runde K10
 # (TTF_OFF = 0x3F000). Sie ist BELEGT, also MUSS der Pruefer anschlagen
 # -- ein Pruefer, der nie anschlaegt, rechnet nichts nach. (Nicht auf

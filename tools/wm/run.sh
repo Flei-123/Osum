@@ -225,10 +225,13 @@ done
 # RUNDE ARM: die Kopie braucht `kernel/arch/x86_64/` mit -- `hv.fi` liegt
 # seit dem Trennschnitt dort, und ohne sie stirbt der Kartenpruefer an
 # einem KeyError statt die Kollision zu melden, die hier gemessen wird.
-GG="$TMPD/kernel-gg"; mkdir -p "$GG/arch/x86_64"
-cp kernel/*.fi "$GG/"
-cp kernel/arch/x86_64/*.fi "$GG/arch/x86_64/"
-sed -i 's/^const WM_OFF: u64 = 0x1E000/const WM_OFF: u64 = 0x3C000/' "$GG/kstate.fi"
+# RUNDE GRUNDLINIE-2 (A-021): siehe tools/gfx/run.sh -- die Kopie
+# spiegelt den BAUM. Ein flaches `cp kernel/*.fi` liess `lib/kstate.fi`
+# und `gfx/fb.fi` weg; der Pruefer starb an einem KeyError, statt die
+# Kollision zu finden, die hier gemessen wird.
+GG="$TMPD/kernel-gg"; mkdir -p "$GG"
+( cd kernel && find . -name '*.fi' -exec cp --parents {} "$GG/" \; )
+sed -i 's/^const WM_OFF: u64 = 0x1E000/const WM_OFF: u64 = 0x3C000/' "$GG/lib/kstate.fi"
 gg=$(python3 tools/kernel/memmap.py "$GG" 2>&1)
 if [ $? -ne 0 ] && printf '%s' "$gg" | grep -q 'KOLLISION'; then
     ok "mit WM_OFF auf 0x3C000 findet der Pruefer die Kollision mit FB"
@@ -250,9 +253,12 @@ else
 fi
 # RUNDE ARM: die Kopie muss auch das Maschinenverzeichnis mitnehmen --
 # `trap.fi` liegt seit dem Trennschnitt unter arch/x86_64/.
-GV="$TMPD/kernel-gv"; mkdir -p "$GV/arch/x86_64"
-cp kernel/*.fi "$GV/"
-cp kernel/arch/x86_64/*.fi "$GV/arch/x86_64/"
+# RUNDE GRUNDLINIE-2 (A-021): dieselbe Ursache wie beim
+# Kollisionspruefer oben -- die Kopie spiegelt den BAUM. Ein flaches
+# `cp kernel/*.fi` liess `lib/kstate.fi` weg, und der Pruefer starb an
+# `KeyError: 'kstate.fi'`, statt die Vektorkollision zu melden.
+GV="$TMPD/kernel-gv"; mkdir -p "$GV"
+( cd kernel && find . -name '*.fi' -exec cp --parents {} "$GV/" \; )
 sed -i 's/^const VEC_MOUSE: u64 = 46/const VEC_MOUSE: u64 = 44/' "$GV/arch/x86_64/trap.fi"
 gv=$(python3 tools/kernel/memmap.py "$GV" 2>&1)
 if [ $? -ne 0 ] && printf '%s' "$gv" | grep -q 'Vektor 44 haben zwei Namen'; then
