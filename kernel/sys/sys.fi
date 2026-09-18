@@ -765,6 +765,55 @@ const NG_DHCPST: u64 = 9
 const NG_DHCPTX: u64 = 10
 const NG_DHCPRX: u64 = 11
 const NG_DHCPTRY: u64 = 12
+
+// ========================================= RUNDE O-NETZUI
+// WAS WINDOWS UND GNOME IM NETZWERKSTATUS ZEIGEN, und was dieser
+// Aufruf dafuer noch hergeben musste.
+//
+// Die Einstellungen konnten bis hierher die ANSCHRIFT zeigen -- Adresse,
+// Maske, Gateway, Hardwareadresse -- und nichts darueber, wie es der
+// Verbindung GERADE geht. Genau das ist aber die Frage, wegen der ein
+// Mensch die Netzwerkseite ueberhaupt aufmacht: geht es, wie schnell
+// geht es, und woran haengt es, wenn es nicht geht.
+//
+//   NG_LINK     1 = der Traeger steht (Kabel drin, Gegenstelle da).
+//               Das ist `netdev.link_up` und damit dieselbe Zahl, aus
+//               der `NG_STATE` seine unterste Stufe bildet -- hier
+//               einzeln, weil eine Statuszeile "getrennt" sagen koennen
+//               muss, ohne die anderen drei Stufen durchzurechnen.
+//   NG_SPEED    die AUSGEHANDELTE Rate in Megabit je Sekunde, oder 0
+//               fuer UNBEKANNT. Nicht der Durchsatz -- die Rate des
+//               Anschlusses (10/100/1000).
+//
+//               DIE NULL IST HIER EINE AUSSAGE UND KEINE ZAHL. Sie
+//               heisst "diese Karte meldet ihre Rate nicht", und die
+//               Oberflaeche hat sie als WORT anzuzeigen. Bei virtio ist
+//               das der Regelfall: ein virtio-net haengt an einem
+//               Programm und nicht an einem Draht, es gibt dort nichts
+//               auszuhandeln. e1000 und r8169 an echtem Blech melden
+//               sie. Eine Zahl daraus zu erfinden, waere in einem
+//               Baum, der sich das Nichtluegen aufgeschrieben hat, die
+//               falscheste aller Abkuerzungen.
+//   NG_CARDTX   was die KARTE gezaehlt hat, hinaus, in Oktetten
+//   NG_CARDRX   und herein
+//
+//               DIE BEIDEN SIND DIE GRUNDLAGE DER DURCHSATZANZEIGE.
+//               Sie sind absolute, monoton steigende Summen; wer eine
+//               RATE will, liest sie zweimal und teilt die Differenz
+//               durch die verstrichene Zeit. Das ist genau der Weg, den
+//               `/proc/net/dev` unter Linux vorgibt, und es ist der
+//               Grund, warum hier keine Rate steht: eine Rate im Kern
+//               waere eine Rate ueber ein Zeitfenster, das der Kern
+//               gewaehlt hat und der Frager nicht kennt.
+//
+//               Warum nicht NG_IN/NG_OUT: die zaehlen RAHMEN, nicht
+//               Oktette. Aus Rahmen laesst sich kein Durchsatz rechnen,
+//               solange man die Rahmengroesse nicht kennt -- und die
+//               schwankt zwischen 64 und 1514.
+const NG_LINK: u64 = 13
+const NG_SPEED: u64 = 14
+const NG_CARDTX: u64 = 15
+const NG_CARDRX: u64 = 16
 // Und die Gegenrichtung: der Klient MELDET seinen Zustand.
 const SYS_OSUM_DHCPST: u64 = 1302
 
@@ -12130,6 +12179,27 @@ fn net_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
             if a0 == NG_STATE {
                 return netview.NS_ONLINE
             }
+            // RUNDE O-NETZUI: die neuen vier Felder gehoeren in DIESELBE
+            // Taeuschung. Ein `faked` Prozess, der hier die echte
+            // Verbindungsrate oder die echten Kartenzaehler bekaeme,
+            // haette an genau dieser Stelle gemerkt, dass er getaeuscht
+            // wird -- die Vortaeuschung waere an ihrer eigenen
+            // Auskunftsstelle durchschaubar, und das ist der Fehler, den
+            // Runde NETVIEW drei Absaetze weiter oben vermeidet.
+            //
+            // Der Traeger steht (sonst waere NS_ONLINE gelogen), die
+            // Rate ist UNBEKANNT (ein erfundenes Netz hat keinen
+            // ausgehandelten Anschluss), und ueber ein Netz, ueber das
+            // nie ein Rahmen ging, sind auch nie Oktette gegangen.
+            if a0 == NG_LINK {
+                return 1
+            }
+            if a0 == NG_SPEED {
+                return 0
+            }
+            if a0 == NG_CARDTX || a0 == NG_CARDRX {
+                return 0
+            }
             return errno.neg(errno.E_INVAL)
         }
         if a0 == NG_READY {
@@ -12144,6 +12214,26 @@ fn net_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
         // diesen hier und `netview.fallback_view`.
         if a0 == NG_STATE {
             return netview.link_state(state)
+        }
+        // RUNDE O-NETZUI: TRAEGER UND RATE STEHEN VOR DER SPERRE, und
+        // das ist der ganze Witz an ihnen.
+        //
+        // Unter dieser Zeile beantwortet `!inet.ready` alles mit
+        // -ENODEV. Der Stapel laeuft aber ERST, wenn eine Adresse steht
+        // -- eine Maschine mit eingestecktem Kabel und ohne DHCP-Antwort
+        // ist "nicht bereit". Genau in diesem Zustand will ein Mensch
+        // aber sehen, DASS das Kabel steckt; das ist die Auskunft, mit
+        // der er den Fehler eingrenzt. Stuenden die beiden unter der
+        // Sperre, sagte die Seite waehrend eines laufenden DHCP
+        // "getrennt" ueber eine Leitung, die steht.
+        if a0 == NG_LINK {
+            if inet.carrier(state) {
+                return 1
+            }
+            return 0
+        }
+        if a0 == NG_SPEED {
+            return inet.link_speed(state)
         }
         if !inet.ready(state) {
             return errno.neg(errno.E_NODEV)
@@ -12169,6 +12259,16 @@ fn net_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
         }
         if a0 == NG_OUT {
             return inet.frames_out(state)
+        }
+        // RUNDE O-NETZUI: die OKTETTE der Karte, aus denen die
+        // Durchsatzanzeige ihre Rate bildet. `card_octets` ist die
+        // Zahl, die der Treiber beim Senden und Empfangen mitfuehrt --
+        // dieselbe, die `netstat` schon druckt.
+        if a0 == NG_CARDTX {
+            return inet.card_octets(state, 0)
+        }
+        if a0 == NG_CARDRX {
+            return inet.card_octets(state, 1)
         }
         // RUNDE ECHTHARDWARE-1: der Fortschritt des DHCP-Klienten.
         if a0 >= NG_DHCPST && a0 <= NG_DHCPTRY {

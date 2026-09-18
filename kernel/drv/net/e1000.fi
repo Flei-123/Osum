@@ -75,7 +75,7 @@ export {
     tx_drops_on, link_up_on, shut_down_on, irqs_on, queue_size_on,
     msix_on, notified_on, features_on, supports, RING_SLOTS, BUFSZ,
     supports_8254x, supports_ich, family_of, FAM_8254X, FAM_ICH,
-    phy_id_on, swflag_on
+    phy_id_on, swflag_on, link_speed_on
 }
 
 // ------------------------------------------------------ the data area
@@ -117,6 +117,18 @@ const S_FAM: u64 = 0x98 // FAM_8254X oder FAM_ICH
 const S_PHYID: u64 = 0xA0 // was der PHY ueber sich sagt (MII 2/3)
 const S_SWFLAG: u64 = 0xA8 // 1 = die Semaphore gegen die ME gehoert uns
 const S_PREMAC: u64 = 0xB0 // RAL/RAH, gelesen VOR dem Ruecksetzen
+// RUNDE O-NETZUI: DIE AUSGEHANDELTE VERBINDUNGSRATE, in Megabit je
+// Sekunde -- 10, 100, 1000, oder 0 fuer "unbekannt". Sie steht in
+// DEMSELBEN Register, aus dem `read_link` schon das Traegerbit liest
+// (STATUS, 0x0008, Bits 7:6), also kostet sie keinen zusaetzlichen
+// Registerzugriff: `read_link` schreibt beide Zahlen in einem Zug.
+//
+// WARUM SIE UEBERHAUPT GESPEICHERT WIRD und nicht bei jeder Frage neu
+// gelesen: die Einstellungen fragen einmal je Sekunde, und ein
+// MMIO-Lesezugriff aus dem Ring 3 heraus waere ein Systemaufruf, der
+// eine Karte anfasst, die gerade sendet. Der Wert ist ohnehin genau so
+// frisch wie das Traegerbit daneben -- beide kommen aus demselben Lauf.
+const S_SPEED: u64 = 0xB8 // 0 = unbekannt, sonst 10/100/1000
 
 fn sc(u: u64, off: u64) -> u64 {
     return kstate.NETDEV_OFF + UNIT_BASE + u * UNIT_SPAN + off
@@ -165,6 +177,15 @@ const CTRL_RST: u64 = 67108864 // 1 << 26
 const CTRL_VME: u64 = 1073741824 // 1 << 30, VLAN mode -- OFF
 
 const STATUS_LU: u64 = 2 // 1 << 1, the link is up
+
+// RUNDE O-NETZUI: die zwei Bits, in denen der Chip die AUSGEHANDELTE
+// Rate meldet. 8254x-Handbuch, Abschnitt 13.4.2 (Device Status
+// Register): Bits 7:6 "SPEED", 00 = 10 Mb/s, 01 = 100 Mb/s,
+// 10 = 1000 Mb/s, 11 = reserviert (in der Praxis ebenfalls Gigabit).
+// Der Wert gilt NUR, wenn LU gesetzt ist -- ohne Traeger ist nichts
+// ausgehandelt und die Bits stehen auf dem, was zuletzt galt.
+const STATUS_SPEED_SHIFT: u64 = 6
+const STATUS_SPEED_MASK: u64 = 3
 
 const RCTL_EN: u64 = 2 // 1 << 1
 const RCTL_UPE: u64 = 8 // 1 << 3, every unicast address
@@ -480,6 +501,19 @@ fn notified_on(state: u64, u: u64) -> u64 {
 
 fn link_up_on(state: u64, u: u64) -> bool {
     return kstate.get(state, sc(u, S_LINK)) != 0
+}
+
+// RUNDE O-NETZUI: die ausgehandelte Rate in Megabit je Sekunde, oder 0.
+//
+// NULL HEISST UNBEKANNT UND NICHT NULL MEGABIT. Der Unterschied ist der
+// ganze Punkt dieser Funktion: die Oberflaeche schreibt bei 0 das Wort
+// "unbekannt" hin und erfindet keine Zahl. Ohne Traeger gibt es nichts
+// auszuhandeln, also ist die Antwort dann ebenfalls 0.
+fn link_speed_on(state: u64, u: u64) -> u64 {
+    if kstate.get(state, sc(u, S_LINK)) == 0 {
+        return 0
+    }
+    return kstate.get(state, sc(u, S_SPEED))
 }
 
 fn mac_at_on(state: u64, u: u64, i: u64) -> u64 {
@@ -834,6 +868,21 @@ fn read_link(state: u64, u: u64) {
         }
     }
     kstate.set(state, sc(u, S_LINK), v)
+    // RUNDE O-NETZUI: die Rate aus DEMSELBEN Register, aus dem die
+    // Traegerfrage oben schon gelesen hat -- ohne Traeger ist sie 0.
+    var mbit: u64 = 0
+    if v != 0 {
+        let st: u64 = reg(state, u, R_STATUS)
+        let bits: u64 = (st >> STATUS_SPEED_SHIFT) & STATUS_SPEED_MASK
+        if bits == 0 {
+            mbit = 10
+        } else if bits == 1 {
+            mbit = 100
+        } else {
+            mbit = 1000
+        }
+    }
+    kstate.set(state, sc(u, S_SPEED), mbit)
 }
 
 // ------------------------------------------------------------- the init

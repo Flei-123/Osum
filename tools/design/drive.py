@@ -488,6 +488,25 @@ class Fahrer:
         #     taskbar: pin certus x=96 y=8 w=64 h=64 sym=1 laeuft=0
         # Der Name im Drehbuch ist die STELLE und nicht das Programm,
         # weil die Stelle genau das ist, was diese Runde veraendert.
+        if name.startswith("pin") and not name[3:].isdigit():
+            # RUNDE O-NETZUI: EINEN ANGEHEFTETEN KNOPF BEIM NAMEN.
+            #
+            # `pin0`..`pin5` verlangen die NUMMER, und die verschiebt
+            # sich, sobald jemand einen Anhefter dazunimmt oder
+            # wegnimmt. Der Name verschiebt sich nicht:
+            #
+            #     taskbar: pin settings x=172 y=4 w=32 h=32 ...
+            #
+            # Damit sagt ein Drehbuch "mach die Einstellungen auf" und
+            # nicht "klick auf den vierten Knopf von links".
+            wort = name[3:]
+            alle = list(re.finditer(
+                r"taskbar: pin %s x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % wort, t))
+            if not alle or tb is None:
+                return None
+            m = alle[-1]
+            return (tb[0] + int(m.group(1)), tb[1] + int(m.group(2)),
+                    int(m.group(3)), int(m.group(4)))
         if name.startswith("pin") and name[3:].isdigit():
             k = int(name[3:])
             alle = list(re.finditer(
@@ -576,6 +595,15 @@ class Fahrer:
             # sitzt unten, also H - PAD - FH.
             m = letzte(r"qs: open x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None:
+                # RUNDE O-NETZUI: `qs: open` kommt nur, wenn das
+                # Kontrollzentrum ueber die LEISTE geoeffnet wurde;
+                # `qs: geo` meldet dasselbe Rechteck und kommt immer
+                # (kernel/user/qs.fi). Ohne diesen Rueckfall endete
+                # jedes Drehbuch, das ueber das Kontrollzentrum in die
+                # Einstellungen will, mit "KEIN RECHTECK GEMELDET" --
+                # und fotografierte dreimal den Schreibtisch.
+                m = letzte(r"qs: geo x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            if m is None:
                 return None
             x, y = int(m.group(1)), int(m.group(2))
             w, h = int(m.group(3)), int(m.group(4))
@@ -605,6 +633,43 @@ class Fahrer:
             zh = int(z.group(1))
             return (o[0] + int(m.group(1)), o[1] + int(m.group(2)) + n * zh,
                     int(m.group(3)), zh)
+        if name.startswith("sreiter"):
+            # RUNDE O-NETZUI: EINEN BESTIMMTEN REITER DER EINSTELLUNGEN.
+            #
+            # `srectwaa` trifft die Reiterleiste, aber immer in ihrer
+            # MITTE -- und die Mitte der Leiste ist der sechste von elf
+            # Reitern. Ein Drehbuch, das "geh auf Netz" sagen will,
+            # konnte es bis hierher nicht sagen.
+            #
+            # Gerechnet aus dem, was das Programm selbst meldet: die
+            # Reiterleiste ist Widget 0 und heisst deshalb `waa`
+            # (`rects_alle` in settings.fi vergibt die Namen der Reihe
+            # nach). Ihre Breite durch die Zahl der Reiter ist eine
+            # Reiterbreite; die Mitte des n-ten liegt bei (n + 0,5)
+            # davon. Die Zahl der Reiter steht als `R_ANZ` in
+            # settings.fi und wird hier nicht geraten, sondern aus der
+            # gemeldeten Reiterzeile gezaehlt.
+            n = int(name[7:])
+            # `ax`/`ay` SIND SCHON BILDSCHIRMKOORDINATEN. `rect_say` in
+            # settings.fi haengt sie ausdruecklich an ("UND DIE LAGE AUF
+            # DEM SCHIRM, IN DEMSELBEN SATZ") -- und das ist hier der
+            # einzige gangbare Weg: `settings: geom` gibt es nicht, also
+            # findet `self.fenster("settings")` nichts und der Klick
+            # kam nie zustande ("KEIN RECHTECK GEMELDET").
+            m = letzte(r"settings: rect name=waa x=(\d+) y=(\d+) "
+                       r"w=(\d+) h=(\d+) ax=(\d+) ay=(\d+)")
+            if m is None:
+                return None
+            w, h = int(m.group(3)), int(m.group(4))
+            ax, ay = int(m.group(5)), int(m.group(6))
+            o = (ax - int(m.group(1)), ay - int(m.group(2)))
+            x, y = int(m.group(1)), int(m.group(2))
+            reiter = 11
+            bx = x + (w * (2 * n + 1)) // (2 * reiter)
+            # Ein Rechteck von einer Reiterbreite um diese Mitte herum,
+            # damit `klickauf` wie ueberall sonst die Mitte nimmt.
+            return (o[0] + bx - w // (2 * reiter), o[1] + y,
+                    w // reiter, h)
         if name.startswith("srect"):
             k = name[5:]
             m = letzte(r"settings: rect name=%s x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % k)

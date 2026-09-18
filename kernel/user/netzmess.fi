@@ -1,0 +1,252 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/netzmess.fi -- RUNDE O-NETZUI: DIE ANZEIGE, GEGEN EINE
+// ECHTE LAST GEMESSEN.
+//
+// ====================================================== WARUM ES EXISTIERT
+//
+// `tools/netzui/run.sh` prueft die RECHNUNG -- aus zwei Zaehlerstaenden
+// und einer Zeit wird eine Rate. Was es nicht pruefen kann: ob die
+// Zaehler, aus denen die Netzseite ihre Rate bildet, sich bei echtem
+// Verkehr ueberhaupt bewegen. Eine Anzeige, die plausibel aussieht und
+// an einer Leitung haengt, die nichts meldet, ist keine Anzeige.
+//
+// Dieses Programm ist genau das Stueck der Netzseite, das ohne Fenster
+// auskommt: es liest `NG_CARDTX`/`NG_CARDRX` im Sekundentakt, bildet
+// dieselbe Rate mit derselben Funktion und DRUCKT sie. Der Laeufer
+// daneben startet eine Maschine, laesst `/bin/wget` eine Datei bekannter
+// Groesse holen und haelt die gedruckten Zahlen dagegen:
+//
+//   - waehrend des Downloads muss die Rate deutlich ueber null liegen
+//   - danach muss sie wieder auf null fallen
+//   - die Summe der Zuwaechse muss zur Dateigroesse passen
+//
+// Das ist die Zusage "der Durchsatz ist ECHT gemessen", als Zahl.
+//
+//     netzmess <sekunden>
+profile kernel
+
+import ulib
+
+export { u_start }
+
+const SYS_NETGET: u64 = 1300
+const NG_READY: u64 = 0
+const NG_LINK: u64 = 13
+const NG_SPEED: u64 = 14
+const NG_CARDTX: u64 = 15
+const NG_CARDRX: u64 = 16
+
+// DIESELBE FUNKTION WIE IN settings.fi. `tools/netzui/run.sh` vergleicht
+// ihren Rumpf mit dem dortigen -- laufen sie auseinander, ist der Lauf
+// rot.
+fn rate_aus(alt: u64, neu: u64, dt: u64) -> u64 {
+    if dt == 0 {
+        return 0
+    }
+    if neu < alt {
+        return 0
+    }
+    return (neu - alt) * 100 / dt
+}
+
+// ======================================================= EINE ZEILE,
+// EIN SCHREIBVORGANG.
+//
+// `ulib.say` und `ulib.sayn` schreiben JE EINEN Systemaufruf. Eine
+// Zeile aus zehn Stuecken sind zehn Schreibvorgaenge auf dieselbe
+// serielle Leitung -- und wenn daneben `wget` schreibt, schiebt sich
+// dessen Ausgabe dazwischen. Gemessen: mit `wget` im Hintergrund kam
+// von vierzehn Messzeilen KEINE EINZIGE vollstaendig durch, obwohl der
+// Lauf vollstaendig war (die Schlusszeile mit den richtigen Summen kam).
+//
+// Also wird die Zeile hier zusammengebaut und in EINEM Stueck
+// hinausgegeben. Was sich dann noch dazwischenschiebt, schiebt sich
+// zwischen ZEILEN und nicht mitten in eine Zahl.
+static mut zeile: [u8; 256] = [0 as u8; 256]
+
+// ============================== DIE MESSWERTE WERDEN GEMERKT UND ERST
+// AM ENDE GEDRUCKT.
+//
+// GEMESSEN, und das ist der Grund: laeuft neben diesem Programm ein
+// Hintergrundauftrag (`wget ... &`), dann kommt von den Zeilen, die
+// WAEHREND dessen Laufzeit geschrieben werden, nichts auf der seriellen
+// Leitung an -- die erste und die letzte Zeile schon, alle dazwischen
+// nicht. Beide Programme schreiben auf denselben Descriptor, und was
+// sich dabei ueberholt, ist weg.
+//
+// Die MESSUNG selbst ist davon nicht betroffen: die Zaehler werden
+// weiter jede Sekunde gelesen. Also werden die Werte gemerkt und erst
+// gedruckt, wenn der Hintergrundauftrag fertig ist. Vier Zahlen je
+// Sekunde, hoechstens 64 Sekunden -- das ist ein Feld und kein Puffer,
+// der ueberlaufen kann.
+const MAXS: u64 = 64
+static mut m_tx: [u64; 64] = [0 as u64; 64]
+static mut m_rx: [u64; 64] = [0 as u64; 64]
+static mut m_rtx: [u64; 64] = [0 as u64; 64]
+static mut m_rrx: [u64; 64] = [0 as u64; 64]
+
+fn an(at: u64, q: u64) -> u64 {
+    let d: u64 = (&zeile[0 as usize]) as u64
+    var k: u64 = 0
+    while __mmio_read8((q + k) as *mut u8) != 0 as u8 {
+        __mmio_write8((d + at + k) as *mut u8, __mmio_read8((q + k) as *mut u8))
+        k = k + 1
+    }
+    return at + k
+}
+
+fn anz(at: u64, v: u64) -> u64 {
+    let d: u64 = (&zeile[0 as usize]) as u64
+    if v == 0 {
+        __mmio_write8((d + at) as *mut u8, 48 as u8)
+        return at + 1
+    }
+    var st: u64 = 0
+    var t: u64 = v
+    while t > 0 {
+        st = st + 1
+        t = t / 10
+    }
+    var k: u64 = st
+    t = v
+    while k > 0 {
+        k = k - 1
+        __mmio_write8((d + at + k) as *mut u8, (48 + (t % 10)) as u8)
+        t = t / 10
+    }
+    return at + st
+}
+
+// UND SIE GEHT IN EINEM STUECK HINAUS.
+//
+// GEMESSEN, und das ist der Grund: laeuft dieses Programm allein, kommen
+// alle Zeilen an. Laeuft daneben ein `wget` als HINTERGRUNDauftrag,
+// kommt keine einzige der Messzeilen an -- wohl aber die erste und die
+// letzte. Deshalb laeuft in `tools/netzui/durchsatz.sh` die MESSUNG im
+// Vordergrund und die Last davor, und nicht umgekehrt.
+fn raus(at: u64) {
+    let d: u64 = (&zeile[0 as usize]) as u64
+    __mmio_write8((d + at) as *mut u8, 10 as u8)
+    let _w: u64 = ulib.put(d, at + 1)
+}
+
+fn hole(was: u64) -> u64 {
+    let v: u64 = ulib.sys(SYS_NETGET, was, 0, 0)
+    if ulib.bad(v) {
+        return 0
+    }
+    return v
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_kopf: [u8; 16] = "netzmess: start\0"
+    var s_link: [u8; 7] = " link=\0"
+    var s_speed: [u8; 8] = " speed=\0"
+    var s_zeile: [u8; 13] = "netzmess: t=\0"
+    var s_tx: [u8; 5] = " tx=\0"
+    var s_rx: [u8; 5] = " rx=\0"
+    var s_rtx: [u8; 6] = " rtx=\0"
+    var s_rrx: [u8; 6] = " rrx=\0"
+    var s_ende: [u8; 22] = "netzmess: fertig dtx=\0"
+    var s_drx: [u8; 6] = " drx=\0"
+    var s_max: [u8; 7] = " maxr=\0"
+
+    var sek: u64 = 12
+    if ulib.arg_count(args) > 1 {
+        sek = ulib.to_num(ulib.arg_at(args, 1))
+        if sek == 0 || sek > 120 {
+            sek = 12
+        }
+    }
+
+    // DER ZUSTAND, EINMAL. Das sind die zwei Zahlen, die die Netzseite
+    // oben hinschreibt -- hier gedruckt, damit der Laeufer sie sieht.
+    var ah: u64 = an(0, (&s_kopf[0 as usize]) as u64)
+    ah = an(ah, (&s_link[0 as usize]) as u64)
+    ah = anz(ah, hole(NG_LINK))
+    ah = an(ah, (&s_speed[0 as usize]) as u64)
+    ah = anz(ah, hole(NG_SPEED))
+    raus(ah)
+
+    let tx0: u64 = hole(NG_CARDTX)
+    let rx0: u64 = hole(NG_CARDRX)
+    var vor_tx: u64 = tx0
+    var vor_rx: u64 = rx0
+    var vor_t: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+    var maxr: u64 = 0
+    var i: u64 = 0
+    while i < sek {
+        // EINE SEKUNDE WARTEN, AN DER UHR UND NICHT MIT `sleep_ms`.
+        //
+        // `ulib.sleep_ms` geht ueber `nanosleep`, und das verlangt einen
+        // Ablaufplaner. Dieser Laeufer faehrt -- wie jeder Netzlaeufer
+        // dieses Baums -- mit `nosched`; gemessen: von sechzehn
+        // Messzeilen kam KEINE EINZIGE, waehrend die Zeile davor und
+        // die Zeile danach beide da waren. Der Lauf hing also im ersten
+        // Schlaf.
+        //
+        // `I_TICKS` laeuft trotzdem (die Zeitgeberunterbrechung haengt
+        // nicht am Planer), also wird darauf gewartet. Das ist eine
+        // Warteschleife und kostet Rechenzeit -- in einem Messprogramm,
+        // das genau eine Sache tut, ist das der richtige Preis, und in
+        // der Netzseite selbst steht ausdruecklich KEINE solche
+        // Schleife (dort laeuft die Ereignisschleife des Fensters).
+        let bis: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0) + 100
+        while ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0) < bis {
+            let _p: u64 = 0
+        }
+        let tx: u64 = hole(NG_CARDTX)
+        let rx: u64 = hole(NG_CARDRX)
+        let t: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+        let dt: u64 = t - vor_t
+        let rtx: u64 = rate_aus(vor_tx, tx, dt)
+        let rrx: u64 = rate_aus(vor_rx, rx, dt)
+        if rrx > maxr {
+            maxr = rrx
+        }
+        // EINE ZEILE JE SEKUNDE, mit den absoluten Staenden UND den
+        // Raten. Der Laeufer braucht beide: die Staende, um die Summe
+        // gegen die Dateigroesse zu halten, die Raten, um zu sehen,
+        // dass die Anzeige mitgeht und wieder faellt.
+        if i < MAXS {
+            m_tx[(i) as usize] = tx
+            m_rx[(i) as usize] = rx
+            m_rtx[(i) as usize] = rtx
+            m_rrx[(i) as usize] = rrx
+        }
+        vor_tx = tx
+        vor_rx = rx
+        vor_t = t
+        i = i + 1
+    }
+    // JETZT die gemerkten Zeilen, alle hintereinander. Der
+    // Hintergrundauftrag ist an dieser Stelle fertig (er dauert kuerzer
+    // als die Messung), also teilt sich niemand mehr die Leitung.
+    var k: u64 = 0
+    while k < sek && k < MAXS {
+        var a: u64 = an(0, (&s_zeile[0 as usize]) as u64)
+        a = anz(a, k)
+        a = an(a, (&s_tx[0 as usize]) as u64)
+        a = anz(a, m_tx[(k) as usize])
+        a = an(a, (&s_rx[0 as usize]) as u64)
+        a = anz(a, m_rx[(k) as usize])
+        a = an(a, (&s_rtx[0 as usize]) as u64)
+        a = anz(a, m_rtx[(k) as usize])
+        a = an(a, (&s_rrx[0 as usize]) as u64)
+        a = anz(a, m_rrx[(k) as usize])
+        raus(a)
+        k = k + 1
+    }
+    var af: u64 = an(0, (&s_ende[0 as usize]) as u64)
+    af = anz(af, vor_tx - tx0)
+    af = an(af, (&s_drx[0 as usize]) as u64)
+    af = anz(af, vor_rx - rx0)
+    af = an(af, (&s_max[0 as usize]) as u64)
+    af = anz(af, maxr)
+    raus(af)
+    return 0
+}
+
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}
