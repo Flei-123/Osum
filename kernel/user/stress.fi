@@ -1,0 +1,80 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/stress.fi -- RUNDE O-CONTAINER: Speicher anfordern, bis es
+// nicht mehr geht.
+//
+//     stress <bloecke>
+//
+// Fordert <bloecke> mal 64 KiB (16 Rahmen) mit `brk` an und BERUEHRT
+// jede Seite. Am Ende sagt es genau eines von zwei Dingen:
+//
+//     stress: ok <n>        alle <n> Bloecke bekommen und beschrieben
+//     stress: knapp <n>     bei Block <n> war Schluss
+//
+// WARUM JEDE SEITE BERUEHRT WIRD, und das ist der Grund, aus dem dieses
+// Programm ueberhaupt existiert: `brk` verschiebt in diesem Kern nur
+// eine Zahl. Die RAHMEN entstehen erst beim ersten Zugriff, im
+// Seitenfehler -- und dort sitzt die Kasse der Runde
+// (`proc.map_page`). Ein Programm, das nur `brk` ruft und nichts
+// schreibt, wuerde von einer Speichergrenze nie etwas merken und die
+// Messung waere wertlos.
+//
+// UND WARUM ES NICHT ABSTUERZT, wenn kein Speicher mehr da ist: es
+// fragt `brk` VORHER, ob es die neue Grenze bekommen hat, und schreibt
+// nur in Speicher, den es bekommen hat. Ein Programm, das trotzdem
+// schreibt, bekaeme einen Seitenfehler -- und gemessen werden soll das
+// SAUBERE SCHEITERN, nicht der Absturz.
+
+profile kernel
+
+import ulib
+
+export { u_start }
+
+// 16 Rahmen zu 4096 Oktetten.
+const BLOCK: u64 = 65536
+
+fn u_start(args: u64) -> u64 {
+    var s_ok: [u8; 12] = "stress: ok \0"
+    var s_kn: [u8; 15] = "stress: knapp \0"
+    var s_use: [u8; 26] = "usage: stress <bloecke>\0\0\0"
+
+    let argc: u64 = ulib.arg_count(args)
+    if argc < 2 {
+        ulib.esay_line((&s_use[0]) as u64, 0)
+        return 1
+    }
+    let want: u64 = ulib.to_num(ulib.arg_at(args, 1))
+
+    // Der Anfang der Halde: `brk(0)` fragt sie ab, ohne etwas zu
+    // aendern -- Linux' eigene Vereinbarung, und dieser Kern haelt sie.
+    let base: u64 = ulib.sys(ulib.SYS_BRK, 0, 0, 0)
+    if ulib.bad(base) || base == 0 {
+        ulib.say_line((&s_kn[0]) as u64, 0)
+        return 1
+    }
+
+    var got: u64 = 0
+    var cur: u64 = base
+    while got < want {
+        let next: u64 = cur + BLOCK
+        let r: u64 = ulib.sys(ulib.SYS_BRK, next, 0, 0)
+        // DIE PRUEFUNG. `brk` gibt die NEUE Grenze zurueck; ist sie
+        // nicht angekommen, gab es den Speicher nicht. Linux gibt in
+        // diesem Fall die ALTE Grenze zurueck und nicht einen Fehler --
+        // deshalb wird verglichen und nicht auf ein Vorzeichen gesehen.
+        if ulib.bad(r) || r < next {
+            ulib.say_line((&s_kn[0]) as u64, got)
+            return 0
+        }
+        // JEDE SEITE ANFASSEN. Erst das holt die Rahmen wirklich.
+        var off: u64 = 0
+        while off < BLOCK {
+            __mmio_write8((cur + off) as *mut u8, 65 as u8)
+            off = off + 4096
+        }
+        cur = next
+        got = got + 1
+    }
+    ulib.say_line((&s_ok[0]) as u64, got)
+    return 0
+}

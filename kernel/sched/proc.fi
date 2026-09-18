@@ -49,6 +49,7 @@ import fs.file
 import ipc.handle
 import ipc.cap
 import bus.bus
+import sched.ctr
 
 export {
     create, user_start, free_space, space_pages, reap, translate, user_ok,
@@ -461,6 +462,15 @@ fn free_space(state: u64, i: u64) -> u64 {
     }
     mem.frame_free(state, pml4)
     freed = freed + 1
+    // RUNDE O-CONTAINER: DIE GEGENBUCHUNG.
+    //
+    // Hier und nicht spaeter: die Aufgabe traegt an dieser Stelle noch
+    // ihre Containernummer (`sched.T_CTR` wird beim Abraeumen nicht
+    // angefasst), und `freed` ist genau die Zahl der Rahmen, die eben
+    // zurueckgegeben wurden. Ein Container, dessen Prozesse enden, muss
+    // seinen Platz WIEDERBEKOMMEN -- sonst ist die Grenze nach dem
+    // dritten Start erreicht, ohne dass etwas laeuft.
+    ctr.mem_uncharge(state, ctr.ctr_of(state, i), freed)
     sched.tset(state, i, sched.T_CR3, 0)
     sched.tset(state, i, sched.T_PT, 0)
     sched.tset(state, i, sched.T_PD, 0)
@@ -988,8 +998,26 @@ fn map_page(state: u64, i: u64, addr: u64, writable: bool,
     if (read_entry(pt, s) & PAGE_PRESENT) != 0 {
         return 0
     }
+    // RUNDE O-CONTAINER, STUFE 2: DIE KASSE.
+    //
+    // HIER und nirgends sonst: `map_page` ist die EINE Stelle, an der
+    // dieser Kern einem Prozess eine Seite gibt -- der ELF-Lader, `brk`,
+    // `mmap`, der wachsende Stapel und `fork` gehen alle hier durch.
+    // Eine Grenze, die an vier Stellen geprueft wird, ist an der
+    // fuenften offen.
+    //
+    // GEFRAGT WIRD VOR `frame_alloc`, nicht danach. Wer erst nimmt und
+    // dann prueft, muss im Fehlerfall zurueckgeben -- und genau dieser
+    // Rueckgabepfad ist der, den niemand testet.
+    if !ctr.mem_charge(state, ctr.ctr_of(state, i), 1) {
+        return 0
+    }
     let frame: u64 = mem.frame_alloc(state)
     if frame == 0 {
+        // Der Speicher der MASCHINE ist alle, nicht der des Containers.
+        // Die Buchung von eben wird zurueckgenommen, sonst zaehlt der
+        // Container einen Rahmen, den er nie bekommen hat.
+        ctr.mem_uncharge(state, ctr.ctr_of(state, i), 1)
         return 0
     }
     var bits: u64 = PAGE_PRESENT | PAGE_USER

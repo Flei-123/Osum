@@ -313,6 +313,16 @@ BEREICHE = [
     # 0x127000..0x12C000, VORHER zugeteilt -- diese Runde hat sich keine
     # Seite gesucht.
     ("WACH",       "kstate.fi", "WACH_OFF",       "WACH_MAX"),
+    # RUNDE O-CONTAINER: die Container.  EINE Seite.  Acht Saetze zu 256
+    # Oktetten plus drei Zaehler sind 2072 Oktette; der Rest der Seite
+    # bleibt dieser Runde zugeteilt und frei.
+    #
+    # BEIM VERSCHMELZEN VERSCHOBEN (18.09.2026): der Zweig waehlte
+    # 0x12C000 direkt hinter WACH und war fuer sich gruen -- auf `main`
+    # hatte EBPF inzwischen denselben Anfang genommen.  Dieses Werkzeug
+    # hat die Kollision gemeldet, bevor sie in den Kern kam; der
+    # Container liegt jetzt auf 0x13C000, hinter EBPFHOOK.
+    ("CONTAINER",  "kstate.fi", "CTR_OFF",        "CTR_MAX"),
     # RUNDE KRYPTO (K-019): die Plattenverschluesselung.  Fuenf Seiten,
     # VORHER zugeteilt in der Welle vom 15.09.2026 -- diese Runde hat
     # sich keine Seite gesucht, sie hat die bekommen, die in kstate.fi

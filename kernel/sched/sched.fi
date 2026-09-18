@@ -74,6 +74,8 @@ export {
     T_FPU, fpu_area, fpu_set_area, fpu_inherit, fpu_reset,
     // ---- RUNDE LAUFZEIT ----
     T_FSBASE, fsbase_apply,
+    // ---- RUNDE O-CONTAINER ----
+    T_CTR,
 }
 
 // ------------------------------------------------------ the task record
@@ -316,6 +318,24 @@ const T_FPU: u64 = 640
 // keine gesetzt" -- der Zustand jedes Osum-eigenen Programms, das ohne
 // TLS gebaut ist.
 const T_FSBASE: u64 = 648
+
+// RUNDE O-CONTAINER: IN WELCHEM CONTAINER DIESE AUFGABE LAEUFT.
+//
+// 0 ist der WIRT, und das ist der Wert, auf dem ein Aufgabensatz steht,
+// den nie jemand angefasst hat. Jeder Prozess, den es vor dieser Runde
+// gab, ist damit im Wirt -- die Runde kostet den bestehenden Betrieb
+// keine Zeile.
+//
+// EIN FELD UND KEIN ZWEITES. Alles, was die Zahl bedeutet (Wurzel,
+// Speichergrenze, CPU-Anteil, Sicht), steht in `ctr.fi` in EINEM
+// Datensatz; hier steht nur, welcher es ist. Das ist dieselbe Bauart
+// wie `T_NETV` eine Runde vorher, und sie ist aus demselben Grund
+// richtig: eine Zugehoerigkeit, die an zwei Stellen steht, steht
+// irgendwann verschieden.
+//
+// Der Platz liegt hinter `T_FSBASE` (648) und damit weit unter
+// TASK_BYTES (1024).
+const T_CTR: u64 = 656
 const GROUPS_MAX: u64 = 16
 
 // The three descriptor slots of round 62. Nothing writes them any more;
@@ -1945,11 +1965,78 @@ fn schedule(state: u64) {
 
 // The run queue lock must be held. On return it is held again -- by this
 // task, on whichever core resumed it.
+// ================================ RUNDE O-CONTAINER: DER CPU-ANTEIL
+//
+// WARUM DIE ZAHLEN HIER NOCH EINMAL STEHEN und nicht aus `ctr.fi`
+// kommen: `ctr.fi` importiert `sched` (es liest `T_STATE` und `T_CTR`),
+// und ein `import ctr` hier waere ein Ring. Uebernommen sind deshalb
+// nur die drei Zahlen, die das Feld beschreiben -- die Bedeutung, die
+// Schranken und jedes Setzen bleiben drueben. Wer `CTR_BYTES` oder
+// `X_CPUSH` in `ctr.fi` aendert, muss diese drei Zeilen nachziehen;
+// darum stehen sie beieinander und sind so benannt wie dort.
+const CTR_BYTES_: u64 = 256
+const X_CPUSH_: u64 = 40
+const X_CPUTICK_: u64 = 48
+
+// Der Anteil des Containers, in dem diese Aufgabe laeuft. 0 heisst
+// "keine Bevorzugung" -- und das ist der Wert fuer JEDE Aufgabe im
+// Wirt, also fuer jede Aufgabe, die es vor dieser Runde gab.
+fn ctr_share_of(state: u64, t: u64) -> u64 {
+    if t >= kstate.MAX_TASKS {
+        return 0
+    }
+    let c: u64 = tget(state, t, T_CTR)
+    if c == 0 || c >= 8 {
+        return 0
+    }
+    return kstate.get(state, kstate.CTR_OFF + c * CTR_BYTES_ + X_CPUSH_)
+}
+
+// Zaehlt die Zeitscheibe auf den Container. Das ist die Zahl, an der
+// `tools/container/run.sh` misst, dass der Anteil wirklich wirkt --
+// eine Einstellung, die man nicht nachmessen kann, ist keine.
+fn ctr_tick(state: u64, t: u64) {
+    if t >= kstate.MAX_TASKS {
+        return
+    }
+    let c: u64 = tget(state, t, T_CTR)
+    if c == 0 || c >= 8 {
+        return
+    }
+    let a: u64 = kstate.CTR_OFF + c * CTR_BYTES_ + X_CPUTICK_
+    kstate.set(state, a, kstate.get(state, a) + 1)
+}
+
+// DIE LAENGE EINER ZEITSCHEIBE, mit dem Anteil verrechnet.
+//
+// Der Anteil wirkt auf die LAENGE der Scheibe und nicht auf die AUSWAHL
+// des naechsten Prozesses. Das ist eine bewusste Entscheidung: dieser
+// Kern hat einen Rundlauf (`pick`), und eine zweite Rangordnung daneben
+// waere ein zweiter Verteiler mit eigenen Hungerfaellen. Wer 50 bekommt,
+// bekommt die halbe Scheibe -- und damit im Mittel die halbe Zeit.
+//
+// MINDESTENS EINS. Ein Anteil von 1 darf nicht zu einer Scheibe der
+// Laenge 0 fuehren: eine Aufgabe mit Budget 0 wird beim naechsten
+// Schlag sofort wieder verdraengt und kaeme nie zum Rechnen. Ein
+// Container mit sehr kleinem Anteil soll langsam sein, nicht tot.
+fn budget_for(state: u64, t: u64) -> u64 {
+    let p: u64 = tget(state, t, T_PRIO)
+    let sh: u64 = ctr_share_of(state, t)
+    if sh == 0 || sh >= 100 {
+        return p
+    }
+    let b: u64 = (p * sh) / 100
+    if b == 0 {
+        return 1
+    }
+    return b
+}
+
 fn schedule_locked(state: u64) {
     let cur: u64 = current(state)
     let next: u64 = pick(state)
     if next == cur {
-        tset(state, cur, T_BUDGET, tget(state, cur, T_PRIO))
+        tset(state, cur, T_BUDGET, budget_for(state, cur))
         atomic.lock_give(state, atomic.L_SCHED)
         return
     }
@@ -1957,7 +2044,10 @@ fn schedule_locked(state: u64) {
         tset(state, cur, T_STATE, S_READY)
     }
     tset(state, next, T_STATE, S_RUN)
-    tset(state, next, T_BUDGET, tget(state, next, T_PRIO))
+    tset(state, next, T_BUDGET, budget_for(state, next))
+    // RUNDE O-CONTAINER: die Scheibe, die der abgeloeste Prozess
+    // verbraucht hat, wird seinem Container gutgeschrieben.
+    ctr_tick(state, cur)
     switch_to(state, cur, next)
     atomic.lock_give(state, atomic.L_SCHED)
 }

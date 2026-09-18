@@ -60,6 +60,7 @@ import sched.sched
 import sched.proc
 import lib.errno
 import arch.cpu
+import sched.ctr
 import arch.x86_64.guard
 
 export {
@@ -472,6 +473,36 @@ fn send_pgid(state: u64, pgid: u64, sig: u64) -> u64 {
         && sched.tget(state, i, sched.T_PGID) == pgid {
             if send_task(state, i, sig) {
                 hit = hit + 1
+            }
+        }
+        i = i + 1
+    }
+    return hit
+}
+
+// DIESELBE GRUPPE, ABER NUR, WAS DER SENDER SEHEN DARF.
+//
+// `send_pgid` hat Aufrufer ausserhalb von `kill` (das Terminal schickt
+// STRG-C an die Vordergrundgruppe, `exiting` meldet SIGCHLD) -- deren
+// Absender ist der KERN und nicht ein Prozess. Deshalb bekommt
+// `send_pgid` keinen zusaetzlichen Parameter, sondern es gibt diese
+// zweite Tuer fuer den Fall, in dem ein PROZESS fragt. Eine
+// Prozessgruppe kann Glieder in zwei Containern haben (der Wirt legt
+// einen Prozess in einen Container, die Gruppe bleibt) -- getroffen
+// werden nur die sichtbaren.
+fn send_pgid_from(state: u64, sender: u64, pgid: u64, sig: u64) -> u64 {
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var i: u64 = 0
+    var hit: u64 = 0
+    while i < n {
+        let st: u64 = sched.tget(state, i, sched.T_STATE)
+        if st != sched.S_FREE && st != sched.S_ZOMBIE
+        && sched.tget(state, i, sched.T_KIND) == sched.K_USER
+        && sched.tget(state, i, sched.T_PGID) == pgid {
+            if ctr.may_signal(state, sender, i) {
+                if send_task(state, i, sig) {
+                    hit = hit + 1
+                }
             }
         }
         i = i + 1
@@ -1028,9 +1059,28 @@ fn do_kill(state: u64, task: u64, pid: u64, sig: u64) -> u64 {
     if sig >= NSIG {
         return neg(errno.E_INVAL)
     }
+    // RUNDE O-CONTAINER, STUFE 3: NICHT UEBER DIE GRENZE.
+    //
+    // Gefragt wird VOR der Verzweigung nach der Zielart, und der
+    // einzelne Prozess ist der Fall, der hier entschieden wird -- die
+    // Gruppenfaelle (`pid <= 0`) laufen durch `send_pgid` bzw. die
+    // Schleife unten, und BEIDE sehen ihrerseits `ctr.visible` (siehe
+    // dort). Ein Container, der eine fremde pid raet, bekommt -ESRCH
+    // und NICHT -EPERM: die Nummer soll ihm nicht verraten, dass es
+    // den Prozess gibt. Dasselbe tut Linux' pid-Namensraum, und aus
+    // demselben Grund.
+    if (pid & 0x8000000000000000) == 0 && pid != 0 {
+        let z: u64 = sched.find_pid(state, pid)
+        if z < kstate.MAX_TASKS {
+            if !ctr.may_signal(state, task, z) {
+                ctr.note_escape(state)
+                return neg(errno.E_SRCH)
+            }
+        }
+    }
     if pid == 0 {
         let g: u64 = sched.tget(state, task, sched.T_PGID)
-        if send_pgid(state, g, sig) == 0 {
+        if send_pgid_from(state, task, g, sig) == 0 {
             return neg(errno.E_SRCH)
         }
         return 0
@@ -1048,8 +1098,11 @@ fn do_kill(state: u64, task: u64, pid: u64, sig: u64) -> u64 {
             var hit: u64 = 0
             while i < n {
                 if i != task && sched.tget(state, i, sched.T_KIND) == sched.K_USER {
-                    if send_task(state, i, sig) {
-                        hit = hit + 1
+                    // Auch "an alle" endet an der Containergrenze.
+                    if ctr.may_signal(state, task, i) {
+                        if send_task(state, i, sig) {
+                            hit = hit + 1
+                        }
                     }
                 }
                 i = i + 1
@@ -1059,7 +1112,7 @@ fn do_kill(state: u64, task: u64, pid: u64, sig: u64) -> u64 {
             }
             return 0
         }
-        if send_pgid(state, g, sig) == 0 {
+        if send_pgid_from(state, task, g, sig) == 0 {
             return neg(errno.E_SRCH)
         }
         return 0
