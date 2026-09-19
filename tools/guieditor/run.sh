@@ -224,6 +224,41 @@ nf=$(grep -aoE '^farben=[0-9]+' "$OUT/farben.txt" | grep -oE '[0-9]+')
 num "der Text hat mehr als eine Farbe (Syntaxhervorhebung)" "${nf:-0}" -ge 3
 sed -n '2,6p' "$OUT/farben.txt" | sed 's/^/        /'
 
+echo "== 7. Sichern: die Oktette liegen wirklich auf der Platte =="
+# DIE EINZIGE ZUSAGE, DIE ZWEI MASCHINEN BRAUCHT.
+#
+# Dass der Editor "gesichert" auf die Leitung schreibt, ist seine
+# eigene Aussage ueber sich selbst. Gemessen ist sie erst, wenn eine
+# ZWEITE Maschine dieselbe Platte aufmacht und die geaenderten Oktette
+# darin findet -- deshalb `platte=` und `script=cat`.
+d="$OUT/sichern"
+bash tools/alltag/build.sh "$d" \
+    progs="desktop taskbar nedit sh echo ls cat" accel="${OSUM_ACCEL:-kvm}" \
+    shot=no desk=no kbd=yes warten=5 bloecke=32768 keep=yes \
+    "xfile=/probe.fi=$KLEIN" \
+    extra="wigapp=/bin/nedit,/probe.fi,zeig=5" > "$d.log" 2>&1
+grep -qa 'nedit: gesichert' "$d/serial.txt" \
+    && ok "der Editor meldet, dass er gesichert hat" \
+    || bad "der Editor meldet kein Sichern"
+mod=$(grep -aoE 'modif [0-9]+' "$d/serial.txt" | tail -1 | grep -oE '[0-9]+$')
+num "nach dem Sichern ist das Aenderungszeichen weg" "${mod:-1}" -eq 0
+d2="$OUT/nachlesen"
+bash tools/alltag/build.sh "$d2" \
+    progs="desktop taskbar nedit sh echo ls cat" accel="${OSUM_ACCEL:-kvm}" \
+    shot=no platte="$d/disk.img" script="cat /probe.fi" > "$d2.log" 2>&1
+if grep -qa 'var TOTAL: u64 = 0' "$d2/serial.txt"; then
+    ok "eine ZWEITE Maschine liest die geaenderte Zeile von derselben Platte"
+else
+    bad "die geaenderte Zeile steht nicht auf der Platte"
+    grep -a -A3 'probe.fi --' "$d2/serial.txt" | head -5 | sed 's/^/        /'
+fi
+# Und der Rest der Datei ist unversehrt -- ein Sichern, das die
+# Aenderung schreibt und daneben etwas zerstoert, waere schlimmer als
+# keines.
+grep -qa 'const TEXT: u64 = 0x1234' "$d2/serial.txt" \
+    && ok "der Rest der Datei ist unveraendert" \
+    || bad "der Rest der Datei hat gelitten"
+
 echo
 echo "GUI-EDITOR: $pass bestanden, $fail gescheitert"
 echo "Bilder: $SHOTS"
