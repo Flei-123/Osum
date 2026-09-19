@@ -6714,7 +6714,31 @@ fn tilde(n: u64, m: u64) -> u64 {
 // der Unterschied zu `K_ENTRY`. Ein Editor, der seinen Text als festes
 // Feld anlegen muesste, haette wieder eine Hoechstgroesse im
 // Quelltext.
-const K_TEXTAREA: u64 = 18
+// INTEGRATIONSPRUEFUNG (Zusammenfuehrung alltag-explorer + runde-gui-editor):
+// DIESE ZAHL WAR 18 UND DAMIT DIESELBE WIE `K_DROP`.
+//
+// Die beiden Runden sind getrennt gewachsen: CLIP-2/ALLTAG hat
+// `K_DROP = 18` und `K_DRAG = 19` oben bei den uebrigen Arten
+// vergeben, GUI-EDITOR hat `K_TEXTAREA` hier unten -- 6000 Zeilen
+// entfernt -- ebenfalls auf 18 gesetzt. Der Zusammenschluss meldete
+// NULL Konflikte, weil die beiden Zeilen einander nie beruehrt haben.
+// Die Zahl war trotzdem doppelt vergeben.
+//
+// WARUM DAS EIN FEHLER IST UND NICHT NUR HAESSLICH: beide Zahlen
+// stehen im SELBEN Zahlenraum. `fired_kind()` liefert einmal die Art
+// eines Widgets (D_KIND) und einmal die Art einer Meldung (`fire`),
+// und ein Programm vergleicht beides gegen dieselben Konstanten.
+// `on_up` feuert `fire(d, K_DROP, zeile, w)` fuer JEDES Widget unter
+// dem Zeiger -- auch fuer ein mehrzeiliges Textfeld. Ein Programm mit
+// Textfeld UND Ablageziel (genau die Mischung, die nedit und der
+// Dateimanager zusammen ergeben) kann die beiden Faelle dann nicht
+// mehr auseinanderhalten.
+//
+// Heute feuert noch niemand `fire(.., K_TEXTAREA, ..)`, der Fehler war
+// also schlafend. Er waere beim naechsten Ereignis des Textfeldes
+// aufgewacht, und dann als Fehler, den man im Quelltext nicht sieht.
+// 20 ist die naechste freie Zahl (19 = K_DRAG).
+const K_TEXTAREA: u64 = 20
 
 // Die Zeilentafel: je Zeile drei Woerter.
 const LN_P: u64 = 0
@@ -9115,6 +9139,60 @@ fn key_handle(wein: u64, k: u64) {
 static mut mn_win: u64 = 0xFFFFFFFFFFFFFFFF
 static mut mn_res: u64 = 0xFFFFFFFFFFFFFFFF
 
+// ================ INTEGRATIONSRUNDE 19.09.2026: MENUE UEBER DIE LEISTE
+//
+// Das Menue steht schon; jetzt hat es ein Handle, und damit antwortet
+// der Fensterserver auf die Frage nach der Arbeitsflaeche. Ragt das
+// Menue in die Taskleiste, wird es so weit nach oben gezogen, dass
+// zwischen seiner Unterkante und der Leiste `MN_AIR` Bildpunkte Luft
+// bleiben -- dieselbe Zahl und derselbe Gedanke wie in
+// `launcher.fi::an_arbeitsflaeche` (dort `AIR = 8`).
+//
+// ES WIRD NUR NACH OBEN GERUECKT und nie nach unten: ein Menue, das
+// ohnehin frei steht, soll nicht wandern, nur weil diese Funktion
+// laeuft. Antwortet der Server nicht (Hoehe 0 oder unplausibel),
+// bleibt alles, wie es war -- ein Menue an der falschen Stelle ist
+// besser als keines.
+const MN_AIR: u64 = 8
+
+fn menu_an_arbeit(w: u64, sy: u64, bh: u64) {
+    let hh: u64 = ng(w, N_H)
+    if hh == 0 {
+        return
+    }
+    let wy: u64 = wlibc.work_y(hh)
+    let wh2: u64 = wlibc.work_h(hh)
+    let sh2: u64 = wlibc.screen_h()
+    // Unplausibel heisst: der Server hat nicht geantwortet.
+    if wh2 == 0 || wy + wh2 > sh2 {
+        return
+    }
+    let unten: u64 = wy + wh2
+    let jetzt: u64 = ng(w, N_Y)
+    // Passt es, ist nichts zu tun.
+    if jetzt + bh + MN_AIR <= unten {
+        return
+    }
+    // Ueber den Zeiger klappen, wenn darueber Platz ist -- das ist die
+    // Richtung, die ein Aufklappmenue am Bildschirmrand nehmen soll.
+    var y: u64 = 0
+    if sy > bh + MN_AIR {
+        y = sub(sy, bh + MN_AIR)
+    }
+    if y + bh + MN_AIR > unten {
+        if unten > bh + MN_AIR {
+            y = sub(unten, bh + MN_AIR)
+        } else {
+            y = wy
+        }
+    }
+    if y == jetzt {
+        return
+    }
+    ns(w, N_Y, y)
+    let _m: u64 = wlibc.win_move(hh, ng(w, N_X), y)
+}
+
 fn menu_open(owner: u64, sx: u64, sy: u64, items: u64, n: u64) -> u64 {
     if mn_win != 0xFFFFFFFFFFFFFFFF {
         return MAXWN
@@ -9162,6 +9240,32 @@ fn menu_open(owner: u64, sx: u64, sy: u64, items: u64, n: u64) -> u64 {
     // Ein Menue, das unten aus dem Bild laeuft, klappt nach oben auf --
     // deshalb kennt diese Bibliothek die Bildschirmgroesse. OHNE
     // Titelleiste sind es genau `bh` Bildpunkte und nicht bh + 24.
+    //
+    // ============ INTEGRATIONSRUNDE 19.09.2026, PUNKT 2 (G-006/G-010)
+    //
+    // HIER STAND `screen_h()`, UND DAS IST DIE FALSCHE ZAHL.
+    //
+    // Der Schirm ist 800 hoch, die Taskleiste belegt davon die
+    // untersten 28 -- frei sind 772. Das Energiemenue des Startmenues
+    // wurde bei sy=714 mit bh=70 aufgeklappt: 714 + 70 + 4 = 788, und
+    // 788 ist kleiner als 800. Die Pruefung oben sagte also "passt",
+    // das Menue klappte NICHT um, und "Abmelden" landete auf der
+    // Leiste. GEMESSEN in belege/alltag/a-energie/03-energiemenue.png:
+    // Menue bei (20, 714) 103x70, Leiste ab y=772 -- die letzte Zeile
+    // liegt 16 Bildpunkte TIEF in der Leiste.
+    //
+    // Richtig ist die ARBEITSFLAECHE, also das, was die Struts uebrig
+    // lassen. Die kennt nur der Fensterserver, und der beantwortet
+    // `WI_WORKY/WI_WORKH` erst, wenn es ein Fenster GIBT (sysgui.fi:790
+    // weist jedes Feld >= MAX_WIN ab, ein Handle 0 also auch -- genau
+    // das hat `launcher.fi::anker_y` schon einmal nachgemessen).
+    //
+    // Also derselbe zweistufige Weg, den das Startmenue seit Runde
+    // FENSTER geht und der sich dort bewaehrt hat: HIER mit der besten
+    // Schaetzung anlegen (Schirm minus nichts), und gleich NACH dem
+    // Anlegen unten mit `an_arbeit` auf den Wert ruecken, den der
+    // Server wirklich fuehrt. Ein Menue, das schon richtig liegt, wird
+    // dabei nicht bewegt.
     var y: u64 = sy
     if y + bh + 4 > wlibc.screen_h() {
         y = sub(sy, bh + 4)
@@ -9202,6 +9306,10 @@ fn menu_open(owner: u64, sx: u64, sy: u64, items: u64, n: u64) -> u64 {
             wlibc.L_POPUP)
         // Ein Menue will die Tastatur: hoch/runter/Eingabe/Flucht.
         let _wk: u64 = wlibc.win_state(ng(w, N_H), wlibc.WS_KEYS, 1)
+        // INTEGRATIONSRUNDE: jetzt, wo es ein Handle gibt, die echte
+        // Arbeitsflaeche erfragen und das Menue ueber die Leiste
+        // ziehen, falls es in sie hineinragt.
+        menu_an_arbeit(w, sy, bh)
         say_window(w)
     }
     // RUNDE DESIGN-2: das Menue klappt auf. Ganzes Fenster, also

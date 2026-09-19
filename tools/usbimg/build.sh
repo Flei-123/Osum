@@ -622,7 +622,35 @@ EOFNL
 # Die Datei heisst weiterhin `locale-de` im Baubaum; sie ist nur der
 # Zwischenspeicher fuer den Inhalt und wird nach
 # /users/root/config/locale kopiert.
-printf 'en\n' > "$OUT/locale-de"
+# ---------------------------------------------------------------------
+# INTEGRATIONSRUNDE 19.09.2026: ZURUECK AUF DEUTSCH -- UND ZWAR HIER.
+#
+# Der Absatz darueber beschreibt den Stand vom 09.09., als Englisch zur
+# Hauptsprache gemacht wurde. Die Begruendung von damals stimmt
+# technisch immer noch (eine Zeile, nicht 71 Stellen im Quelltext) --
+# nur zeigt das Abbild damit eine ENGLISCHE Oberflaeche auf einem
+# System, dessen Quelltext, Kommentare, Berichte und Katalog
+# durchgehend deutsch sind. Der deutsche Katalog liegt vollstaendig im
+# Abbild (locale/de/messages, 588 Zeilen) und wurde nie benutzt.
+#
+# Also `de` -- und zwar an ALLEN DREI Stellen, die die Sprache
+# festlegen, weil eine allein nichts bewirkt (Reihenfolge aus
+# kernel/user/msg.fi, staerkste zuerst):
+#
+#   1. /users/root/config/locale   die WAHL DES BENUTZERS  <- diese Zeile
+#   2. /etc/locale.conf            die VORGABE DES SYSTEMS
+#   3. `lang=` auf der Kommandozeile schreibt (1) VOR dem ersten
+#      Ring-3-Programm (kernel/lib/kstate.fi, M_LANGDE)
+#
+# Haette man nur (2) geaendert, bliebe die Oberflaeche englisch: (1)
+# sticht (2). Genau diese Falle hat die Pruefung dieser Runde gekostet.
+#
+# ENGLISCH BLEIBT WAEHLBAR und geht nicht verloren: der englische
+# Katalog bleibt im Abbild, er ist weiterhin die Rueckfallsprache fuer
+# jeden Schluessel, den die Uebersetzung nicht hat, das
+# Einstellungsprogramm schaltet um, und der Bootmenue-Eintrag mit
+# `lang=en` (weiter unten) bleibt Wort fuer Wort stehen.
+printf 'de\n' > "$OUT/locale-de"
 
 # ---------------------------------------------- RUNDE STICK: DAS NETZ
 #
@@ -777,7 +805,7 @@ ARGS+=("/bin/files@/bin/explorer")
 # lesen kann. Dieselbe Datei, die tools/look/shot.sh seit Runde LOOK
 # schreibt -- mit demselben Inhalt wie die Benutzerwahl, damit beide
 # dasselbe sagen.
-printf '# /etc/locale.conf -- the system default language.\n# A user who has chosen one overrides this in\n# /users/<name>/config/locale; the settings program writes only there.\nlang=en\n' \
+printf '# /etc/locale.conf -- the system default language.\n# A user who has chosen one overrides this in\n# /users/<name>/config/locale; the settings program writes only there.\nlang=de\n' \
     > "$OUT/locale.conf"
 ARGS+=(/etc/ "/etc/passwd=$OUT/passwd"
        "/etc/shadow=$OUT/shadow"
@@ -1193,6 +1221,13 @@ verbose: yes
 # umstellen kann, braucht Maus oder Tastatur -- also genau das, was bei
 # Justin klemmt. `lang=en` setzt die Datei VOR dem ersten
 # Ring-3-Programm; sonst aendert sich an diesem Eintrag nichts.
+#
+# INTEGRATIONSRUNDE 19.09.2026: DIESER EINTRAG IST JETZT DER AUSWEG UND
+# NICHT MEHR DIE AUSNAHME. Seit die Vorgabe wieder `de` ist (oben bei
+# `locale-de`), faehrt der Schreibtisch-Eintrag ohne `lang=` deutsch --
+# er nimmt, was in den beiden Dateien steht. DIESER Eintrag behaelt sein
+# `lang=en` und ist damit der Weg zurueck zum Englischen, ohne Maus und
+# ohne Einstellungsprogramm. Er wurde absichtlich NICHT angefasst.
 
 # ================== RUNDE ZWISCHENSPEICHER: DER EINE EINTRAG, DER DIE
 # FRAGE MIT EINEM FOTO ENTSCHEIDET
