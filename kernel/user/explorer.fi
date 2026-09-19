@@ -2328,6 +2328,13 @@ fn u_start(args: u64) -> u64 {
     wlib.draw_all()
     say_rects(mb, bzur, bvor, bauf, fpfad, baum, tab, stat)
     say_rect(bstart)
+    // ================================================== RUNDE CLIP-2
+    //
+    // DIESES FENSTER IST EIN ABLEGEZIEL. Ohne diesen Ruf meldet `wlib`
+    // das Loslassen nicht (`drop_an`), und der Dateimanager bliebe, was
+    // er bis zu dieser Runde war: eine Quelle ohne Gegenstueck.
+    wlib.drop_an(true)
+    var drop_zahl: u64 = wlib.drop_count()
 
     var offen: u64 = 0 // 1 = Kontextmenue, 2 = Datei-, 3 = Ansichtsmenue
     var wartet: u64 = 0 // 1 = umbenennen, 2 = neuer Ordner, 3 = loeschen,
@@ -2335,6 +2342,9 @@ fn u_start(args: u64) -> u64 {
     var runden: u64 = 0
     var tasten: u64 = wlib.key_seq()
     var rahmen_zahl: u64 = wlib.sel_frame()
+    // RUNDE CLIP-2: derselbe Gedanke wie `rahmen_zahl` -- eine Zahl,
+    // die sich aendert, ist ein Beleg; ein Bild ist eine Vermutung.
+    let _dz0: u64 = drop_zahl
     // RUNDE EXPLORER-2, gemessen am 09.09.2026: DIE OBERGRENZE WAR ZU
     // KLEIN. Hier stand 4 000 000. Ein Durchlauf dieser Schleife ist im
     // Leerlauf ein `SYS_YIELD` -- unter TCG rund 25 Mikrosekunden --,
@@ -2375,6 +2385,18 @@ fn u_start(args: u64) -> u64 {
         if wlib.sel_frame() != rahmen_zahl {
             rahmen_zahl = wlib.sel_frame()
             sag_auswahl(tab)
+        }
+        // RUNDE CLIP-2: und dasselbe fuer das Ablegen. Die Zahl steht
+        // auf der Leitung, sobald `wlib` ein Loslassen ueber diesem
+        // Fenster gemeldet hat -- auch dann, wenn das Ablegen selbst
+        // nichts getan hat (gleicher Ordner). Eine Abnahme kann damit
+        // die MELDUNG von der TAT unterscheiden.
+        if wlib.drop_count() != drop_zahl {
+            drop_zahl = wlib.drop_count()
+            var s_dc: [u8; 17] = "explorer: drops \0"
+            say((&s_dc[0 as usize]) as u64)
+            sayn(drop_zahl)
+            nl()
         }
         // RUNDE HOTPLUG-2: HAT SICH AM BUS ETWAS GETAN?
         //
@@ -2490,6 +2512,40 @@ fn u_start(args: u64) -> u64 {
                         (&s_start[0 as usize]) as u64)
                 } else if id == baum {
                     tree_walk(idx, baum, tab, stat, fpfad)
+                }
+            } else if kind == wlib.K_DRAG {
+                // ======================================= RUNDE CLIP-2
+                //
+                // EIN ZIEHEN HAT ANGEFANGEN: den Pfad der angefassten
+                // Zeile auf den Ziehplatz legen. `ziehen` tut genau
+                // das und wurde bisher nur vom Doppelklick gerufen --
+                // deshalb war der Bus bei einem ECHTEN Zug leer, und
+                // das Ablegen fand nichts vor (gemessen 18.09.:
+                // `sel n=3 rahmen=2`, kein `expl: zieh`).
+                if id == tab && vmodus == 0 {
+                    ziehen(idx)
+                }
+            } else if kind == wlib.K_DROP {
+                // ======================================= RUNDE CLIP-2
+                //
+                // HIER WURDE ETWAS ABGELEGT. `wlib` meldet das
+                // Loslassen ueber einem Widget, waehrend auf dem
+                // Ziehplatz etwas liegt; der Index ist die Zeile
+                // darunter (MAXWD = keine).
+                //
+                // Die Tabelle UND der Baum nehmen an -- und die
+                // Ortsleiste nicht: ein Ort ist ein Sprungziel und
+                // kein Ordner, den dieser Zweig kennt.
+                if id == tab || id == baum {
+                    var zl: u64 = idx
+                    if id == baum {
+                        // Im Baum ist Zeile 0 der Weg nach oben; die
+                        // Tabellenzeilen zaehlen anders. Nur die
+                        // Tabelle nennt eine Datei -- der Baum legt
+                        // immer in den angezeigten Ordner.
+                        zl = wlib.MAXWD
+                    }
+                    wartet = ablegen(zl, baum, tab, stat, fpfad)
                 }
             } else if kind == wlib.K_TABLE {
                 // die Kopfzeile: nach dieser Spalte sortieren
@@ -2766,6 +2822,135 @@ fn ziehen(zeile: u64) {
     say((&s_zg[0 as usize]) as u64)
     say(full)
     nl()
+}
+
+// ======================================================= RUNDE CLIP-2
+//
+// DAS ANDERE ENDE DER ZIEHBEWEGUNG: HIER WIRD ABGELEGT.
+//
+// Bis zu dieser Runde war der Dateimanager nur QUELLE -- `ziehen` legte
+// den Pfad auf den Bus, und der Editor nahm ihn (`edit.fi`). Ein Ziel
+// gab es nicht: wer eine Datei auf einen Ordner zog, bei dem geschah
+// nichts, und im Bild sah das aus wie ein Programm, das den Zug nicht
+// bemerkt. Bemerkt hat ihn niemand, weil `wlib` das Loslassen nicht
+// weitergab; das ist die Naht, die diese Runde zugemacht hat
+// (`wlib.K_DROP`).
+//
+// WOHIN ABGELEGT WIRD -- und das ist die eigentliche Entscheidung:
+//
+//   auf einen ORDNER in der Tabelle  ->  in diesen Ordner hinein
+//   auf eine Datei oder ins Leere    ->  in den ANGEZEIGTEN Ordner
+//
+// Auf eine Datei zu zielen und sie damit zu treffen, waere ein
+// Fehlgriff mit Folgen; jeder andere Dateimanager legt dann daneben,
+// also in den Ordner, der offen ist.
+//
+// VERSCHOBEN WIRD UND NICHT KOPIERT, und zwar durch `expakt.einfuegen`
+// -- dieselbe Funktion, die Strg+V benutzt. Sie haengt auf demselben
+// Datentraeger den Verzeichniseintrag mit `io.rename` um (P-018), statt
+// Oktette zu bewegen. Ein zweiter Weg, der dasselbe noch einmal tut,
+// waere ein zweiter Ort fuer denselben Fehler.
+//
+// WAS NICHT GESCHIEHT: eine Datei auf SICH SELBST oder in den Ordner
+// abzulegen, in dem sie schon liegt, tut nichts. Ohne diese Frage
+// laege gleicher Quell- und Zielpfad vor, und `einfuegen` traefe auf
+// einen belegten Namen -- der Konfliktdialog fuer eine Tat, die
+// niemand wollte.
+fn ablegen(zeile: u64, baum: u64, tab: u64, stat: u64, fpfad: u64) -> u64 {
+    var s_dr: [u8; 13] = "expl: drop \0\0"
+    var s_z: [u8; 3] = "z=\0"
+    var s_rc: [u8; 4] = "rc=\0"
+    var s_q: [u8; 4] = " q=\0"
+    // In einer Sicherung liegt keine Datei, sondern ein Eintrag in
+    // einer Textdatei -- dorthin laesst sich nichts ablegen.
+    if vmodus != 0 {
+        return 0
+    }
+    // DEN PFAD VOM ZIEHPLATZ, und nur wenn es wirklich ein PFAD ist.
+    // Ein Ziehen mit blossem Text ist keine Datei; wer ihn trotzdem
+    // einfuegte, legte eine Datei mit einem Satz als Namen an.
+    var zp: [u8; 200] = [0 as u8; 200]
+    if !ulib.drag_an() {
+        return 0
+    }
+    if ulib.drag_type_path() == 0 {
+        return 0
+    }
+    let zn: u64 = ulib.drag_take((&zp[0 as usize]) as u64, 198)
+    if zn == 0 {
+        return 0
+    }
+    zp[(zn) as usize] = 0 as u8
+    // DAS ZIEL. Eine Zeile, die ein ORDNER ist, nimmt auf; alles
+    // andere legt in den angezeigten Ordner.
+    var ziel: [u8; 200] = [0 as u8; 200]
+    ulib.strncpy((&ziel[0 as usize]) as u64, (&pfad[0 as usize]) as u64,
+        198)
+    if zeile < m_anzahl() {
+        let e: u64 = m_ord(zeile)
+        if m_art(e) != 0 {
+            ulib.strncpy((&ziel[0 as usize]) as u64,
+                join((&pfad[0 as usize]) as u64, m_name(e)), 198)
+        }
+    }
+    // LIEGT ES SCHON DA? Dann ist das Ablegen erledigt, bevor es
+    // anfaengt. Verglichen wird der Ordner der Quelle mit dem Ziel.
+    var qdir: [u8; 200] = [0 as u8; 200]
+    ulib.strncpy((&qdir[0 as usize]) as u64, (&zp[0 as usize]) as u64, 198)
+    eltern((&qdir[0 as usize]) as u64)
+    say((&s_dr[0 as usize]) as u64)
+    say((&zp[0 as usize]) as u64)
+    say((&s_q[0 as usize]) as u64)
+    say((&ziel[0 as usize]) as u64)
+    if ulib.streq((&qdir[0 as usize]) as u64, (&ziel[0 as usize]) as u64) {
+        var s_gl: [u8; 8] = " gleich\0"
+        say((&s_gl[0 as usize]) as u64)
+        nl()
+        let _c: u64 = ulib.drag_drop()
+        return 0
+    }
+    // Die Ablage von `expakt` ist die Liste, die `einfuegen` abarbeitet
+    // -- ein Stueck, der gezogene Pfad. `list_add` fuellt die Auswahl,
+    // `copy_remember(false)` macht daraus die Ablage (kein Schnitt:
+    // beim Ablegen im selben Traeger haengt `einfuegen` ohnehin um).
+    expakt.list_clear()
+    let _a: bool = expakt.list_add((&zp[0 as usize]) as u64)
+    // ALS SCHNITT, NICHT ALS KOPIE -- und das ist nicht Geschmack,
+    // sondern der Unterschied zwischen `rename` und einer neuen Datei.
+    //
+    // GEMESSEN am 18.09.2026, und der erste Entwurf dieser Runde hatte
+    // es falsch: mit `copy_remember(false)` nimmt `expakt.einfuegen`
+    // den Zweig `dateiop.kopiere` (expakt.fi:505) -- die Datei lag
+    // danach ZWEIMAL da, /data/alpha.txt mit Inode 105 und
+    // /data/bilder/alpha.txt mit Inode 116. Der Laeufer hat genau das
+    // gefunden ("inode anders 104 116"), und ohne die Messung waere es
+    // durchgegangen: von aussen sieht eine Kopie am Ziel wie ein
+    // gelungenes Verschieben aus.
+    //
+    // Ziehen und Ablegen VERSCHIEBT im selben Datentraeger -- so macht
+    // es jedes andere System, und `ist_schnitt` ist genau der Schalter,
+    // der `einfuegen` auf `dateiop.verschiebe` und damit auf
+    // `io.rename` fuehrt (P-018: der Verzeichniseintrag wird umgehaengt,
+    // die Oktette werden nicht angefasst).
+    nl()
+    let _r: u64 = expakt.copy_remember(true)
+    kfl_op = 1
+    let rc: u64 = expakt.einfuegen((&ziel[0 as usize]) as u64)
+    var s_de: [u8; 13] = "expl: drop* \0"
+    say((&s_de[0 as usize]) as u64)
+    kv((&s_rc[0 as usize]) as u64, rc)
+    kv((&s_z[0 as usize]) as u64, zeile)
+    nl()
+    // DER ZIEHPLATZ WIRD GELEERT. Eine Ziehbewegung, die angekommen
+    // ist, ist zu Ende -- bliebe sie stehen, naehme der naechste
+    // Loslasser sie ein zweites Mal an.
+    let _c2: u64 = ulib.drag_drop()
+    new_read(baum, tab, stat, fpfad)
+    if conflict_show(tab) {
+        return 9
+    }
+    let _f: bool = error_show(rc)
+    return 0
 }
 
 fn open(zeile: u64, baum: u64, tab: u64, stat: u64, fpfad: u64,

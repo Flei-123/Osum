@@ -947,6 +947,35 @@ def main():
             x1 = r[0] + r[2] * p1 // 100
             f.ziehe_nahe(x0, y, x1, y)
             print("ziehspurnah %s -> %d,%d nach %d,%d" % (t[0], x0, y, x1, y))
+        # ============================================= RUNDE CLIP-2
+        # `ziehvon <quelle> <ziel>` -- von der MITTE eines gemeldeten
+        # Rechtecks in die MITTE eines zweiten ziehen.
+        #
+        # Das ist die Bewegung, die Drag-and-Drop ausmacht, und sie
+        # liess sich mit keinem der vorhandenen Befehle ausdruecken:
+        # `zieheauf` greift die Ecke und zieht um einen VERSATZ,
+        # `ziehespur` bleibt in EINEM Rechteck. Hier sind Anfang und
+        # Ende zwei verschiedene gemeldete Kaesten -- Zeile 3 der
+        # Tabelle auf Zeile 0 der Tabelle, Datei auf Ordner.
+        #
+        # Beide Rechtecke werden ERST JETZT gelesen, aus der zuletzt
+        # gemeldeten Lage: die Tabelle rollt und das Fenster wandert,
+        # und eine ins Drehbuch getippte Zahl waere nach dem ersten
+        # Ordnerwechsel falsch.
+        elif b == "ziehvon":
+            t = arg.split()
+            r0 = f.rechteck(t[0])
+            r1 = f.rechteck(t[1])
+            if r0 is None or r1 is None:
+                print("ziehvon %s -> KEIN RECHTECK GEMELDET (%s=%s %s=%s)"
+                      % (arg, t[0], r0, t[1], r1))
+                fehler += 1
+                continue
+            x0, y0 = r0[0] + r0[2] // 2, r0[1] + r0[3] // 2
+            x1, y1 = r1[0] + r1[2] // 2, r1[1] + r1[3] // 2
+            f.ziehe(x0, y0, x1, y1)
+            print("ziehvon %s(%d,%d) -> %s(%d,%d)"
+                  % (t[0], x0, y0, t[1], x1, y1))
         elif b == "ziehespur":
             t = arg.split()
             r = f.rechteck(t[0])

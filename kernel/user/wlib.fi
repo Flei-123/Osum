@@ -144,6 +144,8 @@ export {
     img_out_y1, img_out_gone, image_px, image_py,
     image_bw, image_bh, slider,
     K_MENUBAR, K_CHOICE, K_SEP, K_SCROLL,
+    // RUNDE CLIP-2: das Ablegeziel.
+    K_DROP, K_DRAG, drop_an, drop_count, drag_starts,
     NK_MAIN, NK_MENU, NK_DLG, NK_TIP,
     tip_win_open, tip_win_close, tip_win_id, feed_key,
     KEY_TAB, KEY_ENTER, KEY_BS, KEY_ESC, KEY_UP, KEY_DOWN, KEY_LEFT,
@@ -326,6 +328,38 @@ const K_GRAPH: u64 = 14
 // bedient von wlib, in jedem Farbschema richtig.
 const K_IMAGE: u64 = 16
 const K_SLIDER: u64 = 17
+
+// ======================================================= RUNDE CLIP-2
+//
+// DAS ZIEL EINER ZIEHBEWEGUNG. Kein Widget, das man anlegt, sondern
+// eine MELDUNG: wer die Maustaste ueber einem Widget loslaesst, waehrend
+// auf dem Ziehplatz etwas liegt, bekommt `K_DROP` mit der Zeile unter
+// dem Zeiger als Index -- MAXWD, wenn keine Zeile darunter liegt; die
+// Flaeche der Liste ist dann selbst das Ziel.
+//
+// WARUM IN DER BIBLIOTHEK UND NICHT IM DATEIMANAGER: `on_up` ist die
+// einzige Stelle, die vom Loslassen ueberhaupt erfaehrt. Ein Programm
+// sieht sonst nur das Feuer vom Druecken; ein Ablegen, das die
+// Bibliothek nicht meldet, kann kein Programm nachbauen, ohne `wlibc`
+// an ihr vorbei zu rufen -- und damit an `noclip` vorbei.
+const K_DROP: u64 = 18
+
+// RUNDE CLIP-2, ZWEITER BEFUND: DER ANFANG EINER ZIEHBEWEGUNG.
+//
+// `K_DROP` allein genuegt nicht, und das hat erst die Messung gezeigt.
+// Der Dateimanager legte den Pfad bisher NUR beim Oeffnen auf den Bus
+// (`ziehen` haengt an `open`, also am DOPPELKLICK). Ein echtes Ziehen
+// -- druecken, fahren, loslassen -- kam dort nie an: `on_move` deutete
+// es als Mausrahmen (Punkt 3 der Runde EXPLORER-2), der Ziehplatz
+// blieb leer, und `on_up` fand beim Loslassen nichts zum Ablegen.
+// GEMESSEN am 18.09.: `explorer: sel n=3 rahmen=2`, und kein `expl:
+// zieh`.
+//
+// Also meldet die Bibliothek jetzt auch den ANFANG: wer mit gedrueckter
+// Taste eine Zeile VERLAESST, bekommt einmal `K_DRAG` mit der Zeile,
+// auf der gedrueckt wurde. Was dann auf den Bus kommt, entscheidet das
+// Programm -- die Bibliothek kennt keine Dateipfade.
+const K_DRAG: u64 = 19
 
 // ========================================== RUNDE CERTUS-AUF-OSUM
 // EINE LEINWAND: DAS WIDGET, DESSEN BILDPUNKTE DEM AUFRUFER GEHOEREN.
@@ -725,6 +759,19 @@ static mut s_down: u64 = 0 // gedruecktes Widget + 1
 // veraendert hat. Eine Zahl, damit die Abnahme das Ziehen MESSEN kann,
 // statt es an einem Standbild zu erraten.
 static mut s_rahmen: u64 = 0
+// RUNDE CLIP-2: wie oft ein Ablegen gemeldet wurde. Dieselbe Absicht
+// wie `s_rahmen`: eine Zahl, die eine Abnahme LESEN kann, statt das
+// Ablegen an einem Standbild zu erraten.
+static mut s_drops: u64 = 0
+// Ob dieses Programm Ablegeziel ist. Wer sich nicht anmeldet, merkt von
+// fremden Ziehbewegungen nichts -- so wie eine Liste ohne `sel_an`
+// nicht mitzieht.
+static mut s_dropan: u64 = 0
+// RUNDE CLIP-2: wie oft ein Ziehen ANGEFANGEN hat, und auf welchem
+// Widget es gerade laeuft (+1). Das zweite verhindert, dass aus einer
+// Bewegung zwanzig Meldungen werden: gemeldet wird EINMAL je Zug.
+static mut s_drags: u64 = 0
+static mut s_dragwd: u64 = 0
 static mut s_dragx: u64 = 0
 static mut s_dragy: u64 = 0
 // Der gezogene Ausschnitt, in BILDPUNKTEN des Bildes und nicht des
@@ -3983,6 +4030,28 @@ fn sel_frame() -> u64 {
     return s_rahmen
 }
 
+// RUNDE CLIP-2: dieses Programm nimmt Abgelegtes an. Ohne diesen Ruf
+// meldet `on_up` kein `K_DROP` -- ein Programm, das mit einer fremden
+// Ziehbewegung nichts anfangen kann, soll auch nicht gefragt werden.
+fn drop_an(an: bool) {
+    if an {
+        s_dropan = 1
+    } else {
+        s_dropan = 0
+    }
+}
+
+// Wie oft ein Ablegen gemeldet wurde. Fuer die Abnahme: eine Zahl auf
+// der Leitung schlaegt ein Standbild.
+fn drop_count() -> u64 {
+    return s_drops
+}
+
+// Wie oft eine Ziehbewegung angefangen hat.
+fn drag_starts() -> u64 {
+    return s_drags
+}
+
 // Wie viele Zeilen markiert sind. Gezaehlt und nicht mitgefuehrt: ein
 // Zaehler, der neben dem Bitfeld herlaeuft, ist ein zweiter Ort, an dem
 // dieselbe Wahrheit stehen kann.
@@ -6046,6 +6115,34 @@ fn on_down(w: u64, x: u64, y: u64, btn: u64) {
 }
 
 fn on_up(w: u64, x: u64, y: u64) {
+    // RUNDE CLIP-2: der Zug ist vorbei -- der naechste darf wieder
+    // melden.
+    s_dragwd = 0
+    // ================================================== RUNDE CLIP-2
+    //
+    // ZUERST: LIEGT HIER ETWAS AB? Das wird VOR `s_down` gefragt, und
+    // das ist der ganze Kniff. Eine Ziehbewegung faengt in einem
+    // ANDEREN Fenster an (der Explorer legt beim Anfassen ab), also ist
+    // `s_down` in DIESEM Fenster null -- der alte Rumpf war damit schon
+    // fertig, bevor er zum Ablegen kam.
+    //
+    // Gefragt wird der Ziehplatz und nicht ein Zustand dieser
+    // Bibliothek: eine Ziehbewegung zwischen ZWEI Programmen kennt kein
+    // gemeinsames `wlib`, sie kennt nur den Bus.
+    if s_dropan != 0 && wlibc.drag_an() {
+        let d: u64 = hit_at(w, x, y)
+        if d < MAXWD {
+            let kd: u64 = g(d, D_KIND)
+            var zeile: u64 = MAXWD
+            if kd == K_LIST || kd == K_TABLE {
+                zeile = row_under(d, y)
+            }
+            s_drops = s_drops + 1
+            s_down = 0
+            fire(d, K_DROP, zeile, w)
+            return
+        }
+    }
     if s_down != 0 {
         let i: u64 = s_down - 1
         s_down = 0
@@ -6168,10 +6265,37 @@ fn on_move(w: u64, x: u64, y: u64, btn: u64) {
             // Zeiger auf der steht, auf der gedrueckt wurde, ist die
             // Bewegung ein Zittern der Hand und kein Ziehen.
             if r < MAXWD && r != g(dd, D_VAL) {
-                sel_bereich(dd, r)
-                s(dd, D_VAL, r)
-                s_rahmen = s_rahmen + 1
-                dirty_wd(dd)
+                // ================================== RUNDE CLIP-2
+                //
+                // HIER FAENGT EIN ZIEHEN AN -- und hier trennen sich
+                // die beiden Deutungen derselben Bewegung.
+                //
+                // Ein angemeldetes ZIEHZIEL-Programm (`drop_an`) will
+                // wissen, dass gezogen wird, damit es seinen Pfad auf
+                // den Bus legen kann; ein Programm ohne Anmeldung zieht
+                // weiter einen Mausrahmen und merkt von alledem nichts.
+                // Die Auswahl bleibt in BEIDEN Faellen stehen: wer eine
+                // Datei zieht, hat sie beim Druecken ausgewaehlt, und
+                // sie ihm unter der Hand wegzunehmen waere falsch.
+                //
+                // EINMAL JE ZUG. `s_dragwd` haelt fest, dass fuer
+                // diesen Druck schon gemeldet wurde -- sonst kaeme bei
+                // jeder Bildpunktbewegung eine weitere Meldung, und der
+                // Bus bekaeme zwanzig Schreibvorgaenge fuer eine
+                // Bewegung.
+                if s_dropan != 0 && s_dragwd == 0 {
+                    s_dragwd = dd + 1
+                    s_drags = s_drags + 1
+                    // Gemeldet wird die Zeile, auf der GEDRUECKT wurde
+                    // (`D_ANKER`), und nicht die unter dem Zeiger: das
+                    // gezogene Stueck ist das angefasste.
+                    fire(dd, K_DRAG, sel_anker_von(dd), w)
+                } else {
+                    sel_bereich(dd, r)
+                    s(dd, D_VAL, r)
+                    s_rahmen = s_rahmen + 1
+                    dirty_wd(dd)
+                }
             }
             return
         }
