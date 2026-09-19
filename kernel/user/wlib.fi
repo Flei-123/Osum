@@ -118,6 +118,14 @@ export {
     MR_AREA, MR_TAFEL, MR_BUTTON, MR_FIELD, MR_GRIFF,
     AN_WIN_OPEN, AN_WIN_CLOSE, AN_MENU, AN_HOVER, AN_PRESS, AN_NOTIFY,
     key_seq,
+    // RUNDE GUI-EDITOR: der Modifikator der letzten Taste.
+    key_mod, key_shift, key_ctrl, feed_key_mod,
+    // RUNDE GUI-EDITOR: das mehrzeilige Textfeld.
+    textarea, ta_text_set, ta_text_get, ta_text_len, ta_leeren,
+    ta_zeilen, ta_zeile, ta_spalte, ta_geaendert, ta_sauber,
+    ta_eol, ta_eol_set, ta_lang, ta_nurlesen, ta_gehe, ta_waehle,
+    ta_zeile_p, ta_zeile_n, ta_einfuegen, ta_hat_auswahl,
+    LANG_NONE, LANG_FIRN, LANG_SH,
     theme_watch, theme_now, theme_switches, theme_polls, theme_pixels,
     theme_stales, paint_all, THEME_POLL_TICKS,
     rect_x, rect_y, rect_w, rect_h, kind_of, tab_x, tab_w, menubar_x,
@@ -131,6 +139,7 @@ export {
     head_base, cell_base, cell_x, head_h, icon_x, icon_y,
     icon_letter_x, icon_letter_base,
     K_LABEL, K_BUTTON, K_CHECK, K_ENTRY, K_LIST, K_TABLE, K_TABS, K_TILE,
+    K_TEXTAREA,
     K_GRAPH, graph, graph_x, graph_y, GRAPH_FIELDS, GR_N, GR_HIST, GR_A,
     GR_B, GR_MAX,
     K_CARD, card,
@@ -753,6 +762,12 @@ static mut s_reseq: u64 = 0
 // (`s_esc = 3 + Ziffer`) und mehr als eine Ziffer gab es nicht.
 static mut s_num: u64 = 0
 static mut s_mod: u64 = 0
+// RUNDE GUI-EDITOR: der Modifikator der zuletzt entschluesselten Taste.
+static mut s_keymod: u64 = 0
+// RUNDE GUI-EDITOR: der Puffer fuer Ausschneiden/Einsetzen im
+// mehrzeiligen Feld. Einmal geholt, dann behalten.
+const TA_CLIP: u64 = 65536
+static mut ta_clipbuf: u64 = 0
 static mut s_down: u64 = 0 // gedruecktes Widget + 1
 // RUNDE ALLTAG: wo das Ziehen anfing (Bildflaeche und Schieberegler).
 // RUNDE EXPLORER-2, Punkt 3: wie oft ein Mausrahmen eine Auswahl
@@ -5107,6 +5122,8 @@ fn paint_one(i: u64) {
         paint_graph(i)
     } else if k == K_CANVAS {
         paint_canvas(i)
+    } else if k == K_TEXTAREA {
+        paint_ta(i)
     }
 }
 
@@ -5956,6 +5973,27 @@ fn on_down(w: u64, x: u64, y: u64, btn: u64) {
         dirty_wd(i)
         return
     }
+    // ============================================== RUNDE GUI-EDITOR
+    //
+    // DER KLICK IM MEHRZEILIGEN FELD. Er setzt die Marke; mit
+    // gehaltener Umschalttaste (M_SHIFT = 8, dieselbe Maske wie bei
+    // der Liste) zieht er statt dessen die Auswahl bis hierher.
+    // `s_down` merkt sich das Feld, damit `on_move` weiterziehen kann.
+    if k == K_TEXTAREA {
+        let tt: u64 = g(i, D_VAL)
+        if tt < TA_MAX {
+            if (btn & 8) == 0 {
+                ta_hit(i, x, y)
+                ta_sel_clear(tt)
+            } else {
+                ta_hit(i, x, y)
+            }
+            s_down = i + 1
+            set_focus(i)
+            dirty_wd(i)
+        }
+        return
+    }
     if k == K_LIST || k == K_TABLE {
         // die Bildlaufleiste?
         if x >= g(i, D_X) + g(i, D_W) - 16 {
@@ -6213,11 +6251,32 @@ fn on_move(w: u64, x: u64, y: u64, btn: u64) {
     } else {
         wlibc.cursor_shape(0)
     }
-    // Ziehen im Textfeld waehlt aus. Umschalt-Pfeil gibt es hier nicht:
-    // die Zeilendisziplin liefert das FERTIGE Zeichen, die Umschalttaste
-    // kommt nie als eigenes Ereignis an. Also waehlt die Maus.
+    // Ziehen im Textfeld waehlt aus.
+    //
+    // RUNDE GUI-EDITOR, NACHTRAG ZU EINEM SATZ, DER HIER STAND: "die
+    // Umschalttaste kommt nie als eigenes Ereignis an, also waehlt die
+    // Maus". Das stimmte, solange `kernel/drv/hid/kbd.fi` den
+    // xterm-Modifikator nur an die Tilde-Formen haengte -- Pfeil links
+    // und Umschalt+Pfeil links waren dieselben drei Oktette. Seit
+    // dieser Runde schickt `mods_of` ihn auch an die Buchstabenformen,
+    // und `key_shift()` beantwortet die Frage. Die Maus waehlt
+    // weiterhin, aber sie ist nicht mehr der einzige Weg.
     if s_down != 0 && (btn & 1) != 0 {
         let dd: u64 = s_down - 1
+        // Im mehrzeiligen Feld zieht die Maus die Auswahl auf: der
+        // Anker bleibt, wo gedrueckt wurde, die Marke folgt dem Zeiger.
+        if g(dd, D_KIND) == K_TEXTAREA {
+            let ty: u64 = g(dd, D_VAL)
+            if ty < TA_MAX {
+                let ay: u64 = tag(ty, TS_AY)
+                let ax: u64 = tag(ty, TS_AX)
+                ta_hit(dd, x, y)
+                tas(ty, TS_AY, ay)
+                tas(ty, TS_AX, ax)
+                dirty_wd(dd)
+            }
+            return
+        }
         if g(dd, D_KIND) == K_SLIDER {
             slider_setz(dd, x)
             fire(dd, K_SLIDER, g(dd, D_VAL), w)
@@ -6382,8 +6441,10 @@ fn decode(c: u64) -> u64 {
         // einen das andere, an der einen Stelle, an der alle Tasten
         // vorbeikommen.
         if c == 10 {
+            s_keymod = 0
             return KEY_ENTER
         }
+        s_keymod = 0
         return c
     }
     if s_esc == 1 {
@@ -6428,25 +6489,11 @@ fn decode(c: u64) -> u64 {
             return 0
         }
         s_esc = 0
-        if c == 65 {
-            return KEY_UP
-        }
-        if c == 66 {
-            return KEY_DOWN
-        }
-        if c == 67 {
-            return KEY_RIGHT
-        }
-        if c == 68 {
-            return KEY_LEFT
-        }
-        if c == 72 {
-            return KEY_HOME
-        }
-        if c == 70 {
-            return KEY_END
-        }
-        return 0
+        // OHNE Ziffern davor: kein Modifikator. `s_keymod` gehoert zur
+        // Taste, die hier gerade fertig wird, und muss deshalb hier
+        // geloescht werden und nicht beim naechsten Tastendruck.
+        s_keymod = 0
+        return letter_key(c)
     }
     // `ESC [ n ~` und `ESC [ n ; m ~`. Der Modifikator m ist der von
     // xterm: 2 = Umschalt, 3 = Alt, 5 = Steuerung, jeweils plus eins.
@@ -6461,7 +6508,11 @@ fn decode(c: u64) -> u64 {
         }
         s_esc = 0
         if c != 126 {
-            return 0
+            // RUNDE GUI-EDITOR: `ESC [ 1 A` -- eine Ziffer und dann ein
+            // BUCHSTABE. Bis hierher fiel das auf `return 0`, also auf
+            // eine verschluckte Taste.
+            s_keymod = 0
+            return letter_key(c)
         }
         return tilde(s_num, 0)
     }
@@ -6471,9 +6522,74 @@ fn decode(c: u64) -> u64 {
     }
     s_esc = 0
     if c != 126 {
-        return 0
+        // ==================================== RUNDE GUI-EDITOR
+        //
+        // `ESC [ 1 ; 2 D` -- UMSCHALT + PFEIL LINKS.
+        //
+        // Hier stand `return 0`: eine Folge, die nicht auf `~` endet,
+        // war eine unbekannte Folge und wurde weggeworfen. Genau das
+        // ist die lange Form der Pfeiltasten, und sie ist der Grund,
+        // warum dieses System bis zu dieser Runde keine Auswahl mit
+        // Umschalt kannte.
+        //
+        // Der Modifikator wird NICHT in die Tastennummer gerechnet:
+        // `KEY_LEFT` bleibt `KEY_LEFT`, damit jedes bestehende
+        // Programm die Taste weiter erkennt. Wer den Unterschied
+        // braucht, fragt `key_mod()`.
+        s_keymod = s_mod
+        return letter_key(c)
     }
+    s_keymod = s_mod
     return tilde(s_num, s_mod)
+}
+
+// RUNDE GUI-EDITOR: die sechs Tasten mit einem BUCHSTABEN als Finale.
+// Sie stehen hier einmal, statt an den drei Stellen, an denen eine
+// Fluchtfolge enden kann.
+fn letter_key(c: u64) -> u64 {
+    if c == 65 {
+        return KEY_UP
+    }
+    if c == 66 {
+        return KEY_DOWN
+    }
+    if c == 67 {
+        return KEY_RIGHT
+    }
+    if c == 68 {
+        return KEY_LEFT
+    }
+    if c == 72 {
+        return KEY_HOME
+    }
+    if c == 70 {
+        return KEY_END
+    }
+    return 0
+}
+
+// ==================================================== RUNDE GUI-EDITOR
+//
+// WELCHE MODIFIKATOREN BEI DER LETZTEN TASTE LAGEN.
+//
+// Die Zahl ist die von xterm, unveraendert so, wie sie auf der Leitung
+// stand: 2 = Umschalt, 3 = Alt, 5 = Strg, 6 = Strg+Umschalt. 0 heisst
+// "keiner" -- das ist der Normalfall und die kurze Form der Folge.
+//
+// WARUM NICHT IN DER TASTENNUMMER: `KEY_LEFT` ist in dreiundzwanzig
+// Programmen `KEY_LEFT`. Ein Umschalt+Links, das eine ANDERE Nummer
+// haette, waere fuer jedes davon eine unbekannte Taste; so bleibt es
+// dieselbe Taste, und nur wer fragt, sieht den Unterschied.
+fn key_mod() -> u64 {
+    return s_keymod
+}
+
+fn key_shift() -> bool {
+    return s_keymod == 2 || s_keymod == 4 || s_keymod == 6 || s_keymod == 8
+}
+
+fn key_ctrl() -> bool {
+    return s_keymod >= 5
 }
 
 fn tilde(n: u64, m: u64) -> u64 {
@@ -6530,6 +6646,1999 @@ fn tilde(n: u64, m: u64) -> u64 {
         return KEY_END
     }
     return 0
+}
+
+// ==================================================== RUNDE GUI-EDITOR
+//
+// K_TEXTAREA -- DAS MEHRZEILIGE TEXTFELD.
+//
+// ========================================================= WARUM ES FEHLTE
+//
+// Der Kopf dieser Datei sagt seit Runde K15 einen Satz, der bis heute
+// stimmte: "keine Umbrueche im Textfeld (es ist EINE Zeile)". Das
+// Textfeld `K_ENTRY` haelt einen Zeiger auf einen Puffer des Aufrufers,
+// eine Einfuegemarke und einen Anker -- und das reicht fuer eine
+// Adresszeile, einen Dateinamen und ein Kennwort.
+//
+// Es reicht fuer keinen Editor. Ein Editor braucht ZEILEN, und Zeilen
+// sind nicht "ein Puffer mit \n darin": wer eine Datei mit
+// fuenftausend Zeilen als EIN Oktettfeld haelt und in Zeile drei ein
+// Zeichen einfuegt, kopiert alle Oktette dahinter um EINS nach hinten.
+// Das ist bei jedem Tastendruck die ganze Datei.
+//
+// ============================================== WIE DER TEXT HIER LIEGT
+//
+// Als ZEILENTAFEL. Jede Zeile ist ein eigener Block aus `map_surface`
+// (ein anonymes mmap, dasselbe, was wlibc fuer die Malflaeche nimmt),
+// und die Tafel haelt je Zeile drei Woerter:
+//
+//     LN_P    Zeiger auf die Oktette der Zeile (ohne Zeilenumbruch)
+//     LN_N    wie viele Oktette benutzt sind
+//     LN_CAP  wie viele Platz haben
+//
+// Ein Zeichen einfuegen kopiert damit nur den REST DIESER ZEILE, nicht
+// den Rest der Datei -- bei einer Zeile von 60 Zeichen sind das 60
+// Oktette statt 200 000. Eine Zeile teilen (Eingabetaste) oder zwei
+// zusammenziehen (Rueckschritt am Zeilenanfang) verschiebt EINTRAEGE
+// IN DER TAFEL (je 3 Woerter), nicht den Text.
+//
+// WARUM NICHT EIN LUECKENPUFFER. Er waere fuer das Tippen genauso gut
+// und fuer "gehe zu Zeile 4000" schlechter: dort muesste er zaehlen,
+// die Zeilentafel rechnet. Und der Zeichner braucht genau das --
+// "gib mir Zeile 312 bis 348" -- bei jedem einzelnen Bild.
+//
+// ============================================ WAS DER ZEICHNER WIRKLICH MALT
+//
+// NUR DEN SICHTBAREN AUSSCHNITT. `paint_ta` faengt bei `TA_TOP` an und
+// hoert nach so vielen Zeilen auf, wie in das Rechteck passen -- bei
+// einem Fenster von 700 Bildpunkten sind das rund 40 Zeilen, ob die
+// Datei nun 50 oder 50 000 hat. Ohne das ist eine grosse Datei nicht
+// langsam, sondern unbedienbar.
+//
+// DIE SCHRIFT IST DIE FESTE (`F_MONO`). Das ist keine Geschmacksfrage:
+// mit einer festen Zellenbreite ist "welche Spalte ist an Bildpunkt x"
+// eine Division statt einer Messung Zeichen fuer Zeichen, und beim
+// Ziehen mit der Maus wird diese Frage je Bewegung gestellt.
+//
+// ====================================================== WAS ES KANN
+//
+// Marke mit Pfeilen, Pos1/Ende, Bild auf/ab, Strg+Pfeil wortweise,
+// Strg+Pos1/Ende an Anfang und Ende der Datei. Auswahl mit Umschalt
+// (siehe `mods_of` in kernel/drv/hid/kbd.fi -- diese Runde hat die
+// Umschalttaste ueberhaupt erst auf die Leitung gebracht) und mit der
+// Maus, samt Ziehen. Zwischenablage ueber `wlibc.clip_put/clip_take`,
+// also dieselbe, die der Dateimanager benutzt. Rueckgaengig und
+// Wiederholen. Zwei Rollbalken.
+//
+// DIE OKTETTE GEHOEREN DIESEM WIDGET und nicht dem Aufrufer -- das ist
+// der Unterschied zu `K_ENTRY`. Ein Editor, der seinen Text als festes
+// Feld anlegen muesste, haette wieder eine Hoechstgroesse im
+// Quelltext.
+const K_TEXTAREA: u64 = 18
+
+// Die Zeilentafel: je Zeile drei Woerter.
+const LN_P: u64 = 0
+const LN_N: u64 = 1
+const LN_CAP: u64 = 2
+const LN_W: u64 = 3
+
+// Wie viele Zeilen und wie viele Textfelder es geben darf.
+//
+// DIE ZAHLEN SIND GEMESSEN UND NICHT GERATEN. 20 000 Zeilen zu drei
+// Woertern sind 480 KiB Tafel -- das ist die eine grosse feste Tafel
+// dieses Widgets, und sie liegt in `.bss`, also im Abbild als Luecke
+// und nicht als Oktette. Die Messlatte dieser Runde nennt 5 000
+// Zeilen; das Vierfache davon ist Luft, ohne dass die Tafel in die
+// Groessenordnung kommt, in der sie selbst das Problem waere.
+const TA_MAXL: u64 = 20000
+const TA_MAX: u64 = 2 // wie viele mehrzeilige Felder gleichzeitig
+
+// Der Zustand je Textfeld, neben der Zeilentafel.
+const TS_NL: u64 = 0 // wie viele Zeilen belegt sind
+const TS_CY: u64 = 1 // die Marke: Zeile
+const TS_CX: u64 = 2 // die Marke: Oktett IN der Zeile
+const TS_AY: u64 = 3 // der Anker der Auswahl: Zeile
+const TS_AX: u64 = 4 // der Anker: Oktett
+const TS_TOP: u64 = 5 // erste sichtbare Zeile
+const TS_LEFT: u64 = 6 // waagerechter Versatz in ZEICHEN
+const TS_DIRTY: u64 = 7 // veraendert seit dem letzten Sichern
+const TS_WANT: u64 = 8 // Wunschspalte fuer Hoch/Runter
+const TS_UN: u64 = 9 // wie viele Schritte im Rueckgaengig-Stapel
+const TS_UAT: u64 = 10 // wo im Stapel wir stehen (fuer Wiederholen)
+const TS_TAB: u64 = 11 // Tabulatorbreite in Zeichen
+const TS_LANG: u64 = 12 // welche Sprache eingefaerbt wird
+const TS_RO: u64 = 13 // nur lesen
+const TS_EOL: u64 = 14 // 0 = LF, 1 = CRLF -- was beim Sichern geschrieben wird
+const TS_F: u64 = 15
+
+static mut ta_line: [u64; 60000] = [0 as u64; 60000] // TA_MAXL * LN_W
+static mut ta_st: [u64; 30] = [0 as u64; 30] // TA_MAX * TS_F
+static mut ta_n: u64 = 0 // wie viele Textfelder angelegt sind
+static mut ta_wd: [u64; 2] = [0 as u64; 2] // Widget-Nummer je Textfeld
+
+// DIE ZEILENTAFEL GEHOERT IMMER GENAU EINEM FELD. Zwei mehrzeilige
+// Felder gleichzeitig gibt es in diesem System nicht (der Editor hat
+// EINES und schaltet die Reiter darauf um) -- `TA_MAX` ist 2, damit ein
+// Dialog daneben eines haben darf, und die Tafel bekommt das Feld 0.
+// Fuer ein zweites Feld faengt sie bei TA_MAXL/2 an.
+fn ta_base(t: u64) -> u64 {
+    return t * (TA_MAXL / TA_MAX)
+}
+
+fn ta_maxl(t: u64) -> u64 {
+    let _v: u64 = t
+    return TA_MAXL / TA_MAX
+}
+
+fn tag(t: u64, f: u64) -> u64 {
+    if t >= TA_MAX || f >= TS_F {
+        return 0
+    }
+    return ta_st[(t * TS_F + f) as usize]
+}
+
+fn tas(t: u64, f: u64, v: u64) {
+    if t >= TA_MAX || f >= TS_F {
+        return
+    }
+    ta_st[(t * TS_F + f) as usize] = v
+}
+
+fn lg(t: u64, y: u64, f: u64) -> u64 {
+    if y >= ta_maxl(t) {
+        return 0
+    }
+    return ta_line[((ta_base(t) + y) * LN_W + f) as usize]
+}
+
+fn ls_(t: u64, y: u64, f: u64, v: u64) {
+    if y >= ta_maxl(t) {
+        return
+    }
+    ta_line[((ta_base(t) + y) * LN_W + f) as usize] = v
+}
+
+// EINE ZEILE BEKOMMT PLATZ. Aufgerundet auf 64 Oktette, damit das
+// Tippen in einer Zeile nicht bei jedem zweiten Zeichen neu abbildet.
+//
+// `map_surface` ist ein anonymes mmap und gibt nie etwas zurueck --
+// eine Zeile, die kuerzer wird, behaelt ihren Block. Das ist Absicht:
+// ein Editor, der beim Loeschen Speicher zurueckgibt, holt ihn beim
+// naechsten Tippen wieder, und dieses System hat keinen Allokator, der
+// das billig koennte.
+fn ln_room(t: u64, y: u64, want: u64) -> bool {
+    if lg(t, y, LN_CAP) >= want {
+        return true
+    }
+    var cap: u64 = (want + 63) & 0xFFFFFFFFFFFFFFC0
+    if cap < 64 {
+        cap = 64
+    }
+    let p: u64 = wlibc.map_surface(cap)
+    if ulib.bad(p) || p == 0 {
+        return false
+    }
+    let alt: u64 = lg(t, y, LN_P)
+    let n: u64 = lg(t, y, LN_N)
+    if alt != 0 && n != 0 {
+        var i: u64 = 0
+        while i < n {
+            __mmio_write8((p + i) as *mut u8, __mmio_read8((alt + i) as *mut u8))
+            i = i + 1
+        }
+    }
+    ls_(t, y, LN_P, p)
+    ls_(t, y, LN_CAP, cap)
+    return true
+}
+
+// ------------------------------------------------- die Zeilen umschichten
+//
+// EINE ZEILE EINFUEGEN ODER WEGNEHMEN VERSCHIEBT EINTRAEGE, NICHT TEXT.
+// Drei Woerter je Zeile: bei 5000 Zeilen sind das im schlimmsten Fall
+// 120 KiB Umkopieren, und das geschieht bei der EINGABETASTE, nicht bei
+// jedem Zeichen.
+fn ln_open(t: u64, at: u64) -> bool {
+    let n: u64 = tag(t, TS_NL)
+    if n + 1 >= ta_maxl(t) {
+        return false
+    }
+    var y: u64 = n
+    while y > at {
+        ls_(t, y, LN_P, lg(t, y - 1, LN_P))
+        ls_(t, y, LN_N, lg(t, y - 1, LN_N))
+        ls_(t, y, LN_CAP, lg(t, y - 1, LN_CAP))
+        y = y - 1
+    }
+    ls_(t, at, LN_P, 0)
+    ls_(t, at, LN_N, 0)
+    ls_(t, at, LN_CAP, 0)
+    tas(t, TS_NL, n + 1)
+    return true
+}
+
+fn ln_drop(t: u64, at: u64) {
+    let n: u64 = tag(t, TS_NL)
+    if at >= n {
+        return
+    }
+    var y: u64 = at
+    while y + 1 < n {
+        ls_(t, y, LN_P, lg(t, y + 1, LN_P))
+        ls_(t, y, LN_N, lg(t, y + 1, LN_N))
+        ls_(t, y, LN_CAP, lg(t, y + 1, LN_CAP))
+        y = y + 1
+    }
+    tas(t, TS_NL, n - 1)
+}
+
+// --------------------------------------------------- Oktette in der Zeile
+
+fn ln_insert(t: u64, y: u64, at: u64, p: u64, n: u64) -> bool {
+    if n == 0 {
+        return true
+    }
+    let have: u64 = lg(t, y, LN_N)
+    if !ln_room(t, y, have + n) {
+        return false
+    }
+    let dst: u64 = lg(t, y, LN_P)
+    var i: u64 = have
+    while i > at {
+        __mmio_write8((dst + i + n - 1) as *mut u8, __mmio_read8((dst + i - 1) as *mut u8))
+        i = i - 1
+    }
+    i = 0
+    while i < n {
+        __mmio_write8((dst + at + i) as *mut u8, __mmio_read8((p + i) as *mut u8))
+        i = i + 1
+    }
+    ls_(t, y, LN_N, have + n)
+    return true
+}
+
+fn ln_erase(t: u64, y: u64, at: u64, n: u64) {
+    let have: u64 = lg(t, y, LN_N)
+    if at >= have || n == 0 {
+        return
+    }
+    var weg: u64 = n
+    if at + weg > have {
+        weg = have - at
+    }
+    let p: u64 = lg(t, y, LN_P)
+    var i: u64 = at
+    while i + weg < have {
+        __mmio_write8((p + i) as *mut u8, __mmio_read8((p + i + weg) as *mut u8))
+        i = i + 1
+    }
+    ls_(t, y, LN_N, have - weg)
+}
+
+// ------------------------------------------------------ Zeichengrenzen
+//
+// RUNDE I18N gilt hier genauso wie im einzeiligen Feld: die Marke steht
+// IMMER auf einer Zeichengrenze, sonst zerteilt der naechste
+// Rueckschritt einen Umlaut.
+fn ta_back(t: u64, y: u64, at: u64) -> u64 {
+    if at == 0 {
+        return 0
+    }
+    let p: u64 = lg(t, y, LN_P)
+    var q: u64 = at - 1
+    while q > 0 && (__mmio_read8((p + q) as *mut u8) as u64 & 0xC0) == 0x80 {
+        q = q - 1
+    }
+    return q
+}
+
+fn ta_fwd(t: u64, y: u64, at: u64) -> u64 {
+    let n: u64 = lg(t, y, LN_N)
+    if at >= n {
+        return n
+    }
+    let p: u64 = lg(t, y, LN_P)
+    var q: u64 = at + 1
+    while q < n && (__mmio_read8((p + q) as *mut u8) as u64 & 0xC0) == 0x80 {
+        q = q + 1
+    }
+    return q
+}
+
+// Wie viele ZEICHEN stehen in den ersten `n` Oktetten? Das ist die
+// Spalte, und die Spalte ist bei fester Schrift auch der Ort.
+fn ta_cols(t: u64, y: u64, n: u64) -> u64 {
+    let p: u64 = lg(t, y, LN_P)
+    var i: u64 = 0
+    var c: u64 = 0
+    while i < n {
+        if (__mmio_read8((p + i) as *mut u8) as u64 & 0xC0) != 0x80 {
+            c = c + 1
+        }
+        i = i + 1
+    }
+    return c
+}
+
+// Und zurueck: an welchem OKTETT faengt die Spalte `col` an?
+fn ta_at_col(t: u64, y: u64, col: u64) -> u64 {
+    let n: u64 = lg(t, y, LN_N)
+    let p: u64 = lg(t, y, LN_P)
+    var i: u64 = 0
+    var c: u64 = 0
+    while i < n {
+        if (__mmio_read8((p + i) as *mut u8) as u64 & 0xC0) != 0x80 {
+            if c == col {
+                return i
+            }
+            c = c + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// ------------------------------------------------------------ die Auswahl
+
+fn ta_has_sel(t: u64) -> bool {
+    return tag(t, TS_AY) != tag(t, TS_CY) || tag(t, TS_AX) != tag(t, TS_CX)
+}
+
+fn ta_sel_clear(t: u64) {
+    tas(t, TS_AY, tag(t, TS_CY))
+    tas(t, TS_AX, tag(t, TS_CX))
+}
+
+// Der Anfang der Auswahl in Lesereihenfolge -- der Anker kann HINTER
+// der Marke liegen, wenn rueckwaerts ausgewaehlt wurde.
+fn ta_sel_first(t: u64) -> u64 {
+    let ay: u64 = tag(t, TS_AY)
+    let cy: u64 = tag(t, TS_CY)
+    if ay < cy {
+        return (ay << 32) | tag(t, TS_AX)
+    }
+    if cy < ay {
+        return (cy << 32) | tag(t, TS_CX)
+    }
+    if tag(t, TS_AX) <= tag(t, TS_CX) {
+        return (ay << 32) | tag(t, TS_AX)
+    }
+    return (cy << 32) | tag(t, TS_CX)
+}
+
+fn ta_sel_last(t: u64) -> u64 {
+    let ay: u64 = tag(t, TS_AY)
+    let cy: u64 = tag(t, TS_CY)
+    if ay < cy {
+        return (cy << 32) | tag(t, TS_CX)
+    }
+    if cy < ay {
+        return (ay << 32) | tag(t, TS_AX)
+    }
+    if tag(t, TS_AX) <= tag(t, TS_CX) {
+        return (cy << 32) | tag(t, TS_CX)
+    }
+    return (ay << 32) | tag(t, TS_AX)
+}
+
+// Die Auswahl wegnehmen. Danach steht die Marke an ihrem Anfang.
+fn ta_del_sel(t: u64) -> bool {
+    if !ta_has_sel(t) {
+        return false
+    }
+    let a: u64 = ta_sel_first(t)
+    let b: u64 = ta_sel_last(t)
+    let ay: u64 = a >> 32
+    let ax: u64 = a & 0xFFFFFFFF
+    let by: u64 = b >> 32
+    let bx: u64 = b & 0xFFFFFFFF
+    if ay == by {
+        ln_erase(t, ay, ax, bx - ax)
+    } else {
+        // Der Rest der ersten Zeile faellt weg, der Rest der letzten
+        // wird angehaengt, alles dazwischen verschwindet.
+        ln_erase(t, ay, ax, lg(t, ay, LN_N) - ax)
+        let rest: u64 = lg(t, by, LN_N)
+        if rest > bx {
+            let _o: bool = ln_insert(t, ay, ax, lg(t, by, LN_P) + bx, rest - bx)
+        }
+        var k: u64 = ay + 1
+        while k <= by {
+            ln_drop(t, ay + 1)
+            k = k + 1
+        }
+    }
+    tas(t, TS_CY, ay)
+    tas(t, TS_CX, ax)
+    ta_sel_clear(t)
+    return true
+}
+
+// ================================================== RUECKGAENGIG UND WIEDERHOLEN
+//
+// WAS GESICHERT WIRD: der ganze Text, als EIN Schnappschuss je Schritt.
+//
+// Das ist die grobe Art, und sie steht hier mit Begruendung statt mit
+// Entschuldigung. Die feine Art (je Schritt nur "an Stelle x kamen
+// diese drei Oktette dazu") braucht eine Umkehrung je Operation, und
+// jede davon ist eine eigene Fehlerquelle -- eine falsche Umkehrung
+// faellt erst auf, wenn jemand zwanzig Schritte zurueckgeht und der
+// Text danach kaputt ist.
+//
+// Ein Schnappschuss kann nicht falsch sein. Was er kostet, ist
+// Speicher, und zwar die Dateigroesse mal UN_MAX; bei einer Datei von
+// 200 KiB und 16 Schritten sind das 3 MiB, und dieses System hat 512.
+// Wer eine Datei von 10 MiB bearbeitet, bekommt keinen Schritt mehr
+// (`ta_push_undo` gibt dann still auf, statt den Editor anzuhalten) --
+// das ist ehrlicher als ein Stapel, der gelegentlich Unsinn einspielt.
+const UN_MAX: u64 = 16
+const UN_P: u64 = 0 // Zeiger auf den Schnappschuss
+const UN_N: u64 = 1 // seine Laenge
+const UN_CAP: u64 = 2
+const UN_CY: u64 = 3 // wo die Marke stand
+const UN_CX: u64 = 4
+const UN_W: u64 = 5
+
+static mut ta_un: [u64; 160] = [0 as u64; 160] // TA_MAX * UN_MAX * UN_W
+
+fn ug(t: u64, k: u64, f: u64) -> u64 {
+    return ta_un[((t * UN_MAX + k) * UN_W + f) as usize]
+}
+
+fn us(t: u64, k: u64, f: u64, v: u64) {
+    ta_un[((t * UN_MAX + k) * UN_W + f) as usize] = v
+}
+
+// Wie viele Oktette der ganze Text braucht (mit je einem \n).
+fn ta_bytes(t: u64) -> u64 {
+    let n: u64 = tag(t, TS_NL)
+    var sum: u64 = 0
+    var y: u64 = 0
+    while y < n {
+        sum = sum + lg(t, y, LN_N) + 1
+        y = y + 1
+    }
+    return sum
+}
+
+// Den ganzen Text in einen Puffer schreiben. Gibt die Laenge zurueck.
+fn ta_copy_out(t: u64, dst: u64, max: u64) -> u64 {
+    let n: u64 = tag(t, TS_NL)
+    var at: u64 = 0
+    var y: u64 = 0
+    while y < n {
+        let ln: u64 = lg(t, y, LN_N)
+        let p: u64 = lg(t, y, LN_P)
+        var i: u64 = 0
+        while i < ln && at < max {
+            __mmio_write8((dst + at) as *mut u8, __mmio_read8((p + i) as *mut u8))
+            at = at + 1
+            i = i + 1
+        }
+        if y + 1 < n && at < max {
+            __mmio_write8((dst + at) as *mut u8, 10 as u8)
+            at = at + 1
+        }
+        y = y + 1
+    }
+    return at
+}
+
+fn ta_push_undo(t: u64) {
+    let need: u64 = ta_bytes(t) + 16
+    let at: u64 = tag(t, TS_UAT)
+    // Ein neuer Schritt wirft alles weg, was "vorwaerts" lag -- wer
+    // nach dem Zurueckgehen tippt, hat einen neuen Ast aufgemacht.
+    tas(t, TS_UN, at)
+    var k: u64 = at
+    if k >= UN_MAX {
+        // Der Stapel ist voll: den aeltesten wegschieben.
+        var j: u64 = 0
+        while j + 1 < UN_MAX {
+            us(t, j, UN_P, ug(t, j + 1, UN_P))
+            us(t, j, UN_N, ug(t, j + 1, UN_N))
+            us(t, j, UN_CAP, ug(t, j + 1, UN_CAP))
+            us(t, j, UN_CY, ug(t, j + 1, UN_CY))
+            us(t, j, UN_CX, ug(t, j + 1, UN_CX))
+            j = j + 1
+        }
+        k = UN_MAX - 1
+    }
+    if ug(t, k, UN_CAP) < need {
+        let p: u64 = wlibc.map_surface((need + 4095) & 0xFFFFFFFFFFFFF000)
+        if ulib.bad(p) || p == 0 {
+            return
+        }
+        us(t, k, UN_P, p)
+        us(t, k, UN_CAP, (need + 4095) & 0xFFFFFFFFFFFFF000)
+    }
+    us(t, k, UN_N, ta_copy_out(t, ug(t, k, UN_P), ug(t, k, UN_CAP)))
+    us(t, k, UN_CY, tag(t, TS_CY))
+    us(t, k, UN_CX, tag(t, TS_CX))
+    tas(t, TS_UN, k + 1)
+    tas(t, TS_UAT, k + 1)
+}
+
+fn ta_restore(t: u64, k: u64) {
+    ta_set_text(t, ug(t, k, UN_P), ug(t, k, UN_N))
+    tas(t, TS_CY, ug(t, k, UN_CY))
+    tas(t, TS_CX, ug(t, k, UN_CX))
+    ta_sel_clear(t)
+    ta_follow(t)
+}
+
+// ------------------------------------------------------------- Text setzen
+
+fn ta_clear(t: u64) {
+    tas(t, TS_NL, 1)
+    ls_(t, 0, LN_N, 0)
+    tas(t, TS_CY, 0)
+    tas(t, TS_CX, 0)
+    tas(t, TS_TOP, 0)
+    tas(t, TS_LEFT, 0)
+    ta_sel_clear(t)
+}
+
+// EINEN GANZEN TEXT EINLESEN. Das ist der Weg, auf dem eine Datei
+// hereinkommt: einmal durch die Oktette, bei jedem \n eine Zeile
+// weiter. \r vor dem \n wird geschluckt und GEMERKT (`TS_EOL`), damit
+// eine Datei aus der anderen Welt beim Sichern so bleibt, wie sie war.
+fn ta_set_text(t: u64, p: u64, n: u64) {
+    tas(t, TS_NL, 0)
+    tas(t, TS_EOL, 0)
+    var y: u64 = 0
+    var start: u64 = 0
+    var i: u64 = 0
+    if !ln_open(t, 0) {
+        return
+    }
+    while i <= n {
+        if i == n || __mmio_read8((p + i) as *mut u8) as u64 == 10 {
+            var ende: u64 = i
+            if ende > start && __mmio_read8((p + ende - 1) as *mut u8) as u64 == 13 {
+                ende = ende - 1
+                tas(t, TS_EOL, 1)
+            }
+            if ende > start {
+                let _o: bool = ln_insert(t, y, 0, p + start, ende - start)
+            }
+            if i == n {
+                i = i + 1
+            } else {
+                y = y + 1
+                if y >= ta_maxl(t) {
+                    i = n + 1
+                } else if !ln_open(t, y) {
+                    i = n + 1
+                } else {
+                    start = i + 1
+                    i = i + 1
+                }
+            }
+        } else {
+            i = i + 1
+        }
+    }
+    tas(t, TS_CY, 0)
+    tas(t, TS_CX, 0)
+    tas(t, TS_TOP, 0)
+    tas(t, TS_LEFT, 0)
+    ta_sel_clear(t)
+}
+
+// ---------------------------------------------------------- Text einfuegen
+
+// EINEN BLOCK EINFUEGEN, mit Zeilenumbruechen darin -- das ist das
+// Einsetzen aus der Zwischenablage und zugleich der Weg, auf dem EIN
+// Zeichen hereinkommt (dann ohne Umbruch).
+fn ta_insert(t: u64, p: u64, n: u64) {
+    if tag(t, TS_RO) != 0 {
+        return
+    }
+    let _d: bool = ta_del_sel(t)
+    var i: u64 = 0
+    var start: u64 = 0
+    while i <= n {
+        if i == n || __mmio_read8((p + i) as *mut u8) as u64 == 10 {
+            var ende: u64 = i
+            if ende > start && __mmio_read8((p + ende - 1) as *mut u8) as u64 == 13 {
+                ende = ende - 1
+            }
+            if ende > start {
+                let y: u64 = tag(t, TS_CY)
+                if ln_insert(t, y, tag(t, TS_CX), p + start, ende - start) {
+                    tas(t, TS_CX, tag(t, TS_CX) + (ende - start))
+                }
+            }
+            if i < n {
+                ta_split(t)
+            }
+            start = i + 1
+        }
+        i = i + 1
+    }
+    tas(t, TS_DIRTY, 1)
+    ta_sel_clear(t)
+    ta_follow(t)
+}
+
+// DIE EINGABETASTE: die Zeile an der Marke teilen.
+fn ta_split(t: u64) {
+    let y: u64 = tag(t, TS_CY)
+    let at: u64 = tag(t, TS_CX)
+    let n: u64 = lg(t, y, LN_N)
+    if !ln_open(t, y + 1) {
+        return
+    }
+    if n > at {
+        let _o: bool = ln_insert(t, y + 1, 0, lg(t, y, LN_P) + at, n - at)
+        ln_erase(t, y, at, n - at)
+    }
+    tas(t, TS_CY, y + 1)
+    tas(t, TS_CX, 0)
+}
+
+// ZWEI ZEILEN ZUSAMMENZIEHEN -- Rueckschritt am Zeilenanfang.
+fn ta_join(t: u64, y: u64) {
+    let n: u64 = lg(t, y, LN_N)
+    let m: u64 = lg(t, y + 1, LN_N)
+    if m > 0 {
+        let _o: bool = ln_insert(t, y, n, lg(t, y + 1, LN_P), m)
+    }
+    ln_drop(t, y + 1)
+    tas(t, TS_CY, y)
+    tas(t, TS_CX, n)
+}
+
+// ------------------------------------------------------------- die Masse
+//
+// Zeilenhoehe und Zellenbreite der FESTEN Schrift. Sie stehen an einer
+// Stelle, weil der Zeichner, die Trefferpruefung und der Bildlauf
+// dieselbe Zahl brauchen -- rechnet einer anders, klickt man daneben.
+fn ta_lh() -> u64 {
+    return wlibc.text_h(wlibc.px_mono()) + 2
+}
+
+fn ta_cw() -> u64 {
+    let c: u64 = wlibc.mono_cell(wlibc.px_mono())
+    if c == 0 {
+        return 8
+    }
+    return c
+}
+
+// Wie viele Zeilen und Spalten in das Feld passen.
+fn ta_rows(i: u64) -> u64 {
+    let h: u64 = g(i, D_H)
+    let lh: u64 = ta_lh()
+    if lh == 0 || h < 4 {
+        return 1
+    }
+    let r: u64 = (h - 4) / lh
+    if r == 0 {
+        return 1
+    }
+    return r
+}
+
+fn ta_gutter(t: u64) -> u64 {
+    if tag(t, TS_LANG) == 0xFF {
+        return 0
+    }
+    // Die Spalte mit den Zeilennummern ist so breit wie die groesste
+    // Nummer, mindestens drei Stellen -- sonst springt der Text, wenn
+    // die Datei von 999 auf 1000 Zeilen waechst.
+    var d: u64 = 3
+    var n: u64 = tag(t, TS_NL)
+    var k: u64 = 1000
+    while n >= k && d < 7 {
+        d = d + 1
+        k = k * 10
+    }
+    return d * ta_cw() + 10
+}
+
+fn ta_cols_fit(i: u64, t: u64) -> u64 {
+    let w: u64 = g(i, D_W)
+    let cw: u64 = ta_cw()
+    let gut: u64 = ta_gutter(t)
+    if w <= gut + scroll_w() + 4 || cw == 0 {
+        return 1
+    }
+    return (w - gut - scroll_w() - 4) / cw
+}
+
+// ============================================= DER BILDLAUF FOLGT DER MARKE
+//
+// Ohne diese Funktion tippt man aus dem Fenster heraus: die Marke geht
+// weiter, das Bild bleibt stehen. Sie wird nach JEDER Bewegung und
+// jeder Aenderung gerufen.
+fn ta_follow(t: u64) {
+    let i: u64 = ta_wd[(t) as usize]
+    if i >= nwd {
+        return
+    }
+    let rows: u64 = ta_rows(i)
+    let cy: u64 = tag(t, TS_CY)
+    var top: u64 = tag(t, TS_TOP)
+    if cy < top {
+        top = cy
+    }
+    if cy >= top + rows {
+        top = cy + 1 - rows
+    }
+    let n: u64 = tag(t, TS_NL)
+    if top + rows > n {
+        if n > rows {
+            if top > n - rows {
+                top = n - rows
+            }
+        } else {
+            top = 0
+        }
+    }
+    tas(t, TS_TOP, top)
+    // Und waagerecht dasselbe, in ZEICHEN.
+    let cols: u64 = ta_cols_fit(i, t)
+    let col: u64 = ta_cols(t, cy, tag(t, TS_CX))
+    var left: u64 = tag(t, TS_LEFT)
+    if col < left {
+        left = col
+    }
+    if col >= left + cols {
+        left = col + 1 - cols
+    }
+    tas(t, TS_LEFT, left)
+}
+
+// ------------------------------------------------------------ die Bewegung
+
+fn ta_clamp(t: u64) {
+    let n: u64 = tag(t, TS_NL)
+    if tag(t, TS_CY) >= n {
+        tas(t, TS_CY, n - 1)
+    }
+    let ln: u64 = lg(t, tag(t, TS_CY), LN_N)
+    if tag(t, TS_CX) > ln {
+        tas(t, TS_CX, ln)
+    }
+}
+
+// WO DER TEXT EINER ZEILE ANFAENGT -- also hinter der Einrueckung.
+//
+// Sie wird an ZWEI Stellen gebraucht: Pos1 springt zuerst hierher (und
+// erst beim zweiten Druck an den Rand), und die Eingabetaste nimmt
+// genau diese Oktette auf die neue Zeile mit. Deshalb steht die
+// Rechnung einmal und nicht zweimal.
+//
+// Eine Zeile, die NUR aus Leerzeichen besteht, hat keinen Textanfang;
+// dann kommt 0 heraus, und Pos1 tut das Richtige (an den Rand).
+fn ta_einzug(t: u64, y: u64) -> u64 {
+    let p: u64 = lg(t, y, LN_P)
+    let n: u64 = lg(t, y, LN_N)
+    var q: u64 = 0
+    while q < n {
+        let c: u64 = __mmio_read8((p + q) as *mut u8) as u64
+        if c != 32 && c != 9 {
+            return q
+        }
+        q = q + 1
+    }
+    return 0
+}
+
+// WORTWEISE. Ein "Wort" ist hier, was auch der Rest dieses Systems ein
+// Wort nennt: Buchstaben, Ziffern und der Unterstrich. Alles andere
+// trennt.
+fn ta_isword(c: u64) -> bool {
+    if c >= 48 && c <= 57 {
+        return true
+    }
+    if c >= 65 && c <= 90 {
+        return true
+    }
+    if c >= 97 && c <= 122 {
+        return true
+    }
+    if c == 95 || c >= 128 {
+        return true
+    }
+    return false
+}
+
+fn ta_word_left(t: u64) {
+    var y: u64 = tag(t, TS_CY)
+    var x: u64 = tag(t, TS_CX)
+    if x == 0 {
+        if y == 0 {
+            return
+        }
+        tas(t, TS_CY, y - 1)
+        tas(t, TS_CX, lg(t, y - 1, LN_N))
+        return
+    }
+    let p: u64 = lg(t, y, LN_P)
+    // Erst das Trennende ueberspringen, dann das Wort.
+    while x > 0 && !ta_isword(__mmio_read8((p + ta_back(t, y, x)) as *mut u8) as u64) {
+        x = ta_back(t, y, x)
+    }
+    while x > 0 && ta_isword(__mmio_read8((p + ta_back(t, y, x)) as *mut u8) as u64) {
+        x = ta_back(t, y, x)
+    }
+    tas(t, TS_CX, x)
+}
+
+fn ta_word_right(t: u64) {
+    let y: u64 = tag(t, TS_CY)
+    let n: u64 = lg(t, y, LN_N)
+    var x: u64 = tag(t, TS_CX)
+    if x >= n {
+        if y + 1 < tag(t, TS_NL) {
+            tas(t, TS_CY, y + 1)
+            tas(t, TS_CX, 0)
+        }
+        return
+    }
+    let p: u64 = lg(t, y, LN_P)
+    while x < n && ta_isword(__mmio_read8((p + x) as *mut u8) as u64) {
+        x = ta_fwd(t, y, x)
+    }
+    while x < n && !ta_isword(__mmio_read8((p + x) as *mut u8) as u64) {
+        x = ta_fwd(t, y, x)
+    }
+    tas(t, TS_CX, x)
+}
+
+// Hoch und runter halten die WUNSCHSPALTE fest: wer in einer langen
+// Zeile steht, durch eine kurze faehrt und wieder in eine lange kommt,
+// landet dort, wo er angefangen hat. Ohne das klebt die Marke an der
+// kuerzesten Zeile, durch die sie gekommen ist.
+fn ta_updown(t: u64, hoch: bool, n: u64) {
+    var want: u64 = tag(t, TS_WANT)
+    let y0: u64 = tag(t, TS_CY)
+    if want == 0xFFFFFFFFFFFFFFFF {
+        want = ta_cols(t, y0, tag(t, TS_CX))
+    }
+    var y: u64 = y0
+    if hoch {
+        if y < n {
+            y = 0
+        } else {
+            y = y - n
+        }
+    } else {
+        y = y + n
+        if y >= tag(t, TS_NL) {
+            y = tag(t, TS_NL) - 1
+        }
+    }
+    tas(t, TS_CY, y)
+    tas(t, TS_CX, ta_at_col(t, y, want))
+    tas(t, TS_WANT, want)
+}
+
+// ======================================================== DIE TASTATUR
+//
+// EINE Stelle, an der entschieden wird, was eine Taste tut. Der
+// Modifikator kommt aus `key_mod()` -- diese Runde hat ihn auf die
+// Leitung gebracht (kernel/drv/hid/kbd.fi, `mods_of`), vorher war
+// Umschalt+Links von Links nicht zu unterscheiden.
+//
+// DIE AUSWAHL IST EINE REGEL UND KEINE SONDERBEHANDLUNG: vor jeder
+// Bewegung wird gefragt, ob Umschalt liegt. Wenn ja, bleibt der Anker
+// stehen; wenn nein, wird er nachgezogen. Damit waehlt JEDE
+// Bewegungstaste aus, auch die, an die man zuerst nicht denkt
+// (Strg+Pos1, Bild ab).
+fn ta_key(i: u64, k: u64) {
+    let t: u64 = g(i, D_VAL)
+    if t >= TA_MAX {
+        return
+    }
+    let shift: bool = key_shift()
+    let ctrl: bool = key_ctrl()
+    let rows: u64 = ta_rows(i)
+    var bewegt: bool = false
+    var geaendert: bool = false
+    // Die Wunschspalte gilt nur fuer Hoch/Runter in Folge.
+    if k != KEY_UP && k != KEY_DOWN && k != KEY_PGUP && k != KEY_PGDN {
+        tas(t, TS_WANT, 0xFFFFFFFFFFFFFFFF)
+    }
+
+    if k == KEY_LEFT {
+        if ctrl {
+            ta_word_left(t)
+        } else if ta_has_sel(t) && !shift {
+            let a: u64 = ta_sel_first(t)
+            tas(t, TS_CY, a >> 32)
+            tas(t, TS_CX, a & 0xFFFFFFFF)
+        } else if tag(t, TS_CX) > 0 {
+            tas(t, TS_CX, ta_back(t, tag(t, TS_CY), tag(t, TS_CX)))
+        } else if tag(t, TS_CY) > 0 {
+            tas(t, TS_CY, tag(t, TS_CY) - 1)
+            tas(t, TS_CX, lg(t, tag(t, TS_CY), LN_N))
+        }
+        bewegt = true
+    } else if k == KEY_RIGHT {
+        if ctrl {
+            ta_word_right(t)
+        } else if ta_has_sel(t) && !shift {
+            let b: u64 = ta_sel_last(t)
+            tas(t, TS_CY, b >> 32)
+            tas(t, TS_CX, b & 0xFFFFFFFF)
+        } else if tag(t, TS_CX) < lg(t, tag(t, TS_CY), LN_N) {
+            tas(t, TS_CX, ta_fwd(t, tag(t, TS_CY), tag(t, TS_CX)))
+        } else if tag(t, TS_CY) + 1 < tag(t, TS_NL) {
+            tas(t, TS_CY, tag(t, TS_CY) + 1)
+            tas(t, TS_CX, 0)
+        }
+        bewegt = true
+    } else if k == KEY_UP {
+        if ctrl {
+            // Strg+Hoch rollt das Bild, ohne die Marke mitzunehmen --
+            // wie in jedem Editor.
+            if tag(t, TS_TOP) > 0 {
+                tas(t, TS_TOP, tag(t, TS_TOP) - 1)
+            }
+            dirty_wd(i)
+            return
+        }
+        ta_updown(t, true, 1)
+        bewegt = true
+    } else if k == KEY_DOWN {
+        if ctrl {
+            if tag(t, TS_TOP) + rows < tag(t, TS_NL) {
+                tas(t, TS_TOP, tag(t, TS_TOP) + 1)
+            }
+            dirty_wd(i)
+            return
+        }
+        ta_updown(t, false, 1)
+        bewegt = true
+    } else if k == KEY_PGUP {
+        ta_updown(t, true, rows)
+        bewegt = true
+    } else if k == KEY_PGDN {
+        ta_updown(t, false, rows)
+        bewegt = true
+    } else if k == KEY_HOME {
+        if ctrl {
+            tas(t, TS_CY, 0)
+            tas(t, TS_CX, 0)
+        } else {
+            // POS1 GEHT ZUERST AN DEN TEXT, DANN AN DEN RAND. Wer in
+            // eingerueckten Zeilen arbeitet, will den Text und nicht
+            // die Spalte 0 -- und wer die Spalte 0 will, drueckt noch
+            // einmal.
+            let ziel: u64 = ta_einzug(t, tag(t, TS_CY))
+            if tag(t, TS_CX) == ziel {
+                tas(t, TS_CX, 0)
+            } else {
+                tas(t, TS_CX, ziel)
+            }
+        }
+        bewegt = true
+    } else if k == KEY_END {
+        if ctrl {
+            tas(t, TS_CY, tag(t, TS_NL) - 1)
+            tas(t, TS_CX, lg(t, tag(t, TS_NL) - 1, LN_N))
+        } else {
+            tas(t, TS_CX, lg(t, tag(t, TS_CY), LN_N))
+        }
+        bewegt = true
+    } else if k == KEY_BS || k == 127 {
+        if tag(t, TS_RO) != 0 {
+            return
+        }
+        ta_push_undo(t)
+        if !ta_del_sel(t) {
+            if tag(t, TS_CX) > 0 {
+                let at: u64 = ta_back(t, tag(t, TS_CY), tag(t, TS_CX))
+                ln_erase(t, tag(t, TS_CY), at, tag(t, TS_CX) - at)
+                tas(t, TS_CX, at)
+            } else if tag(t, TS_CY) > 0 {
+                ta_join(t, tag(t, TS_CY) - 1)
+            }
+        }
+        geaendert = true
+    } else if k == KEY_DEL || k == KEY_SDEL {
+        if tag(t, TS_RO) != 0 {
+            return
+        }
+        ta_push_undo(t)
+        if !ta_del_sel(t) {
+            let y: u64 = tag(t, TS_CY)
+            let x: u64 = tag(t, TS_CX)
+            if x < lg(t, y, LN_N) {
+                ln_erase(t, y, x, ta_fwd(t, y, x) - x)
+            } else if y + 1 < tag(t, TS_NL) {
+                ta_join(t, y)
+            }
+        }
+        geaendert = true
+    } else if k == KEY_ENTER {
+        if tag(t, TS_RO) != 0 {
+            return
+        }
+        ta_push_undo(t)
+        let _d: bool = ta_del_sel(t)
+        ta_split(t)
+        // DIE EINRUECKUNG DER VORIGEN ZEILE WIRD UEBERNOMMEN. Ohne das
+        // faengt in einem eingerueckten Block jede neue Zeile ganz
+        // links an, und der Rhythmus des Tippens bricht.
+        let vy: u64 = tag(t, TS_CY) - 1
+        let e2: u64 = ta_einzug(t, vy)
+        if e2 > 0 {
+            if ln_insert(t, tag(t, TS_CY), 0, lg(t, vy, LN_P), e2) {
+                tas(t, TS_CX, e2)
+            }
+        }
+        geaendert = true
+    } else if k == KEY_TAB {
+        if tag(t, TS_RO) != 0 {
+            return
+        }
+        ta_push_undo(t)
+        var sp: [u8; 8] = [32 as u8; 8]
+        var br: u64 = tag(t, TS_TAB)
+        if br == 0 || br > 8 {
+            br = 4
+        }
+        ta_insert(t, (&sp[0 as usize]) as u64, br)
+        geaendert = true
+    } else if k == KEY_CTRL_A {
+        tas(t, TS_AY, 0)
+        tas(t, TS_AX, 0)
+        tas(t, TS_CY, tag(t, TS_NL) - 1)
+        tas(t, TS_CX, lg(t, tag(t, TS_NL) - 1, LN_N))
+        dirty_wd(i)
+        return
+    } else if k == KEY_CTRL_C || k == KEY_CTRL_X {
+        ta_clip_put(t)
+        if k == KEY_CTRL_X && tag(t, TS_RO) == 0 {
+            ta_push_undo(t)
+            let _d2: bool = ta_del_sel(t)
+            geaendert = true
+        } else {
+            return
+        }
+    } else if k == KEY_CTRL_V {
+        if tag(t, TS_RO) != 0 {
+            return
+        }
+        ta_push_undo(t)
+        ta_clip_take(t)
+        geaendert = true
+    } else if k == KEY_CTRL_Z {
+        // RUECKGAENGIG. Der Schritt, auf den wir zurueckgehen, ist der
+        // VORIGE -- und bevor wir den ersten Schritt zurueckgehen,
+        // muss der JETZIGE Stand im Stapel stehen, sonst ist er nach
+        // einem Wiederholen weg.
+        let at: u64 = tag(t, TS_UAT)
+        if at > 0 {
+            if at == tag(t, TS_UN) {
+                ta_push_undo(t)
+                tas(t, TS_UAT, at)
+            }
+            ta_restore(t, at - 1)
+            tas(t, TS_UAT, at - 1)
+            tas(t, TS_DIRTY, 1)
+            dirty_wd(i)
+        }
+        return
+    } else if k == 25 {
+        // Strg+Y -- Wiederholen.
+        let at2: u64 = tag(t, TS_UAT)
+        if at2 + 1 < tag(t, TS_UN) {
+            ta_restore(t, at2 + 1)
+            tas(t, TS_UAT, at2 + 1)
+            tas(t, TS_DIRTY, 1)
+            dirty_wd(i)
+        }
+        return
+    } else if druckbar(k) {
+        if tag(t, TS_RO) != 0 {
+            return
+        }
+        // EIN SCHNAPPSCHUSS JE WORT, NICHT JE ZEICHEN. Wer einen Satz
+        // tippt und einmal Strg+Z drueckt, will den Satz weg haben und
+        // nicht den letzten Buchstaben. Ein neues Wort faengt nach
+        // einem Trennzeichen an.
+        if !ta_isword(k) || !ta_has_sel(t) {
+            if !ta_isword(k) {
+                ta_push_undo(t)
+            } else if tag(t, TS_UN) == 0 {
+                ta_push_undo(t)
+            }
+        }
+        // EINE TASTE IST EIN OKTETT. Die Oktette eines Umlauts kommen
+        // von der Tastatur NACHEINANDER (siehe `druckbar` weiter
+        // unten) und landen dadurch nebeneinander im Puffer -- genau
+        // die Folge, die `utf8.next` beim Zeichnen wieder zusammensetzt.
+        var ein: [u8; 8] = [0 as u8; 8]
+        ein[(0) as usize] = k as u8
+        ta_insert(t, (&ein[0 as usize]) as u64, 1)
+        geaendert = true
+    } else {
+        return
+    }
+
+    if bewegt {
+        ta_clamp(t)
+        if !shift {
+            ta_sel_clear(t)
+        }
+        ta_follow(t)
+    }
+    if geaendert {
+        tas(t, TS_DIRTY, 1)
+        ta_follow(t)
+    }
+    dirty_wd(i)
+}
+
+// ---------------------------------------------------- die Zwischenablage
+
+fn ta_clip_put(t: u64) {
+    if !ta_has_sel(t) {
+        return
+    }
+    let a: u64 = ta_sel_first(t)
+    let b: u64 = ta_sel_last(t)
+    let ay: u64 = a >> 32
+    let ax: u64 = a & 0xFFFFFFFF
+    let by: u64 = b >> 32
+    let bx: u64 = b & 0xFFFFFFFF
+    // Ein Puffer fuer die Auswahl. Er wird einmal geholt und behalten.
+    if ta_clipbuf == 0 {
+        ta_clipbuf = wlibc.map_surface(TA_CLIP)
+        if ulib.bad(ta_clipbuf) {
+            ta_clipbuf = 0
+            return
+        }
+    }
+    var at: u64 = 0
+    var y: u64 = ay
+    while y <= by && at < TA_CLIP {
+        var von: u64 = 0
+        var bis: u64 = lg(t, y, LN_N)
+        if y == ay {
+            von = ax
+        }
+        if y == by {
+            bis = bx
+        }
+        let p: u64 = lg(t, y, LN_P)
+        var q: u64 = von
+        while q < bis && at < TA_CLIP {
+            __mmio_write8((ta_clipbuf + at) as *mut u8, __mmio_read8((p + q) as *mut u8))
+            at = at + 1
+            q = q + 1
+        }
+        if y < by && at < TA_CLIP {
+            __mmio_write8((ta_clipbuf + at) as *mut u8, 10 as u8)
+            at = at + 1
+        }
+        y = y + 1
+    }
+    let _r: u64 = wlibc.clip_put(ta_clipbuf, at)
+}
+
+fn ta_clip_take(t: u64) {
+    if ta_clipbuf == 0 {
+        ta_clipbuf = wlibc.map_surface(TA_CLIP)
+        if ulib.bad(ta_clipbuf) {
+            ta_clipbuf = 0
+            return
+        }
+    }
+    let n: u64 = wlibc.clip_take(ta_clipbuf, TA_CLIP - 1)
+    if n == 0 {
+        return
+    }
+    ta_insert(t, ta_clipbuf, n)
+}
+
+// ================================================= DIE SYNTAXHERVORHEBUNG
+//
+// SIE IST EINE TABELLE UND KEIN GEFLECHT AUS if.
+//
+// Eine Sprache besteht hier aus vier Angaben: ihre Schluesselwoerter,
+// wie ein Zeilenkommentar anfaengt, ob sie Zeichenketten in
+// Anfuehrungszeichen kennt, und ob Zahlen eigens gefaerbt werden. Wer
+// eine fuenfte Sprache dazulegt, schreibt eine Zeile in `ta_lang_kw`
+// und nichts sonst -- genau das verlangt der Auftrag ("Struktur so,
+// dass weitere Sprachen dazukommen koennen").
+//
+// WAS SIE AUSDRUECKLICH NICHT IST: ein Parser. Sie sieht eine Zeile
+// fuer sich allein an. Ein Blockkommentar ueber mehrere Zeilen wird
+// deshalb nur in der Zeile erkannt, in der er anfaengt -- und das
+// steht hier, statt dass es jemand spaeter als Fehler meldet.
+const LANG_NONE: u64 = 0
+const LANG_FIRN: u64 = 1
+const LANG_SH: u64 = 2
+const LANG_COUNT: u64 = 3
+
+// Die Schluesselwoerter, durch Leerzeichen getrennt, je Sprache eine
+// Zeichenkette.
+static mut kw_firn: [u8; 177] = "fn let var const if else while return struct import export profile true false bool u8 u64 i64 usize as pub static mut match for in break continue type enum impl self and or not\0"
+static mut kw_sh: [u8; 135] = "if then else elif fi for while do done case esac function return local export echo cd set unset read exit break continue in shift test\0"
+
+// Die Farben. Sie kommen aus dem Farbschema und nicht aus dem
+// Quelltext -- ein Editor, der seine eigenen sechs Hexziffern malt,
+// sieht in jedem zweiten Schema falsch aus.
+const HL_TEXT: u64 = 0
+const HL_KEY: u64 = 1
+const HL_STR: u64 = 2
+const HL_COM: u64 = 3
+const HL_NUM: u64 = 4
+
+fn hl_color(art: u64) -> u64 {
+    if art == HL_KEY {
+        return wlibc.theme(wlibc.T_ACCENT)
+    }
+    if art == HL_STR {
+        return ta_misch(wlibc.theme(wlibc.T_FG), 0x00C07030, 6)
+    }
+    if art == HL_COM {
+        return wlibc.theme(wlibc.T_DIM)
+    }
+    if art == HL_NUM {
+        return ta_misch(wlibc.theme(wlibc.T_FG), 0x00206090, 6)
+    }
+    return wlibc.theme(wlibc.T_FG)
+}
+
+// Eine Farbe zur Haelfte in eine andere ziehen -- damit die
+// Hervorhebung im hellen wie im dunklen Schema lesbar bleibt, statt
+// eine feste Farbe zu behaupten.
+fn ta_mix(a: u64, b: u64) -> u64 {
+    return ta_misch(a, b, 3)
+}
+
+// `teil` von acht Teilen `b`, der Rest `a`. EINE Rechnung fuer zwei
+// sehr verschiedene Zwecke, und der Unterschied ist genau dieser
+// Parameter:
+//
+//   Syntaxfarbe      teil 6 -- die Farbe soll man SEHEN
+//   Zeile mit Marke  teil 1 -- die Hinterlegung soll man FAST NICHT
+//                    sehen
+//
+// GEMESSEN AM BILD, nicht geschaetzt: der erste Entwurf nahm fuer
+// beides drei Viertel, und die Zeile unter der Marke wurde damit ein
+// satter blauer Balken quer durch das Fenster -- der Text darin war
+// schlechter zu lesen als ueberall sonst, und das Auge sprang beim
+// Tippen nur noch dorthin. Eine Hervorhebung, die lauter ist als der
+// Text, den sie hervorhebt, ist keine.
+fn ta_misch(a: u64, b: u64, teil: u64) -> u64 {
+    let rest: u64 = 8 - teil
+    let r: u64 = (((a >> 16) & 0xFF) * rest + ((b >> 16) & 0xFF) * teil) / 8
+    let gg: u64 = (((a >> 8) & 0xFF) * rest + ((b >> 8) & 0xFF) * teil) / 8
+    let bb: u64 = ((a & 0xFF) * rest + (b & 0xFF) * teil) / 8
+    return (r << 16) | (gg << 8) | bb
+}
+
+fn kw_list(lang: u64) -> u64 {
+    if lang == LANG_FIRN {
+        return (&kw_firn[0 as usize]) as u64
+    }
+    if lang == LANG_SH {
+        return (&kw_sh[0 as usize]) as u64
+    }
+    return 0
+}
+
+// Steht in der Liste genau dieses Wort?
+fn kw_hat(liste: u64, p: u64, n: u64) -> bool {
+    if liste == 0 || n == 0 {
+        return false
+    }
+    var i: u64 = 0
+    while __mmio_read8((liste + i) as *mut u8) as u64 != 0 {
+        // den Anfang eines Wortes suchen
+        var j: u64 = 0
+        while j < n && __mmio_read8((liste + i + j) as *mut u8) as u64 == __mmio_read8((p + j) as *mut u8) as u64 {
+            j = j + 1
+        }
+        if j == n {
+            let nach: u64 = __mmio_read8((liste + i + n) as *mut u8) as u64
+            if nach == 32 || nach == 0 {
+                return true
+            }
+        }
+        // zum naechsten Wort
+        while __mmio_read8((liste + i) as *mut u8) as u64 != 0
+            && __mmio_read8((liste + i) as *mut u8) as u64 != 32 {
+            i = i + 1
+        }
+        while __mmio_read8((liste + i) as *mut u8) as u64 == 32 {
+            i = i + 1
+        }
+    }
+    return false
+}
+
+// Welche Art hat das Zeichen an Stelle `x`? Die Antwort gilt fuer den
+// Lauf, der dort anfaengt; `bis` sagt, wie weit er reicht.
+fn hl_run(t: u64, y: u64, x: u64) -> u64 {
+    let lang: u64 = tag(t, TS_LANG)
+    let p: u64 = lg(t, y, LN_P)
+    let n: u64 = lg(t, y, LN_N)
+    if lang == LANG_NONE || lang >= LANG_COUNT || x >= n {
+        return ((n - x) << 8) | HL_TEXT
+    }
+    let c: u64 = __mmio_read8((p + x) as *mut u8) as u64
+    // Ein Zeilenkommentar: `//` in Firn, `#` in der Shell.
+    if lang == LANG_FIRN && c == 47 && x + 1 < n
+        && __mmio_read8((p + x + 1) as *mut u8) as u64 == 47 {
+        return ((n - x) << 8) | HL_COM
+    }
+    if lang == LANG_SH && c == 35 {
+        return ((n - x) << 8) | HL_COM
+    }
+    // Eine Zeichenkette. Sie endet am naechsten gleichen
+    // Anfuehrungszeichen oder am Zeilenende.
+    if c == 34 || c == 39 {
+        var q: u64 = x + 1
+        while q < n {
+            let d: u64 = __mmio_read8((p + q) as *mut u8) as u64
+            if d == 92 {
+                q = q + 1
+            } else if d == c {
+                return ((q + 1 - x) << 8) | HL_STR
+            }
+            q = q + 1
+        }
+        return ((n - x) << 8) | HL_STR
+    }
+    // Eine Zahl.
+    if c >= 48 && c <= 57 {
+        var q2: u64 = x
+        while q2 < n {
+            let d2: u64 = __mmio_read8((p + q2) as *mut u8) as u64
+            if (d2 >= 48 && d2 <= 57) || (d2 | 32) == 120
+                || ((d2 | 32) >= 97 && (d2 | 32) <= 102) {
+                q2 = q2 + 1
+            } else {
+                q2 = n + 1
+            }
+        }
+        if q2 > n {
+            q2 = q2 - n - 1 + 0
+            var q3: u64 = x
+            while q3 < n {
+                let d3: u64 = __mmio_read8((p + q3) as *mut u8) as u64
+                if (d3 >= 48 && d3 <= 57) || (d3 | 32) == 120
+                    || ((d3 | 32) >= 97 && (d3 | 32) <= 102) {
+                    q3 = q3 + 1
+                } else {
+                    return ((q3 - x) << 8) | HL_NUM
+                }
+            }
+            return ((q3 - x) << 8) | HL_NUM
+        }
+        return ((q2 - x) << 8) | HL_NUM
+    }
+    // Ein Wort -- vielleicht ein Schluesselwort.
+    if ta_isword(c) {
+        var q4: u64 = x
+        while q4 < n && ta_isword(__mmio_read8((p + q4) as *mut u8) as u64) {
+            q4 = q4 + 1
+        }
+        if kw_hat(kw_list(lang), p + x, q4 - x) {
+            return ((q4 - x) << 8) | HL_KEY
+        }
+        return ((q4 - x) << 8) | HL_TEXT
+    }
+    return (1 << 8) | HL_TEXT
+}
+
+// ============================================================ DER ZEICHNER
+//
+// ER MALT NUR, WAS ZU SEHEN IST. Das ist die ganze Zusage dieser
+// Runde an die Geschwindigkeit: die Schleife laeuft von `TS_TOP` bis
+// `TS_TOP + rows`, und `rows` ist die Hoehe des Rechtecks geteilt
+// durch die Zeilenhoehe. Eine Datei mit 5 000 Zeilen kostet genauso
+// viel wie eine mit 50.
+fn paint_ta(i: u64) {
+    let t: u64 = g(i, D_VAL)
+    if t >= TA_MAX {
+        return
+    }
+    let x: u64 = g(i, D_X)
+    let y: u64 = g(i, D_Y)
+    let bw: u64 = g(i, D_W)
+    let bh: u64 = g(i, D_H)
+    let lh: u64 = ta_lh()
+    let cw: u64 = ta_cw()
+    let gut: u64 = ta_gutter(t)
+    let rows: u64 = ta_rows(i)
+    let top: u64 = tag(t, TS_TOP)
+    let left: u64 = tag(t, TS_LEFT)
+    let nl: u64 = tag(t, TS_NL)
+    let sw: u64 = scroll_w()
+
+    // Alles, was gemalt wird, bleibt im Feld -- ohne das laeuft eine
+    // lange Zeile ueber den Rand hinaus ins Fenster.
+    //
+    // ======================= RUNDE GUI-EDITOR: UND IM BAND, NICHT NUR IM FELD
+    //
+    // DER SCHNITT MUSS MIT DEM BESTEHENDEN VERSCHNITTEN WERDEN und
+    // darf ihn nicht ersetzen. Der Grund steht in `flush_rect`: ein
+    // Fenster wird in BAENDERN gemalt (`wlibc.surf_rows()`, bei 1280
+    // Breite 204 Zeilen hoch), und vor jedem Band setzt `flush_rect`
+    // den Schnitt auf genau dieses Band. Wer ihn hier auf das ganze
+    // Feld setzt, malt ueber die Bandgrenze hinaus -- und was dort
+    // landet, gehoert schon zum naechsten Streifen der Malflaeche.
+    //
+    // GEMESSEN AM BILD, und anders war es nicht zu finden: im leeren
+    // Editor standen drei waagerechte graue Linien quer durch das
+    // Textfeld, bei y = 266, 470 und 674. Der Abstand ist 204 -- die
+    // Bandhoehe. Im Quelltext sieht dieser Fehler wie eine richtige
+    // Zeile aus.
+    let a_x0: u64 = wlibc.clip_x0()
+    let a_y0: u64 = wlibc.clip_y0()
+    let a_x1: u64 = wlibc.clip_x1()
+    let a_y1: u64 = wlibc.clip_y1()
+    // Der Schnitt umfasst das GANZE Feld samt Rahmen und den zwei
+    // Rollbalken -- `fuib.tafel` malt den Rand bei x und bei x+bw-1,
+    // und ein Schnitt, der eins weiter innen liegt, radierte ihn weg.
+    // Der Text wird weiter unten ein zweites Mal enger geschnitten.
+    var c_x0: u64 = x
+    var c_y0: u64 = y
+    var c_x1: u64 = x + bw
+    var c_y1: u64 = y + bh
+    if a_x0 > c_x0 {
+        c_x0 = a_x0
+    }
+    if a_y0 > c_y0 {
+        c_y0 = a_y0
+    }
+    if a_x1 < c_x1 {
+        c_x1 = a_x1
+    }
+    if a_y1 < c_y1 {
+        c_y1 = a_y1
+    }
+    if c_x1 <= c_x0 || c_y1 <= c_y0 {
+        // Von diesem Feld liegt in diesem Band nichts. Der Schnitt
+        // bleibt, wie er war, und es wird nichts gemalt.
+        wlibc.clip_set(a_x0, a_y0, a_x1, a_y1)
+        return
+    }
+    wlibc.clip_set(c_x0, c_y0, c_x1, c_y1)
+
+    // ========================= RUNDE GUI-EDITOR: DIE FLAECHE IN ZWEI TEILEN
+    //
+    // DER HINTERGRUND WIRD ERST FLACH GEFUELLT UND DANN GERAHMT, und
+    // das ist kein Umweg, sondern die Abhilfe zu einem Fehler, den man
+    // NUR IM BILD sieht.
+    //
+    // `fuib.tafel` schneidet ein Rechteck, das oben aus dem Band
+    // herausragt, auf das Band zu (Runde 32, mit Begruendung) und malt
+    // dann eine RUNDE Ecke -- mit dem vollen Radius, aber an der neuen
+    // Oberkante. Bei jedem Bedienelement dieses Systems faellt das nie
+    // auf: keines ist hoeher als ein Band (204 Zeilen bei 1280 Breite).
+    // Dieses Feld ist 560 hoch und liegt damit in DREI Baendern -- an
+    // jeder Bandgrenze rundete fUi eine Ecke in die Flaeche hinein und
+    // liess eine Reihe Fensterhintergrund stehen.
+    //
+    // GEMESSEN am Bild dieser Runde: waagerechte Linien in
+    // (226,232,240) bei y = 470 und y = 674, Abstand genau 204. Im
+    // Quelltext ist davon nichts zu sehen.
+    //
+    // Der Rahmen bleibt rund (er wird nur einmal je Band gemalt und
+    // liegt am Rand, nicht in der Flaeche); die FUELLUNG ist ein
+    // flaches Rechteck, und ein flaches Rechteck hat an keiner
+    // Bandgrenze eine Ecke. `fuib.area` ist derselbe Weg durch fUi,
+    // nur ohne Radius -- check-ui bleibt damit zufrieden.
+    let _fb: bool = fuib.area(x, y, bw, bh, wlibc.theme(wlibc.T_ENTRY))
+    let _fb2: bool = fuib.ring(x, y, bw, bh,
+        wlibc.metric(wlibc.M_RADIUS_INPUT), wlibc.metric(wlibc.M_BORDER),
+        wlibc.theme(wlibc.T_LINE))
+
+    // DIE SPALTE MIT DEN ZEILENNUMMERN. Sie ist etwas dunkler als das
+    // Feld, damit sie eine Spalte IST und nicht nur Zahlen am Rand.
+    if gut != 0 {
+        wlibc.rect(x + 1, y + 1, gut, bh - 2, wlibc.theme(wlibc.T_HEAD))
+        wlibc.rect(x + gut, y + 1, 1, bh - 2, wlibc.theme(wlibc.T_LINE))
+    }
+
+
+    // JETZT ERST DER ENGERE SCHNITT FUER DEN TEXT: er darf nicht in
+    // die Nummernspalte und nicht unter die Rollbalken laufen. Er
+    // wird wieder mit dem Band verschnitten, aus demselben Grund wie
+    // oben.
+    var t_x0: u64 = x + gut + 1
+    var t_y0: u64 = y + 1
+    var t_x1: u64 = x + bw - 1 - sw
+    var t_y1: u64 = y + bh - 1 - sw
+    if c_x0 > t_x0 {
+        t_x0 = c_x0
+    }
+    if c_y0 > t_y0 {
+        t_y0 = c_y0
+    }
+    if c_x1 < t_x1 {
+        t_x1 = c_x1
+    }
+    if c_y1 < t_y1 {
+        t_y1 = c_y1
+    }
+    if t_x1 <= t_x0 || t_y1 <= t_y0 {
+        wlibc.clip_set(a_x0, a_y0, a_x1, a_y1)
+        return
+    }
+
+    let sel: bool = ta_has_sel(t)
+    let sa: u64 = ta_sel_first(t)
+    let sb: u64 = ta_sel_last(t)
+    let say: u64 = sa >> 32
+    let sax: u64 = sa & 0xFFFFFFFF
+    let sby: u64 = sb >> 32
+    let sbx: u64 = sb & 0xFFFFFFFF
+
+    // Der enge Schnitt kommt NICHT um die ganze Schleife: die
+    // Zeilennummer steht LINKS von `t_x0` (in der Nummernspalte), und
+    // ein Schnitt, der bei x+gut+1 anfaengt, radiert sie weg -- genau
+    // das ist beim ersten Versuch passiert, und im Bild fehlten alle
+    // Nummern. Gesetzt wird er deshalb je Zeile um den TEXT herum und
+    // fuer die Nummer wieder geloest.
+    var r: u64 = 0
+    while r < rows {
+        let ln: u64 = top + r
+        if ln >= nl {
+            r = rows
+        } else {
+            let ty: u64 = y + 2 + r * lh
+            let grund: u64 = ty + wlibc.ascent_of(wlibc.F_MONO, wlibc.px_mono())
+            // die Zeilennummer
+            if gut != 0 {
+                var num: [u8; 12] = [0 as u8; 12]
+                let nn: u64 = ta_num(ln + 1, (&num[0 as usize]) as u64)
+                var farbe: u64 = wlibc.theme(wlibc.T_DIM)
+                if ln == tag(t, TS_CY) {
+                    farbe = wlibc.theme(wlibc.T_FG)
+                }
+                wlibc.text_at(wlibc.F_MONO, wlibc.px_mono(),
+                    x + gut - 6 - nn * cw, grund,
+                    (&num[0 as usize]) as u64, nn, farbe)
+            }
+            // Ab hier gehoert alles dem TEXTBEREICH -- also der enge
+            // Schnitt.
+            wlibc.clip_set(t_x0, t_y0, t_x1, t_y1)
+            // DIE ZEILE, IN DER DIE MARKE STEHT, wird hinterlegt.
+            if ln == tag(t, TS_CY) && !sel {
+                wlibc.rect(x + gut + 1, ty, bw - gut - 2 - sw, lh,
+                    ta_misch(wlibc.theme(wlibc.T_ENTRY),
+                        wlibc.theme(wlibc.T_SEL), 1))
+            }
+            let p: u64 = lg(t, ln, LN_P)
+            let n: u64 = lg(t, ln, LN_N)
+            // Die Auswahl dieser Zeile als Balken.
+            if sel && ln >= say && ln <= sby {
+                var von: u64 = 0
+                var bis: u64 = n
+                if ln == say {
+                    von = sax
+                }
+                if ln == sby {
+                    bis = sbx
+                }
+                let c0: u64 = ta_cols(t, ln, von)
+                var c1: u64 = ta_cols(t, ln, bis)
+                if ln < sby {
+                    c1 = c1 + 1 // der Umbruch gehoert dazu
+                }
+                if c1 > left && c0 >= left {
+                    wlibc.rect(x + gut + 2 + (c0 - left) * cw, ty,
+                        (c1 - c0) * cw, lh, wlibc.theme(wlibc.T_SEL))
+                } else if c1 > left {
+                    wlibc.rect(x + gut + 2, ty, (c1 - left) * cw, lh,
+                        wlibc.theme(wlibc.T_SEL))
+                }
+            }
+            // Der Text, in Laeufen einer Farbe.
+            var q: u64 = ta_at_col(t, ln, left)
+            var col: u64 = left
+            let maxc: u64 = left + ta_cols_fit(i, t) + 1
+            while q < n && col < maxc {
+                let run: u64 = hl_run(t, ln, q)
+                var laenge: u64 = run >> 8
+                let art: u64 = run & 0xFF
+                if laenge == 0 {
+                    laenge = 1
+                }
+                if q + laenge > n {
+                    laenge = n - q
+                }
+                var fg: u64 = hl_color(art)
+                if sel && ln >= say && ln <= sby {
+                    var iv: bool = true
+                    if ln == say && q < sax {
+                        iv = false
+                    }
+                    if ln == sby && q >= sbx {
+                        iv = false
+                    }
+                    if iv {
+                        fg = wlibc.theme_selfg()
+                    }
+                }
+                wlibc.text_at(wlibc.F_MONO, wlibc.px_mono(),
+                    x + gut + 2 + (col - left) * cw, grund, p + q, laenge, fg)
+                col = col + ta_cols(t, ln, q + laenge) - ta_cols(t, ln, q)
+                q = q + laenge
+            }
+            wlibc.clip_set(c_x0, c_y0, c_x1, c_y1)
+            r = r + 1
+        }
+    }
+
+    // DIE EINFUEGEMARKE. Sie blinkt nicht: ein Blinken braucht einen
+    // Zeitgeber, der das Fenster von selbst schmutzig macht, und den
+    // hat diese Bibliothek nicht. Ein stehender Strich ist ehrlicher
+    // als einer, der manchmal da ist und manchmal nicht.
+    wlibc.clip_set(t_x0, t_y0, t_x1, t_y1)
+    if s_focus == i + 1 && tag(t, TS_CY) >= top && tag(t, TS_CY) < top + rows {
+        let ccol: u64 = ta_cols(t, tag(t, TS_CY), tag(t, TS_CX))
+        if ccol >= left {
+            wlibc.rect(x + gut + 2 + (ccol - left) * cw,
+                y + 2 + (tag(t, TS_CY) - top) * lh, 2, lh,
+                wlibc.theme(wlibc.T_ACCENT))
+        }
+    }
+    // Zurueck auf den weiten Schnitt (immer noch im Band): die
+    // Rollbalken liegen ausserhalb des Textbereichs.
+    wlibc.clip_set(c_x0, c_y0, c_x1, c_y1)
+
+    // DIE ZWEI ROLLBALKEN. Sie werden gemalt, wenn es etwas zu rollen
+    // gibt -- ein Balken, der immer voll ist, sagt nichts.
+    if nl > rows {
+        paint_scroll(x + bw - sw - 1, y + 1, bh - 2 - sw, top, rows, nl)
+    }
+    let breit: u64 = ta_longest(t)
+    let fit: u64 = ta_cols_fit(i, t)
+    if breit > fit {
+        paint_hscroll(x + gut + 1, y + bh - sw - 1, bw - gut - 2 - sw,
+            left, fit, breit)
+    }
+    focus_ring(i)
+    wlibc.clip_set(a_x0, a_y0, a_x1, a_y1)
+}
+
+// Die laengste Zeile -- fuer den waagerechten Balken. Sie wird ueber
+// die SICHTBAREN Zeilen gesucht und nicht ueber die ganze Datei: bei
+// 5 000 Zeilen waere das eine Schleife ueber alles, je Bild.
+fn ta_longest(t: u64) -> u64 {
+    let i: u64 = ta_wd[(t) as usize]
+    if i >= nwd {
+        return 0
+    }
+    let top: u64 = tag(t, TS_TOP)
+    let rows: u64 = ta_rows(i)
+    let nl: u64 = tag(t, TS_NL)
+    var m: u64 = 0
+    var r: u64 = 0
+    while r < rows && top + r < nl {
+        let c: u64 = ta_cols(t, top + r, lg(t, top + r, LN_N))
+        if c > m {
+            m = c
+        }
+        r = r + 1
+    }
+    return m
+}
+
+// Eine Zahl als Ziffern. Gibt zurueck, wie viele es wurden.
+fn ta_num(v: u64, p: u64) -> u64 {
+    var n: u64 = 0
+    var q: u64 = v
+    var stellen: [u8; 12] = [0 as u8; 12]
+    if q == 0 {
+        __mmio_write8(p as *mut u8, 48 as u8)
+        return 1
+    }
+    while q > 0 && n < 12 {
+        stellen[(n) as usize] = (48 + q % 10) as u8
+        q = q / 10
+        n = n + 1
+    }
+    var k: u64 = 0
+    while k < n {
+        __mmio_write8((p + k) as *mut u8, stellen[(n - 1 - k) as usize])
+        k = k + 1
+    }
+    return n
+}
+
+// EIN WAAGERECHTER ROLLBALKEN.
+//
+// `paint_scroll` gibt es schon, aber nur senkrecht -- und ein
+// gedrehter Aufruf waere ein zweiter Satz Rechnungen an einer Stelle,
+// an der schon einer steht. Gemalt wird mit DENSELBEN zwei Aufrufen
+// wie dort (`fuib.area` fuer die Rinne, `fuib.tafel` fuer den Griff),
+// damit `tools/check-ui.sh` recht behaelt: es gibt keine zweite
+// Umsetzung dieser Optik, nur dieselbe um neunzig Grad.
+fn paint_hscroll(x: u64, y: u64, w: u64, links: u64, sicht: u64,
+    ganz: u64) {
+    let sw: u64 = scroll_w()
+    let _fh1: bool = fuib.area(x, y, w, sw, wlibc.theme(wlibc.T_SCROLL))
+    if ganz == 0 || sicht >= ganz {
+        return
+    }
+    var bw: u64 = w * sicht / ganz
+    if bw < 12 {
+        bw = 12
+    }
+    if bw > w {
+        bw = w
+    }
+    var bx: u64 = 0
+    if ganz > sicht {
+        bx = (w - bw) * links / (ganz - sicht)
+    }
+    let _fh2: bool = fuib.tafel(x + bx, y + 2, bw, thumb_w(),
+        draw_radius(MR_GRIFF), wlibc.theme(wlibc.T_THUMB), 0, 0)
+}
+
+// ========================================================== DIE MAUS
+//
+// WO IM TEXT LIEGT EIN PUNKT. Mit fester Schrift ist das eine
+// Division und keine Messung Zeichen fuer Zeichen -- genau deshalb ist
+// die Schrift fest.
+fn ta_hit(i: u64, mx: u64, my: u64) {
+    let t: u64 = g(i, D_VAL)
+    if t >= TA_MAX {
+        return
+    }
+    let lh: u64 = ta_lh()
+    let cw: u64 = ta_cw()
+    let gut: u64 = ta_gutter(t)
+    let x0: u64 = g(i, D_X) + gut + 2
+    let y0: u64 = g(i, D_Y) + 2
+    var r: u64 = 0
+    if my > y0 {
+        r = (my - y0) / lh
+    }
+    var ln: u64 = tag(t, TS_TOP) + r
+    if ln >= tag(t, TS_NL) {
+        ln = tag(t, TS_NL) - 1
+    }
+    var col: u64 = tag(t, TS_LEFT)
+    if mx > x0 {
+        col = col + (mx - x0 + cw / 2) / cw
+    }
+    tas(t, TS_CY, ln)
+    tas(t, TS_CX, ta_at_col(t, ln, col))
+    tas(t, TS_WANT, 0xFFFFFFFFFFFFFFFF)
+    ta_follow(t)
+}
+
+// ==================================================== WAS EIN PROGRAMM SIEHT
+//
+// Die Schnittstelle nach aussen. Sie ist bewusst klein: ein Editor
+// braucht "leg ein Feld an", "gib mir den Text", "nimm diesen Text",
+// "wo steht die Marke" und "ist etwas veraendert" -- alles andere
+// macht das Widget selbst.
+
+// EIN MEHRZEILIGES TEXTFELD ANLEGEN. Es nimmt den Platz, den sein
+// Kasten ihm gibt (`size(bw, bh)` davor), wie jedes andere Element.
+fn textarea() -> u64 {
+    if ta_n >= TA_MAX {
+        return 0
+    }
+    let t: u64 = ta_n
+    ta_n = ta_n + 1
+    let i: u64 = add(K_TEXTAREA, 0, 0, 0, true)
+    s(i, D_VAL, t)
+    ta_wd[(t) as usize] = i
+    tas(t, TS_TAB, 4)
+    tas(t, TS_LANG, LANG_NONE)
+    tas(t, TS_WANT, 0xFFFFFFFFFFFFFFFF)
+    ta_clear(t)
+    return i
+}
+
+fn ta_of(i: u64) -> u64 {
+    if i >= nwd || g(i, D_KIND) != K_TEXTAREA {
+        return TA_MAX
+    }
+    return g(i, D_VAL)
+}
+
+// Den ganzen Text setzen (eine Datei oeffnen).
+fn ta_text_set(i: u64, p: u64, n: u64) {
+    let t: u64 = ta_of(i)
+    if t >= TA_MAX {
+        return
+    }
+    ta_set_text(t, p, n)
+    tas(t, TS_DIRTY, 0)
+    tas(t, TS_UN, 0)
+    tas(t, TS_UAT, 0)
+    dirty_wd(i)
+}
+
+// Den ganzen Text holen (sichern). Gibt die Laenge zurueck.
+fn ta_text_get(i: u64, p: u64, max: u64) -> u64 {
+    let t: u64 = ta_of(i)
+    if t >= TA_MAX {
+        return 0
+    }
+    return ta_copy_out(t, p, max)
+}
+
+fn ta_text_len(i: u64) -> u64 {
+    let t: u64 = ta_of(i)
+    if t >= TA_MAX {
+        return 0
+    }
+    return ta_bytes(i)
+}
+
+fn ta_leeren(i: u64) {
+    let t: u64 = ta_of(i)
+    if t >= TA_MAX {
+        return
+    }
+    ta_clear(t)
+    tas(t, TS_DIRTY, 0)
+    tas(t, TS_UN, 0)
+    tas(t, TS_UAT, 0)
+    dirty_wd(i)
+}
+
+fn ta_zeilen(i: u64) -> u64 {
+    let t: u64 = ta_of(i)
+    if t >= TA_MAX {
+        return 0
+    }
+    return tag(t, TS_NL)
+}
+
+// Zeile und Spalte der Marke -- fuer die Statuszeile. Beide ab 1
+// gezaehlt, so wie ein Mensch zaehlt.
+fn ta_zeile(i: u64) -> u64 {
+    let t: u64 = ta_of(i)
+    if t >= TA_MAX {
+        return 1
+    }
+    return tag(t, TS_CY) + 1
+}
+
+fn ta_spalte(i: u64) -> u64 {
+    let t: u64 = ta_of(i)
+    if t >= TA_MAX {
+        return 1
+    }
+    return ta_cols(t, tag(t, TS_CY), tag(t, TS_CX)) + 1
+}
+
+fn ta_geaendert(i: u64) -> bool {
+    let t: u64 = ta_of(i)
+    if t >= TA_MAX {
+        return false
+    }
+    return tag(t, TS_DIRTY) != 0
+}
+
+fn ta_sauber(i: u64) {
+    let t: u64 = ta_of(i)
+    if t >= TA_MAX {
+        return
+    }
+    tas(t, TS_DIRTY, 0)
+}
+
+// CRLF oder LF -- was beim Sichern geschrieben wird, und was beim
+// Oeffnen gefunden wurde.
+fn ta_eol(i: u64) -> u64 {
+    let t: u64 = ta_of(i)
+    if t >= TA_MAX {
+        return 0
+    }
+    return tag(t, TS_EOL)
+}
+
+fn ta_eol_set(i: u64, v: u64) {
+    let t: u64 = ta_of(i)
+    if t >= TA_MAX {
+        return
+    }
+    tas(t, TS_EOL, v)
+}
+
+// Welche Sprache eingefaerbt wird.
+fn ta_lang(i: u64, lang: u64) {
+    let t: u64 = ta_of(i)
+    if t >= TA_MAX {
+        return
+    }
+    tas(t, TS_LANG, lang)
+    dirty_wd(i)
+}
+
+fn ta_nurlesen(i: u64, an: bool) {
+    let t: u64 = ta_of(i)
+    if t >= TA_MAX {
+        return
+    }
+    var v: u64 = 0
+    if an {
+        v = 1
+    }
+    tas(t, TS_RO, v)
+}
+
+// ZU EINER ZEILE SPRINGEN -- fuer "Gehe zu" und fuer den Treffer einer
+// Suche. `spalte` ist ein OKTETTVERSATZ in der Zeile.
+fn ta_gehe(i: u64, zeile: u64, spalte: u64) {
+    let t: u64 = ta_of(i)
+    if t >= TA_MAX {
+        return
+    }
+    var y: u64 = zeile
+    if y >= tag(t, TS_NL) {
+        y = tag(t, TS_NL) - 1
+    }
+    tas(t, TS_CY, y)
+    tas(t, TS_CX, spalte)
+    ta_clamp(t)
+    ta_sel_clear(t)
+    ta_follow(t)
+    dirty_wd(i)
+}
+
+// EINEN BEREICH AUSWAEHLEN -- so zeigt die Suche ihren Treffer.
+fn ta_waehle(i: u64, ay: u64, ax: u64, by: u64, bx: u64) {
+    let t: u64 = ta_of(i)
+    if t >= TA_MAX {
+        return
+    }
+    tas(t, TS_AY, ay)
+    tas(t, TS_AX, ax)
+    tas(t, TS_CY, by)
+    tas(t, TS_CX, bx)
+    ta_clamp(t)
+    ta_follow(t)
+    dirty_wd(i)
+}
+
+// Eine Zeile lesen -- die Suche geht damit durch die Datei, ohne dass
+// sie den ganzen Text in einen Puffer holen muss.
+fn ta_zeile_p(i: u64, y: u64) -> u64 {
+    let t: u64 = ta_of(i)
+    if t >= TA_MAX || y >= tag(t, TS_NL) {
+        return 0
+    }
+    return lg(t, y, LN_P)
+}
+
+fn ta_zeile_n(i: u64, y: u64) -> u64 {
+    let t: u64 = ta_of(i)
+    if t >= TA_MAX || y >= tag(t, TS_NL) {
+        return 0
+    }
+    return lg(t, y, LN_N)
+}
+
+// Text an der Marke einsetzen -- das Ersetzen der Suche.
+fn ta_einfuegen(i: u64, p: u64, n: u64) {
+    let t: u64 = ta_of(i)
+    if t >= TA_MAX {
+        return
+    }
+    ta_push_undo(t)
+    ta_insert(t, p, n)
+    dirty_wd(i)
+}
+
+fn ta_hat_auswahl(i: u64) -> bool {
+    let t: u64 = ta_of(i)
+    if t >= TA_MAX {
+        return false
+    }
+    return ta_has_sel(t)
 }
 
 fn next_focus(w: u64, rueckwaerts: bool) {
@@ -6589,7 +8698,7 @@ fn entry_erase(i: u64) -> bool {
     var k: u64 = b
     while k <= n {
         __mmio_write8((p + a + (k - b)) as *mut u8,
-            *((p + k) as *mut u8))
+            __mmio_read8((p + k) as *mut u8))
         k = k + 1
     }
     s(i, D_B, a)
@@ -6607,7 +8716,7 @@ fn entry_insert(i: u64, c: u64) {
     let at: u64 = g(i, D_B)
     var k: u64 = n + 1
     while k > at {
-        __mmio_write8((p + k) as *mut u8, *((p + k - 1) as *mut u8))
+        __mmio_write8((p + k) as *mut u8, __mmio_read8((p + k - 1) as *mut u8))
         k = k - 1
     }
     __mmio_write8((p + at) as *mut u8, c as u8)
@@ -6672,7 +8781,7 @@ fn entry_key(i: u64, k: u64) {
                 var q: u64 = at
                 while q + weg <= n {
                     __mmio_write8((p + q) as *mut u8,
-                        *((p + q + weg) as *mut u8))
+                        __mmio_read8((p + q + weg) as *mut u8))
                     q = q + 1
                 }
                 s(i, D_B, at)
@@ -6686,7 +8795,7 @@ fn entry_key(i: u64, k: u64) {
                 var q2: u64 = g(i, D_B)
                 while q2 + weg2 <= n {
                     __mmio_write8((p + q2) as *mut u8,
-                        *((p + q2 + weg2) as *mut u8))
+                        __mmio_read8((p + q2 + weg2) as *mut u8))
                     q2 = q2 + 1
                 }
             }
@@ -6743,6 +8852,29 @@ fn entry_key(i: u64, k: u64) {
 // dann ein offenes Menue, sonst das angegebene Fenster.
 fn feed_key(c: u64) {
     on_key(wncur, c)
+}
+
+// ==================================================== RUNDE GUI-EDITOR
+//
+// EINE TASTE MIT MODIFIKATOR EINSPEISEN -- OHNE DEN UMWEG UEBER DIE
+// FLUCHTFOLGE.
+//
+// `feed_key` schickt ein OKTETT durch `decode`; eine Taste wie
+// `Umschalt+Pfeil rechts` besteht dort aus sechs Oktetten
+// (`ESC [ 1 ; 2 C`), und wer sie einspeisen will, muesste sie
+// buchstabieren. Das ist fuer einen Pruefstand nicht falsch, aber es
+// misst dann die Fluchtfolge mit.
+//
+// Hier wird die schon FERTIGE Tastennummer mit ihrem Modifikator
+// eingesetzt -- derselbe Zustand, den `decode` am Ende einer Folge
+// herstellt. `key_shift()` und `key_ctrl()` sehen danach dasselbe wie
+// bei einer echten Taste.
+//
+// `m` ist die Zahl von xterm: 0 = nichts, 2 = Umschalt, 5 = Strg,
+// 6 = beide.
+fn feed_key_mod(k: u64, m: u64) {
+    s_keymod = m
+    key_handle(wncur, k)
 }
 
 fn on_key(wein: u64, c: u64) {
@@ -6844,6 +8976,13 @@ fn key_handle(wein: u64, k: u64) {
             return
         }
         entry_key(i, k)
+        return
+    }
+    // RUNDE GUI-EDITOR: das mehrzeilige Feld nimmt die Eingabetaste
+    // SELBST (sie macht eine neue Zeile) -- anders als das einzeilige,
+    // bei dem sie das Ereignis ausloest.
+    if kind == K_TEXTAREA {
+        ta_key(i, k)
         return
     }
     if kind == K_CANVAS {
@@ -7266,7 +9405,7 @@ fn dlg_wahl(titel: u64, ask: u64, block: u64, n: u64) -> u64 {
             let l: u64 = row_len(q)
             var k: u64 = 0
             while k < l && p < 250 {
-                dw_buf[(p) as usize] = *((q + k) as *mut u8)
+                dw_buf[(p) as usize] = __mmio_read8((q + k) as *mut u8)
                 p = p + 1
                 k = k + 1
             }
