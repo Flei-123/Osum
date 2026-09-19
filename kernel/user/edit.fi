@@ -176,6 +176,78 @@ fn textrows() -> u64 {
     return rows - 3
 }
 
+// ====================================================== RUNDE ALLTAG
+//
+// ZEILENNUMMERN AM RAND.
+//
+// Justin will einen Editor "wie Notepad++". Das Erste, was man dort
+// sieht, ist die Nummernspalte -- und sie ist auch das Nuetzlichste:
+// ein Uebersetzerfehler nennt eine Zeilennummer, und ohne die Spalte
+// muss man sie abzaehlen.
+//
+// SIE LAESST SICH ABSCHALTEN (Strg-N), und das ist kein Luxus: die
+// Abnahme in tools/k11/run.sh vergleicht den seriellen Mitschnitt mit
+// einem Bildschirmfoto Zeile fuer Zeile. Eine Spalte, die sich nicht
+// wegnehmen laesst, waere dort eine dauerhafte Aenderung an etwas, das
+// seit Runde K11 gemessen wird.
+//
+// DIE BREITE WAECHST MIT DER DATEI und ist nicht fest: bei 9 Zeilen
+// zwei Stellen und ein Trenner, bei 1000 Zeilen fuenf. Eine feste
+// Breite waere entweder verschwendeter Platz oder abgeschnittene
+// Nummern (Punkt G-010 -- genau die Sorte Fehler, die dieses Projekt
+// auf Bildern sucht).
+static mut nums_an: u64 = 1
+
+fn num_breite() -> u64 {
+    if nums_an == 0 {
+        return 0
+    }
+    var stellen: u64 = 1
+    var n: u64 = nline
+    while n >= 10 {
+        n = n / 10
+        stellen = stellen + 1
+    }
+    if stellen < 2 {
+        stellen = 2
+    }
+    // Eine Spalte Abstand zwischen Nummer und Text, sonst klebt beides
+    // aneinander und die Nummer sieht aus wie Teil der Zeile.
+    return stellen + 1
+}
+
+// Die Nummer einer Zeile ausgeben, rechtsbuendig, mit dem Abstand.
+// `leer` malt stattdessen Leerzeichen -- fuer die Zeilen hinter dem
+// Dateiende, wo eine Nummer eine Zeile verspraeche, die es nicht gibt.
+fn num_aus(i: u64, leer: bool) {
+    let b: u64 = num_breite()
+    if b == 0 {
+        return
+    }
+    if leer {
+        var k: u64 = 0
+        while k < b {
+            tools.ob_byte(32)
+            k = k + 1
+        }
+        return
+    }
+    let nr: u64 = i + 1
+    var stellen: u64 = 1
+    var n: u64 = nr
+    while n >= 10 {
+        n = n / 10
+        stellen = stellen + 1
+    }
+    var pad: u64 = 0
+    while pad + stellen + 1 < b {
+        tools.ob_byte(32)
+        pad = pad + 1
+    }
+    tools.ob_num(nr)
+    tools.ob_byte(32)
+}
+
 // ============================================================ die Ausgabe
 
 fn esc_num(a: u64, b: u64, last: u64) {
@@ -258,11 +330,15 @@ fn draw_line() {
     cursor(false)
     goto(cy - rowoff + 1, 0)
     clear_eol()
+    // RUNDE ALLTAG: auch die einzeln neu gemalte Zeile bekommt ihre
+    // Nummer. Ohne diese Zeile verschwaende sie beim Tippen -- und
+    // zwar nur in DER Zeile, in der der Mensch gerade steht.
+    num_aus(cy, false)
     let n: u64 = llen[(cy) as usize]
     if coloff < n {
         var k: u64 = coloff
         var w: u64 = 0
-        while k < n && w + 1 < cols {
+        while k < n && w + 1 + num_breite() < cols {
             var c: u64 = (*((line_ptr(cy) + k) as *mut u8)) as u64
             if c < 32 || c > 126 {
                 c = 63
@@ -285,7 +361,7 @@ fn draw() {
     var t_mod: [u8; 12] = "  Modified\0\0"
     var t_new: [u8; 12] = "  New file\0\0"
     var t_help1: [u8; 41] = "^O Write  ^X Exit   ^K Cut   ^U Paste\0\0\0\0"
-    var t_help2: [u8; 41] = "^W Where  ^R Replace ^Z Undo  ^G Bottom\0\0"
+    var t_help2: [u8; 41] = "^W Where ^R Replace ^Z Undo ^P Numbers\0\0\0"
     var t_dash: [u8; 2] = "$\0"
     var t_more: [u8; 2] = "~\0"
     cursor(false)
@@ -308,11 +384,13 @@ fn draw() {
         clear_eol()
         let i: u64 = rowoff + r
         if i < nline {
+            // RUNDE ALLTAG: die Nummer, dann der Text.
+            num_aus(i, false)
             let n: u64 = llen[(i) as usize]
             if coloff < n {
                 var k: u64 = coloff
                 var w: u64 = 0
-                while k < n && w + 1 < cols {
+                while k < n && w + 1 + num_breite() < cols {
                     var c: u64 = (*((line_ptr(i) + k) as *mut u8)) as u64
                     if c < 32 || c > 126 {
                         c = 63
@@ -326,6 +404,7 @@ fn draw() {
                 }
             }
         } else {
+            num_aus(0, true)
             tools.ob_str((&t_more[0 as usize]) as u64)
         }
         r = r + 1
@@ -333,8 +412,36 @@ fn draw() {
     goto(rows - 2, 0)
     clear_eol()
     reverse_on()
+    // ================================================== RUNDE ALLTAG
+    //
+    // DIE STATUSZEILE SAGT JETZT, WO MAN IST UND WAS GILT.
+    //
+    // Bis hierher stand hier nur die letzte Meldung, und die ist oft
+    // leer -- ein breiter, heller Balken ohne Inhalt. Jeder heutige
+    // Editor zeigt an dieser Stelle Zeile, Spalte und den
+    // Aenderungsstand; sie zu suchen ist die haeufigste Frage an einen
+    // Editor ueberhaupt ("in welcher Zeile stehe ich?").
+    //
+    // LINKS die Meldung, RECHTS die Zahlen. Rechtsbuendig, damit sie
+    // beim Tippen nicht springen: eine Anzeige, die bei jedem Zeichen
+    // ihre Stelle wechselt, liest niemand.
     var st: [u8; 256] = [0 as u8; 256]
     ulib.strcpy((&st[0 as usize]) as u64, (&msg[0 as usize]) as u64)
+    var rechts: [u8; 64] = [0 as u8; 64]
+    var at: u64 = 0
+    at = at + status_rechts((&rechts[0 as usize]) as u64)
+    let ml: u64 = ulib.length((&st[0 as usize]) as u64)
+    // So viele Leerzeichen, dass der rechte Teil am Rand endet.
+    var fuell: u64 = 0
+    if ml + at + 1 < cols {
+        fuell = cols - 1 - ml - at
+    }
+    var f: u64 = 0
+    while f < fuell {
+        ulib.strcat((&st[0 as usize]) as u64, (&s_space[0 as usize]) as u64)
+        f = f + 1
+    }
+    ulib.strcat((&st[0 as usize]) as u64, (&rechts[0 as usize]) as u64)
     bar((&st[0 as usize]) as u64, ulib.length((&st[0 as usize]) as u64))
     attr_off()
     goto(rows - 1, 0)
@@ -352,8 +459,69 @@ fn draw() {
 }
 
 // Die Schreibmarke dorthin, wo sie im Text steht.
+// ====================================================== RUNDE ALLTAG
+//
+// DER RECHTE TEIL DER STATUSZEILE: "Z 12/340  S 5  UTF-8  geaendert".
+//
+// Die Kodierung steht dabei, obwohl dieser Editor nur eine kennt -- und
+// gerade deshalb: wer sie liest, weiss, dass die Datei nicht in etwas
+// anderem gespeichert wird. Eine Anzeige, die schweigt, laesst die
+// Frage offen.
+static mut s_space: [u8; 2] = " \0"
+static mut s_z: [u8; 3] = "Z \0"
+static mut s_slash: [u8; 2] = "/\0"
+static mut s_sp: [u8; 5] = "  S \0"
+static mut s_enc: [u8; 9] = "  UTF-8\0\0"
+static mut s_mod: [u8; 12] = "  geaendert\0"
+static mut s_ok: [u8; 12] = "  gesichert\0"
+
+fn status_rechts(aus: u64) -> u64 {
+    var at: u64 = 0
+    at = at + ulib.strncpy(aus + at, (&s_z[0 as usize]) as u64, 8)
+    at = at + zahl_an(aus + at, cy + 1)
+    at = at + ulib.strncpy(aus + at, (&s_slash[0 as usize]) as u64, 4)
+    at = at + zahl_an(aus + at, nline)
+    at = at + ulib.strncpy(aus + at, (&s_sp[0 as usize]) as u64, 8)
+    at = at + zahl_an(aus + at, cx + 1)
+    at = at + ulib.strncpy(aus + at, (&s_enc[0 as usize]) as u64, 12)
+    if dirty != 0 {
+        at = at + ulib.strncpy(aus + at, (&s_mod[0 as usize]) as u64, 14)
+    } else {
+        at = at + ulib.strncpy(aus + at, (&s_ok[0 as usize]) as u64, 14)
+    }
+    return at
+}
+
+// Eine Zahl als Text anhaengen. `ulib` hat dafuer nichts, was in einen
+// Puffer schreibt -- `sayn` geht auf die Leitung.
+fn zahl_an(aus: u64, v: u64) -> u64 {
+    var ziffern: [u8; 24] = [0 as u8; 24]
+    var n: u64 = v
+    var k: u64 = 0
+    if n == 0 {
+        ziffern[(0) as usize] = 48 as u8
+        k = 1
+    }
+    while n > 0 {
+        ziffern[(k) as usize] = (48 + (n % 10)) as u8
+        n = n / 10
+        k = k + 1
+    }
+    var i: u64 = 0
+    while i < k {
+        __mmio_write8((aus + i) as *mut u8, ziffern[((k - 1) - i) as usize])
+        i = i + 1
+    }
+    __mmio_write8((aus + k) as *mut u8, 0 as u8)
+    return k
+}
+
 fn place() {
-    goto(cy - rowoff + 1, cx - coloff)
+    // RUNDE ALLTAG: der Schreibzeiger steht hinter der Nummernspalte.
+    // Ohne den Versatz staende er mitten in der Nummer, und jedes
+    // getippte Zeichen erschiene an der falschen Stelle -- einer der
+    // Fehler, die man erst auf einem Bild sieht.
+    goto(cy - rowoff + 1, cx - coloff + num_breite())
     tools.ob_flush()
 }
 
@@ -1312,6 +1480,24 @@ fn handle(k: u64) {
             set_msg((&m_undo[0 as usize]) as u64)
         }
         dirty = 1
+        want_draw = W_ALL
+    } else if k == 16 {
+        // RUNDE ALLTAG: Strg-P schaltet die Nummernspalte um.
+        //
+        // NICHT Strg-N, und das ist gemessen: 14 ist schon die
+        // Pfeiltaste nach oben der PS/2-Tastatur (`key`, Zeile 913,
+        // seit Runde K6) -- `k == 14` kommt im Tastenblock nie an, der
+        // Zweig war tot. Der erste Entwurf dieser Runde hatte ihn
+        // trotzdem, und auf dem Bild sah es aus, als tue Strg-N
+        // nichts: die Nummern standen vorher und nachher da.
+        //
+        // 16 (Strg-P) ist wirklich frei -- vergeben sind 1..15, 18,
+        // 20..27 und 127.
+        if nums_an == 0 {
+            nums_an = 1
+        } else {
+            nums_an = 0
+        }
         want_draw = W_ALL
     } else if k == 12 {
         want_draw = W_ALL
