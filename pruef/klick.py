@@ -233,7 +233,23 @@ class Maschine:
         oe=semicolon, ae=apostrophe, ue=bracket_left, ss=minus."""
         de = {"ä": "apostrophe", "ö": "semicolon", "ü": "bracket_left",
               "ß": "minus", "Ä": "shift-apostrophe", "Ö": "shift-semicolon",
-              "Ü": "shift-bracket_left"}
+              "Ü": "shift-bracket_left",
+              # RUNDE ALLTAG -- DIE ZEICHEN, DIE AUF DEUTSCH WOANDERS
+              # LIEGEN. `ZEICHEN` oben nennt die US-POSITION der Taste,
+              # und der Kern legt sie DEUTSCH aus (kernel/kbd.fi). Fuer
+              # Buchstaben ist das gleich, fuer Satzzeichen nicht:
+              # `sendkey slash` gab ein MINUS, und aus `ls /data` wurde
+              # `ls -data` -- das listete die Wurzel und sah wie eine
+              # Antwort aus. GEMESSEN am 19.09. im Lauf `ziehen2`; im
+              # selben Lauf gab `sendkey minus` ein `ß`, was die
+              # deutsche Belegung beweist.
+              "/": "shift-7", "-": "slash", "ß": "minus",
+              "?": "shift-minus", "_": "shift-slash",
+              ";": "shift-comma", ":": "shift-dot",
+              "=": "shift-0", "+": "bracket_right", "*": "shift-bracket_right",
+              "(": "shift-8", ")": "shift-9", "&": "shift-6",
+              "%": "shift-5", "$": "shift-4", "!": "shift-1",
+              '"': "shift-2"}
         for c in text:
             if c in de:
                 self.taste(de[c])

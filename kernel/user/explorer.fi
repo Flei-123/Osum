@@ -2524,6 +2524,9 @@ fn u_start(args: u64) -> u64 {
                 // `sel n=3 rahmen=2`, kein `expl: zieh`).
                 if id == tab && vmodus == 0 {
                     ziehen(idx)
+                    // RUNDE ALLTAG: und sichtbar machen, was jetzt am
+                    // Zeiger haengt (siehe `zieh_ziel_an` oben).
+                    zieh_ziel_an(idx, stat)
                 }
             } else if kind == wlib.K_DROP {
                 // ======================================= RUNDE CLIP-2
@@ -2536,7 +2539,16 @@ fn u_start(args: u64) -> u64 {
                 // Die Tabelle UND der Baum nehmen an -- und die
                 // Ortsleiste nicht: ein Ort ist ein Sprungziel und
                 // kein Ordner, den dieser Zweig kennt.
-                if id == tab || id == baum {
+                if id == a_orte {
+                    // ================================ RUNDE ALLTAG
+                    //
+                    // DIE ORTSLEISTE NIMMT JETZT AN. CLIP-2 hat sie
+                    // ausgenommen; hinter jedem Ort steht aber ein
+                    // Pfad, und ein Pfad ist ein Ordner. Der
+                    // Papierkorb ist der wichtigste davon.
+                    wartet = ablegen_ort(idx, baum, tab, stat, fpfad)
+                    zieh_ziel_aus()
+                } else if id == tab || id == baum {
                     var zl: u64 = idx
                     if id == baum {
                         // Im Baum ist Zeile 0 der Weg nach oben; die
@@ -2546,6 +2558,7 @@ fn u_start(args: u64) -> u64 {
                         zl = wlib.MAXWD
                     }
                     wartet = ablegen(zl, baum, tab, stat, fpfad)
+                    zieh_ziel_aus()
                 }
             } else if kind == wlib.K_TABLE {
                 // die Kopfzeile: nach dieser Spalte sortieren
@@ -2944,6 +2957,179 @@ fn ablegen(zeile: u64, baum: u64, tab: u64, stat: u64, fpfad: u64) -> u64 {
     // DER ZIEHPLATZ WIRD GELEERT. Eine Ziehbewegung, die angekommen
     // ist, ist zu Ende -- bliebe sie stehen, naehme der naechste
     // Loslasser sie ein zweites Mal an.
+    let _c2: u64 = ulib.drag_drop()
+    new_read(baum, tab, stat, fpfad)
+    if conflict_show(tab) {
+        return 9
+    }
+    let _f: bool = error_show(rc)
+    return 0
+}
+
+// ====================================================== RUNDE ALLTAG
+//
+// SICHTBARE RUECKMELDUNG WAEHREND DES ZIEHENS.
+//
+// Justins Auftrag verlangt sie ausdruecklich: "was haengt am Zeiger,
+// welches Ziel ist gerade aktiv". RUNDE CLIP-2 hatte an dieser Stelle
+// ausdruecklich NICHTS ("Eine Ziehgrafik unter dem Zeiger gibt es
+// NICHT, und das ist hier gesagt statt hinterher entschuldigt").
+//
+// WARUM ES TROTZDEM KEINE ZIEHGRAFIK UNTER DEM ZEIGER GIBT, und das
+// ist eine Messung und keine Bequemlichkeit: ein Programm erfaehrt von
+// einer laufenden Ziehbewegung genau ZWEIMAL etwas -- `K_DRAG` beim
+// Verlassen der angefassten Zeile und `K_DROP` beim Loslassen. Die
+// Bewegung DAZWISCHEN bleibt in `wlib.on_move` und wird nicht
+// gemeldet. Ein Bild, das dem Zeiger folgt, braucht aber jede
+// Zwischenlage; es liesse sich nur in `wlib` selbst malen, und `wlib`
+// gehoert in dieser Runde einem anderen (Territorium, siehe Bericht).
+//
+// ALSO DIE RUECKMELDUNG DORT, WO SIE OHNE FREMDEN CODE HINGEHOERT:
+// in der Statuszeile des Dateimanagers steht, WAS gerade gezogen wird,
+// und die angefasste Zeile bleibt hervorgehoben. Das beantwortet die
+// erste Haelfte der Frage vollstaendig ("was haengt am Zeiger") und
+// die zweite ("welches Ziel") beim Loslassen -- nicht waehrend der
+// Fahrt. Was fehlt, steht so im Bericht und wird nicht schoengeredet.
+static mut zieh_laeuft: u64 = 0
+static mut ziehtext: [u8; 220] = [0 as u8; 220]
+
+// Den Namen des gezogenen Stuecks in die Statuszeile schreiben.
+fn zieh_ziel_an(zeile: u64, stat: u64) {
+    if zeile >= m_anzahl() {
+        return
+    }
+    let e: u64 = m_ord(zeile)
+    var s_zt: [u8; 10] = "Ziehe: \0\0\0"
+    var at: u64 = 0
+    at = at + ulib.strncpy((&ziehtext[0 as usize]) as u64,
+        (&s_zt[0 as usize]) as u64, 16)
+    let _n: u64 = ulib.strncpy((&ziehtext[(at) as usize]) as u64,
+        m_name(e), 190)
+    zieh_laeuft = 1
+    wlib.set_text(stat, (&ziehtext[0 as usize]) as u64)
+}
+
+// Die Hervorhebung wieder wegnehmen. Wird nach JEDEM Ablegen gerufen
+// -- auch nach einem, das nichts getan hat: eine Statuszeile, die
+// "Ziehe: x" stehen laesst, obwohl nichts mehr gezogen wird, ist eine
+// Luege auf dem Schirm.
+fn zieh_ziel_aus() {
+    zieh_laeuft = 0
+}
+
+// ====================================================== RUNDE ALLTAG
+//
+// ABLEGEN AUF DER ORTSLEISTE -- UND AUF DEM PAPIERKORB.
+//
+// RUNDE CLIP-2 hat die Ortsleiste ausdruecklich AUSGENOMMEN, mit der
+// Begruendung "ein Ort ist ein Sprungziel und kein Ordner, den dieser
+// Zweig kennt". Das stimmt fuer den Sprung, aber nicht fuer die Sache:
+// hinter jedem Ort steht ein PFAD (`exporte.place_path`), und ein Pfad
+// ist ein Ordner. Genau deshalb ist die Leiste das Ziel, das ein Mensch
+// zuerst sucht -- "nach Bilder schieben" heisst, auf Bilder zu ziehen.
+//
+// DER PAPIERKORB IST DER GRUND, WARUM DIESE FUNKTION EXISTIERT.
+// Justins Auftrag nennt ihn beim Namen ("auf den Papierkorb ziehen =
+// loeschen"). Er steht seit jeher in der Leiste (`exporte.orte_bauen`),
+// und `trash.hinein` kann ihn fuellen -- verbunden war beides nie.
+//
+// ZWEI WEGE, EINE ENTSCHEIDUNG, und sie faellt an genau einer Stelle:
+//
+//   Papierkorb  ->  expakt.in_korb   (verschiebt in <wurzel>/.papierkorb
+//                                     UND schreibt die .info dazu, damit
+//                                     "zurueck" spaeter weiss, woher)
+//   jeder Ort   ->  ablegen_pfad     (dieselbe Mechanik wie die Tabelle:
+//                                     copy_remember(true) -> einfuegen)
+//
+// Ein eigener Loeschweg neben `in_korb` waere die zweite Wahrheit --
+// dieselbe Falle, die Runde CLIP-2 bei `kopiere`/`verschiebe` gestellt
+// hat. Also wird hier NICHTS nachgebaut, sondern gerufen.
+fn ablegen_ort(ort: u64, baum: u64, tab: u64, stat: u64, fpfad: u64) -> u64 {
+    if vmodus != 0 {
+        return 0
+    }
+    if ort >= exporte.places_num() {
+        return 0
+    }
+    if !exporte.place_droppable(ort) {
+        // Eine Ueberschrift oder ein Datentraeger. Der Ziehplatz bleibt
+        // stehen: wer daneben trifft, soll es noch einmal versuchen
+        // koennen, statt seine Auswahl zu verlieren.
+        var s_no: [u8; 20] = "expl: ort nimmt nix\0"
+        say((&s_no[0 as usize]) as u64)
+        nl()
+        return 0
+    }
+    // DEN PFAD VOM ZIEHPLATZ -- und nur, wenn es wirklich ein Pfad ist.
+    var zp: [u8; 200] = [0 as u8; 200]
+    if !ulib.drag_an() {
+        return 0
+    }
+    if ulib.drag_type_path() == 0 {
+        return 0
+    }
+    let zn: u64 = ulib.drag_take((&zp[0 as usize]) as u64, 198)
+    if zn == 0 {
+        return 0
+    }
+    zp[(zn) as usize] = 0 as u8
+    var s_do: [u8; 15] = "expl: droport \0"
+    say((&s_do[0 as usize]) as u64)
+    say((&zp[0 as usize]) as u64)
+    // ------------------------------------------------- der Papierkorb
+    if exporte.place_is_trash(ort) {
+        var s_tr: [u8; 9] = " -> korb\0"
+        say((&s_tr[0 as usize]) as u64)
+        nl()
+        let rc: u64 = expakt.in_korb((&zp[0 as usize]) as u64)
+        let _c: u64 = ulib.drag_drop()
+        new_read(baum, tab, stat, fpfad)
+        let _f: bool = error_show(rc)
+        return 0
+    }
+    // ------------------------------------------------- jeder andere Ort
+    var ziel: [u8; 200] = [0 as u8; 200]
+    ulib.strncpy((&ziel[0 as usize]) as u64, exporte.place_path(ort), 198)
+    var s_pf: [u8; 5] = " -> \0"
+    say((&s_pf[0 as usize]) as u64)
+    say((&ziel[0 as usize]) as u64)
+    nl()
+    return ablegen_pfad((&zp[0 as usize]) as u64, (&ziel[0 as usize]) as u64,
+        baum, tab, stat, fpfad)
+}
+
+// DER GEMEINSAME RUMPF: einen Pfad in einen Zielordner schieben.
+//
+// `ablegen` (Tabelle/Baum) und `ablegen_ort` (Ortsleiste) hatten sonst
+// zweimal dieselben zwanzig Zeilen -- und damit zwei Orte fuer jeden
+// Fehler darin. Das ist genau die Doppelung, gegen die `fuib.fi` im
+// Kopf argumentiert; hier wird sie gar nicht erst angelegt.
+fn ablegen_pfad(quelle: u64, ziel: u64, baum: u64, tab: u64, stat: u64,
+    fpfad: u64) -> u64 {
+    // LIEGT ES SCHON DA? Dann ist nichts zu tun. Ohne diese Frage
+    // traefe `einfuegen` auf einen belegten Namen und stellte den
+    // Konfliktdialog fuer eine Tat, die niemand wollte.
+    var qdir: [u8; 200] = [0 as u8; 200]
+    ulib.strncpy((&qdir[0 as usize]) as u64, quelle, 198)
+    eltern((&qdir[0 as usize]) as u64)
+    if ulib.streq((&qdir[0 as usize]) as u64, ziel) {
+        var s_gl: [u8; 17] = "expl: ort gleich\0"
+        say((&s_gl[0 as usize]) as u64)
+        nl()
+        let _c: u64 = ulib.drag_drop()
+        return 0
+    }
+    expakt.list_clear()
+    let _a: bool = expakt.list_add(quelle)
+    // ALS SCHNITT: verschieben, nicht kopieren -- derselbe Schalter und
+    // dieselbe Begruendung wie in `ablegen` (P-018, io.rename).
+    let _r: u64 = expakt.copy_remember(true)
+    kfl_op = 1
+    let rc: u64 = expakt.einfuegen(ziel)
+    var s_de: [u8; 18] = "expl: droport rc=\0"
+    say((&s_de[0 as usize]) as u64)
+    sayn(rc)
+    nl()
     let _c2: u64 = ulib.drag_drop()
     new_read(baum, tab, stat, fpfad)
     if conflict_show(tab) {
