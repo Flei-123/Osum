@@ -7769,13 +7769,13 @@ fn hl_color(art: u64) -> u64 {
         return wlibc.theme(wlibc.T_ACCENT)
     }
     if art == HL_STR {
-        return ta_mix(wlibc.theme(wlibc.T_FG), 0x00C08040)
+        return ta_misch(wlibc.theme(wlibc.T_FG), 0x00C07030, 6)
     }
     if art == HL_COM {
         return wlibc.theme(wlibc.T_DIM)
     }
     if art == HL_NUM {
-        return ta_mix(wlibc.theme(wlibc.T_FG), 0x004080C0)
+        return ta_misch(wlibc.theme(wlibc.T_FG), 0x00206090, 6)
     }
     return wlibc.theme(wlibc.T_FG)
 }
@@ -7784,9 +7784,28 @@ fn hl_color(art: u64) -> u64 {
 // Hervorhebung im hellen wie im dunklen Schema lesbar bleibt, statt
 // eine feste Farbe zu behaupten.
 fn ta_mix(a: u64, b: u64) -> u64 {
-    let r: u64 = (((a >> 16) & 0xFF) + ((b >> 16) & 0xFF) * 3) / 4
-    let gg: u64 = (((a >> 8) & 0xFF) + ((b >> 8) & 0xFF) * 3) / 4
-    let bb: u64 = ((a & 0xFF) + (b & 0xFF) * 3) / 4
+    return ta_misch(a, b, 3)
+}
+
+// `teil` von acht Teilen `b`, der Rest `a`. EINE Rechnung fuer zwei
+// sehr verschiedene Zwecke, und der Unterschied ist genau dieser
+// Parameter:
+//
+//   Syntaxfarbe      teil 6 -- die Farbe soll man SEHEN
+//   Zeile mit Marke  teil 1 -- die Hinterlegung soll man FAST NICHT
+//                    sehen
+//
+// GEMESSEN AM BILD, nicht geschaetzt: der erste Entwurf nahm fuer
+// beides drei Viertel, und die Zeile unter der Marke wurde damit ein
+// satter blauer Balken quer durch das Fenster -- der Text darin war
+// schlechter zu lesen als ueberall sonst, und das Auge sprang beim
+// Tippen nur noch dorthin. Eine Hervorhebung, die lauter ist als der
+// Text, den sie hervorhebt, ist keine.
+fn ta_misch(a: u64, b: u64, teil: u64) -> u64 {
+    let rest: u64 = 8 - teil
+    let r: u64 = (((a >> 16) & 0xFF) * rest + ((b >> 16) & 0xFF) * teil) / 8
+    let gg: u64 = (((a >> 8) & 0xFF) * rest + ((b >> 8) & 0xFF) * teil) / 8
+    let bb: u64 = ((a & 0xFF) * rest + (b & 0xFF) * teil) / 8
     return (r << 16) | (gg << 8) | bb
 }
 
@@ -7930,9 +7949,84 @@ fn paint_ta(i: u64) {
     let nl: u64 = tag(t, TS_NL)
     let sw: u64 = scroll_w()
 
-    let _fb: bool = fuib.tafel(x, y, bw, bh,
-        wlibc.metric(wlibc.M_RADIUS_INPUT), wlibc.theme(wlibc.T_ENTRY),
-        wlibc.theme(wlibc.T_LINE), wlibc.metric(wlibc.M_BORDER))
+    // Alles, was gemalt wird, bleibt im Feld -- ohne das laeuft eine
+    // lange Zeile ueber den Rand hinaus ins Fenster.
+    //
+    // ======================= RUNDE GUI-EDITOR: UND IM BAND, NICHT NUR IM FELD
+    //
+    // DER SCHNITT MUSS MIT DEM BESTEHENDEN VERSCHNITTEN WERDEN und
+    // darf ihn nicht ersetzen. Der Grund steht in `flush_rect`: ein
+    // Fenster wird in BAENDERN gemalt (`wlibc.surf_rows()`, bei 1280
+    // Breite 204 Zeilen hoch), und vor jedem Band setzt `flush_rect`
+    // den Schnitt auf genau dieses Band. Wer ihn hier auf das ganze
+    // Feld setzt, malt ueber die Bandgrenze hinaus -- und was dort
+    // landet, gehoert schon zum naechsten Streifen der Malflaeche.
+    //
+    // GEMESSEN AM BILD, und anders war es nicht zu finden: im leeren
+    // Editor standen drei waagerechte graue Linien quer durch das
+    // Textfeld, bei y = 266, 470 und 674. Der Abstand ist 204 -- die
+    // Bandhoehe. Im Quelltext sieht dieser Fehler wie eine richtige
+    // Zeile aus.
+    let a_x0: u64 = wlibc.clip_x0()
+    let a_y0: u64 = wlibc.clip_y0()
+    let a_x1: u64 = wlibc.clip_x1()
+    let a_y1: u64 = wlibc.clip_y1()
+    // Der Schnitt umfasst das GANZE Feld samt Rahmen und den zwei
+    // Rollbalken -- `fuib.tafel` malt den Rand bei x und bei x+bw-1,
+    // und ein Schnitt, der eins weiter innen liegt, radierte ihn weg.
+    // Der Text wird weiter unten ein zweites Mal enger geschnitten.
+    var c_x0: u64 = x
+    var c_y0: u64 = y
+    var c_x1: u64 = x + bw
+    var c_y1: u64 = y + bh
+    if a_x0 > c_x0 {
+        c_x0 = a_x0
+    }
+    if a_y0 > c_y0 {
+        c_y0 = a_y0
+    }
+    if a_x1 < c_x1 {
+        c_x1 = a_x1
+    }
+    if a_y1 < c_y1 {
+        c_y1 = a_y1
+    }
+    if c_x1 <= c_x0 || c_y1 <= c_y0 {
+        // Von diesem Feld liegt in diesem Band nichts. Der Schnitt
+        // bleibt, wie er war, und es wird nichts gemalt.
+        wlibc.clip_set(a_x0, a_y0, a_x1, a_y1)
+        return
+    }
+    wlibc.clip_set(c_x0, c_y0, c_x1, c_y1)
+
+    // ========================= RUNDE GUI-EDITOR: DIE FLAECHE IN ZWEI TEILEN
+    //
+    // DER HINTERGRUND WIRD ERST FLACH GEFUELLT UND DANN GERAHMT, und
+    // das ist kein Umweg, sondern die Abhilfe zu einem Fehler, den man
+    // NUR IM BILD sieht.
+    //
+    // `fuib.tafel` schneidet ein Rechteck, das oben aus dem Band
+    // herausragt, auf das Band zu (Runde 32, mit Begruendung) und malt
+    // dann eine RUNDE Ecke -- mit dem vollen Radius, aber an der neuen
+    // Oberkante. Bei jedem Bedienelement dieses Systems faellt das nie
+    // auf: keines ist hoeher als ein Band (204 Zeilen bei 1280 Breite).
+    // Dieses Feld ist 560 hoch und liegt damit in DREI Baendern -- an
+    // jeder Bandgrenze rundete fUi eine Ecke in die Flaeche hinein und
+    // liess eine Reihe Fensterhintergrund stehen.
+    //
+    // GEMESSEN am Bild dieser Runde: waagerechte Linien in
+    // (226,232,240) bei y = 470 und y = 674, Abstand genau 204. Im
+    // Quelltext ist davon nichts zu sehen.
+    //
+    // Der Rahmen bleibt rund (er wird nur einmal je Band gemalt und
+    // liegt am Rand, nicht in der Flaeche); die FUELLUNG ist ein
+    // flaches Rechteck, und ein flaches Rechteck hat an keiner
+    // Bandgrenze eine Ecke. `fuib.area` ist derselbe Weg durch fUi,
+    // nur ohne Radius -- check-ui bleibt damit zufrieden.
+    let _fb: bool = fuib.area(x, y, bw, bh, wlibc.theme(wlibc.T_ENTRY))
+    let _fb2: bool = fuib.ring(x, y, bw, bh,
+        wlibc.metric(wlibc.M_RADIUS_INPUT), wlibc.metric(wlibc.M_BORDER),
+        wlibc.theme(wlibc.T_LINE))
 
     // DIE SPALTE MIT DEN ZEILENNUMMERN. Sie ist etwas dunkler als das
     // Feld, damit sie eine Spalte IST und nicht nur Zahlen am Rand.
@@ -7941,13 +8035,31 @@ fn paint_ta(i: u64) {
         wlibc.rect(x + gut, y + 1, 1, bh - 2, wlibc.theme(wlibc.T_LINE))
     }
 
-    // Alles, was gemalt wird, bleibt im Feld -- ohne das laeuft eine
-    // lange Zeile ueber den Rand hinaus ins Fenster.
-    let a_x0: u64 = wlibc.clip_x0()
-    let a_y0: u64 = wlibc.clip_y0()
-    let a_x1: u64 = wlibc.clip_x1()
-    let a_y1: u64 = wlibc.clip_y1()
-    wlibc.clip_set(x + 1, y + 1, x + bw - 1 - sw, y + bh - 1 - sw)
+
+    // JETZT ERST DER ENGERE SCHNITT FUER DEN TEXT: er darf nicht in
+    // die Nummernspalte und nicht unter die Rollbalken laufen. Er
+    // wird wieder mit dem Band verschnitten, aus demselben Grund wie
+    // oben.
+    var t_x0: u64 = x + gut + 1
+    var t_y0: u64 = y + 1
+    var t_x1: u64 = x + bw - 1 - sw
+    var t_y1: u64 = y + bh - 1 - sw
+    if c_x0 > t_x0 {
+        t_x0 = c_x0
+    }
+    if c_y0 > t_y0 {
+        t_y0 = c_y0
+    }
+    if c_x1 < t_x1 {
+        t_x1 = c_x1
+    }
+    if c_y1 < t_y1 {
+        t_y1 = c_y1
+    }
+    if t_x1 <= t_x0 || t_y1 <= t_y0 {
+        wlibc.clip_set(a_x0, a_y0, a_x1, a_y1)
+        return
+    }
 
     let sel: bool = ta_has_sel(t)
     let sa: u64 = ta_sel_first(t)
@@ -7957,6 +8069,12 @@ fn paint_ta(i: u64) {
     let sby: u64 = sb >> 32
     let sbx: u64 = sb & 0xFFFFFFFF
 
+    // Der enge Schnitt kommt NICHT um die ganze Schleife: die
+    // Zeilennummer steht LINKS von `t_x0` (in der Nummernspalte), und
+    // ein Schnitt, der bei x+gut+1 anfaengt, radiert sie weg -- genau
+    // das ist beim ersten Versuch passiert, und im Bild fehlten alle
+    // Nummern. Gesetzt wird er deshalb je Zeile um den TEXT herum und
+    // fuer die Nummer wieder geloest.
     var r: u64 = 0
     while r < rows {
         let ln: u64 = top + r
@@ -7977,11 +8095,14 @@ fn paint_ta(i: u64) {
                     x + gut - 6 - nn * cw, grund,
                     (&num[0 as usize]) as u64, nn, farbe)
             }
+            // Ab hier gehoert alles dem TEXTBEREICH -- also der enge
+            // Schnitt.
+            wlibc.clip_set(t_x0, t_y0, t_x1, t_y1)
             // DIE ZEILE, IN DER DIE MARKE STEHT, wird hinterlegt.
             if ln == tag(t, TS_CY) && !sel {
                 wlibc.rect(x + gut + 1, ty, bw - gut - 2 - sw, lh,
-                    ta_mix(wlibc.theme(wlibc.T_ENTRY),
-                        wlibc.theme(wlibc.T_SEL)))
+                    ta_misch(wlibc.theme(wlibc.T_ENTRY),
+                        wlibc.theme(wlibc.T_SEL), 1))
             }
             let p: u64 = lg(t, ln, LN_P)
             let n: u64 = lg(t, ln, LN_N)
@@ -8040,6 +8161,7 @@ fn paint_ta(i: u64) {
                 col = col + ta_cols(t, ln, q + laenge) - ta_cols(t, ln, q)
                 q = q + laenge
             }
+            wlibc.clip_set(c_x0, c_y0, c_x1, c_y1)
             r = r + 1
         }
     }
@@ -8048,6 +8170,7 @@ fn paint_ta(i: u64) {
     // Zeitgeber, der das Fenster von selbst schmutzig macht, und den
     // hat diese Bibliothek nicht. Ein stehender Strich ist ehrlicher
     // als einer, der manchmal da ist und manchmal nicht.
+    wlibc.clip_set(t_x0, t_y0, t_x1, t_y1)
     if s_focus == i + 1 && tag(t, TS_CY) >= top && tag(t, TS_CY) < top + rows {
         let ccol: u64 = ta_cols(t, tag(t, TS_CY), tag(t, TS_CX))
         if ccol >= left {
@@ -8056,7 +8179,9 @@ fn paint_ta(i: u64) {
                 wlibc.theme(wlibc.T_ACCENT))
         }
     }
-    wlibc.clip_set(a_x0, a_y0, a_x1, a_y1)
+    // Zurueck auf den weiten Schnitt (immer noch im Band): die
+    // Rollbalken liegen ausserhalb des Textbereichs.
+    wlibc.clip_set(c_x0, c_y0, c_x1, c_y1)
 
     // DIE ZWEI ROLLBALKEN. Sie werden gemalt, wenn es etwas zu rollen
     // gibt -- ein Balken, der immer voll ist, sagt nichts.
@@ -8070,6 +8195,7 @@ fn paint_ta(i: u64) {
             left, fit, breit)
     }
     focus_ring(i)
+    wlibc.clip_set(a_x0, a_y0, a_x1, a_y1)
 }
 
 // Die laengste Zeile -- fuer den waagerechten Balken. Sie wird ueber

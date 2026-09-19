@@ -1,0 +1,1057 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/nedit.fi -- RUNDE GUI-EDITOR: /bin/nedit, DER EDITOR MIT
+// FENSTER.
+//
+// ====================================================== WAS ER IST
+//
+// Justins Auftrag, woertlich: der Editor soll "ein moderner notepad++
+// editor oder so" werden. Das ist dieser hier: Reiter fuer mehrere
+// Dateien, eine Spalte mit Zeilennummern, eine Statuszeile, die sagt,
+// wo man steht, Syntaxfarben, Suchen und Ersetzen.
+//
+// ============================================ WAS ER AUSDRUECKLICH NICHT IST
+//
+// Er ist NICHT der Ersatz fuer `/bin/edit`. Der bleibt, wo er ist, und
+// er bleibt der Editor fuer die Konsole -- er kommt ohne Fenster aus,
+// und auf einem System, das gerade seine Oberflaeche nicht startet,
+// ist das der Unterschied zwischen "ich kann die Konfigurationsdatei
+// reparieren" und "ich kann es nicht". Zwei Editoren sind hier kein
+// Doppel, sondern zwei Arbeitsplaetze.
+//
+// ================================================== WO DIE ARBEIT LIEGT
+//
+// FAST NICHTS DAVON STEHT IN DIESER DATEI. Das mehrzeilige Textfeld --
+// Zeilentafel, Marke, Auswahl, Rueckgaengig, Bildlauf, Zeichner,
+// Syntaxfarben -- ist `K_TEXTAREA` in `kernel/user/wlib.fi`, und das
+// ist Absicht und keine Bequemlichkeit: die Regel dieses Baums lautet,
+// dass ein Bedienelement in die Bibliothek gehoert und nicht in ein
+// Programm (`tools/check-ui.sh` misst es). Ein Editor, der sich sein
+// Textfeld selbst malt, waere genau die zweite Umsetzung, die dieser
+// Baum nirgends haben will.
+//
+// Diese Datei ist deshalb das, was ein Programm wirklich ausmacht: die
+// Reiter und welche Datei in welchem steckt, das Lesen und Schreiben,
+// die Frage vor dem Schliessen, Suchen und Ersetzen, das Menue.
+profile app
+
+import ulib
+import libc.io
+import wlibc
+import wlib
+
+export { u_start }
+
+// ----------------------------------------------------------- die Texte
+//
+// Sie stehen hier als deutscher Text und nicht als Katalogschluessel.
+// GRUND, und er ist gemessen: `msg` zieht den Katalog in jedes
+// Programm, in dem es steckt, und die Platte dieser Runde hat 128
+// Inodes und wenig Luft (tools/alltag/build.sh sagt es ausdruecklich).
+// Der Dateimanager hat einen Katalog, weil er einen braucht -- dieses
+// Programm bekommt ihn in der Runde, in der jemand es uebersetzt.
+static mut W_TITEL: [u8; 7] = "Editor\0"
+static mut W_APP: [u8; 6] = "nedit\0"
+static mut M_BAR: [u8; 24] = "Datei\nBearbeiten\nSuchen\0"
+static mut M_DATEI: [u8; 59] = "Neu\nOeffnen...\nSichern\nSichern unter...\nSchliessen\nBeenden\0"
+static mut M_BEARB: [u8; 57] = "Rueckgaengig\nWiederholen\nAusschneiden\nKopieren\nEinfuegen\0"
+static mut M_SUCHEN: [u8; 30] = "Suchen...\nErsetzen...\nGehe zu\0"
+
+static mut T_NEU: [u8; 12] = "Unbenannt\0\0\0"
+static mut T_OEFFNEN: [u8; 24] = "Oeffnen: welche Datei?\0\0"
+static mut T_SICHERN: [u8; 25] = "Sichern unter: Pfad?\0\0\0\0\0"
+static mut T_SUCHEN: [u8; 16] = "Suchen wonach?\0\0"
+static mut T_ERSETZEN: [u8; 22] = "Ersetzen durch was?\0\0\0"
+static mut T_GEHE: [u8; 18] = "Gehe zu Zeile:\0\0\0\0"
+static mut T_FRAGE: [u8; 44] = "Nicht gesichert. Trotzdem schliessen?\0\0\0\0\0\0\0"
+static mut T_WEG: [u8; 30] = "Datei laesst sich nicht lesen\0"
+static mut T_SCHREIB: [u8; 34] = "Datei laesst sich nicht schreiben\0"
+static mut T_NICHTDA: [u8; 21] = "Nicht gefunden: \0\0\0\0\0"
+
+// Die Statuszeile wird zusammengesetzt und liegt hier.
+static mut s_stat: [u8; 160] = [0 as u8; 160]
+static mut s_titel: [u8; 96] = [0 as u8; 96]
+
+// ============================================== DIE REITER UND IHRE DATEIEN
+//
+// EIN REITER IST EINE DATEI. Mehr haelt dieses Programm nicht: den
+// Namen, den Pfad und den Text. Der Text liegt NICHT hier -- er liegt
+// im Textfeld der Bibliothek, und beim Reiterwechsel wird er
+// getauscht.
+//
+// WARUM GETAUSCHT UND NICHT JE REITER EIN FELD: die Zeilentafel in
+// wlib ist die grosse Tafel dieses Systems (TA_MAXL Zeilen), und je
+// Reiter eine waere dieselbe Tafel mal acht. Ein Reiter, der nicht
+// vorne liegt, braucht seinen Text nur als Oktette -- und genau so
+// liegt er hier, in einem Puffer, den `map_surface` geholt hat.
+const MAXTAB: u64 = 8
+const TB_PFAD: u64 = 0 // Zeiger auf den Pfad (oder 0 = neu)
+const TB_PUF: u64 = 1 // Zeiger auf die Oktette, wenn der Reiter ruht
+const TB_N: u64 = 2 // wie viele Oktette
+const TB_CAP: u64 = 3 // wie viele Platz haben
+const TB_DIRTY: u64 = 4 // veraendert
+const TB_LANG: u64 = 5 // welche Sprache
+const TB_CY: u64 = 6 // wo die Marke stand
+const TB_CX: u64 = 7
+const TB_EOL: u64 = 8
+const TB_W: u64 = 9
+
+static mut tb: [u64; 72] = [0 as u64; 72] // MAXTAB * TB_W
+static mut ntab: u64 = 0
+static mut cur: u64 = 0
+
+// Die Namen der Reiter, als EIN Block mit Zeilenumbruch -- das ist das
+// Format, das `wlib.tabs` liest.
+static mut tabtext: [u8; 640] = [0 as u8; 640]
+// Die Pfade. Je Reiter 128 Oktette, damit ein Pfad nicht wandert.
+static mut pfade: [u8; 1024] = [0 as u8; 1024]
+
+// Der Puffer, in dem eine Datei gelesen und geschrieben wird.
+const IOMAX: u64 = 1048576
+static mut iobuf: u64 = 0
+
+// Was die Dialoge eintippen lassen.
+static mut dlgbuf: [u8; 256] = [0 as u8; 256]
+static mut suchtext: [u8; 128] = [0 as u8; 128]
+static mut ersetztext: [u8; 128] = [0 as u8; 128]
+
+static mut w_main: u64 = 0
+static mut w_bar: u64 = 0
+static mut w_tabs: u64 = 0
+static mut w_text: u64 = 0
+static mut w_stat: u64 = 0
+static mut w_pfad: u64 = 0
+static mut bw: u64 = 980
+static mut bh: u64 = 700
+static mut c_top: u64 = 0
+static mut c_text: u64 = 0
+static mut c_unten: u64 = 0
+// Was der Dialog gerade will: 1 oeffnen, 2 sichern unter, 3 suchen,
+// 4 ersetzen, 5 gehe zu, 6 schliessen-Frage, 7 beenden-Frage.
+static mut dlgart: u64 = 0
+
+fn tget(t: u64, f: u64) -> u64 {
+    if t >= MAXTAB {
+        return 0
+    }
+    return tb[(t * TB_W + f) as usize]
+}
+
+fn tset(t: u64, f: u64, v: u64) {
+    if t >= MAXTAB {
+        return
+    }
+    tb[(t * TB_W + f) as usize] = v
+}
+
+fn pfad_von(t: u64) -> u64 {
+    return ((&pfade[0 as usize]) as u64) + t * 128
+}
+
+// ======================================================= DIE DATEIEN
+//
+// LESEN. Die Groesse kommt aus `stat`, nicht aus dem Lesen bis zum
+// Ende -- so steht vor dem ersten Oktett fest, ob es ueberhaupt passt.
+fn datei_lesen(pfad: u64) -> u64 {
+    var st: [u8; 144] = [0 as u8; 144]
+    if ulib.bad(io.stat_into(pfad, (&st[0 as usize]) as u64)) {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    let gr: u64 = io.stat_size((&st[0 as usize]) as u64)
+    if gr >= IOMAX {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    let fd: u64 = io.open(pfad, 0)
+    if ulib.bad(fd) {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    let n: u64 = io.read_full(fd, iobuf, gr)
+    let _c: u64 = io.close(fd)
+    if ulib.bad(n) {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    return n
+}
+
+fn datei_schreiben(pfad: u64, n: u64) -> bool {
+    let fd: u64 = io.create(pfad)
+    if ulib.bad(fd) {
+        return false
+    }
+    let g: u64 = io.write_all(fd, iobuf, n)
+    let _c: u64 = io.close(fd)
+    return !ulib.bad(g) && g == n
+}
+
+// Die Sprache aus der Endung. Eine fuenfte Sprache ist hier eine Zeile
+// und in wlib eine -- mehr nicht.
+fn lang_von(pfad: u64) -> u64 {
+    if pfad == 0 {
+        return wlib.LANG_NONE
+    }
+    let n: u64 = ulib.length(pfad)
+    if n < 3 {
+        return wlib.LANG_NONE
+    }
+    let a: u64 = __mmio_read8((pfad + n - 3) as *mut u8) as u64
+    let b: u64 = __mmio_read8((pfad + n - 2) as *mut u8) as u64
+    let c: u64 = __mmio_read8((pfad + n - 1) as *mut u8) as u64
+    if a == 46 && (b | 32) == 102 && (c | 32) == 105 {
+        return wlib.LANG_FIRN // .fi
+    }
+    if a == 46 && (b | 32) == 115 && (c | 32) == 104 {
+        return wlib.LANG_SH // .sh
+    }
+    return wlib.LANG_NONE
+}
+
+// ======================================================== DIE REITER
+//
+// DIE BESCHRIFTUNGEN NEU SETZEN. `wlib.tabs` liest EINEN Block mit
+// einem Namen je Zeile -- also wird er hier gebaut. Ein Stern vor dem
+// Namen heisst "nicht gesichert"; das ist die Art, in der jeder Editor
+// es sagt, und sie kostet ein Zeichen statt eines zweiten Bedienteils.
+fn tabs_setzen() {
+    let p: u64 = (&tabtext[0 as usize]) as u64
+    var at: u64 = 0
+    var t: u64 = 0
+    while t < ntab && at < 600 {
+        if tget(t, TB_DIRTY) != 0 {
+            __mmio_write8((p + at) as *mut u8, 42 as u8) // '*'
+            at = at + 1
+        }
+        let nam: u64 = name_von(t)
+        var i: u64 = 0
+        while __mmio_read8((nam + i) as *mut u8) as u64 != 0 && at < 600 {
+            __mmio_write8((p + at) as *mut u8,
+                __mmio_read8((nam + i) as *mut u8))
+            at = at + 1
+            i = i + 1
+        }
+        if t + 1 < ntab && at < 600 {
+            __mmio_write8((p + at) as *mut u8, 10 as u8)
+            at = at + 1
+        }
+        t = t + 1
+    }
+    __mmio_write8((p + at) as *mut u8, 0 as u8)
+    wlib.set_text(w_tabs, p)
+    wlib.set_value(w_tabs, cur)
+}
+
+// Der NAME eines Reiters ist der letzte Teil seines Pfades -- ein
+// Reiter, auf dem "/users/root/schriften/lesen.fi" steht, ist so breit
+// wie das Fenster.
+fn name_von(t: u64) -> u64 {
+    let p: u64 = tget(t, TB_PFAD)
+    if p == 0 {
+        return (&T_NEU[0 as usize]) as u64
+    }
+    return ulib.base_name(p)
+}
+
+// DEN TEXT DES REITERS IN DAS FELD HOLEN. Vorher wird der Text des
+// alten Reiters herausgeholt -- sonst steht er nach dem Wechsel im
+// falschen.
+fn reiter_zeigen(neu: u64) {
+    if neu >= ntab {
+        return
+    }
+    if neu != cur {
+        reiter_sichern_in_puffer(cur)
+    }
+    cur = neu
+    let puf: u64 = tget(cur, TB_PUF)
+    if puf != 0 {
+        wlib.ta_text_set(w_text, puf, tget(cur, TB_N))
+    } else {
+        wlib.ta_leeren(w_text)
+    }
+    wlib.ta_lang(w_text, tget(cur, TB_LANG))
+    wlib.ta_eol_set(w_text, tget(cur, TB_EOL))
+    if tget(cur, TB_DIRTY) != 0 {
+        // Das Feld ist nach `ta_text_set` sauber -- der Reiter war es
+        // nicht, und der Reiter hat recht.
+        wlib.ta_gehe(w_text, tget(cur, TB_CY), tget(cur, TB_CX))
+    } else {
+        wlib.ta_gehe(w_text, tget(cur, TB_CY), tget(cur, TB_CX))
+    }
+    tabs_setzen()
+    stat_setzen()
+    titel_setzen()
+}
+
+// Den Text aus dem Feld in den Puffer des Reiters retten.
+fn reiter_sichern_in_puffer(t: u64) {
+    if t >= ntab {
+        return
+    }
+    let n: u64 = wlib.ta_text_get(w_text, iobuf, IOMAX - 1)
+    if tget(t, TB_CAP) < n + 1 {
+        var cap: u64 = (n + 4096) & 0xFFFFFFFFFFFFF000
+        let p: u64 = wlibc.map_surface(cap)
+        if ulib.bad(p) || p == 0 {
+            return
+        }
+        tset(t, TB_PUF, p)
+        tset(t, TB_CAP, cap)
+    }
+    let dst: u64 = tget(t, TB_PUF)
+    var i: u64 = 0
+    while i < n {
+        __mmio_write8((dst + i) as *mut u8, __mmio_read8((iobuf + i) as *mut u8))
+        i = i + 1
+    }
+    tset(t, TB_N, n)
+    tset(t, TB_CY, wlib.ta_zeile(w_text) - 1)
+    tset(t, TB_CX, 0)
+    if wlib.ta_geaendert(w_text) {
+        tset(t, TB_DIRTY, 1)
+    }
+}
+
+// EINEN NEUEN REITER. Ohne Pfad ist er "Unbenannt".
+fn reiter_neu(pfad: u64) -> u64 {
+    if ntab >= MAXTAB {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    let t: u64 = ntab
+    ntab = ntab + 1
+    tset(t, TB_PUF, 0)
+    tset(t, TB_N, 0)
+    tset(t, TB_CAP, 0)
+    tset(t, TB_DIRTY, 0)
+    tset(t, TB_CY, 0)
+    tset(t, TB_CX, 0)
+    tset(t, TB_EOL, 0)
+    if pfad == 0 {
+        tset(t, TB_PFAD, 0)
+        tset(t, TB_LANG, wlib.LANG_NONE)
+    } else {
+        ulib.strncpy(pfad_von(t), pfad, 127)
+        tset(t, TB_PFAD, pfad_von(t))
+        tset(t, TB_LANG, lang_von(pfad_von(t)))
+    }
+    return t
+}
+
+// EINE DATEI OEFFNEN -- in einen neuen Reiter.
+fn oeffnen(pfad: u64) -> bool {
+    let n: u64 = datei_lesen(pfad)
+    if n == 0xFFFFFFFFFFFFFFFF {
+        let _h: u64 = wlib.dlg_hinweis((&W_TITEL[0 as usize]) as u64,
+            (&T_WEG[0 as usize]) as u64)
+        return false
+    }
+    // Ein leerer, unberuehrter Reiter wird BENUTZT statt einen zweiten
+    // danebenzustellen -- sonst steht nach dem Start immer ein leeres
+    // "Unbenannt" vor der Datei, die man aufmachen wollte.
+    var t: u64 = 0xFFFFFFFFFFFFFFFF
+    if ntab == 1 && tget(0, TB_PFAD) == 0 && tget(0, TB_DIRTY) == 0
+        && tget(0, TB_N) == 0 {
+        t = 0
+        ulib.strncpy(pfad_von(0), pfad, 127)
+        tset(0, TB_PFAD, pfad_von(0))
+        tset(0, TB_LANG, lang_von(pfad_von(0)))
+    } else {
+        t = reiter_neu(pfad)
+        if t == 0xFFFFFFFFFFFFFFFF {
+            return false
+        }
+    }
+    // Der Text geht zuerst in den Puffer des Reiters, dann zeigt ihn
+    // `reiter_zeigen` -- ein Weg statt zwei.
+    if tget(t, TB_CAP) < n + 1 {
+        let cap: u64 = (n + 4096) & 0xFFFFFFFFFFFFF000
+        let p: u64 = wlibc.map_surface(cap)
+        if ulib.bad(p) || p == 0 {
+            return false
+        }
+        tset(t, TB_PUF, p)
+        tset(t, TB_CAP, cap)
+    }
+    let dst: u64 = tget(t, TB_PUF)
+    var i: u64 = 0
+    while i < n {
+        __mmio_write8((dst + i) as *mut u8, __mmio_read8((iobuf + i) as *mut u8))
+        i = i + 1
+    }
+    tset(t, TB_N, n)
+    tset(t, TB_DIRTY, 0)
+    tset(t, TB_CY, 0)
+    tset(t, TB_CX, 0)
+    cur = t
+    reiter_zeigen(t)
+    return true
+}
+
+// SICHERN. Ohne Pfad wird gefragt.
+fn sichern(t: u64) -> bool {
+    if t >= ntab {
+        return false
+    }
+    if tget(t, TB_PFAD) == 0 {
+        dlgart = 2
+        __mmio_write8(((&dlgbuf[0 as usize]) as u64) as *mut u8, 0 as u8)
+        let _d: u64 = wlib.dlg_open((&W_TITEL[0 as usize]) as u64,
+            (&T_SICHERN[0 as usize]) as u64, (&dlgbuf[0 as usize]) as u64)
+        return false
+    }
+    let n: u64 = wlib.ta_text_get(w_text, iobuf, IOMAX - 1)
+    if !datei_schreiben(tget(t, TB_PFAD), n) {
+        let _h: u64 = wlib.dlg_hinweis((&W_TITEL[0 as usize]) as u64,
+            (&T_SCHREIB[0 as usize]) as u64)
+        return false
+    }
+    tset(t, TB_DIRTY, 0)
+    wlib.ta_sauber(w_text)
+    tabs_setzen()
+    titel_setzen()
+    return true
+}
+
+// ===================================================== DIE STATUSZEILE
+//
+// "Zeile 12, Spalte 4   UTF-8   LF   geaendert" -- die vier Angaben,
+// die ein Editor unten stehen hat, und jede davon ist eine Antwort auf
+// eine Frage, die man sonst nicht stellen kann: wo stehe ich, wie wird
+// die Datei gelesen, womit enden die Zeilen, und ist etwas offen.
+//
+// KODIERUNG IST UTF-8 UND WIRD NICHT GERATEN. Dieses System hat genau
+// eine (`utf8.fi`, `wlibc.text_at` setzt danach); eine Anzeige, die
+// zwischen mehreren waehlen liesse, waere eine Behauptung ueber einen
+// Umsetzer, den es nicht gibt.
+static mut ST_Z: [u8; 8] = "Zeile \0\0"
+static mut ST_S: [u8; 10] = ", Spalte \0"
+static mut ST_UTF: [u8; 12] = "   UTF-8   \0"
+static mut ST_LF: [u8; 3] = "LF\0"
+static mut ST_CRLF: [u8; 5] = "CRLF\0"
+static mut ST_MOD: [u8; 14] = "   geaendert\0\0"
+static mut ST_ZEILEN: [u8; 11] = "   Zeilen \0"
+
+fn zahl_an(p: u64, at: u64, v: u64) -> u64 {
+    var ziffern: [u8; 20] = [0 as u8; 20]
+    var n: u64 = 0
+    var q: u64 = v
+    if q == 0 {
+        __mmio_write8((p + at) as *mut u8, 48 as u8)
+        return at + 1
+    }
+    while q > 0 && n < 20 {
+        ziffern[(n) as usize] = (48 + q % 10) as u8
+        q = q / 10
+        n = n + 1
+    }
+    var k: u64 = 0
+    while k < n {
+        __mmio_write8((p + at + k) as *mut u8, ziffern[(n - 1 - k) as usize])
+        k = k + 1
+    }
+    return at + n
+}
+
+fn text_an(p: u64, at: u64, q: u64) -> u64 {
+    var i: u64 = 0
+    var a: u64 = at
+    while __mmio_read8((q + i) as *mut u8) as u64 != 0 && a < 150 {
+        __mmio_write8((p + a) as *mut u8, __mmio_read8((q + i) as *mut u8))
+        a = a + 1
+        i = i + 1
+    }
+    return a
+}
+
+fn stat_setzen() {
+    let p: u64 = (&s_stat[0 as usize]) as u64
+    var at: u64 = 0
+    at = text_an(p, at, (&ST_Z[0 as usize]) as u64)
+    at = zahl_an(p, at, wlib.ta_zeile(w_text))
+    at = text_an(p, at, (&ST_S[0 as usize]) as u64)
+    at = zahl_an(p, at, wlib.ta_spalte(w_text))
+    at = text_an(p, at, (&ST_ZEILEN[0 as usize]) as u64)
+    at = zahl_an(p, at, wlib.ta_zeilen(w_text))
+    at = text_an(p, at, (&ST_UTF[0 as usize]) as u64)
+    if wlib.ta_eol(w_text) == 1 {
+        at = text_an(p, at, (&ST_CRLF[0 as usize]) as u64)
+    } else {
+        at = text_an(p, at, (&ST_LF[0 as usize]) as u64)
+    }
+    if wlib.ta_geaendert(w_text) {
+        at = text_an(p, at, (&ST_MOD[0 as usize]) as u64)
+    }
+    __mmio_write8((p + at) as *mut u8, 0 as u8)
+    wlib.set_text(w_stat, p)
+}
+
+// DER PFAD STEHT IM FENSTER UND NICHT IM FENSTERTITEL.
+//
+// Er sollte in den Titel -- dort erwartet ihn jeder. Er steht dort
+// NICHT, und das ist keine Nachlaessigkeit, sondern eine Grenze dieser
+// Bibliothek, die hier benannt und nicht umgangen wird: `wlib.window`
+// nimmt den Titel beim ANLEGEN des Fensters, und es gibt keinen Weg,
+// ihn danach zu aendern (kein `set_window_title` in wlib.fi, und der
+// Fensterserver bekommt ihn nur ueber `WIG_NEW`). Ein Titel, der beim
+// Reiterwechsel stehenbliebe, waere schlechter als keiner -- er wuerde
+// die falsche Datei nennen.
+//
+// Also steht der ganze Pfad in der Zeile UNTER den Reitern, wo er sich
+// bei jedem Wechsel mitaendert. Wer den Titel will, baut ihn in der
+// Runde, die `set_window_title` in die Bibliothek legt.
+fn titel_setzen() {
+    let p: u64 = (&s_titel[0 as usize]) as u64
+    var at: u64 = 0
+    if cur < ntab && tget(cur, TB_PFAD) != 0 {
+        at = text_an(p, at, tget(cur, TB_PFAD))
+    } else {
+        at = text_an(p, at, (&T_NEU[0 as usize]) as u64)
+    }
+    __mmio_write8((p + at) as *mut u8, 0 as u8)
+    wlib.set_text(w_pfad, p)
+}
+
+// ==================================================== SUCHEN UND ERSETZEN
+//
+// SIE GEHT ZEILE FUER ZEILE DURCH DAS FELD und holt sich den Text
+// nicht erst in einen Puffer: `wlib.ta_zeile_p/ta_zeile_n` geben den
+// Zeiger auf die Zeile, wie sie im Widget liegt. Bei einer Datei von
+// 5 000 Zeilen ist das der Unterschied zwischen einer Suche und einer
+// Kopie der ganzen Datei je Suche.
+//
+// GESUCHT WIRD AB DER MARKE, nicht ab dem Anfang -- sonst findet
+// "Weitersuchen" immer denselben Treffer.
+fn suchen_ab(vony: u64, vonx: u64) -> bool {
+    let nadel: u64 = (&suchtext[0 as usize]) as u64
+    let m: u64 = ulib.length(nadel)
+    if m == 0 {
+        return false
+    }
+    let zeilen: u64 = wlib.ta_zeilen(w_text)
+    var y: u64 = vony
+    var x: u64 = vonx
+    while y < zeilen {
+        let p: u64 = wlib.ta_zeile_p(w_text, y)
+        let n: u64 = wlib.ta_zeile_n(w_text, y)
+        if p != 0 && n >= m {
+            var i: u64 = x
+            while i + m <= n {
+                var k: u64 = 0
+                while k < m && __mmio_read8((p + i + k) as *mut u8)
+                    == __mmio_read8((nadel + k) as *mut u8) {
+                    k = k + 1
+                }
+                if k == m {
+                    wlib.ta_waehle(w_text, y, i, y, i + m)
+                    stat_setzen()
+                    return true
+                }
+                i = i + 1
+            }
+        }
+        y = y + 1
+        x = 0
+    }
+    return false
+}
+
+fn suchen_jetzt() -> bool {
+    // Ab der Marke, und wenn nichts kommt, noch einmal von vorn --
+    // das ist, was jeder Editor tut, und ohne den zweiten Lauf findet
+    // man den Treffer ueber der Marke nie.
+    let y: u64 = wlib.ta_zeile(w_text) - 1
+    let x: u64 = wlib.ta_spalte(w_text)
+    if suchen_ab(y, x) {
+        return true
+    }
+    if suchen_ab(0, 0) {
+        return true
+    }
+    let _h: u64 = wlib.dlg_hinweis((&W_TITEL[0 as usize]) as u64,
+        (&T_NICHTDA[0 as usize]) as u64)
+    return false
+}
+
+// ERSETZEN: den gefundenen Treffer durch den neuen Text tauschen. Das
+// Textfeld kann "einfuegen", und eine Auswahl wird beim Einfuegen
+// ersetzt -- also ist Ersetzen genau ein Einfuegen.
+fn ersetzen_jetzt() {
+    if !wlib.ta_hat_auswahl(w_text) {
+        if !suchen_jetzt() {
+            return
+        }
+    }
+    let e: u64 = (&ersetztext[0 as usize]) as u64
+    wlib.ta_einfuegen(w_text, e, ulib.length(e))
+    if cur < ntab {
+        tset(cur, TB_DIRTY, 1)
+    }
+    tabs_setzen()
+    stat_setzen()
+    let _w: bool = suchen_jetzt()
+}
+
+// ========================================================= DAS FENSTER
+//
+// Von oben nach unten: Menueleiste, Reiter, der Pfad, das grosse
+// Textfeld, die Statuszeile. Das Textfeld bekommt allen Platz, der
+// uebrig bleibt -- deshalb wird seine Hoehe gerechnet und nicht
+// getippt.
+fn aufbauen() -> bool {
+    var s_bad: [u8; 22] = "nedit: keine Flaeche\0\0"
+    if !wlib.begin(false, false) {
+        ulib.say((&s_bad[0 as usize]) as u64)
+        ulib.nl()
+        return false
+    }
+    let w: u64 = wlib.window(60, 40, bw, bh, (&W_TITEL[0 as usize]) as u64)
+    if w >= wlib.MAXWN {
+        ulib.say((&s_bad[0 as usize]) as u64)
+        ulib.nl()
+        return false
+    }
+    w_main = w
+    let _a: u64 = wlib.window_app(w, (&W_APP[0 as usize]) as u64)
+    let rand: u64 = wlib.inset()
+    let luft: u64 = wlib.inset() / 2
+    let innen: u64 = bw - rand * 2
+
+    c_top = wlib.box_v(w, 0, 0, bw, 0, rand, luft)
+    w_bar = wlib.menubar((&M_BAR[0 as usize]) as u64)
+    w_tabs = wlib.tabs((&tabtext[0 as usize]) as u64)
+    w_pfad = wlib.label((&s_titel[0 as usize]) as u64)
+    wlib.box_end()
+
+    // DIE HOEHE DES TEXTFELDES IST DER REST. Ueber ihm stehen drei
+    // Bedienelemente und unter ihm eines; was sie zusammen brauchen,
+    // wird abgezogen statt geschaetzt.
+    let oben: u64 = wlibc.metric(wlibc.M_CTRL_H) * 2
+        + wlibc.text_h(wlibc.px_ui()) + luft * 4 + rand
+    let unten: u64 = wlibc.text_h(wlibc.px_ui()) + luft * 2 + rand
+    var hoehe: u64 = 100
+    if bh > oben + unten + 100 {
+        hoehe = bh - oben - unten
+    }
+    c_text = wlib.box_v(w, rand, oben, innen, hoehe, 0, 0)
+    wlib.size(innen, hoehe)
+    w_text = wlib.textarea()
+    wlib.box_end()
+
+    c_unten = wlib.box_v(w, rand, bh - unten, innen, unten, 0, 0)
+    w_stat = wlib.label((&s_stat[0 as usize]) as u64)
+    wlib.box_end()
+    wlib.set_focus(w_text)
+    return true
+}
+
+// Nach einer Groessenaenderung: das Textfeld bekommt den neuen Rest.
+fn nachmessen() {
+    let neu_w: u64 = wlib.win_w(w_main)
+    let neu_h: u64 = wlib.win_h(w_main)
+    if neu_w == bw && neu_h == bh {
+        return
+    }
+    bw = neu_w
+    bh = neu_h
+    let rand: u64 = wlib.inset()
+    let luft: u64 = wlib.inset() / 2
+    let innen: u64 = bw - rand * 2
+    let oben: u64 = wlibc.metric(wlibc.M_CTRL_H) * 2
+        + wlibc.text_h(wlibc.px_ui()) + luft * 4 + rand
+    let unten: u64 = wlibc.text_h(wlibc.px_ui()) + luft * 2 + rand
+    var hoehe: u64 = 100
+    if bh > oben + unten + 100 {
+        hoehe = bh - oben - unten
+    }
+    wlib.set_size(w_text, innen, hoehe)
+    wlib.box_at(c_text, rand, oben, innen, hoehe)
+    wlib.box_at(c_unten, rand, bh - unten, innen, unten)
+    wlib.box_at(c_top, 0, 0, bw, 0)
+    // `reshape` misst die Bedienelemente neu und ordnet die Kaesten
+    // danach (`relayout` steckt darin) -- `relayout` allein ist nicht
+    // nach aussen gegeben, und die zwei Zeilen Unterschied sind genau
+    // das Nachmessen, das nach einer Groessenaenderung ohnehin
+    // richtig ist.
+    wlib.reshape()
+    wlib.dirty_all(w_main)
+}
+
+// ====================================================== DIE MENUEPUNKTE
+//
+// Die Nummern sind die Reihenfolge in `M_DATEI` und den beiden
+// anderen. Sie stehen an EINER Stelle, damit der Klick und das, was
+// geschieht, nicht auseinanderlaufen koennen.
+fn menue_datei(n: u64) {
+    if n == 0 {
+        // Neu
+        let t: u64 = reiter_neu(0)
+        if t != 0xFFFFFFFFFFFFFFFF {
+            reiter_sichern_in_puffer(cur)
+            cur = t
+            reiter_zeigen(t)
+        }
+    } else if n == 1 {
+        // Oeffnen
+        dlgart = 1
+        __mmio_write8(((&dlgbuf[0 as usize]) as u64) as *mut u8, 0 as u8)
+        let _d: u64 = wlib.dlg_open((&W_TITEL[0 as usize]) as u64,
+            (&T_OEFFNEN[0 as usize]) as u64, (&dlgbuf[0 as usize]) as u64)
+    } else if n == 2 {
+        let _s: bool = sichern(cur)
+    } else if n == 3 {
+        dlgart = 2
+        __mmio_write8(((&dlgbuf[0 as usize]) as u64) as *mut u8, 0 as u8)
+        let _d: u64 = wlib.dlg_open((&W_TITEL[0 as usize]) as u64,
+            (&T_SICHERN[0 as usize]) as u64, (&dlgbuf[0 as usize]) as u64)
+    } else if n == 4 {
+        schliessen()
+    } else if n == 5 {
+        beenden()
+    }
+}
+
+// EINEN REITER SCHLIESSEN. Ist etwas offen, wird GEFRAGT -- das ist
+// der Pflichtpunkt, an dem ein Editor Arbeit vernichtet oder nicht.
+fn schliessen() {
+    if cur >= ntab {
+        return
+    }
+    if tget(cur, TB_DIRTY) != 0 || wlib.ta_geaendert(w_text) {
+        dlgart = 6
+        let _d: u64 = wlib.dlg_ask((&W_TITEL[0 as usize]) as u64,
+            (&T_FRAGE[0 as usize]) as u64)
+        return
+    }
+    schliessen_wirklich()
+}
+
+fn schliessen_wirklich() {
+    if ntab <= 1 {
+        // Der letzte Reiter wird nicht weggenommen, sondern geleert --
+        // ein Editor ohne Reiter haette kein Textfeld mehr.
+        tset(0, TB_PFAD, 0)
+        tset(0, TB_PUF, 0)
+        tset(0, TB_N, 0)
+        tset(0, TB_DIRTY, 0)
+        tset(0, TB_LANG, wlib.LANG_NONE)
+        cur = 0
+        wlib.ta_leeren(w_text)
+        wlib.ta_lang(w_text, wlib.LANG_NONE)
+        tabs_setzen()
+        stat_setzen()
+        titel_setzen()
+        return
+    }
+    var t: u64 = cur
+    while t + 1 < ntab {
+        tb[(t * TB_W + TB_PFAD) as usize] = tb[((t + 1) * TB_W + TB_PFAD) as usize]
+        tb[(t * TB_W + TB_PUF) as usize] = tb[((t + 1) * TB_W + TB_PUF) as usize]
+        tb[(t * TB_W + TB_N) as usize] = tb[((t + 1) * TB_W + TB_N) as usize]
+        tb[(t * TB_W + TB_CAP) as usize] = tb[((t + 1) * TB_W + TB_CAP) as usize]
+        tb[(t * TB_W + TB_DIRTY) as usize] = tb[((t + 1) * TB_W + TB_DIRTY) as usize]
+        tb[(t * TB_W + TB_LANG) as usize] = tb[((t + 1) * TB_W + TB_LANG) as usize]
+        tb[(t * TB_W + TB_CY) as usize] = tb[((t + 1) * TB_W + TB_CY) as usize]
+        tb[(t * TB_W + TB_CX) as usize] = tb[((t + 1) * TB_W + TB_CX) as usize]
+        tb[(t * TB_W + TB_EOL) as usize] = tb[((t + 1) * TB_W + TB_EOL) as usize]
+        // Der Pfad wandert mit: er liegt in einem festen Platz je Reiter.
+        ulib.strncpy(pfad_von(t), pfad_von(t + 1), 127)
+        if tb[(t * TB_W + TB_PFAD) as usize] != 0 {
+            tb[(t * TB_W + TB_PFAD) as usize] = pfad_von(t)
+        }
+        t = t + 1
+    }
+    ntab = ntab - 1
+    if cur >= ntab {
+        cur = ntab - 1
+    }
+    reiter_zeigen(cur)
+}
+
+fn beenden() {
+    // Ist irgendwo etwas offen, wird gefragt -- einmal fuer alle.
+    var offen: bool = false
+    if wlib.ta_geaendert(w_text) {
+        offen = true
+    }
+    var t: u64 = 0
+    while t < ntab {
+        if tget(t, TB_DIRTY) != 0 {
+            offen = true
+        }
+        t = t + 1
+    }
+    if offen {
+        dlgart = 7
+        let _d: u64 = wlib.dlg_ask((&W_TITEL[0 as usize]) as u64,
+            (&T_FRAGE[0 as usize]) as u64)
+        return
+    }
+    wlib.quit()
+}
+
+fn menue_bearb(n: u64) {
+    // Rueckgaengig/Wiederholen/Ausschneiden/Kopieren/Einfuegen gehen
+    // ALLE ueber die Taste, die das Textfeld ohnehin kennt -- so gibt
+    // es eine Umsetzung und nicht zwei.
+    wlib.set_focus(w_text)
+    if n == 0 {
+        wlib.feed_key(26) // Strg+Z
+    } else if n == 1 {
+        wlib.feed_key(25) // Strg+Y
+    } else if n == 2 {
+        wlib.feed_key(24) // Strg+X
+    } else if n == 3 {
+        wlib.feed_key(3) // Strg+C
+    } else if n == 4 {
+        wlib.feed_key(22) // Strg+V
+    }
+    if cur < ntab && wlib.ta_geaendert(w_text) {
+        tset(cur, TB_DIRTY, 1)
+    }
+    tabs_setzen()
+    stat_setzen()
+}
+
+fn menue_suchen(n: u64) {
+    if n == 0 {
+        dlgart = 3
+        __mmio_write8(((&dlgbuf[0 as usize]) as u64) as *mut u8, 0 as u8)
+        let _d: u64 = wlib.dlg_open((&W_TITEL[0 as usize]) as u64,
+            (&T_SUCHEN[0 as usize]) as u64, (&dlgbuf[0 as usize]) as u64)
+    } else if n == 1 {
+        dlgart = 4
+        __mmio_write8(((&dlgbuf[0 as usize]) as u64) as *mut u8, 0 as u8)
+        let _d: u64 = wlib.dlg_open((&W_TITEL[0 as usize]) as u64,
+            (&T_SUCHEN[0 as usize]) as u64, (&dlgbuf[0 as usize]) as u64)
+    } else if n == 2 {
+        dlgart = 5
+        __mmio_write8(((&dlgbuf[0 as usize]) as u64) as *mut u8, 0 as u8)
+        let _d: u64 = wlib.dlg_open((&W_TITEL[0 as usize]) as u64,
+            (&T_GEHE[0 as usize]) as u64, (&dlgbuf[0 as usize]) as u64)
+    }
+}
+
+// Was ein geschlossener Dialog bedeutet -- die Antwort haengt daran,
+// wonach gefragt wurde (`dlgart`).
+fn dialog_fertig(ok: bool) {
+    let art: u64 = dlgart
+    dlgart = 0
+    if art == 6 {
+        if ok {
+            schliessen_wirklich()
+        }
+        return
+    }
+    if art == 7 {
+        if ok {
+            wlib.quit()
+        }
+        return
+    }
+    if !ok {
+        return
+    }
+    let p: u64 = wlib.dlg_text()
+    if p == 0 || ulib.length(p) == 0 {
+        return
+    }
+    if art == 1 {
+        let _o: bool = oeffnen(p)
+    } else if art == 2 {
+        if cur < ntab {
+            ulib.strncpy(pfad_von(cur), p, 127)
+            tset(cur, TB_PFAD, pfad_von(cur))
+            tset(cur, TB_LANG, lang_von(pfad_von(cur)))
+            wlib.ta_lang(w_text, tget(cur, TB_LANG))
+            let _s: bool = sichern(cur)
+            tabs_setzen()
+            titel_setzen()
+        }
+    } else if art == 3 {
+        ulib.strncpy((&suchtext[0 as usize]) as u64, p, 126)
+        let _f: bool = suchen_jetzt()
+    } else if art == 4 {
+        // Erst wonach, dann wodurch -- zwei Fragen nacheinander, weil
+        // ein Dialog dieser Bibliothek EIN Feld hat.
+        ulib.strncpy((&suchtext[0 as usize]) as u64, p, 126)
+        dlgart = 8
+        __mmio_write8(((&dlgbuf[0 as usize]) as u64) as *mut u8, 0 as u8)
+        let _d: u64 = wlib.dlg_open((&W_TITEL[0 as usize]) as u64,
+            (&T_ERSETZEN[0 as usize]) as u64, (&dlgbuf[0 as usize]) as u64)
+    } else if art == 8 {
+        ulib.strncpy((&ersetztext[0 as usize]) as u64, p, 126)
+        ersetzen_jetzt()
+    } else if art == 5 {
+        let z: u64 = ulib.to_num(p)
+        if z > 0 {
+            wlib.ta_gehe(w_text, z - 1, 0)
+            stat_setzen()
+        }
+    }
+}
+
+// ========================================================= DIE SCHLEIFE
+fn u_start(args: u64) -> u64 {
+    var s_go: [u8; 13] = "nedit: ready\0"
+    var s_bad2: [u8; 21] = "nedit: kein Speicher\0"
+    iobuf = wlibc.map_surface(IOMAX)
+    if ulib.bad(iobuf) || iobuf == 0 {
+        ulib.say((&s_bad2[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    if !aufbauen() {
+        return 1
+    }
+    // Was auf der Befehlszeile steht, wird geoeffnet -- ein Editor,
+    // den der Dateimanager mit einem Pfad startet, soll die Datei
+    // zeigen und nicht ein leeres Blatt.
+    //
+    // ZUERST DER LEERE REITER, DANN DIE DATEIEN. `oeffnen` benutzt
+    // einen leeren, unberuehrten Reiter, statt einen zweiten
+    // danebenzustellen (siehe dort) -- der erste Pfad landet also in
+    // diesem, jeder weitere bekommt einen eigenen.
+    //
+    // HIER STAND EIN `reiter_neu(p)` VOR DEM `oeffnen(p)`, und damit
+    // gab es die Datei ZWEIMAL: einmal den angelegten Reiter und
+    // einmal den, den `oeffnen` sich selbst nahm. Im Bild standen
+    // zwei Reiter "probe.fi" nebeneinander.
+    let _t0: u64 = reiter_neu(0)
+    cur = 0
+    let argc: u64 = ulib.arg_count(args)
+    var a: u64 = 1
+    while a < argc && ntab < MAXTAB {
+        let p: u64 = ulib.arg_at(args, a)
+        if p != 0 && ulib.length(p) != 0 {
+            let _o: bool = oeffnen(p)
+        }
+        a = a + 1
+    }
+    reiter_zeigen(cur)
+    tabs_setzen()
+    stat_setzen()
+    titel_setzen()
+    ulib.say((&s_go[0 as usize]) as u64)
+    ulib.nl()
+    sag_stand()
+
+    while wlib.alive() {
+        let id: u64 = wlib.step()
+        // EIN DIALOG IST DAS ERSTE, was gefragt wird: solange einer
+        // offen ist, gehoert ihm die Antwort.
+        let zu: u64 = wlib.dlg_state()
+        if dlgart != 0 && zu != 0 && zu != 1 {
+            wlib.dlg_close()
+            dialog_fertig(zu == 2)
+            tabs_setzen()
+            stat_setzen()
+            titel_setzen()
+        }
+        if id < wlib.MAXWD {
+            let kind: u64 = wlib.fired_kind()
+            let idx: u64 = wlib.fired_index()
+            if kind == wlib.K_TABS {
+                reiter_zeigen(idx)
+            } else if kind == wlib.K_MENUBAR {
+                if idx >= 0x1000 {
+                    // Die Leiste sagt "Menue n wurde angeklickt" und
+                    // laesst das Aufklappen dem Programm.
+                    let m: u64 = idx - 0x1000
+                    var items: u64 = (&M_DATEI[0 as usize]) as u64
+                    var cnt: u64 = 6
+                    if m == 1 {
+                        items = (&M_BEARB[0 as usize]) as u64
+                        cnt = 5
+                    } else if m == 2 {
+                        items = (&M_SUCHEN[0 as usize]) as u64
+                        cnt = 3
+                    }
+                    let _mo: u64 = wlib.menu_open(w_bar,
+                        wlib.win_x(w_main) + wlib.menubar_x(w_bar, m),
+                        wlib.win_y(w_main) + wlib.win_cy(w_main)
+                            + wlibc.metric(wlibc.M_CTRL_H),
+                        items, cnt)
+                } else if idx != 0xFFFF {
+                    let m2: u64 = wlib.value(w_bar)
+                    if m2 == 1 {
+                        menue_datei(idx)
+                    } else if m2 == 2 {
+                        menue_bearb(idx)
+                    } else if m2 == 3 {
+                        menue_suchen(idx)
+                    }
+                    tabs_setzen()
+                    stat_setzen()
+                    titel_setzen()
+                }
+            }
+        }
+        // Nach jedem Durchgang: steht die Marke woanders, sagt es die
+        // Statuszeile. Sie wird nur neu gesetzt, wenn sich wirklich
+        // etwas geaendert hat -- sonst waere jedes `step` ein Anstrich.
+        let z: u64 = wlib.ta_zeile(w_text)
+        let sp: u64 = wlib.ta_spalte(w_text)
+        if z != letzte_z || sp != letzte_s
+            || wlib.ta_geaendert(w_text) != letzte_d {
+            letzte_z = z
+            letzte_s = sp
+            letzte_d = wlib.ta_geaendert(w_text)
+            if letzte_d && cur < ntab && tget(cur, TB_DIRTY) == 0 {
+                tset(cur, TB_DIRTY, 1)
+                tabs_setzen()
+            }
+            stat_setzen()
+        }
+        if wlib.resize_seq() != letzte_r {
+            letzte_r = wlib.resize_seq()
+            nachmessen()
+        }
+    }
+    sag_stand()
+    return 0
+}
+
+static mut letzte_z: u64 = 0
+static mut letzte_s: u64 = 0
+static mut letzte_d: bool = false
+static mut letzte_r: u64 = 0
+
+// ================================================ WAS DER PRUEFSTAND LIEST
+//
+// Eine Zeile auf der seriellen Leitung, aus der ein Testlaeufer die
+// Zahlen nimmt, statt sie aus einem Bild zu raten. Dieselbe Art Zeile,
+// die `settings` und `taskbar` schreiben (`sayn`), und aus demselben
+// Grund: ein Bild zeigt, dass etwas dasteht, aber nicht, dass die
+// richtige Zahl dahintersteht.
+static mut SG_A: [u8; 15] = "nedit: reiter \0"
+static mut SG_B: [u8; 9] = " zeilen \0"
+static mut SG_C: [u8; 9] = " zeile \0\0"
+static mut SG_D: [u8; 9] = " spalte \0"
+static mut SG_E: [u8; 8] = " modif \0"
+
+fn sag_stand() {
+    ulib.say((&SG_A[0 as usize]) as u64)
+    ulib.sayn(ntab)
+    ulib.say((&SG_B[0 as usize]) as u64)
+    ulib.sayn(wlib.ta_zeilen(w_text))
+    ulib.say((&SG_C[0 as usize]) as u64)
+    ulib.sayn(wlib.ta_zeile(w_text))
+    ulib.say((&SG_D[0 as usize]) as u64)
+    ulib.sayn(wlib.ta_spalte(w_text))
+    ulib.say((&SG_E[0 as usize]) as u64)
+    var d: u64 = 0
+    if wlib.ta_geaendert(w_text) {
+        d = 1
+    }
+    ulib.sayn(d)
+    ulib.nl()
+}
+
+// ==================================================== RUNDE 31: profile app
+//
+// Unter `profile app` bringt firnc seinen eigenen `_start` mit und
+// ruft `main`. `u_start` bleibt die Wurzel dieses Programms (und der
+// Name, unter dem der Binder es mit `--defsym=USER_ENTRY` findet);
+// `main` ist die eine Zeile dazwischen. Die Argumente stehen bei
+// `ulib.ARGS_BASE` -- der Kern legt sie dorthin, und firnc's `_start`
+// macht `mov rsp, rdi`.
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}
