@@ -179,8 +179,28 @@ sagen "kern        $(stat -c%s "$OUT/osum.mb") Oktette"
 # Und ausgerechnet dieses Programm darf nicht fehlen -- es ist der
 # einzige Weg vom Stick auf eine Platte, und ein Stick, der sich
 # nicht installieren laesst, bleibt ein Vorfuehrstueck.
+# ============ INTEGRATIONSRUNDE 19.09.2026: `nedit` HAT HIER GEFEHLT.
+#
+# Die Runde GUI-EDITOR hat /bin/nedit gebaut, gemessen (18/0) und ein
+# Buendel dafuer angelegt (assets/apps/nedit.osp). In DIESE Zeile ist
+# es nie eingetragen worden -- und `tools/k15/bundle.py` bekommt
+# `nur="$PROGS"`, filtert das Buendel also mit heraus. Ergebnis: auf
+# dem Stick gab es den neuen Editor nicht, weder unter /bin noch im
+# Startmenue, und der alte Zeileneditor `edit` war weiterhin das
+# einzige, was "Editor" hiess.
+#
+# GEMESSEN in der Integrationspruefung: ein Lauf des fertigen Abbilds
+# fand `/bin/nedit` nicht im Wurzelabbild (grep -c nedit root.img = 0),
+# waehrend derselbe Quellbaum in tools/alltag/build.sh 18/0 meldete --
+# die Abnahme baut ihre eigene Platte und hatte nedit in ihrer Liste.
+# Genau so sieht ein Programm aus, das "fertig" ist und trotzdem bei
+# niemandem ankommt.
+#
+# `edit` BLEIBT: es ist das Terminalprogramm (kein wlib), und die
+# Abnahme der Runde GUI-EDITOR prueft ausdruecklich, dass es
+# unveraendert eines ist.
 PROGS=${PROGS:-"desktop taskbar settings launcher explorer netview \
-widgetdemo taskmgr installer dualcli locate edit sh echo ls cat ps uname date df mkdir rm cp mv \
+widgetdemo taskmgr installer dualcli locate edit nedit sh echo ls cat ps uname date df mkdir rm cp mv \
 grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
 dhcp host ota jsig jarvisctl pollbr reboot shutdown power fas \
@@ -1025,6 +1045,7 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /bin/jarvisctl /bin/pollbr /etc/ota.conf /etc/jarvis/rechte.conf \
 /system/FASSUNG /system/SCHLUESSELGEN \
 /apps/explorer.osp/start /apps/editor.osp/start /apps/terminal.osp/start \
+/bin/nedit /apps/nedit.osp/start /apps/nedit.osp/INFO \
 /apps/launcher.osp/start /apps/widgets.osp/start /apps/settings.osp/start \
 /apps/settings.osp/INFO /apps/settings.osp/symbol \
 /bin/shutdown /bin/power /bin/firnc /bin/fas /beispiel/hallo.fi \
