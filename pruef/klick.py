@@ -243,6 +243,22 @@ class Maschine:
               # Antwort aus. GEMESSEN am 19.09. im Lauf `ziehen2`; im
               # selben Lauf gab `sendkey minus` ein `ß`, was die
               # deutsche Belegung beweist.
+              # `<` und `>` liegen auf DEUTSCH auf einer eigenen Taste
+              # links neben dem Y (QEMU nennt sie `less`); auf US-Lage
+              # gibt es sie nur als Umschalt-Komma/-Punkt. GEMESSEN:
+              # ohne diese zwei Zeilen fiel das `>` einer Umlenkung
+              # ERSATZLOS weg -- aus `echo eins > /data/t1.txt` wurde
+              # `echo eins  /data/t1.txt`, die Shell schrieb beides auf
+              # den Schirm, `echo` meldete rc=0, und die Datei entstand
+              # NIE. Von aussen sah das wie ein kaputtes Dateisystem aus.
+              # DIE TASTE NEBEN DER LINKEN UMSCHALTTASTE, Scancode
+              # 0x56. QEMU kennt fuer sie KEINEN der ueblichen Namen
+              # (`less` schickt nichts, was hier ankommt -- gemessen:
+              # das Zeichen fiel als LEERZEICHEN an). Ueber die ROHE
+              # Scancode-Nummer geht es: `sendkey 0x56`. Der Kern legt
+              # sie deutsch aus (kernel/drv/hid/kbd.fi:1051 und :1129):
+              # ohne Umschalt `<`, mit Umschalt `>`.
+              "<": "0x56", ">": "shift-0x56",
               "/": "shift-7", "-": "slash", "ß": "minus",
               "?": "shift-minus", "_": "shift-slash",
               ";": "shift-comma", ":": "shift-dot",
