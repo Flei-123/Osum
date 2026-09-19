@@ -887,6 +887,104 @@ fn dialog_fertig(ok: bool) {
     }
 }
 
+// ============================================== DIE MESSUNG DES TIPPENS
+//
+// WARUM SIE IM PROGRAMM STEHT UND NICHT IM TESTLAEUFER.
+//
+// Die Messlatte dieser Runde sagt: "Tippen fuehlt sich nicht traege
+// an (miss die Zeit je Tastendruck)". Von aussen ist das nicht zu
+// messen -- ein Tastendruck ueber den QEMU-Monitor laeuft durch den
+// PS/2-Baustein, den Kern, den Fensterserver und die Ereignisschlange,
+// und was davon auf das TEXTFELD entfaellt, sieht man in der
+// Gesamtzeit nicht.
+//
+// Also misst das Programm selbst: `messen=N` auf der Befehlszeile
+// speist N Zeichen durch GENAU DENSELBEN Weg ein, den eine echte
+// Taste nimmt (`wlib.feed_key` -> `on_key` -> `ta_key`), und nimmt
+// davor und danach die Uhr.
+//
+// DIE UHR HAT 100 Hz (kernel/sched/time.fi, TICK_HZ), ein Tick ist
+// also 10 ms. Ein einzelner Tastendruck liegt weit darunter -- deshalb
+// wird ein BUENDEL gemessen und geteilt. Herauskommen Mikrosekunden je
+// Taste, und die sind ehrlich, weil sie aus einer Zeit stammen, die
+// gross genug ist, um sie abzulesen.
+//
+// GEMESSEN WIRD IN DER DATEI, DIE GERADE OFFEN IST -- bei der grossen
+// ist das der Fall, auf den es ankommt: wenn das Einfuegen die ganze
+// Datei umkopierte, stuende es hier.
+static mut MS_A: [u8; 16] = "nedit: tippen n "
+static mut MS_B: [u8; 9] = " ticks   "
+static mut MS_C: [u8; 10] = " us_je    "
+static mut MS_D: [u8; 10] = " zeilen   "
+
+fn messen(n: u64) {
+    // In die MITTE der Datei, nicht an den Anfang: dort steht der
+    // Einfuegepunkt, bei dem ein Puffer, der die ganze Datei
+    // umkopiert, am meisten zu tun haette.
+    let mitte: u64 = wlib.ta_zeilen(w_text) / 2
+    wlib.ta_gehe(w_text, mitte, 0)
+    let t0: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+    var k: u64 = 0
+    while k < n {
+        // 'a' bis 'z', damit nicht immer dasselbe Zeichen kommt.
+        wlib.feed_key(97 + (k % 26))
+        k = k + 1
+    }
+    let t1: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+    let dt: u64 = t1 - t0
+    ulib.say((&MS_A[0 as usize]) as u64)
+    ulib.sayn(n)
+    ulib.say((&MS_B[0 as usize]) as u64)
+    ulib.sayn(dt)
+    ulib.say((&MS_C[0 as usize]) as u64)
+    // Ein Tick ist 10 000 us. us je Taste = dt * 10000 / n.
+    if n != 0 {
+        ulib.sayn(dt * 10000 / n)
+    }
+    ulib.say((&MS_D[0 as usize]) as u64)
+    ulib.sayn(wlib.ta_zeilen(w_text))
+    ulib.nl()
+}
+
+// Dasselbe fuer das ROLLEN: Bild ab, N mal. Es ist die zweite Zusage
+// der Messlatte ("fluessig scrollen") und die Stelle, an der ein
+// Zeichner, der die ganze Datei malt statt des Ausschnitts, auffiele.
+static mut MR_A: [u8; 17] = "nedit: rollen n  "
+
+fn messen_rollen(n: u64, mit_anstrich: bool) {
+    wlib.ta_gehe(w_text, 0, 0)
+    let t0: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+    // ZWEI ZAHLEN, WEIL ES ZWEI KOSTEN SIND.
+    //
+    // `rollen=` misst BEIDES zusammen (Taste + Anstrich); `rollnur=`
+    // misst nur die Taste, also die Arbeit, die dieses Widget wirklich
+    // leistet. Der Unterschied ist der Anstrich des ganzen Fensters,
+    // und der gehoert dem Fensterserver und nicht dem Textfeld -- er
+    // kostet bei einer Datei mit zwoelf Zeilen dasselbe wie bei einer
+    // mit fuenftausend, und genau das weist die Messung nach.
+    var k: u64 = 0
+    while k < n {
+        wlib.feed_key(0x108) // KEY_PGDN
+        if mit_anstrich {
+            let _s: u64 = wlib.step()
+        }
+        k = k + 1
+    }
+    let t1: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+    let dt: u64 = t1 - t0
+    ulib.say((&MR_A[0 as usize]) as u64)
+    ulib.sayn(n)
+    ulib.say((&MS_B[0 as usize]) as u64)
+    ulib.sayn(dt)
+    ulib.say((&MS_C[0 as usize]) as u64)
+    if n != 0 {
+        ulib.sayn(dt * 10000 / n)
+    }
+    ulib.say((&MS_D[0 as usize]) as u64)
+    ulib.sayn(wlib.ta_zeile(w_text))
+    ulib.nl()
+}
+
 // ========================================================= DIE SCHLEIFE
 fn u_start(args: u64) -> u64 {
     var s_go: [u8; 13] = "nedit: ready\0"
@@ -917,10 +1015,28 @@ fn u_start(args: u64) -> u64 {
     cur = 0
     let argc: u64 = ulib.arg_count(args)
     var a: u64 = 1
+    var mess: u64 = 0
+    var messr: u64 = 0
+    var messrn: u64 = 0
+    var s_m: [u8; 8] = "messen=\0"
+    var s_r: [u8; 8] = "rollen=\0"
+    var s_rn: [u8; 9] = "rollnur=\0"
     while a < argc && ntab < MAXTAB {
         let p: u64 = ulib.arg_at(args, a)
         if p != 0 && ulib.length(p) != 0 {
-            let _o: bool = oeffnen(p)
+            // `messen=N` und `rollen=N` sind MESSBEFEHLE und keine
+            // Dateinamen -- sie stehen hier und nicht in einem eigenen
+            // Programm, weil nur dieses Programm den Weg kennt, den
+            // eine Taste wirklich nimmt.
+            if ulib.strneq(p, (&s_m[0 as usize]) as u64, 7) {
+                mess = ulib.to_num(p + 7)
+            } else if ulib.strneq(p, (&s_r[0 as usize]) as u64, 7) {
+                messr = ulib.to_num(p + 7)
+            } else if ulib.strneq(p, (&s_rn[0 as usize]) as u64, 8) {
+                messrn = ulib.to_num(p + 8)
+            } else {
+                let _o: bool = oeffnen(p)
+            }
         }
         a = a + 1
     }
@@ -931,6 +1047,16 @@ fn u_start(args: u64) -> u64 {
     ulib.say((&s_go[0 as usize]) as u64)
     ulib.nl()
     sag_stand()
+    if messr != 0 {
+        messen_rollen(messr, true)
+    }
+    if messrn != 0 {
+        messen_rollen(messrn, false)
+    }
+    if mess != 0 {
+        messen(mess)
+        sag_stand()
+    }
 
     while wlib.alive() {
         let id: u64 = wlib.step()
