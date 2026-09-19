@@ -461,10 +461,38 @@ fn on_code(state: u64, code: u64) {
         push_hot(state, KEY_F12, 0)
         return
     }
-    // Die Pfeiltaste nach oben: ein Oktett, unveraendert seit Runde K6.
+    // ============================================ RUNDE GUI-EDITOR
+    //
+    // DIE PFEILTASTE NACH OBEN, UND WARUM SIE ZWEI WEGE HAT.
+    //
+    // Seit Runde K6 geht sie als NACKTES OKTETT 14 -- an jeder
+    // Fluchtfolge vorbei. Das war richtig, solange niemand wissen
+    // musste, ob dabei die Umschalttaste lag: 14 ist 14.
+    //
+    // Ein mehrzeiliges Textfeld muss es wissen. `Umschalt+Hoch` waehlt
+    // die Zeile darueber aus, `Hoch` allein bewegt nur die Marke -- und
+    // aus EINEM Oktett sind das dieselben zwei Tasten. Dasselbe gilt
+    // fuer Strg+Hoch (zeilenweise rollen).
+    //
+    // Also: OHNE Modifikator bleibt alles, wie es seit K6 ist (die
+    // Shell, /bin/edit und jedes bestehende Programm sehen keinen
+    // Unterschied), MIT Modifikator geht sie den Weg, den die anderen
+    // Pfeile unten auch gehen -- `ESC [ 1 ; m A`.
     if code == 72 {
-        deliver(state, 14)
-        say_key(14)
+        let m_up: u64 = mods_of(state)
+        if m_up == 0 {
+            deliver(state, 14)
+            say_key(14)
+            return
+        }
+        deliver(state, 27)
+        deliver(state, 91)
+        deliver(state, 49) // '1'
+        deliver(state, 59) // ';'
+        deliver(state, 48 + m_up)
+        deliver(state, 65) // 'A'
+        kstate.add(state, kstate.K11_OFF + kstate.KB_SEQS, 1)
+        say_seq(65)
         return
     }
     if ext == 1 {
@@ -483,12 +511,42 @@ fn on_code(state: u64, code: u64) {
             // Der Dateimanager braucht sie: Entf legt in den
             // Papierkorb, Umschalt+Entf loescht endgueltig, und ohne
             // diese zwei Oktette waere das dieselbe Taste.
-            if kstate.get(state, kstate.K11_OFF + kstate.KB_SHIFT) == 1 {
+            //
+            // RUNDE GUI-EDITOR: jetzt auch Strg (';5') und Strg+Umschalt
+            // (';6') -- dieselbe Stelle, derselbe xterm-Modifikator, nur
+            // nicht mehr nur der eine Wert 2.
+            let m_t: u64 = mods_of(state)
+            if m_t != 0 {
                 deliver(state, 59)
-                deliver(state, 50)
+                deliver(state, 48 + m_t)
             }
             deliver(state, 126)
         } else {
+            // ==================================== RUNDE GUI-EDITOR
+            //
+            // DIE PFEILE MIT UMSCHALT UND MIT STRG.
+            //
+            // Hier stand `deliver(state, final)` -- also `ESC [ D` fuer
+            // links, ohne jeden Modifikator. Damit ist `Pfeil links`
+            // und `Umschalt+Pfeil links` DIESELBE Folge, und ein
+            // Textfeld kann "gehe nach links" nicht von "waehle nach
+            // links aus" unterscheiden. Genau das hielt den Kommentar
+            // in wlib.fi aufrecht, es gebe "keine Auswahl mit
+            // Umschalt-Pfeil -- die Umschalttaste kommt in diesem
+            // System nicht als eigenes Ereignis an".
+            //
+            // Sie kommt an, sie wurde nur nie mitgeschickt. Mit
+            // Modifikator ist es die lange Form, die xterm seit je
+            // schickt: `ESC [ 1 ; m D`. OHNE Modifikator bleibt es bei
+            // `ESC [ D` -- Wort fuer Wort dieselben drei Oktette wie
+            // vorher, und damit sehen die Shell und /bin/edit keinen
+            // Unterschied.
+            let m_a: u64 = mods_of(state)
+            if m_a != 0 {
+                deliver(state, 49) // '1'
+                deliver(state, 59) // ';'
+                deliver(state, 48 + m_a)
+            }
             deliver(state, final)
         }
         kstate.add(state, kstate.K11_OFF + kstate.KB_SEQS, 1)
@@ -683,6 +741,33 @@ fn deliver(state: u64, c: u64) {
 }
 
 // Welcher Schlussbuchstabe zu einer Zusatztaste gehoert. Ueber 255 heisst:
+// ==================================================== RUNDE GUI-EDITOR
+//
+// DER MODIFIKATOR ALS EINE ZAHL, UND ZWAR DIE VON xterm.
+//
+// xterm zaehlt seit dreissig Jahren so: 1 = nichts, 2 = Umschalt,
+// 3 = Alt, 5 = Strg, 6 = Strg+Umschalt -- also 1 + (Umschalt ? 1 : 0)
+// + (Alt ? 2 : 0) + (Strg ? 4 : 0). `wlib.tilde` liest genau diese
+// Zahlen (Entf mit 2, Alt-Pfeile mit 3, Strg+H/N mit 5), also wird
+// hier nichts Neues erfunden.
+//
+// Rueckgabe 0 heisst AUSDRUECKLICH "kein Modifikator" und nicht "1":
+// so kann der Aufrufer die kurze Form ohne `; m` schicken, und
+// dieselben Oktette wie vor dieser Runde stehen auf der Leitung.
+fn mods_of(state: u64) -> u64 {
+    var m: u64 = 0
+    if kstate.get(state, kstate.K11_OFF + kstate.KB_SHIFT) == 1 {
+        m = m + 1
+    }
+    if kstate.get(state, kstate.K11_OFF + kstate.KB_CTRL) == 1 {
+        m = m + 4
+    }
+    if m == 0 {
+        return 0
+    }
+    return m + 1
+}
+
 // die Form `ESC [ n ~` statt `ESC [ x`.
 fn arrow(code: u64) -> u64 {
     if code == 0x50 {
