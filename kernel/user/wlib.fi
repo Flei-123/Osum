@@ -155,6 +155,8 @@ export {
     K_MENUBAR, K_CHOICE, K_SEP, K_SCROLL,
     // RUNDE CLIP-2: das Ablegeziel.
     K_DROP, K_DRAG, drop_an, drop_count, drag_starts,
+    // RUNDE DESIGN-3: das Zugbild am Zeiger.
+    zug_bilder, zug_laeuft,
     NK_MAIN, NK_MENU, NK_DLG, NK_TIP,
     tip_win_open, tip_win_close, tip_win_id, feed_key,
     KEY_TAB, KEY_ENTER, KEY_BS, KEY_ESC, KEY_UP, KEY_DOWN, KEY_LEFT,
@@ -789,6 +791,46 @@ static mut s_drags: u64 = 0
 static mut s_dragwd: u64 = 0
 static mut s_dragx: u64 = 0
 static mut s_dragy: u64 = 0
+// ====================================================== RUNDE DESIGN-3
+//
+// DAS ZUGBILD -- was am Zeiger haengt, waehrend gezogen wird.
+//
+// WARUM UEBERHAUPT. Bis hierher war ein Ziehen auf dem Schirm
+// UNSICHTBAR: der Explorer legte den Pfad auf den Bus, die Statuszeile
+// bekam "Ziehe: name" -- und zwischen Anfassen und Loslassen zeigte der
+// Zeiger nichts an. Wer eine Datei ueber das Fenster schob, sah eine
+// Maus ueber einer Liste und musste sich merken, dass er gerade etwas
+// traegt. Das ist genau die Stelle, an der eine Oberflaeche sich falsch
+// anfuehlt, obwohl jede Funktion stimmt.
+//
+// WARUM EIN EIGENES FENSTER UND KEIN GEMALTES RECHTECK. Der Zug geht
+// ueber FENSTERGRENZEN (aus dem Explorer auf den Papierkorb, auf ein
+// anderes Programm). Ein in das Quellfenster gemaltes Schild waere an
+// dessen Rand abgeschnitten -- und genau dort, wo das Ziel liegt, waere
+// nichts mehr zu sehen. `tip_win_open` hat bereits alles, was gebraucht
+// wird: randlos, eigene Ebene `L_TIP` ganz oben, und der Fensterserver
+// gibt ihm keinen Klick (`wm.hit`), also faengt es das Loslassen NICHT
+// ab. Das ist der entscheidende Punkt -- ein Zugbild, das den Klick
+// schluckt, macht das Ablegen unmoeglich.
+//
+// `s_zugwin` ist das Fenster (+1, damit 0 "keins" heisst), `s_zugtext`
+// der Zeiger auf den angezeigten Namen.
+static mut s_zugwin: u64 = 0
+static mut s_zugtext: u64 = 0
+static mut s_zugw: u64 = 0
+static mut s_zugh: u64 = 0
+// Wie oft ein Zugbild aufgemacht und wieder zugemacht wurde -- der
+// Pruefer laesst sich das ueber `zug_bilder()` sagen, statt Bildpunkte
+// zu zaehlen.
+static mut s_zugauf: u64 = 0
+// Das Widget, ueber dem der Zug gerade schwebt (+1). Das ist die
+// HERVORHEBUNG DES ZIELS: solange es gesetzt ist, malt `paint_one`
+// einen Rahmen um dieses Widget.
+static mut s_zugziel: u64 = 0
+// Der Name auf dem Schild. Eigener Puffer, weil die Zeile in `D_TEXT`
+// tabgetrennt ist und wir nur die ERSTE Spalte zeigen -- ein Schild mit
+// "name<TAB>4 kB<TAB>rw-" darauf waere Rohdaten und kein Name.
+static mut zugname: [u8; 96] = [0 as u8; 96]
 // Der gezogene Ausschnitt, in BILDPUNKTEN des Bildes und nicht des
 // Schirms -- ein Programm, das darin etwas veraendert, rechnet sonst
 // jede Vergroesserung selbst zurueck.
@@ -5125,6 +5167,23 @@ fn paint_one(i: u64) {
     } else if k == K_TEXTAREA {
         paint_ta(i)
     }
+    // ============================================= RUNDE DESIGN-3
+    //
+    // DAS ABLEGEZIEL UNTER DEM ZUG. Der Rahmen kommt NACH dem Widget,
+    // sonst malt das Widget ihn wieder zu. Zwei Bildpunkte in der
+    // Betonungsfarbe -- dieselbe, die das Zugbild traegt, damit auf
+    // dem Schirm erkennbar bleibt, dass beides zusammengehoert.
+    if s_zugziel != 0 && s_zugziel - 1 == i {
+        let zx: u64 = g(i, D_X)
+        let zy: u64 = g(i, D_Y)
+        let zw: u64 = g(i, D_W)
+        let zh2: u64 = g(i, D_H)
+        let zf: u64 = wlibc.theme(wlibc.T_ACCENT)
+        wlibc.rect(zx, zy, zw, 2, zf)
+        wlibc.rect(zx, sub(zy + zh2, 2), zw, 2, zf)
+        wlibc.rect(zx, zy, 2, zh2, zf)
+        wlibc.rect(sub(zx + zw, 2), zy, 2, zh2, zf)
+    }
 }
 
 // EIN MENUEFENSTER. Es hat keine Widgets -- es ist eine Liste von
@@ -5165,6 +5224,167 @@ fn tip_win_open(x: u64, y: u64, w: u64, h: u64, titel: u64) -> u64 {
         wlibc.L_TIP)
     dirty_all(i)
     return i
+}
+
+// ====================================================== RUNDE DESIGN-3
+//
+// DAS ZUGBILD AUFMACHEN, MITZIEHEN, ZUMACHEN.
+//
+// Die drei Funktionen sind bewusst klein und tun NUR das Sichtbare --
+// der Ziehplatz (`wlibc.drag_put`) bleibt Sache des Programms. Das
+// Zugbild ist Schmuck: faellt es aus, funktioniert das Ablegen
+// weiterhin. Umgekehrt waere es ein Fehler, den Zustand des Zuges an
+// einem Bild festzumachen.
+//
+// DIE GROESSE richtet sich nach dem Text, nicht nach einer festen Zahl:
+// ein Dateiname "a.txt" und ein Name mit vierzig Zeichen sollen beide
+// lesbar sein, und ein Schild, das breiter ist als sein Inhalt, sieht
+// nach Platzhalter aus.
+// Der ANGEZEIGTE Name der angefassten Zeile: die erste Spalte, ohne
+// Tabulator und ohne Umbruch. Liefert 0, wenn die Zeile nicht zu
+// finden ist -- dann bekommt das Schild den Vorgabetext.
+fn zug_name_von(i: u64, r: u64) -> u64 {
+    if i >= MAXWD || r >= MAXWD {
+        return 0
+    }
+    // BEI EINER TABELLE IST ZEILE 0 DER KOPF ("Name<TAB>Groesse...").
+    // `paint_table` liest deshalb `row_at(D_TEXT, z + 1)` -- wer das
+    // hier vergisst, schreibt den Namen der Zeile DARUEBER auf das
+    // Schild. GEMESSEN: Statuszeile "Ziehe: delta.txt", Schild
+    // "beta.txt".
+    var zr: u64 = r
+    if g(i, D_KIND) == K_TABLE {
+        zr = r + 1
+    }
+    let q: u64 = row_at(g(i, D_TEXT), zr)
+    if q == 0 {
+        return 0
+    }
+    var ende: u64 = row_len(q)
+    // Bis zum ersten Tabulator -- das ist bei Liste UND Tabelle der
+    // Name; eine Liste hat gar keinen Tabulator, dann ist es die ganze
+    // Zeile.
+    var t: u64 = 0
+    var gefunden: bool = false
+    while t < ende && !gefunden {
+        if (*((q + t) as *mut u8)) == 9 as u8 {
+            gefunden = true
+        } else {
+            t = t + 1
+        }
+    }
+    if t < ende {
+        ende = t
+    }
+    if ende > 94 {
+        ende = 94
+    }
+    var n: u64 = 0
+    while n < ende {
+        zugname[(n) as usize] = *((q + n) as *mut u8)
+        n = n + 1
+    }
+    zugname[(n) as usize] = 0 as u8
+    return (&zugname[0 as usize]) as u64
+}
+
+fn zug_breite(p: u64) -> u64 {
+    if p == 0 {
+        return 96
+    }
+    let tw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), p, tlen(p))
+    var b: u64 = tw + 20
+    if b < 48 {
+        b = 48
+    }
+    // Deckel: ein sehr langer Pfad darf den halben Schirm nicht
+    // verdecken -- was nicht passt, wird beim Malen abgeschnitten.
+    if b > 320 {
+        b = 320
+    }
+    return b
+}
+
+fn zug_auf(txt: u64, sx: u64, sy: u64) {
+    if s_zugwin != 0 {
+        return
+    }
+    let bw: u64 = zug_breite(txt)
+    let bh: u64 = lines_height() + 8
+    // DER VERSATZ. Das Schild haengt RECHTS UNTER dem Zeiger und nicht
+    // unter ihm: liegt es genau auf der Spitze, verdeckt es die Zeile,
+    // auf die man zielt -- und das Ziel ist das, was man beim Ziehen
+    // ansieht.
+    let i: u64 = tip_win_open(sx + 14, sy + 14, bw, bh, 0)
+    if i >= MAXWN {
+        return
+    }
+    s_zugwin = i + 1
+    s_zugtext = txt
+    s_zugw = bw
+    s_zugh = bh
+    s_zugauf = s_zugauf + 1
+    dirty_all(i)
+    let _g: u64 = flush_win(i)
+}
+
+// Dem Zeiger nach. `win_move` ist derselbe Weg, den das Menue benutzt,
+// um sich von der Taskleiste wegzuruecken -- die Koordinaten sind
+// SCHIRMkoordinaten, und die kommen hier vom Fensterserver.
+fn zug_zieh(sx: u64, sy: u64) {
+    if s_zugwin == 0 {
+        return
+    }
+    let i: u64 = s_zugwin - 1
+    let _m: u64 = wlibc.win_move(ng(i, N_H), sx + 14, sy + 14)
+    ns(i, N_X, sx + 14)
+    ns(i, N_Y, sy + 14)
+    // UND NEU MALEN. Ohne das steht am neuen Ort nur der Hintergrund
+    // des Schildes, waehrend Name und Rahmen am ALTEN Ort auf dem
+    // Schirm liegenbleiben -- gemessen als ein leerer weisser Kasten
+    // mit dem Namen halb darueber (shots/zugbild2).
+    dirty_all(i)
+    let _g: u64 = flush_win(i)
+}
+
+fn zug_zu() {
+    if s_zugwin == 0 {
+        return
+    }
+    let i: u64 = s_zugwin - 1
+    s_zugwin = 0
+    s_zugtext = 0
+    tip_win_close(i)
+}
+
+// Wie oft ein Zugbild aufgemacht wurde -- fuer die Abnahme.
+fn zug_bilder() -> u64 {
+    return s_zugauf
+}
+
+// Laeuft gerade ein Zugbild mit?
+fn zug_laeuft() -> bool {
+    return s_zugwin != 0
+}
+
+// Das Schild malen: Flaeche, Rahmen, Text. Gerufen aus `flush_rect`,
+// weil ein NK_TIP sonst nur seinen Hintergrund bekaeme.
+fn paint_zug(w: u64) {
+    let bw: u64 = ng(w, N_W)
+    let bh: u64 = ng(w, N_HH)
+    let _f: bool = fuib.area(0, 0, bw, bh, wlibc.theme(wlibc.T_MENU))
+    // Ein Rahmen in der Betonungsfarbe: das Schild soll als etwas
+    // Schwebendes lesbar sein und nicht als Stueck des Fensters
+    // darunter.
+    wlibc.rect(0, 0, bw, 1, wlibc.theme(wlibc.T_ACCENT))
+    wlibc.rect(0, sub(bh, 1), bw, 1, wlibc.theme(wlibc.T_ACCENT))
+    wlibc.rect(0, 0, 1, bh, wlibc.theme(wlibc.T_ACCENT))
+    wlibc.rect(sub(bw, 1), 0, 1, bh, wlibc.theme(wlibc.T_ACCENT))
+    if s_zugtext != 0 {
+        let _t: u64 = put_text(wlibc.F_UI, wlibc.px_ui(), 10, 4,
+            sub(bw, 20), s_zugtext, tlen(s_zugtext),
+            wlibc.theme(wlibc.T_FG), 0)
+    }
 }
 
 fn tip_win_close(i: u64) {
@@ -5250,6 +5470,10 @@ fn flush_rect(w: u64, x0: u64, y0: u64, x1: u64, y1: u64) -> u64 {
         paint_bg(w, x0, yb, x1 - x0, ye - yb)
         if ng(w, N_KIND) == NK_MENU {
             paint_menu(w)
+        } else if s_zugwin != 0 && w + 1 == s_zugwin {
+            // RUNDE DESIGN-3: das Zugbild hat keine Widgets -- es ist
+            // ein Schild mit einem Namen darauf.
+            paint_zug(w)
         } else {
             var i: u64 = 0
             while i < nwd {
@@ -6156,6 +6380,18 @@ fn on_up(w: u64, x: u64, y: u64) {
     // RUNDE CLIP-2: der Zug ist vorbei -- der naechste darf wieder
     // melden.
     s_dragwd = 0
+    // RUNDE DESIGN-3: und das Schild geht weg. VOR dem Ablegen, damit
+    // das Programm, das gleich `K_DROP` bekommt, einen sauberen Schirm
+    // vorfindet -- und damit ein Schild nicht stehenbleibt, falls der
+    // Empfaenger ein Fenster oeffnet.
+    if s_zugwin != 0 {
+        zug_zu()
+    }
+    if s_zugziel != 0 {
+        let zalt: u64 = s_zugziel - 1
+        s_zugziel = 0
+        dirty_wd(zalt)
+    }
     // ================================================== RUNDE CLIP-2
     //
     // ZUERST: LIEGT HIER ETWAS AB? Das wird VOR `s_down` gefragt, und
@@ -6223,6 +6459,38 @@ fn on_move(w: u64, x: u64, y: u64, btn: u64) {
             dirty_all(w)
         }
         return
+    }
+    // ================================================= RUNDE DESIGN-3
+    //
+    // DAS ZUGBILD FOLGT DEM ZEIGER -- und zwar BEI JEDER Bewegung,
+    // nicht nur bei der, die den Zug ausgeloest hat. Das steht hier
+    // oben und nicht im Zieh-Zweig weiter unten: sobald der Zeiger das
+    // Quellfenster verlaesst, kommen die Bewegungen bei einem ANDEREN
+    // Fenster an, und der Zieh-Zweig unten wird dort nie erreicht.
+    // Genau dann -- ueber dem Ziel -- muss das Schild aber mitlaufen.
+    if s_zugwin != 0 {
+        zug_zieh(ng(w, N_X) + x, ng(w, N_Y) + y)
+        // UND: was liegt gerade darunter? Ein Ablegeziel bekommt einen
+        // Rahmen, solange der Zug darueber steht. Ohne das ist "kann
+        // ich hier loslassen" eine Frage, die man nur durch Ausprobieren
+        // beantwortet.
+        var zz: u64 = 0
+        if s_dropan != 0 {
+            let dz: u64 = hit_at(w, x, y)
+            if dz < MAXWD && (g(dz, D_KIND) == K_LIST
+                || g(dz, D_KIND) == K_TABLE || g(dz, D_KIND) == K_TILE) {
+                zz = dz + 1
+            }
+        }
+        if zz != s_zugziel {
+            if s_zugziel != 0 {
+                dirty_wd(s_zugziel - 1)
+            }
+            s_zugziel = zz
+            if s_zugziel != 0 {
+                dirty_wd(s_zugziel - 1)
+            }
+        }
     }
     let i: u64 = hit_at(w, x, y)
     // RUNDE CERTUS-AUF-OSUM: die Leinwand sieht jede Bewegung ueber ihr
@@ -6345,6 +6613,12 @@ fn on_move(w: u64, x: u64, y: u64, btn: u64) {
                 if s_dropan != 0 && s_dragwd == 0 {
                     s_dragwd = dd + 1
                     s_drags = s_drags + 1
+                    // RUNDE DESIGN-3: ab jetzt haengt etwas am Zeiger,
+                    // und man SIEHT es. Der Name kommt aus der
+                    // angefassten Zeile -- derselbe, der gleich auf
+                    // den Ziehplatz geht.
+                    zug_auf(zug_name_von(dd, sel_anker_von(dd)),
+                        ng(w, N_X) + x, ng(w, N_Y) + y)
                     // Gemeldet wird die Zeile, auf der GEDRUECKT wurde
                     // (`D_ANKER`), und nicht die unter dem Zeiger: das
                     // gezogene Stueck ist das angefasste.
