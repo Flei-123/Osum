@@ -45,8 +45,22 @@ done
 # Platte), die Programme, ein Farbschema und ein Verzeichnisbaum, an dem
 # der Dateimanager etwas zu zeigen hat.
 python3 tools/k15/tree.py "$OUT/baum" || exit 1
-ARGS=(build "$OUT/disk.img" 4096 /lib/
-      "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
+# RUNDE MODERN: 16384 BLOECKE STATT 4096, UND EINE MEHRBLOCKIGE KARTE.
+#
+# GEMESSEN, NICHT GERATEN: die Nutzlast dieses Abbilds sind 4 752 920
+# Oktette (neun Programme, drei Schriften, Buendel, Sprachdateien).
+# Ein Block ist hier 512 Oktette -- 4096 Bloecke sind also 2 MiB,
+# und die Nutzlast ist 4,5 MiB. Das Abbild war schon VOR dieser
+# Runde zu klein: ein sauberer Stand ohne jede Aenderung endet
+# ebenso mit "mkfs: the disk is full". Der fette Schnitt (45 012
+# Oktette) hat das nicht verursacht, er kam nur dazu.
+#
+# WARUM AUCH --karten: eine Blockkarte deckt BS*8 = 4096 Bloecke.
+# Ohne Vorrat an Kartenbloecken ist bei 4096 Schluss, egal welche
+# Zahl hier steht. 16384 Bloecke brauchen vier Karten; 32 sind
+# Vorrat nach oben, wie in tools/install/build.sh.
+ARGS=(build "$OUT/disk.img" 16384 "--karten=32" "--inodes=512" /lib/
+      "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" "/lib/bold.ttf=assets/osum-sans-bold.ttf"
       /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$OUT/$p.elf"); done
 # Der ZWEITE NAME: ein Verzeichniseintrag mehr auf dieselbe Inode.

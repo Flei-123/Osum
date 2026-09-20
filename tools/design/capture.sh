@@ -298,7 +298,7 @@ printf '%s\n' "$lang" > "$OUT/userlocale"
 # Wirtes beim Bauen des Abbildes), sonst waeren alle drei Zeiten null
 # und die Spalte bliebe leer wie zuvor.
 ARGS=(build "$OUT/disk.img" 20480 --v3 "--time=$(date +%s)" /lib/
-      "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
+      "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" "/lib/bold.ttf=assets/osum-sans-bold.ttf"
       "/lib/icons.ttf=assets/osum-icons.ttf" /bin/)
 for p in $progs; do ARGS+=("/bin/$p=$BUILDD/$p.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
