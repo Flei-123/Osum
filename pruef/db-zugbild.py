@@ -16,9 +16,16 @@ lauf.sag("== DESIGN-3: Zugbild am Zeiger ==")
 
 
 def fenster():
+    # NUR DER LETZTE BLOCK ZAEHLT. Der Fensterserver schreibt seine
+    # Liste immer wieder neu; wer das ganze Protokoll sammelt, sieht
+    # auch Fenster, die laengst zu sind -- und haelt ein sauber
+    # geschlossenes Schild faelschlich fuer haengengeblieben.
+    text = lauf.lies()
+    bloecke = re.split(r"(?=wm: fen i=0 )", text)
+    letzter = bloecke[-1] if len(bloecke) > 1 else text
     alle = re.findall(
         r"wm: fen i=\d+ id=(\d+) x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+) lay=(\d+)",
-        lauf.lies())
+        letzter)
     d = {}
     for f in alle:
         d[int(f[0])] = tuple(int(v) for v in f[1:])
@@ -78,7 +85,7 @@ else:
     halt = []
     try:
         # erster Schritt: die Zeile verlassen (sonst kein K_DRAG)
-        for schritt, (dx, dy) in enumerate([(0, -45), (-110, -5), (-100, 0), (-35, 10)]):
+        for schritt, (dx, dy) in enumerate([(0, -45), (-110, -5), (-100, 0), (-35, -8)]):
             m.sag("mouse_move %d %d" % (dx, dy), 0.25)
             time.sleep(1.5)
             t = tips()
