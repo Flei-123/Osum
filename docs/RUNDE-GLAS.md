@@ -272,6 +272,92 @@ Faellig ist eines von beidem: auf EINEN Rasterer zurueck, oder die
 zulaessigen Orte namentlich in eine Liste, die der Laeufer gegen
 `grep -rc` ueber den ganzen Baum prueft.
 
+### 8.5 Nachtrag: was von 8.1 bis 8.4 behoben ist -- mit Zahlen
+
+Die vier Befunde darueber stehen unveraendert; hier steht, was danach
+gemessen wurde.
+
+**Zu 8.1 (Bild 15).** Der "leere Rumpf" war drei Sachen, und keine
+davon war ein nicht gesetztes Schmutzrechteck:
+
+1. Der Griffpunkt `400,10` lag im oberen GREIFRAND. Der Lauf hat also
+   nie gezogen, sondern vierzehnmal die Oberkante nach unten geschoben
+   (`wm: zieh k=4 ... h=16`) -- Bild 15 zeigt ein auf seine
+   Mindesthoehe zusammengeschobenes Fenster. Der Greifrand oben ist
+   jetzt so dick wie der Rahmen; dass in `zug1` KEINE einzige
+   `wm: zieh`-Zeile mehr steht, ist die Gegenprobe.
+2. Das Programm hat seine Beschriftungen weiter zu dem Ursprung
+   gemeldet, an dem es ANGELEGT wurde: `win_ort_holen` fragt den
+   Server nach der wahren Stelle, wurde aber nur aus `win_x`/`win_y`
+   gerufen, und die ruft im Anstrich niemand. Jetzt steht der Aufruf
+   in `wlib.flush_win` -- zwei Systemaufrufe je Anstrich, nicht je
+   Bildpunkt. Ohne ihn suchte `shotcheck.py` die Buchstaben 590
+   Bildpunkte ueber ihrer wirklichen Stelle.
+3. Bei `400,600` haengt das untere Drittel des Fensters UNTER dem
+   Bildrand. Was der Schirm nicht zeigt, ist keine leere
+   Beschriftung: `shotcheck.py` trennt das jetzt und zaehlt es als
+   `ausserhalb` (und `verdeckt`, wenn die Leiste darueber liegt).
+
+| Lauf | Zug | Ergebnis |
+|---|---|---|
+| Bild 15 (vorher) | `400,10>400,600` | `empty 8` |
+| derselbe Stand, berichtigter Pruefer | `400,10>400,600` | `empty 0  ausserhalb 13` |
+| `zug1` (Abschnitt 11f2) | `400,10>400,210`, OHNE Rueckweg | `empty 0  cut 0  overlapping 0  ausserhalb 0` |
+
+Und die Schnittflaeche mit der Leiste steht als Zahl da, damit
+`diff 0` nicht ueber einem leeren Schnitt entsteht -- zweimal
+gerechnet, wie in dieser Abnahme ueblich:
+
+| Rechnung | Flaeche |
+|---|---|
+| Wirt, aus den gemeldeten Kanten | 15 960 Bildpunkte |
+| Server selbst (`wm: schlieren ... unterpx=`) | 16 044 Bildpunkte (764 x 21) |
+| GEGENPROBE: ungezogener Lauf | 0 |
+
+**Zu 8.2 (der stille Schleier).** Der Server meldet das wirksame Alpha
+jetzt dort, wo er mischt -- nur fuer die LEISTE, nicht fuer
+gewoehnliche Fenster:
+
+```
+wm: glas alpha_soll=40 alpha_ist=82 alpha_max=100 hoch=865797 px=935060
+settings: glas radius=10 tba=40 wa=100 blur=0 ist=82
+```
+
+`alpha_ist` ist der SCHNITT der wirklich benutzten Deckkraft, nicht
+das Groesste: ueber einem gemusterten Bild hebt der Schleier an den
+fernsten Bildpunkten bis auf 100 an, und "100" neben dem Regler waere
+so falsch wie die 40. Die Seite "Darstellung" fragt dieselbe Zahl
+ueber `WM_INFO`/`WI_TB_ALPHA_IST` und schreibt sie neben den Regler:
+**"Taskleiste deckend % (wirkt 82)"** (Bild 18). Der Laeufer fordert
+fuer jeden dunklen Lauf, dass entweder das Bild wirklich durchscheint
+(Streuung ueber 100) ODER die Anhebung gemeldet ist -- und dass Seite
+und Server dieselbe Zahl nennen (82 gegen 82).
+
+Was dabei **nicht** behoben ist und offen bleibt: ueber einem dunklen
+Bild gibt es bei `SCHLEIER = 40` keine sichtbare Durchsicht bei 40 %.
+`var 24` bei zwei Gruenden ist der Messwert, und zwei Farben, die sich
+um eine Helligkeitsstufe unterscheiden, sieht kein Mensch. Ein Bild
+"Leiste bei 40 % ueber dunklem Grund, und man sieht hindurch" kann es
+also nicht geben, solange die Lesbarkeit Vorrang hat; was es gibt, ist
+Bild 18, auf dem die Oberflaeche diese Wahrheit ausspricht.
+
+**Zu 8.3 (der schlechteste Grund).** `glascheck.py kontrast` nimmt
+jede Farbe mit mindestens einem Prozent Anteil und davon das Minimum,
+und der Streifen reicht bis an den rechten Rand, also ueber die Uhr.
+Dazu zwei Laeufe, die 11d nicht hatte: mit Milchglas 12 ueber dem
+dunklen Bild (`kontrast 1233`, `var 38`, 18 Gruende) und ueber einem
+ZWEITEN dunklen Muster (senkrechte Streifen zu acht, Blaugruen gegen
+Dunkelrot: `kontrast 1232`, 2 Kandidaten).
+
+**Zu 8.4 (zwei Rasterer).** Die Zusage ist ehrlich gemacht, nicht
+verschaerft: `tools/themestore/raster.liste` nennt alle **neunzehn**
+Funde des Baumes (`^fn .*round|blend|mix8|rrect`) mit Begruendung in
+einem Satz -- warum der Bildspeicher, der Fensterserver und Ring 3
+jeder eine eigene Mischung haben, und warum `foreground_ok` nur so
+klingt. Der Laeufer durchsucht den GANZEN Baum und haelt das Ergebnis
+gegen die Liste: ein Fund ohne Eintrag ist rot, ein Eintrag ohne Fund
+auch.
+
 ---
 
 ## 9. Nachtrag nach der Jury: der Weg der Konsolenschrift
