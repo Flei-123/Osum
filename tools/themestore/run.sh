@@ -1416,11 +1416,11 @@ echo "        100 %%: $SCH100"
 same "bei 40 %% ist der Schild an" "1" \
     "$(printf '%s' "$SCH" | grep -oE 'an=[0-9]+' | cut -d= -f2)"
 num "und er hat wirklich Platten gemalt" \
-    "$(printf '%s' "$SCH" | grep -oE 'n=[0-9]+' | cut -d= -f2)" ge 2
+    "$(printf '%s' "$SCH" | grep -oE ' n=[0-9]+' | cut -d= -f2)" ge 2
 same "GEGENPROBE: bei voller Deckung ist er aus" "0" \
     "$(printf '%s' "$SCH100" | grep -oE 'an=[0-9]+' | cut -d= -f2)"
 num "und dann malt er auch keine einzige Platte" \
-    "$(printf '%s' "$SCH100" | grep -oE 'n=[0-9]+' | cut -d= -f2)" eq 0
+    "$(printf '%s' "$SCH100" | grep -oE ' n=[0-9]+' | cut -d= -f2)" eq 0
 # DIE PLATTE IST WIRKLICH DECKEND -- gerechnet auf dem Wirt aus der
 # gemeldeten Schildfarbe und dem Abstandsalpha. 96 ist die Zahl, ab
 # der `glass_mix` volle Deckung gibt; steht hier weniger, ist die
@@ -1515,19 +1515,32 @@ num "und die Leistenschrift haelt auf dem Milchglas ihre 4,5:1 (x100)" \
 # ---- 11c3. (fix-r4-1) MILCHGLAS, DAS WIRKLICH EIN VERLAUF IST.
 #
 # DER BEFUND: Bild 07 zeigte den Weichzeichner ueber dem GROBEN Muster
-# -- Felder von rund 160 Bildpunkten --, und ein Radius von 16 kann
-# daraus nur weiche NAEHTE machen. Ein Kastenweichzeichner in drei
-# Durchgaengen traegt eine Farbe etwa `3 * r` weit; damit ein Feld
-# vollstaendig in seinen Nachbarn laeuft, muss seine Kantenlaenge
-# hoechstens dreimal so gross sein wie der Radius. Umgestellt ist das
-# die Bedingung, die der Befund nennt: `blur >= Kantenlaenge / 3`.
+# -- Felder von rund 160 Bildpunkten --, und was man sah, waren zwei
+# Kacheln mit weichen Naehten. Der Befund verlangt deshalb zweierlei:
+# der Weichzeichner soll auf die MUSTERPERIODE bezogen sein
+# (`blur >= Kantenlaenge / 3`), und unter der Leiste soll ein VERLAUF
+# ueber mindestens 60 Bildpunkte stehen.
 #
-# 16 ist der groesste Radius, den die Sprache der Vorlagen zulaesst
-# (`BLUR_MAX`), also muss das MUSTER kleiner werden: ein Schachbrett
-# von vier Bildpunkten im 120x90-Bild, das der Schreibtisch auf
-# 1280x800 dehnt, hat Felder von 1280/120*4 = 42,7 Bildpunkten --
-# 16 >= 42,7/3 = 14,2, die Bedingung ist erfuellt, und unter der
-# Leiste steht danach kein Schachbrett mehr, sondern eine Welle.
+# DIE REICHWEITE IST DREIMAL DER RADIUS, und damit sind beide
+# Forderungen zugleich zu haben. Ein Kastenweichzeichner in DREI
+# Durchgaengen traegt eine Farbe nicht `r`, sondern rund `3 * r` weit
+# -- bei r = 16 also 48 Bildpunkte. Die Bedingung `blur >=
+# Kantenlaenge / 3` heisst damit `3 * 16 >= Kantenlaenge / 3`, also
+# eine Kantenlaenge bis 144 Bildpunkte.
+#
+# Gewaehlt ist ein Schachbrett von zwoelf Bildpunkten im 120x90-Bild;
+# der Schreibtisch dehnt es auf 1280 Bildpunkte Breite, also Felder
+# von 128. 48 >= 128/3 = 42,7 -- die Bedingung ist erfuellt, und weil
+# das Feld breiter ist als die Reichweite, bleibt ein WELLE stehen
+# statt einer einzigen flachen Farbe.
+#
+# GEMESSEN wurde auch der Gegenfall, und er steht hier, weil er die
+# Wahl begruendet: mit einem Schachbrett von VIER (Felder von 43
+# Bildpunkten) verruehrt derselbe Radius den Streifen so vollstaendig,
+# dass quer ueber die Leiste nur noch sechs Helligkeitsstufen mit
+# einem Hub von sechs stehen -- gemessen richtig (var faellt von
+# 21 016 auf 1 249), angeschaut eine flache Flaeche. Ein Weichzeichner,
+# der alles gleich macht, ist von einer Farbe nicht zu unterscheiden.
 #
 # Die zwei Farben sind die des dunklen Musters, nur weiter
 # auseinander: der Verlauf soll GESTUFT sein und nicht nur
@@ -1539,7 +1552,7 @@ a, b = (0x10, 0x12, 0x1A), (0x50, 0x30, 0x78)
 px = bytearray()
 for y in range(h):
     for x in range(w):
-        c = a if ((x // 4) + (y // 4)) % 2 == 0 else b
+        c = a if ((x // 12) + (y // 12)) % 2 == 0 else b
         px += bytes((c[2], c[1], c[0], 0xFF))
 open(sys.argv[1], "wb").write(b"OSYM" + struct.pack("<II", w, h) + bytes(px))
 FEINPY
@@ -1575,9 +1588,24 @@ for p in sys.argv[1:3]:
     y = h - 28 + 14                      # die Mitte des Leistenstreifens
     zeile = [G.hell(im.getpixel((x, y))) for x in range(300, 1100)]
     stufen = len(set(zeile))
-    lo = zeile.index(min(zeile))
-    hi = zeile.index(max(zeile))
-    print("%d %d" % (stufen, abs(hi - lo)))
+    # WIE LANG DER VERLAUF IST: das laengste Stueck der Zeile, auf dem
+    # sich die Helligkeit von Bildpunkt zu Bildpunkt um hoechstens acht
+    # Stufen aendert (also kein harter Rand) und ueber das Ganze um
+    # mindestens zehn (also nicht einfach eine flache Flaeche). Eine
+    # Kachel mit weicher Naht hat kein solches Stueck: innen ist sie
+    # flach, aussen springt sie.
+    lang = 0
+    i = 0
+    for j in range(1, len(zeile) + 1):
+        if j < len(zeile) and abs(zeile[j] - zeile[j - 1]) > 8:
+            seg = zeile[i:j]
+            if seg and max(seg) - min(seg) >= 10:
+                lang = max(lang, j - i)
+            i = j
+    seg = zeile[i:]
+    if seg and max(seg) - min(seg) >= 10:
+        lang = max(lang, len(seg))
+    print("%d %d" % (stufen, lang))
 PYV2
 )
 echo "        Leistenzeile (Vollbild): mit/ohne Milchglas -> $(printf '%s' "$VERL" | tr '\n' '|')"
@@ -1586,10 +1614,12 @@ VWEG=$(printf '%s\n' "$VERL" | sed -n 1p | cut -d' ' -f2)
 VSTUF0=$(printf '%s\n' "$VERL" | sed -n 2p | cut -d' ' -f1)
 num "quer ueber den Leistenstreifen stehen im VOLLBILD so viele Helligkeitsstufen" \
     "${VSTUF:-0}" ge 20
-num "und der Weg von der dunkelsten zur hellsten Stelle ist so lang (Bildpunkte)" \
+num "und der Verlauf laeuft ueber so viele Bildpunkte ohne harte Kante" \
     "${VWEG:-0}" ge 60
-num "GEGENPROBE: ohne Weichzeichner sind es hoechstens eine Handvoll Stufen" \
-    "${VSTUF0:-99}" le 6
+num "GEGENPROBE: ohne Weichzeichner sind es die zwei Stufen des Musters" \
+    "${VSTUF0:-99}" le 3
+VWEG0=$(printf '%s\n' "$VERL" | sed -n 2p | cut -d' ' -f2)
+num "und ohne ihn gibt es kein einziges Stueck Verlauf" "${VWEG0:-99}" eq 0
 # UND DIE SCHRIFT HAELT AUCH HIER IHRE 4,5:1 -- auf dem Verlauf, der
 # unter ihr steht, und nicht gegen die Farbe aus der Vorlage.
 FFG=$(grep -a 'taskbar: text clock ' "$TMPD/fein16/serial.txt" | tail -1 \
@@ -2076,7 +2106,7 @@ same "die Marke der Textplatte ist in Ring 0 und Ring 3 dieselbe Zahl" \
 num "und genau eine Stelle in Ring 3 setzt sie" \
     "$(grep -ac '^fn platte(' kernel/user/wlibc.fi)" eq 1
 num "und genau eine in Ring 0 loest sie auf" \
-    "$({ grep -ac 'PLATTE_MARKE) != 0' kernel/ui/wm.fi || true; })" eq 1
+    "$({ grep -ac '== (PLATTE_MARKE >> 24)' kernel/ui/wm.fi || true; })" eq 1
 # ---- (fix-r4-4) UND DER ECKENABTASTER STEHT NUR NOCH EINMAL IM BAUM.
 #
 # `corner_cov` stand wortgleich zweimal da -- `wm.fi:1571` fuer den

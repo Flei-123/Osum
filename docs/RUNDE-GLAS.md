@@ -750,6 +750,94 @@ auf der Reglerstellung 40 und Durchsicht zugleich gelten.
 
 ---
 
+## 9f. Nachtrag nach der Jury: die Textplatte, die Endlage und der Beleg
+
+Vier Befunde, vier Zahlen (fix-r4-2). **Jede Zahl in diesem Abschnitt
+steht in `belege/glas-run.log`** — dem vollstaendigen Mitschnitt des
+Laufs, aus dem die Bilder dieser Runde stammen. Wer eine davon
+nachschlagen will, sucht sie dort mit `grep`; der Satz dazu nennt das
+Suchwort.
+
+**Die Deckung ist unter die Schrift gewandert.** `SCHLEIER_WIN = 20`
+war die richtige Antwort auf die falsche Frage: um eine Handvoll
+Zeilen Schrift lesbar zu halten, wurde die GANZE Fensterflaeche
+deckender: ein Fenster bei 55 Prozent sah aus wie eines bei 80, und
+der Regler log um dieselbe Zahl, um die der Leistenregler in 8.2 log.
+Seit fix-r4-2 setzt Ring 3 eine Marke in die oberen acht Bit jedes
+Bildpunktes, auf dem Schrift steht (`kernel/user/wlibc.fi`, `platte`,
+gerufen aus `text_at` — der EINEN Stelle, an der in Ring 3 eine Glyphe
+auf eine Flaeche kommt), und `wm.glass_mix` nimmt einen markierten
+Bildpunkt unveraendert. Die Reiterzeile bekommt ihre Platte als Ganzes
+(`wlib.paint_tabs`), denn zwischen zwei Reitern steht Flaeche und
+keine Schrift. `SCHLEIER_WIN` ist damit **0** — und "0" heisst in
+beiden Rechnungen "kein Schleier" und nicht "gar nichts darf durch";
+die Aufloesung der Schleierbedingung nach der Deckung ergibt fuer 0
+genau 100 Prozent, also das Gegenteil des Gemeinten (gemessen, bevor
+die Abfrage stand: ein Fenster bei 55 Prozent unterschied sich in
+**114** von 41 000 abgetasteten Bildpunkten von demselben Fenster bei
+100 Prozent; mit der Abfrage sind es **5 132**).
+
+Gemessen wird es an der Reiterzeile, und zwar nicht am Kontrast,
+sondern an der KANTENDICHTE: ein fremder Buchstabe zwischen zwei
+Reitern hat gegen den Reiternamen gar keinen Kontrast zu halten, er
+gehoert einfach nicht dorthin. `glascheck.py reiter` zaehlt im Band
+der Reiterzeile die benachbarten Bildpunkte, die sich um mehr als 24
+Stufen unterscheiden — **4 341 bei `window_alpha=55` gegen 4 341 bei
+100**, und das Band ist zwischen beiden Laeufen Bildpunkt fuer
+Bildpunkt dasselbe (`diff 0`), waehrend der Rumpf desselben Bildes
+sich in ueber 2 000 abgetasteten Bildpunkten unterscheidet. Deckende
+Zeile und durchsichtiger Rumpf, im selben Bild. Der schlechteste
+Kontrast der Seite bleibt bei **5,16:1** (die ausgewaehlte Listenzeile
+auf der Akzentfarbe, kein Fall von Transparenz).
+
+**Die Endlage eines Zuges liegt auf der Arbeitsflaeche.** Befund 8.1
+war damit noch nicht ganz erledigt: das Fenster durfte dort liegen
+bleiben, wohin es gezogen wurde — auch unter der Leiste, auch zu drei
+Vierteln unter dem Bildrand. Ein Fenster, das man nicht mehr anfassen
+kann, ist kein Zustand, den ein Fensterserver herstellen darf.
+`wm.drag_klemmen` holt die Endlage beim LOSLASSEN zurueck und meldet
+beide Stellen in einer Zeile (`wm: geklemmt id=12 x=20 y=182 vory=203
+w=764 h=590`); waehrend des Zuges bleibt alles wie bisher, sonst gaebe
+es die Schnittflaeche mit der Leiste nicht, an der Abschnitt 11f2
+misst — die rechnet der Wirt seither aus `vory` und nicht aus der
+Endlage.
+
+Dazu kommt `wm.rumpf_neu`: nach dem Zug bekommt das Programm dasselbe
+Ereignis wie bei einer Groessenaenderung, mit der UNVERAENDERTEN
+Groesse, und malt seinen Rumpf an der neuen Stelle neu. Und der
+Pruefer hat gelernt, dass ein Schnitt, hinter dem keine Schrift mehr
+steht, kein Schnitt ist, sondern ein leerer Pruefer: `shotcheck.py`
+ging genau so weit zurueck, bis hinter dem Schnitt wirklich Schrift
+steht. Ohne diese drei Zeilen meldete Bild 19 `texts 0 measured 0
+empty 0` — eine Zusage ueber null Beschriftungen. Jetzt sind es **31
+Beschriftungen, `empty 0 cut 0 overlapping 0 ausserhalb 0 verdeckt
+0`**, und die vier Reglerzeilen der Seite stehen **vollstaendig ueber
+der Leiste** (Abschnitt 11f3, zwei Zuege).
+
+**Kein Akzentbalken sitzt mehr auf dem Kachelrahmen.** Die Vorschau in
+der Kachel war um `ecke_ein(r, 4)` eingerueckt, also um die
+Eckendeckung EINER Zeile; die oberste Zeile des senkrechten
+Leistenbalkens lag damit genau auf dem Bogen ("Tafel" rechts, "Studio"
+links). Gerechnet wird jetzt gegen das INNENRECHTECK `x + r .. x + w -
+r`, mindestens vier Bildpunkte — darin liegt jede Zeile der runden
+Flaeche vollstaendig. Die Eckenprobe findet zwei Bildpunkte auf einer
+Rahmenlinie nicht, also meldet die Kachel jedes Balkenrechteck
+zusammen mit dem Rechteck, in dem es liegen muss (`wlib:
+kachelbalken ... kx= ky= kw= kh= ein=`): **24 gemeldete Balken, 0
+schneiden den Rahmen**, und die Gegenprobe (ein von Hand buendig
+gesetzter Balken) wird gefunden.
+
+**Und der Belegpfad ist einer.** Bis hierher standen die Zahlen dieser
+Runde in drei Dateien nebeneinander und stammten aus verschiedenen
+Laeufen — im Bild 08 "74 Rechtecke", in Abschnitt 9e "100, gefordert
+>= 88". Beide waren zu ihrer Zeit richtig und zusammen unbrauchbar.
+Seit fix-r4-2 liegt der vollstaendige Mitschnitt des Laufs, aus dem
+die Bilder stammen, als **`belege/glas-run.log`** im Baum, und
+`README.md` der Bildmappe, `RUN.md` und dieses Blatt zitieren ihre
+Zahlen aus genau dieser Datei.
+
+---
+
 ## 10. Wo was steht
 
 | Datei | Was dieser Runde gehoert |
@@ -766,3 +854,4 @@ auf der Reglerstellung 40 und Durchsicht zugleich gelten.
 | `tools/themestore/leistenvergleich.py` | Bild 12, beschriftet und mit gemessener `var` |
 | `tools/themestore/namecheck.py` | der Kachelname gegen `name=` der Vorlage, Glyphe fuer Glyphe gegen `tools/ttf/raster.py` |
 | `docs/shots/glas/` | die 15 Aufnahmen und ihre Tabelle |
+| `belege/glas-run.log` | der vollstaendige Mitschnitt des Laufs, aus dem die Aufnahmen stammen -- jede Zahl in diesem Blatt, in `RUN.md` und in `docs/shots/glas/README.md` steht dort als Zeile |

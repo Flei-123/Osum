@@ -63,14 +63,22 @@ bash tools/themestore/build.sh /tmp/glas tbalpha=70 blur=12 \
 bash tools/themestore/run.sh
 ```
 
-Zwoelf Abschnitte, rund 25 Minuten (QEMU/TCG). Letzter Lauf auf diesem
-Rechner, vom Zusammenbau der Runde unabhaengig nachgefahren:
+Zwoelf Abschnitte, rund 25 Minuten (QEMU/TCG).
 
-```
-THEMESTORE: 230 passed, 0 failed
+**DER MITSCHNITT LIEGT IM BAUM** (fix-r4-2). Der vollstaendige Lauf,
+aus dem die Aufnahmen dieser Runde stammen, ist als
+[`belege/glas-run.log`](belege/glas-run.log) eingecheckt, und jede Zahl
+auf diesem Blatt, in `docs/RUNDE-GLAS.md` und in
+`docs/shots/glas/README.md` ist eine Zeile DIESER Datei. Vorher standen
+die Zahlen dreier verschiedener Laeufe nebeneinander -- im Bild 08 "74
+Rechtecke", im Blatt "100, gefordert >= 88" -- und beide waren zu ihrer
+Zeit richtig und zusammen unbrauchbar. Die Schlusszeile:
+
+```bash
+tail -1 belege/glas-run.log      # -> THEMESTORE: <n> passed, 0 failed
 ```
 
-230 Zeilen `OK`, keine einzige `FAIL`, Rueckgabewert 0. Ein Hinweis
+Keine einzige `FAIL`, Rueckgabewert 0. Ein Hinweis
 fuer den, der das nachmisst: `run.sh` schreibt auf die Standardausgabe.
 Laeuft daneben ein zweiter Lauf in DIESELBE Datei, mischen sich die
 Zeilen ineinander und das Ergebnis sieht aus, als gehoere fremder Text
@@ -78,8 +86,9 @@ zu dieser Abnahme. Also je Lauf eine eigene Datei — und der Beleg ist
 die Zeile `THEMESTORE:` zusammen mit dem Rueckgabewert, nicht das, was
 sonst noch im Mitschnitt steht.
 
-Die Zahlen, die dieser Lauf nebenbei misst — sie stehen im Mitschnitt,
-damit niemand sie erhoffen muss:
+Die Zahlen, die dieser Lauf nebenbei misst — sie stehen im Mitschnitt
+`belege/glas-run.log`, damit niemand sie erhoffen muss. Jede Zeile der
+Tabelle ist dort mit `grep` zu finden:
 
 | Sache | gemessen |
 |---|---|
