@@ -1,0 +1,378 @@
+# Runde GLAS — Eckenrundung, Durchsicht, Milchglas
+
+Justins Wunsch dieser Runde stand in zwei Saetzen: die **Eckenrundung
+stufenlos regeln** und die **Taskleiste transparent bzw. als Milchglas**
+haben. Beides gibt es jetzt, beides steht in `/etc/theme.conf`, beides
+haengt an einem Regler auf der Seite "Darstellung", und beides ist
+gemessen.
+
+**Jede Zahl unten kommt aus einem Lauf.** Wo eine fehlt, steht warum.
+Abschnitt 8 nennt die Punkte, die **nicht** erreicht wurden — sie stehen
+hier und nicht nur im Protokoll, weil eine Runde, die nur ihre Erfolge
+aufschreibt, beim naechsten Mal an derselben Stelle wieder anlaeuft.
+
+Beleg fuer alles: `bash tools/themestore/run.sh`. Ergebnis des Laufs,
+auf den sich dieses Blatt bezieht (21.09.2026, QEMU/TCG ohne KVM):
+
+```
+THEMESTORE: 136 passed, 0 failed
+```
+
+Vorher waren es 81 Zusagen. Keine davon ist abgeschwaecht oder entfernt
+worden; die 55 neuen stehen in Abschnitt 11 des Laeufers.
+
+Die Bilder liegen unter `docs/shots/glas/` (Tabelle dort in
+`README.md`), die Einzelaufnahmen des Laufs unter
+`docs/shots/themestore/glas-*.png`.
+
+---
+
+## 1. Was neu ist, in vier Zahlen
+
+| Schluessel | Bereich | Bedeutung | Vorgabe |
+|---|---|---|---|
+| `radius` | 0 … 24 | Eckenrundung in Bildpunkten, ueberall | aus `shape=` |
+| `taskbar_alpha` | 20 … 100 | Deckkraft der Leiste in Prozent | 100 |
+| `window_alpha` | 20 … 100 | Deckkraft gewoehnlicher Fenster | 100 |
+| `taskbar_blur` | 0 … 16 | Milchglas unter der Leiste, 0 = aus | 0 |
+
+Jeder der vier liest **nur Ziffern** und wird beim Einlesen geklemmt.
+Die Sicherheitszusage der Vorlagen bleibt damit Wort fuer Wort
+dieselbe: ein untergeschmuggeltes `radius=/bin/sh` ist kein Radius,
+sondern eine schlechte Zeile, und der Laeufer zaehlt sie als solche
+(Abschnitt 7: *"GEGENPROBE: die zwei geschmuggelten Schluessel werden
+GEZAEHLT: 2"*).
+
+`shape=classic|modern` gibt es weiter. Es setzt nur noch den
+**Startwert** des Radius (0 bzw. 8) und wird von einer `radius=`-Zeile
+ueberstimmt.
+
+---
+
+## 2. Die Rundung kommt wirklich ueberall an
+
+Gemessen wird nicht "sieht rund aus", sondern zweierlei: **wer** mit
+welchem Radius gemalt hat (jede Widgetart meldet ihn) und **was im
+Bild** an der Ecke steht.
+
+| Radius | Widgetarten, die ihn melden | Ecke: tiefe | Ecke: Zeilen mit Mischton |
+|---|---|---|---|
+| 0 | 10 | 0 | 0 |
+| 12 | 10 | 10 | 8 |
+| 24 | 10 | 32 | 18 |
+
+* **tiefe** = wie viele Bildpunkte der Ecke abgeschnitten sind
+  (`glascheck.py ecke`). 0 bei Radius 0 ist die Gegenprobe: dort ist
+  ein rechter Winkel und nichts zu runden.
+* **Zeilen mit Mischton** = Kantenglaettung. 18 von 24 Zeilen der
+  Rundung tragen bei Radius 24 einen Zwischenton; eine Treppe haette
+  null.
+* **Der Inhalt wandert nicht**: von 36 gemessenen Rechtecken der Seite
+  "Darstellung" hat sich zwischen Radius 0 und 24 **kein einziges**
+  bewegt.
+* Der Griff des Reglers bleibt auch bei Radius 0 ein Kreis (7 Farben in
+  seiner Ecke) — ein Kreis ist keine Ecke und darf nicht mitgeklemmt
+  werden.
+
+Bilder: `01-radius-0-scharfe-ecken.png`, `02-radius-12-mittel.png`,
+`03-radius-24-weiche-kacheln.png`.
+
+---
+
+## 3. Die Leiste mischt wirklich
+
+`glascheck.py mix` rechnet die Mischung auf dem Wirt ein zweites Mal
+nach — aus dem Kommentar in `kernel/ui/wm.fi` abgeschrieben, nicht aus
+dem Code — und vergleicht Bildpunkt fuer Bildpunkt.
+
+| Deckung | Bildpunkte, die der nachgerechneten Mischung gleichen | Farben unter der Leiste | Streuung (`var`) |
+|---|---|---|---|
+| 100 % | 100 von 100 | 1 | 0 |
+| 70 % | 100 von 100 | 2 | 1 597 |
+| 40 % | 100 von 100 | 2 | 6 389 |
+| 70 % + Milchglas 12 | — | 13 | **788** |
+
+"Farben 1" bei voller Deckung und "Farben 2" darunter ist die Probe
+darauf, dass das **Muster** des Hintergrundbildes durchschlaegt und
+nicht bloss die Flaeche heller wird. Die Streuung steigt von 0 ueber
+1 597 auf 6 389, je durchsichtiger die Leiste ist.
+
+Bilder: `04-taskleiste-100-deckend.png`,
+`05-taskleiste-70-prozent.png`, `06-taskleiste-40-prozent.png`,
+`12-leiste-vergleich-ausschnitt-2x.png` (dieselbe Stelle vierfach,
+2-fach vergroessert).
+
+---
+
+## 4. Milchglas: weichgezeichnet, und schnell genug
+
+Der Weichzeichner ist ein **separierbarer Kastenfilter in drei
+Durchgaengen mit laufender Summe**, also O(1) je Bildpunkt und
+unabhaengig vom Radius. Die Zeile, die er je Vollbild meldet:
+
+```
+wm: glas r=12 px=35840 us=42701 max=46319 cache=2/26 key=ffffff
+```
+
+| Zahl | Bedeutung |
+|---|---|
+| `px=35840` | angefasste Bildpunkte je Streifen (1280 × 28) |
+| `us=42701` | Mikrosekunden fuer den letzten Durchgang, **QEMU/TCG ohne KVM** |
+| `max=46319` | die teuerste je gemessene Mischung, 46,3 ms |
+| `cache=2/26` | 26 mal gebraucht, **2 mal aus dem Zwischenspeicher** |
+| `key=ffffff` | die Schluesselfarbe, gegen die das Abstandsalpha rechnet |
+
+Der erste Streifen eines Laufs kostet `us=37464` bei `cache=0/1` — da
+ist der Zwischenspeicher noch leer, und das ist die ehrliche Zahl fuer
+"kalt".
+
+**Die Streuung sinkt messbar**: 1 597 ohne Milchglas, **788** mit —
+und aus zwei Farben sind 13 geworden, also ein Verlauf und keine zwei
+Kacheln mehr.
+
+Bilder: `07-milchglas-blur12.png`, `14-milchglas-mit-reglerstand.png`.
+
+**Abkuerzung, ausdruecklich benannt:** 46 ms je Vollbild sind unter
+TCG gemessen. Auf Blech mit KVM ist dieselbe Rechnung um ein Vielfaches
+billiger, aber **diese Zahl ist hier nicht gemessen worden** — es gibt
+in diesem Lauf keine KVM-Messung des Weichzeichners. Wer sie braucht,
+faehrt `tools/themestore/build.sh ... accel=kvm`.
+
+---
+
+## 5. Lesbarkeit unter Transparenz
+
+Gerechnet wird gegen den **gemischten** Grund im Bild, nicht gegen die
+theoretische Flaechenfarbe.
+
+| Hintergrundbild | Deckung | Kontrast der Leistenschrift |
+|---|---|---|
+| hell (Schachmuster) | 40 % | **14,43 : 1** |
+| dunkel | 40 % | **12,33 : 1** |
+
+Beides weit ueber 4,5 : 1. Die Untergrenze `ALPHA_MIN = 20` in
+`kernel/user/wlibc.fi` klemmt jede Deckkraft darunter weg — aber siehe
+Abschnitt 8, Punkt 2: der eigentliche Grund fuer die hohen Zahlen ist
+ein **anderer**, und er ist ein Mangel und kein Verdienst.
+
+---
+
+## 6. Keine Schlieren, wenn ein Fenster unter die Leiste geht
+
+Die Regel: **jedes Schmutzrechteck, das das Leistenrechteck schneidet,
+wird auf die volle Breite der Leiste aufgezogen.** Sonst mischt die
+halbe Leiste neu und die andere Haelfte zeigt, was vorher da war.
+
+| Probe | Zahl |
+|---|---|
+| Fenster unter die Leiste gezogen und zurueck, Vergleich mit dem ungezogenen Lauf | **diff 0** abweichende Bildpunkte |
+| die Schlierenregel hat gegriffen | `grow=1` |
+| GEGENPROBE `noglasgrow`: Regel steht still | `aus=0` aufgezogene Rechtecke |
+
+Bild: `10-fenster-unter-leiste-gezogen-keine-schlieren.png`. Was diese
+Probe **nicht** zeigt, steht in Abschnitt 8, Punkt 1.
+
+---
+
+## 7. Genau eine Stelle fuer jede Sache
+
+Mechanisch gezaehlt im Lauf:
+
+| Frage | Befehl | Zahl |
+|---|---|---|
+| Wer malt ein rundes Rechteck? | `grep -c '^fn fill_round(' kernel/ui/wm.fi` | 1 |
+| Wer mischt? | `grep -c '^fn blend(' kernel/ui/wm.fi` | 1 |
+| Wer entscheidet, wie deckend ein Punkt ist? | `grep -c '^fn glass_mix(' kernel/ui/wm.fi` | 1 |
+| Selbsttest der Mischung und des Weichzeichners | `wm: glastest` | 7 / 7 |
+
+Die Einstellung ueberlebt den Neustart, und zwar als Klick gemessen:
+Regler von **4** auf **16** geschoben, `settings: glas radius=16` in
+der laufenden Sitzung, `radius=16` in `/etc/theme.conf` auf der Platte.
+Gegenprobe ohne Klick: 4 und 4.
+
+Die Seite "Darstellung" passt weiter vollstaendig ins Fenster:
+**74 gemeldete Rechtecke, 0 ragen heraus** (Abschnitt 8 des Laeufers).
+
+---
+
+## 8. Was NICHT erreicht wurde
+
+### 8.1 Bild 15: der Fensterrumpf bleibt nach einem Zug leer
+
+`15-fenster-unter-die-leiste-gezogen.png` ist die Endlage **ohne
+Rueckweg**: das Fenster wurde nach unten unter die Leiste gezogen und
+dort losgelassen. Der Rahmen steht richtig, der **Rumpf ist leer**.
+
+```
+shotcheck.py 15-fenster-unter-die-leiste-gezogen.png  ->  empty 8  cut 0  overlapping 0
+(alle anderen Bilder der Runde: empty 0)
+```
+
+Ursache: nach `MOVE` wird das Schmutzrechteck des **Rumpfes** nicht
+gesetzt, das Fenster malt seinen Inhalt an der neuen Stelle nicht neu.
+
+Und die Abnahme haette es finden muessen: Abschnitt 11f faehrt den Zug
+**mit Rueckweg** (`400,10>400,600` und wieder zurueck) und vergleicht
+danach gegen den ungezogenen Lauf. Auf dem Rueckweg wird ohnehin alles
+neu gemalt, also ist `diff 0` dort kein Beleg fuer den Fall, in dem das
+Fenster liegen bleibt. Die Probe braucht einen **zweiten Lauf ohne
+Rueckweg mit `empty == 0`**.
+
+### 8.2 Das Alpha wird still angehoben — Bild 11 ist keine 40 %
+
+`glass_mix` hebt die Deckkraft eines Punktes an, je weiter der
+Untergrund von der Schluesselfarbe (`key=ffffff`) entfernt ist, und
+noch einmal ueber den **Schleier** (`SCHLEIER = 40`), wenn der
+Helligkeitsabstand gross ist. Beides ist gewollt — es haelt die Schrift
+lesbar —, aber **es wird nirgends gemeldet und nirgends angezeigt**.
+Nachgerechnet aus den Bildern dieser Runde:
+
+| Bild | Untergrund | `alpha_soll` | `alpha_ist` |
+|---|---|---|---|
+| 06 (hell) | 245,240,230 | 40 | **71** |
+| 06 (hell) | 200,216,240 | 40 | **100** |
+| 05 (hell) | 245,240,230 | 70 | **85** |
+| 11 (dunkel) | 20,24,34 | 40 | **100** |
+| 11 (dunkel) | 58,34,80 | 40 | **100** |
+
+Daraus folgt dreierlei, und alles davon ist ein Mangel:
+
+1. **Bild 11 heisst zu Unrecht "Leiste bei 40 %".** Ueber einem dunklen
+   Bild ist die Leiste dort zu 100 % deckend; ihre Streuung ist
+   `var 24` gegen `var 6389` beim hellen Bild bei derselben
+   Einstellung. Als Beleg fuer "durchscheinend ueber dunklem Grund"
+   taugt das Bild nicht. Die Bildtabelle in `docs/shots/glas/README.md`
+   sagt das jetzt so.
+2. **Der Kontrast 12,33 : 1 aus Abschnitt 5 ist zu billig erkauft.**
+   Er ist der Kontrast gegen eine praktisch deckende Leiste. Die
+   Zusage "4,5 : 1 unter Transparenz" ist damit fuer den dunklen Fall
+   nicht wirklich geprueft.
+3. **Der Regler luegt den Benutzer an.** Er steht auf 40 und die Leiste
+   ist deckend. Faellig ist: das wirksame Alpha melden
+   (`wm: glas alpha_soll=40 alpha_ist=100`), im Einstellungsfenster
+   neben dem Regler anzeigen (`40 % (wirksam 100 %)`) und im Laeufer
+   eine Zusage, die fuer ein dunkles Bild entweder `farben >= 2` unter
+   der Leiste oder die gemeldete Anhebung nachweist.
+
+### 8.3 Der Kontrast wird gegen den haeufigsten Grund gerechnet, nicht gegen den schlechtesten
+
+`glascheck.py kontrast` nimmt `most_common(1)` — die haeufigste
+Mischfarbe unter der Leiste. Der schlechteste Fall ist aber der
+**schlechteste Grundpunkt**, und der Bereich der Uhr (x > 1150) ist
+ganz ausgeschlossen, weil der Messstreifen bei x0=300 … x1=1100 endet.
+
+### 8.4 Zwei Rasterer, eine Zusage
+
+Abschnitt 11 zaehlt `fn fill_round`, `fn blend` und `fn glass_mix` —
+aber **nur in `kernel/ui/wm.fi`**. Im Baum gibt es daneben
+`wlibc.rrect` (Ring 3) und `vektor.polygon_round`. Das ist vertretbar
+(Kern und Ring 3 teilen keinen Code), aber die Zusage "genau eine
+Stelle malt ein rundes Rechteck" sagt mehr, als der Befehl prueft.
+Faellig ist eines von beidem: auf EINEN Rasterer zurueck, oder die
+zulaessigen Orte namentlich in eine Liste, die der Laeufer gegen
+`grep -rc` ueber den ganzen Baum prueft.
+
+---
+
+## 9. Nachtrag nach der Jury: der Weg der Konsolenschrift
+
+Auf **jeder** Aufnahme dieser Runde stand im Terminalfenster
+
+```
+KEIN EINZIGES GERT!
+```
+
+Die Quelle (`kernel/ui/kgui.fi`, `usb_bericht`) schreibt "GERAET" mit
+einem richtigen UTF-8-Ä, also den zwei Oktetten `0xC3 0x84`.
+`kernel/ui/wm.fi`, `term_putc`, hatte eine Zeile
+
+```
+if ch < 32 || ch > 126 { return }
+```
+
+und die hat beide **spurlos** verschluckt — kein Kaestchen, kein
+Fragezeichen. Runde UMLAUT2 hat denselben Fehler fuer die
+Bedienoberflaeche abgestellt; der Weg ins Terminalfenster war der
+letzte, der ihn noch hatte.
+
+Behoben: `term_putc` dekodiert die zweioktettige Folge `C2..DF` /
+`80..BF`. Alles, was in eine Zelle (ein Oktett) passt, ist damit
+Latin-1 — Ä, ö, ß, °, µ —, und `cell_paint` gibt die Zeichennummer
+unveraendert an `ttf.glyph` weiter, das seit Runde GLYPHE nach
+Zeichennummer sucht. Drei- und vieroktettige Folgen bekommen ein
+sichtbares `?`, weil ein Platzhalter der einzige Befund ist, der sich
+spaeter noch melden laesst.
+
+Zwei Dinge, die dabei mit aufgefallen sind, und beide gehoeren
+zusammen:
+
+* **Die Leiste hat gemeldet, was sie nicht gemalt hat.** Bei
+  `labels=never` zog der Startknopf seinen Text auf leer und
+  `say_text` schickte trotzdem `t=Start` hinaus.
+* **Kein Pruefer hat die Leiste je angesehen.**
+  `tools/themestore/shotcheck.py` misst seit dem ersten Tag GENAU EIN
+  Fenster, naemlich das mit dem meisten Text — nie die Leiste. Der
+  titellose Fensterknopf (ein gruenes Kaestchen mit `>_` darin, das
+  ohne Vorwissen wie ein Unterstrich aussieht) lag deshalb in einem
+  Bereich, den nichts gemessen hat.
+
+Behoben: die Vorgabe der Beschriftung ist `room` statt `never` — der
+Fenstertitel steht im Knopf, solange er ohne Abschneiden hineinpasst,
+sonst faellt der Knopf auf das Symbol zurueck. Der Startknopf meldet
+den Text, den er wirklich malt. `say_text` der Leiste meldet zusaetzlich
+`tw=`, die gemessene Breite, und `shotcheck.py --leiste` stellt der
+Leiste dieselben drei Fragen wie jedem Fenster (leer / abgeschnitten /
+ueberlappend), auf einer eigenen Ausgabezeile und mit Wirkung auf den
+Rueckgabewert.
+
+### Die Zahlen des Nachtrags
+
+Gemessen im Abschnitt 12 des Laeufers, gegen den Lauf `al100`
+(Deckung 100 %, helles Musterbild):
+
+| Frage | Zahl |
+|---|---|
+| Der Kern nennt sein Zellenraster (`wm: termgitter`) | `x=26 y=62 cellw=10 cellh=19 asc=14 px=16` |
+| "KEIN EINZIGES GERÄT!" nachgerastert (`umlaut.py --gitter=1,1`) | 18 Zeichen, **1 014 Tintenpunkte, 0 falsch** |
+| DIESELBE Zeile im Bild VOR dem Nachtrag | **112 falsch**, und das `!` fehlt ganz (um eine Zelle verrutscht) |
+| GEGENPROBE: die alte Zeile "…GERT!" gegen das neue Bild | passt nicht — der Pruefer unterscheidet die beiden |
+| `shotcheck.py --leiste` auf dieselbe Aufnahme | `texts 3  measured 3  empty 0  cut 0  overlapping 0` |
+| Fensterknopf der Leiste | `t=Terminal -- sh` statt leer |
+
+Und ein Fehler, den erst dieser Nachtrag sichtbar gemacht hat, mit
+seiner Gegenprobe: mit `labels=room` malte der Startknopf zuerst "Sta"
+— `start_w()` gab "zwei Klickflaechen breit" zurueck, also 40
+Bildpunkte fuer eine Leiste mit 20 hohen Knoepfen, und "Start" braucht
+mit seinem Zeichen 61. Der Fensterknopf daneben hat den Rest
+ueberdeckt. Die neue Pruefung meldet genau das:
+
+```
+LEISTE CUT  'Start' meldet x=27 tw=36 und reicht damit 19 Bildpunkte
+            ueber sein Bedienelement 4,4 40x20 hinaus
+```
+
+Nach der Berichtigung (`start_w` misst Zeichen + Luft + Wort + Rand)
+steht dieselbe Zusage auf `cut 0`. Die Tinte allein haette den Fehler
+NICHT gefunden — der Nachbar hat zuerst gemalt, also steht dort, wo
+"rt" stehen sollte, sauberer Knopfgrund und keine fremde Tinte.
+
+Bilder: `16-umlaut-im-terminal.png` (der ganze Schreibtisch nach dem
+Nachtrag), `17-vorher-nachher-umlaut-und-leiste.png` (vorher/nachher,
+2-fach vergroessert, abgeleitet aus 04 und 16).
+
+---
+
+## 10. Wo was steht
+
+| Datei | Was dieser Runde gehoert |
+|---|---|
+| `kernel/user/template.fi` | die vier Schluessel, jeder nur Ziffern, jeder geklemmt |
+| `kernel/user/wlibc.fi` | `radius()`, `tb_alpha()`, `win_alpha()`, `tb_blur()` und die vier Setzer; `ALPHA_MIN`, `BLUR_MAX`; `rrect` (Ring 3) |
+| `kernel/ui/wm.fi` | `fill_round`, `blend`, `glass_mix`, der Weichzeichner, die Schlierenregel, `term_putc` (Nachtrag) |
+| `kernel/user/wlib.fi` | `draw_board` und der Radius je Widgetart |
+| `kernel/user/taskbar.fi` | die Leiste mischt; Beschriftung, `tw=` (Nachtrag) |
+| `kernel/user/settings.fi` | die vier Regler auf "Darstellung" |
+| `tools/themestore/run.sh` | Abschnitt 11, 55 neue Zusagen |
+| `tools/themestore/glascheck.py` | die zweite Rechnung auf dem Wirt |
+| `tools/themestore/shotcheck.py` | `--leiste` (Nachtrag) |
+| `docs/shots/glas/` | die 15 Aufnahmen und ihre Tabelle |
