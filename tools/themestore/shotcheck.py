@@ -451,6 +451,52 @@ def main(argv):
     bad = []
     boxes = []
     empty = 0
+    # ============================================ RUNDE GLAS (NACHTRAG)
+    # WAS DER SCHIRM NICHT ZEIGT, IST KEINE LEERE BESCHRIFTUNG.
+    #
+    # Der Nachtrag dieser Runde zieht ein Fenster unter die Taskleiste
+    # (click='400,10>400,600', ohne Rueckweg). Danach haengt sein
+    # unteres Drittel UNTER dem Schirm: das Programm malt seine Zeilen
+    # weiter in den eigenen Puffer, und der Fensterserver zeigt vom
+    # Puffer nur, was auf den Schirm passt. Dieses Werkzeug mass dort
+    # dreizehn "leere Beschriftungen" -- und keine davon war ein
+    # Mangel, sondern die Wahrheit ueber ein Fenster, das zum Teil
+    # nicht auf dem Schirm steht.
+    #
+    # Also werden solche Zeilen GEZAEHLT UND BENANNT (`ausserhalb`,
+    # `verdeckt`) statt sie in `empty` zu werfen. Verschwiegen wird
+    # nichts: steht dort eine Zahl, sagt sie, wie viele Zeilen der
+    # Schirm gar nicht zeigen konnte.
+    ausserhalb = 0
+    verdeckt = 0
+    sicht = []
+    _bt, bar, _br = parse_bar(argv[2])
+    for t in texts:
+        y0 = oy + t["base"] - asc
+        y1 = oy + t["base"] + desc
+        x = ox + t["x"]
+        x1 = x + t["tw"]
+        if y0 >= pic.h or y1 <= 0 or x >= pic.w or x1 <= 0:
+            ausserhalb += 1
+            bad.append("AUSSEN '%s' at %d,%d liegt ausserhalb des Schirms "
+                       "%dx%d" % (t["t"][:32], x, oy + t["base"],
+                                  pic.w, pic.h))
+            continue
+        # UND WAS UNTER DER LEISTE LIEGT, IST VON IHR VERDECKT. Die
+        # Leiste liegt auf L_TOP; ein Fenster, das unter sie gezogen
+        # wurde, ist dort nicht zu sehen, und das ist genau die
+        # Zeichenordnung, die diese Runde gebaut hat.
+        if (bar is not None
+                and y0 >= bar["y"] and y1 <= bar["y"] + bar["h"]
+                and x >= bar["x"] and x1 <= bar["x"] + bar["w"]):
+            verdeckt += 1
+            bad.append("VERDECKT '%s' at %d,%d liegt unter der Leiste "
+                       "%d,%d %dx%d" % (t["t"][:32], x, oy + t["base"],
+                                        bar["x"], bar["y"], bar["w"],
+                                        bar["h"]))
+            continue
+        sicht.append(t)
+    texts = sicht
     for t in texts:
         x = ox + t["x"]
         y0 = oy + t["base"] - asc
@@ -508,8 +554,9 @@ def main(argv):
                            % (boxes[i][0][:24], a[:4],
                               boxes[j][0][:24], b[:4]))
     print("shotcheck: win %s  texts %d  measured %d  empty %d  cut %d  "
-          "overlapping %d  gekuerzt %d"
-          % (want_win, len(texts), len(boxes), empty, cut, over, gekuerzt))
+          "overlapping %d  gekuerzt %d  ausserhalb %d  verdeckt %d"
+          % (want_win, len(texts), len(boxes), empty, cut, over, gekuerzt,
+             ausserhalb, verdeckt))
     for line in bad[:30]:
         print("  " + line)
     # RUNDE GLAS (nachtrag): die Leiste auf einer EIGENEN Zeile. Sie
