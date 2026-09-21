@@ -19,6 +19,13 @@ und genau so sah der Knopf "Uebernehmen" der Seite Darstellung aus. Die
 Zahlen `knopf` und `ohnekante` stehen immer in der Ausgabezeile; in den
 Rueckgabewert gehen sie nur mit diesem Schalter ein.
 
+Seit RUNDE GLAS (fix-r4-1) fragt derselbe Schalter eine zweite Sache:
+liegt die BESCHRIFTUNG eines Knopfes innerhalb seines Umrisses? Der
+Knopf "Mit Konto verknuepfen" der Seite Vorlagen hatte einen Rahmen von
+150 Bildpunkten und ein Wort von 156 -- sein Rand lief also mitten
+durch die Schrift, und angeschaut war das eine Beschriftung mit einem
+Strich darueber. Die Zahl heisst `ueberstand`.
+
 `--leiste` stellt dieselben drei Fragen zusaetzlich an die Taskleiste
 (RUNDE GLAS, Nachtrag -- bis dahin hat dieses Werkzeug GENAU EIN
 Fenster gemessen und die Leiste nie). Sie kommt auf eine eigene
@@ -253,13 +260,31 @@ def kanten(pic, x, y, w, h, r, tol=8, stufe=12, anteil=60):
     return gefunden
 
 
-def knoepfe_messen(pic, tail, ox, oy, ww, wh, bar):
-    """(gemessen, ohne Kante, Befunde) fuer jeden gemeldeten Knopf.
+def knoepfe_messen(pic, tail, ox, oy, ww, wh, bar, texts=()):
+    """(gemessen, ohne Kante, mit Ueberstand, Befunde) je Knopf.
 
     Gemessen wird nur, was im GEMESSENEN FENSTER liegt und auf dem
     Schirm zu sehen ist: ein Knopf eines Fensters dahinter waere
     verdeckt, und ein Knopf unter der Leiste ist es auch -- beides ist
     kein fehlender Rand.
+
+    ============================= RUNDE GLAS (fix-r4-1): DER UEBERSTAND
+
+    Die Kantenprobe darueber beantwortet die Frage "hat das Ding einen
+    Umriss?". Sie beantwortet NICHT die Frage, die der Knopf "Mit Konto
+    verknuepfen" auf Bild 09 gestellt hat: sein Umriss war da (eine
+    sehr helle Linie von x=38 bis x=189), nur war seine Beschriftung
+    156 Bildpunkte breit und stand von x=40 bis x=196 -- sieben
+    Bildpunkte davon LAGEN AUF UND NEBEN DEM RAHMEN. Angeschaut ist das
+    ein Wort mit einem Strich darueber und kein Knopf, und kein
+    Pruefer dieses Baums hat es gesehen: die Schriftpruefung misst
+    gegen das FENSTER, und im Fenster lag der Text ja.
+
+    Also wird ab jetzt jede gemeldete Beschriftung, deren Grundlinie in
+    einem gemeldeten Knopf liegt, gegen die Kanten DIESES Knopfes
+    gehalten. Ein Bildpunkt Luft auf jeder Seite ist erlaubt (die
+    Kantenglaettung eines Buchstabens reicht so weit); alles darueber
+    ist ein Ueberstand und wird gezaehlt.
     """
     letzte = {}
     for m in KNOPF.finditer(tail):
@@ -268,6 +293,7 @@ def knoepfe_messen(pic, tail, ox, oy, ww, wh, bar):
     bad = []
     gemessen = 0
     ohne = 0
+    ueber = 0
     for (x, y, w, h, r, ax, ay) in letzte.values():
         if w < 8 or h < 8:
             continue
@@ -285,7 +311,28 @@ def knoepfe_messen(pic, tail, ox, oy, ww, wh, bar):
             bad.append("KNOPF  bei %d,%d %dx%d r=%d hat keine einzige "
                        "Umrisskante -- er sieht aus wie eine Beschriftung"
                        % (ax, ay, w, h, r))
-    return gemessen, ohne, bad
+        for t in texts:
+            if not t["t"].strip() or t["tw"] <= 0:
+                continue
+            tx = ox + t["x"]
+            tb = oy + t["base"]
+            # Die Grundlinie sitzt in der unteren Haelfte des Zeichens;
+            # als "in diesem Knopf" gilt sie, wenn sie zwischen seiner
+            # Ober- und seiner Unterkante liegt und ihr Anfang
+            # waagerecht im Knopf steht.
+            if tb < ay or tb > ay + h:
+                continue
+            if tx < ax - 2 or tx > ax + w:
+                continue
+            if tx >= ax + 1 and tx + t["tw"] <= ax + w - 1:
+                continue
+            ueber += 1
+            bad.append("KNOPF  bei %d,%d %dx%d: die Beschriftung '%s' "
+                       "steht von %d bis %d und ragt ueber den Umriss "
+                       "(%d bis %d) hinaus"
+                       % (ax, ay, w, h, t["t"][:24], tx, tx + t["tw"],
+                          ax, ax + w))
+    return gemessen, ohne, ueber, bad
 
 
 def parse_bar(path):
@@ -343,6 +390,30 @@ def parse(path, marke="settings: rect name=waa "):
     # frueheren Zeitpunkten. Der Standard bleibt der von Runde
     # THEMESTORE, damit die Aufrufe dort unveraendert weiterlaufen.
     cut = body.rfind(marke)
+    # ============================================ RUNDE GLAS (fix-r4-2)
+    # ... ABER EIN SCHNITT, HINTER DEM KEINE SCHRIFT MEHR STEHT, IST
+    # KEIN SCHNITT, SONDERN EIN LEERER PRUEFER.
+    #
+    # Nach einem ZUG meldet die Seite ihre Rechtecke ein zweites Mal
+    # (sie steht ja woanders), und zwar in dem Durchlauf NACH dem
+    # Anstrich: die Schrift steht auf der Leitung vor dem Bericht.
+    # Gemessen wurde damit gar nichts mehr -- `texts 0 measured 0
+    # empty 0`, und eine Zusage ueber null Beschriftungen ist
+    # geschenkt. Genau so ist Bild 19 dieser Runde durchgerutscht.
+    #
+    # Also wird so weit zurueckgegangen, bis hinter dem Schnitt
+    # wirklich Schrift steht. Das ist gefahrlos: die Stelle jeder Zeile
+    # rechnet dieser Pruefer aus dem URSPRUNG des Fensters
+    # (`wlib: win`, die letzte Meldung) und die doppelt gemalten
+    # Beschriftungen fallen weiter unten auf die JUENGSTE je Text
+    # zusammen. Steht hinter keinem Schnitt Schrift, bleibt es beim
+    # letzten -- dann fehlt sie wirklich.
+    while cut > 0 and not any(TEXT.search(z)
+                              for z in body[cut:].splitlines()):
+        vor = body.rfind(marke, 0, cut)
+        if vor < 0:
+            break
+        cut = vor
     tail = body[cut:] if cut >= 0 else body
     out = []
     for raw in tail.splitlines():
@@ -772,14 +843,17 @@ def main(argv):
     # RUNDE GLAS (fix-r3-2): UND JEDER KNOPF ZEIGT EINEN UMRISS.
     roh = open(argv[2], "rb").read().decode("latin1")
     schnitt = roh.rfind(marke)
-    kn, kohne, kbad = knoepfe_messen(
-        pic, roh[schnitt:] if schnitt >= 0 else roh, ox, oy, ww, wh, bar)
+    kn, kohne, kueber, kbad = knoepfe_messen(
+        pic, roh[schnitt:] if schnitt >= 0 else roh, ox, oy, ww, wh, bar,
+        texts)
     bad.extend(kbad)
     print("shotcheck: win %s  texts %d  measured %d  empty %d  cut %d  "
           "overlapping %d  gekuerzt %d  reiterkurz %d  fliesskurz %d  "
-          "ausserhalb %d  verdeckt %d  linie %d  knopf %d  ohnekante %d"
+          "ausserhalb %d  verdeckt %d  linie %d  knopf %d  ohnekante %d  "
+          "ueberstand %d"
           % (want_win, len(texts), len(boxes), empty, cut, over, gekuerzt,
-             gk_reiter, gk_fliess, ausserhalb, verdeckt, linie, kn, kohne))
+             gk_reiter, gk_fliess, ausserhalb, verdeckt, linie, kn, kohne,
+             kueber))
     for line in bad[:30]:
         print("  " + line)
     # RUNDE GLAS (nachtrag): die Leiste auf einer EIGENEN Zeile. Sie
@@ -806,7 +880,7 @@ def main(argv):
     # Dasselbe fuer die Knoepfe, und aus demselben Grund: die Zahl steht
     # immer da, rot wird sie nur, wo ein Laeufer sie bestellt hat.
     if knoepfe:
-        schlecht = schlecht + kohne
+        schlecht = schlecht + kohne + kueber
     return 0 if (empty == 0 and cut == 0 and over == 0
                  and schlecht == 0) else 1
 

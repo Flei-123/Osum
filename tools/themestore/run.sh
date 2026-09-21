@@ -827,6 +827,66 @@ $KACHELN
 EOF
 num "keine Kachel malt etwas ausserhalb ihrer Rundung" "$KBAD" eq 0
 num "und jede der Kacheln ist wirklich rund (tiefe > 0)" "$KTIEF" eq 0
+# ---- (fix-r4-2) UND KEIN AKZENTBALKEN SCHNEIDET DEN KACHELRAHMEN.
+#
+# Die Eckenprobe darueber zaehlt Bildpunkte in den vier Eckvierteln.
+# Zwei bis drei Bildpunkte Akzentfarbe AUF der Rahmenlinie findet sie
+# nicht -- und genau so sassen die Balken der Miniaturleiste in den
+# Vorlagen "Tafel" (Leiste an der rechten Kante) und "Studio" (an der
+# linken): das Bild der Kachel war um `ecke_ein(r, 4)` eingerueckt,
+# also um die Eckendeckung EINER Zeile, und die oberste Zeile des
+# Balkens lag damit genau auf dem Bogen.
+#
+# Gerechnet statt geschaut: die Kachel meldet jedes Balkenrechteck mit
+# dem Rechteck, in dem es liegen MUSS (`wlib: kachelbalken ... kx= ky=
+# kw= kh= ein=`, kernel/user/wlib.fi `say_balken`). Das Innenrechteck
+# ist `kx + ein .. kx + kw - ein`; darin liegt jede Zeile der runden
+# Flaeche vollstaendig, unabhaengig davon, wie weit oben sie sitzt.
+# Eine Aufnahme braucht diese Probe nicht -- sie faellt auch dann auf,
+# wenn zwei Farben der Vorlage im Bild nicht zu unterscheiden sind.
+BALK=$(python3 - "$TMPD/setv/serial.txt" <<'PYB'
+import re, sys
+txt = open(sys.argv[1], 'rb').read().decode('latin1')
+schnitt = txt.rfind("settings: rect name=waa ")
+schwanz = txt[schnitt:] if schnitt >= 0 else txt
+n = 0
+schlecht = 0
+for m in re.finditer(r"wlib: kachelbalken x=(\d+) y=(\d+) w=(\d+) h=(\d+)"
+                     r" kx=(\d+) ky=(\d+) kw=(\d+) kh=(\d+) ein=(\d+)",
+                     schwanz):
+    x, y, w, h, kx, ky, kw, kh, ein = (int(v) for v in m.groups())
+    n += 1
+    if (x < kx + ein or x + w > kx + kw - ein
+            or y < ky + 4 or y + h > ky + kh - 4):
+        schlecht += 1
+        print("        Balken %d,%d %dx%d schneidet die Kachel %d,%d %dx%d "
+              "(ein=%d)" % (x, y, w, h, kx, ky, kw, kh, ein))
+print("%d %d" % (n, schlecht))
+PYB
+)
+printf '%s\n' "$BALK" | grep -a 'schneidet' || true
+BALKZ=$(printf '%s\n' "$BALK" | tail -1)
+num "die Vorschaukacheln melden ihre Balkenrechtecke" \
+    "${BALKZ%% *}" ge 20
+num "und kein Balken schneidet den Rahmen seiner Kachel" \
+    "${BALKZ##* }" eq 0
+# GEGENPROBE: dieselbe Rechnung mit einer von Hand gebauten Zeile, in
+# der ein Balken buendig an der Kachelkante sitzt -- genau der Fall,
+# um den es geht. Sie MUSS auffallen.
+BGEG=$(printf 'wlib: kachelbalken x=300 y=104 w=5 h=24 kx=12 ky=100 kw=293 kh=32 ein=12\n' \
+       | python3 -c '
+import re, sys
+n = s = 0
+for m in re.finditer(r"wlib: kachelbalken x=(\d+) y=(\d+) w=(\d+) h=(\d+)"
+                     r" kx=(\d+) ky=(\d+) kw=(\d+) kh=(\d+) ein=(\d+)",
+                     sys.stdin.read()):
+    x, y, w, h, kx, ky, kw, kh, ein = (int(v) for v in m.groups())
+    n += 1
+    if (x < kx + ein or x + w > kx + kw - ein
+            or y < ky + 4 or y + h > ky + kh - 4):
+        s += 1
+print(s)')
+num "GEGENPROBE: ein Balken auf der Kachelkante wird gefunden" "$BGEG" eq 1
 
 # ------------------------------------------------- 10. die Bilder MESSEN
 echo
@@ -1650,7 +1710,7 @@ num "der Streifen wurde mehr als einmal gebraucht (cache $GLC)" \
 num "und dabei wiederverwendet statt neu gerechnet" \
     "$(printf '%s' "$GLC" | cut -d/ -f1)" ge 1
 
-# ---- 11c3. MILCHGLAS UNTER EINEM DURCHSICHTIGEN FENSTER (fix-r4-4).
+# ---- 11c4. MILCHGLAS UNTER EINEM DURCHSICHTIGEN FENSTER (fix-r4-4).
 #
 # DER BEFUND: die Leiste ist 28 Bildpunkte hoch. Auf 28 Bildpunkten
 # MISST man einen Weichzeichner (`var` faellt, die Farbzahl steigt), und
@@ -1670,9 +1730,18 @@ num "und dabei wiederverwendet statt neu gerechnet" \
 # der Weichzeichner und sonst nichts. Ein Vergleich gegen `blur=0`
 # haette zwei Sachen auf einmal geaendert und waere deshalb keine
 # Messung dieser einen.
+#
+# UND WARUM DAS DUNKLE SCHEMA UND NICHT DAS HELLE: ueber einem hellen
+# Bild hebt `glass_mix` die Deckkraft an, bis die Schrift ihre 4,5:1
+# haelt, und was deckend ist, kann nicht verwischt aussehen -- dieselbe
+# Beobachtung, die 11c2 fuer die Leiste aufgeschrieben hat. Der dunkle
+# Satz auf dem GROBEN Muster (Schachbrett von 24, also Felder von rund
+# 160 Bildpunkten) braucht die Anhebung nicht, und dort scheint
+# wirklich etwas durch.
 for b in 16 2; do
     bash tools/themestore/build.sh "$TMPD/wglas$b" extra='einst' \
-        winalpha=55 blur="$b" wallpaper=hellgrob uitrace=yes keep=yes \
+        scheme=midnight mode=dark winalpha=25 blur="$b" \
+        wallpaper=dunkelgrob uitrace=yes keep=yes \
         > "$TMPD/wglas$b.log" 2>&1
 done
 # DER AUSSCHNITT WIRD NICHT GERATEN, sondern aus dem Rechteck genommen,
@@ -1988,6 +2057,26 @@ num "genau eine Stelle im Fensterserver malt ein rundes Rechteck" "$RR" eq 1
 num "und genau eine mischt" "$BL" eq 1
 GM=$(grep -ac '^fn glass_mix(' kernel/ui/wm.fi)
 num "und genau eine entscheidet, wie deckend ein Punkt ist" "$GM" eq 1
+# ---- (fix-r4-2) DIE MARKE DER TEXTPLATTE STEHT IN BEIDEN RINGEN AUF
+#      DERSELBEN ZAHL, UND DIE SCHRIFT WIRD AN EINER STELLE GEDECKT.
+#
+# Ring 3 setzt die Marke (kernel/user/wlibc.fi, `const PLATTE`), Ring 0
+# liest und entfernt sie (kernel/ui/wm.fi, `const PLATTE_MARKE`). Zwei
+# Zahlen, die dasselbe Bit meinen und auseinanderlaufen koennen, sind
+# genau die Sorte Fehler, die erst im Bild auffaellt -- also werden sie
+# hier gegeneinander gehalten. Und gesetzt wird sie an EINER Stelle:
+# `wlibc.text_at` ist der einzige Ort in Ring 3, an dem eine Glyphe auf
+# eine Flaeche kommt.
+PM0=$(grep -aoE '^const PLATTE_MARKE: u64 = 0x[0-9A-Fa-f]+' kernel/ui/wm.fi \
+      | grep -oE '0x[0-9A-Fa-f]+')
+PM3=$(grep -aoE '^const PLATTE: u64 = 0x[0-9A-Fa-f]+' kernel/user/wlibc.fi \
+      | grep -oE '0x[0-9A-Fa-f]+')
+same "die Marke der Textplatte ist in Ring 0 und Ring 3 dieselbe Zahl" \
+    "${PM0:-0}" "${PM3:-1}"
+num "und genau eine Stelle in Ring 3 setzt sie" \
+    "$(grep -ac '^fn platte(' kernel/user/wlibc.fi)" eq 1
+num "und genau eine in Ring 0 loest sie auf" \
+    "$({ grep -ac 'PLATTE_MARKE) != 0' kernel/ui/wm.fi || true; })" eq 1
 # ---- (fix-r4-4) UND DER ECKENABTASTER STEHT NUR NOCH EINMAL IM BAUM.
 #
 # `corner_cov` stand wortgleich zweimal da -- `wm.fi:1571` fuer den
@@ -2168,12 +2257,29 @@ ZWW=$(printf '%s' "$ZW" | grep -oE ' w=[0-9]+' | grep -oE '[0-9]+')
 num "und es steht danach woanders als vorher (y)" "${ZWY:-3}" gt 100
 LEIY=$(grep -a 'taskbar: STEHT ' "$TMPD/zug1/serial.txt" | tail -1 \
        | grep -oE 'y=[0-9]+' | cut -d= -f2)
+# ======================================== RUNDE GLAS (fix-r4-2)
+# DIE UEBERLAPPUNG WIRD AUS DER STELLE VOR DEM KLEMMEN GERECHNET.
+#
+# Gezogen wird weiterhin unter die Leiste -- daran misst diese Runde,
+# dass der Leistengrund neu gemischt wird. LIEGEN BLEIBEN darf das
+# Fenster dort seit fix-r4-2 nicht mehr: `wm.drag_klemmen` setzt die
+# Endlage auf die Arbeitsflaeche zurueck, sonst ist das Fenster nicht
+# mehr anzufassen und sein Reglerblock nicht mehr zu sehen. Die
+# Endlage ist damit NICHT mehr die Stelle, an der die Schnittflaeche
+# entstanden ist.
+#
+# Der Server meldet beide Stellen in einer Zeile (`wm: geklemmt ...
+# vorx= vory=`), und der Wirt rechnet mit der Stelle VOR dem Klemmen
+# weiter -- genau die, die der Server auch in `unterpx` stehen hat.
+# Wurde gar nicht geklemmt, gilt wie bisher die gemeldete Endlage.
+VORY=$(grep -a 'wm: geklemmt ' "$TMPD/zug1/serial.txt" | tail -1 \
+       | grep -oE 'vory=[0-9]+' | cut -d= -f2)
 # Die Ueberlappung in Bildpunkten, damit "keine Schliere" nicht ueber
 # einem leeren Schnitt entsteht: Unterkante des Fensters SAMT Schmuck
 # (Rahmen 2 + Titel 22) gegen die Oberkante der Leiste.
-UEB=$(( (${ZWY:-3} + ${ZWH:-0} + 24 - ${LEIY:-772}) * ${ZWW:-0} ))
+UEB=$(( (${VORY:-${ZWY:-3}} + ${ZWH:-0} + 24 - ${LEIY:-772}) * ${ZWW:-0} ))
 [ "$UEB" -lt 0 ] && UEB=0
-echo "        Fenster ${ZWW:-?}x${ZWH:-?} bei y=${ZWY:-?}, Leiste ab y=${LEIY:-?}"
+echo "        Fenster ${ZWW:-?}x${ZWH:-?} bei y=${ZWY:-?} (vor dem Klemmen y=${VORY:-${ZWY:-?}}), Leiste ab y=${LEIY:-?}"
 num "das Fenster reicht wirklich unter die Leiste (Bildpunkte Ueberlappung)" \
     "$UEB" ge 1000
 # UND DIESELBE FLAECHE, VOM SERVER SELBST GERECHNET.
@@ -2228,10 +2334,102 @@ mkdir -p "$GSHOTS"
 cp "$TMPD/zug/desktop.png" \
    "$GSHOTS/10-zug-hin-und-zurueck-keine-schlieren.png" 2>/dev/null
 cp "$TMPD/zug1/desktop.png" \
+   "$GSHOTS/19-zug-unter-die-leiste-neu.png" 2>/dev/null
+[ -s "$GSHOTS/19-zug-unter-die-leiste-neu.png" ] \
+    && ok "und der Zug ohne Rueckweg als eigene Aufnahme (19)" \
+    || bad "die Aufnahme des Zuges ohne Rueckweg fehlt"
+
+# ---- 11f3. (fix-r4-2) DIE ENDLAGE LIEGT AUF DER ARBEITSFLAECHE,
+#            UND DER REGLERBLOCK IST GANZ ZU SEHEN.
+#
+# Bis hierher durfte ein Fenster dort liegen bleiben, wohin es gezogen
+# wurde -- auch unter der Leiste und auch zu drei Vierteln unter dem
+# unteren Bildrand. Das Bild 15 der Runde war genau das, und was daran
+# zu sehen war, war nichts: Rahmen oben, Rumpf ausserhalb des Schirms.
+# Ein Fenster, das man nicht mehr anfassen kann, ist kein Zustand, den
+# ein Fensterserver herstellen darf; `wm.drag_klemmen` setzt die
+# Endlage beim LOSLASSEN auf die Arbeitsflaeche zurueck (waehrend des
+# Zuges bleibt alles wie bisher, sonst gaebe es die Schnittflaeche mit
+# der Leiste nicht, an der 11f2 misst).
+#
+# Zwei Zuege, zwei Aufnahmen, dieselbe Frage:
+#   19 -- Zug auf 400,210. Die Unterkante faellt unter die Leiste, die
+#         Endlage wird nach oben geholt (nur y).
+#   22 -- Zug auf 600,600. Das Fenster wuerde zu drei Vierteln unter dem
+#         Schirm haengen; geklemmt wird in BEIDEN Richtungen.
+# Gefordert wird fuer beide: `empty 0`, nichts ausserhalb, nichts unter
+# der Leiste verdeckt -- und der Reglerblock dieser Runde (die vier
+# Regler der Seite "Darstellung") steht vollstaendig ueber der Leiste.
+echo
+echo "== 11f3. die Endlage liegt auf der Arbeitsflaeche =="
+bash tools/themestore/build.sh "$TMPD/zug2" extra='einst' tbalpha=70 blur=0 \
+    wallpaper=hell uitrace=yes keep=yes click="400,10>600,600" \
+    > "$TMPD/zug2.log" 2>&1
+cp "$TMPD/zug2/desktop.png" \
    "$GSHOTS/22-zug-endlage-unter-der-leiste.png" 2>/dev/null
 [ -s "$GSHOTS/22-zug-endlage-unter-der-leiste.png" ] \
-    && ok "und die Endlage unter der Leiste als eigene Aufnahme (22)" \
+    && ok "und die Endlage des weiten Zuges als eigene Aufnahme (22)" \
     || bad "die Aufnahme der Endlage unter der Leiste fehlt"
+for z in zug1 zug2; do
+    GK=$(grep -a 'wm: geklemmt ' "$TMPD/$z/serial.txt" | tail -1)
+    echo "        $z: ${GK:-KEINE Klemmung gemeldet}"
+    KX=$(printf '%s' "$GK" | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
+    KY=$(printf '%s' "$GK" | grep -oE ' y=[0-9]+' | grep -oE '[0-9]+')
+    KVY=$(printf '%s' "$GK" | grep -oE 'vory=[0-9]+' | cut -d= -f2)
+    KH=$(printf '%s' "$GK" | grep -oE ' h=[0-9]+' | grep -oE '[0-9]+')
+    LY=$(grep -a 'taskbar: STEHT ' "$TMPD/$z/serial.txt" | tail -1 \
+         | grep -oE 'y=[0-9]+' | cut -d= -f2)
+    num "$z: die Endlage wurde wirklich nach oben geholt (vory > y)" \
+        "${KVY:-0}" gt "${KY:-0}"
+    num "$z: und die Unterkante liegt ueber der Leiste" \
+        "$(( ${KY:-0} + ${KH:-0} ))" le "${LY:-772}"
+    SOUT=$(python3 tools/themestore/shotcheck.py "$TMPD/$z/desktop.ppm" \
+           "$TMPD/$z/serial.txt" 2>&1 | head -1)
+    echo "        $SOUT"
+    num "$z: gemessene Beschriftungen" \
+        "$(printf '%s' "$SOUT" | grep -oE 'measured [0-9]+' \
+           | grep -oE '[0-9]+')" ge 20
+    for f in empty cut overlapping ausserhalb verdeckt; do
+        num "$z: $f" \
+            "$(printf '%s' "$SOUT" | grep -oE "$f [0-9]+" | head -1 \
+               | cut -d' ' -f2)" eq 0
+    done
+    # UND DER REGLERBLOCK STEHT GANZ DA.
+    #
+    # Gefragt werden die Rechtecke, die die Seite nach dem Zug selbst
+    # gemeldet hat (`settings: rect ... ax= ay=`, der letzte
+    # vollstaendige Bericht -- dieselbe Regel wie in shotcheck.py). Der
+    # Reglerblock dieser Runde sind die vier Zeilen zu 24 Bildpunkten
+    # unten in der rechten Spalte; ausgegeben wird, wie viele davon
+    # gemeldet wurden und wie viele davon vollstaendig ueber der
+    # Leiste und im Schirm liegen. Beide Zahlen muessen vier sein:
+    # waere nur die zweite gefordert, ginge eine Seite durch, die gar
+    # keinen Regler mehr meldet.
+    RB=$(python3 - "$TMPD/$z/serial.txt" "${LY:-772}" <<'PYR'
+import re, sys
+txt = open(sys.argv[1], 'rb').read().decode('latin1')
+leiste = int(sys.argv[2])
+schnitt = txt.rfind("settings: rect name=waa ")
+schwanz = txt[schnitt:] if schnitt >= 0 else txt
+n = 0
+gut = 0
+for m in re.finditer(r"settings: rect name=w\w\w x=\d+ y=(\d+) w=(\d+)"
+                     r" h=(\d+) ax=(\d+) ay=(\d+)", schwanz):
+    y, w, h, ax, ay = (int(v) for v in m.groups())
+    # Die vier Regler: 24 hoch, ueber die ganze Spalte breit und im
+    # unteren Drittel der Seite.
+    if h != 24 or w < 300 or y < 390:
+        continue
+    n += 1
+    if ay + h <= leiste and ax + w <= 1280:
+        gut += 1
+print("%d %d" % (n, gut))
+PYR
+)
+    echo "        $z: Reglerzeilen gemeldet/ganz sichtbar: ${RB:-? ?}"
+    num "$z: gemeldete Zeilen des Reglerblocks" "${RB%% *}" ge 4
+    num "$z: davon vollstaendig ueber der Leiste" "${RB##* }" eq "${RB%% *}"
+done
 
 # ---- 11g. DER REGLER WIRKT SOFORT UND UEBERLEBT DEN NEUSTART.
 #
@@ -2523,6 +2721,59 @@ print(n)
 PYW
 )
 num "GEGENPROBE: bei 55 Prozent ist das Fenster wirklich eine andere Flaeche" \
+    "${WD:-0}" ge 2000
+# ---- (fix-r4-2) UND IN DER REITERZEILE STEHT KEINE FREMDE GLYPHE.
+#
+# Der Kontrast einer Reiterbeschriftung sagt, ob SIE zu lesen ist. Er
+# sagt nichts darueber, ob NEBEN ihr noch ein zweiter Text steht -- und
+# genau das war das Fehlerbild der Aufnahme 13: die Ausgabe des
+# Terminals lief zwischen "Sprache" und "Vorlagen" hindurch. Der
+# Schatten eines fremden Buchstabens hat gegen den Reiternamen gar
+# keinen Kontrast zu halten, er gehoert einfach nicht dorthin.
+#
+# Seit fix-r4-2 liegt unter der ganzen Reiterzeile eine DECKENDE
+# Textplatte (kernel/user/wlib.fi, `paint_tabs`; die Marke setzt
+# `wlibc.platte`, aufgeloest wird sie in `wm.glass_mix`). Gemessen wird
+# das an der KANTENDICHTE im Band der Reiterzeile: ein Buchstabe ist
+# nichts als Kanten, eine Flaeche hat keine. Die Zahl allein sagt
+# nichts, der Vergleich mit dem Lauf bei `window_alpha=100` sagt alles
+# -- dort steht genau das in der Zeile, was hineingehoert.
+WR55=$(python3 tools/themestore/glascheck.py reiter \
+       "$TMPD/winal/desktop.png" "$TMPD/winal/serial.txt")
+WR100=$(python3 tools/themestore/glascheck.py reiter \
+        "$TMPD/winal100/desktop.png" "$TMPD/winal100/serial.txt")
+echo "        55 %: $WR55"
+echo "        100 %: $WR100"
+K55=$(printf '%s' "$WR55" | grep -oE 'kanten=[0-9]+' | cut -d= -f2)
+K100=$(printf '%s' "$WR100" | grep -oE 'kanten=[0-9]+' | cut -d= -f2)
+num "die Reiterzeile des DECKENDEN Laufs hat ueberhaupt Kanten" \
+    "${K100:-0}" ge 500
+num "und das durchsichtige Fenster hat dort keine einzige mehr" \
+    "${K55:-99999}" le "${K100:-0}"
+# UND ZWAR BILDPUNKT FUER BILDPUNKT DIESELBE ZEILE. Gleich viele
+# Kanten koennten auch zwei verschiedene Zeilen haben; die Platte sagt
+# mehr, naemlich dass in diesem Band gar nicht gemischt wurde.
+WRD=$(python3 - "$TMPD/winal/desktop.png" "$TMPD/winal100/desktop.png" \
+      "$WR55" <<'PYB'
+import re, sys
+from PIL import Image
+a = Image.open(sys.argv[1]).convert("RGB")
+b = Image.open(sys.argv[2]).convert("RGB")
+m = re.search(r"band=(\d+),(\d+),(\d+),(\d+)", sys.argv[3])
+x0, y0, x1, y1 = (int(v) for v in m.groups())
+n = sum(1 for y in range(y0, y1) for x in range(x0, x1)
+        if a.getpixel((x, y)) != b.getpixel((x, y)))
+print(n)
+PYB
+)
+num "und die Reiterzeile ist Bildpunkt fuer Bildpunkt die des deckenden Laufs" \
+    "${WRD:-9999}" eq 0
+# GEGENPROBE, und sie steht schon da: WAERE das ganze Fenster deckend
+# geworden, waere die Zahl oben auch 0 -- deshalb muss der RUMPF sich
+# unterscheiden, und zwar in Tausenden von Bildpunkten. Das ist genau
+# die Zahl `$WD` von oben, hier noch einmal benannt: deckende
+# Reiterzeile UND durchsichtiger Rumpf, beides im selben Bild.
+num "GEGENPROBE: derselbe Lauf mischt seinen Rumpf sehr wohl" \
     "${WD:-0}" ge 2000
 # UND DIE BESCHRIFTUNGEN DIESES LAUFS WERDEN GEMESSEN WIE ALLE ANDEREN.
 SW=$(python3 tools/themestore/shotcheck.py "$TMPD/winal/desktop.ppm" \
