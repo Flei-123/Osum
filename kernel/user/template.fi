@@ -7,15 +7,20 @@
 //
 // A PRESET IS NOT A FIFTH LAYER OF THE TOKEN SYSTEM. Rounds THEME and
 // LOOK built four: raw ramps, semantic roles, components, and form.
-// Nothing here resolves a colour. A preset is SEVEN NAMES -- which
+// Nothing here resolves a colour. A preset is ELEVEN NAMES -- which
 // scheme, which mode, which shape, which accent, which taskbar edge,
-// which alignment, and what to call it -- and applying one writes the
-// two files the system already reads (/etc/theme.conf and
-// /etc/taskbar.conf) and then gets out of the way.
+// which alignment, what to call it, and (round GLAS) four numbers for
+// the corner radius, the two opacities and the frosting -- and
+// applying one writes the two files the system already reads
+// (/etc/theme.conf and /etc/taskbar.conf) and then gets out of the way.
 //
-// THE SEVEN KEYS ARE THE WHOLE VOCABULARY, and that is a security
-// property and not tidiness. `parse_key` accepts exactly those seven
-// and COUNTS everything else as bad. A preset file that arrives from
+// THE ELEVEN KEYS ARE THE WHOLE VOCABULARY, and that is a security
+// property and not tidiness. `parse_key` accepts exactly those eleven
+// and COUNTS everything else as bad. ROUND GLAS ADDED FOUR AND CHANGED
+// NOTHING ABOUT THAT: every one of them is a NUMBER, read digit by
+// digit, and a value that is not a number is counted as bad instead of
+// being quietly taken as 0. The list may grow; what may not grow is
+// what a value can BE. A preset file that arrives from
 // another machine, out of an account, off a USB stick, cannot carry a
 // path, a command, a password or a URL, because there is no key that
 // would hold one and no code here that would look at it. What a preset
@@ -60,6 +65,9 @@ export {
     scan, count, name_at, id_at, origin_at, scheme_at, dscheme_at,
     shape_at,
     mode_at, accent_at, edge_at, align_at, bad_at, keys_at, low_at,
+    // RUNDE GLAS: die vier Zahlen einer Vorlage, und NUM_NONE fuer
+    // "die Vorlage sagt dazu nichts".
+    radius_at, tba_at, wa_at, blur_at, NUM_NONE,
     find, apply_at, save_as, export_at, import_from, remove_at,
     account_have, account_dir, link_all, restore_all, mode_write,
     measure, m_txt, m_min, m_worst, m_ok, m_moved, m_high, m_bar,
@@ -78,6 +86,17 @@ const O_ACCOUNT: u64 = 2
 // black is a colour somebody may want.
 const ACC_NONE: u64 = 0xFFFFFFFF
 
+// ROUND GLAS: "this preset does not say". Not 0, for exactly the same
+// reason as above -- 0 is a radius somebody wants (sharp corners) and
+// 0 per cent is a taskbar somebody could ask for. A preset that is
+// silent about the corner leaves the shape file in charge; a preset
+// that says `radius=0` overrides it with square corners. Those are two
+// different statements and they need two different values.
+const NUM_NONE: u64 = 0xFFFFFFFF
+const RADIUS_MAX: u64 = 24
+const ALPHA_MAX: u64 = 100
+const BLUR_MAX: u64 = 16
+
 // ------------------------------------------------------------ the table
 static mut v_name: [u8; 768] = [0 as u8; 768] // 24 x 32
 static mut v_id: [u8; 576] = [0 as u8; 576] // 24 x 24
@@ -90,6 +109,13 @@ static mut v_accent: [u64; 24] = [0 as u64; 24]
 static mut v_edge: [u64; 24] = [0 as u64; 24]
 static mut v_align: [u64; 24] = [0 as u64; 24]
 static mut v_origin: [u64; 24] = [0 as u64; 24]
+// RUNDE GLAS: vier Zahlen je Vorlage -- Eckenrundung, Deckkraft der
+// Leiste, Deckkraft der Fenster, Milchglas. NUM_NONE heisst "diese
+// Vorlage sagt dazu nichts".
+static mut v_radius: [u64; 24] = [0 as u64; 24]
+static mut v_tba: [u64; 24] = [0 as u64; 24]
+static mut v_wa: [u64; 24] = [0 as u64; 24]
+static mut v_blur: [u64; 24] = [0 as u64; 24]
 static mut v_bad: [u64; 24] = [0 as u64; 24]
 static mut v_keys: [u64; 24] = [0 as u64; 24]
 static mut v_low: [u64; 24] = [0 as u64; 24]
@@ -122,6 +148,11 @@ static mut c_edge: u64 = 0
 static mut c_align: u64 = 0
 static mut c_bad: u64 = 0
 static mut c_keys: u64 = 0
+// RUNDE GLAS: die vier Zahlen der aktuell gelesenen Vorlage.
+static mut c_radius: u64 = NUM_NONE
+static mut c_tba: u64 = NUM_NONE
+static mut c_wa: u64 = NUM_NONE
+static mut c_blur: u64 = NUM_NONE
 
 // ------------------------------------------------------------ small tools
 fn rd(p: u64, i: u64) -> u64 {
@@ -247,9 +278,38 @@ fn hex_of(p: u64, n: u64) -> u64 {
     return v
 }
 
+// ROUND GLAS: DIGITS AND NOTHING ELSE.
+//
+// The counterpart of `hex_of` for the four numeric keys. One character
+// that is not a digit and the whole value is NUM_NONE, which the
+// parser turns into `return false` -- the line is COUNTED AS BAD and
+// not quietly read as 0. That is the difference between a preset
+// saying "sharp corners" and a preset saying `radius=/bin/sh`, and it
+// is the whole reason the security promise of this file still holds
+// with eleven keys in it.
+fn dec_of(p: u64, n: u64, hi: u64) -> u64 {
+    if n == 0 || n > 3 {
+        return NUM_NONE
+    }
+    var v: u64 = 0
+    var k: u64 = 0
+    while k < n {
+        let c: u64 = rd(p, k)
+        if c < 48 || c > 57 {
+            return NUM_NONE
+        }
+        v = v * 10 + (c - 48)
+        k = k + 1
+    }
+    if v > hi {
+        v = hi
+    }
+    return v
+}
+
 // ------------------------------------------------------------ one file
 //
-// The parser. Seven keys, and every other key is COUNTED. A key that
+// The parser. Eleven keys, and every other key is COUNTED. A key that
 // is silently dropped is how a person edits a file, sees nothing
 // change and blames the program.
 fn parse_key(kp: u64, kn: u64, vp: u64, vn: u64) -> bool {
@@ -261,6 +321,13 @@ fn parse_key(kp: u64, kn: u64, vp: u64, vn: u64) -> bool {
     var k_accent: [u8; 7] = "accent\0"
     var k_edge: [u8; 5] = "edge\0"
     var k_align: [u8; 6] = "align\0"
+    // RUNDE GLAS: vier Namen dazu. Die Bezeichner heissen wie die
+    // Schluessel, damit `tools/themestore/run.sh` die Liste im
+    // Quelltext mechanisch gegen die Liste in den Dateien halten kann.
+    var k_radius: [u8; 7] = "radius\0"
+    var k_taskbar_alpha: [u8; 14] = "taskbar_alpha\0"
+    var k_window_alpha: [u8; 13] = "window_alpha\0"
+    var k_taskbar_blur: [u8; 13] = "taskbar_blur\0"
     var v_light: [u8; 6] = "light\0"
     var v_dark: [u8; 5] = "dark\0"
     var v_center: [u8; 7] = "center\0"
@@ -355,6 +422,52 @@ fn parse_key(kp: u64, kn: u64, vp: u64, vn: u64) -> bool {
         if neq(vp, vn, (&v_center[0 as usize]) as u64) {
             c_align = 1
         }
+        return true
+    }
+    // RUNDE GLAS: DIE VIER ZAHLEN, UND DIE ZUSAGE BLEIBT WORTGLEICH.
+    //
+    // Jeder Schluessel dieser Datei ist eine ZAHL oder ein WORT AUS
+    // EINER FESTEN MENGE. Die Liste waechst von sieben auf elf Namen,
+    // und keiner der vier neuen kann einen Pfad, einen Befehl oder ein
+    // Kennwort tragen: `dec_of` liest Ziffern und sonst nichts, und ein
+    // nicht-numerischer Wert gibt `false` zurueck -- die Zeile wird
+    // GEZAEHLT. `command=/bin/sh` wird weiter gezaehlt, weil es in
+    // dieser Liste nicht vorkommt und der Rumpf unten `false` liefert.
+    //
+    // Geklemmt wird schon hier, denn der Wert geht nach
+    // /etc/theme.conf weiter: eine Vorlage mit `radius=250` soll dort
+    // als 24 landen und nicht als eine Zahl, die der naechste Leser
+    // noch einmal beurteilen muss.
+    if neq(kp, kn, (&k_radius[0 as usize]) as u64) {
+        let r: u64 = dec_of(vp, vn, RADIUS_MAX)
+        if r == NUM_NONE {
+            return false
+        }
+        c_radius = r
+        return true
+    }
+    if neq(kp, kn, (&k_taskbar_alpha[0 as usize]) as u64) {
+        let a: u64 = dec_of(vp, vn, ALPHA_MAX)
+        if a == NUM_NONE {
+            return false
+        }
+        c_tba = a
+        return true
+    }
+    if neq(kp, kn, (&k_window_alpha[0 as usize]) as u64) {
+        let a2: u64 = dec_of(vp, vn, ALPHA_MAX)
+        if a2 == NUM_NONE {
+            return false
+        }
+        c_wa = a2
+        return true
+    }
+    if neq(kp, kn, (&k_taskbar_blur[0 as usize]) as u64) {
+        let b: u64 = dec_of(vp, vn, BLUR_MAX)
+        if b == NUM_NONE {
+            return false
+        }
+        c_blur = b
         return true
     }
     return false
@@ -531,6 +644,38 @@ fn align_at(i: u64) -> u64 {
     return v_align[(i) as usize]
 }
 
+// RUNDE GLAS: die vier Zahlen der Vorlage. NUM_NONE heisst "steht
+// nicht in der Datei" -- dann bleibt es bei dem, was die Formdatei
+// bzw. die Einstellung sagt, und `apply_at` schreibt die Zeile gar
+// nicht erst. Das ist dieselbe Regel wie bei `dark_scheme`.
+fn radius_at(i: u64) -> u64 {
+    if i >= nv {
+        return NUM_NONE
+    }
+    return v_radius[(i) as usize]
+}
+
+fn tba_at(i: u64) -> u64 {
+    if i >= nv {
+        return NUM_NONE
+    }
+    return v_tba[(i) as usize]
+}
+
+fn wa_at(i: u64) -> u64 {
+    if i >= nv {
+        return NUM_NONE
+    }
+    return v_wa[(i) as usize]
+}
+
+fn blur_at(i: u64) -> u64 {
+    if i >= nv {
+        return NUM_NONE
+    }
+    return v_blur[(i) as usize]
+}
+
 fn origin_at(i: u64) -> u64 {
     if i >= nv {
         return O_SYSTEM
@@ -609,6 +754,13 @@ fn take(dir: u64, nm: u64, origin: u64) {
     c_accent = ACC_NONE
     c_edge = 0
     c_align = 0
+    // RUNDE GLAS: "sagt nichts dazu" ist die Voreinstellung. Eine
+    // kurze Vorlage bleibt damit eine ganze -- sie ueberlaesst die
+    // Rundung der Formdatei und die Deckkraft dem, was eingestellt ist.
+    c_radius = NUM_NONE
+    c_tba = NUM_NONE
+    c_wa = NUM_NONE
+    c_blur = NUM_NONE
     parse((&buf[0 as usize]) as u64, n)
     if c_keys == 0 {
         return
@@ -631,6 +783,10 @@ fn take(dir: u64, nm: u64, origin: u64) {
     v_accent[(s) as usize] = c_accent
     v_edge[(s) as usize] = c_edge
     v_align[(s) as usize] = c_align
+    v_radius[(s) as usize] = c_radius
+    v_tba[(s) as usize] = c_tba
+    v_wa[(s) as usize] = c_wa
+    v_blur[(s) as usize] = c_blur
     v_origin[(s) as usize] = origin
     v_bad[(s) as usize] = c_bad
     v_keys[(s) as usize] = c_keys
@@ -741,7 +897,7 @@ fn account_have() -> bool {
 // ------------------------------------------------------------ writing out
 fn build(nm: u64, name: u64, scheme: u64, mode: u64, shape: u64,
     accent: u64, edge: u64, align: u64) -> u64 {
-    var h1: [u8; 42] = "# an Osum appearance preset -- 7 keys.\n#\n\0"
+    var h1: [u8; 43] = "# an Osum appearance preset -- 11 keys.\n#\n\0"
     var h2: [u8; 62] = "# Nothing here but how the screen looks. See docs/THEMES.md.\n\0"
     var k1: [u8; 6] = "name=\0"
     var k2: [u8; 8] = "scheme=\0"
@@ -750,6 +906,14 @@ fn build(nm: u64, name: u64, scheme: u64, mode: u64, shape: u64,
     var k5: [u8; 8] = "accent=\0"
     var k6: [u8; 6] = "edge=\0"
     var k7: [u8; 7] = "align=\0"
+    // RUNDE GLAS: die vier Zahlen der laufenden Darstellung. Sie
+    // kommen aus `wlibc` und nicht aus einem Gedaechtnis dieser Datei
+    // -- `save_as` speichert, was IST, und das gilt fuer die Rundung
+    // und die Durchsicht genauso wie fuer Schema und Akzent.
+    var k8: [u8; 8] = "radius=\0"
+    var k9: [u8; 15] = "taskbar_alpha=\0"
+    var k10: [u8; 14] = "window_alpha=\0"
+    var k11: [u8; 14] = "taskbar_blur=\0"
     var v_l: [u8; 6] = "light\0"
     var v_d: [u8; 5] = "dark\0"
     var v_a: [u8; 5] = "auto\0"
@@ -790,6 +954,18 @@ fn build(nm: u64, name: u64, scheme: u64, mode: u64, shape: u64,
     } else {
         at = app(b, at, (&v_le[0 as usize]) as u64)
     }
+    wr(b, at, 10)
+    at = app(b, at + 1, (&k8[0 as usize]) as u64)
+    at = app_num(b, at, wlibc.radius())
+    wr(b, at, 10)
+    at = app(b, at + 1, (&k9[0 as usize]) as u64)
+    at = app_num(b, at, wlibc.tb_alpha())
+    wr(b, at, 10)
+    at = app(b, at + 1, (&k10[0 as usize]) as u64)
+    at = app_num(b, at, wlibc.win_alpha())
+    wr(b, at, 10)
+    at = app(b, at + 1, (&k11[0 as usize]) as u64)
+    at = app_num(b, at, wlibc.tb_blur())
     wr(b, at, 10)
     let _u: u64 = nm
     return at + 1
@@ -936,6 +1112,19 @@ fn tb_num(b: u64, n: u64, key: u64, dflt: u64) -> u64 {
     return dflt
 }
 
+// RUNDE GLAS: eine Zeile `<schluessel>=<zahl>\n`, oder gar nichts.
+// Eine Stelle, vier Aufrufer -- vier fast gleiche Bloecke in `apply_at`
+// waeren vier Stellen, an denen die naechste Runde eine vergisst.
+fn num_line(b: u64, at: u64, key: u64, v: u64) -> u64 {
+    if v == NUM_NONE {
+        return at
+    }
+    var p: u64 = app(b, at, key)
+    p = app_num(b, p, v)
+    wr(b, p, 10)
+    return p + 1
+}
+
 fn apply_at(i: u64) -> bool {
     var p_theme: [u8; 16] = "/etc/theme.conf\0"
     var p_tb: [u8; 19] = "/etc/taskbar.conf\0\0"
@@ -949,6 +1138,19 @@ fn apply_at(i: u64) -> bool {
     var t3: [u8; 8] = "\nshape=\0"
     var t4: [u8; 9] = "\naccent=\0"
     var t5: [u8; 37] = "\nlight_start=07:00\ndark_start=19:00\n\0"
+    var t6: [u8; 8] = "radius=\0"
+    var t7: [u8; 15] = "taskbar_alpha=\0"
+    var t8: [u8; 14] = "window_alpha=\0"
+    // ZUSAMMENFUEHRUNG: DIE VORLAGE SAGT `taskbar_blur`, DIE DATEI
+    // SAGT `blur`. In der Vorlagendatei heisst der Schluessel weiter
+    // `taskbar_blur` -- so steht er in allen zehn mitgelieferten
+    // Vorlagen und so prueft ihn Abschnitt 2 der Abnahme. In
+    // /etc/theme.conf heisst er `blur`, denn das ist der Schluessel des
+    // einen Weichzeichners (Runde BLUR), und nur den liest `wlibc`.
+    // Stuende hier weiter `taskbar_blur=`, schriebe eine angewandte
+    // Vorlage eine Zeile, die niemand mehr liest -- die Vorlage haette
+    // ein Milchglas versprochen und keines geliefert.
+    var t9: [u8; 6] = "blur=\0"
     var v_l: [u8; 6] = "light\0"
     var v_d: [u8; 5] = "dark\0"
     var v_a: [u8; 5] = "auto\0"
@@ -1006,6 +1208,17 @@ fn apply_at(i: u64) -> bool {
         at = app_hex6(b, at, v_accent[(i) as usize] & 0xFFFFFF)
     }
     at = app(b, at, (&t5[0 as usize]) as u64)
+    // RUNDE GLAS: die vier Zahlen ANS ENDE, und nur die, die in der
+    // Vorlage stehen. Ans Ende, weil `tools/desktop/run.sh` und
+    // tests/theme/ diese Datei zeilenweise lesen und die Reihenfolge
+    // der vorhandenen Zeilen deshalb bleibt, wie sie war. Nur die
+    // vorhandenen, weil eine ausgeschriebene Zeile `radius=` die
+    // Formdatei sticht -- eine Vorlage, die ueber die Rundung nichts
+    // sagt, darf sie nicht stillschweigend auf 0 setzen.
+    at = num_line(b, at, (&t6[0 as usize]) as u64, v_radius[(i) as usize])
+    at = num_line(b, at, (&t7[0 as usize]) as u64, v_tba[(i) as usize])
+    at = num_line(b, at, (&t8[0 as usize]) as u64, v_wa[(i) as usize])
+    at = num_line(b, at, (&t9[0 as usize]) as u64, v_blur[(i) as usize])
     if !write_file((&p_theme[0 as usize]) as u64, at) {
         return false
     }
@@ -1146,6 +1359,13 @@ fn import_from(from: u64, nm: u64) -> bool {
     c_accent = ACC_NONE
     c_edge = 0
     c_align = 0
+    // RUNDE GLAS: "sagt nichts dazu" ist die Voreinstellung. Eine
+    // kurze Vorlage bleibt damit eine ganze -- sie ueberlaesst die
+    // Rundung der Formdatei und die Deckkraft dem, was eingestellt ist.
+    c_radius = NUM_NONE
+    c_tba = NUM_NONE
+    c_wa = NUM_NONE
+    c_blur = NUM_NONE
     parse((&buf[0 as usize]) as u64, n)
     if c_keys == 0 {
         return false

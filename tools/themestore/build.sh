@@ -10,6 +10,23 @@
 #                       the same seven keys the system reads)
 #     scheme= mode= shape= accent= edge= align=
 #                       the individual axes, when no preset is named
+#     radius=<0..24>    ROUND GLAS: the free corner radius.  Empty means
+#                       "no `radius=` line at all", which is NOT the
+#                       same as 0 -- with no line the shape file decides,
+#                       with 0 the corners are square on purpose.
+#     tbalpha=<0..100>  how opaque the taskbar is, in per cent
+#     winalpha=<0..100> how opaque ordinary windows are
+#     blur=<0..16>      the frosting under the taskbar, 0 = off
+#     wallpaper=<file>  a picture to put on the desktop, so that a
+#                       transparent bar has something to be transparent
+#                       OVER.  A flat surface would prove nothing.
+#                       Either an OSYM file (tools/k15/icon.py) or one
+#                       of the four words `hell`, `dunkel`, `hellgrob`
+#                       and `dunkelgrob`, which generate a patterned
+#                       120x90 one here (`grob` = a chequer of 24
+#                       instead of 12, for the frosting shots) -- the
+#                       light and the dark case the contrast promise of
+#                       round GLAS has to survive.
 #     script=<cmd>      run this in the guest shell instead of the desktop
 #     user=<name>       put /users/<name>/config/ on the disk (the
 #                       account store lives under it)
@@ -43,6 +60,14 @@ shape=modern
 accent=""
 edge=bottom
 align=left
+# ROUND GLAS.  Empty is "do not write the line" for all four, so that a
+# run that does not care about this round produces exactly the
+# /etc/theme.conf it produced before it.
+radius=""
+tbalpha=""
+winalpha=""
+blur=""
+wallpaper=""
 script=""
 user=root
 account=yes
@@ -66,6 +91,11 @@ for a in "$@"; do
         accent=*) accent=${a#*=} ;;
         edge=*) edge=${a#*=} ;;
         align=*) align=${a#*=} ;;
+        radius=*) radius=${a#*=} ;;
+        tbalpha=*) tbalpha=${a#*=} ;;
+        winalpha=*) winalpha=${a#*=} ;;
+        blur=*) blur=${a#*=} ;;
+        wallpaper=*) wallpaper=${a#*=} ;;
         script=*) script=${a#*=} ;;
         user=*) user=${a#*=} ;;
         account=*) account=${a#*=} ;;
@@ -97,6 +127,16 @@ if [ -n "$preset" ]; then
     accent=$(grep -aE "^accent=" "$P" | tail -1 | cut -d= -f2-)
     edge=$(grep -aE "^edge=" "$P" | tail -1 | cut -d= -f2-)
     align=$(grep -aE "^align=" "$P" | tail -1 | cut -d= -f2-)
+    # ROUND GLAS: the four new lines come OUT OF THE FILE too, by the
+    # same route as the seven above.  Re-typing them here is how a
+    # preset and a test disk start disagreeing about what the preset
+    # says, and the disagreement then looks like a bug in the system.
+    # A preset that does not carry the line leaves the variable empty,
+    # and an empty variable writes no line.
+    radius=$(grep -aE "^radius=" "$P" | tail -1 | cut -d= -f2-)
+    tbalpha=$(grep -aE "^taskbar_alpha=" "$P" | tail -1 | cut -d= -f2-)
+    winalpha=$(grep -aE "^window_alpha=" "$P" | tail -1 | cut -d= -f2-)
+    blur=$(grep -aE "^taskbar_blur=" "$P" | tail -1 | cut -d= -f2-)
 fi
 
 BUILDD=${TSBUILD:-/tmp/osum-tsbuild-$(pwd | md5sum | cut -c1-12)}
@@ -144,6 +184,23 @@ printf '# taskbar.conf -- written by tools/themestore/build.sh\nedge=%s\nheight=
     "$edge" "$align" > "$OUT/taskbar.conf"
 printf '# /etc/theme.conf\nscheme=%s\nmode=%s\naccent=%s\nshape=%s\nlight_start=07:00\ndark_start=19:00\n' \
     "$scheme" "$mode" "$accent" "$shape" > "$OUT/theme.conf"
+# ROUND GLAS: four more lines, AT THE END and only when they were asked
+# for.  At the end because tools/desktop/run.sh and tests/theme/ read
+# this file line by line and the order of the existing six stays what it
+# was; only when asked for because a written `radius=` overrides the
+# shape file, and a run that never mentioned the radius must not do that
+# silently.
+[ -n "$radius" ]   && printf 'radius=%s\n' "$radius" >> "$OUT/theme.conf"
+[ -n "$tbalpha" ]  && printf 'taskbar_alpha=%s\n' "$tbalpha" >> "$OUT/theme.conf"
+[ -n "$winalpha" ] && printf 'window_alpha=%s\n' "$winalpha" >> "$OUT/theme.conf"
+# ZUSAMMENFUEHRUNG BLUR+GLAS: DIE ZEILE HEISST `blur=`.
+# In der VORLAGENDATEI heisst der Schluessel weiter `taskbar_blur` (so
+# steht er in allen zehn Vorlagen und so prueft ihn Abschnitt 2); in
+# /etc/theme.conf heisst er `blur`, denn das ist der Schluessel des
+# EINEN Weichzeichners dieses Systems, und nur den liest `wlibc`.
+# Stuende hier weiter `taskbar_blur=`, bekaeme jeder Lauf dieser
+# Abnahme ein Milchglas von 0, egal was er bestellt hat.
+[ -n "$blur" ]     && printf 'blur=%s\n' "$blur" >> "$OUT/theme.conf"
 printf '# /etc/time.conf\noffset=120\n' > "$OUT/time.conf"
 printf '# /etc/locale.conf\nlang=de\n' > "$OUT/locale.conf"
 if [ "$account" = yes ]; then
@@ -157,7 +214,21 @@ else
 fi
 printf '%s\n' de > "$OUT/userlocale"
 
-ARGS=(build "$OUT/disk.img" 16384 /lib/
+# RUNDE GLAS (fix-r3-2): 32768 BLOECKE STATT 16384, also 16 statt 8 MiB.
+#
+# Die zehn Programme dieser Platte wiegen zusammen 7,6 MiB, dazu die
+# drei Schriften (102 KiB) und -- nur in den Laeufen dieser Runde --
+# ein Hintergrundbild von 43 KiB. Damit lief `mkfs.py` mit
+# "mkfs: the disk is full" an die Wand, und zwar AUSGERECHNET in den
+# Laeufen mit `wallpaper=`, also in genau denen, die Transparenz
+# ueberhaupt belegen koennen. Eine Platte, die nur ohne das
+# Hintergrundbild reicht, misst die Runde nicht.
+#
+# 32768 ist keine neue Zahl, sondern die, mit der tools/look/shot.sh,
+# tools/entry/run.sh und tools/wmplug/*.sh seit Runden bauen. Das
+# Abbild ist duenn belegt: die Datei waechst nur um das, was wirklich
+# darin steht.
+ARGS=(build "$OUT/disk.img" 32768 /lib/
       "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
       "/lib/icons.ttf=assets/osum-icons.ttf")
 ARGS+=(/bin/)
@@ -172,6 +243,67 @@ ARGS+=(/etc/
 if [ "$uitrace" = yes ]; then
     printf 'on\n' > "$OUT/uitrace"
     ARGS+=("/etc/uitrace=$OUT/uitrace@0644")
+fi
+# ROUND GLAS: THE PICTURE UNDER THE BAR.
+#
+# A transparent taskbar over a FLAT desktop proves nothing -- every
+# blend of one colour with one colour is one colour.  `wallpaper=hell`
+# and `wallpaper=dunkel` therefore generate a hard-edged pattern with a
+# lot of variance: it is what makes "the blur really blurs" (the
+# variance falls) and "the text still reaches 4.5:1" (against the worst
+# patch, not against an average) measurable at all.
+#
+# 120 x 90 and not the 240 x 180 that `desktop.fi` allows
+# (IMAGE_MAX_W/H): at the documented maximum the picture is 172 800
+# octets and this disk -- 16 384 blocks, with ten programs, three fonts
+# and three locales on it -- answers `mkfs: the disk is full`. That was
+# measured, not guessed. It costs nothing: the desktop stretches the
+# picture to the screen with NEAREST NEIGHBOUR, so a chequer of twelve
+# grows to one of about eighty screen pixels and stays hard-edged --
+# which is what the measurement needs, and more of it.
+if [ -n "$wallpaper" ]; then
+    case "$wallpaper" in
+        hell|dunkel|hellgrob|dunkelgrob)
+            python3 - "$OUT/wallpaper.osym" "$wallpaper" <<'WALLPY'
+import struct, sys
+out, kind = sys.argv[1], sys.argv[2]
+w, h = 120, 90
+# Two hard colours and a twelve-pixel chequer, which the desktop
+# stretches to about eighty.  Bigger than the largest blur radius (16)
+# on purpose: a pattern finer than the blur would vanish into one grey
+# and the "the variance falls by half" measurement would pass for the
+# wrong reason.
+if kind.startswith("hell"):
+    a, b = (0xF5, 0xF0, 0xE6), (0xC8, 0xD8, 0xF0)
+else:
+    a, b = (0x14, 0x18, 0x22), (0x3A, 0x22, 0x50)
+# ROUND GLAS (fix-r3-1): `hellgrob`/`dunkelgrob` -- THE SAME TWO
+# COLOURS ON A TWENTY-FOUR PIXEL CHEQUER.
+#
+# The frosting picture (07) was taken over the twelve-pixel chequer
+# with r=12, and on a chequer that the desktop stretches to about
+# eighty screen pixels a blur of twelve moves the EDGES and leaves the
+# fields flat: the measurement saw it (var falls from 1597 to 788),
+# a reader did not.  A field twice as wide -- about 160 screen pixels
+# -- has fewer edges, so the blur has room to carry one colour deep
+# into the other, and with r=16 the strip becomes a visible gradient
+# instead of two flat tiles with soft seams.  Same two colours on
+# purpose: the contrast promise must be measured against the same
+# worst case as before.
+kachel = 24 if kind.endswith("grob") else 12
+px = bytearray()
+for y in range(h):
+    for x in range(w):
+        c = a if ((x // kachel) + (y // kachel)) % 2 == 0 else b
+        px += bytes((c[2], c[1], c[0], 0xFF))
+open(out, "wb").write(b"OSYM" + struct.pack("<II", w, h) + bytes(px))
+WALLPY
+            WALLF="$OUT/wallpaper.osym" ;;
+        *)
+            [ -f "$wallpaper" ] || { echo "no such wallpaper: $wallpaper"; exit 2; }
+            WALLF="$wallpaper" ;;
+    esac
+    ARGS+=("/etc/wallpaper=$WALLF@0644")
 fi
 ARGS+=(/etc/schemas/)
 for s in assets/schemes/*.scheme; do
@@ -276,7 +408,38 @@ if [ -n "$clicks" ]; then
     # what it costs to get it wrong.
     python3 tools/themestore/click.py $clicks > "$OUT/mon.txt" 2>"$OUT/click.err"
     python3 tools/wm/monitor.py "$SOCK" "$OUT/mon.txt" > "$OUT/click.log" 2>&1
-    sleep 2
+    # ... AND THEN WAIT UNTIL THE GUEST HAS STOPPED TALKING (fix-r3-4).
+    #
+    # Here stood `sleep 2`, and two seconds is a GUESS about a machine
+    # under TCG: it held on an idle host and did not hold when four
+    # runs shared it. MEASURED on this host, same disk, same click:
+    # idle the settings page reported 34 texts and 6 buttons, under a
+    # load of eleven it reported 11 and 0 -- the click had switched the
+    # page (`settings: stand reiter=7` is in the log) and the picture
+    # was taken before it was painted. Four green assertions went red
+    # without a single line of the system changing.
+    #
+    # So the wait asks the GUEST instead of the clock: as long as the
+    # serial log is still growing, it is still working. Two quiet
+    # halves of a second in a row mean the repaint is over; after
+    # twelve seconds it goes on anyway, because a runner that hangs
+    # forever is worse than a runner that measures a half-painted
+    # window and says so.
+    LAST=-1
+    QUIET=0
+    j=0
+    while [ $j -lt 24 ]; do
+        sleep 0.5
+        NOW=$(stat -c %s "$OUT/serial.txt" 2>/dev/null || echo 0)
+        if [ "$NOW" = "$LAST" ]; then
+            QUIET=$((QUIET+1))
+            [ "$QUIET" -ge 2 ] && break
+        else
+            QUIET=0
+        fi
+        LAST=$NOW
+        j=$((j+1))
+    done
 fi
 if [ -z "$script" ] && [ "$shot" = yes ]; then
     python3 tools/gfx/screenshot.py "$SOCK" "$OUT/desktop.ppm" 25 \

@@ -1,0 +1,128 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/ecke.fi -- RUNDE GLAS: DIE DECKUNG EINES ECKPUNKTES, EINMAL.
+//
+// Hier stand die Rechnung zweimal: `wm.corner_cov` im Fensterserver
+// (Ring 0) und `wlibc.corner_cov` in der Widget-Bibliothek (Ring 3),
+// Zeile fuer Zeile dieselben sechzehn Abtastungen. Beide Fassungen
+// trugen denselben Kommentar -- "DIESELBE RECHNUNG WIE die andere" --
+// und genau das ist der Befund: eine Zusage, die ein Mensch beim Lesen
+// einhalten muss, ist keine. Aendert jemand die Abtastung auf einer
+// Seite, sieht man in einem Dialog die runde Ecke des Fensters und die
+// runde Ecke des Knopfes mit zwei verschiedenen Kruemmungen
+// nebeneinander, und kein Lauf merkt es.
+//
+// Also steht sie ab dieser Runde EINMAL, in `lib/` -- dem einen
+// Verzeichnis, das beide Seiten schon durchsuchen (FIRNLIB, gesetzt
+// von tools/build-kernel.sh und von jedem Ring-3-Bau; `lib/utf8.fi`
+// geht denselben Weg). `tools/themestore/run.sh`, Abschnitt 11e, zaehlt
+// `fn corner_cov` ueber den GANZEN Baum und verlangt genau eins.
+//
+// DIE RUNDUNG BLEIBT KANTENGEGLAETTET, und das ist der ganze Zweck:
+// eine runde Ecke aus harten Bildpunkten ist eine Treppe, und eine
+// Treppe bei Radius 8 faellt staerker auf als eine rechtwinklige Ecke.
+//
+// (dx, dy) ist der Abstand der OBEREN LINKEN Ecke des Bildpunktes vom
+// Mittelpunkt des Eckkreises, in ganzen Bildpunkten. Zwei billige
+// Abkuerzungen tragen die grosse Mehrheit der Punkte: liegt die FERNE
+// Ecke des Bildpunktes noch im Kreis, ist er ganz drin; liegt die NAHE
+// schon draussen, ist er ganz draussen. Nur der schmale Ring dazwischen
+// wird wirklich sechzehnfach abgetastet -- ein Rechteck vom Radius r
+// bezahlt 4 * r * r Bildpunkte, gleich wie gross es ist -- und nur der
+// zaehlt in `aa_px`.
+//
+// WAS `aa_px` SOLL: die Kosten der Glaettung sind in jedem Lauf eine
+// ZAHL und keine Behauptung im Kommentar. Der Zaehler gehoert zum
+// Rasterer, nicht zum Rufer; jede Seite hat ihre eigene Ausfertigung
+// dieses Moduls (Kern und Programm werden getrennt gebunden) und damit
+// ihren eigenen Stand, genau wie vorher.
+
+profile kernel
+
+export {
+    corner_cov, corner_skip, aa_px, aa_reset
+}
+
+static mut aa_n: u64 = 0
+
+fn corner_cov(dx: u64, dy: u64, r: u64) -> u64 {
+    if r == 0 {
+        return 255
+    }
+    let rr: u64 = r *% r
+    // Die ferne Ecke des Bildpunktes liegt noch im Kreis: ganz gedeckt.
+    if (dx + 1) * (dx + 1) + (dy + 1) * (dy + 1) <= rr {
+        return 255
+    }
+    // Die nahe Ecke liegt schon draussen: gar nicht gedeckt.
+    if dx * dx + dy * dy >= rr {
+        return 0
+    }
+    var hits: u64 = 0
+    var sy: u64 = 0
+    while sy < 4 {
+        var sx: u64 = 0
+        while sx < 4 {
+            // die Mitte der Unterabtastung (sx, sy), in Achteln eines
+            // Bildpunktes -- ganzzahlig, ohne Wurzel und ohne Teilung.
+            let px8: u64 = dx *% 8 +% sx *% 2 +% 1
+            let py8: u64 = dy *% 8 +% sy *% 2 +% 1
+            if px8 *% px8 +% py8 *% py8 <= (r *% 8) *% (r *% 8) {
+                hits = hits + 1
+            }
+            sx = sx + 1
+        }
+        sy = sy + 1
+    }
+    aa_n = aa_n + 1
+    return hits * 255 / 16
+}
+
+// AB WELCHER SPALTE EINE ZEILE VOLL GEDECKT IST (fix-r4-3).
+//
+// `corner_cov` sagt, WIE DECKEND ein einzelner Bildpunkt ist. Wer
+// Bildpunkte einzeln mischt, hat damit alles, was er braucht; wer eine
+// Zeile WORTWEISE kopiert, kann kein Alpha tragen und braucht die
+// andere Haelfte derselben Auskunft: ab wo darf ich ueberhaupt
+// anfangen. Genau das ist der Fall der Anwendungsflaeche im
+// Fensterserver (`wm.paint_win`), die bis zur Runde GLAS die unteren
+// Eckboegen des Rahmens wieder zugeschmiert hat.
+//
+// Die Rechnung ist dieselbe Kreisgleichung und dieselbe Grenze wie die
+// erste Abkuerzung oben -- voll gedeckt ist ein Bildpunkt, wenn seine
+// ferne Ecke noch im Kreis liegt --, und sie steht deshalb HIER und
+// nicht im Fensterserver: zwei Orte, die dieselbe Ecke beschreiben,
+// sind genau das, wogegen diese Datei angelegt wurde.
+//
+// `dyv` ist der Abstand der Zeile von der aeusseren Kante, 0 fuer die
+// letzte. Der Rueckgabewert ist die Zahl der Spalten am Rand, die NICHT
+// voll gedeckt sind -- bei `r == 0` immer 0, und damit ist jeder Rufer
+// auf `shape=classic` Aufruf fuer Aufruf der von vorher.
+fn corner_skip(r: u64, dyv: u64) -> u64 {
+    if r == 0 || dyv >= r {
+        return 0
+    }
+    let rr: u64 = r *% r
+    // (dy + 1) der fernen Ecke dieser Zeile, quadriert.
+    let b: u64 = (r - dyv) *% (r - dyv)
+    if b >= rr {
+        return r
+    }
+    var dx: u64 = 0
+    while dx < r {
+        let a: u64 = r - dx
+        if a *% a + b <= rr {
+            return dx
+        }
+        dx = dx + 1
+    }
+    return r
+}
+
+// Wie viele Bildpunkte wirklich durch den Abtaster gelaufen sind.
+fn aa_px() -> u64 {
+    return aa_n
+}
+
+fn aa_reset() {
+    aa_n = 0
+}

@@ -45,6 +45,10 @@ import ulib
 import libc.io
 import icons
 import utf8
+// RUNDE GLAS: die Eckendeckung steht einmal im Baum, in lib/ecke.fi,
+// und wird vom Kern und von dieser Bibliothek aus DERSELBEN Quelle
+// uebersetzt -- siehe den Kopf jener Datei.
+import ecke
 
 export {
     start, ready, screen_w, screen_h, mouse_x, mouse_y, mouse_btn,
@@ -84,6 +88,17 @@ export {
     M_SHADOW, M_SHADOW_R, M_DIVIDER, M_FOCUS, M_COUNT,
     M_SP_XS, M_SP_S, M_SP_M, M_SP_L, M_GRAD, M_TONE,
     M_SHADOW2, M_SHADOW_R2, M_CAPTION, space, shade, grad_room,
+    // RUNDE GLAS: der freie Radius, die zwei Deckkraefte und das
+    // Milchglas. Acht Namen, und sie sind die ganze Schnittstelle
+    // dieser Runde nach aussen: die Widgets, die Leiste und die Seite
+    // "Darstellung" lesen und setzen ihre Zahlen ausschliesslich hier.
+    M_TB_ALPHA, M_WIN_ALPHA, ALPHA_MIN, BLUR_MAX,
+    radius, tb_alpha, win_alpha, tb_blur,
+    set_radius, set_tb_alpha, set_win_alpha, set_tb_blur,
+    // RUNDE GLAS (fix-r4-2): die Textplatte. `text_at` ruft sie selbst
+    // -- nach aussen gereicht wird sie nur fuer FLAECHEN, die als
+    // Ganzes deckend sein muessen (die Reiterzeile).
+    platte, PLATTE,
     // RUNDE ECHTHARDWARE-6: `mix` mischt zwei Farben in Prozent. Das
     // Kontrollzentrum hellt damit eine EINGESCHALTETE Kachel auf,
     // statt sie beim Ueberfahren auf die graue Knopffarbe springen zu
@@ -155,8 +170,9 @@ export {
     WS_LAYER, WS_HIDDEN, WS_DECO, WS_KEYS, WA_RAISE, WA_HIDE, WA_TOGGLE,
     win_minrect,
     WM_STRUT, WS_MAXIMIZED, WI_WORKX, WI_WORKY, WI_WORKW, WI_WORKH,
-    WI_MAXIMIZED, WI_INX, WI_INY, WE_BOTTOM, WE_TOP, WE_LEFT, WE_RIGHT,
+    WI_MAXIMIZED, WI_INX, WI_INY, WI_TB_ALPHA_IST, WE_BOTTOM, WE_TOP, WE_LEFT, WE_RIGHT,
     win_strut, win_max, win_move, work_x, work_y, work_w, work_h, edge_name,
+    win_info,
     edge_by_name,
     WL_ID, WL_X, WL_Y, WL_W, WL_H, WL_LAYER, WL_FLAGS, WL_FOCUS,
     WL_TITLE, WL_NETV, WL_APP, WL_BYTES, APP_LEN, win_app,
@@ -166,11 +182,15 @@ export {
     // ROUND PAINT: the FORM of a window, next to its colour.
     form_push, form_one, FORM_SLOTS,
     WF_RADIUS, WF_SHADOW, WF_SHADOW_R, WF_SHADOW_C,
-    WF_SHADOW2, WF_SHADOW_R2, WF_GRAD, WF_CAPTION,
+    WF_SHADOW2, WF_SHADOW_R2, WF_GRAD, WF_CAPTION, WF_MOTION,
     WF_LIFT, WF_TILT, WF_SWING,
     zieh_lift, zieh_tilt, zieh_swing,
     WF_BLUR, WF_BLURTINT, WF_BLURNOISE,
     blur_staerke, blur_tint, blur_noise,
+    // RUNDE GLAS: die drei Zahlen der Durchsicht. Einen vierten Platz
+    // fuer ein eigenes Milchglas gibt es nicht mehr -- sein Radius ist
+    // `WF_BLUR` der Runde BLUR.
+    WF_TB_ALPHA, WF_WIN_ALPHA, WF_GLASS_KEY,
     EV_KEY, EV_DOWN, EV_UP, EV_MOVE, EV_CLOSE, EV_FOCUS, EV_RESIZE,
     sys5, sys3w
 }
@@ -244,7 +264,18 @@ const WM_DECO: u64 = 2114
 // library in ring 3 may not import the kernel; tools/paint/run.sh holds
 // the three lists against each other.
 const WM_FORM: u64 = 2115
-const FORM_SLOTS: u64 = 4
+// ACHTZEHN PLAETZE. Die Zahl stand auf 4, seit Runde PAINT sie
+// geschrieben hat, und war schon vor der Runde GLAS falsch -- SOFTUI
+// und VSYNC haben fuenf Plaetze dazugelegt, ohne sie zu erhoehen. Sie
+// wird nirgends als Schranke benutzt (der Server klemmt selbst), aber
+// eine Zahl, die eine Liste zaehlt und sie nicht zaehlt, ist genau die
+// Naht, an der die naechste Runde danebengreift.
+//
+// ZUSAMMENFUEHRUNG: GLAS zaehlte dreizehn, BLUR fuenfzehn, und beide
+// hatten fuer ihren Zweig recht. Zusammen sind es achtzehn: 0..8 die
+// alten, 9..11 die Runde ZIEH, 12..14 das Acryl, 15..17 die Durchsicht
+// der Runde GLAS. Dieselbe Zahl steht in `wm.FORM_SLOTS`.
+const FORM_SLOTS: u64 = 18
 const WF_RADIUS: u64 = 0
 const WF_SHADOW: u64 = 1
 const WF_SHADOW_R: u64 = 2
@@ -257,10 +288,12 @@ const WF_SHADOW2: u64 = 4
 const WF_SHADOW_R2: u64 = 5
 const WF_GRAD: u64 = 6
 const WF_CAPTION: u64 = 7
+// RUNDE VSYNC: die Dauer einer Fensterbewegung in Millisekunden.  Sie
+// stand bisher nur drueben in `wm.FM_MOTION`; hier fehlte der Name,
+// obwohl diese Datei die einzige ist, die je einen Formplatz schickt.
+const WF_MOTION: u64 = 8
 // RUNDE ZIEH: die drei Wirkungen des Aufhebens beim Verschieben.
-// Dieselben Nummern wie `wm.FM_LIFT/FM_TILT/FM_SWING`. FM_MOTION (8)
-// wird von dieser Bibliothek NICHT geschickt -- die Dauer einer
-// Fensterbewegung setzt die Leiste aus `motion`, siehe `form_push`.
+// Dieselben Nummern wie `wm.FM_LIFT/FM_TILT/FM_SWING`.
 const WF_LIFT: u64 = 9
 const WF_TILT: u64 = 10
 const WF_SWING: u64 = 11
@@ -269,6 +302,24 @@ const WF_SWING: u64 = 11
 const WF_BLUR: u64 = 12
 const WF_BLURTINT: u64 = 13
 const WF_BLURNOISE: u64 = 14
+// RUNDE GLAS: die Zahlen fuer die Durchsicht.  Dieselben Nummern wie
+// `sys.WF_*` und `wm.FM_*`, und tools/themestore/run.sh haelt die drei
+// Listen gegeneinander.  Die Deckkraft ist in PROZENT -- dieselbe
+// Einheit, die in /etc/theme.conf steht und die der Regler auf der
+// Seite "Darstellung" anzeigt.
+//
+// ZUSAMMENFUEHRUNG: 15/16/17 statt 9/10/12. Auf dem Zweig GLAS waren
+// die Plaetze 9 bis 12 frei; auf main liegen dort ZIEH und das Acryl.
+// Und der Platz, der dort `WF_BLUR` hiess (das Milchglas der Leiste),
+// faellt weg: es gibt nur noch EINEN Weichzeichner, und das ist der
+// der Runde BLUR auf Platz 12.
+const WF_TB_ALPHA: u64 = 15
+const WF_WIN_ALPHA: u64 = 16
+// Die Farbe, mit der Ring 3 die Leistenflaeche ausgefuellt hat.  Der
+// Server unterscheidet damit FLAECHE von SCHRIFT: nur die Flaeche wird
+// durchsichtig.  Ohne sie waere auch die Schrift durchsichtig, und
+// genau daran zerbricht die Zusage 4,5:1 ueber einem hellen Bild.
+const WF_GLASS_KEY: u64 = 17
 
 const WI_W: u64 = 0
 const WI_H: u64 = 1
@@ -288,6 +339,11 @@ const WI_MAXIMIZED: u64 = 15
 // so wie der Server ihn fuehrt. Siehe kernel/sys.fi.
 const WI_INX: u64 = 16
 const WI_INY: u64 = 17
+// RUNDE GLAS (NACHTRAG): das WIRKSAME Alpha der Taskleiste in Prozent.
+// Dieselbe Nummer wie `sys.WI_TB_ALPHA_IST`. Der Regler setzt einen
+// Wunsch, die Lesbarkeitsschranke hebt ihn ueber einem fernen Bild
+// wieder an -- und die Seite "Darstellung" zeigt beide Zahlen.
+const WI_TB_ALPHA_IST: u64 = 18
 
 // ADDENDUM TASKBAR: the four screen edges, same numbers as in the
 // kernel. `WE_` and not `E_`, because `E_` already means an event here.
@@ -666,6 +722,74 @@ fn px(x: u64, y: u64, color: u64) {
         color as u32)
 }
 
+// ================================================ RUNDE GLAS (fix-r4-2)
+// DIE TEXTPLATTE -- DECKUNG DORT, WO SCHRIFT STEHT, UND NUR DORT.
+//
+// Ein durchsichtiges Fenster (`window_alpha < 100`) mischt seine
+// Flaeche mit dem, was darunter liegt -- und darunter liegt Schrift.
+// Auf der Aufnahme 13 lief die Ausgabe des Terminals quer durch die
+// Reiterzeile der Einstellungen. Die Antwort davor war ein GLOBALER
+// Schleier (`wm.SCHLEIER_WIN = 20`): die ganze Fensterflaeche durfte
+// sich nur zwanzig Helligkeitsstufen von der Fensterfarbe entfernen.
+// Das hat zwei Fehler auf einmal -- es macht auch die leeren Flaechen
+// deckend (ein Fenster bei 55 Prozent sah aus wie eines bei 80), und
+// es hilft genau dort am wenigsten, wo der fremde Buchstabe zufaellig
+// dieselbe Helligkeit hat wie der Fenstergrund.
+//
+// Die Platte macht es umgekehrt: sie setzt die Marke `PLATTE` in die
+// oberen acht Bit JEDES Bildpunktes, auf dem Schrift steht -- und der
+// Fensterserver nimmt einen markierten Bildpunkt unveraendert
+// (`wm.glass_mix`). Deckend ist damit die ZEILE, nicht die Flaeche;
+// zwischen den Zeilen bleibt das Fenster so durchsichtig, wie der
+// Regler sagt.
+//
+// Die Marke steht in den oberen acht Bit, weil der Fensterpuffer 32
+// Bit je Bildpunkt fuehrt und die Farbe nur 24 davon braucht. Sie
+// verlaesst Ring 3 nie: `glass_mix` gibt den Bildpunkt ohne sie
+// zurueck. Gemalt wird hier nichts Neues -- was unter der Platte
+// steht, ist schon da; sie sagt nur, dass es nicht gemischt werden
+// soll.
+//
+// UND WARUM 1 UND NICHT 255, obwohl 255 die naheliegende "volle
+// Deckung" waere: in diesen oberen acht Bit steht nicht immer Null.
+// `wlibc.px` schreibt eine 24-Bit-Farbe (Byte bleibt 0), die
+// Vektorbruecke aber laesst `paint/canvas.fi` direkt auf dieselbe
+// Flaeche malen, und die legt ihr viertes Oktett als ALPHA ab -- fuer
+// eine gedeckte Flaeche 255. Mit 255 als Marke war damit JEDE von
+// fUi gemalte Flaeche deckend: GEMESSEN an der Seite "Darstellung"
+// bei `window_alpha=55` blieben die beiden Karten Bildpunkt fuer
+// Bildpunkt dieselben wie bei 100 Prozent, nur der Streifen darunter
+// (den `wlibc.rect` malt) mischte. Eine 1 kann dort nur als
+// Deckungswert eines fast leeren Kantenpunktes stehen; ein einzelner
+// Bildpunkt am Bogen einer Rundung, der deckend bleibt statt zu
+// mischen, ist um eine Stufe daneben und nicht zu sehen.
+const PLATTE: u64 = 0x01000000
+// Ob dieser Prozess eine Schirmkante reserviert hat, also die Leiste
+// ist. Siehe `win_strut`.
+static mut s_panel: u64 = 0
+
+fn platte(x: u64, y: u64, w: u64, h: u64) {
+    if w == 0 || h == 0 {
+        return
+    }
+    // Ein deckendes Fenster hat nichts zu decken, und die Leiste malt
+    // ihren Schild selbst. In beiden Faellen kostet die Platte hier
+    // keinen einzigen Bildpunkt.
+    if win_alpha() >= 100 || s_panel != 0 {
+        return
+    }
+    var r: u64 = 0
+    while r < h {
+        var c: u64 = 0
+        while c < w {
+            let a: u64 = get(x + c, y + r)
+            px(x + c, y + r, (a & 0xFFFFFF) | PLATTE)
+            c = c + 1
+        }
+        r = r + 1
+    }
+}
+
 fn get(x: u64, y: u64) -> u64 {
     if x >= s_sw || y < s_band {
         return 0
@@ -800,40 +924,15 @@ fn frame3(x: u64, y: u64, w: u64, h: u64, hell: u64, dunkel: u64,
 // line (`if cov >= 128`), and it is written here so that whoever needs
 // it does not have to redesign anything.
 
-// Is (dx, dy) -- the distance from the centre of the corner circle, in
-// whole pixels, of the pixel's TOP LEFT -- inside the circle? Answered
-// as a coverage 0..255 by sampling the pixel sixteen times.
-fn corner_cov(dx: u64, dy: u64, r: u64) -> u64 {
-    if r == 0 {
-        return 255
-    }
-    // The far corner of the pixel is inside: fully covered.
-    // Cheap early exits, and they carry most of the pixels.
-    let rr: u64 = r *% r
-    if (dx + 1) * (dx + 1) + (dy + 1) * (dy + 1) <= rr {
-        return 255
-    }
-    if dx * dx + dy * dy >= rr {
-        return 0
-    }
-    var hits: u64 = 0
-    var sy: u64 = 0
-    while sy < 4 {
-        var sx: u64 = 0
-        while sx < 4 {
-            // the centre of sub-sample (sx, sy), in eighths of a pixel
-            let px8: u64 = dx *% 8 +% sx *% 2 +% 1
-            let py8: u64 = dy *% 8 +% sy *% 2 +% 1
-            if px8 *% px8 +% py8 *% py8 <= (r *% 8) *% (r *% 8) {
-                hits = hits + 1
-            }
-            sx = sx + 1
-        }
-        sy = sy + 1
-    }
-    aa_px = aa_px + 1
-    return hits * 255 / 16
-}
+// WHERE THE SAMPLER LIVES NOW: `lib/ecke.fi`, and it is the only
+// copy in the tree. It used to stand here AND in `wm.corner_cov`,
+// word for word, each carrying a comment promising it was the same
+// arithmetic as the other -- a promise a human had to keep by hand.
+// Round GLAS moved it into the one directory both rings already
+// search (FIRNLIB = lib/), so the button of a dialog and the frame
+// of its window cannot curve differently any more.
+// `aa_pixels()` below still reports the cost; the counter moved
+// with the sampler.
 
 // ====================================================== RUNDE VEKTOR
 //
@@ -1272,7 +1371,7 @@ fn rrect(x: u64, y: u64, w: u64, h: u64, r0: u64, color: u64) {
     while dy < r {
         var dx: u64 = 0
         while dx < r {
-            let cov: u64 = corner_cov(r - 1 - dx, r - 1 - dy, r)
+            let cov: u64 = ecke.corner_cov(r - 1 - dx, r - 1 - dy, r)
             if cov != 0 {
                 let x0: u64 = x + dx
                 let y0: u64 = y + dy
@@ -1383,10 +1482,10 @@ fn rring(x: u64, y: u64, w: u64, h: u64, r0: u64, bw: u64, color: u64) {
     while dy < r {
         var dx: u64 = 0
         while dx < r {
-            let a: u64 = corner_cov(r - 1 - dx, r - 1 - dy, r)
+            let a: u64 = ecke.corner_cov(r - 1 - dx, r - 1 - dy, r)
             var b: u64 = 0
             if ri > 0 {
-                b = corner_cov(r - 1 - dx, r - 1 - dy, ri)
+                b = ecke.corner_cov(r - 1 - dx, r - 1 - dy, ri)
             }
             var cov: u64 = 0
             if a > b {
@@ -1569,10 +1668,10 @@ fn shadow_edge(x: u64, y: u64, w: u64, h: u64, r0: u64, color: u64,
     while dy < r {
         var dx: u64 = 0
         while dx < r {
-            let aussen: u64 = corner_cov(r - 1 - dx, r - 1 - dy, r)
+            let aussen: u64 = ecke.corner_cov(r - 1 - dx, r - 1 - dy, r)
             var i2: u64 = 0
             if innen > 0 {
-                i2 = corner_cov(r - 1 - dx, r - 1 - dy, innen)
+                i2 = ecke.corner_cov(r - 1 - dx, r - 1 - dy, innen)
             }
             var cov: u64 = 0
             if aussen > i2 {
@@ -1870,7 +1969,28 @@ fn text_at(f: u64, px_: u64, x: u64, y: u64, p: u64, n: u64,
             k = k + l
         }
     }
-    return (cx >> 6) as u64
+    let ende: u64 = (cx >> 6) as u64
+    // RUNDE GLAS (fix-r4-2): UND DIE ZEILE WIRD DECKEND.
+    //
+    // HIER und nicht in `wlib`: das ist die EINE Stelle, an der in
+    // Ring 3 ueberhaupt Schrift auf eine Flaeche kommt. Jede
+    // Beschriftung, jede Listenzeile, jeder Reitername und jede Zeile
+    // des Terminals geht durch sie -- eine Platte je Aufrufer waere
+    // ein Dutzend Orte fuer dieselbe Sache gewesen, und der erste
+    // vergessene waere genau der, an dem es auffaellt.
+    //
+    // Die Platte ist einen Bildpunkt groesser als das Feld der Zeile,
+    // damit die Kantenglaettung der Ober- und Unterlaengen mit
+    // daruntersteht und die Platte keinen sichtbaren Rand bekommt.
+    if ende > x {
+        let asc: u64 = ascent_of(f, px_)
+        var py0: u64 = 0
+        if y > asc + 1 {
+            py0 = y - asc - 1
+        }
+        platte(x, py0, ende - x + 1, text_h(px_) + 2)
+    }
+    return ende
 }
 
 // Dieselbe Rechnung OHNE zu malen -- fuer die Anordnung, fuer das
@@ -2578,25 +2698,6 @@ const M_CAPTION: u64 = 22
 // wlib: eine Zahl in der Datei, feste Verhaeltnisse im Code.
 const M_FONT: u64 = 23 // die Grundgroesse der Oberflaechenschrift
 const M_MOTION: u64 = 24 // die Grunddauer einer Bewegung, in ms
-// ======================================================= RUNDE ZIEH
-// DAS AUFHEBEN BEIM VERSCHIEBEN -- drei Zahlen, drei Wirkungen.
-//
-// Jede ist Schalter UND Regler: 0 heisst aus, sonst ist sie die
-// Staerke. Sie stehen in der Formdatei (`lift`, `tilt`, `swing`) und
-// gehen unveraendert an den Fensterserver -- diese Bibliothek malt
-// kein gezogenes Fenster, das tut der Server.
-const M_LIFT: u64 = 25 // 0..120, Tausendstel ueber 1000 (50 = 105 %)
-const M_TILT: u64 = 26 // 0..100, wie weit der Pivot an den Griff rueckt
-const M_SWING: u64 = 27 // 0..100, wie stark das Bild nachzieht
-// ======================================================= RUNDE BLUR
-// DAS ACRYL -- drei Zahlen, drei Wirkungen, und jede ist wieder
-// Schalter und Regler zugleich (0 = aus). Sie stehen in der Formdatei
-// (`blur`, `blur_tint`, `blur_noise`) und gehen unveraendert an den
-// Fensterserver; diese Bibliothek zeichnet keinen Blur, das tut er.
-const M_BLUR: u64 = 28 // 0..16, der Radius des Kastenfilters
-const M_BLURTINT: u64 = 29 // 0..100, wie stark getoent wird
-const M_BLURNOISE: u64 = 30 // 0..16, die Amplitude des Rauschens
-const M_COUNT: u64 = 31
 
 // DIE SCHRIFTSTUFEN.  Fuenf, und jede hat eine ROLLE und keine Groesse
 // im Namen -- `TY_TITLE` bleibt richtig, wenn die Grundgroesse sich
@@ -2673,18 +2774,67 @@ static mut booted: u64 = 0
 // machine with no /etc/shapes and no `shape=` line looks EXACTLY as it
 // did -- that is the condition under which this round can be landed
 // without re-measuring every screenshot in the repository.
-// RUNDE BLUR: 28 -> 31. Drei Marken mehr (M_BLUR, M_BLURTINT,
-// M_BLURNOISE), und dieselbe Falle wie bei ZIEH: die Zahl steht
-// als Literal ein zweites Mal, weil der Uebersetzer hier keine
-// Konstante nimmt. Wer M_COUNT aendert, aendert auch diese Zeile.
-// RUNDE ZIEH: 25 -> 28. Die drei Marken des Aufhebens (M_LIFT,
-// M_TILT, M_SWING) sind Metriken wie jede andere, also waechst
-// das Feld mit M_COUNT mit. Die Zahl steht hier leider ein
-// zweites Mal als Literal -- der Uebersetzer nimmt an dieser
-// Stelle keine Konstante --, und genau daran ist der erste
-// Bauversuch dieser Runde gescheitert ('index 25 is outside
-// [u64; 25]'). Wer M_COUNT aendert, aendert auch diese Zeile.
-static mut met: [u64; 31] = [0 as u64; 31]
+// ======================================================= RUNDE ZIEH
+// DAS AUFHEBEN BEIM VERSCHIEBEN -- drei Zahlen, drei Wirkungen.
+//
+// Jede ist Schalter UND Regler: 0 heisst aus, sonst ist sie die
+// Staerke. Sie stehen in der Formdatei (`lift`, `tilt`, `swing`) und
+// gehen unveraendert an den Fensterserver -- diese Bibliothek malt
+// kein gezogenes Fenster, das tut der Server.
+const M_LIFT: u64 = 25 // 0..120, Tausendstel ueber 1000 (50 = 105 %)
+const M_TILT: u64 = 26 // 0..100, wie weit der Pivot an den Griff rueckt
+const M_SWING: u64 = 27 // 0..100, wie stark das Bild nachzieht
+// ======================================================= RUNDE BLUR
+// DAS ACRYL -- drei Zahlen, drei Wirkungen, und jede ist wieder
+// Schalter und Regler zugleich (0 = aus). Sie stehen in der Formdatei
+// (`blur`, `blur_tint`, `blur_noise`) und gehen unveraendert an den
+// Fensterserver; diese Bibliothek zeichnet keinen Blur, das tut er.
+const M_BLUR: u64 = 28 // 0..16, der Radius des Kastenfilters
+const M_BLURTINT: u64 = 29 // 0..100, wie stark getoent wird
+const M_BLURNOISE: u64 = 30 // 0..16, die Amplitude des Rauschens
+// ================================================== RUNDE GLAS
+//
+// DIE SECHSTE SCHICHT IST KEINE SCHICHT, SONDERN ZWEI ZAHLEN.
+//
+// Justin will die Taskleiste durchsichtig und wahlweise als Milchglas.
+// Das ist keine neue Marke pro Bauteil: es sind Zahlen, die den
+// ZUSAMMENBAU betreffen und nicht das Malen -- wie deckend eine
+// Leiste, wie deckend ein Fenster. Sie stehen trotzdem hier und nicht
+// neben dem Fensterserver, weil sie aus derselben Datei kommen wie
+// alles andere Aussehen (/etc/theme.conf) und ueber denselben Weg
+// gehen (`form_push`).
+//
+// DER FREIE RADIUS BEKOMMT HIER KEINEN PLATZ, und das ist Absicht: er
+// wird beim Aufloesen in M_RADIUS_WINDOW/PANEL/BUTTON/INPUT
+// HINEINGESCHRIEBEN. Damit kommt er ohne eine einzige neue Abfrage an
+// jeder Stelle an, die heute schon einen Radius malt.
+//
+// ZUSAMMENFUEHRUNG: 31 und 32 statt 25 und 26, denn auf 25..30 liegen
+// ZIEH und das Acryl. UND `M_TB_BLUR` IST WEG: das Milchglas der
+// Leiste hatte hier eine eigene Staerke, und der Weichzeichner dieses
+// Systems ist seit der Runde BLUR `M_BLUR` (28). Zwei Regler fuer
+// dieselbe Sache waeren genau der zweite Ort, den es nicht geben darf
+// -- die Leiste liest ihren Milchglasradius aus `M_BLUR`.
+const M_TB_ALPHA: u64 = 31 // Deckkraft der Taskleiste, 0..100
+const M_WIN_ALPHA: u64 = 32 // Deckkraft gewoehnlicher Fenster, 0..100
+const M_COUNT: u64 = 33
+
+// ---- ROUND LOOK: the shape state
+//
+// `met` is what every painting routine reads. It starts as `classic`,
+// octet for octet the behaviour of every round before this one, so a
+// machine with no /etc/shapes and no `shape=` line looks EXACTLY as it
+// did -- that is the condition under which this round can be landed
+// without re-measuring every screenshot in the repository.
+//
+// RUNDE ZIEH: 25 -> 28. RUNDE BLUR: 28 -> 31. ZUSAMMENFUEHRUNG MIT
+// GLAS: 31 -> 33, denn die zwei Deckkraefte haengen hinten an. Die
+// Zahl steht hier leider ein zweites Mal als Literal -- der
+// Uebersetzer nimmt an dieser Stelle keine Konstante --, und genau
+// daran ist der erste Bauversuch der Runde ZIEH gescheitert ('index 25
+// is outside [u64; 25]'). Wer M_COUNT aendert, aendert auch diese
+// Zeile.
+static mut met: [u64; 33] = [0 as u64; 33]
 // RUNDE ZIEH: die Ueberschreibungen aus /etc/theme.conf, als
 // "Wert + 1". 0 heisst NICHT GESETZT -- dann gilt die Formdatei.
 // Eine 0 als Wert waere sonst nicht von "nichts gesagt" zu
@@ -2693,6 +2843,8 @@ static mut ovr_lift: u64 = 0
 static mut ovr_tilt: u64 = 0
 static mut ovr_swing: u64 = 0
 // RUNDE BLUR: dieselbe Bauart -- "Wert + 1", 0 heisst nicht gesetzt.
+// Seit der Zusammenfuehrung ist `ovr_blur` AUCH der Speicher des
+// Milchglases unter der Leiste: `set_tb_blur` schreibt hierher.
 static mut ovr_blur: u64 = 0
 static mut ovr_btint: u64 = 0
 static mut ovr_bnoise: u64 = 0
@@ -2700,7 +2852,6 @@ static mut shp_name: [u8; 32] = [0 as u8; 32]
 static mut shp_file: [u8; 32] = [0 as u8; 32]
 static mut shp_keys: u64 = 0
 static mut shp_id: u64 = 0
-static mut aa_px: u64 = 0
 
 static mut sch_mode: u64 = 1
 static mut sch_high: u64 = 0
@@ -2771,7 +2922,16 @@ static mut acc_r_ui: u64 = 0
 // event, and `theme_frame_begin` latches a bank for the whole of a
 // paint.  It is written down here rather than left to be found.
 static mut prb_comp: [u64; 41] = [0 as u64; 41]
-static mut prb_met: [u64; 28] = [0 as u64; 28]
+// DIESELBE LAENGE WIE `met`, UND SIE WAR ES LANGE NICHT.
+//
+// `prb_met` ist die Kopie, die eine Probe von `met` zieht, und die
+// Schleife darueber laeuft bis `M_COUNT`. Diese Zahl stand auf 28,
+// waehrend `M_COUNT` ueber die Runden LOOK, ZIEH und BLUR auf 31
+// gewachsen ist -- der Fehler lag schon auf main und ist erst beim
+// Zusammenfuehren aufgefallen, weil er nur beim Proben einer Vorlage
+// zuschlaegt ('index out of bounds in [u64; 28]', wlibc.fi:5539).
+// Wer M_COUNT aendert, aendert diese Zeile mit.
+static mut prb_met: [u64; 33] = [0 as u64; 33]
 static mut prb_pair: [u64; 17] = [0 as u64; 17]
 static mut prb_txt: u64 = 0
 static mut prb_min: u64 = 0
@@ -4009,6 +4169,14 @@ fn conf_key(kp: u64, kn: u64, vp: u64, vn: u64) -> bool {
     var k_blur: [u8; 5] = "blur\0"
     var k_btint: [u8; 10] = "blur_tint\0"
     var k_bnoise: [u8; 11] = "blur_noise\0"
+    // RUNDE GLAS: die drei neuen Zeilen, in derselben Datei und neben
+    // den anderen, weil es Einstellungen derselben Art sind.
+    // `taskbar_blur` ist NICHT darunter: den Radius des Milchglases
+    // gibt seit der Zusammenfuehrung `blur=` an, der Schluessel der
+    // Runde BLUR -- ein Regler, eine Zeile, ein Ort.
+    var k_rad: [u8; 7] = "radius\0"
+    var k_tba: [u8; 14] = "taskbar_alpha\0"
+    var k_wa: [u8; 13] = "window_alpha\0"
     var v_dark: [u8; 5] = "dark\0"
     var v_light: [u8; 6] = "light\0"
 
@@ -4115,6 +4283,45 @@ fn conf_key(kp: u64, kn: u64, vp: u64, vn: u64) -> bool {
         set_dark_min = v
         return true
     }
+    // RUNDE GLAS: VIER ZAHLEN, UND JEDE LIEST NUR ZIFFERN.
+    //
+    // `parse_dec` gibt DEC_BAD zurueck, sobald ein Zeichen keine Ziffer
+    // ist, und dann antwortet diese Funktion `false` -- die Zeile wird
+    // als SCHLECHT GEZAEHLT und nicht stillschweigend auf 0 gesetzt.
+    // Das ist dieselbe Regel, die `accent=` und `light_start=` schon
+    // haben, und sie ist der Grund, warum in einer dieser Zeilen kein
+    // Pfad und kein Befehl stehen kann.
+    if name_eq(kp, kn, (&k_rad[0 as usize]) as u64) {
+        let r: u64 = parse_dec(vp, vn)
+        if r == DEC_BAD {
+            return false
+        }
+        usr_radius = cap(r, RADIUS_MAX)
+        glas_metrics()
+        return true
+    }
+    if name_eq(kp, kn, (&k_tba[0 as usize]) as u64) {
+        let a: u64 = parse_dec(vp, vn)
+        if a == DEC_BAD {
+            return false
+        }
+        usr_tba = clamp_alpha(a)
+        glas_metrics()
+        return true
+    }
+    if name_eq(kp, kn, (&k_wa[0 as usize]) as u64) {
+        let a2: u64 = parse_dec(vp, vn)
+        if a2 == DEC_BAD {
+            return false
+        }
+        usr_wa = clamp_alpha(a2)
+        glas_metrics()
+        return true
+    }
+    // EIN ZWEIG FUER `taskbar_blur=` STEHT HIER NICHT MEHR. Der
+    // Radius des Weichzeichners kommt aus der Zeile `blur=` der Runde
+    // BLUR, die weiter oben in derselben Schleife gelesen wird -- ein
+    // Schluessel, ein Speicher, ein Regler.
     return false
 }
 
@@ -4469,7 +4676,134 @@ fn metrics_classic() {
     met[(M_BLUR) as usize] = 0
     met[(M_BLURTINT) as usize] = 0
     met[(M_BLURNOISE) as usize] = 0
+    // RUNDE GLAS: und diese beiden ebenfalls auf das, was war. 100
+    // Prozent heisst VOLL DECKEND -- also Bildpunkt fuer Bildpunkt das
+    // Bild jeder Runde vor dieser. Nicht 0 Prozent: eine Leiste, die
+    // beim ersten Bild unsichtbar ist, weil noch niemand eine Zahl
+    // geschickt hat, waere ein Fehlerbild und keine Voreinstellung.
+    // Das Milchglas steht schon auf 0 -- es ist `M_BLUR` darueber.
+    met[(M_TB_ALPHA) as usize] = 100
+    met[(M_WIN_ALPHA) as usize] = 100
     shp_id = SHAPE_CLASSIC
+}
+
+// ================================================== RUNDE GLAS
+//
+// DIE VIER ZAHLEN AUS /etc/theme.conf, UND GENAU EINE STELLE, DIE SIE
+// IN DIE MARKEN SCHREIBT.
+//
+// `usr_radius` ist -1, solange die Datei keine Zeile `radius=` hatte
+// (vorzeichenlos gerechnet: RAD_NONE). Dann gilt die Formdatei wie
+// bisher, und `shape=classic|modern` ist weiter das, was es war. Steht
+// die Zeile da, sticht sie die Formdatei -- das ist die ganze Bedeutung
+// von "shape setzt nur noch den Startwert".
+//
+// WARUM DIE WERTE ZWEIMAL LIEGEN (hier als `usr_*` und drueben in
+// `met`): `metrics_classic()` setzt `met` zurueck, und zwar an zwei
+// Stellen, die nichts von dieser Runde wissen -- zu Beginn von
+// `reload_inner` und noch einmal, wenn die Formdatei null Schluessel
+// hatte. Laegen die Werte nur in `met`, waere eine Vorlage mit
+// `shape=` auf eine nicht vorhandene Datei genug, um die eingestellte
+// Durchsicht stillschweigend auf 100 zurueckzustellen. `usr_*` ist die
+// Quelle, `met` ist die Kopie, und `glas_metrics()` ist der einzige
+// Weg von der einen zur anderen.
+const RAD_NONE: u64 = 0xFFFFFFFFFFFFFFFF
+
+static mut usr_radius: u64 = RAD_NONE
+static mut usr_tba: u64 = 100
+static mut usr_wa: u64 = 100
+
+// DIE UNTERGRENZE DER DECKKRAFT, 20 PROZENT. Eine Leiste, die man gar
+// nicht mehr sieht, ist keine Einstellung, sondern ein Fehlerbild --
+// und sie waere ausserdem die eine Stellung, in der die Schrift
+// darueber gegen ein helles Hintergrundbild nicht mehr 4,5:1 schafft.
+// Geklemmt wird HIER, beim Einlesen, damit die Grenze auch fuer eine
+// Datei gilt, die von Hand geschrieben wurde.
+const ALPHA_MIN: u64 = 20
+const BLUR_MAX: u64 = 16
+
+fn clamp_alpha(v: u64) -> u64 {
+    if v > 100 {
+        return 100
+    }
+    if v < ALPHA_MIN {
+        return ALPHA_MIN
+    }
+    return v
+}
+
+fn glas_metrics() {
+    if usr_radius != RAD_NONE {
+        let r: u64 = cap(usr_radius, RADIUS_MAX)
+        met[(M_RADIUS_WINDOW) as usize] = r
+        met[(M_RADIUS_PANEL) as usize] = r
+        met[(M_RADIUS_BUTTON) as usize] = r
+        met[(M_RADIUS_INPUT) as usize] = r
+    }
+    met[(M_TB_ALPHA) as usize] = clamp_alpha(usr_tba)
+    met[(M_WIN_ALPHA) as usize] = clamp_alpha(usr_wa)
+    // DER MILCHGLASRADIUS WIRD HIER NICHT MEHR ABGELEGT. Er hatte auf
+    // dem Zweig GLAS einen eigenen Platz (`M_TB_BLUR`); seit der
+    // Zusammenfuehrung ist er der Radius des Acryls und liegt in
+    // `M_BLUR` bzw. in dessen Ueberschreibung `ovr_blur`. `tb_blur()`
+    // liest genau von dort.
+}
+
+// DIE OEFFENTLICHEN LESER. Das ist die ganze Schnittstelle, die die
+// Widgets, die Leiste und die Einstellungsseite von dieser Runde
+// brauchen -- vier Zahlen zu lesen und vier zu setzen.
+fn radius() -> u64 {
+    return cap(met[(M_RADIUS_WINDOW) as usize], RADIUS_MAX)
+}
+
+fn tb_alpha() -> u64 {
+    return met[(M_TB_ALPHA) as usize]
+}
+
+fn win_alpha() -> u64 {
+    return met[(M_WIN_ALPHA) as usize]
+}
+
+// ZUSAMMENFUEHRUNG: EIN WEICHZEICHNER, EIN SPEICHER.
+//
+// Dieser Name bleibt, weil die Leiste, die Seite Darstellung und die
+// Vorlagen ihn rufen -- aber er liest jetzt den Radius des ACRYLS
+// (Runde BLUR) und nicht mehr einen zweiten, eigenen Wert. Damit
+// zeigt der Regler der Leiste dieselbe Zahl, die der Server rechnet;
+// vorher waeren es zwei Zahlen an zwei Orten gewesen.
+fn tb_blur() -> u64 {
+    return blur_staerke()
+}
+
+// SETZEN HEISST HIER: SOFORT SICHTBAR, ABER NICHT GESCHRIEBEN. Die
+// Datei schreibt das Einstellungsfenster, und zwar erst beim Loslassen
+// des Reglers -- /etc/theme.conf bei jeder Reglerbewegung neu zu
+// schreiben waere ein Schreibvorgang je Bildpunkt Reglerweg.
+fn set_radius(r: u64) {
+    usr_radius = cap(r, RADIUS_MAX)
+    glas_metrics()
+    theme_apply()
+}
+
+fn set_tb_alpha(a: u64) {
+    usr_tba = clamp_alpha(a)
+    glas_metrics()
+    theme_apply()
+}
+
+fn set_win_alpha(a: u64) {
+    usr_wa = clamp_alpha(a)
+    glas_metrics()
+    theme_apply()
+}
+
+// UND DAS SETZEN GEHT AUF DENSELBEN SPEICHER. `ovr_blur` ist die
+// Ueberschreibung aus /etc/theme.conf (als Wert+1 abgelegt, damit 0
+// "nicht gesetzt" heissen kann und nicht "aus").
+fn set_tb_blur(b: u64) {
+    ovr_blur = cap(b, BLUR_MAX) + 1
+    glas_metrics()
+    theme_apply()
 }
 
 // ================================================== RUNDE OBERFLAECHE
@@ -4656,6 +4990,14 @@ fn metric_is_len(i: u64) -> bool {
     if i == M_TONE || i == M_GRAD {
         return false
     }
+    // RUNDE GLAS: die beiden Deckkraefte sind Hundertstel und der
+    // Weichzeichner ist ein Radius im BILDPUNKTRASTER DES SCHIRMS, den
+    // der Fensterserver anwendet -- keine der drei Zahlen darf mit der
+    // Oberflaechenskalierung wachsen. Eine verdoppelte Deckkraft waere
+    // 200 Prozent, und das ist keine Zahl.
+    if i == M_TB_ALPHA || i == M_WIN_ALPHA || i == M_BLUR {
+        return false
+    }
     return true
 }
 
@@ -4687,7 +5029,7 @@ fn shape_id() -> u64 {
 }
 
 fn aa_pixels() -> u64 {
-    return aa_px
+    return ecke.aa_px()
 }
 
 // One line of a shape file. Unknown keys are counted as bad, exactly
@@ -4972,6 +5314,18 @@ fn theme_sum() -> u64 {
         h = (h ^ tok[((live * C_COUNT + i)) as usize]) *% 1099511628211
         i = i + 1
     }
+    // RUNDE GLAS: DIE VIER ZAHLEN GEHOEREN IN DIESE SUMME.
+    //
+    // Ohne sie antwortet `theme_poll` "nichts geaendert", sobald jemand
+    // nur den Radius oder nur die Durchsicht verstellt -- die
+    // Farbmarken sind dann ja wirklich dieselben vierzig Werte --, und
+    // die Aenderung wirkt erst nach einem Neustart. Genau das ist die
+    // Zusage, die diese Runde gibt, und sie haengt an diesen vier
+    // Zeilen.
+    h = (h ^ met[(M_RADIUS_WINDOW) as usize]) *% 1099511628211
+    h = (h ^ met[(M_TB_ALPHA) as usize]) *% 1099511628211
+    h = (h ^ met[(M_WIN_ALPHA) as usize]) *% 1099511628211
+    h = (h ^ met[(M_BLUR) as usize]) *% 1099511628211
     return h
 }
 
@@ -5006,9 +5360,16 @@ fn reload_inner(aus_kopie: bool) -> u64 {
     metrics_classic()
     __mmio_write8(((&shp_file[0 as usize]) as u64) as *mut u8, 0 as u8)
     __mmio_write8(((&shp_name[0 as usize]) as u64) as *mut u8, 0 as u8)
-    aa_px = 0
+    ecke.aa_reset()
     set_mode = MODE_AUTO
     set_accent = 0
+    // RUNDE GLAS: die vier Werte auf "keine Zeile" zurueck, VOR dem
+    // Lesen der Datei. Sonst uebersteht eine geloeschte Zeile
+    // `taskbar_alpha=` das Neuladen und die Leiste bliebe durchsichtig,
+    // obwohl in der Datei nichts mehr davon steht.
+    usr_radius = RAD_NONE
+    usr_tba = 100
+    usr_wa = 100
     __mmio_write8(((&sch_file[0 as usize]) as u64) as *mut u8, 0 as u8)
     __mmio_write8(((&sch_dark_file[0 as usize]) as u64) as *mut u8, 0 as u8)
     __mmio_write8(((&sch_name[0 as usize]) as u64) as *mut u8, 0 as u8)
@@ -5080,6 +5441,15 @@ fn reload_inner(aus_kopie: bool) -> u64 {
     } else {
         shp_keys = 0
     }
+    // RUNDE GLAS: NACH DER FORMDATEI, NICHT DAVOR.
+    //
+    // Die Formdatei setzt `radius_window` und die drei anderen Radien;
+    // stand in /etc/theme.conf eine Zeile `radius=`, sticht sie diese
+    // vier Werte. Die Reihenfolge ist die ganze Regel: davor
+    // aufgerufen, wuerde `modern.shape` die eingestellte Zahl wieder
+    // ueberschreiben, und der Regler haette bei jeder Vorlage mit
+    // Formdatei nichts getan. Dieselbe Regel steht in `theme_probe`.
+    glas_metrics()
     // OHNE EINSTELLUNGSDATEI GILT DER MODUS DES SCHEMAS, nicht `auto`.
     //
     // Das ist nicht Geschmack, das hat der Testlauf entschieden. Ein
@@ -5156,6 +5526,10 @@ fn theme_probe(scheme: u64, mode: u64, shape: u64, accent: u64) -> u64 {
             shp_id = SHAPE_MODERN
         }
     }
+    // RUNDE GLAS: dieselbe Regel wie in `reload_inner`, an derselben
+    // Stelle -- nach der Formdatei. Eine Vorschau, die den
+    // eingestellten Radius nicht zeigt, zeigt nicht, was man bekommt.
+    glas_metrics()
     set_mode = mode
     set_accent = accent
     if accent != 0 && (accent & RGB24) == 0 {
@@ -5625,6 +5999,27 @@ fn form_push() -> u64 {
     n = n + form_one(WF_BLUR, zieh_wert(ovr_blur, M_BLUR))
     n = n + form_one(WF_BLURTINT, zieh_wert(ovr_btint, M_BLURTINT))
     n = n + form_one(WF_BLURNOISE, zieh_wert(ovr_bnoise, M_BLURNOISE))
+    // RUNDE GLAS: die Zahlen des Zusammenbaus.  Sie gehen denselben
+    // Weg wie der Radius und der Schatten -- eine Systemnummer,
+    // achtzehn Plaetze --, weil die Taskleiste in Ring 3 laeuft und
+    // nicht wissen kann, was unter ihr liegt.  Mischen kann nur, wer
+    // das Bild zusammensetzt.
+    //
+    // EIN `form_one(WF_BLUR, ...)` STEHT HIER NICHT MEHR. Auf dem
+    // Zweig GLAS schickte diese Zeile `M_TB_BLUR` als Radius des
+    // Milchglases; seit der Zusammenfuehrung schickt ihn die Zeile des
+    // Acryls weiter oben (`WF_BLUR` aus `M_BLUR`). Stuende er zweimal
+    // hier, gewaenne der letzte Schreiber -- und der Regler auf der
+    // Seite Darstellung zeigte etwas anderes als der Server rechnet.
+    n = n + form_one(WF_TB_ALPHA, met[(M_TB_ALPHA) as usize])
+    n = n + form_one(WF_WIN_ALPHA, met[(M_WIN_ALPHA) as usize])
+    // DIE SCHLUESSELFARBE IST DIE FLAECHENFARBE DER LEISTE, aufgeloest
+    // -- `C_PANEL_BG` und nicht eine Zahl.  Der Server vergleicht jeden
+    // Bildpunkt mit ihr und laesst nur die FLAECHE durchsichtig werden;
+    // Schrift und Sinnbilder bleiben deckend.  Schickte man hier eine
+    // falsche Farbe, wuerde die Schrift mitgemischt und der Kontrast
+    // ueber einem hellen Hintergrundbild faellt unter 4,5:1.
+    n = n + form_one(WF_GLASS_KEY, theme_live(C_PANEL_BG))
     return n
 }
 
@@ -5711,7 +6106,19 @@ fn deco_push() -> u64 {
 // window on layer 0 or 2 may; everyone else gets a negative result.
 // `size == 0` gives the edge back.
 fn win_strut(h: u64, edge: u64, size: u64) -> u64 {
-    return sys3w(WM_STRUT, h, edge, size)
+    // RUNDE GLAS (fix-r4-2): UND WER EINE KANTE RESERVIERT, IST DIE
+    // LEISTE. Dasselbe Merkmal, an dem `wm.panel_win` sie erkennt --
+    // hier gemerkt, damit `platte` weiss, dass es die Textplatte NICHT
+    // malen darf: die Leiste hat ihre eigene Deckkraft
+    // (`taskbar_alpha`) und ihren eigenen Schild hinter der Schrift
+    // (kernel/user/taskbar.fi). Zwei Schilde hinter derselben Schrift
+    // waeren ein zweiter Ort fuer dieselbe Sache, und ihre Flaeche
+    // waere dann nicht mehr so durchsichtig, wie der Regler sagt.
+    let rc: u64 = sys3w(WM_STRUT, h, edge, size)
+    if !ulib.bad(rc) {
+        s_panel = 1
+    }
+    return rc
 }
 
 // ================================================ RUNDE MERGE-11: R5
@@ -5740,6 +6147,22 @@ fn win_max(h: u64, on: bool) -> u64 {
         v = 1
     }
     return sys3w(WM_STATE, h, WS_MAXIMIZED, v)
+}
+
+// RUNDE GLAS: WO DAS FENSTER WIRKLICH STEHT -- den Server gefragt.
+//
+// Ein Programm kennt die Stelle, an der es sein Fenster ANGELEGT hat.
+// Der Fensterserver setzt es aber auch von sich aus um: an den
+// Arbeitsbereich, wenn die Taskleiste am oberen Rand sitzt, und
+// dorthin, wohin eine Hand es zieht. Danach stimmt die gemerkte Zahl
+// nicht mehr, und jede absolute Angabe, die aus ihr gerechnet wird --
+// wo ein Menue aufgeht, wo ein Laeufer klicken soll -- ist um die
+// Verschiebung daneben. GEMESSEN: mit `edge=top` lag alles, was
+// /bin/settings meldete, 25 Bildpunkte ueber dem, was gemalt wurde.
+//
+// `WI_X` und `WI_Y` sind die Antwort des Servers auf dieselbe Frage.
+fn win_info(h: u64, feld: u64) -> u64 {
+    return sys3w(WM_INFO, h, feld, 0)
 }
 
 fn work_x(h: u64) -> u64 {

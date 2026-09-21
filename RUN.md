@@ -1,216 +1,270 @@
-# RUN.md — wie man die Runde WMPLUGIN startet und nachfaehrt
+# RUN.md — OrientOS/Osum starten und nachmessen (Zweig `glas`)
 
-Zweig `wmplugin` im Worktree `/root/os-wmplug`. Alle Befehle aus diesem
-Ordner, alle Pfade relativ.
+Alle Befehle aus diesem Ordner, alle Pfade relativ. Das Blatt der
+vorigen Runde steht unveraendert in **`docs/RUN-WMPLUGIN.md`**.
 
-Was die Runde inhaltlich ist und was gemessen wurde, steht in
-**`docs/RUNDE-WMPLUGIN.md`**. Dieses Blatt sagt nur, welchen Befehl man
-tippt.
+Diese Runde heisst GLAS: freie Eckenrundung, durchsichtige Taskleiste,
+Milchglas. Was sie baulich ist, steht in `PLAN.md`; hier steht nur,
+welchen Befehl man tippt.
 
 ---
 
-## 1. Der eine Befehl
+## 1. Bauen
 
 ```bash
-bash tools/wmplug/run.sh
+export FIRNLIB="$PWD/lib"
+bash tools/build-kernel.sh /tmp/k.mb      # der Kern, rund 15 s
 ```
 
-Das ist der Abnahmelauf. Er macht alles selbst:
+Die Ring-3-Programme baut der Laeufer selbst mit; einzeln geht
 
-1. baut den Kernel (`tools/build-kernel.sh`, ~30 s),
-2. baut die elf Ring-3-Programme,
-3. sieht in der **Symboltafel des Kerns** nach, dass kein Plugin darin
-   steht,
-4. baut das Plattenabbild (mit Schriften — ohne sie meldet der Kern
-   "wm: kein Bildschirm"),
-5. bootet **sechs** QEMU-Laeufe: Absturz, Frist, Rechte, Schnittstelle,
-   Verwaltung und die der zwei Modullaeufer,
-6. ruft `tools/wmplug/regel.sh` und `tools/wmplug/widget.sh` und
-   rechnet deren Zahlen in seine Summe ein,
-7. prueft `tools/check-ui.sh`,
-8. legt die Bilder nach `docs/shots/wmplug/`,
-9. druckt am Ende `WMPLUG: N bestanden, M gescheitert` und beendet sich
-   mit 1, wenn M ungleich 0 ist.
+```bash
+vendor/firn/bin/firnc -c kernel/user/settings.fi -o /tmp/settings.o
+```
 
-Dauer: rund **20 Minuten** mit KVM.
+(Programme mit `profile app` in der ersten Zeile brauchen
+`--profile=app`; `kernel/user/wlib.fi` und `wlibc.fi` sind
+Bibliotheken und werden nur ueber ein Programm uebersetzt.)
 
-### Schalter
+## 2. Einmal booten und zusehen
 
-| | |
+`tools/themestore/build.sh` baut Kern, Programme und Platte, startet
+QEMU, fotografiert den Schreibtisch und legt alles in ein Verzeichnis:
+
+```bash
+bash tools/themestore/build.sh /tmp/lauf extra='einst' uitrace=yes keep=yes
+```
+
+Danach liegen dort `desktop.png`, `serial.txt` und das Plattenabbild.
+Die Schalter dieser Runde:
+
+| Schalter | was er tut |
 |---|---|
-| `WMPLUG_SCHNELL=1` | ohne die zwei Modullaeufer — nur die Kernseite, rund 8 Minuten |
-| `WMPLUG_KEEP=1` | behaelt das Arbeitsverzeichnis `/tmp/wmplug-run-*` mit allen seriellen Mitschnitten (`*.clean`), Fotos und Abbildern |
-| `OSUM_ACCEL=tcg` | ohne KVM rechnen (rund viermal langsamer) |
+| `radius=0..24` | die freie Eckenrundung (ohne Angabe entscheidet der Formsatz) |
+| `tbalpha=0..100` | Deckkraft der Taskleiste in Prozent (100 = wie frueher) |
+| `winalpha=0..100` | Deckkraft gewoehnlicher Fenster |
+| `blur=0..16` | Milchglas unter der Leiste, 0 = aus |
+| `wallpaper=hell\|dunkel` | ein gemustertes Hintergrundbild — ohne eines beweist Durchsicht nichts |
+| `preset=<name>` | eine der zehn Vorlagen aus `assets/themes/` anwenden |
+| `extra='einst'` | das Einstellungsfenster mit aufmachen |
+| `click='x,y'`, `click='x,y>x,y'` | klicken bzw. ZIEHEN (fuer die Schlierenprobe) |
+| `uitrace=yes` | die Programme melden ihre Rechtecke und Radien auf der Leitung |
+
+Beispiel — Milchglas ueber einem hellen Muster:
 
 ```bash
-WMPLUG_SCHNELL=1 WMPLUG_KEEP=1 bash tools/wmplug/run.sh
+bash tools/themestore/build.sh /tmp/glas tbalpha=70 blur=12 \
+     wallpaper=hell uitrace=yes keep=yes
 ```
 
-### Die einzelnen Modullaeufer
-
-Beide laufen auch allein und bauen sich ihren Kernel selbst:
+## 3. Die Abnahme
 
 ```bash
-bash tools/wmplug/regel.sh     # die Fensterregel-Engine
-bash tools/wmplug/widget.sh    # das Leistenwidget, an und aus
+bash tools/themestore/run.sh
 ```
 
----
+Zwoelf Abschnitte, rund 25 Minuten (QEMU/TCG).
 
-## 2. Voraussetzungen
+**DER MITSCHNITT LIEGT IM BAUM** (fix-r4-2). Der vollstaendige Lauf,
+aus dem die Aufnahmen dieser Runde stammen, ist als
+[`belege/glas-run.log`](belege/glas-run.log) eingecheckt, und jede Zahl
+auf diesem Blatt, in `docs/RUNDE-GLAS.md` und in
+`docs/shots/glas/README.md` ist eine Zeile DIESER Datei. Vorher standen
+die Zahlen dreier verschiedener Laeufe nebeneinander -- im Bild 08 "74
+Rechtecke", im Blatt "100, gefordert >= 88" -- und beide waren zu ihrer
+Zeit richtig und zusammen unbrauchbar. Die Schlusszeile:
 
-* `qemu-system-x86_64` — fehlt es, sagt der Laeufer das und beendet sich
-  mit 0, statt rot zu werden.
-* `/dev/kvm` les- und schreibbar (sonst faellt `tools/lib/qemu.sh`
-  selbsttaetig auf TCG zurueck und schreibt das in die erste Zeile).
-* `python3` mit **Pillow** — nur fuer das Umwandeln der Fotos nach PNG.
-* `as`, `ld`, `nm`, `objcopy` (binutils).
+```bash
+tail -1 belege/glas-run.log      # -> THEMESTORE: <n> passed, 0 failed
+```
+
+Keine einzige `FAIL`, Rueckgabewert 0. Ein Hinweis
+fuer den, der das nachmisst: `run.sh` schreibt auf die Standardausgabe.
+Laeuft daneben ein zweiter Lauf in DIESELBE Datei, mischen sich die
+Zeilen ineinander und das Ergebnis sieht aus, als gehoere fremder Text
+zu dieser Abnahme. Also je Lauf eine eigene Datei — und der Beleg ist
+die Zeile `THEMESTORE:` zusammen mit dem Rueckgabewert, nicht das, was
+sonst noch im Mitschnitt steht.
+
+Die Zahlen, die dieser Lauf nebenbei misst — sie stehen im Mitschnitt
+`belege/glas-run.log`, damit niemand sie erhoffen muss. Jede Zeile der
+Tabelle ist dort mit `grep` zu finden:
+
+| Sache | gemessen |
+|---|---|
+| Weichzeichner je Vollbild | `us=39346`, Spitze `max=203350` bei `px=35840` |
+| und wie oft der Streifen aus dem Zwischenspeicher kam | `cache=2/27` |
+| Milchglas ueber dem GROBEN Muster | `var 4102` (2 Farben) ohne, `var 3563` (36 Farben) mit |
+| gekuerzte Reiternamen von elf | 0 (die Leiste hat zwei Zeilen) |
+| gekuerzter Fliesstext auf beiden Seiten | 0 |
+| Kontrast der Leistenschrift, helles Muster | 14,43:1 |
+| dieselbe Schrift, dunkles Muster | 12,33:1 |
+| dunkles Muster mit Milchglas 12 | 12,33:1 aus 13 Kandidaten |
+| Schlieren nach dem Zug unter die Leiste | 0 Bildpunkte |
+
+Die Zeiten des Weichzeichners sind die eines Laufs auf DIESEM Rechner
+und schwanken mit seiner Last — die Spitze lag hier einmal bei 45 ms
+und einmal, auf einer belasteten Maschine, bei 203 ms. Deshalb prueft
+der Lauf keine feste Zahl, sondern eine Schranke (`unter einer
+Drittelsekunde`, QEMU/TCG ohne KVM) und meldet die gemessene Zahl
+daneben. Wer die Tabelle nachrechnet, bekommt andere Mikrosekunden und
+dieselben Zusagen.
+
+**Wer rundet und wer mischt — "ein Ort je Ring", nicht "genau einer".**
+Abschnitt 11e stellt diese Frage dem GANZEN Baum und nicht einer Datei:
+er sucht jede Funktion, deren Name auf `round`, `blend`, `mix8` oder
+`rrect` passt, und haelt den Fund gegen
+[`tools/themestore/raster.liste`](tools/themestore/raster.liste). Dort
+steht jeder Ort mit einem Satz Begruendung — `wm.fill_round` und
+`wm.blend` fuer den Fensterserver, `fb.blend`/`fb.mix8` fuer das Format
+des Schirms, `wlibc.rrect`/`wlibc.blend` fuer Ring 3 (ueber die
+Ringgrenze geht kein Systemaufruf je Bildpunkt) und
+`vektor.polygon_round` fuer beliebige Formen. Ein Fund ohne Eintrag ist
+rot, ein Eintrag ohne Fund auch. Die Zusage lautet also: **genau ein Ort
+je Ring und je Format, und jeder ist begruendet** — wer einen weiteren
+Mischer baut, schreibt ihn dort hinein oder benutzt einen vorhandenen.
+
+Ein zweiter, kuerzerer Lauf prueft, dass jedes Bedienelement aus der
+Bibliothek kommt:
+
+```bash
+bash tools/check-ui.sh     # -> CHECK-UI PASSED
+```
+
+Mit `TS_OUT=/pfad` bleiben alle Mitschnitte, Bilder und Abbilder
+liegen:
+
+```bash
+TS_OUT=/tmp/ts bash tools/themestore/run.sh
+```
+
+Die Bilder landen in `docs/shots/themestore/` — je eine Aufnahme je
+Vorlage plus die sieben der Runde GLAS (`glas-radius-0/12/24`,
+`glas-alpha-100/70/40`, `glas-milchglas`). Die durchnummerierten
+Aufnahmen der Runde liegen daneben in `docs/shots/glas/`; welche
+welche ist, sagt `docs/shots/glas/README.md`, und was die Runde
+gebaut und was sie NICHT erreicht hat, steht in `docs/RUNDE-GLAS.md`.
+
+Drei dieser Aufnahmen macht der Lauf inzwischen selbst und legt sie
+unter ihrem Namen in `docs/shots/glas/` ab, damit Bild und Lauf nicht
+auseinanderlaufen koennen:
+
+* **10 — der Zug hin UND zurueck** (`10-zug-hin-und-zurueck-keine-
+  schlieren.png`). Der Name sagt, was der Beleg ist: keine Schliere.
+* **22 — die Endlage unter der Leiste**
+  (`22-zug-endlage-unter-der-leiste.png`), derselbe Zug ohne
+  Rueckweg. Das Fenster bleibt unter der Leiste stehen
+  (`unterpx=16044`), und `shotcheck.py` misst dort `empty 0 cut 0
+  overlapping 0`.
+* **12 — der beschriftete Leistenvergleich**. Er wird von
+  `tools/themestore/leistenvergleich.py` aus den Aufnahmen desselben
+  Laufs gebaut, und jede Zeile traegt IM BILD ihre Reglerstellung und
+  ihre gemessene Streuung (`var 0 / 1597 / 6389 / 788` fuer die vier
+  Reihen ueber dem feinen Muster, `4102` und `3563` fuer die zwei
+  darunter). Die Zahl kommt aus `glascheck`, und der Lauf haelt jede
+  Zahl im Bild gegen die, die er selbst gemessen hat.
+* **07 — das Milchglas, auf dem man es SIEHT** (seit fix-r3-1). Die
+  alte Aufnahme war gemessen richtig und angeschaut fast nichts: ein
+  Weichzeichner von 12 verwischt an einem Schachbrett von achtzig
+  Bildpunkten nur die Naehte, und ueber einem hellen Bild hebt
+  `glass_mix` die Deckkraft ausserdem auf 82 an. Der Lauf nimmt darum
+  ein Paar ueber dem GROBEN Muster auf (`wallpaper=dunkelgrob`,
+  Schachbrett von 24) mit dunklem Schema und `blur=16`: **36 Farben im
+  Leistengrund gegen 2 ohne Weichzeichner**, und die Schrift haelt
+  dabei ihre 4,5:1 (Abschnitt 11c2).
+
+**Zwei Fragen, die seit fix-r3-4 im Bild gestellt werden.**
+`shotcheck.py --linien` sucht neben jeder Beschriftung nach einer
+durchlaufenden Rahmenlinie — so ist aufgefallen, dass die Statuszeile
+„bereit" genau auf der unteren Kante der linken Karte sass, was kein
+Vergleich gemeldeter Rechtecke je zeigen konnte (sie ueberlappen
+nicht, sie beruehren sich). Und Abschnitt 11i haelt den Strich unter
+dem vorderen Leistenknopf gegen die gemessene Breite seiner
+Beschriftung: Anfang und Laenge kommen jetzt aus derselben Messung wie
+der Text (`taskbar: pille x= w= tx= tw=`).
+
+**Und drei, die seit fix-r3-2 dazugekommen sind.**
+`shotcheck.py --knoepfe` fragt fuer JEDEN gemeldeten Knopf
+(`wlib: knopf x= y= w= h= r= ax= ay=`), ob im Bild an seinen vier
+Kanten ueberhaupt ein Umriss steht — eine Linie oder wenigstens eine
+Farbstufe zwischen Flaeche und Umgebung. Der Knopf „Uebernehmen" der
+Seite Darstellung hatte keinen: fUi malt flach, Weiss auf `#f8fafc`,
+und niemand konnte ihn von einer Beschriftung unterscheiden. Die Zahlen
+stehen als `knopf N  ohnekante M` in der Zeile des Pruefers, und der
+Lauf haelt eine Gegenprobe dagegen (ein auf dem Wirt flach uebermalter
+Knopf MUSS gefunden werden).
+`glascheck.py fenster <bild> <serial>` stellt der Fensterschrift
+dieselbe Frage, die Abschnitt 11d der Leistenschrift stellt: Kontrast
+gegen den Grund, der WIRKLICH unter ihr liegt. Abschnitt 11j faehrt
+dafuer `window_alpha=55` ueber einem gemusterten Bild; gemessen wird
+das schlechteste Paar (5,16:1), und eine Gegenprobe gegen
+`window_alpha=100` belegt, dass dabei wirklich gemischt wurde (39 120
+abweichende Bildpunkte). Damit unter einem durchsichtigen Fenster kein
+fremder Text durch die Reiterzeile laeuft, ist die Lesbarkeitsschranke
+fuer gewoehnliche Fenster halb so weit wie fuer die Leiste
+(`SCHLEIER_WIN = 20` gegen `SCHLEIER = 40`, kernel/ui/wm.fi) — der
+Selbsttest `wm: glastest 8 / 8` rechnet beide Faelle von Hand nach.
+Und Abschnitt 8 misst seit fix-r3-2 **jedes** gemeldete Rechteck ausser
+`win` gegen Innenhoehe und Innenbreite: der Namensfilter `^w[a-z][a-z]$`
+hat die zwei Karten und die fuenf Bedienelemente mit Sachnamen (`edge`,
+`size`, `autohide`, `ontop`, `apply`) still uebersprungen. Die Zahl der
+gemessenen Rechtecke (100) steht jetzt als eigene Zusage daneben, damit
+ein neuer Filter auffaellt.
+
+## 4. Einstellen im laufenden System
+
+**Die Reiterleiste hat zwei Zeilen.** Elf deutsche Reiter messen 861
+Bildpunkte in einer Leiste von 728; bis fix-r3-1 wurde jeder anteilig
+schmaler und neun von elf verloren Buchstaben ("Netzzu..."). Passt eine
+Zeile nicht, verteilt `wlib.paint_tabs` sie jetzt auf zwei (geteilt bei
+der halben Gesamtbreite) — gemessen: **0 von 11 gekuerzt**, und der
+Lauf laesst hoechstens zwei zu. Die zwei Zeilen von 24 kosten 16
+Bildpunkte gegenueber einer von 32; die holt die Seite an ihren zwei
+Raendern zurueck, es ist also keine Zeile der Spalten gewichen. Die
+linke Spalte ist dabei von 300 auf 340 Bildpunkte gewachsen, damit
+"Akzentfarbe RRGGBB (leer = Schema)" und die zwei Kontrastzeilen ganz
+dastehen; gekuerzter Fliesstext ist seither eine eigene Zahl im Lauf
+(`fliesskurz`) und muss 0 sein.
+
+Einstellungen → Reiter **Darstellung**, rechte Spalte unten: vier
+Schieberegler (Eckenrundung 0..24, Taskleiste und Fenster deckend in
+Prozent, Milchglas 0..16). Jede Bewegung wirkt sofort und wird nach
+`/etc/theme.conf` geschrieben, ueberlebt also einen Neustart. Dieselben
+vier Zahlen stehen in jeder Vorlage (`assets/themes/*.preset`) und in
+`/etc/theme.conf`:
+
+```
+radius=16
+taskbar_alpha=60
+window_alpha=90
+taskbar_blur=12
+```
+
+**Was einen beim Schieben ueberrascht:** die Lesbarkeit geht vor. Ist
+der Untergrund so unruhig, dass die Schrift der Leiste unter 4,5:1
+fiele, hebt der Fensterserver das Alpha an, bis sie wieder darueber
+liegt — aus `taskbar_alpha=40` kann so ein wirksames 82 werden. Der
+Regler verschweigt das nicht, er schreibt die wirksame Zahl daneben
+(„Taskleiste deckend % (wirkt 82)"), und der Lauf misst beides
+getrennt (`alpha_soll` gegen `alpha_ist`). Wer wirklich durchsehen
+will, nimmt ein ruhigeres Hintergrundbild oder Milchglas: der
+Weichzeichner beruhigt den Grund und laesst darum mehr Durchsicht zu.
+
+## 5. Voraussetzungen
+
+* `qemu-system-x86_64` — fehlt es, sagt die Abnahme das und beendet
+  sich mit 0, statt rot zu werden.
+* `python3` mit **Pillow** (Bilder auswerten), `as`, `ld`, `nm`,
+  `objcopy`.
 * Der Firn-Uebersetzer wird bei Bedarf geholt:
   `bash vendor/firn/fetch-firnc.sh`.
 
-**Andere QEMU laufen auf dieser Maschine parallel.** Der Laeufer legt
-seine Sockets und Dateien deshalb in ein eigenes `mktemp`-Verzeichnis.
-Wer von Hand bootet, soll das auch tun — sonst fahren sich zwei Laeufe
-gegenseitig in die Sockets.
-
----
-
-## 3. Von Hand starten (einzelner Lauf)
-
-Wer nur einmal booten und zusehen will:
-
-```bash
-# 1. Kernel
-bash tools/build-kernel.sh /tmp/mein.img
-
-# 2. ein Programm (Beispiel: das Widget)
-export FIRNLIB="$PWD/lib"
-as --64 -o /tmp/crt.o kernel/user/crt.s
-vendor/firn/bin/firnc -c kernel/user/pluguhr.fi -o /tmp/pluguhr.o
-ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" \
-   -o /tmp/pluguhr.elf /tmp/crt.o /tmp/pluguhr.o
-```
-
-Das Plattenabbild braucht die **Schriften**, sonst startet der
-Fensterserver nicht:
-
-```bash
-python3 tools/k15/tree.py /tmp/baum
-python3 tools/osum/mkfs.py build /tmp/disk.img 32768 \
-    /lib/ /lib/mono.ttf=assets/osum-mono.ttf /lib/sans.ttf=assets/osum-sans.ttf \
-    /bin/ /bin/pluguhr=/tmp/pluguhr.elf \
-    /etc/ /etc/wmplug.conf=etc/wmplug.conf /etc/wmregeln.conf=etc/wmregeln.conf
-```
-
-Booten (eigene Socket-Namen benutzen!):
-
-```bash
-qemu-system-x86_64 -accel kvm -cpu host -kernel /tmp/mein.img -m 256 \
-  -append "gfx wm wig desk wmhold wiglong nokbd nosched noproc nofs wmplug" \
-  -serial file:/tmp/ser.txt -display none -no-reboot \
-  -vga std -global VGA.edid=off -monitor unix:/tmp/mon.sock,server,nowait \
-  -drive file=/tmp/disk.img,format=raw,if=ide,index=0 \
-  -device isa-debug-exit,iobase=0xf4,iosize=0x04
-```
-
-**Exitcode 21 heisst sauber.** Auf `wm: hold` in `/tmp/ser.txt` warten,
-dann fotografieren:
-
-```bash
-python3 tools/gfx/screenshot.py /tmp/mon.sock /tmp/bild.ppm 25
-python3 tools/gfx/checkshot.py groesse /tmp/bild.ppm     # -> 800 600
-```
-
-### Die Modusworte dieser Runde
-
-| Wort | was es tut |
-|---|---|
-| `wmplug` | die Plugintafel aufsetzen — **ohne dieses Wort nimmt der Kern keine Plugins an** |
-| `plugaus` | die Tafel ausdruecklich zulassen (Gegenprobe) |
-| `plugtest` | den Selbsttest von `kernel/wmplug.fi` beim Hochlauf fahren |
-| `plugfrist` | die Frist auf wenige Ticks kuerzen, damit ein Haenger im Lauf auffliegt |
-
-Ein zusaetzliches Programm startet der Schreibtisch mit
-`wigapp=/bin/NAME,wort1,wort2` (bis zu vier durch Komma getrennte
-Woerter). Beispiele:
-
-```
-wigapp=/bin/plugboese,boese,segv        # Absturz-Gegenprobe
-wigapp=/bin/plugboese,boese,hang        # Haenger-Gegenprobe (mit plugfrist)
-wigapp=/bin/plugboese,boese,greif       # Rechte-Gegenprobe
-wigapp=/bin/uhrstart,uhrstart,verwaltung,runden=30
-```
-
-### Die serielle Leitung lesen
-
-Der Kern schreibt Namen mit **fester Laenge** (`serial.text(name, 8)`),
-mitten in den Zeilen stehen also Nulloktette. Vor dem Suchen putzen:
-
-```bash
-tr -d '\000' < /tmp/ser.txt > /tmp/ser.clean
-grep -aE 'wmplug:|plugboese:|pluguhr:|plugregel:' /tmp/ser.clean
-```
-
-Und: Kernzeilen und Ring-3-Zeilen laufen **ineinander**. Auf der Leitung
-steht wirklich `plugstart: wmplug: unreg uhr grund=4`. Wer mit `^`
-ankert, sucht vergeblich.
-
----
-
-## 4. Was gerade herauskommt
-
-Letzter voller Lauf auf diesem Rechner (KVM), Exitcode 0:
-
-```
-WMPLUG: 139 bestanden, 0 gescheitert
-```
-
-Die zwei Modullaeufer, die darin mitlaufen:
-
-```
-REGEL:  38 bestanden, 0 gescheitert
-WIDGET: 30 bestanden, 0 gescheitert
-```
-
-Dazu:
-
-```bash
-bash tools/check-ui.sh            # PASSED
-python3 tools/kernel/memmap.py    # 111 Bereiche, 0 Kollisionen
-```
-
----
-
-## 5. Wenn etwas rot ist
+## 6. Wenn etwas rot ist
 
 | Meldung | woran es liegt |
 |---|---|
-| `wm: kein Bildschirm` | das Abbild hat keine Schriften — `/lib/mono.ttf` und `/lib/sans.ttf` fehlen in der `mkfs.py`-Zeile |
-| Exitcode 124 | `timeout` hat zugeschlagen: der Lauf ist nicht bis `wm: hold` gekommen |
-| Exitcode 137 | dieser QEMU wurde von aussen abgeraeumt (Speicherdruck, paralleler Lauf) — wiederholen |
-| `firnc fehlt` | `bash vendor/firn/fetch-firnc.sh` |
-| `the module 'std.rt' ... not available in profile 'kernel'` | das Programm traegt `profile app` — mit `tools/lib/userprog.sh` (`up_build`) bauen, nicht mit einem getippten `firnc`-Aufruf |
-| Fotos fehlen | Pillow ist nicht da; die `.ppm` liegen trotzdem im `WMPLUG_KEEP`-Verzeichnis |
-
----
-
-## 6. Die Dateien der Runde
-
-| Datei | was |
-|---|---|
-| `kernel/wmplug.fi` | die Buchhaltung: acht Plaetze, Ereignisringe, Rechte, Frist, Kehrbesen |
-| `kernel/sysgui.fi` | `plug_call` — die Aufrufe 2117..2126 und die Rechtepruefung |
-| `kernel/sys.fi` | die Nummern, `WM_MAXNR` = 2126 |
-| `kernel/wm.fi` | `notify` an den Stellen, an denen Ereignisse entstehen; Kehrbesen je Bild und je Tick |
-| `kernel/kstate.fi` | `WMP_OFF`, die Modusworte |
-| `kernel/user/plugregel.fi` | **Plugin 1** — Fensterregel-Engine |
-| `kernel/user/pluguhr.fi` | **Plugin 2** — Leistenwidget (Uhr/CPU) |
-| `kernel/user/plugboese.fi` | die Gegenprobe: `segv`, `hang`, `greif` |
-| `kernel/user/plugprobe.fi` | der Prueflauf der Schnittstelle |
-| `kernel/user/plugstart.fi` | Starthelfer (**Abkuerzung**, siehe Bericht) |
-| `kernel/user/wmplug.fi` | `/bin/wmplug` — list/info/enable/disable |
-| `etc/wmplug.conf` | wer was darf |
-| `etc/wmregeln.conf` | die Fensterregeln |
-| `pakete/wmplug-*/rezept` | die drei opk-Pakete |
-| `tools/wmplug/run.sh` | der Abnahmelauf |
-| `docs/RUNDE-WMPLUGIN.md` | der Bericht mit allen Messwerten |
+| `FAILED to compile <programm>` | die ersten 25 Zeilen stehen im Lauf; `firnc -c kernel/user/<programm>.fi` sagt dasselbe schneller |
+| `wm: kein Bildschirm` | dem Abbild fehlen die Schriften |
+| `the module 'std.rt' ... profile 'kernel'` | das Programm traegt `profile app` — mit `--profile=app` uebersetzen |
+| Exitcode 124 | `timeout`: der Lauf kam nicht bis `wm: hold` |
+| Bilder fehlen | Pillow ist nicht da; die `.ppm` liegen trotzdem im `TS_OUT`-Verzeichnis |
