@@ -67,7 +67,7 @@ Zwoelf Abschnitte, rund 25 Minuten (QEMU/TCG). Letzter Lauf auf diesem
 Rechner:
 
 ```
-THEMESTORE: 188 passed, 0 failed
+THEMESTORE: 230 passed, 0 failed
 ```
 
 Die Zahlen, die dieser Lauf nebenbei misst — sie stehen im Mitschnitt,
@@ -76,7 +76,11 @@ damit niemand sie erhoffen muss:
 | Sache | gemessen |
 |---|---|
 | Weichzeichner je Vollbild | `us=45511`, Spitze `max=56721` bei `px=35840` |
+| dasselbe mit dem groessten Radius (16) | `us=42923`, Spitze `max=49335` |
 | und wie oft der Streifen aus dem Zwischenspeicher kam | `cache=2/26` |
+| Milchglas ueber dem GROBEN Muster | `var 4102` (2 Farben) ohne, `var 3563` (36 Farben) mit |
+| gekuerzte Reiternamen von elf | 0 (die Leiste hat zwei Zeilen) |
+| gekuerzter Fliesstext auf beiden Seiten | 0 |
 | Kontrast der Leistenschrift, helles Muster | 14,43:1 |
 | dieselbe Schrift, dunkles Muster | 12,33:1 |
 | dunkles Muster mit Milchglas 12 | 12,33:1 aus 13 Kandidaten |
@@ -129,11 +133,21 @@ auseinanderlaufen koennen:
   (`unterpx=16044`), und `shotcheck.py` misst dort `empty 0 cut 0
   overlapping 0`.
 * **12 — der beschriftete Leistenvergleich**. Er wird von
-  `tools/themestore/leistenvergleich.py` aus den vier Aufnahmen
-  desselben Laufs gebaut, und jede Zeile traegt IM BILD ihre
-  Reglerstellung und ihre gemessene Streuung (`var 0 / 1597 / 6389 /
-  788`). Die Zahl kommt aus `glascheck`, und der Lauf haelt die vier
-  Zahlen im Bild gegen die vier, die er selbst gemessen hat.
+  `tools/themestore/leistenvergleich.py` aus den Aufnahmen desselben
+  Laufs gebaut, und jede Zeile traegt IM BILD ihre Reglerstellung und
+  ihre gemessene Streuung (`var 0 / 1597 / 6389 / 788` fuer die vier
+  Reihen ueber dem feinen Muster, `4102` und `3563` fuer die zwei
+  darunter). Die Zahl kommt aus `glascheck`, und der Lauf haelt jede
+  Zahl im Bild gegen die, die er selbst gemessen hat.
+* **07 — das Milchglas, auf dem man es SIEHT** (seit fix-r3-1). Die
+  alte Aufnahme war gemessen richtig und angeschaut fast nichts: ein
+  Weichzeichner von 12 verwischt an einem Schachbrett von achtzig
+  Bildpunkten nur die Naehte, und ueber einem hellen Bild hebt
+  `glass_mix` die Deckkraft ausserdem auf 82 an. Der Lauf nimmt darum
+  ein Paar ueber dem GROBEN Muster auf (`wallpaper=dunkelgrob`,
+  Schachbrett von 24) mit dunklem Schema und `blur=16`: **36 Farben im
+  Leistengrund gegen 2 ohne Weichzeichner**, und die Schrift haelt
+  dabei ihre 4,5:1 (Abschnitt 11c2).
 
 **Zwei Fragen, die seit fix-r3-4 im Bild gestellt werden.**
 `shotcheck.py --linien` sucht neben jeder Beschriftung nach einer
@@ -174,6 +188,19 @@ gemessenen Rechtecke (100) steht jetzt als eigene Zusage daneben, damit
 ein neuer Filter auffaellt.
 
 ## 4. Einstellen im laufenden System
+
+**Die Reiterleiste hat zwei Zeilen.** Elf deutsche Reiter messen 861
+Bildpunkte in einer Leiste von 728; bis fix-r3-1 wurde jeder anteilig
+schmaler und neun von elf verloren Buchstaben ("Netzzu..."). Passt eine
+Zeile nicht, verteilt `wlib.paint_tabs` sie jetzt auf zwei (geteilt bei
+der halben Gesamtbreite) — gemessen: **0 von 11 gekuerzt**, und der
+Lauf laesst hoechstens zwei zu. Die zwei Zeilen von 24 kosten 16
+Bildpunkte gegenueber einer von 32; die holt die Seite an ihren zwei
+Raendern zurueck, es ist also keine Zeile der Spalten gewichen. Die
+linke Spalte ist dabei von 300 auf 340 Bildpunkte gewachsen, damit
+"Akzentfarbe RRGGBB (leer = Schema)" und die zwei Kontrastzeilen ganz
+dastehen; gekuerzter Fliesstext ist seither eine eigene Zahl im Lauf
+(`fliesskurz`) und muss 0 sein.
 
 Einstellungen → Reiter **Darstellung**, rechte Spalte unten: vier
 Schieberegler (Eckenrundung 0..24, Taskleiste und Fenster deckend in

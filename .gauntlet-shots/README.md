@@ -7,7 +7,7 @@ Neu erzeugt am 21.09.2026 aus dem Zweig `glas`.
 
 Herkunft:
 * 01-12, 18, 19, 21 stammen aus dem Abnahmelauf `bash tools/themestore/run.sh`
-  dieses Tages. Ergebnis des Laufs: **188 Zusagen, 0 rot**
+  dieses Tages. Ergebnis des Laufs: **230 Zusagen, 0 rot**
   (Log: `/tmp/ts-run.log`, Beweisstuecke: `TS_OUT=/tmp/ts`).
 * 13, 14, 20 sind drei zusaetzliche Laeufe mit demselben Verfahren
   (`tools/themestore/build.sh` mit anderen Reglerstellungen).
