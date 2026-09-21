@@ -30,7 +30,7 @@ Herkunft:
 | 11-dunkles-bild-leiste-soll40-wirkt82-kontrast.png | Dunkles Hintergrundbild, Regler auf 40 %. Der NAME sagt, was das Bild zeigt: die Lesbarkeitsschranke hebt die wirksame Deckkraft von **soll 40** auf **wirkt 82** (`wm: glas alpha_soll=40 alpha_ist=82`), damit die Leistenschrift 4,5:1 haelt; gemessen gegen den GEMISCHTEN Grund: 12,33:1. Als Beleg fuer DURCHSICHT bei 40 % taugt es deshalb nicht -- dafuer ist Bild 21 da. |
 | 12-leiste-vergleich-ausschnitt-2x.png | SECHS Ausschnitte der Leiste uebereinander, 2-fach vergroessert, jede Reihe IM BILD beschriftet mit ihrer Reglerstellung UND der gemessenen Streuung: `100 % deckend -- var 0, 1 Farbe`, `70 % -- var 1597, 2`, `40 % -- var 6389, 2`, `Milchglas (blur=12, 70 %) -- var 788, 13`, `dunkles Schema, 40 %, grobes Muster, ohne Milchglas -- var 4102, 2`, `dasselbe mit Milchglas 16 -- var 3563, 36`. Die letzten zwei Reihen sind das Paar, das den Bildvergleich traegt: harte Kacheln gegen einen Verlauf. Gebaut von `tools/themestore/leistenvergleich.py` aus den Aufnahmen desselben Laufs; die Zahlen kommen aus `glascheck.leiste`/`hell`, und der Lauf haelt Bild und Messung Zahl fuer Zahl gegeneinander. |
 | 22-zug-endlage-unter-der-leiste.png | Der zweite Zug-Lauf der Abnahme (ohne Rueckweg): das Fenster steht in seiner Endlage unter der Leiste, Schnittflaeche 16044 Bildpunkte (`wm: schlieren ... unterpx=16044`). `empty 0 cut 0 overlapping 0 linie 0`. |
-| 13-fenster-transparenz-55-prozent.png | `window_alpha=55`: das Einstellungsfenster selbst ist durchsichtig, Muster und das Terminal darunter scheinen durch. Regler zeigt "Fenster deckend % 55%". |
+| 13-fenster-transparenz-55-prozent.png | `window_alpha=55` ueber dem gemusterten Bild: das Einstellungsfenster selbst ist durchsichtig, das Muster schlaegt durch. NEU AUFGENOMMEN nach fix-r3-2: die Lesbarkeitsschranke fuer Fenster ist halb so weit wie die der Leiste (`SCHLEIER_WIN=20`), deshalb laeuft die Ausgabe des Terminals darunter nicht mehr durch die Reiterzeile -- sie bleibt ein Schatten zwischen den Zeilen. Gemessen (`glascheck.py fenster`): 31 Beschriftungen, schlechtestes Paar 5,16:1, die Reiter 6,34:1 (vorher 5,26:1). |
 | 14-milchglas-mit-reglerstand.png | Leiste 60 %, Fenster 80 %, Milchglas 12 -- die Reglerstellungen im Bild stimmen mit der Wirkung ueberein, die Leiste ist sichtbar verwischt. |
 | 18-regler-zeigt-wirksames-alpha.png | Seite "Darstellung" ueber dem DUNKLEN Bild, Regler der Taskleiste auf 40 %: die Beschriftung lautet "Taskleiste deckend % (wirkt 82)" -- die Untergrenze wird angezeigt statt still zu wirken. |
 | 19-zug-unter-die-leiste-neu.png | Zug auf 400,210 OHNE Rueckweg: das Fenster steht bei y=203 und reicht mit der Unterkante unter die Leiste (Schnittflaeche 16044 Bildpunkte, vom Server gerechnet). Der Rumpf ist vollstaendig gemalt, kein Rest steht. |
@@ -40,4 +40,8 @@ Herkunft:
 Mechanische Pruefung (`tools/themestore/shotcheck.py`, gegen die Rechtecke,
 die die Programme selbst gemeldet haben): fuer alle Laeufe dieses Satzes
 `empty 0  cut 0  overlapping 0  ausserhalb 0  verdeckt 0`
-(`gekuerzt 9` sind die absichtlich mit "..." verkuerzten Reiterbeschriftungen).
+(`gekuerzt 0`: seit dem Umbau der Reiterleiste auf ZWEI ZEILEN muss kein
+einziger Reitername mehr gekuerzt werden -- vorher waren es neun von elf --,
+und die drei gekuerzten Fliesstextzeilen der linken Spalte stehen ganz da,
+weil die Spalte von 300 auf 340 Bildpunkte gewachsen ist. `shotcheck.py`
+zaehlt beides seither getrennt: `reiterkurz 0  fliesskurz 0`).
