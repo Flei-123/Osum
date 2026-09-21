@@ -1109,6 +1109,70 @@ same "GEGENPROBE: mit noglasgrow steht die Regel still" "1" \
     "$(printf '%s' "$NG" | grep -oE 'aus=[0-9]+' | cut -d= -f2)"
 same "und sie hat dort kein einziges Rechteck aufgezogen" "0" \
     "$(printf '%s' "$NG" | grep -oE 'grow=[0-9]+' | cut -d= -f2)"
+
+# ---- 11f2. EIN ZUG OHNE RUECKWEG -- UND DAS FENSTER MALT SICH NEU.
+#
+# Die Probe darueber zieht hin UND ZURUECK. Ein Fenster, das am Ende
+# wieder dort steht, wo es angefangen hat, belegt nichts ueber das
+# Malen an der NEUEN Stelle: der Vergleich mit dem ungezogenen Lauf ist
+# dann zwangslaeufig gleich. Genau daran ist Bild 15 dieser Runde
+# vorbeigelaufen, und es kam noch etwas dazu:
+#
+#   * Der Griffpunkt 400,10 lag im oberen GREIFRAND (acht Bildpunkte
+#     ueber einer Titelleiste von zweiundzwanzig). Der Lauf zog also
+#     nie ein Fenster, sondern schob vierzehnmal dessen Oberkante nach
+#     unten (`wm: zieh k=4 ... h=16`). Der "leere Rumpf" auf Bild 15
+#     war ein auf seine Mindesthoehe zusammengeschobenes Fenster und
+#     kein Zeichenfehler. Der Greifrand oben ist jetzt so dick wie der
+#     Rahmen (kernel/ui/wm.fi, `grip_oben`); dass hier KEINE einzige
+#     `wm: zieh`-Zeile mehr steht, ist die Gegenprobe dazu.
+#
+#   * 400,600 als Ziel schiebt das Fenster zu drei Vierteln aus dem
+#     Schirm. Eine Beschriftung, die unter dem Bildrand liegt, ist
+#     nicht gemalt -- und das ist richtig so, aber es ist kein
+#     Zeichenfehler. Gezogen wird deshalb auf 400,210: das Fenster
+#     reicht dann MIT SEINER UNTERKANTE unter die Leiste (die
+#     Ueberlappung steht als Zahl da) und liegt trotzdem ganz auf dem
+#     Schirm, so dass "leer 0" eine Aussage ueber das Malen ist.
+bash tools/themestore/build.sh "$TMPD/zug1" extra='einst' tbalpha=70 blur=0 \
+    wallpaper=hell uitrace=yes keep=yes click="400,10>400,210" \
+    > "$TMPD/zug1.log" 2>&1
+num "ein Griff in die Titelleiste ZIEHT das Fenster (Zahl der Groessenaenderungen)" \
+    "$({ grep -ac 'wm: zieh ' "$TMPD/zug1/serial.txt" || true; })" eq 0
+# DAS BREITESTE gemeldete Fenster ist das der Einstellungen (760
+# gegen 440 des Starters), und die LETZTE seiner Zeilen ist die nach
+# dem Zug. `tail -1` allein nimmt, wer zuletzt gesprochen hat, und das
+# ist auf einem Schreibtisch mit fuenf Programmen kein Kriterium.
+ZW=$(grep -ao 'wlib: win id=[0-9]* x=[0-9]* y=[0-9]* w=[0-9]* h=[0-9]*' \
+     "$TMPD/zug1/serial.txt" \
+     | awk '{ w=$0; sub(/.* w=/, "", w); sub(/ .*/, "", w)
+              if (w+0 >= best+0) { best=w; line=$0 } } END { print line }')
+ZWY=$(printf '%s' "$ZW" | grep -oE ' y=[0-9]+' | grep -oE '[0-9]+')
+ZWH=$(printf '%s' "$ZW" | grep -oE ' h=[0-9]+' | grep -oE '[0-9]+')
+ZWW=$(printf '%s' "$ZW" | grep -oE ' w=[0-9]+' | grep -oE '[0-9]+')
+num "und es steht danach woanders als vorher (y)" "${ZWY:-3}" gt 100
+LEIY=$(grep -a 'taskbar: STEHT ' "$TMPD/zug1/serial.txt" | tail -1 \
+       | grep -oE 'y=[0-9]+' | cut -d= -f2)
+# Die Ueberlappung in Bildpunkten, damit "keine Schliere" nicht ueber
+# einem leeren Schnitt entsteht: Unterkante des Fensters SAMT Schmuck
+# (Rahmen 2 + Titel 22) gegen die Oberkante der Leiste.
+UEB=$(( (${ZWY:-3} + ${ZWH:-0} + 24 - ${LEIY:-772}) * ${ZWW:-0} ))
+[ "$UEB" -lt 0 ] && UEB=0
+echo "        Fenster ${ZWW:-?}x${ZWH:-?} bei y=${ZWY:-?}, Leiste ab y=${LEIY:-?}"
+num "das Fenster reicht wirklich unter die Leiste (Bildpunkte Ueberlappung)" \
+    "$UEB" ge 1000
+ZOUT=$(python3 tools/themestore/shotcheck.py "$TMPD/zug1/desktop.ppm" \
+       "$TMPD/zug1/serial.txt" 2>&1 | head -1)
+echo "        $ZOUT"
+num "nach dem Zug OHNE Rueckweg: leere Beschriftungen" \
+    "$(printf '%s' "$ZOUT" | grep -oE 'empty [0-9]+' | grep -oE '[0-9]+')" eq 0
+num "und abgeschnittene" \
+    "$(printf '%s' "$ZOUT" | grep -oE ' cut [0-9]+' | grep -oE '[0-9]+')" eq 0
+cp "$TMPD/zug1/desktop.png" "$SHOTS/glas-zug-unter-die-leiste.png" 2>/dev/null
+[ -s "$SHOTS/glas-zug-unter-die-leiste.png" ] \
+    && ok "und die Aufnahme dazu liegt in $SHOTS" \
+    || bad "die Aufnahme des Zuges fehlt"
+
 # ---- 11g. DER REGLER WIRKT SOFORT UND UEBERLEBT DEN NEUSTART.
 #
 # Kein Zeugenbericht, sondern ein Klick: der Lauf faehrt mit radius=4
@@ -1181,6 +1245,67 @@ for pair in "rad0:glas-radius-0" "rad12:glas-radius-12" "rad24:glas-radius-24" \
 done
 num "und in keiner von ihnen eine leere, abgeschnittene oder ueberlappende Beschriftung" \
     "$GBAD" eq 0
+
+# =========================== 12. NACHTRAG: DIE SCHRIFT IM TERMINAL
+#                                UND DIE LEISTE SELBST
+echo
+echo "== 12. Nachtrag: der Umlaut im Terminal und die gemessene Leiste =="
+
+# Auf JEDER Aufnahme dieser Runde stand "KEIN EINZIGES GERT!" im
+# Terminalfenster. Die Quelle (kernel/ui/kgui.fi) schreibt "GERAET" mit
+# einem richtigen UTF-8-Ä, also zwei Oktetten -- und `wm.term_putc` hat
+# beide verschluckt, weil dort `if ch < 32 || ch > 126 { return }`
+# stand. Kein Werkzeug konnte das melden: `shotcheck.py` misst, was
+# Ring 3 ueber `wlib: text` meldet, und das Terminal malt durch den
+# KERN. Deshalb hier, und deshalb mit demselben zweiten Rasterer, den
+# tools/wm/run.sh seit Runde K10 benutzt.
+TLOG="$TMPD/al100/serial.txt"
+TPPM="$TMPD/al100/desktop.ppm"
+has "$TLOG" "wm: termgitter win=" \
+    "der Kern nennt das Zellenraster des Terminals (Lage, Zelle, Aufsteiger)"
+UM=$(python3 tools/look/umlaut.py "$TLOG" "$TPPM" --gitter=1,1 \
+     'KEIN EINZIGES GERÄT!' 2>&1 | head -1)
+UF=$(printf '%s' "$UM" | grep -oE '[0-9]+ falsch' | grep -oE '^[0-9]+')
+UT=$(printf '%s' "$UM" | grep -oE '[0-9]+ Tintenpunkte' | grep -oE '^[0-9]+')
+num "das Ä im Terminal ist bildpunktgenau gerastert (falsche Punkte)" \
+    "${UF:-99}" eq 0
+num "und es ist ueberhaupt Tinte gemessen worden" "${UT:-0}" ge 500
+# GEGENPROBE: die Zeichenkette, die VOR dem Nachtrag auf dem Schirm
+# stand, darf jetzt NICHT mehr passen -- sonst misst die Zusage oben
+# nichts.
+if python3 tools/look/umlaut.py "$TLOG" "$TPPM" --gitter=1,1 \
+    'KEIN EINZIGES GERÄT!' 0 >/dev/null 2>&1 \
+    && ! python3 tools/gfx/checkshot.py tgrid "$TPPM" \
+        assets/osum-mono.ttf 16 26 62 10 19 1 1 15 23 42 241 245 249 \
+        'KEIN EINZIGES GERT!' 0 >/dev/null 2>&1; then
+    ok "GEGENPROBE: die alte, verstuemmelte Zeile passt NICHT mehr"
+else
+    bad "GEGENPROBE: 'GERT!' und 'GERÄT!' sind fuer den Rasterer dasselbe"
+fi
+
+# UND DIE LEISTE WIRD GEMESSEN WIE JEDES FENSTER. Bis zu diesem
+# Nachtrag hat `shotcheck.py` GENAU EIN Fenster angesehen -- das mit
+# dem meisten Text -- und die Taskleiste nie. Der titellose
+# Fensterknopf lag deshalb in einem Bereich, den nichts geprueft hat.
+BL=$(python3 tools/themestore/shotcheck.py "$TPPM" "$TLOG" --leiste 2>&1 \
+     | grep -a 'shotcheck: leiste')
+echo "        $BL"
+BN=$(printf '%s' "$BL" | grep -oE 'texts [0-9]+' | grep -oE '[0-9]+')
+BE=$(printf '%s' "$BL" | grep -oE 'empty [0-9]+' | grep -oE '[0-9]+')
+BC=$(printf '%s' "$BL" | grep -oE 'cut [0-9]+' | grep -oE '[0-9]+')
+BO=$(printf '%s' "$BL" | grep -oE 'overlapping [0-9]+' | grep -oE '[0-9]+')
+num "die Leiste meldet ihre Beschriftungen mit gemessener Breite" \
+    "${BN:-0}" ge 3
+num "und keine davon ist leer" "${BE:-9}" eq 0
+num "und keine ragt aus ihrem Bedienelement heraus" "${BC:-9}" eq 0
+num "und keine ueberlappt eine andere" "${BO:-9}" eq 0
+# DER FENSTERKNOPF TRAEGT EINEN TITEL UND NICHT NUR EIN SYMBOL.
+BT=$(grep -aE '^taskbar: btn i=0 ' "$TLOG" | tail -1 | sed -E 's/.* t=//')
+if [ -n "$BT" ]; then
+    ok "der Fensterknopf der Leiste traegt den Fenstertitel: $BT"
+else
+    bad "der Fensterknopf der Leiste ist titellos (nur Symbol)"
+fi
 
 echo
 echo "THEMESTORE: $pass passed, $fail failed"
