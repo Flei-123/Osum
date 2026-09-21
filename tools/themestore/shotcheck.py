@@ -173,6 +173,103 @@ BARRECT = re.compile(
     r"taskbar: (?:(start)|btn i=\d+ id=\d+|field (\w+)|pin \S+) "
     r"x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 
+# =========================== RUNDE GLAS (fix-r3-2): EIN KNOPF SIEHT AUS WIE EINER
+#
+# Der Knopf "Uebernehmen" der Seite Darstellung war auf Aufnahme 08 von
+# einer Beschriftung nicht zu unterscheiden: fUi malt seine Flaeche in
+# Weiss, die Karte darunter ist #f8fafc, und einen Rand hat er nicht
+# gemalt. Kein Pruefer hat das gesehen -- dieses Werkzeug hat bis hierher
+# nur SCHRIFT gemessen, und die Schrift des Knopfes war tadellos.
+#
+# Also wird ab jetzt gefragt, was ein Mensch fragt: hat das Ding einen
+# Umriss? `wlib.say_knopf` meldet Rechteck und Radius jedes gemalten
+# Knopfes samt seiner Ecke auf dem Schirm, und hier wird an seinen vier
+# Kanten nachgesehen, ob sich der Bildpunkt AUF der Kante von dem zwei
+# Bildpunkte weiter draussen unterscheidet. Die Ecken bleiben aussen vor
+# (dort liegt die Rundung), und eine Kante zaehlt erst, wenn sie ueber
+# den GROESSTEN Teil ihrer Laenge da ist -- ein einzelner abweichender
+# Punkt ist ein Buchstabe des Nachbarn und kein Rand.
+KNOPF = re.compile(
+    r"wlib: knopf x=(\d+) y=(\d+) w=(\d+) h=(\d+) r=(\d+) ax=(\d+) ay=(\d+)")
+
+
+def kanten(pic, x, y, w, h, r, tol=8, stufe=12, anteil=60):
+    """Wie viele der vier Kanten eines Knopfes im Bild wirklich da sind.
+
+    Drei Bildpunkte je Stelle: AUF der Kante, zwei davor (draussen) und
+    drei dahinter (die Flaeche). Als Kante zaehlt
+      * eine LINIE -- der Punkt auf der Kante unterscheidet sich von
+        beiden Nachbarn (so malt `fuib.ring` sie, gemessen: Linie
+        227,233,240 zwischen zweimal 246,247,247), oder
+      * eine STUFE -- Flaeche und Umgebung sind verschieden genug, dass
+        der Knopf auch ohne Linie als Flaeche zu sehen ist.
+    Die zweite Bedingung ist absichtlich strenger (12 statt 8 Stufen):
+    genau der Fall, der diese Probe ausgeloest hat, war eine Flaeche in
+    Weiss auf einer Karte in #f8fafc -- neun Stufen, und niemand sieht
+    das.
+    """
+    gefunden = 0
+    seiten = (
+        [((x + i, y), (x + i, y - 2), (x + i, y + 3))
+         for i in range(r + 2, w - r - 2)],
+        [((x + i, y + h - 1), (x + i, y + h + 1), (x + i, y + h - 4))
+         for i in range(r + 2, w - r - 2)],
+        [((x, y + j), (x - 2, y + j), (x + 3, y + j))
+         for j in range(r + 2, h - r - 2)],
+        [((x + w - 1, y + j), (x + w + 1, y + j), (x + w - 4, y + j))
+         for j in range(r + 2, h - r - 2)],
+    )
+    for seite in seiten:
+        n = 0
+        d = 0
+        for auf, aussen, innen in seite:
+            a, b, c = pic.at(*auf), pic.at(*aussen), pic.at(*innen)
+            if a is None or b is None or c is None:
+                continue
+            n += 1
+            linie = (max(abs(a[i] - b[i]) for i in range(3)) >= tol
+                     and max(abs(a[i] - c[i]) for i in range(3)) >= tol)
+            if linie or max(abs(c[i] - b[i]) for i in range(3)) >= stufe:
+                d += 1
+        if n > 0 and d * 100 >= n * anteil:
+            gefunden += 1
+    return gefunden
+
+
+def knoepfe_messen(pic, tail, ox, oy, ww, wh, bar):
+    """(gemessen, ohne Kante, Befunde) fuer jeden gemeldeten Knopf.
+
+    Gemessen wird nur, was im GEMESSENEN FENSTER liegt und auf dem
+    Schirm zu sehen ist: ein Knopf eines Fensters dahinter waere
+    verdeckt, und ein Knopf unter der Leiste ist es auch -- beides ist
+    kein fehlender Rand.
+    """
+    letzte = {}
+    for m in KNOPF.finditer(tail):
+        v = tuple(int(g) for g in m.groups())
+        letzte[(v[5], v[6])] = v
+    bad = []
+    gemessen = 0
+    ohne = 0
+    for (x, y, w, h, r, ax, ay) in letzte.values():
+        if w < 8 or h < 8:
+            continue
+        if ax < ox or ay < oy or ax + w > ox + ww or ay + h > oy + wh:
+            continue
+        if ax < 1 or ay < 1 or ax + w + 1 > pic.w or ay + h + 1 > pic.h:
+            continue
+        if (bar is not None and ay + h > bar["y"]
+                and ax < bar["x"] + bar["w"] and ax + w > bar["x"]):
+            continue
+        gemessen += 1
+        k = kanten(pic, ax, ay, w, h, r)
+        if k == 0:
+            ohne += 1
+            bad.append("KNOPF  bei %d,%d %dx%d r=%d hat keine einzige "
+                       "Umrisskante -- er sieht aus wie eine Beschriftung"
+                       % (ax, ay, w, h, r))
+    return gemessen, ohne, bad
+
 
 def parse_bar(path):
     """Die Beschriftungen der Leiste und das Rechteck, in dem sie stehen.
@@ -491,6 +588,7 @@ def main(argv):
     want_win = None
     leiste = False
     linien = False
+    knoepfe = False
     for a in argv[3:]:
         if a.startswith("--window="):
             ox, oy, ww, wh = (int(v) for v in a.split("=", 1)[1].split(","))
@@ -501,6 +599,8 @@ def main(argv):
             leiste = True
         elif a == "--linien":
             linien = True
+        elif a == "--knoepfe":
+            knoepfe = True
     if want_win is None and texts:
         count = {}
         for t in texts:
@@ -652,11 +752,17 @@ def main(argv):
     # unteren Kante der linken Karte.
     linie, lbad = linien_probe(pic, texts, ox, oy, ww, asc, desc)
     bad.extend(lbad)
+    # RUNDE GLAS (fix-r3-2): UND JEDER KNOPF ZEIGT EINEN UMRISS.
+    roh = open(argv[2], "rb").read().decode("latin1")
+    schnitt = roh.rfind(marke)
+    kn, kohne, kbad = knoepfe_messen(
+        pic, roh[schnitt:] if schnitt >= 0 else roh, ox, oy, ww, wh, bar)
+    bad.extend(kbad)
     print("shotcheck: win %s  texts %d  measured %d  empty %d  cut %d  "
           "overlapping %d  gekuerzt %d  reiterkurz %d  fliesskurz %d  "
-          "ausserhalb %d  verdeckt %d  linie %d"
+          "ausserhalb %d  verdeckt %d  linie %d  knopf %d  ohnekante %d"
           % (want_win, len(texts), len(boxes), empty, cut, over, gekuerzt,
-             gk_reiter, gk_fliess, ausserhalb, verdeckt, linie))
+             gk_reiter, gk_fliess, ausserhalb, verdeckt, linie, kn, kohne))
     for line in bad[:30]:
         print("  " + line)
     # RUNDE GLAS (nachtrag): die Leiste auf einer EIGENEN Zeile. Sie
@@ -680,6 +786,10 @@ def main(argv):
     # sondern ein Hindernis. Die Zahl steht in jedem Fall in der Zeile.
     if linien:
         schlecht = schlecht + linie
+    # Dasselbe fuer die Knoepfe, und aus demselben Grund: die Zahl steht
+    # immer da, rot wird sie nur, wo ein Laeufer sie bestellt hat.
+    if knoepfe:
+        schlecht = schlecht + kohne
     return 0 if (empty == 0 and cut == 0 and over == 0
                  and schlecht == 0) else 1
 

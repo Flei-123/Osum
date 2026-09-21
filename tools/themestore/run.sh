@@ -78,6 +78,10 @@ fi
 PRESETS=$(cd assets/themes && ls *.preset | sed 's/\.preset$//')
 NPRESET=$(printf '%s\n' $PRESETS | wc -l)
 SHOTS=docs/shots/themestore
+# Die Bildmappe der Runde GLAS. Sie ist nicht dieselbe wie $SHOTS: dort
+# liegt eine Aufnahme je VORLAGE, hier die nummerierten Belege dieser
+# Runde, auf die docs/shots/glas/README.md und RUN.md zeigen.
+GSHOTS=docs/shots/glas
 mkdir -p "$SHOTS"
 
 # ------------------------------------------------------------- 1. bauen
@@ -1096,55 +1100,122 @@ FB=$(python3 tools/themestore/glascheck.py var "$SHOTS/glas-milchglas.png" \
 num "Milchglas: die Streuung des Ausschnitts SINKT (gegen $V70 ohne)" \
     "${VB:-999999}" lt "${V70:-0}"
 num "und aus zwei Farben ist ein Verlauf geworden" "${FB:-0}" ge 4
+# ---- (fix-r3-4) UND DIE VIER STREIFEN IN EIN BILD, BESCHRIFTET.
+#
+# Bild 12 der Mappe war ein von Hand zusammengesetzter Ausschnitt, und
+# wer wissen wollte, welcher der vier Streifen welche Reglerstellung
+# ist, brauchte die README daneben. `leistenvergleich.py` baut es aus
+# den vier Aufnahmen, die dieser Abschnitt GERADE gemacht hat, und
+# schreibt in jede Zeile die Stellung UND die Zahl, die hier oben
+# gemessen wurde -- gerechnet mit derselben Funktion aus
+# `glascheck.py`, damit Bild und Lauf nicht zwei Quellen sind.
+mkdir -p "$GSHOTS"
+LV=$(python3 tools/themestore/leistenvergleich.py \
+     "$GSHOTS/12-leiste-vergleich-ausschnitt-2x.png" \
+     "$SHOTS/glas-alpha-100.png=Taskleiste 100 % deckend" \
+     "$SHOTS/glas-alpha-70.png=Taskleiste 70 %" \
+     "$SHOTS/glas-alpha-40.png=Taskleiste 40 %" \
+     "$SHOTS/glas-milchglas.png=Milchglas (blur=12, 70 %)" 2>&1)
+echo "        $LV"
+num "der beschriftete Leistenvergleich (Bild 12) ist aus vier Aufnahmen gebaut" \
+    "$(printf '%s' "$LV" | grep -oE 'aus [0-9]+ Aufnahmen' | grep -oE '[0-9]+')" \
+    eq 4
+# UND DIE ZAHLEN IM BILD SIND DIE DES LAUFS. `leistenvergleich.py`
+# rechnet `var` selbst, mit `glascheck.leiste`/`glascheck.hell`; hier
+# steht die Gegenprobe, dass dabei dieselben vier Zahlen herauskommen,
+# die oben schon gemessen wurden. Weichen sie ab, traegt das Bild eine
+# Beschriftung, die der Lauf nicht deckt.
+LVV=$(python3 - "$SHOTS/glas-alpha-100.png" "$SHOTS/glas-alpha-70.png" \
+      "$SHOTS/glas-alpha-40.png" "$SHOTS/glas-milchglas.png" <<'PYV'
+import sys
+sys.path.insert(0, 'tools/themestore')
+from PIL import Image
+import leistenvergleich as L
+for p in sys.argv[1:]:
+    var, farben = L.var_von(Image.open(p).convert('RGB'), 28, 300, 1100)
+    print(var)
+PYV
+)
+LVW=$(printf '%s\n' "$LVV" | tr '\n' ' ')
+echo "        var im Bild 12: $LVW"
+same "und die erste Zahl im Bild ist die gemessene Streuung bei 100 %" \
+    "${V100:-x}" "$(printf '%s\n' "$LVV" | sed -n 1p)"
+same "und die zweite die bei 70 %" \
+    "${V70:-x}" "$(printf '%s\n' "$LVV" | sed -n 2p)"
+same "und die dritte die bei 40 %" \
+    "${V40:-x}" "$(printf '%s\n' "$LVV" | sed -n 3p)"
+same "und die vierte die des Milchglases" \
+    "${VB:-x}" "$(printf '%s\n' "$LVV" | sed -n 4p)"
 # ---- 11c2. UND EINMAL SO, DASS MAN ES AUCH SIEHT.
 #
 # DER BEFUND, DER DIESEN ABSCHNITT AUSGELOEST HAT: die Zahlen darueber
 # sind richtig (`var` faellt von 1597 auf 788, aus zwei Farben werden
-# 13), und auf dem Bild sah man trotzdem fast nichts. Der Grund ist
-# der Massstab: das Musterbild ist ein Schachbrett von zwoelf
-# Bildpunkten, das der Schreibtisch auf rund achtzig Bildpunkte
-# dehnt. Ein Weichzeichner von zwoelf verwischt davon die KANTEN und
-# laesst die Felder flach -- gemessen ein Erfolg, angeschaut zwei
-# Kacheln mit weichen Naehten.
+# 13), und auf dem Bild sah man trotzdem fast nichts. Zwei Gruende,
+# und beide sind hier abgestellt:
 #
-# Also derselbe Versuch ueber einem GROBEN Muster (24 statt 12, also
-# rund 160 Bildpunkte je Feld) mit dem groessten Radius, den die
-# Sprache der Vorlagen zulaesst (16): jetzt traegt der Weichzeichner
-# die eine Farbe tief in die andere, und der Streifen wird ein
-# Verlauf. Beide Laeufe stehen hier, denn nur mit dem Vergleichslauf
-# OHNE Weichzeichner ueber DEMSELBEN Muster ist "die Streuung sinkt"
-# eine Messung und keine Behauptung.
-bash tools/themestore/build.sh "$TMPD/grob70" tbalpha=70 blur=0 \
-    wallpaper=hellgrob uitrace=yes keep=yes > "$TMPD/grob70.log" 2>&1
-bash tools/themestore/build.sh "$TMPD/grob16" tbalpha=70 blur=16 \
-    wallpaper=hellgrob uitrace=yes keep=yes > "$TMPD/grob16.log" 2>&1
+#  (1) DER MASSSTAB. Das Musterbild ist ein Schachbrett von zwoelf
+#      Bildpunkten, das der Schreibtisch auf rund achtzig dehnt. Ein
+#      Weichzeichner von zwoelf verwischt davon die KANTEN und laesst
+#      die Felder flach -- gemessen ein Erfolg, angeschaut zwei
+#      Kacheln mit weichen Naehten. `wallpaper=dunkelgrob` ist
+#      dasselbe Bild mit einem Schachbrett von 24, also Felder von
+#      rund 160 Bildpunkten, und `blur=16` ist der groesste Radius,
+#      den die Sprache der Vorlagen zulaesst.
+#
+#  (2) DER SCHLEIER. Ueber einem HELLEN Bild hebt `glass_mix` die
+#      Deckkraft an, bis die Schrift ihre 4,5:1 haelt -- aus 40 werden
+#      82, und dann ist da nichts mehr zu verwischen. Ein dunkles
+#      Schema auf dunklem Bild braucht diese Anhebung nicht (Abschnitt
+#      11d3 misst das), also scheint dort wirklich etwas durch.
+#
+# Beide Laeufe stehen hier, denn nur mit dem Vergleichslauf OHNE
+# Weichzeichner ueber DEMSELBEN Bild ist "die Streuung sinkt" eine
+# Messung und keine Behauptung.
+bash tools/themestore/build.sh "$TMPD/grob0" scheme=midnight mode=dark \
+    tbalpha=40 blur=0 wallpaper=dunkelgrob uitrace=yes keep=yes \
+    > "$TMPD/grob0.log" 2>&1
+bash tools/themestore/build.sh "$TMPD/grob16" scheme=midnight mode=dark \
+    tbalpha=40 blur=16 wallpaper=dunkelgrob uitrace=yes keep=yes \
+    > "$TMPD/grob16.log" 2>&1
 cp "$TMPD/grob16/desktop.png" "$SHOTS/glas-milchglas-grob.png" 2>/dev/null
-VG0=$(python3 tools/themestore/glascheck.py var "$TMPD/grob70/desktop.png" \
+VG0=$(python3 tools/themestore/glascheck.py var "$TMPD/grob0/desktop.png" \
       | grep -oE '^var [0-9]+' | cut -d' ' -f2)
 VG16=$(python3 tools/themestore/glascheck.py var "$TMPD/grob16/desktop.png" \
        | grep -oE '^var [0-9]+' | cut -d' ' -f2)
+FG0=$(python3 tools/themestore/glascheck.py var "$TMPD/grob0/desktop.png" \
+      | grep -oE 'farben [0-9]+' | cut -d' ' -f2)
 FG16=$(python3 tools/themestore/glascheck.py var "$TMPD/grob16/desktop.png" \
        | grep -oE 'farben [0-9]+' | cut -d' ' -f2)
-echo "        grobes Muster: var $VG0 ohne, $VG16 mit Milchglas 16 ($FG16 Farben)"
+echo "        grobes Muster, dunkles Schema: var $VG0 ($FG0 Farben) ohne," \
+     "var $VG16 ($FG16 Farben) mit Milchglas 16"
 num "grobes Muster: die Streuung sinkt auch dort (gegen $VG0 ohne)" \
     "${VG16:-999999}" lt "${VG0:-0}"
 # UND ZWAR SICHTBAR: nicht zwei Farben mit weicher Naht, sondern ein
 # Verlauf. Zwoelf Stufen sind die Zahl, an der ein Mensch "verwischt"
-# von "zwei Kacheln" unterscheidet; ueber dem feinen Muster waren es 13,
-# aber ueber eine Naht von acht Bildpunkten verteilt.
+# von "zwei Kacheln" unterscheidet -- ohne Weichzeichner sind es zwei.
 num "und aus dem Schachbrett ist ein Verlauf mit vielen Stufen geworden" \
     "${FG16:-0}" ge 12
+num "GEGENPROBE: ohne Weichzeichner sind es genau die zwei des Musters" \
+    "${FG0:-0}" eq 2
+# UND DIE SCHRIFT HAELT AUCH AUF DEM VERWISCHTEN GRUND IHRE 4,5:1.
+GFG=$(grep -a 'taskbar: text clock ' "$TMPD/grob16/serial.txt" | tail -1 \
+      | grep -oE 'fg=[0-9]+' | cut -d= -f2)
+GK=$(python3 tools/themestore/glascheck.py kontrast \
+     "$TMPD/grob16/desktop.png" "$(printf '%06x' "${GFG:-0}")")
+echo "        $GK"
+num "und die Leistenschrift haelt auf dem Milchglas ihre 4,5:1 (x100)" \
+    "$(printf '%s' "$GK" | grep -oE '^kontrast [0-9]+' | cut -d' ' -f2)" ge 450
 # DER VERGLEICHSSTREIFEN (Bild 12) WIRD HIER ERZEUGT UND NICHT VON
 # HAND: jede Reihe traegt ihre Beschriftung und die Zahl, die sie
-# belegt, im Bild. Ein Bildvergleich, der ein README braucht,
+# belegt, IM BILD. Ein Bildvergleich, der ein README braucht,
 # vergleicht nichts.
 python3 tools/themestore/streifen.py \
     "$SHOTS/glas-vergleich-streifen.png" \
-    "$SHOTS/glas-alpha-100.png=Leiste 100 % deckend (feines Muster)" \
-    "$SHOTS/glas-alpha-70.png=Leiste 70 % (feines Muster)" \
-    "$SHOTS/glas-alpha-40.png=Leiste 40 % (feines Muster)" \
-    "$TMPD/grob70/desktop.png=Leiste 70 %, grobes Muster, ohne Milchglas" \
-    "$SHOTS/glas-milchglas-grob.png=Leiste 70 %, grobes Muster, Milchglas 16" \
+    "$SHOTS/glas-alpha-100.png=100 % deckend, helles Muster" \
+    "$SHOTS/glas-alpha-70.png=70 % deckend, helles Muster" \
+    "$SHOTS/glas-alpha-40.png=40 % (wirksam 71), helles Muster" \
+    "$TMPD/grob0/desktop.png=40 %, dunkles Schema, grobes Muster, ohne Milchglas" \
+    "$SHOTS/glas-milchglas-grob.png=40 %, dunkles Schema, grobes Muster, Milchglas 16" \
     > "$TMPD/streifen.log" 2>&1
 sed 's/^/        /' "$TMPD/streifen.log"
 num "der Vergleichsstreifen ist erzeugt worden" \
@@ -1600,6 +1671,24 @@ cp "$TMPD/zug1/desktop.png" "$SHOTS/glas-zug-unter-die-leiste.png" 2>/dev/null
 [ -s "$SHOTS/glas-zug-unter-die-leiste.png" ] \
     && ok "und die Aufnahme dazu liegt in $SHOTS" \
     || bad "die Aufnahme des Zuges fehlt"
+# ---------------- (fix-r3-4) UND BEIDE ZUEGE ALS NUMMERIERTE AUFNAHME.
+#
+# Bis hierher legte dieser Abschnitt genau EIN Bild in die Bildmappe
+# der Runde: den Zug HIN UND ZURUECK (Nummer 10). Auf dem steht das
+# Fenster am Ende wieder dort, wo es angefangen hat -- es ist der
+# Beleg fuer "keine Schliere" und ausdruecklich KEINER fuer "ein
+# Fenster liegt unter der Leiste". Der zweite Zug (11f2, ohne
+# Rueckweg) zeigt genau das und stand nur im Lauf. Jetzt liegen beide
+# nebeneinander in der Mappe, und ihre Namen sagen, welcher welcher
+# ist.
+mkdir -p "$GSHOTS"
+cp "$TMPD/zug/desktop.png" \
+   "$GSHOTS/10-zug-hin-und-zurueck-keine-schlieren.png" 2>/dev/null
+cp "$TMPD/zug1/desktop.png" \
+   "$GSHOTS/22-zug-endlage-unter-der-leiste.png" 2>/dev/null
+[ -s "$GSHOTS/22-zug-endlage-unter-der-leiste.png" ] \
+    && ok "und die Endlage unter der Leiste als eigene Aufnahme (22)" \
+    || bad "die Aufnahme der Endlage unter der Leiste fehlt"
 
 # ---- 11g. DER REGLER WIRKT SOFORT UND UEBERLEBT DEN NEUSTART.
 #
@@ -1652,15 +1741,19 @@ num "Schmuck-Widgets sind von der Trefferpruefung ausgenommen" \
 
 # UND DIE NEUEN BILDER WERDEN GENAUSO GEMESSEN WIE DIE ALTEN.
 GSHOT=0
+# RUNDE GLAS (fix-r3-1): NEUN STATT SIEBEN. Dazugekommen sind die
+# Aufnahme des Milchglases ueber dem GROBEN Muster (auf der man es
+# sieht und nicht nur misst) und der beschriftete Vergleichsstreifen.
 for s in glas-radius-0 glas-radius-12 glas-radius-24 glas-alpha-100 \
-         glas-alpha-70 glas-alpha-40 glas-milchglas; do
+         glas-alpha-70 glas-alpha-40 glas-milchglas \
+         glas-milchglas-grob glas-vergleich-streifen; do
     [ -s "$SHOTS/$s.png" ] && GSHOT=$((GSHOT+1)) || echo "        $s: kein Bild"
 done
-num "die sieben Aufnahmen der Runde GLAS" "$GSHOT" eq 7
+num "die neun Aufnahmen der Runde GLAS" "$GSHOT" eq 9
 GBAD=0
 for pair in "rad0:glas-radius-0" "rad12:glas-radius-12" "rad24:glas-radius-24" \
             "al100:glas-alpha-100" "al70:glas-alpha-70" "al40:glas-alpha-40" \
-            "blur:glas-milchglas"; do
+            "blur:glas-milchglas" "grob16:glas-milchglas-grob"; do
     d=${pair%%:*}
     o=$(python3 tools/themestore/shotcheck.py "$TMPD/$d/desktop.ppm" \
         "$TMPD/$d/serial.txt" 2>&1 | head -1)
@@ -1743,6 +1836,220 @@ if [ -n "$BT" ]; then
 else
     bad "der Fensterknopf der Leiste ist titellos (nur Symbol)"
 fi
+
+# ---- 11h. (fix-r3-4) KEINE BESCHRIFTUNG STEHT AUF EINER RAHMENLINIE.
+#
+# Abschnitt 8 und 10 vergleichen gemeldete RECHTECKE. Zwei Rechtecke,
+# die sich nur beruehren, melden dabei nichts -- und genau so sass die
+# Statuszeile "bereit" der Einstellungen: ihr Kasten fing dort an, wo
+# die Karte der linken Spalte aufhoerte, also lief deren Rahmenlinie
+# durch das Wort. Gefragt wird deshalb das BILD:
+# `shotcheck.py --linien` sucht links UND rechts neben jeder
+# Beschriftung, auf derselben Bildzeile, einen einfarbigen Lauf von
+# zehn Bildpunkten, der nicht der gemessene Grund ist.
+echo
+echo "== 11h. keine Beschriftung steht auf einer Rahmenlinie =="
+for pair in "set:Darstellung" "setv:Vorlagen"; do
+    d=${pair%%:*}; nm=${pair##*:}
+    LO=$(python3 tools/themestore/shotcheck.py "$TMPD/$d/desktop.ppm" \
+         "$TMPD/$d/serial.txt" --linien 2>&1)
+    LN=$(printf '%s' "$LO" | grep -oE 'linie [0-9]+' | grep -oE '[0-9]+')
+    num "Seite $nm: Beschriftungen auf einer Rahmenlinie" "${LN:-99}" eq 0
+    [ "${LN:-99}" = 0 ] || printf '%s\n' "$LO" | grep -a LINIE \
+        | sed 's/^/        /'
+done
+# GEGENPROBE, und ohne sie waere die Null oben wertlos: dieselbe
+# Aufnahme mit einer quer durch die Statuszeile gezogenen Linie MUSS
+# rot werden. Die Linie wird auf dem WIRT in eine Kopie gemalt und
+# nicht im Gast -- gemessen wird hier das Werkzeug und nicht das
+# System.
+python3 - "$TMPD/set/desktop.ppm" "$TMPD/set/serial.txt" \
+         "$TMPD/linie.ppm" <<'PYL'
+import sys
+sys.path.insert(0, 'tools/themestore')
+import shotcheck as S
+w, h, d = S.read_ppm(sys.argv[1])
+d = bytearray(d)
+texts, wins, font = S.parse(sys.argv[2])
+st = [t for t in texts if t["t"].strip()][-1]
+win = wins[st["win"]]
+y = win["cy"] + st["base"] - 3
+for x in range(win["cx"], min(win["cx"] + win["w"], w)):
+    o = (y * w + x) * 3
+    d[o], d[o + 1], d[o + 2] = 180, 180, 190
+open(sys.argv[3], "wb").write(b"P6\n%d %d\n255\n" % (w, h) + bytes(d))
+PYL
+GL=$(python3 tools/themestore/shotcheck.py "$TMPD/linie.ppm" \
+     "$TMPD/set/serial.txt" --linien 2>&1 \
+     | grep -oE 'linie [0-9]+' | grep -oE '[0-9]+')
+num "GEGENPROBE: eine gemalte Linie durch die Schrift wird gefunden" \
+    "${GL:-0}" ge 1
+
+# ---- 11i. (fix-r3-4) DER STRICH UNTER DEM LEISTENKNOPF IST SO LANG
+#           WIE SEIN WORT.
+#
+# Die Pille unter dem vorderen Fensterknopf hat ihre Laenge selbst
+# erfunden (`w * 45 / 100`, mittig). Sobald ein Symbol vor dem Titel
+# stand, begann der Strich links vom Symbol und endete mitten im Wort
+# -- Justins Befund "der Knopf zeigt einen Unterstrich". Anfang und
+# Laenge kommen jetzt aus DERSELBEN Breitenmessung wie der Text, und
+# das wird hier nachgehalten: `taskbar: pille x= w=` gegen `tx= tw=`
+# und gegen die Breite, die `taskbar: text button ... tw=` meldet.
+echo
+echo "== 11i. der Strich unter dem Leistenknopf folgt der Schrift =="
+PI=$(python3 - "$TLOG" <<'PYP'
+import re
+import sys
+txt = open(sys.argv[1], 'rb').read().decode('latin1')
+pil = {}
+for m in re.finditer(r'taskbar: pille i=(\d+) x=(\d+) w=(\d+)'
+                     r' tx=(\d+) tw=(\d+)', txt):
+    pil[int(m.group(1))] = tuple(int(g) for g in m.groups()[1:])
+txts = {}
+for m in re.finditer(r'taskbar: text button x=(\d+) base=\d+ fg=\d+'
+                     r' bg=\d+ tw=(\d+) t=', txt):
+    txts[int(m.group(1))] = int(m.group(2))
+# Der schmale Strich (10 Bildpunkte) sagt "laeuft" und gehoert keinem
+# Wort; gemessen wird der BREITE unter dem vorderen Fenster.
+breit = [(i, v) for i, v in pil.items() if v[1] != 10]
+schlecht = []
+for i, (px, pw, tx, tw) in breit:
+    if (px, pw) != (tx, tw):
+        schlecht.append('%d: Strich %d..%d, Wort %d..%d'
+                        % (i, px, px + pw, tx, tx + tw))
+    elif tx in txts and txts[tx] != tw:
+        schlecht.append('%d: gemeldete Textbreite %d, Strich %d'
+                        % (i, txts[tx], tw))
+print(len(breit), len(schlecht), ';'.join(schlecht[:3]))
+PYP
+)
+echo "        $PI"
+num "Fensterknoepfe mit breitem Strich (der vordere)" \
+    "$(printf '%s' "$PI" | cut -d' ' -f1)" ge 1
+num "und Striche, die nicht auf der gemessenen Textbreite sitzen" \
+    "$(printf '%s' "$PI" | cut -d' ' -f2)" eq 0
+
+# ---- 11j. (fix-r3-2) EIN DURCHSICHTIGES FENSTER BLEIBT LESBAR,
+#           UND EIN KNOPF SIEHT AUS WIE EINER.
+#
+# Fuer die LEISTE misst Abschnitt 11d den Kontrast gegen den GEMISCHTEN
+# Grund, seit die Runde gelernt hat, dass die Zahl aus der Vorlage bei
+# Transparenz nichts mehr sagt. Fuer gewoehnliche Fenster fehlte genau
+# das -- und dort ist es schlimmer: eine Leiste traegt drei kurze
+# Beschriftungen, ein Fenster ist von oben bis unten Schrift. Auf der
+# Aufnahme 13 (`window_alpha=55`) lief die Ausgabe des Terminals
+# darunter quer durch die Reiterzeile der Einstellungen.
+#
+# Also dieselbe Frage, eine Ebene hoeher: JEDE Beschriftung des
+# Fensters gegen den Grund, der wirklich unter ihr liegt
+# (`glascheck.py fenster`, raeumlich getrennt von der Tinte, damit die
+# Kantenglaettung nicht als Grund zaehlt).
+echo
+echo "== 11j. das durchsichtige Fenster bleibt lesbar =="
+bash tools/themestore/build.sh "$TMPD/winal" extra='einst' winalpha=55 \
+    wallpaper=hell uitrace=yes keep=yes > "$TMPD/winal.log" 2>&1
+WF=$(python3 tools/themestore/glascheck.py fenster \
+     "$TMPD/winal/desktop.png" "$TMPD/winal/serial.txt")
+printf '%s\n' "$WF" | sed 's/^/        /'
+num "jede Fensterbeschriftung haelt 4,5:1 gegen den GEMISCHTEN Grund (x100)" \
+    "$(printf '%s' "$WF" | grep -oE 'schlechteste [0-9]+' | cut -d' ' -f2)" \
+    ge 450
+num "und es waren wirklich Beschriftungen zu messen" \
+    "$(printf '%s' "$WF" | grep -oE 'beschriftungen=[0-9]+' | cut -d= -f2)" \
+    ge 20
+# GEGENPROBE, und ohne sie waere die Zahl oben geschenkt: ein Fenster,
+# das gar nicht durchsichtig ist, haelt jeden Kontrast. Derselbe Stand
+# mit `window_alpha=100` -- die Flaeche des Fensters MUSS sich
+# unterscheiden, und zwar in vielen Bildpunkten.
+bash tools/themestore/build.sh "$TMPD/winal100" extra='einst' winalpha=100 \
+    wallpaper=hell uitrace=yes keep=yes > "$TMPD/winal100.log" 2>&1
+WD=$(python3 - "$TMPD/winal/desktop.png" "$TMPD/winal100/desktop.png" <<'PYW'
+import sys
+from PIL import Image
+a = Image.open(sys.argv[1]).convert("RGB")
+b = Image.open(sys.argv[2]).convert("RGB")
+# Nur die Flaeche des Einstellungsfensters, und nur jede dritte Zeile
+# und Spalte: gezaehlt wird, OB sich die Mischung auswirkt, nicht wie
+# schnell dieses Skript ist.
+n = 0
+for y in range(40, 560, 3):
+    for x in range(30, 770, 3):
+        if a.getpixel((x, y)) != b.getpixel((x, y)):
+            n += 1
+print(n)
+PYW
+)
+num "GEGENPROBE: bei 55 Prozent ist das Fenster wirklich eine andere Flaeche" \
+    "${WD:-0}" ge 2000
+# UND DIE BESCHRIFTUNGEN DIESES LAUFS WERDEN GEMESSEN WIE ALLE ANDEREN.
+SW=$(python3 tools/themestore/shotcheck.py "$TMPD/winal/desktop.ppm" \
+     "$TMPD/winal/serial.txt" --leiste --knoepfe 2>&1)
+printf '%s\n' "$SW" | head -2 | sed 's/^/        /'
+for f in empty cut overlapping; do
+    num "durchsichtiges Fenster, $f" \
+        "$(printf '%s' "$SW" | grep -oE "$f [0-9]+" | head -1 \
+           | cut -d' ' -f2)" eq 0
+done
+
+# ---- 11j2. (fix-r3-2) JEDER GEMELDETE KNOPF ZEIGT EINEN UMRISS.
+#
+# Der Knopf "Uebernehmen" der Seite Darstellung wurde von fUi flach
+# gemalt: Flaeche in Weiss auf einer Karte in #f8fafc, kein Rand. Neben
+# den Knoepfen der Seite Vorlagen sah er aus wie eine Beschriftung, und
+# kein Pruefer hat es gemerkt -- gemessen wurde bis hierher nur SCHRIFT.
+# `wlib.say_knopf` meldet jetzt Rechteck und Radius jedes gemalten
+# Knopfes, und `shotcheck.py --knoepfe` sieht an seinen vier Kanten
+# nach.
+echo
+echo "== 11j2. jeder gemeldete Knopf zeigt einen Umriss =="
+for pair in "set:Darstellung" "setv:Vorlagen" "winal:durchsichtig"; do
+    d=${pair%%:*}; nm=${pair##*:}
+    KO=$(python3 tools/themestore/shotcheck.py "$TMPD/$d/desktop.ppm" \
+         "$TMPD/$d/serial.txt" --knoepfe 2>&1)
+    num "Seite $nm: gemessene Knoepfe" \
+        "$(printf '%s' "$KO" | grep -oE 'knopf [0-9]+' | cut -d' ' -f2)" ge 1
+    num "Seite $nm: Knoepfe ohne jede Umrisskante" \
+        "$(printf '%s' "$KO" | grep -oE 'ohnekante [0-9]+' | cut -d' ' -f2)" \
+        eq 0
+    printf '%s\n' "$KO" | grep -a KNOPF | sed 's/^/        /' || true
+done
+# GEGENPROBE: derselbe Knopf, auf dem WIRT mit der Farbe seiner Karte
+# uebermalt, MUSS auffallen. Ohne sie waere "0 ohne Kante" auch dann
+# gruen, wenn dieses Werkzeug gar nichts prueft.
+python3 - "$TMPD/set/desktop.ppm" "$TMPD/set/serial.txt" \
+         "$TMPD/flach.ppm" <<'PYK'
+import sys
+sys.path.insert(0, 'tools/themestore')
+import shotcheck as S
+w, h, d = S.read_ppm(sys.argv[1])
+d = bytearray(d)
+roh = open(sys.argv[2], "rb").read().decode("latin1")
+schnitt = roh.rfind("settings: rect name=waa ")
+tail = roh[schnitt:] if schnitt >= 0 else roh
+pic = S.Pic(sys.argv[1])
+for m in S.KNOPF.finditer(tail):
+    x, y, bw, bh, r, ax, ay = (int(g) for g in m.groups())
+    # Die Farbe der Karte daneben, und damit alles ausser der Schrift
+    # uebermalen: uebrig bleibt ein Knopf ohne Flaeche und ohne Rand.
+    grund = pic.at(ax - 8, ay + bh // 2)
+    if grund is None:
+        continue
+    for j in range(-2, bh + 2):
+        for i in range(-2, bw + 2):
+            X, Y = ax + i, ay + j
+            if not (0 <= X < w and 0 <= Y < h):
+                continue
+            p = pic.at(X, Y)
+            if max(abs(p[k] - grund[k]) for k in range(3)) > 90:
+                continue          # das ist die Schrift, die bleibt
+            o = (Y * w + X) * 3
+            d[o], d[o + 1], d[o + 2] = grund
+open(sys.argv[3], "wb").write(b"P6\n%d %d\n255\n" % (w, h) + bytes(d))
+PYK
+KG=$(python3 tools/themestore/shotcheck.py "$TMPD/flach.ppm" \
+     "$TMPD/set/serial.txt" --knoepfe 2>&1 \
+     | grep -oE 'ohnekante [0-9]+' | cut -d' ' -f2)
+num "GEGENPROBE: ein flach uebermalter Knopf wird gefunden" "${KG:-0}" ge 1
 
 echo
 echo "THEMESTORE: $pass passed, $fail failed"

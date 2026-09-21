@@ -1036,6 +1036,26 @@ const ALPHA_MIN: u64 = 20
 // Unterschied zwischen 100 und 40 Prozent ist trotzdem auf einen Blick
 // zu sehen (255 gegen 214 auf dunklem Grund).
 const SCHLEIER: u64 = 40
+// UND DIESELBE ZAHL FUER EIN GEWOEHNLICHES FENSTER -- DIE HAELFTE.
+//
+// Die Leiste traegt drei kurze Beschriftungen auf einer sonst leeren
+// Flaeche; ein Fenster ist von oben bis unten Schrift. Mit denselben 40
+// Stufen kam auf der Aufnahme 13 (`window_alpha=55`) die Ausgabe des
+// Terminals darunter QUER DURCH die Reiterzeile: "USB hc=0 ports=0 ..."
+// stand lesbar zwischen "Sprache" und "Vorlagen", und zwei Texte
+// uebereinander sind keine Durchsicht, sondern ein Fehlerbild. 40
+// Stufen sind auf einer leeren Flaeche ein Hauch und in einer Zeile
+// Schrift ein zweiter Text.
+//
+// 20 Stufen sind die Zahl, bei der ein fremder Buchstabe unter der
+// Flaeche als Schatten bleibt und nicht mehr als Wort zu lesen ist, und
+// sie halten den Kontrast jeder Fensterbeschriftung mit Luft ueber der
+// Latte (gemessen auf dem Lauf `winal` der Abnahme, Abschnitt 11g: das
+// schlechteste Paar liegt bei 5,16:1 mit 40 Stufen und steigt mit 20).
+// Ueber einem Hintergrundbild, das der Fensterfarbe nahe ist, greift
+// die Schranke wie bisher GAR NICHT -- das Fenster ist dann so
+// durchsichtig, wie der Regler sagt.
+const SCHLEIER_WIN: u64 = 20
 // RUNDE SOFTUI: die Obergrenze des Titelverlaufs, in Helligkeitsstufen.
 const GRAD_MAX: u64 = 24
 // Die drei Schaltflaechen rechts oben, in der Reihenfolge, in der sie
@@ -5711,7 +5731,17 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
         let key: u64 = form(state, FM_GLASS_KEY)
         // Die Zaehlung des wirksamen Alphas gilt der LEISTE; siehe
         // `glass_stat_an`.
-        glass_stat_an(pw < MAX_WIN && i == pw)
+        let ist_leiste: bool = pw < MAX_WIN && i == pw
+        glass_stat_an(ist_leiste)
+        // UND DIE LESBARKEITSSCHRANKE GILT FUER BEIDE, ABER NICHT MIT
+        // DERSELBEN ZAHL. Ein Fenster ohne Schmuck ist entweder die
+        // Leiste (drei Beschriftungen auf leerer Flaeche, 40 Stufen)
+        // oder der Schreibtisch bzw. ein Fenster, das seinen Rahmen
+        // selbst malt (Schrift von oben bis unten, 20 Stufen).
+        var sch: u64 = SCHLEIER_WIN
+        if ist_leiste {
+            sch = SCHLEIER
+        }
         var gr: i64 = by0
         while gr < by1 {
             var zeile: u64 = 0
@@ -5721,7 +5751,7 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
             }
             fb_row_a(state, bx0 as u64, gr as u64,
                 bq +% (gr - wy) as u64 *% bw *% 4
-                +% (bx0 - wx) as u64 *% 4, bn, alpha, key, zeile)
+                +% (bx0 - wx) as u64 *% 4, bn, alpha, key, zeile, sch)
             gr = gr + 1
         }
         glass_stat_an(false)
@@ -5849,7 +5879,8 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
                 quelle +% zeile *% ww *% 4 +% spalte *% 4, n)
         } else {
             fb_row_a(state, sx0 as u64, r as u64,
-                quelle +% zeile *% ww *% 4 +% spalte *% 4, n, wa, wkey, 0)
+                quelle +% zeile *% ww *% 4 +% spalte *% 4, n, wa, wkey, 0,
+                SCHLEIER_WIN)
         }
         r = r + 1
     }
@@ -6577,7 +6608,15 @@ fn fb_row(state: u64, x: u64, y: u64, src: u64, n: u64) {
 // DIESE FUNKTION RECHNET NICHT SELBST, SIE RUFT `blend`. Das ist die
 // Zusage "genau eine Stelle mischt": hier steht, WIE DECKEND ein Punkt
 // ist, und in `blend` steht, was Mischen heisst.
-fn glass_mix(alt: u64, neu: u64, key: u64, alpha: u64) -> u64 {
+// `schleier` ist die Untergrenze der Lesbarkeit in Helligkeitsstufen:
+// SCHLEIER fuer die Leiste, SCHLEIER_WIN fuer ein gewoehnliches
+// Fenster. Sie steht als ARGUMENT und nicht als stille Statische, weil
+// sonst der Aufrufer, der sie zuletzt gesetzt hat, ueber das Bild des
+// naechsten entscheidet -- derselbe Fehler, den `gaist_an` fuer die
+// Zaehlung nur deshalb nicht macht, weil dort jeder Aufrufer sie
+// hinterher wieder abschaltet.
+fn glass_mix(alt: u64, neu: u64, key: u64, alpha: u64,
+    schleier: u64) -> u64 {
     if alpha >= 100 {
         return neu
     }
@@ -6644,8 +6683,8 @@ fn glass_mix(alt: u64, neu: u64, key: u64, alpha: u64) -> u64 {
     } else {
         dl = lk - lg
     }
-    if dl > SCHLEIER {
-        let amin: u64 = 100 - SCHLEIER * 100 / dl
+    if dl > schleier {
+        let amin: u64 = 100 - schleier * 100 / dl
         if amin > a {
             a = amin
             // ============================== RUNDE GLAS (NACHTRAG)
@@ -6743,8 +6782,11 @@ fn tb_alpha_hoch(state: u64) -> u64 {
 // schon im Zweitpuffer steht" (Hintergrund und alle tieferen Fenster,
 // zu diesem Zeitpunkt fertig gemalt), sonst die Adresse einer Zeile des
 // Milchglasstreifens.
+// `schleier` reicht die Untergrenze der Lesbarkeit durch: der
+// Aufrufer weiss, ob er die LEISTE malt oder ein gewoehnliches
+// Fenster, und `glass_mix` soll es nicht raten muessen.
 fn fb_row_a(state: u64, x: u64, y: u64, src: u64, n: u64, alpha: u64,
-    key: u64, grund: u64) {
+    key: u64, grund: u64, schleier: u64) {
     if y < fb.band_lo(state) {
         return
     }
@@ -6759,7 +6801,7 @@ fn fb_row_a(state: u64, x: u64, y: u64, src: u64, n: u64, alpha: u64,
             alt = __mmio_read32((ziel +% i *% 4) as *mut u32) as u64
         }
         __mmio_write32((ziel +% i *% 4) as *mut u32,
-            glass_mix(alt, neu, key, alpha) as u32)
+            glass_mix(alt, neu, key, alpha, schleier) as u32)
         i = i + 1
     }
 }
@@ -7291,12 +7333,12 @@ fn selftest_glas(state: u64) -> u64 {
     var n: u64 = 0
     // 1. Alpha 100 laesst den neuen Punkt unveraendert -- das ist die
     //    Zusage "bei voller Deckung wie vorher", hier als Zahl.
-    if glass_mix(0x000000, 0x204060, 0x204060, 100) == 0x204060 {
+    if glass_mix(0x000000, 0x204060, 0x204060, 100, SCHLEIER) == 0x204060 {
         n = n + 1
     }
     // 2. Alpha 0 auf der SCHLUESSELFARBE: der Grund bleibt stehen.
     //    d = 0, also a = 0, also kommt der Untergrund heraus.
-    if glass_mix(0x112233, 0x204060, 0x204060, 0) == 0x112233 {
+    if glass_mix(0x112233, 0x204060, 0x204060, 0, SCHLEIER) == 0x112233 {
         n = n + 1
     }
     // 3. Alpha 50 auf der Schluesselfarbe, von Hand gerechnet. Der
@@ -7305,7 +7347,7 @@ fn selftest_glas(state: u64) -> u64 {
     //    greift die Untergrenze NICHT und es gilt genau a = 50 %:
     //    a255 = 127, und blend(0x707070, 0x808080, 127) ist je Kanal
     //    (128*127 + 112*128 + 127)/255 = 30719/255 = 120 = 0x78.
-    if glass_mix(0x707070, 0x808080, 0x808080, 50) == 0x787878 {
+    if glass_mix(0x707070, 0x808080, 0x808080, 50, SCHLEIER) == 0x787878 {
         n = n + 1
     }
     // 4. UND DER PUNKT, AN DEM DIE LESBARKEIT HAENGT: ein Punkt, der
@@ -7313,7 +7355,7 @@ fn selftest_glas(state: u64) -> u64 {
     //    dunklem Grund, d = 3 * 255 = 765 > 96), bleibt bei Alpha 20
     //    VOLL DECKEND. Waere das nicht so, waere die Leistenschrift
     //    durchsichtig und der Kontrast dahin.
-    if glass_mix(0x000000, 0xFFFFFF, 0x202020, 20) == 0xFFFFFF {
+    if glass_mix(0x000000, 0xFFFFFF, 0x202020, 20, SCHLEIER) == 0xFFFFFF {
         n = n + 1
     }
     // 5. Der Weichzeichner gegen eine NAIV gerechnete Mitte. Eine Zeile
@@ -7362,7 +7404,20 @@ fn selftest_glas(state: u64) -> u64 {
     //    (255*216 + 0 + 127)/255 = 55207/255 = 216 = 0xd8.
     //    Gegen die dunkle Leistenschrift #0f172a sind das 12,1:1 und
     //    damit ueber der Latte; ohne den Schleier waeren es 1,6:1.
-    if glass_mix(0x000000, 0xFFFFFF, 0xFFFFFF, 20) == 0xD8D8D8 {
+    if glass_mix(0x000000, 0xFFFFFF, 0xFFFFFF, 20, SCHLEIER) == 0xD8D8D8 {
+        n = n + 1
+    }
+    // 8. UND DERSELBE FALL MIT DEM SCHLEIER EINES GEWOEHNLICHEN
+    //    FENSTERS, ebenfalls von Hand: dl = 255, also
+    //    amin = 100 - 20*100/255 = 93 Prozent, a255 = 93*255/100 = 237,
+    //    und blend(0x000000, 0xffffff, 237) ist je Kanal
+    //    (255*237 + 0 + 127)/255 = 60562/255 = 237 = 0xed.
+    //    0xed liegt naeher an der Fensterfarbe als die 0xd8 der Leiste
+    //    -- genau das ist der Unterschied, um den es geht: unter einem
+    //    Fenster bleibt vom fremden Text ein Schatten, unter der Leiste
+    //    darf mehr durchscheinen.
+    if glass_mix(0x000000, 0xFFFFFF, 0xFFFFFF, 20, SCHLEIER_WIN)
+        == 0xEDEDED {
         n = n + 1
     }
     // Der Streifen ist jetzt Prueffarbe und kein Untergrund mehr.
@@ -7371,7 +7426,7 @@ fn selftest_glas(state: u64) -> u64 {
 }
 
 fn selftest_glas_max() -> u64 {
-    return 7
+    return 8
 }
 
 fn glastest_say(state: u64) {

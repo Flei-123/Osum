@@ -12,6 +12,8 @@
                                                  Kante, Rundung und was
                                                  ausserhalb der Rundung steht
     glascheck.py diff <a.png> <b.png>            abweichende Bildpunkte
+    glascheck.py fenster <bild.png> <serial.txt> JEDE Fensterbeschriftung
+                                                 gegen ihren GEMISCHTEN Grund
 
 DIE ZWEITE RECHNUNG, UND SIE WEISS NICHTS VON DER ERSTEN.
 
@@ -32,12 +34,19 @@ Abnahme faehrt).  Gemessen wird nur der Teil zwischen `--x0` und `--x1`
 ist Schrift und kein Grund.
 """
 import math
+import re
 import sys
 from collections import Counter
 
 from PIL import Image
 
 SCHLEIER = 40          # kernel/ui/wm.fi, const SCHLEIER
+# ... und dieselbe Zahl fuer ein gewoehnliches Fenster: kernel/ui/wm.fi,
+# const SCHLEIER_WIN. Ein Fenster ist von oben bis unten Schrift, also
+# darf sich seine Flaeche nur halb so weit von der Fensterfarbe
+# entfernen wie die Leiste -- sonst laeuft der Text des Fensters
+# darunter quer durch die Beschriftungen.
+SCHLEIER_WIN = 20
 VOLL = 96              # der Abstand, ab dem ein Punkt voll deckend ist
 
 
@@ -58,15 +67,15 @@ def hell(c):
     return (c[0] * 299 + c[1] * 587 + c[2] * 114) // 1000
 
 
-def glass_mix(alt, neu, key, alpha):
+def glass_mix(alt, neu, key, alpha, schleier=SCHLEIER):
     """Die Rechnung aus kernel/ui/wm.fi, hier ein zweites Mal."""
     if alpha >= 100:
         return neu
     d = min(sum(abs(neu[i] - key[i]) for i in range(3)), VOLL)
     a = alpha + (100 - alpha) * d // VOLL
     dl = abs(hell(alt) - hell(key))
-    if dl > SCHLEIER:
-        a = max(a, 100 - SCHLEIER * 100 // dl)
+    if dl > schleier:
+        a = max(a, 100 - schleier * 100 // dl)
     return blend(alt, neu, a * 255 // 100)
 
 
@@ -112,6 +121,106 @@ def hex2rgb(s):
     return ((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF)
 
 
+# ================================== RUNDE GLAS (fix-r3-2): DIE FENSTERSCHRIFT
+#
+# DIESELBE FRAGE WIE FUER DIE LEISTE, EINE EBENE HOEHER GESTELLT.
+#
+# Fuer die Leiste gibt es `kontrast` seit dem Nachtrag: die Schrift
+# gegen den GEMISCHTEN Grund und nicht gegen die Flaechenfarbe, die in
+# der Vorlage steht. Fuer gewoehnliche Fenster fehlte das, und genau
+# dort ist es aufgefallen: mit `window_alpha=55` lief die Ausgabe des
+# Terminals unter dem Einstellungsfenster quer durch dessen Reiterzeile.
+# Die Vorlage sagt "Text #0f172a auf #ffffff, 17,8:1" -- gemalt wurde
+# Text auf einer Mischung aus #ffffff und dem, was darunter lag.
+#
+# WAS DER GRUND EINER BESCHRIFTUNG IST, und warum das nicht die
+# haeufigste Farbe ihres Kastens sein darf: in einem engen Kasten um
+# eine Zeile Text sind die Mischtoene der Kantenglaettung zu Dutzenden
+# vertreten, und jeder einzelne ist dunkler als der Grund. Wer sie
+# mitzaehlt, misst die Schrift gegen sich selbst (nachgemessen: 1,43:1
+# fuer eine Zeile, die in Wahrheit bei 5,2:1 steht).
+#
+# Also raeumlich und nicht farblich: TINTE ist, was der Schriftfarbe
+# nahe ist; GRUND ist jeder Bildpunkt, der mindestens zwei Bildpunkte
+# von jeder Tinte entfernt liegt. Damit fallen die Glaettungsraender
+# heraus, der Schatten eines fremden Buchstabens zwischen den Woertern
+# aber NICHT -- und der ist es, um den es geht. Gemessen wird der
+# SCHLECHTESTE Grund, der mindestens ein Prozent der Flaeche ausmacht.
+FENSTERTEXT = re.compile(
+    r"wlib: text win=(\d+) kind=(\d+) x=(\d+) base=(\d+) fg=(\d+) bg=(\d+)"
+    r" tw=(\d+) ax=(\d+) ay=(\d+)(?: [a-z]+=-?\d+)* t=(.*)")
+
+
+def fenster(bild, serial, marke="settings: rect name=waa "):
+    im = Image.open(bild).convert("RGB")
+    roh = open(serial, "rb").read().decode("latin1")
+    # Der Stand ZUM ZEITPUNKT DER AUFNAHME: alles nach dem letzten
+    # vollstaendigen Bericht der Rechtecke. Dieselbe Regel wie in
+    # shotcheck.py, und aus demselben Grund.
+    schnitt = roh.rfind(marke)
+    schwanz = roh[schnitt:] if schnitt >= 0 else roh
+    f = re.findall(r"wlib: font ui px=(\d+) asc=(\d+) h=(\d+)", roh)
+    asc, desc = (int(f[-1][1]), int(f[-1][2]) - int(f[-1][1])) if f else (16, 6)
+    zeilen = []
+    for ln in schwanz.splitlines():
+        m = FENSTERTEXT.search(ln)
+        if m:
+            zeilen.append(m)
+    if not zeilen:
+        print("fenster KEINE Beschriftung im Mitschnitt -- uitrace aus?")
+        return 1
+    # Das Fenster mit den meisten Beschriftungen ist das vorderste --
+    # dieselbe Wahl wie in shotcheck.py.
+    zaehl = Counter(int(m.group(1)) for m in zeilen)
+    win = zaehl.most_common(1)[0][0]
+    letzte = {}
+    for m in zeilen:
+        if int(m.group(1)) != win or not m.group(10).strip():
+            continue
+        letzte[(m.group(2), m.group(10))] = m
+    schlecht = None
+    n = 0
+    aus = []
+    for m in letzte.values():
+        fg = hex2rgb("%06x" % int(m.group(5)))
+        x0 = int(m.group(8)) + int(m.group(3))
+        y0 = int(m.group(9)) + int(m.group(4)) - asc
+        x1 = min(x0 + int(m.group(7)), im.size[0])
+        y1 = min(int(m.group(9)) + int(m.group(4)) + desc, im.size[1])
+        if x0 >= x1 or y0 >= y1 or x0 < 0 or y0 < 0:
+            continue
+        punkte = {}
+        for y in range(y0, y1):
+            for x in range(x0, x1):
+                punkte[(x, y)] = im.getpixel((x, y))
+        tinte = set(p for p, c in punkte.items()
+                    if max(abs(c[i] - fg[i]) for i in range(3)) <= 60)
+        grund = [c for p, c in punkte.items()
+                 if not any((p[0] + dx, p[1] + dy) in tinte
+                            for dx in range(-2, 3) for dy in range(-2, 3))]
+        if not grund:
+            continue
+        c = Counter(grund)
+        ges = len(grund)
+        kand = [(f0, k) for f0, k in c.items() if k * 100 >= ges]
+        if not kand:
+            kand = [c.most_common(1)[0]]
+        kand.sort(key=lambda fk: kontrast(fg, fk[0]))
+        k = kontrast(fg, kand[0][0])
+        n += 1
+        aus.append((k, m.group(10)[:28], kand[0][0]))
+        if schlecht is None or k < schlecht[0]:
+            schlecht = (k, m.group(10)[:28], kand[0][0], len(kand))
+    aus.sort()
+    print("fenster win=%d beschriftungen=%d schlechteste %d "
+          "text='%s' grund=%02x%02x%02x kandidaten=%d"
+          % (win, n, int(schlecht[0] * 100), schlecht[1],
+             schlecht[2][0], schlecht[2][1], schlecht[2][2], schlecht[3]))
+    for k, t, g in aus[:3]:
+        print("        %6.2f  '%s' auf %02x%02x%02x" % (k, t, g[0], g[1], g[2]))
+    return 0
+
+
 def main(argv):
     if len(argv) < 3:
         print(__doc__)
@@ -139,6 +248,9 @@ def main(argv):
     # wuerde. Wer es anders will, sagt `--x1=`.
     if cmd == "kontrast" and "x1" not in gesetzt:
         opt["x1"] = 1 << 30
+
+    if cmd == "fenster":
+        return fenster(rest[0], rest[1])
 
     if cmd == "diff":
         a = Image.open(rest[0]).convert("RGB")
@@ -296,8 +408,43 @@ def main(argv):
                     s += 1
                 starts.append(s)
         tiefe = (max(starts) - min(starts)) if starts else 0
-        print("kachel links=%d rechts=%d fremd=%d tiefe=%d r=%d"
-              % (links, rechts, fremd, tiefe, r))
+        # UND DIE FLAECHE SELBST, BILDPUNKT FUER BILDPUNKT.
+        #
+        # `fremd` sieht nach AUSSEN und hat damit den halben Fehler
+        # nicht gesehen: eine Kachel, die ihre Flaeche aus einem
+        # anderen Rasterer holt als ihren Rahmen, verliert Bildpunkte
+        # auch nach INNEN. Gemessen an Bild 09 (Stand vor diesem
+        # Nachtrag): `fuib.tafel` beschneidet ein Rechteck, das oben aus
+        # dem Malband herausragt, auf die Bandkante und rundet danach
+        # die Ecken des BESCHNITTENEN Rechtecks -- mitten in der Kachel
+        # "Mitternacht" stand deshalb ein acht Bildpunkte breiter Keil
+        # in der Farbe des Seitengrunds (x=331..338, Zeilen 229..233),
+        # der wie ein verlorenes Zeichen aussah.
+        #
+        # Die Probe nimmt den LINKEN RAND der Kachel: die Spalten 4..7
+        # liegen hinter dem Auswahlring (drei Bildpunkte breit,
+        # `M_FOCUS + 1`) und vor dem Namen (der bei x+8 anfaengt), und
+        # in den Zeilen zwischen den beiden Rundungen liegt dort NICHTS
+        # ausser der Flaeche der Kachel. Was dort nicht die haeufigste
+        # Farbe dieser Spalten ist, ist ein Loch.
+        #
+        # Dazu zwei waagerechte Streifen zwischen dem Rahmen und dem
+        # Namen (Zeile 5..7 von oben und von unten, im mittleren
+        # Drittel der Breite): dort liegt weder der Name, der erst bei
+        # x+8 anfaengt und mittig sitzt, noch die Vorschau, die ganz
+        # rechts sitzt -- und ein Keil an der OBEREN Bandkante faellt
+        # durch die senkrechte Probe allein nicht auf.
+        probe = [(x + i, y + j)
+                 for j in range(r + 1, h - r - 1) for i in range(4, 8)]
+        for j in (5, 6, 7, h - 8, h - 7, h - 6):
+            for i in range(w // 3, w // 3 + 40):
+                probe.append((x + i, y + j))
+        innen = 0
+        if probe:
+            flaeche = Counter(im.getpixel(p) for p in probe).most_common(1)[0][0]
+            innen = sum(1 for p in probe if not nah(im.getpixel(p), flaeche, 24))
+        print("kachel links=%d rechts=%d fremd=%d innen=%d probe=%d tiefe=%d r=%d"
+              % (links, rechts, fremd, innen, len(probe), tiefe, r))
         return 0
 
     if cmd == "kontrast":
