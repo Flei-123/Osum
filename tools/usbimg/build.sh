@@ -787,9 +787,27 @@ fi
 # ================================================== 4. das Dateisystem
 ARGS=(build "$OUT/root.img" "$FS_BLOCKS" --v3
       "--inodes=$FS_INODES" "--karten=$FS_KARTEN")
+# ============ RUNDE MODERN + INTEGRATION 21.09.2026: `bold.ttf` HAT
+# HIER GEFEHLT -- DERSELBE FEHLER WIE BEI `nedit`, NUR EINE SCHRIFT.
+#
+# RUNDE MODERN hat den echten fetten Schnitt geschnitten
+# (assets/osum-sans-bold.ttf, 45012 Oktett, 364 Glyphen, Umrisse
+# bitgleich zu DejaVuSans-Bold) und ihn in tools/k15/build.sh und
+# tools/design/capture.sh eingetragen -- also in die Abbilder, mit
+# denen GEMESSEN wird. In DIESE Zeile, die das AUSGELIEFERTE
+# Wurzelabbild baut, kam er nie. Kein Testlauf war rot: kgui.fi laedt
+# /lib/bold.ttf ausdruecklich als NICHT PFLICHT (fehlt er, wiegt Fett
+# so viel wie Normal). Auf dem Messplatz war der fette Schnitt also
+# da, auf dem Stick nicht -- und die Schrifthierarchie, die diese
+# Runde gebaut hat, waere bei niemandem angekommen.
+#
+# Darum steht /lib/bold.ttf ab jetzt AUCH unten in PFLICHT: die
+# Schrift darf zur Laufzeit fehlen duerfen, aber sie darf nicht
+# STILL aus dem Bauplan fallen.
 ARGS+=(/lib/
        "/lib/mono.ttf=assets/osum-mono.ttf"
        "/lib/sans.ttf=assets/osum-sans.ttf"
+       "/lib/bold.ttf=assets/osum-sans-bold.ttf"
        "/lib/icons.ttf=assets/osum-icons.ttf")
 ARGS+=(/bin/)
 for p in $gebaut; do ARGS+=("/bin/$p=$OUT/$p.elf"); done
@@ -1031,7 +1049,7 @@ sagen "wurzel      $(stat -c%s "$OUT/root.img") Oktette OFS v3"
 
 # ============================================ 5. NACHZAEHLEN, NICHT HOFFEN
 PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
-/lib/sans.ttf /lib/mono.ttf /lib/icons.ttf /users/root/config/locale \
+/lib/sans.ttf /lib/mono.ttf /lib/icons.ttf /lib/bold.ttf /users/root/config/locale \
 /etc/netview/state-online /etc/netview/state-nocarrier \
 /etc/netview/state-noip /etc/netview/state-noroute \
 /etc/netview/mark-filtered /etc/netview/mark-faked /etc/netview/mark-none \
