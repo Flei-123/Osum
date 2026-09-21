@@ -24,6 +24,16 @@ Rueckgabewert gehen sie nur mit diesem Schalter ein.
 Fenster gemessen und die Leiste nie). Sie kommt auf eine eigene
 Ausgabezeile `shotcheck: leiste ...` und geht in den Rueckgabewert ein.
 
+`--linien` stellt eine Frage, die aus gemeldeten Rechtecken nicht zu
+beantworten ist: laeuft eine RAHMENLINIE durch die Schrift? Zwei
+Rechtecke, die sich nur BERUEHREN, melden keine Ueberlappung -- die
+Statuszeile "bereit" der Einstellungen sass trotzdem genau auf der
+unteren Kante der linken Karte. Gesucht wird links UND rechts neben
+der Tinte, auf derselben Bildzeile, ein einfarbiger Lauf von zehn
+Bildpunkten, der nicht der gemessene Grund ist. Die Zahl `linie` steht
+immer in der Ausgabezeile; in den Rueckgabewert geht sie nur mit
+diesem Schalter ein.
+
   1. EMPTY LABEL. Every `wlib: text ... x= base= tw= t=` line names a
      place where letters were drawn and how wide they are. If that box
      holds no pixel differing from the reported background, nothing was
