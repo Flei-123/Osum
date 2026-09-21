@@ -1660,7 +1660,7 @@ same "und die sechste die desselben Musters mit Milchglas 16" \
 # ============================================ RUNDE GLAS (fix-r4-1)
 # DIE VIER AUFNAHMEN DIESES ABSCHNITTS GEHEN IN DIE MAPPE.
 #
-# Bis hierher lagen 04 bis 07 in `docs/shots/glas/` und wurden von
+# Bis hierher lagen 04 bis 06 in `docs/shots/glas/` und wurden von
 # Hand dorthin gelegt; welcher Lauf sie gemacht hat, stand nur in der
 # README daneben. Ab jetzt schreibt sie der Lauf selbst, und zwar
 # genau die, die er gerade gemessen hat -- Bild und Zahl kommen damit
@@ -1668,15 +1668,15 @@ same "und die sechste die desselben Musters mit Milchglas 16" \
 for paar in "glas-alpha-100:04-taskleiste-100-deckend" \
             "glas-alpha-70:05-taskleiste-70-prozent" \
             "glas-alpha-40:06-taskleiste-40-prozent" \
-            "glas-milchglas-verlauf:07-milchglas-blur16-verlauf"; do
+            "glas-milchglas-verlauf:23-milchglas-verlauf-feines-muster"; do
     cp "$SHOTS/${paar%%:*}.png" "$GSHOTS/${paar##*:}.png" 2>/dev/null
 done
 GFEHLT=0
 for b in 04-taskleiste-100-deckend 05-taskleiste-70-prozent \
-         06-taskleiste-40-prozent 07-milchglas-blur16-verlauf; do
+         06-taskleiste-40-prozent 23-milchglas-verlauf-feines-muster; do
     [ -s "$GSHOTS/$b.png" ] || GFEHLT=$((GFEHLT+1))
 done
-num "die vier Aufnahmen 04 bis 07 der Mappe stammen aus DIESEM Lauf" \
+num "die vier Aufnahmen 04 bis 06 und 23 der Mappe stammen aus DIESEM Lauf" \
     "$GFEHLT" eq 0
 GL=$(grep -a 'wm: glas r=' "$TMPD/blur/serial.txt" | tail -1)
 BUS=$(printf '%s' "$GL" | grep -oE ' max=[0-9]+' | grep -oE '[0-9]+')
