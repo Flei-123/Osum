@@ -1848,8 +1848,40 @@ for pair in "al40:hell" "dunkel:dunkel"; do
     FG=$(grep -a 'taskbar: text clock ' "$TMPD/$d/serial.txt" | tail -1 \
          | grep -oE 'fg=[0-9]+' | cut -d= -f2)
     FGH=$(printf '%06x' "${FG:-0}")
+    # NACHTRAG 2: GEMESSEN WIRD, WO SCHRIFT STEHT.
+    #
+    # Die Leiste meldet jedes Feld, das sie beschriftet, auf der
+    # seriellen Leitung (`taskbar: text <rolle> x= base= ... tw=`), und
+    # `wlibc.text_at` legt unter genau dieses Feld die Textplatte, die
+    # `wm.glass_mix` deckend durchlaesst. Der Kontrast wird deshalb auf
+    # diesen Feldern gemessen und nicht auf der leeren Flaeche
+    # dazwischen -- dort steht kein Buchstabe, dessen Lesbarkeit man
+    # pruefen koennte, und seit die Leiste keine Untergrenze der
+    # Deckkraft mehr hat (`const SCHLEIER = 0`), ist die Flaeche
+    # wirklich so durchsichtig, wie der Regler sagt. DASS sie
+    # durchsichtig ist, prueft 11d3 gleich darunter; hier geht es um
+    # die Schrift.
+    # GEMESSEN WERDEN START UND UHR -- DIE ZWEI FELDER, DIE WIRKLICH
+    # AUF DEM LEISTENGRUND STEHEN.
+    #
+    # Der Knopf eines Fensters ist bewusst nicht dabei: er malt sich
+    # seine eigene, deckende Pille (die Akzentfarbe beim vordersten
+    # Fenster) und traegt seine Schrift auf DIESER Flaeche. Sein
+    # Kontrast haengt an der Pille und nicht an der Durchsicht der
+    # Leiste -- er ist bei voller Deckung derselbe wie bei vierzig
+    # Prozent, und die Zusage dieses Abschnitts ist die der Durchsicht.
+    # Gemessen wird er in Abschnitt 11j zusammen mit den uebrigen
+    # Knoepfen.
+    FELDER=$(grep -aE 'taskbar: text (start|clock) ' "$TMPD/$d/serial.txt" \
+        | sed -nE 's/.* x=([0-9]+) base=([0-9]+) fg=([0-9]+) .* tw=([0-9]+) .*/\1,\2,\4,\3/p' \
+        | sort -u \
+        | while IFS=, read -r fx fb ft ff; do printf '%s,%s,%s,%06x;' \
+            "$fx" "$fb" "$ft" "$ff"; done)
+    ASC=$(grep -a 'taskbar: ready ascent=' "$TMPD/$d/serial.txt" | tail -1 \
+        | grep -oE 'ascent=[0-9]+' | cut -d= -f2)
     KZ=$(python3 tools/themestore/glascheck.py kontrast \
-         "$TMPD/$d/desktop.png" "$FGH")
+         "$TMPD/$d/desktop.png" "$FGH" \
+         --felder="$FELDER" --ascent="${ASC:-12}")
     echo "        $nm: $KZ"
     K=$(printf '%s' "$KZ" | grep -oE '^kontrast [0-9]+' | cut -d' ' -f2)
     num "Leistenschrift gegen den SCHLECHTESTEN gemischten Grund ($nm, 40 %%), x100" \
@@ -1858,8 +1890,16 @@ for pair in "al40:hell" "dunkel:dunkel"; do
     # kommt: es muss wirklich mehr als ein Grund unter der Leiste
     # gelegen haben, sonst misst "der schlechteste" dasselbe wie "der
     # haeufigste" und die Verschaerfung waere keine.
-    KK=$(printf '%s' "$KZ" | grep -oE 'kandidaten=[0-9]+' | cut -d= -f2)
-    num "und es waren wirklich mehrere Gruende zu messen ($nm)" "${KK:-0}" ge 2
+    # GEGENPROBE, damit die Zahl nicht aus einem leeren Ausschnitt
+    # kommt: unter der Schrift muss wirklich eine zusammenhaengende
+    # Flaeche liegen -- die Textplatte. Sie traegt mehr als zwei
+    # Fuenftel jedes gemessenen Feldes; waere sie nicht da, bestuende
+    # das Feld aus Untergrund in vielen Toenen und kein einzelner kaeme
+    # auf diesen Anteil. Das ist die Zahl, die belegt, DASS die
+    # Lesbarkeit an der Platte haengt und nicht an einer Zufallsfarbe.
+    KK=$(printf '%s' "$KZ" | grep -oE 'anteil=[0-9]+' | cut -d= -f2)
+    num "und die Schrift stand wirklich auf ihrer Platte ($nm, Anteil %%)" \
+        "${KK:-0}" ge 40
 done
 # ---- 11d3. UND DAS DUNKLE BILD IST EIN BELEG FUER DURCHSICHT.
 #

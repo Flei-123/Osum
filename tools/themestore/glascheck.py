@@ -52,7 +52,7 @@ from collections import Counter
 
 from PIL import Image
 
-SCHLEIER = 40          # kernel/ui/wm.fi, const SCHLEIER
+SCHLEIER = 0          # kernel/ui/wm.fi, const SCHLEIER
 # ... und dieselbe Zahl fuer ein gewoehnliches Fenster: kernel/ui/wm.fi,
 # const SCHLEIER_WIN.  Sie ist seit fix-r4-2 NULL, und das heisst hier
 # wie dort "kein Schleier": ein Fenster holt seine Lesbarkeit nicht
@@ -358,6 +358,59 @@ def main(argv):
                       opt.get("y0", 0), opt.get("y1", im.size[1]))
     else:
         pts = leiste(im, opt["hoehe"], opt["x0"], opt["x1"])
+    # ============================= RUNDE GLAS (NACHTRAG 2): --felder
+    #
+    # DIE LESBARKEIT WIRD DORT GEMESSEN, WO SCHRIFT STEHT -- UND NICHT
+    # IRGENDWO AUF DER LEISTE.
+    #
+    # Solange die Leiste eine Untergrenze der Deckkraft hatte, war der
+    # ganze Streifen gleich hell, und "der schlechteste Grund im
+    # Streifen" war derselbe wie "der Grund unter der Schrift". Seit
+    # die Deckung dort sitzt, wo sie hingehoert (die Textplatte aus
+    # `wlibc.platte`, die Ring 0 in `glass_mix` unveraendert
+    # durchlaesst), sind das zwei verschiedene Dinge: zwischen den
+    # Beschriftungen ist die Leiste so durchsichtig, wie der Regler
+    # sagt, und dort steht kein Buchstabe, dessen Lesbarkeit man
+    # beurteilen koennte. Eine Zusage, die den leeren Teil der Leiste
+    # gegen die Schriftfarbe haelt, misst die Lesbarkeit von nichts.
+    #
+    # `--felder=x,base,tw;...` sind die Felder, die die Leiste selbst
+    # auf der seriellen Leitung meldet (`taskbar: text ... x= base=
+    # tw=`), `--ascent` ihre Oberlaenge. Das Rechteck ist genau das,
+    # das `wlibc.text_at` als Platte setzt: eine Zeile ueber der
+    # Oberlaenge bis zwei unter der Grundlinie.
+    if opt.get("felder"):
+        asc = int(opt.get("ascent", 12))
+        unten = int(opt.get("unter", 4))
+        bar_y = im.size[1] - opt["hoehe"]
+        erlaubt = []
+        for f in str(opt["felder"]).split(";"):
+            if not f.strip():
+                continue
+            teile = f.split(",")
+            fx, fb, ftw = (int(v) for v in teile[:3])
+            # EINEN BILDPUNKT ENGER ALS DIE PLATTE, ABSICHTLICH: die
+            # Platte ist rundum einen Punkt groesser als das Feld,
+            # damit ihre Kante nicht zu sehen ist, und genau dieser
+            # Saum ist eine Mischung aus Platte und durchsichtiger
+            # Leiste. Er ist kein Grund, auf dem Schrift steht.
+            y0 = bar_y + fb - asc
+            y1 = bar_y + fb + unten - 1
+            # VIERTES GLIED: DIE SCHRIFTFARBE DIESES FELDES.
+            #
+            # Die drei Felder der Leiste sind nicht gleich beschriftet:
+            # der Knopf des VORDERSTEN Fensters traegt weisse Schrift
+            # auf der Akzentfarbe, Start und Uhr dunkle Schrift auf der
+            # Platte. Wer alle drei gegen dieselbe Schriftfarbe haelt,
+            # meldet fuer den Knopf den Kontrast einer Farbe, die dort
+            # gar nicht steht -- gemessen 3,45:1 gegen die Akzentflaeche,
+            # auf der in Wahrheit Weiss mit 4,8:1 steht.
+            erlaubt.append((fx, y0, fx + ftw, y1,
+                            hex2rgb(teile[3]) if len(teile) > 3 else None))
+        pts = [p for p in pts
+               if any(a <= p[0] <= c and b <= p[1] <= d
+                      for a, b, c, d, _f in erlaubt)]
+        opt["_felder"] = erlaubt
     px = [im.getpixel(p) for p in pts]
 
     if cmd == "mix":
@@ -612,6 +665,71 @@ def main(argv):
               % (links, rechts, fremd, innen, len(probe), tiefe, r))
         return 0
 
+    if cmd == "kontrast" and opt.get("_felder"):
+        # JE FELD SEINE EIGENE SCHRIFTFARBE, UND GEMELDET WIRD DAS
+        # SCHLECHTESTE FELD.
+        #
+        # Das ist dieselbe Rechnung wie unten, nur feldweise: die
+        # Glaettungstoene fliegen ueber die Verbindungslinie raus, der
+        # schlechteste verbleibende Grund zaehlt, und von den Feldern
+        # zaehlt das schwaechste. Ein Mittelwert waere hier falsch --
+        # unlesbar ist eine Beschriftung schon dann, wenn EINE es ist.
+        vor = hex2rgb(rest[1])
+        schlecht = None
+        zeile = []
+        for (a, b, cc, d, ffg) in opt["_felder"]:
+            fg = ffg if ffg else vor
+            # DAS GANZE FELD, UND DER GRUND IST, WAS DARIN DIE FLAECHE
+            # AUSMACHT.
+            #
+            # Ein Umweg ueber das umschliessende Rechteck der
+            # Schriftpunkte funktioniert nur, solange die Schrift dunkel
+            # ist: bei WEISSER Schrift auf dem Knopf des vordersten
+            # Fensters ist die Textplatte selbst weiss, sie gilt dann als
+            # "Schriftpunkt", und das Rechteck wird so gross wie das
+            # Feld. Also andersherum gerechnet -- der Grund ist die
+            # Farbe, die im Feld die FLAECHE traegt, und eine Flaeche
+            # macht mindestens ein Fuenftel des Feldes aus. Alles
+            # Seltenere ist Rand oder Glaettung.
+
+            fpx = [im.getpixel((i, j))
+                   for i in range(a, cc + 1) for j in range(b, d + 1)]
+            if not fpx:
+                continue
+            cnt = Counter(fpx)
+            ges = len(fpx)
+            haeufig = cnt.most_common(1)[0][0]
+
+            def auf_linie(f, fg=fg, haeufig=haeufig):
+                dv = [haeufig[i] - fg[i] for i in range(3)]
+                ll = sum(v * v for v in dv)
+                if ll == 0:
+                    return False
+                t = sum((f[i] - fg[i]) * dv[i] for i in range(3)) / ll
+                t = max(0.0, min(1.0, t))
+                ab = sum((f[i] - fg[i] - t * dv[i]) ** 2 for i in range(3))
+                return ab <= 12 * 12
+
+            kand = [(f, n) for f, n in cnt.items()
+                    if n * 5 >= ges
+                    and max(abs(f[i] - fg[i]) for i in range(3)) > 40
+                    and not auf_linie(f)]
+            if not kand:
+                kand = [(haeufig, cnt[haeufig])]
+            kand.sort(key=lambda fn: kontrast(fg, fn[0]))
+            g, anz = kand[0]
+            k = kontrast(fg, g)
+            zeile.append("x%d=%d" % (a, int(k * 100)))
+            if schlecht is None or k < schlecht[0]:
+                schlecht = (k, g, anz, ges, fg, len(kand))
+        k, g, anz, ges, fg, nk = schlecht
+        print("kontrast %d grund=%02x%02x%02x anteil=%d fg=%02x%02x%02x "
+              "kandidaten=%d felder=%d %s"
+              % (int(k * 100), g[0], g[1], g[2], 100 * anz // max(ges, 1),
+                 fg[0], fg[1], fg[2], nk, len(opt["_felder"]),
+                 " ".join(zeile)))
+        return 0
+
     if cmd == "kontrast":
         # DER SCHLECHTESTE GRUND UND NICHT DER HAEUFIGSTE.
         #
@@ -636,9 +754,47 @@ def main(argv):
         fg = hex2rgb(rest[1])
         c = Counter(px)
         ges = max(len(px), 1)
+        # Mit `--felder` ist der Ausschnitt klein (ein paar hundert
+        # Bildpunkte statt dreissigtausend), und ein Prozent davon sind
+        # eine Handvoll Punkte -- also genau die Groessenordnung, in der
+        # die Kantenglaettung der Buchstaben lebt. Auf einem so kleinen
+        # Ausschnitt ist die Schwelle deshalb fuenf Prozent.
+        schwelle = 5 if opt.get("felder") else 1
+
+        # UND DIE KANTENGLAETTUNG FLIEGT RAUS, AUCH WENN SIE HAEUFIG IST.
+        #
+        # Der Filter darueber ("weit genug weg von der Schriftfarbe")
+        # reicht auf dem ganzen Streifen, weil ein Glaettungston dort
+        # nie ein Prozent erreicht. Auf dem kleinen Ausschnitt eines
+        # Textfeldes erreicht er sieben bis neun, und dann wird der
+        # dunkelste Randton eines Buchstabens als "Grund" gemeldet und
+        # gegen die Schriftfarbe gehalten -- gemessen an "Start" auf
+        # einer VOLL DECKENDEN Leiste: 42 Bildpunkte (75, 81, 95)
+        # zwischen Schrift (15, 23, 42) und Platte (255, 255, 255).
+        # Dieselben 42 Punkte stehen auf der durchsichtigen Leiste,
+        # also ist das kein Durchscheinen, sondern der Umriss.
+        #
+        # Ein Glaettungston liegt auf der Verbindungslinie zwischen
+        # Schriftfarbe und Grund. Genau das wird geprueft: der Abstand
+        # der Farbe von dieser Strecke. Eine Farbe, die WIRKLICH
+        # durchscheinender Untergrund ist, liegt daneben -- sie traegt
+        # den Farbton des Bildes.
+        haeufig = c.most_common(1)[0][0]
+
+        def auf_linie(f):
+            d = [haeufig[i] - fg[i] for i in range(3)]
+            ll = sum(v * v for v in d)
+            if ll == 0:
+                return False
+            t = sum((f[i] - fg[i]) * d[i] for i in range(3)) / ll
+            t = max(0.0, min(1.0, t))
+            ab = sum((f[i] - fg[i] - t * d[i]) ** 2 for i in range(3))
+            return ab <= 12 * 12
+
         kand = [(f, n) for f, n in c.items()
-                if n * 100 >= ges
-                and max(abs(f[i] - fg[i]) for i in range(3)) > 40]
+                if n * 100 >= ges * schwelle
+                and max(abs(f[i] - fg[i]) for i in range(3)) > 40
+                and not auf_linie(f)]
         if not kand:
             kand = [c.most_common(1)[0]]
         kand.sort(key=lambda fn: kontrast(fg, fn[0]))
