@@ -776,57 +776,43 @@ for pair in "set:Darstellung" "setv:Vorlagen"; do
     [ "${e:-1}" = 0 ] && [ "${c:-1}" = 0 ] && [ "${o:-1}" = 0 ] || \
         printf '%s\n' "$out" | sed 's/^/        /' | head -12
 done
-# ------------------------ RUNDE GLAS (nachtrag): HEISST DER REITER SO?
+# ---------------- RUNDE GLAS (nachtrag): UND WIE VIEL DAVON UEBRIG IST
 #
-# Die Reiterleiste kuerzt eine Beschriftung, die nicht in ihren Reiter
-# passt. Bis hierher tat sie es STILL: "Netzzugriff" wurde
-# "Netzzugrif" gemalt, und ein fehlender letzter Buchstabe sieht aus
-# wie ein Wort. Seit dieser Runde meldet jeder Reiter den GANZEN Namen
-# (`t=`) und beide Laengen (`nq=` gemalt, `nv=` ganz) -- und hier wird
-# der gemeldete Name gegen die Sprachdatei gehalten, aus der er kommt.
-# Ungleich ist rot: dann malt die Leiste etwas anderes, als
-# locale/de/messages sagt, und keine Bildpruefung der Welt weiss, ob
-# das Absicht war.
-TABNAM=$(python3 - locale/de/messages "$SE" <<'PY'
+# Dass der gemeldete Name der der Sprachdatei ist, misst Abschnitt 8
+# ("jeder Reiter meldet den Namen..."); das steht dort einmal und wird
+# hier nicht noch einmal gerechnet. Was hier dazukommt, ist die andere
+# Haelfte derselben Zeile: `nv` muss die Laenge DIESES Namens in
+# Oktetten sein. Eine gemeldete Laenge, die nicht zum gemeldeten Text
+# passt, macht jede Aussage ueber "gekuerzt" wertlos -- und genau
+# diese zwei Zahlen benutzt tools/themestore/shotcheck.py, um eine
+# stille Kuerzung von einem kurzen Namen zu unterscheiden.
+TABNV=$(python3 - locale/de/messages "$SE" <<'PY'
 import re, sys
-msg = open(sys.argv[1], 'rb').read().decode('utf-8')
 want = None
-for zeile in msg.splitlines():
+for zeile in open(sys.argv[1], 'rb').read().decode('utf-8').splitlines():
     if zeile.startswith('settings.tabs'):
         want = zeile.split('=', 1)[1].strip().split('\\n')
 if want is None:
-    print("        keine Zeile settings.tabs in %s" % sys.argv[1],
-          file=sys.stderr)
     print(99)
     raise SystemExit
 txt = open(sys.argv[2], 'rb').read().decode('utf-8', 'replace')
 ist = {}
-for m in re.finditer(r'wlib: tab i=(\d+) .* nq=(\d+) nv=(\d+) t=(.*)', txt):
-    ist[int(m.group(1))] = (m.group(4), int(m.group(2)), int(m.group(3)))
+for m in re.finditer(r'wlib: tab i=(\d+) .* nq=(\d+) nv=(\d+) t=', txt):
+    ist[int(m.group(1))] = (int(m.group(2)), int(m.group(3)))
 n = 0
 if len(ist) != len(want):
     print("        %d Reiter gemeldet, %d in der Sprachdatei"
           % (len(ist), len(want)), file=sys.stderr)
     n += 1
 for i, w in enumerate(want):
-    if i not in ist:
-        print("        Reiter %d ('%s') meldet sich nicht" % (i, w),
-              file=sys.stderr)
-        n += 1
-        continue
-    t, nq, nv = ist[i]
-    if t != w:
-        print("        Reiter %d meldet '%s', die Sprachdatei sagt '%s'"
-              % (i, t, w), file=sys.stderr)
-        n += 1
-    if nv != len(w.encode('utf-8')):
+    if i in ist and ist[i][1] != len(w.encode('utf-8')):
         print("        Reiter %d meldet nv=%d, '%s' hat %d Oktette"
-              % (i, nv, w, len(w.encode('utf-8'))), file=sys.stderr)
+              % (i, ist[i][1], w, len(w.encode('utf-8'))), file=sys.stderr)
         n += 1
 print(n)
 PY
 )
-num "Reiter, deren gemeldeter Name nicht der der Sprachdatei ist" "${TABNAM:-99}" eq 0
+num "Reiter, deren gemeldete Laenge nicht zu ihrem Namen passt" "${TABNV:-99}" eq 0
 # UND WIE VIELE DAVON GEKUERZT GEMALT WERDEN. Das ist keine Zusage auf
 # 0 -- elf deutsche Reiter passen in 728 Bildpunkte nur gekuerzt --,
 # sondern die Zahl, die der naechste Umbau der Reiterleiste senken
