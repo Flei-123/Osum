@@ -459,6 +459,62 @@ Nachtrag), `17-vorher-nachher-umlaut-und-leiste.png` (vorher/nachher,
 
 ---
 
+## 9b. Nachtrag nach der Jury: die Zeile, der Strich und die Bilder
+
+Vier Maengel, vier Messungen (fix-r3-4).
+
+**Die Statuszeile lag auf der Kartenkante.** `bereit` sass bei
+`ty + body`, und genau dort verlief die untere Kante der linken Karte
+(die zwoelf Bildpunkte ueber den Rumpf hinausging). Zwei Rechtecke,
+die sich nur BERUEHREN, melden keine Ueberlappung — Abschnitt 8 und 10
+konnten das also nie sehen. Jetzt ist die Zeile eine eigene Zeile im
+Fluss: die Karte endet mit dem Rumpf (`kh = body`), dann acht
+Bildpunkte Luft (`STAT_GAP`), dann die Zeile; gemessen auf `modern`
+endet die linke Spalte bei 504, die Karte bei 504, die Zeile steht bei
+512..532 in einem Fenster von 542. Die zwoelf Bildpunkte, die die
+Spalte dafuer hergeben musste, kommen aus der Schemaliste (92 → 80,
+drei gemalte Zeilen vorher wie nachher).
+
+Gemessen wird es im BILD: `shotcheck.py --linien` sucht links und
+rechts neben jeder Beschriftung, auf derselben Bildzeile, einen
+einfarbigen Lauf von zehn Bildpunkten, der nicht der gemessene Grund
+ist. Abschnitt 11h haelt das auf `linie 0` fuer beide Seiten und
+beweist mit einer Gegenprobe, dass die Null etwas misst: dieselbe
+Aufnahme mit einer auf dem Wirt quer durch die Zeile gemalten Linie
+wird rot (`linie 1`).
+
+**Der Strich unter dem Leistenknopf folgte einer zweiten Rechnung.**
+`pill` nahm `w * 45 / 100`, mittig — eine Zahl, die mit der
+Knopfbreite wuchs und mit dem Wort darueber nichts zu tun hatte;
+sobald ein Symbol vor dem Titel stand, begann der Strich links vom
+Symbol. Anfang und Laenge kommen jetzt aus derselben Breitenmessung
+wie der Text (`button_sym` merkt `lab_tx`/`lab_tw`, `pill` liest sie),
+und die Leiste meldet beides nebeneinander:
+`taskbar: pille i=1 x=235 w=101 tx=235 tw=101` gegen
+`taskbar: text button x=235 ... tw=101`. Abschnitt 11i haelt sie
+gegeneinander. Ein Knopf ohne Wort (ein Anhefter ist nur ein Symbol)
+behaelt die schmale, mittige Pille — unter einem Symbol gibt es keine
+Textbreite, an die man einen Strich binden koennte.
+
+**Bild 10 hiess, was es nicht zeigt.** Es heisst jetzt
+`10-zug-hin-und-zurueck-keine-schlieren.png`, und der Abnahmelauf legt
+daneben `22-zug-endlage-unter-der-leiste.png` ab: derselbe Zug OHNE
+Rueckweg, das Fenster bleibt unter der Leiste stehen
+(`unterpx=16044`), `empty 0 cut 0 overlapping 0 linie 0`, keine
+einzige `wm: zieh`-Zeile.
+
+**Bild 12 brauchte die README, um lesbar zu sein.** Es wird jetzt von
+`tools/themestore/leistenvergleich.py` aus den vier Aufnahmen
+desselben Laufs gebaut, und jede Zeile traegt im Bild ihre
+Reglerstellung UND die gemessene Streuung: `var 0` / `1597` / `6389` /
+`788`, dazu die Zahl der Farben (1 / 2 / 2 / 13). Die Zahl wird nicht
+abgetippt, sondern mit `glascheck.leiste`/`glascheck.hell` gerechnet —
+derselben Rechnung, mit der Abschnitt 11c das Milchglas nachweist —,
+und der Lauf haelt die vier Zahlen im Bild gegen die vier, die er
+selbst gemessen hat.
+
+---
+
 ## 10. Wo was steht
 
 | Datei | Was dieser Runde gehoert |
@@ -471,5 +527,6 @@ Nachtrag), `17-vorher-nachher-umlaut-und-leiste.png` (vorher/nachher,
 | `kernel/user/settings.fi` | die vier Regler auf "Darstellung" |
 | `tools/themestore/run.sh` | Abschnitt 11, 55 neue Zusagen |
 | `tools/themestore/glascheck.py` | die zweite Rechnung auf dem Wirt |
-| `tools/themestore/shotcheck.py` | `--leiste` (Nachtrag) |
+| `tools/themestore/shotcheck.py` | `--leiste` (Nachtrag), `--linien` (Bildpunktprobe auf Rahmenlinien) |
+| `tools/themestore/leistenvergleich.py` | Bild 12, beschriftet und mit gemessener `var` |
 | `docs/shots/glas/` | die 15 Aufnahmen und ihre Tabelle |

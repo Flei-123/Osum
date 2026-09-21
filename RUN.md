@@ -117,6 +117,34 @@ Aufnahmen der Runde liegen daneben in `docs/shots/glas/`; welche
 welche ist, sagt `docs/shots/glas/README.md`, und was die Runde
 gebaut und was sie NICHT erreicht hat, steht in `docs/RUNDE-GLAS.md`.
 
+Drei dieser Aufnahmen macht der Lauf inzwischen selbst und legt sie
+unter ihrem Namen in `docs/shots/glas/` ab, damit Bild und Lauf nicht
+auseinanderlaufen koennen:
+
+* **10 — der Zug hin UND zurueck** (`10-zug-hin-und-zurueck-keine-
+  schlieren.png`). Der Name sagt, was der Beleg ist: keine Schliere.
+* **22 — die Endlage unter der Leiste**
+  (`22-zug-endlage-unter-der-leiste.png`), derselbe Zug ohne
+  Rueckweg. Das Fenster bleibt unter der Leiste stehen
+  (`unterpx=16044`), und `shotcheck.py` misst dort `empty 0 cut 0
+  overlapping 0`.
+* **12 — der beschriftete Leistenvergleich**. Er wird von
+  `tools/themestore/leistenvergleich.py` aus den vier Aufnahmen
+  desselben Laufs gebaut, und jede Zeile traegt IM BILD ihre
+  Reglerstellung und ihre gemessene Streuung (`var 0 / 1597 / 6389 /
+  788`). Die Zahl kommt aus `glascheck`, und der Lauf haelt die vier
+  Zahlen im Bild gegen die vier, die er selbst gemessen hat.
+
+**Zwei Fragen, die seit fix-r3-4 im Bild gestellt werden.**
+`shotcheck.py --linien` sucht neben jeder Beschriftung nach einer
+durchlaufenden Rahmenlinie — so ist aufgefallen, dass die Statuszeile
+„bereit" genau auf der unteren Kante der linken Karte sass, was kein
+Vergleich gemeldeter Rechtecke je zeigen konnte (sie ueberlappen
+nicht, sie beruehren sich). Und Abschnitt 11i haelt den Strich unter
+dem vorderen Leistenknopf gegen die gemessene Breite seiner
+Beschriftung: Anfang und Laenge kommen jetzt aus derselben Messung wie
+der Text (`taskbar: pille x= w= tx= tw=`).
+
 ## 4. Einstellen im laufenden System
 
 Einstellungen → Reiter **Darstellung**, rechte Spalte unten: vier
