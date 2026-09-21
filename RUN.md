@@ -64,20 +64,27 @@ bash tools/themestore/run.sh
 ```
 
 Zwoelf Abschnitte, rund 25 Minuten (QEMU/TCG). Letzter Lauf auf diesem
-Rechner:
+Rechner, vom Zusammenbau der Runde unabhaengig nachgefahren:
 
 ```
 THEMESTORE: 230 passed, 0 failed
 ```
+
+230 Zeilen `OK`, keine einzige `FAIL`, Rueckgabewert 0. Ein Hinweis
+fuer den, der das nachmisst: `run.sh` schreibt auf die Standardausgabe.
+Laeuft daneben ein zweiter Lauf in DIESELBE Datei, mischen sich die
+Zeilen ineinander und das Ergebnis sieht aus, als gehoere fremder Text
+zu dieser Abnahme. Also je Lauf eine eigene Datei — und der Beleg ist
+die Zeile `THEMESTORE:` zusammen mit dem Rueckgabewert, nicht das, was
+sonst noch im Mitschnitt steht.
 
 Die Zahlen, die dieser Lauf nebenbei misst — sie stehen im Mitschnitt,
 damit niemand sie erhoffen muss:
 
 | Sache | gemessen |
 |---|---|
-| Weichzeichner je Vollbild | `us=45511`, Spitze `max=56721` bei `px=35840` |
-| dasselbe mit dem groessten Radius (16) | `us=42923`, Spitze `max=49335` |
-| und wie oft der Streifen aus dem Zwischenspeicher kam | `cache=2/26` |
+| Weichzeichner je Vollbild | `us=39346`, Spitze `max=203350` bei `px=35840` |
+| und wie oft der Streifen aus dem Zwischenspeicher kam | `cache=2/27` |
 | Milchglas ueber dem GROBEN Muster | `var 4102` (2 Farben) ohne, `var 3563` (36 Farben) mit |
 | gekuerzte Reiternamen von elf | 0 (die Leiste hat zwei Zeilen) |
 | gekuerzter Fliesstext auf beiden Seiten | 0 |
@@ -85,6 +92,14 @@ damit niemand sie erhoffen muss:
 | dieselbe Schrift, dunkles Muster | 12,33:1 |
 | dunkles Muster mit Milchglas 12 | 12,33:1 aus 13 Kandidaten |
 | Schlieren nach dem Zug unter die Leiste | 0 Bildpunkte |
+
+Die Zeiten des Weichzeichners sind die eines Laufs auf DIESEM Rechner
+und schwanken mit seiner Last — die Spitze lag hier einmal bei 45 ms
+und einmal, auf einer belasteten Maschine, bei 203 ms. Deshalb prueft
+der Lauf keine feste Zahl, sondern eine Schranke (`unter einer
+Drittelsekunde`, QEMU/TCG ohne KVM) und meldet die gemessene Zahl
+daneben. Wer die Tabelle nachrechnet, bekommt andere Mikrosekunden und
+dieselben Zusagen.
 
 **Wer rundet und wer mischt — "ein Ort je Ring", nicht "genau einer".**
 Abschnitt 11e stellt diese Frage dem GANZEN Baum und nicht einer Datei:
