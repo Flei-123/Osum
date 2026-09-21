@@ -2386,6 +2386,13 @@ fn surface(state: u64) {
             if kstate.mode_on(state, kstate.M_WMANIM) {
                 anim_vorfuehrung(state)
             }
+            // RUNDE ZIEH: den Zug vorfuehren. Eigener Schalter,
+            // eigener Ablauf -- `wmanim` und `wmzieh` duerfen
+            // zusammen laufen, sie fassen verschiedene Fenster an.
+            if kstate.mode_on(state, kstate.M_WMZIEH) {
+                zieh_marken(state)
+                zieh_vorfuehrung(state)
+            }
             // RUNDE VSYNC: `wmruhe` -- das Fenster steht, das Bild
             // wechselt trotzdem. So misst die Zerreissprobe das
             // Uebertragen und nicht die Bewegung.
@@ -2433,6 +2440,12 @@ fn surface(state: u64) {
             mausflut_schritt(state)
             mauslauf_schritt(state)
             let _offen: u64 = wm.anim_tick(state)
+            // RUNDE ZIEH: der Nachzug des gezogenen Fensters tickt im
+            // SELBEN Zeitgeber wie die Fensterbewegungen und nicht im
+            // Zeichnen -- aus dem Grund, den Runde VSYNC dazu schon
+            // aufgeschrieben hat: was im Zeichnen tickt, laeuft auf
+            // einer langsamen Maschine langsamer.
+            let _sw: u64 = wm.swing_tick(state)
             // RUNDE VSYNC: DER ABLESER LIEST VOR UND NACH DEM MALEN.
             // Vorher steht das fertige Bild der letzten Runde auf der
             // Karte, nachher das neue -- und dazwischen liegt genau
@@ -2496,6 +2509,156 @@ fn surface(state: u64) {
 // Warum feste Ticks und keine Zufallszahl: der Ablauf muss bei jedem
 // Lauf derselbe sein, sonst vergleicht die Bildserie zwei verschiedene
 // Vorgaenge.
+// ======================================================= RUNDE ZIEH
+//
+// DEN ZUG VORFUEHREN -- und warum der Kern ihn selbst faehrt.
+//
+// Ein Foto vom Ende eines Zuges sieht aus wie eines ohne Zug, also
+// braucht die Messung einen Anlass mitten in der Bewegung. Der
+// naheliegende Weg -- die Zeigerschnittstelle von QEMU -- ist hier
+// KEINER: `pruef/ziehprobe.py` hat in vier Fassungen gemessen, dass
+// der Kern die gedrueckte Taste waehrend einer Bewegung nicht sieht
+// (`kl=0`), auf dem alten Abbild genauso wie auf dem neuen. Das ist
+// kein Fehler dieser Runde, aber es macht den echten Zug als
+// Messmittel unbrauchbar.
+//
+// Also ruft diese Vorfuehrung GENAU DIE DREI STELLEN, die ein Zeiger
+// riefe, und keine eigene: `drag_begin` + `S_DRAG` beim Anfassen,
+// `move_win` je Schritt, `drag_end` beim Loslassen. Was danach
+// gemessen wird, ist damit derselbe Weg, den ein Mensch ausloest.
+//
+// Der Ablauf, in Ticks seit dem Beginn des Haltens (TICK_HZ = 100,
+// ein Tick = 10 ms):
+//
+//    50   ein Fenster entsteht und wird an der Stelle (40|20)
+//         ANGEFASST -- also weit aus der Mitte, damit man den Pivot
+//         am Bild UEBERHAUPT sehen kann. In der Mitte angefasst
+//         saehen tilt=0 und tilt=100 gleich aus.
+//    60   ab hier wandert es je Tick um 9 Bildpunkte nach rechts und
+//         4 nach unten. Das ist schnell genug fuer einen sichtbaren
+//         Nachzug und langsam genug, dass es nicht vom Schirm laeuft.
+//   110   losgelassen. Von hier an pendelt der Versatz aus.
+// RUNDE ZIEH: die drei Marken von der Kommandozeile in den Server.
+//
+// EINMAL, nicht in jedem Durchlauf -- `set_form` macht den ganzen
+// Schirm schmutzig, und das sechzig Mal in der Sekunde waere genau
+// der Fehler, den WM_DECO und WM_FORM in `sysgui.fi` ausdruecklich
+// vermeiden ("acht Vollbild-Durchlaeufe im Systemaufruf -- die
+// Maschine kam beim Starten nicht mehr durch").
+//
+// 9999 heisst "nicht gewuenscht" und laesst die Marke in Ruhe.
+fn zieh_marken(state: u64) {
+    if zieh_marken_gesetzt != 0 {
+        return
+    }
+    zieh_marken_gesetzt = 1
+    let vl: u64 = kstate.get(state, kstate.ZIEH_LIFT)
+    let vt: u64 = kstate.get(state, kstate.ZIEH_TILT)
+    let vs: u64 = kstate.get(state, kstate.ZIEH_SWING)
+    if vl != 9999 {
+        let _fl: bool = wm.set_form(state, wm.FM_LIFT, vl)
+    }
+    if vt != 9999 {
+        let _ft: bool = wm.set_form(state, wm.FM_TILT, vt)
+    }
+    if vs != 9999 {
+        let _fs: bool = wm.set_form(state, wm.FM_SWING, vs)
+    }
+}
+
+static mut zieh_marken_gesetzt: u64 = 0
+static mut zieh_t0: u64 = 0
+static mut zieh_schritt: u64 = 0
+static mut zieh_win: u64 = 0
+
+fn zieh_vorfuehrung(state: u64) {
+    let t: u64 = kstate.get(state, kstate.TICKS)
+    let ab: u64 = zieh_t0
+    if ab == 0 {
+        zieh_t0 = t
+        return
+    }
+    let seit: u64 = t - ab
+    if seit >= 50 && zieh_schritt == 0 {
+        zieh_schritt = 1
+        var s_t: [u8; 7] = "Ziehen\0"
+        let i: u64 = wm.create(state, 0, 120, 380, 360, 240, wm.K_RAW,
+            (&s_t[0]) as u64)
+        if i < wm.MAX_WIN {
+            // Ein Muster, an dem man Skalierung UND Versatz sieht:
+            // eine Flaeche allein verraet beides nicht. Der helle
+            // Block sitzt absichtlich NICHT mittig.
+            wm.fill(state, i, 0, 0, 360, 240, 0x2E6FD9)
+            wm.fill(state, i, 16, 16, 150, 100, 0xF8FAFC)
+            wm.fill(state, i, 200, 140, 140, 80, 0xFFC857)
+            zieh_win = i + 1
+            var s_g: [u8; 16] = "zieh: angefasst\0"
+            serial.puts((&s_g[0]) as u64)
+            serial.nl()
+            // ANFASSEN. Dieselben zwei Zahlen, die die Titelleiste
+            // beim echten Klick setzt: der Griffpunkt relativ zur
+            // AUSSENecke des Fensters.
+            wm.drag_begin_pub(state, i, 40, 20)
+        }
+    }
+    // DIE BEWEGUNG, und danach eine RUHEPAUSE, in der das Fenster
+    // noch haengt. Die Pause ist kein Schmuck: ein Bildschirmfoto
+    // mitten in der Bewegung erwischt zwei Zwischenbilder
+    // uebereinander (gemessen: 387 statt 378 Bildpunkte Breite, und
+    // 9 ist genau ein Zugschritt). Wer die SKALIERUNG messen will,
+    // muss sie an einem stehenden, aber aufgehobenen Fenster messen
+    // -- sonst misst er die Bewegung mit.
+    if seit >= 60 && seit < 100 && zieh_win != 0 {
+        let i: u64 = zieh_win - 1
+        let n: i64 = (seit - 60) as i64
+        wm.move_win(state, i, 120 + n * 9, 380 - n * 4)
+    }
+    // RUNDE ZIEH: DIE WAHRE LAGE, JEDEN TICK.
+    //
+    // Ohne sie ist der Pivot nicht nachrechenbar: ein Bildschirmfoto
+    // sagt, WO DAS BILD liegt, und die Frage des Pivots ist gerade,
+    // wie weit das Bild gegen die WAHRE Lage versetzt ist. Zwei
+    // Unbekannte, eine Gleichung. Diese Zeile liefert die zweite.
+    if zieh_win != 0 && seit >= 55 && seit <= 190 {
+        let i: u64 = zieh_win - 1
+        var s_p: [u8; 12] = "zieh: t=\0\0\0\0"
+        var s_x: [u8; 5] = "  x=\0"
+        var s_y: [u8; 5] = "  y=\0"
+        var s_s: [u8; 6] = "  sx=\0"
+        var s_t2: [u8; 6] = "  sy=\0"
+        serial.puts((&s_p[0]) as u64)
+        serial.dec(seit)
+        serial.puts((&s_x[0]) as u64)
+        serial.dec(wm.win_x_pub(state, i) as u64)
+        serial.puts((&s_y[0]) as u64)
+        serial.dec(wm.win_y_pub(state, i) as u64)
+        serial.puts((&s_s[0]) as u64)
+        serial.dec(wm.swing_dx(state, i) as u64)
+        serial.puts((&s_t2[0]) as u64)
+        serial.dec(wm.swing_dy(state, i) as u64)
+        serial.nl()
+    }
+    // 100..180: DAS FENSTER HAENGT NOCH, BEWEGT SICH ABER NICHT MEHR.
+    // Achthundert Millisekunden, und sie sind der Grund, warum diese
+    // Runde die Skalierung ueberhaupt messen kann: ein Foto mitten in
+    // der Bewegung erwischt zwei Zwischenbilder uebereinander
+    // (gemessen: 387 statt 378 Bildpunkte Breite -- und 9 ist genau
+    // ein Zugschritt). An einem stehenden, aber aufgehobenen Fenster
+    // ist die Zahl eindeutig.
+    if seit >= 180 && zieh_schritt == 1 {
+        zieh_schritt = 2
+        if zieh_win != 0 {
+            wm.drag_end_pub(state, zieh_win - 1)
+        }
+        // RUNDE ZIEH: SAGEN, WANN LOSGELASSEN WURDE.
+        // Ohne diese Zeile raet die Auswertung, welcher Schuss noch am
+        // Haken liegt -- und eine geratene Zuordnung ist keine Messung.
+        var s_l: [u8; 18] = "zieh: losgelassen\0"
+        serial.puts((&s_l[0]) as u64)
+        serial.nl()
+    }
+}
+
 fn anim_vorfuehrung(state: u64) {
     let t: u64 = kstate.get(state, kstate.TICKS)
     let ab: u64 = wm.before_t0(state)
@@ -2619,6 +2782,21 @@ fn say_vsync(state: u64) {
     var s_q: [u8; 11] = "  ohnesig=\0"
     var s_r: [u8; 8] = "  halt=\0"
     var s_ps: [u8; 10] = "  pxsum=\0\0"
+    // RUNDE ZIEH: die vier Zahlen des Aufhebens.
+    var s_zl: [u8; 9] = "  lift=\0\0"
+    var s_zt: [u8; 9] = "  tilt=\0\0"
+    var s_zs: [u8; 10] = "  swing=\0\0"
+    var s_zp: [u8; 11] = "  ziehpx=\0\0"
+    var s_zn: [u8; 12] = "  swings=\0\0\0"
+    // RUNDE ZIEH: die Bildzeit NUR waehrend des Zuges.
+    var s_zf: [u8; 13] = "ziehbild: n=\0"
+    var s_zm: [u8; 12] = "  mittel=\0\0\0"
+    var s_zx: [u8; 9] = "  max=\0\0\0"
+    var s_zu: [u8; 14] = "  ueber16.7=\0\0"
+    var s_zus: [u8; 4] = " us\0"
+    var s_og: [u8; 14] = "  ohnezug n=\0\0"
+    var s_om: [u8; 12] = "  mittel=\0\0\0"
+    var s_ox: [u8; 9] = "  max=\0\0\0"
     serial.puts((&s_a[0]) as u64)
     serial.dec(bool_num(wm.vsync_on(state)))
     serial.puts((&s_b[0]) as u64)
@@ -2641,6 +2819,56 @@ fn say_vsync(state: u64) {
     serial.dec(wm.frame_no(state))
     serial.puts((&s_j[0]) as u64)
     serial.dec(wm.form(state, wm.FM_MOTION))
+    // RUNDE ZIEH: die drei Marken, wie sie im Server WIRKLICH stehen
+    // (nicht wie die Formdatei sie gemeint hat), und was das Malen
+    // des gezogenen Fensters gekostet hat.
+    serial.puts((&s_zl[0]) as u64)
+    serial.dec(wm.form(state, wm.FM_LIFT))
+    serial.puts((&s_zt[0]) as u64)
+    serial.dec(wm.form(state, wm.FM_TILT))
+    serial.puts((&s_zs[0]) as u64)
+    serial.dec(wm.form(state, wm.FM_SWING))
+    serial.puts((&s_zp[0]) as u64)
+    serial.dec(wm.drag_px(state))
+    serial.puts((&s_zn[0]) as u64)
+    serial.dec(wm.swings(state))
+    serial.nl()
+    // ================================================== RUNDE ZIEH
+    // DIE ZAHL, DIE JUSTINS BEDINGUNG BEANTWORTET.
+    //
+    // `bildzeit:` daneben mittelt ueber ALLE Bilder, auch ueber das
+    // Hochfahren -- dort liegt das Maximum bei rund 50 ms, und zwar
+    // auch mit abgeschalteter Wirkung. Diese Zeile zaehlt NUR die
+    // Bilder, in denen wirklich ein Fenster aufgehoben gemalt wurde.
+    serial.puts((&s_zf[0]) as u64)
+    serial.dec(wm.zieh_frn(state))
+    serial.puts((&s_zm[0]) as u64)
+    if wm.zieh_frn(state) != 0 {
+        serial.dec(wm.zieh_frus(state) / wm.zieh_frn(state))
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_zus[0]) as u64)
+    serial.puts((&s_zx[0]) as u64)
+    serial.dec(wm.zieh_frmax(state))
+    serial.puts((&s_zus[0]) as u64)
+    serial.puts((&s_zu[0]) as u64)
+    serial.dec(wm.zieh_frueber(state))
+    // UND DIE GRUNDLAST DESSELBEN LAUFS. Erst der Vergleich beider
+    // Zahlen sagt, was das Ziehen kostet -- eine Bildzeit allein sagt
+    // nur, was die Maschine gerade kostet.
+    serial.puts((&s_og[0]) as u64)
+    serial.dec(wm.ohne_frn(state))
+    serial.puts((&s_om[0]) as u64)
+    if wm.ohne_frn(state) != 0 {
+        serial.dec(wm.ohne_frus(state) / wm.ohne_frn(state))
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_zus[0]) as u64)
+    serial.puts((&s_ox[0]) as u64)
+    serial.dec(wm.ohne_frmax(state))
+    serial.puts((&s_zus[0]) as u64)
     serial.puts((&s_k[0]) as u64)
     serial.dec(wm.liest(state))
     serial.puts((&s_l[0]) as u64)

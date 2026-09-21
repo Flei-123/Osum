@@ -93,7 +93,7 @@ export {
     shadow_an, shadow_value, SHDW_OFF, SHDW_AN,
     SHAPE_CLASSIC, SHAPE_MODERN,
     // RUNDE OBERFLAECHE: die fuenfte Schicht -- Schrift, Hoehe, Zeit.
-    M_FONT, M_MOTION,
+    M_FONT, M_MOTION, M_LIFT, M_TILT, M_SWING,
     TY_CAPTION, TY_BODY, TY_STRONG, TY_TITLE, TY_DISPLAY, TY_COUNT,
     type_px, type_lh, type_base,
     EL_FLAT, EL_RAISED, EL_OVERLAY, EL_MODAL, EL_WINDOW, EL_COUNT,
@@ -165,6 +165,8 @@ export {
     form_push, form_one, FORM_SLOTS,
     WF_RADIUS, WF_SHADOW, WF_SHADOW_R, WF_SHADOW_C,
     WF_SHADOW2, WF_SHADOW_R2, WF_GRAD, WF_CAPTION,
+    WF_LIFT, WF_TILT, WF_SWING,
+    zieh_lift, zieh_tilt, zieh_swing,
     EV_KEY, EV_DOWN, EV_UP, EV_MOVE, EV_CLOSE, EV_FOCUS, EV_RESIZE,
     sys5, sys3w
 }
@@ -251,6 +253,13 @@ const WF_SHADOW2: u64 = 4
 const WF_SHADOW_R2: u64 = 5
 const WF_GRAD: u64 = 6
 const WF_CAPTION: u64 = 7
+// RUNDE ZIEH: die drei Wirkungen des Aufhebens beim Verschieben.
+// Dieselben Nummern wie `wm.FM_LIFT/FM_TILT/FM_SWING`. FM_MOTION (8)
+// wird von dieser Bibliothek NICHT geschickt -- die Dauer einer
+// Fensterbewegung setzt die Leiste aus `motion`, siehe `form_push`.
+const WF_LIFT: u64 = 9
+const WF_TILT: u64 = 10
+const WF_SWING: u64 = 11
 
 const WI_W: u64 = 0
 const WI_H: u64 = 1
@@ -2560,7 +2569,17 @@ const M_CAPTION: u64 = 22
 // wlib: eine Zahl in der Datei, feste Verhaeltnisse im Code.
 const M_FONT: u64 = 23 // die Grundgroesse der Oberflaechenschrift
 const M_MOTION: u64 = 24 // die Grunddauer einer Bewegung, in ms
-const M_COUNT: u64 = 25
+// ======================================================= RUNDE ZIEH
+// DAS AUFHEBEN BEIM VERSCHIEBEN -- drei Zahlen, drei Wirkungen.
+//
+// Jede ist Schalter UND Regler: 0 heisst aus, sonst ist sie die
+// Staerke. Sie stehen in der Formdatei (`lift`, `tilt`, `swing`) und
+// gehen unveraendert an den Fensterserver -- diese Bibliothek malt
+// kein gezogenes Fenster, das tut der Server.
+const M_LIFT: u64 = 25 // 0..120, Tausendstel ueber 1000 (50 = 105 %)
+const M_TILT: u64 = 26 // 0..100, wie weit der Pivot an den Griff rueckt
+const M_SWING: u64 = 27 // 0..100, wie stark das Bild nachzieht
+const M_COUNT: u64 = 28
 
 // DIE SCHRIFTSTUFEN.  Fuenf, und jede hat eine ROLLE und keine Groesse
 // im Namen -- `TY_TITLE` bleibt richtig, wenn die Grundgroesse sich
@@ -2637,7 +2656,21 @@ static mut booted: u64 = 0
 // machine with no /etc/shapes and no `shape=` line looks EXACTLY as it
 // did -- that is the condition under which this round can be landed
 // without re-measuring every screenshot in the repository.
-static mut met: [u64; 25] = [0 as u64; 25]
+// RUNDE ZIEH: 25 -> 28. Die drei Marken des Aufhebens (M_LIFT,
+// M_TILT, M_SWING) sind Metriken wie jede andere, also waechst
+// das Feld mit M_COUNT mit. Die Zahl steht hier leider ein
+// zweites Mal als Literal -- der Uebersetzer nimmt an dieser
+// Stelle keine Konstante --, und genau daran ist der erste
+// Bauversuch dieser Runde gescheitert ('index 25 is outside
+// [u64; 25]'). Wer M_COUNT aendert, aendert auch diese Zeile.
+static mut met: [u64; 28] = [0 as u64; 28]
+// RUNDE ZIEH: die Ueberschreibungen aus /etc/theme.conf, als
+// "Wert + 1". 0 heisst NICHT GESETZT -- dann gilt die Formdatei.
+// Eine 0 als Wert waere sonst nicht von "nichts gesagt" zu
+// unterscheiden, und 0 ist hier ein sinnvoller Wunsch ("aus").
+static mut ovr_lift: u64 = 0
+static mut ovr_tilt: u64 = 0
+static mut ovr_swing: u64 = 0
 static mut shp_name: [u8; 32] = [0 as u8; 32]
 static mut shp_file: [u8; 32] = [0 as u8; 32]
 static mut shp_keys: u64 = 0
@@ -2713,7 +2746,7 @@ static mut acc_r_ui: u64 = 0
 // event, and `theme_frame_begin` latches a bank for the whole of a
 // paint.  It is written down here rather than left to be found.
 static mut prb_comp: [u64; 41] = [0 as u64; 41]
-static mut prb_met: [u64; 25] = [0 as u64; 25]
+static mut prb_met: [u64; 28] = [0 as u64; 28]
 static mut prb_pair: [u64; 17] = [0 as u64; 17]
 static mut prb_txt: u64 = 0
 static mut prb_min: u64 = 0
@@ -3933,6 +3966,21 @@ fn conf_key(kp: u64, kn: u64, vp: u64, vn: u64) -> bool {
     var k_accent: [u8; 7] = "accent\0"
     var k_ls: [u8; 12] = "light_start\0"
     var k_ds: [u8; 11] = "dark_start\0"
+    // RUNDE ZIEH: die drei Wirkungen des Aufhebens, als
+    // UEBERSCHREIBUNG in /etc/theme.conf.
+    //
+    // Sie stehen zusaetzlich hier und nicht nur in der Formdatei, weil
+    // die Formdatei zur FORM gehoert (sie wird mitgewechselt, wenn man
+    // von `osum` auf `classic` geht) und diese drei eine Vorliebe des
+    // Menschen sind, die den Formwechsel ueberleben soll. Dieselbe
+    // Trennung, die `accent=` in derselben Datei schon macht.
+    //
+    // Nicht gesetzt = die Formdatei gilt. Das ist der Grund fuer die
+    // -1-Wache in `lift_ovr` und nicht fuer eine 0: 0 ist ein
+    // gueltiger Wunsch, naemlich "aus".
+    var k_lift: [u8; 5] = "lift\0"
+    var k_tilt: [u8; 5] = "tilt\0"
+    var k_swing: [u8; 6] = "swing\0"
     var v_dark: [u8; 5] = "dark\0"
     var v_light: [u8; 6] = "light\0"
 
@@ -3959,6 +4007,27 @@ fn conf_key(kp: u64, kn: u64, vp: u64, vn: u64) -> bool {
         }
         if name_eq(vp, vn, (&v_light[0 as usize]) as u64) {
             set_mode = MODE_LIGHT
+        }
+        return true
+    }
+    if name_eq(kp, kn, (&k_lift[0 as usize]) as u64) {
+        let v: u64 = parse_dec(vp, vn)
+        if v != DEC_BAD && v <= 120 {
+            ovr_lift = v + 1
+        }
+        return true
+    }
+    if name_eq(kp, kn, (&k_tilt[0 as usize]) as u64) {
+        let v: u64 = parse_dec(vp, vn)
+        if v != DEC_BAD && v <= 100 {
+            ovr_tilt = v + 1
+        }
+        return true
+    }
+    if name_eq(kp, kn, (&k_swing[0 as usize]) as u64) {
+        let v: u64 = parse_dec(vp, vn)
+        if v != DEC_BAD && v <= 100 {
+            ovr_swing = v + 1
         }
         return true
     }
@@ -4336,6 +4405,12 @@ fn metrics_classic() {
     // Vergangenheit, auch mit zwei Marken mehr.
     met[(M_FONT) as usize] = PX_UI0
     met[(M_MOTION) as usize] = 0
+    // RUNDE ZIEH: und die drei ebenfalls auf null. `classic` heisst
+    // "das ist die Vergangenheit", und in der Vergangenheit wurde ein
+    // gezogenes Fenster weder groesser noch schief noch traege.
+    met[(M_LIFT) as usize] = 0
+    met[(M_TILT) as usize] = 0
+    met[(M_SWING) as usize] = 0
     shp_id = SHAPE_CLASSIC
 }
 
@@ -4588,6 +4663,9 @@ fn shape_key(kp: u64, kn: u64, vp: u64, vn: u64) -> bool {
     var k_cp: [u8; 8] = "caption "
     var k_ft: [u8; 5] = "font "
     var k_mo: [u8; 7] = "motion "
+    var k_li: [u8; 5] = "lift "
+    var k_ti: [u8; 5] = "tilt "
+    var k_sw: [u8; 6] = "swing "
     if name_eq(kp, kn, (&k_name[0 as usize]) as u64) {
         copy_bounded((&shp_name[0 as usize]) as u64, vp, vn, 32)
         return true
@@ -4702,6 +4780,22 @@ fn shape_key(kp: u64, kn: u64, vp: u64, vn: u64) -> bool {
     }
     if name_eq(kp, kn, (&k_mo[0 as usize]) as u64) {
         met[(M_MOTION) as usize] = cap(v, 400)
+        return true
+    }
+    // RUNDE ZIEH: die drei Wirkungen des Aufhebens. Die Deckel sind
+    // dieselben wie im Server (`wm.LIFT_MAX/TILT_MAX/SWING_MAX`) --
+    // hier, damit eine unsinnige Formdatei gar nicht erst losgeschickt
+    // wird, und dort, weil der Server keiner Zahl aus Ring 3 glaubt.
+    if name_eq(kp, kn, (&k_li[0 as usize]) as u64) {
+        met[(M_LIFT) as usize] = cap(v, 120)
+        return true
+    }
+    if name_eq(kp, kn, (&k_ti[0 as usize]) as u64) {
+        met[(M_TILT) as usize] = cap(v, 100)
+        return true
+    }
+    if name_eq(kp, kn, (&k_sw[0 as usize]) as u64) {
+        met[(M_SWING) as usize] = cap(v, 100)
         return true
     }
     return false
@@ -5379,6 +5473,31 @@ fn form_one(slot: u64, wert: u64) -> u64 {
     return 1
 }
 
+// RUNDE ZIEH: Ueberschreibung oder Formdatei. `ovr` ist "Wert + 1",
+// 0 heisst nicht gesetzt.
+// RUNDE ZIEH: was gerade GILT -- Ueberschreibung oder Formdatei.
+// Das Einstellungsfenster fragt danach, damit seine Kaestchen den
+// laufenden Zustand zeigen und nicht eine Vermutung. Dieselbe Regel
+// wie bei `shape_id()`.
+fn zieh_lift() -> u64 {
+    return zieh_wert(ovr_lift, M_LIFT)
+}
+
+fn zieh_tilt() -> u64 {
+    return zieh_wert(ovr_tilt, M_TILT)
+}
+
+fn zieh_swing() -> u64 {
+    return zieh_wert(ovr_swing, M_SWING)
+}
+
+fn zieh_wert(ovr: u64, m: u64) -> u64 {
+    if ovr != 0 {
+        return ovr - 1
+    }
+    return met[(m) as usize]
+}
+
 fn form_push() -> u64 {
     var n: u64 = 0
     n = n + form_one(WF_RADIUS, met[(M_RADIUS_WINDOW) as usize])
@@ -5400,6 +5519,15 @@ fn form_push() -> u64 {
     n = n + form_one(WF_SHADOW_R2, met[(M_SHADOW_R2) as usize])
     n = n + form_one(WF_GRAD, met[(M_GRAD) as usize])
     n = n + form_one(WF_CAPTION, met[(M_CAPTION) as usize])
+    // RUNDE ZIEH: die drei Wirkungen des Aufhebens beim Verschieben.
+    // Sie gehen denselben Weg wie jede andere Formmarke -- aufgeloest,
+    // ohne dass der Server je erfaehrt, dass es eine Formdatei gibt.
+    // Die Ueberschreibung aus /etc/theme.conf schlaegt die Formdatei
+    // -- sie ist die Vorliebe des Menschen, die Formdatei nur die
+    // Vorgabe der Form.
+    n = n + form_one(WF_LIFT, zieh_wert(ovr_lift, M_LIFT))
+    n = n + form_one(WF_TILT, zieh_wert(ovr_tilt, M_TILT))
+    n = n + form_one(WF_SWING, zieh_wert(ovr_swing, M_SWING))
     return n
 }
 
