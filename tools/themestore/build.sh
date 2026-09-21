@@ -22,7 +22,7 @@
 #                       OVER.  A flat surface would prove nothing.
 #                       Either an OSYM file (tools/k15/icon.py) or one
 #                       of the two words `hell` and `dunkel`, which
-#                       generate a patterned 240x180 one here -- the
+#                       generate a patterned 120x90 one here -- the
 #                       light and the dark case the contrast promise of
 #                       round GLAS has to survive.
 #     script=<cmd>      run this in the guest shell instead of the desktop
@@ -230,20 +230,26 @@ fi
 # variance falls) and "the text still reaches 4.5:1" (against the worst
 # patch, not against an average) measurable at all.
 #
-# 240 x 180 is the limit `desktop.fi` documents (IMAGE_MAX_W/H); the
-# desktop stretches it to the screen with nearest neighbour, so the
-# pattern stays hard-edged instead of being smoothed on the way in.
+# 120 x 90 and not the 240 x 180 that `desktop.fi` allows
+# (IMAGE_MAX_W/H): at the documented maximum the picture is 172 800
+# octets and this disk -- 16 384 blocks, with ten programs, three fonts
+# and three locales on it -- answers `mkfs: the disk is full`. That was
+# measured, not guessed. It costs nothing: the desktop stretches the
+# picture to the screen with NEAREST NEIGHBOUR, so a chequer of twelve
+# grows to one of about eighty screen pixels and stays hard-edged --
+# which is what the measurement needs, and more of it.
 if [ -n "$wallpaper" ]; then
     case "$wallpaper" in
         hell|dunkel)
             python3 - "$OUT/wallpaper.osym" "$wallpaper" <<'WALLPY'
 import struct, sys
 out, kind = sys.argv[1], sys.argv[2]
-w, h = 240, 180
-# Two hard colours and a twelve-pixel chequer.  Twelve, because the
-# frosting of round GLAS goes up to sixteen: a pattern finer than the
-# blur radius would vanish into one grey and the "variance falls by
-# half" measurement would pass for the wrong reason.
+w, h = 120, 90
+# Two hard colours and a twelve-pixel chequer, which the desktop
+# stretches to about eighty.  Bigger than the largest blur radius (16)
+# on purpose: a pattern finer than the blur would vanish into one grey
+# and the "the variance falls by half" measurement would pass for the
+# wrong reason.
 if kind == "hell":
     a, b = (0xF5, 0xF0, 0xE6), (0xC8, 0xD8, 0xF0)
 else:
