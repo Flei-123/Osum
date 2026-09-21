@@ -1063,33 +1063,61 @@ for pair in "al40:hell" "dunkel:dunkel"; do
     KK=$(printf '%s' "$KZ" | grep -oE 'kandidaten=[0-9]+' | cut -d= -f2)
     num "und es waren wirklich mehrere Gruende zu messen ($nm)" "${KK:-0}" ge 2
 done
-# ---- 11d2. UND DAS DUNKLE BILD IST EIN BELEG FUER DURCHSICHT.
+# ---- 11d3. UND DAS DUNKLE BILD IST EIN BELEG FUER DURCHSICHT.
 #
 # Der Kontrast oben sagt, dass die Schrift lesbar bleibt -- er sagt
-# NICHT, dass ueberhaupt noch etwas durchscheint. Beides zusammen ist
-# erst die Zusage dieser Runde: bei 40 Prozent ueber einem dunklen
-# Musterbild muss der Leistengrund das Muster tragen (mehr als eine
-# Farbe) UND die Lesbarkeitsschranke muss sagen, wie weit sie
-# angehoben hat. Ohne die zweite Zahl hiesse eine Aufnahme "40 %" und
-# zeigte 82 -- das war der Befund an Bild 11.
-cp "$TMPD/dunkel/desktop.png" "$SHOTS/glas-dunkel-40.png" 2>/dev/null
+# NICHT, dass ueberhaupt noch etwas durchscheint. Genau daran ist Bild
+# 11 der Runde vorbeigelaufen: es hiess "Leiste bei 40 %" und zeigte
+# eine praktisch deckende Leiste, weil die Lesbarkeitsschranke von 40
+# auf 82 angehoben hatte (helle Leiste, dunkles Bild, dunkle Schrift --
+# der Schleier hat recht, und trotzdem belegt das Bild keine
+# Durchsicht).
+#
+# Also wird der Fall gefahren, in dem beides zugleich gilt: dunkles
+# Schema UND dunkles Bild. Dann liegt die Leistenfarbe nahe am
+# Untergrund, der Schleier muss kaum anheben, und bei 40 Prozent
+# scheint das Schachbrett wirklich durch. Drei Zahlen dazu, und jede
+# misst etwas anderes: wie viele Farben der Leistengrund traegt (das
+# ist die Durchsicht), wie weit angehoben wurde (das ist die
+# Ehrlichkeit der Reglerstellung) und der Kontrast der Schrift (das
+# ist die Zusage, die nicht fallen darf).
+bash tools/themestore/build.sh "$TMPD/dunkelmod" scheme=midnight mode=dark \
+    tbalpha=40 blur=0 wallpaper=dunkel uitrace=yes keep=yes \
+    > "$TMPD/dunkelmod.log" 2>&1
+cp "$TMPD/dunkelmod/desktop.png" "$SHOTS/glas-dunkel-40.png" 2>/dev/null
 DV=$(python3 tools/themestore/glascheck.py var "$SHOTS/glas-dunkel-40.png")
-echo "        dunkel, Leiste bei 40 %: $DV"
-num "ueber dem dunklen Bild traegt der Leistengrund mehr als eine Farbe" \
-    "$(printf '%s' "$DV" | grep -oE 'farben [0-9]+' | cut -d' ' -f2)" ge 2
-DA=$(grep -a 'wm: glas alpha_soll=' "$TMPD/dunkel/serial.txt" | tail -1)
+DA=$(grep -a 'wm: glas alpha_soll=' "$TMPD/dunkelmod/serial.txt" | tail -1)
+echo "        dunkles Schema auf dunklem Bild: $DV"
 echo "        $DA"
+num "bei 40 %% ueber dem dunklen Bild traegt der Leistengrund das Muster (Farben)" \
+    "$(printf '%s' "$DV" | grep -oE 'farben [0-9]+' | cut -d' ' -f2)" ge 2
+num "und er streut wirklich (die deckende Leiste streut 0)" \
+    "$(printf '%s' "$DV" | grep -oE '^var [0-9]+' | cut -d' ' -f2)" ge 100
 DSOLL=$(printf '%s' "$DA" | grep -oE 'alpha_soll=[0-9]+' | cut -d= -f2)
 DIST=$(printf '%s' "$DA" | grep -oE 'alpha_ist=[0-9]+' | cut -d= -f2)
-num "und der Fensterserver sagt, welches Alpha wirklich gemalt wurde" \
-    "${DIST:-0}" ge "${DSOLL:-40}"
+num "der Regler sagt 40, und der Server malt hier fast dasselbe" \
+    "$(( ${DIST:-99} - ${DSOLL:-0} ))" le 10
+DFG=$(grep -a 'taskbar: text clock ' "$TMPD/dunkelmod/serial.txt" | tail -1 \
+      | grep -oE 'fg=[0-9]+' | cut -d= -f2)
+DK=$(python3 tools/themestore/glascheck.py kontrast \
+     "$SHOTS/glas-dunkel-40.png" "$(printf '%06x' "${DFG:-0}")")
+echo "        $DK"
+num "und die Leistenschrift haelt dabei ihre 4,5:1 (x100)" \
+    "$(printf '%s' "$DK" | grep -oE '^kontrast [0-9]+' | cut -d' ' -f2)" ge 450
+# GEGENPROBE, und sie ist der Grund fuer das ganze Stueck: ueber
+# demselben dunklen Bild mit HELLER Leiste hebt der Schleier wirklich
+# an -- dort ist "40 %" eben nicht 40, und das steht jetzt als Zahl da
+# statt als Bildunterschrift.
+HA=$(grep -a 'wm: glas alpha_soll=' "$TMPD/dunkel/serial.txt" | tail -1)
+echo "        GEGENPROBE, helle Leiste auf demselben Bild: $HA"
+num "GEGENPROBE: dort hebt der Schleier die Deckkraft ueber die Reglerstellung" \
+    "$(printf '%s' "$HA" | grep -oE 'alpha_ist=[0-9]+' | cut -d= -f2)" gt \
+    "$(printf '%s' "$HA" | grep -oE 'alpha_soll=[0-9]+' | cut -d= -f2)"
 # UND DIE EINSTELLUNGSSEITE FUEHRT DIESELBE ZAHL. Gemessen am Lauf aus
-# Abschnitt 8 (dort laeuft das Fenster; der Lauf hier oben faehrt
-# absichtlich ohne, damit unter der Leiste wirklich nur das
-# Hintergrundbild liegt): die Seite meldet `ist=` neben `tba=`, und
-# ohne Anhebung sind beide gleich. Ein Regler, der 40 sagt und 82
-# bewirkt, ist eine Luege in der Oberflaeche -- und eine Zahl, die das
-# Fenster gar nicht erst fuehrt, kann es nicht anzeigen.
+# Abschnitt 8 (dort laeuft das Fenster): die Seite meldet `ist=` neben
+# `tba=`. Ein Regler, der 40 sagt und 82 bewirkt, ist eine Luege in der
+# Oberflaeche -- und eine Zahl, die das Fenster gar nicht erst fuehrt,
+# kann es nicht anzeigen.
 SGL=$(grep -a 'settings: glas ' "$SE" | tail -1)
 echo "        $SGL"
 num "die Einstellungsseite fuehrt das WIRKSAME Alpha neben dem Regler" \
