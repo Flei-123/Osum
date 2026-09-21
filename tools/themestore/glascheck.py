@@ -4,8 +4,13 @@
 
     glascheck.py mix <bild.png> <alpha>          die Mischung nachrechnen
     glascheck.py var <bild.png>                  Streuung des Leistenstreifens
-    glascheck.py kontrast <bild.png> <fg-hex>    Schrift gegen GEMISCHTEN Grund
+    glascheck.py kontrast <bild.png> <fg-hex>    Schrift gegen den SCHLECHTESTEN
+                                                 gemischten Grund (Anteil >= 1 %),
+                                                 Uhr eingeschlossen
     glascheck.py ecke <bild.png> <x> <y> <k>     Farben in einer Ecke zaehlen
+    glascheck.py kachel <bild.png> <x> <y> <w> <h> <r>
+                                                 Kante, Rundung und was
+                                                 ausserhalb der Rundung steht
     glascheck.py diff <a.png> <b.png>            abweichende Bildpunkte
 
 DIE ZWEITE RECHNUNG, UND SIE WEISS NICHTS VON DER ERSTEN.
@@ -26,6 +31,7 @@ Abnahme faehrt).  Gemessen wird nur der Teil zwischen `--x0` und `--x1`
 -- links sitzen Start- und Fensterknoepfe, rechts die Uhr, und beides
 ist Schrift und kein Grund.
 """
+import math
 import sys
 from collections import Counter
 
@@ -111,14 +117,28 @@ def main(argv):
         print(__doc__)
         return 2
     cmd = argv[1]
-    opt = {"hoehe": 28, "x0": 300, "x1": 1100, "key": "ffffff"}
+    opt = {"hoehe": 28, "x0": 300, "x1": 1100, "key": "ffffff", "slack": 2}
+    gesetzt = set()
     rest = []
     for a in argv[2:]:
         if a.startswith("--"):
             k, _, v = a[2:].partition("=")
             opt[k] = int(v) if k in ("hoehe", "x0", "x1") else v
+            gesetzt.add(k)
         else:
             rest.append(a)
+    # RUNDE GLAS (nachtrag): DIE UHR GEHOERT ZUR LEISTE.
+    #
+    # `x1 = 1100` schnitt die rechten 180 Bildpunkte weg, und genau
+    # dort steht die Uhr -- also wurde der Kontrast der Leistenschrift
+    # ueberall gemessen, nur nicht an der Stelle, an der auf jeder
+    # Aufnahme dieser Runde wirklich Schrift steht. Fuer `kontrast`
+    # gilt deshalb die ganze Breite ab `x0`, fuer `mix`, `var` und
+    # `diff` bleibt der alte Ausschnitt: die messen den GRUND, und der
+    # Grund unter der Uhr traegt Schrift, die ihre Zahlen verfaelschen
+    # wuerde. Wer es anders will, sagt `--x1=`.
+    if cmd == "kontrast" and "x1" not in gesetzt:
+        opt["x1"] = 1 << 30
 
     if cmd == "diff":
         a = Image.open(rest[0]).convert("RGB")
@@ -201,13 +221,124 @@ def main(argv):
         print("ecke tiefe=%d weich=%d zeilen=%d" % (tiefe, weich, len(starts)))
         return 0
 
+    if cmd == "kachel":
+        # EINE VORSCHAUKACHEL, GANZ GEMESSEN.
+        #
+        # Die Kacheln der Seite "Vorlagen" malen ihren Umriss rund und
+        # ihren Inhalt eckig -- die Miniaturleiste am rechten Rand lief
+        # deshalb an der Rundung vorbei ins Freie ("Tafel", "Studio",
+        # Bild 09, ein Farbschlitz bei x=768..774). Drei Zahlen sagen,
+        # ob das behoben ist:
+        #
+        #   links/rechts  die erste und die letzte Spalte, in der auf
+        #                 halber Hoehe etwas anderes als der Seitengrund
+        #                 steht. Zehn Kacheln untereinander MUESSEN
+        #                 dieselben zwei Zahlen melden -- sonst stehen
+        #                 sie auf verschiedenen Kanten.
+        #   fremd         Bildpunkte in den vier Eckvierteln, die
+        #                 AUSSERHALB der Rundung liegen. Genau das war
+        #                 der Schlitz, und genau das muss 0 sein.
+        #   tiefe         dieselbe Zahl wie `ecke`: dass die Kachel
+        #                 ueberhaupt rund ist und nicht nur beschnitten.
+        x, y, w, h, r = (int(v) for v in rest[1:6])
+        grund = im.getpixel((x - 6, y + h // 2))
+
+        def nah(a, b, tol=12):
+            return max(abs(a[i] - b[i]) for i in range(3)) <= tol
+
+        mitte = y + h // 2
+        links = rechts = -1
+        for i in range(-4, w + 5):
+            if not nah(im.getpixel((x + i, mitte)), grund):
+                if links < 0:
+                    links = x + i
+                rechts = x + i
+        # Wie weit die Rundung in der Zeile j unter der Kante nach
+        # innen greift -- dieselbe Bedingung wie `wlib.ecke_ein` und
+        # wie die Eckendeckung in `wlibc.rrect`, hier zum zweiten Mal
+        # und aus dem Kommentar dort abgeschrieben. Gerechnet wird mit
+        # BILDPUNKTMITTEN (j + 0,5), denn genau so deckt der
+        # Rasterizer seine Ecken.
+        #
+        # `slack` ist die Nachsicht fuer die Kantenglaettung: der
+        # Umriss selbst ist zwei Bildpunkte breit verlaufend, und ein
+        # Pruefer, der das als Fehler zaehlt, ist ein Pruefer, der
+        # Glaettung verbietet. Die oberste und die unterste Zeile
+        # bleiben ganz aussen vor -- dort IST der Umriss. Der
+        # Farbschlitz, um den es geht, ist sechs Bildpunkte breit und
+        # steht in den Zeilen 4..27: er faellt durch beide Nachsichten
+        # nicht hindurch.
+        slack = int(opt.get("slack", 2))
+
+        def ein(j):
+            dy = r - (j + 0.5)
+            if dy <= 0:
+                return 0
+            rest = r * r - dy * dy
+            if rest < 0:
+                return r
+            e = int(math.ceil(r - 0.5 - math.sqrt(rest))) - slack
+            return e if e > 0 else 0
+
+        fremd = 0
+        starts = []
+        for j in range(h):
+            d = min(j, h - 1 - j)
+            e = ein(d) if 0 < j < h - 1 else 0
+            for i in range(e):
+                if not nah(im.getpixel((x + i, y + j)), grund):
+                    fremd += 1
+                if not nah(im.getpixel((x + w - 1 - i, y + j)), grund):
+                    fremd += 1
+            if j < r:
+                s = 0
+                while s < r + 8 and nah(im.getpixel((x + s, y + j)), grund):
+                    s += 1
+                starts.append(s)
+        tiefe = (max(starts) - min(starts)) if starts else 0
+        print("kachel links=%d rechts=%d fremd=%d tiefe=%d r=%d"
+              % (links, rechts, fremd, tiefe, r))
+        return 0
+
     if cmd == "kontrast":
+        # DER SCHLECHTESTE GRUND UND NICHT DER HAEUFIGSTE.
+        #
+        # Bis hierher stand hier `most_common(1)`: gemessen wurde die
+        # Farbe, die unter der Leiste am oefte(n)sten vorkommt. Auf
+        # einem gemusterten Bild ist das die groessere der beiden
+        # Kacheln -- und die Schrift steht nicht nur auf der groesseren.
+        # Eine Zusage "4,5:1", die das hellste Viertel des Untergrunds
+        # auslaesst, sagt ueber die Lesbarkeit an der Stelle, an der es
+        # eng wird, gar nichts.
+        #
+        # Also: jede Farbe, die mindestens EIN Prozent des Streifens
+        # ausmacht, ist ein Grund, auf dem wirklich Schrift stehen
+        # kann, und gemessen wird die SCHLECHTESTE davon. Die Schwelle
+        # ist nicht Bequemlichkeit, sondern der Filter gegen die
+        # Kantenglaettung: die Mischtoene am Rand eines Buchstabens
+        # sind zu Hunderten verschieden und jeder einzelne weit unter
+        # einem Prozent -- sie sind der Uebergang zwischen Schrift und
+        # Grund und kein Grund. Aus demselben Grund fliegen Farben
+        # heraus, die der Schriftfarbe selbst nahe sind: das ist die
+        # Schrift.
         fg = hex2rgb(rest[1])
-        grund = Counter(px).most_common(1)[0][0]
+        c = Counter(px)
+        ges = max(len(px), 1)
+        kand = [(f, n) for f, n in c.items()
+                if n * 100 >= ges
+                and max(abs(f[i] - fg[i]) for i in range(3)) > 40]
+        if not kand:
+            kand = [c.most_common(1)[0]]
+        kand.sort(key=lambda fn: kontrast(fg, fn[0]))
+        grund, anz = kand[0]
+        best = kand[-1][0]
         k = kontrast(fg, grund)
-        print("kontrast %d grund=%02x%02x%02x fg=%02x%02x%02x"
+        print("kontrast %d grund=%02x%02x%02x anteil=%d fg=%02x%02x%02x "
+              "kandidaten=%d bester=%d x0=%d x1=%d n=%d"
               % (int(k * 100), grund[0], grund[1], grund[2],
-                 fg[0], fg[1], fg[2]))
+                 100 * anz // ges, fg[0], fg[1], fg[2], len(kand),
+                 int(kontrast(fg, best) * 100), opt["x0"],
+                 min(opt["x1"], im.size[0]), len(px)))
         return 0
 
     print(__doc__)

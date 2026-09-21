@@ -10,6 +10,12 @@ had. So this asks a picture the three questions a person asks, in
 numbers:
 
     shotcheck.py <shot.ppm|png> <serial.txt> --window=x,y,w,h [--win=N]
+                 [--leiste]
+
+`--leiste` stellt dieselben drei Fragen zusaetzlich an die Taskleiste
+(RUNDE GLAS, Nachtrag -- bis dahin hat dieses Werkzeug GENAU EIN
+Fenster gemessen und die Leiste nie). Sie kommt auf eine eigene
+Ausgabezeile `shotcheck: leiste ...` und geht in den Rueckgabewert ein.
 
   1. EMPTY LABEL. Every `wlib: text ... x= base= tw= t=` line names a
      place where letters were drawn and how wide they are. If that box
@@ -23,6 +29,12 @@ numbers:
 
   3. OVERLAPPING. Two reported texts must not have ink in the same
      pixel.
+
+  4. CUT SHORT. Every line says how many octets were painted (`nq=`)
+     and how many the label really has (`nv=`). Fewer painted than
+     meant is a shortening: it is counted as `gekuerzt`, and if it
+     happened WITHOUT the three dots that tell a reader something is
+     missing, it is a silent cut and counts as `cut`.
 
 THREE THINGS THAT HAD TO BE GOT RIGHT BEFORE THE NUMBERS MEANT ANYTHING,
 and every one of them produced a false failure first:
@@ -117,6 +129,60 @@ WINRE = re.compile(
 # hinunter; die Bibliothek sagt es jetzt selbst.
 FONTRE = re.compile(r"wlib: font ui px=(\d+) asc=(\d+) h=(\d+)")
 
+# RUNDE GLAS (nachtrag): GEMALTE LAENGE GEGEN GEMEINTE LAENGE.
+#
+# Die Reiterleiste der Einstellungen malte "Netzzugrif" und meinte
+# "Netzzugriff": elf deutsche Reiter brauchen 861 Bildpunkte in einer
+# Leiste, die 728 breit ist, und `wlib.fit` schnitt jedem Namen ab, was
+# nicht hineinpasste -- ohne Zeichen, ohne Meldung, ohne dass ein
+# Pruefer es von einem Reiter unterscheiden konnte, der wirklich so
+# heisst. Zwei Zahlen in der Spur machen daraus eine Messung.
+KURZ = re.compile(r" nq=(\d+) nv=(\d+)")
+
+# ================================================ RUNDE GLAS (nachtrag)
+# DIE LEISTE WURDE NIE GEMESSEN.
+#
+# Dieses Werkzeug misst seit dem ersten Tag GENAU EIN Fenster -- das
+# mit dem meisten Text -- und das war immer das vorderste Programm.
+# Die Taskleiste ist ein eigenes Fenster und hat deshalb keine einzige
+# Zusage getragen, obwohl sie auf jeder Aufnahme dieser Runde zu sehen
+# ist. Justins Befund an Bild 04 ("der Knopf zeigt einen Unterstrich
+# und keinen Fenstertitel") stand also in einem Bereich, den kein
+# Pruefer angesehen hat.
+#
+# Die Leiste meldet ihre Beschriftungen in IHREN Koordinaten
+# (`taskbar: text ... x= base=`) und ihre eigene Lage auf dem Schirm in
+# denen des Schirms (`taskbar: STEHT x= y= w= h=`). Beide zusammen sind
+# dasselbe Paar, das `wlib: win cx= cy=` fuer ein gewoehnliches Fenster
+# liefert -- und damit gilt fuer sie Bildpunkt fuer Bildpunkt dieselbe
+# Rechnung wie fuer jede andere Beschriftung hier.
+BARTEXT = re.compile(
+    r"taskbar: text (\w+) x=(\d+) base=(\d+) fg=(\d+) bg=(\d+)"
+    r" tw=(\d+) t=(.*)")
+BARWIN = re.compile(
+    r"taskbar: STEHT x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+
+
+def parse_bar(path):
+    """Die Beschriftungen der Leiste und das Rechteck, in dem sie stehen.
+
+    Der LETZTE Bericht je Marke gilt, genau wie beim Fenster: die
+    Leiste malt bei jedem Uhrenwechsel neu, und was vor zehn Sekunden
+    einmal dort stand, ist auf der Aufnahme nicht mehr zu finden.
+    """
+    body = open(path, "rb").read().decode("latin1")
+    bar = None
+    for m in BARWIN.finditer(body):
+        bar = dict(x=int(m.group(1)), y=int(m.group(2)),
+                   w=int(m.group(3)), h=int(m.group(4)))
+    last = {}
+    for m in BARTEXT.finditer(body):
+        last[(m.group(1), m.group(7))] = dict(
+            kind=m.group(1), x=int(m.group(2)), base=int(m.group(3)),
+            fg=int(m.group(4)), bg=int(m.group(5)), tw=int(m.group(6)),
+            t=m.group(7))
+    return [t for t in last.values() if t["t"].strip()], bar
+
 
 def parse(path, marke="settings: rect name=waa "):
     body = open(path, "rb").read().decode("latin1")
@@ -139,10 +205,18 @@ def parse(path, marke="settings: rect name=waa "):
         m = TEXT.search(raw)
         if not m:
             continue
+        # RUNDE GLAS (nachtrag): WIE VIEL VON DEM TEXT UEBRIG BLIEB.
+        # `nq` sind die wirklich gemalten Oktette, `nv` die des
+        # ungekuerzten Textes; wer nicht kuerzt, meldet beide gleich.
+        # Aeltere Mitschnitte haben die zwei Felder nicht -- dann gilt
+        # "nicht gekuerzt", und diese Datei misst wie vorher.
+        k = KURZ.search(raw)
         out.append(dict(win=int(m.group(1)), kind=int(m.group(2)),
                         x=int(m.group(3)), base=int(m.group(4)),
                         fg=int(m.group(5)), bg=int(m.group(6)),
-                        tw=int(m.group(7)), t=m.group(8)))
+                        tw=int(m.group(7)), t=m.group(8),
+                        nq=int(k.group(1)) if k else 0,
+                        nv=int(k.group(2)) if k else 0))
     # Die Fensterzeilen stehen am ANFANG des Laufs (ein Fenster wird
     # einmal angelegt), also aus dem ganzen Text und nicht aus dem
     # Schwanz. Die letzte Meldung je Fenster gilt.
@@ -195,6 +269,106 @@ def inkbox(pic, x0, y0, x1, y1, bg, tol):
     return (lo_x, lo_y, hi_x, hi_y, len(pts), pts)
 
 
+def grund(pic, x0, y0, x1, y1):
+    """Die haeufigste Farbe eines Ausschnitts -- der gemessene Grund.
+
+    Fuer ein Fenster ist der Grund die Farbe, die das Programm gemeldet
+    hat. Fuer die Leiste dieser Runde gilt das NICHT mehr: sie wird mit
+    `taskbar_alpha` ueber das Hintergrundbild gemischt, also ist hinter
+    der Schrift weder die Flaechenfarbe noch irgendeine andere Zahl,
+    die irgendwo gemeldet waere. Die haeufigste Farbe unter der Zeile
+    ist sie dagegen immer: Schrift bedeckt einen Bruchteil ihres
+    Kastens, der Rest ist Grund.
+    """
+    zaehl = {}
+    for y in range(max(y0, 0), min(y1, pic.h)):
+        for x in range(max(x0, 0), min(x1, pic.w)):
+            p = pic.at(x, y)
+            if p is None:
+                continue
+            zaehl[p] = zaehl.get(p, 0) + 1
+    if not zaehl:
+        return None
+    return max(zaehl, key=lambda k: zaehl[k])
+
+
+def leiste_messen(pic, serial, asc, desc):
+    """Dieselben drei Fragen, gestellt an die Taskleiste.
+
+    Rueckgabe: (Zahl der Texte, gemessen, leer, abgeschnitten,
+    ueberlappend, Liste der Befunde).
+    """
+    texts, bar = parse_bar(serial)
+    if bar is None:
+        return 0, 0, 0, 0, 0, ["LEISTE keine `taskbar: STEHT`-Zeile "
+                               "im Mitschnitt -- uitrace aus?"]
+    schlecht = []
+    boxes = []
+    leer = 0
+    for t in sorted(texts, key=lambda t: t["x"]):
+        x = bar["x"] + t["x"]
+        y0 = bar["y"] + t["base"] - asc
+        y1 = bar["y"] + t["base"] + desc
+        x1 = x + t["tw"]
+        bg = grund(pic, x, y0, min(x1, bar["x"] + bar["w"]), y1)
+        if bg is None:
+            bg = rgb(t["bg"])
+        box = inkbox(pic, x, y0, min(x1, bar["x"] + bar["w"]), y1, bg, 10)
+        if box is None:
+            leer += 1
+            schlecht.append(
+                "LEISTE EMPTY  '%s' (%s) at %d,%d w=%d: no pixel differs "
+                "from the measured ground %02x%02x%02x"
+                % (t["t"][:32], t["kind"], x, bar["y"] + t["base"],
+                   t["tw"], bg[0], bg[1], bg[2]))
+            continue
+        boxes.append((t["kind"] + ":" + t["t"], box, x, x1))
+    ab = 0
+    for name, b, x, x1 in boxes:
+        if (x < bar["x"] or x1 > bar["x"] + bar["w"]
+                or b[1] < bar["y"] or b[3] >= bar["y"] + bar["h"]):
+            ab += 1
+            schlecht.append("LEISTE CUT    '%s' at %d..%d (ink %s) leaves "
+                            "the bar %d,%d %dx%d"
+                            % (name[:32], x, x1, b[:4], bar["x"], bar["y"],
+                               bar["w"], bar["h"]))
+    # DER GEMELDETE KASTEN ZAEHLT AUCH, NICHT NUR DIE TINTE.
+    #
+    # Der Fall, der diese Zeilen gekostet hat: der Startknopf war 40
+    # Bildpunkte breit, "Start" braucht mit seinem Zeichen 61, und der
+    # Fensterknopf daneben hat die letzten zwei Buchstaben einfach
+    # ueberdeckt -- auf dem Bild stand "Sta". Die TINTE ueberlappt
+    # dabei nicht, weil der Nachbar zuerst gemalt hat und danach
+    # niemand mehr; nur die gemeldeten Kaesten tun es. Zwei
+    # Beschriftungen derselben Zeile, deren gemeldete Breiten
+    # ineinanderragen, sind deshalb ein Mangel und werden bei `cut`
+    # gezaehlt -- abgeschnitten ist genau das, was dort passiert.
+    reihe = sorted(texts, key=lambda t: t["x"])
+    for i in range(len(reihe) - 1):
+        a, b = reihe[i], reihe[i + 1]
+        if a["base"] != b["base"]:
+            continue
+        if a["x"] + a["tw"] > b["x"]:
+            ab += 1
+            schlecht.append(
+                "LEISTE CUT    '%s' meldet x=%d tw=%d und reicht damit in "
+                "'%s' bei x=%d hinein"
+                % (a["t"][:24], a["x"], a["tw"], b["t"][:24], b["x"]))
+    ueber = 0
+    for i in range(len(boxes)):
+        for j in range(i + 1, len(boxes)):
+            a, b = boxes[i][1], boxes[j][1]
+            if a[0] > b[2] or b[0] > a[2] or a[1] > b[3] or b[1] > a[3]:
+                continue
+            if not (a[5] & b[5]):
+                continue
+            ueber += 1
+            schlecht.append("LEISTE OVER   '%s' %s and '%s' %s"
+                            % (boxes[i][0][:24], a[:4],
+                               boxes[j][0][:24], b[:4]))
+    return len(texts), len(boxes), leer, ab, ueber, schlecht
+
+
 def main(argv):
     if len(argv) < 3:
         print(__doc__)
@@ -209,12 +383,15 @@ def main(argv):
     forced = False
     ww, wh = pic.w, pic.h
     want_win = None
+    leiste = False
     for a in argv[3:]:
         if a.startswith("--window="):
             ox, oy, ww, wh = (int(v) for v in a.split("=", 1)[1].split(","))
             forced = True
         elif a.startswith("--win="):
             want_win = int(a.split("=", 1)[1])
+        elif a == "--leiste":
+            leiste = True
     if want_win is None and texts:
         count = {}
         for t in texts:
@@ -261,6 +438,23 @@ def main(argv):
             bad.append("CUT    '%s' at %d..%d (ink %s) leaves the window "
                        "%d,%d %dx%d"
                        % (name[:32], x, x1, b[:4], ox, oy, ww, wh))
+    # GEKUERZT IST EINE ZAHL, STILL GEKUERZT IST EIN MANGEL.
+    #
+    # Ein Bedienelement darf einen Namen kuerzen -- elf Reiter in eine
+    # Leiste zu zwingen geht nicht anders. Es darf es nur nicht
+    # VERSCHWEIGEN: wer kuerzt, setzt drei Punkte, und dann sieht der
+    # Leser, dass da mehr stand. Fehlen die Punkte, ist das ein
+    # abgeschnittener Text wie jeder andere und zaehlt in `cut`
+    # -- genau der Fall, den die Reiterleiste jahrelang hatte.
+    gekuerzt = 0
+    for t in texts:
+        if t["nv"] > t["nq"]:
+            gekuerzt += 1
+            if not t["t"].endswith("..."):
+                cut += 1
+                bad.append("CLIP   '%s' painted %d of %d octets without a "
+                           "mark -- a silent cut" % (t["t"][:32], t["nq"],
+                                                     t["nv"]))
     over = 0
     for i in range(len(boxes)):
         for j in range(i + 1, len(boxes)):
@@ -277,11 +471,26 @@ def main(argv):
                            % (boxes[i][0][:24], a[:4],
                               boxes[j][0][:24], b[:4]))
     print("shotcheck: win %s  texts %d  measured %d  empty %d  cut %d  "
-          "overlapping %d" % (want_win, len(texts), len(boxes), empty, cut,
-                              over))
+          "overlapping %d  gekuerzt %d"
+          % (want_win, len(texts), len(boxes), empty, cut, over, gekuerzt))
     for line in bad[:30]:
         print("  " + line)
-    return 0 if (empty == 0 and cut == 0 and over == 0) else 1
+    # RUNDE GLAS (nachtrag): die Leiste auf einer EIGENEN Zeile. Sie
+    # gehoert nicht in die Zahlen des Fensters -- die Zusagen, die es
+    # dort schon gibt, sollen genau das weiter messen, was sie bisher
+    # gemessen haben --, und sie geht trotzdem in den Rueckgabewert
+    # ein, sonst waere sie wieder nur eine Ausgabe, die niemand liest.
+    schlecht = 0
+    if leiste:
+        bn, bm, bleer, bab, bueber, bbad = leiste_messen(
+            pic, argv[2], asc, desc)
+        print("shotcheck: leiste texts %d  measured %d  empty %d  cut %d  "
+              "overlapping %d" % (bn, bm, bleer, bab, bueber))
+        for line in bbad[:30]:
+            print("  " + line)
+        schlecht = bleer + bab + bueber
+    return 0 if (empty == 0 and cut == 0 and over == 0
+                 and schlecht == 0) else 1
 
 
 if __name__ == "__main__":

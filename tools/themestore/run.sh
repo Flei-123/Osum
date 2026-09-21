@@ -550,6 +550,90 @@ print(n)
 PY
 )
 num "und kein Reiter wird ausserhalb der Leiste gemalt" "$TABOUT" eq 0
+# ---- UND DER REITER HEISST, WIE ER IN DER SPRACHDATEI HEISST.
+#
+# Die Reiterleiste hat ihre Namen bis zu dieser Runde still gekuerzt
+# ("Netzzugrif" statt "Netzzugriff"): elf deutsche Reiter brauchen mehr
+# Platz, als die Leiste hat, und `fit` schnitt ab, ohne dass irgendwo
+# eine Zahl davon wusste. Jetzt meldet `say_tab` den GANZEN Namen und
+# daneben, wie viele Oktette wirklich gemalt wurden. Hier wird der
+# gemeldete Name Zeichen fuer Zeichen gegen locale/de/messages
+# gehalten -- die Datei, aus der das Programm ihn holt. Ungleich ist
+# rot, und zwar fuer jeden einzelnen Reiter.
+TABNAME=$(python3 - "$SE" locale/de/messages <<'PY'
+import re, sys
+txt = open(sys.argv[1], 'rb').read().decode('latin1')
+soll = None
+for raw in open(sys.argv[2], 'rb').read().decode('utf-8').splitlines():
+    if raw.startswith('settings.tabs'):
+        soll = raw.split('=', 1)[1].strip().split('\\n')
+if not soll:
+    print('KEINE SPRACHDATEI'); raise SystemExit
+ist = {}
+for m in re.finditer(r'wlib: tab i=(\d+) .* nq=(\d+) nv=(\d+) t=(.*)', txt):
+    ist[int(m.group(1))] = (m.group(4).encode('latin1').decode('utf-8',
+                                                               'replace'),
+                            int(m.group(2)), int(m.group(3)))
+schlecht = []
+for i, name in enumerate(soll):
+    if i not in ist:
+        schlecht.append('%d fehlt (%s)' % (i, name))
+    elif ist[i][0] != name:
+        schlecht.append("%d meldet '%s' statt '%s'" % (i, ist[i][0], name))
+print(len(schlecht), ';'.join(schlecht[:4]) if schlecht else '')
+PY
+)
+num "jeder Reiter meldet den Namen, der in der Sprachdatei steht ($TABNAME)" \
+    "$(printf '%s' "$TABNAME" | cut -d' ' -f1)" eq 0
+# ---- UND KEIN BLAUER STRICH UNTER DER REITERZEILE.
+#
+# In 02/03/08/10/13/14 stand unter der Reiterzeile ein Rest der
+# Akzentfarbe bei x=313..330 und x=713..759: der Fokusring lag um die
+# GANZE Leiste, und die zwei Karten der Seite ragen vier Bildpunkte in
+# sie hinein und malten ihn streckenweise zu. Uebrig blieben zwei
+# Striche, die zu nichts gehoeren. Der Ring liegt jetzt um den AKTIVEN
+# REITER; gemessen wird das im Bild und gegen die Rechtecke, die
+# `say_tab` selbst gemeldet hat: kein Bildpunkt der Akzentfarbe
+# unterhalb der Reiterzeile.
+STRICH=$(python3 - "$SE" "$TMPD/set/desktop.png" <<'PY'
+import re, sys
+from PIL import Image
+txt = open(sys.argv[1], 'rb').read().decode('latin1')
+tabs = {}
+for m in re.finditer(r'wlib: tab i=(\d+) x=\d+ y=\d+ w=(\d+) h=(\d+)'
+                     r' ax=(\d+) ay=(\d+)', txt):
+    tabs[int(m.group(1))] = (int(m.group(4)), int(m.group(5)),
+                             int(m.group(2)), int(m.group(3)))
+if not tabs:
+    print('999 keine tab-zeile'); raise SystemExit
+unten = max(t[1] + t[3] for t in tabs.values())
+im = Image.open(sys.argv[2]).convert('RGB')
+# Die drei untersten Zeilen der Reiterzeile: dort lag die untere Kante
+# des Fokusrings, und dort standen die Reste. Gezaehlt wird nicht in
+# Bildpunkten, sondern in REITERN -- in wie vielen der gemeldeten
+# Rechtecke ueberhaupt Akzentfarbe liegt. Ein Ring um den aktiven
+# Reiter faerbt genau einen; ein Ring um die ganze Leiste faerbt alle,
+# und ein von Karten zerschnittener Ring faerbt ein paar davon. Mehr
+# als einer ist ein Rest.
+betroffen = []
+for i, (tx, ty, tw, th) in sorted(tabs.items()):
+    n = 0
+    for y in range(unten - 3, unten):
+        for x in range(tx, tx + tw):
+            p = im.getpixel((x, y))
+            # Kraeftiges Blau: der Akzent (37,99,235) und der
+            # Fokusring (18,49,117) erfuellen beides, jeder Grund und
+            # jede graue Trennlinie dieser Themen keines von beiden.
+            if p[2] > p[0] + 60 and p[2] > 110:
+                n += 1
+    if n > 2:
+        betroffen.append('%d:%d' % (i, n))
+print(len(betroffen), 'reiter mit Akzent in den untersten Zeilen',
+      ','.join(betroffen[:6]))
+PY
+)
+num "hoechstens EIN Reiter traegt Akzentfarbe an seiner Unterkante ($STRICH)" \
+    "$(printf '%s' "$STRICH" | cut -d' ' -f1)" le 1
 
 # --------------------------------------------------------- 9. die Bilder
 echo
@@ -601,6 +685,57 @@ PY
 )
 num "und die Kacheln haben verschiedene Flaechenfarben (nicht die des laufenden Satzes)" \
     "$TDIFF" ge 4
+# ---- UND JEDE KACHEL BLEIBT IN IHRER EIGENEN RUNDUNG.
+#
+# Eine Kachel malt ihren Umriss rund und ihren Inhalt aus Rechtecken.
+# Der senkrechte Balken der Miniaturleiste sass buendig an der rechten
+# Kante und lief damit an der Rundung vorbei ins Freie: in Bild 09 ein
+# sechs Bildpunkte breiter Farbschlitz bei x=768..774 an den Vorlagen
+# "Tafel" und "Studio", ausserhalb des Umrisses und ausserhalb der
+# Spalte. `glascheck.py kachel` misst das an jeder der zehn Kacheln:
+# `tiefe` sagt, dass die Kachel ueberhaupt rund ist, `fremd`, dass in
+# den Eckvierteln nichts ausserhalb der Rundung steht.
+# Der Radius kommt von der Kachel selbst (`wlib: radius ... typ=kachel`)
+# und nicht aus dem laufenden Satz: eine Kachel malt in der Rolle
+# "Tafel", und die hat ihre eigene Marke.
+KACHR=$(grep -aoE 'wlib: radius rolle=[0-9]+ r=[0-9]+ typ=kachel' \
+        "$TMPD/setv/serial.txt" | tail -1 | grep -oE 'r=[0-9]+' | cut -d= -f2)
+KACHELN=$(python3 - "$TMPD/setv/serial.txt" <<'PY'
+import re, sys
+txt = open(sys.argv[1], 'rb').read().decode('latin1')
+cut = txt.rfind('settings: rect name=waa ')
+tail = txt[cut:] if cut >= 0 else txt
+grp = {}
+for m in re.finditer(r'settings: rect name=w\w\w x=\d+ y=\d+ w=(\d+) h=(\d+)'
+                     r' ax=(\d+) ay=(\d+)', tail):
+    w, h, ax, ay = (int(v) for v in m.groups())
+    if h > 40:
+        continue
+    grp.setdefault((ax, w, h), []).append(ay)
+if not grp:
+    raise SystemExit
+k, ys = max(grp.items(), key=lambda kv: len(kv[1]))
+for ay in sorted(ys):
+    print(k[0], ay, k[1], k[2])
+PY
+)
+KN=$(printf '%s\n' "$KACHELN" | grep -c .)
+num "die zehn Vorschaukacheln melden ihr Rechteck" "$KN" ge 10
+KBAD=0; KTIEF=0
+while read -r kx ky kw kh; do
+    [ -n "$kx" ] || continue
+    O=$(python3 tools/themestore/glascheck.py kachel \
+        "$SHOTS/settings-vorlagen.png" "$kx" "$ky" "$kw" "$kh" \
+        "${KACHR:-12}")
+    f=$(printf '%s' "$O" | grep -oE 'fremd=[0-9]+' | cut -d= -f2)
+    t=$(printf '%s' "$O" | grep -oE 'tiefe=[0-9]+' | cut -d= -f2)
+    [ "${f:-9}" = 0 ] || { KBAD=$((KBAD+1)); echo "        $ky: $O"; }
+    [ "${t:-0}" -gt 0 ] || KTIEF=$((KTIEF+1))
+done <<EOF
+$KACHELN
+EOF
+num "keine Kachel malt etwas ausserhalb ihrer Rundung" "$KBAD" eq 0
+num "und jede der Kacheln ist wirklich rund (tiefe > 0)" "$KTIEF" eq 0
 
 # ------------------------------------------------- 10. die Bilder MESSEN
 echo
@@ -620,11 +755,82 @@ for pair in "set:Darstellung" "setv:Vorlagen"; do
     t=$(printf '%s' "$out" | grep -oE 'measured [0-9]+' | grep -oE '[0-9]+')
     num "Seite $nm: gemessene Beschriftungen" "${t:-0}" ge 12
     num "Seite $nm: leere Beschriftungen" "${e:-1}" eq 0
-    num "Seite $nm: abgeschnittene" "${c:-1}" eq 0
+    # `cut` zaehlt seit dieser Runde auch die STILLE Kuerzung: eine
+    # Beschriftung, von der weniger Oktette gemalt als gemeldet wurden,
+    # ohne die drei Punkte, die einem Leser sagen, dass etwas fehlt.
+    # `gekuerzt` daneben ist die Zahl der Beschriftungen, die
+    # ueberhaupt gekuerzt wurden -- sie darf ungleich 0 sein (elf
+    # Reiter passen nicht in eine Leiste), aber sie steht damit als
+    # Zahl im Lauf statt nur im Bild.
+    gk=$(printf '%s' "$out" | grep -oE 'gekuerzt [0-9]+' | grep -oE '[0-9]+')
+    echo "        Seite $nm: gekuerzte Beschriftungen: ${gk:-0}"
+    num "Seite $nm: abgeschnittene (still gekuerzte eingerechnet)" "${c:-1}" eq 0
     num "Seite $nm: ueberlappende" "${o:-1}" eq 0
     [ "${e:-1}" = 0 ] && [ "${c:-1}" = 0 ] && [ "${o:-1}" = 0 ] || \
         printf '%s\n' "$out" | sed 's/^/        /' | head -12
 done
+# ------------------------ RUNDE GLAS (nachtrag): HEISST DER REITER SO?
+#
+# Die Reiterleiste kuerzt eine Beschriftung, die nicht in ihren Reiter
+# passt. Bis hierher tat sie es STILL: "Netzzugriff" wurde
+# "Netzzugrif" gemalt, und ein fehlender letzter Buchstabe sieht aus
+# wie ein Wort. Seit dieser Runde meldet jeder Reiter den GANZEN Namen
+# (`t=`) und beide Laengen (`nq=` gemalt, `nv=` ganz) -- und hier wird
+# der gemeldete Name gegen die Sprachdatei gehalten, aus der er kommt.
+# Ungleich ist rot: dann malt die Leiste etwas anderes, als
+# locale/de/messages sagt, und keine Bildpruefung der Welt weiss, ob
+# das Absicht war.
+TABNAM=$(python3 - locale/de/messages "$SE" <<'PY'
+import re, sys
+msg = open(sys.argv[1], 'rb').read().decode('utf-8')
+want = None
+for zeile in msg.splitlines():
+    if zeile.startswith('settings.tabs'):
+        want = zeile.split('=', 1)[1].strip().split('\\n')
+if want is None:
+    print("        keine Zeile settings.tabs in %s" % sys.argv[1],
+          file=sys.stderr)
+    print(99)
+    raise SystemExit
+txt = open(sys.argv[2], 'rb').read().decode('utf-8', 'replace')
+ist = {}
+for m in re.finditer(r'wlib: tab i=(\d+) .* nq=(\d+) nv=(\d+) t=(.*)', txt):
+    ist[int(m.group(1))] = (m.group(4), int(m.group(2)), int(m.group(3)))
+n = 0
+if len(ist) != len(want):
+    print("        %d Reiter gemeldet, %d in der Sprachdatei"
+          % (len(ist), len(want)), file=sys.stderr)
+    n += 1
+for i, w in enumerate(want):
+    if i not in ist:
+        print("        Reiter %d ('%s') meldet sich nicht" % (i, w),
+              file=sys.stderr)
+        n += 1
+        continue
+    t, nq, nv = ist[i]
+    if t != w:
+        print("        Reiter %d meldet '%s', die Sprachdatei sagt '%s'"
+              % (i, t, w), file=sys.stderr)
+        n += 1
+    if nv != len(w.encode('utf-8')):
+        print("        Reiter %d meldet nv=%d, '%s' hat %d Oktette"
+              % (i, nv, w, len(w.encode('utf-8'))), file=sys.stderr)
+        n += 1
+print(n)
+PY
+)
+num "Reiter, deren gemeldeter Name nicht der der Sprachdatei ist" "${TABNAM:-99}" eq 0
+# UND WIE VIELE DAVON GEKUERZT GEMALT WERDEN. Das ist keine Zusage auf
+# 0 -- elf deutsche Reiter passen in 728 Bildpunkte nur gekuerzt --,
+# sondern die Zahl, die der naechste Umbau der Reiterleiste senken
+# muss. Sie steht hier, damit sie nicht wieder unbemerkt steigt.
+TABKURZ=$(grep -ao 'wlib: tab i=[0-9]* .*nq=[0-9]* nv=[0-9]*' "$SE" \
+    | awk '{ for (i=1;i<=NF;i++) { if ($i ~ /^nq=/) { split($i,a,"="); q=a[2] }
+             if ($i ~ /^nv=/) { split($i,b,"="); v=b[2] } } if (q != v) k++ }
+           END { print k+0 }')
+echo "        gekuerzt gemalte Reiterbeschriftungen: ${TABKURZ:-?} von $TABS"
+num "und hoechstens neun der elf Reiter muessen gekuerzt werden" \
+    "${TABKURZ:-99}" le 9
 # und jede der zehn Aufnahmen: die Taskleiste sagt, wo sie ist, und im
 # Bild ist sie dort.
 BARBAD=0
@@ -825,9 +1031,17 @@ num "und dabei wiederverwendet statt neu gerechnet" \
 # ---- 11d. LESBAR BLEIBT LESBAR -- GEGEN DEN GEMISCHTEN GRUND.
 #
 # Nicht gegen die Flaechenfarbe des Themas, sondern gegen das, was
-# wirklich im Bild steht: die haeufigste Farbe des Leistengrundes.
-# Einmal ueber einem hellen und einmal ueber einem dunklen Bild, denn
-# die Schranke, die die Lesbarkeit haelt, greift auf beiden Seiten.
+# wirklich im Bild steht. Und nicht gegen die HAEUFIGSTE Farbe des
+# Leistengrundes, sondern gegen die SCHLECHTESTE: ueber einem
+# gemusterten Bild liegt die Schrift mal auf der einen, mal auf der
+# anderen Kachel, und eine Zusage, die nur die groessere von beiden
+# misst, sagt ueber die Stelle, an der es eng wird, gar nichts.
+# `glascheck.py kontrast` nimmt deshalb jede Farbe, die mindestens ein
+# Prozent des Streifens ausmacht, und davon das Minimum -- und der
+# Streifen reicht jetzt bis an den rechten Rand, also ueber die UHR,
+# die vorher bei x=1100 abgeschnitten war. Einmal ueber einem hellen
+# und einmal ueber einem dunklen Bild, denn die Schranke, die die
+# Lesbarkeit haelt, greift auf beiden Seiten.
 bash tools/themestore/build.sh "$TMPD/dunkel" tbalpha=40 blur=0 \
     wallpaper=dunkel uitrace=yes keep=yes > "$TMPD/dunkel.log" 2>&1
 for pair in "al40:hell" "dunkel:dunkel"; do
@@ -835,10 +1049,18 @@ for pair in "al40:hell" "dunkel:dunkel"; do
     FG=$(grep -a 'taskbar: text clock ' "$TMPD/$d/serial.txt" | tail -1 \
          | grep -oE 'fg=[0-9]+' | cut -d= -f2)
     FGH=$(printf '%06x' "${FG:-0}")
-    K=$(python3 tools/themestore/glascheck.py kontrast "$TMPD/$d/desktop.png" \
-        "$FGH" | grep -oE '^kontrast [0-9]+' | cut -d' ' -f2)
-    num "Leistenschrift gegen den GEMISCHTEN Grund ($nm, 40 %%), x100" \
+    KZ=$(python3 tools/themestore/glascheck.py kontrast \
+         "$TMPD/$d/desktop.png" "$FGH")
+    echo "        $nm: $KZ"
+    K=$(printf '%s' "$KZ" | grep -oE '^kontrast [0-9]+' | cut -d' ' -f2)
+    num "Leistenschrift gegen den SCHLECHTESTEN gemischten Grund ($nm, 40 %%), x100" \
         "${K:-0}" ge 450
+    # GEGENPROBE, damit die Zahl nicht aus einem leeren Streifen
+    # kommt: es muss wirklich mehr als ein Grund unter der Leiste
+    # gelegen haben, sonst misst "der schlechteste" dasselbe wie "der
+    # haeufigste" und die Verschaerfung waere keine.
+    KK=$(printf '%s' "$KZ" | grep -oE 'kandidaten=[0-9]+' | cut -d= -f2)
+    num "und es waren wirklich mehrere Gruende zu messen ($nm)" "${KK:-0}" ge 2
 done
 
 # ---- 11e. KEIN ZWEITER ORT FUER DIESELBE SACHE.
