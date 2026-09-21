@@ -104,14 +104,26 @@ for p in $PRESETS; do
         case "$k" in
             name|scheme|mode|shape|accent|edge|align) ;;
             radius|taskbar_alpha|window_alpha|taskbar_blur) ;;
+            # `dark_scheme` ist der zwoelfte, und er ist KEIN Pflichtteil:
+            # nur eine Vorlage, die im Dunkelmodus auf ein anderes Schema
+            # umschaltet, traegt ihn (Runde FARBE, `tageslicht`). Er
+            # steht hier, weil `template.parse_key` ihn kennt -- die
+            # Liste der Datei und die des Quelltextes sind dieselbe.
+            dark_scheme) ;;
             *) echo "        $p: unbekannter Schluessel '$k'"; KEYS_BAD=$((KEYS_BAD+1));;
         esac
     done < <(grep -aoE '^[a-z_]+=' "$f" | sed 's/=$//')
-    n=$(grep -acE '^[a-z_]+=' "$f")
-    [ "$n" -eq 11 ] || { echo "        $p: $n Schluessel statt 11"; KEYS_MISS=$((KEYS_MISS+1)); }
+    # ELF PFLICHTSCHLUESSEL, und zwar jeder einzeln nachgesehen: eine
+    # blosse Anzahl waere bei einer Vorlage mit `dark_scheme` und ohne
+    # `radius` genauso gross und trotzdem falsch.
+    for k in name scheme mode shape accent edge align radius \
+             taskbar_alpha window_alpha taskbar_blur; do
+        grep -qaE "^$k=" "$f" || { echo "        $p: '$k' fehlt"
+            KEYS_MISS=$((KEYS_MISS+1)); }
+    done
 done
 num "kein Schluessel ausserhalb der elf" "$KEYS_BAD" eq 0
-num "und jede Vorlage hat alle elf" "$KEYS_MISS" eq 0
+num "und jeder der elf Pflichtschluessel steht in jeder Vorlage" "$KEYS_MISS" eq 0
 # RUNDE GLAS: DIE LISTE IST GEWACHSEN, DIE ZUSAGE NICHT GESCHRUMPFT.
 # Vier Schluessel sind dazugekommen, und jeder einzelne ist eine ZAHL
 # in einem festen Bereich -- kein Pfad, kein Befehl, kein Text freier
@@ -143,8 +155,8 @@ num "und die vier neuen Schluessel tragen nur Ziffern im erlaubten Bereich" "$NU
 # GEGENPROBE ZU DEM, WORAUF ES ANKOMMT: das Vokabular ist im Quelltext
 # genauso eng wie in den Dateien. Ein zwoelfter Schluessel muesste hier
 # stehen; steht er nicht, kann eine fremde Vorlage keinen tragen.
-PK=$(grep -acE 'var k_(name|scheme|mode|shape|accent|edge|align|radius|taskbar_alpha|window_alpha|taskbar_blur): ' kernel/user/template.fi)
-num "und vorlage.parse_key kennt genau elf Schluesselnamen" "$PK" eq 11
+PK=$(grep -acE 'var k_(name|scheme|dscheme|mode|shape|accent|edge|align|radius|taskbar_alpha|window_alpha|taskbar_blur): ' kernel/user/template.fi)
+num "und vorlage.parse_key kennt genau zwoelf Schluesselnamen" "$PK" eq 12
 # UND DIE VIER NEUEN GEHEN DURCH EINEN LESER, DER NUR ZIFFERN NIMMT.
 # `dec_of` gibt NUM_NONE zurueck, sobald ein Zeichen keine Ziffer ist,
 # und `parse_key` antwortet darauf `false` -- die Zeile wird als
@@ -380,7 +392,7 @@ python3 tools/osum/mkfs.py cat "$TMPD/noacc/disk.img" /x.otheme > "$TMPD/x.othem
 XK=0
 while IFS= read -r k; do
     case "$k" in
-        name|scheme|mode|shape|accent|edge|align) ;;
+        name|scheme|dark_scheme|mode|shape|accent|edge|align) ;;
         radius|taskbar_alpha|window_alpha|taskbar_blur) ;;
         *) XK=$((XK+1));;
     esac
@@ -484,9 +496,22 @@ num "und kein Reiter wird ausserhalb der Leiste gemalt" "$TABOUT" eq 0
 echo
 echo "== 9. ein Bild je Vorlage =="
 SHOTN=0
+# RUNDE GLAS: DIE AUFNAHME ZEIGT EIN FENSTER, und das ist kein
+# Schoenheitswunsch.
+#
+# Bis hierher fuhren diese zehn Laeufe den blossen Schreibtisch. Auf dem
+# steht kein Widget, und die einzigen `wlib: text`-Zeilen kamen vom
+# Starter, den `desk` seit Runde WMPLUGIN UNSICHTBAR hochbringt
+# (`launcher: versteckt`). Abschnitt 10 mass also die Beschriftungen
+# eines Fensters, das gar nicht auf dem Schirm ist -- und meldete
+# "leere Beschriftung" fuer jede davon. Mit `einst` steht das
+# Einstellungsfenster IN DER VORLAGE da: dieselben zehn Bilder zeigen
+# jetzt Schrift, Knoepfe, Listen und Regler in den Farben und der
+# Rundung, um die es geht, und Abschnitt 10 misst etwas, das wirklich
+# gemalt wurde.
 for p in $PRESETS; do
-    bash tools/themestore/build.sh "$TMPD/s-$p" preset="$p" uitrace=yes keep=yes \
-        > "$TMPD/s-$p.log" 2>&1
+    bash tools/themestore/build.sh "$TMPD/s-$p" preset="$p" extra='einst' \
+        uitrace=yes keep=yes > "$TMPD/s-$p.log" 2>&1
     if [ -s "$TMPD/s-$p/desktop.png" ]; then
         cp "$TMPD/s-$p/desktop.png" "$SHOTS/$p.png"
         SHOTN=$((SHOTN+1))
@@ -597,7 +622,13 @@ for r in 0 12 24; do
     g=$(grep -a 'settings: glas radius=' "$f" | tail -1 \
         | grep -oE 'radius=[0-9]+' | cut -d= -f2)
     same "Radius $r kommt in der laufenden Darstellung an" "$r" "${g:-}"
-    MAXR=$(grep -aoE 'wlib: radius rolle=[0-9]+ r=[0-9]+' "$f" \
+    # ROLLE 4 IST DER GRIFF DES REGLERS, und der ist ein KREIS. Er
+    # sagt "so rund wie moeglich" und meint damit seinen halben
+    # Durchmesser; ihn bei Radius 0 eckig zu machen hiesse, aus einem
+    # Knopf ein Kaestchen zu machen. Er zaehlt deshalb hier nicht mit
+    # -- und dass er ueberhaupt durch dieselbe eine Stelle geht, sagt
+    # seine Meldung.
+    MAXR=$(grep -aoE 'wlib: radius rolle=[0-3] r=[0-9]+' "$f" \
         | grep -oE 'r=[0-9]+$' | cut -d= -f2 | sort -n | tail -1)
     TYPEN=$(grep -aoE 'wlib: radius .*typ=[a-z]+' "$f" \
         | grep -oE 'typ=[a-z]+' | sort -u | wc -l)
@@ -612,10 +643,14 @@ for r in 0 12 24; do
     fi
     cp "$TMPD/rad$r/desktop.png" "$SHOTS/glas-radius-$r.png" 2>/dev/null
 done
-R12MAX=$(grep -aoE 'wlib: radius rolle=[0-9]+ r=[0-9]+' "$TMPD/rad12/serial.txt" \
+R12MAX=$(grep -aoE 'wlib: radius rolle=[0-3] r=[0-9]+' "$TMPD/rad12/serial.txt" \
     | grep -oE 'r=[0-9]+$' | cut -d= -f2 | sort -n | tail -1)
-R24MAX=$(grep -aoE 'wlib: radius rolle=[0-9]+ r=[0-9]+' "$TMPD/rad24/serial.txt" \
+R24MAX=$(grep -aoE 'wlib: radius rolle=[0-3] r=[0-9]+' "$TMPD/rad24/serial.txt" \
     | grep -oE 'r=[0-9]+$' | cut -d= -f2 | sort -n | tail -1)
+# UND DER GRIFF BLEIBT RUND, auch wenn alles andere eckig ist.
+GRIFF=$(grep -aoE 'wlib: radius rolle=4 r=[0-9]+' "$TMPD/rad0/serial.txt" \
+    | grep -oE 'r=[0-9]+$' | cut -d= -f2 | sort -n | tail -1)
+num "der Griff des Reglers bleibt auch bei Radius 0 ein Kreis" "${GRIFF:-0}" gt 0
 num "und 24 rundet staerker als 12 (Bildpunkte)" "${R24MAX:-0}" gt "${R12MAX:-0}"
 # DER INHALT SITZT BEI JEDEM RADIUS AN DERSELBEN STELLE.
 grep -ao 'settings: rect name=[a-z]* x=[0-9]* y=[0-9]* w=[0-9]* h=[0-9]*' \
@@ -636,14 +671,19 @@ num "und es sind ueberhaupt Rechtecke gemessen worden" \
 WX0=$(grep -ao 'name=win x=[0-9]*' "$TMPD/rad24/serial.txt" | tail -1 | cut -d= -f3)
 WY0=$(grep -ao 'name=win x=[0-9]* y=[0-9]*' "$TMPD/rad24/serial.txt" | tail -1 \
       | grep -oE 'y=[0-9]+' | cut -d= -f2)
-AA24=$(python3 tools/themestore/glascheck.py ecke "$SHOTS/glas-radius-24.png" \
-       "${WX0:-20}" "${WY0:-3}" 24 | grep -oE 'zwischen=[0-9]+' | cut -d= -f2)
-AA0=$(python3 tools/themestore/glascheck.py ecke "$SHOTS/glas-radius-0.png" \
-      "${WX0:-20}" "${WY0:-3}" 24 | grep -oE 'zwischen=[0-9]+' | cut -d= -f2)
-num "die Rundung bei 24 ist kantengeglaettet (Zwischentoene in der Ecke)" \
-    "${AA24:-0}" ge 20
-num "GEGENPROBE: die scharfe Ecke bei Radius 0 hat fast keine" \
-    "${AA0:-99}" lt 8
+for r in 0 12 24; do
+    E=$(python3 tools/themestore/glascheck.py ecke "$SHOTS/glas-radius-$r.png" \
+        "${WX0:-20}" "${WY0:-3}" 24)
+    eval "T$r=$(printf '%s' "$E" | grep -oE 'tiefe=[0-9]+' | cut -d= -f2)"
+    eval "W$r=$(printf '%s' "$E" | grep -oE 'weich=[0-9]+' | cut -d= -f2)"
+    echo "        Radius $r: $E"
+done
+num "bei Radius 12 ist die Ecke wirklich abgeschnitten (Bildpunkte)" "${T12:-0}" ge 8
+num "und bei 24 tiefer als bei 12" "${T24:-0}" gt "${T12:-0}"
+num "die Rundung bei 24 ist kantengeglaettet (Zeilen mit Mischton)" "${W24:-0}" ge 12
+num "und die bei 12 auch" "${W12:-0}" ge 6
+num "GEGENPROBE: bei Radius 0 ist die Ecke ein rechter Winkel" "${T0:-99}" eq 0
+num "und hat keinen einzigen Mischton -- da ist nichts zu glaetten" "${W0:-99}" eq 0
 
 # ---- 11b. DIE LEISTE MISCHT WIRKLICH -- GEGEN EINE ZWEITE RECHNUNG.
 #
@@ -771,6 +811,55 @@ same "GEGENPROBE: mit noglasgrow steht die Regel still" "1" \
     "$(printf '%s' "$NG" | grep -oE 'aus=[0-9]+' | cut -d= -f2)"
 same "und sie hat dort kein einziges Rechteck aufgezogen" "0" \
     "$(printf '%s' "$NG" | grep -oE 'grow=[0-9]+' | cut -d= -f2)"
+# ---- 11g. DER REGLER WIRKT SOFORT UND UEBERLEBT DEN NEUSTART.
+#
+# Kein Zeugenbericht, sondern ein Klick: der Lauf faehrt mit radius=4
+# hoch, klickt auf die rechte Haelfte der Reglerbahn der Eckenrundung
+# und sieht danach zweimal nach -- was die laufende Darstellung sagt
+# (`settings: glas radius=`) und was in /etc/theme.conf auf der PLATTE
+# steht. Das eine ist "wirkt ohne Neustart", das andere ist
+# "ueberlebt einen Neustart", denn genau diese Zeile liest der naechste
+# Start (11a misst, dass sie ankommt).
+#
+# ZWEI KLICKS UND NICHT EINER: der erste holt das Fenster nach vorn.
+# Die Stelle kommt aus dem Rechteck, das die Seite selbst meldet, und
+# nicht aus einer abgemessenen Zahl.
+bash tools/themestore/build.sh "$TMPD/rvor" extra='einst' uitrace=yes \
+    keep=yes radius=4 > "$TMPD/rvor.log" 2>&1
+SL=$(grep -ao 'settings: rect name=[a-z]* x=[0-9]* y=40[0-9] w=[0-9]* h=[0-9]*' \
+     "$TMPD/rvor/serial.txt" | tail -1)
+SLX=$(printf '%s' "$SL" | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
+SLY=$(printf '%s' "$SL" | grep -oE ' y=[0-9]+' | grep -oE '[0-9]+')
+SLW=$(printf '%s' "$SL" | grep -oE ' w=[0-9]+' | grep -oE '[0-9]+')
+# Fensterinneres: 22 nach rechts (Rahmen) und 25 nach unten (Rahmen
+# und Titel), wie es die Reiterzeile selbst meldet (x=16 -> ax=38).
+CX=$(( ${SLX:-316} + 22 + (${SLW:-428} * 2 / 3) ))
+CY=$(( ${SLY:-408} + 25 + 12 ))
+bash tools/themestore/build.sh "$TMPD/rklick" extra='einst' uitrace=yes \
+    keep=yes radius=4 click="$CX,$CY" click="$CX,$CY" \
+    > "$TMPD/rklick.log" 2>&1
+RNEU=$(grep -a 'settings: glas radius=' "$TMPD/rklick/serial.txt" | tail -1 \
+       | grep -oE 'radius=[0-9]+' | cut -d= -f2)
+num "ein Klick auf den Regler aendert die laufende Eckenrundung (von 4)" \
+    "${RNEU:-4}" gt 4
+RDAT=$(python3 tools/osum/mkfs.py cat "$TMPD/rklick/disk.img" /etc/theme.conf \
+       2>/dev/null | grep -aE '^radius=' | tail -1 | cut -d= -f2)
+same "und dieselbe Zahl steht danach in /etc/theme.conf auf der Platte" \
+    "${RNEU:-4}" "${RDAT:-}"
+# GEGENPROBE: ohne den Klick bleibt beides bei 4.
+RVOR=$(grep -a 'settings: glas radius=' "$TMPD/rvor/serial.txt" | tail -1 \
+       | grep -oE 'radius=[0-9]+' | cut -d= -f2)
+same "GEGENPROBE: ohne Klick bleibt die Eckenrundung, wo sie war" "4" "${RVOR:-}"
+same "und die Datei auch" "4" \
+    "$(python3 tools/osum/mkfs.py cat "$TMPD/rvor/disk.img" /etc/theme.conf \
+       2>/dev/null | grep -aE '^radius=' | tail -1 | cut -d= -f2)"
+# UND EIN KASTEN FAENGT KEINEN KLICK MEHR AB. Ohne diese Zeile waere
+# der Klick oben nie angekommen: `wlib.card` liegt als erstes Widget
+# der Spalte ueber allem, was danach kommt, und `hit_at` nimmt das
+# erste passende.
+num "Schmuck-Widgets sind von der Trefferpruefung ausgenommen" \
+    "$(grep -ac 'fn nur_schmuck(' kernel/user/wlib.fi)" eq 1
+
 # UND DIE NEUEN BILDER WERDEN GENAUSO GEMESSEN WIE DIE ALTEN.
 GSHOT=0
 for s in glas-radius-0 glas-radius-12 glas-radius-24 glas-alpha-100 \

@@ -159,14 +159,46 @@ def main(argv):
         return 0
 
     if cmd == "ecke":
+        # DIE ECKE WIRD ZEILE FUER ZEILE ABGETASTET, und das ist der
+        # einzige Weg, auf dem "rund" und "kantengeglaettet" zwei
+        # verschiedene Zahlen werden.
+        #
+        # Von links in jede Zeile des Eckquadrats hineingehen und die
+        # Stelle merken, an der die Fensterfarbe anfaengt:
+        #
+        #   tiefe  = wie weit die oberste Zeile spaeter anfaengt als
+        #            die unterste. Bei einem rechten Winkel ist das 0,
+        #            bei Radius r ungefaehr r -- das ist die Rundung.
+        #   weich  = in wie vielen Zeilen der Punkt VOR dieser Stelle
+        #            ein Mischton ist, also weder Untergrund noch
+        #            Fensterfarbe. Eine Treppe hat dort nichts;
+        #            Kantenglaettung hat in fast jeder Zeile etwas.
+        #
+        # Ohne die zweite Zahl waere eine grob gestufte Rundung von
+        # einer geglaetteten nicht zu unterscheiden, und genau das ist
+        # die Zusage, um die es geht.
         x, y, k = (int(v) for v in rest[1:4])
-        c = Counter(im.getpixel((x + i, y + j))
-                    for i in range(k) for j in range(k))
-        # Die Zwischentoene sind die Kantenglaettung: alles, was weder
-        # die haeufigste noch die zweithaeufigste Farbe ist.
-        zwei = [f for f, _ in c.most_common(2)]
-        zwischen = sum(n for f, n in c.items() if f not in zwei)
-        print("ecke farben=%d zwischen=%d" % (len(c), zwischen))
+        aussen = im.getpixel((x - 6, y + k // 2))
+        innen = im.getpixel((x + k + 8, y + k - 1))
+
+        def nah(a, b, tol=12):
+            return max(abs(a[i] - b[i]) for i in range(3)) <= tol
+
+        starts, weich = [], 0
+        for j in range(k):
+            for i in range(k + 8):
+                p = im.getpixel((x + i, y + j))
+                if not nah(p, aussen):
+                    starts.append(i)
+                    if i > 0:
+                        q = im.getpixel((x + i - 1, y + j))
+                        if not nah(q, aussen, 2) and not nah(q, innen, 2):
+                            weich += 1
+                    break
+            else:
+                starts.append(k + 8)
+        tiefe = max(starts) - min(starts)
+        print("ecke tiefe=%d weich=%d zeilen=%d" % (tiefe, weich, len(starts)))
         return 0
 
     if cmd == "kontrast":
