@@ -7,7 +7,8 @@ Erzeugt am 21.09.2026 aus dem Zweig `glas`.
 
 Herkunft:
 * 01-11 und 21 stammen aus dem Abnahmelauf `bash tools/themestore/run.sh`
-  (Ergebnis dieses Laufs: **136 Zusagen, 0 rot**).
+  (Ergebnis des Laufs, aus dem die hier liegenden Bilder stammen:
+  **230 Zusagen, 0 rot**, Stand nach fix-r3-1 bis fix-r3-4).
 * 13-15 sind drei zusaetzliche Laeufe mit demselben Verfahren
   (`tools/themestore/build.sh` mit anderen Reglerstellungen).
 * 12 ist kein eigener Lauf, sondern ein 2-fach vergroesserter Ausschnitt

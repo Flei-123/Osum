@@ -15,11 +15,12 @@ Beleg fuer alles: `bash tools/themestore/run.sh`. Ergebnis des Laufs,
 auf den sich dieses Blatt bezieht (21.09.2026, QEMU/TCG ohne KVM):
 
 ```
-THEMESTORE: 136 passed, 0 failed
+THEMESTORE: 230 passed, 0 failed
 ```
 
 Vorher waren es 81 Zusagen. Keine davon ist abgeschwaecht oder entfernt
-worden; die 55 neuen stehen in Abschnitt 11 des Laeufers.
+worden; die 149 neuen stehen in Abschnitt 11 des Laeufers (55 aus der
+Runde selbst, der Rest aus den Nachtraegen fix-r3-1 bis fix-r3-4).
 
 Die Bilder liegen unter `docs/shots/glas/` (Tabelle dort in
 `README.md`), die Einzelaufnahmen des Laufs unter
