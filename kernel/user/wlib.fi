@@ -79,6 +79,13 @@ export {
     win_w, win_h, win_x, win_y, win_cx, win_cy, win_hide, win_layer, win_fokus,
     box_v, box_h, box_grid, box_end, box_at, box_use, size, gap_after,
     set_size,
+    // RUNDE GLAS (nachtrag): ein Programm, das einen Kasten
+    // NACHTRAEGLICH woandershin legt (`box_at`), muss die Kaesten auch
+    // von vorn setzen duerfen -- sonst bleibt das Widget darin an der
+    // Stelle liegen, an der es angelegt wurde. `reshape` tut es auch,
+    // misst aber zusaetzlich jede Hoehe neu; wer nur verschoben hat,
+    // braucht das nicht.
+    relayout,
     label, button, icon_button, check, entry, list, table, tabs, menubar, choice,
     tile, TILE_FIELDS, TL_SURFACE, TL_RAISED, TL_ACCENT, TL_ONACCENT,
     TL_TEXT, TL_FRAME, TL_TASKBAR, TL_TBTEXT, TL_BUTTON, TL_RADW,
@@ -916,6 +923,18 @@ static mut tr_w: [u8; 6] = " tw=\0\0"
 // is not a checker, that is noise.  Two numbers fix it.
 static mut tr_ax: [u8; 6] = " ax=\0\0"
 static mut tr_ay: [u8; 6] = " ay=\0\0"
+// RUNDE GLAS (nachtrag): UND WIE VIEL VON DEM TEXT UEBRIG BLIEB.
+//
+// `nq` ist die Zahl der Oktette, die wirklich gemalt wurden, `nv` die
+// des ungekuerzten Textes. Solange beide gleich sind, steht in `t=`
+// der ganze Name; sind sie es nicht, hat ein Bedienelement gekuerzt --
+// und genau das war bisher unsichtbar: die Reiterleiste malte
+// "Netzzugrif" statt "Netzzugriff", und kein Pruefer konnte das von
+// einem Reiter unterscheiden, der wirklich so heisst. Zwei Zahlen
+// machen daraus eine Messung (tools/themestore/shotcheck.py, `cut`
+// und `elided`).
+static mut tr_q: [u8; 6] = " nq=\0\0"
+static mut tr_v: [u8; 6] = " nv=\0\0"
 static mut tr_t: [u8; 5] = " t=\0\0"
 static mut tr_buf: [u8; 320] = [0 as u8; 320]
 // RUNDE THEME. Was das Umschalten kostet, gezaehlt an der Stelle, an
@@ -2807,6 +2826,33 @@ fn tspec(i: u64, f: u64) -> u64 {
     return __mmio_read64((p + f * 8) as *mut u64)
 }
 
+// WIE WEIT EINE RUNDUNG IN EINER BESTIMMTEN HOEHE NACH INNEN GREIFT.
+//
+// Eine Flaeche mit Radius `r` ist in der Zeile `d` unter ihrer Kante um
+// so viele Bildpunkte schmaler, als dieser Wert sagt: der kleinste `e`,
+// fuer den der Punkt (r-e, r-d) noch im Viertelkreis liegt. Das ist
+// dieselbe Bedingung, mit der `wlibc.rrect` seine Ecken deckt --
+// deshalb wird hier auch nichts gemalt, sondern nur GERECHNET: wer ein
+// Rechteck in eine gerundete Flaeche legt, ruckt es um diese Zahl ein
+// und liegt damit garantiert innerhalb desselben Umrisses. Eine
+// Wurzel braucht es dafuer nicht; bei hoechstens 24 Durchgaengen ist
+// die Schleife billiger als jede Naeherung und dazu exakt.
+fn ecke_ein(r: u64, d: u64) -> u64 {
+    if r <= d {
+        return 0
+    }
+    let b: u64 = r - d
+    var e: u64 = 0
+    while e < r {
+        let a: u64 = r - e
+        if a * a + b * b <= r * r {
+            return e
+        }
+        e = e + 1
+    }
+    return r
+}
+
 fn paint_tile(i: u64) {
     let x: u64 = g(i, D_X)
     let y: u64 = g(i, D_Y)
@@ -2818,8 +2864,25 @@ fn paint_tile(i: u64) {
     // THE PICTURE HALF IS ON THE RIGHT AND IS ALWAYS THE SAME SHAPE, so
     // that ten tiles under each other can be compared by eye and by a
     // pixel reader. 96 wide; the name gets the rest.
+    //
+    // RUNDE GLAS (nachtrag): UND SIE LIEGT INNERHALB DER RUNDUNG.
+    //
+    // Die Vorschau sass bis hierher buendig an der rechten Kante der
+    // Kachel (`x + w - pw`), die Kachel selbst ist aber RUND. Der
+    // senkrechte Balken der Miniaturleiste an der rechten Kante
+    // (`edge=rechts`, die Vorlagen "Tafel" und "Studio") lief damit an
+    // der Rundung vorbei ins Freie: im Bild 09 ein sechs Bildpunkte
+    // breiter Farbschlitz bei x=768..774, ausserhalb des Umrisses und
+    // ausserhalb der Spalte. `ecke_ein` sagt, wie weit die Rundung an
+    // der Hoehe der Vorschau (4 Bildpunkte unter der Kante) nach innen
+    // greift; um genau so viel rueckt die Vorschau ein. Damit liegt
+    // JEDE Flaeche der Kachel -- Fuellung, Leiste, Knopf, Fenster --
+    // innerhalb desselben Umrisses, ohne dass ein zweiter Rasterizer
+    // dafuer noetig waere.
+    let rk: u64 = typ_radius(RT_KACHEL, MR_TAFEL, w, h)
+    let rkant: u64 = ecke_ein(rk, 4)
     let pw: u64 = TP_W
-    let px: u64 = x + sub(w, pw)
+    let px: u64 = sub(x + sub(w, pw), rkant)
     let ph: u64 = sub(h, 8)
     let py: u64 = y + 4
     let sel: bool = g(i, D_VAL) != 0
@@ -2833,9 +2896,9 @@ fn paint_tile(i: u64) {
     // ANDERES Schema als das laufende), und die darf fUi nicht
     // ueberstimmen. `sel` bleibt der Zustand des Aufrufers.
     // RUNDE GLAS: dreimal dieselbe Marke abgetippt -- jetzt einmal aus
-    // der Rolle geholt. Flaeche und Ring MUESSEN dieselbe Zahl haben,
-    // sonst liegt der Ring bei einem gedrehten Regler neben der Kante.
-    let rk: u64 = typ_radius(RT_KACHEL, MR_TAFEL, w, h)
+    // der Rolle geholt (`rk`, oben). Flaeche und Ring MUESSEN dieselbe
+    // Zahl haben, sonst liegt der Ring bei einem gedrehten Regler
+    // neben der Kante.
     let _fb1: bool = fuib.tafel(x, y, w, h, rk,
         tspec(i, TL_SURFACE), 0, 0)
     if sel {
@@ -3321,6 +3384,19 @@ fn set_trace(on: bool) {
 // Farben und der Text.
 fn say_painted(w: u64, kind: u64, base: u64, fg: u64, bg: u64, p: u64,
     n: u64) {
+    say_painted_n(w, kind, base, fg, bg, p, n, n)
+}
+
+// DIESELBE ZEILE, ABER MIT DER UNGEKUERZTEN LAENGE DANEBEN.
+//
+// Wer einen Text kuerzt, malt `n` Oktette von `nv`, und nur er weiss
+// das noch. Sagt er es nicht, ist die Kuerzung im Bild von einem
+// kurzen Namen nicht zu unterscheiden -- und ein geklemmtes Label
+// bleibt jahrelang unbemerkt, so wie die Reiter dieser Runde.
+// `say_painted` reicht `nv = n` durch: wer nicht kuerzt, hat nichts zu
+// melden.
+fn say_painted_n(w: u64, kind: u64, base: u64, fg: u64, bg: u64, p: u64,
+    n: u64, nv: u64) {
     if s_trace == 0 || p == 0 || n == 0 {
         return
     }
@@ -3362,6 +3438,10 @@ fn say_painted(w: u64, kind: u64, base: u64, fg: u64, bg: u64, p: u64,
     at = tr_num(b, at, ng(w, N_X) + 2)
     at = tr_put(b, at, (&tr_ay[0 as usize]) as u64)
     at = tr_num(b, at, ng(w, N_Y) + 22)
+    at = tr_put(b, at, (&tr_q[0 as usize]) as u64)
+    at = tr_num(b, at, n)
+    at = tr_put(b, at, (&tr_v[0 as usize]) as u64)
+    at = tr_num(b, at, nv)
     at = tr_put(b, at, (&tr_t[0 as usize]) as u64)
     var i: u64 = 0
     while i < n && at + 2 < 320 {
@@ -3439,7 +3519,18 @@ fn fui_zustand(i: u64) -> u64 {
 }
 
 fn focus_ring(i: u64) {
-    if s_focus != i + 1 {
+    focus_ring_at(i, g(i, D_X), g(i, D_Y), g(i, D_W), g(i, D_H))
+}
+
+// DERSELBE RING, ABER UM EIN ANGEGEBENES RECHTECK.
+//
+// Ein Bedienelement, das aus mehreren anfassbaren Stuecken besteht
+// (die Reiterleiste ist das einzige), traegt den Ring nicht um sich
+// selbst, sondern um das Stueck, das gerade gilt. Der Ring bleibt die
+// EINE Stelle, die einen Fokusring malt -- nur das Rechteck ist jetzt
+// ein Argument statt einer Annahme.
+fn focus_ring_at(i: u64, rx: u64, ry: u64, rw: u64, rh: u64) {
+    if s_focus != i + 1 || rw == 0 || rh == 0 {
         return
     }
     // `rring` and not `rframe`: a focus ring goes ON TOP of a control
@@ -3452,13 +3543,11 @@ fn focus_ring(i: u64) {
     // Quelle holte, wandert bei jeder Reglerbewegung von der Kante weg.
     // Gemeldet wird hier NICHT: ein Fokusring ist kein Widgettyp,
     // sondern liegt auf einem.
-    if fuib.ring(g(i, D_X), g(i, D_Y), g(i, D_W), g(i, D_H),
-        draw_radius(MR_BUTTON),
+    if fuib.ring(rx, ry, rw, rh, draw_radius(MR_BUTTON),
         wlibc.metric(wlibc.M_FOCUS), wlibc.theme(wlibc.T_FOCUS)) {
         return
     }
-    wlibc.rring(g(i, D_X), g(i, D_Y), g(i, D_W), g(i, D_H),
-        draw_radius(MR_BUTTON),
+    wlibc.rring(rx, ry, rw, rh, draw_radius(MR_BUTTON),
         wlibc.metric(wlibc.M_FOCUS), wlibc.theme(wlibc.T_FOCUS))
 }
 
@@ -4936,7 +5025,8 @@ fn tab_w(i: u64, k: u64) -> u64 {
     return tab_width(i, k)
 }
 
-fn say_tab(w: u64, k: u64, x: u64, y: u64, tw: u64, th: u64) {
+fn say_tab(w: u64, k: u64, x: u64, y: u64, tw: u64, th: u64, q: u64,
+    nq: u64, nv: u64) {
     var a: [u8; 13] = "wlib: tab i=\0"
     var bx: [u8; 4] = " x=\0"
     var by: [u8; 4] = " y=\0"
@@ -4963,7 +5053,28 @@ fn say_tab(w: u64, k: u64, x: u64, y: u64, tw: u64, th: u64) {
     ulib.sayn(ng(w, N_X) + 2 + x)
     ulib.say((&bay[0 as usize]) as u64)
     ulib.sayn(ng(w, N_Y) + 22 + y)
-    ulib.nl()
+    // UND WIE DER REITER HEISST -- UNGEKUERZT.
+    //
+    // `nq` ist, was gemalt wurde, `nv`, was dastehen sollte, und `t=`
+    // traegt den GANZEN Namen. Ohne den ganzen Namen kann ein
+    // Abnahmelauf die Beschriftung nicht gegen die Sprachdatei halten:
+    // er saehe "Netzzugrif" und haette keine Zeile, an der er merkt,
+    // dass dem Reiter ein Buchstabe fehlt. Der Text wird oktettweise
+    // und mit EINEM Schreibvorgang ausgegeben -- `ulib.say` liefe bis
+    // zur naechsten Null und schriebe damit die ganze Reiterliste.
+    ulib.say((&tr_q[0 as usize]) as u64)
+    ulib.sayn(nq)
+    ulib.say((&tr_v[0 as usize]) as u64)
+    ulib.sayn(nv)
+    ulib.say((&tr_t[0 as usize]) as u64)
+    let b: u64 = (&tr_buf[0 as usize]) as u64
+    var c: u64 = 0
+    while c < nv && c + 2 < 320 {
+        __mmio_write8((b + c) as *mut u8, __mmio_read8((q + c) as *mut u8))
+        c = c + 1
+    }
+    __mmio_write8((b + c) as *mut u8, 10 as u8)
+    let _wt: u64 = ulib.put(b, c + 1)
 }
 
 fn paint_tabs(i: u64) {
@@ -5007,29 +5118,65 @@ fn paint_tabs(i: u64) {
             } else {
                 wlibc.hline(tx, y + bh - 1, tw, wlibc.theme(wlibc.T_LINE))
             }
-            // AND THE LABEL IS CLIPPED TO THE TAB. `fit` answers how
-            // many characters go into a width; without it a scaled tab
-            // paints its name across the next one, which is exactly
-            // the "overlapping text" this round is supposed to find
-            // rather than produce.
-            let nq: u64 = wlibc.fit(wlibc.F_UI, wlibc.px_ui(), q,
-                row_len(q), sub(tw, 6))
-            put_text(wlibc.F_UI, wlibc.px_ui(), tx,
-                y + (bh + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())) / 2, tw,
-                q, nq, farbe, 1)
+            // AND THE LABEL IS CLIPPED TO THE TAB -- BUT VISIBLY.
+            //
+            // `fit` answers how many characters go into a width, and
+            // it answers it SILENTLY: eleven German tabs need 861
+            // pixels in a bar 728 wide, so every label lost about a
+            // seventh of itself and "Netzzugriff" was painted
+            // "Netzzugrif". Nobody could see that this was a cut and
+            // not the name -- a missing last letter looks like a
+            // word. `elide` puts three dots where it cut, which is the
+            // one mark a reader recognises without knowing the name,
+            // and both lengths go into the trace so that
+            // tools/themestore/shotcheck.py can COUNT the cuts instead
+            // of leaving them to the eye.
+            let voll: u64 = row_len(q)
+            let el: u64 = elide(wlibc.F_UI, wlibc.px_ui(), q, voll,
+                sub(tw, 8))
+            var qp: u64 = q
+            var nq: u64 = voll
+            if el != 0 {
+                qp = (&el_buf[0 as usize]) as u64
+                nq = el
+            }
+            let base: u64 = y
+                + (bh + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())) / 2
+            put_text(wlibc.F_UI, wlibc.px_ui(), tx, base, tw, qp, nq,
+                farbe, 1)
+            // UND DIE BESCHRIFTUNG MELDET SICH WIE JEDE ANDERE.
+            // Bis hierher war die Reiterleiste die einzige Flaeche mit
+            // Text, die keine `wlib: text`-Zeile schrieb -- also die
+            // einzige, ueber die shotcheck.py nichts wusste. Genau
+            // dort sassen die geklemmten Namen.
+            say_painted_n(g(i, D_WIN), K_TABS, base, farbe, area, qp, nq,
+                voll)
             // WHERE THE TAB IS, REPORTED BY THE THING THAT DRAWS IT.
             // Round LOOK made list rows and table headers say where
             // they painted, for the reason a runner that computes a tab
             // boundary is a runner that checks its own arithmetic. Same
             // rule, one widget further along.
-            say_tab(g(i, D_WIN), k, tx, y, tw, bh)
+            say_tab(g(i, D_WIN), k, tx, y, tw, bh, q, nq, voll)
             tx = tx + tw
             k = k + 1
         }
     }
     wlibc.hline(tx, y + bh - 1, sub(x + g(i, D_W), tx),
         wlibc.theme(wlibc.T_LINE))
-    focus_ring(i)
+    // DER FOKUSRING LIEGT AUF DEM REITER UND NICHT UM DIE LEISTE.
+    //
+    // Er lag um die ganze Leiste, und die Leiste ist 728 Bildpunkte
+    // breit: ihre untere Kante lief unter den beiden Karten der Seite
+    // hindurch, die vier Bildpunkte in sie hineinragen. Die Karten
+    // malten sie streckenweise zu, uebrig blieben zwei blaue
+    // Strichreste bei x=313..330 und x=713..759 -- in 02, 03, 08, 10,
+    // 13 und 14 zu sehen und in keiner Zusage. Ein Ring um den
+    // AKTIVEN REITER sagt ausserdem das Richtige: die Tastatur
+    // wechselt den Reiter, nicht die Leiste. Er liegt vollstaendig
+    // innerhalb des Rechtecks, das `say_tab` fuer diesen Reiter
+    // meldet, und genau daran misst es der Abnahmelauf.
+    let sel: u64 = g(i, D_VAL)
+    focus_ring_at(i, tab_x(i, sel), y, tab_width(i, sel), bh)
 }
 
 fn paint_menubar(i: u64) {
@@ -5385,6 +5532,24 @@ fn flush_win(w: u64) -> u64 {
     if w >= MAXWN || ng(w, N_H) == 0 {
         return 0
     }
+    // ============================================ RUNDE GLAS (NACHTRAG)
+    // WER GEZOGEN WURDE, STEHT WOANDERS -- UND MUSS ES SAGEN.
+    //
+    // `win_ort_holen` fragt den Server nach der wahren Stelle und
+    // meldet eine Aenderung weiter; aufgerufen wurde es aber nur aus
+    // `win_x`/`win_y`, und die ruft im Anstrich niemand. Zieht eine
+    // Hand das Fenster unter die Taskleiste, malt der Server es dort
+    // richtig, das Programm meldet seine Beschriftungen aber weiter zu
+    // dem Ursprung, an dem es ANGELEGT wurde. GEMESSEN an Bild 15
+    // dieser Runde: nach einem Zug von 400,10 nach 400,600 meldete
+    // `tools/themestore/shotcheck.py` acht leere Beschriftungen -- an
+    // den alten Stellen war wirklich nichts, und an den neuen hat
+    // niemand nachgesehen.
+    //
+    // Hier ist die Stelle, durch die JEDER Anstrich geht, und sie
+    // kostet zwei Systemaufrufe je Anstrich (nicht je Bildpunkt und
+    // nicht je Bedienelement).
+    win_ort_holen(w)
     let n: u64 = ng(w, N_NDIRT)
     ns(w, N_NDIRT, 0)
     var gemalt: u64 = 0

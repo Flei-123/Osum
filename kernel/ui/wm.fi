@@ -117,6 +117,9 @@ export {
     panel_grows, set_noglasgrow, selftest_glas, selftest_glas_max,
     glas_bericht,
     glass_mix,
+    // RUNDE GLAS (NACHTRAG): was der Regler SOLL und was wirklich IST,
+    // und wie weit ein Fenster unter der Leiste stand.
+    tb_alpha_ist, tb_alpha_hoch, unter_leiste_px,
     RADIUS_MAX, SHADOW_MAX,
     DK_FRAME, DK_TITLE, DK_TEXT, DK_FRAME_ON, DK_TITLE_ON, DK_TEXT_ON,
     DK_CLOSE, DK_CLOSE_MARK, DK_DESK, DK_TERM_FG, DK_TERM_BG,
@@ -134,6 +137,8 @@ export {
     fill, text, blit_in, flush_win, hit,
     ev_push, ev_pop, ev_waiting,
     on_mouse, on_key, term_write, term_out, term_cols, term_rows, term_cx, term_cy,
+    // RUNDE GLAS (nachtrag): die echten Zellenmasse, siehe `term_cellw`.
+    term_cellw, term_cellh, term_asc, term_px,
     bind_tty, key_tty, tty_of, NO_TTY, term_outs, term_puts_n,
     term_dump,
     poll, composites, blits, pixels, last_us, cursor_on, set_cursor,
@@ -881,6 +886,17 @@ const S_GLSAY: u64 = 0x1418 // Laeufe seit der letzten Meldezeile
 const S_GLTEST: u64 = 0x1420 // bestandene Zusagen von `selftest_glas`
 // GEGENPROBE: die Schlierenregel abgeschaltet (`noglasgrow`).
 const S_NOGROW: u64 = 0x1428
+// ================================================ RUNDE GLAS (NACHTRAG)
+// WIE WEIT EIN FENSTER WIRKLICH UNTER DER LEISTE STAND, in Bildpunkten
+// der groessten je gemessenen Schnittflaeche.
+//
+// Die Zusage "nach einem Zug unter der Leiste bleiben keine Schlieren"
+// wurde mit `diff 0` belegt -- und `diff 0` kommt auch dann heraus,
+// wenn das Fenster die Leiste nie beruehrt hat. Genau das war der Fall:
+// der Zug der Abnahme fasste den oberen RAHMEN und veraenderte die
+// Groesse, statt das Fenster zu bewegen. Diese Zahl ist die Gegenprobe
+// dazu; sie steht in `wm: schlieren ... unterpx=`.
+const S_UNTERPX: u64 = 0x1430
 
 // ------------------------------- RUNDE VEKTOR: DIE ZEICHEN LIEGEN FERTIG
 //
@@ -2611,6 +2627,37 @@ fn term_cy(state: u64, i: u64) -> u64 {
     return wg(state, i, W_CY)
 }
 
+// ====================================== RUNDE GLAS (nachtrag)
+// WO EINE ZELLE WIRKLICH LIEGT -- gefragt von aussen.
+//
+// `wm: term win=0 cols= rows= cell=` hat die Zellengroesse bis zu
+// dieser Runde aus zwei festen Zahlen GETEILT (560/cols, 380/rows),
+// und das stimmte genau fuer den einen Aufbau, in dem es geschrieben
+// wurde. Wer eine Zeile des Terminals bildpunktgenau nachrastern will
+// -- tools/look/umlaut.py tut das seit dem Nachtrag --, braucht die
+// echten Zahlen: Zellenbreite, Zellenhoehe und den Aufsteiger der
+// Festbreitenschrift, denn die Grundlinie der Zeile r liegt bei
+// y + r * Zellenhoehe + Aufsteiger. Geraten wird hier nichts mehr.
+fn term_cellw(state: u64, i: u64) -> u64 {
+    return wg(state, i, W_CELLW)
+}
+
+fn term_cellh(state: u64, i: u64) -> u64 {
+    return wg(state, i, W_CELLH)
+}
+
+fn term_asc(state: u64) -> u64 {
+    let f: u64 = gs(state, S_FONT_MONO)
+    if f >= ttf.MAX_FONTS {
+        return 0
+    }
+    return ttf.ascent(state, f, gs(state, S_PX_MONO))
+}
+
+fn term_px(state: u64) -> u64 {
+    return gs(state, S_PX_MONO)
+}
+
 // ------------------------------------------------------------- Start
 
 fn init(state: u64, w: u64, h: u64, nodirty: bool, nofocus: bool) -> bool {
@@ -3542,6 +3589,39 @@ fn grip(state: u64) -> u64 {
     return GRIP0 * uisc(state)
 }
 
+// ============================================ RUNDE GLAS (nachtrag)
+// DIE OBERE GREIFKANTE IST SCHMALER ALS DIE DREI ANDEREN -- UND ZWAR
+// WEIL HINTER IHR DIE TITELLEISTE LIEGT UND NICHT DER INHALT.
+//
+// Links, rechts und unten grenzt der Greifrand an die Malflaeche: acht
+// Bildpunkte dort kosten nichts, weil dort ohnehin niemand etwas
+// anfasst. Oben grenzt er an die TITELLEISTE, also an die eine
+// Flaeche, die es gibt, damit man ein Fenster VERSCHIEBEN kann. Acht
+// von zweiundzwanzig Bildpunkten Titelhoehe sind mehr als ein Drittel
+// davon -- und wer dort hineingreift, zieht das Fenster nicht, sondern
+// zieht seine Oberkante herunter.
+//
+// GEMESSEN, und das ist der ganze Befund zu Bild 15 dieser Runde: der
+// Abnahmelauf zieht bei 400,10 (das Fenster steht bei y=3, die
+// Titelschrift beginnt bei y=5) und meinte einen Zug unter die
+// Leiste. Auf der Leitung stand statt dessen
+//
+//     wm: zieh k=4 w=760 h=16 x=20 vorh=31 vory=538
+//
+// -- vierzehn Mal `zieh` und kein einziges `move`. Das Fenster wurde
+// auf seine Mindesthoehe zusammengeschoben, und die Aufnahme zeigte
+// einen leeren Rumpf, den alle fuer einen Zeichenfehler hielten. Die
+// Schlierenprobe dieser Runde hat damit nie ein bewegtes Fenster
+// gesehen.
+//
+// Der Rahmen selbst plus zwei Bildpunkte bleibt greifbar (vier auf
+// einem gewoehnlichen Schirm, acht bei uiscale 2, also genau so viel
+// wie Justins Blech vorher hatte) -- die obere Kante laesst sich
+// weiter ziehen, sie frisst nur die Titelleiste nicht mehr auf.
+fn grip_oben(state: u64) -> u64 {
+    return border(state) + 2 * uisc(state)
+}
+
 fn close_w(state: u64) -> u64 {
     return CLOSE_W0 * uisc(state)
 }
@@ -4095,6 +4175,57 @@ fn move_win(state: u64, i: u64, x: i64, y: i64) {
     wsv(state, i, W_X, x as u64)
     wsv(state, i, W_Y, y as u64)
     damage_win(state, i) // und die neue gemalt
+    unter_leiste_messen(state, i)
+}
+
+// ================================================ RUNDE GLAS (NACHTRAG)
+//
+// WIE GROSS DIE SCHNITTFLAECHE MIT DER LEISTE IST -- gemessen an der
+// Stelle, durch die jede Bewegung geht.
+//
+// `tools/themestore/run.sh` belegte "keine Schlieren" mit `diff 0` auf
+// dem Leistenstreifen. Diese Zahl ist 0, solange die Leiste mit sich
+// selbst verglichen wird, und sie ist AUCH 0, wenn das Fenster nie
+// unter die Leiste gekommen ist -- ein gruener Haken ueber einem
+// leeren Schnitt. Seit diesem Nachtrag steht die Schnittflaeche
+// daneben: ist sie 0, hat die Probe nichts geprueft, und der Laeufer
+// zaehlt sie rot.
+fn unter_leiste_messen(state: u64, i: u64) {
+    let pw: u64 = panel_win(state)
+    if pw >= MAX_WIN || i == pw || !valid(state, i) {
+        return
+    }
+    let px0: i64 = win_x(state, pw)
+    let py0: i64 = win_y(state, pw)
+    let px1: i64 = px0 + outer_w(state, pw) as i64
+    let py1: i64 = py0 + outer_h(state, pw) as i64
+    var a: i64 = win_x(state, i)
+    var b: i64 = win_y(state, i)
+    var c: i64 = a + outer_w(state, i) as i64
+    var d: i64 = b + outer_h(state, i) as i64
+    if a < px0 {
+        a = px0
+    }
+    if b < py0 {
+        b = py0
+    }
+    if c > px1 {
+        c = px1
+    }
+    if d > py1 {
+        d = py1
+    }
+    if c <= a || d <= b {
+        return
+    }
+    let f: u64 = ((c - a) * (d - b)) as u64
+    if f > gs(state, S_UNTERPX) {
+        ss(state, S_UNTERPX, f)
+    }
+}
+
+fn unter_leiste_px(state: u64) -> u64 {
+    return gs(state, S_UNTERPX)
 }
 
 fn resize_win(state: u64, i: u64, w: u64, h: u64) -> bool {
@@ -5569,6 +5700,9 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
                 wg(state, i, W_H), form(state, FM_BLUR))
         }
         let key: u64 = form(state, FM_GLASS_KEY)
+        // Die Zaehlung des wirksamen Alphas gilt der LEISTE; siehe
+        // `glass_stat_an`.
+        glass_stat_an(pw < MAX_WIN && i == pw)
         var gr: i64 = by0
         while gr < by1 {
             var zeile: u64 = 0
@@ -5581,6 +5715,7 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
                 +% (bx0 - wx) as u64 *% 4, bn, alpha, key, zeile)
             gr = gr + 1
         }
+        glass_stat_an(false)
         ss(state, S_BLITS, gs(state, S_BLITS) + 1)
         return
     }
@@ -6504,9 +6639,86 @@ fn glass_mix(alt: u64, neu: u64, key: u64, alpha: u64) -> u64 {
         let amin: u64 = 100 - SCHLEIER * 100 / dl
         if amin > a {
             a = amin
+            // ============================== RUNDE GLAS (NACHTRAG)
+            // DER SCHLEIER SCHREIBT DEN REGLER STILL UEBER -- ALSO
+            // SAGT ER ES JETZT.
+            //
+            // Bis hierher hob diese Zeile das Alpha an und niemand
+            // erfuhr davon: der Regler sagte 40 Prozent, die Leiste
+            // stand ueber einem dunklen Bild in Wahrheit bei 83, und
+            // die Aufnahme "Leiste bei 40 %" zeigte etwas, das es
+            // nicht gab. Eine Untergrenze, die man nicht sieht, ist
+            // von einem Fehler nicht zu unterscheiden.
+            //
+            // Gezaehlt wird hier, wo es passiert, und nicht
+            // nachgerechnet: `gaist_hoch` ist die Zahl der
+            // angehobenen Bildpunkte, `gaist_max` das groesste
+            // wirklich benutzte Alpha. Beides sind zwei Vergleiche je
+            // Bildpunkt und steht in der Zeile `wm: glas alpha_soll=
+            // alpha_ist=`, die `glas_bericht` am Ende des Laufs
+            // schreibt.
+            if gaist_an != 0 {
+                gaist_hoch = gaist_hoch + 1
+            }
+        }
+    }
+    // GEZAEHLT WIRD NUR DIE LEISTE. Dieselbe Funktion mischt auch
+    // gewoehnliche Fenster (`window_alpha`); wer beides in eine Zahl
+    // wirft, meldet fuer die Leiste einen Wert, der von einem Fenster
+    // stammt. `gaist_an` setzt der Aufrufer, und nur er weiss, welches
+    // Fenster er gerade mischt.
+    if gaist_an != 0 {
+        gaist_px = gaist_px + 1
+        gaist_sum = gaist_sum + a
+        if a > gaist_max {
+            gaist_max = a
         }
     }
     return blend(alt, neu, a * 255 / 100)
+}
+
+// DIE ZAHLEN ZUM SCHLEIER. Sie liegen in Statischen und nicht im
+// Zustandsblock, weil `glass_mix` je Bildpunkt laeuft und kein
+// `state` in der Hand hat -- dieselbe Bauart wie `cg_treffer` weiter
+// oben.
+static mut gaist_max: u64 = 0 // groesstes wirklich benutztes Alpha, Prozent
+static mut gaist_sum: u64 = 0 // Summe der benutzten Alphas (fuer den Schnitt)
+static mut gaist_hoch: u64 = 0 // Bildpunkte, die der Schleier angehoben hat
+static mut gaist_px: u64 = 0 // Bildpunkte, die ueberhaupt gemischt wurden
+static mut gaist_an: u64 = 0 // 1, solange die LEISTE gemischt wird
+
+fn glass_stat_an(on: bool) {
+    if on {
+        gaist_an = 1
+    } else {
+        gaist_an = 0
+    }
+}
+
+// WAS DER REGLER WIRKLICH BEWIRKT. Die Stellung des Reglers ist
+// `form_or(FM_TB_ALPHA)`; `tb_alpha_ist` ist das MITTLERE Alpha, mit
+// dem die Leistenflaeche in diesem Lauf wirklich gemischt wurde.
+//
+// Der Schnitt und nicht das Groesste: ueber einem gemusterten Bild
+// hebt der Schleier an den fernsten Bildpunkten bis auf 100 an, und
+// "100" neben dem Regler waere genauso falsch wie die 40, die vorher
+// dastand -- die Leiste scheint ja durch. Der Schnitt ist die Zahl,
+// die einem Menschen sagt, wie deckend die Leiste aussieht;
+// `alpha_max` steht in der Meldezeile daneben.
+fn tb_alpha_ist(state: u64) -> u64 {
+    let soll: u64 = form_or(state, FM_TB_ALPHA, 100)
+    if gaist_px == 0 {
+        return soll
+    }
+    let m: u64 = gaist_sum / gaist_px
+    if m < soll {
+        return soll
+    }
+    return m
+}
+
+fn tb_alpha_hoch(state: u64) -> u64 {
+    return gaist_hoch
 }
 
 // EINE BILDZEILE AUS EINEM FENSTERPUFFER, GEMISCHT.
@@ -6908,6 +7120,9 @@ static mut sl_a: [u8; 20] = "wm: schlieren grow=\0"
 static mut sl_b: [u8; 8] = " alpha=\0"
 static mut sl_c: [u8; 7] = " blur=\0"
 static mut sl_d: [u8; 6] = " aus=\0"
+// RUNDE GLAS (NACHTRAG): die Schnittflaeche mit der Leiste, in
+// Bildpunkten. Siehe `unter_leiste_messen`.
+static mut sl_e: [u8; 10] = " unterpx=\0"
 
 fn schlieren_say(state: u64) {
     serial.puts((&sl_a[0]) as u64)
@@ -6918,6 +7133,40 @@ fn schlieren_say(state: u64) {
     serial.dec(form(state, FM_BLUR))
     serial.puts((&sl_d[0]) as u64)
     serial.dec(gs(state, S_NOGROW))
+    serial.puts((&sl_e[0]) as u64)
+    serial.dec(gs(state, S_UNTERPX))
+    serial.nl()
+}
+
+// ================================================ RUNDE GLAS (NACHTRAG)
+// WAS DER REGLER SAGT UND WAS WIRKLICH GEMALT WURDE.
+//
+//     wm: glas alpha_soll=40 alpha_ist=83 hoch=27412 px=35840
+//
+// `alpha_soll` ist die Stellung des Reglers, `alpha_ist` das groesste
+// Alpha, mit dem in diesem Lauf wirklich gemischt wurde, `hoch` die
+// Zahl der Bildpunkte, an denen der Schleier (die Lesbarkeitsschranke
+// in `glass_mix`) angehoben hat, und `px` die Zahl der gemischten
+// Bildpunkte insgesamt. Ohne diese Zeile heisst eine Aufnahme
+// "Leiste bei 40 %", obwohl ueber einem dunklen Bild 83 Prozent
+// gemalt wurden -- das war der Befund an Bild 11.
+static mut al_a: [u8; 22] = "wm: glas alpha_soll=\0\0"
+static mut al_b: [u8; 12] = " alpha_ist=\0"
+static mut al_c: [u8; 7] = " hoch=\0"
+static mut al_d: [u8; 5] = " px=\0"
+static mut al_e: [u8; 12] = " alpha_max=\0"
+
+fn glas_alpha_say(state: u64) {
+    serial.puts((&al_a[0]) as u64)
+    serial.dec(form_or(state, FM_TB_ALPHA, 100))
+    serial.puts((&al_b[0]) as u64)
+    serial.dec(tb_alpha_ist(state))
+    serial.puts((&al_e[0]) as u64)
+    serial.dec(gaist_max)
+    serial.puts((&al_c[0]) as u64)
+    serial.dec(gaist_hoch)
+    serial.puts((&al_d[0]) as u64)
+    serial.dec(gaist_px)
     serial.nl()
 }
 
@@ -6931,6 +7180,13 @@ fn schlieren_say(state: u64) {
 // ohnehin seine Zahlen schreibt -- kostet eine Zeile nichts und sagt,
 // wie oft wirklich gerechnet und wie oft wiederverwendet wurde.
 fn glas_bericht(state: u64) {
+    // DIE ALPHAZEILE STEHT VOR DEM AUSSTIEG. Gemischt wird auch ohne
+    // Milchglas (`taskbar_alpha` allein braucht keinen Streifen), und
+    // genau dieser Fall -- 40 Prozent ueber einem dunklen Bild -- ist
+    // der, in dem der Schleier anhebt und es bisher niemand erfuhr.
+    if gaist_px > 0 {
+        glas_alpha_say(state)
+    }
     if gs(state, S_GLRUN) == 0 {
         return
     }
@@ -8350,7 +8606,9 @@ fn on_mouse(state: u64) {
                 if lokal_x >= iw - rand && lokal_x < iw + rand {
                     kanten = kanten | SZ_R
                 }
-                if lokal_y >= oben && lokal_y < oben + rand {
+                // Oben gilt `grip_oben` und nicht `rand`: dahinter
+                // liegt die Titelleiste, und die ist zum Ziehen da.
+                if lokal_y >= oben && lokal_y < oben + grip_oben(state) as i64 {
                     kanten = kanten | SZ_T
                 }
                 if lokal_y >= ih - rand && lokal_y < ih + rand {
@@ -8952,11 +9210,43 @@ fn term_scroll(state: u64, i: u64) {
     fill(state, i, 0, (rows - 1) * ch, ww, ch, wg(state, i, W_BG))
 }
 
+// ============================================ RUNDE GLAS (nachtrag)
+// DAS TERMINAL SPRACH KEIN UTF-8 -- UND HAT DIE UMLAUTE STILL
+// WEGGEWORFEN.
+//
+// Justins Befund am Bild 04 dieser Runde: im Terminalfenster stand
+// "KEIN EINZIGES GERT!". Die Quelle (kernel/ui/kgui.fi, `usb_bericht`)
+// schreibt "GERAET" mit einem richtigen UTF-8-Ä, also die zwei Oktette
+// 0xC3 0x84 -- und die Zeile `if ch < 32 || ch > 126 { return }`
+// darunter hat beide verschluckt. Nicht als Kaestchen, nicht als
+// Fragezeichen: spurlos. Genau dieselbe Klasse Fehler, die Runde
+// UMLAUT2 fuer die Bedienoberflaeche abgestellt hat; der Weg ins
+// Terminalfenster war der letzte, der sie noch hatte.
+//
+// EIN Oktett Zustand reicht, weil genau EIN Fall zu behandeln ist: die
+// zweioktettige Folge C2..DF / 80..BF traegt U+0080..U+07FF, und alles
+// davon, was eine Zelle (ein Oktett) fassen kann, ist Latin-1, also
+// U+00A0..U+00FF -- Ä, ö, ß, °, µ. Die Zelle bleibt damit ein Oktett
+// breit und `cell_paint` gibt ihre Zahl unveraendert als Zeichennummer
+// an `ttf.glyph` weiter, das seit Runde GLYPHE nach Zeichennummer und
+// nicht nach Oktett sucht. Drei- und vieroktettige Folgen (CJK,
+// Emoji) passen NICHT in ein Oktett; sie werden als ein Fragezeichen
+// gesetzt, weil ein sichtbarer Platzhalter der einzige Befund ist, der
+// sich spaeter noch melden laesst.
+static mut term_utf: u64 = 0
+
 fn term_putc(state: u64, i: u64, ch: u64) {
     let cols: u64 = wg(state, i, W_COLS)
     let rows: u64 = wg(state, i, W_ROWS)
     if cols == 0 || rows == 0 {
         return
+    }
+    // Ein Steuerzeichen beendet jede angefangene Folge: ein halb
+    // gelesenes Zeichen ueber einen Zeilenumbruch hinweg gibt es
+    // nicht, und ein haengengebliebenes Fuehrungsoktett wuerde das
+    // NAECHSTE Zeichen verschlucken.
+    if ch < 32 {
+        term_utf = 0
     }
     var cx: u64 = wg(state, i, W_CX)
     var cy: u64 = wg(state, i, W_CY)
@@ -8992,10 +9282,37 @@ fn term_putc(state: u64, i: u64, ch: u64) {
         }
         return
     }
-    if ch < 32 || ch > 126 {
+    // DER UTF-8-WEG. `z` ist die Zeichennummer, die in die Zelle geht.
+    var z: u64 = ch
+    if term_utf != 0 {
+        let lead: u64 = term_utf
+        term_utf = 0
+        if ch < 128 || ch > 191 {
+            // Kein Folgeoktett: die angefangene Folge war Schrott.
+            // Das Oktett hier wird trotzdem noch als sich selbst
+            // versucht -- Schrott einmal zu melden ist genug.
+            z = ch
+        } else {
+            z = (lead - 192) * 64 + (ch - 128)
+            if z > 255 {
+                z = 63 // '?' -- passt nicht in eine Zelle
+            }
+        }
+    } else if ch >= 194 && ch <= 223 {
+        term_utf = ch
+        return
+    } else if ch >= 224 && ch <= 244 {
+        // Drei oder vier Oktette: der Rest der Folge sind Folge-
+        // oktette (80..BF), die unten von selbst durchfallen.
+        z = 63
+    } else if ch > 127 {
         return
     }
-    cell_set(state, i, cx, cy, ch)
+    // 0x7F..0x9F ist nicht druckbar (C1), 0xA0 ist ein Leerzeichen.
+    if z < 32 || (z > 126 && z < 160) {
+        return
+    }
+    cell_set(state, i, cx, cy, z)
     cell_paint(state, i, cx, cy)
     cx = cx + 1
     if cx >= cols {
