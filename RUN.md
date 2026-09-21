@@ -82,6 +82,20 @@ damit niemand sie erhoffen muss:
 | dunkles Muster mit Milchglas 12 | 12,33:1 aus 13 Kandidaten |
 | Schlieren nach dem Zug unter die Leiste | 0 Bildpunkte |
 
+**Wer rundet und wer mischt — "ein Ort je Ring", nicht "genau einer".**
+Abschnitt 11e stellt diese Frage dem GANZEN Baum und nicht einer Datei:
+er sucht jede Funktion, deren Name auf `round`, `blend`, `mix8` oder
+`rrect` passt, und haelt den Fund gegen
+[`tools/themestore/raster.liste`](tools/themestore/raster.liste). Dort
+steht jeder Ort mit einem Satz Begruendung — `wm.fill_round` und
+`wm.blend` fuer den Fensterserver, `fb.blend`/`fb.mix8` fuer das Format
+des Schirms, `wlibc.rrect`/`wlibc.blend` fuer Ring 3 (ueber die
+Ringgrenze geht kein Systemaufruf je Bildpunkt) und
+`vektor.polygon_round` fuer beliebige Formen. Ein Fund ohne Eintrag ist
+rot, ein Eintrag ohne Fund auch. Die Zusage lautet also: **genau ein Ort
+je Ring und je Format, und jeder ist begruendet** — wer einen weiteren
+Mischer baut, schreibt ihn dort hinein oder benutzt einen vorhandenen.
+
 Ein zweiter, kuerzerer Lauf prueft, dass jedes Bedienelement aus der
 Bibliothek kommt:
 

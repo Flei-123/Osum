@@ -14,11 +14,27 @@ schon da und wird nur verbunden:
 * Runde THEME/LOOK hat die **Formmarken** (`/etc/shapes/*.shape`,
   `met[M_RADIUS_*]` in `kernel/user/wlibc.fi`) — es fehlt nur eine Zahl, die
   sie ueberstimmt.
-* Runde PAINT hat im Kern **genau eine** Stelle, die ein rundes Rechteck malt
-  (`wm.fill_round`, `kernel/ui/wm.fi:1452`) und **genau eine**, die mischt
+* Runde PAINT hat im Kern **einen Ort je Ring** fuer das runde Rechteck
+  (`wm.fill_round`, `kernel/ui/wm.fi:1452`) und einen fuers Mischen
   (`wm.blend`, `:3973`, wortgleich mit `fb.blend` und `wlibc.blend`).
-* Ring 3 hat **genau eine** Stelle fuer dasselbe (`wlibc.rrect`, `:1214`, und
+* Ring 3 hat seinen eigenen fuer dasselbe (`wlibc.rrect`, `:1214`, und
   die Vektorbruecke `fuib.tafel`, die sie beim Ausfall selbst ruft).
+
+> **DIE MESSLATTE HEISST "EIN ORT JE RING", NICHT "GENAU EINER".**
+> Hier stand "genau eine Stelle", und das war ueber den ganzen Baum
+> gerechnet schlicht falsch: neben `wm.fill_round` und `wm.blend` stehen
+> `fb.blend`, `fb.mix8`, `wlibc.rrect`, `wlibc.blend`, `wlibc.mix8` und
+> `vektor.polygon_round` — und zwar mit Grund. Zwischen Ring 0 und Ring 3
+> liegt eine Ringgrenze; ein Programm, das in seinen eigenen Fensterpuffer
+> malt, kann `wm.fill_round` nicht rufen, ohne je Bildpunkt einen
+> Systemaufruf zu bezahlen (siehe `BEFUND-VEKTOR-ENTSCHEIDUNG.md`), und der
+> Bildspeicher mischt im Format des Schirms statt in gepackten Farbworten.
+> Die Zusage lautet deshalb: **genau ein Ort je Ring und je Format, und
+> jeder einzelne ist in `tools/themestore/raster.liste` mit einem Satz
+> begruendet.** Nachgemessen wird sie in `tools/themestore/run.sh`,
+> Abschnitt 11e: der GANZE Baum wird nach `*round*`, `*blend*`, `*mix8*`
+> und `*rrect*` durchsucht, ein Fund ohne Eintrag ist rot, ein Eintrag ohne
+> Fund auch. Wer einen weiteren Mischer baut, muss ihn dort begruenden.
 * Runde PAINT hat den Weg **Ring 3 → Kern fuer aufgeloeste Formzahlen**
   (`WM_FORM` = 2115, `wlibc.form_push` → `sysgui` → `wm.set_form`).
 
@@ -162,7 +178,10 @@ ziel = blend(untergrund, punkt, a * 255 / 100)
   Schwelle haette Treppen an jeden Buchstaben gemalt.
 
 Drei Multiplikationen und eine Division je Bildpunkt, kein Speicher, keine
-zweite Rechenart. **`blend` bleibt die eine Stelle, die mischt.**
+zweite Rechenart. **`wm.blend` bleibt der eine Ort, der im Fensterserver
+mischt** — und damit der eine Ort seines Rings; die uebrigen Mischer
+(`fb.blend` im Format des Schirms, `wlibc.blend` in Ring 3) stehen mit ihrem
+Grund in `tools/themestore/raster.liste`.
 
 Zusaetzlich eine harte Untergrenze `taskbar_alpha >= 20`: eine Leiste, die man
 gar nicht mehr sieht, ist keine Einstellung, sondern ein Fehlerbild.
@@ -284,7 +303,7 @@ muss `bad=1` melden.
    `form_push` lief, unsichtbar. Also ein eigener Leser
    `form_or(state, slot, vorgabe)`, und die Alphas gehen ausschliesslich
    durch ihn.
-2. **Die eine Stelle, die mischt, wird eine Zeile breiter.** Neben
+2. **Der eine Ort dieses Rings, der mischt, wird eine Zeile breiter.** Neben
    `wm.fb_row` (wortweise Kopie, bleibt unveraendert fuer Alpha 100) entsteht
    `wm.fb_row_a(state, x, y, src, n, alpha, key, grund)`:
    die Schleife aus Abschnitt 3, die **`blend` ruft und sonst nichts rechnet**.

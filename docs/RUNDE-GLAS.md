@@ -174,15 +174,26 @@ Probe **nicht** zeigt, steht in Abschnitt 8, Punkt 1.
 
 ---
 
-## 7. Genau eine Stelle fuer jede Sache
+## 7. Ein Ort je Ring fuer jede Sache, begruendet in `raster.liste`
+
+Die Messlatte hiess urspruenglich "genau eine Stelle, die ein rundes
+Rechteck malt / die mischt". Ueber den ganzen Baum gerechnet ist das
+falsch, und zwar mit Grund: zwischen Ring 0 und Ring 3 liegt eine
+Ringgrenze (ein Programm kann `wm.fill_round` nicht je Bildpunkt als
+Systemaufruf rufen), und der Bildspeicher mischt im Format des Schirms
+statt in gepackten Farbworten. Sie lautet deshalb **ein Ort je Ring und
+je Format, jeder einzelne begruendet in `tools/themestore/raster.liste`**
+— und genau so wird sie gemessen.
 
 Mechanisch gezaehlt im Lauf:
 
 | Frage | Befehl | Zahl |
 |---|---|---|
-| Wer malt ein rundes Rechteck? | `grep -c '^fn fill_round(' kernel/ui/wm.fi` | 1 |
-| Wer mischt? | `grep -c '^fn blend(' kernel/ui/wm.fi` | 1 |
+| Wer malt im Fensterserver ein rundes Rechteck? | `grep -c '^fn fill_round(' kernel/ui/wm.fi` | 1 |
+| Wer mischt dort? | `grep -c '^fn blend(' kernel/ui/wm.fi` | 1 |
 | Wer entscheidet, wie deckend ein Punkt ist? | `grep -c '^fn glass_mix(' kernel/ui/wm.fi` | 1 |
+| Rasterer/Mischer im ganzen Baum ohne Eintrag in `raster.liste` | Abschnitt 11e | 0 |
+| Eintraege der Liste, die es nicht mehr gibt | Abschnitt 11e | 0 |
 | Selbsttest der Mischung und des Weichzeichners | `wm: glastest` | 7 / 7 |
 
 Die Einstellung ueberlebt den Neustart, und zwar als Klick gemessen:
