@@ -1063,6 +1063,133 @@ for pair in "al40:hell" "dunkel:dunkel"; do
     KK=$(printf '%s' "$KZ" | grep -oE 'kandidaten=[0-9]+' | cut -d= -f2)
     num "und es waren wirklich mehrere Gruende zu messen ($nm)" "${KK:-0}" ge 2
 done
+# ---- 11d2. UND DAS DUNKLE BILD IST EIN BELEG FUER DURCHSICHT.
+#
+# Der Kontrast oben sagt, dass die Schrift lesbar bleibt -- er sagt
+# NICHT, dass ueberhaupt noch etwas durchscheint. Beides zusammen ist
+# erst die Zusage dieser Runde: bei 40 Prozent ueber einem dunklen
+# Musterbild muss der Leistengrund das Muster tragen (mehr als eine
+# Farbe) UND die Lesbarkeitsschranke muss sagen, wie weit sie
+# angehoben hat. Ohne die zweite Zahl hiesse eine Aufnahme "40 %" und
+# zeigte 82 -- das war der Befund an Bild 11.
+cp "$TMPD/dunkel/desktop.png" "$SHOTS/glas-dunkel-40.png" 2>/dev/null
+DV=$(python3 tools/themestore/glascheck.py var "$SHOTS/glas-dunkel-40.png")
+echo "        dunkel, Leiste bei 40 %: $DV"
+num "ueber dem dunklen Bild traegt der Leistengrund mehr als eine Farbe" \
+    "$(printf '%s' "$DV" | grep -oE 'farben [0-9]+' | cut -d' ' -f2)" ge 2
+DA=$(grep -a 'wm: glas alpha_soll=' "$TMPD/dunkel/serial.txt" | tail -1)
+echo "        $DA"
+DSOLL=$(printf '%s' "$DA" | grep -oE 'alpha_soll=[0-9]+' | cut -d= -f2)
+DIST=$(printf '%s' "$DA" | grep -oE 'alpha_ist=[0-9]+' | cut -d= -f2)
+num "und der Fensterserver sagt, welches Alpha wirklich gemalt wurde" \
+    "${DIST:-0}" ge "${DSOLL:-40}"
+# UND DIE EINSTELLUNGSSEITE FUEHRT DIESELBE ZAHL. Gemessen am Lauf aus
+# Abschnitt 8 (dort laeuft das Fenster; der Lauf hier oben faehrt
+# absichtlich ohne, damit unter der Leiste wirklich nur das
+# Hintergrundbild liegt): die Seite meldet `ist=` neben `tba=`, und
+# ohne Anhebung sind beide gleich. Ein Regler, der 40 sagt und 82
+# bewirkt, ist eine Luege in der Oberflaeche -- und eine Zahl, die das
+# Fenster gar nicht erst fuehrt, kann es nicht anzeigen.
+SGL=$(grep -a 'settings: glas ' "$SE" | tail -1)
+echo "        $SGL"
+num "die Einstellungsseite fuehrt das WIRKSAME Alpha neben dem Regler" \
+    "$(printf '%s' "$SGL" | grep -oE 'ist=[0-9]+' | cut -d= -f2)" ge \
+    "$(printf '%s' "$SGL" | grep -oE 'tba=[0-9]+' | cut -d= -f2)"
+
+# ---- 11d2. DERSELBE SATZ, ABER MIT MILCHGLAS UND AUF EINEM ZWEITEN
+#            DUNKLEN MUSTER -- UND DER SCHLEIER SAGT, WAS ER TUT.
+#
+# Zwei Luecken in 11d, beide gefunden und beide hier geschlossen:
+#
+#  1. Gemessen wurde nur OHNE Milchglas. Der Weichzeichner aendert den
+#     Grund unter der Schrift (aus zwei Kacheln wird ein Verlauf), also
+#     ist "4,5:1" mit blur=0 keine Aussage ueber den Fall mit blur=12.
+#  2. Gemessen wurde auf EINEM dunklen Muster. Zwei Farben, die beide
+#     dieselbe Richtung von der Leistenfarbe weg haben, sind ein Fall
+#     und nicht zwei; ein zweites Muster mit anderen Farben (und einem
+#     Streifen statt eines Schachbretts) ist der zweite.
+#
+# DAZU DIE ZAHL, DIE VORHER FEHLTE. Die Lesbarkeitsschranke in
+# `wm.glass_mix` hebt die Deckkraft ueber einem fernen Bild an -- der
+# Regler sagt 40 Prozent und gemalt werden im Schnitt 82. Das war
+# still: eine Aufnahme hiess "Leiste bei 40 %" und zeigte 82. Der
+# Server meldet es jetzt (`wm: glas alpha_soll= alpha_ist=`), und hier
+# wird es gefordert: ueber einem DUNKLEN Bild muss entweder das Muster
+# trotzdem durchscheinen (zwei Gruende oder mehr unter der Leiste) oder
+# die Anhebung gemeldet sein. Beides gar nicht zu haben waere eine
+# deckende Leiste, die sich durchsichtig nennt.
+python3 - "$TMPD/dunkel2.osym" <<'WALL2'
+import struct, sys
+# Ein ZWEITES dunkles Muster, und absichtlich anders gebaut als das
+# von build.sh: senkrechte Streifen von acht Bildpunkten statt eines
+# Schachbretts von zwoelf, und zwei Farben, die nicht in dieselbe
+# Richtung von Weiss weg liegen (ein tiefes Blaugruen und ein sehr
+# dunkles Rot). Dasselbe Muster zweimal zu messen ist eine Messung,
+# nicht zwei.
+w, h = 120, 90
+a, b = (0x08, 0x2A, 0x24), (0x2E, 0x0A, 0x12)
+px = bytearray()
+for y in range(h):
+    for x in range(w):
+        c = a if (x // 8) % 2 == 0 else b
+        px += bytes((c[2], c[1], c[0], 0xFF))
+open(sys.argv[1], "wb").write(b"OSYM" + struct.pack("<II", w, h) + bytes(px))
+WALL2
+bash tools/themestore/build.sh "$TMPD/dblur" tbalpha=40 blur=12 \
+    wallpaper=dunkel uitrace=yes keep=yes > "$TMPD/dblur.log" 2>&1
+bash tools/themestore/build.sh "$TMPD/dunkel2" tbalpha=40 blur=0 \
+    wallpaper="$TMPD/dunkel2.osym" uitrace=yes keep=yes \
+    > "$TMPD/dunkel2.log" 2>&1
+for pair in "dblur:dunkel mit Milchglas 12" "dunkel2:zweites dunkles Muster"; do
+    d=${pair%%:*}; nm=${pair##*:}
+    FG=$(grep -a 'taskbar: text clock ' "$TMPD/$d/serial.txt" | tail -1 \
+         | grep -oE 'fg=[0-9]+' | cut -d= -f2)
+    FGH=$(printf '%06x' "${FG:-0}")
+    KZ=$(python3 tools/themestore/glascheck.py kontrast \
+         "$TMPD/$d/desktop.png" "$FGH")
+    echo "        $nm: $KZ"
+    num "Leistenschrift gegen den SCHLECHTESTEN Grund ($nm), x100" \
+        "$(printf '%s' "$KZ" | grep -oE '^kontrast [0-9]+' | cut -d' ' -f2)" \
+        ge 450
+done
+# UND DER SCHLEIER WIRD BENANNT. Drei dunkle Laeufe, in jedem dieselbe
+# Frage: scheint das Bild durch, oder ist angehoben worden -- und um
+# wie viel?
+for d in dunkel dblur dunkel2; do
+    AL=$(grep -a 'wm: glas alpha_soll=' "$TMPD/$d/serial.txt" | tail -1)
+    SOLL=$(printf '%s' "$AL" | grep -oE 'alpha_soll=[0-9]+' | cut -d= -f2)
+    IST=$(printf '%s' "$AL" | grep -oE 'alpha_ist=[0-9]+' | cut -d= -f2)
+    FAB=$(python3 tools/themestore/glascheck.py var "$TMPD/$d/desktop.png" \
+          | grep -oE 'farben [0-9]+' | cut -d' ' -f2)
+    echo "        $d: soll=${SOLL:-?} ist=${IST:-?} farben=${FAB:-?}"
+    same "$d: der Lauf meldet die Reglerstellung, die er bekommen hat" \
+        "40" "${SOLL:-}"
+    if [ "${FAB:-0}" -ge 2 ] 2>/dev/null; then
+        ok "$d: das Bild scheint unter der Leiste durch (Gruende: $FAB)"
+    else
+        num "$d: dann ist die Anhebung gemeldet (ist > soll)" \
+            "${IST:-0}" gt "${SOLL:-100}"
+    fi
+    # UND DIE WIRKSAME ZAHL IST NIE KLEINER ALS DIE GEWUENSCHTE. Waere
+    # sie es, haette der Server durchsichtiger gemalt als bestellt --
+    # und die Lesbarkeitszusage darueber waere gegen die falsche Zahl
+    # gerechnet.
+    num "$d: und sie ist nie kleiner als die Reglerstellung" \
+        "${IST:-0}" ge "${SOLL:-100}"
+done
+# DIE SEITE ZEIGT DIESELBE ZAHL WIE DER SERVER. Ohne diese Zeile stuende
+# neben dem Regler eine Zahl, die niemand gegen ihre Quelle gehalten
+# hat -- und genau das war der Mangel.
+bash tools/themestore/build.sh "$TMPD/dunkelsett" extra='einst' tbalpha=40 \
+    blur=0 wallpaper=dunkel uitrace=yes keep=yes > "$TMPD/dunkelsett.log" 2>&1
+SIST=$(grep -a 'settings: glas ' "$TMPD/dunkelsett/serial.txt" | tail -1 \
+       | grep -oE 'ist=[0-9]+' | cut -d= -f2)
+WIST=$(grep -a 'wm: glas alpha_soll=' "$TMPD/dunkelsett/serial.txt" | tail -1 \
+       | grep -oE 'alpha_ist=[0-9]+' | cut -d= -f2)
+same "die Seite Darstellung nennt dasselbe wirksame Alpha wie der Server" \
+    "${WIST:-x}" "${SIST:-y}"
+num "und es ist wirklich angehoben (Regler 40)" "${SIST:-0}" gt 40
+cp "$TMPD/dunkelsett/desktop.png" "$SHOTS/glas-dunkel-alpha-40.png" 2>/dev/null
 
 # ---- 11e. KEIN ZWEITER ORT FUER DIESELBE SACHE.
 RR=$(grep -ac '^fn fill_round(' kernel/ui/wm.fi)
@@ -1071,6 +1198,36 @@ num "genau eine Stelle im Fensterserver malt ein rundes Rechteck" "$RR" eq 1
 num "und genau eine mischt" "$BL" eq 1
 GM=$(grep -ac '^fn glass_mix(' kernel/ui/wm.fi)
 num "und genau eine entscheidet, wie deckend ein Punkt ist" "$GM" eq 1
+# UND DIESELBE FRAGE AN DEN GANZEN BAUM, nicht an eine Datei.
+#
+# Die drei Zeilen darueber fragen kernel/ui/wm.fi. Das ist eine Zusage
+# ueber EINE Datei -- und daneben standen die ganze Zeit
+# `wlibc.rrect`, `wlibc.blend`, `wlibc.mix8`, `fb.blend` und
+# `vektor.polygon_round`. Sechs Rasterer und Mischer, eine Zusage
+# "genau einer": das ist nicht verschaerft worden, sondern ehrlich
+# gemacht. `tools/themestore/raster.liste` nennt JEDEN Ort im Baum und
+# begruendet ihn in einem Satz; hier wird der Baum durchsucht und das
+# Ergebnis gegen die Liste gehalten. Ein Fund ohne Eintrag ist rot
+# (jemand hat einen siebten Mischer gebaut), ein Eintrag ohne Fund
+# auch (die Liste ist veraltet).
+LISTE=tools/themestore/raster.liste
+grep -rEona '^fn [a-z_0-9]*(round|blend|mix8|rrect)[a-z_0-9]*\(' kernel/ \
+    --include=*.fi | sed 's/:[0-9]*:fn / /' | sed 's/($//' | sort -u \
+    > "$TMPD/raster.gefunden"
+grep -avE '^\s*(#|$)' "$LISTE" | awk '{ print $1, $2 }' | sort -u \
+    > "$TMPD/raster.erlaubt"
+RFEHLT=$(comm -23 "$TMPD/raster.gefunden" "$TMPD/raster.erlaubt" | wc -l)
+RALT=$(comm -13 "$TMPD/raster.gefunden" "$TMPD/raster.erlaubt" | wc -l)
+comm -3 "$TMPD/raster.gefunden" "$TMPD/raster.erlaubt" | sed 's/^/        /'
+num "jeder Rasterer und Mischer im BAUM steht in $LISTE mit Begruendung" \
+    "$RFEHLT" eq 0
+num "und kein Eintrag der Liste ist verwaist" "$RALT" eq 0
+num "es sind wirklich Funde gemessen worden" \
+    "$(grep -c . "$TMPD/raster.gefunden")" ge 15
+# Und jeder Eintrag traegt einen SATZ und nicht nur zwei Woerter --
+# eine Liste ohne Begruendung waere eine Ausnahmeliste.
+RKURZ=$(grep -avE '^\s*(#|$)' "$LISTE" | awk 'NF < 8 { n++ } END { print n+0 }')
+num "und jeder Eintrag begruendet sich in einem ganzen Satz" "$RKURZ" eq 0
 SELF=$(grep -a 'wm: glastest ' "$TMPD/blur/serial.txt" | tail -1)
 SN=$(printf '%s' "$SELF" | grep -oE 'glastest [0-9]+' | grep -oE '[0-9]+')
 SM=$(printf '%s' "$SELF" | grep -oE '/ [0-9]+' | grep -oE '[0-9]+')
@@ -1162,6 +1319,33 @@ UEB=$(( (${ZWY:-3} + ${ZWH:-0} + 24 - ${LEIY:-772}) * ${ZWW:-0} ))
 echo "        Fenster ${ZWW:-?}x${ZWH:-?} bei y=${ZWY:-?}, Leiste ab y=${LEIY:-?}"
 num "das Fenster reicht wirklich unter die Leiste (Bildpunkte Ueberlappung)" \
     "$UEB" ge 1000
+# UND DIESELBE FLAECHE, VOM SERVER SELBST GERECHNET.
+#
+# Die Zahl darueber kommt aus gemeldeten Kanten und einem `awk` auf dem
+# Wirt -- also aus derselben Quelle, die schon einmal daneben lag (der
+# Schmuck wurde mit 24 dazugerechnet, weil das Programm seine eigene
+# Hoehe meldet und nicht die aeussere). Der Fensterserver fuehrt die
+# Schnittflaeche mit dem Leistenrechteck jetzt selbst
+# (`wm: schlieren ... unterpx=`, kernel/ui/wm.fi `unter_leiste_messen`),
+# und zwei Rechnungen, die nichts voneinander wissen, sind die Bauart
+# dieser Abnahme. Verglichen wird auf ein Zehntel genau: der Wirt
+# rechnet mit der gemeldeten Fensterbreite, der Server mit der
+# aeusseren.
+UPX=$(grep -a 'wm: schlieren ' "$TMPD/zug1/serial.txt" | tail -1 \
+      | grep -oE 'unterpx=[0-9]+' | cut -d= -f2)
+echo "        Wirt: $UEB Bildpunkte, Server: ${UPX:-0}"
+num "der Server hat dieselbe Schnittflaeche gesehen" "${UPX:-0}" ge 1000
+ABW=$(( ${UPX:-0} - UEB ))
+[ "$ABW" -lt 0 ] && ABW=$(( -ABW ))
+num "und beide Rechnungen weichen um weniger als ein Zehntel ab" \
+    "$(( ABW * 10 ))" lt "$UEB"
+# GEGENPROBE: OHNE ZUG IST DIE FLAECHE NULL. Ohne sie waere `unterpx`
+# eine Zahl, die vielleicht schon beim Hochfahren entsteht (ein Fenster,
+# das der Server unter die Leiste setzt) -- und dann belegte sie den Zug
+# nicht.
+num "GEGENPROBE: ohne Zug steht kein Fenster unter der Leiste" \
+    "$(grep -a 'wm: schlieren ' "$TMPD/ruhe/serial.txt" | tail -1 \
+       | grep -oE 'unterpx=[0-9]+' | cut -d= -f2)" eq 0
 ZOUT=$(python3 tools/themestore/shotcheck.py "$TMPD/zug1/desktop.ppm" \
        "$TMPD/zug1/serial.txt" 2>&1 | head -1)
 echo "        $ZOUT"
