@@ -443,12 +443,68 @@ INNER=$((${WH:-566} - 24))
 # 680,51 traf damit nicht mehr "Vorlagen" (Reiter 7, x=526..601),
 # sondern den letzten Reiter "Abgleich". Gemessen wurden dann elf
 # Beschriftungen der Abgleich-Seite statt der zwoelf der Vorlagen.
+#
+# RUNDE GLAS (fix-r3-1): UND JETZT WIRD DER PUNKT GEMESSEN STATT
+# GETIPPT. Die Leiste ist seit dieser Runde zweizeilig; jede getippte
+# Zahl waere beim naechsten Reiter, beim naechsten Wort oder in der
+# naechsten Sprache wieder falsch -- und zwar still, denn ein Klick
+# auf den falschen Reiter misst eine andere Seite und meldet gruen.
+# Das Programm sagt selbst, wo der Reiter "Vorlagen" liegt (`wlib: tab
+# ... ax= ay=`, Bildschirmkoordinaten), also wird hier die MITTE
+# dieses Rechtecks angeklickt.
+VKLICK=$(python3 - "$SE" locale/de/messages <<'PYV'
+import re, sys
+txt = open(sys.argv[1], 'rb').read().decode('latin1')
+soll = []
+for raw in open(sys.argv[2], 'rb').read().decode('utf-8').splitlines():
+    if raw.startswith('settings.tabs'):
+        soll = raw.split('=', 1)[1].strip().split('\\n')
+ziel = soll.index('Vorlagen') if 'Vorlagen' in soll else 7
+for m in re.finditer(r'wlib: tab i=(\d+) x=\d+ y=\d+ w=(\d+) h=(\d+) '
+                     r'ax=(\d+) ay=(\d+)', txt):
+    if int(m.group(1)) == ziel:
+        print('%d,%d' % (int(m.group(4)) + int(m.group(2)) // 2,
+                         int(m.group(5)) + int(m.group(3)) // 2))
+        raise SystemExit
+print('548,41')
+PYV
+)
+echo "        Reiter 'Vorlagen' wird bei $VKLICK angeklickt"
 bash tools/themestore/build.sh "$TMPD/setv" extra='einst' uitrace=yes keep=yes \
-    click=548,41 > "$TMPD/setv.log" 2>&1
+    click=$VKLICK > "$TMPD/setv.log" 2>&1
 SEV="$TMPD/setv/serial.txt"
 NR=$({ grep -ac 'settings: rect name=w[a-z][a-z] ' "$SE" "$SEV" || true; } \
      | cut -d: -f2 | awk '{n=n+$1} END {print n+0}')
 num "gemeldete Rechtecke beider Seiten (vor dieser Runde waren es fuenf)" "${NR:-0}" ge 25
+# ------------------------------- RUNDE GLAS (fix-r3-2): KEIN STILLER FILTER
+#
+# HIER STAND EIN NAMENSFILTER `^w[a-z][a-z]$`, und er war der Fehler,
+# den dieser Abschnitt selbst finden sollte. Die Seite meldet ausser den
+# laufenden Namen (`waa`, `wab`, ...) noch die zwei KARTEN (`kartel`,
+# `karter`) und fuenf Bedienelemente unter ihrem Sachnamen (`edge`,
+# `size`, `autohide`, `ontop`, `apply`) -- ausgerechnet die, auf die ein
+# Laeufer klickt. Der Filter hat sie alle stillschweigend uebersprungen:
+# eine Karte, die aus dem Fenster ragt, waere nie aufgefallen, und die
+# Zusage haette trotzdem gruen gemeldet.
+#
+# Jetzt wird JEDES gemeldete Rechteck ausser `win` gemessen, und die
+# ZAHL der gemessenen Rechtecke steht als eigene Zusage daneben. Faellt
+# sie, hat wieder jemand einen Filter eingezogen -- und das sieht man
+# dann an der Zahl und nicht erst an einem Bild.
+GEPRUEFT=$(python3 - "$SE" "$SEV" <<'PYX'
+import re, sys
+n = 0
+for path in sys.argv[1:]:
+    txt = open(path, 'rb').read().decode('latin1')
+    for m in re.finditer(
+            r'settings: rect name=(\w+) x=\d+ y=\d+ w=\d+ h=\d+', txt):
+        if m.group(1) != 'win':
+            n += 1
+print(n)
+PYX
+)
+num "gemessene Rechtecke beider Seiten, ohne jeden Namensfilter" \
+    "${GEPRUEFT:-0}" ge 88
 OVER=$(python3 - "$INNER" "$SE" "$SEV" <<'PYX'
 import re, sys
 inner = int(sys.argv[1])
@@ -458,11 +514,10 @@ for path in sys.argv[2:]:
     # NUR die Zeilen von `settings` selbst. Die Zeile des FENSTERS
     # (name=win) sieht genauso aus, ist aber das Fenster und nicht sein
     # Inhalt -- sie gegen die INNENhoehe zu halten misst das Fenster
-    # gegen sich selbst und ist immer rot.
+    # gegen sich selbst und ist immer rot. Jeder ANDERE Name wird
+    # gemessen, auch `kartel`/`karter` und die Sachnamen.
     for m in re.finditer(
-            r'settings: rect name=(w[a-z][a-z]) x=(\d+) y=(\d+) w=(\d+) h=(\d+)', txt):
-        # `win` ist das FENSTER und kein Widget darin -- es traegt
-        # zufaellig einen Namen aus drei Buchstaben mit w am Anfang.
+            r'settings: rect name=(\w+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)', txt):
         if m.group(1) == 'win':
             continue
         y, h = int(m.group(3)), int(m.group(5))
@@ -506,9 +561,16 @@ for path in sys.argv[2:]:
     for m in RE.finditer(txt):
         r = (m.group(1), int(m.group(2)), int(m.group(3)),
              int(m.group(4)), int(m.group(5)))
+        # RUNDE GLAS (fix-r3-2): die Karten sind Karten UND Rechtecke.
+        # Bis hierher wurden sie nur als Untergrund gefuehrt und selbst
+        # nie gegen die Fensterbreite gehalten -- und der Namensfilter
+        # daneben hat ausserdem `edge`, `size`, `autohide`, `ontop` und
+        # `apply` verschluckt. Gemessen wird ab jetzt jeder Name ausser
+        # `win`; dass eine Karte nicht gegen sich selbst gemessen wird,
+        # besorgt der Vergleich weiter unten.
         if r[0] in ('kartel', 'karter'):
             karten[r[0]] = r
-        elif r[0] != 'win' and re.match(r'^w[a-z][a-z]$', r[0]):
+        if r[0] != 'win':
             rects.append(r)
     for (nm, x, y, w, h) in rects:
         if x + w > innen:
@@ -770,7 +832,21 @@ for pair in "set:Darstellung" "setv:Vorlagen"; do
     # Reiter passen nicht in eine Leiste), aber sie steht damit als
     # Zahl im Lauf statt nur im Bild.
     gk=$(printf '%s' "$out" | grep -oE 'gekuerzt [0-9]+' | grep -oE '[0-9]+')
-    echo "        Seite $nm: gekuerzte Beschriftungen: ${gk:-0}"
+    # RUNDE GLAS (fix-r3-1): FLIESSTEXT GETRENNT VON DEN REITERN.
+    #
+    # `gekuerzt` war eine Zahl fuer zwei Sachen, und deshalb konnte auf
+    # keine von beiden eine Zusage stehen: die neun gekuerzten Reiter
+    # verdeckten drei gekuerzte Saetze der linken Spalte ("Akzentfarbe
+    # RRGGBB (leer = Sch..."), und das waren ausgerechnet die
+    # Kontrastzahlen, mit denen diese Seite ihre Lesbarkeit belegt.
+    # Eine Reiterleiste hat einen Zwang, den ein Etikett nicht hat --
+    # ein Etikett darf umbrechen oder seine Spalte breiter bekommen.
+    # Fuer Fliesstext gilt darum NULL, und zwar als Zusage.
+    gr=$(printf '%s' "$out" | grep -oE 'reiterkurz [0-9]+' | grep -oE '[0-9]+')
+    gf=$(printf '%s' "$out" | grep -oE 'fliesskurz [0-9]+' | grep -oE '[0-9]+')
+    echo "        Seite $nm: gekuerzte Beschriftungen: ${gk:-0} (Reiter ${gr:-?}, Fliesstext ${gf:-?})"
+    num "Seite $nm: gekuerzter Fliesstext" "${gf:-99}" eq 0
+    num "Seite $nm: gekuerzte Reiter" "${gr:-99}" le 2
     num "Seite $nm: abgeschnittene (still gekuerzte eingerechnet)" "${c:-1}" eq 0
     num "Seite $nm: ueberlappende" "${o:-1}" eq 0
     [ "${e:-1}" = 0 ] && [ "${c:-1}" = 0 ] && [ "${o:-1}" = 0 ] || \
@@ -813,10 +889,18 @@ print(n)
 PY
 )
 num "Reiter, deren gemeldete Laenge nicht zu ihrem Namen passt" "${TABNV:-99}" eq 0
-# UND WIE VIELE DAVON GEKUERZT GEMALT WERDEN. Das ist keine Zusage auf
-# 0 -- elf deutsche Reiter passen in 728 Bildpunkte nur gekuerzt --,
-# sondern die Zahl, die der naechste Umbau der Reiterleiste senken
-# muss. Sie steht hier, damit sie nicht wieder unbemerkt steigt.
+# UND WIE VIELE DAVON GEKUERZT GEMALT WERDEN.
+#
+# RUNDE GLAS (fix-r3-1): DIE SCHRANKE IST VON NEUN AUF ZWEI GEFALLEN,
+# WEIL DIE LEISTE UMGEBAUT WURDE. Hier stand "hoechstens neun der elf
+# Reiter muessen gekuerzt werden" -- eine Zusage, die den Ist-Zustand
+# als Obergrenze nimmt, misst nichts: sie war in dem Augenblick gruen,
+# in dem sie geschrieben wurde, und waere es auch geblieben, wenn ein
+# zwoelfter Reiter dazugekommen waere. Die Leiste hat jetzt ZWEI
+# ZEILEN, sobald eine nicht reicht (kernel/user/wlib.fi, `tab_rows`),
+# und damit muss kein einziger Name mehr gekuerzt werden. Zwei sind
+# die Luft fuer eine Sprache mit laengeren Woertern; dass es heute 0
+# sind, steht in der Zeile darueber.
 TABKURZ=$(python3 - "$SE" <<'PY'
 import re, sys
 # DER LETZTE BERICHT JE REITER GILT. Die Leiste malt sich mehrfach neu
@@ -830,8 +914,23 @@ print(sum(1 for (nq, nv) in ist.values() if nq != nv))
 PY
 )
 echo "        gekuerzt gemalte Reiterbeschriftungen: ${TABKURZ:-?} von $TABS"
-num "und hoechstens neun der elf Reiter muessen gekuerzt werden" \
-    "${TABKURZ:-99}" le 9
+num "und hoechstens zwei der elf Reiter muessen gekuerzt werden" \
+    "${TABKURZ:-99}" le 2
+# UND DIE ZWEITE ZEILE IST WIRKLICH DA. Ohne diese Zahl koennte die
+# Zusage darueber auch dadurch gruen werden, dass jemand die Namen
+# kuerzt: zwei verschiedene `y` in den gemeldeten Reiterrechtecken sind
+# der Beleg, dass die Leiste umgebrochen hat und nicht abgeschnitten.
+TABZEIL=$(python3 - "$SE" <<'PYZ'
+import re, sys
+txt = open(sys.argv[1], 'rb').read().decode('utf-8', 'replace')
+ist = {}
+for m in re.finditer(r'wlib: tab i=(\d+) x=\d+ y=(\d+) ', txt):
+    ist[int(m.group(1))] = int(m.group(2))
+print(len(set(ist.values())))
+PYZ
+)
+echo "        verschiedene Zeilen der Reiterleiste: ${TABZEIL:-?}"
+num "und die Reiterleiste hat dafuer zwei Zeilen" "${TABZEIL:-0}" eq 2
 # und jede der zehn Aufnahmen: die Taskleiste sagt, wo sie ist, und im
 # Bild ist sie dort.
 BARBAD=0
@@ -997,6 +1096,59 @@ FB=$(python3 tools/themestore/glascheck.py var "$SHOTS/glas-milchglas.png" \
 num "Milchglas: die Streuung des Ausschnitts SINKT (gegen $V70 ohne)" \
     "${VB:-999999}" lt "${V70:-0}"
 num "und aus zwei Farben ist ein Verlauf geworden" "${FB:-0}" ge 4
+# ---- 11c2. UND EINMAL SO, DASS MAN ES AUCH SIEHT.
+#
+# DER BEFUND, DER DIESEN ABSCHNITT AUSGELOEST HAT: die Zahlen darueber
+# sind richtig (`var` faellt von 1597 auf 788, aus zwei Farben werden
+# 13), und auf dem Bild sah man trotzdem fast nichts. Der Grund ist
+# der Massstab: das Musterbild ist ein Schachbrett von zwoelf
+# Bildpunkten, das der Schreibtisch auf rund achtzig Bildpunkte
+# dehnt. Ein Weichzeichner von zwoelf verwischt davon die KANTEN und
+# laesst die Felder flach -- gemessen ein Erfolg, angeschaut zwei
+# Kacheln mit weichen Naehten.
+#
+# Also derselbe Versuch ueber einem GROBEN Muster (24 statt 12, also
+# rund 160 Bildpunkte je Feld) mit dem groessten Radius, den die
+# Sprache der Vorlagen zulaesst (16): jetzt traegt der Weichzeichner
+# die eine Farbe tief in die andere, und der Streifen wird ein
+# Verlauf. Beide Laeufe stehen hier, denn nur mit dem Vergleichslauf
+# OHNE Weichzeichner ueber DEMSELBEN Muster ist "die Streuung sinkt"
+# eine Messung und keine Behauptung.
+bash tools/themestore/build.sh "$TMPD/grob70" tbalpha=70 blur=0 \
+    wallpaper=hellgrob uitrace=yes keep=yes > "$TMPD/grob70.log" 2>&1
+bash tools/themestore/build.sh "$TMPD/grob16" tbalpha=70 blur=16 \
+    wallpaper=hellgrob uitrace=yes keep=yes > "$TMPD/grob16.log" 2>&1
+cp "$TMPD/grob16/desktop.png" "$SHOTS/glas-milchglas-grob.png" 2>/dev/null
+VG0=$(python3 tools/themestore/glascheck.py var "$TMPD/grob70/desktop.png" \
+      | grep -oE '^var [0-9]+' | cut -d' ' -f2)
+VG16=$(python3 tools/themestore/glascheck.py var "$TMPD/grob16/desktop.png" \
+       | grep -oE '^var [0-9]+' | cut -d' ' -f2)
+FG16=$(python3 tools/themestore/glascheck.py var "$TMPD/grob16/desktop.png" \
+       | grep -oE 'farben [0-9]+' | cut -d' ' -f2)
+echo "        grobes Muster: var $VG0 ohne, $VG16 mit Milchglas 16 ($FG16 Farben)"
+num "grobes Muster: die Streuung sinkt auch dort (gegen $VG0 ohne)" \
+    "${VG16:-999999}" lt "${VG0:-0}"
+# UND ZWAR SICHTBAR: nicht zwei Farben mit weicher Naht, sondern ein
+# Verlauf. Zwoelf Stufen sind die Zahl, an der ein Mensch "verwischt"
+# von "zwei Kacheln" unterscheidet; ueber dem feinen Muster waren es 13,
+# aber ueber eine Naht von acht Bildpunkten verteilt.
+num "und aus dem Schachbrett ist ein Verlauf mit vielen Stufen geworden" \
+    "${FG16:-0}" ge 12
+# DER VERGLEICHSSTREIFEN (Bild 12) WIRD HIER ERZEUGT UND NICHT VON
+# HAND: jede Reihe traegt ihre Beschriftung und die Zahl, die sie
+# belegt, im Bild. Ein Bildvergleich, der ein README braucht,
+# vergleicht nichts.
+python3 tools/themestore/streifen.py \
+    "$SHOTS/glas-vergleich-streifen.png" \
+    "$SHOTS/glas-alpha-100.png=Leiste 100 % deckend (feines Muster)" \
+    "$SHOTS/glas-alpha-70.png=Leiste 70 % (feines Muster)" \
+    "$SHOTS/glas-alpha-40.png=Leiste 40 % (feines Muster)" \
+    "$TMPD/grob70/desktop.png=Leiste 70 %, grobes Muster, ohne Milchglas" \
+    "$SHOTS/glas-milchglas-grob.png=Leiste 70 %, grobes Muster, Milchglas 16" \
+    > "$TMPD/streifen.log" 2>&1
+sed 's/^/        /' "$TMPD/streifen.log"
+num "der Vergleichsstreifen ist erzeugt worden" \
+    "$( [ -s "$SHOTS/glas-vergleich-streifen.png" ] && echo 1 || echo 0)" eq 1
 GL=$(grep -a 'wm: glas r=' "$TMPD/blur/serial.txt" | tail -1)
 BUS=$(printf '%s' "$GL" | grep -oE ' max=[0-9]+' | grep -oE '[0-9]+')
 BPX=$(printf '%s' "$GL" | grep -oE ' px=[0-9]+' | grep -oE '[0-9]+')

@@ -136,6 +136,10 @@ export {
     theme_watch, theme_now, theme_switches, theme_polls, theme_pixels,
     theme_stales, paint_all, THEME_POLL_TICKS,
     rect_x, rect_y, rect_w, rect_h, kind_of, tab_x, tab_w, menubar_x,
+    // RUNDE GLAS (nachtrag): die zweizeilige Reiterleiste und das
+    // umbrechende Etikett. `tab_y`/`tab_rows` braucht jeder Laeufer,
+    // der einen Reiter anklickt; `umbruch` setzt die Marke.
+    tab_y, tab_rows, tab_rowh, umbruch,
     text_x, text_base, text_fg, text_bg, row_base, row_x, row_h,
     lines_height,
     // RUNDE OBERFLAECHE: die abgeleiteten Hoehen gehoeren nach
@@ -587,6 +591,22 @@ const F_EINKLICK: u64 = 32
 // Die Zusage ist genau so gross wie ihr Name: er wird nicht ANGEZEIGT.
 const F_GEHEIM: u64 = 64
 
+// RUNDE GLAS (nachtrag): EIN ETIKETT, DAS UMBRICHT STATT ZU KUERZEN.
+//
+// Drei Beschriftungen der Seite "Darstellung" standen als "Akzentfarbe
+// RRGGBB (leer = Sch..." im Bild: sie sind laenger als ihre Spalte, und
+// `paint_label` kuerzte sie stillschweigend mit drei Punkten. Genau
+// die Zahlen, die dort gekuerzt wurden, sind die Kontrastwerte, die
+// diese Runde nachweist -- eine abgeschnittene Zahl belegt nichts.
+//
+// Ein Etikett mit dieser Marke bekommt deshalb ZWEI Zeilen, sobald der
+// Satz nicht in eine passt, und wird an einem Leerzeichen getrennt.
+// Die Marke ist ausdruecklich (`wlib.umbruch()` vor dem Anlegen) und
+// nicht die Regel: eine Bibliothek, in der jedes zu lange Etikett
+// ploetzlich doppelt so hoch wird, verschoebe jede Seite dieses
+// Systems auf einmal.
+const F_UMBRUCH: u64 = 128
+
 // Ein Fenster
 const N_H: u64 = 0
 const N_W: u64 = 1
@@ -744,6 +764,10 @@ static mut ctcur: u64 = 0xFFFFFFFFFFFFFFFF
 static mut wncur: u64 = 0
 static mut want_w: u64 = 0
 static mut want_h: u64 = 0
+// Die Wunschmarke des NAECHSTEN Bedienelements -- heute nur
+// `F_UMBRUCH`. Wie `want_w` gilt sie fuer genau eines und ist danach
+// wieder vergessen.
+static mut want_flags: u64 = 0
 static mut want_gap: u64 = 0
 
 static mut s_focus: u64 = 0 // Widgetnummer + 1
@@ -1829,6 +1853,13 @@ fn size(w: u64, h: u64) {
     want_h = h
 }
 
+// DAS NAECHSTE ETIKETT DARF UMBRECHEN statt zu kuerzen. Dieselbe
+// Machart wie `size`: sie gilt fuer genau ein Bedienelement, sonst
+// waere sie ein Zustand, der einem drei Seiten spaeter auffaellt.
+fn umbruch() {
+    want_flags = want_flags | F_UMBRUCH
+}
+
 // RUNDE ALLTAG: die Wunschgroesse NACHTRAEGLICH aendern.
 //
 // `size` gilt fuer das naechste Bedienelement; danach war die Groesse
@@ -1869,8 +1900,25 @@ fn place(i: u64) {
             bw = r4auf(pw)
         }
         s(i, D_W, bw)
-        s(i, D_H, ph)
-        cs(c, C_CY, cg(c, C_CY) + ph + cg(c, C_GAP))
+        // ============ RUNDE GLAS (nachtrag): HOEHE AUS DER BREITE
+        //
+        // Zwei Bedienelemente wissen erst hier, wie hoch sie sein
+        // muessen: die Reiterleiste (passen die Namen in eine Zeile
+        // oder braucht sie zwei?) und ein umbrechendes Etikett (passt
+        // der Satz in eine Zeile?). Beides haengt an der BREITE, und
+        // die steht erst in der Zeile darueber fest -- deshalb wird
+        // die Wunschhoehe genau hier und an keiner zweiten Stelle
+        // berichtigt. `relayout` geht durch dieselbe Funktion, also
+        // stimmt die Hoehe auch nach einem Form- oder Sprachwechsel.
+        var ph2: u64 = ph
+        if g(i, D_KIND) == K_TABS {
+            ph2 = r4auf(tab_h_at(i, bw))
+        } else if g(i, D_KIND) == K_LABEL
+            && (g(i, D_FLAGS) & F_UMBRUCH) != 0 {
+            ph2 = r4auf(label_h_at(i, bw))
+        }
+        s(i, D_H, ph2)
+        cs(c, C_CY, cg(c, C_CY) + ph2 + cg(c, C_GAP))
     } else if kind == 2 {
         let rest: u64 = sub(cg(c, C_X) + cg(c, C_W) - cg(c, C_PAD),
             cg(c, C_CX))
@@ -2038,9 +2086,10 @@ fn add(kind: u64, txt: u64, pw: u64, ph: u64, fokus: bool) -> u64 {
     }
     want_w = 0
     want_h = 0
-    var fl: u64 = 0
+    var fl: u64 = want_flags
+    want_flags = 0
     if fokus {
-        fl = F_FOCUSABLE
+        fl = fl | F_FOCUSABLE
     }
     s(i, D_FLAGS, fl)
     place(i)
@@ -2900,11 +2949,42 @@ fn paint_tile(i: u64) {
     // der Rolle geholt (`rk`, oben). Flaeche und Ring MUESSEN dieselbe
     // Zahl haben, sonst liegt der Ring bei einem gedrehten Regler
     // neben der Kante.
-    let _fb1: bool = fuib.tafel(x, y, w, h, rk,
-        tspec(i, TL_SURFACE), 0, 0)
+    // ============================================ RUNDE GLAS (nachtrag)
+    // FLAECHE UND RAHMEN KOMMEN AUS DERSELBEN ECKENDECKUNG, und der
+    // Grund dafuer stand als heller Keil im Bild 09.
+    //
+    // Die Flaeche kam bis hierher aus `fuib.tafel` (dem Vektorrasterer)
+    // und der Rahmen aus `wlibc.rring` (der Eckendeckung `corner_cov`)
+    // -- zwei Rasterer fuer EINE Form. Das war nicht nur unsauber,
+    // sondern SICHTBAR: `fuib.tafel` beschneidet ein Rechteck, das oben
+    // aus dem Malband herausragt, auf die Bandkante und rundet danach
+    // die Ecken des BESCHNITTENEN Rechtecks (kernel/user/fuib.fi, "ein
+    // Rechteck, das oben aus dem Band herausragt, wird beschnitten").
+    // Liegt die Bandkante mitten in einer Kachel, malt die Bruecke also
+    // eine runde Ecke MITTEN IN DIE FLAECHE. GEMESSEN an der Kachel
+    // "Mitternacht" in Bild 09: ein acht Bildpunkte breiter Keil in
+    // Farbe des Seitengrunds bei x=331..338, Zeilen 229..233, also
+    // genau dort, wo der Name anfaengt -- er sah wie ein verlorenes
+    // Zeichen aus und wurde auch dafuer gehalten.
+    //
+    // `wlibc.rrect` hat diese Schwaeche nicht: es malt die ganze Form,
+    // und `wlibc.px` verwirft die Bildpunkte ausserhalb des Bandes.
+    // Flaeche und Rahmen tragen damit denselben `rk`, dieselben Kanten
+    // und dieselben Mischstufen an der Rundung.
+    //
+    // Die FARBE kommt weiter aus `tspec(i, TL_SURFACE)` -- eine Kachel
+    // traegt ihre Farben selbst (Vorschaukacheln zeigen ein ANDERES
+    // Schema als das laufende). `sel` bleibt der Zustand des Aufrufers,
+    // und der Auswahlring ist der einzige Teil der Kachel, der aus dem
+    // LAUFENDEN Satz kommt: ihn malt weiter fUi -- und wo fUi ihn wegen
+    // des Bandes ablehnt (`fuib.ring` gibt dann `false` zurueck und
+    // malte bis hierher gar nichts), malt dieselbe Eckendeckung ihn.
+    wlibc.rrect(x, y, w, h, rk, tspec(i, TL_SURFACE))
     if sel {
-        let _fb2: bool = fuib.ring(x, y, w, h, rk,
-            wlibc.metric(wlibc.M_FOCUS) + 1, wlibc.theme(wlibc.T_FOCUS))
+        let fw: u64 = wlibc.metric(wlibc.M_FOCUS) + 1
+        if !fuib.ring(x, y, w, h, rk, fw, wlibc.theme(wlibc.T_FOCUS)) {
+            wlibc.rring(x, y, w, h, rk, fw, wlibc.theme(wlibc.T_FOCUS))
+        }
     } else {
         wlibc.rring(x, y, w, h, rk, 1,
             tspec(i, TL_FRAME))
@@ -3612,6 +3692,19 @@ fn paint_button(i: u64) {
     // die Abnahme haette genau den Weg nicht gemessen, der wirklich
     // malt.
     let rb: u64 = typ_radius(RT_KNOPF, MR_BUTTON, bw, bh)
+    // RUNDE GLAS (fix-r3-2): WER DIE FLAECHE MALT, SAGT AUCH, OB ER
+    // SIE GERAHMT HAT.
+    //
+    // fUi malt den Knopf flach: eine Flaeche in Weiss auf einer Karte
+    // in fast Weiss und KEINE Umrisskante. Auf der Seite Darstellung
+    // war der Knopf "Uebernehmen" deshalb von einer Beschriftung nicht
+    // zu unterscheiden -- ein Bedienelement, das nicht aussieht wie
+    // eines, ist keines. Der Rueckweg unten rahmt selbst (`rrect` in
+    // T_LINE mit der Flaeche darin, bzw. `frame3` beim eckigen Knopf,
+    // das auch den gedrueckten Zustand zeigt); nur der fUi-Zweig
+    // braucht die Kante nachgereicht. Diese Marke sagt, welcher Fall
+    // vorliegt, damit die Kante nicht zweimal entsteht.
+    var gerahmt: bool = false
     if fuib.draw(fuib.S_BUTTON, x, y, bw, bh, fui_zustand(i), 0) {
         // fUi hat die Flaeche gemalt -- weiter beim Text.
     } else {
@@ -3662,7 +3755,26 @@ fn paint_button(i: u64) {
         wlibc.rrect(x + bo, y + bo, bw - 2 * bo, bh - 2 * bo,
             ri, area)
     }
+    gerahmt = true
     }
+    if !gerahmt {
+        // DIE UMRISSKANTE DES KNOPFES, in derselben Farbe und mit
+        // demselben Radius wie der Rueckweg sie malt -- `fuib.ring`
+        // ist die eine Stelle, die einen Ring legt, und faellt von
+        // selbst auf `wlibc.rring` zurueck. Die Breite ist die Marke
+        // M_BORDER; ist sie 0 (ein Satz ganz ohne Raender), bleibt
+        // trotzdem ein Bildpunkt stehen, denn `shotcheck.py` weist
+        // ab jetzt fuer JEDES gemeldete Widget vom Typ `button`
+        // mindestens eine Kante im Bild nach.
+        var kb: u64 = wlibc.metric(wlibc.M_BORDER)
+        if kb == 0 {
+            kb = 1
+        }
+        let _kante: bool = fuib.ring(x, y, bw, bh, rb, kb,
+            wlibc.theme(wlibc.T_LINE))
+    }
+    // UND ER SAGT, WO ER STEHT -- egal, wer die Flaeche gemalt hat.
+    say_knopf(g(i, D_WIN), x, y, bw, bh, rb)
     var farbe: u64 = wlibc.theme(wlibc.T_FG)
     if (g(i, D_FLAGS) & F_OFF) != 0 {
         farbe = wlibc.theme(wlibc.T_DIM)
@@ -3704,19 +3816,96 @@ fn paint_button(i: u64) {
 // Zeile, die nicht passt, wird gekuerzt"), an derselben Stelle
 // gemeldet: `say_painted` bekommt den Text, der WIRKLICH gemalt wurde,
 // nicht den, der gewuenscht war.
+// WIE HOCH EIN UMBRECHENDES ETIKETT IN DIESER BREITE IST.
+// `place` fragt das, sobald die Breite feststeht -- und nur dort.
+fn label_h_at(i: u64, bw: u64) -> u64 {
+    let zh: u64 = wlibc.text_h(wlibc.px_ui())
+    let q: u64 = g(i, D_TEXT)
+    let n: u64 = tlen(q)
+    if n == 0 || bw == 0
+        || wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), q, n) <= bw {
+        return zh
+    }
+    return zh * 2
+}
+
+// WO EIN SATZ UMBRICHT: am letzten Leerzeichen, das noch in die Breite
+// passt. Gibt es keines (ein einziges langes Wort), wird hart getrennt
+// -- das ist haesslich, aber es ist immer noch der ganze Text und
+// nicht die Haelfte mit drei Punkten.
+fn wrap_split(f: u64, pxs: u64, p: u64, n: u64, limit: u64) -> u64 {
+    let k: u64 = fit_n(f, pxs, p, n, limit)
+    if k == 0 || k >= n {
+        return n
+    }
+    var b: u64 = k
+    while b > 0 {
+        if __mmio_read8((p + b) as *mut u8) == 32 as u8 {
+            return b
+        }
+        b = b - 1
+    }
+    return k
+}
+
 fn paint_label(i: u64) {
-    let grund: u64 = g(i, D_Y) + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())
-    var q: u64 = g(i, D_TEXT)
-    var qn: u64 = tlen(q)
-    let el: u64 = elide(wlibc.F_UI, wlibc.px_ui(), q, qn, g(i, D_W))
+    let zh: u64 = wlibc.text_h(wlibc.px_ui())
+    let asc: u64 = wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())
+    let grund: u64 = g(i, D_Y) + asc
+    let voll: u64 = g(i, D_TEXT)
+    let vn: u64 = tlen(voll)
+    let bw: u64 = g(i, D_W)
+    // ------- RUNDE GLAS (nachtrag): ZWEI ZEILEN STATT DREI PUNKTE
+    if (g(i, D_FLAGS) & F_UMBRUCH) != 0 && vn > 0
+        && wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), voll, vn) > bw {
+        let n1: u64 = wrap_split(wlibc.F_UI, wlibc.px_ui(), voll, vn, bw)
+        put_text(wlibc.F_UI, wlibc.px_ui(), g(i, D_X), grund, bw,
+            voll, n1, wlibc.theme(wlibc.T_FG), 0)
+        say_painted(g(i, D_WIN), K_LABEL, grund, wlibc.theme(wlibc.T_FG),
+            bg_of(g(i, D_WIN)), voll, n1)
+        // Das Leerzeichen, an dem getrennt wurde, gehoert in keine der
+        // beiden Zeilen -- es stuende sonst als Einzug vor der zweiten.
+        var st: u64 = n1
+        if st < vn && __mmio_read8((voll + st) as *mut u8) == 32 as u8 {
+            st = st + 1
+        }
+        var q2: u64 = voll + st
+        var n2: u64 = sub(vn, st)
+        let el2: u64 = elide(wlibc.F_UI, wlibc.px_ui(), q2, n2, bw)
+        var nq2: u64 = n2
+        if el2 != 0 {
+            q2 = (&el_buf[0 as usize]) as u64
+            n2 = el2
+            nq2 = sub(el2, 3)
+        }
+        put_text(wlibc.F_UI, wlibc.px_ui(), g(i, D_X), grund + zh, bw,
+            q2, n2, wlibc.theme(wlibc.T_FG), 0)
+        say_painted_n(g(i, D_WIN), K_LABEL, grund + zh,
+            wlibc.theme(wlibc.T_FG), bg_of(g(i, D_WIN)), q2, n2, nq2,
+            sub(vn, st))
+        return
+    }
+    var q: u64 = voll
+    var qn: u64 = vn
+    // UND WENN DOCH GEKUERZT WIRD, STEHT ES IN DER MELDUNG.
+    //
+    // Bis hierher meldete ein gekuerztes Etikett `nq=nv`: die
+    // gemeldete Laenge war die des GEMALTEN Textes, und damit war eine
+    // Kuerzung aus der Leitung nicht mehr zu erkennen -- nur die
+    // Reiter sagten es. Seit dieser Runde zaehlt
+    // tools/themestore/shotcheck.py gekuerzten Fliesstext getrennt von
+    // den Reitern, und dafuer muss der Fliesstext es auch sagen.
+    let el: u64 = elide(wlibc.F_UI, wlibc.px_ui(), q, qn, bw)
+    var nq: u64 = qn
     if el != 0 {
         q = (&el_buf[0 as usize]) as u64
         qn = el
+        nq = sub(el, 3)
     }
-    put_text(wlibc.F_UI, wlibc.px_ui(), g(i, D_X), grund, g(i, D_W),
+    put_text(wlibc.F_UI, wlibc.px_ui(), g(i, D_X), grund, bw,
         q, qn, wlibc.theme(wlibc.T_FG), 0)
-    say_painted(g(i, D_WIN), K_LABEL, grund, wlibc.theme(wlibc.T_FG),
-        bg_of(g(i, D_WIN)), q, qn)
+    say_painted_n(g(i, D_WIN), K_LABEL, grund, wlibc.theme(wlibc.T_FG),
+        bg_of(g(i, D_WIN)), q, qn, nq, vn)
 }
 
 // Die Flaeche, auf der ein Etikett liegt. `paint_bg` entscheidet das
@@ -4930,6 +5119,26 @@ fn paint_table(i: u64) {
 // left. Painter and hit test both come through here, so they cannot
 // disagree about where a tab is -- which is the only thing that would
 // be worse than tabs that are too wide.
+//
+// ================================ RUNDE GLAS (nachtrag): ZWEI ZEILEN
+//
+// Die Division war ehrlich, aber sie loeste das Falsche. Elf deutsche
+// Reiter messen 861 Bildpunkte in einer Leiste von 728: JEDER wurde
+// anteilig schmaler und NEUN von elf verloren Buchstaben ("Netzzu...",
+// "Darstell..."). Eine Zusage, die neun gekuerzte Reiter erlaubt,
+// misst nichts -- sie schreibt den Ist-Zustand fest.
+//
+// Passt die Zeile nicht, bekommt die Leiste deshalb eine ZWEITE: die
+// Reiter werden auf zwei Zeilen verteilt, und zwar dort geteilt, wo
+// die Haelfte der Gesamtbreite erreicht ist, damit beide Zeilen etwa
+// gleich voll sind. 861 auf zwei Zeilen sind rund 430 je Zeile in 728
+// Bildpunkten -- kein einziger Reiter muss mehr gekuerzt werden, und
+// die Division bleibt als Rueckfall fuer den Tag, an dem eine ZEILE
+// allein nicht mehr passt.
+//
+// Alle vier Rechnungen (Breite, Stelle, Zeile, Hoehe) stehen hier und
+// sind die einzigen: Maler, Treffer und Fokusring holen sich dieselben
+// Zahlen, sonst laege ein Reiter woanders, als er anklickbar ist.
 fn tab_natur(i: u64, k: u64) -> u64 {
     let q: u64 = row_at(g(i, D_TEXT), k)
     if q == 0 {
@@ -4953,12 +5162,90 @@ fn tab_sum(i: u64) -> u64 {
     return t
 }
 
+// WIE VIELE REITER DIE LEISTE UEBERHAUPT HAT.
+fn tab_n(i: u64) -> u64 {
+    var k: u64 = 0
+    while k < 12 && tab_natur(i, k) != 0 {
+        k = k + 1
+    }
+    return k
+}
+
+// EINE ZEILE ODER ZWEI -- gefragt fuer eine BREITE und nicht fuer das
+// Bedienelement, weil `place` die Hoehe braucht, bevor die Breite im
+// Feld steht. Wer das Bedienelement meint, nimmt `tab_rows`.
+fn tab_rows_at(i: u64, platz: u64) -> u64 {
+    if platz == 0 || tab_sum(i) <= platz || tab_n(i) < 2 {
+        return 1
+    }
+    return 2
+}
+
+fn tab_rows(i: u64) -> u64 {
+    return tab_rows_at(i, g(i, D_W))
+}
+
+// WO DIE ERSTE ZEILE AUFHOERT: beim ersten Reiter, mit dem die halbe
+// Gesamtbreite erreicht ist. Damit sind beide Zeilen etwa gleich voll;
+// eine Teilung "so viel wie passt" liesse die zweite Zeile fast leer
+// und die erste bis an den Rand gefuellt.
+fn tab_split(i: u64) -> u64 {
+    let n: u64 = tab_n(i)
+    if n < 2 {
+        return n
+    }
+    let ges: u64 = tab_sum(i)
+    var acc: u64 = 0
+    var k: u64 = 0
+    while k < n {
+        acc = acc + tab_natur(i, k)
+        if acc * 2 >= ges {
+            // Die zweite Zeile bekommt mindestens einen Reiter, sonst
+            // waere es wieder eine Zeile -- nur mit doppelter Hoehe.
+            if k + 1 >= n {
+                return n - 1
+            }
+            return k + 1
+        }
+        k = k + 1
+    }
+    return n - 1
+}
+
+fn tab_row(i: u64, k: u64) -> u64 {
+    if tab_rows(i) < 2 || k < tab_split(i) {
+        return 0
+    }
+    return 1
+}
+
+fn tab_row_first(i: u64, r: u64) -> u64 {
+    if r == 0 {
+        return 0
+    }
+    return tab_split(i)
+}
+
+fn tab_row_sum(i: u64, r: u64) -> u64 {
+    let n: u64 = tab_n(i)
+    var k: u64 = tab_row_first(i, r)
+    var t: u64 = 0
+    while k < n && tab_row(i, k) == r {
+        t = t + tab_natur(i, k)
+        k = k + 1
+    }
+    return t
+}
+
 fn tab_width(i: u64, k: u64) -> u64 {
     let b: u64 = tab_natur(i, k)
     if b == 0 {
         return 0
     }
-    let int: u64 = tab_sum(i)
+    // DIE SUMME DER EIGENEN ZEILE und nicht die aller Reiter: auf zwei
+    // Zeilen verteilt passt jede fuer sich, und dann wird nichts
+    // skaliert und nichts gekuerzt.
+    let int: u64 = tab_row_sum(i, tab_row(i, k))
     let platz: u64 = g(i, D_W)
     if int <= platz || int == 0 {
         return b
@@ -4970,6 +5257,39 @@ fn tab_width(i: u64, k: u64) -> u64 {
         sk = 24
     }
     return sk
+}
+
+// DIE HOEHE EINER ZEILE. Eine einzelne Zeile ist so hoch wie jedes
+// andere Bedienelement (`M_CTRL_H`); zwei Zeilen duerfen die Seite
+// nicht um eine ganze Bedienhoehe nach unten schieben, also sind sie
+// je so hoch, wie die Schrift samt Luft braucht. Gemessen: 24 statt
+// 32 auf `modern`, zwei Zeilen kosten damit 16 Bildpunkte und nicht 32.
+fn tab_rowh_at(i: u64, platz: u64) -> u64 {
+    if tab_rows_at(i, platz) < 2 {
+        return wlibc.metric(wlibc.M_CTRL_H)
+    }
+    // VIER BILDPUNKTE LUFT UM DIE SCHRIFT, nicht acht: zwei Zeilen von
+    // 24 kosten die Seite 16 Bildpunkte gegenueber einer von 32, und
+    // genau diese 16 holt die Einstellungsseite an ihren zwei Raendern
+    // wieder herein (kernel/user/settings.fi, `ctop` und `ty`). Mit
+    // acht waeren es 24 gewesen, und dann haette eine Zeile der
+    // linken Spalte weichen muessen.
+    return r4auf(wlibc.text_h(wlibc.px_ui()) + 4)
+}
+
+fn tab_rowh(i: u64) -> u64 {
+    return tab_rowh_at(i, g(i, D_W))
+}
+
+// DIE HOEHE DER GANZEN LEISTE, fuer eine Breite gefragt. `place`
+// benutzt genau diese Zahl; damit ist die Hoehe des Bedienelements
+// immer ein ganzes Vielfaches der Zeilenhoehe.
+fn tab_h_at(i: u64, platz: u64) -> u64 {
+    return tab_rowh_at(i, platz) * tab_rows_at(i, platz)
+}
+
+fn tab_y(i: u64, k: u64) -> u64 {
+    return g(i, D_Y) + tab_row(i, k) * tab_rowh(i)
 }
 
 // RUNDE I18N: WO EIN REITER LIEGT.
@@ -5007,7 +5327,11 @@ fn menubar_x(i: u64, k: u64) -> u64 {
 
 fn tab_x(i: u64, k: u64) -> u64 {
     var x: u64 = g(i, D_X)
-    var t: u64 = 0
+    // RUNDE GLAS (nachtrag): GEZAEHLT WIRD IN DER EIGENEN ZEILE. Der
+    // erste Reiter der zweiten Zeile faengt wieder am linken Rand an;
+    // saehe der Treffer die Summe aller Vorgaenger, laege jeder Reiter
+    // der zweiten Zeile weit rechts ausserhalb der Leiste.
+    var t: u64 = tab_row_first(i, tab_row(i, k))
     // 12 UND NICHT 8. Jede andere Stelle dieser Datei, die Reiter
     // zaehlt (`tab_summe`, der Mausklick, die Pfeiltasten), geht bis 12;
     // nur hier stand 8. Solange es acht Reiter gab, fiel das nicht auf.
@@ -5024,6 +5348,53 @@ fn tab_x(i: u64, k: u64) -> u64 {
 
 fn tab_w(i: u64, k: u64) -> u64 {
     return tab_width(i, k)
+}
+
+// RUNDE GLAS (fix-r3-2): WO EIN KNOPF STEHT UND WIE RUND ER IST.
+//
+// `tools/themestore/shotcheck.py` weist ab jetzt fuer JEDES gemeldete
+// Bedienelement vom Typ `button` mindestens eine Umrisskante im Bild
+// nach. Der Grund steht in der Aufnahme 08 der Runde: eine Flaeche in
+// Weiss auf einer Karte in fast Weiss und ohne Rand ist von einer
+// Beschriftung nicht zu unterscheiden, und genau so sah der Knopf
+// "Uebernehmen" aus. Die Textzeile (`wlib: text kind=2`) sagt nur, wo
+// die SCHRIFT sitzt -- fuer eine Kante braucht der Pruefer das
+// Rechteck des Knopfes, und den Radius dazu, sonst sucht er die Kante
+// in einer abgerundeten Ecke.
+//
+// `ax`/`ay` ist die linke obere Ecke auf dem SCHIRM (Ursprung der
+// Malflaeche plus die Ecke im Fenster), damit der Pruefer nicht
+// nachrechnen muss. Eine Zeile, ein Schreibvorgang -- dieselbe
+// Begruendung wie bei `say_painted`.
+fn say_knopf(w: u64, x: u64, y: u64, bw: u64, bh: u64, r: u64) {
+    var a: [u8; 15] = "wlib: knopf x=\0"
+    var by: [u8; 4] = " y=\0"
+    var bw2: [u8; 4] = " w=\0"
+    var bh2: [u8; 4] = " h=\0"
+    var br: [u8; 4] = " r=\0"
+    var bax: [u8; 5] = " ax=\0"
+    var bay: [u8; 5] = " ay=\0"
+    var nl2: [u8; 2] = "\n\0"
+    if s_trace == 0 {
+        return
+    }
+    let b: u64 = (&tr_buf[0 as usize]) as u64
+    var at: u64 = tr_put(b, 0, (&a[0 as usize]) as u64)
+    at = tr_num(b, at, x)
+    at = tr_put(b, at, (&by[0 as usize]) as u64)
+    at = tr_num(b, at, y)
+    at = tr_put(b, at, (&bw2[0 as usize]) as u64)
+    at = tr_num(b, at, bw)
+    at = tr_put(b, at, (&bh2[0 as usize]) as u64)
+    at = tr_num(b, at, bh)
+    at = tr_put(b, at, (&br[0 as usize]) as u64)
+    at = tr_num(b, at, r)
+    at = tr_put(b, at, (&bax[0 as usize]) as u64)
+    at = tr_num(b, at, ng(w, N_X) + 2 + x)
+    at = tr_put(b, at, (&bay[0 as usize]) as u64)
+    at = tr_num(b, at, ng(w, N_Y) + 22 + y)
+    at = tr_put(b, at, (&nl2[0 as usize]) as u64)
+    let _p: u64 = ulib.put(b, at)
 }
 
 fn say_tab(w: u64, k: u64, x: u64, y: u64, tw: u64, th: u64, q: u64,
@@ -5091,7 +5462,11 @@ fn paint_tabs(i: u64) {
     // have swallowed its clicks, with no message of any kind. The hit
     // test below counts to the same number, and it has to: a tab that
     // is drawn and not clickable is worse than one that is neither.
-    var tx: u64 = x
+    // RUNDE GLAS (nachtrag): STELLE UND ZEILE KOMMEN AUS `tab_x` und
+    // `tab_y` und werden hier nicht mitgezaehlt. Eine zweite Zaehlung
+    // waere genau der Fehler, den diese Datei bei den Menueleisten
+    // schon einmal hatte: gemalt bei 120, getroffen bei 70.
+    let zh: u64 = tab_rowh(i)
     var k: u64 = 0
     while k < 12 {
         let q: u64 = row_at(g(i, D_TEXT), k)
@@ -5099,6 +5474,8 @@ fn paint_tabs(i: u64) {
             k = 12
         } else {
             let tw: u64 = tab_width(i, k)
+            let tx: u64 = tab_x(i, k)
+            let ty: u64 = tab_y(i, k)
             var area: u64 = wlibc.theme(wlibc.T_PANEL)
             var farbe: u64 = wlibc.theme(wlibc.T_DIM)
             if k == g(i, D_VAL) {
@@ -5110,14 +5487,14 @@ fn paint_tabs(i: u64) {
             // Streifen dahinter (`_fb14`) bleibt eckig: er laeuft ueber
             // die ganze Breite des Fensters und hat dort keine Ecke,
             // die man runden koennte.
-            let _fb15: bool = fuib.tafel(tx, y, tw, bh,
-                typ_radius(RT_REITER, MR_BUTTON, tw, bh), area, 0, 0)
-            wlibc.vline(tx, y, bh, wlibc.theme(wlibc.T_LINE))
+            let _fb15: bool = fuib.tafel(tx, ty, tw, zh,
+                typ_radius(RT_REITER, MR_BUTTON, tw, zh), area, 0, 0)
+            wlibc.vline(tx, ty, zh, wlibc.theme(wlibc.T_LINE))
             if k == g(i, D_VAL) {
-                wlibc.hline(tx, y, tw, wlibc.theme(wlibc.T_ACCENT))
-                wlibc.hline(tx, y + 1, tw, wlibc.theme(wlibc.T_ACCENT))
+                wlibc.hline(tx, ty, tw, wlibc.theme(wlibc.T_ACCENT))
+                wlibc.hline(tx, ty + 1, tw, wlibc.theme(wlibc.T_ACCENT))
             } else {
-                wlibc.hline(tx, y + bh - 1, tw, wlibc.theme(wlibc.T_LINE))
+                wlibc.hline(tx, ty + zh - 1, tw, wlibc.theme(wlibc.T_LINE))
             }
             // AND THE LABEL IS CLIPPED TO THE TAB -- BUT VISIBLY.
             //
@@ -5148,8 +5525,19 @@ fn paint_tabs(i: u64) {
                 nmal = el
                 nq = sub(el, 3)
             }
-            let base: u64 = y
-                + (bh + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())) / 2
+            // DIE SCHRIFT WIRD MIT IHREM GANZEN KASTEN MITTIG
+            // GESETZT und nicht mit ihrer Oberlaenge. In einer Zeile
+            // von 24 Bildpunkten sass die Grundlinie sonst so tief,
+            // dass die Unterlaengen von "Abgleich" und "Vorlagen"
+            // genau auf der unteren Kante des Reiters standen -- die
+            // Bildpunktprobe in tools/themestore/shotcheck.py nennt
+            // das `LINIE`, und sie hat recht: Schrift auf einer Linie
+            // liest sich schlecht. `text_h` ist Ober- plus
+            // Unterlaenge, also ist `(zh - text_h) / 2` die Luft, die
+            // oben und unten gleich bleibt.
+            let base: u64 = ty
+                + sub(zh, wlibc.text_h(wlibc.px_ui())) / 2
+                + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())
             put_text(wlibc.F_UI, wlibc.px_ui(), tx, base, tw, qp, nmal,
                 farbe, 1)
             // UND DIE BESCHRIFTUNG MELDET SICH WIE JEDE ANDERE.
@@ -5164,13 +5552,27 @@ fn paint_tabs(i: u64) {
             // they painted, for the reason a runner that computes a tab
             // boundary is a runner that checks its own arithmetic. Same
             // rule, one widget further along.
-            say_tab(g(i, D_WIN), k, tx, y, tw, bh, q, nq, voll)
-            tx = tx + tw
+            say_tab(g(i, D_WIN), k, tx, ty, tw, zh, q, nq, voll)
             k = k + 1
         }
     }
-    wlibc.hline(tx, y + bh - 1, sub(x + g(i, D_W), tx),
-        wlibc.theme(wlibc.T_LINE))
+    // DER REST JEDER ZEILE bekommt denselben Strich wie ein nicht
+    // gewaehlter Reiter -- je Zeile einen, sonst endete die untere
+    // Kante der ersten Zeile im Nichts.
+    var r: u64 = 0
+    let zeilen: u64 = tab_rows(i)
+    while r < zeilen {
+        let letzt: u64 = tab_row_first(i, r + 1)
+        var ex: u64 = x
+        if r + 1 < zeilen {
+            ex = tab_x(i, letzt - 1) + tab_width(i, letzt - 1)
+        } else if tab_n(i) > 0 {
+            ex = tab_x(i, tab_n(i) - 1) + tab_width(i, tab_n(i) - 1)
+        }
+        wlibc.hline(ex, y + (r + 1) * zh - 1, sub(x + g(i, D_W), ex),
+            wlibc.theme(wlibc.T_LINE))
+        r = r + 1
+    }
     // DER FOKUSRING LIEGT AUF DEM REITER UND NICHT UM DIE LEISTE.
     //
     // Er lag um die ganze Leiste, und die Leiste ist 728 Bildpunkte
@@ -5184,7 +5586,7 @@ fn paint_tabs(i: u64) {
     // innerhalb des Rechtecks, das `say_tab` fuer diesen Reiter
     // meldet, und genau daran misst es der Abnahmelauf.
     let sel: u64 = g(i, D_VAL)
-    focus_ring_at(i, tab_x(i, sel), y, tab_width(i, sel), bh)
+    focus_ring_at(i, tab_x(i, sel), tab_y(i, sel), tab_width(i, sel), zh)
 }
 
 fn paint_menubar(i: u64) {
@@ -6658,21 +7060,26 @@ fn on_down(w: u64, x: u64, y: u64, btn: u64) {
         return
     }
     if k == K_TABS {
-        var tx: u64 = g(i, D_X)
+        // RUNDE GLAS (nachtrag): DER KLICK KENNT DIE ZWEITE ZEILE.
+        // Die Stelle jedes Reiters kommt aus `tab_x`/`tab_y` -- also
+        // aus derselben Rechnung, aus der sie gemalt wird -- und die
+        // Zeile wird MITGEPRUEFT. Ohne das Y traefe ein Klick in der
+        // unteren Zeile den Reiter, der in der oberen daruebersteht.
+        let zh: u64 = tab_rowh(i)
+        let n: u64 = tab_n(i)
         var t: u64 = 0
-        while t < 12 {
+        while t < n {
             let tw: u64 = tab_width(i, t)
-            if tw == 0 {
-                t = 12
-            } else if x >= tx && x < tx + tw {
+            let tx: u64 = tab_x(i, t)
+            let ty: u64 = tab_y(i, t)
+            if x >= tx && x < tx + tw && y >= ty && y < ty + zh {
                 if g(i, D_VAL) != t {
                     s(i, D_VAL, t)
                     dirty_wd(i)
                     fire(i, K_TABS, t, w)
                 }
-                t = 12
+                t = n
             } else {
-                tx = tx + tw
                 t = t + 1
             }
         }

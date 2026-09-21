@@ -323,6 +323,75 @@ def grund(pic, x0, y0, x1, y1):
     return max(zaehl, key=lambda k: zaehl[k])
 
 
+# =========================== RUNDE GLAS (fix-r3-4): DIE BILDPUNKTPROBE
+# TEXT, DER AUF EINER RAHMENLINIE LIEGT.
+#
+# Der Fall, der diese Funktion gekostet hat: die Statuszeile "bereit"
+# der Einstellungen sass auf `ty + body`, und genau dort verlief die
+# UNTERE KANTE der linken Karte. Beide Rechtecke sind fuer sich
+# richtig -- die Zeile meldet 16,516 20 hoch, die Karte 4,60 456 hoch
+# --, und deshalb konnte KEIN Vergleich gemeldeter Rechtecke das
+# sehen: sie ueberlappen sich nicht, sie beruehren sich. Im Bild lief
+# die Linie trotzdem mitten durch das Wort.
+#
+# Gefragt wird deshalb das Bild und nicht der Mitschnitt: liegt links
+# UND rechts vom Text, auf derselben Zeile, ueber `LINIE_LAUF`
+# Bildpunkte derselben Farbe, und ist diese Farbe nicht der gemessene
+# Grund des Textes, dann laeuft dort eine Linie durch die Schrift.
+# Ein Nachbarbuchstabe erfuellt das nicht (er ist nicht einfarbig ueber
+# zehn Bildpunkte), eine Knopfflaeche auch nicht (sie IST der
+# gemessene Grund).
+LINIE_LAUF = 10
+
+
+def _lauf(pic, x0, y, schritt, n, bg, tol):
+    """Die Farbe eines einfarbigen Laufs von `n` Bildpunkten, oder None."""
+    c = pic.at(x0, y)
+    if c is None or near(c, bg, tol):
+        return None
+    for k in range(1, n):
+        p = pic.at(x0 + k * schritt, y)
+        if p is None or p != c:
+            return None
+    return c
+
+
+def linien_probe(pic, texts, ox, oy, ww, asc, desc):
+    """Wie viele Beschriftungen auf einer waagerechten Linie liegen."""
+    treffer = 0
+    schlecht = []
+    for t in texts:
+        x = ox + t["x"]
+        y0 = oy + t["base"] - asc
+        y1 = oy + t["base"] + desc
+        x1 = min(x + t["tw"], ox + ww)
+        bg = grund(pic, x, y0, x1, y1)
+        if bg is None:
+            continue
+        box = inkbox(pic, x, y0, x1, y1, bg, 10)
+        if box is None:
+            continue
+        lo_x, lo_y, hi_x, hi_y = box[0], box[1], box[2], box[3]
+        # Nur die Zeilen, in denen wirklich Tinte steht, und nur so weit
+        # vom Text weg, wie noch zu seinem Kasten gehoert.
+        for y in range(lo_y, hi_y + 1):
+            links = _lauf(pic, lo_x - 2, y, -1, LINIE_LAUF, bg, 10)
+            if links is None:
+                continue
+            rechts = _lauf(pic, hi_x + 2, y, 1, LINIE_LAUF, bg, 10)
+            if rechts is None or rechts != links:
+                continue
+            treffer += 1
+            schlecht.append(
+                "LINIE  '%s' bei %d,%d steht auf einer Linie der Farbe "
+                "%02x%02x%02x (Zeile y=%d, %d Bildpunkte links und rechts "
+                "einfarbig)"
+                % (t["t"][:32], x, oy + t["base"], links[0], links[1],
+                   links[2], y, LINIE_LAUF))
+            break
+    return treffer, schlecht
+
+
 def leiste_messen(pic, serial, asc, desc):
     """Dieselben drei Fragen, gestellt an die Taskleiste.
 
@@ -421,6 +490,7 @@ def main(argv):
     ww, wh = pic.w, pic.h
     want_win = None
     leiste = False
+    linien = False
     for a in argv[3:]:
         if a.startswith("--window="):
             ox, oy, ww, wh = (int(v) for v in a.split("=", 1)[1].split(","))
@@ -429,6 +499,8 @@ def main(argv):
             want_win = int(a.split("=", 1)[1])
         elif a == "--leiste":
             leiste = True
+        elif a == "--linien":
+            linien = True
     if want_win is None and texts:
         count = {}
         for t in texts:
@@ -529,10 +601,28 @@ def main(argv):
     # Leser, dass da mehr stand. Fehlen die Punkte, ist das ein
     # abgeschnittener Text wie jeder andere und zaehlt in `cut`
     # -- genau der Fall, den die Reiterleiste jahrelang hatte.
+    #
+    # UND ZWEI ZAHLEN STATT EINER (fix-r3-1): eine Reiterleiste hat
+    # einen Zwang, den ein Etikett nicht hat -- sie muss elf Namen in
+    # eine Fensterbreite bringen. Fliesstext dagegen darf umbrechen
+    # (`wlib.umbruch`), also ist eine gekuerzte Beschriftung dort kein
+    # Zwang, sondern ein Mangel. Beides in EINER Zahl zu fuehren hiess:
+    # die neun gekuerzten Reiter verdeckten drei gekuerzte Saetze, und
+    # `tools/themestore/run.sh` konnte auf keine der beiden eine Zusage
+    # setzen, die etwas misst. Darum zaehlt `reiter` (kind K_TABS = 7)
+    # getrennt von `fliess`.
     gekuerzt = 0
+    gk_reiter = 0
+    gk_fliess = 0
     for t in texts:
         if t["nv"] > t["nq"]:
             gekuerzt += 1
+            if t["kind"] == 7:
+                gk_reiter += 1
+            else:
+                gk_fliess += 1
+                bad.append("KURZ   '%s' (typ %d) malt %d von %d Oktetten"
+                           % (t["t"][:32], t["kind"], t["nq"], t["nv"]))
             if not t["t"].endswith("..."):
                 cut += 1
                 bad.append("CLIP   '%s' painted %d of %d octets without a "
@@ -553,10 +643,20 @@ def main(argv):
                 bad.append("OVER   '%s' %s and '%s' %s"
                            % (boxes[i][0][:24], a[:4],
                               boxes[j][0][:24], b[:4]))
+    # RUNDE GLAS (fix-r3-4): UND DIE BILDPUNKTPROBE OBENDRAUF.
+    #
+    # Sie beantwortet die eine Frage, die aus gemeldeten Rechtecken
+    # nicht zu beantworten ist: laeuft eine RAHMENLINIE durch die
+    # Schrift? Zwei Rechtecke, die sich nur beruehren, melden keine
+    # Ueberlappung -- die Statuszeile "bereit" lag trotzdem auf der
+    # unteren Kante der linken Karte.
+    linie, lbad = linien_probe(pic, texts, ox, oy, ww, asc, desc)
+    bad.extend(lbad)
     print("shotcheck: win %s  texts %d  measured %d  empty %d  cut %d  "
-          "overlapping %d  gekuerzt %d  ausserhalb %d  verdeckt %d"
+          "overlapping %d  gekuerzt %d  reiterkurz %d  fliesskurz %d  "
+          "ausserhalb %d  verdeckt %d  linie %d"
           % (want_win, len(texts), len(boxes), empty, cut, over, gekuerzt,
-             ausserhalb, verdeckt))
+             gk_reiter, gk_fliess, ausserhalb, verdeckt, linie))
     for line in bad[:30]:
         print("  " + line)
     # RUNDE GLAS (nachtrag): die Leiste auf einer EIGENEN Zeile. Sie
@@ -573,6 +673,13 @@ def main(argv):
         for line in bbad[:30]:
             print("  " + line)
         schlecht = bleer + bab + bueber
+    # `linie` geht NUR mit `--linien` in den Rueckgabewert ein. Der
+    # Grund ist derselbe, aus dem `--leiste` ein Schalter ist: dieses
+    # Werkzeug wird von acht Laeufen dieses Baums gerufen, und eine
+    # neue Frage, die sofort fuer alle rot faellt, waere keine Messung,
+    # sondern ein Hindernis. Die Zahl steht in jedem Fall in der Zeile.
+    if linien:
+        schlecht = schlecht + linie
     return 0 if (empty == 0 and cut == 0 and over == 0
                  and schlecht == 0) else 1
 

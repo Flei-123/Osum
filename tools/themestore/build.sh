@@ -21,8 +21,10 @@
 #                       transparent bar has something to be transparent
 #                       OVER.  A flat surface would prove nothing.
 #                       Either an OSYM file (tools/k15/icon.py) or one
-#                       of the two words `hell` and `dunkel`, which
-#                       generate a patterned 120x90 one here -- the
+#                       of the four words `hell`, `dunkel`, `hellgrob`
+#                       and `dunkelgrob`, which generate a patterned
+#                       120x90 one here (`grob` = a chequer of 24
+#                       instead of 12, for the frosting shots) -- the
 #                       light and the dark case the contrast promise of
 #                       round GLAS has to survive.
 #     script=<cmd>      run this in the guest shell instead of the desktop
@@ -205,7 +207,21 @@ else
 fi
 printf '%s\n' de > "$OUT/userlocale"
 
-ARGS=(build "$OUT/disk.img" 16384 /lib/
+# RUNDE GLAS (fix-r3-2): 32768 BLOECKE STATT 16384, also 16 statt 8 MiB.
+#
+# Die zehn Programme dieser Platte wiegen zusammen 7,6 MiB, dazu die
+# drei Schriften (102 KiB) und -- nur in den Laeufen dieser Runde --
+# ein Hintergrundbild von 43 KiB. Damit lief `mkfs.py` mit
+# "mkfs: the disk is full" an die Wand, und zwar AUSGERECHNET in den
+# Laeufen mit `wallpaper=`, also in genau denen, die Transparenz
+# ueberhaupt belegen koennen. Eine Platte, die nur ohne das
+# Hintergrundbild reicht, misst die Runde nicht.
+#
+# 32768 ist keine neue Zahl, sondern die, mit der tools/look/shot.sh,
+# tools/entry/run.sh und tools/wmplug/*.sh seit Runden bauen. Das
+# Abbild ist duenn belegt: die Datei waechst nur um das, was wirklich
+# darin steht.
+ARGS=(build "$OUT/disk.img" 32768 /lib/
       "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
       "/lib/icons.ttf=assets/osum-icons.ttf")
 ARGS+=(/bin/)
@@ -240,7 +256,7 @@ fi
 # which is what the measurement needs, and more of it.
 if [ -n "$wallpaper" ]; then
     case "$wallpaper" in
-        hell|dunkel)
+        hell|dunkel|hellgrob|dunkelgrob)
             python3 - "$OUT/wallpaper.osym" "$wallpaper" <<'WALLPY'
 import struct, sys
 out, kind = sys.argv[1], sys.argv[2]
@@ -250,14 +266,28 @@ w, h = 120, 90
 # on purpose: a pattern finer than the blur would vanish into one grey
 # and the "the variance falls by half" measurement would pass for the
 # wrong reason.
-if kind == "hell":
+if kind.startswith("hell"):
     a, b = (0xF5, 0xF0, 0xE6), (0xC8, 0xD8, 0xF0)
 else:
     a, b = (0x14, 0x18, 0x22), (0x3A, 0x22, 0x50)
+# ROUND GLAS (fix-r3-1): `hellgrob`/`dunkelgrob` -- THE SAME TWO
+# COLOURS ON A TWENTY-FOUR PIXEL CHEQUER.
+#
+# The frosting picture (07) was taken over the twelve-pixel chequer
+# with r=12, and on a chequer that the desktop stretches to about
+# eighty screen pixels a blur of twelve moves the EDGES and leaves the
+# fields flat: the measurement saw it (var falls from 1597 to 788),
+# a reader did not.  A field twice as wide -- about 160 screen pixels
+# -- has fewer edges, so the blur has room to carry one colour deep
+# into the other, and with r=16 the strip becomes a visible gradient
+# instead of two flat tiles with soft seams.  Same two colours on
+# purpose: the contrast promise must be measured against the same
+# worst case as before.
+kachel = 24 if kind.endswith("grob") else 12
 px = bytearray()
 for y in range(h):
     for x in range(w):
-        c = a if ((x // 12) + (y // 12)) % 2 == 0 else b
+        c = a if ((x // kachel) + (y // kachel)) % 2 == 0 else b
         px += bytes((c[2], c[1], c[0], 0xFF))
 open(out, "wb").write(b"OSYM" + struct.pack("<II", w, h) + bytes(px))
 WALLPY
