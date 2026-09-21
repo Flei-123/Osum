@@ -11,16 +11,19 @@ Abschnitt 8 nennt die Punkte, die **nicht** erreicht wurden — sie stehen
 hier und nicht nur im Protokoll, weil eine Runde, die nur ihre Erfolge
 aufschreibt, beim naechsten Mal an derselben Stelle wieder anlaeuft.
 
-Beleg fuer alles: `bash tools/themestore/run.sh`. Ergebnis des Laufs,
-auf den sich dieses Blatt bezieht (21.09.2026, QEMU/TCG ohne KVM):
+Beleg fuer alles: `bash tools/themestore/run.sh`. Der Lauf, auf den
+sich dieses Blatt bezieht, liegt seit fix-r4-2 vollstaendig im Baum --
+**`belege/glas-run.log`** --, und seine Schlusszeile ist das Ergebnis:
 
-```
-THEMESTORE: 230 passed, 0 failed
+```bash
+tail -1 belege/glas-run.log     # -> THEMESTORE: 312 passed, 0 failed
 ```
 
 Vorher waren es 81 Zusagen. Keine davon ist abgeschwaecht oder entfernt
-worden; die 149 neuen stehen in Abschnitt 11 des Laeufers (55 aus der
-Runde selbst, der Rest aus den Nachtraegen fix-r3-1 bis fix-r3-4).
+worden; die neuen stehen in Abschnitt 11 des Laeufers (55 aus der Runde
+selbst, der Rest aus den Nachtraegen fix-r3-1 bis fix-r4-4). Jede Zahl
+dieses Blattes ist eine Zeile jener Datei; wo eine steht, die dort
+nicht steht, ist sie als Messung ausserhalb des Laufs gekennzeichnet.
 
 Die Bilder liegen unter `docs/shots/glas/` (Tabelle dort in
 `README.md`), die Einzelaufnahmen des Laufs unter
@@ -775,7 +778,8 @@ die Aufloesung der Schleierbedingung nach der Deckung ergibt fuer 0
 genau 100 Prozent, also das Gegenteil des Gemeinten (gemessen, bevor
 die Abfrage stand: ein Fenster bei 55 Prozent unterschied sich in
 **114** von 41 000 abgetasteten Bildpunkten von demselben Fenster bei
-100 Prozent; mit der Abfrage sind es **5 132**).
+100 Prozent; mit der Abfrage sind es **29 283**, und genau diese Zahl
+steht im Mitschnitt: `grep 'mischt seinen Rumpf' belege/glas-run.log`).
 
 Gemessen wird es an der Reiterzeile, und zwar nicht am Kontrast,
 sondern an der KANTENDICHTE: ein fremder Buchstabe zwischen zwei
@@ -785,7 +789,7 @@ der Reiterzeile die benachbarten Bildpunkte, die sich um mehr als 24
 Stufen unterscheiden — **4 341 bei `window_alpha=55` gegen 4 341 bei
 100**, und das Band ist zwischen beiden Laeufen Bildpunkt fuer
 Bildpunkt dasselbe (`diff 0`), waehrend der Rumpf desselben Bildes
-sich in ueber 2 000 abgetasteten Bildpunkten unterscheidet. Deckende
+sich in **29 283** abgetasteten Bildpunkten unterscheidet. Deckende
 Zeile und durchsichtiger Rumpf, im selben Bild. Der schlechteste
 Kontrast der Seite bleibt bei **5,16:1** (die ausgewaehlte Listenzeile
 auf der Akzentfarbe, kein Fall von Transparenz).
