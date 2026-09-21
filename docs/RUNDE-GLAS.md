@@ -130,7 +130,8 @@ ist der Zwischenspeicher noch leer, und das ist die ehrliche Zahl fuer
 und aus zwei Farben sind 13 geworden, also ein Verlauf und keine zwei
 Kacheln mehr.
 
-Bilder: `07-milchglas-blur12.png`, `14-milchglas-mit-reglerstand.png`.
+Bilder: `07-milchglas-blur16-grobes-muster.png` (die Aufnahme, auf der
+man es SIEHT -- siehe Abschnitt 9c), `14-milchglas-mit-reglerstand.png`.
 
 **Abkuerzung, ausdruecklich benannt:** 46 ms je Vollbild sind unter
 TCG gemessen. Auf Blech mit KVM ist dieselbe Rechnung um ein Vielfaches
@@ -515,6 +516,161 @@ selbst gemessen hat.
 
 ---
 
+## 9c. Nachtrag nach der Jury: die Reiterleiste, die Spalte und das Milchglas
+
+Vier Maengel, vier Messungen (fix-r3-1).
+
+**Die Messlatte "genau eine Stelle" war ueber den Baum gerechnet
+falsch.** Sie heisst jetzt, was sie immer gemessen hat: **ein Ort je
+Ring und je Format, jeder begruendet in
+`tools/themestore/raster.liste`** — im Fensterserver `wm.fill_round`
+und `wm.blend`, im Bildspeicher `fb.blend`/`fb.mix8` (anderes
+Bildformat), in Ring 3 `wlibc.rrect`/`wlibc.blend` (ueber die
+Ringgrenze geht kein Systemaufruf je Bildpunkt, siehe
+`BEFUND-VEKTOR-ENTSCHEIDUNG.md`) und `vektor.polygon_round` fuer
+beliebige Formen. Abschnitt 11e sucht den GANZEN Baum ab und haelt
+den Fund gegen die Liste: ein Fund ohne Eintrag ist rot, ein Eintrag
+ohne Fund auch. Dieselbe Formulierung steht in `PLAN.md` und `RUN.md`
+an genau den Stellen, an denen vorher "genau eine" stand.
+
+**Neun von elf Reitern wurden gekuerzt gemalt, und die Zusage hiess
+"hoechstens neun".** Eine Schranke, die den Ist-Zustand als
+Obergrenze nimmt, misst nichts. Elf deutsche Reiter messen 861
+Bildpunkte in einer Leiste von 728; `wlib.paint_tabs` verteilt sie
+jetzt auf **zwei Zeilen**, geteilt bei der halben Gesamtbreite
+(`tab_split`), und die Division auf schmalere Reiter bleibt nur als
+Rueckfall fuer den Tag, an dem eine ZEILE allein nicht mehr passt.
+Breite, Stelle, Zeile und Hoehe kommen aus vier Funktionen, die Maler,
+Mausklick und Fokusring gemeinsam benutzen; die Hoehe entscheidet
+`wlib.place`, weil erst dort die Breite feststeht.
+
+Zwei Zeilen von 24 statt einer von 32 kosten 16 Bildpunkte. Die holt
+die Seite an ihren zwei Raendern zurueck (`ctop`-Rand 4 statt 16, die
+Luft unter der Leiste 4 statt 8), also ist **keine einzige Zeile der
+beiden Spalten gewichen**. Gemessen:
+
+```
+wlib: tab i=0  x=4   y=4   w=106 h=24  nq=11 nv=11 t=Darstellung
+wlib: tab i=5  x=398 y=4   w=101 h=24  nq=11 nv=11 t=Netzzugriff
+wlib: tab i=6  x=4   y=28  w=81  h=24  nq=7  nv=7  t=Sprache
+wlib: tab i=10 x=326 y=28  w=71  h=24  nq=7  nv=7  t=Brücke
+```
+
+Die Schranke im Laeufer steht jetzt auf **zwei** (`TABKURZ <= 2`, heute
+0), daneben eine Zusage, dass die Leiste wirklich zwei verschiedene
+Zeilen hat — sonst koennte sie auch durch noch kuerzere Namen gruen
+werden.
+
+**Drei Fliesstextzeilen der linken Spalte waren gekuerzt, und niemand
+konnte es zaehlen.** `paint_label` meldete den GEMALTEN Text als
+ungekuerzt (`nq = nv`), also sah `shotcheck.py` nur die neun Reiter.
+Jetzt meldet es beide Laengen, und die Zahl ist in zwei zerlegt:
+`reiterkurz` und `fliesskurz`. Fuer Fliesstext gilt **0 als Zusage**,
+auf beiden Seiten. Moeglich wird sie durch die Spalte: sie ist von 300
+auf **340** Bildpunkte gewachsen (gemessen: "Akzentfarbe RRGGBB (leer
+= Schema)" misst 285, die Kontrastzeile 290, in 300 blieben nach dem
+Innenabstand 268). Das kostet keinen Bildpunkt in der Hoehe. Als Netz
+gibt es zusaetzlich `wlib.umbruch`: ein so bezeichnetes Etikett
+bekommt eine zweite Zeile statt drei Punkten, wenn eine andere Sprache
+doch einmal laenger ist.
+
+**Milchglas war gemessen da und angeschaut nicht.** `var` fiel von
+1 597 auf 788, und trotzdem sah man auf Bild 07 zwei Kacheln mit
+weichen Naehten. Zwei Gruende, beide abgestellt: das Musterbild ist
+ein Schachbrett von zwoelf Bildpunkten, das der Schreibtisch auf rund
+achtzig dehnt — ein Weichzeichner von zwoelf verwischt davon nur die
+Naehte —, und ueber einem HELLEN Bild hebt `glass_mix` die Deckkraft
+auf 82 an, so dass nichts mehr zu verwischen bleibt.
+`tools/themestore/build.sh` kennt darum `wallpaper=hellgrob` und
+`dunkelgrob` (Schachbrett von 24, also Felder von rund 160
+Bildpunkten), und Bild 07 ist mit dunklem Schema, 40 Prozent und
+`blur=16` neu aufgenommen:
+
+| Stand | `var` | Farben im Leistengrund |
+|---|---|---|
+| grobes Muster, dunkles Schema, ohne Milchglas | 4 102 | 2 |
+| dasselbe mit `taskbar_blur=16` | 3 563 | **36** |
+
+Zwei Farben gegen sechsunddreissig, harte Kacheln gegen einen Verlauf
+— das ist der Unterschied, den ein Mensch sieht. Bild 12 hat dafuer
+zwei Reihen mehr (jetzt sechs), jede mit ihrer gemessenen Zahl als
+Beschriftung IM BILD, und Abschnitt 11c2 misst das Paar: der Abfall
+der Streuung, mindestens zwoelf Stufen mit und genau zwei ohne
+Weichzeichner, und der Kontrast der Leistenschrift auf dem
+verwischten Grund.
+
+---
+
+## 9d. Nachtrag nach der Jury: die Vorschaukachel und der Name darauf
+
+Zwei Maengel an einer Stelle des Bildes 09, und die Messung hat sie
+getrennt (fix-r3-3).
+
+**Der helle Keil am Rand der Kachel "Mitternacht" war ein Loch in der
+FLAECHE, kein abgerutschtes Zeichen.** Die Kachel holte ihre Flaeche
+aus `fuib.tafel` (dem Vektorrasterer) und ihren Rahmen aus
+`wlibc.rring` (der Eckendeckung `corner_cov`) — zwei Rasterer fuer
+EINE Form, und der Unterschied war sichtbar: `fuib.tafel` beschneidet
+ein Rechteck, das oben aus dem Malband herausragt, auf die Bandkante
+und rundet danach die Ecken des **beschnittenen** Rechtecks. Liegt die
+Bandkante mitten in einer Kachel, malt die Bruecke damit eine runde
+Ecke **mitten in die Flaeche**. Gemessen an Bild 09 (alter Stand):
+acht Bildpunkte breit, x=331..338, Zeilen 229..233, in der Farbe des
+Seitengrunds. Seit fix-r3-3 kommen Flaeche und Rahmen aus derselben
+Eckendeckung (`wlibc.rrect` / `wlibc.rring`, derselbe Radius 12,
+dieselben Kanten); der Auswahlring geht weiter ueber fUi und faellt
+auf dieselbe Eckendeckung zurueck, wenn fUi ihn wegen des Bandes
+ablehnt — bis hierher fehlte er in diesem Fall ganz.
+
+| Kachel | `innen` vorher | `innen` jetzt |
+|---|---|---|
+| Kontrast Nacht | 6 | 0 |
+| Mitternacht | 7 | 0 |
+| die anderen acht | 0 | 0 |
+
+`innen` ist die neue Zahl von `glascheck.py kachel`: Bildpunkte am
+linken Rand (Spalten 4..7, hinter dem Auswahlring und vor dem Namen)
+und in zwei waagerechten Streifen, die nicht die Flaechenfarbe der
+Kachel tragen. Die Gegenprobe stanzt ein Loch von acht mal fuenf
+Bildpunkten in dasselbe Bild; die Probe findet 20.
+
+**Der Name war nie verstuemmelt — das Schriftbild ist es.**
+`tools/themestore/namecheck.py` haelt jede gemalte Kachelzeile
+(`wlib: text ... kind=12 ... t=`) gegen die `name=`-Zeile ihrer Vorlage
+und sieht danach an **jeder gerechneten Glyphenstelle** im Bild nach,
+ob dort Tinte steht; die Stellen kommen aus dem zweiten Rasterer
+(`tools/ttf/raster.py stellen`, dieselbe Schrift, dieselben 15
+Bildpunkte, dieselbe Unterschneidung). Ergebnis: `gemalt=10 soll=10
+fehlt=0 gekuerzt=0 ohnetinte=0`. Dass ein Mensch "Mittemacht" liest,
+kommt vom Paar 'rn': der Arm des 'r' endet bei 15 Bildpunkten 0,9
+Bildpunkte hinter seiner Laufweite und die Unterschneidung des Paares
+zieht das 'n' noch einmal 36/64 Bildpunkte heran — die beiden
+Buchstaben beruehren sich und sehen aus wie ein 'm'. Das ist eine
+Eigenschaft von `assets/osum-sans.ttf` und liesse sich nur dort
+aendern; hier steht es als Befund mit seiner Zahl. Gegenprobe: ein mit
+der Flaechenfarbe uebermaltes 'r' meldet `ohnetinte=1`.
+
+**Und der Lauf, der diese Seite aufnimmt, klickt zweimal.** Mit einem
+Klick trug der Reiter "Vorlagen" zwar den Fokusring, die Seite wurde
+aber erst **nach** der Aufnahme gemalt (die zehn Kachelzeilen standen
+in den letzten vierundzwanzig Zeilen des Mitschnitts) — jede
+Bildpunktprobe dieses Laufs mass dann die Seite "Darstellung" und
+meldete trotzdem eine Zahl. Derselbe Grund wie in 11g: der erste Klick
+holt das Fenster nach vorn.
+
+**Was hier NICHT noch einmal gemacht wurde.** Die Lesbarkeitsschranke
+fuer gewoehnliche Fenster und die Zusage dazu (Kontrast jeder
+Fensterbeschriftung, Reiterzeile eingeschlossen, gegen den GEMISCHTEN
+Grund bei `window_alpha=55`) stehen seit fix-r3-2 als Abschnitt 11j
+mit `glascheck.py fenster` im Lauf — gemessen 5,16:1 auf der
+Reiterzeile. Eine zweite Fassung derselben Messung waere genau der
+zweite Ort, den diese Runde nicht haben will. Ebenso ist die
+Aufnahme, auf der bei Reglerstellung 40 wirklich etwas durchscheint,
+Bild 21 (`var 4218`, Schrift 13,09:1) — nachgemessen und unveraendert
+gueltig.
+
+---
+
 ## 10. Wo was steht
 
 | Datei | Was dieser Runde gehoert |
@@ -529,4 +685,5 @@ selbst gemessen hat.
 | `tools/themestore/glascheck.py` | die zweite Rechnung auf dem Wirt |
 | `tools/themestore/shotcheck.py` | `--leiste` (Nachtrag), `--linien` (Bildpunktprobe auf Rahmenlinien) |
 | `tools/themestore/leistenvergleich.py` | Bild 12, beschriftet und mit gemessener `var` |
+| `tools/themestore/namecheck.py` | der Kachelname gegen `name=` der Vorlage, Glyphe fuer Glyphe gegen `tools/ttf/raster.py` |
 | `docs/shots/glas/` | die 15 Aufnahmen und ihre Tabelle |
