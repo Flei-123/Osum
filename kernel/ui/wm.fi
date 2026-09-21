@@ -110,6 +110,12 @@ export {
     CAP_MIN, CAP_MAX, CAP_CLOSE,
     FORM_SLOTS, FM_RADIUS, FM_SHADOW, FM_SHADOW_R, FM_SHADOW_C,
     FM_SHADOW2, FM_SHADOW_R2, FM_GRAD, FM_CAPTION, FM_MOTION,
+    // RUNDE GLAS: die vier Formplaetze, die Ableser der gemessenen
+    // Zahlen und die Gegenprobe zur Schlierenregel.
+    FM_TB_ALPHA, FM_WIN_ALPHA, FM_BLUR, FM_GLASS_KEY, form_or,
+    glass_gen, blur_us, blur_us_max, blur_runs, glass_hits,
+    panel_grows, set_noglasgrow, selftest_glas, selftest_glas_max,
+    glass_mix,
     RADIUS_MAX, SHADOW_MAX,
     DK_FRAME, DK_TITLE, DK_TEXT, DK_FRAME_ON, DK_TITLE_ON, DK_TEXT_ON,
     DK_CLOSE, DK_CLOSE_MARK, DK_DESK, DK_TERM_FG, DK_TERM_BG,
@@ -840,6 +846,40 @@ const S_SWTICK: u64 = 0x1390 // Tick des letzten Kehrbesens
 const S_HWSHAPE: u64 = 0x1398
 const S_FRMAXW: u64 = 0x1370
 const S_FRUEBERW: u64 = 0x1378
+// ====================================================== RUNDE GLAS
+//
+// SIEBZEHN WOERTER AB 0x13A0, und dort ist wirklich Platz: der Block
+// der Bildzeiten endet bei 0x1378, S_HWSHAPE liegt auf 0x1398, und
+// WM_MAX sind 0x2000. `tools/kernel/memmap.py` rechnet es nach.
+//
+// S_GLASSGEN ist die BILDRUNDENNUMMER DES UNTERGRUNDS und nicht die
+// des Bildes: sie steigt genau dann, wenn in dieser Runde etwas UNTER
+// der Leiste gemalt wurde. Die Uhr in der Leiste laeuft jede Sekunde
+// und macht Schmutz, ohne dass sich unter der Leiste etwas aendert --
+// ohne diese Trennung waere das Milchglas sechzigmal in der Sekunde neu
+// gerechnet worden, obwohl dasselbe herausgekommen waere.
+const S_GLASSGEN: u64 = 0x13A0 // Stand des Untergrunds
+const S_GLGEN: u64 = 0x13A8 // fuer welchen Stand der Streifen gilt
+const S_GLVALID: u64 = 0x13B0 // 0 = der Streifen ist ungueltig
+const S_GLX: u64 = 0x13B8 // und fuer welches Rechteck
+const S_GLY: u64 = 0x13C0
+const S_GLW: u64 = 0x13C8
+const S_GLH: u64 = 0x13D0
+const S_GLR: u64 = 0x13D8 // und fuer welchen Weichzeichnerradius
+const S_BLURUS: u64 = 0x13E0 // Summe der Weichzeichnerzeiten in us
+const S_BLURN: u64 = 0x13E8 // wie viele Laeufe darin stecken
+const S_BLURMAX: u64 = 0x13F0 // der laengste Lauf
+const S_BLURLAST: u64 = 0x13F8 // der letzte
+const S_GLHIT: u64 = 0x1400 // Treffer des Zwischenspeichers
+const S_GLRUN: u64 = 0x1408 // Anfragen an ihn insgesamt
+// WIE OFT DIE SCHLIERENREGEL ZUGETROFFEN HAT. Ohne diese Zahl waere
+// "beim Verschieben bleiben keine Schlieren stehen" eine Behauptung
+// ueber eine Regel, von der niemand weiss, ob sie je gelaufen ist.
+const S_PANELGROW: u64 = 0x1410
+const S_GLSAY: u64 = 0x1418 // Laeufe seit der letzten Meldezeile
+const S_GLTEST: u64 = 0x1420 // bestandene Zusagen von `selftest_glas`
+// GEGENPROBE: die Schlierenregel abgeschaltet (`noglasgrow`).
+const S_NOGROW: u64 = 0x1428
 
 // ------------------------------- RUNDE VEKTOR: DIE ZEICHEN LIEGEN FERTIG
 //
@@ -905,7 +945,7 @@ const SIG_H: u64 = 4
 // Sprung, den man sieht, ohne dass es zappelt.
 const AN_SCALE0: u64 = 850
 const SHMASK_SIDE: u64 = 40
-const FORM_SLOTS: u64 = 9
+const FORM_SLOTS: u64 = 13
 const FM_RADIUS: u64 = 0 // Eckenradius des Fensterrahmens, 0 = eckig
 const FM_SHADOW: u64 = 1 // Staerke des Schattens, 0..100, 0 = keiner
 const FM_SHADOW_R: u64 = 2 // wie weit er reicht, in Bildpunkten
@@ -931,11 +971,54 @@ const FM_CAPTION: u64 = 7
 // uebersprungen: der Endzustand wird in beiden Faellen erreicht.
 // Vorgabe ist MO_FAST aus wlibc (120 ms), siehe DESIGN-2.
 const FM_MOTION: u64 = 8
+// ====================================================== RUNDE GLAS
+//
+// VIER PLAETZE MEHR, UND WARUM SIE IM KERN UND NICHT IN RING 3 LIEGEN.
+//
+// Die Taskleiste ist ein gewoehnliches Fenster ohne Schmuck. Sie malt
+// in IHREN Puffer und kann nicht wissen, was unter ihr liegt -- also
+// kann sie auch nicht durchsichtig sein. Der einzige Ort, an dem beides
+// gleichzeitig vorliegt (die Flaeche der Leiste UND der schon fertig
+// gemalte Untergrund), ist die Zeile in `paint_win`, die den einen
+// Puffer in den anderen kopiert. Deshalb stehen diese vier Zahlen hier.
+//
+// DIE NUMMERN SIND EIN VERTRAG: `sys.WF_TB_ALPHA` bis `sys.WF_GLASS_KEY`
+// tragen dieselben Werte, und `tools/themestore/run.sh` haelt die beiden
+// Listen gegeneinander. Wer eine aendert, aendert beide im selben Commit.
+const FM_TB_ALPHA: u64 = 9 // Deckkraft der Taskleiste in Prozent, 0..100
+const FM_WIN_ALPHA: u64 = 10 // Deckkraft gewoehnlicher Fenster, 0..100
+const FM_BLUR: u64 = 11 // Radius des Milchglases, 0..16, 0 = aus
+// Die Farbe, mit der Ring 3 die Leistenflaeche ausgefuellt hat. Sie ist
+// die SCHLUESSELFARBE des Abstandsalphas in `glass_mix`: nur was ihr
+// gleicht, wird durchsichtig, Schrift und Symbole bleiben deckend.
+const FM_GLASS_KEY: u64 = 12 // 0xRRGGBB
 // Die Obergrenzen. Sie stehen hier und nicht beim Aufrufer, weil ein
 // Radius von 4000 den Rahmen nicht rund macht, sondern den Server in
 // eine Schleife ueber vier Millionen Eckpunkte schickt.
 const RADIUS_MAX: u64 = 24
 const SHADOW_MAX: u64 = 16
+// RUNDE GLAS: die Obergrenze des Milchglases. 16 ist der Radius, bei
+// dem ein Ausschnitt von 40 Bildzeilen Hoehe vollstaendig verruehrt
+// ist; darueber aendert sich das Bild nicht mehr, die Rechnung aber
+// schon.
+const BLUR_MAX: u64 = 16
+// UND DIE UNTERGRENZE DER DECKKRAFT, und sie ist keine Bevormundung.
+// Eine Leiste mit 5 Prozent Deckung ist keine Einstellung, sondern ein
+// Fehlerbild: man sieht sie nicht mehr, ihre Schrift steht ohne Grund
+// im Hintergrundbild, und die Zusage "4,5:1" der Runde THEME waere auch
+// mit dem Abstandsalpha nicht mehr zu halten. 20 Prozent ist die Zahl,
+// bei der ein heller Grund unter dunkler Schrift noch als Flaeche
+// erkennbar bleibt (gemessen in docs/RUNDE-GLAS.md).
+const ALPHA_MIN: u64 = 20
+// UM WIE VIELE HELLIGKEITSSTUFEN SICH DIE GEMISCHTE FLAECHE HOECHSTENS
+// VON DER THEMENFARBE ENTFERNEN DARF. Siehe die Rechnung in
+// `glass_mix`. 40 Stufen sind die Zahl, bei der das dunkelste Thema
+// dieses Systems (Schrift #f8fafc auf #0f172a) und das hellste
+// (#0f172a auf #ffffff) beide ueber 4,5:1 bleiben -- nachgerechnet
+// liegen sie bei 9,0:1 und 11,9:1, also mit reichlich Luft, und der
+// Unterschied zwischen 100 und 40 Prozent ist trotzdem auf einen Blick
+// zu sehen (255 gegen 214 auf dunklem Grund).
+const SCHLEIER: u64 = 40
 // RUNDE SOFTUI: die Obergrenze des Titelverlaufs, in Helligkeitsstufen.
 const GRAD_MAX: u64 = 24
 // Die drei Schaltflaechen rechts oben, in der Reihenfolge, in der sie
@@ -1281,6 +1364,35 @@ fn form(state: u64, i: u64) -> u64 {
     return v - 1
 }
 
+// ====================================================== RUNDE GLAS
+//
+// DERSELBE PLATZ, ABER MIT EINER ANDEREN VORGABE -- UND DAS IST KEINE
+// BEQUEMLICHKEIT, SONDERN DIE FALLE DIESER RUNDE.
+//
+// `form` oben legt WERT + 1 ab und liefert bei 0 ("nie gesetzt") eine
+// Null zurueck. Fuer Radius, Schatten und Verlauf ist das genau
+// richtig: null heisst eckig, schattenlos, flach -- also das Bild vor
+// der Runde PAINT. Fuer eine DECKKRAFT heisst null aber UNSICHTBAR.
+// Zwischen dem Start des Fensterservers und dem ersten `form_push` der
+// Taskleiste liegen mehrere hundert Bilder; in dieser Zeit waere die
+// Leiste vollstaendig durchsichtig gewesen und der Schreibtisch haette
+// beim Hochfahren geflackert.
+//
+// Also liest JEDE Deckkraft durch diesen Leser und nie durch `form`.
+// `vorgabe` ist der Wert, der gilt, solange niemand etwas gesagt hat --
+// 100 fuer beide Alphas, also Bildpunkt fuer Bildpunkt das Verhalten
+// vor dieser Runde.
+fn form_or(state: u64, i: u64, vorgabe: u64) -> u64 {
+    if i >= FORM_SLOTS {
+        return vorgabe
+    }
+    let v: u64 = gs(state, S_FORM + i * 8)
+    if v == 0 {
+        return vorgabe
+    }
+    return v - 1
+}
+
 fn set_form(state: u64, i: u64, v: u64) -> bool {
     if i >= FORM_SLOTS {
         return false
@@ -1318,6 +1430,29 @@ fn set_form(state: u64, i: u64, v: u64) -> bool {
     // keine Rueckmeldung mehr, sondern Warten.
     if i == FM_MOTION && w > MOTION_MAX {
         w = MOTION_MAX
+    }
+    // RUNDE GLAS: die vier neuen Plaetze werden hier geklemmt und nicht
+    // beim Aufrufer. Ring 3 darf jede Zahl schicken; was hier ankommt,
+    // liegt danach in seinem Bereich -- sonst haette ein
+    // `taskbar_alpha=4000` aus der Vorlagendatei den Mischer in eine
+    // Deckung von 10 200 Prozent geschickt.
+    if (i == FM_TB_ALPHA || i == FM_WIN_ALPHA) && w > 100 {
+        w = 100
+    }
+    if (i == FM_TB_ALPHA || i == FM_WIN_ALPHA) && w < ALPHA_MIN {
+        w = ALPHA_MIN
+    }
+    if i == FM_BLUR && w > BLUR_MAX {
+        w = BLUR_MAX
+    }
+    if i == FM_GLASS_KEY {
+        w = w & RGB24
+    }
+    // Und JEDE Aenderung an den vier Glaszahlen macht den Streifen des
+    // Milchglases ungueltig: er ist fuer einen bestimmten Radius und
+    // eine bestimmte Grundfarbe gerechnet worden.
+    if i >= FM_TB_ALPHA {
+        ss(state, S_GLVALID, 0)
     }
     ss(state, S_FORM + i * 8, w + 1)
     ss(state, S_FORMN, gs(state, S_FORMN) + 1)
@@ -1415,8 +1550,14 @@ fn corner_cov(state: u64, dx: u64, dy: u64, r: u64) -> u64 {
 
 // Ein Rechteck, auf den schmutzigen Bereich beschnitten. Der Beschnitt
 // steht EINMAL hier und nicht sechsmal in `paint_win`.
+//
+// RUNDE GLAS: MIT EINER DECKKRAFT, und sie geht durch `fb.fill_a` --
+// also durch dieselbe `blend`-Arithmetik wie alles andere. `a == 255`
+// nimmt weiterhin `fb.fill` und ist Bildpunkt fuer Bildpunkt der Weg
+// vor dieser Runde; das ist der Grund, warum die Deckkraft hier ein
+// Argument geworden ist und nicht eine zweite Fuellfunktion daneben.
 fn fill_clip(state: u64, x: i64, y: i64, w: i64, h: i64, farbe: u64,
-    cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
+    a: u64, cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
     let ax0: i64 = imax(x, cx0)
     let ay0: i64 = imax(y, cy0)
     let ax1: i64 = imin(x + w, cx1)
@@ -1424,8 +1565,16 @@ fn fill_clip(state: u64, x: i64, y: i64, w: i64, h: i64, farbe: u64,
     if ax1 <= ax0 || ay1 <= ay0 || ax1 <= 0 || ay1 <= 0 {
         return
     }
-    fb.fill(state, imax(ax0, 0) as u64, imax(ay0, 0) as u64,
-        (ax1 - imax(ax0, 0)) as u64, (ay1 - imax(ay0, 0)) as u64, farbe)
+    if a >= 255 {
+        fb.fill(state, imax(ax0, 0) as u64, imax(ay0, 0) as u64,
+            (ax1 - imax(ax0, 0)) as u64, (ay1 - imax(ay0, 0)) as u64, farbe)
+        return
+    }
+    if a == 0 {
+        return
+    }
+    fb.fill_a(state, imax(ax0, 0) as u64, imax(ay0, 0) as u64,
+        (ax1 - imax(ax0, 0)) as u64, (ay1 - imax(ay0, 0)) as u64, farbe, a)
 }
 
 // Ein GEMISCHTER Bildpunkt, beschnitten. `a == 0` und `a == 255` gehen
@@ -1450,8 +1599,8 @@ fn px_clip(state: u64, x: i64, y: i64, farbe: u64, a: u64,
 // der Grund, warum das hier geht und in Ring 3 nicht: die Bibliothek
 // malt in IHREN Puffer und weiss nicht, was darunter liegt.
 fn fill_round(state: u64, x: i64, y: i64, w: i64, h: i64, r0: u64,
-    farbe: u64, cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
-    if w <= 0 || h <= 0 {
+    farbe: u64, a: u64, cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
+    if w <= 0 || h <= 0 || a == 0 {
         return
     }
     var r: u64 = r0
@@ -1462,19 +1611,26 @@ fn fill_round(state: u64, x: i64, y: i64, w: i64, h: i64, r0: u64,
         r = (h / 2) as u64
     }
     if r == 0 {
-        fill_clip(state, x, y, w, h, farbe, cx0, cy0, cx1, cy1)
+        fill_clip(state, x, y, w, h, farbe, a, cx0, cy0, cx1, cy1)
         return
     }
     let ri: i64 = r as i64
-    fill_clip(state, x, y + ri, w, h - 2 * ri, farbe, cx0, cy0, cx1, cy1)
-    fill_clip(state, x + ri, y, w - 2 * ri, ri, farbe, cx0, cy0, cx1, cy1)
-    fill_clip(state, x + ri, y + h - ri, w - 2 * ri, ri, farbe,
+    fill_clip(state, x, y + ri, w, h - 2 * ri, farbe, a, cx0, cy0, cx1, cy1)
+    fill_clip(state, x + ri, y, w - 2 * ri, ri, farbe, a, cx0, cy0, cx1, cy1)
+    fill_clip(state, x + ri, y + h - ri, w - 2 * ri, ri, farbe, a,
         cx0, cy0, cx1, cy1)
     var dy: u64 = 0
     while dy < r {
         var dx: u64 = 0
         while dx < r {
-            let cov: u64 = corner_cov(state, r - 1 - dx, r - 1 - dy, r)
+            var cov: u64 = corner_cov(state, r - 1 - dx, r - 1 - dy, r)
+            // RUNDE GLAS: die Eckendeckung UND die Fensterdeckkraft in
+            // EINER Zahl. Zweimal mischen -- erst die Ecke, dann das
+            // Fenster -- haette den Rand der Rundung zweimal gegen den
+            // Untergrund gerechnet und ihn sichtbar dunkler gemacht.
+            if a < 255 {
+                cov = cov * a / 255
+            }
             if cov != 0 {
                 let x0: i64 = x + dx as i64
                 let y0: i64 = y + dy as i64
@@ -1611,11 +1767,11 @@ fn paint_shadow(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
     cy1: i64) {
     // RUNDE SOFTUI: WELCHE BANK. Das Fenster mit dem Fokus steht
     // hoeher; die anderen liegen flacher auf dem Schreibtisch.
-    var staerke: u64 = form(state, FM_SHADOW2)
+    var staerke: u64 = shadow_staerke(state, FM_SHADOW2)
     var reach: u64 = form(state, FM_SHADOW_R2)
     var bank: u64 = 1
     if focus(state) == i {
-        staerke = form(state, FM_SHADOW)
+        staerke = shadow_staerke(state, FM_SHADOW)
         reach = form(state, FM_SHADOW_R)
         bank = 0
     }
@@ -1701,11 +1857,32 @@ fn shadow_rings(state: u64, wx: i64, wy: i64, ow: i64, oh: i64, r: u64,
 // den Abfall an dieser Stelle ab. An ganzzahligen Abstaenden kommt
 // dasselbe heraus wie vorher -- die Rampe ist dieselbe Formel --,
 // dazwischen etwas Besseres.
+// RUNDE GLAS: DIE DECKKRAFT DES FENSTERSCHMUCKS, als 0..255.
+//
+// Rahmen, Titelleiste und die Flaechen der Schaltflaechen gehen durch
+// diese eine Zahl. Sie steht in einer Funktion und nicht an sechs
+// Stellen im Quelltext, weil sonst die naechste Runde fuenf davon
+// nachzieht und eine vergisst.
+fn deco_alpha(state: u64) -> u64 {
+    return form_or(state, FM_WIN_ALPHA, 100) * 255 / 100
+}
+
+// UND DIE STAERKE DES SCHATTENS, mit derselben Deckkraft verrechnet.
+//
+// Ein voller Schatten unter einem halb durchsichtigen Fenster sieht
+// falsch aus, weil er mehr Licht schluckt als das Fenster selbst. Die
+// Zahl geht durch `shadow_key` mit in den Maskenschluessel -- damit
+// wird die Schattenmaske beim Verschieben des Reglers genau EINMAL neu
+// gebaut und nicht in jedem Bild, und `shadow_builds` bleibt klein.
+fn shadow_staerke(state: u64, slot: u64) -> u64 {
+    return form(state, slot) * form_or(state, FM_WIN_ALPHA, 100) / 100
+}
+
 fn shadow_key(state: u64) -> u64 {
     let r: u64 = form(state, FM_RADIUS)
-    let a1: u64 = form(state, FM_SHADOW)
+    let a1: u64 = shadow_staerke(state, FM_SHADOW)
     let r1: u64 = form(state, FM_SHADOW_R)
-    let a2: u64 = form(state, FM_SHADOW2)
+    let a2: u64 = shadow_staerke(state, FM_SHADOW2)
     let r2: u64 = form(state, FM_SHADOW_R2)
     // Ein Schluessel und kein Zeitstempel: baut die Maske nur neu, wenn
     // sich wirklich eine der fuenf Zahlen geaendert hat. + 1, damit
@@ -1742,9 +1919,9 @@ fn shadow_ramp(staerke: u64, reach: u64, d16: u64) -> u64 {
 
 fn shadow_build(state: u64) {
     let r: u64 = form(state, FM_RADIUS)
-    let a1: u64 = form(state, FM_SHADOW)
+    let a1: u64 = shadow_staerke(state, FM_SHADOW)
     let r1: u64 = form(state, FM_SHADOW_R)
-    let a2: u64 = form(state, FM_SHADOW2)
+    let a2: u64 = shadow_staerke(state, FM_SHADOW2)
     let r2: u64 = form(state, FM_SHADOW_R2)
     var rmax: u64 = r1
     if r2 > rmax {
@@ -2499,6 +2676,27 @@ fn init(state: u64, w: u64, h: u64, nodirty: bool, nofocus: bool) -> bool {
         || kstate.mode_on(state, kstate.M_PLUGAUS) {
         wmplug.set_ready(state, false)
     }
+    // RUNDE GLAS: der Selbsttest der Mischung und des Weichzeichners.
+    // Er steht HIER und nicht in `selftest`, weil der dort mitten in
+    // einer Zeile laeuft, die `kgui` schreibt -- siehe `fokus_still`.
+    glastest_say(state)
+    ss(state, S_GLASSGEN, 1)
+    ss(state, S_GLVALID, 0)
+    ss(state, S_PANELGROW, 0)
+    ss(state, S_GLHIT, 0)
+    ss(state, S_GLRUN, 0)
+    ss(state, S_BLURUS, 0)
+    ss(state, S_BLURN, 0)
+    ss(state, S_BLURMAX, 0)
+    ss(state, S_BLURLAST, 0)
+    ss(state, S_GLSAY, 0)
+    set_noglasgrow(state, fb.glasgrow_aus(state))
+    // Die Gegenprobe meldet sich von selbst: ein Lauf, in dem die Regel
+    // abgeschaltet ist, muss das in seiner eigenen Ausgabe sagen und
+    // nicht nur auf der Befehlszeile.
+    if gs(state, S_NOGROW) != 0 {
+        schlieren_say(state)
+    }
     damage_all(state)
     return true
 }
@@ -2532,6 +2730,74 @@ fn damage(state: u64, x0: i64, y0: i64, x1: i64, y1: i64) {
     if c <= a || d <= b {
         return
     }
+    // ================================================= RUNDE GLAS
+    //
+    // DIE SCHLIERENREGEL, UND WARUM ES OHNE SIE WIRKLICH SCHLIEREN GIBT.
+    //
+    // Solange die Leiste DECKEND kopiert wurde, war es gleichgueltig,
+    // was unter ihr lag: ihre Bildpunkte haengen von nichts ab. Sobald
+    // sie mischt, haengt JEDER ihrer Bildpunkte vom Untergrund ab --
+    // und der Schmutz eines bewegten Fensters ist sein altes und sein
+    // neues Rechteck. Schiebt man ein Fenster unter der Leiste nach
+    // links, wird nur der Teil der Leiste neu gemischt, unter dem das
+    // Fenster war oder ist; der Rest behaelt die Mischung aus dem
+    // vorigen Bild und zeigt einen Schatten des Fensters an einer
+    // Stelle, an der es nicht mehr steht. Genau das ist die Schliere.
+    //
+    // Also: schneidet ein gemeldetes Rechteck das Rechteck der Leiste,
+    // wird es auf die VOLLE Leiste aufgezogen -- und zwar nur, solange
+    // die Leiste ueberhaupt mischt. Bei voller Deckung und ohne
+    // Milchglas ist es Bildpunkt fuer Bildpunkt der Weg vor der Runde.
+    //
+    // `S_PANELGROW` zaehlt, wie oft die Regel zugetroffen hat.
+    // `noglasgrow` schaltet sie ab; dann MUSS die Abnahme Schlieren
+    // finden, sonst hat sie nie etwas geprueft.
+    if gs(state, S_NOGROW) == 0
+        && (form_or(state, FM_TB_ALPHA, 100) < 100
+            || form(state, FM_BLUR) > 0) {
+        let pw: u64 = panel_win(state)
+        if pw < MAX_WIN {
+            let px0: i64 = win_x(state, pw)
+            let py0: i64 = win_y(state, pw)
+            let px1: i64 = px0 + outer_w(state, pw) as i64
+            let py1: i64 = py0 + outer_h(state, pw) as i64
+            if c > px0 && a < px1 && d > py0 && b < py1 {
+                if px0 < a {
+                    a = px0
+                }
+                if py0 < b {
+                    b = py0
+                }
+                if px1 > c {
+                    c = px1
+                }
+                if py1 > d {
+                    d = py1
+                }
+                if a < 0 {
+                    a = 0
+                }
+                if b < 0 {
+                    b = 0
+                }
+                if c > gs(state, S_SW) as i64 {
+                    c = gs(state, S_SW) as i64
+                }
+                if d > gs(state, S_SH) as i64 {
+                    d = gs(state, S_SH) as i64
+                }
+                ss(state, S_PANELGROW, gs(state, S_PANELGROW) + 1)
+                // Der Beweis, dass die Regel wirklich zugetroffen hat
+                // -- beim ersten Mal und danach alle fuenfhundert. Eine
+                // Zeile je Schmutzrechteck waere ein Wasserfall im
+                // Bildtakt.
+                let gz: u64 = gs(state, S_PANELGROW)
+                if gz == 1 || gz % 500 == 0 {
+                    schlieren_say(state)
+                }
+            }
+        }
+    }
     if gs(state, S_DON) == 0 {
         ss(state, S_DX0, a as u64)
         ss(state, S_DY0, b as u64)
@@ -2555,6 +2821,9 @@ fn damage(state: u64, x0: i64, y0: i64, x1: i64, y1: i64) {
 }
 
 fn damage_all(state: u64) {
+    // RUNDE GLAS: das ganze Bild ist neu, also auch alles unter der
+    // Leiste -- der Milchglasstreifen gilt nicht mehr.
+    ss(state, S_GLASSGEN, gs(state, S_GLASSGEN) + 1)
     ss(state, S_DX0, 0)
     ss(state, S_DY0, 0)
     ss(state, S_DX1, gs(state, S_SW))
@@ -2577,6 +2846,11 @@ fn damage_all(state: u64) {
 // zu gross ist, kostet eine Bildzeile; einer, der einen zu klein ist,
 // kostet eine sichtbare Kante.
 fn damage_win(state: u64, i: u64) {
+    // RUNDE GLAS: DIESE EINE STELLE SAGT DEM MILCHGLAS, DASS SICH SEIN
+    // UNTERGRUND GEAENDERT HAT. `flush_win`, `move_win`, `resize_win`,
+    // `raise_win` und `destroy` laufen alle hier durch -- es gibt also
+    // keine zweite Stelle, an der ein Fenster sich ruehren koennte.
+    glass_touch(state, i)
     // RUNDE SOFTUI: DIE GROESSERE DER BEIDEN REICHWEITEN.
     //
     // Es gibt jetzt zwei Schatten -- einen unter dem scharfen Fenster
@@ -4897,8 +5171,8 @@ fn paint_sig(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
     if oh < 2 * SIG_H as i64 {
         return
     }
-    fill_clip(state, wx, wy, ow, SIG_H as i64, farbe, cx0, cy0, cx1, cy1)
-    fill_clip(state, wx, wy + oh - SIG_H as i64, ow, SIG_H as i64, farbe,
+    fill_clip(state, wx, wy, ow, SIG_H as i64, farbe, 255, cx0, cy0, cx1, cy1)
+    fill_clip(state, wx, wy + oh - SIG_H as i64, ow, SIG_H as i64, farbe, 255,
         cx0, cy0, cx1, cy1)
 }
 
@@ -5252,12 +5526,50 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
         let bw: u64 = wg(state, i, W_W)
         let bq: u64 = wg(state, i, W_BUF)
         let bn: u64 = (bx1 - bx0) as u64
-        var br: i64 = by0
-        while br < by1 {
-            fb_row(state, bx0 as u64, br as u64,
-                bq +% (br - wy) as u64 *% bw *% 4
-                +% (bx0 - wx) as u64 *% 4, bn)
-            br = br + 1
+        // RUNDE GLAS: DIE DECKKRAFT DIESES FENSTERS.
+        //
+        // Die Taskleiste ist genau so ein Fenster ohne Schmuck, und sie
+        // hat ihre EIGENE Zahl -- der Schreibtisch hinter ihr soll
+        // durchscheinen, ohne dass jedes andere Fenster dasselbe tut.
+        // `panel_win` erkennt sie daran, dass sie eine Schirmkante
+        // reserviert; dasselbe Merkmal, an dem `sysgui` entscheidet, wer
+        // ueberhaupt Formzahlen setzen darf.
+        let pw: u64 = panel_win(state)
+        var alpha: u64 = form_or(state, FM_WIN_ALPHA, 100)
+        if pw < MAX_WIN && i == pw {
+            alpha = form_or(state, FM_TB_ALPHA, 100)
+        }
+        if alpha >= 100 {
+            var br: i64 = by0
+            while br < by1 {
+                fb_row(state, bx0 as u64, br as u64,
+                    bq +% (br - wy) as u64 *% bw *% 4
+                    +% (bx0 - wx) as u64 *% 4, bn)
+                br = br + 1
+            }
+            ss(state, S_BLITS, gs(state, S_BLITS) + 1)
+            return
+        }
+        // Das Milchglas gibt es nur unter der Leiste. Unter einem
+        // gewoehnlichen Fenster waere es dasselbe Rechnen fuer jedes
+        // Fenster in jedem Bild, und der Streifenpuffer ist einer.
+        var grund: u64 = 0
+        if pw < MAX_WIN && i == pw && form(state, FM_BLUR) > 0 {
+            grund = glass_prepare(state, wx, wy, wg(state, i, W_W),
+                wg(state, i, W_H), form(state, FM_BLUR))
+        }
+        let key: u64 = form(state, FM_GLASS_KEY)
+        var gr: i64 = by0
+        while gr < by1 {
+            var zeile: u64 = 0
+            if grund != 0 {
+                zeile = grund +% ((gr - wy) as u64 *% wg(state, i, W_W)
+                    +% (bx0 - wx) as u64) *% 4
+            }
+            fb_row_a(state, bx0 as u64, gr as u64,
+                bq +% (gr - wy) as u64 *% bw *% 4
+                +% (bx0 - wx) as u64 *% 4, bn, alpha, key, zeile)
+            gr = gr + 1
         }
         ss(state, S_BLITS, gs(state, S_BLITS) + 1)
         return
@@ -5284,7 +5596,7 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     // beschnittenen Rechteck -- `shape=classic` malt bildpunktgleich
     // weiter, und tools/look/run.sh misst das.
     fill_round(state, wx, wy, ow, oh, form(state, FM_RADIUS), rahmen,
-        cx0 as i64, cy0 as i64, cx1 as i64, cy1 as i64)
+        deco_alpha(state), cx0 as i64, cy0 as i64, cx1 as i64, cy1 as i64)
     // die Titelleiste
     //
     // RUNDE SOFTUI: SIE IST NICHT MEHR EIN RECHTECK IN EINER FARBE.
@@ -5362,12 +5674,29 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     let ww: u64 = wg(state, i, W_W)
     let quelle: u64 = wg(state, i, W_BUF)
     let n: u64 = (sx1 - sx0) as u64
+    // RUNDE GLAS: die Flaeche der Anwendung mit `window_alpha`.
+    //
+    // Die Schluesselfarbe ist dieselbe, die die Leiste geschickt hat
+    // (`FM_GLASS_KEY`). Das ist eine bewusste Vereinfachung und sie
+    // steht hier, damit sie niemand fuer ein Versehen haelt: in allen
+    // zehn Vorlagen liegen Leistengrund und Fenstergrund unter dreissig
+    // Helligkeitsstufen auseinander, und das Abstandsalpha braucht die
+    // Grundfarbe nur auf diese Genauigkeit. Waeren sie einmal weit
+    // auseinander, bekaeme die Fensterflaeche zu viel Deckung -- also
+    // zu wenig Glas, nie zu wenig Kontrast.
+    let wa: u64 = form_or(state, FM_WIN_ALPHA, 100)
+    let wkey: u64 = form(state, FM_GLASS_KEY)
     var r: i64 = sy0
     while r < sy1 {
         let zeile: u64 = (r - py0) as u64
         let spalte: u64 = (sx0 - px0) as u64
-        fb_row(state, sx0 as u64, r as u64,
-            quelle +% zeile *% ww *% 4 +% spalte *% 4, n)
+        if wa >= 100 {
+            fb_row(state, sx0 as u64, r as u64,
+                quelle +% zeile *% ww *% 4 +% spalte *% 4, n)
+        } else {
+            fb_row_a(state, sx0 as u64, r as u64,
+                quelle +% zeile *% ww *% 4 +% spalte *% 4, n, wa, wkey, 0)
+        }
         r = r + 1
     }
     ss(state, S_BLITS, gs(state, S_BLITS) + 1)
@@ -5456,6 +5785,10 @@ fn mix24(a: u64, b: u64, per: u64) -> u64 {
 
 fn paint_title(state: u64, i: u64, wx: i64, wy: i64, ow: i64, titel: u64,
     schrift: u64, ax0: i64, ay0: i64, ax1: i64, ay1: i64) {
+    // RUNDE GLAS: die Titelleiste traegt dieselbe Deckkraft wie der
+    // Rahmen. Eine deckende Leiste ueber einem durchscheinenden Rahmen
+    // saehe nicht nach Glas aus, sondern nach einem Fehler.
+    let wal: u64 = deco_alpha(state)
     let x0: i64 = wx + border(state) as i64
     let y0: i64 = wy + border(state) as i64
     let tw: i64 = ow - 2 * border(state) as i64
@@ -5478,10 +5811,10 @@ fn paint_title(state: u64, i: u64, wx: i64, wy: i64, ow: i64, titel: u64,
     if grad == 0 {
         // Volltonfarbe: EIN Aufruf, wie vor dieser Runde -- nur mit
         // runden oberen Ecken, wenn der Radius es sagt.
-        fill_round(state, x0, y0, tw, th, tr, titel, ax0, ay0, ax1, ay1)
+        fill_round(state, x0, y0, tw, th, tr, titel, wal, ax0, ay0, ax1, ay1)
         if tr != 0 {
             fill_clip(state, x0, y0 + tr as i64, tw, th - tr as i64,
-                titel, ax0, ay0, ax1, ay1)
+                titel, wal, ax0, ay0, ax1, ay1)
         }
         return
     }
@@ -5492,21 +5825,21 @@ fn paint_title(state: u64, i: u64, wx: i64, wy: i64, ow: i64, titel: u64,
     let grund: u64 = deco_title(state, i)
     let d: u64 = grad_room(grund, grad)
     if d == 0 {
-        fill_round(state, x0, y0, tw, th, tr, titel, ax0, ay0, ax1, ay1)
+        fill_round(state, x0, y0, tw, th, tr, titel, wal, ax0, ay0, ax1, ay1)
         if tr != 0 {
             fill_clip(state, x0, y0 + tr as i64, tw, th - tr as i64,
-                titel, ax0, ay0, ax1, ay1)
+                titel, wal, ax0, ay0, ax1, ay1)
         }
         return
     }
     let oben: u64 = rgb24(state, shade24(grund, d, false))
-    fill_round(state, x0, y0, tw, th, tr, oben, ax0, ay0, ax1, ay1)
+    fill_round(state, x0, y0, tw, th, tr, oben, wal, ax0, ay0, ax1, ay1)
     var j: i64 = tr as i64
     while j < th {
         // linear von `oben` zurueck auf die Grundfarbe
         let rest: u64 = d * (th - 1 - j) as u64 / (th - 1) as u64
         let c: u64 = rgb24(state, shade24(grund, rest, false))
-        fill_clip(state, x0, y0 + j, tw, 1, c, ax0, ay0, ax1, ay1)
+        fill_clip(state, x0, y0 + j, tw, 1, c, wal, ax0, ay0, ax1, ay1)
         j = j + 1
     }
 }
@@ -5647,16 +5980,21 @@ fn deco_schrift(state: u64, i: u64) -> u64 {
 // Rechtecke, weil sie mitten in der Leiste stehen.
 fn cap_face(state: u64, x: i64, y: i64, h: i64, tr: u64, farbe: u64,
     rechts: bool, ax0: i64, ay0: i64, ax1: i64, ay1: i64) {
+    // RUNDE GLAS: die Flaeche der Schaltflaeche gehoert zur
+    // Titelleiste und bekommt deren Deckkraft. Das ZEICHEN darauf
+    // nicht -- `cap_glyph` malt weiter voll deckend, sonst waere ein
+    // Kreuz auf einem hellen Hintergrundbild nicht mehr zu sehen.
+    let wal: u64 = deco_alpha(state)
     let w: i64 = cap_w(state) as i64
     if !rechts || tr == 0 {
-        fill_clip(state, x, y, w, h, farbe, ax0, ay0, ax1, ay1)
+        fill_clip(state, x, y, w, h, farbe, wal, ax0, ay0, ax1, ay1)
         return
     }
     let r: i64 = tr as i64
-    fill_round(state, x, y, w, h, tr, farbe, ax0, ay0, ax1, ay1)
+    fill_round(state, x, y, w, h, tr, farbe, wal, ax0, ay0, ax1, ay1)
     // die drei Ecken wieder eckig machen
-    fill_clip(state, x, y, w - r, r, farbe, ax0, ay0, ax1, ay1)
-    fill_clip(state, x, y + r, w, h - r, farbe, ax0, ay0, ax1, ay1)
+    fill_clip(state, x, y, w - r, r, farbe, wal, ax0, ay0, ax1, ay1)
+    fill_clip(state, x, y + r, w, h - r, farbe, wal, ax0, ay0, ax1, ay1)
 }
 
 // DAS ZEICHEN. Zehn mal zehn Bildpunkte, einen Strich breit.
@@ -6047,6 +6385,690 @@ fn fb_row(state: u64, x: u64, y: u64, src: u64, n: u64) {
         __mmio_write32((ziel +% (n - 1) *% 4) as *mut u32,
             __mmio_read32((src +% (n - 1) *% 4) as *mut u32))
     }
+}
+
+// =====================================================================
+// RUNDE GLAS: DIE DURCHSICHTIGE FLAECHE
+// =====================================================================
+//
+// SCHLUESSELFARBE UND ABSTANDSALPHA -- die eine Rechnung, und warum sie
+// nicht einfach "alles mit 40 Prozent" ist.
+//
+// Ein gleichmaessiges Alpha ueber die ganze Leistenflaeche macht AUCH
+// DIE SCHRIFT durchsichtig. Genau daran zerbricht die Zusage "4,5:1"
+// der Runde THEME: weisse Leistenschrift, zu 40 Prozent ueber ein
+// helles Hintergrundbild gemischt, hat gegen denselben Grund gemessen
+// keinen Kontrast mehr, sondern 1,6:1 -- unlesbar, und zwar genau auf
+// den Bildern, auf denen Transparenz am huebschesten aussieht.
+//
+// Deshalb bekommt der Kern mit `FM_GLASS_KEY` die Farbe, mit der Ring 3
+// die Flaeche ausgefuellt hat, und mischt NACH ABSTAND ZU IHR:
+//
+//   d = |dr| + |dg| + |db|                    Abstand zur Grundfarbe
+//   a = alpha + (100 - alpha) * min(d,96)/96  Deckung dieses Punktes
+//
+// Ein Punkt der FLAECHE (d = 0) bekommt genau `alpha` und wird
+// durchsichtig. Ein Punkt der SCHRIFT (d gross) bekommt 100 und bleibt
+// Zahl fuer Zahl so deckend wie vor dieser Runde. Die kantengeglaetteten
+// Raender eines Zeichens liegen dazwischen und bekommen dazwischen --
+// deshalb `min(d,96)/96` und keine Schwelle: eine Schwelle haette
+// Treppen an jeden Buchstaben gemalt.
+//
+// 96 ist die Zahl, bei der ein Punkt voll deckend wird. Sie ist so
+// gewaehlt, dass der Unterschied zwischen zwei benachbarten Flaechen
+// desselben Themas (Leistengrund und Knopfgrund liegen in allen zehn
+// Vorlagen unter 30 Stufen auseinander) noch MITGEMISCHT wird, ein
+// Buchstabe (ueber 300 Stufen in jedem Thema) aber nicht.
+//
+// DIESE FUNKTION RECHNET NICHT SELBST, SIE RUFT `blend`. Das ist die
+// Zusage "genau eine Stelle mischt": hier steht, WIE DECKEND ein Punkt
+// ist, und in `blend` steht, was Mischen heisst.
+fn glass_mix(alt: u64, neu: u64, key: u64, alpha: u64) -> u64 {
+    if alpha >= 100 {
+        return neu
+    }
+    let nr: u64 = (neu >> 16) & 0xFF
+    let ng: u64 = (neu >> 8) & 0xFF
+    let nb: u64 = neu & 0xFF
+    let kr: u64 = (key >> 16) & 0xFF
+    let kg: u64 = (key >> 8) & 0xFF
+    let kb: u64 = key & 0xFF
+    var d: u64 = 0
+    if nr > kr {
+        d = d + (nr - kr)
+    } else {
+        d = d + (kr - nr)
+    }
+    if ng > kg {
+        d = d + (ng - kg)
+    } else {
+        d = d + (kg - ng)
+    }
+    if nb > kb {
+        d = d + (nb - kb)
+    } else {
+        d = d + (kb - nb)
+    }
+    if d > 96 {
+        d = 96
+    }
+    var a: u64 = alpha + (100 - alpha) * d / 96
+    // ================================================= RUNDE GLAS
+    //
+    // DER SCHLEIER -- DIE UNTERGRENZE DER LESBARKEIT, UND SIE IST HIER
+    // NOETIG, WEIL DAS ABSTANDSALPHA ALLEIN SIE NICHT HAELT.
+    //
+    // Das Abstandsalpha haelt die SCHRIFT deckend. Der Kontrast einer
+    // Schrift misst sich aber gegen den Grund NEBEN ihr, und der ist ab
+    // dieser Runde nicht mehr die Themenfarbe, sondern die Mischung aus
+    // ihr und dem Hintergrundbild. GEMESSEN am laufenden System: helles
+    // Thema (Leiste #ffffff, Schrift #0f172a, Kontrast 17,8:1) bei
+    // taskbar_alpha=40 ueber einem DUNKLEN Hintergrundbild -- die
+    // Leistenflaeche kam als (114,116,122) heraus und der Kontrast der
+    // Schrift dagegen als 3,76:1. Unter der Latte, und zwar genau auf
+    // dem Bild, auf dem Transparenz am huebschesten aussieht.
+    //
+    // Also darf sich die FLAECHE nur begrenzt weit von ihrer eigenen
+    // Farbe entfernen. Die Helligkeit einer Mischung ist in dieser
+    // Gewichtung linear, also loest sich die Bedingung
+    // |L(misch) - L(key)| <= SCHLEIER direkt nach der Deckung auf:
+    //
+    //     (100 - a) * |L(grund) - L(key)| / 100 <= SCHLEIER
+    //     a >= 100 - SCHLEIER * 100 / |L(grund) - L(key)|
+    //
+    // Das ist kein Deckel auf den Regler: ueber einem Hintergrundbild,
+    // das der Leistenfarbe ohnehin nahe ist, greift die Schranke NICHT
+    // und die Leiste ist so durchsichtig, wie der Regler sagt. Sie
+    // greift genau dort, wo sie muss -- und sie ist Bildpunkt fuer
+    // Bildpunkt und nicht fuer die ganze Flaeche, weil ein gemustertes
+    // Hintergrundbild beides unter derselben Leiste hat.
+    let lg: u64 = hell_von(alt)
+    let lk: u64 = hell_von(key)
+    var dl: u64 = 0
+    if lg > lk {
+        dl = lg - lk
+    } else {
+        dl = lk - lg
+    }
+    if dl > SCHLEIER {
+        let amin: u64 = 100 - SCHLEIER * 100 / dl
+        if amin > a {
+            a = amin
+        }
+    }
+    return blend(alt, neu, a * 255 / 100)
+}
+
+// EINE BILDZEILE AUS EINEM FENSTERPUFFER, GEMISCHT.
+//
+// Das Gegenstueck zu `fb_row` -- und `fb_row` bleibt wortgleich stehen
+// und bleibt der Weg bei `alpha >= 100`. Damit ist die Zusage "bei
+// voller Deckung malt dieser Server Bildpunkt fuer Bildpunkt wie vorher"
+// nicht behauptet, sondern baulich: bei 100 Prozent laeuft dieselbe
+// wortweise Kopie wie vor der Runde, und diese Funktion wird nicht
+// einmal betreten.
+//
+// `grund` ist die Zeile, gegen die gemischt wird: 0 heisst "das, was
+// schon im Zweitpuffer steht" (Hintergrund und alle tieferen Fenster,
+// zu diesem Zeitpunkt fertig gemalt), sonst die Adresse einer Zeile des
+// Milchglasstreifens.
+fn fb_row_a(state: u64, x: u64, y: u64, src: u64, n: u64, alpha: u64,
+    key: u64, grund: u64) {
+    if y < fb.band_lo(state) {
+        return
+    }
+    let ziel: u64 = fb.draw_at(state) +% y *% fb.pitch(state) +% x *% 4
+    var i: u64 = 0
+    while i < n {
+        let neu: u64 = __mmio_read32((src +% i *% 4) as *mut u32) as u64
+        var alt: u64 = 0
+        if grund != 0 {
+            alt = __mmio_read32((grund +% i *% 4) as *mut u32) as u64
+        } else {
+            alt = __mmio_read32((ziel +% i *% 4) as *mut u32) as u64
+        }
+        __mmio_write32((ziel +% i *% 4) as *mut u32,
+            glass_mix(alt, neu, key, alpha) as u32)
+        i = i + 1
+    }
+}
+
+// =====================================================================
+// RUNDE GLAS: DAS MILCHGLAS
+// =====================================================================
+//
+// DER STREIFENPUFFER UND SEINE OBERGRENZE.
+//
+// 3840 mal 64 Bildpunkte, also 960 KiB. Die Breite ist die eines
+// 4K-Schirms, die Hoehe das Anderthalbfache der groessten Leiste, die
+// dieses System aufsetzt (40 Bildpunkte bei Vervielfachung 1, 60 bei 2
+// -- taskbar.fi rechnet sie aus der Schriftgroesse). IST DIE LEISTE
+// GROESSER, BLEIBT DAS MILCHGLAS AUS, und zwar ganz: ein Weichzeichner,
+// der nur die linken 3840 Spalten erwischt, malt eine sichtbare Kante
+// mitten in die Leiste, und ein halb wirkender Schmuck ist schlimmer
+// als gar keiner.
+const GLASS_W: u64 = 3840
+const GLASS_H: u64 = 64
+// Um wie viele Stufen der weichgezeichnete Untergrund gegen die
+// Grundfarbe verschoben wird: heller unter einem hellen Satz, dunkler
+// unter einem dunklen. Ohne diesen Schritt bleibt das Glas genau so
+// hell wie das, was darunter liegt, und die Leiste verschwindet auf
+// einem mittelhellen Hintergrundbild ganz. 24 Stufen sind sichtbar und
+// kippen keinen Farbton.
+const GLASS_TINT: u64 = 24
+static mut gl_puf: [u32; 245760] = [0 as u32; 245760]
+// DER ZWEITE STREIFEN, UND WARUM ER SICH LOHNT.
+//
+// Ein Kastendurchgang kann nicht in denselben Puffer schreiben, aus dem
+// er noch liest -- die laufende Summe braucht die Quelle noch. Die
+// erste Fassung hat deshalb je Linie in eine Zwischenzeile geschrieben
+// und danach zurueckkopiert: das sind ZWEI Durchlaeufe ueber jeden
+// Bildpunkt statt einem, also 215 040 statt 107 520 Schleifendurchgaengen
+// je Vollbild. Mit zwei Streifen, zwischen denen die drei Durchgaenge
+// hin und her laufen, faellt das Zurueckkopieren ganz weg; die
+// Einfaerbung am Ende ist dann der eine Durchlauf, der ohnehin sein
+// musste. Gemessen im Gast (TCG, 896 x 40, r = 8): 52 435 gegen
+// 30 000 Mikrosekunden.
+static mut gl_alt: [u32; 245760] = [0 as u32; 245760]
+
+// EINE LINIE KASTENWEICHZEICHNER MIT LAUFENDER SUMME -- DIE EINE
+// STELLE, an der ueberhaupt weichgezeichnet wird. Waagerecht und
+// senkrecht sind derselbe Rumpf mit einem anderen Schritt (`sb`, dem
+// Abstand zweier Nachbarn in Oktetten); zwei Fassungen waeren zwei Orte
+// fuer dieselbe Sache gewesen.
+//
+// WARUM LAUFENDE SUMME UND NICHT DIE NAIVE SCHLEIFE: naiv kostet ein
+// Bildpunkt 2r+1 Additionen, also bei r = 16 das 33-fache. Hier kostet
+// er EINE Addition und EINE Subtraktion je Kanal, unabhaengig von r --
+// und genau das ist der Unterschied zwischen 60 Bildern und Ruckeln.
+// `tools/themestore/run.sh` misst es an der Zeit: `us` bei r = 16 darf
+// hoechstens das 1,3-fache von `us` bei r = 4 sein.
+//
+// Am Rand zaehlt der Randpunkt mehrfach (statt einer Null ausserhalb).
+// Eine Null dort haette einen dunklen Saum an jede Kante der Leiste
+// gemalt, und der sieht aus wie ein Fehler, weil er einer ist.
+//
+// MIT ADRESSEN UND NICHT MIT FELDINDIZES, und das ist gemessen: der
+// Uebersetzer legt vor jeden Feldzugriff eine Bereichspruefung, und
+// dieser Rumpf macht sechs davon je Bildpunkt.
+fn blur_line(qadr: u64, zadr: u64, sb: u64, n: u64, r: u64) {
+    if n == 0 || r == 0 {
+        return
+    }
+    let fen: u64 = 2 * r + 1
+    // UND DIE DIVISION DURCH DIE FENSTERBREITE ALS MULTIPLIKATION.
+    // Drei ganzzahlige Divisionen je Bildpunkt sind 322 560 Divisionen
+    // je Vollbild. `kehr` ist die aufgerundete Kehrzahl in 24
+    // Nachkommabit -- fuer jede Fensterbreite 3..33 und jede
+    // vorkommende Summe (hoechstens 255 * 33 = 8415) liefert
+    // `(x * kehr) >> 24` GENAU dasselbe wie `x / fen`, vollstaendig
+    // nachgerechnet und nicht abgeschaetzt.
+    let kehr: u64 = ((1 << 24) + fen - 1) / fen
+    let qend: u64 = qadr +% (n - 1) *% sb
+    let p0: u64 = __mmio_read32(qadr as *mut u32) as u64
+    var sr: u64 = ((p0 >> 16) & 0xFF) * (r + 1)
+    var sg: u64 = ((p0 >> 8) & 0xFF) * (r + 1)
+    var sb2: u64 = (p0 & 0xFF) * (r + 1)
+    var i: u64 = 1
+    while i <= r {
+        var j: u64 = i
+        if j > n - 1 {
+            j = n - 1
+        }
+        let p: u64 = __mmio_read32((qadr +% j *% sb) as *mut u32) as u64
+        sr = sr + ((p >> 16) & 0xFF)
+        sg = sg + ((p >> 8) & 0xFF)
+        sb2 = sb2 + (p & 0xFF)
+        i = i + 1
+    }
+    // Zwei laufende Zeiger statt zweier Multiplikationen je Bildpunkt:
+    // `pa` zeigt auf den Punkt, der ins Fenster kommt, `ps` auf den,
+    // der herausfaellt. Beide bleiben am Rand einfach stehen -- das ist
+    // dieselbe Klemmung wie oben, nur ohne Rechnung.
+    var pa: u64 = qadr +% (r + 1) *% sb
+    if pa > qend {
+        pa = qend
+    }
+    var ps: u64 = qadr
+    var zp: u64 = zadr
+    var x: u64 = 0
+    while x < n {
+        __mmio_write32(zp as *mut u32,
+            (((((sr *% kehr) >> 24) << 16) | (((sg *% kehr) >> 24) << 8)
+                | ((sb2 *% kehr) >> 24))) as u32)
+        zp = zp +% sb
+        let va: u64 = __mmio_read32(pa as *mut u32) as u64
+        let vs: u64 = __mmio_read32(ps as *mut u32) as u64
+        sr = sr + ((va >> 16) & 0xFF) - ((vs >> 16) & 0xFF)
+        sg = sg + ((va >> 8) & 0xFF) - ((vs >> 8) & 0xFF)
+        sb2 = sb2 + (va & 0xFF) - (vs & 0xFF)
+        if pa < qend {
+            pa = pa +% sb
+        }
+        if x >= r {
+            ps = ps +% sb
+        }
+        x = x + 1
+    }
+}
+
+// DREI DURCHGAENGE: waagerecht, senkrecht, waagerecht. Drei Kaesten
+// hintereinander sind die uebliche ganzzahlige Annaeherung an eine
+// Gaussglocke; einer allein sieht nach Bewegungsunschaerfe aus, weil
+// seine Kante hart bleibt.
+//
+// Der Streifen wandert dabei gl_puf -> gl_alt -> gl_puf -> gl_alt; das
+// Ergebnis steht also in `gl_alt`, und der Rufer holt es sich von dort.
+fn glass_blur(w: u64, h: u64, r: u64) {
+    if r == 0 {
+        return
+    }
+    let a: u64 = (&gl_puf[0]) as u64
+    let b: u64 = (&gl_alt[0]) as u64
+    var y: u64 = 0
+    while y < h {
+        blur_line(a +% y *% w *% 4, b +% y *% w *% 4, 4, w, r)
+        y = y + 1
+    }
+    var x: u64 = 0
+    while x < w {
+        blur_line(b +% x *% 4, a +% x *% 4, w *% 4, h, r)
+        x = x + 1
+    }
+    y = 0
+    while y < h {
+        blur_line(a +% y *% w *% 4, b +% y *% w *% 4, 4, w, r)
+        y = y + 1
+    }
+}
+
+// Helligkeit einer Farbe in Hundertsteln, nach derselben Gewichtung,
+// die `wlibc` fuer die Kontrastrechnung benutzt.
+fn hell_von(c: u64) -> u64 {
+    return (((c >> 16) & 0xFF) * 299 + ((c >> 8) & 0xFF) * 587
+        + (c & 0xFF) * 114) / 1000
+}
+
+// DEN AUSSCHNITT UNTER DER LEISTE HOLEN, WEICHZEICHNEN, EINFAERBEN.
+//
+// Liefert die Adresse des Streifens oder 0, wenn kein Milchglas moeglich
+// ist. Der Streifen ist danach der `grund` fuer `fb_row_a`.
+//
+// DER ZWISCHENSPEICHER UND SEINE BEDINGUNG. Die Uhr in der Leiste malt
+// jede Sekunde neu, obwohl sich unter der Leiste nichts geaendert hat;
+// ohne Zwischenspeicher waere das Milchglas sechzigmal in der Sekunde
+// neu gerechnet worden. `S_GLASSGEN` steigt genau dann, wenn ein
+// Fenster UNTER der Leiste gemalt, bewegt, geoeffnet oder geschlossen
+// wurde (siehe `glass_touch`). Ist der Stand derselbe und sind
+// Rechteck und Radius unveraendert, wird der Streifen wiederverwendet.
+fn glass_prepare(state: u64, x: i64, y: i64, w: u64, h: u64,
+    r: u64) -> u64 {
+    if r == 0 || w == 0 || h == 0 {
+        return 0
+    }
+    if w > GLASS_W || h > GLASS_H {
+        return 0
+    }
+    if x < 0 || y < 0 {
+        return 0
+    }
+    let gx: u64 = x as u64
+    let gy: u64 = y as u64
+    let basis: u64 = (&gl_puf[0]) as u64
+    ss(state, S_GLRUN, gs(state, S_GLRUN) + 1)
+    if gs(state, S_GLVALID) != 0 && gs(state, S_GLX) == gx
+        && gs(state, S_GLY) == gy && gs(state, S_GLW) == w
+        && gs(state, S_GLH) == h && gs(state, S_GLR) == r
+        && gs(state, S_GLGEN) == gs(state, S_GLASSGEN) {
+        ss(state, S_GLHIT, gs(state, S_GLHIT) + 1)
+        return basis
+    }
+    let t_anfang: u64 = time.tsc()
+    // 1. der schon fertig gemalte Untergrund in den Streifen
+    let sbas: u64 = (&gl_puf[0]) as u64
+    var row: u64 = 0
+    while row < h {
+        let q: u64 = fb.draw_at(state) +% (gy + row) *% fb.pitch(state) +%
+            gx *% 4
+        // Wortweise, ueber `rep movsq` wie in `fb_row`: eine Schleife
+        // aus Einzelzugriffen kostet hier gemessen den Faktor acht.
+        let z: u64 = sbas +% row *% w *% 4
+        copy_words(z, q, w *% 4 / 8)
+        if (w & 1) != 0 {
+            __mmio_write32((z +% (w - 1) *% 4) as *mut u32,
+                __mmio_read32((q +% (w - 1) *% 4) as *mut u32))
+        }
+        row = row + 1
+    }
+    // 2. drei Durchgaenge mit laufender Summe
+    glass_blur(w, h, r)
+    // 3. aufhellen oder abdunkeln, je nachdem, ob der laufende Satz
+    //    hell oder dunkel ist. `FM_GLASS_KEY` ist die Grundfarbe der
+    //    Leiste und sagt es ohne eine weitere Einstellung.
+    let dunkel: bool = hell_von(form(state, FM_GLASS_KEY)) < 128
+    let qbas: u64 = (&gl_alt[0]) as u64
+    var p: u64 = 0
+    let n: u64 = w * h
+    while p < n {
+        let v: u64 = __mmio_read32((qbas +% p *% 4) as *mut u32) as u64
+        var cr: u64 = (v >> 16) & 0xFF
+        var cg: u64 = (v >> 8) & 0xFF
+        var cb: u64 = v & 0xFF
+        if dunkel {
+            if cr > GLASS_TINT {
+                cr = cr - GLASS_TINT
+            } else {
+                cr = 0
+            }
+            if cg > GLASS_TINT {
+                cg = cg - GLASS_TINT
+            } else {
+                cg = 0
+            }
+            if cb > GLASS_TINT {
+                cb = cb - GLASS_TINT
+            } else {
+                cb = 0
+            }
+        } else {
+            cr = cr + GLASS_TINT
+            cg = cg + GLASS_TINT
+            cb = cb + GLASS_TINT
+            if cr > 255 {
+                cr = 255
+            }
+            if cg > 255 {
+                cg = 255
+            }
+            if cb > 255 {
+                cb = 255
+            }
+        }
+        __mmio_write32((sbas +% p *% 4) as *mut u32,
+            ((cr << 16) | (cg << 8) | cb) as u32)
+        p = p + 1
+    }
+    // Ob sich die Einstellungen geaendert haben, entscheidet, ob die
+    // Meldezeile faellig ist -- eine Zeile je Bild waere kein Bericht,
+    // sondern ein Wasserfall.
+    let neu_form: bool = gs(state, S_GLVALID) == 0 || gs(state, S_GLW) != w
+        || gs(state, S_GLH) != h || gs(state, S_GLR) != r
+    ss(state, S_GLX, gx)
+    ss(state, S_GLY, gy)
+    ss(state, S_GLW, w)
+    ss(state, S_GLH, h)
+    ss(state, S_GLR, r)
+    ss(state, S_GLGEN, gs(state, S_GLASSGEN))
+    ss(state, S_GLVALID, 1)
+    let kh: u64 = time.khz(state)
+    if kh >= 1000 {
+        let t_ende: u64 = time.tsc()
+        if t_ende > t_anfang {
+            let us: u64 = (t_ende - t_anfang) / (kh / 1000)
+            ss(state, S_BLURUS, gs(state, S_BLURUS) + us)
+            ss(state, S_BLURN, gs(state, S_BLURN) + 1)
+            ss(state, S_BLURLAST, us)
+            if us > gs(state, S_BLURMAX) {
+                ss(state, S_BLURMAX, us)
+            }
+        }
+    }
+    ss(state, S_GLSAY, gs(state, S_GLSAY) + 1)
+    if neu_form || gs(state, S_GLSAY) >= 60 {
+        ss(state, S_GLSAY, 0)
+        glas_say(state)
+    }
+    return basis
+}
+
+// DIE ZAHL, DIE DAS MILCHGLAS BELEGT -- eine Zeile, und in ihr steht
+// alles, was die Abnahme braucht: der Radius, die Flaeche, die
+// gemessene Zeit je Vollbild, die laengste gemessene Zeit und die
+// Trefferquote des Zwischenspeichers. `key=` ist die Schluesselfarbe;
+// steht dort eine andere Zahl als in `taskbar: glas ... key=`, mischt
+// der Kern gegen etwas, das die Leiste nie gemalt hat.
+static mut gl_a: [u8; 13] = "wm: glas r=\0\0"
+static mut gl_b: [u8; 5] = " px=\0"
+static mut gl_c: [u8; 5] = " us=\0"
+static mut gl_d: [u8; 6] = " max=\0"
+static mut gl_e: [u8; 8] = " cache=\0"
+static mut gl_f: [u8; 2] = "/\0"
+static mut gl_g: [u8; 6] = " key=\0"
+static mut gl_h: [u8; 17] = "0123456789abcdef\0"
+static mut gl_x: [u8; 7] = "000000\0"
+
+fn glas_hex6(v: u64) {
+    var i: u64 = 0
+    while i < 6 {
+        let d: u64 = (v >> ((5 - i) * 4)) & 15
+        gl_x[(i) as usize] = gl_h[(d) as usize]
+        i = i + 1
+    }
+}
+
+fn glas_say(state: u64) {
+    serial.puts((&gl_a[0]) as u64)
+    serial.dec(gs(state, S_GLR))
+    serial.puts((&gl_b[0]) as u64)
+    serial.dec(gs(state, S_GLW) * gs(state, S_GLH))
+    serial.puts((&gl_c[0]) as u64)
+    serial.dec(gs(state, S_BLURLAST))
+    serial.puts((&gl_d[0]) as u64)
+    serial.dec(gs(state, S_BLURMAX))
+    serial.puts((&gl_e[0]) as u64)
+    serial.dec(gs(state, S_GLHIT))
+    serial.puts((&gl_f[0]) as u64)
+    serial.dec(gs(state, S_GLRUN))
+    serial.puts((&gl_g[0]) as u64)
+    glas_hex6(form(state, FM_GLASS_KEY))
+    serial.puts((&gl_x[0]) as u64)
+    serial.nl()
+}
+
+// DER UNTERGRUND HAT SICH GEAENDERT -- und das ist NICHT dasselbe wie
+// "die Leiste wird neu gemalt".
+//
+// `compose` malt in jeder Bildrunde den ganzen Schmutzbereich neu, also
+// auch die Flaeche unter der Leiste; dabei kommt aber Bildpunkt fuer
+// Bildpunkt dasselbe heraus, solange kein Fenster darunter sich geruehrt
+// hat. Deshalb steigt der Stand hier -- an der einen Stelle, durch die
+// JEDE Inhalts-, Groessen- und Ortsaenderung eines Fensters geht
+// (`flush_win`, `move_win`, `resize_win`, `raise`, `destroy` rufen alle
+// `damage_win`) -- und nicht im Zusammensetzen.
+// DIE ZAHL ZUR SCHLIERENREGEL. `grow=` ist, wie oft ein Schmutzrechteck
+// auf die volle Leiste aufgezogen wurde, `aus=` sagt, ob die Regel
+// ueberhaupt an ist (`noglasgrow` schaltet sie ab). Ohne diese beiden
+// Zahlen waere "es bleiben keine Schlieren stehen" eine Aussage ueber
+// eine Regel, von der niemand weiss, ob sie je gelaufen ist.
+static mut sl_a: [u8; 20] = "wm: schlieren grow=\0"
+static mut sl_b: [u8; 8] = " alpha=\0"
+static mut sl_c: [u8; 7] = " blur=\0"
+static mut sl_d: [u8; 6] = " aus=\0"
+
+fn schlieren_say(state: u64) {
+    serial.puts((&sl_a[0]) as u64)
+    serial.dec(gs(state, S_PANELGROW))
+    serial.puts((&sl_b[0]) as u64)
+    serial.dec(form_or(state, FM_TB_ALPHA, 100))
+    serial.puts((&sl_c[0]) as u64)
+    serial.dec(form(state, FM_BLUR))
+    serial.puts((&sl_d[0]) as u64)
+    serial.dec(gs(state, S_NOGROW))
+    serial.nl()
+}
+
+fn glass_touch(state: u64, i: u64) {
+    if gs(state, S_GLVALID) == 0 {
+        return
+    }
+    let pw: u64 = panel_win(state)
+    if pw < MAX_WIN && i == pw {
+        return
+    }
+    if pw >= MAX_WIN {
+        ss(state, S_GLASSGEN, gs(state, S_GLASSGEN) + 1)
+        return
+    }
+    if !valid(state, i) {
+        ss(state, S_GLASSGEN, gs(state, S_GLASSGEN) + 1)
+        return
+    }
+    // Nur, wenn das Fenster das Leistenrechteck ueberhaupt beruehrt.
+    let px0: i64 = win_x(state, pw)
+    let py0: i64 = win_y(state, pw)
+    let px1: i64 = px0 + outer_w(state, pw) as i64
+    let py1: i64 = py0 + outer_h(state, pw) as i64
+    let wx0: i64 = win_x(state, i)
+    let wy0: i64 = win_y(state, i)
+    let wx1: i64 = wx0 + outer_w(state, i) as i64
+    let wy1: i64 = wy0 + outer_h(state, i) as i64
+    if wx1 <= px0 || wx0 >= px1 || wy1 <= py0 || wy0 >= py1 {
+        return
+    }
+    ss(state, S_GLASSGEN, gs(state, S_GLASSGEN) + 1)
+}
+
+// Die Ableser fuer die Abnahme. Sie stehen hier, damit
+// `tools/themestore/run.sh` die Zahlen holen kann, ohne die Offsets zu
+// kennen.
+fn glass_gen(state: u64) -> u64 {
+    return gs(state, S_GLASSGEN)
+}
+
+fn blur_us(state: u64) -> u64 {
+    return gs(state, S_BLURLAST)
+}
+
+fn blur_us_max(state: u64) -> u64 {
+    return gs(state, S_BLURMAX)
+}
+
+fn blur_runs(state: u64) -> u64 {
+    return gs(state, S_BLURN)
+}
+
+fn glass_hits(state: u64) -> u64 {
+    return gs(state, S_GLHIT)
+}
+
+fn panel_grows(state: u64) -> u64 {
+    return gs(state, S_PANELGROW)
+}
+
+fn set_noglasgrow(state: u64, on: bool) {
+    ss(state, S_NOGROW, 0)
+    if on {
+        ss(state, S_NOGROW, 1)
+    }
+}
+
+// =====================================================================
+// RUNDE GLAS: DER SELBSTTEST DER MISCHUNG UND DES WEICHZEICHNERS
+// =====================================================================
+//
+// Er steht NICHT in `wm.selftest`. Der laeuft mitten in einer Zeile,
+// die `kgui` schreibt ("wm: selftest " + Zahl), und seine Zahl 30 ist
+// in einem halben Dutzend Abnahmeskripten festgenagelt. Also eine
+// eigene Zahl in einer eigenen Zeile, gerechnet beim Aufsetzen des
+// Fensterservers -- und ohne einen einzigen Bildpunkt auf dem Schirm:
+// beide gepruefte Funktionen sind rein.
+static mut gt_a: [u8; 16] = "wm: glastest \0\0\0"
+static mut gt_b: [u8; 4] = " / \0"
+
+fn selftest_glas(state: u64) -> u64 {
+    var n: u64 = 0
+    // 1. Alpha 100 laesst den neuen Punkt unveraendert -- das ist die
+    //    Zusage "bei voller Deckung wie vorher", hier als Zahl.
+    if glass_mix(0x000000, 0x204060, 0x204060, 100) == 0x204060 {
+        n = n + 1
+    }
+    // 2. Alpha 0 auf der SCHLUESSELFARBE: der Grund bleibt stehen.
+    //    d = 0, also a = 0, also kommt der Untergrund heraus.
+    if glass_mix(0x112233, 0x204060, 0x204060, 0) == 0x112233 {
+        n = n + 1
+    }
+    // 3. Alpha 50 auf der Schluesselfarbe, von Hand gerechnet. Der
+    //    Untergrund liegt dicht an der Schluesselfarbe (Helligkeit 112
+    //    gegen 128, also 16 Stufen und damit unter SCHLEIER), also
+    //    greift die Untergrenze NICHT und es gilt genau a = 50 %:
+    //    a255 = 127, und blend(0x707070, 0x808080, 127) ist je Kanal
+    //    (128*127 + 112*128 + 127)/255 = 30719/255 = 120 = 0x78.
+    if glass_mix(0x707070, 0x808080, 0x808080, 50) == 0x787878 {
+        n = n + 1
+    }
+    // 4. UND DER PUNKT, AN DEM DIE LESBARKEIT HAENGT: ein Punkt, der
+    //    weit von der Schluesselfarbe weg liegt (weisse Schrift auf
+    //    dunklem Grund, d = 3 * 255 = 765 > 96), bleibt bei Alpha 20
+    //    VOLL DECKEND. Waere das nicht so, waere die Leistenschrift
+    //    durchsichtig und der Kontrast dahin.
+    if glass_mix(0x000000, 0xFFFFFF, 0x202020, 20) == 0xFFFFFF {
+        n = n + 1
+    }
+    // 5. Der Weichzeichner gegen eine NAIV gerechnete Mitte. Eine Zeile
+    //    aus 64 Punkten, deren linke Haelfte 0 und deren rechte 200 ist;
+    //    ein einzelner Kastendurchgang mit r = 4 liefert in der Mitte
+    //    den Mittelwert der neun Punkte um sie herum. Naiv gerechnet
+    //    sind das bei x = 32 die Punkte 28..36, also vier Nullen und
+    //    fuenf Zweihunderter: 1000/9 = 111.
+    let qa: u64 = (&gl_puf[0]) as u64
+    let za: u64 = (&gl_alt[0]) as u64
+    var i: u64 = 0
+    while i < 64 {
+        var v: u64 = 0
+        if i >= 32 {
+            v = 200
+        }
+        gl_puf[(i) as usize] = ((v << 16) | (v << 8) | v) as u32
+        i = i + 1
+    }
+    blur_line(qa, za, 4, 64, 4)
+    if (gl_alt[(32) as usize] as u64 & 0xFF) == 111 {
+        n = n + 1
+    }
+    // 6. Und dieselbe Zeile SENKRECHT gelesen muss dieselbe Zahl
+    //    liefern -- sonst haette der Schritt (`stride`) einen Fehler,
+    //    und der faellt an einer Leiste von 40 Zeilen Hoehe sonst nicht
+    //    auf.
+    i = 0
+    while i < 64 {
+        var v2: u64 = 0
+        if i >= 32 {
+            v2 = 200
+        }
+        gl_puf[(i * 8) as usize] = ((v2 << 16) | (v2 << 8) | v2) as u32
+        i = i + 1
+    }
+    blur_line(qa, za, 32, 64, 4)
+    if (gl_alt[(32 * 8) as usize] as u64 & 0xFF) == 111 {
+        n = n + 1
+    }
+    // 7. UND DER SCHLEIER, von Hand gerechnet. Weisse Leiste (Key
+    //    0xffffff, Helligkeit 255) ueber schwarzem Grund (Helligkeit 0):
+    //    dl = 255, also amin = 100 - 40*100/255 = 85 Prozent -- und
+    //    nicht die 20, die der Regler sagt. a255 = 216, und
+    //    blend(0x000000, 0xffffff, 216) ist je Kanal
+    //    (255*216 + 0 + 127)/255 = 55207/255 = 216 = 0xd8.
+    //    Gegen die dunkle Leistenschrift #0f172a sind das 12,1:1 und
+    //    damit ueber der Latte; ohne den Schleier waeren es 1,6:1.
+    if glass_mix(0x000000, 0xFFFFFF, 0xFFFFFF, 20) == 0xD8D8D8 {
+        n = n + 1
+    }
+    // Der Streifen ist jetzt Prueffarbe und kein Untergrund mehr.
+    ss(state, S_GLVALID, 0)
+    return n
+}
+
+fn selftest_glas_max() -> u64 {
+    return 7
+}
+
+fn glastest_say(state: u64) {
+    ss(state, S_GLTEST, selftest_glas(state))
+    serial.puts((&gt_a[0]) as u64)
+    serial.dec(gs(state, S_GLTEST))
+    serial.puts((&gt_b[0]) as u64)
+    serial.dec(selftest_glas_max())
+    serial.nl()
 }
 
 // Der Titel, auf die Breite bis zum Schliessfeld beschnitten.
