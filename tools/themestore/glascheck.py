@@ -4,16 +4,28 @@
 
     glascheck.py mix <bild.png> <alpha>          die Mischung nachrechnen
     glascheck.py var <bild.png>                  Streuung des Leistenstreifens
+                  [--y0=.. --y1=..]              oder, mit y-Grenzen, die eines
+                                                 beliebigen Rechtecks -- etwa der
+                                                 Flaeche eines durchsichtigen
+                                                 Fensters mit Milchglas
     glascheck.py kontrast <bild.png> <fg-hex>    Schrift gegen den SCHLECHTESTEN
                                                  gemischten Grund (Anteil >= 1 %),
                                                  Uhr eingeschlossen
-    glascheck.py ecke <bild.png> <x> <y> <k>     Farben in einer Ecke zaehlen
+    glascheck.py ecke <bild.png> <x> <y> <k> [ol|or|ul|ur]
+                                                 Farben in einer Ecke zaehlen;
+                                                 das Wort sagt, WELCHE Ecke des
+                                                 Quadrats die aeussere ist
+    glascheck.py linien <bild.png> <x> <y> <w> <h> [rand]
+                                                 waagerechte Linien in einer
+                                                 Karte zaehlen
     glascheck.py kachel <bild.png> <x> <y> <w> <h> <r>
                                                  Kante, Rundung und was
                                                  ausserhalb der Rundung steht
     glascheck.py diff <a.png> <b.png>            abweichende Bildpunkte
     glascheck.py fenster <bild.png> <serial.txt> JEDE Fensterbeschriftung
                                                  gegen ihren GEMISCHTEN Grund
+    glascheck.py reiter <bild.png> <serial.txt>  Kantendichte im Band der
+                                                 Reiterzeile (fremde Glyphen)
 
 DIE ZWEITE RECHNUNG, UND SIE WEISS NICHTS VON DER ERSTEN.
 
@@ -42,11 +54,15 @@ from PIL import Image
 
 SCHLEIER = 40          # kernel/ui/wm.fi, const SCHLEIER
 # ... und dieselbe Zahl fuer ein gewoehnliches Fenster: kernel/ui/wm.fi,
-# const SCHLEIER_WIN. Ein Fenster ist von oben bis unten Schrift, also
-# darf sich seine Flaeche nur halb so weit von der Fensterfarbe
-# entfernen wie die Leiste -- sonst laeuft der Text des Fensters
-# darunter quer durch die Beschriftungen.
-SCHLEIER_WIN = 20
+# const SCHLEIER_WIN.  Sie ist seit fix-r4-2 NULL, und das heisst hier
+# wie dort "kein Schleier": ein Fenster holt seine Lesbarkeit nicht
+# mehr darueber, dass seine ganze Flaeche deckender wird, sondern ueber
+# die TEXTPLATTE -- Ring 3 markiert jeden Bildpunkt, auf dem Schrift
+# steht (kernel/user/wlibc.fi, `platte`), und `glass_mix` nimmt ihn
+# unveraendert.  Die Flaeche dazwischen ist damit so durchsichtig, wie
+# der Regler sagt.  `tools/themestore/run.sh` haelt die beiden Zahlen
+# gegeneinander; wer eine aendert, aendert beide.
+SCHLEIER_WIN = 0
 VOLL = 96              # der Abstand, ab dem ein Punkt voll deckend ist
 
 
@@ -74,17 +90,35 @@ def glass_mix(alt, neu, key, alpha, schleier=SCHLEIER):
     d = min(sum(abs(neu[i] - key[i]) for i in range(3)), VOLL)
     a = alpha + (100 - alpha) * d // VOLL
     dl = abs(hell(alt) - hell(key))
-    if dl > schleier:
+    # `schleier == 0` heisst "kein Schleier" und nicht "gar nichts darf
+    # durch" -- dieselbe Abfrage wie in kernel/ui/wm.fi, und aus
+    # demselben Grund: die Aufloesung nach der Deckung ergibt fuer 0
+    # genau 100 Prozent, also das Gegenteil des Gemeinten.
+    if schleier > 0 and dl > schleier:
         a = max(a, 100 - schleier * 100 // dl)
     return blend(alt, neu, a * 255 // 100)
+
+
+def rechteck(im, x0, x1, y0, y1):
+    """Ein Rechteck des Bildes als Punktliste -- die EINE Stelle, die
+    aus Grenzen Punkte macht.
+
+    Runde GLAS (fix-r4-4): bis hierher gab es nur `leiste`, also nur
+    den Streifen am unteren Rand. Das Milchglas liegt seit dieser Runde
+    auch unter einem DURCHSICHTIGEN FENSTER, und dessen Ausschnitt ist
+    kein Streifen am Bildrand. Gemessen wird er mit derselben Rechnung
+    wie die Leiste -- `var` weiss nicht, welches Rechteck es ist.
+    """
+    w, h = im.size
+    return [(x, y) for x in range(max(x0, 0), min(x1, w))
+            for y in range(max(y0, 0), min(y1, h))]
 
 
 def leiste(im, hoehe, x0, x1):
     w, h = im.size
     # Die obersten zwei Zeilen der Leiste bleiben aussen vor: dort
     # sitzt ihre Kante, und eine Kante ist kein Grund.
-    return [(x, y) for x in range(x0, min(x1, w))
-            for y in range(h - hoehe + 6, h - 2)]
+    return rechteck(im, x0, x1, h - hoehe + 6, h - 2)
 
 
 def wandfarben(im, hoehe, x0, x1):
@@ -221,6 +255,53 @@ def fenster(bild, serial, marke="settings: rect name=waa "):
     return 0
 
 
+# ================================================ RUNDE GLAS (fix-r4-2)
+# DIE REITERZEILE: KEINE FREMDE GLYPHE, UND DAS WIRD GEZAEHLT.
+#
+# Der Kontrast einer Reiterbeschriftung sagt, ob SIE zu lesen ist. Er
+# sagt nichts darueber, ob NEBEN ihr noch ein zweiter Text steht: der
+# Schatten eines fremden Buchstabens zwischen zwei Reitern hat gegen
+# den Reiternamen gar keinen Kontrast zu halten, er gehoert einfach
+# nicht dorthin.
+#
+# Gezaehlt wird deshalb die KANTENDICHTE im Band der Reiterzeile --
+# benachbarte Bildpunkte, die sich um mehr als `--slack` Stufen
+# unterscheiden. Ein Buchstabe ist nichts als Kanten; eine Flaeche hat
+# keine. Die Zahl allein sagt nichts (die Reiter selbst haben Kanten),
+# der VERGLEICH sagt alles: derselbe Stand mit `window_alpha=100` hat
+# genau die Kanten, die dorthin gehoeren, und ein durchsichtiges
+# Fenster mit deckender Reiterzeile muss dieselben haben.
+#
+# Das Band kommt aus dem Mitschnitt und nicht aus einer geratenen
+# Hoehe: `wlib: tab ... ax= ay= w= h=` meldet jeder Reiter selbst.
+def reiter(bild, serial):
+    im = Image.open(bild).convert("RGB")
+    roh = open(serial, "rb").read().decode("latin1")
+    tabs = re.findall(r"wlib: tab i=\d+ x=\d+ y=\d+ w=(\d+) h=(\d+)"
+                      r" ax=(\d+) ay=(\d+)", roh)
+    if not tabs:
+        print("reiter KEIN Reiter im Mitschnitt -- uitrace aus?")
+        return 1
+    x0 = min(int(t[2]) for t in tabs)
+    y0 = min(int(t[3]) for t in tabs)
+    x1 = max(int(t[2]) + int(t[0]) for t in tabs)
+    y1 = max(int(t[3]) + int(t[1]) for t in tabs)
+    x1 = min(x1, im.size[0])
+    y1 = min(y1, im.size[1])
+    kanten = 0
+    punkte = 0
+    for y in range(y0, y1):
+        for x in range(x0, x1 - 1):
+            a = im.getpixel((x, y))
+            b = im.getpixel((x + 1, y))
+            punkte += 1
+            if max(abs(a[i] - b[i]) for i in range(3)) > 24:
+                kanten += 1
+    print("reiter band=%d,%d,%d,%d kanten=%d punkte=%d"
+          % (x0, y0, x1, y1, kanten, punkte))
+    return 0
+
+
 def main(argv):
     if len(argv) < 3:
         print(__doc__)
@@ -232,7 +313,7 @@ def main(argv):
     for a in argv[2:]:
         if a.startswith("--"):
             k, _, v = a[2:].partition("=")
-            opt[k] = int(v) if k in ("hoehe", "x0", "x1") else v
+            opt[k] = int(v) if k in ("hoehe", "x0", "x1", "y0", "y1") else v
             gesetzt.add(k)
         else:
             rest.append(a)
@@ -252,6 +333,9 @@ def main(argv):
     if cmd == "fenster":
         return fenster(rest[0], rest[1])
 
+    if cmd == "reiter":
+        return reiter(rest[0], rest[1])
+
     if cmd == "diff":
         a = Image.open(rest[0]).convert("RGB")
         b = Image.open(rest[1]).convert("RGB")
@@ -261,7 +345,19 @@ def main(argv):
         return 0
 
     im = Image.open(rest[0]).convert("RGB")
-    pts = leiste(im, opt["hoehe"], opt["x0"], opt["x1"])
+    # RUNDE GLAS (fix-r4-4): EIN AUSSCHNITT, DER KEIN STREIFEN IST.
+    #
+    # Ohne `--y0/--y1` ist der Ausschnitt der Leistenstreifen wie
+    # bisher, Bildpunkt fuer Bildpunkt derselbe. Mit ihnen ist es ein
+    # Rechteck irgendwo im Bild -- gebraucht wird das fuer das
+    # Milchglas unter einem DURCHSICHTIGEN FENSTER, das seit dieser
+    # Runde auch eines bekommt: auf 28 Bildpunkten Leiste MISST man
+    # einen Weichzeichner, auf einer Fensterflaeche SIEHT man ihn.
+    if "y0" in gesetzt or "y1" in gesetzt:
+        pts = rechteck(im, opt["x0"], opt["x1"],
+                      opt.get("y0", 0), opt.get("y1", im.size[1]))
+    else:
+        pts = leiste(im, opt["hoehe"], opt["x0"], opt["x1"])
     px = [im.getpixel(p) for p in pts]
 
     if cmd == "mix":
@@ -290,6 +386,58 @@ def main(argv):
               % (int(var * 100), int(m), len(l), len(set(px))))
         return 0
 
+    if cmd == "linien":
+        # DIE WAAGERECHTEN LINIEN IN EINER KARTE, GEZAEHLT (fix-r4-3).
+        #
+        # Die Frage dahinter: umrandet ein grosser Radius eine Karte
+        # zweimal? Angeschaut war das auf Bild 03 eine zwei Bildpunkte
+        # hohe Linie unter der Karte, und angeschaut kann man das nicht
+        # entscheiden. Gezaehlt schon: eine Bildzeile gilt als LINIE,
+        # wenn sie ueber den ganzen gemessenen Ausschnitt hinweg vom
+        # Kartengrund abweicht. Dieselbe Karte bei Radius 0 und bei 24
+        # muss dieselbe Zahl liefern.
+        #
+        # `rand` ist der Saum, der auf beiden Seiten aussen vor bleibt,
+        # und er ist der Grund, warum diese Zahl ueberhaupt vergleichbar
+        # ist: eine Rundung frisst an JEDEM Ende einer Linie bis zu
+        # `radius` Bildpunkte (der Rahmen eines Eingabefeldes laeuft bei
+        # Radius 24 erst 24 Bildpunkte spaeter los). Wer bis an die
+        # Kartenkante misst, zaehlt deshalb bei Radius 24 weniger
+        # Linien und haelt den Unterschied fuer einen Fehler. 56 ist
+        # der groesste Radius dieser Runde plus der Innenabstand der
+        # Spalte.
+        # WAS EINE LINIE IST, und warum nicht "weicht vom Grund ab":
+        # in einer Karte stehen Flaechen (Eingabefeld, Liste, Knopf) in
+        # ihrer eigenen Farbe, und gegen den Kartengrund gemessen waere
+        # JEDE ihrer Zeilen eine Linie. Eine Linie ist etwas anderes:
+        # ein DUENNER Streifen. Gezaehlt wird deshalb die Zeile, die
+        # sich ueber ihre ganze Laenge von der Zeile zwei darueber UND
+        # von der zwei darunter unterscheidet. Eine Flaeche liefert
+        # damit nur ihre zwei Kanten, eine doppelt gemalte Kante zwei
+        # Zeilen -- genau die Zahl, um die es geht.
+        x, y, w, h = (int(v) for v in rest[1:5])
+        rand = int(rest[5]) if len(rest) > 5 else 56
+        x0, x1 = x + rand, x + w - rand
+        if x1 - x0 < 20:
+            print("linien=0 breite=0 -- Ausschnitt zu schmal")
+            return 0
+
+        def weg(a, b):
+            return max(abs(a[k] - b[k]) for k in range(3)) > 12
+
+        n = 0
+        for j in range(y + 3, y + h - 3):
+            treffer = 0
+            for i in range(x0, x1):
+                p = im.getpixel((i, j))
+                if weg(p, im.getpixel((i, j - 2))) \
+                        and weg(p, im.getpixel((i, j + 2))):
+                    treffer += 1
+            if treffer * 10 >= (x1 - x0) * 9:
+                n += 1
+        print("linien=%d breite=%d" % (n, x1 - x0))
+        return 0
+
     if cmd == "ecke":
         # DIE ECKE WIRD ZEILE FUER ZEILE ABGETASTET, und das ist der
         # einzige Weg, auf dem "rund" und "kantengeglaettet" zwei
@@ -310,8 +458,24 @@ def main(argv):
         # einer geglaetteten nicht zu unterscheiden, und genau das ist
         # die Zusage, um die es geht.
         x, y, k = (int(v) for v in rest[1:4])
-        aussen = im.getpixel((x - 6, y + k // 2))
-        innen = im.getpixel((x + k + 8, y + k - 1))
+        # WELCHE DER VIER ECKEN, und warum das ein Wort und kein
+        # zweiter Befehl ist (fix-r4-3): die Rechnung ist fuer alle
+        # vier dieselbe, nur die Richtung, in der "nach innen" zeigt,
+        # ist eine andere. Ein zweiter Befehl daneben waere dieselbe
+        # Sache ein zweites Mal -- also wird das Quadrat gespiegelt
+        # und nicht die Messung verdoppelt. `ol` ist die Vorgabe und
+        # damit Aufruf fuer Aufruf das, was vor diesem Zusatz stand.
+        wo = rest[4] if len(rest) > 4 else "ol"
+        rechts = wo in ("or", "ur")
+        unten = wo in ("ul", "ur")
+
+        def P(i, j):
+            X = (x + k - 1 - i) if rechts else (x + i)
+            Y = (y + k - 1 - j) if unten else (y + j)
+            return im.getpixel((X, Y))
+
+        aussen = P(-6, k // 2)
+        innen = P(k + 8, k - 1)
 
         def nah(a, b, tol=12):
             return max(abs(a[i] - b[i]) for i in range(3)) <= tol
@@ -319,18 +483,19 @@ def main(argv):
         starts, weich = [], 0
         for j in range(k):
             for i in range(k + 8):
-                p = im.getpixel((x + i, y + j))
+                p = P(i, j)
                 if not nah(p, aussen):
                     starts.append(i)
                     if i > 0:
-                        q = im.getpixel((x + i - 1, y + j))
+                        q = P(i - 1, j)
                         if not nah(q, aussen, 2) and not nah(q, innen, 2):
                             weich += 1
                     break
             else:
                 starts.append(k + 8)
         tiefe = max(starts) - min(starts)
-        print("ecke tiefe=%d weich=%d zeilen=%d" % (tiefe, weich, len(starts)))
+        print("ecke %s tiefe=%d weich=%d zeilen=%d"
+              % (wo, tiefe, weich, len(starts)))
         return 0
 
     if cmd == "kachel":

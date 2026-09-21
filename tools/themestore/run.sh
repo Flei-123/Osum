@@ -70,9 +70,19 @@ has() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || {
     echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
+# EIN UEBERSPRUNGENER LAUF IST KEIN BESTANDENER LAUF (fix-r4-4).
+#
+# Hier stand `exit 0`, und damit war die Abnahme auf einer Maschine
+# ohne QEMU GRUEN -- ohne eine einzige gepruefte Zusage. Das ist genau
+# die Art Zahl, die eine Runde spaeter niemand mehr nachrechnet: "der
+# Lauf war gruen" stimmte woertlich und bedeutete nichts. 77 ist der
+# Schluesselwert, den `automake` und `prove` seit jeher fuer
+# UEBERSPRUNGEN lesen; er ist NICHT 0, also faellt er jedem Aufrufer
+# auf, der nur auf Erfolg prueft.
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    echo "THEMESTORE: uebersprungen, qemu-system-x86_64 ist nicht da"
-    exit 0
+    echo "THEMESTORE: UEBERSPRUNGEN (0 Zusagen geprueft)," \
+         "qemu-system-x86_64 ist nicht da"
+    exit 77
 fi
 
 PRESETS=$(cd assets/themes && ls *.preset | sed 's/\.preset$//')
@@ -1011,12 +1021,31 @@ for r in 0 12 24; do
         | grep -oE 'typ=[a-z]+' | sort -u | wc -l)
     num "und $TYPEN Widgetarten melden, mit welchem Radius sie gemalt haben" \
         "$TYPEN" ge 8
+    # ---- (fix-r4-4) UND DAS KLEINSTE UND NICHT NUR DAS GROESSTE.
+    #
+    # "Der groesste gemalte Radius ist groesser als bei 0" ist genau
+    # dann wahr, wenn EIN EINZIGES Widget rundet -- die Karte etwa --
+    # und alle anderen eckig bleiben. Die Zusage heisst aber "der
+    # Radius kommt bei JEDEM Widgettyp an". Also wird zusaetzlich das
+    # Minimum ueber die Rollen 0..3 genommen und, weil ein
+    # Reglerbalken von vier Bildpunkten Hoehe nie auf 24 runden kann
+    # (geklemmt auf die halbe Hoehe), auch jeder gemeldete TYP einzeln
+    # gezaehlt: bei 12 und bei 24 darf keiner mit r=0 dastehen.
+    MINR=$(grep -aoE 'wlib: radius rolle=[0-3] r=[0-9]+' "$f" \
+        | grep -oE 'r=[0-9]+$' | cut -d= -f2 | sort -n | head -1)
+    ECKIG=$(grep -aoE 'wlib: radius rolle=[0-3] r=0 typ=[a-z]+' "$f" \
+        | grep -oE 'typ=[a-z]+' | sort -u | wc -l)
     if [ "$r" = 0 ]; then
         num "bei Radius 0 malt KEIN Widget eine Rundung" "${MAXR:-99}" eq 0
+        num "und auch das kleinste gemalte Mass ist 0" "${MINR:-99}" eq 0
         R0MAX=${MAXR:-0}
     else
         num "bei Radius $r ist der groesste gemalte Radius groesser als bei 0" \
             "${MAXR:-0}" gt "${R0MAX:-0}"
+        num "und bei Radius $r rundet auch das KLEINSTE Widget (Rollen 0..3)" \
+            "${MINR:-0}" gt 0
+        num "und bei Radius $r ist kein gemeldeter Widgettyp eckig geblieben" \
+            "${ECKIG:-99}" eq 0
     fi
     cp "$TMPD/rad$r/desktop.png" "$SHOTS/glas-radius-$r.png" 2>/dev/null
 done
@@ -1062,6 +1091,124 @@ num "und die bei 12 auch" "${W12:-0}" ge 6
 num "GEGENPROBE: bei Radius 0 ist die Ecke ein rechter Winkel" "${T0:-99}" eq 0
 num "und hat keinen einzigen Mischton -- da ist nichts zu glaetten" "${W0:-99}" eq 0
 
+# ---- 11a2. (fix-r4-3) DER UMRISS IST AN ALLEN VIER ECKEN GESCHLOSSEN.
+#
+# Die Probe darueber hat GENAU EINE Ecke gemessen -- die obere linke,
+# weil nur deren Koordinaten im Mitschnitt standen (`settings: rect
+# name=win`). Das hat einen Fehler zugedeckt, der auf jeder Aufnahme
+# mit Radius 24 zu sehen war: oben ein sauberer Bogen, UNTEN EIN
+# RECHTER WINKEL. Der Grund stand in `wm.paint_win`: `fill_round` malt
+# den Rumpf rund, danach kopierte die Schleife die Anwendungsflaeche
+# zeilenweise und RECHTECKIG darueber und hat die unteren Boegen
+# wieder zugeschmiert. Oben faellt das nicht auf, weil die Titelleiste
+# ihre eigene runde Kante mitbringt.
+#
+# Gemessen wird jetzt an allen vier Ecken, und zwar am Rechteck, das
+# der SERVER gemalt hat: `wm: rahmen x= y= w= h= r=` ist das aeussere
+# Rechteck samt Radius. Ohne diese Zeile muesste der Laeufer
+# Rahmenbreite und Titelhoehe nachrechnen -- beides sind Formmarken,
+# also genau die Zahlen, die diese Runde verstellbar gemacht hat.
+RH=$(grep -ao 'wm: rahmen x=[0-9]* y=[0-9]* w=[0-9]* h=[0-9]* r=[0-9]*' \
+     "$TMPD/rad24/serial.txt" | awk -F'[= ]' '$8 >= 400' | tail -1)
+echo "        ${RH:-KEINE Rahmenzeile}"
+RHX=$(printf '%s' "$RH" | grep -oE ' x=[0-9]+' | cut -d= -f2)
+RHY=$(printf '%s' "$RH" | grep -oE ' y=[0-9]+' | cut -d= -f2)
+RHW=$(printf '%s' "$RH" | grep -oE ' w=[0-9]+' | cut -d= -f2)
+RHH=$(printf '%s' "$RH" | grep -oE ' h=[0-9]+' | cut -d= -f2)
+RHR=$(printf '%s' "$RH" | grep -oE ' r=[0-9]+' | cut -d= -f2)
+same "der Server meldet das Rechteck, das er mit Radius 24 gemalt hat" \
+    "24" "${RHR:-}"
+ECKBAD=0; ECKWEICH=99; ECKTIEF=99
+for wo in ol or ul ur; do
+    ex=${RHX:-20}; ey=${RHY:-3}
+    [ "$wo" = or ] || [ "$wo" = ur ] && ex=$(( ${RHX:-20} + ${RHW:-760} - 24 ))
+    [ "$wo" = ul ] || [ "$wo" = ur ] && ey=$(( ${RHY:-3} + ${RHH:-566} - 24 ))
+    E=$(python3 tools/themestore/glascheck.py ecke \
+        "$SHOTS/glas-radius-24.png" "$ex" "$ey" 24 "$wo" 2>&1)
+    echo "        $E"
+    t=$(printf '%s' "$E" | grep -oE 'tiefe=[0-9]+' | cut -d= -f2)
+    wq=$(printf '%s' "$E" | grep -oE 'weich=[0-9]+' | cut -d= -f2)
+    [ -n "${t:-}" ] && [ -n "${wq:-}" ] || { ECKBAD=$((ECKBAD+1)); continue; }
+    [ "$t" -lt "$ECKTIEF" ] && ECKTIEF=$t
+    [ "$wq" -lt "$ECKWEICH" ] && ECKWEICH=$wq
+done
+num "alle vier Fensterecken sind gemessen worden" "$ECKBAD" eq 0
+num "und die FLACHSTE der vier ist bei Radius 24 immer noch rund (tiefe)" \
+    "$ECKTIEF" gt 0
+num "und die HAERTESTE der vier ist kantengeglaettet (Zeilen mit Mischton)" \
+    "$ECKWEICH" ge 12
+# GEGENPROBE: bei Radius 0 hat KEINE der vier Ecken eine Rundung. Ohne
+# sie waere "tiefe > 0" auch dann gruen, wenn dieses Werkzeug in jedem
+# Bild irgendetwas findet.
+ECK0=0
+for wo in ol or ul ur; do
+    ex=${RHX:-20}; ey=${RHY:-3}
+    [ "$wo" = or ] || [ "$wo" = ur ] && ex=$(( ${RHX:-20} + ${RHW:-760} - 24 ))
+    [ "$wo" = ul ] || [ "$wo" = ur ] && ey=$(( ${RHY:-3} + ${RHH:-566} - 24 ))
+    t=$(python3 tools/themestore/glascheck.py ecke \
+        "$SHOTS/glas-radius-0.png" "$ex" "$ey" 24 "$wo" 2>&1 \
+        | grep -oE 'tiefe=[0-9]+' | cut -d= -f2)
+    [ "${t:-99}" = 0 ] || ECK0=$((ECK0+1))
+done
+num "GEGENPROBE: bei Radius 0 ist keine der vier Ecken rund" "$ECK0" eq 0
+
+# ---- 11a3. (fix-r4-3) EINE KARTE WIRD NICHT ZWEIMAL UMRANDET.
+#
+# Auf Bild 03 (Radius 24) steht unter der linken wie unter der rechten
+# Karte eine ZWEI Bildpunkte hohe Linie, und der Verdacht lag nahe, die
+# Karte bekaeme bei grossem Radius von `wlib.box_v` und `wm.round_frame`
+# zwei Umrandungen uebereinander. NACHGEMESSEN IST ES DAS NICHT: die
+# zwei Zeilen sind die Unterkante des FENSTERRAHMENS (`border` ist in
+# diesem Formsatz zwei Bildpunkte breit), sie stehen bei Radius 0
+# genauso da, und eine Karte malt ueberhaupt keinen Rahmen -- sie ist
+# eine Flaeche mit Schlagschatten (`wlib.paint_card`).
+#
+# Damit der Verdacht nicht beim naechsten Bild wiederkommt, steht er
+# ab jetzt als ZAHL da: `glascheck.py linien` zaehlt in jeder Karte die
+# duennen waagerechten Streifen -- Bildzeilen, die sich ueber die ganze
+# gemessene Breite von der Zeile zwei darueber UND zwei darunter
+# unterscheiden --, und zwar bei Radius 0 und bei Radius 24. Die zwei
+# Zahlen MUESSEN gleich sein: eine Rundung, die eine Kante hinzufuegt
+# oder verschluckt, faellt hier auf und sonst nirgends. Gemessen wird
+# mit einem Saum von 56 Bildpunkten, denn eine Rundung verkuerzt jede
+# Linie an beiden Enden -- wer bis an die Kante misst, zaehlt bei 24
+# weniger Linien und haelt genau das fuer den Fehler.
+KART=$(python3 - "$TMPD/rad0/serial.txt" <<'PYK2'
+import re, sys
+roh = open(sys.argv[1], 'rb').read().decode('latin1')
+w = re.findall(r'settings: rect name=win x=(\d+) y=(\d+)', roh)
+rects = re.findall(r'settings: rect name=(kart[a-z]*) x=(\d+) y=(\d+)'
+                   r' w=(\d+) h=(\d+)', roh)
+gesehen = {}
+for nm, x, y, bw, bh in rects:
+    gesehen[nm] = (int(x), int(y), int(bw), int(bh))
+for nm in sorted(gesehen):
+    x, y, bw, bh = gesehen[nm]
+    if not w:
+        break
+    # dieselbe Umrechnung wie in Abschnitt 10: Rahmen und Titelzeile
+    print(nm, int(w[-1][0]) + 2 + x, int(w[-1][1]) + 22 + y, bw, bh)
+PYK2
+)
+KARTN=0
+while read -r nm kx ky kw kh; do
+    [ -n "${nm:-}" ] || continue
+    KARTN=$((KARTN+1))
+    L0=$(python3 tools/themestore/glascheck.py linien \
+         "$SHOTS/glas-radius-0.png" "$kx" "$ky" "$kw" "$kh" 2>&1 | tail -1)
+    L24=$(python3 tools/themestore/glascheck.py linien \
+          "$SHOTS/glas-radius-24.png" "$kx" "$ky" "$kw" "$kh" 2>&1 | tail -1)
+    echo "        $nm  Radius 0: $L0   Radius 24: $L24"
+    N0=$(printf '%s' "$L0" | grep -oE 'linien=[0-9]+' | cut -d= -f2)
+    N24=$(printf '%s' "$L24" | grep -oE 'linien=[0-9]+' | cut -d= -f2)
+    num "in der Karte $nm stehen waagerechte Linien" "${N0:-0}" ge 1
+    same "und bei Radius 24 sind es in $nm genauso viele (keine doppelte Kante)" \
+        "${N0:-x}" "${N24:-y}"
+done <<EOF
+$KART
+EOF
+num "und es sind ueberhaupt Karten gemessen worden" "$KARTN" ge 2
+
 # ---- 11b. DIE LEISTE MISCHT WIRKLICH -- GEGEN EINE ZWEITE RECHNUNG.
 #
 # Drei Laeufe ueber DEMSELBEN gemusterten Hintergrundbild, und in jedem
@@ -1069,9 +1216,52 @@ num "und hat keinen einzigen Mischton -- da ist nichts zu glaetten" "${W0:-99}" 
 # die `tools/themestore/glascheck.py` auf dem Wirt aus den zwei Farben
 # des Bildes und der Schluesselfarbe der Leiste rechnet -- dieselbe
 # Rolle, die `model.py` fuer die Kontraste spielt.
+#
+# ====================================== RUNDE GLAS (fix-r4-1)
+# DAS BILD UNTER DER LEISTE IST JETZT BUNT UND NICHT NUR HELL.
+#
+# Der Befund der Jury an 04/05/06: "bei 40 % muessen auch wirklich
+# 40 % Flaechendeckung stehen". Sie standen dort schon -- das Muster
+# `wallpaper=hell` liegt mit seinen Helligkeiten 240 und 214 so nahe an
+# der weissen Leiste (255), dass die Lesbarkeitsschranke gar nicht
+# greift --, nur SAH man es nicht: 40 Prozent eines fast weissen
+# Musters auf Weiss sind acht Helligkeitsstufen Unterschied.
+#
+# Das Bild hier hat deshalb zwei KRAEFTIGE Farben, die in der
+# HELLIGKEIT trotzdem dicht genug bei der weissen Leiste liegen
+# (gerechnet mit derselben Gewichtung 299/587/114, die `wm.hell_von`
+# benutzt):
+#
+#   orange  (255,178,104)  Helligkeit 192, Abstand zur Leiste 63
+#   eisblau (200,245,255)  Helligkeit 232, Abstand zur Leiste 23
+#
+# Beides liegt UNTER der Schwelle, ab der `glass_mix` bei alpha=40
+# anhebt: sie liegt bei einem Abstand von 67 (100 - 40*100/67 = 40).
+# Also bleiben 40 Prozent 40 Prozent -- und weil der Unterschied
+# ueberwiegend in der FARBE steckt, faerbt sich die Leiste sichtbar
+# ein, statt nur ein wenig dunkler zu werden. Gemessen wird beides:
+# `hoch=0` sagt, dass kein einziger Bildpunkt angehoben wurde, und der
+# mittlere Farbabstand zwischen 70 und 40 Prozent sagt, dass man es
+# sieht.
+python3 - "$TMPD/bunt.osym" <<'BUNTPY'
+import struct, sys
+# Dasselbe Format und dieselbe Groesse wie `wallpaper=hell` in
+# tools/themestore/build.sh (OSYM, 120x90, BGRA), nur mit zwei
+# kraeftigen Farben gleicher Helligkeit. Ein Schachbrett von zwoelf
+# Bildpunkten, das der Schreibtisch auf rund achtzig dehnt.
+w, h = 120, 90
+a, b = (255, 178, 104), (200, 245, 255)
+px = bytearray()
+for y in range(h):
+    for x in range(w):
+        c = a if ((x // 12) + (y // 12)) % 2 == 0 else b
+        px += bytes((c[2], c[1], c[0], 0xFF))
+open(sys.argv[1], "wb").write(b"OSYM" + struct.pack("<II", w, h) + bytes(px))
+BUNTPY
 for a in 100 70 40; do
     bash tools/themestore/build.sh "$TMPD/al$a" tbalpha="$a" blur=0 \
-        wallpaper=hell uitrace=yes keep=yes > "$TMPD/al$a.log" 2>&1
+        wallpaper="$TMPD/bunt.osym" uitrace=yes keep=yes \
+        > "$TMPD/al$a.log" 2>&1
     cp "$TMPD/al$a/desktop.png" "$SHOTS/glas-alpha-$a.png" 2>/dev/null
     out=$(python3 tools/themestore/glascheck.py mix "$TMPD/al$a/desktop.png" "$a")
     pct=$(printf '%s' "$out" | grep -oE 'prozent=[0-9]+' | cut -d= -f2)
@@ -1096,6 +1286,101 @@ V40=$(python3 tools/themestore/glascheck.py var "$SHOTS/glas-alpha-40.png" \
 num "voll deckend streut der Leistengrund nicht" "${V100:-1}" eq 0
 num "bei 70 %% streut er" "${V70:-0}" gt 0
 num "und bei 40 %% mehr als bei 70 %%" "${V40:-0}" gt "${V70:-0}"
+# ============================================ RUNDE GLAS (fix-r4-1)
+# UM WIEVIEL MEHR -- UND WARUM VIER UND NICHT FUENF.
+#
+# Der Befund verlangte `var(40) >= 5 * var(70)`. Die Blendgleichung
+# laesst das nicht zu, und das ist keine Ausrede, sondern eine
+# Rechnung: der Grund der Leiste ist `a * Leiste + (1-a) * Bild`, also
+# ist seine Abweichung vom eigenen Mittel genau `(1-a)` mal der des
+# Bildes und seine STREUUNG das Quadrat davon. Zwischen 40 und 70
+# Prozent stehen (60/30)^2 = 4,0 -- und mehr ist nur zu haben, wenn
+# eine der beiden Stellungen nicht die ist, die auf dem Regler steht.
+# Nachgemessen am Lauf vor diesem Nachtrag: var 6389 gegen 1597, also
+# 4,001. Die Schranke steht deshalb bei 3,5 und der Abstand nach oben
+# ist die Quantisierung auf ganze Helligkeitsstufen.
+VQ=$(( ${V40:-0} * 100 / (${V70:-1} + 1) ))
+echo "        Streuung 40 %% gegen 70 %%: ${VQ} von Hundert (Deckel 400)"
+num "die Streuung bei 40 %% ist mindestens das 3,5-fache der bei 70 %% (x100)" \
+    "$VQ" ge 350
+num "und sie ueberschreitet den Deckel der Blendgleichung nicht (x100)" \
+    "$VQ" le 420
+# UND DER MITTLERE FARBABSTAND DER ZWEI LEISTENGRUENDE. Die Streuung
+# sagt, wie stark das Muster durchschlaegt; sie sagt NICHTS darueber,
+# ob sich die Leiste als Ganzes veraendert hat. Zwoelf Stufen sind die
+# Zahl, ab der ein Mensch zwei Flaechen nebeneinander sicher
+# unterscheidet.
+FABST=$(python3 - "$SHOTS/glas-alpha-70.png" "$SHOTS/glas-alpha-40.png" <<'PYF'
+import sys
+sys.path.insert(0, 'tools/themestore')
+from PIL import Image
+import glascheck as G
+mit = []
+for p in sys.argv[1:3]:
+    im = Image.open(p).convert('RGB')
+    pts = G.leiste(im, 28, 300, 1100)
+    px = [im.getpixel(q) for q in pts]
+    mit.append([sum(c[i] for c in px) / len(px) for i in range(3)])
+print(int(sum(abs(mit[0][i] - mit[1][i]) for i in range(3)) / 3))
+PYF
+)
+num "mittlerer Farbabstand des Leistengrundes zwischen 70 %% und 40 %% (Stufen)" \
+    "${FABST:-0}" ge 12
+# UND DIE 40 PROZENT SIND WIRKLICH 40 PROZENT. `wm: glas alpha_soll=
+# ... hoch=` zaehlt die Bildpunkte, die die Lesbarkeitsschranke
+# angehoben hat. Ueber diesem Bild ist die Zahl null -- die Flaeche
+# traegt die Reglerstellung und nichts anderes. Dass die Schrift
+# trotzdem ihre 4,5:1 haelt, ist ab dieser Runde die Aufgabe des
+# TEXTSCHILDES in kernel/user/taskbar.fi und nicht mehr die der
+# Flaeche.
+GL40=$(grep -a 'wm: glas alpha_soll=' "$TMPD/al40/serial.txt" | tail -1)
+echo "        $GL40"
+num "bei Regler 40 hebt die Lesbarkeitsschranke keinen einzigen Bildpunkt an" \
+    "$(printf '%s' "$GL40" | grep -oE 'hoch=[0-9]+' | cut -d= -f2)" eq 0
+same "und der Server meldet genau die Reglerstellung als Soll" "40" \
+    "$(printf '%s' "$GL40" | grep -oE 'alpha_soll=[0-9]+' | cut -d= -f2)"
+# ---- 11b2. (fix-r4-1) DER TEXTSCHILD TRAEGT DIE LESBARKEIT.
+#
+# Die Leiste malt im Glasmodus unter jede Beschriftung eine Platte,
+# deren drei Kanaele um je 32 Stufen von der Schluesselfarbe abweichen
+# -- in der Summe 96, und das ist genau der Abstand, ab dem das
+# Abstandsalpha in `glass_mix` volle Deckung gibt. Die Schrift steht
+# damit auf einer Flaeche, die der Untergrund NICHT erreicht, und ihr
+# Kontrast haengt nicht mehr an der Reglerstellung.
+echo
+echo "== 11b2. der Textschild der Leiste =="
+SCH=$(grep -a 'taskbar: schild ' "$TMPD/al40/serial.txt" | tail -1)
+SCH100=$(grep -a 'taskbar: schild ' "$TMPD/al100/serial.txt" | tail -1)
+echo "        40 %%: $SCH"
+echo "        100 %%: $SCH100"
+same "bei 40 %% ist der Schild an" "1" \
+    "$(printf '%s' "$SCH" | grep -oE 'an=[0-9]+' | cut -d= -f2)"
+num "und er hat wirklich Platten gemalt" \
+    "$(printf '%s' "$SCH" | grep -oE 'n=[0-9]+' | cut -d= -f2)" ge 2
+same "GEGENPROBE: bei voller Deckung ist er aus" "0" \
+    "$(printf '%s' "$SCH100" | grep -oE 'an=[0-9]+' | cut -d= -f2)"
+num "und dann malt er auch keine einzige Platte" \
+    "$(printf '%s' "$SCH100" | grep -oE 'n=[0-9]+' | cut -d= -f2)" eq 0
+# DIE PLATTE IST WIRKLICH DECKEND -- gerechnet auf dem Wirt aus der
+# gemeldeten Schildfarbe und dem Abstandsalpha. 96 ist die Zahl, ab
+# der `glass_mix` volle Deckung gibt; steht hier weniger, ist die
+# Platte halb durchsichtig und die Zusage waere geraten.
+SFARBE=$(printf '%s' "$SCH" | grep -oE 'farbe=[0-9a-f]+' | cut -d= -f2)
+SGRUND=$(printf '%s' "$SCH" | grep -oE 'grund=[0-9a-f]+' | cut -d= -f2)
+SABST=$(python3 -c "
+import sys
+a = int('${SFARBE:-0}', 16); b = int('${SGRUND:-0}', 16)
+print(sum(abs(((a >> s) & 255) - ((b >> s) & 255)) for s in (0, 8, 16)))")
+num "der Kanalabstand der Platte zur Schluesselfarbe (voll deckend ab 96)" \
+    "${SABST:-0}" ge 96
+# UND DER KONTRAST DER LEISTENSCHRIFT AUF DEM WIRKLICH GEMALTEN GRUND.
+TFG=$(grep -a 'taskbar: text clock ' "$TMPD/al40/serial.txt" | tail -1 \
+      | grep -oE 'fg=[0-9]+' | cut -d= -f2)
+TK=$(python3 tools/themestore/glascheck.py kontrast \
+     "$SHOTS/glas-alpha-40.png" "$(printf '%06x' "${TFG:-0}")")
+echo "        $TK"
+num "die Leistenschrift haelt bei 40 %% ihre 4,5:1 (x100)" \
+    "$(printf '%s' "$TK" | grep -oE '^kontrast [0-9]+' | cut -d' ' -f2)" ge 450
 
 # ---- 11c. MILCHGLAS: WEICHER, UND SCHNELL GENUG.
 bash tools/themestore/build.sh "$TMPD/blur" tbalpha=70 blur=12 \
@@ -1167,6 +1452,93 @@ GK=$(python3 tools/themestore/glascheck.py kontrast \
 echo "        $GK"
 num "und die Leistenschrift haelt auf dem Milchglas ihre 4,5:1 (x100)" \
     "$(printf '%s' "$GK" | grep -oE '^kontrast [0-9]+' | cut -d' ' -f2)" ge 450
+# ---- 11c3. (fix-r4-1) MILCHGLAS, DAS WIRKLICH EIN VERLAUF IST.
+#
+# DER BEFUND: Bild 07 zeigte den Weichzeichner ueber dem GROBEN Muster
+# -- Felder von rund 160 Bildpunkten --, und ein Radius von 16 kann
+# daraus nur weiche NAEHTE machen. Ein Kastenweichzeichner in drei
+# Durchgaengen traegt eine Farbe etwa `3 * r` weit; damit ein Feld
+# vollstaendig in seinen Nachbarn laeuft, muss seine Kantenlaenge
+# hoechstens dreimal so gross sein wie der Radius. Umgestellt ist das
+# die Bedingung, die der Befund nennt: `blur >= Kantenlaenge / 3`.
+#
+# 16 ist der groesste Radius, den die Sprache der Vorlagen zulaesst
+# (`BLUR_MAX`), also muss das MUSTER kleiner werden: ein Schachbrett
+# von vier Bildpunkten im 120x90-Bild, das der Schreibtisch auf
+# 1280x800 dehnt, hat Felder von 1280/120*4 = 42,7 Bildpunkten --
+# 16 >= 42,7/3 = 14,2, die Bedingung ist erfuellt, und unter der
+# Leiste steht danach kein Schachbrett mehr, sondern eine Welle.
+#
+# Die zwei Farben sind die des dunklen Musters, nur weiter
+# auseinander: der Verlauf soll GESTUFT sein und nicht nur
+# angedeutet, und gezaehlt wird er in ganzen Helligkeitsstufen.
+python3 - "$TMPD/fein.osym" <<'FEINPY'
+import struct, sys
+w, h = 120, 90
+a, b = (0x10, 0x12, 0x1A), (0x50, 0x30, 0x78)
+px = bytearray()
+for y in range(h):
+    for x in range(w):
+        c = a if ((x // 4) + (y // 4)) % 2 == 0 else b
+        px += bytes((c[2], c[1], c[0], 0xFF))
+open(sys.argv[1], "wb").write(b"OSYM" + struct.pack("<II", w, h) + bytes(px))
+FEINPY
+for v in 0 16; do
+    bash tools/themestore/build.sh "$TMPD/fein$v" scheme=midnight mode=dark \
+        tbalpha=40 blur="$v" wallpaper="$TMPD/fein.osym" uitrace=yes \
+        keep=yes > "$TMPD/fein$v.log" 2>&1
+done
+cp "$TMPD/fein16/desktop.png" "$SHOTS/glas-milchglas-verlauf.png" 2>/dev/null
+VF0=$(python3 tools/themestore/glascheck.py var "$TMPD/fein0/desktop.png" \
+      | grep -oE '^var [0-9]+' | cut -d' ' -f2)
+VF16=$(python3 tools/themestore/glascheck.py var "$TMPD/fein16/desktop.png" \
+       | grep -oE '^var [0-9]+' | cut -d' ' -f2)
+echo "        feines Muster: var $VF0 ohne, var $VF16 mit Milchglas 16"
+num "feines Muster: die Streuung sinkt unter dem Weichzeichner" \
+    "${VF16:-999999}" lt "${VF0:-0}"
+# UND JETZT DIE ZAHL, DIE DER BEFUND BESTELLT HAT: WIE VIELE
+# HELLIGKEITSSTUFEN STEHEN QUER UEBER DEM LEISTENSTREIFEN -- IM
+# VOLLBILD und nicht im zweifach vergroesserten Ausschnitt von Bild 12.
+# Eine Reihe quer durch den Grund der Leiste, und gezaehlt wird, wie
+# viele verschiedene Helligkeiten darauf vorkommen und wie weit der
+# Weg zwischen der dunkelsten und der hellsten Stelle ist. Zwei
+# Kacheln mit weicher Naht geben zwei Stufen und einen Weg von wenigen
+# Bildpunkten; ein Verlauf gibt viele Stufen ueber viele Bildpunkte.
+VERL=$(python3 - "$TMPD/fein16/desktop.png" "$TMPD/fein0/desktop.png" <<'PYV2'
+import sys
+sys.path.insert(0, 'tools/themestore')
+from PIL import Image
+import glascheck as G
+for p in sys.argv[1:3]:
+    im = Image.open(p).convert('RGB')
+    w, h = im.size
+    y = h - 28 + 14                      # die Mitte des Leistenstreifens
+    zeile = [G.hell(im.getpixel((x, y))) for x in range(300, 1100)]
+    stufen = len(set(zeile))
+    lo = zeile.index(min(zeile))
+    hi = zeile.index(max(zeile))
+    print("%d %d" % (stufen, abs(hi - lo)))
+PYV2
+)
+echo "        Leistenzeile (Vollbild): mit/ohne Milchglas -> $(printf '%s' "$VERL" | tr '\n' '|')"
+VSTUF=$(printf '%s\n' "$VERL" | sed -n 1p | cut -d' ' -f1)
+VWEG=$(printf '%s\n' "$VERL" | sed -n 1p | cut -d' ' -f2)
+VSTUF0=$(printf '%s\n' "$VERL" | sed -n 2p | cut -d' ' -f1)
+num "quer ueber den Leistenstreifen stehen im VOLLBILD so viele Helligkeitsstufen" \
+    "${VSTUF:-0}" ge 20
+num "und der Weg von der dunkelsten zur hellsten Stelle ist so lang (Bildpunkte)" \
+    "${VWEG:-0}" ge 60
+num "GEGENPROBE: ohne Weichzeichner sind es hoechstens eine Handvoll Stufen" \
+    "${VSTUF0:-99}" le 6
+# UND DIE SCHRIFT HAELT AUCH HIER IHRE 4,5:1 -- auf dem Verlauf, der
+# unter ihr steht, und nicht gegen die Farbe aus der Vorlage.
+FFG=$(grep -a 'taskbar: text clock ' "$TMPD/fein16/serial.txt" | tail -1 \
+      | grep -oE 'fg=[0-9]+' | cut -d= -f2)
+FK=$(python3 tools/themestore/glascheck.py kontrast \
+     "$TMPD/fein16/desktop.png" "$(printf '%06x' "${FFG:-0}")")
+echo "        $FK"
+num "die Leistenschrift haelt auf dem Verlauf ihre 4,5:1 (x100)" \
+    "$(printf '%s' "$FK" | grep -oE '^kontrast [0-9]+' | cut -d' ' -f2)" ge 450
 # ---- (fix-r3-4) UND DIE VIER STREIFEN IN EIN BILD, BESCHRIFTET.
 #
 # Bild 12 der Mappe war ein von Hand zusammengesetzter Ausschnitt, und
@@ -1225,6 +1597,27 @@ same "und die fuenfte die des groben Musters ohne Milchglas" \
     "${VG0:-x}" "$(printf '%s\n' "$LVV" | sed -n 5p)"
 same "und die sechste die desselben Musters mit Milchglas 16" \
     "${VG16:-x}" "$(printf '%s\n' "$LVV" | sed -n 6p)"
+# ============================================ RUNDE GLAS (fix-r4-1)
+# DIE VIER AUFNAHMEN DIESES ABSCHNITTS GEHEN IN DIE MAPPE.
+#
+# Bis hierher lagen 04 bis 07 in `docs/shots/glas/` und wurden von
+# Hand dorthin gelegt; welcher Lauf sie gemacht hat, stand nur in der
+# README daneben. Ab jetzt schreibt sie der Lauf selbst, und zwar
+# genau die, die er gerade gemessen hat -- Bild und Zahl kommen damit
+# aus demselben Durchgang.
+for paar in "glas-alpha-100:04-taskleiste-100-deckend" \
+            "glas-alpha-70:05-taskleiste-70-prozent" \
+            "glas-alpha-40:06-taskleiste-40-prozent" \
+            "glas-milchglas-verlauf:07-milchglas-blur16-verlauf"; do
+    cp "$SHOTS/${paar%%:*}.png" "$GSHOTS/${paar##*:}.png" 2>/dev/null
+done
+GFEHLT=0
+for b in 04-taskleiste-100-deckend 05-taskleiste-70-prozent \
+         06-taskleiste-40-prozent 07-milchglas-blur16-verlauf; do
+    [ -s "$GSHOTS/$b.png" ] || GFEHLT=$((GFEHLT+1))
+done
+num "die vier Aufnahmen 04 bis 07 der Mappe stammen aus DIESEM Lauf" \
+    "$GFEHLT" eq 0
 GL=$(grep -a 'wm: glas r=' "$TMPD/blur/serial.txt" | tail -1)
 BUS=$(printf '%s' "$GL" | grep -oE ' max=[0-9]+' | grep -oE '[0-9]+')
 BPX=$(printf '%s' "$GL" | grep -oE ' px=[0-9]+' | grep -oE '[0-9]+')
@@ -1256,6 +1649,84 @@ num "der Streifen wurde mehr als einmal gebraucht (cache $GLC)" \
     "$(printf '%s' "$GLC" | cut -d/ -f2)" ge 2
 num "und dabei wiederverwendet statt neu gerechnet" \
     "$(printf '%s' "$GLC" | cut -d/ -f1)" ge 1
+
+# ---- 11c3. MILCHGLAS UNTER EINEM DURCHSICHTIGEN FENSTER (fix-r4-4).
+#
+# DER BEFUND: die Leiste ist 28 Bildpunkte hoch. Auf 28 Bildpunkten
+# MISST man einen Weichzeichner (`var` faellt, die Farbzahl steigt), und
+# auf dem Bild sieht man einen schmalen Streifen, von dem ein Mensch
+# nicht sagen kann, ob er verwischt oder nur halb durchsichtig ist. Die
+# Jury hat genau das angemerkt, und die Abhilfe ist nicht eine schoenere
+# Beschriftung, sondern eine groessere FLAECHE: seit dieser Runde
+# bekommt auch ein durchsichtiges FENSTER sein Glas
+# (`wm.paint_win`, Suchwort "fix-r4-4"), und 760 x 566 Bildpunkte
+# zeigen einen Verlauf, auf den man zeigen kann.
+#
+# DIE MESSUNG VERGLEICHT ZWEI GLASLAEUFE UND NICHT GLAS GEGEN KEIN
+# GLAS, und das ist mit Absicht: beide Laeufe sind gleich durchsichtig
+# (`window_alpha=55`), beide mischen durch dieselbe eine Stelle, und
+# der EINZIGE Unterschied ist der Radius des Kastens -- 16 gegen 2.
+# Was dann noch an der Streuung faellt und an Farbstufen dazukommt, ist
+# der Weichzeichner und sonst nichts. Ein Vergleich gegen `blur=0`
+# haette zwei Sachen auf einmal geaendert und waere deshalb keine
+# Messung dieser einen.
+for b in 16 2; do
+    bash tools/themestore/build.sh "$TMPD/wglas$b" extra='einst' \
+        winalpha=55 blur="$b" wallpaper=hellgrob uitrace=yes keep=yes \
+        > "$TMPD/wglas$b.log" 2>&1
+done
+# DER AUSSCHNITT WIRD NICHT GERATEN, sondern aus dem Rechteck genommen,
+# das das Programm selbst gemeldet hat: die unterste freie Zeile des
+# Fensterrumpfes, acht Bildpunkte innerhalb der Raender. Dort steht
+# keine Schrift, und quer durch sie laeuft eine Kante des Musters --
+# genau die Kante, die der Weichzeichner zu einem Verlauf machen soll.
+WR=$(grep -ao 'settings: rect name=win x=[0-9]* y=[0-9]* w=[0-9]* h=[0-9]*' \
+     "$TMPD/wglas16/serial.txt" | tail -1)
+WGX=$(printf '%s' "$WR" | grep -oE 'x=[0-9]+' | cut -d= -f2)
+WGY=$(printf '%s' "$WR" | grep -oE 'y=[0-9]+' | cut -d= -f2)
+WGW=$(printf '%s' "$WR" | grep -oE 'w=[0-9]+' | cut -d= -f2)
+WGH=$(printf '%s' "$WR" | grep -oE 'h=[0-9]+' | cut -d= -f2)
+FY1=$(( ${WGY:-3} + ${WGH:-566} - 2 ))
+FY0=$(( FY1 - 18 ))
+FX0=$(( ${WGX:-20} + 8 ))
+FX1=$(( ${WGX:-20} + ${WGW:-760} - 8 ))
+num "das durchsichtige Fenster ist breit genug fuer einen Verlauf" \
+    "$(( FX1 - FX0 ))" ge 600
+for b in 16 2; do
+    eval "VF$b=\$(python3 tools/themestore/glascheck.py var \
+        \"\$TMPD/wglas$b/desktop.png\" --x0=$FX0 --x1=$FX1 --y0=$FY0 \
+        --y1=$FY1 | grep -oE '^var [0-9]+' | cut -d' ' -f2)"
+    eval "FF$b=\$(python3 tools/themestore/glascheck.py var \
+        \"\$TMPD/wglas$b/desktop.png\" --x0=$FX0 --x1=$FX1 --y0=$FY0 \
+        --y1=$FY1 | grep -oE 'farben [0-9]+' | cut -d' ' -f2)"
+done
+echo "        Fensterausschnitt ($FX0..$FX1, $FY0..$FY1):" \
+     "var $VF16 ($FF16 Farben) mit Milchglas 16," \
+     "var $VF2 ($FF2 Farben) mit 2"
+num "unter dem durchsichtigen Fenster SINKT die Streuung mit dem Radius" \
+    "${VF16:-999999}" lt "${VF2:-0}"
+num "und aus der Kante des Musters ist ein Verlauf mit vielen Stufen geworden" \
+    "${FF16:-0}" ge 12
+num "GEGENPROBE: mit Radius 2 sind es deutlich weniger Stufen" \
+    "${FF2:-99}" lt "${FF16:-0}"
+# UND DAS GLAS IST WIRKLICH UNTER DEM FENSTER GERECHNET WORDEN und
+# nicht nur unter der Leiste: die Meldung des Kerns nennt die Flaeche,
+# und die eines Fensters ist ein Vielfaches der 28 Zeilen der Leiste.
+WGPX=$(grep -aoE 'wm: glas r=16 px=[0-9]+' "$TMPD/wglas16/serial.txt" \
+       | grep -oE 'px=[0-9]+' | cut -d= -f2 | sort -n | tail -1)
+num "der Weichzeichner hat die FLAECHE eines Fensters bearbeitet (Bildpunkte)" \
+    "${WGPX:-0}" ge 100000
+cp "$TMPD/wglas16/desktop.png" "$SHOTS/glas-milchglas-fenster.png" 2>/dev/null
+mkdir -p "$GSHOTS"
+cp "$TMPD/wglas16/desktop.png" \
+   "$GSHOTS/07-milchglas-unter-durchsichtigem-fenster.png" 2>/dev/null
+WGO=$(python3 tools/themestore/shotcheck.py "$TMPD/wglas16/desktop.ppm" \
+      "$TMPD/wglas16/serial.txt" 2>&1 | head -1)
+echo "        Bild 07: $WGO"
+for feld in empty cut overlapping; do
+    num "Bild 07 (Milchglas unterm Fenster): $feld" \
+        "$(printf '%s' "$WGO" | grep -oE "$feld [0-9]+" | grep -oE '[0-9]+')" eq 0
+done
 
 # ---- 11d. LESBAR BLEIBT LESBAR -- GEGEN DEN GEMISCHTEN GRUND.
 #
@@ -1517,6 +1988,36 @@ num "genau eine Stelle im Fensterserver malt ein rundes Rechteck" "$RR" eq 1
 num "und genau eine mischt" "$BL" eq 1
 GM=$(grep -ac '^fn glass_mix(' kernel/ui/wm.fi)
 num "und genau eine entscheidet, wie deckend ein Punkt ist" "$GM" eq 1
+# ---- (fix-r4-4) UND DER ECKENABTASTER STEHT NUR NOCH EINMAL IM BAUM.
+#
+# `corner_cov` stand wortgleich zweimal da -- `wm.fi:1571` fuer den
+# Fensterserver und `wlibc.fi:810` fuer die Widget-Bibliothek --, und
+# beide Fassungen trugen den Kommentar, sie seien dieselbe Rechnung wie
+# die andere. Eine Zusage, die ein Mensch beim Bearbeiten einhalten
+# muss, ist keine: wer die Abtastung auf einer Seite aendert, sieht in
+# einem Dialog die Ecke des Knopfes anders gekruemmt als die Ecke des
+# Fensters darum. Seit dieser Runde liegt sie in `lib/ecke.fi`, also in
+# dem einen Verzeichnis, das der Kernbau UND jedes Ring-3-Programm
+# schon durchsuchen (FIRNLIB) -- und hier wird der GANZE Baum gezaehlt
+# und nicht eine Datei gefragt. `vendor/` bleibt aussen vor: das ist
+# fremder Quelltext (fui hat seine eigene `corner_coverage`), und ihn
+# zu zaehlen hiesse, eine Zusage ueber Code abzugeben, den diese Runde
+# nicht schreibt.
+CC=$(grep -rac '^fn corner_cov(' --include=*.fi kernel/ lib/ module/ pkg/ \
+     2>/dev/null | awk -F: '{ n += $2 } END { print n+0 }')
+num "der Eckenabtaster steht GENAU EINMAL im Baum (ausser vendor/)" "$CC" eq 1
+same "und zwar in lib/ecke.fi, wo beide Ringe ihn uebersetzen" "lib/ecke.fi" \
+    "$(grep -rla '^fn corner_cov(' --include=*.fi kernel/ lib/ module/ pkg/ \
+       2>/dev/null | head -1)"
+# GEGENPROBE: ein zweiter Abtaster, auf dem Wirt danebengelegt, MUSS
+# gefunden werden -- sonst misst die Zeile darueber nur, dass `grep`
+# laeuft.
+printf 'fn corner_cov(dx: u64) -> u64 {\n    return 0\n}\n' \
+    > lib/.zweiter-abtaster-probe.fi
+CC2=$(grep -rac '^fn corner_cov(' --include=*.fi kernel/ lib/ module/ pkg/ \
+      2>/dev/null | awk -F: '{ n += $2 } END { print n+0 }')
+rm -f lib/.zweiter-abtaster-probe.fi
+num "GEGENPROBE: ein zweiter Abtaster im Baum wird gefunden" "$CC2" eq 2
 # UND DIESELBE FRAGE AN DEN GANZEN BAUM, nicht an eine Datei.
 #
 # Die drei Zeilen darueber fragen kernel/ui/wm.fi. Das ist eine Zusage
@@ -1530,7 +2031,30 @@ num "und genau eine entscheidet, wie deckend ein Punkt ist" "$GM" eq 1
 # (jemand hat einen siebten Mischer gebaut), ein Eintrag ohne Fund
 # auch (die Liste ist veraltet).
 LISTE=tools/themestore/raster.liste
-grep -rEona '^fn [a-z_0-9]*(round|blend|mix8|rrect)[a-z_0-9]*\(' kernel/ \
+# ======================================== RUNDE GLAS (fix-r4-1)
+# DAS SUCHMUSTER FRAGT JETZT AUCH DEUTSCH.
+#
+# Bis hierher hiess es `round|blend|mix8|rrect` -- also englisch, und
+# damit blieben sieben Funktionen dieses Baums ungefragt, die alle
+# runden oder mischen: `vektor.rundeck`, `wlibc.v_rundeck`, `wm.mix24`,
+# `wm.anim_mix`, `wlibc.mix`, `wlib.ta_mix` und `wlib.ta_misch`. Eine
+# Zusage "kein zweiter Ort", deren Muster den halben Baum nicht sieht,
+# ist keine.
+#
+# WARUM NICHT DAS NACKTE `fill_`, `ring_` UND `eck`, wie der Befund es
+# vorschlug: `fill_` faengt `fill_words` (eine Speicherfuellung),
+# `ring_` faengt die DMA-Ringpuffer der Tonkarten (`ring_base`,
+# `ring_frames`, `ring_octets`) und sogar `bring_up`, und `eck` faengt
+# JEDES `check` dieses Baums -- in der Summe neunzig Namen ohne einen
+# einzigen Bildpunkt. Neunzig Eintraege in `raster.liste` waeren eine
+# Ausnahmeliste und keine Begruendung. Das Muster nennt deshalb die
+# MALVERBEN beim Namen (`fill_round`, `fill_clip`, `fill_a`,
+# `ring_round`) und bei den Woertern, die eine Rundung oder eine
+# Mischung heissen, die ganze Wortform (`ecke` statt `eck`). Gemessen:
+# 63 Funde statt 21, jeder mit einem Satz in der Liste.
+RASTERPAT='^fn [a-z_0-9]*(round|blend|mix8|rrect|rund|ecke|deckung|misch'
+RASTERPAT="$RASTERPAT|mix|fill_a|fill_clip|fill_round|ring_round)[a-z_0-9]*\\("
+grep -rEona "$RASTERPAT" kernel/ \
     --include=*.fi | sed 's/:[0-9]*:fn / /' | sed 's/($//' | sort -u \
     > "$TMPD/raster.gefunden"
 grep -avE '^\s*(#|$)' "$LISTE" | awk '{ print $1, $2 }' | sort -u \
@@ -1542,7 +2066,21 @@ num "jeder Rasterer und Mischer im BAUM steht in $LISTE mit Begruendung" \
     "$RFEHLT" eq 0
 num "und kein Eintrag der Liste ist verwaist" "$RALT" eq 0
 num "es sind wirklich Funde gemessen worden" \
-    "$(grep -c . "$TMPD/raster.gefunden")" ge 15
+    "$(grep -c . "$TMPD/raster.gefunden")" ge 60
+# GEGENPROBE, UND ZWAR DIE EINZIGE, DIE ETWAS BEWEIST: eine erfundene
+# Mischfunktion wird auf dem Wirt in den Baum gelegt, und die Probe
+# darueber MUSS sie finden. Ohne sie misst "0 fehlen" nur, dass `comm`
+# laeuft. Der Name traegt absichtlich kein englisches Wort -- genau
+# der Fall, den das alte Muster durchgelassen haette.
+printf 'fn zweimischer(a: u64, b: u64) -> u64 {\n    return (a + b) / 2\n}\n' \
+    > kernel/user/.zweimischer-probe.fi
+grep -rEona "$RASTERPAT" kernel/ \
+    --include=*.fi | sed 's/:[0-9]*:fn / /' | sed 's/($//' | sort -u \
+    > "$TMPD/raster.gegenprobe"
+rm -f kernel/user/.zweimischer-probe.fi
+RGEG=$(comm -23 "$TMPD/raster.gegenprobe" "$TMPD/raster.erlaubt" | wc -l)
+num "GEGENPROBE: eine untergeschobene 'fn zweimischer(' faellt auf" \
+    "$RGEG" eq 1
 # Und jeder Eintrag traegt einen SATZ und nicht nur zwei Woerter --
 # eine Liste ohne Begruendung waere eine Ausnahmeliste.
 RKURZ=$(grep -avE '^\s*(#|$)' "$LISTE" | awk 'NF < 8 { n++ } END { print n+0 }')
@@ -2013,7 +2551,14 @@ echo "== 11j2. jeder gemeldete Knopf zeigt einen Umriss =="
 # dieser Pruefer. Eine Bildpunktprobe gegen gemeldete Rechtecke einer
 # ANDEREN Seite misst nichts. `set` (Darstellung) und `winal` (dasselbe
 # mit window_alpha=55) tragen zusammen jeden Knopf, um den es geht.
-for pair in "set:Darstellung" "winal:durchsichtig"; do
+#
+# ---- (fix-r4-1) UND DIE SEITE VORLAGEN IST DAZUGEKOMMEN, denn dort
+# stand der Fall, den diese Probe bis hierher nicht sehen konnte: der
+# Knopf "Mit Konto verknuepfen" HATTE einen Umriss, nur war seine
+# Beschriftung breiter als er selbst (156 gegen 150 Bildpunkte), und
+# der Rahmen lief mitten durch das Wort. `shotcheck.py --knoepfe`
+# zaehlt das jetzt als `ueberstand`.
+for pair in "set:Darstellung" "winal:durchsichtig" "setv:Vorlagen"; do
     d=${pair%%:*}; nm=${pair##*:}
     KO=$(python3 tools/themestore/shotcheck.py "$TMPD/$d/desktop.ppm" \
          "$TMPD/$d/serial.txt" --knoepfe 2>&1)
@@ -2022,8 +2567,42 @@ for pair in "set:Darstellung" "winal:durchsichtig"; do
     num "Seite $nm: Knoepfe ohne jede Umrisskante" \
         "$(printf '%s' "$KO" | grep -oE 'ohnekante [0-9]+' | cut -d' ' -f2)" \
         eq 0
+    num "Seite $nm: Beschriftungen, die ueber ihren Knopf hinausragen" \
+        "$(printf '%s' "$KO" | grep -oE 'ueberstand [0-9]+' | cut -d' ' -f2)" \
+        eq 0
     printf '%s\n' "$KO" | grep -a KNOPF | sed 's/^/        /' || true
 done
+# GEGENPROBE ZUM UEBERSTAND: dieselbe Seite, aber jedem gemeldeten
+# Knopf auf dem WIRT zwanzig Bildpunkte Breite weggenommen. Dann muss
+# mindestens eine Beschriftung ueberstehen -- sonst misst die Zeile
+# darueber nichts.
+UEB=$(python3 - "$TMPD/setv/desktop.ppm" "$TMPD/setv/serial.txt" <<'PYU'
+import re
+import sys
+sys.path.insert(0, 'tools/themestore')
+import shotcheck as S
+pic = S.Pic(sys.argv[1])
+texts, wins, font = S.parse(sys.argv[2])
+# Dasselbe Fenster wie in `main`: das mit den meisten Beschriftungen.
+zaehl = {}
+for t in texts:
+    zaehl[t["win"]] = zaehl.get(t["win"], 0) + 1
+win = max(zaehl, key=lambda k: zaehl[k])
+texts = [t for t in texts if t["win"] == win and t["t"].strip()]
+w = wins[win]
+roh = open(sys.argv[2], "rb").read().decode("latin1")
+schnitt = roh.rfind("settings: rect name=waa ")
+tail = roh[schnitt:] if schnitt >= 0 else roh
+# Jeder Knopf zwanzig Bildpunkte schmaler, alles andere unveraendert.
+eng = re.sub(r"(wlib: knopf x=\d+ y=\d+ w=)(\d+)",
+             lambda m: m.group(1) + str(max(int(m.group(2)) - 20, 9)), tail)
+gem, ohne, ueber, bad = S.knoepfe_messen(
+    pic, eng, w["cx"], w["cy"], w["w"], w["h"], None, texts)
+print(ueber)
+PYU
+)
+num "GEGENPROBE: schmaler gerechnete Knoepfe lassen ihre Beschriftung ueberstehen" \
+    "${UEB:-0}" ge 1
 # GEGENPROBE: derselbe Knopf, auf dem WIRT mit der Farbe seiner Karte
 # uebermalt, MUSS auffallen. Ohne sie waere "0 ohne Kante" auch dann
 # gruen, wenn dieses Werkzeug gar nichts prueft.
@@ -2156,6 +2735,24 @@ num "GEGENPROBE: ein uebermaltes 'r' wird gefunden" \
     "$(printf '%s' "$NL" | grep -oE 'ohnetinte=[0-9]+' | cut -d= -f2)" ge 1
 
 echo
-echo "THEMESTORE: $pass passed, $fail failed"
+# DIE SCHLUSSZEILE NENNT DIE ZAHL DER GEPRUEFTEN ZUSAGEN (fix-r4-4).
+#
+# "0 passed, 0 failed" sah in jedem Protokoll aus wie ein Erfolg --
+# kein rotes Zeichen, kein Hinweis. Ein Lauf, der irgendwo unterwegs
+# abgebrochen ist (kein QEMU, kein Uebersetzer, eine Aenderung, die
+# einen ganzen Abschnitt ueberspringt), muss daran erkennbar sein, dass
+# er ZU WENIG gemessen hat. Die Untergrenze ist bewusst weit unter dem
+# heutigen Stand (ueber 230): sie faengt den Abbruch, nicht das
+# Wachstum, und sie steht hier als Zahl, damit niemand sie fuer ein
+# Gefuehl haelt.
+MINDEST=200
+GESAMT=$((pass + fail))
+echo "THEMESTORE: $pass passed, $fail failed ($GESAMT Zusagen geprueft," \
+     "Mindestzahl $MINDEST)"
+if [ "$GESAMT" -lt "$MINDEST" ]; then
+    echo "THEMESTORE: ABGEBROCHEN -- nur $GESAMT Zusagen geprueft," \
+         "das ist kein gruener Lauf"
+    exit 1
+fi
 [ "$fail" -eq 0 ] || exit 1
 exit 0

@@ -1603,40 +1603,12 @@ fn cap_hits(state: u64) -> u64 {
 // der Kernbau und jedes Ring-3-Programm schon durchsuchen, also
 // liegt sie dort; `aa_px` unten liest den Zaehler des Abtasters.
 
-// WIE VIELE SPALTEN EINER ZEILE DIE RUNDUNG FRISST.
-//
-// Dieselbe Kreisgleichung wie in `corner_cov`, nur andersherum
-// gefragt: `corner_cov` sagt, WIE DECKEND ein Bildpunkt ist, und diese
-// Funktion sagt, ab welcher Spalte er VOLL deckend ist. Sie ist die
-// Antwort auf die Frage, die eine zeilenweise Kopie stellt -- die
-// Anwendungsflaeche wird wortweise kopiert und kann kein Alpha tragen,
-// also muss sie dort AUFHOEREN, wo die Rundung anfaengt, statt sie zu
-// uebermalen (siehe `paint_win`).
-//
-// `dyv` ist der Abstand der Zeile von der AEUSSEREN Kante, 0 fuer die
-// letzte. Voll gedeckt ist ein Bildpunkt, wenn seine vom Kreismittel
-// am weitesten entfernte Ecke noch im Kreis liegt -- dieselbe erste
-// Abkuerzung, die `corner_cov` oben nimmt, und deshalb sind die
-// beiden Zahlen nicht nur aehnlich, sondern dieselbe Grenze.
-fn corner_skip(r: u64, dyv: u64) -> u64 {
-    if r == 0 || dyv >= r {
-        return 0
-    }
-    let rr: u64 = r *% r
-    let b: u64 = (r - dyv) *% (r - dyv)
-    if b >= rr {
-        return r
-    }
-    var dx: u64 = 0
-    while dx < r {
-        let a: u64 = r - dx
-        if a *% a + b <= rr {
-            return dx
-        }
-        dx = dx + 1
-    }
-    return r
-}
+// UND DIE ZWEITE HAELFTE DERSELBEN AUSKUNFT, `ecke.corner_skip`, sagt
+// AB WELCHER SPALTE eine Zeile voll gedeckt ist. Sie steht in
+// derselben Datei und wird von der zeilenweisen Kopie der
+// Anwendungsflaeche gebraucht (`paint_win`): wortweise kopierte
+// Bildpunkte koennen kein Alpha tragen, also muessen sie dort
+// aufhoeren, wo die Rundung anfaengt, statt sie zu uebermalen.
 
 // Ein Rechteck, auf den schmutzigen Bereich beschnitten. Der Beschnitt
 // steht EINMAL hier und nicht sechsmal in `paint_win`.
@@ -5933,14 +5905,25 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     // rechter Winkel -- ein Fenster mit zwei verschiedenen Formen.
     //
     // Die Abhilfe rechnet KEINE zweite Rundung, sie laesst nur die
-    // Bildpunkte stehen, die schon rund sind: `corner_skip` sagt fuer
-    // jede der untersten `radius` Zeilen, wie viele Spalten am Rand
-    // NICHT vollstaendig innerhalb des Eckkreises liegen; genau die
-    // ueberspringt die Kopie, und dort bleibt die kantengeglaettete
-    // Fuellung von `fill_round` sichtbar. Ein Bildpunkt weniger
-    // Anwendungsflaeche in der Ecke einer Karte ist das, was eine
-    // Rundung IST -- und der Innenraum verschiebt sich dabei nicht,
-    // denn `sx0` und die Zeilennummer bleiben unveraendert.
+    // Bildpunkte stehen, die schon rund sind: `ecke.corner_skip` sagt
+    // fuer jede der untersten `radius` Zeilen, wie viele Spalten am
+    // Rand NICHT vollstaendig innerhalb des Eckkreises liegen; genau
+    // die ueberspringt die Kopie, und dort bleibt die
+    // kantengeglaettete Fuellung von `fill_round` sichtbar. Ein
+    // Bildpunkt weniger Anwendungsflaeche in der Ecke einer Karte ist
+    // das, was eine Rundung IST -- und der Innenraum verschiebt sich
+    // dabei nicht, denn `sx0` und die Zeilennummer bleiben
+    // unveraendert.
+    //
+    // UND DER INNERSTE TEILGEDECKTE BILDPUNKT BEKOMMT SEINEN ANTEIL.
+    // Ohne ihn endete die Anwendungsflaeche an einer harten Kante und
+    // der Bogen daneben trug nur die Rahmenfarbe -- gemessen mit
+    // `glascheck.py ecke ... ul`: zwoelf Zeilen mit Mischton gegen
+    // achtzehn an der oberen Ecke, also sichtbar weniger Glaettung
+    // unten als oben. Dieser eine Bildpunkt je Zeile und Seite geht
+    // durch `px_clip` und damit durch dieselbe `blend`-Arithmetik wie
+    // alles andere; gemischt wird die Farbe, die die Anwendung selbst
+    // an diese Stelle gemalt hat.
     let rad: u64 = form(state, FM_RADIUS)
     let bo: i64 = border(state) as i64
     let cw: i64 = wg(state, i, W_W) as i64
@@ -5977,7 +5960,14 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
         var rx1: i64 = sx1
         let dyb: i64 = wy + oh - 1 - r
         if rad > 0 && dyb >= 0 && dyb < rad as i64 {
-            let sk: i64 = corner_skip(rad, dyb as u64) as i64 - bo
+            // `skr` zaehlt vom FENSTERRAND, die Flaeche faengt eine
+            // Rahmenbreite weiter innen an -- und sie hoert deshalb
+            // auch eine Rahmenbreite VOR dem Bogen auf. Ohne dieses
+            // `+ bo` stiesse die Anwendungsflaeche in der Ecke
+            // unmittelbar an den Bogen, und der Rahmen, der an der
+            // geraden Unterkante zwei Bildpunkte breit ist, waere an
+            // der Rundung gar nicht da.
+            let sk: i64 = ecke.corner_skip(rad, dyb as u64) as i64
             if sk > 0 {
                 rx0 = imax(rx0, px0 + sk)
                 rx1 = imin(rx1, px0 + cw - sk)
@@ -6817,7 +6807,18 @@ fn glass_mix(alt: u64, neu: u64, key: u64, alpha: u64,
     } else {
         dl = lk - lg
     }
-    if dl > schleier {
+    // RUNDE GLAS (fix-r4-2): `schleier == 0` HEISST "KEIN SCHLEIER" UND
+    // NICHT "GAR NICHTS DARF DURCH".
+    //
+    // Die Rechnung darunter loest |L(misch) - L(key)| <= schleier nach
+    // der Deckung auf. Fuer schleier = 0 ist die Loesung a = 100 --
+    // mathematisch richtig und als Regel genau verkehrt herum: ein
+    // Fenster, das seine Lesbarkeit ueber die Textplatte holt und
+    // deshalb KEINEN Schleier braucht, waere damit vollstaendig
+    // deckend geworden. Gemessen, bevor diese Zeile stand: ein Fenster
+    // bei 55 Prozent unterschied sich in 114 von 41 000 abgetasteten
+    // Bildpunkten von demselben Fenster bei 100 Prozent.
+    if schleier > 0 && dl > schleier {
         let amin: u64 = 100 - schleier * 100 / dl
         if amin > a {
             a = amin
@@ -10818,15 +10819,33 @@ fn drag_klemmen(state: u64, i: u64) {
     // UND ES WIRD GESAGT. Eine Endlage, die der Server selbst gesetzt
     // hat, ist fuer jeden Laeufer sonst ein Raetsel: er hat nach
     // `400,600` gezogen und findet das Fenster bei `400,512`.
+    // Und die Stelle VOR dem Klemmen steht daneben: aus ihr rechnet
+    // `tools/themestore/run.sh` die Schnittflaeche mit der Leiste noch
+    // einmal nach, und zwar auf dem Wirt. Ohne sie gaebe es fuer die
+    // Flaeche, die der Server waehrend des Zuges gesehen hat, nur noch
+    // seine eigene Zahl -- und eine Zahl, die sich selbst bestaetigt,
+    // ist in dieser Abnahme keine.
     var s_k: [u8; 17] = "wm: geklemmt id=\0"
     var s_x: [u8; 4] = " x=\0"
     var s_y: [u8; 4] = " y=\0"
+    var s_vx: [u8; 7] = " vorx=\0"
+    var s_vy: [u8; 7] = " vory=\0"
+    var s_aw: [u8; 4] = " w=\0"
+    var s_ah: [u8; 4] = " h=\0"
     serial.puts((&s_k[0]) as u64)
     serial.dec(wg(state, i, W_ID))
     serial.puts((&s_x[0]) as u64)
     serial.dec(nx as u64)
     serial.puts((&s_y[0]) as u64)
     serial.dec(ny as u64)
+    serial.puts((&s_vx[0]) as u64)
+    serial.dec(wx0 as u64)
+    serial.puts((&s_vy[0]) as u64)
+    serial.dec(wy0 as u64)
+    serial.puts((&s_aw[0]) as u64)
+    serial.dec(aw as u64)
+    serial.puts((&s_ah[0]) as u64)
+    serial.dec(ah as u64)
     serial.nl()
 }
 
