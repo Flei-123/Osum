@@ -173,12 +173,129 @@ def rgb(v):
     return [str((v >> 16) & 255), str((v >> 8) & 255), str(v & 255)]
 
 
+# ================================================ RUNDE GLAS (nachtrag)
+# DERSELBE PRUEFER FUER EINE ZEILE IM TERMINALFENSTER.
+#
+# Der Anlass: auf jeder Aufnahme der Runde GLAS stand
+# "KEIN EINZIGES GERT!" -- `wm.term_putc` hat die zwei Oktette des Ä
+# verschluckt. Kein Werkzeug dieses Baums konnte das melden: dieses
+# hier misst nur, was Ring 3 ueber `wlib: text` meldet, und das
+# Terminal malt durch den KERN, Zelle fuer Zelle, in der
+# Festbreitenschrift.
+#
+# `--gitter` misst genau diesen Fall. Die Lage kommt NICHT aus einer
+# Rechnung dieses Programms, sondern aus der Zeile, die der Kern selbst
+# druckt (`wm: termgitter win= x= y= cellw= cellh= asc= px=`): Spalte c
+# beginnt bei x + c * cellw, die Grundlinie der Zeile r liegt bei
+# y + r * cellh + asc. Gerechnet wird dann von `checkshot.py tgrid`,
+# demselben zweiten Rasterer, den tools/wm/run.sh seit Runde K10
+# benutzt.
+GITTER = re.compile(
+    rb"wm: termgitter win=(\d+) x=(\d+) y=(\d+) cellw=(\d+) cellh=(\d+)"
+    rb" asc=(\d+) px=(\d+)")
+
+
+def gitter(roh):
+    treffer = None
+    for m in GITTER.finditer(roh):
+        treffer = m
+    if treffer is None:
+        return None
+    return tuple(int(treffer.group(i)) for i in range(2, 8))
+
+
+def grundfarben(ppm, x0, y0, x1, y1):
+    """Grund und Schrift einer Terminalzeile, AUS DEM BILD gelesen.
+
+    Die Farben eines Terminalfensters kommen aus dem Farbschema und
+    stehen auf keiner Leitung -- anders als bei `wlib: text`, wo das
+    Programm sein `fg=`/`bg=` selbst meldet. Sie sind aber im Bild
+    eindeutig: der Grund ist die haeufigste Farbe der Zeile, die
+    Schrift die, die am weitesten von ihm entfernt ist. Zwischentoene
+    liegen zwischen beiden und koennen keines von beiden sein.
+    """
+    b = open(ppm, "rb").read()
+    if not b.startswith(b"P6"):
+        return None
+    felder = []
+    at = 2
+    while len(felder) < 3:
+        while at < len(b) and b[at:at + 1].isspace():
+            at += 1
+        if b[at:at + 1] == b"#":
+            while b[at:at + 1] not in (b"\n", b""):
+                at += 1
+            continue
+        a = at
+        while at < len(b) and not b[at:at + 1].isspace():
+            at += 1
+        felder.append(int(b[a:at]))
+    at += 1
+    w, h = felder[0], felder[1]
+    zaehl = {}
+    for y in range(max(y0, 0), min(y1, h)):
+        for x in range(max(x0, 0), min(x1, w)):
+            o = at + (y * w + x) * 3
+            p = (b[o], b[o + 1], b[o + 2])
+            zaehl[p] = zaehl.get(p, 0) + 1
+    if not zaehl:
+        return None
+    hg = max(zaehl, key=lambda k: zaehl[k])
+    vg = max(zaehl, key=lambda k: sum(abs(k[i] - hg[i]) for i in range(3)))
+    return vg, hg
+
+
+def term_pruefen(serial, ppm, text, zeile, spalte, tol, zeichen):
+    roh = open(serial, "rb").read()
+    g = gitter(roh)
+    if g is None:
+        print("umlaut: [%s] keine `wm: termgitter`-Zeile im Mitschnitt"
+              % zeichen)
+        return 1
+    x0, y0, cw, chh, asc, px = g
+    ax = x0 + spalte * cw
+    ay = y0 + zeile * chh + asc
+    farben = grundfarben(ppm, ax, ay - asc, ax + len(text) * cw, ay + 4)
+    if farben is None:
+        print("umlaut: [%s] die Zeile %d ist im Bild nicht zu finden"
+              % (zeichen, zeile))
+        return 1
+    vg, hg = farben
+    r = subprocess.run(
+        ["python3", "tools/gfx/checkshot.py", "tgrid", ppm,
+         "assets/osum-mono.ttf", str(px), str(x0), str(y0),
+         str(cw), str(chh), str(zeile), str(spalte)]
+        + [str(v) for v in vg] + [str(v) for v in hg] + [text, tol],
+        capture_output=True, text=True)
+    kopf = r.stdout.strip().split("\n")[0] if r.stdout else r.stderr.strip()
+    print("umlaut: [%s] termgitter zeile=%d spalte=%d x=%d y=%d "
+          "fg=%02x%02x%02x bg=%02x%02x%02x tol=%s -- %s"
+          % (zeichen, zeile, spalte, ax, ay, vg[0], vg[1], vg[2],
+             hg[0], hg[1], hg[2], tol, kopf))
+    for z in r.stdout.strip().split("\n")[1:]:
+        print("        " + z)
+    return r.returncode
+
+
 def main(argv):
     if len(argv) < 4:
         print("umlaut: <serial> <ppm> <fenstertitel> <text> [toleranz]")
+        print("        <serial> <ppm> --gitter=<zeile>,<spalte> <text> "
+              "[toleranz]")
         return 2
     kette = "--kette" in argv
     argv = [x for x in argv if x != "--kette"]
+    # `--gitter=zeile,spalte` steht an der Stelle des Fenstertitels:
+    # eine Terminalzeile hat keinen, sie hat ein Raster.
+    if argv[2].startswith("--gitter="):
+        text = argv[3]
+        zeichen = "".join(sorted(set(c for c in text if c in "äöüÄÖÜß")))
+        if not zeichen:
+            print("umlaut: %r traegt gar keinen Umlaut" % text)
+            return 2
+        zeile, spalte = (int(v) for v in argv[2].split("=", 1)[1].split(","))
+        return term_pruefen(argv[0], argv[1], text, zeile, spalte,
+                            argv[4] if len(argv) > 4 else "0", zeichen)
     serial, ppm, titel, text = argv[0], argv[1], argv[2], argv[3]
     tol = argv[4] if len(argv) > 4 else "0"
     zeichen = "".join(sorted(set(c for c in text if c in "äöüÄÖÜß")))
