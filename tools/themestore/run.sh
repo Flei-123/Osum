@@ -737,14 +737,31 @@ BPX=$(printf '%s' "$GL" | grep -oE ' px=[0-9]+' | grep -oE '[0-9]+')
 echo "        Weichzeichner: $GL"
 num "der Weichzeichner meldet seine Zeit je Vollbild (Mikrosekunden, QEMU/TCG)" \
     "${BUS:-0}" gt 0
-num "und sie bleibt unter einer Fuenftelsekunde" "${BUS:-999999999}" lt 200000
+# DIE SCHRANKE IST DIE EINES EMULIERTEN RECHNERS UND NICHT DIE EINES
+# SCHREIBTISCHS. Gemessen wird unter QEMU/TCG, also ohne
+# Hardwarebeschleunigung und neben anderen Laeufen auf derselben
+# Maschine; dieselbe Schleife ueber 35 840 Bildpunkte sind drei
+# Durchgaenge mit laufender Summe, also rund 100 000 Rechenschritte.
+# Die Zahl hier faengt die Groessenordnung ab -- eine naive Faltung
+# mit r=12 waere das Fuenfundzwanzigfache und riebe sich an ihr wund.
+num "und sie bleibt unter einer Drittelsekunde (QEMU/TCG, ohne KVM)" \
+    "${BUS:-999999999}" lt 300000
 num "und er hat wirklich Bildpunkte angefasst" "${BPX:-0}" ge 10000
 # O(1) JE BILDPUNKT, und das ist keine Meinung: der laufende Summe folgt
 # genau eine Schleife je Zeile, und ein naiver Kasten haette hier die
 # Fensterbreite als Faktor. Die Zahl dazu ist die Zeit oben; die Form
 # steht im Quelltext, und dass sie nur EINMAL dasteht, misst 11e.
-num "und das Milchglas wird zwischengespeichert, wenn sich nichts ruehrt" \
-    "$(printf '%s' "$GL" | grep -oE 'cache=[0-9]+' | grep -oE '[0-9]+')" ge 0
+# UND DER ZWISCHENSPEICHER, an der Schlusszeile des Laufs abgelesen
+# (`wm.glas_bericht`): wie oft ein Streifen gebraucht und wie oft er
+# WIEDERVERWENDET wurde. Ohne diese Zahl waere "wird nicht neu
+# gerechnet, wenn sich nichts ruehrt" eine Behauptung -- die einzige
+# Zeile im Betrieb ist die des ersten Streifens, und in der steht
+# zwangslaeufig cache=0/1.
+GLC=$(printf '%s' "$GL" | grep -oE 'cache=[0-9]+/[0-9]+' | cut -d= -f2)
+num "der Streifen wurde mehr als einmal gebraucht (cache $GLC)" \
+    "$(printf '%s' "$GLC" | cut -d/ -f2)" ge 2
+num "und dabei wiederverwendet statt neu gerechnet" \
+    "$(printf '%s' "$GLC" | cut -d/ -f1)" ge 1
 
 # ---- 11d. LESBAR BLEIBT LESBAR -- GEGEN DEN GEMISCHTEN GRUND.
 #
