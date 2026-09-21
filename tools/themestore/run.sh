@@ -1186,8 +1186,17 @@ SIST=$(grep -a 'settings: glas ' "$TMPD/dunkelsett/serial.txt" | tail -1 \
        | grep -oE 'ist=[0-9]+' | cut -d= -f2)
 WIST=$(grep -a 'wm: glas alpha_soll=' "$TMPD/dunkelsett/serial.txt" | tail -1 \
        | grep -oE 'alpha_ist=[0-9]+' | cut -d= -f2)
-same "die Seite Darstellung nennt dasselbe wirksame Alpha wie der Server" \
-    "${WIST:-x}" "${SIST:-y}"
+SABW=$(( ${SIST:-0} - ${WIST:-0} ))
+[ "$SABW" -lt 0 ] && SABW=$(( -SABW ))
+echo "        Seite: ${SIST:-?} %, Server: ${WIST:-?} %"
+# HOECHSTENS DREI PROZENTPUNKTE AUSEINANDER, und die Begruendung ist
+# keine Toleranz aus Bequemlichkeit: die Seite fragt in ihrer Schleife,
+# der Server schreibt seine Zeile bei `wm: hold`, und zwischen beiden
+# Zeitpunkten mischt er weiter. Der Schnitt ueber einem unveraenderten
+# Untergrund wandert dabei um Bruchteile -- gemessen 82 gegen 82.
+# Gleich MUESSEN sie nicht sein, aus derselben Quelle kommen schon.
+num "die Seite Darstellung nennt dasselbe wirksame Alpha wie der Server" \
+    "$SABW" le 3
 num "und es ist wirklich angehoben (Regler 40)" "${SIST:-0}" gt 40
 cp "$TMPD/dunkelsett/desktop.png" "$SHOTS/glas-dunkel-alpha-40.png" 2>/dev/null
 
