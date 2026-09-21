@@ -214,10 +214,56 @@ gehoert in eine eigene Runde, und dann zuerst.
 |---|---|
 | `tools/check-ui.sh` | **PASSED**, 196 Dateien, 0 Verstoesse |
 | `tools/usbimg/build.sh` | **71 Pflichtpfade** im fertigen Dateisystem, 312 Umlautfolgen |
-| `tools/install/abnahme.sh` | siehe Lauf |
-| `tools/clip2/run.sh` | siehe Lauf |
+| `tools/install/abnahme.sh` | **35 gruen, 0 rot**, RC=0 |
+| `tools/clip2/run.sh` | **32 gruen, 0 rot**, RC=0 |
+| `tools/hotplug/run.sh` | **45 gruen, 0 rot**, RC=0 |
+| `tools/logind/run.sh` | **49 gruen, 0 rot**, RC=0 (mit `UITRACE=1`) |
+
+Alle vier auf den von der Auftragsliste genannten Staenden (35/0, 45/0,
+48/0 bzw. 49/0, 32/0).
+
+### Eine Regression, gefunden und behoben
+
+`tools/logind/run.sh` hat den ersten Anlauf dieser Runde **rot**
+gemacht, und zwar zu Recht:
+
+    FAIL  das Startmenue ging nicht auf (fl=19)
+
+Auf `main` steht dort `fl=18`. Nachgeprueft, indem derselbe Lauf auf
+`/root/osum-merge` (main, `211f8e1b`) durchlief -- dort 49/0. Also eine
+echte Regression aus dem Animations-Commit und keine Wackelei des
+Laeufers; zweimal hintereinander reproduziert.
+
+Ursache: der Starter legt sein Menuefenster an und verbirgt es sofort
+wieder. Seit `WM_CREATE` eine Oeffnungsbewegung anmeldet, lief die auf
+einem unsichtbaren Fenster weiter, `W_ANK` blieb stehen, und beim
+naechsten Aufklappen malte `paint_win_anim` das Menue geschrumpft und
+durchscheinend statt fertig.
+
+Behoben in `51d81668`: `set_hidden` beendet eine laufende Bewegung in
+beide Richtungen. `tools/logind/run.sh` danach **49/0**, und `anim=4`
+bleibt.
+
+**Lehre fuer die naechste Runde:** eine Bewegung, die an `create`
+haengt, muss an jedem Weg enden, der das Fenster aus dem Bild nimmt --
+nicht nur an dem, der sie gestartet hat.
 
 Keine neue Datei wird ausgeliefert, deshalb war an
 `tools/usbimg/build.sh` und der Pflichtliste nichts zu aendern. Die
 Aenderungen dieser Runde stehen ausschliesslich in Dateien, die schon
 gebaut und ausgeliefert werden (`kernel/…`).
+
+### Die Gegenprobe auf die Pflichtliste
+
+Trotzdem gemacht, weil sie verlangt war und weil `nedit` und
+`bold.ttf` genau daran zweimal gescheitert sind: Eintrag aus dem
+BAUPLAN genommen (`build.sh:810`, `/lib/bold.ttf`), Pflichteintrag
+(`build.sh:1052`) stehen gelassen.
+
+    == FEHLT IM ABBILD: /lib/bold.ttf
+    == 1 Pflichtdatei(en) fehlen im Abbild
+    RC=1
+
+Der Bauer bricht also wirklich ab und meldet die Datei beim Namen. Die
+Zeile ist danach wortgleich wiederhergestellt (`git diff` auf
+`tools/usbimg/build.sh` ist leer).
